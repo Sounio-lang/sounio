@@ -1,0 +1,321 @@
+// Compiler-private target value-cell contract. Not host/C sizeof.
+// Layout knowledge and semantic move admission are deliberately separate.
+module ir::storage_intrinsics
+use parser::ast::{Name,TypeExpr,TypeExprKind,make_name}
+use ir::ir::{StructLayoutTable,EnumVariantTable,EnumVariantEntry,IrInstr,IrRegList,ir_call,ir_path_last_name,ir_name_eq,IR_FLOAT_REG_MARKER_FLAG}
+
+pub let STORAGE_CELL_ABI_VERSION:i64=1
+pub let STORAGE_LAYOUT_UNKNOWN:i64=1
+pub let STORAGE_KIND_BLOCKED:i64=0
+pub let STORAGE_KIND_UNIT:i64=1
+pub let STORAGE_KIND_WORD:i64=2
+pub let STORAGE_KIND_FLOAT:i64=3
+pub let STORAGE_KIND_HANDLE:i64=4
+pub let STORAGE_KIND_FUNCTION:i64=5
+pub let STORAGE_KIND_REFERENCE:i64=6
+pub let STORAGE_KIND_WIDE:i64=7
+pub let STORAGE_KIND_KNOWLEDGE:i64=8
+// -1 means unknown; it must never silently become "no borrow".
+pub let STORAGE_BORROW_UNKNOWN:i64=0-1
+pub let STORAGE_BORROW_NONE:i64=0
+pub let STORAGE_BORROW_PRESENT:i64=1
+pub let STORAGE_PAYLOAD_UNKNOWN:i64=0-1
+pub let STORAGE_PAYLOAD_COMPLETE:i64=0
+pub let STORAGE_PAYLOAD_BLOCKED:i64=1
+// Compiler-generated evidence flags, NOT extra user arguments to raw intrinsics.
+// The checker must derive these from the fully resolved concrete element/value.
+pub let STORAGE_PROOF_NO_BORROW:i64=1
+pub let STORAGE_PROOF_PAYLOAD_COMPLETE:i64=2
+pub let STORAGE_PROOF_NO_CAPTURED_CLOSURE:i64=4
+pub let STORAGE_OP_INTO:i64=1
+pub let STORAGE_OP_OUT:i64=2
+pub let STORAGE_OP_RANGE:i64=3
+pub let STORAGE_OP_BORROW:i64=4
+pub let STORAGE_OP_BORROW_MUT:i64=5
+
+pub struct StorageCellDescriptor {
+ pub status:i64,
+ pub kind:i64,
+ pub size:i64,
+ pub align:i64,
+ pub limbs:i64,
+ pub contains_borrow:i64,
+ pub payload_state:i64,
+ pub needs_bare_function:bool,
+}
+pub struct StorageIntrinsicOperands {
+ // Canonical owner VALUECELL bits, not the address of the source &O argument.
+ // Lowering loads this cell only when O has a word cell. Unit uses literal0.
+ // Native barriers target this owner, not the unregistered raw mmap address.
+ pub owner_handle:i64,
+ pub address:i64,
+ pub source:i64,
+ pub value:i64,
+ pub count:i64,
+}
+
+fn storage_name_is(n:&Name,text:string)->bool with Mut,Div,Panic {
+ let length=str_len(text)
+ if n.len!=length || n.len<0 || n.len>384 {return false}
+ var i:i64=0
+ while i<length {
+  if n.buf[i as usize] as i64!=str_char_at(text,i) {return false}
+  i=i+1
+ }
+ true
+}
+fn storage_is_word_name(n:&Name)->bool with Mut,Div,Panic {
+ storage_name_is(n,"i8") || storage_name_is(n,"u8") ||
+ storage_name_is(n,"i16") || storage_name_is(n,"u16") ||
+ storage_name_is(n,"i32") || storage_name_is(n,"u32") ||
+ storage_name_is(n,"i64") || storage_name_is(n,"u64") ||
+ storage_name_is(n,"isize") || storage_name_is(n,"usize") ||
+ storage_name_is(n,"bool") || storage_name_is(n,"char") ||
+ storage_name_is(n,"string")
+}
+fn storage_is_wide_name(n:&Name)->bool with Mut,Div,Panic {
+ storage_name_is(n,"i128") || storage_name_is(n,"u128") ||
+ storage_name_is(n,"i256") || storage_name_is(n,"u256") ||
+ storage_name_is(n,"f128") || storage_name_is(n,"f256")
+}
+fn storage_is_float_name(n:&Name)->bool with Mut,Div,Panic {
+ storage_name_is(n,"f32") || storage_name_is(n,"f64")
+}
+// This syntactic classification intentionally cannot certify hidden nominal
+// fields. The checker's recursive declaration/type analysis supplies that proof.
+fn storage_type_borrow_state(te:&TypeExpr,depth:i64)->i64 with Mut,Div,Panic,Alloc {
+ if depth>64 {return STORAGE_BORROW_UNKNOWN}
+ if te.kind==TypeExprKind::TypeReference || te.kind==TypeExprKind::TypeRefMut {return STORAGE_BORROW_PRESENT}
+ if te.kind==TypeExprKind::TypeUnit || te.kind==TypeExprKind::TypeRawPtr || te.kind==TypeExprKind::TypeFn {return STORAGE_BORROW_NONE}
+ if te.kind==TypeExprKind::TypeArray {
+  match te.inner {Some(inner)=>storage_type_borrow_state(&(*inner),depth+1),None=>STORAGE_BORROW_UNKNOWN}
+ } else {
+  if te.kind==TypeExprKind::TypeTuple {
+   var cursor=&te.type_args
+   var count:i64=0
+   var state=STORAGE_BORROW_NONE
+   while true {
+    match *cursor {
+     Some(list)=>{
+      if count>=64 {return STORAGE_BORROW_UNKNOWN}
+      let next=storage_type_borrow_state(&(*list).head,depth+1)
+      if next==STORAGE_BORROW_PRESENT {return next}
+      if next==STORAGE_BORROW_UNKNOWN {state=next}
+      cursor=&(*list).tail;count=count+1
+     },
+     None=>return state,
+    }
+   }
+   state
+  } else {
+   if te.kind==TypeExprKind::TypeNamed {
+    let name=ir_path_last_name(te.path)
+    if storage_is_word_name(&name) || storage_is_float_name(&name) || storage_is_wide_name(&name) {return STORAGE_BORROW_NONE}
+    if storage_name_is(&name,"Box") {
+     match te.type_args {
+      Some(list)=>{
+       match (*list).tail {Some(_)=>return STORAGE_BORROW_UNKNOWN,None=>{}}
+       return storage_type_borrow_state(&(*list).head,depth+1)
+      },
+      None=>return STORAGE_BORROW_UNKNOWN,
+     }
+    }
+   }
+   STORAGE_BORROW_UNKNOWN
+  }
+ }
+}
+// Known unsupported nested rows remain blocked even inside an opaque handle.
+// This prevents a guessed cell from silently discarding Knowledge sidechannels
+// or wide limbs. A raw pointer is itself one trusted address word.
+fn storage_type_payload_state(te:&TypeExpr,depth:i64)->i64 with Mut,Div,Panic,Alloc {
+ if depth>64 {return STORAGE_PAYLOAD_UNKNOWN}
+ if te.kind==TypeExprKind::TypeKnowledge {return STORAGE_PAYLOAD_BLOCKED}
+ if te.kind==TypeExprKind::TypeUnit || te.kind==TypeExprKind::TypeRawPtr ||
+ te.kind==TypeExprKind::TypeReference || te.kind==TypeExprKind::TypeRefMut {return STORAGE_PAYLOAD_COMPLETE}
+ if te.kind==TypeExprKind::TypeFn {return STORAGE_PAYLOAD_UNKNOWN}
+ if te.kind==TypeExprKind::TypeArray {
+  match te.inner {Some(inner)=>storage_type_payload_state(&(*inner),depth+1),None=>STORAGE_PAYLOAD_UNKNOWN}
+ } else {
+  if te.kind==TypeExprKind::TypeTuple {
+   var cursor=&te.type_args
+   var count:i64=0
+   var state=STORAGE_PAYLOAD_COMPLETE
+   while true {
+    match *cursor {
+     Some(list)=>{
+      if count>=64 {return STORAGE_PAYLOAD_UNKNOWN}
+      let next=storage_type_payload_state(&(*list).head,depth+1)
+      if next==STORAGE_PAYLOAD_BLOCKED {return next}
+      if next==STORAGE_PAYLOAD_UNKNOWN {state=next}
+      cursor=&(*list).tail;count=count+1
+     },
+     None=>return state,
+    }
+   }
+   state
+  } else {
+   if te.kind==TypeExprKind::TypeNamed {
+    let name=ir_path_last_name(te.path)
+    if storage_is_wide_name(&name) {return STORAGE_PAYLOAD_BLOCKED}
+    if storage_is_word_name(&name) || storage_is_float_name(&name) {return STORAGE_PAYLOAD_COMPLETE}
+    if storage_name_is(&name,"Box") {
+     match te.type_args {
+      Some(list)=>{
+       match (*list).tail {Some(_)=>return STORAGE_PAYLOAD_UNKNOWN,None=>{}}
+       return storage_type_payload_state(&(*list).head,depth+1)
+      },
+      None=>return STORAGE_PAYLOAD_UNKNOWN,
+     }
+    }
+   }
+   STORAGE_PAYLOAD_UNKNOWN
+  }
+ }
+}
+fn storage_blocked(kind:i64)->StorageCellDescriptor {
+ StorageCellDescriptor {status:STORAGE_LAYOUT_UNKNOWN,kind:kind,size:0-1,align:0,limbs:0,
+ contains_borrow:STORAGE_BORROW_UNKNOWN,payload_state:STORAGE_PAYLOAD_BLOCKED,needs_bare_function:false}
+}
+fn storage_word(kind:i64,borrows:i64,payload:i64,bare:bool)->StorageCellDescriptor {
+ StorageCellDescriptor {status:0,kind:kind,size:8,align:8,limbs:1,
+ contains_borrow:borrows,payload_state:payload,needs_bare_function:bare}
+}
+// TypeExpr must be the fully resolved concrete instantiation. An unresolved
+// generic parameter must not be admitted merely because a nominal homonym exists.
+pub fn storage_cell_descriptor(te:&TypeExpr,layouts:&StructLayoutTable,enums:&EnumVariantTable)->StorageCellDescriptor with Mut,Div,Panic,Alloc {
+ if te.kind==TypeExprKind::TypeUnit {
+  return StorageCellDescriptor {status:0,kind:STORAGE_KIND_UNIT,size:0,align:1,limbs:0,
+  contains_borrow:STORAGE_BORROW_NONE,payload_state:STORAGE_PAYLOAD_COMPLETE,needs_bare_function:false}
+ }
+ if te.kind==TypeExprKind::TypeKnowledge {return storage_blocked(STORAGE_KIND_KNOWLEDGE)}
+ let borrows=storage_type_borrow_state(te,0)
+ let payload=storage_type_payload_state(te,0)
+ if te.kind==TypeExprKind::TypeRawPtr {return storage_word(STORAGE_KIND_WORD,borrows,payload,false)}
+ if te.kind==TypeExprKind::TypeReference || te.kind==TypeExprKind::TypeRefMut {
+  return storage_word(STORAGE_KIND_REFERENCE,borrows,payload,false)
+ }
+ if te.kind==TypeExprKind::TypeFn {
+  return storage_word(STORAGE_KIND_FUNCTION,STORAGE_BORROW_NONE,STORAGE_PAYLOAD_COMPLETE,true)
+ }
+ if te.kind==TypeExprKind::TypeArray || te.kind==TypeExprKind::TypeTuple {
+  return storage_word(STORAGE_KIND_HANDLE,borrows,payload,false)
+ }
+ if te.kind!=TypeExprKind::TypeNamed {return storage_blocked(STORAGE_KIND_BLOCKED)}
+ let name=ir_path_last_name(te.path)
+ if storage_is_wide_name(&name) {return storage_blocked(STORAGE_KIND_WIDE)}
+ if storage_is_word_name(&name) {return storage_word(STORAGE_KIND_WORD,borrows,payload,false)}
+ if storage_is_float_name(&name) {return storage_word(STORAGE_KIND_FLOAT,borrows,payload,false)}
+ if storage_name_is(&name,"Box") {
+  match te.type_args {
+   Some(list)=>{
+    match (*list).tail {Some(_)=>return storage_blocked(STORAGE_KIND_BLOCKED),None=>{}}
+    return storage_word(STORAGE_KIND_HANDLE,borrows,payload,false)
+   },
+   None=>return storage_blocked(STORAGE_KIND_BLOCKED),
+  }
+ }
+ if layouts.count<0 || layouts.count>1024 || enums.count<0 || enums.count>4096 {return storage_blocked(STORAGE_KIND_BLOCKED)}
+ var i:i64=0
+ while i<layouts.count {
+  if ir_name_eq(layouts.entries[i as usize].type_name,name) {
+   // Even an empty registered struct is a handle cell, not Unit.
+   return storage_word(STORAGE_KIND_HANDLE,borrows,payload,false)
+  }
+  i=i+1
+ }
+ var found=false
+ var has_payload=false
+ i=0
+ while i<enums.count {
+  if ir_name_eq(enums.entries[i as usize].enum_name,name) {
+   found=true
+   let entry:EnumVariantEntry=enums.entries[i as usize]
+   match entry.payload_fields {Some(_)=>has_payload=true,None=>{}}
+  }
+  i=i+1
+ }
+ if found {
+  if has_payload {return storage_word(STORAGE_KIND_HANDLE,borrows,payload,false)}
+  return storage_word(STORAGE_KIND_WORD,STORAGE_BORROW_NONE,STORAGE_PAYLOAD_COMPLETE,false)
+ }
+ storage_blocked(STORAGE_KIND_BLOCKED)
+}
+// 0 admitted,1 unknown/unsupported layout,2 borrowed-T storage unproved,
+// 3 unsupported/incomplete payload,4 captured-function representation unproved.
+// Proof flags are private compiler evidence; a source-level caller cannot pass
+// them as raw-hook arguments. Borrowed-T storage stays closed in this tranche.
+pub fn storage_move_admission(d:&StorageCellDescriptor,proof_flags:i64)->i64 {
+ if d.status!=0 || (d.size!=0 && d.size!=8) {return 1}
+ if d.contains_borrow==STORAGE_BORROW_PRESENT {return 2}
+ if d.contains_borrow==STORAGE_BORROW_UNKNOWN {
+  if (proof_flags&STORAGE_PROOF_NO_BORROW)==0 {return 2}
+ }
+ if d.payload_state==STORAGE_PAYLOAD_BLOCKED {return 3}
+ if d.payload_state==STORAGE_PAYLOAD_UNKNOWN {
+  if (proof_flags&STORAGE_PROOF_PAYLOAD_COMPLETE)==0 {return 3}
+  if (proof_flags&STORAGE_PROOF_NO_CAPTURED_CLOSURE)==0 {return 4}
+ }
+ if d.needs_bare_function {
+  if (proof_flags&STORAGE_PROOF_NO_CAPTURED_CLOSURE)==0 {return 4}
+ }
+ 0
+}
+pub fn storage_intrinsic_symbol(op:i64)->Name with Mut,Div,Panic {
+ if op==1 {return make_name("@storage1:into_word")}
+ if op==2 {return make_name("@storage1:out_word")}
+ if op==3 {return make_name("@storage1:range_word")}
+ if op==4 {return make_name("@storage1:borrow_word")}
+ if op==5 {return make_name("@storage1:borrow_mut_word")}
+ if op==17 {return make_name("@storage1:into_unit")}
+ if op==18 {return make_name("@storage1:out_unit")}
+ if op==19 {return make_name("@storage1:range_unit")}
+ if op==20 {return make_name("@storage1:borrow_unit")}
+ if op==21 {return make_name("@storage1:borrow_mut_unit")}
+ make_name("@storage1:invalid")
+}
+pub fn storage_intrinsic_op(name:&Name)->i64 with Mut,Div,Panic {
+ if storage_name_is(name,"@storage1:into_word") {return 1}
+ if storage_name_is(name,"@storage1:out_word") {return 2}
+ if storage_name_is(name,"@storage1:range_word") {return 3}
+ if storage_name_is(name,"@storage1:borrow_word") {return 4}
+ if storage_name_is(name,"@storage1:borrow_mut_word") {return 5}
+ if storage_name_is(name,"@storage1:into_unit") {return 17}
+ if storage_name_is(name,"@storage1:out_unit") {return 18}
+ if storage_name_is(name,"@storage1:range_unit") {return 19}
+ if storage_name_is(name,"@storage1:borrow_unit") {return 20}
+ if storage_name_is(name,"@storage1:borrow_mut_unit") {return 21}
+ if storage_name_is(name,"@storage1:invalid") {return 99}
+ 0
+}
+pub fn storage_intrinsic_arity(op:i64)->i64 {
+ if op==1 || op==17 {return 3}
+ if op==2 || op==4 || op==5 || op==18 || op==20 || op==21 {return 2}
+ if op==3 || op==19 {return 4}
+ 0
+}
+pub fn storage_intrinsic_needs_t_access(op:i64)->bool {op>=1 && op<=5}
+pub fn storage_owner_needs_cell_load(d:&StorageCellDescriptor)->bool {d.status==0 && d.size==8}
+fn storage_invalid_call(dst:i64)->IrInstr with Mut,Div,Panic {
+ // Defense in depth: an ignored admission failure still reaches an explicitly
+ // invalid protected intrinsic, never an accepted Nop or fabricated value.
+ ir_call(dst,0-1,make_name("@storage1:invalid"),None,0)
+}
+pub fn storage_ir_call(base_op:i64,dst:i64,args:&StorageIntrinsicOperands,d:&StorageCellDescriptor,proof_flags:i64)->IrInstr with Mut,Div,Panic,Alloc {
+ if base_op<1 || base_op>5 || storage_move_admission(d,proof_flags)!=0 {return storage_invalid_call(dst)}
+ if args.owner_handle<0 || args.address<0 {return storage_invalid_call(dst)}
+ if base_op==1 {if args.value<0 {return storage_invalid_call(dst)}}
+ if base_op==3 {if args.source<0 || args.count<0 {return storage_invalid_call(dst)}}
+ var registers:Option<Box<IrRegList> > = None
+ if base_op==1 {registers=Some(Box::new(IrRegList {head:args.value,tail:registers}))}
+ if base_op==3 {
+  registers=Some(Box::new(IrRegList {head:args.count,tail:registers}))
+  registers=Some(Box::new(IrRegList {head:args.source,tail:registers}))
+ }
+ registers=Some(Box::new(IrRegList {head:args.address,tail:registers}))
+ registers=Some(Box::new(IrRegList {head:args.owner_handle,tail:registers}))
+ let op=if d.kind==STORAGE_KIND_UNIT {base_op+16} else {base_op}
+ var instr=ir_call(dst,0-1,storage_intrinsic_symbol(op),registers,storage_intrinsic_arity(op))
+ if base_op==STORAGE_OP_OUT && d.kind==STORAGE_KIND_FLOAT {instr.imm_flags=IR_FLOAT_REG_MARKER_FLAG}
+ instr
+}

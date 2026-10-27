@@ -1,0 +1,117 @@
+//@ run-pass
+//@ expect-stdout: STORAGE_DESCRIPTOR_COMPONENT_OK
+// Compiler-component policy/data test; not native typed-move/loan acceptance.
+use lexer::span::Span
+use parser::ast::{TypeExpr,TypeExprKind,TypeExprList,AstPath,StringList,FieldDef,FieldDefList,make_name}
+use ir::ir::{StructLayoutTable,EnumVariantTable,StructLayoutEntry,EnumVariantEntry,empty_struct_layout_table,empty_enum_variant_table,empty_struct_layout_entry,ir_name_at,IrOpcode,IR_FLOAT_REG_MARKER_FLAG}
+use ir::storage_intrinsics::*
+
+fn type_node(kind:TypeExprKind,text:string)->TypeExpr with Mut,Div,Panic {
+ let name=make_name(text)
+ TypeExpr {kind:kind,span:Span {file_id:0,start:0,end:0},
+ path:AstPath {segments:StringList {head_buf:name.buf,head_len:name.len,tail:None},seg_count:if name.len==0 {0} else {1}},
+ type_args:None,inner:None,array_size:None,effects:None,knowledge_info:None,refinement_info:None}
+}
+fn check_word(text:string,layouts:&StructLayoutTable,enums:&EnumVariantTable) with Mut,Div,Panic,Alloc {
+ let ty=type_node(TypeExprKind::TypeNamed,text)
+ let d=storage_cell_descriptor(&ty,layouts,enums)
+ assert(d.status==0 && d.size==8 && d.align==8 && d.limbs==1)
+ assert(storage_move_admission(&d,0)==0)
+}
+fn main()->i32 with IO,Alloc,Mut,Div,Panic {
+ var layouts=empty_struct_layout_table()
+ var enums=empty_enum_variant_table()
+ check_word("i8",&layouts,&enums)
+ check_word("u8",&layouts,&enums)
+ check_word("i16",&layouts,&enums)
+ check_word("u16",&layouts,&enums)
+ check_word("i32",&layouts,&enums)
+ check_word("u32",&layouts,&enums)
+ check_word("i64",&layouts,&enums)
+ check_word("u64",&layouts,&enums)
+ check_word("usize",&layouts,&enums)
+ check_word("bool",&layouts,&enums)
+ check_word("char",&layouts,&enums)
+ check_word("string",&layouts,&enums)
+ check_word("f32",&layouts,&enums)
+ check_word("f64",&layouts,&enums)
+ let unit=type_node(TypeExprKind::TypeUnit,"")
+ let zd=storage_cell_descriptor(&unit,&layouts,&enums)
+ assert(zd.status==0 && zd.kind==STORAGE_KIND_UNIT && zd.size==0 && zd.align==1 && zd.limbs==0)
+ assert(storage_move_admission(&zd,0)==0)
+ let args=StorageIntrinsicOperands {owner_handle:1,address:2,source:3,value:4,count:5}
+ let unit_call=storage_ir_call(STORAGE_OP_OUT,6,&args,&zd,0)
+ let unit_name=ir_name_at(unit_call.name_id)
+ assert(unit_call.op==IrOpcode::IrCall && unit_call.arg_count==2)
+ assert(storage_intrinsic_op(&unit_name)==18)
+ assert(!storage_intrinsic_needs_t_access(18))
+ var ptr=type_node(TypeExprKind::TypeRawPtr,"")
+ ptr.inner=Some(Box::new(type_node(TypeExprKind::TypeNamed,"u8")))
+ let pd=storage_cell_descriptor(&ptr,&layouts,&enums)
+ assert(pd.status==0 && pd.size==8 && storage_move_admission(&pd,0)==0)
+ var reference=type_node(TypeExprKind::TypeReference,"")
+ reference.inner=Some(Box::new(type_node(TypeExprKind::TypeNamed,"i64")))
+ let rd=storage_cell_descriptor(&reference,&layouts,&enums)
+ assert(rd.status==0 && rd.size==8 && rd.contains_borrow==STORAGE_BORROW_PRESENT)
+ assert(storage_move_admission(&rd,7)==2)
+ let refused=storage_ir_call(STORAGE_OP_INTO,6,&args,&rd,7)
+ let refused_name=ir_name_at(refused.name_id)
+ assert(refused.op==IrOpcode::IrCall && storage_intrinsic_op(&refused_name)==99)
+ let wide=type_node(TypeExprKind::TypeNamed,"i128")
+ let wd=storage_cell_descriptor(&wide,&layouts,&enums)
+ assert(wd.status!=0 && wd.size<0 && wd.kind==STORAGE_KIND_WIDE)
+ let kn=type_node(TypeExprKind::TypeKnowledge,"")
+ let kd=storage_cell_descriptor(&kn,&layouts,&enums)
+ assert(kd.status!=0 && kd.kind==STORAGE_KIND_KNOWLEDGE)
+ let unknown=type_node(TypeExprKind::TypeNamed,"MissingType")
+ let ud=storage_cell_descriptor(&unknown,&layouts,&enums)
+ assert(ud.status!=0)
+ var array=type_node(TypeExprKind::TypeArray,"")
+ array.inner=Some(Box::new(type_node(TypeExprKind::TypeNamed,"i64")))
+ let ad=storage_cell_descriptor(&array,&layouts,&enums)
+ assert(ad.kind==STORAGE_KIND_HANDLE && ad.size==8 && storage_move_admission(&ad,0)==0)
+ array.inner=Some(Box::new(type_node(TypeExprKind::TypeReference,"")))
+ let abd=storage_cell_descriptor(&array,&layouts,&enums)
+ assert(abd.status==0 && storage_move_admission(&abd,7)==2)
+ var tuple=type_node(TypeExprKind::TypeTuple,"")
+ tuple.type_args=Some(Box::new(TypeExprList {head:type_node(TypeExprKind::TypeNamed,"i64"),tail:Some(Box::new(TypeExprList {head:type_node(TypeExprKind::TypeNamed,"bool"),tail:None}))}))
+ let td=storage_cell_descriptor(&tuple,&layouts,&enums)
+ assert(td.kind==STORAGE_KIND_HANDLE && td.size==8 && storage_move_admission(&td,0)==0)
+ let fun=type_node(TypeExprKind::TypeFn,"")
+ let fd=storage_cell_descriptor(&fun,&layouts,&enums)
+ assert(fd.status==0 && fd.size==8 && storage_move_admission(&fd,0)==4)
+ assert(storage_move_admission(&fd,STORAGE_PROOF_NO_CAPTURED_CLOSURE)==0)
+ var empty=empty_struct_layout_entry()
+ empty.type_name=make_name("EmptyRecord")
+ layouts.entries[0]=empty;layouts.count=1
+ let record=type_node(TypeExprKind::TypeNamed,"EmptyRecord")
+ let ed=storage_cell_descriptor(&record,&layouts,&enums)
+ assert(ed.kind==STORAGE_KIND_HANDLE && ed.size==8 && ed.align==8)
+ assert(storage_move_admission(&ed,0)==2)
+ assert(storage_move_admission(&ed,7)==0)
+ enums.entries[0]=EnumVariantEntry {enum_name:make_name("Tag"),variant_name:make_name("A"),discriminant:0,payload_fields:None}
+ enums.count=1
+ let tag=type_node(TypeExprKind::TypeNamed,"Tag")
+ let tagd=storage_cell_descriptor(&tag,&layouts,&enums)
+ assert(tagd.kind==STORAGE_KIND_WORD && tagd.size==8 && storage_move_admission(&tagd,0)==0)
+ let field=FieldDef {name:make_name("field_0"),ty:unit,is_pub:true,span:Span {file_id:0,start:0,end:0}}
+ enums.entries[1]=EnumVariantEntry {enum_name:make_name("Payload"),variant_name:make_name("V"),discriminant:0,payload_fields:Some(Box::new(FieldDefList {head:field,tail:None}))}
+ enums.count=2
+ let payload=type_node(TypeExprKind::TypeNamed,"Payload")
+ let payload_d=storage_cell_descriptor(&payload,&layouts,&enums)
+ assert(payload_d.kind==STORAGE_KIND_HANDLE && payload_d.size==8)
+ let ft=type_node(TypeExprKind::TypeNamed,"f64")
+ let ftd=storage_cell_descriptor(&ft,&layouts,&enums)
+ let float_call=storage_ir_call(STORAGE_OP_OUT,6,&args,&ftd,0)
+ assert(float_call.imm_flags==IR_FLOAT_REG_MARKER_FLAG && float_call.arg_count==2)
+ let owner_arg=match float_call.call_args {Some(list)=>(*list).head,None=>0-1}
+ assert(owner_arg==1)
+ let symbol=storage_intrinsic_symbol(3)
+ assert(storage_intrinsic_op(&symbol)==3 && storage_intrinsic_arity(3)==4)
+ assert(storage_intrinsic_needs_t_access(3))
+ let public_name=make_name("typed_move_into")
+ assert(storage_intrinsic_op(&public_name)==0)
+ println("STORAGE_DESCRIPTOR_COMPONENT_OK")
+ 0
+}
+
