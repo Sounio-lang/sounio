@@ -26,11 +26,11 @@ struct Fixture{std::string name;N kind,rows,bytes;};
 std::vector<Fixture> manifest(const fs::path& root){
  std::ifstream in(root/"MANIFEST.tsv");if(!in)fail("fixture manifest missing");std::string line;
  if(!std::getline(in,line)||line!="filename\tkind\trows\tpayload_bytes")fail("manifest header");
- std::vector<Fixture> result;const std::regex safe("^(norm|segment|case)-[0-9]{6}\\.bin$");
+ std::vector<Fixture> result;const std::regex safe("^(norm|segment|case|collation)-[0-9]{6}\\.bin$");
  while(std::getline(in,line)){
   std::istringstream fields(line);std::array<std::string,4> parts;for(auto& p:parts)if(!std::getline(fields,p,'\t'))fail("manifest fields");
   Fixture f{parts[0],number(parts[1]),number(parts[2]),number(parts[3])};
-  if(!std::regex_match(f.name,safe)||f.kind<1||f.kind>3||f.rows==0||f.rows>512||f.bytes>1048576)fail("manifest value");
+  if(!std::regex_match(f.name,safe)||f.kind<1||f.kind>4||f.rows==0||f.rows>512||f.bytes>1048576)fail("manifest value");
   if(fs::file_size(root/f.name)!=f.bytes+24)fail("fixture size mismatch: "+f.name);
   std::ifstream file(root/f.name,std::ios::binary);std::array<unsigned char,24> b{};file.read(reinterpret_cast<char*>(b.data()),b.size());
   if(!file||std::string(b.begin(),b.begin()+8)!="SOUNUTF1"||word(b,8)!=f.kind||word(b,12)!=f.rows||word(b,16)!=f.bytes||word(b,20)!=0x00120000)fail("fixture header mismatch: "+f.name);
@@ -63,6 +63,7 @@ std::pair<bool,N> observed(const fs::path& file){
  }
  return {marker&&have,rows};
 }
+#ifndef SOUNIO_CHUNK_RUNNER_NO_MAIN
 int main(int argc,char**argv){
  try{
   if(argc!=6){std::cerr<<"usage: run_chunks ELF FIXTURE_DIRECTORY NEW_RUN_DIRECTORY PART PARTS\n";return 64;}
@@ -84,3 +85,6 @@ int main(int argc,char**argv){
   if(!status||!copied)fail("scope/status output");std::cout<<"UNICODE_CHUNK_PART_OK part="<<part<<" parts="<<parts<<" files="<<completed<<" rows="<<rows<<"\n";return 0;
  }catch(const std::exception& e){std::cerr<<"UNICODE_CHUNK_RUNNER_ERROR "<<e.what()<<"\n";return 1;}
 }
+
+#endif
+

@@ -7,11 +7,12 @@
 use ffi::platform::{platform_open,platform_status,platform_close}
 use io::native_file::{native_file_open,native_file_status,native_file_read,native_file_close}
 use collections::byte_buffer::{ByteBuffer,byte_buffer_new,byte_buffer_push,byte_buffer_reserve,byte_buffer_get,byte_buffer_len,byte_buffer_close}
-use collections::integer_buffer::{integer_buffer_new,integer_buffer_len,integer_buffer_get,integer_buffer_close}
+use collections::integer_buffer::{integer_buffer_new,integer_buffer_status,integer_buffer_push,integer_buffer_len,integer_buffer_get,integer_buffer_close}
 use text::utf8::{Utf8Text,utf8_text_new,utf8_text_from_bytes,utf8_text_status,utf8_text_byte_len,utf8_text_scalar_len,utf8_text_next,utf8_text_close,utf8_encode_append}
 use text::normalize::{unicode_normalize_append}
 use text::case::{unicode_lowercase_append,unicode_uppercase_append,unicode_casefold_append}
 use text::segment::{unicode_segment_append}
+use text::collation::{unicode_collator_root,unicode_collator_status,unicode_collation_key,unicode_collation_key_codepoints,unicode_collation_key_status,unicode_collation_key_compare,unicode_collation_key_close}
 fn fixture_u32(b:&ByteBuffer,offset:i64)->i64 with Panic {
  let n=byte_buffer_len(b)
  assert(offset>=0 && offset<=n && n-offset>=4)
@@ -105,6 +106,67 @@ fn fixture_case_row(b:&ByteBuffer,start:i64)->i64 with Alloc,Mut,Div,Panic {
  utf8_text_close(input)
  end
 }
+fn fixture_codepoints(b:&ByteBuffer,offset:i64)->IntegerBuffer with Alloc,Mut,Div,Panic {
+ let count=fixture_u32(b,offset)
+ let end=fixture_skip_sequence(b,offset)
+ assert(end<=byte_buffer_len(b))
+ var values=integer_buffer_new(0,count*8)
+ var i:i64=0
+ while i<count {assert(integer_buffer_push(&!values,fixture_u32(b,offset+4+i*4))==0);i=i+1}
+ values
+}
+fn fixture_scalar_domain(input:&IntegerBuffer)->bool {
+ var i:i64=0
+ while i<integer_buffer_len(input) {
+  let cp=integer_buffer_get(input,i).value
+  if cp<0 || cp>1114111 || (cp>=55296 && cp<=57343) {return false}
+  i=i+1
+ }
+ true
+}
+fn fixture_collation_row(b:&ByteBuffer,start:i64)->i64 with Alloc,Mut,Div,Panic {
+ let root=fixture_u32(b,start)
+ let strength=fixture_u32(b,start+4)
+ let shifted=fixture_u32(b,start+8)
+ let backwards=fixture_u32(b,start+12)
+ let expected=fixture_u32(b,start+16)
+ assert(root<=1 && strength>=1 && strength<=5 && shifted<=1 && backwards<=1 && expected<=2)
+ let left_start=start+20
+ let right_start=fixture_skip_sequence(b,left_start)
+ let end=fixture_skip_sequence(b,right_start)
+ let left_cp=fixture_codepoints(b,left_start)
+ let right_cp=fixture_codepoints(b,right_start)
+ let collator=unicode_collator_root(root,strength,shifted==1,backwards==1)
+ assert(unicode_collator_status(&collator)==0)
+ let a=unicode_collation_key_codepoints(&collator,&left_cp,1048576,1048576)
+ let c=unicode_collation_key_codepoints(&collator,&right_cp,1048576,1048576)
+ assert(unicode_collation_key_status(&a)==0 && unicode_collation_key_status(&c)==0)
+ let actual=unicode_collation_key_compare(&a,&c)
+ assert(actual.status==0 && actual.order==expected-1)
+ if fixture_scalar_domain(&left_cp) {
+  let text=fixture_text(b,left_start)
+  let key=unicode_collation_key(&collator,&text,1048576,1048576)
+  assert(unicode_collation_key_status(&key)==0)
+  let parity=unicode_collation_key_compare(&a,&key)
+  assert(parity.status==0 && parity.order==0)
+  unicode_collation_key_close(key)
+  utf8_text_close(text)
+ }
+ if fixture_scalar_domain(&right_cp) {
+  let text=fixture_text(b,right_start)
+  let key=unicode_collation_key(&collator,&text,1048576,1048576)
+  assert(unicode_collation_key_status(&key)==0)
+  let parity=unicode_collation_key_compare(&c,&key)
+  assert(parity.status==0 && parity.order==0)
+  unicode_collation_key_close(key)
+  utf8_text_close(text)
+ }
+ unicode_collation_key_close(a)
+ unicode_collation_key_close(c)
+ integer_buffer_close(left_cp)
+ integer_buffer_close(right_cp)
+ end
+}
 fn fixture_path()->ByteBuffer with Alloc,Mut,Div,Panic {
  let path="tests/stdlib/wave3-core/data/current.bin"
  var bytes=byte_buffer_new(str_len(path))
@@ -139,12 +201,12 @@ fn main()->i32 with IO,Alloc,Mut,Div,Panic {
   let count=fixture_u32(&source,start+12)
   let payload=fixture_u32(&source,start+16)
   assert(fixture_u32(&source,start+20)==0x00120000)
-  assert(kind>=1 && kind<=3 && count>0 && payload<=bytes-start-24)
+  assert(kind>=1 && kind<=4 && count>0 && payload<=bytes-start-24)
   let end=start+24+payload
   cursor=start+24
   i=0
   while i<count {
-   cursor=if kind==1 {fixture_norm_row(&source,cursor)} else if kind==2 {fixture_segment_row(&source,cursor)} else {fixture_case_row(&source,cursor)}
+   cursor=if kind==1 {fixture_norm_row(&source,cursor)} else if kind==2 {fixture_segment_row(&source,cursor)} else if kind==3 {fixture_case_row(&source,cursor)} else {fixture_collation_row(&source,cursor)}
    assert(cursor<=end)
    total=total+1
    i=i+1
@@ -158,3 +220,4 @@ fn main()->i32 with IO,Alloc,Mut,Div,Panic {
  print("\nUNICODE_CONFORMANCE_OK\n")
  0
 }
+
