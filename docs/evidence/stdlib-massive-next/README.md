@@ -192,3 +192,11 @@ and is retained as a failed fixture attempt. Compiler source files needed for
 the additive repair are protected by the active v276 lane; requests were sent
 before making any conflicting edit. Failed loader compatibility candidates
 62/63/64/66 are retained; the temporary byte/libc helper edits were removed.
+
+Slurm18035 / packet75 isolates only the original caller effect migration,
+without the temporary byte helper edits: graphics_smoke passes on the qualified
+bootstrap, while the two PNG export/gallery native cases still fail. The packet
+then stops at the old graphics::svg module parse refusal under Madaros; it is
+not an all-green graphics gate. The three original fixture effect declarations
+are retained, their assertions unchanged. Remaining bootstrap export failures
+still require a compiler-compatible output path.
