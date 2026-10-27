@@ -249,8 +249,40 @@ void mutant(const fs::path& source,const fs::path& output){
  auto s=file(source);need(s.batches.size()==1,"mutant source");auto b=s.batches[0];arrow::Int64Builder ids;okay(ids.AppendValues({9,2,-3}));auto a=take(ids.Finish());auto cols=b->columns();cols[0]=a;
  auto m=arrow::RecordBatch::Make(s.schema,b->num_rows(),cols);okay(m->ValidateFull());auto out=take(arrow::io::FileOutputStream::Open(output.string()));auto writer=take(arrow::ipc::MakeFileWriter(out,s.schema));okay(writer->WriteRecordBatch(*m));okay(writer->Close());okay(out->Close());std::cout<<"ID_MUTANT_WRITTEN\n";
 }
+
+void incremental_write(const fs::path& output){
+ auto schema=arrow::schema({arrow::field("id",arrow::int64())});
+ auto out=take(arrow::io::FileOutputStream::Open(output.string()));
+ auto writer=take(arrow::ipc::MakeStreamWriter(out,schema));
+ for(std::int64_t batch=0;batch<100;++batch){
+  arrow::Int64Builder builder;for(std::int64_t row=0;row<16;++row)okay(builder.Append(batch*16+row));
+  auto array=take(builder.Finish());auto record=arrow::RecordBatch::Make(schema,16,{array});
+  okay(record->ValidateFull());okay(writer->WriteRecordBatch(*record));
+ }
+ okay(writer->Close());okay(out->Close());
+ auto original=bytes(output);need(original.size()>8192,"incremental producer did not exceed buffer");
+ for(bool trailing:{false,true}){
+  auto changed=original;if(trailing)changed.push_back(0);else changed.pop_back();
+  std::ofstream f(output.string()+(trailing?".trailing":".truncated"),std::ios::binary);
+  need(bool(f),"mutant open");f.write(reinterpret_cast<const char*>(changed.data()),static_cast<std::streamsize>(changed.size()));need(bool(f),"mutant write");
+ }
+ std::cout<<"ARROW_INCREMENTAL_CPP_WRITTEN\n";
+}
+void incremental_check(const fs::path& input){
+ need(bytes(input).size()>8192,"incremental output size");auto s=stream(input);
+ need(s.schema->num_fields()==1&&s.schema->field(0)->name()=="id"&&s.schema->field(0)->type()->Equals(arrow::int64()),"incremental schema");
+ need(s.batches.size()==100,"incremental batch count");
+ for(std::int64_t b=0;b<100;++b){
+  need(s.batches[b]->num_rows()==16,"incremental rows");
+  for(std::int64_t r=0;r<16;++r)need(integer(s.batches[b]->column(0),r)==b*16+r,"incremental value");
+ }
+ std::cout<<"ARROW_INCREMENTAL_CPP_OK\n";
+}
+
 int main(int argc,char** argv){
  try{version();if(argc==2&&std::string_view(argv[1])=="--version")return 0;
+  if(argc==3&&std::string_view(argv[1])=="--write-incremental"){incremental_write(argv[2]);return 0;}
+  if(argc==3&&std::string_view(argv[1])=="--check-incremental"){incremental_check(argv[2]);return 0;}
   if(argc==4&&std::string_view(argv[1])=="--write-id-mutant"){mutant(argv[2],argv[3]);return 0;}
   if(argc==3&&std::string_view(argv[1])=="--check-basic-logical"){basic(file(argv[2]));std::cout<<"BASIC_LOGICAL_OK\n";return 0;}
   need(argc==3&&std::string_view(argv[1])=="--check","usage: arrow_cpp_interop --check <fixture-dir>");fs::path d=argv[2];ipc_cases(d);spec_cases(d);ext_cases(d);flight_cases(d);std::cout<<"ARROW_CPP_INTEROP_OK\n";return 0;

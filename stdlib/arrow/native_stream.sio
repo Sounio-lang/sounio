@@ -1,0 +1,166 @@
+// Incremental Arrow IPC stream adapters. Each frame retains ArrowBuf8192 and
+// batch-body4096 limits; total stream length and number of batches are unbounded.
+// Caller owns schema/dictionary state and must preserve it between open/next calls.
+// Return Arrow status codes; -9 means I/O/storage failure, exposed as POSIX errno.
+// Explicit stream EOS is required; trailing bytes after EOS are malformed.
+use arrow::lib::{ArrowSchema,ArrowBatch,ArrowBuf,ArrowDicts,arrow_buf_new,arrow_cursor_new,arrow_ipc_metadata_view,arrow_ipc_open_ex,arrow_ipc_next_ex,arrow_ipc_stream_begin,arrow_ipc_stream_push,arrow_ipc_stream_push_dict,arrow_ipc_stream_end}
+use ffi::platform::{Platform}
+use io::buffered_reader::{BufferedReader,buffered_reader_status,buffered_reader_next,buffered_reader_close}
+use io::native_file::{NativeFile,native_file_status,native_file_write_all,native_file_close}
+use collections::byte_buffer::{ByteBuffer,byte_buffer_new,byte_buffer_push,byte_buffer_clear,byte_buffer_close}
+pub linear struct ArrowStreamReader {reader:BufferedReader,status:i64,io_status:i64,opened:bool,ended:bool}
+pub linear struct ArrowStreamWriter {file:NativeFile,buffer:ByteBuffer,status:i64,io_status:i64,opened:bool,ended:bool}
+pub fn arrow_stream_reader_new(reader:BufferedReader)->ArrowStreamReader {
+ let io=buffered_reader_status(&reader)
+ return ArrowStreamReader {reader:reader,status:if io==0 {0} else {0-9},io_status:io,opened:false,ended:false}
+}
+pub fn arrow_stream_reader_status(r:&ArrowStreamReader)->i64 {r.status}
+pub fn arrow_stream_reader_io_status(r:&ArrowStreamReader)->i64 {r.io_status}
+fn asr_fail(r:&!ArrowStreamReader,code:i64)->i64 with Mut {r.status=code;return code}
+fn frame_u32(b:&ArrowBuf,at:i64)->i64 with Mut,Panic {
+ var i:i64=0
+ var out:i64=0
+ while i<4 {out=out+((b.data[(at+i) as usize] as i64) << (8*i));i=i+1}
+ return out
+}
+fn asr_fill(p:&Platform,r:&!ArrowStreamReader,b:&!ArrowBuf,n:i64)->i64 with IO,Alloc,Mut,Panic {
+ if n<0 || n>8192-b.len {return asr_fail(r,0-7)}
+ var i:i64=0
+ while i<n {
+  let byte=buffered_reader_next(p,&!r.reader)
+  if byte.status==61 {return asr_fail(r,0-5)}
+  if byte.status!=0 {r.io_status=byte.status;return asr_fail(r,0-9)}
+  b.data[b.len as usize]=byte.value as u8
+  b.len=b.len+1
+  i=i+1
+ }
+ return 0
+}
+fn asr_eos(p:&Platform,r:&!ArrowStreamReader)->i64 with IO,Alloc,Mut {
+ let trailing=buffered_reader_next(p,&!r.reader)
+ if trailing.status==61 {r.ended=true;return 1}
+ if trailing.status!=0 {r.io_status=trailing.status;return asr_fail(r,0-9)}
+ return asr_fail(r,0-3)
+}
+fn asr_frame(p:&Platform,r:&!ArrowStreamReader,b:&!ArrowBuf)->i64 with IO,Alloc,Mut,Div,Panic {
+ b.len=0
+ let first=asr_fill(p,r,b,4)
+ if first!=0 {return first}
+ let cont=frame_u32(b,0)
+ if cont==0 {return asr_eos(p,r)}
+ if cont!=4294967295 {return asr_fail(r,0-3)}
+ let second=asr_fill(p,r,b,4)
+ if second!=0 {return second}
+ let meta=frame_u32(b,4)
+ if meta==0 {return asr_eos(p,r)}
+ if meta>8184 {return asr_fail(r,0-7)}
+ let metadata=asr_fill(p,r,b,meta)
+ if metadata!=0 {return metadata}
+ let view=arrow_ipc_metadata_view(b,0)
+ if view.status!=0 {return asr_fail(r,view.status)}
+ if view.body_len>4096 || view.body_len>8192-b.len {return asr_fail(r,0-7)}
+ return asr_fill(p,r,b,view.body_len)
+}
+pub fn arrow_stream_reader_open(p:&Platform,r:&!ArrowStreamReader,schema:&!ArrowSchema,dicts:&!ArrowDicts)->i64 with IO,Alloc,Mut,Div,Panic {
+ if r.status!=0 {return r.status}
+ if r.opened || r.ended {return asr_fail(r,0-6)}
+ var frame=arrow_buf_new()
+ let code=asr_frame(p,r,&!frame)
+ if code!=0 {if code==1 {return asr_fail(r,0-6)};return code}
+ var cursor=arrow_cursor_new()
+ let opened=arrow_ipc_open_ex(&frame,schema,&!cursor,dicts)
+ if opened!=0 {return asr_fail(r,opened)}
+ r.opened=true
+ return 0
+}
+pub fn arrow_stream_reader_next(p:&Platform,r:&!ArrowStreamReader,schema:&ArrowSchema,dicts:&!ArrowDicts,batch:&!ArrowBatch)->i64 with IO,Alloc,Mut,Div,Panic {
+ if r.status!=0 {return r.status}
+ if !r.opened {return asr_fail(r,0-6)}
+ if r.ended {return 1}
+ while true {
+  var frame=arrow_buf_new()
+  let code=asr_frame(p,r,&!frame)
+  if code!=0 {return code}
+  let view=arrow_ipc_metadata_view(&frame,0)
+  if view.header_type!=2 && view.header_type!=3 {return asr_fail(r,0-6)}
+  var cursor=arrow_cursor_new()
+  cursor.kind=2
+  let decoded=arrow_ipc_next_ex(&frame,schema,&!cursor,batch,dicts)
+  if view.header_type==3 {
+   if decoded!=0 {return asr_fail(r,decoded)}
+   return 0
+  }
+  if decoded!=1 {return asr_fail(r,decoded)}
+ }
+ return 1
+}
+pub fn arrow_stream_reader_close(p:&Platform,r:ArrowStreamReader)->i64 with IO,Alloc {
+ let ArrowStreamReader {reader,status,io_status,opened,ended}=r
+ return buffered_reader_close(p,reader)
+}
+pub fn arrow_stream_writer_new(file:NativeFile)->ArrowStreamWriter {
+ let io=native_file_status(&file)
+ return ArrowStreamWriter {file:file,buffer:byte_buffer_new(8192),status:if io==0 {0} else {0-9},io_status:io,opened:false,ended:false}
+}
+pub fn arrow_stream_writer_status(w:&ArrowStreamWriter)->i64 {w.status}
+pub fn arrow_stream_writer_io_status(w:&ArrowStreamWriter)->i64 {w.io_status}
+fn asw_fail(w:&!ArrowStreamWriter,code:i64)->i64 with Mut {w.status=code;return code}
+fn asw_frame(p:&Platform,w:&!ArrowStreamWriter,frame:&ArrowBuf)->i64 with IO,Alloc,Mut,Div,Panic {
+ if frame.len<0 || frame.len>8192 {return asw_fail(w,0-7)}
+ byte_buffer_clear(&!w.buffer)
+ var i:i64=0
+ while i<frame.len {
+  let code=byte_buffer_push(&!w.buffer,frame.data[i as usize] as i64)
+  if code!=0 {w.io_status=if code==3 {12} else {105};return asw_fail(w,0-9)}
+  i=i+1
+ }
+ let written=native_file_write_all(p,&w.file,&w.buffer,0,frame.len)
+ if written.status!=0 {w.io_status=written.status;return asw_fail(w,0-9)}
+ return 0
+}
+pub fn arrow_stream_writer_begin(p:&Platform,w:&!ArrowStreamWriter,schema:&ArrowSchema)->i64 with IO,Alloc,Mut,Div,Panic {
+ if w.status!=0 {return w.status}
+ if w.opened || w.ended {return asw_fail(w,0-6)}
+ var frame=arrow_buf_new()
+ let code=arrow_ipc_stream_begin(schema,&!frame)
+ if code!=0 {return asw_fail(w,code)}
+ let written=asw_frame(p,w,&frame)
+ if written==0 {w.opened=true}
+ return written
+}
+pub fn arrow_stream_writer_push(p:&Platform,w:&!ArrowStreamWriter,schema:&ArrowSchema,batch:&ArrowBatch)->i64 with IO,Alloc,Mut,Div,Panic {
+ if w.status!=0 {return w.status}
+ if !w.opened || w.ended {return asw_fail(w,0-6)}
+ var frame=arrow_buf_new()
+ let code=arrow_ipc_stream_push(schema,batch,&!frame)
+ if code!=0 {return asw_fail(w,code)}
+ return asw_frame(p,w,&frame)
+}
+pub fn arrow_stream_writer_push_dict(p:&Platform,w:&!ArrowStreamWriter,schema:&ArrowSchema,node:i64,is_delta:i64,values:&ArrowBatch)->i64 with IO,Alloc,Mut,Div,Panic {
+ if w.status!=0 {return w.status}
+ if !w.opened || w.ended {return asw_fail(w,0-6)}
+ var frame=arrow_buf_new()
+ let code=arrow_ipc_stream_push_dict(schema,node,is_delta,values,&!frame)
+ if code!=0 {return asw_fail(w,code)}
+ return asw_frame(p,w,&frame)
+}
+pub fn arrow_stream_writer_finish(p:&Platform,w:&!ArrowStreamWriter)->i64 with IO,Alloc,Mut,Div,Panic {
+ if w.status!=0 {return w.status}
+ if w.ended {return 0}
+ if !w.opened {return asw_fail(w,0-6)}
+ var frame=arrow_buf_new()
+ let code=arrow_ipc_stream_end(&!frame)
+ if code!=0 {return asw_fail(w,code)}
+ let written=asw_frame(p,w,&frame)
+ if written==0 {w.ended=true}
+ return written
+}
+// Close returns POSIX errno, including22 if writer was not successfully finished.
+pub fn arrow_stream_writer_close(p:&Platform,w:ArrowStreamWriter)->i64 with IO,Alloc {
+ let ArrowStreamWriter {file,buffer,status,io_status,opened,ended}=w
+ byte_buffer_close(buffer)
+ let code=native_file_close(p,file)
+ if io_status!=0 {return io_status}
+ if status!=0 || !ended {return 22}
+ return code
+}

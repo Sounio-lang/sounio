@@ -150,3 +150,28 @@ Source, compiler/qualified runtime and executable hashes have final rechecks.
 API: `json::writer`. Exact number lexemes are validated by the owned DOM
 parser and emitted unchanged; the writer makes no round-trip f64 formatting
 claim. Existing scientific JSON paths remain available.
+
+## Incremental Arrow C++/Sounio concordance
+
+Slurm **18152** completed with status0. It repeated all five legacy producers,
+all30 required C++ groups and the logical-mutant control, then qualified
+100 batches of16 i64 rows per stream in both directions. Each stream exceeds
+8192 bytes. Sounio read the official SDK producer with refill sizes1 and17;
+the SDK read the Sounio producer and validated all1600 values. Missing EOS
+bytes and trailing bytes were rejected. The Sounio fixture also retains its
+standalone self-produced stream check; the cross-language gate additionally
+requires `ARROW_NATIVE_CPP_READ_OK`.
+
+Receipt root:
+`/scratch/sounio-stdlib-wave3-20261027/services/arrow-incremental-03/results`.
+The legacy gate receipt is under `gate`; `incremental` contains reversible
+path relocation, original/derived hashes, SDK/native files and execution
+logs. `INCREMENTAL.sha256`, `PLATFORM.sha256` and input custody have final
+rechecks. Required markers: `ARROW_NATIVE_STREAM_OK`,
+`ARROW_INCREMENTAL_CPP_OK`, `ARROW_INCREMENTAL_BIDIRECTIONAL_OK`.
+
+Job18146 passed the legacy gate then lacked the SDK dependency search path
+for its later C++ producer invocation. Corrected job18148 passed both
+directions; job18152 repeated final-source qualification after making the
+default fixture independent of optional external fixture files. No numeric
+inputs, producer assertions, legacy case groups or SDK version changed.

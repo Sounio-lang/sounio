@@ -1,0 +1,83 @@
+//@ run-pass
+//@ expect-stdout: ARROW_NATIVE_STREAM_OK
+use ffi::platform::{Platform,platform_open,platform_status,platform_close}
+use io::native_file::{native_file_open,native_file_status,native_file_close,native_file_seek}
+use io::buffered_reader::{buffered_reader_new}
+use collections::byte_buffer::{ByteBuffer,byte_buffer_new,byte_buffer_push,byte_buffer_close}
+use arrow::lib::{arrow_schema_new,arrow_schema_add,arrow_type_int,arrow_batch_new,arrow_batch_shape,arrow_batch_set_i64,arrow_batch_i64,arrow_dicts_new}
+use arrow::native_stream::{arrow_stream_reader_new,arrow_stream_reader_open,arrow_stream_reader_next,arrow_stream_reader_close,arrow_stream_writer_new,arrow_stream_writer_begin,arrow_stream_writer_push,arrow_stream_writer_finish,arrow_stream_writer_close}
+fn path_bytes(text:string)->ByteBuffer with Alloc,Mut,Div,Panic {
+ var b=byte_buffer_new(1024)
+ var i:i64=0
+ while i<str_len(text) {assert(byte_buffer_push(&!b,(str_char_at(text,i) as i64) & 255)==0);i=i+1}
+ return b
+}
+fn read_stream(p:&Platform,path:string,chunk:i64,expected_end:i64) with IO,Alloc,Mut,Div,Panic {
+ let name=path_bytes(path)
+ let file=native_file_open(p,&name,0)
+ byte_buffer_close(name)
+ let size=native_file_seek(p,&file,0,2)
+ assert(size.status==0 && size.value>8192)
+ assert(native_file_seek(p,&file,0,0).status==0)
+ var reader=arrow_stream_reader_new(buffered_reader_new(file,chunk,chunk))
+ var schema=arrow_schema_new()
+ var dicts=arrow_dicts_new()
+ assert(arrow_stream_reader_open(p,&!reader,&!schema,&!dicts)==0)
+ assert(schema.n_fields==1)
+ var batch=arrow_batch_new()
+ var n:i64=0
+ var code=arrow_stream_reader_next(p,&!reader,&schema,&!dicts,&!batch)
+ while code==0 {
+  assert(batch.n_rows==16 && batch.n_cols==1)
+  var row:i64=0
+  while row<16 {assert(arrow_batch_i64(&batch,0,row)==n*16+row);row=row+1}
+  n=n+1
+  code=arrow_stream_reader_next(p,&!reader,&schema,&!dicts,&!batch)
+ }
+ assert(n==100 && code==expected_end)
+ assert(arrow_stream_reader_next(p,&!reader,&schema,&!dicts,&!batch)==expected_end)
+ assert(arrow_stream_reader_close(p,reader)==0)
+}
+fn main()->i32 with IO,Alloc,Mut,Div,Panic {
+ let p=platform_open()
+ assert(platform_status(&p)==0)
+ var schema=arrow_schema_new()
+ assert(arrow_schema_add(&!schema,"id",0,arrow_type_int(),64,1,0)==0)
+ let name=path_bytes("/tmp/sounio_wave3_arrow_native.stream")
+ let file=native_file_open(&p,&name,1)
+ byte_buffer_close(name)
+ var writer=arrow_stream_writer_new(file)
+ assert(arrow_stream_writer_begin(&p,&!writer,&schema)==0)
+ var batch=arrow_batch_new()
+ assert(arrow_batch_shape(&!batch,17,1)!=0)
+ assert(arrow_batch_shape(&!batch,16,1)==0)
+ var n:i64=0
+ while n<100 {
+  var row:i64=0
+  while row<16 {assert(arrow_batch_set_i64(&!batch,0,row,n*16+row,0)==0);row=row+1}
+  assert(arrow_stream_writer_push(&p,&!writer,&schema,&batch)==0)
+  n=n+1
+ }
+ assert(arrow_stream_writer_finish(&p,&!writer)==0)
+ assert(arrow_stream_writer_finish(&p,&!writer)==0)
+ assert(arrow_stream_writer_close(&p,writer)==0)
+ read_stream(&p,"/tmp/sounio_wave3_arrow_native.stream",1,1)
+ // Standalone fixture always checks the Sounio stream. The C++26 gate supplies
+ // and requires the additional external producer inputs and their marker.
+ let oracle_path=path_bytes("/tmp/sounio_wave3_arrow_cpp.stream")
+ let oracle=native_file_open(&p,&oracle_path,0)
+ let oracle_present=native_file_status(&oracle)==0
+ let oracle_closed=native_file_close(&p,oracle)
+ byte_buffer_close(oracle_path)
+ if oracle_present {
+  assert(oracle_closed==0)
+  read_stream(&p,"/tmp/sounio_wave3_arrow_cpp.stream",1,1)
+  read_stream(&p,"/tmp/sounio_wave3_arrow_cpp.stream",17,1)
+  read_stream(&p,"/tmp/sounio_wave3_arrow_cpp.stream.truncated",7,0-5)
+  read_stream(&p,"/tmp/sounio_wave3_arrow_cpp.stream.trailing",7,0-3)
+  println("ARROW_NATIVE_CPP_READ_OK")
+ }
+ platform_close(p)
+ println("ARROW_NATIVE_STREAM_OK")
+ 0
+}

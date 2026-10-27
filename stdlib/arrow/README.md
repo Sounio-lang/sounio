@@ -164,3 +164,21 @@ the acceptance entrypoint never executes them.
 
 This gate qualifies the covered interoperability cases. Existing capacity and
 codec limits above remain part of the API.
+
+## Incremental native file streams
+
+`arrow::native_stream` provides owned `ArrowStreamReader` and
+`ArrowStreamWriter` adapters over buffered regular-file I/O. The caller owns
+the schema and dictionary state supplied to open/next and preserves them
+between calls. Writers expose begin/push/push_dict/finish; close is explicit.
+Reader close releases its buffered file. Writer close returns POSIX errno
+and reports22 if a successful finish did not occur.
+
+Messages retain the8192-byte framing and4096-byte body caps and all existing
+batch/schema/dictionary limits. Total stream length and batch count have no
+additional cap. This is the IPC stream encapsulation; seekable Arrow files
+with footers remain on the existing file API. The adapter requires EOS and
+rejects trailing bytes. Status -9 means native I/O/storage failure; the
+reader/writer io-status getter exposes the underlying POSIX errno.
+`arrow_ipc_metadata_view` inspects metadata before body bytes are read;
+callers must bound the returned body length.
