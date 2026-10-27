@@ -25,7 +25,7 @@ function createBelowOutput(dir) {
   }
 }
 function phase(c, rel, name) {
-  if (!['check','run'].includes(name) || !rel.startsWith('tests/stdlib/') || !rel.endsWith('.sio') || path.posix.normalize(rel)!==rel || rel.split('/').some(x=>x==='..'||x==='.'||x==='')) throw Error('unsafe case key');
+  if (!['check','run','compile','native'].includes(name) || !rel.startsWith('tests/stdlib/') || !rel.endsWith('.sio') || path.posix.normalize(rel)!==rel || rel.split('/').some(x=>x==='..'||x==='.'||x==='')) throw Error('unsafe case key');
   if (!c.sources.some(x=>x.path===path.join(c.root,rel))) throw Error('case outside initial source census');
   return path.join(out,rel,name);
 }
@@ -33,7 +33,7 @@ function verifyAllCaptures(c) {
   let count=0;
   function visit(dir) {
     const rel=path.relative(out,dir).split(path.sep).join('/');
-    const match=/^(tests\/stdlib\/.+\.sio)\/(check|run)$/.exec(rel);
+    const match=/^(tests\/stdlib\/.+\.sio)\/(check|run|compile|native)$/.exec(rel);
     if(match) {
       const expectedDir=phase(c,match[1],match[2]);
       if(expectedDir!==dir) throw Error('phase directory mismatch');
@@ -62,11 +62,11 @@ try {
     if(fs.existsSync(out) || (()=>{try{fs.lstatSync(out);return true;}catch(e){if(e.code==='ENOENT')return false;throw e;}})()) throw Error('artifacts directory already exists');
     ancestors(path.dirname(out));
     for(const input of [root,stdlib]) { const real=fs.realpathSync(input); if(inside(out,real)||inside(real,out)) throw Error(`artifacts/input overlap: ${real}`); }
-    const callers=['scripts/stdlib/run_stdlib_e2e.sh','scripts/stdlib/stdlib_e2e_diagnostics.mjs','scripts/stdlib/emit_stdlib_e2e_result.mjs','scripts/lib/resolve_souc.sh'].map(p=>identity(path.join(root,p)));
+    const callers=['scripts/stdlib/run_stdlib_e2e.sh','scripts/stdlib/stdlib_e2e_diagnostics.mjs','scripts/stdlib/emit_stdlib_e2e_result.mjs','scripts/stdlib/bounded_command.mjs','scripts/lib/resolve_souc.sh'].map(p=>identity(path.join(root,p)));
     callers.push(identity(wrapper));
     const sources=walk(path.join(root,'tests/stdlib')).sort((a,b)=>a.path.localeCompare(b.path));
     fs.mkdirSync(out,{mode:0o700});
-    put(path.join(out,'capture.json'),{schema:'sounio.stdlib.e2e.diagnostics.v1',output:out,root,started_at_utc:utc(),identity_scope:'Test source and caller/wrapper file identities; not an execve witness or imported-source closure. Run output combines compiler and native execution.',callers,sources});
+    put(path.join(out,'capture.json'),{schema:'sounio.stdlib.e2e.diagnostics.v1',output:out,root,started_at_utc:utc(),identity_scope:'Test source and caller/wrapper file identities; not an execve witness or imported-source closure. Compile and native execution have separate bounded phase receipts.',callers,sources});
   } else if(op==='begin') {
     const c=control(), [rel,name,...command]=args, dir=phase(c,rel,name);
     c.callers.forEach(same); c.sources.filter(x=>x.path===path.join(c.root,rel)).forEach(same);

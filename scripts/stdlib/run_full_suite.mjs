@@ -38,7 +38,7 @@ if(partition==='file'&&externalWorkers){
 }
 const workerBase=externalWorkers||path.join(output,'workers');
 const workerCount=Math.min(jobs,prefixes.length),workerRoots=[];
-const copyInvariants=partition==='file'?[...initial,...walk(path.join(root,'stdlib'),false).filter(p=>p.endsWith('.sio')).map(p=>({path:path.relative(root,p),sha256:hash(p)}))]:[];
+const copyInvariants=partition==='file'?[...initial,...walk(path.join(root,'stdlib')).map(p=>({path:path.relative(root,p),sha256:hash(p)}))]:[];
 for(let i=0;i<workerCount;i++){
  if(partition!=='file'){workerRoots.push(root);continue;}
  const copy=path.join(workerBase,String(i));fs.mkdirSync(path.dirname(copy),{recursive:true});

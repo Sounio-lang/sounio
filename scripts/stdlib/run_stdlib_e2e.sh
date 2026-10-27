@@ -21,6 +21,10 @@
 # ignore them, so 19 of the 24 tests it reported as run-timeout on 2026-10-25
 # had been killed at 30 s although they declare 60 s to 3600 s.
 #
+# Compilation has a separate STDLIB_E2E_COMPILE_TIMEOUT_SEC deadline (1200 s).
+# Each phase has STDLIB_E2E_MAX_OUTPUT_BYTES (16 MiB); excess is a failure.
+# Native execution alone uses each test timeout annotation.
+#
 # Usage:
 #   bash scripts/stdlib/run_stdlib_e2e.sh [--filter PATTERN] [--verbose] [--json-out PATH] [--artifacts-dir ABS_FRESH_PATH]
 #   bash scripts/stdlib/run_stdlib_e2e.sh PATTERN --verbose
@@ -42,6 +46,9 @@ FILTER=""
 VERBOSE=0
 JSON_OUT="${STDLIB_E2E_JSON_OUT:-}"
 RUN_TIMEOUT_SEC="${STDLIB_E2E_RUN_TIMEOUT_SEC:-30}"
+COMPILE_TIMEOUT_SEC="${STDLIB_E2E_COMPILE_TIMEOUT_SEC:-1200}"
+MAX_OUTPUT_BYTES="${STDLIB_E2E_MAX_OUTPUT_BYTES:-16777216}"
+BOUNDED_COMMAND="$ROOT_DIR/scripts/stdlib/bounded_command.mjs"
 RUN_ALL_RUN_PASS="${STDLIB_E2E_RUN_ALL_RUN_PASS:-1}"
 
 usage() {
@@ -131,6 +138,18 @@ capture_command() (
 
 verify_capture() {
   node "$DIAGNOSTICS_HELPER" verify "$ARTIFACTS_DIR" "$1" "$2" "$3" || exit 65
+}
+
+phase_command() {
+  local rel="$1" phase="$2" seconds="$3" rc=0
+  shift 3
+  if [[ -n "$ARTIFACTS_DIR" ]]; then
+    capture_command "$rel" "$phase" node "$BOUNDED_COMMAND" "$seconds" "$MAX_OUTPUT_BYTES" -- "$@" || rc=$?
+    verify_capture "$rel" "$phase" "$rc"
+  else
+    node "$BOUNDED_COMMAND" "$seconds" "$MAX_OUTPUT_BYTES" -- "$@" 2>&1 || rc=$?
+  fi
+  return "$rc"
 }
 
 PASS=0
@@ -243,18 +262,16 @@ run_test() {
 
   local output
   local exit_code=0
-  if [[ -n "$ARTIFACTS_DIR" ]]; then
-    output=$(capture_command "$relpath" check "$SOUC_BIN" check "$file") || exit_code=$?
-    verify_capture "$relpath" check "$exit_code"
-  else
-    output=$("$SOUC_BIN" check "$file" 2>&1) || exit_code=$?
-  fi
+  output=$(phase_command "$relpath" check "$COMPILE_TIMEOUT_SEC" "$SOUC_BIN" check "$file") || exit_code=$?
   if [[ $exit_code -ne 0 ]]; then
     local excerpt
     excerpt="$(head -6 <<< "$output")"
     FAIL=$((FAIL + 1))
     ERRORS="${ERRORS}\n  FAIL  $relpath (check exited $exit_code)"
-    record_result "fail" "$relpath" "check" "check-failed" "" "" "$exit_code" "$excerpt"
+    local check_reason="check-failed"
+    [[ $exit_code -ne 124 ]] || check_reason="check-timeout"
+    [[ $exit_code -ne 122 ]] || check_reason="output-limit"
+    record_result "fail" "$relpath" "check" "$check_reason" "" "" "$exit_code" "$excerpt"
     if [[ $VERBOSE -eq 1 ]]; then
       echo "  FAIL  $relpath (check exited $exit_code)"
       echo "        $(echo "$excerpt" | tr '\n' ' ' | sed 's/[[:space:]]\+/ /g')"
@@ -280,31 +297,34 @@ run_test() {
     return
   fi
 
+  local executable
+  executable="$(mktemp /tmp/sounio-stdlib-e2e-XXXXXX.elf)" || exit 65
   exit_code=0
-  if command -v timeout >/dev/null 2>&1; then
-    if [[ -n "$ARTIFACTS_DIR" ]]; then
-      output=$(capture_command "$relpath" run timeout "${test_timeout}s" "$SOUC_BIN" run "$file") || exit_code=$?
-      verify_capture "$relpath" run "$exit_code"
-    else
-      output=$(timeout "${test_timeout}s" "$SOUC_BIN" run "$file" 2>&1) || exit_code=$?
-    fi
-  else
-    if [[ -n "$ARTIFACTS_DIR" ]]; then
-      output=$(capture_command "$relpath" run "$SOUC_BIN" run "$file") || exit_code=$?
-      verify_capture "$relpath" run "$exit_code"
-    else
-      output=$("$SOUC_BIN" run "$file" 2>&1) || exit_code=$?
-    fi
+  output=$(phase_command "$relpath" compile "$COMPILE_TIMEOUT_SEC" "$SOUC_BIN" compile "$file" -o "$executable") || exit_code=$?
+  if [[ $exit_code -ne 0 || ! -s "$executable" ]]; then
+    rm -f "$executable"
+    [[ $exit_code -ne 0 ]] || exit_code=1
+    FAIL=$((FAIL + 1))
+    local compile_reason="compile-failed"
+    [[ $exit_code -ne 124 ]] || compile_reason="compile-timeout"
+    [[ $exit_code -ne 122 ]] || compile_reason="output-limit"
+    record_result "fail" "$relpath" "compile" "$compile_reason" "" "" "$exit_code" "$(head -6 <<< "$output")"
+    ERRORS="${ERRORS}\n  FAIL  $relpath ($compile_reason)"
+    return
   fi
+  chmod +x "$executable"
+  output=$(phase_command "$relpath" native "$test_timeout" "$executable") || exit_code=$?
+  rm -f "$executable"
   if [[ $exit_code -ne 0 ]]; then
     local excerpt
     excerpt="$(head -6 <<< "$output")"
     FAIL=$((FAIL + 1))
     local reason="run-failed"
     if [[ $exit_code -eq 124 ]]; then
-      reason="run-timeout"
+      reason="native-timeout"
       excerpt="timeout after ${test_timeout}s"
     fi
+    [[ $exit_code -ne 122 ]] || reason="output-limit"
     ERRORS="${ERRORS}\n  FAIL  $relpath (run exited $exit_code)"
     record_result "fail" "$relpath" "run" "$reason" "" "" "$exit_code" "$excerpt"
     if [[ $VERBOSE -eq 1 ]]; then
