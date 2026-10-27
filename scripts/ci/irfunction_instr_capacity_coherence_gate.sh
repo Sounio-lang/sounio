@@ -52,6 +52,6 @@ if git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
 fi
 
 printf '%s\n' \
-  'IRFUNCTION_INSTR_CAPACITY_BOUNDARY storage_coherence=proved analysis_refusal=proved runtime_readback=not_claimed soir_v6=unchanged legacy=preserved'
+  'IRFUNCTION_INSTR_CAPACITY_BOUNDARY storage_coherence=proved analysis_refusal=proved runtime_readback=not_claimed soir_storage_pool=checked wire_compatibility=separate_gate'
 printf 'IRFUNCTION_INSTR_CAPACITY_PASS source=%s source_sha256=%s expected=%s head=%s tree=%s worktree=%s\n' \
   "$SOURCE" "$source_sha256" "$EXPECTED_CAPACITY" "$head_sha" "$tree_sha" "$worktree_state"
