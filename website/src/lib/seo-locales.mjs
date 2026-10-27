@@ -265,6 +265,10 @@ export function canonicalPathname(pathname) {
   return localizedPath(bare, target);
 }
 
+/**
+ * @param {string} pathname
+ * @returns {{ hreflang: string, href: string }[]}
+ */
 export function hreflangLinks(pathname) {
   const bare = barePath(pathname);
   const links = indexableLocales(bare).map((locale) => ({
