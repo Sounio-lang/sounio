@@ -10,10 +10,15 @@ export MADAROS_RAW_BIN
 SEED_RAW_BIN=$(readlink -f "${SEED_RAW_BIN:-$repo/bin/souc-lean-single-x86_64}") || exit 64
 [[ -x "$SEED_RAW_BIN" ]] || exit 64
 export SEED_RAW_BIN
+time_bin=$(readlink -f "${STDLIB_TIME_BIN:-/usr/bin/time}") || exit 64
+[[ -x "$time_bin" ]] || { echo "missing executable GNU time; set STDLIB_TIME_BIN" >&2; exit 64; }
 out=$(realpath -m "$out") || exit 64
 case "$out/" in "$repo/stdlib/"*|"$repo/tests/"*|"$repo/examples/"*|"$repo/scripts/stdlib/"*|"$repo/scripts/lib/"*) echo "output overlaps input catalog" >&2; exit 64;; esac
 mkdir -p "$out" || exit 65
 [[ -z "$(find "$out" -mindepth 1 -maxdepth 1 -print -quit)" ]] || { echo "refusing nonempty output directory" >&2; exit 65; }
+"$time_bin" --version > "$out/TIME_VERSION.txt" 2>&1 || exit 64
+grep -q GNU "$out/TIME_VERSION.txt" || { echo "GNU time required" >&2;exit 64; }
+sha256sum "$time_bin" > "$out/TIME.sha256" || exit 65
 cd "$repo" || exit 65
 export SOUNIO_STDLIB_PATH="$repo/stdlib" SOUNIO_SOUC_ENGINE=madaros
 export SOUNIO_MADAROS_NOCACHE=1 SOUNIO_MADAROS_CACHE_READONLY=1
@@ -126,7 +131,7 @@ native() {
     sha256sum "$src" "$out/$name.elf" > "$out/$name.identities" || { record native-artifact-seal "$src" 1; return; }
     # Each parallel worker owns its pre-execution manifest; aggregate after join.
     sha256sum "$out/$name.elf" > "$out/$name.native-elf.sha256" || { record native-artifact-seal "$src" 1; return; }
-    /usr/bin/time -f 'elapsed_seconds=%e\nuser_seconds=%U\nsystem_seconds=%S\nmax_rss_kib=%M\nexit_code=%x' -o "$out/$name.resource" timeout 300 "$out/$name.elf" > "$out/$name.stdout" 2> "$out/$name.stderr" || rc=$?
+    "$time_bin" -f 'elapsed_seconds=%e\nuser_seconds=%U\nsystem_seconds=%S\nmax_rss_kib=%M\nexit_code=%x' -o "$out/$name.resource" timeout 300 "$out/$name.elf" > "$out/$name.stdout" 2> "$out/$name.stderr" || rc=$?
     record native "$src" "$rc"
     if [[ $rc == 0 ]]; then
         local expected marker_rc=0
@@ -588,6 +593,9 @@ record input-catalog unchanged "$rc"
 rc=0
 sha256sum -c "$out/NATIVE_ELFS.sha256" > "$out/NATIVE_ELFS.verify.txt" 2>&1 || rc=$?
 record native-artifact-hashes unchanged "$rc"
+rc=0
+sha256sum -c "$out/TIME.sha256" > "$out/TIME.final.verify" || rc=$?
+record time-tool-hash unchanged "$rc"
 rc=0
 sha256sum -c "$out/REFERENCE_ELFS.sha256" > "$out/REFERENCE_ELFS.verify.txt" 2>&1 || rc=$?
 record reference-artifact-hashes unchanged "$rc"
