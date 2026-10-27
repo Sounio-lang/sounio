@@ -36,3 +36,12 @@ closed IDs and non-reuse, a destination at 127.0.0.2, sender identity, empty and
 truncated datagrams, interrupted absolute waits, stream transfer, timeout, EOF,
 and existing platform behavior. This receipt qualifies the C ABI; Sounio API
 qualification is a separate gate.
+
+Operation112 returns one atomic packed latest-sender endpoint (IPv4<<16|port).
+The receive path updates that endpoint once, including empty and truncated
+messages. Legacy109/63 decode it for compatibility. A packed snapshot prevents
+mixed address/port pairs; binding it to a particular receive still requires
+external serialization or an exclusive typed compound receive wrapper.
+Slurm18169 passed the previous controls plus64 datagrams from two endpoints
+and50,000 concurrent snapshot observations, normally and with ASAN/UBSAN.
+Qualified library SHA256: de01597868c09725c2c26651d23203043c65fdc04a3e5e96f45dfe4a51d494c4.

@@ -1,4 +1,5 @@
 #include <cassert>
+#include <atomic>
 #include <cerrno>
 #include <cstdint>
 #include <cstring>
@@ -43,6 +44,7 @@ int main(){
  assert(call(62,receiver,reinterpret_cast<I>(buffer),sizeof(buffer),1000)==3&&error()==0);
  assert(std::memcmp(buffer,payload,3)==0);
  assert(call(109,receiver)==ip1&&call(63,receiver)==sender_port);
+ assert(call(112,receiver)==((ip1<<16)|sender_port)&&error()==0);
  assert(call(108,sender,0,0)==0&&error()==0);
  assert(call(62,receiver,0,0,1000)==0&&error()==0);
  assert(call(109,receiver)==ip1);
@@ -88,6 +90,16 @@ int main(){
  assert(call(111,accepted,reinterpret_cast<I>(buffer),1,now()+10000000)==0&&error()==ETIMEDOUT);
  assert(call(56,client,1)==0&&error()==0);
  assert(call(111,accepted,reinterpret_cast<I>(buffer),1,now()+1000000000)==0&&error()==0);
+ const I receive2=call(60,ip2,0),send2=call(60,ip2,0);
+ assert(receive2>0&&send2>0);
+ const I port2=call(51,receive2),sender2_port=call(51,send2);
+ assert(call(107,sender,ip2,port2)==1&&call(107,send2,ip2,port2)==1);
+ std::atomic<int> consumed{0};
+ std::thread consumer([&]{char byte=0;for(int i=0;i<64;++i){assert(call(62,receive2,reinterpret_cast<I>(&byte),1,1000)==1&&error()==0);++consumed;std::this_thread::yield();}});
+ for(int i=0;i<32;++i){assert(call(108,sender,reinterpret_cast<I>(payload),1)==1);assert(call(108,send2,reinterpret_cast<I>(payload),1)==1);}
+ for(int i=0;i<50000;++i){const I endpoint=call(112,receive2);assert(error()==0);assert(endpoint==0||endpoint==((ip1<<16)|sender_port)||endpoint==((ip2<<16)|sender2_port));}
+ consumer.join();assert(consumed==64);
+ call(2,receive2);assert(error()==0);call(2,send2);assert(error()==0);
  for(I id:{sender,extra,replacement,listener,client,accepted}){call(2,id);assert(error()==0);}
  std::cout<<"STDLIB_POLLSET_UDP_ABSOLUTE_DEADLINE_OK\n";
 }

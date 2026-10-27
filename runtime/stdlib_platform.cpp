@@ -111,7 +111,7 @@ struct File final:Resource {
   ~File()override {if(fd>=0)::close(fd);}
 };
 struct Socket final:Resource {
-  int fd;std::atomic<int> peer_port{0};std::atomic<I> peer_ip{0};
+  int fd;std::atomic<I> peer_endpoint{0};
   std::mutex destination_mutex;sockaddr_in destination{};bool has_destination=false;
   std::mutex connect_mutex;bool is_connection=false,connect_pending=false;int connect_error=0;
   explicit Socket(int f):Resource(Kind::socket),fd(f){}
@@ -276,9 +276,10 @@ I dispatch(I op,I a,I b,I c,I d) {
     }
     return failure(ERANGE);
   }
-  if(op>=107&&op<=111) {
+  if(op>=107&&op<=112) {
     auto socket=get<Socket>(a,Kind::socket);if(!socket)return 0;
-    if(op==109)return socket->peer_ip.load();
+    if(op==109)return socket->peer_endpoint.load()>>16;
+    if(op==112)return socket->peer_endpoint.load();
     int type=0;socklen_t length=sizeof(type);
     if(getsockopt(socket->fd,SOL_SOCKET,SO_TYPE,&type,&length))return failure(errno);
     if(op==107) {
@@ -582,8 +583,7 @@ I dispatch(I op,I a,I b,I c,I d) {
           message.msg_iov=&buffer;message.msg_iovlen=1;
           rc=recvmsg(s->fd,&message,0);
           if(rc>=0) {
-            s->peer_port.store(ntohs(peer.sin_port));
-            s->peer_ip.store(ntohl(peer.sin_addr.s_addr));
+            s->peer_endpoint.store((static_cast<I>(ntohl(peer.sin_addr.s_addr))<<16)|ntohs(peer.sin_port));
             // The datagram is consumed. Expose truncation and the copied byte
             // count; callers must not accept its prefix as a complete message.
             if(message.msg_flags&MSG_TRUNC){last_error=EMSGSIZE;return rc;}
@@ -594,7 +594,7 @@ I dispatch(I op,I a,I b,I c,I d) {
       return rc;
     }
     if(op==56){if(b<0||b>2)return failure(EINVAL);if(::shutdown(s->fd,static_cast<int>(b)))return failure(errno);return 0;}
-    if(op==63)return s->peer_port.load();
+    if(op==63)return s->peer_endpoint.load()&65535;
   }
   return failure(ENOSYS);
 }
