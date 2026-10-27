@@ -20,6 +20,10 @@ Fail closed (status `-7`) rather than truncate:
 - field names, time zones, and string/binary cells at most 32 bytes
 - IPC buffer 8192 bytes, record-batch body 4096 bytes
 
+`arrow::feed` packs each record batch into one contiguous little-endian float32 matrix for a single device copy. Feature columns are non-null float32. An optional `label` column is non-null int64 and rides in the same slab, after padding to 8 bytes. Rows stay in column-major order (`(col * rows + row) * 4`). The loader does not gather rows and does not merge record batches. Nulls, float64 features, and nested values return `-4`.
+
+The largest matrix is 16 rows by 8 float32 columns, 512 feature bytes. `arrow_feed_rows_for_payload` applies that ceiling to a requested byte count. A multi-megabyte target still returns 16. That number is a size, not a measured bandwidth. The feed does not change these caps, and it is not the C Data Interface.
+
 `arrow_ipc_read` reads one batch and returns `-7` when another batch is present.
 `arrow_ipc_open` then `arrow_ipc_next` walk every batch (`0` = a batch, `1` = end).
 `arrow_ipc_open_ex` / `arrow_ipc_next_ex` also load dictionary batches.

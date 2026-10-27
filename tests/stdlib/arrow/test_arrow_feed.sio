@@ -1,0 +1,205 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: ARROW_FEED_OK
+// Native device feed: one Arrow record batch, one contiguous float32 slab.
+
+use arrow::feed::{
+    ArrowFeedBatch,
+    arrow_feed_copy_bytes,
+    arrow_feed_label,
+    arrow_feed_new,
+    arrow_feed_next,
+    arrow_feed_open,
+    arrow_feed_payload_bytes,
+    arrow_feed_reset,
+    arrow_feed_rows_for_payload,
+    arrow_feed_swap,
+    arrow_feed_u32,
+    arrow_feed_u8,
+}
+use arrow::lib::{
+    ArrowSchema,
+    arrow_batch_new,
+    arrow_batch_set_i64,
+    arrow_batch_shape,
+    arrow_buf_new,
+    arrow_ipc_stream_begin,
+    arrow_ipc_stream_end,
+    arrow_ipc_stream_push,
+    arrow_ipc_write_file,
+    arrow_schema_add,
+    arrow_schema_new,
+    arrow_type_float,
+    arrow_type_int,
+}
+
+fn f32_bits(n: i64) -> i64 {
+    if n == 1 { return 1065353216 }
+    if n == 2 { return 1073741824 }
+    if n == 3 { return 1077936128 }
+    if n == 4 { return 1082130432 }
+    if n == 5 { return 1084227584 }
+    if n == 6 { return 1086324736 }
+    if n == 7 { return 1088421888 }
+    if n == 8 { return 1090519040 }
+    0
+}
+
+fn add_f32(schema: &!ArrowSchema, name: string) -> i64 with Mut, Panic {
+    arrow_schema_add(schema, name, 0, arrow_type_float(), 0, 0, 1)
+}
+
+fn fail(code: i64) -> i64 with IO {
+    print("ARROW_FEED_FAIL ")
+    print_int(code)
+    println("")
+    code
+}
+
+fn test_sizes() -> i64 with Div, Panic {
+    if arrow_feed_rows_for_payload(8, 8388608) != 16 { return 10 }
+    if arrow_feed_rows_for_payload(8, 32) != 1 { return 11 }
+    if arrow_feed_rows_for_payload(8, 33) != 2 { return 12 }
+    if arrow_feed_rows_for_payload(9, 32) != -7 { return 13 }
+    if arrow_feed_payload_bytes(16, 8) != 512 { return 14 }
+    0
+}
+
+fn test_two_batches() -> i64 with IO, Mut, Panic, Div {
+    var schema = arrow_schema_new()
+    if add_f32(&!schema, "a") != 0 { return 20 }
+    if add_f32(&!schema, "b") != 0 { return 21 }
+    if arrow_schema_add(&!schema, "label", 0, arrow_type_int(), 64, 1, 0) != 0 { return 22 }
+    var batch = arrow_batch_new()
+    if arrow_batch_shape(&!batch, 4, 3) != 0 { return 23 }
+    var r: i64 = 0
+    while r < 4 {
+        if arrow_batch_set_i64(&!batch, 0, r, f32_bits(r + 1), 0) != 0 { return 24 }
+        if arrow_batch_set_i64(&!batch, 1, r, f32_bits(r + 5), 0) != 0 { return 25 }
+        if arrow_batch_set_i64(&!batch, 2, r, 100 + r, 0) != 0 { return 26 }
+        r = r + 1
+    }
+    var buf = arrow_buf_new()
+    if arrow_ipc_stream_begin(&schema, &!buf) != 0 { return 27 }
+    if arrow_ipc_stream_push(&schema, &batch, &!buf) != 0 { return 28 }
+    if arrow_batch_shape(&!batch, 2, 3) != 0 { return 29 }
+    if arrow_batch_set_i64(&!batch, 0, 0, f32_bits(1), 0) != 0 { return 30 }
+    if arrow_batch_set_i64(&!batch, 0, 1, f32_bits(2), 0) != 0 { return 31 }
+    if arrow_batch_set_i64(&!batch, 1, 0, f32_bits(3), 0) != 0 { return 32 }
+    if arrow_batch_set_i64(&!batch, 1, 1, f32_bits(4), 0) != 0 { return 33 }
+    if arrow_batch_set_i64(&!batch, 2, 0, -3, 0) != 0 { return 34 }
+    if arrow_batch_set_i64(&!batch, 2, 1, 8, 0) != 0 { return 35 }
+    if arrow_ipc_stream_push(&schema, &batch, &!buf) != 0 { return 36 }
+    if arrow_ipc_stream_end(&!buf) != 0 { return 37 }
+    var feed = arrow_feed_new()
+    let opened = arrow_feed_open(&buf, &!feed)
+    if opened != 0 { return 38 }
+    if feed.n_batches != 2 || feed.cols != 2 || feed.has_label != 1 { return 39 }
+    var step = ArrowFeedBatch {
+        index: 0,
+        rows: 0,
+        cols: 0,
+        offset: 0,
+        features_bytes: 0,
+        nbytes: 0,
+        has_label: 0,
+    }
+    if arrow_feed_next(&!feed, &!step) != 0 { return 40 }
+    if step.rows != 4 || step.cols != 2 || step.offset != 0 { return 41 }
+    if step.features_bytes != 32 || step.nbytes != 64 { return 42 }
+    if arrow_feed_copy_bytes(&feed, 0) != 64 { return 43 }
+    if arrow_feed_u32(&feed, 0) != f32_bits(1) { return 44 }
+    if arrow_feed_u32(&feed, 4) != f32_bits(2) { return 45 }
+    if arrow_feed_u32(&feed, 12) != f32_bits(4) { return 46 }
+    if arrow_feed_u32(&feed, 16) != f32_bits(5) { return 47 }
+    if arrow_feed_u32(&feed, 28) != f32_bits(8) { return 48 }
+    if arrow_feed_label(&feed, 0, 0) != 100 || arrow_feed_label(&feed, 0, 3) != 103 { return 49 }
+    if arrow_feed_u8(&feed, 32) != 100 { return 50 }
+    if arrow_feed_next(&!feed, &!step) != 0 { return 51 }
+    if step.rows != 2 || step.offset != 1024 || step.features_bytes != 16 { return 52 }
+    if step.nbytes != 32 { return 53 }
+    if arrow_feed_u32(&feed, 1024) != f32_bits(1) { return 54 }
+    if arrow_feed_u32(&feed, 1028) != f32_bits(2) { return 55 }
+    if arrow_feed_u32(&feed, 1032) != f32_bits(3) { return 56 }
+    if arrow_feed_label(&feed, 1, 0) != -3 || arrow_feed_label(&feed, 1, 1) != 8 { return 57 }
+    if arrow_feed_u8(&feed, 1040) != 253 { return 58 }
+    if arrow_feed_next(&!feed, &!step) != 1 { return 59 }
+    if arrow_feed_swap(&!feed, 0, 1) != 0 { return 60 }
+    arrow_feed_reset(&!feed)
+    if arrow_feed_next(&!feed, &!step) != 0 { return 61 }
+    if step.rows != 2 || arrow_feed_label(&feed, 0, 0) != -3 { return 62 }
+    if arrow_feed_u32(&feed, 0) != f32_bits(1) { return 63 }
+    if arrow_feed_u32(&feed, 8) != f32_bits(3) { return 64 }
+    0
+}
+
+fn test_align_and_file() -> i64 with Mut, Panic, Div {
+    var schema = arrow_schema_new()
+    if add_f32(&!schema, "a") != 0 { return 70 }
+    if arrow_schema_add(&!schema, "label", 0, arrow_type_int(), 64, 1, 0) != 0 { return 71 }
+    var batch = arrow_batch_new()
+    if arrow_batch_shape(&!batch, 1, 2) != 0 { return 72 }
+    if arrow_batch_set_i64(&!batch, 0, 0, f32_bits(1), 0) != 0 { return 73 }
+    if arrow_batch_set_i64(&!batch, 1, 0, 7, 0) != 0 { return 74 }
+    var buf = arrow_buf_new()
+    if arrow_ipc_write_file(&schema, &batch, &!buf) != 0 { return 75 }
+    var feed = arrow_feed_new()
+    if arrow_feed_open(&buf, &!feed) != 0 { return 76 }
+    if feed.n_batches != 1 || feed.cols != 1 { return 77 }
+    if feed.feature_bytes[0] != 4 || feed.nbytes[0] != 16 { return 78 }
+    if arrow_feed_u32(&feed, 0) != f32_bits(1) { return 79 }
+    if arrow_feed_u8(&feed, 4) != 0 || arrow_feed_u8(&feed, 7) != 0 { return 80 }
+    if arrow_feed_label(&feed, 0, 0) != 7 || arrow_feed_u8(&feed, 8) != 7 { return 81 }
+    0
+}
+
+fn test_refusals() -> i64 with Mut, Panic, Div {
+    var schema = arrow_schema_new()
+    if arrow_schema_add(&!schema, "x", 0, arrow_type_float(), 0, 0, 2) != 0 { return 90 }
+    var batch = arrow_batch_new()
+    if arrow_batch_shape(&!batch, 1, 1) != 0 { return 91 }
+    if arrow_batch_set_i64(&!batch, 0, 0, 1, 0) != 0 { return 92 }
+    var buf = arrow_buf_new()
+    if arrow_ipc_stream_begin(&schema, &!buf) != 0 { return 93 }
+    if arrow_ipc_stream_push(&schema, &batch, &!buf) != 0 { return 94 }
+    if arrow_ipc_stream_end(&!buf) != 0 { return 95 }
+    var feed = arrow_feed_new()
+    if arrow_feed_open(&buf, &!feed) != -4 { return 96 }
+    var schema2 = arrow_schema_new()
+    if arrow_schema_add(&!schema2, "x", 0, arrow_type_float(), 0, 0, 1) != 0 { return 97 }
+    var batch2 = arrow_batch_new()
+    if arrow_batch_shape(&!batch2, 2, 1) != 0 { return 98 }
+    if arrow_batch_set_i64(&!batch2, 0, 0, f32_bits(1), 0) != 0 { return 99 }
+    if arrow_batch_set_i64(&!batch2, 0, 1, f32_bits(2), 1) != 0 { return 100 }
+    var buf2 = arrow_buf_new()
+    if arrow_ipc_stream_begin(&schema2, &!buf2) != 0 { return 101 }
+    if arrow_ipc_stream_push(&schema2, &batch2, &!buf2) != 0 { return 102 }
+    if arrow_ipc_stream_end(&!buf2) != 0 { return 103 }
+    if arrow_feed_open(&buf2, &!feed) != -4 { return 104 }
+    0
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    let s = test_sizes()
+    if s != 0 {
+        let _ = fail(s)
+        return 1
+    }
+    let a = test_two_batches()
+    if a != 0 {
+        let _ = fail(a)
+        return 1
+    }
+    let b = test_align_and_file()
+    if b != 0 {
+        let _ = fail(b)
+        return 1
+    }
+    let c = test_refusals()
+    if c != 0 {
+        let _ = fail(c)
+        return 1
+    }
+    println("ARROW_FEED_OK")
+    0
+}
