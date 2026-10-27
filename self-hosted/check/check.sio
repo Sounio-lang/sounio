@@ -12060,6 +12060,36 @@ fn checker_fn_sig_visible_inplace(c: *mut Checker, sig_id: i64) -> bool with Mut
     )
 }
 
+// A bare `write_i64` / `read_i64` is the runtime builtin. Name-only lookup
+// otherwise binds the first private function of that spelling (ir/serialize
+// owns both) and E175s every later module, including the compiler checking
+// itself. Same-module calls stay on the local signature: prefer_module finds
+// it, and visibility is true there. A private extern stub of a builtin name
+// is already treated as visible, so it is not this case.
+fn checker_invisible_native_builtin_sig(c: *mut Checker, name: Name) -> bool with Mut, Panic, Div, Alloc, IO {
+    if !name_is_native_backend_builtin(name) {
+        return false
+    }
+    let sig_id = checker_fn_sigs_find_inplace(c, name)
+    if sig_id < 0 {
+        return false
+    }
+    !checker_fn_sig_visible_inplace(c, sig_id)
+}
+
+// Result of a bare builtin whose spelling is also a private function in
+// another module. Returning here avoids the ident fallback, which would
+// otherwise find that private signature and report E175 again.
+fn checker_shadowed_builtin_result(name: Name) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    if name_eq(name, make_name("read_i64")) || name_eq(name, make_name("heap_alloc")) || name_eq(name, make_name("read_f64")) {
+        return ty_i64()
+    }
+    if name_eq(name, make_name("write_i64")) || name_eq(name, make_name("write_f64")) || name_eq(name, make_name("print")) || name_eq(name, make_name("heap_free")) {
+        return ty_unit()
+    }
+    ty_unknown()
+}
+
 fn checker_struct_visible_inplace(c: *mut Checker, struct_idx: i64) -> bool with Mut, Panic, Div, Alloc, IO {
     let vis_kind = (*(*c).structs).entries[struct_idx as usize].visibility_kind
     if vis_kind == VISIBILITY_PUB {
@@ -12175,10 +12205,11 @@ fn checker_reject_invalid_implicit_native_builtin_arity_inplace(c: *mut Checker,
             if !name_is_native_backend_builtin(name) {
                 return false
             }
-            // A declared function, including an extern declaration, has a real
-            // FnSig and is checked by checker_check_call_args_inplace below.
-            // This guard is only for implicit runtime builtins bound as TyUnknown.
-            if checker_fn_sigs_find_inplace(c, name) >= 0 {
+            // A visible declared function, including an extern declaration, has
+            // a real FnSig and is checked by checker_check_call_args_inplace
+            // below. An invisible private function that only shares a builtin
+            // spelling is not that declaration: the call is still the builtin.
+            if checker_fn_sigs_find_inplace(c, name) >= 0 && !checker_invisible_native_builtin_sig(c, name) {
                 return false
             }
             let argc = expr_list_handle_count(expr_list_handle(e.args))
@@ -12594,6 +12625,18 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
         None => {}
     }
     if callee_is_local_fn { direct_sig_id = 0 - 1 }
+    // Bare builtin names are not calls to an invisible private function in
+    // another module. Return before the ident fallback rebinds that signature.
+    // Qualified calls are left alone.
+    match e.left {
+        Some(shadow_callee) => {
+            if (*shadow_callee).kind == ExprKind::ExprIdent && checker_invisible_native_builtin_sig(c, (*shadow_callee).name) {
+                checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
+                return checker_shadowed_builtin_result((*shadow_callee).name)
+            }
+        }
+        None => {}
+    }
     // #2164: a bare call to a math name the native backend cannot emit. Guarded
     // on direct_sig_id < 0 so it fires only where the name resolves to nothing
     // real -- the phantom-builtin case that produces a runtime SIGILL.
@@ -13600,6 +13643,9 @@ fn checker_check_ident_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
         // function reference via the chunked fn_sigs before reporting E137.
         let fn_sig_id = checker_fn_sigs_find_inplace(c, e.name)
         if fn_sig_id >= 0 {
+            if checker_invisible_native_builtin_sig(c, e.name) {
+                return ty_unknown()
+            }
             if (*c).enforce_visibility && !checker_fn_sig_visible_inplace(c,fn_sig_id) {
                 checker_report_private_fn_inplace(c,e.span,fn_sig_id)
             }
