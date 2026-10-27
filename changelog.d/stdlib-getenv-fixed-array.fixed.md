@@ -1,0 +1,1 @@
+Implement the OS environment facade's fixed &[u8; 64] getenv ABI in native Linux emission without heap allocation. Validate exact key termination and matching, preserve borrowed value pointers and IO effects, and retain E250 for unsupported foreign signatures. The initial process environment is scanned with an explicit overflow refusal rather than reporting false absence.

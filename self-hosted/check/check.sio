@@ -4773,6 +4773,23 @@ fn checker_collect_fn_def_inplace(c: *mut Checker, opt: Option<Box<FnDef> >, vis
                 }
             }
 
+            if (*fd).is_extern && name_eq(name, make_name("getenv")) {
+                var has_io = false
+                var io_index: i64 = 0
+                while io_index < kernel_effect_count {
+                    if kernel_effects[io_index as usize] == 0 { has_io = true }
+                    io_index = io_index + 1
+                }
+                if !has_io {
+                    if kernel_effect_count < 8 {
+                        kernel_effects[kernel_effect_count as usize] = 0
+                        kernel_effect_count = kernel_effect_count + 1
+                    } else {
+                        checker_report_error_at_inplace(c, (*fd).span, 246, 0, 0, 0)
+                    }
+                }
+            }
+
             var has_epistemic_param = false
             if is_kernel_fn {
                 var walk_params = params
@@ -12740,7 +12757,7 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
         // implement. This is the live arm -- a plain ident callee resolves via
         // direct_sig_id and returns below, never reaching the TyFn fallback.
         var refused_unimplemented = false
-        if direct_sig.is_extern && !name_is_native_backend_builtin(direct_sig.name) && !name_is_dynlink_extern(direct_sig.name) {
+        if direct_sig.is_extern && !checker_native_extern_signature_supported(direct_sig) {
             checker_report_error_at_inplace(c, e.span, 250, 0, 0, 0)
             refused_unimplemented = true
         }
@@ -12852,7 +12869,7 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
         // bodyless instead of giving it a ffi_<name> forwarding body, because
         // a wrapper body carries is_extern false and this arm never fires.
         var refused_unimplemented = false
-        if sig.is_extern && !name_is_native_backend_builtin(sig.name) && !name_is_dynlink_extern(sig.name) {
+        if sig.is_extern && !checker_native_extern_signature_supported(sig) {
             checker_report_error_at_inplace(c, e.span, 250, 0, 0, 0)
             refused_unimplemented = true
         }
@@ -20556,6 +20573,28 @@ fn name_is_dynlink_extern(n: Name) -> bool with Mut, Panic, Div, Alloc, IO {
     false
 }
 
+// getenv is emitted for exactly the stdlib fixed-key reference ABI.
+// Other declarations remain E250 even though the external name is known.
+fn checker_native_extern_signature_supported(sig: FnSig) -> bool with Mut, Panic, Div, Alloc, IO {
+    if name_eq(sig.name, make_name("getenv")) {
+        if sig.param_count != 1 || sig.return_type.kind != TypeKind::TyI64 { return false }
+        let param = fn_param_list_handle_get(fn_param_list_handle(sig.params), 0)
+        if param.ty.kind != TypeKind::TyRef { return false }
+        match param.ty.inner {
+            Some(array) => {
+                if (*array).kind != TypeKind::TyArray || (*array).array_size != 64 { return false }
+                match (*array).inner {
+                    Some(elem) => (*elem).kind == TypeKind::TyU8,
+                    None => false,
+                }
+            }
+            None => false,
+        }
+    } else {
+        name_is_native_backend_builtin(sig.name) || name_is_dynlink_extern(sig.name)
+    }
+}
+
 fn name_is_native_backend_builtin(n: Name) -> bool with Mut, Panic, Div, Alloc, IO {
     if name_eq(n, make_name("print_int")) { return true }        // id 1
     if name_eq(n, make_name("print_char")) { return true }       // id 2
@@ -20593,6 +20632,7 @@ fn name_is_native_backend_builtin(n: Name) -> bool with Mut, Panic, Div, Alloc, 
     // EXECUTION witnesses gate this in CI.
     if name_eq(n, make_name("malloc")) { return true }           // id 23 (heap_alloc)
     if name_eq(n, make_name("free")) { return true }             // id 24 (heap_free)
+    if name_eq(n, make_name("getenv")) { return true }           // id 74, fixed key ABI
     if name_eq(n, make_name("getpid")) { return true }           // id 28
     if name_eq(n, make_name("getppid")) { return true }          // id 29
     if name_eq(n, make_name("exit")) { return true }             // id 30
@@ -20658,6 +20698,7 @@ fn native_backend_builtin_arity_is_valid(n: Name, argc: i64) -> bool with Mut, P
         return name_eq(n, make_name("print_int"))
             || name_eq(n, make_name("print_char"))
             || name_eq(n, make_name("print"))
+            || name_eq(n, make_name("getenv"))
             || name_eq(n, make_name("get_arg"))
             || name_eq(n, make_name("str_len"))
             || name_eq(n, make_name("read_file"))
@@ -25718,6 +25759,23 @@ impl Checker {
                 }
 
                 // Detect epistemic kernel: any param with Knowledge/Epistemic type
+                if (*fd).is_extern && name_eq(name, make_name("getenv")) {
+                    var has_io = false
+                    var io_index: i64 = 0
+                    while io_index < kernel_effect_count {
+                        if kernel_effects[io_index as usize] == 0 { has_io = true }
+                        io_index = io_index + 1
+                    }
+                    if !has_io {
+                        if kernel_effect_count < 8 {
+                            kernel_effects[kernel_effect_count as usize] = 0
+                            kernel_effect_count = kernel_effect_count + 1
+                        } else {
+                            checker_report_error_at_inplace(c, (*fd).span, 246, 0, 0, 0)
+                        }
+                    }
+                }
+
                 var has_epistemic_param = false
                 if is_kernel_fn {
                     var walk_params = params
@@ -28995,7 +29053,7 @@ impl Checker {
             // on the in-place arm above, and the fixture that pins it,
             // tests/run-pass/ffi_declared_never_called_is_legal.sio.
             var refused_unimplemented = false
-            if sig.is_extern && !name_is_native_backend_builtin(sig.name) && !name_is_dynlink_extern(sig.name) {
+            if sig.is_extern && !checker_native_extern_signature_supported(sig) {
                 c = c.report_error_at(e.span, 250, 0, 0, 0)
                 refused_unimplemented = true
             }
