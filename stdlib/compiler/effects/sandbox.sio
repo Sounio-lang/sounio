@@ -336,7 +336,17 @@ pub fn policy_to_effect_mask(policy: SandboxPolicy) -> i64 with Mut, Panic, Div 
     mask
 }
 
-pub fn sandbox_execute(bc: ByteCode, policy: SandboxPolicy) -> (EffectVM, i64) with Mut, Panic, Div {
+// Keep this result as a named aggregate. The native lowering has a known
+// unsafe path for a tuple whose first element is a large aggregate: it can
+// corrupt the caller frame while materialising the tuple. A named struct uses
+// the proven SRET shape, preserving the sandbox result without moving the
+// EffectVM through that tuple path.
+pub struct SandboxExecution {
+    pub effect_vm: EffectVM,
+    pub instructions_executed: i64,
+}
+
+pub fn sandbox_execute(bc: ByteCode, policy: SandboxPolicy) -> SandboxExecution with Mut, Panic, Div {
     let allowed_effects = policy_to_effect_mask(policy)
     var evm = effect_vm_new(allowed_effects)
     var instruction_count: i64 = 0
@@ -350,7 +360,10 @@ pub fn sandbox_execute(bc: ByteCode, policy: SandboxPolicy) -> (EffectVM, i64) w
         instruction_count = instruction_count + 1
     }
 
-    (evm, instruction_count)
+    SandboxExecution {
+        effect_vm: evm,
+        instructions_executed: instruction_count,
+    }
 }
 
 pub struct EffectSummary {
@@ -416,8 +429,8 @@ pub fn sandbox_compile_and_run(src: [i8; 8192], src_len: i64, policy: SandboxPol
     let pipeline = compile_pipeline_new(src, src_len, policy)
     let compiled = compile_to_effect_bytecode(pipeline)
     let exec = sandbox_execute(compiled.bytecode, compiled.effect_policy)
-    let evm = exec.0
-    let inst_count = exec.1
+    let evm = exec.effect_vm
+    let inst_count = exec.instructions_executed
     let summary = effect_vm_summary(evm, inst_count)
     let success = !vm_has_error(&evm.vm) && !vm_is_halted(&evm.vm)
     (summary, success)
@@ -486,8 +499,8 @@ fn test_sandbox_execute() -> bool with Mut, Panic, Div {
 
     let policy = sandbox_policy_permissive()
     let exec = sandbox_execute(bc, policy)
-    let evm = exec.0
-    let inst = exec.1
+    let evm = exec.effect_vm
+    let inst = exec.instructions_executed
     inst == 2 && vm_stack_depth(&evm.vm) == 1 && value_as_i64(vm_result(evm.vm)) == 42
 }
 
