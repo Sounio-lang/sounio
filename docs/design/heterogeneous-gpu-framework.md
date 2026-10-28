@@ -1553,3 +1553,20 @@ Job 19268. md5 `c0ab579ade99a0db7a9376a43bfaa0b5`.
 The four inputs were still there. The cleared word at offset 16 came back 88. The four loads were in flight under four barrier ids, and each add waited on the barrier of the load it consumed.
 
 Gate. Node `gpuorangefs-r770-proxmox`, `--gres=gpu:1`, `--mem=16G`, `--cpus-per-task=4`. The 0.0018 s threshold is not moved. This cut does not pass it.
+
+
+## 61. Two FFMAs (2026-10-28, OBSERVED)
+
+The four loads stay. The adds are now `FFMA`, opcode `23 72`, the unpredicated form in `token_m1`. The low word is `35 + 114 * 256`, destination, first source, second source. The addend is byte 0 of the high half. The first addend is 255, RZ, so the product starts from zero. The second addend is R0, the running sum. Stall is 5. The first `FFMA` waits on mask 12, barriers 2 and 3. The second waits on mask 48, barriers 4 and 5.
+
+The host writes the bits of 2.0, 3.0, 4.0 and 5.0. In f32, 2 times 3 plus 4 times 5 is 26.0. The bits of 26.0 are `0x41d00000`, which is 1104150528. An earlier draft of the expected word used 1101529088. That was a bad conversion of the same hex. It was corrected before the launch.
+
+Job 19267 still held the node with CPUs only and no GPU. It was not cancelled. Job 19271 moved to partition `all`.
+
+Job 19271. md5 `7f28a8a5e5b520e63752fee0f11b5d80`.
+
+`OWN=1073741824`, `OWN_ADD=1077936128`, `OWN_SRC=1082130432`, `OWN_WIDE=1084227584`, `OWN_SUM=1104150528`, `EXIT:0`.
+
+Those four words are 2.0, 3.0, 4.0 and 5.0. The stored word is 26.0. The inputs were not overwritten.
+
+Gate. Node `gpuorangefs-r770-proxmox`, `--gres=gpu:1`, `--mem=16G`, `--cpus-per-task=4`. The 0.0018 s threshold is not moved. This cut does not pass it.
