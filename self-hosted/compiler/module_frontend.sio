@@ -22,7 +22,7 @@ use gpu::native_metal::{native_metal_begin, native_metal_collect_program, native
 use resolve::mod::{resolve_modules}
 use module_parse::{extract_imports_from_ast, file_exists, file_path_to_module_path, load_module_file}
 use private_fn_identity::{private_fn_identity_apply, module_struct_identity_check, pfi_use_map_reset, pfi_use_map_module_begin, pfi_use_map_note}
-use check::specializer::{specialize_generics, specialize_generics_multi, spec_last_instantiated, spec_mono_marker_count, spec_append_item_lists, spec_dce_unreachable_item_fns, spec_dce_mark_across_programs, spec_dce_filter_with_global_marks, spec_dce_live_item_fns, spec_report_any_specializer_failure, spec_program_mentions_f128}
+use check::specializer::{specialize_generics, specialize_generics_multi, spec_last_instantiated, spec_mono_marker_count, spec_append_item_lists, spec_dce_unreachable_item_fns, spec_dce_mark_across_programs, spec_dce_filter_with_global_marks, spec_dce_live_item_fns, spec_report_any_specializer_failure, spec_program_mentions_f128, spec_alias_canonical_prepare_after_check, spec_alias_canonical_single_prepare_after_check, spec_alias_canonical_items_after_check, spec_alias_canonical_count}
 
 // Multi-module parse accumulates every module's GLOBAL_VAR_INIT_* side-table
 // entries so imported f64/i64 BSS constants survive to lower time. Without
@@ -6610,6 +6610,7 @@ fn bridge_lower_single_module_box_scoped(main_path: string, trace: &! LoadMultim
         trace.last_stage = "typecheck_error"
         return module_frontend_lower_box_error("type_check_failed")
     }
+    module_frontend_alias_single_after_check(program.items)
     var epistemic = ir_empty_epistemic_section()
     if !check_program_epistemic_into(program, &!epistemic) {
         trace.last_stage = "epistemic_export_error"
@@ -6938,6 +6939,43 @@ fn module_frontend_pfi_note_use_targets(
 // SEGV. Whole-Program array writeback is also fragile for large Program
 // (measured Wave12 STAR: seed_begin SEGV after writeback). Caller lowers the
 // out-param list directly via module_frontend_lower_specialized_items_box.
+
+ // Called only after the authoritative module verdict is zero. Normalize the
+ // original metadata-bearing boxes as well as fresh specialized bodies, then
+ // discard and recollect pre-check FO/use/tuple-array metadata by physical owner.
+fn module_frontend_alias_lowering_after_check(
+    programs:&![Program;256], count:i64, specialized:Option<Box<ItemList>>
+) with IO,Mut,Panic,Div,Alloc {
+    spec_alias_canonical_prepare_after_check(programs,count)
+    var i:i64=0
+    while i<count {
+        let program=(*programs)[i as usize]
+        spec_alias_canonical_items_after_check(program.items,i)
+        i=i+1
+    }
+    // An unknown origin in a merged list must not inherit module zero.
+    spec_alias_canonical_items_after_check(specialized,0-1)
+    if spec_alias_canonical_count()<=0 {return}
+    fo_xfer_global_reset()
+    lower_use_module_reset()
+    lower_fn_tuple_arr_reset()
+    i=0
+    while i<count {
+        let program=(*programs)[i as usize]
+        fo_preregister_program_items_multipass(&program.items,i)
+        i=i+1
+    }
+}
+fn module_frontend_alias_single_after_check(items:Option<Box<ItemList>>) with IO,Mut,Panic,Div,Alloc {
+    spec_alias_canonical_single_prepare_after_check(items)
+    spec_alias_canonical_items_after_check(items,0)
+    if spec_alias_canonical_count()<=0 {return}
+    fo_xfer_global_reset()
+    lower_use_module_reset()
+    lower_fn_tuple_arr_reset()
+    fo_preregister_program_items_multipass(&items,0)
+}
+
 fn module_frontend_specialized_prepare(
     programs: &! [Program; 256],
     count: i64,
@@ -7148,6 +7186,7 @@ fn module_frontend_merge_imported_box(
         print("Type check failed during imported IR merge\n")
         return module_frontend_lower_direct_box_error("type_check_failed")
     }
+    module_frontend_alias_lowering_after_check(programs,loaded,specialized_items)
     trace.typechecked_modules = loaded
 
     // Per-module check_program_with_artifacts cannot see cross-module imports and
@@ -7558,6 +7597,7 @@ fn module_frontend_compile_imported_to_file_target_impl(
         module_frontend_global_init_compile_end()
         return 1
     }
+    module_frontend_alias_lowering_after_check(&! programs,loaded,specialized_items)
     trace.typechecked_modules = loaded
     print("imported_compile: typecheck ok\n")
     if use_collapse && loaded > 1 {
@@ -8717,6 +8757,7 @@ fn load_multimodule_ir_to_box_traced(main_path: string, trace: &! LoadMultimodul
             module_frontend_global_init_compile_end()
             return module_frontend_lower_direct_box_error("type_check_failed")
         }
+        module_frontend_alias_single_after_check(main_prog.items)
         trace.typechecked_modules = 1
         trace.last_stage = "lower_single"
         var single_lower_result_no_use = load_multimodule_lower_program_traced(main_prog, single_epistemic_no_use, 0, trace)
@@ -8756,6 +8797,7 @@ fn load_multimodule_ir_to_box_traced(main_path: string, trace: &! LoadMultimodul
             module_frontend_global_init_compile_end()
             return module_frontend_lower_direct_box_error("type_check_failed")
         }
+        module_frontend_alias_single_after_check(main_prog.items)
         trace.typechecked_modules = 1
         trace.last_stage = "lower_single"
         var single_lower_result = load_multimodule_lower_program_traced(main_prog, single_epistemic, 0, trace)

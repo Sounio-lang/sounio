@@ -2018,7 +2018,230 @@ fn spec_name_to_path(n: Name) -> AstPath {
 }
 
 struct SpecTypeStage { ty: TypeExpr }
+
+// Post-check lowering normalization. Context -17 reuses the faithful AST
+// substitution visitor WITHOUT generic instantiation or call-target rewriting.
+// Type aliases are resolved by owner/declaration, never receiver field shape.
+let SPEC_ALIAS_CANON_CTX:i64=0-17
+var SPEC_ALIAS_CANON_OWNER:i64=0-1
+var SPEC_ALIAS_CANON_PROTECT_PARAMS:bool=true
+var SPEC_ALIAS_CANON_COUNT:i64=0
+var SPEC_ALIAS_CANON_HAS_ALIASES:bool=false
+
+fn alias_shape_is_plain_named(ty:&TypeExpr)->bool with Mut,Panic,Div {
+ if (*ty).kind!=TypeExprKind::TypeNamed || (*ty).path.seg_count<1 {return false}
+ match (*ty).type_args {Some(_)=>false,None=>true}
+}
+fn spec_alias_reserved_name(name:Name)->bool with Mut,Panic,Div {
+ name_eq(name,make_name("i8")) || name_eq(name,make_name("u8")) ||
+ name_eq(name,make_name("i16")) || name_eq(name,make_name("u16")) ||
+ name_eq(name,make_name("i32")) || name_eq(name,make_name("u32")) ||
+ name_eq(name,make_name("i64")) || name_eq(name,make_name("u64")) ||
+ name_eq(name,make_name("i128")) || name_eq(name,make_name("u128")) ||
+ name_eq(name,make_name("i256")) || name_eq(name,make_name("u256")) ||
+ name_eq(name,make_name("isize")) || name_eq(name,make_name("usize")) ||
+ name_eq(name,make_name("f32")) || name_eq(name,make_name("f64")) ||
+ name_eq(name,make_name("f128")) || name_eq(name,make_name("f256")) ||
+ name_eq(name,make_name("bool")) || name_eq(name,make_name("char")) ||
+ name_eq(name,make_name("string")) || name_eq(name,make_name("Self")) ||
+ name_eq(name,make_name("Box")) || name_eq(name,make_name("Option")) ||
+ name_eq(name,make_name("Result"))
+}
+fn spec_alias_param_name(name:Name)->bool with Mut,Panic,Div {
+ if !SPEC_ALIAS_CANON_PROTECT_PARAMS || name.len!=1 {return false}
+ let ch=name.buf[0] as i64
+ ch>=65 && ch<=90
+}
+fn spec_alias_unique_nominal(decl:i64)->bool with Mut,Panic,Div,Alloc {
+ if decl<=0 {return false}
+ let wanted=decl as *mut SpecReceiverDecl
+ var owner:i64=0
+ while owner<SPEC_ENUM_PROGRAM_COUNT {
+  var cursor=spec_enum_module_items(owner)
+  while true {match cursor {
+   Some(node)=>{
+    let item=(*node).head
+    if (item.kind==ItemKind::ItemStruct || item.kind==ItemKind::ItemEnum) &&
+       name_eq(item.name,(*wanted).item.name) {
+     let candidate=spec_receiver_stage(owner,item)
+     if !spec_receiver_same(decl,candidate) {return false}
+    }
+    cursor=(*node).tail
+   },
+   None=>break,
+  }}
+  owner=owner+1
+ }
+ true
+}
+// Only transparent chains ending at a concrete nongeneric struct are in this
+// initial normalization boundary. A generic application, cycle, ambiguity or
+// unavailable owner remains unchanged and cannot acquire a guessed identity.
+
+fn spec_alias_nominal_path(path:AstPath)->i64 with Mut,Panic,Div,Alloc {
+ if path.seg_count<1 {return 0}
+ let first=spec_string_list_last_name(path.segments)
+ if spec_alias_reserved_name(first) || spec_alias_param_name(first) {return 0}
+ let owner=SPEC_ALIAS_CANON_OWNER
+ if owner<0 || owner>=SPEC_ENUM_PROGRAM_COUNT {return 0}
+ var current=spec_receiver_lookup(owner,path)
+ if current<=0 {return 0}
+ if (*(current as *mut SpecReceiverDecl)).item.kind!=ItemKind::ItemTypeAlias {return 0}
+ var depth:i64=0
+ while depth<64 {
+  if current<=0 {return 0}
+  let record=current as *mut SpecReceiverDecl
+  if (*record).item.kind==ItemKind::ItemStruct {
+   if spec_receiver_generic(current) || !spec_alias_unique_nominal(current) {return 0}
+   return current
+  }
+  if (*record).item.kind!=ItemKind::ItemTypeAlias {return 0}
+  match (*record).item.type_alias_ty {
+   Some(next)=>{
+    if !alias_shape_is_plain_named(&(*next)) {return 0}
+    current=spec_receiver_lookup((*record).owner,(*next).path)
+   },
+   None=>return 0,
+  }
+  depth=depth+1
+ }
+ 0
+}
+fn spec_alias_nominal_decl(ty:&TypeExpr)->i64 with Mut,Panic,Div,Alloc {
+ if !alias_shape_is_plain_named(ty) {return 0}
+ spec_alias_nominal_path((*ty).path)
+}
+fn spec_alias_type_after_check(te:TypeExpr)->TypeExpr with Mut,Panic,Div,Alloc {
+ let staged=heap_alloc(32768) as *mut SpecTypeStage
+ (*staged).ty=te
+ (*staged).ty.inner=spec_subst_type_opt(te.inner,SPEC_ALIAS_CANON_CTX,None)
+ (*staged).ty.type_args=spec_subst_type_list_opt(te.type_args,SPEC_ALIAS_CANON_CTX,None)
+ let found=spec_alias_nominal_decl(&(*staged).ty)
+ if found>0 {
+  let record=found as *mut SpecReceiverDecl
+  (*staged).ty.path=spec_name_to_path((*record).item.name)
+  SPEC_ALIAS_CANON_COUNT=SPEC_ALIAS_CANON_COUNT+1
+ }
+ (*staged).ty
+}
+fn spec_alias_constructor_after_check(p:*mut SpecExprStage) with Mut,Panic,Div,Alloc {
+ if (*p).e.kind!=ExprKind::ExprStructLit {return}
+ match (*p).e.type_args {Some(_)=>return,None=>{}}
+ let found=spec_alias_nominal_path((*p).e.path)
+ if found>0 {
+  let record=found as *mut SpecReceiverDecl
+  (*p).e.path=spec_name_to_path((*record).item.name)
+  SPEC_ALIAS_CANON_COUNT=SPEC_ALIAS_CANON_COUNT+1
+ }
+}
+pub fn spec_alias_canonical_prepare_after_check(programs:&![Program;256],count:i64) with Mut,Panic,Div,Alloc {
+ SPEC_ALIAS_CANON_COUNT=0
+ SPEC_ALIAS_CANON_HAS_ALIASES=false
+ SPEC_ALIAS_CANON_OWNER=0-1
+ SPEC_ALIAS_CANON_PROTECT_PARAMS=true
+ if count<1 || count>256 {spec_enum_modules_reset(0);return}
+ spec_enum_modules_reset(count)
+ var i:i64=0
+ while i<count {
+  let program=(*programs)[i as usize]
+  spec_enum_module_note(i,program.items)
+  i=i+1
+ }
+ // The usual no-struct-alias compilation is a true no-op: do not clone its
+ // entire AST or disturb Worker/source sidecars merely to discover no change.
+ SPEC_ALIAS_CANON_PROTECT_PARAMS=false
+ i=0
+ while i<count {
+  SPEC_ALIAS_CANON_OWNER=i
+  var cursor=spec_enum_module_items(i)
+  while true {match cursor {
+   Some(node)=>{
+    if (*node).head.kind==ItemKind::ItemTypeAlias {
+     if spec_alias_nominal_path(spec_name_to_path((*node).head.name))>0 {SPEC_ALIAS_CANON_HAS_ALIASES=true}
+    }
+    cursor=(*node).tail
+   },
+   None=>break,
+  }}
+  i=i+1
+ }
+ SPEC_ALIAS_CANON_OWNER=0-1
+ SPEC_ALIAS_CANON_PROTECT_PARAMS=true
+}
+// Mutate the existing Box spine, like private_fn_identity_apply. Replacing a
+// programs[i] aggregate or its nested items field is not bootstrap-safe.
+pub fn spec_alias_canonical_items_after_check(items:Option<Box<ItemList>>,owner_hint:i64) with Mut,Panic,Div,Alloc {
+ if !SPEC_ALIAS_CANON_HAS_ALIASES {return}
+ var cursor=items
+ while true {match cursor {
+  Some(node)=>{
+   let item=(*node).head
+   let owner=if item.origin_module_id>=0 {item.origin_module_id} else {owner_hint}
+   let saved_owner=SPEC_ALIAS_CANON_OWNER
+   let saved_params=SPEC_ALIAS_CANON_PROTECT_PARAMS
+   SPEC_ALIAS_CANON_OWNER=owner
+   if item.kind==ItemKind::ItemStruct {
+    match item.struct_def {Some(sd)=>{
+     match (*sd).type_params {
+      None=>{
+       SPEC_ALIAS_CANON_PROTECT_PARAMS=false
+       let writable=sd as *mut StructDef
+       (*writable).fields=spec_subst_field_list_opt((*sd).fields,SPEC_ALIAS_CANON_CTX,None)
+      },
+      Some(_)=>{},
+     }
+    },None=>{}}
+   } else if item.kind==ItemKind::ItemFn {
+    match item.fn_def {Some(fd)=>{
+     SPEC_ALIAS_CANON_PROTECT_PARAMS=true
+     let writable=fd as *mut FnDef
+     (*writable).params=spec_subst_param_list_opt((*fd).params,SPEC_ALIAS_CANON_CTX,None)
+     (*writable).return_type=spec_subst_type_opt((*fd).return_type,SPEC_ALIAS_CANON_CTX,None)
+     (*writable).body=spec_subst_block((*fd).body,SPEC_ALIAS_CANON_CTX,None)
+    },None=>{}}
+   } else if item.kind==ItemKind::ItemImpl {
+    match item.impl_def {Some(id)=>{
+     // Impl headers also carry inferred generic parameters; never capture
+     // a single-letter binder through a same-named module alias.
+     SPEC_ALIAS_CANON_PROTECT_PARAMS=true
+     let writable=id as *mut ImplDef
+     (*writable).target_type=spec_alias_type_after_check((*id).target_type)
+     spec_alias_canonical_items_after_check((*id).methods,owner)
+    },None=>{}}
+   }
+   SPEC_ALIAS_CANON_OWNER=saved_owner
+   SPEC_ALIAS_CANON_PROTECT_PARAMS=saved_params
+   cursor=(*node).tail
+  },
+  None=>break,
+ }}
+}
+
+pub fn spec_alias_canonical_single_prepare_after_check(items:Option<Box<ItemList>>) with Mut,Panic,Div,Alloc {
+ SPEC_ALIAS_CANON_COUNT=0
+ SPEC_ALIAS_CANON_HAS_ALIASES=false
+ SPEC_ALIAS_CANON_OWNER=0
+ SPEC_ALIAS_CANON_PROTECT_PARAMS=false
+ spec_enum_modules_reset(1)
+ spec_enum_module_note(0,items)
+ var cursor=items
+ while true {match cursor {
+  Some(node)=>{
+   if (*node).head.kind==ItemKind::ItemTypeAlias {
+    if spec_alias_nominal_path(spec_name_to_path((*node).head.name))>0 {SPEC_ALIAS_CANON_HAS_ALIASES=true}
+   }
+   cursor=(*node).tail
+  },
+  None=>break,
+ }}
+ SPEC_ALIAS_CANON_OWNER=0-1
+ SPEC_ALIAS_CANON_PROTECT_PARAMS=true
+}
+pub fn spec_alias_canonical_count()->i64 with Mut {SPEC_ALIAS_CANON_COUNT}
+
+
 fn spec_subst_type(te: TypeExpr, ctx: i64, targs: Option<Box<TypeExprList>>) -> TypeExpr with Mut, Panic, Div, Alloc {
+    if ctx == SPEC_ALIAS_CANON_CTX {return spec_alias_type_after_check(te)}
     if ctx == 0 - 1 { return te }
     if te.kind == TypeExprKind::TypeNamed && te.path.seg_count == 1 {
         let idx = spec_ctx_tp_index_name(ctx,spec_path_single_name(te.path))
@@ -2086,6 +2309,10 @@ fn spec_subst_expr_mut(p: *mut SpecExprStage, ctx: i64, targs: Option<Box<TypeEx
     (*p).e.closure_params = spec_subst_closure_param_list_opt((*p).e.closure_params, ctx, targs)
     (*p).e.type_args = spec_subst_type_list_opt((*p).e.type_args, ctx, targs)
 
+    if ctx == SPEC_ALIAS_CANON_CTX {
+        spec_alias_constructor_after_check(p)
+        return
+    }
     if ctx == 0 - 1 {
         spec_rewrite_call_mut(p)
         return
