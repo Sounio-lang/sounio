@@ -71,7 +71,7 @@ Source artifact: `stdlib/hetero/kernels/mmid_q4k_dp4a_f32_lab_out.txt`
 - Demo: `examples/hetero_moe_layer_demo.sio` (router -> gate/up/down Q4_K -> combine)
 - Vec n=1: uint32_t `__ldg` nibble unpack; measured 114.43 us/run on L4
 
-Hetero Q5_K/Q8_0 mmid + moe_ffn: Plan E (below). `llama_moe_ffn_block` stays Q4_K.
+Hetero Q5_K/Q8_0 mmid + moe_ffn: Plan E (below). Plan F adds Q4_K/Q5_K dispatch in `llama_moe_ffn_block` and multi-layer forward (supersedes Q4_K-only note in Plan E).
 
 ## Plan C receipts (2026-10-28)
 
@@ -157,8 +157,9 @@ Twin hetero stacks (dp4a batch + vec n=1) for Q5_K and Q8_0 expert matmul with F
 activations (amax=1e5). Runtime loaders, `moe_ffn_q5k` / `moe_ffn_q8_0`, and L4 demos
 mirror the measured Q4_K path. No llama.cpp link.
 
-`llama_moe_ffn_block` and the Plan D layer-0 forward hook remain **Q4_K only** this
-cycle (no multi-quant llama API).
+`llama_moe_ffn_block` and the Plan D layer-0 forward hook were **Q4_K only** in the
+Plan E cycle. Plan F supersedes that with `moe_quant` dispatch (Q4_K or Q5_K) and
+MoE on every ready layer (not layer 0 only).
 
 Roadmap after Plan E (spec non-goals): **4 -> 2 -> 3** means Q4_K Plans A-D ship
 first; Plan E adds hetero Q5_K/Q8_0; then cycle 2 (multi-layer MoE) and cycle 3
@@ -201,3 +202,57 @@ Demo: `examples/hetero_moe_q8_0_demo.sio` (L4 smoke: MOE Q8_0 DONE, status 0, fi
 
 Q8_0 vec reads more weight bytes per row than Q5_K; documented us ceilings sit above
 the Q4_K table targets while NMSE gates stay green.
+
+## Plan F: Mixtral multi-layer + prefill + loader (2026-10-28)
+
+Plan: `docs/superpowers/plans/2026-10-28-moe-f32-mixtral-forward.md`
+Spec: `docs/superpowers/specs/2026-10-28-moe-f32-mixtral-forward-design.md`
+Branch: `cursor/moe-f32-mixtral-forward`
+
+Multi-layer MoE inside `ll_forward_impl`, batch prefill (`ntok>1`) via dp4a mmid,
+Mixtral-shaped safetensor load plus Q4_K sidecar packs, and llama-path quant dispatch.
+No llama.cpp runtime link.
+
+### What shipped
+
+- Per-layer MoE fields on `Llama` (routers and gate/up/down packs for up to 64 layers).
+- `ll_moe_ready_layer(m, rt, use_gpu, ntok, li)` with no `li==0` gate and no `ntok==1` gate.
+- Forward attempts MoE on every layer that passes ready; dense SwiGLU fallback per layer on miss or block failure.
+- Telemetry: `last_moe_layers_ok` counts successful MoE layers; `last_moe_used = last_moe_layers_ok > 0`.
+- `LlamaMoeFfnCfg.moe_quant` (0=Q4_K, 1=Q5_K) dispatches `moe_ffn_q4k` vs `moe_ffn_q5k` in `llama_moe_ffn_block`.
+- `llama_cfg` scans `num_local_experts`, `num_experts_per_tok`, `moe_intermediate_size` from config when present.
+- `llama_load_moe(dir)` loads attn/embed/norms and MoE routers plus optional sidecar expert packs.
+- Demos: `examples/llama_moe_forward_demo.sio` (regression), `examples/llama_moe_multilayer_demo.sio` (synthetic 2-layer, ntok 1 and 4), `examples/llama_mixtral_forward_demo.sio` (dir-based smoke).
+
+### Loader contract
+
+- Router per layer: safetensor `model.layers.{i}.block_sparse_moe.gate.weight` into `moe_router[i]` (same transpose convention as other linear weights).
+- Expert Q4_K sidecars (raw concat, strides from cfg):
+
+```text
+dir/moe_q4k/layer{i}_gate.bin
+dir/moe_q4k/layer{i}_up.bin
+dir/moe_q4k/layer{i}_down.bin
+```
+
+- If sidecars or MoE cfg are missing, attn still loads and that layer uses dense FFN fallback.
+- Default demo model dir: `/workspace/llm-models/mixtral-moe` (CLI arg overrides).
+
+### L4 synthetic multi-layer (Task 4)
+
+Host: gpuorangefs-r770-proxmox, NVIDIA L4 (same family as mmid lab).
+Demo: `examples/llama_moe_multilayer_demo.sio` (`layers=2`, `hidden=256`, `moe_inter=512`, 8 experts, 2 slots).
+
+| run | last_moe_used | last_moe_layers_ok | last_moe_status | finite_logits | RC |
+|-----|---------------|--------------------|-----------------|---------------|-----|
+| ntok=1 | 1 | 2 | 0 | 1 | 0 |
+| ntok=4 | 1 | 2 | 0 | 1 | 0 |
+
+Stdout ends with `LLAMA MOE MULTILAYER DONE`. Log on workspace: `/tmp/moe_multilayer_task4_l4.log`.
+
+### Real Mixtral L4 (blocker)
+
+- `/workspace/llm-models/mixtral-moe` and pre-packed `moe_q4k/` sidecars are **not** on the workspace (only smaller safetensor trees such as tiny-random-Llama).
+- Implemented honest paths: `MIXTRAL DIR MISSING` and dense fallback on tiny-random dir both print `LLAMA MIXTRAL FORWARD DONE` and exit 0 without claiming full Mixtral MoE on GPU.
+- Unblock: deploy Mixtral weights plus sidecar layout above, then re-run `examples/llama_mixtral_forward_demo.sio` on L4 with `last_moe_layers_ok > 0` when packs and GPU mmid are ready.
+
