@@ -1,0 +1,3 @@
+# Activate complete FFT and contour programs with independent result checks
+
+Only run-pass and existing completion-string annotations were added to three complete programs. Bodies, side256, FFT4096/32 pairs and the30-second default deadlines are unchanged. Slurm19357 runs all three with sealed raw826d9c18:3pass/0fail/0skip, zero selection/source identity errors. C++23 independently accepts the FFT result and both exact contour/provenance outputs. Removing the FFT completion is rejected with21; removing contour completion is rejected with1. This is functional concordance, not a speedup or historical before/after performance claim.
