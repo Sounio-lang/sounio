@@ -148,6 +148,11 @@ prepare_compiler() {
   compiler_origin=built
   if [[ -n "${SOUNIO_MADAROS_F64_LOWERING_GATE_DIR:-}" ]]; then
     WORK="$SOUNIO_MADAROS_F64_LOWERING_GATE_DIR"
+    # -d follows a symlink, and find does not descend into one. A link to a
+    # directory that also holds leftover files would pass the scan below.
+    if [[ -L "$WORK" ]]; then
+      fail "refusing existing gate directory: $WORK"
+    fi
     if [[ -d "$WORK" && -f "$WORK/madaros" && -s "$WORK/madaros" && -x "$WORK/madaros" && ! -L "$WORK/madaros" ]]; then
       extra="$(find "$WORK" -mindepth 1 -maxdepth 1 ! -name madaros -print -quit)"
       if [[ -n "$extra" ]]; then
@@ -251,6 +256,27 @@ EOF
     bash "${BASH_SOURCE[0]}" --resolve-compiler-only >"$tmp/link.log" 2>&1 || rc=$?
   [[ "$rc" == 1 ]] || fail "symlinked compiler was accepted ($rc)"
   grep -q 'refusing existing gate directory' "$tmp/link.log" || fail "symlink lacked refusal"
+  mkdir -p "$tmp/via-target"
+  printf '#!/bin/sh\nexit 0\n' > "$tmp/via-target/madaros"
+  chmod 755 "$tmp/via-target/madaros"
+  echo leftover > "$tmp/via-target/extra"
+  ln -s "$tmp/via-target" "$tmp/via-link"
+  rc=0
+  SOUNIO_MADAROS_F64_LOWERING_GATE_DIR="$tmp/via-link" \
+    SOUNIO_MADAROS_F64_LOWERING_GATE_KEEP=1 \
+    bash "${BASH_SOURCE[0]}" --resolve-compiler-only >"$tmp/via-link.log" 2>&1 || rc=$?
+  [[ "$rc" == 1 ]] || fail "symlinked gate directory was accepted ($rc)"
+  grep -q 'refusing existing gate directory' "$tmp/via-link.log" || fail "symlinked gate directory lacked refusal"
+  mkdir -p "$tmp/clean-target"
+  printf '#!/bin/sh\nexit 0\n' > "$tmp/clean-target/madaros"
+  chmod 755 "$tmp/clean-target/madaros"
+  ln -s "$tmp/clean-target" "$tmp/clean-link"
+  rc=0
+  SOUNIO_MADAROS_F64_LOWERING_GATE_DIR="$tmp/clean-link" \
+    SOUNIO_MADAROS_F64_LOWERING_GATE_KEEP=1 \
+    bash "${BASH_SOURCE[0]}" --resolve-compiler-only >"$tmp/clean-link.log" 2>&1 || rc=$?
+  [[ "$rc" == 1 ]] || fail "clean symlinked gate directory was accepted ($rc)"
+  grep -q 'refusing existing gate directory' "$tmp/clean-link.log" || fail "clean symlink lacked refusal"
   printf '#!/bin/bash\nexit 3\n' > "$tmp/failbuild"
   chmod 755 "$tmp/failbuild"
   rc=0
