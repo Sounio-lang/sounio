@@ -1,3 +1,6 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: FLIGHT_IPC_OK
 // DoPut and DoExchange frames around encapsulated IPC messages.
 // https://arrow.apache.org/docs/format/Columnar.html#format-ipc
 
@@ -12,10 +15,12 @@ use arrow::lib::{
     arrow_cursor_new,
     arrow_ipc_next,
     arrow_ipc_open,
+    arrow_ipc_view,
     arrow_ipc_stream_begin,
     arrow_ipc_stream_end,
     arrow_ipc_stream_push,
     arrow_schema_add,
+    arrow_schema_add_msg_meta,
     arrow_schema_new,
     arrow_type_int,
 }
@@ -82,6 +87,52 @@ fn cmd_is(desc: &FlightDesc, text: string) -> i64 with Panic {
     1
 }
 
+fn be4(buf: &ArrowBuf, at: i64) -> i64 with Panic {
+    var b0 = buf.data[at as usize] as i64
+    if b0 < 0 { b0 = b0 + 256 }
+    var b1 = buf.data[(at + 1) as usize] as i64
+    if b1 < 0 { b1 = b1 + 256 }
+    var b2 = buf.data[(at + 2) as usize] as i64
+    if b2 < 0 { b2 = b2 + 256 }
+    var b3 = buf.data[(at + 3) as usize] as i64
+    if b3 < 0 { b3 = b3 + 256 }
+    (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+}
+
+fn pushb(dst: &!ArrowBuf, v: i64) -> i64 with Mut, Panic {
+    if dst.len >= 8192 { return -1 }
+    var x = v
+    if x < 0 { x = x + 256 }
+    dst.data[dst.len as usize] = (x as i32) as u8
+    dst.len = dst.len + 1
+    0
+}
+
+fn push_hex(dst: &!ArrowBuf, text: string) -> i64 with Mut, Panic {
+    let n = str_len(text)
+    var i: i64 = 0
+    while i + 1 < n {
+        var h0 = text[i as usize] as i64
+        var h1 = text[(i + 1) as usize] as i64
+        if h0 < 0 { h0 = h0 + 256 }
+        if h1 < 0 { h1 = h1 + 256 }
+        if h0 >= 97 { h0 = h0 - 87 } else { h0 = h0 - 48 }
+        if h1 >= 97 { h1 = h1 - 87 } else { h1 = h1 - 48 }
+        if pushb(dst, h0 * 16 + h1) != 0 { return -1 }
+        i = i + 2
+    }
+    0
+}
+
+fn copy_span(dst: &!ArrowBuf, src: &ArrowBuf, at: i64, n: i64) -> i64 with Mut, Panic {
+    var i: i64 = 0
+    while i < n {
+        if pushb(dst, src.data[(at + i) as usize] as i64) != 0 { return -1 }
+        i = i + 1
+    }
+    0
+}
+
 fn test_desc() -> i64 with Mut, Panic {
     var desc = flight_desc_new()
     if flight_desc_add_path(&!desc, "data") != 0 { return 10 }
@@ -95,6 +146,22 @@ fn test_desc() -> i64 with Mut, Panic {
     if flight_desc_encode(&cmd, &!buf) != 0 { return 15 }
     var query: [i64; 16] = [8, 2, 18, 5, 113, 117, 101, 114, 121, 0, 0, 0, 0, 0, 0, 0]
     if eq_bytes(&buf, &query, 9) == 0 { return 16 }
+    var missing = flight_desc_new()
+    assert(flight_desc_encode(&missing, &!buf) == -6)
+    missing.kind = 1
+    assert(flight_desc_encode(&missing, &!buf) == 0)
+    var no_paths: [i64; 16] = [8, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    assert(eq_bytes(&buf, &no_paths, 2) == 1)
+    missing.n_path = -1
+    assert(flight_desc_encode(&missing, &!buf) == -7)
+    assert(flight_desc_add_path(&!missing, "a") == -7)
+    missing.n_path = 5
+    assert(flight_desc_encode(&missing, &!buf) == -7)
+    assert(flight_desc_add_path(&!missing, "e") == -7)
+    cmd.n_path = 5
+    assert(flight_desc_encode(&cmd, &!buf) == -7)
+    cmd.n_path = -1
+    assert(flight_desc_encode(&cmd, &!buf) == -7)
     0
 }
 
@@ -170,6 +237,15 @@ fn test_put_result() -> i64 with IO, Mut, Panic {
     if meta.n != 2 { return 64 }
     if meta_is(&meta, 0, "ok") == 0 { return 65 }
     if meta.lens[1] != 0 { return 66 }
+    var many = arrow_buf_new()
+    var k: i64 = 0
+    while k < 9 {
+        if put_result_write("", &!many) != 0 { return 67 }
+        k = k + 1
+    }
+    if put_result_write("", &!many) != -7 { return 68 }
+    if put_result_read(&many, &!meta) != 0 { return 69 }
+    if meta.n != 9 { return 70 }
     0
 }
 
@@ -260,6 +336,427 @@ fn test_reject() -> i64 with Mut, Panic, Div {
     0
 }
 
+fn test_gap() -> i64 with Mut, Panic, Div {
+    var schema = arrow_schema_new()
+    if fill_id(&!schema) != 0 { return 130 }
+    var batch = arrow_batch_new()
+    if arrow_batch_shape(&!batch, 1, 1) != 0 { return 131 }
+    if arrow_batch_set_i64(&!batch, 0, 0, 30, 0) != 0 { return 132 }
+    var ipc = arrow_buf_new()
+    if arrow_ipc_stream_begin(&schema, &!ipc) != 0 { return 133 }
+    if arrow_ipc_stream_push(&schema, &batch, &!ipc) != 0 { return 134 }
+    if arrow_ipc_stream_end(&!ipc) != 0 { return 135 }
+    var desc = flight_desc_new()
+    if flight_desc_set_cmd(&!desc, "query") != 0 { return 136 }
+    var meta = flight_meta_new()
+    var out = arrow_buf_new()
+    if do_put_write(&desc, &ipc, &meta, &!out) != 0 { return 137 }
+    if out.len < 5 { return 138 }
+    let n0 = be4(&out, 1)
+    if n0 < 0 || 5 + n0 >= out.len { return 139 }
+    var spliced = arrow_buf_new()
+    if copy_span(&!spliced, &out, 0, 5 + n0) != 0 { return 140 }
+    if pushb(&!spliced, 0) != 0 { return 141 }
+    if pushb(&!spliced, 0) != 0 { return 142 }
+    if pushb(&!spliced, 0) != 0 { return 143 }
+    if pushb(&!spliced, 0) != 0 { return 144 }
+    if pushb(&!spliced, 6) != 0 { return 145 }
+    if pushb(&!spliced, 18) != 0 { return 146 }
+    if pushb(&!spliced, 0) != 0 { return 147 }
+    if pushb(&!spliced, 26) != 0 { return 148 }
+    if pushb(&!spliced, 2) != 0 { return 149 }
+    if pushb(&!spliced, 97) != 0 { return 150 }
+    if pushb(&!spliced, 98) != 0 { return 151 }
+    if copy_span(&!spliced, &out, 5 + n0, out.len - (5 + n0)) != 0 { return 152 }
+    var got = flight_desc_new()
+    var back = arrow_buf_new()
+    var got_meta = flight_meta_new()
+    if do_put_read(&spliced, &!got, &!back, &!got_meta) != 0 { return 153 }
+    if got_meta.n != 3 { return 154 }
+    if meta_is(&got_meta, 1, "ab") == 0 { return 155 }
+    var schema2 = arrow_schema_new()
+    var cur = arrow_cursor_new()
+    var got_batch = arrow_batch_new()
+    if arrow_ipc_open(&back, &!schema2, &!cur) != 0 { return 156 }
+    if arrow_ipc_next(&back, &schema2, &!cur, &!got_batch) != 0 { return 157 }
+    if arrow_batch_i64(&got_batch, 0, 0) != 30 { return 158 }
+    if arrow_ipc_next(&back, &schema2, &!cur, &!got_batch) != 1 { return 159 }
+    meta.n = 1
+    meta.lens[0] = 33
+    if do_put_write(&desc, &ipc, &meta, &!out) != -7 { return 160 }
+    var empty = arrow_buf_new()
+    empty.len = 0
+    if do_exchange_write(&desc, &empty, &meta, 1, &!out) != -7 { return 161 }
+    0
+}
+
+fn test_bounds() -> i64 with Mut, Panic, Div {
+    var schema = arrow_schema_new()
+    if fill_id(&!schema) != 0 { return 170 }
+    var ipc = arrow_buf_new()
+    if arrow_ipc_stream_begin(&schema, &!ipc) != 0 { return 171 }
+    if arrow_ipc_stream_end(&!ipc) != 0 { return 172 }
+    var desc = flight_desc_new()
+    if flight_desc_set_cmd(&!desc, "query") != 0 { return 173 }
+    var meta = flight_meta_new()
+    var out = arrow_buf_new()
+    meta.n = -1
+    if do_put_write(&desc, &ipc, &meta, &!out) != -7 { return 174 }
+    meta.n = 10
+    if do_put_write(&desc, &ipc, &meta, &!out) != -7 { return 175 }
+    var empty = arrow_buf_new()
+    empty.len = 0
+    meta.n = -1
+    if do_exchange_write(&desc, &empty, &meta, 1, &!out) != -7 { return 176 }
+    meta.n = 10
+    if do_exchange_write(&desc, &empty, &meta, 1, &!out) != -7 { return 177 }
+    meta.n = 0
+    var second = arrow_buf_new()
+    if arrow_ipc_stream_begin(&schema, &!second) != 0 { return 178 }
+    var dup = arrow_buf_new()
+    if copy_span(&!dup, &ipc, 0, ipc.len - 8) != 0 { return 179 }
+    if copy_span(&!dup, &second, 0, second.len) != 0 { return 180 }
+    if arrow_ipc_stream_end(&!dup) != 0 { return 181 }
+    if do_put_write(&desc, &dup, &meta, &!out) != -6 { return 182 }
+    var none = flight_desc_new()
+    var one = arrow_buf_new()
+    if do_exchange_write(&none, &ipc, &meta, 0, &!one) != 0 { return 183 }
+    var doubled = arrow_buf_new()
+    if copy_span(&!doubled, &one, 0, one.len) != 0 { return 184 }
+    if copy_span(&!doubled, &one, 0, one.len) != 0 { return 185 }
+    var got = flight_desc_new()
+    var back = arrow_buf_new()
+    if do_exchange_read(&doubled, &!got, &!back, &!meta) != -6 { return 186 }
+    var batch = arrow_batch_new()
+    if arrow_batch_shape(&!batch, 1, 1) != 0 { return 187 }
+    if arrow_batch_set_i64(&!batch, 0, 0, 30, 0) != 0 { return 188 }
+    var both = arrow_buf_new()
+    if arrow_ipc_stream_begin(&schema, &!both) != 0 { return 189 }
+    if arrow_ipc_stream_push(&schema, &batch, &!both) != 0 { return 190 }
+    if arrow_ipc_stream_end(&!both) != 0 { return 191 }
+    var frames = arrow_buf_new()
+    if do_exchange_write(&none, &both, &meta, 0, &!frames) != 0 { return 192 }
+    let n0 = be4(&frames, 1)
+    if n0 < 0 || 5 + n0 >= frames.len { return 193 }
+    var tail = arrow_buf_new()
+    if copy_span(&!tail, &frames, 5 + n0, frames.len - (5 + n0)) != 0 { return 194 }
+    if do_exchange_read(&tail, &!got, &!back, &!meta) != -6 { return 195 }
+    var bad = arrow_buf_new()
+    if pushb(&!bad, 0) != 0 { return 196 }
+    if pushb(&!bad, 0) != 0 { return 197 }
+    if pushb(&!bad, 0) != 0 { return 198 }
+    if pushb(&!bad, 0) != 0 { return 199 }
+    if pushb(&!bad, 2) != 0 { return 200 }
+    if pushb(&!bad, 2) != 0 { return 201 }
+    if pushb(&!bad, 0) != 0 { return 202 }
+    if do_exchange_read(&bad, &!got, &!back, &!meta) != -6 { return 203 }
+    if put_result_read(&bad, &!meta) != -6 { return 204 }
+    var desc0 = arrow_buf_new()
+    if pushb(&!desc0, 0) != 0 { return 205 }
+    if pushb(&!desc0, 0) != 0 { return 206 }
+    if pushb(&!desc0, 0) != 0 { return 207 }
+    if pushb(&!desc0, 0) != 0 { return 208 }
+    if pushb(&!desc0, 4) != 0 { return 209 }
+    if pushb(&!desc0, 10) != 0 { return 210 }
+    if pushb(&!desc0, 2) != 0 { return 211 }
+    if pushb(&!desc0, 2) != 0 { return 212 }
+    if pushb(&!desc0, 0) != 0 { return 213 }
+    if do_exchange_read(&desc0, &!got, &!back, &!meta) != -6 { return 214 }
+    var bare = arrow_buf_new()
+    if pushb(&!bare, 0) != 0 { return 215 }
+    if pushb(&!bare, 0) != 0 { return 216 }
+    if pushb(&!bare, 0) != 0 { return 217 }
+    if pushb(&!bare, 0) != 0 { return 218 }
+    if pushb(&!bare, 14) != 0 { return 219 }
+    if pushb(&!bare, 18) != 0 { return 220 }
+    if pushb(&!bare, 12) != 0 { return 221 }
+    if pushb(&!bare, 8) != 0 { return 222 }
+    if pushb(&!bare, 0) != 0 { return 223 }
+    if pushb(&!bare, 0) != 0 { return 224 }
+    if pushb(&!bare, 0) != 0 { return 225 }
+    if pushb(&!bare, 4) != 0 { return 226 }
+    if pushb(&!bare, 0) != 0 { return 227 }
+    if pushb(&!bare, 4) != 0 { return 228 }
+    if pushb(&!bare, 0) != 0 { return 229 }
+    if pushb(&!bare, 4) != 0 { return 230 }
+    if pushb(&!bare, 0) != 0 { return 231 }
+    if pushb(&!bare, 0) != 0 { return 232 }
+    if pushb(&!bare, 0) != 0 { return 233 }
+    if do_exchange_read(&bare, &!got, &!back, &!meta) != -6 { return 234 }
+    0
+}
+
+fn ub(buf: &ArrowBuf, at: i64) -> i64 with Panic {
+    var b = buf.data[at as usize] as i64
+    if b < 0 { b = b + 256 }
+    b
+}
+
+fn u16le(buf: &ArrowBuf, at: i64) -> i64 with Panic {
+    ub(buf, at) | (ub(buf, at + 1) << 8)
+}
+
+fn u32le(buf: &ArrowBuf, at: i64) -> i64 with Panic {
+    ub(buf, at) | (ub(buf, at + 1) << 8) | (ub(buf, at + 2) << 16) | (ub(buf, at + 3) << 24)
+}
+
+fn i32le(buf: &ArrowBuf, at: i64) -> i64 with Panic {
+    let u = u32le(buf, at)
+    if u >= 2147483648 { u - 4294967296 } else { u }
+}
+
+fn push_var(dst: &!ArrowBuf, v: i64) -> i64 with Mut, Panic {
+    var x = v
+    var more: i64 = 1
+    while more == 1 {
+        var b = x & 127
+        x = x >> 7
+        if x != 0 { b = b | 128 } else { more = 0 }
+        if pushb(dst, b) != 0 { return -1 }
+    }
+    0
+}
+
+fn push_repeat(dst: &!ArrowBuf, v: i64, n: i64) -> i64 with Mut, Panic {
+    var i: i64 = 0
+    while i < n {
+        if pushb(dst, v) != 0 { return -1 }
+        i = i + 1
+    }
+    0
+}
+
+fn ipc_header(header: &ArrowBuf, out: &!ArrowBuf) -> i64 with Mut, Panic {
+    out.len = 0
+    if push_repeat(out, 255, 4) != 0 { return -1 }
+    let rem = header.len % 8
+    var pad: i64 = 0
+    if rem != 0 { pad = 8 - rem }
+    let msize = header.len + pad
+    if pushb(out, msize & 255) != 0 { return -1 }
+    if pushb(out, (msize >> 8) & 255) != 0 { return -1 }
+    if pushb(out, (msize >> 16) & 255) != 0 { return -1 }
+    if pushb(out, (msize >> 24) & 255) != 0 { return -1 }
+    if copy_span(out, header, 0, header.len) != 0 { return -1 }
+    push_repeat(out, 0, pad)
+}
+
+fn wrap_grpc(payload: &ArrowBuf, out: &!ArrowBuf) -> i64 with Mut, Panic {
+    out.len = 0
+    if pushb(out, 0) != 0 { return -1 }
+    if pushb(out, (payload.len >> 24) & 255) != 0 { return -1 }
+    if pushb(out, (payload.len >> 16) & 255) != 0 { return -1 }
+    if pushb(out, (payload.len >> 8) & 255) != 0 { return -1 }
+    if pushb(out, payload.len & 255) != 0 { return -1 }
+    copy_span(out, payload, 0, payload.len)
+}
+
+fn header_frame(header: &ArrowBuf, out: &!ArrowBuf) -> i64 with Mut, Panic {
+    var pay = arrow_buf_new()
+    if pushb(&!pay, 18) != 0 { return -1 }
+    if push_var(&!pay, header.len) != 0 { return -1 }
+    if copy_span(&!pay, header, 0, header.len) != 0 { return -1 }
+    wrap_grpc(&pay, out)
+}
+
+fn push_trunc_header(dst: &!ArrowBuf) -> i64 with Mut, Panic {
+    if pushb(dst, 16) != 0 { return -1 }
+    if push_repeat(dst, 0, 3) != 0 { return -1 }
+    if pushb(dst, 10) != 0 { return -1 }
+    if pushb(dst, 0) != 0 { return -1 }
+    if pushb(dst, 16) != 0 { return -1 }
+    if pushb(dst, 0) != 0 { return -1 }
+    if pushb(dst, 20) != 0 { return -1 }
+    if pushb(dst, 0) != 0 { return -1 }
+    if pushb(dst, 4) != 0 { return -1 }
+    if pushb(dst, 0) != 0 { return -1 }
+    if pushb(dst, 8) != 0 { return -1 }
+    if push_repeat(dst, 0, 3) != 0 { return -1 }
+    if pushb(dst, 12) != 0 { return -1 }
+    if push_repeat(dst, 0, 3) != 0 { return -1 }
+    if pushb(dst, 1) != 0 { return -1 }
+    if push_repeat(dst, 0, 15) != 0 { return -1 }
+    pushb(dst, 4)
+}
+
+fn header_type_at(buf: &ArrowBuf, meta: i64) -> i64 with Panic {
+    let root = u32le(buf, meta)
+    let table = meta + root
+    let soff = i32le(buf, table)
+    let vt = table - soff
+    let foff = u16le(buf, vt + 6)
+    table + foff
+}
+
+fn set_u16(buf: &!ArrowBuf, at: i64, v: i64) with Mut, Panic {
+    buf.data[at as usize] = ((v & 255) as i32) as u8
+    buf.data[(at + 1) as usize] = (((v >> 8) & 255) as i32) as u8
+}
+
+fn set_u64_one(buf: &!ArrowBuf, at: i64) with Mut, Panic {
+    buf.data[at as usize] = 1 as u8
+    var i: i64 = 1
+    while i < 8 {
+        buf.data[(at + i) as usize] = 0 as u8
+        i = i + 1
+    }
+}
+
+fn test_wire() -> i64 with Mut, Panic, Div {
+    var none = flight_desc_new()
+    var got = flight_desc_new()
+    var back = arrow_buf_new()
+    var meta = flight_meta_new()
+    var skip = arrow_buf_new()
+    if pushb(&!skip, 0) != 0 { return 240 }
+    if push_repeat(&!skip, 0, 3) != 0 { return 241 }
+    if pushb(&!skip, 7) != 0 { return 242 }
+    if pushb(&!skip, 32) != 0 { return 243 }
+    if push_repeat(&!skip, 128, 5) != 0 { return 244 }
+    if pushb(&!skip, 1) != 0 { return 245 }
+    if do_exchange_read(&skip, &!got, &!back, &!meta) != 0 { return 246 }
+    if meta.n != 1 || back.len != 0 { return 247 }
+    var over = arrow_buf_new()
+    if pushb(&!over, 0) != 0 { return 248 }
+    if push_repeat(&!over, 0, 3) != 0 { return 249 }
+    if pushb(&!over, 11) != 0 { return 250 }
+    if pushb(&!over, 32) != 0 { return 251 }
+    if push_repeat(&!over, 128, 9) != 0 { return 252 }
+    if pushb(&!over, 2) != 0 { return 253 }
+    if do_exchange_read(&over, &!got, &!back, &!meta) != -6 { return 254 }
+    var ten = arrow_buf_new()
+    if pushb(&!ten, 0) != 0 { return 255 }
+    if push_repeat(&!ten, 0, 3) != 0 { return 256 }
+    if pushb(&!ten, 11) != 0 { return 257 }
+    if pushb(&!ten, 32) != 0 { return 258 }
+    if push_repeat(&!ten, 128, 9) != 0 { return 259 }
+    if pushb(&!ten, 1) != 0 { return 260 }
+    if do_exchange_read(&ten, &!got, &!back, &!meta) != 0 { return 261 }
+    var trunc_pay = arrow_buf_new()
+    if pushb(&!trunc_pay, 18) != 0 { return 262 }
+    if pushb(&!trunc_pay, 37) != 0 { return 263 }
+    if push_trunc_header(&!trunc_pay) != 0 { return 264 }
+    if trunc_pay.len != 39 { return 265 }
+    var trunc = arrow_buf_new()
+    if wrap_grpc(&trunc_pay, &!trunc) != 0 { return 266 }
+    if do_exchange_read(&trunc, &!got, &!back, &!meta) != -6 { return 267 }
+    var schema = arrow_schema_new()
+    if fill_id(&!schema) != 0 { return 268 }
+    var batch = arrow_batch_new()
+    if arrow_batch_shape(&!batch, 1, 1) != 0 { return 269 }
+    if arrow_batch_set_i64(&!batch, 0, 0, 30, 0) != 0 { return 270 }
+    var ipc = arrow_buf_new()
+    if arrow_ipc_stream_begin(&schema, &!ipc) != 0 { return 271 }
+    if arrow_ipc_stream_push(&schema, &batch, &!ipc) != 0 { return 272 }
+    if arrow_ipc_stream_end(&!ipc) != 0 { return 273 }
+    let schema_view = arrow_ipc_view(&ipc, 0)
+    if schema_view.status != 0 || schema_view.header_type != 1 { return 274 }
+    let batch_at = 8 + schema_view.meta_size + schema_view.body_len
+    let batch_view = arrow_ipc_view(&ipc, batch_at)
+    if batch_view.status != 0 || batch_view.header_type != 3 { return 275 }
+    if batch_view.body_len <= 0 || batch_view.body_len % 8 != 0 { return 276 }
+    let type_at = header_type_at(&ipc, batch_at + 8)
+    if ub(&ipc, type_at) != 3 { return 277 }
+    ipc.data[type_at as usize] = 1 as u8
+    var pay = arrow_buf_new()
+    if pushb(&!pay, 18) != 0 { return 278 }
+    if push_var(&!pay, batch_view.meta_size) != 0 { return 279 }
+    if copy_span(&!pay, &ipc, batch_at + 8, batch_view.meta_size) != 0 { return 280 }
+    if pushb(&!pay, 194) != 0 { return 281 }
+    if pushb(&!pay, 62) != 0 { return 282 }
+    if push_var(&!pay, batch_view.body_len) != 0 { return 283 }
+    if copy_span(&!pay, &ipc, batch_at + 8 + batch_view.meta_size, batch_view.body_len) != 0 { return 284 }
+    var frame = arrow_buf_new()
+    if wrap_grpc(&pay, &!frame) != 0 { return 285 }
+    if do_exchange_read(&frame, &!got, &!back, &!meta) != -3 { return 286 }
+    var bad = arrow_buf_new()
+    if push_hex(&!bad, "140000000e001800040006000800000014000000100000000400010004000000fcffffff04000400aabbcc") != 0 { return 287 }
+    if bad.len != 43 { return 288 }
+    var bad_frame = arrow_buf_new()
+    if header_frame(&bad, &!bad_frame) != 0 { return 289 }
+    if do_exchange_read(&bad_frame, &!got, &!back, &!meta) != -6 { return 290 }
+    bad.len = 0
+    if push_hex(&!bad, "0e0000000a0010000400060008000a0000000400010000000000") != 0 { return 291 }
+    if bad.len != 26 { return 292 }
+    if header_frame(&bad, &!bad_frame) != 0 { return 293 }
+    if do_exchange_read(&bad_frame, &!got, &!back, &!meta) != -6 { return 294 }
+    var stream = arrow_buf_new()
+    if ipc_header(&bad, &!stream) != 0 { return 295 }
+    var written = arrow_buf_new()
+    if do_exchange_write(&none, &stream, &meta, 0, &!written) != -6 { return 296 }
+    bad.len = 0
+    if push_hex(&!bad, "0e0000000a0010000400060008000a000000040001000400000000000000") != 0 { return 297 }
+    if bad.len != 30 { return 298 }
+    if header_frame(&bad, &!bad_frame) != 0 { return 299 }
+    if do_exchange_read(&bad_frame, &!got, &!back, &!meta) != -6 { return 300 }
+    if ipc_header(&bad, &!stream) != 0 { return 301 }
+    if do_exchange_write(&none, &stream, &meta, 0, &!written) != -6 { return 302 }
+    bad.len = 0
+    if push_hex(&!bad, "140000000e001800040006000800000014000000100000000400010004000000fcffffff0400040004000000") != 0 { return 303 }
+    if bad.len != 44 { return 304 }
+    if header_frame(&bad, &!bad_frame) != 0 { return 305 }
+    if do_exchange_read(&bad_frame, &!got, &!back, &!meta) != -6 { return 306 }
+    var tagged = arrow_schema_new()
+    if fill_id(&!tagged) != 0 { return 307 }
+    if arrow_schema_add_msg_meta(&!tagged, "k", "v") != 0 { return 308 }
+    var tagged_ipc = arrow_buf_new()
+    if arrow_ipc_stream_begin(&tagged, &!tagged_ipc) != 0 { return 309 }
+    if arrow_ipc_stream_end(&!tagged_ipc) != 0 { return 310 }
+    var tagged_meta = flight_meta_new()
+    if do_exchange_write(&none, &tagged_ipc, &tagged_meta, 0, &!written) != 0 { return 311 }
+    if do_exchange_read(&written, &!got, &!back, &!meta) != 0 { return 312 }
+    meta.n = 0
+    var aligned = arrow_buf_new()
+    if arrow_ipc_stream_begin(&schema, &!aligned) != 0 { return 313 }
+    if arrow_ipc_stream_push(&schema, &batch, &!aligned) != 0 { return 314 }
+    if arrow_ipc_stream_end(&!aligned) != 0 { return 315 }
+    let aligned_schema = arrow_ipc_view(&aligned, 0)
+    if aligned_schema.status != 0 { return 316 }
+    let aligned_batch_at = 8 + aligned_schema.meta_size
+    let aligned_batch = arrow_ipc_view(&aligned, aligned_batch_at)
+    if aligned_batch.status != 0 || aligned_batch.header_type != 3 { return 317 }
+    let batch_root = u32le(&aligned, aligned_batch_at + 8)
+    let batch_table = aligned_batch_at + 8 + batch_root
+    let batch_vt = batch_table - i32le(&aligned, batch_table)
+    let batch_body = u16le(&aligned, batch_vt + 10)
+    if batch_body <= 0 { return 318 }
+    set_u64_one(&!aligned, batch_table + batch_body)
+    if do_exchange_write(&none, &aligned, &meta, 0, &!written) != -3 { return 319 }
+    var grown = arrow_buf_new()
+    if copy_span(&!grown, &aligned, 8, aligned_schema.meta_size) != 0 { return 320 }
+    let grown_root = u32le(&grown, 0)
+    let grown_vt = grown_root - i32le(&grown, grown_root)
+    set_u16(&!grown, grown_vt + 2, 65535)
+    if header_frame(&grown, &!bad_frame) != 0 { return 321 }
+    if do_exchange_read(&bad_frame, &!got, &!back, &!meta) != -6 { return 322 }
+    if ipc_header(&grown, &!stream) != 0 { return 323 }
+    if do_exchange_write(&none, &stream, &meta, 0, &!written) != -6 { return 324 }
+    grown.len = 0
+    if copy_span(&!grown, &aligned, 8, aligned_schema.meta_size) != 0 { return 325 }
+    let schema_root = u32le(&grown, 0)
+    let schema_vt = schema_root - i32le(&grown, schema_root)
+    let schema_hoff = u16le(&grown, schema_vt + 8)
+    let schema_rel = u32le(&grown, schema_root + schema_hoff)
+    let schema_target = schema_root + schema_hoff + schema_rel
+    let schema_pvt = schema_target - i32le(&grown, schema_target)
+    if u16le(&grown, schema_pvt) < 8 { return 326 }
+    let schema_field = u16le(&grown, schema_pvt + 6)
+    if schema_field + 4 <= 4 { return 327 }
+    set_u16(&!grown, schema_pvt + 2, 4)
+    if header_frame(&grown, &!bad_frame) != 0 { return 328 }
+    if do_exchange_read(&bad_frame, &!got, &!back, &!meta) != -6 { return 329 }
+    if ipc_header(&grown, &!stream) != 0 { return 330 }
+    if do_exchange_write(&none, &stream, &meta, 0, &!written) != -6 { return 331 }
+    bad.len = 0
+    if push_hex(&!bad, "140000000e001800040006000800000014000000100000000400010004000000fcffffff04000400040000000100000000100000") != 0 { return 332 }
+    if bad.len != 52 { return 333 }
+    if header_frame(&bad, &!bad_frame) != 0 { return 334 }
+    if do_exchange_read(&bad_frame, &!got, &!back, &!meta) != -6 { return 335 }
+    if ipc_header(&bad, &!stream) != 0 { return 336 }
+    if do_exchange_write(&none, &stream, &meta, 0, &!written) != -6 { return 337 }
+    0
+}
+
 fn main() -> i32 with IO, Mut, Panic, Div {
     let a = test_desc()
     if a != 0 {
@@ -289,6 +786,24 @@ fn main() -> i32 with IO, Mut, Panic, Div {
     if e != 0 {
         print("FAIL reject ")
         println(e)
+        return 1
+    }
+    let f = test_gap()
+    if f != 0 {
+        print("FAIL gap ")
+        println(f)
+        return 1
+    }
+    let g = test_bounds()
+    if g != 0 {
+        print("FAIL bounds ")
+        println(g)
+        return 1
+    }
+    let h = test_wire()
+    if h != 0 {
+        print("FAIL wire ")
+        println(h)
         return 1
     }
     println("FLIGHT_IPC_OK")

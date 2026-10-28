@@ -38,7 +38,8 @@ pub struct FlightDesc {
 }
 
 /// Per-frame app_metadata. On write, `n == 0` omits every field.
-/// On read, `n` is the number of frames and `lens[i] == 0` means that frame had none.
+/// `n` outside `0..=9` is a capacity error. On read, `n` is the number of
+/// frames and `lens[i] == 0` means that frame had none.
 pub struct FlightMeta {
     pub n: i64,
     pub lens: [i64; 9],
@@ -131,7 +132,7 @@ fn copy_bytes(src: &ArrowBuf, at: i64, n: i64, dst: &!ArrowBuf) -> i64 with Mut,
 
 /// Append one path component. Sets `kind` to path (1). At most 4 components, 32 bytes each.
 pub fn flight_desc_add_path(d: &!FlightDesc, text: string) -> i64 with Mut, Panic {
-    if d.n_path >= 4 { return -7 }
+    if d.n_path < 0 || d.n_path >= 4 { return -7 }
     let n = str_len(text)
     if n < 0 || n > 32 { return -7 }
     let base = d.n_path * 32
@@ -203,6 +204,7 @@ fn raw_varint(r: &!RawBuf, v: i64) -> i64 with Mut, Panic {
 
 fn encode_desc(desc: &FlightDesc, raw: &!RawBuf) -> i64 with Mut, Panic {
     raw.len = 0
+    if desc.n_path < 0 || desc.n_path > 4 { return -7 }
     if desc.kind != 1 && desc.kind != 2 { return -6 }
     if raw_varint(raw, 8) != 0 { return -1 }
     if raw_varint(raw, desc.kind) != 0 { return -1 }
@@ -321,12 +323,14 @@ fn write_desc_only(desc: &FlightDesc, meta: &FlightMeta, out: &!ArrowBuf) -> i64
     if write_raw_field(out, 10, &raw) != 0 { return -1 }
     if meta.n > 0 {
         if meta.n != 1 { return -8 }
-        if write_meta_field(out, meta, 0) != 0 { return -1 }
+        let mrc = write_meta_field(out, meta, 0)
+        if mrc != 0 { return mrc }
     }
     grpc_end(out, start)
 }
 
 fn flight_write(desc: &FlightDesc, ipc: &ArrowBuf, meta: &FlightMeta, out: &!ArrowBuf, include_desc: i64) -> i64 with Mut, Panic, Div {
+    if meta.n < 0 || meta.n > 9 { return -7 }
     if ipc.len == 0 {
         if include_desc == 0 { return -6 }
         return write_desc_only(desc, meta, out)
@@ -340,8 +344,12 @@ fn flight_write(desc: &FlightDesc, ipc: &ArrowBuf, meta: &FlightMeta, out: &!Arr
         if view.status == 1 { break }
         if view.status != 0 { return view.status }
         if first == 1 && view.header_type != 1 { return -6 }
+        if view.header_type == 1 && first == 0 { return -6 }
         if view.header_type != 1 && view.header_type != 2 && view.header_type != 3 { return -4 }
         if view.header_type == 1 && view.body_len != 0 { return -3 }
+        if view.body_len % 8 != 0 { return -3 }
+        let fit_rc = message_in_header(ipc, pos + 8, view.meta_size)
+        if fit_rc != 0 { return fit_rc }
         if fi >= 9 { return -7 }
         if meta.n > 0 && fi >= meta.n { return -8 }
         let start = grpc_begin(out)
@@ -354,7 +362,8 @@ fn flight_write(desc: &FlightDesc, ipc: &ArrowBuf, meta: &FlightMeta, out: &!Arr
         }
         if write_slice_field(out, 18, ipc, pos + 8, view.meta_size) != 0 { return -1 }
         if meta.n > 0 {
-            if write_meta_field(out, meta, fi) != 0 { return -1 }
+            let mrc = write_meta_field(out, meta, fi)
+            if mrc != 0 { return mrc }
         }
         if view.header_type == 2 || view.header_type == 3 {
             if write_slice_field(out, 8002, ipc, pos + 8 + view.meta_size, view.body_len) != 0 { return -1 }
@@ -369,8 +378,9 @@ fn flight_write(desc: &FlightDesc, ipc: &ArrowBuf, meta: &FlightMeta, out: &!Arr
     0
 }
 
-/// DoPut client stream. `ipc` is an IPC stream (schema first). The descriptor is required.
-/// `meta.n == 0` omits app_metadata; otherwise it must equal the number of IPC messages.
+/// DoPut client stream. `ipc` is an IPC stream (schema first, and only once).
+/// The descriptor is required. `meta.n == 0` omits app_metadata; otherwise it
+/// must equal the number of IPC messages and stay inside `0..=9`.
 pub fn do_put_write(desc: &FlightDesc, ipc: &ArrowBuf, meta: &FlightMeta, out: &!ArrowBuf) -> i64 with Mut, Panic, Div {
     if desc.kind != 1 && desc.kind != 2 { return -6 }
     if ipc.len < 8 { return -6 }
@@ -400,6 +410,22 @@ fn pb_varint_at(buf: &ArrowBuf, pos: i64, end: i64) -> PbInt with Panic {
     PbInt { val: 0, pos: pos, status: -6 }
 }
 
+fn pb_skip_varint(buf: &ArrowBuf, pos: i64, end: i64) -> PbInt with Panic {
+    var n: i64 = 0
+    var p = pos
+    while n < 9 {
+        if p >= end { return PbInt { val: 0, pos: pos, status: -6 } }
+        let b = u8_at(buf, p)
+        p = p + 1
+        if (b & 128) == 0 { return PbInt { val: 0, pos: p, status: 0 } }
+        n = n + 1
+    }
+    if p >= end { return PbInt { val: 0, pos: pos, status: -6 } }
+    let last = u8_at(buf, p)
+    if (last & 128) != 0 || last > 1 { return PbInt { val: 0, pos: pos, status: -6 } }
+    PbInt { val: 0, pos: p + 1, status: 0 }
+}
+
 fn slice_absent() -> FlightSlice {
     FlightSlice {
         desc_at: 0,
@@ -412,6 +438,10 @@ fn slice_absent() -> FlightSlice {
         body_len: -1,
         status: 0,
     }
+}
+
+fn pb_field_ok(field: i64) -> i64 {
+    if field < 1 || field > 536870911 { -6 } else { 0 }
 }
 
 fn parse_flight_data(buf: &ArrowBuf, start: i64, end: i64) -> FlightSlice with Panic {
@@ -429,6 +459,10 @@ fn parse_flight_data(buf: &ArrowBuf, start: i64, end: i64) -> FlightSlice with P
         }
         let wire = tag.val & 7
         let field = tag.val >> 3
+        if pb_field_ok(field) != 0 {
+            s.status = -6
+            return s
+        }
         pos = tag.pos
         if wire == 2 {
             let ln = pb_varint_at(buf, pos, end)
@@ -471,7 +505,7 @@ fn parse_flight_data(buf: &ArrowBuf, start: i64, end: i64) -> FlightSlice with P
             }
             pos = ln.pos + ln.val
         } else if wire == 0 {
-            let v = pb_varint_at(buf, pos, end)
+            let v = pb_skip_varint(buf, pos, end)
             if v.status != 0 {
                 s.status = v.status
                 return s
@@ -523,16 +557,21 @@ fn parse_desc(buf: &ArrowBuf, start: i64, end: i64, desc: &!FlightDesc) -> i64 w
         if tag.val == 0 { return -6 }
         let wire = tag.val & 7
         let field = tag.val >> 3
+        if pb_field_ok(field) != 0 { return -6 }
         pos = tag.pos
         if wire == 0 {
-            let v = pb_varint_at(buf, pos, end)
-            if v.status != 0 { return v.status }
             if field == 1 {
+                let v = pb_varint_at(buf, pos, end)
+                if v.status != 0 { return v.status }
                 if v.val != 1 && v.val != 2 { return -4 }
                 desc.kind = v.val
                 saw_type = 1
+                pos = v.pos
+            } else {
+                let v = pb_skip_varint(buf, pos, end)
+                if v.status != 0 { return v.status }
+                pos = v.pos
             }
-            pos = v.pos
         } else if wire == 2 {
             let ln = pb_varint_at(buf, pos, end)
             if ln.status != 0 { return ln.status }
@@ -568,10 +607,229 @@ fn parse_desc(buf: &ArrowBuf, start: i64, end: i64, desc: &!FlightDesc) -> i64 w
     0
 }
 
+fn hdr_u8(buf: &ArrowBuf, base: i64, off: i64, n: i64) -> i64 with Panic {
+    if off < 0 || off >= n || base < 0 || base + off >= buf.len || base + off >= 8192 { return -1 }
+    u8_at(buf, base + off)
+}
+
+fn hdr_u16(buf: &ArrowBuf, base: i64, off: i64, n: i64) -> i64 with Panic {
+    if off < 0 || off + 2 > n { return -1 }
+    let b0 = hdr_u8(buf, base, off, n)
+    let b1 = hdr_u8(buf, base, off + 1, n)
+    if b0 < 0 || b1 < 0 { return -1 }
+    b0 | (b1 << 8)
+}
+
+fn hdr_u32(buf: &ArrowBuf, base: i64, off: i64, n: i64) -> i64 with Panic {
+    if off < 0 || off + 4 > n { return -1 }
+    let b0 = hdr_u8(buf, base, off, n)
+    let b1 = hdr_u8(buf, base, off + 1, n)
+    let b2 = hdr_u8(buf, base, off + 2, n)
+    let b3 = hdr_u8(buf, base, off + 3, n)
+    if b0 < 0 || b1 < 0 || b2 < 0 || b3 < 0 { return -1 }
+    b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+}
+
+fn hdr_i32(buf: &ArrowBuf, base: i64, off: i64, n: i64) -> i64 with Panic {
+    let u = hdr_u32(buf, base, off, n)
+    if u < 0 { return -1 }
+    if u >= 2147483648 { u - 4294967296 } else { u }
+}
+
+fn hdr_i64(buf: &ArrowBuf, base: i64, off: i64, n: i64) -> i64 with Panic {
+    if off < 0 || off + 8 > n { return -1 }
+    var v: i64 = 0
+    var i: i64 = 0
+    while i < 8 {
+        let b = hdr_u8(buf, base, off + i, n)
+        if b < 0 { return -1 }
+        v = v | (b << (8 * i))
+        i = i + 1
+    }
+    v
+}
+
+fn declared_body(buf: &ArrowBuf, at: i64, n: i64) -> i64 with Panic {
+    if n < 8 || at < 0 || at + n > buf.len || at + n > 8192 { return -6 }
+    let root = hdr_u32(buf, at, 0, n)
+    if root < 4 || root + 4 > n { return -6 }
+    let soff = hdr_i32(buf, at, root, n)
+    if soff == 0 || soff == -1 { return -6 }
+    let vt = root - soff
+    if vt < 0 || vt + 4 > n { return -6 }
+    let vts = hdr_u16(buf, at, vt, n)
+    if vts < 4 || vt + vts > n { return -6 }
+    if vts < 12 { return 0 }
+    let foff = hdr_u16(buf, at, vt + 10, n)
+    if foff < 0 { return -6 }
+    if foff == 0 { return 0 }
+    if root + foff + 8 > n { return -6 }
+    let body = hdr_i64(buf, at, root + foff, n)
+    if body < 0 { return -6 }
+    body
+}
+
+fn header_limit(buf: &ArrowBuf, at: i64, n: i64) -> i64 with Panic {
+    var lim = n
+    var trimmed: i64 = 0
+    while trimmed < 7 && lim > 0 {
+        let b = hdr_u8(buf, at, lim - 1, n)
+        if b != 0 { return lim }
+        lim = lim - 1
+        trimmed = trimmed + 1
+    }
+    lim
+}
+
+fn slot_width_ok(buf: &ArrowBuf, at: i64, vt: i64, vts: i64, obj: i64, slot: i64, width: i64, n: i64) -> i64 with Panic {
+    let pos = vt + 4 + slot * 2
+    if pos + 2 > vt + vts { return 0 }
+    let off = hdr_u16(buf, at, pos, n)
+    if off < 0 { return -6 }
+    if off == 0 { return 0 }
+    if off + width > obj { return -6 }
+    0
+}
+
+fn payload_fields_ok(buf: &ArrowBuf, at: i64, vt: i64, vts: i64, obj: i64, kind: i64, n: i64) -> i64 with Panic {
+    if kind == 1 {
+        if slot_width_ok(buf, at, vt, vts, obj, 0, 2, n) != 0 { return -6 }
+        if slot_width_ok(buf, at, vt, vts, obj, 1, 4, n) != 0 { return -6 }
+        if slot_width_ok(buf, at, vt, vts, obj, 2, 4, n) != 0 { return -6 }
+        if slot_width_ok(buf, at, vt, vts, obj, 3, 4, n) != 0 { return -6 }
+        return 0
+    }
+    if kind == 2 {
+        if slot_width_ok(buf, at, vt, vts, obj, 0, 8, n) != 0 { return -6 }
+        if slot_width_ok(buf, at, vt, vts, obj, 1, 4, n) != 0 { return -6 }
+        if slot_width_ok(buf, at, vt, vts, obj, 2, 1, n) != 0 { return -6 }
+        return 0
+    }
+    if kind == 3 {
+        if slot_width_ok(buf, at, vt, vts, obj, 0, 8, n) != 0 { return -6 }
+        if slot_width_ok(buf, at, vt, vts, obj, 1, 4, n) != 0 { return -6 }
+        if slot_width_ok(buf, at, vt, vts, obj, 2, 4, n) != 0 { return -6 }
+        if slot_width_ok(buf, at, vt, vts, obj, 3, 4, n) != 0 { return -6 }
+        if slot_width_ok(buf, at, vt, vts, obj, 4, 4, n) != 0 { return -6 }
+        return 0
+    }
+    0
+}
+
+fn kv_string_ok(buf: &ArrowBuf, at: i64, kv: i64, vt: i64, vts: i64, obj: i64, slot: i64, n: i64) -> i64 with Panic {
+    let pos = vt + 4 + slot * 2
+    if pos + 2 > vt + vts { return 0 }
+    let off = hdr_u16(buf, at, pos, n)
+    if off < 0 { return -6 }
+    if off == 0 { return 0 }
+    if off + 4 > obj { return -6 }
+    if kv + off + 4 > n { return -6 }
+    let rel = hdr_u32(buf, at, kv + off, n)
+    if rel <= 0 { return -6 }
+    let s = kv + off + rel
+    if s < 0 || s + 4 > n { return -6 }
+    let slen = hdr_u32(buf, at, s, n)
+    if slen < 0 || slen > n { return -6 }
+    if s + 4 + slen + 1 > n { return -6 }
+    0
+}
+
+fn kv_table_ok(buf: &ArrowBuf, at: i64, kv: i64, n: i64, lim: i64) -> i64 with Panic {
+    if kv < 0 || kv + 4 > n { return -6 }
+    let soff = hdr_i32(buf, at, kv, n)
+    if soff == 0 || soff == -1 { return -6 }
+    let vt = kv - soff
+    if vt < 0 || vt + 4 > n { return -6 }
+    let vts = hdr_u16(buf, at, vt, n)
+    if vts < 4 || vt + vts > n { return -6 }
+    let obj = hdr_u16(buf, at, vt + 2, n)
+    if obj < 4 || kv + obj > lim { return -6 }
+    if kv_string_ok(buf, at, kv, vt, vts, obj, 0, n) != 0 { return -6 }
+    if kv_string_ok(buf, at, kv, vt, vts, obj, 1, n) != 0 { return -6 }
+    0
+}
+
+fn message_in_header(buf: &ArrowBuf, at: i64, n: i64) -> i64 with Panic {
+    if n < 8 || at < 0 { return -6 }
+    let lim = header_limit(buf, at, n)
+    let root = hdr_u32(buf, at, 0, n)
+    if root < 4 || root + 4 > n { return -6 }
+    let soff = hdr_i32(buf, at, root, n)
+    if soff == 0 || soff == -1 { return -6 }
+    let vt = root - soff
+    if vt < 0 || vt + 4 > n { return -6 }
+    let vts = hdr_u16(buf, at, vt, n)
+    if vts < 4 || vt + vts > n { return -6 }
+    let obj = hdr_u16(buf, at, vt + 2, n)
+    if obj < 4 || root + obj > lim { return -6 }
+    if vts < 6 { return -6 }
+    let voff = hdr_u16(buf, at, vt + 4, n)
+    if voff <= 0 || voff + 2 > obj || root + voff + 2 > n { return -6 }
+    let version = hdr_u16(buf, at, root + voff, n)
+    if version < 0 { return -6 }
+    if version != 3 && version != 4 { return -4 }
+    if vts < 8 { return -6 }
+    let toff = hdr_u16(buf, at, vt + 6, n)
+    if toff <= 0 || toff + 1 > obj || root + toff + 1 > n { return -6 }
+    let htype = hdr_u8(buf, at, root + toff, n)
+    if htype < 0 { return -6 }
+    if vts < 10 { return -6 }
+    let hoff = hdr_u16(buf, at, vt + 8, n)
+    if hoff <= 0 || hoff + 4 > obj || root + hoff + 4 > n { return -6 }
+    let rel = hdr_u32(buf, at, root + hoff, n)
+    if rel <= 0 { return -6 }
+    let target = root + hoff + rel
+    if target < 0 || target + 4 > n { return -6 }
+    let psoff = hdr_i32(buf, at, target, n)
+    if psoff == 0 || psoff == -1 { return -6 }
+    let pvt = target - psoff
+    if pvt < 0 || pvt + 4 > n { return -6 }
+    let pvts = hdr_u16(buf, at, pvt, n)
+    if pvts < 4 || pvt + pvts > n { return -6 }
+    let pobj = hdr_u16(buf, at, pvt + 2, n)
+    if pobj < 4 || target + pobj > lim { return -6 }
+    if payload_fields_ok(buf, at, pvt, pvts, pobj, htype, n) != 0 { return -6 }
+    if vts >= 12 {
+        let boff = hdr_u16(buf, at, vt + 10, n)
+        if boff < 0 { return -6 }
+        if boff > 0 && (boff + 8 > obj || root + boff + 8 > n) { return -6 }
+    }
+    if vts >= 14 {
+        let moff = hdr_u16(buf, at, vt + 12, n)
+        if moff < 0 { return -6 }
+        if moff > 0 {
+            if moff + 4 > obj || root + moff + 4 > n { return -6 }
+            let mrel = hdr_u32(buf, at, root + moff, n)
+            if mrel <= 0 { return -6 }
+            let vec = root + moff + mrel
+            if vec < 0 || vec + 4 > n { return -6 }
+            let count = hdr_u32(buf, at, vec, n)
+            if count < 0 || count > n { return -6 }
+            if vec + 4 + count * 4 > n { return -6 }
+            var ei: i64 = 0
+            while ei < count {
+                let epos = vec + 4 + 4 * ei
+                let erel = hdr_u32(buf, at, epos, n)
+                if erel <= 0 { return -6 }
+                if kv_table_ok(buf, at, epos + erel, n, lim) != 0 { return -6 }
+                ei = ei + 1
+            }
+        }
+    }
+    0
+}
+
 fn encapsulate(dst: &!ArrowBuf, src: &ArrowBuf, header_at: i64, header_len: i64, body_at: i64, body_len: i64) -> i64 with Mut, Panic, Div {
     if header_len < 0 { return -6 }
     var body = body_len
     if body < 0 { body = 0 }
+    if header_len > 0 {
+        let declared = declared_body(src, header_at, header_len)
+        if declared < 0 { return declared }
+        if declared != body { return -3 }
+        let fit_rc = message_in_header(src, header_at, header_len)
+        if fit_rc != 0 { return fit_rc }
+    }
     if body % 8 != 0 { return -3 }
     let rem = header_len % 8
     var pad: i64 = 0
@@ -588,14 +846,21 @@ fn encapsulate(dst: &!ArrowBuf, src: &ArrowBuf, header_at: i64, header_len: i64,
 }
 
 fn flight_read(buf: &ArrowBuf, desc: &!FlightDesc, ipc: &!ArrowBuf, meta: &!FlightMeta, require_desc: i64) -> i64 with Mut, Panic, Div {
+    if buf.len < 0 || buf.len > 8192 { return -7 }
     desc.kind = 0
     desc.n_path = 0
     desc.cmd_len = 0
     meta.n = 0
+    var cleared: i64 = 0
+    while cleared < 9 {
+        meta.lens[cleared as usize] = 0
+        cleared = cleared + 1
+    }
     ipc.len = 0
     var pos: i64 = 0
     var fi: i64 = 0
     var wrote: i64 = 0
+    var saw_schema: i64 = 0
     while pos < buf.len {
         if fi >= 9 { return -7 }
         if pos + 5 > buf.len { return -5 }
@@ -613,16 +878,27 @@ fn flight_read(buf: &ArrowBuf, desc: &!FlightDesc, ipc: &!ArrowBuf, meta: &!Flig
             if rc != 0 { return rc }
         }
         if fi == 0 && require_desc != 0 && slice.desc_len < 0 { return -6 }
-        if fi == 0 && require_desc != 0 && slice.header_len < 0 { return -6 }
+        if fi == 0 && require_desc != 0 && slice.header_len <= 0 { return -6 }
         if slice.meta_len > 32 { return -7 }
         if slice.meta_len >= 0 {
             let rc = take_meta(buf, slice.meta_at, slice.meta_len, meta, fi)
             if rc != 0 { return rc }
         }
-        if slice.header_len >= 0 {
-            if slice.body_len >= 0 && slice.header_len == 0 { return -6 }
+        if slice.header_len > 0 {
+            let at = ipc.len
             let rc = encapsulate(ipc, buf, slice.header_at, slice.header_len, slice.body_at, slice.body_len)
             if rc != 0 { return rc }
+            let view = arrow_ipc_view(ipc, at)
+            if view.status != 0 { return view.status }
+            if view.header_type == 1 {
+                if view.body_len != 0 { return -3 }
+                if saw_schema != 0 { return -6 }
+                saw_schema = 1
+            } else if view.header_type == 2 || view.header_type == 3 {
+                if saw_schema == 0 { return -6 }
+            } else {
+                return -4
+            }
             wrote = 1
         } else if slice.body_len > 0 {
             return -6
@@ -650,7 +926,26 @@ pub fn do_exchange_read(buf: &ArrowBuf, desc: &!FlightDesc, ipc: &!ArrowBuf, met
 }
 
 /// Append one DoPut PutResult frame. An empty string is an empty protobuf.
+fn grpc_frames(buf: &ArrowBuf) -> i64 with Panic {
+    if buf.len < 0 || buf.len > 8192 { return -7 }
+    var pos: i64 = 0
+    var n: i64 = 0
+    while pos < buf.len {
+        if n >= 9 { return -7 }
+        if pos + 5 > buf.len { return -6 }
+        if u8_at(buf, pos) != 0 { return -4 }
+        let ln = be_u32(buf, pos + 1)
+        if ln < 0 || pos + 5 + ln > buf.len { return -6 }
+        pos = pos + 5 + ln
+        n = n + 1
+    }
+    n
+}
+
 pub fn put_result_write(text: string, out: &!ArrowBuf) -> i64 with Mut, Panic {
+    let have = grpc_frames(out)
+    if have < 0 { return have }
+    if have >= 9 { return -7 }
     let n = str_len(text)
     if n < 0 || n > 32 { return -7 }
     let start = grpc_begin(out)
@@ -671,6 +966,7 @@ pub fn put_result_write(text: string, out: &!ArrowBuf) -> i64 with Mut, Panic {
 
 /// Read a stream of PutResult frames into `meta`.
 pub fn put_result_read(buf: &ArrowBuf, meta: &!FlightMeta) -> i64 with Mut, Panic {
+    if buf.len < 0 || buf.len > 8192 { return -7 }
     meta.n = 0
     var pos: i64 = 0
     var fi: i64 = 0
@@ -690,6 +986,7 @@ pub fn put_result_read(buf: &ArrowBuf, meta: &!FlightMeta) -> i64 with Mut, Pani
             if tag.val == 0 { return -6 }
             let wire = tag.val & 7
             let field = tag.val >> 3
+            if pb_field_ok(field) != 0 { return -6 }
             p = tag.pos
             if wire == 2 {
                 let ln = pb_varint_at(buf, p, frame_end)
@@ -703,7 +1000,7 @@ pub fn put_result_read(buf: &ArrowBuf, meta: &!FlightMeta) -> i64 with Mut, Pani
                 }
                 p = ln.pos + ln.val
             } else if wire == 0 {
-                let v = pb_varint_at(buf, p, frame_end)
+                let v = pb_skip_varint(buf, p, frame_end)
                 if v.status != 0 { return v.status }
                 p = v.pos
             } else if wire == 1 {

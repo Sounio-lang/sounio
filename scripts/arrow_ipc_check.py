@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Check Sounio Arrow IPC bytes, then compare with pyarrow when it imports."""
 
+import os
 import sys
 from pathlib import Path
 
@@ -84,6 +85,8 @@ def try_pyarrow(file_path: Path, stream_path: Path, multi: tuple[Path, Path] | N
         import pyarrow as pa
         import pyarrow.ipc as ipc
     except ImportError:
+        if os.environ.get("ARROW_REQUIRE_PYARROW") == "1":
+            raise SystemExit("FAIL pyarrow required but not importable")
         print("PYARROW_SKIP")
         return
 

@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 # Native Arrow IPC gate. Default compiler is Madaros via ./bin/souc.
+# Stdlib Deep Science runs this script with MADAROS_RAW_BIN set to the
+# compiler built from the pull request. The full suite skips the fixtures
+# on lean_single because they carry //@ requires: madaros.
 # The Sounio test round-trips file and stream IPC, including a pyarrow 26
 # fixture embedded as hex. This script then checks the bytes on disk and,
 # when pyarrow imports, compares the logical columns.
@@ -10,6 +13,47 @@ cd "$REPO_ROOT"
 
 export SOUNIO_STDLIB_PATH="$PWD/stdlib"
 SOUC="${SOUC:-./bin/souc}"
+
+# Pyarrow comes from the caller's environment. Set ARROW_PYARROW_PATH only
+# when that directory is one the caller trusts; a shared temp tree is not.
+# The required-import preflight and the later checkers must see the same path.
+if [[ -n "${ARROW_PYARROW_PATH:-}" ]]; then
+  export PYTHONPATH="${ARROW_PYARROW_PATH}${PYTHONPATH:+:$PYTHONPATH}"
+fi
+
+prove_pyarrow_absence() {
+  local rc=0
+  local out
+  set +e
+  out=$(env -u PYTHONPATH -u PYTHONHOME ARROW_REQUIRE_PYARROW=1 python3 -S -c '
+import importlib.util
+import os
+from pathlib import Path
+os.environ["ARROW_REQUIRE_PYARROW"] = "1"
+spec = importlib.util.spec_from_file_location("arrow_ipc_check", "scripts/arrow_ipc_check.py")
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+mod.try_pyarrow(Path("unused-file"), Path("unused-stream"), None)
+' 2>&1)
+  rc=$?
+  set -e
+  if [[ "$rc" == 0 || "$out" == *PYARROW_SKIP* || "$out" != *"pyarrow required"* ]]; then
+    echo "FAIL pyarrow absence control rc=$rc"
+    printf '%s\n' "$out"
+    exit 1
+  fi
+  echo "pyarrow absence control: required import failed closed"
+}
+
+if [[ "${ARROW_REQUIRE_PYARROW:-0}" == 1 ]]; then
+  ver=$(python3 -c 'import pyarrow, pyarrow.ipc, pyarrow.flight; print(pyarrow.__version__)')
+  if [[ "$ver" != "26.0.0" ]]; then
+    echo "FAIL required pyarrow version ${ver}"
+    exit 1
+  fi
+  echo "Required pyarrow: ${ver}"
+  prove_pyarrow_absence
+fi
 
 FILE_OUT="/tmp/sounio_arrow_ipc.arrow"
 STREAM_OUT="/tmp/sounio_arrow_ipc.arrows"
@@ -24,15 +68,6 @@ test -f "$FILE_OUT"
 test -f "$STREAM_OUT"
 test -f "$MULTI_FILE"
 test -f "$MULTI_STREAM"
-
-# Prefer an already-importable pyarrow. This VM keeps a newer numpy+pyarrow
-# under /tmp/pyarrow-pkgs because the system numpy is too old for pyarrow 26.
-# Set the path before Python starts so numpy is not imported from the system.
-if ! python3 -c 'import pyarrow' >/dev/null 2>&1; then
-  if [ -d /tmp/pyarrow-pkgs ]; then
-    export PYTHONPATH="/tmp/pyarrow-pkgs${PYTHONPATH:+:$PYTHONPATH}"
-  fi
-fi
 
 python3 scripts/arrow_ipc_check.py "$FILE_OUT" "$STREAM_OUT" "$MULTI_FILE" "$MULTI_STREAM"
 

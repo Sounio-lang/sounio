@@ -1,8 +1,26 @@
 #!/usr/bin/env python3
 """Logical check of the spec IPC files written by test_arrow_spec.sio."""
 
-import sys
+import os
+from decimal import Decimal
 from pathlib import Path
+
+
+def check_decimal(schema, batch, name: str, type_s: str, want: list) -> None:
+    field = schema.field(name).type
+    if str(field) != type_s or field.precision < 1:
+        raise SystemExit(f"FAIL {name} type {field}")
+    got = batch.column(name).to_pylist()
+    if got != want:
+        raise SystemExit(f"FAIL {name} {got}")
+    for value in got:
+        if value is None:
+            continue
+        digits = len(value.as_tuple().digits)
+        if digits > field.precision or value.as_tuple().exponent != -field.scale:
+            raise SystemExit(
+                f"FAIL {name} precision digits={digits} precision={field.precision} scale={field.scale}"
+            )
 
 
 def main() -> None:
@@ -10,6 +28,8 @@ def main() -> None:
         import pyarrow as pa
         import pyarrow.ipc as ipc
     except ImportError:
+        if os.environ.get("ARROW_REQUIRE_PYARROW") == "1":
+            raise SystemExit("FAIL pyarrow required but not importable")
         print("SPEC_PYARROW_SKIP")
         return
 
@@ -53,6 +73,85 @@ def main() -> None:
             raise SystemExit(f"FAIL {name} timestamp")
         if str(schema.field("ts").type) != "timestamp[ns, tz=UTC]":
             raise SystemExit(f"FAIL {name} tz {schema.field('ts').type}")
+
+    schema, got = batches(Path("/tmp/sounio_arrow_ree.arrows"))
+    if str(schema.field("r").type) != "run_end_encoded<run_ends: int32, values: int64>":
+        raise SystemExit(f"FAIL ree type {schema.field('r').type}")
+    if got[0].column("r").to_pylist() != [7, 7, 9, 9]:
+        raise SystemExit(f"FAIL ree {got[0].column('r').to_pylist()}")
+
+    schema, got = batches(Path("/tmp/sounio_arrow_scalars.arrows"))
+    batch = got[0]
+    try:
+        batch.validate(full=True)
+    except Exception as exc:
+        raise SystemExit(f"FAIL scalar validate {exc}") from exc
+
+    def values(name: str) -> list:
+        col = batch.column(name)
+        out = []
+        for i in range(len(col)):
+            if not col[i].is_valid:
+                out.append(None)
+            else:
+                out.append(col[i].value)
+        return out
+
+    if str(schema.field("d32").type) != "date32[day]" or values("d32") != [19000, None]:
+        raise SystemExit(f"FAIL d32 {schema.field('d32').type} {values('d32')}")
+    if str(schema.field("d64").type) != "date64[ms]" or values("d64") != [432000000, -777600000]:
+        raise SystemExit(f"FAIL d64 {schema.field('d64').type} {values('d64')}")
+    if str(schema.field("t32").type) != "time32[ms]" or values("t32") != [1000, 86399999]:
+        raise SystemExit(f"FAIL t32 {schema.field('t32').type} {values('t32')}")
+    if str(schema.field("t64").type) != "time64[ns]" or values("t64") != [7, 8]:
+        raise SystemExit(f"FAIL t64 {schema.field('t64').type} {values('t64')}")
+    check_decimal(
+        schema,
+        batch,
+        "dec64",
+        "decimal64(10, 2)",
+        [Decimal("-0.42"), Decimal("0.42")],
+    )
+    check_decimal(
+        schema,
+        batch,
+        "dec128",
+        "decimal128(38, 4)",
+        [
+            Decimal("6432940189538350054795618879031647.8768"),
+            Decimal("6405838452101818886974504219670769.8022"),
+        ],
+    )
+    if batch.column("f32").to_pylist() != [-1.0, 1.0]:
+        raise SystemExit(f"FAIL f32 {batch.column('f32').to_pylist()}")
+    if str(schema.field("iym").type) != "month_interval":
+        raise SystemExit(f"FAIL interval {schema.field('iym').type}")
+
+    schema, got = batches(Path("/tmp/sounio_arrow_more.arrows"))
+    batch = got[0]
+    if batch.column("fb").to_pylist() != [b"xyz"]:
+        raise SystemExit(f"FAIL fixed {batch.column('fb').to_pylist()}")
+    if str(schema.field("m").type) != "map<int32, int64, keys_sorted>":
+        raise SystemExit(f"FAIL map type {schema.field('m').type}")
+    if batch.column("m").to_pylist() != [[(10, 100), (20, 200)]]:
+        raise SystemExit(f"FAIL map {batch.column('m').to_pylist()}")
+    if batch.column("lu").to_pylist() != ["pq"]:
+        raise SystemExit(f"FAIL large utf8 {batch.column('lu').to_pylist()}")
+    if batch.column("lv").to_pylist() != [[5, 6]]:
+        raise SystemExit(f"FAIL list view {batch.column('lv').to_pylist()}")
+
+    schema, got = batches(Path("/tmp/sounio_arrow_unions.arrows"))
+    batch = got[0]
+    if "sparse_union" not in str(schema.field("su").type):
+        raise SystemExit(f"FAIL sparse type {schema.field('su').type}")
+    if "dense_union" not in str(schema.field("du").type):
+        raise SystemExit(f"FAIL dense type {schema.field('du').type}")
+    if batch.column("su").to_pylist() != [4, 9] or batch.column("du").to_pylist() != [4, 9]:
+        raise SystemExit(f"FAIL unions {batch.column('su').to_pylist()} {batch.column('du').to_pylist()}")
+    if str(schema.field("ll").type) != "large_list<item: int16 not null>":
+        raise SystemExit(f"FAIL large list {schema.field('ll').type}")
+    if batch.column("ll").to_pylist() != [[99], [-5]]:
+        raise SystemExit(f"FAIL large list values {batch.column('ll').to_pylist()}")
     print("SPEC_PYARROW_OK")
 
 

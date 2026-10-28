@@ -15,7 +15,8 @@ Fail closed (status `-7`) rather than truncate:
 - 16 rows at the root of a batch; a list child holds at most 16 values
 - 8 record-batch blocks and 4 dictionary blocks in one file
 - 4 dictionaries, 16 values each, value type has no children
-- 4 custom-metadata pairs at each of field, schema, and message; keys ≤ 32 bytes, values ≤ 48
+- 4 custom-metadata pairs at each of field, schema, and message; keys ≤ 32 bytes
+- schema and message values ≤ 48 bytes; field values ≤ 128 bytes, including extension metadata
 - field names, time zones, and string/binary cells at most 32 bytes
 - IPC buffer 8192 bytes, record-batch body 4096 bytes
 

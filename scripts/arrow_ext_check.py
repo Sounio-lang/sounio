@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Check canonical extension IPC written by test_arrow_ext.sio."""
 
+import os
 from pathlib import Path
 
 
@@ -9,6 +10,8 @@ def main() -> None:
         import pyarrow as pa
         import pyarrow.ipc as ipc
     except ImportError:
+        if os.environ.get("ARROW_REQUIRE_PYARROW") == "1":
+            raise SystemExit("FAIL pyarrow required but not importable")
         print("EXT_PYARROW_SKIP")
         return
 
@@ -48,6 +51,11 @@ def main() -> None:
         raise SystemExit(f"FAIL dim names {tensor.dim_names}")
     if batch.column("t").storage.to_pylist() != [[1, 2, 3, 4, 5, 6]]:
         raise SystemExit("FAIL tensor values")
+
+    with pa.memory_map("/tmp/sounio_arrow_ext_escaped.arrows", "r") as src:
+        escaped = ipc.open_stream(src).schema.field("t").type
+    if list(escaped.dim_names) != ['a"b\n', "c\\d\t"]:
+        raise SystemExit(f"FAIL escaped dim names {escaped.dim_names}")
 
     schema, _batch = load(Path("/tmp/sounio_arrow_ext_struct.arrows"))
     variant = schema.field("p").metadata

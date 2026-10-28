@@ -20,7 +20,14 @@ pub struct CodecBuf {
 struct BitBack {
     idx: i64,
     bit: i64,
+    floor: i64,
     err: i64,
+}
+
+struct RepOff {
+    r1: i64,
+    r2: i64,
+    r3: i64,
 }
 
 struct Fse64 {
@@ -76,20 +83,21 @@ fn rotl32(v: i64, r: i64) -> i64 {
     u32((x << r) | (x >> (32 - r)))
 }
 
-fn xxh32(src: &[u8; 4096], n: i64) -> i64 with Panic {
+fn xxh32(src: &[u8; 4096], at: i64, n: i64) -> i64 with Panic {
     let p1: i64 = 2654435761
     let p2: i64 = 2246822519
     let p3: i64 = 3266489917
     let p4: i64 = 668265263
     let p5: i64 = 374761393
     var acc = u32(p5 + n)
-    var i: i64 = 0
-    while i + 4 <= n {
+    var i: i64 = at
+    let end = at + n
+    while i + 4 <= end {
         let w = c_at(src, i) + (c_at(src, i + 1) << 8) + (c_at(src, i + 2) << 16) + (c_at(src, i + 3) << 24)
         acc = u32(mul_u32(rotl32(u32(acc + mul_u32(w, p3)), 17), p4))
         i = i + 4
     }
-    while i < n {
+    while i < end {
         acc = u32(mul_u32(rotl32(u32(acc + mul_u32(c_at(src, i), p5)), 11), p1))
         i = i + 1
     }
@@ -133,7 +141,7 @@ pub fn codec_compress_lz4(src: &[u8; 4096], n: i64, dst: &!CodecBuf) -> i64 with
     var hdr: [u8; 4096] = [0; 4096]
     hdr[0] = 96 as u8
     hdr[1] = 64 as u8
-    let sum = xxh32(&hdr, 2)
+    let sum = xxh32(&hdr, 0, 2)
     if c_push(dst, sum >> 8) != 0 { return -1 }
     let mark = dst.len
     if c_push(dst, 0) != 0 { return -1 }
@@ -224,7 +232,7 @@ pub fn codec_decompress_lz4(src: &[u8; 4096], n: i64, dst: &!CodecBuf) -> i64 wi
         }
         hlen = 10
     }
-    let sum = xxh32(&hdr, hlen)
+    let sum = xxh32(&hdr, 0, hlen)
     if c_at(src, p) != cu8(sum >> 8) { return -6 }
     p = p + 1
     dst.len = 0
@@ -238,7 +246,8 @@ pub fn codec_decompress_lz4(src: &[u8; 4096], n: i64, dst: &!CodecBuf) -> i64 wi
         }
         let uncomp = (rawsz >> 31) & 1
         let sz = rawsz & 2147483647
-        if sz < 0 || p + sz > n { return -6 }
+        if sz < 0 || sz > 4096 || p + sz > n { return -6 }
+        let block_at = p
         if uncomp != 0 {
             var i: i64 = 0
             while i < sz {
@@ -250,13 +259,18 @@ pub fn codec_decompress_lz4(src: &[u8; 4096], n: i64, dst: &!CodecBuf) -> i64 wi
             if rc != 0 { return rc }
         }
         p = p + sz
-        if (flg & 16) != 0 { p = p + 4 }
+        if (flg & 16) != 0 {
+            if p + 4 > n { return -6 }
+            let got = c_at(src, p) + (c_at(src, p + 1) << 8) + (c_at(src, p + 2) << 16) + (c_at(src, p + 3) << 24)
+            if got != xxh32(src, block_at, sz) { return -6 }
+            p = p + 4
+        }
     }
     if ended == 0 { return -6 }
     if (flg & 4) != 0 {
         if p + 4 > n { return -6 }
         let want = c_at(src, p) + (c_at(src, p + 1) << 8) + (c_at(src, p + 2) << 16) + (c_at(src, p + 3) << 24)
-        if want != xxh32(&dst.data, dst.len) { return -6 }
+        if want != xxh32(&dst.data, 0, dst.len) { return -6 }
         p = p + 4
     }
     if p != n { return -6 }
@@ -411,7 +425,7 @@ fn ml_bits(code: i64) -> i64 {
 }
 
 fn br_init(src: &[u8; 4096], start: i64, len: i64, br: &!BitBack) -> i64 with Mut, Panic {
-    if len <= 0 { return -6 }
+    if len <= 0 || start < 0 { return -6 }
     let last = start + len - 1
     let b = c_at(src, last)
     if b == 0 { return -6 }
@@ -420,6 +434,7 @@ fn br_init(src: &[u8; 4096], start: i64, len: i64, br: &!BitBack) -> i64 with Mu
         bit = bit - 1
     }
     bit = bit - 1
+    br.floor = start
     br.idx = last
     br.bit = bit
     br.err = 0
@@ -439,7 +454,7 @@ fn br_read(src: &[u8; 4096], br: &!BitBack, n: i64) -> i64 with Mut, Panic {
             br.idx = br.idx - 1
             br.bit = 7
         }
-        if br.idx < 0 {
+        if br.idx < br.floor {
             br.err = 1
             return 0
         }
@@ -451,11 +466,11 @@ fn br_read(src: &[u8; 4096], br: &!BitBack, n: i64) -> i64 with Mut, Panic {
     v
 }
 
-fn zstd_exec(lits: &[u8; 4096], lit_n: i64, seq_l: &[i64; 256], seq_o: &[i64; 256], seq_m: &[i64; 256], nseq: i64, dst: &!CodecBuf) -> i64 with Mut, Panic {
+fn zstd_exec(lits: &[u8; 4096], lit_n: i64, seq_l: &[i64; 256], seq_o: &[i64; 256], seq_m: &[i64; 256], nseq: i64, rep: &!RepOff, dst: &!CodecBuf) -> i64 with Mut, Panic {
     var lp: i64 = 0
-    var r1: i64 = 1
-    var r2: i64 = 4
-    var r3: i64 = 8
+    var r1 = rep.r1
+    var r2 = rep.r2
+    var r3 = rep.r3
     var s: i64 = 0
     while s < nseq {
         let lit_len = seq_l[s as usize]
@@ -521,6 +536,9 @@ fn zstd_exec(lits: &[u8; 4096], lit_n: i64, seq_l: &[i64; 256], seq_o: &[i64; 25
         if c_push(dst, c_at(lits, lp)) != 0 { return -1 }
         lp = lp + 1
     }
+    rep.r1 = r1
+    rep.r2 = r2
+    rep.r3 = r3
     0
 }
 
@@ -1205,7 +1223,7 @@ fn build_seq_table(src: &[u8; 4096], sp: i64, end: i64, mode: i64, kind: i64, ma
     nc.used
 }
 
-fn zstd_compressed(src: &[u8; 4096], at: i64, n: i64, dst: &!CodecBuf) -> i64 with Mut, Panic {
+fn zstd_compressed(src: &[u8; 4096], at: i64, n: i64, rep: &!RepOff, dst: &!CodecBuf) -> i64 with Mut, Panic {
     if n < 1 { return -6 }
     let b0 = c_at(src, at)
     let lt = b0 & 3
@@ -1366,7 +1384,7 @@ fn zstd_compressed(src: &[u8; 4096], at: i64, n: i64, dst: &!CodecBuf) -> i64 wi
     let got_ml = build_seq_table(src, sp, seq_end, mlm, 1, 52, &!ml)
     if got_ml < 0 { return got_ml }
     sp = sp + got_ml
-    var br = BitBack { idx: 0, bit: 0, err: 0 }
+    var br = BitBack { idx: 0, bit: 0, floor: 0, err: 0 }
     if br_init(src, sp, seq_end - sp, &!br) != 0 { return -6 }
     var st_ll: i64 = 0
     var st_of: i64 = 0
@@ -1427,7 +1445,7 @@ fn zstd_compressed(src: &[u8; 4096], at: i64, n: i64, dst: &!CodecBuf) -> i64 wi
         }
         si = si + 1
     }
-    zstd_exec(&lits, lit_n, &seq_l, &seq_o, &seq_m, nseq, dst)
+    zstd_exec(&lits, lit_n, &seq_l, &seq_o, &seq_m, nseq, rep, dst)
 }
 
 /// One Zstandard frame. Raw blocks, and the compressed-block subset above.
@@ -1489,6 +1507,7 @@ pub fn codec_decompress_zstd(src: &[u8; 4096], n: i64, dst: &!CodecBuf) -> i64 w
     if p + csz > n { return -6 }
     p = p + csz
     dst.len = 0
+    var rep = RepOff { r1: 1, r2: 4, r3: 8 }
     while true {
         if p + 3 > n { return -6 }
         let bh = c_at(src, p) + (c_at(src, p + 1) << 8) + (c_at(src, p + 2) << 16)
@@ -1517,7 +1536,7 @@ pub fn codec_decompress_zstd(src: &[u8; 4096], n: i64, dst: &!CodecBuf) -> i64 w
         } else {
             if p + bsz > n { return -6 }
             let before = dst.len
-            let rc = zstd_compressed(src, p, bsz, dst)
+            let rc = zstd_compressed(src, p, bsz, &!rep, dst)
             if rc != 0 { return rc }
             if dst.len < before { return -6 }
             p = p + bsz
