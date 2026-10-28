@@ -143,6 +143,31 @@ scan_job_body() {
  done <<<"$blob"
  printf '%s %s %s %s %s %s %s %s\n' "$uploads" "$downloads" "$upload_at" "$download_at" "$verify_at" "$prepare_at" "$build_runs" "$unattached"
 }
+# A verify command inside `if: false` (or any other step condition) is not a
+# consumer. Skipping that step also skips placing the verified compiler, and
+# the f64 gate then builds another ELF while this check stays green.
+verify_step_problems() {
+ local blob=$1 job=$2 line in_step=0 step_if=0 step_verify=0
+ flush_verify_step() {
+  if [[ "$in_step" == 1 && "$step_verify" == 1 && "$step_if" == 1 ]]; then
+   printf 'verify-skippable %s\n' "$job"
+  fi
+ }
+ while IFS= read -r line; do
+  [[ "$line" =~ ^[[:space:]]*# ]] && continue
+  if [[ "$line" =~ ^[[:space:]]{6}-[[:space:]] ]]; then
+   flush_verify_step
+   in_step=1
+   step_if=0
+   step_verify=0
+  fi
+  [[ "$in_step" == 1 ]] || continue
+  # Step keys sit at eight spaces. A shell `if` inside `run: |` is indented further.
+  [[ "$line" =~ ^[[:space:]]{8}if: ]] && step_if=1
+  [[ "$line" == *"stdlib_deep_compiler_receipt.sh verify"* ]] && step_verify=1
+ done <<<"$blob"
+ flush_verify_step
+}
 needs_has() {
  local text=$1 id=$2
  [[ "$text" =~ (^|[^A-Za-z0-9_-])${id}([^A-Za-z0-9_-]|$) ]]
@@ -211,6 +236,10 @@ workflow_problems() {
   [[ "$unattached" == 0 ]] || problems+=("artifact-unattached $consumer")
   [[ "$build_runs" == 0 ]] || problems+=("consumer-rebuilds $consumer")
   [[ "$download_at" -gt 0 && "$verify_at" -gt "$download_at" ]] || problems+=("verify-after-download $consumer")
+  while IFS= read -r flag; do
+   [[ -n "$flag" ]] || continue
+   problems+=("$flag")
+  done < <(verify_step_problems "$blob" "$consumer")
   [[ "$blob" =~ stdlib_deep_compiler_receipt\.sh[[:space:]]+verify[[:space:]]*\\?[[:space:]]*\"\$GITHUB_WORKSPACE\"[[:space:]]*\"\$RUNNER_TEMP/stdlib-deep-compiler\"[[:space:]]*\"\$GITHUB_SHA\" ]] || problems+=("verify-arguments $consumer")
   [[ "$blob" == *"$artifact_path"* ]] || problems+=("download-path $consumer")
   [[ -n "${if_text[$consumer]:-}" ]] || problems+=("consumer-if $consumer")
@@ -328,6 +357,9 @@ EOF
  bad="$work/wf-unattached.yml"
  sed 's/uses: actions\/upload-artifact@v4/uses: actions\/checkout@v4/' "$base" >"$bad"
  expect_workflow_problem "$bad" artifact-unattached
+ bad="$work/wf-verify-if.yml"
+ awk 'BEGIN{arm=0} /^  madaros-current-source-deref-f64:/{arm=1} arm && /name: Verify/{print; print "        if: false"; arm=0; next} {print}' "$base" >"$bad"
+ expect_workflow_problem "$bad" verify-skippable
  bad="$work/wf-missing.yml"
  awk 'BEGIN{drop=0} /^  gate-wave-0:/{drop=1} drop && /^  [A-Za-z0-9_-]+:[[:space:]]*$/ && !/^  gate-wave-0:/{drop=0} drop{next} {print}' "$base" >"$bad"
  expect_workflow_problem "$bad" missing-consumer

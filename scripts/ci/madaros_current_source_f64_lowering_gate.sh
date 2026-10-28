@@ -143,11 +143,22 @@ wait_knowledge_runtime() {
 # copied that ELF here. Anything else already in the directory is leftover
 # state. SOUNIO_MADAROS_F64_LOWERING_BUILD overrides the builder for the
 # resolve-compiler selftest; CI must not set it.
+# bash -L does not see a symlink when the path ends in / or /. ; those forms
+# name the directory reached through the link.
+gate_dir_lexical() {
+  local p=$1
+  while [[ "$p" == */ || "$p" == */. ]]; do
+    [[ "$p" == / ]] && break
+    if [[ "$p" == */. ]]; then p="${p%/.}"; else p="${p%/}"; fi
+  done
+  printf '%s\n' "$p"
+}
+
 prepare_compiler() {
   local created=0 preplaced=0 extra build_cmd
   compiler_origin=built
   if [[ -n "${SOUNIO_MADAROS_F64_LOWERING_GATE_DIR:-}" ]]; then
-    WORK="$SOUNIO_MADAROS_F64_LOWERING_GATE_DIR"
+    WORK="$(gate_dir_lexical "$SOUNIO_MADAROS_F64_LOWERING_GATE_DIR")"
     # -d follows a symlink, and find does not descend into one. A link to a
     # directory that also holds leftover files would pass the scan below.
     if [[ -L "$WORK" ]]; then
@@ -277,6 +288,25 @@ EOF
     bash "${BASH_SOURCE[0]}" --resolve-compiler-only >"$tmp/clean-link.log" 2>&1 || rc=$?
   [[ "$rc" == 1 ]] || fail "clean symlinked gate directory was accepted ($rc)"
   grep -q 'refusing existing gate directory' "$tmp/clean-link.log" || fail "clean symlink lacked refusal"
+  rc=0
+  SOUNIO_MADAROS_F64_LOWERING_GATE_DIR="$tmp/clean-link/" \
+    SOUNIO_MADAROS_F64_LOWERING_GATE_KEEP=1 \
+    bash "${BASH_SOURCE[0]}" --resolve-compiler-only >"$tmp/clean-link-slash.log" 2>&1 || rc=$?
+  [[ "$rc" == 1 ]] || fail "trailing-slash symlink was accepted ($rc)"
+  grep -q 'refusing existing gate directory' "$tmp/clean-link-slash.log" || fail "trailing-slash symlink lacked refusal"
+  rc=0
+  SOUNIO_MADAROS_F64_LOWERING_GATE_DIR="$tmp/clean-link/." \
+    SOUNIO_MADAROS_F64_LOWERING_GATE_KEEP=1 \
+    bash "${BASH_SOURCE[0]}" --resolve-compiler-only >"$tmp/clean-link-dot.log" 2>&1 || rc=$?
+  [[ "$rc" == 1 ]] || fail "dot-suffix symlink was accepted ($rc)"
+  grep -q 'refusing existing gate directory' "$tmp/clean-link-dot.log" || fail "dot-suffix symlink lacked refusal"
+  rc=0
+  out="$(SOUNIO_MADAROS_F64_LOWERING_GATE_DIR="$tmp/pre/" \
+    SOUNIO_MADAROS_F64_LOWERING_GATE_KEEP=1 \
+    SOUNIO_MADAROS_F64_LOWERING_BUILD="$stub" \
+    bash "${BASH_SOURCE[0]}" --resolve-compiler-only)" || rc=$?
+  [[ "$rc" == 0 ]] || fail "real directory with a trailing slash was refused ($rc): $out"
+  grep -q 'RESOLVED preplaced' <<<"$out" || fail "trailing-slash real directory marker missing: $out"
   printf '#!/bin/bash\nexit 3\n' > "$tmp/failbuild"
   chmod 755 "$tmp/failbuild"
   rc=0
