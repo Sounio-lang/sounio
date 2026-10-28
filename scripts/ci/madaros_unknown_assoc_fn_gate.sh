@@ -187,6 +187,16 @@ fn main() with IO, Mut, Panic, Div {
 SIO
 run_case unused_module_path refuse "$OUT_DIR/unused_module_path.sio"
 
+# Positive (PR #2844 review): the qualifier IS a `use`d module and the
+# terminal function does not exist. E266 must name that cause. The old text
+# ("neither a `use`d module nor a known type") was false for this program.
+run_case missing_on_used_module refuse "$ROOT_DIR/tests/compile-fail/qualified_call_missing_fn_on_used_module.sio"
+if ! grep -q 'the qualifier is unresolved or the target function is undefined' "$OUT_DIR/missing_on_used_module.log"; then
+  echo "[madaros-unknown-assoc-fn] FAIL(missing_on_used_module): E266 text does not name both causes" >&2
+  tail -n 12 "$OUT_DIR/missing_on_used_module.log" >&2 || true
+  fail=1
+fi
+
 # Negative: Box::new is a real builtin and returns before the check. A warning here would fire on
 # 817 in-tree call sites.
 cat >"$OUT_DIR/box_quiet.sio" <<'SIO'
