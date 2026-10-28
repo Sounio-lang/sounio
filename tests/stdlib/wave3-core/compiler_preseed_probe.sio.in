@@ -1,0 +1,72 @@
+
+use compiler::module_parse::{load_module_file}
+use parser::parser::{parser_last_error_count}
+
+pub struct PreseedComponentMetrics {
+ pub functions:i64,pub layouts:i64,pub value_layouts:i64,pub float_fields:i64,
+ pub float_returns:i64,pub free_functions:i64,pub methods:i64,pub ref_methods:i64,pub enum_variants:i64
+}
+pub fn preseed_component_probe(items:&Option<Box<ItemList>>,merged:bool)->PreseedComponentMetrics with IO,Alloc,Mut,Panic,Div {
+ var lo=lowerer_new()
+ let previous=LOWER_SKIP_USE_RECOLLECT_FOR_MERGED
+ LOWER_SKIP_USE_RECOLLECT_FOR_MERGED=merged
+ lowerer_preseed_external_struct_items_mut(&!lo,items)
+ LOWER_SKIP_USE_RECOLLECT_FOR_MERGED=previous
+ let module=lo.module
+ let layouts=lo.struct_layouts
+ let enums=lo.enum_variants
+ var out=PreseedComponentMetrics {functions:(*module).fn_count,layouts:(*layouts).count,value_layouts:0,float_fields:0,float_returns:0,free_functions:0,methods:0,ref_methods:0,enum_variants:0}
+ var i:i64=0
+ while i<(*layouts).count {
+  let entry=(*layouts).entries[i as usize]
+  if ir_name_eq(entry.type_name,make_name("ExternalValue")) {
+   out.value_layouts=out.value_layouts+1
+   if entry.field_count==1 && entry.fields[0].is_float==1 {out.float_fields=out.float_fields+1}
+  }
+  i=i+1
+ }
+ i=0
+ while i<(*enums).count {
+  if ir_name_eq((*enums).entries[i as usize].enum_name,make_name("ExternalChoice")) {out.enum_variants=out.enum_variants+1}
+  i=i+1
+ }
+ i=0
+ while i<(*module).fn_count {
+  let f=ir_fn_get(&(*module),i as usize)
+  if f.returns_float==1 {out.float_returns=out.float_returns+1}
+  if ir_name_eq(f.name,make_name("external_free")) {out.free_functions=out.free_functions+1}
+  if ir_name_eq(f.name,make_name("ExternalValue_external_method")) {
+   out.methods=out.methods+1
+   if f.first_param_is_ref==1 {out.ref_methods=out.ref_methods+1}
+  }
+  i=i+1
+ }
+ out
+}
+pub fn preseed_component_driver()->i32 with IO,Alloc,Mut,Panic,Div {
+ let dep=load_module_file("fixtures/dependency.sio")
+ assert(parser_last_error_count()==0)
+ match dep.items {Some(_)=>{},None=>{println("PRESEED_FIXTURE_EMPTY");return 2}}
+ let merged=preseed_component_probe(&dep.items,true)
+ let ordinary=preseed_component_probe(&dep.items,false)
+ print("MERGED_FN_COUNT ");println(merged.functions)
+ print("MERGED_LAYOUTS ");println(merged.layouts)
+ print("MERGED_VALUE_LAYOUTS ");println(merged.value_layouts)
+ print("MERGED_FLOAT_FIELDS ");println(merged.float_fields)
+ print("MERGED_ENUM_VARIANTS ");println(merged.enum_variants)
+ print("NONMERGED_FN_COUNT ");println(ordinary.functions)
+ print("NONMERGED_FLOAT_RETURNS ");println(ordinary.float_returns)
+ print("NONMERGED_FREE_FUNCTIONS ");println(ordinary.free_functions)
+ print("NONMERGED_METHODS ");println(ordinary.methods)
+ print("NONMERGED_REF_METHODS ");println(ordinary.ref_methods)
+ print("NONMERGED_LAYOUTS ");println(ordinary.layouts)
+ print("NONMERGED_FLOAT_FIELDS ");println(ordinary.float_fields)
+ print("NONMERGED_ENUM_VARIANTS ");println(ordinary.enum_variants)
+ assert(merged.value_layouts==1 && merged.float_fields==1 && merged.layouts>=1 && merged.enum_variants==2)
+ assert(ordinary.value_layouts==1 && ordinary.float_fields==1 && ordinary.layouts>=1 && ordinary.enum_variants==2)
+ assert(ordinary.functions==2 && ordinary.float_returns==2 && ordinary.free_functions==1 && ordinary.methods==1 && ordinary.ref_methods==1)
+ assert(merged.functions==0)
+ println("PRESEED_COMPONENT_OK")
+ return 0
+}
+
