@@ -27,3 +27,467 @@ pub fn worker_protected_id(name:Name)->i64 with Mut,Panic,Div {
 pub fn worker_type_name(name:Name)->bool with Mut,Panic,Div {
     name_eq(name,make_name("WorkerFnI64")) || name_eq(name,make_name("WorkerFnF64"))
 }
+
+use parser::ast::{Block,StmtKind,Expr,ExprKind,Span}
+struct WorkerSourceDecl {
+    id:i64,
+    owner:i64,
+    body:Block,
+    next:Option<Box<WorkerSourceDecl>>,
+}
+struct WorkerSourceCall {
+    caller:i64,
+    start:i64,
+    end:i64,
+    callee:i64,
+    next:Option<Box<WorkerSourceCall>>,
+}
+struct WorkerSourceRequest {
+    target:i64,
+    abi:i64,
+    next:Option<Box<WorkerSourceRequest>>,
+}
+var WORKER_SOURCE_DECLS:Option<Box<WorkerSourceDecl>> = None
+var WORKER_SOURCE_CALLS:Option<Box<WorkerSourceCall>> = None
+var WORKER_SOURCE_REQUESTS:Option<Box<WorkerSourceRequest>> = None
+var WORKER_SOURCE_ACTIVE:bool=false
+var WORKER_SOURCE_BAD:bool=false
+var WORKER_SOURCE_COUNT:i64=0
+var WORKER_SOURCE_ERROR_FN:i64=0-1
+var WORKER_SOURCE_ERROR_CODE:i64=0
+var WORKER_SOURCE_STATES:[i64;16384]=[0;16384]
+
+pub fn worker_source_reset() with Mut,Panic,Div {
+    WORKER_SOURCE_DECLS=None
+    WORKER_SOURCE_CALLS=None
+    WORKER_SOURCE_REQUESTS=None
+    WORKER_SOURCE_ACTIVE=false
+    WORKER_SOURCE_BAD=false
+    WORKER_SOURCE_COUNT=0
+    WORKER_SOURCE_ERROR_FN=0-1
+    WORKER_SOURCE_ERROR_CODE=0
+    var i:i64=0
+    while i<16384 {WORKER_SOURCE_STATES[i as usize]=0;i=i+1}
+}
+fn worker_source_take_slot()->bool with Mut {
+    if WORKER_SOURCE_COUNT>=131072 {WORKER_SOURCE_BAD=true;return false}
+    WORKER_SOURCE_COUNT=WORKER_SOURCE_COUNT+1
+    true
+}
+fn worker_source_expr_may_issue(e:&Expr,depth:i64)->bool with Mut,Panic,Div,Alloc {
+    if depth>=128 {return true}
+    if (*e).kind==ExprKind::ExprCall {
+        match (*e).left {
+            Some(callee)=>{if (*callee).kind==ExprKind::ExprIdent && worker_intrinsic_op((*callee).name)>0 {return true}}
+            None=>{}
+        }
+    }
+    match (*e).left {Some(x)=>{if worker_source_expr_may_issue(&(*x),depth+1) {return true}},None=>{}}
+    match (*e).right {Some(x)=>{if worker_source_expr_may_issue(&(*x),depth+1) {return true}},None=>{}}
+    match (*e).else_expr {Some(x)=>{if worker_source_expr_may_issue(&(*x),depth+1) {return true}},None=>{}}
+    match (*e).closure_body {Some(x)=>{if worker_source_expr_may_issue(&(*x),depth+1) {return true}},None=>{}}
+    match (*e).block {Some(x)=>{if worker_source_block_may_issue(&(*x),depth+1) {return true}},None=>{}}
+    match (*e).handler_block {Some(x)=>{if worker_source_block_may_issue(&(*x),depth+1) {return true}},None=>{}}
+    var args=(*e).args
+    while true {match args {Some(x)=>{if worker_source_expr_may_issue(&(*x).head,depth+1) {return true};args=(*x).tail},None=>break}}
+    var fields=(*e).fields
+    while true {match fields {Some(x)=>{if worker_source_expr_may_issue(&(*x).head.value,depth+1) {return true};fields=(*x).tail},None=>break}}
+    var arms=(*e).arms
+    while true {match arms {
+        Some(x)=>{
+            if worker_source_expr_may_issue(&(*x).head.body,depth+1) {return true}
+            match (*x).head.guard {Some(g)=>{if worker_source_expr_may_issue(&(*g),depth+1) {return true}},None=>{}}
+            arms=(*x).tail
+        }
+        None=>break
+    }}
+    false
+}
+fn worker_source_block_may_issue(block:&Block,depth:i64)->bool with Mut,Panic,Div,Alloc {
+    if depth>=128 {return true}
+    var stmts=(*block).stmts
+    while true {match stmts {
+        Some(s)=>{
+            match (*s).head.expr {Some(e)=>{if worker_source_expr_may_issue(&(*e),depth+1) {return true}},None=>{}}
+            match (*s).head.target {Some(e)=>{if worker_source_expr_may_issue(&(*e),depth+1) {return true}},None=>{}}
+            stmts=(*s).tail
+        }
+        None=>break
+    }}
+    false
+}
+pub fn worker_source_note_decl(id:i64,owner:i64,body:Block) with Mut,Panic,Div,Alloc {
+    if id<0 || id>=16384 || owner<0 {WORKER_SOURCE_BAD=true;return}
+    if worker_source_block_may_issue(&body,0) {WORKER_SOURCE_ACTIVE=true}
+    var cursor=WORKER_SOURCE_DECLS
+    while true {match cursor {
+        Some(d)=>{
+            if (*d).id==id {
+                if (*d).owner!=owner || (*d).body.span.start!=body.span.start || (*d).body.span.end!=body.span.end {WORKER_SOURCE_BAD=true}
+                return
+            }
+            cursor=(*d).next
+        }
+        None=>break
+    }}
+    if !worker_source_take_slot() {return}
+    WORKER_SOURCE_DECLS=Some(Box::new(WorkerSourceDecl{id:id,owner:owner,body:body,next:WORKER_SOURCE_DECLS}))
+}
+pub fn worker_source_note_call(caller:i64,span:Span,callee:i64) with Mut,Panic,Div,Alloc {
+    if !WORKER_SOURCE_ACTIVE {return}
+    if caller<0 {return}
+    if caller>=16384 || callee<0 || callee>=16384 {WORKER_SOURCE_BAD=true;return}
+    var cursor=WORKER_SOURCE_CALLS
+    while true {match cursor {
+        Some(edge)=>{
+            if (*edge).caller==caller && (*edge).start==span.start && (*edge).end==span.end {
+                if (*edge).callee!=callee {WORKER_SOURCE_BAD=true}
+                return
+            }
+            cursor=(*edge).next
+        }
+        None=>break
+    }}
+    if !worker_source_take_slot() {return}
+    WORKER_SOURCE_CALLS=Some(Box::new(WorkerSourceCall{caller:caller,start:span.start,end:span.end,callee:callee,next:WORKER_SOURCE_CALLS}))
+}
+pub fn worker_source_note_request(target:i64,abi:i64) with Mut,Panic,Div,Alloc {
+    WORKER_SOURCE_ACTIVE=true
+    if target<0 || target>=16384 || (abi!=1 && abi!=2) {WORKER_SOURCE_BAD=true;return}
+    var cursor=WORKER_SOURCE_REQUESTS
+    while true {match cursor {
+        Some(request)=>{if (*request).target==target && (*request).abi==abi {return};cursor=(*request).next}
+        None=>break
+    }}
+    if !worker_source_take_slot() {return}
+    WORKER_SOURCE_REQUESTS=Some(Box::new(WorkerSourceRequest{target:target,abi:abi,next:WORKER_SOURCE_REQUESTS}))
+}
+fn worker_source_decl(id:i64)->Option<Box<WorkerSourceDecl>> with Mut,Panic,Div,Alloc {
+    var cursor=WORKER_SOURCE_DECLS
+    while true {match cursor {Some(d)=>{if (*d).id==id {return Some(d)};cursor=(*d).next},None=>return None}}
+    None
+}
+fn worker_source_call(caller:i64,span:Span)->i64 with Mut,Panic,Div,Alloc {
+    var cursor=WORKER_SOURCE_CALLS
+    while true {match cursor {
+        Some(edge)=>{if (*edge).caller==caller && (*edge).start==span.start && (*edge).end==span.end {return (*edge).callee};cursor=(*edge).next}
+        None=>return 0-1
+    }}
+    0-1
+}
+
+use parser::ast::{UnaryOp,BinaryOp,PatternKind,AssignOp,TypeExpr,TypeExprKind,Pattern}
+use check::types::{TypeEntry,TypeKind}
+use check::defs::{FnSigTable,fn_sig_table_get}
+struct WorkerSourceLocal {
+    name:Name,
+    class:i64,
+    next:Option<Box<WorkerSourceLocal>>,
+}
+struct WorkerSourceFrame {
+    id:i64,
+    call_depth:i64,
+    locals:Option<Box<WorkerSourceLocal>>,
+}
+fn worker_source_scalar_kind(kind:TypeKind)->bool {
+    kind==TypeKind::TyI8 || kind==TypeKind::TyI32 || kind==TypeKind::TyI64
+    || kind==TypeKind::TyU8 || kind==TypeKind::TyU32 || kind==TypeKind::TyU64
+    || kind==TypeKind::TyF32 || kind==TypeKind::TyF64
+    || kind==TypeKind::TyBool || kind==TypeKind::TyChar
+}
+fn worker_source_type_class(ty:&TypeEntry)->i64 with Mut,Panic,Div {
+    if worker_source_scalar_kind((*ty).kind) {return 1}
+    if (*ty).kind==TypeKind::TyUnit {return 3}
+    if (*ty).kind==TypeKind::TyRef || (*ty).kind==TypeKind::TyRefMut {
+        match (*ty).inner {Some(inner)=>{if worker_source_scalar_kind((*inner).kind) {return 2}},None=>{}}
+    }
+    0
+}
+fn worker_source_annotation_class(ty:&TypeExpr)->i64 with Mut,Panic,Div,Alloc {
+    if (*ty).kind==TypeExprKind::TypeUnit {return 3}
+    if (*ty).kind==TypeExprKind::TypeReference || (*ty).kind==TypeExprKind::TypeRefMut {
+        match (*ty).inner {Some(inner)=>{if worker_source_annotation_class(&(*inner))==1 {return 2}},None=>{}}
+        return 0
+    }
+    if (*ty).kind!=TypeExprKind::TypeNamed || (*ty).path.seg_count!=1 {return 0}
+    let segments=(*ty).path.segments
+    var n=empty_name()
+    n.len=segments.head_len
+    var i:i64=0
+    while i<n.len && i<384 {n.buf[i as usize]=segments.head_buf[i as usize];i=i+1}
+    if name_eq(n,make_name("i64")) || name_eq(n,make_name("f64"))
+        || name_eq(n,make_name("i32")) || name_eq(n,make_name("f32"))
+        || name_eq(n,make_name("i8")) || name_eq(n,make_name("u8"))
+        || name_eq(n,make_name("u32")) || name_eq(n,make_name("u64"))
+        || name_eq(n,make_name("usize")) || name_eq(n,make_name("bool"))
+        || name_eq(n,make_name("char")) {return 1}
+    0
+}
+fn worker_source_local(frame:&WorkerSourceFrame,name:Name)->i64 with Mut,Panic,Div,Alloc {
+    var cursor=(*frame).locals
+    while true {match cursor {Some(local)=>{if name_eq((*local).name,name) {return (*local).class};cursor=(*local).next},None=>return 0}}
+    0
+}
+fn worker_source_push(frame:&!WorkerSourceFrame,name:Name,class:i64) with Mut,Panic,Div,Alloc {
+    (*frame).locals=Some(Box::new(WorkerSourceLocal{name:name,class:class,next:(*frame).locals}))
+}
+fn worker_source_fault(id:i64,code:i64)->bool with Mut {
+    if WORKER_SOURCE_ERROR_CODE==0 {WORKER_SOURCE_ERROR_FN=id;WORKER_SOURCE_ERROR_CODE=code}
+    false
+}
+fn worker_source_opt_expr(table:*mut FnSigTable,frame:&!WorkerSourceFrame,e:&Option<Box<Expr>>,depth:i64)->i64 with Mut,Panic,Div,Alloc {
+    match *e {Some(value)=>worker_source_expr(table,frame,&(*value),depth+1),None=>3}
+}
+fn worker_source_place(table:*mut FnSigTable,frame:&!WorkerSourceFrame,e:&Expr,depth:i64)->i64 with Mut,Panic,Div,Alloc {
+    if depth>=64 {return 0}
+    if (*e).kind==ExprKind::ExprIdent {
+        if worker_source_local(&(*frame),(*e).name)==1 {return 1}
+        return 0
+    }
+    if (*e).kind==ExprKind::ExprUnary && (*e).un_op==UnaryOp::OpDeref {
+        if worker_source_opt_expr(table,frame,&(*e).left,depth+1)==2 {return 1}
+    }
+    0
+}
+fn worker_source_bind_pattern(frame:&!WorkerSourceFrame,pat:&Pattern)->bool with Mut,Panic,Div,Alloc {
+    if (*pat).kind==PatternKind::PatWildcard || (*pat).kind==PatternKind::PatIntLit
+        || (*pat).kind==PatternKind::PatBoolTrue || (*pat).kind==PatternKind::PatBoolFalse {return true}
+    if (*pat).kind==PatternKind::PatBinding {worker_source_push(frame,(*pat).name,1);return true}
+    false
+}
+fn worker_source_block(table:*mut FnSigTable,frame:&!WorkerSourceFrame,block:&Block,depth:i64)->i64 with Mut,Panic,Div,Alloc {
+    if depth>=64 {return 0}
+    let saved=(*frame).locals
+    var result:i64=3
+    var stmts=(*block).stmts
+    while true {match stmts {
+        Some(node)=>{
+            let stmt=&(*node).head
+            if (*stmt).kind==StmtKind::StmtLet || (*stmt).kind==StmtKind::StmtVar {
+                match (*stmt).expr {None=>{(*frame).locals=saved;return 0},Some(_)=>{}}
+                let class=worker_source_opt_expr(table,frame,&(*stmt).expr,depth+1)
+                if class<=0 {(*frame).locals=saved;return 0}
+                match (*stmt).ty {
+                    Some(ty)=>{if worker_source_annotation_class(&(*ty))!=class {(*frame).locals=saved;return 0}}
+                    None=>{}
+                }
+                worker_source_push(frame,(*stmt).name,class)
+                result=3
+            } else if (*stmt).kind==StmtKind::StmtExpr {
+                result=worker_source_opt_expr(table,frame,&(*stmt).expr,depth+1)
+                if result<=0 {(*frame).locals=saved;return 0}
+            } else if (*stmt).kind==StmtKind::StmtAssign {
+                let rhs=worker_source_opt_expr(table,frame,&(*stmt).expr,depth+1)
+                var lhs:i64=0
+                match (*stmt).target {
+                    Some(target)=>{
+                        if (*target).kind==ExprKind::ExprIdent {lhs=worker_source_local(&(*frame),(*target).name)}
+                        else if worker_source_place(table,frame,&(*target),depth+1)==1 {lhs=1}
+                    }
+                    None=>{}
+                }
+                if lhs<=0 || rhs!=lhs || (lhs==2 && (*stmt).assign_op!=AssignOp::AssignEq) {(*frame).locals=saved;return 0}
+                result=3
+            } else {(*frame).locals=saved;return 0}
+            stmts=(*node).tail
+        }
+        None=>break
+    }}
+    (*frame).locals=saved
+    result
+}
+fn worker_source_expr(table:*mut FnSigTable,frame:&!WorkerSourceFrame,e:&Expr,depth:i64)->i64 with Mut,Panic,Div,Alloc {
+    if depth>=64 {return 0}
+    let kind=(*e).kind
+    if kind==ExprKind::ExprIntLit || kind==ExprKind::ExprFloatLit || kind==ExprKind::ExprBoolTrue
+        || kind==ExprKind::ExprBoolFalse || kind==ExprKind::ExprCharLit {return 1}
+    if kind==ExprKind::ExprIdent {return worker_source_local(&(*frame),(*e).name)}
+    if kind==ExprKind::ExprTupleLit {
+        match (*e).args {None=>return 3,Some(_)=>return 0}
+    }
+    if kind==ExprKind::ExprUnary {
+        if (*e).un_op==UnaryOp::OpRef || (*e).un_op==UnaryOp::OpRefMut {
+            match (*e).left {Some(place)=>{if worker_source_place(table,frame,&(*place),depth+1)==1 {return 2}},None=>{}}
+            return 0
+        }
+        let class=worker_source_opt_expr(table,frame,&(*e).left,depth+1)
+        if (*e).un_op==UnaryOp::OpDeref {if class==2 {return 1};return 0}
+        if class==1 {return 1}
+        return 0
+    }
+    if kind==ExprKind::ExprBinary {
+        if (*e).bin_op==BinaryOp::OpConcat || (*e).bin_op==BinaryOp::OpRange || (*e).bin_op==BinaryOp::OpRangeInclusive {return 0}
+        if worker_source_opt_expr(table,frame,&(*e).left,depth+1)!=1 {return 0}
+        if worker_source_opt_expr(table,frame,&(*e).right,depth+1)!=1 {return 0}
+        return 1
+    }
+    if kind==ExprKind::ExprCast {
+        if worker_source_opt_expr(table,frame,&(*e).left,depth+1)!=1 {return 0}
+        match (*e).cast_type {Some(ty)=>{if worker_source_annotation_class(&(*ty))==1 {return 1}},None=>{}}
+        return 0
+    }
+    if kind==ExprKind::ExprCall {
+        let callee=worker_source_call((*frame).id,(*e).span)
+        if callee<0 {
+            // Genuine implicit word bitcasts only; a resolved source function
+            // always has an identity edge and is audited through its body.
+            match (*e).left {
+                Some(target)=>{
+                    if (*target).kind!=ExprKind::ExprIdent {return 0}
+                    if !name_eq((*target).name,make_name("f64_to_bits")) && !name_eq((*target).name,make_name("bits_to_f64")) {return 0}
+                }
+                None=>return 0
+            }
+            match (*e).args {
+                Some(arg)=>{
+                    match (*arg).tail {Some(_)=>return 0,None=>{}}
+                    if worker_source_expr(table,frame,&(*arg).head,depth+1)==1 {return 1}
+                }
+                None=>{}
+            }
+            return 0
+        }
+        let sig=fn_sig_table_get(table,callee)
+        var args=(*e).args
+        var params=sig.params
+        var mask:i64=0
+        var bit:i64=1
+        var count:i64=0
+        while true {match params {
+            Some(param)=>{
+                match args {
+                    Some(arg)=>{
+                        let expected=worker_source_type_class(&(*param).head.ty)
+                        let actual=worker_source_expr(table,frame,&(*arg).head,depth+1)
+                        if expected<=0 || expected!=actual {return 0}
+                        if actual==2 {mask=mask|bit}
+                        args=(*arg).tail
+                    }
+                    None=>return 0
+                }
+                if count>=61 {return 0}
+                count=count+1
+                bit=bit*2
+                params=(*param).tail
+            }
+            None=>break
+        }}
+        match args {Some(_)=>return 0,None=>{}}
+        if count!=sig.param_count || !worker_source_audit_function(table,callee,mask,(*frame).call_depth+1) {return 0}
+        return worker_source_type_class(&sig.return_type)
+    }
+    if kind==ExprKind::ExprReturn {
+        let class=worker_source_opt_expr(table,frame,&(*e).left,depth+1)
+        if class==1 || class==3 {return 3}
+        return 0
+    }
+    if kind==ExprKind::ExprBreak {
+        match (*e).left {Some(_)=>return 0,None=>return 3}
+    }
+    if kind==ExprKind::ExprContinue {return 3}
+    if kind==ExprKind::ExprBlock || kind==ExprKind::ExprLoop {
+        match (*e).block {Some(block)=>return worker_source_block(table,frame,&(*block),depth+1),None=>return 3}
+    }
+    if kind==ExprKind::ExprWhile {
+        if worker_source_opt_expr(table,frame,&(*e).left,depth+1)!=1 {return 0}
+        match (*e).block {Some(block)=>{if worker_source_block(table,frame,&(*block),depth+1)<=0 {return 0}},None=>return 0}
+        return 3
+    }
+    if kind==ExprKind::ExprIf {
+        if worker_source_opt_expr(table,frame,&(*e).left,depth+1)!=1 {return 0}
+        var then_class:i64=3
+        match (*e).block {Some(block)=>{then_class=worker_source_block(table,frame,&(*block),depth+1)},None=>return 0}
+        let else_class=worker_source_opt_expr(table,frame,&(*e).else_expr,depth+1)
+        if then_class<=0 || then_class!=else_class {return 0}
+        return then_class
+    }
+    if kind==ExprKind::ExprMatch {
+        if worker_source_opt_expr(table,frame,&(*e).left,depth+1)!=1 {return 0}
+        let saved=(*frame).locals
+        var arms=(*e).arms
+        var result:i64=0-1
+        while true {match arms {
+            Some(arm)=>{
+                (*frame).locals=saved
+                if !worker_source_bind_pattern(frame,&(*arm).head.pattern) {return 0}
+                match (*arm).head.guard {Some(guard)=>{if worker_source_expr(table,frame,&(*guard),depth+1)!=1 {(*frame).locals=saved;return 0}},None=>{}}
+                let class=worker_source_expr(table,frame,&(*arm).head.body,depth+1)
+                if class<=0 || (result>=0 && result!=class) {(*frame).locals=saved;return 0}
+                result=class
+                arms=(*arm).tail
+            }
+            None=>break
+        }}
+        (*frame).locals=saved
+        if result>0 {return result}
+    }
+    0
+}
+fn worker_source_audit_function(table:*mut FnSigTable,id:i64,incoming:i64,depth:i64)->bool with Mut,Panic,Div,Alloc {
+    if depth>=64 || id<0 || id>=16384 {return worker_source_fault(id,1)}
+    let sig=fn_sig_table_get(table,id)
+    let result_class=worker_source_type_class(&sig.return_type)
+    if result_class!=1 && result_class!=3 {return worker_source_fault(id,2)}
+    if sig.is_method || sig.is_kernel || sig.is_epistemic_kernel || sig.is_linear_closure || sig.linear_capture_count!=0 {return worker_source_fault(id,3)}
+    var effects:i64=0
+    if sig.effect_count<0 || sig.effect_count>8 {return worker_source_fault(id,3)}
+    while effects<sig.effect_count {let code=sig.effects[effects as usize];if code!=1 && code!=3 && code!=4 {return worker_source_fault(id,3)};effects=effects+1}
+    var frame=WorkerSourceFrame{id:id,call_depth:depth,locals:None}
+    var params=sig.params
+    var expected:i64=0
+    var bit:i64=1
+    var count:i64=0
+    while true {match params {
+        Some(param)=>{
+            if count>=62 {return worker_source_fault(id,4)}
+            let class=worker_source_type_class(&(*param).head.ty)
+            if class<=0 {return worker_source_fault(id,4)}
+            if class==2 {expected=expected|bit}
+            worker_source_push(&!frame,(*param).head.name,class)
+            count=count+1
+            bit=bit*2
+            params=(*param).tail
+        }
+        None=>break
+    }}
+    if count!=sig.param_count || expected!=incoming {return worker_source_fault(id,4)}
+    if sig.is_extern {
+        if expected==0 && count==1 && result_class==1
+            && (name_eq(sig.name,make_name("f64_to_bits")) || name_eq(sig.name,make_name("bits_to_f64"))) {return true}
+        return worker_source_fault(id,5)
+    }
+    let state=WORKER_SOURCE_STATES[id as usize]
+    if state==1 || state==2 {return true}
+    if state==3 {return false}
+    WORKER_SOURCE_STATES[id as usize]=1
+    match worker_source_decl(id) {
+        Some(decl)=>{
+            if (*decl).owner!=sig.defining_module_id {WORKER_SOURCE_STATES[id as usize]=3;return worker_source_fault(id,6)}
+            if worker_source_block(table,&!frame,&(*decl).body,0)>0 {WORKER_SOURCE_STATES[id as usize]=2;return true}
+        }
+        None=>{}
+    }
+    WORKER_SOURCE_STATES[id as usize]=3
+    worker_source_fault(id,7)
+}
+pub fn worker_source_finalize(table:*mut FnSigTable)->bool with Mut,Panic,Div,Alloc {
+    match WORKER_SOURCE_REQUESTS {None=>return true,Some(_)=>{}}
+    if WORKER_SOURCE_BAD {return worker_source_fault(0-1,8)}
+    var cursor=WORKER_SOURCE_REQUESTS
+    var valid=true
+    while true {match cursor {
+        Some(request)=>{
+            var i:i64=0
+            while i<16384 {WORKER_SOURCE_STATES[i as usize]=0;i=i+1}
+            let sig=fn_sig_table_get(table,(*request).target)
+            let expected=if (*request).abi==1 {TypeKind::TyI64} else {TypeKind::TyF64}
+            if sig.return_type.kind!=expected || sig.param_count!=1 {valid=false;let _fault=worker_source_fault((*request).target,9)}
+            else if !worker_source_audit_function(table,(*request).target,0,0) {valid=false}
+            cursor=(*request).next
+        }
+        None=>break
+    }}
+    valid
+}
+pub fn worker_source_error_function()->i64 with Mut {WORKER_SOURCE_ERROR_FN}
+pub fn worker_source_error_reason()->i64 with Mut {WORKER_SOURCE_ERROR_CODE}

@@ -11,7 +11,9 @@
 namespace fs=std::filesystem;
 struct Row{std::string status,log;};
 using Rows=std::map<std::string,Row>;
-constexpr std::array<std::pair<std::string_view,std::string_view>,10> expected{{
+constexpr std::array<std::pair<std::string_view,std::string_view>,18> expected{{
+ {"good_transitive","0"},{"good_stack_refs","0"},{"good_recursive","0"},
+ {"transitive_global","1"},{"transitive_indirect","1"},{"transitive_aggregate","1"},{"global_reference","1"},{"reference_cast","1"},
  {"good_i64","0"},{"good_f64","0"},{"wrong_root_abi","1"},{"capture","1"},{"local_alias","1"},
  {"forged_cast","1"},{"raw_extract","1"},{"declared_alloc","1"},{"wrong_cap_abi","1"},{"forged_struct","1"}
 }};
@@ -58,6 +60,6 @@ int main(int argc,char**argv){
   wrong=rows;wrong["good_i64"].log.clear();if(!valid(wrong))++rejected;
   try{(void)parse(input+"capture\t1\n",dir);}catch(const std::runtime_error&){++rejected;}
   if(rejected!=7)throw std::runtime_error("wrong-output control accepted");
-  std::cout<<"WORKER_FRONTEND_ADMISSION_OK cases=10 positive=2 negative=8 wrong_controls=7 native_certificate=false\n";
+  std::cout<<"WORKER_FRONTEND_ADMISSION_OK cases=18 positive=5 negative=13 wrong_controls=7 native_certificate=false\n";
  }catch(const std::exception&e){std::cerr<<"WORKER_FRONTEND_ADMISSION_REFUSED "<<e.what()<<'\n';return 1;}
 }

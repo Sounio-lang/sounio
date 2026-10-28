@@ -13,6 +13,8 @@ use check::defs::*
 use check::env::*
 use check::borrow::*
 use check::pattern_types::{pattern_type_note}
+use native::worker_proof::{worker_source_note_decl,worker_source_note_call,worker_source_note_request,worker_source_finalize,worker_source_error_function,worker_source_error_reason}
+use compiler::trusted_origins::{trusted_origin_is_worker}
 use check::units::*
 use check::traits::*
 use check::ownership::*
@@ -4940,6 +4942,7 @@ fn checker_collect_fn_def_inplace(c: *mut Checker, opt: Option<Box<FnDef> >, vis
             // FnSigTable by value (one of the large-aggregate copies the *mut
             // conversion eliminates).
             let sig_id = fn_sig_table_add((*c).fn_sigs, sig)
+            worker_source_note_decl(sig_id,(*c).current_module_id,(*fd).body)
             // N2 (codex ruling 2026-08-23): register this fn's call-projection
             // verdict at the SAME index fn_sig_table_add just returned, so
             // checker_propagate_call_result_ns_inplace can look it up in O(1)
@@ -12943,12 +12946,25 @@ fn checker_worker_refused(c:*mut Checker,reason:string)->TypeEntry with Mut,IO {
 fn checker_worker_type_name(name:Name)->bool with Mut,Panic,Div {
     name_eq(name,make_name("WorkerFnI64")) || name_eq(name,make_name("WorkerFnF64"))
 }
-fn checker_worker_call_inplace(c:*mut Checker,e:Expr,kind:i64)->TypeEntry with Mut,Panic,Div,Alloc,IO {
-    if kind==17 || kind==18 {
-        // Loader-issued physical origin admission is wired with the native
-        // proof boundary. A namespace declaration cannot grant this authority.
-        return checker_worker_refused(c,"raw extraction requires the loader-issued canonical ffi::worker origin")
+
+fn checker_worker_raw_inplace(c:*mut Checker,e:Expr,kind:i64)->TypeEntry with Mut,Panic,Div,Alloc,IO {
+    if !trusted_origin_is_worker((*c).current_module_id) {
+        return checker_worker_refused(c,"raw extraction requires the loader-issued physical ffi::worker origin")
     }
+    match e.args {
+        Some(first)=>{
+            match (*first).tail {Some(_)=>return checker_worker_refused(c,"raw extraction requires exactly one typed capability"),None=>{}}
+            let ty=checker_check_expr_inplace(c,(*first).head)
+            let expected=if kind==17 {TypeKind::TyWorkerFnI64} else {TypeKind::TyWorkerFnF64}
+            if ty.kind!=expected {return checker_worker_refused(c,"raw extraction capability ABI mismatch")}
+            return ty_i64()
+        }
+        None=>return checker_worker_refused(c,"raw extraction requires exactly one typed capability")
+    }
+}
+
+fn checker_worker_call_inplace(c:*mut Checker,e:Expr,kind:i64)->TypeEntry with Mut,Panic,Div,Alloc,IO {
+    if kind==17 || kind==18 {return checker_worker_raw_inplace(c,e,kind)}
     var argument:Option<Box<Expr>> = None
     match e.args {
         Some(first)=>{
@@ -13002,6 +13018,7 @@ fn checker_worker_call_inplace(c:*mut Checker,e:Expr,kind:i64)->TypeEntry with M
             var result=if kind==1 {ty_worker_fn_i64()} else {ty_worker_fn_f64()}
             // This records the resolved declaration, never a native certificate.
             result.fn_sig_id=id
+            worker_source_note_request(id,kind)
             return result
         }
         None=>return checker_worker_refused(c,"missing callback")
@@ -13440,6 +13457,7 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
         }
     }
     if direct_sig_id >= 0 {
+        worker_source_note_call((*c).current_sig_id,e.span,direct_sig_id)
         if (*c).enforce_visibility && !checker_fn_sig_visible_inplace(c, direct_sig_id) {
             checker_report_private_fn_inplace(c, e.span, direct_sig_id)
         }
@@ -15745,6 +15763,7 @@ pub fn checker_check_items_inner_store_return_had_error_mut(c: *mut Checker, ite
     // codegen crash never fires. (Was: `(*c).check_items(items)` by value.)
     checker_check_items_inplace(c, items)
     checker_verify_dsep_claims_mut(c)
+    checker_finalize_worker_requests_mut(c)
     checker_flush_unemitted_type_errors_mut(c)
     if (*c).had_error {
         1
@@ -33754,5 +33773,19 @@ fn checker_algebra_def_mul_alt(ops: Option<Box<AlgebraOpDeclList> >) -> bool wit
             if op.op_name.len == 3 && op.op_name.buf[0] == 109 as i8 { return op.is_alternative }
             checker_algebra_def_mul_alt((*list).tail)
         }
+    }
+}
+
+// Runs only after all bodies have supplied resolved call identities. A
+// constructor appearing before its callback's body cannot bypass the profile.
+pub fn checker_finalize_worker_requests_mut(c:*mut Checker) with Mut,Panic,Div,Alloc,IO {
+    if !worker_source_finalize((*c).fn_sigs) {
+        print("error: WorkerFn source closure refused: function ")
+        print_int(worker_source_error_function())
+        print(" profile reason ")
+        print_int(worker_source_error_reason())
+        print("\n")
+        checker_note_type_error_mut(c)
+        (*c).diag_emitted=true
     }
 }
