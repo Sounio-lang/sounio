@@ -25013,8 +25013,51 @@ impl Lowerer {
                                 lowerer_mark_hard_error(&!lo)
                                 return false
                             }
+                            // Capture before binding: `let t = t` / `let p = p`
+                            // must read the outer slot, not the fresh empty one.
+                            var tuple_mask = lower_opt_type_tuple_float_mask(&stmt_ref.ty)
+                            if tuple_mask == 0 {
+                                match stmt_ref.expr {
+                                    Some(rhs) => { tuple_mask = lo.expr_result_tuple_float_mask_ref(&(*rhs)) }
+                                    None => {}
+                                }
+                            }
+                            var ref_pointee = ir_empty_name()
+                            match stmt_ref.ty {
+                                Some(ty) => {
+                                    if lower_type_expr_is_ref_like(&(*ty)) {
+                                        ref_pointee = lower_param_struct_type_name(&(*ty))
+                                    }
+                                }
+                                None => {
+                                    match stmt_ref.expr {
+                                        Some(rhs) => {
+                                            if (*rhs).kind == ExprKind::ExprIdent && lo.lookup_local_is_ref((*rhs).name) {
+                                                ref_pointee = lo.lookup_local_struct_type((*rhs).name)
+                                            } else if (*rhs).kind == ExprKind::ExprUnary
+                                                && ((*rhs).un_op == UnaryOp::OpRef || (*rhs).un_op == UnaryOp::OpRefMut) {
+                                                if lo.opt_expr_result_is_float_ref(&(*rhs).left) {
+                                                    ref_pointee = make_name("f64")
+                                                }
+                                            }
+                                        }
+                                        None => {}
+                                    }
+                                }
+                            }
+                            let local_idx = (*lo.locals).count
                             lowerer_bind_local_mut(&!lo, stmt_ref.name, IR_INVALID_REG, false)
                             lo = lo.bind_local_scalar_kind(stmt_ref.name, if local_is_float { 2 } else { 0 })
+                            if tuple_mask != 0 {
+                                // Keep the original locals Box: the normal tuple
+                                // binder replaces it, which would detach count
+                                // restoration from the caller's temporary stack.
+                                (*(*lo.locals).tuple_float_mask).values[local_idx as usize] = tuple_mask
+                            }
+                            if ref_pointee.len > 0 {
+                                lo = lo.bind_local_ref(stmt_ref.name)
+                                lo = lo.bind_local_struct_type(stmt_ref.name, ref_pointee, false)
+                            }
                         }
                     }
                     current = &(*list).tail
@@ -28839,7 +28882,26 @@ impl Lowerer {
         //
         // Gated on fo_nchan > 0 so a program that never calls measure() pays
         // nothing; a `let` is never reassigned and needs no slot.
-        if is_mut && lo.fo_nchan > 0 && !bind_as_ref && fixed_array_len < 0 {
+        //
+        // Not for a `var` initialised with an integer or bool literal
+        // (`var k: i64 = 0`, `var n_fail = 0`, `var done = false`): it carries no
+        // variance and nothing above bound it to any. One channel anywhere in the
+        // function (an `if` that bumps an integer counter is enough) used to give
+        // every such counter sens slots, and since #2827 a residual slot that each
+        // loop head and assignment rewrites: obo_elplus_driver.sio, which has no
+        // f64, compiled to 385 KB instead of 156 KB and ran 2.2x slower. The test
+        // is on the literal, not on the declared type, because an integer bound to
+        // a variance-carrying RHS still needs private slots across a back-edge.
+        var rhs_is_int_or_bool_lit = false
+        match s.expr {
+            Some(rhs_lit) => {
+                rhs_is_int_or_bool_lit = (*rhs_lit).kind == ExprKind::ExprIntLit
+                    || (*rhs_lit).kind == ExprKind::ExprBoolTrue
+                    || (*rhs_lit).kind == ExprKind::ExprBoolFalse
+            }
+            None => {}
+        }
+        if is_mut && lo.fo_nchan > 0 && !bind_as_ref && fixed_array_len < 0 && !rhs_is_int_or_bool_lit {
             lo = lo.alloc_variance_slot_for_local(s.name)
             lo = lo.fo_alloc_sens_slots_for_local(s.name)
         }
@@ -34338,6 +34400,20 @@ impl Lowerer {
             var lo_refuse = self
             lowerer_mark_hard_error(&! lo_refuse)
             return (lo_refuse, 0)
+        }
+        // Fail-closed: array `++` has no native-v2 lowering yet. The checker
+        // admits OpConcat only for string++string and array++array; the string
+        // arm below routes to str_concat, but an array concat fell through to
+        // a generic IrBinOp that nc_emit_core_binop has no Concat arm for, so
+        // the compile died as bare rc=12 naming nothing (Native-v2 gaps card).
+        // Refuse by name until the alloc+copy lowering exists.
+        if e.bin_op == BinaryOp::OpConcat
+            && !self.opt_expr_result_is_string_ref(&e.left)
+            && !self.opt_expr_result_is_string_ref(&e.right) {
+            print("error: array concatenation (BinaryOp::OpConcat) is not implemented on Madaros native-v2 (fail-closed; was unnamed rc=12). Build the result element-wise into a pre-sized array until array-concat lowering lands.\n")
+            var lo_concat_refuse = self
+            lowerer_mark_hard_error(&! lo_concat_refuse)
+            return (lo_concat_refuse, 0)
         }
         // Fail-closed: a dereference whose pointee cannot be typed here, as an
         // operand next to an f64. The checker only admits `*x <op> f64` when *x
