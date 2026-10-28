@@ -734,7 +734,9 @@ EOF
  awk 'BEGIN{arm=0} /^  madaros-current-source-deref-f64:/{arm=1} arm && /\$GITHUB_SHA"/{sub(/"$/, "\" || true"); arm=0} {print}' "$base" >"$bad"
  expect_workflow_problem "$bad" verify-skippable
  bad="$work/wf-verify-and.yml"
- awk 'BEGIN{arm=0} /^  madaros-current-source-deref-f64:/{arm=1} arm && /\$GITHUB_SHA"/{sub(/"$/, "\" \&\& true"); arm=0} {print}' "$base" >"$bad"
+ # gawk treats `\&` in a sub() string as the matched text, so the `&` never
+ # reaches the fixture. Append the ampersands as characters instead.
+ awk 'BEGIN{arm=0} /^  madaros-current-source-deref-f64:/{arm=1} arm && /\$GITHUB_SHA"$/ {print $0 " " sprintf("%c%c", 38, 38) " ok"; arm=0; next} {print}' "$base" >"$bad"
  expect_workflow_problem "$bad" verify-skippable
  bad="$work/wf-verify-continue.yml"
  awk 'BEGIN{arm=0} /^  madaros-current-source-deref-f64:/{arm=1} arm && /name: Verify/{print; print "        continue-on-error: true"; arm=0; next} {print}' "$base" >"$bad"
@@ -764,7 +766,7 @@ EOF
  awk 'BEGIN{arm=0} /^  madaros-current-source-deref-f64:/{arm=1} arm && /name: Verify/{print; print "        shell: bash -e {0}"; arm=0; next} {print}' "$base" >"$bad"
  expect_workflow_problem "$bad" verify-skippable
  bad="$work/wf-verify-background.yml"
- awk 'BEGIN{arm=0} /^  madaros-current-source-deref-f64:/{arm=1} arm && /\$GITHUB_SHA"/{sub(/"$/, "\" \&"); arm=0} {print}' "$base" >"$bad"
+ awk 'BEGIN{arm=0} /^  madaros-current-source-deref-f64:/{arm=1} arm && /\$GITHUB_SHA"$/ {print $0 " " sprintf("%c", 38); arm=0; next} {print}' "$base" >"$bad"
  expect_workflow_problem "$bad" verify-skippable
  bad="$work/wf-verify-coproc.yml"
  awk 'BEGIN{arm=0} /^  madaros-current-source-deref-f64:/{arm=1} arm && /stdlib_deep_compiler_receipt.sh verify/{sub(/bash/, "coproc VERIFY bash"); arm=0} {print}' "$base" >"$bad"
