@@ -144,11 +144,13 @@ scan_job_body() {
  printf '%s %s %s %s %s %s %s %s\n' "$uploads" "$downloads" "$upload_at" "$download_at" "$verify_at" "$prepare_at" "$build_runs" "$unattached"
 }
 # A verify command the step can skip or ignore is not a consumer. A YAML `if:`,
-# `continue-on-error`, a shell `if`, `set +e`, `&&` / `||`, or a shell `!`
-# lets receipt failure pass. Placement is then skipped, or a rejected ELF is
-# copied and run, and the f64 gate can build another ELF while this check
-# stays green. `set -e` does not save a command in an AND/OR list, a shell
-# conditional, or a negation.
+# `continue-on-error`, a shell `if`, `set +e`, `&&` / `||`, a shell `!`, or a
+# pipeline lets receipt failure pass. Without pipefail the pipeline status is
+# the last command, so `verify | tee` still copies the ELF. Process
+# substitution drops verify's status even when pipefail is on. Placement is
+# then skipped, or a rejected ELF is copied and run, and the f64 gate can
+# build another ELF while this check stays green. `set -e` does not save a
+# command in an AND/OR list, a shell conditional, a negation, or such a pipe.
 verify_step_problems() {
  local blob=$1 job=$2 line in_step=0 step_if=0 step_swallow=0 step_verify=0 bang
  flush_verify_step() {
@@ -178,8 +180,14 @@ verify_step_problems() {
   # `!=` is a comparison. Any other `!` in this step negates a command.
   bang=${line//!=/}
   [[ "$bang" == *'!'* ]] && step_swallow=1
+  # YAML `run: |` starts a block. Any other `|` is a shell pipeline.
+  if [[ "$line" == *'|'* ]]; then
+   [[ "$line" =~ ^[[:space:]]*(-\ )?run:[[:space:]]*\|[+-]?[[:space:]]*$ ]] || step_swallow=1
+  fi
+  [[ "$line" == *'<('* || "$line" == *'>('* ]] && step_swallow=1
+  [[ "$line" =~ set[[:space:]]+\+o[[:space:]]+pipefail ]] && step_swallow=1
   if [[ "$line" =~ ^[[:space:]]*(-\ )?shell: ]]; then
-   [[ "$line" == *'-e'* || "$line" == *'errexit'* ]] || step_swallow=1
+   [[ ( "$line" == *'-e'* || "$line" == *'errexit'* ) && "$line" == *'pipefail'* ]] || step_swallow=1
   fi
   [[ "$line" == *"stdlib_deep_compiler_receipt.sh verify"* ]] && step_verify=1
  done <<<"$blob"
@@ -453,6 +461,15 @@ EOF
  expect_workflow_problem "$bad" verify-skippable
  bad="$work/wf-verify-bang.yml"
  awk 'BEGIN{arm=0} /^  madaros-current-source-deref-f64:/{arm=1} arm && /stdlib_deep_compiler_receipt.sh verify/{sub(/bash/, "! bash"); arm=0} {print}' "$base" >"$bad"
+ expect_workflow_problem "$bad" verify-skippable
+ bad="$work/wf-verify-pipe.yml"
+ awk 'BEGIN{arm=0} /^  madaros-current-source-deref-f64:/{arm=1} arm && /\$GITHUB_SHA"/{sub(/"$/, "\" | tee log"); arm=0} {print}' "$base" >"$bad"
+ expect_workflow_problem "$bad" verify-skippable
+ bad="$work/wf-verify-procsub.yml"
+ awk 'BEGIN{arm=0} /^  madaros-current-source-deref-f64:/{arm=1} arm && /stdlib_deep_compiler_receipt.sh verify/{sub(/bash/, "cat <(bash"); arm=0} {print}' "$base" >"$bad"
+ expect_workflow_problem "$bad" verify-skippable
+ bad="$work/wf-verify-shell-nopipefail.yml"
+ awk 'BEGIN{arm=0} /^  madaros-current-source-deref-f64:/{arm=1} arm && /name: Verify/{print; print "        shell: bash -e {0}"; arm=0; next} {print}' "$base" >"$bad"
  expect_workflow_problem "$bad" verify-skippable
  bad="$work/wf-use-before-verify.yml"
  awk 'BEGIN{arm=0} /^  madaros-current-source-deref-f64:/{arm=1} arm && /name: Verify/{print "      - name: Run early"; print "        run: bash scripts/ci/madaros_current_source_f64_lowering_gate.sh"; arm=0} {print}' "$base" >"$bad"
