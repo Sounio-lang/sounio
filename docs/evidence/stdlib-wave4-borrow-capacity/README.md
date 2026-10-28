@@ -1,6 +1,6 @@
 # Borrow capacity: persistent storage candidate
 
-Status: implementation candidate; integrated compiler and original BigFrame acceptance remain open. No main merge or push.
+Status: persistent borrow storage, real checker and BFS compiler gates qualify. The full original BigFrame native gate remains open; whole-stdlib acceptance is not claimed. No main merge or push.
 
 ## Causal reproduction
 
@@ -31,7 +31,10 @@ Pages remain allocated while any fork may reference them. This patch deliberatel
 -19211: exact public-setter hardening passes storage/native/C++ marker guards in modes0/1. Duplicate IDs, replacement of stable IDs and Name.len385 fail before publication; old roots and cells remain intact, while the arena error remains sticky. A private compactor relocation2→1 succeeds and preserves the older fork.
 -19214: actual checker component preserves all51 statuses, but C++ refuses three changed escape diagnostics (E397 instead of E091). This failure is preserved and corrected by separating semantic poison from storage errors.
 -19225: COMPLETED0 in1m36, batch MaxRSS2057224KiB,2CPU/4GiB. Exact final source passes storage512/4097/24+hardening and resource/semantic controls in modes0/1. Checker matrix passes51 (21positive/30negative), all original diagnostic codes, and7 wrong-output refusals;129/160/512 pass, balanced24 passes and asymmetry24 produces E040. Source guards and required outputs pass. Versioned receipt subset is in19225/.
--19228: raw BFS build submitted only after19225 passed, with afterok dependency plus READY/source/seed verification. Full lowering/native and original BigFrame acceptance remain pending.
+-19228: build0 after22m11; exact raw826d9c18efbc8dc878633c355a8a1e76985aa40fa7faa47490e3544ecddb9143. Both modes pass all51 raw checks/compilations and21 positive native cases, all wrong-output controls, plus capacity and deep-branch gates. Original BigFrame check/compile pass in both modes, both baseline and immutable75d library overlay. Native fails181 (arena full) in mode0 and139 (SIGSEGV) in mode1. Job correctly FAILED1 after29m18; every final source/seed/compiler guard passes.
+-19246: derived prefixes100/160/200/240/320/512 compile and run0 in mode1; these are diagnostics, not full-witness acceptance.
+-19255/19258: full-body marker derivatives reproduce139 and locate it in the original line775 call to bf_rolling_max_by. Removing only the inserted println statements restores the exact original SHA.
+-19264: standalone gsf100k rolling-max reduction also SIGSEGV139 in both modes. Observable lhs()/rhs() witness prints RHS_VISITED even when lhs is false in both modes, establishing eager && in raw826d. No library workaround or test alteration was applied; root owns upstream ADR014 integration.
 
 The C++23 reference for the storage component checks required output markers. It is an artifact guard, not an independent mathematical or layout model.
 
@@ -41,4 +44,4 @@ Worktree base12f277c8acbf8890fd58aa8a196910a38510a284. The full build copies sea
 
 Revision03 final borrow SHA256 d5559a728fd43d40c8b3ac8e36fc9f02648ed39816466a014c282636ac441220; merged checker remains fd9b97d61fa3660dafea578c726671b248a4b0b3003fd3f392ca8c4abc54a094. Revision03 checks errors after linear-scope traversal and preserves the reason of standalone source-list failures. Its semantic/storage distinction preserves all51 original diagnostics. The source/hash manifests distinguish it from earlier components. Build uses exact seed9cf, loop regions0 and no cache. Both loop-region modes and all existing returned-loan witnesses remain required.
 
-Reproducible gates live in tests/fixtures/wave4_borrow_capacity: gate_storage.sh, gate_checker_component.sh (single-file checker), and gate_capacity.sh (requires rebuilt BFS compiler). Orchestration and results are in /workspace/.tmp/borrow-paged-* and /scratch/sounio-stdlib-wave3-20261027/borrow-paged-integration03. Earlier failures remain in integration01/02 and services/borrow-paged-* directories. Durable export remains open.
+Reproducible gates live in tests/fixtures/wave4_borrow_capacity: gate_storage.sh, gate_checker_component.sh (single-file checker), and gate_capacity.sh (requires rebuilt BFS compiler). Orchestration and results are in /workspace/.tmp/borrow-paged-* and /scratch/sounio-stdlib-wave3-20261027/borrow-paged-integration03. Earlier failures remain in integration01/02 and services/borrow-paged-* directories. Durable export19266 COMPLETED0 after1m32 (MaxRSS2131304KiB). Archive /orangefs/training/sounio-foundry/runs/stdlib-wave3-20261027/services/borrow-profiler-export01/borrow-profiler.tar.gz; SHA2566ee48112220c17f9008b00264e7c58eddf00afd1eee32422c06f8d1f98902edb. It includes all before/failure/cancel receipts, frozen sources, seeds/raws, marker/standalone diagnostics, profiler both modes, DSO and commit patches. gzip and archive SHA verification pass. This custody success does not turn19228 or BigFrame native into a pass.
