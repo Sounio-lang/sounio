@@ -1815,6 +1815,10 @@ fn checker_lower_named_type_mut(c: *mut Checker, path: AstPath) -> TypeEntry wit
         ty_u128()
     } else if name_wide_int_bits(name) > 0 {
         ty_wide_int(name_wide_int_bits(name), (name.buf[0] as i64) == 105)
+    } else if path.seg_count==1 && name_eq(name,make_name("WorkerFnI64")) {
+        ty_worker_fn_i64()
+    } else if path.seg_count==1 && name_eq(name,make_name("WorkerFnF64")) {
+        ty_worker_fn_f64()
     } else if name_is_dsep_proof(name) {
         ty_dsep_proof()
     } else if checker_name_is_type_param_in_scope(c, name) {
@@ -5665,6 +5669,7 @@ fn struct_field_list_has_direct_self_ref(opt: Option<Box<FieldInfoList> >, self_
 }
 
 fn checker_collect_struct_def_inplace(c: *mut Checker, name: Name, opt: Option<Box<StructDef> >, visibility: Visibility, defining_module: AstPath) with Mut, Panic, Div, Alloc, IO {
+    if checker_worker_type_name(name) {let _refused=checker_worker_refused(c,"opaque capability type names cannot be declared as source structs");return}
     match opt {
         Some(sd) => {
             let tp_result = collect_type_params((*sd).type_params)
@@ -10789,6 +10794,7 @@ fn knowledge_struct_lit_apply_fields(base: TypeEntry, fields: Option<Box<StructF
 
 fn checker_check_struct_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     let struct_name = checker_copy_string_list_to_name(e.path.segments)
+    if checker_worker_type_name(struct_name) {return checker_worker_refused(c,"opaque capabilities have no struct literal constructor")}
     let struct_idx = struct_table_find((*c).structs, struct_name)
     if struct_idx >= 0 {
         let si = struct_table_get((*c).structs, struct_idx)
@@ -12910,7 +12916,101 @@ fn checker_check_static_blob_inplace(c: *mut Checker, e: Expr) -> TypeEntry with
     checker_static_blob_type()
 }
 
+
+// Worker capabilities have no source-visible representation. This front-end
+// signature check is admission only; native emission must re-prove the FINAL IR.
+fn checker_worker_intrinsic_kind(left:Option<Box<Expr>>)->i64 with Mut,Panic,Div {
+    match left {
+        Some(callee)=>{
+            if (*callee).kind!=ExprKind::ExprIdent {return 0}
+            let name=(*callee).name
+            if name_eq(name,make_name("worker_fn_i64")) {return 1}
+            if name_eq(name,make_name("worker_fn_f64")) {return 2}
+            if name_eq(name,make_name("worker_fn_i64_raw")) {return 17}
+            if name_eq(name,make_name("worker_fn_f64_raw")) {return 18}
+        }
+        None=>{}
+    }
+    0
+}
+fn checker_worker_refused(c:*mut Checker,reason:string)->TypeEntry with Mut,IO {
+    print("error: WorkerFn capability refused: ")
+    println(reason)
+    checker_note_type_error_mut(c)
+    (*c).diag_emitted=true
+    ty_error()
+}
+fn checker_worker_type_name(name:Name)->bool with Mut,Panic,Div {
+    name_eq(name,make_name("WorkerFnI64")) || name_eq(name,make_name("WorkerFnF64"))
+}
+fn checker_worker_call_inplace(c:*mut Checker,e:Expr,kind:i64)->TypeEntry with Mut,Panic,Div,Alloc,IO {
+    if kind==17 || kind==18 {
+        // Loader-issued physical origin admission is wired with the native
+        // proof boundary. A namespace declaration cannot grant this authority.
+        return checker_worker_refused(c,"raw extraction requires the loader-issued canonical ffi::worker origin")
+    }
+    var argument:Option<Box<Expr>> = None
+    match e.args {
+        Some(first)=>{
+            match (*first).tail {Some(_)=>return checker_worker_refused(c,"constructor requires exactly one named function"),None=>{}}
+            argument=Some(Box::new((*first).head))
+        }
+        None=>return checker_worker_refused(c,"constructor requires exactly one named function")
+    }
+    match argument {
+        Some(item)=>{
+            if (*item).kind!=ExprKind::ExprIdent {return checker_worker_refused(c,"constructor requires a named function item; closures and indirect values are not capabilities")}
+            let name=(*item).name
+            var binding=(*c).env.count-1
+            while binding>=0 {
+                if name_eq((*c).env.bindings[binding as usize].name,name)
+                    && (*c).env.bindings[binding as usize].scope_depth>=1 {
+                    return checker_worker_refused(c,"local function values and captures are not named function items")
+                }
+                binding=binding-1
+            }
+            let id=checker_fn_sigs_find_inplace(c,name)
+            if id<0 {return checker_worker_refused(c,"callback does not resolve to a named function identity")}
+            if !checker_fn_sig_visible_inplace(c,id) {return checker_worker_refused(c,"callback function identity is not visible here")}
+            let sig=fn_sig_table_get((*c).fn_sigs,id)
+            if sig.is_extern || sig.is_method || sig.is_kernel || sig.is_epistemic_kernel
+                || sig.is_linear_closure || sig.linear_capture_count!=0 || sig.param_count!=1 {
+                return checker_worker_refused(c,"callback must be an ordinary, noncapturing unary function")
+            }
+            let scalar=if kind==1 {TypeKind::TyI64} else {TypeKind::TyF64}
+            if sig.return_type.kind!=scalar || sig.return_type.unit_id>=0
+                || sig.return_type.refinement_id>=0 || sig.return_type.ontology_id>=0 {
+                return checker_worker_refused(c,"callback result must have the exact scalar ABI")
+            }
+            match sig.params {
+                Some(parameter)=>{
+                    let ty=(*parameter).head.ty
+                    if ty.kind!=scalar || ty.unit_id>=0 || ty.refinement_id>=0 || ty.ontology_id>=0 {
+                        return checker_worker_refused(c,"callback parameter must have the exact scalar ABI")
+                    }
+                    match (*parameter).tail {Some(_)=>return checker_worker_refused(c,"callback parameter list is not unary"),None=>{}}
+                }
+                None=>return checker_worker_refused(c,"callback parameter list is empty")
+            }
+            var effect:i64=0
+            if sig.effect_count<0 || sig.effect_count>8 {return checker_worker_refused(c,"callback effect row is not representable")}
+            while effect<sig.effect_count {
+                let code=sig.effects[effect as usize]
+                if code!=1 && code!=3 && code!=4 {return checker_worker_refused(c,"callback declares effects outside scalar local mutation, panic and division")}
+                effect=effect+1
+            }
+            var result=if kind==1 {ty_worker_fn_i64()} else {ty_worker_fn_f64()}
+            // This records the resolved declaration, never a native certificate.
+            result.fn_sig_id=id
+            return result
+        }
+        None=>return checker_worker_refused(c,"missing callback")
+    }
+}
+
 fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    let worker_kind=checker_worker_intrinsic_kind(e.left)
+    if worker_kind!=0 {return checker_worker_call_inplace(c,e,worker_kind)}
     if call_expr_is_static_blob(e.left) { return checker_check_static_blob_inplace(c, e) }
     if checker_reject_invalid_implicit_native_builtin_arity_inplace(c, e) {
         return ty_error()
@@ -14398,6 +14498,7 @@ fn checker_check_cast_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
     match e.cast_type {
         Some(ty) => {
             let target_ty = checker_lower_type_expr_mut(c, *ty)
+            if type_is_worker_capability(src_ty) || type_is_worker_capability(target_ty) {return checker_worker_refused(c,"capabilities cannot be cast to or from source representations")}
             if (src_ty.kind == TypeKind::TyUnobserved || target_ty.kind == TypeKind::TyUnobserved)
                 && !checker_unobserved_cast_allowed(src_ty, target_ty, has_effect_id((*c).current_effects, (*c).current_effect_count, 13)) {
                 checker_report_error_at_inplace(c, e.span, 36, 0, 0, 0)
@@ -17570,6 +17671,8 @@ fn print_type_name(ty: TypeEntry) with IO, Mut, Panic, Div, Alloc {
         // is legible instead of blank.
         TypeKind::TyUnobserved => print("Unobserved")
         TypeKind::TyDsepProof => print("DsepProof")
+        TypeKind::TyWorkerFnI64 => print("WorkerFnI64")
+        TypeKind::TyWorkerFnF64 => print("WorkerFnF64")
         TypeKind::TyNever => print("!")
         TypeKind::TyError => print("<error>")
         TypeKind::TyUnknown => print("<unknown>")
@@ -24299,6 +24402,8 @@ impl Checker {
 
     fn lower_named_type(self, path: AstPath) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         let name = checker_copy_string_list_to_name(path.segments)
+        if path.seg_count==1 && name_eq(name,make_name("WorkerFnI64")) {return (self,ty_worker_fn_i64())}
+        if path.seg_count==1 && name_eq(name,make_name("WorkerFnF64")) {return (self,ty_worker_fn_f64())}
         if name_is_i8(name) {
             (self, ty_i8())
         } else if name_is_i32(name) {
@@ -29694,6 +29799,8 @@ impl Checker {
 
     fn check_call_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         var c_enum=self
+        let worker_kind=checker_worker_intrinsic_kind(e.left)
+        if worker_kind!=0 {let result=checker_worker_call_inplace((&!c_enum) as *mut Checker,e,worker_kind);return (c_enum,result)}
         if call_expr_enum_variant_ctor_enum_idx((&!c_enum) as *mut Checker,e.left)>=0 {
             let result=checker_check_call_expr_inplace((&!c_enum) as *mut Checker,e)
             return (c_enum,result)
