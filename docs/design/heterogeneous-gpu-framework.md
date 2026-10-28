@@ -1517,3 +1517,22 @@ Job 18808. The node was idle, not drained. md5 `c8287b87723ad0dc25ebd00da6e34604
 The word at offset 16 is 20 again. Byte 4 equal to 6, with displacement 8 and the wait mask on, delivered the same 17. The 42 and the 13 stayed. Offset 12 stayed 0. The 17 at offset 8 was still there.
 
 Gate. Node `gpuorangefs-r770-proxmox`, `--gres=gpu:1`, `--mem=16G`, `--cpus-per-task=4`. The 0.0018 s threshold is not moved. This cut does not pass it.
+
+
+## 59. Displacement 0 reads the stored 42 (2026-10-28, OBSERVED)
+
+The load of job 18808 had byte 4 equal to 6 and displacement 8, and stored 20. This job changes byte 5 from 8 to 0. Byte 4 stays 6. The add's wait mask stays on. The low word is `81 79 04 02 06 00 00 00`. That is the shape of `LDG.E R15, [R2.64]` at pc `0x1e40` in `token_m1`, with R4 and R2 in place of R15 and the same R2. Host byte 1573 is 0.
+
+When the load runs, slot 10, offset 0 already holds the 42 stored at slot 5. Offset 4 holds 13. Offset 8 holds 17. Offset 12 holds 0. The sum of a load from offset 0 with the 3 in R7 is 45.
+
+`token_m1` loads through that R2 before it stores. `LDG.E R15, [R2.64]` at `0x1e40` registers read barrier 3. `FFMA R27, R10, R15.reuse, -R27` at `0x1eb0` waits on mask 8. `STG.E [R2.64], R27` at `0x1ed0` waits on nobody and registers write barrier 0. R2 is not written between the load and the store. There is no load of an address this kernel just stored. A search of twenty instructions after every `STG.E` found none whose address register was still the one just stored.
+
+Job 19265. The node was idle. md5 `d6a9d4a5dd77d332c06735452ab7554e`.
+
+`OWN=42`, `OWN_ADD=13`, `OWN_SRC=17`, `OWN_WIDE=0`, `OWN_SUM=45`, `EXIT:0`.
+
+The word at offset 16, cleared before launch, came back 45. The load at displacement 0 saw the 42 written at slot 5. No extra barrier was added. The 42 and the 13 stayed. The 17 at offset 8 was still there. Offset 12 stayed 0.
+
+Across the 104 `.reuse` tags in `token_m1`, the last byte of the instruction carries one bit per source, counting from the destination. The first source is bit 2 (value 4): 24 `IADD3` and 22 `FFMA`. The second source is bit 3 (value 8): 13 `FFMA`. The third source is bit 4 (value 16): 3 `IMAD.WIDE` and 2 `IMAD`. The sum that stored 20 reads R4 once and leaves that byte at 0. This job does not set those bits.
+
+Gate. Node `gpuorangefs-r770-proxmox`, `--gres=gpu:1`, `--mem=16G`, `--cpus-per-task=4`. The 0.0018 s threshold is not moved. This cut does not pass it.
