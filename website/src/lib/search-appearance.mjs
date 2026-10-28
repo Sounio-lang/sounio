@@ -42,7 +42,7 @@ export const ENGLISH_SEARCH = {
 /** Approved S1 copy for the English self-hosted compiler page. */
 export const SELF_HOSTED_PAGE = {
   h1: 'Sounio self-hosted compiler',
-  lede: 'The Sounio compiler is written in Sounio (.sio). It parses, type-checks, lowers to an IR, runs 20+ optimization passes and emits a static Linux x86-64 ELF binary directly, with no LLVM, Cranelift or other external code generator. Linux x86-64 is the only target today.',
+  lede: 'The Sounio compiler is written in Sounio (.sio). It parses, type-checks, lowers to an IR, runs its optimization passes and emits a static Linux x86-64 ELF binary directly, with no LLVM or Cranelift on that path. Linux x86-64 is the default shipped target.',
   crumbs: ['Learn', 'Compiler', 'Self-hosted compiler'],
   author: {
     '@type': 'Person',
