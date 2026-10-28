@@ -194,7 +194,10 @@ verify_step_problems() {
   [[ "$line" =~ ^[[:space:]]{8}if: ]] && step_if=1
   [[ "$line" =~ ^[[:space:]]{8}continue-on-error: ]] && step_swallow=1
   [[ "$line" == *'||'* || "$line" == *'&&'* ]] && step_swallow=1
-  [[ "$line" =~ (^|[[:space:]])(if|elif|while|until)[[:space:]] ]] && step_swallow=1
+  [[ "$line" =~ (^|[[:space:]])(if|elif|while|until|for|case|select)[[:space:]] ]] && step_swallow=1
+  # A function body is parsed, not run, until something calls it. The verify
+  # text can sit in that body while `cp` still runs.
+  [[ "$line" =~ (^|[[:space:]])function[[:space:]] || "$line" == *'()'* ]] && step_swallow=1
   [[ "$line" =~ set[[:space:]]+\+([^[:space:]]*e|o[[:space:]]+[\'\"]?errexit) ]] && step_swallow=1
   # `!=` is a comparison. Any other `!` in this step negates a command.
   bang=${line//!=/}
@@ -557,6 +560,15 @@ EOF
  expect_workflow_problem "$bad" verify-skippable
  bad="$work/wf-verify-quoted-errexit.yml"
  awk 'BEGIN{arm=0} /^  madaros-current-source-deref-f64:/{arm=1} arm && /stdlib_deep_compiler_receipt.sh verify/{print "          set +o '\''errexit'\''"; arm=0} {print}' "$base" >"$bad"
+ expect_workflow_problem "$bad" verify-skippable
+ bad="$work/wf-verify-for.yml"
+ awk 'BEGIN{arm=0} /^  madaros-current-source-deref-f64:/{arm=1} arm && /stdlib_deep_compiler_receipt.sh verify/{print "          for x in; do"; arm=0} {print}' "$base" >"$bad"
+ expect_workflow_problem "$bad" verify-skippable
+ bad="$work/wf-verify-case.yml"
+ awk 'BEGIN{arm=0} /^  madaros-current-source-deref-f64:/{arm=1} arm && /stdlib_deep_compiler_receipt.sh verify/{print "          case 0 in 1)"; arm=0} {print}' "$base" >"$bad"
+ expect_workflow_problem "$bad" verify-skippable
+ bad="$work/wf-verify-function.yml"
+ awk 'BEGIN{arm=0} /^  madaros-current-source-deref-f64:/{arm=1} arm && /stdlib_deep_compiler_receipt.sh verify/{print "          verify_later() {"; arm=0} {print}' "$base" >"$bad"
  expect_workflow_problem "$bad" verify-skippable
  bad="$work/wf-verify.yml"
  awk 'BEGIN{skip=0} /madaros-current-source-deref-f64/{skip=1} skip && /stdlib_deep_compiler_receipt.sh verify/{skip=0; next} {print}' "$base" >"$bad"
