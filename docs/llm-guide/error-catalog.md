@@ -469,3 +469,4 @@ page is not a fresh execution receipt.
 | E272 | lexer (Madaros) | error | unterminated block comment: a `/*` (block comments nest) reaches end of file with its depth above zero; reported at the opening `/*` instead of silently swallowing the rest of the file | — |
 | E273 | lexer (Madaros) | error | unterminated string literal: a `"` reaches end of file without its closing quote; reported at the opening quote | — |
 | E274 | lexer (Madaros) | error | invalid escape sequence in a string literal: only `\n` `\t` `\r` `\0` `\\` `\"` and `\xHH` (two hex digits) are escapes; any other backslash pair used to compile as the bare character | — |
+| E275 | type-checker/ownership | error | borrow checker capacity exceeded: a linear or affine binding was not registered | — |

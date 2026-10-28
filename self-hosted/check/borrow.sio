@@ -152,8 +152,13 @@ impl BorrowEnv {
         env
     }
 
-    // Register a variable for borrow tracking
-    fn track(self, name: Name, is_linear: bool) -> BorrowEnv with Mut, Panic, Div {
+    // Register a variable for borrow tracking.
+    // Returns (env, 0) when the binding is recorded, or when a non-linear name
+    // is dropped because the table is full (pre-existing borrow-precision limit).
+    // A linear or affine binding that does not fit returns E275: the 128-entry
+    // table is not enlarged (it sits on the checker frame), and silently
+    // dropping the name lets a later use skip E268 / E039.
+    fn track(self, name: Name, is_linear: bool) -> (BorrowEnv, i64) with Mut, Panic, Div {
         var env = self
         if env.count < 128 {
             env.entries[env.count] = BorrowEntry {
@@ -167,13 +172,21 @@ impl BorrowEnv {
                 provenance: 0,
             }
             env.count = env.count + 1
+            return (env, 0)
         }
-        env
+        if is_linear {
+            return (env, 275)
+        }
+        (env, 0)
     }
 
     // #1263: mark the most recent binding of `name` as affine. Affine values are
-    // tracked like linear ones for the second-use check (consume_linear -> E039)
-    // but are exempt from the must-consume check (E040) and the branch merge.
+    // tracked like linear ones for the second-use check (E268 if affine, E039
+    // if linear) but are exempt from the must-consume check (E040). The if-join ORs
+    // their consumed flag (see checker_merge_if_branches_inplace): disagreement
+    // between arms is legal, a later use on the arm that spent the value is not.
+    // Callers must not call this when track returned E275 — find would otherwise
+    // stamp an outer binding of the same name.
     fn mark_affine(self, name: Name) -> BorrowEnv with Mut, Panic, Div {
         var env = self
         let idx = env.find(name)
