@@ -7,7 +7,7 @@ fn worker_probe_signature(source:i64,params:i64,refs:i64,abi:i64)->Box<WorkerSou
     Box::new(WorkerSourceSignature {id:source,owner:0,name:empty_name(),start:0,end:1,param_count:params,refs:refs,cap_i64:0,cap_f64:0,cap_return:0,float_params:0,float_return:false,root_abi:abi,return_class:1,callback_abi:true,next:None})
 }
 fn worker_probe_binding(key:i64,fi:i64,source:i64,params:i64,refs:i64,abi:i64,trusted:bool) with Mut,Panic,Div,Alloc {
-    WORKER_LOWER_BINDINGS=Some(Box::new(WorkerLowerBinding {module_key:key,fn_id:fi,source_epoch:77,signature:worker_probe_signature(source,params,refs,abi),fresh:true,trusted_worker:trusted,next:WORKER_LOWER_BINDINGS}))
+    WORKER_LOWER_BINDINGS=Some(worker_lower_store_binding(WorkerLowerBinding {module_key:key,fn_id:fi,source_epoch:77,signature:worker_probe_signature(source,params,refs,abi),fresh:true,trusted_worker:trusted,next:WORKER_LOWER_BINDINGS}))
 }
 fn worker_probe_emit(function:&!IrFunction,instruction:IrInstr) with Mut,Panic,Div {
     if ir_region_push(&!(*function).region,instruction)==0 {(*function).instr_count=(*function).instr_count+1}
@@ -50,6 +50,8 @@ fn worker_probe_contract_without_intrinsics(original:&IrModule)->i64 with Mut,Pa
     3
 }
 pub fn worker_ir_component()->i32 with Mut,Panic,Div,Alloc,IO {
+    if !worker_probe_pages() {return 1}
+    if !worker_probe_retirement() {print("WORKER_RETIREMENT_FAILED\n");return 1}
     worker_compilation_begin()
     worker_lower_backend_opt_in()
     var module=Box::new(ir_empty_module())
@@ -81,7 +83,7 @@ pub fn worker_ir_component()->i32 with Mut,Panic,Div,Alloc,IO {
     ir_module_fn_set(&!(*module),1,*main)
     worker_probe_binding(key,0,10,1,0,1,false)
     worker_probe_binding(key,1,20,0,0,0,false)
-    WORKER_LOWER_INTENTS=Some(Box::new(WorkerLowerIntent {token:123,source_epoch:77,caller:20,start:2,end:3,target:10,abi:1,next:None}))
+    WORKER_LOWER_INTENTS=Some(worker_lower_store_intent(WorkerLowerIntent {token:123,source_epoch:77,caller:20,start:2,end:3,target:10,abi:1,next:None}))
     worker_backend_begin(&(*module))
     worker_backend_note_builtin(key,ctor,2001)
     worker_backend_note_builtin(key,raw,2017)
@@ -278,4 +280,59 @@ fn worker_probe_external_slots(module:&!IrModule)->i64 with Mut,Panic,Div,Alloc,
     if !worker_validate_capability_flow(&(*module)) {return 0}
     println("WORKER_EXTERN_NAMESPACE_OK ordinary_empty=1 opaque_empty_refused=1")
     2
+}
+fn worker_probe_retirement()->bool with Mut,Panic,Div,Alloc,IO {
+    worker_compilation_begin()
+    worker_lower_backend_opt_in()
+    let first=worker_probe_signature(700,1,0,1)
+    let second=worker_probe_signature(701,1,0,1)
+    let mark=__arena_mark()
+    WORKER_LOWER_BINDINGS=Some(worker_lower_store_binding(WorkerLowerBinding {module_key:100,fn_id:0,source_epoch:77,signature:first,fresh:true,trusted_worker:false,next:None}))
+    WORKER_LOWER_INTENTS=Some(worker_lower_store_intent(WorkerLowerIntent {token:700,source_epoch:77,caller:700,start:3,end:4,target:700,abi:1,next:None}))
+    worker_lower_note_remap(100,0,200,4)
+    worker_lower_note_remap(200,4,300,9)
+    worker_lower_retire_dependencies(300)
+    if WORKER_LOWER_BAD || WORKER_LOWER_REMAP_COUNT!=0 {return false}
+    __arena_reset(mark)
+    // Reuse the retired table key for a different physical source identity.
+    WORKER_LOWER_BINDINGS=Some(worker_lower_store_binding(WorkerLowerBinding {module_key:100,fn_id:0,source_epoch:77,signature:second,fresh:true,trusted_worker:false,next:WORKER_LOWER_BINDINGS}))
+    match worker_lower_binding(300,9,0) {Some(binding)=>{if (*(*binding).signature).id!=700 || !(*binding).fresh {return false}},None=>return false}
+    match worker_lower_binding(100,0,0) {Some(binding)=>{if (*(*binding).signature).id!=701 {return false}},None=>return false}
+    match worker_lower_binding(200,4,0) {Some(_)=>return false,None=>{}}
+    match worker_identity_intent(700) {Some(intent)=>{if (*intent).target!=700 || (*intent).start!=3 {return false}},None=>return false}
+    worker_lower_note_remap(100,0,300,9)
+    match worker_lower_binding(300,9,0) {Some(_)=>{},None=>{}}
+    if !WORKER_LOWER_BAD {return false}
+    print("WORKER_RETIREMENT_OK arena_reset=1 chain_consolidated=1 reused_key_isolated=1 retired_edge_absent=1 conflicting_reuse_refused=1\n")
+    worker_compilation_begin()
+    true
+}
+fn worker_probe_pages()->bool with Mut,Panic,Div,Alloc,IO {
+    worker_compilation_begin()
+    let sig=worker_probe_signature(991,1,0,1)
+    var index:i64=0
+    while index<1025 {
+        WORKER_LOWER_BINDINGS=Some(worker_lower_store_binding(WorkerLowerBinding {module_key:999,fn_id:index,source_epoch:77,signature:sig,fresh:true,trusted_worker:false,next:WORKER_LOWER_BINDINGS}))
+        WORKER_LOWER_INTENTS=Some(worker_lower_store_intent(WorkerLowerIntent {token:index+1,source_epoch:77,caller:991,start:index,end:index+1,target:991,abi:1,next:WORKER_LOWER_INTENTS}))
+        index=index+1
+    }
+    if WORKER_LOWER_BAD || WORKER_BINDING_PAGES[0]==0 || WORKER_BINDING_PAGES[1]==0 || WORKER_BINDING_PAGES[0]==WORKER_BINDING_PAGES[1] {return false}
+    index=0
+    while index<1025 {
+        match worker_lower_binding_direct(999,index) {Some(binding)=>{if (*binding).fn_id!=index || (*(*binding).signature).id!=991 || !(*binding).fresh {return false}},None=>return false}
+        match worker_identity_intent(index+1) {Some(intent)=>{if (*intent).start!=index || (*intent).end!=index+1 || (*intent).abi!=1 {return false}},None=>return false}
+        index=index+1
+    }
+    let first_page=WORKER_BINDING_PAGES[0]
+    WORKER_BINDING_USED=131072
+    let rejected=worker_lower_store_binding(WorkerLowerBinding {module_key:1,fn_id:0,source_epoch:77,signature:sig,fresh:true,trusted_worker:false,next:None})
+    if rejected as i64!=0 || !WORKER_LOWER_BAD {return false}
+    worker_compilation_begin()
+    if WORKER_BINDING_PAGES[0]!=first_page || WORKER_BINDING_USED!=0 || WORKER_INTENT_USED!=0 || WORKER_LOWER_BAD {return false}
+    WORKER_INTENT_USED=131072
+    let rejected_intent=worker_lower_store_intent(WorkerLowerIntent {token:1,source_epoch:77,caller:991,start:0,end:1,target:991,abi:1,next:None})
+    if rejected_intent as i64!=0 || !WORKER_LOWER_BAD {return false}
+    worker_compilation_begin()
+    print("WORKER_METADATA_PAGES_OK records=1025 per_family=2pages budget_refusals=2 pages_reused=1\n")
+    true
 }

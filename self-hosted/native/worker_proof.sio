@@ -610,7 +610,7 @@ struct WorkerLowerBinding {
     signature:Box<WorkerSourceSignature>,
     fresh:bool,
     trusted_worker:bool,
-    next:Option<Box<WorkerLowerBinding>>,
+    next:Option<*mut WorkerLowerBinding>,
 }
 struct WorkerLowerIntent {
     token:i64,
@@ -620,13 +620,44 @@ struct WorkerLowerIntent {
     end:i64,
     target:i64,
     abi:i64,
-    next:Option<Box<WorkerLowerIntent>>,
+    next:Option<*mut WorkerLowerIntent>,
+}
+// Compiler-private metadata lives outside the reclaimable Box arena. Fixed-size
+// pages are retained and reused by compilation_begin; 16 MiB per record family
+// is a hard process budget. Never interpret these addresses as user authority.
+var WORKER_BINDING_PAGES:[i64;128]=[0;128]
+var WORKER_INTENT_PAGES:[i64;128]=[0;128]
+var WORKER_BINDING_USED:i64=0
+var WORKER_INTENT_USED:i64=0
+fn worker_lower_store_binding(value:WorkerLowerBinding)->*mut WorkerLowerBinding with Mut,Panic,Div,Alloc {
+    if WORKER_BINDING_USED>=131072 {WORKER_LOWER_BAD=true;return 0 as *mut WorkerLowerBinding}
+    let index=WORKER_BINDING_USED
+    let page=index/1024
+    if WORKER_BINDING_PAGES[page as usize]==0 {WORKER_BINDING_PAGES[page as usize]=heap_alloc(131072) as i64}
+    let base=WORKER_BINDING_PAGES[page as usize]
+    if base<=0 {WORKER_LOWER_BAD=true;return 0 as *mut WorkerLowerBinding}
+    let cell=(base+(index%1024)*128) as *mut WorkerLowerBinding;
+    *cell=value
+    WORKER_BINDING_USED=index+1
+    cell
+}
+fn worker_lower_store_intent(value:WorkerLowerIntent)->*mut WorkerLowerIntent with Mut,Panic,Div,Alloc {
+    if WORKER_INTENT_USED>=131072 {WORKER_LOWER_BAD=true;return 0 as *mut WorkerLowerIntent}
+    let index=WORKER_INTENT_USED
+    let page=index/1024
+    if WORKER_INTENT_PAGES[page as usize]==0 {WORKER_INTENT_PAGES[page as usize]=heap_alloc(131072) as i64}
+    let base=WORKER_INTENT_PAGES[page as usize]
+    if base<=0 {WORKER_LOWER_BAD=true;return 0 as *mut WorkerLowerIntent}
+    let cell=(base+(index%1024)*128) as *mut WorkerLowerIntent;
+    *cell=value
+    WORKER_INTENT_USED=index+1
+    cell
 }
 var WORKER_SOURCE_EPOCH:i64=0
 var WORKER_LOWER_ENABLED:bool=false
 var WORKER_LOWER_BAD:bool=false
-var WORKER_LOWER_BINDINGS:Option<Box<WorkerLowerBinding>> = None
-var WORKER_LOWER_INTENTS:Option<Box<WorkerLowerIntent>> = None
+var WORKER_LOWER_BINDINGS:Option<*mut WorkerLowerBinding> = None
+var WORKER_LOWER_INTENTS:Option<*mut WorkerLowerIntent> = None
 var WORKER_LOWER_NEXT_TOKEN:i64=1
 var WORKER_LOWER_REMAP_COUNT:i64=0
 var WORKER_REMAP_FROM_KEY:[i64;131072]=[0;131072]
@@ -637,6 +668,8 @@ pub fn worker_lower_backend_opt_in() with Mut {WORKER_LOWER_ENABLED=true}
 pub fn worker_lower_backend_enabled()->bool with Mut {WORKER_LOWER_ENABLED}
 pub fn worker_compilation_begin() with Mut {
     worker_certified_reset()
+    WORKER_BINDING_USED=0
+    WORKER_INTENT_USED=0
     WORKER_LOWER_BINDINGS=None
     WORKER_LOWER_INTENTS=None
     WORKER_LOWER_BAD=false
@@ -654,10 +687,11 @@ fn worker_source_signature(owner:i64,name:Name,span:Span)->Option<Box<WorkerSour
     }}
     None
 }
-fn worker_lower_binding_direct(module_key:i64,fn_id:i64)->Option<Box<WorkerLowerBinding>> with Mut,Panic,Div,Alloc {
+fn worker_lower_binding_direct(module_key:i64,fn_id:i64)->Option<*mut WorkerLowerBinding> with Mut,Panic,Div,Alloc {
     var cursor=WORKER_LOWER_BINDINGS
     while true {match cursor {
         Some(binding)=>{
+            if binding as i64<=0 {WORKER_LOWER_BAD=true;return None}
             if (*binding).module_key==module_key && (*binding).fn_id==fn_id {return Some(binding)}
             cursor=(*binding).next
         }
@@ -665,7 +699,7 @@ fn worker_lower_binding_direct(module_key:i64,fn_id:i64)->Option<Box<WorkerLower
     }}
     None
 }
-fn worker_lower_binding(module_key:i64,fn_id:i64,depth:i64)->Option<Box<WorkerLowerBinding>> with Mut,Panic,Div,Alloc {
+fn worker_lower_binding(module_key:i64,fn_id:i64,depth:i64)->Option<*mut WorkerLowerBinding> with Mut,Panic,Div,Alloc {
     if depth>=256 {WORKER_LOWER_BAD=true;return None}
     var result=worker_lower_binding_direct(module_key,fn_id)
     var i=WORKER_LOWER_REMAP_COUNT-1
@@ -703,7 +737,7 @@ pub fn worker_lower_begin_body(module_key:i64,fn_id:i64,owner:i64,name:Name,span
                 }
                 None=>{}
             }
-            WORKER_LOWER_BINDINGS=Some(Box::new(WorkerLowerBinding {
+            WORKER_LOWER_BINDINGS=Some(worker_lower_store_binding(WorkerLowerBinding {
                 module_key:module_key,fn_id:fn_id,source_epoch:WORKER_SOURCE_EPOCH,
                 signature:sig,fresh:false,trusted_worker:trusted_worker,next:WORKER_LOWER_BINDINGS
             }))
@@ -726,6 +760,52 @@ pub fn worker_lower_note_remap(from_key:i64,from_fn:i64,to_key:i64,to_fn:i64) wi
     WORKER_REMAP_TO_FN[i as usize]=to_fn
     WORKER_LOWER_REMAP_COUNT=i+1
 }
+// Called immediately before dependency arena reclamation. Materialize every
+// destination identity, then remove dependency keys and lazy remap edges. A
+// reused source table address starts without the previous instance's bindings.
+pub fn worker_lower_retire_dependencies(acc_key:i64) with Mut,Panic,Div,Alloc {
+    if !WORKER_LOWER_ENABLED {return}
+    if acc_key<=0 {WORKER_LOWER_BAD=true;return}
+    var i:i64=0
+    while i<WORKER_LOWER_REMAP_COUNT {
+        let key=WORKER_REMAP_TO_KEY[i as usize]
+        let id=WORKER_REMAP_TO_FN[i as usize]
+        if key==acc_key {
+            match worker_lower_binding(key,id,0) {
+                Some(binding)=>{
+                    match worker_lower_binding_direct(key,id) {
+                        Some(old)=>{
+                            if (*old).source_epoch!=(*binding).source_epoch || (*(*old).signature).id!=(*(*binding).signature).id || (*old).fresh!=(*binding).fresh || (*old).trusted_worker!=(*binding).trusted_worker {WORKER_LOWER_BAD=true}
+                        }
+                        None=>{
+                            WORKER_LOWER_BINDINGS=Some(worker_lower_store_binding(WorkerLowerBinding {module_key:key,fn_id:id,source_epoch:(*binding).source_epoch,signature:(*binding).signature,fresh:(*binding).fresh,trusted_worker:(*binding).trusted_worker,next:WORKER_LOWER_BINDINGS}))
+                        }
+                    }
+                }
+                None=>{}
+            }
+        }
+        i=i+1
+    }
+    WORKER_LOWER_REMAP_COUNT=0
+    var cursor=WORKER_LOWER_BINDINGS
+    var retained:Option<*mut WorkerLowerBinding> = None
+    var visited:i64=0
+    while true {match cursor {
+        Some(binding)=>{
+            if binding as i64<=0 || visited>=131072 {WORKER_LOWER_BAD=true;break}
+            let next=(*binding).next
+            if (*binding).module_key==acc_key {
+                (*binding).next=retained
+                retained=Some(binding)
+            }
+            visited=visited+1
+            cursor=next
+        }
+        None=>break
+    }}
+    WORKER_LOWER_BINDINGS=retained
+}
 pub fn worker_lower_constructor_token(module_key:i64,caller_fn:i64,span:Span,abi:i64)->i64 with Mut,Panic,Div,Alloc {
     if !WORKER_LOWER_ENABLED || WORKER_LOWER_BAD || !WORKER_SOURCE_CONTEXT_READY || !WORKER_SOURCE_CHECKED_OK {return 0}
     match worker_lower_binding_direct(module_key,caller_fn) {
@@ -739,7 +819,7 @@ pub fn worker_lower_constructor_token(module_key:i64,caller_fn:i64,span:Span,abi
                         if WORKER_LOWER_NEXT_TOKEN<=0 || WORKER_LOWER_NEXT_TOKEN>=2147483647 {WORKER_LOWER_BAD=true;return 0}
                         let token=WORKER_LOWER_NEXT_TOKEN
                         WORKER_LOWER_NEXT_TOKEN=token+1
-                        WORKER_LOWER_INTENTS=Some(Box::new(WorkerLowerIntent {
+                        WORKER_LOWER_INTENTS=Some(worker_lower_store_intent(WorkerLowerIntent {
                             token:token,source_epoch:WORKER_SOURCE_EPOCH,caller:caller,start:span.start,end:span.end,
                             target:(*request).target,abi:abi,next:WORKER_LOWER_INTENTS
                         }))
@@ -886,10 +966,10 @@ fn worker_cfg_defined(function:&IrFunction,reg:i64,use_at:i64)->bool with Mut,Pa
     let state=WORKER_CFG_IN[use_at as usize]
     state==0 || state==2
 }
-fn worker_identity_intent(token:i64)->Option<Box<WorkerLowerIntent>> with Mut,Panic,Div,Alloc {
+fn worker_identity_intent(token:i64)->Option<*mut WorkerLowerIntent> with Mut,Panic,Div,Alloc {
     var cursor=WORKER_LOWER_INTENTS
     while true {match cursor {
-        Some(intent)=>{if (*intent).token==token {return Some(intent)};cursor=(*intent).next}
+        Some(intent)=>{if intent as i64<=0 {WORKER_LOWER_BAD=true;return None};if (*intent).token==token {return Some(intent)};cursor=(*intent).next}
         None=>return None
     }}
     None
@@ -978,9 +1058,9 @@ pub fn worker_validate_constructor_identities(module:&IrModule)->bool with Mut,P
                         let target=worker_identity_ref(argument,function.reg_count)
                         if target<0 || target>=(*module).fn_count {return worker_identity_fail(9)}
                         if !worker_cfg_defined(&function,argument,at) {return worker_identity_fail(21)}
-                        var intent:Option<Box<WorkerLowerIntent>> = worker_identity_intent(instruction.imm_i64)
-                        var caller:Option<Box<WorkerLowerBinding>> = worker_lower_binding(key,fi,0)
-                        var callback:Option<Box<WorkerLowerBinding>> = worker_lower_binding(key,target,0)
+                        var intent:Option<*mut WorkerLowerIntent> = worker_identity_intent(instruction.imm_i64)
+                        var caller:Option<*mut WorkerLowerBinding> = worker_lower_binding(key,fi,0)
+                        var callback:Option<*mut WorkerLowerBinding> = worker_lower_binding(key,target,0)
                         match intent {Some(wanted)=>{match caller {Some(from)=>{match callback {Some(to)=>{
                             if !(*from).fresh || !(*to).fresh || WORKER_LOWER_BAD {return worker_identity_fail(10)}
                             if (*wanted).source_epoch!=(*from).source_epoch || (*wanted).source_epoch!=(*to).source_epoch {return worker_identity_fail(11)}
@@ -1286,7 +1366,7 @@ pub fn worker_validate_capability_flow(module:&IrModule)->bool with Mut,Panic,Di
         let function=ir_fn_get(module,fi)
         if function.reg_count<0 || function.reg_count>65536 || function.param_count<0 || function.param_count>64 {return worker_cap_fail(202,fi,0-1)}
         if function.instr_count>0 && !ir_function_regs_are_valid(&function) {return worker_cap_fail(203,fi,0-1)}
-        var own:Option<Box<WorkerLowerBinding>> = worker_lower_binding(key,fi,0)
+        var own:Option<*mut WorkerLowerBinding> = worker_lower_binding(key,fi,0)
         var cap_i64:i64=0
         var cap_f64:i64=0
         var cap_return:i64=0
@@ -1496,7 +1576,7 @@ pub fn worker_prepare_clones(module:&!IrModule)->bool with Mut,Panic,Div,Alloc {
             (*module).fn_count=id+1
             WORKER_CLONE_OF[i as usize]=id
             match worker_lower_binding(key,i,0) {Some(binding)=>{
-                WORKER_LOWER_BINDINGS=Some(Box::new(WorkerLowerBinding {module_key:key,fn_id:id,source_epoch:(*binding).source_epoch,signature:(*binding).signature,fresh:true,trusted_worker:false,next:WORKER_LOWER_BINDINGS}))
+                WORKER_LOWER_BINDINGS=Some(worker_lower_store_binding(WorkerLowerBinding {module_key:key,fn_id:id,source_epoch:(*binding).source_epoch,signature:(*binding).signature,fresh:true,trusted_worker:false,next:WORKER_LOWER_BINDINGS}))
             },None=>return worker_closure_fail(304,i,0-1)}
         }
         i=i+1
