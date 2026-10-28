@@ -5,6 +5,8 @@
 # (ADR-008). Classifications are heuristic - overrides may be supplied later.
 #
 # Output: artifacts/audit/claim_oracle_inventory.tsv
+# Human overrides: artifacts/audit/claim_oracle_inventory.overrides.tsv
+# (same columns; last row per gate_id wins; applied after the scan)
 # Schema: docs/decisions/claim_oracle_inventory.schema.md
 #
 # Exit 0 always on successful scan (inventory is observational).
@@ -292,6 +294,30 @@ classify_one() {
     classify_one "$p"
   done
 } > "$OUT_TSV"
+
+# Apply human overrides (ADR-008 schema: same columns, last wins per gate_id)
+OVERRIDES_TSV="$OUT_DIR/claim_oracle_inventory.overrides.tsv"
+if [[ -f "$OVERRIDES_TSV" ]]; then
+  MERGED_TSV="$(mktemp)"
+  awk -F'\t' '
+    NR==FNR {
+      if ($0 ~ /^#/ || $1 == "gate_id" || NF < 10) next
+      ovr[$1] = $0
+      next
+    }
+    /^#/ || $1 == "gate_id" { print; next }
+    ($1 in ovr) {
+      if (!seen[$1]) { print ovr[$1]; seen[$1] = 1 }
+      next
+    }
+    { print }
+    END {
+      for (k in ovr) if (!seen[k]) print ovr[k]
+    }
+  ' "$OVERRIDES_TSV" "$OUT_TSV" > "$MERGED_TSV"
+  mv "$MERGED_TSV" "$OUT_TSV"
+  echo "[claim-oracle-inventory] applied overrides from $OVERRIDES_TSV"
+fi
 
 # Summary
 total=$(grep -v '^#' "$OUT_TSV" | grep -v '^gate_id' | wc -l | tr -d ' ')

@@ -64,6 +64,7 @@ Grounded in: commit, artifact, or empirical result
 | 016 | Epistemic merge, contradiction, typed zeros and provenance trust | accepted | 2026-10-24 |
 | 018 | Release trains, editions and the compatibility contract | accepted | 2026-10-24 |
 | 020 | Eight rulings from the 2026-10-25 decision session (D-15, D-16, D-20, D-22, D-24–D-27) | accepted | 2026-10-25 |
+| 021 | Oracle stack for the Sounio-to-FPGA backend (U250) | experimental | 2026-10-26 |
 
 Reserved by open pull requests (not yet on `main`):
 
@@ -73,7 +74,7 @@ Reserved by open pull requests (not yet on `main`):
 | 017 | Single authority for IR memory effects (`ir::effects`) | #2686 (renumbered from a colliding 013) |
 | 019 | Certified intervals | #3101 |
 
-The next free number is **021**.
+The next free number is **022**.
 
 ## Files
 
@@ -94,6 +95,7 @@ The next free number is **021**.
 - [ADR-016](./adr-016-epistemic-merge-and-provenance-trust.md)
 - [ADR-018](./adr-018-release-cycle-and-versioning.md)
 - [ADR-020](./adr-020-rulings-2026-10-25.md)
+- [ADR-021](./adr-021-fpga-backend-oracle-stack.md)
 - [Claim-oracle inventory schema](./claim_oracle_inventory.schema.md)
 
 ## Related Docs
