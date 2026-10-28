@@ -143,13 +143,15 @@ scan_job_body() {
  done <<<"$blob"
  printf '%s %s %s %s %s %s %s %s\n' "$uploads" "$downloads" "$upload_at" "$download_at" "$verify_at" "$prepare_at" "$build_runs" "$unattached"
 }
-# A verify command inside `if: false` (or any other step condition) is not a
-# consumer. Skipping that step also skips placing the verified compiler, and
-# the f64 gate then builds another ELF while this check stays green.
+# A verify command the step can skip or ignore is not a consumer. A YAML `if:`,
+# `continue-on-error`, a shell `if`, `set +e`, or `&&` / `||` around the command
+# lets receipt failure pass. Placement is then skipped and the f64 gate builds
+# another ELF while this check stays green. `set -e` does not save a command
+# that is part of an AND/OR list or a shell conditional.
 verify_step_problems() {
- local blob=$1 job=$2 line in_step=0 step_if=0 step_verify=0
+ local blob=$1 job=$2 line in_step=0 step_if=0 step_swallow=0 step_verify=0
  flush_verify_step() {
-  if [[ "$in_step" == 1 && "$step_verify" == 1 && "$step_if" == 1 ]]; then
+  if [[ "$in_step" == 1 && "$step_verify" == 1 && ( "$step_if" == 1 || "$step_swallow" == 1 ) ]]; then
    printf 'verify-skippable %s\n' "$job"
   fi
  }
@@ -159,13 +161,22 @@ verify_step_problems() {
    flush_verify_step
    in_step=1
    step_if=0
+   step_swallow=0
    step_verify=0
    # `- if: false` is a step condition on the opening line, not an eight-space key.
    [[ "$line" =~ ^[[:space:]]{6}-[[:space:]]+if: ]] && step_if=1
+   [[ "$line" =~ ^[[:space:]]{6}-[[:space:]]+continue-on-error: ]] && step_swallow=1
   fi
   [[ "$in_step" == 1 ]] || continue
   # Step keys sit at eight spaces. A shell `if` inside `run: |` is indented further.
   [[ "$line" =~ ^[[:space:]]{8}if: ]] && step_if=1
+  [[ "$line" =~ ^[[:space:]]{8}continue-on-error: ]] && step_swallow=1
+  [[ "$line" == *'||'* || "$line" == *'&&'* ]] && step_swallow=1
+  [[ "$line" =~ (^|[[:space:]])(if|elif|while|until)[[:space:]] ]] && step_swallow=1
+  [[ "$line" =~ set[[:space:]]+\+([^[:space:]]*e|o[[:space:]]+errexit) ]] && step_swallow=1
+  if [[ "$line" =~ ^[[:space:]]*(-\ )?shell: ]]; then
+   [[ "$line" == *'-e'* || "$line" == *'errexit'* ]] || step_swallow=1
+  fi
   [[ "$line" == *"stdlib_deep_compiler_receipt.sh verify"* ]] && step_verify=1
  done <<<"$blob"
  flush_verify_step
@@ -393,6 +404,21 @@ EOF
  expect_workflow_problem "$bad" verify-skippable
  bad="$work/wf-verify-if-open.yml"
  awk 'BEGIN{arm=0} /^  madaros-current-source-deref-f64:/{arm=1} arm && /name: Verify/{print "      - if: false"; arm=0; next} {print}' "$base" >"$bad"
+ expect_workflow_problem "$bad" verify-skippable
+ bad="$work/wf-verify-or.yml"
+ awk 'BEGIN{arm=0} /^  madaros-current-source-deref-f64:/{arm=1} arm && /\$GITHUB_SHA"/{sub(/"$/, "\" || true"); arm=0} {print}' "$base" >"$bad"
+ expect_workflow_problem "$bad" verify-skippable
+ bad="$work/wf-verify-and.yml"
+ awk 'BEGIN{arm=0} /^  madaros-current-source-deref-f64:/{arm=1} arm && /\$GITHUB_SHA"/{sub(/"$/, "\" \&\& true"); arm=0} {print}' "$base" >"$bad"
+ expect_workflow_problem "$bad" verify-skippable
+ bad="$work/wf-verify-continue.yml"
+ awk 'BEGIN{arm=0} /^  madaros-current-source-deref-f64:/{arm=1} arm && /name: Verify/{print; print "        continue-on-error: true"; arm=0; next} {print}' "$base" >"$bad"
+ expect_workflow_problem "$bad" verify-skippable
+ bad="$work/wf-verify-shell-if.yml"
+ awk 'BEGIN{arm=0} /^  madaros-current-source-deref-f64:/{arm=1} arm && /stdlib_deep_compiler_receipt.sh verify/{sub(/bash/, "if bash"); arm=0} {print}' "$base" >"$bad"
+ expect_workflow_problem "$bad" verify-skippable
+ bad="$work/wf-verify-set-plus-e.yml"
+ awk 'BEGIN{arm=0} /^  madaros-current-source-deref-f64:/{arm=1} arm && /stdlib_deep_compiler_receipt.sh verify/{print "          set +e"; arm=0} {print}' "$base" >"$bad"
  expect_workflow_problem "$bad" verify-skippable
  bad="$work/wf-missing.yml"
  awk 'BEGIN{drop=0} /^  gate-wave-0:/{drop=1} drop && /^  [A-Za-z0-9_-]+:[[:space:]]*$/ && !/^  gate-wave-0:/{drop=0} drop{next} {print}' "$base" >"$bad"
