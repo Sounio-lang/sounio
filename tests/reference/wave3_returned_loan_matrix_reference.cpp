@@ -27,6 +27,8 @@ constexpr std::array cases{
  Case{"returned_loan_pattern_forward","0","-","RETURNED_LOAN_PATTERN_FORWARD_OK"},
  Case{"returned_loan_pattern_mutation","1","E038","-"},
  Case{"returned_loan_pattern_scope","0","-","RETURNED_LOAN_PATTERN_SCOPE_OK"},
+ Case{"returned_loan_reassign_mutation","1","E038","-"},
+ Case{"returned_loan_reassign_scope","0","-","RETURNED_LOAN_REASSIGN_SCOPE_OK"},
  Case{"returned_loan_reborrow_conflict","1","E038","-"},
  Case{"returned_loan_reborrow_forward","0","-","AFFINE_REBORROW_FORWARD_OK"},
  Case{"returned_loan_reborrow_scope","0","-","AFFINE_REBORROW_SCOPE_OK"},

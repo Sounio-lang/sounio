@@ -15376,7 +15376,10 @@ fn checker_type_has_ref(c: *mut Checker, ty: TypeEntry, depth: i64) -> bool with
 }
 
 fn checker_check_assign_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    // Resolving a destination is a place operation, not an affine value move.
+    (*c).suppress_affine_consume_depth=(*c).suppress_affine_consume_depth+1
     let target_ty = checker_check_opt_expr_inplace(c, s.target)
+    (*c).suppress_affine_consume_depth=(*c).suppress_affine_consume_depth-1
     let val_ty = checker_check_opt_expr_inplace(c, s.expr)
     if s.assign_op != AssignOp::AssignEq {
         if !is_error_or_unknown(target_ty) && !is_error_or_unknown(val_ty) {
@@ -15428,6 +15431,26 @@ fn checker_check_assign_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with
         }
     }
     checker_check_assign_mutability_inplace(c, s.target, s.span)
+    if s.assign_op==AssignOp::AssignEq && checker_type_has_ref(c,val_ty,0) {
+        match s.target {Some(target)=>{
+            if (*target).kind==ExprKind::ExprIdent && type_env_has_binding(&(*c).env,(*target).name) {
+                let sources=checker_collect_loan_sources_opt(c,s.expr)
+                if !borrow_sources_all_live(&(*c).borrows,sources) {checker_report_error_at_inplace(c,s.span,91,0,0,0)}
+                // Retaining both old and new sources is conservative across
+                // branches and aliases. Reassignment cannot erase a live loan.
+                (*c).borrows=borrow_persist_sources((*c).borrows,(*target).name,sources)
+                (*c).borrows=(*c).borrows.set_provenance((*target).name,checker_loan_sources_local(c,sources))
+                let index=(*c).borrows.find((*target).name)
+                if index>=0 {
+                    var entry=(*c).borrows.entries[index as usize]
+                    entry.loan_live=true
+                    if entry.is_affine && !entry.is_linear {entry.consumed=false}
+                    (*c).borrows.entries[index as usize]=entry
+                }
+                if (*c).borrows.loan_overflow {checker_report_error_at_inplace(c,s.span,38,0,0,0)}
+            }
+        },None=>{}}
+    }
     // Effect GENERATION at the store site (#1488).
     //
     // Madaros propagated declared effects correctly — a caller of a `with Mut`
