@@ -5597,36 +5597,36 @@ organized by module. Generated from source on the date shown below.
 - `pub fn scidata_new() -> SciDataset {` — *io/scidata.sio*
 - `pub fn scidata_add_array(` — *io/scidata.sio*
 - `pub fn scidata_get_array(` — *io/scidata.sio*
-- `pub fn scidata_array_len(ds: SciDataset, array_idx: i64) -> i64 with Div, Panic {` — *io/scidata.sio*
+- `pub fn scidata_array_len(ds: &SciDataset, array_idx: i64) -> i64 with Div, Panic {` — *io/scidata.sio*
 - `pub fn scidata_set_attr(ds: SciDataset, key_id: i64, value: f64) -> SciDataset with Mut, Div, Panic {` — *io/scidata.sio*
-- `pub fn scidata_get_attr(ds: SciDataset, key_id: i64) -> f64 with Mut, Div, Panic {` — *io/scidata.sio*
-- `pub fn scidata_print(ds: SciDataset) with IO, Mut, Panic, Div {` — *io/scidata.sio*
-- `pub fn scidata_col_mean(ds: SciDataset, array_idx: i64) -> f64 with Mut, Div, Panic {` — *io/scidata.sio*
-- `pub fn scidata_col_std(ds: SciDataset, array_idx: i64) -> f64 with Mut, Div, Panic {` — *io/scidata.sio*
-- `pub fn scidata_col_min(ds: SciDataset, array_idx: i64) -> f64 with Mut, Div, Panic {` — *io/scidata.sio*
-- `pub fn scidata_col_max(ds: SciDataset, array_idx: i64) -> f64 with Mut, Div, Panic {` — *io/scidata.sio*
+- `pub fn scidata_get_attr(ds: &SciDataset, key_id: i64) -> f64 with Mut, Div, Panic {` — *io/scidata.sio*
+- `pub fn scidata_print(ds: &SciDataset) with IO, Mut, Panic, Div {` — *io/scidata.sio*
+- `pub fn scidata_col_mean(ds: &SciDataset, array_idx: i64) -> f64 with Mut, Div, Panic {` — *io/scidata.sio*
+- `pub fn scidata_col_std(ds: &SciDataset, array_idx: i64) -> f64 with Mut, Div, Panic {` — *io/scidata.sio*
+- `pub fn scidata_col_min(ds: &SciDataset, array_idx: i64) -> f64 with Mut, Div, Panic {` — *io/scidata.sio*
+- `pub fn scidata_col_max(ds: &SciDataset, array_idx: i64) -> f64 with Mut, Div, Panic {` — *io/scidata.sio*
 - `pub fn scidata_col_normalize(ds: SciDataset, array_idx: i64) -> SciDataset with Mut, Div, Panic {` — *io/scidata.sio*
 - `pub fn scidata_col_scale(ds: SciDataset, array_idx: i64, factor: f64) -> SciDataset with Mut, Div, Panic {` — *io/scidata.sio*
 - `pub fn scidata_add_array_with_uncertainty(` — *io/scidata.sio*
-- `pub fn scidata_epist_value(ds: SciDataset, pair_base_idx: i64, elem_idx: i64) -> f64 with Div, Panic {` — *io/scidata.sio*
-- `pub fn scidata_epist_variance(ds: SciDataset, pair_base_idx: i64, elem_idx: i64) -> f64 with Div, Panic {` — *io/scidata.sio*
-- `pub fn scidata_epist_std_uncert(ds: SciDataset, pair_base_idx: i64, elem_idx: i64) -> f64 with Div, Panic {` — *io/scidata.sio*
+- `pub fn scidata_epist_value(ds: &SciDataset, pair_base_idx: i64, elem_idx: i64) -> f64 with Div, Panic {` — *io/scidata.sio*
+- `pub fn scidata_epist_variance(ds: &SciDataset, pair_base_idx: i64, elem_idx: i64) -> f64 with Div, Panic {` — *io/scidata.sio*
+- `pub fn scidata_epist_std_uncert(ds: &SciDataset, pair_base_idx: i64, elem_idx: i64) -> f64 with Div, Panic {` — *io/scidata.sio*
 - `pub fn sci_print_i64(n: i64) with IO, Mut, Panic, Div {` — *io/scientific.sio*
 - `pub fn sci_print_f64(value: f64, decimals: i64) with IO, Mut, Panic, Div {` — *io/scientific.sio*
 - `pub fn matrix_data_new(rows: i64, cols: i64) -> MatrixData with Mut {` — *io/scientific.sio*
-- `pub fn matrix_data_get(m: MatrixData, row: i64, col: i64) -> f64 with Panic {` — *io/scientific.sio*
+- `pub fn matrix_data_get(m: &MatrixData, row: i64, col: i64) -> f64 with Panic {` — *io/scientific.sio*
 - `pub fn matrix_data_set(m: MatrixData, row: i64, col: i64, val: f64) -> MatrixData with Mut, Panic {` — *io/scientific.sio*
 - `pub fn print_smat_header_info(rows: i64, cols: i64) with IO, Mut, Panic, Div {` — *io/scientific.sio*
-- `pub fn print_csv(data: [f64; 4096], rows: i64, cols: i64) with IO, Mut, Panic, Div {` — *io/scientific.sio*
-- `pub fn print_csv_named(data: [f64; 4096], rows: i64, cols: i64,` — *io/scientific.sio*
-- `pub fn print_epistemic_csv(values: [f64; 4096], uncertainties: [f64; 4096],` — *io/scientific.sio*
-- `pub fn print_json_matrix(data: [f64; 4096], rows: i64, cols: i64) with IO, Mut, Panic, Div {` — *io/scientific.sio*
+- `pub fn print_csv(data: &[f64; 4096], rows: i64, cols: i64) with IO, Mut, Panic, Div {` — *io/scientific.sio*
+- `pub fn print_csv_named(data: &[f64; 4096], rows: i64, cols: i64,` — *io/scientific.sio*
+- `pub fn print_epistemic_csv(values: &[f64; 4096], uncertainties: &[f64; 4096],` — *io/scientific.sio*
+- `pub fn print_json_matrix(data: &[f64; 4096], rows: i64, cols: i64) with IO, Mut, Panic, Div {` — *io/scientific.sio*
 - `pub fn print_npy_header(rows: i64, cols: i64) with IO, Mut, Panic, Div {` — *io/scientific.sio*
-- `pub fn print_npy_data(data: [f64; 4096], rows: i64, cols: i64) with IO, Mut, Panic, Div {` — *io/scientific.sio*
-- `pub fn matrix_data_print_csv(m: MatrixData) with IO, Mut, Panic, Div {` — *io/scientific.sio*
-- `pub fn matrix_data_print_json(m: MatrixData) with IO, Mut, Panic, Div {` — *io/scientific.sio*
-- `pub fn col_mean(data: [f64; 4096], rows: i64, cols: i64, col: i64) -> f64 with Mut, Div, Panic {` — *io/scientific.sio*
-- `pub fn col_std(data: [f64; 4096], rows: i64, cols: i64, col: i64) -> f64 with Mut, Div, Panic {` — *io/scientific.sio*
+- `pub fn print_npy_data(data: &[f64; 4096], rows: i64, cols: i64) with IO, Mut, Panic, Div {` — *io/scientific.sio*
+- `pub fn matrix_data_print_csv(m: &MatrixData) with IO, Mut, Panic, Div {` — *io/scientific.sio*
+- `pub fn matrix_data_print_json(m: &MatrixData) with IO, Mut, Panic, Div {` — *io/scientific.sio*
+- `pub fn col_mean(data: &[f64; 4096], rows: i64, cols: i64, col: i64) -> f64 with Mut, Div, Panic {` — *io/scientific.sio*
+- `pub fn col_std(data: &[f64; 4096], rows: i64, cols: i64, col: i64) -> f64 with Mut, Div, Panic {` — *io/scientific.sio*
 - `pub fn print_python_csv_reader() with IO {` — *io/scientific.sio*
 - `pub fn print_python_npy_converter(rows: i64, cols: i64) with IO, Mut, Panic, Div {` — *io/scientific.sio*
 
