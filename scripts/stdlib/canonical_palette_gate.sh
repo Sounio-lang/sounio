@@ -16,7 +16,7 @@ ulimit -s 524288
 sha256sum "$MADAROS_RAW_BIN" > "$out/COMPILER.sha256"
 sha256sum "$SOUC_BIN" > "$out/LAUNCHER.sha256"
 find stdlib tests/reference/data/canonical_palettes tests/stdlib/canonical_palettes -type f -print0 | sort -z | xargs -0 sha256sum > "$out/INPUTS.sha256"
-sha256sum scripts/stdlib/canonical_palette_gate.sh tests/run-pass/viz_canonical_palettes.sio tests/run-pass/stdlib_deep_viz_dynamic_fields.sio tests/reference/canonical_palette_reference.cpp tests/reference/deep_viz_dynamic_fields.cpp tests/reference/data/font8x8_basic.h tests/reference/scientific_canvas_export.cpp >> "$out/INPUTS.sha256"
+sha256sum tests/stdlib/viz/test_colormap_stdlib.sio tests/stdlib/viz/test_colormap_canonical_stdlib.sio scripts/stdlib/canonical_palette_gate.sh tests/run-pass/viz_canonical_palettes.sio tests/run-pass/stdlib_deep_viz_dynamic_fields.sio tests/reference/canonical_palette_reference.cpp tests/reference/deep_viz_dynamic_fields.cpp tests/reference/data/font8x8_basic.h tests/reference/scientific_canvas_export.cpp >> "$out/INPUTS.sha256"
 printf 'phase\tsource\texit_status\n' > "$out/RESULTS.tsv"
 phase(){ local label=$1;shift;local rc=0;"$@" > "$out/$label.stdout" 2> "$out/$label.stderr" || rc=$?;printf '%s\t%s\t%s\n' "$label" "$*" "$rc" >> "$out/RESULTS.tsv";return "$rc"; }
 finish(){ local rc=$?;trap - EXIT;printf '%s\n' "$rc" > "$out/STATUS";exit "$rc"; };trap finish EXIT
@@ -38,8 +38,10 @@ sha256sum "$out/reference" >> "$out/ELFS.sha256"
 phase primary-concordance "$out/reference" --sources "$primary/BIDS-colormaps.py.txt" "$out/Matplotlib-cm-listed.py.txt"
 "$out/reference" --emit-lut "$primary/BIDS-colormaps.py.txt" > "$out/generated-data.sio"
 phase generated-data cmp "$out/generated-data.sio" stdlib/viz/colormap_data.sio
+"$out/reference" --emit-smoke "$primary/BIDS-colormaps.py.txt" > "$out/generated-smoke.sio"
+phase generated-smoke cmp "$out/generated-smoke.sio" tests/stdlib/viz/test_colormap_canonical_stdlib.sio
 for lib in colormap_data palette colormap colorbar dynamic_fields epiviz field_canvas viz_canvas viz_html;do phase "$lib.check" "$SOUC_BIN" check "stdlib/viz/$lib.sio";done
-for src in tests/stdlib/canonical_palettes/legacy_palette_witness.sio tests/stdlib/canonical_palettes/approx_palette_witness.sio tests/run-pass/viz_canonical_palettes.sio tests/run-pass/stdlib_deep_viz_dynamic_fields.sio;do
+for src in tests/stdlib/viz/test_colormap_stdlib.sio tests/stdlib/viz/test_colormap_canonical_stdlib.sio tests/stdlib/canonical_palettes/legacy_palette_witness.sio tests/stdlib/canonical_palettes/approx_palette_witness.sio tests/run-pass/viz_canonical_palettes.sio tests/run-pass/stdlib_deep_viz_dynamic_fields.sio;do
  name=$(basename "$src" .sio)
  phase "$name.check" "$SOUC_BIN" check "$src"
  phase "$name.compile" "$SOUC_BIN" compile "$src" -o "$out/$name.elf"
