@@ -194,7 +194,7 @@ unreachable**.
 
 ## 6.4 The gate that guards it tests that the file exists
 
-`scripts/archive/sprint17a_row_poly_gate.sh`, case 8:
+The removed `sprint17a_row_poly_gate.sh` (formerly under `scripts/archive/`), case 8:
 
     if [ -f self-hosted/check/effects_row.sio ]; then
       record "effects_row_sio_exists" "pass" "found"
