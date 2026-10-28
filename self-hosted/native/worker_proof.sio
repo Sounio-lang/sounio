@@ -43,6 +43,9 @@ struct WorkerSourceCall {
     next:Option<Box<WorkerSourceCall>>,
 }
 struct WorkerSourceRequest {
+    caller:i64,
+    start:i64,
+    end:i64,
     target:i64,
     abi:i64,
     next:Option<Box<WorkerSourceRequest>>,
@@ -58,6 +61,10 @@ var WORKER_SOURCE_ERROR_CODE:i64=0
 var WORKER_SOURCE_STATES:[i64;16384]=[0;16384]
 
 pub fn worker_source_reset() with Mut,Panic,Div {
+    WORKER_SOURCE_EPOCH=WORKER_SOURCE_EPOCH+1
+    WORKER_SOURCE_SIGNATURES=None
+    WORKER_SOURCE_CONTEXT_READY=false
+    WORKER_SOURCE_CHECKED_OK=false
     WORKER_SOURCE_DECLS=None
     WORKER_SOURCE_CALLS=None
     WORKER_SOURCE_REQUESTS=None
@@ -151,16 +158,16 @@ pub fn worker_source_note_call(caller:i64,span:Span,callee:i64) with Mut,Panic,D
     if !worker_source_take_slot() {return}
     WORKER_SOURCE_CALLS=Some(Box::new(WorkerSourceCall{caller:caller,start:span.start,end:span.end,callee:callee,next:WORKER_SOURCE_CALLS}))
 }
-pub fn worker_source_note_request(target:i64,abi:i64) with Mut,Panic,Div,Alloc {
+pub fn worker_source_note_request(caller:i64,span:Span,target:i64,abi:i64) with Mut,Panic,Div,Alloc {
     WORKER_SOURCE_ACTIVE=true
     if target<0 || target>=16384 || (abi!=1 && abi!=2) {WORKER_SOURCE_BAD=true;return}
     var cursor=WORKER_SOURCE_REQUESTS
     while true {match cursor {
-        Some(request)=>{if (*request).target==target && (*request).abi==abi {return};cursor=(*request).next}
+        Some(request)=>{if (*request).caller==caller && (*request).start==span.start && (*request).end==span.end && (*request).abi==abi {if (*request).target!=target {WORKER_SOURCE_BAD=true};return};cursor=(*request).next}
         None=>break
     }}
     if !worker_source_take_slot() {return}
-    WORKER_SOURCE_REQUESTS=Some(Box::new(WorkerSourceRequest{target:target,abi:abi,next:WORKER_SOURCE_REQUESTS}))
+    WORKER_SOURCE_REQUESTS=Some(Box::new(WorkerSourceRequest{caller:caller,start:span.start,end:span.end,target:target,abi:abi,next:WORKER_SOURCE_REQUESTS}))
 }
 fn worker_source_decl(id:i64)->Option<Box<WorkerSourceDecl>> with Mut,Panic,Div,Alloc {
     var cursor=WORKER_SOURCE_DECLS
@@ -179,6 +186,19 @@ fn worker_source_call(caller:i64,span:Span)->i64 with Mut,Panic,Div,Alloc {
 use parser::ast::{UnaryOp,BinaryOp,PatternKind,AssignOp,TypeExpr,TypeExprKind,Pattern}
 use check::types::{TypeEntry,TypeKind}
 use check::defs::{FnSigTable,fn_sig_table_get}
+pub fn worker_source_note_cap_signature(table:*mut FnSigTable,id:i64) with Mut,Panic,Div,Alloc {
+    let sig=fn_sig_table_get(table,id)
+    if sig.return_type.kind==TypeKind::TyWorkerFnI64 || sig.return_type.kind==TypeKind::TyWorkerFnF64 {WORKER_SOURCE_ACTIVE=true}
+    var params=sig.params
+    while true {match params {
+        Some(param)=>{
+            let kind=(*param).head.ty.kind
+            if kind==TypeKind::TyWorkerFnI64 || kind==TypeKind::TyWorkerFnF64 {WORKER_SOURCE_ACTIVE=true}
+            params=(*param).tail
+        }
+        None=>break
+    }}
+}
 struct WorkerSourceLocal {
     name:Name,
     class:i64,
@@ -471,7 +491,10 @@ fn worker_source_audit_function(table:*mut FnSigTable,id:i64,incoming:i64,depth:
     worker_source_fault(id,7)
 }
 pub fn worker_source_finalize(table:*mut FnSigTable)->bool with Mut,Panic,Div,Alloc {
-    match WORKER_SOURCE_REQUESTS {None=>return true,Some(_)=>{}}
+    WORKER_SOURCE_CONTEXT_READY=false
+    WORKER_SOURCE_SIGNATURES=None
+    if !WORKER_SOURCE_ACTIVE {return true}
+    match WORKER_SOURCE_REQUESTS {None=>{if WORKER_SOURCE_BAD {return worker_source_fault(0-1,8)};worker_source_capture_signatures(table);WORKER_SOURCE_CONTEXT_READY=true;return true},Some(_)=>{}}
     if WORKER_SOURCE_BAD {return worker_source_fault(0-1,8)}
     var cursor=WORKER_SOURCE_REQUESTS
     var valid=true
@@ -487,7 +510,1148 @@ pub fn worker_source_finalize(table:*mut FnSigTable)->bool with Mut,Panic,Div,Al
         }
         None=>break
     }}
+    if valid {worker_source_capture_signatures(table);WORKER_SOURCE_CONTEXT_READY=true}
     valid
 }
 pub fn worker_source_error_function()->i64 with Mut {WORKER_SOURCE_ERROR_FN}
 pub fn worker_source_error_reason()->i64 with Mut {WORKER_SOURCE_ERROR_CODE}
+
+struct WorkerSourceSignature {
+    id:i64,
+    owner:i64,
+    name:Name,
+    start:i64,
+    end:i64,
+    param_count:i64,
+    refs:i64,
+    cap_i64:i64,
+    cap_f64:i64,
+    cap_return:i64,
+    float_params:i64,
+    float_return:bool,
+    root_abi:i64,
+    return_class:i64,
+    callback_abi:bool,
+    next:Option<Box<WorkerSourceSignature>>,
+}
+var WORKER_SOURCE_SIGNATURES:Option<Box<WorkerSourceSignature>> = None
+var WORKER_SOURCE_CONTEXT_READY:bool=false
+var WORKER_SOURCE_CHECKED_OK:bool=false
+pub fn worker_source_set_checked(valid:bool) with Mut {WORKER_SOURCE_CHECKED_OK=valid}
+pub fn worker_source_checked_context()->bool with Mut {WORKER_SOURCE_CHECKED_OK}
+fn worker_source_capture_signatures(table:*mut FnSigTable) with Mut,Panic,Div,Alloc {
+    WORKER_SOURCE_SIGNATURES=None
+    var cursor=WORKER_SOURCE_DECLS
+    while true {match cursor {
+        Some(decl)=>{
+            let sig=fn_sig_table_get(table,(*decl).id)
+            var params=sig.params
+            var refs:i64=0
+            var cap_i64:i64=0
+            var cap_f64:i64=0
+            var float_params:i64=0
+            var bit:i64=1
+            var count:i64=0
+            var callback_abi=true
+            var first_kind=TypeKind::TyUnknown
+            var first_unbranded=false
+            while true {match params {
+                Some(param)=>{
+                    let ty=&(*param).head.ty
+                    if count==0 {first_kind=(*ty).kind;first_unbranded=(*ty).unit_id<0 && (*ty).refinement_id<0 && (*ty).ontology_id<0}
+                    let class=worker_source_type_class(ty)
+                    if class<=0 {callback_abi=false}
+                    if count<62 {
+                        if class==2 {refs=refs|bit}
+                        if (*ty).kind==TypeKind::TyWorkerFnI64 {cap_i64=cap_i64|bit}
+                        if (*ty).kind==TypeKind::TyWorkerFnF64 {cap_f64=cap_f64|bit}
+                        if (*ty).kind==TypeKind::TyF64 || (*ty).kind==TypeKind::TyF32 {float_params=float_params|bit}
+                        bit=bit*2
+                    } else {
+                        callback_abi=false
+                        // A negative mask is an unrepresentable opaque ABI,
+                        // never an empty set of capability parameters.
+                        if (*ty).kind==TypeKind::TyWorkerFnI64 {cap_i64=0-1}
+                        if (*ty).kind==TypeKind::TyWorkerFnF64 {cap_f64=0-1}
+                    }
+                    count=count+1
+                    params=(*param).tail
+                }
+                None=>break
+            }}
+            let result_class=worker_source_type_class(&sig.return_type)
+            if result_class!=1 && result_class!=3 {callback_abi=false}
+            if count!=sig.param_count {callback_abi=false}
+            var cap_return:i64=0
+            if sig.return_type.kind==TypeKind::TyWorkerFnI64 {cap_return=1}
+            if sig.return_type.kind==TypeKind::TyWorkerFnF64 {cap_return=2}
+            var root_abi:i64=0
+            if count==1 && first_unbranded && !sig.is_extern && !sig.is_method
+                && !sig.is_kernel && !sig.is_linear_closure && sig.linear_capture_count==0
+                && sig.return_type.unit_id<0 && sig.return_type.refinement_id<0 && sig.return_type.ontology_id<0 {
+                if first_kind==TypeKind::TyI64 && sig.return_type.kind==TypeKind::TyI64 {root_abi=1}
+                if first_kind==TypeKind::TyF64 && sig.return_type.kind==TypeKind::TyF64 {root_abi=2}
+            }
+            WORKER_SOURCE_SIGNATURES=Some(Box::new(WorkerSourceSignature {
+                id:(*decl).id,owner:(*decl).owner,name:sig.name,start:(*decl).body.span.start,end:(*decl).body.span.end,
+                param_count:sig.param_count,refs:refs,cap_i64:cap_i64,cap_f64:cap_f64,cap_return:cap_return,float_params:float_params,float_return:sig.return_type.kind==TypeKind::TyF64 || sig.return_type.kind==TypeKind::TyF32,
+                root_abi:root_abi,return_class:result_class,callback_abi:callback_abi,next:WORKER_SOURCE_SIGNATURES
+            }))
+            cursor=(*decl).next
+        }
+        None=>break
+    }}
+}
+
+struct WorkerLowerBinding {
+    module_key:i64,
+    fn_id:i64,
+    source_epoch:i64,
+    signature:Box<WorkerSourceSignature>,
+    fresh:bool,
+    trusted_worker:bool,
+    next:Option<Box<WorkerLowerBinding>>,
+}
+struct WorkerLowerIntent {
+    token:i64,
+    source_epoch:i64,
+    caller:i64,
+    start:i64,
+    end:i64,
+    target:i64,
+    abi:i64,
+    next:Option<Box<WorkerLowerIntent>>,
+}
+var WORKER_SOURCE_EPOCH:i64=0
+var WORKER_LOWER_ENABLED:bool=false
+var WORKER_LOWER_BAD:bool=false
+var WORKER_LOWER_BINDINGS:Option<Box<WorkerLowerBinding>> = None
+var WORKER_LOWER_INTENTS:Option<Box<WorkerLowerIntent>> = None
+var WORKER_LOWER_NEXT_TOKEN:i64=1
+var WORKER_LOWER_REMAP_COUNT:i64=0
+var WORKER_REMAP_FROM_KEY:[i64;131072]=[0;131072]
+var WORKER_REMAP_FROM_FN:[i64;131072]=[0;131072]
+var WORKER_REMAP_TO_KEY:[i64;131072]=[0;131072]
+var WORKER_REMAP_TO_FN:[i64;131072]=[0;131072]
+pub fn worker_lower_backend_opt_in() with Mut {WORKER_LOWER_ENABLED=true}
+pub fn worker_lower_backend_enabled()->bool with Mut {WORKER_LOWER_ENABLED}
+pub fn worker_compilation_begin() with Mut {
+    worker_certified_reset()
+    WORKER_LOWER_BINDINGS=None
+    WORKER_LOWER_INTENTS=None
+    WORKER_LOWER_BAD=false
+    WORKER_LOWER_REMAP_COUNT=0
+}
+fn worker_source_signature(owner:i64,name:Name,span:Span)->Option<Box<WorkerSourceSignature>> with Mut,Panic,Div,Alloc {
+    if !WORKER_SOURCE_CONTEXT_READY {return None}
+    var cursor=WORKER_SOURCE_SIGNATURES
+    while true {match cursor {
+        Some(sig)=>{
+            if (*sig).owner==owner && name_eq((*sig).name,name) && (*sig).start==span.start && (*sig).end==span.end {return Some(sig)}
+            cursor=(*sig).next
+        }
+        None=>return None
+    }}
+    None
+}
+fn worker_lower_binding_direct(module_key:i64,fn_id:i64)->Option<Box<WorkerLowerBinding>> with Mut,Panic,Div,Alloc {
+    var cursor=WORKER_LOWER_BINDINGS
+    while true {match cursor {
+        Some(binding)=>{
+            if (*binding).module_key==module_key && (*binding).fn_id==fn_id {return Some(binding)}
+            cursor=(*binding).next
+        }
+        None=>return None
+    }}
+    None
+}
+fn worker_lower_binding(module_key:i64,fn_id:i64,depth:i64)->Option<Box<WorkerLowerBinding>> with Mut,Panic,Div,Alloc {
+    if depth>=256 {WORKER_LOWER_BAD=true;return None}
+    var result=worker_lower_binding_direct(module_key,fn_id)
+    var i=WORKER_LOWER_REMAP_COUNT-1
+    while i>=0 {
+        if WORKER_REMAP_TO_KEY[i as usize]==module_key && WORKER_REMAP_TO_FN[i as usize]==fn_id {
+            let from_key=WORKER_REMAP_FROM_KEY[i as usize]
+            let from_fn=WORKER_REMAP_FROM_FN[i as usize]
+            if from_key!=module_key || from_fn!=fn_id {
+                match worker_lower_binding(from_key,from_fn,depth+1) {
+                    Some(candidate)=>{
+                        match result {
+                            Some(existing)=>{
+                                if (*existing).source_epoch!=(*candidate).source_epoch || (*(*existing).signature).id!=(*(*candidate).signature).id {WORKER_LOWER_BAD=true;return None}
+                            }
+                            None=>{result=Some(candidate)}
+                        }
+                    }
+                    None=>{}
+                }
+            }
+        }
+        i=i-1
+    }
+    result
+}
+pub fn worker_lower_begin_body(module_key:i64,fn_id:i64,owner:i64,name:Name,span:Span,trusted_worker:bool) with Mut,Panic,Div,Alloc {
+    if !WORKER_LOWER_ENABLED || !WORKER_SOURCE_CONTEXT_READY {return}
+    if module_key<=0 || fn_id<0 || fn_id>=16384 {WORKER_LOWER_BAD=true;return}
+    match worker_source_signature(owner,name,span) {
+        Some(sig)=>{
+            match worker_lower_binding_direct(module_key,fn_id) {
+                Some(old)=>{
+                    if (*old).source_epoch!=WORKER_SOURCE_EPOCH || (*(*old).signature).id!=(*sig).id {WORKER_LOWER_BAD=true}
+                    return
+                }
+                None=>{}
+            }
+            WORKER_LOWER_BINDINGS=Some(Box::new(WorkerLowerBinding {
+                module_key:module_key,fn_id:fn_id,source_epoch:WORKER_SOURCE_EPOCH,
+                signature:sig,fresh:false,trusted_worker:trusted_worker,next:WORKER_LOWER_BINDINGS
+            }))
+        }
+        None=>{}
+    }
+}
+pub fn worker_lower_end_body(module_key:i64,fn_id:i64) with Mut,Panic,Div,Alloc {
+    match worker_lower_binding_direct(module_key,fn_id) {Some(binding)=>{(*binding).fresh=true},None=>{}}
+}
+pub fn worker_lower_note_remap(from_key:i64,from_fn:i64,to_key:i64,to_fn:i64) with Mut,Panic,Div {
+    if !WORKER_LOWER_ENABLED {return}
+    if from_key==to_key && from_fn==to_fn {return}
+    if from_key<=0 || to_key<=0 || from_fn<0 || to_fn<0 || from_fn>=16384 || to_fn>=16384 {WORKER_LOWER_BAD=true;return}
+    if WORKER_LOWER_REMAP_COUNT>=131072 {WORKER_LOWER_BAD=true;return}
+    let i=WORKER_LOWER_REMAP_COUNT
+    WORKER_REMAP_FROM_KEY[i as usize]=from_key
+    WORKER_REMAP_FROM_FN[i as usize]=from_fn
+    WORKER_REMAP_TO_KEY[i as usize]=to_key
+    WORKER_REMAP_TO_FN[i as usize]=to_fn
+    WORKER_LOWER_REMAP_COUNT=i+1
+}
+pub fn worker_lower_constructor_token(module_key:i64,caller_fn:i64,span:Span,abi:i64)->i64 with Mut,Panic,Div,Alloc {
+    if !WORKER_LOWER_ENABLED || WORKER_LOWER_BAD || !WORKER_SOURCE_CONTEXT_READY || !WORKER_SOURCE_CHECKED_OK {return 0}
+    match worker_lower_binding_direct(module_key,caller_fn) {
+        Some(binding)=>{
+            if (*binding).source_epoch!=WORKER_SOURCE_EPOCH {return 0}
+            let caller=(*(*binding).signature).id
+            var cursor=WORKER_SOURCE_REQUESTS
+            while true {match cursor {
+                Some(request)=>{
+                    if (*request).caller==caller && (*request).start==span.start && (*request).end==span.end && (*request).abi==abi {
+                        if WORKER_LOWER_NEXT_TOKEN<=0 || WORKER_LOWER_NEXT_TOKEN>=2147483647 {WORKER_LOWER_BAD=true;return 0}
+                        let token=WORKER_LOWER_NEXT_TOKEN
+                        WORKER_LOWER_NEXT_TOKEN=token+1
+                        WORKER_LOWER_INTENTS=Some(Box::new(WorkerLowerIntent {
+                            token:token,source_epoch:WORKER_SOURCE_EPOCH,caller:caller,start:span.start,end:span.end,
+                            target:(*request).target,abi:abi,next:WORKER_LOWER_INTENTS
+                        }))
+                        return token
+                    }
+                    cursor=(*request).next
+                }
+                None=>return 0
+            }}
+        }
+        None=>{}
+    }
+    0
+}
+
+use ir::ir::{IrModule,IR_MAX_FUNCS,ir_fn_name_eq_at,ir_fn_get,ir_empty_function,ir_module_fn_set,ir_module_fn_storage_status}
+pub fn worker_register_intrinsic(module:&!IrModule,op:i64)->i64 with Mut,Panic,Div,Alloc {
+    let name=worker_protected_name(op)
+    if name.len<=0 {return 0-1}
+    var i:i64=0
+    while i<(*module).fn_count {
+        if ir_fn_name_eq_at(&(*module),i,&name) {
+            let function=ir_fn_get(&(*module),i)
+            if function.param_count!=1 || function.instr_count!=0 || function.returns_float!=0 {return 0-1}
+            return i
+        }
+        i=i+1
+    }
+    let id=(*module).fn_count
+    if id<0 || id>=IR_MAX_FUNCS {return 0-1}
+    var function=ir_empty_function()
+    function.name=name
+    function.param_count=1
+    function.reg_count=1
+    function.param_regs[0]=0
+    function.returns_float=0
+    ir_module_fn_set(module,id,function)
+    if ir_module_fn_storage_status(&(*module))!=0 {return 0-1}
+    (*module).fn_count=id+1
+    id
+}
+
+use ir::ir::{IrOpcode,IrInstr,ir_float_bits_get,ir_nop,ir_region_get,ir_region_slot_r,ir_arena_arg_at,ir_function_regs_are_valid}
+var WORKER_IDENTITY_ERROR:i64=0
+var WORKER_IDENTITY_COUNT:i64=0
+var WORKER_IDENTITY_REFS:[i64;65536]=[0;65536]
+pub fn worker_identity_error()->i64 with Mut {WORKER_IDENTITY_ERROR}
+pub fn worker_identity_count()->i64 with Mut {WORKER_IDENTITY_COUNT}
+fn worker_identity_fail(reason:i64)->bool with Mut {WORKER_IDENTITY_ERROR=reason;false}
+fn worker_identity_ref(reg:i64,count:i64)->i64 with Mut,Panic,Div {
+    if reg<0 || reg>=count || reg>=65536 {return 0-1}
+    WORKER_IDENTITY_REFS[reg as usize]
+}
+fn worker_identity_merge(reg:i64,value:i64,count:i64)->bool with Mut,Panic,Div {
+    if reg<0 || reg>=count || reg>=65536 || value==(0-2) {return false}
+    let old=WORKER_IDENTITY_REFS[reg as usize]
+    if old==value || old==(0-1) {return false}
+    WORKER_IDENTITY_REFS[reg as usize]=if old==(0-2) {value} else {0-1}
+    true
+}
+// MAY-kind joins above reject mixed provenances. This independent CFG pass
+// also requires a critical word to have a definition on every incoming path.
+// Rebuild scratch for each query: recursive closure checks cannot reuse a
+// caller's mutable flow state. Ordinary scalar/boolean values need no query.
+var WORKER_CFG_IN:[i64;65536]=[0;65536]
+var WORKER_CFG_LABEL:[i64;65536]=[0;65536]
+var WORKER_CFG_NEXT_A:[i64;65536]=[0;65536]
+var WORKER_CFG_NEXT_B:[i64;65536]=[0;65536]
+var WORKER_CFG_DEFINES:[i64;65536]=[0;65536]
+var WORKER_CFG_QUEUE:[i64;262144]=[0;262144]
+fn worker_cfg_defined(function:&IrFunction,reg:i64,use_at:i64)->bool with Mut,Panic,Div {
+    let count=(*function).instr_count
+    let structure_only=use_at==(0-1)
+    if count<=0 || count>65536 || (!structure_only && (reg<0 || reg>=(*function).reg_count || use_at<0 || use_at>=count)) {return false}
+    var at:i64=0
+    while at<65536 {WORKER_CFG_LABEL[at as usize]=0-1;at=at+1}
+    at=0
+    while at<count {
+        var instruction=ir_nop()
+        if ir_region_get(&(*function).region,at,&!instruction)!=0 {return false}
+        WORKER_CFG_IN[at as usize]=0
+        WORKER_CFG_NEXT_A[at as usize]=if at+1<count {at+1} else {0-1}
+        WORKER_CFG_NEXT_B[at as usize]=0-1
+        let op=instruction.op
+        WORKER_CFG_DEFINES[at as usize]=if instruction.dst==reg && (op==IrOpcode::IrCopy || op==IrOpcode::IrLoadFnRef || op==IrOpcode::IrCall || op==IrOpcode::IrUnaryOp) {1} else {0}
+        if op==IrOpcode::IrLabel {
+            let label=instruction.label_id
+            if label<0 || label>=65536 {return false}
+            if WORKER_CFG_LABEL[label as usize]>=0 {return false}
+            WORKER_CFG_LABEL[label as usize]=at
+        }
+        at=at+1
+    }
+    at=0
+    while at<count {
+        var instruction=ir_nop()
+        if ir_region_get(&(*function).region,at,&!instruction)!=0 {return false}
+        let op=instruction.op
+        if op==IrOpcode::IrJump || op==IrOpcode::IrBranchTrue || op==IrOpcode::IrBranchFalse {
+            let label=instruction.label_id
+            if label<0 || label>=65536 {return false}
+            let target=WORKER_CFG_LABEL[label as usize]
+            if target<0 {return false}
+            if op==IrOpcode::IrJump {WORKER_CFG_NEXT_A[at as usize]=target}
+            else {WORKER_CFG_NEXT_B[at as usize]=target}
+        } else if op==IrOpcode::IrReturn || op==IrOpcode::IrReturnSret {
+            WORKER_CFG_NEXT_A[at as usize]=0-1
+        }
+        at=at+1
+    }
+    var initial:i64=1
+    var p:i64=0
+    if (*function).param_count<0 || (*function).param_count>64 {return false}
+    while p<(*function).param_count {if (*function).param_regs[p as usize]==reg {initial=2};p=p+1}
+    WORKER_CFG_IN[0]=initial
+    WORKER_CFG_QUEUE[0]=0
+    var head:i64=0
+    var tail:i64=1
+    while head<tail {
+        at=WORKER_CFG_QUEUE[head as usize];head=head+1
+        if at+1==count {
+            var last=ir_nop()
+            if ir_region_get(&(*function).region,at,&!last)!=0 {return false}
+            if last.op!=IrOpcode::IrReturn && last.op!=IrOpcode::IrReturnSret && last.op!=IrOpcode::IrJump {return false}
+        }
+        let incoming=WORKER_CFG_IN[at as usize]
+        let outgoing=if WORKER_CFG_DEFINES[at as usize]==1 {2} else {incoming}
+        var edge:i64=0
+        while edge<2 {
+            let next=if edge==0 {WORKER_CFG_NEXT_A[at as usize]} else {WORKER_CFG_NEXT_B[at as usize]}
+            if next>=0 {
+                let old=WORKER_CFG_IN[next as usize]
+                let combined=old|outgoing
+                if combined!=old {
+                    if tail>=262144 {return false}
+                    WORKER_CFG_IN[next as usize]=combined
+                    WORKER_CFG_QUEUE[tail as usize]=next;tail=tail+1
+                }
+            }
+            edge=edge+1
+        }
+    }
+    if structure_only {return true}
+    let state=WORKER_CFG_IN[use_at as usize]
+    state==0 || state==2
+}
+fn worker_identity_intent(token:i64)->Option<Box<WorkerLowerIntent>> with Mut,Panic,Div,Alloc {
+    var cursor=WORKER_LOWER_INTENTS
+    while true {match cursor {
+        Some(intent)=>{if (*intent).token==token {return Some(intent)};cursor=(*intent).next}
+        None=>return None
+    }}
+    None
+}
+// This is identity validation, not a worker certificate. A successful result
+// neither authorizes code emission nor elides any runtime operation.
+pub fn worker_validate_constructor_identities(module:&IrModule)->bool with Mut,Panic,Div,Alloc {
+    WORKER_IDENTITY_ERROR=0
+    WORKER_IDENTITY_COUNT=0
+    if !WORKER_LOWER_ENABLED || WORKER_LOWER_BAD {return worker_identity_fail(1)}
+    let key=(*module).functions as i64
+    var fi:i64=0
+    while fi<(*module).fn_count {
+        let function=ir_fn_get(module,fi)
+        if function.reg_count<0 || function.reg_count>65536 {return worker_identity_fail(2)}
+        if function.instr_count>0 && !ir_function_regs_are_valid(&function) {return worker_identity_fail(3)}
+        var has_constructor=false
+        var at:i64=0
+        while at<function.instr_count {
+            var instruction=ir_nop()
+            if ir_region_get(&function.region,at,&!instruction)!=0 {return worker_identity_fail(4)}
+            if instruction.op==IrOpcode::IrCall && instruction.fn_id>=0 && instruction.fn_id<(*module).fn_count {
+                let called=ir_fn_get(module,instruction.fn_id)
+                let op=worker_protected_id(called.name)
+                if instruction.imm_flags==64501 && op!=2001 && op!=2002 {return worker_identity_fail(18)}
+                if instruction.imm_flags==64502 && op!=2017 && op!=2018 {return worker_identity_fail(19)}
+                if op==2001 || op==2002 {has_constructor=true}
+            }
+            at=at+1
+        }
+        if has_constructor {
+            var r:i64=0
+            while r<function.reg_count {WORKER_IDENTITY_REFS[r as usize]=0-2;r=r+1}
+            var p:i64=0
+            while p<function.param_count {
+                if p>=64 {return worker_identity_fail(5)}
+                let reg=function.param_regs[p as usize]
+                if reg<0 || reg>=function.reg_count {return worker_identity_fail(5)}
+                WORKER_IDENTITY_REFS[reg as usize]=0-1
+                p=p+1
+            }
+            var changed=true
+            var iteration:i64=0
+            while changed && iteration<=function.reg_count+1 {
+                changed=false
+                at=0
+                while at<function.instr_count {
+                    var instruction=ir_nop()
+                    if ir_region_get(&function.region,at,&!instruction)!=0 {return worker_identity_fail(4)}
+                    var value:i64=0-1
+                    var defines=instruction.dst>=0
+                    if instruction.op==IrOpcode::IrLoadFnRef {
+                        value=instruction.fn_id
+                        if value<0 || value>=(*module).fn_count {return worker_identity_fail(6)}
+                    } else if instruction.op==IrOpcode::IrCopy {
+                        value=worker_identity_ref(instruction.src1,function.reg_count)
+                    } else if instruction.op==IrOpcode::IrPhi {
+                        // The incoming values are not represented here. Poison
+                        // a pre-existing reference too, rather than retaining a
+                        // stale unique target from another definition.
+                        value=0-1
+                    } else if instruction.op==IrOpcode::IrNop || instruction.op==IrOpcode::IrLabel {
+                        defines=false
+                    }
+                    if defines && worker_identity_merge(instruction.dst,value,function.reg_count) {changed=true}
+                    at=at+1
+                }
+                iteration=iteration+1
+            }
+            if changed {return worker_identity_fail(7)}
+            at=0
+            while at<function.instr_count {
+                var instruction=ir_nop()
+                if ir_region_get(&function.region,at,&!instruction)!=0 {return worker_identity_fail(4)}
+                if instruction.op==IrOpcode::IrCopy && worker_identity_ref(instruction.dst,function.reg_count)>=0 {
+                    if worker_identity_ref(instruction.src1,function.reg_count)!=worker_identity_ref(instruction.dst,function.reg_count) || !worker_cfg_defined(&function,instruction.src1,at) {return worker_identity_fail(20)}
+                }
+                if instruction.op==IrOpcode::IrCall && instruction.fn_id>=0 && instruction.fn_id<(*module).fn_count {
+                    let called=ir_fn_get(module,instruction.fn_id)
+                    let op=worker_protected_id(called.name)
+                    if op==2001 || op==2002 {
+                        let abi=op-2000
+                        if called.instr_count!=0 || called.param_count!=1 || called.returns_float!=0 || instruction.arg_count!=1 || instruction.imm_flags!=64501 {return worker_identity_fail(8)}
+                        let slot=ir_region_slot_r(function.region,at)
+                        let argument=ir_arena_arg_at(slot,0)
+                        let target=worker_identity_ref(argument,function.reg_count)
+                        if target<0 || target>=(*module).fn_count {return worker_identity_fail(9)}
+                        if !worker_cfg_defined(&function,argument,at) {return worker_identity_fail(21)}
+                        var intent:Option<Box<WorkerLowerIntent>> = worker_identity_intent(instruction.imm_i64)
+                        var caller:Option<Box<WorkerLowerBinding>> = worker_lower_binding(key,fi,0)
+                        var callback:Option<Box<WorkerLowerBinding>> = worker_lower_binding(key,target,0)
+                        match intent {Some(wanted)=>{match caller {Some(from)=>{match callback {Some(to)=>{
+                            if !(*from).fresh || !(*to).fresh || WORKER_LOWER_BAD {return worker_identity_fail(10)}
+                            if (*wanted).source_epoch!=(*from).source_epoch || (*wanted).source_epoch!=(*to).source_epoch {return worker_identity_fail(11)}
+                            if (*wanted).caller!=(*(*from).signature).id || (*wanted).target!=(*(*to).signature).id || (*wanted).abi!=abi {return worker_identity_fail(12)}
+                            if (*(*to).signature).root_abi!=abi || !(*(*to).signature).callback_abi {return worker_identity_fail(13)}
+                            if (*wanted).start<0 || (*wanted).end<(*wanted).start {return worker_identity_fail(14)}
+                            if WORKER_IDENTITY_COUNT>=4096 {return worker_identity_fail(17)}
+                            WORKER_ROOT_FN[WORKER_IDENTITY_COUNT as usize]=target
+                            WORKER_ROOT_ABI[WORKER_IDENTITY_COUNT as usize]=abi
+                            WORKER_ROOT_EPOCH[WORKER_IDENTITY_COUNT as usize]=(*wanted).source_epoch
+                        },None=>return worker_identity_fail(10)}},None=>return worker_identity_fail(10)}},None=>return worker_identity_fail(15)}
+                        WORKER_IDENTITY_COUNT=WORKER_IDENTITY_COUNT+1
+                    }
+                }
+                at=at+1
+            }
+        }
+        fi=fi+1
+    }
+    if WORKER_LOWER_BAD {return worker_identity_fail(16)}
+    true
+}
+
+use parser::ast::{UnaryOp}
+var WORKER_ROOT_FN:[i64;4096]=[0;4096]
+var WORKER_ROOT_ABI:[i64;4096]=[0;4096]
+var WORKER_ROOT_EPOCH:[i64;4096]=[0;4096]
+var WORKER_BACKEND_KEY:i64=0
+var WORKER_BACKEND_BUILTIN:[i64;16384]=[0;16384]
+var WORKER_CLOSURE_STATE:[i64;16384]=[0;16384]
+var WORKER_CLOSURE_EPOCH:[i64;16384]=[0;16384]
+// Sixty-four independent frames. The admitted scalar callback profile has a
+// separate, explicit 4096-vreg ceiling; larger closures fail without truncation.
+var WORKER_CLOSURE_VALUES:[i64;262144]=[0;262144]
+var WORKER_CLOSURE_ERROR:i64=0
+var WORKER_CLOSURE_ERROR_FN:i64=0-1
+var WORKER_CLOSURE_ERROR_AT:i64=0-1
+pub fn worker_closure_error()->i64 with Mut {WORKER_CLOSURE_ERROR}
+pub fn worker_closure_error_function()->i64 with Mut {WORKER_CLOSURE_ERROR_FN}
+pub fn worker_closure_error_instruction()->i64 with Mut {WORKER_CLOSURE_ERROR_AT}
+pub fn worker_backend_begin(module:&IrModule) with Mut,Panic,Div {
+    worker_certified_reset()
+    WORKER_BACKEND_KEY=(*module).functions as i64
+    var i:i64=0
+    while i<16384 {WORKER_BACKEND_BUILTIN[i as usize]=0;WORKER_CLOSURE_STATE[i as usize]=0;WORKER_CLOSURE_EPOCH[i as usize]=0;i=i+1}
+}
+// The emitter supplies this table from its actual empty-stub dispatch. Source
+// spellings alone never establish a builtin identity in the worker proof.
+pub fn worker_backend_note_builtin(module_key:i64,fn_id:i64,emitter_id:i64) with Mut,Panic,Div {
+    if module_key!=WORKER_BACKEND_KEY || fn_id<0 || fn_id>=16384 || emitter_id<0 {WORKER_LOWER_BAD=true;return}
+    WORKER_BACKEND_BUILTIN[fn_id as usize]=emitter_id
+}
+fn worker_closure_fail(reason:i64,fi:i64,at:i64)->bool with Mut {
+    if WORKER_CLOSURE_ERROR==0 {WORKER_CLOSURE_ERROR=reason;WORKER_CLOSURE_ERROR_FN=fi;WORKER_CLOSURE_ERROR_AT=at}
+    false
+}
+fn worker_closure_value(depth:i64,reg:i64,count:i64)->i64 with Mut,Panic,Div {
+    if depth<0 || depth>=64 || reg<0 || reg>=count || reg>=4096 {return 3}
+    WORKER_CLOSURE_VALUES[(depth*4096+reg) as usize]
+}
+fn worker_closure_merge(depth:i64,reg:i64,value:i64,count:i64)->bool with Mut,Panic,Div {
+    if reg<0 || reg>=count || reg>=4096 || value==0 {return false}
+    let index=depth*4096+reg
+    let old=WORKER_CLOSURE_VALUES[index as usize]
+    let combined=old|value
+    if combined==old {return false}
+    WORKER_CLOSURE_VALUES[index as usize]=combined
+    true
+}
+fn worker_mask_has(mask:i64,index:i64)->bool with Panic,Div {
+    if index<0 || index>=62 {return false}
+    ((mask>>index)&1)==1
+}
+fn worker_closure_callback(module:&IrModule,fi:i64,epoch:i64,depth:i64)->bool with Mut,Panic,Div,Alloc {
+    if depth>=64 || fi<0 || fi>=(*module).fn_count || fi>=16384 {return worker_closure_fail(101,fi,0-1)}
+    let state=WORKER_CLOSURE_STATE[fi as usize]
+    if state==1 || state==2 {
+        if WORKER_CLOSURE_EPOCH[fi as usize]!=epoch {return worker_closure_fail(102,fi,0-1)}
+        return true
+    }
+    if state==3 {return false}
+    var signature:Option<Box<WorkerSourceSignature>> = None
+    match worker_lower_binding((*module).functions as i64,fi,0) {
+        Some(binding)=>{
+            if !(*binding).fresh || (*binding).source_epoch!=epoch || WORKER_LOWER_BAD {return worker_closure_fail(103,fi,0-1)}
+            signature=Some((*binding).signature)
+        }
+        None=>return worker_closure_fail(103,fi,0-1)
+    }
+    let function=ir_fn_get(module,fi)
+    if function.instr_count<=0 || function.reg_count<0 || function.reg_count>4096 || function.param_count<0 || function.param_count>6 || function.is_sret!=0 || function.bss_size>0 || function.prof_counter_id>=0 || function.compile_strategy==3 || function.ref_struct_param_mask!=0 || function.f128_param_mask!=0 {return worker_closure_fail(104,fi,0-1)}
+    if !ir_function_regs_are_valid(&function) {return worker_closure_fail(105,fi,0-1)}
+    if !worker_cfg_defined(&function,0,0-1) {return worker_closure_fail(139,fi,0-1)}
+    var refs:i64=0
+    match signature {Some(sig)=>{
+        if !(*sig).callback_abi || (*sig).param_count!=function.param_count || (*sig).cap_i64!=0 || (*sig).cap_f64!=0 || (*sig).cap_return!=0 {return worker_closure_fail(106,fi,0-1)}
+        refs=(*sig).refs
+        if function.returns_float!=(if (*sig).float_return {1} else {0}) {return worker_closure_fail(129,fi,0-1)}
+        var parameter:i64=0
+        while parameter<function.param_count {
+            if ir_float_bits_get(&function,function.param_regs[parameter as usize])!=worker_mask_has((*sig).float_params,parameter) {return worker_closure_fail(130,fi,0-1)}
+            parameter=parameter+1
+        }
+    },None=>return worker_closure_fail(103,fi,0-1)}
+    WORKER_CLOSURE_STATE[fi as usize]=1
+    WORKER_CLOSURE_EPOCH[fi as usize]=epoch
+    var r:i64=0
+    while r<function.reg_count {WORKER_CLOSURE_VALUES[(depth*4096+r) as usize]=0;r=r+1}
+    var p:i64=0
+    while p<function.param_count {
+        let reg=function.param_regs[p as usize]
+        if reg<0 || reg>=function.reg_count {return worker_closure_fail(107,fi,0-1)}
+        WORKER_CLOSURE_VALUES[(depth*4096+reg) as usize]=if worker_mask_has(refs,p) {2} else {1}
+        p=p+1
+    }
+    var changed=true
+    var pass:i64=0
+    while changed && pass<=function.reg_count+1 {
+        changed=false
+        var at:i64=0
+        while at<function.instr_count {
+            var instruction=ir_nop()
+            if ir_region_get(&function.region,at,&!instruction)!=0 {return worker_closure_fail(108,fi,at)}
+            let op=instruction.op
+            // This legacy native value is an IO sentinel, not an ordinary load.
+            if op==IrOpcode::IrLoadImm && instruction.imm_i64==(0-4242) {return worker_closure_fail(133,fi,at)}
+            if op==IrOpcode::IrUnaryOp {
+                if instruction.un_op!=UnaryOp::OpNeg && instruction.un_op!=UnaryOp::OpNot && instruction.un_op!=UnaryOp::OpBitNot && instruction.un_op!=UnaryOp::OpRef && instruction.un_op!=UnaryOp::OpRefMut && instruction.un_op!=UnaryOp::OpDeref {return worker_closure_fail(134,fi,at)}
+                if instruction.un_op==UnaryOp::OpDeref && (instruction.imm_flags<0 || instruction.imm_flags>4) {return worker_closure_fail(135,fi,at)}
+            }
+            if op==IrOpcode::IrStorePtr && (instruction.imm_flags<0 || instruction.imm_flags>4) {return worker_closure_fail(136,fi,at)}
+            if op==IrOpcode::IrBinOp && (instruction.bin_op==BinaryOp::OpConcat || instruction.bin_op==BinaryOp::OpRange || instruction.bin_op==BinaryOp::OpRangeInclusive) {return worker_closure_fail(137,fi,at)}
+            var value:i64=0
+            if op==IrOpcode::IrLoadImm || op==IrOpcode::IrLoadFloat || op==IrOpcode::IrLoadBool {
+                value=1
+            } else if op==IrOpcode::IrCall {
+                value=1
+                if instruction.fn_id>=0 && instruction.fn_id<16384 {
+                    if WORKER_BACKEND_BUILTIN[instruction.fn_id as usize]==60 && (instruction.imm_flags==64066 || instruction.imm_flags==64076) {value=4}
+                }
+            } else if op==IrOpcode::IrCopy {
+                value=worker_closure_value(depth,instruction.src1,function.reg_count)
+            } else if op==IrOpcode::IrUnaryOp {
+                let source=worker_closure_value(depth,instruction.src1,function.reg_count)
+                if instruction.un_op==UnaryOp::OpRef || instruction.un_op==UnaryOp::OpRefMut {
+                    if source==1 {value=2}
+                } else if instruction.un_op==UnaryOp::OpDeref {
+                    if source==2 {value=1}
+                } else if source==1 {value=1}
+            } else if op==IrOpcode::IrBinOp {
+                if worker_closure_value(depth,instruction.src1,function.reg_count)==1 && worker_closure_value(depth,instruction.src2,function.reg_count)==1 {value=1}
+            } else if op==IrOpcode::IrIntToFloat || op==IrOpcode::IrFloatToInt {
+                if worker_closure_value(depth,instruction.src1,function.reg_count)==1 {value=1}
+            } else if op!=IrOpcode::IrNop && op!=IrOpcode::IrLabel && op!=IrOpcode::IrJump && op!=IrOpcode::IrBranchTrue && op!=IrOpcode::IrBranchFalse && op!=IrOpcode::IrReturn && op!=IrOpcode::IrStorePtr {
+                return worker_closure_fail(109,fi,at)
+            }
+            if worker_closure_merge(depth,instruction.dst,value,function.reg_count) {changed=true}
+            at=at+1
+        }
+        pass=pass+1
+    }
+    if changed {return worker_closure_fail(110,fi,0-1)}
+    var at:i64=0
+    while at<function.instr_count {
+        var instruction=ir_nop()
+        if ir_region_get(&function.region,at,&!instruction)!=0 {return worker_closure_fail(108,fi,at)}
+        let op=instruction.op
+        if op==IrOpcode::IrCopy {
+            let source=worker_closure_value(depth,instruction.src1,function.reg_count)
+            if (source!=1 && source!=2 && source!=4) || worker_closure_value(depth,instruction.dst,function.reg_count)!=source {return worker_closure_fail(111,fi,at)}
+            if (source==2 || source==4) && !worker_cfg_defined(&function,instruction.src1,at) {return worker_closure_fail(138,fi,at)}
+        } else if op==IrOpcode::IrUnaryOp {
+            let source=worker_closure_value(depth,instruction.src1,function.reg_count)
+            if instruction.un_op==UnaryOp::OpDeref {if source!=2 {return worker_closure_fail(112,fi,at)}}
+            else if instruction.un_op==UnaryOp::OpRef || instruction.un_op==UnaryOp::OpRefMut {if source!=1 {return worker_closure_fail(113,fi,at)}}
+            else if source!=1 {return worker_closure_fail(114,fi,at)}
+            if source==2 && !worker_cfg_defined(&function,instruction.src1,at) {return worker_closure_fail(138,fi,at)}
+        } else if op==IrOpcode::IrBinOp {
+            if worker_closure_value(depth,instruction.src1,function.reg_count)!=1 || worker_closure_value(depth,instruction.src2,function.reg_count)!=1 {return worker_closure_fail(115,fi,at)}
+        } else if op==IrOpcode::IrIntToFloat || op==IrOpcode::IrFloatToInt || op==IrOpcode::IrBranchTrue || op==IrOpcode::IrBranchFalse || op==IrOpcode::IrReturn {
+            if worker_closure_value(depth,instruction.src1,function.reg_count)!=1 {return worker_closure_fail(116,fi,at)}
+        } else if op==IrOpcode::IrStorePtr {
+            if worker_closure_value(depth,instruction.src1,function.reg_count)!=2 || worker_closure_value(depth,instruction.src2,function.reg_count)!=1 {return worker_closure_fail(117,fi,at)}
+            if !worker_cfg_defined(&function,instruction.src1,at) {return worker_closure_fail(138,fi,at)}
+        } else if op==IrOpcode::IrCall {
+            let target=instruction.fn_id
+            if target<0 || target>=(*module).fn_count || target>=16384 {return worker_closure_fail(118,fi,at)}
+            let builtin=WORKER_BACKEND_BUILTIN[target as usize]
+            let called=ir_fn_get(module,target)
+            let slot=ir_region_slot_r(function.region,at)
+            var critical_arg:i64=0
+            if instruction.arg_count<0 || instruction.arg_count>64 {return worker_closure_fail(124,fi,at)}
+            while critical_arg<instruction.arg_count {
+                let argument=ir_arena_arg_at(slot,critical_arg)
+                let value=worker_closure_value(depth,argument,function.reg_count)
+                if (value==2 || value==4) && !worker_cfg_defined(&function,argument,at) {return worker_closure_fail(138,fi,at)}
+                critical_arg=critical_arg+1
+            }
+            if called.instr_count==0 && builtin!=0 {
+                if builtin==60 && (instruction.imm_flags==64066 || instruction.imm_flags==64076) && instruction.arg_count==0 {
+                    // Compiler-owned region tokens cannot escape or enter scalar arithmetic.
+                } else if builtin==67 && (instruction.imm_flags==64067 || instruction.imm_flags==64077) && instruction.arg_count==2 {
+                    if worker_closure_value(depth,ir_arena_arg_at(slot,0),function.reg_count)!=4 || worker_closure_value(depth,ir_arena_arg_at(slot,1),function.reg_count)!=1 {return worker_closure_fail(119,fi,at)}
+                } else if builtin==1101 && instruction.imm_flags==64078 && instruction.arg_count==2 {
+                    let value=worker_closure_value(depth,ir_arena_arg_at(slot,1),function.reg_count)
+                    if worker_closure_value(depth,ir_arena_arg_at(slot,0),function.reg_count)!=4 || (value!=1 && value!=2) {return worker_closure_fail(131,fi,at)}
+                } else if builtin==61 && instruction.imm_flags==64079 && instruction.arg_count==1 {
+                    if worker_closure_value(depth,ir_arena_arg_at(slot,0),function.reg_count)!=4 {return worker_closure_fail(132,fi,at)}
+                } else if (builtin==25 || builtin==26) && instruction.arg_count==1 {
+                    if worker_closure_value(depth,ir_arena_arg_at(slot,0),function.reg_count)!=1 {return worker_closure_fail(120,fi,at)}
+                } else {return worker_closure_fail(121,fi,at)}
+            } else {
+                var target_refs:i64=0
+                match worker_lower_binding((*module).functions as i64,target,0) {Some(binding)=>{
+                    if !(*binding).fresh || (*binding).source_epoch!=epoch || instruction.arg_count!=(*(*binding).signature).param_count {return worker_closure_fail(122,fi,at)}
+                    target_refs=(*(*binding).signature).refs
+                },None=>return worker_closure_fail(123,fi,at)}
+                if instruction.arg_count<0 || instruction.arg_count>6 {return worker_closure_fail(124,fi,at)}
+                var a:i64=0
+                while a<instruction.arg_count {
+                    let expected=if worker_mask_has(target_refs,a) {2} else {1}
+                    if worker_closure_value(depth,ir_arena_arg_at(slot,a),function.reg_count)!=expected {return worker_closure_fail(125,fi,at)}
+                    a=a+1
+                }
+                if !worker_closure_callback(module,target,epoch,depth+1) {return false}
+            }
+        }
+        at=at+1
+    }
+    WORKER_CLOSURE_STATE[fi as usize]=2
+    true
+}
+pub fn worker_validate_callback_closures(module:&IrModule)->bool with Mut,Panic,Div,Alloc {
+    WORKER_CLOSURE_ERROR=0
+    WORKER_CLOSURE_ERROR_FN=0-1
+    WORKER_CLOSURE_ERROR_AT=0-1
+    if WORKER_BACKEND_KEY!=(*module).functions as i64 {return worker_closure_fail(126,0-1,0-1)}
+    if !worker_validate_constructor_identities(module) {return worker_closure_fail(127,0-1,0-1)}
+    var i:i64=0
+    while i<16384 {WORKER_CLOSURE_STATE[i as usize]=0;WORKER_CLOSURE_EPOCH[i as usize]=0;i=i+1}
+    i=0
+    while i<WORKER_IDENTITY_COUNT {
+        if i>=4096 {return worker_closure_fail(128,0-1,0-1)}
+        if !worker_closure_callback(module,WORKER_ROOT_FN[i as usize],WORKER_ROOT_EPOCH[i as usize],0) {return false}
+        i=i+1
+    }
+    true
+}
+
+var WORKER_CAP_VALUES:[i64;65536]=[0;65536]
+var WORKER_CAP_ERROR:i64=0
+var WORKER_CAP_ERROR_FN:i64=0-1
+var WORKER_CAP_ERROR_AT:i64=0-1
+pub fn worker_capability_error()->i64 with Mut {WORKER_CAP_ERROR}
+pub fn worker_capability_error_function()->i64 with Mut {WORKER_CAP_ERROR_FN}
+pub fn worker_capability_error_instruction()->i64 with Mut {WORKER_CAP_ERROR_AT}
+fn worker_cap_fail(reason:i64,fi:i64,at:i64)->bool with Mut {
+    WORKER_CAP_ERROR=reason;WORKER_CAP_ERROR_FN=fi;WORKER_CAP_ERROR_AT=at;false
+}
+fn worker_cap_value(reg:i64,count:i64)->i64 with Mut,Panic,Div {
+    if reg<0 || reg>=count || reg>=65536 {return 0}
+    WORKER_CAP_VALUES[reg as usize]
+}
+fn worker_cap_merge(reg:i64,value:i64,count:i64)->bool with Mut,Panic,Div {
+    if reg<0 || reg>=count || reg>=65536 || value==0 {return false}
+    let old=WORKER_CAP_VALUES[reg as usize]
+    let combined=old|value
+    if combined==old {return false}
+    WORKER_CAP_VALUES[reg as usize]=combined
+    true
+}
+fn worker_cap_bits(value:i64)->bool {(value&24)!=0}
+// Whole-module capability contracts are checked independently of callback
+// closure purity. Opaque words may cross only declared, fresh ABI boundaries.
+// Aggregate/reference carriers remain closed until their flows are modeled.
+pub fn worker_validate_capability_flow(module:&IrModule)->bool with Mut,Panic,Div,Alloc {
+    WORKER_CAP_ERROR=0;WORKER_CAP_ERROR_FN=0-1;WORKER_CAP_ERROR_AT=0-1
+    if !worker_validate_constructor_identities(module) {return worker_cap_fail(201,0-1,0-1)}
+    let key=(*module).functions as i64
+    var fi:i64=0
+    while fi<(*module).fn_count {
+        let function=ir_fn_get(module,fi)
+        if function.reg_count<0 || function.reg_count>65536 || function.param_count<0 || function.param_count>64 {return worker_cap_fail(202,fi,0-1)}
+        if function.instr_count>0 && !ir_function_regs_are_valid(&function) {return worker_cap_fail(203,fi,0-1)}
+        var own:Option<Box<WorkerLowerBinding>> = worker_lower_binding(key,fi,0)
+        var cap_i64:i64=0
+        var cap_f64:i64=0
+        var cap_return:i64=0
+        match own {Some(binding)=>{
+            let sig=(*binding).signature
+            if (*sig).cap_i64<0 || (*sig).cap_f64<0 {return worker_cap_fail(225,fi,0-1)}
+            if !(*binding).fresh && ((*sig).cap_i64!=0 || (*sig).cap_f64!=0 || (*sig).cap_return!=0) {return worker_cap_fail(222,fi,0-1)}
+            if (*binding).fresh {cap_i64=(*sig).cap_i64;cap_f64=(*sig).cap_f64;cap_return=(*sig).cap_return}
+        },None=>{}}
+        if cap_i64!=0 || cap_f64!=0 || cap_return!=0 {
+            match own {Some(binding)=>{if !(*binding).fresh || (*(*binding).signature).param_count!=function.param_count {return worker_cap_fail(222,fi,0-1)}},None=>return worker_cap_fail(222,fi,0-1)}
+            if cap_return!=0 && (function.returns_float!=0 || function.is_sret!=0) {return worker_cap_fail(223,fi,0-1)}
+        }
+        var r:i64=0
+        while r<function.reg_count {WORKER_CAP_VALUES[r as usize]=0;r=r+1}
+        var p:i64=0
+        while p<function.param_count {
+            let reg=function.param_regs[p as usize]
+            if reg<0 || reg>=function.reg_count {return worker_cap_fail(204,fi,0-1)}
+            var value:i64=1
+            if worker_mask_has(cap_i64,p) {value=8}
+            if worker_mask_has(cap_f64,p) {if value==8 {return worker_cap_fail(205,fi,0-1)};value=16}
+            if (value==8 || value==16) && (ir_float_bits_get(&function,reg) || worker_mask_has(function.f128_param_mask,p) || worker_mask_has(function.ref_struct_param_mask,p)) {return worker_cap_fail(226,fi,0-1)}
+            WORKER_CAP_VALUES[reg as usize]=value
+            p=p+1
+        }
+        var changed=true
+        var pass:i64=0
+        while changed && pass<=function.reg_count+1 {
+            changed=false
+            var at:i64=0
+            while at<function.instr_count {
+                var instruction=ir_nop()
+                if ir_region_get(&function.region,at,&!instruction)!=0 {return worker_cap_fail(206,fi,at)}
+                var value:i64=1
+                var defines=instruction.dst>=0
+                let op=instruction.op
+                if op==IrOpcode::IrCopy {value=worker_cap_value(instruction.src1,function.reg_count)}
+                else if op==IrOpcode::IrLoadFnRef {value=4}
+                else if op==IrOpcode::IrNop || op==IrOpcode::IrLabel || op==IrOpcode::IrPhi {defines=false}
+                else if op==IrOpcode::IrCall && instruction.fn_id>=0 && instruction.fn_id<(*module).fn_count {
+                    let called=ir_fn_get(module,instruction.fn_id)
+                    let protected_id=worker_protected_id(called.name)
+                    if protected_id==2001 {value=8}
+                    else if protected_id==2002 {value=16}
+                    else if protected_id!=2017 && protected_id!=2018 {
+                        match worker_lower_binding(key,instruction.fn_id,0) {Some(binding)=>{if (*binding).fresh {
+                            if (*(*binding).signature).cap_return==1 {value=8}
+                            if (*(*binding).signature).cap_return==2 {value=16}
+                        }},None=>{}}
+                    }
+                }
+                if defines && worker_cap_merge(instruction.dst,value,function.reg_count) {changed=true}
+                at=at+1
+            }
+            pass=pass+1
+        }
+        if changed {return worker_cap_fail(207,fi,0-1)}
+        var has_capability=cap_i64!=0 || cap_f64!=0 || cap_return!=0
+        r=0
+        while r<function.reg_count {if worker_cap_bits(WORKER_CAP_VALUES[r as usize]) {has_capability=true};r=r+1}
+        var at:i64=0
+        while at<function.instr_count {
+            var instruction=ir_nop()
+            if ir_region_get(&function.region,at,&!instruction)!=0 {return worker_cap_fail(206,fi,at)}
+            let op=instruction.op
+            let src1=worker_cap_value(instruction.src1,function.reg_count)
+            let src2=worker_cap_value(instruction.src2,function.reg_count)
+            if op==IrOpcode::IrCopy {
+                if worker_cap_bits(worker_cap_value(instruction.dst,function.reg_count)) && worker_cap_value(instruction.dst,function.reg_count)!=src1 {return worker_cap_fail(208,fi,at)}
+                if worker_cap_bits(src1) && src1!=8 && src1!=16 {return worker_cap_fail(208,fi,at)}
+                if worker_cap_bits(src1) && worker_cap_value(instruction.dst,function.reg_count)!=src1 {return worker_cap_fail(208,fi,at)}
+                if worker_cap_bits(src1) && !worker_cfg_defined(&function,instruction.src1,at) {return worker_cap_fail(228,fi,at)}
+            } else if op==IrOpcode::IrPhi && has_capability {
+                // Capability phi operands need their own complete contract;
+                // an unmodeled merge cannot inherit a previous opaque tag.
+                return worker_cap_fail(224,fi,at)
+            } else if op==IrOpcode::IrReturn {
+                let expected=if cap_return==1 {8} else {if cap_return==2 {16} else {1}}
+                if cap_return!=0 {if src1!=expected {return worker_cap_fail(209,fi,at)}}
+                else if worker_cap_bits(src1) {return worker_cap_fail(210,fi,at)}
+                if worker_cap_bits(src1) && !worker_cfg_defined(&function,instruction.src1,at) {return worker_cap_fail(228,fi,at)}
+            } else if op==IrOpcode::IrCall || op==IrOpcode::IrCallIndirect || op==IrOpcode::IrCallExtern || op==IrOpcode::IrCallSret {
+                let slot=ir_region_slot_r(function.region,at)
+                var target_i64:i64=0
+                var target_f64:i64=0
+                var protected_id:i64=0
+                if op==IrOpcode::IrCall && instruction.fn_id>=0 && instruction.fn_id<(*module).fn_count {
+                    let called=ir_fn_get(module,instruction.fn_id)
+                    protected_id=worker_protected_id(called.name)
+                    if protected_id!=0 && (called.instr_count!=0 || called.param_count!=1 || called.returns_float!=0) {return worker_cap_fail(221,fi,at)}
+                    match worker_lower_binding(key,instruction.fn_id,0) {Some(binding)=>{
+                        let sig=(*binding).signature
+                        if (*sig).cap_i64!=0 || (*sig).cap_f64!=0 || (*sig).cap_return!=0 {
+                            if !(*binding).fresh || instruction.arg_count!=(*sig).param_count {return worker_cap_fail(227,fi,at)}
+                        }
+                        if (*binding).fresh {target_i64=(*sig).cap_i64;target_f64=(*sig).cap_f64}
+                    },None=>{}}
+                }
+                if protected_id==2017 || protected_id==2018 {
+                    if instruction.arg_count!=1 || instruction.imm_flags!=64502 {return worker_cap_fail(211,fi,at)}
+                    match own {Some(binding)=>{if !(*binding).fresh || !(*binding).trusted_worker {return worker_cap_fail(212,fi,at)}},None=>return worker_cap_fail(212,fi,at)}
+                    if protected_id==2017 {target_i64=1} else {target_f64=1}
+                }
+                if instruction.arg_count<0 || instruction.arg_count>64 {return worker_cap_fail(213,fi,at)}
+                var a:i64=0
+                while a<instruction.arg_count {
+                    let argument=ir_arena_arg_at(slot,a)
+                    let value=worker_cap_value(argument,function.reg_count)
+                    if worker_cap_bits(value) && !worker_cfg_defined(&function,argument,at) {return worker_cap_fail(228,fi,at)}
+                    if worker_mask_has(target_i64,a) {if value!=8 {return worker_cap_fail(214,fi,at)}}
+                    else if worker_mask_has(target_f64,a) {if value!=16 {return worker_cap_fail(215,fi,at)}}
+                    else if worker_cap_bits(value) {return worker_cap_fail(216,fi,at)}
+                    a=a+1
+                }
+                if op!=IrOpcode::IrCall && (worker_cap_bits(src1) || worker_cap_bits(src2)) {return worker_cap_fail(217,fi,at)}
+            } else if op!=IrOpcode::IrNop && op!=IrOpcode::IrLabel && op!=IrOpcode::IrPhi {
+                if worker_cap_bits(src1) || worker_cap_bits(src2) {return worker_cap_fail(218,fi,at)}
+                if op==IrOpcode::IrIndexSet && worker_cap_bits(worker_cap_value(instruction.imm_i64,function.reg_count)) {return worker_cap_fail(219,fi,at)}
+            }
+            at=at+1
+        }
+        fi=fi+1
+    }
+    if WORKER_LOWER_BAD {return worker_cap_fail(220,0-1,0-1)}
+    true
+}
+
+use ir::ir::{IrFunction,ir_region_clone,ir_region_set,ir_region_invalid,ir_instr_arena_alloc,ir_region_push,ir_region_is_valid,ir_region_seal,ir_load_imm,ir_copy,ir_load_fn_ref,ir_reg_list_single,ir_intern_name,ir_float_bits_capacity,ir_arena_store_from,ir_region_slot_w}
+struct WorkerCertifiedClone {
+    module_key:i64,
+    fn_id:i64,
+    entry_abi:i64,
+    snapshot:Box<IrFunction>,
+    next:Option<Box<WorkerCertifiedClone>>,
+}
+var WORKER_CERTIFIED:Option<Box<WorkerCertifiedClone>> = None
+var WORKER_CERTIFIED_KEY:i64=0
+var WORKER_CLONE_OF:[i64;16384]=[0;16384]
+var WORKER_ENTRY_IDS:[i64;4096]=[0;4096]
+var WORKER_ENTRY_ABIS:[i64;4096]=[0;4096]
+var WORKER_ENTRY_COUNT:i64=0
+pub fn worker_certified_entry_count()->i64 with Mut {if WORKER_CERTIFIED_KEY==0 {0} else {WORKER_ENTRY_COUNT}}
+pub fn worker_certified_entry_id(index:i64)->i64 with Mut,Panic,Div {
+    if WORKER_CERTIFIED_KEY==0 || index<0 || index>=WORKER_ENTRY_COUNT || index>=4096 {return 0-1}
+    WORKER_ENTRY_IDS[index as usize]
+}
+pub fn worker_certified_entry_abi(index:i64)->i64 with Mut,Panic,Div {
+    if WORKER_CERTIFIED_KEY==0 || index<0 || index>=WORKER_ENTRY_COUNT || index>=4096 {return 0}
+    WORKER_ENTRY_ABIS[index as usize]
+}
+fn worker_certified_reset() with Mut {WORKER_CERTIFIED=None;WORKER_CERTIFIED_KEY=0;WORKER_ENTRY_COUNT=0}
+fn worker_clone_name(id:i64)->Name with Mut,Panic,Div {
+    var name=make_name("@worker:clone:")
+    var divisor:i64=10000
+    var started=false
+    while divisor>0 {
+        let digit=(id/divisor)%10
+        if digit>0 || started || divisor==1 {name.buf[name.len as usize]=(48+digit) as i8;name.len=name.len+1;started=true}
+        divisor=divisor/10
+    }
+    name
+}
+pub fn worker_module_has_intrinsics(module:&IrModule)->bool with Mut,Panic,Div,Alloc {
+    var i:i64=0
+    while i<(*module).fn_count {
+        if worker_protected_id(ir_fn_get(module,i).name)!=0 {return true}
+        // A program can violate an opaque argument/return contract without
+        // containing a constructor or extractor call. Keep that module inside
+        // the final capability-flow boundary too.
+        match worker_lower_binding((*module).functions as i64,i,0) {Some(binding)=>{
+            let sig=(*binding).signature
+            if (*sig).cap_i64!=0 || (*sig).cap_f64!=0 || (*sig).cap_return!=0 {return true}
+        },None=>{}}
+        i=i+1
+    }
+    false
+}
+// Called on a private module copy after final optimization. The emitter must
+// provide the actual builtin map before this operation. No certificate is read
+// from the IR stream, serialized flags or a persistent cache.
+pub fn worker_prepare_clones(module:&!IrModule)->bool with Mut,Panic,Div,Alloc {
+    worker_certified_reset()
+    if !worker_validate_capability_flow(&(*module)) || !worker_validate_callback_closures(&(*module)) {return false}
+    let key=(*module).functions as i64
+    let original_count=(*module).fn_count
+    var i:i64=0
+    while i<16384 {WORKER_CLONE_OF[i as usize]=0-1;i=i+1}
+    i=0
+    while i<original_count {
+        if WORKER_CLOSURE_STATE[i as usize]==2 {
+            let id=(*module).fn_count
+            if id>=IR_MAX_FUNCS || id>=16384 {return worker_closure_fail(301,i,0-1)}
+            var clone=ir_fn_get(&(*module),i)
+            var region=ir_region_invalid()
+            if ir_region_clone(&clone.region,&!region)!=0 {return worker_closure_fail(302,i,0-1)}
+            clone.region=region;clone.name=worker_clone_name(id)
+            ir_module_fn_set(module,id,clone)
+            if ir_module_fn_storage_status(&(*module))!=0 {return worker_closure_fail(303,i,0-1)}
+            (*module).fn_count=id+1
+            WORKER_CLONE_OF[i as usize]=id
+            match worker_lower_binding(key,i,0) {Some(binding)=>{
+                WORKER_LOWER_BINDINGS=Some(Box::new(WorkerLowerBinding {module_key:key,fn_id:id,source_epoch:(*binding).source_epoch,signature:(*binding).signature,fresh:true,trusted_worker:false,next:WORKER_LOWER_BINDINGS}))
+            },None=>return worker_closure_fail(304,i,0-1)}
+        }
+        i=i+1
+    }
+    i=0
+    while i<original_count {
+        let clone_id=WORKER_CLONE_OF[i as usize]
+        if clone_id>=0 {
+            let clone=ir_fn_get(&(*module),clone_id)
+            var at:i64=0
+            while at<clone.instr_count {
+                var instruction=ir_nop()
+                if ir_region_get(&clone.region,at,&!instruction)!=0 {return worker_closure_fail(305,clone_id,at)}
+                if instruction.op==IrOpcode::IrCall {
+                    let target=instruction.fn_id
+                    if target<0 || target>=original_count {return worker_closure_fail(306,clone_id,at)}
+                    let target_clone=WORKER_CLONE_OF[target as usize]
+                    if target_clone>=0 {
+                        instruction.fn_id=target_clone
+                        instruction.name_id=ir_intern_name(ir_fn_get(&(*module),target_clone).name)
+                    } else {
+                        let builtin=WORKER_BACKEND_BUILTIN[target as usize]
+                        if builtin==60 || builtin==61 || builtin==67 || builtin==1101 {
+                            let destination=instruction.dst
+                            if destination<0 {instruction=ir_nop()}
+                            else if builtin==67 {
+                                let value=ir_arena_arg_at(ir_region_slot_r(clone.region,at),1)
+                                instruction=ir_copy(destination,value)
+                            } else {instruction=ir_load_imm(destination,0)}
+                        } else if builtin!=25 && builtin!=26 {return worker_closure_fail(307,clone_id,at)}
+                    }
+                    if instruction.op==IrOpcode::IrCall {
+                        // Reads carry pooled arguments, not a rebuilt Box list.
+                        // Preserve their binding, including the first pool range.
+                        let slot=ir_region_slot_w(clone.region,at)
+                        ir_arena_store_from(slot,instruction,slot)
+                    } else {
+                        if ir_region_set(&clone.region,at,instruction)!=0 {return worker_closure_fail(308,clone_id,at)}
+                    }
+                }
+                at=at+1
+            }
+        }
+        i=i+1
+    }
+    // Each constructor receives its own fresh function-reference instruction.
+    // Other references to the original function retain their original identity.
+    i=0
+    while i<original_count {
+        var function=ir_fn_get(&(*module),i)
+        var constructors:i64=0
+        var at:i64=0
+        while at<function.instr_count {
+            var instruction=ir_nop()
+            if ir_region_get(&function.region,at,&!instruction)!=0 {return worker_closure_fail(309,i,at)}
+            if instruction.op==IrOpcode::IrCall && instruction.imm_flags==64501 {constructors=constructors+1}
+            at=at+1
+        }
+        if constructors>0 {
+            if function.reg_count+constructors>65536 {return worker_closure_fail(310,i,0-1)}
+            var region=ir_region_invalid()
+            if ir_instr_arena_alloc(function.instr_count+constructors,&!region)!=0 {return worker_closure_fail(311,i,0-1)}
+            at=0
+            var written:i64=0
+            while at<function.instr_count {
+                var instruction=ir_nop()
+                if ir_region_get(&function.region,at,&!instruction)!=0 {return worker_closure_fail(309,i,at)}
+                var preserve_arguments=true
+                if instruction.op==IrOpcode::IrCall && instruction.imm_flags==64501 {
+                    var intent=worker_identity_intent(instruction.imm_i64)
+                    var original:i64=0-1
+                    match intent {Some(request)=>{
+                        var found:i64=0
+                        while found<WORKER_IDENTITY_COUNT {
+                            if WORKER_ROOT_EPOCH[found as usize]==(*request).source_epoch {
+                                match worker_lower_binding(key,WORKER_ROOT_FN[found as usize],0) {Some(binding)=>{
+                                    if (*(*binding).signature).id==(*request).target && WORKER_ROOT_ABI[found as usize]==(*request).abi {original=WORKER_ROOT_FN[found as usize]}
+                                },None=>{}}
+                            }
+                            found=found+1
+                        }
+                    },None=>return worker_closure_fail(312,i,at)}
+                    if original<0 || original>=original_count {return worker_closure_fail(313,i,at)}
+                    let target=WORKER_CLONE_OF[original as usize]
+                    if target<0 {return worker_closure_fail(314,i,at)}
+                    let reg=function.reg_count;function.reg_count=reg+1
+                    if ir_region_push(&!region,ir_load_fn_ref(reg,target))!=0 {return worker_closure_fail(315,i,at)}
+                    written=written+1
+                    instruction.call_args=Some(Box::new(ir_reg_list_single(reg)))
+                    instruction.src1=reg;instruction.src2=0-1
+                    preserve_arguments=false
+                }
+                if preserve_arguments {
+                    if ir_region_push(&!region,ir_nop())!=0 {return worker_closure_fail(315,i,at)}
+                    ir_arena_store_from(ir_region_slot_w(region,written),instruction,ir_region_slot_r(function.region,at))
+                } else {
+                    if ir_region_push(&!region,instruction)!=0 {return worker_closure_fail(315,i,at)}
+                }
+                written=written+1
+                at=at+1
+            }
+            function.region=region;function.instr_count=function.instr_count+constructors
+            ir_module_fn_set(module,i,function)
+        }
+        i=i+1
+    }
+    if !worker_validate_capability_flow(&(*module)) || !worker_validate_callback_closures(&(*module)) {return false}
+    i=0
+    while i<WORKER_IDENTITY_COUNT {
+        let id=WORKER_ROOT_FN[i as usize]
+        if id<original_count {return worker_closure_fail(316,id,0-1)}
+        var found=false
+        var e:i64=0
+        while e<WORKER_ENTRY_COUNT {
+            if WORKER_ENTRY_IDS[e as usize]==id {
+                if WORKER_ENTRY_ABIS[e as usize]!=WORKER_ROOT_ABI[i as usize] {return worker_closure_fail(317,id,0-1)}
+                found=true
+            }
+            e=e+1
+        }
+        if !found {
+            if WORKER_ENTRY_COUNT>=4096 {return worker_closure_fail(318,id,0-1)}
+            WORKER_ENTRY_IDS[WORKER_ENTRY_COUNT as usize]=id
+            WORKER_ENTRY_ABIS[WORKER_ENTRY_COUNT as usize]=WORKER_ROOT_ABI[i as usize]
+            WORKER_ENTRY_COUNT=WORKER_ENTRY_COUNT+1
+        }
+        i=i+1
+    }
+    i=original_count
+    while i<(*module).fn_count {
+        if WORKER_CLOSURE_STATE[i as usize]!=2 {return worker_closure_fail(319,i,0-1)}
+        var function=ir_fn_get(&(*module),i)
+        var region=ir_region_invalid()
+        if ir_region_clone(&function.region,&!region)!=0 {return worker_closure_fail(320,i,0-1)}
+        function.region=region
+        if ir_region_seal(&region)!=0 {return worker_closure_fail(321,i,0-1)}
+        var abi:i64=0
+        var e:i64=0
+        while e<WORKER_ENTRY_COUNT {if WORKER_ENTRY_IDS[e as usize]==i {abi=WORKER_ENTRY_ABIS[e as usize]};e=e+1}
+        WORKER_CERTIFIED=Some(Box::new(WorkerCertifiedClone {module_key:key,fn_id:i,entry_abi:abi,snapshot:Box::new(function),next:WORKER_CERTIFIED}))
+        i=i+1
+    }
+    WORKER_CERTIFIED_KEY=key
+    true
+}
+
+fn worker_function_matches(actual:&IrFunction,expected:&IrFunction)->bool with Mut,Panic,Div {
+    if !name_eq((*actual).name,(*expected).name) || !name_eq((*actual).return_struct_name,(*expected).return_struct_name) {return false}
+    if (*actual).instr_count!=(*expected).instr_count || (*actual).reg_count!=(*expected).reg_count || (*actual).label_count!=(*expected).label_count || (*actual).param_count!=(*expected).param_count || (*actual).compile_strategy!=(*expected).compile_strategy || (*actual).returns_float!=(*expected).returns_float || (*actual).return_kn_value_float!=(*expected).return_kn_value_float || (*actual).return_fixed_array_len!=(*expected).return_fixed_array_len || (*actual).prof_counter_id!=(*expected).prof_counter_id || (*actual).hyper_algebra_kind!=(*expected).hyper_algebra_kind || (*actual).is_sret!=(*expected).is_sret || (*actual).sret_dest_reg!=(*expected).sret_dest_reg || (*actual).bss_size!=(*expected).bss_size || (*actual).first_param_is_ref!=(*expected).first_param_is_ref || (*actual).f128_param_mask!=(*expected).f128_param_mask || (*actual).ref_struct_param_mask!=(*expected).ref_struct_param_mask {return false}
+    var p:i64=0
+    while p<64 {if (*actual).param_regs[p as usize]!=(*expected).param_regs[p as usize] {return false};p=p+1}
+    p=0
+    while p<ir_float_bits_capacity()/32 {if (*actual).float_reg_bits[p as usize]!=(*expected).float_reg_bits[p as usize] {return false};p=p+1}
+    if !ir_region_is_valid(&(*actual).region) || !ir_region_is_valid(&(*expected).region) {return false}
+    var at:i64=0
+    while at<(*actual).instr_count {
+        var a=ir_nop();var b=ir_nop()
+        if ir_region_get(&(*actual).region,at,&!a)!=0 || ir_region_get(&(*expected).region,at,&!b)!=0 {return false}
+        if a.op!=b.op || a.dst!=b.dst || a.src1!=b.src1 || a.src2!=b.src2 || a.imm_i64!=b.imm_i64 || f64_to_bits(a.imm_f64)!=f64_to_bits(b.imm_f64) || a.label_id!=b.label_id || a.fn_id!=b.fn_id || a.field_idx!=b.field_idx || a.imm_flags!=b.imm_flags || a.bin_op!=b.bin_op || a.un_op!=b.un_op || a.name_id!=b.name_id || a.arg_count!=b.arg_count {return false}
+        var arg:i64=0
+        while arg<a.arg_count {
+            if ir_arena_arg_at(ir_region_slot_r((*actual).region,at),arg)!=ir_arena_arg_at(ir_region_slot_r((*expected).region,at),arg) {return false}
+            arg=arg+1
+        }
+        at=at+1
+    }
+    true
+}
+pub fn worker_certified_context_key()->i64 with Mut {WORKER_CERTIFIED_KEY}
+// 0 ordinary function, 1 exact certified clone, -1 mutated certified function.
+// The backend must refuse -1; it must not silently compile it as an ordinary fn.
+pub fn worker_certificate_status(module_key:i64,fn_id:i64,function:&IrFunction)->i64 with Mut,Panic,Div,Alloc {
+    if module_key==0 || module_key!=WORKER_CERTIFIED_KEY {return 0}
+    var cursor=WORKER_CERTIFIED
+    while true {match cursor {
+        Some(certificate)=>{
+            if (*certificate).module_key==module_key && (*certificate).fn_id==fn_id {
+                if worker_function_matches(function,&(*(*certificate).snapshot)) {return 1}
+                return 0-1
+            }
+            cursor=(*certificate).next
+        }
+        None=>return 0
+    }}
+    0
+}

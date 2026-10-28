@@ -4,7 +4,8 @@ module ir::lower
 
 use parser::ast::*
 use check::types::{TypeEntry,TypeKind}
-use native::worker_proof::{worker_intrinsic_op,worker_type_name}
+use native::worker_proof::{worker_intrinsic_op,worker_type_name,worker_lower_begin_body,worker_lower_end_body,worker_lower_backend_enabled,worker_lower_constructor_token,worker_register_intrinsic,worker_protected_name}
+use compiler::trusted_origins::{trusted_origin_is_worker}
 use check::pattern_types::{CheckedPatternType,pattern_type_lookup}
 use ir::ir::*
 use ir::numeric_payload::{ir_wide_compile_pool_reset, ir_wide_compile_pool_intern_low}
@@ -7528,6 +7529,7 @@ fn lowerer_lower_fn_item_mut(
 
     lowerer_flush_current_func_mut(lo)
     (*lo).current_fn = fn_id
+    worker_lower_begin_body((*(*lo).module).functions as i64,fn_id,lower_effective_current_module_id(),name,(*fd).body.span,trusted_origin_is_worker(lower_effective_current_module_id()))
     // REUSE the Box the Lowerer already holds. `var f = ir_empty_function()`
     // followed by `Box::new(f)` allocated ~673 KB per function against a bump
     // cursor that never reclaims, which is the whole of the 1417 KB/function
@@ -7855,6 +7857,7 @@ lower_rss_mark("before_block")
     }
     lowerer_flush_current_func_mut(lo)
     lower_rss_mark("after_flush")
+    worker_lower_end_body((*(*lo).module).functions as i64,fn_id)
     (*lo).current_fn = IR_INVALID_FN
     // #1586/#1645: the body did not fit. Report at the END of the function, so
     // the message carries what it actually needed rather than only that it
@@ -35885,13 +35888,52 @@ impl Lowerer {
         (lo4, dst)
     }
 
+
+    fn lower_worker_intrinsic_ref(self,e:&Expr,op:i64)->(Lowerer,i64) with Mut,Panic,Div,Alloc,IO {
+        if !worker_lower_backend_enabled() {
+            print("error: WorkerFn native capability refused: final-IR closure, value-flow and isolated-clone certificates are required\n")
+            let refused=self.report_error_at(35776)
+            return refused.emit_i64_const(0)
+        }
+        let module_key=(*self.module).functions as i64
+        if (op==17 || op==18) && !trusted_origin_is_worker(lower_effective_current_module_id()) {
+            print("error: WorkerFn native capability refused: raw extraction has no trusted physical origin\n")
+            let refused=self.report_error_at(35777)
+            return refused.emit_i64_const(0)
+        }
+        var argument:Option<Box<Expr>> = None
+        match (*e).args {
+            Some(first)=>{
+                match (*first).tail {Some(_)=>{print("error: WorkerFn intrinsic requires one argument\n");let refused=self.report_error_at(35778);return refused.emit_i64_const(0)},None=>{}}
+                argument=Some(Box::new((*first).head))
+            }
+            None=>{print("error: WorkerFn intrinsic requires one argument\n");let refused=self.report_error_at(35778);return refused.emit_i64_const(0)}
+        }
+        var token:i64=0
+        if op==1 || op==2 {
+            match argument {Some(item)=>{if (*item).kind!=ExprKind::ExprIdent {print("error: WorkerFn constructor requires a named function item\n");let refused=self.report_error_at(35779);return refused.emit_i64_const(0)}},None=>{}}
+            token=worker_lower_constructor_token(module_key,self.current_fn,(*e).span,op)
+            if token<=0 {print("error: WorkerFn constructor has no fresh checked source identity\n");let refused=self.report_error_at(35780);return refused.emit_i64_const(0)}
+        }
+        let value=self.lower_opt_expr_ref(&argument)
+        var lo=value.0
+        let target=worker_register_intrinsic(&!(*lo.module),op)
+        if target<0 {print("error: WorkerFn protected stub registration refused\n");lo=lo.report_error_at(35781);return lo.emit_i64_const(0)}
+        let result=lo.fresh_reg()
+        lo=result.0
+        let args=Some(Box::new(ir_reg_list_single(value.1)))
+        var instruction=ir_call(result.1,target,worker_protected_name(op),args,1)
+        instruction.imm_i64=token
+        instruction.imm_flags=if op==1 || op==2 {64501} else {64502}
+        lo=lo.emit(instruction)
+        (lo,result.1)
+    }
+
     fn lower_call_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         match (*e).left {
             Some(callee)=>{
                 if (*callee).kind==ExprKind::ExprIdent && worker_intrinsic_op((*callee).name)>0 {
-                    print("error: WorkerFn native capability refused: final-IR closure, value-flow and isolated-clone certificates are required\n")
-                    let lo=self.report_error_at(35776)
-                    return lo.emit_i64_const(0)
+                    return self.lower_worker_intrinsic_ref(e,worker_intrinsic_op((*callee).name))
                 }
             }
             None=>{}

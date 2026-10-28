@@ -8,6 +8,8 @@ module native::codegen_x86_linux
 
 use parser::ast::{Name}
 use ir::storage_intrinsics::{storage_intrinsic_op}
+use ir::ir::{ir_module_clone,ir_module_fn_storage_status}
+use native::worker_proof::{worker_protected_id,worker_module_has_intrinsics,worker_lower_note_remap,worker_backend_begin,worker_backend_note_builtin,worker_prepare_clones,worker_identity_error,worker_capability_error,worker_closure_error,worker_closure_error_function,worker_closure_error_instruction,worker_certified_context_key,worker_certificate_status,worker_certified_entry_count,worker_certified_entry_id,worker_certified_entry_abi}
 use compiler::static_assets::{static_asset_read_verified}
 use ir::ir::{IrModule, IrFunction, IrInstr, IrOpcode, IR_MAX_FUNCS, IR_MAX_STRINGS, IR_MAX_VREGS, IR_MAX_INSTRS, IR_INVALID_REG, IR_FLOAT_REG_MARKER_FLAG, IR_BOX_ALLOC_FLAG, IR_XOR_TWIST_CAYLEY_DICKSON_SIGN, IR_XOR_CANDIDATE_AUTO, ir_reg_count_is_valid, ir_function_regs_are_valid, ir_xor_convolution_s, ir_name_eq, BSS_BASE_LINUX, IR_STRATEGY_BSS_GLOBAL, BSS_INIT_STRING_MAGIC}
 use native::encode::*
@@ -1411,6 +1413,8 @@ fn native_v2_region_builtin_id(n: Name) -> i64 with Mut, Panic, Div {
 // suffixes. An unrelated private formatter cannot acquire this identity.
 fn native_v2_protected_builtin_id(name: Name) -> i64 with Mut, Panic, Div {
     if name_eq(name,make_name("@region1:keep_local")) {return 1101}
+    let worker_id=worker_protected_id(name)
+    if worker_id!=0 {return worker_id}
     let storage_op=storage_intrinsic_op(&name)
     if storage_op!=0 {return 1000+storage_op}
     if name_eq(name, make_name("@native:print_int")) { return 1 }
@@ -8211,6 +8215,8 @@ fn emit_builtin_file_size(nc: NativeCompiler) -> NativeCompiler with Mut, Panic,
 // functions with different bodies collapse to the first-loaded one in a merged
 // Madaros program (#2773), which could drop the region binding silently.
 pub fn x86_compile_module_streaming_begin_into(nc: &! NativeCompiler, module: &IrModule) with Mut, Panic, Div, Alloc {
+    NC_WORKER_CURRENT_CLONE=false
+    NC_WORKER_EMIT_KEY=if worker_certified_context_key()==(*module).functions as i64 {(*module).functions as i64} else {0}
     nc_rgn_bind_module_fns(module)
     (*nc).fn_count = module.fn_count
     (*nc).runtime_context_slot_offset = 0
@@ -9587,6 +9593,7 @@ pub fn native_v2_builtin_returns_float(builtin_id: i64) -> bool {
 
 fn native_v2_emit_builtin_by_id_into(nc: &! NativeCompiler, builtin_id: i64) with Mut, Panic, Div {
     if builtin_id==1101 {emit_builtin_loop_keep_local_into(nc);return}
+    if builtin_id==2001 || builtin_id==2002 || builtin_id==2017 || builtin_id==2018 {native_v2_emit_worker_intrinsic_into(nc,builtin_id);return}
     if builtin_id>=1000 && builtin_id<1100 {emit_builtin_storage_into(nc,builtin_id-1000);return}
     if builtin_id == 39 { emit_builtin_ffi_getpid_into(nc); return }
     if builtin_id == 40 { emit_builtin_ffi_getppid_into(nc); return }
@@ -11429,6 +11436,9 @@ fn native_v2_report_invalid_registers(func: &IrFunction, fn_index: i64) with IO,
 }
 
 pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunction, fn_index: i64) -> bool with IO, Mut, Panic, Div, Alloc {
+    let worker_status=worker_certificate_status(NC_WORKER_EMIT_KEY,fn_index,func)
+    NC_WORKER_CURRENT_CLONE=worker_status==1
+    if worker_status<0 {println("error: WorkerFn certified IR changed before native emission");(*nc).ir_validation_failed=true;return false}
     // Final fail-closed boundary: several optimization/legalization passes can
     // allocate registers after lowering. Never let oversized final IR reach
     // the fixed native register-class and allocation tables.
@@ -11903,7 +11913,7 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
             )
         } else if instr_op == IrOpcode::IrStorePtr {
             // [src1] = src2 : store val through a raw pointer. val -> rbx, ptr -> rax, [rax]=rbx.
-            if NC_RGN_SABOTAGE != 3 { nc_rgn_emit_store_barrier(nc, IR_A_SRC2[(ir_region_slot_r((*func).region, (i))) as usize], IR_A_SRC1[(ir_region_slot_r((*func).region, (i))) as usize]) }
+            if !NC_WORKER_CURRENT_CLONE && NC_RGN_SABOTAGE != 3 { nc_rgn_emit_store_barrier(nc, IR_A_SRC2[(ir_region_slot_r((*func).region, (i))) as usize], IR_A_SRC1[(ir_region_slot_r((*func).region, (i))) as usize]) }
             nc_core_load_temp_to_rax(nc, IR_A_SRC2[(ir_region_slot_r((*func).region, (i))) as usize])
             nc_emit_mov_rbx_rax(nc)
             nc_core_load_temp_to_rax(nc, IR_A_SRC1[(ir_region_slot_r((*func).region, (i))) as usize])
@@ -12971,6 +12981,8 @@ fn compile_module_v2(nc: NativeCompiler, module: &IrModule) -> (NativeCompiler, 
 }
 
 pub fn compile_module_v2_mut(nc: &! NativeCompiler, module: &IrModule) -> string with Mut, Panic, Div, Alloc {
+    NC_WORKER_EMIT_KEY=0;NC_WORKER_CURRENT_CLONE=false
+    if worker_module_has_intrinsics(module) {return "WorkerFn native capability refused: certified file writer required"}
     (*nc).fn_count = module.fn_count
     (*nc).runtime_context_slot_offset = 0
     let runtime_slot_size = runtime_context_global_slot_size()
@@ -15409,6 +15421,13 @@ fn native_v2_trace_module_ir_ref(module: &IrModule) with IO, Mut, Panic, Div {
 }
 
 pub fn compile_native_v2_preview_to_file(module: &IrModule, target_spec: NativeTargetSpec, output_path: string) -> i32 with IO, Mut, Panic, Div, Alloc {
+    if worker_module_has_intrinsics(module) {
+        if !(target_spec.arch_id==ARCH_X86_64() && target_spec.os_id==OS_LINUX()) {println("error: WorkerFn requires the certified x86-64 Linux native backend");return 26}
+        match native_v2_worker_private_copy(module) {Some(copy)=>return compile_native_v2_prepared_to_file(&(*copy),target_spec,output_path),None=>return 26}
+    }
+    compile_native_v2_prepared_to_file(module,target_spec,output_path)
+}
+fn compile_native_v2_prepared_to_file(module: &IrModule, target_spec: NativeTargetSpec, output_path: string) -> i32 with IO, Mut, Panic, Div, Alloc {
     if target_spec.matrix_mode < 0 {
         return 10
     }
@@ -16021,6 +16040,10 @@ fn compile_native_finalize_and_write_ref(nc: &! NativeCompiler, base_addr: i64, 
 }
 
 pub fn compile_native_x86_linux_to_file(module: &IrModule, output_path: string) -> i32 with IO, Mut, Panic, Div, Alloc {
+    if worker_module_has_intrinsics(module) {
+        let target=native_resolve_target("x86_64-linux","auto",true)
+        return compile_native_v2_preview_to_file(module,target,output_path)
+    }
     var nc = compiler_new()
     x86_compile_module_streaming_begin_into(&! nc, module)
     var fi: i64 = 0
@@ -16623,4 +16646,59 @@ fn emit_builtin_loop_keep_local_into(nc:&!NativeCompiler) with Mut,Panic,Div {
  rgn_patch(nc,none)
  rgn_emit_alu(nc,0x31,0,0)
  nc_emit_ret(nc)
+ }
+
+var NC_WORKER_EMIT_KEY:i64=0
+var NC_WORKER_CURRENT_CLONE:bool=false
+fn native_v2_emit_worker_intrinsic_into(nc:&!NativeCompiler,id:i64) with Mut,Panic,Div {
+    if NC_WORKER_EMIT_KEY==0 || worker_certified_context_key()!=NC_WORKER_EMIT_KEY {
+        (*nc).ir_validation_failed=true
+        nc_emit_ud2(nc)
+        return
+    }
+    if id==2001 || id==2002 {
+        // Constructor receives the emitted certified clone's address as a word.
+        nc_emit_byte(nc,0x48);nc_emit_byte(nc,0x89);nc_emit_byte(nc,0xf8);nc_emit_ret(nc)
+        return
+    }
+    let abi=if id==2017 {1} else {2}
+    var i:i64=0
+    while i<worker_certified_entry_count() {
+        if worker_certified_entry_abi(i)==abi {
+            let entry=worker_certified_entry_id(i)
+            if entry<0 {(*nc).ir_validation_failed=true;nc_emit_ud2(nc);return}
+            let address=(*nc).code.len
+            nc_emit_lea_rax_rip_disp32(nc,0)
+            nc_add_flat_reloc(nc,address+3,4,1,entry)
+            // cmp rdi,rax ; jne +4 ; mov rax,rdi ; ret
+            nc_emit_byte(nc,0x48);nc_emit_byte(nc,0x39);nc_emit_byte(nc,0xc7)
+            nc_emit_byte(nc,0x75);nc_emit_byte(nc,4)
+            nc_emit_byte(nc,0x48);nc_emit_byte(nc,0x89);nc_emit_byte(nc,0xf8);nc_emit_ret(nc)
+        }
+        i=i+1
+    }
+    // Empty list, wrong ABI and a corrupted capability word all stop before the
+    // FFI bridge can create a worker. The list consists of immutable code bytes.
+    nc_emit_ud2(nc)
+}
+fn native_v2_worker_private_copy(module:&IrModule)->Option<Box<IrModule>> with Mut,Panic,Div,Alloc,IO {
+    var copy=Box::new(ir_module_clone(module))
+    if ir_module_fn_storage_status(&(*copy))!=0 {println("error: WorkerFn private module copy refused");return None}
+    let from_key=(*module).functions as i64
+    let to_key=(*copy).functions as i64
+    var i:i64=0
+    while i<(*module).fn_count {worker_lower_note_remap(from_key,i,to_key,i);i=i+1}
+    worker_backend_begin(&(*copy))
+    i=0
+    while i<(*copy).fn_count {
+        let function=ir_fn_get(&(*copy),i)
+        worker_backend_note_builtin(to_key,i,native_v2_builtin_id_for_func_ref(&function))
+        i=i+1
+    }
+    if !worker_prepare_clones(&!(*copy)) {
+        print("error: WorkerFn final IR capability or closure proof refused: identity=")
+        print_int(worker_identity_error());print(" capability=");print_int(worker_capability_error());print(" closure=");print_int(worker_closure_error());print(" fn=");print_int(worker_closure_error_function());print(" at=");print_int(worker_closure_error_instruction());print("\n")
+        return None
+    }
+    Some(copy)
 }
