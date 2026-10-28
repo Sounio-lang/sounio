@@ -200,8 +200,11 @@ verify_step_problems() {
   [[ "$line" =~ (^|[[:space:]])trap[[:space:]] ]] && step_swallow=1
   # `echo "$(verify)"` and backticks succeed when verify fails. `set -e` does
   # not apply inside the substitution. An assignment of the substitution does
-  # fail the step; nesting it in another command does not.
+  # fail the step; nesting it in another command does not. A plain `echo` or
+  # `printf` of the verify command is not a run either: the text matches, and
+  # the copy still proceeds.
   [[ "$line" == *'$('* || "$line" == *'`'* ]] && step_swallow=1
+  [[ "$line" =~ (^|[[:space:]])(echo|printf)([[:space:]]|$) ]] && step_swallow=1
   if [[ "$line" =~ ^[[:space:]]*(-\ )?shell: ]]; then
    [[ ( "$line" == *'-e'* || "$line" == *'errexit'* ) && "$line" == *'pipefail'* ]] || step_swallow=1
   fi
@@ -328,12 +331,20 @@ workflow_problems() {
   body[$job]+=$line$'\n'
   if [[ "$line" =~ ^\ \ \ \ needs:[[:space:]]*(.*)$ ]]; then
    rest=${BASH_REMATCH[1]}
+   # A name after `#` is not a dependency. `needs: [impact] # madaros-witness-gate`
+   # does not wait for the producer.
+   rest=${rest%% #*}
+   [[ "$rest" == \#* ]] && rest=
+   rest=${rest#"${rest%%[![:space:]]*}"}
+   rest=${rest%"${rest##*[![:space:]]}"}
    needs_text[$job]=$rest
    if [[ -z "$rest" ]]; then in_needs=1; else in_needs=0; fi
    continue
   fi
   if [[ "$in_needs" == 1 ]]; then
-   if [[ "$line" =~ ^\ \ \ \ \ \ -\ ([A-Za-z0-9_-]+)[[:space:]]*$ ]]; then
+   [[ "$line" =~ ^[[:space:]]*# ]] && continue
+   rest=${line%% #*}
+   if [[ "$rest" =~ ^\ \ \ \ \ \ -\ ([A-Za-z0-9_-]+)[[:space:]]*$ ]]; then
     needs_text[$job]+=" ${BASH_REMATCH[1]}"
     continue
    fi
@@ -483,6 +494,15 @@ EOF
  sed 's/needs: \[impact, madaros-witness-gate\]/needs: impact/' "$base" >"$bad"
  # The sed above rewrites every consumer. One missing edge is enough.
  expect_workflow_problem "$bad" needs-producer
+ bad="$work/wf-needs-comment.yml"
+ awk 'BEGIN{arm=0} /^  madaros-current-source-deref-f64:/{arm=1} arm && /^    needs: \[impact, madaros-witness-gate\]/{print "    needs: [impact] # madaros-witness-gate"; arm=0; next} {print}' "$base" >"$bad"
+ expect_workflow_problem "$bad" needs-producer
+ bad="$work/wf-needs-comment-list.yml"
+ awk 'BEGIN{arm=0} /^  madaros-current-source-deref-f64:/{arm=1} arm && /^    needs: \[impact, madaros-witness-gate\]/{print "    needs:"; print "      - impact"; print "      # - madaros-witness-gate"; arm=0; next} {print}' "$base" >"$bad"
+ expect_workflow_problem "$bad" needs-producer
+ bad="$work/wf-verify-echo.yml"
+ awk 'BEGIN{arm=0} /^  madaros-current-source-deref-f64:/{arm=1} arm && /stdlib_deep_compiler_receipt.sh verify/{sub(/bash/, "echo bash"); arm=0} {print}' "$base" >"$bad"
+ expect_workflow_problem "$bad" verify-skippable
  bad="$work/wf-verify.yml"
  awk 'BEGIN{skip=0} /madaros-current-source-deref-f64/{skip=1} skip && /stdlib_deep_compiler_receipt.sh verify/{skip=0; next} {print}' "$base" >"$bad"
  expect_workflow_problem "$bad" verify-after-download
