@@ -14183,16 +14183,14 @@ impl Lowerer {
                 // pushed the gen2 self-compile past the native code buffer
                 // (149663889 > 134217728 bytes, SIO-278 first attempt). Emit
                 // the copy only where it changes an observable value within
-                // the copy's own depth cap: an aggregate field is followed
-                // (deep cost above the flat 1 + 2*slots), or the struct is
+                // the copy's own depth cap: an aggregate field is reachable
+                // (struct_type_has_copyable_aggregate), or the struct is
                 // small enough that the flat copy is a handful of
                 // instructions. A large struct with no reachable aggregate
                 // field keeps the pre-SIO-278 shared handle for scalar
                 // fields -- the residual the size cap forces, never worse
                 // than the behaviour this replaces.
-                let flat_cost = 1 + 2 * slot_count
-                let deep_cost = self.struct_deep_copy_cost(st, slot_count, 0)
-                if deep_cost > flat_cost || slot_count <= 16 {
+                if slot_count <= 16 || self.struct_type_has_copyable_aggregate(st) {
                     return self.emit_struct_value_copy_budgeted(reg, st, slot_count)
                 }
                 return (self, reg)
@@ -14225,6 +14223,57 @@ impl Lowerer {
             }
         }
         (self, reg)
+    }
+
+    // Whether the registered layout of `type_name` has a word-scalar
+    // fixed-array field, read straight off the layout entries.
+    fn struct_layout_has_array_field(self, type_name: Name) -> bool with Mut, Panic, Div, Alloc {
+        if type_name.len <= 0 { return false }
+        var si: i64 = 0
+        while si < (*self.struct_layouts).count {
+            if ir_name_eq((*self.struct_layouts).entries[si as usize].type_name, type_name) {
+                var fi: i64 = 0
+                let fc = (*self.struct_layouts).entries[si as usize].field_count
+                while fi < fc && fi < 128 {
+                    if (*self.struct_layouts).entries[si as usize].fields[fi as usize].word_scalar_array_len > 0 { return true }
+                    fi = fi + 1
+                }
+                return false
+            }
+            si = si + 1
+        }
+        false
+    }
+
+    // SIO-278: whether a value copy of `type_name` would follow at least one
+    // aggregate field within the deep copy's depth cap -- a fixed-array
+    // field on the type itself, or on a nested struct field one level down
+    // (the deep copy follows depth 0 and 1 the same way). One pass over the
+    // layout entries per level: this runs at every deref/field `let` site,
+    // where the projected-cost walk (struct_deep_copy_cost) re-scans the
+    // layout registry per slot and made gen2 self-compile time explode.
+    fn struct_type_has_copyable_aggregate(self, type_name: Name) -> bool with Mut, Panic, Div, Alloc {
+        if self.struct_layout_has_array_field(type_name) { return true }
+        var si: i64 = 0
+        while si < (*self.struct_layouts).count {
+            if ir_name_eq((*self.struct_layouts).entries[si as usize].type_name, type_name) {
+                var fi: i64 = 0
+                let fc = (*self.struct_layouts).entries[si as usize].field_count
+                while fi < fc && fi < 128 {
+                    let entry = (*self.struct_layouts).entries[si as usize].fields[fi as usize]
+                    if entry.word_scalar_array_len <= 0 {
+                        let nested_name = ir_name_at(entry.named_type_name_id)
+                        if self.nested_struct_field_slot_count(nested_name) > 0 {
+                            if self.struct_layout_has_array_field(nested_name) { return true }
+                        }
+                    }
+                    fi = fi + 1
+                }
+                return false
+            }
+            si = si + 1
+        }
+        false
     }
 
     // (word-scalar element count, element is float) of a fixed-array FIELD
