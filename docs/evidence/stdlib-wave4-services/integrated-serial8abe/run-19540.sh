@@ -1,0 +1,180 @@
+#!/bin/bash
+#SBATCH --job-name=normal-abort-component
+#SBATCH --chdir=/tmp
+#SBATCH --partition=all
+#SBATCH --nodelist=dl380-dl380-proxmox
+#SBATCH --cpus-per-task=4
+#SBATCH --mem=8G
+#SBATCH --time=00:35:00
+#SBATCH --export=NIL
+#SBATCH --output=/scratch/sounio-stdlib-wave3-20261027/services/normal-abort-integrated31/slurm-%j.out
+#SBATCH --error=/scratch/sounio-stdlib-wave3-20261027/services/normal-abort-integrated31/slurm-%j.err
+set -euo pipefail
+export PATH=/usr/bin:/bin SOUNIO_LOOP_REGIONS=0
+B=/scratch/sounio-stdlib-wave3-20261027/services/normal-abort-integrated31
+SOURCE=/scratch/sounio-stdlib-wave3-20261027/services/arrow-abort-committed02/src
+R=/scratch/sounio-stdlib-wave3-20261027/services/arrow-abort02/results
+OUT=$B/results
+mkdir "$OUT"
+mkdir "$OUT/inputs" "$OUT/runs"
+finish(){ r=$?;trap - EXIT;if [[ -s "$OUT/INTEGRATED_COMPILER.sha256" ]];then sha256sum -c "$OUT/INTEGRATED_COMPILER.sha256" > "$OUT/INTEGRATED_COMPILER.final.verify" 2>&1||r=1;fi;echo "$r" > "$OUT/STATUS";exit "$r";};trap finish EXIT
+[[ $(cat "$R/STATUS") == 0 ]]
+cp /scratch/sounio-stdlib-wave3-20261027/root-integrated02/RAW_READY "$OUT/INTEGRATED_COMPILER.sha256"
+sha256sum -c "$OUT/INTEGRATED_COMPILER.sha256" > "$OUT/INTEGRATED_COMPILER.before.verify"
+printf '%s\n' 'COMPONENT SERIAL EXTRACTION ONLY; existing function-body/source ledgers retained. Does not qualify WorkerFn, public API or parallel pipeline.' > "$OUT/INTEGRATED_SCOPE"
+cd "$SOURCE"
+FINAL=/scratch/sounio-stdlib-wave3-20261027/services/arrow-abort-committed02/results
+[[ $(cat "$FINAL/STATUS") == 0 ]]
+sha256sum -c "$FINAL/SOURCES.sha256" > "$OUT/FINAL_API_SOURCE.verify"
+for n in SOURCES TOOLS SDK_HEADERS EXECUTABLES DYNAMIC;do
+ [[ -s "$R/$n.sha256" ]]
+ sha256sum -c "$R/$n.sha256" > "$OUT/DEPENDENCY_$n.verify"
+done
+sha256sum "$B/file.sio" "$B/tcp.sio" "$B/EXECUTOR_BODIES.tsv" "$B/worker.sh" > "$OUT/SOURCES.sha256"
+export SOUC_NATIVE_BIN=/scratch/sounio-stdlib-wave3-20261027/root-integrated02/results/madaros
+export SOUNIO_SOUC_BIN=$SOUC_NATIVE_BIN SOUNIO_SOUC_RAW_MODE=modular SOUNIO_STDLIB_PATH="$SOURCE/stdlib"
+export SOUNIO_MADAROS_NOCACHE=1 SOUNIO_MADAROS_CACHE_READONLY=1 LD_LIBRARY_PATH="$R:/scratch/sounio-stdlib-wave3-20261027/sdk/arrow26/root/usr/lib/x86_64-linux-gnu"
+WRAPPER="$SOURCE/scripts/ci/souc-native-wrapper.sh"
+ulimit -s 524288
+ulimit -c 0
+printf 'case\tphase\tstatus\n' > "$OUT/RESULTS.tsv"
+ln -s "$R/normal-reference" "$OUT/normal-reference"
+ln -s "$R/spawn-trace.so" "$OUT/spawn-trace.so"
+ln -s "$R/close-eio.so" "$OUT/close-eio.so"
+
+phase(){
+ local name=$1 kind=$2 seconds=$3 r=0
+ shift 3
+ timeout "$seconds" "$@" > "$OUT/$name.$kind.stdout" 2> "$OUT/$name.$kind.stderr" || r=$?
+ printf '%s\t%s\t%s\n' "$name" "$kind" "$r" >> "$OUT/RESULTS.tsv"
+ return "$r"
+}
+compile_sio(){
+ local name=$1 source=$2
+ sha256sum "$source" >> "$OUT/INPUTS.sha256"
+ phase "$name" check 300 bash "$WRAPPER" check "$source"
+ grep -Fxq 'check: OK' "$OUT/$name.check.stdout"
+ phase "$name" compile 600 bash "$WRAPPER" compile "$source" -o "$OUT/$name.elf"
+ [[ -s "$OUT/$name.elf" && $(od -An -tx1 -N4 "$OUT/$name.elf"|tr -d ' \n') == 7f454c46 ]]
+ chmod +x "$OUT/$name.elf"
+ sha256sum "$OUT/$name.elf" >> "$OUT/EXECUTABLES.sha256"
+}
+negative_input(){
+ local name=$1 expected=$2 contents=$3 r=0
+ mkdir "$OUT/runs/$name"
+ printf '%b' "$contents" > "$OUT/runs/$name/input.csv"
+ sha256sum "$OUT/runs/$name/input.csv" >> "$OUT/INPUTS.sha256"
+ (cd "$OUT/runs/$name";phase "$name" native-refusal 120 "$OUT/file.elf") || r=$?
+ [[ $r == "$expected" ]]
+ [[ $(head -1 "$OUT/$name.native-refusal.stdout") == "$expected" && $(sed -n '2p' "$OUT/$name.native-refusal.stdout") == 0 ]]
+ [[ $(tail -c 8 "$OUT/runs/$name/output.arrow"|od -An -tx1|tr -d ' \n') != ffffffff00000000 ]]
+ grep -Fxq NORMAL_PIPELINE_RESOURCES_CLOSED "$OUT/$name.native-refusal.stdout"
+ ! grep -Fxq NORMAL_CSV_ARROW_OK "$OUT/$name.native-refusal.stdout"
+}
+tcp_run(){
+ local name=$1 elf=$2 input=$3 chunk=$4 delay=$5 mode=$6 expected=$7 port='' producer_rc=0 peer_rc=0
+ mkdir "$OUT/runs/$name"
+ cp "$input" "$OUT/runs/$name/input.csv"
+ sha256sum "$OUT/runs/$name/input.csv" >> "$OUT/INPUTS.sha256"
+ : > "$OUT/$name.spawns"
+ (cd "$OUT/runs/$name";phase "$name" native 600 env LD_PRELOAD="$OUT/spawn-trace.so" SOUNIO_SPAWN_TRACE="$OUT/$name.spawns" SOUNIO_SPAWN_TARGET="$elf" /usr/bin/time -v -o "$OUT/$name.resource" "$elf") &
+ local producer=$!
+ for attempt in {1..250};do
+  if grep -Fxq TCP_LISTENING "$OUT/$name.native.stdout" 2>/dev/null;then
+   port=$(sed -n '2p' "$OUT/$name.native.stdout")
+   [[ $port =~ ^[0-9]+$ ]] && break
+  fi
+  if ! kill -0 "$producer" 2>/dev/null;then break;fi
+  sleep 0.02
+ done
+ if [[ ! $port =~ ^[0-9]+$ ]];then wait "$producer" || true;echo "missing TCP port" >&2;return 1;fi
+ phase "$name" peer 600 "$OUT/normal-reference" peer "$port" "$OUT/runs/$name/input.csv" "$chunk" "$delay" "$mode" || peer_rc=$?
+ wait "$producer" || producer_rc=$?
+ trace_check "$OUT/$name.spawns" 0
+ if [[ $expected == 0 ]];then
+  [[ $producer_rc == 0 && $peer_rc == 0 ]]
+  grep -Fxq NORMAL_TCP_ARROW_OK "$OUT/$name.native.stdout"
+  phase "$name" verify 120 "$OUT/normal-reference" verify "$OUT/runs/$name/input.csv" "$OUT/runs/$name/output.arrow"
+ else
+  [[ $producer_rc == "$expected" ]]
+  [[ $(sed -n '3p' "$OUT/$name.native.stdout") == "$expected" && $(sed -n '4p' "$OUT/$name.native.stdout") == 0 ]]
+  [[ $(tail -c 8 "$OUT/runs/$name/output.arrow"|od -An -tx1|tr -d ' \n') != ffffffff00000000 ]]
+  grep -Fxq NORMAL_TCP_RESOURCES_CLOSED "$OUT/$name.native.stdout"
+  ! grep -Fxq NORMAL_TCP_ARROW_OK "$OUT/$name.native.stdout"
+  if [[ $peer_rc != 0 ]];then [[ $peer_rc == 1 ]];grep -Eq 'errno=(32|104)' "$OUT/$name.peer.stderr";fi
+ fi
+}
+trace_check(){
+ local path=$1 expected=$2
+ [[ -f "$path" && $(tr -cd L < "$path") == L && $(tr -cd S < "$path"|wc -c) -eq "$expected" && $(tr -d LS < "$path"|wc -c) -eq 0 ]]
+}
+
+compile_sio file "$B/file.sio"
+compile_sio tcp "$B/tcp.sio"
+sed 's/value+180000000000/value+10000000/' "$B/tcp.sio" > "$OUT/inputs/deadline.sio"
+compile_sio deadline "$OUT/inputs/deadline.sio"
+sed 's/deadline,33554432/deadline,16/' "$B/tcp.sio" > "$OUT/inputs/budget.sio"
+compile_sio budget "$OUT/inputs/budget.sio"
+mkdir "$OUT/runs/file-small"
+phase generate generate 60 "$OUT/normal-reference" generate "$OUT/runs/file-small" 257
+sha256sum "$OUT/runs/file-small/input.csv" >> "$OUT/INPUTS.sha256"
+: > "$OUT/file-small.spawns"
+(cd "$OUT/runs/file-small";phase file-small native 120 env LD_PRELOAD="$OUT/spawn-trace.so" SOUNIO_SPAWN_TRACE="$OUT/file-small.spawns" SOUNIO_SPAWN_TARGET="$OUT/file.elf" /usr/bin/time -v -o "$OUT/file-small.resource" "$OUT/file.elf")
+trace_check "$OUT/file-small.spawns" 0
+grep -Fxq NORMAL_CSV_ARROW_OK "$OUT/file-small.native.stdout"
+phase file-small verify 120 "$OUT/normal-reference" verify "$OUT/runs/file-small/input.csv" "$OUT/runs/file-small/output.arrow"
+
+mkdir "$OUT/runs/file-million"
+phase generate-million generate 60 "$OUT/normal-reference" generate "$OUT/runs/file-million" 1000000
+sha256sum "$OUT/runs/file-million/input.csv" >> "$OUT/INPUTS.sha256"
+: > "$OUT/file-million.spawns"
+(cd "$OUT/runs/file-million";phase file-million native 600 env LD_PRELOAD="$OUT/spawn-trace.so" SOUNIO_SPAWN_TRACE="$OUT/file-million.spawns" SOUNIO_SPAWN_TARGET="$OUT/file.elf" /usr/bin/time -v -o "$OUT/file-million.resource" "$OUT/file.elf")
+trace_check "$OUT/file-million.spawns" 0
+grep -Fxq NORMAL_CSV_ARROW_OK "$OUT/file-million.native.stdout"
+phase file-million verify 120 "$OUT/normal-reference" verify "$OUT/runs/file-million/input.csv" "$OUT/runs/file-million/output.arrow"
+
+negative_input header 22 'id,z_milli\n0,1\n'
+negative_input columns 22 'sample_id,z_milli\n0,1,2\n'
+negative_input order 22 'sample_id,z_milli\n1,1\n'
+negative_input fraction 22 'sample_id,z_milli\n0,0.5\n'
+negative_input exponent 22 'sample_id,z_milli\n0,1e3\n'
+negative_input sign 22 'sample_id,z_milli\n0,+\n'
+negative_input range 34 'sample_id,z_milli\n0,40001\n'
+negative_input min-range 34 'sample_id,z_milli\n0,-40001\n'
+negative_input overflow 34 'sample_id,z_milli\n0,9223372036854775808\n'
+negative_input utf8 84 'sample_id,z_milli\n0,\377\n'
+negative_input quoted-eof 22 'sample_id,z_milli\n0,"2'
+negative_input maxrow 105 "sample_id,z_milli\n0,$(printf '%0130d' 1)\n"
+mkdir "$OUT/runs/input-close-error"
+printf 'sample_id,z_milli\n0,"2' > "$OUT/runs/input-close-error/input.csv"
+sha256sum "$OUT/runs/input-close-error/input.csv" >> "$OUT/INPUTS.sha256"
+r=0
+(cd "$OUT/runs/input-close-error";phase input-close-error native-refusal 120 env LD_PRELOAD="$OUT/close-eio.so" SOUNIO_FAIL_CLOSE_NAME=output.arrow "$OUT/file.elf") || r=$?
+[[ $r == 22 && $(sed -n '1p' "$OUT/input-close-error.native-refusal.stdout") == 22 && $(sed -n '2p' "$OUT/input-close-error.native-refusal.stdout") == 5 ]]
+grep -Fxq NORMAL_PIPELINE_RESOURCES_CLOSED "$OUT/input-close-error.native-refusal.stdout"
+grep -Fxq INJECTED_CLOSE_EIO_DESCRIPTOR_CLOSED "$OUT/input-close-error.native-refusal.stderr"
+[[ $(tail -c 8 "$OUT/runs/input-close-error/output.arrow"|od -An -tx1|tr -d ' \n') != ffffffff00000000 ]]
+
+
+
+tcp_run tcp-small "$OUT/tcp.elf" "$OUT/runs/file-small/input.csv" 4096 0 normal 0
+tcp_run tcp-million "$OUT/tcp.elf" "$OUT/runs/file-million/input.csv" 4096 0 normal 0
+cmp "$OUT/runs/file-million/output.arrow" "$OUT/runs/tcp-million/output.arrow"
+phase file-memory resources 60 "$OUT/normal-reference" resources "$OUT/file-small.resource" "$OUT/file-million.resource" "$OUT/file-million.resource"
+phase tcp-memory resources 60 "$OUT/normal-reference" resources "$OUT/tcp-small.resource" "$OUT/tcp-million.resource" "$OUT/tcp-million.resource"
+printf '%s\n' 'SERIAL ONLY: third resource input duplicates serial scale for the existing bounds check; no parallel runtime or speedup claim.' > "$OUT/MEMORY_SCOPE"
+tcp_run tcp-deadline "$OUT/deadline.elf" "$OUT/runs/file-small/input.csv" 4096 250 hold 110
+tcp_run tcp-budget "$OUT/budget.elf" "$OUT/runs/file-small/input.csv" 4096 0 normal 105
+printf 'sample_id,z_milli\n0,"12' > "$OUT/inputs/tcp-truncated.csv"
+tcp_run tcp-truncated "$OUT/tcp.elf" "$OUT/inputs/tcp-truncated.csv" 1 0 normal 22
+cmp "$OUT/runs/file-small/output.arrow" "$OUT/runs/tcp-small/output.arrow"
+sha256sum -c "$OUT/SOURCES.sha256" > "$OUT/SOURCES.final.verify"
+sha256sum -c "$OUT/INPUTS.sha256" > "$OUT/INPUTS.final.verify"
+sha256sum -c "$OUT/EXECUTABLES.sha256" > "$OUT/EXECUTABLES.final.verify"
+for n in SOURCES TOOLS SDK_HEADERS EXECUTABLES DYNAMIC;do
+ sha256sum -c "$R/$n.sha256" > "$OUT/DEPENDENCY_$n.final.verify"
+done
+find "$OUT/runs" "$OUT/inputs" -type f -print0|sort -z|xargs -0 sha256sum > "$OUT/ARTIFACTS.sha256"
+cat "$OUT/RESULTS.tsv"
+sha256sum -c "$FINAL/SOURCES.sha256" > "$OUT/FINAL_API_SOURCE.final.verify"
+echo NORMAL_ABORT_COMPONENT_OK
