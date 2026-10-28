@@ -36,12 +36,7 @@ The scaffold now generates and records:
 
 ## Verify Baseline Still Passes
 
-```bash
-PATH=/home/demetrios/work/sounio/target/debug:$PATH \
-SOUC_BIN=/home/demetrios/work/sounio/target/debug/souc \
-OMEGA_POLICY_SOUC_BIN=/home/demetrios/work/sounio/target/debug/souc \
-bash scripts/archive/omega_sprint1_gate.sh --strict --report-full   # retired: moved to scripts/archive/ in 6eedd8fe52
-```
+`omega_sprint1_gate.sh --strict --report-full` was retired in `6eedd8fe52` and removed with `scripts/archive/`. It is not a command in this tree.
 
 ## Output
 
