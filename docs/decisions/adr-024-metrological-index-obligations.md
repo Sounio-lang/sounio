@@ -29,23 +29,29 @@ That obligation defeats ADR-023 in two ways. It is non-linear (`floor`, division
 
 ### 1. Metrological pullback
 
-When an index is `floor((x - x0) / dx)` (or `ceil`, or `round`) and the unit checker establishes that `x`, `x0` and `dx` have the same unit, so the quotient is dimensionless, and that `dx > 0`, the obligation `0 <= i < n` is rewritten to the equivalent constraint in the measurement space:
+Write `q = (x - x0) / dx`. The rule applies when the unit checker establishes that `x`, `x0` and `dx` have the same unit, so `q` is dimensionless, and when `dx > 0`. The obligation `0 <= i < n` is then replaced by an interval in the measurement space. That interval depends on the rounding operator:
 
-```
-x0 <= x < x0 + n * dx
-```
+| index `i` | `0 <= i < n` holds exactly when | pulled-back constraint on `x` | relation |
+|---|---|---|---|
+| `floor(q)` | `0 <= q < n` | `x0 <= x < x0 + n*dx` | equivalent |
+| `ceil(q)` | `-1 < q <= n - 1` | `x0 - dx < x <= x0 + (n-1)*dx` | equivalent |
+| `round(q)`, any tie rule | `-1/2 < q < n - 1/2` is sufficient | `x0 - dx/2 < x < x0 + (n - 1/2)*dx` | sufficient |
 
-This rewrite turns the non-linear index constraint into a linear one in the original unit. The unit check is what licenses it, and `floor` monotonicity is the lemma that justifies it. Both go into the ADR-023 certificate. The rewritten constraint is discharged by ADR-023's linear decider when `x` is exact.
+For `round`, the endpoints `q = -1/2` and `q = n - 1/2` depend on the tie convention. The open interval excludes both, so it implies the obligation under every convention. It may refuse a value that a specific convention would accept, but it never accepts one that is out of range.
+
+A pullback is admitted only if it is **equivalent to the obligation or implies it**. It is never weaker. Using the `floor` interval for `ceil` or `round` is unsound. For example, with `x0 = 0`, `dx = 1` and `n = 4`, the value `x = 3.75` satisfies `x < 4`, yet `ceil` and `round` both give index 4. Each operator has its own lemma, built from the monotonicity of the operator together with its exact inverse image or a sufficient sub-interval. That lemma goes into the ADR-023 certificate, along with the unit check that licenses the rewrite.
+
+The rewrite turns the non-linear index constraint into a linear one in the original unit. When `x` is exact, ADR-023's linear decider discharges it.
 
 ### 2. Probabilistic discharge, distribution-free
 
-When `x` is an epistemic value with mean `μ` and standard uncertainty `u`, the pulled-back obligation is the event `a <= X < b`. Let `d_a = μ - a` and `d_b = b - μ`. If `μ` lies in `[a, b)`, the out-of-range probability is bounded without assuming a distribution by
+When `x` is an epistemic value with mean `μ` and standard uncertainty `u`, the pulled-back obligation is an interval event `a ⊲ X ⊲ b` (open or closed at each end, per the table). Let `d_a = μ - a` and `d_b = b - μ`. If `a < μ < b`, the out-of-range probability is bounded without assuming a distribution by
 
 ```
 ε = min( u²/(u²+d_a²) + u²/(u²+d_b²),   u² / min(d_a, d_b)² )
 ```
 
-This is the two-sided Cantelli bound, by the union bound, and the Chebyshev bound at the nearer edge, whichever is smaller. If `μ` is outside `[a, b)`, `ε = 1`. If `u = 0`, the obligation is decided exactly as in ADR-023. The bound and its derivation are part of the certificate, and Lean checks them.
+This is the two-sided Cantelli bound, by the union bound, and the Chebyshev bound at the nearer edge, whichever is smaller. Each term bounds a closed tail, so the bound holds for either endpoint convention. If `μ` is not strictly inside, `ε = 1`. If `u = 0`, the obligation is decided exactly as in ADR-023. The bound and its derivation are part of the certificate, and Lean checks them.
 
 ### 3. Guarantee levels
 
@@ -92,6 +98,15 @@ The new part is to use dimensional analysis to pull a non-linear index obligatio
 ## Acceptance
 
 1. `floor((x - x0) / dx)` with consistent units is pulled back. Lean accepts the certificate. The same expression with `x` in metres and `dx` in seconds is not pulled back, and the unit checker reports it.
+   The three operators are checked against their own intervals with `x0 = 0`, `dx = 1` and `n = 4`:
+
+   | `x` | `floor` | `ceil` | `round` | `floor` interval `[0,4)` | `ceil` interval `(-1,3]` | `round` interval `(-1/2, 7/2)` |
+   |---|---|---|---|---|---|---|
+   | -0.25 | -1, out | 0, in | 0, in | out ✓ | in ✓ | in ✓ |
+   | 3.75 | 3, in | 4, out | 4, out | in ✓ | out ✓ | out ✓ |
+   | -0.5 | -1, out | 0, in | tie-dependent | out ✓ | in ✓ | out (sufficient: refused) |
+
+   No pullback certifies an index that is out of range (C++23 oracle [`adr024_pullback.cpp`](../audit/ADR_024_025_ORACLES_2026-10-28/adr024_pullback.cpp) checks all three intervals on a 12,001-point grid: 0 unsound admissions, and `floor` and `ceil` are equivalent). A certificate that applies the `floor` interval to `ceil` or `round` is rejected by Lean.
 2. (C++23 oracle [`adr024_epsilon.cpp`](../audit/ADR_024_025_ORACLES_2026-10-28/adr024_epsilon.cpp)) `x = 3.2 ± 0.1 m`, `x0 = 0 m`, `dx = 0.5 m`, `n = 16` gives `ε = min(0.01/(0.01+10.24) + 0.01/(0.01+23.04), 0.01/10.24)`. This is about 1.41e-3 from the summed Cantelli term and about 9.77e-4 from Chebyshev, so `ε ≈ 9.77e-4 [exact]`. A function declaring `Panic ≤ 1e-3` compiles; one declaring `Panic ≤ 1e-4` is refused with that contribution named.
 3. The same index computed through `exp` without an `M` bound is `[1st-order]`, and a function declaring `[rigorous]` refuses it. With a certified-interval `M`, it is `[rigorous]`.
 4. A module with `#[panic_budget(1e-9, rigorous)]` refuses a function that declares `Panic ≤ 1e-6`.
