@@ -14555,8 +14555,32 @@ fn checker_type_is_payload_enum(c:*mut Checker, ty:TypeEntry) -> bool with Mut,P
     false
 }
 
-fn checker_enum_payload_type_admitted(c:*mut Checker, ty:TypeEntry, seen:*mut [Name;64], depth:i64) -> bool with Mut,Panic,Div {
+fn checker_enum_payload_type_admitted_ref_mode(c:*mut Checker,ty:TypeEntry,seen:*mut [Name;64],depth:i64,allow_refs:bool) -> bool with Mut,Panic,Div {
     if depth>=64 {return false}
+    if ty.kind==TypeKind::TyRef || ty.kind==TypeKind::TyRefMut {
+        if !allow_refs {return false}
+        // Payload references are native VALUECELL addresses. Only scalar cells
+        // and registered ordinary struct handles have proved pointee metadata.
+        // Nested references, arrays, Box, wide/Knowledge/function cells and unit
+        // stay closed until their distinct projections are represented.
+        match ty.inner {
+            Some(inner)=>{
+                let target=*inner
+                if target.kind==TypeKind::TyBool || target.kind==TypeKind::TyChar
+                    || target.kind==TypeKind::TyI8
+                    || target.kind==TypeKind::TyI32 || target.kind==TypeKind::TyI64
+                    || target.kind==TypeKind::TyU8
+                    || target.kind==TypeKind::TyU32 || target.kind==TypeKind::TyU64
+                    || target.kind==TypeKind::TyF32 || target.kind==TypeKind::TyF64
+                    || target.kind==TypeKind::TyString {return true}
+                if target.kind==TypeKind::TyNamed {
+                    return struct_table_find((*c).structs,target.name)>=0
+                }
+                return false
+            }
+            None=>return false
+        }
+    }
     if ty.kind==TypeKind::TyError || ty.kind==TypeKind::TyUnknown
         || ty.kind==TypeKind::TyRef || ty.kind==TypeKind::TyRefMut
         || ty.kind==TypeKind::TySlice || ty.kind==TypeKind::TySliceMut
@@ -14565,7 +14589,7 @@ fn checker_enum_payload_type_admitted(c:*mut Checker, ty:TypeEntry, seen:*mut [N
         || ty.kind==TypeKind::TyF128 || ty.kind==TypeKind::TyF256 {return false}
     (*seen)[depth as usize]=empty_name()
     match ty.inner {
-        Some(inner)=>{if !checker_enum_payload_type_admitted(c,*inner,seen,depth+1) {return false}}
+        Some(inner)=>{if !checker_enum_payload_type_admitted_ref_mode(c,*inner,seen,depth+1,allow_refs && ty.kind!=TypeKind::TyArray && ty.kind!=TypeKind::TyTuple && ty.kind!=TypeKind::TyNamed) {return false}}
         None=>{}
     }
     if ty.kind==TypeKind::TyNamed {
@@ -14574,7 +14598,7 @@ fn checker_enum_payload_type_admitted(c:*mut Checker, ty:TypeEntry, seen:*mut [N
         (*seen)[depth as usize]=ty.name
         let si=struct_table_find((*c).structs,ty.name)
         if si>=0 {
-            return checker_enum_payload_fields_admitted_depth(c,(*(*c).structs).entries[si].fields,seen,depth+1)
+            return checker_enum_payload_fields_admitted_depth(c,(*(*c).structs).entries[si].fields,seen,depth+1,allow_refs)
         }
         let ei=enum_table_find((*c).enums,ty.name)
         if ei>=0 {
@@ -14582,7 +14606,7 @@ fn checker_enum_payload_type_admitted(c:*mut Checker, ty:TypeEntry, seen:*mut [N
             while true {
                 match variants {
                     Some(v)=>{
-                        if !checker_enum_payload_fields_admitted_depth(c,(*v).head.fields,seen,depth+1) {return false}
+                        if !checker_enum_payload_fields_admitted_depth(c,(*v).head.fields,seen,depth+1,allow_refs) {return false}
                         variants=(*v).tail
                     }
                     None=>break
@@ -14596,7 +14620,7 @@ fn checker_enum_payload_type_admitted(c:*mut Checker, ty:TypeEntry, seen:*mut [N
         var elems=ty.tuple_elems
         while true {
             match elems {
-                Some(e)=>{if !checker_enum_payload_type_admitted(c,(*e).head,seen,depth+1) {return false};elems=(*e).tail}
+                Some(e)=>{if !checker_enum_payload_type_admitted_ref_mode(c,(*e).head,seen,depth+1,false) {return false};elems=(*e).tail}
                 None=>break
             }
         }
@@ -14604,11 +14628,11 @@ fn checker_enum_payload_type_admitted(c:*mut Checker, ty:TypeEntry, seen:*mut [N
     true
 }
 
-fn checker_enum_payload_fields_admitted_depth(c:*mut Checker, fields:Option<Box<FieldInfoList>>, seen:*mut [Name;64], depth:i64) -> bool with Mut,Panic,Div {
+fn checker_enum_payload_fields_admitted_depth(c:*mut Checker, fields:Option<Box<FieldInfoList>>, seen:*mut [Name;64], depth:i64,allow_refs:bool) -> bool with Mut,Panic,Div {
     var cur=fields
     while true {
         match cur {
-            Some(f)=>{if !checker_enum_payload_type_admitted(c,(*f).head.ty,seen,depth) {return false};cur=(*f).tail}
+            Some(f)=>{if !checker_enum_payload_type_admitted_ref_mode(c,(*f).head.ty,seen,depth,allow_refs) {return false};cur=(*f).tail}
             None=>break
         }
     }
@@ -14617,7 +14641,7 @@ fn checker_enum_payload_fields_admitted_depth(c:*mut Checker, fields:Option<Box<
 
 fn checker_enum_payload_fields_admitted(c:*mut Checker, fields:Option<Box<FieldInfoList>>) -> bool with Mut,Panic,Div {
     var seen:[Name;64]=[empty_name();64]
-    checker_enum_payload_fields_admitted_depth(c,fields,(&!seen) as *mut [Name;64],0)
+    checker_enum_payload_fields_admitted_depth(c,fields,(&!seen) as *mut [Name;64],0,true)
 }
 
 fn checker_check_enum_args_inplace(c:*mut Checker, args:Option<Box<ExprList>>, fields:Option<Box<FieldInfoList>>, span:Span) with Mut,Panic,Div,Alloc,IO {
@@ -14673,7 +14697,7 @@ fn checker_bind_user_enum_pattern_inplace(c:*mut Checker, pat:Pattern, scrut_ty:
                         let ty=(*f).head.ty
                         // A borrowed owner cannot move its active linear payload.
                         // Reference projections need a separately proved provenance path.
-                        if borrowed && checker_is_linear_type_inplace(c,ty) {
+                        if borrowed && (checker_is_linear_type_inplace(c,ty) || checker_type_has_affine_borrow(c,ty)) {
                             checker_report_error_at_inplace(c,pat.span,264,0,0,0)
                         } else {checker_bind_pattern_inplace(c,(*p).head,ty)}
                         types=(*f).tail
@@ -15335,45 +15359,56 @@ fn checker_check_assign_mutability_inplace(c: *mut Checker, opt: Option<Box<Expr
 // Used to reject storing a value that smuggles a reference inside an aggregate (a struct
 // field or array element), which the bare-ref-type / provenance checks miss. Self-recursive,
 // depth-bounded; conservative (an unregistered named type is treated as ref-free).
-fn checker_type_has_ref(c: *mut Checker, ty: TypeEntry, depth: i64) -> bool with Mut, Panic, Div, Alloc, IO {
-    if depth > 16 { return false }
-    if ty.kind == TypeKind::TyRef || ty.kind == TypeKind::TyRefMut
-        || ty.kind == TypeKind::TySlice || ty.kind == TypeKind::TySliceMut {
-        return true
-    }
-    if ty.kind == TypeKind::TyArray {
-        match ty.inner {
-            Some(el) => { return checker_type_has_ref(c, *el, depth + 1) }
-            None => { return false }
+fn checker_type_has_ref_depth(c:*mut Checker,ty:TypeEntry,seen:*mut [Name;64],depth:i64)->bool with Mut,Panic,Div,Alloc,IO {
+    if ty.kind==TypeKind::TyRef || ty.kind==TypeKind::TyRefMut
+        || ty.kind==TypeKind::TySlice || ty.kind==TypeKind::TySliceMut {return true}
+    // A code pointer or raw pointer does not own the lifetime of its pointee.
+    // Capturing functions remain outside this nominal-value representation.
+    if ty.kind==TypeKind::TyRawPtr || ty.kind==TypeKind::TyFn {return false}
+    if ty.kind==TypeKind::TyArray && ty.array_size==0 {return false}
+    if depth>=64 {return true}
+    (*seen)[depth as usize]=empty_name()
+    if ty.kind==TypeKind::TyNamed {
+        var i:i64=0
+        while i<depth {if name_eq((*seen)[i as usize],ty.name) {return false};i=i+1}
+        (*seen)[depth as usize]=ty.name
+        let si=struct_table_find((*c).structs,ty.name)
+        if si>=0 {
+            var fields=struct_table_get((*c).structs,si).fields
+            while true {match fields {
+                Some(field)=>{if checker_type_has_ref_depth(c,(*field).head.ty,seen,depth+1) {return true};fields=(*field).tail}
+                None=>break
+            }}
+        }
+        let ei=enum_table_find((*c).enums,ty.name)
+        if ei>=0 {
+            var variants=enum_table_get((*c).enums,ei).variants
+            while true {match variants {
+                Some(variant)=>{
+                    var fields=(*variant).head.fields
+                    while true {match fields {
+                        Some(field)=>{if checker_type_has_ref_depth(c,(*field).head.ty,seen,depth+1) {return true};fields=(*field).tail}
+                        None=>break
+                    }}
+                    variants=(*variant).tail
+                }
+                None=>break
+            }}
         }
     }
+    match ty.inner {Some(inner)=>{if checker_type_has_ref_depth(c,*inner,seen,depth+1) {return true}},None=>{}}
     if ty.kind==TypeKind::TyTuple {
         var elems=ty.tuple_elems
         while true {match elems {
-            Some(elem)=>{if checker_type_has_ref(c,(*elem).head,depth+1) {return true};elems=(*elem).tail}
+            Some(elem)=>{if checker_type_has_ref_depth(c,(*elem).head,seen,depth+1) {return true};elems=(*elem).tail}
             None=>break
         }}
     }
-    if ty.kind == TypeKind::TyNamed {
-        let sidx = struct_table_find((*c).structs, ty.name)
-        if sidx >= 0 && sidx < (*(*c).structs).count {
-            let si = struct_table_get((*c).structs, sidx)
-            var cur = si.fields
-            var guard = 0
-            while guard < 1024 {
-                guard = guard + 1
-                match cur {
-                    Some(list) => {
-                        if checker_type_has_ref(c, (*list).head.ty, depth + 1) { return true }
-                        cur = (*list).tail
-                    }
-                    None => break
-                }
-            }
-        }
-        return false
-    }
     false
+}
+fn checker_type_has_ref(c:*mut Checker,ty:TypeEntry,depth:i64)->bool with Mut,Panic,Div,Alloc,IO {
+    var seen:[Name;64]=[empty_name();64]
+    checker_type_has_ref_depth(c,ty,(&!seen) as *mut [Name;64],depth)
 }
 
 fn checker_check_assign_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with Mut, Panic, Div, Alloc, IO {

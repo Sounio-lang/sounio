@@ -11,6 +11,26 @@
 namespace fs=std::filesystem;
 struct Case {std::string_view name,exit,code,marker;};
 constexpr std::array cases{
+ Case{"borrowed_enum_array_cells","1","E264","-"},
+ Case{"borrowed_enum_box_cells","1","E264","-"},
+ Case{"borrowed_enum_i16_ref","1","E264","-"},
+ Case{"borrowed_enum_supported_cells","0","-","BORROWED_ENUM_SUPPORTED_CELLS_OK"},
+ Case{"borrowed_enum_tuple_cells","1","E264","-"},
+ Case{"borrowed_enum_u16_ref","1","E264","-"},
+ Case{"borrowed_enum_array_ref","1","E264","-"},
+ Case{"borrowed_enum_borrowed_mut_binding","1","E264","-"},
+ Case{"borrowed_enum_escape","1","E091","-"},
+ Case{"borrowed_enum_float","0","-","BORROWED_ENUM_FLOAT_OK"},
+ Case{"borrowed_enum_inference_refused","1","GENERIC","-"},
+ Case{"borrowed_enum_mut_alias","1","E039","-"},
+ Case{"borrowed_enum_mut_move","0","-","BORROWED_ENUM_MUT_MOVE_OK"},
+ Case{"borrowed_enum_mutation","1","E038","-"},
+ Case{"borrowed_enum_nested_ref_spaced","1","E264","-"},
+ Case{"borrowed_enum_owner","0","-","BORROWED_ENUM_OWNER_OK"},
+ Case{"borrowed_enum_owner_mutation","1","E038","-"},
+ Case{"borrowed_enum_reassign_mutation","1","E038","-"},
+ Case{"borrowed_enum_scalar","0","-","BORROWED_ENUM_SCALAR_OK"},
+ Case{"borrowed_enum_unit_ref","1","E264","-"},
  Case{"returned_loan_alias_mutation","1","E038","-"},
  Case{"returned_loan_block_escape","1","E091","-"},
  Case{"returned_loan_branch_future","1","E038","-"},
@@ -58,7 +78,7 @@ Table parse(const std::string& matrix,const fs::path& dir) {
  }
  return table;
 }
-bool validate(const Table& table,bool kernel,std::string& why) {
+bool validate(const Table& table,bool kernel,bool compile,std::string& why) {
  if(table.size()!=cases.size()){why="selection cardinality";return false;}
  const std::regex errors(R"(error\[(E[0-9]{3})\])");
  for(const auto& test:cases) {
@@ -66,7 +86,7 @@ bool validate(const Table& table,bool kernel,std::string& why) {
   if(it==table.end()){why="missing case: "+std::string(test.name);return false;}
   const auto& record=it->second;const auto& log=record.log;
   if(record.exit!=test.exit){why="wrong verdict: "+std::string(test.name);return false;}
-  if(log.find("parse error")!=std::string::npos||log.find("error[E264]")!=std::string::npos
+  if(log.find("parse error")!=std::string::npos||(log.find("error[E264]")!=std::string::npos&&test.code!="E264")
    ||log.find("error[E137]")!=std::string::npos) {why="parser/unsupported/undefined-API refusal";return false;}
   if(kernel) {
    const std::string marker="ACTUAL_CHECKER_VERDICT "+record.exit+"\n";
@@ -74,17 +94,17 @@ bool validate(const Table& table,bool kernel,std::string& why) {
    if(p==std::string::npos||log.find("ACTUAL_CHECKER_VERDICT ",p+marker.size())!=std::string::npos) {
     why="missing or duplicated actual-checker verdict";return false;
    }
-  } else if(test.exit=="0"&&log.find("check: OK")==std::string::npos) {
+  } else if(test.exit=="0"&&log.find(compile?"Compilation successful!":"check: OK")==std::string::npos) {
    why="missing raw compiler check verdict";return false;
   }
   if(test.exit=="0") {
    if(log.find("error")!=std::string::npos){why="positive contains an error";return false;}
   } else {
-   const std::string required="error["+std::string(test.code)+"]";
+   const std::string required=test.code=="GENERIC"?"error: generic specialization cannot be represented safely":"error["+std::string(test.code)+"]";
    if(log.find(required)==std::string::npos){why="wrong diagnostic: "+std::string(test.name);return false;}
    for(auto e=std::sregex_iterator(log.begin(),log.end(),errors);e!=std::sregex_iterator();++e) {
     const auto code=(*e)[1].str();
-    if(code!="E038"&&code!="E039"&&code!="E040"&&code!="E091") {why="unrelated diagnostic: "+code;return false;}
+    if(code!="E038"&&code!="E039"&&code!="E040"&&code!="E091"&&!(code=="E264"&&test.code=="E264")) {why="unrelated diagnostic: "+code;return false;}
    }
   }
  }
@@ -96,26 +116,27 @@ int main(int argc,char** argv) {
    for(const auto& c:cases)std::cout<<c.name<<'\t'<<c.exit<<'\t'<<c.code<<'\t'<<c.marker<<'\n';
    return 0;
   }
-  if(argc!=4)throw std::runtime_error("usage: reference --kernel|--raw --verify|--self-test RESULTS");
+  if(argc!=4)throw std::runtime_error("usage: reference --kernel|--raw|--compile --verify|--self-test RESULTS");
   bool kernel=std::string_view(argv[1])=="--kernel";
-  if(!kernel&&std::string_view(argv[1])!="--raw")throw std::runtime_error("unknown engine");
+  bool compile=std::string_view(argv[1])=="--compile";
+  if(!kernel&&!compile&&std::string_view(argv[1])!="--raw")throw std::runtime_error("unknown engine");
   const fs::path dir=argv[3];const auto matrix=read(dir/"VERDICTS.tsv");
   const auto table=parse(matrix,dir);std::string why;
-  if(!validate(table,kernel,why))throw std::runtime_error(why);
+  if(!validate(table,kernel,compile,why))throw std::runtime_error(why);
   if(std::string_view(argv[2])=="--self-test") {
    unsigned rejected=0;
    auto wrong=table;wrong.begin()->second.exit="0";
-   if(!validate(wrong,kernel,why))++rejected;
+   if(!validate(wrong,kernel,compile,why))++rejected;
    wrong=table;wrong.erase(wrong.begin());
-   if(!validate(wrong,kernel,why))++rejected;
+   if(!validate(wrong,kernel,compile,why))++rejected;
    wrong=table;wrong.emplace("unexpected",Record{"0",""});
-   if(!validate(wrong,kernel,why))++rejected;
-   wrong=table;wrong.begin()->second.log="error[E264]: unsupported\nACTUAL_CHECKER_VERDICT 1\n";
-   if(!validate(wrong,kernel,why))++rejected;
+   if(!validate(wrong,kernel,compile,why))++rejected;
+   wrong=table;wrong["returned_loan_alias_mutation"].log="error[E264]: unsupported\nACTUAL_CHECKER_VERDICT 1\n";
+   if(!validate(wrong,kernel,compile,why))++rejected;
    wrong=table;wrong["returned_loan_scope"].log.clear();
-   if(!validate(wrong,kernel,why))++rejected;
+   if(!validate(wrong,kernel,compile,why))++rejected;
    wrong=table;wrong.begin()->second.log+="parse error\n";
-   if(!validate(wrong,kernel,why))++rejected;
+   if(!validate(wrong,kernel,compile,why))++rejected;
    bool duplicate=false;
    try {auto p=matrix.find('\n');auto e=matrix.find('\n',p+1);(void)parse(matrix+matrix.substr(p+1,e-p),dir);}
    catch(const std::runtime_error&){duplicate=true;}
@@ -124,7 +145,7 @@ int main(int argc,char** argv) {
    std::cout<<"RETURNED_LOAN_MATRIX_WRONG_OUTPUT_REJECTED controls="<<rejected<<'\n';
   } else if(std::string_view(argv[2])!="--verify")throw std::runtime_error("unknown operation");
   std::size_t positive=0;for(const auto& c:cases)if(c.exit=="0")++positive;
-  std::cout<<"RETURNED_LOAN_MATRIX_OK engine="<<(kernel?"kernel":"raw")<<" cases="<<cases.size()
+  std::cout<<"RETURNED_LOAN_MATRIX_OK engine="<<(kernel?"kernel":compile?"compile":"raw")<<" cases="<<cases.size()
    <<" positive="<<positive<<" negative="<<cases.size()-positive<<'\n';
   return 0;
  }catch(const std::exception& e){std::cerr<<"RETURNED_LOAN_MATRIX_REFUSED "<<e.what()<<'\n';return 1;}

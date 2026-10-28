@@ -20,7 +20,7 @@ g++ -std=c++23 -O2 -Wall -Wextra -Werror -pedantic tests/reference/wave3_returne
 "$results/reference" --manifest > "$results/EXPECTED.tsv"
 sha256sum "$raw" "$results/reference" > "$results/ARTIFACT_INPUTS.sha256"
 {
- printf '%s\0' self-hosted/check/borrow.sio self-hosted/check/check.sio tests/reference/wave3_returned_loan_matrix_reference.cpp scripts/ci/wave3_returned_loans_gate.sh
+ printf '%s\0' self-hosted/check/borrow.sio self-hosted/check/check.sio self-hosted/check/specializer.sio self-hosted/ir/lower.sio tests/reference/wave3_returned_loan_matrix_reference.cpp scripts/ci/wave3_returned_loans_gate.sh
  while IFS=$'\t' read -r name expected code marker;do
   printf '%s\0' "tests/fixtures/wave3_generic_enum/$name.sio"
  done < "$results/EXPECTED.tsv"
@@ -28,6 +28,8 @@ sha256sum "$raw" "$results/reference" > "$results/ARTIFACT_INPUTS.sha256"
 export SOUNIO_STDLIB_PATH="$repo/stdlib"
 "$raw" --version > "$results/COMPILER_VERSION.txt" 2>&1
 printf 'case\texit_status\n' > "$results/VERDICTS.tsv"
+mkdir -p "$results/compile"
+printf 'case\texit_status\n' > "$results/compile/VERDICTS.tsv"
 printf 'case\tphase\texit_status\n' > "$results/PHASES.tsv"
 failed=0
 while IFS=$'\t' read -r name expected code marker;do
@@ -38,9 +40,13 @@ while IFS=$'\t' read -r name expected code marker;do
  if [[ "$rc" != "$expected" ]];then failed=1;fi
  rc=0;timeout 180 "$raw" compile "$source" -o "$results/$name.elf" > "$results/$name-compile.stdout" 2>&1 ||rc=$?
  printf '%s\tcompile\t%s\n' "$name" "$rc" >> "$results/PHASES.tsv"
+ printf '%s\t%s\n' "$name" "$rc" >> "$results/compile/VERDICTS.tsv"
+ ln -s "../$name-compile.stdout" "$results/compile/$name.stdout"
  if [[ "$expected" == 1 ]];then
   if [[ "$rc" != 1 || -e "$results/$name.elf" ]];then failed=1;fi
-  if ! grep -Fq "error[$code]" "$results/$name-compile.stdout";then failed=1;fi
+  if [[ "$code" == GENERIC ]];then
+   if ! grep -Fq "error: generic specialization cannot be represented safely" "$results/$name-compile.stdout";then failed=1;fi
+  elif ! grep -Fq "error[$code]" "$results/$name-compile.stdout";then failed=1;fi
  else
   if [[ "$rc" != 0 || ! -s "$results/$name.elf" ]];then failed=1;continue;fi
   chmod +x "$results/$name.elf"
@@ -51,6 +57,8 @@ while IFS=$'\t' read -r name expected code marker;do
 done < "$results/EXPECTED.tsv"
 "$results/reference" --raw --verify "$results" > "$results/reference.stdout" 2>&1 ||failed=1
 "$results/reference" --raw --self-test "$results" > "$results/wrong-output.stdout" 2>&1 ||failed=1
+"$results/reference" --compile --verify "$results/compile" > "$results/compile-reference.stdout" 2>&1 ||failed=1
+"$results/reference" --compile --self-test "$results/compile" > "$results/compile-wrong-output.stdout" 2>&1 ||failed=1
 sha256sum -c "$results/SOURCE_INPUTS.sha256" > "$results/SOURCE_INPUTS.final.verify"
 sha256sum -c "$results/ARTIFACT_INPUTS.sha256" > "$results/ARTIFACT_INPUTS.final.verify"
 printf '%s\n' "$failed" > "$results/GATE_STATUS"
