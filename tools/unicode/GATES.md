@@ -159,3 +159,31 @@ All gate source/compiler/platform/executable guards passed before/after.
 This is early compatibility evidence for the generic compiler. It does not
 retag the earlier complete Unicode/UCA/CLDR executions as runs on this compiler,
 and does not close BIDI, persistent owner loans or the final integrated suite.
+
+
+## Explicit coherent-ELF corpus invocation
+
+WAVE3_COHERENT_KIND is optional. The default preserves the original no-argument
+ELF invocation. In chunks/collect phases, set 1 for family unicode, 2 for locale,
+or 3 for locale-metadata. Other kinds, mismatched family and identity/smoke
+phases are refused 64 before creating output.
+
+The runner passes exactly that one argument to the actual ELF and writes
+ELF_INVOCATION.tsv. The collector validates its kind/argc binding for every
+partition, and the public gate pins those receipt bytes together with the
+ordinary partition, status and executable identity records.
+ELF_ARGUMENT_KIND records the declared invocation mode. Existing STATUS and
+RESULTS.tsv protocols retain their legacy schemas.
+
+Slurm 19291 completed 0 in 3m38s: the same original no-argument Sounio harness
+works through both old/new gates; the old gate refuses the coherent harness;
+all three explicit protocols pass part+complete-prepared-manifest collection.
+Wrong kind, wrong family, wrong phase and tampered/missing kind/argc records
+are refused. These private one-chunk manifests qualify the adapter only.
+The comprehensive corpus replay is a separate receipt.
+
+The first 19289 attempt retained a source guard failure: the wrapper updated
+its copied binary verification cache after the manifest was frozen. 19291
+primes both wrapper copies before freezing that manifest. No cache/source
+guard was removed, and the original failed receipt is retained.
+See docs/evidence/stdlib-wave3-core/coherent-text for source and artifact pins.

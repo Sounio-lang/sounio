@@ -17,8 +17,19 @@ test "$#" -ge 2
 OUT=$1;PHASE=$2
 case "$OUT" in /*) ;; *) echo 'output must be absolute' >&2;exit 64;; esac
 case "$PHASE" in identity|smoke) test "$#" -eq 2;;chunks) test "$#" -eq 6;;collect) test "$#" -ge 5;;*) echo 'phase must be identity, smoke, chunks or collect' >&2;exit 64;;esac
+COHERENT_KIND=${WAVE3_COHERENT_KIND:-}
+FAMILY=${WAVE3_FIXTURE_FAMILY:-unicode}
+CORPUS_RUN_ARGS=()
+CORPUS_COLLECT_ARGS=()
+if test -n "$COHERENT_KIND";then
+ case "$PHASE" in chunks|collect) ;;*) echo "coherent kind requires corpus chunks or collect" >&2;exit 64;;esac
+ case "$COHERENT_KIND:$FAMILY" in 1:unicode|2:locale|3:locale-metadata) ;;*) echo "coherent kind does not match fixture family" >&2;exit 64;;esac
+ CORPUS_RUN_ARGS=(--coherent-kind "$COHERENT_KIND")
+ CORPUS_COLLECT_ARGS=(--coherent-kind "$COHERENT_KIND")
+fi
 test ! -e "$OUT"
 mkdir -p "$OUT"
+printf "%s\n" "${COHERENT_KIND:-legacy-no-user-argv}" > "$OUT/ELF_ARGUMENT_KIND"
 trap 'status=$?;printf "%s\n" "$status" > "$OUT/STATUS";exit "$status"' EXIT
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 cd "$ROOT"
@@ -119,7 +130,7 @@ else
  sha256sum "$OUT/run_chunks" "$OUT/collect_chunks" > "$OUT/TOOLS.sha256"
  if test "$PHASE" = chunks;then
   echo 'ONE PART OF AN EXPLICIT PREPARED MANIFEST. Complete-manifest collection is a separate required gate.' > "$OUT/SCOPE.txt"
-  run chunks "$OUT/run_chunks" "$ELF" "$FIXTURES" "$OUT/chunks" "$5" "$6"
+  run chunks "$OUT/run_chunks" "$ELF" "$FIXTURES" "$OUT/chunks" "$5" "$6" "${CORPUS_RUN_ARGS[@]}"
   echo WAVE3_CORE_NATIVE_PART_OK
  else
   echo 'COMPLETE PREPARED MANIFEST: every declared file and row must be collected exactly once.' > "$OUT/SCOPE.txt"
@@ -137,8 +148,9 @@ else
     sha256sum "$parent/WORKER_STATUS" "$parent/NATIVE_STATUS" >> "$OUT/PART_RECEIPTS.sha256"
    fi
    sha256sum "$parent/EXECUTABLE.sha256" "$part/STATUS" "$part/RESULTS.tsv" >> "$OUT/PART_RECEIPTS.sha256"
+   if test -n "$COHERENT_KIND";then sha256sum "$part/ELF_INVOCATION.tsv" >> "$OUT/PART_RECEIPTS.sha256";fi
   done
-  run collect "$OUT/collect_chunks" "$FIXTURES" "$WAVE3_CORE_ELF_SHA256" "$OUT/summary" "${@:5}"
+  run collect "$OUT/collect_chunks" "${CORPUS_COLLECT_ARGS[@]}" "$FIXTURES" "$WAVE3_CORE_ELF_SHA256" "$OUT/summary" "${@:5}"
   sha256sum -c "$OUT/PART_RECEIPTS.sha256" > "$OUT/PART_RECEIPTS.final.verify"
   echo WAVE3_CORE_NATIVE_COMPLETE_OK
  fi
