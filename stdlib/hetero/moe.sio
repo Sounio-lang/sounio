@@ -1,0 +1,209 @@
+// stdlib::hetero::moe - first native MoE layer over Q4_K mul_mat_id.
+//
+// Router top-k on the host, expert GEMMs on the GPU (rt_mul_mat_id_q4k),
+// SiLU*Up and weighted combine on the host. Not a full LLM yet - the
+// daring surface that proves Sounio can own MoE without llama.cpp.
+
+use hetero::runtime::{Runtime, rt_mul_mat_id_q4k}
+use hetero::cublas_bench::{gb_host_get, gb_host_set}
+
+fn moe_write_u8(buf: *mut u8, off: i64, v: i64) with Mut {
+    let shift = (off % 8) * 8
+    let mask = (0 - 1) - (255 << shift)
+    let word = (read_i64(buf as *mut i64, off / 8) & mask) | ((v & 255) << shift)
+    write_i64(buf as *mut i64, off / 8, word)
+}
+
+fn moe_write_i32(buf: *mut u8, idx: i64, v: i64) with Mut {
+    var b: i64 = 0
+    while b < 4 {
+        moe_write_u8(buf, idx * 4 + b, (v >> (b * 8)) & 255)
+        b = b + 1
+    }
+}
+
+fn moe_read_i32(buf: *mut u8, idx: i64) -> i64 {
+    var bits: i64 = 0
+    var b: i64 = 0
+    while b < 4 {
+        let shift = ((idx * 4 + b) % 8) * 8
+        let word = read_i64(buf as *mut i64, (idx * 4 + b) / 8)
+        bits = bits | (((word >> shift) & 255) << (b * 8))
+        b = b + 1
+    }
+    bits
+}
+
+fn moe_exp(x: f64) -> f64 with Div {
+    // Cheap exp for top-k renormalize; enough for a lab router.
+    if x > 20.0 { return 485165195.0 }
+    if x < 0.0 - 20.0 { return 0.000000002 }
+    var t = 1.0
+    var term = 1.0
+    var i: i64 = 1
+    while i < 12 {
+        term = term * x / (i as f64)
+        t = t + term
+        i = i + 1
+    }
+    t
+}
+
+/// Top-k over router logits f32[n_tokens * n_experts].
+/// Writes ids i32[n_tokens * k] and renorm softmax weights f32[n_tokens * k].
+pub fn moe_topk(
+    logits: *mut u8, n_tokens: i64, n_experts: i64, k: i64,
+    ids: *mut u8, weights: *mut u8
+) with Mut, Div {
+    var t: i64 = 0
+    while t < n_tokens {
+        var used: [i64; 16] = [0 - 1; 16]
+        var uk: i64 = 0
+        while uk < k && uk < 16 {
+            var best: i64 = 0 - 1
+            var bv = 0.0 - 1000000000.0
+            var e: i64 = 0
+            while e < n_experts {
+                var taken = false
+                var u: i64 = 0
+                while u < uk {
+                    if used[u as usize] == e { taken = true }
+                    u = u + 1
+                }
+                if !taken {
+                    let v = gb_host_get(logits, t * n_experts + e)
+                    if v > bv { bv = v; best = e }
+                }
+                e = e + 1
+            }
+            used[uk as usize] = best
+            moe_write_i32(ids, t * k + uk, best)
+            uk = uk + 1
+        }
+        // Softmax over the selected logits only.
+        var mx = 0.0 - 1000000000.0
+        uk = 0
+        while uk < k {
+            let v = gb_host_get(logits, t * n_experts + moe_read_i32(ids, t * k + uk))
+            if v > mx { mx = v }
+            uk = uk + 1
+        }
+        var sum = 0.0
+        uk = 0
+        while uk < k {
+            let v = moe_exp(gb_host_get(logits, t * n_experts + moe_read_i32(ids, t * k + uk)) - mx)
+            gb_host_set(weights, t * k + uk, v)
+            sum = sum + v
+            uk = uk + 1
+        }
+        uk = 0
+        while uk < k {
+            gb_host_set(weights, t * k + uk, gb_host_get(weights, t * k + uk) / sum)
+            uk = uk + 1
+        }
+        t = t + 1
+    }
+}
+
+/// out[i] = silu(gate[i]) * up[i]
+pub fn moe_silu_mul(gate: *mut u8, up: *mut u8, out: *mut u8, n: i64) with Mut, Div {
+    var i: i64 = 0
+    while i < n {
+        let g = gb_host_get(gate, i)
+        let s = g / (1.0 + moe_exp(0.0 - g))
+        gb_host_set(out, i, s * gb_host_get(up, i))
+        i = i + 1
+    }
+}
+
+/// Weighted sum of expert rows: dst[t,m] = sum_s w[t,s] * expert[t,s,m].
+pub fn moe_weighted_sum(
+    expert_out: *mut u8, weights: *mut u8,
+    n_tokens: i64, slots: i64, m: i64, dst: *mut u8
+) with Mut {
+    var t: i64 = 0
+    while t < n_tokens {
+        var r: i64 = 0
+        while r < m {
+            var acc = 0.0
+            var s: i64 = 0
+            while s < slots {
+                acc = acc + gb_host_get(weights, t * slots + s) * gb_host_get(expert_out, (t * slots + s) * m + r)
+                s = s + 1
+            }
+            gb_host_set(dst, t * m + r, acc)
+            r = r + 1
+        }
+        t = t + 1
+    }
+}
+
+pub struct MoeFfnResult {
+    pub ok: bool,
+    pub status: i64,
+    pub ms_gate: f64,
+    pub ms_up: f64,
+    pub ms_down: f64,
+}
+
+/// One MoE-FFN step: gate/up/down via Q4_K mul_mat_id, SiLU*Up + combine on host.
+/// x is f32[n_tokens * hidden] shared across slots (x_rows=1).
+/// gate_w/up_w/down_w are Q4_K expert packs; ids is i32[n_tokens * slots].
+pub fn moe_ffn_q4k(
+    rt: &Runtime,
+    x: *mut u8, hidden: i64, n_tokens: i64, slots: i64,
+    ids: *mut u8, route_w: *mut u8,
+    gate_w: *mut u8, gate_bytes: i64,
+    up_w: *mut u8, up_bytes: i64,
+    down_w: *mut u8, down_bytes: i64,
+    experts: i64, inter: i64,
+    expert_stride_g: i64, row_stride_g: i64,
+    expert_stride_u: i64, row_stride_u: i64,
+    expert_stride_d: i64, row_stride_d: i64,
+    dst: *mut u8
+) -> MoeFfnResult with Alloc, Mut, Panic, Div {
+    var res = MoeFfnResult { ok: false, status: -1, ms_gate: 0.0, ms_up: 0.0, ms_down: 0.0 }
+    let gate = heap_alloc(n_tokens * slots * inter * 4)
+    let up = heap_alloc(n_tokens * slots * inter * 4)
+    let act = heap_alloc(n_tokens * slots * inter * 4)
+    let down = heap_alloc(n_tokens * slots * hidden * 4)
+    let x_nb1 = hidden * 4
+    let ids_nb1 = slots * 4
+
+    let g = rt_mul_mat_id_q4k(
+        rt, gate_w, gate_bytes, x, n_tokens * hidden * 4, ids, n_tokens * slots * 4,
+        gate, n_tokens * slots * inter * 4,
+        hidden, inter, experts, slots, n_tokens,
+        expert_stride_g, row_stride_g,
+        x_nb1, x_nb1, ids_nb1, inter * 4, slots * inter * 4, 1
+    )
+    if !g.ok { res.status = g.status; return res }
+    res.ms_gate = g.ms
+
+    let u = rt_mul_mat_id_q4k(
+        rt, up_w, up_bytes, x, n_tokens * hidden * 4, ids, n_tokens * slots * 4,
+        up, n_tokens * slots * inter * 4,
+        hidden, inter, experts, slots, n_tokens,
+        expert_stride_u, row_stride_u,
+        x_nb1, x_nb1, ids_nb1, inter * 4, slots * inter * 4, 1
+    )
+    if !u.ok { res.status = u.status; return res }
+    res.ms_up = u.ms
+
+    moe_silu_mul(gate, up, act, n_tokens * slots * inter)
+
+    let d = rt_mul_mat_id_q4k(
+        rt, down_w, down_bytes, act, n_tokens * slots * inter * 4, ids, n_tokens * slots * 4,
+        down, n_tokens * slots * hidden * 4,
+        inter, hidden, experts, slots, n_tokens,
+        expert_stride_d, row_stride_d,
+        inter * 4, slots * inter * 4, ids_nb1, hidden * 4, slots * hidden * 4, slots
+    )
+    if !d.ok { res.status = d.status; return res }
+    res.ms_down = d.ms
+
+    moe_weighted_sum(down, route_w, n_tokens, slots, hidden, dst)
+    res.ok = true
+    res.status = 0
+    res
+}
