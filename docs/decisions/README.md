@@ -65,6 +65,10 @@ Grounded in: commit, artifact, or empirical result
 | 018 | Release trains, editions and the compatibility contract | accepted | 2026-10-24 |
 | 020 | Eight rulings from the 2026-10-25 decision session (D-15, D-16, D-20, D-22, D-24–D-27) | accepted | 2026-10-25 |
 | 021 | Oracle stack for the Sounio-to-FPGA backend (U250) | experimental | 2026-10-26 |
+| 022 | FPGA backend MVP — profile subset, kernel IR, first kernel | experimental | 2026-10-26 |
+| 023 | Checked indexing, path-conditioned obligations and proof-erased `Panic` | accepted | 2026-10-28 |
+| 024 | Metrological index obligations and graded `Panic ≤ ε` | accepted | 2026-10-28 |
+| 025 | Epistemic decisions: flip budgets, attribution and the value of remeasuring | accepted | 2026-10-28 |
 
 Reserved by open pull requests (not yet on `main`):
 
@@ -74,7 +78,7 @@ Reserved by open pull requests (not yet on `main`):
 | 017 | Single authority for IR memory effects (`ir::effects`) | #2686 (renumbered from a colliding 013) |
 | 019 | Certified intervals | #3101 |
 
-The next free number is **022**.
+The next free number is **026**.
 
 ## Files
 
@@ -96,6 +100,10 @@ The next free number is **022**.
 - [ADR-018](./adr-018-release-cycle-and-versioning.md)
 - [ADR-020](./adr-020-rulings-2026-10-25.md)
 - [ADR-021](./adr-021-fpga-backend-oracle-stack.md)
+- [ADR-022](./adr-022-fpga-backend-mvp.md)
+- [ADR-023](./adr-023-checked-indexing-and-proof-erased-panic.md)
+- [ADR-024](./adr-024-metrological-index-obligations.md)
+- [ADR-025](./adr-025-decision-flip-budget-and-attribution.md)
 - [Claim-oracle inventory schema](./claim_oracle_inventory.schema.md)
 
 ## Related Docs
