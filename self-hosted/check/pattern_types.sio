@@ -1,0 +1,75 @@
+// Checked match-scrutinee types for lowering. No guessed payload layouts.
+// The active checker entrypoint resets this cache before each compilation.
+module check::pattern_types
+use parser::ast::{Name,Span,name_eq}
+use check::types::{TypeEntry,TypeEntryList,TypeKind}
+pub struct CheckedPatternType {
+ pub owner:i64,
+ pub function_name:Name,
+ pub start:i64,
+ pub end:i64,
+ pub ty:TypeEntry,
+ pub next:Option<Box<CheckedPatternType>>,
+}
+var PATTERN_TYPES:Option<Box<CheckedPatternType>> = None
+var PATTERN_TYPE_COUNT:i64=0
+var PATTERN_TYPE_OVERFLOW:bool=false
+
+pub fn pattern_types_reset() with Mut {
+ PATTERN_TYPES=None
+ PATTERN_TYPE_COUNT=0
+ PATTERN_TYPE_OVERFLOW=false
+}
+fn pattern_type_layout_equal(a:TypeEntry,b:TypeEntry,depth:i64)->bool with Mut,Panic,Div,Alloc {
+ if depth>=64 || a.kind!=b.kind {return false}
+ if a.kind==TypeKind::TyNamed && !name_eq(a.name,b.name) {return false}
+ if a.kind==TypeKind::TyArray && a.array_size!=b.array_size {return false}
+ match a.inner {
+  Some(ai)=>{match b.inner {Some(bi)=>{if !pattern_type_layout_equal(*ai,*bi,depth+1) {return false}},None=>return false}}
+  None=>{match b.inner {Some(_)=>return false,None=>{}}}
+ }
+ var left=a.tuple_elems
+ var right=b.tuple_elems
+ while true {match left {
+  Some(l)=>{match right {
+   Some(r)=>{if !pattern_type_layout_equal((*l).head,(*r).head,depth+1) {return false};right=(*r).tail}
+   None=>return false
+  };left=(*l).tail}
+  None=>{match right {Some(_)=>return false,None=>return true}}
+ }}
+ false
+}
+pub fn pattern_type_note(owner:i64,function_name:Name,span:Span,ty:TypeEntry)->bool with Mut,Panic,Div,Alloc {
+ if owner<0 || function_name.len<=0 || PATTERN_TYPE_OVERFLOW {return false}
+ var cursor=PATTERN_TYPES
+ while true {match cursor {
+  Some(entry)=>{
+   if (*entry).owner==owner && name_eq((*entry).function_name,function_name)
+    && (*entry).start==span.start && (*entry).end==span.end {
+    if pattern_type_layout_equal((*entry).ty,ty,0) {return true}
+    PATTERN_TYPE_OVERFLOW=true
+    return false
+   }
+   cursor=(*entry).next
+  }
+  None=>break
+ }}
+ if PATTERN_TYPE_COUNT>=8192 {PATTERN_TYPE_OVERFLOW=true;return false}
+ let entry=CheckedPatternType {owner:owner,function_name:function_name,start:span.start,end:span.end,ty:ty,next:PATTERN_TYPES}
+ PATTERN_TYPES=Some(Box::new(entry))
+ PATTERN_TYPE_COUNT=PATTERN_TYPE_COUNT+1
+ true
+}
+pub fn pattern_type_lookup(owner:i64,function_name:Name,span:Span)->Option<Box<CheckedPatternType>> with Mut,Panic,Div,Alloc {
+ if PATTERN_TYPE_OVERFLOW {return None}
+ var cursor=PATTERN_TYPES
+ while true {match cursor {
+  Some(entry)=>{
+   if (*entry).owner==owner && name_eq((*entry).function_name,function_name)
+    && (*entry).start==span.start && (*entry).end==span.end {return Some(entry)}
+   cursor=(*entry).next
+  }
+  None=>return None
+ }}
+ None
+}

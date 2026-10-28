@@ -16,13 +16,20 @@ file "$raw" | grep -q ELF
 mkdir -p "$results"
 [[ ! -e "$results/VERDICTS.tsv" && ! -e "$results/EXPECTED.tsv" ]]
 cd "$repo"
+source_for_case() {
+ if [[ "$1" == tuple_pattern_* ]];then
+  printf "%s" "tests/fixtures/wave4_tuple_pattern/${1#tuple_pattern_}.sio"
+ else
+  printf "%s" "tests/fixtures/wave3_generic_enum/$1.sio"
+ fi
+}
 g++ -std=c++23 -O2 -Wall -Wextra -Werror -pedantic tests/reference/wave3_returned_loan_matrix_reference.cpp -o "$results/reference"
 "$results/reference" --manifest > "$results/EXPECTED.tsv"
 sha256sum "$raw" "$results/reference" > "$results/ARTIFACT_INPUTS.sha256"
 {
- printf '%s\0' self-hosted/check/borrow.sio self-hosted/check/check.sio self-hosted/check/specializer.sio self-hosted/ir/lower.sio tests/reference/wave3_returned_loan_matrix_reference.cpp scripts/ci/wave3_returned_loans_gate.sh
+ printf '%s\0' self-hosted/check/borrow.sio self-hosted/check/check.sio self-hosted/check/mod.sio self-hosted/check/pattern_types.sio self-hosted/check/specializer.sio self-hosted/ir/lower.sio tests/reference/wave3_returned_loan_matrix_reference.cpp scripts/ci/wave3_returned_loans_gate.sh
  while IFS=$'\t' read -r name expected code marker;do
-  printf '%s\0' "tests/fixtures/wave3_generic_enum/$name.sio"
+  printf '%s\0' "$(source_for_case "$name")"
  done < "$results/EXPECTED.tsv"
 } | xargs -0 sha256sum > "$results/SOURCE_INPUTS.sha256"
 export SOUNIO_STDLIB_PATH="$repo/stdlib"
@@ -33,7 +40,7 @@ printf 'case\texit_status\n' > "$results/compile/VERDICTS.tsv"
 printf 'case\tphase\texit_status\n' > "$results/PHASES.tsv"
 failed=0
 while IFS=$'\t' read -r name expected code marker;do
- source="tests/fixtures/wave3_generic_enum/$name.sio"
+ source="$(source_for_case "$name")"
  rc=0;timeout 90 "$raw" check "$source" > "$results/$name.stdout" 2>&1 ||rc=$?
  printf '%s\t%s\n' "$name" "$rc" >> "$results/VERDICTS.tsv"
  printf '%s\tcheck\t%s\n' "$name" "$rc" >> "$results/PHASES.tsv"

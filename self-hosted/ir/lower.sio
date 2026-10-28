@@ -3,6 +3,8 @@
 module ir::lower
 
 use parser::ast::*
+use check::types::{TypeEntry,TypeKind}
+use check::pattern_types::{CheckedPatternType,pattern_type_lookup}
 use ir::ir::*
 use ir::numeric_payload::{ir_wide_compile_pool_reset, ir_wide_compile_pool_intern_low}
 use check::specializer::{spec_dce_filter_with_global_marks, spec_dce_global_marks_ready, spec_item_module_lookup, spec_item_module_populated, spec_item_module_overflowed}
@@ -2648,6 +2650,22 @@ var LOWER_MONOLITHIC_PUBLIC_PROBE_TRACE: bool = false
 var LOWER_KERNEL_TID_REG: i64 = 0 - 1
 // #2766: the scrutinee of the match being lowered is a reference local, so a
 // struct-pattern arm reads its fields through the reference (field_get label 1).
+fn lower_checked_pattern_scalar_name(ty:&TypeEntry)->Name {
+    if (*ty).kind==TypeKind::TyI64 {return make_name("i64")}
+    if (*ty).kind==TypeKind::TyI32 {return make_name("i32")}
+    if (*ty).kind==TypeKind::TyI8 {return make_name("i8")}
+    if (*ty).kind==TypeKind::TyU64 {return make_name("u64")}
+    if (*ty).kind==TypeKind::TyU32 {return make_name("u32")}
+    if (*ty).kind==TypeKind::TyU8 {return make_name("u8")}
+    if (*ty).kind==TypeKind::TyF64 {return make_name("f64")}
+    if (*ty).kind==TypeKind::TyF32 {return make_name("f32")}
+    if (*ty).kind==TypeKind::TyBool {return make_name("bool")}
+    if (*ty).kind==TypeKind::TyChar {return make_name("char")}
+    if (*ty).kind==TypeKind::TyString {return make_name("string")}
+    ir_empty_name()
+}
+var LOWER_CURRENT_MATCH_TYPE:Option<Box<CheckedPatternType>> = None
+
 var LOWER_MATCH_SCRUT_IS_REF: bool = false
 
 // Label of the lane-increment block while a `kernel fn` body is lowered; -1
@@ -26278,6 +26296,88 @@ impl Lowerer {
         (lo,cell)
     }
 
+    fn lower_checked_value_pattern_ref(self, value:i64, pat:&Pattern, ty:&TypeEntry, skip:i64, depth:i64)->Lowerer with Mut,Panic,Div,Alloc,IO {
+        var lo=self
+        if depth>=64 {return lo.lower_option_pattern_refused("tuple pattern nesting exceeds supported depth")}
+        if (*pat).kind==PatternKind::PatWildcard {return lo}
+        if (*pat).kind==PatternKind::PatTuple {
+            if (*ty).kind!=TypeKind::TyTuple {return lo.lower_option_pattern_refused("tuple pattern has no checked tuple type")}
+            var patterns=(*pat).sub_patterns
+            var types=(*ty).tuple_elems
+            var index:i64=0
+            while true {match patterns {
+                Some(p)=>{match types {
+                    Some(t)=>{
+                        if (*p).head.kind!=PatternKind::PatWildcard {
+                            let pair=lo.fresh_reg()
+                            lo=pair.0
+                            if (*t).head.kind==TypeKind::TyUnit {lo=lo.emit(ir_load_imm(pair.1,0))}
+                            else {lo=lo.emit(ir_field_get(pair.1,value,index,ir_empty_name()))}
+                            lo=lo.lower_checked_value_pattern_ref(pair.1,&(*p).head,&(*t).head,skip,depth+1)
+                        }
+                        types=(*t).tail
+                    }
+                    None=>return lo.lower_option_pattern_refused("tuple pattern has too many elements")
+                };patterns=(*p).tail;index=index+1}
+                None=>break
+            }}
+            match types {Some(_)=>return lo.lower_option_pattern_refused("tuple pattern has too few elements"),None=>{}}
+            return lo
+        }
+        if (*pat).kind==PatternKind::PatBinding {
+            var scalar:i64=0
+            var pointee=ir_empty_name()
+            let is_reference=(*ty).kind==TypeKind::TyRef || (*ty).kind==TypeKind::TyRefMut
+            if is_reference {
+                match (*ty).inner {
+                    Some(inner)=>{
+                        pointee=lower_checked_pattern_scalar_name(&(*inner))
+                        if (*inner).kind==TypeKind::TyNamed && lower_struct_layout_index_of(&(*lo.struct_layouts),(*inner).name)>=0 {
+                            pointee=(*inner).name
+                        }
+                    }
+                    None=>{}
+                }
+                if pointee.len<=0 {return lo.lower_option_pattern_refused("tuple reference pointee has no supported native metadata")}
+            } else {
+                if (*ty).kind==TypeKind::TyF64 || (*ty).kind==TypeKind::TyF32 {scalar=2}
+                else if (*ty).kind==TypeKind::TyString {scalar=3}
+                else if lower_checked_pattern_scalar_name(ty).len>0 || (*ty).kind==TypeKind::TyUnit {scalar=1}
+                else {return lo.lower_option_pattern_refused("tuple binding aggregate needs an explicit native move/copy representation")}
+            }
+            lo=lo.bind_local((*pat).name,value,(*pat).is_mut)
+            if scalar>0 {lo=lo.bind_local_scalar_kind((*pat).name,scalar)}
+            if scalar==2 {lo=lo.emit(ir_mark_float_reg(value))}
+            if is_reference {lo=lo.bind_local_ref((*pat).name);lo=lo.bind_local_struct_type((*pat).name,pointee,false)}
+            return lo
+        }
+        if (*pat).kind==PatternKind::PatIntLit || (*pat).kind==PatternKind::PatBoolTrue || (*pat).kind==PatternKind::PatBoolFalse {
+            if (*ty).kind==TypeKind::TyF32 || (*ty).kind==TypeKind::TyF64 || (*ty).kind==TypeKind::TyString
+                || lower_checked_pattern_scalar_name(ty).len<=0 {return lo.lower_option_pattern_refused("tuple literal pattern needs a checked integer/bool/char cell")}
+            let expected=if (*pat).kind==PatternKind::PatIntLit {(*pat).int_val} else {if (*pat).kind==PatternKind::PatBoolTrue {1} else {0}}
+            let literal=lo.emit_i64_const(expected)
+            lo=literal.0
+            let compare=lo.fresh_reg()
+            lo=compare.0
+            lo=lo.emit(ir_binop(compare.1,value,BinaryOp::OpEq,literal.1))
+            return lo.emit(ir_branch_false(compare.1,skip))
+        }
+        if (*pat).kind==PatternKind::PatEnum && (*ty).kind==TypeKind::TyNamed {
+            let entry=lo.user_variant_index_ref(ir_path_qualifier_name((*pat).path),ir_path_last_name((*pat).path))
+            if entry>=0 && lo.user_enum_uses_handle_ref(entry) {return lo.lower_user_enum_pattern_ref(value,pat,skip,depth+1)}
+            match (*pat).sub_patterns {Some(_)=>return lo.lower_option_pattern_refused("unresolved tuple enum payload"),None=>{}}
+            let tag=lo.lookup_variant_discriminant_by_path(ir_path_qualifier_name((*pat).path),ir_path_last_name((*pat).path))
+            if tag<0 {return lo.lower_option_pattern_refused("unresolved tuple enum variant")}
+            let literal=lo.emit_i64_const(tag)
+            lo=literal.0
+            let compare=lo.fresh_reg()
+            lo=compare.0
+            lo=lo.emit(ir_binop(compare.1,value,BinaryOp::OpEq,literal.1))
+            return lo.emit(ir_branch_false(compare.1,skip))
+        }
+        lo.lower_option_pattern_refused("unsupported checked tuple sub-pattern")
+    }
+
     fn lower_user_enum_pattern_ref(self, cell:i64, pat:&Pattern, skip:i64, depth:i64) -> Lowerer with Mut,Panic,Div,Alloc,IO {
         var lo=self
         if depth>=64 {return lo.lower_option_pattern_refused("enum pattern nesting exceeds supported depth")}
@@ -31926,6 +32026,21 @@ impl Lowerer {
             lo = lo.emit(ir_jump(l_end))
             lo = lo.emit(ir_label(l_skip))
             lo
+        } else if pat.kind == PatternKind::PatTuple {
+            match LOWER_CURRENT_MATCH_TYPE {
+                Some(info)=>{
+                    let skip=self.fresh_label()
+                    var lo=skip.0
+                    lo=lo.lower_checked_value_pattern_ref(scrut,pat,&(*info).ty,skip.1,0)
+                    lo=lo.lower_arm_guard(&arm.guard,skip.1)
+                    let body=lo.lower_expr_ref(&arm.body)
+                    lo=body.0
+                    lo=lo.emit(ir_copy(res,body.1))
+                    lo=lo.emit(ir_jump(l_end))
+                    return lo.emit(ir_label(skip.1))
+                }
+                None=>return self.lower_option_pattern_refused("tuple pattern is missing checked type metadata")
+            }
         } else if pat.kind == PatternKind::PatBinding {
             // Binding matches the pattern; bind the scrutinee, then a guard may reject it.
             var lo = self.bind_local(pat.name, scrut, pat.is_mut)
@@ -37444,9 +37559,12 @@ impl Lowerer {
         lo = pair_end.0
         let l_end = pair_end.1
         let scrut_opk = lo.opt_expr_option_payload_kind_ref(&e.left)
+        let saved_match_type=LOWER_CURRENT_MATCH_TYPE
+        LOWER_CURRENT_MATCH_TYPE=pattern_type_lookup(lower_effective_current_module_id(),(*lo.current_func).name,(*e).span)
         LOWER_MATCH_SCRUT_IS_REF = scrut_is_ref
         lo = lo.lower_match_arms_ref(scrut, res, l_end, &e.arms, payload_layout, scrut_opk)
         LOWER_MATCH_SCRUT_IS_REF = saved_scrut_is_ref
+        LOWER_CURRENT_MATCH_TYPE=saved_match_type
         lo = lo.emit(ir_load_imm(res, 0))
         lo = lo.emit(ir_label(l_end))
         if res_is_float {

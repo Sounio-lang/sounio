@@ -11,6 +11,11 @@
 namespace fs=std::filesystem;
 struct Case {std::string_view name,exit,code,marker;};
 constexpr std::array cases{
+ Case{"tuple_pattern_effects","0","-","TUPLE_PATTERN_EFFECTS_OK"},
+ Case{"tuple_pattern_mixed_ref","0","-","TUPLE_PATTERN_MIXED_REF_OK"},
+ Case{"tuple_pattern_nested","0","-","TUPLE_PATTERN_NESTED_OK"},
+ Case{"tuple_pattern_owner_ref","0","-","TUPLE_PATTERN_OWNER_REF_OK"},
+ Case{"tuple_pattern_enum_tag","0","-","TUPLE_PATTERN_ENUM_TAG_OK"},
  Case{"borrowed_enum_array_cells","1","E264","-"},
  Case{"borrowed_enum_box_cells","1","E264","-"},
  Case{"borrowed_enum_i16_ref","1","E264","-"},
