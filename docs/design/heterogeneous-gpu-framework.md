@@ -1570,3 +1570,20 @@ Job 19271. md5 `7f28a8a5e5b520e63752fee0f11b5d80`.
 Those four words are 2.0, 3.0, 4.0 and 5.0. The stored word is 26.0. The inputs were not overwritten.
 
 Gate. Node `gpuorangefs-r770-proxmox`, `--gres=gpu:1`, `--mem=16G`, `--cpus-per-task=4`. The 0.0018 s threshold is not moved. This cut does not pass it.
+
+
+## 62. Three products (2026-10-28, OBSERVED)
+
+The two-product kernel left the slots after the store empty. Those slots now hold two more loads, a third `FFMA`, the store, and `EXIT`. The text stays 256 bytes. A fourth product does not fit. Eight loads, four `FFMA`s, the four setup instructions, the store and `EXIT` are eighteen instructions, and `.text` sits against the section headers.
+
+The third pair reuses R4 and R6. The first `FFMA` has already waited on those registers. The new loads register barriers 2 and 3 again. The third `FFMA` waits on mask 12, the same mask the first one used. The second `FFMA` still waits on mask 48. `EXIT` is at pc 224.
+
+The host writes the bits of 2.0, 3.0, 4.0, 5.0, 6.0 and 7.0. In f32, 2 times 3 plus 4 times 5 plus 6 times 7 is 68.0. The bits of 68.0 are `0x42880000`, which is 1116209152. The node was idle. No drain was cleared and no foreign job was moved.
+
+Job 19296. md5 `98989b7019c0f14cd8e97373d7c2cd09`.
+
+`OWN=1073741824`, `OWN_ADD=1077936128`, `OWN_SRC=1082130432`, `OWN_WIDE=1084227584`, `OWN_EXT=1086324736`, `OWN_EXT2=1088421888`, `OWN_SUM=1116209152`, `EXIT:0`.
+
+Those six words are 2.0, 3.0, 4.0, 5.0, 6.0 and 7.0. The stored word is 68.0. The inputs were not overwritten. The third product was added to the running sum.
+
+Gate. Node `gpuorangefs-r770-proxmox`, `--gres=gpu:1`, `--mem=16G`, `--cpus-per-task=4`. The 0.0018 s threshold is not moved. This cut does not pass it.
