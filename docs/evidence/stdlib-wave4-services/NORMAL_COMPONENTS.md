@@ -70,6 +70,11 @@ The following actual native error exits are required and observed:
 | Byte budget 16 | 105 |
 | Unterminated quoted field at EOF | 22 |
 
+At this historical stage, the three expected TCP refusals report cleanup
+status 22 from strict Arrow close because output was intentionally not finished.
+All platform resources still close. The later explicit abort API separates
+this stream-validity result from actual close errors; see ARROW_ABORT.md.
+
 The socket reader owns its duplicated descriptor, the source socket is closed
 before parsing, and the read lease rejects a concurrent socket receive with
 EBUSY. All success and refusal drivers assert zero platform resources before
