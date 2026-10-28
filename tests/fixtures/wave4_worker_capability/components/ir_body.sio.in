@@ -50,6 +50,7 @@ fn worker_probe_contract_without_intrinsics(original:&IrModule)->i64 with Mut,Pa
     3
 }
 pub fn worker_ir_component()->i32 with Mut,Panic,Div,Alloc,IO {
+    if !worker_probe_layout() {print("WORKER_LAYOUT_FAILED\n");return 1}
     if !worker_probe_pages() {return 1}
     if !worker_probe_retirement() {print("WORKER_RETIREMENT_FAILED\n");return 1}
     worker_compilation_begin()
@@ -88,6 +89,14 @@ pub fn worker_ir_component()->i32 with Mut,Panic,Div,Alloc,IO {
     worker_backend_note_builtin(key,ctor,2001)
     worker_backend_note_builtin(key,raw,2017)
     worker_backend_note_builtin(key,raw_f64,2018)
+    let saved_bindings=WORKER_LOWER_BINDINGS
+    WORKER_LOWER_BINDINGS=None
+    worker_lower_note_remap(444,0,key,0)
+    worker_lower_retire_dependencies(key)
+    if WORKER_LOWER_REMAP_COUNT!=0 || worker_validate_constructor_identities(&(*module)) || worker_identity_error()!=10 {return 1}
+    if worker_validate_capability_flow(&(*module)) || worker_capability_error()!=201 {return 1}
+    WORKER_LOWER_BINDINGS=saved_bindings
+    print("WORKER_RETIRE_UNKNOWN_OK residual_intent_rejected=1 identity=10 capability=201\n")
     if !worker_validate_constructor_identities(&(*module)) {print("identity ");print_int(worker_identity_error());return 1}
     if !worker_validate_capability_flow(&(*module)) {print("capflow ");print_int(worker_capability_error());return 1}
     if !worker_validate_callback_closures(&(*module)) {print("closure ");print_int(worker_closure_error());return 1}
@@ -334,5 +343,43 @@ fn worker_probe_pages()->bool with Mut,Panic,Div,Alloc,IO {
     if rejected_intent as i64!=0 || !WORKER_LOWER_BAD {return false}
     worker_compilation_begin()
     print("WORKER_METADATA_PAGES_OK records=1025 per_family=2pages budget_refusals=2 pages_reused=1\n")
+    true
+}
+fn worker_probe_layout()->bool with Mut,Panic,Div,Alloc,IO {
+    let sig=worker_probe_signature(801,1,0,1)
+    let raw=heap_alloc(256) as i64
+    let other=heap_alloc(256) as i64
+    if raw<=0 || other<=0 {return false}
+    var index:i64=0
+    while index<32 {
+        let word=(raw+index*8) as *mut i64;
+        *word=887766
+        let another=(other+index*8) as *mut i64;
+        *another=887766
+        index=index+1
+    }
+    let first=raw as *mut WorkerLowerBinding;
+    *first=WorkerLowerBinding {module_key:111,fn_id:3,source_epoch:77,signature:sig,fresh:true,trusted_worker:false,next:None}
+    let second=(raw+128) as *mut WorkerLowerBinding;
+    *second=WorkerLowerBinding {module_key:222,fn_id:4,source_epoch:78,signature:sig,fresh:false,trusted_worker:true,next:Some(first)}
+    if (*first).module_key!=111 || (*first).fn_id!=3 || (*first).source_epoch!=77 || !(*first).fresh || (*first).trusted_worker || (*(*first).signature).id!=801 {return false}
+    if (*second).module_key!=222 || (*second).fn_id!=4 || (*second).source_epoch!=78 || (*second).fresh || !(*second).trusted_worker || (*(*second).signature).id!=801 {return false}
+    match (*second).next {Some(previous)=>{if previous as i64!=first as i64 {return false}},None=>return false}
+    let a=other as *mut WorkerLowerIntent;
+    *a=WorkerLowerIntent {token:1,source_epoch:77,caller:800,start:10,end:11,target:801,abi:1,next:None}
+    let b=(other+128) as *mut WorkerLowerIntent;
+    *b=WorkerLowerIntent {token:2,source_epoch:78,caller:802,start:12,end:13,target:803,abi:2,next:Some(a)}
+    if (*a).token!=1 || (*a).source_epoch!=77 || (*a).caller!=800 || (*a).start!=10 || (*a).end!=11 || (*a).target!=801 || (*a).abi!=1 {return false}
+    if (*b).token!=2 || (*b).source_epoch!=78 || (*b).caller!=802 || (*b).start!=12 || (*b).end!=13 || (*b).target!=803 || (*b).abi!=2 {return false}
+    match (*b).next {Some(previous)=>{if previous as i64!=a as i64 {return false}},None=>return false}
+    index=8
+    while index<16 {
+        if read_i64(raw,index)!=887766 || read_i64(raw,index+16)!=887766 {return false}
+        if index>=9 {if read_i64(other,index)!=887766 || read_i64(other,index+16)!=887766 {return false}}
+        index=index+1
+    }
+    heap_free(raw)
+    heap_free(other)
+    print("WORKER_METADATA_LAYOUT_OK stride=128 binding_bytes=64 intent_bytes=72 tail_canaries=30 all_fields_and_links=1\n")
     true
 }
