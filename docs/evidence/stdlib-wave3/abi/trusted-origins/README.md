@@ -1,3 +1,5 @@
+> Historical libc-based component, superseded by [kernel identity and dual-bootstrap qualification](KERNEL_BOOTSTRAP.md). The current implementation no longer loads libc dynamically.
+
 # Trusted physical module origins — component qualification
 
 The loader records the physical files selected by BFS under their module IDs.

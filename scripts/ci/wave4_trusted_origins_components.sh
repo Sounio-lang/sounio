@@ -5,6 +5,8 @@ ROOT=$(cd "$(dirname "$0")/../.." && pwd -P)
 [[ "${SLURM_JOB_ID:-}" =~ ^[1-9][0-9]*$ ]] || exit 64
 [[ $# == 1 && "$1" == /* && ! -e "$1" ]] || exit 64
 : "${SEED_RAW_BIN:?modern raw compiler ELF required}"
+: "${BOOTSTRAP_RAW_BIN:?legacy bootstrap ELF required}"
+[[ "$BOOTSTRAP_RAW_BIN" == /* && -x "$BOOTSTRAP_RAW_BIN" ]] || exit 64
 [[ "$SEED_RAW_BIN" == /* && -x "$SEED_RAW_BIN" ]] || exit 64
 OUT=$1
 mkdir -p "$OUT/input/compiler" "$OUT/input/io"
@@ -22,7 +24,7 @@ cp fixtures/mem/typed_storage.sio spoof/mem/typed_storage.sio
 ln -s fixtures/ffi/worker.sio worker-link.sio
 ln fixtures/mem/typed_storage.sio storage-hardlink.sio
 find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum >"$OUT/INPUTS.sha256"
-sha256sum "$SEED_RAW_BIN" >"$OUT/SEED.sha256"
+sha256sum "$SEED_RAW_BIN" "$BOOTSTRAP_RAW_BIN" >"$OUT/SEED.sha256"
 ulimit -s 524288
 ulimit -c 0
 export SOUNIO_STDLIB_PATH="$PWD"
@@ -40,6 +42,20 @@ printf 'positive_native\t0\n' >>"$OUT/RESULTS.tsv"
 SOUNIO_STDLIB_PATH="$PWD/missing-authority" timeout 30 "$OUT/negative.elf" >"$OUT/negative.native"
 grep -qx 'trusted origins fail closed: OK' "$OUT/negative.native"
 printf 'negative_native\t0\n' >>"$OUT/RESULTS.tsv"
+for name in positive negative;do
+ timeout 300 "$BOOTSTRAP_RAW_BIN" "$name.sio" "$OUT/$name.bootstrap.elf" >"$OUT/$name.bootstrap.compile" 2>&1
+ if grep -En 'error:|error\[|would be dropped' "$OUT/$name.bootstrap.compile" >"$OUT/$name.bootstrap.diagnostics";then exit 1;fi
+ chmod +x "$OUT/$name.bootstrap.elf"
+ sha256sum "$OUT/$name.bootstrap.elf" >>"$OUT/ELFS.sha256"
+ printf '%s_bootstrap_compile\t0\n' "$name" >>"$OUT/RESULTS.tsv"
+done
+SOUNIO_STDLIB_PATH="$PWD/fixtures" timeout 30 "$OUT/positive.bootstrap.elf" >"$OUT/positive.bootstrap.native"
+grep -qx 'trusted origins native: OK' "$OUT/positive.bootstrap.native"
+printf 'positive_bootstrap_native\t0\n' >>"$OUT/RESULTS.tsv"
+SOUNIO_STDLIB_PATH="$PWD/missing-authority" timeout 30 "$OUT/negative.bootstrap.elf" >"$OUT/negative.bootstrap.native"
+grep -qx 'trusted origins fail closed: OK' "$OUT/negative.bootstrap.native"
+printf 'negative_bootstrap_native\t0\n' >>"$OUT/RESULTS.tsv"
+
 "${CXX:-g++}" -std=c++23 -Wall -Wextra -Werror stat64_layout.cpp -o "$OUT/layout"
 "$OUT/layout" fixtures/ffi/worker.sio worker-link.sio >"$OUT/layout.native"
 "$OUT/layout" fixtures/mem/typed_storage.sio storage-hardlink.sio >>"$OUT/layout.native"
