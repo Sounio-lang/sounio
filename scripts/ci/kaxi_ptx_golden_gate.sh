@@ -3,7 +3,7 @@
 ulimit -s unlimited 2>/dev/null || true
 # (5-transpiler unification). Re-emits all (pattern × mode) combinations
 # and asserts byte-identical output vs. captured goldens at
-# tests/golden/kaxi_ptx/<mode>/<pattern>.{ptx,sha256,unsupported}.
+# tests/golden/kaxi_ptx/<mode>/<pattern>.{ptx,unsupported}.
 #
 # Capture goldens first via scripts/gpu/kaxi_ptx_capture.sh (a capture tool,
 # not a gate: it cannot fail -- this script is the assertion).
@@ -60,7 +60,6 @@ for mode_entry in "${MODES[@]}"; do
 
     for pattern in "${PATTERNS[@]}"; do
         gold_ptx="$GOLDEN_DIR/$mode/$pattern.ptx"
-        gold_sha="$GOLDEN_DIR/$mode/$pattern.sha256"
         gold_unsup="$GOLDEN_DIR/$mode/$pattern.unsupported"
 
         if [[ ! -f "$gold_ptx" && ! -f "$gold_unsup" ]]; then
@@ -95,13 +94,15 @@ for mode_entry in "${MODES[@]}"; do
                 FAIL=$((FAIL + 1))
                 [[ "${#FIRST_FAILURES[@]}" -lt 5 ]] && FIRST_FAILURES+=("DROP  $mode/$pattern (rc=$rc, was supported)")
             else
-                cur_sha="$(sha256sum "$tmp_ptx" | awk '{print $1}')"
-                gold_sha_val="$(cat "$gold_sha" 2>/dev/null || echo MISSING)"
-                if [[ "$cur_sha" == "$gold_sha_val" ]]; then
+                if cmp -s "$tmp_ptx" "$gold_ptx"; then
                     PASS=$((PASS + 1))
                 else
                     FAIL=$((FAIL + 1))
-                    [[ "${#FIRST_FAILURES[@]}" -lt 5 ]] && FIRST_FAILURES+=("DIFF  $mode/$pattern (golden=$gold_sha_val current=$cur_sha)")
+                    if [[ "${#FIRST_FAILURES[@]}" -lt 5 ]]; then
+                        cur_sha="$(sha256sum "$tmp_ptx" | awk '{print $1}')"
+                        gold_sha_val="$(sha256sum "$gold_ptx" | awk '{print $1}')"
+                        FIRST_FAILURES+=("DIFF  $mode/$pattern (golden=$gold_sha_val current=$cur_sha)")
+                    fi
                 fi
             fi
         fi
