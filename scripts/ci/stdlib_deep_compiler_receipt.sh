@@ -172,6 +172,16 @@ run_shell_text() {
   [[ -n "$shell" ]] && printf '%s\n' "$shell"
  done <<<"$blob"
 }
+# `;`, `&`, `|`, `(`, and `{` start a command, the same way a space does.
+# `cd .;if false; then` hides `if` from a check that only looks for whitespace.
+cmd_boundary='(^|[[:space:];\&\|\(\{])'
+# The receipt runs only as `bash <script> verify`. `bash -n <script> verify`
+# parses the script and returns success, so the copy still proceeds.
+receipt_verify_executed() {
+ local text=$1
+ [[ "$text" =~ ${cmd_boundary}(bash|[^[:space:]]+/bash)[[:space:]]+scripts/ci/stdlib_deep_compiler_receipt\.sh[[:space:]]+verify([^[:alnum:]_]|$) ]]
+}
+verify_arguments_re=${cmd_boundary}'(bash|[^[:space:]]+/bash)[[:space:]]+scripts/ci/stdlib_deep_compiler_receipt\.sh[[:space:]]+verify[[:space:]]*\\?[[:space:]]*"\$GITHUB_WORKSPACE"[[:space:]]*"\$RUNNER_TEMP/stdlib-deep-compiler"[[:space:]]*"\$GITHUB_SHA"'
 scan_job_body() {
  local blob=$1 mode= line shell uploads=0 downloads=0 upload_at=0 download_at=0 verify_at=0 prepare_at=0 build_runs=0 unattached=0 n=0 in_run=0
  while IFS= read -r line; do
@@ -196,7 +206,7 @@ scan_job_body() {
   fi
   consider_run_line "$line" in_run shell
   [[ -n "$shell" ]] || continue
-  [[ "$verify_at" == 0 && "$shell" == *"stdlib_deep_compiler_receipt.sh verify"* ]] && verify_at=$n
+  if [[ "$verify_at" == 0 ]] && receipt_verify_executed "$shell"; then verify_at=$n; fi
   [[ "$prepare_at" == 0 && "$shell" == *"stdlib_deep_compiler_receipt.sh prepare"* ]] && prepare_at=$n
   [[ "$shell" == *"build_modular_madaros.sh"* && "$shell" != *"hashFiles("* ]] && build_runs=$((build_runs + 1))
  done <<<"$blob"
@@ -212,8 +222,10 @@ scan_job_body() {
 # step exits. Placement is then skipped, or a rejected ELF is copied and run,
 # and the f64 gate can build another ELF while this check stays green.
 # `set -e` does not save a command in an AND/OR list, a shell conditional, a
-# negation, a pipe, or a background job. Those shell forms count only inside
-# the `run:` script. A step `name:` or `env:` value is not executed.
+# negation, a pipe, or a background job. A semicolon is a command boundary, so
+# `cd .;if false; then` skips the receipt the same way a line-leading `if`
+# does. `bash -n` only syntax-checks the script. Those shell forms count only
+# inside the `run:` script. A step `name:` or `env:` value is not executed.
 verify_step_problems() {
  local blob=$1 job=$2 line shell in_step=0 step_if=0 step_swallow=0 step_verify=0 bang amp in_run=0
  flush_verify_step() {
@@ -240,15 +252,15 @@ verify_step_problems() {
   [[ "$line" =~ ^[[:space:]]{8}if: ]] && step_if=1
   [[ "$line" =~ ^[[:space:]]{8}continue-on-error: ]] && step_swallow=1
   if [[ "$line" =~ ^[[:space:]]*(-\ )?shell: ]]; then
-   [[ ( "$line" == *'-e'* || "$line" == *'errexit'* ) && "$line" == *'pipefail'* ]] || step_swallow=1
+   shell_is_strict "$line" || step_swallow=1
   fi
   consider_run_line "$line" in_run shell
   [[ -n "$shell" ]] || continue
   [[ "$shell" == *'||'* || "$shell" == *'&&'* ]] && step_swallow=1
-  [[ "$shell" =~ (^|[[:space:]])(if|elif|while|until|for|case|select)[[:space:]] ]] && step_swallow=1
+  [[ "$shell" =~ ${cmd_boundary}(if|elif|while|until|for|case|select)([[:space:]]|;|$) ]] && step_swallow=1
   # A function body is parsed, not run, until something calls it. The verify
   # text can sit in that body while `cp` still runs.
-  [[ "$shell" =~ (^|[[:space:]])function[[:space:]] || "$shell" == *'()'* ]] && step_swallow=1
+  [[ "$shell" =~ ${cmd_boundary}function[[:space:]] || "$shell" == *'()'* ]] && step_swallow=1
   [[ "$shell" =~ set[[:space:]]+\+([^[:space:]]*e|o[[:space:]]+[\'\"]?errexit) ]] && step_swallow=1
   # `!=` is a comparison. Any other `!` in this step negates a command.
   bang=${shell//!=/}
@@ -265,25 +277,25 @@ verify_step_problems() {
   amp=${amp//>&/}
   amp=${amp//|&/}
   [[ "$amp" == *'&'* ]] && step_swallow=1
-  [[ "$shell" =~ (^|[[:space:]])coproc([[:space:]]|$) ]] && step_swallow=1
-  [[ "$shell" =~ (^|[[:space:]])trap[[:space:]] ]] && step_swallow=1
+  [[ "$shell" =~ ${cmd_boundary}coproc([[:space:]]|$) ]] && step_swallow=1
+  [[ "$shell" =~ ${cmd_boundary}trap[[:space:]] ]] && step_swallow=1
   # `echo "$(verify)"` and backticks succeed when verify fails. `set -e` does
   # not apply inside the substitution. An assignment of the substitution does
   # fail the step; nesting it in another command does not. A plain `echo` or
   # `printf` of the verify command is not a run either: the text matches, and
   # the copy still proceeds.
   [[ "$shell" == *'$('* || "$shell" == *'`'* ]] && step_swallow=1
-  [[ "$shell" =~ (^|[[:space:]])(echo|printf)([[:space:]]|$) ]] && step_swallow=1
+  [[ "$shell" =~ ${cmd_boundary}(echo|printf)([[:space:]]|$) ]] && step_swallow=1
   # `true` and `:` ignore their arguments and return 0, so the verify text is
   # not executed. A heredoc holds that text without running it. `bash +e`
   # turns errexit off in that shell, so a failed receipt still reaches `cp`.
-  [[ "$shell" =~ (^|[[:space:]])true([[:space:]]|$) || "$shell" == *'/true'* ]] && step_swallow=1
+  [[ "$shell" =~ ${cmd_boundary}true([[:space:]]|$) || "$shell" == *'/true'* ]] && step_swallow=1
   [[ "$shell" =~ ^[[:space:]]*:[[:space:]] ]] && step_swallow=1
   [[ "$shell" == *'<<'* ]] && step_swallow=1
-  [[ "$shell" =~ (^|[[:space:]])\+e([^[:alnum:]_]|$) || "$shell" =~ \+o[[:space:]]+[\'\"]?errexit ]] && step_swallow=1
+  [[ "$shell" =~ ${cmd_boundary}\+e([^[:alnum:]_]|$) || "$shell" =~ \+o[[:space:]]+[\'\"]?errexit ]] && step_swallow=1
   # `exit 0` and `exec /bin/true` end the step successfully before verify runs.
   # The text is still in the file, and the next step copies or builds another ELF.
-  [[ "$shell" =~ (^|[[:space:]])(exit|exec)([[:space:]]|$) ]] && step_swallow=1
+  [[ "$shell" =~ ${cmd_boundary}(exit|exec)([[:space:]]|$) ]] && step_swallow=1
   [[ "$shell" == *"stdlib_deep_compiler_receipt.sh verify"* ]] && step_verify=1
  done <<<"$blob"
  flush_verify_step
@@ -303,7 +315,9 @@ compiler_use_before_verify() {
   consider_run_line "$line" in_run shell
   [[ -n "$shell" ]] || continue
   vhead=
-  [[ "$shell" == *"stdlib_deep_compiler_receipt.sh verify"* ]] && vhead=${shell%%stdlib_deep_compiler_receipt.sh verify*}
+  if receipt_verify_executed "$shell"; then
+   vhead=${shell%%stdlib_deep_compiler_receipt.sh verify*}
+  fi
   for token in "${tokens[@]}"; do
    [[ "$shell" == *"$token"* ]] || continue
    [[ "$token" == 'madaros_current_source_f64_lowering_gate.sh' && "$shell" == *'hashFiles('* ]] && continue
@@ -314,16 +328,82 @@ compiler_use_before_verify() {
     return
    fi
   done
-  [[ -n "$vhead" || "$shell" == *"stdlib_deep_compiler_receipt.sh verify"* ]] && verify_at=1
+  receipt_verify_executed "$shell" && verify_at=1
  done <<<"$blob"
 }
 # GitHub's default shell is `bash -eo pipefail`. A workflow or job `shell:`
 # replaces that for every `run:` step that does not set its own. Without
 # errexit, a failed receipt is ignored and the next line copies the ELF.
+# Options apply left to right: `bash -eo pipefail +e` contains `-e` and
+# `pipefail`, but the final `+e` leaves errexit off. `bash -n` does not run
+# the script at all. An empty value keeps GitHub's default.
 shell_is_strict() {
- local line=$1
+ local line=$1 rest word sign cluster opt next
+ local errexit=0 pipefail=0 executes=1
  [[ -z "$line" ]] && return 0
- [[ ( "$line" == *'-e'* || "$line" == *'errexit'* ) && "$line" == *'pipefail'* ]]
+ rest=${line##*shell:}
+ rest=${rest#"${rest%%[![:space:]]*}"}
+ [[ -n "$rest" ]] || return 1
+ word=${rest%%[[:space:]]*}
+ rest=${rest#"$word"}
+ rest=${rest#"${rest%%[![:space:]]*}"}
+ case "$word" in
+  bash|*/bash) ;;
+  *) return 1 ;;
+ esac
+ while [[ -n "$rest" ]]; do
+  word=${rest%%[[:space:]]*}
+  rest=${rest#"$word"}
+  rest=${rest#"${rest%%[![:space:]]*}"}
+  [[ "$word" == '{0}' ]] && continue
+  [[ "$word" == '--' ]] && break
+  if [[ "$word" == --* ]]; then
+   case "$word" in
+    --noprofile|--norc|--login|--posix|--restricted) ;;
+    *) return 1 ;;
+   esac
+   continue
+  fi
+  if [[ "$word" == [-+]?* ]]; then
+   sign=${word:0:1}
+   cluster=${word:1}
+   while [[ -n "$cluster" ]]; do
+    opt=${cluster:0:1}
+    cluster=${cluster:1}
+    case "$opt" in
+     e)
+      if [[ "$sign" == - ]]; then errexit=1; else errexit=0; fi
+      ;;
+     n)
+      # `bash -n` syntax-checks. A later letter does not run the script.
+      if [[ "$sign" == - ]]; then executes=0; fi
+      ;;
+     o)
+      # `-o` takes the next word, including in `-eo pipefail` and `-oe pipefail`.
+      [[ -n "$rest" ]] || return 1
+      next=${rest%%[[:space:]]*}
+      rest=${rest#"$next"}
+      rest=${rest#"${rest%%[![:space:]]*}"}
+      next=${next#\"}; next=${next%\"}
+      next=${next#\'}; next=${next%\'}
+      case "$next" in
+       errexit)
+        if [[ "$sign" == - ]]; then errexit=1; else errexit=0; fi
+        ;;
+       pipefail)
+        if [[ "$sign" == - ]]; then pipefail=1; else pipefail=0; fi
+        ;;
+      esac
+      ;;
+     [a-zA-Z]) ;;
+     *) return 1 ;;
+    esac
+   done
+   continue
+  fi
+  return 1
+ done
+ [[ "$executes" == 1 && "$errexit" == 1 && "$pipefail" == 1 ]]
 }
 job_default_shell() {
  local blob=$1 line found=
@@ -355,7 +435,7 @@ verify_step_shell() {
   [[ "$in_step" == 1 ]] || continue
   [[ "$line" =~ ^[[:space:]]{6}-[[:space:]]+shell: || "$line" =~ ^[[:space:]]{8}shell: ]] && shell_line=$line
   consider_run_line "$line" in_run shell
-  [[ -n "$shell" && "$shell" == *"stdlib_deep_compiler_receipt.sh verify"* ]] && step_verify=1
+  if [[ -n "$shell" ]] && receipt_verify_executed "$shell"; then step_verify=1; fi
  done <<<"$blob"
  if [[ "$in_step" == 1 && "$step_verify" == 1 ]]; then
   printf '%s\n' "$shell_line"
@@ -479,7 +559,7 @@ workflow_problems() {
    shell_is_strict "$job_shell" || problems+=("shell-default $consumer")
   fi
   code=$(run_shell_text "$blob")
-  [[ "$code" =~ stdlib_deep_compiler_receipt\.sh[[:space:]]+verify[[:space:]]*\\?[[:space:]]*\"\$GITHUB_WORKSPACE\"[[:space:]]*\"\$RUNNER_TEMP/stdlib-deep-compiler\"[[:space:]]*\"\$GITHUB_SHA\" ]] || problems+=("verify-arguments $consumer")
+  [[ "$code" =~ $verify_arguments_re ]] || problems+=("verify-arguments $consumer")
   [[ "$blob" == *"$artifact_path"* ]] || problems+=("download-path $consumer")
   [[ -n "${if_text[$consumer]:-}" ]] || problems+=("consumer-if $consumer")
   [[ "${if_text[$consumer]:-}" != *"always()"* ]] || problems+=("consumer-always $consumer")
@@ -662,6 +742,12 @@ EOF
  bad="$work/wf-verify-shell-if.yml"
  awk 'BEGIN{arm=0} /^  madaros-current-source-deref-f64:/{arm=1} arm && /stdlib_deep_compiler_receipt.sh verify/{sub(/bash/, "if bash"); arm=0} {print}' "$base" >"$bad"
  expect_workflow_problem "$bad" verify-skippable
+ bad="$work/wf-verify-semi-if.yml"
+ awk 'BEGIN{arm=0; closefi=0} /^  madaros-current-source-deref-f64:/{arm=1} arm && /^        run: bash scripts\/ci\/stdlib_deep_compiler_receipt.sh verify \\$/ {print "        run: |"; print "          cd .;if false; then"; print "          bash scripts/ci/stdlib_deep_compiler_receipt.sh verify \\"; closefi=1; arm=0; next} closefi && /^            "\$GITHUB_WORKSPACE"/ {print; print "          fi"; closefi=0; next} {print}' "$base" >"$bad"
+ expect_workflow_problem "$bad" verify-skippable
+ bad="$work/wf-verify-bash-n.yml"
+ awk 'BEGIN{arm=0} /^  madaros-current-source-deref-f64:/{arm=1} arm && /stdlib_deep_compiler_receipt.sh verify/{sub(/bash/, "bash -n"); arm=0} {print}' "$base" >"$bad"
+ expect_workflow_problem "$bad" verify-after-download
  bad="$work/wf-verify-set-plus-e.yml"
  awk 'BEGIN{arm=0} /^  madaros-current-source-deref-f64:/{arm=1} arm && /^        run: bash scripts\/ci\/stdlib_deep_compiler_receipt.sh verify \\$/ {print "        run: |"; print "          set +e"; print "          bash scripts/ci/stdlib_deep_compiler_receipt.sh verify \\"; arm=0; next} {print}' "$base" >"$bad"
  expect_workflow_problem "$bad" verify-skippable
@@ -703,6 +789,25 @@ EOF
  good=$(workflow_problems "$bad")
  [[ -z "$good" ]] || fail "strict job shell was rejected: $good"
  printf 'RECEIPT_WORKFLOW_CONTROL_ACCEPTED strict-shell\n'
+ bad="$work/wf-github-default-shell.yml"
+ awk '/^  madaros-current-source-deref-f64:/{print; print "    defaults:"; print "      run:"; print "        shell: bash --noprofile --norc -eo pipefail {0}"; next} {print}' "$base" >"$bad"
+ good=$(workflow_problems "$bad")
+ [[ -z "$good" ]] || fail "GitHub default shell was rejected: $good"
+ printf 'RECEIPT_WORKFLOW_CONTROL_ACCEPTED github-default-shell\n'
+ bad="$work/wf-shell-plus-e-then-e.yml"
+ awk '/^  madaros-current-source-deref-f64:/{print; print "    defaults:"; print "      run:"; print "        shell: bash +e -eo pipefail {0}"; next} {print}' "$base" >"$bad"
+ good=$(workflow_problems "$bad")
+ [[ -z "$good" ]] || fail "errexit re-enabled after +e was rejected: $good"
+ printf 'RECEIPT_WORKFLOW_CONTROL_ACCEPTED errexit-reenabled\n'
+ bad="$work/wf-verify-shell-plus-e.yml"
+ awk 'BEGIN{arm=0} /^  madaros-current-source-deref-f64:/{arm=1} arm && /name: Verify/{print; print "        shell: bash -eo pipefail +e {0}"; arm=0; next} {print}' "$base" >"$bad"
+ expect_workflow_problem "$bad" verify-skippable
+ bad="$work/wf-job-shell-plus-e.yml"
+ awk '/^  madaros-current-source-deref-f64:/{print; print "    defaults:"; print "      run:"; print "        shell: bash -eo pipefail +e {0}"; next} {print}' "$base" >"$bad"
+ expect_workflow_problem "$bad" shell-default
+ bad="$work/wf-workflow-shell-plus-e.yml"
+ awk '/^jobs:/{print "defaults:"; print "  run:"; print "    shell: bash -eo pipefail +e {0}"} {print}' "$base" >"$bad"
+ expect_workflow_problem "$bad" shell-default
  bad="$work/wf-use-before-verify.yml"
  awk 'BEGIN{arm=0} /^  madaros-current-source-deref-f64:/{arm=1} arm && /name: Verify/{print "      - name: Run early"; print "        run: bash scripts/ci/madaros_current_source_f64_lowering_gate.sh"; arm=0} {print}' "$base" >"$bad"
  expect_workflow_problem "$bad" use-before-verify
