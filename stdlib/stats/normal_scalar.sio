@@ -1,0 +1,97 @@
+// Scalar-source standard-normal probability/log-tail kernels.
+// Worker use requires final-IR certification and verified region elision.
+// The checked Normal facade uses the same log-tail core and recurrence loops.
+// No structs, arrays, tuples, closures, globals, FFI or allocator calls occur
+// in this module or the reachable scalar helpers. Local outrefs do not escape.
+// Inputs: NaN propagates; +/-infinity has exact support endpoints.
+// Finite scalar underflow returns0 while the corresponding log stays finite.
+// Unsupported arithmetic/nonconvergence returns NaN, never a numeric sentinel.
+use math::pure::{is_finite,ln,exp}
+use math::scalar_log::{log1p_small_scalar}
+use special::gamma::{lgamma_positive_core}
+use special::gamma_scalar_core::{gamma_series_sum_scalar,gamma_cf_factor_scalar}
+fn ns_abs(x:f64)->f64 {if x<0.0 {-x}else{x}}
+fn ns_inf()->f64 {1.0e308*10.0}
+fn ns_nan()->f64 {let inf=ns_inf();inf-inf}
+// Returns log(Phi(-abs(z))). Prefixes, branch choice, compensation and work
+// accounting match the canonical checked gamma/Normal algorithms.
+// Six scalar/out-scalar arguments fit the native internal argument ABI.
+pub fn normal_standard_logtail_into(z:f64,budget:i64,tol:f64,status:&!i64,iterations:&!i64,method:&!i64)->f64 with Mut,Div,Panic {
+ *status=2;*iterations=0;*method=0
+ if !is_finite(z) || !is_finite(tol) {return 0.0}
+ *status=1
+ if budget<1 || budget>1000000 || tol<1.7763568394002505e-15 || tol>1.0e-4 {return 0.0}
+ let square=(0.5*z)*z
+ *status=5
+ if !is_finite(square) {return 0.0}
+ if square==0.0 {*status=0;return -0.6931471805599453}
+ let lx=ln(square)
+ if !is_finite(lx) {*status=4;return 0.0}
+ var spent:i64=0
+ if square<1.5 {
+  var series_status:i64=3
+  var series_iterations:i64=0
+  let sum=gamma_series_sum_scalar(0.5,square,budget,tol,&!series_status,&!series_iterations)
+  *iterations=series_iterations;*method=1;*status=series_status
+  if series_status!=0 {return 0.0}
+  let ls=ln(sum)
+  let lg=lgamma_positive_core(1.5)
+  let log_lower=(0.5*lx-square)-lg+ls
+  if !is_finite(ls) || !is_finite(lg) || !is_finite(log_lower) {*status=4;return 0.0}
+  if log_lower<= -0.6931471805599453 {
+   let lower=exp(log_lower)
+   if !is_finite(lower) || lower<0.0 || lower>0.5 {*status=4;return 0.0}
+   let log_upper=log1p_small_scalar(-lower)
+   if !is_finite(log_upper) {*status=4;return 0.0}
+   *status=0
+   return log_upper-0.6931471805599453
+  }
+  spent=series_iterations
+ }
+ let remaining=budget-spent
+ *method=2
+ if remaining<1 {*status=3;return 0.0}
+ var cf_status:i64=3
+ var cf_iterations:i64=0
+ let factor=gamma_cf_factor_scalar(0.5,square,remaining,tol,&!cf_status,&!cf_iterations)
+ *iterations=spent+cf_iterations;*status=cf_status
+ if cf_status!=0 {return 0.0}
+ let lh=ln(factor)
+ let lg=lgamma_positive_core(0.5)
+ let log_upper=(0.5*lx-square)-lg+lh
+ if !is_finite(lh) || !is_finite(lg) || !is_finite(log_upper) {*status=4;return 0.0}
+ *status=0
+ log_upper-0.6931471805599453
+}
+fn ns_logtail(a:f64)->f64 with Mut,Div,Panic {
+ if !is_finite(a) {return -ns_inf()}
+ let square=(0.5*a)*a
+ if !is_finite(square) {return -ns_inf()}
+ var status:i64=3
+ var iterations:i64=0
+ var method:i64=0
+ let value=normal_standard_logtail_into(a,2048,1.7763568394002505e-15,&!status,&!iterations,&!method)
+ if status!=0 || value> -0.6931471805599453 {return ns_nan()}
+ value
+}
+fn ns_tail(a:f64)->f64 with Mut,Div,Panic {exp(ns_logtail(a))}
+pub fn normal_cdf_scalar(x:f64)->f64 with Mut,Div,Panic {
+ if x!=x {return x}
+ let small=ns_tail(ns_abs(x))
+ if x<0.0 {small}else{1.0-small}
+}
+pub fn normal_sf_scalar(x:f64)->f64 with Mut,Div,Panic {
+ if x!=x {return x}
+ let small=ns_tail(ns_abs(x))
+ if x>=0.0 {small}else{1.0-small}
+}
+pub fn normal_logcdf_scalar(x:f64)->f64 with Mut,Div,Panic {
+ if x!=x {return x}
+ if x<=0.0 {return ns_logtail(ns_abs(x))}
+ log1p_small_scalar(-ns_tail(x))
+}
+pub fn normal_logsf_scalar(x:f64)->f64 with Mut,Div,Panic {
+ if x!=x {return x}
+ if x>=0.0 {return ns_logtail(x)}
+ log1p_small_scalar(-ns_tail(-x))
+}
