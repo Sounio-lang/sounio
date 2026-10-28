@@ -14165,6 +14165,73 @@ impl Lowerer {
         true
     }
 
+    // SIO-278: value-copy the aggregate a `let` reads through a deref or a
+    // field access, as `let copy = t` already does for a plain identifier
+    // (emit_ident_aggregate_value_copy). `let saved = *b` and `let s = o.f`
+    // bound the SOURCE storage, so a later write through the source showed
+    // through the binding: `(*b).a[0] = 99` changed `saved.a[0]`. The copy
+    // is the same budgeted deep copy the identifier path uses -- aggregate
+    // fields get fresh backing, Box fields keep reference semantics.
+    fn emit_place_aggregate_value_copy(self, e: &Expr, reg: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        let st = self.expr_receiver_struct_type_ref(e)
+        if st.len > 0 && !ir_name_is_box(st) && !ir_name_eq(st, make_name("Knowledge")) {
+            let slot_count = self.struct_layout_slot_count(st)
+            if slot_count > 0 {
+                return self.emit_struct_value_copy_budgeted(reg, st, slot_count)
+            }
+        }
+        if (*e).kind == ExprKind::ExprFieldAccess {
+            match (*e).left {
+                Some(owner) => {
+                    let owner_type = self.expr_receiver_struct_type_ref(&(*owner))
+                    let fld = self.struct_layout_field_array_info(owner_type, (*e).name)
+                    if fld.0 > 0 {
+                        return self.emit_fixed_array_value_copy(reg, fld.0, fld.1)
+                    }
+                }
+                None => {}
+            }
+        }
+        if (*e).kind == ExprKind::ExprUnary && (*e).un_op == UnaryOp::OpDeref {
+            match (*e).left {
+                Some(operand) => {
+                    if (*operand).kind == ExprKind::ExprIdent && self.lookup_local_is_ref((*operand).name) {
+                        let arr_len = self.lookup_local_fixed_array_len((*operand).name)
+                        if arr_len >= 0 && self.lookup_local_array_copy_word_scalar((*operand).name) {
+                            let elem_is_float = self.lookup_local_array_elem_float((*operand).name)
+                            return self.emit_fixed_array_value_copy(reg, arr_len, elem_is_float)
+                        }
+                    }
+                }
+                None => {}
+            }
+        }
+        (self, reg)
+    }
+
+    // (word-scalar element count, element is float) of a fixed-array FIELD
+    // addressed by name; (0, false) when the field is not one.
+    fn struct_layout_field_array_info(self, type_name: Name, field_name: Name) -> (i64, bool) with Mut, Panic, Div, Alloc {
+        if type_name.len <= 0 || field_name.len <= 0 { return (0, false) }
+        var si: i64 = 0
+        while si < (*self.struct_layouts).count {
+            if ir_name_eq((*self.struct_layouts).entries[si as usize].type_name, type_name) {
+                var fi: i64 = 0
+                let fc = (*self.struct_layouts).entries[si as usize].field_count
+                while fi < fc && fi < 128 {
+                    if ir_name_eq(ir_name_at((*self.struct_layouts).entries[si as usize].fields[fi as usize].name_id), field_name) {
+                        let entry = (*self.struct_layouts).entries[si as usize].fields[fi as usize]
+                        return (entry.word_scalar_array_len, entry.is_float == 1)
+                    }
+                    fi = fi + 1
+                }
+                return (0, false)
+            }
+            si = si + 1
+        }
+        (0, false)
+    }
+
     fn expr_is_zero_fill_value(self, e: Expr) -> bool {
         let _lo = self
         if e.kind == ExprKind::ExprIntLit { return e.int_val == 0 }
@@ -28458,6 +28525,15 @@ impl Lowerer {
                         lo = lo.emit(ir_copy(copy_reg, reg))
                         bind_reg = copy_reg
                     }
+                } else if (*rhs_ident).kind == ExprKind::ExprUnary || (*rhs_ident).kind == ExprKind::ExprFieldAccess {
+                    // SIO-278: `let saved = *b` / `let s = o.f` bound the
+                    // source storage itself, so `(*b).a[0] = 99` showed
+                    // through `saved.a[0]` (lean_single prints the copied
+                    // value). Apply the same value copy the identifier path
+                    // above applies; non-aggregate places keep the handle.
+                    let place_pair = lo.emit_place_aggregate_value_copy(&(*rhs_ident), reg)
+                    lo = place_pair.0
+                    bind_reg = place_pair.1
                 }
             }
             _ => {}
