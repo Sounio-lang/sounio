@@ -7,6 +7,7 @@
 module native::codegen_x86_linux
 
 use parser::ast::{Name}
+use ir::storage_intrinsics::{storage_intrinsic_op}
 use compiler::static_assets::{static_asset_read_verified}
 use ir::ir::{IrModule, IrFunction, IrInstr, IrOpcode, IR_MAX_FUNCS, IR_MAX_STRINGS, IR_MAX_VREGS, IR_MAX_INSTRS, IR_INVALID_REG, IR_FLOAT_REG_MARKER_FLAG, IR_BOX_ALLOC_FLAG, IR_XOR_TWIST_CAYLEY_DICKSON_SIGN, IR_XOR_CANDIDATE_AUTO, ir_reg_count_is_valid, ir_function_regs_are_valid, ir_xor_convolution_s, ir_name_eq, BSS_BASE_LINUX, IR_STRATEGY_BSS_GLOBAL, BSS_INIT_STRING_MAGIC}
 use native::encode::*
@@ -1409,6 +1410,8 @@ fn native_v2_region_builtin_id(n: Name) -> i64 with Mut, Panic, Div {
 // source identifier, and private-function mangling appends legal identifier
 // suffixes. An unrelated private formatter cannot acquire this identity.
 fn native_v2_protected_builtin_id(name: Name) -> i64 with Mut, Panic, Div {
+    let storage_op=storage_intrinsic_op(&name)
+    if storage_op!=0 {return 1000+storage_op}
     if name_eq(name, make_name("@native:print_int")) { return 1 }
     if name_eq(name, make_name("@native:print_char")) { return 2 }
     if name_eq(name, make_name("@native:print")) { return 3 }
@@ -9582,6 +9585,7 @@ pub fn native_v2_builtin_returns_float(builtin_id: i64) -> bool {
 }
 
 fn native_v2_emit_builtin_by_id_into(nc: &! NativeCompiler, builtin_id: i64) with Mut, Panic, Div {
+    if builtin_id>=1000 && builtin_id<1100 {emit_builtin_storage_into(nc,builtin_id-1000);return}
     if builtin_id == 39 { emit_builtin_ffi_getpid_into(nc); return }
     if builtin_id == 40 { emit_builtin_ffi_getppid_into(nc); return }
     if builtin_id == 41 { emit_builtin_ffi_exit_into(nc); return }
@@ -12747,7 +12751,8 @@ pub fn compile_native_v2_sret_witness_to_file(output_path: string, plain_call: b
     let reloc_eff_rodata = if nc.flat_rodata_len > 0 { nc.flat_rodata_len } else { nc.rodata.len }
     let reloc_data_off = align_page(reloc_rodata_off + reloc_eff_rodata)
     apply_relocations_into(&! nc, reloc_rodata_off, reloc_data_off)
-    native_v2_write_min_elf64_to_file(output_path, &! nc, nc.entry_offset, 4194304)
+    let final_entry_offset = nc.entry_offset
+    native_v2_write_min_elf64_to_file(output_path, &! nc, final_entry_offset, 4194304)
 }
 
 // Map MachineOperand to a scheduler register ID for dependency tracking.
@@ -16465,4 +16470,134 @@ pub(crate) fn compile_to_shared(module: &IrModule) -> Elf64Binary with Mut, Pani
     var nc = compiler_new()
     nc = compile_module_for_obj(nc, module)
     finalize_elf64_shared(nc.code, nc.symbols, NC_FN_OFFSETS, module.export_names, module.export_count)
+}
+
+// Typed storage value-cell ABI. Protected symbols are never source identifiers.
+fn storage_emit_jcc(nc:&!NativeCompiler,cc:i64)->i64 with Mut,Panic,Div {
+ nc_emit_byte(nc,0x0f);nc_emit_byte(nc,cc)
+ let p=(*nc).code.len
+ nc_emit_u32_le(nc,0)
+ p
+}
+fn storage_patch_jcc(nc:&!NativeCompiler,p:i64,target:i64) with Mut,Panic,Div {
+ nc_patch_u32_le(nc,p,target-p-4)
+}
+fn storage_emit_zero_ret(nc:&!NativeCompiler) with Mut,Panic,Div {
+ nc_emit_byte(nc,0x31);nc_emit_byte(nc,0xc0);nc_emit_byte(nc,0xc3)
+}
+fn storage_emit_aligned_barrier(nc:&!NativeCompiler,value:i64,owner:i64) with Mut,Panic,Div {
+ nc_emit_byte(nc,0x48);nc_emit_byte(nc,0x83);nc_emit_byte(nc,0xec);nc_emit_byte(nc,8)
+ rgn_emit_builtin_barrier(nc,value,owner)
+ nc_emit_byte(nc,0x48);nc_emit_byte(nc,0x83);nc_emit_byte(nc,0xc4);nc_emit_byte(nc,8)
+}
+fn emit_builtin_storage_into(nc:&!NativeCompiler,op:i64) with Mut,Panic,Div {
+ if op==99 {
+  (*nc).ir_validation_failed=true
+  nc_emit_byte(nc,0x0f);nc_emit_byte(nc,0x0b)
+  return
+ }
+ if op==17 || op==18 {storage_emit_zero_ret(nc);return}
+ if op==19 {
+  // Unit has no bytes, but an invalid negative range remains an error.
+  nc_emit_byte(nc,0x48);nc_emit_byte(nc,0x85);nc_emit_byte(nc,0xc9)
+  let bad=storage_emit_jcc(nc,0x88)
+  storage_emit_zero_ret(nc)
+  storage_patch_jcc(nc,bad,(*nc).code.len)
+  nc_emit_exit_code(nc,1)
+  return
+ }
+ if op==4 || op==5 || op==20 || op==21 {
+  // Borrowing roots the owner. It never reads a T value at the address.
+  nc_emit_byte(nc,0x45);nc_emit_byte(nc,0x31);nc_emit_byte(nc,0xc0)
+  storage_emit_aligned_barrier(nc,7,8)
+  rgn_emit_mov(nc,0,6)
+  nc_emit_byte(nc,0xc3)
+  return
+ }
+ if op==1 || op==2 {
+  nc_emit_byte(nc,0x48);nc_emit_byte(nc,0x85);nc_emit_byte(nc,0xf6)
+  let null_bad=storage_emit_jcc(nc,0x84)
+  nc_emit_byte(nc,0x48);nc_emit_byte(nc,0xf7);nc_emit_byte(nc,0xc6);nc_emit_u32_le(nc,7)
+  let align_bad=storage_emit_jcc(nc,0x85)
+  if op==1 {
+   storage_emit_aligned_barrier(nc,2,7)
+   nc_emit_byte(nc,0x48);nc_emit_byte(nc,0x89);nc_emit_byte(nc,0x16)
+   storage_emit_zero_ret(nc)
+  } else {
+   nc_emit_byte(nc,0x48);nc_emit_byte(nc,0x8b);nc_emit_byte(nc,0x16)
+   nc_emit_byte(nc,0x45);nc_emit_byte(nc,0x31);nc_emit_byte(nc,0xc0)
+   storage_emit_aligned_barrier(nc,2,8)
+   nc_emit_byte(nc,0x48);nc_emit_byte(nc,0xc7);nc_emit_byte(nc,0x06);nc_emit_u32_le(nc,0)
+   rgn_emit_mov(nc,0,2);nc_emit_byte(nc,0xc3)
+  }
+  let fail=(*nc).code.len
+  storage_patch_jcc(nc,null_bad,fail);storage_patch_jcc(nc,align_bad,fail)
+  nc_emit_exit_code(nc,1)
+  return
+ }
+ if op==3 {
+  // Negative count, overflow, null and unaligned endpoints fail before writes.
+  nc_emit_byte(nc,0x48);nc_emit_byte(nc,0x85);nc_emit_byte(nc,0xc9)
+  let negative=storage_emit_jcc(nc,0x88)
+  let empty=storage_emit_jcc(nc,0x84)
+  nc_emit_byte(nc,0x48);nc_emit_byte(nc,0x85);nc_emit_byte(nc,0xf6)
+  let null_dst=storage_emit_jcc(nc,0x84)
+  nc_emit_byte(nc,0x48);nc_emit_byte(nc,0x85);nc_emit_byte(nc,0xd2)
+  let null_src=storage_emit_jcc(nc,0x84)
+  rgn_emit_mov(nc,0,6)
+  nc_emit_byte(nc,0x48);nc_emit_byte(nc,0x09);nc_emit_byte(nc,0xd0)
+  nc_emit_byte(nc,0x48);nc_emit_byte(nc,0xa9);nc_emit_u32_le(nc,7)
+  let unaligned=storage_emit_jcc(nc,0x85)
+  rgn_emit_mov(nc,0,1)
+  nc_emit_byte(nc,0x48);nc_emit_byte(nc,0xc1);nc_emit_byte(nc,0xe8);nc_emit_byte(nc,61)
+  nc_emit_byte(nc,0x48);nc_emit_byte(nc,0x85);nc_emit_byte(nc,0xc0)
+  let multiply=storage_emit_jcc(nc,0x85)
+  rgn_emit_mov(nc,9,1)
+  nc_emit_byte(nc,0x49);nc_emit_byte(nc,0xc1);nc_emit_byte(nc,0xe1);nc_emit_byte(nc,3)
+  rgn_emit_mov(nc,0,6)
+  nc_emit_byte(nc,0x4c);nc_emit_byte(nc,0x01);nc_emit_byte(nc,0xc8)
+  let dst_wrap=storage_emit_jcc(nc,0x82)
+  rgn_emit_mov(nc,0,2)
+  nc_emit_byte(nc,0x4c);nc_emit_byte(nc,0x01);nc_emit_byte(nc,0xc8)
+  let src_wrap=storage_emit_jcc(nc,0x82)
+  nc_emit_byte(nc,0x48);nc_emit_byte(nc,0x39);nc_emit_byte(nc,0xd6)
+  let same=storage_emit_jcc(nc,0x84)
+  let forward=storage_emit_jcc(nc,0x82)
+  // Destination is above source: move backwards for overlap safety.
+  nc_emit_byte(nc,0x4c);nc_emit_byte(nc,0x01);nc_emit_byte(nc,0xce)
+  nc_emit_byte(nc,0x4c);nc_emit_byte(nc,0x01);nc_emit_byte(nc,0xca)
+  let back_loop=(*nc).code.len
+  nc_emit_byte(nc,0x48);nc_emit_byte(nc,0x83);nc_emit_byte(nc,0xee);nc_emit_byte(nc,8)
+  nc_emit_byte(nc,0x48);nc_emit_byte(nc,0x83);nc_emit_byte(nc,0xea);nc_emit_byte(nc,8)
+  nc_emit_byte(nc,0x4c);nc_emit_byte(nc,0x8b);nc_emit_byte(nc,0x02)
+  storage_emit_aligned_barrier(nc,8,7)
+  nc_emit_byte(nc,0x4c);nc_emit_byte(nc,0x89);nc_emit_byte(nc,0x06)
+  nc_emit_byte(nc,0x48);nc_emit_byte(nc,0xc7);nc_emit_byte(nc,0x02);nc_emit_u32_le(nc,0)
+  nc_emit_byte(nc,0x48);nc_emit_byte(nc,0xff);nc_emit_byte(nc,0xc9)
+  let back=storage_emit_jcc(nc,0x85)
+  storage_patch_jcc(nc,back,back_loop)
+  storage_emit_zero_ret(nc)
+  storage_patch_jcc(nc,forward,(*nc).code.len)
+  let front_loop=(*nc).code.len
+  nc_emit_byte(nc,0x4c);nc_emit_byte(nc,0x8b);nc_emit_byte(nc,0x02)
+  storage_emit_aligned_barrier(nc,8,7)
+  nc_emit_byte(nc,0x4c);nc_emit_byte(nc,0x89);nc_emit_byte(nc,0x06)
+  nc_emit_byte(nc,0x48);nc_emit_byte(nc,0xc7);nc_emit_byte(nc,0x02);nc_emit_u32_le(nc,0)
+  nc_emit_byte(nc,0x48);nc_emit_byte(nc,0x83);nc_emit_byte(nc,0xc6);nc_emit_byte(nc,8)
+  nc_emit_byte(nc,0x48);nc_emit_byte(nc,0x83);nc_emit_byte(nc,0xc2);nc_emit_byte(nc,8)
+  nc_emit_byte(nc,0x48);nc_emit_byte(nc,0xff);nc_emit_byte(nc,0xc9)
+  let front=storage_emit_jcc(nc,0x85)
+  storage_patch_jcc(nc,front,front_loop)
+  let done=(*nc).code.len
+  storage_patch_jcc(nc,empty,done);storage_patch_jcc(nc,same,done)
+  storage_emit_zero_ret(nc)
+  let bad=(*nc).code.len
+  storage_patch_jcc(nc,negative,bad);storage_patch_jcc(nc,null_dst,bad)
+  storage_patch_jcc(nc,null_src,bad);storage_patch_jcc(nc,unaligned,bad)
+  storage_patch_jcc(nc,multiply,bad);storage_patch_jcc(nc,dst_wrap,bad);storage_patch_jcc(nc,src_wrap,bad)
+  nc_emit_exit_code(nc,1)
+  return
+ }
+ (*nc).ir_validation_failed=true
+ nc_emit_byte(nc,0x0f);nc_emit_byte(nc,0x0b)
 }

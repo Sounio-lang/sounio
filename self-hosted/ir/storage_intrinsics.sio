@@ -2,7 +2,7 @@
 // Layout knowledge and semantic move admission are deliberately separate.
 module ir::storage_intrinsics
 use parser::ast::{Name,TypeExpr,TypeExprKind,make_name}
-use ir::ir::{StructLayoutTable,EnumVariantTable,EnumVariantEntry,IrInstr,IrRegList,ir_call,ir_path_last_name,ir_name_eq,IR_FLOAT_REG_MARKER_FLAG}
+use ir::ir::{IrModule,IR_MAX_FUNCS,ir_fn_name_eq_at,ir_fn_get,ir_empty_function,ir_module_fn_set,ir_module_fn_storage_status,StructLayoutTable,EnumVariantTable,EnumVariantEntry,IrInstr,IrRegList,ir_call,ir_path_last_name,ir_name_eq,IR_FLOAT_REG_MARKER_FLAG}
 
 pub let STORAGE_CELL_ABI_VERSION:i64=1
 pub let STORAGE_LAYOUT_UNKNOWN:i64=1
@@ -318,4 +318,33 @@ pub fn storage_ir_call(base_op:i64,dst:i64,args:&StorageIntrinsicOperands,d:&Sto
  var instr=ir_call(dst,0-1,storage_intrinsic_symbol(op),registers,storage_intrinsic_arity(op))
  if base_op==STORAGE_OP_OUT && d.kind==STORAGE_KIND_FLOAT {instr.imm_flags=IR_FLOAT_REG_MARKER_FLAG}
  instr
+}
+
+ // Register a protected native stub only after concrete-type admission.
+ // Shared stubs transport cell bits; float result metadata belongs to each call.
+pub fn storage_register_intrinsic(module:&!IrModule,op:i64)->i64 with Mut,Div,Panic,Alloc {
+ let arity=storage_intrinsic_arity(op)
+ if arity==0 {return 0-1}
+ let name=storage_intrinsic_symbol(op)
+ var i:i64=0
+ while i<(*module).fn_count {
+  if ir_fn_name_eq_at(&(*module),i,&name) {
+   let f=ir_fn_get(&(*module),i)
+   if f.param_count!=arity || f.instr_count!=0 {return 0-1}
+   return i
+  }
+  i=i+1
+ }
+ let id=(*module).fn_count
+ if id<0 || id>=IR_MAX_FUNCS {return 0-1}
+ var f=ir_empty_function()
+ f.name=name
+ f.param_count=arity
+ f.reg_count=arity
+ i=0
+ while i<arity {f.param_regs[i as usize]=i;i=i+1}
+ ir_module_fn_set(module,id,f)
+ if ir_module_fn_storage_status(&(*module))!=0 {return 0-1}
+ (*module).fn_count=id+1
+ id
 }
