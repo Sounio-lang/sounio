@@ -1,0 +1,142 @@
+use compiler::module_parse::{load_module_file}
+use parser::parser::{parser_last_error_count}
+use parser::ast::*
+use compiler::private_fn_identity::{pfi_use_map_reset,pfi_use_map_module_begin,pfi_use_map_note}
+use check::specializer::{specialize_generics,spec_report_any_specializer_failure,spec_mono_marker_count,specialize_generics_multi,spec_append_item_lists}
+fn method_count(items:Option<Box<ItemList>>,target:Name)->i64 with Mut,Panic,Div {
+ var out:i64=0
+ var cursor=items
+ while true {match cursor {Some(node)=>{
+  let it=(*node).head
+  if it.kind==ItemKind::ItemImpl {match it.impl_def {Some(id)=>{
+   let target_name=Name {buf:(*id).target_type.path.segments.head_buf,len:(*id).target_type.path.segments.head_len}
+   if name_eq(target_name,target) {
+    var methods=(*id).methods
+    while true {match methods {Some(m)=>{out=out+1;methods=(*m).tail},None=>break}}
+   }
+  },None=>{}}}
+  cursor=(*node).tail
+ },None=>break}}
+ out
+}
+fn run_case(path:string,refused:bool,pruned:bool)->i64 with IO,Alloc,Mut,Panic,Div {
+ let prog=load_module_file(path)
+ if parser_last_error_count()!=0 {print("PARSE_FAILED ");println(path);return 1}
+ let out=specialize_generics(prog.items)
+ let failed=spec_report_any_specializer_failure()
+ let markers=spec_mono_marker_count()
+ print("CASE ");print(path);print(" failed=");print(if failed {1}else{0});print(" markers=");println(markers)
+ if failed!=refused {return 1}
+ if !refused && pruned {
+  if markers<=0 {return 1}
+  if method_count(out,make_name("Ghost"))!=0 {return 1}
+  if method_count(out,make_name("Word"))!=1 {return 1}
+  if method_count(out,make_name("FloatWord"))!=1 {return 1}
+ }
+ if !pruned && !refused && str_eq(path,"fixtures/plain.sio") && markers!=0 {return 1}
+ 0
+}
+
+fn stamp(items:Option<Box<ItemList>>,owner:i64)->Option<Box<ItemList>> with Mut,Alloc {
+ match items {Some(node)=>{
+  var it=(*node).head
+  it.origin_module_id=owner
+  Some(Box::new(ItemList {head:it,tail:stamp((*node).tail,owner)}))
+ },None=>None}
+}
+fn empty_program()->Program {Program {module_path:empty_path(),items:None}}
+fn load_stamped(path:string,owner:i64)->Program with IO,Alloc,Mut,Panic,Div {
+ var prog=load_module_file(path)
+ assert(parser_last_error_count()==0)
+ prog.items=stamp(prog.items,owner)
+ prog
+}
+fn owner_methods(items:Option<Box<ItemList>>,owner:i64)->i64 with Mut,Panic,Div {
+ var count:i64=0
+ var cursor=items
+ while true {match cursor {Some(node)=>{
+  let it=(*node).head
+  if it.kind==ItemKind::ItemImpl && it.origin_module_id==owner {match it.impl_def {Some(id)=>{
+   var methods=(*id).methods
+   while true {match methods {Some(m)=>{count=count+1;methods=(*m).tail},None=>break}}
+  },None=>{}}}
+  cursor=(*node).tail
+ },None=>break}}
+ count
+}
+fn run_multi(path:string,mode:i64,refused:bool,private_edge:bool)->i64 with IO,Alloc,Mut,Panic,Div {
+ var programs:[Program;256]=[empty_program();256]
+ programs[0]=load_stamped(path,0)
+ programs[1]=load_stamped("fixtures/multi_alpha.sio",1)
+ programs[2]=load_stamped("fixtures/multi_beta.sio",2)
+ programs[3]=if private_edge {load_stamped("fixtures/multi_private.sio",3)}else{load_stamped("fixtures/multi_facade.sio",3)}
+ pfi_use_map_reset()
+ pfi_use_map_module_begin(0)
+ if mode==0 {pfi_use_map_note(0,1,false)}
+ if mode==1 {pfi_use_map_note(0,2,false)}
+ if mode==2 || mode==3 {pfi_use_map_note(0,2,false);pfi_use_map_note(0,1,false)}
+ if mode==4 {pfi_use_map_note(0,3,false)}
+ pfi_use_map_module_begin(1)
+ pfi_use_map_module_begin(2)
+ pfi_use_map_module_begin(3)
+ pfi_use_map_note(3,1,false)
+ var merged:Option<Box<ItemList>> =None
+ var i:i64=0
+ while i<4 {merged=spec_append_item_lists(merged,programs[i as usize].items);i=i+1}
+ let out=specialize_generics_multi(merged,&!programs,4)
+ let failed=spec_report_any_specializer_failure()
+ print("MULTI ");print(path);print(" private=");print(if private_edge {1}else{0});print(" failed=");println(if failed {1}else{0})
+ if failed!=refused {return 1}
+ if !refused {
+  if owner_methods(out,1)!=1 || owner_methods(out,2)!=0 {return 1}
+  if spec_mono_marker_count()<=0 {return 1}
+ }
+ 0
+}
+fn run_original_heap()->i64 with IO,Alloc,Mut,Panic,Div {
+ var programs:[Program;256]=[empty_program();256]
+ programs[0]=load_stamped("fixtures/original_heap_methods.sio",0)
+ programs[1]=load_stamped("fixtures/original_heap_module.sio",1)
+ pfi_use_map_reset()
+ pfi_use_map_module_begin(0)
+ pfi_use_map_note(0,1,false)
+ pfi_use_map_module_begin(1)
+ let merged=spec_append_item_lists(programs[0].items,programs[1].items)
+ let out=specialize_generics_multi(merged,&!programs,2)
+ let failed=spec_report_any_specializer_failure()
+ print("ORIGINAL_HEAP failed=");println(if failed {1}else{0})
+ if failed {return 1}
+ if method_count(out,make_name("HeapVec"))!=0 {return 1}
+ if method_count(out,make_name("HeapI64Vec"))<=0 || method_count(out,make_name("HeapF64Vec"))<=0 {return 1}
+ if spec_mono_marker_count()<=0 {return 1}
+ 0
+}
+
+fn main()->i32 with IO,Alloc,Mut,Panic,Div {
+ var failures:i64=0
+ failures=failures+run_case("fixtures/constructors.sio",false,true)
+ failures=failures+run_case("fixtures/params.sio",false,true)
+ failures=failures+run_case("fixtures/aliases_fields.sio",false,true)
+ failures=failures+run_case("fixtures/shadow_refused.sio",true,false)
+ failures=failures+run_case("fixtures/pattern_refused.sio",true,false)
+ failures=failures+run_case("fixtures/unknown_refused.sio",true,false)
+ failures=failures+run_case("fixtures/free_homonym.sio",false,true)
+ failures=failures+run_case("fixtures/duplicates_unused.sio",false,true)
+ failures=failures+run_case("fixtures/generic_explicit.sio",false,false)
+ failures=failures+run_case("fixtures/generic_inferred_refused.sio",true,false)
+ failures=failures+run_case("fixtures/concrete_targs_refused.sio",true,false)
+ failures=failures+run_case("fixtures/plain.sio",false,false)
+ failures=failures+run_multi("fixtures/multi_direct.sio",0,false,false)
+ failures=failures+run_multi("fixtures/multi_foreign_refused.sio",1,true,false)
+ failures=failures+run_multi("fixtures/multi_named.sio",2,false,false)
+ failures=failures+run_multi("fixtures/multi_ambiguous_refused.sio",3,true,false)
+ failures=failures+run_multi("fixtures/multi_reexport.sio",4,false,false)
+ failures=failures+run_multi("fixtures/multi_qualified.sio",4,false,false)
+ failures=failures+run_multi("fixtures/multi_reexport.sio",4,true,true)
+ failures=failures+run_original_heap()
+ failures=failures+run_case("fixtures/constructor_aliases.sio",false,true)
+ failures=failures+run_case("fixtures/constructor_ambiguous_refused.sio",true,false)
+ if failures!=0 {print("FAILURES ");println(failures);return 1}
+ println("RECEIVER_COMPONENT_OK")
+ 0
+}

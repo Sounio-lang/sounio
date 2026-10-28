@@ -54,6 +54,415 @@ use compiler::private_fn_identity::{pfi_use_target,pfi_use_named}
 // Small fixed-capacity LOCAL helper structs (never stored in globals)
 // ============================================================
 
+
+// Receiver facts are compiler-derived nominal declarations, never method-name
+// or field-shape guesses. Only scalar pointers are global (seed-safe spine).
+struct SpecReceiverDecl { owner:i64, item:Item }
+struct SpecReceiverMethod {
+ owner:i64, receiver:i64, item:Item, slot:i64, is_generic:bool, needed:bool, next:i64
+}
+struct SpecReceiverBinding { name:Name, decl:i64, next:i64 }
+var SPEC_RECEIVER_METHODS:i64=0
+var SPEC_RECEIVER_BINDINGS:i64=0
+var SPEC_PRUNED_TEMPLATES:i64=0
+
+fn spec_receiver_owner(owner:i64)->i64 with Mut {
+ if owner==0-1 && SPEC_ENUM_PROGRAM_COUNT==1 {return 0}
+ owner
+}
+fn spec_receiver_stage(owner:i64,it:Item)->i64 with Mut,Panic,Div,Alloc {
+ let p=heap_alloc(16384) as *mut SpecReceiverDecl
+ if (p as i64)<=0 {SPEC_UNSOUND_POISON=true;return 0-1}
+ (*p).owner=owner;(*p).item=it
+ p as i64
+}
+fn spec_receiver_same(a:i64,b:i64)->bool with Mut,Panic,Div {
+ if a<=0 || b<=0 {return false}
+ let x=a as *mut SpecReceiverDecl
+ let y=b as *mut SpecReceiverDecl
+ (*x).owner==(*y).owner && (*x).item.kind==(*y).item.kind &&
+ name_eq((*x).item.name,(*y).item.name) &&
+ (*x).item.span.start==(*y).item.span.start && (*x).item.span.end==(*y).item.span.end
+}
+fn spec_receiver_merge(a:i64,b:i64)->i64 with Mut,Panic,Div {
+ if a<0 || b<0 {return 0-1}
+ if b==0 {return a}
+ if a==0 || spec_receiver_same(a,b) {return b}
+ 0-1
+}
+fn spec_receiver_local(owner:i64,name:Name)->i64 with Mut,Panic,Div,Alloc {
+ var out:i64=0
+ var cursor=spec_enum_module_items(owner)
+ while true {match cursor {
+  Some(node)=>{
+   let it=(*node).head
+   if name_eq(it.name,name) && (it.kind==ItemKind::ItemStruct || it.kind==ItemKind::ItemEnum || it.kind==ItemKind::ItemTypeAlias) {
+    out=spec_receiver_merge(out,spec_receiver_stage(owner,it))
+   }
+   cursor=(*node).tail
+  },
+  None=>break,
+ }}
+ out
+}
+fn spec_receiver_export(owner:i64,name:Name,seen:*mut [bool;256])->i64 with Mut,Panic,Div,Alloc {
+ if owner<0 || owner>=SPEC_ENUM_PROGRAM_COUNT || owner>=256 {return 0-1}
+ if (*seen)[owner as usize] {return 0}
+ (*seen)[owner as usize]=true
+ let local=spec_receiver_local(owner,name)
+ if local!=0 {
+  if local<0 {return local}
+  let p=local as *mut SpecReceiverDecl
+  if (*p).item.visibility.kind==1 || (*p).item.visibility.kind==2 {return local}
+  return 0
+ }
+ var plain:i64=0
+ var named:i64=0
+ var ordinal:i64=0
+ var cursor=spec_enum_module_items(owner)
+ while true {match cursor {
+  Some(node)=>{
+   let it=(*node).head
+   if it.kind==ItemKind::ItemUse {
+    if (it.visibility.kind==1 || it.visibility.kind==2) && spec_enum_use_has_name(it,owner,ordinal,name) {
+     let target=pfi_use_target(owner,ordinal)
+     if target>=0 {
+      let found=spec_receiver_export(target,name,seen)
+      if it.use_glob {plain=spec_receiver_merge(plain,found)}
+      else {if found<=0 {named=0-1}else{named=spec_receiver_merge(named,found)}}
+     }
+    }
+    ordinal=ordinal+1
+   }
+   cursor=(*node).tail
+  },
+  None=>break,
+ }}
+ if named!=0 {return named}
+ plain
+}
+fn spec_receiver_seen()->*mut [bool;256] with Mut,Panic,Div,Alloc {
+ let p=heap_alloc(4096) as *mut [bool;256]
+ if (p as i64)<=0 {SPEC_UNSOUND_POISON=true;return p}
+ var i:i64=0
+ while i<256 {(*p)[i as usize]=false;i=i+1}
+ p
+}
+fn spec_receiver_qualified(owner:i64,path:AstPath,seen:*mut [bool;256])->i64 with Mut,Panic,Div,Alloc {
+ if owner<0 || owner>=SPEC_ENUM_PROGRAM_COUNT || owner>=256 {return 0-1}
+ if (*seen)[owner as usize] {return 0}
+ (*seen)[owner as usize]=true
+ let name=spec_string_list_last_name(path.segments)
+ var out:i64=0
+ var ordinal:i64=0
+ var cursor=spec_enum_module_items(owner)
+ while true {match cursor {
+  Some(node)=>{
+   let it=(*node).head
+   if it.kind==ItemKind::ItemUse {
+    if (it.visibility.kind==1 || it.visibility.kind==2) && spec_enum_use_has_name(it,owner,ordinal,name) {
+     let target=pfi_use_target(owner,ordinal)
+     if target>=0 {
+      if spec_enum_use_qualifier_matches(it,owner,ordinal,path) {
+       let fresh=spec_receiver_seen()
+       if (fresh as i64)<=0 {return 0-1}
+       out=spec_receiver_merge(out,spec_receiver_export(target,name,fresh))
+      }
+      out=spec_receiver_merge(out,spec_receiver_qualified(target,path,seen))
+     }
+    }
+    ordinal=ordinal+1
+   }
+   cursor=(*node).tail
+  },
+  None=>break,
+ }}
+ out
+}
+fn spec_receiver_lookup(owner_raw:i64,path:AstPath)->i64 with Mut,Panic,Div,Alloc {
+ let owner=spec_receiver_owner(owner_raw)
+ if owner<0 || owner>=SPEC_ENUM_PROGRAM_COUNT || path.seg_count<1 {return 0}
+ let name=spec_string_list_last_name(path.segments)
+ if path.seg_count==1 {
+  let local=spec_receiver_local(owner,name)
+  if local!=0 {return local}
+ }
+ var plain:i64=0
+ var named:i64=0
+ var ordinal:i64=0
+ var cursor=spec_enum_module_items(owner)
+ while true {match cursor {
+  Some(node)=>{
+   let it=(*node).head
+   if it.kind==ItemKind::ItemUse {
+    let matches=if path.seg_count==1 {spec_enum_use_has_name(it,owner,ordinal,name)}
+                else {spec_enum_use_qualifier_matches(it,owner,ordinal,path)}
+    if matches {
+     let target=pfi_use_target(owner,ordinal)
+     if target>=0 {
+      let seen=spec_receiver_seen()
+      if (seen as i64)<=0 {return 0}
+      let found=spec_receiver_export(target,name,seen)
+      if it.use_glob || path.seg_count>1 {plain=spec_receiver_merge(plain,found)}
+      else {if found<=0 {named=0-1}else{named=spec_receiver_merge(named,found)}}
+     }
+    }
+    ordinal=ordinal+1
+   }
+   cursor=(*node).tail
+  },
+  None=>break,
+ }}
+ if named!=0 {return named}
+ if plain!=0 || path.seg_count==1 {return plain}
+ ordinal=0;cursor=spec_enum_module_items(owner)
+ var qualified:i64=0
+ while true {match cursor {
+  Some(node)=>{
+   if (*node).head.kind==ItemKind::ItemUse {
+    let target=pfi_use_target(owner,ordinal)
+    if target>=0 {
+     let seen=spec_receiver_seen()
+     if (seen as i64)<=0 {return 0}
+     qualified=spec_receiver_merge(qualified,spec_receiver_qualified(target,path,seen))
+    }
+    ordinal=ordinal+1
+   }
+   cursor=(*node).tail
+  },
+  None=>break,
+ }}
+ qualified
+}
+fn spec_receiver_generic(decl:i64)->bool with Mut,Panic,Div {
+ if decl<=0 {return true}
+ let p=decl as *mut SpecReceiverDecl
+ if (*p).item.kind==ItemKind::ItemStruct {
+  match (*p).item.struct_def {Some(sd)=>{match (*sd).type_params {Some(_)=>return true,None=>return false}},None=>return true}
+ }
+ if (*p).item.kind==ItemKind::ItemEnum {
+  match (*p).item.enum_def {Some(ed)=>{match (*ed).type_params {Some(_)=>return true,None=>return false}},None=>return true}
+ }
+ true
+}
+fn spec_receiver_type(ty:TypeExpr,owner:i64,self_decl:i64,depth:i64)->i64 with Mut,Panic,Div,Alloc {
+ if depth>64 {return 0}
+ if ty.kind==TypeExprKind::TypeReference || ty.kind==TypeExprKind::TypeRefMut {
+  match ty.inner {Some(inner)=>return spec_receiver_type(*inner,owner,self_decl,depth+1),None=>return 0}
+ }
+ if ty.kind!=TypeExprKind::TypeNamed {return 0}
+ if self_decl>0 && ty.path.seg_count==1 && name_eq(spec_path_single_name(ty.path),make_name("Self")) {return self_decl}
+ let decl=spec_receiver_lookup(owner,ty.path)
+ if decl<=0 {return 0}
+ let p=decl as *mut SpecReceiverDecl
+ if (*p).item.kind==ItemKind::ItemTypeAlias {
+  match ty.type_args {Some(_)=>return 0,None=>{}}
+  match (*p).item.type_alias_ty {Some(inner)=>return spec_receiver_type(*inner,(*p).owner,self_decl,depth+1),None=>return 0}
+ }
+ if !spec_receiver_generic(decl) {match ty.type_args {Some(_)=>return 0,None=>{}}}
+ decl
+}
+fn spec_receiver_method(owner:i64,receiver:i64,it:Item,is_generic:bool,slot:i64) with Mut,Panic,Div,Alloc {
+ let p=heap_alloc(16384) as *mut SpecReceiverMethod
+ if (p as i64)<=0 {SPEC_UNSOUND_POISON=true;return}
+ (*p).owner=owner;(*p).receiver=receiver;(*p).item=it
+ (*p).is_generic=is_generic;(*p).slot=slot;(*p).needed=false
+ (*p).next=SPEC_RECEIVER_METHODS;SPEC_RECEIVER_METHODS=p as i64
+}
+fn spec_receiver_method_find(receiver:i64,name:Name)->i64 with Mut,Panic,Div {
+ if receiver<=0 {return 0}
+ var found:i64=0
+ var cursor=SPEC_RECEIVER_METHODS
+ while cursor>0 {
+  let p=cursor as *mut SpecReceiverMethod
+  if name_eq((*p).item.name,name) && spec_receiver_same(receiver,(*p).receiver) {
+   if found>0 {return 0-1}
+   found=cursor
+  }
+  cursor=(*p).next
+ }
+ found
+}
+fn spec_receiver_method_item(owner:i64,receiver:i64,it:Item)->i64 with Mut,Panic,Div {
+ var cursor=SPEC_RECEIVER_METHODS
+ while cursor>0 {
+  let p=cursor as *mut SpecReceiverMethod
+  if spec_receiver_owner((*p).owner)==spec_receiver_owner(owner) && name_eq((*p).item.name,it.name) && spec_receiver_same(receiver,(*p).receiver) &&
+     (*p).item.span.start==it.span.start && (*p).item.span.end==it.span.end {return cursor}
+  cursor=(*p).next
+ }
+ 0
+}
+fn spec_receiver_generic_count(name:Name)->i64 with Mut,Panic,Div {
+ var count:i64=0
+ var cursor=SPEC_RECEIVER_METHODS
+ while cursor>0 {
+  let p=cursor as *mut SpecReceiverMethod
+  if (*p).is_generic && name_eq((*p).item.name,name) {count=count+1}
+  cursor=(*p).next
+ }
+ count
+}
+fn spec_receiver_need_name(name:Name) with Mut,Panic,Div {
+ var cursor=SPEC_RECEIVER_METHODS
+ while cursor>0 {
+  let p=cursor as *mut SpecReceiverMethod
+  if (*p).is_generic && name_eq((*p).item.name,name) {(*p).needed=true}
+  cursor=(*p).next
+ }
+}
+fn spec_receiver_binding(name:Name)->i64 with Mut,Panic,Div {
+ var cursor=SPEC_RECEIVER_BINDINGS
+ while cursor>0 {
+  let p=cursor as *mut SpecReceiverBinding
+  if name_eq((*p).name,name) {return cursor}
+  cursor=(*p).next
+ }
+ 0
+}
+fn spec_receiver_bind(name:Name,decl:i64) with Mut,Panic,Div,Alloc {
+ let p=heap_alloc(4096) as *mut SpecReceiverBinding
+ if (p as i64)<=0 {SPEC_UNSOUND_POISON=true;return}
+ (*p).name=name;(*p).decl=decl;(*p).next=SPEC_RECEIVER_BINDINGS
+ SPEC_RECEIVER_BINDINGS=p as i64
+}
+fn spec_receiver_expr_opt(opt:Option<Box<Expr>>,depth:i64)->i64 with Mut,Panic,Div,Alloc {
+ match opt {Some(e)=>spec_receiver_expr(*e,depth+1),None=>0}
+}
+fn spec_receiver_free_result(name:Name,depth:i64)->i64 with Mut,Panic,Div,Alloc {
+ if depth>64 || spec_receiver_binding(name)>0 {return 0}
+ // A constructor name can have multiple declarations (legacy public aliases).
+ // Infer only the meet of ALL possible declared return types. We never choose
+ // a callable by name here; the ordinary checker still resolves the call.
+ var found:i64=0
+ var module:i64=0
+ while module<SPEC_ENUM_PROGRAM_COUNT {
+  var cursor=spec_enum_module_items(module)
+  while true {match cursor {
+   Some(node)=>{
+    let it=(*node).head
+    if it.kind==ItemKind::ItemFn && name_eq(it.name,name) {
+     var candidate:i64=0
+     match it.fn_def {
+      Some(fd)=>{match (*fd).return_type {
+       Some(ty)=>candidate=spec_receiver_type(*ty,module,0,depth+1)
+       None=>{}
+      }}
+      None=>{}
+     }
+     if candidate<=0 {return 0}
+     found=spec_receiver_merge(found,candidate)
+     if found<0 {return 0}
+    }
+    cursor=(*node).tail
+   }
+   None=>break
+  }}
+  module=module+1
+ }
+ found
+}
+fn spec_receiver_method_result(method:i64,depth:i64)->i64 with Mut,Panic,Div,Alloc {
+ if method<=0 || depth>64 {return 0}
+ let p=method as *mut SpecReceiverMethod
+ match (*p).item.fn_def {
+  Some(fd)=>{match (*fd).return_type {Some(ty)=>return spec_receiver_type(*ty,(*p).owner,(*p).receiver,depth+1),None=>{}}},
+  None=>{},
+ }
+ 0
+}
+fn spec_receiver_block_result(block:Block,depth:i64)->i64 with Mut,Panic,Div,Alloc {
+ if depth>64 {return 0}
+ match block.stmts {Some(node)=>{
+  match (*node).tail {Some(_)=>return 0,None=>{}}
+  if (*node).head.kind==StmtKind::StmtExpr {return spec_receiver_expr_opt((*node).head.expr,depth+1)}
+ },None=>{}}
+ 0
+}
+fn spec_receiver_expr(e:Expr,depth:i64)->i64 with Mut,Panic,Div,Alloc {
+ if depth>64 {return 0}
+ if e.kind==ExprKind::ExprIdent {
+  let binding=spec_receiver_binding(e.name)
+  if binding>0 {return (*(binding as *mut SpecReceiverBinding)).decl}
+  return 0
+ }
+ if e.kind==ExprKind::ExprStructLit {
+  var ty=dummy_type_expr()
+  ty.kind=TypeExprKind::TypeNamed;ty.path=e.path;ty.type_args=e.type_args
+  return spec_receiver_type(ty,SPEC_CURRENT_MODULE_ID,0,depth+1)
+ }
+ if e.kind==ExprKind::ExprUnary && (e.un_op==UnaryOp::OpRef || e.un_op==UnaryOp::OpRefMut || e.un_op==UnaryOp::OpDeref) {return spec_receiver_expr_opt(e.left,depth+1)}
+ if e.kind==ExprKind::ExprCast {match e.cast_type {Some(ty)=>return spec_receiver_type(*ty,SPEC_CURRENT_MODULE_ID,0,depth+1),None=>return 0}}
+ if e.kind==ExprKind::ExprCall {
+  match e.left {Some(callee)=>{
+   let c=*callee
+   if c.kind==ExprKind::ExprIdent {return spec_receiver_free_result(c.name,depth+1)}
+   if c.kind==ExprKind::ExprPath {
+    if c.path.seg_count>1 {
+     let prefix=spec_enum_path_prefix(c.path,c.path.seg_count-1)
+     let receiver=spec_receiver_lookup(SPEC_CURRENT_MODULE_ID,prefix)
+     if receiver>0 {
+      let method=spec_receiver_method_find(receiver,spec_string_list_last_name(c.path.segments))
+      if method>0 {return spec_receiver_method_result(method,depth+1)}
+     }
+    }
+    return spec_receiver_free_result(spec_string_list_last_name(c.path.segments),depth+1)
+   }
+  },None=>{}}
+ }
+ if e.kind==ExprKind::ExprMethodCall {
+  let receiver=spec_receiver_expr_opt(e.left,depth+1)
+  return spec_receiver_method_result(spec_receiver_method_find(receiver,e.name),depth+1)
+ }
+ if e.kind==ExprKind::ExprFieldAccess {
+  let receiver=spec_receiver_expr_opt(e.left,depth+1)
+  if receiver<=0 || spec_receiver_generic(receiver) {return 0}
+  let p=receiver as *mut SpecReceiverDecl
+  match (*p).item.struct_def {Some(sd)=>{
+   var cursor=(*sd).fields
+   while true {match cursor {Some(node)=>{
+    if name_eq((*node).head.name,e.name) {return spec_receiver_type((*node).head.ty,(*p).owner,receiver,depth+1)}
+    cursor=(*node).tail
+   },None=>break}}
+  },None=>{}}
+ }
+ if e.kind==ExprKind::ExprBlock {match e.block {Some(b)=>return spec_receiver_block_result(*b,depth+1),None=>return 0}}
+ if e.kind==ExprKind::ExprIf {
+  var yes:i64=0
+  match e.block {Some(b)=>{yes=spec_receiver_block_result(*b,depth+1)},None=>{}}
+  let no=spec_receiver_expr_opt(e.else_expr,depth+1)
+  if spec_receiver_same(yes,no) {return yes}
+ }
+ 0
+}
+fn spec_receiver_bind_pattern(pattern:Pattern) with Mut,Panic,Div,Alloc {
+ if pattern.kind==PatternKind::PatBinding {spec_receiver_bind(pattern.name,0)}
+ var sub=pattern.sub_patterns
+ while true {match sub {Some(node)=>{spec_receiver_bind_pattern((*node).head);sub=(*node).tail},None=>break}}
+ var fields=pattern.pat_fields
+ while true {match fields {Some(node)=>{spec_receiver_bind_pattern((*node).head.pattern);fields=(*node).tail},None=>break}}
+}
+fn spec_receiver_scan_function(fd:FnDef,self_decl:i64) with IO,Mut,Panic,Div,Alloc {
+ let saved=SPEC_RECEIVER_BINDINGS
+ SPEC_RECEIVER_BINDINGS=0
+ var params=fd.params
+ while true {match params {Some(node)=>{
+  spec_receiver_bind((*node).head.name,spec_receiver_type((*node).head.ty,SPEC_CURRENT_MODULE_ID,self_decl,0))
+  params=(*node).tail
+ },None=>break}}
+ spec_scan_block(fd.body)
+ SPEC_RECEIVER_BINDINGS=saved
+}
+fn spec_receiver_method_for_slot(slot:i64)->i64 with Mut,Panic,Div {
+ var cursor=SPEC_RECEIVER_METHODS
+ while cursor>0 {
+  let p=cursor as *mut SpecReceiverMethod
+  if (*p).is_generic && (*p).slot==slot {return (*p).receiver}
+  cursor=(*p).next
+ }
+ 0
+}
+
 struct SpecKnownNames { names: [Name; 32], count: i64 }
 struct SpecNameBuf { names: [Name; 4], count: i64 }
 
@@ -179,6 +588,9 @@ var SPEC_EMITTED_COUNT: i64 = 0
 var SPEC_EXTRA_HEAD: i64 = 0
 
 fn spec_reset_state() with Mut {
+    SPEC_RECEIVER_METHODS = 0
+    SPEC_RECEIVER_BINDINGS = 0
+    SPEC_PRUNED_TEMPLATES = 0
     SPEC_FN_INST_COUNT = 0
     SPEC_FN_MULTI = false
     SPEC_SOURCE_ITEMS = 0
@@ -1186,66 +1598,68 @@ fn spec_collect_generic_fns(items: Option<Box<ItemList>>, known: SpecKnownNames)
     }
 }
 
-fn spec_collect_generic_method_items(methods: Option<Box<ItemList>>, known: SpecKnownNames) with IO, Mut, Panic, Div, Alloc {
+fn spec_collect_generic_method_items(methods: Option<Box<ItemList>>, known: SpecKnownNames, owner:i64, receiver:i64) with IO, Mut, Panic, Div, Alloc {
     match methods {
         None => {}
         Some(list) => {
-            let it = (*list).head
-            if it.kind == ItemKind::ItemFn {
+            let it=(*list).head
+            if it.kind==ItemKind::ItemFn {
                 match it.fn_def {
                     Some(fd_box) => {
-                        let tp = spec_collect_free_vars_from_fndef((*fd_box), known)
-                        if tp.count > 0 {
-                            if spec_generic_table_find(it.name) >= 0 {
-                                // Receiver types are unavailable to this AST-only
-                                // pass. Two same-named generic methods cannot be
-                                // selected safely from ExprMethodCall alone.
-                                SPEC_METHOD_TARG_UNSUPPORTED = true
-                            } else if SPEC_GF_COUNT >= 256 {
-                                spec_mark_cap_overflow(2)
-                            } else {
-                                let slot = SPEC_GF_COUNT
-                                let p = heap_alloc(4096) as *mut SpecGfNode
-                                (*p).name_hash = ast_name_hash(it.name)
-                                (*p).tp_count = tp.count
-                                (*p).tp_h0 = spec_tp_hash_at(tp, 0)
-                                (*p).tp_h1 = spec_tp_hash_at(tp, 1)
-                                (*p).tp_h2 = spec_tp_hash_at(tp, 2)
-                                (*p).tp_h3 = spec_tp_hash_at(tp, 3)
+                        let tp=spec_collect_free_vars_from_fndef(*fd_box,known)
+                        var slot:i64=0-1
+                        if tp.count>0 && spec_generic_table_find(it.name)<0 {
+                            if SPEC_GF_COUNT>=256 {spec_mark_cap_overflow(2)}
+                            else {
+                                slot=SPEC_GF_COUNT
+                                let p=heap_alloc(4096) as *mut SpecGfNode
+                                (*p).name_hash=ast_name_hash(it.name)
+                                (*p).tp_count=tp.count
+                                (*p).tp_h0=spec_tp_hash_at(tp,0)
+                                (*p).tp_h1=spec_tp_hash_at(tp,1)
+                                (*p).tp_h2=spec_tp_hash_at(tp,2)
+                                (*p).tp_h3=spec_tp_hash_at(tp,3)
                                 (*p).tp_n0=tp.names[0]
                                 (*p).tp_n1=tp.names[1]
                                 (*p).tp_n2=tp.names[2]
                                 (*p).tp_n3=tp.names[3]
-                                (*p).fd = it.fn_def
-                                (*p).visibility = it.visibility
-                                (*p).owner=it.origin_module_id
-                                SPEC_GF_PTRS[slot as usize] = p as i64
-                                SPEC_GF_IS_METHOD[slot as usize] = true
-                                SPEC_GF_NEEDED[slot as usize] = false
-                                SPEC_GF_COUNT = SPEC_GF_COUNT + 1
+                                (*p).fd=it.fn_def
+                                (*p).visibility=it.visibility
+                                (*p).owner=owner
+                                SPEC_GF_PTRS[slot as usize]=p as i64
+                                SPEC_GF_IS_METHOD[slot as usize]=true
+                                SPEC_GF_NEEDED[slot as usize]=false
+                                SPEC_GF_COUNT=SPEC_GF_COUNT+1
                             }
                         }
+                        // Same-named templates are recorded independently.
+                        // Only an actual unresolved/ambiguous use is rejected.
+                        spec_receiver_method(owner,receiver,it,tp.count>0,slot)
                     }
-                    None => {}
+                    None=>{}
                 }
             }
-            spec_collect_generic_method_items((*list).tail, known)
+            spec_collect_generic_method_items((*list).tail,known,owner,receiver)
         }
     }
 }
 
-fn spec_collect_generic_methods(items: Option<Box<ItemList>>, known: SpecKnownNames) with IO, Mut, Panic, Div, Alloc {
+fn spec_collect_generic_methods(items:Option<Box<ItemList>>,known:SpecKnownNames) with IO,Mut,Panic,Div,Alloc {
     match items {
-        None => {}
-        Some(list) => {
-            let it = (*list).head
-            if it.kind == ItemKind::ItemImpl {
+        None=>{}
+        Some(list)=>{
+            let it=(*list).head
+            if it.kind==ItemKind::ItemImpl {
                 match it.impl_def {
-                    Some(id) => spec_collect_generic_method_items((*id).methods, known)
-                    None => {}
+                    Some(id)=>{
+                        let owner=spec_receiver_owner(it.origin_module_id)
+                        let receiver=spec_receiver_type((*id).target_type,owner,0,0)
+                        spec_collect_generic_method_items((*id).methods,known,owner,receiver)
+                    }
+                    None=>{}
                 }
             }
-            spec_collect_generic_methods((*list).tail, known)
+            spec_collect_generic_methods((*list).tail,known)
         }
     }
 }
@@ -2052,7 +2466,7 @@ fn spec_ensure_instance(base_name: Name, targs: Option<Box<TypeExprList>>) with 
             // duration of this one scan, then restore the caller's context
             // so the OUTER scan continues under its own correct module.
             SPEC_CURRENT_MODULE_ID = spec_generic_table_owner(gt_idx)
-            spec_scan_block((*fp).fd.body)
+            spec_receiver_scan_function((*fp).fd,spec_receiver_method_for_slot(gt_idx))
             SPEC_CURRENT_MODULE_ID = caller_module_id
             let np = heap_alloc(16384) as *mut SpecItemNode
             (*np).it = spec_make_fn_item((*fp).fd.name, (*fp).fd, spec_generic_table_visibility(gt_idx))
@@ -2268,13 +2682,26 @@ fn spec_scan_expr_opt(opt: Option<Box<Expr>>) with IO, Mut, Panic, Div, Alloc {
 fn spec_scan_expr(e: Expr) with IO, Mut, Panic, Div, Alloc {
     spec_scan_expr_opt(e.left)
     spec_scan_expr_opt(e.right)
+    let saved_loop=SPEC_RECEIVER_BINDINGS
+    if e.kind==ExprKind::ExprForIn {spec_receiver_bind(e.name,0)}
     spec_scan_block_opt(e.block)
+    SPEC_RECEIVER_BINDINGS=saved_loop
     spec_scan_expr_opt(e.else_expr)
     spec_scan_expr_list_opt(e.args)
     spec_scan_match_arm_list_opt(e.arms)
     spec_scan_struct_field_list_opt(e.fields)
     spec_scan_block_opt(e.handler_block)
+    let saved_closure=SPEC_RECEIVER_BINDINGS
+    var closure_params=e.closure_params
+    while true {match closure_params {
+        Some(node)=>{
+            spec_receiver_bind((*node).head.name,spec_receiver_type((*node).head.ty,SPEC_CURRENT_MODULE_ID,0,0))
+            closure_params=(*node).tail
+        }
+        None=>break
+    }}
     spec_scan_expr_opt(e.closure_body)
+    SPEC_RECEIVER_BINDINGS=saved_closure
 
     if e.kind == ExprKind::ExprCall || e.kind == ExprKind::ExprMethodCall {
         let callee_name = if e.kind == ExprKind::ExprMethodCall {
@@ -2283,7 +2710,35 @@ fn spec_scan_expr(e: Expr) with IO, Mut, Panic, Div, Alloc {
             spec_call_expr_callee_name(e)
         }
         if !name_is_empty(callee_name) {
-            let gt_idx = spec_generic_table_find(callee_name)
+            var gt_idx = spec_generic_table_find(callee_name)
+            if e.kind==ExprKind::ExprMethodCall {
+                let receiver=spec_receiver_expr_opt(e.left,0)
+                let method=spec_receiver_method_find(receiver,callee_name)
+                if method>0 {
+                    let m=method as *mut SpecReceiverMethod
+                    if !(*m).is_generic && !spec_receiver_generic(receiver) {
+                        match spec_call_expr_type_args(e) {
+                            Some(_)=>SPEC_METHOD_TARG_UNSUPPORTED=true
+                            None=>{}
+                        }
+                        return
+                    }
+                    if (*m).is_generic && (*m).slot>=0 && spec_receiver_generic_count(callee_name)==1 {
+                        gt_idx=(*m).slot
+                    } else if gt_idx>=0 || spec_receiver_generic_count(callee_name)>0 {
+                        spec_receiver_need_name(callee_name)
+                        SPEC_METHOD_TARG_UNSUPPORTED=true
+                        return
+                    }
+                } else if gt_idx>=0 || spec_receiver_generic_count(callee_name)>0 {
+                    spec_receiver_need_name(callee_name)
+                    SPEC_METHOD_TARG_UNSUPPORTED=true
+                    return
+                }
+            } else if gt_idx>=0 {
+                // A method template is not a free function with the same name.
+                if SPEC_GF_IS_METHOD[gt_idx as usize] {gt_idx=0-1}
+            }
             if gt_idx >= 0 {
                 var specialized = false
                 match spec_call_expr_type_args(e) {
@@ -2333,13 +2788,15 @@ fn spec_scan_expr(e: Expr) with IO, Mut, Panic, Div, Alloc {
 }
 
 fn spec_scan_block(b: Block) with IO, Mut, Panic, Div, Alloc {
+    let saved=SPEC_RECEIVER_BINDINGS
     spec_scan_stmt_list_opt(b.stmts)
+    SPEC_RECEIVER_BINDINGS=saved
 }
 
 fn spec_scan_block_opt(opt: Option<Box<Block>>) with IO, Mut, Panic, Div, Alloc {
     match opt {
         None => {}
-        Some(b) => spec_scan_stmt_list_opt((*b).stmts)
+        Some(b) => spec_scan_block(*b)
     }
 }
 
@@ -2349,6 +2806,15 @@ fn spec_scan_stmt_list_opt(opt: Option<Box<StmtList>>) with IO, Mut, Panic, Div,
         Some(list) => {
             spec_scan_expr_opt((*list).head.expr)
             spec_scan_expr_opt((*list).head.target)
+            let stmt=(*list).head
+            if stmt.kind==StmtKind::StmtLet || stmt.kind==StmtKind::StmtVar {
+                var decl:i64=0
+                match stmt.ty {
+                    Some(ty)=>decl=spec_receiver_type(*ty,SPEC_CURRENT_MODULE_ID,0,0)
+                    None=>decl=spec_receiver_expr_opt(stmt.expr,0)
+                }
+                spec_receiver_bind(stmt.name,decl)
+            }
             spec_scan_stmt_list_opt((*list).tail)
         }
     }
@@ -2368,8 +2834,11 @@ fn spec_scan_match_arm_list_opt(opt: Option<Box<MatchArmList>>) with IO, Mut, Pa
     match opt {
         None => {}
         Some(list) => {
+            let saved=SPEC_RECEIVER_BINDINGS
+            spec_receiver_bind_pattern((*list).head.pattern)
             spec_scan_expr_opt((*list).head.guard)
             spec_scan_expr((*list).head.body)
+            SPEC_RECEIVER_BINDINGS=saved
             spec_scan_match_arm_list_opt((*list).tail)
         }
     }
@@ -2385,36 +2854,43 @@ fn spec_scan_struct_field_list_opt(opt: Option<Box<StructFieldList>>) with IO, M
     }
 }
 
-fn spec_scan_method_items(methods: Option<Box<ItemList>>) with IO, Mut, Panic, Div, Alloc {
+fn spec_scan_method_items(methods:Option<Box<ItemList>>,owner:i64,receiver:i64) with IO,Mut,Panic,Div,Alloc {
     match methods {
-        None => {}
-        Some(list) => {
-            let it = (*list).head
-            if it.kind == ItemKind::ItemFn && spec_generic_table_find(it.name) < 0 {
+        None=>{}
+        Some(list)=>{
+            let it=(*list).head
+            let method=spec_receiver_method_item(owner,receiver,it)
+            var generic=false
+            if method>0 {generic=(*(method as *mut SpecReceiverMethod)).is_generic}
+            if it.kind==ItemKind::ItemFn && !generic {
                 match it.fn_def {
-                    Some(fd_box) => spec_scan_block((*fd_box).body)
-                    None => {}
+                    Some(fd)=>spec_receiver_scan_function(*fd,receiver)
+                    None=>{}
                 }
             }
-            spec_scan_method_items((*list).tail)
+            spec_scan_method_items((*list).tail,owner,receiver)
         }
     }
 }
 
-fn spec_scan_items(items: Option<Box<ItemList>>) with IO, Mut, Panic, Div, Alloc {
+fn spec_scan_items(items:Option<Box<ItemList>>) with IO,Mut,Panic,Div,Alloc {
     match items {
-        None => {}
-        Some(list) => {
-            let it = (*list).head
-            if it.kind == ItemKind::ItemFn && spec_generic_table_find(it.name) < 0 {
-                match it.fn_def {
-                    Some(fd_box) => spec_scan_block((*fd_box).body)
-                    None => {}
-                }
-            } else if it.kind == ItemKind::ItemImpl {
+        None=>{}
+        Some(list)=>{
+            let it=(*list).head
+            let slot=spec_generic_table_find(it.name)
+            var generic=false
+            if slot>=0 {generic=!SPEC_GF_IS_METHOD[slot as usize]}
+            if it.kind==ItemKind::ItemFn && !generic {
+                match it.fn_def {Some(fd)=>spec_receiver_scan_function(*fd,0),None=>{}}
+            } else if it.kind==ItemKind::ItemImpl {
                 match it.impl_def {
-                    Some(id) => spec_scan_method_items((*id).methods)
-                    None => {}
+                    Some(id)=>{
+                        let owner=spec_receiver_owner(it.origin_module_id)
+                        let receiver=spec_receiver_type((*id).target_type,owner,0,0)
+                        spec_scan_method_items((*id).methods,owner,receiver)
+                    }
+                    None=>{}
                 }
             }
             spec_scan_items((*list).tail)
@@ -2541,22 +3017,30 @@ fn spec_finalize_fn_instances(slot: i64, rest: Option<Box<ItemList>>) -> Option<
 //   - multiple instances: emit all clones and rewrite each call to its symbol;
 //   - never referenced: drop it so the checker never sees a body with free
 //     type vars.
-fn spec_finalize_method_items(methods: Option<Box<ItemList>>) -> Option<Box<ItemList>> with Mut, Panic, Div, Alloc {
+fn spec_finalize_method_items(methods:Option<Box<ItemList>>,owner:i64,receiver:i64) -> Option<Box<ItemList>> with Mut,Panic,Div,Alloc {
     match methods {
-        None => None
-        Some(list) => {
-            let it = (*list).head
-            let rest = spec_finalize_method_items((*list).tail)
-            if it.kind == ItemKind::ItemFn {
-                let gt_idx = spec_generic_table_find(it.name)
-                if gt_idx >= 0 {
-                    if SPEC_GF_POISONED[gt_idx as usize] || SPEC_GF_NEEDED[gt_idx as usize] {
-                        return Some(Box::new(ItemList { head: it, tail: rest }))
+        None=>None
+        Some(list)=>{
+            let it=(*list).head
+            let rest=spec_finalize_method_items((*list).tail,owner,receiver)
+            let method=spec_receiver_method_item(owner,receiver,it)
+            if method>0 {
+                let m=method as *mut SpecReceiverMethod
+                if (*m).is_generic {
+                    let slot=(*m).slot
+                    if (*m).needed {return Some(Box::new(ItemList {head:it,tail:rest}))}
+                    if slot>=0 {
+                        if SPEC_GF_POISONED[slot as usize] || SPEC_GF_NEEDED[slot as usize] {
+                            return Some(Box::new(ItemList {head:it,tail:rest}))
+                        }
+                        if SPEC_GF_INST_COUNT[slot as usize]==0 {SPEC_PRUNED_TEMPLATES=SPEC_PRUNED_TEMPLATES+1}
+                        return spec_finalize_fn_instances(slot,rest)
                     }
-                    return spec_finalize_fn_instances(gt_idx, rest)
+                    SPEC_PRUNED_TEMPLATES=SPEC_PRUNED_TEMPLATES+1
+                    return rest
                 }
             }
-            Some(Box::new(ItemList { head: spec_finish_fn_item(it, it.name), tail: rest }))
+            Some(Box::new(ItemList {head:spec_finish_fn_item(it,it.name),tail:rest}))
         }
     }
 }
@@ -2569,10 +3053,11 @@ fn spec_finalize_items(items: Option<Box<ItemList>>) -> Option<Box<ItemList>> wi
             let rest = spec_finalize_items((*list).tail)
             if it.kind == ItemKind::ItemFn {
                 let gt_idx = spec_generic_table_find(it.name)
-                if gt_idx >= 0 {
+                if gt_idx >= 0 && !SPEC_GF_IS_METHOD[gt_idx as usize] {
                     if SPEC_GF_POISONED[gt_idx as usize] || SPEC_GF_NEEDED[gt_idx as usize] {
                         return Some(Box::new(ItemList { head: it, tail: rest }))
                     }
+                    if SPEC_GF_INST_COUNT[gt_idx as usize]==0 {SPEC_PRUNED_TEMPLATES=SPEC_PRUNED_TEMPLATES+1}
                     return spec_finalize_fn_instances(gt_idx, rest)
                 }
             } else if it.kind == ItemKind::ItemImpl {
@@ -2581,7 +3066,9 @@ fn spec_finalize_items(items: Option<Box<ItemList>>) -> Option<Box<ItemList>> wi
                         let ip = heap_alloc(16384) as *mut SpecImplDefStage
                         let tmp_id = (*id)
                         (*ip).id = tmp_id
-                        (*ip).id.methods = spec_finalize_method_items((*ip).id.methods)
+                        let owner=spec_receiver_owner(it.origin_module_id)
+                        let receiver=spec_receiver_type((*id).target_type,owner,0,0)
+                        (*ip).id.methods = spec_finalize_method_items((*ip).id.methods,owner,receiver)
                         var out_it = it
                         out_it.impl_def = Some(Box::new((*ip).id))
                         return Some(Box::new(ItemList { head: out_it, tail: rest }))
@@ -2772,11 +3259,11 @@ pub fn specialize_generics_multi(items: Option<Box<ItemList>>, programs: &! [Pro
 // too, so a real imported `struct F {..}` is never misread as a free type var).
 // It then needs two things this state exposes AFTER a specialize_generics call:
 //   1. spec_last_instantiated() — did the pass actually replace a generic fn
-//      template with a concrete clone, or emit a concrete struct instance?
-//      Only then does the driver collapse the merged+specialized list into one
-//      module. When false, the merged list differs from the inputs by at most
-//      dropped never-referenced templates, so the driver leaves the per-module
-//      programs untouched (plain multi-module code stays byte-identical).
+//      template with a concrete clone, emit a concrete struct instance, or
+//      remove an unused generic template? Every such AST change must survive
+//      the module-frontend handoff. Reusing original per-module programs after
+//      pruning would reintroduce unbound type variables into lowering.
+//      Programs with no transformation retain their original module layout.
 //   2. spec_append_item_lists() — a public wrapper over the proven internal
 //      concat, used to build the merged list without duplicating the pattern.
 
@@ -2784,13 +3271,13 @@ pub fn spec_last_instantiated() -> bool with Mut, Panic, Div {
     spec_mono_marker_count() > 0
 }
 
-// Seed-safe i64 count of monomorphization markers after specialize_generics:
-// emitted struct instances + same-name fn clones. Drivers that arm IR collapse
+// Seed-safe i64 count of AST transformations after specialize_generics:
+// emitted struct/enum instances, fn clones, and pruned templates. IR-collapse drivers
 // should prefer this over bare bool negation — CI-seed rebuilds miscompiled
 // `if !spec_last_instantiated() { return … }` so non-generic multi-mod still
 // collapsed (generic_fns=0 → ir_summary_failed on imported_deref_f64_array).
 pub fn spec_mono_marker_count() -> i64 with Mut, Panic, Div {
-    var n: i64 = SPEC_EMITTED_COUNT + SPEC_ENUM_INSTANCE_COUNT
+    var n: i64 = SPEC_EMITTED_COUNT + SPEC_ENUM_INSTANCE_COUNT + SPEC_PRUNED_TEMPLATES
     var i: i64 = 0
     while i < SPEC_GF_COUNT {
         if SPEC_GF_CLONE_PTR[i as usize] != 0 {
