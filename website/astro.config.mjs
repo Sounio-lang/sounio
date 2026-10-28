@@ -9,6 +9,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import githubDarkTheme from '@shikijs/themes/github-dark';
 import { HREFLANG, isIndexableSitemapUrl, sitemapLinks } from './src/lib/seo-locales.mjs';
+import { rehypeDemoteH1 } from './src/lib/rehype-demote-h1.mjs';
 
 // Real Shiki grammar for Sounio (`sio` code fences). Previously ```sio blocks
 // were relabeled as ```rust before highlighting (see git history of
@@ -77,6 +78,7 @@ export default defineConfig({
         theme: sounioSiteTheme,
         langs: [sounioGrammar],
       },
+      rehypePlugins: [rehypeDemoteH1],
     }),
   ],
 
@@ -86,6 +88,7 @@ export default defineConfig({
       theme: sounioSiteTheme,
       langs: [sounioGrammar],
     },
+    rehypePlugins: [rehypeDemoteH1],
   },
 
   vite: {

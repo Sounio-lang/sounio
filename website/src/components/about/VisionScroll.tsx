@@ -154,6 +154,7 @@ function AnimatedParagraph({
 
 function ActSection({ act, isReduced }: { act: ActData; isReduced: boolean }) {
   const theme = THEMES[act.id];
+  const TitleTag = act.id === 1 ? 'h1' : 'h2';
   const titleRef = useRef<HTMLHeadingElement>(null);
   const [titleVisible, setTitleVisible] = useState(isReduced);
 
@@ -219,7 +220,7 @@ function ActSection({ act, isReduced }: { act: ActData; isReduced: boolean }) {
             {act.numeral}
           </span>
 
-          <h2
+          <TitleTag
             ref={titleRef}
             className="vision-act-title"
             style={{
@@ -230,7 +231,7 @@ function ActSection({ act, isReduced }: { act: ActData; isReduced: boolean }) {
             }}
           >
             {act.title}
-          </h2>
+          </TitleTag>
 
           <p
             className="vision-act-subtitle"

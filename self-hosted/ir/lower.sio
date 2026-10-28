@@ -2640,6 +2640,11 @@ var LOWER_KERNEL_TID_REG: i64 = 0 - 1
 // #2766: the scrutinee of the match being lowered is a reference local, so a
 // struct-pattern arm reads its fields through the reference (field_get label 1).
 var LOWER_MATCH_SCRUT_IS_REF: bool = false
+// SIO-322: f64-element mask (bit k = element k is f64) of the tuple scrutinee
+// of the match being lowered, from expr_result_tuple_float_mask_ref at the
+// match site. Tuple-pattern element bindings/tests read it; 0 when the
+// scrutinee's element types are not known there (same limit as destructuring).
+var LOWER_MATCH_SCRUT_TUPLE_FLOAT_MASK: i64 = 0
 
 // Label of the lane-increment block while a `kernel fn` body is lowered; -1
 // outside a kernel. `return` inside a kernel ends THAT LANE, not the launch —
@@ -13730,6 +13735,42 @@ impl Lowerer {
     // nc_core_field_is_float / nc_core_mark_float_field. The index ops carry
     // four label_id-selected addressing variants (ref/BSS/param/local) that do
     // not apply to a struct handle.
+    // A zeroed struct slot is handle 0. An uninitialized `[T; N]` field must
+    // own storage before the first indexed store, or that store lands at 0x20.
+    fn emit_uninit_struct_array_fields(self, dst_reg: i64, type_name: Name, slot_count: i64) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        var i: i64 = 0
+        while i < slot_count && i < 128 {
+            let pos = lo.struct_layout_field_pos(type_name, i)
+            var n = lo.struct_layout_pos_array_len(pos)
+            let noted = lower_raw_arr_len_for(type_name, i)
+            if noted > n { n = noted }
+            if pos >= 0 {
+                let si = pos / 128
+                let fi = pos - si * 128
+                if si >= 0 && si < (*lo.struct_layouts).count {
+                    let field = (*lo.struct_layouts).entries[si as usize].fields[fi as usize]
+                    if field.fixed_array_len > n { n = field.fixed_array_len }
+                    if field.word_scalar_array_len > n { n = field.word_scalar_array_len }
+                }
+            }
+            if n > 0 {
+                let fname = lo.struct_layout_pos_field_name(pos)
+                let pair = lo.fresh_reg()
+                lo = pair.0
+                let arr = pair.1
+                lo = lo.emit(ir_alloc_array(arr, lo.aggregate_storage_bytes(n), n))
+                if lo.struct_layout_pos_is_float(pos) == 2 {
+                    lo = lo.emit(ir_mark_float_reg(arr))
+                    lo = lo.bind_reg_array_elem_float(arr)
+                }
+                lo = lo.emit(ir_field_set(dst_reg, i, arr, fname))
+            }
+            i = i + 1
+        }
+        lo
+    }
+
     fn emit_struct_value_copy(self, src_reg: i64, type_name: Name, slot_count: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         let pair_dst = self.fresh_reg()
         var lo = pair_dst.0
@@ -28353,6 +28394,9 @@ impl Lowerer {
                         lo = uninit_pair.0
                         let uninit_dst = uninit_pair.1
                         lo = lo.emit(ir_alloc(uninit_dst, lo.aggregate_storage_bytes(st_slot_count)))
+                        // Array fields are handles, not inline words. A zero slot
+                        // is handle 0, and the first indexed store lands at 0x20.
+                        lo = lo.emit_uninit_struct_array_fields(uninit_dst, st_name, st_slot_count)
                         lo = lo.bind_local_struct_type(s.name, st_name, false)
                         bind_reg = uninit_dst
                     }
@@ -31500,6 +31544,44 @@ impl Lowerer {
             lo = lo.emit(ir_jump(l_end))
             lo = lo.emit(ir_label(l_skip))
             lo
+        } else if pat.kind == PatternKind::PatStringLit {
+            // SIO-322: string literal -- content-compare via str_eq, exactly
+            // like `s == "lit"`. Before, this fell to "Unsupported pattern --
+            // skip" below, so a string match silently never matched and every
+            // scrutinee took the wildcard arm.
+            let pair_l = self.fresh_label()
+            var lo = pair_l.0
+            let l_skip = pair_l.1
+            lo = lo.lower_string_eq_test(scrut, pat.name, l_skip)
+            lo = lo.lower_arm_guard(&arm.guard, l_skip)
+            let pair_b = lo.lower_expr_ref(&arm.body)
+            lo = pair_b.0
+            let body_reg = pair_b.1
+            lo = lo.emit(ir_copy(res, body_reg))
+            lo = lo.emit(ir_jump(l_end))
+            lo = lo.emit(ir_label(l_skip))
+            lo
+        } else if pat.kind == PatternKind::PatTuple {
+            // SIO-322: tuple pattern -- test/bind each element slot of the
+            // scrutinee aggregate. Before, this fell to "Unsupported pattern
+            // -- skip" below, so `(0, _) => ..` never matched and even the
+            // irrefutable `(a, b) => ..` arm silently did not run.
+            let pair_l = self.fresh_label()
+            var lo = pair_l.0
+            let l_skip = pair_l.1
+            let pt = lo.lower_tuple_pattern_elements(scrut, &pat.sub_patterns, 0, l_skip, LOWER_MATCH_SCRUT_TUPLE_FLOAT_MASK)
+            lo = pt.0
+            if !pt.1 {
+                return lo.lower_match_pattern_refused("a tuple-pattern element (supported elements: bindings, `_`, integer/bool/string literals, nested tuples of those)")
+            }
+            lo = lo.lower_arm_guard(&arm.guard, l_skip)
+            let pair_b = lo.lower_expr_ref(&arm.body)
+            lo = pair_b.0
+            let body_reg = pair_b.1
+            lo = lo.emit(ir_copy(res, body_reg))
+            lo = lo.emit(ir_jump(l_end))
+            lo = lo.emit(ir_label(l_skip))
+            lo
         } else if pat.kind == PatternKind::PatStruct {
             // #2766: `S { a, b: y, c: _ } => body` on a struct scrutinee is
             // irrefutable: bind each field from the scrutinee and run the arm.
@@ -31519,8 +31601,105 @@ impl Lowerer {
             lo = lo.emit(ir_label(l_skip))
             lo
         } else {
-            // Unsupported pattern — skip
-            self
+            // SIO-322: an unhandled pattern kind used to land here and the arm
+            // was silently skipped, so the match picked a later arm (or the
+            // 0 the end label loads) with check: OK. Every PatternKind is
+            // handled above; refuse fail-closed rather than skip.
+            self.lower_match_pattern_refused("this pattern kind")
+        }
+    }
+
+    // SIO-322: fail-closed refusal for a match pattern this lowerer cannot
+    // test honestly, in the shape of lower_option_pattern_refused.
+    fn lower_match_pattern_refused(self, what: string) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        print("error: Madaros cannot lower this match pattern: ")
+        print(what)
+        print(" (supported: `_`, bindings, module-level constants, integer/bool/string literals, enum variants, struct field patterns, or-patterns of literals, tuple patterns of those). Refused rather than silently skipping the arm.\n")
+        var lo = self
+        lowerer_mark_hard_error(&! lo)
+        lo
+    }
+
+    // SIO-322: emit `str_eq(lhs, lit)` and branch to l_skip when not equal --
+    // the same content compare `s == "lit"` lowers to (34663).
+    fn lower_string_eq_test(self, lhs: i64, lit: Name, l_skip: i64) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        let lit_name = ir_normalize_string_literal_name(lit)
+        let pair_idx = self.intern_string(lit_name)
+        var lo = pair_idx.0
+        let idx = pair_idx.1
+        let pair_reg = lo.fresh_reg()
+        lo = pair_reg.0
+        let lit_reg = pair_reg.1
+        lo = lo.emit(ir_load_string(lit_reg, idx, lit_name))
+        let se_fn = lowerer_find_or_add_fn_id_mut(&! lo, make_name("str_eq"))
+        let se_args: Option<Box<IrRegList>> = Some(Box::new(ir_reg_list_cons(lhs, Some(Box::new(ir_reg_list_single(lit_reg))))))
+        let pair_eq = lo.fresh_reg()
+        lo = pair_eq.0
+        let eq_reg = pair_eq.1
+        lo = lo.emit(ir_call(eq_reg, se_fn, make_name("str_eq"), se_args, 2))
+        lo.emit(ir_branch_false(eq_reg, l_skip))
+    }
+
+    // SIO-322: test/bind tuple element slots against sub-patterns, in order.
+    // Any failing test branches to l_skip. Returns false when a sub-pattern
+    // kind is unsupported (the caller refuses fail-closed). float_mask bit k
+    // marks element k as f64 (only known for the outermost tuple; nested
+    // tuples pass 0, the same limit destructuring has).
+    fn lower_tuple_pattern_elements(self, scrut: i64, pats: &Option<Box<PatternList> >, idx: i64, l_skip: i64, float_mask: i64) -> (Lowerer, bool) with Mut, Panic, Div, Alloc, IO {
+        match *pats {
+            Some(list) => {
+                let pair_e = self.fresh_reg()
+                var lo = pair_e.0
+                let elem = pair_e.1
+                lo = lo.emit(ir_field_get(elem, scrut, idx, ir_empty_name()))
+                let is_float = idx < 63 && ((float_mask >> idx) & 1) == 1
+                if is_float {
+                    lo = lo.emit(ir_mark_float_reg(elem))
+                }
+                let ps = lo.lower_tuple_subpattern(elem, &(*list).head, l_skip, is_float)
+                lo = ps.0
+                if !ps.1 {
+                    return (lo, false)
+                }
+                lo.lower_tuple_pattern_elements(scrut, &(*list).tail, idx + 1, l_skip, float_mask)
+            }
+            None => (self, true),
+        }
+    }
+
+    fn lower_tuple_subpattern(self, elem: i64, sub: &Pattern, l_skip: i64, is_float: bool) -> (Lowerer, bool) with Mut, Panic, Div, Alloc, IO {
+        if (*sub).kind == PatternKind::PatWildcard {
+            (self, true)
+        } else if (*sub).kind == PatternKind::PatBinding {
+            var lo = self.bind_local((*sub).name, elem, (*sub).is_mut)
+            if is_float {
+                lo = lo.bind_local_scalar_kind((*sub).name, 2)
+            }
+            (lo, true)
+        } else if (*sub).kind == PatternKind::PatIntLit {
+            if is_float {
+                (self, false)
+            } else {
+                let pair_d = self.fresh_reg()
+                var lo = pair_d.0
+                let lit_reg = pair_d.1
+                lo = lo.emit(ir_load_imm(lit_reg, (*sub).int_val))
+                let pair_c = lo.fresh_reg()
+                lo = pair_c.0
+                let cmp_reg = pair_c.1
+                lo = lo.emit(ir_binop(cmp_reg, elem, BinaryOp::OpEq, lit_reg))
+                (lo.emit(ir_branch_false(cmp_reg, l_skip)), true)
+            }
+        } else if (*sub).kind == PatternKind::PatBoolTrue {
+            if is_float { (self, false) } else { (self.emit(ir_branch_false(elem, l_skip)), true) }
+        } else if (*sub).kind == PatternKind::PatBoolFalse {
+            if is_float { (self, false) } else { (self.emit(ir_branch_true(elem, l_skip)), true) }
+        } else if (*sub).kind == PatternKind::PatStringLit {
+            if is_float { (self, false) } else { (self.lower_string_eq_test(elem, (*sub).name, l_skip), true) }
+        } else if (*sub).kind == PatternKind::PatTuple {
+            self.lower_tuple_pattern_elements(elem, &(*sub).sub_patterns, 0, l_skip, 0)
+        } else {
+            (self, false)
         }
     }
 
@@ -36600,9 +36779,16 @@ impl Lowerer {
         lo = pair_end.0
         let l_end = pair_end.1
         let scrut_opk = lo.opt_expr_option_payload_kind_ref(&e.left)
+        let scrut_tuple_float_mask = match e.left {
+            Some(se) => lo.expr_result_tuple_float_mask_ref(&(*se)),
+            None => 0,
+        }
+        let saved_tuple_float_mask = LOWER_MATCH_SCRUT_TUPLE_FLOAT_MASK
         LOWER_MATCH_SCRUT_IS_REF = scrut_is_ref
+        LOWER_MATCH_SCRUT_TUPLE_FLOAT_MASK = scrut_tuple_float_mask
         lo = lo.lower_match_arms_ref(scrut, res, l_end, &e.arms, payload_layout, scrut_opk)
         LOWER_MATCH_SCRUT_IS_REF = saved_scrut_is_ref
+        LOWER_MATCH_SCRUT_TUPLE_FLOAT_MASK = saved_tuple_float_mask
         lo = lo.emit(ir_load_imm(res, 0))
         lo = lo.emit(ir_label(l_end))
         if res_is_float {
