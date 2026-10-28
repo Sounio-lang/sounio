@@ -1,0 +1,266 @@
+/**
+ * English search-appearance gate.
+ *
+ * Warns when an English page's <title> is longer than 60 characters or its
+ * meta description is longer than 155. Warnings do not fail the run.
+ * The six pages in src/lib/search-appearance.mjs must match that copy.
+ * Every built page must have one H1. Learn pages must carry TechArticle
+ * and a BreadcrumbList taken from the visible breadcrumb. SoftwareApplication
+ * stays on the home page. SoftwareSourceCode is on the home page and
+ * /learn/getting-started/.
+ */
+import assert from 'node:assert/strict';
+import { readdir, readFile, stat } from 'node:fs/promises';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { ENGLISH_SEARCH } from '../src/lib/search-appearance.mjs';
+import { rehypeDemoteH1 } from '../src/lib/rehype-demote-h1.mjs';
+import { isoDateOrNothing, CODE_REPOSITORY } from '../src/lib/structured-data.mjs';
+import { barePath, localeFromPath, isRedirectPath, absoluteUrl, htmlLang, canonicalPathname } from '../src/lib/seo-locales.mjs';
+
+const website = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const dist = path.join(website, 'dist');
+const TITLE_MAX = 60;
+const DESCRIPTION_MAX = 155;
+
+function decode(text) {
+  return text
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&apos;/g, "'");
+}
+
+function webPath(relFile) {
+  const clean = relFile.split(path.sep).join('/');
+  if (clean === 'index.html') return '/';
+  if (clean.endsWith('/index.html')) return `/${clean.slice(0, -'index.html'.length)}`;
+  if (clean.endsWith('.html')) return `/${clean.slice(0, -'.html'.length)}`;
+  return null;
+}
+
+async function* walk(dir) {
+  const entries = await readdir(dir);
+  for (const entry of entries) {
+    if (entry === 'pagefind') continue;
+    const full = path.join(dir, entry);
+    const info = await stat(full);
+    if (info.isDirectory()) yield* walk(full);
+    else yield full;
+  }
+}
+
+function jsonLd(html) {
+  const blocks = [];
+  for (const match of html.matchAll(/<script\b[^>]*type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/gi)) {
+    blocks.push(JSON.parse(match[1]));
+  }
+  return blocks;
+}
+
+function titleOf(html) {
+  const match = html.match(/<title>([\s\S]*?)<\/title>/i);
+  return match ? decode(match[1].trim()) : '';
+}
+
+function descriptionOf(html) {
+  const match = html.match(/<meta\b[^>]*name="description"[^>]*>/i);
+  if (!match) return '';
+  const quoted = match[0].match(/content="([^"]*)"/);
+  return quoted ? decode(quoted[1]) : '';
+}
+
+function h1Texts(html) {
+  return [...html.matchAll(/<h1\b[^>]*>([\s\S]*?)<\/h1>/gi)].map((match) =>
+    decode(match[1].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim())
+  );
+}
+
+function visibleCrumbs(html) {
+  const nav = html.match(/<nav\b[^>]*aria-label="Breadcrumb"[^>]*>([\s\S]*?)<\/nav>/i);
+  if (!nav) return null;
+  return [...nav[1].matchAll(/<li\b[^>]*>([\s\S]*?)<\/li>/gi)]
+    .map((match) => decode(match[1].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()))
+    .filter((text) => text && text !== '/');
+}
+
+function selfTest() {
+  const tree = {
+    type: 'root',
+    children: [
+      { type: 'element', tagName: 'h1', children: [{ type: 'text', value: 'Title' }] },
+      {
+        type: 'element',
+        tagName: 'pre',
+        children: [{ type: 'element', tagName: 'span', children: [{ type: 'text', value: '# not a heading' }] }],
+      },
+    ],
+  };
+  rehypeDemoteH1()(tree);
+  assert.equal(tree.children[0].tagName, 'h2');
+  assert.equal(tree.children[1].children[0].tagName, 'span');
+  assert.equal(isoDateOrNothing('unvalidated'), undefined);
+  assert.equal(isoDateOrNothing('2026-10-27'), '2026-10-27');
+  assert.equal(isoDateOrNothing('2026-02-31'), undefined);
+  assert.equal(isoDateOrNothing('2026-10-27T12:00:00Z'), undefined);
+}
+
+selfTest();
+
+let distStat;
+try {
+  distStat = await stat(dist);
+} catch {
+  distStat = null;
+}
+if (!distStat?.isDirectory()) {
+  console.error('search-appearance: dist/ is missing. Run the website build first.');
+  process.exit(1);
+}
+
+const warnings = [];
+const errors = [];
+let pages = 0;
+let englishPages = 0;
+
+for await (const file of walk(dist)) {
+  if (!file.endsWith('.html')) continue;
+  const rel = path.relative(dist, file);
+  const route = webPath(rel);
+  if (!route) continue;
+  if (isRedirectPath(route)) continue;
+  const html = await readFile(file, 'utf8');
+  const bare = barePath(route);
+  const locale = localeFromPath(route);
+  pages += 1;
+
+  const headings = h1Texts(html);
+  if (headings.length !== 1) errors.push(`${route}: expected 1 H1, found ${headings.length}`);
+
+  let blocks = [];
+  try {
+    blocks = jsonLd(html);
+  } catch (error) {
+    errors.push(`${route}: invalid JSON-LD (${error.message})`);
+    continue;
+  }
+  const software = blocks.filter((block) => block['@type'] === 'SoftwareApplication');
+  const source = blocks.filter((block) => block['@type'] === 'SoftwareSourceCode');
+  const articles = blocks.filter((block) => block['@type'] === 'TechArticle');
+  const crumbs = blocks.filter((block) => block['@type'] === 'BreadcrumbList');
+
+  if (bare === '/') {
+    if (software.length !== 1) errors.push(`${route}: home must have one SoftwareApplication`);
+    if (source.length !== 1) errors.push(`${route}: home must have one SoftwareSourceCode`);
+    if (articles.length !== 0) errors.push(`${route}: home must not be a TechArticle`);
+  } else if (software.length !== 0) {
+    errors.push(`${route}: SoftwareApplication is only for the home page`);
+  }
+
+  if (bare === '/learn/getting-started/') {
+    if (source.length !== 1) errors.push(`${route}: getting-started must have one SoftwareSourceCode`);
+  } else if (bare !== '/' && source.length !== 0) {
+    errors.push(`${route}: SoftwareSourceCode is only for the home page and getting-started`);
+  }
+
+  for (const block of source) {
+    if (block.codeRepository !== CODE_REPOSITORY) errors.push(`${route}: SoftwareSourceCode.codeRepository`);
+    if (block.programmingLanguage !== 'Sounio') errors.push(`${route}: SoftwareSourceCode.programmingLanguage`);
+  }
+  for (const block of software) {
+    if ('softwareVersion' in block) errors.push(`${route}: unverified softwareVersion`);
+    if (block.author?.name !== 'Demetrios Chiuratto Agourakis') errors.push(`${route}: software author`);
+  }
+
+  if (bare.startsWith('/learn/')) {
+    if (articles.length !== 1) errors.push(`${route}: learn page must have one TechArticle`);
+    if (crumbs.length !== 1) errors.push(`${route}: learn page must have one BreadcrumbList`);
+    const article = articles[0];
+    if (article) {
+      for (const field of ['headline', 'description', 'inLanguage', 'url']) {
+        if (typeof article[field] !== 'string' || article[field].length === 0) {
+          errors.push(`${route}: TechArticle.${field} missing`);
+        }
+      }
+      if ('dateModified' in article && article.dateModified !== isoDateOrNothing(article.dateModified)) {
+        errors.push(`${route}: TechArticle.dateModified is not an available calendar date`);
+      }
+      const canonical = canonicalPathname(route);
+      if (article.url !== absoluteUrl(canonical)) errors.push(`${route}: TechArticle url ${article.url}`);
+      if (article.inLanguage !== htmlLang(localeFromPath(canonical))) {
+        errors.push(`${route}: TechArticle inLanguage ${article.inLanguage}`);
+      }
+    }
+    const visible = visibleCrumbs(html);
+    const list = crumbs[0]?.itemListElement;
+    if (visible && list) {
+      const names = list.map((item) => item.name);
+      if (names.join('\n') !== visible.join('\n')) {
+        errors.push(`${route}: BreadcrumbList names do not match the visible breadcrumb`);
+      }
+      list.forEach((item, index) => {
+        if (item['@type'] !== 'ListItem' || item.position !== index + 1) {
+          errors.push(`${route}: BreadcrumbList position ${index + 1}`);
+        }
+        if (typeof item.item !== 'string' || !item.item.startsWith('https://www.souniolang.org/')) {
+          errors.push(`${route}: BreadcrumbList item URL`);
+        }
+      });
+    }
+  }
+
+  if (locale !== 'en') continue;
+  englishPages += 1;
+  const title = titleOf(html);
+  const description = descriptionOf(html);
+  if (title.length > TITLE_MAX) warnings.push(`${route}: title ${title.length} > ${TITLE_MAX}: ${title}`);
+  if (description.length > DESCRIPTION_MAX) warnings.push(`${route}: description ${description.length} > ${DESCRIPTION_MAX}`);
+
+  const expected = ENGLISH_SEARCH[bare];
+  if (!expected) continue;
+  if (title !== expected.title) errors.push(`${route}: title is ${JSON.stringify(title)}, expected ${JSON.stringify(expected.title)}`);
+  if (description !== expected.description) errors.push(`${route}: description does not match the recommended copy`);
+  if (headings.length === 1 && headings[0] === expected.title) {
+    errors.push(`${route}: the visible H1 was replaced by the search title`);
+  }
+  const article = articles[0];
+  if (article) {
+    if (article.headline !== expected.title) errors.push(`${route}: TechArticle headline does not match the title`);
+    if (article.description !== expected.description) errors.push(`${route}: TechArticle description does not match the meta description`);
+    if (article.inLanguage !== 'en') errors.push(`${route}: TechArticle inLanguage`);
+    if (article.url !== absoluteUrl(bare)) errors.push(`${route}: TechArticle url ${article.url}`);
+    if ('dateModified' in article) errors.push(`${route}: dateModified was emitted without a calendar date in the source`);
+  }
+  if (bare === '/') {
+    const app = software[0];
+    if (app && app.description !== expected.description) errors.push(`${route}: SoftwareApplication description drifted from the meta description`);
+  }
+}
+
+for (const page of Object.keys(ENGLISH_SEARCH)) {
+  const suffix = page === '/' ? 'index.html' : `${page.slice(1)}index.html`;
+  const file = path.join(dist, suffix);
+  try {
+    await stat(file);
+  } catch {
+    errors.push(`${page}: missing built page ${suffix}`);
+  }
+}
+
+if (pages === 0) errors.push('no HTML pages checked');
+
+for (const warning of warnings) console.warn(`search-appearance: WARN ${warning}`);
+if (errors.length) {
+  for (const error of errors) console.error(`search-appearance: ${error}`);
+  process.exitCode = 1;
+}
+console.log(JSON.stringify({
+  schema: 'sounio.search-appearance.v1',
+  pages,
+  englishPages,
+  warnings: warnings.length,
+  errors: errors.length,
+  priorityPages: Object.keys(ENGLISH_SEARCH),
+}, null, 2));
