@@ -19,16 +19,16 @@ Siga [`CONVENTIONS.md`](CONVENTIONS.md) para benchmarks por módulo.
 | Módulo | Baseline | Meta | Status |
 |--------|----------|------|--------|
 | [`linalg/matrix.sio`](linalg/matrix.sio) | NumPy (BLAS) | <2x | ✅ Precisão: matmul [L9], SVD [L10] |
-| [`stats`](stats/lib.sio) | SciPy | <1.5x | ✅ Precisão: OLS [L8] |
+| [`stats`](stats/) | SciPy | <1.5x | ✅ Precisão: OLS [L8] |
 | [`epistemic/knowledge.sio`](epistemic/knowledge.sio) | JAX | <3x | ✅ Precisão: epistemic matmul [L11], GUM [L12] |
 | [`math`](math/lib.sio) | Rust std::f64 | <1.5x | ⏳ Performance pendente |
 | [`optimize`](optimize/lib.sio) | SciPy.optimize | <2x | ⏳ Pendente |
 | [`integrate`](integrate/lib.sio) | SciPy.integrate | <2x | ⏳ Cross-lang |
-| [`autodiff`](autodiff/lib.sio) | JAX | <3x | ⏳ Pendente |
-| [`nn`](nn/lib.sio) | PyTorch | <3x | ⏳ Pendente |
-| [`prob`](prob/lib.sio) | SciPy.stats | <1.5x | ⏳ Pendente |
+| [`autodiff`](autodiff/) | JAX | <3x | ⏳ Pendente |
+| [`nn`](nn/) | PyTorch | <3x | ⏳ Pendente |
+| [`prob`](prob/) | SciPy.stats | <1.5x | ⏳ Pendente |
 | [`bayes`](bayes/lib.sio) | PyMC | <4x | ⏳ Pendente |
-| [`causal`](causal/lib.sio) | doWhy | <3x | ⏳ Pendente |
+| [`causal`](causal/) | doWhy | <3x | ⏳ Pendente |
 | [`ode`](ode/lib.sio) | SciPy.odeint | <2x | ⏳ Cross-lang |
 | [`quantum`](quantum/lib.sio) | Qiskit | <5x | ⏳ Pendente |
 | [`signal`](signal/lib.sio) | SciPy.signal | <2x | ⏳ Pendente |
@@ -39,7 +39,7 @@ Siga [`CONVENTIONS.md`](CONVENTIONS.md) para benchmarks por módulo.
 | [`csv`](csv/lib.sio) | csv crate | <1.5x | ⏳ Pendente |
 | [`plot`](plot/lib.sio) | matplotlib | <5x | ⏳ Pendente |
 | [`units`](units/lib.sio) | pint | <2x | ⏳ Pendente |
-| [`gpu`](gpu/lib.sio) | CuBLAS | <1.5x | ✅ GPU GEMM 17% peak |
+| [`gpu`](gpu/) | CuBLAS | <1.5x | ✅ GPU GEMM 17% peak |
 
 **Legenda de Status:**
 - ✅ Validado em [`VALIDATION_REPORT.md`](../benchmarks/stdlib_validation/VALIDATION_REPORT.md)
