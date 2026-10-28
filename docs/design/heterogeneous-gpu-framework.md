@@ -1500,3 +1500,20 @@ Job 18761. md5 `718355dd94e09b5ca75d37475d2f20fa`.
 The cleared word at offset 16 came back 3. That is the 3 already in R7, added to an R4 that was still 0. The load had not delivered 17 when the add issued. With the mask on, job 18697 stored 20 in that word. The mask bit is the wait. The required 20 was not changed to 3.
 
 Gate. Node `gpuorangefs-r770-proxmox`, `--gres=gpu:1`, `--mem=16G`, `--cpus-per-task=4`. The 0.0018 s threshold is not moved. This cut does not pass it.
+
+
+## 58. Load byte 4 (2026-10-27, OBSERVED)
+
+Job 18697 stored 20 with load byte 4 equal to 4 and the add's wait mask equal to 4. Job 18761 cleared that mask and stored 3. This job puts the mask back, `atlas_iadd3_hi(0)`, and changes only byte 4 of the load from 4 to 6. The displacement stays 8. The low word is `81 79 04 02 06 08 00 00`. Host byte 1572 is 6. Host byte 1598 is 79 (`0x4f`), the mask bit back on.
+
+The host still writes 17 at offset 8. The probe still requires 20.
+
+The common `LDG.E` in `token_m1` uses byte 4 equal to 6 at displacement 0. This cubin has no load with byte 4 equal to 6 and displacement 8. That is the combination launched here.
+
+Job 18808. The node was idle, not drained. md5 `c8287b87723ad0dc25ebd00da6e34604`.
+
+`OWN=42`, `OWN_ADD=13`, `OWN_SRC=17`, `OWN_WIDE=0`, `OWN_SUM=20`, `EXIT:0`.
+
+The word at offset 16 is 20 again. Byte 4 equal to 6, with displacement 8 and the wait mask on, delivered the same 17. The 42 and the 13 stayed. Offset 12 stayed 0. The 17 at offset 8 was still there.
+
+Gate. Node `gpuorangefs-r770-proxmox`, `--gres=gpu:1`, `--mem=16G`, `--cpus-per-task=4`. The 0.0018 s threshold is not moved. This cut does not pass it.
