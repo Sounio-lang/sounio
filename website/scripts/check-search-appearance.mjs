@@ -23,14 +23,19 @@ const dist = path.join(website, 'dist');
 const TITLE_MAX = 60;
 const DESCRIPTION_MAX = 155;
 
+function decodeEntity(entity) {
+  if (entity === '&amp;') return '&';
+  if (entity === '&lt;') return '<';
+  if (entity === '&gt;') return '>';
+  if (entity === '&quot;') return '"';
+  if (entity === '&#39;' || entity === '&apos;') return "'";
+  return entity;
+}
+
+// One pass. Decoding `&amp;` in a separate earlier replace would turn
+// `&amp;lt;` into `&lt;` and then into `<`.
 function decode(text) {
-  return text
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&apos;/g, "'");
+  return text.replace(/&(?:amp|lt|gt|quot|#39|apos);/g, decodeEntity);
 }
 
 function webPath(relFile) {
@@ -117,6 +122,11 @@ function selfTest() {
   assert.equal(isoDateOrNothing('2026-10-27'), '2026-10-27');
   assert.equal(isoDateOrNothing('2026-02-31'), undefined);
   assert.equal(isoDateOrNothing('2026-10-27T12:00:00Z'), undefined);
+  assert.equal(decode('Sounio&#39;s'), "Sounio's");
+  assert.equal(decode('&amp;'), '&');
+  assert.equal(decode('&lt;h1&gt;'), '<h1>');
+  assert.equal(decode('&amp;lt;'), '&lt;');
+  assert.equal(decode('&amp;amp;'), '&amp;');
 }
 
 selfTest();
