@@ -15,7 +15,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ENGLISH_SEARCH, SELF_HOSTED_PAGE } from '../src/lib/search-appearance.mjs';
 import { rehypeDemoteH1 } from '../src/lib/rehype-demote-h1.mjs';
-import { isoDateOrNothing, CODE_REPOSITORY } from '../src/lib/structured-data.mjs';
+import { isoDateOrNothing, CODE_REPOSITORY, FORMER_LANGUAGE_NAME, FORMER_RELEASE_URL } from '../src/lib/structured-data.mjs';
 import { barePath, localeFromPath, isRedirectPath, absoluteUrl, htmlLang, canonicalPathname } from '../src/lib/seo-locales.mjs';
 
 const website = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -63,6 +63,32 @@ function jsonLd(html) {
     blocks.push(JSON.parse(match[1]));
   }
   return blocks;
+}
+
+function collectAlternateNames(value, found) {
+  if (!value || typeof value !== 'object') return;
+  if (Array.isArray(value)) {
+    for (const item of value) collectAlternateNames(item, found);
+    return;
+  }
+  const alt = value.alternateName;
+  if (typeof alt === 'string') found.add(alt);
+  else if (Array.isArray(alt)) {
+    for (const item of alt) if (typeof item === 'string') found.add(item);
+  }
+  for (const child of Object.values(value)) collectAlternateNames(child, found);
+}
+
+const FORMER_NAME_NOTE = 'Sounio (formerly Demetrios). Sounio was previously released as Demetrios, the former name of this language.';
+
+function visibleProse(html) {
+  return decode(
+    html
+      .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, ' ')
+      .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, ' ')
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/\s+/g, ' ')
+  );
 }
 
 function titleOf(html) {
@@ -170,6 +196,20 @@ for await (const file of walk(dist)) {
   }
   const software = blocks.filter((block) => block['@type'] === 'SoftwareApplication');
   const source = blocks.filter((block) => block['@type'] === 'SoftwareSourceCode');
+  if (bare === '/' || bare === '/about/') {
+    const names = new Set();
+    for (const block of blocks) collectAlternateNames(block, names);
+    if (!names.has(FORMER_LANGUAGE_NAME)) {
+      errors.push(`${route}: JSON-LD missing alternateName ${FORMER_LANGUAGE_NAME}`);
+    }
+    const serialized = JSON.stringify(blocks);
+    if (!serialized.includes(FORMER_RELEASE_URL)) {
+      errors.push(`${route}: JSON-LD missing former-release sameAs ${FORMER_RELEASE_URL}`);
+    }
+  }
+  if (bare === '/about/' && !visibleProse(html).includes(FORMER_NAME_NOTE)) {
+    errors.push(`${route}: visible former-name note is missing`);
+  }
   const articles = blocks.filter((block) => block['@type'] === 'TechArticle');
   const crumbs = blocks.filter((block) => block['@type'] === 'BreadcrumbList');
 
@@ -306,6 +346,12 @@ for (const page of Object.keys(ENGLISH_SEARCH)) {
 }
 
 if (pages === 0) errors.push('no HTML pages checked');
+
+const readmePath = path.join(website, '..', 'README.md');
+const readmeHead = (await readFile(readmePath, 'utf8')).split('\n').slice(0, 25).join('\n');
+if (!readmeHead.includes('Sounio (formerly Demetrios)') || !readmeHead.includes('previously released as Demetrios, the former name of this language.')) {
+  errors.push('README.md: former-name note is missing from the top of the file');
+}
 
 for (const warning of warnings) console.warn(`search-appearance: WARN ${warning}`);
 if (errors.length) {
