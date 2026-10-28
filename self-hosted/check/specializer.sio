@@ -57,6 +57,8 @@ use compiler::private_fn_identity::{pfi_use_target,pfi_use_named}
 
 // Receiver facts are compiler-derived nominal declarations, never method-name
 // or field-shape guesses. Only scalar pointers are global (seed-safe spine).
+// A proven array shape carries only the builtin len capability, not a nominal type.
+let SPEC_RECEIVER_ARRAY:i64=0-2
 struct SpecReceiverDecl { owner:i64, item:Item }
 struct SpecReceiverMethod {
  owner:i64, receiver:i64, item:Item, slot:i64, is_generic:bool, needed:bool, next:i64
@@ -77,6 +79,7 @@ fn spec_receiver_stage(owner:i64,it:Item)->i64 with Mut,Panic,Div,Alloc {
  p as i64
 }
 fn spec_receiver_same(a:i64,b:i64)->bool with Mut,Panic,Div {
+ if a==SPEC_RECEIVER_ARRAY && b==SPEC_RECEIVER_ARRAY {return true}
  if a<=0 || b<=0 {return false}
  let x=a as *mut SpecReceiverDecl
  let y=b as *mut SpecReceiverDecl
@@ -85,9 +88,11 @@ fn spec_receiver_same(a:i64,b:i64)->bool with Mut,Panic,Div {
  (*x).item.span.start==(*y).item.span.start && (*x).item.span.end==(*y).item.span.end
 }
 fn spec_receiver_merge(a:i64,b:i64)->i64 with Mut,Panic,Div {
- if a<0 || b<0 {return 0-1}
  if b==0 {return a}
- if a==0 || spec_receiver_same(a,b) {return b}
+ if a==0 {return b}
+ if a==SPEC_RECEIVER_ARRAY && b==SPEC_RECEIVER_ARRAY {return SPEC_RECEIVER_ARRAY}
+ if a<0 || b<0 {return 0-1}
+ if spec_receiver_same(a,b) {return b}
  0-1
 }
 fn spec_receiver_local(owner:i64,name:Name)->i64 with Mut,Panic,Div,Alloc {
@@ -250,6 +255,7 @@ fn spec_receiver_type(ty:TypeExpr,owner:i64,self_decl:i64,depth:i64)->i64 with M
  if ty.kind==TypeExprKind::TypeReference || ty.kind==TypeExprKind::TypeRefMut {
   match ty.inner {Some(inner)=>return spec_receiver_type(*inner,owner,self_decl,depth+1),None=>return 0}
  }
+ if ty.kind==TypeExprKind::TypeArray {return SPEC_RECEIVER_ARRAY}
  if ty.kind!=TypeExprKind::TypeNamed {return 0}
  if self_decl>0 && ty.path.seg_count==1 && name_eq(spec_path_single_name(ty.path),make_name("Self")) {return self_decl}
  let decl=spec_receiver_lookup(owner,ty.path)
@@ -350,7 +356,7 @@ fn spec_receiver_free_result(name:Name,depth:i64)->i64 with Mut,Panic,Div,Alloc 
       }}
       None=>{}
      }
-     if candidate<=0 {return 0}
+     if candidate<=0 {if candidate!=SPEC_RECEIVER_ARRAY {return 0}}
      found=spec_receiver_merge(found,candidate)
      if found<0 {return 0}
     }
@@ -381,6 +387,7 @@ fn spec_receiver_block_result(block:Block,depth:i64)->i64 with Mut,Panic,Div,All
 }
 fn spec_receiver_expr(e:Expr,depth:i64)->i64 with Mut,Panic,Div,Alloc {
  if depth>64 {return 0}
+ if e.kind==ExprKind::ExprArrayLit {return SPEC_RECEIVER_ARRAY}
  if e.kind==ExprKind::ExprIdent {
   let binding=spec_receiver_binding(e.name)
   if binding>0 {return (*(binding as *mut SpecReceiverBinding)).decl}
@@ -2713,6 +2720,20 @@ fn spec_scan_expr(e: Expr) with IO, Mut, Panic, Div, Alloc {
             var gt_idx = spec_generic_table_find(callee_name)
             if e.kind==ExprKind::ExprMethodCall {
                 let receiver=spec_receiver_expr_opt(e.left,0)
+                if receiver==SPEC_RECEIVER_ARRAY && name_eq(callee_name,make_name("len")) {
+                    // Builtin array/slice len is established by the receiver's
+                    // declared shape. It never selects a generic method template.
+                    match e.args {
+                        None=>{
+                            match spec_call_expr_type_args(e) {
+                                Some(_)=>SPEC_METHOD_TARG_UNSUPPORTED=true
+                                None=>{}
+                            }
+                            return
+                        }
+                        Some(_)=>{}
+                    }
+                }
                 let method=spec_receiver_method_find(receiver,callee_name)
                 if method>0 {
                     let m=method as *mut SpecReceiverMethod

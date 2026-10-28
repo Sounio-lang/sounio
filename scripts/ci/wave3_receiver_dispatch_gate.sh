@@ -73,7 +73,7 @@ for variant in before after;do
  else
   test "$status" = 0
   grep -Fx RECEIVER_COMPONENT_OK "$OUT/$variant/native.stdout" > "$OUT/$variant/MARKER.verify"
-  test "$(grep -Ec '^(CASE |MULTI |ORIGINAL_HEAP )' "$OUT/$variant/native.stdout")" = 24
+  test "$(grep -Ec '^(CASE |MULTI |ORIGINAL_HEAP )' "$OUT/$variant/native.stdout")" = 30
  fi
  sha256sum -c "$OUT/$variant/SOURCE.sha256" > "$OUT/$variant/SOURCE.final.verify"
  sha256sum -c "$OUT/$variant/ELF.sha256" > "$OUT/$variant/ELF.final.verify"

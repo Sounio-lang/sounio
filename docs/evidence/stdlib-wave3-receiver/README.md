@@ -120,3 +120,87 @@ scope-controls-19102.tar.gz
 SHA256 53f3770140bfdab59feb52ed900eec98a21567eb2c350048c10cff151d20bb5d.
 The earlier 22-case receipt remains unchanged. Neither component replay is
 retagged as the pending source-built CLI integration result.
+
+## Declared array/slice length — separate correction
+
+The first composed view-facade witness checks normally (verdict0) but the earlier
+specializer then refuses an imported method. Slurm19120 reproduces its exact
+32-program source closure with the real parser, physical import map, private
+function identity pass (five renames) and actual specializer. Diagnostic-only
+instrumentation identifies unicode.sio char_from_utf8(bytes:&[u8]), at source
+offset3495: bytes.len() had no nominal receiver and collided with HeapVec<T>.len.
+The diagnostic source is separately hashed and is not production code.
+
+Production source683d539aacd6a76e47261973f01b0fc5c927efc2b34e5c1ac84eb7b1ad8e10f4
+adds a proven array-shape fact, carrying only the builtin length capability.
+Declared TypeArray (including reference unwrap and alias expansion), an actual
+array literal and convergent array-result facts can establish it. Only zero-arg
+len uses that capability; explicit turbofish is refused. Unknown receivers,
+shadows and other methods still follow the fail-closed generic path. This is
+not a nominal declaration or evidence for any slice payload ABI.
+
+Slurm **19138** completed0:0 in2m57s: the portable actual-source gate now has
+**30 cases (16 acceptances, 14 refusals)**. Before compile0/native1 and after
+26-module type/effect verdict0/compile0/native0 all hold. New cases cover literal,
+declared slice and alias-to-array receivers, and reject a shadowed receiver,
+explicit turbofish or extra length argument. The source-manifest digest after
+is edc3f5e0f1b4b73f7f75e7a1d8e01b075a47ba6701c5fc186d4b76cab76b7c71.
+
+Slurm **19139** completed0:0 in13s using the exact production683d module without
+instrumentation. It replays the same 32 customer programs and explicit
+GRAPH.json through load_module_file, private_fn_identity_apply and
+specialize_generics_multi. Before19120 refuses; after19139 reports
+FACADES_DIAGNOSTIC_REFUSED0. Source bytes, import graph, compiler and executable
+are retained. This is a component reproduction, not the source-built CLI or
+native execution of the composed facade witness.
+
+## Raw6259: original native method fixed, alias lowering remains refused
+
+Slurm **19088** rebuilt an actual raw compiler6259ed416e90a9ae555fbf2407f50a187bc45bf6323d84f9ad1085e4ce90b0c1
+from the f64ae source (the earlier30-case array fix is NOT in this artifact).
+The untouched original HeapVec method witness changes from check1/compile1 with
+the qualified f3ce baseline to check0/compile0/native0 and exact PASS. Six other
+receiver positives run at0; five negatives retain check1/compile1 and no ELF.
+The C++23 returned-loan gate passes51 checks,51 compilations,21 native cases and
+all30 expected compile refusals, including its wrong-output controls.
+
+The **aggregate worker/gate remains1**. aliases_fields checks0 but native
+compilation refuses a body-less i64_get at the unchanged f4 guard. No ELF is
+emitted. The lowerer has lost the declared nominal alias across a reference to a
+field. The original fixture is retained and remains mandatory. This source
+change and these receipts do not qualify general alias lowering, generic
+collections, or the whole compiler/stdlib.
+
+Source-manifest digest for19088 is
+7d41c3898e9537a43da557eb055400e98f7a28c9335a9ccb9ec38e58991bab69.
+The before/after logs, aggregate failure, exact alias refusal and strict loan
+receipts are in raw-19088. The complete manifest and raw binary are durable.
+
+Slurm19150 separately rebuilds the source683d array fix and repeats the raw
+matrix with literal-array and negative array controls. The alias fixture remains
+expected to succeed in that raw gate; its failure is not waived. A selected
+view/facade gate may report its own bounded results with this alias limit
+explicitly retained, but cannot turn the aggregate raw result into acceptance.
+
+## Additional durable custody
+
+All following files are under the existing receiver-dispatch01 durable directory:
+
+- raw6259-original-method-and-alias-refusal.tar.gz:
+  5b87c5e192834ece3755db040d529469c04e43a0669da21c4669f6d7f8058e27.
+- array30-and-real-closure32.tar.gz:
+  7749bd8db96d0415025871a2f9b9e2fca272b94b84c8602936598ef88cac5fe2.
+- view-api-failed-history.tar.gz:
+  169ee02fc7563fffdfbbaa03404b3a2f526171b7b44bf0d24b5464151ece0d7b.
+- stdlib-head1ffa-base.tar.gz:
+  dceff0ea12faca83f303451d1a6a2ef02882261384f891e33417c5424181f32d.
+- owner-view-overlay-v3.tar:
+  7fce3530b4b8a7943f00e8ee483464c5cbe5b652c231fc0e01474d176b366f3e.
+
+Slurm19145 and19168 verified these archives and source reconstruction inputs.
+The view source base is the core branch HEAD1ffa (legacy Mut signatures, adopted
+budget accessor and immutable BIDI source), without its uncommitted generic
+HeapVec draft. Failed view attempts preserve an escaped-tab guard error, missing
+version metadata, and the composed-facade specialization refusal. Their partial
+leaf native success is not a facade gate pass. CHANGELOG.md and CITATION.cff are
+now explicit source inputs of the pending view gate.
