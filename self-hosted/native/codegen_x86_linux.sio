@@ -2726,6 +2726,17 @@ fn nc_emit_setae_al(nc: &! NativeCompiler) with Mut, Panic, Div {
     nc_emit_byte(nc, 0x0f); nc_emit_byte(nc, 0x93); nc_emit_byte(nc, 0xc0)
 }
 
+// cmp rbx, rsp
+fn nc_emit_cmp_rbx_rsp(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x39); nc_emit_byte(nc, 0xe3)
+}
+
+// cmp rbx, r14. r14 is the entry rsp, saved by the trampoline and not
+// clobbered by function bodies, so [rsp, r14] is the live stack.
+fn nc_emit_cmp_rbx_r14(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x4c); nc_emit_byte(nc, 0x39); nc_emit_byte(nc, 0xf3)
+}
+
 fn nc_emit_setb_al(nc: &! NativeCompiler) with Mut, Panic, Div {
     nc_emit_byte(nc, 0x0f); nc_emit_byte(nc, 0x92); nc_emit_byte(nc, 0xc0)
 }
@@ -13242,10 +13253,76 @@ fn native_v2_ref_array_resolve_base_rax_into(nc: &! NativeCompiler, base_ref: i6
     nc_patch_u32_le(nc, done_jmp2 + 1, done - (done_jmp2 + 5))
 }
 
-// Struct &T uses the same three encodings as &[T; N]. A field load that
-// always dereferences faults when the slot holds a bare handle id.
+// Struct &T is not the same as &[T; N]. A local borrow is a stack cell
+// holding the alloc result. A struct global's BSS slot is one word (the
+// named-type size is 8), and a <=16 B struct is unboxed, so that word is the
+// raw object base. The array classifier dereferences every pointer above its
+// BSS window. Dereferencing an object base loads field 0 and resolves that
+// small integer as a handle, which is empty, so the ud2 fires (SIGILL, exit
+// 132). A stack cell is inside [rsp, r14]; an object base is not.
 fn native_v2_ref_field_resolve_base_rax_into(nc: &! NativeCompiler, base_ref: i64) with Mut, Panic, Div {
-    native_v2_ref_array_resolve_base_rax_into(nc, base_ref)
+    nc_core_load_temp_to_rax(nc, base_ref)
+    nc_emit_mov_rbx_rax(nc)
+    nc_emit_mov_rax_imm(nc, native_v2_handle_raw_ptr_threshold())
+    nc_emit_cmp_rbx_rax(nc)
+    nc_emit_setae_al(nc)
+    nc_emit_movzx_rax_al(nc)
+    nc_emit_test_rax_rax(nc)
+    let not_handle_jnz = (*nc).code.len
+    nc_emit_jnz_rel32(nc)
+    nc_emit_mov_rax_rbx(nc)
+    native_v2_resolve_handle_to_object_base_rax_into(nc)
+    let done_jmp1 = (*nc).code.len
+    nc_emit_jmp_rel32(nc)
+    let not_handle = (*nc).code.len
+    nc_patch_u32_le(nc, not_handle_jnz + 2, not_handle - (not_handle_jnz + 6))
+    nc_emit_cmp_rbx_rsp(nc)
+    nc_emit_setae_al(nc)
+    nc_emit_movzx_rax_al(nc)
+    nc_emit_test_rax_rax(nc)
+    let below_stack_jz = (*nc).code.len
+    nc_emit_jz_rel32(nc)
+    nc_emit_cmp_rbx_r14(nc)
+    nc_emit_setbe_al(nc)
+    nc_emit_movzx_rax_al(nc)
+    nc_emit_test_rax_rax(nc)
+    let above_stack_jz = (*nc).code.len
+    nc_emit_jz_rel32(nc)
+    nc_emit_mov_rax_rbx(nc)
+    nc_emit_load_rax_mem_rax(nc)
+    native_v2_resolve_handle_to_object_base_rax_into(nc)
+    let done_jmp2 = (*nc).code.len
+    nc_emit_jmp_rel32(nc)
+    let not_stack = (*nc).code.len
+    nc_patch_u32_le(nc, below_stack_jz + 2, not_stack - (below_stack_jz + 6))
+    nc_patch_u32_le(nc, above_stack_jz + 2, not_stack - (above_stack_jz + 6))
+    nc_emit_mov_rax_imm(nc, BSS_BASE_LINUX)
+    nc_emit_cmp_rbx_rax(nc)
+    nc_emit_setae_al(nc)
+    nc_emit_movzx_rax_al(nc)
+    nc_emit_test_rax_rax(nc)
+    let below_bss_jz = (*nc).code.len
+    nc_emit_jz_rel32(nc)
+    nc_emit_mov_rax_imm(nc, native_v2_ref_array_bss_window_end())
+    nc_emit_cmp_rbx_rax(nc)
+    nc_emit_setae_al(nc)
+    nc_emit_movzx_rax_al(nc)
+    nc_emit_test_rax_rax(nc)
+    let above_bss_jnz = (*nc).code.len
+    nc_emit_jnz_rel32(nc)
+    nc_emit_mov_rax_rbx(nc)
+    nc_emit_sub_rax_imm8(nc, native_v2_object_header_size())
+    let done_jmp3 = (*nc).code.len
+    nc_emit_jmp_rel32(nc)
+    let object_base = (*nc).code.len
+    nc_patch_u32_le(nc, below_bss_jz + 2, object_base - (below_bss_jz + 6))
+    nc_patch_u32_le(nc, above_bss_jnz + 2, object_base - (above_bss_jnz + 6))
+    nc_emit_mov_rax_rbx(nc)
+    native_v2_resolve_handle_to_object_base_rax_into(nc)
+    let done = (*nc).code.len
+    nc_patch_u32_le(nc, done_jmp1 + 1, done - (done_jmp1 + 5))
+    nc_patch_u32_le(nc, done_jmp2 + 1, done - (done_jmp2 + 5))
+    nc_patch_u32_le(nc, done_jmp3 + 1, done - (done_jmp3 + 5))
 }
 
 pub fn native_v2_core_emit_ref_array_load_into(nc: &! NativeCompiler, dst: i64, base_ref: i64, idx_reg: i64) with Mut, Panic, Div {
