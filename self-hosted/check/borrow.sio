@@ -1,25 +1,9 @@
-// Borrow checker — single-pass ownership and borrowing verification
-//
-// Tracks per-variable borrow state: Owned, SharedBorrow(n), ExclusiveBorrow
-// Enforces:
-//   - &x: fails if exclusive borrow is active
-//   - &!x: fails if any borrow is active
-//   - linear struct: must be consumed exactly once
-//   - Scope exit: releases borrows created in that scope
-
-// ============================================================
-// Borrow state per variable
-// ============================================================
-
-// State values: 0 = Owned (unborrowed), 1 = SharedBorrow, 2 = ExclusiveBorrow
-// shared_count tracks number of active shared borrows
-
-// Two snapshot slots per nested `if` level; 16 levels of nesting are tracked.
-// Beyond that the merge degrades to the old sequential behaviour rather than
-// misreporting.
-pub const MAX_BRANCH_LEVELS: i64 = 16
-pub const MAX_BRANCH_SNAP: i64 = 32
-const BRANCH_SNAP_PLANE: i64 = 4096   // 128 entries * MAX_BRANCH_SNAP
+// Persistent borrow checking. Stable identities, immutable paged roots and
+// proportional scope/branch frames preserve value-copy/backtracking semantics.
+use parser::ast::{Name,name_eq}
+// Retained public constants for source compatibility; storage has no 16-level bound.
+pub const MAX_BRANCH_LEVELS:i64=16
+pub const MAX_BRANCH_SNAP:i64=32
 
 pub struct BorrowEntry {
     // Stable identity, independent of a reused slot or shadowed name.
@@ -52,35 +36,7 @@ fn empty_borrow_entry() -> BorrowEntry {
     }
 }
 
-// ============================================================
-// Borrow environment
-// ============================================================
 
-pub struct BorrowEnv {
-    pub next_binding_id:i64,
-    pub loan_head:i64,
-    pub loan_count:i64,
-    pub loan_overflow:bool,
-    pub entries: [BorrowEntry; 128],
-    pub count: i64,
-    pub scope_starts: [i64; 64],
-    pub scope_depth: i64,
-    pub branch_depth: i64,   // nesting level of `if` currently being checked
-    // Snapshots of `consumed`, laid out FLAT as entry-major
-    // [entry * MAX_BRANCH_SNAP + 2*level (+1)], so the write is a single-level
-    // indexed store rather than the known-fragile `entries[i].snap[j]` shape.
-    //
-    // The length is spelled as a LITERAL, not as BRANCH_SNAP_PLANE. A named const
-    // in an array-type position is not resolved by the lean_single front end -- the
-    // seed that builds Madaros -- and the field is then dropped from the struct
-    // entirely: every BorrowEnv literal reports `missing field in struct literal`
-    // and stores through the field get no valid offset (issue #1471). A const in a
-    // repeat-literal LENGTH is NOT fine either (see borrow_env_new below); only
-    // index arithmetic, as in check.sio, resolves the const correctly.
-    pub branch_snap: [bool; 4096],
-}
-
-// #1581 field-path helpers (path names are "root.f1.f2").
 pub fn borrow_name_is_path(n: Name) -> bool with Mut, Panic, Div {
     var i: i64 = 0
     while i < n.len {
@@ -101,8 +57,6 @@ pub fn borrow_path_root(n: Name) -> Name with Mut, Panic, Div {
     r
 }
 
-// `a` and `b` name the same storage or one contains the other: equal, or one
-// is a prefix of the other ending exactly at a `.`.
 pub fn borrow_paths_overlap(a: Name, b: Name) -> bool with Mut, Panic, Div {
     var short = a
     var long = b
@@ -119,495 +73,758 @@ pub fn borrow_paths_overlap(a: Name, b: Name) -> bool with Mut, Panic, Div {
     long.buf[short.len as usize] == 46 as i8
 }
 
-pub fn borrow_env_new() -> BorrowEnv {
-    BorrowEnv {
-        next_binding_id:1,loan_head:0,loan_count:0,loan_overflow:false,
-        entries: [empty_borrow_entry(); 128],
-        count: 0,
-        scope_starts: [0; 64],
-        scope_depth: 0,
-        branch_depth: 0,
-        // Literal length, matching the declaration above. The comment there said a
-        // named const was safe in a repeat-literal LENGTH and unsafe only in a TYPE
-        // position; measured against the self-compilation ratchet that is not true --
-        // `[false; BRANCH_SNAP_PLANE]` here produced E020 (array elements must all have
-        // the same type) + E016 (field initializer has wrong type) when Madaros
-        // typechecks its own source. Both spellings must be the literal 4096.
-        branch_snap: [false; 4096],
-    }
+
+// Persistent storage: published radix pages, entry cells and frames are immutable.
+// BorrowEnv copies share roots. Only the function arena's allocation/error ledger
+// is mutable; no page is released while a copied environment may still refer to it.
+pub struct BorrowArena {pub error:i64,pub bytes:i64,pub allocations:i64,pub head:i64}
+struct BorrowAllocation {next:i64,bytes:i64}
+struct BorrowRadixPage {slots:[i64;16]}
+struct BorrowRadixRoot {page:i64,depth:i64}
+struct BorrowEntryCell {value:BorrowEntry}
+struct BorrowScopeFrame {previous:i64,start:i64,names_before:i64}
+struct BorrowBranchFrame {previous:i64,before:i64,then_bits:i64,count:i64,phase:i64}
+
+pub struct BorrowEnv {
+    pub next_binding_id:i64,
+    pub loan_head:i64,
+    pub loan_count:i64,
+    pub loan_overflow:bool,
+    pub failure_kind:i64,
+    pub failure_reported:bool,
+    pub arena:i64,
+    pub entry_root:i64,
+    pub binding_root:i64,
+    pub name_root:i64,
+    pub consumed_root:i64,
+    pub owner_root:i64,
+    pub carrier_root:i64,
+    pub dedup_root:i64,
+    pub count:i64,
+    pub scope_head:i64,
+    pub scope_depth:i64,
+    pub branch_head:i64,
+    pub branch_depth:i64,
 }
 
-// Persistent loans belong to a carrier binding and point to its actual owner
-// identity. Call-site borrow release changes transient state only. Scope exit
-// removes carrier identities from the active environment; old edges cannot bind
-// a later shadow that reuses their entry index. Nodes are immutable so copying a
-// BorrowEnv does not let a sibling mutate its graph.
-pub struct PersistentLoanEdge {
-    pub owner:i64,
-    pub carrier:i64,
-    pub kind:i64,
-    pub next:i64,
+// 1 allocation failure, 2 byte/identity overflow, 3 invalid index/state,
+// 4 corrupt length/path. These never become a successful checker verdict.
+
+pub fn borrow_env_clone(env:&BorrowEnv)->BorrowEnv {
+ BorrowEnv {next_binding_id:env.next_binding_id,loan_head:env.loan_head,loan_count:env.loan_count,
+ loan_overflow:env.loan_overflow,failure_kind:env.failure_kind,failure_reported:env.failure_reported,
+ arena:env.arena,entry_root:env.entry_root,binding_root:env.binding_root,name_root:env.name_root,
+ consumed_root:env.consumed_root,owner_root:env.owner_root,carrier_root:env.carrier_root,dedup_root:env.dedup_root,
+ count:env.count,scope_head:env.scope_head,scope_depth:env.scope_depth,branch_head:env.branch_head,branch_depth:env.branch_depth}
 }
-pub fn borrow_binding_id(env:&BorrowEnv,name:Name)->i64 with Mut,Panic,Div {
-    let root=borrow_path_root(name)
-    var i=env.count-1
-    while i>=0 {
-        if name_eq(env.entries[i as usize].name,root) {return env.entries[i as usize].binding_id}
-        i=i-1
-    }
+fn bp_copy_name(name:Name)->Name with Mut,Panic,Div {
+ var copy=Name{buf:[0;384],len:name.len}
+ var i:i64=0
+ while i<name.len && i<384 {copy.buf[i as usize]=name.buf[i as usize];i=i+1}
+ copy
+}
+fn bp_copy_entry(entry:BorrowEntry,consumed:bool)->BorrowEntry with Mut,Panic,Div {
+ BorrowEntry {binding_id:entry.binding_id,name:bp_copy_name(entry.name),state:entry.state,
+ shared_count:entry.shared_count,loan_live:entry.loan_live,loan_temporary:entry.loan_temporary,
+ loan_pinned:entry.loan_pinned,is_affine:entry.is_affine,is_linear:entry.is_linear,
+ consumed:consumed,scope_depth:entry.scope_depth,provenance:entry.provenance}
+}
+
+fn bp_fail(arena:i64,kind:i64) with Mut,Panic,Div {
+    if arena>0 {let a=arena as *mut BorrowArena;if (*a).error==0 {(*a).error=kind}}
+}
+pub fn borrow_failure_kind(env:&BorrowEnv)->i64 with Mut,Panic,Div {
+    if env.failure_kind!=0 {return env.failure_kind}
+    if env.arena>0 {let a=env.arena as *mut BorrowArena;if (*a).error!=0 {return (*a).error}}
+    // loan_overflow also retains the legacy semantic poison for an escaped owner.
+    // Only explicit failure_kind/arena.error denotes a storage fault.
     0
 }
-pub fn borrow_binding_live(env:&BorrowEnv,id:i64)->bool with Mut,Panic,Div {
-    if id<=0 {return false}
+fn bp_failed(env:&BorrowEnv)->bool with Mut,Panic,Div {borrow_failure_kind(env)!=0}
+fn bp_poison(env:BorrowEnv,kind:i64)->BorrowEnv with Mut,Panic,Div {
+    var out=borrow_env_clone(&env)
+    out.loan_overflow=true
+    if out.failure_kind==0 {out.failure_kind=kind}
+    bp_fail(out.arena,kind)
+    out
+}
+fn bp_sync(env:BorrowEnv)->BorrowEnv with Mut,Panic,Div {
+    let kind=borrow_failure_kind(&env)
+    if kind!=0 {return bp_poison(env,kind)}
+    env
+}
+fn bp_alloc(arena:i64,bytes:i64)->i64 with Mut,Panic,Div,Alloc {
+    if arena<=0 {return 0}
+    let a=arena as *mut BorrowArena
+    if (*a).error!=0 {return 0}
+    if bytes<=0 || bytes>9223372036854775791 || (*a).bytes>9223372036854775791-bytes {bp_fail(arena,2);return 0}
+    let raw=heap_alloc(bytes+16) as i64
+    if raw<=0 {bp_fail(arena,1);return 0}
+    let h=raw as *mut BorrowAllocation
+    (*h).next=(*a).head;(*h).bytes=bytes+16
+    (*a).head=raw
+    (*a).bytes=(*a).bytes+bytes+16
+    (*a).allocations=(*a).allocations+1
+    raw+16
+}
+fn bp_get(root:i64,key:i64,arena:i64)->i64 with Mut,Panic,Div {
+    if key<=0 {bp_fail(arena,3);return 0}
+    if root==0 {return 0}
+    if root<0 {bp_fail(arena,4);return 0}
+    let r=root as *mut BorrowRadixRoot
+    var depth=(*r).depth
+    if depth<1 || depth>16 {bp_fail(arena,4);return 0}
+    if depth<16 {if (key >> (4*depth))!=0 {return 0}}
+    var cursor=(*r).page
+    while depth>0 {
+        if cursor==0 {return 0}
+        if cursor<0 {bp_fail(arena,4);return 0}
+        let p=cursor as *mut BorrowRadixPage
+        let slot=(key >> (4*(depth-1))) & 15
+        let value=(*p).slots[slot as usize]
+        if depth==1 {return value}
+        cursor=value;depth=depth-1
+    }
+    bp_fail(arena,4)
+    0
+}
+fn bp_copy_put(page:i64,depth:i64,key:i64,value:i64,arena:i64)->i64 with Mut,Panic,Div,Alloc {
+    if depth<1 || depth>16 || page<0 {bp_fail(arena,4);return 0}
+    let raw=bp_alloc(arena,256)
+    if raw==0 {return 0}
+    let fresh=raw as *mut BorrowRadixPage
     var i:i64=0
-    while i<env.count {
-        if env.entries[i as usize].binding_id==id {return true}
+    while i<16 {
+        var v:i64=0
+        if page!=0 {let old=page as *mut BorrowRadixPage;v=(*old).slots[i as usize]}
+        (*fresh).slots[i as usize]=v
         i=i+1
     }
-    false
+    let slot=(key >> (4*(depth-1))) & 15
+    if depth==1 {(*fresh).slots[slot as usize]=value}
+    else {
+        let child=bp_copy_put((*fresh).slots[slot as usize],depth-1,key,value,arena)
+        if child==0 {return 0}
+        (*fresh).slots[slot as usize]=child
+    }
+    raw
+}
+fn bp_put(root:i64,key:i64,value:i64,arena:i64)->i64 with Mut,Panic,Div,Alloc {
+    if key<=0 || root<0 {bp_fail(arena,3);return root}
+    var depth:i64=1
+    while depth<16 {if (key >> (4*depth))==0 {break};depth=depth+1}
+    var page:i64=0
+    var previous:i64=0
+    if root>0 {
+        let r=root as *mut BorrowRadixRoot
+        previous=(*r).depth;page=(*r).page
+        if previous<1 || previous>16 {bp_fail(arena,4);return root}
+        if previous>depth {depth=previous}
+    }
+    while previous>0 && previous<depth {
+        let raw=bp_alloc(arena,256)
+        if raw==0 {return root}
+        let p=raw as *mut BorrowRadixPage
+        var i:i64=0
+        while i<16 {(*p).slots[i as usize]=0;i=i+1}
+        (*p).slots[0]=page
+        page=raw;previous=previous+1
+    }
+    let updated=bp_copy_put(page,depth,key,value,arena)
+    if updated==0 {return root}
+    let raw=bp_alloc(arena,64)
+    if raw==0 {return root}
+    let r=raw as *mut BorrowRadixRoot
+    (*r).page=updated;(*r).depth=depth
+    raw
+}
+pub fn borrow_mark_failure(env:BorrowEnv,kind:i64)->BorrowEnv with Mut,Panic,Div {bp_poison(env,kind)}
+
+pub fn borrow_env_new()->BorrowEnv with Alloc {
+    // heap_alloc is zero-initialized, as required by existing checker tables.
+    let arena=heap_alloc(64) as i64
+    let failure=if arena<=0 {1}else{0}
+    BorrowEnv {next_binding_id:1,loan_head:0,loan_count:0,loan_overflow:failure!=0,failure_kind:failure,failure_reported:false,
+        arena:arena,entry_root:0,binding_root:0,name_root:0,consumed_root:0,owner_root:0,carrier_root:0,dedup_root:0,count:0,
+        scope_head:0,scope_depth:0,branch_head:0,branch_depth:0}
+}
+
+fn bp_cell_guard_write(raw:i64) with Mut,Panic,Div {
+ var i:i64=0
+ while i<8 {let p=(raw+8192+i*8) as *mut i64;*p=781273081865789761;i=i+1}
+}
+fn bp_cell_guard_valid(raw:i64,arena:i64)->bool with Mut,Panic,Div {
+ if raw<=0 {bp_fail(arena,4);return false}
+ var i:i64=0
+ while i<8 {
+  let p=(raw+8192+i*8) as *mut i64
+  if *p!=781273081865789761 {bp_fail(arena,4);return false}
+  i=i+1
+ }
+ true
+}
+pub fn borrow_entry_guards_ok(env:&BorrowEnv)->bool with Mut,Panic,Div {
+ var i:i64=0
+ while i<env.count {
+  let raw=bp_get(env.entry_root,i+1,env.arena)
+  if !bp_cell_guard_valid(raw,env.arena) {return false}
+  i=i+1
+ }
+ borrow_failure_kind(env)==0
+}
+
+pub fn borrow_entry_get(env:&BorrowEnv,index:i64)->BorrowEntry with Mut,Panic,Div {
+    if index<0 || index>=env.count {bp_fail(env.arena,3);return empty_borrow_entry()}
+    let raw=bp_get(env.entry_root,index+1,env.arena)
+    if raw<=0 {bp_fail(env.arena,4);return empty_borrow_entry()}
+    if !bp_cell_guard_valid(raw,env.arena) {return empty_borrow_entry()}
+    let cell=raw as *mut BorrowEntryCell
+    let entry=(*cell).value
+    if entry.binding_id<=0 || entry.name.len<0 || entry.name.len>384 {bp_fail(env.arena,4);return empty_borrow_entry()}
+    bp_copy_entry(entry,bp_get(env.consumed_root,entry.binding_id,env.arena)!=0)
+}
+fn bp_entry_publish(env:BorrowEnv,index:i64,entry:BorrowEntry,allow_relocation:bool)->BorrowEnv with Mut,Panic,Div,Alloc {
+    var out=borrow_env_clone(&env)
+    if bp_failed(&out) {return bp_sync(out)}
+    if index<0 || index>out.count || index>=9223372036854775806 || entry.binding_id<=0 {return bp_poison(out,3)}
+    if entry.name.len<0 || entry.name.len>384 {return bp_poison(out,3)}
+    let old_index=borrow_binding_index(&out,entry.binding_id)
+    if bp_failed(&out) {return bp_sync(out)}
+    if index<out.count && !allow_relocation {
+        let current=borrow_entry_get(&out,index)
+        if current.binding_id!=entry.binding_id {return bp_poison(out,3)}
+    }
+    if old_index>=0 && old_index!=index {
+        // Only the private compactor may move an existing stable ID to a lower slot.
+        if !allow_relocation || old_index<=index || index>=out.count {return bp_poison(out,3)}
+    }
+    // Explicit conservative cell budget. The layout component must guard this
+    // bound for every bootstrap/compiler ABI; there is no language sizeof yet.
+    let raw=bp_alloc(out.arena,8256)
+    if raw==0 {return bp_sync(out)}
+    let cell=raw as *mut BorrowEntryCell
+    bp_cell_guard_write(raw)
+    let frozen=bp_copy_entry(entry,entry.consumed)
+    (*cell).value=frozen
+    if !bp_cell_guard_valid(raw,out.arena) {return bp_sync(out)}
+    var add_name=old_index<0
+    if old_index>=0 {let old_entry=borrow_entry_get(&out,old_index);add_name=!name_eq(old_entry.name,entry.name)}
+    let entries=bp_put(out.entry_root,index+1,raw,out.arena)
+    var bindings=out.binding_root
+    if bp_get(bindings,entry.binding_id,out.arena)!=index+1 {bindings=bp_put(bindings,entry.binding_id,index+1,out.arena)}
+    var consumed=out.consumed_root
+    let bit=if entry.consumed {1} else {0}
+    if bp_get(consumed,entry.binding_id,out.arena)!=bit {consumed=bp_put(consumed,entry.binding_id,bit,out.arena)}
+    if bp_failed(&out) {return bp_sync(out)}
+    out.entry_root=entries;out.binding_root=bindings;out.consumed_root=consumed
+    if index==out.count {out.count=out.count+1}
+    if add_name {out=bp_name_add(out,entry.name,entry.binding_id)}
+    bp_sync(out)
+}
+pub fn borrow_entry_set(env:BorrowEnv,index:i64,entry:BorrowEntry)->BorrowEnv with Mut,Panic,Div,Alloc {
+    bp_entry_publish(env,index,entry,false)
+}
+pub fn borrow_set_consumed(env:BorrowEnv,id:i64,value:bool)->BorrowEnv with Mut,Panic,Div,Alloc {
+    var out=borrow_env_clone(&env)
+    if bp_failed(&out) {return bp_sync(out)}
+    if id<=0 {return bp_poison(out,3)}
+    let bit=if value {1} else {0}
+    if bp_get(out.consumed_root,id,out.arena)==bit {return out}
+    let root=bp_put(out.consumed_root,id,bit,out.arena)
+    if bp_failed(&out) {return bp_sync(out)}
+    out.consumed_root=root
+    out
+}
+pub fn borrow_binding_index(env:&BorrowEnv,id:i64)->i64 with Mut,Panic,Div {
+    if id<=0 {return 0-1}
+    let encoded=bp_get(env.binding_root,id,env.arena)
+    if encoded<=0 || encoded>env.count {return 0-1}
+    let entry=borrow_entry_get(env,encoded-1)
+    if entry.binding_id!=id {return 0-1}
+    encoded-1
+}
+
+struct BorrowNameLink {binding_id:i64,next:i64,length:i64}
+fn bp_name_key(env:&BorrowEnv,name:Name)->i64 with Mut,Panic,Div {
+    if name.len<0 || name.len>384 {bp_fail(env.arena,4);return 0}
+    var hash:i64=1;var i:i64=0
+    while i<name.len {
+        var byte=name.buf[i as usize] as i64
+        if byte<0 {byte=byte+256}
+        hash=(hash*131+byte)%2147483647
+        i=i+1
+    }
+    hash+1
+}
+fn bp_name_add(env:BorrowEnv,name:Name,id:i64)->BorrowEnv with Mut,Panic,Div,Alloc {
+    var out=borrow_env_clone(&env)
+    if name.len==0 {return out}
+    let key=bp_name_key(&out,name)
+    if key<=0 {return bp_sync(out)}
+    let head=bp_get(out.name_root,key,out.arena)
+    var n:i64=0
+    if head>0 {let old=head as *mut BorrowNameLink;n=(*old).length}
+    if head<0 || n<0 || n>=9223372036854775806 {return bp_poison(out,4)}
+    let raw=bp_alloc(out.arena,64)
+    if raw==0 {return bp_sync(out)}
+    let node=raw as *mut BorrowNameLink
+    (*node).binding_id=id;(*node).next=head;(*node).length=n+1
+    let root=bp_put(out.name_root,key,raw,out.arena)
+    if bp_failed(&out) {return bp_sync(out)}
+    out.name_root=root
+    out
+}
+pub fn borrow_find_index(env:&BorrowEnv,name:Name)->i64 with Mut,Panic,Div {
+    let key=bp_name_key(env,name)
+    if key<=0 {return 0-1}
+    var cursor=bp_get(env.name_root,key,env.arena)
+    var remaining:i64=0
+    if cursor>0 {let head=cursor as *mut BorrowNameLink;remaining=(*head).length}
+    if cursor<0 || remaining<0 {bp_fail(env.arena,4);return 0-1}
+    while cursor!=0 && remaining>0 {
+        let link=cursor as *mut BorrowNameLink
+        if (*link).length!=remaining {bp_fail(env.arena,4);return 0-1}
+        let index=borrow_binding_index(env,(*link).binding_id)
+        if index>=0 {let entry=borrow_entry_get(env,index);if name_eq(entry.name,name) {return index}}
+        cursor=(*link).next;remaining=remaining-1
+    }
+    if cursor!=0 || remaining!=0 {bp_fail(env.arena,4)}
+    0-1
+}
+
+pub fn borrow_binding_id(env:&BorrowEnv,name:Name)->i64 with Mut,Panic,Div {
+ let index=borrow_find_index(env,borrow_path_root(name))
+ if index<0 {return 0}
+ borrow_entry_get(env,index).binding_id
+}
+pub fn borrow_binding_live(env:&BorrowEnv,id:i64)->bool with Mut,Panic,Div {borrow_binding_index(env,id)>=0}
+pub fn borrow_carrier_live(env:&BorrowEnv,id:i64)->bool with Mut,Panic,Div {
+    let i=borrow_binding_index(env,id)
+    if i<0 {return false}
+    let entry=borrow_entry_get(env,i)
+    entry.loan_live && (entry.loan_pinned || !(entry.is_affine && entry.consumed))
+}
+pub fn borrow_branch_enter(env:BorrowEnv)->BorrowEnv with Mut,Panic,Div,Alloc {
+    var out=borrow_env_clone(&env)
+    if bp_failed(&out) {return bp_sync(out)}
+    if out.branch_depth>=9223372036854775806 {return bp_poison(out,2)}
+    let raw=bp_alloc(out.arena,64)
+    if raw==0 {return bp_sync(out)}
+    let f=raw as *mut BorrowBranchFrame
+    (*f).previous=out.branch_head;(*f).before=out.consumed_root;(*f).then_bits=0;(*f).count=out.count;(*f).phase=0
+    out.branch_head=raw;out.branch_depth=out.branch_depth+1
+    out
+}
+pub fn borrow_branch_then_done(env:BorrowEnv)->BorrowEnv with Mut,Panic,Div,Alloc {
+    var out=borrow_env_clone(&env)
+    if bp_failed(&out) {return bp_sync(out)}
+    if out.branch_head<=0 || out.branch_depth<=0 {return bp_poison(out,3)}
+    let old=out.branch_head as *mut BorrowBranchFrame
+    if (*old).phase!=0 {return bp_poison(out,3)}
+    let raw=bp_alloc(out.arena,64)
+    if raw==0 {return bp_sync(out)}
+    let f=raw as *mut BorrowBranchFrame
+    (*f).previous=(*old).previous;(*f).before=(*old).before;(*f).then_bits=out.consumed_root;(*f).count=out.count;(*f).phase=1
+    out.consumed_root=(*old).before;out.branch_head=raw
+    out
+}
+pub fn borrow_branch_before(env:&BorrowEnv,id:i64)->bool with Mut,Panic,Div {
+    if env.branch_head<=0 || id<=0 {bp_fail(env.arena,3);return false}
+    let f=env.branch_head as *mut BorrowBranchFrame
+    bp_get((*f).before,id,env.arena)!=0
+}
+pub fn borrow_branch_then(env:&BorrowEnv,id:i64)->bool with Mut,Panic,Div {
+    if env.branch_head<=0 || id<=0 {bp_fail(env.arena,3);return false}
+    let f=env.branch_head as *mut BorrowBranchFrame
+    if (*f).phase!=1 {bp_fail(env.arena,3);return false}
+    bp_get((*f).then_bits,id,env.arena)!=0
+}
+pub fn borrow_branch_leave(env:BorrowEnv)->BorrowEnv with Mut,Panic,Div {
+    var out=borrow_env_clone(&env)
+    if out.branch_head<=0 || out.branch_depth<=0 {return bp_poison(out,3)}
+    let f=out.branch_head as *mut BorrowBranchFrame
+    if (*f).phase!=1 {return bp_poison(out,3)}
+    out.branch_head=(*f).previous;out.branch_depth=out.branch_depth-1
+    bp_sync(out)
+}
+
+
+impl BorrowEnv {
+    fn push_scope(self)->BorrowEnv with Mut,Panic,Div,Alloc {
+        var out=borrow_env_clone(&self)
+        if bp_failed(&out) {return bp_sync(out)}
+        if out.scope_depth>=9223372036854775806 {return bp_poison(out,2)}
+        let raw=bp_alloc(out.arena,64)
+        if raw==0 {return bp_sync(out)}
+        let f=raw as *mut BorrowScopeFrame
+        (*f).previous=out.scope_head;(*f).start=out.count;(*f).names_before=out.name_root
+        out.scope_head=raw;out.scope_depth=out.scope_depth+1
+        out
+    }
+    fn pop_scope(self)->BorrowEnv with Mut,Panic,Div {
+        var out=borrow_env_clone(&self)
+        if out.scope_depth<=0 {return out}
+        if out.scope_head<=0 {return bp_poison(out,3)}
+        let f=out.scope_head as *mut BorrowScopeFrame
+        if (*f).start<0 || (*f).start>out.count {return bp_poison(out,3)}
+        out.count=(*f).start;out.name_root=(*f).names_before;out.scope_head=(*f).previous;out.scope_depth=out.scope_depth-1
+        // Dead slots need no mutation. Lookup validates count and stable identity;
+        // a copied older environment still sees its original immutable entries.
+        if out.count==0 {
+            out.entry_root=0;out.binding_root=0;out.name_root=0;out.consumed_root=0
+            out.loan_head=0;out.loan_count=0;out.owner_root=0;out.carrier_root=0;out.dedup_root=0
+        }
+        bp_sync(out)
+    }
+    fn track(self,name:Name,is_linear:bool)->BorrowEnv with Mut,Panic,Div,Alloc {
+        var out=borrow_env_clone(&self)
+        if bp_failed(&out) {return bp_sync(out)}
+        if out.count>=9223372036854775806 || out.next_binding_id>=9223372036854775806 {return bp_poison(out,2)}
+        let entry=BorrowEntry {binding_id:out.next_binding_id,name:name,state:0,shared_count:0,
+            loan_live:true,loan_temporary:false,loan_pinned:false,is_affine:false,is_linear:is_linear,
+            consumed:false,scope_depth:out.scope_depth,provenance:0}
+        out=borrow_entry_set(out,out.count,entry)
+        if !bp_failed(&out) {out.next_binding_id=out.next_binding_id+1}
+        bp_sync(out)
+    }
+    fn find(self,name:Name)->i64 with Mut,Panic,Div {borrow_find_index(&self,name)}
+    fn scope_depth_of(self,name:Name)->i64 with Mut,Panic,Div {
+        let i=self.find(name)
+        if i<0 {return 0-1}
+        borrow_entry_get(&self,i).scope_depth
+    }
+    fn provenance_of(self,name:Name)->i64 with Mut,Panic,Div {
+        let i=self.find(name)
+        if i<0 {return 0}
+        borrow_entry_get(&self,i).provenance
+    }
+    fn set_provenance(self,name:Name,prov:i64)->BorrowEnv with Mut,Panic,Div,Alloc {
+        var out=borrow_env_clone(&self)
+        let i=out.find(name)
+        if i>=0 {var entry=borrow_entry_get(&out,i);entry.provenance=prov;out=borrow_entry_set(out,i,entry)}
+        bp_sync(out)
+    }
+    fn try_shared_borrow(self,name:Name)->(BorrowEnv,i64) with Mut,Panic,Div,Alloc {
+        var out=borrow_env_clone(&self)
+        if bp_failed(&out) {return (bp_sync(out),37)}
+        let i=out.find(name)
+        if i<0 {return (out,0)}
+        var entry=borrow_entry_get(&out,i)
+        if entry.is_linear && entry.consumed {return (out,39)}
+        if entry.state==2 || borrow_persistent_state(&out,name)==2 {return (out,37)}
+        if entry.shared_count>=9223372036854775806 {return (bp_poison(out,2),37)}
+        entry.state=1;entry.shared_count=entry.shared_count+1
+        out=borrow_entry_set(out,i,entry)
+        (out,if bp_failed(&out) {37}else{0})
+    }
+    fn try_exclusive_borrow(self,name:Name)->(BorrowEnv,i64) with Mut,Panic,Div,Alloc {
+        var out=borrow_env_clone(&self)
+        if bp_failed(&out) {return (bp_sync(out),38)}
+        let i=out.find(name)
+        if i<0 {return (out,0)}
+        var entry=borrow_entry_get(&out,i)
+        if entry.is_linear && entry.consumed {return (out,39)}
+        if entry.state!=0 || borrow_persistent_state(&out,name)!=0 {return (out,38)}
+        entry.state=2
+        out=borrow_entry_set(out,i,entry)
+        (out,if bp_failed(&out) {38}else{0})
+    }
+    fn consume_linear(self,name:Name)->(BorrowEnv,i64) with Mut,Panic,Div,Alloc {
+        var out=borrow_env_clone(&self)
+        if bp_failed(&out) {return (bp_sync(out),38)}
+        let i=out.find(name)
+        if i<0 {return (out,0)}
+        let entry=borrow_entry_get(&out,i)
+        if !entry.is_linear {return (out,0)}
+        if borrow_persistent_state(&out,name)!=0 {return (out,38)}
+        if entry.consumed {return (out,39)}
+        out=borrow_set_consumed(out,entry.binding_id,true)
+        (out,if bp_failed(&out) {38}else{0})
+    }
+    fn check_linear_consumed(self)->(BorrowEnv,i64) with Mut,Panic,Div {
+        let out=self
+        var start:i64=0
+        if out.scope_depth>0 {
+            if out.scope_head<=0 {bp_fail(out.arena,3);return (out,0)}
+            let f=out.scope_head as *mut BorrowScopeFrame
+            start=(*f).start
+        }
+        if start<0 || start>out.count {bp_fail(out.arena,3);return (out,0)}
+        var n:i64=0;var i=start
+        while i<out.count {let entry=borrow_entry_get(&out,i);if entry.is_linear && !entry.consumed {n=n+1};i=i+1}
+        (out,n)
+    }
+    fn is_borrowed(self,name:Name)->bool with Mut,Panic,Div {
+        if bp_failed(&self) {return true}
+        let i=self.find(name)
+        if i<0 {return false}
+        let entry=borrow_entry_get(&self,i)
+        entry.state!=0 || borrow_persistent_state(&self,name)!=0
+    }
+    fn release_borrow(self,name:Name)->BorrowEnv with Mut,Panic,Div,Alloc {
+        var out=borrow_env_clone(&self)
+        if bp_failed(&out) {return bp_sync(out)}
+        let i=out.find(name)
+        if i>=0 {
+            var entry=borrow_entry_get(&out,i)
+            var changed=false
+            if entry.state==2 {entry.state=0;changed=true}
+            else if entry.state==1 {
+                entry.shared_count=entry.shared_count-1
+                if entry.shared_count<=0 {entry.state=0;entry.shared_count=0}
+                changed=true
+            }
+            if changed {out=borrow_entry_set(out,i,entry)}
+        }
+        bp_sync(out)
+    }
+    fn release_exclusive_borrows(self)->BorrowEnv with Mut,Panic,Div,Alloc {
+        var out=borrow_env_clone(&self)
+        var i:i64=0
+        while i<out.count {
+            var entry=borrow_entry_get(&out,i)
+            if entry.state==2 {entry.state=0;out=borrow_entry_set(out,i,entry)}
+            i=i+1
+        }
+        bp_sync(out)
+    }
+}
+pub fn borrow_end_temporaries_since(env:BorrowEnv,start:i64)->BorrowEnv with Mut,Panic,Div,Alloc {
+    var out=borrow_env_clone(&env);var i:i64=0
+    while i<out.count {
+        var entry=borrow_entry_get(&out,i)
+        if entry.loan_temporary && entry.binding_id>=start {entry.loan_live=false;out=borrow_entry_set(out,i,entry)}
+        i=i+1
+    }
+    bp_sync(out)
+}
+pub fn borrow_compact_temporaries(env:BorrowEnv)->BorrowEnv with Mut,Panic,Div,Alloc {
+    var out=borrow_env_clone(&env)
+    if out.scope_depth!=2 || out.branch_depth!=0 {return out}
+    var read:i64=0;var write:i64=0
+    while read<out.count {
+        let entry=borrow_entry_get(&out,read)
+        if !entry.loan_temporary || entry.scope_depth<2 {
+            if write!=read {out=bp_entry_publish(out,write,entry,true)}
+            write=write+1
+        }
+        read=read+1
+    }
+    out.count=write
+    bp_sync(out)
+}
+
+
+pub struct PersistentLoanEdge {pub owner:i64,pub carrier:i64,pub kind:i64,pub next:i64,pub length:i64}
+struct BorrowLoanLink {edge:i64,next:i64,length:i64}
+pub fn borrow_sources_count(head:i64)->i64 with Mut,Panic,Div {
+    if head<0 {return head}
+    if head==0 {return 0}
+    let e=head as *mut PersistentLoanEdge
+    if (*e).length<1 {return 0-4}
+    (*e).length
+}
+fn bp_link_count(head:i64,arena:i64)->i64 with Mut,Panic,Div {
+    if head==0 {return 0}
+    if head<0 {bp_fail(arena,4);return 0}
+    let link=head as *mut BorrowLoanLink
+    if (*link).length<1 {bp_fail(arena,4);return 0}
+    (*link).length
+}
+fn bp_link_new(arena:i64,head:i64,edge:i64)->i64 with Mut,Panic,Div,Alloc {
+    let n=bp_link_count(head,arena)
+    if n>=9223372036854775806 {bp_fail(arena,2);return 0}
+    let raw=bp_alloc(arena,64)
+    if raw==0 {return 0}
+    let link=raw as *mut BorrowLoanLink
+    (*link).edge=edge;(*link).next=head;(*link).length=n+1
+    raw
 }
 pub fn borrow_persistent_state(env:&BorrowEnv,name:Name)->i64 with Mut,Panic,Div {
-    if env.loan_overflow {return 2}
+    if bp_failed(env) || env.loan_overflow {return 2}
     let owner=borrow_binding_id(env,name)
     if owner==0 {return 0}
-    var cursor=env.loan_head
-    var count:i64=0
+    var cursor=bp_get(env.owner_root,owner,env.arena)
+    var remaining=bp_link_count(cursor,env.arena)
     var state:i64=0
-    while cursor!=0 && count<4096 {
-        let edge=cursor as *mut PersistentLoanEdge
-        if (*edge).owner==owner && borrow_carrier_live(env,(*edge).carrier) {
+    while cursor!=0 && remaining>0 {
+        let link=cursor as *mut BorrowLoanLink
+        if (*link).length!=remaining || (*link).edge<=0 {bp_fail(env.arena,4);return 2}
+        let edge=(*link).edge as *mut PersistentLoanEdge
+        if (*edge).owner!=owner || (*edge).kind<1 || (*edge).kind>4 {bp_fail(env.arena,4);return 2}
+        if borrow_carrier_live(env,(*edge).carrier) {
             if (*edge).kind==2 || (*edge).kind==4 {return 2}
             state=1
         }
-        cursor=(*edge).next
-        count=count+1
+        cursor=(*link).next;remaining=remaining-1
     }
-    if cursor!=0 {return 2}
+    if cursor!=0 || remaining!=0 {bp_fail(env.arena,4);return 2}
+    if bp_failed(env) {return 2}
     state
 }
 fn borrow_persist_edge(env:BorrowEnv,carrier:i64,owner:i64,kind:i64)->BorrowEnv with Mut,Panic,Div,Alloc {
-    var out=env
+    var out=borrow_env_clone(&env)
+    if bp_failed(&out) {return bp_sync(out)}
     if out.loan_overflow {return out}
-    if carrier<=0 || owner<=0 || (kind<1 || kind>4) {out.loan_overflow=true;return out}
-    if !borrow_binding_live(&out,carrier) {out.loan_overflow=true;return out}
-    if !borrow_binding_live(&out,owner) {if kind>=3 {return out};out.loan_overflow=true;return out}
-    var cursor=out.loan_head
-    var count:i64=0
-    while cursor!=0 && count<4096 {
-        let edge=cursor as *mut PersistentLoanEdge
-        if (*edge).owner==owner && (*edge).carrier==carrier && (*edge).kind==kind {return out}
-        cursor=(*edge).next
-        count=count+1
+    if carrier<=0 || owner<=0 || kind<1 || kind>4 {return bp_poison(out,3)}
+    if !borrow_binding_live(&out,carrier) {return bp_poison(out,3)}
+    if !borrow_binding_live(&out,owner) {
+        if kind>=3 {return out}
+        // A dead owner is a user escape error, not an allocator/index failure.
+        out.loan_overflow=true
+        return out
     }
-    if cursor!=0 || out.loan_count>=4096 {out.loan_overflow=true;return out}
-    let edge=heap_alloc(64) as *mut PersistentLoanEdge
-    if (edge as i64)<=0 {out.loan_overflow=true;return out}
-    (*edge).owner=owner
-    (*edge).carrier=carrier
-    (*edge).kind=kind
-    (*edge).next=out.loan_head
-    out.loan_head=edge as i64
-    out.loan_count=out.loan_count+1
+    let kinds_root=bp_get(out.dedup_root,owner,out.arena)
+    let kinds=bp_get(kinds_root,carrier,out.arena)
+    let one:i64=1
+    let mask=one << (kind-1)
+    if (kinds & mask)!=0 {return out}
+    let owner_head=bp_get(out.owner_root,owner,out.arena)
+    if out.loan_count>=9223372036854775806 {return bp_poison(out,2)}
+    if borrow_sources_count(out.loan_head)!=out.loan_count {return bp_poison(out,4)}
+    let raw=bp_alloc(out.arena,64)
+    if raw==0 {return bp_sync(out)}
+    let edge=raw as *mut PersistentLoanEdge
+    (*edge).owner=owner;(*edge).carrier=carrier;(*edge).kind=kind;(*edge).next=out.loan_head;(*edge).length=out.loan_count+1
+    let ol=bp_link_new(out.arena,owner_head,raw)
+    let carrier_head=bp_get(out.carrier_root,carrier,out.arena)
+    let cl=bp_link_new(out.arena,carrier_head,raw)
+    let owners=bp_put(out.owner_root,owner,ol,out.arena)
+    let carriers=bp_put(out.carrier_root,carrier,cl,out.arena)
+    let updated_kinds=bp_put(kinds_root,carrier,kinds | mask,out.arena)
+    let dedup=bp_put(out.dedup_root,owner,updated_kinds,out.arena)
+    if bp_failed(&out) {return bp_sync(out)}
+    out.owner_root=owners;out.carrier_root=carriers;out.dedup_root=dedup
+    out.loan_head=raw;out.loan_count=out.loan_count+1
     out
 }
 pub fn borrow_persist_owner(env:BorrowEnv,carrier:Name,owner:Name,kind:i64)->BorrowEnv with Mut,Panic,Div,Alloc {
     borrow_persist_edge(env,borrow_binding_id(&env,carrier),borrow_binding_id(&env,owner),kind)
 }
 pub fn borrow_persist_alias(env:BorrowEnv,carrier:Name,source:Name)->BorrowEnv with Mut,Panic,Div,Alloc {
-    var out=env
+    var out=borrow_env_clone(&env)
     let carrier_id=borrow_binding_id(&out,carrier)
     let source_id=borrow_binding_id(&out,source)
-    if carrier_id<=0 || source_id<=0 {out.loan_overflow=true;return out}
-    // Traverse the original immutable list, never newly added alias edges.
-    var cursor=env.loan_head
-    var count:i64=0
-    while cursor!=0 && count<4096 {
-        let edge=cursor as *mut PersistentLoanEdge
-        if (*edge).carrier==source_id {
-            out=borrow_persist_edge(out,carrier_id,(*edge).owner,(*edge).kind)
-        }
-        cursor=(*edge).next
-        count=count+1
+    if carrier_id<=0 || source_id<=0 {return bp_poison(out,3)}
+    // Read the original immutable carrier index, never newly published aliases.
+    var cursor=bp_get(env.carrier_root,source_id,env.arena)
+    var remaining=bp_link_count(cursor,env.arena)
+    while cursor!=0 && remaining>0 {
+        let link=cursor as *mut BorrowLoanLink
+        if (*link).length!=remaining || (*link).edge<=0 {return bp_poison(out,4)}
+        let edge=(*link).edge as *mut PersistentLoanEdge
+        if (*edge).carrier!=source_id {return bp_poison(out,4)}
+        out=borrow_persist_edge(out,carrier_id,(*edge).owner,(*edge).kind)
+        cursor=(*link).next;remaining=remaining-1
     }
-    if cursor!=0 {out.loan_overflow=true}
-    out
+    if cursor!=0 || remaining!=0 {return bp_poison(out,4)}
+    bp_sync(out)
 }
-
-impl BorrowEnv {
-    fn push_scope(self) -> BorrowEnv with Mut, Panic, Div {
-        var env = self
-        if env.scope_depth < 64 {
-            env.scope_starts[env.scope_depth] = env.count
-            env.scope_depth = env.scope_depth + 1
-        }
-        env
-    }
-
-    fn pop_scope(self) -> BorrowEnv with Mut, Panic, Div {
-        var env = self
-        if env.scope_depth > 0 {
-            env.scope_depth = env.scope_depth - 1
-            // Release borrows created in this scope by resetting state
-            let scope_start = env.scope_starts[env.scope_depth]
-            var i = scope_start
-            while i < env.count {
-                env.entries[i].state = 0
-                env.entries[i].shared_count = 0
-                i = i + 1
-            }
-            env.count = scope_start
-            if env.count==0 {env.loan_head=0;env.loan_count=0;env.loan_overflow=false}
-        }
-        env
-    }
-
-    // Register a variable for borrow tracking
-    fn track(self, name: Name, is_linear: bool) -> BorrowEnv with Mut, Panic, Div {
-        var env = self
-        if env.count < 128 {
-            env.entries[env.count] = BorrowEntry {
-                binding_id:env.next_binding_id,
-                name: name,
-                state: 0,
-                shared_count: 0,
-                loan_live:true,loan_temporary:false,loan_pinned:false,
-                is_affine:false,
-                is_linear: is_linear,
-                consumed: false,
-                scope_depth: env.scope_depth,
-                provenance: 0,
-            }
-            env.count = env.count + 1
-            if env.next_binding_id>=9223372036854775806 {env.loan_overflow=true} else {env.next_binding_id=env.next_binding_id+1}
-        } else {env.loan_overflow=true}
-        env
-    }
-
-    // Find entry index for a variable (most recent binding)
-    fn find(self, name: Name) -> i64 with Mut, Panic, Div {
-        var i = self.count - 1
-        while i >= 0 {
-            if name_eq(self.entries[i].name, name) {
-                return i
-            }
-            i = i - 1
-        }
-        -1
-    }
-
-    // Scope depth where a name was bound (-1 if not tracked). Params are bound at
-    // depth 1 (the fn param scope); body-locals at depth >= 2 (the body block pushes
-    // a second scope). So scope_depth_of(name) >= 2 iff name is a frame-bound local.
-    fn scope_depth_of(self, name: Name) -> i64 with Mut, Panic, Div {
-        let idx = self.find(name)
-        if idx < 0 { return -1 }
-        self.entries[idx].scope_depth
-    }
-
-    // Escape provenance of a binding (0=first-class, 1=local); 0 if not tracked.
-    fn provenance_of(self, name: Name) -> i64 with Mut, Panic, Div {
-        let idx = self.find(name)
-        if idx < 0 { return 0 }
-        self.entries[idx].provenance
-    }
-
-    // Record the escape provenance of a binding (set after track at let/var sites).
-    fn set_provenance(self, name: Name, prov: i64) -> BorrowEnv with Mut, Panic, Div {
-        var env = self
-        let idx = env.find(name)
-        if idx >= 0 {
-            env.entries[idx].provenance = prov
-        }
-        env
-    }
-
-    // Try to take a shared borrow (&x)
-    // Returns (updated env, error_code) where error_code 0 = ok, 37 = conflict
-    fn try_shared_borrow(self, name: Name) -> (BorrowEnv, i64) with Mut, Panic, Div {
-        var env = self
-        let idx = env.find(name)
-        if idx < 0 {
-            // Variable not tracked — allow (may be a global or external)
-            return (env, 0)
-        }
-        let entry = env.entries[idx]
-        // Borrowing a moved linear owner must remain a use-after-move error.
-        if entry.is_linear && entry.consumed { return (env, 39) }
-        if entry.state == 2 || borrow_persistent_state(&env,name)==2 {
-            // Cannot take shared borrow while exclusive borrow is active
-            return (env, 37)
-        }
-        // Increment shared borrow count
-        env.entries[idx].state = 1
-        env.entries[idx].shared_count = entry.shared_count + 1
-        (env, 0)
-    }
-
-    // Try to take an exclusive borrow (&!x)
-    // Returns (updated env, error_code) where error_code 0 = ok, 38 = conflict
-    fn try_exclusive_borrow(self, name: Name) -> (BorrowEnv, i64) with Mut, Panic, Div {
-        var env = self
-        let idx = env.find(name)
-        if idx < 0 {
-            return (env, 0)
-        }
-        let entry = env.entries[idx]
-        // Borrowing a moved linear owner must remain a use-after-move error.
-        if entry.is_linear && entry.consumed { return (env, 39) }
-        if entry.state != 0 || borrow_persistent_state(&env,name)!=0 {
-            // Cannot take exclusive borrow while any borrow is active
-            return (env, 38)
-        }
-        env.entries[idx].state = 2
-        (env, 0)
-    }
-
-    // Mark a linear variable as consumed (moved)
-    // Returns (updated env, error_code) where 0 = ok, 39 = already consumed
-    fn consume_linear(self, name: Name) -> (BorrowEnv, i64) with Mut, Panic, Div {
-        var env = self
-        let idx = env.find(name)
-        if idx < 0 {
-            return (env, 0)
-        }
-        let entry = env.entries[idx]
-        if !entry.is_linear {
-            return (env, 0)
-        }
-        if borrow_persistent_state(&env,name)!=0 {return (env,38)}
-        if entry.consumed {
-            // Double consumption of linear value
-            return (env, 39)
-        }
-        env.entries[idx].consumed = true
-        (env, 0)
-    }
-
-    // Check that all linear variables in the current scope have been consumed
-    // Returns (env, unconsumed_count)
-    fn check_linear_consumed(self) -> (BorrowEnv, i64) with Mut, Panic, Div {
-        let env = self
-        var unconsumed: i64 = 0
-        let scope_start = if env.scope_depth > 0 {
-            env.scope_starts[env.scope_depth - 1]
-        } else {
-            0
-        }
-        var i = scope_start
-        while i < env.count {
-            if env.entries[i].is_linear && !env.entries[i].consumed {
-                unconsumed = unconsumed + 1
-            }
-            i = i + 1
-        }
-        (env, unconsumed)
-    }
-
-    // Check if a variable is currently borrowed (state != 0)
-    // Returns true if the variable has an active shared or exclusive borrow
-    fn is_borrowed(self, name: Name) -> bool with Mut, Panic, Div {
-        let idx = self.find(name)
-        if idx < 0 {
-            return false
-        }
-        let entry = self.entries[idx]
-        entry.state != 0 || borrow_persistent_state(&self,name)!=0
-    }
-
-    // Release a borrow on a named variable, restoring it to Owned state.
-    // Called after a function call returns to release borrows taken for parameters.
-    fn release_borrow(self, name: Name) -> BorrowEnv with Mut, Panic, Div {
-        var env = self
-        let idx = env.find(name)
-        if idx >= 0 {
-            if env.entries[idx].state == 2 {
-                // Exclusive borrow -> Owned
-                env.entries[idx].state = 0
-            } else if env.entries[idx].state == 1 {
-                // Decrement shared borrow count
-                env.entries[idx].shared_count = env.entries[idx].shared_count - 1
-                if env.entries[idx].shared_count <= 0 {
-                    env.entries[idx].state = 0
-                    env.entries[idx].shared_count = 0
-                }
-            }
-        }
-        env
-    }
-
-    // Release all exclusive borrows in the current scope.
-    // Used at loop iteration boundaries to allow re-borrowing in the next iteration.
-    fn release_exclusive_borrows(self) -> BorrowEnv with Mut, Panic, Div {
-        var env = self
-        var i: i64 = 0
-        while i < env.count {
-            if env.entries[i].state == 2 {
-                env.entries[i].state = 0
-            }
-            i = i + 1
-        }
-        env
-    }
-}
-
-// Stage source identities before a new name is bound: shadowing in an
-// initializer must keep the previous binding's identity.
 pub fn borrow_sources_add(head:i64,owner:i64,kind:i64)->i64 with Mut,Panic,Div,Alloc {
     if head<0 {return head}
     if owner==0 {return head}
-    if owner<0 || (kind<1 || kind>4) {return 0-1}
-    var cursor=head
-    var count:i64=0
-    while cursor!=0 && count<4096 {
+    if owner<0 || kind<1 || kind>4 {return 0-3}
+    let n=borrow_sources_count(head)
+    if n<0 {return n}
+    if n>=9223372036854775806 {return 0-2}
+    var cursor=head;var remaining=n
+    while cursor!=0 && remaining>0 {
         let edge=cursor as *mut PersistentLoanEdge
+        if (*edge).length!=remaining {return 0-4}
         if (*edge).owner==owner && (*edge).kind==kind {return head}
-        cursor=(*edge).next
-        count=count+1
+        cursor=(*edge).next;remaining=remaining-1
     }
-    if cursor!=0 || count>=4096 {return 0-1}
-    let edge=heap_alloc(64) as *mut PersistentLoanEdge
-    if (edge as i64)<=0 {return 0-1}
-    (*edge).owner=owner
-    (*edge).carrier=0
-    (*edge).kind=kind
-    (*edge).next=head
-    edge as i64
+    if cursor!=0 || remaining!=0 {return 0-4}
+    let raw=heap_alloc(64) as i64
+    if raw<=0 {return 0-1}
+    let edge=raw as *mut PersistentLoanEdge
+    (*edge).owner=owner;(*edge).carrier=0;(*edge).kind=kind;(*edge).next=head;(*edge).length=n+1
+    raw
 }
 pub fn borrow_sources_alias(env:&BorrowEnv,name:Name,head:i64,kind:i64)->i64 with Mut,Panic,Div,Alloc {
     let source=borrow_binding_id(env,name)
     if source==0 {return head}
     var out=head
     var found=false
-    var cursor=env.loan_head
-    var count:i64=0
-    while cursor!=0 && count<4096 {
-        let edge=cursor as *mut PersistentLoanEdge
-        if (*edge).carrier==source {
-            out=borrow_sources_add(out,(*edge).owner,(*edge).kind)
-            found=true
-        }
-        cursor=(*edge).next
-        count=count+1
+    var cursor=bp_get(env.carrier_root,source,env.arena)
+    var remaining=bp_link_count(cursor,env.arena)
+    while cursor!=0 && remaining>0 {
+        let link=cursor as *mut BorrowLoanLink
+        if (*link).length!=remaining || (*link).edge<=0 {bp_fail(env.arena,4);return 0-4}
+        let edge=(*link).edge as *mut PersistentLoanEdge
+        if (*edge).carrier!=source {bp_fail(env.arena,4);return 0-4}
+        out=borrow_sources_add(out,(*edge).owner,kind);found=true
+        cursor=(*link).next;remaining=remaining-1
     }
-    if cursor!=0 {return 0-1}
+    if cursor!=0 || remaining!=0 {bp_fail(env.arena,4);return 0-4}
     if !found {out=borrow_sources_add(out,source,kind)}
     out
 }
 pub fn borrow_persist_sources(env:BorrowEnv,name:Name,sources:i64)->BorrowEnv with Mut,Panic,Div,Alloc {
-    var out=env
-    if sources<0 {out.loan_overflow=true;return out}
+    var out=borrow_env_clone(&env)
+    if sources<0 {return bp_poison(out,0-sources)}
     let carrier=borrow_binding_id(&out,name)
-    var cursor=sources
-    var count:i64=0
-    while cursor!=0 && count<4096 {
+    var cursor=sources;var remaining=borrow_sources_count(sources)
+    if remaining<0 {return bp_poison(out,0-remaining)}
+    while cursor!=0 && remaining>0 {
         let edge=cursor as *mut PersistentLoanEdge
+        if (*edge).length!=remaining {return bp_poison(out,4)}
         out=borrow_persist_edge(out,carrier,(*edge).owner,(*edge).kind)
-        cursor=(*edge).next
-        count=count+1
+        cursor=(*edge).next;remaining=remaining-1
     }
-    if cursor!=0 {out.loan_overflow=true}
-    out
+    if cursor!=0 || remaining!=0 {return bp_poison(out,4)}
+    bp_sync(out)
 }
-
 pub fn borrow_sources_union(left:i64,right:i64)->i64 with Mut,Panic,Div,Alloc {
-    if left<0 || right<0 {return 0-1}
-    var out=left
-    var cursor=right
-    var count:i64=0
-    while cursor!=0 && count<4096 {
+    if left<0 {return left}
+    if right<0 {return right}
+    var out=left;var cursor=right;var remaining=borrow_sources_count(right)
+    if remaining<0 {return remaining}
+    while cursor!=0 && remaining>0 {
         let edge=cursor as *mut PersistentLoanEdge
+        if (*edge).length!=remaining {return 0-4}
         out=borrow_sources_add(out,(*edge).owner,(*edge).kind)
-        cursor=(*edge).next
-        count=count+1
+        cursor=(*edge).next;remaining=remaining-1
     }
-    if cursor!=0 {return 0-1}
+    if cursor!=0 || remaining!=0 {return 0-4}
     out
 }
-
 pub fn borrow_sources_all_live(env:&BorrowEnv,sources:i64)->bool with Mut,Panic,Div {
-    if sources<0 {return false}
-    var cursor=sources
-    var count:i64=0
-    while cursor!=0 && count<4096 {
+    if sources<0 {bp_fail(env.arena,0-sources);return false}
+    if bp_failed(env) {return false}
+    var cursor=sources;var remaining=borrow_sources_count(sources)
+    if remaining<0 {bp_fail(env.arena,4);return false}
+    while cursor!=0 && remaining>0 {
         let edge=cursor as *mut PersistentLoanEdge
+        if (*edge).length!=remaining {bp_fail(env.arena,4);return false}
         if (*edge).kind<=2 {if !borrow_binding_live(env,(*edge).owner) {return false}}
-        cursor=(*edge).next
-        count=count+1
+        cursor=(*edge).next;remaining=remaining-1
     }
-    cursor==0
-}
-
-// Affine carriers may be moved or discarded; they never acquire a Drop duty.
-pub fn borrow_carrier_live(env:&BorrowEnv,id:i64)->bool with Mut,Panic,Div {
-    if id<=0 {return false}
-    var i:i64=0
-    while i<env.count {
-        let entry=env.entries[i as usize]
-        if entry.binding_id==id {return entry.loan_live && (entry.loan_pinned || !(entry.is_affine && entry.consumed))}
-        i=i+1
-    }
-    false
-}
-
-pub fn borrow_end_temporaries_since(env:BorrowEnv,start:i64)->BorrowEnv with Mut,Panic,Div {
-    var out=env
-    var i:i64=0
-    while i<out.count {
-        var entry=out.entries[i as usize]
-        if entry.loan_temporary && entry.binding_id>=start {
-            entry.loan_live=false
-            out.entries[i as usize]=entry
-        }
-        i=i+1
-    }
-    out
+    if cursor!=0 || remaining!=0 {bp_fail(env.arena,4);return false}
+    true
 }
 pub fn borrow_add_temporary(env:BorrowEnv,sources:i64)->BorrowEnv with Mut,Panic,Div,Alloc {
     if sources==0 {return env}
-    if sources<0 {var failed=env;failed.loan_overflow=true;return failed}
-    var out=env.track(Name{buf:[0;384],len:0},false)
-    if out.count<=0 || out.loan_overflow {return out}
-    var entry=out.entries[(out.count-1) as usize]
-    // Empty source names cannot be spelled as a user binding.
+    if sources<0 {return bp_poison(env,0-sources)}
+    var out=borrow_env_clone(&env).track(Name{buf:[0;384],len:0},false)
+    if out.count<=0 || bp_failed(&out) {return bp_sync(out)}
+    var entry=borrow_entry_get(&out,out.count-1)
     entry.loan_temporary=true
-    out.entries[(out.count-1) as usize]=entry
-    var cursor=sources
-    var count:i64=0
-    while cursor!=0 && count<4096 {
+    out=borrow_entry_set(out,out.count-1,entry)
+    var cursor=sources;var remaining=borrow_sources_count(sources)
+    if remaining<0 {return bp_poison(out,0-remaining)}
+    while cursor!=0 && remaining>0 {
         let edge=cursor as *mut PersistentLoanEdge
+        if (*edge).length!=remaining {return bp_poison(out,4)}
         out=borrow_persist_edge(out,entry.binding_id,(*edge).owner,(*edge).kind)
-        cursor=(*edge).next
-        count=count+1
+        cursor=(*edge).next;remaining=remaining-1
     }
-    if sources<0 || cursor!=0 {out.loan_overflow=true}
-    out
-}
-pub fn borrow_compact_temporaries(env:BorrowEnv)->BorrowEnv with Mut,Panic,Div {
-    var out=env
-    // Only call between full statements at the function-body level; there is
-    // no active branch snapshot or nested scope index to shift at that point.
-    if out.scope_depth!=2 || out.branch_depth!=0 {return out}
-    var read:i64=0
-    var write:i64=0
-    while read<out.count {
-        let entry=out.entries[read as usize]
-        if !entry.loan_temporary || entry.scope_depth<2 {
-            if write!=read {out.entries[write as usize]=entry}
-            write=write+1
-        }
-        read=read+1
-    }
-    out.count=write
-    out
+    if cursor!=0 || remaining!=0 {return bp_poison(out,4)}
+    bp_sync(out)
 }
 pub fn borrow_has_carrier_edge(env:&BorrowEnv,id:i64)->bool with Mut,Panic,Div {
-    var cursor=env.loan_head
-    var count:i64=0
-    while cursor!=0 && count<4096 {
-        let edge=cursor as *mut PersistentLoanEdge
-        if (*edge).carrier==id {return true}
-        cursor=(*edge).next
-        count=count+1
-    }
-    cursor!=0
+    if bp_failed(env) {return true}
+    if id<=0 {return false}
+    let head=bp_get(env.carrier_root,id,env.arena)
+    bp_link_count(head,env.arena)>0
 }

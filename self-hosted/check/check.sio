@@ -4141,7 +4141,28 @@ fn checker_prove_robust_names_mut(c: *mut Checker, contest_name: Name, policy_na
 // `checker_check_expr_mut` (a single copy, off the hello.sio path).
 // ============================================================
 
+// Storage failures are fatal to this checker verdict, independent of later
+// backtracking. They must not be advertised as conflicting user borrows.
+fn checker_report_borrow_failure_inplace(c:*mut Checker)->bool with Mut,IO,Panic,Div {
+ let reason=borrow_failure_kind(&(*c).borrows)
+ if reason==0 {return false}
+ (*c).had_error=true
+ if (*c).error_count==0 {(*c).error_count=1}
+ if !(*c).borrows.failure_reported {
+  (*c).borrows.failure_reported=true
+  (*c).diag_emitted=true
+  print("error[E397]: borrow checker storage failure: ")
+  if reason==1 {print("allocation failed")}
+  else if reason==2 {print("storage or binding identity overflow")}
+  else if reason==3 {print("invalid storage index or state")}
+  else {print("corrupt persistent path or loan length")}
+  print("\n   = note: compilation is refused; no loan is discarded and no successful verdict is produced\n")
+ }
+ true
+}
+
 fn checker_report_error_at_inplace(c: *mut Checker, span: Span, code: i64, msg_a: i64, msg_b: i64, msg_c: i64) with Mut, IO, Panic, Div, Alloc {
+    if checker_report_borrow_failure_inplace(c) {return}
     (*c).error_count = (*c).error_count + 1
     (*c).had_error = true
     (*c).diag_emitted = true
@@ -7020,8 +7041,10 @@ fn checker_report_multitest_correction_required_inplace(c: *mut Checker, span: S
 
 // The caller must invoke this before popping the scope whose bindings it owns.
 fn checker_require_current_linear_scope_consumed_inplace(c: *mut Checker) with Mut, IO, Panic, Div {
+    if checker_report_borrow_failure_inplace(c) {return}
     let linear_check = (*c).borrows.check_linear_consumed()
     (*c).borrows = linear_check.0
+    if checker_report_borrow_failure_inplace(c) {return}
     if linear_check.1 > 0 {
         (*c).had_error = true
         (*c).error_count = (*c).error_count + 1
@@ -7541,27 +7564,27 @@ fn checker_type_has_affine_borrow(c:*mut Checker,ty:TypeEntry)->bool with Mut,Pa
 fn checker_set_affine_binding(c:*mut Checker,name:Name,ty:TypeEntry) with Mut,Panic,Div,Alloc,IO {
     let index=(*c).borrows.find(name)
     if index>=0 {
-        var entry=(*c).borrows.entries[index as usize]
+        var entry=borrow_entry_get(&(*c).borrows,index)
         entry.is_affine=checker_type_has_affine_borrow(c,ty)
-        (*c).borrows.entries[index as usize]=entry
+        (*c).borrows = borrow_entry_set((*c).borrows,index,entry)
     }
 }
 fn checker_take_affine_binding(c:*mut Checker,name:Name,span:Span) with Mut,Panic,Div,Alloc,IO {
     let index=(*c).borrows.find(borrow_path_root(name))
     if index>=0 {
-        var entry=(*c).borrows.entries[index as usize]
+        var entry=borrow_entry_get(&(*c).borrows,index)
         if entry.is_affine && !entry.is_linear {
             if borrow_persistent_state(&(*c).borrows,name)!=0 {checker_report_error_at_inplace(c,span,38,0,0,0);return}
             if entry.consumed {checker_report_error_at_inplace(c,span,39,0,0,0)}
             entry.consumed=true
-            (*c).borrows.entries[index as usize]=entry
+            (*c).borrows = borrow_entry_set((*c).borrows,index,entry)
         }
     }
 }
 fn checker_affine_binding_moved(c:*mut Checker,name:Name)->bool with Mut,Panic,Div {
     let index=(*c).borrows.find(borrow_path_root(name))
     if index<0 {return false}
-    let entry=(*c).borrows.entries[index as usize]
+    let entry=borrow_entry_get(&(*c).borrows,index)
     entry.is_affine && entry.consumed
 }
 
@@ -7593,11 +7616,11 @@ fn checker_loan_result_lookup(c:*mut Checker,e:Expr)->i64 with Mut,Panic,Div {
 }
 fn checker_loan_result_record(c:*mut Checker,e:Expr,sources:i64) with Mut,Panic,Div,Alloc {
     if (*c).loan_result_count>=8192 {
-        if sources!=0 {(*c).borrows.loan_overflow=true}
+        if sources!=0 {(*c).borrows=borrow_mark_failure((*c).borrows,2)}
         return
     }
     let item=heap_alloc(128) as *mut CheckedLoanResult
-    if (item as i64)<=0 {(*c).borrows.loan_overflow=true;return}
+    if (item as i64)<=0 {(*c).borrows=borrow_mark_failure((*c).borrows,1);return}
     (*item).module_id=(*c).current_module_id
     (*item).sig_id=(*c).current_sig_id
     (*item).file_id=e.span.file_id
@@ -7714,27 +7737,22 @@ fn checker_collect_loan_sources_opt(c:*mut Checker,e:Option<Box<Expr> >)->i64 wi
     match e {Some(value)=>checker_collect_loan_sources(c,*value,0,0),None=>0}
 }
 fn checker_loan_sources_local(c:*mut Checker,sources:i64)->i64 with Mut,Panic,Div {
-    if sources<0 {return 1}
-    var cursor=sources
-    var count:i64=0
-    while cursor!=0 && count<4096 {
-        let edge=cursor as *mut PersistentLoanEdge
-        if (*edge).kind>=3 {cursor=(*edge).next;count=count+1;continue}
-        var i:i64=0
-        var found=false
-        while i<(*c).borrows.count {
-            if (*c).borrows.entries[i as usize].binding_id==(*edge).owner {
-                found=true
-                if (*c).borrows.entries[i as usize].scope_depth>=2 {return 1}
-            }
-            i=i+1
-        }
-        if !found {return 1}
-        cursor=(*edge).next
-        count=count+1
-    }
-    if cursor!=0 {return 1}
-    0
+ if sources<0 {(*c).borrows=borrow_mark_failure((*c).borrows,0-sources);return 1}
+ var cursor=sources
+ var remaining=borrow_sources_count(sources)
+ if remaining<0 {(*c).borrows=borrow_mark_failure((*c).borrows,4);return 1}
+ while cursor!=0 && remaining>0 {
+  let edge=cursor as *mut PersistentLoanEdge
+  if (*edge).length!=remaining {(*c).borrows=borrow_mark_failure((*c).borrows,4);return 1}
+  if (*edge).kind<3 {
+   let index=borrow_binding_index(&(*c).borrows,(*edge).owner)
+   if index<0 {return 1}
+   if borrow_entry_get(&(*c).borrows,index).scope_depth>=2 {return 1}
+  }
+  cursor=(*edge).next;remaining=remaining-1
+ }
+ if cursor!=0 || remaining!=0 {(*c).borrows=borrow_mark_failure((*c).borrows,4);return 1}
+ 0
 }
 
 // Escape provenance (raw-reference escape analysis)
@@ -8002,12 +8020,12 @@ fn checker_end_statement_loans(c:*mut Checker,remaining:Option<Box<StmtList>>) w
     (*c).borrows=borrow_end_temporaries_since((*c).borrows,0)
     var i:i64=0
     while i<(*c).borrows.count {
-        var entry=(*c).borrows.entries[i as usize]
+        var entry=borrow_entry_get(&(*c).borrows,i)
         if !entry.loan_temporary && !entry.loan_pinned && entry.loan_live {
             if borrow_has_carrier_edge(&(*c).borrows,entry.binding_id) {
                 if !checker_loan_name_in_stmts(c,entry.name,remaining,0) {
                     entry.loan_live=false
-                    (*c).borrows.entries[i as usize]=entry
+                    (*c).borrows = borrow_entry_set((*c).borrows,i,entry)
                 }
             }
         }
@@ -8508,7 +8526,7 @@ fn checker_check_expr_inplace(c:*mut Checker,e:Expr)->TypeEntry with Mut,Panic,D
     if (*c).in_closure_body && e.kind==ExprKind::ExprIdent {
         let index=(*c).borrows.find(e.name)
         if index>=0 && index<(*c).closure_capture_count {
-            if has_ref {var captured=(*c).borrows.entries[index as usize];captured.loan_pinned=true;captured.loan_live=true;(*c).borrows.entries[index as usize]=captured}
+            if has_ref {var captured=borrow_entry_get(&(*c).borrows,index);captured.loan_pinned=true;captured.loan_live=true;(*c).borrows = borrow_entry_set((*c).borrows,index,captured)}
         }
     }
     if (*c).suppress_affine_consume_depth==0 && (*c).suppress_linear_consume_depth==0 {
@@ -9535,100 +9553,56 @@ fn checker_check_opt_block_inplace(c: *mut Checker, opt: Option<Box<Block> >) ->
 //   if c { use(t) }                   accepted, though `t` survives unconsumed
 //                                     on the implicit else path
 //
-// These mutate (*c).borrows fields in place rather than going through BorrowEnv
-// methods. Two other shapes were built and measured and neither is usable:
-// by-value `self -> BorrowEnv` methods (three aggregate round-trips per `if`),
-// and `&!BorrowEnv` methods (mutations never land; reaching one through a
-// pointer segfaults).
+// BorrowEnv is a small immutable-root header. Explicit constructor copies and
+// consumed-state roots replace the old fixed arrays. Snapshot frames share
+// immutable pages; a branch never rewrites the sibling snapshot.
 // ============================================================
 
 // Record the on-entry `consumed` state for this branch level.
-fn checker_branch_enter_inplace(c: *mut Checker) with Mut, Panic, Div, Alloc, IO {
-    let d = (*c).borrows.branch_depth
-    (*c).borrows.branch_depth = d + 1
-    // Beyond the tracked nesting depth the counter stays balanced but nothing is
-    // stored; the merge then leaves state alone, degrading to the old sequential
-    // behaviour rather than merging against a stale snapshot.
-    if d < MAX_BRANCH_LEVELS {
-        var i: i64 = 0
-        while i < (*c).borrows.count {
-            (*c).borrows.branch_snap[i * MAX_BRANCH_SNAP + 2 * d] = (*c).borrows.entries[i].consumed
-            i = i + 1
-        }
-    }
+fn checker_branch_enter_inplace(c:*mut Checker) with Mut,Panic,Div,Alloc,IO {
+ (*c).borrows=borrow_branch_enter((*c).borrows)
+ if checker_report_borrow_failure_inplace(c) {return}
 }
 
 // Stash the end-of-then-arm state and rewind to the on-entry state, so the
 // else-arm is checked from the same starting point the then-arm had.
-fn checker_branch_then_done_inplace(c: *mut Checker) with Mut, Panic, Div, Alloc, IO {
-    let d = (*c).borrows.branch_depth - 1
-    if d >= 0 && d < MAX_BRANCH_LEVELS {
-        var i: i64 = 0
-        while i < (*c).borrows.count {
-            (*c).borrows.branch_snap[i * MAX_BRANCH_SNAP + 2 * d + 1] = (*c).borrows.entries[i].consumed
-            // Whole-element read-modify-write. Assigning THROUGH a nested place --
-            // `(*c).borrows.entries[i].consumed = ...`, i.e. deref -> field -> index ->
-            // field -- is not resolved by the lean_single front end, which is the seed
-            // that builds Madaros. It reports `unknown identifier consumed` and the
-            // emitted store lands somewhere else in the Checker (issue #1471). The rest
-            // of this file already uses this idiom for the same reason; see the
-            // TypeEnv.bindings update in checker_env_mark_mutable_inplace.
-            var be_rewind = (*c).borrows.entries[i as usize]
-            be_rewind.consumed = (*c).borrows.branch_snap[i * MAX_BRANCH_SNAP + 2 * d]
-            (*c).borrows.entries[i as usize] = be_rewind
-            i = i + 1
-        }
-    }
+fn checker_branch_then_done_inplace(c:*mut Checker) with Mut,Panic,Div,Alloc,IO {
+ (*c).borrows=borrow_branch_then_done((*c).borrows)
+ if checker_report_borrow_failure_inplace(c) {return}
 }
 
 // Combine the two arms and report values consumed on only one path. A linear
 // binding is consumed after the `if` only if BOTH arms consumed it; if exactly
 // one did, its fate depends on a runtime condition, which linearity forbids.
-fn checker_merge_if_branches_inplace(c: *mut Checker) with Mut, Panic, Div, Alloc, IO {
-    let d = (*c).borrows.branch_depth - 1
-    if d < 0 {
-        return
-    }
-    (*c).borrows.branch_depth = d
-    if d >= MAX_BRANCH_LEVELS {
-        return
-    }
-    var mismatch: i64 = 0
-    var i: i64 = 0
-    while i < (*c).borrows.count {
-        if (*c).borrows.entries[i].is_linear && !(*c).borrows.branch_snap[i * MAX_BRANCH_SNAP + 2 * d] {
-            let then_consumed = (*c).borrows.branch_snap[i * MAX_BRANCH_SNAP + 2 * d + 1]
-            let else_consumed = (*c).borrows.entries[i].consumed
-            var be_merge = (*c).borrows.entries[i as usize]
-            if then_consumed != else_consumed {
-                mismatch = mismatch + 1
-                be_merge.consumed = true
-            } else {
-                be_merge.consumed = then_consumed
-            }
-            (*c).borrows.entries[i as usize] = be_merge
-        }
-        // Affine values have no Drop obligation. A move on either path makes a
-        // later use unsafe, without requiring both paths to consume the value.
-        if (*c).borrows.entries[i].is_affine && !(*c).borrows.entries[i].is_linear {
-            let then_consumed=(*c).borrows.branch_snap[i*MAX_BRANCH_SNAP+2*d+1]
-            let else_consumed=(*c).borrows.entries[i].consumed
-            var affine_entry=(*c).borrows.entries[i as usize]
-            affine_entry.consumed=then_consumed || else_consumed
-            (*c).borrows.entries[i as usize]=affine_entry
-        }
-        i = i + 1
-    }
-    if mismatch > 0 {
-        (*c).had_error = true
-        (*c).error_count = (*c).error_count + 1
-        (*c).diag_emitted = true
-        print("error[E040]: linear value not consumed on every path (")
-        print_int(mismatch)
-        print(" value(s) consumed in one branch only)\n")
-        print("   = help: a linear value must be consumed on both branches of an `if`, or on neither\n")
-        print("   = note: linear types enforce single-use semantics for resources\n")
-    }
+fn checker_merge_if_branches_inplace(c:*mut Checker) with Mut,Panic,Div,Alloc,IO {
+ if checker_report_borrow_failure_inplace(c) {return}
+ var mismatch:i64=0
+ var i:i64=0
+ while i<(*c).borrows.count {
+  let entry=borrow_entry_get(&(*c).borrows,i)
+  let before=borrow_branch_before(&(*c).borrows,entry.binding_id)
+  let then_consumed=borrow_branch_then(&(*c).borrows,entry.binding_id)
+  let else_consumed=entry.consumed
+  if entry.is_linear && !before {
+   var merged=then_consumed
+   if then_consumed!=else_consumed {mismatch=mismatch+1;merged=true}
+   (*c).borrows=borrow_set_consumed((*c).borrows,entry.binding_id,merged)
+  }
+  if entry.is_affine && !entry.is_linear {
+   (*c).borrows=borrow_set_consumed((*c).borrows,entry.binding_id,then_consumed || else_consumed)
+  }
+  i=i+1
+ }
+ (*c).borrows=borrow_branch_leave((*c).borrows)
+ if checker_report_borrow_failure_inplace(c) {return}
+ if mismatch>0 {
+  (*c).had_error=true;(*c).error_count=(*c).error_count+1;(*c).diag_emitted=true
+  print("error[E040]: linear value not consumed on every path (")
+  print_int(mismatch)
+  print(" value(s) consumed in one branch only)\n")
+  print("   = help: a linear value must be consumed on both branches of an `if`, or on neither\n")
+  print("   = note: linear types enforce single-use semantics for resources\n")
+ }
 }
 
 // ============================================================
@@ -10057,9 +10031,9 @@ fn checker_place_borrow_conflict_inplace(c: *mut Checker, name: Name, want_excl:
     if persistent==2 || (want_excl && persistent!=0) {return true}
     var i: i64 = 0
     while i < (*c).borrows.count {
-        if i != self_idx && (*c).borrows.entries[i].state != 0 {
-            if borrow_paths_overlap((*c).borrows.entries[i].name, name) {
-                if want_excl || (*c).borrows.entries[i].state == 2 { return true }
+        if i != self_idx && borrow_entry_get(&(*c).borrows,i).state != 0 {
+            if borrow_paths_overlap(borrow_entry_get(&(*c).borrows,i).name, name) {
+                if want_excl || borrow_entry_get(&(*c).borrows,i).state == 2 { return true }
             }
         }
         i = i + 1
@@ -10095,18 +10069,17 @@ fn checker_take_borrow_inplace(c: *mut Checker, name: Name, want_excl: bool) -> 
         return 37
     }
     if idx < 0 {
-        if (*c).borrows.count >= 128 { return 0 }
         (*c).borrows = (*c).borrows.track(name, false)
         idx = (*c).borrows.count - 1
     }
-    var e = (*c).borrows.entries[idx as usize]
+    var e = borrow_entry_get(&(*c).borrows,idx)
     if want_excl {
         e.state = 2
     } else {
         e.state = 1
         e.shared_count = e.shared_count + 1
     }
-    (*c).borrows.entries[idx as usize] = e
+    (*c).borrows = borrow_entry_set((*c).borrows,idx,e)
     0
 }
 
@@ -11077,7 +11050,7 @@ fn checker_check_struct_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
                 // representation exists. Field inits are still checked for nested diagnostics.
                 if field_info_list_count(vfields) > 0 {
                     checker_report_error_at_inplace(c, e.span, 264, 0, 0, 0)
-                    let call_start_borrows_ev = (*c).borrows
+                    let call_start_borrows_ev = borrow_env_clone(&(*c).borrows)
                     var cur_ev264 = e.fields
                     var done_ev264 = false
                     while !done_ev264 {
@@ -11332,13 +11305,7 @@ fn checker_check_closure_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry wit
     checker_push_const_scope_inplace(c)
 
     checker_bind_closure_params_inplace(c, resolved_params)
-    var capture_candidates: [bool; 128] = [false; 128]
-    var capture_seed_i: i64 = 0
-    while capture_seed_i < outer_borrow_count {
-        let entry = (*c).borrows.entries[capture_seed_i as usize]
-        capture_candidates[capture_seed_i as usize] = entry.is_linear && !entry.consumed
-        capture_seed_i = capture_seed_i + 1
-    }
+    let capture_before = borrow_env_clone(&(*c).borrows)
 
     // THE FIX: body checked in place (was the by-value c.check_opt_expr recursion).
     // Effects inside a closure BODY are inferred (§7.2.1): raise the flag so
@@ -11380,8 +11347,9 @@ fn checker_check_closure_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry wit
     var capture_linear_count: i64 = 0
     var capture_i: i64 = 0
     while capture_i < outer_borrow_count {
-        let after = (*c).borrows.entries[capture_i as usize]
-        if capture_candidates[capture_i as usize] && after.consumed {
+        let after = borrow_entry_get(&(*c).borrows,capture_i)
+        let before=borrow_entry_get(&capture_before,capture_i)
+        if before.is_linear && !before.consumed && after.consumed {
             capture_linear = true
             capture_linear_count = capture_linear_count + 1
         }
@@ -11482,7 +11450,7 @@ fn checker_check_method_call_with_base_ty_inplace(c: *mut Checker, e: Expr, base
         }
     }
     if name_matches_str3(e.name, 108, 101, 110) && len_method_supported(base_ty) {
-        let call_start_borrows = (*c).borrows
+        let call_start_borrows = borrow_env_clone(&(*c).borrows)
         checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
         match e.args {
             Some(_) => checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
@@ -11498,7 +11466,7 @@ fn checker_check_method_call_with_base_ty_inplace(c: *mut Checker, e: Expr, base
     // Seq<T> methods: .push / .count / .get / .set / .push_uncertain (lean_single surface).
     if is_seq_type(base_ty) {
         let elem_ty = seq_elem_type(base_ty)
-        let call_start_borrows = (*c).borrows
+        let call_start_borrows = borrow_env_clone(&(*c).borrows)
         // push(v) / push_uncertain(v, conf, var)
         if name_matches_str4(e.name, 112, 117, 115, 104) {
             let first = expr_list_head(e.args)
@@ -11558,7 +11526,7 @@ fn checker_check_method_call_with_base_ty_inplace(c: *mut Checker, e: Expr, base
     }
     if base_ty.kind == TypeKind::TyKnowledge {
         if name_matches_str6(e.name, 117, 110, 119, 114, 97, 112) {
-            let call_start_borrows = (*c).borrows
+            let call_start_borrows = borrow_env_clone(&(*c).borrows)
             match e.args {
                 None => {
                     checker_report_error_at_inplace(c, e.span, 172, 0, 0, 0)
@@ -11576,7 +11544,7 @@ fn checker_check_method_call_with_base_ty_inplace(c: *mut Checker, e: Expr, base
             }
         } else {
             checker_report_error_at_inplace(c, e.span, 11, 0, 0, 0)
-            let call_start_borrows = (*c).borrows
+            let call_start_borrows = borrow_env_clone(&(*c).borrows)
             checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
             checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
             ty_error()
@@ -11588,17 +11556,17 @@ fn checker_check_method_call_with_base_ty_inplace(c: *mut Checker, e: Expr, base
             None => ty_error()
         }
         if name_matches_str9(e.name, 99, 111, 110, 106, 117, 103, 97, 116, 101) {
-            let call_start_borrows = (*c).borrows
+            let call_start_borrows = borrow_env_clone(&(*c).borrows)
             checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
             checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
             base_ty
         } else if name_matches_str4(e.name, 110, 111, 114, 109) {
-            let call_start_borrows = (*c).borrows
+            let call_start_borrows = borrow_env_clone(&(*c).borrows)
             checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
             checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
             inner_ty
         } else if name_matches_str7(e.name, 105, 110, 118, 101, 114, 115, 101) {
-            let call_start_borrows = (*c).borrows
+            let call_start_borrows = borrow_env_clone(&(*c).borrows)
             checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
             checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
             if alg > 3 {
@@ -11609,7 +11577,7 @@ fn checker_check_method_call_with_base_ty_inplace(c: *mut Checker, e: Expr, base
             }
         } else {
             checker_report_error_at_inplace(c, e.span, 11, 0, 0, 0)
-            let call_start_borrows = (*c).borrows
+            let call_start_borrows = borrow_env_clone(&(*c).borrows)
             checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
             checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
             ty_error()
@@ -11618,7 +11586,7 @@ fn checker_check_method_call_with_base_ty_inplace(c: *mut Checker, e: Expr, base
         let sig_id = fn_sig_table_find_method_semantic((*c).fn_sigs, base_ty, e.name)
         if sig_id >= 0 {
             let sig = fn_sig_table_get((*c).fn_sigs, sig_id)
-            let call_start_borrows = (*c).borrows
+            let call_start_borrows = borrow_env_clone(&(*c).borrows)
             var effective_params = fn_param_list_clone(&sig.params)
             var effective_return_type = sig.return_type
             match e.type_args {
@@ -11643,13 +11611,13 @@ fn checker_check_method_call_with_base_ty_inplace(c: *mut Checker, e: Expr, base
             effective_return_type
         } else {
             checker_report_error_at_inplace(c, e.span, 11, 0, 0, 0)
-            let call_start_borrows = (*c).borrows
+            let call_start_borrows = borrow_env_clone(&(*c).borrows)
             checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
             checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
             ty_error()
         }
     } else if base_ty.kind == TypeKind::TyString {
-        let call_start_borrows = (*c).borrows
+        let call_start_borrows = borrow_env_clone(&(*c).borrows)
         checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
         checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
         if name_matches_str8(e.name, 97, 115, 95, 98, 121, 116, 101, 115) {
@@ -11669,7 +11637,7 @@ fn checker_check_method_call_with_base_ty_inplace(c: *mut Checker, e: Expr, base
         let sig_id = fn_sig_table_find_method_semantic((*c).fn_sigs, base_ty, e.name)
         if sig_id >= 0 {
             let sig = fn_sig_table_get((*c).fn_sigs, sig_id)
-            let call_start_borrows = (*c).borrows
+            let call_start_borrows = borrow_env_clone(&(*c).borrows)
             var effective_params = fn_param_list_clone(&sig.params)
             var effective_return_type = sig.return_type
             match e.type_args {
@@ -11694,7 +11662,7 @@ fn checker_check_method_call_with_base_ty_inplace(c: *mut Checker, e: Expr, base
             effective_return_type
         } else {
             checker_report_error_at_inplace(c, e.span, 19, 0, 0, 0)
-            let call_start_borrows = (*c).borrows
+            let call_start_borrows = borrow_env_clone(&(*c).borrows)
             checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
             checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
             ty_error()
@@ -11708,18 +11676,18 @@ fn checker_check_method_call_with_base_ty_inplace(c: *mut Checker, e: Expr, base
         // See docs/audit/MADAROS_DUAL_GUM_KNOWLEDGE_IMPORT_2026-07-19.md.
         if !fn_sig_table_has_method_name((*c).fn_sigs, e.name) {
             checker_report_error_at_inplace(c, e.span, 11, 0, 0, 0)
-            let call_start_borrows = (*c).borrows
+            let call_start_borrows = borrow_env_clone(&(*c).borrows)
             checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
             checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
             return ty_error()
         }
-        let call_start_borrows = (*c).borrows
+        let call_start_borrows = borrow_env_clone(&(*c).borrows)
         checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
         checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
         base_ty
     } else {
         checker_report_error_at_inplace(c, e.span, 19, 0, 0, 0)
-        let call_start_borrows = (*c).borrows
+        let call_start_borrows = borrow_env_clone(&(*c).borrows)
         checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
         checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
         ty_error()
@@ -12567,7 +12535,7 @@ fn checker_check_print_i64_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry w
 fn checker_check_slice_len_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     let first_arg = expr_list_head(e.args)
     let second_arg = expr_list_second(e.args)
-    let call_start_borrows = (*c).borrows
+    let call_start_borrows = borrow_env_clone(&(*c).borrows)
     let arg_ty = checker_check_opt_expr_inplace(c, first_arg)
     match first_arg {
         None => checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
@@ -12639,7 +12607,7 @@ fn call_expr_is_box_new(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Div, A
 fn checker_check_box_new_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     let first_arg = expr_list_head(e.args)
     let second_arg = expr_list_second(e.args)
-    let call_start_borrows = (*c).borrows
+    let call_start_borrows = borrow_env_clone(&(*c).borrows)
     let arg_ty = checker_check_opt_expr_inplace(c, first_arg)
     match first_arg {
         None => checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
@@ -13461,7 +13429,7 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
         if (*c).enforce_visibility && !checker_fn_sig_visible_inplace(c, direct_sig_id) {
             checker_report_private_fn_inplace(c, e.span, direct_sig_id)
         }
-        let call_start_borrows = (*c).borrows
+        let call_start_borrows = borrow_env_clone(&(*c).borrows)
         let direct_sig = fn_sig_table_get((*c).fn_sigs, direct_sig_id)
         // #1622: calling an `extern "C"` name the native backend does not
         // implement. This is the live arm -- a plain ident callee resolves via
@@ -13583,7 +13551,7 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
             checker_report_error_at_inplace(c, e.span, 250, 0, 0, 0)
             refused_unimplemented = true
         }
-        let call_start_borrows = (*c).borrows
+        let call_start_borrows = borrow_env_clone(&(*c).borrows)
         var effective_params = fn_param_list_clone(&sig.params)
         var effective_return_type = sig.return_type
         match call_expr_type_args(e) {
@@ -13626,7 +13594,7 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
             ns_result
         }
     } else if is_error_or_unknown(callee_ty) {
-        let call_start_borrows = (*c).borrows
+        let call_start_borrows = borrow_env_clone(&(*c).borrows)
         checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
         checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
         callee_ty
@@ -13649,7 +13617,7 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
             return ty_named(ei.name)
         }
         checker_report_error_at_inplace(c, e.span, 17, 0, 0, 0)
-        let call_start_borrows = (*c).borrows
+        let call_start_borrows = borrow_env_clone(&(*c).borrows)
         checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
         checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
         ty_error()
@@ -14607,7 +14575,7 @@ fn checker_check_match_arm_inplace(c: *mut Checker, arm: MatchArm, scrut_ty: Typ
     // slot reuse from rebasing a returned reference onto a pattern-local name.
     var binding=pattern_start
     while binding<(*c).borrows.count {
-        let name=(*c).borrows.entries[binding as usize].name
+        let name=borrow_entry_get(&(*c).borrows,binding).name
         let ty=type_env_lookup(&(*c).env,name)
         checker_set_affine_binding(c,name,ty)
         if checker_type_has_ref(c,ty,0) {
@@ -15608,10 +15576,10 @@ fn checker_check_assign_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with
                 (*c).borrows=(*c).borrows.set_provenance((*target).name,checker_loan_sources_local(c,sources))
                 let index=(*c).borrows.find((*target).name)
                 if index>=0 {
-                    var entry=(*c).borrows.entries[index as usize]
+                    var entry=borrow_entry_get(&(*c).borrows,index)
                     entry.loan_live=true
                     if entry.is_affine && !entry.is_linear {entry.consumed=false}
-                    (*c).borrows.entries[index as usize]=entry
+                    (*c).borrows = borrow_entry_set((*c).borrows,index,entry)
                 }
                 if (*c).borrows.loan_overflow {checker_report_error_at_inplace(c,s.span,38,0,0,0)}
             }
@@ -18049,6 +18017,7 @@ impl Checker {
 
     fn report_error_at(self, span: Span, code: i64, msg_a: i64, msg_b: i64, msg_c: i64) -> Checker with Mut, IO, Panic, Div, Alloc {
         var c = self
+        if checker_report_borrow_failure_inplace((&!c) as *mut Checker) {return c}
         c.error_count = c.error_count + 1
         c.had_error = true
         print("error[E")
@@ -28139,8 +28108,10 @@ impl Checker {
     // The caller must invoke this before popping the scope whose bindings it owns.
     fn require_current_linear_scope_consumed(self) -> Checker with Mut, Panic, Div, IO {
         var c = self
+        if checker_report_borrow_failure_inplace((&!c) as *mut Checker) {return c}
         let linear_check = c.borrows.check_linear_consumed()
         c.borrows = linear_check.0
+        if checker_report_borrow_failure_inplace((&!c) as *mut Checker) {return c}
         if linear_check.1 > 0 {
             c.had_error = true
             c.error_count = c.error_count + 1
@@ -29417,7 +29388,7 @@ impl Checker {
         }
         let base_ty = base_pair.1
         if name_matches_str3(e.name, 108, 101, 110) && len_method_supported(base_ty) {
-            let call_start_borrows = c.borrows
+            let call_start_borrows = borrow_env_clone(&c.borrows)
             c = c.check_expr_list_no_type_no_linear_consume(e.args)
             match e.args {
                 Some(_) => { c = c.report_error_at(e.span, 10, 0, 0, 0) }
@@ -29433,7 +29404,7 @@ impl Checker {
             // Knowledge<T>.unwrap() -> T
             if name_matches_str6(e.name, 117, 110, 119, 114, 97, 112) {
                 // "unwrap" = [117, 110, 119, 114, 97, 112]
-                let call_start_borrows = c.borrows
+                let call_start_borrows = borrow_env_clone(&c.borrows)
                 match e.args {
                     None => {
                         c = c.report_error_at(e.span, 172, 0, 0, 0)
@@ -29451,7 +29422,7 @@ impl Checker {
                 }
             } else {
                 c = c.report_error_at(e.span, 11, 0, 0, 0)
-                let call_start_borrows = c.borrows
+                let call_start_borrows = borrow_env_clone(&c.borrows)
                 c = c.check_expr_list_no_type_no_linear_consume(e.args)
                 c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
                 (c, ty_error())
@@ -29465,19 +29436,19 @@ impl Checker {
             }
             // "conjugate" = [99,111,110,106,117,103,97,116,101] (9 chars)
             if name_matches_str9(e.name, 99, 111, 110, 106, 117, 103, 97, 116, 101) {
-                let call_start_borrows = c.borrows
+                let call_start_borrows = borrow_env_clone(&c.borrows)
                 c = c.check_expr_list_no_type_no_linear_consume(e.args)
                 c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
                 (c, base_ty)  // conjugate returns same Hyper type
             // "norm" = [110,111,114,109] (4 chars)
             } else if name_matches_str4(e.name, 110, 111, 114, 109) {
-                let call_start_borrows = c.borrows
+                let call_start_borrows = borrow_env_clone(&c.borrows)
                 c = c.check_expr_list_no_type_no_linear_consume(e.args)
                 c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
                 (c, inner_ty)  // norm returns scalar
             // "inverse" = [105,110,118,101,114,115,101] (7 chars)
             } else if name_matches_str7(e.name, 105, 110, 118, 101, 114, 115, 101) {
-                let call_start_borrows = c.borrows
+                let call_start_borrows = borrow_env_clone(&c.borrows)
                 c = c.check_expr_list_no_type_no_linear_consume(e.args)
                 c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
                 // Only division algebras have inverse (alg <= 3)
@@ -29489,7 +29460,7 @@ impl Checker {
                 }
             } else {
                 c = c.report_error_at(e.span, 11, 0, 0, 0)
-                let call_start_borrows = c.borrows
+                let call_start_borrows = borrow_env_clone(&c.borrows)
                 c = c.check_expr_list_no_type_no_linear_consume(e.args)
                 c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
                 (c, ty_error())
@@ -29498,7 +29469,7 @@ impl Checker {
             let sig_id = fn_sig_table_find_method_semantic(c.fn_sigs, base_ty, e.name)
             if sig_id >= 0 {
                 let sig = fn_sig_table_get(c.fn_sigs, sig_id)
-                let call_start_borrows = c.borrows
+                let call_start_borrows = borrow_env_clone(&c.borrows)
                 c = c.check_call_args(e.args, sig.params, sig.param_count, e.span)
                 // Verify callee method's effects are subset of caller's effects
                 c = c.check_callee_effects(e.span, sig.effects, sig.effect_count)
@@ -29511,7 +29482,7 @@ impl Checker {
                 // generic declaration boundary, so defer concrete method selection
                 // until monomorphization instead of issuing E011 for `F.er_add`.
                 if type_is_unresolved_type_param_in_tables(c.structs, c.enums, base_ty) {
-                    let call_start_borrows = c.borrows
+                    let call_start_borrows = borrow_env_clone(&c.borrows)
                     c = c.check_expr_list_no_type_no_linear_consume(e.args)
                     c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
                     return (c, base_ty)
@@ -29519,14 +29490,14 @@ impl Checker {
                 // Method not found
                 c = c.report_error_at(e.span, 11, 0, 0, 0)
                 // Still check args to accumulate errors
-                let call_start_borrows = c.borrows
+                let call_start_borrows = borrow_env_clone(&c.borrows)
                 c = c.check_expr_list_no_type_no_linear_consume(e.args)
                 c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
                 (c, ty_error())
             }
         } else if base_ty.kind == TypeKind::TyString {
             // String methods: .as_bytes() -> &[i8], .len() -> i64
-            let call_start_borrows = c.borrows
+            let call_start_borrows = borrow_env_clone(&c.borrows)
             c = c.check_expr_list_no_type_no_linear_consume(e.args)
             c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
             // "as_bytes" = [97,115,95,98,121,116,101,115]
@@ -29547,14 +29518,14 @@ impl Checker {
             let sig_id = fn_sig_table_find_method_semantic(c.fn_sigs, base_ty, e.name)
             if sig_id >= 0 {
                 let sig = fn_sig_table_get(c.fn_sigs, sig_id)
-                let call_start_borrows = c.borrows
+                let call_start_borrows = borrow_env_clone(&c.borrows)
                 c = c.check_call_args(e.args, sig.params, sig.param_count, e.span)
                 c = c.check_callee_effects(e.span, sig.effects, sig.effect_count)
                 c = c.release_call_arg_borrows(e.args, sig.params, call_start_borrows)
                 (c, sig.return_type)
             } else {
                 c = c.report_error_at(e.span, 19, 0, 0, 0)
-                let call_start_borrows = c.borrows
+                let call_start_borrows = borrow_env_clone(&c.borrows)
                 c = c.check_expr_list_no_type_no_linear_consume(e.args)
                 c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
                 (c, ty_error())
@@ -29563,18 +29534,18 @@ impl Checker {
             // Mirror inplace: reject nonexistent method names under untyped receivers.
             if !fn_sig_table_has_method_name(c.fn_sigs, e.name) {
                 c = c.report_error_at(e.span, 11, 0, 0, 0)
-                let call_start_borrows = c.borrows
+                let call_start_borrows = borrow_env_clone(&c.borrows)
                 c = c.check_expr_list_no_type_no_linear_consume(e.args)
                 c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
                 return (c, ty_error())
             }
-            let call_start_borrows = c.borrows
+            let call_start_borrows = borrow_env_clone(&c.borrows)
             c = c.check_expr_list_no_type_no_linear_consume(e.args)
             c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
             (c, base_ty)
         } else {
             c = c.report_error_at(e.span, 19, 0, 0, 0)
-            let call_start_borrows = c.borrows
+            let call_start_borrows = borrow_env_clone(&c.borrows)
             c = c.check_expr_list_no_type_no_linear_consume(e.args)
             c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
             (c, ty_error())
@@ -29584,7 +29555,7 @@ impl Checker {
     fn check_method_call_with_base_ty(self, e: Expr, base_ty: TypeEntry) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         var c = self
         if name_matches_str3(e.name, 108, 101, 110) && len_method_supported(base_ty) {
-            let call_start_borrows = c.borrows
+            let call_start_borrows = borrow_env_clone(&c.borrows)
             c = c.check_expr_list_no_type_no_linear_consume(e.args)
             match e.args {
                 Some(_) => { c = c.report_error_at(e.span, 10, 0, 0, 0) }
@@ -29595,7 +29566,7 @@ impl Checker {
         }
         if base_ty.kind == TypeKind::TyKnowledge {
             if name_matches_str6(e.name, 117, 110, 119, 114, 97, 112) {
-                let call_start_borrows = c.borrows
+                let call_start_borrows = borrow_env_clone(&c.borrows)
                 match e.args {
                     None => {
                         c = c.report_error_at(e.span, 172, 0, 0, 0)
@@ -29613,7 +29584,7 @@ impl Checker {
                 }
             } else {
                 c = c.report_error_at(e.span, 11, 0, 0, 0)
-                let call_start_borrows = c.borrows
+                let call_start_borrows = borrow_env_clone(&c.borrows)
                 c = c.check_expr_list_no_type_no_linear_consume(e.args)
                 c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
                 (c, ty_error())
@@ -29625,17 +29596,17 @@ impl Checker {
                 None => ty_error()
             }
             if name_matches_str9(e.name, 99, 111, 110, 106, 117, 103, 97, 116, 101) {
-                let call_start_borrows = c.borrows
+                let call_start_borrows = borrow_env_clone(&c.borrows)
                 c = c.check_expr_list_no_type_no_linear_consume(e.args)
                 c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
                 (c, base_ty)
             } else if name_matches_str4(e.name, 110, 111, 114, 109) {
-                let call_start_borrows = c.borrows
+                let call_start_borrows = borrow_env_clone(&c.borrows)
                 c = c.check_expr_list_no_type_no_linear_consume(e.args)
                 c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
                 (c, inner_ty)
             } else if name_matches_str7(e.name, 105, 110, 118, 101, 114, 115, 101) {
-                let call_start_borrows = c.borrows
+                let call_start_borrows = borrow_env_clone(&c.borrows)
                 c = c.check_expr_list_no_type_no_linear_consume(e.args)
                 c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
                 if alg > 3 {
@@ -29646,7 +29617,7 @@ impl Checker {
                 }
             } else {
                 c = c.report_error_at(e.span, 11, 0, 0, 0)
-                let call_start_borrows = c.borrows
+                let call_start_borrows = borrow_env_clone(&c.borrows)
                 c = c.check_expr_list_no_type_no_linear_consume(e.args)
                 c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
                 (c, ty_error())
@@ -29655,27 +29626,27 @@ impl Checker {
             let sig_id = fn_sig_table_find_method_semantic(c.fn_sigs, base_ty, e.name)
             if sig_id >= 0 {
                 let sig = fn_sig_table_get(c.fn_sigs, sig_id)
-                let call_start_borrows = c.borrows
+                let call_start_borrows = borrow_env_clone(&c.borrows)
                 c = c.check_call_args(e.args, sig.params, sig.param_count, e.span)
                 c = c.check_callee_effects(e.span, sig.effects, sig.effect_count)
                 c = c.release_call_arg_borrows(e.args, sig.params, call_start_borrows)
                 (c, sig.return_type)
             } else {
                 if type_is_unresolved_type_param_in_tables(c.structs, c.enums, base_ty) {
-                    let call_start_borrows = c.borrows
+                    let call_start_borrows = borrow_env_clone(&c.borrows)
                     c = c.check_expr_list_no_type_no_linear_consume(e.args)
                     c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
                     (c, base_ty)
                 } else {
                 c = c.report_error_at(e.span, 11, 0, 0, 0)
-                let call_start_borrows = c.borrows
+                let call_start_borrows = borrow_env_clone(&c.borrows)
                 c = c.check_expr_list_no_type_no_linear_consume(e.args)
                 c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
                 (c, ty_error())
                 }
             }
         } else if base_ty.kind == TypeKind::TyString {
-            let call_start_borrows = c.borrows
+            let call_start_borrows = borrow_env_clone(&c.borrows)
             c = c.check_expr_list_no_type_no_linear_consume(e.args)
             c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
             if name_matches_str8(e.name, 97, 115, 95, 98, 121, 116, 101, 115) {
@@ -29694,14 +29665,14 @@ impl Checker {
             let sig_id = fn_sig_table_find_method_semantic(c.fn_sigs, base_ty, e.name)
             if sig_id >= 0 {
                 let sig = fn_sig_table_get(c.fn_sigs, sig_id)
-                let call_start_borrows = c.borrows
+                let call_start_borrows = borrow_env_clone(&c.borrows)
                 c = c.check_call_args(e.args, sig.params, sig.param_count, e.span)
                 c = c.check_callee_effects(e.span, sig.effects, sig.effect_count)
                 c = c.release_call_arg_borrows(e.args, sig.params, call_start_borrows)
                 (c, sig.return_type)
             } else {
                 c = c.report_error_at(e.span, 19, 0, 0, 0)
-                let call_start_borrows = c.borrows
+                let call_start_borrows = borrow_env_clone(&c.borrows)
                 c = c.check_expr_list_no_type_no_linear_consume(e.args)
                 c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
                 (c, ty_error())
@@ -29710,18 +29681,18 @@ impl Checker {
             // Mirror inplace: reject nonexistent method names under untyped receivers.
             if !fn_sig_table_has_method_name(c.fn_sigs, e.name) {
                 c = c.report_error_at(e.span, 11, 0, 0, 0)
-                let call_start_borrows = c.borrows
+                let call_start_borrows = borrow_env_clone(&c.borrows)
                 c = c.check_expr_list_no_type_no_linear_consume(e.args)
                 c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
                 return (c, ty_error())
             }
-            let call_start_borrows = c.borrows
+            let call_start_borrows = borrow_env_clone(&c.borrows)
             c = c.check_expr_list_no_type_no_linear_consume(e.args)
             c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
             (c, base_ty)
         } else {
             c = c.report_error_at(e.span, 19, 0, 0, 0)
-            let call_start_borrows = c.borrows
+            let call_start_borrows = borrow_env_clone(&c.borrows)
             c = c.check_expr_list_no_type_no_linear_consume(e.args)
             c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
             (c, ty_error())
@@ -29736,7 +29707,7 @@ impl Checker {
     fn check_slice_len_call_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         let first_arg = expr_list_head(e.args)
         let second_arg = expr_list_second(e.args)
-        let call_start_borrows = self.borrows
+        let call_start_borrows = borrow_env_clone(&self.borrows)
         let first_pair = self.check_opt_expr(first_arg)
         var c = first_pair.0
         let arg_ty = first_pair.1
@@ -29794,7 +29765,7 @@ impl Checker {
     fn check_box_new_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         let first_arg = expr_list_head(e.args)
         let second_arg = expr_list_second(e.args)
-        let call_start_borrows = self.borrows
+        let call_start_borrows = borrow_env_clone(&self.borrows)
         let first_pair = self.check_opt_expr(first_arg)
         var c = first_pair.0
         let arg_ty = first_pair.1
@@ -30040,7 +30011,7 @@ impl Checker {
                 c = c.report_error_at(e.span, 250, 0, 0, 0)
                 refused_unimplemented = true
             }
-            let call_start_borrows = c.borrows
+            let call_start_borrows = borrow_env_clone(&c.borrows)
             var effective_params = fn_param_list_clone(&sig.params)
             var effective_return_type = sig.return_type
             match call_expr_type_args(e) {
@@ -30073,13 +30044,13 @@ impl Checker {
                 (c, effective_return_type)
             }
         } else if is_error_or_unknown(callee_ty) {
-            let call_start_borrows = c.borrows
+            let call_start_borrows = borrow_env_clone(&c.borrows)
             c = c.check_expr_list_no_type_no_linear_consume(e.args)
             c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
             (c, callee_ty)
         } else {
             c = c.report_error_at(e.span, 17, 0, 0, 0)
-            let call_start_borrows = c.borrows
+            let call_start_borrows = borrow_env_clone(&c.borrows)
             c = c.check_expr_list_no_type_no_linear_consume(e.args)
             c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
             (c, ty_error())
@@ -32046,7 +32017,7 @@ impl Checker {
     fn borrow_state_and_shared_count(self, name: Name) -> (i64, i64) with Mut, Panic, Div, Alloc, IO {
         let idx = self.borrows.find(name)
         if idx >= 0 {
-            let entry = self.borrows.entries[idx]
+            let entry = borrow_entry_get(&self.borrows,idx)
             (entry.state, entry.shared_count)
         } else {
             (0, 0)
@@ -33427,13 +33398,7 @@ impl Checker {
 
         // Bind closure params in environment
         c = c.bind_closure_params(resolved_params)
-        var capture_candidates: [bool; 128] = [false; 128]
-        var capture_seed_i: i64 = 0
-        while capture_seed_i < outer_borrow_count {
-            let entry = c.borrows.entries[capture_seed_i as usize]
-            capture_candidates[capture_seed_i as usize] = entry.is_linear && !entry.consumed
-            capture_seed_i = capture_seed_i + 1
-        }
+        let capture_before = borrow_env_clone(&c.borrows)
 
         // Check body expression
         let body_pair = c.check_opt_expr(e.closure_body)
@@ -33470,8 +33435,9 @@ impl Checker {
         var capture_linear_count: i64 = 0
         var capture_i: i64 = 0
         while capture_i < outer_borrow_count {
-            let after = c.borrows.entries[capture_i as usize]
-            if capture_candidates[capture_i as usize] && after.consumed {
+            let after = borrow_entry_get(&c.borrows,capture_i)
+            let before=borrow_entry_get(&capture_before,capture_i)
+        if before.is_linear && !before.consumed && after.consumed {
                 capture_linear = true
                 capture_linear_count = capture_linear_count + 1
             }

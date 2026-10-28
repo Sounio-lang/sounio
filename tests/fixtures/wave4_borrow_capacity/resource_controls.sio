@@ -1,0 +1,115 @@
+use parser::ast::{Name,make_name}
+use check::borrow::*
+struct ProbeRadixRoot {page:i64,depth:i64}
+struct ProbeRadixPage {slots:[i64;16]}
+// Fault injection is confined to this fixture; production pages remain immutable.
+fn main()->i32 with IO,Alloc,Mut,Panic,Div {
+ {
+  var env=borrow_env_new().track(make_name("x"),false)
+  let old=borrow_env_clone(&env)
+  let unused=borrow_entry_get(&env,1)
+  assert(borrow_failure_kind(&env)==3 && borrow_failure_kind(&old)==3)
+  let refused=env.try_exclusive_borrow(make_name("x"))
+  assert(refused.1!=0 && borrow_failure_kind(&refused.0)==3)
+  println("INVALID_INDEX_FAIL_CLOSED")
+ }
+ {
+  var env=borrow_env_new()
+  let arena=env.arena as *mut BorrowArena
+  (*arena).bytes=9223372036854775791
+  env=env.track(make_name("overflow"),false)
+  assert(borrow_failure_kind(&env)==2 && env.count==0)
+  println("BYTE_OVERFLOW_FAIL_CLOSED")
+ }
+ {
+  var env=borrow_env_new().track(make_name("guard"),false)
+  let root=env.entry_root as *mut ProbeRadixRoot
+  assert((*root).depth==1)
+  let page=(*root).page as *mut ProbeRadixPage
+  let cell=(*page).slots[1]
+  assert(cell>0)
+  let guard=(cell+8192) as *mut i64
+  *guard=0
+  assert(!borrow_entry_guards_ok(&env) && borrow_failure_kind(&env)==4)
+  println("CORRUPT_CELL_FAIL_CLOSED")
+ }
+ {
+  var env=borrow_env_new().track(make_name("path"),false)
+  let root=env.binding_root as *mut ProbeRadixRoot
+  (*root).depth=0
+  let ignored=borrow_binding_index(&env,1)
+  assert(ignored<0 && borrow_failure_kind(&env)==4)
+  println("CORRUPT_PATH_FAIL_CLOSED")
+ }
+ {
+  var env=borrow_env_new().track(make_name("owner"),false).track(make_name("carrier"),false)
+  env=borrow_persist_owner(env,make_name("carrier"),make_name("owner"),1)
+  assert(env.loan_count==1)
+  let edge=env.loan_head as *mut PersistentLoanEdge
+  (*edge).length=0
+  env=borrow_persist_owner(env,make_name("owner"),make_name("carrier"),1)
+  assert(borrow_failure_kind(&env)==4)
+  println("CORRUPT_LOAN_LENGTH_FAIL_CLOSED")
+ }
+ {
+  var env=borrow_env_new()
+  let old=borrow_env_clone(&env)
+  // Synthetic OOM-state propagation, not a claim of allocator fault injection.
+  env=borrow_mark_failure(env,1)
+  env=env.track(make_name("refused"),false)
+  assert(env.count==0 && borrow_failure_kind(&env)==1 && borrow_failure_kind(&old)==1)
+  println("SYNTHETIC_OOM_STICKY")
+ }
+ {
+  var env=borrow_env_new()
+  assert(!borrow_sources_all_live(&env,0-1))
+  assert(borrow_failure_kind(&env)==1)
+  println("SOURCE_ERROR_PRESERVES_REASON")
+ }
+ {
+  var env=borrow_env_new().track(make_name("left"),false).track(make_name("right"),false)
+  let old=borrow_env_clone(&env)
+  var mutant=borrow_entry_get(&env,1)
+  mutant.binding_id=1
+  env=borrow_entry_set(env,1,mutant)
+  assert(borrow_failure_kind(&env)==3 && env.entry_root==old.entry_root && env.binding_root==old.binding_root)
+  assert(borrow_entry_get(&old,0).binding_id==1 && borrow_entry_get(&old,1).binding_id==2)
+  println("DUPLICATE_ID_PUBLICATION_REFUSED")
+ }
+ {
+  var env=borrow_env_new().track(make_name("stable"),false)
+  let old=borrow_env_clone(&env)
+  var mutant=borrow_entry_get(&env,0)
+  mutant.binding_id=777
+  env=borrow_entry_set(env,0,mutant)
+  assert(borrow_failure_kind(&env)==3 && env.entry_root==old.entry_root && env.binding_root==old.binding_root)
+  assert(borrow_entry_get(&old,0).binding_id==1)
+  println("BINDING_ID_REWRITE_REFUSED")
+ }
+ {
+  var env=borrow_env_new().track(make_name("name"),false)
+  let old=borrow_env_clone(&env)
+  var mutant=borrow_entry_get(&env,0)
+  var name=mutant.name
+  name.len=385
+  mutant.name=name
+  env=borrow_entry_set(env,0,mutant)
+  assert(borrow_failure_kind(&env)==3 && env.entry_root==old.entry_root && env.name_root==old.name_root)
+  assert(borrow_entry_get(&old,0).name.len==4)
+  println("INVALID_NAME_PUBLICATION_REFUSED")
+ }
+ {
+  var env=borrow_env_new().push_scope().track(make_name("outer"),false).push_scope()
+  env=env.track(make_name("dead_owner"),false)
+  let dead_id=borrow_binding_id(&env,make_name("dead_owner"))
+  let sources=borrow_sources_add(0,dead_id,1)
+  env=env.pop_scope().track(make_name("escaped"),false)
+  env=borrow_persist_sources(env,make_name("escaped"),sources)
+  assert(env.loan_overflow && borrow_failure_kind(&env)==0)
+  assert(!borrow_sources_all_live(&env,sources) && borrow_failure_kind(&env)==0)
+  assert(borrow_persistent_state(&env,make_name("outer"))==2)
+  println("SEMANTIC_INVALID_LOAN_NOT_STORAGE_FAILURE")
+ }
+ println("BORROW_RESOURCE_CONTROLS_OK")
+ return 0
+}

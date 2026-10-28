@@ -1,0 +1,264 @@
+//@ run-pass
+//@ expect-stdout: BIGFRAME_OPS_GATE_OK
+//@ timeout: 120
+// Runtime (2026-09-27): 13.4 s on lean_single (souc-stage2 engine) on a
+// 4-core dev container, against the harness default of 30 s. CI job
+// 108525867166 measured the Full Test Suite runner at 2.65-4.3x slower
+// than that class of machine, i.e. 36-58 s projected, so the default
+// timed out intermittently (job 108543622564, an unrelated PR). 120 s is
+// about 2x the worst projection, 4.3 x 13.4 s. The workload (1,000,000
+// rows) is the point of the gate, so it is not shrunk.
+// Run-proof for stdlib/data/bigframe_ops.sio — scale verbs over the heap-backed
+// columnar BigFrame. Builds a 1,000,000-row frame via a LOOP, then exercises
+// bf_filter_gt and bf_groupby_sum against oracle-exact answers.
+//
+//   col0[i] = i           (0 .. 999999)
+//   col1[i] = i % 10      (group key, each of 0..9 appears 100000 times)
+//   col2[i] = 1.0         (unit value, so sum per group == count)
+//
+// NATIVE + lean_single only (heap). Compile with:
+//   SOUNIO_SOUC_ENGINE=lean_single ./bin/souc compile <file> -o out && ./out
+use data::bigframe::*
+use data::bigframe_ops::*
+
+fn approx_eq(a: f64, b: f64) -> bool {
+    let d = a - b
+    let ad = if d < 0.0 { 0.0 - d } else { d }
+    return ad < 0.0000001
+}
+
+// naive per-window median (sort a copy each window) -- reference for bf_rolling_median.
+fn naive_rolling_median(src: &BigFrame, col: i64, window: i64, fill: f64) -> BigFrame with Alloc, Mut, Div, Panic {
+    let n = bf_nrows(src)
+    let sp = bf_col_ptr(src, col) as *mut f64
+    var out = bf_new(1, n); out.n_rows = n; let op = bf_col_ptr(&out, 0) as *mut f64
+    let buf = heap_alloc(window * 8) as *mut f64
+    let half = window / 2; let odd = window - 2 * (window / 2)
+    var i: i64 = 0
+    while i < n {
+        if i >= window - 1 {
+            var t: i64 = 0
+            while t < window { write_f64(buf, t, read_f64(sp, i - window + 1 + t)); t = t + 1 }
+            var a: i64 = 1
+            while a < window {                    // insertion sort
+                let key = read_f64(buf, a); var b = a - 1
+                while b >= 0 && read_f64(buf, b) > key { write_f64(buf, b + 1, read_f64(buf, b)); b = b - 1 }
+                write_f64(buf, b + 1, key); a = a + 1
+            }
+            var med = 0.0
+            if odd == 1 { med = read_f64(buf, half) } else { med = (read_f64(buf, half - 1) + read_f64(buf, half)) / 2.0 }
+            write_f64(op, i, med)
+        } else { write_f64(op, i, fill) }
+        i = i + 1
+    }
+    heap_free(buf as *mut i8)
+    out
+}
+
+// look up col1 for the row whose col0 == key in a [key, value] result (hash-order).
+fn lookup2(t: &BigFrame, key: f64) -> f64 with Mut, Div, Panic {
+    var r: i64 = 0
+    while r < bf_nrows(t) { if bf_get(t, r, 0) == key { return bf_get(t, r, 1) } r = r + 1 }
+    return 0.0 - 1.0
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
+    let n: i64 = 1000000
+
+    // 3 columns; small starting capacity forces heavy heap_realloc growth.
+    var bf = bf_new(3, 16)
+
+    var row: [f64; 64] = [0.0; 64]
+    var i: i64 = 0
+    while i < n {
+        let fi = i as f64
+        row[0] = fi
+        row[1] = (i % 10) as f64
+        row[2] = 1.0
+        bf_push_row(&!bf, &row, 3)
+        i = i + 1
+    }
+
+    var pass = 1
+
+    // Sanity: all 1,000,000 rows are present.
+    if bf_nrows(&bf) != n { pass = 0 }
+    if bf_ncols(&bf) != 3 { pass = 0 }
+
+    // (a) FILTER: col0 > 499999.5  -> rows i = 500000 .. 999999 = 500000 rows.
+    var filt = bf_filter_gt(&bf, 0, 499999.5)
+    if bf_nrows(&filt) != 500000 { pass = 0 }
+    if bf_ncols(&filt) != 3 { pass = 0 }
+    // Spot-check: min surviving col0 is 500000, and its key/value survived intact.
+    if !approx_eq(bf_get(&filt, 0, 0), 500000.0) { pass = 0 }
+    if !approx_eq(bf_get(&filt, 0, 2), 1.0) { pass = 0 }
+    // Filtered value column still sums to the row count.
+    if !approx_eq(bf_col_sum(&filt, 2), 500000.0) { pass = 0 }
+
+    // (b) GROUPBY-SUM: group by col1 (key), sum col2 (unit) -> 10 groups, each 100000.
+    var grp = bf_groupby_sum(&bf, 1, 2)
+    if bf_nrows(&grp) != 10 { pass = 0 }
+    if bf_ncols(&grp) != 2 { pass = 0 }
+
+    // Keys emitted ascending 0..9, each with sum == 100000.
+    var g: i64 = 0
+    while g < 10 {
+        if !approx_eq(bf_get(&grp, g, 0), g as f64) { pass = 0 }
+        if !approx_eq(bf_get(&grp, g, 1), 100000.0) { pass = 0 }
+        g = g + 1
+    }
+    // Total summed value across all groups == total rows.
+    if !approx_eq(bf_col_sum(&grp, 1), 1000000.0) { pass = 0 }
+
+    bf_free(&!grp)
+    bf_free(&!filt)
+    bf_free(&!bf)
+
+    print("rows_built=")
+    print_int(n)
+    print("\n")
+    if pass == 1 {
+        var wf = bf_new(10, 16)
+    var wr: i64 = 0
+    while wr < 1000 { var wrow: [f64;64]=[0.0;64]; var wc: i64=0; while wc<10 { wrow[wc]=(wr*10+wc) as f64; wc=wc+1 } bf_push_row(&!wf,&wrow,10); wr=wr+1 }
+    let wfilt = bf_filter_gt(&wf, 0, 4995.0)
+    if bf_nrows(&wfilt) != 500 { print("FAIL wide_filter_n\n"); return 40 }
+    if bf_get(&wfilt, 0, 9) != 5009.0 { print("FAIL wide_filter_v\n"); return 41 }
+    var sf = bf_new(2, 16)
+    var si: i64 = 0
+    while si < 100 { var srow:[f64;64]=[0.0;64]; srow[0]=(si%2) as f64; srow[1]=si as f64; bf_push_row(&!sf,&srow,2); si=si+1 }
+    let sfilt = bf_filter_gt(&sf, 0, 0.5)
+    if bf_nrows(&sfilt) != 50 { print("FAIL scatter_n\n"); return 42 }
+    if bf_get(&sfilt, 0, 1) != 1.0 { print("FAIL scatter_v\n"); return 43 }
+    // SPARSE-key hash groupby: keys 0,1000,..,999000 (all >> the dense cap of 1023, which would drop them)
+    var hg = bf_new(2, 1024)
+    var hi: i64 = 0
+    while hi < 50000 { var hrow:[f64;64]=[0.0;64]; hrow[0]=((hi%1000)*1000) as f64; hrow[1]=1.0; bf_push_row(&!hg,&hrow,2); hi=hi+1 }
+    let hgr = bf_groupby_sum_hash(&hg, 0, 1)
+    if bf_nrows(&hgr) != 1000 { print("FAIL hash_groupby_n\n"); return 44 }   // 1000 distinct sparse keys
+    var htot = bf_col_sum(&hgr, 1)
+    if htot < 49999.5 || htot > 50000.5 { print("FAIL hash_groupby_total\n"); return 45 }  // 50000 rows total
+    // INNER HASH-JOIN at scale: left 100000 rows (key=i, lval=i*10), right 60000 rows
+    // (key=i, rval=i*2). Inner join on key drops left rows with key >= 60000 -> 60000 matches.
+    var jl = bf_new(2, 1024)
+    var jli: i64 = 0
+    while jli < 100000 { var jrow:[f64;64]=[0.0;64]; jrow[0]=jli as f64; jrow[1]=(jli*10) as f64; bf_push_row(&!jl,&jrow,2); jli=jli+1 }
+    var jr = bf_new(2, 1024)
+    var jrx: i64 = 0
+    while jrx < 60000 { var krow:[f64;64]=[0.0;64]; krow[0]=jrx as f64; krow[1]=(jrx*2) as f64; bf_push_row(&!jr,&krow,2); jrx=jrx+1 }
+    let jj = bf_join_inner(&jl, 0, &jr, 0)
+    if bf_nrows(&jj) != 60000 { print("FAIL join_n\n"); return 46 }   // inner join filters 100k -> 60k
+    if bf_ncols(&jj) != 3 { print("FAIL join_c\n"); return 47 }       // left 2 cols + right 1 non-key col
+    // Left probe order preserved: joined row 5000 == left row 5000 joined to right row 5000.
+    if bf_get(&jj, 5000, 0) != 5000.0 { print("FAIL join_key\n"); return 48 }
+    if bf_get(&jj, 5000, 1) != 50000.0 { print("FAIL join_lval\n"); return 49 }  // left  i*10
+    if bf_get(&jj, 5000, 2) != 10000.0 { print("FAIL join_rval\n"); return 50 }  // right i*2
+    // LEFT + OUTER join: left keys 0..99999 (lval=i*10); a NEW right keyed 50000..109999
+    // (rval=key*2). Overlap = keys 50000..99999 (50000 matches); left-only = 0..49999;
+    // right-only = 100000..109999 (10000). fill = -1.0 sentinel for unmatched cells.
+    var lo = bf_new(2, 1024)
+    var loi: i64 = 0
+    while loi < 100000 { var lrow:[f64;64]=[0.0;64]; lrow[0]=loi as f64; lrow[1]=(loi*10) as f64; bf_push_row(&!lo,&lrow,2); loi=loi+1 }
+    var ro = bf_new(2, 1024)
+    var roi: i64 = 0
+    while roi < 60000 { var rrow:[f64;64]=[0.0;64]; let rk=(roi+50000); rrow[0]=rk as f64; rrow[1]=(rk*2) as f64; bf_push_row(&!ro,&rrow,2); roi=roi+1 }
+    // LEFT join: all 100000 left rows kept.
+    let lj = bf_join_left(&lo, 0, &ro, 0, 0.0 - 1.0)
+    if bf_nrows(&lj) != 100000 { print("FAIL left_n\n"); return 51 }
+    if bf_ncols(&lj) != 3 { print("FAIL left_c\n"); return 52 }
+    if bf_get(&lj, 0, 0) != 0.0 { print("FAIL left_k0\n"); return 53 }         // left row 0, key 0
+    if bf_get(&lj, 0, 2) != (0.0 - 1.0) { print("FAIL left_miss\n"); return 54 }  // no right key 0 -> fill
+    if bf_get(&lj, 60000, 1) != 600000.0 { print("FAIL left_lval\n"); return 55 } // left row 60000, lval
+    if bf_get(&lj, 60000, 2) != 120000.0 { print("FAIL left_rval\n"); return 56 } // matched right rval=key*2
+    // OUTER join: 100000 left + 10000 right-only = 110000.
+    let oj = bf_join_outer(&lo, 0, &ro, 0, 0.0 - 1.0)
+    if bf_nrows(&oj) != 110000 { print("FAIL outer_n\n"); return 57 }
+    if bf_get(&oj, 0, 2) != (0.0 - 1.0) { print("FAIL outer_leftmiss\n"); return 58 }  // left-only row still filled
+    // right-only rows come after the 100000 left rows, in right-scan order.
+    // right rows 50000..59999 hold keys 100000..109999 -> first right-only = out row 100000.
+    if bf_get(&oj, 100000, 0) != 100000.0 { print("FAIL outer_rkey\n"); return 59 }   // key coalesced
+    if bf_get(&oj, 100000, 1) != (0.0 - 1.0) { print("FAIL outer_rleft\n"); return 60 } // left cols filled
+    if bf_get(&oj, 100000, 2) != 200000.0 { print("FAIL outer_rval\n"); return 61 }    // right rval=key*2
+    // SORT at scale: 1,000,000 rows, col0 = reverse key (n-1-i), col1 = original index i.
+    var sf = bf_new(2, 16)
+    var sfi: i64 = 0
+    while sfi < 1000000 { var srow2:[f64;64]=[0.0;64]; srow2[0]=(1000000-1-sfi) as f64; srow2[1]=sfi as f64; bf_push_row(&!sf,&srow2,2); sfi=sfi+1 }
+    let asc = bf_sort_by(&sf, 0, true)
+    if bf_nrows(&asc) != 1000000 { print("FAIL sort_n\n"); return 62 }
+    // fully ordered: zero inversions over 1M rows.
+    var invc: i64 = 0; var sj: i64 = 1
+    while sj < 1000000 { if bf_get(&asc, sj, 0) < bf_get(&asc, sj-1, 0) { invc = invc + 1 } sj = sj + 1 }
+    if invc != 0 { print("FAIL sort_inversions\n"); return 63 }
+    if bf_get(&asc, 0, 0) != 0.0 { print("FAIL sort_first\n"); return 64 }
+    if bf_get(&asc, 999999, 0) != 999999.0 { print("FAIL sort_last\n"); return 65 }
+    // permutation preserved: row with key 12345 carried original index 999999-12345.
+    if bf_get(&asc, 12345, 1) != 987654.0 { print("FAIL sort_perm\n"); return 66 }
+    let desc = bf_sort_by(&sf, 0, false)
+    if bf_get(&desc, 0, 0) != 999999.0 { print("FAIL sort_desc\n"); return 67 }
+    // STABILITY: 30 rows, key = i%3 (10 each), col1 = i. Stable asc sort keeps input order
+    // within a key -> the ten key==0 rows carry col1 = 0,3,6,...,27 in that order.
+    var stf = bf_new(2, 16)
+    var sti: i64 = 0
+    while sti < 30 { var strow:[f64;64]=[0.0;64]; strow[0]=(sti%3) as f64; strow[1]=sti as f64; bf_push_row(&!stf,&strow,2); sti=sti+1 }
+    let sts = bf_sort_by(&stf, 0, true)
+    if bf_get(&sts, 0, 1) != 0.0 { print("FAIL sort_stable0\n"); return 68 }   // first key==0 row = original 0
+    if bf_get(&sts, 1, 1) != 3.0 { print("FAIL sort_stable1\n"); return 69 }   // second = original 3 (order kept)
+    if bf_get(&sts, 9, 1) != 27.0 { print("FAIL sort_stable9\n"); return 70 }  // tenth key==0 row = original 27
+    if bf_get(&sts, 10, 0) != 1.0 { print("FAIL sort_stableblk\n"); return 71 } // block boundary: key 1 starts
+    // RADIX SORT — differentially verified against the trusted stable mergesort (both
+    // stable, so outputs must be byte-for-byte identical). Two data shapes:
+    //  (1) MIXED-SIGN, no ties: col0 = ((i*48271)%100000 - 50000)*0.5 (perm, range -25000..24999.5)
+    //      -> validates the f64->key transform for NEGATIVES.
+    //  (2) TIES-HEAVY: col0 = i%100 (1000 rows per key), col1 = i -> validates STABILITY
+    //      (equal-key rows must keep input order, exactly like the mergesort).
+    let RN: i64 = 100000
+    var rf = bf_new(2, 16)
+    var rfi: i64 = 0
+    while rfi < RN { var rr:[f64;64]=[0.0;64]; let s=((rfi*48271)%100000 - 50000); rr[0]=(s as f64)*0.5; rr[1]=rfi as f64; bf_push_row(&!rf,&rr,2); rfi=rfi+1 }
+    let rx = bf_sort_radix(&rf, 0, true)
+    let mg = bf_sort_by(&rf, 0, true)
+    var rd: i64 = 0; var rj: i64 = 0
+    while rj < RN { if bf_get(&rx,rj,0) != bf_get(&mg,rj,0) { rd = rd + 1 } if bf_get(&rx,rj,1) != bf_get(&mg,rj,1) { rd = rd + 1 } rj = rj + 1 }
+    if rd != 0 { print("FAIL radix_vs_mergesort_mixedsign\n"); return 72 }
+    // radix output must also be fully ordered incl. across the sign boundary.
+    var rinv: i64 = 0; rj = 1
+    while rj < RN { if bf_get(&rx,rj,0) < bf_get(&rx,rj-1,0) { rinv = rinv + 1 } rj = rj + 1 }
+    if rinv != 0 { print("FAIL radix_inversions\n"); return 73 }
+    var tf = bf_new(2, 16)
+    var tfi: i64 = 0
+    while tfi < RN { var tr:[f64;64]=[0.0;64]; tr[0]=(tfi%100) as f64; tr[1]=tfi as f64; bf_push_row(&!tf,&tr,2); tfi=tfi+1 }
+    let trx = bf_sort_radix(&tf, 0, true)
+    let tmg = bf_sort_by(&tf, 0, true)
+    var td: i64 = 0; var tj: i64 = 0
+    while tj < RN { if bf_get(&trx,tj,0) != bf_get(&tmg,tj,0) { td = td + 1 } if bf_get(&trx,tj,1) != bf_get(&tmg,tj,1) { td = td + 1 } tj = tj + 1 }
+    if td != 0 { print("FAIL radix_stability_ties\n"); return 74 }  // stable tie-order matches mergesort
+    // descending + all-equal edge (diff-mask -> zero passes).
+    let rdesc = bf_sort_radix(&rf, 0, false)
+    if bf_get(&rdesc, 0, 0) < bf_get(&rdesc, RN-1, 0) { print("FAIL radix_desc\n"); return 75 }
+    var eqf = bf_new(1, 16); var eqi: i64 = 0
+    while eqi < 1000 { var er:[f64;64]=[0.0;64]; er[0]=7.0; bf_push_row(&!eqf,&er,1); eqi=eqi+1 }
+    let eqs = bf_sort_radix(&eqf, 0, true)
+    if bf_nrows(&eqs) != 1000 { print("FAIL radix_alleq_n\n"); return 76 }
+    if bf_get(&eqs, 0, 0) != 7.0 { print("FAIL radix_alleq_v\n"); return 77 }
+    // UNIQUE + DROP_DUPLICATES: 1,000,000 rows, col0 = i%1000 (1000 distinct, each 1000x),
+    // col1 = i. Key j first appears at i=j.
+    var uf = bf_new(2, 16)
+    var ufi: i64 = 0
+    while ufi < 1000000 { var ur:[f64;64]=[0.0;64]; ur[0]=(ufi%1000) as f64; ur[1]=ufi as f64; bf_push_row(&!uf,&ur,2); ufi=ufi+1 }
+    let uq = bf_unique(&uf, 0)
+    if bf_nrows(&uq) != 1000 { print("FAIL unique_n\n"); return 78 }
+    if bf_ncols(&uq) != 1 { print("FAIL unique_c\n"); return 79 }
+    if bf_get(&uq, 0, 0) != 0.0 { print("FAIL unique_first\n"); return 80 }    // first-seen order 0..999
+    if bf_get(&uq, 999, 0) != 999.0 { print("FAIL unique_last\n"); return 81 }
+    var usum = bf_col_sum(&uq, 0)
+    if usum < 499499.5 || usum > 499500.5 { print("FAIL unique_sum\n"); return 82 }  // 0+1+..+999
+    // all-distinct edge (table near full, output == input): unique(col1) == 1,000,000.
+    let uad = bf_unique(&uf, 1)
+    if bf_nrows(&uad) != 1000000 { print("FAIL unique_alldistinct\n"); return 83 }
+    let dd = bf_drop_duplicates(&uf, 0)
+    if bf_nrows(&dd) != 1000 { print("FAIL dropdup_n\n"); return 84 }
+    if bf_ncols(&dd) != 2 { print("FAIL dropdup_c\n"); return 85 }
+
+}
+ return 0
+}

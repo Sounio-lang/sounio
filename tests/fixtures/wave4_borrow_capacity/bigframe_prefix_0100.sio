@@ -1,0 +1,103 @@
+//@ run-pass
+//@ expect-stdout: BIGFRAME_OPS_GATE_OK
+//@ timeout: 120
+// Runtime (2026-09-27): 13.4 s on lean_single (souc-stage2 engine) on a
+// 4-core dev container, against the harness default of 30 s. CI job
+// 108525867166 measured the Full Test Suite runner at 2.65-4.3x slower
+// than that class of machine, i.e. 36-58 s projected, so the default
+// timed out intermittently (job 108543622564, an unrelated PR). 120 s is
+// about 2x the worst projection, 4.3 x 13.4 s. The workload (1,000,000
+// rows) is the point of the gate, so it is not shrunk.
+// Run-proof for stdlib/data/bigframe_ops.sio — scale verbs over the heap-backed
+// columnar BigFrame. Builds a 1,000,000-row frame via a LOOP, then exercises
+// bf_filter_gt and bf_groupby_sum against oracle-exact answers.
+//
+//   col0[i] = i           (0 .. 999999)
+//   col1[i] = i % 10      (group key, each of 0..9 appears 100000 times)
+//   col2[i] = 1.0         (unit value, so sum per group == count)
+//
+// NATIVE + lean_single only (heap). Compile with:
+//   SOUNIO_SOUC_ENGINE=lean_single ./bin/souc compile <file> -o out && ./out
+use data::bigframe::*
+use data::bigframe_ops::*
+
+fn approx_eq(a: f64, b: f64) -> bool {
+    let d = a - b
+    let ad = if d < 0.0 { 0.0 - d } else { d }
+    return ad < 0.0000001
+}
+
+// naive per-window median (sort a copy each window) -- reference for bf_rolling_median.
+fn naive_rolling_median(src: &BigFrame, col: i64, window: i64, fill: f64) -> BigFrame with Alloc, Mut, Div, Panic {
+    let n = bf_nrows(src)
+    let sp = bf_col_ptr(src, col) as *mut f64
+    var out = bf_new(1, n); out.n_rows = n; let op = bf_col_ptr(&out, 0) as *mut f64
+    let buf = heap_alloc(window * 8) as *mut f64
+    let half = window / 2; let odd = window - 2 * (window / 2)
+    var i: i64 = 0
+    while i < n {
+        if i >= window - 1 {
+            var t: i64 = 0
+            while t < window { write_f64(buf, t, read_f64(sp, i - window + 1 + t)); t = t + 1 }
+            var a: i64 = 1
+            while a < window {                    // insertion sort
+                let key = read_f64(buf, a); var b = a - 1
+                while b >= 0 && read_f64(buf, b) > key { write_f64(buf, b + 1, read_f64(buf, b)); b = b - 1 }
+                write_f64(buf, b + 1, key); a = a + 1
+            }
+            var med = 0.0
+            if odd == 1 { med = read_f64(buf, half) } else { med = (read_f64(buf, half - 1) + read_f64(buf, half)) / 2.0 }
+            write_f64(op, i, med)
+        } else { write_f64(op, i, fill) }
+        i = i + 1
+    }
+    heap_free(buf as *mut i8)
+    out
+}
+
+// look up col1 for the row whose col0 == key in a [key, value] result (hash-order).
+fn lookup2(t: &BigFrame, key: f64) -> f64 with Mut, Div, Panic {
+    var r: i64 = 0
+    while r < bf_nrows(t) { if bf_get(t, r, 0) == key { return bf_get(t, r, 1) } r = r + 1 }
+    return 0.0 - 1.0
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
+    let n: i64 = 1000000
+
+    // 3 columns; small starting capacity forces heavy heap_realloc growth.
+    var bf = bf_new(3, 16)
+
+    var row: [f64; 64] = [0.0; 64]
+    var i: i64 = 0
+    while i < n {
+        let fi = i as f64
+        row[0] = fi
+        row[1] = (i % 10) as f64
+        row[2] = 1.0
+        bf_push_row(&!bf, &row, 3)
+        i = i + 1
+    }
+
+    var pass = 1
+
+    // Sanity: all 1,000,000 rows are present.
+    if bf_nrows(&bf) != n { pass = 0 }
+    if bf_ncols(&bf) != 3 { pass = 0 }
+
+    // (a) FILTER: col0 > 499999.5  -> rows i = 500000 .. 999999 = 500000 rows.
+    var filt = bf_filter_gt(&bf, 0, 499999.5)
+    if bf_nrows(&filt) != 500000 { pass = 0 }
+    if bf_ncols(&filt) != 3 { pass = 0 }
+    // Spot-check: min surviving col0 is 500000, and its key/value survived intact.
+    if !approx_eq(bf_get(&filt, 0, 0), 500000.0) { pass = 0 }
+    if !approx_eq(bf_get(&filt, 0, 2), 1.0) { pass = 0 }
+    // Filtered value column still sums to the row count.
+    if !approx_eq(bf_col_sum(&filt, 2), 500000.0) { pass = 0 }
+
+    // (b) GROUPBY-SUM: group by col1 (key), sum col2 (unit) -> 10 groups, each 100000.
+    var grp = bf_groupby_sum(&bf, 1, 2)
+    if bf_nrows(&grp) != 10 { pass = 0 }
+
+ return 0
+}
