@@ -93,9 +93,9 @@ test('runner projection pins emitter and drained diagnostics integration', () =>
     assert.ok(start > 0 && end > start);
     return text.slice(0, start) + text.slice(end);
   };
-  // Pin includes drain-before-seal, bounded phases and reviewed compile-fail and runtime diagnostic refusal. The
+  // Pin includes drain-before-seal, bounded phases and reviewed compile-fail and explicit diagnostic or exact-silent runtime refusal. The
   // historical JSON fixture above remains unchanged. Source archives need no Git.
-  assert.equal(createHash('sha256').update(strip(after)).digest('hex'), '6a07b4b0331bc2b566a1cd163aa503271e96404658401d12b703ca379a8bf134');
+  assert.equal(createHash('sha256').update(strip(after)).digest('hex'), '9c8077381bf1ba505b35e88fdc5d25d1468391ad140694f1a15aa1b651fc129f');
   assert.ok(!after.includes('python3'));
 });
 test('CLI emits fresh JSON and rejects invalid UTF8 without output', () => {

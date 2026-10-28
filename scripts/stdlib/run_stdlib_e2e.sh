@@ -10,7 +10,8 @@
 #   //@ compile-fail            both check and compile must refuse with exit1
 #   //@ error-code: E259        required diagnostic for compile-fail
 #   //@ run-fail                check/compile succeed; native refuses with exit1
-#   //@ expect-diagnostic: X    mandatory native diagnostic for run-fail
+#   //@ expect-diagnostic: X    declared diagnostic for run-fail
+#   //@ expect-silent-refusal   alternative: native exit1 with exactly zero bytes
 #   //@ expect-stdout: X        stdout must contain X (run-pass only, optional)
 #   //@ ignore [reason]         skip this test
 #   //@ ignore-owner: TEAM      optional owner metadata for ignored tests
@@ -195,6 +196,7 @@ run_test() {
   local expected_error_code=""
   local is_run_fail=false
   local expected_runtime_diagnostic=""
+  local expected_silent_refusal=false
   local is_run_pass=false
   local is_check_only=false
   local is_ignored=false
@@ -225,6 +227,9 @@ run_test() {
     fi
     if [[ "$line" =~ ^[[:space:]]*//@[[:space:]]*expect-diagnostic:[[:space:]]*(.*)$ ]]; then
       expected_runtime_diagnostic="${BASH_REMATCH[1]}"
+    fi
+    if [[ "$line" =~ ^[[:space:]]*//@[[:space:]]*expect-silent-refusal[[:space:]]*$ ]]; then
+      expected_silent_refusal=true
     fi
     if [[ "$line" =~ "//@ run-pass" ]]; then
       is_run_pass=true
@@ -274,9 +279,19 @@ run_test() {
     return
   fi
 
-  if $is_run_fail && { $is_compile_fail || $is_run_pass || $is_check_only || [[ -z "$expected_runtime_diagnostic" ]]; }; then
+  local invalid_runtime_contract=false
+  if $expected_silent_refusal && ! $is_run_fail; then invalid_runtime_contract=true; fi
+  if $is_run_fail; then
+    if $is_compile_fail || $is_run_pass || $is_check_only; then invalid_runtime_contract=true; fi
+    if [[ -z "$expected_runtime_diagnostic" ]]; then
+      if ! $expected_silent_refusal; then invalid_runtime_contract=true; fi
+    elif $expected_silent_refusal; then
+      invalid_runtime_contract=true
+    fi
+  fi
+  if $invalid_runtime_contract; then
     FAIL=$((FAIL + 1))
-    record_result "fail" "$relpath" "run-fail" "invalid-runtime-negative-annotation" "" "" "1" "run-fail requires a native diagnostic and no other mode"
+    record_result "fail" "$relpath" "run-fail" "invalid-runtime-negative-annotation" "" "" "1" "run-fail requires exactly one diagnostic or silent-refusal contract and no other mode"
     return
   fi
 
@@ -368,16 +383,26 @@ run_test() {
     return
   fi
   chmod +x "$executable"
-  output=$(phase_command "$relpath" native "$test_timeout" "$executable") || exit_code=$?
+  local native_has_output=false
+  if $expected_silent_refusal; then
+    local native_output_file
+    native_output_file=$(mktemp /tmp/sounio-stdlib-native-output-XXXXXX) || exit 65
+    phase_command "$relpath" native "$test_timeout" "$executable" >"$native_output_file" || exit_code=$?
+    if [[ -s "$native_output_file" ]]; then native_has_output=true; fi
+    output=$(cat "$native_output_file")
+    rm -f "$native_output_file"
+  else
+    output=$(phase_command "$relpath" native "$test_timeout" "$executable") || exit_code=$?
+  fi
   rm -f "$executable"
   if $is_run_fail; then
-    if [[ "$exit_code" != 1 ]] || ! grep -qF -- "$expected_runtime_diagnostic" <<< "$output"; then
+    if [[ "$exit_code" != 1 ]] || { $expected_silent_refusal && $native_has_output; } || { ! $expected_silent_refusal && ! grep -qF -- "$expected_runtime_diagnostic" <<< "$output"; }; then
       FAIL=$((FAIL + 1))
       record_result "fail" "$relpath" "run-fail" "expected-native-refusal-missing" "" "" "$exit_code" "$(head -6 <<< "$output")"
       return
     fi
     PASS=$((PASS + 1))
-    record_result "pass" "$relpath" "run-fail" "" "" "" "0" "native=1 diagnostic=$expected_runtime_diagnostic"
+    record_result "pass" "$relpath" "run-fail" "" "" "" "0" "native=1 silent=$expected_silent_refusal diagnostic=$expected_runtime_diagnostic"
     if [[ $VERBOSE -eq 1 ]]; then echo "  PASS  $relpath (native refuses with declared diagnostic)"; fi
     return
   fi
