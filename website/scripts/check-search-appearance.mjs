@@ -13,6 +13,7 @@ import assert from 'node:assert/strict';
 import { readdir, readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { parse } from 'parse5';
 import { ENGLISH_SEARCH, SELF_HOSTED_PAGE } from '../src/lib/search-appearance.mjs';
 import { rehypeDemoteH1 } from '../src/lib/rehype-demote-h1.mjs';
 import { isoDateOrNothing, CODE_REPOSITORY, FORMER_LANGUAGE_NAME, FORMER_RELEASE_URL } from '../src/lib/structured-data.mjs';
@@ -81,14 +82,28 @@ function collectAlternateNames(value, found) {
 
 const FORMER_NAME_NOTE = 'Sounio (formerly Demetrios). Sounio was previously released as Demetrios, the former name of this language.';
 
+// HTML5 end tags may carry whitespace or ignored attributes before `>`,
+// as in `</script >`. A regexp that requires a bare `</script>` leaves
+// that element body in the visible text. parse5 follows the HTML parser.
+function collectVisibleText(node, parts) {
+  if (!node || typeof node !== 'object') return;
+  const name = node.nodeName;
+  if (name === 'script' || name === 'style') return;
+  if (name === '#text') {
+    parts.push(node.value);
+    return;
+  }
+  const children = node.childNodes;
+  if (children) {
+    for (const child of children) collectVisibleText(child, parts);
+  }
+  if (node.content) collectVisibleText(node.content, parts);
+}
+
 function visibleProse(html) {
-  return decode(
-    html
-      .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, ' ')
-      .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, ' ')
-      .replace(/<[^>]+>/g, ' ')
-      .replace(/\s+/g, ' ')
-  );
+  const parts = [];
+  collectVisibleText(parse(html), parts);
+  return parts.join(' ').replace(/\s+/g, ' ');
 }
 
 function titleOf(html) {
@@ -153,6 +168,30 @@ function selfTest() {
   assert.equal(decode('&lt;h1&gt;'), '<h1>');
   assert.equal(decode('&amp;lt;'), '&lt;');
   assert.equal(decode('&amp;amp;'), '&amp;');
+
+  const aboutSnippet = `<section><h1>About</h1><p>
+        Sounio (formerly Demetrios). Sounio was previously released as Demetrios, the former name of this language.
+      </p></section>`;
+  assert.equal(visibleProse(aboutSnippet).includes(FORMER_NAME_NOTE), true);
+
+  const closings = [
+    '</script >',
+    '</script\t>',
+    '</script\n>',
+    '</script foo="bar">',
+    '</script\t\n bar>',
+    '</SCRIPT >',
+  ];
+  for (const closing of closings) {
+    const hidden = `<script>SECRET_TOKEN ${FORMER_NAME_NOTE}${closing}<p>visible only</p>`;
+    const prose = visibleProse(hidden);
+    assert.equal(prose.includes('SECRET_TOKEN'), false, closing);
+    assert.equal(prose.includes(FORMER_NAME_NOTE), false, closing);
+    assert.equal(prose.includes('visible only'), true, closing);
+  }
+  const styled = '<style>SECRET_STYLE</style ><p>visible only</p>';
+  assert.equal(visibleProse(styled).includes('SECRET_STYLE'), false);
+  assert.equal(visibleProse(styled).includes('visible only'), true);
 }
 
 selfTest();
