@@ -8,9 +8,10 @@
 // tables may be predefined, RLE, or FSE-compressed with a table log of
 // at most 6. A repeated table, or an FSE log above 6, returns -4.
 // An LZ4 frame must end on its end marker. When the content-checksum
-// flag is set, that checksum is xxHash32 of the decoded bytes. A
-// Zstandard content-checksum flag requires the 4-byte trailer to be
-// present; the trailer value is not checked.
+// flag is set, that checksum is xxHash32 of the decoded bytes. When the
+// Zstandard content-checksum flag is set, the 4-byte trailer must be the
+// low 32 bits of xxHash64 (seed 0) of the decoded bytes. Huffman literal
+// streams must be consumed exactly.
 
 pub struct CodecBuf {
     pub data: [u8; 4096],
@@ -83,15 +84,132 @@ fn rotl32(v: i64, r: i64) -> i64 {
     u32((x << r) | (x >> (32 - r)))
 }
 
+fn xxh32_round(acc: i64, lane: i64) -> i64 {
+    let p1: i64 = 2654435761
+    let p2: i64 = 2246822519
+    u32(mul_u32(rotl32(u32(acc + mul_u32(lane, p2)), 13), p1))
+}
+
+// xxHash64 helpers. i64 multiplication and addition wrap modulo 2^64, so they
+// are the unsigned 64-bit operations; only the right shift needs masking.
+fn lsr64(x: i64, r: i64) -> i64 {
+    if r == 0 { return x }
+    (x >> r) & ((1 << (64 - r)) - 1)
+}
+
+fn rotl64(x: i64, r: i64) -> i64 {
+    if r == 0 { return x }
+    (x << r) | lsr64(x, 64 - r)
+}
+
+fn le64_src(src: &[u8; 4096], i: i64) -> i64 with Panic {
+    le32_src(src, i) | (le32_src(src, i + 4) << 32)
+}
+
+fn xxh64_round(acc: i64, lane: i64) -> i64 {
+    let p1: i64 = -7046029288634856825
+    let p2: i64 = -4417276706812531889
+    rotl64(acc + lane * p2, 31) * p1
+}
+
+fn xxh64_merge(h: i64, v: i64) -> i64 {
+    let p1: i64 = -7046029288634856825
+    let p4: i64 = -8796714831421723037
+    (h ^ xxh64_round(0, v)) * p1 + p4
+}
+
+/// xxHash64 (seed 0) of `n` bytes at `at`, as a two's-complement i64.
+fn xxh64(src: &[u8; 4096], at: i64, n: i64) -> i64 with Panic {
+    let p1: i64 = -7046029288634856825
+    let p2: i64 = -4417276706812531889
+    let p3: i64 = 1609587929392839161
+    let p4: i64 = -8796714831421723037
+    let p5: i64 = 2870177450012600261
+    var i: i64 = at
+    let end = at + n
+    var h: i64 = 0
+    if n >= 32 {
+        var v1 = p1 + p2
+        var v2 = p2
+        var v3: i64 = 0
+        var v4 = 0 - p1
+        while i + 32 <= end {
+            v1 = xxh64_round(v1, le64_src(src, i))
+            v2 = xxh64_round(v2, le64_src(src, i + 8))
+            v3 = xxh64_round(v3, le64_src(src, i + 16))
+            v4 = xxh64_round(v4, le64_src(src, i + 24))
+            i = i + 32
+        }
+        h = rotl64(v1, 1) + rotl64(v2, 7) + rotl64(v3, 12) + rotl64(v4, 18)
+        h = xxh64_merge(h, v1)
+        h = xxh64_merge(h, v2)
+        h = xxh64_merge(h, v3)
+        h = xxh64_merge(h, v4)
+    } else {
+        h = p5
+    }
+    h = h + n
+    while i + 8 <= end {
+        h = h ^ xxh64_round(0, le64_src(src, i))
+        h = rotl64(h, 27) * p1 + p4
+        i = i + 8
+    }
+    if i + 4 <= end {
+        h = h ^ (le32_src(src, i) * p1)
+        h = rotl64(h, 23) * p2 + p3
+        i = i + 4
+    }
+    while i < end {
+        h = h ^ (c_at(src, i) * p5)
+        h = rotl64(h, 11) * p1
+        i = i + 1
+    }
+    h = h ^ lsr64(h, 33)
+    h = h * p2
+    h = h ^ lsr64(h, 29)
+    h = h * p3
+    h ^ lsr64(h, 32)
+}
+
+/// Test hooks: xxHash32 and the low 32 bits of xxHash64 (the Zstandard
+/// content checksum), both seed 0, over the first `n` bytes of `src`.
+pub fn codec_xxh32(src: &[u8; 4096], n: i64) -> i64 with Panic {
+    if n < 0 || n > 4096 { return -1 }
+    xxh32(src, 0, n)
+}
+
+pub fn codec_xxh64_lo32(src: &[u8; 4096], n: i64) -> i64 with Panic {
+    if n < 0 || n > 4096 { return -1 }
+    u32(xxh64(src, 0, n))
+}
+
 fn xxh32(src: &[u8; 4096], at: i64, n: i64) -> i64 with Panic {
     let p1: i64 = 2654435761
     let p2: i64 = 2246822519
     let p3: i64 = 3266489917
     let p4: i64 = 668265263
     let p5: i64 = 374761393
-    var acc = u32(p5 + n)
     var i: i64 = at
     let end = at + n
+    var acc: i64 = 0
+    if n >= 16 {
+        // Four lanes over each 16-byte stripe, then the lane merge.
+        var v1 = u32(p1 + p2)
+        var v2 = p2
+        var v3: i64 = 0
+        var v4 = u32(0 - p1)
+        while i + 16 <= end {
+            v1 = xxh32_round(v1, le32_src(src, i))
+            v2 = xxh32_round(v2, le32_src(src, i + 4))
+            v3 = xxh32_round(v3, le32_src(src, i + 8))
+            v4 = xxh32_round(v4, le32_src(src, i + 12))
+            i = i + 16
+        }
+        acc = u32(rotl32(v1, 1) + rotl32(v2, 7) + rotl32(v3, 12) + rotl32(v4, 18))
+    } else {
+        acc = p5
+    }
+    acc = u32(acc + n)
     while i + 4 <= end {
         let w = c_at(src, i) + (c_at(src, i + 1) << 8) + (c_at(src, i + 2) << 16) + (c_at(src, i + 3) << 24)
         acc = u32(mul_u32(rotl32(u32(acc + mul_u32(w, p3)), 17), p4))
@@ -1146,6 +1264,9 @@ fn huff_stream(src: &[u8; 4096], start: i64, len: i64, nout: i64, lits: &![u8; 4
     while bit >= 0 && ((lastb >> bit) & 1) == 0 {
         bit = bit - 1
     }
+    // Data bits below the end marker. Each symbol must fit in them, and the
+    // stream must be consumed exactly (zstd's end-of-stream condition).
+    var rem = (end - 1 - start) * 8 + bit
     bit = bit - 1
     var idx = end - 1
     if bit < 0 {
@@ -1167,10 +1288,14 @@ fn huff_stream(src: &[u8; 4096], start: i64, len: i64, nout: i64, lits: &![u8; 4
             s = s + 1
         }
         if found < 0 { return -6 }
+        let used = h.nbits[found as usize]
+        if used > rem { return -6 }
+        rem = rem - used
         lits[(at + i) as usize] = (found as i32) as u8
-        b_skip(&!idx, &!bit, h.nbits[found as usize])
+        b_skip(&!idx, &!bit, used)
         i = i + 1
     }
+    if rem != 0 { return -6 }
     0
 }
 
@@ -1544,6 +1669,8 @@ pub fn codec_decompress_zstd(src: &[u8; 4096], n: i64, dst: &!CodecBuf) -> i64 w
         if last != 0 {
             if (fhd & 4) != 0 {
                 if p + 4 > n { return -6 }
+                // Content checksum: the low 32 bits of xxHash64 (seed 0) of the decoded content.
+                if le32_src(src, p) != u32(xxh64(&dst.data, 0, dst.len)) { return -6 }
                 p = p + 4
             }
             if p != n { return -6 }
