@@ -93,9 +93,10 @@ export function buildPageSchemas({
   headline,
   about,
   author,
+  omitSoftwareApplication,
 }) {
   const schemas = [];
-  if (bare === '/') schemas.push(softwareApplication({ description, siteOrigin }));
+  if (bare === '/' && !omitSoftwareApplication) schemas.push(softwareApplication({ description, siteOrigin }));
   if (bare === '/' || bare === '/learn/getting-started/') schemas.push(softwareSourceCode());
   if (bare.startsWith('/learn/')) {
     schemas.push(techArticle({

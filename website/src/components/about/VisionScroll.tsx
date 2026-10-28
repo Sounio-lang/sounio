@@ -323,7 +323,7 @@ export function VisionScroll() {
           </blockquote>
           <cite className="vision-quote-cite">— Lord Byron, Don Juan (1819)</cite>
           <h2 className="vision-cta-heading">Compute at the horizon of certainty.</h2>
-          <a href="/language" className="hero-cta primary vision-cta-btn">
+          <a href="/language/" className="hero-cta primary vision-cta-btn">
             Explore the Language →
           </a>
         </div>
