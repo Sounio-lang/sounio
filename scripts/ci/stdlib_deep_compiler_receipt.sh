@@ -195,7 +195,7 @@ verify_step_problems() {
   [[ "$line" =~ ^[[:space:]]{8}continue-on-error: ]] && step_swallow=1
   [[ "$line" == *'||'* || "$line" == *'&&'* ]] && step_swallow=1
   [[ "$line" =~ (^|[[:space:]])(if|elif|while|until)[[:space:]] ]] && step_swallow=1
-  [[ "$line" =~ set[[:space:]]+\+([^[:space:]]*e|o[[:space:]]+errexit) ]] && step_swallow=1
+  [[ "$line" =~ set[[:space:]]+\+([^[:space:]]*e|o[[:space:]]+[\'\"]?errexit) ]] && step_swallow=1
   # `!=` is a comparison. Any other `!` in this step negates a command.
   bang=${line//!=/}
   [[ "$bang" == *'!'* ]] && step_swallow=1
@@ -204,7 +204,7 @@ verify_step_problems() {
    [[ "$line" =~ ^[[:space:]]*(-\ )?run:[[:space:]]*\|[+-]?[[:space:]]*$ ]] || step_swallow=1
   fi
   [[ "$line" == *'<('* || "$line" == *'>('* ]] && step_swallow=1
-  [[ "$line" =~ set[[:space:]]+\+o[[:space:]]+pipefail ]] && step_swallow=1
+  [[ "$line" =~ set[[:space:]]+\+o[[:space:]]+[\'\"]?pipefail ]] && step_swallow=1
   # `&&`, `&>`, `>&`, and `|&` are not background jobs. A remaining `&` is.
   amp=$line
   amp=${amp//&&/}
@@ -225,10 +225,13 @@ verify_step_problems() {
   # not executed. A heredoc holds that text without running it. `bash +e`
   # turns errexit off in that shell, so a failed receipt still reaches `cp`.
   # `run:` and `name:` are YAML keys, not the `:` builtin.
-  [[ "$line" =~ (^|[[:space:]])true([[:space:]]|$) ]] && step_swallow=1
+  [[ "$line" =~ (^|[[:space:]])true([[:space:]]|$) || "$line" == *'/true'* ]] && step_swallow=1
   [[ "$line" =~ ^[[:space:]]{10,}:[[:space:]] || "$line" =~ run:[[:space:]]+:[[:space:]] ]] && step_swallow=1
   [[ "$line" == *'<<'* ]] && step_swallow=1
-  [[ "$line" =~ (^|[[:space:]])\+e([^[:alnum:]_]|$) || "$line" =~ \+o[[:space:]]+errexit ]] && step_swallow=1
+  [[ "$line" =~ (^|[[:space:]])\+e([^[:alnum:]_]|$) || "$line" =~ \+o[[:space:]]+[\'\"]?errexit ]] && step_swallow=1
+  # `exit 0` and `exec /bin/true` end the step successfully before verify runs.
+  # The text is still in the file, and the next step copies or builds another ELF.
+  [[ "$line" =~ (^|[[:space:]])(exit|exec)([[:space:]]|$) ]] && step_swallow=1
   if [[ "$line" =~ ^[[:space:]]*(-\ )?shell: ]]; then
    [[ ( "$line" == *'-e'* || "$line" == *'errexit'* ) && "$line" == *'pipefail'* ]] || step_swallow=1
   fi
@@ -545,6 +548,15 @@ EOF
  expect_workflow_problem "$bad" verify-skippable
  bad="$work/wf-verify-bash-plus-e.yml"
  awk 'BEGIN{arm=0} /^  madaros-current-source-deref-f64:/{arm=1} arm && /stdlib_deep_compiler_receipt.sh verify/{sub(/bash/, "bash +e"); arm=0} {print}' "$base" >"$bad"
+ expect_workflow_problem "$bad" verify-skippable
+ bad="$work/wf-verify-exit.yml"
+ awk 'BEGIN{arm=0} /^  madaros-current-source-deref-f64:/{arm=1} arm && /stdlib_deep_compiler_receipt.sh verify/{print "          exit 0"; arm=0} {print}' "$base" >"$bad"
+ expect_workflow_problem "$bad" verify-skippable
+ bad="$work/wf-verify-exec-true.yml"
+ awk 'BEGIN{arm=0} /^  madaros-current-source-deref-f64:/{arm=1} arm && /stdlib_deep_compiler_receipt.sh verify/{print "          exec /bin/true"; arm=0} {print}' "$base" >"$bad"
+ expect_workflow_problem "$bad" verify-skippable
+ bad="$work/wf-verify-quoted-errexit.yml"
+ awk 'BEGIN{arm=0} /^  madaros-current-source-deref-f64:/{arm=1} arm && /stdlib_deep_compiler_receipt.sh verify/{print "          set +o '\''errexit'\''"; arm=0} {print}' "$base" >"$bad"
  expect_workflow_problem "$bad" verify-skippable
  bad="$work/wf-verify.yml"
  awk 'BEGIN{skip=0} /madaros-current-source-deref-f64/{skip=1} skip && /stdlib_deep_compiler_receipt.sh verify/{skip=0; next} {print}' "$base" >"$bad"
