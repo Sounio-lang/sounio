@@ -418,12 +418,14 @@ I dispatch(I op,I a,I b,I c,I d) {
     if(reserved<0)return failure(EINVAL);
     return reserved;
   }
-  if(op==130) {
+  if(op==130||op==140) {
     const I reserved=pool_reservation(b,c);
     if(reserved<0||d<0||a==0)return failure(EINVAL);
     if(d<reserved)return failure(ENOBUFS);
-    // dladdr rejects heap closure descriptors. It does not prove code identity;
-    // the typed public API requires a bare function and forbids owner casts.
+    // Both native scalar ABIs use GPR/RAX words, including f64 IEEE bits.
+    // Operation140 is the typed F64 entry; no C double/XMM calling convention.
+    // dladdr is only an FFI guard, not a proof of worker safety. Certified
+    // public wrappers obtain this entry only through compiler-private extraction.
     Dl_info info{};
     if(dladdr(reinterpret_cast<void*>(a),&info)==0)return failure(EINVAL);
     auto pool=std::make_shared<Pool>(reinterpret_cast<Pool::Callback>(a),
