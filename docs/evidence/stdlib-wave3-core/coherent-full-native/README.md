@@ -33,9 +33,9 @@ and current-directory collisions do not choose a family.
 `tools/unicode/run_bidi_coherent_chunks.cpp` runs the actual ELF directly with
 one argument, `4`, through the existing native execution helper. It accepts
 only the full original manifest of 211 chunks and 861,948 cases, even when
-executing one partition. The runner records the executable digest, exact argc
-and kind, chunk bytes, exit status, unique success marker and observed case
-count. The collector checks invocation sidecars, parent executable bindings,
+executing one partition. The per-part receipt binds the externally measured executable digest to the
+runner-recorded argc and kind, chunk bytes, exit status, unique success marker
+and observed case count. The collector checks invocation sidecars, parent executable bindings,
 partition topology, unique fixture coverage and exact full-manifest totals
 before creating a fresh summary directory.
 
