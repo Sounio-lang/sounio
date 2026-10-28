@@ -1,3 +1,13 @@
+#include <cstring>
+#include <arrow/util/config.h>
+#include <algorithm>
+#include <cerrno>
+#include <chrono>
+#include <thread>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <sys/socket.h>
+#include <unistd.h>
 // Independent C++23 exact ADC oracle and Arrow C++26 IPC consumer.
 #include <arrow/api.h>
 #include <arrow/io/api.h>
@@ -10,7 +20,9 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+static_assert(ARROW_VERSION_MAJOR==26&&ARROW_VERSION_MINOR==0&&ARROW_VERSION_PATCH==0);
 using I=std::int64_t;
+static_assert(static_cast<__int128>(1000000)*1000000*1000000<=INT64_MAX);
 namespace fs=std::filesystem;
 static void need(bool b,const std::string& why){if(!b)throw std::runtime_error(why);}
 template<class T>static T take(arrow::Result<T> r){need(r.ok(),r.status().ToString());return std::move(r).ValueOrDie();}
@@ -51,6 +63,15 @@ static void generate(const fs::path& dir,I count){
 }
 static void verify(const fs::path& input,const fs::path& output,const std::string& mutation){
  const auto expected=samples(input);
+
+ std::ifstream wire(output,std::ios::binary);
+ need(bool(wire),"open Arrow bytes");
+ wire.seekg(-8,std::ios::end);
+ char tail[8]{};
+ wire.read(tail,8);
+ const unsigned char eos[8]={255,255,255,255,0,0,0,0};
+ need(wire.gcount()==8&&std::memcmp(tail,eos,8)==0,"explicit Arrow EOS missing");
+
  auto file=take(arrow::io::ReadableFile::Open(output.string()));
  auto reader=take(arrow::ipc::RecordBatchStreamReader::Open(file));
  const auto schema=reader->schema();
@@ -109,13 +130,62 @@ static void mutate(const fs::path& input,const fs::path& output,const std::strin
  need(writer->Close().ok()&&sink->Close().ok(),"mutation close");
 }
 
+
+static void peer(const std::string& port_text,const fs::path& input,I chunk,I delay_ms,const std::string& mode){
+ const I port=integer(port_text);
+ need(port>0&&port<=65535&&chunk>0&&chunk<=65536&&delay_ms>=0&&delay_ms<=1000,"peer parameters");
+ std::ifstream file(input,std::ios::binary);need(bool(file),"peer input");
+ const std::string data((std::istreambuf_iterator<char>(file)),{});
+ const int fd=::socket(AF_INET,SOCK_STREAM|SOCK_CLOEXEC,0);need(fd>=0,"peer socket");
+ struct Close{int fd;~Close(){if(fd>=0)::close(fd);}} close{fd};
+ int one=1,send_bytes=4096;timeval timeout{5,0};
+ need(setsockopt(fd,IPPROTO_TCP,TCP_NODELAY,&one,sizeof(one))==0,"TCP_NODELAY");
+ need(setsockopt(fd,SOL_SOCKET,SO_SNDBUF,&send_bytes,sizeof(send_bytes))==0,"SO_SNDBUF");
+ need(setsockopt(fd,SOL_SOCKET,SO_SNDTIMEO,&timeout,sizeof(timeout))==0,"SO_SNDTIMEO");
+ sockaddr_in address{};address.sin_family=AF_INET;address.sin_port=htons(static_cast<std::uint16_t>(port));address.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
+ need(::connect(fd,reinterpret_cast<sockaddr*>(&address),sizeof(address))==0,"peer connect");
+ std::size_t sent=0,calls=0;
+ while(sent<data.size()){
+  const auto amount=std::min(static_cast<std::size_t>(chunk),data.size()-sent);
+  const auto n=::send(fd,data.data()+sent,amount,MSG_NOSIGNAL);
+  if(n<0&&errno==EINTR)continue;
+  need(n>0,"TCP_SEND_ERROR errno="+std::to_string(errno));
+  sent+=static_cast<std::size_t>(n);++calls;
+  if(mode=="slow")std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
+ }
+ if(mode=="hold")std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
+ // The receiver may intentionally close on a tested error before shutdown.
+ ::shutdown(fd,SHUT_WR);
+ std::cout<<"TCP_PEER_SENT bytes="<<sent<<" calls="<<calls<<'\n';
+}
+
+
+static I rss_kib(const fs::path& path){
+ std::ifstream file(path);need(bool(file),"resource receipt");
+ std::string line;
+ const std::string key="Maximum resident set size (kbytes): ";
+ while(std::getline(file,line)){
+  const auto at=line.find(key);
+  if(at!=std::string::npos)return integer(line.substr(at+key.size()));
+ }
+ throw std::runtime_error("missing max RSS");
+}
+static void resources(const fs::path& small,const fs::path& scale,const fs::path& tcp){
+ const I a=rss_kib(small),b=rss_kib(scale),c=rss_kib(tcp);
+ need(a>0&&b>0&&c>0,"nonpositive RSS");
+ need(b<=131072&&c<=131072,"128MiB resident-memory limit");
+ need(b-a<=16384&&c-a<=16384,"RSS growth exceeds 16MiB over small fixture");
+ std::cout<<"ADC_RSS_CPP_OK small_kib="<<a<<" scale_kib="<<b<<" tcp_kib="<<c<<'\n';
+}
+
 int main(int argc,char** argv){
  try{
   need(argc>=2,"mode");
   if(std::string(argv[1])=="generate"){need(argc==4,"generate DIR COUNT");generate(argv[2],integer(argv[3]));}
+  else if(std::string(argv[1])=="resources"){need(argc==5,"resources SMALL SCALE TCP");resources(argv[2],argv[3],argv[4]);}
+  else if(std::string(argv[1])=="peer"){need(argc==7,"peer PORT CSV CHUNK DELAY_MS MODE");peer(argv[2],argv[3],integer(argv[4]),integer(argv[5]),argv[6]);}
   else if(std::string(argv[1])=="mutate"){need(argc==5,"mutate INPUT OUTPUT KIND");mutate(argv[2],argv[3],argv[4]);}
   else{need((argc==4||argc==5)&&std::string(argv[1])=="verify","verify CSV ARROW [mutation]");verify(argv[2],argv[3],argc==5?argv[4]:"");}
   return 0;
  }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
 }
-

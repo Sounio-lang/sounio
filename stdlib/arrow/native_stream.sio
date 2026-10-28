@@ -1,12 +1,13 @@
+use arrow::flatbuf::{FbBuilder}
 // Incremental Arrow IPC stream adapters. Each frame retains ArrowBuf8192 and
 // batch-body4096 limits; total stream length and number of batches are unbounded.
 // Caller owns schema/dictionary state and must preserve it between open/next calls.
 // Return Arrow status codes; -9 means I/O/storage failure, exposed as POSIX errno.
 // Explicit stream EOS is required; trailing bytes after EOS are malformed.
-use arrow::lib::{ArrowSchema,ArrowBatch,ArrowBuf,ArrowDicts,arrow_buf_new,arrow_cursor_new,arrow_ipc_metadata_view,arrow_ipc_open_ex,arrow_ipc_next_ex,arrow_ipc_stream_begin,arrow_ipc_stream_push,arrow_ipc_stream_push_dict,arrow_ipc_stream_end}
+use arrow::lib::{ArrowSchema,ArrowBatch,ArrowBuf,ArrowDicts,ArrowBatchWorkspace,arrow_ipc_stream_push_reuse,arrow_buf_new,arrow_cursor_new,arrow_ipc_metadata_view,arrow_ipc_open_ex,arrow_ipc_next_ex,arrow_ipc_stream_begin,arrow_ipc_stream_push,arrow_ipc_stream_push_dict,arrow_ipc_stream_end}
 use ffi::platform::{Platform}
 use io::buffered_reader::{BufferedReader,buffered_reader_status,buffered_reader_next,buffered_reader_close}
-use io::native_file::{NativeFile,native_file_status,native_file_write_all,native_file_close}
+use io::native_file::{NativeFile,native_file_status,native_file_write_all,native_file_write_all_count,native_file_close}
 use collections::byte_buffer::{ByteBuffer,byte_buffer_new,byte_buffer_push,byte_buffer_clear,byte_buffer_close}
 pub linear struct ArrowStreamReader {reader:BufferedReader,status:i64,io_status:i64,opened:bool,ended:bool}
 pub linear struct ArrowStreamWriter {file:NativeFile,buffer:ByteBuffer,status:i64,io_status:i64,opened:bool,ended:bool}
@@ -105,6 +106,22 @@ pub fn arrow_stream_writer_new(file:NativeFile)->ArrowStreamWriter {
 pub fn arrow_stream_writer_status(w:&ArrowStreamWriter)->i64 {w.status}
 pub fn arrow_stream_writer_io_status(w:&ArrowStreamWriter)->i64 {w.io_status}
 fn asw_fail(w:&!ArrowStreamWriter,code:i64)->i64 with Mut {w.status=code;return code}
+fn asw_frame_reuse(p:&Platform,w:&!ArrowStreamWriter,frame:&ArrowBuf)->i64 with IO,Alloc,Mut,Div,Panic {
+ if frame.len<0 || frame.len>8192 {return asw_fail(w,0-7)}
+ byte_buffer_clear(&!w.buffer)
+ var i:i64=0
+ while i<frame.len {
+  let code=byte_buffer_push(&!w.buffer,frame.data[i as usize] as i64)
+  if code!=0 {w.io_status=if code==3 {12} else {105};return asw_fail(w,0-9)}
+  i=i+1
+ }
+ let written=native_file_write_all_count(p,&w.file,&w.buffer,0,frame.len)
+ if written<0 {w.io_status=0-written;return asw_fail(w,0-9)}
+ if written!=frame.len {w.io_status=5;return asw_fail(w,0-9)}
+ return 0
+}
+
+
 fn asw_frame(p:&Platform,w:&!ArrowStreamWriter,frame:&ArrowBuf)->i64 with IO,Alloc,Mut,Div,Panic {
  if frame.len<0 || frame.len>8192 {return asw_fail(w,0-7)}
  byte_buffer_clear(&!w.buffer)
@@ -163,4 +180,13 @@ pub fn arrow_stream_writer_close(p:&Platform,w:ArrowStreamWriter)->i64 with IO,A
  if io_status!=0 {return io_status}
  if status!=0 || !ended {return 22}
  return code
+}
+
+// Reuses caller-owned frame/body/builder; no per-batch aggregate construction.
+pub fn arrow_stream_writer_push_reuse(p:&Platform,w:&!ArrowStreamWriter,schema:&ArrowSchema,batch:&ArrowBatch,frame:&!ArrowBuf,work:&!ArrowBatchWorkspace,b:&!FbBuilder)->i64 with IO,Alloc,Mut,Div,Panic {
+ if w.status!=0 {return w.status}
+ if !w.opened || w.ended {return asw_fail(w,0-6)}
+ let code=arrow_ipc_stream_push_reuse(schema,batch,frame,work,b)
+ if code!=0 {return asw_fail(w,code)}
+ return asw_frame_reuse(p,w,frame)
 }

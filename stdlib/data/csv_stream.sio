@@ -4,8 +4,8 @@
 // 0 learns its width; every later record must match. Only an initial UTF-8 BOM
 // is stripped. No normalization is performed. All row/field budgets are explicit.
 use ffi::platform::{Platform,PlatformValue}
-use io::buffered_reader::{BufferedReader,buffered_reader_status,buffered_reader_next,buffered_reader_close}
-use collections::byte_buffer::{ByteBuffer,ByteValue,byte_buffer_new,byte_buffer_len,byte_buffer_get,byte_buffer_push,byte_buffer_reserve,byte_buffer_clear,byte_buffer_utf8_count_range,byte_buffer_close}
+use io::buffered_reader::{BufferedReader,buffered_reader_status,buffered_reader_next,buffered_reader_next_code,buffered_reader_close}
+use collections::byte_buffer::{ByteBuffer,ByteValue,byte_buffer_new,byte_buffer_len,byte_buffer_get,byte_buffer_byte_code,byte_buffer_push,byte_buffer_reserve,byte_buffer_clear,byte_buffer_utf8_count_range,byte_buffer_utf8_count_range_code,byte_buffer_close}
 use collections::integer_buffer::{IntegerBuffer,integer_buffer_new,integer_buffer_len,integer_buffer_resize,integer_buffer_at,integer_buffer_set,integer_buffer_close}
 pub linear struct CsvStream {reader:BufferedReader,prefix:[i64;3],prefix_len:i64,prefix_pos:i64,started:bool,offset:i64,columns:i64,status:i64}
 pub linear struct CsvOwnedRow {data:ByteBuffer,fields:IntegerBuffer,status:i64,error_offset:i64}
@@ -63,15 +63,15 @@ pub fn csv_row_copy_field(r:&CsvOwnedRow,field:i64,out:&!ByteBuffer)->ByteValue 
  }
  return ByteValue {value:range.len,status:0}
 }
-fn csv_stream_read(p:&Platform,s:&!CsvStream)->PlatformValue with IO,Alloc,Mut {
+fn csv_stream_read_code(p:&Platform,s:&!CsvStream)->i64 with IO,Alloc,Mut {
  if !s.started {
   s.started=true
   var n:i64=0
   while n<3 {
-   let b=buffered_reader_next(p,&!s.reader)
-   if b.status==61 {break}
-   if b.status!=0 {return b}
-   s.prefix[n]=b.value
+   let byte=buffered_reader_next_code(p,&!s.reader)
+   if byte==0-61 {break}
+   if byte<0 {return byte}
+   s.prefix[n]=byte
    n=n+1
   }
   s.prefix_len=n
@@ -80,18 +80,17 @@ fn csv_stream_read(p:&Platform,s:&!CsvStream)->PlatformValue with IO,Alloc,Mut {
    s.offset=3
   }
  }
- if s.offset==9223372036854775807 {return PlatformValue {value:0,status:75}}
+ if s.offset==9223372036854775807 {return 0-75}
  if s.prefix_pos<s.prefix_len {
   let value=s.prefix[s.prefix_pos]
   s.prefix_pos=s.prefix_pos+1
   s.offset=s.offset+1
-  return PlatformValue {value:value,status:0}
+  return value
  }
- let b=buffered_reader_next(p,&!s.reader)
- if b.status==0 {s.offset=s.offset+1}
- return b
-}
-fn csv_stream_fail(s:&!CsvStream,r:&!CsvOwnedRow,code:i64,offset:i64)->i64 with Mut {
+ let byte=buffered_reader_next_code(p,&!s.reader)
+ if byte>=0 {s.offset=s.offset+1}
+ return byte
+}fn csv_stream_fail(s:&!CsvStream,r:&!CsvOwnedRow,code:i64,offset:i64)->i64 with Mut {
  s.status=code
  r.status=code
  r.error_offset=offset
@@ -99,8 +98,8 @@ fn csv_stream_fail(s:&!CsvStream,r:&!CsvOwnedRow,code:i64,offset:i64)->i64 with 
 }
 fn csv_row_finish_field(r:&!CsvOwnedRow,start:i64)->i64 with Alloc,Mut,Div,Panic {
  let n=byte_buffer_len(&r.data)-start
- let valid=byte_buffer_utf8_count_range(&r.data,start,n)
- if valid.status!=0 {return csv_stream_errno(valid.status)}
+ let valid=byte_buffer_utf8_count_range_code(&r.data,start,n)
+ if valid<0 {return csv_stream_errno(0-valid)}
  let at=integer_buffer_len(&r.fields)
  if at>9223372036854775805 {return 105}
  let code=integer_buffer_resize(&!r.fields,at+2)
@@ -132,14 +131,14 @@ pub fn csv_stream_next(p:&Platform,s:&!CsvStream,r:&!CsvOwnedRow)->i64 with IO,A
  var field_offset=s.offset
  var any:bool=false
  while true {
-  let got=csv_stream_read(p,s)
-  if got.status==61 {
+  let got=csv_stream_read_code(p,s)
+  if got==0-61 {
    if state==2 || state==4 {return csv_stream_fail(s,r,22,s.offset)}
    if !any {s.status=1;r.status=1;return 1}
    return csv_stream_complete(s,r,start,field_offset)
   }
-  if got.status!=0 {return csv_stream_fail(s,r,got.status,s.offset)}
-  let c=got.value
+  if got<0 {return csv_stream_fail(s,r,0-got,s.offset)}
+  let c=got
   if !any {field_offset=s.offset-1}
   any=true
   if state==4 {
@@ -155,6 +154,7 @@ pub fn csv_stream_next(p:&Platform,s:&!CsvStream,r:&!CsvOwnedRow)->i64 with IO,A
   } else if c==13 {state=4}
   else if c==10 {return csv_stream_complete(s,r,start,field_offset)}
   else if c==44 {
+   if s.columns>0 && integer_buffer_len(&r.fields)/2>=s.columns-1 {return csv_stream_fail(s,r,22,s.offset-1)}
    let code=csv_row_finish_field(r,start)
    if code!=0 {return csv_stream_fail(s,r,code,field_offset)}
    start=byte_buffer_len(&r.data)
@@ -193,26 +193,36 @@ pub fn csv_stream_close(p:&Platform,s:CsvStream)->i64 with IO,Alloc {
 // Checked signed decimal conversion directly from an unescaped owned field.
 // No whitespace, fractional part, exponent, truncation or CString roundtrip.
 // Negative accumulation also admits the exact i64 minimum without negating it.
-pub fn csv_row_i64_checked(r:&CsvOwnedRow,field:i64)->PlatformValue with Div,Panic {
- let range=csv_row_field_range(r,field)
- if range.status!=0 {return PlatformValue {value:0,status:range.status}}
- if range.len==0 {return PlatformValue {value:0,status:22}}
+pub fn csv_row_i64_checked_into(r:&CsvOwnedRow,field:i64,out:&!PlatformValue) with Mut,Div,Panic {
+ out.value=0
+ out.status=0
+ if r.status!=0 {out.status=r.status;return}
+ if field<0 || field>=integer_buffer_len(&r.fields)/2 {out.status=4;return}
+ let start=integer_buffer_at(&r.fields,field*2)
+ let count=integer_buffer_at(&r.fields,field*2+1)
+ if count==0 {out.status=22;return}
  var at:i64=0
  var negative:bool=false
- let first=csv_row_field_byte(r,field,0).value
+ let first=byte_buffer_byte_code(&r.data,start)
  if first==45 || first==43 {negative=first==45;at=1}
- if at==range.len {return PlatformValue {value:0,status:22}}
+ if at==count {out.status=22;return}
  let limit=if negative {0-9223372036854775807-1} else {0-9223372036854775807}
  var value:i64=0
- while at<range.len {
-  let digit=csv_row_field_byte(r,field,at).value-48
-  if digit<0 || digit>9 {return PlatformValue {value:0,status:22}}
-  if value<limit/10 {return PlatformValue {value:0,status:34}}
+ while at<count {
+  let digit=byte_buffer_byte_code(&r.data,start+at)-48
+  if digit<0 || digit>9 {out.status=22;return}
+  if value<limit/10 {out.status=34;return}
   value=value*10
-  if value<limit+digit {return PlatformValue {value:0,status:34}}
+  if value<limit+digit {out.status=34;return}
   value=value-digit
   at=at+1
  }
- return PlatformValue {value:if negative {value} else {0-value},status:0}
+ out.value=if negative {value} else {0-value}
+ out.status=0
 }
 
+pub fn csv_row_i64_checked(r:&CsvOwnedRow,field:i64)->PlatformValue with Mut,Div,Panic {
+ var out=PlatformValue {value:0,status:0}
+ csv_row_i64_checked_into(r,field,&!out)
+ return out
+}

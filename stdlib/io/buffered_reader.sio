@@ -1,8 +1,8 @@
 // Owned buffered regular-file reader. Payload budget covers the refill buffer.
 // next returns status61 at EOF; offset counts delivered bytes, not prefetched bytes.
 use ffi::platform::{Platform,PlatformValue}
-use io::native_file::{NativeFile,native_file_status,native_file_read,native_file_close}
-use collections::byte_buffer::{ByteBuffer,byte_buffer_new,byte_buffer_status,byte_buffer_len,byte_buffer_get,byte_buffer_clear,byte_buffer_close}
+use io::native_file::{NativeFile,native_file_status,native_file_read,native_file_close,native_file_read_count}
+use collections::byte_buffer::{ByteBuffer,byte_buffer_new,byte_buffer_status,byte_buffer_len,byte_buffer_get,byte_buffer_byte_code,byte_buffer_clear,byte_buffer_close}
 pub linear struct BufferedReader {file:NativeFile,buffer:ByteBuffer,pos:i64,offset:i64,chunk:i64,status:i64,eof:bool}
 pub fn buffered_reader_new(file:NativeFile,chunk_bytes:i64,max_bytes:i64)->BufferedReader {
  var code=native_file_status(&file)
@@ -34,4 +34,23 @@ pub fn buffered_reader_close(p:&Platform,r:BufferedReader)->i64 with IO,Alloc {
  let BufferedReader {file,buffer,pos,offset,chunk,status,eof}=r
  byte_buffer_close(buffer)
  return native_file_close(p,file)
+}
+
+// Byte 0..255, otherwise -POSIX_errno (EOF is -61). Reuses all owner storage.
+pub fn buffered_reader_next_code(p:&Platform,r:&!BufferedReader)->i64 with IO,Alloc,Mut {
+ if r.status!=0 {return 0-r.status}
+ if r.pos>=byte_buffer_len(&r.buffer) {
+  if r.eof {return 0-61}
+  byte_buffer_clear(&!r.buffer)
+  let got=native_file_read_count(p,&r.file,&!r.buffer,r.chunk)
+  if got<0 {r.status=0-got;return got}
+  if got==0 {r.eof=true;return 0-61}
+  r.pos=0
+ }
+ if r.offset==9223372036854775807 {r.status=75;return 0-75}
+ let byte=byte_buffer_byte_code(&r.buffer,r.pos)
+ if byte<0 {r.status=71;return 0-71}
+ r.pos=r.pos+1
+ r.offset=r.offset+1
+ return byte
 }

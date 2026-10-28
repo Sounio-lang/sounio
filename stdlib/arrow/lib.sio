@@ -48,6 +48,7 @@ use arrow::flatbuf::{
     fb_end_vector,
     fb_finish,
     fb_new,
+    fb_reset,
     fb_place_u8,
     fb_slot_i16,
     fb_slot_i32,
@@ -215,6 +216,8 @@ struct Scratch {
     nvc: i64,
     codec: i64,
 }
+
+pub struct ArrowBatchWorkspace {scratch:Scratch}
 
 struct MsgSpan {
     start: i64,
@@ -1849,6 +1852,18 @@ fn compress_scratch(sc: &!Scratch) -> i64 with Mut, Panic, Div {
     0
 }
 
+fn emit_message_reuse(out:&!ArrowBuf,b:&FbBuilder,sc:&Scratch)->i64 with Mut,Panic,Div {
+ if b.err!=0 {return 0-1}
+ let meta_len=4096-b.head
+ let pad=pad8(meta_len)
+ if buf_push_i32(out,0-1)!=0 {return 0-1}
+ if buf_push_i32(out,meta_len+pad)!=0 {return 0-1}
+ if buf_append_fb(out,b)!=0 {return 0-1}
+ var i:i64=0
+ while i<pad {if buf_push(out,0)!=0 {return 0-1};i=i+1}
+ if buf_append_body(out,sc)!=0 {return 0-1}
+ return 0
+}
 fn emit_message(out: &!ArrowBuf, b: &FbBuilder, sc: &Scratch) -> MsgSpan with Mut, Panic, Div {
     if b.err != 0 { return msg_fail(-1) }
     let meta_len = 4096 - b.head
@@ -3684,4 +3699,40 @@ pub fn arrow_ipc_read(buf: &ArrowBuf, schema: &!ArrowSchema, batch: &!ArrowBatch
         return read_file_buf(buf, schema, batch)
     }
     read_stream_buf(buf, schema, batch)
+}
+
+// Reusable uncompressed-batch workspace. Private fields prevent forged state.
+pub fn arrow_batch_workspace_new()->ArrowBatchWorkspace {
+ return ArrowBatchWorkspace {scratch:scratch_new()}
+}
+// Encodes one frame with caller-owned output, body scratch and FlatBuffer
+// builder. Existing batch/type/shape validation remains mandatory.
+pub fn arrow_ipc_stream_push_reuse(schema:&ArrowSchema,batch:&ArrowBatch,out:&!ArrowBuf,work:&!ArrowBatchWorkspace,b:&!FbBuilder)->i64 with Mut,Panic,Div {
+ let code=shape_ok(schema,batch)
+ if code!=0 {return code}
+ if batch.codec!=0 {return 0-4}
+ out.len=0
+ work.scratch.body_len=0
+ work.scratch.nbuf=0
+ work.scratch.nnode=0
+ work.scratch.nvc=0
+ work.scratch.codec=0
+ var i:i64=0
+ while i<8 {
+  work.scratch.nlen[i as usize]=0
+  work.scratch.nnull[i as usize]=0
+  work.scratch.vcnt[i as usize]=0
+  i=i+1
+ }
+ let emitted=emit_roots(&!work.scratch,schema,batch)
+ if emitted!=0 {return emitted}
+ fb_reset(b)
+ let rb=build_record_batch(b,&work.scratch,batch.n_rows)
+ if rb<0 {return 0-1}
+ let meta=build_meta4(b,&batch.mmeta_k,&batch.mmeta_kl,&batch.mmeta_v,&batch.mmeta_vl,batch.mmeta_n)
+ if meta<0 {return 0-1}
+ let msg=build_message(b,3,rb,work.scratch.body_len,meta)
+ if msg<0 {return 0-1}
+ if fb_finish(b,msg)!=0 {return 0-1}
+ return emit_message_reuse(out,b,&work.scratch)
 }

@@ -2,8 +2,8 @@
 // Callback and argument are plain fn(i64)->i64 and i64 data: no owners, loans or
 // captured environments are admitted through this interface. Callbacks must
 // terminate; shutdown cannot interrupt a running callback.
-use ffi::platform::{Platform,PlatformValue,platform_call}
-pub linear struct NativeThreadPool {id:i64,status:i64,joined:bool}
+use ffi::platform::{Platform,PlatformValue,platform_call,platform_call_into}
+pub linear struct NativeThreadPool {id:i64,status:i64,joined:bool,last_result:PlatformValue}
 pub struct NativePoolResult {pub task_id:i64,pub value:i64,pub status:i64}
 // Reservation charges control/slots, dedicated 1MiB worker stacks, 4KiB stack
 // guards and pthread handles. OS allocator bookkeeping/shared pages are excluded.
@@ -12,7 +12,7 @@ pub fn native_pool_reservation(p:&Platform,workers:i64,capacity:i64)->PlatformVa
 }
 pub fn native_pool_new(p:&Platform,callback:fn(i64)->i64,workers:i64,capacity:i64,max_bytes:i64)->NativeThreadPool with IO {
  let r=platform_call(p,130,callback as i64,workers,capacity,max_bytes)
- return NativeThreadPool {id:r.value,status:r.status,joined:false}
+ return NativeThreadPool {id:r.value,status:r.status,joined:false,last_result:PlatformValue {value:0,status:0}}
 }
 pub fn native_pool_status(pool:&NativeThreadPool)->i64 {pool.status}
 // timeout_ms=0 is nonblocking (EAGAIN). On error no task was admitted.
@@ -51,7 +51,7 @@ pub fn native_pool_peak_running(p:&Platform,pool:&NativeThreadPool)->PlatformVal
 // Consumes the owner. Cancel queued work, join workers, discard remaining scalar
 // results, then destroy. A failed join is reported and never mislabeled cleanup.
 pub fn native_pool_close(p:&Platform,pool:NativeThreadPool)->i64 with IO {
- let NativeThreadPool {id,status,joined}=pool
+ let NativeThreadPool {id,status,joined,last_result}=pool
  if status!=0 {return status}
  if !joined {
   let stopped=platform_call(p,133,id,1,0,0)
@@ -64,3 +64,21 @@ pub fn native_pool_close(p:&Platform,pool:NativeThreadPool)->i64 with IO {
  return platform_call(p,2,id,0,0,0).status
 }
 
+
+// Reuses caller-owned result storage; avoids a managed 24-byte object per task
+// on engines whose by-value aggregate handles live until process exit.
+pub fn native_pool_result_into(p:&Platform,pool:&!NativeThreadPool,id:i64,timeout_ms:i64,out:&!NativePoolResult) with IO,Mut {
+ out.task_id=id
+ out.value=0
+ out.status=pool.status
+ if pool.status!=0 {return}
+ platform_call_into(p,132,pool.id,id,timeout_ms,0,&!pool.last_result)
+ out.value=pool.last_result.value
+ out.status=pool.last_result.status
+}
+pub fn native_pool_submit_into(p:&Platform,pool:&!NativeThreadPool,value:i64,timeout_ms:i64,out:&!PlatformValue) with IO,Mut {
+ out.value=0
+ out.status=pool.status
+ if pool.status!=0 {return}
+ platform_call_into(p,131,pool.id,value,timeout_ms,0,out)
+}

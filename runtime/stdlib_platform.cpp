@@ -105,12 +105,23 @@ struct Text final:Resource {
     if(size>0)std::memcpy(data.data(),source,size);
   }
 };
+
+// Reader lease is separate from Socket lifetime: closing the socket owner
+// closes its descriptor while the duplicated reader remains independent.
+struct SocketReadState {std::mutex mutex;bool leased=false;};
+
 struct File final:Resource {
   int fd;std::mutex mutex;
+  std::shared_ptr<SocketReadState> read_state;
+  I deadline_ns=0,remaining=0;
   explicit File(int f):Resource(Kind::file),fd(f){}
-  ~File()override {if(fd>=0)::close(fd);}
+  ~File()override {
+    if(fd>=0)::close(fd);
+    if(read_state){std::lock_guard lock(read_state->mutex);read_state->leased=false;}
+  }
 };
 struct Socket final:Resource {
+  std::shared_ptr<SocketReadState> read_state=std::make_shared<SocketReadState>();
   int fd;std::atomic<I> peer_endpoint{0};
   std::mutex destination_mutex;sockaddr_in destination{};bool has_destination=false;
   std::mutex connect_mutex;bool is_connection=false,connect_pending=false;int connect_error=0;
@@ -353,7 +364,99 @@ I pool_result(const std::shared_ptr<Pool>& pool,I id,I timeout_ms) {
   return value;
 }
 
+I tcp_file_read(File& file,void* output,I count) {
+  if(count==0)return 0;
+  bool retried=false;
+  for(;;) {
+    I now=0;if(!monotonic_now(now))return 0;
+    if((file.deadline_ns!=0&&now>=file.deadline_ns)||(retried&&file.deadline_ns==0))
+      return failure(ETIMEDOUT);
+    pollfd ready{file.fd,POLLIN,0};
+    const int polled=poll_absolute(&ready,1,file.deadline_ns);
+    if(polled<0)return 0;
+    if(polled==0)return failure(ETIMEDOUT);
+    if(ready.revents&POLLNVAL)return failure(EBADF);
+    unsigned char peek=0;
+    const bool exhausted=file.remaining==0;
+    const auto amount=static_cast<std::size_t>(exhausted?1:std::min(count,file.remaining));
+    const auto got=::recv(file.fd,exhausted?static_cast<void*>(&peek):output,amount,
+                          MSG_DONTWAIT|(exhausted?MSG_PEEK:0));
+    if(got>=0) {
+      if(exhausted&&got>0)return failure(ENOBUFS);
+      if(!exhausted)file.remaining-=got;
+      return got;
+    }
+    if(errno!=EINTR&&errno!=EAGAIN&&errno!=EWOULDBLOCK)return failure(errno);
+    retried=true;
+  }
+}
+
 I dispatch(I op,I a,I b,I c,I d) {
+  if(op==138) {
+    if(b<0||c<0||d!=0)return failure(EINVAL);
+    auto socket=get<Socket>(a,Kind::socket);if(!socket)return 0;
+    int type=0;socklen_t length=sizeof(type);
+    if(getsockopt(socket->fd,SOL_SOCKET,SO_TYPE,&type,&length))return failure(errno);
+    if(type!=SOCK_STREAM)return failure(EPROTOTYPE);
+    sockaddr_storage peer{};length=sizeof(peer);
+    if(getpeername(socket->fd,reinterpret_cast<sockaddr*>(&peer),&length))return failure(errno);
+    std::unique_lock lease(socket->read_state->mutex,std::try_to_lock);
+    if(!lease.owns_lock()||socket->read_state->leased)return failure(EBUSY);
+    const int fd=fcntl(socket->fd,F_DUPFD_CLOEXEC,0);
+    if(fd<0)return failure(errno);
+    std::shared_ptr<File> reader;
+    try {reader=std::make_shared<File>(fd);}catch(...){::close(fd);throw;}
+    reader->read_state=socket->read_state;reader->deadline_ns=b;reader->remaining=c;
+    socket->read_state->leased=true;
+    lease.unlock();
+    return put(std::move(reader));
+  }
+
+
+  if(op==139) {
+    const I reserved=pool_reservation(a,b);
+    if(reserved<0)return failure(EINVAL);
+    return reserved;
+  }
+  if(op==130) {
+    const I reserved=pool_reservation(b,c);
+    if(reserved<0||d<0||a==0)return failure(EINVAL);
+    if(d<reserved)return failure(ENOBUFS);
+    // dladdr rejects heap closure descriptors. It does not prove code identity;
+    // the typed public API requires a bare function and forbids owner casts.
+    Dl_info info{};
+    if(dladdr(reinterpret_cast<void*>(a),&info)==0)return failure(EINVAL);
+    auto pool=std::make_shared<Pool>(reinterpret_cast<Pool::Callback>(a),
+                                    static_cast<std::size_t>(c),static_cast<std::size_t>(b));
+    const int rc=pool->start(static_cast<std::size_t>(b));if(rc)return failure(rc);
+    return put(std::move(pool));
+  }
+  if(op>=131&&op<=136) {
+    auto pool=get<Pool>(a,Kind::pool);if(!pool)return 0;
+    if(op==131){if(d!=0)return failure(EINVAL);return pool_submit(pool,b,c);}
+    if(op==132){if(d!=0)return failure(EINVAL);return pool_result(pool,b,c);}
+    if(op==133){if(b<0||b>1||c!=0||d!=0)return failure(EINVAL);return pool->stop(b==1);}
+    if(op==134){if(b||c||d)return failure(EINVAL);const int rc=pool->join();return rc?failure(rc):0;}
+    if(op==135) {
+      std::lock_guard lock(pool->mutex);
+      if(c||d)return failure(EINVAL);
+      if(b==0)return pool->outstanding;
+      if(b==1)return static_cast<I>(pool->threads.size());
+      if(b==2)return static_cast<I>(pool->slots.size());
+      if(b==3)return pool->running;
+      if(b==4)return pool->peak_running;
+      if(b==5)return pool->completed;
+      return failure(EINVAL);
+    }
+    if(op==136) {
+      std::lock_guard lock(pool->mutex);
+      if(b||c||d||!pool->joined)return failure(EINVAL);
+      const I discarded=pool->outstanding;
+      for(auto& slot:pool->slots)slot.state=0;
+      pool->outstanding=0;return discarded;
+    }
+    return failure(ENOSYS);
+  }
   if(op==100) {
     if(a<=0||b<0)return failure(EINVAL);
     if(a>std::numeric_limits<I>::max()/24)return failure(EOVERFLOW);
@@ -430,6 +533,10 @@ I dispatch(I op,I a,I b,I c,I d) {
       return transferred<0?failure(errno):transferred;
     }
     if(type!=SOCK_STREAM)return failure(EPROTOTYPE);
+    std::unique_lock read_lock(socket->read_state->mutex,std::defer_lock);
+    if(op==111) {
+      if(!read_lock.try_lock()||socket->read_state->leased)return failure(EBUSY);
+    }
     if(d<0)return failure(EINVAL);
     if(c==0)return 0;
     bool retried=false;
@@ -448,51 +555,6 @@ I dispatch(I op,I a,I b,I c,I d) {
       if(errno!=EINTR&&errno!=EAGAIN&&errno!=EWOULDBLOCK)return failure(errno);
       retried=true;
     }
-  }
-
-  if(op==139) {
-    const I reserved=pool_reservation(a,b);
-    if(reserved<0)return failure(EINVAL);
-    return reserved;
-  }
-  if(op==130) {
-    const I reserved=pool_reservation(b,c);
-    if(reserved<0||d<0||a==0)return failure(EINVAL);
-    if(d<reserved)return failure(ENOBUFS);
-    // dladdr rejects heap closure descriptors. It does not prove code identity;
-    // the typed public API requires a bare function and forbids owner casts.
-    Dl_info info{};
-    if(dladdr(reinterpret_cast<void*>(a),&info)==0)return failure(EINVAL);
-    auto pool=std::make_shared<Pool>(reinterpret_cast<Pool::Callback>(a),
-                                    static_cast<std::size_t>(c),static_cast<std::size_t>(b));
-    const int rc=pool->start(static_cast<std::size_t>(b));if(rc)return failure(rc);
-    return put(std::move(pool));
-  }
-  if(op>=131&&op<=138) {
-    auto pool=get<Pool>(a,Kind::pool);if(!pool)return 0;
-    if(op==131){if(d!=0)return failure(EINVAL);return pool_submit(pool,b,c);}
-    if(op==132){if(d!=0)return failure(EINVAL);return pool_result(pool,b,c);}
-    if(op==133){if(b<0||b>1||c!=0||d!=0)return failure(EINVAL);return pool->stop(b==1);}
-    if(op==134){if(b||c||d)return failure(EINVAL);const int rc=pool->join();return rc?failure(rc):0;}
-    if(op==135) {
-      std::lock_guard lock(pool->mutex);
-      if(c||d)return failure(EINVAL);
-      if(b==0)return pool->outstanding;
-      if(b==1)return static_cast<I>(pool->threads.size());
-      if(b==2)return static_cast<I>(pool->slots.size());
-      if(b==3)return pool->running;
-      if(b==4)return pool->peak_running;
-      if(b==5)return pool->completed;
-      return failure(EINVAL);
-    }
-    if(op==136) {
-      std::lock_guard lock(pool->mutex);
-      if(b||c||d||!pool->joined)return failure(EINVAL);
-      const I discarded=pool->outstanding;
-      for(auto& slot:pool->slots)slot.state=0;
-      pool->outstanding=0;return discarded;
-    }
-    return failure(ENOSYS);
   }
 
   if(op==95) {
@@ -524,6 +586,13 @@ I dispatch(I op,I a,I b,I c,I d) {
   if(op>=91&&op<=94) {
     auto f=get<File>(a,Kind::file);if(!f)return 0;
     std::lock_guard lock(f->mutex);
+    if(f->read_state) {
+      if(op==92)return failure(EBADF);
+      if(op==93)return failure(ESPIPE);
+      if(op==94)return failure(EINVAL);
+      if(c<0||(c>0&&b==0))return failure(EINVAL);
+      return tcp_file_read(*f,reinterpret_cast<void*>(b),c);
+    }
     if(op==91||op==92) {
       if(c<0||(c>0&&b==0))return failure(EINVAL);
       ssize_t rc;
@@ -742,6 +811,10 @@ I dispatch(I op,I a,I b,I c,I d) {
     }
     if(op==54||op==55||op==61||op==62) {
       if(c<0||(c>0&&b==0))return failure(EINVAL);
+      std::unique_lock read_lock(s->read_state->mutex,std::defer_lock);
+      if(op==55) {
+        if(!read_lock.try_lock()||s->read_state->leased)return failure(EBUSY);
+      }
       if(op==61) {
         if(d<=0||d>65535)return failure(EINVAL);
         auto addr=address(2130706433,d);
@@ -773,7 +846,13 @@ I dispatch(I op,I a,I b,I c,I d) {
       if(rc<0)return failure(errno);
       return rc;
     }
-    if(op==56){if(b<0||b>2)return failure(EINVAL);if(::shutdown(s->fd,static_cast<int>(b)))return failure(errno);return 0;}
+    if(op==56){
+      if(b<0||b>2)return failure(EINVAL);
+      std::unique_lock read_lock(s->read_state->mutex,std::defer_lock);
+      if(b!=1&&(!read_lock.try_lock()||s->read_state->leased))return failure(EBUSY);
+      if(::shutdown(s->fd,static_cast<int>(b)))return failure(errno);
+      return 0;
+    }
     if(op==63)return s->peer_endpoint.load()&65535;
   }
   return failure(ENOSYS);

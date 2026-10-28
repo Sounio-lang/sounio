@@ -1,7 +1,7 @@
 // Checked regular-file I/O. Reads append into caller-owned, budgeted byte buffers.
 // A successful positive-length read with value=0 is EOF. Short reads/writes are explicit.
 use ffi::platform::{Platform,PlatformValue,platform_call}
-use collections::byte_buffer::{ByteBuffer,byte_buffer_native_file_open,byte_buffer_native_file_read,byte_buffer_native_file_write}
+use collections::byte_buffer::{ByteBuffer,byte_buffer_native_file_open,byte_buffer_native_file_read,byte_buffer_native_file_write,byte_buffer_native_file_read_count,byte_buffer_native_file_write_count}
 pub linear struct NativeFile {id:i64,status:i64}
 pub fn native_file_open(p:&Platform,path:&ByteBuffer,mode:i64)->NativeFile with IO {
  let r=byte_buffer_native_file_open(p,path,mode)
@@ -42,4 +42,36 @@ pub fn native_file_close(p:&Platform,f:NativeFile)->i64 with IO {
  let NativeFile {id,status}=f
  if status!=0 {return status}
  return platform_call(p,2,id,0,0,0).status
+}
+
+// Allocation-free nonnegative-count/-errno counterparts for streaming.
+pub fn native_file_read_count(p:&Platform,f:&NativeFile,b:&!ByteBuffer,n:i64)->i64 with IO,Alloc,Mut {
+ if f.status!=0 {return 0-f.status}
+ return byte_buffer_native_file_read_count(p,f.id,b,n)
+}
+pub fn native_file_write_all_count(p:&Platform,f:&NativeFile,b:&ByteBuffer,offset:i64,n:i64)->i64 with IO,Mut {
+ if f.status!=0 {return 0-f.status}
+ if n<0 || offset<0 {return 0-22}
+ let valid=byte_buffer_native_file_write_count(p,f.id,b,offset,0)
+ if valid<0 {return valid}
+ var done:i64=0
+ while done<n {
+  let got=byte_buffer_native_file_write_count(p,f.id,b,offset+done,n-done)
+  if got<0 {return got}
+  if got==0 || got>n-done {return 0-5}
+  done=done+got
+ }
+ return done
+}
+
+// Independent duplicated TCP reader with exclusive read lease, fixed absolute
+// monotonic deadline and total byte budget. Original writes/close remain valid;
+// other original reads/read-shutdown return EBUSY until this reader closes.
+use net::native::{NativeSocket,native_socket_status,native_socket_token,socket_token_argument}
+pub fn native_file_from_tcp(p:&Platform,socket:&NativeSocket,deadline_ns:i64,max_bytes:i64)->NativeFile with IO {
+ let code=native_socket_status(socket)
+ if code!=0 {return NativeFile {id:0,status:code}}
+ let token=native_socket_token(socket)
+ let result=platform_call(p,138,socket_token_argument(&token),deadline_ns,max_bytes,0)
+ return NativeFile {id:result.value,status:result.status}
 }

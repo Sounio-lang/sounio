@@ -1,15 +1,16 @@
+use arrow::flatbuf::{fb_new}
 // Streaming exact sum-of-squares for discrete ADC samples.
 // CSV schema: sample_id,amplitude_adc; IDs 0..n-1, |amplitude|<=1,000,000.
 // Values are ADC counts; squared values are ADC^2, not calibrated SI energy.
 // Only scalar amplitudes enter native workers. All CSV/Arrow owners stay here.
-use ffi::platform::{Platform}
+use ffi::platform::{Platform,PlatformValue}
 use collections::byte_buffer::{ByteBuffer}
-use io::native_file::{native_file_open}
+use io::native_file::{NativeFile,native_file_open,native_file_close}
 use io::buffered_reader::{buffered_reader_new}
-use data::csv_stream::{CsvOwnedRow,csv_stream_new,csv_stream_next,csv_stream_close,csv_owned_row_new,csv_owned_row_close,csv_row_fields,csv_row_field_range,csv_row_field_byte,csv_row_i64_checked}
-use thread::native_pool::{native_pool_new,native_pool_status,native_pool_submit,native_pool_result,native_pool_shutdown,native_pool_join,native_pool_close}
-use arrow::lib::{arrow_schema_new,arrow_schema_add,arrow_type_int,arrow_batch_new,arrow_batch_shape,arrow_batch_set_i64}
-use arrow::native_stream::{arrow_stream_writer_new,arrow_stream_writer_status,arrow_stream_writer_begin,arrow_stream_writer_push,arrow_stream_writer_finish,arrow_stream_writer_close}
+use data::csv_stream::{CsvOwnedRow,csv_stream_new,csv_stream_next,csv_stream_close,csv_owned_row_new,csv_owned_row_close,csv_row_fields,csv_row_field_range,csv_row_field_byte,csv_row_i64_checked,csv_row_i64_checked_into}
+use thread::native_pool::{native_pool_new,native_pool_status,native_pool_submit,native_pool_submit_into,NativePoolResult,native_pool_result_into,native_pool_shutdown,native_pool_join,native_pool_close}
+use arrow::lib::{arrow_schema_new,arrow_schema_add,arrow_type_int,arrow_batch_new,arrow_batch_shape,arrow_batch_set_i64,arrow_batch_workspace_new,arrow_buf_new}
+use arrow::native_stream::{arrow_stream_writer_new,arrow_stream_writer_status,arrow_stream_writer_begin,arrow_stream_writer_push,arrow_stream_writer_push_reuse,arrow_stream_writer_finish,arrow_stream_writer_close}
 pub struct AdcPipelineConfig {
  pub workers:i64,pub task_capacity:i64,pub pool_budget_bytes:i64,
  pub read_chunk_bytes:i64,pub max_row_bytes:i64,pub max_samples:i64,pub task_timeout_ms:i64
@@ -28,15 +29,9 @@ fn adc_header(r:&CsvOwnedRow,field:i64,text:string)->bool with Div,Panic {
  }
  return true
 }
-pub fn adc_csv_to_arrow(p:&Platform,input:&ByteBuffer,output:&ByteBuffer,cfg:&AdcPipelineConfig)->AdcPipelineSummary with IO,Alloc,Mut,Div,Panic {
- if cfg.workers<1 || cfg.workers>64 || cfg.task_capacity<1 || cfg.task_capacity>1048576 ||
-    cfg.pool_budget_bytes<0 || cfg.read_chunk_bytes<1 || cfg.max_row_bytes<1 ||
-    cfg.max_samples<0 || cfg.max_samples>1000000 || cfg.task_timeout_ms<1 || cfg.task_timeout_ms>2147483647 {
-  return AdcPipelineSummary {status:22,cleanup_status:0,accepted_rows:0,written_rows:0,sum_squares:0}
- }
+fn adc_reader_valid(p:&Platform,source:NativeFile,output:&ByteBuffer,cfg:&AdcPipelineConfig)->AdcPipelineSummary with IO,Alloc,Mut,Div,Panic {
  var pool=native_pool_new(p,adc_square,cfg.workers,cfg.task_capacity,cfg.pool_budget_bytes)
  var status=native_pool_status(&pool)
- let source=native_file_open(p,input,0)
  var stream=csv_stream_new(buffered_reader_new(source,cfg.read_chunk_bytes,cfg.read_chunk_bytes),2)
  var row=csv_owned_row_new(cfg.max_row_bytes,2)
  let target=native_file_open(p,output,1)
@@ -62,6 +57,14 @@ pub fn adc_csv_to_arrow(p:&Platform,input:&ByteBuffer,output:&ByteBuffer,cfg:&Ad
  let window=if cfg.task_capacity<16 {cfg.task_capacity} else {16}
  var task_ids:[i64;16]=[0;16]
  var amplitudes:[i64;16]=[0;16]
+ var batch=arrow_batch_new()
+ var frame=arrow_buf_new()
+ var workspace=arrow_batch_workspace_new()
+ var builder=fb_new()
+ var result=NativePoolResult {task_id:0,value:0,status:0}
+ var id=PlatformValue {value:0,status:0}
+ var sample=PlatformValue {value:0,status:0}
+ var task=PlatformValue {value:0,status:0}
  while status==0 && !ended {
   var count:i64=0
   while count<window && status==0 && !ended {
@@ -70,14 +73,14 @@ pub fn adc_csv_to_arrow(p:&Platform,input:&ByteBuffer,output:&ByteBuffer,cfg:&Ad
    else if code!=0 {status=code}
    else if accepted>=cfg.max_samples {status=75}
    else {
-    let id=csv_row_i64_checked(&row,0)
-    let sample=csv_row_i64_checked(&row,1)
+    csv_row_i64_checked_into(&row,0,&!id)
+    csv_row_i64_checked_into(&row,1,&!sample)
     if id.status!=0 {status=id.status}
     else if sample.status!=0 {status=sample.status}
     else if id.value!=accepted {status=22}
     else if sample.value<0-1000000 || sample.value>1000000 {status=34}
     else {
-     let task=native_pool_submit(p,&!pool,sample.value,cfg.task_timeout_ms)
+     native_pool_submit_into(p,&!pool,sample.value,cfg.task_timeout_ms,&!task)
      if task.status!=0 {status=task.status}
      else {
       task_ids[count as usize]=task.value
@@ -88,11 +91,11 @@ pub fn adc_csv_to_arrow(p:&Platform,input:&ByteBuffer,output:&ByteBuffer,cfg:&Ad
     }
    }
   }
-  var batch=arrow_batch_new()
+  var batch_sum:i64=0
   if status==0 {status=arrow_batch_shape(&!batch,count,3)}
   var i:i64=0
   while status==0 && i<count {
-   let result=native_pool_result(p,&!pool,task_ids[i as usize],cfg.task_timeout_ms)
+   native_pool_result_into(p,&!pool,task_ids[i as usize],cfg.task_timeout_ms,&!result)
    if result.status!=0 {status=result.status}
    else if result.task_id!=written+i {status=5}
    else {
@@ -100,13 +103,13 @@ pub fn adc_csv_to_arrow(p:&Platform,input:&ByteBuffer,output:&ByteBuffer,cfg:&Ad
     if code==0 {code=arrow_batch_set_i64(&!batch,1,i,amplitudes[i as usize],0)}
     if code==0 {code=arrow_batch_set_i64(&!batch,2,i,result.value,0)}
     if code!=0 {status=code}
-    else {sum=sum+result.value}
+    else {batch_sum=batch_sum+result.value}
    }
    i=i+1
   }
   if status==0 && count>0 {
-   status=arrow_stream_writer_push(p,&!writer,&schema,&batch)
-   if status==0 {written=written+count}
+   status=arrow_stream_writer_push_reuse(p,&!writer,&schema,&batch,&!frame,&!workspace,&!builder)
+   if status==0 {written=written+count;sum=sum+batch_sum}
   }
  }
  var cleanup:i64=0
@@ -128,3 +131,18 @@ pub fn adc_csv_to_arrow(p:&Platform,input:&ByteBuffer,output:&ByteBuffer,cfg:&Ad
  return AdcPipelineSummary {status:status,cleanup_status:cleanup,accepted_rows:accepted,written_rows:written,sum_squares:sum}
 }
 
+pub fn adc_reader_to_arrow(p:&Platform,source:NativeFile,output:&ByteBuffer,cfg:&AdcPipelineConfig)->AdcPipelineSummary with IO,Alloc,Mut,Div,Panic {
+ if cfg.workers<1 || cfg.workers>64 || cfg.task_capacity<1 || cfg.task_capacity>1048576 ||
+    cfg.pool_budget_bytes<0 || cfg.read_chunk_bytes<1 || cfg.max_row_bytes<1 ||
+    cfg.max_samples<0 || cfg.max_samples>1000000 || cfg.task_timeout_ms<1 || cfg.task_timeout_ms>2147483647 {
+  let closed=native_file_close(p,source)
+  return AdcPipelineSummary {status:22,cleanup_status:closed,accepted_rows:0,written_rows:0,sum_squares:0}
+ } else {
+  return adc_reader_valid(p,source,output,cfg)
+ }
+}
+
+pub fn adc_csv_to_arrow(p:&Platform,input:&ByteBuffer,output:&ByteBuffer,cfg:&AdcPipelineConfig)->AdcPipelineSummary with IO,Alloc,Mut,Div,Panic {
+ let source=native_file_open(p,input,0)
+ return adc_reader_to_arrow(p,source,output,cfg)
+}

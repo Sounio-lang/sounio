@@ -36,6 +36,13 @@ pub fn byte_buffer_reserve(b: &!ByteBuffer, n: i64) -> i64 with Alloc, Mut {
     b.capacity = n
     return 0
 }
+// Byte 0..255 or negative storage status, without allocating a result handle.
+pub fn byte_buffer_byte_code(b:&ByteBuffer,index:i64)->i64 {
+ if b.status!=0 {return 0-b.status}
+ if index<0 || index>=b.size {return 0-4}
+ return byte_load(b.ptr,index)
+}
+
 pub fn byte_buffer_get(b: &ByteBuffer, index: i64) -> ByteValue {
     if b.status != 0 { return ByteValue { value: 0, status: b.status } }
     if index < 0 || index >= b.size { return ByteValue { value: 0, status: 4 } }
@@ -58,10 +65,10 @@ pub fn byte_buffer_push(b: &!ByteBuffer, value: i64) -> i64 with Alloc, Mut, Div
 }
 // Validates complete UTF-8, rejecting overlong forms, surrogates and >U+10FFFF.
 // A valid result carries scalar count; byte length remains byte_buffer_len.
-pub fn byte_buffer_utf8_count_range(b: &ByteBuffer, offset:i64, n:i64) -> ByteValue with Mut, Div {
-    if b.status != 0 { return ByteValue { value: 0, status: b.status } }
-    if offset<0 || n<0 || offset>b.size {return ByteValue {value:0,status:4}}
-    if n>b.size-offset {return ByteValue {value:0,status:4}}
+pub fn byte_buffer_utf8_count_range_code(b: &ByteBuffer, offset:i64, n:i64) -> i64 with Mut, Div {
+    if b.status != 0 { return 0-(b.status) }
+    if offset<0 || n<0 || offset>b.size {return 0-(4)}
+    if n>b.size-offset {return 0-(4)}
     let end=offset+n
     var i:i64 = offset
     var count:i64 = 0
@@ -71,28 +78,34 @@ pub fn byte_buffer_utf8_count_range(b: &ByteBuffer, offset:i64, n:i64) -> ByteVa
         var cp:i64 = lead
         var minimum:i64 = 0
         if lead >= 128 {
-            if lead < 194 { return ByteValue { value: 0, status: 5 } }
+            if lead < 194 { return 0-(5) }
             if lead < 224 { width = 2; cp = lead & 31; minimum = 128 }
             else if lead < 240 { width = 3; cp = lead & 15; minimum = 2048 }
             else if lead < 245 { width = 4; cp = lead & 7; minimum = 65536 }
-            else { return ByteValue { value: 0, status: 5 } }
+            else { return 0-(5) }
         }
-        if width > end - i { return ByteValue { value: 0, status: 5 } }
+        if width > end - i { return 0-(5) }
         var j:i64 = 1
         while j < width {
             let part = (byte_load(b.ptr, i+j) as i64) & 255
-            if part < 128 || part > 191 { return ByteValue { value: 0, status: 5 } }
+            if part < 128 || part > 191 { return 0-(5) }
             cp = cp * 64 + (part & 63)
             j = j + 1
         }
-        if cp < minimum || cp > 1114111 { return ByteValue { value: 0, status: 5 } }
-        if cp >= 55296 { if cp <= 57343 { return ByteValue { value: 0, status: 5 } } }
+        if cp < minimum || cp > 1114111 { return 0-(5) }
+        if cp >= 55296 { if cp <= 57343 { return 0-(5) } }
         count = count + 1
         i = i + width
     }
-    return ByteValue { value: count, status: 0 }
+    return count
 }
-pub fn byte_buffer_utf8_count(b:&ByteBuffer)->ByteValue with Mut,Div {
+
+
+pub fn byte_buffer_utf8_count_range(b: &ByteBuffer, offset:i64, n:i64) -> ByteValue with Mut, Div {
+    let code=byte_buffer_utf8_count_range_code(b,offset,n)
+    if code<0 {return ByteValue {value:0,status:0-code}}
+    return ByteValue {value:code,status:0}
+}pub fn byte_buffer_utf8_count(b:&ByteBuffer)->ByteValue with Mut,Div {
     return byte_buffer_utf8_count_range(b,0,b.size)
 }
 pub fn byte_buffer_clear(b: &!ByteBuffer) with Mut { b.size = 0 }
@@ -101,7 +114,7 @@ pub fn byte_buffer_close(b: ByteBuffer) with Alloc {
     if capacity > 0 { heap_free(ptr) }
 }
 
-use ffi::platform::{Platform,PlatformValue,platform_call}
+use ffi::platform::{Platform,PlatformValue,platform_call,platform_call_nonnegative}
 // PlatformValue uses Linux errno; local ByteValue keeps the storage codes above.
 fn byte_buffer_errno(status:i64)->i64 {
     if status==0 {return 0}
@@ -198,4 +211,22 @@ pub fn byte_buffer_native_udp_send(p:&Platform,socket:i64,b:&ByteBuffer,offset:i
  if offset<0 || n<0 || offset>b.size {return PlatformValue {value:0,status:22}}
  if n>b.size-offset {return PlatformValue {value:0,status:22}}
  return platform_call(p,108,socket,(b.ptr as i64)+offset,n,0)
+}
+
+// Scalar counterpart: byte count >=0 (zero means EOF), otherwise -POSIX_errno.
+pub fn byte_buffer_native_file_read_count(p:&Platform,file:i64,b:&!ByteBuffer,n:i64)->i64 with IO,Alloc,Mut {
+ if b.status!=0 {return 0-byte_buffer_errno(b.status)}
+ if n<0 || n>9223372036854775807-b.size {return 0-22}
+ let code=byte_buffer_reserve(b,b.size+n)
+ if code!=0 {return 0-byte_buffer_errno(code)}
+ let got=platform_call_nonnegative(p,91,file,(b.ptr as i64)+b.size,n,0)
+ if got<0 {return got}
+ if got>n {return 0-5}
+ b.size=b.size+got
+ return got
+}
+pub fn byte_buffer_native_file_write_count(p:&Platform,file:i64,b:&ByteBuffer,offset:i64,n:i64)->i64 with IO {
+ if b.status!=0 {return 0-byte_buffer_errno(b.status)}
+ if offset<0 || n<0 || offset>b.size || n>b.size-offset {return 0-22}
+ return platform_call_nonnegative(p,92,file,(b.ptr as i64)+offset,n,0)
 }
