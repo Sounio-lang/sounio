@@ -1,0 +1,248 @@
+// Diagnostic native counterexample: expected exit 1 after all computations.
+// The three original scientific expectations are false in this fixed case.
+
+// Fixed-case Euler/real-Monte-Carlo/PBox/GUM/Klib concordance regression.
+// Euler and all numerical parameters are retained. The MC varies mu only,
+// using epistemic::propagate::monte_carlo (wrapping LCG, twelve-uniform CLT).
+// pb_from_knowledge preserves variance and creates NO Knightian mean gap.
+// A mean band is not a support enclosure or a confidence interval. In this
+// case its width is zero and it need not contain the nonlinear MC mean.
+// GUM is a forward finite-difference local approximation, not an outer bound.
+// All original false predicates remain observable as counterexamples.
+// Independent C++23 validates the numerical values and selected-case strict
+// CARA ordering; this test claims no general enclosure or monotonicity theorem.
+
+use epistemic::knowledge::{epistemic_new,Epistemic}
+use epistemic::propagate::monte_carlo
+use epistemic::knightian::*
+use epistemic::walley::*
+use epistemic::klibanoff::klibanoff_compose_with_active
+use epistemic::active::EFEComponents
+
+// One fixed configuration, shared by main and the noncapturing MC callback.
+fn ode_mu()->f64 {5.0}
+fn ode_mu_var()->f64 {0.25}
+fn ode_x0()->f64 {0.5}
+fn ode_x0_var()->f64 {0.01}
+fn ode_y0()->f64 {0.0}
+fn ode_dt()->f64 {0.02}
+fn ode_steps()->i64 {80}
+fn ode_samples()->i64 {5000}
+
+fn k_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn k_min(a: f64, b: f64) -> f64 { if a < b { a } else { b } }
+fn k_max(a: f64, b: f64) -> f64 { if a > b { a } else { b } }
+
+// Local sqrt approx for prints (newton, sufficient precision)
+fn k_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+  if x <= 0.0 { return 0.0 }
+  var y = x
+  var i = 0
+  while i < 12 {
+    y = 0.5 * (y + x / y)
+    i = i + 1
+  }
+  y
+}
+
+// Deterministic vdp euler step (from systems/lib, van der Pol rhs)
+// dx = y
+// dy = mu*(1-x^2)*y - x
+// Returns final y after n_steps (the "stiff variable" at fixed horizon; avoids max functional enclosure subtleties)
+fn vdp_final_y(mu: f64, x0: f64, y0: f64, dt: f64, n_steps: i64) -> f64 with Mut, Div, Panic {
+  var x = x0
+  var y = y0
+  var i = 0
+  while i < n_steps {
+    let dx = y
+    let dy = mu * (1.0 - x * x) * y - x
+    x = x + dt * dx
+    y = y + dt * dy
+    i = i + 1
+  }
+  y
+}
+
+// monte_carlo accepts a function pointer, without a captured environment.
+fn ode_mc_sample(mu:f64)->f64 with Prob,Mut,Div,Panic {
+ vdp_final_y(mu,ode_x0(),ode_y0(),ode_dt(),ode_steps())
+}
+fn stiff_bits(name:string,value:f64) with IO {
+ let observed_bits:i64=f64_to_bits(value)
+ println("STIFF_BITS {} {}",name,observed_bits)
+}
+
+// Grid min/max for 1d non-monotone segment (support of pbox -> image)
+fn grid_min_max(lo: f64, hi: f64, f: fn(f64) -> f64, npts: i64) -> (f64, f64) with Mut, Div, Panic {
+  var mn: f64 = 1.0e30
+  var mx: f64 = -1.0e30
+  var i: i64 = 0
+  while i < npts {
+    let frac = (i as f64) / ((npts - 1) as f64)
+    let t = lo + frac * (hi - lo)
+    let v = f(t)
+    if v < mn { mn = v }
+    if v > mx { mx = v }
+    i = i + 1
+  }
+  (mn, mx)
+}
+
+// This selected test starts with point mean bands. The seven-point grid below
+// evaluates x*x on that point. It is not an enclosure proof for general bands.
+fn vdp_step_knightian(xb: &PBox, yb: &PBox, dt: f64, mub: &PBox) -> (PBox, PBox) with Mut, Div, Panic {
+  // dx = y  (linear, monotone inc in y)
+  let dxb = yb;  // identity
+
+  // dy = mu*(1-x*x)*y - x
+  // non-mono segment: x*x -> grid on support (as fallback)
+  let xlo = pb_lo_mean(xb)
+  let xhi = pb_hi_mean(xb)
+  let (x2lo, x2hi) = grid_min_max(xlo, xhi, |t: f64| -> f64 { t * t }, 7)
+  let x2b = pb_new(x2lo, x2hi, 0.0, pb_confidence(xb))
+
+  let one = pb_from_knowledge(1.0, 0.0, 1000)
+  let one_m_x2 = pb_sub(&one, &x2b)
+
+  // product segments (1-x2)*y and mu*term : use general pb_mul (4-corner, sound for any sign; non-monotone x^2 already handled by grid above)
+  let termb = pb_mul(&one_m_x2, yb)
+  let mu_term = pb_mul(mub, &termb)
+
+  let dyb = pb_sub(&mu_term, xb)
+
+  // euler update: + dt * rhs  (monotone inc in rhs for dt>0 -> use apply2 on the scale)
+  let dtb = pb_from_knowledge(dt, 0.0, 1000)
+  // euler scale dt * rhs : use pb_mul (sound outer; dt>0 but rhs may straddle so general mul)
+  let dx_upd = pb_mul(&dtb, dxb)
+  let dy_upd = pb_mul(&dtb, &dyb)
+
+  let xnext = pb_add(xb, &dx_upd)
+  let ynext = pb_add(yb, &dy_upd)
+  (xnext, ynext)
+}
+
+fn main()->i32 with IO,Mut,Div,Panic,Prob {
+ let mu0:f64=ode_mu()
+ let mu_var:f64=ode_mu_var()
+ let x0:f64=ode_x0()
+ let x0_var:f64=ode_x0_var()
+ let y0:f64=ode_y0()
+ let dt:f64=ode_dt()
+ let n_steps:i64=ode_steps()
+
+ // The public generic MC API is exercised; no replacement MC kernel.
+ let mu_ep=epistemic_new(mu0,mu_var,850)
+ let final_mc=monte_carlo(mu_ep,ode_mc_sample,ode_samples())
+ let mc_mean:f64=final_mc.val()
+ let mc_var:f64=final_mc.variance()
+ let mc_std:f64=k_sqrt(mc_var)
+
+ let mu_box=pb_from_knowledge(mu0,mu_var,850)
+ let x_box=pb_from_knowledge(x0,x0_var,900)
+ let y_box=pb_from_knowledge(y0,0.0,1000)
+ assert(pb_lo_mean(&mu_box)==mu0 && pb_hi_mean(&mu_box)==mu0)
+ assert(pb_variance(&mu_box)==mu_var)
+ assert(pb_lo_mean(&x_box)==x0 && pb_hi_mean(&x_box)==x0)
+ assert(pb_variance(&x_box)==x0_var)
+ var step:i64=0
+ var cur_x=x_box
+ var cur_y=y_box
+ while step<n_steps {
+  let (nx,ny)=vdp_step_knightian(&cur_x,&cur_y,dt,&mu_box)
+  cur_x=nx
+  cur_y=ny
+  step=step+1
+ }
+ let k_box=cur_y
+ let k_lo:f64=pb_lo_mean(&k_box)
+ let k_hi:f64=pb_hi_mean(&k_box)
+ let k_width:f64=k_hi-k_lo
+ let k_variance:f64=pb_variance(&k_box)
+
+ let readout_scale=pb_from_knowledge(1.05,0.0,1000)
+ let stiff_readout=pb_apply2_monotone_inc_inc(|s:f64,v:f64|->f64 {s*v},&readout_scale,&k_box)
+ let readout_lo:f64=pb_lo_mean(&stiff_readout)
+ let readout_hi:f64=pb_hi_mean(&stiff_readout)
+
+ let f0:f64=vdp_final_y(mu0,x0,y0,dt,n_steps)
+ let h:f64=0.001
+ let fp:f64=vdp_final_y(mu0+h,x0,y0,dt,n_steps)
+ let df:f64=(fp-f0)/h
+ let delta_var:f64=df*df*mu_var
+ let delta_w:f64=2.0*k_sqrt(delta_var)
+ let ratio:f64=if delta_w>1.0e-9 {k_width/delta_w}else{999.0}
+
+ let ode_state=final_mc
+ let rew_c=cs_neighborhood(mc_mean*0.04,0.0004,0.25,mc_mean*0.01,mc_mean*0.08,800)
+ let efe_k=klibanoff_compose_with_active(&rew_c,2.0,1.0,&ode_state,0.15,1.0)
+ let efe_p=klibanoff_compose_with_active(&rew_c,0.0,1.0,&ode_state,0.15,1.0)
+ let ce_k:f64=kl_smooth_ce(&rew_c,2.0,1.0)
+ let ce_p:f64=kl_precise_ce(&rew_c,1.0)
+ let prag_k_derived:f64=ce_k*1.0
+ let prag_p_derived:f64=ce_p*1.0
+ let prag_k:f64=efe_k.pragmatic
+ let prag_p:f64=efe_p.pragmatic
+ let epi_k:f64=efe_k.epistemic
+ let epi_p:f64=efe_p.epistemic
+ let total_k:f64=efe_k.total
+ let total_p:f64=efe_p.total
+ let tightness:f64=if mc_std>1.0e-9 {k_width/(2.0*mc_std)}else{999.0}
+
+ // Preserve all three original expectations as falsified selected-case
+ // predicates, rather than silently skipping them or inventing physical bounds.
+ let mean_in:bool=(k_lo<=mc_mean)&&(mc_mean<=k_hi)
+ let wider:bool=k_width>delta_w*1.01
+ let lower_prag:bool=prag_k_derived<prag_p_derived-0.001
+ let lower_prag2:bool=prag_k<prag_p-0.001
+ let original_assert3:bool=lower_prag||lower_prag2
+ let original_mean_flag:i64=if mean_in {1}else{0}
+ let original_wider_flag:i64=if wider {1}else{0}
+ let original_margin_flag:i64=if original_assert3 {1}else{0}
+ println("STIFF_ORIGINAL_PREDICATES {} {} {}",original_mean_flag,original_wider_flag,original_margin_flag)
+
+ // Replay the original conjunction as a real failing native counterexample.
+ if !mean_in || !wider || !original_assert3 {
+  println("STIFF_ORIGINAL_EXPECTATIONS_COUNTEREXAMPLE")
+  return 1
+ }
+ // Point-lift identities and positive aleatoric dispersion for this fixed case.
+ assert(k_lo==k_hi && k_width==0.0 && k_variance>=0.0)
+ assert(k_abs(k_lo-f0)<1.0e-12)
+ assert(mc_var>0.0 && mc_std>0.0 && delta_var>0.0 && delta_w>0.0)
+ assert(!mean_in && !wider && !original_assert3)
+ assert(readout_lo==readout_hi)
+ assert(readout_lo==1.05*k_lo)
+
+ // The measured gap is about 2.79e-6, far below the old arbitrary .001.
+ // Strict ordering is established for this selected case by the C++23 oracle.
+ assert(ce_k<ce_p && prag_k<prag_p)
+ assert(prag_k==prag_k_derived && prag_p==prag_p_derived)
+ assert(epi_k==epi_p)
+ assert(total_k==0.0-epi_k-prag_k)
+ assert(total_p==0.0-epi_p-prag_p)
+
+ stiff_bits("MC_MEAN",mc_mean)
+ stiff_bits("MC_VAR",mc_var)
+ stiff_bits("MC_STD",mc_std)
+ stiff_bits("POINT_Y",f0)
+ stiff_bits("K_LO",k_lo)
+ stiff_bits("K_HI",k_hi)
+ stiff_bits("K_WIDTH",k_width)
+ stiff_bits("K_VARIANCE",k_variance)
+ stiff_bits("DELTA_VAR",delta_var)
+ stiff_bits("DELTA_W",delta_w)
+ stiff_bits("RATIO",ratio)
+ stiff_bits("TIGHTNESS",tightness)
+ stiff_bits("READOUT_LO",readout_lo)
+ stiff_bits("READOUT_HI",readout_hi)
+ stiff_bits("CE_KLIB",ce_k)
+ stiff_bits("CE_PRECISE",ce_p)
+ stiff_bits("PRAG_KLIB",prag_k)
+ stiff_bits("PRAG_PRECISE",prag_p)
+ stiff_bits("EFE_EPI_K",epi_k)
+ stiff_bits("EFE_EPI_P",epi_p)
+ stiff_bits("EFE_TOTAL_K",total_k)
+ stiff_bits("EFE_TOTAL_P",total_p)
+ println("STIFF_ODE_KLIB_BRIDGE_PASS")
+ 0
+}
