@@ -1,0 +1,5 @@
+# Strict runtime refusal mode
+
+The canonical runner accepts run-fail only when check and compilation succeed and native execution returns exactly1 with a mandatory declared diagnostic substring. Other positive or negative modes conflict, and an empty or whitespace-only diagnostic refuses before any compiler call. The regular run-pass behavior and historical JSON schema remain unchanged. A native crash, timeout, output-limit exit, successful execution, unrelated error, failed checker/compiler or missing executable cannot pass this mode.
+
+Slurm19317 completes14 new operational controls plus the existing11 compile-fail controls, diagnostics custody controls and10 emitter/schema controls. Source projection hash was reviewed and repinned; the historical JSON fixture bytes/hash are unchanged. Slurm19314 is retained as a failed packaging attempt: it lacked the historical JSON fixture and did not qualify the gate. These are test doubles, not Sounio or numerical validation. Existing silent native negative probes are not silently relabeled under this diagnostic contract.

@@ -9,6 +9,8 @@
 #   //@ check-only              only run souc check, not souc run
 #   //@ compile-fail            both check and compile must refuse with exit1
 #   //@ error-code: E259        required diagnostic for compile-fail
+#   //@ run-fail                check/compile succeed; native refuses with exit1
+#   //@ expect-diagnostic: X    mandatory native diagnostic for run-fail
 #   //@ expect-stdout: X        stdout must contain X (run-pass only, optional)
 #   //@ ignore [reason]         skip this test
 #   //@ ignore-owner: TEAM      optional owner metadata for ignored tests
@@ -191,6 +193,8 @@ run_test() {
 
   local is_compile_fail=false
   local expected_error_code=""
+  local is_run_fail=false
+  local expected_runtime_diagnostic=""
   local is_run_pass=false
   local is_check_only=false
   local is_ignored=false
@@ -215,6 +219,12 @@ run_test() {
     fi
     if [[ "$line" =~ ^[[:space:]]*//@[[:space:]]*error-code:[[:space:]]*(E[0-9]{3})[[:space:]]*$ ]]; then
       expected_error_code="${BASH_REMATCH[1]}"
+    fi
+    if [[ "$line" =~ ^[[:space:]]*//@[[:space:]]*run-fail[[:space:]]*$ ]]; then
+      is_run_fail=true
+    fi
+    if [[ "$line" =~ ^[[:space:]]*//@[[:space:]]*expect-diagnostic:[[:space:]]*(.*)$ ]]; then
+      expected_runtime_diagnostic="${BASH_REMATCH[1]}"
     fi
     if [[ "$line" =~ "//@ run-pass" ]]; then
       is_run_pass=true
@@ -264,6 +274,12 @@ run_test() {
     return
   fi
 
+  if $is_run_fail && { $is_compile_fail || $is_run_pass || $is_check_only || [[ -z "$expected_runtime_diagnostic" ]]; }; then
+    FAIL=$((FAIL + 1))
+    record_result "fail" "$relpath" "run-fail" "invalid-runtime-negative-annotation" "" "" "1" "run-fail requires a native diagnostic and no other mode"
+    return
+  fi
+
   if $is_compile_fail; then
     if $is_run_pass || $is_check_only || [[ -z "$expected_error_code" ]]; then
       FAIL=$((FAIL + 1))
@@ -293,7 +309,7 @@ run_test() {
     return
   fi
 
-  if ! $is_run_pass && ! $is_check_only; then
+  if ! $is_run_pass && ! $is_run_fail && ! $is_check_only; then
     SKIP=$((SKIP + 1))
     record_result "skip" "$relpath" "no-annotation" "no-annotation" "" "" "0" ""
     return
@@ -327,7 +343,7 @@ run_test() {
     return
   fi
 
-  if [[ ${#expect_stdout[@]} -eq 0 && "$RUN_ALL_RUN_PASS" != "1" ]]; then
+  if ! $is_run_fail && [[ ${#expect_stdout[@]} -eq 0 && "$RUN_ALL_RUN_PASS" != "1" ]]; then
     PASS=$((PASS + 1))
     record_result "pass" "$relpath" "run-pass-check-only" "no-expect-stdout" "" "" "0" ""
     if [[ $VERBOSE -eq 1 ]]; then
@@ -354,6 +370,17 @@ run_test() {
   chmod +x "$executable"
   output=$(phase_command "$relpath" native "$test_timeout" "$executable") || exit_code=$?
   rm -f "$executable"
+  if $is_run_fail; then
+    if [[ "$exit_code" != 1 ]] || ! grep -qF -- "$expected_runtime_diagnostic" <<< "$output"; then
+      FAIL=$((FAIL + 1))
+      record_result "fail" "$relpath" "run-fail" "expected-native-refusal-missing" "" "" "$exit_code" "$(head -6 <<< "$output")"
+      return
+    fi
+    PASS=$((PASS + 1))
+    record_result "pass" "$relpath" "run-fail" "" "" "" "0" "native=1 diagnostic=$expected_runtime_diagnostic"
+    if [[ $VERBOSE -eq 1 ]]; then echo "  PASS  $relpath (native refuses with declared diagnostic)"; fi
+    return
+  fi
   if [[ $exit_code -ne 0 ]]; then
     local excerpt
     excerpt="$(head -6 <<< "$output")"
