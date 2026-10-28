@@ -1,0 +1,11 @@
+# Shadowed native memory result types
+
+A bare native builtin whose spelling is also a private function in another module reaches checker_shadowed_builtin_result. That helper incorrectly grouped read_f64 with read_i64 and heap_alloc, producing an i64 result type. The protected fallback now returns f64 for read_f64; the integer and unit rows retain their types.
+
+This change does not replace the signature of a visible user declaration. The executed actual-checker controls declare their own three-argument read_f64 returning i64: the i64 binding checks, and assigning its result to f64 rejects with E001. The real private helper is separately exercised for read_i64/heap_alloc (i64), write_i64/write_f64 (unit), and read_f64 (f64).
+
+Slurm18855 compiled the before/after seed components. Its wrapper expected E002 for the deliberate incompatible binding, while the actual checker correctly reported E001; the incomplete receipt remains preserved. Replay18868 exposed that the after artifact had not yet been chmodded because the earlier wrapper stopped before that step. Replay18869 corrected those harness conditions and completed0: before executable exit1 at the intended float-kind assertion, after exit0 with SHADOWED_FLOAT_RESULT_OK. Both executions retained the resolved-declaration and integer/unit markers, the deliberate E001, and no parse/E137/E264 surrogate refusal. Source, seed, artifact and exact after-input final guards passed.
+
+Qualified source check.sio SHA256 67defbd2e6b3cd2f0a042c409c11d7bb2fb27667706e0542640bafbd775c813a. Before ELF 55e7af37aadec2d25b236f80b35a63a8291e856aa5d5b8cd47a47a5987759b69; after ELF 7597186a07b3d663e4dcb50d498ae99ebf7b4af6967ba451c8fc0af38c26c785. After source-manifest bf00f1204051ca767154cb27359775ab172334dfd73513b554a91eee3513611e; overlay 7706e11d25dd3c56926396d219456ee693235eb2cffb5a52c0c16b9c03aaff7b.
+
+Receipts: /scratch/sounio-stdlib-wave3-20261027/compiler-resumed/shadowed-memory-result{,-replay,-replay2}. This is checker semantic/component qualification. The new-placeholder native return metadata, actual nested raw float read/cast execution, region capacity and a fully rebuilt integrated root compiler remain separate gates. Borrowed enum payload draft changes were excluded from this source delivery.
