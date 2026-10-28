@@ -4395,6 +4395,21 @@ fn checker_const_name_eq_raw(c: *mut Checker, idx: i64, name: Name) -> bool with
     true
 }
 
+// Assignment must invalidate the visible binding before adding a scoped
+// constant shadow. Otherwise block pop resurrects a stale pre-loop value.
+// Only the nearest binding is touched, so a local declaration that shadows an
+// outer name cannot invalidate or rewrite the outer declaration's constant.
+fn checker_const_int_forget_visible_inplace(c: *mut Checker, name: Name) with Mut,Div,Panic {
+    var i=(*c).const_int_count-1
+    while i>=0 {
+        if checker_const_name_eq_raw(c,i,name) {
+            (*c).const_int_known[i as usize]=0
+            return
+        }
+        i=i-1
+    }
+}
+
 fn checker_const_int_bind_unknown_inplace(c: *mut Checker, name: Name) with Mut, Div, Panic {
     checker_const_int_bind_raw_inplace(c, name, 0, 0)
 }
@@ -15641,6 +15656,7 @@ fn checker_check_assign_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with
         Some(target) => {
             if (*target).kind == ExprKind::ExprIdent {
                 let rhs_pair = checker_eval_const_int_opt_expr_mut(c, s.expr)
+                checker_const_int_forget_visible_inplace(c, (*target).name)
                 if rhs_pair.0 != 0 {
                     checker_const_int_bind_value_inplace(c, (*target).name, rhs_pair.1)
                 } else {
@@ -19984,6 +20000,19 @@ impl Checker {
         c.const_int_name_lens = lens
         c.const_int_known[idx as usize] = known
         c.const_int_values[idx as usize] = value
+        c
+    }
+
+    fn const_int_forget_visible(self, name: Name) -> Checker with Mut,Div,Panic {
+        var c=self
+        var i=c.const_int_count-1
+        while i>=0 {
+            if checker_const_name_eq(&c.const_int_name_bufs,&c.const_int_name_lens,i,name) {
+                c.const_int_known[i as usize]=0
+                return c
+            }
+            i=i-1
+        }
         c
     }
 
@@ -28386,6 +28415,7 @@ impl Checker {
             Some(target) => {
                 if (*target).kind == ExprKind::ExprIdent {
                     let rhs_pair = eval_const_int_opt_expr(c, s.expr)
+                    c = c.const_int_forget_visible((*target).name)
                     if rhs_pair.0 != 0 {
                         c = c.const_int_bind_value((*target).name, rhs_pair.1)
                     } else {
