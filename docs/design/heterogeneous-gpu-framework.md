@@ -1587,3 +1587,20 @@ Job 19296. md5 `98989b7019c0f14cd8e97373d7c2cd09`.
 Those six words are 2.0, 3.0, 4.0, 5.0, 6.0 and 7.0. The stored word is 68.0. The inputs were not overwritten. The third product was added to the running sum.
 
 Gate. Node `gpuorangefs-r770-proxmox`, `--gres=gpu:1`, `--mem=16G`, `--cpus-per-task=4`. The 0.0018 s threshold is not moved. This cut does not pass it.
+
+
+## 63. Four products, text grown by 32 bytes (2026-10-28, OBSERVED)
+
+Three products filled the 256-byte text. A fourth product needs two more loads and one more `FFMA`. The section headers sat against the end of `.text`, so the image grew. The first 1664 bytes stay. The section-header table and the program headers move down 32 bytes. `e_shoff` goes from `0x680` to `0x6a0`. `e_phoff` goes from `0x980` to `0x9a0`. The `.text` size and the `stamp` symbol size go from 256 to 288. The load of the constant bank plus the text grows its file size and memory size from `0x2c0` to `0x2e0`. The two program headers that point at the program-header table move from `0x980` to `0x9a0`. `.debug_frame` still carries the old length 256. The driver loaded the image anyway.
+
+The fourth pair reuses R8 and R9. The second `FFMA` has already waited on barriers 4 and 5. The new loads register those barriers again. The fourth `FFMA` waits on mask 48. The third product still waits on mask 12. The store displacement is 32. `EXIT` is at pc 272. The register count stays 12.
+
+The host writes the bits of 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0 and 9.0. In f32, 2 times 3 plus 4 times 5 plus 6 times 7 plus 8 times 9 is 140.0. The bits of 140.0 are `0x430c0000`, which is 1124859904. The node was idle. No drain was cleared.
+
+Job 19381. md5 `bc2dd72a3581e3d3d8b2fe65f41c1413`.
+
+`OWN=1073741824`, `OWN_ADD=1077936128`, `OWN_SRC=1082130432`, `OWN_WIDE=1084227584`, `OWN_EXT=1086324736`, `OWN_EXT2=1088421888`, `OWN_E8=1090519040`, `OWN_E9=1091567616`, `OWN_SUM=1124859904`, `EXIT:0`.
+
+Those eight words are 2.0 through 9.0. The stored word is 140.0. The inputs were not overwritten.
+
+Gate. Node `gpuorangefs-r770-proxmox`, `--gres=gpu:1`, `--mem=16G`, `--cpus-per-task=4`. The 0.0018 s threshold is not moved. This cut does not pass it.
