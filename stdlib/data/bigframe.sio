@@ -10,9 +10,11 @@
 // The POINT is scale: a BigFrame can hold >> 1024 rows (millions), unlike the
 // fixed [f64; 65536] DataFrame which is hard-capped at 1024 rows x 64 cols.
 //
-// Heap ABI: see heap_vec.sio (#874). heap_realloc uses mremap on the header
-// 8 bytes before the pointer, so only pass it heap_alloc/heap_realloc results
-// (NULL is accepted and allocates).
+// Heap ABI: see heap_vec.sio (#874). The logical size lives 16 bytes before the
+// pointer and the mapping length 8 bytes before it. heap_realloc(NULL, n)
+// allocates; a refused resize returns NULL and leaves the old block intact.
+// bf_reserve commits a column pointer only after that result is non-NULL and
+// advances cap_rows only after every column succeeds.
 
 // ============================================================================
 // CONSTANTS
@@ -66,22 +68,36 @@ pub fn bf_new(n_cols: i64, capacity_rows: i64) -> BigFrame with Alloc {
 // ============================================================================
 // INTERNAL: grow every column buffer to at least `need` rows.
 // ============================================================================
+fn bf_commit_columns(bf: &!BigFrame, new_cap: i64) -> bool with Alloc, Mut {
+    if new_cap <= bf.cap_rows { return true }
+    if new_cap <= 0 { return false }
+    let new_bytes = new_cap * 8
+    if new_bytes <= 0 { return false }
+    var c: i64 = 0
+    while c < bf.n_cols {
+        let old = bf.col_ptrs[c] as *mut i8
+        let np = heap_realloc(old, new_bytes) as *mut f64
+        if (np as i64) == 0 { return false }
+        bf.col_ptrs[c] = np as i64
+        c = c + 1
+    }
+    bf.cap_rows = new_cap
+    true
+}
+
 fn bf_reserve(bf: &!BigFrame, need: i64) with Alloc, Mut {
     if need <= bf.cap_rows { return }
     var new_cap = bf.cap_rows
     if new_cap < 1 { new_cap = 1 }
     while new_cap < need {
+        if new_cap > 4611686018427387904 { return }
         new_cap = new_cap * 2
     }
-    let new_bytes = new_cap * 8
-    var c: i64 = 0
-    while c < bf.n_cols {
-        let old = bf.col_ptrs[c] as *mut i8
-        let np = heap_realloc(old, new_bytes) as *mut f64
-        bf.col_ptrs[c] = np as i64
-        c = c + 1
-    }
-    bf.cap_rows = new_cap
+    let _grown = bf_commit_columns(bf, new_cap)
+}
+
+pub fn bf_try_reserve_rows(bf: &!BigFrame, new_cap: i64) -> bool with Alloc, Mut {
+    bf_commit_columns(bf, new_cap)
 }
 
 // ============================================================================
@@ -92,6 +108,7 @@ fn bf_reserve(bf: &!BigFrame, need: i64) with Alloc, Mut {
 // (capped to bf.n_cols) are stored. Grows every column buffer if needed.
 pub fn bf_push_row(bf: &!BigFrame, row: &[f64; 64], n_cols: i64) with Alloc, Mut {
     bf_reserve(bf, bf.n_rows + 1)
+    if bf.n_rows >= bf.cap_rows { return }
     let r = bf.n_rows
     var nc = n_cols
     if nc > bf.n_cols { nc = bf.n_cols }

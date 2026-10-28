@@ -4,7 +4,7 @@
 
 // Witness for the native heap ABI documented in
 // self-hosted/native/codegen_x86_linux.sio (native_v2_heap_header_bytes):
-// payload = mmap base + 16, mapping length at payload - 8.
+// payload = mmap base + 16, logical size at payload - 16, mapping length at payload - 8.
 // Before #874: Madaros compiled heap_realloc to a ud2 stub (SIGILL, rc=132)
 // and both engines returned payloads that were only 8-byte aligned.
 
@@ -85,11 +85,24 @@ fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
     }
     fails = check(sum == 37497500, "vec growth contents", fails)
 
+    // Same page: shrink then grow must not resurrect bytes past the shrunk length.
+    // mremap keeps the 4096-byte mapping, so the kernel does not zero the tail.
+    let s = heap_alloc(24) as *mut i64
+    write_i64(s, 0, 11)
+    write_i64(s, 2, 99)
+    let s2 = heap_realloc(s as *mut i8, 8) as *mut i64
+    fails = check((s2 as i64) != 0, "same-page shrink non-null", fails)
+    let s3 = heap_realloc(s2 as *mut i8, 24) as *mut i64
+    fails = check((s3 as i64) != 0 && (s3 as i64) % 16 == 0, "same-page grow aligned", fails)
+    fails = check(read_i64(s3, 0) == 11, "same-page keeps prefix", fails)
+    fails = check(read_i64(s3, 2) == 0, "same-page grow zeroes tail", fails)
+
     // heap_free(NULL) is a no-op; valid blocks are released.
     heap_free(0 as *mut u8)
     heap_free(r as *mut u8)
     heap_free(z as *mut u8)
     heap_free(v as *mut u8)
+    heap_free(s3 as *mut u8)
 
     if fails == 0 {
         print("heap_abi_align16_realloc: PASS\n")
