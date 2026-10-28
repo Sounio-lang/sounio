@@ -181,7 +181,7 @@ for (const locale of ['en', 'pt', 'el', 'zh', 'zh-hk', 'ja', 'es']) {
     assert.equal(question[1].trim(), '', 'recipe placeholder must not impersonate a scientist question');
     if (language !== locale && !visible.includes(copy.en.fallback)) errors.push(`${locale}: missing fallback boundary`);
     const home = await readFile(path.join(site, prefix, 'index.html'), 'utf8');
-    if (!home.includes(`href="${prefix}/scientist"`)) errors.push(`${locale}: missing public scientist entry`);
+    if (!home.includes(`href="${prefix}/scientist/"`)) errors.push(`${locale}: missing public scientist entry`);
     pages += 1;
   } catch (error) { errors.push(`${locale}: missing scientist route (${error.message})`); }
 }

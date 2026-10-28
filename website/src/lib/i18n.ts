@@ -57,16 +57,32 @@ export function getLocaleFromUrl(url: URL): Locale {
 /**
  * Get the path for a different locale
  */
+const LOCALE_PREFIX = /^\/(en|pt|el|zh-hk|zh|ja|es)(?=\/|$)/;
+
+function splitPathSuffix(path: string): { pathname: string; suffix: string } {
+  const hash = path.indexOf('#');
+  const query = path.indexOf('?');
+  let cut = path.length;
+  if (hash >= 0) cut = Math.min(cut, hash);
+  if (query >= 0) cut = Math.min(cut, query);
+  return { pathname: path.slice(0, cut), suffix: path.slice(cut) };
+}
+
+/** Directory URLs end with `/`. Files (`robots.txt`, `feed.xml`, images) do not. */
+function ensureDirectorySlash(pathname: string): string {
+  if (pathname === '' || pathname === '/') return '/';
+  const last = pathname.split('/').filter(Boolean).pop() ?? '';
+  if (last.includes('.')) return pathname;
+  return pathname.endsWith('/') ? pathname : `${pathname}/`;
+}
+
 export function getLocalizedPath(path: string, locale: Locale): string {
-  // Remove any existing locale prefix
-  const cleanPath = path.replace(/^\/(en|pt|el|zh-hk|zh|ja|es)/, '');
-
-  // Don't prefix default locale
-  if (locale === defaultLocale) {
-    return cleanPath || '/';
-  }
-
-  return `/${locale}${cleanPath}`;
+  const { pathname, suffix } = splitPathSuffix(path);
+  const stripped = pathname.replace(LOCALE_PREFIX, '') || '/';
+  const bare = ensureDirectorySlash(stripped.startsWith('/') ? stripped : `/${stripped}`);
+  if (locale === defaultLocale) return `${bare}${suffix}`;
+  if (bare === '/') return `/${locale}/${suffix}`;
+  return `/${locale}${bare}${suffix}`;
 }
 
 /**
