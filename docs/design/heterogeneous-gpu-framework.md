@@ -1536,3 +1536,20 @@ The word at offset 16, cleared before launch, came back 45. The load at displace
 Across the 104 `.reuse` tags in `token_m1`, the last byte of the instruction carries one bit per source, counting from the destination. The first source is bit 2 (value 4): 24 `IADD3` and 22 `FFMA`. The second source is bit 3 (value 8): 13 `FFMA`. The third source is bit 4 (value 16): 3 `IMAD.WIDE` and 2 `IMAD`. The sum that stored 20 reads R4 once and leaves that byte at 0. This job does not set those bits.
 
 Gate. Node `gpuorangefs-r770-proxmox`, `--gres=gpu:1`, `--mem=16G`, `--cpus-per-task=4`. The 0.0018 s threshold is not moved. This cut does not pass it.
+
+
+## 60. Four loads, one sum (2026-10-28, OBSERVED)
+
+The image no longer stores 42 and 13. It loads four words and adds them. The host writes 17, 19, 23 and 29 at offsets 0, 4, 8 and 12. The sum is 88, stored at offset 16.
+
+Each load is `LDG.E` with byte 4 equal to 6. Displacements are 0, 4, 8 and 12. The read barriers are 2, 3, 4 and 5. The first add waits on mask 12, barriers 2 and 3, and adds R4 and R6. The second waits on mask 16, barrier 4, and adds R8. The third waits on mask 32, barrier 5, and adds R9. Register count is 12. `EXIT` is at pc `0xc0`.
+
+Job 19267, a CPU validation with `OverSubscribe=OK` and no GPU request, held the node. It was not cancelled. Job 19268 was moved to partition `all` so it could use the free GPU.
+
+Job 19268. md5 `c0ab579ade99a0db7a9376a43bfaa0b5`.
+
+`OWN=17`, `OWN_ADD=19`, `OWN_SRC=23`, `OWN_WIDE=29`, `OWN_SUM=88`, `EXIT:0`.
+
+The four inputs were still there. The cleared word at offset 16 came back 88. The four loads were in flight under four barrier ids, and each add waited on the barrier of the load it consumed.
+
+Gate. Node `gpuorangefs-r770-proxmox`, `--gres=gpu:1`, `--mem=16G`, `--cpus-per-task=4`. The 0.0018 s threshold is not moved. This cut does not pass it.
