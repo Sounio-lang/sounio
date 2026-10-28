@@ -67,7 +67,7 @@ asm(
 namespace {
 using I=std::int64_t;
 thread_local int last_error=0;
-enum class Kind {atomic,thread,socket,mutex,channel,file,text,pollset,pool};
+enum class Kind {atomic,thread,socket,mutex,channel,file,text,pollset,pool,channel_range};
 struct Resource {const Kind kind;explicit Resource(Kind k):kind(k){};virtual ~Resource()=default;};
 struct Atomic final:Resource {std::atomic<I> value;explicit Atomic(I v):Resource(Kind::atomic),value(v){}};
 struct Thread final:Resource {
@@ -364,6 +364,120 @@ I pool_result(const std::shared_ptr<Pool>& pool,I id,I timeout_ms) {
   return value;
 }
 
+
+// Fixed native channel protocol. A lease retains only the checked C++ Channel;
+// no Sounio callback, owner, loan, pointer or runtime context enters this thread.
+struct ChannelRangeProducer final:Resource {
+  std::shared_ptr<Channel> channel;
+  std::mutex mutex;
+  pthread_t thread{};
+  std::atomic<I> sent{0},wait_count{0};
+  std::atomic<bool> cancel_requested{false};
+  I first=0,count=0,step=0,deadline_ns=0;
+  int phase=0,work_error=0;
+  bool started=false,joining=false,joined=false,finished=false,retired=false;
+  explicit ChannelRangeProducer(std::shared_ptr<Channel> q)
+      :Resource(Kind::channel_range),channel(std::move(q)){}
+  ~ChannelRangeProducer() override {
+    if(started&&!joined){cancel();pthread_join(thread,nullptr);}
+  }
+  static I reservation() {
+    return 1024+static_cast<I>(Pool::stack_bytes)+static_cast<I>(Pool::guard_bytes)+sizeof(pthread_t);
+  }
+  int configure(I begin,I length,I increment) {
+    std::lock_guard lock(mutex);
+    if(retired)return EBADF;
+    if(phase!=0)return EBUSY;
+    if(cancel_requested.load(std::memory_order_acquire))return ECANCELED;
+    if(length<0)return EINVAL;
+    if(length>0) {
+      const __int128 last=static_cast<__int128>(begin)+
+          static_cast<__int128>(length-1)*static_cast<__int128>(increment);
+      if(last<std::numeric_limits<I>::min()||last>std::numeric_limits<I>::max())return EOVERFLOW;
+    }
+    first=begin;count=length;step=increment;phase=1;return 0;
+  }
+  void cancel() {
+    // Cancellation linearizes under the same queue lock as admission. After
+    // cancel returns, no new value can be admitted by this producer.
+    {std::lock_guard lock(channel->mutex);cancel_requested.store(true,std::memory_order_release);}
+    channel->writable.notify_all();
+  }
+  static void* run(void* raw) noexcept {
+    auto& producer=*static_cast<ChannelRangeProducer*>(raw);
+    int error=0;
+    try {
+      while(producer.sent.load(std::memory_order_relaxed)<producer.count) {
+        std::unique_lock lock(producer.channel->mutex);
+        for(;;) {
+          if(producer.cancel_requested.load(std::memory_order_acquire)){error=ECANCELED;break;}
+          if(producer.channel->destroyed){error=EBADF;break;}
+          if(producer.channel->closed){error=EPIPE;break;}
+          I now=0;
+          if(!monotonic_now(now)){error=last_error;break;}
+          if(now>=producer.deadline_ns){error=ETIMEDOUT;break;}
+          if(producer.channel->size<producer.channel->data.size()) {
+            const I index=producer.sent.load(std::memory_order_relaxed);
+            const I value=static_cast<I>(static_cast<__int128>(producer.first)+
+                static_cast<__int128>(index)*static_cast<__int128>(producer.step));
+            producer.channel->data[(producer.channel->head+producer.channel->size)%
+                                    producer.channel->data.size()]=value;
+            ++producer.channel->size;
+            producer.sent.store(index+1,std::memory_order_release);
+            lock.unlock();producer.channel->readable.notify_one();break;
+          }
+          // Recompute from the original CLOCK_MONOTONIC deadline after every
+          // spurious wakeup; cancellation and channel close also wake this wait.
+          // Use the native absolute CLOCK_MONOTONIC epoch directly. Relative
+          // wait_for adds a later steady_clock::now() and can overflow when the
+          // caller supplies INT64_MAX, despite the subtraction above being safe.
+          const timespec until{static_cast<time_t>(producer.deadline_ns/1000000000),
+                               static_cast<long>(producer.deadline_ns%1000000000)};
+          producer.wait_count.fetch_add(1,std::memory_order_release);
+          const int rc=pthread_cond_clockwait(producer.channel->writable.native_handle(),
+                          producer.channel->mutex.native_handle(),CLOCK_MONOTONIC,&until);
+          if(rc==ETIMEDOUT){error=ETIMEDOUT;break;}
+          if(rc!=0&&rc!=EINTR){error=rc;break;}
+        }
+        if(error)break;
+      }
+    }catch(...){error=EIO;} // C++ exceptions only; this worker never calls Sounio.
+    {std::lock_guard lock(producer.mutex);producer.work_error=error;producer.finished=true;}
+    return nullptr;
+  }
+  int start(I deadline) {
+    std::lock_guard lock(mutex);
+    if(retired)return EBADF;
+    if(phase!=1)return phase>=2?EBUSY:EINVAL;
+    if(cancel_requested.load(std::memory_order_acquire))return ECANCELED;
+    if(deadline<=0)return EINVAL;
+    I now=0;if(!monotonic_now(now))return last_error;
+    if(now>=deadline)return ETIMEDOUT;
+    deadline_ns=deadline;phase=2;
+    pthread_attr_t attr;
+    int rc=pthread_attr_init(&attr);if(rc)return rc;
+    rc=pthread_attr_setstacksize(&attr,Pool::stack_bytes);
+    if(!rc)rc=pthread_attr_setguardsize(&attr,Pool::guard_bytes);
+    if(!rc)rc=pthread_create(&thread,&attr,run,this);
+    pthread_attr_destroy(&attr);
+    if(!rc)started=true;
+    return rc;
+  }
+  int join() {
+    {
+      std::lock_guard lock(mutex);
+      if(retired)return EBADF;
+      if(!started||joining||joined)return EINVAL;
+      if(pthread_equal(pthread_self(),thread))return EDEADLK;
+      joining=true;
+    }
+    const int rc=pthread_join(thread,nullptr);
+    {std::lock_guard lock(mutex);joining=false;if(!rc)joined=true;}
+    return rc;
+  }
+};
+static_assert(sizeof(ChannelRangeProducer)<=1024&&sizeof(pthread_t)<=8);
+
 I tcp_file_read(File& file,void* output,I count) {
   if(count==0)return 0;
   bool retried=false;
@@ -392,6 +506,60 @@ I tcp_file_read(File& file,void* output,I count) {
 }
 
 I dispatch(I op,I a,I b,I c,I d) {
+
+  // The typed constructor keeps this three-stage builder private: reserve the
+  // complete budget/Channel lease, copy scalar range, then publish one thread.
+  // No Sounio POD address is retained or reinterpreted across this boundary.
+  if(op==149) {
+    if(a||b||c||d)return failure(EINVAL);
+    return ChannelRangeProducer::reservation();
+  }
+  if(op==141) {
+    if(b<0||c||d)return failure(EINVAL);
+    if(b<ChannelRangeProducer::reservation())return failure(ENOBUFS);
+    auto channel=get<Channel>(a,Kind::channel);if(!channel)return 0;
+    return put(std::make_shared<ChannelRangeProducer>(std::move(channel)));
+  }
+  if(op>=142&&op<=147) {
+    auto producer=get<ChannelRangeProducer>(a,Kind::channel_range);if(!producer)return 0;
+    if(op==142){const int rc=producer->configure(b,c,d);return rc?failure(rc):0;}
+    if(op==143) {
+      if(c||d)return failure(EINVAL);
+      const int rc=producer->start(b);return rc?failure(rc):0;
+    }
+    if(op==144) {
+      if(b||c||d)return failure(EINVAL);
+      const int rc=producer->join();if(rc)return failure(rc);
+      return producer->sent.load(std::memory_order_acquire);
+    }
+    if(op==145) {
+      if(b||c||d)return failure(EINVAL);
+      std::lock_guard lock(producer->mutex);
+      if(producer->retired)return failure(EBADF);
+      if(!producer->finished)return failure(EAGAIN);
+      return producer->work_error;
+    }
+    if(op==146) {
+      if(b||c||d)return failure(EINVAL);
+      {std::lock_guard lock(producer->mutex);if(producer->retired)return failure(EBADF);}
+      producer->cancel();return 0;
+    }
+    if(c||d)return failure(EINVAL);
+    std::lock_guard lock(producer->mutex);
+    if(producer->retired)return failure(EBADF);
+    if(b==0)return producer->sent.load(std::memory_order_acquire);
+    if(b==1)return producer->count;
+    if(b==2)return producer->first;
+    if(b==3)return producer->step;
+    if(b==4)return producer->started?1:0;
+    if(b==5)return producer->joined?1:0;
+    if(b==6)return producer->finished?1:0;
+    if(b==7)return producer->cancel_requested.load(std::memory_order_acquire)?1:0;
+    if(b==8)return producer->phase;
+    if(b==9)return producer->wait_count.load(std::memory_order_acquire);
+    return failure(EINVAL);
+  }
+
   if(op==138) {
     if(b<0||c<0||d!=0)return failure(EINVAL);
     auto socket=get<Socket>(a,Kind::socket);if(!socket)return 0;
@@ -652,6 +820,12 @@ I dispatch(I op,I a,I b,I c,I d) {
       auto pool=std::static_pointer_cast<Pool>(it->second);
       std::lock_guard lock(pool->mutex);
       if(!pool->joined||pool->outstanding!=0)return failure(EBUSY);
+    }
+    if(it->second->kind==Kind::channel_range) {
+      auto producer=std::static_pointer_cast<ChannelRangeProducer>(it->second);
+      std::lock_guard lock(producer->mutex);
+      if(producer->started&&!producer->joined)return failure(EBUSY);
+      producer->retired=true;
     }
     if(it->second->kind==Kind::thread) {
       auto t=std::static_pointer_cast<Thread>(it->second);

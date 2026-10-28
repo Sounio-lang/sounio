@@ -1,0 +1,141 @@
+//@ run-pass
+//@ expect-stdout: NATIVE_CHANNEL_RANGE_SOUNIO_OK
+use ffi::platform::{platform_open,platform_status,platform_call,platform_close}
+use sync::native_channel::{native_channel_new,native_channel_status,native_channel_token,native_channel_try_send,native_channel_try_receive,native_channel_receive,native_channel_close,native_channel_destroy}
+use sync::native_channel_range::{NativeChannelRangeConfig,native_channel_range_reservation,native_channel_range_producer_new,native_channel_range_producer_status,native_channel_range_producer_cleanup_status,native_channel_range_producer_join,native_channel_range_producer_cancel,native_channel_range_producer_close}
+fn main()->i32 with IO,Alloc,Mut,Div,Panic {
+ let p=platform_open()
+ assert(platform_status(&p)==0)
+ let c=native_channel_new(&p,2,16)
+ assert(native_channel_status(&c)==0)
+ let token=native_channel_token(&c)
+ let budget=native_channel_range_reservation(&p)
+ assert(budget.status==0)
+ var cfg=NativeChannelRangeConfig {start:0,count:0,step:0,deadline_ns:platform_call(&p,30,0,0,0,0).value+5000000000,max_bytes:budget.value-1}
+ let invalid_budget=native_channel_range_producer_new(&p,&c,&cfg)
+ assert(native_channel_range_producer_status(&invalid_budget)==105)
+ assert(native_channel_range_producer_cleanup_status(&invalid_budget)==0)
+ assert(native_channel_range_producer_close(&p,invalid_budget)==105)
+ cfg.max_bytes=budget.value
+ cfg.start=9223372036854775807
+ cfg.count=2
+ cfg.step=1
+ let overflow=native_channel_range_producer_new(&p,&c,&cfg)
+ assert(native_channel_range_producer_status(&overflow)==75)
+ assert(native_channel_range_producer_cleanup_status(&overflow)==0)
+ assert(native_channel_range_producer_close(&p,overflow)==75)
+ cfg.start=0
+ cfg.count=0-1
+ let negative=native_channel_range_producer_new(&p,&c,&cfg)
+ assert(native_channel_range_producer_status(&negative)==22)
+ assert(native_channel_range_producer_cleanup_status(&negative)==0)
+ assert(native_channel_range_producer_close(&p,negative)==22)
+ cfg.count=0
+ cfg.deadline_ns=platform_call(&p,30,0,0,0,0).value-1
+ let past=native_channel_range_producer_new(&p,&c,&cfg)
+ assert(native_channel_range_producer_status(&past)==110)
+ assert(native_channel_range_producer_cleanup_status(&past)==0)
+ assert(native_channel_range_producer_close(&p,past)==110)
+ cfg.deadline_ns=platform_call(&p,30,0,0,0,0).value+5000000000
+ var zero=native_channel_range_producer_new(&p,&c,&cfg)
+ assert(native_channel_range_producer_status(&zero)==0)
+ let zero_done=native_channel_range_producer_join(&p,&!zero)
+ assert(zero_done.status==0 && zero_done.value==0)
+ assert(native_channel_range_producer_join(&p,&!zero).status==22)
+ assert(native_channel_range_producer_close(&p,zero)==0)
+ assert(native_channel_try_receive(&p,&token).status==11)
+ cfg.start=0-7
+ cfg.count=3
+ cfg.step=0
+ var repeated=native_channel_range_producer_new(&p,&c,&cfg)
+ assert(native_channel_range_producer_status(&repeated)==0)
+ var i:i64=0
+ while i<3 {
+  let r=native_channel_receive(&p,&token,5000)
+  assert(r.status==0 && !r.closed && r.value==0-7)
+  i=i+1
+ }
+ let repeat_done=native_channel_range_producer_join(&p,&!repeated)
+ assert(repeat_done.status==0 && repeat_done.value==3)
+ assert(native_channel_range_producer_close(&p,repeated)==0)
+ cfg.start=3
+ cfg.count=4
+ cfg.step=0-1
+ var descending=native_channel_range_producer_new(&p,&c,&cfg)
+ assert(native_channel_range_producer_status(&descending)==0)
+ i=0
+ while i<4 {
+  let r=native_channel_receive(&p,&token,5000)
+  assert(r.status==0 && !r.closed && r.value==3-i)
+  i=i+1
+ }
+ let desc_done=native_channel_range_producer_join(&p,&!descending)
+ assert(desc_done.status==0 && desc_done.value==4)
+ assert(native_channel_range_producer_close(&p,descending)==0)
+ assert(native_channel_destroy(&p,c)==0)
+ let blocked=native_channel_new(&p,1,8)
+ let blocked_token=native_channel_token(&blocked)
+ assert(native_channel_try_send(&p,&blocked_token,99)==0)
+ cfg.start=0
+ cfg.count=128
+ cfg.step=1
+ var stopped=native_channel_range_producer_new(&p,&blocked,&cfg)
+ assert(native_channel_range_producer_status(&stopped)==0)
+ assert(native_channel_range_producer_cancel(&p,&stopped)==0)
+ let stopped_done=native_channel_range_producer_join(&p,&!stopped)
+ assert(stopped_done.status==125 && stopped_done.value==0)
+ assert(native_channel_range_producer_close(&p,stopped)==0)
+ assert(native_channel_try_receive(&p,&blocked_token).value==99)
+ assert(native_channel_destroy(&p,blocked)==0)
+ let maximum=native_channel_new(&p,1,8)
+ let maximum_token=native_channel_token(&maximum)
+ assert(native_channel_try_send(&p,&maximum_token,99)==0)
+ cfg.deadline_ns=9223372036854775807
+ cfg.count=1
+ var distant=native_channel_range_producer_new(&p,&maximum,&cfg)
+ assert(native_channel_range_producer_status(&distant)==0)
+ assert(native_channel_range_producer_cancel(&p,&distant)==0)
+ let distant_done=native_channel_range_producer_join(&p,&!distant)
+ assert(distant_done.status==125 && distant_done.value==0)
+ assert(native_channel_range_producer_close(&p,distant)==0)
+ assert(native_channel_try_receive(&p,&maximum_token).value==99)
+ assert(native_channel_destroy(&p,maximum)==0)
+ cfg.count=128
+ let timed=native_channel_new(&p,1,8)
+ let timed_token=native_channel_token(&timed)
+ assert(native_channel_try_send(&p,&timed_token,99)==0)
+ cfg.deadline_ns=platform_call(&p,30,0,0,0,0).value+100000000
+ var expired=native_channel_range_producer_new(&p,&timed,&cfg)
+ assert(native_channel_range_producer_status(&expired)==0)
+ let expired_done=native_channel_range_producer_join(&p,&!expired)
+ assert(expired_done.status==110 && expired_done.value==0)
+ assert(native_channel_range_producer_close(&p,expired)==0)
+ assert(native_channel_try_receive(&p,&timed_token).value==99)
+ assert(native_channel_destroy(&p,timed)==0)
+ let closing=native_channel_new(&p,1,8)
+ let closing_token=native_channel_token(&closing)
+ assert(native_channel_try_send(&p,&closing_token,99)==0)
+ cfg.deadline_ns=platform_call(&p,30,0,0,0,0).value+5000000000
+ var closed=native_channel_range_producer_new(&p,&closing,&cfg)
+ assert(native_channel_range_producer_status(&closed)==0)
+ assert(native_channel_close(&p,&closing)==0)
+ let closed_done=native_channel_range_producer_join(&p,&!closed)
+ assert(closed_done.status==32 && closed_done.value==0)
+ assert(native_channel_range_producer_close(&p,closed)==0)
+ assert(native_channel_try_receive(&p,&closing_token).value==99)
+ assert(native_channel_try_receive(&p,&closing_token).closed)
+ assert(native_channel_destroy(&p,closing)==0)
+ let destroyed=native_channel_new(&p,1,8)
+ let destroyed_token=native_channel_token(&destroyed)
+ assert(native_channel_try_send(&p,&destroyed_token,99)==0)
+ var lease=native_channel_range_producer_new(&p,&destroyed,&cfg)
+ assert(native_channel_range_producer_status(&lease)==0)
+ assert(native_channel_destroy(&p,destroyed)==0)
+ let lease_done=native_channel_range_producer_join(&p,&!lease)
+ assert(lease_done.status==9 && lease_done.value==0)
+ assert(native_channel_range_producer_close(&p,lease)==0)
+ assert(platform_call(&p,3,0,0,0,0).value==0)
+ platform_close(p)
+ println("NATIVE_CHANNEL_RANGE_SOUNIO_OK")
+ return 0
+}

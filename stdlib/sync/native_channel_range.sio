@@ -1,0 +1,76 @@
+// Native bounded range producer. Its one pthread executes only C++ queue logic,
+// never Sounio code. A runtime lease retains the checked C++ channel storage.
+// Destroying the channel wakes the producer with EBADF; close wakes it EPIPE.
+// The input owner stays in this thread and is never encoded into a task argument.
+use ffi::platform::{Platform,PlatformValue,platform_call,platform_call_nonnegative}
+use sync::native_channel::{NativeChannel,native_channel_status,native_channel_token,channel_token_argument}
+pub struct NativeChannelRangeConfig {
+ pub start:i64,pub count:i64,pub step:i64,pub deadline_ns:i64,pub max_bytes:i64
+}
+pub linear struct NativeChannelRangeProducer {id:i64,status:i64,joined:bool,cleanup_status:i64}
+// Additional control + dedicated 1MiB pthread stack + 4KiB guard + pthread handle.
+// The already-owned bounded channel storage and OS bookkeeping are separate.
+pub fn native_channel_range_reservation(p:&Platform)->PlatformValue with IO {
+ return platform_call(p,149,0,0,0,0)
+}
+pub fn native_channel_range_producer_new(p:&Platform,channel:&NativeChannel,cfg:&NativeChannelRangeConfig)->NativeChannelRangeProducer with IO {
+ let channel_status=native_channel_status(channel)
+ if channel_status!=0 {return NativeChannelRangeProducer {id:0,status:channel_status,joined:true,cleanup_status:0}}
+ let token=native_channel_token(channel)
+ // Private builder: validate/reserve the complete budget before allocation,
+ // copy only scalar values, then start. No config address crosses the ABI.
+ let reserved=platform_call(p,141,channel_token_argument(&token),cfg.max_bytes,0,0)
+ if reserved.status!=0 {return NativeChannelRangeProducer {id:0,status:reserved.status,joined:true,cleanup_status:0}}
+ let range=platform_call(p,142,reserved.value,cfg.start,cfg.count,cfg.step)
+ var status=range.status
+ if status==0 {status=platform_call(p,143,reserved.value,cfg.deadline_ns,0,0).status}
+ if status!=0 {
+  let closed=platform_call(p,2,reserved.value,0,0,0)
+  return NativeChannelRangeProducer {id:0,status:status,joined:true,cleanup_status:closed.status}
+ }
+ return NativeChannelRangeProducer {id:reserved.value,status:0,joined:false,cleanup_status:0}
+}
+pub fn native_channel_range_producer_status(producer:&NativeChannelRangeProducer)->i64 {producer.status}
+pub fn native_channel_range_producer_cleanup_status(producer:&NativeChannelRangeProducer)->i64 {producer.cleanup_status}
+pub fn native_channel_range_producer_sent(p:&Platform,producer:&NativeChannelRangeProducer)->PlatformValue with IO {
+ if producer.status!=0 {return PlatformValue {value:0,status:producer.status}}
+ return platform_call(p,147,producer.id,0,0,0)
+}
+// Number of queue waits attempted under the queue mutex. A positive count
+// proves the native worker entered its bounded-channel backpressure path.
+// Scalar polling avoids allocating a result object per observation.
+pub fn native_channel_range_producer_wait_count_code(p:&Platform,producer:&NativeChannelRangeProducer)->i64 with IO {
+ if producer.status!=0 {return 0-producer.status}
+ return platform_call_nonnegative(p,147,producer.id,9,0,0)
+}
+
+pub fn native_channel_range_producer_cancel(p:&Platform,producer:&NativeChannelRangeProducer)->i64 with IO {
+ if producer.status!=0 {return producer.status}
+ return platform_call(p,146,producer.id,0,0,0).status
+}
+// On successful pthread join, value is the admitted prefix length and status is
+// the worker's POSIX error (zero for completion). Zero is a valid successful count.
+// A timeout/close/cancel never retroactively removes already-admitted values.
+pub fn native_channel_range_producer_join(p:&Platform,producer:&!NativeChannelRangeProducer)->PlatformValue with IO,Mut {
+ if producer.status!=0 {return PlatformValue {value:0,status:producer.status}}
+ if producer.joined {return PlatformValue {value:0,status:22}}
+ let joined=platform_call(p,144,producer.id,0,0,0)
+ if joined.status!=0 {return joined}
+ producer.joined=true
+ let result=platform_call(p,145,producer.id,0,0,0)
+ if result.status!=0 {return PlatformValue {value:joined.value,status:result.status}}
+ return PlatformValue {value:joined.value,status:result.value}
+}
+// Close cancels unfinished admission, joins, then releases the lease. It reports
+// cleanup failures; use join first when the final work status/count is needed.
+pub fn native_channel_range_producer_close(p:&Platform,producer:NativeChannelRangeProducer)->i64 with IO {
+ let NativeChannelRangeProducer {id,status,joined,cleanup_status}=producer
+ if status!=0 {return if cleanup_status!=0 {cleanup_status}else{status}}
+ if !joined {
+  let stopped=platform_call(p,146,id,0,0,0)
+  if stopped.status!=0 {return stopped.status}
+  let finished=platform_call(p,144,id,0,0,0)
+  if finished.status!=0 {return finished.status}
+ }
+ return platform_call(p,2,id,0,0,0).status
+}
