@@ -53,6 +53,11 @@ const sounioSiteTheme = {
 // https://astro.build/config
 export default defineConfig({
   site: 'https://www.souniolang.org',
+  // Directory URLs are the indexable form. Vercel mirrors this in vercel.json
+  // (docs redirects first, then the same trailing-slash routes `trailingSlash:
+  // true` would emit). A bare `trailingSlash: true` runs before user redirects
+  // and would turn /docs into /docs/ instead of /learn/.
+  trailingSlash: 'always',
 
   integrations: [
     react(),
@@ -102,12 +107,12 @@ export default defineConfig({
   // Hash fragments are client-side only; the 308 targets /language.
   // The stub page at platform.astro adds the #compiler fragment via JS.
   redirects: {
-    '/platform': { status: 308, destination: '/language' },
-    '/pt/platform': { status: 308, destination: '/pt/language' },
-    '/el/platform': { status: 308, destination: '/el/language' },
-    '/zh/platform': { status: 308, destination: '/zh/language' },
-    '/ja/platform': { status: 308, destination: '/ja/language' },
-    '/es/platform': { status: 308, destination: '/es/language' },
-    '/zh-hk/platform': { status: 308, destination: '/zh-hk/language' },
+    '/platform/': { status: 308, destination: '/language/' },
+    '/pt/platform/': { status: 308, destination: '/pt/language/' },
+    '/el/platform/': { status: 308, destination: '/el/language/' },
+    '/zh/platform/': { status: 308, destination: '/zh/language/' },
+    '/ja/platform/': { status: 308, destination: '/ja/language/' },
+    '/es/platform/': { status: 308, destination: '/es/language/' },
+    '/zh-hk/platform/': { status: 308, destination: '/zh-hk/language/' },
   },
 });

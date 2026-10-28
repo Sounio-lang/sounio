@@ -28,7 +28,7 @@ function homepageIssues(html, locale) {
   const expected = copy[locale];
   if ((html.match(/<h1\b[^>]*>/g) ?? []).length !== 1) errors.push('expected one primary heading');
   for (const field of ['title', 'description', 'start', 'note', 'scope']) if (!prose.includes(expected[field])) errors.push(`missing localized ${field}`);
-  if (!html.includes(`href="${prefix(locale)}/learn/getting-started"`)) errors.push('missing first-program entry');
+  if (!html.includes(`href="${prefix(locale)}/learn/getting-started/"`)) errors.push('missing first-program entry');
   if (!html.includes('class="language-picker"')) errors.push('missing header language control');
   if (!html.includes(`<html lang="${htmlLang(locale)}"`)) errors.push('wrong document language');
   for (const alternate of locales) {
