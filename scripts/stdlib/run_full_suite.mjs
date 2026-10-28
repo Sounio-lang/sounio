@@ -40,7 +40,7 @@ if(partition==='file'&&externalWorkers){
 }
 const workerBase=externalWorkers||path.join(output,'workers');
 const workerCount=Math.min(jobs,prefixes.length),workerRoots=[];
-const copyInvariants=partition==='file'?[...initial,...walk(path.join(root,'stdlib')).map(p=>({path:path.relative(root,p),sha256:hash(p)}))]:[];
+const copyInvariants=partition==='file'?['tests','stdlib','scripts','self-hosted'].flatMap(dir=>walk(path.join(root,dir),dir==='stdlib')).map(p=>({path:path.relative(root,p),sha256:hash(p)})):[];
 for(let i=0;i<workerCount;i++){
  if(partition!=='file'){workerRoots.push(root);continue;}
  const copy=path.join(workerBase,String(i));fs.mkdirSync(path.dirname(copy),{recursive:true});
@@ -86,6 +86,10 @@ for(const r of receipts.sort((a,b)=>a.stem.localeCompare(b.stem))) {
 }
 for(const p of paths)if(!seen.has(p))errors.push({path:p,error:'missing test result'});
 for(const p of initial)if(hash(path.join(root,p.path))!==p.sha256)errors.push({path:p.path,error:'test input changed during execution'});
+if(partition==='file')for(const input of copyInvariants){
+ try{if(hash(path.join(root,input.path))!==input.sha256)errors.push({path:input.path,error:'source changed during execution'});}
+ catch(error){errors.push({path:input.path,error:'source missing: '+error.message});}
+}
 if(partition==='file')for(const copy of workerRoots)for(const input of copyInvariants){
  try{if(hash(path.join(copy,input.path))!==input.sha256)errors.push({path:input.path,worker_root:copy,error:'worker source changed during execution'});}
  catch(error){errors.push({path:input.path,worker_root:copy,error:'worker source missing: '+error.message});}
