@@ -13,20 +13,16 @@ Desenvolver simultaneamente três projetos interconectados que demonstram o pode
 ```
 ecosystem/
 ├── README.md                          # Este arquivo
-├── ARCHITECTURE.md                    # Arquitetura integrada
-├── ROADMAP.md                         # Plano paralelo
 ├── shared/                            # Código compartilhado
 │   ├── epistemic_types.sio            # Tipos Knowledge[T] compartilhados
 │   ├── utils.sio                      # Utilitários comuns
 │   └── ffi_bridge.sio                 # Ponte FFI para Python
 ├── sounio-py/                         # PROJETO 1: Bindings Python
-│   ├── pyproject.toml                 # Configuração Python
-│   ├── src/
+│   ├── pyproject.toml                 # python-source = "python"
+│   ├── python/
 │   │   └── sounio/
-│   │       ├── __init__.py
-│   │       ├── core.py                # Bindings principais
-│   │       ├── numpy_integration.py   # Integração NumPy
-│   │       └── jupyter_support.py     # Suporte a Jupyter
+│   │       └── __init__.py            # fonte Python
+│   ├── src/*.rs                       # extensão Rust (maturin)
 │   ├── tests/
 │   │   └── test_basic.py
 │   └── examples/
@@ -151,8 +147,6 @@ All three projects are **functionally complete and tested**:
 - **sounio-py**: Full Knowledge[T] support, GUM arithmetic, NumPy/Pandas integration, DrugDiscoveryPipeline API
 - **sounio-jupyter**: Kernel fully functional, %drug_pipeline magic, integration with sounio-py
 - **drug-discovery**: Three-stage pipeline (Lipinski → PK/PD → Monte Carlo), complete with uncertainty quantification
-
-See [ARCHITECTURE.md](ARCHITECTURE.md) and [ROADMAP.md](ROADMAP.md) for full details.
 
 ## 🚀 Quick Verification
 
