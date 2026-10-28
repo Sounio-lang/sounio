@@ -79,6 +79,9 @@ var NC_RGN_BARRIER_SLOT: i64 = -1
 // 8 rawwrite (write_i64/write_f64), 9 syscall (syscall6 mark-all),
 // 10 extern (dynlink stub mark-all). Never set outside that gate.
 var NC_RGN_SABOTAGE: i64 = 0
+// ADR-023 §1 probe: SOUNIO_NV2_BOUNDS_CHECK=1 at compile time checks local and
+// param array indices against the object header's logical length.
+var NC_BOUNDS_CHECK: i64 = 0
 // Cached SOUNIO_WIDE_MUL_SABOTAGE. i64 (0/1) rather than bool: module-global
 // bool init is not exercised elsewhere in this backend. Refreshed from the
 // IO compile entry so nc_wide_mul_into does not take IO — its emit-loop
@@ -3125,6 +3128,12 @@ fn nc_refresh_rgn_sabotage() with IO, Mut, Panic, Div {
         NC_DYNLINK_THUNK_SABOTAGE = 1
     } else {
         NC_DYNLINK_THUNK_SABOTAGE = 0
+    }
+    let bounds_flag = read_env("SOUNIO_NV2_BOUNDS_CHECK")
+    if str_eq(bounds_flag, "1") {
+        NC_BOUNDS_CHECK = 1
+    } else {
+        NC_BOUNDS_CHECK = 0
     }
     let v = read_env("SOUNIO_RGN_BARRIER_SABOTAGE")
     NC_RGN_SABOTAGE = 0
@@ -13079,6 +13088,31 @@ pub fn native_v2_core_emit_driver_global_store_into(nc: &! NativeCompiler, globa
     }
 }
 
+// ADR-023 §1 (probe, behind SOUNIO_NV2_BOUNDS_CHECK=1). On entry rdx holds the
+// array's object base and rbx the index. The alloc emitter stamps the logical
+// element count into the header's flags slot (see IrArrayLen). The compare is
+// unsigned, so a negative index and an index at or above the length both fail.
+// Exit status 101 marks an index out of bounds. rax is clobbered; rdx and rbx
+// are preserved.
+fn nc_emit_index_bounds_check(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_mov_reg_reg(nc, 0, 2)
+    nc_emit_load_rax_mem_rax_disp32(nc, native_v2_object_header_field_flags())
+    // flags = 0 is every non-array object (tuples are index-addressed through
+    // ir_alloc, which leaves it 0) and a zero-length array: no length known.
+    nc_emit_test_rax_rax(nc)
+    let unknown_jz = (*nc).code.len
+    nc_emit_jz_rel32(nc)
+    nc_emit_cmp_rbx_rax(nc)
+    let in_bounds_patch = (*nc).code.len + 2
+    nc_emit_byte(nc, 0x0f)
+    nc_emit_byte(nc, 0x82) // jb in_bounds
+    nc_emit_u32_le(nc, 0)
+    nc_emit_exit_code(nc, 101)
+    let in_bounds_offset = (*nc).code.len
+    nc_patch_u32_le(nc, in_bounds_patch, in_bounds_offset - (in_bounds_patch + 4))
+    nc_patch_u32_le(nc, unknown_jz + 2, in_bounds_offset - (unknown_jz + 6))
+}
+
 pub fn native_v2_core_emit_local_array_load_into(nc: &! NativeCompiler, dst: i64, base_reg: i64, idx_reg: i64) with Mut, Panic, Div {
     // dst = arr[idx_runtime]; arrays are heap objects, base_reg stores a handle.
     nc_core_load_temp_to_rax(nc, base_reg)
@@ -13086,6 +13120,7 @@ pub fn native_v2_core_emit_local_array_load_into(nc: &! NativeCompiler, dst: i64
     nc_emit_mov_reg_reg(nc, 2, 0)
     nc_core_load_temp_to_rax(nc, idx_reg)
     nc_emit_mov_reg_reg(nc, 3, 0)
+    if NC_BOUNDS_CHECK == 1 { nc_emit_index_bounds_check(nc) }
     nc_emit_mov_reg_imm(nc, 1, native_v2_object_header_size() / 8)
     nc_emit_add_reg_reg(nc, 3, 1)
     nc_emit_load_rax_mem_rdx_rbx8(nc)
@@ -13099,6 +13134,7 @@ pub fn native_v2_core_emit_local_array_store_into(nc: &! NativeCompiler, base_re
     nc_emit_mov_reg_reg(nc, 2, 0)
     nc_core_load_temp_to_rax(nc, idx_reg)
     nc_emit_mov_reg_reg(nc, 3, 0)
+    if NC_BOUNDS_CHECK == 1 { nc_emit_index_bounds_check(nc) }
     nc_emit_mov_reg_imm(nc, 1, native_v2_object_header_size() / 8)
     nc_emit_add_reg_reg(nc, 3, 1)
     nc_core_load_temp_to_rax(nc, src)
@@ -13112,6 +13148,7 @@ pub fn native_v2_core_emit_param_array_load_into(nc: &! NativeCompiler, dst: i64
     nc_emit_mov_reg_reg(nc, 2, 0)
     nc_core_load_temp_to_rax(nc, idx_reg)
     nc_emit_mov_reg_reg(nc, 3, 0)
+    if NC_BOUNDS_CHECK == 1 { nc_emit_index_bounds_check(nc) }
     nc_emit_mov_reg_imm(nc, 1, native_v2_object_header_size() / 8)
     nc_emit_add_reg_reg(nc, 3, 1)
     nc_emit_load_rax_mem_rdx_rbx8(nc)
@@ -13125,6 +13162,7 @@ pub fn native_v2_core_emit_param_array_store_into(nc: &! NativeCompiler, base_re
     nc_emit_mov_reg_reg(nc, 2, 0)
     nc_core_load_temp_to_rax(nc, idx_reg)
     nc_emit_mov_reg_reg(nc, 3, 0)
+    if NC_BOUNDS_CHECK == 1 { nc_emit_index_bounds_check(nc) }
     nc_emit_mov_reg_imm(nc, 1, native_v2_object_header_size() / 8)
     nc_emit_add_reg_reg(nc, 3, 1)
     nc_core_load_temp_to_rax(nc, src)
