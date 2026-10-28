@@ -8173,9 +8173,35 @@ fn checker_check_ident_named(c: *mut Checker, name: Name, span: Span) -> TypeEnt
     ident_ty
 }
 
+// Logical RHS is checked on one possible path; the other path skips it.
+// Reuse if's linear AND / affine OR and namespace join. Resource failure must
+// not strand an immutable branch frame: restore the caller's frame links even
+// when the ordinary merge refuses early with E397.
+fn checker_check_logical_rhs_inplace(c:*mut Checker,right:Option<Box<Expr> >)->TypeEntry with Mut,Panic,Div,Alloc,IO {
+    let saved_head=(*c).borrows.branch_head
+    let saved_depth=(*c).borrows.branch_depth
+    let saved_ns_depth=(*c).ns_branch_depth
+    checker_branch_enter_inplace(c)
+    checker_ns_branch_enter_inplace(c)
+    let right_ty=checker_check_opt_expr_inplace(c,right)
+    checker_branch_then_done_inplace(c)
+    checker_merge_if_branches_inplace(c)
+    // The skip branch is the state rewound by branch_then_done.
+    var finished=borrow_env_clone(&(*c).borrows)
+    finished.branch_head=saved_head
+    finished.branch_depth=saved_depth
+    (*c).borrows=finished
+    checker_merge_ns_reassigned_inplace(c)
+    (*c).ns_branch_depth=saved_ns_depth
+    right_ty
+}
+
+
 fn checker_check_binary_fields(c: *mut Checker, span: Span, left: Option<Box<Expr> >, right: Option<Box<Expr> >, op: BinaryOp) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     let left_ty = checker_check_opt_expr_inplace(c, left)
-    let right_ty = checker_check_opt_expr_inplace(c, right)
+    let right_ty = if op==BinaryOp::OpAnd || op==BinaryOp::OpOr {
+        checker_check_logical_rhs_inplace(c,right)
+    } else {checker_check_opt_expr_inplace(c,right)}
     let arith = op == BinaryOp::OpAdd || op == BinaryOp::OpSub || op == BinaryOp::OpMul || op == BinaryOp::OpDiv
     if arith && is_integer_type(left_ty) && is_integer_type(right_ty) {
         return ty_i64()
@@ -8842,7 +8868,9 @@ fn checker_check_binary_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with
     let left_was_int_lit = (*c).last_literal_kind == 1
     let left_was_float_lit = (*c).last_literal_kind == 2
     (*c).last_literal_kind = 0
-    let right_ty = checker_check_opt_expr_inplace(c, e.right)
+    let right_ty = if e.bin_op==BinaryOp::OpAnd || e.bin_op==BinaryOp::OpOr {
+        checker_check_logical_rhs_inplace(c,e.right)
+    } else {checker_check_opt_expr_inplace(c,e.right)}
     let right_was_int_lit = (*c).last_literal_kind == 1
     let right_was_float_lit = (*c).last_literal_kind == 2
     (*c).last_literal_kind = 0
@@ -28631,10 +28659,15 @@ impl Checker {
         let left_pair = self.check_opt_expr(e.left)
         var c = left_pair.0
         let left_ty = left_pair.1
-        let right_pair = c.check_opt_expr(e.right)
-        c = right_pair.0
-        let right_ty = right_pair.1
-        c.check_binary_with_operand_types(e, left_ty, right_ty)
+        var right_ty=ty_unknown()
+        if e.bin_op==BinaryOp::OpAnd || e.bin_op==BinaryOp::OpOr {
+            right_ty=checker_check_logical_rhs_inplace((&!c) as *mut Checker,e.right)
+        } else {
+            let right_pair=c.check_opt_expr(e.right)
+            c=right_pair.0
+            right_ty=right_pair.1
+        }
+        c.check_binary_with_operand_types(e,left_ty,right_ty)
     }
 
     // Op-typing tail of check_binary_expr, split out so the *mut spine
