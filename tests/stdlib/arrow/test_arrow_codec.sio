@@ -9,6 +9,8 @@ use arrow::compress::{
     codec_compress_zstd,
     codec_decompress_lz4,
     codec_decompress_zstd,
+    codec_xxh32,
+    codec_xxh64_lo32,
 }
 
 fn put(dst: &![u8; 4096], i: i64, v: i64) with Mut, Panic {
@@ -258,6 +260,73 @@ fn test_edges() -> i64 with Mut, Panic {
     0
 }
 
+fn flip(buf: &![u8; 4096], i: i64) with Mut, Panic {
+    let v = buf[i as usize] as i64
+    var b = v
+    if b < 0 { b = b + 256 }
+    buf[i as usize] = ((b ^ 1) as i32) as u8
+}
+
+// Checksums against reference xxHash32 / xxHash64 (seed 0), and frames written
+// by the reference lz4 and zstd libraries with block and content checksums.
+fn test_integrity() -> i64 with Mut, Panic {
+    var d: [u8; 4096] = [0; 4096]
+    var i: i64 = 0
+    while i < 1000 {
+        put(&!d, i, (i * 7 + 1) & 255)
+        i = i + 1
+    }
+    // Vectors from the xxHash reference implementation; 16+ bytes takes the
+    // four-lane stripe path in xxHash32, 32+ bytes in xxHash64.
+    var ns: [i64; 10] = [0, 3, 15, 16, 17, 31, 32, 33, 100, 1000]
+    var w32: [i64; 10] = [46947589, 400596534, 3249220853, 2433961689, 2293673269, 2167657158, 3724036677, 1718007755, 2819860663, 615276764]
+    var w64: [i64; 10] = [1373170073, 3271374650, 3548178161, 2691914382, 554607752, 703922291, 3924612049, 2075771267, 545983254, 4183409683]
+    var k: i64 = 0
+    while k < 10 {
+        if codec_xxh32(&d, ns[k as usize]) != w32[k as usize] { return 200 + k }
+        if codec_xxh64_lo32(&d, ns[k as usize]) != w64[k as usize] { return 210 + k }
+        k = k + 1
+    }
+    var src: [u8; 4096] = [0; 4096]
+    var back = codec_buf_new()
+    // "abc": XXH32 32d153ff, XXH64 44bc2cf5ad770999.
+    put(&!src, 0, 97)
+    put(&!src, 1, 98)
+    put(&!src, 2, 99)
+    if codec_xxh32(&src, 3) != 852579327 { return 220 }
+    if codec_xxh64_lo32(&src, 3) != 2910259609 { return 221 }
+    // LZ4 frame, one uncompressed 32-byte block, content checksum over 32 bytes.
+    let n1 = load_hex(&!src, "04224d186440a72000008001080f161d242b323940474e555c636a71787f868d949ba2a9b0b7bec5ccd3da00000000454af8dd")
+    if codec_decompress_lz4(&src, n1, &!back) != 0 { return 222 }
+    if back.len != 32 || get(&back.data, 31) != 218 { return 223 }
+    // lz4.frame with block and content checksums: 200 bytes from a 64-byte frame.
+    let n2 = load_hex(&!src, "04224d187c40c8000000000000002c21000000ff07746865206172726f7720626f6479206275666665722016009a5065722074681538578000000000faa3caba")
+    if codec_decompress_lz4(&src, n2, &!back) != 0 { return 224 }
+    if back.len != 200 || byte_sum(&back.data, 200) != 18832 { return 225 }
+    flip(&!src, n2 - 1)
+    if codec_decompress_lz4(&src, n2, &!back) != -6 { return 226 }
+    flip(&!src, n2 - 1)
+    flip(&!src, n2 - 9)
+    if codec_decompress_lz4(&src, n2, &!back) != -6 { return 227 }
+    // zstd frame with a content checksum: 200 bytes.
+    let n3 = load_hex(&!src, "28b52ffd24c8f50000b8746865206172726f7720626f647920627566666572207401005d49cd2609ab5c7e")
+    if codec_decompress_zstd(&src, n3, &!back) != 0 { return 228 }
+    if back.len != 200 || byte_sum(&back.data, 200) != 18832 { return 229 }
+    flip(&!src, n3 - 1)
+    if codec_decompress_zstd(&src, n3, &!back) != -6 { return 230 }
+    // zstd level 19, Huffman literals, content checksum: 400 bytes.
+    let n4 = load_hex(&!src, "28b52ffd6490002d030056581706e0e9bb01d4111300140014003de3ee661bc5a7b16eebd5a1edd1d7fa65877bed0fef9f6e88d947def87ed9a8d6758cb61114068ba261ea6eb8fde3bb8bbbbdfffd2100b92a74016f0f8733c20cc3324aff2fb81e77a38800d0868a130100cd9861c15ce410")
+    if codec_decompress_zstd(&src, n4, &!back) != 0 { return 231 }
+    if back.len != 400 || byte_sum(&back.data, 400) != 39053 { return 232 }
+    flip(&!src, n4 - 1)
+    if codec_decompress_zstd(&src, n4, &!back) != -6 { return 234 }
+    // A Huffman literal stream that is only its end marker cannot produce
+    // 8 literals; it used to decode as 8 zero bytes.
+    let n5 = load_hex(&!src, "28b52ffd20083d000082c00080100100")
+    if codec_decompress_zstd(&src, n5, &!back) != -6 { return 233 }
+    0
+}
+
 fn main() -> i32 with IO, Mut, Panic {
     let a = test_round()
     if a != 0 {
@@ -281,6 +350,12 @@ fn main() -> i32 with IO, Mut, Panic {
     if d != 0 {
         print("FAIL edges ")
         println(d)
+        return 1
+    }
+    let e = test_integrity()
+    if e != 0 {
+        print("FAIL integrity ")
+        println(e)
         return 1
     }
     println("CODEC_OK")

@@ -1,12 +1,20 @@
 ---
+import '../styles/fonts.css';
 import '../styles/global.css';
 import Header from '../components/common/Header.astro';
 import Footer from '../components/common/Footer.astro';
 import { CustomCursor } from '../components/common/CustomCursor';
 import { ClientRouter } from 'astro:transitions';
 import { getLocaleFromUrl, getLocalizedPath, isLocaleFullyLocalized, loadTranslations, ogLocaleTag, shouldShowLocaleTranslationNotice, type Locale } from '../lib/i18n';
-import { absoluteUrl, canonicalPathname, hreflangLinks, htmlLang, localeFromPath } from '../lib/seo-locales.mjs';
+import { absoluteUrl, barePath, canonicalPathname, hreflangLinks, htmlLang, localeFromPath } from '../lib/seo-locales.mjs';
+import { englishSearchFor } from '../lib/search-appearance.mjs';
+import { buildPageSchemas, jsonForScript } from '../lib/structured-data.mjs';
 import surface from '../data/publicSurface.json';
+
+interface Crumb {
+  name: string;
+  href: string;
+}
 
 interface Props {
   title: string;
@@ -16,20 +24,47 @@ interface Props {
   localizedAlternates?: boolean;
   removeTopPadding?: boolean;
   schema?: any;
+  breadcrumbs?: Crumb[];
+  dateModified?: string;
+  articleHeadline?: string;
+  articleAbout?: Record<string, unknown>;
+  articleAuthor?: Record<string, unknown>;
+  omitSoftwareApplication?: boolean;
 }
 
-const { title, description, image, noIndex = false, localizedAlternates = true, removeTopPadding = false, schema = null } = Astro.props;
+const { title, description, image, noIndex = false, localizedAlternates = true, removeTopPadding = false, schema = null, breadcrumbs = [], dateModified, articleHeadline, articleAbout, articleAuthor, omitSoftwareApplication = false } = Astro.props;
 const locale = getLocaleFromUrl(Astro.url);
 const canonicalPath = canonicalPathname(Astro.url.pathname);
 const canonicalURL = absoluteUrl(canonicalPath);
 const alternates: { hreflang: string; href: string }[] = hreflangLinks(Astro.url.pathname);
 const t = await loadTranslations(locale);
+const pagePath = barePath(Astro.url.pathname);
+const searchCopy = englishSearchFor(pagePath, locale);
 
 const siteTitle = 'Sounio';
-const fullTitle = title 
-  ? (title.includes(siteTitle) ? title : `${title} — ${siteTitle}`)
-  : (t.seo_default_title || 'Sounio — Epistemic Computing');
-const metaDescription = description || t.seo_default_description || 'A self-hosted programming language for epistemic computing: native uncertainty quantification, physical units and declared effects, compiled to Linux x86-64.';
+const fullTitle = searchCopy?.title
+  ? searchCopy.title
+  : title
+    ? (title.includes(siteTitle) ? title : `${title} — ${siteTitle}`)
+    : (t.seo_default_title || 'Sounio — Epistemic Computing');
+const metaDescription = searchCopy?.description || description || t.seo_default_description || 'A self-hosted programming language for epistemic computing: native uncertainty quantification, physical units and declared effects, compiled to Linux x86-64.';
+const extraSchemas = schema == null ? [] : Array.isArray(schema) ? schema : [schema];
+const structuredData = buildPageSchemas({
+  bare: pagePath,
+  title: fullTitle,
+  description: metaDescription,
+  canonicalUrl: canonicalURL,
+  inLanguage: htmlLang(localeFromPath(canonicalPath) as Locale),
+  siteOrigin: (Astro.site?.toString() || 'https://www.souniolang.org'),
+  breadcrumbs,
+  dateModified,
+  extra: extraSchemas,
+  absolutize: (href: string) => absoluteUrl(href),
+  headline: articleHeadline,
+  about: articleAbout,
+  author: articleAuthor,
+  omitSoftwareApplication,
+});
 const ogImage = image || '/assets/lockups/lockup_horizontal_light.svg';
 
 const showLocaleNotice =
@@ -42,6 +77,23 @@ const englishUrl = getLocalizedPath(Astro.url.pathname, 'en');
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- Islands use client:idle. Hold requestIdleCallback until load so their
+         bundles do not compete with the hero image on the first paint. -->
+    <script is:inline>
+      (function () {
+        const native = window.requestIdleCallback && window.requestIdleCallback.bind(window);
+        window.requestIdleCallback = function (callback, options) {
+          const run = function () {
+            if (native) native(callback, options);
+            else window.setTimeout(callback, 1);
+          };
+          if (document.readyState === 'complete') run();
+          else window.addEventListener('load', run, { once: true });
+          return 0;
+        };
+      })();
+    </script>
+    <slot name="head" />
     <title>{fullTitle}</title>
     <meta name="description" content={metaDescription} />
     <meta name="generator" content={Astro.generator} />
@@ -54,14 +106,6 @@ const englishUrl = getLocalizedPath(Astro.url.pathname, 'en');
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     <link rel="icon" type="image/png" href="/icon-192.png" sizes="192x192" />
     <link rel="icon" type="image/png" href="/icon-512.png" sizes="512x512" />
-
-    <!-- Preload fonts -->
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link
-      href="https://fonts.googleapis.com/css2?family=GFS+Neohellenic:wght@400;700&family=EB+Garamond:ital,wght@1,400;1,500&family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap"
-      rel="stylesheet"
-    />
 
     <!-- Open Graph -->
     <meta property="og:type" content="website" />
@@ -82,34 +126,9 @@ const englishUrl = getLocalizedPath(Astro.url.pathname, 'en');
       <link rel="alternate" hreflang={alt.hreflang} href={alt.href} />
     ))}
 
-    <!-- JSON-LD Structured Data -->
-    <script is:inline type="application/ld+json" set:html={JSON.stringify({
-      "@context": "https://schema.org",
-      "@type": "SoftwareApplication",
-      "name": "Sounio",
-      "applicationCategory": "DeveloperApplication",
-      "operatingSystem": "Linux x86_64 (committed prebuilt); macOS arm64 (source-built)",
-      "programmingLanguage": "Sounio",
-      "license": "https://opensource.org/licenses/Apache-2.0",
-      "downloadUrl": "https://github.com/Sounio-lang/sounio",
-      "codeRepository": "https://github.com/Sounio-lang/sounio",
-      "author": {
-        "@type": "Person",
-        "name": "Demetrios Chiuratto Agourakis",
-        "url": (Astro.site?.toString() || "https://www.souniolang.org").replace(/\/$/, "")
-      },
-      "description": metaDescription,
-      "url": (Astro.site?.toString() || "https://www.souniolang.org").replace(/\/$/, ""),
-      "offers": {
-        "@type": "Offer",
-        "price": "0",
-        "priceCurrency": "USD"
-      }
-    })} />
-
-    {schema && (
-      <script is:inline type="application/ld+json" set:html={JSON.stringify(schema)} />
-    )}
+    {structuredData.map((block) => (
+      <script is:inline type="application/ld+json" set:html={jsonForScript(block)} />
+    ))}
 
     <!-- Dark-first theme script (runs before render to prevent flash) -->
     <script is:inline>
@@ -148,22 +167,22 @@ const englishUrl = getLocalizedPath(Astro.url.pathname, 'en');
       });
     </script>
 
-    <!-- Pagefind runtime (present in production builds; ignored in dev if missing) -->
+    <!-- Pagefind runtime. Loaded after the window load event so it does not
+         share the first-paint connection pool with the hero image. -->
     <script type="module" is:inline>
-      (async () => {
-        try {
-          const mod = await import('/pagefind/pagefind.js');
-          window.pagefind = mod;
-        } catch {
-          // Dev mode or builds without pagefind. Search UI will gracefully noop.
-        }
-      })();
+      window.addEventListener('load', () => {
+        import('/pagefind/pagefind.js')
+          .then((mod) => { window.pagefind = mod; })
+          .catch(() => {
+            // Dev mode or builds without pagefind. Search UI will gracefully noop.
+          });
+      }, { once: true });
     </script>
 
     <ClientRouter />
   </head>
   <body class="min-h-screen flex flex-col bg-[var(--color-bg)] text-[var(--color-text)]">
-    <CustomCursor client:only="react" />
+    <CustomCursor client:media="(hover: hover) and (pointer: fine)" />
     <a href="#main-content" class="skip-link">{surface[locale].chrome.skip}</a>
 
     <Header locale={locale} />
@@ -185,19 +204,3 @@ const englishUrl = getLocalizedPath(Astro.url.pathname, 'en');
     <Footer locale={locale} localizedAlternates={localizedAlternates} />
   </body>
 </html>
-
-<script>
-  import gsap from 'gsap';
-  import { ScrollTrigger } from 'gsap/ScrollTrigger';
-  gsap.registerPlugin(ScrollTrigger);
-
-  function pageIn() {
-    const mm = gsap.matchMedia();
-    mm.add('(prefers-reduced-motion: no-preference)', () => {
-      gsap.from('#main-content', { opacity: 0, y: 6, duration: 0.35, ease: 'power2.out', clearProps: 'all' });
-    });
-  }
-
-  // First load + every Astro client-router navigation
-  document.addEventListener('astro:page-load', pageIn);
-</script>
