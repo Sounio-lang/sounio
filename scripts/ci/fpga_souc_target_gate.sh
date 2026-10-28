@@ -18,6 +18,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 cd "${REPO_ROOT}"
 
+# Refusal outcomes go through the shared classifier (the Contracts suite
+# meta-gate refusal_gates_use_classifier_gate.sh requires it): rc alone
+# cannot tell refusal from crash/timeout/OOM.
+source "${SCRIPT_DIR}/../lib/classify_compile.sh"
+
+
 if [[ -x artifacts/self-hosted/madaros ]]; then
     export MADAROS_RAW_BIN="${REPO_ROOT}/artifacts/self-hosted/madaros"
 fi
@@ -55,16 +61,14 @@ fn main() -> i64 with IO {
     0
 }
 EOF
-if ./bin/souc compile "${TMP}/bad_kernel.sio" -t fpga-u250 -o "${TMP}/bad.cpp" > "${TMP}/bad.log" 2>&1; then
-    fail "while-kernel unexpectedly accepted by fpga-u250 target"
-fi
-# Fail-closed contract: nonzero exit (asserted above) AND no HLS artifact.
-# Madaros panic text is not surfaced through the compiler driver, so this
-# gate asserts rc + absence, the same convention as the other negative
-# gates; the emitter still panics with SIO_FPGA_EMIT_FAIL at every
-# subset violation.
+sounio_capture_rc NEG_RC "${TMP}/bad.log" -- ./bin/souc compile "${TMP}/bad_kernel.sio" -t fpga-u250 -o "${TMP}/bad.cpp"
+sounio_expect_failed_exit "$NEG_RC" "${TMP}/bad.log" \
+    || fail "while-kernel unexpectedly accepted by fpga-u250 target (rc=${NEG_RC}, $(sounio_refusal_reason))"
+# Fail-closed contract: ordinary failed exit AND no HLS artifact. (Madaros
+# panic text is not surfaced through the compiler driver, so the class here
+# is failed-exit rather than REFUSED; the emitter still panics with
+# SIO_FPGA_EMIT_FAIL at every subset violation.)
 [[ -s "${TMP}/bad.cpp" ]] && fail "while-kernel left an HLS artifact behind"
-grep -q "SIO_FPGA_EMIT_FAIL" "${TMP}/bad.log" && echo "note: SIO_FPGA_EMIT_FAIL marker surfaced" || true
 
 # 3. Host C++ simulation of the emitted HLS against closed-form expectations.
 # SAN: q=50 -> exits at k=0 (100), k=2 (60), never (zeros) => hist[0]=hist[2]=hist[7]=1,
