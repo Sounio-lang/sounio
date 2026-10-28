@@ -53,7 +53,7 @@
   - `ll_moe_ready_layer(m, rt, use_gpu, ntok, li) -> bool` (no `li==0`, no `ntok==1`; checks packs for `li` + GPU + mmid for quant)
   - Keep thin `ll_moe_ready(...)` as `ll_moe_ready_layer(..., 0)` only if demos need it; prefer updating call sites to `_layer`
 
-- [ ] **Step 1: Extend structs**
+- [x] **Step 1: Extend structs**
 
 In `LlamaCfg` add `moe_quant: i64` default 0 in `llama_cfg` / empty cfg.
 
@@ -61,7 +61,7 @@ In `Llama` replace scalar MoE pack fields with arrays. Initialize all 64 slots e
 
 Add `last_moe_layers_ok: i64 = 0`.
 
-- [ ] **Step 2: Ready helper**
+- [x] **Step 2: Ready helper**
 
 ```sio
 fn ll_moe_ready_layer(m: &Llama, rt: &Runtime, use_gpu: bool, ntok: i64, li: i32) -> bool {
@@ -85,11 +85,11 @@ fn ll_moe_ready_layer(m: &Llama, rt: &Runtime, use_gpu: bool, ntok: i64, li: i32
 
 Adapt field names if you choose shared strides (document choice in report).
 
-- [ ] **Step 3: Fix Plan D demo**
+- [x] **Step 3: Fix Plan D demo**
 
 `examples/llama_moe_forward_demo.sio`: assign synthetic packs into index 0 of the new arrays; load Q4 PTX as today.
 
-- [ ] **Step 4: Typecheck**
+- [x] **Step 4: Typecheck**
 
 ```bash
 bin/souc check examples/llama_moe_forward_demo.sio examples/llama_moe_ffn_demo.sio
@@ -97,7 +97,7 @@ bin/souc check examples/llama_moe_forward_demo.sio examples/llama_moe_ffn_demo.s
 
 Expected: `check: OK`.
 
-- [ ] **Step 5: Propose commit only**
+- [ ] **Step 5: Propose commit only** (propose only; human-gated)
 
 ```
 llm: per-layer MoE fields and ready_layer helper
@@ -117,7 +117,7 @@ Assisted-by: Composer
 - Consumes: `ll_moe_ready_layer`, per-layer packs
 - Produces: MoE attempted on every ready layer; `last_moe_layers_ok` count; `last_moe_used = last_moe_layers_ok > 0`
 
-- [ ] **Step 1: Reset telemetry**
+- [x] **Step 1: Reset telemetry**
 
 At forward entry:
 
@@ -127,7 +127,7 @@ m.last_moe_status = 0
 m.last_moe_layers_ok = 0
 ```
 
-- [ ] **Step 2: Replace `li == 0 && ll_moe_ready` branch**
+- [x] **Step 2: Replace `li == 0 && ll_moe_ready` branch**
 
 For each layer, after post-norm:
 
@@ -153,7 +153,7 @@ if !used_moe {
 
 Do **not** gate on `ntok == 1`.
 
-- [ ] **Step 3: Typecheck**
+- [x] **Step 3: Typecheck**
 
 ```bash
 bin/souc check examples/llama_moe_forward_demo.sio
@@ -161,7 +161,7 @@ bin/souc check examples/llama_moe_forward_demo.sio
 
 Expected: `check: OK`.
 
-- [ ] **Step 4: Propose commit only**
+- [ ] **Step 4: Propose commit only** (propose only; human-gated)
 
 ```
 llm: MoE on all layers; allow ntok>1
@@ -181,7 +181,7 @@ Assisted-by: Composer
 - Consumes: `moe_ffn_q4k`, `moe_ffn_q5k` from `hetero::moe`
 - Produces: `LlamaMoeFfnCfg.moe_quant: i64`; block calls the matching `moe_ffn_*`
 
-- [ ] **Step 1: Extend cfg + imports**
+- [x] **Step 1: Extend cfg + imports**
 
 ```sio
 use hetero::moe::{moe_topk, moe_ffn_q4k, moe_ffn_q5k, MoeFfnResult}
@@ -189,15 +189,15 @@ use hetero::moe::{moe_topk, moe_ffn_q4k, moe_ffn_q5k, MoeFfnResult}
 pub moe_quant: i64,
 ```
 
-- [ ] **Step 2: Dispatch**
+- [x] **Step 2: Dispatch**
 
 After topk, if `cfg.moe_quant == 1` call `moe_ffn_q5k(...)` else `moe_ffn_q4k(...)` with the same argument list.
 
-- [ ] **Step 3: Call sites**
+- [x] **Step 3: Call sites**
 
 Forward and `llama_moe_ffn_demo` set `moe_quant` from `m.cfg.moe_quant` (0).
 
-- [ ] **Step 4: Typecheck**
+- [x] **Step 4: Typecheck**
 
 ```bash
 bin/souc check examples/llama_moe_ffn_demo.sio examples/llama_moe_forward_demo.sio
@@ -205,7 +205,7 @@ bin/souc check examples/llama_moe_ffn_demo.sio examples/llama_moe_forward_demo.s
 
 Expected: `check: OK`.
 
-- [ ] **Step 5: Propose commit only**
+- [ ] **Step 5: Propose commit only** (propose only; human-gated)
 
 ```
 llm: llama_moe_ffn_block Q4_K/Q5_K dispatch
@@ -225,11 +225,11 @@ Assisted-by: Composer
 - Consumes: Tasks 1-3 APIs, `rt_load_mmid`, `llama_forward_rt`
 - Produces: demo binary printing MoE telemetry for `ntok=1` and `ntok=4`
 
-- [ ] **Step 1: Build synthetic model**
+- [x] **Step 1: Build synthetic model**
 
 `layers=2` (or 3), `hidden=256`, `moe_inter=512`, `n_experts=8`, `n_expert_used=2`. Fill MoE packs + router for **every** layer. Dense attn/embed synthetic as Plan D demo.
 
-- [ ] **Step 2: Run twice**
+- [x] **Step 2: Run twice**
 
 ```sio
 // ntok=1 then ntok=4 (fresh kv each time)
@@ -239,14 +239,14 @@ llama_forward_rt(&!m, &!kv, &tokens, ntok, &rt)
 
 Print `LLAMA MOE MULTILAYER DONE` and `exit(0)`.
 
-- [ ] **Step 3: Verify**
+- [x] **Step 3: Verify**
 
 ```bash
 bin/souc check examples/llama_moe_multilayer_demo.sio examples/llama_moe_forward_demo.sio
 # L4 tar+srun --gres=gpu:1 ; expect DONE and RC=0 for both ntok modes
 ```
 
-- [ ] **Step 4: Propose commit only**
+- [ ] **Step 4: Propose commit only** (propose only; human-gated)
 
 ```
 examples: multi-layer MoE forward demo (ntok 1 and 4)
@@ -268,7 +268,7 @@ Assisted-by: Composer
 - Consumes: `st_scan_i64`, `st_load_f64`, `st_read_all`, pack load helpers
 - Produces: `pub fn llama_load_moe(dir: string) -> Llama with ...`
 
-- [ ] **Step 1: Cfg scans**
+- [x] **Step 1: Cfg scans**
 
 In `llama_cfg`, when present:
 
@@ -280,7 +280,7 @@ cfg.moe_inter = st_scan_i64(f.data, f.len, "moe_intermediate_size")
 
 Leave 0 if missing (dense).
 
-- [ ] **Step 2: Implement `llama_load_moe`**
+- [x] **Step 2: Implement `llama_load_moe`**
 
 Clone `llama_load` attn path. For each layer, load Mixtral gate:
 
@@ -298,7 +298,7 @@ Or, if raw expert tensors exist as u8/Q blobs in safetensors with known names, b
 
 If sidecars missing: attn still loads; MoE packs stay null => dense FFN fallback.
 
-- [ ] **Step 3: Demo**
+- [x] **Step 3: Demo**
 
 `examples/llama_mixtral_forward_demo.sio`:
 
@@ -308,14 +308,14 @@ If sidecars missing: attn still loads; MoE packs stay null => dense FFN fallback
 - If dir missing: print `MIXTRAL DIR MISSING` and `exit(0)` (honest non-claim).
 - If GPU MoE path claimed: require `last_moe_layers_ok > 0` or document why dense.
 
-- [ ] **Step 4: Verify**
+- [x] **Step 4: Verify**
 
 ```bash
 bin/souc check examples/llama_mixtral_forward_demo.sio examples/llama_moe_multilayer_demo.sio
 # L4 optional real weights; always run missing-dir path locally
 ```
 
-- [ ] **Step 5: Propose commit only**
+- [ ] **Step 5: Propose commit only** (propose only; human-gated)
 
 ```
 llm: llama_load_moe + Mixtral forward demo
@@ -332,10 +332,10 @@ Assisted-by: Composer
 - Modify: this plan checkboxes to `[x]` when done
 - Notion: controller creates/Done `SIO-moe-f32-mixtral-forward`
 
-- [ ] **Step 1: Plan F section** with multi-layer + prefill + loader contract + L4 numbers / blocker
-- [ ] **Step 2: Mark plan checkboxes**
-- [ ] **Step 3: Notion IDs for controller**
-- [ ] **Step 4: Propose docs commit only**
+- [x] **Step 1: Plan F section** with multi-layer + prefill + loader contract + L4 numbers / blocker
+- [x] **Step 2: Mark plan checkboxes**
+- [x] **Step 3: Notion IDs for controller** (Done: https://app.notion.com/p/4073f37f937181a5a42de8818cfa32f9 )
+- [ ] **Step 4: Propose docs commit only** (propose only; human-gated)
 
 ```
 docs: Plan F Mixtral multi-layer receipts

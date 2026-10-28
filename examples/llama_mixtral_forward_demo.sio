@@ -1,0 +1,114 @@
+//@ run-pass
+// Mixtral-shaped llama_load_moe + one-token GPU forward smoke.
+// Default model dir: /workspace/llm-models/mixtral-moe (override with arg0).
+// Usage: llama_mixtral_forward_demo [model-dir] [gemm-ptx] [mmid-ptx]
+
+use hetero::runtime::{rt_load_mmid, rt_open}
+use llm::bpe::{bpe_encode, bpe_load}
+use llm::llama::{Llama, kv_new, llama_forward_rt, llama_load_moe}
+use llm::safetensors::{st_read_all}
+use tensor2::cpu_kernel::{ck_alloc, ck_get, ck_set}
+
+fn putb(buf: *mut u8, i: i64, v: i64) {
+    let w = read_i64(buf as *mut i64, i / 8)
+    let sh = (i % 8) * 8
+    let cleared = w & ((0 - 1) - (255 << sh))
+    write_i64(buf as *mut i64, i / 8, cleared | ((v & 255) << sh))
+}
+
+fn any_moe_pack(m: &Llama) -> bool {
+    var i: i64 = 0
+    while i < 64 {
+        if m.moe_gate_bytes[i as usize] > 0 { return true }
+        if m.moe_up_bytes[i as usize] > 0 { return true }
+        if m.moe_down_bytes[i as usize] > 0 { return true }
+        i = i + 1
+    }
+    false
+}
+
+fn main() with IO, Mut, Panic, Div, Alloc {
+    var dir = "/workspace/llm-models/mixtral-moe"
+    var gemm_ptx = "stdlib/hetero/kernels/gemm_naive_f32.ptx"
+    var mmid_ptx = "stdlib/hetero/kernels/mmid_q4k_dp4a_f32.ptx"
+    if arg_count() > 0 { dir = get_arg(0) }
+    if arg_count() > 1 { gemm_ptx = get_arg(1) }
+    if arg_count() > 2 { mmid_ptx = get_arg(2) }
+
+    let cfg_probe = st_read_all(dir ++ "/config.json")
+    if !cfg_probe.ok {
+        print("MIXTRAL DIR MISSING\nLLAMA MIXTRAL FORWARD DONE\n")
+        exit(0)
+    }
+
+    var m = llama_load_moe(dir)
+    if !m.loaded {
+        print("MIXTRAL LOAD FAIL\nLLAMA MIXTRAL FORWARD DONE\n")
+        exit(0)
+    }
+
+    var rt = rt_open(gemm_ptx, "gemm_naive_f32")
+    var gpu_ready = rt.ready
+    if gpu_ready && !rt_load_mmid(&!rt, mmid_ptx) {
+        print("mmid: PTX load failed\nLLAMA MIXTRAL FORWARD FAIL\n")
+        exit(1)
+    }
+
+    var tokens = ck_alloc(1)
+    ck_set(&!tokens, 0, 1.0)
+    let tok_path = dir ++ "/tokenizer.json"
+    let tok_probe = st_read_all(tok_path)
+    if tok_probe.ok {
+        let bp = bpe_load(tok_path)
+        if bp.ok {
+            let plen: i64 = 1
+            let pbuf = heap_alloc(32)
+            putb(pbuf, 0, 104)
+            let enc = bpe_encode(&bp, pbuf, plen)
+            if enc.len > 0 { ck_set(&!tokens, 0, ck_get(&enc, 0)) }
+        }
+    }
+
+    var kv = kv_new(&m, 8)
+    let logits = llama_forward_rt(&!m, &!kv, &tokens, 1, &rt)
+
+    var bad: i64 = 0
+    var i: i64 = 0
+    while i < logits.len {
+        let v = ck_get(&logits, i)
+        if v != v || v > 1.0e30 || v < 0.0 - 1.0e30 { bad = bad + 1 }
+        i = i + 1
+    }
+
+    let packs = any_moe_pack(&m)
+    if packs && gpu_ready {
+        if m.last_moe_layers_ok <= 0 {
+            print("moe_layers_ok=0 with packs present\nLLAMA MIXTRAL FORWARD FAIL\n")
+            exit(1)
+        }
+    }
+    if !packs {
+        print("moe_dense_fallback=1\n")
+    }
+
+    print("n_experts=")
+    print_int(m.cfg.n_experts)
+    print(" gpu_ready=")
+    print_int(if gpu_ready { 1 } else { 0 })
+    print(" last_moe_layers_ok=")
+    print_int(m.last_moe_layers_ok)
+    print(" finite_logits=")
+    print_int(if bad == 0 { 1 } else { 0 })
+    print("\n")
+
+    if bad != 0 {
+        print("LLAMA MIXTRAL FORWARD FAIL\n")
+        exit(1)
+    }
+    if gpu_ready && logits.len == 0 {
+        print("LLAMA MIXTRAL FORWARD FAIL\n")
+        exit(1)
+    }
+    print("LLAMA MIXTRAL FORWARD DONE\n")
+    exit(0)
+}
