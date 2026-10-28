@@ -144,12 +144,13 @@ scan_job_body() {
  printf '%s %s %s %s %s %s %s %s\n' "$uploads" "$downloads" "$upload_at" "$download_at" "$verify_at" "$prepare_at" "$build_runs" "$unattached"
 }
 # A verify command the step can skip or ignore is not a consumer. A YAML `if:`,
-# `continue-on-error`, a shell `if`, `set +e`, or `&&` / `||` around the command
-# lets receipt failure pass. Placement is then skipped and the f64 gate builds
-# another ELF while this check stays green. `set -e` does not save a command
-# that is part of an AND/OR list or a shell conditional.
+# `continue-on-error`, a shell `if`, `set +e`, `&&` / `||`, or a shell `!`
+# lets receipt failure pass. Placement is then skipped, or a rejected ELF is
+# copied and run, and the f64 gate can build another ELF while this check
+# stays green. `set -e` does not save a command in an AND/OR list, a shell
+# conditional, or a negation.
 verify_step_problems() {
- local blob=$1 job=$2 line in_step=0 step_if=0 step_swallow=0 step_verify=0
+ local blob=$1 job=$2 line in_step=0 step_if=0 step_swallow=0 step_verify=0 bang
  flush_verify_step() {
   if [[ "$in_step" == 1 && "$step_verify" == 1 && ( "$step_if" == 1 || "$step_swallow" == 1 ) ]]; then
    printf 'verify-skippable %s\n' "$job"
@@ -174,12 +175,38 @@ verify_step_problems() {
   [[ "$line" == *'||'* || "$line" == *'&&'* ]] && step_swallow=1
   [[ "$line" =~ (^|[[:space:]])(if|elif|while|until)[[:space:]] ]] && step_swallow=1
   [[ "$line" =~ set[[:space:]]+\+([^[:space:]]*e|o[[:space:]]+errexit) ]] && step_swallow=1
+  # `!=` is a comparison. Any other `!` in this step negates a command.
+  bang=${line//!=/}
+  [[ "$bang" == *'!'* ]] && step_swallow=1
   if [[ "$line" =~ ^[[:space:]]*(-\ )?shell: ]]; then
    [[ "$line" == *'-e'* || "$line" == *'errexit'* ]] || step_swallow=1
   fi
   [[ "$line" == *"stdlib_deep_compiler_receipt.sh verify"* ]] && step_verify=1
  done <<<"$blob"
  flush_verify_step
+}
+# Copying or executing the downloaded ELF before `verify` runs a rejected
+# receipt, or runs the f64 gate while the verified compiler is still absent
+# so that gate builds another ELF. Line order inside a step counts.
+compiler_use_before_verify() {
+ local blob=$1 line verify_at=0 token head use_at vhead
+ local -a tokens=(madaros.elf madaros-wave0.elf deep_science_gate.sh madaros_current_source_f64_lowering_gate.sh sounio-madaros-current-source-f64-lowering/madaros)
+ while IFS= read -r line; do
+  [[ "$line" =~ ^[[:space:]]*# ]] && continue
+  vhead=
+  [[ "$line" == *"stdlib_deep_compiler_receipt.sh verify"* ]] && vhead=${line%%stdlib_deep_compiler_receipt.sh verify*}
+  for token in "${tokens[@]}"; do
+   [[ "$line" == *"$token"* ]] || continue
+   [[ "$token" == 'madaros_current_source_f64_lowering_gate.sh' && "$line" == *'hashFiles('* ]] && continue
+   [[ "$verify_at" == 1 ]] && continue
+   head=${line%%"$token"*}
+   if [[ -z "$vhead" || ${#head} -lt ${#vhead} ]]; then
+    printf 'use-before-verify\n'
+    return
+   fi
+  done
+  [[ -n "$vhead" || "$line" == *"stdlib_deep_compiler_receipt.sh verify"* ]] && verify_at=1
+ done <<<"$blob"
 }
 needs_has() {
  local text=$1 id=$2
@@ -276,6 +303,10 @@ workflow_problems() {
    [[ -n "$flag" ]] || continue
    problems+=("$flag")
   done < <(verify_step_problems "$blob" "$consumer")
+  while IFS= read -r flag; do
+   [[ -n "$flag" ]] || continue
+   problems+=("$flag $consumer")
+  done < <(compiler_use_before_verify "$blob")
   [[ "$blob" =~ stdlib_deep_compiler_receipt\.sh[[:space:]]+verify[[:space:]]*\\?[[:space:]]*\"\$GITHUB_WORKSPACE\"[[:space:]]*\"\$RUNNER_TEMP/stdlib-deep-compiler\"[[:space:]]*\"\$GITHUB_SHA\" ]] || problems+=("verify-arguments $consumer")
   [[ "$blob" == *"$artifact_path"* ]] || problems+=("download-path $consumer")
   [[ -n "${if_text[$consumer]:-}" ]] || problems+=("consumer-if $consumer")
@@ -420,6 +451,15 @@ EOF
  bad="$work/wf-verify-set-plus-e.yml"
  awk 'BEGIN{arm=0} /^  madaros-current-source-deref-f64:/{arm=1} arm && /stdlib_deep_compiler_receipt.sh verify/{print "          set +e"; arm=0} {print}' "$base" >"$bad"
  expect_workflow_problem "$bad" verify-skippable
+ bad="$work/wf-verify-bang.yml"
+ awk 'BEGIN{arm=0} /^  madaros-current-source-deref-f64:/{arm=1} arm && /stdlib_deep_compiler_receipt.sh verify/{sub(/bash/, "! bash"); arm=0} {print}' "$base" >"$bad"
+ expect_workflow_problem "$bad" verify-skippable
+ bad="$work/wf-use-before-verify.yml"
+ awk 'BEGIN{arm=0} /^  madaros-current-source-deref-f64:/{arm=1} arm && /name: Verify/{print "      - name: Run early"; print "        run: bash scripts/ci/madaros_current_source_f64_lowering_gate.sh"; arm=0} {print}' "$base" >"$bad"
+ expect_workflow_problem "$bad" use-before-verify
+ bad="$work/wf-copy-before-verify.yml"
+ awk 'BEGIN{arm=0} /^  madaros-current-source-deref-f64:/{arm=1} arm && /stdlib_deep_compiler_receipt.sh verify/{print "          cp madaros.elf /tmp/out"; arm=0} {print}' "$base" >"$bad"
+ expect_workflow_problem "$bad" use-before-verify
  bad="$work/wf-missing.yml"
  awk 'BEGIN{drop=0} /^  gate-wave-0:/{drop=1} drop && /^  [A-Za-z0-9_-]+:[[:space:]]*$/ && !/^  gate-wave-0:/{drop=0} drop{next} {print}' "$base" >"$bad"
  expect_workflow_problem "$bad" missing-consumer
