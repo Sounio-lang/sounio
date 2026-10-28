@@ -27,4 +27,4 @@ This compiles only the C++23 verifier and uses an already-built checker for all1
 
 Compiler bootstrap was not duplicated. Runtime short-circuit lowering and the single integrated raw build belong to root's ADR014 integration. The counter fixture's runtime assertions remain for that integration; this receipt qualifies checking, ownership and cleanup only.
 
-All sources, ELF files, logs and bridges remain under /scratch/sounio-stdlib-wave3-20261027/services/logical-ownership02 and logical-ownership03. Durable export is a follow-up custody step.
+All sources, ELF files, logs and bridges remain under /scratch/sounio-stdlib-wave3-20261027/services/logical-ownership02 and logical-ownership03. Durable custody was completed by Slurm19346; see custody-19346.md for archive contents and SHA256.
