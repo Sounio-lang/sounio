@@ -4,7 +4,7 @@
 // SiLU*Up and weighted combine on the host. Not a full LLM yet - the
 // daring surface that proves Sounio can own MoE without llama.cpp.
 
-use hetero::runtime::{Runtime, rt_mul_mat_id_q4k}
+use hetero::runtime::{Runtime, rt_mul_mat_id_q4k, rt_mul_mat_id_q5k, rt_mul_mat_id_q8_0}
 use hetero::cublas_bench::{gb_host_get, gb_host_set}
 
 fn moe_write_u8(buf: *mut u8, off: i64, v: i64) with Mut {
@@ -193,6 +193,126 @@ pub fn moe_ffn_q4k(
     moe_silu_mul(gate, up, act, n_tokens * slots * inter)
 
     let d = rt_mul_mat_id_q4k(
+        rt, down_w, down_bytes, act, n_tokens * slots * inter * 4, ids, n_tokens * slots * 4,
+        down, n_tokens * slots * hidden * 4,
+        inter, hidden, experts, slots, n_tokens,
+        expert_stride_d, row_stride_d,
+        inter * 4, slots * inter * 4, ids_nb1, hidden * 4, slots * hidden * 4, slots
+    )
+    if !d.ok { res.status = d.status; return res }
+    res.ms_down = d.ms
+
+    moe_weighted_sum(down, route_w, n_tokens, slots, hidden, dst)
+    res.ok = true
+    res.status = 0
+    res
+}
+
+/// One MoE-FFN step with Q5_K expert packs.
+pub fn moe_ffn_q5k(
+    rt: &Runtime,
+    x: *mut u8, hidden: i64, n_tokens: i64, slots: i64,
+    ids: *mut u8, route_w: *mut u8,
+    gate_w: *mut u8, gate_bytes: i64,
+    up_w: *mut u8, up_bytes: i64,
+    down_w: *mut u8, down_bytes: i64,
+    experts: i64, inter: i64,
+    expert_stride_g: i64, row_stride_g: i64,
+    expert_stride_u: i64, row_stride_u: i64,
+    expert_stride_d: i64, row_stride_d: i64,
+    dst: *mut u8
+) -> MoeFfnResult with Alloc, Mut, Panic, Div {
+    var res = MoeFfnResult { ok: false, status: -1, ms_gate: 0.0, ms_up: 0.0, ms_down: 0.0 }
+    let gate = heap_alloc(n_tokens * slots * inter * 4)
+    let up = heap_alloc(n_tokens * slots * inter * 4)
+    let act = heap_alloc(n_tokens * slots * inter * 4)
+    let down = heap_alloc(n_tokens * slots * hidden * 4)
+    let x_nb1 = hidden * 4
+    let ids_nb1 = slots * 4
+
+    let g = rt_mul_mat_id_q5k(
+        rt, gate_w, gate_bytes, x, n_tokens * hidden * 4, ids, n_tokens * slots * 4,
+        gate, n_tokens * slots * inter * 4,
+        hidden, inter, experts, slots, n_tokens,
+        expert_stride_g, row_stride_g,
+        x_nb1, x_nb1, ids_nb1, inter * 4, slots * inter * 4, 1
+    )
+    if !g.ok { res.status = g.status; return res }
+    res.ms_gate = g.ms
+
+    let u = rt_mul_mat_id_q5k(
+        rt, up_w, up_bytes, x, n_tokens * hidden * 4, ids, n_tokens * slots * 4,
+        up, n_tokens * slots * inter * 4,
+        hidden, inter, experts, slots, n_tokens,
+        expert_stride_u, row_stride_u,
+        x_nb1, x_nb1, ids_nb1, inter * 4, slots * inter * 4, 1
+    )
+    if !u.ok { res.status = u.status; return res }
+    res.ms_up = u.ms
+
+    moe_silu_mul(gate, up, act, n_tokens * slots * inter)
+
+    let d = rt_mul_mat_id_q5k(
+        rt, down_w, down_bytes, act, n_tokens * slots * inter * 4, ids, n_tokens * slots * 4,
+        down, n_tokens * slots * hidden * 4,
+        inter, hidden, experts, slots, n_tokens,
+        expert_stride_d, row_stride_d,
+        inter * 4, slots * inter * 4, ids_nb1, hidden * 4, slots * hidden * 4, slots
+    )
+    if !d.ok { res.status = d.status; return res }
+    res.ms_down = d.ms
+
+    moe_weighted_sum(down, route_w, n_tokens, slots, hidden, dst)
+    res.ok = true
+    res.status = 0
+    res
+}
+
+/// One MoE-FFN step with Q8_0 expert packs.
+pub fn moe_ffn_q8_0(
+    rt: &Runtime,
+    x: *mut u8, hidden: i64, n_tokens: i64, slots: i64,
+    ids: *mut u8, route_w: *mut u8,
+    gate_w: *mut u8, gate_bytes: i64,
+    up_w: *mut u8, up_bytes: i64,
+    down_w: *mut u8, down_bytes: i64,
+    experts: i64, inter: i64,
+    expert_stride_g: i64, row_stride_g: i64,
+    expert_stride_u: i64, row_stride_u: i64,
+    expert_stride_d: i64, row_stride_d: i64,
+    dst: *mut u8
+) -> MoeFfnResult with Alloc, Mut, Panic, Div {
+    var res = MoeFfnResult { ok: false, status: -1, ms_gate: 0.0, ms_up: 0.0, ms_down: 0.0 }
+    let gate = heap_alloc(n_tokens * slots * inter * 4)
+    let up = heap_alloc(n_tokens * slots * inter * 4)
+    let act = heap_alloc(n_tokens * slots * inter * 4)
+    let down = heap_alloc(n_tokens * slots * hidden * 4)
+    let x_nb1 = hidden * 4
+    let ids_nb1 = slots * 4
+
+    let g = rt_mul_mat_id_q8_0(
+        rt, gate_w, gate_bytes, x, n_tokens * hidden * 4, ids, n_tokens * slots * 4,
+        gate, n_tokens * slots * inter * 4,
+        hidden, inter, experts, slots, n_tokens,
+        expert_stride_g, row_stride_g,
+        x_nb1, x_nb1, ids_nb1, inter * 4, slots * inter * 4, 1
+    )
+    if !g.ok { res.status = g.status; return res }
+    res.ms_gate = g.ms
+
+    let u = rt_mul_mat_id_q8_0(
+        rt, up_w, up_bytes, x, n_tokens * hidden * 4, ids, n_tokens * slots * 4,
+        up, n_tokens * slots * inter * 4,
+        hidden, inter, experts, slots, n_tokens,
+        expert_stride_u, row_stride_u,
+        x_nb1, x_nb1, ids_nb1, inter * 4, slots * inter * 4, 1
+    )
+    if !u.ok { res.status = u.status; return res }
+    res.ms_up = u.ms
+
+    moe_silu_mul(gate, up, act, n_tokens * slots * inter)
+
+    let d = rt_mul_mat_id_q8_0(
         rt, down_w, down_bytes, act, n_tokens * slots * inter * 4, ids, n_tokens * slots * 4,
         down, n_tokens * slots * hidden * 4,
         inter, hidden, experts, slots, n_tokens,

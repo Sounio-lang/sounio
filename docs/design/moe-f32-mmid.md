@@ -71,7 +71,7 @@ Source artifact: `stdlib/hetero/kernels/mmid_q4k_dp4a_f32_lab_out.txt`
 - Demo: `examples/hetero_moe_layer_demo.sio` (router -> gate/up/down Q4_K -> combine)
 - Vec n=1: uint32_t `__ldg` nibble unpack; measured 114.43 us/run on L4
 
-Out of scope (A+B): Q5/Q8 MoE kernels.
+Hetero Q5_K/Q8_0 mmid + moe_ffn: Plan E (below). `llama_moe_ffn_block` stays Q4_K.
 
 ## Plan C receipts (2026-10-28)
 
@@ -146,3 +146,58 @@ exits RC=0 (dense may run if weights exist).
 
 Regression: `examples/llama_moe_ffn_demo.sio` unchanged (block-level demo).
 
+
+## Plan E: Q5_K + Q8_0 (2026-10-28)
+
+Plan: `docs/superpowers/plans/2026-10-28-moe-f32-q5-q8.md`
+Spec: `docs/superpowers/specs/2026-10-28-moe-f32-q5-q8-design.md`
+Branch: `cursor/moe-f32-q5-q8`
+
+Twin hetero stacks (dp4a batch + vec n=1) for Q5_K and Q8_0 expert matmul with F32
+activations (amax=1e5). Runtime loaders, `moe_ffn_q5k` / `moe_ffn_q8_0`, and L4 demos
+mirror the measured Q4_K path. No llama.cpp link.
+
+`llama_moe_ffn_block` and the Plan D layer-0 forward hook remain **Q4_K only** this
+cycle (no multi-quant llama API).
+
+Roadmap after Plan E (spec non-goals): **4 -> 2 -> 3** means Q4_K Plans A-D ship
+first; Plan E adds hetero Q5_K/Q8_0; then cycle 2 (multi-layer MoE) and cycle 3
+(weight loader) as separate specs.
+
+### Q5_K measured (L4, 2026-10-28)
+
+Host: gpuorangefs-r770-proxmox, NVIDIA L4, nvcc 12.6 (PTX `.version 8.5`, sm_89).
+Lab shapes: m=4096, k=2048, 128 experts, 4 slots, amax=1e5. Oracle: CPU dequant+GEMM.
+
+| n | path | NMSE | us/run | gate |
+|---|------|------|--------|------|
+| 1 | vec | 7.13651471e-13 | 139.32 | NMSE<=5e-4; us<=160 (ceiling; aspirational 120) |
+| 16 | dp4a | 1.41207309e-05 | 4161.27 | NMSE<=5e-4; us<=5000 |
+| 64 | dp4a | 1.4168864e-05 | 8560.91 | NMSE<=5e-4; us<=10000 |
+
+`LAB_EXIT:0`. Source: `stdlib/hetero/kernels/mmid_q5k_dp4a_f32_lab_out.txt`
+Kernel: `stdlib/hetero/kernels/mmid_q5k_dp4a_f32.cu` / `.ptx`
+Build/run: `scripts/gpu/build_mmid_q5k_dp4a_f32.sh`, `scripts/gpu/run_mmid_q5k_l4_lab.sh`
+Runtime: `rt_load_mmid_q5k`, `rt_mul_mat_id_q5k` in `stdlib/hetero/runtime.sio`
+MoE: `moe_ffn_q5k` in `stdlib/hetero/moe.sio`
+Demo: `examples/hetero_moe_q5k_demo.sio` (L4 smoke: MOE Q5_K DONE, status 0, finite)
+
+### Q8_0 measured (L4, 2026-10-28)
+
+Same host and lab shapes as Q5_K.
+
+| n | path | NMSE | us/run | gate |
+|---|------|------|--------|------|
+| 1 | vec | 6.69601827e-13 | 241.94 | NMSE<=5e-4; us<=280 (ceiling; aspirational 120) |
+| 16 | dp4a | 1.41185482e-05 | 5528.33 | NMSE<=5e-4; us<=6500 |
+| 64 | dp4a | 1.41679768e-05 | 11966.53 | NMSE<=5e-4; us<=14000 |
+
+`LAB_EXIT:0`. Source: `stdlib/hetero/kernels/mmid_q8_0_dp4a_f32_lab_out.txt`
+Kernel: `stdlib/hetero/kernels/mmid_q8_0_dp4a_f32.cu` / `.ptx`
+Build/run: `scripts/gpu/build_mmid_q8_0_dp4a_f32.sh`, `scripts/gpu/run_mmid_q8_0_l4_lab.sh`
+Runtime: `rt_load_mmid_q8_0`, `rt_mul_mat_id_q8_0`
+MoE: `moe_ffn_q8_0`
+Demo: `examples/hetero_moe_q8_0_demo.sio` (L4 smoke: MOE Q8_0 DONE, status 0, finite)
+
+Q8_0 vec reads more weight bytes per row than Q5_K; documented us ceilings sit above
+the Q4_K table targets while NMSE gates stay green.
