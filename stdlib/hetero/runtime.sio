@@ -1,0 +1,654 @@
+// stdlib::hetero::runtime - multi-device executor (single host + workers).
+//
+// Two execution levels, both driven by planner decisions over MEASURED
+// caps (this module executes; it does not decide - except when a device
+// fails mid-flight, see rt_exec_chain):
+//
+// 1) rt_gemm_split: one square GEMM row-sharded GPU (own PTX kernel via
+//    cuda_exec) + CPU (tensor2::cpu_kernel), CPU shard overlapping the
+//    GPU kernel, shards gathered into the f64 host master. A split with
+//    gpu_rows = 0 is CPU placement; gpu_rows = n is GPU placement.
+// 2) rt_exec_chain: a GraphIR chain (hetero::graph) executed node by node
+//    under a ChainPlan (hetero::cost::plan_chain). Devices are bound to
+//    executors by a caller-supplied kinds table (per pool index):
+//    0 = local GPU, 1 = local CPU, 2 = remote worker (net_worker).
+//    Activations ping-pong through host masters between nodes (v1 data
+//    movement: device->host->device, charged in the CostModel links).
+//
+// REPLAN: if a node fails on its assigned device (worker died, GPU
+// launch failed), the failed device is struck from the pool (caps zeroed
+// = unmeasured = infinite cost), the remaining sub-chain is re-planned
+// with the same DP, and execution continues. The session survives; the
+// result records replans/failed_device/ran_on so the replan is auditable,
+// never silent. After 3 replans the chain fails loudly.
+//
+// Staging: host masters are f64; device buffers are f32. Conversion packs
+// two f32 into one i64 word write (the v1 byte-at-a-time staging was the
+// runtime's dominant cost: 4 byte-writes per element).
+//
+// Failure model: ready=false (no GPU / kernel load failed) never crashes;
+// a requested GPU split then returns status -1 instead of silently
+// falling back, so a plan can never be "executed" somewhere else quietly
+// - except through the explicit, recorded replan path above.
+
+use hetero::cuda_exec::{
+    CudaExec, ce_alloc, ce_arg, ce_d2h, ce_event_create, ce_event_elapsed_ms,
+    ce_host_alloc,
+    ce_event_record, ce_function, ce_h2d, ce_launch_2d_shmem, ce_launch_gemm, ce_launch_raw,
+    ce_module_log, ce_open, ce_sync,
+}
+use hetero::probe_cuda::{pb_cstr}
+use hetero::cublas_bench::{gb_host_f32, gb_host_get, gb_host_set}
+use hetero::graph::{Graph, GraphNode, graph_add_chain_node, graph_new, graph_node}
+use hetero::cost::{ChainPlan, LinkMatrix, plan_chain}
+use hetero::caps::{DevicePool, pool_add, pool_new}
+use hetero::types::{DeviceCaps, op_matmul, op_mul_mat_id}
+use hetero::net_worker::{NwLib, nw_gemm_rows_remote}
+use tensor2::cpu_kernel::{CpuBuf, ck_alloc, ck_gemm, ck_gemm_rows, ck_get, ck_set}
+use tensor2::convert::{f32_bits_to_f64, f64_to_f32_bits}
+
+pub struct Runtime {
+    pub exec: CudaExec,
+    pub func: i64,
+    pub ready: bool,
+    // Device-side dtype conversion kernels (kernels/cvt_f64_f32.ptx);
+    // 0 = unavailable, rt_gemm_split then uses packed host staging.
+    pub cvt_down: i64,
+    pub cvt_up: i64,
+    // Q4_K mul_mat_id F32 kernels (same PTX module); 0 = not loaded.
+    pub mmid_func: i64,
+    pub mmid_vec_func: i64,
+}
+
+pub struct SplitResult {
+    pub status: i64,
+    pub gpu_rows: i64,
+    pub cpu_rows: i64,
+    pub ms: f64,
+}
+
+pub struct MmidResult {
+    pub ok: bool,
+    pub status: i64,
+    pub ms: f64,
+}
+
+pub fn rt_open(ptx_path: string, kernel_name: string) -> Runtime with Alloc, Mut, Panic, Div, IO {
+    var rt = Runtime { exec: ce_open(), func: 0, ready: false, cvt_down: 0, cvt_up: 0, mmid_func: 0, mmid_vec_func: 0 }
+    if !rt.exec.ok { return rt }
+    let ptx = read_file(ptx_path)
+    if str_len(ptx) == 0 { return rt }
+    let module = ce_module_log(&rt.exec, pb_cstr(ptx))
+    if module == 0 { return rt }
+    let f = ce_function(&rt.exec, module, kernel_name)
+    if f == 0 { return rt }
+    rt.func = f
+    rt.ready = true
+    rt
+}
+
+// rt_open plus the device-side conversion kernels. When the cvt module
+// loads, rt_gemm_split moves f64 masters to the device and converts
+// there - the host never touches an element.
+pub fn rt_open_full(ptx_path: string, kernel_name: string, cvt_ptx_path: string) -> Runtime with Alloc, Mut, Panic, Div, IO {
+    var rt = rt_open(ptx_path, kernel_name)
+    if !rt.ready { return rt }
+    let ptx = read_file(cvt_ptx_path)
+    if str_len(ptx) == 0 { return rt }
+    let module = ce_module_log(&rt.exec, pb_cstr(ptx))
+    if module == 0 { return rt }
+    let down = ce_function(&rt.exec, module, "cvt_f64_f32")
+    let up = ce_function(&rt.exec, module, "cvt_f32_f64")
+    if down == 0 || up == 0 { return rt }
+    rt.cvt_down = down
+    rt.cvt_up = up
+    rt
+}
+
+fn rt_launch_cvt(rt: &Runtime, func: i64, din: i64, dout: i64, count: i64) -> i32 with Alloc, Mut, Panic, Div {
+    let params = heap_alloc(24)
+    write_i64(params as *mut i64, 0, ce_arg(din) as i64)
+    write_i64(params as *mut i64, 1, ce_arg(dout) as i64)
+    write_i64(params as *mut i64, 2, ce_arg(count) as i64)
+    let grid = (count + 255) / 256
+    ce_launch_raw(&rt.exec, func, grid, 256, params)
+}
+
+// Fraction of rows the GPU should take under proportional-to-measured-
+// throughput sharing. 0 when neither side was measured.
+pub fn rt_gpu_share(gpu_gflops: f64, cpu_gflops: f64) -> f64 {
+    let tot = gpu_gflops + cpu_gflops
+    if tot <= 0.0 { return 0.0 }
+    gpu_gflops / tot
+}
+
+// Packed staging f64 -> f32: two elements per i64 word write.
+fn rt_stage_in(dst: *mut u8, src: &CpuBuf, src_off: i64, count: i64) with Mut {
+    let pairs = count / 2
+    var p: i64 = 0
+    while p < pairs {
+        let lo = f64_to_f32_bits(ck_get(src, src_off + 2 * p)) & 4294967295
+        let hi = f64_to_f32_bits(ck_get(src, src_off + 2 * p + 1)) & 4294967295
+        write_i64(dst as *mut i64, p, lo | (hi << 32))
+        p = p + 1
+    }
+    if (count % 2) == 1 {
+        gb_host_set(dst, count - 1, ck_get(src, src_off + count - 1))
+    }
+}
+
+// Packed gather f32 -> f64: one i64 word read per two elements.
+fn rt_scatter_out(dst: &!CpuBuf, dst_off: i64, src: *mut u8, count: i64) with Mut {
+    let pairs = count / 2
+    var p: i64 = 0
+    while p < pairs {
+        let w = read_i64(src as *mut i64, p)
+        ck_set(dst, dst_off + 2 * p, f32_bits_to_f64(w & 4294967295))
+        ck_set(dst, dst_off + 2 * p + 1, f32_bits_to_f64((w >> 32) & 4294967295))
+        p = p + 1
+    }
+    if (count % 2) == 1 {
+        ck_set(dst, dst_off + count - 1, gb_host_get(src, count - 1))
+    }
+}
+
+// C[m][n] = A[m][k] * B[k][n], rows [0, gpu_rows) on GPU, rest on CPU.
+// gpu_rows is rounded down to the 16-row kernel tile; the remainder rows
+// always land on CPU, so any shape is exact. ms via CUDA events spanning
+// launch + concurrent CPU shard + gather (0.0 when no GPU shard ran);
+// host staging time is NOT inside the event window - measure the full
+// call with an outer event pair if staging must be charged.
+pub fn rt_gemm_rect(rt: &Runtime, a: &CpuBuf, b: &CpuBuf, c: &!CpuBuf, m: i64, n: i64, k: i64, gpu_rows_req: i64) -> SplitResult with Alloc, Mut, Panic, Div {
+    var gr = gpu_rows_req
+    if gr < 0 { gr = 0 }
+    if gr > m { gr = m }
+    gr = (gr / 16) * 16
+    var res = SplitResult { status: 0, gpu_rows: gr, cpu_rows: m - gr, ms: 0.0 }
+    if gr == 0 {
+        ck_gemm_rows(a, b, c, 0, m, n, k)
+        return res
+    }
+    if !rt.ready {
+        res.status = -1
+        return res
+    }
+    if rt.cvt_down != 0 && rt.cvt_up != 0 {
+        // Fast path: f64 masters go to the device as-is (the shard rows
+        // are contiguous from element 0), conversion happens on device,
+        // results land back in the f64 master. No host staging at all.
+        let da64 = ce_alloc(&rt.exec, gr * k * 8)
+        let db64 = ce_alloc(&rt.exec, k * n * 8)
+        let da32 = ce_alloc(&rt.exec, gr * k * 4)
+        let db32 = ce_alloc(&rt.exec, k * n * 4)
+        let dc32 = ce_alloc(&rt.exec, gr * n * 4)
+        let dc64 = ce_alloc(&rt.exec, gr * n * 8)
+        if da64 == 0 || db64 == 0 || da32 == 0 || db32 == 0 || dc32 == 0 || dc64 == 0 {
+            res.status = -2
+            return res
+        }
+        let fev0 = ce_event_create(&rt.exec)
+        let fev1 = ce_event_create(&rt.exec)
+        var fst = ce_event_record(&rt.exec, fev0)
+        fst = ce_h2d(&rt.exec, da64, a.data as *mut u8, gr * k * 8)
+        fst = ce_h2d(&rt.exec, db64, b.data as *mut u8, k * n * 8)
+        fst = rt_launch_cvt(rt, rt.cvt_down, da64, da32, gr * k)
+        fst = rt_launch_cvt(rt, rt.cvt_down, db64, db32, k * n)
+        fst = ce_launch_gemm(&rt.exec, rt.func, da32, db32, dc32, gr, n, k)
+        if fst != 0 {
+            res.status = -3
+            return res
+        }
+        fst = rt_launch_cvt(rt, rt.cvt_up, dc32, dc64, gr * n)
+        // CPU shard overlaps the in-flight GPU work.
+        ck_gemm_rows(a, b, c, gr, m, n, k)
+        fst = ce_d2h(&rt.exec, c.data as *mut u8, dc64, gr * n * 8)
+        fst = ce_event_record(&rt.exec, fev1)
+        res.ms = ce_event_elapsed_ms(&rt.exec, fev0, fev1)
+        return res
+    }
+    let a_st = gb_host_f32(gr * k)
+    rt_stage_in(a_st, a, 0, gr * k)
+    let b_st = gb_host_f32(k * n)
+    rt_stage_in(b_st, b, 0, k * n)
+    let c_st = gb_host_f32(gr * n)
+    let da = ce_alloc(&rt.exec, gr * k * 4)
+    let db = ce_alloc(&rt.exec, k * n * 4)
+    let dc = ce_alloc(&rt.exec, gr * n * 4)
+    if da == 0 || db == 0 || dc == 0 {
+        res.status = -2
+        return res
+    }
+    let ev0 = ce_event_create(&rt.exec)
+    let ev1 = ce_event_create(&rt.exec)
+    var st = ce_event_record(&rt.exec, ev0)
+    st = ce_h2d(&rt.exec, da, a_st, gr * k * 4)
+    st = ce_h2d(&rt.exec, db, b_st, k * n * 4)
+    st = ce_launch_gemm(&rt.exec, rt.func, da, db, dc, gr, n, k)
+    if st != 0 {
+        res.status = -3
+        return res
+    }
+    // CPU shard overlaps the in-flight GPU kernel.
+    ck_gemm_rows(a, b, c, gr, m, n, k)
+    st = ce_d2h(&rt.exec, c_st, dc, gr * n * 4)
+    st = ce_event_record(&rt.exec, ev1)
+    res.ms = ce_event_elapsed_ms(&rt.exec, ev0, ev1)
+    rt_scatter_out(c, 0, c_st, gr * n)
+    res
+}
+
+// Square case (the Fase 4 chain/split contract), kept as a wrapper.
+pub fn rt_gemm_split(rt: &Runtime, a: &CpuBuf, b: &CpuBuf, c: &!CpuBuf, n: i64, gpu_rows_req: i64) -> SplitResult with Alloc, Mut, Panic, Div {
+    rt_gemm_rect(rt, a, b, c, n, n, n, gpu_rows_req)
+}
+
+// Allocate a host master in pinned memory when the GPU path is live
+// (full-bandwidth transfers), heap otherwise. Same CpuBuf contract.
+pub fn rt_master(rt: &Runtime, count: i64) -> CpuBuf with Alloc, Mut, Panic {
+    if rt.ready {
+        let p = ce_host_alloc(&rt.exec, count * 8)
+        if (p as i64) != 0 {
+            return CpuBuf { data: p as *mut f64, len: count }
+        }
+    }
+    ck_alloc(count)
+}
+
+// ---- Chain execution (GraphIR -> devices, with live replan) ----
+
+pub fn rt_kind_gpu() -> i32 { 0 }
+pub fn rt_kind_cpu() -> i32 { 1 }
+pub fn rt_kind_remote() -> i32 { 2 }
+
+pub struct ChainResult {
+    pub status: i64,
+    pub resident: i64,
+    pub replans: i64,
+    pub failed_device: i32,
+    pub ms_total: f64,
+    pub node_ms: [f64; 64],
+    pub ran_on: [i32; 64],
+    pub n_done: i32,
+}
+
+struct RtNodeRun {
+    status: i64,
+    ms: f64,
+}
+
+// A view into a concatenated weight buffer: node i's n x n matrix starts
+// at element i*n*n. Pointer offset through the i64 view of the address.
+fn rt_view(base: &CpuBuf, elem_off: i64) -> CpuBuf {
+    CpuBuf { data: ((base.data as i64) + elem_off * 8) as *mut f64, len: base.len - elem_off }
+}
+
+fn rt_pool_clone(pool: &DevicePool) -> DevicePool with Mut {
+    var p = pool_new()
+    var i = 0
+    while i < pool.n_devices {
+        pool_add(&!p, pool.devices[i as usize])
+        i = i + 1
+    }
+    p
+}
+
+// Same pool with device `bad` struck out: caps zeroed (unmeasured), so
+// node_time_s is infinite and the DP can never route work to it again.
+fn rt_pool_without(pool: &DevicePool, bad: i32) -> DevicePool with Mut {
+    var p = pool_new()
+    var i = 0
+    while i < pool.n_devices {
+        let c = pool.devices[i as usize]
+        if i == bad {
+            pool_add(&!p, DeviceCaps {
+                backend: c.backend, arch_class: c.arch_class,
+                vram_bytes: c.vram_bytes, unified_memory: c.unified_memory,
+                measured: false,
+                tput_matmul_bf16: 0.0, tput_matmul_f32: 0.0,
+                tput_attention_bf16: 0.0, tput_elementwise_f32: 0.0,
+            })
+        } else {
+            pool_add(&!p, c)
+        }
+        i = i + 1
+    }
+    p
+}
+
+fn rt_exec_node(rt: &Runtime, lib: &NwLib, conn: i64, kind: i32, a: &CpuBuf, b: &CpuBuf, c: &!CpuBuf, n: i64) -> RtNodeRun with Alloc, Mut, Panic, Div {
+    var run = RtNodeRun { status: 0, ms: 0.0 }
+    if kind == 0 {
+        let r = rt_gemm_split(rt, a, b, c, n, n)
+        run.status = r.status
+        run.ms = r.ms
+        return run
+    }
+    var ev0: i64 = 0
+    var ev1: i64 = 0
+    if rt.ready {
+        ev0 = ce_event_create(&rt.exec)
+        ev1 = ce_event_create(&rt.exec)
+        let _s = ce_event_record(&rt.exec, ev0)
+    }
+    if kind == 1 {
+        ck_gemm(a, b, c, n, n, n)
+    } else if kind == 2 {
+        run.status = nw_gemm_rows_remote(lib, conn, a, b, c, 0, n, n)
+    } else {
+        run.status = -20
+    }
+    if rt.ready {
+        let _s2 = ce_event_record(&rt.exec, ev1)
+        run.ms = ce_event_elapsed_ms(&rt.exec, ev0, ev1)
+    }
+    run
+}
+
+// Execute a chain graph of square GEMM nodes: out = ((x * W0) * W1) ...
+// weights are concatenated in w_all (node i at element offset i*n*n).
+// plan_chain decides placement; a mid-chain device failure triggers a
+// replan of the remaining sub-chain without the failed device (max 3).
+pub fn rt_exec_chain(rt: &Runtime, lib: &NwLib, conn: i64, kinds: [i32; 16], g: &Graph, pool: &DevicePool, lm: &LinkMatrix, x: &CpuBuf, w_all: &CpuBuf, n: i64, out: &!CpuBuf) -> ChainResult with Alloc, Mut, Panic, Div {
+    var res = ChainResult {
+        status: 0, resident: 0, replans: 0, failed_device: -1, ms_total: 0.0,
+        node_ms: [0.0; 64], ran_on: [-1; 64], n_done: 0,
+    }
+    let nn = g.n_nodes
+    if nn <= 0 || nn > 8 || n <= 0 {
+        res.status = -10
+        return res
+    }
+    var cur_pool = rt_pool_clone(pool)
+    var plan = plan_chain(g, &cur_pool, lm)
+
+    // Device-resident fast path: when EVERY node is bound to the local
+    // GPU and the cvt kernels exist, upload x and all weights once,
+    // run the GEMMs device->device, download only the final activation.
+    // (The generic path below pays a host round-trip per node; measured
+    // chain makespan gap vs the compute-only prediction comes from that.)
+    // Any failure here falls through to the generic path, which retries
+    // node 0 through rt_gemm_split and replans if it keeps failing.
+    // Refuse non-GEMM ops before the resident fast path (same contract as
+    // the generic loop below: status -22 -> call rt_exec_mmid_node).
+    var oi: i32 = 0
+    while oi < nn {
+        if graph_node(g, oi).op != op_matmul() {
+            res.status = -22
+            return res
+        }
+        oi = oi + 1
+    }
+
+    if rt.ready && rt.cvt_down != 0 && rt.cvt_up != 0 {
+        var all_gpu = true
+        var ai = 0
+        while ai < nn {
+            if kinds[plan.assign[ai as usize] as usize] != 0 { all_gpu = false }
+            ai = ai + 1
+        }
+        if all_gpu {
+            let dx64 = ce_alloc(&rt.exec, n * n * 8)
+            let dw64 = ce_alloc(&rt.exec, (nn as i64) * n * n * 8)
+            let dx32 = ce_alloc(&rt.exec, n * n * 4)
+            let dw32 = ce_alloc(&rt.exec, (nn as i64) * n * n * 4)
+            let dalt = ce_alloc(&rt.exec, n * n * 4)
+            let dout64 = ce_alloc(&rt.exec, n * n * 8)
+            var rok = dx64 != 0 && dw64 != 0 && dx32 != 0 && dw32 != 0 && dalt != 0 && dout64 != 0
+            let rev0 = ce_event_create(&rt.exec)
+            let rev1 = ce_event_create(&rt.exec)
+            var rst = ce_event_record(&rt.exec, rev0)
+            if rok {
+                rst = ce_h2d(&rt.exec, dx64, x.data as *mut u8, n * n * 8)
+                rst = ce_h2d(&rt.exec, dw64, w_all.data as *mut u8, (nn as i64) * n * n * 8)
+                rst = rt_launch_cvt(rt, rt.cvt_down, dx64, dx32, n * n)
+                rst = rt_launch_cvt(rt, rt.cvt_down, dw64, dw32, (nn as i64) * n * n)
+                var dcur = dx32
+                var dnxt = dalt
+                var gi: i32 = 0
+                while gi < nn && rok {
+                    let nev0 = ce_event_create(&rt.exec)
+                    let nev1 = ce_event_create(&rt.exec)
+                    let _ns = ce_event_record(&rt.exec, nev0)
+                    let gst = ce_launch_gemm(&rt.exec, rt.func, dcur, dw32 + (gi as i64) * n * n * 4, dnxt, n, n, n)
+                    let _ns2 = ce_event_record(&rt.exec, nev1)
+                    if gst != 0 { rok = false }
+                    res.node_ms[gi as usize] = ce_event_elapsed_ms(&rt.exec, nev0, nev1)
+                    res.ran_on[gi as usize] = plan.assign[gi as usize]
+                    let tmp = dcur
+                    dcur = dnxt
+                    dnxt = tmp
+                    gi = gi + 1
+                }
+                if rok {
+                    rst = rt_launch_cvt(rt, rt.cvt_up, dcur, dout64, n * n)
+                    rst = ce_d2h(&rt.exec, out.data as *mut u8, dout64, n * n * 8)
+                    rst = ce_event_record(&rt.exec, rev1)
+                    res.ms_total = ce_event_elapsed_ms(&rt.exec, rev0, rev1)
+                    res.n_done = nn
+                    res.resident = 1
+                    res.status = 0
+                    return res
+                }
+            }
+            // Resident attempt failed: reset bookkeeping, generic path.
+            res.node_ms = [0.0; 64]
+            res.ran_on = [-1; 64]
+            res.ms_total = 0.0
+        }
+    }
+
+    var bufa = ck_alloc(n * n)
+    var bufb = ck_alloc(n * n)
+    var idx: i64 = 0
+    while idx < n * n {
+        ck_set(&!bufa, idx, ck_get(x, idx))
+        idx = idx + 1
+    }
+    var cur_is_a = true
+    var i: i32 = 0
+    while i < nn {
+        let nd = graph_node(g, i)
+        // Square GEMM chain only. MulMatId has a different buffer contract
+        // (Q4_K weights + ids); use rt_exec_mmid_node instead.
+        if nd.op != op_matmul() {
+            res.status = -22
+            return res
+        }
+        var settled = false
+        while !settled {
+            let dev = plan.assign[i as usize]
+            let kind = kinds[dev as usize]
+            let wv = rt_view(w_all, (i as i64) * n * n)
+            var run = RtNodeRun { status: -99, ms: 0.0 }
+            if cur_is_a {
+                run = rt_exec_node(rt, lib, conn, kind, &bufa, &wv, &!bufb, n)
+            } else {
+                run = rt_exec_node(rt, lib, conn, kind, &bufb, &wv, &!bufa, n)
+            }
+            if run.status == 0 {
+                res.node_ms[i as usize] = run.ms
+                res.ms_total = res.ms_total + run.ms
+                res.ran_on[i as usize] = dev
+                res.n_done = res.n_done + 1
+                cur_is_a = !cur_is_a
+                settled = true
+            } else {
+                // Device failed mid-chain: strike it, replan the rest.
+                if res.replans >= 3 {
+                    res.status = run.status
+                    return res
+                }
+                res.failed_device = dev
+                res.replans = res.replans + 1
+                cur_pool = rt_pool_without(&cur_pool, dev)
+                var sub = graph_new()
+                var j = i
+                while j < nn {
+                    let nd = graph_node(g, j)
+                    let _added = graph_add_chain_node(&!sub, nd.op, nd.dtype, nd.flops, nd.out_bytes, nd.shard_units, nd.bytes_per_unit)
+                    j = j + 1
+                }
+                let subplan = plan_chain(&sub, &cur_pool, lm)
+                if subplan.assign[0] == dev {
+                    // No surviving device can take the node: fail loudly.
+                    res.status = -21
+                    return res
+                }
+                var j2 = i
+                while j2 < nn {
+                    plan.assign[j2 as usize] = subplan.assign[(j2 - i) as usize]
+                    j2 = j2 + 1
+                }
+            }
+        }
+        i = i + 1
+    }
+    idx = 0
+    if cur_is_a {
+        while idx < n * n {
+            ck_set(out, idx, ck_get(&bufa, idx))
+            idx = idx + 1
+        }
+    } else {
+        while idx < n * n {
+            ck_set(out, idx, ck_get(&bufb, idx))
+            idx = idx + 1
+        }
+    }
+    res
+}
+
+/// Load mmid Q4_K PTX (vec + dp4a) into an existing Runtime (lazy, once).
+///
+/// # Return
+/// true when both mmid_func and mmid_vec_func are ready.
+pub fn rt_load_mmid(rt: &!Runtime, ptx_path: string) -> bool with Alloc, Mut, Panic, Div, IO {
+    if rt.mmid_func != 0 && rt.mmid_vec_func != 0 { return true }
+    if !rt.exec.ok { return false }
+    let ptx = read_file(ptx_path)
+    if str_len(ptx) == 0 { return false }
+    let module = ce_module_log(&rt.exec, pb_cstr(ptx))
+    if module == 0 { return false }
+    let f = ce_function(&rt.exec, module, "mmid_q4k_dp4a_f32")
+    let fv = ce_function(&rt.exec, module, "mmid_q4k_vec_f32")
+    if f == 0 || fv == 0 { return false }
+    rt.mmid_func = f
+    rt.mmid_vec_func = fv
+    true
+}
+
+/// Q4_K mul_mat_id with F32 activations. Host buffers are raw bytes
+/// (weights Q4_K, y F32, ids i32, dst F32). ntokens==1 uses the vec tile
+/// kernel; n>1 uses dp4a. Returns ok=false when GPU / module is missing.
+pub fn rt_mul_mat_id_q4k(
+    rt: &Runtime,
+    weights: *mut u8, weights_bytes: i64,
+    y: *mut u8, y_bytes: i64,
+    ids: *mut u8, ids_bytes: i64,
+    dst: *mut u8, dst_bytes: i64,
+    k: i64, m: i64, experts: i64, slots: i64, ntokens: i64,
+    expert_stride: i64, row_stride: i64,
+    x_nb1: i64, x_nb2: i64, ids_nb1: i64,
+    dst_nb1: i64, dst_nb2: i64, x_rows: i64
+) -> MmidResult with Alloc, Mut, Panic, Div {
+    var res = MmidResult { ok: false, status: -1, ms: 0.0 }
+    if !rt.exec.ok { return res }
+    if ntokens == 1 {
+        if rt.mmid_vec_func == 0 { return res }
+    } else {
+        if rt.mmid_func == 0 { return res }
+    }
+    let dw = ce_alloc(&rt.exec, weights_bytes)
+    let dy = ce_alloc(&rt.exec, y_bytes)
+    let dids = ce_alloc(&rt.exec, ids_bytes)
+    let ddst = ce_alloc(&rt.exec, dst_bytes)
+    if dw == 0 || dy == 0 || dids == 0 || ddst == 0 {
+        res.status = -2
+        return res
+    }
+    var st = ce_h2d(&rt.exec, dw, weights, weights_bytes)
+    if st != 0 { res.status = st as i64; return res }
+    st = ce_h2d(&rt.exec, dy, y, y_bytes)
+    if st != 0 { res.status = st as i64; return res }
+    st = ce_h2d(&rt.exec, dids, ids, ids_bytes)
+    if st != 0 { res.status = st as i64; return res }
+
+    let threads: i64 = 128
+    let tiles = (m + threads - 1) / threads
+    let start = ce_event_create(&rt.exec)
+    let stop = ce_event_create(&rt.exec)
+    st = ce_event_record(&rt.exec, start)
+    if ntokens == 1 {
+        let params = heap_alloc(8 * 14)
+        write_i64(params as *mut i64, 0, ce_arg(dw) as i64)
+        write_i64(params as *mut i64, 1, ce_arg(dy) as i64)
+        write_i64(params as *mut i64, 2, ce_arg(dids) as i64)
+        write_i64(params as *mut i64, 3, ce_arg(ddst) as i64)
+        write_i64(params as *mut i64, 4, ce_arg(k) as i64)
+        write_i64(params as *mut i64, 5, ce_arg(m) as i64)
+        write_i64(params as *mut i64, 6, ce_arg(experts) as i64)
+        write_i64(params as *mut i64, 7, ce_arg(slots) as i64)
+        write_i64(params as *mut i64, 8, ce_arg(expert_stride) as i64)
+        write_i64(params as *mut i64, 9, ce_arg(row_stride) as i64)
+        write_i64(params as *mut i64, 10, ce_arg(x_nb1) as i64)
+        write_i64(params as *mut i64, 11, ce_arg(ids_nb1) as i64)
+        write_i64(params as *mut i64, 12, ce_arg(dst_nb1) as i64)
+        write_i64(params as *mut i64, 13, ce_arg(x_rows) as i64)
+        st = ce_launch_2d_shmem(&rt.exec, rt.mmid_vec_func, tiles, slots, threads, k * 4, params)
+    } else {
+        let params = heap_alloc(8 * 17)
+        write_i64(params as *mut i64, 0, ce_arg(dw) as i64)
+        write_i64(params as *mut i64, 1, ce_arg(dy) as i64)
+        write_i64(params as *mut i64, 2, ce_arg(dids) as i64)
+        write_i64(params as *mut i64, 3, ce_arg(ddst) as i64)
+        write_i64(params as *mut i64, 4, ce_arg(k) as i64)
+        write_i64(params as *mut i64, 5, ce_arg(m) as i64)
+        write_i64(params as *mut i64, 6, ce_arg(experts) as i64)
+        write_i64(params as *mut i64, 7, ce_arg(slots) as i64)
+        write_i64(params as *mut i64, 8, ce_arg(ntokens) as i64)
+        write_i64(params as *mut i64, 9, ce_arg(expert_stride) as i64)
+        write_i64(params as *mut i64, 10, ce_arg(row_stride) as i64)
+        write_i64(params as *mut i64, 11, ce_arg(x_nb1) as i64)
+        write_i64(params as *mut i64, 12, ce_arg(x_nb2) as i64)
+        write_i64(params as *mut i64, 13, ce_arg(ids_nb1) as i64)
+        write_i64(params as *mut i64, 14, ce_arg(dst_nb1) as i64)
+        write_i64(params as *mut i64, 15, ce_arg(dst_nb2) as i64)
+        write_i64(params as *mut i64, 16, ce_arg(x_rows) as i64)
+        let shmem = 4 * k + 4 * (k / 32) * 4
+        st = ce_launch_2d_shmem(&rt.exec, rt.mmid_func, tiles, experts, threads, shmem, params)
+    }
+    if st != 0 { res.status = st as i64; return res }
+    st = ce_event_record(&rt.exec, stop)
+    st = ce_sync(&rt.exec)
+    if st != 0 { res.status = st as i64; return res }
+    res.ms = ce_event_elapsed_ms(&rt.exec, start, stop)
+    st = ce_d2h(&rt.exec, dst, ddst, dst_bytes)
+    if st != 0 { res.status = st as i64; return res }
+    res.ok = true
+    res.status = 0
+    res
+}
+
+/// GraphIR dispatch: run one MulMatId node via rt_mul_mat_id_q4k.
+/// Status -30 when node.op is not op_mul_mat_id.
+pub fn rt_exec_mmid_node(
+    rt: &Runtime,
+    node: GraphNode,
+    weights: *mut u8, weights_bytes: i64,
+    y: *mut u8, y_bytes: i64,
+    ids: *mut u8, ids_bytes: i64,
+    dst: *mut u8, dst_bytes: i64,
+    k: i64, m: i64, experts: i64, slots: i64, ntokens: i64,
+    expert_stride: i64, row_stride: i64,
+    x_nb1: i64, x_nb2: i64, ids_nb1: i64,
+    dst_nb1: i64, dst_nb2: i64, x_rows: i64
+) -> MmidResult with Alloc, Mut, Panic, Div {
+    if node.op != op_mul_mat_id() {
+        return MmidResult { ok: false, status: -30, ms: 0.0 }
+    }
+    rt_mul_mat_id_q4k(
+        rt, weights, weights_bytes, y, y_bytes, ids, ids_bytes, dst, dst_bytes,
+        k, m, experts, slots, ntokens, expert_stride, row_stride,
+        x_nb1, x_nb2, ids_nb1, dst_nb1, dst_nb2, x_rows
+    )
+}

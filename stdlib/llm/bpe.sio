@@ -1,0 +1,688 @@
+// stdlib::llm::bpe - byte-level BPE tokenizer (tokenizer.json, HF format).
+//
+// Loads model.vocab and model.merges from a tokenizer.json read as raw
+// bytes (llm::safetensors file IO + scanners), builds:
+//   - the GPT-2 byte<->unicode map (bytes 0..255 -> codepoints, so every
+//     byte is a printable symbol and BPE never sees a raw control byte),
+//   - a hash map token-bytes -> id, and pair -> merge-rank,
+//   - encode: GPT-2 pre-tokenization (hand scanner, ASCII-faithful:
+//     contractions, letter/digit/punct runs, whitespace rules; bytes
+//     >= 0x80 count as letter bytes), then rank-ordered merges,
+//   - decode: ids -> bytes through the inverse map.
+// Special (added) tokens are parsed for decode display; encode does not
+// split them out of text (documented v1 limit - prompts are plain text).
+//
+// All tables live in heap i64 arrays; strings are byte ranges in one
+// blob. JSON string escapes (including \uXXXX with surrogate pairs) are
+// decoded to UTF-8 at parse time.
+
+use llm::safetensors::{st_byte_at, st_read_all}
+use tensor2::cpu_kernel::{CpuBuf, ck_alloc}
+
+pub struct Bpe {
+    pub ok: bool,
+    pub n_vocab: i64,
+    pub blob: *mut u8,
+    pub blob_len: i64,
+    pub tok_off: *mut u8,
+    pub tok_len: *mut u8,
+    pub tok_id: *mut u8,
+    pub hash_slot: *mut u8,
+    pub merge_a: *mut u8,
+    pub merge_b: *mut u8,
+    pub merge_out: *mut u8,
+    pub n_merges: i64,
+    pub pair_slot: *mut u8,
+    pub pair_rank: *mut u8,
+    pub init_id: [i64; 256],
+    pub rev_byte: [i64; 512],
+    pub sp_id: [i64; 16],
+    pub sp_off: [i64; 16],
+    pub sp_len: [i64; 16],
+    pub n_special: i64,
+}
+
+fn bp_hget(tab: *mut u8, idx: i64) -> i64 { read_i64(tab as *mut i64, idx) }
+fn bp_hset(tab: *mut u8, idx: i64, v: i64) { write_i64(tab as *mut i64, idx, v) }
+
+fn bp_blob_put(bp: &!Bpe, data: *mut u8, from: i64, len: i64) -> i64 with Mut {
+    var i: i64 = 0
+    while i < len {
+        let w = read_i64(bp.blob as *mut i64, (bp.blob_len + i) / 8)
+        let sh = ((bp.blob_len + i) % 8) * 8
+        let nb = st_byte_at(data, from + i)
+        let cleared = w & ((0 - 1) - (255 << sh))
+        write_i64(bp.blob as *mut i64, (bp.blob_len + i) / 8, cleared | (nb << sh))
+        i = i + 1
+    }
+    let off = bp.blob_len
+    bp.blob_len = bp.blob_len + len
+    off
+}
+
+fn bp_blob_byte(bp: &Bpe, off: i64) -> i64 {
+    (read_i64(bp.blob as *mut i64, off / 8) >> ((off % 8) * 8)) & 255
+}
+
+// FNV-1a over a blob range (token) or a raw buffer range.
+fn bp_hash_blob(bp: &Bpe, off: i64, len: i64) -> i64 {
+    var h: i64 = 1469598103934665603
+    var i: i64 = 0
+    while i < len {
+        h = ((h ^ bp_blob_byte(bp, off + i)) * 1099511628211) & 4503599627370495
+        i = i + 1
+    }
+    h
+}
+
+fn bp_hash_raw(data: *mut u8, from: i64, len: i64) -> i64 {
+    var h: i64 = 1469598103934665603
+    var i: i64 = 0
+    while i < len {
+        h = ((h ^ st_byte_at(data, from + i)) * 1099511628211) & 4503599627370495
+        i = i + 1
+    }
+    h
+}
+
+fn bp_tok_eq(bp: &Bpe, slot_tok: i64, data: *mut u8, from: i64, len: i64) -> bool {
+    let off = bp_hget(bp.tok_off, slot_tok)
+    if bp_hget(bp.tok_len, slot_tok) != len { return false }
+    var i: i64 = 0
+    while i < len {
+        if bp_blob_byte(bp, off + i) != st_byte_at(data, from + i) { return false }
+        i = i + 1
+    }
+    true
+}
+
+// id of the token whose bytes are data[from, from+len); -1 when absent.
+pub fn bpe_lookup(bp: &Bpe, data: *mut u8, from: i64, len: i64) -> i64 {
+    let mask: i64 = 524287
+    var slot = bp_hash_raw(data, from, len) & mask
+    var guard = 0
+    while guard < 1024 {
+        let v = bp_hget(bp.hash_slot, slot)
+        if v == 0 { return -1 }
+        let ti = v - 1
+        if bp_tok_eq(bp, ti, data, from, len) { return bp_hget(bp.tok_id, ti) }
+        slot = (slot + 1) & mask
+        guard = guard + 1
+    }
+    -1
+}
+
+fn bp_hash_insert(bp: &!Bpe, tok_idx: i64) with Mut {
+    let mask: i64 = 524287
+    let off = bp_hget(bp.tok_off, tok_idx)
+    let len = bp_hget(bp.tok_len, tok_idx)
+    var slot = bp_hash_blob(bp, off, len) & mask
+    while bp_hget(bp.hash_slot, slot) != 0 {
+        slot = (slot + 1) & mask
+    }
+    bp_hset(bp.hash_slot, slot, tok_idx + 1)
+}
+
+fn bp_pair_key(a: i64, b: i64) -> i64 {
+    (a * 1000003 + b * 97 + 12345) & 4503599627370495
+}
+
+fn bp_pair_rank(bp: &Bpe, a: i64, b: i64) -> i64 {
+    let mask: i64 = 524287
+    var slot = bp_pair_key(a, b) & mask
+    var guard = 0
+    while guard < 1024 {
+        let v = bp_hget(bp.pair_slot, slot)
+        if v == 0 { return -1 }
+        let r = v - 1
+        if bp_hget(bp.merge_a, r) == a && bp_hget(bp.merge_b, r) == b { return r }
+        slot = (slot + 1) & mask
+        guard = guard + 1
+    }
+    -1
+}
+
+// Parse a JSON string at data[pos] (pos at the opening quote) into
+// scratch bytes (decoded UTF-8). Returns [bytes_len, pos_past_string].
+fn bp_parse_string(data: *mut u8, len: i64, pos: i64, scratch: *mut u8) -> [i64; 2] with Mut {
+    var i = pos + 1
+    var out: i64 = 0
+    while i < len {
+        let c = st_byte_at(data, i)
+        if c == 34 {
+            var r: [i64; 2] = [out, i + 1]
+            return r
+        }
+        if c == 92 && i + 1 < len {
+            let e = st_byte_at(data, i + 1)
+            if e == 110 { bp_scratch_put(scratch, out, 10); out = out + 1; i = i + 2 }
+            else if e == 116 { bp_scratch_put(scratch, out, 9); out = out + 1; i = i + 2 }
+            else if e == 114 { bp_scratch_put(scratch, out, 13); out = out + 1; i = i + 2 }
+            else if e == 98 { bp_scratch_put(scratch, out, 8); out = out + 1; i = i + 2 }
+            else if e == 102 { bp_scratch_put(scratch, out, 12); out = out + 1; i = i + 2 }
+            else if e == 47 { bp_scratch_put(scratch, out, 47); out = out + 1; i = i + 2 }
+            else if e == 34 { bp_scratch_put(scratch, out, 34); out = out + 1; i = i + 2 }
+            else if e == 92 { bp_scratch_put(scratch, out, 92); out = out + 1; i = i + 2 }
+            else if e == 117 {
+                // \uXXXX (+ optional surrogate pair)
+                var cp = bp_hex4(data, i + 2)
+                var adv = 6
+                if cp >= 55296 && cp <= 56319 && i + 11 < len && st_byte_at(data, i + 6) == 92 && st_byte_at(data, i + 7) == 117 {
+                    let lo = bp_hex4(data, i + 8)
+                    if lo >= 56320 && lo <= 57343 {
+                        cp = 65536 + ((cp - 55296) << 10) + (lo - 56320)
+                        adv = 12
+                    }
+                }
+                out = out + bp_utf8_put(scratch, out, cp)
+                i = i + adv
+            } else {
+                bp_scratch_put(scratch, out, e)
+                out = out + 1
+                i = i + 2
+            }
+        } else {
+            bp_scratch_put(scratch, out, c)
+            out = out + 1
+            i = i + 1
+        }
+    }
+    var r2: [i64; 2] = [out, i]
+    r2
+}
+
+fn bp_scratch_put(scratch: *mut u8, idx: i64, v: i64) {
+    let w = read_i64(scratch as *mut i64, idx / 8)
+    let sh = (idx % 8) * 8
+    let cleared = w & ((0 - 1) - (255 << sh))
+    write_i64(scratch as *mut i64, idx / 8, cleared | ((v & 255) << sh))
+}
+
+fn bp_scratch_get(scratch: *mut u8, idx: i64) -> i64 {
+    (read_i64(scratch as *mut i64, idx / 8) >> ((idx % 8) * 8)) & 255
+}
+
+fn bp_hex4(data: *mut u8, pos: i64) -> i64 {
+    var v: i64 = 0
+    var i: i64 = 0
+    while i < 4 {
+        let c = st_byte_at(data, pos + i)
+        var d: i64 = 0
+        if c >= 48 && c <= 57 { d = c - 48 }
+        if c >= 97 && c <= 102 { d = c - 87 }
+        if c >= 65 && c <= 70 { d = c - 55 }
+        v = v * 16 + d
+        i = i + 1
+    }
+    v
+}
+
+// Encode one codepoint as UTF-8 into scratch at out; returns byte count.
+fn bp_utf8_put(scratch: *mut u8, out: i64, cp: i64) -> i64 {
+    if cp < 128 {
+        bp_scratch_put(scratch, out, cp)
+        return 1
+    }
+    if cp < 2048 {
+        bp_scratch_put(scratch, out, 192 | (cp >> 6))
+        bp_scratch_put(scratch, out + 1, 128 | (cp & 63))
+        return 2
+    }
+    if cp < 65536 {
+        bp_scratch_put(scratch, out, 224 | (cp >> 12))
+        bp_scratch_put(scratch, out + 1, 128 | ((cp >> 6) & 63))
+        bp_scratch_put(scratch, out + 2, 128 | (cp & 63))
+        return 3
+    }
+    bp_scratch_put(scratch, out, 240 | (cp >> 18))
+    bp_scratch_put(scratch, out + 1, 128 | ((cp >> 12) & 63))
+    bp_scratch_put(scratch, out + 2, 128 | ((cp >> 6) & 63))
+    bp_scratch_put(scratch, out + 3, 128 | (cp & 63))
+    4
+}
+
+fn bp_skip_ws(data: *mut u8, len: i64, pos: i64) -> i64 {
+    var i = pos
+    while i < len {
+        let c = st_byte_at(data, i)
+        if c == 32 || c == 10 || c == 13 || c == 9 || c == 44 { i = i + 1 } else { return i }
+    }
+    i
+}
+
+fn bp_parse_int(data: *mut u8, len: i64, pos: i64) -> [i64; 2] {
+    var i = pos
+    while i < len {
+        let c = st_byte_at(data, i)
+        if (c >= 48 && c <= 57) || c == 45 { break }
+        i = i + 1
+    }
+    var neg = false
+    if i < len && st_byte_at(data, i) == 45 { neg = true; i = i + 1 }
+    var v: i64 = 0
+    while i < len {
+        let c = st_byte_at(data, i)
+        if c < 48 || c > 57 { break }
+        v = v * 10 + (c - 48)
+        i = i + 1
+    }
+    if neg { v = 0 - v }
+    var r: [i64; 2] = [v, i]
+    r
+}
+
+// Find `"key"` in raw bytes; index just past it, or -1.
+fn bp_find(data: *mut u8, len: i64, from: i64, key: string) -> i64 {
+    let klen = str_len(key)
+    var i = from
+    while i + klen + 2 < len {
+        if st_byte_at(data, i) == 34 {
+            var eq = true
+            var j: i64 = 0
+            while j < klen {
+                if st_byte_at(data, i + 1 + j) != (str_char_at(key, j) & 255) { eq = false }
+                j = j + 1
+            }
+            if eq && st_byte_at(data, i + 1 + klen) == 34 { return i + klen + 2 }
+        }
+        i = i + 1
+    }
+    -1
+}
+
+pub fn bpe_load(path: string) -> Bpe with Alloc, Mut, Panic, Div {
+    var bp = Bpe {
+        ok: false, n_vocab: 0, blob: heap_alloc(16777216), blob_len: 0,
+        tok_off: heap_alloc(262144 * 8), tok_len: heap_alloc(262144 * 8), tok_id: heap_alloc(262144 * 8),
+        hash_slot: heap_alloc(524288 * 8),
+        merge_a: heap_alloc(262144 * 8), merge_b: heap_alloc(262144 * 8), merge_out: heap_alloc(262144 * 8),
+        n_merges: 0, pair_slot: heap_alloc(524288 * 8), pair_rank: heap_alloc(524288 * 8),
+        init_id: [0; 256], rev_byte: [0; 512],
+        sp_id: [0; 16], sp_off: [0; 16], sp_len: [0; 16], n_special: 0,
+    }
+    var s: i64 = 0
+    while s < 524288 { bp_hset(bp.hash_slot, s, 0); s = s + 1 }
+    s = 0
+    while s < 524288 { bp_hset(bp.pair_slot, s, 0); s = s + 1 }
+
+    // Byte<->unicode map (GPT-2): self-mapped printable ranges first.
+    var map_cp: [i64; 256] = [0; 256]
+    var n: i64 = 0
+    var b: i64 = 0
+    while b < 256 {
+        if (b >= 33 && b <= 126) || (b >= 161 && b <= 172) || (b >= 174 && b <= 255) {
+            map_cp[b as usize] = b
+        } else {
+            map_cp[b as usize] = 256 + n
+            n = n + 1
+        }
+        b = b + 1
+    }
+    b = 0
+    while b < 256 {
+        bp.rev_byte[(map_cp[b as usize]) as usize] = b
+        b = b + 1
+    }
+
+    let f = st_read_all(path)
+    if !f.ok { return bp }
+    let data = f.data
+    let len = f.len
+    let scratch = heap_alloc(8192)
+
+    // ---- vocab ----
+    let vpos = bp_find(data, len, 0, "vocab")
+    if vpos < 0 { return bp }
+    var i = bp_skip_ws(data, len, vpos)
+    if i < len && st_byte_at(data, i) == 58 { i = i + 1 }
+    i = bp_skip_ws(data, len, i)
+    if i < len && st_byte_at(data, i) == 123 { i = i + 1 }
+    var ntok: i64 = 0
+    var done = false
+    while !done && ntok < 262144 {
+        i = bp_skip_ws(data, len, i)
+        if i >= len { done = true }
+        else if st_byte_at(data, i) == 125 { done = true }
+        else if st_byte_at(data, i) == 34 {
+            let r = bp_parse_string(data, len, i, scratch)
+            let idr = bp_parse_int(data, len, r[1])
+            let off = bp_blob_put(&!bp, scratch, 0, r[0])
+            bp_hset(bp.tok_off, ntok, off)
+            bp_hset(bp.tok_len, ntok, r[0])
+            bp_hset(bp.tok_id, ntok, idr[0])
+            bp_hash_insert(&!bp, ntok)
+            ntok = ntok + 1
+            i = idr[1]
+        } else { done = true }
+    }
+    bp.n_vocab = ntok
+
+    // ---- merges ----
+    let mpos = bp_find(data, len, 0, "merges")
+    if mpos < 0 { return bp }
+    i = mpos
+    while i < len && st_byte_at(data, i) != 91 { i = i + 1 }
+    i = i + 1
+    var nm: i64 = 0
+    done = false
+    let pair = heap_alloc(8192)
+    while !done && nm < 262144 {
+        i = bp_skip_ws(data, len, i)
+        if i >= len { done = true }
+        else if st_byte_at(data, i) == 93 { done = true }
+        else if st_byte_at(data, i) == 34 {
+            let r = bp_parse_string(data, len, i, scratch)
+            // split at the single raw space
+            var sp: i64 = -1
+            var j: i64 = 0
+            while j < r[0] {
+                if bp_scratch_get(scratch, j) == 32 { sp = j }
+                j = j + 1
+            }
+            if sp > 0 {
+                let ida = bpe_lookup(&bp, scratch, 0, sp)
+                let idb = bpe_lookup(&bp, scratch, sp + 1, r[0] - sp - 1)
+                var k: i64 = 0
+                while k < r[0] {
+                    if k != sp {
+                        var dst = k
+                        if k > sp { dst = k - 1 }
+                        bp_scratch_put(pair, dst, bp_scratch_get(scratch, k))
+                    }
+                    k = k + 1
+                }
+                let ido = bpe_lookup(&bp, pair, 0, r[0] - 1)
+                if ida >= 0 && idb >= 0 && ido >= 0 {
+                    bp_hset(bp.merge_a, nm, ida)
+                    bp_hset(bp.merge_b, nm, idb)
+                    bp_hset(bp.merge_out, nm, ido)
+                    let mask: i64 = 524287
+                    var slot = bp_pair_key(ida, idb) & mask
+                    while bp_hget(bp.pair_slot, slot) != 0 { slot = (slot + 1) & mask }
+                    bp_hset(bp.pair_slot, slot, nm + 1)
+                    nm = nm + 1
+                }
+            }
+            i = r[1]
+        } else { done = true }
+    }
+    bp.n_merges = nm
+
+    // ---- added (special) tokens, for decode display ----
+    let apos = bp_find(data, len, 0, "added_tokens")
+    if apos >= 0 {
+        i = apos
+        var nsp: i64 = 0
+        var scan = 0
+        while scan < 400000 && i < len && nsp < 16 {
+            let cpos = bp_find(data, len, i, "content")
+            if cpos < 0 { scan = 400000 }
+            else {
+                var p = cpos
+                while p < len && st_byte_at(data, p) != 34 { p = p + 1 }
+                // id is BEFORE content in each object: search back is
+                // fragile; instead scan forward for "id" first.
+                let r = bp_parse_string(data, len, p, scratch)
+                // find the id by scanning the object start (crude: the
+                // last "id" before content within 200 bytes back)
+                var back = cpos - 200
+                if back < apos { back = apos }
+                var idv: i64 = -1
+                var q = back
+                while q < cpos {
+                    let ipos = bp_find(data, len, q, "id")
+                    if ipos < 0 || ipos > cpos { q = cpos }
+                    else {
+                        let pr = bp_parse_int(data, len, ipos)
+                        idv = pr[0]
+                        q = pr[1]
+                    }
+                }
+                if idv >= 0 {
+                    let off = bp_blob_put(&!bp, scratch, 0, r[0])
+                    bp.sp_id[nsp as usize] = idv
+                    bp.sp_off[nsp as usize] = off
+                    bp.sp_len[nsp as usize] = r[0]
+                    nsp = nsp + 1
+                }
+                i = r[1]
+                scan = scan + 1
+            }
+        }
+        bp.n_special = nsp
+    }
+
+    // ---- initial byte tokens ----
+    b = 0
+    while b < 256 {
+        let cp = map_cp[b as usize]
+        let nb = bp_utf8_put(scratch, 0, cp)
+        bp.init_id[b as usize] = bpe_lookup(&bp, scratch, 0, nb)
+        b = b + 1
+    }
+    bp.ok = bp.n_vocab > 0 && bp.n_merges > 0
+    bp
+}
+
+// ---- pre-tokenization (GPT-2 pattern, ASCII-faithful) ----
+
+fn bp_is_letter(c: i64) -> bool { (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c >= 128 }
+fn bp_is_digit(c: i64) -> bool { c >= 48 && c <= 57 }
+fn bp_is_space(c: i64) -> bool { c == 32 || c == 9 || c == 11 || c == 12 }
+fn bp_is_nl(c: i64) -> bool { c == 10 || c == 13 }
+
+fn bp_lower(c: i64) -> i64 { if c >= 65 && c <= 90 { c + 32 } else { c } }
+
+// Contraction suffix right after an apostrophe at i (s[i] = 39):
+// returns total chunk length including apostrophe, or 0.
+fn bp_contraction(data: *mut u8, len: i64, i: i64) -> i64 {
+    if i + 1 >= len { return 0 }
+    let a = bp_lower(st_byte_at(data, i + 1))
+    // two-letter: re, ve, ll
+    if i + 2 < len {
+        let b2 = bp_lower(st_byte_at(data, i + 2))
+        if (a == 114 && b2 == 101) || (a == 118 && b2 == 101) || (a == 108 && b2 == 108) { return 3 }
+    }
+    if a == 115 || a == 116 || a == 109 || a == 100 { return 2 }
+    0
+}
+
+// Length of the pre-token chunk starting at i (GPT-2 regex order).
+fn bp_chunk_len(data: *mut u8, len: i64, i: i64) -> i64 {
+    let c = st_byte_at(data, i)
+    if c == 39 {
+        let cl = bp_contraction(data, len, i)
+        if cl > 0 { return cl }
+    }
+    // letters, optionally led by one non-letter/digit char (incl space)
+    if bp_is_letter(c) {
+        var j = i
+        while j < len && bp_is_letter(st_byte_at(data, j)) { j = j + 1 }
+        return j - i
+    }
+    if bp_is_digit(c) {
+        var j2 = i
+        while j2 < len && bp_is_digit(st_byte_at(data, j2)) && (j2 - i) < 3 { j2 = j2 + 1 }
+        return j2 - i
+    }
+    if (c == 32 || (!bp_is_space(c) && !bp_is_nl(c))) && i + 1 < len && bp_is_letter(st_byte_at(data, i + 1)) {
+        var j3 = i + 1
+        while j3 < len && bp_is_letter(st_byte_at(data, j3)) { j3 = j3 + 1 }
+        return j3 - i
+    }
+    // punctuation run, optional leading space, trailing newlines attach
+    if !bp_is_space(c) && !bp_is_nl(c) {
+        var j4 = i
+        while j4 < len {
+            let d = st_byte_at(data, j4)
+            if bp_is_letter(d) || bp_is_digit(d) || bp_is_space(d) { break }
+            if bp_is_nl(d) { break }
+            j4 = j4 + 1
+        }
+        while j4 < len && bp_is_nl(st_byte_at(data, j4)) { j4 = j4 + 1 }
+        return j4 - i
+    }
+    if c == 32 && i + 1 < len && !bp_is_space(st_byte_at(data, i + 1)) && !bp_is_nl(st_byte_at(data, i + 1)) && !bp_is_letter(st_byte_at(data, i + 1)) && !bp_is_digit(st_byte_at(data, i + 1)) {
+        var j5 = i + 1
+        while j5 < len {
+            let d2 = st_byte_at(data, j5)
+            if bp_is_letter(d2) || bp_is_digit(d2) || bp_is_space(d2) || bp_is_nl(d2) { break }
+            j5 = j5 + 1
+        }
+        while j5 < len && bp_is_nl(st_byte_at(data, j5)) { j5 = j5 + 1 }
+        return j5 - i
+    }
+    // whitespace: newline-containing run, else space run (leaving the
+    // last space to attach to a following word, per \s+(?!\S) vs \s+)
+    if bp_is_nl(c) || bp_is_space(c) {
+        var j6 = i
+        var has_nl = false
+        while j6 < len && (bp_is_space(st_byte_at(data, j6)) || bp_is_nl(st_byte_at(data, j6))) {
+            if bp_is_nl(st_byte_at(data, j6)) { has_nl = true }
+            j6 = j6 + 1
+        }
+        if has_nl { return j6 - i }
+        // pure spaces: if followed by a word, leave one space behind
+        if j6 < len && (j6 - i) > 1 { return (j6 - i) - 1 }
+        return j6 - i
+    }
+    1
+}
+
+// Encode text (as bytes in data[0..len)) into token ids (CpuBuf of f64).
+pub fn bpe_encode(bp: &Bpe, data: *mut u8, len: i64) -> CpuBuf with Alloc, Mut, Panic, Div {
+    var out = ck_alloc(len + 16)
+    var n_out: i64 = 0
+    let seq = heap_alloc(65536)
+    let scratch = heap_alloc(8192)
+    var pos: i64 = 0
+    while pos < len {
+        var cl = bp_chunk_len(data, len, pos)
+        if cl <= 0 { cl = 1 }
+        if pos + cl > len { cl = len - pos }
+        // chunk bytes -> initial token ids via the byte map: each byte's
+        // symbol is 1-2 blob bytes; merge the UTF-8 units through vocab
+        // lookup on the fully mapped chunk instead: build mapped bytes.
+        var mlen: i64 = 0
+        var j = pos
+        while j < pos + cl {
+            let byte = st_byte_at(data, j)
+            let tid = bp.init_id[byte as usize]
+            // append the mapped symbol bytes by copying from the token
+            let toff = bp_hget(bp.tok_off, tid)
+            let tlen = bp_hget(bp.tok_len, tid)
+            var q: i64 = 0
+            while q < tlen {
+                bp_scratch_put(scratch, mlen, bp_blob_byte(bp, toff + q))
+                mlen = mlen + 1
+                q = q + 1
+            }
+            j = j + 1
+        }
+        // initial ids: one per input byte
+        var nseq: i64 = 0
+        j = pos
+        while j < pos + cl {
+            bp_hset(seq, nseq, bp.init_id[(st_byte_at(data, j)) as usize])
+            nseq = nseq + 1
+            j = j + 1
+        }
+        // BPE merges: repeatedly take the lowest-rank adjacent pair.
+        var merging = true
+        while merging {
+            merging = false
+            var best_rank: i64 = -1
+            var r: i64 = 0
+            while r + 1 < nseq {
+                let rk = bp_pair_rank(bp, bp_hget(seq, r), bp_hget(seq, r + 1))
+                if rk >= 0 && (best_rank < 0 || rk < best_rank) { best_rank = rk }
+                r = r + 1
+            }
+            if best_rank >= 0 {
+                merging = true
+                var w: i64 = 0
+                r = 0
+                while r < nseq {
+                    if r + 1 < nseq && bp_pair_rank(bp, bp_hget(seq, r), bp_hget(seq, r + 1)) == best_rank {
+                        bp_hset(seq, w, bp_hget(bp.merge_out, best_rank))
+                        w = w + 1
+                        r = r + 2
+                    } else {
+                        bp_hset(seq, w, bp_hget(seq, r))
+                        w = w + 1
+                        r = r + 1
+                    }
+                }
+                nseq = w
+            }
+        }
+        var k: i64 = 0
+        while k < nseq {
+            write_f64(out.data, n_out, (bp_hget(seq, k)) as f64)
+            n_out = n_out + 1
+            k = k + 1
+        }
+        pos = pos + cl
+    }
+    out.len = n_out
+    out
+}
+
+// Decode one token id to raw bytes printed via print_char by caller:
+// returns the byte count written into `buf` (heap, caller-allocated).
+pub fn bpe_decode_token(bp: &Bpe, id: i64, buf: *mut u8) -> i64 with Mut {
+    // special tokens print as their literal content
+    var s: i64 = 0
+    while s < bp.n_special {
+        if bp.sp_id[s as usize] == id {
+            var j: i64 = 0
+            while j < bp.sp_len[s as usize] {
+                bp_scratch_put(buf, j, bp_blob_byte(bp, bp.sp_off[s as usize] + j))
+                j = j + 1
+            }
+            return bp.sp_len[s as usize]
+        }
+        s = s + 1
+    }
+    // find token index by id (linear scan over directory by id array is
+    // O(vocab) per token worst case; vocab is stored in parse order and
+    // HF ids are dense, so index == id for model.vocab entries unless
+    // gaps exist - verify via tok_id, fall back to scan)
+    var ti: i64 = -1
+    if id >= 0 && id < bp.n_vocab && bp_hget(bp.tok_id, id) == id { ti = id }
+    if ti < 0 {
+        var t: i64 = 0
+        while t < bp.n_vocab {
+            if bp_hget(bp.tok_id, t) == id { ti = t; t = bp.n_vocab }
+            t = t + 1
+        }
+    }
+    if ti < 0 { return 0 }
+    let off = bp_hget(bp.tok_off, ti)
+    let tlen = bp_hget(bp.tok_len, ti)
+    // walk UTF-8 codepoints of the token, map back to bytes
+    var out: i64 = 0
+    var i: i64 = 0
+    while i < tlen {
+        let b0 = bp_blob_byte(bp, off + i)
+        var cp: i64 = 0
+        var adv: i64 = 1
+        if b0 < 128 { cp = b0 }
+        else if b0 >= 192 && b0 < 224 && i + 1 < tlen {
+            cp = ((b0 & 31) << 6) | (bp_blob_byte(bp, off + i + 1) & 63)
+            adv = 2
+        } else if b0 >= 224 && b0 < 240 && i + 2 < tlen {
+            cp = ((b0 & 15) << 12) | ((bp_blob_byte(bp, off + i + 1) & 63) << 6) | (bp_blob_byte(bp, off + i + 2) & 63)
+            adv = 3
+        } else if b0 >= 240 && i + 3 < tlen {
+            cp = ((b0 & 7) << 18) | ((bp_blob_byte(bp, off + i + 1) & 63) << 12) | ((bp_blob_byte(bp, off + i + 2) & 63) << 6) | (bp_blob_byte(bp, off + i + 3) & 63)
+            adv = 4
+        }
+        if cp < 512 {
+            bp_scratch_put(buf, out, bp.rev_byte[cp as usize])
+            out = out + 1
+        }
+        i = i + adv
+    }
+    out
+}

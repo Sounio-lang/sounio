@@ -1,0 +1,196 @@
+//@ run-pass
+//
+// GraphIR MulMatId demo: build a one-node graph with op_mul_mat_id, plan it
+// over a measured GPU pool, then dispatch via rt_exec_mmid_node ->
+// rt_mul_mat_id_q4k. Packs a constant Q4_K row and checks NMSE vs the
+// expected dequant*ones dot. Without GPU/PTX prints unavailable and exits 0.
+// Usage: hetero_mmid_demo [gemm-ptx] [mmid-ptx]
+
+use hetero::runtime::{rt_exec_mmid_node, rt_load_mmid, rt_open}
+use hetero::graph::{graph_add_mmid_node, graph_new, graph_node}
+use hetero::caps::{pool_add, pool_new}
+use hetero::cost::{link_matrix_new, plan_chain}
+use hetero::types::{
+    backend_cuda_ptx, device_caps_measured, dtype_f32, op_mul_mat_id,
+}
+use hetero::cublas_bench::{gb_host_f32, gb_host_get, gb_host_set}
+
+fn write_u8(buf: *mut u8, off: i64, v: i64) with Mut {
+    let shift = (off % 8) * 8
+    let mask = (0 - 1) - (255 << shift)
+    let word = (read_i64(buf as *mut i64, off / 8) & mask) | ((v & 255) << shift)
+    write_i64(buf as *mut i64, off / 8, word)
+}
+
+fn write_i32(buf: *mut u8, idx: i64, v: i64) with Mut {
+    var b: i64 = 0
+    while b < 4 {
+        write_u8(buf, idx * 4 + b, (v >> (b * 8)) & 255)
+        b = b + 1
+    }
+}
+
+fn f32_to_f16_bits(v: f64) -> i64 {
+    if v <= 0.0 { return 0 }
+    var exp: i64 = 15
+    var mant = v
+    while mant >= 2.0 && exp < 30 {
+        mant = mant / 2.0
+        exp = exp + 1
+    }
+    while mant < 1.0 && exp > 1 {
+        mant = mant * 2.0
+        exp = exp - 1
+    }
+    let frac = ((mant - 1.0) * 1024.0) as i64
+    (exp << 10) | (frac & 1023)
+}
+
+fn pack_q4k_const(weights: *mut u8, expert_stride: i64, row_stride: i64, experts: i64, m: i64, k: i64, fill: f64) with Mut {
+    let nqb = k / 256
+    let dbits = f32_to_f16_bits(fill / 15.0)
+    var e: i64 = 0
+    while e < experts {
+        var r: i64 = 0
+        while r < m {
+            var ib: i64 = 0
+            while ib < nqb {
+                let base = e * expert_stride + r * row_stride + ib * 144
+                write_u8(weights, base + 0, dbits & 255)
+                write_u8(weights, base + 1, (dbits >> 8) & 255)
+                write_u8(weights, base + 2, 0)
+                write_u8(weights, base + 3, 0)
+                var s: i64 = 0
+                while s < 4 {
+                    write_u8(weights, base + 4 + s, 1)
+                    write_u8(weights, base + 8 + s, 0)
+                    write_u8(weights, base + 12 + s, 1)
+                    s = s + 1
+                }
+                var q: i64 = 0
+                while q < 128 {
+                    write_u8(weights, base + 16 + q, (8 << 4) | 8)
+                    q = q + 1
+                }
+                ib = ib + 1
+            }
+            r = r + 1
+        }
+        e = e + 1
+    }
+}
+
+fn main() with IO, Mut, Panic, Div, Alloc {
+    var gemm_ptx = "stdlib/hetero/kernels/gemm_naive_f32.ptx"
+    var mmid_ptx = "stdlib/hetero/kernels/mmid_q4k_dp4a_f32.ptx"
+    if arg_count() > 0 { gemm_ptx = get_arg(0) }
+    if arg_count() > 1 { mmid_ptx = get_arg(1) }
+
+    var rt = rt_open(gemm_ptx, "gemm_naive_f32")
+    if !rt.ready {
+        print("gpu: unavailable (or gemm PTX missing)\n")
+        print("MMID DEMO DONE\n")
+        exit(0)
+    }
+    if !rt_load_mmid(&!rt, mmid_ptx) {
+        print("mmid: PTX missing or load failed\n")
+        print("MMID DEMO DONE\n")
+        exit(0)
+    }
+    print("mmid: loaded\n")
+
+    let m: i64 = 256
+    let k: i64 = 256
+    let experts: i64 = 8
+    let slots: i64 = 4
+    let ntokens: i64 = 4
+
+    var g = graph_new()
+    let nidx = graph_add_mmid_node(&!g, dtype_f32(), m, k, ntokens, slots)
+    if nidx < 0 {
+        print("graph: add MulMatId failed\n")
+        exit(1)
+    }
+    let node = graph_node(&g, nidx)
+    if node.op != op_mul_mat_id() {
+        print("graph: node op mismatch\n")
+        exit(1)
+    }
+
+    var pool = pool_new()
+    pool_add(&!pool, device_caps_measured(backend_cuda_ptx(), 89, 22000000000, false, 2394.0, 2394.0, 2394.0, 100.0))
+    let lm = link_matrix_new()
+    let plan = plan_chain(&g, &pool, &lm)
+    print("graph: MulMatId planned assign=")
+    print_int(plan.assign[0] as i64)
+    print(" predicted_us=")
+    print_int((plan.predicted_s * 1000000.0) as i64)
+    print("\n")
+
+    let row_stride = (k / 256) * 144
+    let expert_stride = m * row_stride
+    let wbytes = experts * expert_stride
+    let weights = heap_alloc(wbytes)
+    pack_q4k_const(weights, expert_stride, row_stride, experts, m, k, 1.0)
+    let y = gb_host_f32(ntokens * slots * k)
+    let dst = gb_host_f32(ntokens * slots * m)
+    let ids = heap_alloc(ntokens * slots * 4)
+    var t: i64 = 0
+    while t < ntokens {
+        var s: i64 = 0
+        while s < slots {
+            write_i32(ids, t * slots + s, (t * slots + s) % experts)
+            var j: i64 = 0
+            while j < k {
+                gb_host_set(y, (t * slots + s) * k + j, 1.0)
+                j = j + 1
+            }
+            s = s + 1
+        }
+        t = t + 1
+    }
+
+    let run = rt_exec_mmid_node(
+        &rt, node,
+        weights, wbytes,
+        y, ntokens * slots * k * 4,
+        ids, ntokens * slots * 4,
+        dst, ntokens * slots * m * 4,
+        k, m, experts, slots, ntokens,
+        expert_stride, row_stride,
+        k * 4, slots * k * 4, slots * 4,
+        m * 4, slots * m * 4, slots
+    )
+    if !run.ok {
+        print("mmid: dispatch failed status=")
+        print(run.status)
+        print("\n")
+        print("MMID DEMO DONE\n")
+        exit(1)
+    }
+    print("mmid: ok ms=")
+    print(run.ms)
+    print("\n")
+
+    // d=1/15, q=8, scales d=1,m=0 -> value 8/15; y=1 -> expect (8/15)*k
+    let expect = (8.0 / 15.0) * (k as f64)
+    var num = 0.0
+    var den = 0.0
+    var idx: i64 = 0
+    while idx < ntokens * slots * m {
+        let got = gb_host_get(dst, idx)
+        let d = got - expect
+        num = num + d * d
+        den = den + expect * expect
+        idx = idx + 1
+    }
+    let nmse = if den > 0.0 { num / den } else { num }
+    print("mmid: NMSE=")
+    print(nmse)
+    print("\n")
+    if nmse > 0.0005 {
+        print("FAIL: NMSE gate\n")
+        exit(1)
+    }
+    print("MMID DEMO DONE\n")
+}
