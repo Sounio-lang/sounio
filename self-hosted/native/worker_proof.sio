@@ -1054,6 +1054,26 @@ fn worker_mask_has(mask:i64,index:i64)->bool with Panic,Div {
     if index<0 || index>=62 {return false}
     ((mask>>index)&1)==1
 }
+// Region exit/leave/keep return Unit. The emitter's incidental RAX contents
+// are not a scalar return contract and cannot be replaced with a guessed value.
+// Accept a destination only when the complete function never reads it.
+fn worker_region_result_unused(function:&IrFunction,reg:i64,definition:i64)->bool with Mut,Panic,Div {
+    if reg<0 {return true}
+    var at:i64=0
+    while at<(*function).instr_count {
+        if at!=definition {
+            var instruction=ir_nop()
+            if ir_region_get(&(*function).region,at,&!instruction)!=0 {return false}
+            if instruction.src1==reg || instruction.src2==reg {return false}
+            if instruction.arg_count<0 || instruction.arg_count>64 {return false}
+            var a:i64=0
+            let slot=ir_region_slot_r((*function).region,at)
+            while a<instruction.arg_count {if ir_arena_arg_at(slot,a)==reg {return false};a=a+1}
+        }
+        at=at+1
+    }
+    true
+}
 fn worker_closure_callback(module:&IrModule,fi:i64,epoch:i64,depth:i64)->bool with Mut,Panic,Div,Alloc {
     if depth>=64 || fi<0 || fi>=(*module).fn_count || fi>=16384 {return worker_closure_fail(101,fi,0-1)}
     let state=WORKER_CLOSURE_STATE[fi as usize]
@@ -1180,6 +1200,7 @@ fn worker_closure_callback(module:&IrModule,fi:i64,epoch:i64,depth:i64)->bool wi
                 critical_arg=critical_arg+1
             }
             if called.instr_count==0 && builtin!=0 {
+                if (builtin==61 || builtin==67 || builtin==1101) && !worker_region_result_unused(&function,instruction.dst,at) {return worker_closure_fail(140,fi,at)}
                 if builtin==60 && (instruction.imm_flags==64066 || instruction.imm_flags==64076) && instruction.arg_count==0 {
                     // Compiler-owned region tokens cannot escape or enter scalar arithmetic.
                 } else if builtin==67 && (instruction.imm_flags==64067 || instruction.imm_flags==64077) && instruction.arg_count==2 {
@@ -1493,11 +1514,8 @@ pub fn worker_prepare_clones(module:&!IrModule)->bool with Mut,Panic,Div,Alloc {
                         let builtin=WORKER_BACKEND_BUILTIN[target as usize]
                         if builtin==60 || builtin==61 || builtin==67 || builtin==1101 {
                             let destination=instruction.dst
-                            if destination<0 {instruction=ir_nop()}
-                            else if builtin==67 {
-                                let value=ir_arena_arg_at(ir_region_slot_r(clone.region,at),1)
-                                instruction=ir_copy(destination,value)
-                            } else {instruction=ir_load_imm(destination,0)}
+                            if builtin==60 && destination>=0 {instruction=ir_load_imm(destination,0)}
+                            else {instruction=ir_nop()}
                         } else if builtin!=25 && builtin!=26 {return worker_closure_fail(307,clone_id,at)}
                     }
                     if instruction.op==IrOpcode::IrCall {
