@@ -6305,6 +6305,88 @@ fn checker_collect_ontology_def_inplace(c: *mut Checker, opt: Option<Box<Ontolog
     }
 }
 
+// Register one `effect Name { ... }` into the in-place effect tables.
+// The by-value collect_item_effect has done this for years; the *mut spine
+// that `souc check` actually runs never did, so a declared user effect was
+// "not a declared user effect" (E246). Held spellings stay held: registering
+// Choice/Fail/Counter/Fetch would turn the silent transition list into a
+// real row and change every fixture that depends on that drop.
+//
+// Clause names are EffectRef.name_buf ([i8; 64]). Copy that many bytes
+// into a local; do not return the array. A 64-byte array return is the
+// SRET shape this spine exists to avoid.
+fn checker_collect_effect_ops_inplace(c: *mut Checker, opt: Option<Box<EffectOpDefList> >, effect_id: i64) with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        None => {}
+        Some(node) => {
+            let op_name = (*node).head.name
+            let ret_ty = match (*node).head.ret_ty {
+                None => ty_unit()
+                Some(te_box) => checker_lower_type_expr_mut(c, *te_box)
+            }
+            let op_idx = (*c).effect_ops.count
+            if op_idx < 128 {
+                (*c).effect_ops.entries[op_idx as usize] = EffectOpInfo {
+                    name: op_name,
+                    effect_id: effect_id,
+                    param_count: 0,
+                    ret_ty: ret_ty,
+                }
+                (*c).effect_ops.count = op_idx + 1
+            }
+            checker_collect_effect_ops_inplace(c, (*node).tail, effect_id)
+        }
+    }
+}
+
+fn checker_register_effect_def_inplace(c: *mut Checker, name: Name, ops: Option<Box<EffectOpDefList> >) with Mut, Panic, Div, Alloc, IO {
+    var key_buf: [i8; 64] = [0 as i8; 64]
+    var key_len = name.len
+    if key_len > 64 { key_len = 64 }
+    if key_len < 0 { key_len = 0 }
+    var key_i: i64 = 0
+    while key_i < key_len {
+        key_buf[key_i as usize] = name.buf[key_i as usize]
+        key_i = key_i + 1
+    }
+    if effect_name_is_held(key_buf, key_len) { return }
+    if checker_lookup_user_effect_id_mut(c, key_buf, key_len) >= 0 { return }
+    let idx = (*c).effects.count
+    if idx >= 32 { return }
+    let effect_id = 100 + idx
+    let first_op_id = (*c).effect_ops.count
+    checker_collect_effect_ops_inplace(c, ops, effect_id)
+    let op_count = (*c).effect_ops.count - first_op_id
+    (*c).effects.entries[idx as usize] = EffectInfo {
+        name: name,
+        op_count: op_count,
+        first_op_id: first_op_id,
+    }
+    (*c).effects.count = idx + 1
+}
+
+// Walk declarations only. Function clauses are resolved while signatures are
+// collected, and the entry file is programs[0], so an effect that lives in
+// an imported module is invisible unless every module is registered first.
+pub fn checker_collect_declared_effects_inplace(c: *mut Checker, items: Option<Box<ItemList> >) with Mut, Panic, Div, Alloc, IO {
+    var cursor = items
+    while true {
+        match cursor {
+            Some(list) => {
+                let item = (*list).head
+                if item.kind == ItemKind::ItemEffect {
+                    match item.effect_def {
+                        Some(edef) => checker_register_effect_def_inplace(c, (*edef).name, (*edef).ops)
+                        None => {}
+                    }
+                }
+                cursor = (*list).tail
+            }
+            None => break
+        }
+    }
+}
+
 fn checker_collect_unit_decl_inplace(c: *mut Checker, name: Name, conv: Option<Box<TypeExpr> >) with Mut, Panic, Div, Alloc, IO {
     // *mut transcription of Checker::collect_unit_decl. Registers a
     // user-declared unit of measure so that a type annotation naming it
@@ -6377,6 +6459,14 @@ fn checker_collect_item_inplace(c: *mut Checker, item: Item) with Mut, Panic, Di
         // defaults). Measured with SOUNIO_E252_TRACE=1 on a source build: the by-value
         // collect_algebra_def never ran. Wired here, with the Axis-1 certificate (E252).
         checker_collect_algebra_def_inplace(c, item.algebra_def)
+    } else if item.kind == ItemKind::ItemEffect {
+        // Same hole as ItemAlgebra / ItemUnit: the by-value collect_item_effect
+        // filled EffectTable, and this spine fell through to the no-op, so
+        // `pub effect LoomHostTrust {}` was E246 at every `with LoomHostTrust`.
+        match item.effect_def {
+            Some(edef) => checker_register_effect_def_inplace(c, (*edef).name, (*edef).ops)
+            None => {}
+        }
     } else {
         // ItemSession / typealias / policy / … — not yet collected by the
         // *mut spine (no-op, same as before). *mut collectors pending.
@@ -6558,6 +6648,10 @@ pub fn checker_collect_items_inplace(c: *mut Checker, items: Option<Box<ItemList
     // pointer write — persists where deep ontology_kernel mutation does not.
     (*c).ontology_items = items
     checker_collect_runtime_builtins_inplace(c)
+    // Same-module clauses see a declaration that appears later in the file.
+    // Cross-module clauses need the pass in check_modules_verdict_boot4,
+    // which runs this over every module before any signature is collected.
+    checker_collect_declared_effects_inplace(c, items)
     var cursor = items
     while true {
         match cursor {

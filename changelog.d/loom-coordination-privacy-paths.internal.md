@@ -1,0 +1,1 @@
+The Loom coordination workflow starts when a privacy fixture under `tests/compiler/causal_receipt*/`, `tests/compiler/fleet_transaction*/` or `tests/compiler/loom_*/` changes. A `*` in the path filter does not cross a directory, so an edit to the continuity sabotage fixture did not run the gate that reads it.
