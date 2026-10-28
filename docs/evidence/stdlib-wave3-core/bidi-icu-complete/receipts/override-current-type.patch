@@ -1,0 +1,211 @@
+--- a/source/common/ubidi.cpp
++++ b/source/common/ubidi.cpp
+@@ -677,9 +677,47 @@
+    the level of paired brackets.  */
+ 
+ static void
+-bracketInit(UBiDi *pBiDi, BracketData *bd) {
++bracketStartSequence(BracketData *bd, IsoRun *run) {
++    run->bd16Id=bd->sequenceCounter++;
++    run->bd16Depth=0;
++}
++
++/* BD16 preflight tracks canonical closing values, not ICU's pending N0
++   records (which may include completed pairs and duplicate synonyms). */
++static void
++bracketObserveBD16(BracketData *bd, int32_t position) {
++    IsoRun *run=&bd->isoRuns[bd->isoRunLast];
++    if(!bd->discover || bd->suppressed[run->bd16Id])
++        return;
++    UChar32 c=bd->pBiDi->text[position];
++    UBidiPairedBracketType type=ubidi_getPairedBracketType(c);
++    if(type==U_BPT_OPEN) {
++        if(run->bd16Depth==63) {
++            bd->suppressed[run->bd16Id]=true;
++            run->bd16Depth=0;
++            return;
++        }
++        UChar32 close=u_getBidiPairedBracket(c);
++        run->bd16Stack[run->bd16Depth++]=close==0x232A ? 0x3009 : close;
++    } else if(type==U_BPT_CLOSE) {
++        if(c==0x232A) c=0x3009;
++        for(int32_t j=run->bd16Depth-1;j>=0;--j) {
++            if(run->bd16Stack[j]==c) {
++                run->bd16Depth=j;
++                break;
++            }
++        }
++    }
++}
++
++static void
++bracketInit(UBiDi *pBiDi, BracketData *bd, UBool *suppressed, UBool discover) {
+     bd->pBiDi=pBiDi;
++    bd->suppressed=suppressed;
++    bd->discover=discover;
++    bd->sequenceCounter=0;
+     bd->isoRunLast=0;
++    bracketStartSequence(bd, &bd->isoRuns[0]);
+     bd->isoRuns[0].start=0;
+     bd->isoRuns[0].limit=0;
+     bd->isoRuns[0].level=GET_PARALEVEL(pBiDi, 0);
+@@ -703,6 +741,7 @@
+ bracketProcessB(BracketData *bd, UBiDiLevel level) {
+     bd->isoRunLast=0;
+     bd->isoRuns[0].limit=0;
++    bracketStartSequence(bd, &bd->isoRuns[0]);
+     bd->isoRuns[0].level=level;
+     bd->isoRuns[0].lastStrong=bd->isoRuns[0].lastBase=level&1;
+     bd->isoRuns[0].contextDir = static_cast<UBiDiDirection>(level & 1);
+@@ -720,6 +759,7 @@
+     if(NO_OVERRIDE(embeddingLevel)>NO_OVERRIDE(contextLevel))   /* not a PDF */
+         contextLevel=embeddingLevel;
+     pLastIsoRun->limit=pLastIsoRun->start;
++    bracketStartSequence(bd, pLastIsoRun);
+     pLastIsoRun->level=embeddingLevel;
+     pLastIsoRun->lastStrong=pLastIsoRun->lastBase=contextLevel&1;
+     pLastIsoRun->contextDir = static_cast<UBiDiDirection>(contextLevel & 1);
+@@ -736,6 +776,7 @@
+     bd->isoRunLast++;
+     pLastIsoRun++;
+     pLastIsoRun->start=pLastIsoRun->limit=lastLimit;
++    bracketStartSequence(bd, pLastIsoRun);
+     pLastIsoRun->level=level;
+     pLastIsoRun->lastStrong=pLastIsoRun->lastBase=level&1;
+     pLastIsoRun->contextDir = static_cast<UBiDiDirection>(level & 1);
+@@ -889,7 +930,11 @@
+     UBiDiLevel level;
+     dirProps=bd->pBiDi->dirProps;
+     dirProp=dirProps[position];
+-    if(dirProp==ON) {
++    // UAX9 rev52 X6 precedes BD14/BD15/N0: overridden ON is not a bracket.
++    if(dirProp==ON && !(bd->pBiDi->levels[position]&UBIDI_LEVEL_OVERRIDE))
++        bracketObserveBD16(bd, position);
++    if(dirProp==ON && !(bd->pBiDi->levels[position]&UBIDI_LEVEL_OVERRIDE)
++       && !bd->suppressed[pLastIsoRun->bd16Id]) {
+         char16_t c, match;
+         int32_t idx;
+         /* First see if it is a matching closing bracket. Hopefully, this is
+@@ -989,12 +1034,9 @@
+         pLastIsoRun->contextPos=position;
+     }
+     else if(dirProp==NSM) {
+-        /* if the last real char was ON, change NSM to ON so that it
+-           will stay ON even if the last real char is a bracket which
+-           may be changed to L or R */
++        /* N0: leave original NSMs intact so W1 inherits a bracket after
++           its final N0 resolution, including across ignored BN characters. */
+         newProp=pLastIsoRun->lastBase;
+-        if(newProp==ON)
+-            dirProps[position]=newProp;
+     }
+     else {
+         newProp=dirProp;
+@@ -1078,7 +1120,8 @@
+  *
+  */
+ static UBiDiDirection
+-resolveExplicitLevels(UBiDi *pBiDi, UErrorCode *pErrorCode) {
++resolveExplicitLevelsPass(UBiDi *pBiDi, UErrorCode *pErrorCode,
++                          UBool *suppressed, UBool discover) {
+     DirProp *dirProps=pBiDi->dirProps;
+     UBiDiLevel *levels=pBiDi->levels;
+     const char16_t *text=pBiDi->text;
+@@ -1121,7 +1164,7 @@
+         /* we still have to perform bracket matching */
+         int32_t paraIndex, start, limit;
+         BracketData bracketData;
+-        bracketInit(pBiDi, &bracketData);
++        bracketInit(pBiDi, &bracketData, suppressed, discover);
+         for(paraIndex=0; paraIndex<pBiDi->paraCount; paraIndex++) {
+             if(paraIndex==0)
+                 start=0;
+@@ -1168,7 +1211,7 @@
+         int32_t overflowEmbeddingCount=0;
+         int32_t validIsolateCount=0;
+         BracketData bracketData;
+-        bracketInit(pBiDi, &bracketData);
++        bracketInit(pBiDi, &bracketData, suppressed, discover);
+         stack[0]=level;     /* initialize base entry to para level, no override, no isolate */
+ 
+         /* recalculate the flags */
+@@ -1228,7 +1271,7 @@
+             case LRI:
+             case RLI:
+                 flags|=(DIRPROP_FLAG(ON)|DIRPROP_FLAG_LR(embeddingLevel));
+-                levels[i]=NO_OVERRIDE(embeddingLevel);
++                levels[i]=embeddingLevel;
+                 if(NO_OVERRIDE(embeddingLevel)!=NO_OVERRIDE(previousLevel)) {
+                     bracketProcessBoundary(&bracketData, lastCcPos,
+                                            previousLevel, embeddingLevel);
+@@ -1288,7 +1331,7 @@
+                 embeddingLevel = static_cast<UBiDiLevel>(stack[stackLast]) & ~ISOLATE;
+                 flags|=(DIRPROP_FLAG(ON)|DIRPROP_FLAG_LR(embeddingLevel));
+                 previousLevel=embeddingLevel;
+-                levels[i]=NO_OVERRIDE(embeddingLevel);
++                levels[i]=embeddingLevel;
+                 break;
+             case B:
+                 flags|=DIRPROP_FLAG(B);
+@@ -1341,6 +1384,39 @@
+     return direction;
+ }
+ 
++/* BD16 overflow returns an empty list for the whole isolating run sequence.
++   Restore original properties and replay ICU's own explicit resolver so pairs
++   completed before the overflow are also removed. Other sequences stay active.
++   Sequence identities follow the same explicit/isolate transitions in both
++   passes; there is at most one boundary plus one isolate push per code unit. */
++static UBiDiDirection
++resolveExplicitLevels(UBiDi *pBiDi, UErrorCode *pErrorCode) {
++    if(U_FAILURE(*pErrorCode)) return UBIDI_LTR;
++    const int32_t length=pBiDi->length;
++    if(length>(INT32_MAX-2)/2) {
++        *pErrorCode=U_MEMORY_ALLOCATION_ERROR;
++        return UBIDI_LTR;
++    }
++    const int32_t capacity=length*2+2;
++    icu::LocalMemory<DirProp> original(static_cast<DirProp*>(uprv_malloc(length>0 ? length : 1)));
++    icu::LocalMemory<UBool> suppressed(static_cast<UBool*>(uprv_malloc(capacity*sizeof(UBool))));
++    if(original.isNull() || suppressed.isNull()) {
++        *pErrorCode=U_MEMORY_ALLOCATION_ERROR;
++        return UBIDI_LTR;
++    }
++    uprv_memcpy(original.getAlias(),pBiDi->dirProps,length);
++    uprv_memset(suppressed.getAlias(),0,capacity*sizeof(UBool));
++    const Flags originalFlags=pBiDi->flags;
++    UBiDiDirection direction=resolveExplicitLevelsPass(pBiDi,pErrorCode,suppressed.getAlias(),true);
++    if(U_FAILURE(*pErrorCode) || direction==static_cast<UBiDiDirection>(-1)) return direction;
++    UBool overflow=false;
++    for(int32_t i=0;i<capacity;++i) overflow|=suppressed[i];
++    if(!overflow) return direction;
++    uprv_memcpy(pBiDi->dirProps,original.getAlias(),length);
++    pBiDi->flags=originalFlags;
++    return resolveExplicitLevelsPass(pBiDi,pErrorCode,suppressed.getAlias(),false);
++}
++
+ /*
+  * Use a pre-specified embedding levels array:
+  *
+--- a/source/common/ubidiimp.h
++++ b/source/common/ubidiimp.h
+@@ -188,6 +188,9 @@
+     DirProp lastStrong;                 /* bidi class of last strong char found in this run */
+     DirProp lastBase;                   /* bidi class of last base char found in this run */
+     UBiDiDirection contextDir;          /* L or R to use as context for following openings */
++    int32_t bd16Id;
++    int32_t bd16Depth;
++    UChar32 bd16Stack[63];
+ } IsoRun;
+ 
+ typedef struct BracketData {
+@@ -200,6 +203,9 @@
+     /* array of nested isolated sequence entries; can never excess UBIDI_MAX_EXPLICIT_LEVEL
+        + 1 for index 0, + 1 for before the first isolated sequence */
+     IsoRun  isoRuns[UBIDI_MAX_EXPLICIT_LEVEL+2];
++    UBool *suppressed;                  /* BD16 overflow by stable sequence identity */
++    UBool discover;
++    int32_t sequenceCounter;
+     UBool isNumbersSpecial;             /* reordering mode for NUMBERS_SPECIAL */
+ } BracketData;
+ 
