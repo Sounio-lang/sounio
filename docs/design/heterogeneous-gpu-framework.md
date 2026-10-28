@@ -1638,3 +1638,20 @@ Job 19444. md5 `a308fd258c6191e051cfa1fea7a2fa87`.
 Those twelve words are 2.0 through 13.0. The stored word is 406.0. The inputs were not overwritten. Barriers 4 and 5 survived a second reuse.
 
 Gate. Node `gpuorangefs-r770-proxmox`, `--gres=gpu:1`, `--mem=16G`, `--cpus-per-task=4`. The 0.0018 s threshold is not moved. This cut does not pass it.
+
+
+## 66. Seven products (2026-10-28, OBSERVED)
+
+The sixth product left the text at 384 bytes. The seventh needs two more loads and one more `FFMA`. Counted from the original 2600-byte container, the tail after the old text shifts by 176 bytes. The file is 2776 bytes. `.text` is 432 bytes, `0x1b0`. `e_shoff` is `0x730`. `e_phoff` is `0xa30`. The `stamp` symbol size is 432. The load of the constant bank plus the text has file size and memory size `0x370`. `.debug_frame` still carries the length 256. The driver loaded the image.
+
+The seventh pair reuses R4 and R6. Barriers 2 and 3 have now been registered three times. The fifth `FFMA` waits on the second registration, and the new loads register them again. The seventh `FFMA` waits on mask 12. The sixth still waits on mask 48. The store displacement is 56. `EXIT` is at pc 416. The register count stays 12.
+
+The host writes the bits of 2.0 through 15.0. In f32, the seven products from 2 times 3 through 14 times 15 sum to 616.0. The bits of 616.0 are `0x441a0000`, which is 1142554624. Job 19443 still held the node with CPUs only and no GPU. It was not cancelled. Job 19446 moved to partition `all`.
+
+Job 19446. md5 `1ffa61df65c4f1af08ff3d7ce911dfeb`.
+
+`OWN=1073741824`, `OWN_ADD=1077936128`, `OWN_SRC=1082130432`, `OWN_WIDE=1084227584`, `OWN_EXT=1086324736`, `OWN_EXT2=1088421888`, `OWN_E8=1090519040`, `OWN_E9=1091567616`, `OWN_E10=1092616192`, `OWN_E11=1093664768`, `OWN_E12=1094713344`, `OWN_E13=1095761920`, `OWN_E14=1096810496`, `OWN_E15=1097859072`, `OWN_SUM=1142554624`, `EXIT:0`.
+
+Those fourteen words are 2.0 through 15.0. The stored word is 616.0. The inputs were not overwritten. Barriers 2 and 3 survived a third registration.
+
+Gate. Node `gpuorangefs-r770-proxmox`, `--gres=gpu:1`, `--mem=16G`, `--cpus-per-task=4`. The 0.0018 s threshold is not moved. This cut does not pass it.
