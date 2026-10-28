@@ -22,9 +22,15 @@ pub const MAX_BRANCH_SNAP: i64 = 32
 const BRANCH_SNAP_PLANE: i64 = 4096   // 128 entries * MAX_BRANCH_SNAP
 
 pub struct BorrowEntry {
+    // Stable identity, independent of a reused slot or shadowed name.
+    pub binding_id:i64,
     pub name: Name,
     pub state: i64,          // 0=Owned, 1=SharedBorrow, 2=ExclusiveBorrow
     pub shared_count: i64,   // Number of active shared borrows
+    pub loan_live:bool,
+    pub loan_temporary:bool,
+    pub loan_pinned:bool,
+    pub is_affine:bool,
     pub is_linear: bool,     // Whether this is a linear type variable
     pub consumed: bool,      // Whether a linear variable has been consumed
     pub scope_depth: i64,    // Scope where this entry was created
@@ -33,9 +39,12 @@ pub struct BorrowEntry {
 
 fn empty_borrow_entry() -> BorrowEntry {
     BorrowEntry {
+        binding_id:0,
         name: Name { buf: [0; 384], len: 0 },
         state: 0,
         shared_count: 0,
+        loan_live:true,loan_temporary:false,loan_pinned:false,
+        is_affine:false,
         is_linear: false,
         consumed: false,
         scope_depth: 0,
@@ -48,6 +57,10 @@ fn empty_borrow_entry() -> BorrowEntry {
 // ============================================================
 
 pub struct BorrowEnv {
+    pub next_binding_id:i64,
+    pub loan_head:i64,
+    pub loan_count:i64,
+    pub loan_overflow:bool,
     pub entries: [BorrowEntry; 128],
     pub count: i64,
     pub scope_starts: [i64; 64],
@@ -108,6 +121,7 @@ pub fn borrow_paths_overlap(a: Name, b: Name) -> bool with Mut, Panic, Div {
 
 pub fn borrow_env_new() -> BorrowEnv {
     BorrowEnv {
+        next_binding_id:1,loan_head:0,loan_count:0,loan_overflow:false,
         entries: [empty_borrow_entry(); 128],
         count: 0,
         scope_starts: [0; 64],
@@ -121,6 +135,102 @@ pub fn borrow_env_new() -> BorrowEnv {
         // typechecks its own source. Both spellings must be the literal 4096.
         branch_snap: [false; 4096],
     }
+}
+
+// Persistent loans belong to a carrier binding and point to its actual owner
+// identity. Call-site borrow release changes transient state only. Scope exit
+// removes carrier identities from the active environment; old edges cannot bind
+// a later shadow that reuses their entry index. Nodes are immutable so copying a
+// BorrowEnv does not let a sibling mutate its graph.
+pub struct PersistentLoanEdge {
+    pub owner:i64,
+    pub carrier:i64,
+    pub kind:i64,
+    pub next:i64,
+}
+pub fn borrow_binding_id(env:&BorrowEnv,name:Name)->i64 with Mut,Panic,Div {
+    let root=borrow_path_root(name)
+    var i=env.count-1
+    while i>=0 {
+        if name_eq(env.entries[i as usize].name,root) {return env.entries[i as usize].binding_id}
+        i=i-1
+    }
+    0
+}
+pub fn borrow_binding_live(env:&BorrowEnv,id:i64)->bool with Mut,Panic,Div {
+    if id<=0 {return false}
+    var i:i64=0
+    while i<env.count {
+        if env.entries[i as usize].binding_id==id {return true}
+        i=i+1
+    }
+    false
+}
+pub fn borrow_persistent_state(env:&BorrowEnv,name:Name)->i64 with Mut,Panic,Div {
+    if env.loan_overflow {return 2}
+    let owner=borrow_binding_id(env,name)
+    if owner==0 {return 0}
+    var cursor=env.loan_head
+    var count:i64=0
+    var state:i64=0
+    while cursor!=0 && count<4096 {
+        let edge=cursor as *mut PersistentLoanEdge
+        if (*edge).owner==owner && borrow_carrier_live(env,(*edge).carrier) {
+            if (*edge).kind==2 || (*edge).kind==4 {return 2}
+            state=1
+        }
+        cursor=(*edge).next
+        count=count+1
+    }
+    if cursor!=0 {return 2}
+    state
+}
+fn borrow_persist_edge(env:BorrowEnv,carrier:i64,owner:i64,kind:i64)->BorrowEnv with Mut,Panic,Div,Alloc {
+    var out=env
+    if out.loan_overflow {return out}
+    if carrier<=0 || owner<=0 || (kind<1 || kind>4) {out.loan_overflow=true;return out}
+    if !borrow_binding_live(&out,carrier) {out.loan_overflow=true;return out}
+    if !borrow_binding_live(&out,owner) {if kind>=3 {return out};out.loan_overflow=true;return out}
+    var cursor=out.loan_head
+    var count:i64=0
+    while cursor!=0 && count<4096 {
+        let edge=cursor as *mut PersistentLoanEdge
+        if (*edge).owner==owner && (*edge).carrier==carrier && (*edge).kind==kind {return out}
+        cursor=(*edge).next
+        count=count+1
+    }
+    if cursor!=0 || out.loan_count>=4096 {out.loan_overflow=true;return out}
+    let edge=heap_alloc(64) as *mut PersistentLoanEdge
+    if (edge as i64)<=0 {out.loan_overflow=true;return out}
+    (*edge).owner=owner
+    (*edge).carrier=carrier
+    (*edge).kind=kind
+    (*edge).next=out.loan_head
+    out.loan_head=edge as i64
+    out.loan_count=out.loan_count+1
+    out
+}
+pub fn borrow_persist_owner(env:BorrowEnv,carrier:Name,owner:Name,kind:i64)->BorrowEnv with Mut,Panic,Div,Alloc {
+    borrow_persist_edge(env,borrow_binding_id(&env,carrier),borrow_binding_id(&env,owner),kind)
+}
+pub fn borrow_persist_alias(env:BorrowEnv,carrier:Name,source:Name)->BorrowEnv with Mut,Panic,Div,Alloc {
+    var out=env
+    let carrier_id=borrow_binding_id(&out,carrier)
+    let source_id=borrow_binding_id(&out,source)
+    if carrier_id<=0 || source_id<=0 {out.loan_overflow=true;return out}
+    // Traverse the original immutable list, never newly added alias edges.
+    var cursor=env.loan_head
+    var count:i64=0
+    while cursor!=0 && count<4096 {
+        let edge=cursor as *mut PersistentLoanEdge
+        if (*edge).carrier==source_id {
+            out=borrow_persist_edge(out,carrier_id,(*edge).owner,(*edge).kind)
+        }
+        cursor=(*edge).next
+        count=count+1
+    }
+    if cursor!=0 {out.loan_overflow=true}
+    out
 }
 
 impl BorrowEnv {
@@ -146,6 +256,7 @@ impl BorrowEnv {
                 i = i + 1
             }
             env.count = scope_start
+            if env.count==0 {env.loan_head=0;env.loan_count=0;env.loan_overflow=false}
         }
         env
     }
@@ -155,16 +266,20 @@ impl BorrowEnv {
         var env = self
         if env.count < 128 {
             env.entries[env.count] = BorrowEntry {
+                binding_id:env.next_binding_id,
                 name: name,
                 state: 0,
                 shared_count: 0,
+                loan_live:true,loan_temporary:false,loan_pinned:false,
+                is_affine:false,
                 is_linear: is_linear,
                 consumed: false,
                 scope_depth: env.scope_depth,
                 provenance: 0,
             }
             env.count = env.count + 1
-        }
+            if env.next_binding_id>=9223372036854775806 {env.loan_overflow=true} else {env.next_binding_id=env.next_binding_id+1}
+        } else {env.loan_overflow=true}
         env
     }
 
@@ -218,7 +333,7 @@ impl BorrowEnv {
         let entry = env.entries[idx]
         // Borrowing a moved linear owner must remain a use-after-move error.
         if entry.is_linear && entry.consumed { return (env, 39) }
-        if entry.state == 2 {
+        if entry.state == 2 || borrow_persistent_state(&env,name)==2 {
             // Cannot take shared borrow while exclusive borrow is active
             return (env, 37)
         }
@@ -239,7 +354,7 @@ impl BorrowEnv {
         let entry = env.entries[idx]
         // Borrowing a moved linear owner must remain a use-after-move error.
         if entry.is_linear && entry.consumed { return (env, 39) }
-        if entry.state != 0 {
+        if entry.state != 0 || borrow_persistent_state(&env,name)!=0 {
             // Cannot take exclusive borrow while any borrow is active
             return (env, 38)
         }
@@ -259,6 +374,7 @@ impl BorrowEnv {
         if !entry.is_linear {
             return (env, 0)
         }
+        if borrow_persistent_state(&env,name)!=0 {return (env,38)}
         if entry.consumed {
             // Double consumption of linear value
             return (env, 39)
@@ -295,7 +411,7 @@ impl BorrowEnv {
             return false
         }
         let entry = self.entries[idx]
-        entry.state != 0  // 0 = Owned, 1 = SharedBorrow, 2 = ExclusiveBorrow
+        entry.state != 0 || borrow_persistent_state(&self,name)!=0
     }
 
     // Release a borrow on a named variable, restoring it to Owned state.
@@ -332,4 +448,166 @@ impl BorrowEnv {
         }
         env
     }
+}
+
+// Stage source identities before a new name is bound: shadowing in an
+// initializer must keep the previous binding's identity.
+pub fn borrow_sources_add(head:i64,owner:i64,kind:i64)->i64 with Mut,Panic,Div,Alloc {
+    if head<0 {return head}
+    if owner==0 {return head}
+    if owner<0 || (kind<1 || kind>4) {return 0-1}
+    var cursor=head
+    var count:i64=0
+    while cursor!=0 && count<4096 {
+        let edge=cursor as *mut PersistentLoanEdge
+        if (*edge).owner==owner && (*edge).kind==kind {return head}
+        cursor=(*edge).next
+        count=count+1
+    }
+    if cursor!=0 || count>=4096 {return 0-1}
+    let edge=heap_alloc(64) as *mut PersistentLoanEdge
+    if (edge as i64)<=0 {return 0-1}
+    (*edge).owner=owner
+    (*edge).carrier=0
+    (*edge).kind=kind
+    (*edge).next=head
+    edge as i64
+}
+pub fn borrow_sources_alias(env:&BorrowEnv,name:Name,head:i64,kind:i64)->i64 with Mut,Panic,Div,Alloc {
+    let source=borrow_binding_id(env,name)
+    if source==0 {return head}
+    var out=head
+    var found=false
+    var cursor=env.loan_head
+    var count:i64=0
+    while cursor!=0 && count<4096 {
+        let edge=cursor as *mut PersistentLoanEdge
+        if (*edge).carrier==source {
+            out=borrow_sources_add(out,(*edge).owner,(*edge).kind)
+            found=true
+        }
+        cursor=(*edge).next
+        count=count+1
+    }
+    if cursor!=0 {return 0-1}
+    if !found {out=borrow_sources_add(out,source,kind)}
+    out
+}
+pub fn borrow_persist_sources(env:BorrowEnv,name:Name,sources:i64)->BorrowEnv with Mut,Panic,Div,Alloc {
+    var out=env
+    if sources<0 {out.loan_overflow=true;return out}
+    let carrier=borrow_binding_id(&out,name)
+    var cursor=sources
+    var count:i64=0
+    while cursor!=0 && count<4096 {
+        let edge=cursor as *mut PersistentLoanEdge
+        out=borrow_persist_edge(out,carrier,(*edge).owner,(*edge).kind)
+        cursor=(*edge).next
+        count=count+1
+    }
+    if cursor!=0 {out.loan_overflow=true}
+    out
+}
+
+pub fn borrow_sources_union(left:i64,right:i64)->i64 with Mut,Panic,Div,Alloc {
+    if left<0 || right<0 {return 0-1}
+    var out=left
+    var cursor=right
+    var count:i64=0
+    while cursor!=0 && count<4096 {
+        let edge=cursor as *mut PersistentLoanEdge
+        out=borrow_sources_add(out,(*edge).owner,(*edge).kind)
+        cursor=(*edge).next
+        count=count+1
+    }
+    if cursor!=0 {return 0-1}
+    out
+}
+
+pub fn borrow_sources_all_live(env:&BorrowEnv,sources:i64)->bool with Mut,Panic,Div {
+    if sources<0 {return false}
+    var cursor=sources
+    var count:i64=0
+    while cursor!=0 && count<4096 {
+        let edge=cursor as *mut PersistentLoanEdge
+        if (*edge).kind<=2 {if !borrow_binding_live(env,(*edge).owner) {return false}}
+        cursor=(*edge).next
+        count=count+1
+    }
+    cursor==0
+}
+
+// Affine carriers may be moved or discarded; they never acquire a Drop duty.
+pub fn borrow_carrier_live(env:&BorrowEnv,id:i64)->bool with Mut,Panic,Div {
+    if id<=0 {return false}
+    var i:i64=0
+    while i<env.count {
+        let entry=env.entries[i as usize]
+        if entry.binding_id==id {return entry.loan_live && (entry.loan_pinned || !(entry.is_affine && entry.consumed))}
+        i=i+1
+    }
+    false
+}
+
+pub fn borrow_end_temporaries_since(env:BorrowEnv,start:i64)->BorrowEnv with Mut,Panic,Div {
+    var out=env
+    var i:i64=0
+    while i<out.count {
+        var entry=out.entries[i as usize]
+        if entry.loan_temporary && entry.binding_id>=start {
+            entry.loan_live=false
+            out.entries[i as usize]=entry
+        }
+        i=i+1
+    }
+    out
+}
+pub fn borrow_add_temporary(env:BorrowEnv,sources:i64)->BorrowEnv with Mut,Panic,Div,Alloc {
+    if sources==0 {return env}
+    if sources<0 {var failed=env;failed.loan_overflow=true;return failed}
+    var out=env.track(Name{buf:[0;384],len:0},false)
+    if out.count<=0 || out.loan_overflow {return out}
+    var entry=out.entries[(out.count-1) as usize]
+    // Empty source names cannot be spelled as a user binding.
+    entry.loan_temporary=true
+    out.entries[(out.count-1) as usize]=entry
+    var cursor=sources
+    var count:i64=0
+    while cursor!=0 && count<4096 {
+        let edge=cursor as *mut PersistentLoanEdge
+        out=borrow_persist_edge(out,entry.binding_id,(*edge).owner,(*edge).kind)
+        cursor=(*edge).next
+        count=count+1
+    }
+    if sources<0 || cursor!=0 {out.loan_overflow=true}
+    out
+}
+pub fn borrow_compact_temporaries(env:BorrowEnv)->BorrowEnv with Mut,Panic,Div {
+    var out=env
+    // Only call between full statements at the function-body level; there is
+    // no active branch snapshot or nested scope index to shift at that point.
+    if out.scope_depth!=2 || out.branch_depth!=0 {return out}
+    var read:i64=0
+    var write:i64=0
+    while read<out.count {
+        let entry=out.entries[read as usize]
+        if !entry.loan_temporary || entry.scope_depth<2 {
+            if write!=read {out.entries[write as usize]=entry}
+            write=write+1
+        }
+        read=read+1
+    }
+    out.count=write
+    out
+}
+pub fn borrow_has_carrier_edge(env:&BorrowEnv,id:i64)->bool with Mut,Panic,Div {
+    var cursor=env.loan_head
+    var count:i64=0
+    while cursor!=0 && count<4096 {
+        let edge=cursor as *mut PersistentLoanEdge
+        if (*edge).carrier==id {return true}
+        cursor=(*edge).next
+        count=count+1
+    }
+    cursor!=0
 }

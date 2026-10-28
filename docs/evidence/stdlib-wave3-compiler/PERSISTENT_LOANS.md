@@ -1,0 +1,31 @@
+# Persistent returned loans and affine reference carriers
+
+This source change strengthens existing reference operations. It does not enable reference-bearing enum payloads or raw typed storage.
+
+BorrowEnv now assigns monotonically distinct binding identities and retains immutable owner/carrier edges. Ending a call's transient argument borrow cannot erase an owner loan retained by its result. Alias and shadow handling use the binding identity, rather than a source spelling or a reused entry index. Strong lifetime edges are distinct from weak reborrow access edges: forwarding through a local reference cannot manufacture a local pointee lifetime or erase the underlying owner.
+
+The checker records expression-result provenance before popping nested scopes. Tuples retain their reference sources; a pointer to a popped local rejects. Temporary values retain loans while later arguments are evaluated, and a completed non-reference call consumes its temporary loans. Complete function-body statements can end a carrier after its last future use. Nested control-flow blocks retain their enclosing continuation conservatively; closure captures pin their reference carriers through their scope.
+
+Exclusive references and aggregates containing them are affine. Their value transfer consumes the old binding; dereference and parameter reborrow do not. A branch consuming an affine value makes subsequent use reject, without imposing linear Drop or requiring every branch to consume it. Existing linear resource consumption remains a separate obligation.
+
+## Executed evidence
+
+- Slurm18728, raw e9ad6cde: the original returned-reference mutation and local-reference escape repros both incorrectly checked0. The lexical-scope positive checked, compiled and executed0.
+- Slurm18740 rebuilt the first graph tranche with seed9cf. Raw SHA256 07491b4fe7936e20b7abb0949f836b844f5f3233ab2d492e481144ba12e96a60: those repros changed to E038 and E091 respectively, and the unchanged lexical-scope positive checked/compiled/executed0. Source, seed and compiler final guards passed.
+- Slurm18725 and18754 executed binding-identity, immutable-edge snapshot, alias, call-release, scope and slot-reuse component controls. These precede the final checker source and do not substitute for its qualification.
+- Slurm18765 executed the actual checker kernel and preserved three additional admitted-invalid cases: tuple mutation, popped-block escape and duplicated exclusive references.
+- Slurm18773 closed the first two in the checker kernel. Slurm18776 closed exclusive duplication/branch consumption and accepted affine movement/discard. Its reborrow-scope fixture had a parser ambiguity after an unparenthesized borrow followed by a block; that failed input and receipt remain sealed.
+- Slurm18779 executed the final actual checker kernel with the corrected new fixture: eight positives and twelve negatives matched the full twenty-case matrix. Positives include last use without an extra scope, alias-shadow scopes, affine movement/discard, forwarded/scoped reborrow and consumption of an inner temporary before a later mutation. Negatives require E038, E039 or E091 for owner mutation/close, aliases, tuples, popped locals, branch/closure continuations, duplicate exclusive references and an inline temporary kept across later arguments. No parse, undefined-API or E264 rejection is accepted.
+- Slurm18782 and the exact final gate-source replay18783 compiled the C++23 matrix verifier with strict warnings, accepted that exact actual-kernel matrix, and rejected seven wrong-output/selection controls: flipped verdict, missing/extra case, unsupported diagnostic, missing actual verdict, parse refusal and duplicate row. Actual-kernel, source and verifier guards passed.
+
+Final source hashes: borrow.sio d7d8740dba59c265bf7250ea50d2b44dc6ce49ba3a45d0631f0b4bf711aa6416; check.sio 03e376ce676a28cc2fc0459eecf8bba8863625a18f931800532e9be86ddbe48d. Slurm18779 kernel ELF c90306d7bfd3e4b7c03185136528fc37402e04dd02f4ac2ebfbb3bad6907d2b6; source-manifest f6ca7e052ea4317c8ac9e3148f7055223604c68ef70e614f3f3d32044af29e7b. V4 overlay 9fad5057e51df8ef16db792620b4d4bddf234b6bf82acff25b89ed4be9c493cd; twenty-case control bundle b909c66b0a3ebb771171736e723da12186586de8b5d1090d2cb22cc1d851d644.
+
+Receipts live under /scratch/sounio-stdlib-wave3-20261027/compiler-resumed/{persistent-loans-native,returned-loan-checker-component,returned-loan-checker-v2,returned-loan-checker-v3,returned-loan-checker-v4,returned-loan-matrix-reference,returned-loan-matrix-reference-final}.
+
+## Required integration and limits
+
+scripts/ci/wave3_returned_loans_gate.sh RAW_MADAROS RESULTS_DIRECTORY is the strict native replay gate. It checks all twenty cases, compiles and executes all eight positives with their markers, requires all twelve negatives to reject compilation with the intended diagnostic and no ELF, rejects wrong output, and guards source/compiler inputs. Its raw replay requires a fresh compiler built from the final integrated source; the final V4 matrix above was an executed checker component, not that rebuilt CLI. The earlier18740 raw compiler contains V1 and cannot stand in for V4.
+
+Returned Option<&T>/Option<&!T>, generic borrowed storage, pattern provenance through those payloads, capturing-function storage and complete HeapVec ownership remain unqualified and E264 remains closed. This is not full-stdlib or fixed-point acceptance.
+
+Bounds remain explicit: 128 active binding slots, 4096 retained edges per active environment (cleared when no bindings remain) and 8192 recorded expression results per checked function. Exhaustion refuses rather than inventing borrow-free metadata. NLL is conservative inside nested control flow and for captures; direct syntactic borrow transient-state behavior is not advertised as complete NLL. Interprocedural returned-reference sources conservatively include borrowed inputs. These restrictions may reject programs requiring a more precise lifetime model; they must not be bypassed or relabeled as passing tests.

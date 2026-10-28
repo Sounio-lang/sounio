@@ -1,0 +1,42 @@
+// Component contract only: not proof that frontend carrier propagation is wired.
+use parser::ast::{make_name}
+use check::borrow::{borrow_env_new,borrow_binding_id,borrow_persistent_state,borrow_persist_owner,borrow_persist_alias}
+fn main()->i32 with IO,Mut,Alloc,Div,Panic {
+ let owner=make_name("owner")
+ let carrier=make_name("carrier")
+ let alias=make_name("alias")
+ var env=borrow_env_new().push_scope().track(owner,true)
+ let original=borrow_binding_id(&env,owner)
+ env=env.push_scope().track(carrier,false)
+ env=borrow_persist_owner(env,carrier,owner,1)
+ assert(borrow_persistent_state(&env,owner)==1)
+ let borrowed=env.try_shared_borrow(owner)
+ assert(borrowed.1==0)
+ env=borrowed.0.release_borrow(owner)
+ // Releasing the call's transient borrow must leave the owner's loan alive.
+ assert(borrow_persistent_state(&env,owner)==1)
+ let snapshot=env
+ env=env.track(alias,false)
+ env=borrow_persist_alias(env,alias,carrier)
+ assert(borrow_persistent_state(&env,owner)==1)
+ // An immutable graph update cannot alter a sibling snapshot's head/count.
+ assert(snapshot.loan_count==1)
+ assert(env.loan_count==2)
+ env=env.pop_scope()
+ assert(borrow_persistent_state(&env,owner)==0)
+ // A shadow with the same source name cannot revive edges of the old owner.
+ env=env.push_scope().track(owner,true).track(carrier,false)
+ assert(borrow_binding_id(&env,owner)!=original)
+ assert(borrow_persistent_state(&env,owner)==0)
+ env=borrow_persist_owner(env,carrier,owner,2)
+ assert(borrow_persistent_state(&env,owner)==2)
+ env=env.pop_scope()
+ assert(borrow_binding_id(&env,owner)==original)
+ assert(borrow_persistent_state(&env,owner)==0)
+ // A missing/untracked anchor must fail closed, never become no loan.
+ env=borrow_persist_owner(env,make_name("missing"),owner,1)
+ assert(env.loan_overflow)
+ assert(borrow_persistent_state(&env,owner)==2)
+ println("PERSISTENT_LOAN_IDENTITY_COMPONENT_OK")
+ 0
+}

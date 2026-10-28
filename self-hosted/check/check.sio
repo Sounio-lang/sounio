@@ -367,12 +367,17 @@ pub struct Checker {
     // and the inferred set is captured by checker_check_closure_expr_inplace
     // and published onto the closure's FnSig. A named fn body does NOT set this,
     // so its missing effects still fail E035 (effect_missing and friends).
+    pub closure_capture_count:i64,
     pub in_closure_body: bool,
     pub multitest_count: i64,
     pub multitest_corrected: bool,
     pub last_literal_int: i64,
     pub last_literal_float: f64,
     pub last_literal_kind: i64,   // 0=none, 1=int, 2=float
+    pub suppress_affine_consume_depth:i64,
+    pub loan_result_kind:i64,
+    pub loan_result_head:i64,
+    pub loan_result_count:i64,
     pub escape_provenance: i64,   // tail-expr escape provenance: 0=safe, 1=local ref escapes the frame
     pub loop_depth: i64,
     pub suppress_linear_consume_depth: i64,
@@ -1445,12 +1450,15 @@ pub fn checker_new() -> Checker with Mut, Panic, Div, Alloc {
         // function's effects.
         current_sig_id: 0 - 1,
         current_sig_name: empty_name(),
+        closure_capture_count:0,
         in_closure_body: false,
         multitest_count: 0,
         multitest_corrected: false,
         last_literal_int: 0,
         last_literal_float: 0.0,
         last_literal_kind: 0,
+        suppress_affine_consume_depth:0,loan_result_kind:1,
+        loan_result_head:0,loan_result_count:0,
         escape_provenance: 0,
         loop_depth: 0,
         suppress_linear_consume_depth: 0,
@@ -1570,12 +1578,17 @@ pub fn checker_init_in_place(raw: *mut Checker) with Mut, Panic, Div, Alloc {
     e035_note_fn(empty_name())
     (*raw).current_sig_id = 0 - 1
     (*raw).current_sig_name = empty_name()
+    (*raw).closure_capture_count=0
     (*raw).in_closure_body = false
     (*raw).multitest_count = 0
     (*raw).multitest_corrected = false
     (*raw).last_literal_int = 0
     (*raw).last_literal_float = 0.0
     (*raw).last_literal_kind = 0
+    (*raw).suppress_affine_consume_depth=0
+    (*raw).loan_result_kind=1
+    (*raw).loan_result_head=0
+    (*raw).loan_result_count=0
     (*raw).escape_provenance = 0
     (*raw).loop_depth = 0
     (*raw).suppress_linear_consume_depth = 0
@@ -1619,6 +1632,10 @@ fn checker_store_from_value(dst: *mut Checker, src: Checker) with Mut, Panic, Di
     let prev_error_count = (*dst).error_count
     (*dst).env = src.env
     (*dst).borrows = src.borrows
+    (*dst).suppress_affine_consume_depth=src.suppress_affine_consume_depth
+    (*dst).loan_result_kind=src.loan_result_kind
+    (*dst).loan_result_head=src.loan_result_head
+    (*dst).loan_result_count=src.loan_result_count
     (*dst).units = src.units
     (*dst).refinements = src.refinements
     (*dst).structs = src.structs
@@ -1682,6 +1699,7 @@ fn checker_store_from_value(dst: *mut Checker, src: Checker) with Mut, Panic, Di
     (*dst).current_effect_count = src.current_effect_count
     (*dst).current_sig_id = src.current_sig_id
     (*dst).current_sig_name = src.current_sig_name
+    (*dst).closure_capture_count=src.closure_capture_count
     (*dst).in_closure_body = src.in_closure_body
     (*dst).multitest_count = src.multitest_count
     (*dst).multitest_corrected = src.multitest_corrected
@@ -7029,6 +7047,8 @@ fn checker_check_impl_method_inplace(c: *mut Checker, item: Item) with Mut, Pani
             // current_effects empty and firing a spurious E035 on the merged/imported
             // lane. The semantic lookup disambiguates by TypeKind (TyUnknown vs TyI64),
             // so each impl body sees ITS OWN declared effects.
+            (*c).loan_result_head=0
+            (*c).loan_result_count=0
             (*c).current_fn_name = (*fd).name
             e035_note_fn((*fd).name)
             let sig_id = fn_sig_table_find_method_semantic((*c).fn_sigs, (*c).current_impl_type, (*fd).name)
@@ -7323,12 +7343,14 @@ fn checker_bind_fn_param_inplace(c: *mut Checker, p: Param) with Mut, Panic, Div
         checker_const_int_bind_unknown_inplace(c, p.name)
         let self_linear = checker_is_linear_type_inplace(c, (*c).current_impl_type)
         (*c).borrows = (*c).borrows.track(p.name, self_linear)
+        checker_set_affine_binding(c,p.name,(*c).current_impl_type)
     } else {
         let param_ty = checker_lower_type_expr_mut(c, p.ty)
         type_env_bind_mut(&!(*c).env, p.name, param_ty, false)
         checker_const_int_bind_unknown_inplace(c, p.name)
         let lin = checker_is_linear_type_inplace(c, param_ty)
         (*c).borrows = (*c).borrows.track(p.name, lin)
+        checker_set_affine_binding(c,p.name,param_ty)
     }
 }
 
@@ -7359,6 +7381,8 @@ fn checker_check_fn_item_inplace(c: *mut Checker, opt: Option<Box<FnDef> >) with
             // return-type path until the expr spine lands — so the conservative
             // proven path ships. Revisit direct-read with a real return-mismatch
             // gate once `return <expr>` no longer crashes the check spine.
+            (*c).loan_result_head=0
+            (*c).loan_result_count=0
             (*c).current_fn_name = (*fd).name
             e035_note_fn((*fd).name)
             // Defect B (docs/audit/MADAROS_PBPK28_NN_TENSOR_COMPILE_RUNTIME_DIVERGENCE_2026-08-17.md):
@@ -7457,6 +7481,253 @@ fn checker_check_block_inplace(c: *mut Checker, blk: Block) -> TypeEntry with Mu
 }
 
 // ============================================================
+fn checker_type_has_affine_borrow_depth(c:*mut Checker,ty:TypeEntry,seen:*mut [Name;64],depth:i64)->bool with Mut,Panic,Div,Alloc,IO {
+    if ty.kind==TypeKind::TyRefMut || ty.kind==TypeKind::TySliceMut {return true}
+    if ty.kind==TypeKind::TyRef || ty.kind==TypeKind::TySlice || ty.kind==TypeKind::TyRawPtr {return false}
+    if ty.kind==TypeKind::TyArray && ty.array_size==0 {return false}
+    if depth>=64 {return true}
+    (*seen)[depth as usize]=empty_name()
+    if ty.kind==TypeKind::TyNamed {
+        var i:i64=0
+        while i<depth {if name_eq((*seen)[i as usize],ty.name) {return false};i=i+1}
+        (*seen)[depth as usize]=ty.name
+        let si=struct_table_find((*c).structs,ty.name)
+        if si>=0 {
+            var fields=struct_table_get((*c).structs,si).fields
+            while true {match fields {
+                Some(field)=>{if checker_type_has_affine_borrow_depth(c,(*field).head.ty,seen,depth+1) {return true};fields=(*field).tail}
+                None=>break
+            }}
+        }
+        let ei=enum_table_find((*c).enums,ty.name)
+        if ei>=0 {
+            var variants=enum_table_get((*c).enums,ei).variants
+            while true {match variants {
+                Some(variant)=>{
+                    var fields=(*variant).head.fields
+                    while true {match fields {
+                        Some(field)=>{if checker_type_has_affine_borrow_depth(c,(*field).head.ty,seen,depth+1) {return true};fields=(*field).tail}
+                        None=>break
+                    }}
+                    variants=(*variant).tail
+                }
+                None=>break
+            }}
+        }
+    }
+    match ty.inner {Some(inner)=>{if checker_type_has_affine_borrow_depth(c,*inner,seen,depth+1) {return true}},None=>{}}
+    if ty.kind==TypeKind::TyTuple {
+        var elems=ty.tuple_elems
+        while true {match elems {
+            Some(elem)=>{if checker_type_has_affine_borrow_depth(c,(*elem).head,seen,depth+1) {return true};elems=(*elem).tail}
+            None=>break
+        }}
+    }
+    false
+}
+fn checker_type_has_affine_borrow(c:*mut Checker,ty:TypeEntry)->bool with Mut,Panic,Div,Alloc,IO {
+    var seen:[Name;64]=[empty_name();64]
+    checker_type_has_affine_borrow_depth(c,ty,(&!seen) as *mut [Name;64],0)
+}
+fn checker_set_affine_binding(c:*mut Checker,name:Name,ty:TypeEntry) with Mut,Panic,Div,Alloc,IO {
+    let index=(*c).borrows.find(name)
+    if index>=0 {
+        var entry=(*c).borrows.entries[index as usize]
+        entry.is_affine=checker_type_has_affine_borrow(c,ty)
+        (*c).borrows.entries[index as usize]=entry
+    }
+}
+fn checker_take_affine_binding(c:*mut Checker,name:Name,span:Span) with Mut,Panic,Div,Alloc,IO {
+    let index=(*c).borrows.find(borrow_path_root(name))
+    if index>=0 {
+        var entry=(*c).borrows.entries[index as usize]
+        if entry.is_affine && !entry.is_linear {
+            if borrow_persistent_state(&(*c).borrows,name)!=0 {checker_report_error_at_inplace(c,span,38,0,0,0);return}
+            if entry.consumed {checker_report_error_at_inplace(c,span,39,0,0,0)}
+            entry.consumed=true
+            (*c).borrows.entries[index as usize]=entry
+        }
+    }
+}
+fn checker_affine_binding_moved(c:*mut Checker,name:Name)->bool with Mut,Panic,Div {
+    let index=(*c).borrows.find(borrow_path_root(name))
+    if index<0 {return false}
+    let entry=(*c).borrows.entries[index as usize]
+    entry.is_affine && entry.consumed
+}
+
+// Expression-result provenance retains real binding IDs after an inner block
+// has popped its locals. A name lookup after pop_scope cannot reconstruct them.
+struct CheckedLoanResult {
+    module_id:i64,
+    sig_id:i64,
+    file_id:i64,
+    start:i64,
+    end:i64,
+    kind:i64,
+    sources:i64,
+    next:i64,
+}
+fn checker_loan_result_lookup(c:*mut Checker,e:Expr)->i64 with Mut,Panic,Div {
+    var cursor=(*c).loan_result_head
+    var count:i64=0
+    while cursor!=0 && count<8192 {
+        let item=cursor as *mut CheckedLoanResult
+        if (*item).module_id==(*c).current_module_id && (*item).sig_id==(*c).current_sig_id
+            && (*item).file_id==e.span.file_id && (*item).start==e.span.start
+            && (*item).end==e.span.end && (*item).kind==(e.kind as i64) {return (*item).sources}
+        cursor=(*item).next
+        count=count+1
+    }
+    if cursor!=0 {return 0-1}
+    0-2
+}
+fn checker_loan_result_record(c:*mut Checker,e:Expr,sources:i64) with Mut,Panic,Div,Alloc {
+    if (*c).loan_result_count>=8192 {
+        if sources!=0 {(*c).borrows.loan_overflow=true}
+        return
+    }
+    let item=heap_alloc(128) as *mut CheckedLoanResult
+    if (item as i64)<=0 {(*c).borrows.loan_overflow=true;return}
+    (*item).module_id=(*c).current_module_id
+    (*item).sig_id=(*c).current_sig_id
+    (*item).file_id=e.span.file_id
+    (*item).start=e.span.start
+    (*item).end=e.span.end
+    (*item).kind=e.kind as i64
+    (*item).sources=sources
+    (*item).next=(*c).loan_result_head
+    (*c).loan_result_head=item as i64
+    (*c).loan_result_count=(*c).loan_result_count+1
+}
+
+// Stage concrete binding identities before let/var shadows source names.
+// Returned borrows conservatively retain every borrowed input.
+fn checker_collect_loan_sources(c:*mut Checker,e:Expr,head:i64,depth:i64)->i64 with Mut,Panic,Div,Alloc,IO {
+    if head<0 || depth>=64 {return 0-1}
+    let checked=checker_loan_result_lookup(c,e)
+    if checked!=0-2 {return borrow_sources_union(head,checked)}
+    var out=head
+    if e.kind==ExprKind::ExprIdent {
+        if type_env_has_binding(&(*c).env,e.name) {
+            let ty=type_env_lookup(&(*c).env,e.name)
+            if checker_type_has_ref(c,ty,0) {
+                let kind=if ty.kind==TypeKind::TyRefMut || ty.kind==TypeKind::TySliceMut {2} else {1}
+                out=borrow_sources_alias(&(*c).borrows,e.name,out,kind)
+            }
+        }
+        return out
+    }
+    if e.kind==ExprKind::ExprUnary {
+        if e.un_op==UnaryOp::OpRef || e.un_op==UnaryOp::OpRefMut {
+            let name=checker_borrow_place_name(c,e.left)
+            if !name_is_empty(name) {
+                let id=borrow_binding_id(&(*c).borrows,name)
+                var kind=if e.un_op==UnaryOp::OpRefMut {2} else {1}
+                match e.left {Some(place)=>{if (*place).kind==ExprKind::ExprUnary && (*place).un_op==UnaryOp::OpDeref {kind=kind+2}},None=>{}}
+                out=borrow_sources_add(out,id,kind)
+                if type_env_has_binding(&(*c).env,borrow_path_root(name)) {
+                    let root_ty=type_env_lookup(&(*c).env,borrow_path_root(name))
+                    if checker_type_has_ref(c,root_ty,0) {out=borrow_sources_alias(&(*c).borrows,name,out,kind)}
+                }
+                return out
+            }
+        }
+        match e.left {Some(inner)=>return checker_collect_loan_sources(c,*inner,out,depth+1),None=>return out}
+    }
+    if e.kind==ExprKind::ExprCall || e.kind==ExprKind::ExprMethodCall
+        || e.kind==ExprKind::ExprTupleLit || e.kind==ExprKind::ExprArrayLit {
+        if e.kind==ExprKind::ExprMethodCall {
+            let receiver=checker_borrow_place_name(c,e.left)
+            if !name_is_empty(receiver) {
+                var kind=(*c).loan_result_kind
+                match e.left {Some(base)=>{let ty=checker_place_static_type(c,*base,0);if ty.kind==TypeKind::TyRef || ty.kind==TypeKind::TyRefMut {kind=kind+2}},None=>{}}
+                out=borrow_sources_add(out,borrow_binding_id(&(*c).borrows,receiver),kind)
+            }
+            match e.left {Some(base)=>{out=checker_collect_loan_sources(c,*base,out,depth+1)},None=>{}}
+        }
+        var args=e.args
+        while true {match args {
+            Some(arg)=>{
+                if (*arg).head.kind==ExprKind::ExprIdent {
+                    let name=(*arg).head.name
+                    if type_env_has_binding(&(*c).env,name) {
+                        let ty=type_env_lookup(&(*c).env,name)
+                        if ty.kind==TypeKind::TyRefMut || ty.kind==TypeKind::TySliceMut {
+                            out=borrow_sources_add(out,borrow_binding_id(&(*c).borrows,name),(*c).loan_result_kind+2)
+                        }
+                    }
+                }
+                out=checker_collect_loan_sources(c,(*arg).head,out,depth+1)
+                args=(*arg).tail
+            }
+
+            None=>break
+        }}
+        return out
+    }
+    if e.kind==ExprKind::ExprStructLit {
+        var fields=e.fields
+        while true {match fields {
+            Some(field)=>{out=checker_collect_loan_sources(c,(*field).head.value,out,depth+1);fields=(*field).tail}
+            None=>break
+        }}
+        return out
+    }
+    if e.kind==ExprKind::ExprFieldAccess || e.kind==ExprKind::ExprIndex || e.kind==ExprKind::ExprCast {
+        match e.left {Some(base)=>return checker_collect_loan_sources(c,*base,out,depth+1),None=>return out}
+    }
+    if e.kind==ExprKind::ExprIf || e.kind==ExprKind::ExprBlock {
+        match e.else_expr {Some(other)=>{out=checker_collect_loan_sources(c,*other,out,depth+1)},None=>{}}
+        match e.block {Some(block)=>{
+            var stmts=(*block).stmts
+            while true {match stmts {
+                Some(stmt)=>{
+                    match (*stmt).tail {None=>match (*stmt).head.expr {Some(tail)=>{out=checker_collect_loan_sources(c,*tail,out,depth+1)},None=>{}},Some(_)=>{}}
+                    stmts=(*stmt).tail
+                }
+                None=>break
+            }}
+        },None=>{}}
+        return out
+    }
+    if e.kind==ExprKind::ExprMatch {
+        match e.left {Some(source)=>{out=checker_collect_loan_sources(c,*source,out,depth+1)},None=>{}}
+        var arms=e.arms
+        while true {match arms {
+            Some(arm)=>{out=checker_collect_loan_sources(c,(*arm).head.body,out,depth+1);arms=(*arm).tail}
+            None=>break
+        }}
+    }
+    out
+}
+fn checker_collect_loan_sources_opt(c:*mut Checker,e:Option<Box<Expr> >)->i64 with Mut,Panic,Div,Alloc,IO {
+    match e {Some(value)=>checker_collect_loan_sources(c,*value,0,0),None=>0}
+}
+fn checker_loan_sources_local(c:*mut Checker,sources:i64)->i64 with Mut,Panic,Div {
+    if sources<0 {return 1}
+    var cursor=sources
+    var count:i64=0
+    while cursor!=0 && count<4096 {
+        let edge=cursor as *mut PersistentLoanEdge
+        if (*edge).kind>=3 {cursor=(*edge).next;count=count+1;continue}
+        var i:i64=0
+        var found=false
+        while i<(*c).borrows.count {
+            if (*c).borrows.entries[i as usize].binding_id==(*edge).owner {
+                found=true
+                if (*c).borrows.entries[i as usize].scope_depth>=2 {return 1}
+            }
+            i=i+1
+        }
+        if !found {return 1}
+        cursor=(*edge).next
+        count=count+1
+    }
+    if cursor!=0 {return 1}
+    0
+}
+
 // Escape provenance (raw-reference escape analysis)
 //
 // 0 = first-class: rooted in a reference parameter / global → outlives the frame.
@@ -7663,6 +7934,79 @@ fn checker_expr_provenance_opt(c: *mut Checker, opt: Option<Box<Expr> >) -> i64 
     checker_expr_provenance(c, *ptr)
 }
 
+// Future-name scans are conservative at shadows and at resource bounds. Only
+// complete function-body statements end a loan; nested control-flow blocks keep
+// their enclosing continuation live until the whole control-flow statement ends.
+fn checker_loan_name_in_expr(c:*mut Checker,name:Name,e:Expr,depth:i64)->bool with Mut,Panic,Div,Alloc,IO {
+    if depth>=64 {return true}
+    if e.kind==ExprKind::ExprIdent && name_eq(e.name,name) {return true}
+    match e.left {Some(x)=>{if checker_loan_name_in_expr(c,name,*x,depth+1) {return true}},None=>{}}
+    match e.right {Some(x)=>{if checker_loan_name_in_expr(c,name,*x,depth+1) {return true}},None=>{}}
+    match e.else_expr {Some(x)=>{if checker_loan_name_in_expr(c,name,*x,depth+1) {return true}},None=>{}}
+    match e.closure_body {Some(x)=>{if checker_loan_name_in_expr(c,name,*x,depth+1) {return true}},None=>{}}
+    match e.block {Some(b)=>{if checker_loan_name_in_stmts(c,name,(*b).stmts,depth+1) {return true}},None=>{}}
+    match e.handler_block {Some(b)=>{if checker_loan_name_in_stmts(c,name,(*b).stmts,depth+1) {return true}},None=>{}}
+    var args=e.args
+    var guard:i64=0
+    while guard<4096 {match args {
+        Some(arg)=>{if checker_loan_name_in_expr(c,name,(*arg).head,depth+1) {return true};args=(*arg).tail;guard=guard+1}
+        None=>break
+    }}
+    match args {Some(_)=>return true,None=>{}}
+    var fields=e.fields
+    guard=0
+    while guard<4096 {match fields {
+        Some(field)=>{if checker_loan_name_in_expr(c,name,(*field).head.value,depth+1) {return true};fields=(*field).tail;guard=guard+1}
+        None=>break
+    }}
+    match fields {Some(_)=>return true,None=>{}}
+    var arms=e.arms
+    guard=0
+    while guard<4096 {match arms {
+        Some(arm)=>{
+            if checker_loan_name_in_expr(c,name,(*arm).head.body,depth+1) {return true}
+            match (*arm).head.guard {Some(g)=>{if checker_loan_name_in_expr(c,name,*g,depth+1) {return true}},None=>{}}
+            arms=(*arm).tail;guard=guard+1
+        }
+        None=>break
+    }}
+    match arms {Some(_)=>return true,None=>{}}
+    false
+}
+fn checker_loan_name_in_stmts(c:*mut Checker,name:Name,stmts:Option<Box<StmtList>>,depth:i64)->bool with Mut,Panic,Div,Alloc,IO {
+    if depth>=64 {return true}
+    var cursor=stmts
+    var guard:i64=0
+    while guard<65536 {match cursor {
+        Some(stmt)=>{
+            if name_eq((*stmt).head.name,name) {return true}
+            match (*stmt).head.expr {Some(e)=>{if checker_loan_name_in_expr(c,name,*e,depth+1) {return true}},None=>{}}
+            match (*stmt).head.target {Some(e)=>{if checker_loan_name_in_expr(c,name,*e,depth+1) {return true}},None=>{}}
+            cursor=(*stmt).tail;guard=guard+1
+        }
+        None=>return false
+    }}
+    true
+}
+fn checker_end_statement_loans(c:*mut Checker,remaining:Option<Box<StmtList>>) with Mut,Panic,Div,Alloc,IO {
+    if (*c).borrows.scope_depth!=2 || (*c).borrows.branch_depth!=0 {return}
+    (*c).borrows=borrow_end_temporaries_since((*c).borrows,0)
+    var i:i64=0
+    while i<(*c).borrows.count {
+        var entry=(*c).borrows.entries[i as usize]
+        if !entry.loan_temporary && !entry.loan_pinned && entry.loan_live {
+            if borrow_has_carrier_edge(&(*c).borrows,entry.binding_id) {
+                if !checker_loan_name_in_stmts(c,entry.name,remaining,0) {
+                    entry.loan_live=false
+                    (*c).borrows.entries[i as usize]=entry
+                }
+            }
+        }
+        i=i+1
+    }
+    (*c).borrows=borrow_compact_temporaries((*c).borrows)
+}
+
 fn checker_check_stmts_inplace(c: *mut Checker, opt: Option<Box<StmtList> >) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     var cursor = opt
     var last_ty = ty_unit()
@@ -7683,13 +8027,15 @@ fn checker_check_stmts_inplace(c: *mut Checker, opt: Option<Box<StmtList> >) -> 
                 match (*list).tail {
                     None => {
                         if (*list).head.kind == StmtKind::StmtExpr {
-                            (*c).escape_provenance = checker_expr_provenance_opt(c, (*list).head.expr)
+                            (*c).escape_provenance = checker_expr_provenance_opt(c,(*list).head.expr)
+                            if checker_type_has_ref(c,last_ty,0) && checker_loan_sources_local(c,checker_collect_loan_sources_opt(c,(*list).head.expr))==1 {(*c).escape_provenance=1}
                         } else {
                             (*c).escape_provenance = 0
                         }
                     }
                     Some(_) => {}
                 }
+                checker_end_statement_loans(c,(*list).tail)
                 cursor = (*list).tail
             }
             None => break
@@ -7759,6 +8105,8 @@ fn checker_note_kind_tag_miss(c: *mut Checker, tag: i64) with Mut, IO {
 }
 
 fn checker_check_ident_named(c: *mut Checker, name: Name, span: Span) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    if (*c).suppress_linear_consume_depth==0 && borrow_persistent_state(&(*c).borrows,name)==2 {checker_report_error_at_inplace(c,span,38,0,0,0)}
+    if checker_affine_binding_moved(c,name) {checker_report_error_at_inplace(c,span,39,0,0,0)}
     if !(*c).env.has_binding(name) {
         let fn_sig_id = checker_fn_sigs_find_inplace(c, name)
         if fn_sig_id >= 0 {
@@ -8099,7 +8447,7 @@ fn checker_check_return_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with
             checker_check_refinement_literal_inplace(c, e.span, (*c).current_return_type)
             // Raw-reference escape: `return &local` / `return r` where r is rooted
             // in a frame-local → dangling reference.
-            if checker_expr_provenance(c, *val_expr) == 1 {
+            if checker_expr_provenance(c,*val_expr)==1 || (checker_type_has_ref(c,val_ty,0) && checker_loan_sources_local(c,checker_collect_loan_sources(c,*val_expr,0,0))==1) {
                 checker_report_error_at_inplace(c, e.span, 91, 0, 0, 0)
             }
         }
@@ -8116,7 +8464,61 @@ fn checker_check_return_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with
     ty_never()
 }
 
-fn checker_check_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+fn checker_check_expr_inplace(c:*mut Checker,e:Expr)->TypeEntry with Mut,Panic,Div,Alloc,IO {
+    let temporary_start=(*c).borrows.next_binding_id
+    var borrow_place=false
+    if e.kind==ExprKind::ExprUnary {
+        if e.un_op==UnaryOp::OpDeref || e.un_op==UnaryOp::OpRef || e.un_op==UnaryOp::OpRefMut {
+            match e.left {Some(place)=>{
+                borrow_place=(*place).kind==ExprKind::ExprIdent || (*place).kind==ExprKind::ExprFieldAccess || (*place).kind==ExprKind::ExprIndex || (*place).kind==ExprKind::ExprUnary
+            },None=>{}}
+        }
+    }
+    if borrow_place {(*c).suppress_affine_consume_depth=(*c).suppress_affine_consume_depth+1}
+    let ty=checker_check_expr_inner_inplace(c,e)
+    if borrow_place {(*c).suppress_affine_consume_depth=(*c).suppress_affine_consume_depth-1}
+    let has_ref=checker_type_has_ref(c,ty,0)
+    var value_sources:i64=0
+    if has_ref {
+        let previous_kind=(*c).loan_result_kind
+        (*c).loan_result_kind=if checker_type_has_affine_borrow(c,ty) {2} else {1}
+        value_sources=checker_collect_loan_sources(c,e,0,0)
+        (*c).loan_result_kind=previous_kind
+        checker_loan_result_record(c,e,value_sources)
+    } else {
+        if e.kind==ExprKind::ExprCall || e.kind==ExprKind::ExprMethodCall
+            || e.kind==ExprKind::ExprStructLit || e.kind==ExprKind::ExprFieldAccess
+            || e.kind==ExprKind::ExprIndex || e.kind==ExprKind::ExprBlock
+            || e.kind==ExprKind::ExprIf || e.kind==ExprKind::ExprMatch {
+            checker_loan_result_record(c,e,0)
+        }
+    }
+    // The completed value replaces its child temporaries atomically. No user
+    // expression is evaluated between this release and the new carrier.
+    (*c).borrows=borrow_end_temporaries_since((*c).borrows,temporary_start)
+    if (*c).in_closure_body && e.kind==ExprKind::ExprIdent {
+        let index=(*c).borrows.find(e.name)
+        if index>=0 && index<(*c).closure_capture_count {
+            if has_ref {var captured=(*c).borrows.entries[index as usize];captured.loan_pinned=true;captured.loan_live=true;(*c).borrows.entries[index as usize]=captured}
+        }
+    }
+    if (*c).suppress_affine_consume_depth==0 && (*c).suppress_linear_consume_depth==0 {
+        if checker_type_has_affine_borrow(c,ty) {
+            if e.kind==ExprKind::ExprIdent {checker_set_affine_binding(c,e.name,ty);checker_take_affine_binding(c,e.name,e.span)}
+            if e.kind==ExprKind::ExprFieldAccess || e.kind==ExprKind::ExprIndex {
+                let name=checker_borrow_place_name(c,Some(Box::new(e)))
+                if !name_is_empty(name) {checker_take_affine_binding(c,name,e.span)}
+            }
+        }
+    }
+    if has_ref && !(e.kind==ExprKind::ExprIdent && ((*c).suppress_linear_consume_depth>0 || (*c).suppress_affine_consume_depth>0)) {
+        (*c).borrows=borrow_add_temporary((*c).borrows,value_sources)
+        if (*c).borrows.loan_overflow {checker_report_error_at_inplace(c,e.span,38,0,0,0)}
+    }
+    ty
+}
+
+fn checker_check_expr_inner_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     if checker_expr_depth_exceeded((*c).expr_depth) {
         checker_report_error_at_inplace(c, e.span, 61, (*c).expr_depth, MAX_EXPR_DEPTH, 0)
         return ty_error()
@@ -9197,6 +9599,15 @@ fn checker_merge_if_branches_inplace(c: *mut Checker) with Mut, Panic, Div, Allo
             }
             (*c).borrows.entries[i as usize] = be_merge
         }
+        // Affine values have no Drop obligation. A move on either path makes a
+        // later use unsafe, without requiring both paths to consume the value.
+        if (*c).borrows.entries[i].is_affine && !(*c).borrows.entries[i].is_linear {
+            let then_consumed=(*c).borrows.branch_snap[i*MAX_BRANCH_SNAP+2*d+1]
+            let else_consumed=(*c).borrows.entries[i].consumed
+            var affine_entry=(*c).borrows.entries[i as usize]
+            affine_entry.consumed=then_consumed || else_consumed
+            (*c).borrows.entries[i as usize]=affine_entry
+        }
         i = i + 1
     }
     if mismatch > 0 {
@@ -9633,6 +10044,8 @@ fn checker_check_array_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
 // disjoint fields (`s.x`/`s.y`) do not. Returns 0, 37 (shared vs exclusive)
 // or 38 (exclusive vs any).
 fn checker_place_borrow_conflict_inplace(c: *mut Checker, name: Name, want_excl: bool, self_idx: i64) -> bool with Mut, Panic, Div, Alloc, IO {
+    let persistent=borrow_persistent_state(&(*c).borrows,name)
+    if persistent==2 || (want_excl && persistent!=0) {return true}
     var i: i64 = 0
     while i < (*c).borrows.count {
         if i != self_idx && (*c).borrows.entries[i].state != 0 {
@@ -9925,7 +10338,9 @@ fn checker_check_field_access_inplace(c: *mut Checker, e: Expr) -> TypeEntry wit
     if checker_expr_is_gpu_axis_field(e) {
         return ty_i64()
     }
+    (*c).suppress_affine_consume_depth=(*c).suppress_affine_consume_depth+1
     let base_ty = checker_check_opt_expr_inplace(c, e.left)
+    (*c).suppress_affine_consume_depth=(*c).suppress_affine_consume_depth-1
     if base_ty.kind == TypeKind::TyNamed {
         let struct_idx = struct_table_find((*c).structs, base_ty.name)
         if struct_idx >= 0 {
@@ -10123,7 +10538,9 @@ fn checker_check_field_access_inplace(c: *mut Checker, e: Expr) -> TypeEntry wit
 fn checker_check_index_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     // Base then index, in left->right order (faithful to the by-value c threading:
     // base_pair = check_opt_expr(e.left); then idx_pair = c.check_opt_expr(e.right)).
+    (*c).suppress_affine_consume_depth=(*c).suppress_affine_consume_depth+1
     let base_ty = checker_check_opt_expr_inplace(c, e.left)
+    (*c).suppress_affine_consume_depth=(*c).suppress_affine_consume_depth-1
     let idx_ty = checker_check_opt_expr_inplace(c, e.right)
     // Index must be an integer type (E14). Non-returning: continues to the indexability check below.
     if !is_error_or_unknown(idx_ty) && !is_integer_type(idx_ty) {
@@ -10785,7 +11202,7 @@ fn checker_closure_peer_primitive(c: *mut Checker, e: &Expr) -> Name with Mut, P
     empty_name()
 }
 
-fn checker_closure_param_constraint(c: *mut Checker, param: Name, opt: &Option<Box<Expr>>, known: Name) -> Name with Mut, Panic, Div, Alloc, IO {
+fn checker_closure_param_constraint(c: *mut Checker, param: Name, opt: &Option<Box<Expr> >, known: Name) -> Name with Mut, Panic, Div, Alloc, IO {
     var result = known
     match *opt {
         Some(e) => {
@@ -10840,7 +11257,7 @@ fn checker_closure_param_constraint(c: *mut Checker, param: Name, opt: &Option<B
     result
 }
 
-fn checker_resolve_closure_params_inplace(c: *mut Checker, params: Option<Box<ClosureParamList>>, body: &Option<Box<Expr>>) -> Option<Box<ClosureParamList>> with Mut, Panic, Div, Alloc, IO {
+fn checker_resolve_closure_params_inplace(c: *mut Checker, params: Option<Box<ClosureParamList>>, body: &Option<Box<Expr> >) -> Option<Box<ClosureParamList>> with Mut, Panic, Div, Alloc, IO {
     match params {
         Some(list) => {
             var param = (*list).head
@@ -10868,7 +11285,7 @@ fn checker_resolve_closure_params_inplace(c: *mut Checker, params: Option<Box<Cl
 // Keep the exclusive borrow a direct call argument: a cast around &!c at
 // the caller obscures its call-scoped lifetime from borrow release tracking.
 // The raw pointer stays inside this bridge and never escapes its invocation.
-fn checker_resolve_closure_params_borrowed(c: &!Checker, params: Option<Box<ClosureParamList>>, body: &Option<Box<Expr>>) -> Option<Box<ClosureParamList>> with Mut, Panic, Div, Alloc, IO {
+fn checker_resolve_closure_params_borrowed(c: &!Checker, params: Option<Box<ClosureParamList>>, body: &Option<Box<Expr> >) -> Option<Box<ClosureParamList>> with Mut, Panic, Div, Alloc, IO {
     checker_resolve_closure_params_inplace(c as *mut Checker, params, body)
 }
 
@@ -10907,10 +11324,13 @@ fn checker_check_closure_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry wit
     // check_callee_effects widens current_effects instead of firing E035. The
     // widened set is captured into inferred_effects below and published onto the
     // closure's FnSig. A named fn body never sets this, so E035 stays in force there.
+    let saved_capture_count=(*c).closure_capture_count
+    (*c).closure_capture_count=outer_borrow_count
     let saved_in_closure = (*c).in_closure_body
     (*c).in_closure_body = true
     let body_ty = checker_check_opt_expr_inplace(c, e.closure_body)
     (*c).in_closure_body = saved_in_closure
+    (*c).closure_capture_count=saved_capture_count
 
     let inferred_ret_ty = if ret_ty.kind == TypeKind::TyUnknown {
         body_ty
@@ -11291,7 +11711,9 @@ fn checker_check_method_call_inplace(c: *mut Checker, e: Expr) -> TypeEntry with
         return ty_unit()
     }
     (*c).suppress_linear_consume_depth = (*c).suppress_linear_consume_depth + 1
+    (*c).suppress_affine_consume_depth=(*c).suppress_affine_consume_depth+1
     let base_ty = checker_check_opt_expr_inplace(c, e.left)
+    (*c).suppress_affine_consume_depth=(*c).suppress_affine_consume_depth-1
     if (*c).suppress_linear_consume_depth > 0 {
         (*c).suppress_linear_consume_depth = (*c).suppress_linear_consume_depth - 1
     }
@@ -11369,6 +11791,15 @@ fn checker_check_expr_list_no_type_no_linear_consume_inplace(c: *mut Checker, op
     }
 }
 
+fn checker_hold_value_arg_loan(c:*mut Checker,arg:Expr,ty:TypeEntry,implicit_borrow:bool) with Mut,Panic,Div,Alloc,IO {
+    if implicit_borrow || arg.kind!=ExprKind::ExprIdent {return}
+    if checker_type_has_ref(c,ty,0) {
+        let sources=checker_collect_loan_sources(c,arg,0,0)
+        (*c).borrows=borrow_add_temporary((*c).borrows,sources)
+        if (*c).borrows.loan_overflow {checker_report_error_at_inplace(c,arg.span,38,0,0,0)}
+    }
+}
+
 fn checker_check_one_call_arg_inplace(c: *mut Checker, arg_expr: Expr, param_info: FnParamInfo, call_span: Span) with Mut, Panic, Div, Alloc, IO {
     let implicit_borrow =
         arg_expr.kind == ExprKind::ExprIdent &&
@@ -11413,6 +11844,7 @@ fn checker_check_one_call_arg_inplace(c: *mut Checker, arg_expr: Expr, param_inf
             checker_ontology_boundary_check_call_arg_contract_inplace(c, arg_ty, param_info.ty, call_span)
         }
     }
+    if has_param_info && arg_expr.kind==ExprKind::ExprIdent && !implicit_borrow {checker_take_affine_binding(c,arg_expr.name,call_span)}
     if has_param_info &&
        arg_expr.kind == ExprKind::ExprIdent &&
        checker_is_linear_type_inplace(c, arg_ty) &&
@@ -11428,6 +11860,7 @@ fn checker_check_one_call_arg_inplace(c: *mut Checker, arg_expr: Expr, param_inf
             }
         }
     }
+    checker_hold_value_arg_loan(c,arg_expr,arg_ty,implicit_borrow)
 }
 
 // *mut transcription of check_call_args_inner (16907): the arg is checked via the spine;
@@ -11541,6 +11974,7 @@ fn checker_check_call_args_inplace(c: *mut Checker, args: ExprListHandle, params
                 checker_ontology_boundary_check_call_arg_contract_inplace(c, arg_ty, param_info.ty, call_span)
             }
         }
+        if has_param_info && arg_expr.kind==ExprKind::ExprIdent && !implicit_borrow {checker_take_affine_binding(c,arg_expr.name,call_span)}
         if has_param_info &&
            arg_expr.kind == ExprKind::ExprIdent &&
            checker_is_linear_type_inplace(c, arg_ty) &&
@@ -11556,6 +11990,7 @@ fn checker_check_call_args_inplace(c: *mut Checker, args: ExprListHandle, params
                 }
             }
         }
+        checker_hold_value_arg_loan(c,arg_expr,arg_ty,implicit_borrow)
         current = expr_list_handle_next(current)
         idx = idx + 1
     }
@@ -12428,7 +12863,7 @@ fn checker_reject_invalid_implicit_native_builtin_arity_inplace(c: *mut Checker,
     }
 }
 
-fn call_expr_is_static_blob(opt: Option<Box<Expr>>) -> bool with Mut, Panic, Div {
+fn call_expr_is_static_blob(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Div {
     match opt {
         Some(callee) => (*callee).kind == ExprKind::ExprIdent && name_eq((*callee).name, make_name("static_blob_bytes")),
         None => false,
@@ -12952,7 +13387,7 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
         return ns_result
     }
     // Callee via the *mut spine, matched locally so the call path does not pass
-    // Option<Box<Expr>> through another *mut helper boundary.
+    // Option<Box<Expr> > through another *mut helper boundary.
     let callee_ty =
         match e.left {
             Some(callee_expr) => checker_check_expr_inplace(c, *callee_expr)
@@ -13878,6 +14313,8 @@ fn checker_name_is_destructure_temp(n: Name) -> bool {
 // linear-consume in place; returns only the TypeEntry (no 164KB self SRET — the by-value
 // arm's `(c2, ident_ty)` return was the last bridge before crash in 165 deeply-nested cases).
 fn checker_check_ident_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    if (*c).suppress_linear_consume_depth==0 && borrow_persistent_state(&(*c).borrows,e.name)==2 {checker_report_error_at_inplace(c,e.span,38,0,0,0)}
+    if checker_affine_binding_moved(c,e.name) {checker_report_error_at_inplace(c,e.span,39,0,0,0)}
     if !type_env_has_binding(&(*c).env, e.name) {
         // Functions are not bound in env (collect keeps them in fn_sigs only) — resolve a bare
         // function reference via the chunked fn_sigs before reporting E137.
@@ -14668,6 +15105,9 @@ fn checker_check_let_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with Mu
     }
     // Validate refinement predicate on literal initializers
     checker_check_refinement_literal_inplace(c, s.span, bind_ty)
+    let loan_sources=if checker_type_has_ref(c,bind_ty,0) {checker_collect_loan_sources_opt(c,s.expr)} else {0}
+    let loan_provenance=if checker_expr_provenance_opt(c,s.expr)==1 {1} else {checker_loan_sources_local(c,loan_sources)}
+    if !borrow_sources_all_live(&(*c).borrows,loan_sources) {checker_report_error_at_inplace(c,s.span,91,0,0,0)}
     let const_pair = checker_eval_const_int_opt_expr_mut(c, s.expr)
     type_env_bind_mut(&!(*c).env, s.name, bind_ty, false)
     if const_pair.0 != 0 {
@@ -14678,8 +15118,11 @@ fn checker_check_let_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with Mu
     // Track variable for borrow checking (linear if struct is declared linear)
     let lin = checker_is_linear_type_inplace(c, bind_ty) && !checker_name_is_destructure_temp(s.name)
     (*c).borrows = (*c).borrows.track(s.name, lin)
+    checker_set_affine_binding(c,s.name,bind_ty)
     // Propagate escape provenance: `let r = &x` taints r LOCAL; `let r = &self.f` keeps it first-class.
-    (*c).borrows = (*c).borrows.set_provenance(s.name, checker_expr_provenance_opt(c, s.expr))
+    (*c).borrows=borrow_persist_sources((*c).borrows,s.name,loan_sources)
+    if (*c).borrows.loan_overflow {checker_report_error_at_inplace(c,s.span,38,0,0,0)}
+    (*c).borrows = (*c).borrows.set_provenance(s.name,loan_provenance)
     ty_unit()
 }
 
@@ -14754,6 +15197,9 @@ fn checker_check_var_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with Mu
         }
     }
     checker_check_refinement_literal_inplace(c, s.span, bind_ty)
+    let loan_sources=if checker_type_has_ref(c,bind_ty,0) {checker_collect_loan_sources_opt(c,s.expr)} else {0}
+    let loan_provenance=if checker_expr_provenance_opt(c,s.expr)==1 {1} else {checker_loan_sources_local(c,loan_sources)}
+    if !borrow_sources_all_live(&(*c).borrows,loan_sources) {checker_report_error_at_inplace(c,s.span,91,0,0,0)}
     let const_pair = checker_eval_const_int_opt_expr_mut(c, s.expr)
     type_env_bind_mut(&!(*c).env, s.name, bind_ty, true)
     if const_pair.0 != 0 {
@@ -14763,7 +15209,10 @@ fn checker_check_var_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with Mu
     }
     let lin = checker_is_linear_type_inplace(c, bind_ty) && !checker_name_is_destructure_temp(s.name)
     (*c).borrows = (*c).borrows.track(s.name, lin)
-    (*c).borrows = (*c).borrows.set_provenance(s.name, checker_expr_provenance_opt(c, s.expr))
+    checker_set_affine_binding(c,s.name,bind_ty)
+    (*c).borrows=borrow_persist_sources((*c).borrows,s.name,loan_sources)
+    if (*c).borrows.loan_overflow {checker_report_error_at_inplace(c,s.span,38,0,0,0)}
+    (*c).borrows = (*c).borrows.set_provenance(s.name,loan_provenance)
     ty_unit()
 }
 
@@ -14841,6 +15290,8 @@ fn checker_place_writes_through_shared_ref(c: *mut Checker, place: Expr, depth: 
 fn checker_check_assign_mutability_inplace(c: *mut Checker, opt: Option<Box<Expr> >, span: Span) with Mut, Panic, Div, Alloc, IO {
     match opt {
         Some(e) => {
+            let owner=checker_borrow_place_name(c,opt)
+            if !name_is_empty(owner) && borrow_persistent_state(&(*c).borrows,owner)!=0 {checker_report_error_at_inplace(c,span,38,0,0,0)}
             if (*e).kind != ExprKind::ExprIdent && checker_place_writes_through_shared_ref(c, *e, 0) {
                 checker_report_error_at_inplace(c, span, 267, 0, 0, 0)
             }
@@ -14876,6 +15327,13 @@ fn checker_type_has_ref(c: *mut Checker, ty: TypeEntry, depth: i64) -> bool with
             Some(el) => { return checker_type_has_ref(c, *el, depth + 1) }
             None => { return false }
         }
+    }
+    if ty.kind==TypeKind::TyTuple {
+        var elems=ty.tuple_elems
+        while true {match elems {
+            Some(elem)=>{if checker_type_has_ref(c,(*elem).head,depth+1) {return true};elems=(*elem).tail}
+            None=>break
+        }}
     }
     if ty.kind == TypeKind::TyNamed {
         let sidx = struct_table_find((*c).structs, ty.name)
@@ -23159,7 +23617,7 @@ fn checker_arm_body_float_literal_magnitude(ex: Expr) -> f64 with Mut {
     0.0 - 1.0
 }
 
-fn checker_else_arm_float_literal_expr(opt: Option<Box<Expr>>) -> Option<Expr> with Mut {
+fn checker_else_arm_float_literal_expr(opt: Option<Box<Expr> >) -> Option<Expr> with Mut {
     match opt {
         Some(ee) => {
             let ex = *ee
