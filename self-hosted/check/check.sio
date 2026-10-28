@@ -4772,6 +4772,7 @@ fn checker_collect_global_item_inplace(
     name: Name,
     declared_ty: Option<Box<TypeExpr>>
 ) with Mut, Panic, Div, Alloc, IO {
+    checker_defined_name_note(name)
     match declared_ty {
         Some(te) => {
             // Validate the annotation at the checker boundary, but preserve the
@@ -4959,10 +4960,213 @@ var CHECKER_USE_MODULE_OVERFLOWED: bool = false
 // Checker needs updating.
 var CHECKER_USE_MODULE_OVERFLOW_REPORTED: bool = false
 
+// SIO-346: selective-import validation. checker_collect_use_item_inplace binds
+// every braced name (`use m::{a, b}`) as import-unknown without asking whether
+// the target module defines it, so `use cmp::lib::{no_such_fn}` checked clean
+// and a call to the phantom name lowered to a body-less stub (SIGILL at run
+// time). Braced names are recorded here at collect time (with the use path
+// flattened to text and the item span); checker_validate_selective_imports_
+// inplace runs after every module's collect pass, when a real definition --
+// fn signature, struct, enum, or enum variant -- exists in the shared tables
+// for every legitimately imported name. A recorded name with no definition
+// anywhere is refused with a diagnostic naming the name and the module path.
+// Same fail-closed overflow rule as the registry above: past capacity the
+// compile is refused, never silently under-validated.
+let CHECKER_SEL_IMPORT_CAP: i64 = 4096
+var CHECKER_SEL_IMPORT_COUNT: i64 = 0
+var CHECKER_SEL_IMPORT_NAME_LEN: [i64; 4096] = [0; 4096]
+var CHECKER_SEL_IMPORT_NAME_BUF: [i8; 1572864] = [0; 1572864]
+var CHECKER_SEL_IMPORT_PATH_LEN: [i64; 4096] = [0; 4096]
+var CHECKER_SEL_IMPORT_PATH_BUF: [i8; 1572864] = [0; 1572864]
+var CHECKER_SEL_IMPORT_SPAN_START: [i64; 4096] = [0; 4096]
+var CHECKER_SEL_IMPORT_SPAN_END: [i64; 4096] = [0; 4096]
+var CHECKER_SEL_IMPORT_OVERFLOWED: bool = false
+var CHECKER_SEL_IMPORT_OVERFLOW_REPORTED: bool = false
+
+// Names defined by collect paths that have no searchable table of their own:
+// top-level globals (`let EV_NONE: i64 = 0` in stdlib/display/event.sio binds
+// ty_unknown in the env, indistinguishable there from an import-unknown),
+// type aliases, and unit declarations. Recorded as they are collected so the
+// validation below can tell a real global/alias/unit import from a phantom.
+let CHECKER_DEFINED_NAME_CAP: i64 = 8192
+var CHECKER_DEFINED_NAME_COUNT: i64 = 0
+var CHECKER_DEFINED_NAME_LEN: [i64; 8192] = [0; 8192]
+var CHECKER_DEFINED_NAME_BUF: [i8; 3145728] = [0; 3145728]
+var CHECKER_DEFINED_NAME_OVERFLOWED: bool = false
+
+fn checker_defined_name_note(name: Name) with Mut, Panic, Div {
+    if name.len <= 0 || name.len > 384 { return }
+    if CHECKER_DEFINED_NAME_COUNT >= CHECKER_DEFINED_NAME_CAP {
+        CHECKER_DEFINED_NAME_OVERFLOWED = true
+        return
+    }
+    let at = CHECKER_DEFINED_NAME_COUNT
+    CHECKER_DEFINED_NAME_LEN[at as usize] = name.len
+    var k: i64 = 0
+    while k < name.len {
+        CHECKER_DEFINED_NAME_BUF[(at * 384 + k) as usize] = name.buf[k as usize]
+        k = k + 1
+    }
+    CHECKER_DEFINED_NAME_COUNT = at + 1
+}
+
+fn checker_defined_name_known(name: Name) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < CHECKER_DEFINED_NAME_COUNT {
+        if CHECKER_DEFINED_NAME_LEN[i as usize] == name.len {
+            var eq = true
+            var k: i64 = 0
+            while k < name.len {
+                if CHECKER_DEFINED_NAME_BUF[(i * 384 + k) as usize] != name.buf[k as usize] { eq = false }
+                k = k + 1
+            }
+            if eq { return true }
+        }
+        i = i + 1
+    }
+    false
+}
+
+fn checker_selective_import_reset() with Mut {
+    CHECKER_SEL_IMPORT_COUNT = 0
+    CHECKER_SEL_IMPORT_OVERFLOWED = false
+    CHECKER_SEL_IMPORT_OVERFLOW_REPORTED = false
+    CHECKER_DEFINED_NAME_COUNT = 0
+    CHECKER_DEFINED_NAME_OVERFLOWED = false
+}
+
+fn checker_selective_import_note(path: AstPath, items: Option<Box<ImportItemList> >, span: Span) with Mut, Panic, Div, Alloc {
+    // Flatten the use path to "a::b::c" text once, for the diagnostic.
+    var path_buf: [i8; 384] = [0; 384]
+    var path_len: i64 = 0
+    var seg = path.segments
+    var seg_idx: i64 = 0
+    var more = true
+    while more && seg_idx < path.seg_count && seg_idx < 32 {
+        if seg_idx > 0 && path_len + 2 < 384 {
+            path_buf[path_len as usize] = 58  // ':'
+            path_buf[(path_len + 1) as usize] = 58
+            path_len = path_len + 2
+        }
+        var j: i64 = 0
+        while j < seg.head_len && j < 128 && path_len < 384 {
+            path_buf[path_len as usize] = seg.head_buf[j as usize]
+            path_len = path_len + 1
+            j = j + 1
+        }
+        match seg.tail {
+            Some(t) => { seg = *t }
+            None => { more = false }
+        }
+        seg_idx = seg_idx + 1
+    }
+    var cursor = items
+    while true {
+        match cursor {
+            Some(node) => {
+                let name = (*node).head
+                if CHECKER_SEL_IMPORT_COUNT >= CHECKER_SEL_IMPORT_CAP {
+                    CHECKER_SEL_IMPORT_OVERFLOWED = true
+                } else if name.len > 0 && name.len <= 384 {
+                    let at = CHECKER_SEL_IMPORT_COUNT
+                    CHECKER_SEL_IMPORT_NAME_LEN[at as usize] = name.len
+                    var k: i64 = 0
+                    while k < name.len {
+                        CHECKER_SEL_IMPORT_NAME_BUF[(at * 384 + k) as usize] = name.buf[k as usize]
+                        k = k + 1
+                    }
+                    CHECKER_SEL_IMPORT_PATH_LEN[at as usize] = path_len
+                    var p: i64 = 0
+                    while p < path_len {
+                        CHECKER_SEL_IMPORT_PATH_BUF[(at * 384 + p) as usize] = path_buf[p as usize]
+                        p = p + 1
+                    }
+                    CHECKER_SEL_IMPORT_SPAN_START[at as usize] = span.start
+                    CHECKER_SEL_IMPORT_SPAN_END[at as usize] = span.end
+                    CHECKER_SEL_IMPORT_COUNT = at + 1
+                }
+                cursor = (*node).tail
+            }
+            None => break
+        }
+    }
+}
+
+fn checker_selective_import_name_at(at: i64) -> Name with Mut, Panic, Div {
+    var buf: [i8; 384] = [0; 384]
+    let len = CHECKER_SEL_IMPORT_NAME_LEN[at as usize]
+    var k: i64 = 0
+    while k < len && k < 384 {
+        buf[k as usize] = CHECKER_SEL_IMPORT_NAME_BUF[(at * 384 + k) as usize]
+        k = k + 1
+    }
+    Name { buf: buf, len: len }
+}
+
+fn checker_selective_import_resolves(c: *mut Checker, name: Name) -> bool with Mut, Panic, Div, Alloc, IO {
+    if checker_fn_sigs_find_inplace(c, name) >= 0 { return true }
+    if struct_table_find((*c).structs, name) >= 0 { return true }
+    if enum_table_find((*c).enums, name) >= 0 { return true }
+    if enum_table_find_variant_enum((*c).enums, name) >= 0 { return true }
+    if checker_defined_name_known(name) { return true }
+    false
+}
+
+pub fn checker_validate_selective_imports_inplace(c: *mut Checker) with Mut, Panic, Div, Alloc, IO {
+    if CHECKER_DEFINED_NAME_OVERFLOWED {
+        // The defined-name table lost entries, so "not found" below could be
+        // a lost global/alias/unit rather than a phantom. Fail closed, once
+        // per Checker (the flag stays set for this compile).
+        if !CHECKER_SEL_IMPORT_OVERFLOW_REPORTED {
+            CHECKER_SEL_IMPORT_OVERFLOW_REPORTED = true
+            (*c).error_count = (*c).error_count + 1
+            (*c).had_error = true
+            print("error[E-USE-ITEM-CAP]: defined-name registry is full (")
+            print_int(CHECKER_DEFINED_NAME_CAP)
+            print(" globals/aliases/units) -- refusing rather than risk refusing a real selective import\n")
+        }
+        return
+    }
+    if CHECKER_SEL_IMPORT_OVERFLOWED && !CHECKER_SEL_IMPORT_OVERFLOW_REPORTED {
+        CHECKER_SEL_IMPORT_OVERFLOW_REPORTED = true
+        (*c).error_count = (*c).error_count + 1
+        (*c).had_error = true
+        print("error[E-USE-ITEM-CAP]: selective-import registry is full (")
+        print_int(CHECKER_SEL_IMPORT_CAP)
+        print(" braced names) -- refusing rather than silently under-validating the rest of this compile\n")
+    }
+    var i: i64 = 0
+    while i < CHECKER_SEL_IMPORT_COUNT {
+        let name = checker_selective_import_name_at(i)
+        if !checker_selective_import_resolves(c, name) {
+            (*c).error_count = (*c).error_count + 1
+            (*c).had_error = true
+            print("error[E-USE-ITEM] at ")
+            print_int(CHECKER_SEL_IMPORT_SPAN_START[i as usize])
+            print("..")
+            print_int(CHECKER_SEL_IMPORT_SPAN_END[i as usize])
+            print(": selective import of `")
+            e035_print_ident(name)
+            print("` from `")
+            var p: i64 = 0
+            let path_len = CHECKER_SEL_IMPORT_PATH_LEN[i as usize]
+            while p < path_len && p < 384 {
+                print_char(CHECKER_SEL_IMPORT_PATH_BUF[(i * 384 + p) as usize] as i64)
+                p = p + 1
+            }
+            print("` names no definition in the loaded modules\n")
+            print("   = note: the module does not export a function, struct, enum, or variant with that name; ")
+            print("refusing instead of binding an import-unknown that lowers to a body-less stub\n")
+        }
+        i = i + 1
+    }
+}
+
 fn checker_use_module_reset() with Mut {
     CHECKER_USE_MODULE_COUNT = 0
     CHECKER_USE_MODULE_OVERFLOWED = false
     CHECKER_USE_MODULE_OVERFLOW_REPORTED = false
+    checker_selective_import_reset()
 }
 
 fn checker_use_module_known(module_id: i64, n: Name) -> bool with Mut, Panic, Div {
@@ -5229,6 +5433,12 @@ fn checker_collect_known_module_backing_imports_inplace(c: *mut Checker, path: A
 
 fn checker_collect_use_item_inplace(c: *mut Checker, item: Item) with Mut, Panic, Div, Alloc, IO {
     checker_collect_import_item_list_inplace(c, item.use_items)
+    // SIO-346: record braced names for post-collect validation (the binding
+    // above is import-unknown by design; whether the name is real can only be
+    // known once every loaded module has been collected).
+    if !item.use_glob && item.use_items != None {
+        checker_selective_import_note(item.use_path, item.use_items, item.span)
+    }
     // Path-form named import `use module::symbol` (no braces, no glob): the
     // parser leaves the symbol as the last path segment with use_items=None.
     // Bind that last segment so visibility preflight does not E137 it when the
@@ -5394,13 +5604,12 @@ fn checker_collect_runtime_builtins_inplace(c: *mut Checker) with Mut, Panic, Di
     // surface as E137 undeclared (heap_free, f64_to_bits, ...).
     checker_bind_import_unknown_inplace(c, make_name("heap_alloc"))
     checker_bind_import_unknown_inplace(c, make_name("heap_free"))
-    // heap_realloc has a real definition (stdlib/mem/box.sio, extern "C" realloc)
-    // -- unlike read_f64 etc it is NOT a compiler-codegen builtin, it just needs
-    // the same implicit-global registration heap_alloc/heap_free already have,
-    // or callers that don't `use` it explicitly (stdlib/data/bigframe.sio,
-    // stdlib/collections/heap_vec.sio) trip E137. Found alongside Defect A
-    // while validating its fix against a real bigframe consumer test, not part
-    // of the read_i64/write_i64/read_f64/write_f64 family itself.
+    // heap_realloc is a native-backend builtin since #874 (id 71, mremap over
+    // the 16-byte heap header; before it compiled to a ud2 stub). It also has
+    // a libc-backed definition in stdlib/mem/box.sio for programs that import
+    // that module. Callers that don't `use` it explicitly
+    // (stdlib/data/bigframe.sio, stdlib/collections/heap_vec.sio) need this
+    // implicit-global registration or they trip E137.
     checker_bind_import_unknown_inplace(c, make_name("heap_realloc"))
     checker_bind_import_unknown_inplace(c, make_name("f64_to_bits"))
     checker_bind_import_unknown_inplace(c, make_name("bits_to_f64"))
@@ -6306,6 +6515,7 @@ fn checker_collect_ontology_def_inplace(c: *mut Checker, opt: Option<Box<Ontolog
 }
 
 fn checker_collect_unit_decl_inplace(c: *mut Checker, name: Name, conv: Option<Box<TypeExpr> >) with Mut, Panic, Div, Alloc, IO {
+    checker_defined_name_note(name)
     // *mut transcription of Checker::collect_unit_decl. Registers a
     // user-declared unit of measure so that a type annotation naming it
     // lowers to ty_with_unit(ty_f64(), idx) instead of an opaque ty_named --
@@ -6463,6 +6673,7 @@ fn checker_collect_algebra_def_inplace(c: *mut Checker, opt: Option<Box<AlgebraD
 }
 
 fn checker_collect_type_alias_inplace(c: *mut Checker, name: Name, ty_opt: Option<Box<TypeExpr> >) with Mut, Panic, Div, Alloc, IO {
+    checker_defined_name_note(name)
     match ty_opt {
         Some(te_box) => {
             let te = *te_box
@@ -12617,7 +12828,21 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
                             // same scoping judgment on a related finding).
                             let free_fn_sig_id = checker_fn_sigs_find_inplace(c, path_method_name)
                             if free_fn_sig_id < 0 || !checker_path_qualifier_all_modules_known(c, (*callee_expr).path) {
-                                checker_report_warning_at_mut(c, e.span, 44, 0, 0, 0)
+                                // #1568: this used to be W044, a WARNING -- `check` reported
+                                // success and the lowerer then emitted a body-less mangled stub
+                                // that native codegen turns into ud2 (SIGILL at run time, or a
+                                // silent 0 on older binaries). A call whose target resolves to
+                                // no definition is refused here instead (E266), before any code
+                                // is produced. lean_single already refuses the same programs.
+                                //
+                                // The condition is a disjunction (PR #2844 review).
+                                // `free_fn_sig_id < 0` is a qualifier the caller did `use`,
+                                // whose terminal function does not exist
+                                // (`use testmod::tc_c` then `tc_c::missing_fn()`). The other
+                                // arm is a qualifier that is not a known module. One message
+                                // covers both; naming only the qualifier tells the first
+                                // program that its import is missing.
+                                checker_report_error_at_inplace(c, e.span, 266, 0, 0, 0)
                             } else {
                                 direct_sig_id = free_fn_sig_id
                             }
@@ -19300,6 +19525,7 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 251 { print("product variance shortcut is unsound beyond the octonions: |xy| != |x||y| on Sedenion/Clifford, so Var(x*y) = |y|^2 Var x + |x|^2 Var y fabricates precision") }
     else if code == 252 { print("algebra declares a reassociation strategy its multiplication law cannot certify: `free` needs an associative product, `fano_selective` needs the octonion level") }
     else if code == 264 { print("enum variant with a payload is not supported by this compiler: the native lowering represents an enum value as a bare discriminant, so the payload would be dropped") }
+    else if code == 266 { print("qualified call resolves to no definition: the qualifier is unresolved or the target function is undefined") }
     else if code == 267 { print("cannot assign through a shared reference: the place is reached through `&T`, which is read-only") }
     else if code == 269 { print("a `where` refinement on Knowledge<T> is not enforced by this compiler yet: the predicate would be silently ignored, so it is refused") }
     else if code == 270 { print("`as string` does not convert a number, bool or char to text: no engine formats the value, so the cast is refused") }
@@ -19629,7 +19855,7 @@ fn print_error_help(code: i64) with IO, Mut, Panic, Div {
     }
     else if code == 250 {
         print("   |\n   = help: only these body-less names are implemented: print, print_int, print_char, print_f64, get_arg, get_arg_count, str_len, str_char_at, str_eq, str_slice, starts_with, str_concat,")
-        print(" str_from_bytes, read_file, write_file, file_size, sqrt, exp, log, sin, cos, assert, heap_alloc, heap_free, f64_to_bits, bits_to_f64, syscall6, malloc, free, getpid, getppid, exit, abort, system,")
+        print(" str_from_bytes, read_file, write_file, file_size, sqrt, exp, log, sin, cos, assert, heap_alloc, heap_free, heap_realloc, f64_to_bits, bits_to_f64, syscall6, malloc, free, getpid, getppid, exit, abort, system,")
         print(" read_i64, write_i64, read_f64, write_f64\n")
     }
     else if code == 230 {
@@ -19649,6 +19875,9 @@ fn print_error_help(code: i64) with IO, Mut, Panic, Div {
         print("\n   =       (then the reported variance overstates, which is safe); `/` refuses")
         print("\n   =       any shared source, because its dropped term also depends on the sign")
         print("\n   =       of the product of the operand values, which is not tracked.\n")
+    }
+    else if code == 266 {
+        print("   |\n   = help: add a `use` for the module (e.g. `use a::b::f` or `use a::b`), or call a function/associated function that exists\n")
     }
     else if code == 267 {
         print("   |\n   = help: take the parameter or binding as an exclusive reference `&!T` (and pass `&!x` at the call site) to modify it\n")
@@ -20601,7 +20830,7 @@ fn name_is_native_backend_builtin(n: Name) -> bool with Mut, Panic, Div, Alloc, 
     if name_eq(n, make_name("str_from_bytes")) { return true }   // id 22
     if name_eq(n, make_name("heap_alloc")) { return true }       // id 23
     if name_eq(n, make_name("heap_free")) { return true }        // id 24
-    if name_eq(n, make_name("heap_realloc")) { return true }     // id 71
+    if name_eq(n, make_name("heap_realloc")) { return true }     // id 71 (#874)
     if name_eq(n, make_name("f64_to_bits")) { return true }      // id 25
     if name_eq(n, make_name("bits_to_f64")) { return true }      // id 26
     if name_eq(n, make_name("syscall6")) { return true }         // id 27

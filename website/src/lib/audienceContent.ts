@@ -21,9 +21,9 @@ export const heroContent: Record<Audience, {
     subtitle:
       'When you compute a drug dose, an fMRI threshold, or a climate projection, the answer is a number. But how confident is that number? Where did the input data come from? What happens when the measurement error matters? Sounio is a programming language that tracks all of this automatically.',
     cta1Label: 'See How Labs Use Sounio',
-    cta1Href: '/science',
+    cta1Href: '/science/',
     cta2Label: 'Explore a Dosing Example',
-    cta2Href: '/learn/vancomycin-uncertainty',
+    cta2Href: '/learn/vancomycin-uncertainty/',
   },
   technical: {
     badge: 'CURRENT CONTRACT \u00B7 BETA COMPILER + GATED STDLIB',
@@ -32,9 +32,9 @@ export const heroContent: Record<Audience, {
     subtitle:
       'Sounio combines explicit uncertainty, provenance-aware types, and gate-backed compiler workflows. The current repo is strongest as a check-first platform with validated scientific lanes, not as a fully finished all-backends release.',
     cta1Label: 'Read the Current Contract',
-    cta1Href: '/learn/getting-started',
+    cta1Href: '/learn/getting-started/',
     cta2Label: 'Open Playground',
-    cta2Href: '/playground',
+    cta2Href: '/playground/',
   },
 };
 
@@ -189,16 +189,16 @@ export const bottomCta: Record<Audience, {
     heading: 'Ready to stop guessing?',
     body: 'Start with the vancomycin dosing case study \u2014 a real example of how Sounio tracks confidence from raw measurement to clinical decision.',
     cta1Label: 'See the Vancomycin Case Study',
-    cta1Href: '/docs/vancomycin-uncertainty',
+    cta1Href: '/learn/vancomycin-uncertainty/',
     cta2Label: 'Browse Scientific Domains',
-    cta2Href: '/science',
+    cta2Href: '/science/',
     showShellCommand: false,
   },
   technical: {
     heading: 'Ship scientific software that explains itself.',
     body: 'Start with the parts of Sounio that are already verified, then expand into the self-hosted and domain-specific lanes with the gate artifacts in hand.',
     cta1Label: 'Enter the Learning Hub',
-    cta1Href: '/learn',
+    cta1Href: '/learn/',
     cta2Label: 'Explore on GitHub',
     cta2Href: 'https://github.com/sounio-lang/sounio',
     showShellCommand: true,
