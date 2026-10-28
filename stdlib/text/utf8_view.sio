@@ -1,0 +1,48 @@
+// A checked scalar-boundary byte span borrowing the original Utf8Text owner.
+// Offsets and next positions are bytes relative to this view; scalar length
+// is explicit. Embedded NUL is retained. Payload bytes are borrowed without copying.
+use core::result::{Result}
+use collections::byte_buffer::{ByteValue}
+use text::utf8::{Utf8Text,utf8_text_status,utf8_text_byte_len,utf8_text_byte_at,utf8_text_next}
+use text::utf8_scalar::{Utf8Scalar}
+pub struct Utf8View {owner:&Utf8Text,start:i64,size:i64}
+fn utf8_view_boundary(owner:&Utf8Text,at:i64,count:i64)->bool {
+ if at==count {return true}
+ let byte=utf8_text_byte_at(owner,at)
+ byte.status==0 && (byte.value&192)!=128
+}
+pub fn utf8_view_new(owner:&Utf8Text,start:i64,end:i64)->Result<Utf8View,i64> {
+ let status=utf8_text_status(owner)
+ if status!=0 {return Result::Err(status)}
+ let count=utf8_text_byte_len(owner)
+ if start<0 || end<start || end>count {return Result::Err(4)}
+ if !utf8_view_boundary(owner,start,count) || !utf8_view_boundary(owner,end,count) {return Result::Err(5)}
+ Result::Ok(Utf8View {owner:owner,start:start,size:end-start})
+}
+pub fn utf8_view_byte_len(view:&Utf8View)->i64 {view.size}
+pub fn utf8_view_byte_at(view:&Utf8View,index:i64)->ByteValue {
+ if index<0 || index>=view.size {return ByteValue {value:0,status:4}}
+ utf8_text_byte_at(view.owner,view.start+index)
+}
+pub fn utf8_view_next(view:&Utf8View,offset:i64)->Utf8Scalar {
+ if offset<0 || offset>=view.size {return Utf8Scalar {codepoint:0,next:offset,status:4}}
+ let scalar=utf8_text_next(view.owner,view.start+offset)
+ if scalar.status!=0 {return Utf8Scalar {codepoint:0,next:offset,status:scalar.status}}
+ if scalar.next>view.start+view.size {return Utf8Scalar {codepoint:0,next:offset,status:5}}
+ Utf8Scalar {codepoint:scalar.codepoint,next:scalar.next-view.start,status:0}
+}
+pub fn utf8_view_scalar_len(view:&Utf8View)->i64 {
+ var at:i64=0
+ var count:i64=0
+ while at<view.size {
+  let scalar=utf8_view_next(view,at)
+  if scalar.status!=0 || scalar.next<=at {return 0-1}
+  at=scalar.next
+  count=count+1
+ }
+ count
+}
+pub fn utf8_view_slice(view:&Utf8View,start:i64,end:i64)->Result<Utf8View,i64> {
+ if start<0 || end<start || end>view.size {return Result::Err(4)}
+ utf8_view_new(view.owner,view.start+start,view.start+end)
+}
