@@ -7,12 +7,15 @@ import crypto from 'node:crypto';
 import {spawn} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 import {walk} from './inventory.mjs';
+import {runCompoundGates} from './compound_gates.mjs';
+import {createCompilerBinding,compilerEnvironment,verifyCompilerBinding} from './compiler_binding.mjs';
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'../..');
-let output='',jobs=2,slow=false,acceptance=false,partition='directory';
+let output='',jobs=2,slow=false,acceptance=false,compound=false,partition='directory';
 for(let i=2;i<process.argv.length;i++) {
   const a=process.argv[i];
-  if(a==='--help'){console.log('run_full_suite.mjs --out-dir ABS_FRESH_PATH [--jobs N] [--slow] [--acceptance] [--partition directory|file]');process.exit(0);}
+  if(a==='--help'){console.log('run_full_suite.mjs --out-dir ABS_FRESH_PATH [--jobs N] [--slow] [--acceptance] [--partition directory|file] [--compound-gates]');process.exit(0);}
   if(a==='--partition'){partition=process.argv[++i];if(!['directory','file'].includes(partition))throw Error('invalid partition');continue;}
+  if(a==='--compound-gates'){compound=true;continue;}
   if(a==='--slow'){slow=true;continue;}
   if(a==='--acceptance'){acceptance=true;continue;}
   if(a==='--out-dir'){output=process.argv[++i]||'';continue;}
@@ -22,6 +25,7 @@ for(let i=2;i<process.argv.length;i++) {
 if(!path.isAbsolute(output)||!Number.isSafeInteger(jobs)||jobs>64)throw Error('require absolute fresh output and jobs<=64');
 if(acceptance&&!slow)throw Error('acceptance requires --slow');
 fs.mkdirSync(output);
+const compilerBinding=compound?createCompilerBinding(process.env.MADAROS_RAW_BIN,output):null;
 const hash=p=>crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex');
 const paths=walk(path.join(root,'tests/stdlib'),false).filter(p=>p.endsWith('.sio')).map(p=>path.relative(root,p)).sort();
 if(paths.length===0)throw Error('empty test selection');
@@ -58,7 +62,7 @@ async function worker(workerIndex) {
     const log=fs.openSync(path.join(output,stem+'.log'),'wx');
     const args=[path.join(workerRoot,'scripts/stdlib/run_stdlib_e2e.sh'),'--filter',prefix,'--json-out',path.join(output,stem+'.json'),'--verbose'];
     if(process.env.STDLIB_FULL_CAPTURE==='1')args.push('--artifacts-dir',path.join(output,stem+'.capture'));
-    const env={...process.env};if(partition==='file'&&(!env.SOUNIO_STDLIB_PATH||path.resolve(env.SOUNIO_STDLIB_PATH)===path.join(root,'stdlib')))env.SOUNIO_STDLIB_PATH=path.join(workerRoot,'stdlib');if(slow)env.SOUNIO_SLOW_TESTS_AVAILABLE='1';
+    const env=compound?compilerEnvironment(compilerBinding):{...process.env};if(partition==='file'&&(!env.SOUNIO_STDLIB_PATH||path.resolve(env.SOUNIO_STDLIB_PATH)===path.join(root,'stdlib')))env.SOUNIO_STDLIB_PATH=path.join(workerRoot,'stdlib');if(slow)env.SOUNIO_SLOW_TESTS_AVAILABLE='1';
     const result=await new Promise(resolve=>{
       const child=spawn('bash',args,{cwd:workerRoot,env,detached:true,stdio:['ignore',log,log]});active.add(child);
       let settled=false;
@@ -73,6 +77,7 @@ const seen=new Set(),results=[],errors=[];
 for(const r of receipts.sort((a,b)=>a.stem.localeCompare(b.stem))) {
   try {
     const doc=JSON.parse(fs.readFileSync(path.join(output,r.stem+'.json'),'utf8'));
+    if(compound&&doc.context?.souc_bin!==compilerBinding.launcher)throw Error('standalone compiler launcher mismatch');
     if(doc.schema!=='sounio.stdlib.e2e.result.v1'||!Array.isArray(doc.results))throw Error('invalid result schema');
     if(![0,1].includes(r.code))throw Error('producer aborted '+JSON.stringify(r));
     const totals={pass:0,fail:0,skip:0,total:doc.results.length};
@@ -85,6 +90,11 @@ for(const r of receipts.sort((a,b)=>a.stem.localeCompare(b.stem))) {
   }catch(e){errors.push({prefix:r.prefix,error:e.message});}
 }
 for(const p of paths)if(!seen.has(p))errors.push({path:p,error:'missing test result'});
+let compoundReceipts=[];
+if(compound&&!interrupted){
+ try{compoundReceipts=await runCompoundGates({root,output:path.join(output,'compound'),results,inputs:initial,onChild:c=>active.add(c),onDone:c=>active.delete(c),shouldStop:()=>interrupted,compiler:compilerBinding});}
+ catch(error){errors.push({error:'compound execution: '+error.message});}
+}
 for(const p of initial)if(hash(path.join(root,p.path))!==p.sha256)errors.push({path:p.path,error:'test input changed during execution'});
 if(partition==='file')for(const input of copyInvariants){
  try{if(hash(path.join(root,input.path))!==input.sha256)errors.push({path:input.path,error:'source changed during execution'});}
@@ -94,15 +104,16 @@ if(partition==='file')for(const copy of workerRoots)for(const input of copyInvar
  try{if(hash(path.join(copy,input.path))!==input.sha256)errors.push({path:input.path,worker_root:copy,error:'worker source changed during execution'});}
  catch(error){errors.push({path:input.path,worker_root:copy,error:'worker source missing: '+error.message});}
 }
+if(compound){try{verifyCompilerBinding(compilerBinding);}catch(error){errors.push({error:error.message});}}
 const totals={pass:0,fail:0,skip:0,total:results.length};
 for(const r of results)totals[r.status]++;
 if(totals.pass===0)errors.push({error:'no executed passing tests'});
 if(acceptance&&totals.skip!==0)errors.push({error:'acceptance contains skipped tests'});
 const doc={schema:'sounio.stdlib.e2e.result.v1',generated_at_utc:new Date().toISOString(),
- command:'node scripts/stdlib/run_full_suite.mjs',context:{root_dir:root,slow_enabled:slow,acceptance,jobs,partition,worker_roots:workerRoots},
+ command:'node scripts/stdlib/run_full_suite.mjs',context:{root_dir:root,slow_enabled:slow,acceptance,compound_enabled:compound,compiler_binding:compilerBinding,jobs,partition,worker_roots:workerRoots},
  status_summary:errors.length||interrupted?'not_run':totals.fail?'fail':'pass',totals,
  results:results.sort((a,b)=>a.test_path.localeCompare(b.test_path)),failures:results.filter(r=>r.status==='fail'),
- ignored:results.filter(r=>r.mode==='ignore'),selection_errors:errors,producers:receipts};
+ ignored:results.filter(r=>r.mode==='ignore'),selection_errors:errors,producers:receipts,compound_producers:compoundReceipts};
 fs.writeFileSync(path.join(output,'RESULT.json'),JSON.stringify(doc,null,2)+'\n');
 console.log(JSON.stringify({status:doc.status_summary,totals,selection_errors:errors.length}));
 process.exitCode=doc.status_summary==='pass'?0:1;

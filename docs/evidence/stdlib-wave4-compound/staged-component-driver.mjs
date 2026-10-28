@@ -1,0 +1,16 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import crypto from 'node:crypto';
+import {compoundGates,runCompoundGates} from './compound_gates.mjs';
+import {createCompilerBinding} from './compiler_binding.mjs';
+const root=process.cwd(),out=process.argv[2];
+const doc=JSON.parse(fs.readFileSync('/scratch/sounio-stdlib-wave3-20261027/whole-integrated01/results/full/RESULT.json'));
+const members=compoundGates.flatMap(g=>g.members);
+const rows=doc.results.filter(r=>members.includes(r.test_path)).map(r=>({...r}));
+const inputs=members.map(p=>({path:p,sha256:crypto.createHash('sha256').update(fs.readFileSync(path.join(root,p))).digest('hex')}));
+const bindingDir=path.join(path.dirname(out),'binding');fs.mkdirSync(bindingDir);
+const compiler=createCompilerBinding(process.env.MADAROS_RAW_BIN,bindingDir);
+const receipts=await runCompoundGates({root,output:out,results:rows,inputs,compiler});
+if(rows.length!==10||rows.some(r=>r.status!=='pass'||r.mode!=='compound-native'||r.standalone_result.status!=='skip'))throw Error('compound component failed');
+fs.writeFileSync(path.join(out,'COMPONENT.json'),JSON.stringify({scope:'compound-only;not-whole-suite',rows,receipts},null,2)+'\n');
+console.log('COMPOUND_COMPONENT_PASS');
