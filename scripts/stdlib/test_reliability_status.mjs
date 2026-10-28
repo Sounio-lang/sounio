@@ -30,6 +30,11 @@ try {
   test('producer failure cannot reuse a passing artifact',()=>{reset();assert.equal(aggregate(tmp,paths,{...goodCodes,hyper:1}).status_summary,'fail');});
   test('missing hyper retains E2E results',()=>{reset();fs.unlinkSync(paths.hyper);const r=aggregate(tmp,paths,goodCodes);assert.equal(r.totals.pass,1);assert.equal(r.status_summary,'not_run');});
   test('all skipped receipt cannot pass',()=>{reset();write(paths.e2e,{...e2e,totals:{pass:0,fail:0,skip:1,total:1},results:[{status:'skip',test_path:'tests/stdlib/a.sio'}]});assert.notEqual(aggregate(tmp,paths,goodCodes).status_summary,'pass');});
+  for(const legacy of [false,true])test('mixed pass/skip cannot pass, legacy='+legacy,()=>{
+    reset();const mixed={...e2e,totals:{pass:1,fail:0,skip:1,total:2},results:[e2e.results[0],{status:'skip',test_path:'tests/stdlib/b.sio'}]};
+    if(legacy)delete mixed.status_summary;
+    write(paths.e2e,mixed);const r=aggregate(tmp,paths,goodCodes);assert.notEqual(r.status_summary,'pass');assert(r.notes.includes('e2e_contains_skipped_tests'));
+  });
   test('producer not_run cannot be relabeled',()=>{reset();write(paths.e2e,{...e2e,status_summary:'not_run'});assert.notEqual(aggregate(tmp,paths,goodCodes).status_summary,'pass');});
   test('selection errors cannot pass',()=>{reset();write(paths.e2e,{...e2e,selection_errors:[{error:'missing test'}]});assert.notEqual(aggregate(tmp,paths,goodCodes).status_summary,'pass');});
   test('empty selection fails closed',()=>{reset();write(paths.e2e,{...e2e,totals:{pass:0,fail:0,skip:0,total:0},results:[]});assert.notEqual(aggregate(tmp,paths,goodCodes).status_summary,'pass');});
