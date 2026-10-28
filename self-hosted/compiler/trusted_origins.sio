@@ -1,0 +1,98 @@
+// Compiler-owned origin registry. Names and source-written module paths confer no authority.
+module compiler::trusted_origins
+use io::env::{read_env}
+extern "C" {
+ fn dlopen(name:*mut u8,flags:i32)->*mut u8
+ fn dlsym(handle:*mut u8,name:*mut u8)->*mut u8
+ fn dlclose(handle:*mut u8)->i32
+}
+var TRUSTED_MODULE_FLAGS:[i64;256]=[0;256]
+var TRUSTED_STAT_HANDLE:i64=0
+var TRUSTED_STAT_FN:i64=0
+var TRUSTED_ROOT:string=""
+fn trusted_c_string(text:string)->i64 with Alloc,Mut,Div {
+ let n=str_len(text)
+ if n<=0 || n>1048576 {return 0}
+ let p=heap_alloc(n+1) as *mut i8
+ if (p as i64)<=0 {return 0}
+ var i:i64=0
+ while i<n {
+  let ch=str_char_at(text,i)
+  if ch==0 {heap_free(p);return 0}
+  *((p as i64+i) as *mut i8)=ch as i8
+  i=i+1
+ }
+ *((p as i64+n) as *mut i8)=0
+ p as i64
+}
+pub fn trusted_origins_reset() with IO,Alloc,Mut,Div,Panic {
+ var i:i64=0
+ while i<256 {TRUSTED_MODULE_FLAGS[i as usize]=0;i=i+1}
+ TRUSTED_STAT_FN=0
+ if TRUSTED_STAT_HANDLE!=0 {let ignored=dlclose(TRUSTED_STAT_HANDLE as *mut u8)}
+ TRUSTED_STAT_HANDLE=0
+ // This stat64 layout is admitted only on a Linux x86-64 ELF host.
+ // procfs identifies the running compiler, never the requested output target.
+ if file_size("/proc/self/exe")<64 {return}
+ let image=read_file("/proc/self/exe")
+ if image[0 as usize]!=127 || image[1 as usize]!=69 || image[2 as usize]!=76 || image[3 as usize]!=70 {return}
+ if image[4 as usize]!=2 || image[5 as usize]!=1 || image[18 as usize]!=62 || image[19 as usize]!=0 {return}
+ TRUSTED_ROOT=read_env("SOUNIO_STDLIB_PATH")
+ // read_env has a bounded result. A possibly truncated authority fails closed.
+ if str_len(TRUSTED_ROOT)>=512 {TRUSTED_ROOT="";return}
+ if str_len(TRUSTED_ROOT)==0 {TRUSTED_ROOT="stdlib"}
+ let lib=trusted_c_string("libc.so.6")
+ if lib==0 {return}
+ let h=dlopen(lib as *mut u8,2)
+ heap_free(lib as *mut i8)
+ if (h as i64)==0 {return}
+ let sym=trusted_c_string("stat64")
+ if sym==0 {let ignored=dlclose(h);return}
+ let ptr=dlsym(h,sym as *mut u8)
+ heap_free(sym as *mut i8)
+ if (ptr as i64)==0 {let ignored=dlclose(h);return}
+ TRUSTED_STAT_HANDLE=h as i64
+ TRUSTED_STAT_FN=ptr as i64
+}
+// Linux x86-64 libc stat64 uses 64-bit dev_t/ino_t in its first two words.
+// Other hosts/libcs are unsupported and fail closed; never fall back to names.
+fn trusted_same_file(left:string,right:string)->bool with IO,Alloc,Mut,Div,Panic {
+ if TRUSTED_STAT_FN==0 {return false}
+ let a=trusted_c_string(left)
+ let b=trusted_c_string(right)
+ let buf=heap_alloc(512) as *mut i8
+ if a==0 || b==0 || (buf as i64)<=0 {
+  if a!=0 {heap_free(a as *mut i8)}
+  if b!=0 {heap_free(b as *mut i8)}
+  if (buf as i64)>0 {heap_free(buf)}
+  return false
+ }
+ let stat=TRUSTED_STAT_FN as fn(i64,i64)->i64
+ let ra=stat(a,buf as i64)
+ let rb=stat(b,(buf as i64)+256)
+ var same=false
+ if ra==0 && rb==0 {
+  let dev_a=read_i64(buf as i64,0)
+  let ino_a=read_i64(buf as i64,1)
+  let dev_b=read_i64((buf as i64)+256,0)
+  let ino_b=read_i64((buf as i64)+256,1)
+  same=dev_a==dev_b && ino_a==ino_b && ino_a!=0
+ }
+ heap_free(a as *mut i8)
+ heap_free(b as *mut i8)
+ heap_free(buf)
+ same
+}
+pub fn trusted_origins_note(module_id:i64,path:string) with IO,Alloc,Mut,Div,Panic {
+ if module_id<0 || module_id>=256 || TRUSTED_STAT_FN==0 {return}
+ if trusted_same_file(path,str_concat(TRUSTED_ROOT,"/ffi/worker.sio")) {TRUSTED_MODULE_FLAGS[module_id as usize]=TRUSTED_MODULE_FLAGS[module_id as usize]|1}
+ if trusted_same_file(path,str_concat(TRUSTED_ROOT,"/mem/typed_storage.sio")) {TRUSTED_MODULE_FLAGS[module_id as usize]=TRUSTED_MODULE_FLAGS[module_id as usize]|2}
+}
+pub fn trusted_origin_is_worker(module_id:i64)->bool with Mut {
+ if module_id<0 || module_id>=256 {return false}
+ (TRUSTED_MODULE_FLAGS[module_id as usize]&1)!=0
+}
+pub fn trusted_origin_is_storage(module_id:i64)->bool with Mut {
+ if module_id<0 || module_id>=256 {return false}
+ (TRUSTED_MODULE_FLAGS[module_id as usize]&2)!=0
+}
