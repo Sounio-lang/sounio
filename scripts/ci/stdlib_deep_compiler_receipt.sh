@@ -117,11 +117,26 @@ selftest() {
 artifact_name_re='^[[:space:]]+name:[[:space:]]+current-source-madaros-\$\{\{[[:space:]]*github\.run_id[[:space:]]*\}\}-\$\{\{[[:space:]]*github\.sha[[:space:]]*\}\}[[:space:]]*$'
 producer_job=madaros-witness-gate
 consumer_jobs=(madaros-current-source-deref-f64 stdlib-deep-science gate-wave-0)
+# A shell comment is `#` at the start of the line, or whitespace then `#`.
+# `true # bash ... verify` does not run verify. A scan of the raw line still
+# sees the command text, and the copy proceeds.
+strip_shell_comment() {
+ local line=$1
+ [[ "$line" =~ ^[[:space:]]*# ]] && return 0
+ printf '%s\n' "${line%% #*}"
+}
+decomment_blob() {
+ local blob=$1 line
+ while IFS= read -r line; do
+  strip_shell_comment "$line"
+ done <<<"$blob"
+}
 scan_job_body() {
  local blob=$1 mode= line uploads=0 downloads=0 upload_at=0 download_at=0 verify_at=0 prepare_at=0 build_runs=0 unattached=0 n=0
  while IFS= read -r line; do
   n=$((n + 1))
-  [[ "$line" =~ ^[[:space:]]*# ]] && continue
+  line=$(strip_shell_comment "$line")
+  [[ -n "$line" ]] || continue
   if [[ "$line" =~ ^[[:space:]]{6}-[[:space:]] ]]; then
    mode=
    [[ "$line" == *"actions/upload-artifact@"* ]] && mode=upload
@@ -162,7 +177,8 @@ verify_step_problems() {
   fi
  }
  while IFS= read -r line; do
-  [[ "$line" =~ ^[[:space:]]*# ]] && continue
+  line=$(strip_shell_comment "$line")
+  [[ -n "$line" ]] || continue
   if [[ "$line" =~ ^[[:space:]]{6}-[[:space:]] ]]; then
    flush_verify_step
    in_step=1
@@ -219,7 +235,8 @@ compiler_use_before_verify() {
  local blob=$1 line verify_at=0 token head use_at vhead
  local -a tokens=(madaros.elf madaros-wave0.elf deep_science_gate.sh madaros_current_source_f64_lowering_gate.sh sounio-madaros-current-source-f64-lowering/madaros)
  while IFS= read -r line; do
-  [[ "$line" =~ ^[[:space:]]*# ]] && continue
+  line=$(strip_shell_comment "$line")
+  [[ -n "$line" ]] || continue
   vhead=
   [[ "$line" == *"stdlib_deep_compiler_receipt.sh verify"* ]] && vhead=${line%%stdlib_deep_compiler_receipt.sh verify*}
   for token in "${tokens[@]}"; do
@@ -246,7 +263,8 @@ shell_is_strict() {
 job_default_shell() {
  local blob=$1 line found=
  while IFS= read -r line; do
-  [[ "$line" =~ ^[[:space:]]*# ]] && continue
+  line=$(strip_shell_comment "$line")
+  [[ -n "$line" ]] || continue
   [[ "$line" =~ ^[[:space:]]{4}steps: ]] && break
   [[ "$line" =~ shell: ]] && found=$line
  done <<<"$blob"
@@ -257,7 +275,8 @@ job_default_shell() {
 verify_step_shell() {
  local blob=$1 line in_step=0 step_verify=0 shell_line=
  while IFS= read -r line; do
-  [[ "$line" =~ ^[[:space:]]*# ]] && continue
+  line=$(strip_shell_comment "$line")
+  [[ -n "$line" ]] || continue
   if [[ "$line" =~ ^[[:space:]]{6}-[[:space:]] ]]; then
    if [[ "$in_step" == 1 && "$step_verify" == 1 ]]; then
     printf '%s\n' "$shell_line"
@@ -355,7 +374,7 @@ workflow_problems() {
   fi
  done < "$file"
  [[ -n "${body[$producer_job]:-}" ]] || problems+=("missing-producer $producer_job")
- local uploads downloads upload_at download_at verify_at prepare_at build_runs unattached blob known=0
+ local uploads downloads upload_at download_at verify_at prepare_at build_runs unattached blob known=0 code=''
  local producer_flags='' consumer_flags artifact_path='path: ${{ runner.temp }}/stdlib-deep-compiler'
  if [[ -n "${body[$producer_job]:-}" ]]; then
   blob=${body[$producer_job]}
@@ -392,14 +411,15 @@ workflow_problems() {
   if [[ -z "$(verify_step_shell "$blob")" ]]; then
    shell_is_strict "$job_shell" || problems+=("shell-default $consumer")
   fi
-  [[ "$blob" =~ stdlib_deep_compiler_receipt\.sh[[:space:]]+verify[[:space:]]*\\?[[:space:]]*\"\$GITHUB_WORKSPACE\"[[:space:]]*\"\$RUNNER_TEMP/stdlib-deep-compiler\"[[:space:]]*\"\$GITHUB_SHA\" ]] || problems+=("verify-arguments $consumer")
+  code=$(decomment_blob "$blob")
+  [[ "$code" =~ stdlib_deep_compiler_receipt\.sh[[:space:]]+verify[[:space:]]*\\?[[:space:]]*\"\$GITHUB_WORKSPACE\"[[:space:]]*\"\$RUNNER_TEMP/stdlib-deep-compiler\"[[:space:]]*\"\$GITHUB_SHA\" ]] || problems+=("verify-arguments $consumer")
   [[ "$blob" == *"$artifact_path"* ]] || problems+=("download-path $consumer")
   [[ -n "${if_text[$consumer]:-}" ]] || problems+=("consumer-if $consumer")
   [[ "${if_text[$consumer]:-}" != *"always()"* ]] || problems+=("consumer-always $consumer")
   consumer_flags=$(or_true_flags "${if_text[$consumer]:-}" | sed 's/ == .*$//' | sort -u) || problems+=("impact-or $consumer")
   [[ -n "$consumer_flags" ]] || problems+=("consumer-if $consumer")
-  if [[ "$blob" == *'SOUNIO_MADAROS_F64_LOWERING_GATE_DIR'* ]]; then
-   [[ "$blob" == *'mkdir "$SOUNIO_MADAROS_F64_LOWERING_GATE_DIR"'* && "$blob" != *'mkdir -p "$SOUNIO_MADAROS_F64_LOWERING_GATE_DIR"'* ]] || problems+=("fresh-gate-dir $consumer")
+  if [[ "$code" == *'SOUNIO_MADAROS_F64_LOWERING_GATE_DIR'* ]]; then
+   [[ "$code" == *'mkdir "$SOUNIO_MADAROS_F64_LOWERING_GATE_DIR"'* && "$code" != *'mkdir -p "$SOUNIO_MADAROS_F64_LOWERING_GATE_DIR"'* ]] || problems+=("fresh-gate-dir $consumer")
   fi
   while IFS= read -r flag; do
    [[ -n "$flag" ]] || continue
@@ -503,6 +523,9 @@ EOF
  bad="$work/wf-verify-echo.yml"
  awk 'BEGIN{arm=0} /^  madaros-current-source-deref-f64:/{arm=1} arm && /stdlib_deep_compiler_receipt.sh verify/{sub(/bash/, "echo bash"); arm=0} {print}' "$base" >"$bad"
  expect_workflow_problem "$bad" verify-skippable
+ bad="$work/wf-verify-trailing-comment.yml"
+ awk 'BEGIN{arm=0} /^  madaros-current-source-deref-f64:/{arm=1} arm && /stdlib_deep_compiler_receipt.sh verify/{sub(/bash/, "true # bash"); arm=0} {print}' "$base" >"$bad"
+ expect_workflow_problem "$bad" verify-after-download
  bad="$work/wf-verify.yml"
  awk 'BEGIN{skip=0} /madaros-current-source-deref-f64/{skip=1} skip && /stdlib_deep_compiler_receipt.sh verify/{skip=0; next} {print}' "$base" >"$bad"
  expect_workflow_problem "$bad" verify-after-download
