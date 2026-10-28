@@ -14177,7 +14177,25 @@ impl Lowerer {
         if st.len > 0 && !ir_name_is_box(st) && !ir_name_eq(st, make_name("Knowledge")) {
             let slot_count = self.struct_layout_slot_count(st)
             if slot_count > 0 {
-                return self.emit_struct_value_copy_budgeted(reg, st, slot_count)
+                // The unrolled copy costs ~2 instructions per slot at EVERY
+                // site, and deref/field reads of the compiler's own large
+                // AST structs are frequent enough that copying all of them
+                // pushed the gen2 self-compile past the native code buffer
+                // (149663889 > 134217728 bytes, SIO-278 first attempt). Emit
+                // the copy only where it changes an observable value within
+                // the copy's own depth cap: an aggregate field is followed
+                // (deep cost above the flat 1 + 2*slots), or the struct is
+                // small enough that the flat copy is a handful of
+                // instructions. A large struct with no reachable aggregate
+                // field keeps the pre-SIO-278 shared handle for scalar
+                // fields -- the residual the size cap forces, never worse
+                // than the behaviour this replaces.
+                let flat_cost = 1 + 2 * slot_count
+                let deep_cost = self.struct_deep_copy_cost(st, slot_count, 0)
+                if deep_cost > flat_cost || slot_count <= 16 {
+                    return self.emit_struct_value_copy_budgeted(reg, st, slot_count)
+                }
+                return (self, reg)
             }
         }
         if (*e).kind == ExprKind::ExprFieldAccess {
