@@ -518,6 +518,11 @@ rc=0
 MADAROS_RAW_BIN="$MADAROS_RAW_BIN" STDLIB_PLATFORM_LIBRARY="$STDLIB_PLATFORM_LIBRARY" timeout 5400 bash scripts/stdlib/wave3_services_gate.sh "$out/wave3-services" > "$out/wave3-services.stdout" 2> "$out/wave3-services.stderr" || rc=$?
 record focused-gate wave3-services "$rc"
 
+# Mandatory bounded worker pipeline: original CSV/socket and million-row file/TCP.
+rc=0
+MADAROS_RAW_BIN="$MADAROS_RAW_BIN" ARROW_CPP_ROOT="${ARROW_CPP_PREFIX:?Arrow C++ SDK required}/usr" timeout 1800 bash scripts/stdlib/wave3_native_pool_gate.sh "$out/wave3-native-pool" > "$out/wave3-native-pool.stdout" 2> "$out/wave3-native-pool.stderr" || rc=$?
+record focused-gate wave3-native-pool "$rc"
+
 # Independent constructor, Monte Carlo, EFE composition and original DP.
 rc=0
 MADAROS_RAW_BIN="$MADAROS_RAW_BIN" timeout 1200 bash scripts/stdlib/wave3_epistemic_gate.sh "$out/wave3-epistemic" > "$out/wave3-epistemic.stdout" 2> "$out/wave3-epistemic.stderr" || rc=$?
