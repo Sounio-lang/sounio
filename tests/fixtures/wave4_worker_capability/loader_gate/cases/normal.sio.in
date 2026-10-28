@@ -1,0 +1,46 @@
+use stats::normal_scalar::{normal_cdf_scalar,normal_sf_scalar,normal_logcdf_scalar,normal_logsf_scalar}
+use ffi::platform::{Platform,PlatformValue,platform_open,platform_status,platform_call,platform_close}
+use thread::native_pool_f64::{NativePoolF64Result,native_pool_f64_reservation,native_pool_f64_new,native_pool_f64_status,native_pool_f64_submit_into,native_pool_f64_result_into,native_pool_f64_shutdown,native_pool_f64_join,native_pool_f64_close}
+fn serial(kind:i64,x:f64)->f64 with Mut,Div,Panic {
+ if kind==0 {return normal_cdf_scalar(x)}
+ if kind==1 {return normal_sf_scalar(x)}
+ if kind==2 {return normal_logcdf_scalar(x)}
+ return normal_logsf_scalar(x)
+}
+fn run(p:&Platform,cap:WorkerFnF64,kind:i64) with IO,Alloc,Mut,Div,Panic {
+ let budget=native_pool_f64_reservation(p,2,2)
+ assert(budget.status==0)
+ var pool=native_pool_f64_new(p,cap,2,2,budget.value)
+ assert(native_pool_f64_status(&pool)==0)
+ let inf=1.0e308*10.0
+ var values:[f64;15]=[-40.0,-8.0,-2.0,-1.0,-0.5,bits_to_f64(0-9223372036854775807-1),0.0,0.5,1.0,2.0,8.0,40.0,inf,0.0-inf,bits_to_f64(9221120237041090626)]
+ var task=PlatformValue {value:0,status:0}
+ var result=NativePoolF64Result {task_id:0,value:0.0,status:0}
+ var i:i64=0
+ while i<15 {
+  let x=values[i as usize]
+  let expected=serial(kind,x)
+  native_pool_f64_submit_into(p,&!pool,x,5000,&!task)
+  assert(task.status==0)
+  native_pool_f64_result_into(p,&!pool,task.value,5000,&!result)
+  assert(result.status==0 && result.task_id==task.value)
+  assert(f64_to_bits(result.value)==f64_to_bits(expected))
+  print("NORMAL_BITS ");print_int(kind);print(" ");print_int(f64_to_bits(x));print(" ");print_int(f64_to_bits(expected));print(" ");print_int(f64_to_bits(result.value));print("\n")
+  i=i+1
+ }
+ assert(native_pool_f64_shutdown(p,&!pool,false).status==0)
+ assert(native_pool_f64_join(p,&!pool)==0)
+ assert(native_pool_f64_close(p,pool)==0)
+}
+fn main()->i32 with IO,Alloc,Mut,Div,Panic {
+ let p=platform_open()
+ assert(platform_status(&p)==0)
+ run(&p,worker_fn_f64(normal_cdf_scalar),0)
+ run(&p,worker_fn_f64(normal_sf_scalar),1)
+ run(&p,worker_fn_f64(normal_logcdf_scalar),2)
+ run(&p,worker_fn_f64(normal_logsf_scalar),3)
+ assert(platform_call(&p,3,0,0,0,0).value==0)
+ platform_close(p)
+ println("WORKER_LOADER_NORMAL_OK")
+ return 0
+}
