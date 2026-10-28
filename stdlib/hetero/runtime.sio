@@ -58,6 +58,11 @@ pub struct Runtime {
     // Q4_K mul_mat_id F32 kernels (same PTX module); 0 = not loaded.
     pub mmid_func: i64,
     pub mmid_vec_func: i64,
+    // Q5_K and Q8_0 mul_mat_id F32 kernels; 0 = not loaded.
+    pub mmid_q5k_func: i64,
+    pub mmid_q5k_vec_func: i64,
+    pub mmid_q8_0_func: i64,
+    pub mmid_q8_0_vec_func: i64,
 }
 
 pub struct SplitResult {
@@ -74,7 +79,7 @@ pub struct MmidResult {
 }
 
 pub fn rt_open(ptx_path: string, kernel_name: string) -> Runtime with Alloc, Mut, Panic, Div, IO {
-    var rt = Runtime { exec: ce_open(), func: 0, ready: false, cvt_down: 0, cvt_up: 0, mmid_func: 0, mmid_vec_func: 0 }
+    var rt = Runtime { exec: ce_open(), func: 0, ready: false, cvt_down: 0, cvt_up: 0, mmid_func: 0, mmid_vec_func: 0, mmid_q5k_func: 0, mmid_q5k_vec_func: 0, mmid_q8_0_func: 0, mmid_q8_0_vec_func: 0 }
     if !rt.exec.ok { return rt }
     let ptx = read_file(ptx_path)
     if str_len(ptx) == 0 { return rt }
@@ -537,6 +542,44 @@ pub fn rt_load_mmid(rt: &!Runtime, ptx_path: string) -> bool with Alloc, Mut, Pa
     true
 }
 
+/// Load mmid Q5_K PTX (vec + dp4a) into an existing Runtime (lazy, once).
+///
+/// # Return
+/// true when both mmid_q5k_func and mmid_q5k_vec_func are ready.
+pub fn rt_load_mmid_q5k(rt: &!Runtime, ptx_path: string) -> bool with Alloc, Mut, Panic, Div, IO {
+    if rt.mmid_q5k_func != 0 && rt.mmid_q5k_vec_func != 0 { return true }
+    if !rt.exec.ok { return false }
+    let ptx = read_file(ptx_path)
+    if str_len(ptx) == 0 { return false }
+    let module = ce_module_log(&rt.exec, pb_cstr(ptx))
+    if module == 0 { return false }
+    let f = ce_function(&rt.exec, module, "mmid_q5k_dp4a_f32")
+    let fv = ce_function(&rt.exec, module, "mmid_q5k_vec_f32")
+    if f == 0 || fv == 0 { return false }
+    rt.mmid_q5k_func = f
+    rt.mmid_q5k_vec_func = fv
+    true
+}
+
+/// Load mmid Q8_0 PTX (vec + dp4a) into an existing Runtime (lazy, once).
+///
+/// # Return
+/// true when both mmid_q8_0_func and mmid_q8_0_vec_func are ready.
+pub fn rt_load_mmid_q8_0(rt: &!Runtime, ptx_path: string) -> bool with Alloc, Mut, Panic, Div, IO {
+    if rt.mmid_q8_0_func != 0 && rt.mmid_q8_0_vec_func != 0 { return true }
+    if !rt.exec.ok { return false }
+    let ptx = read_file(ptx_path)
+    if str_len(ptx) == 0 { return false }
+    let module = ce_module_log(&rt.exec, pb_cstr(ptx))
+    if module == 0 { return false }
+    let f = ce_function(&rt.exec, module, "mmid_q8_0_dp4a_f32")
+    let fv = ce_function(&rt.exec, module, "mmid_q8_0_vec_f32")
+    if f == 0 || fv == 0 { return false }
+    rt.mmid_q8_0_func = f
+    rt.mmid_q8_0_vec_func = fv
+    true
+}
+
 /// Q4_K mul_mat_id with F32 activations. Host buffers are raw bytes
 /// (weights Q4_K, y F32, ids i32, dst F32). ntokens==1 uses the vec tile
 /// kernel; n>1 uses dp4a. Returns ok=false when GPU / module is missing.
@@ -616,6 +659,190 @@ pub fn rt_mul_mat_id_q4k(
         write_i64(params as *mut i64, 16, ce_arg(x_rows) as i64)
         let shmem = 4 * k + 4 * (k / 32) * 4
         st = ce_launch_2d_shmem(&rt.exec, rt.mmid_func, tiles, experts, threads, shmem, params)
+    }
+    if st != 0 { res.status = st as i64; return res }
+    st = ce_event_record(&rt.exec, stop)
+    st = ce_sync(&rt.exec)
+    if st != 0 { res.status = st as i64; return res }
+    res.ms = ce_event_elapsed_ms(&rt.exec, start, stop)
+    st = ce_d2h(&rt.exec, dst, ddst, dst_bytes)
+    if st != 0 { res.status = st as i64; return res }
+    res.ok = true
+    res.status = 0
+    res
+}
+
+/// Q5_K mul_mat_id with F32 activations. Host buffers are raw bytes
+/// (weights Q5_K, y F32, ids i32, dst F32). ntokens==1 uses the vec tile
+/// kernel; n>1 uses dp4a. Returns ok=false when GPU / module is missing.
+pub fn rt_mul_mat_id_q5k(
+    rt: &Runtime,
+    weights: *mut u8, weights_bytes: i64,
+    y: *mut u8, y_bytes: i64,
+    ids: *mut u8, ids_bytes: i64,
+    dst: *mut u8, dst_bytes: i64,
+    k: i64, m: i64, experts: i64, slots: i64, ntokens: i64,
+    expert_stride: i64, row_stride: i64,
+    x_nb1: i64, x_nb2: i64, ids_nb1: i64,
+    dst_nb1: i64, dst_nb2: i64, x_rows: i64
+) -> MmidResult with Alloc, Mut, Panic, Div {
+    var res = MmidResult { ok: false, status: -1, ms: 0.0 }
+    if !rt.exec.ok { return res }
+    if ntokens == 1 {
+        if rt.mmid_q5k_vec_func == 0 { return res }
+    } else {
+        if rt.mmid_q5k_func == 0 { return res }
+    }
+    let dw = ce_alloc(&rt.exec, weights_bytes)
+    let dy = ce_alloc(&rt.exec, y_bytes)
+    let dids = ce_alloc(&rt.exec, ids_bytes)
+    let ddst = ce_alloc(&rt.exec, dst_bytes)
+    if dw == 0 || dy == 0 || dids == 0 || ddst == 0 {
+        res.status = -2
+        return res
+    }
+    var st = ce_h2d(&rt.exec, dw, weights, weights_bytes)
+    if st != 0 { res.status = st as i64; return res }
+    st = ce_h2d(&rt.exec, dy, y, y_bytes)
+    if st != 0 { res.status = st as i64; return res }
+    st = ce_h2d(&rt.exec, dids, ids, ids_bytes)
+    if st != 0 { res.status = st as i64; return res }
+
+    let threads: i64 = 128
+    let tiles = (m + threads - 1) / threads
+    let start = ce_event_create(&rt.exec)
+    let stop = ce_event_create(&rt.exec)
+    st = ce_event_record(&rt.exec, start)
+    if ntokens == 1 {
+        let params = heap_alloc(8 * 14)
+        write_i64(params as *mut i64, 0, ce_arg(dw) as i64)
+        write_i64(params as *mut i64, 1, ce_arg(dy) as i64)
+        write_i64(params as *mut i64, 2, ce_arg(dids) as i64)
+        write_i64(params as *mut i64, 3, ce_arg(ddst) as i64)
+        write_i64(params as *mut i64, 4, ce_arg(k) as i64)
+        write_i64(params as *mut i64, 5, ce_arg(m) as i64)
+        write_i64(params as *mut i64, 6, ce_arg(experts) as i64)
+        write_i64(params as *mut i64, 7, ce_arg(slots) as i64)
+        write_i64(params as *mut i64, 8, ce_arg(expert_stride) as i64)
+        write_i64(params as *mut i64, 9, ce_arg(row_stride) as i64)
+        write_i64(params as *mut i64, 10, ce_arg(x_nb1) as i64)
+        write_i64(params as *mut i64, 11, ce_arg(ids_nb1) as i64)
+        write_i64(params as *mut i64, 12, ce_arg(dst_nb1) as i64)
+        write_i64(params as *mut i64, 13, ce_arg(x_rows) as i64)
+        st = ce_launch_2d_shmem(&rt.exec, rt.mmid_q5k_vec_func, tiles, slots, threads, k * 4, params)
+    } else {
+        let params = heap_alloc(8 * 17)
+        write_i64(params as *mut i64, 0, ce_arg(dw) as i64)
+        write_i64(params as *mut i64, 1, ce_arg(dy) as i64)
+        write_i64(params as *mut i64, 2, ce_arg(dids) as i64)
+        write_i64(params as *mut i64, 3, ce_arg(ddst) as i64)
+        write_i64(params as *mut i64, 4, ce_arg(k) as i64)
+        write_i64(params as *mut i64, 5, ce_arg(m) as i64)
+        write_i64(params as *mut i64, 6, ce_arg(experts) as i64)
+        write_i64(params as *mut i64, 7, ce_arg(slots) as i64)
+        write_i64(params as *mut i64, 8, ce_arg(ntokens) as i64)
+        write_i64(params as *mut i64, 9, ce_arg(expert_stride) as i64)
+        write_i64(params as *mut i64, 10, ce_arg(row_stride) as i64)
+        write_i64(params as *mut i64, 11, ce_arg(x_nb1) as i64)
+        write_i64(params as *mut i64, 12, ce_arg(x_nb2) as i64)
+        write_i64(params as *mut i64, 13, ce_arg(ids_nb1) as i64)
+        write_i64(params as *mut i64, 14, ce_arg(dst_nb1) as i64)
+        write_i64(params as *mut i64, 15, ce_arg(dst_nb2) as i64)
+        write_i64(params as *mut i64, 16, ce_arg(x_rows) as i64)
+        let shmem = 4 * k + 4 * (k / 32) * 4
+        st = ce_launch_2d_shmem(&rt.exec, rt.mmid_q5k_func, tiles, experts, threads, shmem, params)
+    }
+    if st != 0 { res.status = st as i64; return res }
+    st = ce_event_record(&rt.exec, stop)
+    st = ce_sync(&rt.exec)
+    if st != 0 { res.status = st as i64; return res }
+    res.ms = ce_event_elapsed_ms(&rt.exec, start, stop)
+    st = ce_d2h(&rt.exec, dst, ddst, dst_bytes)
+    if st != 0 { res.status = st as i64; return res }
+    res.ok = true
+    res.status = 0
+    res
+}
+
+/// Q8_0 mul_mat_id with F32 activations. Host buffers are raw bytes
+/// (weights Q8_0, y F32, ids i32, dst F32). ntokens==1 uses the vec tile
+/// kernel; n>1 uses dp4a. Returns ok=false when GPU / module is missing.
+pub fn rt_mul_mat_id_q8_0(
+    rt: &Runtime,
+    weights: *mut u8, weights_bytes: i64,
+    y: *mut u8, y_bytes: i64,
+    ids: *mut u8, ids_bytes: i64,
+    dst: *mut u8, dst_bytes: i64,
+    k: i64, m: i64, experts: i64, slots: i64, ntokens: i64,
+    expert_stride: i64, row_stride: i64,
+    x_nb1: i64, x_nb2: i64, ids_nb1: i64,
+    dst_nb1: i64, dst_nb2: i64, x_rows: i64
+) -> MmidResult with Alloc, Mut, Panic, Div {
+    var res = MmidResult { ok: false, status: -1, ms: 0.0 }
+    if !rt.exec.ok { return res }
+    if ntokens == 1 {
+        if rt.mmid_q8_0_vec_func == 0 { return res }
+    } else {
+        if rt.mmid_q8_0_func == 0 { return res }
+    }
+    let dw = ce_alloc(&rt.exec, weights_bytes)
+    let dy = ce_alloc(&rt.exec, y_bytes)
+    let dids = ce_alloc(&rt.exec, ids_bytes)
+    let ddst = ce_alloc(&rt.exec, dst_bytes)
+    if dw == 0 || dy == 0 || dids == 0 || ddst == 0 {
+        res.status = -2
+        return res
+    }
+    var st = ce_h2d(&rt.exec, dw, weights, weights_bytes)
+    if st != 0 { res.status = st as i64; return res }
+    st = ce_h2d(&rt.exec, dy, y, y_bytes)
+    if st != 0 { res.status = st as i64; return res }
+    st = ce_h2d(&rt.exec, dids, ids, ids_bytes)
+    if st != 0 { res.status = st as i64; return res }
+
+    let threads: i64 = 128
+    let tiles = (m + threads - 1) / threads
+    let start = ce_event_create(&rt.exec)
+    let stop = ce_event_create(&rt.exec)
+    st = ce_event_record(&rt.exec, start)
+    if ntokens == 1 {
+        let params = heap_alloc(8 * 14)
+        write_i64(params as *mut i64, 0, ce_arg(dw) as i64)
+        write_i64(params as *mut i64, 1, ce_arg(dy) as i64)
+        write_i64(params as *mut i64, 2, ce_arg(dids) as i64)
+        write_i64(params as *mut i64, 3, ce_arg(ddst) as i64)
+        write_i64(params as *mut i64, 4, ce_arg(k) as i64)
+        write_i64(params as *mut i64, 5, ce_arg(m) as i64)
+        write_i64(params as *mut i64, 6, ce_arg(experts) as i64)
+        write_i64(params as *mut i64, 7, ce_arg(slots) as i64)
+        write_i64(params as *mut i64, 8, ce_arg(expert_stride) as i64)
+        write_i64(params as *mut i64, 9, ce_arg(row_stride) as i64)
+        write_i64(params as *mut i64, 10, ce_arg(x_nb1) as i64)
+        write_i64(params as *mut i64, 11, ce_arg(ids_nb1) as i64)
+        write_i64(params as *mut i64, 12, ce_arg(dst_nb1) as i64)
+        write_i64(params as *mut i64, 13, ce_arg(x_rows) as i64)
+        st = ce_launch_2d_shmem(&rt.exec, rt.mmid_q8_0_vec_func, tiles, slots, threads, k * 4, params)
+    } else {
+        let params = heap_alloc(8 * 17)
+        write_i64(params as *mut i64, 0, ce_arg(dw) as i64)
+        write_i64(params as *mut i64, 1, ce_arg(dy) as i64)
+        write_i64(params as *mut i64, 2, ce_arg(dids) as i64)
+        write_i64(params as *mut i64, 3, ce_arg(ddst) as i64)
+        write_i64(params as *mut i64, 4, ce_arg(k) as i64)
+        write_i64(params as *mut i64, 5, ce_arg(m) as i64)
+        write_i64(params as *mut i64, 6, ce_arg(experts) as i64)
+        write_i64(params as *mut i64, 7, ce_arg(slots) as i64)
+        write_i64(params as *mut i64, 8, ce_arg(ntokens) as i64)
+        write_i64(params as *mut i64, 9, ce_arg(expert_stride) as i64)
+        write_i64(params as *mut i64, 10, ce_arg(row_stride) as i64)
+        write_i64(params as *mut i64, 11, ce_arg(x_nb1) as i64)
+        write_i64(params as *mut i64, 12, ce_arg(x_nb2) as i64)
+        write_i64(params as *mut i64, 13, ce_arg(ids_nb1) as i64)
+        write_i64(params as *mut i64, 14, ce_arg(dst_nb1) as i64)
+        write_i64(params as *mut i64, 15, ce_arg(dst_nb2) as i64)
+        write_i64(params as *mut i64, 16, ce_arg(x_rows) as i64)
+        let shmem = 4 * k + 4 * (k / 32) * 4
+        st = ce_launch_2d_shmem(&rt.exec, rt.mmid_q8_0_func, tiles, experts, threads, shmem, params)
     }
     if st != 0 { res.status = st as i64; return res }
     st = ce_event_record(&rt.exec, stop)
