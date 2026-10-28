@@ -311,6 +311,163 @@ pub fn parser_last_error_count() -> i64 {
     PARSER_LAST_ERROR_COUNT
 }
 
+// ADR-015 row 1: an integer literal that fits no integer type must be refused,
+// never silently wrapped. The lexer accumulates into i64 and has no notion of
+// width, so `99999999999999999999` became 7766279631452241919 and
+// `0x1FFFFFFFFFFFFFFFF` became -1 with rc=0 (probes int_huge / int_hex_over in
+// docs/audit/S01_LEXICAL_PROBES_2026-10-22). This is the width-independent half
+// of the ruling: a literal wider than 64 bits fits no type, so it is refused at
+// the token. The band (i64 MAX, u64 MAX] is deliberately NOT refused here — the
+// corpus uses it as a type-independent bit pattern (`0xBF31A9BDE18F45C7` in the
+// codegen emitters, 51 sites) and as annotated `u64` literals (6 sites), and
+// deciding it needs the declared type, which is the checker's half.
+//
+// Reads the token's own source bytes: the accumulated value is already wrapped
+// by the time the parser sees it, so only the spelling tells the truth.
+pub fn parser_span_int_literal_overflow(start: i64, end: i64) -> bool with Mut, Panic {
+    if end <= start + 1 { return false }
+    var base: i64 = 10
+    var digits_from = start
+    let b0 = cursor_source_byte(start)
+    let b1 = cursor_source_byte(start + 1)
+    if b0 == (48 as i8) {
+        if b1 == (120 as i8) || b1 == (88 as i8) { base = 16; digits_from = start + 2 }
+        else if b1 == (98 as i8) || b1 == (66 as i8) { base = 2; digits_from = start + 2 }
+        else if b1 == (111 as i8) || b1 == (79 as i8) { base = 8; digits_from = start + 2 }
+    }
+    // Count significant digits (separators and leading zeros carry no width),
+    // and remember where they start: the boundary tests below read at most 18
+    // digits at a time so no accumulation can wrap. No hand-copied ASCII table
+    // of 2^63 or 2^64 anywhere — a [i8; 20] of the latter silently drifted from
+    // the constant it claimed to encode and refused u64 MAX, and a 19-digit
+    // accumulator overflows i64 and came back negative, which made an earlier
+    // version accept 99999999999999999999.
+    var seen = false
+    var count: i64 = 0
+    var first_sig = digits_from   // position of the first significant digit
+    var i = digits_from
+    while i < end {
+        let c = cursor_source_byte(i)
+        if c == (95 as i8) {
+            i = i + 1
+            continue
+        }
+        // Hex digits are hex: the first version tested '0'..'9' for every base,
+        // so 0x1FFFFFFFFFFFFFFFF stopped at the first 'F' and counted one digit.
+        var d: i64 = 0
+        var is_digit = true
+        if c >= (48 as i8) && c <= (57 as i8) { d = (c - (48 as i8)) as i64 }
+        else if base == 16 && c >= (97 as i8) && c <= (102 as i8) { d = (c - (87 as i8)) as i64 }
+        else if base == 16 && c >= (65 as i8) && c <= (70 as i8) { d = (c - (55 as i8)) as i64 }
+        else { is_digit = false }
+        if !is_digit { break }   // a suffix (`5u8`) ends the number
+        if !seen {
+            if d == 0 {
+                i = i + 1
+                continue
+            }
+            seen = true
+            first_sig = i
+        }
+        count = count + 1
+        i = i + 1
+    }
+    if !seen { return false }
+    // Non-decimal bases decide on digit count alone: 16 hex digits is exactly
+    // u64 MAX, 64 binary and 22 octal likewise.
+    if base == 16 { return count > 16 }
+    if base == 2 { return count > 64 }
+    if base == 8 { return count > 22 }
+    if count > 20 { return true }
+    if count < 19 { return false }
+    // (19 and 20 significant digits are the only bands where the width alone
+    // cannot decide: i64 MAX is 19 digits and u64 MAX is 20.)
+    // Decimal, 19 or 20 significant digits. Accumulating 19 digits in i64 is NOT
+    // safe — 9999999999999999999 exceeds i64 MAX and wraps negative, which made
+    // an earlier version of this test accept 99999999999999999999. So: the first
+    // significant digit branches, the next 18 are accumulated (always < 10^18,
+    // exact), and any digit past the 19th is read separately. 1844674407370955161
+    // is 2^64/10 and 922337203685477580 is 2^63/10, both exactly 18 digits.
+    // value = first digit * 10^k + the rest. Comparing the whole run at once
+    // would need 19 or 20 digits in an i64, which overflows; split this way each
+    // part stays below 2^63 and every comparison is exact.
+    // Both remaining cases split the value as <two digits> * 10^18 + <18 digits>,
+    // because 18 digits never overflow i64 (999999999999999999 < 2^63-1) while 19
+    // of them can: 19999999999999999999 was the case an earlier cut of this test
+    // accumulated straight past i64 MIN.
+    let d0 = cursor_source_byte(first_sig)
+    var i2 = first_sig + 1
+    var d1 = d0
+    var skip = true
+    while i2 < end && skip {          // `_` inside the literal is not a digit
+        let c1 = cursor_source_byte(i2)
+        if c1 == (95 as i8) { i2 = i2 + 1; continue }
+        d1 = c1
+        skip = false
+    }
+    i2 = i2 + 1
+    var acc: i64 = 0
+    var got: i64 = 0
+    while i2 < end && got < 18 {
+        let cc = cursor_source_byte(i2)
+        if cc == (95 as i8) { i2 = i2 + 1; continue }
+        if cc < (48 as i8) || cc > (57 as i8) { break }
+        acc = acc * 10 + ((cc - (48 as i8)) as i64)
+        got = got + 1
+        i2 = i2 + 1
+    }
+    let lead2 = ((d0 - (48 as i8)) as i64) * 10 + ((d1 - (48 as i8)) as i64)
+    if count == 20 {
+        // 2^64 = 18 * 10^18 + 446744073709551616.
+        if lead2 > 18 { return true }
+        if lead2 < 18 { return false }
+        return acc >= 446744073709551616
+    }
+    // 19 digits. 2^63 = 92 * 10^18 + 23372036854775808, so only a literal that
+    // starts 92 and lands on that tail is 2^63; i64 MAX is 2^63-1, one below.
+    if lead2 != 92 { return false }
+    if acc != 23372036854775808 { return false }
+    // Exactly 2^63: the one value i64 cannot hold that the corpus still writes,
+    // because `-9223372036854775808` (i64 MIN) is a prefix minus over a value
+    // that does fit. Refuse only when no prefix minus absorbs the sign bit.
+    !parser_prefix_minus_before(start)
+}
+
+// Is the byte before `start` a minus acting as a prefix operator on this
+// literal? A `-` is binary subtraction when the token before it can already end
+// a value (`x - 1`, `f() - 1`, `a[0] - 1`), and prefix otherwise (`-1`, `f(-1)`,
+// `(-1)`, `x == -1`). Read from the source rather than from a token-kind list so
+// the test cannot go stale when the lexer's kind numbers move.
+fn parser_prefix_minus_before(start: i64) -> bool with Mut, Panic {
+    var i = start - 1
+    while i >= 0 {
+        let c = cursor_source_byte(i)
+        if c == (32 as i8) || c == (9 as i8) || c == (10 as i8) || c == (13 as i8) {
+            i = i - 1
+            continue
+        }
+        if c != (45 as i8) { return false }
+        break
+    }
+    if i < 0 { return false }
+    i = i - 1
+    while i >= 0 {
+        let c2 = cursor_source_byte(i)
+        if c2 == (32 as i8) || c2 == (9 as i8) || c2 == (10 as i8) || c2 == (13 as i8) {
+            i = i - 1
+            continue
+        }
+        break
+    }
+    if i < 0 { return true }
+    let before = cursor_source_byte(i)
+    let ends_value = (before >= (48 as i8) && before <= (57 as i8)) ||
+        (before >= (65 as i8) && before <= (90 as i8)) ||
+        (before >= (97 as i8) && before <= (122 as i8)) || before == (95 as i8) ||
+        before == (41 as i8) || before == (93 as i8)
+    !ends_value
+}
+
 pub fn parser_reset_truncated_literals() with Mut {
     PARSER_TRUNCATED_LITERALS = 0
     PARSER_TRUNCATED_FIRST_LINE = 0
