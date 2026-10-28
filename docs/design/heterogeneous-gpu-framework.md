@@ -1604,3 +1604,20 @@ Job 19381. md5 `bc2dd72a3581e3d3d8b2fe65f41c1413`.
 Those eight words are 2.0 through 9.0. The stored word is 140.0. The inputs were not overwritten.
 
 Gate. Node `gpuorangefs-r770-proxmox`, `--gres=gpu:1`, `--mem=16G`, `--cpus-per-task=4`. The 0.0018 s threshold is not moved. This cut does not pass it.
+
+
+## 64. Five products, text grown to 336 bytes (2026-10-28, OBSERVED)
+
+The fourth product left the text at 288 bytes. The fifth needs two more loads and one more `FFMA`. The same move applies, counted from the original 2600-byte container: the tail after the old text shifts by 80 bytes, not 32. The file is 2680 bytes. `e_shoff` is `0x6d0`. `e_phoff` is `0x9d0`. The `.text` size and the `stamp` symbol size are 336. The load of the constant bank plus the text has file size and memory size `0x310`. `.debug_frame` still carries the length 256. The driver loaded the image.
+
+The fifth pair reuses R4 and R6. Barriers 2 and 3 were already reused once, for 6.0 and 7.0. The third `FFMA` waits on them, and the new loads register them again. The fifth `FFMA` waits on mask 12. The fourth still waits on mask 48. The store displacement is 40. `EXIT` is at pc 320. The register count stays 12.
+
+The host writes the bits of 2.0 through 11.0. In f32, 2 times 3 plus 4 times 5 plus 6 times 7 plus 8 times 9 plus 10 times 11 is 250.0. The bits of 250.0 are `0x437a0000`, which is 1132068864. The node was idle. No drain was cleared.
+
+Job 19385. md5 `169164c5b241574cff84769cde6324af`.
+
+`OWN=1073741824`, `OWN_ADD=1077936128`, `OWN_SRC=1082130432`, `OWN_WIDE=1084227584`, `OWN_EXT=1086324736`, `OWN_EXT2=1088421888`, `OWN_E8=1090519040`, `OWN_E9=1091567616`, `OWN_E10=1092616192`, `OWN_E11=1093664768`, `OWN_SUM=1132068864`, `EXIT:0`.
+
+Those ten words are 2.0 through 11.0. The stored word is 250.0. The inputs were not overwritten. Barriers 2 and 3 survived a second reuse.
+
+Gate. Node `gpuorangefs-r770-proxmox`, `--gres=gpu:1`, `--mem=16G`, `--cpus-per-task=4`. The 0.0018 s threshold is not moved. This cut does not pass it.
