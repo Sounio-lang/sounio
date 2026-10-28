@@ -10591,6 +10591,7 @@ fn checker_check_index_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, 
 fn checker_check_match_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     // Scrutinee via the *mut spine (faithful to check_match_expr's self.check_opt_expr(e.left)).
     let scrut_ty = checker_check_opt_expr_inplace(c, e.left)
+    let scrut_sources=if checker_type_has_ref(c,scrut_ty,0) {checker_collect_loan_sources_opt(c,e.left)} else {0}
     // Iterate the arm list. The FIRST arm's body type is the match result type
     // (check_match_arms' first_ty); each REMAINING arm's body type is compared against it
     // (check_remaining_arms). No arms => ty_unit() (check_match_arms' None branch).
@@ -10609,7 +10610,7 @@ fn checker_check_match_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
         match cursor {
             Some(list) => {
                 let arm = (*list).head
-                let arm_ty_raw = checker_check_match_arm_inplace(c, arm, scrut_ty)
+                let arm_ty_raw = checker_check_match_arm_inplace(c, arm, scrut_ty, scrut_sources)
                 // #830: an arm whose value is an unsuffixed float literal adopts a
                 // narrower float type from its sibling arms, as at the if/else join.
                 // A literal arm after an f32 arm narrows here; f32 arriving after
@@ -14460,14 +14461,31 @@ fn checker_pattern_names_global_const_inplace(c: *mut Checker, name: Name) -> bo
     false
 }
 
-fn checker_check_match_arm_inplace(c: *mut Checker, arm: MatchArm, scrut_ty: TypeEntry) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+fn checker_check_match_arm_inplace(c: *mut Checker, arm: MatchArm, scrut_ty: TypeEntry, scrut_sources:i64) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     type_env_push_scope_mut(&!(*c).env)
     (*c).borrows = (*c).borrows.push_scope()
     checker_push_const_scope_inplace(c)
+    let pattern_start=(*c).borrows.count
     if arm.pattern.kind == PatternKind::PatBinding && checker_pattern_names_global_const_inplace(c, arm.pattern.name) {
         // #2377: value pattern -- binds nothing; the arm compares against the constant.
     } else {
         checker_bind_pattern_inplace(c, arm.pattern, scrut_ty)
+    }
+    // Bindings extracted from a carrier retain the actual scrutinee owners.
+    // Staging identities before entering the arm prevents shadowing or scope
+    // slot reuse from rebasing a returned reference onto a pattern-local name.
+    var binding=pattern_start
+    while binding<(*c).borrows.count {
+        let name=(*c).borrows.entries[binding as usize].name
+        let ty=type_env_lookup(&(*c).env,name)
+        checker_set_affine_binding(c,name,ty)
+        if checker_type_has_ref(c,ty,0) {
+            if !borrow_sources_all_live(&(*c).borrows,scrut_sources) {checker_report_error_at_inplace(c,arm.span,91,0,0,0)}
+            (*c).borrows=borrow_persist_sources((*c).borrows,name,scrut_sources)
+            (*c).borrows=(*c).borrows.set_provenance(name,checker_loan_sources_local(c,scrut_sources))
+            if (*c).borrows.loan_overflow {checker_report_error_at_inplace(c,arm.span,38,0,0,0)}
+        }
+        binding=binding+1
     }
     // Type-check the `if <cond>` guard (if any) with the pattern variables in scope.
     match arm.guard {
