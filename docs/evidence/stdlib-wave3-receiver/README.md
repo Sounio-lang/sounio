@@ -97,3 +97,26 @@ No root storage/origin/Worker/loop-region WIP is included.
 This document qualifies the component and type/effect check. Full CLI/native,
 owner-view facade, strict BIDI/CLDR, generic linear storage and whole-stdlib
 acceptance remain separate until their own receipts complete.
+
+## Additional lexical-scope controls
+
+Slurm **19102** completed 0:0 in 2m55s with the identical production specializer
+f64ae053 and the same baseline, common legacy heap module and compiler pins.
+The expanded gate has **24 cases: 13 acceptances and 11 refusals**. The two added
+negative inputs shadow an outer concrete receiver with a closure parameter or
+a for-loop binder. They require the specializer to discard the outer nominal
+fact and refuse the unresolved generic homonym. The original production source
+and original HeapVec fixture are unchanged.
+
+Before compile0/native1 and after typecheck0/compile0/native0 all hold in this
+separate replay; the 26-module modern check reports verdict0. Its component
+receipt is retained under component-19102. This tests actual lexical-fact
+scoping without claiming native support for a user closure program.
+
+Slurm19103 archived its overlay, component executables, workers, logs and
+manifests in the same durable directory as:
+scope-controls-19102.tar.gz
+
+SHA256 53f3770140bfdab59feb52ed900eec98a21567eb2c350048c10cff151d20bb5d.
+The earlier 22-case receipt remains unchanged. Neither component replay is
+retagged as the pending source-built CLI integration result.
