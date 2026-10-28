@@ -7,6 +7,8 @@
 # Annotations:
 #   //@ run-pass                expect souc check and runtime execution
 #   //@ check-only              only run souc check, not souc run
+#   //@ compile-fail            both check and compile must refuse with exit1
+#   //@ error-code: E259        required diagnostic for compile-fail
 #   //@ expect-stdout: X        stdout must contain X (run-pass only, optional)
 #   //@ ignore [reason]         skip this test
 #   //@ ignore-owner: TEAM      optional owner metadata for ignored tests
@@ -187,6 +189,8 @@ run_test() {
     return
   fi
 
+  local is_compile_fail=false
+  local expected_error_code=""
   local is_run_pass=false
   local is_check_only=false
   local is_ignored=false
@@ -206,6 +210,12 @@ run_test() {
     # header comment would otherwise count as one.
     [[ "$line" =~ ^[[:space:]]*//@\  ]] || continue
 
+    if [[ "$line" =~ ^[[:space:]]*//@[[:space:]]*compile-fail[[:space:]]*$ ]]; then
+      is_compile_fail=true
+    fi
+    if [[ "$line" =~ ^[[:space:]]*//@[[:space:]]*error-code:[[:space:]]*(E[0-9]{3})[[:space:]]*$ ]]; then
+      expected_error_code="${BASH_REMATCH[1]}"
+    fi
     if [[ "$line" =~ "//@ run-pass" ]]; then
       is_run_pass=true
     fi
@@ -251,6 +261,35 @@ run_test() {
     if [[ $VERBOSE -eq 1 ]]; then
       echo "  SKIP  $relpath"
     fi
+    return
+  fi
+
+  if $is_compile_fail; then
+    if $is_run_pass || $is_check_only || [[ -z "$expected_error_code" ]]; then
+      FAIL=$((FAIL + 1))
+      record_result "fail" "$relpath" "compile-fail" "invalid-negative-annotation" "" "" "1" "compile-fail requires an error-code and no positive mode"
+      return
+    fi
+    local negative_output negative_rc=0 negative_executable
+    negative_output=$(phase_command "$relpath" check "$COMPILE_TIMEOUT_SEC" "$SOUC_BIN" check "$file") || negative_rc=$?
+    if [[ "$negative_rc" != 1 ]] || ! grep -qF "error[$expected_error_code]" <<< "$negative_output"; then
+      FAIL=$((FAIL + 1))
+      record_result "fail" "$relpath" "compile-fail" "expected-check-refusal-missing" "" "" "$negative_rc" "$(head -6 <<< "$negative_output")"
+      return
+    fi
+    negative_executable="$(mktemp /tmp/sounio-stdlib-negative-XXXXXX.elf)" || exit 65
+    rm -f "$negative_executable"
+    negative_rc=0
+    negative_output=$(phase_command "$relpath" compile "$COMPILE_TIMEOUT_SEC" "$SOUC_BIN" compile "$file" -o "$negative_executable") || negative_rc=$?
+    if [[ "$negative_rc" != 1 || -e "$negative_executable" || -L "$negative_executable" ]] || ! grep -qF "error[$expected_error_code]" <<< "$negative_output"; then
+      rm -f "$negative_executable"
+      FAIL=$((FAIL + 1))
+      record_result "fail" "$relpath" "compile-fail" "expected-compile-refusal-missing" "" "" "$negative_rc" "$(head -6 <<< "$negative_output")"
+      return
+    fi
+    PASS=$((PASS + 1))
+    record_result "pass" "$relpath" "compile-fail" "" "" "" "0" "check=1 compile=1 diagnostic=$expected_error_code no executable"
+    if [[ $VERBOSE -eq 1 ]]; then echo "  PASS  $relpath (check and compile refuse $expected_error_code)"; fi
     return
   fi
 
