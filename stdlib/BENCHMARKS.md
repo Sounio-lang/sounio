@@ -93,11 +93,7 @@ bash benchmarks/comparison/run_all.sh
 
 ### 4.3 Benchmarks GPU
 
-```bash
-scripts/archive/gpu_test_runner.sh
-```
-
-Relatório completo: [`benchmarks/results/NVIDIA_L4_BENCHMARKS.md`](../benchmarks/results/NVIDIA_L4_BENCHMARKS.md)
+O runner que gerou estes números saiu junto com `scripts/archive/`. O histórico do git guarda `gpu_test_runner.sh`. O relatório gravado continua em [`benchmarks/results/NVIDIA_L4_BENCHMARKS.md`](../benchmarks/results/NVIDIA_L4_BENCHMARKS.md).
 
 ### 4.4 Por Módulo (Futuro)
 

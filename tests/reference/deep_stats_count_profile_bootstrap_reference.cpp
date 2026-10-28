@@ -48,11 +48,13 @@ static void pbclose(Q got,Q want,Q relative,Q absolute,const char* w){
  if(fabsq(got-want)>absolute+relative*fabsq(want)){pbrow("actual",got);pbrow("expected",want);throw std::runtime_error(w);}
 }
 int main(int argc,char** argv){try{
- bool mutant=argc==3&&std::string(argv[1])=="--mutant-fixed-alpha";
- pbneed(argc<=2||mutant,"oracle arguments");
+ bool mutant=argc==3&&(std::string(argv[1])=="--mutant-fixed-alpha"||std::string(argv[1])=="--nested-mutant-fixed-alpha");
+ bool nested=argc==3&&(std::string(argv[1])=="--nested-single"||std::string(argv[1])=="--nested-mutant-fixed-alpha");
+ int model_count=nested?1:2;
+ pbneed(argc<=2||mutant||nested,"oracle arguments");
  const Data data={0,0,1,2,5,8,13,19,1,1,2,3,7,12,18,28};
  std::array<PBReference,2> refs{};
- for(int model=0;model<2;model++){
+ for(int model=0;model<model_count;model++){
   auto& o=refs[model];auto f0=pbprofile(data,false),f1=pbprofile(data,model==0);
   o.a0=f0.alpha;o.a1=f1.alpha;o.lr=2*(f1.ll-f0.ll);pbneed(o.lr>=0,"nonnegative observed LR");
   auto mu=pbmeans(data,false);Cursor rng(model==0?7:19);
@@ -68,13 +70,13 @@ int main(int argc,char** argv){try{
   std::cout<<"reference case "<<model<<'\n';pbrow("observed LR",o.lr);pbrow("null alpha",o.a0);pbrow("alternative alpha",o.a1);pbrow("tail",o.tail);
  }
  if(!mutant)pbneed(refs[0].last_a0!=refs[0].a0||refs[0].last_a1!=refs[0].a0,"replicate dispersion refit discriminator");
- if(argc>=2){std::ifstream in(argv[mutant?2:1]);pbneed(bool(in),"native stdout open");std::string line;int current=-1,cases=0,seen=0,counts=0;bool done=false;
+ if(argc>=2){std::ifstream in(argv[(mutant||nested)?2:1]);pbneed(bool(in),"native stdout open");std::string line;int current=-1,cases=0,seen=0,counts=0;bool done=false;
   const std::string prefix="profile bootstrap ";
   while(std::getline(in,line)){
-   if(line=="DEEP COUNT PROFILE BOOTSTRAP PASS")done=true;
+   if(line==(nested?"DEEP COUNT PROFILE NESTED BOOTSTRAP PASS":"DEEP COUNT PROFILE BOOTSTRAP PASS"))done=true;
    if(!line.starts_with(prefix))continue;auto sep=line.find(": ");pbneed(sep!=std::string::npos,"native row syntax");
    auto key=line.substr(prefix.size(),sep-prefix.size()),value=line.substr(sep+2);
-   if(key=="case"){if(current>=0)pbneed(seen==511&&counts==16,"previous complete native case");current=std::stoi(value);pbneed(current==cases&&current<2,"case order");cases++;seen=counts=0;continue;}
+   if(key=="case"){if(current>=0)pbneed(seen==511&&counts==16,"previous complete native case");current=std::stoi(value);pbneed(current==cases&&current<model_count,"case order");cases++;seen=counts=0;continue;}
    pbneed(current>=0,"native case context");auto& e=refs[current];Q v=strtoflt128(value.c_str(),nullptr);
    if(key=="lr"){pbclose(v,e.lr,Q(2e-7),Q(2e-9),"native full profiled LR");seen|=1;}
    else if(key=="alpha0"){pbclose(v,e.a0,Q(2e-5),0,"native null alpha");seen|=2;}
@@ -87,7 +89,7 @@ int main(int argc,char** argv){try{
    else if(key=="state lo"){pbneed(std::stoll(value)==e.lo,"native RNG low");seen|=64;}
    else if(key=="count"){pbneed(counts<16&&std::stoll(value)==e.last[counts],"native last sample");counts++;}
   }
-  pbneed(done&&cases==2&&seen==511&&counts==16,"full native profile-bootstrap completion");
+  pbneed(done&&cases==model_count&&seen==511&&counts==16,"full native profile-bootstrap completion");
   std::cout<<"ACTUAL PROFILE BOOTSTRAP CONCORDANCE PASS\n";
  }
  std::cout<<"DEEP COUNT PROFILE BOOTSTRAP CPP PASS\n";return 0;

@@ -15,7 +15,7 @@ export const docsNavSections: DocsNavSection[] = [
   {
     titleKey: 'docs_sidebar_language',
     heroSlug: 'language',
-    slugs: ['language', 'language/variables', 'language/functions', 'language/control-flow'],
+    slugs: ['language', 'language/variables', 'language/functions', 'language/control-flow', 'language/units-and-uncertainty'],
     icon: 'language',
   },
   {

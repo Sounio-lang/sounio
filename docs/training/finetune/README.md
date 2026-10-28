@@ -18,12 +18,10 @@ differ from Rust and other languages they were trained on.
 LLMs trained on general code corpora produce Rust-like syntax when asked to
 write Sounio. Common errors include:
 
-- Adding semicolons (`let x = 5;` instead of `let x = 5`)
 - Using `&mut` instead of `&!`
 - Using `let mut` instead of `var`
 - Using Rust macros (`assert!()` instead of `assert()`)
 - Missing effects declarations (`with IO, Mut, Panic, Div`)
-- Using unary minus (`-42` instead of `0 - 42`)
 
 LoRA fine-tuning on the Sounio corpus corrects these patterns with minimal
 compute cost (~2 hours on a single A100).
@@ -193,7 +191,7 @@ python benchmarks/multipl_e/eval_sounio.py \
 Key metrics:
 - **pass@1**: Fraction of problems solved on first try
 - **pass@10**: Fraction of problems solvable with 10 attempts
-- **Sounio syntax compliance**: Absence of semicolons, &mut, let mut, Rust macros
+- **Sounio syntax compliance**: &mut, let mut, Rust macros
 
 ## Advanced Usage
 

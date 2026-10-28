@@ -51,6 +51,24 @@ jobs:
         run: bash scripts/ci/classify_ci_impact.sh
       - name: Classifier self-test
         run: bash scripts/ci/impact_ci_selftest.sh
+      # ADR-018 §4: a PR that changes the compiler, runtime or stdlib adds a
+      # changelog.d/<slug>.<kind>.md fragment (kind=internal when nothing is
+      # user-visible). Pull requests only: a merge group carries diffs that
+      # were already checked here, and push/schedule have no PR to attribute.
+      - name: Changelog fragment gate and assembler self-tests
+        run: |
+          bash scripts/ci/changelog_fragment_gate.sh --selftest
+          bash scripts/release/changelog_assemble.sh --selftest
+      - name: Changelog fragment gate
+        if: github.event_name == 'pull_request'
+        env:
+          CI_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          CI_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_CREATED_AT: ${{ github.event.pull_request.created_at }}
+          IMPACT_COMPILER: ${{ steps.classify.outputs.compiler }}
+          IMPACT_RUNTIME: ${{ steps.classify.outputs.runtime }}
+          IMPACT_STDLIB: ${{ steps.classify.outputs.stdlib }}
+        run: bash scripts/ci/changelog_fragment_gate.sh
 
   contracts-core:
     name: Contracts Core
@@ -222,12 +240,6 @@ jobs:
       # written while the compiler stayed self-hosting — so this does not forbid
       # it, it makes it legible and shrink-only. Zero retires the scaffolding
       # by exhaustion.
-      - name: Silent type-spine ratchet
-        run: bash scripts/ci/silent_type_spine_ratchet_gate.sh
-      # Parameter-position uses of type kinds the *mut lowering spine does not
-      # handle. The silence is scaffolding — it is what let twenty type families
-      # be written while the compiler stayed self-hosting — so this makes it
-      # legible and shrink-only rather than forbidding it. Frozen at 19.
       - name: Silent type-spine ratchet
         run: bash scripts/ci/silent_type_spine_ratchet_gate.sh
       # Epsilon engine parity lives in Madaros Witness Gate: it must run against
@@ -826,6 +838,8 @@ jobs:
           fetch-depth: 0
       - name: Materialize the committed Madaros prebuilt
         run: bash scripts/lib/materialize_madaros_prebuilt.sh
+      - name: Multi-ontology scheduling self-test
+        run: bash scripts/ci/ontology_multi_ontology_gate.sh --selftest
       - name: Multi-ontology composition holds
         run: bash scripts/ci/ontology_multi_ontology_gate.sh
 
@@ -1095,6 +1109,17 @@ jobs:
           /tmp/madaros-ast-expr-surface "$PWD"
       - name: Build Madaros once and run current-source f64 lowering gates
         run: bash scripts/ci/madaros_current_source_f64_lowering_gate.sh
+      - name: Start self-hosted knowledge runtime thresholds asynchronously
+        if: runner.environment == 'self-hosted'
+        env:
+          MADAROS_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
+          SOUNIO_MADAROS_F64_LOWERING_KNOWLEDGE_RUNTIME_SCRIPT: scripts/ci/knowledge_runtime_threshold_contract_gate.sh
+        run: bash scripts/ci/madaros_current_source_f64_lowering_gate.sh --start-knowledge-runtime
+      - name: Verify standalone nested record-owner contract with the same source-built ELF
+        env:
+          MADAROS_RAW_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
+          SOUNIO_MADAROS_RECORD_OWNER_GATE_DIR: /tmp/sounio-madaros-current-source-f64-lowering/nested-record-owner-workflow
+        run: bash scripts/ci/madaros_nested_if_record_owner_gate.sh
       # SCO gates require a compiler from this exact source, not the shipping prebuilt.
       # The modular content-addressed cache reuses the compiler built above.
       - name: Validate the SCO compiler stack contract
@@ -1140,47 +1165,6 @@ jobs:
           bash scripts/ci/madaros_scientific_scalar_regression_gate.sh \
             /tmp/sounio-madaros-current-source-f64-lowering/madaros \
             /tmp/sounio-madaros-current-source-f64-lowering/scientific-scalar
-      # Reuses the source-built Madaros above; compiles the native driver
-      # program once, then checks its threshold matrix. No second Madaros build.
-      # Driver compile is bounded at 15 min and the matrix at 10 min; the step
-      # has 26 min including receipt I/O. Existing job and uploader stay intact.
-      # The driver build reached about 24 GiB RSS in Slurm; PR runners have
-      # about 16 GiB RAM. Run this real gate on the existing reviewed DARWIN
-      # route (48 GiB limit); PR runs skip it, without changing runner policy.
-      - name: Knowledge runtime thresholds on the source-built native driver
-        if: runner.environment == 'self-hosted'
-        timeout-minutes: 26
-        env:
-          MADAROS_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
-        run: |
-          set -euo pipefail
-          resolver_dir="${PWD}/scripts/lib"
-          source "$resolver_dir/resolve_madaros.sh"
-          sounio_require_madaros
-          export SOUNIO_STDLIB_PATH="$PWD/stdlib"
-          gate_dir="$SOUNIO_MADAROS_F64_LOWERING_GATE_DIR/knowledge-runtime-threshold"
-          mkdir -p "$gate_dir"
-          git rev-parse HEAD > "$gate_dir/source-commit.txt"
-          git ls-files -z self-hosted stdlib tests/frontend/threshold-matrix | xargs -0 sha256sum > "$gate_dir/source.sha256"
-          sha256sum "$MADAROS_BIN" > "$gate_dir/madaros.sha256"
-          driver="$gate_dir/driver"
-          rm -f "$driver"
-          ulimit -S -s 65536
-          build_rc=0
-          timeout 900 "$MADAROS_BIN" self-hosted/compiler/native_compile_driver.sio -o "$driver" > "$gate_dir/driver-build.log" 2>&1 || build_rc=$?
-          printf 'driver_build_rc=%s\n' "$build_rc" > "$gate_dir/phases.txt"
-          cat "$gate_dir/driver-build.log"
-          [[ "$build_rc" == 0 && -s "$driver" ]] || exit 1
-          chmod +x "$driver"
-          sha256sum -c "$gate_dir/source.sha256" > "$gate_dir/source-verify.log"
-          sha256sum -c "$gate_dir/madaros.sha256" > "$gate_dir/madaros-verify.log"
-          driver_sha=$(sha256sum "$driver" | cut -d ' ' -f1)
-          printf '%s  %s\n' "$driver_sha" "$driver" > "$gate_dir/driver.sha256"
-          gate_rc=0
-          timeout 600 bash scripts/ci/knowledge_runtime_threshold_contract_gate.sh "$driver" "$gate_dir/source.sha256" "$driver_sha" > "$gate_dir/matrix.log" 2>&1 || gate_rc=$?
-          cat "$gate_dir/matrix.log"
-          printf 'threshold_matrix_rc=%s\n' "$gate_rc" >> "$gate_dir/phases.txt"
-          exit "$gate_rc"
       - name: Madaros IR function table stays heap-backed
         env:
           MADAROS_RAW_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
@@ -1240,6 +1224,12 @@ jobs:
         env:
           MADAROS_RAW_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
         run: bash scripts/ci/madaros_visibility_context_gate.sh
+      # Issue #3238: a private ir/serialize write_i64 must not steal the bare
+      # runtime builtin of the same name. Reuses the ELF built above.
+      - name: Bare builtin calls ignore an invisible same-named private function
+        env:
+          MADAROS_RAW_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
+        run: bash scripts/ci/madaros_builtin_name_shadow_gate.sh
       # Copilot review (PR #2515), comment 4113458034: check_items_verdict_
       # boot4_with_module_map stamped current_module_id per item but left
       # current_module (used by pub(in path)'s ast_path_is_prefix check)
@@ -1570,6 +1560,12 @@ jobs:
         with:
           path: /tmp/sounio-madaros-cache
           key: madaros-cache-v1-${{ hashFiles('self-hosted/**', 'stdlib/**', 'bin/souc-linux-x86_64', 'bin/souc-lean-single-x86_64', 'scripts/lib/**', 'scripts/ci/build_modular_madaros.sh', 'scripts/ci/madaros_fixed_point_gate.sh', 'scripts/dev/madaros-cache.sh') }}
+      - name: Wait for self-hosted knowledge runtime threshold receipt
+        if: always() && !cancelled() && runner.environment == 'self-hosted'
+        timeout-minutes: 27
+        env:
+          SOUNIO_MADAROS_F64_LOWERING_KNOWLEDGE_RUNTIME_WAIT_SECONDS: 1560
+        run: bash scripts/ci/madaros_current_source_f64_lowering_gate.sh --wait-knowledge-runtime
       - name: Upload current-source f64 lowering logs
         if: always()
         uses: actions/upload-artifact@v4
@@ -1578,15 +1574,31 @@ jobs:
           path: /tmp/sounio-madaros-current-source-f64-lowering
           retention-days: 1
 
+  # Same trust boundary as SOUNIO_CI_RUNNER: the self-hosted Mac named by
+  # SOUNIO_CI_MACOS_RUNNER runs only reviewed code (merge_group, and main
+  # push/schedule/dispatch). pull_request runs stay on GitHub-hosted macOS.
+  # Delete the variable to fall back to macos-15 at once, without a commit.
+  # Setup: docs/ops/MACOS_CI_RUNNER.md.
   native-selfhost-macos-arm64:
     name: Native Self-Host (macOS arm64)
-    runs-on: macos-15
+    runs-on: ${{ (vars.SOUNIO_CI_MACOS_RUNNER != '' && (github.event_name == 'merge_group' || (github.event_name != 'pull_request' && github.ref == 'refs/heads/main'))) && vars.SOUNIO_CI_MACOS_RUNNER || 'macos-15' }}
     needs: [impact, source-bootstrap-selfhost-linux-x86_64]
     if: ${{ !cancelled() && (needs.impact.outputs.compiler == 'true' || needs.impact.outputs.full == 'true') && needs.source-bootstrap-selfhost-linux-x86_64.result == 'success' }}
     timeout-minutes: 60
     env:
       SOUNIO_SELFHOST_HOST_GATE_DIR: /tmp/sounio-selfhost-macos-arm64
     steps:
+      # A GitHub-hosted runner starts every job with an empty /tmp; a
+      # self-hosted one keeps the previous job's /tmp/madaros-* trees, and the
+      # gates below refuse existing outputs ("ln: ... File exists"). The runner
+      # user owns only its own entries and /tmp is sticky, so this removes the
+      # previous job's state and nothing else. One job runs at a time per runner.
+      - name: Reset the runner user's /tmp (self-hosted only)
+        if: runner.environment == 'self-hosted'
+        run: |
+          n=$(find /private/tmp -mindepth 1 -maxdepth 1 -user "$(id -un)" | wc -l | tr -d ' ')
+          find /private/tmp -mindepth 1 -maxdepth 1 -user "$(id -un)" -exec rm -rf {} +
+          echo "SELFHOST_TMP_RESET removed=$n user=$(id -un)"
       - uses: actions/checkout@v4
       - name: Download source-bootstrap macOS compiler artifact
         uses: actions/download-artifact@v4
@@ -1615,8 +1627,12 @@ jobs:
         run: bash scripts/ci/selfhost_host_gate.sh
       - name: Prepare native Madaros toolchain and signed current-source seed
         run: |
-          brew list coreutils >/dev/null 2>&1 || brew install coreutils
-          brew list boost >/dev/null 2>&1 || brew install boost
+          # Probe the filesystem, not `brew list`: brew refuses to run for a
+          # user that does not own the prefix (the self-hosted sounio-ci user).
+          brew_prefix="$(brew --prefix 2>/dev/null || echo /opt/homebrew)"
+          for formula in coreutils boost; do
+            [ -e "$brew_prefix/opt/$formula" ] || brew install "$formula"
+          done
           codesign -s - -f artifacts/self-hosted/souc-self-hosted-arm64-macos
           codesign --verify artifacts/self-hosted/souc-self-hosted-arm64-macos
       - name: Native AST expression-kind surface preflight

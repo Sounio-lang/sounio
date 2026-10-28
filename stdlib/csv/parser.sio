@@ -4,7 +4,7 @@
 // No heap, no dynamic allocation — all capacities are compile-time constants.
 //
 // Capacity:
-//   - max 256 rows × 16 columns  → data[4096]
+//   - max 256 rows × 16 columns  → data[4096], column-major, stride 256
 //   - input / output buffer: 4096 bytes
 //   - column header: up to 16 names of 32 bytes each
 //
@@ -46,7 +46,7 @@ pub fn csv_buf_new() -> CsvBuf {
 // =============================================================================
 
 pub struct CsvTable {
-    pub data:        [f64; 4096],       // row-major: data[row * n_cols + col]
+    pub data:        [f64; 4096],       // column-major: data[col * 256 + row]
     pub n_rows:      i32,
     pub n_cols:      i32,
     pub max_rows:    i32,               // fixed: CSV_MAX_ROWS
@@ -74,20 +74,20 @@ pub fn csv_table_new() -> CsvTable {
     }
 }
 
+fn csv_at(row: i32, col: i32) -> i32 { col * 256 + row }
+
 /// Set the value at (row, col). Out-of-bounds writes are silently ignored.
 pub fn csv_table_set(t: &!CsvTable, row: i32, col: i32, val: f64) with Mut, Panic {
     if row < 0 || row >= t.n_rows { return }
     if col < 0 || col >= t.n_cols { return }
-    let idx = row * t.n_cols + col
-    t.data[idx as usize] = val
+    t.data[csv_at(row, col) as usize] = val
 }
 
 /// Read the value at (row, col). Out-of-bounds reads return 0.0.
 pub fn csv_table_get(t: &CsvTable, row: i32, col: i32) -> f64 {
     if row < 0 || row >= t.n_rows { return 0.0 }
     if col < 0 || col >= t.n_cols { return 0.0 }
-    let idx = row * t.n_cols + col
-    t.data[idx as usize]
+    t.data[csv_at(row, col) as usize]
 }
 
 /// Append a row from values[0..n_cols-1].  n_cols must match t.n_cols (or set
@@ -104,10 +104,9 @@ pub fn csv_table_add_row(t: &!CsvTable, values: &[f64; 16], n_cols: i32) with Mu
     // Column count mismatch — silently skip
     if n_cols != t.n_cols { return }
 
-    let base = t.n_rows * t.n_cols
     var c: i32 = 0
     while c < n_cols {
-        t.data[(base + c) as usize] = values[c as usize]
+        t.data[csv_at(t.n_rows, c) as usize] = values[c as usize]
         c = c + 1
     }
     t.n_rows = t.n_rows + 1
@@ -336,10 +335,9 @@ pub fn csv_parse(input: &[u8; 4096], input_len: i32, table: &!CsvTable, delimite
                     if table.n_cols == 0 {
                         table.n_cols = col_count
                     }
-                    let base = row_count * table.n_cols
                     var wc: i32 = 0
                     while wc < col_count {
-                        table.data[(base + wc) as usize] = row_vals[wc as usize]
+                        table.data[csv_at(row_count, wc) as usize] = row_vals[wc as usize]
                         wc = wc + 1
                     }
                     row_count = row_count + 1
@@ -519,7 +517,7 @@ pub fn csv_serialize(table: &CsvTable, out: &![u8; 4096], delimiter: u8) -> i32 
                 out[p as usize] = delimiter
                 p = p + 1
             }
-            let v = table.data[(r * table.n_cols + c) as usize]
+            let v = table.data[csv_at(r, c) as usize]
             p = write_f64(v, out, p)
             if p >= 4096 { return 0 - 1 }
             c = c + 1
@@ -640,7 +638,7 @@ pub fn csv_serialize_buf(table: &CsvTable, b: &!CsvBuf, delimiter: u8) -> i32 wi
                 b.bytes[p as usize] = delimiter
                 p = p + 1
             }
-            let v = table.data[(r * table.n_cols + c) as usize]
+            let v = table.data[csv_at(r, c) as usize]
             p = write_f64_buf(v, b, p)
             if p >= 4096 { return 0 - 1 }
             c = c + 1
@@ -668,10 +666,11 @@ pub fn csv_parse_buf(b: &CsvBuf, table: &!CsvTable, delimiter: u8) -> i32 with M
 pub fn csv_col_sum(t: &CsvTable, col: i32) -> f64 {
     if col < 0 || col >= t.n_cols { return 0.0 }
     var s: f64 = 0.0
-    var r: i32 = 0
-    while r < t.n_rows {
-        s = s + t.data[(r * t.n_cols + col) as usize]
-        r = r + 1
+    var idx: i32 = col * 256
+    let end = idx + t.n_rows
+    while idx < end {
+        s = s + t.data[idx as usize]
+        idx = idx + 1
     }
     s
 }
@@ -689,11 +688,12 @@ pub fn csv_col_variance(t: &CsvTable, col: i32) -> f64 with Mut, Div, Panic {
     if t.n_rows == 0 { return 0.0 }
     let mean = csv_col_mean(t, col)
     var acc: f64 = 0.0
-    var r: i32 = 0
-    while r < t.n_rows {
-        let d = t.data[(r * t.n_cols + col) as usize] - mean
+    var idx: i32 = col * 256
+    let end = idx + t.n_rows
+    while idx < end {
+        let d = t.data[idx as usize] - mean
         acc = acc + d * d
-        r = r + 1
+        idx = idx + 1
     }
     acc / (t.n_rows as f64)
 }
@@ -702,12 +702,13 @@ pub fn csv_col_variance(t: &CsvTable, col: i32) -> f64 with Mut, Div, Panic {
 pub fn csv_col_min(t: &CsvTable, col: i32) -> f64 {
     if col < 0 || col >= t.n_cols { return 0.0 }
     if t.n_rows == 0 { return 0.0 }
-    var m: f64 = t.data[col as usize]
-    var r: i32 = 1
-    while r < t.n_rows {
-        let v = t.data[(r * t.n_cols + col) as usize]
+    var m: f64 = t.data[(col * 256) as usize]
+    var idx: i32 = col * 256 + 1
+    let end = col * 256 + t.n_rows
+    while idx < end {
+        let v = t.data[idx as usize]
         if v < m { m = v }
-        r = r + 1
+        idx = idx + 1
     }
     m
 }
@@ -716,12 +717,13 @@ pub fn csv_col_min(t: &CsvTable, col: i32) -> f64 {
 pub fn csv_col_max(t: &CsvTable, col: i32) -> f64 {
     if col < 0 || col >= t.n_cols { return 0.0 }
     if t.n_rows == 0 { return 0.0 }
-    var m: f64 = t.data[col as usize]
-    var r: i32 = 1
-    while r < t.n_rows {
-        let v = t.data[(r * t.n_cols + col) as usize]
+    var m: f64 = t.data[(col * 256) as usize]
+    var idx: i32 = col * 256 + 1
+    let end = col * 256 + t.n_rows
+    while idx < end {
+        let v = t.data[idx as usize]
         if v > m { m = v }
-        r = r + 1
+        idx = idx + 1
     }
     m
 }

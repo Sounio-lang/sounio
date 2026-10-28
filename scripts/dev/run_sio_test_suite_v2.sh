@@ -163,6 +163,7 @@ FILTER_MODE="contains"
 VERBOSE=""
 FORMAT="text"
 JOBS="${SOUNIO_TEST_JOBS:-$(nproc 2>/dev/null || echo 4)}"
+JOBS_CLI_SET=0
 LIST_TESTS=0
 TEST_LIST_FILE=""
 
@@ -193,6 +194,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         --jobs)
             JOBS="$2"
+            JOBS_CLI_SET=1
             shift 2
             ;;
         --list-tests)
@@ -210,6 +212,83 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+available_cpus() {
+    if [[ -n "${SOUNIO_TEST_CPU_COUNT:-}" ]]; then
+        printf '%s\n' "$SOUNIO_TEST_CPU_COUNT"
+    else
+        nproc 2>/dev/null || echo 4
+    fi
+}
+
+available_memory_bytes() {
+    if [[ -n "${SOUNIO_TEST_MEMORY_BYTES:-}" ]]; then
+        printf '%s\n' "$SOUNIO_TEST_MEMORY_BYTES"
+    elif [[ -r /sys/fs/cgroup/memory.max ]]; then
+        local limit current
+        read -r limit < /sys/fs/cgroup/memory.max
+        if [[ "$limit" =~ ^[0-9]+$ ]]; then
+            current=0
+            if [[ -r /sys/fs/cgroup/memory.current ]]; then
+                read -r current < /sys/fs/cgroup/memory.current
+            fi
+            [[ "$current" =~ ^[0-9]+$ ]] || current=0
+            (( current < limit )) && printf '%s\n' "$((limit - current))" || printf '1\n'
+        else
+            awk '/^MemAvailable:/ { printf "%.0f\n", $2 * 1024; exit }' /proc/meminfo
+        fi
+    elif [[ -r /sys/fs/cgroup/memory/memory.limit_in_bytes ]]; then
+        local limit current host_memory
+        read -r limit < /sys/fs/cgroup/memory/memory.limit_in_bytes
+        current=0
+        [[ ! -r /sys/fs/cgroup/memory/memory.usage_in_bytes ]] \
+            || read -r current < /sys/fs/cgroup/memory/memory.usage_in_bytes
+        if [[ "$limit" =~ ^[0-9]+$ && "$current" =~ ^[0-9]+$ && "$current" -lt "$limit" ]]; then
+            host_memory="$(awk '/^MemAvailable:/ { printf "%.0f\n", $2 * 1024; exit }' /proc/meminfo)"
+            if [[ "$host_memory" =~ ^[1-9][0-9]*$ ]]; then
+                local remaining=$((limit - current))
+                if (( remaining > host_memory )); then
+                    remaining="$host_memory"
+                fi
+                printf '%s\n' "$remaining"
+            else
+                printf '1\n'
+            fi
+        else
+            printf '1\n'
+        fi
+    else
+        awk '/^MemAvailable:/ { printf "%.0f\n", $2 * 1024; exit }' /proc/meminfo
+    fi
+}
+
+if [[ ! "$JOBS" =~ ^[1-9][0-9]*$ ]]; then
+    echo "error: --jobs must be a positive integer" >&2
+    exit 2
+fi
+
+if [[ -n "${CI:-}" && "${SOUNIO_TEST_JOBS_DYNAMIC:-1}" != "0" ]]; then
+    JOBS_CAP="${SOUNIO_TEST_JOBS_CAP:-8}"
+    if [[ ! "$JOBS_CAP" =~ ^[1-9][0-9]*$ ]]; then
+        echo "error: SOUNIO_TEST_JOBS_CAP must be a positive integer" >&2
+        exit 2
+    fi
+    CPU_COUNT="$(available_cpus)"
+    MEMORY_BYTES="$(available_memory_bytes)"
+    if [[ ! "$CPU_COUNT" =~ ^[1-9][0-9]*$ || ! "$MEMORY_BYTES" =~ ^[1-9][0-9]*$ ]]; then
+        echo "error: could not determine positive CPU and memory limits for dynamic test jobs" >&2
+        exit 2
+    fi
+    MEMORY_JOBS=$((MEMORY_BYTES / (2 * 1024 * 1024 * 1024)))
+    (( MEMORY_JOBS > 0 )) || MEMORY_JOBS=1
+    SCALED_JOBS=$((2 * CPU_COUNT))
+    (( SCALED_JOBS > MEMORY_JOBS )) && SCALED_JOBS="$MEMORY_JOBS"
+    (( SCALED_JOBS > JOBS_CAP )) && SCALED_JOBS="$JOBS_CAP"
+    if (( JOBS_CLI_SET == 1 && JOBS > SCALED_JOBS )); then
+        SCALED_JOBS="$JOBS"
+    fi
+    JOBS="$SCALED_JOBS"
+fi
 
 # Test counters
 PASS=0
@@ -316,7 +395,7 @@ test_matches_filter() {
 }
 
 # Function to run a single test
-run_test() {
+_run_test_case() {
     local file="$1"
     local idx="$2"
     local output_file="$TEST_TMP/result_$idx.json"
@@ -857,6 +936,8 @@ run_test() {
         cp "$output_file" "$SOUNIO_TEST_RESULTS_DIR/"
     fi
 }
+
+source "$ROOT_DIR/scripts/dev/sio_test_case.sh"
 
 # Collect all test files
 TEST_FILES=()

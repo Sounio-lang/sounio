@@ -63,7 +63,9 @@ function mapLegacyPathToTarget(webPath) {
   for (const matcher of matchers) {
     const match = basePath.match(matcher.test);
     if (!match) continue;
-    return `${localePrefix}${matcher.map(match)}`;
+    const target = `${localePrefix}${matcher.map(match)}`;
+    if (target === '/' || target.endsWith('/')) return target;
+    return `${target}/`;
   }
 
   return null;
