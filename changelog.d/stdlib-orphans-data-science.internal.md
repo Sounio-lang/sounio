@@ -1,0 +1,1 @@
+Unreferenced stdlib modules with no importer were removed: the BigFrame satellite packages, inlined copies of the proof kernel and geometric algebra, private math constants, and unused epistemic, probability, statistics, autodiff, causal, machine-learning, neural, GPU and spiking-network leaves. Programs that import the modules that remain are unchanged.
