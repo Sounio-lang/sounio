@@ -221,6 +221,14 @@ verify_step_problems() {
   # the copy still proceeds.
   [[ "$line" == *'$('* || "$line" == *'`'* ]] && step_swallow=1
   [[ "$line" =~ (^|[[:space:]])(echo|printf)([[:space:]]|$) ]] && step_swallow=1
+  # `true` and `:` ignore their arguments and return 0, so the verify text is
+  # not executed. A heredoc holds that text without running it. `bash +e`
+  # turns errexit off in that shell, so a failed receipt still reaches `cp`.
+  # `run:` and `name:` are YAML keys, not the `:` builtin.
+  [[ "$line" =~ (^|[[:space:]])true([[:space:]]|$) ]] && step_swallow=1
+  [[ "$line" =~ ^[[:space:]]{10,}:[[:space:]] || "$line" =~ run:[[:space:]]+:[[:space:]] ]] && step_swallow=1
+  [[ "$line" == *'<<'* ]] && step_swallow=1
+  [[ "$line" =~ (^|[[:space:]])\+e([^[:alnum:]_]|$) || "$line" =~ \+o[[:space:]]+errexit ]] && step_swallow=1
   if [[ "$line" =~ ^[[:space:]]*(-\ )?shell: ]]; then
    [[ ( "$line" == *'-e'* || "$line" == *'errexit'* ) && "$line" == *'pipefail'* ]] || step_swallow=1
   fi
@@ -526,6 +534,18 @@ EOF
  bad="$work/wf-verify-trailing-comment.yml"
  awk 'BEGIN{arm=0} /^  madaros-current-source-deref-f64:/{arm=1} arm && /stdlib_deep_compiler_receipt.sh verify/{sub(/bash/, "true # bash"); arm=0} {print}' "$base" >"$bad"
  expect_workflow_problem "$bad" verify-after-download
+ bad="$work/wf-verify-true.yml"
+ awk 'BEGIN{arm=0} /^  madaros-current-source-deref-f64:/{arm=1} arm && /stdlib_deep_compiler_receipt.sh verify/{sub(/bash/, "true bash"); arm=0} {print}' "$base" >"$bad"
+ expect_workflow_problem "$bad" verify-skippable
+ bad="$work/wf-verify-colon.yml"
+ awk 'BEGIN{arm=0} /^  madaros-current-source-deref-f64:/{arm=1} arm && /stdlib_deep_compiler_receipt.sh verify/{sub(/bash/, ": bash"); arm=0} {print}' "$base" >"$bad"
+ expect_workflow_problem "$bad" verify-skippable
+ bad="$work/wf-verify-heredoc.yml"
+ awk 'BEGIN{arm=0} /^  madaros-current-source-deref-f64:/{arm=1} arm && /stdlib_deep_compiler_receipt.sh verify/{print "          cat <<'\''EOF'\''"; arm=0} {print}' "$base" >"$bad"
+ expect_workflow_problem "$bad" verify-skippable
+ bad="$work/wf-verify-bash-plus-e.yml"
+ awk 'BEGIN{arm=0} /^  madaros-current-source-deref-f64:/{arm=1} arm && /stdlib_deep_compiler_receipt.sh verify/{sub(/bash/, "bash +e"); arm=0} {print}' "$base" >"$bad"
+ expect_workflow_problem "$bad" verify-skippable
  bad="$work/wf-verify.yml"
  awk 'BEGIN{skip=0} /madaros-current-source-deref-f64/{skip=1} skip && /stdlib_deep_compiler_receipt.sh verify/{skip=0; next} {print}' "$base" >"$bad"
  expect_workflow_problem "$bad" verify-after-download
