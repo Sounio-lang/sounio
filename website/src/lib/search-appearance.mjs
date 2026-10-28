@@ -28,9 +28,9 @@ export const ENGLISH_SEARCH = {
       'Epistemic types treat uncertainty, confidence, and provenance as program data. The guide shows Knowledge values and the checked unwrap boundary.',
   },
   '/learn/compiler/self-hosted/': {
-    title: 'Sounio self-hosted compiler, from source to x86-64',
+    title: 'Sounio self-hosted compiler: x86-64 ELF without LLVM',
     description:
-      'Architecture of the self-hosted Sounio compiler: parse, type-check, lower to IR, and emit a native Linux x86-64 ELF binary.',
+      "Sounio's compiler is written in Sounio: it type-checks, optimizes and emits static Linux x86-64 ELF binaries directly, with no LLVM or Cranelift.",
   },
   '/about/roadmap/': {
     title: 'Sounio roadmap: language, runtime, and what is open',
@@ -39,10 +39,29 @@ export const ENGLISH_SEARCH = {
   },
 };
 
+/** Approved S1 copy for the English self-hosted compiler page. */
+export const SELF_HOSTED_PAGE = {
+  h1: 'Sounio self-hosted compiler',
+  lede: 'The Sounio compiler is written in Sounio (.sio). It parses, type-checks, lowers to an IR, runs 20+ optimization passes and emits a static Linux x86-64 ELF binary directly, with no LLVM, Cranelift or other external code generator. Linux x86-64 is the only target today.',
+  crumbs: ['Learn', 'Compiler', 'Self-hosted compiler'],
+  author: {
+    '@type': 'Person',
+    name: 'Demetrios Chiuratto Agourakis',
+    url: 'https://www.souniolang.org/about/',
+    sameAs: ['https://orcid.org/0009-0001-8671-8878'],
+  },
+  about: {
+    '@type': 'SoftwareApplication',
+    name: 'Sounio',
+  },
+};
+
 export function englishSearchFor(barePath, locale) {
   if (locale !== 'en') return undefined;
   return ENGLISH_SEARCH[barePath];
 }
+
+const COMPILER_VERSION = /v0\.80|v0\.99|v0\.100|v1\.0/;
 
 for (const [page, copy] of Object.entries(ENGLISH_SEARCH)) {
   if (copy.title.length < 50 || copy.title.length > 60) {
@@ -50,5 +69,8 @@ for (const [page, copy] of Object.entries(ENGLISH_SEARCH)) {
   }
   if (copy.description.length < 120 || copy.description.length > 155) {
     throw new Error(`${page} description length ${copy.description.length} is outside 120–155`);
+  }
+  if (COMPILER_VERSION.test(copy.title) || COMPILER_VERSION.test(copy.description)) {
+    throw new Error(`${page} title or description names a compiler version`);
   }
 }

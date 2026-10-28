@@ -50,7 +50,7 @@ export function softwareSourceCode() {
   };
 }
 
-export function techArticle({ headline, description, url, inLanguage, dateModified }) {
+export function techArticle({ headline, description, url, inLanguage, dateModified, about, author }) {
   const article = {
     '@context': 'https://schema.org',
     '@type': 'TechArticle',
@@ -61,6 +61,8 @@ export function techArticle({ headline, description, url, inLanguage, dateModifi
   };
   const modified = isoDateOrNothing(dateModified);
   if (modified) article.dateModified = modified;
+  if (about) article.about = about;
+  if (author) article.author = author;
   return article;
 }
 
@@ -88,17 +90,22 @@ export function buildPageSchemas({
   dateModified,
   extra,
   absolutize,
+  headline,
+  about,
+  author,
 }) {
   const schemas = [];
   if (bare === '/') schemas.push(softwareApplication({ description, siteOrigin }));
   if (bare === '/' || bare === '/learn/getting-started/') schemas.push(softwareSourceCode());
   if (bare.startsWith('/learn/')) {
     schemas.push(techArticle({
-      headline: title,
+      headline: headline || title,
       description,
       url: canonicalUrl,
       inLanguage,
       dateModified,
+      about,
+      author,
     }));
   }
   if (Array.isArray(breadcrumbs) && breadcrumbs.length > 0) {

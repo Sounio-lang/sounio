@@ -13,7 +13,7 @@ import assert from 'node:assert/strict';
 import { readdir, readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { ENGLISH_SEARCH } from '../src/lib/search-appearance.mjs';
+import { ENGLISH_SEARCH, SELF_HOSTED_PAGE } from '../src/lib/search-appearance.mjs';
 import { rehypeDemoteH1 } from '../src/lib/rehype-demote-h1.mjs';
 import { isoDateOrNothing, CODE_REPOSITORY } from '../src/lib/structured-data.mjs';
 import { barePath, localeFromPath, isRedirectPath, absoluteUrl, htmlLang, canonicalPathname } from '../src/lib/seo-locales.mjs';
@@ -76,6 +76,18 @@ function h1Texts(html) {
   return [...html.matchAll(/<h1\b[^>]*>([\s\S]*?)<\/h1>/gi)].map((match) =>
     decode(match[1].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim())
   );
+}
+
+function firstParagraphAfterH1(html) {
+  const h1End = html.search(/<\/h1>/i);
+  if (h1End < 0) return '';
+  const match = html.slice(h1End).match(/<p\b[^>]*>([\s\S]*?)<\/p>/i);
+  if (!match) return '';
+  return decode(match[1].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim());
+}
+
+function attr(tag, name) {
+  return tag?.match(new RegExp(`${name}="([^"]*)"`))?.[1] ?? '';
 }
 
 function visibleCrumbs(html) {
@@ -227,11 +239,45 @@ for await (const file of walk(dist)) {
   }
   const article = articles[0];
   if (article) {
-    if (article.headline !== expected.title) errors.push(`${route}: TechArticle headline does not match the title`);
+    const headline = bare === '/learn/compiler/self-hosted/' ? SELF_HOSTED_PAGE.h1 : expected.title;
+    if (article.headline !== headline) errors.push(`${route}: TechArticle headline does not match ${JSON.stringify(headline)}`);
     if (article.description !== expected.description) errors.push(`${route}: TechArticle description does not match the meta description`);
     if (article.inLanguage !== 'en') errors.push(`${route}: TechArticle inLanguage`);
     if (article.url !== absoluteUrl(bare)) errors.push(`${route}: TechArticle url ${article.url}`);
     if ('dateModified' in article) errors.push(`${route}: dateModified was emitted without a calendar date in the source`);
+  }
+  if (bare === '/learn/compiler/self-hosted/') {
+    if (headings[0] !== SELF_HOSTED_PAGE.h1) {
+      errors.push(`${route}: H1 is ${JSON.stringify(headings[0])}, expected ${JSON.stringify(SELF_HOSTED_PAGE.h1)}`);
+    }
+    const lede = firstParagraphAfterH1(html);
+    if (lede !== SELF_HOSTED_PAGE.lede) errors.push(`${route}: first paragraph after H1 does not match the answer`);
+    const versionHit = html.match(/v0\.80|v0\.99|v0\.100|v1\.0/);
+    if (versionHit) errors.push(`${route}: compiler version ${versionHit[0]} appears in the HTML`);
+    if (/\bphysician\b|\bPhD\b|\bDr\.|\bMD\b|honorificPrefix/.test(html)) {
+      errors.push(`${route}: forbidden credential or honorificPrefix in the HTML`);
+    }
+    const canonicalTag = html.match(/<link\b[^>]*rel="canonical"[^>]*>/i)?.[0] ?? '';
+    if (attr(canonicalTag, 'href') !== 'https://www.souniolang.org/learn/compiler/self-hosted/') {
+      errors.push(`${route}: canonical is ${attr(canonicalTag, 'href')}`);
+    }
+    if (!html.includes('hreflang="en"') || !html.includes('hreflang="x-default"')) {
+      errors.push(`${route}: hreflang alternates are missing`);
+    }
+    const names = crumbs[0]?.itemListElement?.map((item) => item.name) ?? [];
+    if (names.join('\n') !== SELF_HOSTED_PAGE.crumbs.join('\n')) {
+      errors.push(`${route}: BreadcrumbList is ${names.join(' / ')}`);
+    }
+    const author = article?.author;
+    if (JSON.stringify(author) !== JSON.stringify(SELF_HOSTED_PAGE.author)) {
+      errors.push(`${route}: TechArticle author ${JSON.stringify(author)}`);
+    }
+    if (author && ('honorificPrefix' in author || 'honorificSuffix' in author)) {
+      errors.push(`${route}: TechArticle author carries an honorific`);
+    }
+    if (JSON.stringify(article?.about) !== JSON.stringify(SELF_HOSTED_PAGE.about)) {
+      errors.push(`${route}: TechArticle about ${JSON.stringify(article?.about)}`);
+    }
   }
   if (bare === '/') {
     const app = software[0];
