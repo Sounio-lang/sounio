@@ -172,6 +172,29 @@ needs_has() {
  local text=$1 id=$2
  [[ "$text" =~ (^|[^A-Za-z0-9_-])${id}([^A-Za-z0-9_-]|$) ]]
 }
+# Producer and consumer job conditions are an OR of `flag == 'true'` terms.
+# Replacing || with && keeps the same flag names and skips the producer while
+# a consumer still wants to run.
+or_true_flags() {
+ local expr=$1 rest piece term_re="^needs\\.impact\\.outputs\\.[a-z0-9_]+ == 'true'$" out=''
+ [[ "$expr" == *'&&'* || "$expr" == *'!'* || "$expr" == *'('* || "$expr" == *')'* ]] && return 1
+ rest="$expr"
+ while [[ -n "$rest" ]]; do
+  if [[ "$rest" == *'||'* ]]; then
+   piece="${rest%%||*}"
+   rest="${rest#*||}"
+  else
+   piece="$rest"
+   rest=
+  fi
+  piece="${piece#"${piece%%[![:space:]]*}"}"
+  piece="${piece%"${piece##*[![:space:]]}"}"
+  [[ "$piece" =~ $term_re ]] || return 1
+  printf -v out '%s%s\n' "$out" "$piece"
+ done
+ [[ -n "$out" ]] || return 1
+ printf '%s' "$out"
+}
 workflow_problems() {
  local file=$1 line job= in_jobs=0 in_needs=0 id rest flag consumer
  local -a problems=()
@@ -224,7 +247,7 @@ workflow_problems() {
   [[ "$prepare_at" -gt 0 && "$upload_at" -gt "$prepare_at" ]] || problems+=("prepare-before-upload $producer_job")
   [[ "$blob" == *"$artifact_path"* ]] || problems+=("download-path $producer_job")
   [[ -n "${if_text[$producer_job]:-}" && "${if_text[$producer_job]}" != *"always()"* ]] || problems+=("producer-if $producer_job")
-  producer_flags=$(grep -oE 'needs\.impact\.outputs\.[a-z0-9_]+' <<<"${if_text[$producer_job]:-}" | sort -u || true)
+  producer_flags=$(or_true_flags "${if_text[$producer_job]:-}" | sed 's/ == .*$//' | sort -u) || problems+=("impact-or $producer_job")
   [[ -n "$producer_flags" ]] || problems+=("producer-if $producer_job")
  fi
  for consumer in "${consumer_jobs[@]}"; do
@@ -244,8 +267,11 @@ workflow_problems() {
   [[ "$blob" == *"$artifact_path"* ]] || problems+=("download-path $consumer")
   [[ -n "${if_text[$consumer]:-}" ]] || problems+=("consumer-if $consumer")
   [[ "${if_text[$consumer]:-}" != *"always()"* ]] || problems+=("consumer-always $consumer")
-  consumer_flags=$(grep -oE 'needs\.impact\.outputs\.[a-z0-9_]+' <<<"${if_text[$consumer]:-}" | sort -u || true)
+  consumer_flags=$(or_true_flags "${if_text[$consumer]:-}" | sed 's/ == .*$//' | sort -u) || problems+=("impact-or $consumer")
   [[ -n "$consumer_flags" ]] || problems+=("consumer-if $consumer")
+  if [[ "$blob" == *'SOUNIO_MADAROS_F64_LOWERING_GATE_DIR'* ]]; then
+   [[ "$blob" == *'mkdir "$SOUNIO_MADAROS_F64_LOWERING_GATE_DIR"'* && "$blob" != *'mkdir -p "$SOUNIO_MADAROS_F64_LOWERING_GATE_DIR"'* ]] || problems+=("fresh-gate-dir $consumer")
+  fi
   while IFS= read -r flag; do
    [[ -n "$flag" ]] || continue
    grep -Fxq "$flag" <<<"$producer_flags" || problems+=("impact-subset $consumer $flag")
@@ -351,6 +377,9 @@ EOF
  bad="$work/wf-subset.yml"
  sed "s/if: needs.impact.outputs.full == 'true'/if: needs.impact.outputs.website == 'true'/" "$base" >"$bad"
  expect_workflow_problem "$bad" impact-subset
+ bad="$work/wf-and.yml"
+ sed '/needs.impact.outputs.runtime/s/ || / \&\& /g' "$base" >"$bad"
+ expect_workflow_problem "$bad" impact-or
  bad="$work/wf-always.yml"
  sed 's/if: needs.impact.outputs.full/if: always() \&\& needs.impact.outputs.full/' "$base" >"$bad"
  expect_workflow_problem "$bad" consumer-always
@@ -376,6 +405,11 @@ run_workflow() {
  problems=$(workflow_problems "$sabotaged")
  grep -q 'needs-producer gate-wave-0' <<<"$problems" || fail "real workflow sabotage was not rejected: ${problems:-<none>}"
  printf 'RECEIPT_WORKFLOW_REAL_SABOTAGE_REJECTED needs-producer\n'
+ sabotaged="$work/ci-mkdir-p.yml"
+ sed 's/mkdir "\$SOUNIO_MADAROS_F64_LOWERING_GATE_DIR"/mkdir -p "\$SOUNIO_MADAROS_F64_LOWERING_GATE_DIR"/' "$target" >"$sabotaged"
+ problems=$(workflow_problems "$sabotaged")
+ grep -q 'fresh-gate-dir madaros-current-source-deref-f64' <<<"$problems" || fail "mkdir -p sabotage was not rejected: ${problems:-<none>}"
+ printf 'RECEIPT_WORKFLOW_REAL_SABOTAGE_REJECTED fresh-gate-dir\n'
  printf 'STDLIB_DEEP_COMPILER_RECEIPT_WORKFLOW_PASS\n'
 }
 case ${1:-} in
