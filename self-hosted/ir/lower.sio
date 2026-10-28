@@ -340,12 +340,18 @@ fn lower_name_in_closure_params(params: &Option<Box<ClosureParamList>>, name: Na
 struct LowerLoopLabels {
     break_labels: [i64; 256],
     continue_labels: [i64; 256],
+    region_tokens: [i64; 256],
+    region_local_counts: [i64; 256],
+    region_body_starts: [i64; 256],
 }
 
 fn empty_lower_loop_labels() -> LowerLoopLabels {
     LowerLoopLabels {
         break_labels: [IR_INVALID_LABEL; 256],
         continue_labels: [IR_INVALID_LABEL; 256],
+        region_tokens: [0-1; 256],
+        region_local_counts: [0; 256],
+        region_body_starts: [0; 256],
     }
 }
 
@@ -3425,7 +3431,7 @@ fn ir_program_summary_from_lowerer(lo: Lowerer) -> IrProgramSummary with Alloc, 
     // At the imported-function ceiling the language promises the full table to
     // user code. Do not consume ten hidden slots there: body lowering applies
     // the matching headroom guard and simply leaves reclamation disabled.
-    if lower_rgn_enabled() && (*module_box).fn_count <= IR_MAX_FUNCS - 10 {
+    if lower_rgn_enabled() && (*module_box).fn_count <= IR_MAX_FUNCS - 11 {
         let _r0 = ir_fast_summary_find_or_add_fn_id(&! (*module_box), make_name("__rgn_enter"))
         let _r1 = ir_fast_summary_find_or_add_fn_id(&! (*module_box), make_name("__rgn_leave"))
         let _r2 = ir_fast_summary_find_or_add_fn_id(&! (*module_box), make_name("__rgn_escaped"))
@@ -3436,6 +3442,7 @@ fn ir_program_summary_from_lowerer(lo: Lowerer) -> IrProgramSummary with Alloc, 
         let _r7 = ir_fast_summary_find_or_add_fn_id(&! (*module_box), make_name("__rgn_exit_scalar"))
         let _r8 = ir_fast_summary_find_or_add_fn_id(&! (*module_box), make_name("__rgn_barrier"))
         let _r9 = ir_fast_summary_find_or_add_fn_id(&! (*module_box), make_name("__rgn_mark_all"))
+        let _r10 = ir_fast_summary_find_or_add_fn_id(&! (*module_box), make_name("@region1:keep_local"))
     }
     IrProgramSummary {
         module: module_box,
@@ -6445,7 +6452,7 @@ pub fn lower_program_to_ir_summary_flat_owned_with_epistemic_ref(
     }
     // Keep the owned flat-summary lane id-compatible with the boxed summary
     // lane above. These stubs are bodyless here and emitted by native codegen.
-    if lower_rgn_enabled() && module.fn_count <= IR_MAX_FUNCS - 10 {
+    if lower_rgn_enabled() && module.fn_count <= IR_MAX_FUNCS - 11 {
         let _r0 = ir_fast_summary_find_or_add_fn_id(&! module, make_name("__rgn_enter"))
         let _r1 = ir_fast_summary_find_or_add_fn_id(&! module, make_name("__rgn_leave"))
         let _r2 = ir_fast_summary_find_or_add_fn_id(&! module, make_name("__rgn_escaped"))
@@ -6456,6 +6463,7 @@ pub fn lower_program_to_ir_summary_flat_owned_with_epistemic_ref(
         let _r7 = ir_fast_summary_find_or_add_fn_id(&! module, make_name("__rgn_exit_scalar"))
         let _r8 = ir_fast_summary_find_or_add_fn_id(&! module, make_name("__rgn_barrier"))
         let _r9 = ir_fast_summary_find_or_add_fn_id(&! module, make_name("__rgn_mark_all"))
+        let _r10 = ir_fast_summary_find_or_add_fn_id(&! module, make_name("@region1:keep_local"))
     }
     IrProgramSummaryFlatResult {
         summary: IrProgramSummaryFlat {
@@ -7728,7 +7736,7 @@ lower_rss_mark("before_block")
     }
     var result_reg = lowerer_try_canonical_hello_block_mut(lo, &fd.body)
     if result_reg == IR_INVALID_REG {
-        if lower_rgn_enabled() && (*(*lo).module).fn_count <= IR_MAX_FUNCS - 10
+        if lower_rgn_enabled() && (*(*lo).module).fn_count <= IR_MAX_FUNCS - 11
             && !fd.is_kernel && !fd.is_extern && !(*lo).probe_mode
             && !ir_name_eq(name, make_name("main"))
             && !(*lo).ir_effect_list_has_name_ref(&fd.effects, "GPU")
@@ -23624,29 +23632,91 @@ impl Lowerer {
         last.op == IrOpcode::IrReturn
     }
 
-    fn push_loop_labels(self, continue_label: i64, break_label: i64) -> Lowerer with Mut, Panic, Div, IO {
-        var lo = self
-        if lo.loop_depth < 256 {
-            // Store through an extracted single-level Box pointer: the two-level
-            // nested stores `(*lo.loop_labels).break_labels[depth] = ...` are
-            // discarded by the codegen (the same two-level-nested-store miscompile
-            // that emptied enum_variants), so loop labels were never recorded and
-            // every break/continue then failed current_break/continue_label and
-            // reported an error (ir_bodies_failed) in both for and while loops.
-            var ll_box = lo.loop_labels
-            (*ll_box).continue_labels[lo.loop_depth as usize] = continue_label
-            (*ll_box).break_labels[lo.loop_depth as usize] = break_label
-            lo.loop_depth = lo.loop_depth + 1
-            lo
-        } else {
-            lo.report_error_at(9175)
-        }
+    fn loop_rgn_call(self,name:string,a0:i64,a1:i64,argc:i64,flag:i64)->(Lowerer,i64) with Mut,Panic,Div,Alloc,IO {
+        let pair=self.rgn_call(name,a0,a1,0,argc)
+        var lo=pair.0
+        let count=(*lo.current_func).instr_count
+        if count<=0 {return (lo.report_fatal_lowering_error(),pair.1)}
+        let slot=ir_region_slot_w((*lo.current_func).region,count-1)
+        if slot<0 {return (lo.report_fatal_lowering_error(),pair.1)}
+        if (IR_A_OP[slot as usize] as IrOpcode)!=IrOpcode::IrCall {return (lo.report_fatal_lowering_error(),pair.1)}
+        // Provenance marker only. Native certification must revalidate context,
+        // emitter identity and complete def-use; serialized flags grant no trust.
+        IR_A_IMM_FLAGS[slot as usize]=flag
+        (lo,pair.1)
     }
-
-    fn pop_loop_labels(self) -> Lowerer with Mut {
-        var lo = self
-        if lo.loop_depth > 0 {
-            lo.loop_depth = lo.loop_depth - 1
+    // Each token covers the body of one iteration. Conditions remain outside it.
+    fn loop_region_close(self, slot:i64, preserve:bool) -> Lowerer with Mut,Panic,Div,Alloc,IO {
+        var lo=self
+        if slot<0 || slot>=lo.loop_depth {return lo}
+        let labels=lo.loop_labels
+        let token=(*labels).region_tokens[slot as usize]
+        if token<0 {return lo}
+        if !preserve {
+            let leave=lo.loop_rgn_call("__rgn_leave",token,0,1,64079)
+            return leave.0
+        }
+        // Immutable/unwritten outer registers cannot acquire a young value.
+        // Scan arena columns once, rather than materializing IrInstr aggregates
+        // for every local. Numeric counters must never be interpreted as roots.
+        LOWER_LOOP_WRITE_EPOCH=LOWER_LOOP_WRITE_EPOCH+1
+        let epoch=LOWER_LOOP_WRITE_EPOCH
+        var at=(*labels).region_body_starts[slot as usize]
+        while at<(*lo.current_func).instr_count {
+            let instruction_slot=ir_region_slot_r((*lo.current_func).region,at)
+            let written=IR_A_DST[instruction_slot as usize]
+            if written>=0 && written<65536 {LOWER_LOOP_WRITTEN[written as usize]=epoch}
+            at=at+1
+        }
+        let locals=lo.locals
+        let limit=(*labels).region_local_counts[slot as usize]
+        var i:i64=0
+        while i<limit && i<(*locals).count {
+            let reg=(*(*locals).regs).values[i as usize]
+            var numeric=false
+            if i<4096 {
+                numeric=LOWER_RGN_NUM_SLOT_EPOCH[i as usize]==LOWER_RGN_NUM_EPOCH && LOWER_RGN_NUM_SLOT_REG[i as usize]==reg
+            }
+            var written=false
+            if reg>=65536 {written=true}
+            if reg>=0 && reg<65536 {written=LOWER_LOOP_WRITTEN[reg as usize]==epoch}
+            if !numeric && reg>=0 && written {
+                // Preserve this body's young roots only in THIS record. Promoting
+                // an older body local to root0 would incorrectly pin parent loops.
+                let keep=lo.loop_rgn_call("@region1:keep_local",token,reg,2,64078)
+                lo=keep.0
+            }
+            i=i+1
+        }
+        let z=lo.fresh_reg()
+        lo=z.0
+        lo=lo.emit(ir_load_imm(z.1,0))
+        let close=lo.loop_rgn_call("__rgn_exit_scalar",token,z.1,2,64077)
+        close.0
+    }
+    fn push_loop_labels(self, continue_label: i64, break_label: i64) -> Lowerer with Mut,Panic,Div,Alloc,IO {
+        var lo=self
+        if lo.loop_depth>=256 {return lo.report_error_at(9175)}
+        var labels=lo.loop_labels
+        let slot=lo.loop_depth
+        (*labels).continue_labels[slot as usize]=continue_label
+        (*labels).break_labels[slot as usize]=break_label
+        (*labels).region_local_counts[slot as usize]=(*lo.locals).count
+        (*labels).region_tokens[slot as usize]=0-1
+        if lower_loop_regions_enabled() {
+            let entered=lo.loop_rgn_call("__rgn_enter",0,0,0,64076)
+            lo=entered.0
+            (*labels).region_tokens[slot as usize]=entered.1
+        }
+        (*labels).region_body_starts[slot as usize]=(*lo.current_func).instr_count
+        lo.loop_depth=slot+1
+        lo
+    }
+    fn pop_loop_labels(self) -> Lowerer with Mut,Panic,Div,Alloc,IO {
+        var lo=self
+        if lo.loop_depth>0 {
+            lo=lo.loop_region_close(lo.loop_depth-1,true)
+            lo.loop_depth=lo.loop_depth-1
         }
         lo
     }
@@ -37972,7 +38042,7 @@ impl Lowerer {
             return (lo, cached)
         }
         var found = lowerer_lookup_fn_id_by_name_ref(&lo, make_name("__rgn_barrier"))
-        if found < 0 && (*lo.module).fn_count <= IR_MAX_FUNCS - 10 {
+        if found < 0 && (*lo.module).fn_count <= IR_MAX_FUNCS - 11 {
             found = lowerer_find_or_add_fn_id_mut(&! lo, make_name("__rgn_barrier"))
         }
         LOWER_RGN_CAST_BARRIER_ID = found
@@ -38228,8 +38298,12 @@ impl Lowerer {
         } else {
             self.lower_opt_expr_ref(&e.left)
         }
-        let lo = pair.0
+        var lo = pair.0
         let reg = pair.1
+        // Return values are handled by the existing function exit. Leave loop
+        // records without resetting; their allocations remain in the parent.
+        var loop_slot=lo.loop_depth-1
+        while loop_slot>=0 {lo=lo.loop_region_close(loop_slot,false);loop_slot=loop_slot-1}
         // Inside a kernel lane loop, `return` ends the lane, not the launch.
         // Emitting IrReturn here would abandon every remaining lane — the shape
         // `if (early_out) return` is common enough in kernels that getting this
@@ -38255,6 +38329,7 @@ impl Lowerer {
         let reg = pair.1
         let target = lo.current_break_label()
         if target >= 0 {
+            lo=lo.loop_region_close(lo.loop_depth-1,true)
             lo = lo.emit(ir_jump(target))
         } else {
             lo = lo.report_error_at(15095)
@@ -38268,6 +38343,7 @@ impl Lowerer {
         let reg = pair.1
         let target = lo.current_continue_label()
         if target >= 0 {
+            lo=lo.loop_region_close(lo.loop_depth-1,true)
             lo = lo.emit(ir_jump(target))
         } else {
             lo = lo.report_error_at(15108)
@@ -38990,6 +39066,7 @@ impl Lowerer {
         let saved_locals = lo.locals
         let saved_scope = lo.scope_depth
         let saved_loop = lo.loop_depth
+        let saved_loop_labels = lo.loop_labels
         let saved_loaded = lo.current_func_loaded
         let saved_allow_direct_capture = lo.allow_direct_capturing_closure_literal
 
@@ -39065,6 +39142,21 @@ impl Lowerer {
             float_ci = float_ci + 1
         }
 
+        // A closure is a different function: neither its labels/tokens nor
+        // binding-slot numeric proofs may overwrite the enclosing function.
+        let saved_numeric_epoch=LOWER_RGN_NUM_EPOCH
+        var saved_numeric_words:i64=0
+        if lower_loop_regions_enabled() {
+            saved_numeric_words=heap_alloc(65536) as i64
+            if saved_numeric_words<=0 {return lo.report_fatal_lowering_error().emit_unit()}
+            var ni:i64=0
+            while ni<4096 {
+                write_i64(saved_numeric_words,ni,LOWER_RGN_NUM_SLOT_EPOCH[ni as usize])
+                write_i64(saved_numeric_words,4096+ni,LOWER_RGN_NUM_SLOT_REG[ni as usize])
+                ni=ni+1
+            }
+        }
+
         // 3. Switch to the closure function context. current_func_loaded MUST be true so
         // the functional lowering (current_fn_validated_reg / param resolution) reads from
         // lo.current_func — not the empty module placeholder, which is what zeroed
@@ -39086,6 +39178,8 @@ impl Lowerer {
         lo.locals = lowerer_box_empty_locals()
         lo.scope_depth = 0
         lo.loop_depth = 0
+        lo.loop_labels = lowerer_box_empty_loop_labels()
+        lowerer_rgn_fn_start(&lo)
         // D5 (#986): per-function reset of vreg-keyed float/variance tables.
         lo.array_elem_float_reg_count = 0
         lo.variance_base_reg_count = 0
@@ -39189,6 +39283,17 @@ impl Lowerer {
         lo.locals = saved_locals
         lo.scope_depth = saved_scope
         lo.loop_depth = saved_loop
+        lo.loop_labels = saved_loop_labels
+        if saved_numeric_words>0 {
+            var ni:i64=0
+            while ni<4096 {
+                LOWER_RGN_NUM_SLOT_EPOCH[ni as usize]=read_i64(saved_numeric_words,ni)
+                LOWER_RGN_NUM_SLOT_REG[ni as usize]=read_i64(saved_numeric_words,4096+ni)
+                ni=ni+1
+            }
+            heap_free(saved_numeric_words as *mut i8)
+        }
+        LOWER_RGN_NUM_EPOCH=saved_numeric_epoch
         lo.allow_direct_capturing_closure_literal = saved_allow_direct_capture
 
         // 8b. For a capturing closure, record the captured ENCLOSING regs keyed by fn_id and
@@ -40354,3 +40459,16 @@ fn lower_program_to_ir_with_epistemic_ref(prog: &Program, epistemic: IrEpistemic
 fn lower_program_to_ir_with_epistemic(prog: Program, epistemic: IrEpistemicSection) -> IrLowerResult with Mut, Panic, Div, Alloc, IO {
     lower_program_to_ir_with_epistemic_ref(&prog, epistemic)
 }
+
+var LOWER_LOOP_REGIONS_CHECKED:i64=0
+var LOWER_LOOP_REGIONS_ON:i64=0
+fn lower_loop_regions_enabled()->bool with IO,Mut,Panic,Div {
+    if LOWER_LOOP_REGIONS_CHECKED==0 {
+        LOWER_LOOP_REGIONS_ON=if str_eq(read_env("SOUNIO_LOOP_REGIONS"),"1") {1} else {0}
+        LOWER_LOOP_REGIONS_CHECKED=1
+    }
+    LOWER_LOOP_REGIONS_ON==1 && LOWER_KERNEL_CONT_LABEL<0 && lower_rgn_enabled()
+}
+
+var LOWER_LOOP_WRITE_EPOCH:i64=0
+var LOWER_LOOP_WRITTEN:[i64;65536]=[0;65536]

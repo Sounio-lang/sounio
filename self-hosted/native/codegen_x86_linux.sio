@@ -1410,6 +1410,7 @@ fn native_v2_region_builtin_id(n: Name) -> i64 with Mut, Panic, Div {
 // source identifier, and private-function mangling appends legal identifier
 // suffixes. An unrelated private formatter cannot acquire this identity.
 fn native_v2_protected_builtin_id(name: Name) -> i64 with Mut, Panic, Div {
+    if name_eq(name,make_name("@region1:keep_local")) {return 1101}
     let storage_op=storage_intrinsic_op(&name)
     if storage_op!=0 {return 1000+storage_op}
     if name_eq(name, make_name("@native:print_int")) { return 1 }
@@ -9585,6 +9586,7 @@ pub fn native_v2_builtin_returns_float(builtin_id: i64) -> bool {
 }
 
 fn native_v2_emit_builtin_by_id_into(nc: &! NativeCompiler, builtin_id: i64) with Mut, Panic, Div {
+    if builtin_id==1101 {emit_builtin_loop_keep_local_into(nc);return}
     if builtin_id>=1000 && builtin_id<1100 {emit_builtin_storage_into(nc,builtin_id-1000);return}
     if builtin_id == 39 { emit_builtin_ffi_getpid_into(nc); return }
     if builtin_id == 40 { emit_builtin_ffi_getppid_into(nc); return }
@@ -16600,4 +16602,25 @@ fn emit_builtin_storage_into(nc:&!NativeCompiler,op:i64) with Mut,Panic,Div {
  }
  (*nc).ir_validation_failed=true
  nc_emit_byte(nc,0x0f);nc_emit_byte(nc,0x0b)
+}
+
+ // Preserve a live outer local in this iteration record without promoting
+ // allocations to older loop/function records. Whole-object stores still use
+ // the ordinary transitive barrier.
+fn emit_builtin_loop_keep_local_into(nc:&!NativeCompiler) with Mut,Panic,Div {
+ rgn_emit_alu(nc,0x85,7,7)
+ let none=rgn_emit_jcc(nc,0x84)
+ rgn_emit_load_ctx(nc,8)
+ rgn_emit_mov(nc,11,7)
+ rgn_emit_classify(nc,6,8,9,10,0-1,0-1)
+ rgn_emit_load(nc,10,11,native_v2_region_record_field_heap_start())
+ rgn_emit_alu(nc,0x39,9,10)
+ let old=rgn_emit_jcc(nc,0x82)
+ rgn_emit_mov_imm(nc,0,1)
+ rgn_emit_store(nc,11,native_v2_region_record_field_escaped(),0)
+ rgn_patch(nc,old)
+ rgn_patch_not_ref_exits(nc)
+ rgn_patch(nc,none)
+ rgn_emit_alu(nc,0x31,0,0)
+ nc_emit_ret(nc)
 }
