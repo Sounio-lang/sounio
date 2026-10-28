@@ -20,6 +20,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <regex>
 #include <sstream>
 #include <stdexcept>
@@ -52,13 +53,16 @@ std::vector<Fixture> manifest(const fs::path& root){
  }
  if(result.empty())fail("empty fixture selection");return result;
 }
-int execute(const fs::path& executable,const fs::path& cwd){
+int execute(const fs::path& executable,const fs::path& cwd,const std::string& coherent_kind={}){
  pid_t child=fork();if(child<0)fail("fork");
  if(child==0){
   setpgid(0,0);if(chdir(cwd.c_str())!=0)_exit(125);
   int out=open("native.stdout",O_WRONLY|O_CREAT|O_EXCL,0600),err=open("native.stderr",O_WRONLY|O_CREAT|O_EXCL,0600);
   if(out<0||err<0||dup2(out,STDOUT_FILENO)<0||dup2(err,STDERR_FILENO)<0)_exit(125);
-  close(out);close(err);execl(executable.c_str(),executable.c_str(),static_cast<char*>(nullptr));_exit(127);
+  close(out);close(err);
+  if(coherent_kind.empty())execl(executable.c_str(),executable.c_str(),static_cast<char*>(nullptr));
+  else execl(executable.c_str(),executable.c_str(),coherent_kind.c_str(),static_cast<char*>(nullptr));
+  _exit(127);
  }
  int status=0;auto deadline=std::chrono::steady_clock::now()+std::chrono::minutes(5);
  for(;;){
@@ -80,15 +84,26 @@ std::pair<bool,N> observed(const fs::path& file){
 #ifndef SOUNIO_CHUNK_RUNNER_NO_MAIN
 int main(int argc,char**argv){
  try{
-  if(argc!=6){std::cerr<<"usage: run_chunks ELF FIXTURE_DIRECTORY NEW_RUN_DIRECTORY PART PARTS\n";return 64;}
+  if(argc!=6&&argc!=8){std::cerr<<"usage: run_chunks ELF FIXTURE_DIRECTORY NEW_RUN_DIRECTORY PART PARTS [--coherent-kind KIND]\n";return 64;}
+  std::string coherent_kind;
+  if(argc==8) {
+   constexpr int family=SOUNIO_CHUNK_KIND_MIN==5?2:SOUNIO_CHUNK_KIND_MIN==6?3:1;
+   if(std::string(argv[6])!="--coherent-kind"||std::string(argv[7])!=std::to_string(family))return 64;
+   coherent_kind=argv[7];
+  }
   fs::path executable=fs::canonical(argv[1]),fixtures=fs::canonical(argv[2]),out=fs::absolute(argv[3]);N part=number(argv[4]),parts=number(argv[5]);
   if(parts==0||parts>1024||part>=parts)fail("invalid partition");auto all=manifest(fixtures);
   std::vector<Fixture> selected;for(std::size_t i=0;i<all.size();++i)if(i%parts==part)selected.push_back(all[i]);if(selected.empty())fail("empty partition");
   if(!fs::create_directory(out))fail("run directory must be new");
+  if(!coherent_kind.empty()) {
+   std::ofstream invocation(out/"ELF_INVOCATION.tsv");
+   invocation<<"argc\t1\nkind\t"<<coherent_kind<<"\n";
+   invocation.close();if(!invocation)fail("ELF invocation receipt");
+  }
   std::ofstream results(out/"RESULTS.tsv");results<<"fixture\tkind\texpected_rows\texit_status\tmarker\tactual_rows\n";N completed=0,rows=0;
   for(const auto& f:selected){
    auto cwd=out/fs::path(f.name).stem();auto destination=cwd/SOUNIO_CHUNK_FILE_DESTINATION;fs::create_directories(destination.parent_path());fs::copy_file(fixtures/f.name,destination);
-   int status=execute(executable,cwd);auto [marker,actual]=observed(cwd/"native.stdout");
+   int status=execute(executable,cwd,coherent_kind);auto [marker,actual]=observed(cwd/"native.stdout");
    results<<f.name<<'\t'<<f.kind<<'\t'<<f.rows<<'\t'<<status<<'\t'<<marker<<'\t'<<actual<<'\n';results.flush();if(!results)fail("result output");
    if(status!=0||!marker||actual!=f.rows){std::cerr<<"UNICODE_CHUNK_FAILURE "<<f.name<<" exit="<<status<<" expected="<<f.rows<<" actual="<<actual<<" marker="<<marker<<"\n";return 1;}
    ++completed;rows+=actual;
