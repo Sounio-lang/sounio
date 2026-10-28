@@ -160,6 +160,8 @@ verify_step_problems() {
    in_step=1
    step_if=0
    step_verify=0
+   # `- if: false` is a step condition on the opening line, not an eight-space key.
+   [[ "$line" =~ ^[[:space:]]{6}-[[:space:]]+if: ]] && step_if=1
   fi
   [[ "$in_step" == 1 ]] || continue
   # Step keys sit at eight spaces. A shell `if` inside `run: |` is indented further.
@@ -388,6 +390,9 @@ EOF
  expect_workflow_problem "$bad" artifact-unattached
  bad="$work/wf-verify-if.yml"
  awk 'BEGIN{arm=0} /^  madaros-current-source-deref-f64:/{arm=1} arm && /name: Verify/{print; print "        if: false"; arm=0; next} {print}' "$base" >"$bad"
+ expect_workflow_problem "$bad" verify-skippable
+ bad="$work/wf-verify-if-open.yml"
+ awk 'BEGIN{arm=0} /^  madaros-current-source-deref-f64:/{arm=1} arm && /name: Verify/{print "      - if: false"; arm=0; next} {print}' "$base" >"$bad"
  expect_workflow_problem "$bad" verify-skippable
  bad="$work/wf-missing.yml"
  awk 'BEGIN{drop=0} /^  gate-wave-0:/{drop=1} drop && /^  [A-Za-z0-9_-]+:[[:space:]]*$/ && !/^  gate-wave-0:/{drop=0} drop{next} {print}' "$base" >"$bad"
