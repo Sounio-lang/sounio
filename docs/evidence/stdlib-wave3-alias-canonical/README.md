@@ -138,3 +138,42 @@ No raw CLI containing this change has been bootstrapped by this lane. General
 alias inference, the open inferred-return receiver, all imported alias forms,
 generic storage/HeapVec/HeapDeque, and global compiler/whole-stdlib acceptance
 are not claimed by this component result.
+
+## Converged CLI successor, 2026-10-28
+
+Slurm **19528 completed 0** replays the unchanged original
+`aliases_fields.sio` through the converged public CLI: **check 0, compile 0,
+native 0**. The raw is
+`/scratch/sounio-stdlib-wave3-20261027/root-integrated02/results/madaros`,
+SHA-256
+`8abe891a66c71bdbeb784a9200d1ea395d4d5a55f0036a0daa51ad3cf0614932`.
+It includes the root's alias, cleanup, wildcard and Worker lifetime integration.
+The original fixture remains at
+`compiler-resumed/receiver-raw-array01/source/tests/fixtures/wave3_receiver_dispatch/aliases_fields.sio`
+under the sprint scratch root, SHA-256
+`0781ca5cfed395df4ff5b13df0314abbc4575c22088dec349e42bdaa4f19a990`.
+The same original stdlib path and 512 MiB stack are preserved. A separate
+wrong-value copy (expected 18 changed to 19) checks and compiles 0 but exits 1
+natively, showing that the original assertion executes. Raw and original
+before/final guards pass. See
+[supplement/alias-converged-cli01](supplement/alias-converged-cli01).
+
+This closes the unchanged `aliases_fields` CLI replay gate for this particular
+converged raw. It does not extend the accepted alias subset or close the
+inferred-return, general imported-alias, generic-storage or global acceptance
+limits described above.
+
+Slurm **19489 completed 0** also qualifies the separate three-function borrow
+cleanup controls: the original nested shared-getter expression is refused with
+E037, and the original owner-field index expression with E038 (both
+check/compile 1, no ELF); the temporary-value version checks, compiles and runs
+0 and preserves the count and bit-value assertions. See
+[supplement/frontend-source-borrow03](supplement/frontend-source-borrow03).
+The source cleanup remains commit
+`15bce9ecfa3c9c2687dd40cad8d3e56b6ca362a0`, distinct from the alias change.
+
+The independent whole frontend source check **19474 ended OUT_OF_MEMORY**,
+scheduler exit `0:125`, elapsed 00:19:51, maximum RSS 25163728 KiB. It did not
+produce a whole-file verdict 0 and is not treated as a pass. This final
+scheduler result supersedes only its previously running status; it does not
+alter the completed component or CLI evidence.
