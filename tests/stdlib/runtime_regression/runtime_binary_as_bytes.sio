@@ -1,12 +1,69 @@
 //@ run-pass
-fn main() -> i32 with IO {
-    print("RUNTIME_PROBE_BINARY_START\n")
-    let raw = read_file("tests/fixtures/fmri/tiny_real_slice_nifti1.nii")
-    let bytes = raw.as_bytes()
-    let n = bytes.len() as i64
-    print("RUNTIME_PROBE_BINARY_LEN ")
-    print(n)
-    print("\n")
-    print("RUNTIME_PROBE_BINARY_AFTER\n")
-    0
+use core::result::{Result}
+use collections::byte_buffer::{ByteBuffer,byte_buffer_new,byte_buffer_len,byte_buffer_push,byte_buffer_close}
+use collections::byte_view::{ByteView,byte_view_new,byte_view_len,byte_view_get,byte_view_slice}
+use ffi::platform::{Platform,platform_open,platform_status,platform_close}
+use io::native_file::{native_file_open}
+use io::buffered_reader::{buffered_reader_new,buffered_reader_status,buffered_reader_next_code,buffered_reader_close}
+fn probe_load_bytes(p:&Platform,path:string,out:&!ByteBuffer)->i64 with IO,Alloc,Mut,Panic,Div {
+ var name=byte_buffer_new(4096)
+ var code:i64=0
+ var i:i64=0
+ while code==0 && i<str_len(path) {
+  code=byte_buffer_push(&!name,str_char_at(path,i))
+  i=i+1
+ }
+ if code==0 {
+  let file=native_file_open(p,&name,0)
+  byte_buffer_close(name)
+  var reader=buffered_reader_new(file,7,7)
+  code=buffered_reader_status(&reader)
+  while code==0 {
+   let byte=buffered_reader_next_code(p,&!reader)
+   if byte==0-61 {break}
+   if byte<0 {code=0-byte}
+   else {code=byte_buffer_push(out,byte)}
+  }
+  let closed=buffered_reader_close(p,reader)
+  if code!=0 {code}else{closed}
+ }else {
+  byte_buffer_close(name)
+  code
+ }
+}
+fn probe_dump_bytes(view:&ByteView)->i64 with IO,Alloc,Mut,Panic,Div {
+ let count=byte_view_len(view)
+ if byte_view_get(view,0-1).status!=4 || byte_view_get(view,count).status!=4 {return 4}
+ var i:i64=0
+ while i<count {
+  let byte=byte_view_get(view,i)
+  if byte.status!=0 {return byte.status}
+  print("RUNTIME_PROBE_BYTE ");print_int(i);print(" ");print_int(byte.value);print("\n")
+  i=i+1
+ }
+ 0
+}
+fn main()->i32 with IO,Alloc,Mut,Panic,Div {
+ if arg_count()>1 {return 64}
+ print("RUNTIME_PROBE_BINARY_START\n")
+ let path=if arg_count()==1 {get_arg(0)}else{"tests/fixtures/fmri/tiny_real_slice_nifti1.nii"}
+ let platform=platform_open()
+ var buffer=byte_buffer_new(1048576)
+ var failure:i64=0
+ if platform_status(&platform)!=0 {failure=1}
+ else {
+  let code=probe_load_bytes(&platform,path,&!buffer)
+  if code!=0 {print("RUNTIME_PROBE_ERROR ");print_int(code);print("\n");failure=1}
+  else {match byte_view_new(&buffer,0,byte_buffer_len(&buffer)) {
+   Result::Ok(bytes)=>{
+    print("RUNTIME_PROBE_BINARY_LEN ");print_int(byte_view_len(&bytes));print("\n")
+    if probe_dump_bytes(&bytes)!=0 {failure=1}
+   },
+   Result::Err(code)=>{print("RUNTIME_PROBE_ERROR ");print_int(code);print("\n");failure=1},
+  }}
+ }
+ byte_buffer_close(buffer)
+ platform_close(platform)
+ if failure==0 {print("RUNTIME_PROBE_BINARY_AFTER\n")}
+ failure as i32
 }
