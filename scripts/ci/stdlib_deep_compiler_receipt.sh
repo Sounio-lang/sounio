@@ -198,6 +198,10 @@ verify_step_problems() {
   [[ "$amp" == *'&'* ]] && step_swallow=1
   [[ "$line" =~ (^|[[:space:]])coproc([[:space:]]|$) ]] && step_swallow=1
   [[ "$line" =~ (^|[[:space:]])trap[[:space:]] ]] && step_swallow=1
+  # `echo "$(verify)"` and backticks succeed when verify fails. `set -e` does
+  # not apply inside the substitution. An assignment of the substitution does
+  # fail the step; nesting it in another command does not.
+  [[ "$line" == *'$('* || "$line" == *'`'* ]] && step_swallow=1
   if [[ "$line" =~ ^[[:space:]]*(-\ )?shell: ]]; then
    [[ ( "$line" == *'-e'* || "$line" == *'errexit'* ) && "$line" == *'pipefail'* ]] || step_swallow=1
   fi
@@ -228,6 +232,46 @@ compiler_use_before_verify() {
   [[ -n "$vhead" || "$line" == *"stdlib_deep_compiler_receipt.sh verify"* ]] && verify_at=1
  done <<<"$blob"
 }
+# GitHub's default shell is `bash -eo pipefail`. A workflow or job `shell:`
+# replaces that for every `run:` step that does not set its own. Without
+# errexit, a failed receipt is ignored and the next line copies the ELF.
+shell_is_strict() {
+ local line=$1
+ [[ -z "$line" ]] && return 0
+ [[ ( "$line" == *'-e'* || "$line" == *'errexit'* ) && "$line" == *'pipefail'* ]]
+}
+job_default_shell() {
+ local blob=$1 line found=
+ while IFS= read -r line; do
+  [[ "$line" =~ ^[[:space:]]*# ]] && continue
+  [[ "$line" =~ ^[[:space:]]{4}steps: ]] && break
+  [[ "$line" =~ shell: ]] && found=$line
+ done <<<"$blob"
+ printf '%s\n' "$found"
+}
+# The shell key on the verify step, when that step sets one. It overrides a
+# workflow or job default for that step.
+verify_step_shell() {
+ local blob=$1 line in_step=0 step_verify=0 shell_line=
+ while IFS= read -r line; do
+  [[ "$line" =~ ^[[:space:]]*# ]] && continue
+  if [[ "$line" =~ ^[[:space:]]{6}-[[:space:]] ]]; then
+   if [[ "$in_step" == 1 && "$step_verify" == 1 ]]; then
+    printf '%s\n' "$shell_line"
+    return 0
+   fi
+   in_step=1
+   step_verify=0
+   shell_line=
+  fi
+  [[ "$in_step" == 1 ]] || continue
+  [[ "$line" == *"stdlib_deep_compiler_receipt.sh verify"* ]] && step_verify=1
+  [[ "$line" =~ shell: ]] && shell_line=$line
+ done <<<"$blob"
+ if [[ "$in_step" == 1 && "$step_verify" == 1 ]]; then
+  printf '%s\n' "$shell_line"
+ fi
+}
 needs_has() {
  local text=$1 id=$2
  [[ "$text" =~ (^|[^A-Za-z0-9_-])${id}([^A-Za-z0-9_-]|$) ]]
@@ -257,6 +301,7 @@ or_true_flags() {
 }
 workflow_problems() {
  local file=$1 line job= in_jobs=0 in_needs=0 id rest flag consumer
+ local workflow_shell='' job_shell=''
  local -a problems=()
  local -A body=() needs_text=() if_text=()
  [[ -f "$file" ]] || { printf 'workflow-missing %s\n' "$file"; return 0; }
@@ -267,7 +312,10 @@ workflow_problems() {
    job=
    continue
   fi
-  [[ "$in_jobs" == 1 ]] || continue
+  if [[ "$in_jobs" != 1 ]]; then
+   [[ "$line" =~ shell: ]] && workflow_shell=$line
+   continue
+  fi
   if [[ "$line" =~ ^\ \ ([A-Za-z0-9_-]+):[[:space:]]*$ ]]; then
    job=${BASH_REMATCH[1]}
    body[$job]=
@@ -327,6 +375,12 @@ workflow_problems() {
    [[ -n "$flag" ]] || continue
    problems+=("$flag $consumer")
   done < <(compiler_use_before_verify "$blob")
+  job_shell=$(job_default_shell "$blob")
+  [[ -z "$job_shell" ]] && job_shell=$workflow_shell
+  # A shell key on the verify step overrides the default and is checked there.
+  if [[ -z "$(verify_step_shell "$blob")" ]]; then
+   shell_is_strict "$job_shell" || problems+=("shell-default $consumer")
+  fi
   [[ "$blob" =~ stdlib_deep_compiler_receipt\.sh[[:space:]]+verify[[:space:]]*\\?[[:space:]]*\"\$GITHUB_WORKSPACE\"[[:space:]]*\"\$RUNNER_TEMP/stdlib-deep-compiler\"[[:space:]]*\"\$GITHUB_SHA\" ]] || problems+=("verify-arguments $consumer")
   [[ "$blob" == *"$artifact_path"* ]] || problems+=("download-path $consumer")
   [[ -n "${if_text[$consumer]:-}" ]] || problems+=("consumer-if $consumer")
@@ -492,6 +546,23 @@ EOF
  bad="$work/wf-verify-trap.yml"
  awk 'BEGIN{arm=0} /^  madaros-current-source-deref-f64:/{arm=1} arm && /stdlib_deep_compiler_receipt.sh verify/{print "          trap true ERR"; arm=0} {print}' "$base" >"$bad"
  expect_workflow_problem "$bad" verify-skippable
+ bad="$work/wf-verify-subst.yml"
+ awk 'BEGIN{arm=0} /^  madaros-current-source-deref-f64:/{arm=1} arm && /stdlib_deep_compiler_receipt.sh verify/{sub(/bash/, "echo \"$(bash"); arm=0} {print}' "$base" >"$bad"
+ expect_workflow_problem "$bad" verify-skippable
+ bad="$work/wf-verify-backtick.yml"
+ awk 'BEGIN{arm=0} /^  madaros-current-source-deref-f64:/{arm=1} arm && /stdlib_deep_compiler_receipt.sh verify/{sub(/bash/, "echo `bash"); arm=0} {print}' "$base" >"$bad"
+ expect_workflow_problem "$bad" verify-skippable
+ bad="$work/wf-job-shell.yml"
+ awk '/^  madaros-current-source-deref-f64:/{print; print "    defaults:"; print "      run:"; print "        shell: bash {0}"; next} {print}' "$base" >"$bad"
+ expect_workflow_problem "$bad" shell-default
+ bad="$work/wf-workflow-shell.yml"
+ awk '/^jobs:/{print "defaults:"; print "  run:"; print "    shell: bash {0}"} {print}' "$base" >"$bad"
+ expect_workflow_problem "$bad" shell-default
+ bad="$work/wf-strict-shell.yml"
+ awk '/^  madaros-current-source-deref-f64:/{print; print "    defaults:"; print "      run:"; print "        shell: bash -eo pipefail {0}"; next} {print}' "$base" >"$bad"
+ good=$(workflow_problems "$bad")
+ [[ -z "$good" ]] || fail "strict job shell was rejected: $good"
+ printf 'RECEIPT_WORKFLOW_CONTROL_ACCEPTED strict-shell\n'
  bad="$work/wf-use-before-verify.yml"
  awk 'BEGIN{arm=0} /^  madaros-current-source-deref-f64:/{arm=1} arm && /name: Verify/{print "      - name: Run early"; print "        run: bash scripts/ci/madaros_current_source_f64_lowering_gate.sh"; arm=0} {print}' "$base" >"$bad"
  expect_workflow_problem "$bad" use-before-verify
