@@ -96,7 +96,7 @@ TOTAL                  | 14.8K     | 59.2K        | 4.0x
 | **Batch Linear** | 4.3 | 80-120 | 20-30x | Good for batch ≥ 32 |
 | **Fully Connected** | 2.0 | 50-80 | 25-40x | Best for large batches |
 
-**GPU Kernels Implemented**: 7 production-ready kernels in `compiler/src/codegen/gpu/bio.rs:504-910`
+**GPU Kernels Implemented**: 7 kernels in `compiler/src/codegen/gpu/bio.rs:504-910`
 
 ---
 

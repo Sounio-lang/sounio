@@ -79,6 +79,11 @@ struct LowerLocalStack {
     // 32-63 of one i64 pushes array slot 31 onto the sign bit of the combined
     // value, corrupting it. See lower_fn_tuple_f64_array_mask.
     tuple_arr_mask: Box<LowerLocalI64Slots>,
+    // Tuple-typed local: bit k set iff element k is POSITIVELY an integer or
+    // bool (print_int kind 1). Own table for the same reason as tuple_arr_mask.
+    // Without it `let (st, v) = f()` left `st` at scalar kind 0 and
+    // `print(st)` was refused as "unresolved scalar kind".
+    tuple_int_mask: Box<LowerLocalI64Slots>,
     // Layout index for an aggregate element carried by a local: tuple slot-0
     // fixed arrays and Seq<T> share this slot because those shapes are disjoint.
     tuple0_array_elem_layout: Box<LowerLocalI64Slots>,
@@ -299,6 +304,7 @@ fn empty_lower_local_stack() -> LowerLocalStack with Alloc, Mut {
         scalar_kind: lowerer_box_local_i64_slots(0),
         tuple_float_mask: lowerer_box_local_i64_slots(0),
         tuple_arr_mask: lowerer_box_local_i64_slots(0),
+        tuple_int_mask: lowerer_box_local_i64_slots(0),
         tuple0_array_elem_layout: lowerer_box_local_i64_slots(-1),
         tuple_struct_layout: lowerer_box_local_i64_slots(-1),
         tuple_struct_slot: lowerer_box_local_i64_slots(-1),
@@ -2083,6 +2089,33 @@ var LOWER_HOF_TRANSPARENT_HASH: [i64; 4096] = [0; 4096]
 var LOWER_HOF_TRANSPARENT_LEN: [i64; 4096] = [0; 4096]
 var LOWER_HOF_TRANSPARENT_COUNT: i64 = 0
 
+// Integer/bool slots of a function's declared tuple return type, indexed by the
+// interned name id and stored as mask + 1 (0 = no tuple-returning fn recorded).
+// The first declaration collected under a name wins, the same precedence the
+// f64-array table uses (the owner's own items are collected first).
+// Sized to the same 262145 name-id window as the other return-payload tables
+// above (IR_NAME_POOL_MAX is 262144). The 65537 cap this arrived with drops
+// every name the self-compile interns past 65536, which is the silent miss
+// those tables were enlarged to close.
+var LOWER_FN_TUPLE_INT_MASK_BY_NID: [i64; 262145] = [0; 262145]
+
+fn lower_fn_tuple_int_mask_note(name: Name, rt: &TypeExpr) with Mut, Panic, Div {
+    if (*rt).kind != TypeExprKind::TypeTuple { return }
+    let nid = ir_intern_name(name)
+    if nid <= 0 || nid > 262144 { return }
+    if LOWER_FN_TUPLE_INT_MASK_BY_NID[nid as usize] != 0 { return }
+    LOWER_FN_TUPLE_INT_MASK_BY_NID[nid as usize] = lower_type_list_int_mask(&(*rt).type_args, 0) + 1
+}
+
+pub fn lower_fn_tuple_int_mask(name: Name) -> i64 with Mut, Panic, Div {
+    if name.len <= 0 { return 0 }
+    let nid = ir_intern_name(name)
+    if nid <= 0 || nid > 262144 { return 0 }
+    let stored = LOWER_FN_TUPLE_INT_MASK_BY_NID[nid as usize]
+    if stored <= 0 { return 0 }
+    stored - 1
+}
+
 pub fn lower_fn_tuple_arr_reset() with Mut {
     var oi: i64 = 0
     while oi < 262145 {
@@ -2093,6 +2126,7 @@ pub fn lower_fn_tuple_arr_reset() with Mut {
         LOWER_TUPLE_BOX_INNER[oi as usize] = 0
         LOWER_TUPLE_BOX_KIND[oi as usize] = 0
         LOWER_RAW_PTR_RETURN_PTE[oi as usize] = 0
+        LOWER_FN_TUPLE_INT_MASK_BY_NID[oi as usize] = 0
         oi = oi + 1
     }
     LOWER_HOF_TRANSPARENT_COUNT = 0
@@ -2233,6 +2267,7 @@ fn lower_fn_tuple_f64_arrays_collect_one(name: Name, fd_opt_ref: &Option<Box<FnD
             match *rt_opt_ref {
                 Some(rt) => {
                     if (*rt).kind == TypeExprKind::TypeTuple {
+                        lower_fn_tuple_int_mask_note(name, &(*rt))
                         let mask = lower_type_list_f64_array_mask(&(*rt).type_args, 0)
                         // Table is sized to IR_MAX_FUNCS (ir.sio:35), the hard
                         // ceiling on the number of functions any program can
@@ -5550,6 +5585,21 @@ fn lower_opt_type_fixed_array_len(ty_opt: &Option<Box<TypeExpr>>) -> i64 {
     }
 }
 
+// SIO-311: the type is spelled `[T]` with no size expression -- an open,
+// growable array, as opposed to `[T; N]` (Some size, literal or not).
+fn lower_opt_type_is_dynamic_array(ty_opt: &Option<Box<TypeExpr>>) -> bool {
+    match *ty_opt {
+        Some(ty) => {
+            if (*ty).kind != TypeExprKind::TypeArray { return false }
+            match (*ty).array_size {
+                None => true,
+                Some(_) => false,
+            }
+        }
+        None => false,
+    }
+}
+
 fn lower_name_is_direct_word_scalar_type(n: Name) -> bool with Panic, Div {
     // Native-v2 local arrays use one boxed 8-byte slot per primitive element,
     // including narrow integers. Keep this list explicit so structs, nested
@@ -6845,6 +6895,7 @@ fn lowerer_bind_local_mut(
         // a plain f64 slot as an f64-ARRAY. Explicit 0, mirroring bind_local.
         (*(*locals_box).tuple_float_mask).values[idx as usize] = 0
         (*(*locals_box).tuple_arr_mask).values[idx as usize] = 0
+        (*(*locals_box).tuple_int_mask).values[idx as usize] = 0
         // Post-#2084: tuple0_array_elem_layout was added on main to track when a
         // tuple slot-0 is a fixed array, which gates the aggregate-shallow-copy path.
         (*(*locals_box).tuple0_array_elem_layout).values[idx as usize] = 0 - 1
@@ -6954,7 +7005,8 @@ fn lowerer_mark_local_tuple_masks_mut(
     lo: &! Lowerer,
     name: Name,
     float_mask: i64,
-    arr_mask: i64
+    arr_mask: i64,
+    int_mask: i64
 ) with Mut, Alloc, Panic, Div {
     var locals_box = (*lo).locals
     var i = (*locals_box).count - 1
@@ -6962,6 +7014,7 @@ fn lowerer_mark_local_tuple_masks_mut(
         if (*(*locals_box).depths).values[i as usize] <= (*lo).scope_depth && ir_name_eq((*(*locals_box).names).values[i as usize], name) {
             (*(*locals_box).tuple_float_mask).values[i as usize] = float_mask
             (*(*locals_box).tuple_arr_mask).values[i as usize] = arr_mask
+            (*(*locals_box).tuple_int_mask).values[i as usize] = int_mask
             (*lo).locals = locals_box
             return
         }
@@ -7400,7 +7453,8 @@ fn lowerer_lower_fn_params_mut(
                 }
                 let param_tuple_float_mask = if (*list).head.ty.kind == TypeExprKind::TypeTuple { lower_type_list_float_mask(&(*list).head.ty.type_args, 0) } else { 0 }
                 let param_tuple_arr_mask = if (*list).head.ty.kind == TypeExprKind::TypeTuple { lower_type_list_arr_mask(&(*list).head.ty.type_args, 0) } else { 0 }
-                lowerer_mark_local_tuple_masks_mut(lo, (*list).head.name, param_tuple_float_mask, param_tuple_arr_mask)
+                let param_tuple_int_mask = if (*list).head.ty.kind == TypeExprKind::TypeTuple { lower_type_list_int_mask(&(*list).head.ty.type_args, 0) } else { 0 }
+                lowerer_mark_local_tuple_masks_mut(lo, (*list).head.name, param_tuple_float_mask, param_tuple_arr_mask, param_tuple_int_mask)
                 let param_elem_wide_bits = lower_type_expr_array_elem_wide_bits(&(*list).head.ty)
                 if param_elem_wide_bits > 0 {
                     // V0-E.5.7: `[f128; N]` / `&[f128; N]` param — element reads are
@@ -9426,6 +9480,33 @@ fn lower_opt_type_tuple_arr_mask(opt: &Option<Box<TypeExpr>>) -> i64 with Mut, P
         Some(te) => {
             if (*te).kind != TypeExprKind::TypeTuple { return 0 }
             lower_type_list_arr_mask(&(*te).type_args, 0)
+        }
+        None => 0,
+    }
+}
+
+// Integer-slot counterpart of lower_type_list_float_mask: bit k set iff element
+// k of a declared tuple type is an integer or bool (both print as kind 1).
+fn lower_type_list_int_mask(opt: &Option<Box<TypeExprList>>, bit: i64) -> i64 with Mut, Panic, Div {
+    match *opt {
+        Some(list) => {
+            var m: i64 = 0
+            if bit < 32 {
+                if lower_type_expr_is_integer(&(*list).head) || lower_type_expr_is_bool(&(*list).head) {
+                    m = 1 << (bit as i32)
+                }
+            }
+            m + lower_type_list_int_mask(&(*list).tail, bit + 1)
+        }
+        None => 0,
+    }
+}
+
+fn lower_opt_type_tuple_int_mask(opt: &Option<Box<TypeExpr>>) -> i64 with Mut, Panic, Div {
+    match *opt {
+        Some(te) => {
+            if (*te).kind != TypeExprKind::TypeTuple { return 0 }
+            lower_type_list_int_mask(&(*te).type_args, 0)
         }
         None => 0,
     }
@@ -15727,6 +15808,7 @@ impl Lowerer {
                 if idx < 4096 { LOWER_RGN_NUM_SLOT_EPOCH[idx as usize] = 0 }
                 (*(*stk).tuple_float_mask).values[idx as usize] = 0
                 (*(*stk).tuple_arr_mask).values[idx as usize] = 0
+                (*(*stk).tuple_int_mask).values[idx as usize] = 0
                 (*(*stk).tuple0_array_elem_layout).values[idx as usize] = 0 - 1
                 (*(*stk).tuple_struct_layout).values[idx as usize] = 0 - 1
                 (*(*stk).tuple_struct_slot).values[idx as usize] = 0 - 1
@@ -15831,6 +15913,89 @@ impl Lowerer {
             i = i - 1
         }
         lo
+    }
+
+    // Integer-slot counterpart of bind_local_tuple_arr_mask (tuple_int_mask).
+    fn bind_local_tuple_int_mask(self, name: Name, mask: i64) -> Lowerer with Mut, Alloc, Panic, Div {
+        var lo = self
+        if mask == 0 { return lo }
+        var stk = *lo.locals
+        var i = stk.count - 1
+        while i >= 0 {
+            if (*stk.depths).values[i as usize] <= lo.scope_depth && ir_name_eq((*stk.names).values[i as usize], name) {
+                (*stk.tuple_int_mask).values[i as usize] = mask
+                lo.locals = Box::new(stk)
+                return lo
+            }
+            i = i - 1
+        }
+        lo
+    }
+
+    fn lookup_local_tuple_int_mask(self, name: Name) -> i64 with Mut, Panic, Div, Alloc {
+        var i = (*self.locals).count - 1
+        while i >= 0 {
+            if (*(*self.locals).depths).values[i as usize] <= self.scope_depth && ir_name_eq((*(*self.locals).names).values[i as usize], name) {
+                return (*(*self.locals).tuple_int_mask).values[i as usize]
+            }
+            i = i - 1
+        }
+        0
+    }
+
+    // Integer slots of a tuple-producing expression: a call or method call
+    // (declared return type), an alias of a tracked tuple local, or a tuple
+    // literal whose element is positively an integer.
+    fn expr_result_tuple_int_mask_ref(self, e: &Expr) -> i64 with Mut, Panic, Div, Alloc {
+        if (*e).kind == ExprKind::ExprIdent {
+            return self.lookup_local_tuple_int_mask((*e).name)
+        }
+        if (*e).kind == ExprKind::ExprCall {
+            match (*e).left {
+                Some(callee_expr) => {
+                    let callee_name = self.expr_to_callee_name_ref(&(*callee_expr))
+                    return lower_fn_tuple_int_mask(callee_name)
+                }
+                None => { return 0 }
+            }
+        }
+        if (*e).kind == ExprKind::ExprMethodCall {
+            let recv_type = self.lower_method_recv_type(&(*e).left)
+            if recv_type.len <= 0 { return 0 }
+            return lower_fn_tuple_int_mask(ir_mangle_method_name(recv_type, (*e).name))
+        }
+        if (*e).kind == ExprKind::ExprTupleLit {
+            var m: i64 = 0
+            var bit: i64 = 0
+            var cur = &(*e).args
+            while bit < 32 {
+                match *cur {
+                    Some(list) => {
+                        if self.expr_result_scalar_kind_ref(&(*list).head) == 1 {
+                            m = m | (1 << (bit as i32))
+                        }
+                        bit = bit + 1
+                        cur = &(*list).tail
+                    }
+                    None => { break }
+                }
+            }
+            return m
+        }
+        0
+    }
+
+    // `t.K` where slot K of the tuple local / call `t` is positively an integer.
+    fn tuple_slot_is_int_ref(self, e: &Expr) -> bool with Mut, Panic, Div, Alloc {
+        let k = lower_name_tuple_index((*e).name)
+        if k < 0 || k >= 32 { return false }
+        match (*e).left {
+            Some(base) => {
+                let m = self.expr_result_tuple_int_mask_ref(&(*base))
+                ((m >> (k as i32)) & 1) == 1
+            }
+            None => false,
+        }
     }
 
     fn bind_local_tuple_struct(self, name: Name, layout_idx: i64, slot: i64) -> Lowerer with Mut, Alloc, Panic, Div {
@@ -26808,6 +26973,9 @@ impl Lowerer {
             if self.field_is_int_for_base_ref(&(*e).left, (*e).name) || self.field_is_int_by_name_simple((*e).name) {
                 return 1
             }
+            if self.tuple_slot_is_int_ref(e) {
+                return 1
+            }
         }
         // println i64-segfault fix (array-element axis): an array subscript `a[i]`
         // (including a struct-field array `s.c[i]`) yields a scalar element. The
@@ -27917,6 +28085,7 @@ impl Lowerer {
                         // not leak into this param.
                         (*(*locals).tuple_float_mask).values[idx as usize] = if (*list).head.ty.kind == TypeExprKind::TypeTuple { lower_type_list_float_mask(&(*list).head.ty.type_args, 0) } else { 0 }
                         (*(*locals).tuple_arr_mask).values[idx as usize] = if (*list).head.ty.kind == TypeExprKind::TypeTuple { lower_type_list_arr_mask(&(*list).head.ty.type_args, 0) } else { 0 }
+                        (*(*locals).tuple_int_mask).values[idx as usize] = if (*list).head.ty.kind == TypeExprKind::TypeTuple { lower_type_list_int_mask(&(*list).head.ty.type_args, 0) } else { 0 }
                         (*(*locals).box_inner_layout).values[idx as usize] = lower_struct_layout_index_of(&(*lo.struct_layouts), lower_box_or_option_inner_type_name(&(*list).head.ty))
                         if lower_type_expr_is_box(&(*list).head.ty) && lower_box_trace_enabled(1) {
                             print("boxtrace: WRITE-B ")
@@ -29480,10 +29649,12 @@ impl Lowerer {
         // left with the twin of the bug just fixed.
         var rhs_tuple_arr_mask: i64 = 0
         var rhs_tuple_mask: i64 = 0
+        var rhs_tuple_int_mask: i64 = 0
         match s.expr {
             Some(rhs_mask_pre) => {
                 rhs_tuple_arr_mask = lo.expr_result_tuple_arr_mask_ref(&(*rhs_mask_pre))
                 rhs_tuple_mask = lo.expr_result_tuple_float_mask_ref(&(*rhs_mask_pre))
+                rhs_tuple_int_mask = lo.expr_result_tuple_int_mask_ref(&(*rhs_mask_pre))
             }
             _ => {}
         }
@@ -29665,6 +29836,13 @@ impl Lowerer {
             lo = lo.bind_local_tuple_arr_mask(s.name, annotated_tuple_arr_mask)
         } else if rhs_tuple_arr_mask != 0 {
             lo = lo.bind_local_tuple_arr_mask(s.name, rhs_tuple_arr_mask)
+        }
+        // Integer-slot counterpart, same precedence (annotation, then initialiser).
+        let annotated_tuple_int_mask = lower_opt_type_tuple_int_mask(&s.ty)
+        if annotated_tuple_int_mask != 0 {
+            lo = lo.bind_local_tuple_int_mask(s.name, annotated_tuple_int_mask)
+        } else if rhs_tuple_int_mask != 0 {
+            lo = lo.bind_local_tuple_int_mask(s.name, rhs_tuple_int_mask)
         }
         // See the `var out: SomeStruct` (no initializer) note above: the local
         // must exist on the stack (bind_local, just above) before
@@ -29989,7 +30167,13 @@ impl Lowerer {
                 }
             }
         }
-        if fixed_array_len >= 0 {
+        if lower_opt_type_is_dynamic_array(&s.ty) {
+            // SIO-311: an annotated `[T]` stays dynamic even when its
+            // initializer is a literal of known length; recording that
+            // length here would mark the local as a fixed array and hide
+            // it from the .push path.
+            lo = lo.bind_local_fixed_array_len(s.name, 0 - 1)
+        } else if fixed_array_len >= 0 {
             lo = lo.bind_local_fixed_array_len(s.name, fixed_array_len)
         }
         if fixed_array_word_scalar {
@@ -38125,6 +38309,23 @@ impl Lowerer {
                                 }
                                 return (lo.emit(len_instr), dst)
                             }
+                            // SIO-311: `.len()` on an array held in a struct
+                            // field (`b.items.len()`). Evaluating the field
+                            // access yields the array handle, exactly what
+                            // ir_array_len reads; the ident-only path above
+                            // otherwise fell through and invented a body-less
+                            // `len`. The fn_id guard keeps a user-defined
+                            // `len` method on the field's type on the generic
+                            // path.
+                            if (*recv).kind == ExprKind::ExprFieldAccess && self.lower_method_call_fn_id_ref(e) < 0 {
+                                let pair_b = self.lower_expr_ref(&(*recv))
+                                var lo = pair_b.0
+                                let base_reg = pair_b.1
+                                let pair_d = lo.fresh_reg()
+                                lo = pair_d.0
+                                let dst = pair_d.1
+                                return (lo.emit(ir_array_len(dst, base_reg)), dst)
+                            }
                         }
                         None => {}
                     }
@@ -38137,6 +38338,48 @@ impl Lowerer {
                     lowerer_mark_error(&! lo_bad)
                     return (lo_bad, IR_INVALID_REG)
                 }
+            }
+        }
+        // SIO-311: `.push(v)` on a dynamic array ([T]). The checker admits
+        // it only there (fixed arrays keep E019); the append is
+        // __sounio_seq_push, which grows the shared aggregate layout
+        // (flags = logical length, payload_size = capacity) and retargets
+        // the handle-table entry when it grows, so every alias observes
+        // the append. Only an ident receiver is recognised here -- the
+        // local tables are what tell an open array apart (element type in
+        // struct_types with array_lens < 0); other receiver shapes keep
+        // the generic path below.
+        if ir_name_eq(e.name, make_name("push")) && !ir_name_eq(recv_type, make_name("Seq")) {
+            match e.left {
+                Some(recv) => {
+                    if (*recv).kind == ExprKind::ExprIdent
+                        && !self.lookup_local_is_ref((*recv).name)
+                        && self.lookup_local_fixed_array_len((*recv).name) < 0
+                        && (self.lookup_local_struct_type_is_array_elem((*recv).name)
+                            || self.lookup_local_array_copy_word_scalar((*recv).name)
+                            || self.lookup_local_array_elem_float((*recv).name)) {
+                        let pair_b_push = self.lower_expr_ref(&(*recv))
+                        var lo_push = pair_b_push.0
+                        let base_reg_push = pair_b_push.1
+                        let pair_args_push: LowerExprArgsResult = lo_push.lower_expr_args_raw_ref(&e.args)
+                        lo_push = pair_args_push.lowerer
+                        if pair_args_push.count != 1 {
+                            lowerer_mark_hard_error(&! lo_push)
+                            return (lo_push, IR_INVALID_REG)
+                        }
+                        let call_name_push = make_name("__sounio_seq_push")
+                        let fn_id_push = lowerer_find_or_add_fn_id_mut(&! lo_push, call_name_push)
+                        let call_args_push: Option<Box<IrRegList>> = Some(Box::new(ir_reg_list_cons(
+                            base_reg_push,
+                            Some(Box::new(pair_args_push.regs)),
+                        )))
+                        let pair_d_push = lo_push.fresh_reg()
+                        lo_push = pair_d_push.0
+                        let dst_push = pair_d_push.1
+                        return (lo_push.emit(ir_call(dst_push, fn_id_push, call_name_push, call_args_push, 2)), dst_push)
+                    }
+                }
+                None => {}
             }
         }
         // Impl methods are lowered as mangled free functions (ir_mangle_method_name).
@@ -38229,6 +38472,36 @@ impl Lowerer {
                 lowerer_mark_hard_error(&! lo_bad_seq_method)
                 return (lo_bad_seq_method, IR_INVALID_REG)
             }
+        }
+        // SIO-311: `.push(v)` on a dynamic array through a non-ident
+        // receiver (a field, a deref, a call result). When no impl method
+        // named `push` is registered for the receiver type, a bare push
+        // call can only be the dynamic-array append the checker admitted
+        // (Seq is handled above; every other receiver keeps E019 there),
+        // so emit __sounio_seq_push on the evaluated handle. Evaluating
+        // the receiver yields the array handle in each of those shapes,
+        // and the intrinsic retargets its handle-table entry when it
+        // grows, so the append is observed through the place itself.
+        if ir_name_eq(e.name, make_name("push")) && self.lower_method_call_fn_id_ref(e) < 0 {
+            let pair_b_push = self.lower_opt_expr_ref(&e.left)
+            var lo_push = pair_b_push.0
+            let base_reg_push = pair_b_push.1
+            let pair_args_push: LowerExprArgsResult = lo_push.lower_expr_args_raw_ref(&e.args)
+            lo_push = pair_args_push.lowerer
+            if pair_args_push.count != 1 {
+                lowerer_mark_hard_error(&! lo_push)
+                return (lo_push, IR_INVALID_REG)
+            }
+            let call_name_push = make_name("__sounio_seq_push")
+            let fn_id_push = lowerer_find_or_add_fn_id_mut(&! lo_push, call_name_push)
+            let call_args_push: Option<Box<IrRegList>> = Some(Box::new(ir_reg_list_cons(
+                base_reg_push,
+                Some(Box::new(pair_args_push.regs)),
+            )))
+            let pair_d_push = lo_push.fresh_reg()
+            lo_push = pair_d_push.0
+            let dst_push = pair_d_push.1
+            return (lo_push.emit(ir_call(dst_push, fn_id_push, call_name_push, call_args_push, 2)), dst_push)
         }
         let call_name = if recv_type.len > 0 { ir_mangle_method_name(recv_type, e.name) } else { e.name }
         if recv_type.len == 0 && lower_recv_trace_enabled() {

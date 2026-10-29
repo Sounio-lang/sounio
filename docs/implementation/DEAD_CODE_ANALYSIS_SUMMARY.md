@@ -47,21 +47,6 @@ Added settings:
 
 ## Usage
 
-### Command Line
-```bash
-# Analyze a file
-python3 tools/analyze/dead_code.py file.sio
-
-# Analyze with JSON output
-python3 tools/analyze/dead_code.py file.sio --format json
-
-# Analyze directory
-python3 tools/analyze/dead_code.py ./src --exclude test_ vendor/
-
-# Fix automatically (when --fix is implemented)
-python3 tools/analyze/dead_code.py file.sio --fix
-```
-
 ### VSCode Integration
 1. Open a `.sio` file
 2. Unused code will be grayed out automatically
@@ -102,15 +87,12 @@ python3 tools/analyze/dead_code.py file.sio --fix
 ## Test Results
 
 ```bash
-$ python3 tools/analyze/dead_code.py /tmp/test_dead.sio
-
 🔍 Dead Code Analysis: /tmp/test_dead.sio
 
 📦 Function 'unused_helper' is never called
    at /tmp/test_dead.sio:7:1
    💡 Remove function 'unused_helper' or add '_' prefix
 
-$ python3 tools/analyze/dead_code.py /tmp/test_dead.sio --format lsp
 {"jsonrpc": "2.0", "result": {"kind": "full", "items": [...]}}
 ```
 
@@ -159,17 +141,6 @@ $ python3 tools/analyze/dead_code.py /tmp/test_dead.sio --format lsp
 - Can be integrated into `sounio analyze --dead-code`
 - Uses same file reading logic as compiler
 - Could be rewritten in Sounio when bootstrapped
-
-### With CI/CD
-```yaml
-# Example GitHub Action
-- name: Check for dead code
-  run: |
-    python3 tools/analyze/dead_code.py ./src --format json | \
-      jq '.items | length' | \
-      xargs -I {} test {} -eq 0 || \
-      (echo "Dead code detected!" && exit 1)
-```
 
 ## Future Enhancements
 

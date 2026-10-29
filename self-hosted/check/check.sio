@@ -11237,6 +11237,49 @@ fn checker_check_method_call_with_base_ty_inplace(c: *mut Checker, e: Expr, base
         checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
         return ty_error()
     }
+    // Dynamic arrays ([T], array_size < 0): .push(v) appends, growing the
+    // backing object. Fixed arrays keep the E019 below -- their extent is
+    // part of the type and cannot grow. Lowers to __sounio_seq_push, which
+    // operates on the shared aggregate layout (flags = logical length,
+    // payload_size = capacity) and retargets the handle-table entry when
+    // it grows, so every alias observes the append.
+    if base_ty.kind == TypeKind::TyArray && base_ty.array_size < 0 {
+        if name_matches_str4(e.name, 112, 117, 115, 104) {
+            let elem_ty = match base_ty.inner {
+                Some(elem) => *elem,
+                None => ty_error(),
+            }
+            let call_start_borrows = (*c).borrows
+            let first = expr_list_head(e.args)
+            match first {
+                None => checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
+                Some(_) => {
+                    let arg_ty = checker_check_opt_expr_inplace(c, first)
+                    if !is_error_or_unknown(arg_ty) && !is_error_or_unknown(elem_ty) {
+                        if !checker_types_compatible_inplace(c, arg_ty, elem_ty) {
+                            checker_report_mismatch_inplace(c, e.span, 9, elem_ty, arg_ty)
+                        }
+                    }
+                }
+            }
+            match e.args {
+                Some(list) => {
+                    match (*list).tail {
+                        Some(_) => checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
+                        None => {}
+                    }
+                }
+                None => {}
+            }
+            checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
+            return ty_unit()
+        }
+        checker_report_error_at_inplace(c, e.span, 11, 0, 0, 0)
+        let call_start_borrows = (*c).borrows
+        checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
+        checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
+        return ty_error()
+    }
     if base_ty.kind == TypeKind::TyKnowledge {
         if name_matches_str6(e.name, 117, 110, 119, 114, 97, 112) {
             let call_start_borrows = (*c).borrows
