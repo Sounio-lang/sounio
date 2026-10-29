@@ -209,6 +209,8 @@ run_test() {
   local expect_stdout=()
   local test_timeout="$RUN_TIMEOUT_SEC"
   local requires_slow=false
+  local runtime_fixture=""
+  local runtime_fixture_count=0
 
   while IFS= read -r line; do
     if [[ ! "$line" =~ ^[[:space:]]*//@\  && ! "$line" =~ ^[[:space:]]*//([[:space:]]|$) && ! "$line" =~ ^[[:space:]]*$ ]]; then
@@ -218,6 +220,11 @@ run_test() {
     # below match by substring, so prose such as "NOT `//@ check-only`" in a
     # header comment would otherwise count as one.
     [[ "$line" =~ ^[[:space:]]*//@\  ]] || continue
+
+    if [[ "$line" =~ ^[[:space:]]*//@[[:space:]]*runtime-fixture:[[:space:]]*(.*)$ ]]; then
+      runtime_fixture="${BASH_REMATCH[1]}"
+      runtime_fixture_count=$((runtime_fixture_count + 1))
+    fi
 
     if [[ "$line" =~ ^[[:space:]]*//@[[:space:]]*compile-fail[[:space:]]*$ ]]; then
       is_compile_fail=true
@@ -280,6 +287,14 @@ run_test() {
       echo "  SKIP  $relpath"
     fi
     return
+  fi
+
+  if [[ "$runtime_fixture_count" != 0 ]]; then
+    if [[ "$runtime_fixture_count" != 1 || "$runtime_fixture" != unicode18-bidi || "$relpath" != tests/stdlib/wave3-bidi/conformance.sio || -e "$file.args" || -L "$file.args" ]] || ! $is_run_pass || $is_run_fail || $is_check_only || $is_compile_fail; then
+      FAIL=$((FAIL + 1))
+      record_result "fail" "$relpath" "runtime-fixture" "invalid-runtime-fixture-contract" "" "" "1" "registered run-pass fixture required, without argv or another mode"
+      return
+    fi
   fi
 
   local invalid_runtime_contract=false
@@ -361,7 +376,7 @@ run_test() {
     return
   fi
 
-  if ! $is_run_fail && [[ ${#expect_stdout[@]} -eq 0 && "$RUN_ALL_RUN_PASS" != "1" ]]; then
+  if ! $is_run_fail && [[ "$runtime_fixture_count" == 0 && ${#expect_stdout[@]} -eq 0 && "$RUN_ALL_RUN_PASS" != "1" ]]; then
     PASS=$((PASS + 1))
     record_result "pass" "$relpath" "run-pass-check-only" "no-expect-stdout" "" "" "0" ""
     if [[ $VERBOSE -eq 1 ]]; then
@@ -386,18 +401,32 @@ run_test() {
     return
   fi
   chmod +x "$executable"
+  local -a native_command=(node "$ROOT_DIR/scripts/stdlib/argv_inputs.mjs" run "$ROOT_DIR" "$relpath" "$executable")
+  local fixture_temp=""
+  if [[ "$runtime_fixture_count" == 1 ]]; then
+    local fixture_out
+    if [[ -n "$ARTIFACTS_DIR" ]]; then
+      fixture_out="$ARTIFACTS_DIR/$relpath/runtime-fixture"
+      mkdir -p "$(dirname "$fixture_out")"
+    else
+      fixture_temp=$(mktemp -d /tmp/sounio-runtime-fixture-XXXXXX) || exit 65
+      fixture_out="$fixture_temp/result"
+    fi
+    native_command=(node "$ROOT_DIR/scripts/stdlib/runtime_fixtures.mjs" run "$ROOT_DIR" "$relpath" "$executable" "$fixture_out")
+  fi
   local native_has_output=false
   if $expected_silent_refusal; then
     local native_output_file
     native_output_file=$(mktemp /tmp/sounio-stdlib-native-output-XXXXXX) || exit 65
-    phase_command "$relpath" native "$test_timeout" node "$ROOT_DIR/scripts/stdlib/argv_inputs.mjs" run "$ROOT_DIR" "$relpath" "$executable" >"$native_output_file" || exit_code=$?
+    phase_command "$relpath" native "$test_timeout" "${native_command[@]}" >"$native_output_file" || exit_code=$?
     if [[ -s "$native_output_file" ]]; then native_has_output=true; fi
     output=$(cat "$native_output_file")
     rm -f "$native_output_file"
   else
-    output=$(phase_command "$relpath" native "$test_timeout" node "$ROOT_DIR/scripts/stdlib/argv_inputs.mjs" run "$ROOT_DIR" "$relpath" "$executable") || exit_code=$?
+    output=$(phase_command "$relpath" native "$test_timeout" "${native_command[@]}") || exit_code=$?
   fi
   rm -f "$executable"
+  if [[ -n "$fixture_temp" ]]; then printf 'Runtime fixture artifacts retained at: %s\n' "$fixture_out" >&2; fi
   if $is_run_fail; then
     if [[ "$exit_code" != 1 ]] || { $expected_silent_refusal && $native_has_output; } || { ! $expected_silent_refusal && ! grep -qF -- "$expected_runtime_diagnostic" <<< "$output"; }; then
       FAIL=$((FAIL + 1))
@@ -441,7 +470,11 @@ run_test() {
   done
 
   PASS=$((PASS + 1))
-  record_result "pass" "$relpath" "run-pass" "" "" "" "0" ""
+  if [[ "$runtime_fixture_count" == 1 ]]; then
+    record_result "pass" "$relpath" "runtime-fixture" "$runtime_fixture" "" "" "0" "$output"
+  else
+    record_result "pass" "$relpath" "run-pass" "" "" "" "0" ""
+  fi
   if [[ $VERBOSE -eq 1 ]]; then
     echo "  PASS  $relpath"
   fi
