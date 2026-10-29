@@ -1,0 +1,227 @@
+// Graph Types Module - Core data structures for network geometry analysis
+
+module graph::types
+
+// Type Aliases
+pub type NodeId = usize;
+pub type Degree = usize;
+pub type Count = usize;
+pub type Curvature = f64;
+pub type Probability = f64;
+pub type Distance = usize;
+
+// Geometry Classification
+pub enum Geometry {
+    Hyperbolic,  // Negative curvature
+    Euclidean,   // Zero curvature
+    Spherical,   // Positive curvature
+}
+
+impl Geometry {
+    pub fn from_curvature(kappa: Curvature) -> Geometry {
+        if kappa < -0.05 {
+            Geometry::Hyperbolic
+        } else if kappa > 0.05 {
+            Geometry::Spherical
+        } else {
+            Geometry::Euclidean
+        }
+    }
+}
+
+// Edge Type
+pub struct Edge {
+    pub u: NodeId,
+    pub v: NodeId,
+}
+
+impl Edge {
+    pub fn new(u: NodeId, v: NodeId) -> Edge {
+        if u <= v { Edge { u, v } } else { Edge { u: v, v: u } }
+    }
+
+    pub fn other(self: &Edge, node: NodeId) -> NodeId {
+        if self.u == node { self.v } else { self.u }
+    }
+}
+
+// Graph Type - adjacency list representation
+pub struct Graph {
+    n: Count,
+    // Seq, not [[NodeId]]: slices are fixed-length, and this adjacency is built
+    // by growing. Seq.get returns a handle that shares storage, so pushing into
+    // an inner row is visible through the outer Seq.
+    adj: Seq<Seq<NodeId>>,
+    m: Count,
+}
+
+impl Graph {
+    pub fn new(n: Count) -> Graph with Mut, Panic {
+        var adj: Seq<Seq<NodeId>> = seq_new()
+        var i: usize = 0
+        while i < n {
+            var row: Seq<NodeId> = seq_new()
+            adj.push(row)
+            i = i + 1
+        }
+        Graph { n: n, adj: adj, m: 0 }
+    }
+
+    pub fn num_nodes(self: &Graph) -> Count { self.n }
+    pub fn num_edges(self: &Graph) -> Count { self.m }
+
+    pub fn add_edge(self: &!Graph, u: NodeId, v: NodeId) with Mut, Panic {
+        if u < self.n && v < self.n && u != v {
+            var row_u: Seq<NodeId> = self.adj.get(u)
+            row_u.push(v)
+            var row_v: Seq<NodeId> = self.adj.get(v)
+            row_v.push(u)
+            self.m = self.m + 1
+        }
+    }
+
+    pub fn degree(self: &Graph, u: NodeId) -> Degree with Mut, Panic, Epistemic {
+        if u < self.n {
+            let row: Seq<NodeId> = self.adj.get(u)
+            let k: i64 = row.len().unwrap("degree")
+            k as usize
+        } else { 0 }
+    }
+
+    // Returns the row itself. Seq is handle-based, so this shares storage with
+    // the graph rather than copying, which is what the old `&[NodeId]` gave.
+    pub fn neighbors(self: &Graph, u: NodeId) -> Seq<NodeId> with Mut, Panic {
+        self.adj.get(u)
+    }
+
+    pub fn has_edge(self: &Graph, u: NodeId, v: NodeId) -> bool with Mut, Panic, Epistemic {
+        if u >= self.n || v >= self.n { return false }
+        let neighbors: Seq<NodeId> = self.adj.get(u)
+        let k: i64 = neighbors.len().unwrap("has_edge")
+        var i: i64 = 0
+        while i < k {
+            if neighbors.get(i as usize) == v { return true }
+            i = i + 1
+        }
+        false
+    }
+
+    pub fn edges(self: &Graph) -> Seq<Edge> with Mut, Panic, Epistemic {
+        var result: Seq<Edge> = seq_new()
+        var u: NodeId = 0
+        while u < self.n {
+            let neighbors: Seq<NodeId> = self.adj.get(u)
+            let k: i64 = neighbors.len().unwrap("edges")
+            var i: i64 = 0
+            while i < k {
+                let v = neighbors.get(i as usize)
+                if u < v { result.push(Edge::new(u, v)) }
+                i = i + 1
+            }
+            u = u + 1
+        }
+        result
+    }
+
+    pub fn mean_degree(self: &Graph) -> f64 {
+        if self.n == 0 { return 0.0 }
+        (2.0 * (self.m as f64)) / (self.n as f64)
+    }
+
+    pub fn sparsity_ratio(self: &Graph) -> f64 {
+        let k = self.mean_degree()
+        k * k / (self.n as f64)
+    }
+}
+
+// Network Statistics
+pub struct NetworkStats {
+    pub num_nodes: Count,
+    pub num_edges: Count,
+    pub mean_degree: f64,
+    pub sparsity_ratio: f64,
+    pub predicted_geometry: Geometry,
+}
+
+impl NetworkStats {
+    pub fn from_graph(g: &Graph) -> NetworkStats {
+        let ratio = g.sparsity_ratio()
+        let geometry = if ratio < 2.0 {
+            Geometry::Hyperbolic
+        } else if ratio > 3.5 {
+            Geometry::Spherical
+        } else {
+            Geometry::Euclidean
+        }
+        NetworkStats {
+            num_nodes: g.num_nodes(),
+            num_edges: g.num_edges(),
+            mean_degree: g.mean_degree(),
+            sparsity_ratio: ratio,
+            predicted_geometry: geometry,
+        }
+    }
+}
+
+// Probability Measure for optimal transport
+pub struct ProbabilityMeasure {
+    pub nodes: [NodeId],
+    // Grown by `uniform`, so Seq rather than a fixed slice.
+    pub probs: Seq<Probability>,
+}
+
+impl ProbabilityMeasure {
+    pub fn empty() -> ProbabilityMeasure with Mut, Panic {
+        var probs: Seq<Probability> = seq_new()
+        ProbabilityMeasure { nodes: [], probs: probs }
+    }
+
+    pub fn uniform(nodes: [NodeId]) -> ProbabilityMeasure with Mut, Panic, Div {
+        let n = nodes.len()
+        if n == 0 { return ProbabilityMeasure::empty() }
+        let p = 1.0 / (n as f64)
+        var probs: Seq<Probability> = seq_new()
+        var i: usize = 0
+        while i < n {
+            probs.push(p)
+            i = i + 1
+        }
+        ProbabilityMeasure { nodes: nodes, probs: probs }
+    }
+
+    pub fn total(self: &ProbabilityMeasure) -> Probability with Mut, Panic, Epistemic {
+        var sum: f64 = 0.0
+        let k: i64 = self.probs.len().unwrap("total")
+        var i: i64 = 0
+        while i < k {
+            sum = sum + self.probs.get(i as usize)
+            i = i + 1
+        }
+        sum
+    }
+
+    pub fn support_size(self: &ProbabilityMeasure) -> usize { self.nodes.len() }
+}
+
+// Tests
+pub fn test_graph_creation() -> bool with Mut, Panic {
+    var g = Graph::new(5)
+    g.add_edge(0, 1)
+    g.add_edge(1, 2)
+    g.add_edge(2, 3)
+    g.add_edge(3, 4)
+    g.add_edge(4, 0)
+    g.num_nodes() == 5 && g.num_edges() == 5
+}
+
+pub fn test_degree() -> bool with Mut, Panic, Epistemic {
+    var g = Graph::new(4)
+    g.add_edge(0, 1)
+    g.add_edge(0, 2)
+    g.add_edge(0, 3)
+    g.degree(0) == 3 && g.degree(1) == 1
+}
+
+pub fn run_types_tests() -> bool with Mut, Panic, Epistemic {
+    test_graph_creation() && test_degree()
+}
