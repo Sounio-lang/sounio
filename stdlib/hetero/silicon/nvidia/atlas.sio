@@ -1,0 +1,182 @@
+// stdlib/hetero/silicon/nvidia/atlas.sio
+//
+// sm_89 assembly atlas. 1328 instructions, 43 cubins, nvdisasm 12.8.55.
+// Bytes 0 and 1 are the opcode. Bytes 13 and 14 move inside one opcode
+// and are the schedule, kept from the slot being replaced.
+// A register number is the register itself. 255 is RZ.
+//
+// opcode          b0  b1   fields, byte index
+// MOV rr          02  72   dst 2, src 4
+// MOV imm         02  78   dst 2, imm u32 at 4
+// IMAD.MOV imm    24  74   dst 2, imm u32 at 4, byte 3 = 255
+// IMAD.MOV c[]    24  76   dst 2, c_offset/4 at 5
+// LDG.E           81  79   dst 2, addr 3, disp 5, byte 4 = 4
+// STG.E           86  79   addr 3, data 4, disp 5
+// IADD3 rr        10  72   dst 2, src0 3, src1 4, negate-src1 at 7 (128)
+// IADD3 imm       10  78   dst 2, src 3, imm at 4
+// IADD3.X         10  72   dst 2, src 3, fixed tail
+// SHFL.BFLY       89  7f   dst 2, src 3, delta<<5 at 6
+// BAR.SYNC        1d  7b   id<<6 at 6
+// S2R tid         19  79   dst 2
+// EXIT            4d  79   schedule only
+//
+// Device-checked before this atlas existed, as single-byte patches:
+// IADD3 dst, src1, negate pair, disp; STG data and addr; LDG disp;
+// FFMA dst and addend; MOV/IMAD imm; SHFL delta; BAR id.
+
+module hetero::silicon::nvidia::atlas
+
+pub fn op_iadd3_rr_b0() -> i64 { 16 }
+pub fn op_iadd3_rr_b1() -> i64 { 114 }
+pub fn fld_dst() -> i64 { 2 }
+pub fn fld_src0() -> i64 { 3 }
+pub fn fld_src1() -> i64 { 4 }
+
+// Low 8 bytes of IADD3 dst, src0, src1, RZ. neg=0 is add. neg!=0 sets
+// bit 63, which is byte 7 = 128, the negate on source 1.
+pub fn atlas_iadd3_lo(dst: i64, src0: i64, src1: i64, neg: i64) -> i64 {
+    let base = 16 + 114 * 256 + dst * 65536 + src0 * 16777216 + src1 * 4294967296
+    if neg != 0 { return base - 9223372036854775808 }
+    base
+}
+
+// Control field of a 128-bit sm_89 word, in the high 8 bytes.
+// stall is bits 41..44, yield bit 45, read-barrier bits 46..48,
+// write-barrier bits 49..51, wait mask bits 52..57.
+// 7 in a barrier slot means the slot is unset.
+// Positions agree with the measured 0xca/0xc6 pair: those two
+// bytes differ only by stall 5 versus stall 3.
+pub fn atlas_sched(stall: i64, y: i64, rbar: i64, wbar: i64, bmask: i64) -> i64 {
+    stall * 2199023255552 + y * 35184372088832 + rbar * 70368744177664 + wbar * 562949953421312 + bmask * 4503599627370496
+}
+
+// High 8 bytes. The operand residue is the measured leftover of
+// IADD3 R7, R0, -R7, RZ (134209791). The control field is encoded:
+// sel=0 is stall 5, which is byte 13 = 0xca and commits in this slot.
+// sel!=0 is stall 3, byte 13 = 0xc6, which does not commit.
+pub fn atlas_iadd3_hi(sel: i64) -> i64 {
+    let stall = if sel != 0 { 3 } else { 5 }
+    134209791 + atlas_sched(stall, 0, 7, 7, 4)
+}
+
+pub fn atlas_stg_lo(addr: i64, data: i64) -> i64 {
+    134 + 121 * 256 + addr * 16777216 + data * 4294967296
+}
+
+// MOV Rd, imm. Opcode 02 78. This is the opt-level 0 form.
+// The schedule row measured on that form is 00 0f 00 00 00 de 3f 00.
+// Splicing this opcode into the subtract slot did not deliver the
+// immediate: job 17831 stored 0 with the e2 0f row, job 17833 stored 3
+// with the IADD3 schedule. An optimized mov.u32 immediate is IMAD.MOV.
+pub fn atlas_mov_imm_lo(dst: i64, imm: i64) -> i64 with Div {
+    let u = imm & 4294967295
+    let lo = u & 65535
+    let hi = u / 65536
+    let base = 2 + 120 * 256 + dst * 65536 + lo * 4294967296
+    if hi < 32768 {
+        return base + hi * 281474976710656
+    }
+    base + (hi - 65536) * 281474976710656
+}
+
+
+// DMUL Rd, Ra, Rb. The named register is the low half of the f64 pair.
+// Specimen DMUL R2, R2, R4 is 28 72 02 02 04 00 00 00.
+pub fn atlas_dmul_lo(dst: i64, src0: i64, src1: i64) -> i64 {
+    40 + 114 * 256 + dst * 65536 + src0 * 16777216 + src1 * 4294967296
+}
+
+pub fn atlas_mov_imm_hi() -> i64 {
+    15 * 256 + 222 * 1099511627776 + 63 * 281474976710656
+}
+
+// IMAD.MOV.U32 Rd, RZ, RZ, imm. Opcode 24 74, byte 3 = 255.
+// This is the immediate move an optimized sm_89 kernel actually emits.
+pub fn atlas_imad_mov_lo(dst: i64, imm: i64) -> i64 with Div {
+    let u = imm & 4294967295
+    let lo = u & 65535
+    let hi = u / 65536
+    let base = 36 + 116 * 256 + dst * 65536 + 255 * 16777216 + lo * 4294967296
+    if hi < 32768 {
+        return base + hi * 281474976710656
+    }
+    base + (hi - 65536) * 281474976710656
+}
+
+// Schedule half measured on IMAD.MOV.U32 R5, RZ, RZ, 0x7: ff 00 8e 07 00 e2 0f 00.
+pub fn atlas_imad_mov_hi() -> i64 {
+    255 + 142 * 65536 + 7 * 16777216 + 226 * 1099511627776 + 15 * 281474976710656
+}
+
+pub fn atlas_ldg_lo(dst: i64, addr: i64, disp: i64) -> i64 {
+    129 + 121 * 256 + dst * 65536 + addr * 16777216 + 4 * 4294967296 + disp * 1099511627776
+}
+
+// High half of LDG.E. Residue 203299072 is shared by the two loads
+// in the subtract kernel. The first load uses stall 4, the second stall 1.
+pub fn atlas_ldg_hi(stall: i64) -> i64 {
+    203299072 + atlas_sched(stall, 1, 2, 7, 0)
+}
+
+// High half of STG.E [R4], R7. Stall 1, no wait mask.
+pub fn atlas_stg_hi() -> i64 {
+    202381572 + atlas_sched(1, 1, 7, 7, 0)
+}
+
+// High half of FFMA Rd, Rsrc0, Rsrc1, imm. src1 is byte 0 of this half.
+// The specimen's src1 is R0, so the byte is 0 and the field was invisible.
+pub fn atlas_ffma_hi(src1: i64) -> i64 {
+    src1 + atlas_sched(5, 0, 7, 7, 0)
+}
+
+// The family disassembly (tight and opt-level 0, several register
+// assignments) keeps one residue per instruction form. Register
+// numbers and the constant offset live in the low 8 bytes.
+// IMAD.MOV c[] residue 126746879. off4 is the byte offset divided by 4.
+pub fn atlas_imad_c_lo(dst: i64, off4: i64) -> i64 {
+    36 + 118 * 256 + dst * 65536 + 255 * 16777216 + off4 * 1099511627776
+}
+
+pub fn atlas_imad_c_hi(stall: i64) -> i64 {
+    126746879 + atlas_sched(stall, 1, 7, 7, 0)
+}
+
+// MOV Rd, c[0][off]. Residue 3840 on every MOV form in the family.
+pub fn atlas_mov_c_lo(dst: i64, off4: i64) -> i64 {
+    2 + 122 * 256 + dst * 65536 + off4 * 1099511627776
+}
+
+pub fn atlas_mov_c_hi(stall: i64) -> i64 {
+    3840 + atlas_sched(stall, 1, 7, 7, 0)
+}
+
+// ULDC.64 URd, c[0][0x118]. Residue 2560. 0x118/4 = 70.
+pub fn atlas_uldc_lo(urd: i64, off4: i64) -> i64 {
+    185 + 122 * 256 + urd * 65536 + off4 * 1099511627776
+}
+
+pub fn atlas_uldc_hi() -> i64 {
+    2560 + atlas_sched(4, 0, 7, 7, 0)
+}
+
+// EXIT. Residue 58720256. The schedule row of the tight kernel is stall 5.
+pub fn atlas_exit_lo() -> i64 {
+    77 + 121 * 256
+}
+
+pub fn atlas_exit_hi() -> i64 {
+    58720256 + atlas_sched(5, 1, 7, 7, 0)
+}
+
+// IADD3 Rd, -Rsrc0, Rsrc1, RZ. Bit 63 stays clear. Bit 8 of the
+// high half is the negate on source 0. Residue 134210047.
+pub fn atlas_iadd3_hi_src0neg() -> i64 {
+    134210047 + atlas_sched(5, 0, 7, 7, 4)
+}
+
+// sh_info of .text.stamp. The low byte stays 6. The register count
+// sits in bits 24..31. The same count is the low byte of .nv.info
+// at file 0x330. R7 in this kernel is count 10. R8 is count 11.
+pub fn atlas_shi_info(nregs: i64) -> i64 {
+    6 + nregs * 16777216
+}

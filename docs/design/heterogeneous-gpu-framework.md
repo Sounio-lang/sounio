@@ -915,3 +915,919 @@ Gate. Job 17669, node `gpuorangefs-r770-proxmox`, `--gres=gpu:1`, `--mem=16G`, `
 - After one warm step, seven forwards span 31181338 ns, which is 0.00445 s/token. The seven gaps sit between 3.0 ms and 5.2 ms. The threshold is 0.0018 s. The measured step is under the 0.00464 s of job 17633 and above 0.0018 s. Effective traffic is 121 GB/s. The per-thread fence and the five block-local barriers were not the 4.6 ms. The threshold is not moved. This cut does not pass it.
 
 Job 17669 completed in 47 s and released the allocation. Job 17670, a different job, then took the node.
+
+
+## 34. An sm_89 image written in Sounio (2026-10-26, OBSERVED)
+
+Job 17669 is the fastest resident forward that matches the tokens, at 0.00445 s/token. That kernel is still PTX text. The driver compiles it. This cut does not replace that kernel and does not move the 0.0018 s ceiling.
+
+The generator is a Sounio program. It writes an ELF image for sm_89 from bytes measured once. ptxas 12.8.61 and nvdisasm 12.8.55 produced three cubins of the same stamp kernel, differing by the immediate 0x89abcdef, 0x00000001 and 0x11223344. Each file is 2600 bytes. The only bytes that changed were file offsets 1428 through 1431, and those bytes were the immediate, little-endian. ELF e_machine is 190. e_flags is 5834073. `.text.stamp` is 256 bytes at offset 1408. The second instruction is `IMAD.MOV.U32 R5, RZ, RZ, imm`, and the immediate is byte 4 of that instruction.
+
+`sm89_stamp_image` copies the measured container and writes the immediate at offset 1428. The value in the probe is 0x01020304 (16909060). It was not one of the three specimens. The RDNA encoder and the AGX encoder return an empty image. No field has been measured on those machines. `ce_module_image` checks the ELF magic and passes the pointer to `cuModuleLoadData`. The probe does not call ptxas.
+
+Gate. Job 17714, node `gpuorangefs-r770-proxmox`, `--gres=gpu:1`, `--mem=16G`, `--cpus-per-task=4`. Partition `bench` still has no nodes, so the job was pinned on `gpu-orangefs`. The node was idle at submit. Binary md5 `25c74fc128324e5aff396c77b8045544`.
+
+- `SM89 nbytes=2600 ok=1`. `RDNA` and `AGX` report `ok=0`.
+- `BYTES=16909060`.
+- `LOAD=1`, `FUNC=1`, `LAUNCH=0`.
+- `STAMP=16909060`.
+- The program printed `SILICON PASS` and the script printed `EXIT:0`.
+
+Job 17713 printed the same stamp and then did not return. The script killed it at the timeout (`EXIT:124`). Job 17714 is the same image with `exit(0)` after the pass. The node is idle after 17714.
+
+This cut does not run SmolLM2. The load, the fma, the store, the barrier and the shuffle do not yet have an isolated field. The 0.0018 s threshold is not moved. This cut does not pass it.
+
+A Metal specimen on the M5 Max compiled to AIR (`air64_v29`). That is not the GPU encoding. The AGX table stays empty.
+
+
+
+## 35. Three sm_89 fields, measured by difference (2026-10-26, OBSERVED)
+
+Section 34 patched one mov immediate. This cut asks which other bytes are a field. The specimen assembler is ptxas 12.8.61, target sm_89. The probe does not call it.
+
+An FFMA whose addend is 3.0, against the same FFMA with addend 4.0, produces two cubins of 2728 bytes. One byte differs, inside the u32 at file offset 1508. That u32 is the f32 encoding itself: 0x40400000 and 0x40800000. A uniform shuffle was deleted by the assembler: the two cubins were identical. Keeping the lane id, and storing at `out[tid]`, delta 1 against delta 4 differs by one byte at file offset 1478, 0x20 against 0x80. Delta 2 on the non-indexed form wrote 0x40 in that same byte of its SHFL instruction. The byte is `delta << 5`. `BAR.SYNC` ids 0, 1, 2 and 3 move two bytes. File offset 1430 is 0x00, 0x40, 0x80, 0xc0, which is `id << 6`. File offset 2506, outside `.text`, is 0x10, 0x20, 0x30, 0x40, which is `(id + 1) << 4`. Swapping which register is stored moved the mov immediates and left the store register field where it was. A global load at offset 0 against the same load at offset 4 differs in 9 bytes, and the register assignment moved. Those two are not encoded.
+
+The probe writes an FFMA addend of 5.0, bits 0x40A00000 (1084227584). That value was not a specimen. The instruction is `2.0 * 1.0 + addend`, so the stored word must be 7.0, bits 0x40E00000 (1088421888). The shuffle image is the delta-1 container with byte 1478 set to 0x80. Thirty-two lanes run, and lane `i` must store `i xor 4`. The barrier image patches both measured bytes to the id-1 specimen.
+
+Job 17739 launched the barrier with only the text byte patched. The module loaded, the launch returned 0, and `ce_sync` returned 715. The next `cuModuleLoadData` also returned 715. That context does not survive the instruction. Job 17740 does not launch that image.
+
+Gate. Job 17740, node `gpuorangefs-r770-proxmox`, `--gres=gpu:1`, `--mem=16G`, `--cpus-per-task=4`. Partition `bench` still has no nodes, so the job was pinned on `gpu-orangefs`. The node was idle at submit. Binary md5 `bb0474f66878ca6c0385190724b6799f`.
+
+- `BYTES=16909060` and `STAMP=16909060`.
+- `FMA_BITS=1084227584`, `FMA_LOAD=1`, `FMA=1088421888`.
+- `SHFL_BYTE=128`, `SHFL_LOAD=1`, `SHFL=4`.
+- `BAR_BYTE=64`, `BAR_META=32`, `BAR_META_LOAD=1`, `BAR_META_LAUNCH=0`, `BAR1=16909060`.
+- `RDNA ok=0`, `AGX ok=0`.
+- The program printed `SILICON PASS` and the script printed `EXIT:0`.
+
+The node is idle.
+
+Two AIR files from the M5 Max, metal 32023.921, are 3312 bytes and differ in 7. The four-byte group at file offset 2862 is `c8080901` against `d81c2929`, which is not the source immediate. The AGX table stays empty. The R9700 was not used. Job 12798 still holds `dl380`.
+
+This cut does not run SmolLM2. The 0.0018 s threshold is not moved. This cut does not pass it.
+
+
+
+## 36. The 128-bit load and the cache byte (2026-10-26, OBSERVED)
+
+Section 35 patched fields that already sat inside an instruction. This cut asks where a vector load keeps its address, and whether the cache mode is a byte.
+
+ptxas 12.8.61, `--opt-level 0`, sm_89. A `ld.global.cs.v4.f32` at `+0`, `+16` and `+32` does not put the displacement in the load. The `+0` kernel has no add. `+16` against `+32` differs by one byte, file offset 1652, and that byte is the displacement: `0x10` and `0x20`. The instruction is `IADD3 R2, P0, R4, imm, RZ`. The load that follows is `LDG.E.EF.128`, with no displacement of its own. The four cache modifiers on a scalar load, same registers `R0` and `[R2]`, stay on one instruction at the same program counter. `cs` disassembles as `LDG.E.EF` and the byte at file offset 1754 is `0x0e`. `lu` is `LDG.E.LU` and that byte is `0x3e`. `ca` (`LDG.E.STRONG.SM`) and `cg` (`LDG.E.STRONG.GPU`) also change the previous byte, `0x19` to `0xb9` and `0xf9`. There is no formula past those four rows.
+
+The probe copies the `+16` container and writes displacement 48 (`0x30`). That value was not a specimen. The input words are `100 + i`. A 16-byte load from offset 48 must return 112, 113, 114, 115. Offset 16 would have returned 104 through 107, and offset 32 would have returned 108 through 111. The cache image is the `cs` container with byte 1754 set to `0x3e`. It loads the word 42. The same word coming back shows that the encoding is accepted. It does not show that the cache policy changed.
+
+Gate. Job 17757, node `gpuorangefs-r770-proxmox`, `--gres=gpu:1`, `--mem=16G`, `--cpus-per-task=4`. The node was idle at submit. Binary md5 `16cfdc7c2e952fc59016b86e39cd94cf`.
+
+- `LDG_IMM=48`, `LDG_LOAD=1`, `LDG=112 113 114 115`.
+- `CACHE_BYTE=62`, `CACHE_LOAD=1`, `CACHE_LAUNCH=0`, `CACHE_SYNC=0`, `CACHE=42`.
+- The mov, the FFMA 7.0, the shuffle and the barrier still match. `SILICON PASS`, `EXIT:0`.
+
+The node is idle.
+
+A Metal binary archive on the M5 Max, dumped through the Metal framework, is 12768 bytes for each of two immediates. 595 bytes differ, in 49 groups, including hash text. The four-byte group is again `c8080901` against `d81c2929`, the same non-identity word the AIR file held. The AGX table stays empty. Job 12798 still holds `dl380`, so the R9700 was not used.
+
+This cut does not run SmolLM2. The 0.0018 s threshold is not moved. This cut does not pass it.
+
+
+
+## 37. The IADD3 register byte (2026-10-26, OBSERVED)
+
+Constants fold, and the allocator renames. A store of one immediate against a store of another, at opt-level 0, changed the immediate and left the store on R0. Naming the add's destination r3 or r5 produced identical cubins. The register number is not the PTX name.
+
+Memory operands do not fold. sub.u32 of two loaded words, default optimisation, is IADD3 R7, R0, -R7, RZ against IADD3 R7, -R0, R7, RZ. Two bytes differ. At opt-level 0 the same subtract is IADD3 R0, R0, -R2, RZ against IADD3 R0, R2, -R0, RZ, and the two bytes are 00 02 against 02 00. Byte 2 of the instruction is the destination: 0 for R0, 7 for R7. Byte 3 is source 0 and byte 4 is source 1: 0 for R0, 2 for R2, 7 for R7. The negate is not that byte. On the tight kernel, moving the negate from source 1 onto source 0 changes byte 7 from 0x80 to 0x00 and byte 9 from 0xe0 to 0xe1.
+
+The probe loads 10 and 3. The unpatched image must store 7. The two negate bytes, written as measured, must store 3 - 10 as a u32, which is 4294967289. A third image sets only the destination byte from 7 to 0. The store still names R7. R7 then still holds the second load, so the stored word must be 3.
+
+Gate. Job 17767, node gpuorangefs-r770-proxmox, --gres=gpu:1, --mem=16G, --cpus-per-task=4. The node was idle at submit. Binary md5 7ec42d72df5b8b6351c0daed478a7b73.
+
+- SUB_DST=7, SUB_LOAD=1, SUB=7.
+- SUB_SWAP=4294967289.
+- SUB_DEST_LOAD=1, SUB_DEST_LAUNCH=0, SUB_DEST_SYNC=0, SUB_DEST=3.
+- The earlier stamp, FFMA, shuffle, barrier, 128-bit load and cache byte still match. SILICON PASS, EXIT:0.
+
+The node is idle.
+
+metal-objdump does not read the M5 binary archive: it is not a Mach-O. The two archives still contain no raw immediate. The AGX table stays empty. Job 12798 still holds dl380.
+
+This cut does not run SmolLM2. The 0.0018 s threshold is not moved. This cut does not pass it.
+
+
+## 38. Source, store and the small load offset (2026-10-26, OBSERVED)
+
+Section 37 showed that byte 2 of IADD3 is the destination. The same subtract kernel names the other operands.
+
+IADD3 R7, R0, -R7, RZ has byte 4 equal to 7, the second source. The two loads are LDG.E R0, [R2] and LDG.E R7, [R2+4]. Byte 2 is 0 and 7. Byte 3 is 2 on both, the address register. Byte 5 is 0 and 4, the displacement. One other byte, at position 13, also differs between those two loads. The store is STG.E [R4], R7. Byte 4 is 7. An earlier store, STG.E [R2], R5, matches this word except byte 3 (2 against 4) and byte 4 (5 against 7).
+
+Three images, each changing one byte of the kernel that stores 7 for inputs 10 and 3.
+
+- Source 1 set from 7 to 0. The subtract is R0 minus R0. The stored word must be 0.
+- The store's data byte set from 7 to 0. The subtract still writes R7. The store reads R0, which still holds the first load. The stored word must be 10.
+- The second load's displacement byte set from 4 to 0, and byte 13 left alone. Both loads read the first word. The stored word must be 0.
+
+Gate. Job 17790, node gpuorangefs-r770-proxmox, --gres=gpu:1, --mem=16G, --cpus-per-task=4. The node was idle at submit. Binary md5 93a5c8b4e4bdddf6ead76cc5a68df98c.
+
+- SRC_BYTE=0, SRC_LOAD=1, SRC_SYNC=0, SRC=0.
+- STG_BYTE=0, STG_LOAD=1, STG_SYNC=0, STG=10.
+- OFF_BYTE=0, OFF_LOAD=1, OFF_SYNC=0, OFF=0.
+- SUB=7, SUB_SWAP=4294967289 and SUB_DEST=3 still hold. The earlier stamp, FFMA, shuffle, barrier, 128-bit load and cache byte still match. SILICON PASS, EXIT:0.
+
+The node is idle.
+
+This cut does not run SmolLM2. The 0.0018 s threshold is not moved. This cut does not pass it.
+
+
+## 39. Store address and the FFMA destination (2026-10-26, OBSERVED)
+
+The subtract kernel keeps the input pointer in R2 and the output pointer in R4. Its store is STG.E [R4], R7. Byte 3 of that instruction is 4. The FFMA that stores 2.0 times 1.0 plus the addend is FFMA R5, R5, R0, imm. Byte 2 is 5, the same slot as the IADD3 destination.
+
+Two images. The store's address byte is set from 4 to 2. The output buffer is cleared first. The input words are 10 and 3. R2 still holds the input pointer, so the result 7 must land on the first input word, the second input word must stay 3, and the output must stay 0. The FFMA image keeps the addend at 5.0 and sets byte 2 from 5 to 0. The multiply-add writes R0. The store still reads R5, which the mov before the FFMA set to 2.0. The stored bits must be 1073741824.
+
+Gate. Job 17797, node gpuorangefs-r770-proxmox, --gres=gpu:1, --mem=16G, --cpus-per-task=4. Job 17793 held the CPUs on that node and did not hold the GPU. This job shared the node and did not cancel 17793. Binary md5 b0ff6cd3f5bbf107914527eae89bdbdd.
+
+- ADDR_LOAD=1, ADDR_SYNC=0, ADDR_IN=7, ADDR_IN1=3, ADDR_OUT=0.
+- FDEST_LOAD=1, FDEST_SYNC=0, FDEST=1073741824.
+- The earlier stamp, FFMA 7.0, shuffle, barrier, 128-bit load, cache byte, subtract, negate swap, destination 3, source 0, store data 10 and load offset 0 still match. SILICON PASS, EXIT:0.
+
+17793 was still running after this job ended. The node was not idle.
+
+This cut does not run SmolLM2. The 0.0018 s threshold is not moved. This cut does not pass it.
+
+
+## 40. An sm_89 atlas, and one assembled add (2026-10-26, OBSERVED)
+
+The corpus is 1328 instructions from 43 cubins, read with nvdisasm 12.8.55. Thirty-one families. Bytes 0 and 1 stay fixed inside a family. Bytes 13 and 14 move inside that family and are the schedule. The assembler writes the opcode and the fields, and leaves the schedule bytes of the slot it replaces.
+
+| family | bytes 0, 1 | fields |
+| --- | --- | --- |
+| MOV rr | 02 72 | dst at 2, src at 4, RZ is 255 |
+| MOV imm | 02 78 | dst at 2, u32 at 4 |
+| IMAD.MOV imm | 24 74 | dst at 2, u32 at 4, byte 3 is 255 |
+| IMAD.MOV c[] | 24 76 | dst at 2, constant offset/4 at 5 |
+| LDG.E | 81 79 | dst at 2, address at 3, displacement at 5, byte 4 is 4 |
+| STG.E | 86 79 | address at 3, data at 4, displacement at 5 |
+| IADD3 rr | 10 72 | dst at 2, src0 at 3, src1 at 4, negate-src1 is 128 at byte 7 |
+| IADD3 imm | 10 78 | dst at 2, src at 3, immediate at 4 |
+| SHFL.BFLY | 89 7f | dst at 2, src at 3, delta shifted 5 at byte 6 |
+| BAR.SYNC | 1d 7b | id shifted 6 at byte 6 |
+| S2R tid | 19 79 | dst at 2 |
+| EXIT | 4d 79 | schedule only |
+
+`atlas_iadd3_lo(7, 0, 0, 0)` builds `10 72 07 00 00 00 00 00`. That word is not one of the specimens. The specimens with no negate are `R0, R0, R2` and `R7, R0, R7`. This one is `R7, R0, R0`. It replaces the subtract in the kernel whose loads are 10 and 3. The schedule half of that slot stays. The sum is 20.
+
+Gate. Job 17813, node gpuorangefs-r770-proxmox, --gres=gpu:1, --mem=16G, --cpus-per-task=4. The node was idle at submit. Binary md5 576acd012f4080061fe9aa9c04b4e72b.
+
+- ASM_DST=7, ASM_LOAD=1, ASM_SYNC=0, ASM=20.
+- The earlier field patches still match. SILICON PASS, EXIT:0.
+
+The node is idle.
+
+The negate bit is bit 63 and this assembler does not form it. AMD and AGX are not in the atlas. This cut does not run SmolLM2. The 0.0018 s threshold is not moved. This cut does not pass it.
+
+
+## 41. The whole IADD3 word, negate included (2026-10-26, OBSERVED)
+
+Section 40 built only the low 8 bytes of an add and left the schedule half in the slot. The negate bit was not formed.
+
+`atlas_iadd3_lo` now sets bit 63 when negate is requested. That bit is byte 7 equal to 128. `atlas_iadd3_hi` builds the other 8 bytes. Two schedule rows exist in the corpus, byte 13 equal to 0xca and to 0xc6. `atlas_stg_lo` builds the low half of STG.E from the address register and the data register.
+
+Job 17817 wrote the add R7, R0, R7 with the 0xc6 schedule into the subtract slot. The loads were 10 and 3. The stored word was 3, the second load, still sitting in R7. The add did not commit. 0xc6 is not a substitute for 0xca in this slot. The threshold of that experiment is not a sum.
+
+The same words with byte 13 equal to 0xca, which is the schedule already measured on this slot:
+
+- R7, R0, R7, no negate. 10 + 3 = 13.
+- R7, R0, R0, negate on source 1. 10 - 10 = 0. The negate bit was formed by the assembler.
+- STG.E [R4], R0 built by `atlas_stg_lo(4, 0)`. The subtract still writes R7. The store reads R0, which holds 10.
+
+Gate. Job 17819, node gpuorangefs-r770-proxmox, --gres=gpu:1, --mem=16G, --cpus-per-task=4. The node was idle at submit. Binary md5 9702f778de0dc1c7431aa11d2c58436f.
+
+- ADD_BYTE=202, ADD_LOAD=1, ADD_SYNC=0, ADD=13.
+- NEG_BYTE=128, NEG_LOAD=1, NEG_SYNC=0, NEG=0.
+- STG_ASM=0, STGASM_LOAD=1, STGASM_SYNC=0, STGASM=10.
+- ASM=20 and the earlier field patches still match. SILICON PASS, EXIT:0.
+
+The node is idle.
+
+AMD and AGX are not in the atlas. This cut does not run SmolLM2. The 0.0018 s threshold is not moved. This cut does not pass it.
+
+
+## 42. The optimized immediate move is IMAD.MOV (2026-10-26, OBSERVED)
+
+An optimized `mov.u32` is not opcode `02 78`. ptxas 12.8.61 at default opt emits `IMAD.MOV.U32 Rd, RZ, RZ, imm`, opcode bytes `24 74`, destination at byte 2, byte 3 equal to 255, the immediate at bytes 4–7. Opcode `02 78` is the opt-level 0 form. Its own schedule row is `00 0f 00 00 00 de 3f 00`.
+
+`atlas_mov_imm_lo` matches that opt-level 0 low word. Splicing it over the subtract slot does not deliver the immediate. Job 17831 used the `e2 0f` schedule row and stored 0. Job 17833 kept the low word and used the subtract slot's `0xca` schedule; the store returned 3, the second load, still sitting in R7. The move did not commit. Binary md5 of that run: 19ebdaae4a5a44ba2ce45170618fb443. The node was idle afterwards.
+
+`atlas_imad_mov_lo(5, 42)` builds the whole low word `24 74 05 ff 2a 00 00 00`. The specimen in the container was immediate 7, destination R5. 42 was not in that cubin. The schedule half of the slot is left as the cubin had it, `ff 00 8e 07 00 e2 0f 00`, which is the half the following `STG.E [R2.64], R5` was compiled against.
+
+Gate. Job 17846, node gpuorangefs-r770-proxmox, --gres=gpu:1, --mem=16G, --cpus-per-task=4. The node was idle at submit. Binary md5 e177a37bc1bc1865344378fac8d50adf.
+
+- IMAD_IMM=42, IMAD_LOAD=1, IMAD_SYNC=0, IMAD=42.
+- MOV_SLOT=3, the opt-level 0 opcode in the subtract slot, recorded and not treated as a pass.
+- ADD=13, NEG=0, STGASM=10, ASM=20 and the earlier field patches still match. SILICON PASS, EXIT:0.
+
+The node is idle.
+
+AMD and AGX are not in the atlas. This cut does not run SmolLM2. The 0.0018 s threshold is not moved. This cut does not pass it.
+
+
+## 43. Four instructions from one schedule encoder (2026-10-26, OBSERVED)
+
+`atlas_sched` places the control field in the high 8 bytes: stall at bits 41..44, yield at bit 45, the read barrier at 46..48, the write barrier at 49..51, the wait mask at 52..57. A barrier value of 7 is the unset slot. The measured pair 0xca / 0xc6 is stall 5 versus stall 3, with the other control fields held. Stall 5 commits in the subtract slot. Stall 3 does not.
+
+The operand residue under that field stays the measured leftover. The published fixed-bit pattern for IADD3 does not match this cubin, so it is not what the encoder writes.
+
+Job 17876 replaced, in one image, both `LDG.E` words, the `IADD3` word and the `STG.E` word. The loads are the measured pair: R0 at displacement 0, stall 4; R7 at displacement 4, stall 1. The add is R7 = R0 + R7, which is not the specimen subtract. The store reads R7. The inputs were 10 and 3.
+
+- PIPE_BYTE=202, PIPE_LOAD=1, PIPE_SYNC=0, PIPE=13.
+
+The same four words, with the store's data register set to R0. The specimen store reads R7, not R0. R0 still holds the first load.
+
+- ST0_LOAD=1, ST0_SYNC=0, ST0=10.
+
+`FFMA R5, R5, R0, 5` keeps its second factor in byte 8. The specimen factor is R0, so that byte is 0 and the field was invisible. `atlas_ffma_hi(5)` writes R5 there. R5 holds 2.0. 2 * 2 + 5 = 9.
+
+- FSRC_LOAD=1, FSRC_SYNC=0, FSRC=1091567616, the bits of 9.0.
+
+ADD=13, NEG=0, STGASM=10, ASM=20, IMAD=42 and MOV_SLOT=3 still match.
+
+Gate. Job 17876, node gpuorangefs-r770-proxmox, --gres=gpu:1, --mem=16G, --cpus-per-task=4. The node was idle at submit. Binary md5 d9a1081e75609478987dab17e0a1367c. SILICON PASS, EXIT:0. The node is idle.
+
+AMD and AGX are not in the atlas. The ELF container is still the one ptxas wrote. This cut does not run SmolLM2. The 0.0018 s threshold is not moved. This cut does not pass it.
+
+
+## 44. The kernel body, assembled (2026-10-26, OBSERVED)
+
+The family of cubins, tight and `--opt-level 0`, keeps one residue per instruction form. Changing the register does not change it. The register number and the constant offset live in the low 8 bytes.
+
+Residues measured that way: IMAD.MOV c[] 126746879, MOV 3840, ULDC.64 2560, LDG.E 203299072, STG.E 202381572, IADD3 with RZ as the fourth source 134209791, the same add with the negate on source 0 134210047, EXIT 58720256. Negate-on-source-0 is bit 8 of the high half. Bit 63 stays clear. That is the opposite of negate-on-source-1.
+
+Job 17904 replaced every instruction of the subtract kernel, from the constant moves through EXIT, with those formulas. The loads, the store and the prologue match the specimen bytes. The add does not: it is R7 = −R0 + R7. The inputs were 10 and 3. −10 + 3 is −7.
+
+- BODY_NEG=225, the negate byte.
+- BODY_LOAD=1, BODY_SYNC=0, BODY=4294967289.
+
+PIPE=13, ST0=10, FSRC=1091567616, IMAD=42 and the earlier checks still match.
+
+The node was not idle. Job 17884, a foreign CPU-only trace with OverSubscribe=OK and no GPU, held gpuorangefs-r770-proxmox. This probe was moved to partition `all` and shared the free GPU. 17884 was not cancelled.
+
+Gate. --gres=gpu:1, --mem=16G, --cpus-per-task=4. Binary md5 aaeec55cac927f692d4a25dc0d73fbc8. SILICON PASS, EXIT:0.
+
+The ELF container is still the one ptxas wrote. AMD and AGX are not in the atlas. This cut does not run SmolLM2. The 0.0018 s threshold is not moved. This cut does not pass it.
+
+
+## 45. The register count is part of the image (2026-10-26, OBSERVED)
+
+Two bytes carry `SHI_REGISTERS`. One is the low byte of `.nv.info` at file 0x330. The other is bits 24..31 of `sh_info` on `.text.stamp`, file 0x9ef in this 2728-byte image. The low byte of that `sh_info` stays 6. Across the family the count is 8, 10, 12 or 14, and those two bytes move together. `atlas_shi_info` builds the `sh_info` word.
+
+The specimen count is 10. The highest register in that kernel is R7. Job 17906 keeps the assembled body and writes the negate into R8, which the specimen does not use. The store reads R8. Both count bytes become 11.
+
+- SHI=11 on the host, and the specimen image still has 10 at both bytes.
+- REG8_LOAD=1, REG8_SYNC=0, REG8=4294967289. That is −10+3, now through R8.
+
+BODY=4294967289, PIPE=13, ST0=10, FSRC=1091567616 and IMAD=42 still match.
+
+Gate. Job 17906, node gpuorangefs-r770-proxmox, idle at submit, --gres=gpu:1, --mem=16G, --cpus-per-task=4. Binary md5 46a80905dd61e7030f1b42d5524d52f0. SILICON PASS, EXIT:0. The node is idle.
+
+The rest of the ELF container is still the one ptxas wrote. AMD and AGX are not in the atlas. This cut does not run SmolLM2. The 0.0018 s threshold is not moved. This cut does not pass it.
+
+
+## 46. The exit-offset attribute is not read by this launch (2026-10-27, OBSERVED)
+
+`cuobjdump` 12.8.55 names the records in `.nv.info.stamp`. `EIATTR_REGCOUNT` is the register count already measured. `EIATTR_CBANK_PARAM_SIZE` is a half-value at file 0x362, 16 for the two pointers. `EIATTR_PARAM_CBANK` carries the same size in the byte at file 0x35e and the constant offset 0x160. `EIATTR_MAXREG_COUNT` is 255. `EIATTR_EXIT_INSTR_OFFSETS` is the u32 at file 0x38c. In the specimen that u32 is 160, the PC of `EXIT`. `EIATTR_KPARAM_INFO` has one record per pointer. A `R_CUDA_CONST_FIELD22_37` relocation sits on the constant field. Those names are the tool's. Only the exit offset was varied.
+
+Job 18063 keeps the assembled body, the negate on source 0, and writes 176 into that u32. 176 is the `BRA` after `EXIT`, not an exit. The inputs were 10 and 3.
+
+- The specimen byte at file 908 is 160. The varied image byte is 176.
+- XOFF_LOAD=1, XOFF_SYNC=0, XOFF=4294967289.
+
+The stored word is still −10+3. This launch does not consult `EIATTR_EXIT_INSTR_OFFSETS`. The parameter-size byte was left at 16 and was not varied.
+
+REG8=4294967289, BODY=4294967289, PIPE=13, ST0=10, FSRC=1091567616 and IMAD=42 still match.
+
+Gate. Job 18063, node gpuorangefs-r770-proxmox, idle at submit, --gres=gpu:1, --mem=16G, --cpus-per-task=4. Binary md5 e1b3aa2d44bcd3c0e0048a4adc0ee03a. SILICON PASS, EXIT:0. The node is idle.
+
+The relocation and the parameter records are still the ones ptxas wrote. AMD and AGX are not in the atlas. This cut does not run SmolLM2. The 0.0018 s threshold is not moved. This cut does not pass it.
+
+
+## 47. The constant offset chooses the pointer (2026-10-27, OBSERVED)
+
+`EIATTR_PARAM_CBANK` in this image is bank 2 and the value 0x100160. The low byte of that value, file 0x35c, is 96, which is the base 0x160. The parameter block is 16 bytes. The first pointer sits at `c[0][0x160]`. The second sits at `c[0][0x168]`. The constant section ends at 0x170, so the block fills the tail.
+
+Job 18077 moved that base to 0x140 and retargeted the loads and the store with it. The module loaded. `cuModuleGetFunction` returned 0. Job 18079 repeated that image and got the same `CBANK_FUN=0`. The driver does not accept a parameter base other than 0x160 on this launch.
+
+The same job then left the base at 0x160 and assembled the store pointer from `c[0][0x160]`, the input slot. The specimen store pointer is `c[0][0x168]`. The loads still read the input. The stored word is −10+3. A fresh output buffer was zeroed before the launch.
+
+- Specimen byte 1509 is 90. The assembled store offset byte is 88.
+- SLOT_LOAD=1, SLOT_FUN=1, SLOT_SYNC=0.
+- SLOT_IN0=4294967289. SLOT_IN1=3. SLOT_OUT=0.
+
+The first word of the input is the result. The second word of the input is untouched. The output buffer is untouched.
+
+XOFF=4294967289, REG8=4294967289, BODY=4294967289, PIPE=13, ST0=10, FSRC=1091567616 and IMAD=42 still match.
+
+Gate. Job 18079, node gpuorangefs-r770-proxmox, idle at submit, --gres=gpu:1, --mem=16G, --cpus-per-task=4. Binary md5 762118edb8bc2920fa870a024ae6bf1f. SILICON PASS, EXIT:0. The node is idle.
+
+The `R_CUDA_CONST_FIELD22_37` record in `.nv.rel.action` was not varied. AMD and AGX are not in the atlas. This cut does not run SmolLM2. The 0.0018 s threshold is not moved. This cut does not pass it.
+
+
+## 48. Ampere encoding on the L4, Volta refused (2026-10-27, OBSERVED)
+
+There is no V100 on this cluster. The A5000 (sm_86) sits in job 17498, `gpu-guard-r740`, which asked for the Quadro and was allocated both GPUs and 72 CPUs, `OverSubscribe=NO`. That job was not cancelled. The L4 (sm_89) was idle. A cubin for compute capability 8.6 is accepted by 8.9. A cubin for 7.0 is not.
+
+ptxas 12.8.61 emitted the same `mov.u32` kernel for sm_70, sm_80, sm_86 and sm_89. The immediate move `IMAD.MOV.U32 R5, RZ, RZ, 0x7` is the word `24 74 05 ff 07 00 00 00 | ff 00 8e 07 00 e2 0f 00` on sm_80, sm_86 and sm_89. On sm_70 the same word is present, one slot later, and the kernel also contains `@!PT SHFL.IDX` and `STG.E.SYS` (opcode `86 73`, not `86 79`).
+
+`atlas_imad_mov_lo(5, 42)` replaced that low word in the sm_86 image. Job 18084, on the L4:
+
+- AMP_LOAD=1, AMP86=42.
+
+The f64 kernel at `--opt-level 0` has `DMUL R2, R2, R4`. The word `28 72 02 02 04 00 00 00` is the same in the sm_70, sm_80, sm_86 and sm_89 specimens. The high half of the second factor was the specimen 3.0 (`0x40080000`). The atlas wrote 5.0 (`0x40140000`). 2.0 times 5.0 is 10.0.
+
+- DMUL_LOAD=1, DMUL=4621819117588971520, the bits of 10.0.
+
+The sm_70 image was then loaded and not launched.
+
+- image rc=209, VOLTA_LOAD=0.
+
+209 is `CUDA_ERROR_NO_BINARY_FOR_GPU`. The context stayed alive: the line after it is SILICON PASS.
+
+This is not an A5000 run and not a V100 run. The f64 rate of the L4 is not the rate of a V100. The DMUL word in the Volta specimen matches the word the L4 executed, and the Volta container was refused.
+
+Gate. Job 18084, node gpuorangefs-r770-proxmox, idle at submit, --gres=gpu:1, --mem=16G, --cpus-per-task=4. Binary md5 a46e89b064041643bfde8eb7cc5cc63c. SILICON PASS, EXIT:0. The node is idle.
+
+The 0.0018 s threshold is not moved. This cut does not pass it.
+
+
+## 49. Both halves of the f64 multiply (2026-10-27, OBSERVED)
+
+Job 18084 stored the bits of 10.0. That product is `0x4024000000000000`. The low 32 bits are 0, so a store of only the high half would have looked the same.
+
+`atlas_mov_imm_lo` now forms an immediate whose top 16 bits are at least 32768. The sign of that half is written as `(hi - 65536) * 2^48`, the same adjustment the IMAD immediate already used. The four moves in front of `DMUL` were replaced:
+
+- R2, R3 hold 1.1, bits `0x3ff199999999999a`. The low half `0x9999999a` is the case the old formula could not form.
+- R4, R5 hold 2.3, bits `0x4002666666666666`.
+
+The IEEE product of those two values is `0x40043d70a3d70a3d`. The low 32 bits are `0xa3d70a3d`.
+
+Job 18090, on the L4, the sm_86 image:
+
+- AMP86=42 still.
+- DMUL_LOAD=1, DMUL=4612879472328641085, DMUL_LO=2748779069.
+- image rc=209, VOLTA_LOAD=0.
+
+The A5000 is still inside job 17498. There is still no V100. This is the sm_86 `DMUL` word, executed on the L4, with both halves of the product nonzero in the sense that the low half of the product is not zero. The low half of each factor was also nonzero.
+
+Gate. Node gpuorangefs-r770-proxmox, idle at submit, --gres=gpu:1, --mem=16G, --cpus-per-task=4. Binary md5 b61ff06bd9e6ad3c99b4819de663cc5d. SILICON PASS, EXIT:0. The node is idle.
+
+The 0.0018 s threshold is not moved. This cut does not pass it.
+
+
+## 50. The DMUL source register (2026-10-27, OBSERVED)
+
+Job 18090 multiplied 1.1 by 2.3. The second factor sat in R4. The low word of that `DMUL` was `28 72 02 02 04 00 00 00`. Byte 4 was 4.
+
+`atlas_dmul_lo(2, 2, 2)` writes `28 72 02 02 02 00 00 00`. The factors are unchanged: R2 and R3 are still 1.1, R4 and R5 are still 2.3. The instruction now names R2 as both factors, so it squares 1.1. The IEEE square is `0x3ff35c28f5c28f5d`. The low 32 bits are `0xf5c28f5d`.
+
+Job 18091, on the L4, the sm_86 image:
+
+- Host byte 1524 is 2. The specimen byte at that position is 4.
+- DMUL_LOAD=1, DMUL=4608128174721765213, DMUL_LO=4123168605.
+- AMP86=42. image rc=209, VOLTA_LOAD=0.
+
+If byte 4 were not the source, the product would still have been 1.1 times 2.3, which is 4612879472328641085. It was not.
+
+The A5000 is still inside job 17498. There is still no V100.
+
+Gate. Node gpuorangefs-r770-proxmox, idle at submit, --gres=gpu:1, --mem=16G, --cpus-per-task=4. Binary md5 64193081a24cfda9ad078a114700d90a. SILICON PASS, EXIT:0. The node is idle.
+
+The 0.0018 s threshold is not moved. This cut does not pass it.
+
+
+## 51. The other DMUL source (2026-10-27, OBSERVED)
+
+Job 18090 multiplied 1.1 by 2.3. The low word was `28 72 02 02 04`: destination R2, first source R2, second source R4. Job 18091 changed only the second source to R2 and stored 1.1 squared. Byte 4 is that source.
+
+`atlas_dmul_lo(2, 4, 4)` writes `28 72 02 02 04` with byte 3 also equal to 4. The factors are the same ones: R2 is 1.1, R4 is 2.3. Both sources now name R4, so the operation squares 2.3. The IEEE square is `0x401528f5c28f5c28`. The low 32 bits are `0xc28f5c28`.
+
+Job 18097, on the L4, the sm_86 image:
+
+- Host bytes 1523 and 1524 are 4. In job 18090 byte 3 was 2 and byte 4 was 4.
+- DMUL_LOAD=1, DMUL=4617642028934585384, DMUL_LO=3264175144.
+- AMP86=42. image rc=209, VOLTA_LOAD=0.
+
+The product is not 1.1 times 2.3 and not 1.1 squared. It is 2.3 squared. Byte 3 selects the first source the same way byte 4 selects the second.
+
+The A5000 is still inside job 17498. There is still no V100.
+
+Gate. Node gpuorangefs-r770-proxmox, idle at submit, --gres=gpu:1, --mem=16G, --cpus-per-task=4. Binary md5 f624ce4b88439b1f353aea651519cf85. SILICON PASS, EXIT:0. The node is idle.
+
+The 0.0018 s threshold is not moved. This cut does not pass it.
+
+
+## 52. The DMUL destination (2026-10-27, OBSERVED)
+
+Job 18097 squared 2.3 into R2. The low word was `28 72 02 04 04`. Byte 2 was the destination, 2.
+
+`atlas_dmul_lo(4, 4, 4)` writes `28 72 04 04 04`. The sources are still both R4, so the arithmetic is still 2.3 squared. The destination is R4. The store after it still reads R2. R2 was loaded with 1.1 and nothing else writes it.
+
+Job 18201, on the L4, the sm_86 image:
+
+- Host byte 1522 is 4. In job 18097 that byte was 2.
+- DMUL_LOAD=1, DMUL=4607632778762754458, DMUL_LO=2576980378.
+- Those are the bits of 1.1, `0x3ff199999999999a`. The low half is `0x9999999a`.
+- AMP86=42. image rc=209, VOLTA_LOAD=0.
+
+The square did not reach the store. It was written to R4. Byte 2 is the destination.
+
+The A5000 is still inside job 17498. There is still no V100.
+
+Gate. Node gpuorangefs-r770-proxmox, idle at submit, --gres=gpu:1, --mem=16G, --cpus-per-task=4. Binary md5 d40c2ca0734fcbaf5c68a9e3aefc710c. SILICON PASS, EXIT:0. The node is idle.
+
+The 0.0018 s threshold is not moved. This cut does not pass it.
+
+
+## 53. An sm_89 image that reads no cubin (2026-10-27, OBSERVED)
+
+Sounio allocates 2600 bytes and writes the ELF. The probe does not open a cubin. `e_machine` is 190. `e_flags` is `0x590559`. The entry is `stamp`. One parameter. The register count is 8, written by `atlas_shi_info` at file `0x330` and at file `0x96f`.
+
+The first body loaded the pointer with `IMAD.MOV` from `c[0][0x160]`, moved 42 into R5 afterwards, and padded the section with `EXIT`. Job 18279. md5 `038cb4b304550246538ed0e7be1446d6`. `OWN_LOAD=1`. The output word was not cleared. `OWN=1073741824`, the bits of 2.0.
+
+Job 18297 used that same image and cleared the word to 0 before launch. md5 `f13571c4e3b087233a6ce772914e413b`. `OWN=1073741824` again. The kernel wrote 2.0. The cleared 0 did not remain.
+
+The text was then put in the order whose atlas words match a kernel that has stored 42: `IMAD.MOV` R1 from `c[0][0x28]`, `IMAD.MOV` R5 of 42, `MOV` R2 from `c[0][0x160]`, `ULDC.64` UR4 from `c[0][0x118]` at stall 1 yield 1, `MOV` R3 from `c[0][0x164]`, `STG.E` of R5, `EXIT`, then the `BRA` and `NOP` bytes that fill the 256-byte section. The word was cleared first.
+
+Job 18304. The node was idle. md5 `0e31e400e6c96c1508a22ddce69a04cf`. `OWN_LOAD=1`, `OWN=42`, `EXIT:0`. The cleared word became 42.
+
+Gate. Node `gpuorangefs-r770-proxmox`, `--gres=gpu:1`, `--mem=16G`, `--cpus-per-task=4`. The 0.0018 s threshold is not moved. This cut does not pass it.
+
+## 54. The mnemonic list of the resident forward (2026-10-27, OBSERVED as a list)
+
+`nvdisasm` 12.8.55 on the cubin from `ptxas` 12.8.61 of `stdlib/hetero/kernels/fwd_resident.ptx` at `a50f6285db`, target `sm_89`, entry `token_m1`. Eighty-one mnemonics. This list is the atlas scope. A name with no device number is not an encoder.
+
+The opcode column is the low 16 bits of the first instruction of that mnemonic in this cubin, printed as the disassembler's word. It is the specimen, not a proof.
+
+Job 18304's 42 is the only number this ELF has stored. It shows that `IMAD.MOV` of the immediate 42 reached `STG.E` through the pointer this body loaded with `MOV` from `c[0][0x160]` and `c[0][0x164]`. The other names are not proven here.
+
+- 242 `7c10` IADD3
+- 184 `7a02` MOV
+- 167 `7624` IMAD.MOV.U32
+- 141 `8947` BRA
+- 135 `7825` IMAD.WIDE.U32
+- 123 `2223` FFMA
+- 122 `7981` LDG.E
+- 104 `8221` FADD
+- 89 `7c82` UMOV
+- 77 `7a0c` ISETP.GE.U32.AND
+- 57 `720c` ISETP.NE.U32.AND
+- 52 `7a24` IMAD
+- 48 `7820` FMUL
+- 46 `7945` BSSY
+- 46 `7941` BSYNC
+- 42 `7944` CALL.REL.NOINC
+- 41 `7b1d` BAR.SYNC.DEFER
+- 39 `7986` STG.E
+- 35 `7812` LOP3.LUT
+- 24 `7984` LDS
+- 24 `2824` IMAD.IADD
+- 23 `7ab9` ULDC.64
+- 23 `7ab9` ULDC
+- 22 `8388` STS
+- 22 `781c` PLOP3.LUT
+- 20 `7919` S2R
+- 20 `7948` WARPSYNC
+- 17 `7981` LDG.E.64
+- 16 `7f89` SHFL.DOWN
+- 15 `7946` YIELD
+- 14 `7890` UIADD3
+- 12 `7992` MEMBAR.SC.GPU
+- 12 `79ab` ERRBAR
+- 12 `798f` CCTL.IVALL
+- 12 `79a8` ATOMG.E.ADD.STRONG.GPU
+- 12 `7981` LDG.E.STRONG.SYS
+- 12 `780c` ISETP.LE.U32.OR
+- 12 `7981` LDG.E.EF.128
+- 12 `7981` LDG.E.STRONG.SM
+- 11 `7308` MUFU.RCP
+- 11 `2824` IMAD.SHL.U32
+- 10 `7224` IMAD.MOV
+- 10 `7227` IMAD.HI.U32
+- 10 `7219` SHF.L.U32
+- 9 `7950` RET.REL.NODEC
+- 8 `720c` ISETP.GT.U32.AND
+- 8 `7918` NOP
+- 7 `7819` SHF.R.U32.HI
+- 7 `7805` CS2R
+- 6 `780b` FSETP.GEU.AND
+- 6 `7207` SEL
+- 6 `7589` SHFL.IDX
+- 6 `7811` LEA
+- 6 `7e24` IMAD.U32
+- 5 `7302` FCHK
+- 5 `7b06` I2F.U32.RP
+- 5 `7305` F2I.FTZ.U32.TRUNC.NTZ
+- 5 `7947` BRA.DIV
+- 4 `7308` MUFU.RSQ
+- 4 `780b` FSETP.NEU.FTZ.AND
+- 4 `720c` ISETP.GE.AND
+- 4 `7310` F2F.F64.F32
+- 4 `7986` STG.E.64
+- 3 `7a0c` ISETP.LT.U32.AND
+- 3 `7899` USHF.R.U32.HI
+- 3 `7a45` I2FP.F32.S32
+- 3 `7208` FSEL
+- 3 `7308` MUFU.EX2
+- 3 `720c` ISETP.NE.AND
+- 2 `780b` FSETP.GTU.FTZ.AND
+- 2 `7221` FADD.FTZ
+- 2 `7986` STG.E.128
+- 1 `7311` F2I.F64.TRUNC
+- 1 `8209` FMNMX
+- 1 `794d` EXIT
+- 1 `780c` ISETP.GT.U32.OR
+- 1 `780c` ISETP.GT.AND
+- 1 `7223` FFMA.RZ
+- 1 `7223` FFMA.RP
+- 1 `7223` FFMA.RM
+- 1 `7217` IMNMX.U32
+
+The 0.0018 s threshold is not moved. This list does not pass it.
+
+
+## 55. IADD3 inside the owned image (2026-10-27, OBSERVED)
+
+The image of job 18304 stayed the container. Four instructions were inserted before `EXIT`, and the register count became 11. The cleared buffer is two words.
+
+Job 18313 wrote the exit-offset word as `7172 + 160 * 2^32`. That low half is `0x1c04`, not the attribute header `0x00041c04`. `cuModuleLoadData` returned `image rc=200`. md5 `419a515c26c7d313300eafb441f7ffee`. The image was not launched.
+
+Job 18315 repaired that word to `269316 + 160 * 2^32`, which is `04 1c 04 00 a0 00 00 00`. `IMAD.MOV` of 10 and of 3 used the ordinary immediate schedule, stall 1. `IADD3` R8, R6, R7 then `STG.E` of R8 at displacement 4. `OWN=42`, `OWN_ADD=0`. md5 `61729dcbd05f1b4135f4a2bd54726c56`. The second word stayed the cleared 0.
+
+Job 18319 kept the displacement and stored R5, which holds 42, at displacement 4. `OWN=42`, `OWN_ADD=42`. md5 `1ed58045a0083ccaa667a6d3eed0cb3a`. Byte 5 of `STG.E` is the displacement. The 0 in job 18315 was the value in R8, not a missed address.
+
+Job 18325 gave those two immediate moves stall 5 and yield 1, and stored R8 again. `OWN=42`, `OWN_ADD=13`, `EXIT:0`. md5 `8cd5efbcff8d2f5ff8ee01a44b343ef5`. Ten plus three is 13. `IADD3` opcode `10 72` committed inside this ELF.
+
+The resident kernel's first `IADD3` in the list of section 54 is opcode `10 7c`. That form is not this word. The row stays open. Seventy-nine of the eighty-one names still have no number from this image.
+
+The 0.0018 s threshold is not moved. This cut does not pass it.
+
+
+## 56. A load from the owned image (2026-10-27, OBSERVED)
+
+Three instructions were inserted before `EXIT` in the image that stored 13. Slot 10 is `atlas_ldg_lo(4, 2, 8)` and `atlas_ldg_hi(4)`. The low word is `81 79 04 02 04 08 00 00`. The high word is `00 19 1e 0c 00 a8 0e 00`. The residue `203299072` is `0x0c1e1900`, so byte 1 of that half is `0x19`, the 32-bit `LDG.E` form. Stall is 4, yield is set, the read barrier is 2, and the write barrier is 7. Slot 11 is `IADD3` R0, R4, R7. R7 already holds 3. Slot 12 stores R0 at displacement 16. `EXIT` moved from pc `0xa0` to pc `0xd0`. The exit-offset word kept the low half `0x00041c04`. The high half is 208.
+
+The host cleared 24 bytes and wrote 17 at offset 8. Offset 12 was left at 0.
+
+The L4 was `IDLE+DRAIN` because the kill of job 18427 had failed at 17:08, and that job was already gone. The node was resumed. Pending job 18691, which had asked for the same node, started and was not cancelled. After it released the GPU, job 18697 ran. md5 `51967e8086db1300f49e1f3a1ed0f652`.
+
+`OWN=42`, `OWN_ADD=13`, `OWN_SRC=17`, `OWN_WIDE=0`, `OWN_SUM=20`, `EXIT:0`.
+
+The word at offset 16, which had been cleared, became 20. That is 17 plus 3. The 17 at offset 8 was still there. Offset 12 stayed 0. Read barrier 2 did not hang this launch. Stall 4 was enough for this load to be visible to the add.
+
+Byte 4 of this load is 4. The common `LDG.E` in `token_m1` uses 6 at displacement 0. That byte was not changed in this job.
+
+Gate. Node `gpuorangefs-r770-proxmox`, `--gres=gpu:1`, `--mem=16G`, `--cpus-per-task=4`. The 0.0018 s threshold is not moved. This cut does not pass it.
+
+
+## 57. The add's wait mask (2026-10-27, OBSERVED)
+
+The load of job 18697 was left as it was. `atlas_iadd3_hi(0)` on the sum is residue `134209791` plus `atlas_sched(5, 0, 7, 7, 4)`. That 4 is the wait mask, bit 2, barrier 2, the barrier the load registers. This job uses `atlas_sched(5, 0, 7, 7, 0)`. Stall 5 stays. The mask bit is off. Host byte 1598 is 15 (`0x0f`), where the previous image had 79 (`0x4f`).
+
+The host still writes 17 at offset 8. The probe still requires 20 at offset 16.
+
+The L4 was `IDLE+DRAIN` because the kill of job 18758 failed at 23:14, and that job was already gone. The node was resumed so 18761 could run. Revert with `scontrol update NodeName=gpuorangefs-r770-proxmox State=DRAIN Reason="Kill task failed (JobId=18758 StepId=0)"`.
+
+Job 18761. md5 `718355dd94e09b5ca75d37475d2f20fa`.
+
+`OWN=42`, `OWN_ADD=13`, `OWN_SRC=17`, `OWN_WIDE=0`, `OWN_SUM=3`, `EXIT:1`.
+
+The cleared word at offset 16 came back 3. That is the 3 already in R7, added to an R4 that was still 0. The load had not delivered 17 when the add issued. With the mask on, job 18697 stored 20 in that word. The mask bit is the wait. The required 20 was not changed to 3.
+
+Gate. Node `gpuorangefs-r770-proxmox`, `--gres=gpu:1`, `--mem=16G`, `--cpus-per-task=4`. The 0.0018 s threshold is not moved. This cut does not pass it.
+
+
+## 58. Load byte 4 (2026-10-27, OBSERVED)
+
+Job 18697 stored 20 with load byte 4 equal to 4 and the add's wait mask equal to 4. Job 18761 cleared that mask and stored 3. This job puts the mask back, `atlas_iadd3_hi(0)`, and changes only byte 4 of the load from 4 to 6. The displacement stays 8. The low word is `81 79 04 02 06 08 00 00`. Host byte 1572 is 6. Host byte 1598 is 79 (`0x4f`), the mask bit back on.
+
+The host still writes 17 at offset 8. The probe still requires 20.
+
+The common `LDG.E` in `token_m1` uses byte 4 equal to 6 at displacement 0. This cubin has no load with byte 4 equal to 6 and displacement 8. That is the combination launched here.
+
+Job 18808. The node was idle, not drained. md5 `c8287b87723ad0dc25ebd00da6e34604`.
+
+`OWN=42`, `OWN_ADD=13`, `OWN_SRC=17`, `OWN_WIDE=0`, `OWN_SUM=20`, `EXIT:0`.
+
+The word at offset 16 is 20 again. Byte 4 equal to 6, with displacement 8 and the wait mask on, delivered the same 17. The 42 and the 13 stayed. Offset 12 stayed 0. The 17 at offset 8 was still there.
+
+Gate. Node `gpuorangefs-r770-proxmox`, `--gres=gpu:1`, `--mem=16G`, `--cpus-per-task=4`. The 0.0018 s threshold is not moved. This cut does not pass it.
+
+
+## 59. Displacement 0 reads the stored 42 (2026-10-28, OBSERVED)
+
+The load of job 18808 had byte 4 equal to 6 and displacement 8, and stored 20. This job changes byte 5 from 8 to 0. Byte 4 stays 6. The add's wait mask stays on. The low word is `81 79 04 02 06 00 00 00`. That is the shape of `LDG.E R15, [R2.64]` at pc `0x1e40` in `token_m1`, with R4 and R2 in place of R15 and the same R2. Host byte 1573 is 0.
+
+When the load runs, slot 10, offset 0 already holds the 42 stored at slot 5. Offset 4 holds 13. Offset 8 holds 17. Offset 12 holds 0. The sum of a load from offset 0 with the 3 in R7 is 45.
+
+`token_m1` loads through that R2 before it stores. `LDG.E R15, [R2.64]` at `0x1e40` registers read barrier 3. `FFMA R27, R10, R15.reuse, -R27` at `0x1eb0` waits on mask 8. `STG.E [R2.64], R27` at `0x1ed0` waits on nobody and registers write barrier 0. R2 is not written between the load and the store. There is no load of an address this kernel just stored. A search of twenty instructions after every `STG.E` found none whose address register was still the one just stored.
+
+Job 19265. The node was idle. md5 `d6a9d4a5dd77d332c06735452ab7554e`.
+
+`OWN=42`, `OWN_ADD=13`, `OWN_SRC=17`, `OWN_WIDE=0`, `OWN_SUM=45`, `EXIT:0`.
+
+The word at offset 16, cleared before launch, came back 45. The load at displacement 0 saw the 42 written at slot 5. No extra barrier was added. The 42 and the 13 stayed. The 17 at offset 8 was still there. Offset 12 stayed 0.
+
+Across the 104 `.reuse` tags in `token_m1`, the last byte of the instruction carries one bit per source, counting from the destination. The first source is bit 2 (value 4): 24 `IADD3` and 22 `FFMA`. The second source is bit 3 (value 8): 13 `FFMA`. The third source is bit 4 (value 16): 3 `IMAD.WIDE` and 2 `IMAD`. The sum that stored 20 reads R4 once and leaves that byte at 0. This job does not set those bits.
+
+Gate. Node `gpuorangefs-r770-proxmox`, `--gres=gpu:1`, `--mem=16G`, `--cpus-per-task=4`. The 0.0018 s threshold is not moved. This cut does not pass it.
+
+
+## 60. Four loads, one sum (2026-10-28, OBSERVED)
+
+The image no longer stores 42 and 13. It loads four words and adds them. The host writes 17, 19, 23 and 29 at offsets 0, 4, 8 and 12. The sum is 88, stored at offset 16.
+
+Each load is `LDG.E` with byte 4 equal to 6. Displacements are 0, 4, 8 and 12. The read barriers are 2, 3, 4 and 5. The first add waits on mask 12, barriers 2 and 3, and adds R4 and R6. The second waits on mask 16, barrier 4, and adds R8. The third waits on mask 32, barrier 5, and adds R9. Register count is 12. `EXIT` is at pc `0xc0`.
+
+Job 19267, a CPU validation with `OverSubscribe=OK` and no GPU request, held the node. It was not cancelled. Job 19268 was moved to partition `all` so it could use the free GPU.
+
+Job 19268. md5 `c0ab579ade99a0db7a9376a43bfaa0b5`.
+
+`OWN=17`, `OWN_ADD=19`, `OWN_SRC=23`, `OWN_WIDE=29`, `OWN_SUM=88`, `EXIT:0`.
+
+The four inputs were still there. The cleared word at offset 16 came back 88. The four loads were in flight under four barrier ids, and each add waited on the barrier of the load it consumed.
+
+Gate. Node `gpuorangefs-r770-proxmox`, `--gres=gpu:1`, `--mem=16G`, `--cpus-per-task=4`. The 0.0018 s threshold is not moved. This cut does not pass it.
+
+
+## 61. Two FFMAs (2026-10-28, OBSERVED)
+
+The four loads stay. The adds are now `FFMA`, opcode `23 72`, the unpredicated form in `token_m1`. The low word is `35 + 114 * 256`, destination, first source, second source. The addend is byte 0 of the high half. The first addend is 255, RZ, so the product starts from zero. The second addend is R0, the running sum. Stall is 5. The first `FFMA` waits on mask 12, barriers 2 and 3. The second waits on mask 48, barriers 4 and 5.
+
+The host writes the bits of 2.0, 3.0, 4.0 and 5.0. In f32, 2 times 3 plus 4 times 5 is 26.0. The bits of 26.0 are `0x41d00000`, which is 1104150528. An earlier draft of the expected word used 1101529088. That was a bad conversion of the same hex. It was corrected before the launch.
+
+Job 19267 still held the node with CPUs only and no GPU. It was not cancelled. Job 19271 moved to partition `all`.
+
+Job 19271. md5 `7f28a8a5e5b520e63752fee0f11b5d80`.
+
+`OWN=1073741824`, `OWN_ADD=1077936128`, `OWN_SRC=1082130432`, `OWN_WIDE=1084227584`, `OWN_SUM=1104150528`, `EXIT:0`.
+
+Those four words are 2.0, 3.0, 4.0 and 5.0. The stored word is 26.0. The inputs were not overwritten.
+
+Gate. Node `gpuorangefs-r770-proxmox`, `--gres=gpu:1`, `--mem=16G`, `--cpus-per-task=4`. The 0.0018 s threshold is not moved. This cut does not pass it.
+
+
+## 62. Three products (2026-10-28, OBSERVED)
+
+The two-product kernel left the slots after the store empty. Those slots now hold two more loads, a third `FFMA`, the store, and `EXIT`. The text stays 256 bytes. A fourth product does not fit. Eight loads, four `FFMA`s, the four setup instructions, the store and `EXIT` are eighteen instructions, and `.text` sits against the section headers.
+
+The third pair reuses R4 and R6. The first `FFMA` has already waited on those registers. The new loads register barriers 2 and 3 again. The third `FFMA` waits on mask 12, the same mask the first one used. The second `FFMA` still waits on mask 48. `EXIT` is at pc 224.
+
+The host writes the bits of 2.0, 3.0, 4.0, 5.0, 6.0 and 7.0. In f32, 2 times 3 plus 4 times 5 plus 6 times 7 is 68.0. The bits of 68.0 are `0x42880000`, which is 1116209152. The node was idle. No drain was cleared and no foreign job was moved.
+
+Job 19296. md5 `98989b7019c0f14cd8e97373d7c2cd09`.
+
+`OWN=1073741824`, `OWN_ADD=1077936128`, `OWN_SRC=1082130432`, `OWN_WIDE=1084227584`, `OWN_EXT=1086324736`, `OWN_EXT2=1088421888`, `OWN_SUM=1116209152`, `EXIT:0`.
+
+Those six words are 2.0, 3.0, 4.0, 5.0, 6.0 and 7.0. The stored word is 68.0. The inputs were not overwritten. The third product was added to the running sum.
+
+Gate. Node `gpuorangefs-r770-proxmox`, `--gres=gpu:1`, `--mem=16G`, `--cpus-per-task=4`. The 0.0018 s threshold is not moved. This cut does not pass it.
+
+
+## 63. Four products, text grown by 32 bytes (2026-10-28, OBSERVED)
+
+Three products filled the 256-byte text. A fourth product needs two more loads and one more `FFMA`. The section headers sat against the end of `.text`, so the image grew. The first 1664 bytes stay. The section-header table and the program headers move down 32 bytes. `e_shoff` goes from `0x680` to `0x6a0`. `e_phoff` goes from `0x980` to `0x9a0`. The `.text` size and the `stamp` symbol size go from 256 to 288. The load of the constant bank plus the text grows its file size and memory size from `0x2c0` to `0x2e0`. The two program headers that point at the program-header table move from `0x980` to `0x9a0`. `.debug_frame` still carries the old length 256. The driver loaded the image anyway.
+
+The fourth pair reuses R8 and R9. The second `FFMA` has already waited on barriers 4 and 5. The new loads register those barriers again. The fourth `FFMA` waits on mask 48. The third product still waits on mask 12. The store displacement is 32. `EXIT` is at pc 272. The register count stays 12.
+
+The host writes the bits of 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0 and 9.0. In f32, 2 times 3 plus 4 times 5 plus 6 times 7 plus 8 times 9 is 140.0. The bits of 140.0 are `0x430c0000`, which is 1124859904. The node was idle. No drain was cleared.
+
+Job 19381. md5 `bc2dd72a3581e3d3d8b2fe65f41c1413`.
+
+`OWN=1073741824`, `OWN_ADD=1077936128`, `OWN_SRC=1082130432`, `OWN_WIDE=1084227584`, `OWN_EXT=1086324736`, `OWN_EXT2=1088421888`, `OWN_E8=1090519040`, `OWN_E9=1091567616`, `OWN_SUM=1124859904`, `EXIT:0`.
+
+Those eight words are 2.0 through 9.0. The stored word is 140.0. The inputs were not overwritten.
+
+Gate. Node `gpuorangefs-r770-proxmox`, `--gres=gpu:1`, `--mem=16G`, `--cpus-per-task=4`. The 0.0018 s threshold is not moved. This cut does not pass it.
+
+
+## 64. Five products, text grown to 336 bytes (2026-10-28, OBSERVED)
+
+The fourth product left the text at 288 bytes. The fifth needs two more loads and one more `FFMA`. The same move applies, counted from the original 2600-byte container: the tail after the old text shifts by 80 bytes, not 32. The file is 2680 bytes. `e_shoff` is `0x6d0`. `e_phoff` is `0x9d0`. The `.text` size and the `stamp` symbol size are 336. The load of the constant bank plus the text has file size and memory size `0x310`. `.debug_frame` still carries the length 256. The driver loaded the image.
+
+The fifth pair reuses R4 and R6. Barriers 2 and 3 were already reused once, for 6.0 and 7.0. The third `FFMA` waits on them, and the new loads register them again. The fifth `FFMA` waits on mask 12. The fourth still waits on mask 48. The store displacement is 40. `EXIT` is at pc 320. The register count stays 12.
+
+The host writes the bits of 2.0 through 11.0. In f32, 2 times 3 plus 4 times 5 plus 6 times 7 plus 8 times 9 plus 10 times 11 is 250.0. The bits of 250.0 are `0x437a0000`, which is 1132068864. The node was idle. No drain was cleared.
+
+Job 19385. md5 `169164c5b241574cff84769cde6324af`.
+
+`OWN=1073741824`, `OWN_ADD=1077936128`, `OWN_SRC=1082130432`, `OWN_WIDE=1084227584`, `OWN_EXT=1086324736`, `OWN_EXT2=1088421888`, `OWN_E8=1090519040`, `OWN_E9=1091567616`, `OWN_E10=1092616192`, `OWN_E11=1093664768`, `OWN_SUM=1132068864`, `EXIT:0`.
+
+Those ten words are 2.0 through 11.0. The stored word is 250.0. The inputs were not overwritten. Barriers 2 and 3 survived a second reuse.
+
+Gate. Node `gpuorangefs-r770-proxmox`, `--gres=gpu:1`, `--mem=16G`, `--cpus-per-task=4`. The 0.0018 s threshold is not moved. This cut does not pass it.
+
+
+## 65. Six products, text at the 128-byte alignment (2026-10-28, OBSERVED)
+
+The fifth product left the text at 336 bytes. The sixth needs two more loads and one more `FFMA`. Counted from the original 2600-byte container, the tail after the old text shifts by 128 bytes. The file is 2728 bytes. `.text` is 384 bytes, `0x180`, a multiple of the section alignment `0x80`. `e_shoff` is `0x700`. `e_phoff` is `0xa00`. The `stamp` symbol size is 384. The load of the constant bank plus the text has file size and memory size `0x340`. `.debug_frame` still carries the length 256. The driver loaded the image.
+
+The sixth pair reuses R8 and R9. Barriers 4 and 5 were already reused once, for 8.0 and 9.0. The fourth `FFMA` waits on them, and the new loads register them again. The sixth `FFMA` waits on mask 48. The fifth still waits on mask 12. The store displacement is 48. `EXIT` is at pc 368. The register count stays 12.
+
+The host writes the bits of 2.0 through 13.0. In f32, 2 times 3 plus 4 times 5 plus 6 times 7 plus 8 times 9 plus 10 times 11 plus 12 times 13 is 406.0. The bits of 406.0 are `0x43cb0000`, which is 1137377280. Job 19443 held the node with CPUs only and no GPU. It was not cancelled. Job 19444 moved to partition `all`.
+
+Job 19444. md5 `a308fd258c6191e051cfa1fea7a2fa87`.
+
+`OWN=1073741824`, `OWN_ADD=1077936128`, `OWN_SRC=1082130432`, `OWN_WIDE=1084227584`, `OWN_EXT=1086324736`, `OWN_EXT2=1088421888`, `OWN_E8=1090519040`, `OWN_E9=1091567616`, `OWN_E10=1092616192`, `OWN_E11=1093664768`, `OWN_E12=1094713344`, `OWN_E13=1095761920`, `OWN_SUM=1137377280`, `EXIT:0`.
+
+Those twelve words are 2.0 through 13.0. The stored word is 406.0. The inputs were not overwritten. Barriers 4 and 5 survived a second reuse.
+
+Gate. Node `gpuorangefs-r770-proxmox`, `--gres=gpu:1`, `--mem=16G`, `--cpus-per-task=4`. The 0.0018 s threshold is not moved. This cut does not pass it.
+
+
+## 66. Seven products (2026-10-28, OBSERVED)
+
+The sixth product left the text at 384 bytes. The seventh needs two more loads and one more `FFMA`. Counted from the original 2600-byte container, the tail after the old text shifts by 176 bytes. The file is 2776 bytes. `.text` is 432 bytes, `0x1b0`. `e_shoff` is `0x730`. `e_phoff` is `0xa30`. The `stamp` symbol size is 432. The load of the constant bank plus the text has file size and memory size `0x370`. `.debug_frame` still carries the length 256. The driver loaded the image.
+
+The seventh pair reuses R4 and R6. Barriers 2 and 3 have now been registered three times. The fifth `FFMA` waits on the second registration, and the new loads register them again. The seventh `FFMA` waits on mask 12. The sixth still waits on mask 48. The store displacement is 56. `EXIT` is at pc 416. The register count stays 12.
+
+The host writes the bits of 2.0 through 15.0. In f32, the seven products from 2 times 3 through 14 times 15 sum to 616.0. The bits of 616.0 are `0x441a0000`, which is 1142554624. Job 19443 still held the node with CPUs only and no GPU. It was not cancelled. Job 19446 moved to partition `all`.
+
+Job 19446. md5 `1ffa61df65c4f1af08ff3d7ce911dfeb`.
+
+`OWN=1073741824`, `OWN_ADD=1077936128`, `OWN_SRC=1082130432`, `OWN_WIDE=1084227584`, `OWN_EXT=1086324736`, `OWN_EXT2=1088421888`, `OWN_E8=1090519040`, `OWN_E9=1091567616`, `OWN_E10=1092616192`, `OWN_E11=1093664768`, `OWN_E12=1094713344`, `OWN_E13=1095761920`, `OWN_E14=1096810496`, `OWN_E15=1097859072`, `OWN_SUM=1142554624`, `EXIT:0`.
+
+Those fourteen words are 2.0 through 15.0. The stored word is 616.0. The inputs were not overwritten. Barriers 2 and 3 survived a third registration.
+
+Gate. Node `gpuorangefs-r770-proxmox`, `--gres=gpu:1`, `--mem=16G`, `--cpus-per-task=4`. The 0.0018 s threshold is not moved. This cut does not pass it.
+
+
+## 67. Eight products (2026-10-28, OBSERVED)
+
+The seventh product left the text at 432 bytes. The eighth needs two more loads and one more `FFMA`. Counted from the original 2600-byte container, the tail after the old text shifts by 224 bytes. The file is 2824 bytes. `.text` is 480 bytes, `0x1e0`. `e_shoff` is `0x760`. `e_phoff` is `0xa60`. The `stamp` symbol size is 480. The load of the constant bank plus the text has file size and memory size `0x3a0`. `.debug_frame` still carries the length 256. The driver loaded the image.
+
+Section 66 said barriers 2 and 3 were registered three times in the seven-product image. The instruction list registers them four times: the pairs 2/3, 6/7, 10/11 and 14/15. Barriers 4 and 5 were registered three times there. The stored 616.0 is unchanged. This image registers barriers 4 and 5 a fourth time, for 16.0 and 17.0, after the sixth `FFMA` has waited on the third registration. The eighth `FFMA` waits on mask 48. The seventh still waits on mask 12. The store displacement is 64. `EXIT` is at pc 464. The register count stays 12.
+
+The host writes the bits of 2.0 through 17.0. In f32, the eight products from 2 times 3 through 16 times 17 sum to 888.0. The bits of 888.0 are `0x445e0000`, which is 1147011072. The node was idle. No drain was cleared.
+
+Job 19629. md5 `fdce2620e78c5173f4762e20b0468432`.
+
+`OWN=1073741824`, `OWN_ADD=1077936128`, `OWN_SRC=1082130432`, `OWN_WIDE=1084227584`, `OWN_EXT=1086324736`, `OWN_EXT2=1088421888`, `OWN_E8=1090519040`, `OWN_E9=1091567616`, `OWN_E10=1092616192`, `OWN_E11=1093664768`, `OWN_E12=1094713344`, `OWN_E13=1095761920`, `OWN_E14=1096810496`, `OWN_E15=1097859072`, `OWN_E16=1098907648`, `OWN_E17=1099431936`, `OWN_SUM=1147011072`, `EXIT:0`.
+
+Those sixteen words are 2.0 through 17.0. The stored word is 888.0. The inputs were not overwritten. Barriers 4 and 5 survived a fourth registration.
+
+Gate. Node `gpuorangefs-r770-proxmox`, `--gres=gpu:1`, `--mem=16G`, `--cpus-per-task=4`. The 0.0018 s threshold is not moved. This cut does not pass it.
+
+
+## 68. Nine products (2026-10-29, OBSERVED)
+
+The eighth product left the text at 480 bytes. The ninth needs two more loads and one more `FFMA`. Counted from the original 2600-byte container, the tail after the old text shifts by 272 bytes. The file is 2872 bytes. `.text` is 528 bytes, `0x210`. `e_shoff` is `0x790`. `e_phoff` is `0xa90`. The `stamp` symbol size is 528. The load of the constant bank plus the text has file size and memory size `0x3d0`. `.debug_frame` still carries the length 256. The driver loaded the image.
+
+The ninth pair reuses R4 and R6. Barriers 2 and 3 are registered a fifth time, for 18.0 and 19.0, after the seventh `FFMA` has waited on the fourth registration. The ninth `FFMA` waits on mask 12. The eighth still waits on mask 48. The store displacement is 72. `EXIT` is at pc 512, so the exit-offset attribute now uses two bytes: the low byte is 0 and the next byte is 2. The register count stays 12.
+
+The host writes the bits of 2.0 through 19.0. In f32, the nine products from 2 times 3 through 18 times 19 sum to 1230.0. The bits of 1230.0 are `0x4499c000`, which is 1150926848. The node was idle. No drain was cleared.
+
+Job 19653. md5 `0c6e3ec49cad29fd5dabdca33785d7c5`.
+
+`OWN=1073741824`, `OWN_ADD=1077936128`, `OWN_SRC=1082130432`, `OWN_WIDE=1084227584`, `OWN_EXT=1086324736`, `OWN_EXT2=1088421888`, `OWN_E8=1090519040`, `OWN_E9=1091567616`, `OWN_E10=1092616192`, `OWN_E11=1093664768`, `OWN_E12=1094713344`, `OWN_E13=1095761920`, `OWN_E14=1096810496`, `OWN_E15=1097859072`, `OWN_E16=1098907648`, `OWN_E17=1099431936`, `OWN_E18=1099956224`, `OWN_E19=1100480512`, `OWN_SUM=1150926848`, `EXIT:0`.
+
+Those eighteen words are 2.0 through 19.0. The stored word is 1230.0. The inputs were not overwritten. Barriers 2 and 3 survived a fifth registration.
+
+Gate. Node `gpuorangefs-r770-proxmox`, `--gres=gpu:1`, `--mem=16G`, `--cpus-per-task=4`. The 0.0018 s threshold is not moved. This cut does not pass it.
+
+
+## 69. Ten products (2026-10-29, OBSERVED)
+
+The ninth product left the text at 528 bytes. The tenth needs two more loads and one more `FFMA`. Counted from the original 2600-byte container, the tail after the old text shifts by 320 bytes. The file is 2920 bytes. `.text` is 576 bytes, `0x240`. `e_shoff` is `0x7c0`. `e_phoff` is `0xac0`. The `stamp` symbol size is 576. The load of the constant bank plus the text has file size and memory size `0x400`. `.debug_frame` still carries the length 256. The driver loaded the image.
+
+The tenth pair reuses R8 and R9. Barriers 4 and 5 are registered a fifth time, for 20.0 and 21.0, after the eighth `FFMA` has waited on the fourth registration. The tenth `FFMA` waits on mask 48. The ninth still waits on mask 12. The store displacement is 80. `EXIT` is at pc 560. The register count stays 12.
+
+The host writes the bits of 2.0 through 21.0. In f32, the ten products from 2 times 3 through 20 times 21 sum to 1650.0. The bits of 1650.0 are `0x44ce4000`, which is 1154367488. The bits of 20.0 are 1101004800. The bits of 21.0 are 1101529088. The node was idle. No drain was cleared.
+
+Job 19671. md5 `e9fe9f328f5b652e61c1be01b454e719`.
+
+`OWN=1073741824`, `OWN_ADD=1077936128`, `OWN_SRC=1082130432`, `OWN_WIDE=1084227584`, `OWN_EXT=1086324736`, `OWN_EXT2=1088421888`, `OWN_E8=1090519040`, `OWN_E9=1091567616`, `OWN_E10=1092616192`, `OWN_E11=1093664768`, `OWN_E12=1094713344`, `OWN_E13=1095761920`, `OWN_E14=1096810496`, `OWN_E15=1097859072`, `OWN_E16=1098907648`, `OWN_E17=1099431936`, `OWN_E18=1099956224`, `OWN_E19=1100480512`, `OWN_E20=1101004800`, `OWN_E21=1101529088`, `OWN_SUM=1154367488`, `EXIT:0`.
+
+Those twenty words are 2.0 through 21.0. The stored word is 1650.0. The inputs were not overwritten. Barriers 4 and 5 survived a fifth registration.
+
+Gate. Node `gpuorangefs-r770-proxmox`, `--gres=gpu:1`, `--mem=16G`, `--cpus-per-task=4`. The 0.0018 s threshold is not moved. This cut does not pass it.
+
+
+## 70. Ten products with the scoreboard off (2026-10-29, OBSERVED)
+
+The ten-product program of section 69 is unchanged in its arithmetic. What changed is the scoreboard. Every load registers no barrier: the barrier field is 7. Every `FFMA` waits on mask 0. Stall 5 on the `FFMA` and stall 1 on the load stay. The required stored word stays the bits of 1650.0, which is 1154367488. That word was not rewritten after the run.
+
+The node was idle. No drain was cleared.
+
+Job 19674. md5 `a39125b5322aee6e4fb9f00c16273610`.
+
+`OWN=1073741824`, `OWN_ADD=1077936128`, `OWN_SRC=1082130432`, `OWN_WIDE=1084227584`, `OWN_EXT=1086324736`, `OWN_EXT2=1088421888`, `OWN_E8=1090519040`, `OWN_E9=1091567616`, `OWN_E10=1092616192`, `OWN_E11=1093664768`, `OWN_E12=1094713344`, `OWN_E13=1095761920`, `OWN_E14=1096810496`, `OWN_E15=1097859072`, `OWN_E16=1098907648`, `OWN_E17=1099431936`, `OWN_E18=1099956224`, `OWN_E19=1100480512`, `OWN_E20=1101004800`, `OWN_E21=1101529088`, `OWN_SUM=0`. The probe exits 1.
+
+Those twenty words are 2.0 through 21.0. They were not overwritten. The stored sum is 0. With the scoreboard removed, none of the ten products landed in the accumulator. The same program with the waits on, job 19671, stored 1650.0.
+
+This cut does not separate "the load registered no barrier" from "the consumer waited on no mask." Both are off. Job 18761 already stored 3, rather than 20, when one consumer's mask was cleared and the load still registered its barrier.
+
+Gate. Node `gpuorangefs-r770-proxmox`, `--gres=gpu:1`, `--mem=16G`, `--cpus-per-task=4`. The 0.0018 s threshold is not moved. This cut does not pass it. The required word 1154367488 is not moved either.
+
+
+## 71. Sixteen stall-15 moves, scoreboard still off (2026-10-29, OBSERVED)
+
+The scoreboard stays off, as in section 70. The shape of the program changes. Twenty loads write R4 through R23, displacements 0 through 76. Sixteen moves of `c[0][0x28]` into R1 follow, each with stall 15. Then the ten products run, still with mask 0. The register count is 26. `.text` is 832 bytes. The file is 3176 bytes. `e_shoff` is `0x8c0`. `EXIT` is at pc 816. The required stored word stays 1154367488, the bits of 1650.0. It was not rewritten after the run.
+
+The node was idle. No drain was cleared.
+
+Job 19725. md5 `c3eeabe6938b572ca29ff52798cf8d6a`.
+
+The twenty input words are 2.0 through 21.0, unchanged. `OWN_SUM=2985189878`. That is `0xb1ee61f6`. Read as f32, the pattern is about -6.94e-9. It is not the bits of 1650, nor of 0, nor of any partial sum of the ten products. The probe exits 1.
+
+The same inputs with the scoreboard on, job 19671, stored 1650.0. With the scoreboard off and no extra gap, job 19674 stored 0. The sixteen stall-15 moves did not turn this program into the 1650 result.
+
+Gate. Node `gpuorangefs-r770-proxmox`, `--gres=gpu:1`, `--mem=16G`, `--cpus-per-task=4`. The 0.0018 s threshold is not moved. The required word 1154367488 is not moved either.
+
+
+## 72. The container emitter replays job 19671 (2026-10-29, OBSERVED)
+
+`emit_container` takes the instruction count, the register count, and the EXIT slot. The growth in words is `ninsns * 2 - 32`. From that one number it moves the section headers and the program headers, and it writes the section size, the `stamp` symbol size, the LOAD sizes, the two header offsets, the register-count bytes, and the EXIT pc. The measured 2600-byte container in `own_word` stays the source of the bytes that do not move.
+
+The first caller is the ten-product program of job 19671. Thirty-six instructions. Register count 12. EXIT at slot 35. The scoreboard masks are on. The file the function produces is 2920 bytes. `e_shoff` is 1984. The EXIT pc is 560.
+
+The required stored word is 1154367488, the bits of 1650.0. It was not rewritten before the run.
+
+The node was idle. No drain was cleared.
+
+Job 19732. md5 `0ad3ed7be39a5116285313f68264254d`.
+
+The twenty input words are 2.0 through 21.0, unchanged. `OWN_SUM=1154367488`, `EXIT:0`.
+
+That is the same word job 19671 stored, from a program whose container arithmetic is now a function of the instruction count.
+
+Gate. Node `gpuorangefs-r770-proxmox`, `--gres=gpu:1`, `--mem=16G`, `--cpus-per-task=4`. The 0.0018 s threshold is not moved. This cut does not pass it.
+
+
+## 73. Four taken branches store 4 (2026-10-29, OBSERVED)
+
+`emit_container` replayed a straight-line product. This cut names the `BRA` displacement, then launches one program whose store was fixed at 4 before the run.
+
+ptxas 12.8.61, `--opt-level 0`, sm_89. nvdisasm 12.8.55 with `-hex`. Two unconditional backward branches:
+
+| target, from the next instruction | low word | high word | bytes 4..7 |
+| --- | --- | --- | --- |
+| −16 | `0xfffffff000007947` | `0x003fde000383ffff` | `f0 ff ff ff` |
+| −48 | `0xffffffd000007947` | `0x003fde000383ffff` | `d0 ff ff ff` |
+
+Bytes 4..7 are a signed displacement in bytes. The high word is the same on both. A branch whose target is the next instruction, displacement 0, has low word `0x0000000000007947` and high word `0x003fde0003800000`. Those two high words differ by `0x3ffff`, the low 18 bits, which carry the sign of the field. The opcode bytes stay `47 79`.
+
+The program uses displacement +16. Bytes 4..7 are `10 00 00 00`. The high word is the displacement-0 specimen, because bit 31 of +16 is clear. The two negative branches are the pair that located the field. The zero branch supplies the high word used when the sign bits are clear.
+
+Twenty instructions. `emit_container(buf, 20, 7, 19)`. The file is 2664 bytes. `.text` is 320 bytes. `e_shoff` is 1728. The EXIT pc is 304. The register count is 7.
+
+`IMAD.MOV` writes 0 into R0 and 1 into R4, both at stall 5 and yield 1, the schedule on which job 18325's add saw its sources. Then, four times: `BRA` over one `IMAD.MOV` of 99 into R0, then `IADD3 R0, R0, R4, RZ` at stall 5. `STG.E [R2+80], R0` and `EXIT` follow.
+
+Four taken branches skip every 99. The four adds leave 4, and 4 is stored. Four fall-throughs each write 99 and the following add leaves 100, so the store is 100. The required word is 4. It was not rewritten after the run.
+
+The node was idle when the job ran. No drain was cleared. Foreign job 19867 had held the same GPU and had already ended `FAILED` `2:0`. It was not cancelled.
+
+Job 19868. md5 `672f685e54f46c5aa4a63a955001676e`.
+
+The twenty input words are 2.0 through 21.0, unchanged. `OWN_SUM=4`, `EXIT:0`.
+
+Gate. Node `gpuorangefs-r770-proxmox`, `--gres=gpu:1`, `--mem=16G`, `--cpus-per-task=4`. The 0.0018 s threshold is not moved. The loop body is still an integer add. The text of this program is four branches, and it does not yet stay the same size when K grows.
+
+
+## 74. One loop body stores the ten products (2026-10-29, OBSERVED)
+
+The four branches of job 19868 each skip one instruction. The branch does not return, and the text grows with the trip count. This cut puts the ten products in one body. The trip count is the compare immediate 10. The required stored word is 1154367488, the bits of 1650.0. It was written before either launch and was not rewritten after the miss.
+
+ptxas 12.8.61, `--opt-level 0`, sm_89. `ISETP.LT.U32.AND P0, PT, R0, imm`. Immediate 4 is low word `0x000000040000780c`. Immediate 8 is `0x000000080000780c`. Byte 4 is the immediate. The high word stays `0x003fde0003f01070`. A second pair compares R0 and R2. Byte 3 moves with the register: 0 for R0, 2 for R2. `PLOP3.LUT` between the compare and the branch is the same word in every specimen, low `0x000000000000781c`, high `0x003fde000070f070`. The `@P0 BRA` uses byte 1 `0x09` and the displacement field already measured. Displacement −128 is bytes `80 ff ff ff` with the negative high word `0x003fde000383ffff`.
+
+The body loads one pair through the walking pointer R6:R7, multiplies with `FFMA` into R0 under mask 12, adds 8 to the low half of that pointer, and adds 1 to R5. R0 starts at the bit pattern 0. R6:R7 starts as a copy of R2:R3. The store uses the original R2 at displacement 80. Twenty instructions. Register count 13. The file is 2664 bytes. `.text` is 320 bytes. `e_shoff` is 1728. The EXIT pc is 304.
+
+The node was idle. No drain was cleared.
+
+Job 19921. md5 `682f8d1281dd3a4a998aa6d08df47429`.
+
+The compare in that image names R0, the accumulator. After one product R0 holds the bits of 6.0, and that unsigned value is not less than 10. The branch falls through. The twenty inputs, 2.0 through 21.0, are unchanged. `OWN_SUM=1086324736`, the bits of 6.0. `EXIT:1`. The required word stayed 1154367488.
+
+Byte 3 of `ISETP` was then set to 5, so the compare reads the counter. The required word stayed 1154367488.
+
+Job 19925. md5 `e4620888be507dc9c8bdebf1a1fd2970`.
+
+The same inputs. `OWN_SUM=1154367488`, `EXIT:0`. Ten products, one body. The text does not contain a copy of the product per trip.
+
+The pointer step is a 32-bit add on the low half. This allocation returned 1650.0, so that add was enough for these eighty bytes.
+
+Gate. Node `gpuorangefs-r770-proxmox`, `--gres=gpu:1`, `--mem=16G`, `--cpus-per-task=4`. The 0.0018 s threshold is not moved.
+
+
+## 75. One block of 576 columns (2026-10-29, OBSERVED)
+
+The loop of job 19925 is one thread. A projection of width 576 has one column per thread in this cut. The block size is 576. K is 576. Even columns hold 1.0 and odd columns hold 2.0, and the vector is 1.0, so an even column is 576.0 and an odd column is 1152.0. Those bit patterns were fixed before the launch: 1141899264 and 1150287872. The sum of the thread indices 0 through 575 is 165600. That sum was not rewritten after the run.
+
+`S2R` was named from ptxas 12.8.61 at opt-level 0 before the launch. `SR_LANEID` and `SR_TID.X`, same destination, differ in byte 9: `0x00` and `0x21`. `SR_CTAID.X` puts `0x25` in that byte. The high word of `SR_TID.X` is `0x00321e0000002100`. Byte 2 is the destination.
+
+The node was idle. No drain was cleared.
+
+Job 19962. md5 `c76fa23a73d7b0b7f5433b56c8c0692f`.
+
+`DOT0=1141899264`, `DOT1=1150287872`, `DOT575=1150287872`. `TID0=0`, `TID1=1`, `TID575=575`. `TID_SUM=155392`. The probe exits 1. The required sum stays 165600.
+
+Jobs 19963 and 19967 repeat the same device program and print more of the index vector. md5 of 19967 is `6c58b5bfeb35151422dd5e5445f6e40f`. `T32=32`, `T256=256`, `T512=512`. `T128=0`, `T191=0`, `D128=0`. The low half of the index sum is 77568 and the high half is 77824. Together they are 155392 again. The gap below 165600 is 10208, which is the sum of the integers 128 through 191. The two samples read inside that span are 0, and the dot at column 128 is 0.
+
+The columns that were read outside that span match the words written down before the launch. The index sum does not.
+
+Gate. Node `gpuorangefs-r770-proxmox`, one block of 576, `--gres=gpu:1`, `--mem=16G`, `--cpus-per-task=4`. The 0.0018 s threshold is not moved. The forward still runs the PTX kernel of job 17669.
