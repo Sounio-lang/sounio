@@ -1,7 +1,5 @@
 /// SounioProcess — spawn `souc run <program> -- --serve`, handshake, send/receive SNIO frames.
 ///
-/// Ported from interop/fsharp/Sounio.Interop/SounioProcess.fs.
-///
 /// Key design decisions:
 /// - stderr is drained in a background thread to prevent deadlock when the
 ///   the compiler emits warnings (for example around file_size()).

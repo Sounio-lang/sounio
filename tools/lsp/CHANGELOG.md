@@ -138,7 +138,7 @@ Verified on a 10-function fixture: `/full` returns 52 tokens (260 ints);
 `/range` for `lines 0..3` returns 15 tokens (75 ints); first delta-line
 is 0, matching the range's start line.
 
-### Out of scope (Sprint 2 — see `SPRINT2_TODO.md`)
+### Out of scope (Sprint 2 — landed later in v0.4.0)
 
 Patches 5–8 from the audit's patch list — `semanticTokens/full/delta`,
 `typeHierarchy*`, cross-file `workspace/symbol` over unopened files,
