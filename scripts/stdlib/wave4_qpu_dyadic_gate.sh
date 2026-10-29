@@ -34,6 +34,7 @@ function sourceKind(body){
  normalized=exactOnce(normalized,'    let b01 = p00 + p.p01\n','    let b01 = p.p00 + p.p01\n');
  normalized=exactOnce(normalized,'if u < p00 {','if u < p.p00 {');
  if(normalized.replace('fn wide_core_literal','fn wide_core_dyadic')!==dyadic)throw Error('source body mismatch after exact hoist');
+ if(body!==hoisted)throw Error('noncanonical hoist placement');
  return 'dyadic-hoist';
 }
 const dyadicOriginal=dyadic.replace('fn wide_core_dyadic','fn wide_core_literal');
@@ -45,12 +46,13 @@ for(const [name,bad] of [
  ['missing-declaration',hoisted.replace('    let p00 = p.p00\n','')],
  ['duplicate-declaration',hoisted.replace('    let p00 = p.p00\n','    let p00 = p.p00\n    let p00 = p.p00\n')],
  ['literal-hoist',hoisted.replace(' * inverse_scale',' / scale').replace('let inverse_scale = 0.00000000023283064365386962890625','let scale = 4294967296.0')],
- ['changed-threshold',hoisted.replace('if u < b01 {','if u <= b01 {')]
+ ['changed-threshold',hoisted.replace('if u < b01 {','if u <= b01 {')],
+ ['moved-declaration',hoisted.replace('    let p00 = p.p00\n','').replace('    while k < shots {\n','    while k < shots {\n    let p00 = p.p00\n')]
 ]){
  let rejected=false;try{sourceKind(bad);}catch{rejected=true;}
  if(!rejected)throw Error('source validator accepted '+name);
 }
-console.log('SOURCE_VALIDATOR_CONTROLS_OK positives=3 negatives=6');
+console.log('SOURCE_VALIDATOR_CONTROLS_OK positives=3 negatives=7');
 console.log('EXPLICIT_SOURCE_KIND '+sourceKind(original));
 if(t.split('@CALLS@').length!==2)throw Error('marker');
 const driver=t.replace('@CALLS@',fs.readFileSync(o+'/generated/CALLS.sio','utf8'));
