@@ -14728,6 +14728,24 @@ impl Lowerer {
     // is the same budgeted deep copy the identifier path uses -- aggregate
     // fields get fresh backing, Box fields keep reference semantics.
     fn emit_place_aggregate_value_copy(self, e: &Expr, reg: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        // A field declared `Box<T>` or `Option<Box<T>>` holds a handle, and
+        // `let b = o.f` must bind that handle. expr_receiver_struct_type_ref
+        // looks through the Box (it answers `T`, the type a method call or a
+        // field read on `o.f` reaches), so without this check the copy below
+        // treated the one-slot Box object as a `T` value: `var reused =
+        // lo.current_func; lo.current_func = reused` left a fake IrFunction in
+        // the Box slot, and gen2 trapped (ud2) on its null float_reg_bits in
+        // ir_reset_function_in_place (#2966).
+        if (*e).kind == ExprKind::ExprFieldAccess {
+            match (*e).left {
+                Some(owner) => {
+                    let owner_st = self.expr_receiver_struct_type_ref(&(*owner))
+                    if self.field_box_inner_type_for_struct(owner_st, (*e).name).len > 0 { return (self, reg) }
+                    if self.field_option_box_inner_type_for_struct(owner_st, (*e).name).len > 0 { return (self, reg) }
+                }
+                None => {}
+            }
+        }
         let st = self.expr_receiver_struct_type_ref(e)
         if st.len > 0 && !ir_name_is_box(st) && !ir_name_eq(st, make_name("Knowledge")) {
             let slot_count = self.struct_layout_slot_count(st)

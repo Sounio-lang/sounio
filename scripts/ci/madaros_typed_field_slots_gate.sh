@@ -98,6 +98,7 @@ check box_field_local_typed BOX_FIELD_LOCAL_TYPED_OK
 check let_match_some_payload_typed LET_MATCH_SOME_PAYLOAD_TYPED_OK
 check uninit_struct_array_field_global UNINIT_STRUCT_ARRAY_FIELD_OK
 check tuple_raw_slot_deref TUPLE_RAW_SLOT_OK
+check box_field_let_keeps_handle BOX_FIELD_LET_KEEPS_HANDLE_OK
 
 cat >"$WORK/refuse.sio" <<'SIO'
 struct Seg { buf: [i8; 16], len: i64 }
