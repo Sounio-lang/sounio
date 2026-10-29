@@ -104,16 +104,66 @@ sounio_require_souc
 _sounio_engine_md5() {
     if [[ -r "$1" ]]; then md5sum "$1" 2>/dev/null | cut -c1-8; else echo "absent"; fi
 }
-SOUNIO_ENGINE_KIND="madaros"
-SOUNIO_ENGINE_ELF="$ROOT_DIR/artifacts/self-hosted/madaros"
-if [[ "${SOUNIO_SOUC_ENGINE:-}" == "lean_single" ]] || [[ ! -x "$ROOT_DIR/artifacts/self-hosted/madaros" ]]; then
-    SOUNIO_ENGINE_KIND="lean_single"
-    SOUNIO_ENGINE_ELF="$ROOT_DIR/bin/souc-lean-single-x86_64"
-    [[ -x "$SOUNIO_ENGINE_ELF" ]] || SOUNIO_ENGINE_ELF="$ROOT_DIR/bin/souc-linux-x86_64"
-fi
+# Resolve the engine the way the dispatcher actually will, not by inference
+# from one path. With no override, $SOUC_BIN is bin/souc, whose default engine
+# is Madaros whenever a Madaros ELF resolves -- the committed prebuilt
+# bin/madaros-linux-x86_64 included (bin/souc auto-materializes it from the
+# tracked .gz) -- and which falls back to lean_single only when none resolves.
+# The previous heuristic reported lean_single whenever artifacts/self-hosted/
+# madaros was absent, so a run the committed Madaros prebuilt produced was
+# bannered "engine=lean_single elf=bin/souc-lean-single-x86_64", md5 of a
+# compiler that ran nothing. Measured 2026-10-29 on main 439b42c5: prebuilt
+# materialized, no env set, no artifacts build -- the banner named lean_single
+# (md5 2640b5b1) while every test executed on Madaros v0.80.0.
 if [[ -n "${SOUNIO_TEST_SOUC_BIN:-}" ]]; then
     SOUNIO_ENGINE_KIND="explicit"
     SOUNIO_ENGINE_ELF="$SOUNIO_TEST_SOUC_BIN"
+elif [[ -n "${SOUNIO_SOUC_BIN:-}" && -x "${SOUNIO_SOUC_BIN}" \
+       && "$(head -c 2 "${SOUNIO_SOUC_BIN}" 2>/dev/null)" != '#!' ]]; then
+    # bin/souc execs an explicit ELF override directly (raw lean_single CLI).
+    SOUNIO_ENGINE_KIND="explicit"
+    SOUNIO_ENGINE_ELF="$SOUNIO_SOUC_BIN"
+elif [[ "${SOUNIO_SOUC_ENGINE:-}" == "lean_single" ]]; then
+    SOUNIO_ENGINE_KIND="lean_single"
+    SOUNIO_ENGINE_ELF="$ROOT_DIR/bin/souc-lean-single-x86_64"
+    [[ -x "$SOUNIO_ENGINE_ELF" ]] || SOUNIO_ENGINE_ELF="$ROOT_DIR/bin/souc-linux-x86_64"
+else
+    # Mirror bin/souc's Madaros resolution order: MADAROS_RAW_BIN,
+    # SOUNIO_MADAROS_BIN, host raw, the local artifacts build, then the
+    # committed prebuilt. The prebuilt is committed compressed; when no
+    # higher-priority override resolves, materialize it here exactly as
+    # bin/souc would on the first test, so the md5 below is read from the
+    # ELF that is about to run, not reported "absent" and resolved later.
+    _engine_banner_madaros=""
+    source "$ROOT_DIR/scripts/lib/resolve_madaros.sh"
+    for _engine_banner_cand in "${MADAROS_RAW_BIN:-}" "${SOUNIO_MADAROS_BIN:-}" \
+            "$(sounio_madaros_host_raw || true)" \
+            "$ROOT_DIR/artifacts/self-hosted/madaros" \
+            "$ROOT_DIR/bin/madaros-linux-x86_64"; do
+        if [[ -n "$_engine_banner_cand" && -x "$_engine_banner_cand" \
+              && "$(head -c 2 "$_engine_banner_cand" 2>/dev/null)" != '#!' ]]; then
+            _engine_banner_madaros="$_engine_banner_cand"
+            break
+        fi
+    done
+    if [[ -z "$_engine_banner_madaros" \
+          && -f "$ROOT_DIR/bin/madaros-linux-x86_64.gz" \
+          && -f "$ROOT_DIR/bin/madaros-linux-x86_64.sha256" ]]; then
+        # bin/souc tolerates a materialization failure only when an override
+        # resolved above; with none, its first call exits with the script's
+        # rc, so aborting here on the same condition changes no outcome.
+        bash "$ROOT_DIR/scripts/lib/materialize_madaros_prebuilt.sh"
+        _engine_banner_madaros="$ROOT_DIR/bin/madaros-linux-x86_64"
+    fi
+    if [[ -n "$_engine_banner_madaros" ]]; then
+        SOUNIO_ENGINE_KIND="madaros"
+        SOUNIO_ENGINE_ELF="$_engine_banner_madaros"
+    else
+        SOUNIO_ENGINE_KIND="lean_single"
+        SOUNIO_ENGINE_ELF="$ROOT_DIR/bin/souc-lean-single-x86_64"
+        [[ -x "$SOUNIO_ENGINE_ELF" ]] || SOUNIO_ENGINE_ELF="$ROOT_DIR/bin/souc-linux-x86_64"
+    fi
+    unset _engine_banner_madaros _engine_banner_cand
 fi
 
 # Refuse to guess: a newer local build of the engine that is NOT the one about
@@ -275,7 +325,7 @@ if [[ -n "${CI:-}" && "${SOUNIO_TEST_JOBS_DYNAMIC:-1}" != "0" ]]; then
     fi
     CPU_COUNT="$(available_cpus)"
     MEMORY_BYTES="$(available_memory_bytes)"
-    if [[ ! "$CPU_COUNT" =~ ^[1-9][0-9]*$ || ! "$MEMORY_BYTES" =~ ^[1-9][0-9]*$ ]]; then
+    if [[ ! "$CPU_COUNT" =~ ^[1-9][0-9]*$ || ! "$MEMORY_BYTES" =~ ^[0-9][0-9]*$ ]]; then
         echo "error: could not determine positive CPU and memory limits for dynamic test jobs" >&2
         exit 2
     fi
