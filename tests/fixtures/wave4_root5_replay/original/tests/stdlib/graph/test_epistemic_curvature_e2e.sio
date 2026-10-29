@@ -1,0 +1,296 @@
+//@ run-pass
+//@ expect-stdout: GRAPH_EPISTEMIC_CURVATURE_OK
+// Exercises graph::epistemic_curvature after the Seq migration.
+//
+// What moved: the adjacency, the all-pairs distance matrix, the cost and
+// cost-uncertainty matrices, the Sinkhorn transport plan, the per-edge
+// curvature list, and the FCGraphResult / DimensionalTrajectory struct fields
+// were all fixed-length slices grown with .push (28 x E019) and are Seq now.
+// Every Seq parameter is taken BY VALUE: a Seq is a handle, so by-value shares
+// storage, and reading one through a reference parameter is a known compiler
+// defect (docs/handoff/BLK-20260904-seq-f64-element-scalar-kind.md).
+//
+// The assertions are closed forms, not "it type-checks". Ollivier-Ricci
+// curvature with laziness alpha=0.5 on hop-count distance has exact values on
+// both graphs below, and they have OPPOSITE SIGNS:
+//
+//   K4 (complete):     every edge kappa = +2/3
+//   Heawood (3-regular, girth 6): every edge kappa = -1/3
+//
+// Derivation for K4, edge (u,v): mu_u puts 1/2 on u and 1/6 on each of the
+// three neighbours; nu_v is the mirror image. The measures already agree on the
+// two nodes that are neither u nor v, so only the 1/3 excess sitting on u has to
+// move, one hop, to v. W1 = 1/3 and kappa = 1 - W1/d(u,v) = 2/3.
+//
+// Derivation for Heawood: girth 6 means u and v have disjoint, mutually
+// non-adjacent neighbourhoods with d(a,c) = 3 between them, i.e. the edge looks
+// locally like a 3-regular tree. Moving the 1/3 excess off u costs 1, and the
+// two remaining 1/6 lumps each travel 2 hops, so W1 = 1/3 + 2*(1/6)*2 = 4/3 and
+// kappa = 1 - 4/3 = -1/3. Verified independently by Kantorovich duality with
+// the 1-Lipschitz potential f = (1, 0, 2, 2, -1, -1) on (u, v, a, b, c, d).
+//
+// K4 lands on 0.663477 rather than 0.666667 because Sinkhorn is entropically
+// regularized at epsilon = 0.1; the band below is wide enough for that blur and
+// far too tight to admit a broken transport plan.
+use graph::epistemic_curvature::*;
+use graph::random::*;
+
+fn near(a: f64, b: f64, tol: f64) -> bool {
+    let d = a - b
+    if d < 0.0 { 0.0 - d < tol } else { d < tol }
+}
+
+// Fixture helpers. Seq rows cannot be written as a nested array literal --
+// `[[1,2],[0]]` compiles to an empty stub that traps at runtime
+// (NATIVE_REFUSAL_SUMMARY empty_stub_ud2) -- so rows are grown.
+fn seq_rows(n: usize) -> Seq<Seq<usize>> with Mut, Panic {
+    var adj: Seq<Seq<usize>> = seq_new()
+    var i: usize = 0
+    while i < n {
+        var row: Seq<usize> = seq_new()
+        adj.push(row)
+        i = i + 1
+    }
+    adj
+}
+
+// adj.get returns a handle sharing storage, so pushing into the bound row is
+// visible through the outer Seq.
+fn add_edge(adj: Seq<Seq<usize>>, u: usize, v: usize) with Mut, Panic {
+    var row_u: Seq<usize> = adj.get(u)
+    row_u.push(v)
+    var row_v: Seq<usize> = adj.get(v)
+    row_v.push(u)
+}
+
+// Heawood graph: 3-regular, 14 nodes, 21 edges, girth 6, triangle-free.
+// LCF notation [5,-5]^7 -- a 14-cycle plus a chord from each even i to i+5.
+fn heawood() -> Seq<Seq<usize>> with Mut, Panic, Div {
+    var adj: Seq<Seq<usize>> = seq_rows(14)
+    var i: usize = 0
+    while i < 14 {
+        add_edge(adj, i, (i + 1) % 14)
+        i = i + 1
+    }
+    i = 0
+    while i < 14 {
+        add_edge(adj, i, (i + 5) % 14)
+        i = i + 2
+    }
+    adj
+}
+
+fn const_matrix(n: usize, val: f64) -> Seq<Seq<f64>> with Mut, Panic {
+    var m: Seq<Seq<f64>> = seq_new()
+    var i: usize = 0
+    while i < n {
+        var row: Seq<f64> = seq_new()
+        var j: usize = 0
+        while j < n {
+            row.push(val)
+            j = j + 1
+        }
+        m.push(row)
+        i = i + 1
+    }
+    m
+}
+
+fn set_sym(m: Seq<Seq<f64>>, i: usize, j: usize, val: f64) with Mut, Panic {
+    var row_i: Seq<f64> = m.get(i)
+    row_i.set(j, val)
+    var row_j: Seq<f64> = m.get(j)
+    row_j.set(i, val)
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div, Epistemic {
+    // ------------------------------------------------------------------
+    // Graph metrics: closed forms straight off the Seq adjacency.
+    // ------------------------------------------------------------------
+    let k4: Seq<Seq<usize>> = complete_graph(4)
+    let m4 = compute_graph_metrics(k4)
+    if m4.n_nodes != 4 { println("FAIL K4 n_nodes"); return 1 }
+    if m4.n_edges != 6 { println("FAIL K4 n_edges"); return 1 }
+    if !near(m4.mean_degree, 3.0, 1e-9) { println("FAIL K4 mean_degree"); return 1 }
+    // K4 is one big clique, so every connected triple closes.
+    if !near(m4.clustering, 1.0, 1e-9) { println("FAIL K4 clustering"); return 1 }
+    // eta = k^2/N = 9/4.
+    if !near(m4.eta, 2.25, 1e-9) { println("FAIL K4 eta"); return 1 }
+
+    let hw: Seq<Seq<usize>> = heawood()
+    let mh = compute_graph_metrics(hw)
+    if mh.n_nodes != 14 { println("FAIL Heawood n_nodes"); return 1 }
+    if mh.n_edges != 21 { println("FAIL Heawood n_edges"); return 1 }
+    if !near(mh.mean_degree, 3.0, 1e-9) { println("FAIL Heawood mean_degree"); return 1 }
+    // Girth 6, so triangle-free: clustering is exactly zero.
+    if !near(mh.clustering, 0.0, 1e-9) { println("FAIL Heawood clustering"); return 1 }
+    // eta = 9/14.
+    if !near(mh.eta, 0.6428571428, 1e-8) { println("FAIL Heawood eta"); return 1 }
+
+    // ------------------------------------------------------------------
+    // Curvature on the complete graph: every edge +2/3, spherical.
+    // ------------------------------------------------------------------
+    let a4 = analyze_curvature_exact(k4)
+    if a4.num_edges != 6 { println("FAIL K4 curvature edge count"); return 1 }
+    let mean4: f64 = a4.mean_kappa
+    if !near(mean4, 0.6634, 0.0015) { println("FAIL K4 mean kappa off 2/3"); return 1 }
+    // All six edges are equivalent under the symmetry of K4, so the spread is
+    // exactly zero and min == max == mean.
+    if !near(a4.std_kappa, 0.0, 1e-9) { println("FAIL K4 std_kappa"); return 1 }
+    if !near(a4.min_kappa, mean4, 1e-9) { println("FAIL K4 min_kappa"); return 1 }
+    if !near(a4.max_kappa, mean4, 1e-9) { println("FAIL K4 max_kappa"); return 1 }
+    if a4.num_spherical != 6 { println("FAIL K4 spherical count"); return 1 }
+    if a4.num_hyperbolic != 0 { println("FAIL K4 hyperbolic count"); return 1 }
+    // Exact hop-count topology carries no cost uncertainty, so every sign is
+    // unambiguous and GCI saturates.
+    if !near(a4.gci, 1.0, 1e-9) { println("FAIL K4 gci"); return 1 }
+    if a4.num_sign_certain != 6 { println("FAIL K4 sign_certain"); return 1 }
+    if !near(a4.sigma_mean_kappa, 0.0, 1e-9) { println("FAIL K4 sigma_mean"); return 1 }
+
+    // ------------------------------------------------------------------
+    // Curvature on the Heawood graph: every edge exactly -1/3, hyperbolic.
+    // ------------------------------------------------------------------
+    let ah = analyze_curvature_exact(hw)
+    if ah.num_edges != 21 { println("FAIL Heawood curvature edge count"); return 1 }
+    let meanh: f64 = ah.mean_kappa
+    if !near(meanh, 0.0 - 0.3333333333, 1e-6) {
+        println("FAIL Heawood mean kappa off -1/3")
+        return 1
+    }
+    if !near(ah.std_kappa, 0.0, 1e-6) { println("FAIL Heawood std_kappa"); return 1 }
+    if ah.num_hyperbolic != 21 { println("FAIL Heawood hyperbolic count"); return 1 }
+    if ah.num_spherical != 0 { println("FAIL Heawood spherical count"); return 1 }
+    if !near(ah.gci, 1.0, 1e-9) { println("FAIL Heawood gci"); return 1 }
+
+    // The headline: the same pipeline separates a clique from a locally
+    // tree-like graph by the SIGN of the curvature, not just its magnitude.
+    if mean4 <= 0.0 { println("FAIL complete graph should be positively curved"); return 1 }
+    if meanh >= 0.0 { println("FAIL girth-6 graph should be negatively curved"); return 1 }
+
+    // ------------------------------------------------------------------
+    // GUM uncertainty propagation through the transport plan.
+    // Feeding a large uniform sigma_C must leave the point estimate alone and
+    // destroy the sign certainty -- sigma_kappa = sqrt(sum gamma_ij^2 sigma^2)
+    // reads the plan, so a corrupted gamma would show up here.
+    // ------------------------------------------------------------------
+    let sigma: Seq<Seq<f64>> = const_matrix(4, 1.0)
+    let params = EpistemicCurvatureParams::clinical()
+    let au = analyze_epistemic_curvature(k4, sigma, &params)
+    if !near(au.mean_kappa, mean4, 1e-9) {
+        println("FAIL uncertainty moved the point estimate")
+        return 1
+    }
+    if au.sigma_mean_kappa < 0.0 { println("FAIL negative sigma_mean"); return 1 }
+    // |kappa| = 0.663 is no longer larger than 2*sigma_kappa, so no edge keeps
+    // an unambiguous sign and every one reclassifies as Uncertain.
+    if au.num_sign_certain != 0 { println("FAIL sign certainty survived sigma=1"); return 1 }
+    if !near(au.gci, 0.0, 1e-9) { println("FAIL gci should collapse to 0"); return 1 }
+    if au.num_uncertain != 6 { println("FAIL uncertain geometry count"); return 1 }
+    // Confidence must fall, and can never rise, when cost uncertainty is added.
+    if au.mean_confidence >= 1.0 { println("FAIL confidence did not fall"); return 1 }
+
+    // ------------------------------------------------------------------
+    // Geometric Certainty Index over a hand-built Seq of edge records:
+    // one sign-certain edge out of two is exactly 0.5.
+    // ------------------------------------------------------------------
+    var recs: Seq<EpistemicEdgeCurvature> = seq_new()
+    recs.push(EpistemicEdgeCurvature {
+        u: 0, v: 1, kappa: -0.3, sigma_kappa: 0.01,
+        ci_lower: -0.32, ci_upper: -0.28, confidence: 0.95,
+        sign_certain: true, geometry: GeometryClass::Hyperbolic,
+    })
+    recs.push(EpistemicEdgeCurvature {
+        u: 1, v: 2, kappa: 0.01, sigma_kappa: 0.05,
+        ci_lower: -0.09, ci_upper: 0.11, confidence: 0.5,
+        sign_certain: false, geometry: GeometryClass::Uncertain,
+    })
+    let gci = geometric_certainty_index(recs)
+    if !near(gci, 0.5, 1e-9) { println("FAIL gci closed form"); return 1 }
+
+    // ------------------------------------------------------------------
+    // FC graph construction: thresholding a correlation matrix.
+    // |r| > 0.5 keeps (0,1), (1,2), (2,3) -- the path 0-1-2-3.
+    // ------------------------------------------------------------------
+    var corr: Seq<Seq<f64>> = const_matrix(4, 0.1)
+    set_sym(corr, 0, 1, 0.9)
+    set_sym(corr, 1, 2, 0.8)
+    set_sym(corr, 2, 3, 0.7)
+    var unc: Seq<Seq<f64>> = const_matrix(4, 0.05)
+    // Only (2,3) sits within one SE of the threshold: 0.7 - 0.5 = 0.2 < 0.5.
+    set_sym(unc, 2, 3, 0.5)
+
+    let fc = build_fc_graph(corr, unc, 4, 0.5)
+    if fc.n_certain_edges != 2 { println("FAIL fc certain edge count"); return 1 }
+    if fc.n_uncertain_edges != 1 { println("FAIL fc uncertain edge count"); return 1 }
+
+    let fadj: Seq<Seq<usize>> = fc.adj
+    let fm = compute_graph_metrics(fadj)
+    if fm.n_nodes != 4 { println("FAIL fc n_nodes"); return 1 }
+    if fm.n_edges != 3 { println("FAIL fc n_edges"); return 1 }
+    // Path on 4 nodes: degrees 1, 2, 2, 1.
+    if !near(fm.mean_degree, 1.5, 1e-9) { println("FAIL fc mean_degree"); return 1 }
+    if !near(fm.clustering, 0.0, 1e-9) { println("FAIL fc clustering"); return 1 }
+
+    let d0: Seq<usize> = fadj.get(0)
+    let d1: Seq<usize> = fadj.get(1)
+    let deg0: usize = (d0.len().unwrap("fc row 0")) as usize
+    let deg1: usize = (d1.len().unwrap("fc row 1")) as usize
+    if deg0 != 1 { println("FAIL fc degree of endpoint"); return 1 }
+    if deg1 != 2 { println("FAIL fc degree of interior node"); return 1 }
+
+    // Cost uncertainty is sqrt(hops * fraction_uncertain). One of the three
+    // edges is uncertain, so the fraction is 1/3, and node 0 to node 3 is 3
+    // hops: sqrt(3 * 1/3) = 1 exactly. The diagonal is 0 hops, so 0.
+    let cu: Seq<Seq<f64>> = fc.cost_uncertainty
+    let cu0: Seq<f64> = cu.get(0)
+    let c03: f64 = cu0.get(3)
+    let c01: f64 = cu0.get(1)
+    let c00: f64 = cu0.get(0)
+    if !near(c03, 1.0, 1e-6) { println("FAIL fc cost uncertainty at 3 hops"); return 1 }
+    if !near(c01, 0.5773502692, 1e-6) { println("FAIL fc cost uncertainty at 1 hop"); return 1 }
+    if !near(c00, 0.0, 1e-9) { println("FAIL fc cost uncertainty on diagonal"); return 1 }
+
+    // The FC-derived graph is a path, which is flat, not spherical.
+    let fa = analyze_curvature_exact(fadj)
+    if fa.num_edges != 3 { println("FAIL fc curvature edge count"); return 1 }
+
+    // ------------------------------------------------------------------
+    // Critical embedding dimension: linear interpolation of the zero crossing
+    // between d=4 (kappa=-0.05) and d=8 (kappa=+0.02) is
+    // 4 + 4*0.05/0.07 = 6.857142.
+    // ------------------------------------------------------------------
+    var dims: Seq<usize> = seq_new()
+    dims.push(4)
+    dims.push(8)
+    dims.push(16)
+    var kaps: Seq<f64> = seq_new()
+    kaps.push(0.0 - 0.05)
+    kaps.push(0.02)
+    kaps.push(0.08)
+    let traj = find_d_star(dims, kaps)
+    if !traj.has_crossing { println("FAIL d_star crossing not found"); return 1 }
+    if !near(traj.d_star, 6.8571428571, 1e-6) { println("FAIL d_star interpolation"); return 1 }
+    // The trajectory copies both inputs into its own Seq fields.
+    let tdims: Seq<usize> = traj.dimensions
+    let tkaps: Seq<f64> = traj.kappas
+    let nd: usize = (tdims.len().unwrap("traj dims")) as usize
+    let nk: usize = (tkaps.len().unwrap("traj kappas")) as usize
+    if nd != 3 { println("FAIL trajectory dimension count"); return 1 }
+    if nk != 3 { println("FAIL trajectory kappa count"); return 1 }
+    let last_d: usize = tdims.get(2)
+    let last_k: f64 = tkaps.get(2)
+    if last_d != 16 { println("FAIL trajectory dimension value"); return 1 }
+    if !near(last_k, 0.08, 1e-9) { println("FAIL trajectory kappa value"); return 1 }
+
+    // ------------------------------------------------------------------
+    // The module's own suite, which had never run before: the file did not
+    // compile, so all six cases were dead code.
+    // ------------------------------------------------------------------
+    if !run_epistemic_curvature_tests() {
+        println("FAIL module self-tests")
+        return 1
+    }
+
+    println("GRAPH_EPISTEMIC_CURVATURE_OK")
+    0
+}

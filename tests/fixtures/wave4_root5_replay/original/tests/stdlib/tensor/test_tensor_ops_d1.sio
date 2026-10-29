@@ -1,0 +1,158 @@
+//@ run-pass
+//@ expect-stdout: D1_TENSOR_OPS_PASS
+
+use tensor::types::{
+    Tensor, TensorShape,
+    shape_scalar, shape1, shape2, shape3, shape_eq,
+    tensor_get, tensor_set,
+}
+use tensor::ops::{
+    tensor_zeros, tensor_ones, tensor_full, tensor_scalar, tensor_linspace,
+    tensor_free, tensor_clone,
+    tensor_add, tensor_sub, tensor_mul, tensor_div,
+    tensor_matmul, tensor_sum, tensor_mean,
+    tensor_reshape, tensor_transpose, tensor_permute,
+    tensor_tanh, tensor_sigmoid, tensor_relu, tensor_gelu,
+}
+
+fn d1_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn d1_close(a: f64, b: f64, tol: f64) -> bool {
+    d1_abs(a - b) <= tol
+}
+
+fn assert_close(a: f64, b: f64, tol: f64) with Panic {
+    assert(d1_close(a, b, tol))
+}
+
+fn fill_matrix_2x2(t: &!Tensor, a00: f64, a01: f64, a10: f64, a11: f64) with Mut, Panic {
+    tensor_set(t, 0 as usize, a00)
+    tensor_set(t, 1 as usize, a01)
+    tensor_set(t, 2 as usize, a10)
+    tensor_set(t, 3 as usize, a11)
+}
+
+fn finite_difference_matmul_a00(a: &!Tensor, b: &Tensor, eps: f64) -> f64 with Alloc, Mut, Panic, Div {
+    let saved = tensor_get(a, 0 as usize)
+    tensor_set(a, 0 as usize, saved + eps)
+    var yp = tensor_matmul(a, b)
+    let plus = tensor_get(&yp, 0 as usize)
+    tensor_free(&!yp)
+
+    tensor_set(a, 0 as usize, saved - eps)
+    var ym = tensor_matmul(a, b)
+    let minus = tensor_get(&ym, 0 as usize)
+    tensor_free(&!ym)
+
+    tensor_set(a, 0 as usize, saved)
+    (plus - minus) / (2.0 * eps)
+}
+
+fn test_constructors_and_elementwise() with Alloc, Mut, Panic, Div {
+    var z = tensor_zeros(shape2(2 as usize, 3 as usize))
+    var o = tensor_ones(shape2(2 as usize, 3 as usize))
+    var two = tensor_full(shape_scalar(), 2.0)
+    var b = tensor_add(&o, &two)
+    assert(shape_eq(b.shape, shape2(2 as usize, 3 as usize)))
+    var i: usize = 0 as usize
+    while i < b.shape.len {
+        assert_close(tensor_get(&b, i), 3.0, 1.0e-12)
+        i = i + 1 as usize
+    }
+    var c = tensor_sub(&b, &o)
+    var d = tensor_mul(&c, &two)
+    var e = tensor_div(&d, &two)
+    assert_close(tensor_get(&e, 5 as usize), 2.0, 1.0e-12)
+
+    var line = tensor_linspace(0.0, 1.0, 5 as usize)
+    assert_close(tensor_get(&line, 0 as usize), 0.0, 1.0e-12)
+    assert_close(tensor_get(&line, 4 as usize), 1.0, 1.0e-12)
+
+    var cc = tensor_clone(&e)
+    assert_close(tensor_get(&cc, 3 as usize), 2.0, 1.0e-12)
+
+    tensor_free(&!z)
+    tensor_free(&!o)
+    tensor_free(&!two)
+    tensor_free(&!b)
+    tensor_free(&!c)
+    tensor_free(&!d)
+    tensor_free(&!e)
+    tensor_free(&!line)
+    tensor_free(&!cc)
+}
+
+fn test_matmul_and_jacobian() with Alloc, Mut, Panic, Div {
+    var a = tensor_zeros(shape2(2 as usize, 2 as usize))
+    var b = tensor_zeros(shape2(2 as usize, 2 as usize))
+    fill_matrix_2x2(&!a, 1.0, 2.0, 3.0, 4.0)
+    fill_matrix_2x2(&!b, 5.0, 6.0, 7.0, 8.0)
+    var c = tensor_matmul(&a, &b)
+    assert_close(tensor_get(&c, 0 as usize), 19.0, 1.0e-12)
+    assert_close(tensor_get(&c, 1 as usize), 22.0, 1.0e-12)
+    assert_close(tensor_get(&c, 2 as usize), 43.0, 1.0e-12)
+    assert_close(tensor_get(&c, 3 as usize), 50.0, 1.0e-12)
+
+    let fd = finite_difference_matmul_a00(&!a, &b, 1.0e-5)
+    assert_close(fd, 5.0, 1.0e-6)
+
+    tensor_free(&!a)
+    tensor_free(&!b)
+    tensor_free(&!c)
+}
+
+fn test_reductions_shape_and_activations() with Alloc, Mut, Panic, Div {
+    var o = tensor_ones(shape1(7 as usize))
+    var s = tensor_sum(&o, None, false)
+    var m = tensor_mean(&o, None, false)
+    assert_close(tensor_get(&s, 0 as usize), 7.0, 1.0e-12)
+    assert_close(tensor_get(&m, 0 as usize), 1.0, 1.0e-12)
+
+    var mat = tensor_zeros(shape2(2 as usize, 3 as usize))
+    var i: usize = 0 as usize
+    while i < 6 as usize {
+        tensor_set(&!mat, i, (i + 1 as usize) as f64)
+        i = i + 1 as usize
+    }
+    var reshaped = tensor_reshape(&mat, shape3(1 as usize, 2 as usize, 3 as usize))
+    assert(shape_eq(reshaped.shape, shape3(1 as usize, 2 as usize, 3 as usize)))
+    var tr = tensor_transpose(&mat)
+    assert(shape_eq(tr.shape, shape2(3 as usize, 2 as usize)))
+    assert_close(tensor_get(&tr, 1 as usize), 4.0, 1.0e-12)
+    var axes = [0 as usize; 8]
+    axes[0] = 1 as usize
+    axes[1] = 0 as usize
+    var pm = tensor_permute(&mat, axes)
+    assert(shape_eq(pm.shape, shape2(3 as usize, 2 as usize)))
+
+    var zero = tensor_scalar(0.0)
+    var th = tensor_tanh(&zero)
+    var sig = tensor_sigmoid(&zero)
+    var rel = tensor_relu(&zero)
+    var ge = tensor_gelu(&zero)
+    assert_close(tensor_get(&th, 0 as usize), 0.0, 1.0e-12)
+    assert_close(tensor_get(&sig, 0 as usize), 0.5, 1.0e-8)
+    assert_close(tensor_get(&rel, 0 as usize), 0.0, 1.0e-12)
+    assert_close(tensor_get(&ge, 0 as usize), 0.0, 1.0e-12)
+
+    tensor_free(&!o)
+    tensor_free(&!s)
+    tensor_free(&!m)
+    tensor_free(&!mat)
+    tensor_free(&!reshaped)
+    tensor_free(&!tr)
+    tensor_free(&!pm)
+    tensor_free(&!zero)
+    tensor_free(&!th)
+    tensor_free(&!sig)
+    tensor_free(&!rel)
+    tensor_free(&!ge)
+}
+
+fn main() -> i32 with Alloc, IO, Mut, Panic, Div {
+    test_constructors_and_elementwise()
+    test_matmul_and_jacobian()
+    test_reductions_shape_and_activations()
+    println("D1_TENSOR_OPS_PASS")
+    0
+}
