@@ -225,6 +225,10 @@ rc=0
 timeout 180 g++ -std=c++23 -O2 -Wall -Wextra tests/reference/normalization_into_reference.cpp -o "$out/normalization_into_reference" > "$out/normalization_into_reference.cpp.txt" 2>&1 || rc=$?
 record cpp-compile normalization_into_reference "$rc"
 if [[ $rc == 0 ]]; then compare normalization_into_reference stdlib_scale_normalization_into; fi
+# SIO-93 backport (release/3.0 has no oracle queue: normalization stays inline
+# above): current logarithm boundaries and discriminating guard control.
+LN_BOUNDARY_OUT="$out/math-pure-ln-boundary" bash scripts/stdlib/math_pure_ln_boundary_gate.sh > "$out/math-pure-ln-boundary.log" 2>&1 || rc=$?
+record concordance math-pure-ln-boundary "$rc"
 rc=0
 sha256sum -c "$out/INPUTS.sha256" > "$out/INPUTS.verify.txt" 2>&1 || rc=$?
 record input-hashes unchanged "$rc"

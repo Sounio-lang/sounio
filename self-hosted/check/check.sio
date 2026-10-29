@@ -11672,6 +11672,22 @@ fn checker_fn_sig_visible_inplace(c: *mut Checker, sig_id: i64) -> bool with Mut
     )
 }
 
+// Backport dependency slice of ff1c83d426 (required by the SIO-27 hunk from
+// #3264 in this batch): a bare `write_i64` / `read_i64` is the runtime
+// builtin. Name-only lookup otherwise binds the first private function of
+// that spelling and E175s every later module, including the compiler
+// checking itself.
+fn checker_invisible_native_builtin_sig(c: *mut Checker, name: Name) -> bool with Mut, Panic, Div, Alloc, IO {
+    if !name_is_native_backend_builtin(name) {
+        return false
+    }
+    let sig_id = checker_fn_sigs_find_inplace(c, name)
+    if sig_id < 0 {
+        return false
+    }
+    !checker_fn_sig_visible_inplace(c, sig_id)
+}
+
 fn checker_struct_visible_inplace(c: *mut Checker, struct_idx: i64) -> bool with Mut, Panic, Div, Alloc, IO {
     let vis_kind = (*(*c).structs).entries[struct_idx as usize].visibility_kind
     if vis_kind == VISIBILITY_PUB {
@@ -11942,6 +11958,22 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
         effects_io[0] = 0  // IO (effects.sio: 0=IO)
         checker_check_callee_effects_inplace(c, e.span, effects_io, 1)
         return ty_i64()
+    }
+    // SIO-27 (#2760): attribute IO to the implicit IO builtins, mirroring
+    // lean_single (which asks for the IO bit whenever the name does not
+    // resolve to a user function). A visible declared function with the same
+    // spelling keeps its own signature's effects, checked on the generic
+    // path below. print_int/print_char never reach here (specialised arms).
+    match e.left {
+        Some(io_callee) => {
+            if (*io_callee).kind == ExprKind::ExprIdent && checker_name_is_io_builtin((*io_callee).name) {
+                let io_sig = checker_fn_sigs_find_inplace(c, (*io_callee).name)
+                if io_sig < 0 || checker_invisible_native_builtin_sig(c, (*io_callee).name) {
+                    checker_check_io_builtin_effects_inplace(c, e.span, (*io_callee).name)
+                }
+            }
+        }
+        None => {}
     }
     if call_expr_is_box_new(e.left) {
         return checker_check_box_new_expr_inplace(c, e)
@@ -12764,6 +12796,59 @@ fn checker_check_callee_effects_named_inplace(c: *mut Checker, span: Span, calle
 // println, IO on syscall6, the store-site Mut from #1522): there is no callee name to report.
 fn checker_check_callee_effects_inplace(c: *mut Checker, span: Span, callee_effects: [i64; 8], callee_effect_count: i64) with Mut, IO, Panic, Div, Alloc {
     checker_check_callee_effects_named_inplace(c, span, callee_effects, callee_effect_count, empty_name())
+}
+
+// SIO-27 (#2760): the IO obligation of an implicit IO builtin (print, read_file,
+// ...), mirroring lean_single's observable behaviour. Two scoped differences
+// from the generic callee path:
+//  - Entry point: lean_single accepts IO builtins in a bare `main`, so the
+//    obligation is waived when the enclosing named fn is `main`. The generic
+//    path (user fns with declared effects) keeps its existing behaviour.
+//  - Closures: a builtin IO call inside a closure body is effect-transparent.
+//    The obligation lands on the ENCLOSING named fn (which is what
+//    current_sig_id still points at in that scope): if it declares IO (or is
+//    `main`), the closure keeps its pure inferred type and can flow through a
+//    pure fn-typed parameter; otherwise E035 fires at the call. User-fn
+//    effects inside closures keep the widening path in the named check above.
+fn checker_check_io_builtin_effects_inplace(c: *mut Checker, span: Span, source: Name) with Mut, IO, Panic, Div, Alloc {
+    var effects_io: [i64; 8] = [0; 8]
+    effects_io[0] = 0  // IO (effects.sio: 0=IO)
+    if checker_effect_inference_enabled() {
+        checker_check_callee_effects_inplace(c, span, effects_io, 1)
+        return
+    }
+    if (*c).in_closure_body {
+        // current_sig_id points at the enclosing named fn while a closure body
+        // is checked, but checking an inner closure leaves it at -1
+        // (checker_check_closure_expr_inplace), so fall back to a by-name
+        // lookup of the enclosing fn (current_sig_name is not rewritten there).
+        var owner_idx = (*c).current_sig_id
+        if owner_idx >= 0 {
+            let owner0 = fn_sig_table_get((*c).fn_sigs, owner_idx)
+            if !name_eq(owner0.name, (*c).current_sig_name) { owner_idx = 0 - 1 }
+        }
+        if owner_idx < 0 { owner_idx = checker_fn_sigs_find_inplace(c, (*c).current_sig_name) }
+        if owner_idx >= 0 {
+            let owner = fn_sig_table_get((*c).fn_sigs, owner_idx)
+            if effects_subset(effects_io, 1, owner.effects, owner.effect_count) { return }
+            if name_matches_str4(owner.name, 109, 97, 105, 110) { return }  // main
+        }
+        // Report through the existing named path with the closure flag
+        // cleared, so it fires E035 instead of widening the closure's set.
+        // (A direct (*c).report_effect_error_from here would be a new
+        // by-value bridge; checker_spine_bridges.frozen may only shrink.)
+        let saved_flag = (*c).in_closure_body
+        (*c).in_closure_body = false
+        checker_check_callee_effects_named_inplace(c, span, effects_io, 1, source)
+        (*c).in_closure_body = saved_flag
+        return
+    }
+    if effects_subset(effects_io, 1, (*c).current_effects, (*c).current_effect_count) { return }
+    if (*c).current_sig_id >= 0 {
+        let owner = fn_sig_table_get((*c).fn_sigs, (*c).current_sig_id)
+        if name_eq(owner.name, (*c).current_sig_name) && name_matches_str4(owner.name, 109, 97, 105, 110) { return }  // main
+    }
+    checker_check_callee_effects_named_inplace(c, span, effects_io, 1, source)
 }
 
     fn checker_release_call_arg_borrows_inplace(c: *mut Checker, args: Option<Box<ExprList> >, params: Option<Box<FnParamList> >, call_start_borrows: BorrowEnv) with Mut, Panic, Div, Alloc, IO {
@@ -18253,6 +18338,35 @@ impl Checker {
         self.report_effect_error(span, missing_pair.0, missing_pair.1)
     }
 
+    // SIO-27 (#2760): by-value twin of checker_check_io_builtin_effects_inplace.
+    fn check_io_builtin_effects(self, span: Span, source: Name) -> Checker with Mut, IO, Panic, Div, Alloc {
+        var effects_io: [i64; 8] = [0; 8]
+        effects_io[0] = 0  // IO (effects.sio: 0=IO)
+        if checker_effect_inference_enabled() {
+            return self.check_callee_effects(span, effects_io, 1)
+        }
+        if self.in_closure_body {
+            var owner_idx = self.current_sig_id
+            if owner_idx >= 0 {
+                let owner0 = fn_sig_table_get(self.fn_sigs, owner_idx)
+                if !name_eq(owner0.name, self.current_sig_name) { owner_idx = 0 - 1 }
+            }
+            if owner_idx < 0 { owner_idx = fn_sig_table_find_prefer_module(self.fn_sigs, self.current_sig_name, self.current_module_id) }
+            if owner_idx >= 0 {
+                let owner = fn_sig_table_get(self.fn_sigs, owner_idx)
+                if effects_subset(effects_io, 1, owner.effects, owner.effect_count) { return self }
+                if name_matches_str4(owner.name, 109, 97, 105, 110) { return self }  // main
+            }
+            return self.report_effect_error_from(span, effects_io, 1, source)
+        }
+        if effects_subset(effects_io, 1, self.current_effects, self.current_effect_count) { return self }
+        if self.current_sig_id >= 0 {
+            let owner = fn_sig_table_get(self.fn_sigs, self.current_sig_id)
+            if name_eq(owner.name, self.current_sig_name) && name_matches_str4(owner.name, 109, 97, 105, 110) { return self }  // main
+        }
+        self.report_effect_error_from(span, effects_io, 1, source)
+    }
+
     // --------------------------------------------------------
     // Security hardening: depth and complexity tracking
     // --------------------------------------------------------
@@ -20159,6 +20273,25 @@ fn call_expr_is_builtin_println(opt: Option<Box<Expr> >) -> bool with Mut, Panic
         }
         None => false
     }
+}
+
+// SIO-27 (#2760): the implicit IO builtins. lean_single requires the IO bit
+// for these names whenever they do not resolve to a user function; Madaros
+// bound them as import-unknown with no attributed effects, so a call in a
+// function without `with IO` was never asked for the effect. print_int and
+// print_char are NOT here: their specialised arms already synthesise IO.
+// read_i64/write_i64/read_f64/write_f64 are NOT here either: they are raw
+// pointer accessors, not file IO (lean_single emits them with no IO bit).
+fn checker_name_is_io_builtin(n: Name) -> bool with Mut, Panic, Div, Alloc, IO {
+    if name_matches_str5(n, 112, 114, 105, 110, 116) { return true }  // print
+    if name_matches_str7(n, 112, 114, 105, 110, 116, 108, 110) { return true }  // println
+    if name_matches_str9(n, 112, 114, 105, 110, 116, 95, 102, 54, 52) { return true }  // print_f64
+    if name_matches_str9(n, 114, 101, 97, 100, 95, 102, 105, 108, 101) { return true }  // read_file
+    if name_matches_str10(n, 119, 114, 105, 116, 101, 95, 102, 105, 108, 101) { return true }  // write_file
+    if name_matches_str11(n, 119, 114, 105, 116, 101, 95, 98, 121, 116, 101, 115) { return true }  // write_bytes
+    if name_matches_str11(n, 97, 112, 112, 101, 110, 100, 95, 102, 105, 108, 101) { return true }  // append_file
+    if name_matches_str9(n, 102, 105, 108, 101, 95, 115, 105, 122, 101) { return true }  // file_size
+    false
 }
 
 fn call_expr_is_builtin_lift_knowledge(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Div, Alloc, IO {
@@ -28115,6 +28248,17 @@ impl Checker {
             return self.check_contest_witness_expr(e, witness_kind)
         }
         var c = self
+        // SIO-27 (#2760): same IO attribution as the in-place spine.
+        match e.left {
+            Some(io_callee_bv) => {
+                if (*io_callee_bv).kind == ExprKind::ExprIdent && checker_name_is_io_builtin((*io_callee_bv).name) {
+                    if fn_sig_table_find_prefer_module(c.fn_sigs, (*io_callee_bv).name, c.current_module_id) < 0 {
+                        c = c.check_io_builtin_effects(e.span, (*io_callee_bv).name)
+                    }
+                }
+            }
+            None => {}
+        }
         if multitest_effect_enabled(c.current_effects, c.current_effect_count) {
             let callee_name = multitest_call_name(e.left)
             if multitest_is_stat_test_name(callee_name) {
