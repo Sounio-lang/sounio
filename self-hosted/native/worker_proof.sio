@@ -890,7 +890,7 @@ var WORKER_CFG_NEXT_A:[i64;65536]=[0;65536]
 var WORKER_CFG_NEXT_B:[i64;65536]=[0;65536]
 var WORKER_CFG_DEFINES:[i64;65536]=[0;65536]
 var WORKER_CFG_QUEUE:[i64;262144]=[0;262144]
-fn worker_cfg_defined(function:&IrFunction,reg:i64,use_at:i64)->bool with Mut,Panic,Div {
+fn worker_cfg_defined_mode(function:&IrFunction,reg:i64,use_at:i64,definition_mode:i64)->bool with Mut,Panic,Div {
     let count=(*function).instr_count
     let structure_only=use_at==(0-1)
     if count<=0 || count>65536 || (!structure_only && (reg<0 || reg>=(*function).reg_count || use_at<0 || use_at>=count)) {return false}
@@ -904,7 +904,7 @@ fn worker_cfg_defined(function:&IrFunction,reg:i64,use_at:i64)->bool with Mut,Pa
         WORKER_CFG_NEXT_A[at as usize]=if at+1<count {at+1} else {0-1}
         WORKER_CFG_NEXT_B[at as usize]=0-1
         let op=instruction.op
-        WORKER_CFG_DEFINES[at as usize]=if instruction.dst==reg && (op==IrOpcode::IrCopy || op==IrOpcode::IrLoadFnRef || op==IrOpcode::IrCall || op==IrOpcode::IrUnaryOp) {1} else {0}
+        WORKER_CFG_DEFINES[at as usize]=if instruction.dst==reg && (op==IrOpcode::IrCopy || op==IrOpcode::IrLoadFnRef || op==IrOpcode::IrCall || op==IrOpcode::IrUnaryOp || (definition_mode==1 && op==IrOpcode::IrLoadImm && instruction.imm_i64==0) || (definition_mode==2 && (op==IrOpcode::IrLoadImm || op==IrOpcode::IrLoadFloat || op==IrOpcode::IrLoadBool || op==IrOpcode::IrBinOp || op==IrOpcode::IrIntToFloat || op==IrOpcode::IrFloatToInt))) {1} else {0}
         if op==IrOpcode::IrLabel {
             let label=instruction.label_id
             if label<0 || label>=65536 {return false}
@@ -964,7 +964,11 @@ fn worker_cfg_defined(function:&IrFunction,reg:i64,use_at:i64)->bool with Mut,Pa
     }
     if structure_only {return true}
     let state=WORKER_CFG_IN[use_at as usize]
+    if definition_mode!=0 {return state==2}
     state==0 || state==2
+}
+fn worker_cfg_defined(function:&IrFunction,reg:i64,use_at:i64)->bool with Mut,Panic,Div {
+    worker_cfg_defined_mode(function,reg,use_at,0)
 }
 fn worker_identity_intent(token:i64)->Option<*mut WorkerLowerIntent> with Mut,Panic,Div,Alloc {
     var cursor=WORKER_LOWER_INTENTS
@@ -1154,6 +1158,77 @@ fn worker_region_result_unused(function:&IrFunction,reg:i64,definition:i64)->boo
     }
     true
 }
+// A lowerer-elided region has an ordinary integer-zero register, not a dynamic
+// region token. Prove its one definition and every CFG path; scalar tags or
+// envelope flags alone are never evidence of this special inert value.
+fn worker_region_zero_token(function:&IrFunction,reg:i64,use_at:i64)->bool with Mut,Panic,Div {
+    if reg<0 || reg>=(*function).reg_count || (*function).reg_count>4096 || (*function).param_count<0 || (*function).param_count>64 || ir_float_bits_get(function,reg) {return false}
+    var p:i64=0
+    while p<(*function).param_count {if (*function).param_regs[p as usize]==reg {return false};p=p+1}
+    if (*function).instr_count<=0 || (*function).instr_count>65536 {return false}
+    var definitions:i64=0
+    var at:i64=0
+    while at<(*function).instr_count {
+        var instruction=ir_nop()
+        if ir_region_get(&(*function).region,at,&!instruction)!=0 {return false}
+        if instruction.dst==reg {
+            definitions=definitions+1
+            if definitions!=1 || instruction.op!=IrOpcode::IrLoadImm || instruction.imm_i64!=0 || instruction.imm_flags!=0 || instruction.arg_count!=0 {return false}
+        }
+        at=at+1
+    }
+    definitions==1 && worker_cfg_defined_mode(function,reg,use_at,1)
+}
+fn worker_region_frame_token(module:&IrModule,function:&IrFunction,reg:i64,use_at:i64)->bool with Mut,Panic,Div {
+    if reg<0 || reg>=(*function).reg_count || (*function).param_count<0 || (*function).param_count>64 || ir_float_bits_get(function,reg) {return false}
+    var p:i64=0
+    while p<(*function).param_count {if (*function).param_regs[p as usize]==reg {return false};p=p+1}
+    var definitions:i64=0
+    var at:i64=0
+    while at<(*function).instr_count {
+        var instruction=ir_nop()
+        if ir_region_get(&(*function).region,at,&!instruction)!=0 {return false}
+        if instruction.dst==reg {
+            definitions=definitions+1
+            let target=instruction.fn_id
+            if definitions!=1 || instruction.op!=IrOpcode::IrCall || instruction.imm_flags!=64066 || instruction.arg_count!=0 || target<0 || target>=(*module).fn_count || target>=16384 {return false}
+            let called=ir_fn_get(module,target)
+            if called.instr_count!=0 || called.param_count!=0 || called.returns_float!=0 || WORKER_BACKEND_BUILTIN[target as usize]!=60 {return false}
+        }
+        at=at+1
+    }
+    definitions==1 && worker_cfg_defined_mode(function,reg,use_at,2)
+}
+// Eliding an enter changes its Token4 to zero. A branch on that token may skip
+// only the canonical Unit cleanup and the matching return, never body work.
+fn worker_region_scalar_exit_guard(module:&IrModule,function:&IrFunction,at:i64,depth:i64)->bool with Mut,Panic,Div {
+    if at<0 || at>(*function).instr_count-4 {return false}
+    var branch=ir_nop();var cleanup=ir_nop();var label=ir_nop();var returned=ir_nop()
+    if ir_region_get(&(*function).region,at,&!branch)!=0 || ir_region_get(&(*function).region,at+1,&!cleanup)!=0 || ir_region_get(&(*function).region,at+2,&!label)!=0 || ir_region_get(&(*function).region,at+3,&!returned)!=0 {return false}
+    if branch.op!=IrOpcode::IrBranchFalse || cleanup.op!=IrOpcode::IrCall || cleanup.imm_flags!=64067 || cleanup.arg_count!=2 || label.op!=IrOpcode::IrLabel || label.label_id!=branch.label_id || returned.op!=IrOpcode::IrReturn {return false}
+    let target=cleanup.fn_id
+    if target<0 || target>=(*module).fn_count || target>=16384 {return false}
+    let called=ir_fn_get(module,target)
+    if called.instr_count!=0 || called.param_count!=2 || called.returns_float!=0 || WORKER_BACKEND_BUILTIN[target as usize]!=67 {return false}
+    let slot=ir_region_slot_r((*function).region,at+1)
+    let token=ir_arena_arg_at(slot,0)
+    let value=ir_arena_arg_at(slot,1)
+    if token!=branch.src1 || value!=returned.src1 || worker_closure_value(depth,token,(*function).reg_count)!=4 || worker_closure_value(depth,value,(*function).reg_count)!=1 || !worker_region_result_unused(function,cleanup.dst,at+1) {return false}
+    if !worker_region_frame_token(module,function,token,at) || !worker_cfg_defined_mode(function,value,at,2) || !worker_cfg_defined_mode(function,value,at+3,2) {return false}
+    var i:i64=0
+    while i<(*function).instr_count {
+        var instruction=ir_nop()
+        if ir_region_get(&(*function).region,i,&!instruction)!=0 {return false}
+        if instruction.arg_count<0 || instruction.arg_count>64 {return false}
+        var used=instruction.src1==token || instruction.src2==token
+        var arg:i64=0
+        let current=ir_region_slot_r((*function).region,i)
+        while arg<instruction.arg_count {if ir_arena_arg_at(current,arg)==token {used=true};arg=arg+1}
+        if used && i!=at && i!=at+1 {return false}
+        i=i+1
+    }
+    true
+}
 fn worker_closure_callback(module:&IrModule,fi:i64,epoch:i64,depth:i64)->bool with Mut,Panic,Div,Alloc {
     if depth>=64 || fi<0 || fi>=(*module).fn_count || fi>=16384 {return worker_closure_fail(101,fi,0-1)}
     let state=WORKER_CLOSURE_STATE[fi as usize]
@@ -1260,7 +1335,11 @@ fn worker_closure_callback(module:&IrModule,fi:i64,epoch:i64,depth:i64)->bool wi
             if source==2 && !worker_cfg_defined(&function,instruction.src1,at) {return worker_closure_fail(138,fi,at)}
         } else if op==IrOpcode::IrBinOp {
             if worker_closure_value(depth,instruction.src1,function.reg_count)!=1 || worker_closure_value(depth,instruction.src2,function.reg_count)!=1 {return worker_closure_fail(115,fi,at)}
-        } else if op==IrOpcode::IrIntToFloat || op==IrOpcode::IrFloatToInt || op==IrOpcode::IrBranchTrue || op==IrOpcode::IrBranchFalse || op==IrOpcode::IrReturn {
+        } else if op==IrOpcode::IrBranchFalse {
+            let value=worker_closure_value(depth,instruction.src1,function.reg_count)
+            if value==4 {if !worker_region_scalar_exit_guard(module,&function,at,depth) {return worker_closure_fail(141,fi,at)}}
+            else if value!=1 {return worker_closure_fail(116,fi,at)}
+        } else if op==IrOpcode::IrIntToFloat || op==IrOpcode::IrFloatToInt || op==IrOpcode::IrBranchTrue || op==IrOpcode::IrReturn {
             if worker_closure_value(depth,instruction.src1,function.reg_count)!=1 {return worker_closure_fail(116,fi,at)}
         } else if op==IrOpcode::IrStorePtr {
             if worker_closure_value(depth,instruction.src1,function.reg_count)!=2 || worker_closure_value(depth,instruction.src2,function.reg_count)!=1 {return worker_closure_fail(117,fi,at)}
@@ -1284,7 +1363,7 @@ fn worker_closure_callback(module:&IrModule,fi:i64,epoch:i64,depth:i64)->bool wi
                 if builtin==60 && (instruction.imm_flags==64066 || instruction.imm_flags==64076) && instruction.arg_count==0 {
                     // Compiler-owned region tokens cannot escape or enter scalar arithmetic.
                 } else if builtin==67 && (instruction.imm_flags==64067 || instruction.imm_flags==64077) && instruction.arg_count==2 {
-                    if worker_closure_value(depth,ir_arena_arg_at(slot,0),function.reg_count)!=4 || worker_closure_value(depth,ir_arena_arg_at(slot,1),function.reg_count)!=1 {return worker_closure_fail(119,fi,at)}
+                    if (worker_closure_value(depth,ir_arena_arg_at(slot,0),function.reg_count)!=4 && !worker_region_zero_token(&function,ir_arena_arg_at(slot,0),at)) || worker_closure_value(depth,ir_arena_arg_at(slot,1),function.reg_count)!=1 {return worker_closure_fail(119,fi,at)}
                 } else if builtin==1101 && instruction.imm_flags==64078 && instruction.arg_count==2 {
                     let value=worker_closure_value(depth,ir_arena_arg_at(slot,1),function.reg_count)
                     if worker_closure_value(depth,ir_arena_arg_at(slot,0),function.reg_count)!=4 || (value!=1 && value!=2) {return worker_closure_fail(131,fi,at)}

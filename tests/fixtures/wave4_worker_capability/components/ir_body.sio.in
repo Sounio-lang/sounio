@@ -100,6 +100,7 @@ pub fn worker_ir_component()->i32 with Mut,Panic,Div,Alloc,IO {
     if !worker_validate_constructor_identities(&(*module)) {print("identity ");print_int(worker_identity_error());return 1}
     if !worker_validate_capability_flow(&(*module)) {print("capflow ");print_int(worker_capability_error());return 1}
     if !worker_validate_callback_closures(&(*module)) {print("closure ");print_int(worker_closure_error());return 1}
+    if worker_probe_region_envelopes(&!(*module))!=20 {return 1}
     var refused:i64=0
     // The checked source binding stays fixed while final IR is corrupted.
     var allocation=ir_nop();allocation.op=IrOpcode::IrAlloc;allocation.dst=2
@@ -383,3 +384,80 @@ fn worker_probe_layout()->bool with Mut,Panic,Div,Alloc,IO {
     print("WORKER_METADATA_LAYOUT_OK stride=128 binding_bytes=64 intent_bytes=72 tail_canaries=30 all_fields_and_links=1\n")
     true
 }
+// Private IR mutations: no negative callback is emitted or executed.
+use ir::ir::{ir_branch_false,ir_float_bits_set}
+fn worker_probe_region_model(module:&!IrModule,enter:i64,exit:i64,mode:i64) with Mut,Panic,Div,Alloc {
+ var f=Box::new(ir_empty_function());(*f).name=make_name("callback");(*f).param_count=1;(*f).param_regs[0]=0;(*f).reg_count=9
+ let allocated=ir_function_alloc_region(&!(*f))
+ if mode==2 || mode==12 {worker_probe_emit(&!(*f),ir_branch_true(0,8))}
+ if mode>=10 {
+  var call=ir_call(1,enter,make_name("__rgn_enter"),None,0);call.imm_flags=64066
+  worker_probe_emit(&!(*f),call)
+  if mode==19 {worker_probe_emit(&!(*f),call)}
+ } else if mode==4 {
+  worker_probe_emit(&!(*f),ir_unaryop(1,UnaryOp::OpRefMut,0))
+ } else {
+  worker_probe_emit(&!(*f),ir_load_imm(1,if mode==1 {7} else {0}))
+ }
+ if mode==2 || mode==12 {worker_probe_emit(&!(*f),ir_label(8))}
+ if mode==3 {worker_probe_emit(&!(*f),ir_load_imm(1,0))}
+ if mode==7 {let floated=ir_float_bits_set(&!(*f),1)}
+ worker_probe_emit(&!(*f),ir_load_imm(2,7))
+ if mode==5 {worker_probe_emit(&!(*f),ir_unaryop(3,UnaryOp::OpRefMut,0))}
+ else {worker_probe_emit(&!(*f),ir_binop(3,0,BinaryOp::OpAdd,2))}
+ if mode==11 {worker_probe_emit(&!(*f),ir_unaryop(6,UnaryOp::OpRefMut,0))}
+ if mode==18 {worker_probe_emit(&!(*f),ir_copy(7,1))}
+ if mode==20 {worker_probe_emit(&!(*f),ir_binop(7,1,BinaryOp::OpAdd,0))}
+ if mode==14 {
+  var another=ir_call(5,enter,make_name("__rgn_enter"),None,0);another.imm_flags=64066;worker_probe_emit(&!(*f),another)
+ }
+ let args=Some(Box::new(ir_reg_list_cons(if mode==14 {5} else {1},Some(Box::new(ir_reg_list_single(3))))))
+ var cleanup=ir_call(4,exit,make_name("__rgn_exit_scalar"),args,2);cleanup.imm_flags=64067
+ if mode==17 {worker_probe_emit(&!(*f),cleanup)}
+ if mode==21 {worker_probe_emit(&!(*f),ir_branch_true(1,7))}
+ else {worker_probe_emit(&!(*f),ir_branch_false(1,if mode==13 {9} else {7}))}
+ if mode==11 {worker_probe_emit(&!(*f),ir_store_ptr(6,3))}
+ if mode!=17 {worker_probe_emit(&!(*f),cleanup)}
+ worker_probe_emit(&!(*f),ir_label(7))
+ worker_probe_emit(&!(*f),ir_return(if mode==6 || mode==16 {4} else {if mode==15 || mode==5 {0} else {3}}))
+ if mode==13 {worker_probe_emit(&!(*f),ir_label(9));worker_probe_emit(&!(*f),ir_return(3))}
+ ir_module_fn_set(module,0,*f)
+}
+fn worker_probe_region_envelopes(module:&!IrModule)->i64 with Mut,Panic,Div,Alloc,IO {
+ let saved=ir_fn_get(&(*module),0)
+ let count=(*module).fn_count
+ let key=(*module).functions as i64
+ var enter=ir_empty_function();enter.name=make_name("__rgn_enter")
+ var exit=ir_empty_function();exit.name=make_name("__rgn_exit_scalar");exit.param_count=2
+ ir_module_fn_set(module,count,enter);ir_module_fn_set(module,count+1,exit);(*module).fn_count=count+2
+ worker_backend_note_builtin(key,count,60);worker_backend_note_builtin(key,count+1,67)
+ if !WORKER_PROBE_FRAME_BEFORE {
+  worker_probe_region_model(module,count,count+1,0)
+  if !worker_validate_callback_closures(&(*module)) {print("ZERO_ENVELOPE_REFUSED ");print_int(worker_closure_error());print("\n");return 0}
+ }
+ worker_probe_region_model(module,count,count+1,10)
+ if !worker_validate_callback_closures(&(*module)) {print("FRAME_ENVELOPE_REFUSED ");print_int(worker_closure_error());print("\n");return 0}
+ var refused:i64=0
+ var mode:i64=1
+ while mode<=7 {
+  worker_probe_region_model(module,count,count+1,mode)
+  if worker_validate_callback_closures(&(*module)) {print("ZERO_MUTANT_ACCEPTED ");print_int(mode);print("\n");return 0}
+  print("ZERO_MUTANT_REFUSED ");print_int(mode);print(" reason ");print_int(worker_closure_error());print("\n")
+  refused=refused+1;mode=mode+1
+ }
+ mode=11
+ while mode<=21 {
+  worker_probe_region_model(module,count,count+1,mode)
+  if worker_validate_callback_closures(&(*module)) {print("FRAME_MUTANT_ACCEPTED ");print_int(mode);print("\n");return 0}
+  print("FRAME_MUTANT_REFUSED ");print_int(mode);print(" reason ");print_int(worker_closure_error());print("\n")
+  refused=refused+1;mode=mode+1
+ }
+ ir_module_fn_set(module,0,saved);(*module).fn_count=count
+ WORKER_BACKEND_BUILTIN[count as usize]=0;WORKER_BACKEND_BUILTIN[(count+1) as usize]=0
+ if refused!=18 {return 0}
+ println("WORKER_REGION_ENVELOPES_OK zero_unique_dominant=1 frame_token_canonical=1 mutations_refused=18")
+ 20
+}
+
+var WORKER_PROBE_FRAME_BEFORE:bool=false
+pub fn worker_ir_frame_component()->i32 with Mut,Panic,Div,Alloc,IO {WORKER_PROBE_FRAME_BEFORE=true;worker_ir_component()}
