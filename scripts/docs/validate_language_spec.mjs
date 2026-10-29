@@ -23,8 +23,28 @@ function parseTable(text, header, label) {
   });
 }
 
+function stripHtmlComments(text) {
+  let current = text;
+  let previous;
+  do {
+    previous = current;
+    current = current.replace(/<!--[\s\S]*?-->/g, '');
+  } while (current !== previous);
+  return current;
+}
+
+function stripHtmlTags(text) {
+  let current = text;
+  let previous;
+  do {
+    previous = current;
+    current = current.replace(/<[^>]*>/g, '');
+  } while (current !== previous);
+  return current;
+}
+
 function markdownProse(text) {
-  return text.replace(/<!--[\s\S]*?-->/g, '').replace(/^ {0,3}(`{3,}|~{3,})[^\n]*\n[\s\S]*?^ {0,3}\1[ \t]*$/gm, '');
+  return stripHtmlComments(text).replace(/^ {0,3}(`{3,}|~{3,})[^\n]*\n[\s\S]*?^ {0,3}\1[ \t]*$/gm, '');
 }
 
 function ruleDeclarations(body) {
@@ -164,7 +184,7 @@ function headingIds(text) {
   const ids = new Set();
   const occurrences = new Map();
   for (const match of markdownProse(text).matchAll(/^#{1,6}\s+(.+)$/gm)) {
-    const slug = match[1].trim().toLowerCase().replace(/<[^>]*>/g, '').replace(/[^\p{L}\p{N}\s_-]/gu, '').replace(/\s/g, '-');
+    const slug = stripHtmlTags(match[1].trim().toLowerCase()).replace(/[^\p{L}\p{N}\s_-]/gu, '').replace(/\s/g, '-');
     const occurrence = occurrences.get(slug) ?? 0;
     occurrences.set(slug, occurrence + 1);
     ids.add(occurrence ? `${slug}-${occurrence}` : slug);

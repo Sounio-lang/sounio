@@ -47,7 +47,8 @@ function syncRepoMetadata(content, topic, relPath) {
 }
 
 function formatFrontmatterValue(value) {
-  return `"${String(value).replace(/"/g, '\\"')}"`;
+  const escaped = String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  return `"${escaped}"`;
 }
 
 function syncFrontmatter(content, topic) {

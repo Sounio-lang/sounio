@@ -28,8 +28,9 @@ src = src.replace(/<!--\s*docs:meta[\s\S]*?-->\s*/g, '')
 
 // ---------- inline ----------
 const escapeTex = (s) => s
-  .replace(/\\/g, '\\textbackslash{}')
+  .replace(/\\/g, '\\\\')
   .replace(/([&%$#_{}])/g, '\\$1')
+  .replace(/\\\\/g, '\\textbackslash\\{\\}')
   .replace(/~/g, '\\textasciitilde{}')
   .replace(/\^/g, '\\textasciicircum{}');
 

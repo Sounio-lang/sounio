@@ -146,7 +146,8 @@ def main():
         fin.write(requests)
         stdin_path = fin.name
 
-    stdout_path = tempfile.mktemp(prefix="snio_out_")
+    with tempfile.NamedTemporaryFile(prefix="snio_out_", delete=False) as fout:
+        stdout_path = fout.name
 
     print(f"[smoke] souc: {souc}")
     print(f"[smoke] serve: {serve_sio}")
