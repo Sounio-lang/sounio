@@ -79,7 +79,13 @@ cd "$ROOT_DIR"
 # parsing it (#2966; scripts/ci/madaros_arena_size_gate.sh). Both rungs are
 # compiled under the same value, so gen2 and gen3 stay comparable. The mapping
 # is MAP_NORESERVE: only the pages the compile touches are committed.
-export SOUNIO_NV2_ARENA_GIB="${SOUNIO_NV2_ARENA_GIB:-64}"
+# 64 GiB stopped gen3 at arena full (rc 181) after 116 of 130 modules on
+# 7d462afa8 (proof 40947411774), with cross-module DCE working (11,375
+# functions). gen2 is a Madaros-built compiler and measures ~11% more peak RSS
+# than the gen2 of 67e20eadf on the same input (stats_inference_forest: 3.66 vs
+# 3.31 GB) while the lean_single-built gen1s match (3.69 vs 3.68 GB). The
+# workflow provides 72 GiB of swap for it.
+export SOUNIO_NV2_ARENA_GIB="${SOUNIO_NV2_ARENA_GIB:-128}"
 # Likewise the handle table: 4,194,304 handles ran out in gen3 after it had
 # parsed about 3 MB of its own source (#2966). The load base is the handle
 # capacity, and native_v2_write_min_elf64_to_file refuses (rc 29) when
