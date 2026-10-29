@@ -14191,7 +14191,7 @@ impl Lowerer {
                 // fields -- the residual the size cap forces, never worse
                 // than the behaviour this replaces.
                 if slot_count <= 16 || self.struct_type_has_copyable_aggregate(st) {
-                    return self.emit_struct_value_copy_budgeted(reg, st, slot_count)
+                    return self.emit_place_struct_value_copy(reg, st, slot_count)
                 }
                 return (self, reg)
             }
@@ -14274,6 +14274,53 @@ impl Lowerer {
             si = si + 1
         }
         false
+    }
+
+    // SIO-278: the budgeted copy for the deref/field path, with the cost
+    // estimated from direct layout reads. emit_struct_value_copy_budgeted
+    // prices the deep copy with struct_deep_copy_cost, which re-scans the
+    // layout registry for every slot; at deref/field `let` frequency that
+    // pricing dominated gen2 build time. This estimate reads each level's
+    // layout entries once. It only ever decides deep-vs-flat, and the flat
+    // copy is the documented floor, so a rough estimate is safe.
+    fn emit_place_struct_value_copy(self, src_reg: i64, type_name: Name, slot_count: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        if self.struct_type_has_copyable_aggregate(type_name) {
+            let deep_room = IR_MAX_INSTRS - self.struct_deep_copy_instr_headroom() - self.current_func.instr_count
+            if self.place_deep_copy_cost(type_name, slot_count, 0) <= deep_room {
+                return self.emit_struct_value_copy_deep(src_reg, type_name, slot_count, 0)
+            }
+        }
+        self.emit_struct_value_copy(src_reg, type_name, slot_count)
+    }
+
+    fn place_deep_copy_cost(self, type_name: Name, slot_count: i64, depth: i64) -> i64 with Mut, Panic, Div, Alloc {
+        var total: i64 = 1
+        var si: i64 = 0
+        while si < (*self.struct_layouts).count {
+            if ir_name_eq((*self.struct_layouts).entries[si as usize].type_name, type_name) {
+                var fi: i64 = 0
+                let fc = (*self.struct_layouts).entries[si as usize].field_count
+                while fi < fc && fi < 128 {
+                    let entry = (*self.struct_layouts).entries[si as usize].fields[fi as usize]
+                    if entry.index >= 0 && entry.index < slot_count {
+                        total = total + 2
+                        if entry.word_scalar_array_len > 0 {
+                            total = total + self.struct_deep_copy_guard_cost() + self.struct_deep_copy_array_cost()
+                        } else if depth < self.struct_deep_copy_max_depth() {
+                            let nested_name = ir_name_at(entry.named_type_name_id)
+                            let nested_slots = self.nested_struct_field_slot_count(nested_name)
+                            if nested_slots > 0 {
+                                total = total + self.struct_deep_copy_guard_cost() + self.place_deep_copy_cost(nested_name, nested_slots, depth + 1)
+                            }
+                        }
+                    }
+                    fi = fi + 1
+                }
+                return total
+            }
+            si = si + 1
+        }
+        total
     }
 
     // (word-scalar element count, element is float) of a fixed-array FIELD
