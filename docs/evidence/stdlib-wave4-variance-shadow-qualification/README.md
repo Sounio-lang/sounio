@@ -39,7 +39,7 @@ No Sounio compiler runs in that mode.
 --language-components additionally requires SHADOW_AUTHORIZATION JSON with
 authorized_by=root, raw/source paths, raw_ready path and hash, raw compiler hash,
 patch hash, exact candidate lower hash, terminal BUILD_STATUS0 root proof and
-full source/SDK manifests verified before/after (see ADMISSION-02.md). This is an execution record of root
+full source/SDK manifests verified before/after (see ADMISSION-03.md; revision02 is historical). This is an execution record of root
 authorization, not a mechanism for granting it. The harness never applies patches.
 The anticipated candidate lower hash is 291d815f4fec96b9c149df0ed8606bc2ae70228807ea80bc43b4f2fe34b185af;
 a different reviewed candidate requires a visible manifest revision.

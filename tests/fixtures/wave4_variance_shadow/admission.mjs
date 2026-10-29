@@ -7,31 +7,41 @@ const bad=s=>{throw Error(s)};
 const hash=s=>typeof s==='string'&&/^[0-9a-f]{64}$/.test(s);
 function regular(p){if(!fs.lstatSync(p).isFile()||fs.lstatSync(p).isSymbolicLink())bad('regular file required: '+p)}
 function pinned(row){if(!row||!path.isAbsolute(row.file)||!hash(row.sha256))bad('invalid pinned input');regular(row.file);if(digest(row.file)!==row.sha256)bad('pinned input changed: '+row.file);return fs.readFileSync(row.file,'utf8')}
-function census(root,base=''){
- const out=[];
- for(const e of fs.readdirSync(path.join(root,base),{withFileTypes:true})){
-  const rel=base?base+'/'+e.name:e.name,full=path.join(root,rel);
-  if(e.isSymbolicLink())bad('sealed tree symlink: '+rel);
-  if(e.isDirectory())out.push(...census(root,rel));
-  else if(e.isFile())out.push(rel);
-  else bad('unsupported sealed tree node: '+rel);
+const modeOf=p=>fs.lstatSync(p).mode&0o7777;
+const hashBytes=b=>crypto.createHash('sha256').update(b).digest('hex');
+export function treeManifest(root){
+ if(!path.isAbsolute(root)||!fs.lstatSync(root).isDirectory()||fs.lstatSync(root).isSymbolicLink())bad('sealed directory root required');
+ const nodes=[];
+ function visit(base=''){
+  for(const e of fs.readdirSync(path.join(root,base),{withFileTypes:true})){
+   const file=base?base+'/'+e.name:e.name,p=path.join(root,file),st=fs.lstatSync(p),mode=modeOf(p);
+   if(st.isSymbolicLink()){
+    const target=fs.readlinkSync(p,{encoding:'buffer'});
+    nodes.push({file,type:'symlink',mode,bytes:target.length,sha256:hashBytes(target),target_base64:target.toString('base64')});
+   }else if(st.isDirectory()){nodes.push({file,type:'directory',mode});visit(file)}
+   else if(st.isFile())nodes.push({file,type:'file',mode,bytes:st.size,sha256:digest(p)});
+   else bad('unsupported sealed tree node: '+file);
+  }
  }
- return out.sort();
+ visit();nodes.sort((x,y)=>x.file<y.file?-1:x.file>y.file?1:0);
+ return {schema:'sounio.sealed-tree.v2',root_mode:modeOf(root),nodes};
 }
 export function verifyTree(root,manifest){
- if(!path.isAbsolute(root)||!fs.lstatSync(root).isDirectory()||fs.lstatSync(root).isSymbolicLink())bad('sealed root required');
- const sealed=pinned(manifest);
- const parsed=JSON.parse(sealed);
- if(parsed.schema!=='sounio.sealed-tree.v1'||!Array.isArray(parsed.files)||parsed.files.length===0)bad('nonempty full tree manifest required');
- const names=parsed.files.map(r=>r.file);
+ const parsed=JSON.parse(pinned(manifest));
+ if(parsed.schema!=='sounio.sealed-tree.v2'||!Array.isArray(parsed.nodes)||parsed.nodes.length===0)bad('nonempty full tree manifest v2 required');
+ const names=parsed.nodes.map(r=>r.file);
  if(names.some((s,i)=>typeof s!=='string'||!s||s.startsWith('/')||s.split('/').some(x=>!x||x==='.'||x==='..')||s.includes('\\')||(i>0&&names[i-1]>=s)))bad('manifest order/path/duplicate');
- const actual=census(root);
- if(JSON.stringify(actual)!==JSON.stringify(names))bad('sealed tree census mismatch');
- for(const row of parsed.files){
-  const p=path.join(root,row.file);regular(p);
-  if(!Number.isSafeInteger(row.bytes)||row.bytes<0||fs.statSync(p).size!==row.bytes||!hash(row.sha256)||digest(p)!==row.sha256)bad('sealed tree content mismatch: '+row.file);
+ const actual=treeManifest(root);
+ if(parsed.root_mode!==actual.root_mode||parsed.nodes.length!==actual.nodes.length)bad('sealed tree root/census mismatch');
+ for(let i=0;i<parsed.nodes.length;i++){
+  const want=parsed.nodes[i],got=actual.nodes[i];
+  if(want.file!==got.file||want.type!==got.type||want.mode!==got.mode)bad('sealed tree node/type/mode mismatch: '+got.file);
+  if(got.type==='file'&&(want.bytes!==got.bytes||want.sha256!==got.sha256))bad('sealed file content mismatch: '+got.file);
+  if(got.type==='symlink'&&(want.bytes!==got.bytes||want.sha256!==got.sha256||want.target_base64!==got.target_base64))bad('sealed symlink literal mismatch: '+got.file);
+  const keys=Object.keys(want).sort().join(',');
+  if(keys!==Object.keys(got).sort().join(','))bad('sealed manifest unknown/missing fields: '+got.file);
  }
- return {root,manifest_sha256:manifest.sha256,files:names.length};
+ return {root,manifest_sha256:manifest.sha256,nodes:actual.nodes.length};
 }
 export function explicitDiagnostics(text){
  const clean=text.replace(/\x1b\[[0-9;]*m/g,'');
@@ -64,6 +74,15 @@ export function admit(auth,manifest){
     proof.raw!==auth.raw||proof.raw_sha256!==auth.raw_sha256||
     proof.source_manifest_sha256!==auth.source_manifest.sha256||
     proof.sdk_manifest_sha256!==auth.sdk_manifest.sha256)bad('terminal root graph proof mismatch');
+ pinned(proof.adapter);
+ if(!Array.isArray(proof.original_inputs)||proof.original_inputs.length===0)bad('pinned original build inputs required');
+ const roles=new Set();
+ for(const input of proof.original_inputs){
+  if(typeof input.role!=='string'||!/^[A-Z][A-Z0-9_]{0,63}$/.test(input.role)||roles.has(input.role))bad('invalid/duplicate original input role');
+  roles.add(input.role);pinned(input);
+ }
+ for(const role of ['BUILD_STATUS_SOURCE','FINAL_SOURCE_VERIFY','FINAL_SDK_VERIFY','ENDED_SOURCE'])
+  if(!roles.has(role))bad('missing original input role: '+role);
  const build=pinned(proof.build_status);
  if(!/^0\n?$/.test(build))bad('terminal BUILD_STATUS0 required');
  const ended=pinned(proof.ended_utc);
@@ -80,6 +99,8 @@ export function captureAdmission(auth,manifest,dest,label){
   SOURCE_MANIFEST:auth.source_manifest,SDK_MANIFEST:auth.sdk_manifest,ROOT_PROOF:auth.root_proof
  }))fs.copyFileSync(row.file,path.join(target,name));
  const proof=JSON.parse(fs.readFileSync(auth.root_proof.file,'utf8'));
+ fs.copyFileSync(proof.adapter.file,path.join(target,'ROOT_ADAPTER'));
+ for(const input of proof.original_inputs)fs.copyFileSync(input.file,path.join(target,'ORIGINAL_'+input.role));
  for(const[name,row]of [['BUILD_STATUS',proof.build_status],['ENDED_UTC',proof.ended_utc],...proof.final_guards.map((g,i)=>['FINAL_GUARD_'+i,g])])
   fs.copyFileSync(row.file,path.join(target,name));
  fs.writeFileSync(path.join(target,'RECEIPT.json'),JSON.stringify(receipt,null,2)+'\n');

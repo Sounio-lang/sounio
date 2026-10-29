@@ -1,7 +1,7 @@
 // Synthetic filesystem metadata controls only: no compiler or ELF is executed.
 import fs from 'node:fs';
 import path from 'node:path';
-import {admit,captureAdmission,digest,successfulCompilerResult,elfIdentity} from './admission.mjs';
+import {admit,captureAdmission,digest,successfulCompilerResult,elfIdentity,treeManifest} from './admission.mjs';
 if(!process.env.SLURM_JOB_ID)throw Error('metadata controls require Slurm receipt');
 const dest=path.resolve(process.argv[2]??'');fs.mkdirSync(dest,{recursive:false});
 const PATCH='127b070e8a0e3e9fae8891383797a6cd25cd13094429f5f19b42d8dbb73f74a6';
@@ -9,17 +9,14 @@ const results=[];
 function write(p,s){fs.mkdirSync(path.dirname(p),{recursive:true});fs.writeFileSync(p,s)}
 function json(p,v){write(p,JSON.stringify(v,null,2)+'\n');return {file:p,sha256:digest(p)}}
 function pin(p){return {file:p,sha256:digest(p)}}
-function tree(root,out){
- const files=[];
- function visit(d,base=''){for(const e of fs.readdirSync(d,{withFileTypes:true})){const file=base?base+'/'+e.name:e.name,p=path.join(d,e.name);if(e.isDirectory())visit(p,file);else files.push({file,bytes:fs.statSync(p).size,sha256:digest(p)})}}
- visit(root);files.sort((a,b)=>a.file<b.file?-1:a.file>b.file?1:0);
- return json(out,{schema:'sounio.sealed-tree.v1',files});
-}
+function tree(root,out){return json(out,treeManifest(root))}
 function setup(name){
  const d=path.join(dest,name),source=path.join(d,'source'),sdk=path.join(d,'sdk'),raw=path.join(d,'raw');
  write(path.join(source,'self-hosted/ir/lower.sio'),'SYNTHETIC metadata lower; never compiled\n');
  write(path.join(source,'stdlib/mod.sio'),'SYNTHETIC source graph dependency\n');
  write(path.join(sdk,'runtime.cpp'),'SYNTHETIC SDK dependency\n');
+ fs.symlinkSync('../missing-lean-target',path.join(source,'dangling-link'));
+ fs.mkdirSync(path.join(source,'empty-directory'));
  write(raw,Buffer.from([0x7f,0x45,0x4c,0x46,0])); // metadata stub, never executable
  const auth={authorized_by:'root',patch_sha256:PATCH,raw,raw_sha256:digest(raw),source,sdk,
  lower_sha256:digest(path.join(source,'self-hosted/ir/lower.sio')),
@@ -32,6 +29,13 @@ function setup(name){
  source_manifest_sha256:auth.source_manifest.sha256,sdk_manifest_sha256:auth.sdk_manifest.sha256,
  build_status:pin(path.join(d,'BUILD_STATUS')),ended_utc:pin(path.join(d,'ENDED_UTC')),
  final_guards:[pin(path.join(d,'FINAL_GUARD'))]};
+ write(path.join(d,'ADAPTER.txt'),'SYNTHETIC adapter metadata, never a real build receipt\n');
+ proof.adapter=pin(path.join(d,'ADAPTER.txt'));
+ proof.original_inputs=[];
+ for(const role of ['BUILD_STATUS_SOURCE','FINAL_SOURCE_VERIFY','FINAL_SDK_VERIFY','ENDED_SOURCE']){
+  const f=path.join(d,role+'.txt');write(f,'SYNTHETIC original receipt '+role+'\n');
+  proof.original_inputs.push({role,...pin(f)});
+ }
  auth.root_proof=json(path.join(d,'ROOT_PROOF.json'),proof);
  return {d,auth,proof,manifest:{patch_sha256:PATCH,candidate_lower_sha256:auth.lower_sha256}};
 }
@@ -59,13 +63,27 @@ check('sdk-mutated',x=>write(path.join(x.auth.sdk,'runtime.cpp'),'changed\n'));
 check('sdk-extra',x=>write(path.join(x.auth.sdk,'extra.hpp'),'extra\n'));
 check('source-symlink',x=>{const f=path.join(x.auth.source,'stdlib/mod.sio');fs.unlinkSync(f);fs.symlinkSync(x.auth.raw,f)});
 check('sdk-manifest-duplicate',x=>{
- const j=JSON.parse(fs.readFileSync(x.auth.sdk_manifest.file));j.files.push(j.files[0]);
+ const j=JSON.parse(fs.readFileSync(x.auth.sdk_manifest.file));j.nodes.push(j.nodes[0]);
  x.auth.sdk_manifest=json(x.auth.sdk_manifest.file,j);x.proof.sdk_manifest_sha256=x.auth.sdk_manifest.sha256;reseal(x)});
 check('guard-nonzero',x=>{write(x.proof.final_guards[0].file,'1\n');x.proof.final_guards[0]=pin(x.proof.final_guards[0].file);reseal(x)});
 check('guard-empty',x=>{x.proof.final_guards=[];reseal(x)});
 check('lower-mismatch',x=>{x.auth.lower_sha256='0'.repeat(64)});
 check('raw-mutated',x=>write(x.auth.raw,'changed'));
 check('raw-ready-symlink',x=>{fs.renameSync(x.auth.raw_ready,x.auth.raw_ready+'.target');fs.symlinkSync(x.auth.raw_ready+'.target',x.auth.raw_ready)});
+check('symlink-target-changed',x=>{const p=path.join(x.auth.source,'dangling-link');fs.unlinkSync(p);fs.symlinkSync('../different-missing',p)});
+check('symlink-added',x=>fs.symlinkSync('../missing',path.join(x.auth.sdk,'extra-link')));
+check('symlink-removed',x=>fs.unlinkSync(path.join(x.auth.source,'dangling-link')));
+check('file-chmod',x=>fs.chmodSync(path.join(x.auth.sdk,'runtime.cpp'),0o700));
+check('directory-chmod',x=>fs.chmodSync(path.join(x.auth.source,'empty-directory'),0o700));
+check('directory-added',x=>fs.mkdirSync(path.join(x.auth.source,'extra-empty')));
+check('directory-removed',x=>fs.rmdirSync(path.join(x.auth.source,'empty-directory')));
+check('root-chmod',x=>fs.chmodSync(x.auth.source,0o700));
+check('symlink-manifest-mode',x=>{
+ const j=JSON.parse(fs.readFileSync(x.auth.source_manifest.file));j.nodes.find(r=>r.type==='symlink').mode=0;
+ x.auth.source_manifest=json(x.auth.source_manifest.file,j);x.proof.source_manifest_sha256=x.auth.source_manifest.sha256;reseal(x)});
+check('original-input-mutated',x=>write(x.proof.original_inputs[0].file,'changed'));
+check('original-input-missing-role',x=>{x.proof.original_inputs.pop();reseal(x)});
+check('adapter-mutated',x=>write(x.proof.adapter.file,'changed'));
 const x=setup('before-after');
 fs.mkdirSync(path.join(x.d,'receipts'));
 captureAdmission(x.auth,x.manifest,path.join(x.d,'receipts'),'before');

@@ -1,3 +1,5 @@
+Historical revision02: symlink policy below is superseded by ADMISSION-03.md.
+
 # Admission revision 02: metadata only
 
 The first commit df75a6a5a1 and its19790 C++23 receipt remain unchanged history.

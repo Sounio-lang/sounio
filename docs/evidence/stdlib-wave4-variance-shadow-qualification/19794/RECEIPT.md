@@ -1,0 +1,1 @@
+Slurm19794 COMPLETED0/1s/15556K:42 synthetic metadata-only controls. Valid complete graph includes an unchanged dangling symlink and empty directory. Target/entry/mode drift and original-receipt/adapter mutations are refused. No compiler, adapter or ELF execution; no numerical rerun. Source guards before/after agree.
