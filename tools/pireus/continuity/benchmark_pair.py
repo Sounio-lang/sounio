@@ -48,6 +48,25 @@ with tarfile.open(fileobj=sys.stdin.buffer,mode='r|') as archive:
   for name in ["gpu_probe.py","gpu_benchmark.py"]:
    remote(pod,"python3","-c","from pathlib import Path;import sys;p=Path(sys.argv[1]);p.write_bytes(sys.stdin.buffer.read())","/scratch/pireus/runtime/"+name,stdin=(HERE/name).read_bytes())
 
+RUNS_ROOT="/scratch/pireus/runs"
+
+def remote_identity(root):
+ # The cell manifest is byte-identical across runs prepared from one commit, so
+ # it cannot name the worker directory alone. A nonce minted once per run cell,
+ # journaled and never rewritten, separates runs; reruns read it back unchanged.
+ path=root/"remote-identity.json"
+ manifest_sha256=digest((root/"manifest.json").read_bytes())
+ if not path.exists():
+  atomic(path,encoded(dict(schema=1,manifest_sha256=manifest_sha256,run=str(root.resolve()),nonce=os.urandom(16).hex())))
+ value=json.loads(path.read_text())
+ if value.get("manifest_sha256")!=manifest_sha256:raise ValueError("remote identity belongs to another cell manifest")
+ event(root,"remote-identity",path)
+ return value
+
+def remote_root_for(root):
+ identity=remote_identity(root)
+ return RUNS_ROOT+"/cycle-"+identity["manifest_sha256"][:20]+"-"+digest(encoded(identity))[:16]
+
 def run_gpu(root,remote_root,phase):
  log=root/(phase+".log")
  with log.open("ab") as output:
@@ -149,10 +168,10 @@ def main():
   atomic(root/"material-deduplication.json",encoded(mapping));event(root,"material-deduplication",root/"material-deduplication.json")
  gpu_manifest=dict(schema=1,fixtures_sha256=digest(fixture),candidates=controls+candidates)
  atomic(root/"gpu-manifest.json",encoded(gpu_manifest));event(root,"gpu-manifest",root/"gpu-manifest.json")
- remote_root="/scratch/pireus/runs/cycle-"+digest((root/"manifest.json").read_bytes())[:20]
+ remote_root=remote_root_for(root)
  print(json.dumps({"host_preflight":check_pair()}),flush=True)
  pods=workers()
- names=["gpu-manifest.json","numeric-fixtures.jsonl",*[item["ptx"] for item in controls+candidates]]
+ names=["remote-identity.json","gpu-manifest.json","numeric-fixtures.jsonl",*[item["ptx"] for item in controls+candidates]]
  stage(pods,root,remote_root,names)
  if not (root/"probe.complete.json").exists():
   if not observe_available(pods,remote_root,"probe"):run_gpu(root,remote_root,"probe")

@@ -6,7 +6,10 @@ import tempfile
 import unittest
 from unittest.mock import patch
 from types import SimpleNamespace
-from benchmark_pair import deduplicate_candidates
+import os
+import subprocess
+import benchmark_pair
+from benchmark_pair import deduplicate_candidates, observe_available, remote_root_for, stage, NODES
 from cycle import HERE, encoded, digest
 from pilot import settled_job_state, cells, paired_completion, launch_cell_stage, validate_checks, REQUIRED_CHECKS, summarize
 from tokenized_cycle import pack_offline
@@ -99,6 +102,83 @@ class PilotControls(unittest.TestCase):
         for budget in [0, 7, 9, 31, 33, 288]:
             with self.assertRaisesRegex(ValueError, "8- or 32-proposal"):
                 pack_offline(Path("/never-accessed"), dict(transport="sglang-offline-token-ids", budget=budget))
+
+
+class RunScopedRemoteRoot(unittest.TestCase):
+    """pilot-20261029a reused pilot-20261024g's worker directory: identical cell
+    manifests named the same cycle-* root, so probe/timing were observed instead
+    of measured and the write-once stage refused a different gpu-manifest."""
+
+    def make_cell(self, base, run, gpu_manifest):
+        root = base / run / "round-0-deterministic"
+        root.mkdir(parents=True)
+        (root / "manifest.json").write_bytes(encoded(dict(schema=1, condition="deterministic")))
+        (root / "gpu-manifest.json").write_text(gpu_manifest)
+        return root
+
+    def worker(self, scratch):
+        (scratch / "runtime").mkdir(parents=True)
+        def mapped(path):
+            return str(scratch / Path(path).relative_to("/scratch/pireus"))
+        def fake_remote(pod, *args, stdin=None):
+            self.assertEqual(args[:2], ("python3", "-c"))
+            program = args[2].replace("os.chown(root,1000,1000)", "None")
+            return subprocess.check_output([sys.executable, "-c", program, mapped(args[3])], input=stdin,
+                                           stderr=subprocess.DEVNULL)
+        def fake_test(command, **kwargs):
+            self.assertEqual(command[-3:-1], ["test", "-f"])
+            return SimpleNamespace(returncode=0 if os.path.isfile(mapped(command[-1])) else 1)
+        return mapped, fake_remote, fake_test
+
+    def test_identical_manifests_in_two_runs_never_share_a_remote_root(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            a = self.make_cell(base, "pilot-a", "{}")
+            b = self.make_cell(base, "pilot-b", "{}")
+            self.assertEqual((a / "manifest.json").read_bytes(), (b / "manifest.json").read_bytes())
+            first = remote_root_for(a)
+            self.assertNotEqual(first, remote_root_for(b))
+            self.assertTrue(first.startswith("/scratch/pireus/runs/cycle-"
+                                             + digest((a / "manifest.json").read_bytes())[:20] + "-"))
+            identity = (a / "remote-identity.json").read_bytes()
+            journal = (a / "journal.jsonl").read_bytes()
+            self.assertEqual(remote_root_for(a), first)
+            self.assertEqual((a / "remote-identity.json").read_bytes(), identity)
+            self.assertEqual((a / "journal.jsonl").read_bytes(), journal)
+            # A run dir recreated at the same path is a different run: a fresh nonce.
+            (base / "pilot-a").rename(base / "pilot-a.previous")
+            reused = self.make_cell(base, "pilot-a", "{}")
+            self.assertEqual(reused, a)
+            self.assertNotEqual(remote_root_for(reused), first)
+            (a / "manifest.json").write_bytes(encoded(dict(schema=1, condition="other")))
+            with self.assertRaisesRegex(ValueError, "another cell manifest"):
+                remote_root_for(a)
+
+    def test_observations_and_staging_never_cross_runs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            mapped, fake_remote, fake_test = self.worker(base / "worker")
+            a = self.make_cell(base, "pilot-a", '{"candidates":"a"}')
+            b = self.make_cell(base, "pilot-b", '{"candidates":"b"}')
+            pods = ["pod-0", "pod-1"]
+            root_a, root_b = remote_root_for(a), remote_root_for(b)
+            names = ["remote-identity.json", "gpu-manifest.json"]
+            with patch("benchmark_pair.remote", side_effect=fake_remote):
+                stage(pods, a, root_a, names)
+                stage(pods, a, root_a, names)
+                stage(pods, b, root_b, names)
+                (a / "gpu-manifest.json").write_text('{"candidates":"changed"}')
+                with self.assertRaises(subprocess.CalledProcessError):
+                    stage(pods, a, root_a, names)
+            for node in NODES:
+                for prefix in ("observed-", "timings-"):
+                    inventory = Path(mapped(root_a)) / (prefix + node) / "inventory.json"
+                    inventory.parent.mkdir(parents=True)
+                    inventory.write_text("{}")
+            with patch("benchmark_pair.subprocess.run", side_effect=fake_test):
+                for phase in ("probe", "timing"):
+                    self.assertTrue(observe_available(pods, root_a, phase))
+                    self.assertFalse(observe_available(pods, root_b, phase))
 
 
 class SettledJobState(unittest.TestCase):
