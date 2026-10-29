@@ -236,7 +236,7 @@ dir/moe_q4k/layer{i}_down.bin
 ```
 
 - If sidecars or MoE cfg are missing, attn still loads and that layer uses dense FFN fallback.
-- Default demo model dir: `/workspace/llm-models/mixtral-moe` (CLI arg overrides).
+- Default demo model dir: `/workspace/llm-models/tiny-mixtral-moe` (CLI arg overrides).
 
 ### L4 synthetic multi-layer (Task 4)
 
@@ -250,9 +250,9 @@ Demo: `examples/llama_moe_multilayer_demo.sio` (`layers=2`, `hidden=256`, `moe_i
 
 Stdout ends with `LLAMA MOE MULTILAYER DONE`. Log on workspace: `/tmp/moe_multilayer_task4_l4.log`.
 
-### Real Mixtral L4 (blocker)
+### Tiny Mixtral fixture + real Mixtral
 
-- `/workspace/llm-models/mixtral-moe` and pre-packed `moe_q4k/` sidecars are **not** on the workspace (only smaller safetensor trees such as tiny-random-Llama).
-- Implemented honest paths: `MIXTRAL DIR MISSING` and dense fallback on tiny-random dir both print `LLAMA MIXTRAL FORWARD DONE` and exit 0 without claiming full Mixtral MoE on GPU.
-- Unblock: deploy Mixtral weights plus sidecar layout above, then re-run `examples/llama_mixtral_forward_demo.sio` on L4 with `last_moe_layers_ok > 0` when packs and GPU mmid are ready.
+- Fixture generator: `scripts/llm/gen_tiny_mixtral_moe_fixture.py` writes `/workspace/llm-models/tiny-mixtral-moe` (config MoE keys, attn safetensors, `moe_q4k/layer{i}_*.bin`).
+- Demo default dir: that fixture. L4 smoke expects `last_moe_layers_ok > 0` when packs and GPU mmid are ready.
+- Full HuggingFace Mixtral weights remain optional; missing dir still prints `MIXTRAL DIR MISSING` and exits 0.
 
