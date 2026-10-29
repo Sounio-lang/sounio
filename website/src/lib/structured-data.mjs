@@ -60,6 +60,23 @@ export function softwareSourceCode() {
   };
 }
 
+/** Stable id for the language page. Not the About person ids, and not a software node. */
+export const COMPUTER_LANGUAGE_ID = 'https://www.souniolang.org/language/#computer-language';
+
+export function computerLanguage({ description } = {}) {
+  const node = {
+    '@context': 'https://schema.org',
+    '@type': 'ComputerLanguage',
+    '@id': COMPUTER_LANGUAGE_ID,
+    name: 'Sounio',
+    alternateName: FORMER_LANGUAGE_NAME,
+    sameAs: [FORMER_RELEASE_URL],
+    url: 'https://www.souniolang.org/language/',
+  };
+  if (typeof description === 'string' && description.length > 0) node.description = description;
+  return node;
+}
+
 export function techArticle({
   headline,
   description,
