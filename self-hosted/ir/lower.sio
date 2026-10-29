@@ -5214,6 +5214,21 @@ fn lower_opt_type_fixed_array_len(ty_opt: &Option<Box<TypeExpr>>) -> i64 {
     }
 }
 
+// SIO-311: the type is spelled `[T]` with no size expression -- an open,
+// growable array, as opposed to `[T; N]` (Some size, literal or not).
+fn lower_opt_type_is_dynamic_array(ty_opt: &Option<Box<TypeExpr>>) -> bool {
+    match *ty_opt {
+        Some(ty) => {
+            if (*ty).kind != TypeExprKind::TypeArray { return false }
+            match (*ty).array_size {
+                None => true,
+                Some(_) => false,
+            }
+        }
+        None => false,
+    }
+}
+
 fn lower_name_is_direct_word_scalar_type(n: Name) -> bool with Panic, Div {
     // Native-v2 local arrays use one boxed 8-byte slot per primitive element,
     // including narrow integers. Keep this list explicit so structs, nested
@@ -29052,7 +29067,13 @@ impl Lowerer {
         if raw_pointee.len > 0 && lower_struct_layout_index_of(&(*lo.struct_layouts), raw_pointee) >= 0 {
             lo = lo.bind_local_struct_type(s.name, raw_pointee, false)
         }
-        if fixed_array_len >= 0 {
+        if lower_opt_type_is_dynamic_array(&s.ty) {
+            // SIO-311: an annotated `[T]` stays dynamic even when its
+            // initializer is a literal of known length; recording that
+            // length here would mark the local as a fixed array and hide
+            // it from the .push path.
+            lo = lo.bind_local_fixed_array_len(s.name, 0 - 1)
+        } else if fixed_array_len >= 0 {
             lo = lo.bind_local_fixed_array_len(s.name, fixed_array_len)
         }
         if fixed_array_word_scalar {
@@ -36771,6 +36792,23 @@ impl Lowerer {
                                 }
                                 return (lo.emit(len_instr), dst)
                             }
+                            // SIO-311: `.len()` on an array held in a struct
+                            // field (`b.items.len()`). Evaluating the field
+                            // access yields the array handle, exactly what
+                            // ir_array_len reads; the ident-only path above
+                            // otherwise fell through and invented a body-less
+                            // `len`. The fn_id guard keeps a user-defined
+                            // `len` method on the field's type on the generic
+                            // path.
+                            if (*recv).kind == ExprKind::ExprFieldAccess && self.lower_method_call_fn_id_ref(e) < 0 {
+                                let pair_b = self.lower_expr_ref(&(*recv))
+                                var lo = pair_b.0
+                                let base_reg = pair_b.1
+                                let pair_d = lo.fresh_reg()
+                                lo = pair_d.0
+                                let dst = pair_d.1
+                                return (lo.emit(ir_array_len(dst, base_reg)), dst)
+                            }
                         }
                         None => {}
                     }
@@ -36783,6 +36821,48 @@ impl Lowerer {
                     lowerer_mark_error(&! lo_bad)
                     return (lo_bad, IR_INVALID_REG)
                 }
+            }
+        }
+        // SIO-311: `.push(v)` on a dynamic array ([T]). The checker admits
+        // it only there (fixed arrays keep E019); the append is
+        // __sounio_seq_push, which grows the shared aggregate layout
+        // (flags = logical length, payload_size = capacity) and retargets
+        // the handle-table entry when it grows, so every alias observes
+        // the append. Only an ident receiver is recognised here -- the
+        // local tables are what tell an open array apart (element type in
+        // struct_types with array_lens < 0); other receiver shapes keep
+        // the generic path below.
+        if ir_name_eq(e.name, make_name("push")) && !ir_name_eq(recv_type, make_name("Seq")) {
+            match e.left {
+                Some(recv) => {
+                    if (*recv).kind == ExprKind::ExprIdent
+                        && !self.lookup_local_is_ref((*recv).name)
+                        && self.lookup_local_fixed_array_len((*recv).name) < 0
+                        && (self.lookup_local_struct_type_is_array_elem((*recv).name)
+                            || self.lookup_local_array_copy_word_scalar((*recv).name)
+                            || self.lookup_local_array_elem_float((*recv).name)) {
+                        let pair_b_push = self.lower_expr_ref(&(*recv))
+                        var lo_push = pair_b_push.0
+                        let base_reg_push = pair_b_push.1
+                        let pair_args_push: LowerExprArgsResult = lo_push.lower_expr_args_raw_ref(&e.args)
+                        lo_push = pair_args_push.lowerer
+                        if pair_args_push.count != 1 {
+                            lowerer_mark_hard_error(&! lo_push)
+                            return (lo_push, IR_INVALID_REG)
+                        }
+                        let call_name_push = make_name("__sounio_seq_push")
+                        let fn_id_push = lowerer_find_or_add_fn_id_mut(&! lo_push, call_name_push)
+                        let call_args_push: Option<Box<IrRegList>> = Some(Box::new(ir_reg_list_cons(
+                            base_reg_push,
+                            Some(Box::new(pair_args_push.regs)),
+                        )))
+                        let pair_d_push = lo_push.fresh_reg()
+                        lo_push = pair_d_push.0
+                        let dst_push = pair_d_push.1
+                        return (lo_push.emit(ir_call(dst_push, fn_id_push, call_name_push, call_args_push, 2)), dst_push)
+                    }
+                }
+                None => {}
             }
         }
         // Impl methods are lowered as mangled free functions (ir_mangle_method_name).
@@ -36875,6 +36955,36 @@ impl Lowerer {
                 lowerer_mark_hard_error(&! lo_bad_seq_method)
                 return (lo_bad_seq_method, IR_INVALID_REG)
             }
+        }
+        // SIO-311: `.push(v)` on a dynamic array through a non-ident
+        // receiver (a field, a deref, a call result). When no impl method
+        // named `push` is registered for the receiver type, a bare push
+        // call can only be the dynamic-array append the checker admitted
+        // (Seq is handled above; every other receiver keeps E019 there),
+        // so emit __sounio_seq_push on the evaluated handle. Evaluating
+        // the receiver yields the array handle in each of those shapes,
+        // and the intrinsic retargets its handle-table entry when it
+        // grows, so the append is observed through the place itself.
+        if ir_name_eq(e.name, make_name("push")) && self.lower_method_call_fn_id_ref(e) < 0 {
+            let pair_b_push = self.lower_opt_expr_ref(&e.left)
+            var lo_push = pair_b_push.0
+            let base_reg_push = pair_b_push.1
+            let pair_args_push: LowerExprArgsResult = lo_push.lower_expr_args_raw_ref(&e.args)
+            lo_push = pair_args_push.lowerer
+            if pair_args_push.count != 1 {
+                lowerer_mark_hard_error(&! lo_push)
+                return (lo_push, IR_INVALID_REG)
+            }
+            let call_name_push = make_name("__sounio_seq_push")
+            let fn_id_push = lowerer_find_or_add_fn_id_mut(&! lo_push, call_name_push)
+            let call_args_push: Option<Box<IrRegList>> = Some(Box::new(ir_reg_list_cons(
+                base_reg_push,
+                Some(Box::new(pair_args_push.regs)),
+            )))
+            let pair_d_push = lo_push.fresh_reg()
+            lo_push = pair_d_push.0
+            let dst_push = pair_d_push.1
+            return (lo_push.emit(ir_call(dst_push, fn_id_push, call_name_push, call_args_push, 2)), dst_push)
         }
         let call_name = if recv_type.len > 0 { ir_mangle_method_name(recv_type, e.name) } else { e.name }
         if recv_type.len == 0 && lower_recv_trace_enabled() {
