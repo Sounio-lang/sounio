@@ -14,7 +14,7 @@ scalar_kind=1 only says int/bool representation. It is also set for integer Call
 
 The positive bit is seeded only for a direct, unqualified builtin word-integer parameter or a declaration whose initializer is already in the closed grammar. Parameter type arguments, references, Knowledge/refinement types, bool/char/f64, wide types and unknown types do not seed it. Declarations capture RHS provenance before binding a same-name local. All three local-slot writers reset/initialize the new field, including direct parameter setup, so slot reuse cannot inherit an old bit.
 
-An Ident is accepted only with positive provenance AND scalar_kind=1 AND no local/base variance, no matching FO row, no reference/global/raw/array/aggregate/Box/Option/tuple/function-pointer/closure or Knowledge metadata. kn_value_float must be exactly -1; legacy unknown -2 is refused. Pending variance/FO/closure facts and FO inline context prevent certification.
+An Ident is accepted only with positive provenance AND scalar_kind=1 AND no local/base variance, no matching FO row, no reference/global/raw/array/aggregate/Box/Option/tuple/function-pointer/closure or Knowledge metadata. kn_value_float must be exactly -1; legacy unknown -2 is refused. Pending variance/FO/closure facts and FO inline context prevent certification. Revision02 also rejects expr_wide_bits_ref(e)>64 before literal/identifier rules.
 
 Only integer literals, certified Idents, unary negation/bit-not and closed +,-,*,bitwise/shift trees qualify. Calls, field/index access, casts, f64, division/remainder, bool operations and unknown nodes are not certified by type or by a floating-point equality test.
 
@@ -35,3 +35,5 @@ FO inline rejection uses the existing FO_INLINE_FRAME_CLASH escape rather than h
 ## Approval boundary
 
 The foreign v13 claim on lower.sio remains respected. Review the positive-origin signature, conservative scope rule, metadata cloning/reset and diagnostic allocation before any isolated application. The complete matrix in CONTROLS.md is required before a new full compiler bootstrap or elision acceptance. A basic enum-or-pattern syntax probe was checked by the user-required MCP; it is unrelated to this uncompiled patch and is not counted as a candidate gate.
+
+Revision02 records the safe lower_note_error(site, ir_empty_name()) call before the invalid-context transient flag, so compilation refusal survives dependency reset. Its exact latch/reset and wide/suffix controls remain pending as described in REVISION-02.md.

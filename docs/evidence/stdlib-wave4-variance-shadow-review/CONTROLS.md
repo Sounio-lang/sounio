@@ -20,3 +20,21 @@ All actual source/component/native/scientific gates must run under Slurm with ex
 | WIDE | Original projection and imported program, exact literal/dyadic/hoist cores and seeds; FULL schema accepted before claims; C++23 mustdefs and 14-case oracle, mutant controls, LOOP1 ELISION0/1. Slow61B remains separate and unchanged. |
 
 Additional suspected reset/residual/declaration issues described in RISKS.md need separate repros and are not part of this patch.
+
+## Revision 02 gates: durable latch before dependency reset
+
+Run this against the actual source/component after isolated application, before a full bootstrap:
+
+1. Begin a fresh compilation error scope and reset transient hard-error state. Use a deliberately invalid current-function context; in a native safety control, current_func may be unreadable while current_func_loaded is false.
+2. Invoke the new refusal entry. Before reset, assert the semantic marker, positive error total/site and durable compile-scope latch. No current_func dereference or crash may occur.
+3. Call lower_hard_error_reset (and separately the next-dependency/new-lowerer route). Its transient flag and total may reset; lower_hard_error_pending/lower_had_error_with_hard must still report failure through the active compilation latch. No ELF may be published.
+4. Mutant omitting lower_note_error must fail that survival control. A subsequent fresh compile-scope begin plus transient reset must permit a clean control, proving no cross-compilation poisoning.
+5. Preserve the separate probe and FO-inline rollback controls; the invalid-context durable path must not replace their explicitly scoped behavior.
+
+## Revision 02 gates: wide types and suffix representation
+
+- Declared i128 and u128 parameters and aliases: origin seeding denied, expr-wide guard denied, no closed-integer optimization.
+- Explicit casts to i128/u128, including unary/binary trees around them: classifier denied before literal/identifier rules; ordinary i64 controls remain eligible.
+- Parse literal suffix forms such as 1i128/1u128 and record token, AST kind, type and width. If unsupported, keep the exact parse failure as unsupported coverage; do not count it as a semantic negative.
+- Exercise accepted word suffix controls and f64/f128 suffix-looking forms to ensure no lexical/type information is silently laundered through ExprIntLit. expr_wide_bits_ref(IntLit)==0 alone is not evidence of word width. A representation gap blocks that claim until the producer/source-shape contract is resolved.
+- Wrong-guard mutants (drop expr_wide check, admit i128 in parameter origin, or infer zero from kind1 alone) must be refused by controls using the real producer.
