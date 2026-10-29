@@ -14276,6 +14276,127 @@ impl Lowerer {
         false
     }
 
+    // SIO-278: flat value copy of a struct handle as a runtime LOOP over
+    // the slots -- ir_index_get/set address the same header-plus-words
+    // layout ir_field_get/set do -- so the emitted code is O(1) in the
+    // slot count instead of ~2 unrolled instructions per slot. Even gated
+    // to structs with a reachable aggregate or <= 16 slots, the unrolled
+    // copy pushed gen2 to code_bytes_needed=147171366 > 134217728. The
+    // descriptor records the slot count (ir_alloc_array) so a
+    // bounds-checked index stays in range. Scalar f64 fields additionally
+    // get an unrolled field_get/field_set pair: the native codegen tracks
+    // a field's float class per (register, index) from field stores, and
+    // the raw word loop would leave the fresh handle's f64 fields
+    // classified as int for later field reads.
+    fn emit_struct_value_copy_loop(self, src_reg: i64, type_name: Name, slot_count: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        let pair_dst = self.fresh_reg()
+        var lo = pair_dst.0
+        let dst_reg = pair_dst.1
+        lo = lo.emit(ir_alloc_array(dst_reg, lo.aggregate_storage_bytes(slot_count), slot_count))
+        if slot_count <= 0 {
+            return (lo, dst_reg)
+        }
+        let pair_idx = lo.emit_i64_const(0)
+        lo = pair_idx.0
+        let idx_reg = pair_idx.1
+        let pair_limit = lo.emit_i64_const(slot_count)
+        lo = pair_limit.0
+        let limit_reg = pair_limit.1
+        let pair_one = lo.emit_i64_const(1)
+        lo = pair_one.0
+        let one_reg = pair_one.1
+        let pair_top = lo.fresh_label()
+        lo = pair_top.0
+        let top_label = pair_top.1
+        let pair_end = lo.fresh_label()
+        lo = pair_end.0
+        let end_label = pair_end.1
+        lo = lo.emit(ir_label(top_label))
+        let pair_cond = lo.fresh_reg()
+        lo = pair_cond.0
+        let cond_reg = pair_cond.1
+        lo = lo.emit(ir_binop(cond_reg, idx_reg, BinaryOp::OpLt, limit_reg))
+        lo = lo.emit(ir_branch_false(cond_reg, end_label))
+        let pair_elem = lo.fresh_reg()
+        lo = pair_elem.0
+        let elem_reg = pair_elem.1
+        lo = lo.emit(ir_index_get(elem_reg, src_reg, idx_reg))
+        lo = lo.emit(ir_index_set(dst_reg, idx_reg, elem_reg))
+        let pair_next = lo.fresh_reg()
+        lo = pair_next.0
+        let next_reg = pair_next.1
+        lo = lo.emit(ir_binop(next_reg, idx_reg, BinaryOp::OpAdd, one_reg))
+        lo = lo.emit(ir_copy(idx_reg, next_reg))
+        lo = lo.emit(ir_jump(top_label))
+        lo = lo.emit(ir_label(end_label))
+        var i: i64 = 0
+        while i < slot_count && i < 128 {
+            let pos = lo.struct_layout_field_pos(type_name, i)
+            if lo.struct_layout_pos_is_float(pos) == 1 {
+                let fname = lo.struct_layout_pos_field_name(pos)
+                let pair_slot = lo.fresh_reg()
+                lo = pair_slot.0
+                let slot_reg = pair_slot.1
+                lo = lo.emit(ir_field_get(slot_reg, src_reg, i, fname))
+                lo = lo.emit(ir_field_set(dst_reg, i, slot_reg, fname))
+            }
+            i = i + 1
+        }
+        (lo, dst_reg)
+    }
+
+    // SIO-278: emit_struct_value_copy_deep with the flat part as the loop
+    // above; only the aggregate fields stay unrolled. The field handle is
+    // read back out of the fresh copy and replaced under the same
+    // null-handle guard the unrolled deep copy uses.
+    fn emit_struct_value_copy_deep_loop(self, src_reg: i64, type_name: Name, slot_count: i64, depth: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        let flat_pair = self.emit_struct_value_copy_loop(src_reg, type_name, slot_count)
+        var lo = flat_pair.0
+        let dst_reg = flat_pair.1
+        var i: i64 = 0
+        while i < slot_count && i < 128 {
+            let pos = lo.struct_layout_field_pos(type_name, i)
+            let fname = lo.struct_layout_pos_field_name(pos)
+            let arr_len = lo.struct_layout_pos_array_len(pos)
+            var nested_name = ir_empty_name()
+            var nested_slots: i64 = 0 - 1
+            if arr_len <= 0 && depth < lo.struct_deep_copy_max_depth() {
+                nested_name = lo.struct_layout_pos_named_type(pos)
+                nested_slots = lo.nested_struct_field_slot_count(nested_name)
+            }
+            if arr_len > 0 || nested_slots > 0 {
+                let pair_slot = lo.fresh_reg()
+                lo = pair_slot.0
+                let slot_reg = pair_slot.1
+                lo = lo.emit(ir_field_get(slot_reg, dst_reg, i, fname))
+                let pair_zero = lo.emit_i64_const(0)
+                lo = pair_zero.0
+                let zero_reg = pair_zero.1
+                let pair_cond = lo.fresh_reg()
+                lo = pair_cond.0
+                let cond_reg = pair_cond.1
+                lo = lo.emit(ir_binop(cond_reg, slot_reg, BinaryOp::OpNe, zero_reg))
+                let pair_skip = lo.fresh_label()
+                lo = pair_skip.0
+                let skip_label = pair_skip.1
+                lo = lo.emit(ir_branch_false(cond_reg, skip_label))
+                if arr_len > 0 {
+                    let elem_is_float = lo.struct_layout_pos_is_float(pos) == 2
+                    let arr_pair = lo.emit_fixed_array_value_copy(slot_reg, arr_len, elem_is_float)
+                    lo = arr_pair.0
+                    lo = lo.emit(ir_field_set(dst_reg, i, arr_pair.1, fname))
+                } else {
+                    let sub_pair = lo.emit_struct_value_copy_deep_loop(slot_reg, nested_name, nested_slots, depth + 1)
+                    lo = sub_pair.0
+                    lo = lo.emit(ir_field_set(dst_reg, i, sub_pair.1, fname))
+                }
+                lo = lo.emit(ir_label(skip_label))
+            }
+            i = i + 1
+        }
+        (lo, dst_reg)
+    }
+
     // SIO-278: the budgeted copy for the deref/field path, with the cost
     // estimated from direct layout reads. emit_struct_value_copy_budgeted
     // prices the deep copy with struct_deep_copy_cost, which re-scans the
@@ -14287,14 +14408,14 @@ impl Lowerer {
         if self.struct_type_has_copyable_aggregate(type_name) {
             let deep_room = IR_MAX_INSTRS - self.struct_deep_copy_instr_headroom() - self.current_func.instr_count
             if self.place_deep_copy_cost(type_name, slot_count, 0) <= deep_room {
-                return self.emit_struct_value_copy_deep(src_reg, type_name, slot_count, 0)
+                return self.emit_struct_value_copy_deep_loop(src_reg, type_name, slot_count, 0)
             }
         }
-        self.emit_struct_value_copy(src_reg, type_name, slot_count)
+        self.emit_struct_value_copy_loop(src_reg, type_name, slot_count)
     }
 
     fn place_deep_copy_cost(self, type_name: Name, slot_count: i64, depth: i64) -> i64 with Mut, Panic, Div, Alloc {
-        var total: i64 = 1
+        var total: i64 = self.struct_deep_copy_array_cost()
         var si: i64 = 0
         while si < (*self.struct_layouts).count {
             if ir_name_eq((*self.struct_layouts).entries[si as usize].type_name, type_name) {
@@ -14303,7 +14424,7 @@ impl Lowerer {
                 while fi < fc && fi < 128 {
                     let entry = (*self.struct_layouts).entries[si as usize].fields[fi as usize]
                     if entry.index >= 0 && entry.index < slot_count {
-                        total = total + 2
+                        if entry.is_float == 1 { total = total + 2 }
                         if entry.word_scalar_array_len > 0 {
                             total = total + self.struct_deep_copy_guard_cost() + self.struct_deep_copy_array_cost()
                         } else if depth < self.struct_deep_copy_max_depth() {
