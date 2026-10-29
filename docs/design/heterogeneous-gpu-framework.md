@@ -1706,3 +1706,20 @@ Job 19671. md5 `e9fe9f328f5b652e61c1be01b454e719`.
 Those twenty words are 2.0 through 21.0. The stored word is 1650.0. The inputs were not overwritten. Barriers 4 and 5 survived a fifth registration.
 
 Gate. Node `gpuorangefs-r770-proxmox`, `--gres=gpu:1`, `--mem=16G`, `--cpus-per-task=4`. The 0.0018 s threshold is not moved. This cut does not pass it.
+
+
+## 70. Ten products with the scoreboard off (2026-10-29, OBSERVED)
+
+The ten-product program of section 69 is unchanged in its arithmetic. What changed is the scoreboard. Every load registers no barrier: the barrier field is 7. Every `FFMA` waits on mask 0. Stall 5 on the `FFMA` and stall 1 on the load stay. The required stored word stays the bits of 1650.0, which is 1154367488. That word was not rewritten after the run.
+
+The node was idle. No drain was cleared.
+
+Job 19674. md5 `a39125b5322aee6e4fb9f00c16273610`.
+
+`OWN=1073741824`, `OWN_ADD=1077936128`, `OWN_SRC=1082130432`, `OWN_WIDE=1084227584`, `OWN_EXT=1086324736`, `OWN_EXT2=1088421888`, `OWN_E8=1090519040`, `OWN_E9=1091567616`, `OWN_E10=1092616192`, `OWN_E11=1093664768`, `OWN_E12=1094713344`, `OWN_E13=1095761920`, `OWN_E14=1096810496`, `OWN_E15=1097859072`, `OWN_E16=1098907648`, `OWN_E17=1099431936`, `OWN_E18=1099956224`, `OWN_E19=1100480512`, `OWN_E20=1101004800`, `OWN_E21=1101529088`, `OWN_SUM=0`. The probe exits 1.
+
+Those twenty words are 2.0 through 21.0. They were not overwritten. The stored sum is 0. With the scoreboard removed, none of the ten products landed in the accumulator. The same program with the waits on, job 19671, stored 1650.0.
+
+This cut does not separate "the load registered no barrier" from "the consumer waited on no mask." Both are off. Job 18761 already stored 3, rather than 20, when one consumer's mask was cleared and the load still registered its barrier.
+
+Gate. Node `gpuorangefs-r770-proxmox`, `--gres=gpu:1`, `--mem=16G`, `--cpus-per-task=4`. The 0.0018 s threshold is not moved. This cut does not pass it. The required word 1154367488 is not moved either.
