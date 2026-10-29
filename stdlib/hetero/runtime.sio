@@ -63,6 +63,12 @@ pub struct Runtime {
     pub mmid_q5k_vec_func: i64,
     pub mmid_q8_0_func: i64,
     pub mmid_q8_0_vec_func: i64,
+    // Fused MoE gate+up SiLU Q4_K kernel; 0 = not loaded.
+    pub gus_q4k_func: i64,
+    // Fused MoE FFN mega-kernels; 0 = not loaded.
+    pub mega_q4k_func: i64,
+    pub mega_q5k_func: i64,
+    pub mega_q8_0_func: i64,
 }
 
 pub struct SplitResult {
@@ -79,7 +85,7 @@ pub struct MmidResult {
 }
 
 pub fn rt_open(ptx_path: string, kernel_name: string) -> Runtime with Alloc, Mut, Panic, Div, IO {
-    var rt = Runtime { exec: ce_open(), func: 0, ready: false, cvt_down: 0, cvt_up: 0, mmid_func: 0, mmid_vec_func: 0, mmid_q5k_func: 0, mmid_q5k_vec_func: 0, mmid_q8_0_func: 0, mmid_q8_0_vec_func: 0 }
+    var rt = Runtime { exec: ce_open(), func: 0, ready: false, cvt_down: 0, cvt_up: 0, mmid_func: 0, mmid_vec_func: 0, mmid_q5k_func: 0, mmid_q5k_vec_func: 0, mmid_q8_0_func: 0, mmid_q8_0_vec_func: 0, gus_q4k_func: 0, mega_q4k_func: 0, mega_q5k_func: 0, mega_q8_0_func: 0 }
     if !rt.exec.ok { return rt }
     let ptx = read_file(ptx_path)
     if str_len(ptx) == 0 { return rt }
@@ -578,6 +584,402 @@ pub fn rt_load_mmid_q8_0(rt: &!Runtime, ptx_path: string) -> bool with Alloc, Mu
     rt.mmid_q8_0_func = f
     rt.mmid_q8_0_vec_func = fv
     true
+}
+
+
+/// Load fused MoE gate+up SiLU Q4_K PTX into an existing Runtime (lazy, once).
+///
+/// # Return
+/// true when gus_q4k_func is ready.
+pub fn rt_load_moe_gate_up_silu(rt: &!Runtime, ptx_path: string) -> bool with Alloc, Mut, Panic, Div, IO {
+    if rt.gus_q4k_func != 0 { return true }
+    if !rt.exec.ok { return false }
+    let ptx = read_file(ptx_path)
+    if str_len(ptx) == 0 { return false }
+    let module = ce_module_log(&rt.exec, pb_cstr(ptx))
+    if module == 0 { return false }
+    let f = ce_function(&rt.exec, module, "moe_gate_up_silu_q4k_f32")
+    if f == 0 { return false }
+    rt.gus_q4k_func = f
+    true
+}
+
+/// Fused Q4_K gate+up matvec with SiLU multiply into act f32.
+/// Host buffers are raw bytes (gate/up Q4_K, x/ids/act F32/i32). Strides are byte strides.
+pub fn rt_moe_gate_up_silu_q4k(
+    rt: &Runtime,
+    gate_w: *mut u8, gate_bytes: i64,
+    up_w: *mut u8, up_bytes: i64,
+    x: *mut u8, x_bytes: i64,
+    ids: *mut u8, ids_bytes: i64,
+    act: *mut u8, act_bytes: i64,
+    hidden: i64, inter: i64, experts: i64, slots: i64, ntokens: i64,
+    expert_stride_g: i64, row_stride_g: i64,
+    expert_stride_u: i64, row_stride_u: i64,
+    x_nb1: i64, ids_nb1: i64, act_nb1: i64, act_nb2: i64,
+) -> MmidResult with Alloc, Mut, Panic, Div {
+    var res = MmidResult { ok: false, status: -1, ms: 0.0 }
+    if !rt.exec.ok { return res }
+    if rt.gus_q4k_func == 0 { return res }
+    let dg = ce_alloc(&rt.exec, gate_bytes)
+    let du = ce_alloc(&rt.exec, up_bytes)
+    let dx = ce_alloc(&rt.exec, x_bytes)
+    let dids = ce_alloc(&rt.exec, ids_bytes)
+    let dact = ce_alloc(&rt.exec, act_bytes)
+    if dg == 0 || du == 0 || dx == 0 || dids == 0 || dact == 0 {
+        res.status = -2
+        return res
+    }
+    var st = ce_h2d(&rt.exec, dg, gate_w, gate_bytes)
+    if st != 0 { res.status = st as i64; return res }
+    st = ce_h2d(&rt.exec, du, up_w, up_bytes)
+    if st != 0 { res.status = st as i64; return res }
+    st = ce_h2d(&rt.exec, dx, x, x_bytes)
+    if st != 0 { res.status = st as i64; return res }
+    st = ce_h2d(&rt.exec, dids, ids, ids_bytes)
+    if st != 0 { res.status = st as i64; return res }
+
+    let threads: i64 = 128
+    let tiles = (inter + threads - 1) / threads
+    let ts_count = ntokens * slots
+    let shmem = hidden * 4
+    let start = ce_event_create(&rt.exec)
+    let stop = ce_event_create(&rt.exec)
+    st = ce_event_record(&rt.exec, start)
+    let params = heap_alloc(8 * 18)
+    write_i64(params as *mut i64, 0, ce_arg(dg) as i64)
+    write_i64(params as *mut i64, 1, ce_arg(du) as i64)
+    write_i64(params as *mut i64, 2, ce_arg(dx) as i64)
+    write_i64(params as *mut i64, 3, ce_arg(dids) as i64)
+    write_i64(params as *mut i64, 4, ce_arg(dact) as i64)
+    write_i64(params as *mut i64, 5, ce_arg(hidden) as i64)
+    write_i64(params as *mut i64, 6, ce_arg(inter) as i64)
+    write_i64(params as *mut i64, 7, ce_arg(experts) as i64)
+    write_i64(params as *mut i64, 8, ce_arg(slots) as i64)
+    write_i64(params as *mut i64, 9, ce_arg(ntokens) as i64)
+    write_i64(params as *mut i64, 10, ce_arg(expert_stride_g) as i64)
+    write_i64(params as *mut i64, 11, ce_arg(row_stride_g) as i64)
+    write_i64(params as *mut i64, 12, ce_arg(expert_stride_u) as i64)
+    write_i64(params as *mut i64, 13, ce_arg(row_stride_u) as i64)
+    write_i64(params as *mut i64, 14, ce_arg(x_nb1) as i64)
+    write_i64(params as *mut i64, 15, ce_arg(ids_nb1) as i64)
+    write_i64(params as *mut i64, 16, ce_arg(act_nb1) as i64)
+    write_i64(params as *mut i64, 17, ce_arg(act_nb2) as i64)
+    st = ce_launch_2d_shmem(&rt.exec, rt.gus_q4k_func, tiles, ts_count, threads, shmem, params)
+    if st != 0 { res.status = st as i64; return res }
+    st = ce_event_record(&rt.exec, stop)
+    st = ce_sync(&rt.exec)
+    if st != 0 { res.status = st as i64; return res }
+    res.ms = ce_event_elapsed_ms(&rt.exec, start, stop)
+    st = ce_d2h(&rt.exec, act, dact, act_bytes)
+    if st != 0 { res.status = st as i64; return res }
+    res.ok = true
+    res.status = 0
+    res
+}
+
+
+/// Load fused MoE FFN mega Q4_K PTX into an existing Runtime (lazy, once).
+///
+/// # Return
+/// true when mega_q4k_func is ready.
+pub fn rt_load_moe_ffn_mega(rt: &!Runtime, ptx_path: string) -> bool with Alloc, Mut, Panic, Div, IO {
+    if rt.mega_q4k_func != 0 { return true }
+    if !rt.exec.ok { return false }
+    let ptx = read_file(ptx_path)
+    if str_len(ptx) == 0 { return false }
+    let module = ce_module_log(&rt.exec, pb_cstr(ptx))
+    if module == 0 { return false }
+    let f = ce_function(&rt.exec, module, "moe_ffn_mega_q4k_f32")
+    if f == 0 { return false }
+    rt.mega_q4k_func = f
+    true
+}
+
+/// Fused Q4_K MoE FFN mega-kernel into dst f32.
+/// Host buffers are raw bytes (gate/up/down Q4_K, x/ids/weights/dst F32/i32). Strides are byte strides.
+pub fn rt_moe_ffn_mega_q4k(
+    rt: &Runtime,
+    gate_w: *mut u8, gate_bytes: i64,
+    up_w: *mut u8, up_bytes: i64,
+    down_w: *mut u8, down_bytes: i64,
+    x: *mut u8, x_bytes: i64,
+    ids: *mut u8, ids_bytes: i64,
+    weights: *mut u8, weights_bytes: i64,
+    dst: *mut u8, dst_bytes: i64,
+    hidden: i64, inter: i64, experts: i64, slots: i64, n_tokens: i64,
+    expert_stride_g: i64, row_stride_g: i64,
+    expert_stride_u: i64, row_stride_u: i64,
+    expert_stride_d: i64, row_stride_d: i64,
+    x_nb1: i64, ids_nb1: i64, w_nb1: i64, dst_nb1: i64
+) -> MmidResult with Alloc, Mut, Panic, Div {
+    var res = MmidResult { ok: false, status: -1, ms: 0.0 }
+    if !rt.exec.ok { return res }
+    if rt.mega_q4k_func == 0 { return res }
+    let dg = ce_alloc(&rt.exec, gate_bytes)
+    let du = ce_alloc(&rt.exec, up_bytes)
+    let dd = ce_alloc(&rt.exec, down_bytes)
+    let dx = ce_alloc(&rt.exec, x_bytes)
+    let dids = ce_alloc(&rt.exec, ids_bytes)
+    let dweights = ce_alloc(&rt.exec, weights_bytes)
+    let ddst = ce_alloc(&rt.exec, dst_bytes)
+    if dg == 0 || du == 0 || dd == 0 || dx == 0 || dids == 0 || dweights == 0 || ddst == 0 {
+        res.status = -2
+        return res
+    }
+    var st = ce_h2d(&rt.exec, dg, gate_w, gate_bytes)
+    if st != 0 { res.status = st as i64; return res }
+    st = ce_h2d(&rt.exec, du, up_w, up_bytes)
+    if st != 0 { res.status = st as i64; return res }
+    st = ce_h2d(&rt.exec, dd, down_w, down_bytes)
+    if st != 0 { res.status = st as i64; return res }
+    st = ce_h2d(&rt.exec, dx, x, x_bytes)
+    if st != 0 { res.status = st as i64; return res }
+    st = ce_h2d(&rt.exec, dids, ids, ids_bytes)
+    if st != 0 { res.status = st as i64; return res }
+    st = ce_h2d(&rt.exec, dweights, weights, weights_bytes)
+    if st != 0 { res.status = st as i64; return res }
+
+    let threads: i64 = 128
+    let shmem = (hidden + inter) * 4
+    let start = ce_event_create(&rt.exec)
+    let stop = ce_event_create(&rt.exec)
+    st = ce_event_record(&rt.exec, start)
+    let params = heap_alloc(8 * 22)
+    write_i64(params as *mut i64, 0, ce_arg(dg) as i64)
+    write_i64(params as *mut i64, 1, ce_arg(du) as i64)
+    write_i64(params as *mut i64, 2, ce_arg(dd) as i64)
+    write_i64(params as *mut i64, 3, ce_arg(dx) as i64)
+    write_i64(params as *mut i64, 4, ce_arg(dids) as i64)
+    write_i64(params as *mut i64, 5, ce_arg(dweights) as i64)
+    write_i64(params as *mut i64, 6, ce_arg(ddst) as i64)
+    write_i64(params as *mut i64, 7, ce_arg(hidden) as i64)
+    write_i64(params as *mut i64, 8, ce_arg(inter) as i64)
+    write_i64(params as *mut i64, 9, ce_arg(experts) as i64)
+    write_i64(params as *mut i64, 10, ce_arg(slots) as i64)
+    write_i64(params as *mut i64, 11, ce_arg(n_tokens) as i64)
+    write_i64(params as *mut i64, 12, ce_arg(expert_stride_g) as i64)
+    write_i64(params as *mut i64, 13, ce_arg(row_stride_g) as i64)
+    write_i64(params as *mut i64, 14, ce_arg(expert_stride_u) as i64)
+    write_i64(params as *mut i64, 15, ce_arg(row_stride_u) as i64)
+    write_i64(params as *mut i64, 16, ce_arg(expert_stride_d) as i64)
+    write_i64(params as *mut i64, 17, ce_arg(row_stride_d) as i64)
+    write_i64(params as *mut i64, 18, ce_arg(x_nb1) as i64)
+    write_i64(params as *mut i64, 19, ce_arg(ids_nb1) as i64)
+    write_i64(params as *mut i64, 20, ce_arg(w_nb1) as i64)
+    write_i64(params as *mut i64, 21, ce_arg(dst_nb1) as i64)
+    st = ce_launch_2d_shmem(&rt.exec, rt.mega_q4k_func, n_tokens, 1, threads, shmem, params)
+    if st != 0 { res.status = st as i64; return res }
+    st = ce_event_record(&rt.exec, stop)
+    st = ce_sync(&rt.exec)
+    if st != 0 { res.status = st as i64; return res }
+    res.ms = ce_event_elapsed_ms(&rt.exec, start, stop)
+    st = ce_d2h(&rt.exec, dst, ddst, dst_bytes)
+    if st != 0 { res.status = st as i64; return res }
+    res.ok = true
+    res.status = 0
+    res
+}
+
+
+/// Load fused MoE FFN mega Q5_K PTX into an existing Runtime (lazy, once).
+///
+/// # Return
+/// true when mega_q5k_func is ready.
+pub fn rt_load_moe_ffn_mega_q5k(rt: &!Runtime, ptx_path: string) -> bool with Alloc, Mut, Panic, Div, IO {
+    if rt.mega_q5k_func != 0 { return true }
+    if !rt.exec.ok { return false }
+    let ptx = read_file(ptx_path)
+    if str_len(ptx) == 0 { return false }
+    let module = ce_module_log(&rt.exec, pb_cstr(ptx))
+    if module == 0 { return false }
+    let f = ce_function(&rt.exec, module, "moe_ffn_mega_q5k_f32")
+    if f == 0 { return false }
+    rt.mega_q5k_func = f
+    true
+}
+
+/// Fused Q5_K MoE FFN mega-kernel into dst f32.
+/// Host buffers are raw bytes (gate/up/down Q5_K, x/ids/weights/dst F32/i32). Strides are byte strides.
+pub fn rt_moe_ffn_mega_q5k(
+    rt: &Runtime,
+    gate_w: *mut u8, gate_bytes: i64,
+    up_w: *mut u8, up_bytes: i64,
+    down_w: *mut u8, down_bytes: i64,
+    x: *mut u8, x_bytes: i64,
+    ids: *mut u8, ids_bytes: i64,
+    weights: *mut u8, weights_bytes: i64,
+    dst: *mut u8, dst_bytes: i64,
+    hidden: i64, inter: i64, experts: i64, slots: i64, n_tokens: i64,
+    expert_stride_g: i64, row_stride_g: i64,
+    expert_stride_u: i64, row_stride_u: i64,
+    expert_stride_d: i64, row_stride_d: i64,
+    x_nb1: i64, ids_nb1: i64, w_nb1: i64, dst_nb1: i64
+) -> MmidResult with Alloc, Mut, Panic, Div {
+    var res = MmidResult { ok: false, status: -1, ms: 0.0 }
+    if !rt.exec.ok { return res }
+    if rt.mega_q5k_func == 0 { return res }
+    let dg = ce_alloc(&rt.exec, gate_bytes)
+    let du = ce_alloc(&rt.exec, up_bytes)
+    let dd = ce_alloc(&rt.exec, down_bytes)
+    let dx = ce_alloc(&rt.exec, x_bytes)
+    let dids = ce_alloc(&rt.exec, ids_bytes)
+    let dweights = ce_alloc(&rt.exec, weights_bytes)
+    let ddst = ce_alloc(&rt.exec, dst_bytes)
+    if dg == 0 || du == 0 || dd == 0 || dx == 0 || dids == 0 || dweights == 0 || ddst == 0 {
+        res.status = -2
+        return res
+    }
+    var st = ce_h2d(&rt.exec, dg, gate_w, gate_bytes)
+    if st != 0 { res.status = st as i64; return res }
+    st = ce_h2d(&rt.exec, du, up_w, up_bytes)
+    if st != 0 { res.status = st as i64; return res }
+    st = ce_h2d(&rt.exec, dd, down_w, down_bytes)
+    if st != 0 { res.status = st as i64; return res }
+    st = ce_h2d(&rt.exec, dx, x, x_bytes)
+    if st != 0 { res.status = st as i64; return res }
+    st = ce_h2d(&rt.exec, dids, ids, ids_bytes)
+    if st != 0 { res.status = st as i64; return res }
+    st = ce_h2d(&rt.exec, dweights, weights, weights_bytes)
+    if st != 0 { res.status = st as i64; return res }
+
+    let threads: i64 = 128
+    let shmem = (hidden + inter) * 4
+    let start = ce_event_create(&rt.exec)
+    let stop = ce_event_create(&rt.exec)
+    st = ce_event_record(&rt.exec, start)
+    let params = heap_alloc(8 * 22)
+    write_i64(params as *mut i64, 0, ce_arg(dg) as i64)
+    write_i64(params as *mut i64, 1, ce_arg(du) as i64)
+    write_i64(params as *mut i64, 2, ce_arg(dd) as i64)
+    write_i64(params as *mut i64, 3, ce_arg(dx) as i64)
+    write_i64(params as *mut i64, 4, ce_arg(dids) as i64)
+    write_i64(params as *mut i64, 5, ce_arg(dweights) as i64)
+    write_i64(params as *mut i64, 6, ce_arg(ddst) as i64)
+    write_i64(params as *mut i64, 7, ce_arg(hidden) as i64)
+    write_i64(params as *mut i64, 8, ce_arg(inter) as i64)
+    write_i64(params as *mut i64, 9, ce_arg(experts) as i64)
+    write_i64(params as *mut i64, 10, ce_arg(slots) as i64)
+    write_i64(params as *mut i64, 11, ce_arg(n_tokens) as i64)
+    write_i64(params as *mut i64, 12, ce_arg(expert_stride_g) as i64)
+    write_i64(params as *mut i64, 13, ce_arg(row_stride_g) as i64)
+    write_i64(params as *mut i64, 14, ce_arg(expert_stride_u) as i64)
+    write_i64(params as *mut i64, 15, ce_arg(row_stride_u) as i64)
+    write_i64(params as *mut i64, 16, ce_arg(expert_stride_d) as i64)
+    write_i64(params as *mut i64, 17, ce_arg(row_stride_d) as i64)
+    write_i64(params as *mut i64, 18, ce_arg(x_nb1) as i64)
+    write_i64(params as *mut i64, 19, ce_arg(ids_nb1) as i64)
+    write_i64(params as *mut i64, 20, ce_arg(w_nb1) as i64)
+    write_i64(params as *mut i64, 21, ce_arg(dst_nb1) as i64)
+    st = ce_launch_2d_shmem(&rt.exec, rt.mega_q5k_func, n_tokens, 1, threads, shmem, params)
+    if st != 0 { res.status = st as i64; return res }
+    st = ce_event_record(&rt.exec, stop)
+    st = ce_sync(&rt.exec)
+    if st != 0 { res.status = st as i64; return res }
+    res.ms = ce_event_elapsed_ms(&rt.exec, start, stop)
+    st = ce_d2h(&rt.exec, dst, ddst, dst_bytes)
+    if st != 0 { res.status = st as i64; return res }
+    res.ok = true
+    res.status = 0
+    res
+}
+
+pub fn rt_load_moe_ffn_mega_q8_0(rt: &!Runtime, ptx_path: string) -> bool with Alloc, Mut, Panic, Div, IO {
+    if rt.mega_q8_0_func != 0 { return true }
+    if !rt.exec.ok { return false }
+    let ptx = read_file(ptx_path)
+    if str_len(ptx) == 0 { return false }
+    let module = ce_module_log(&rt.exec, pb_cstr(ptx))
+    if module == 0 { return false }
+    let f = ce_function(&rt.exec, module, "moe_ffn_mega_q8_0_f32")
+    if f == 0 { return false }
+    rt.mega_q8_0_func = f
+    true
+}
+
+/// Fused Q8_0 MoE FFN mega-kernel into dst f32.
+/// Host buffers are raw bytes (gate/up/down Q8_0, x/ids/weights/dst F32/i32). Strides are byte strides.
+pub fn rt_moe_ffn_mega_q8_0(
+    rt: &Runtime,
+    gate_w: *mut u8, gate_bytes: i64,
+    up_w: *mut u8, up_bytes: i64,
+    down_w: *mut u8, down_bytes: i64,
+    x: *mut u8, x_bytes: i64,
+    ids: *mut u8, ids_bytes: i64,
+    weights: *mut u8, weights_bytes: i64,
+    dst: *mut u8, dst_bytes: i64,
+    hidden: i64, inter: i64, experts: i64, slots: i64, n_tokens: i64,
+    expert_stride_g: i64, row_stride_g: i64,
+    expert_stride_u: i64, row_stride_u: i64,
+    expert_stride_d: i64, row_stride_d: i64,
+    x_nb1: i64, ids_nb1: i64, w_nb1: i64, dst_nb1: i64
+) -> MmidResult with Alloc, Mut, Panic, Div {
+    var res = MmidResult { ok: false, status: -1, ms: 0.0 }
+    if !rt.exec.ok { return res }
+    if rt.mega_q8_0_func == 0 { return res }
+    let dg = ce_alloc(&rt.exec, gate_bytes)
+    let du = ce_alloc(&rt.exec, up_bytes)
+    let dd = ce_alloc(&rt.exec, down_bytes)
+    let dx = ce_alloc(&rt.exec, x_bytes)
+    let dids = ce_alloc(&rt.exec, ids_bytes)
+    let dweights = ce_alloc(&rt.exec, weights_bytes)
+    let ddst = ce_alloc(&rt.exec, dst_bytes)
+    if dg == 0 || du == 0 || dd == 0 || dx == 0 || dids == 0 || dweights == 0 || ddst == 0 {
+        res.status = -2
+        return res
+    }
+    var st = ce_h2d(&rt.exec, dg, gate_w, gate_bytes)
+    if st != 0 { res.status = st as i64; return res }
+    st = ce_h2d(&rt.exec, du, up_w, up_bytes)
+    if st != 0 { res.status = st as i64; return res }
+    st = ce_h2d(&rt.exec, dd, down_w, down_bytes)
+    if st != 0 { res.status = st as i64; return res }
+    st = ce_h2d(&rt.exec, dx, x, x_bytes)
+    if st != 0 { res.status = st as i64; return res }
+    st = ce_h2d(&rt.exec, dids, ids, ids_bytes)
+    if st != 0 { res.status = st as i64; return res }
+    st = ce_h2d(&rt.exec, dweights, weights, weights_bytes)
+    if st != 0 { res.status = st as i64; return res }
+
+    let threads: i64 = 128
+    let shmem = (hidden + inter) * 4
+    let start = ce_event_create(&rt.exec)
+    let stop = ce_event_create(&rt.exec)
+    st = ce_event_record(&rt.exec, start)
+    let params = heap_alloc(8 * 22)
+    write_i64(params as *mut i64, 0, ce_arg(dg) as i64)
+    write_i64(params as *mut i64, 1, ce_arg(du) as i64)
+    write_i64(params as *mut i64, 2, ce_arg(dd) as i64)
+    write_i64(params as *mut i64, 3, ce_arg(dx) as i64)
+    write_i64(params as *mut i64, 4, ce_arg(dids) as i64)
+    write_i64(params as *mut i64, 5, ce_arg(dweights) as i64)
+    write_i64(params as *mut i64, 6, ce_arg(ddst) as i64)
+    write_i64(params as *mut i64, 7, ce_arg(hidden) as i64)
+    write_i64(params as *mut i64, 8, ce_arg(inter) as i64)
+    write_i64(params as *mut i64, 9, ce_arg(experts) as i64)
+    write_i64(params as *mut i64, 10, ce_arg(slots) as i64)
+    write_i64(params as *mut i64, 11, ce_arg(n_tokens) as i64)
+    write_i64(params as *mut i64, 12, ce_arg(expert_stride_g) as i64)
+    write_i64(params as *mut i64, 13, ce_arg(row_stride_g) as i64)
+    write_i64(params as *mut i64, 14, ce_arg(expert_stride_u) as i64)
+    write_i64(params as *mut i64, 15, ce_arg(row_stride_u) as i64)
+    write_i64(params as *mut i64, 16, ce_arg(expert_stride_d) as i64)
+    write_i64(params as *mut i64, 17, ce_arg(row_stride_d) as i64)
+    write_i64(params as *mut i64, 18, ce_arg(x_nb1) as i64)
+    write_i64(params as *mut i64, 19, ce_arg(ids_nb1) as i64)
+    write_i64(params as *mut i64, 20, ce_arg(w_nb1) as i64)
+    write_i64(params as *mut i64, 21, ce_arg(dst_nb1) as i64)
+    st = ce_launch_2d_shmem(&rt.exec, rt.mega_q8_0_func, n_tokens, 1, threads, shmem, params)
+    if st != 0 { res.status = st as i64; return res }
+    st = ce_event_record(&rt.exec, stop)
+    st = ce_sync(&rt.exec)
+    if st != 0 { res.status = st as i64; return res }
+    res.ms = ce_event_elapsed_ms(&rt.exec, start, stop)
+    st = ce_d2h(&rt.exec, dst, ddst, dst_bytes)
+    if st != 0 { res.status = st as i64; return res }
+    res.ok = true
+    res.status = 0
+    res
 }
 
 /// Q4_K mul_mat_id with F32 activations. Host buffers are raw bytes

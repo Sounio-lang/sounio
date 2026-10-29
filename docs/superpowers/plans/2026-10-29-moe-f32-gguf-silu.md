@@ -57,7 +57,7 @@
 - Consumes: Q4_K `block_q4_K` layout and dequant helpers from `mmid_q4k_dp4a_f32.cu`
 - Produces: entry `moe_gate_up_silu_q4k_f32` writing `act` f32; lab oracle under `-DMOE_GUS_LAB_HOST`
 
-- [ ] **Step 1: Skeleton CU with shared Q4_K helpers**
+- [x] **Step 1: Skeleton CU with shared Q4_K helpers**
 
 Copy `block_q4_K`, `get_scale_min_k4`, and a scalar row-dot helper from `mmid_q4k_dp4a_f32.cu`. Do not include llama.cpp.
 
@@ -72,7 +72,7 @@ extern "C" __global__ void moe_gate_up_silu_q4k_f32(
 
 For each `(token, slot, row)`: `act = silu(dot_q4k(gate)) * dot_q4k(up)` with `silu(g)=g/(1+expf(-g))`.
 
-- [ ] **Step 2: Lab host oracle + NMSE**
+- [x] **Step 2: Lab host oracle + NMSE**
 
 CPU oracle: dequant+dot gate, dequant+dot up, SiLU*mul. Gate NMSE <= 5e-4, amax=1e5. Include `ntokens>1`. Print:
 
@@ -81,11 +81,11 @@ n=<ntokens> NMSE=<val> us/run=<val> baseline_us=<val>
 LAB_EXIT:0
 ```
 
-- [ ] **Step 3: Build + run scripts**
+- [x] **Step 3: Build + run scripts**
 
 Mirror `scripts/gpu/build_mmid_q4k_dp4a_f32.sh` and `run_mmid_q4k_l4_lab.sh` with `srun --gres=gpu:1`.
 
-- [ ] **Step 4: Run L4 lab**
+- [x] **Step 4: Run L4 lab**
 
 ```bash
 bash scripts/gpu/run_moe_gate_up_silu_q4k_l4_lab.sh
@@ -112,11 +112,11 @@ Assisted-by: Composer
 **Interfaces:**
 - Produces: `Runtime.gus_q4k_func: i64`; `rt_load_moe_gate_up_silu(rt, ptx) -> bool`; `rt_moe_gate_up_silu_q4k(...) -> MmidResult`
 
-- [ ] **Step 1: Extend Runtime**
+- [x] **Step 1: Extend Runtime**
 
 Add `gus_q4k_func: i64`. Update every `Runtime { ... }` literal that lists mmid fields (search `mmid_q8_0_vec_func`).
 
-- [ ] **Step 2: Loader**
+- [x] **Step 2: Loader**
 
 ```sio
 pub fn rt_load_moe_gate_up_silu(rt: &!Runtime, ptx_path: string) -> bool with Alloc, Mut, Panic, Div, IO {
@@ -124,11 +124,11 @@ pub fn rt_load_moe_gate_up_silu(rt: &!Runtime, ptx_path: string) -> bool with Al
 }
 ```
 
-- [ ] **Step 3: Launcher**
+- [x] **Step 3: Launcher**
 
 H2D gate/up/x/ids, device act, launch, sync, D2H. If `gus_q4k_func==0` or `!rt.exec.ok`, return `ok=false` status -1.
 
-- [ ] **Step 4: Typecheck**
+- [x] **Step 4: Typecheck**
 
 ```bash
 bin/souc check examples/hetero_moe_layer_demo.sio
@@ -156,7 +156,7 @@ Assisted-by: Composer
 **Interfaces:**
 - `moe_ffn_q4k` prefers super-kernel; fallback two mmid + `moe_silu_mul`; down + weighted_sum unchanged
 
-- [ ] **Step 1: Prefer super-kernel**
+- [x] **Step 1: Prefer super-kernel**
 
 ```sio
 let gus = rt_moe_gate_up_silu_q4k(/* packs, x, ids, act, dims, strides */)
@@ -169,11 +169,11 @@ if gus.ok {
 // mmid down(act) + moe_weighted_sum
 ```
 
-- [ ] **Step 2: Demo**
+- [x] **Step 2: Demo**
 
 Args `[gemm-ptx] [mmid-ptx] [gus-ptx]`. Load mmid (down) + gus. Call `moe_ffn_q4k`. Require ok + finite. Print `MOE GUS DONE`.
 
-- [ ] **Step 3: Verify**
+- [x] **Step 3: Verify**
 
 ```bash
 bin/souc check examples/hetero_moe_gate_up_silu_demo.sio examples/llama_moe_ffn_demo.sio
@@ -198,11 +198,11 @@ Assisted-by: Composer
 - Optional: Q5 kernel/runtime/`moe_ffn_q5k` wire
 - Or docs defer paragraph in `docs/design/moe-f32-mmid.md`
 
-- [ ] **Step 1: Decide by cost**
+- [x] **Step 1: Decide by cost**
 
 If Q4 green and Q5 copy is mechanical, ship twin. Else write: "Q5_K super-kernel deferred; `moe_ffn_q5k` keeps two-mmid + host SiLU".
 
-- [ ] **Step 2: Verify**
+- [x] **Step 2: Verify**
 
 Q5 lab green or defer note present; `bin/souc check examples/llama_moe_ffn_demo.sio`.
 
@@ -229,13 +229,13 @@ docs: defer Q5 gate/up SiLU super-kernel
 - `GgufFile`, `gguf_open(path)`, `gguf_find(f, name) -> GgufTensor`, raw byte slice for Q4_K packs
 - Support GGUF v3; dtypes F32, F16, Q4_K minimum
 
-- [ ] **Step 1: Parse header + tensor index**
+- [x] **Step 1: Parse header + tensor index**
 
 Magic `GGUF`, version, tensor_count, kv_count, skip KV, read tensor infos, data offsets.
 
-- [ ] **Step 2: Export from mod.sio**
+- [x] **Step 2: Export from mod.sio**
 
-- [ ] **Step 3: Typecheck**
+- [x] **Step 3: Typecheck**
 
 ```bash
 bin/souc check examples/llama_load_demo.sio
@@ -263,17 +263,17 @@ Assisted-by: Composer
 **Interfaces:**
 - `llama_load_gguf(path) -> Llama` with Plan F MoE pack fields; fixture hidden=256, moe_inter=512, layers=2, experts=8, slots=2, vocab=64
 
-- [ ] **Step 1: Generator**
+- [x] **Step 1: Generator**
 
 ```bash
 python3 scripts/llm/gen_tiny_mixtral_gguf.py --out /workspace/llm-models/tiny-mixtral-moe.gguf
 ```
 
-- [ ] **Step 2: llama_load_gguf**
+- [x] **Step 2: llama_load_gguf**
 
 Fill cfg from KV written by the fixture; bind Q4_K expert tensors; decode attn/embed; set strides like `llama_load_moe`.
 
-- [ ] **Step 3: Smoke**
+- [x] **Step 3: Smoke**
 
 Print `loaded=1 n_experts=8` with packs present.
 
@@ -293,11 +293,11 @@ Assisted-by: Composer
 - Create: `examples/llama_gguf_forward_demo.sio`
 - Test: check + L4
 
-- [ ] **Step 1: Demo**
+- [x] **Step 1: Demo**
 
 Default `/workspace/llm-models/tiny-mixtral-moe.gguf`. Missing fixture: `GGUF FIXTURE MISSING` + DONE exit 0. Load gus+mmid; forward ntok=1 and 4; assert finite and `last_moe_layers_ok == layers` when GPU+packs. Optional real GGUF argv with `GGUF REAL SKIP` if absent.
 
-- [ ] **Step 2: Verify**
+- [x] **Step 2: Verify**
 
 ```bash
 python3 scripts/llm/gen_tiny_mixtral_gguf.py --out /workspace/llm-models/tiny-mixtral-moe.gguf
@@ -325,11 +325,11 @@ Assisted-by: Composer
 - Modify: this plan checkboxes
 - Notion: controller `SIO-moe-f32-gguf-silu`
 
-- [ ] **Step 1: Plan G receipts** (NMSE/us, baseline_us, fixture cmd, demo lines, Q5 twin/defer)
+- [x] **Step 1: Plan G receipts** (NMSE/us, baseline_us, fixture cmd, demo lines, Q5 twin/defer)
 
-- [ ] **Step 2: Changelog fragment**
+- [x] **Step 2: Changelog fragment**
 
-- [ ] **Step 3: Notion IDs for controller**
+- [ ] **Step 3: Notion IDs for controller** (controller-owned: `SIO-moe-f32-gguf-silu`; skip in agent lane)
 
 - [ ] **Step 4: Propose docs commit only**
 
