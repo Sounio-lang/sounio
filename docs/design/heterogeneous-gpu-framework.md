@@ -1723,3 +1723,18 @@ Those twenty words are 2.0 through 21.0. They were not overwritten. The stored s
 This cut does not separate "the load registered no barrier" from "the consumer waited on no mask." Both are off. Job 18761 already stored 3, rather than 20, when one consumer's mask was cleared and the load still registered its barrier.
 
 Gate. Node `gpuorangefs-r770-proxmox`, `--gres=gpu:1`, `--mem=16G`, `--cpus-per-task=4`. The 0.0018 s threshold is not moved. This cut does not pass it. The required word 1154367488 is not moved either.
+
+
+## 71. Sixteen stall-15 moves, scoreboard still off (2026-10-29, OBSERVED)
+
+The scoreboard stays off, as in section 70. The shape of the program changes. Twenty loads write R4 through R23, displacements 0 through 76. Sixteen moves of `c[0][0x28]` into R1 follow, each with stall 15. Then the ten products run, still with mask 0. The register count is 26. `.text` is 832 bytes. The file is 3176 bytes. `e_shoff` is `0x8c0`. `EXIT` is at pc 816. The required stored word stays 1154367488, the bits of 1650.0. It was not rewritten after the run.
+
+The node was idle. No drain was cleared.
+
+Job 19725. md5 `c3eeabe6938b572ca29ff52798cf8d6a`.
+
+The twenty input words are 2.0 through 21.0, unchanged. `OWN_SUM=2985189878`. That is `0xb1ee61f6`. Read as f32, the pattern is about -6.94e-9. It is not the bits of 1650, nor of 0, nor of any partial sum of the ten products. The probe exits 1.
+
+The same inputs with the scoreboard on, job 19671, stored 1650.0. With the scoreboard off and no extra gap, job 19674 stored 0. The sixteen stall-15 moves did not turn this program into the 1650 result.
+
+Gate. Node `gpuorangefs-r770-proxmox`, `--gres=gpu:1`, `--mem=16G`, `--cpus-per-task=4`. The 0.0018 s threshold is not moved. The required word 1154367488 is not moved either.
