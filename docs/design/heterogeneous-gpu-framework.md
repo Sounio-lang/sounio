@@ -1757,3 +1757,33 @@ The twenty input words are 2.0 through 21.0, unchanged. `OWN_SUM=1154367488`, `E
 That is the same word job 19671 stored, from a program whose container arithmetic is now a function of the instruction count.
 
 Gate. Node `gpuorangefs-r770-proxmox`, `--gres=gpu:1`, `--mem=16G`, `--cpus-per-task=4`. The 0.0018 s threshold is not moved. This cut does not pass it.
+
+
+## 73. Four taken branches store 4 (2026-10-29, OBSERVED)
+
+`emit_container` replayed a straight-line product. This cut names the `BRA` displacement, then launches one program whose store was fixed at 4 before the run.
+
+ptxas 12.8.61, `--opt-level 0`, sm_89. nvdisasm 12.8.55 with `-hex`. Two unconditional backward branches:
+
+| target, from the next instruction | low word | high word | bytes 4..7 |
+| --- | --- | --- | --- |
+| −16 | `0xfffffff000007947` | `0x003fde000383ffff` | `f0 ff ff ff` |
+| −48 | `0xffffffd000007947` | `0x003fde000383ffff` | `d0 ff ff ff` |
+
+Bytes 4..7 are a signed displacement in bytes. The high word is the same on both. A branch whose target is the next instruction, displacement 0, has low word `0x0000000000007947` and high word `0x003fde0003800000`. Those two high words differ by `0x3ffff`, the low 18 bits, which carry the sign of the field. The opcode bytes stay `47 79`.
+
+The program uses displacement +16. Bytes 4..7 are `10 00 00 00`. The high word is the displacement-0 specimen, because bit 31 of +16 is clear. The two negative branches are the pair that located the field. The zero branch supplies the high word used when the sign bits are clear.
+
+Twenty instructions. `emit_container(buf, 20, 7, 19)`. The file is 2664 bytes. `.text` is 320 bytes. `e_shoff` is 1728. The EXIT pc is 304. The register count is 7.
+
+`IMAD.MOV` writes 0 into R0 and 1 into R4, both at stall 5 and yield 1, the schedule on which job 18325's add saw its sources. Then, four times: `BRA` over one `IMAD.MOV` of 99 into R0, then `IADD3 R0, R0, R4, RZ` at stall 5. `STG.E [R2+80], R0` and `EXIT` follow.
+
+Four taken branches skip every 99. The four adds leave 4, and 4 is stored. Four fall-throughs each write 99 and the following add leaves 100, so the store is 100. The required word is 4. It was not rewritten after the run.
+
+The node was idle when the job ran. No drain was cleared. Foreign job 19867 had held the same GPU and had already ended `FAILED` `2:0`. It was not cancelled.
+
+Job 19868. md5 `672f685e54f46c5aa4a63a955001676e`.
+
+The twenty input words are 2.0 through 21.0, unchanged. `OWN_SUM=4`, `EXIT:0`.
+
+Gate. Node `gpuorangefs-r770-proxmox`, `--gres=gpu:1`, `--mem=16G`, `--cpus-per-task=4`. The 0.0018 s threshold is not moved. The loop body is still an integer add. The text of this program is four branches, and it does not yet stay the same size when K grows.
