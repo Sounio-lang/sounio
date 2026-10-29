@@ -411,8 +411,8 @@ fn put_insn(buf: *mut u8, slot: i64, lo: i64, hi: i64) with Mut {
 // The measured 2600-byte container stays in own_word. This writes a
 // program of ninsns instructions over .text and moves the section and
 // program headers by the extra bytes. nregs is max GPR + 3. exit_slot
-// is the instruction that holds EXIT. The caller is the four-branch loop.
-// Job 19732 was the ten-product kernel.
+// is the instruction that holds EXIT. The caller is the ten-product loop. One body, trip count 10.
+// Job 19868 was four forward branches. Job 19732 was the straight-line product.
 fn emit_container(buf: *mut u8, ninsns: i64, nregs: i64, exit_slot: i64) with Mut {
     let growth = ninsns * 2 - 32
     let add = growth * 8
@@ -454,6 +454,24 @@ fn own_bra_hi_disp(disp: i64) -> i64 {
 // Job 18325 saw the immediate when this move used stall 5 and yield 1.
 fn own_imad_hi_stall5() -> i64 { atlas_imad_mov_hi() + 8796093022208 }
 
+// @P0 BRA. The predicated specimens use byte 1 = 0x09. Bytes 4..7 are
+// the same signed displacement as the unconditional branch.
+fn own_bra_p0_lo(disp: i64) -> i64 { 2375 + disp * 4294967296 }
+
+// ISETP.LT.U32.AND P0, PT, R0, imm. ptxas 12.8.61, opt-level 0.
+// imm 4 is low word 0x000000040000780c. imm 8 is 0x000000080000780c.
+// Byte 4 is the immediate. The high word does not move.
+// A second pair, R0 against R2, moves byte 3. That byte is the register.
+fn own_isetp_lo(reg: i64, imm: i64) -> i64 { 30732 + reg * 16777216 + imm * 4294967296 }
+
+fn own_isetp_hi() -> i64 { 17977015180202096 }
+
+// PLOP3.LUT between the compare and the branch. Both specimens match.
+fn own_plop3_lo() -> i64 { 30748 }
+
+fn own_plop3_hi() -> i64 { 17977015121539184 }
+
+
 pub fn sm89_own_image() -> *mut u8 with Alloc, Mut, Div {
     let buf = heap_alloc(emit_nbytes(20))
     var i: i64 = 0
@@ -465,23 +483,28 @@ pub fn sm89_own_image() -> *mut u8 with Alloc, Mut, Div {
     put_insn(buf, 1, atlas_mov_c_lo(2, 88), atlas_mov_c_hi(1))
     put_insn(buf, 2, atlas_mov_c_lo(3, 89), atlas_mov_c_hi(5))
     put_insn(buf, 3, atlas_uldc_lo(4, 70), 2560 + atlas_sched(1, 1, 7, 7, 0))
+    // R0 is the f32 accumulator, bit pattern 0. R5 counts trips.
+    // R8 is the byte stride. R10 is the trip increment.
+    // R6:R7 is a copy of the pointer pair R2:R3.
     put_insn(buf, 4, atlas_imad_mov_lo(0, 0), own_imad_hi_stall5())
-    put_insn(buf, 5, atlas_imad_mov_lo(4, 1), own_imad_hi_stall5())
-    put_insn(buf, 6, own_bra_lo_disp(16), own_bra_hi_disp(16))
-    put_insn(buf, 7, atlas_imad_mov_lo(0, 99), own_imad_hi_stall5())
-    put_insn(buf, 8, atlas_iadd3_lo(0, 0, 4, 0), atlas_iadd3_hi(0))
-    put_insn(buf, 9, own_bra_lo_disp(16), own_bra_hi_disp(16))
-    put_insn(buf, 10, atlas_imad_mov_lo(0, 99), own_imad_hi_stall5())
-    put_insn(buf, 11, atlas_iadd3_lo(0, 0, 4, 0), atlas_iadd3_hi(0))
-    put_insn(buf, 12, own_bra_lo_disp(16), own_bra_hi_disp(16))
-    put_insn(buf, 13, atlas_imad_mov_lo(0, 99), own_imad_hi_stall5())
-    put_insn(buf, 14, atlas_iadd3_lo(0, 0, 4, 0), atlas_iadd3_hi(0))
-    put_insn(buf, 15, own_bra_lo_disp(16), own_bra_hi_disp(16))
-    put_insn(buf, 16, atlas_imad_mov_lo(0, 99), own_imad_hi_stall5())
-    put_insn(buf, 17, atlas_iadd3_lo(0, 0, 4, 0), atlas_iadd3_hi(0))
+    put_insn(buf, 5, atlas_imad_mov_lo(5, 0), own_imad_hi_stall5())
+    put_insn(buf, 6, atlas_imad_mov_lo(8, 8), own_imad_hi_stall5())
+    put_insn(buf, 7, atlas_imad_mov_lo(10, 1), own_imad_hi_stall5())
+    put_insn(buf, 8, atlas_iadd3_lo(6, 2, 0, 0), atlas_iadd3_hi(0))
+    put_insn(buf, 9, atlas_iadd3_lo(7, 3, 0, 0), atlas_iadd3_hi(0))
+    // Ten products. The body is one pair, one FFMA, one step of the pointer.
+    // The compare immediate is 10. Text does not grow with that 10.
+    put_insn(buf, 10, atlas_ldg_lo(4, 6, 0) + 2 * 4294967296, 203299072 + atlas_sched(1, 1, 2, 7, 0))
+    put_insn(buf, 11, atlas_ldg_lo(9, 6, 4) + 2 * 4294967296, 203299072 + atlas_sched(1, 1, 3, 7, 0))
+    put_insn(buf, 12, 35 + 114 * 256 + 4 * 16777216 + 9 * 4294967296, atlas_sched(5, 0, 7, 7, 12))
+    put_insn(buf, 13, atlas_iadd3_lo(6, 6, 8, 0), atlas_iadd3_hi(0))
+    put_insn(buf, 14, atlas_iadd3_lo(5, 5, 10, 0), atlas_iadd3_hi(0))
+    put_insn(buf, 15, own_isetp_lo(5, 10), own_isetp_hi())
+    put_insn(buf, 16, own_plop3_lo(), own_plop3_hi())
+    put_insn(buf, 17, own_bra_p0_lo(-128), own_bra_hi_disp(-128))
     put_insn(buf, 18, own_stg_disp(2, 0, 80), atlas_stg_hi())
     put_insn(buf, 19, atlas_exit_lo(), atlas_exit_hi())
-    emit_container(buf, 20, 7, 19)
+    emit_container(buf, 20, 13, 19)
     buf
 }
 

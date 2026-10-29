@@ -1787,3 +1787,28 @@ Job 19868. md5 `672f685e54f46c5aa4a63a955001676e`.
 The twenty input words are 2.0 through 21.0, unchanged. `OWN_SUM=4`, `EXIT:0`.
 
 Gate. Node `gpuorangefs-r770-proxmox`, `--gres=gpu:1`, `--mem=16G`, `--cpus-per-task=4`. The 0.0018 s threshold is not moved. The loop body is still an integer add. The text of this program is four branches, and it does not yet stay the same size when K grows.
+
+
+## 74. One loop body stores the ten products (2026-10-29, OBSERVED)
+
+The four branches of job 19868 each skip one instruction. The branch does not return, and the text grows with the trip count. This cut puts the ten products in one body. The trip count is the compare immediate 10. The required stored word is 1154367488, the bits of 1650.0. It was written before either launch and was not rewritten after the miss.
+
+ptxas 12.8.61, `--opt-level 0`, sm_89. `ISETP.LT.U32.AND P0, PT, R0, imm`. Immediate 4 is low word `0x000000040000780c`. Immediate 8 is `0x000000080000780c`. Byte 4 is the immediate. The high word stays `0x003fde0003f01070`. A second pair compares R0 and R2. Byte 3 moves with the register: 0 for R0, 2 for R2. `PLOP3.LUT` between the compare and the branch is the same word in every specimen, low `0x000000000000781c`, high `0x003fde000070f070`. The `@P0 BRA` uses byte 1 `0x09` and the displacement field already measured. Displacement −128 is bytes `80 ff ff ff` with the negative high word `0x003fde000383ffff`.
+
+The body loads one pair through the walking pointer R6:R7, multiplies with `FFMA` into R0 under mask 12, adds 8 to the low half of that pointer, and adds 1 to R5. R0 starts at the bit pattern 0. R6:R7 starts as a copy of R2:R3. The store uses the original R2 at displacement 80. Twenty instructions. Register count 13. The file is 2664 bytes. `.text` is 320 bytes. `e_shoff` is 1728. The EXIT pc is 304.
+
+The node was idle. No drain was cleared.
+
+Job 19921. md5 `682f8d1281dd3a4a998aa6d08df47429`.
+
+The compare in that image names R0, the accumulator. After one product R0 holds the bits of 6.0, and that unsigned value is not less than 10. The branch falls through. The twenty inputs, 2.0 through 21.0, are unchanged. `OWN_SUM=1086324736`, the bits of 6.0. `EXIT:1`. The required word stayed 1154367488.
+
+Byte 3 of `ISETP` was then set to 5, so the compare reads the counter. The required word stayed 1154367488.
+
+Job 19925. md5 `e4620888be507dc9c8bdebf1a1fd2970`.
+
+The same inputs. `OWN_SUM=1154367488`, `EXIT:0`. Ten products, one body. The text does not contain a copy of the product per trip.
+
+The pointer step is a 32-bit add on the low half. This allocation returned 1650.0, so that add was enough for these eighty bytes.
+
+Gate. Node `gpuorangefs-r770-proxmox`, `--gres=gpu:1`, `--mem=16G`, `--cpus-per-task=4`. The 0.0018 s threshold is not moved.
