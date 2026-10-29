@@ -260,6 +260,74 @@ pub fn rk4_step_pbpk14(st: PBPK14State, t: f64, dt: f64, p: PBPK14Params) -> PBP
 }
 
 // ============================================================================
+// STABILITY BOUND FOR THE EXPLICIT STEP
+// ============================================================================
+//
+// The model is stiff: its fastest mode is about -q_lung/(v_lung*kp_lung)
+// = -437.5/h, and explicit RK4 is stable on the negative real axis only for
+// dt*|lambda| <= 2.785. A caller step of 0.24 h (24 h in 100 steps) is ~40x
+// outside that region and the state overflows to NaN. The derivative is linear
+// and homogeneous in the state, so pbpk14_ode(e_j) is exactly column j of the
+// system matrix A; the largest absolute column sum (the 1-norm) bounds the
+// spectral radius. The solver takes enough RK4 substeps per caller step that
+// h*||A||_1 <= 2.5, which lies inside the RK4 stability region for every
+// eigenvalue with non-positive real part (measured: max |R(z)| = 1 on the
+// left half-disc |z| <= 2.6).
+
+fn pbpk14_unit_state(j: i64) -> PBPK14State {
+    return PBPK14State {
+        gut: if j == 0 { 1.0 } else { 0.0 },
+        art: if j == 1 { 1.0 } else { 0.0 },
+        ven: if j == 2 { 1.0 } else { 0.0 },
+        lung: if j == 3 { 1.0 } else { 0.0 },
+        heart: if j == 4 { 1.0 } else { 0.0 },
+        brain: if j == 5 { 1.0 } else { 0.0 },
+        muscle: if j == 6 { 1.0 } else { 0.0 },
+        adipose: if j == 7 { 1.0 } else { 0.0 },
+        skin: if j == 8 { 1.0 } else { 0.0 },
+        bone: if j == 9 { 1.0 } else { 0.0 },
+        spleen: if j == 10 { 1.0 } else { 0.0 },
+        gut_tis: if j == 11 { 1.0 } else { 0.0 },
+        liver: if j == 12 { 1.0 } else { 0.0 },
+        kidney: if j == 13 { 1.0 } else { 0.0 }
+    }
+}
+
+fn pbpk14_abs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn pbpk14_deriv_abs_sum(d: PBPK14Deriv) -> f64 {
+    return pbpk14_abs(d.d_gut) + pbpk14_abs(d.d_art) + pbpk14_abs(d.d_ven)
+        + pbpk14_abs(d.d_lung) + pbpk14_abs(d.d_heart) + pbpk14_abs(d.d_brain)
+        + pbpk14_abs(d.d_muscle) + pbpk14_abs(d.d_adipose) + pbpk14_abs(d.d_skin)
+        + pbpk14_abs(d.d_bone) + pbpk14_abs(d.d_spleen) + pbpk14_abs(d.d_gut_tis)
+        + pbpk14_abs(d.d_liver) + pbpk14_abs(d.d_kidney)
+}
+
+// ||A||_1 of the linear PBPK system for parameters p (875/h for default_params).
+pub fn pbpk14_stiffness_bound(p: PBPK14Params) -> f64 with Mut {
+    var bound = 0.0
+    var j: i64 = 0
+    while j < 14 {
+        let col = pbpk14_deriv_abs_sum(pbpk14_ode(pbpk14_unit_state(j), 0.0, p))
+        if col > bound { bound = col }
+        j = j + 1
+    }
+    return bound
+}
+
+// RK4 substeps needed per caller step dt so that h * bound <= 2.5.
+fn pbpk14_substeps(dt: f64, bound: f64) -> i64 {
+    let x = dt * bound / 2.5
+    if !(x > 1.0) { return 1 }
+    var m = x as i64
+    if (m as f64) < x { m = m + 1 }
+    return m
+}
+
+// ============================================================================
 // SOLVER
 // ============================================================================
 
@@ -273,20 +341,29 @@ struct PBPK14Solution {
     muscle: f64,
     adipose: f64,
     brain: f64,
-    pub nsteps: i64
+    pub nsteps: i64,     // caller steps (n_steps)
+    pub substeps: i64    // RK4 substeps actually taken (stability-bounded)
 }
 
 pub fn solve_pbpk14_rk4(init: PBPK14State, p: PBPK14Params, t_sim: f64, n_steps: i64) -> PBPK14Solution with Mut, Div {
-    // Fixed timestep based on simulation time
+    // Fixed caller timestep; each one is split into m RK4 substeps so that the
+    // explicit step stays inside its stability region (pbpk14_stiffness_bound).
     let dt = t_sim / (n_steps as f64)
+    let m = pbpk14_substeps(dt, pbpk14_stiffness_bound(p))
+    let h = dt / (m as f64)
     var curr = init
     var iter: i64 = 0
-    let t = 0.0
+    var taken: i64 = 0
 
     while iter < n_steps {
-        let t_curr = (iter as f64) * dt
-        let result = rk4_step_pbpk14(curr, t_curr, dt, p)
-        curr = result.state_new
+        let t_step = (iter as f64) * dt
+        var k: i64 = 0
+        while k < m {
+            let result = rk4_step_pbpk14(curr, t_step + (k as f64) * h, h, p)
+            curr = result.state_new
+            k = k + 1
+        }
+        taken = taken + m
         iter = iter + 1
     }
 
@@ -300,7 +377,8 @@ pub fn solve_pbpk14_rk4(init: PBPK14State, p: PBPK14Params, t_sim: f64, n_steps:
         muscle: curr.muscle,
         adipose: curr.adipose,
         brain: curr.brain,
-        nsteps: iter
+        nsteps: iter,
+        substeps: taken
     }
 }
 
