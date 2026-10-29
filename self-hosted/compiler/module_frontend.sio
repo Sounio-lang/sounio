@@ -7,6 +7,7 @@ use parser::ast::{AstPath, empty_path, Item, ItemKind, ItemList, Name, ParamList
 use parser::mod::{count_items}
 use parser::parser::{parser_last_error_count, parser_reset_last_errors}
 use ir::ir::*
+use ir::loop_checkpoint_elision::{loop_checkpoint_elide_module}
 use ir::opt_cleanup::{OcpCleanupModuleReceipt, opt_cleanup_module_inplace, OCP_SKIP_MASK, OCP_RESEARCH_EXACT_INTEGRAL_CENTER, OCP_RESEARCH_EXACT_CENTER_APPLICATIONS, OCP_RESEARCH_EXACT_CENTER_LAST_FUNCTION}
 use io::env::{read_env}
 use compiler::trusted_origins::{trusted_origins_reset, trusted_origins_note}
@@ -7358,6 +7359,32 @@ pub fn module_frontend_compile_imported_to_file(
     module_frontend_compile_imported_to_file_for_target(main_path, output_path, optimize, "native", false)
 }
 
+
+fn module_frontend_loop_checkpoint_cleanup(module: &! IrModule, arch_id: i64, os_id: i64) with IO, Mut, Div, Panic {
+    // Experimental x86_64 Linux native-v2 proof only, independent of -O.
+    // Called before the FIRST seal. Worker cloning/proof happens later.
+    // Opt out only of this pass to compare identical loop-region lowering.
+    if str_eq(read_env("SOUNIO_LOOP_REGIONS"), "1")
+        && !str_eq(read_env("SOUNIO_LOOP_CHECKPOINT_ELISION"), "0")
+        && arch_id == ARCH_X86_64() && os_id == OS_LINUX() {
+        let audit = loop_checkpoint_elide_module(module)
+        print("loop_checkpoint_elision: functions=")
+        print_int(audit.functions)
+        print(" refused=")
+        print_int(audit.refused)
+        print(" entries=")
+        print_int(audit.entries)
+        print(" eligible=")
+        print_int(audit.eligible)
+        print(" neutralized=")
+        print_int(audit.neutralized)
+        print(" status=")
+        print_int(audit.status)
+        print("\n")
+    }
+}
+
+
 pub fn module_frontend_compile_imported_to_file_for_target(
     main_path: string,
     output_path: string,
@@ -7672,12 +7699,14 @@ fn module_frontend_compile_imported_to_file_target_impl(
         } else {
             module_frontend_print_rebracket_disabled("single-disabled", fn_count)
         }
-        // Cleanup is the final mutable IR pass on this route; codegen receives
+        // Cleanup and optional loop-checkpoint elision precede sealing; codegen receives
         // only an immutable module reference after this audit snapshot.
         //
         // #1649: that sentence used to be a comment. Sealing makes it checked --
         // any write past this point lands in quarantine and latches, and the
         // barriers below refuse the binary.
+        let single_target_spec = native_resolve_target(requested_target, "auto", explicit_target)
+        module_frontend_loop_checkpoint_cleanup(&! (*module_box), single_target_spec.arch_id, single_target_spec.os_id)
         let single_sealed = ir_module_seal_functions(&(*module_box))
         module_frontend_print_seal_receipt("single", single_sealed, fn_count)
         module_frontend_print_ordered_path_receipt("single-final", optimize, &(*module_box))
@@ -7700,7 +7729,6 @@ fn module_frontend_compile_imported_to_file_target_impl(
             return 1
         }
         module_frontend_print_float_bits_probe("single", &(*module_box))
-        let single_target_spec = native_resolve_target(requested_target, "auto", explicit_target)
         let single_write_rc = compile_native_v2_preview_to_file(&(*module_box), single_target_spec, output_path)
         if single_write_rc != 0 {
             print("Error: Failed to write native binary to ")
@@ -7780,10 +7808,12 @@ fn module_frontend_compile_imported_to_file_target_impl(
     } else {
         module_frontend_print_rebracket_disabled("merged-disabled", fn_count)
     }
-    // Finalization and cleanup are complete; codegen receives an immutable
+    // Finalization, cleanup and optional loop-checkpoint elision are complete; codegen receives an immutable
     // module reference after this audit snapshot. Sealed, so that claim is
     // checked rather than asserted -- see the single route above.
     print("compile_stage: merged_seal_begin\n")
+    let target_spec = native_resolve_target(requested_target, "auto", explicit_target)
+    module_frontend_loop_checkpoint_cleanup(&! (*module_box), target_spec.arch_id, target_spec.os_id)
     let merged_sealed = ir_module_seal_functions(&(*module_box))
     module_frontend_print_seal_receipt("merged", merged_sealed, fn_count)
     print("compile_stage: merged_ordered_audit_begin\n")
@@ -7813,7 +7843,6 @@ fn module_frontend_compile_imported_to_file_target_impl(
     }
     print("compile_stage: merged_float_probe_begin\n")
     module_frontend_print_float_bits_probe("merged", &(*module_box))
-    let target_spec = native_resolve_target(requested_target, "auto", explicit_target)
     print("compile_stage: merged_native_emit_begin\n")
     let write_rc = compile_native_v2_preview_to_file(&(*module_box), target_spec, output_path)
     print("compile_stage: merged_native_emit_end\n")
