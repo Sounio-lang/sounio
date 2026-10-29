@@ -1689,3 +1689,20 @@ Job 19653. md5 `0c6e3ec49cad29fd5dabdca33785d7c5`.
 Those eighteen words are 2.0 through 19.0. The stored word is 1230.0. The inputs were not overwritten. Barriers 2 and 3 survived a fifth registration.
 
 Gate. Node `gpuorangefs-r770-proxmox`, `--gres=gpu:1`, `--mem=16G`, `--cpus-per-task=4`. The 0.0018 s threshold is not moved. This cut does not pass it.
+
+
+## 69. Ten products (2026-10-29, OBSERVED)
+
+The ninth product left the text at 528 bytes. The tenth needs two more loads and one more `FFMA`. Counted from the original 2600-byte container, the tail after the old text shifts by 320 bytes. The file is 2920 bytes. `.text` is 576 bytes, `0x240`. `e_shoff` is `0x7c0`. `e_phoff` is `0xac0`. The `stamp` symbol size is 576. The load of the constant bank plus the text has file size and memory size `0x400`. `.debug_frame` still carries the length 256. The driver loaded the image.
+
+The tenth pair reuses R8 and R9. Barriers 4 and 5 are registered a fifth time, for 20.0 and 21.0, after the eighth `FFMA` has waited on the fourth registration. The tenth `FFMA` waits on mask 48. The ninth still waits on mask 12. The store displacement is 80. `EXIT` is at pc 560. The register count stays 12.
+
+The host writes the bits of 2.0 through 21.0. In f32, the ten products from 2 times 3 through 20 times 21 sum to 1650.0. The bits of 1650.0 are `0x44ce4000`, which is 1154367488. The bits of 20.0 are 1101004800. The bits of 21.0 are 1101529088. The node was idle. No drain was cleared.
+
+Job 19671. md5 `e9fe9f328f5b652e61c1be01b454e719`.
+
+`OWN=1073741824`, `OWN_ADD=1077936128`, `OWN_SRC=1082130432`, `OWN_WIDE=1084227584`, `OWN_EXT=1086324736`, `OWN_EXT2=1088421888`, `OWN_E8=1090519040`, `OWN_E9=1091567616`, `OWN_E10=1092616192`, `OWN_E11=1093664768`, `OWN_E12=1094713344`, `OWN_E13=1095761920`, `OWN_E14=1096810496`, `OWN_E15=1097859072`, `OWN_E16=1098907648`, `OWN_E17=1099431936`, `OWN_E18=1099956224`, `OWN_E19=1100480512`, `OWN_E20=1101004800`, `OWN_E21=1101529088`, `OWN_SUM=1154367488`, `EXIT:0`.
+
+Those twenty words are 2.0 through 21.0. The stored word is 1650.0. The inputs were not overwritten. Barriers 4 and 5 survived a fifth registration.
+
+Gate. Node `gpuorangefs-r770-proxmox`, `--gres=gpu:1`, `--mem=16G`, `--cpus-per-task=4`. The 0.0018 s threshold is not moved. This cut does not pass it.
