@@ -2702,6 +2702,266 @@ fn flow_join_x86(left: i64, right: i64) -> i64 {
     if left != 0 || right != 0 { return 1 }
     return 0
 }
+
+// Structural x86 flow failures must block publication even in imported code.
+// Keep tc_mark_failed's legacy imported-warning policy unchanged elsewhere.
+fn flow_error_x86(tok:i64,msg:string)->i64 with IO,Mut,Panic {
+    tc_error_hard(tok,msg)
+    TYPECHECK_FAILED = 1
+    return 0
+}
+
+// Emission-only representation proofs. 0=none,1=builtin None,2=builtin Some,
+// 3+ are bounded literal-tuple records. These are compiler facts, never values.
+var FLOW_VALUE_PROOF_X86:i64=0
+var FLOW_VALUE_START_X86:i64=-1
+var FLOW_VALUE_END_X86:i64=-1
+var FLOW_VALUE_TY_X86:i64=0
+var FLOW_VALUE_HASH_X86:i64=0
+var LAST_STMT_PROOF_X86:i64=0
+var FLOW_PROOF_COUNT_X86:i64=0
+var FLOW_PROOF_FRAME_BASE_X86:i64=0
+var FLOW_PROOF_HASH_X86:[i64;4096]=[0;4096]
+var FLOW_PROOF_ARITY_X86:[i64;4096]=[0;4096]
+var FLOW_PROOF_CHILD_X86:[i64;65536]=[0;65536]
+
+fn flow_value_clear_x86() with Mut {
+    FLOW_VALUE_PROOF_X86=0
+    FLOW_VALUE_START_X86=-1
+    FLOW_VALUE_END_X86=-1
+    FLOW_VALUE_TY_X86=0
+    FLOW_VALUE_HASH_X86=0
+}
+
+fn flow_builtin_constructor_x86(tok:i64)->bool with Mut,Panic,Div {
+    if !flow_counts_valid_x86(EN_COUNT,ST_COUNT,TC) || tok<0 || tok>=TC {return false}
+    if TK[tok as usize]!=57 && TK[tok as usize]!=58 {return false}
+    // Qualified forms, including Option::None, are outside this initial proof.
+    if tok>0 && TK[(tok-1) as usize]==51 {return false}
+    if VAR_COUNT<0 || VAR_COUNT>1024 || FN_COUNT<0 || FN_COUNT>65536 {return false}
+    if GL_COUNT<0 || GL_COUNT>global_cap() {return false}
+    let ns=TS[tok as usize]
+    let ne=TE[tok as usize]
+    if var_find_idx(ns,ne)>=0 || fn_find(ns,ne)>=0 || gl_find(ns,ne)>=0 {return false}
+    let h=gl_name_hash(ns,ne)
+    var ei:i64=0
+    while ei<EN_COUNT {
+        let n=EN[(ei*256+1) as usize]
+        if n<0 || n>254 {return false}
+        var i:i64=0
+        while i<n {
+            // A collision conserves too: it cannot authorize this constructor.
+            if EN[(ei*256+2+i) as usize]==h {return false}
+            i=i+1
+        }
+        ei=ei+1
+    }
+    return true
+}
+
+fn flow_value_note_x86(proof:i64,start:i64,end:i64,ty:i64,h:i64) with Mut {
+    FLOW_VALUE_PROOF_X86=proof
+    FLOW_VALUE_START_X86=start
+    FLOW_VALUE_END_X86=end
+    FLOW_VALUE_TY_X86=ty
+    FLOW_VALUE_HASH_X86=h
+}
+fn flow_value_at_x86(start:i64,end:i64,ty:i64,h:i64)->i64 with Mut {
+    if FLOW_VALUE_START_X86!=start || FLOW_VALUE_END_X86!=end {return 0}
+    if FLOW_VALUE_TY_X86!=ty || FLOW_VALUE_HASH_X86!=h {return 0}
+    return FLOW_VALUE_PROOF_X86
+}
+fn flow_proof_counts_x86()->bool with Mut {
+    if FLOW_PROOF_COUNT_X86<0 || FLOW_PROOF_COUNT_X86>4096 {return false}
+    if FLOW_PROOF_FRAME_BASE_X86<0 || FLOW_PROOF_FRAME_BASE_X86>FLOW_PROOF_COUNT_X86 {return false}
+    if TUP_CACHE_COUNT<0 || TUP_CACHE_COUNT>16384 {return false}
+    if RH_INTERN_COUNT<0 || RH_INTERN_COUNT>1024 || ST_COUNT<0 || ST_COUNT>1024 {return false}
+    return true
+}
+fn flow_proof_row_x86(proof:i64,h:i64,n:i64)->i64 with Mut,Panic {
+    if !flow_proof_counts_x86() || proof<3 {return -1}
+    let ix=proof-3
+    if ix<FLOW_PROOF_FRAME_BASE_X86 || ix>=FLOW_PROOF_COUNT_X86 {return -1}
+    if n<2 || n>16 {return -1}
+    if FLOW_PROOF_HASH_X86[ix as usize]!=h || FLOW_PROOF_ARITY_X86[ix as usize]!=n {return -1}
+    return ix
+}
+// No proof is needed for ordinary tuples. Exhaustion drops the optional fact;
+// a later coercion needing it then fails the structural join, never guesses.
+fn flow_proof_tuple_x86(h:i64,n:i64,children:[i64;16],tys:[i64;16],hashes:[i64;16])->i64 with Mut,Panic {
+    if !flow_proof_counts_x86() || n<2 || n>16 {return 0}
+    if FLOW_PROOF_COUNT_X86>=4096 || FLOW_PROOF_COUNT_X86-FLOW_PROOF_FRAME_BASE_X86>=1024 {return 0}
+    let ci=tup_cache_lookup(h)
+    if ci<0 || TUP_CACHE_HAS_ROW[ci as usize]!=1 || TUP_CACHE_TCOUNT[ci as usize]!=n {return 0}
+    var has:i64=0
+    var i:i64=0
+    while i<n {
+        // The packed cache key is not identity. Bind the proof to the actual
+        // emitted row, refusing a merged/colliding cache row.
+        if TUP_CACHE_ELEM_TY[(ci*16+i) as usize]!=tys[i as usize] {return 0}
+        if TUP_CACHE_ELEM_HASH[(ci*16+i) as usize]!=hashes[i as usize] {return 0}
+        if children[i as usize]!=0 {has=1}
+        i=i+1
+    }
+    if has==0 {return 0}
+    let ix=FLOW_PROOF_COUNT_X86
+    FLOW_PROOF_HASH_X86[ix as usize]=h
+    FLOW_PROOF_ARITY_X86[ix as usize]=n
+    i=0
+    while i<n {
+        FLOW_PROOF_CHILD_X86[(ix*16+i) as usize]=children[i as usize]
+        i=i+1
+    }
+    FLOW_PROOF_COUNT_X86=ix+1
+    return ix+3
+}
+fn flow_word_box_payload_x86(ty:i64,h:i64,depth:i64)->bool with Mut,Panic,Div {
+    if depth>=16 {return false}
+    if (ty==1 || ty==2 || ty==4) && h==0 {return true}
+    if ty!=11 || !box_hash_is(h) {return false}
+    if RH_INTERN_COUNT<0 || RH_INTERN_COUNT>1024 || ST_COUNT<0 || ST_COUNT>1024 {return false}
+    let inner=ptr_hash_inner_ty(h)
+    let ih=ptr_hash_inner_hash(h)
+    if (inner==1 || inner==2 || inner==4) && ih==0 {return true}
+    if inner==6 && ih!=0 && st_find(ih)>=0 {return true}
+    if inner==11 {return flow_word_box_payload_x86(inner,ih,depth+1)}
+    return false
+}
+// 0=mismatch,1=exact bounded representation,2=representation plus a proved
+// None inference. Both the expected Some and actual None are emission facts.
+fn flow_sibling_value_x86(et:i64,eh:i64,ep:i64,at:i64,ah:i64,ap:i64,depth:i64)->i64 with Mut,Panic,Div {
+    if depth>=16 || !flow_proof_counts_x86() {return 0}
+    if et!=at {return 0}
+    if et==6 {
+        // A nested tuple cell is a pointer into its producer's frame. The
+        // legacy return transport is not yet qualified to preserve that cell.
+        if depth!=0 {return 0}
+        if ST_COUNT<0 || ST_COUNT>1024 {return 0}
+        let ei=tup_cache_lookup(eh)
+        let ai=tup_cache_lookup(ah)
+        if ei<0 || ai<0 {return 0}
+        if TUP_CACHE_HAS_ROW[ei as usize]!=1 || TUP_CACHE_HAS_ROW[ai as usize]!=1 {return 0}
+        let n=TUP_CACHE_TCOUNT[ei as usize]
+        if n<2 || n>16 || TUP_CACHE_TCOUNT[ai as usize]!=n {return 0}
+        let er=flow_proof_row_x86(ep,eh,n)
+        let ar=flow_proof_row_x86(ap,ah,n)
+        if er<0 || ar<0 {return 0}
+        if ret_agg_nslots(et,eh)!=ret_agg_nslots(at,ah) {return 0}
+        var result:i64=1
+        var i:i64=0
+        while i<n {
+            let e=ei*16+i
+            let a=ai*16+i
+            let e_t=TUP_CACHE_ELEM_TY[e as usize]
+            let e_h=TUP_CACHE_ELEM_HASH[e as usize]
+            let a_t=TUP_CACHE_ELEM_TY[a as usize]
+            let a_h=TUP_CACHE_ELEM_HASH[a as usize]
+            if ty_slot_count(e_t,e_h)!=ty_slot_count(a_t,a_h) {return 0}
+            let r=flow_sibling_value_x86(e_t,e_h,FLOW_PROOF_CHILD_X86[(er*16+i) as usize],a_t,a_h,FLOW_PROOF_CHILD_X86[(ar*16+i) as usize],depth+1)
+            if r==0 {return 0}
+            if r==2 {result=2}
+            i=i+1
+        }
+        return result
+    }
+    if et==11 {
+        if !option_hash_is(eh) || ep!=2 {return 0}
+        if !flow_word_box_payload_x86(option_hash_inner_ty(eh),option_hash_inner_hash(eh),0) {return 0}
+        if ah==0 && ap==1 {return 2}
+        if ah==eh && ap==2 {return 1}
+        return 0
+    }
+    if (et==1 || et==2 || et==4) && eh==0 && ah==0 {return 1}
+    return 0
+}
+fn flow_sibling_tuple_hash_x86(at:i64,ah:i64,ap:i64,bt:i64,bh:i64,bp:i64)->i64 with Mut,Panic,Div {
+    if at!=6 || bt!=6 {return 0}
+    if flow_sibling_value_x86(at,ah,ap,bt,bh,bp,0)==2 {return ah}
+    if flow_sibling_value_x86(bt,bh,bp,at,ah,ap,0)==2 {return bh}
+    return 0
+}
+fn flow_proof_same_x86(a:i64,b:i64,h:i64,depth:i64)->bool with Mut,Panic {
+    if a==0 || b==0 || depth>=16 || !flow_proof_counts_x86() {return false}
+    if a<3 || b<3 {return a==b}
+    let ci=tup_cache_lookup(h)
+    if ci<0 {return false}
+    let n=TUP_CACHE_TCOUNT[ci as usize]
+    let ar=flow_proof_row_x86(a,h,n)
+    let br=flow_proof_row_x86(b,h,n)
+    if ar<0 || br<0 {return false}
+    var i:i64=0
+    while i<n {
+        let ac=FLOW_PROOF_CHILD_X86[(ar*16+i) as usize]
+        let bc=FLOW_PROOF_CHILD_X86[(br*16+i) as usize]
+        if ac!=0 || bc!=0 {
+            if !flow_proof_same_x86(ac,bc,TUP_CACHE_ELEM_HASH[(ci*16+i) as usize],depth+1) {return false}
+        }
+        i=i+1
+    }
+    return true
+}
+
+var FLOW_JOIN_HASH_X86:i64=0
+var FLOW_JOIN_PROOF_X86:i64=0
+fn flow_match_join_x86(at:i64,ah:i64,ap:i64,bt:i64,bh:i64,bp:i64)->bool with Mut,Panic,Div {
+    FLOW_JOIN_HASH_X86=ah
+    FLOW_JOIN_PROOF_X86=0
+    if ty_eq(at,ah,bt,bh) {
+        if flow_proof_same_x86(ap,bp,ah,0) {FLOW_JOIN_PROOF_X86=ap}
+        return true
+    }
+    let common=flow_sibling_tuple_hash_x86(at,ah,ap,bt,bh,bp)
+    if common==0 {return false}
+    FLOW_JOIN_HASH_X86=common
+    return true
+}
+
+fn flow_transportable_x86(ty:i64,h:i64,proof:i64)->bool with Mut,Panic,Div {
+    if !flow_proof_counts_x86() {return false}
+    if ty==11 {
+        if proof==1 {return h==0}
+        if proof==2 && option_hash_is(h) {
+            return flow_word_box_payload_x86(option_hash_inner_ty(h),option_hash_inner_hash(h),0)
+        }
+        return false
+    }
+    if ty!=6 {return false}
+    let ci=tup_cache_lookup(h)
+    if ci<0 || TUP_CACHE_HAS_ROW[ci as usize]!=1 {return false}
+    let n=TUP_CACHE_TCOUNT[ci as usize]
+    let pi=flow_proof_row_x86(proof,h,n)
+    if pi<0 {return false}
+    var i:i64=0
+    while i<n {
+        let t=TUP_CACHE_ELEM_TY[(ci*16+i) as usize]
+        let ch=TUP_CACHE_ELEM_HASH[(ci*16+i) as usize]
+        let cp=FLOW_PROOF_CHILD_X86[(pi*16+i) as usize]
+        // No proof transport across a nested tuple pointer cell.
+        if t==6 && tup_cache_lookup(ch)>=0 {return false}
+        if cp!=0 && !flow_transportable_x86(t,ch,cp) {return false}
+        i=i+1
+    }
+    return true
+}
+// Meet existing emission facts; this does not perform None coercion.
+fn flow_transport_join_x86(lt:i64,lh:i64,lp:i64,lf:i64,lv:i64,rt:i64,rh:i64,rp:i64,rf:i64,rv:i64)->i64 with Mut,Panic,Div {
+    if lf==0 && rf==0 {return 0}
+    if lf!=0 && rf==0 {
+        if lv==1 && flow_transportable_x86(lt,lh,lp) {return lp}
+        return 0
+    }
+    if lf==0 && rf!=0 {
+        if rv==1 && flow_transportable_x86(rt,rh,rp) {return rp}
+        return 0
+    }
+    if lv!=1 || rv!=1 || lt!=rt || lh!=rh {return 0}
+    if ty_slot_count(lt,lh)!=ty_slot_count(rt,rh) || ret_agg_nslots(lt,lh)!=ret_agg_nslots(rt,rh) {return 0}
+    if !flow_transportable_x86(lt,lh,lp) || !flow_transportable_x86(rt,rh,rp) {return 0}
+    if flow_proof_same_x86(lp,rp,lh,0) {return lp}
+    return 0
+}
+
+
 // x86-only coverage sidecar. EN is a legacy spelling-hash registry;
 // validation binds each accepted entry back to unique source tokens.
 var FLOW_EN_DECL_TOK_X86: [i64; 256] = [-1; 256]
@@ -17051,9 +17311,12 @@ fn primary_fallback_report(tok: i64) with IO, Mut, Panic {
     while bad_i < TE[tok as usize] { print_char(SRC[bad_i as usize] as i64); bad_i = bad_i + 1 }
     print("`\n")
     tc_mark_failed()
+    // A parser fallback never denotes a publishable imported function.
+    TYPECHECK_FAILED = 1
 }
 
 fn compile_primary() with IO, Mut, Panic, Div {
+    flow_value_clear_x86()
     if tc_reject_rust_macro_at(EP) { }
     LAST_EXPR_IS_CLOSURE = 0
     LAST_EXPR_IS_LINEAR = 0
@@ -17172,7 +17435,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
     if k == 48 {
         let match_tok = EP
         compile_stmt()
-        if LAST_STMT_HAS_VALUE == 0 && LAST_STMT_CAN_FALLTHROUGH_X86 != 0 { tc_error_hard(match_tok, "match expression must yield a value") }
+        if LAST_STMT_HAS_VALUE == 0 && LAST_STMT_CAN_FALLTHROUGH_X86 != 0 { flow_error_x86(match_tok, "match expression must yield a value") }
         EXPR_TY = LAST_STMT_TY
         EXPR_TY_HASH = LAST_STMT_TY_HASH
         if EXPR_TY == 2 { EXPR_IS_F64 = 1 }
@@ -17182,7 +17445,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
     if k == 13 {
         let if_tok = EP
         compile_stmt()
-        if LAST_STMT_HAS_VALUE == 0 && LAST_STMT_CAN_FALLTHROUGH_X86 != 0 { tc_error_hard(if_tok, "if expression must yield a value") }
+        if LAST_STMT_HAS_VALUE == 0 && LAST_STMT_CAN_FALLTHROUGH_X86 != 0 { flow_error_x86(if_tok, "if expression must yield a value") }
         EXPR_TY = LAST_STMT_TY
         EXPR_TY_HASH = LAST_STMT_TY_HASH
         if EXPR_TY == 2 { EXPR_IS_F64 = 1 }
@@ -17517,6 +17780,11 @@ fn compile_primary() with IO, Mut, Panic, Div {
         }
         // Compile body: a nested closure has its own reachability context.
         let cl_save_flow_x86 = LAST_STMT_CAN_FALLTHROUGH_X86
+        let cl_proof_count_x86=FLOW_PROOF_COUNT_X86
+        let cl_proof_frame_x86=FLOW_PROOF_FRAME_BASE_X86
+        FLOW_PROOF_FRAME_BASE_X86=FLOW_PROOF_COUNT_X86
+        flow_value_clear_x86()
+        LAST_STMT_PROOF_X86=0
         LAST_STMT_CAN_FALLTHROUGH_X86 = 1
         LAST_STMT_HAS_VALUE = 0
         if TK[EP as usize] == 8 {
@@ -17545,6 +17813,10 @@ fn compile_primary() with IO, Mut, Panic, Div {
         let saved_cap_count = CL_CAP_COUNT
         // Restore outer function state
         LAST_STMT_CAN_FALLTHROUGH_X86 = cl_save_flow_x86
+        FLOW_PROOF_COUNT_X86=cl_proof_count_x86
+        FLOW_PROOF_FRAME_BASE_X86=cl_proof_frame_x86
+        flow_value_clear_x86()
+        LAST_STMT_PROOF_X86=0
         VAR_COUNT = save_vc
         cl_shadow_restore(cl_sh_base, save_vc)
         var cl_ci1: i64 = 0
@@ -17640,6 +17912,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
     }
     // None → 2-qword tagged union [tag=0, value=0]
     if k == 58 {
+        let flow_none_start_x86=EP
         EP = EP + 1
         let base = NEXT_SLOT
         NEXT_SLOT = NEXT_SLOT + 2
@@ -17651,10 +17924,14 @@ fn compile_primary() with IO, Mut, Panic, Div {
         EXPR_IS_F64 = 0
         EXPR_TY = 11
         EXPR_TY_HASH = 0
+        // This fact follows the actual two zero stores above, not token text.
+        flow_value_clear_x86()
+        if flow_builtin_constructor_x86(flow_none_start_x86) {flow_value_note_x86(1,flow_none_start_x86,EP,EXPR_TY,EXPR_TY_HASH)}
         return
     }
     // Some(expr) → 2-qword tagged union [tag=1, value=expr]
     if k == 57 {
+        let flow_some_start_x86=EP
         EP = EP + 1
         if TK[EP as usize] == 6 { EP = EP + 1 }
         compile_or()
@@ -17671,6 +17948,8 @@ fn compile_primary() with IO, Mut, Panic, Div {
         EXPR_IS_F64 = 0
         EXPR_TY = 11
         EXPR_TY_HASH = option_hash_make(some_inner_ty, some_inner_hash)
+        flow_value_clear_x86()
+        if flow_builtin_constructor_x86(flow_some_start_x86) {flow_value_note_x86(2,flow_some_start_x86,EP,EXPR_TY,EXPR_TY_HASH)}
         return
     }
     // Ok(expr) → 2-qword tagged union [tag=0, payload=expr]
@@ -17768,6 +18047,8 @@ fn compile_primary() with IO, Mut, Panic, Div {
             // the buffer was sized first+last only, dropping every middle
             // element's slots too. Bug G / issue #601: this both mistyped and,
             // for tuples of 3+ same-typed elements, silently duplicated values.)
+            var elem_proof_x86:[i64;16]=[0;16]
+            elem_proof_x86[0]=flow_value_at_x86(paren_open+1,EP,EXPR_TY,EXPR_TY_HASH)
             var elem_ty: [i64; 16] = [0; 16]
             var elem_hash: [i64; 16] = [0; 16]
             var elem_nslots: [i64; 16] = [0; 16]
@@ -17783,11 +18064,13 @@ fn compile_primary() with IO, Mut, Panic, Div {
             while ep_before_body_close() && TK[EP as usize] == 28 {
                 EP = EP + 1  // skip ,
                 if TK[EP as usize] == 7 { break }  // trailing comma
+                let elem_start_x86=EP
                 compile_or()
                 if n >= 16 {
                     tc_error_hard(EP, "tuple literal exceeds maximum of 16 elements")
                     n = n + 1
                 } else {
+                    elem_proof_x86[n as usize]=flow_value_at_x86(elem_start_x86,EP,EXPR_TY,EXPR_TY_HASH)
                     elem_ty[n as usize] = EXPR_TY
                     elem_hash[n as usize] = EXPR_TY_HASH
                     elem_nslots[n as usize] = ty_slot_count(EXPR_TY, EXPR_TY_HASH)
@@ -17858,6 +18141,8 @@ fn compile_primary() with IO, Mut, Panic, Div {
             }
             TUP_SCRATCH_COUNT = real_n
             EXPR_TY_HASH = tup_cache_register(EXPR_TY_HASH, first_ty, first_hash, last_ty, last_hash)
+            let tuple_proof_x86=flow_proof_tuple_x86(EXPR_TY_HASH,real_n,elem_proof_x86,elem_ty,elem_hash)
+            flow_value_note_x86(tuple_proof_x86,paren_open,EP,EXPR_TY,EXPR_TY_HASH)
             return
         }
         if TK[EP as usize] == 7 { EP = EP + 1 }
@@ -31021,8 +31306,14 @@ fn tc_shared_ref_store(tok: i64) -> i64 with IO, Mut, Panic {
 
 fn compile_stmt() with IO, Mut, Panic, Div {
     let prior_flow = LAST_STMT_CAN_FALLTHROUGH_X86
+    let proof_start_x86=EP
+    LAST_STMT_PROOF_X86=0
     LAST_STMT_CAN_FALLTHROUGH_X86 = 1
     compile_stmt_body_x86()
+    LAST_STMT_PROOF_X86=0
+    if LAST_STMT_HAS_VALUE==1 {
+        LAST_STMT_PROOF_X86=flow_value_at_x86(proof_start_x86,EP,LAST_STMT_TY,LAST_STMT_TY_HASH)
+    }
     LAST_STMT_CAN_FALLTHROUGH_X86 = flow_sequence_x86(prior_flow, LAST_STMT_CAN_FALLTHROUGH_X86)
 }
 
@@ -32414,12 +32705,17 @@ fn compile_stmt_body_x86() with IO, Mut, Panic, Div {
     if k == 2 {
         EP = EP + 1
         var fsh_ret_src: i64 = -1
-        if TK[EP as usize] != 9 {
+        var return_comma_unit_x86:i64 = 0
+        // A comma ends a bare return arm, as in the modern at_expr_start parser.
+        // No other delimiter is newly accepted here.
+        if TK[EP as usize] != 9 && TK[EP as usize] != 28 {
             compile_or()
             fsh_ret_src = fsh_expr_agg()
         }
         else {
+            if TK[EP as usize] == 28 { return_comma_unit_x86 = 1 }
             em(0x31); em(0xc0)
+            EXPR_IS_F64 = 0
             EXPR_TY = 5
             EXPR_TY_HASH = 0
         }
@@ -32441,7 +32737,8 @@ fn compile_stmt_body_x86() with IO, Mut, Panic, Div {
                     if type_has_knowledge(CURRENT_RET_TY, CURRENT_RET_HASH) || type_has_knowledge(EXPR_TY, EXPR_TY_HASH) {
                         tc_epistemic_boundary(EP)
                     } else {
-                        tc_error_hard(EP - 1, "return type does not match function signature")
+                        if return_comma_unit_x86 != 0 { flow_error_x86(EP - 1, "return type does not match function signature") }
+                        else { tc_error_hard(EP - 1, "return type does not match function signature") }
                     }
                 }
             }
@@ -32720,6 +33017,7 @@ fn compile_stmt_body_x86() with IO, Mut, Panic, Div {
             while ep_before_body_close() && TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt() }
             let il_then_flow_x86 = LAST_STMT_CAN_FALLTHROUGH_X86
             let il_then_ch_set_x86 = EXPR_CH_SET
+            let il_then_proof_x86=LAST_STMT_PROOF_X86
             let il_then_has_value = LAST_STMT_HAS_VALUE
             let il_then_ty = LAST_STMT_TY
             let il_then_hash = LAST_STMT_TY_HASH
@@ -32754,6 +33052,7 @@ fn compile_stmt_body_x86() with IO, Mut, Panic, Div {
                     while ep_before_body_close() && TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt() }
                     if TK[EP as usize] == 9 { EP = EP + 1 }
                 }
+                let il_else_proof_x86=LAST_STMT_PROOF_X86
                 let il_else_has_value = LAST_STMT_HAS_VALUE
                 let il_else_ty = LAST_STMT_TY
                 let il_else_hash = LAST_STMT_TY_HASH
@@ -32773,14 +33072,18 @@ fn compile_stmt_body_x86() with IO, Mut, Panic, Div {
                 LAST_STMT_HAS_VALUE = 0; LAST_STMT_TY = 0; LAST_STMT_TY_HASH = 0
                 if il_then_flow_x86 != 0 && il_then_value_x86 && (il_else_flow_x86 == 0 || il_else_value_x86) {
                     if il_else_flow_x86 != 0 && ty_eq(il_then_ty, il_then_hash, il_else_ty, il_else_hash) == false {
-                        tc_error_hard(EP - 1, "if-let arm type does not match else arm")
+                        flow_error_x86(EP - 1, "if-let arm type does not match else arm")
                     }
                     LAST_STMT_HAS_VALUE = 1; LAST_STMT_TY = il_then_ty; LAST_STMT_TY_HASH = il_then_hash
+                    let joined_proof_x86=flow_transport_join_x86(il_then_ty,il_then_hash,il_then_proof_x86,il_then_flow_x86,il_then_has_value,il_else_ty,il_else_hash,il_else_proof_x86,il_else_flow_x86,il_else_has_value)
+                    flow_value_note_x86(joined_proof_x86,if_tok,EP,LAST_STMT_TY,LAST_STMT_TY_HASH)
                     EXPR_TY = il_then_ty; EXPR_TY_HASH = il_then_hash
                     EXPR_CH_SET = il_then_ch_set_x86
                     if il_else_flow_x86 != 0 { EXPR_CH_SET = EXPR_CH_SET | il_else_ch_set_x86 }
                 } else if il_then_flow_x86 == 0 && il_else_flow_x86 != 0 && il_else_value_x86 {
                     LAST_STMT_HAS_VALUE = 1; LAST_STMT_TY = il_else_ty; LAST_STMT_TY_HASH = il_else_hash
+                    let joined_proof_x86=flow_transport_join_x86(il_then_ty,il_then_hash,il_then_proof_x86,il_then_flow_x86,il_then_has_value,il_else_ty,il_else_hash,il_else_proof_x86,il_else_flow_x86,il_else_has_value)
+                    flow_value_note_x86(joined_proof_x86,if_tok,EP,LAST_STMT_TY,LAST_STMT_TY_HASH)
                     EXPR_TY = il_else_ty; EXPR_TY_HASH = il_else_hash
                     EXPR_CH_SET = il_else_ch_set_x86
                 }
@@ -32829,6 +33132,7 @@ fn compile_stmt_body_x86() with IO, Mut, Panic, Div {
         while ep_before_body_close() && TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt() }
         // β⁹ GTT week-6 stage-2: capture then-body's tail channel-set topology.
         let if_then_ch_set = EXPR_CH_SET
+        let then_proof_x86=LAST_STMT_PROOF_X86
         let then_has_value = LAST_STMT_HAS_VALUE
         let then_flow_x86 = LAST_STMT_CAN_FALLTHROUGH_X86
         let then_ty = LAST_STMT_TY
@@ -32907,6 +33211,7 @@ fn compile_stmt_body_x86() with IO, Mut, Panic, Div {
                 }
                 lchk = lchk + 1
             }
+            let else_proof_x86=LAST_STMT_PROOF_X86
             let else_has_value = LAST_STMT_HAS_VALUE
             let else_flow_x86 = LAST_STMT_CAN_FALLTHROUGH_X86
             let else_ty = LAST_STMT_TY
@@ -32926,11 +33231,13 @@ fn compile_stmt_body_x86() with IO, Mut, Panic, Div {
             // them; compile_primary/non-Unit tails reject value consumption.
             if then_flow_x86 != 0 && then_value_x86 && (else_flow_x86 == 0 || else_value_x86) {
                 if else_flow_x86 != 0 && ty_eq(then_ty, then_hash, else_ty, else_hash) == false {
-                    tc_error_hard(EP - 1, "if arm type does not match else arm")
+                    flow_error_x86(EP - 1, "if arm type does not match else arm")
                 }
                 LAST_STMT_HAS_VALUE = 1
                 LAST_STMT_TY = then_ty
                 LAST_STMT_TY_HASH = then_hash
+                let joined_proof_x86=flow_transport_join_x86(then_ty,then_hash,then_proof_x86,then_flow_x86,then_has_value,else_ty,else_hash,else_proof_x86,else_flow_x86,else_has_value)
+                flow_value_note_x86(joined_proof_x86,if_tok,EP,LAST_STMT_TY,LAST_STMT_TY_HASH)
                 EXPR_TY = then_ty
                 EXPR_TY_HASH = then_hash
                 if then_ty == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
@@ -32945,6 +33252,8 @@ fn compile_stmt_body_x86() with IO, Mut, Panic, Div {
                 LAST_STMT_HAS_VALUE = 1
                 LAST_STMT_TY = else_ty
                 LAST_STMT_TY_HASH = else_hash
+                let joined_proof_x86=flow_transport_join_x86(then_ty,then_hash,then_proof_x86,then_flow_x86,then_has_value,else_ty,else_hash,else_proof_x86,else_flow_x86,else_has_value)
+                flow_value_note_x86(joined_proof_x86,if_tok,EP,LAST_STMT_TY,LAST_STMT_TY_HASH)
                 EXPR_TY = else_ty
                 EXPR_TY_HASH = else_hash
                 if else_ty == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
@@ -33436,6 +33745,7 @@ fn compile_stmt_body_x86() with IO, Mut, Panic, Div {
     // match expr { pattern => body, ... }
     // 48 = match keyword
     if k == 48 {
+        let match_tok=EP
         EP = EP + 1
         compile_or()  // scrutinee in rax
         // β⁹ GTT week-7: capture scrutinee channel topology before any arm body
@@ -33465,6 +33775,7 @@ fn compile_stmt_body_x86() with IO, Mut, Panic, Div {
         var match_ends: [i64; 256] = [0; 256]
         var match_ty: i64 = 0
         var match_hash: i64 = 0
+        var match_proof_x86:i64=0
         var match_have_ty: i64 = 0
         var match_live_x86: i64 = 0
         var match_exhaustive_x86: i64 = 0
@@ -33778,8 +34089,10 @@ fn compile_stmt_body_x86() with IO, Mut, Panic, Div {
                 if LAST_STMT_CAN_FALLTHROUGH_X86 != 0 {
                     match_live_x86 = 1
                     if LAST_STMT_HAS_VALUE == 1 && LAST_STMT_TY != 5 {
-                    if match_have_ty == 0 { match_have_ty = 1; match_ty = LAST_STMT_TY; match_hash = LAST_STMT_TY_HASH }
-                    else if ty_eq(match_ty, match_hash, LAST_STMT_TY, LAST_STMT_TY_HASH) == false { tc_error_hard(EP - 1, "match arm type does not match other arms") }
+                    if match_have_ty == 0 { match_have_ty = 1; match_ty = LAST_STMT_TY; match_hash = LAST_STMT_TY_HASH; FLOW_JOIN_HASH_X86=match_hash; FLOW_JOIN_PROOF_X86=LAST_STMT_PROOF_X86 }
+                    else if flow_match_join_x86(match_ty,match_hash,match_proof_x86,LAST_STMT_TY,LAST_STMT_TY_HASH,LAST_STMT_PROOF_X86) == false { flow_error_x86(EP - 1, "match arm type does not match other arms") }
+                        match_hash=FLOW_JOIN_HASH_X86
+                        match_proof_x86=FLOW_JOIN_PROOF_X86
                         if LAST_STMT_TY == 2 {
                             if match_shadow_base_x86 < 0 { match_shadow_base_x86 = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 69 }
                             match_mask0_x86 = match_mask0_x86 | flow_shadow_mask_x86(0)
@@ -33864,8 +34177,10 @@ fn compile_stmt_body_x86() with IO, Mut, Panic, Div {
                 if LAST_STMT_CAN_FALLTHROUGH_X86 != 0 {
                     match_live_x86 = 1
                     if LAST_STMT_HAS_VALUE == 1 && LAST_STMT_TY != 5 {
-                    if match_have_ty == 0 { match_have_ty = 1; match_ty = LAST_STMT_TY; match_hash = LAST_STMT_TY_HASH }
-                    else if ty_eq(match_ty, match_hash, LAST_STMT_TY, LAST_STMT_TY_HASH) == false { tc_error_hard(EP - 1, "match arm type does not match other arms") }
+                    if match_have_ty == 0 { match_have_ty = 1; match_ty = LAST_STMT_TY; match_hash = LAST_STMT_TY_HASH; FLOW_JOIN_HASH_X86=match_hash; FLOW_JOIN_PROOF_X86=LAST_STMT_PROOF_X86 }
+                    else if flow_match_join_x86(match_ty,match_hash,match_proof_x86,LAST_STMT_TY,LAST_STMT_TY_HASH,LAST_STMT_PROOF_X86) == false { flow_error_x86(EP - 1, "match arm type does not match other arms") }
+                        match_hash=FLOW_JOIN_HASH_X86
+                        match_proof_x86=FLOW_JOIN_PROOF_X86
                         if LAST_STMT_TY == 2 {
                             if match_shadow_base_x86 < 0 { match_shadow_base_x86 = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 69 }
                             match_mask0_x86 = match_mask0_x86 | flow_shadow_mask_x86(0)
@@ -33928,8 +34243,10 @@ fn compile_stmt_body_x86() with IO, Mut, Panic, Div {
                 if LAST_STMT_CAN_FALLTHROUGH_X86 != 0 {
                     match_live_x86 = 1
                     if LAST_STMT_HAS_VALUE == 1 && LAST_STMT_TY != 5 {
-                    if match_have_ty == 0 { match_have_ty = 1; match_ty = LAST_STMT_TY; match_hash = LAST_STMT_TY_HASH }
-                    else if ty_eq(match_ty, match_hash, LAST_STMT_TY, LAST_STMT_TY_HASH) == false { tc_error_hard(EP - 1, "match arm type does not match other arms") }
+                    if match_have_ty == 0 { match_have_ty = 1; match_ty = LAST_STMT_TY; match_hash = LAST_STMT_TY_HASH; FLOW_JOIN_HASH_X86=match_hash; FLOW_JOIN_PROOF_X86=LAST_STMT_PROOF_X86 }
+                    else if flow_match_join_x86(match_ty,match_hash,match_proof_x86,LAST_STMT_TY,LAST_STMT_TY_HASH,LAST_STMT_PROOF_X86) == false { flow_error_x86(EP - 1, "match arm type does not match other arms") }
+                        match_hash=FLOW_JOIN_HASH_X86
+                        match_proof_x86=FLOW_JOIN_PROOF_X86
                         if LAST_STMT_TY == 2 {
                             if match_shadow_base_x86 < 0 { match_shadow_base_x86 = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 69 }
                             match_mask0_x86 = match_mask0_x86 | flow_shadow_mask_x86(0)
@@ -33999,10 +34316,12 @@ fn compile_stmt_body_x86() with IO, Mut, Panic, Div {
                         if match_have_ty == 0 {
                             match_have_ty = 1
                             match_ty = LAST_STMT_TY
-                            match_hash = LAST_STMT_TY_HASH
-                        } else if ty_eq(match_ty, match_hash, LAST_STMT_TY, LAST_STMT_TY_HASH) == false {
-                            tc_error_hard(EP - 1, "match arm type does not match other arms")
+                            match_hash = LAST_STMT_TY_HASH; FLOW_JOIN_HASH_X86=match_hash; FLOW_JOIN_PROOF_X86=LAST_STMT_PROOF_X86
+                        } else if flow_match_join_x86(match_ty,match_hash,match_proof_x86,LAST_STMT_TY,LAST_STMT_TY_HASH,LAST_STMT_PROOF_X86) == false {
+                            flow_error_x86(EP - 1, "match arm type does not match other arms")
                         }
+                            match_hash=FLOW_JOIN_HASH_X86
+                            match_proof_x86=FLOW_JOIN_PROOF_X86
                             if LAST_STMT_TY == 2 {
                                 if match_shadow_base_x86 < 0 { match_shadow_base_x86 = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 69 }
                                 match_mask0_x86 = match_mask0_x86 | flow_shadow_mask_x86(0)
@@ -34043,10 +34362,12 @@ fn compile_stmt_body_x86() with IO, Mut, Panic, Div {
                         if match_have_ty == 0 {
                             match_have_ty = 1
                             match_ty = LAST_STMT_TY
-                            match_hash = LAST_STMT_TY_HASH
-                        } else if ty_eq(match_ty, match_hash, LAST_STMT_TY, LAST_STMT_TY_HASH) == false {
-                            tc_error_hard(EP - 1, "match arm type does not match other arms")
+                            match_hash = LAST_STMT_TY_HASH; FLOW_JOIN_HASH_X86=match_hash; FLOW_JOIN_PROOF_X86=LAST_STMT_PROOF_X86
+                        } else if flow_match_join_x86(match_ty,match_hash,match_proof_x86,LAST_STMT_TY,LAST_STMT_TY_HASH,LAST_STMT_PROOF_X86) == false {
+                            flow_error_x86(EP - 1, "match arm type does not match other arms")
                         }
+                            match_hash=FLOW_JOIN_HASH_X86
+                            match_proof_x86=FLOW_JOIN_PROOF_X86
                             if LAST_STMT_TY == 2 {
                                 if match_shadow_base_x86 < 0 { match_shadow_base_x86 = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 69 }
                                 match_mask0_x86 = match_mask0_x86 | flow_shadow_mask_x86(0)
@@ -34084,10 +34405,12 @@ fn compile_stmt_body_x86() with IO, Mut, Panic, Div {
                     if match_have_ty == 0 {
                         match_have_ty = 1
                         match_ty = LAST_STMT_TY
-                        match_hash = LAST_STMT_TY_HASH
-                    } else if ty_eq(match_ty, match_hash, LAST_STMT_TY, LAST_STMT_TY_HASH) == false {
-                        tc_error_hard(EP - 1, "match arm type does not match other arms")
+                        match_hash = LAST_STMT_TY_HASH; FLOW_JOIN_HASH_X86=match_hash; FLOW_JOIN_PROOF_X86=LAST_STMT_PROOF_X86
+                    } else if flow_match_join_x86(match_ty,match_hash,match_proof_x86,LAST_STMT_TY,LAST_STMT_TY_HASH,LAST_STMT_PROOF_X86) == false {
+                        flow_error_x86(EP - 1, "match arm type does not match other arms")
                     }
+                        match_hash=FLOW_JOIN_HASH_X86
+                        match_proof_x86=FLOW_JOIN_PROOF_X86
                         if LAST_STMT_TY == 2 {
                             if match_shadow_base_x86 < 0 { match_shadow_base_x86 = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 69 }
                             match_mask0_x86 = match_mask0_x86 | flow_shadow_mask_x86(0)
@@ -34122,7 +34445,7 @@ fn compile_stmt_body_x86() with IO, Mut, Panic, Div {
         }
         if match_option_mask_x86 == 3 || match_bool_mask_x86 == 3 { match_exhaustive_x86 = 1 }
         if match_scrut_ty == 7 && match_exhaustive_x86 == 0 {
-            tc_error_hard(EP - 1, "match must be exhaustive")
+            flow_error_x86(EP - 1, "match must be exhaustive")
             LAST_STMT_CAN_FALLTHROUGH_X86 = 1
             LAST_STMT_HAS_VALUE = 0
             LAST_STMT_TY = 0
@@ -34138,6 +34461,9 @@ fn compile_stmt_body_x86() with IO, Mut, Panic, Div {
             LAST_STMT_HAS_VALUE = 1
             LAST_STMT_TY = match_ty
             LAST_STMT_TY_HASH = match_hash
+            if flow_transportable_x86(match_ty,match_hash,match_proof_x86) {
+                flow_value_note_x86(match_proof_x86,match_tok,EP,match_ty,match_hash)
+            } else {flow_value_clear_x86()}
             EXPR_TY = match_ty
             EXPR_TY_HASH = match_hash
             if match_ty == 2 { EXPR_IS_F64 = 1 }
@@ -38602,6 +38928,11 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
         // Record code offset + set current function for effects checking
         FN_OFF[fn_idx as usize] = CL
         CURRENT_FN = fn_idx
+        // Top-level functions have disjoint proof frames; no global accumulation.
+        FLOW_PROOF_COUNT_X86=0
+        FLOW_PROOF_FRAME_BASE_X86=0
+        flow_value_clear_x86()
+        LAST_STMT_PROOF_X86=0
         LAST_STMT_CAN_FALLTHROUGH_X86 = 1
         CURRENT_RET_TY = FN_RET_TY[fn_idx as usize]
         CURRENT_RET_HASH = FN_RET_HASH[fn_idx as usize]
@@ -39036,7 +39367,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                 em(0x31); em(0xc0)
             } else if LAST_STMT_HAS_VALUE == 0 {
                 if LAST_STMT_CAN_FALLTHROUGH_X86 != 0 && (CURRENT_RET_TY != 0 || CURRENT_RET_HASH != 0) {
-                    tc_error_hard(EP - 1, "non-Unit function has a reachable path without a return value")
+                    flow_error_x86(EP - 1, "non-Unit function has a reachable path without a return value")
                 }
                 em(0x31); em(0xc0)
             } else {
