@@ -1,0 +1,59 @@
+// Preserve one positively checked primitive binding for existing AST consumers.
+// No type inference, RHS checking, lowering, or Worker authority is performed here.
+module check::binding_stamp
+
+use parser::ast::{StmtList,StmtKind,TypeExpr,TypeExprKind,AstPath,StringList,Name,name_eq,make_name}
+use check::types::{TypeEntry,TypeKind,ty_i64}
+use check::env::{TypeEnv,TYPE_ENV_CAPACITY}
+
+pub fn binding_stamp_is_plain_i64(ty:TypeEntry)->bool with Mut,Panic,Div {
+    let canonical=ty_i64()
+    if ty.kind!=TypeKind::TyI64 || ty.name.len!=0 {return false}
+    var i:i64=0
+    while i<384 {
+        if ty.name.buf[i as usize]!=canonical.name.buf[i as usize] {return false}
+        i=i+1
+    }
+    match ty.inner {Some(_)=>return false,None=>{}}
+    match ty.tuple_elems {Some(_)=>return false,None=>{}}
+    if ty.array_size!=canonical.array_size || ty.fn_sig_id!=canonical.fn_sig_id {return false}
+    if f64_to_bits(ty.knowledge_epsilon)!=f64_to_bits(canonical.knowledge_epsilon) {return false}
+    if f64_to_bits(ty.knowledge_validity_value)!=f64_to_bits(canonical.knowledge_validity_value) {return false}
+    ty.knowledge_epsilon_mode==canonical.knowledge_epsilon_mode
+        && ty.knowledge_provenance_kind==canonical.knowledge_provenance_kind
+        && ty.knowledge_validity_kind==canonical.knowledge_validity_kind
+        && ty.algebra_kind==canonical.algebra_kind
+        && ty.clifford_p==canonical.clifford_p && ty.clifford_q==canonical.clifford_q
+        && ty.unit_id==canonical.unit_id && ty.refinement_id==canonical.refinement_id
+        && ty.epistemic_meta_id==canonical.epistemic_meta_id
+        && ty.robustness_level_id==canonical.robustness_level_id
+        && ty.robustness_scope_id==canonical.robustness_scope_id
+        && ty.ontology_id==canonical.ontology_id && ty.noise_set_id==canonical.noise_set_id
+}
+
+// The caller snapshots count/scope/error state before checking THIS original node
+// once, then calls us before statement-loan finalization or scope pop. Exactly
+// one freshly appended binding must match this node, scope, and mutability.
+pub fn binding_stamp_checked_i64(list:Box<StmtList>,env:&TypeEnv,before_count:i64,before_scope:i64,errors_before:i64,errors_after:i64,had_error:bool)->bool with Mut,Panic,Div,Alloc {
+    if had_error || errors_before!=0 || errors_after!=0 || env.overflowed {return false}
+    if before_count<0 || before_count>=TYPE_ENV_CAPACITY {return false}
+    if before_scope<0 || before_scope>64 || env.scope_depth!=before_scope {return false}
+    if env.count!=before_count+1 {return false}
+    let stmt=(*list).head
+    if stmt.kind!=StmtKind::StmtLet && stmt.kind!=StmtKind::StmtVar {return false}
+    match stmt.ty {Some(_)=>return false,None=>{}}
+    if stmt.name.len<=0 || stmt.name.len>384 {return false}
+    let binding=env.bindings[before_count as usize]
+    if binding.scope_depth!=before_scope || !name_eq(binding.name,stmt.name) {return false}
+    if binding.is_mutable!=(stmt.kind==StmtKind::StmtVar) {return false}
+    if !binding_stamp_is_plain_i64(binding.ty) {return false}
+    let n=make_name("i64")
+    let annotation=TypeExpr {
+        kind:TypeExprKind::TypeNamed,span:stmt.span,
+        path:AstPath {segments:StringList {head_buf:n.buf,head_len:n.len,tail:None},seg_count:1},
+        type_args:None,inner:None,array_size:None,effects:None,knowledge_info:None,refinement_info:None,
+    }
+    // Managed store on the original list node; every other field stays intact.
+    (*list).head.ty=Some(Box::new(annotation))
+    true
+}
