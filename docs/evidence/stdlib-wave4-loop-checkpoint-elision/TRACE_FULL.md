@@ -1,4 +1,4 @@
-# Complete NV2 arena trace diagnostic: patch artifact only
+# Complete NV2 arena trace diagnostic: stage-bound schema 2 artifact
 
 The diagnostic patch is prepared for root review and **has not been applied**
 to a production codegen file or compiler ELF:
@@ -6,33 +6,36 @@ to a production codegen file or compiler ELF:
 `tests/fixtures/wave4_loop_checkpoint_elision/nv2_trace_full.patch`
 
 Patch SHA-256:
-`fce0e36ea25bda7a7eb29e8c112c1d05a936055ca541bd6ff87742e9e6521f8f`.
+`5281be3be5d2556b077f60c48f2f2fbf3102a8feb2eefb8630d81141b6b22ab6`.
 
 Its base is root `fa485cc07e5596573eb99807184ccb47878fa198`,
 `self-hosted/native/codegen_x86_linux.sio` SHA-256
 `d3380a0826be9547204e8cc53d35c45e6fd1e010f421172d64c80a1e6507e01d`.
 Candidate SHA-256:
-`79ce70a9da5e1965891d54e09fb08cb2354339906ce26eeef77bf5eca9ca4844`.
+`0e370fddc5c85147bc5e8215f4cc1e6b8ac4adecf8f172d3fc28db5a36ac1ac7`.
 `git apply --check` against the root codegen file succeeds, without mutation.
+
+The schema-1 artifact remains in historical commit
+`8aee6eaa3ff8c08ba44423ca1f4cefd8de81a334`. The current patch supersedes it.
 
 The new opt-in is exactly `SOUNIO_NV2_IR_TRACE_FULL=1`. The existing
 `SOUNIO_NV2_IR_TRACE` and legacy trace body are retained. Removing only the
-added helper, named imports and guarded call reproduces the **entire original
+added helper, named imports and two stage-hook calls reproduces the **entire original
 codegen source byte for byte**. See
-[trace-full/LEGACY_SOURCE_CONTROL](trace-full/LEGACY_SOURCE_CONTROL).
+[trace-full-stage2/LEGACY_SOURCE_CONTROL](trace-full/LEGACY_SOURCE_CONTROL).
 A standalone false-branch control also preserves its legacy output exactly.
 This is structural/component evidence, not a rebuilt production-ELF replay.
 
-## Schema 1 and completeness
+## Schema 2 and completeness
 
 The writer validates the entire capture before BEGIN. Refusal emits only
 `NV2_IR_FULL_REFUSED 1 reason function instruction`, with no BEGIN/END pair.
 A diagnostic refusal does not alter the enclosing compiler's exit status;
 a consumer must require the complete versioned pair and matching counts.
 
-BEGIN carries version, function count, total instruction/raw-argument/name-byte
+BEGIN carries version 2, stage code, function count, total instruction/raw-argument/name-byte
 counts, float bitmap word count, argument-pool length, arena capacity and
-name-pool count. END repeats the version and actual emitted
+name-pool count. END repeats the version/stage and actual emitted
 function/instruction/argument/name counts. The C++23 parser rejects truncated
 captures, duplicate groups, count mismatches and trailing full-trace rows.
 
@@ -61,7 +64,43 @@ Function and individual-instruction bounds also honor `IR_MAX_FUNCS` and
 `IR_MAX_INSTRS`. All region/pool extents are checked before access. Unknown
 opcode tags are recorded exactly; the formatter does not certify semantics.
 
-## Executed component qualification
+## Current stage-bound component qualification
+
+Slurm **19623 completed 0** in eight seconds: modern check 0, seed producer
+0, and the published schema-2 stage gate 0. Source selection emits the fixture's
+six-function module; prepared selection emits its distinct seven-function
+module after a simulated clone. Every byte/field/census and the same exact
+signed-minimum, negative-zero, NaN and slot-argument payloads pass C++23.
+
+The stage selection is explicit:
+
+- `SOUNIO_NV2_IR_TRACE_FULL_STAGE=source` captures in preview before
+  Worker preparation can fail. The prepared hook suppresses full output.
+- `SOUNIO_NV2_IR_TRACE_FULL_STAGE=prepared` captures only at the existing
+  prepared trace site. Unset/empty stage selects this same default.
+- Any other stage emits refusal reason 10 at source preview and no full group.
+- Source is encoded as 0 and prepared as 1 in both BEGIN and END. Neither is
+  a certificate. C++23 requires `--check source FILE` or
+  `--check prepared FILE` (similarly for `--probe`).
+
+Both stages reject ten mutations and five malformed/bounded inputs. Wrong
+stage selection, a concatenation of both stages, schema-1 input and an omitted
+stage selector are also rejected. Default-prepared output is byte-identical
+to explicit prepared selection; FULL absent retains the control output with
+either stage environment value. These are **stage-routing/formatter component
+results**, not an actual Worker IR capture or a Worker proof result.
+
+The new records are in [trace-full-stage2](trace-full-stage2). The previously
+published schema-1 records are retained below as historical evidence.
+
+The initial uncommitted schema-2 packaging attempt omitted helper/hooks due
+to a Perl generation-variable scope error. Its inverse guard refused it.
+It was not applied or committed. The accepted candidate was regenerated,
+compared byte-for-byte against a separately constructed 761370-byte candidate,
+inverse-stripped to the original source, and checked with git apply. The
+obsolete packaging hashes 6a60.../f405... are not accepted artifacts.
+
+## Historical schema-1 component qualification
 
 Slurm **19614 completed 0**:
 
@@ -106,7 +145,20 @@ They are not successful captures. SOIR v6's CLI also emits only a summary
 and may refuse signatures or images beyond 128 KiB.
 
 After root review and an authorized compiler build, this diagnostic can
-capture the final complete module at the existing native trace callsite.
+capture the full source module before Worker preparation, or the complete
+prepared module at the existing native trace callsite.
 It changes no IR and performs no elision. Real helper metadata, including
 parameter counts, remains an explicit prerequisite to qualifying the
 optimization on the benchmark.
+
+The published schema-2 gate is reproduced with:
+
+```sh
+bash tests/fixtures/wave4_loop_checkpoint_elision/nv2_trace_full_gate.sh \\
+  COMPONENT_ELF CPP23_ORACLE \\
+  docs/evidence/stdlib-wave4-loop-checkpoint-elision/trace-full/results/valid.stdout \\
+  FRESH_OUTPUT
+```
+
+The schema-1 log argument is intentionally an input that the current parser
+must reject. The gate requires a Slurm allocation.

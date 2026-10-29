@@ -1,4 +1,4 @@
-// Full diagnostic schema 1. A preflight refusal has no BEGIN/END pair.
+// Full diagnostic schema 2, explicitly bound to source or prepared stage. A preflight refusal has no BEGIN/END pair.
 // Integer immediates and f64 payloads use two unsigned 32-bit limbs; this
 // avoids signed-minimum formatting and preserves -0 and NaN payloads exactly.
 fn native_v2_full_trace_number(value:i64) with IO {print(" ");print_int(value)}
@@ -18,28 +18,29 @@ fn native_v2_full_trace_name(tag:string,fi:i64,ii:i64,name:Name) with IO,Mut,Pan
     }
     print("\n")
 }
-fn native_v2_full_trace_refuse(reason:i64,fi:i64,ii:i64) with IO {
-    print("NV2_IR_FULL_REFUSED 1")
+fn native_v2_full_trace_refuse(stage:i64,reason:i64,fi:i64,ii:i64) with IO {
+    print("NV2_IR_FULL_REFUSED 2")
+    native_v2_full_trace_number(stage)
     native_v2_full_trace_number(reason)
     native_v2_full_trace_number(fi)
     native_v2_full_trace_number(ii)
     print("\n")
 }
-fn native_v2_trace_full_module_ir_ref(module:&IrModule) with IO,Mut,Panic,Div {
+fn native_v2_trace_full_module_ir_ref(module:&IrModule,stage:i64) with IO,Mut,Panic,Div {
     // Explicit diagnostic limits, independent of the serializer's 128-KiB
     // image ceiling. A future increase needs a parser/gate schema review.
     let max_instructions:i64=131072
     let max_arguments:i64=524288
     let float_capacity=ir_float_bits_capacity()
     if module.fn_count<0 || module.fn_count>IR_MAX_FUNCS {
-        native_v2_full_trace_refuse(1,-1,-1);return
+        native_v2_full_trace_refuse(stage,1,-1,-1);return
     }
     if float_capacity<=0 || float_capacity>65536 || float_capacity%32!=0 {
-        native_v2_full_trace_refuse(2,-1,-1);return
+        native_v2_full_trace_refuse(stage,2,-1,-1);return
     }
     let float_words=float_capacity/32
     if IR_ARG_POOL_LEN<0 || IR_ARG_POOL_LEN>ir_arg_pool_capacity() {
-        native_v2_full_trace_refuse(3,-1,-1);return
+        native_v2_full_trace_refuse(stage,3,-1,-1);return
     }
     var total_instructions:i64=0
     var total_arguments:i64=0
@@ -52,23 +53,23 @@ fn native_v2_trace_full_module_ir_ref(module:&IrModule) with IO,Mut,Panic,Div {
            f.label_count<0 || f.param_count<0 || f.param_count>64 ||
            f.name.len<0 || f.name.len>384 ||
            f.return_struct_name.len<0 || f.return_struct_name.len>384 {
-            native_v2_full_trace_refuse(4,fi,-1);return
+            native_v2_full_trace_refuse(stage,4,fi,-1);return
         }
         if f.instr_count>max_instructions-total_instructions {
-            native_v2_full_trace_refuse(5,fi,-1);return
+            native_v2_full_trace_refuse(stage,5,fi,-1);return
         }
         total_instructions=total_instructions+f.instr_count
         total_name_bytes=total_name_bytes+f.name.len+f.return_struct_name.len
         if f.instr_count>0 {
             if ir_region_status(&f.region)!=IR_ARENA_OK ||
                f.instr_count>ir_region_len(&f.region) || f.instr_count>ir_region_cap(&f.region) {
-                native_v2_full_trace_refuse(6,fi,-1);return
+                native_v2_full_trace_refuse(stage,6,fi,-1);return
             }
         }
         var pi:i64=0
         while pi<f.param_count {
             if f.param_regs[pi as usize]<0 || f.param_regs[pi as usize]>=f.reg_count {
-                native_v2_full_trace_refuse(4,fi,pi);return
+                native_v2_full_trace_refuse(stage,4,fi,pi);return
             }
             pi=pi+1
         }
@@ -76,31 +77,32 @@ fn native_v2_trace_full_module_ir_ref(module:&IrModule) with IO,Mut,Panic,Div {
         while ii<f.instr_count {
             let slot=ir_region_slot_r(f.region,ii)
             if slot<0 || slot>=ir_instr_arena_capacity() {
-                native_v2_full_trace_refuse(6,fi,ii);return
+                native_v2_full_trace_refuse(stage,6,fi,ii);return
             }
             let ins=ir_arena_load(slot)
             if ins.name_id<0 || ins.name_id>IR_NAME_POOL_COUNT || ins.name_id>IR_NAME_POOL_MAX {
-                native_v2_full_trace_refuse(7,fi,ii);return
+                native_v2_full_trace_refuse(stage,7,fi,ii);return
             }
             let name=ir_name_at(ins.name_id)
             if name.len<0 || name.len>384 {
-                native_v2_full_trace_refuse(7,fi,ii);return
+                native_v2_full_trace_refuse(stage,7,fi,ii);return
             }
             total_name_bytes=total_name_bytes+name.len
             let argc=ins.arg_count
             let base=IR_A_ARG_BASE[slot as usize]
             if argc<0 || argc>64 || base<0 || (argc>0 && base>IR_ARG_POOL_LEN-argc) {
-                native_v2_full_trace_refuse(8,fi,ii);return
+                native_v2_full_trace_refuse(stage,8,fi,ii);return
             }
             if argc>max_arguments-total_arguments {
-                native_v2_full_trace_refuse(9,fi,ii);return
+                native_v2_full_trace_refuse(stage,9,fi,ii);return
             }
             total_arguments=total_arguments+argc
             ii=ii+1
         }
         fi=fi+1
     }
-    print("NV2_IR_FULL_BEGIN 1")
+    print("NV2_IR_FULL_BEGIN 2")
+    native_v2_full_trace_number(stage)
     native_v2_full_trace_number(module.fn_count)
     native_v2_full_trace_number(total_instructions)
     native_v2_full_trace_number(total_arguments)
@@ -195,10 +197,34 @@ fn native_v2_trace_full_module_ir_ref(module:&IrModule) with IO,Mut,Panic,Div {
         emitted_functions=emitted_functions+1
         fi=fi+1
     }
-    print("NV2_IR_FULL_END 1")
+    print("NV2_IR_FULL_END 2")
+    native_v2_full_trace_number(stage)
     native_v2_full_trace_number(emitted_functions)
     native_v2_full_trace_number(emitted_instructions)
     native_v2_full_trace_number(emitted_arguments)
     native_v2_full_trace_number(emitted_name_bytes)
     print("\n")
+}
+
+// This hook runs before Worker preparation, so a preparation refusal cannot
+// erase the source-stage capture. Invalid stage selection is explicit.
+fn native_v2_full_trace_source_stage_ref(module:&IrModule) with IO,Mut,Panic,Div {
+    if !str_eq(read_env("SOUNIO_NV2_IR_TRACE_FULL"),"1") {return}
+    let requested=read_env("SOUNIO_NV2_IR_TRACE_FULL_STAGE")
+    if str_eq(requested,"source") {
+        native_v2_trace_full_module_ir_ref(module,0)
+    }else {
+        if !str_eq(requested,"") && !str_eq(requested,"prepared") {
+            native_v2_full_trace_refuse(-1,10,-1,-1)
+        }
+    }
+}
+// The legacy prepared trace still runs normally. Full output is suppressed
+// here in source mode, preventing two distinct modules from sharing a capture.
+fn native_v2_full_trace_prepared_stage_ref(module:&IrModule) with IO,Mut,Panic,Div {
+    if !str_eq(read_env("SOUNIO_NV2_IR_TRACE_FULL"),"1") {return}
+    let requested=read_env("SOUNIO_NV2_IR_TRACE_FULL_STAGE")
+    if str_eq(requested,"") || str_eq(requested,"prepared") {
+        native_v2_trace_full_module_ir_ref(module,1)
+    }
 }
