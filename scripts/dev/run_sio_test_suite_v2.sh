@@ -325,7 +325,7 @@ if [[ -n "${CI:-}" && "${SOUNIO_TEST_JOBS_DYNAMIC:-1}" != "0" ]]; then
     fi
     CPU_COUNT="$(available_cpus)"
     MEMORY_BYTES="$(available_memory_bytes)"
-    if [[ ! "$CPU_COUNT" =~ ^[1-9][0-9]*$ || ! "$MEMORY_BYTES" =~ ^[0-9][0-9]*$ ]]; then
+    if [[ ! "$CPU_COUNT" =~ ^[1-9][0-9]*$ || ! "$MEMORY_BYTES" =~ ^[1-9][0-9]*$ ]]; then
         echo "error: could not determine positive CPU and memory limits for dynamic test jobs" >&2
         exit 2
     fi
