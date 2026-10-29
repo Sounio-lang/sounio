@@ -1,0 +1,13 @@
+# PBPK compile frontier on raw04
+
+The unchanged `tests/stdlib/chemistry/test_pbpk_clearance_ode.sio` still fails compilation. Slurm19687 checks it successfully in both LOOP_REGIONS modes, but both compiles return1 and publish no ELF. The lowerer reports three unresolved scalar-kind print arguments in `main`, at its recorded source site9712. No numerical execution or acceptance follows.
+
+Slurm19691 is a diagnostic clone only: it changes exactly `print(st_inf)`, `print(st_neg)` and `print(s_nuk)` to the explicit integer builtin. It retains the original calculations, assertions, constants and timeout. Both checks return0. Both compiles advance past seed lowering, reach dependency11 and terminate139, without an ELF. The probe localizes the print-dispatch frontier; it is not a production repair, and its later crash has not been classified as one of the historical11 crashes. The original regression remains unchanged.
+
+Both probes use the same raw04 compiler SHA `a4f5e8d655754202493bbb04d8fbb15890b10e8fc861ac3dc60438452704c333`, source05 SDK, 1200-second compile bounds, private-v3 tool environment, and hashed source/compiler inputs. A probe-level STATUS0 means its recording and final hash guards succeeded; individual check/compile STATUS files carry the actual outcomes. No native program was executed.
+
+Slurm19697 preserved complete used stdlib sources, original and diagnostic cases, recipes, compiler, runtime environment, outputs and manifests at `/orangefs/training/sounio-foundry/runs/stdlib-wave3-20261027/root/pbpk-compile-frontier04/pbpk-frontier.tar.gz`. Archive SHA `896b7516ae6e26f0145f4216ed1d00e9b2c5086697203394a9b190533f6b763c`, size41012491bytes. Export guards and readback passed; separate Slurm19703 re-read the hash and complete tar census successfully on the worker with OrangeFS mounted.
+
+Two earlier attempts on the refreshed DL380P worker are infrastructure failures, not archive failures:19699 exited signal53 before starting due to an unwritable batch output directory;19701 exited1 at the OrangeFS mount precondition. That worker has no OrangeFS mount. Only a task-specific writable output directory was created; no mount, package or global configuration was changed. The successful readback19703 used the existing DL380 mount, so it does not establish cross-node availability.
+
+This evidence does not update the historical whole-suite totals and does not qualify PBPK numerics or remove any failure. The lowerer remains under another lane's active claim and was not edited.
