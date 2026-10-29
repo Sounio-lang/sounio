@@ -79,6 +79,11 @@ struct LowerLocalStack {
     // 32-63 of one i64 pushes array slot 31 onto the sign bit of the combined
     // value, corrupting it. See lower_fn_tuple_f64_array_mask.
     tuple_arr_mask: Box<LowerLocalI64Slots>,
+    // Tuple-typed local: bit k set iff element k is POSITIVELY an integer or
+    // bool (print_int kind 1). Own table for the same reason as tuple_arr_mask.
+    // Without it `let (st, v) = f()` left `st` at scalar kind 0 and
+    // `print(st)` was refused as "unresolved scalar kind".
+    tuple_int_mask: Box<LowerLocalI64Slots>,
     // Layout index for an aggregate element carried by a local: tuple slot-0
     // fixed arrays and Seq<T> share this slot because those shapes are disjoint.
     tuple0_array_elem_layout: Box<LowerLocalI64Slots>,
@@ -245,6 +250,7 @@ fn empty_lower_local_stack() -> LowerLocalStack with Alloc, Mut {
         scalar_kind: lowerer_box_local_i64_slots(0),
         tuple_float_mask: lowerer_box_local_i64_slots(0),
         tuple_arr_mask: lowerer_box_local_i64_slots(0),
+        tuple_int_mask: lowerer_box_local_i64_slots(0),
         tuple0_array_elem_layout: lowerer_box_local_i64_slots(-1),
         tuple_struct_layout: lowerer_box_local_i64_slots(-1),
         tuple_struct_slot: lowerer_box_local_i64_slots(-1),
@@ -1793,10 +1799,34 @@ var LOWER_HOF_TRANSPARENT_HASH: [i64; 4096] = [0; 4096]
 var LOWER_HOF_TRANSPARENT_LEN: [i64; 4096] = [0; 4096]
 var LOWER_HOF_TRANSPARENT_COUNT: i64 = 0
 
+// Integer/bool slots of a function's declared tuple return type, indexed by the
+// interned name id and stored as mask + 1 (0 = no tuple-returning fn recorded).
+// The first declaration collected under a name wins, the same precedence the
+// f64-array table uses (the owner's own items are collected first).
+var LOWER_FN_TUPLE_INT_MASK_BY_NID: [i64; 65537] = [0; 65537]
+
+fn lower_fn_tuple_int_mask_note(name: Name, rt: &TypeExpr) with Mut, Panic, Div {
+    if (*rt).kind != TypeExprKind::TypeTuple { return }
+    let nid = ir_intern_name(name)
+    if nid <= 0 || nid > 65536 { return }
+    if LOWER_FN_TUPLE_INT_MASK_BY_NID[nid as usize] != 0 { return }
+    LOWER_FN_TUPLE_INT_MASK_BY_NID[nid as usize] = lower_type_list_int_mask(&(*rt).type_args, 0) + 1
+}
+
+pub fn lower_fn_tuple_int_mask(name: Name) -> i64 with Mut, Panic, Div {
+    if name.len <= 0 { return 0 }
+    let nid = ir_intern_name(name)
+    if nid <= 0 || nid > 65536 { return 0 }
+    let stored = LOWER_FN_TUPLE_INT_MASK_BY_NID[nid as usize]
+    if stored <= 0 { return 0 }
+    stored - 1
+}
+
 pub fn lower_fn_tuple_arr_reset() with Mut {
     var oi: i64 = 0
     while oi < 65537 {
         LOWER_OPTION_BOX_RETURN_INNER[oi as usize] = 0
+        LOWER_FN_TUPLE_INT_MASK_BY_NID[oi as usize] = 0
         oi = oi + 1
     }
     LOWER_HOF_TRANSPARENT_COUNT = 0
@@ -1937,6 +1967,7 @@ fn lower_fn_tuple_f64_arrays_collect_one(name: Name, fd_opt_ref: &Option<Box<FnD
             match *rt_opt_ref {
                 Some(rt) => {
                     if (*rt).kind == TypeExprKind::TypeTuple {
+                        lower_fn_tuple_int_mask_note(name, &(*rt))
                         let mask = lower_type_list_f64_array_mask(&(*rt).type_args, 0)
                         // Table is sized to IR_MAX_FUNCS (ir.sio:35), the hard
                         // ceiling on the number of functions any program can
@@ -6431,6 +6462,7 @@ fn lowerer_bind_local_mut(
         // a plain f64 slot as an f64-ARRAY. Explicit 0, mirroring bind_local.
         (*(*locals_box).tuple_float_mask).values[idx as usize] = 0
         (*(*locals_box).tuple_arr_mask).values[idx as usize] = 0
+        (*(*locals_box).tuple_int_mask).values[idx as usize] = 0
         // Post-#2084: tuple0_array_elem_layout was added on main to track when a
         // tuple slot-0 is a fixed array, which gates the aggregate-shallow-copy path.
         (*(*locals_box).tuple0_array_elem_layout).values[idx as usize] = 0 - 1
@@ -6540,7 +6572,8 @@ fn lowerer_mark_local_tuple_masks_mut(
     lo: &! Lowerer,
     name: Name,
     float_mask: i64,
-    arr_mask: i64
+    arr_mask: i64,
+    int_mask: i64
 ) with Mut, Alloc, Panic, Div {
     var locals_box = (*lo).locals
     var i = (*locals_box).count - 1
@@ -6548,6 +6581,7 @@ fn lowerer_mark_local_tuple_masks_mut(
         if (*(*locals_box).depths).values[i as usize] <= (*lo).scope_depth && ir_name_eq((*(*locals_box).names).values[i as usize], name) {
             (*(*locals_box).tuple_float_mask).values[i as usize] = float_mask
             (*(*locals_box).tuple_arr_mask).values[i as usize] = arr_mask
+            (*(*locals_box).tuple_int_mask).values[i as usize] = int_mask
             (*lo).locals = locals_box
             return
         }
@@ -6986,7 +7020,8 @@ fn lowerer_lower_fn_params_mut(
                 }
                 let param_tuple_float_mask = if (*list).head.ty.kind == TypeExprKind::TypeTuple { lower_type_list_float_mask(&(*list).head.ty.type_args, 0) } else { 0 }
                 let param_tuple_arr_mask = if (*list).head.ty.kind == TypeExprKind::TypeTuple { lower_type_list_arr_mask(&(*list).head.ty.type_args, 0) } else { 0 }
-                lowerer_mark_local_tuple_masks_mut(lo, (*list).head.name, param_tuple_float_mask, param_tuple_arr_mask)
+                let param_tuple_int_mask = if (*list).head.ty.kind == TypeExprKind::TypeTuple { lower_type_list_int_mask(&(*list).head.ty.type_args, 0) } else { 0 }
+                lowerer_mark_local_tuple_masks_mut(lo, (*list).head.name, param_tuple_float_mask, param_tuple_arr_mask, param_tuple_int_mask)
                 let param_elem_wide_bits = lower_type_expr_array_elem_wide_bits(&(*list).head.ty)
                 if param_elem_wide_bits > 0 {
                     // V0-E.5.7: `[f128; N]` / `&[f128; N]` param — element reads are
@@ -8964,6 +8999,33 @@ fn lower_opt_type_tuple_arr_mask(opt: &Option<Box<TypeExpr>>) -> i64 with Mut, P
         Some(te) => {
             if (*te).kind != TypeExprKind::TypeTuple { return 0 }
             lower_type_list_arr_mask(&(*te).type_args, 0)
+        }
+        None => 0,
+    }
+}
+
+// Integer-slot counterpart of lower_type_list_float_mask: bit k set iff element
+// k of a declared tuple type is an integer or bool (both print as kind 1).
+fn lower_type_list_int_mask(opt: &Option<Box<TypeExprList>>, bit: i64) -> i64 with Mut, Panic, Div {
+    match *opt {
+        Some(list) => {
+            var m: i64 = 0
+            if bit < 32 {
+                if lower_type_expr_is_integer(&(*list).head) || lower_type_expr_is_bool(&(*list).head) {
+                    m = 1 << (bit as i32)
+                }
+            }
+            m + lower_type_list_int_mask(&(*list).tail, bit + 1)
+        }
+        None => 0,
+    }
+}
+
+fn lower_opt_type_tuple_int_mask(opt: &Option<Box<TypeExpr>>) -> i64 with Mut, Panic, Div {
+    match *opt {
+        Some(te) => {
+            if (*te).kind != TypeExprKind::TypeTuple { return 0 }
+            lower_type_list_int_mask(&(*te).type_args, 0)
         }
         None => 0,
     }
@@ -15146,6 +15208,7 @@ impl Lowerer {
                 if idx < 4096 { LOWER_RGN_NUM_SLOT_EPOCH[idx as usize] = 0 }
                 (*(*stk).tuple_float_mask).values[idx as usize] = 0
                 (*(*stk).tuple_arr_mask).values[idx as usize] = 0
+                (*(*stk).tuple_int_mask).values[idx as usize] = 0
                 (*(*stk).tuple0_array_elem_layout).values[idx as usize] = 0 - 1
                 (*(*stk).tuple_struct_layout).values[idx as usize] = 0 - 1
                 (*(*stk).tuple_struct_slot).values[idx as usize] = 0 - 1
@@ -15245,6 +15308,89 @@ impl Lowerer {
             i = i - 1
         }
         lo
+    }
+
+    // Integer-slot counterpart of bind_local_tuple_arr_mask (tuple_int_mask).
+    fn bind_local_tuple_int_mask(self, name: Name, mask: i64) -> Lowerer with Mut, Alloc, Panic, Div {
+        var lo = self
+        if mask == 0 { return lo }
+        var stk = *lo.locals
+        var i = stk.count - 1
+        while i >= 0 {
+            if (*stk.depths).values[i as usize] <= lo.scope_depth && ir_name_eq((*stk.names).values[i as usize], name) {
+                (*stk.tuple_int_mask).values[i as usize] = mask
+                lo.locals = Box::new(stk)
+                return lo
+            }
+            i = i - 1
+        }
+        lo
+    }
+
+    fn lookup_local_tuple_int_mask(self, name: Name) -> i64 with Mut, Panic, Div, Alloc {
+        var i = (*self.locals).count - 1
+        while i >= 0 {
+            if (*(*self.locals).depths).values[i as usize] <= self.scope_depth && ir_name_eq((*(*self.locals).names).values[i as usize], name) {
+                return (*(*self.locals).tuple_int_mask).values[i as usize]
+            }
+            i = i - 1
+        }
+        0
+    }
+
+    // Integer slots of a tuple-producing expression: a call or method call
+    // (declared return type), an alias of a tracked tuple local, or a tuple
+    // literal whose element is positively an integer.
+    fn expr_result_tuple_int_mask_ref(self, e: &Expr) -> i64 with Mut, Panic, Div, Alloc {
+        if (*e).kind == ExprKind::ExprIdent {
+            return self.lookup_local_tuple_int_mask((*e).name)
+        }
+        if (*e).kind == ExprKind::ExprCall {
+            match (*e).left {
+                Some(callee_expr) => {
+                    let callee_name = self.expr_to_callee_name_ref(&(*callee_expr))
+                    return lower_fn_tuple_int_mask(callee_name)
+                }
+                None => { return 0 }
+            }
+        }
+        if (*e).kind == ExprKind::ExprMethodCall {
+            let recv_type = self.lower_method_recv_type(&(*e).left)
+            if recv_type.len <= 0 { return 0 }
+            return lower_fn_tuple_int_mask(ir_mangle_method_name(recv_type, (*e).name))
+        }
+        if (*e).kind == ExprKind::ExprTupleLit {
+            var m: i64 = 0
+            var bit: i64 = 0
+            var cur = &(*e).args
+            while bit < 32 {
+                match *cur {
+                    Some(list) => {
+                        if self.expr_result_scalar_kind_ref(&(*list).head) == 1 {
+                            m = m | (1 << (bit as i32))
+                        }
+                        bit = bit + 1
+                        cur = &(*list).tail
+                    }
+                    None => { break }
+                }
+            }
+            return m
+        }
+        0
+    }
+
+    // `t.K` where slot K of the tuple local / call `t` is positively an integer.
+    fn tuple_slot_is_int_ref(self, e: &Expr) -> bool with Mut, Panic, Div, Alloc {
+        let k = lower_name_tuple_index((*e).name)
+        if k < 0 || k >= 32 { return false }
+        match (*e).left {
+            Some(base) => {
+                let m = self.expr_result_tuple_int_mask_ref(&(*base))
+                ((m >> (k as i32)) & 1) == 1
+            }
+            None => false,
+        }
     }
 
     fn bind_local_tuple_struct(self, name: Name, layout_idx: i64, slot: i64) -> Lowerer with Mut, Alloc, Panic, Div {
@@ -26025,6 +26171,9 @@ impl Lowerer {
             if self.field_is_int_for_base_ref(&(*e).left, (*e).name) || self.field_is_int_by_name_simple((*e).name) {
                 return 1
             }
+            if self.tuple_slot_is_int_ref(e) {
+                return 1
+            }
         }
         // println i64-segfault fix (array-element axis): an array subscript `a[i]`
         // (including a struct-field array `s.c[i]`) yields a scalar element. The
@@ -27133,6 +27282,7 @@ impl Lowerer {
                         // not leak into this param.
                         (*(*locals).tuple_float_mask).values[idx as usize] = if (*list).head.ty.kind == TypeExprKind::TypeTuple { lower_type_list_float_mask(&(*list).head.ty.type_args, 0) } else { 0 }
                         (*(*locals).tuple_arr_mask).values[idx as usize] = if (*list).head.ty.kind == TypeExprKind::TypeTuple { lower_type_list_arr_mask(&(*list).head.ty.type_args, 0) } else { 0 }
+                        (*(*locals).tuple_int_mask).values[idx as usize] = if (*list).head.ty.kind == TypeExprKind::TypeTuple { lower_type_list_int_mask(&(*list).head.ty.type_args, 0) } else { 0 }
                         (*(*locals).box_inner_layout).values[idx as usize] = lower_struct_layout_index_of(&(*lo.struct_layouts), lower_box_or_option_inner_type_name(&(*list).head.ty))
                         if lower_type_expr_is_box(&(*list).head.ty) && lower_box_trace_enabled(1) {
                             print("boxtrace: WRITE-B ")
@@ -28635,10 +28785,12 @@ impl Lowerer {
         // left with the twin of the bug just fixed.
         var rhs_tuple_arr_mask: i64 = 0
         var rhs_tuple_mask: i64 = 0
+        var rhs_tuple_int_mask: i64 = 0
         match s.expr {
             Some(rhs_mask_pre) => {
                 rhs_tuple_arr_mask = lo.expr_result_tuple_arr_mask_ref(&(*rhs_mask_pre))
                 rhs_tuple_mask = lo.expr_result_tuple_float_mask_ref(&(*rhs_mask_pre))
+                rhs_tuple_int_mask = lo.expr_result_tuple_int_mask_ref(&(*rhs_mask_pre))
             }
             _ => {}
         }
@@ -28822,6 +28974,13 @@ impl Lowerer {
             lo = lo.bind_local_tuple_arr_mask(s.name, annotated_tuple_arr_mask)
         } else if rhs_tuple_arr_mask != 0 {
             lo = lo.bind_local_tuple_arr_mask(s.name, rhs_tuple_arr_mask)
+        }
+        // Integer-slot counterpart, same precedence (annotation, then initialiser).
+        let annotated_tuple_int_mask = lower_opt_type_tuple_int_mask(&s.ty)
+        if annotated_tuple_int_mask != 0 {
+            lo = lo.bind_local_tuple_int_mask(s.name, annotated_tuple_int_mask)
+        } else if rhs_tuple_int_mask != 0 {
+            lo = lo.bind_local_tuple_int_mask(s.name, rhs_tuple_int_mask)
         }
         // See the `var out: SomeStruct` (no initializer) note above: the local
         // must exist on the stack (bind_local, just above) before
