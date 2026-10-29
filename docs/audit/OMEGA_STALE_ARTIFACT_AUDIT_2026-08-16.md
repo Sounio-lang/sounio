@@ -205,7 +205,7 @@ about **now**.
 - `.claude/PLAN_CANONICAL_EXECUTION.md` — canonical precedence list includes both files  
 - `.claude/PROMPT_EXECUTION_CONTRACT.md`  
 - `docs/implementation/CODEX_CLAUDE_PARALLEL_CONTRACT.md`  
-- `docs/internal/implementation/CODEX_CLAUDE_PARALLEL_CONTRACT.md`  
+- `docs/implementation/CODEX_CLAUDE_PARALLEL_CONTRACT.md`  
 - `artifacts/omega/claude_operational_contract_status.v1.json` (2026-05-12) lists both in `canonical_precedence`  
 - `scripts/ci/plan_big_gate.sh` requires `.summary.parallel_cutover_status == "pass"` from a board that **reads** these files (`plan_big_status_board.v1.json` generated 2026-05-07 still shows parallel_cutover pass)
 
