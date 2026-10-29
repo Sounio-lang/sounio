@@ -1,4 +1,4 @@
-/// SNIO binary wire protocol — Rust port of interop/test_protocol.py and Protocol.fs.
+/// SNIO binary wire protocol.
 ///
 /// Frame format (little-endian throughout):
 ///   [4 bytes] magic = b"SNIO"
