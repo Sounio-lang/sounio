@@ -50,7 +50,18 @@ export function softwareSourceCode() {
   };
 }
 
-export function techArticle({ headline, description, url, inLanguage, dateModified, about, author }) {
+export function techArticle({
+  headline,
+  description,
+  url,
+  inLanguage,
+  dateModified,
+  about,
+  author,
+  isPartOf,
+  proficiencyLevel,
+  dependencies,
+}) {
   const article = {
     '@context': 'https://schema.org',
     '@type': 'TechArticle',
@@ -63,6 +74,11 @@ export function techArticle({ headline, description, url, inLanguage, dateModifi
   if (modified) article.dateModified = modified;
   if (about) article.about = about;
   if (author) article.author = author;
+  if (isPartOf) article.isPartOf = isPartOf;
+  if (typeof proficiencyLevel === 'string' && proficiencyLevel.length > 0) {
+    article.proficiencyLevel = proficiencyLevel;
+  }
+  if (dependencies !== undefined) article.dependencies = dependencies;
   return article;
 }
 
@@ -93,6 +109,9 @@ export function buildPageSchemas({
   headline,
   about,
   author,
+  isPartOf,
+  proficiencyLevel,
+  dependencies,
   omitSoftwareApplication,
 }) {
   const schemas = [];
@@ -107,6 +126,9 @@ export function buildPageSchemas({
       dateModified,
       about,
       author,
+      isPartOf,
+      proficiencyLevel,
+      dependencies,
     }));
   }
   if (Array.isArray(breadcrumbs) && breadcrumbs.length > 0) {

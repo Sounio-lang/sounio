@@ -37,6 +37,11 @@ export const ENGLISH_SEARCH = {
     description:
       'The Sounio roadmap tracks language, runtime, and ecosystem milestones, including runtime and backend work that is still in progress.',
   },
+  '/learn/effects/': {
+    title: 'Effect System in Sounio: Side Effects in the Signature',
+    description:
+      "How Sounio's effect system works: with IO, Mut, Div and Panic in every signature, custom effects, and what handlers do today. Code from real tests.",
+  },
 };
 
 /** Approved S1 copy for the English self-hosted compiler page. */
@@ -54,6 +59,33 @@ export const SELF_HOSTED_PAGE = {
     '@type': 'SoftwareApplication',
     name: 'Sounio',
   },
+};
+
+/** Approved copy for the English effect-system hub. The search title stays in ENGLISH_SEARCH. */
+export const EFFECTS_PAGE = {
+  h1: 'Effect system: side effects in the function signature',
+  lede: "An effect system tracks what a function may do besides returning a value (I/O, mutation, panics, division) in its type. In Sounio, effects are written in the signature with `with`, and a caller that does not declare a callee's effect is rejected at compile time.",
+  author: {
+    '@type': 'Person',
+    name: 'Demetrios Chiuratto Agourakis',
+    url: 'https://www.souniolang.org/about/',
+    sameAs: ['https://orcid.org/0009-0001-8671-8878'],
+  },
+  about: [
+    {
+      '@type': 'Thing',
+      name: 'Effect system',
+      sameAs: 'https://en.wikipedia.org/wiki/Effect_system',
+    },
+  ],
+  isPartOf: {
+    '@type': 'WebSite',
+    name: 'Sounio',
+    url: 'https://www.souniolang.org/',
+  },
+  proficiencyLevel: 'Intermediate',
+  dependencies: [],
+  dateModified: '2026-10-29',
 };
 
 export function englishSearchFor(barePath, locale) {
