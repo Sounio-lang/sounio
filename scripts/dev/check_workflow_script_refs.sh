@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+shopt -s globstar
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
@@ -20,9 +21,9 @@ has_real_ripgrep() {
 
 workflow_script_refs() {
   if has_real_ripgrep; then
-    rg -No "(?:\\./)?(?:[A-Za-z0-9_.-]+/)*scripts/[A-Za-z0-9_./-]+" "${WORKFLOWS[@]}"
+    rg -No "(?:\\./)?(?:[A-Za-z0-9_.-]+/)*scripts/[A-Za-z0-9_./*?-]+" "${WORKFLOWS[@]}"
   else
-    grep -H -o -E "(\\./)?([A-Za-z0-9_.-]+/)*scripts/[A-Za-z0-9_./-]+" "${WORKFLOWS[@]}"
+    grep -H -o -E "(\\./)?([A-Za-z0-9_.-]+/)*scripts/[A-Za-z0-9_./*?-]+" "${WORKFLOWS[@]}"
   fi
 }
 
@@ -42,15 +43,23 @@ fi
 missing=0
 for ref in "${REFS[@]}"; do
   path="${ref#./}"
-  if [[ ! -e "$path" ]]; then
+  # Workflow path filters contain globs, not executable path prefixes.
+  # Expand patterns as data (never eval) and still reject an empty match set.
+  matches=()
+  if [[ "$path" == *'*'* || "$path" == *'?'* ]]; then
+    mapfile -t matches < <(compgen -G "$path" || true)
+  elif [[ -e "$path" ]]; then
+    matches=("$path")
+  fi
+  if [[ ${#matches[@]} -eq 0 ]]; then
     echo "Missing workflow script reference: $ref"
     missing=1
     continue
   fi
 
-  # Shell targets referenced by workflows must be executable so direct invocations
-  # do not regress with permission denied errors.
-  if [[ "$path" == *.sh && ! -x "$path" ]]; then
+  # Glob refs are path filters (data), so they only need a non-empty match.
+  # Direct refs are invocations: shell targets must stay executable.
+  if [[ "$path" != *'*'* && "$path" != *'?'* && "$path" == *.sh && ! -x "$path" ]]; then
     echo "Non-executable workflow shell target: $ref"
     missing=1
   fi

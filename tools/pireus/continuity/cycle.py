@@ -102,6 +102,29 @@ def prepare(args):
     event(root, "prepare", root / "manifest.json")
     return manifest
 
+# Focused lowering region (pilot-20261023f evidence, 174 hardware decisions):
+# layout 1 (SoA), lane_stride 7/15 and unroll 4/8 had negative median paired
+# gain, while layout 0, strides 3/5/11/13 and unroll 1/2/16 held every top
+# plan. This narrows WHERE proposals are drawn; it changes no admission rule,
+# gate or the 50000 ppm promotion threshold, and admission still accepts the
+# full grammar if a proposer leaves the region.
+FOCUSED_LANE_STRIDES = (3, 5, 11, 13)
+FOCUSED_UNROLLS = (1, 2, 16)
+FOCUSED_LAYOUTS = (0,)
+FOCUSED_LOADS = (0, 1)
+FOCUSED_REGION_TEXT = (
+    "lane_stride in [3,5,11,13]; lane_offset 0..15; "
+    "load 0 (direct) or 1 (shuffle); layout 0 (AoS) only; unroll in [1,2,16]")
+
+
+def deterministic_plan(base, index, round_id):
+    """Index -> unique focused plan; 32 consecutive indices never collide."""
+    return base | dict(lane_stride=FOCUSED_LANE_STRIDES[index % 4],
+                       load=FOCUSED_LOADS[(index // 4) % 2],
+                       layout=FOCUSED_LAYOUTS[0],
+                       unroll=FOCUSED_UNROLLS[(index // 8) % 3],
+                       lane_offset=(index // 8 + round_id) % 16)
+
 def proposal_template(context_hash, kind=1):
     # kind=1 is a lowering of the fixed Cayley-Dickson product. kind=2 names a
     # new operator through a 16-bit bilinear phase code and still carries a
@@ -121,9 +144,7 @@ LOWERING_PROMPT = (
     "Propose one untrusted lowering plan as a JSON object only. "
     "Do not add expected results, authority, claims, or new fields. "
     "Keep schema, target, dimension, precision, order, fma, kind and context unchanged. "
-    "You may vary lane_stride in odd integers 1..15; lane_offset 0..15; "
-    "load 0 (direct) or 1 (shuffle); layout 0 (AoS) or 1 (SoA); "
-    "unroll in [1,2,4,8,16]. Output k accumulates ascending right operand j "
+    "You may vary " + FOCUSED_REGION_TEXT + ". Output k accumulates ascending right operand j "
     "with left i=k XOR j, separate f64 multiply/add, no reassociation. "
     "Lane mapping k=(lane*lane_stride+lane_offset)%16. ")
 
@@ -149,8 +170,7 @@ OPERATOR_PROMPT = (
     "distinct classes, falling into 32 classes under the admitted change-of-basis "
     "actions, and the lowering grammar used so far has only ever reached 4 of them. "
     "Aim outside those 4. "
-    "You may also vary lane_stride in odd integers 1..15; lane_offset 0..15; "
-    "load 0 (direct) or 1 (shuffle); layout 0 (AoS) or 1 (SoA); unroll in [1,2,4,8,16], "
+    "You may also vary " + FOCUSED_REGION_TEXT + ", "
     "with the same evaluation order as a lowering proposal: output k accumulates "
     "ascending right operand j with left i=k XOR j, separate f64 multiply/add, "
     "no reassociation, lane mapping k=(lane*lane_stride+lane_offset)%16. ")
@@ -182,10 +202,7 @@ def generate(args, manifest):
             event(root, "generate", proposal)
             continue
         if manifest["condition"] == "deterministic":
-            p = base | dict(lane_stride=1 + 2 * (index % 8),
-                            lane_offset=(index // 8 + manifest["round"]) % 16,
-                            load=(index // 2) % 2, layout=index % 2,
-                            unroll=(1, 2, 4, 8, 16)[index % 5])
+            p = deterministic_plan(base, index, manifest["round"])
             if manifest.get("kind", 1) == 2:
                 # Fixed phase codes, not a search: enough to exercise transport
                 # and admission without a Spark pair. 1128 is the operator the

@@ -89,6 +89,13 @@ def inference_memory(stage, **fields):
 def load_worker_and_cache(server_args, rank):
     # Same parallel layout as pinned one_batch.load_model; use the real worker
     # so the scheduler's hybrid cache builder receives its complete interface.
+    # Probes import this function without PIREUS_LEAN_RESIDENT and keep the
+    # ordinary resident parameters. Only offline-generate sets the variable.
+    if os.environ.get("PIREUS_LEAN_RESIDENT") == "1":
+        if not getattr(server_args, "disable_cuda_graph", False):
+            raise ValueError("file-backed routed experts require cuda graphs to stay off")
+        import lean_resident
+        lean_resident.install()
     at_rank, at_size, ad_rank, ad_size = bench.compute_dp_attention_world_info(
         server_args.enable_dp_attention, rank, server_args.tp_size,
         server_args.dp_size, server_args.attn_cp_size)
@@ -103,6 +110,10 @@ def load_worker_and_cache(server_args, rank):
     worker = TpModelWorker(server_args=server_args, gpu_id=0, ps=ps,
                            nccl_port=PortArgs.init_new(server_args).nccl_port)
     assert worker.tokenizer is None
+    if os.environ.get("PIREUS_LEAN_RESIDENT") == "1":
+        import lean_resident
+        info = lean_resident.commit_residency(worker.model_runner.model)
+        emit("OFFLINE_LEAN_RESIDENT", **info)
     release_loading_temporaries(worker.model_runner.model,"after_weight_load")
     worker.alloc_memory_pool()
     worker.init_attention_backends()
@@ -165,6 +176,10 @@ def main():
         emit("OFFLINE_INTERFACE_PASS", model_loaded=False, random_seed=server_args.random_seed,
              max_total_tokens=server_args.max_total_tokens, context_length=server_args.context_length)
         return
+    if os.environ.get("PIREUS_LEAN_RESIDENT") != "1":
+        raise ValueError("offline generate requires PIREUS_LEAN_RESIDENT=1")
+    if not server_args.disable_cuda_graph:
+        raise ValueError("file-backed routed experts require cuda graphs to stay off")
     from sglang.srt.model_loader.loader import DefaultModelLoader
     original_iterator = DefaultModelLoader._get_all_weights
     def traced_weights(loader, model_config, loaded_model):
@@ -226,6 +241,7 @@ def main():
                    actual_swa_tokens=model.swa_max_total_num_tokens,
                    swa_full_tokens_ratio=server_args.swa_full_tokens_ratio,
                    page_size=server_args.page_size, max_running_requests=1,
+                   routed_expert_placement="file-backed-active-layer",
                    max_new_tokens=4096, native_host_floor_gib=32, early_stop_gib=33,
                    http_serving=False, general_16k_inference_accepted=False)
     emit("OFFLINE_EXECUTION_PROFILE", execution_profile=profile)

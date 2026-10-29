@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import time
 from types import SimpleNamespace
 from cycle import HERE, atomic, digest, encoded, prepare, report, verify
 from benchmark_pair import remote
@@ -123,6 +124,38 @@ def paired_completion(log, stage):
     return job, launch[0]["nodes"]
 
 
+# Slurm reports COMPLETING until the extern/epilog step ends, so a finished
+# job is polled (bounded, well under MinJobAge=300s) before acceptance. The
+# final state must still be exactly COMPLETED with ExitCode 0:0 (fail closed).
+TRANSIENT_STATES = {"COMPLETING", "PENDING", "CONFIGURING", "RUNNING", "SUSPENDED", "STAGE_OUT"}
+
+
+def settled_job_state(job, deadline_seconds=120, interval=2, clock=time.monotonic, sleep=time.sleep):
+    stop = clock() + deadline_seconds
+    observed = []
+    while True:
+        result = subprocess.run(["scontrol", "show", "job", "-o", job], capture_output=True, text=True)
+        if result.returncode:
+            # Aged out of slurmctld memory: confirm through controller accounting.
+            from ops.resume_pilot import completed_accounting, query_accounting
+            receipt = query_accounting(job)
+            row = completed_accounting(receipt["stdout"], job)
+            observed.append(dict(source="sacct", state=row[1], exit=row[2]))
+            return (f"JobId={job} JobState={row[1]} ExitCode={row[2]} StateSource=accounting",
+                    observed)
+        raw_state = result.stdout
+        state = dict(x.split("=", 1) for x in raw_state.split() if "=" in x)
+        raw, code = state.get("JobState"), state.get("ExitCode")
+        observed.append(dict(source="scontrol", state=raw, exit=code))
+        if raw in TRANSIENT_STATES and clock() < stop:
+            sleep(interval)
+            continue
+        if raw != "COMPLETED" or code != "0:0":
+            raise ValueError(f"paired runtime job has not completed successfully "
+                             f"(raw_state={raw} raw_exit={code})")
+        return raw_state, observed
+
+
 def launch_cell_stage(root, name, mode, bundle, minutes):
     folder = root / "pilot-stages" / name
     folder.mkdir(parents=True, exist_ok=True)
@@ -151,12 +184,10 @@ def launch_cell_stage(root, name, mode, bundle, minutes):
     # the same frozen launch twice. Missing/partial logs or active jobs refuse.
     expected = "OFFLINE_CYCLE_COMPLETE" if mode == "offline-generate" else "TOKENIZER_TRANSPORT_PASS"
     job, nodes = paired_completion(log.read_text(), expected)
-    raw_state = subprocess.check_output(["scontrol", "show", "job", "-o", job], text=True)
-    state = dict(x.split("=", 1) for x in raw_state.split() if "=" in x)
-    if state.get("JobState") != "COMPLETED" or state.get("ExitCode") != "0:0":
-        raise ValueError("paired runtime job has not completed successfully")
+    raw_state, observed = settled_job_state(job)
     result = dict(job=job, nodes=nodes, log_sha256=digest(log.read_bytes()),
-                  slurm_state=raw_state, input_sha256=identity["bundle_sha256"])
+                  slurm_state=raw_state, slurm_observed=observed,
+                  input_sha256=identity["bundle_sha256"])
     atomic(completed, encoded(result))
     return result
 
@@ -219,7 +250,7 @@ def run_pilot(root):
             call("tokenized_cycle.py", "accept-encode", "--run", target, "--receipts", *receipts)
             call("tokenized_cycle.py", "pack-offline", "--run", target)
             generated_job = launch_cell_stage(target, "generate", "offline-generate",
-                                             target / "offline-bundle.json", 120)
+                                             target / "offline-bundle.json", 240)
             collect(target, generated_job, offline=True)
             call("tokenized_cycle.py", "accept-offline", "--run", target, "--worker-dir", target / "worker")
             call("tokenized_cycle.py", "pack-decode", "--run", target)
