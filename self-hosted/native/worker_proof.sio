@@ -1179,6 +1179,23 @@ fn worker_region_zero_token(function:&IrFunction,reg:i64,use_at:i64)->bool with 
     }
     definitions==1 && worker_cfg_defined_mode(function,reg,use_at,1)
 }
+// Native region helpers are compiler-created, descriptor-free placeholders.
+// Their machine ABI comes from the audited emitter ID and the call operands;
+// param_count=0 is not a claim that exit_scalar takes zero machine arguments.
+fn worker_region_stub_is_canonical(function:&IrFunction)->bool with Mut,Panic,Div {
+    if (*function).instr_count!=0 || (*function).reg_count!=0 || (*function).label_count!=0 || (*function).param_count!=0 || (*function).compile_strategy!=0 || (*function).returns_float!=0 || (*function).is_sret!=0 || (*function).bss_size!=0 || (*function).first_param_is_ref!=0 || (*function).f128_param_mask!=0 || (*function).ref_struct_param_mask!=0 {return false}
+    if (*function).return_kn_value_float!=(0-1) || (*function).return_fixed_array_len!=(0-1) || (*function).prof_counter_id!=(0-1) || (*function).hyper_algebra_kind!=(0-1) || (*function).sret_dest_reg!=(0-1) || (*function).return_struct_name.len!=0 {return false}
+    var p:i64=0
+    while p<64 {if (*function).param_regs[p as usize]!=(0-1) {return false};p=p+1}
+    let capacity=ir_float_bits_capacity()
+    if capacity<=0 || capacity%32!=0 {return false}
+    let words=capacity/32
+    if words<=0 || words>2048 {return false}
+    p=0
+    while p<words {if (*function).float_reg_bits[p as usize]!=0 {return false};p=p+1}
+    true
+}
+
 fn worker_region_frame_token(module:&IrModule,function:&IrFunction,reg:i64,use_at:i64)->bool with Mut,Panic,Div {
     if reg<0 || reg>=(*function).reg_count || (*function).param_count<0 || (*function).param_count>64 || ir_float_bits_get(function,reg) {return false}
     var p:i64=0
@@ -1193,7 +1210,7 @@ fn worker_region_frame_token(module:&IrModule,function:&IrFunction,reg:i64,use_a
             let target=instruction.fn_id
             if definitions!=1 || instruction.op!=IrOpcode::IrCall || instruction.imm_flags!=64066 || instruction.arg_count!=0 || target<0 || target>=(*module).fn_count || target>=16384 {return false}
             let called=ir_fn_get(module,target)
-            if called.instr_count!=0 || called.param_count!=0 || called.returns_float!=0 || WORKER_BACKEND_BUILTIN[target as usize]!=60 {return false}
+            if !worker_region_stub_is_canonical(&called) || WORKER_BACKEND_BUILTIN[target as usize]!=60 {return false}
         }
         at=at+1
     }
@@ -1209,7 +1226,7 @@ fn worker_region_scalar_exit_guard(module:&IrModule,function:&IrFunction,at:i64,
     let target=cleanup.fn_id
     if target<0 || target>=(*module).fn_count || target>=16384 {return false}
     let called=ir_fn_get(module,target)
-    if called.instr_count!=0 || called.param_count!=2 || called.returns_float!=0 || WORKER_BACKEND_BUILTIN[target as usize]!=67 {return false}
+    if !worker_region_stub_is_canonical(&called) || WORKER_BACKEND_BUILTIN[target as usize]!=67 {return false}
     let slot=ir_region_slot_r((*function).region,at+1)
     let token=ir_arena_arg_at(slot,0)
     let value=ir_arena_arg_at(slot,1)
@@ -1360,6 +1377,7 @@ fn worker_closure_callback(module:&IrModule,fi:i64,epoch:i64,depth:i64)->bool wi
             }
             if called.instr_count==0 && builtin!=0 {
                 if (builtin==61 || builtin==67 || builtin==1101) && !worker_region_result_unused(&function,instruction.dst,at) {return worker_closure_fail(140,fi,at)}
+                if (builtin==60 || builtin==67) && !worker_region_stub_is_canonical(&called) {return worker_closure_fail(142,fi,at)}
                 if builtin==60 && (instruction.imm_flags==64066 || instruction.imm_flags==64076) && instruction.arg_count==0 {
                     // Compiler-owned region tokens cannot escape or enter scalar arithmetic.
                 } else if builtin==67 && (instruction.imm_flags==64067 || instruction.imm_flags==64077) && instruction.arg_count==2 {
