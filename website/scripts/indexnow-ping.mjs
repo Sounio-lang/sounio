@@ -37,12 +37,13 @@ const KEY_FILE_RE = /^[0-9a-f]{32}\.txt$/;
 const REPO_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 
 function decodeXml(value) {
-  return value
-    .replaceAll('&amp;', '&')
-    .replaceAll('&lt;', '<')
-    .replaceAll('&gt;', '>')
-    .replaceAll('&quot;', '"')
-    .replaceAll('&apos;', "'");
+  return value.replace(/&(?:amp|lt|gt|quot|apos);/g, (entity) => {
+    if (entity === '&amp;') return '&';
+    if (entity === '&lt;') return '<';
+    if (entity === '&gt;') return '>';
+    if (entity === '&quot;') return '"';
+    return "'";
+  });
 }
 
 export function parseSitemap(xml) {
@@ -422,6 +423,8 @@ async function selfTest() {
 
   const decoded = parseSitemap(`<url><loc>https://${HOST}/a&amp;b/</loc></url>`);
   assert.ok(decoded.has(`https://${HOST}/a&b/`));
+  const once = parseSitemap(`<url><loc>https://${HOST}/a&amp;amp;b/</loc></url>`);
+  assert.ok(once.has(`https://${HOST}/a&amp;b/`));
 
   const noBaseline = diffSitemap(null, bare);
   assert.equal(noBaseline.baseline, false);
@@ -568,7 +571,7 @@ with zipfile.ZipFile(sys.argv[1], 'w') as zf:
     zf.writestr('website/indexnow-snapshot/sitemap-0.xml', '<urlset><url><loc>https://${HOST}/</loc></url></urlset>')
 `, zipPath]);
     const extracted = await extractSitemapZip(zipPath, path.join(zipDir, 'out'));
-    assert.match(extracted, new RegExp(`https://${HOST}/`));
+    assert.ok(extracted.includes(`https://${HOST}/`));
 
     const token = 'ghp_secretvalue';
     let sawTokenInArgv = false;
