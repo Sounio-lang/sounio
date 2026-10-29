@@ -83,7 +83,7 @@ export SOUNIO_NV2_ARENA_GIB="${SOUNIO_NV2_ARENA_GIB:-64}"
 # Likewise the handle table: 4,194,304 handles ran out in gen3 after it had
 # parsed about 3 MB of its own source (#2966). The load base is the handle
 # capacity, and native_v2_write_min_elf64_to_file refuses (rc 29) when
-# base + image runs past BSS_BASE_LINUX (0x10000000).
+# base + image runs past BSS_BASE_LINUX (0x20000000 since #2966; 0x10000000 before).
 # 2^26 ran out in gen3 on 9ed0b7bd (proof 40152465186), before the lowering
 # stopped copying a Name per literal and a Lowerer per emit. 2^27 then
 # reached the fixed point while the image was ~124 MiB: base 0x8000000 leaves
@@ -91,8 +91,13 @@ export SOUNIO_NV2_ARENA_GIB="${SOUNIO_NV2_ARENA_GIB:-64}"
 # 162,617,633 bytes (proof 40869897189, code_bytes_needed). At base 0x8000000
 # that image ends near 0x11b00000, past the BSS base, so 27 is no longer a
 # legal load. 26 puts the base at 0x4000000 and leaves ~37 MiB under the BSS
-# window for that text plus rodata. Both rungs use the same value.
-export SOUNIO_NV2_HANDLE_LOG2="${SOUNIO_NV2_HANDLE_LOG2:-26}"
+# window for that text plus rodata. 26 then ran out in gen3 on 409cdf093
+# (proof 40898142044, rc 182 after 39 of 130 modules). BSS_BASE_LINUX moved to
+# 0x20000000 so 28 is a legal load: base 0x10000000 + ~163 MB of image ends
+# below the BSS window. The handle table is bump-allocated and demand-paged, so
+# only touched entries cost memory; 2^28 x 48 B x 4 fits the 64 GiB arena
+# (nc_configure_handles_from_env). Both rungs use the same value.
+export SOUNIO_NV2_HANDLE_LOG2="${SOUNIO_NV2_HANDLE_LOG2:-28}"
 
 # ── receipt reuse ─────────────────────────────────────────────────────────────
 # gen2 and gen3 are two full self-compiles (~40 min in CI, in swap). Their
