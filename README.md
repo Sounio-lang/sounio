@@ -16,6 +16,8 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.frontdoor.readme
 
 [English](README.md) · [Ελληνικά — ξεκινήστε εδώ](README.el.md)
 
+**Sounio (formerly Demetrios).** Sounio was previously released as Demetrios, the former name of this language.
+
 **Scientific computing with explicit uncertainty, units and effects — powered by a self-hosted compiler.**
 
 > **Status: research language (pre-1.0).** APIs may change; not recommended for production use. Open limits: [KNOWN_LIMITATIONS.md](docs/compiler/KNOWN_LIMITATIONS.md).
