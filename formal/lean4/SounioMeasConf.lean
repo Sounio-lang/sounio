@@ -12,8 +12,6 @@
 --
 -- All confidence values are integers in [0, 1000].
 -- GATE_THRESHOLD = 950; PLATINUM = 1000.
---
--- Source: docs/proofs/meas_conf_soundness.lean (canonical reference copy)
 
 namespace EGC
 

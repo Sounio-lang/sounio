@@ -4,6 +4,7 @@ import { readFile, access } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequestGuard, searchResultsForLocale, urlMatchesLocale } from '../src/lib/search-state.mjs';
+import { HREFLANG, htmlLang } from '../src/lib/seo-locales.mjs';
 import { htmlVisibleText } from './html-visible-text.mjs';
 
 const website = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -28,10 +29,12 @@ function homepageIssues(html, locale) {
   const expected = copy[locale];
   if ((html.match(/<h1\b[^>]*>/g) ?? []).length !== 1) errors.push('expected one primary heading');
   for (const field of ['title', 'description', 'start', 'note', 'scope']) if (!prose.includes(expected[field])) errors.push(`missing localized ${field}`);
-  if (!html.includes(`href="${prefix(locale)}/learn/getting-started"`)) errors.push('missing first-program entry');
+  if (!html.includes(`href="${prefix(locale)}/learn/getting-started/"`)) errors.push('missing first-program entry');
   if (!html.includes('class="language-picker"')) errors.push('missing header language control');
-  if (!html.includes(`lang="${locale}"`)) errors.push('wrong document language');
-  for (const alternate of locales) if (!html.includes(`hreflang="${alternate}"`)) errors.push(`missing language alternate: ${alternate}`);
+  if (!html.includes(`<html lang="${htmlLang(locale)}"`)) errors.push('wrong document language');
+  for (const alternate of locales) {
+    if (!html.includes(`rel="alternate" hreflang="${HREFLANG[alternate]}"`)) errors.push(`missing language alternate: ${HREFLANG[alternate]}`);
+  }
   if (/100\s*%|automatically tracks measurement error|cannot lie about uncertainty|patient safety at compile.time/i.test(prose)) errors.push('unscoped public claim');
   const schemas = [];
   for (const match of html.matchAll(/<script\b[^>]*type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/g)) {
@@ -170,7 +173,7 @@ if (args.includes('--self-test')) {
     [html => html.replaceAll(copy.en.title, 'Unreviewed title'), 'localized title'],
     [html => html.replaceAll(copy.en.note, ''), 'localized note'],
     [html => html.replaceAll(copy.en.scope, ''), 'localized scope'],
-    [html => html.replaceAll('hreflang="zh-hk"', 'hreflang="unknown"'), 'language alternate'],
+    [html => html.replaceAll('hreflang="zh-HK"', 'hreflang="unknown"'), 'language alternate'],
     [html => html.replace('class="language-picker"', 'class="missing-language"'), 'language control'],
     [html => html.replace('</main>', '<p>100% translated</p></main>'), 'unscoped public claim'],
     [html => html.replace('"programmingLanguage":"Sounio"', '"programmingLanguage":"Sounio","softwareVersion":"2.0.0"'), 'release metadata'],

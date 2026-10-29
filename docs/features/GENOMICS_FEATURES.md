@@ -432,8 +432,8 @@ let msa = build_msa(seqs)
 See full documentation:
 - [Expression Analysis](../../stdlib/genomics/expression.sio)
 - [Pathway Enrichment](../../stdlib/genomics/ontology.sio)
-- [Sequence Alignment](../../stdlib/genomics/alignment.sio)
-- [Variant Calling](../../stdlib/genomics/variant.sio)
+- Sequence alignment (`stdlib/genomics/alignment.sio` is not in this tree)
+- Variant calling (`stdlib/genomics/variant.sio` is not in this tree)
 
 ---
 

@@ -64,12 +64,52 @@ jobs:
           rc=${PIPESTATUS[0]}
           echo "STDLIB_RELIABILITY_GATE_RC=$rc ref=${GITHUB_REF_NAME} sha=$(git rev-parse HEAD)"
           exit $rc
+      # The gate stops at its first failing sub-gate (the hyper lanes run
+      # first), so a red hyper lane used to hide the whole E2E result and the
+      # uploaded stdlib_e2e_result.v1.json was the stale committed file. Run
+      # the E2E on its own, always, into a fresh path, so every run measures it.
+      - name: Stdlib E2E (always measured)
+        if: always()
+        env:
+          SOUC_BIN: ""
+        run: |
+          set +e
+          out=/tmp/stdlib_e2e_measured.v1.json
+          rm -f "$out"
+          bash scripts/stdlib/run_stdlib_e2e.sh --json-out "$out" > /tmp/stdlib-e2e.log 2>&1
+          rc=$?
+          # A step that ran is not a measurement. Only a fresh file with the
+          # expected schema and integer totals counts; anything else is
+          # recorded as unavailable, never replaced by the committed snapshot.
+          if [ -s "$out" ] && jq -e '.schema == "sounio.stdlib.e2e.result.v1"
+              and ([.totals.pass, .totals.fail, .totals.skip, .totals.total]
+                   | all(type == "number" and . == floor and . >= 0))' "$out" >/dev/null 2>&1; then
+            measurement=valid
+            totals=$(jq -c '.totals' "$out")
+          else
+            measurement=unavailable
+            totals=null
+          fi
+          jq -n --arg m "$measurement" --argjson rc "$rc" --argjson totals "$totals" \
+            --arg sha "$(git rev-parse HEAD)" --arg run "$GITHUB_RUN_ID" \
+            '{schema: "sounio.stdlib.e2e.receipt.v1", attempted: true, runner_rc: $rc,
+              measurement: $m, totals: $totals, sha: $sha, run_id: $run}' \
+            > /tmp/stdlib_e2e_receipt.v1.json
+          cat /tmp/stdlib_e2e_receipt.v1.json
+          echo "STDLIB_E2E_RC=$rc STDLIB_E2E_MEASUREMENT=$measurement"
+          if [ "$measurement" = unavailable ]; then
+            echo "::warning title=Stdlib E2E::measurement unavailable (runner rc=$rc); totals were not produced on this run"
+          fi
+          exit 0
       - name: Upload status and evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: stdlib-reliability-${{ github.run_id }}
           path: |
+            /tmp/stdlib_e2e_measured.v1.json
+            /tmp/stdlib_e2e_receipt.v1.json
+            /tmp/stdlib-e2e.log
             artifacts/stdlib/stdlib_reliability_status.v1.json
             artifacts/stdlib/stdlib_e2e_result.v1.json
             artifacts/stdlib/stdlib_hyper_execution_status.v1.json

@@ -282,7 +282,7 @@ required-features = ["blast"]
 
 ## 🤝 Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for development guidelines.
+See [CONTRIBUTING.md](../../CONTRIBUTING.md) for development guidelines.
 
 ## 📄 License
 

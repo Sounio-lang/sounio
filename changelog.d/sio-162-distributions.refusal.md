@@ -1,0 +1,1 @@
+Invalid or unavailable scalar Normal/Beta evaluations now raise runtime `Panic` instead of returning finite sentinel or fabricated values. Checked calls expose diagnostic status 1 for domain/options, 2 for nonfinite input, 3 for exhausted work, 4 for arithmetic failure and 5 for unsupported representation; scalar underflow retains a finite logarithm independently.

@@ -336,10 +336,11 @@ pub fn check_program_epistemic_into(prog: Program, out: &! IrEpistemicSection) -
     let checker_ptr = check_mod_alloc_checker()
     checker_init_in_place(checker_ptr)
     (*checker_ptr).current_module = prog.module_path
+    e035_note_module(prog.module_path)
     (*checker_ptr).crate_root = prog.module_path
     checker_collect_items_mut(checker_ptr, prog.items)
     let had_error = checker_check_items_inner_store_return_had_error_mut(checker_ptr, prog.items)
-    if had_error == 1 || (*checker_ptr).error_count > 0 {
+    if had_error == 1 || checker_had_error_scalar(checker_ptr) == 1 {
         heap_free(checker_ptr as i64)
         return false
     }
@@ -485,17 +486,16 @@ pub fn check_items_verdict_boot4_with_module_path(items: Option<Box<ItemList>>, 
     let checker_ptr = check_mod_alloc_checker()
     checker_init_in_place(checker_ptr)
     (*checker_ptr).current_module = module_path
+    e035_note_module(module_path)
     (*checker_ptr).crate_root = module_path
     checker_collect_items_mut(checker_ptr, items)
     let had_error = checker_check_items_inner_store_return_had_error_mut(checker_ptr, items)
-    // Collect lowers parameter types. A diagnostic recorded there (E201 on
-    // ExactlyPrivate without ZD, or the always-refuse control) used to be
-    // discarded: this verdict only inspected the check-pass had_error bit,
-    // so `check: OK` and rc=0 while the checker had already failed. Honour
-    // the recorded count before freeing the checker.
-    let recorded = (*checker_ptr).error_count
-    let noted = (*checker_ptr).had_error
-    if had_error == 1 || recorded > 0 || noted {
+    // Collect lowers parameter types. A diagnostic recorded there sets
+    // had_error on this same Checker, and the check pass does not clear it.
+    // Do not also load (*checker_ptr).error_count / .had_error: Gen1 emits
+    // those as words 1 and 2 (env count, then a pointer), so a clean module
+    // is rejected and panic("check failed") exits 1 with no text.
+    if had_error == 1 || checker_had_error_scalar(checker_ptr) == 1 {
         heap_free(checker_ptr as i64)
         return 1
     }
@@ -620,6 +620,7 @@ pub fn check_items_verdict_boot4_with_module_map(items: Option<Box<ItemList>>, m
     let checker_ptr = check_mod_alloc_checker()
     checker_init_in_place(checker_ptr)
     (*checker_ptr).current_module = module_path
+    e035_note_module(module_path)
     (*checker_ptr).crate_root = module_path
 
     // Round 10 (review comment 4099548914): leaving current_module_id
@@ -651,8 +652,10 @@ pub fn check_items_verdict_boot4_with_module_map(items: Option<Box<ItemList>>, m
                 (*checker_ptr).current_module_id = owner
                 if owner >= 0 && owner < program_count {
                     (*checker_ptr).current_module = (*programs)[owner as usize].module_path
+                    e035_note_module((*programs)[owner as usize].module_path)
                 } else {
                     (*checker_ptr).current_module = module_path
+                    e035_note_module(module_path)
                 }
                 checker_collect_item_only_mut(checker_ptr, it)
                 cur = (*list).tail
@@ -674,6 +677,10 @@ pub fn check_items_verdict_boot4_with_module_map(items: Option<Box<ItemList>>, m
     // here, once, before the body-checking pass below needs it.
     (*checker_ptr).ontology_items = items
 
+    // SIO-346: same post-collect selective-import validation as the
+    // per-module verdict (see check_modules_verdict_boot4_with_visibility).
+    checker_validate_selective_imports_inplace(checker_ptr)
+
     var chk = items
     while true {
         match chk {
@@ -683,8 +690,10 @@ pub fn check_items_verdict_boot4_with_module_map(items: Option<Box<ItemList>>, m
                 (*checker_ptr).current_module_id = owner
                 if owner >= 0 && owner < program_count {
                     (*checker_ptr).current_module = (*programs)[owner as usize].module_path
+                    e035_note_module((*programs)[owner as usize].module_path)
                 } else {
                     (*checker_ptr).current_module = module_path
+                    e035_note_module(module_path)
                 }
                 checker_check_items_mut(checker_ptr, check_mod_singleton_item_list(it))
                 chk = (*list).tail
@@ -695,9 +704,7 @@ pub fn check_items_verdict_boot4_with_module_map(items: Option<Box<ItemList>>, m
     checker_verify_dsep_claims_mut(checker_ptr)
     checker_flush_unemitted_type_errors_mut(checker_ptr)
 
-    let recorded = (*checker_ptr).error_count
-    let noted = (*checker_ptr).had_error
-    if noted || recorded > 0 {
+    if checker_had_error_scalar(checker_ptr) == 1 {
         heap_free(checker_ptr as i64)
         return 1
     }
@@ -724,7 +731,7 @@ pub fn check_items_ontology_verdict(items: Option<Box<ItemList>>) -> i64 with Mu
     let checker_ptr = check_mod_alloc_checker()
     checker_init_in_place(checker_ptr)
     checker_validate_ontology_items_inplace(checker_ptr, items)
-    let bad = if (*checker_ptr).had_error || (*checker_ptr).error_count > 0 { 1 } else { 0 }
+    let bad = checker_had_error_scalar(checker_ptr)
     heap_free(checker_ptr as i64)
     bad
 }
@@ -754,10 +761,17 @@ pub fn check_modules_verdict_boot4_with_visibility(programs: &! [Program; 256], 
     var i: i64 = 0
     while i < count && i < 256 {
         (*checker_ptr).current_module = (*programs)[i as usize].module_path
+        e035_note_module((*programs)[i as usize].module_path)
         (*checker_ptr).current_module_id = i
         checker_collect_items_inplace(checker_ptr, (*programs)[i as usize].items)
         i = i + 1
     }
+
+    // SIO-346: every module is collected now, so a braced name recorded by
+    // checker_collect_use_item_inplace can be asked whether any loaded module
+    // actually defines it. A phantom selective import is refused here instead
+    // of lowering to a body-less stub.
+    checker_validate_selective_imports_inplace(checker_ptr)
 
     // Pass 2: check function bodies module-by-module, with current_module set
     // to the module being checked.  This is what makes E175/E176/E177 fire on
@@ -765,6 +779,7 @@ pub fn check_modules_verdict_boot4_with_visibility(programs: &! [Program; 256], 
     i = 0
     while i < count && i < 256 {
         (*checker_ptr).current_module = (*programs)[i as usize].module_path
+        e035_note_module((*programs)[i as usize].module_path)
         (*checker_ptr).current_module_id = i
         checker_check_items_mut(checker_ptr, (*programs)[i as usize].items)
         i = i + 1
@@ -774,7 +789,7 @@ pub fn check_modules_verdict_boot4_with_visibility(programs: &! [Program; 256], 
     // in one module may name a graph declared in another.
     checker_verify_dsep_claims_mut(checker_ptr)
 
-    if (*checker_ptr).had_error || (*checker_ptr).error_count > 0 {
+    if checker_had_error_scalar(checker_ptr) == 1 {
         heap_free(checker_ptr as i64)
         return 1
     }
@@ -1765,6 +1780,7 @@ pub fn check_items_verdict_boot4_with_ontocache_sidecar(items: Option<Box<ItemLi
     let checker_ptr = check_mod_alloc_checker()
     checker_init_in_place(checker_ptr)
     (*checker_ptr).current_module = module_path
+    e035_note_module(module_path)
     (*checker_ptr).crate_root = module_path
     checker_collect_items_mut(checker_ptr, items)
     let had_error = checker_check_items_inner_store_return_had_error_mut(checker_ptr, items)
@@ -1846,6 +1862,7 @@ fn check_program_verdict(prog: Program) -> i64 with Mut, Panic, Div, Alloc, IO {
 pub fn check_program_with_artifacts(prog: Program) -> CheckArtifactsResult with Mut, Panic, Div, Alloc, IO {
     var checker = checker_new()
     checker.current_module = prog.module_path
+    e035_note_module(prog.module_path)
     // The crate root is the module being checked in single-module contexts.
     checker.crate_root = prog.module_path
     checker = checker.collect_items(prog.items)
