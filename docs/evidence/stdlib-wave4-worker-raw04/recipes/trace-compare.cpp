@@ -1,0 +1,7 @@
+#define main schema_reference_main
+#include "nv2_trace_full_reference.cpp"
+#undef main
+#include <map>
+struct Counts{std::string name;I instructions=0;std::map<I,I> flags;};
+std::vector<Counts> census(const char*p){const auto lines=load(p);Parser parser(lines);parser.verify(false,0);std::vector<Counts> out;for(const auto&s:lines){if(!s.starts_with("NV2_IR_FULL_"))continue;auto r=row(s);if(r.tag=="NV2_IR_FULL_FN"){Counts c;c.instructions=r.v.at(7);out.push_back(c);}else if(r.tag=="NV2_IR_FULL_FN_NAME"){auto&c=out.at(static_cast<std::size_t>(r.v.at(0)));for(std::size_t n=3;n<r.v.size();++n)c.name+=static_cast<char>(r.v[n]);}else if(r.tag=="NV2_IR_FULL_INSTR"){auto&c=out.at(static_cast<std::size_t>(r.v.at(0)));const I flag=r.v.at(14);if(flag>=64076&&flag<=64079)++c.flags[flag];}}return out;}
+int main(int argc,char**argv){try{if(argc!=3)return 64;auto a=census(argv[1]),b=census(argv[2]);if(a.size()!=b.size())bad("function census changed");std::cout<<"function\tname\tinstructions_off\tinstructions_on\tenter_off\tenter_on\texit_off\texit_on\tkeep_off\tkeep_on\tleave_off\tleave_on\n";for(std::size_t i=0;i<a.size();++i){if(a[i].name!=b[i].name)bad("function identity changed");std::cout<<i<<'\t'<<a[i].name<<'\t'<<a[i].instructions<<'\t'<<b[i].instructions;for(I f=64076;f<=64079;++f)std::cout<<'\t'<<a[i].flags[f]<<'\t'<<b[i].flags[f];std::cout<<'\n';}return 0;}catch(const std::exception&e){std::cerr<<e.what()<<'\n';return 1;}}
