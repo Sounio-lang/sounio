@@ -1,0 +1,250 @@
+//@ run-pass
+// Synthetic multi-layer Llama forward through Q4_K MoE on every layer.
+// Usage: llama_moe_multilayer_demo [gemm-ptx] [mmid-ptx]
+
+use hetero::runtime::{Runtime, rt_load_mmid, rt_open}
+use llm::llama::{Llama, LlamaCfg, kv_new, llama_forward_rt}
+use tensor2::cpu_kernel::{CpuBuf, ck_alloc, ck_get, ck_set}
+
+fn empty_buf() -> CpuBuf {
+    CpuBuf { data: 0 as *mut f64, len: 0 }
+}
+
+fn filled_buf(n: i64, value: f64) -> CpuBuf with Alloc, Mut {
+    var out = ck_alloc(n)
+    var i: i64 = 0
+    while i < n {
+        ck_set(&!out, i, value)
+        i = i + 1
+    }
+    out
+}
+
+fn pattern_buf(n: i64, scale: f64) -> CpuBuf with Alloc, Mut {
+    var out = ck_alloc(n)
+    var i: i64 = 0
+    while i < n {
+        ck_set(&!out, i, scale * (((i % 7) + 1) as f64))
+        i = i + 1
+    }
+    out
+}
+
+fn router_buf(hidden: i64, experts: i64) -> CpuBuf with Alloc, Mut {
+    var out = ck_alloc(hidden * experts)
+    var h: i64 = 0
+    while h < hidden {
+        var e: i64 = 0
+        while e < experts {
+            ck_set(&!out, h * experts + e, 0.00001 * ((e + 1) as f64))
+            e = e + 1
+        }
+        h = h + 1
+    }
+    out
+}
+
+fn write_u8(buf: *mut u8, off: i64, v: i64) with Mut {
+    let shift = (off % 8) * 8
+    let mask = (0 - 1) - (255 << shift)
+    let word = (read_i64(buf as *mut i64, off / 8) & mask) | ((v & 255) << shift)
+    write_i64(buf as *mut i64, off / 8, word)
+}
+
+fn f32_to_f16_bits(v: f64) -> i64 {
+    if v <= 0.0 { return 0 }
+    var exp: i64 = 15
+    var mant = v
+    while mant >= 2.0 && exp < 30 {
+        mant = mant / 2.0
+        exp = exp + 1
+    }
+    while mant < 1.0 && exp > 1 {
+        mant = mant * 2.0
+        exp = exp - 1
+    }
+    let frac = ((mant - 1.0) * 1024.0) as i64
+    (exp << 10) | (frac & 1023)
+}
+
+fn pack_q4k(weights: *mut u8, expert_stride: i64, row_stride: i64, experts: i64, m: i64, k: i64, fill: f64) with Mut {
+    let nqb = k / 256
+    let dbits = f32_to_f16_bits(fill / 15.0)
+    var e: i64 = 0
+    while e < experts {
+        var r: i64 = 0
+        while r < m {
+            var ib: i64 = 0
+            while ib < nqb {
+                let base = e * expert_stride + r * row_stride + ib * 144
+                write_u8(weights, base + 0, dbits & 255)
+                write_u8(weights, base + 1, (dbits >> 8) & 255)
+                write_u8(weights, base + 2, 0)
+                write_u8(weights, base + 3, 0)
+                var s: i64 = 0
+                while s < 4 {
+                    write_u8(weights, base + 4 + s, 1)
+                    write_u8(weights, base + 8 + s, 0)
+                    write_u8(weights, base + 12 + s, 1)
+                    s = s + 1
+                }
+                var q: i64 = 0
+                while q < 128 {
+                    write_u8(weights, base + 16 + q, (8 << 4) | 8)
+                    q = q + 1
+                }
+                ib = ib + 1
+            }
+            r = r + 1
+        }
+        e = e + 1
+    }
+}
+
+fn fill_layer(
+    m: &!Llama, li: i64,
+    hidden: i64, inter: i64, kvdim: i64, experts: i64,
+    eg: i64, eu: i64, ed: i64, row_g: i64, row_u: i64, row_d: i64,
+    pack_fill: f64, attn_scale: f64,
+) with Alloc, Mut {
+    let ix = li as usize
+    let gate_w = heap_alloc(experts * eg)
+    let up_w = heap_alloc(experts * eu)
+    let down_w = heap_alloc(experts * ed)
+    pack_q4k(gate_w, eg, row_g, experts, inter, hidden, pack_fill)
+    pack_q4k(up_w, eu, row_u, experts, inter, hidden, pack_fill)
+    pack_q4k(down_w, ed, row_d, experts, hidden, inter, pack_fill)
+    m.moe_router[ix] = router_buf(hidden, experts)
+    m.moe_gate_w[ix] = gate_w
+    m.moe_up_w[ix] = up_w
+    m.moe_down_w[ix] = down_w
+    m.moe_gate_bytes[ix] = experts * eg
+    m.moe_up_bytes[ix] = experts * eu
+    m.moe_down_bytes[ix] = experts * ed
+    m.in_norm[ix] = filled_buf(hidden, 1.0)
+    m.post_norm[ix] = filled_buf(hidden, 1.0)
+    m.wq[ix] = pattern_buf(hidden * hidden, attn_scale)
+    m.wk[ix] = pattern_buf(hidden * kvdim, attn_scale)
+    m.wv[ix] = pattern_buf(hidden * kvdim, attn_scale)
+    m.wo[ix] = pattern_buf(hidden * hidden, attn_scale)
+    m.gate[ix] = filled_buf(hidden * inter, attn_scale)
+    m.up[ix] = filled_buf(hidden * inter, attn_scale)
+    m.down[ix] = filled_buf(inter * hidden, attn_scale)
+}
+
+fn logits_nonfinite_count(logits: &CpuBuf) -> i64 {
+    var bad: i64 = 0
+    var i: i64 = 0
+    while i < logits.len {
+        let v = ck_get(logits, i)
+        if v != v || v > 1.0e30 || v < 0.0 - 1.0e30 { bad = bad + 1 }
+        i = i + 1
+    }
+    bad
+}
+
+fn run_forward(m: &!Llama, rt: &Runtime, ntok: i64, layers: i64) -> i64 with IO, Mut, Panic, Div, Alloc {
+    var tokens = ck_alloc(ntok)
+    var t: i64 = 0
+    while t < ntok {
+        ck_set(&!tokens, t, (t + 1) as f64)
+        t = t + 1
+    }
+    var kv = kv_new(m, 16)
+    let logits = llama_forward_rt(m, &!kv, &tokens, ntok, rt)
+    let bad = logits_nonfinite_count(&logits)
+    print("ntok=")
+    print_int(ntok)
+    print(" last_moe_used=")
+    print_int(if m.last_moe_used { 1 } else { 0 })
+    print(" last_moe_layers_ok=")
+    print_int(m.last_moe_layers_ok)
+    print(" last_moe_status=")
+    print_int(m.last_moe_status)
+    print(" finite_logits=")
+    print_int(if bad == 0 { 1 } else { 0 })
+    print("\n")
+    if !m.last_moe_used || m.last_moe_layers_ok != layers || m.last_moe_status != 0 || bad != 0 {
+        return 1
+    }
+    0
+}
+
+fn main() with IO, Mut, Panic, Div, Alloc {
+    var gemm_ptx = "stdlib/hetero/kernels/gemm_naive_f32.ptx"
+    var mmid_ptx = "stdlib/hetero/kernels/mmid_q4k_dp4a_f32.ptx"
+    if arg_count() > 0 { gemm_ptx = get_arg(0) }
+    if arg_count() > 1 { mmid_ptx = get_arg(1) }
+
+    var rt = rt_open(gemm_ptx, "gemm_naive_f32")
+    if !rt.ready {
+        print("gpu: unavailable\nLLAMA MOE MULTILAYER DONE\n")
+        exit(0)
+    }
+    if !rt_load_mmid(&!rt, mmid_ptx) {
+        print("mmid: PTX load failed\nLLAMA MOE MULTILAYER DONE\n")
+        exit(0)
+    }
+
+    let hidden: i64 = 256
+    let inter: i64 = 512
+    let layers: i64 = 2
+    let experts: i64 = 8
+    let slots: i64 = 2
+    let vocab: i64 = 8
+    let heads: i64 = 4
+    let kv_heads: i64 = 1
+    let head_dim: i64 = hidden / heads
+    let kvdim = kv_heads * head_dim
+
+    let row_g = (hidden / 256) * 144
+    let row_u = row_g
+    let row_d = (inter / 256) * 144
+    let eg = inter * row_g
+    let eu = inter * row_u
+    let ed = hidden * row_d
+
+    let cfg = LlamaCfg {
+        hidden: hidden, inter: inter, layers: layers, heads: heads, kv_heads: kv_heads,
+        vocab: vocab, head_dim: head_dim, eps: 0.00001, theta: 10000.0,
+        tied: false, n_experts: experts, n_expert_used: slots, moe_inter: inter, moe_quant: 0, ok: true,
+    }
+    var m = Llama {
+        cfg: cfg,
+        embed: pattern_buf(vocab * hidden, 0.001),
+        lm_head_t: pattern_buf(hidden * vocab, 0.0001),
+        final_norm: filled_buf(hidden, 1.0),
+        wq: [empty_buf(); 64], wk: [empty_buf(); 64], wv: [empty_buf(); 64], wo: [empty_buf(); 64],
+        qb: [empty_buf(); 64], kb: [empty_buf(); 64], vb: [empty_buf(); 64],
+        gate: [empty_buf(); 64], up: [empty_buf(); 64], down: [empty_buf(); 64],
+        in_norm: [empty_buf(); 64], post_norm: [empty_buf(); 64],
+        moe_router: [empty_buf(); 64],
+        moe_gate_w: [0 as *mut u8; 64], moe_up_w: [0 as *mut u8; 64], moe_down_w: [0 as *mut u8; 64],
+        moe_gate_bytes: [0; 64], moe_up_bytes: [0; 64], moe_down_bytes: [0; 64],
+        moe_expert_stride_g: eg, moe_row_stride_g: row_g,
+        moe_expert_stride_u: eu, moe_row_stride_u: row_u,
+        moe_expert_stride_d: ed, moe_row_stride_d: row_d,
+        last_moe_used: false, last_moe_status: 0, last_moe_layers_ok: 0, loaded: true,
+    }
+
+    var li: i64 = 0
+    while li < layers {
+        fill_layer(
+            &!m, li, hidden, inter, kvdim, experts,
+            eg, eu, ed, row_g, row_u, row_d,
+            0.02 + 0.001 * (li as f64), 0.000001 * ((li + 1) as f64),
+        )
+        li = li + 1
+    }
+
+    if run_forward(&!m, &rt, 1, layers) != 0 {
+        print("LLAMA MOE MULTILAYER FAIL\n")
+        exit(1)
+    }
+    if run_forward(&!m, &rt, 4, layers) != 0 {
+        print("LLAMA MOE MULTILAYER FAIL\n")
+        exit(1)
+    }
+    print("LLAMA MOE MULTILAYER DONE\n")
+    exit(0)
+}
