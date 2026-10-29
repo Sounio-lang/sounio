@@ -1,0 +1,354 @@
+--- a/self-hosted/ir/lower.sio
++++ b/self-hosted/ir/lower.sio
+@@ -100,0 +101,2 @@
++    // Positive declared/closed integer provenance. Never inferred from kind1.
++    untracked_int_origin: Box<LowerLocalI64Slots>,
+@@ -261,0 +264 @@
++        untracked_int_origin: lowerer_box_local_i64_slots(0),
+@@ -2525,0 +2529 @@
++    shadow_origin_body_closed: bool,
+@@ -2956,0 +2961 @@
++        shadow_origin_body_closed: false,
+@@ -3580,0 +3586 @@
++        shadow_origin_body_closed: false,
+@@ -3640,0 +3647 @@
++        shadow_origin_body_closed: false,
+@@ -3704,0 +3712 @@
++        shadow_origin_body_closed: false,
+@@ -6481,0 +6490,115 @@
++
++// REVIEW ONLY: closed whole-body fence for untracked-integer provenance.
++// This is NOT a Worker capability proof and does not authorize runtime callbacks.
++fn shadow_origin_block_closed(block: &Block, depth: i64) -> bool with Mut, Panic, Div, Alloc {
++    if depth > 64 { return false }
++    var cur = &(*block).stmts
++    var count: i64 = 0
++    while true {
++        match *cur {
++            Some(node) => {
++                count = count + 1
++                if count > 4096 { return false }
++                let stmt = &(*node).head
++                match (*stmt).kind {
++                    StmtKind::StmtLet | StmtKind::StmtVar | StmtKind::StmtExpr | StmtKind::StmtAssign => {}
++                    _ => { return false }
++                }
++                match (*stmt).expr {
++                    Some(e) => { if !shadow_origin_expr_closed(&(*e), depth + 1) { return false } }
++                    None => {}
++                }
++                match (*stmt).target {
++                    Some(e) => { if !shadow_origin_expr_closed(&(*e), depth + 1) { return false } }
++                    None => {}
++                }
++                cur = &(*node).tail
++            }
++            None => break
++        }
++    }
++    true
++}
++
++fn shadow_origin_expr_closed(e: &Expr, depth: i64) -> bool with Mut, Panic, Div, Alloc {
++    if depth > 64 { return false }
++    match (*e).kind {
++        ExprKind::ExprIntLit | ExprKind::ExprFloatLit | ExprKind::ExprBoolTrue
++        | ExprKind::ExprBoolFalse | ExprKind::ExprStringLit | ExprKind::ExprCharLit
++        | ExprKind::ExprIdent | ExprKind::ExprPath | ExprKind::ExprBinary
++        | ExprKind::ExprUnary | ExprKind::ExprFieldAccess | ExprKind::ExprIndex
++        | ExprKind::ExprCall | ExprKind::ExprIf | ExprKind::ExprWhile
++        | ExprKind::ExprLoop | ExprKind::ExprBlock | ExprKind::ExprReturn
++        | ExprKind::ExprBreak | ExprKind::ExprContinue | ExprKind::ExprStructLit
++        | ExprKind::ExprArrayLit | ExprKind::ExprTupleLit | ExprKind::ExprRange
++        | ExprKind::ExprCast => {}
++        _ => { return false }
++    }
++    // Fail closed for all borrowing/capture forms, including later occurrences.
++    if (*e).kind == ExprKind::ExprUnary {
++        if (*e).un_op == UnaryOp::OpRef || (*e).un_op == UnaryOp::OpRefMut
++            || (*e).un_op == UnaryOp::OpDeref { return false }
++    }
++    match (*e).arms { Some(_) => { return false } None => {} }
++    match (*e).handler_block { Some(_) => { return false } None => {} }
++    match (*e).closure_body { Some(_) => { return false } None => {} }
++    match (*e).left {
++        Some(c) => { if !shadow_origin_expr_closed(&(*c), depth + 1) { return false } }
++        None => {}
++    }
++    match (*e).right {
++        Some(c) => { if !shadow_origin_expr_closed(&(*c), depth + 1) { return false } }
++        None => {}
++    }
++    match (*e).else_expr {
++        Some(c) => { if !shadow_origin_expr_closed(&(*c), depth + 1) { return false } }
++        None => {}
++    }
++    match (*e).block {
++        Some(b) => { if !shadow_origin_block_closed(&(*b), depth + 1) { return false } }
++        None => {}
++    }
++    var args = &(*e).args
++    var argc: i64 = 0
++    while true {
++        match *args {
++            Some(a) => {
++                argc = argc + 1
++                if argc > 4096 || !shadow_origin_expr_closed(&(*a).head, depth + 1) { return false }
++                args = &(*a).tail
++            }
++            None => break
++        }
++    }
++    var fields = &(*e).fields
++    var fieldc: i64 = 0
++    while true {
++        match *fields {
++            Some(f) => {
++                fieldc = fieldc + 1
++                if fieldc > 4096 || !shadow_origin_expr_closed(&(*f).head.value, depth + 1) { return false }
++                fields = &(*f).tail
++            }
++            None => break
++        }
++    }
++    true
++}
++
++fn shadow_declared_word_integer(ty: &TypeExpr) -> bool with Mut, Panic, Div {
++    if (*ty).kind != TypeExprKind::TypeNamed || (*ty).path.seg_count != 1 { return false }
++    match (*ty).type_args { Some(_) => { return false } None => {} }
++    match (*ty).inner { Some(_) => { return false } None => {} }
++    match (*ty).knowledge_info { Some(_) => { return false } None => {} }
++    match (*ty).refinement_info { Some(_) => { return false } None => {} }
++    lower_name_is_integer_type(ir_path_first_name((*ty).path))
++}
++
++fn lowerer_shadow_origin_set_mut(lo: &! Lowerer, name: Name, origin: i64) with Mut, Panic, Div, Alloc {
++    if FO_INLINE_DEPTH != 0 { return }
++    let index = (*lo).shadow_local_index(name)
++    if index >= 0 {
++        (*(*(*lo).locals).untracked_int_origin).values[index as usize] = if origin == 1 { 1 } else { 0 }
++    }
++}
++
+@@ -6523,0 +6647 @@
++        (*(*locals_box).untracked_int_origin).values[idx as usize] = 0
+@@ -7082,0 +7207,3 @@
++                if (*lo).shadow_origin_body_closed && shadow_declared_word_integer(&(*list).head.ty) {
++                    lowerer_shadow_origin_set_mut(lo, (*list).head.name, 1)
++                }
+@@ -7442,0 +7570 @@
++    (*lo).shadow_origin_body_closed = shadow_origin_block_closed(&(*fd).body, 0)
+@@ -13480,0 +13609 @@
++        lo.shadow_origin_body_closed = false
+@@ -15044,0 +15174 @@
++                (*(*stk).untracked_int_origin).values[idx as usize] = 0
+@@ -16068,0 +16199,133 @@
++
++    fn shadow_local_index(self, name: Name) -> i64 with Mut, Panic, Div {
++        if (*self.locals).count < 0 || (*self.locals).count > 4096 { return -1 }
++        var i = (*self.locals).count - 1
++        while i >= 0 {
++            if (*(*self.locals).depths).values[i as usize] <= self.scope_depth
++                && ir_name_eq((*(*self.locals).names).values[i as usize], name) { return i }
++            i = i - 1
++        }
++        -1
++    }
++
++    // Positive representation + absence of every tracked/aggregate origin.
++    // The independent provenance bit is checked by the expression classifier.
++    fn shadow_plain_untracked_slot(self, index: i64) -> bool with Mut, Panic, Div {
++        if index < 0 || index >= (*self.locals).count || index >= 4096 { return false }
++        let kind = (*(*self.locals).scalar_kind).values[index as usize]
++        if kind != 1 && kind != 2 { return false }
++        if (*(*self.locals).is_ref).values[index as usize] != 0
++            || (*(*self.locals).is_global).values[index as usize] != 0
++            || (*(*self.locals).raw_memory_kind).values[index as usize] != 0
++            || (*(*self.locals).wide_bits).values[index as usize] != 0
++            || (*(*self.locals).array_lens).values[index as usize] >= 0
++            || (*(*self.locals).array_copy_word_scalar).values[index as usize] != 0
++            || (*(*self.locals).array_elem_float).values[index as usize] != 0
++            || (*(*self.locals).array_elem_wide_bits).values[index as usize] != 0
++            || (*(*self.locals).struct_type_is_array_elem).values[index as usize] != 0
++            || (*(*self.locals).struct_types).values[index as usize].len != 0
++            || (*(*self.locals).kn_value_float).values[index as usize] != -1
++            || (*(*self.locals).opt_payload_kind).values[index as usize] != 0
++            || (*(*self.locals).box_inner_layout).values[index as usize] >= 0
++            || (*(*self.locals).closure_fn_id).values[index as usize] >= 0
++            || (*(*self.locals).fn_ptr_ret_float).values[index as usize] != 0
++            || (*(*self.locals).fn_ptr_ret_layout).values[index as usize] >= 0
++            || (*(*self.locals).tuple_float_mask).values[index as usize] != 0
++            || (*(*self.locals).tuple_arr_mask).values[index as usize] != 0
++            || (*(*self.locals).tuple0_array_elem_layout).values[index as usize] >= 0
++            || (*(*self.locals).tuple_struct_layout).values[index as usize] >= 0
++            || (*(*self.locals).tuple_struct_slot).values[index as usize] >= 0
++            || (*(*self.locals).variance_regs).values[index as usize] >= 0 { return false }
++        let reg = (*(*self.locals).regs).values[index as usize]
++        if reg < 0 || self.lookup_variance_for_base_reg(reg) >= 0 { return false }
++        if self.fo_bind_count < 0 || self.fo_bind_count > 128 { return false }
++        var row: i64 = 0
++        while row < self.fo_bind_count {
++            if ir_name_eq((*self.fo_bind).names[row as usize], (*(*self.locals).names).values[index as usize]) { return false }
++            row = row + 1
++        }
++        var ch: i64 = 0
++        while ch < 32 {
++            if self.fo_sigma2[ch as usize] == reg { return false }
++            ch = ch + 1
++        }
++        true
++    }
++
++    fn shadow_closed_untracked_integer(self, e: &Expr, depth: i64) -> bool with Mut, Panic, Div, Alloc {
++        if depth > 32 || !self.shadow_origin_body_closed || FO_INLINE_DEPTH != 0
++            || self.current_fn < 0 || !self.current_func_loaded
++            || self.pending_variance_reg >= 0 || self.pending_closure_fn_id >= 0 { return false }
++        var p: i64 = 0
++        while p < 32 {
++            if self.fo_pending_sens[p as usize] >= 0 { return false }
++            p = p + 1
++        }
++        if (*e).kind == ExprKind::ExprIntLit { return true }
++        if (*e).kind == ExprKind::ExprIdent {
++            let i = self.shadow_local_index((*e).name)
++            if !self.shadow_plain_untracked_slot(i) { return false }
++            return (*(*self.locals).scalar_kind).values[i as usize] == 1
++                && (*(*self.locals).untracked_int_origin).values[i as usize] == 1
++        }
++        if (*e).kind == ExprKind::ExprUnary {
++            if (*e).un_op != UnaryOp::OpNeg && (*e).un_op != UnaryOp::OpBitNot { return false }
++            match (*e).left {
++                Some(v) => { return self.shadow_closed_untracked_integer(&(*v), depth + 1) }
++                None => { return false }
++            }
++        }
++        if (*e).kind == ExprKind::ExprBinary {
++            let allowed = match (*e).bin_op {
++                BinaryOp::OpAdd | BinaryOp::OpSub | BinaryOp::OpMul
++                | BinaryOp::OpBitAnd | BinaryOp::OpBitOr | BinaryOp::OpBitXor
++                | BinaryOp::OpShl | BinaryOp::OpShr | BinaryOp::OpUShr => true,
++                _ => false
++            }
++            if !allowed { return false }
++            match (*e).left {
++                Some(l) => {
++                    match (*e).right {
++                        Some(r) => { return self.shadow_closed_untracked_integer(&(*l), depth + 1)
++                            && self.shadow_closed_untracked_integer(&(*r), depth + 1) }
++                        None => { return false }
++                    }
++                }
++                None => { return false }
++            }
++        }
++        false
++    }
++
++    fn shadow_first_track_dominates(self, index: i64) -> bool with Mut, Panic, Div {
++        if !self.shadow_plain_untracked_slot(index) { return false }
++        FO_INLINE_DEPTH == 0 && self.loop_depth == 0
++            && (*(*self.locals).depths).values[index as usize] == self.scope_depth
++            && !self.so_expr_has_hess()
++    }
++
++    fn shadow_refuse_scope(self) -> Lowerer with Mut, Panic, Div, Alloc, IO {
++        if FO_INLINE_DEPTH > 0 {
++            FO_INLINE_FRAME_CLASH = 1
++            return self
++        }
++        var lo = self
++        if !lo.probe_mode {
++            print("error: uncertainty shadow scope refused: first tracking needs a dominating private cell\n")
++        }
++        if lo.probe_mode {
++            lo.error_count = lo.error_count + 1
++            lo.had_error = true
++            return lo
++        }
++        if lo.current_func_loaded && lo.current_fn >= 0 && lo.current_fn < lo.module.fn_count {
++            lowerer_mark_hard_error(&! lo)
++        } else {
++            // Do not dereference current_func merely to diagnose invalid context.
++            lo.error_count = lo.error_count + 1
++            lo.had_error = true
++            IR_LOWER_HARD_ERROR = 1
++        }
++        lo
++    }
++
+@@ -27444,0 +27708 @@
++                        (*(*locals).untracked_int_origin).values[idx as usize] = if lo.shadow_origin_body_closed && shadow_declared_word_integer(&(*list).head.ty) { 1 } else { 0 }
+@@ -27643,0 +27908 @@
++        lo.shadow_origin_body_closed = shadow_origin_block_closed(&fd.body, 0)
+@@ -27861,0 +28127 @@
++        lo.shadow_origin_body_closed = shadow_origin_block_closed(&(*fd).body, 0)
+@@ -28863,0 +29130,5 @@
++        // Capture before same-name shadowing publishes the new binding.
++        let shadow_rhs_origin = match s.expr {
++            Some(e) => self.shadow_closed_untracked_integer(&(*e), 0),
++            None => false,
++        }
+@@ -29129,0 +29401 @@
++        if shadow_rhs_origin { lowerer_shadow_origin_set_mut(&! lo, s.name, 1) }
+@@ -30516,0 +30789,11 @@
++        let shadow_target_index = match s.target {
++            Some(t) => if (*t).kind == ExprKind::ExprIdent { self.shadow_local_index((*t).name) } else { -1 },
++            None => -1,
++        }
++        var shadow_origin_before = false
++        if self.shadow_origin_body_closed && FO_INLINE_DEPTH == 0 && self.shadow_plain_untracked_slot(shadow_target_index) {
++            shadow_origin_before = (*(*self.locals).untracked_int_origin).values[shadow_target_index as usize] == 1
++        }
++        let shadow_closed_rhs_before = if s.assign_op == AssignOp::AssignEq {
++            match s.expr { Some(e) => self.shadow_closed_untracked_integer(&(*e), 0), None => false }
++        } else { false }
+@@ -30732,0 +31016 @@
++        var shadow_rhs_zero = false
+@@ -30735 +31019,20 @@
+-                let rhs_var_pair = lo.lower_expr_variance_ref(&(*rhs_expr_var))
++                // Only an untracked integer target may take the closed-zero path.
++                let shadow_current_index = match s.target {
++                    Some(t) => if (*t).kind == ExprKind::ExprIdent { lo.shadow_local_index((*t).name) } else { -1 },
++                    None => -1,
++                }
++                if shadow_target_index >= 0 && shadow_current_index != shadow_target_index { return (lo.shadow_refuse_scope(), rhs) }
++                if lo.shadow_plain_untracked_slot(shadow_target_index) {
++                    shadow_rhs_zero = (*(*lo.locals).scalar_kind).values[shadow_target_index as usize] == 1
++                        && shadow_closed_rhs_before && lo.shadow_closed_untracked_integer(&(*rhs_expr_var), 0)
++                }
++                if shadow_origin_before && !shadow_rhs_zero {
++                    (*(*lo.locals).untracked_int_origin).values[shadow_target_index as usize] = 0
++                    // Never accept a prefix proof across another loop iteration.
++                    if lo.loop_depth > 0 { return (lo.shadow_refuse_scope(), rhs) }
++                }
++                let rhs_var_pair = if shadow_rhs_zero {
++                    lo.fo_clear_expr_sens().so_clear_expr_hess().emit_zero_variance()
++                } else {
++                    lo.lower_expr_variance_ref(&(*rhs_expr_var))
++                }
+@@ -30765 +31068,4 @@
+-                            if rhs_variance >= 0 {
++                            let shadow_keep_none = shadow_rhs_zero
++                                && lo.lookup_local_variance_reg((*target_expr).name) < 0
++                                && !lo.fo_expr_has_sens() && !lo.so_expr_has_hess()
++                            if rhs_variance >= 0 && !shadow_keep_none {
+@@ -30773,2 +31079,2 @@
+-                                // uncertainty. Locals with no slot keep the old rebind
+-                                // path, which is no worse than before.
++                                // uncertainty. First tracking requires a fresh cell
++                                // at a dominating same-scope point.
+@@ -30790 +31096,12 @@
+-                                    lo = lo.bind_local_variance_reg((*target_expr).name, rhs_variance)
++                                    let first_index = lo.shadow_local_index((*target_expr).name)
++                                    if !lo.shadow_first_track_dominates(first_index) {
++                                        return (lo.shadow_refuse_scope(), rhs)
++                                    }
++                                    // Initialize a fresh private cell from the REAL RHS.
++                                    // No zero guessed at a merge, and no RHS/parameter alias.
++                                    let private_pair = lo.fresh_reg()
++                                    lo = private_pair.0
++                                    lo = lo.emit(ir_copy(private_pair.1, rhs_variance))
++                                    lo = lo.emit(ir_mark_float_reg(private_pair.1))
++                                    lo = lo.bind_local_variance_reg((*target_expr).name, private_pair.1)
++                                    lo = lo.fo_alloc_sens_slots_for_local((*target_expr).name)
