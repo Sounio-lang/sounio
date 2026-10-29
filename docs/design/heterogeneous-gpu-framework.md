@@ -1812,3 +1812,22 @@ The same inputs. `OWN_SUM=1154367488`, `EXIT:0`. Ten products, one body. The tex
 The pointer step is a 32-bit add on the low half. This allocation returned 1650.0, so that add was enough for these eighty bytes.
 
 Gate. Node `gpuorangefs-r770-proxmox`, `--gres=gpu:1`, `--mem=16G`, `--cpus-per-task=4`. The 0.0018 s threshold is not moved.
+
+
+## 75. One block of 576 columns (2026-10-29, OBSERVED)
+
+The loop of job 19925 is one thread. A projection of width 576 has one column per thread in this cut. The block size is 576. K is 576. Even columns hold 1.0 and odd columns hold 2.0, and the vector is 1.0, so an even column is 576.0 and an odd column is 1152.0. Those bit patterns were fixed before the launch: 1141899264 and 1150287872. The sum of the thread indices 0 through 575 is 165600. That sum was not rewritten after the run.
+
+`S2R` was named from ptxas 12.8.61 at opt-level 0 before the launch. `SR_LANEID` and `SR_TID.X`, same destination, differ in byte 9: `0x00` and `0x21`. `SR_CTAID.X` puts `0x25` in that byte. The high word of `SR_TID.X` is `0x00321e0000002100`. Byte 2 is the destination.
+
+The node was idle. No drain was cleared.
+
+Job 19962. md5 `c76fa23a73d7b0b7f5433b56c8c0692f`.
+
+`DOT0=1141899264`, `DOT1=1150287872`, `DOT575=1150287872`. `TID0=0`, `TID1=1`, `TID575=575`. `TID_SUM=155392`. The probe exits 1. The required sum stays 165600.
+
+Jobs 19963 and 19967 repeat the same device program and print more of the index vector. md5 of 19967 is `6c58b5bfeb35151422dd5e5445f6e40f`. `T32=32`, `T256=256`, `T512=512`. `T128=0`, `T191=0`, `D128=0`. The low half of the index sum is 77568 and the high half is 77824. Together they are 155392 again. The gap below 165600 is 10208, which is the sum of the integers 128 through 191. The two samples read inside that span are 0, and the dot at column 128 is 0.
+
+The columns that were read outside that span match the words written down before the launch. The index sum does not.
+
+Gate. Node `gpuorangefs-r770-proxmox`, one block of 576, `--gres=gpu:1`, `--mem=16G`, `--cpus-per-task=4`. The 0.0018 s threshold is not moved. The forward still runs the PTX kernel of job 17669.
