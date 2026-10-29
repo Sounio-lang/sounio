@@ -1,7 +1,7 @@
 import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import assert from 'node:assert/strict';import {spawnSync} from 'node:child_process';import {fileURLToPath} from 'node:url';
 const repo=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'../..'),tmp=fs.mkdtempSync(path.join(os.tmpdir(),'stdlib-silent-refusal-')),root=tmp+'/root';
 for(const dir of ['scripts/stdlib','scripts/lib','tests/stdlib/negative','stdlib'])fs.mkdirSync(root+'/'+dir,{recursive:true});
-for(const file of ['scripts/stdlib/run_stdlib_e2e.sh','scripts/stdlib/bounded_command.mjs','scripts/stdlib/stdlib_e2e_diagnostics.mjs','scripts/stdlib/emit_stdlib_e2e_result.mjs','scripts/lib/resolve_souc.sh'])fs.copyFileSync(repo+'/'+file,root+'/'+file);
+for(const file of ['scripts/stdlib/run_stdlib_e2e.sh','scripts/stdlib/argv_inputs.mjs','scripts/stdlib/bounded_command.mjs','scripts/stdlib/stdlib_e2e_diagnostics.mjs','scripts/stdlib/emit_stdlib_e2e_result.mjs','scripts/lib/resolve_souc.sh'])fs.copyFileSync(repo+'/'+file,root+'/'+file);
 const fake=tmp+'/compiler',payload=tmp+'/payload';
 fs.writeFileSync(fake,'#!/bin/bash\nprintf "%s\\n" "$1" >> "$CALLS"\nif [[ "$1" == check ]];then [[ "$VARIANT" != check-fail ]] || exit 1;exit 0;fi\n[[ "$1" == compile ]] || exit 65\n[[ "$VARIANT" != compile-fail ]] || exit 1\ncp "$PAYLOAD" "$4"\nchmod +x "$4"\n');fs.chmodSync(fake,0o700);
 fs.writeFileSync(payload,'#!/bin/bash\ncase "$VARIANT" in\nnewline)printf "\\n";;\nnul)printf "\\0";;\nmessage)echo refused;;\naccept)exit 0;;\ncrash)exit 139;;\ntimeout)exit 124;;\noutput-limit)exit 122;;\nesac\nexit 1\n');fs.chmodSync(payload,0o700);

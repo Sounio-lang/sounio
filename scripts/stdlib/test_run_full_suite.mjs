@@ -11,16 +11,17 @@ test('file partitions isolate relative outputs and refuse omitted cases',()=>{
  try{
   const root=path.join(tmp,'archive');
   for(const p of ['scripts/stdlib','tests/stdlib/group','stdlib'])fs.mkdirSync(path.join(root,p),{recursive:true});
-  for(const name of ['run_full_suite.mjs','inventory.mjs'])fs.copyFileSync(path.join(repository,'scripts/stdlib',name),path.join(root,'scripts/stdlib',name));
+  for(const name of ['run_full_suite.mjs','inventory.mjs','argv_inputs.mjs','compound_gates.mjs','compiler_binding.mjs'])fs.copyFileSync(path.join(repository,'scripts/stdlib',name),path.join(root,'scripts/stdlib',name));
   for(const name of ['a','b'])fs.writeFileSync(path.join(root,'tests/stdlib/group',name+'.sio'),'// metadata fixture\n');
   fs.writeFileSync(path.join(root,'stdlib','module.sio'),'// immutable fixture\n');
   fs.writeFileSync(path.join(root,'scripts/stdlib','immutable-marker.txt'),'script fixture\n');
+  for(const dir of ['docs','tools','runtime']){fs.mkdirSync(path.join(root,dir));fs.writeFileSync(path.join(root,dir,'immutable-marker.txt'),dir+' fixture\n');}
   fs.writeFileSync(path.join(root,'tests/stdlib/group','input.csv'),'x,y\n1,2\n');
   fs.writeFileSync(path.join(root,'scripts/stdlib/run_stdlib_e2e.sh'),'#!/bin/bash\nexec node "$(dirname "$0")/fixture_runner.mjs" "$@"\n');
-  fs.writeFileSync(path.join(root,'scripts/stdlib/fixture_runner.mjs'),"import fs from 'node:fs';import path from 'node:path';import {fileURLToPath} from 'node:url';\nimport {setTimeout} from 'node:timers/promises';\nconst root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'../..'),args=process.argv.slice(2);\nconst filter=args[args.indexOf('--filter')+1],output=args[args.indexOf('--json-out')+1];\nif(process.env.MUTATE_INPUT==='script')fs.appendFileSync(path.join(root,'scripts/stdlib','immutable-marker.txt'),'changed');\nif(process.env.MUTATE_INPUT==='data')fs.appendFileSync(path.join(root,'tests/stdlib/group','input.csv'),'changed');\nconst collision=path.join(root,'case-output.txt');fs.writeFileSync(collision,filter);\nawait setTimeout(100);\nif(fs.readFileSync(collision,'utf8')!==filter)throw Error('relative output collision');\nconst paths=['tests/stdlib/group/a.sio','tests/stdlib/group/b.sio'].filter(p=>p.startsWith(filter));\nconst results=paths.filter(p=>!(process.env.OMIT_A==='1'&&p.endsWith('/a.sio'))).map(test_path=>({test_path,status:(process.env.SKIP_ALL==='1'||(process.env.SKIP_B==='1'&&test_path.endsWith('/b.sio')))?'skip':'pass',mode:'check',reason:'',exit_code:0}));\nfs.writeFileSync(output,JSON.stringify({schema:'sounio.stdlib.e2e.result.v1',results,totals:{pass:results.filter(r=>r.status==='pass').length,fail:0,skip:results.filter(r=>r.status==='skip').length,total:results.length}}));\n");
+  fs.writeFileSync(path.join(root,'scripts/stdlib/fixture_runner.mjs'),"import fs from 'node:fs';import path from 'node:path';import {fileURLToPath} from 'node:url';\nimport {setTimeout} from 'node:timers/promises';\nconst root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'../..'),args=process.argv.slice(2);\nconst filter=args[args.indexOf('--filter')+1],output=args[args.indexOf('--json-out')+1];\nif(process.env.MUTATE_INPUT==='script')fs.appendFileSync(path.join(root,'scripts/stdlib','immutable-marker.txt'),'changed');\nif(process.env.MUTATE_INPUT==='data')fs.appendFileSync(path.join(root,'tests/stdlib/group','input.csv'),'changed');\nif(['docs','tools','runtime'].includes(process.env.MUTATE_INPUT))fs.appendFileSync(path.join(root,process.env.MUTATE_INPUT,'immutable-marker.txt'),'changed');\nconst collision=path.join(root,'case-output.txt');fs.writeFileSync(collision,filter);\nawait setTimeout(100);\nif(fs.readFileSync(collision,'utf8')!==filter)throw Error('relative output collision');\nconst paths=['tests/stdlib/group/a.sio','tests/stdlib/group/b.sio'].filter(p=>p.startsWith(filter));\nconst results=paths.filter(p=>!(process.env.OMIT_A==='1'&&p.endsWith('/a.sio'))).map(test_path=>({test_path,status:(process.env.SKIP_ALL==='1'||(process.env.SKIP_B==='1'&&test_path.endsWith('/b.sio')))?'skip':'pass',mode:'check',reason:'',exit_code:0}));\nfs.writeFileSync(output,JSON.stringify({schema:'sounio.stdlib.e2e.result.v1',results,totals:{pass:results.filter(r=>r.status==='pass').length,fail:0,skip:results.filter(r=>r.status==='skip').length,total:results.length}}));\n");
   const run=(name,extra={})=>{
    const env={...process.env,STDLIB_FULL_CAPTURE:'0'};delete env.STDLIB_FULL_WORKER_DIR;Object.assign(env,extra);
-   const out=path.join(tmp,name),result=spawnSync(process.execPath,[path.join(root,'scripts/stdlib/run_full_suite.mjs'),'--out-dir',out,'--jobs','2','--partition','file',...(extra.ACCEPTANCE_TEST==='1'?['--slow','--acceptance']:[])],{env,encoding:'utf8',timeout:30000});
+   const out=path.join(tmp,name),result=spawnSync(process.execPath,[path.join(root,'scripts/stdlib/run_full_suite.mjs'),'--out-dir',out,'--jobs','2','--partition',extra.PARTITION_DIRECTORY==='1'?'directory':'file',...(extra.ACCEPTANCE_TEST==='1'?['--slow','--acceptance']:[])],{env,encoding:'utf8',timeout:30000});
    assert.ifError(result.error);
    return {result,report:JSON.parse(fs.readFileSync(path.join(out,'RESULT.json'),'utf8'))};
   };
@@ -47,12 +48,15 @@ test('file partitions isolate relative outputs and refuse omitted cases',()=>{
   assert.equal(omitted.result.status,1);
   assert.equal(omitted.report.status_summary,'not_run');
   assert(omitted.report.selection_errors.some(e=>e.path==='tests/stdlib/group/a.sio'&&e.error==='missing test result'));
-  for(const kind of ['script','data']){
+  for(const kind of ['script','data','docs','tools','runtime']){
    const mutated=run('mutated-'+kind,{MUTATE_INPUT:kind});
    assert.equal(mutated.result.status,1,kind+' mutation must refuse');
    assert.equal(mutated.report.status_summary,'not_run');
-   const target=kind==='script'?'scripts/stdlib/immutable-marker.txt':'tests/stdlib/group/input.csv';
+   const target=kind==='script'?'scripts/stdlib/immutable-marker.txt':kind==='data'?'tests/stdlib/group/input.csv':kind+'/immutable-marker.txt';
    assert(mutated.report.selection_errors.some(e=>e.path===target&&e.error==='worker source changed during execution'));
   }
+  const directory=run('directory-mutated-docs',{MUTATE_INPUT:'docs',PARTITION_DIRECTORY:'1'});
+  assert.equal(directory.result.status,1);assert.equal(directory.report.totals.total,2);
+  assert(directory.report.selection_errors.some(e=>e.path==='docs/immutable-marker.txt'&&e.error==='source changed during execution'));
  }finally{fs.rmSync(tmp,{recursive:true,force:true});}
 });

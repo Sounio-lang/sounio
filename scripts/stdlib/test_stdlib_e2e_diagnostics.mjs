@@ -11,7 +11,7 @@ const repo=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'../..');
 const tmp=fs.mkdtempSync(path.join(os.tmpdir(),'sounio-e2e-diagnostics-'));
 const root=path.join(tmp,'project');
 for(const d of ['scripts/stdlib','scripts/lib','tests/stdlib/nested','stdlib']) fs.mkdirSync(path.join(root,d),{recursive:true});
-for(const p of ['scripts/stdlib/run_stdlib_e2e.sh','scripts/stdlib/bounded_command.mjs','scripts/stdlib/stdlib_e2e_diagnostics.mjs','scripts/stdlib/emit_stdlib_e2e_result.mjs','scripts/lib/resolve_souc.sh']) fs.copyFileSync(path.join(repo,p),path.join(root,p));
+for(const p of ['scripts/stdlib/run_stdlib_e2e.sh','scripts/stdlib/argv_inputs.mjs','scripts/stdlib/bounded_command.mjs','scripts/stdlib/stdlib_e2e_diagnostics.mjs','scripts/stdlib/emit_stdlib_e2e_result.mjs','scripts/lib/resolve_souc.sh']) fs.copyFileSync(path.join(repo,p),path.join(root,p));
 const fake=path.join(tmp,'fake-compiler');
 fs.writeFileSync(fake,`#!/usr/bin/env bash
 printf '%s\\n' "$*" >> "$INVOCATIONS"
@@ -62,7 +62,7 @@ check('full diagnostic beyond six lines retained',()=>{assert.match(fs.readFileS
 check('raw NUL and all final newlines retained',()=>assert.deepEqual(fs.readFileSync(path.join(log('bytes'),'combined.output')),Buffer.from('before\0after\n\n\n')));
 check('check65 is genuine science status not metadata refusal',()=>assert.equal(json(path.join(log('exit65','check'),'result.json')).exit_code,65));
 check('run statuses 0 1 124 139 independently retained',()=>{for(const [name,rc]of [['ok',0],['rc1',1],['rc124',124],['rc139',139]])assert.equal(json(path.join(log(name),'result.json')).exit_code,rc);});
-check('native capture binds bounded deadline and the compile-output executable',()=>{const r=json(path.join(log('ok'),'result.json'));assert.deepEqual(r.command.slice(0,5),['node',path.join(root,'scripts/stdlib/bounded_command.mjs'),'30','16777216','--']);assert.equal(r.command.length,6);assert.match(r.command[5],/^\/tmp\/sounio-stdlib-e2e-[A-Za-z0-9]+\.elf$/);assert.equal(json(path.join(log('ok','compile'),'result.json')).command.at(-2),'-o');assert.match(json(path.join(out,'capture.json')).identity_scope,/not an execve witness/);});
+check('native capture binds bounded deadline and the compile-output executable',()=>{const r=json(path.join(log('ok'),'result.json'));assert.deepEqual(r.command.slice(0,5),['node',path.join(root,'scripts/stdlib/bounded_command.mjs'),'30','16777216','--']);assert.equal(r.command.length,11);assert.deepEqual(r.command.slice(5,10),['node',path.join(root,'scripts/stdlib/argv_inputs.mjs'),'run',root,'tests/stdlib/nested/ok.sio']);assert.match(r.command[10],/^\/tmp\/sounio-stdlib-e2e-[A-Za-z0-9]+\.elf$/);assert.equal(json(path.join(log('ok','compile'),'result.json')).command.at(-2),'-o');assert.match(json(path.join(out,'capture.json')).identity_scope,/not an execve witness/);});
 check('skip and unannotated cases never execute',()=>{const commands=fs.readFileSync(inv,'utf8');assert(!commands.includes('ignored.sio'));assert(!commands.includes('plain.sio'));assert(!fs.existsSync(log('ignored')));});
 check('all identities verified at finalization',()=>assert.equal(json(path.join(out,'complete.json')).source_and_caller_identity_unchanged,true));
 function refuse(p,label){const before=fs.readFileSync(inv,'utf8');const r=run(['--artifacts-dir',p]);assert.equal(r.status,65,label);assert.match(r.stderr,/E2E artifact capture/);assert.equal(fs.readFileSync(inv,'utf8'),before);}

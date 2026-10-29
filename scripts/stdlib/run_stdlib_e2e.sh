@@ -29,6 +29,9 @@
 # Compilation has a separate STDLIB_E2E_COMPILE_TIMEOUT_SEC deadline (1200 s).
 # Each phase has STDLIB_E2E_MAX_OUTPUT_BYTES (16 MiB); excess is a failure.
 # Native execution alone uses each test timeout annotation.
+# Optional TEST.sio.args supplies literal file paths, one per LF-delimited line.
+# Blank lines are ignored; spaces and shell metacharacters remain literal.
+# Sidecar and referenced file identities are checked before and after native execution.
 #
 # Usage:
 #   bash scripts/stdlib/run_stdlib_e2e.sh [--filter PATTERN] [--verbose] [--json-out PATH] [--artifacts-dir ABS_FRESH_PATH]
@@ -387,12 +390,12 @@ run_test() {
   if $expected_silent_refusal; then
     local native_output_file
     native_output_file=$(mktemp /tmp/sounio-stdlib-native-output-XXXXXX) || exit 65
-    phase_command "$relpath" native "$test_timeout" "$executable" >"$native_output_file" || exit_code=$?
+    phase_command "$relpath" native "$test_timeout" node "$ROOT_DIR/scripts/stdlib/argv_inputs.mjs" run "$ROOT_DIR" "$relpath" "$executable" >"$native_output_file" || exit_code=$?
     if [[ -s "$native_output_file" ]]; then native_has_output=true; fi
     output=$(cat "$native_output_file")
     rm -f "$native_output_file"
   else
-    output=$(phase_command "$relpath" native "$test_timeout" "$executable") || exit_code=$?
+    output=$(phase_command "$relpath" native "$test_timeout" node "$ROOT_DIR/scripts/stdlib/argv_inputs.mjs" run "$ROOT_DIR" "$relpath" "$executable") || exit_code=$?
   fi
   rm -f "$executable"
   if $is_run_fail; then

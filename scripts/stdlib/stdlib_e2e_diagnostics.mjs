@@ -3,6 +3,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import {argvSnapshot,verifyArgvSnapshot} from './argv_inputs.mjs';
 const [op, out, ...args] = process.argv.slice(2);
 const sha = b => crypto.createHash('sha256').update(b).digest('hex');
 const utc = () => new Date().toISOString();
@@ -49,7 +50,7 @@ function verifyAllCaptures(c) {
       const child=path.join(dir,name), st=fs.lstatSync(child);
       if(st.isSymbolicLink()) throw Error('symlink in capture tree: '+child);
       if(st.isDirectory()) visit(child);
-      else if(!(dir===out&&name==='capture.json'&&st.isFile())) throw Error('unexpected capture file: '+child);
+      else if(!(dir===out&&['capture.json','argv-inputs.after.json'].includes(name)&&st.isFile())) throw Error('unexpected capture file: '+child);
     }
   }
   visit(out);return count;
@@ -62,14 +63,15 @@ try {
     if(fs.existsSync(out) || (()=>{try{fs.lstatSync(out);return true;}catch(e){if(e.code==='ENOENT')return false;throw e;}})()) throw Error('artifacts directory already exists');
     ancestors(path.dirname(out));
     for(const input of [root,stdlib]) { const real=fs.realpathSync(input); if(inside(out,real)||inside(real,out)) throw Error(`artifacts/input overlap: ${real}`); }
-    const callers=['scripts/stdlib/run_stdlib_e2e.sh','scripts/stdlib/stdlib_e2e_diagnostics.mjs','scripts/stdlib/emit_stdlib_e2e_result.mjs','scripts/stdlib/bounded_command.mjs','scripts/lib/resolve_souc.sh'].map(p=>identity(path.join(root,p)));
+    const callers=['scripts/stdlib/run_stdlib_e2e.sh','scripts/stdlib/argv_inputs.mjs','scripts/stdlib/stdlib_e2e_diagnostics.mjs','scripts/stdlib/emit_stdlib_e2e_result.mjs','scripts/stdlib/bounded_command.mjs','scripts/lib/resolve_souc.sh'].map(p=>identity(path.join(root,p)));
     callers.push(identity(wrapper));
     const sources=walk(path.join(root,'tests/stdlib')).sort((a,b)=>a.path.localeCompare(b.path));
     fs.mkdirSync(out,{mode:0o700});
-    put(path.join(out,'capture.json'),{schema:'sounio.stdlib.e2e.diagnostics.v1',output:out,root,started_at_utc:utc(),identity_scope:'Test source and caller/wrapper file identities; not an execve witness or imported-source closure. Compile and native execution have separate bounded phase receipts.',callers,sources});
+    put(path.join(out,'capture.json'),{schema:'sounio.stdlib.e2e.diagnostics.v1',output:out,root,started_at_utc:utc(),identity_scope:'Test source and caller/wrapper file identities; not an execve witness or imported-source closure. Compile and native execution have separate bounded phase receipts.',callers,sources,argv_inputs:sources.map(s=>argvSnapshot(root,path.relative(root,s.path)))});
   } else if(op==='begin') {
     const c=control(), [rel,name,...command]=args, dir=phase(c,rel,name);
     c.callers.forEach(same); c.sources.filter(x=>x.path===path.join(c.root,rel)).forEach(same);
+    c.argv_inputs.filter(x=>x.test_path===rel).forEach(x=>verifyArgvSnapshot(c.root,x));
     createBelowOutput(dir); ancestors(dir);
     put(path.join(dir,'start.json'),{test_path:rel,phase:name,command,started_at_utc:utc(),source:identity(path.join(c.root,rel))});
     process.stdout.write(path.join(dir,'combined.output'));
@@ -83,9 +85,12 @@ try {
     const result=read(path.join(dir,'result.json')); if(result.test_path!==rel||result.phase!==name||result.exit_code!==Number(rc)) throw Error('missing/mismatched completed capture'); regular(result.combined_output.path); same(result.combined_output); same(result.source);
   } else if(op==='finalize') {
     const c=control(); c.callers.forEach(same); c.sources.forEach(same);
+    const argv_inputs_after=c.argv_inputs.map(x=>argvSnapshot(c.root,x.test_path));
+    put(path.join(out,'argv-inputs.after.json'),argv_inputs_after);
+    if(JSON.stringify(argv_inputs_after)!==JSON.stringify(c.argv_inputs))throw Error('argv input changed during capture');
     const now=walk(path.join(c.root,'tests/stdlib')).sort((a,b)=>a.path.localeCompare(b.path));
     if(JSON.stringify(now)!==JSON.stringify(c.sources)) throw Error('test source census changed');
     const captured_phases=verifyAllCaptures(c);
-    put(path.join(out,'complete.json'),{schema:c.schema,captured_phases,completed_at_utc:utc(),source_and_caller_identity_unchanged:true,selection_and_results:'See unchanged schema-v1 E2E result; capture is supplemental operational metadata.'});
+    put(path.join(out,'complete.json'),{schema:c.schema,captured_phases,completed_at_utc:utc(),source_and_caller_identity_unchanged:true,argv_inputs_after,argv_inputs_unchanged:true,selection_and_results:'See unchanged schema-v1 E2E result; capture is supplemental operational metadata.'});
   } else throw Error(`unknown operation: ${op}`);
 } catch(e) { console.error(`error: E2E artifact capture: ${e.message}`); process.exitCode=65; }

@@ -7,6 +7,7 @@ import crypto from 'node:crypto';
 import {spawn} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 import {walk} from './inventory.mjs';
+import {argvSnapshot,verifyArgvSnapshot} from './argv_inputs.mjs';
 import {runCompoundGates} from './compound_gates.mjs';
 import {createCompilerBinding,compilerEnvironment,verifyCompilerBinding} from './compiler_binding.mjs';
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'../..');
@@ -31,6 +32,8 @@ const paths=walk(path.join(root,'tests/stdlib'),false).filter(p=>p.endsWith('.si
 if(paths.length===0)throw Error('empty test selection');
 const initial=paths.map(p=>({path:p,sha256:hash(path.join(root,p))}));
 fs.writeFileSync(path.join(output,'INPUTS.json'),JSON.stringify(initial,null,2)+'\n');
+const argvInputs=paths.map(p=>argvSnapshot(root,p));
+fs.writeFileSync(path.join(output,'ARGV_INPUTS.before.json'),JSON.stringify(argvInputs,null,2)+'\n');
 const directoryPrefixes=[...new Set(paths.map(p=>{const rest=p.slice('tests/stdlib/'.length);return rest.includes('/')?'tests/stdlib/'+rest.split('/')[0]+'/':p;}))].sort();
 if(partition==='file' && paths.some(p=>paths.some(q=>p!==q&&q.startsWith(p))))throw Error('file selections overlap');
 const prefixes=partition==='file'?paths:directoryPrefixes;
@@ -44,14 +47,18 @@ if(partition==='file'&&externalWorkers){
 }
 const workerBase=externalWorkers||path.join(output,'workers');
 const workerCount=Math.min(jobs,prefixes.length),workerRoots=[];
-const copyInvariants=partition==='file'?['tests','stdlib','scripts','self-hosted'].flatMap(dir=>walk(path.join(root,dir),dir==='stdlib')).map(p=>({path:path.relative(root,p),sha256:hash(p)})):[];
+const copyInvariants=['tests','stdlib','scripts','self-hosted','docs','tools','runtime'].flatMap(dir=>walk(path.join(root,dir),dir==='stdlib')).map(p=>({path:path.relative(root,p),sha256:hash(p)}));
+fs.writeFileSync(path.join(output,'SOURCE_INPUTS.before.json'),JSON.stringify(copyInvariants,null,2)+'\n');
 for(let i=0;i<workerCount;i++){
  if(partition!=='file'){workerRoots.push(root);continue;}
  const copy=path.join(workerBase,String(i));fs.mkdirSync(path.dirname(copy),{recursive:true});
  fs.cpSync(root,copy,{recursive:true,mode:fs.constants.COPYFILE_FICLONE,filter:p=>p!==output&&!p.startsWith(output+path.sep)});
  for(const input of copyInvariants)if(hash(path.join(copy,input.path))!==input.sha256)throw Error('worker copy differs: '+input.path);
+ for(const input of argvInputs)verifyArgvSnapshot(copy,input);
  workerRoots.push(copy);
 }
+fs.writeFileSync(path.join(output,'ARGV_WORKERS.before.json'),JSON.stringify(partition==='file'?workerRoots.map(worker_root=>({worker_root,inputs:argvInputs})):[],null,2)+'\n');
+fs.writeFileSync(path.join(output,'SOURCE_WORKERS.before.json'),JSON.stringify(partition==='file'?workerRoots.map(worker_root=>({worker_root,inputs:copyInvariants})):[],null,2)+'\n');
 const active=new Set(),receipts=[];
 let cursor=0,interrupted=false;
 process.on('SIGTERM',()=>{interrupted=true;for(const p of active){try{process.kill(-p.pid,'SIGTERM');}catch{}}});
@@ -96,7 +103,7 @@ if(compound&&!interrupted){
  catch(error){errors.push({error:'compound execution: '+error.message});}
 }
 for(const p of initial)if(hash(path.join(root,p.path))!==p.sha256)errors.push({path:p.path,error:'test input changed during execution'});
-if(partition==='file')for(const input of copyInvariants){
+for(const input of copyInvariants){
  try{if(hash(path.join(root,input.path))!==input.sha256)errors.push({path:input.path,error:'source changed during execution'});}
  catch(error){errors.push({path:input.path,error:'source missing: '+error.message});}
 }
@@ -104,6 +111,20 @@ if(partition==='file')for(const copy of workerRoots)for(const input of copyInvar
  try{if(hash(path.join(copy,input.path))!==input.sha256)errors.push({path:input.path,worker_root:copy,error:'worker source changed during execution'});}
  catch(error){errors.push({path:input.path,worker_root:copy,error:'worker source missing: '+error.message});}
 }
+const sourceAfter=where=>copyInvariants.map(input=>{try{return {path:input.path,sha256:hash(path.join(where,input.path))};}catch(error){return {path:input.path,error:error.code||error.message};}});
+fs.writeFileSync(path.join(output,'SOURCE_INPUTS.after.json'),JSON.stringify(sourceAfter(root),null,2)+'\n');
+fs.writeFileSync(path.join(output,'SOURCE_WORKERS.after.json'),JSON.stringify(partition==='file'?workerRoots.map(worker_root=>({worker_root,inputs:sourceAfter(worker_root)})):[],null,2)+'\n');
+const argvAfter=[];
+for(const input of argvInputs){
+ try{argvAfter.push(verifyArgvSnapshot(root,input));}catch(error){argvAfter.push(argvSnapshot(root,input.test_path));errors.push({path:input.test_path,error:error.message});}
+}
+fs.writeFileSync(path.join(output,'ARGV_INPUTS.after.json'),JSON.stringify(argvAfter,null,2)+'\n');
+const workerArgvAfter=[];
+if(partition==='file')for(const copy of workerRoots){
+ const inputs=[];for(const input of argvInputs){try{inputs.push(verifyArgvSnapshot(copy,input));}catch(error){inputs.push(argvSnapshot(copy,input.test_path));errors.push({path:input.test_path,worker_root:copy,error:error.message});}}
+ workerArgvAfter.push({worker_root:copy,inputs});
+}
+fs.writeFileSync(path.join(output,'ARGV_WORKERS.after.json'),JSON.stringify(workerArgvAfter,null,2)+'\n');
 if(compound){try{verifyCompilerBinding(compilerBinding);}catch(error){errors.push({error:error.message});}}
 const totals={pass:0,fail:0,skip:0,total:results.length};
 for(const r of results)totals[r.status]++;
