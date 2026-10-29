@@ -1,0 +1,35 @@
+fn stabilize_return_agg_x86(expr_ty: i64, expr_hash: i64) with Mut, Panic, Div {
+    var nslots = ret_agg_nslots(CURRENT_RET_TY, CURRENT_RET_HASH)
+    if nslots <= 0 { nslots = ret_agg_nslots(expr_ty, expr_hash) }
+    if nslots <= 0 { return }
+    em(0x48); em(0x89); em(0xc2)  // mov rdx, rax (src ptr)
+    if CURRENT_SRET_SLOT > 0 {
+        // Use r12 (callee-saved, set at prologue) as SRET pointer — immune to stack corruption
+        em(0x4c); em(0x89); em(0xe1)  // mov rcx, r12
+    } else {
+        let dst = GL_BSS_BASE + RET_AGG_BSS_OFF
+        em(0x48); em(0xb9); em64(dst)  // mov rcx, dst ptr
+    }
+    if nslots > 32 {
+        em(0x48); em(0x89); em(0xd6)      // mov rsi, rdx (source)
+        em(0x48); em(0x89); em(0xcf)      // mov rdi, rcx (dest)
+        em(0xb9); em32(nslots)            // mov ecx, nslots
+        em(0xf3); em(0x48); em(0xa5)      // rep movsq
+    } else {
+        var i: i64 = 0
+        while i < nslots {
+            em(0x48); em(0x8b); em(0x82); em32(i * 8)  // mov rax, [rdx + i*8]
+            em(0x48); em(0x89); em(0x81); em32(i * 8)  // mov [rcx + i*8], rax
+            i = i + 1
+        }
+    }
+    if CURRENT_SRET_SLOT > 0 {
+        em(0x4c); em(0x89); em(0xe0)  // mov rax, r12 (return SRET ptr in rax)
+    } else {
+        let dst2 = GL_BSS_BASE + RET_AGG_BSS_OFF
+        em(0x48); em(0xb8); em64(dst2)
+    }
+}
+
+// ─── Emit print("string") ───
+// Print source bytes ss..se of the string literal at tok, decoding escapes.

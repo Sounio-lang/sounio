@@ -1,0 +1,85 @@
+            // Tuple literal: (expr1, expr2, ..., exprN).
+            // Layout requirement: .0 at lowest address (highest slot), .1 above, etc.
+            // Problem: we don't know each element's slot count relative to the
+            // others (hence total_slots and every offset) until ALL elements are
+            // compiled. Strategy: save EVERY element's rax (a scalar value or an
+            // aggregate pointer — either way just one register-width word) to its
+            // own temp slot immediately after compiling it, so the next element's
+            // compile_or() never clobbers an earlier one. Once all N are known,
+            // allocate one buffer sized to the true sum of every element's slots
+            // and copy each into its correct cumulative offset.
+            // (A prior version only preserved the FIRST and LAST elements — any
+            // middle element's compiled value was silently overwritten by the
+            // next element's compile_or() before ever being stored anywhere, and
+            // the buffer was sized first+last only, dropping every middle
+            // element's slots too. Bug G / issue #601: this both mistyped and,
+            // for tuples of 3+ same-typed elements, silently duplicated values.)
+            var elem_ty: [i64; 16] = [0; 16]
+            var elem_hash: [i64; 16] = [0; 16]
+            var elem_nslots: [i64; 16] = [0; 16]
+            var elem_slot: [i64; 16] = [0; 16]
+            var n: i64 = 0
+            elem_ty[0] = EXPR_TY
+            elem_hash[0] = EXPR_TY_HASH
+            elem_nslots[0] = ty_slot_count(EXPR_TY, EXPR_TY_HASH)
+            elem_slot[0] = NEXT_SLOT
+            NEXT_SLOT = NEXT_SLOT + 1
+            emit_store_var(elem_slot[0])
+            n = 1
+            while ep_before_body_close() && TK[EP as usize] == 28 {
+                EP = EP + 1  // skip ,
+                if TK[EP as usize] == 7 { break }  // trailing comma
+                compile_or()
+                if n >= 16 {
+                    tc_error_hard(EP, "tuple literal exceeds maximum of 16 elements")
+                    n = n + 1
+                } else {
+                    elem_ty[n as usize] = EXPR_TY
+                    elem_hash[n as usize] = EXPR_TY_HASH
+                    elem_nslots[n as usize] = ty_slot_count(EXPR_TY, EXPR_TY_HASH)
+                    elem_slot[n as usize] = NEXT_SLOT
+                    NEXT_SLOT = NEXT_SLOT + 1
+                    emit_store_var(elem_slot[n as usize])
+                    n = n + 1
+                }
+            }
+            if TK[EP as usize] == 7 { EP = EP + 1 }  // skip )
+            var f128_ti: i64 = 0
+            while f128_ti < n && f128_ti < 16 {
+                if elem_ty[f128_ti as usize] == 13 { tc_error_hard(EP - 1, "f128 tuple elements are not implemented") }
+                f128_ti = f128_ti + 1
+            }
+            let tup_count = n
+            var real_n = n
+            if real_n > 16 { real_n = 16 }
+            // Allocate the tuple buffer sized to the sum of every element's slots.
+            var total_slots: i64 = 0
+            var i: i64 = 0
+            while i < real_n { total_slots = total_slots + elem_nslots[i as usize]; i = i + 1 }
+            let tup_base = NEXT_SLOT
+            NEXT_SLOT = NEXT_SLOT + total_slots
+            // Element i sits at slot (tup_base + total_slots - 1 - prefix_sum(i)),
+            // where prefix_sum(i) = sum of elem_nslots[0..i-1] — element 0 at the
+            // highest slot number (lowest address, the pointer this expression
+            // returns), later elements at successively higher addresses.
+            var prefix: i64 = 0
+            i = 0
+            while i < real_n {
+                let dst_start = tup_base + total_slots - 1 - prefix
+                em(0x48); em(0x8b); em(0x85); em32(0 - elem_slot[i as usize] * 8)  // restore rax
+                if elem_nslots[i as usize] > 1 {
+                    copy_agg_into_struct_slots_x86(dst_start, elem_ty[i as usize], elem_hash[i as usize])
+                } else {
+                    emit_store_var(dst_start)
+                }
+                prefix = prefix + elem_nslots[i as usize]
+                i = i + 1
+            }
+            // Return pointer to element 0 (lowest address).
+            em(0x48); em(0x8d); em(0x85)
+            em32(0 - (tup_base + total_slots - 1) * 8)
+            EXPR_IS_F64 = 0
+            EXPR_TY = 6
+            let first_ty = elem_ty[0]
+            let first_hash = elem_hash[0]
+            let first_nslots = elem_nslots[0]
