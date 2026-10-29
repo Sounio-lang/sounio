@@ -81,6 +81,7 @@ function collectAlternateNames(value, found) {
 }
 
 const FORMER_NAME_NOTE = 'Sounio (formerly Demetrios). Sounio was previously released as Demetrios, the former name of this language.';
+const FORMER_NAME_NOTE_PT = 'Sounio (anteriormente Demetrios). O Sounio foi lançado anteriormente como Demetrios, o nome anterior desta linguagem.';
 
 // HTML5 end tags may carry whitespace or ignored attributes before `>`,
 // as in `</script >`. A regexp that requires a bare `</script>` leaves
@@ -246,8 +247,11 @@ for await (const file of walk(dist)) {
       errors.push(`${route}: JSON-LD missing former-release sameAs ${FORMER_RELEASE_URL}`);
     }
   }
-  if (bare === '/about/' && !visibleProse(html).includes(FORMER_NAME_NOTE)) {
-    errors.push(`${route}: visible former-name note is missing`);
+  if (bare === '/about/') {
+    const expectedNote = locale === 'pt' ? FORMER_NAME_NOTE_PT : FORMER_NAME_NOTE;
+    if (!visibleProse(html).includes(expectedNote)) {
+      errors.push(`${route}: visible former-name note is missing`);
+    }
   }
   const articles = blocks.filter((block) => block['@type'] === 'TechArticle');
   const crumbs = blocks.filter((block) => block['@type'] === 'BreadcrumbList');
