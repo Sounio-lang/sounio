@@ -4,7 +4,7 @@
 // SiLU*Up and weighted combine on the host. Not a full LLM yet - the
 // daring surface that proves Sounio can own MoE without llama.cpp.
 
-use hetero::runtime::{Runtime, rt_mul_mat_id_q4k, rt_mul_mat_id_q5k, rt_mul_mat_id_q8_0}
+use hetero::runtime::{Runtime, rt_mul_mat_id_q4k, rt_mul_mat_id_q5k, rt_mul_mat_id_q8_0, rt_moe_ffn_mega_q4k, rt_moe_ffn_mega_q5k, rt_moe_ffn_mega_q8_0, rt_moe_gate_up_silu_q4k}
 use hetero::cublas_bench::{gb_host_get, gb_host_set}
 
 fn moe_write_u8(buf: *mut u8, off: i64, v: i64) with Mut {
@@ -163,34 +163,70 @@ pub fn moe_ffn_q4k(
     dst: *mut u8
 ) -> MoeFfnResult with Alloc, Mut, Panic, Div {
     var res = MoeFfnResult { ok: false, status: -1, ms_gate: 0.0, ms_up: 0.0, ms_down: 0.0 }
+    let x_nb1 = hidden * 4
+    let ids_nb1 = slots * 4
+
+    let mega = rt_moe_ffn_mega_q4k(
+        rt, gate_w, gate_bytes, up_w, up_bytes, down_w, down_bytes,
+        x, n_tokens * hidden * 4, ids, n_tokens * slots * 4,
+        route_w, n_tokens * slots * 4,
+        dst, n_tokens * hidden * 4,
+        hidden, inter, experts, slots, n_tokens,
+        expert_stride_g, row_stride_g, expert_stride_u, row_stride_u,
+        expert_stride_d, row_stride_d,
+        x_nb1, ids_nb1, ids_nb1, hidden * 4
+    )
+    if mega.ok {
+        res.ms_gate = mega.ms
+        res.ms_up = 0.0
+        res.ms_down = 0.0
+        res.ok = true
+        res.status = 0
+        return res
+    }
+
     let gate = heap_alloc(n_tokens * slots * inter * 4)
     let up = heap_alloc(n_tokens * slots * inter * 4)
     let act = heap_alloc(n_tokens * slots * inter * 4)
     let down = heap_alloc(n_tokens * slots * hidden * 4)
-    let x_nb1 = hidden * 4
-    let ids_nb1 = slots * 4
 
-    let g = rt_mul_mat_id_q4k(
-        rt, gate_w, gate_bytes, x, n_tokens * hidden * 4, ids, n_tokens * slots * 4,
-        gate, n_tokens * slots * inter * 4,
+    let act_nb1 = inter * 4
+    let act_nb2 = slots * inter * 4
+
+    let gus = rt_moe_gate_up_silu_q4k(
+        rt, gate_w, gate_bytes, up_w, up_bytes,
+        x, n_tokens * hidden * 4, ids, n_tokens * slots * 4,
+        act, n_tokens * slots * inter * 4,
         hidden, inter, experts, slots, n_tokens,
-        expert_stride_g, row_stride_g,
-        x_nb1, x_nb1, ids_nb1, inter * 4, slots * inter * 4, 1
+        expert_stride_g, row_stride_g, expert_stride_u, row_stride_u,
+        x_nb1, ids_nb1, act_nb1, act_nb2
     )
-    if !g.ok { res.status = g.status; return res }
-    res.ms_gate = g.ms
+    if gus.ok {
+        res.ms_gate = gus.ms
+        res.ms_up = 0.0
+    } else {
+        let g = rt_mul_mat_id_q4k(
+            rt, gate_w, gate_bytes, x, n_tokens * hidden * 4, ids, n_tokens * slots * 4,
+            gate, n_tokens * slots * inter * 4,
+            hidden, inter, experts, slots, n_tokens,
+            expert_stride_g, row_stride_g,
+            x_nb1, x_nb1, ids_nb1, inter * 4, slots * inter * 4, 1
+        )
+        if !g.ok { res.status = g.status; return res }
+        res.ms_gate = g.ms
 
-    let u = rt_mul_mat_id_q4k(
-        rt, up_w, up_bytes, x, n_tokens * hidden * 4, ids, n_tokens * slots * 4,
-        up, n_tokens * slots * inter * 4,
-        hidden, inter, experts, slots, n_tokens,
-        expert_stride_u, row_stride_u,
-        x_nb1, x_nb1, ids_nb1, inter * 4, slots * inter * 4, 1
-    )
-    if !u.ok { res.status = u.status; return res }
-    res.ms_up = u.ms
+        let u = rt_mul_mat_id_q4k(
+            rt, up_w, up_bytes, x, n_tokens * hidden * 4, ids, n_tokens * slots * 4,
+            up, n_tokens * slots * inter * 4,
+            hidden, inter, experts, slots, n_tokens,
+            expert_stride_u, row_stride_u,
+            x_nb1, x_nb1, ids_nb1, inter * 4, slots * inter * 4, 1
+        )
+        if !u.ok { res.status = u.status; return res }
+        res.ms_up = u.ms
 
-    moe_silu_mul(gate, up, act, n_tokens * slots * inter)
+        moe_silu_mul(gate, up, act, n_tokens * slots * inter)
+    }
 
     let d = rt_mul_mat_id_q4k(
         rt, down_w, down_bytes, act, n_tokens * slots * inter * 4, ids, n_tokens * slots * 4,
@@ -223,12 +259,32 @@ pub fn moe_ffn_q5k(
     dst: *mut u8
 ) -> MoeFfnResult with Alloc, Mut, Panic, Div {
     var res = MoeFfnResult { ok: false, status: -1, ms_gate: 0.0, ms_up: 0.0, ms_down: 0.0 }
+    let x_nb1 = hidden * 4
+    let ids_nb1 = slots * 4
+
+    let mega = rt_moe_ffn_mega_q5k(
+        rt, gate_w, gate_bytes, up_w, up_bytes, down_w, down_bytes,
+        x, n_tokens * hidden * 4, ids, n_tokens * slots * 4,
+        route_w, n_tokens * slots * 4,
+        dst, n_tokens * hidden * 4,
+        hidden, inter, experts, slots, n_tokens,
+        expert_stride_g, row_stride_g, expert_stride_u, row_stride_u,
+        expert_stride_d, row_stride_d,
+        x_nb1, ids_nb1, ids_nb1, hidden * 4
+    )
+    if mega.ok {
+        res.ms_gate = mega.ms
+        res.ms_up = 0.0
+        res.ms_down = 0.0
+        res.ok = true
+        res.status = 0
+        return res
+    }
+
     let gate = heap_alloc(n_tokens * slots * inter * 4)
     let up = heap_alloc(n_tokens * slots * inter * 4)
     let act = heap_alloc(n_tokens * slots * inter * 4)
     let down = heap_alloc(n_tokens * slots * hidden * 4)
-    let x_nb1 = hidden * 4
-    let ids_nb1 = slots * 4
 
     let g = rt_mul_mat_id_q5k(
         rt, gate_w, gate_bytes, x, n_tokens * hidden * 4, ids, n_tokens * slots * 4,
@@ -283,12 +339,32 @@ pub fn moe_ffn_q8_0(
     dst: *mut u8
 ) -> MoeFfnResult with Alloc, Mut, Panic, Div {
     var res = MoeFfnResult { ok: false, status: -1, ms_gate: 0.0, ms_up: 0.0, ms_down: 0.0 }
+    let x_nb1 = hidden * 4
+    let ids_nb1 = slots * 4
+
+    let mega = rt_moe_ffn_mega_q8_0(
+        rt, gate_w, gate_bytes, up_w, up_bytes, down_w, down_bytes,
+        x, n_tokens * hidden * 4, ids, n_tokens * slots * 4,
+        route_w, n_tokens * slots * 4,
+        dst, n_tokens * hidden * 4,
+        hidden, inter, experts, slots, n_tokens,
+        expert_stride_g, row_stride_g, expert_stride_u, row_stride_u,
+        expert_stride_d, row_stride_d,
+        x_nb1, ids_nb1, ids_nb1, hidden * 4
+    )
+    if mega.ok {
+        res.ms_gate = mega.ms
+        res.ms_up = 0.0
+        res.ms_down = 0.0
+        res.ok = true
+        res.status = 0
+        return res
+    }
+
     let gate = heap_alloc(n_tokens * slots * inter * 4)
     let up = heap_alloc(n_tokens * slots * inter * 4)
     let act = heap_alloc(n_tokens * slots * inter * 4)
     let down = heap_alloc(n_tokens * slots * hidden * 4)
-    let x_nb1 = hidden * 4
-    let ids_nb1 = slots * 4
 
     let g = rt_mul_mat_id_q8_0(
         rt, gate_w, gate_bytes, x, n_tokens * hidden * 4, ids, n_tokens * slots * 4,

@@ -256,3 +256,225 @@ Stdout ends with `LLAMA MOE MULTILAYER DONE`. Log on workspace: `/tmp/moe_multil
 - Demo default dir: that fixture. L4 smoke expects `last_moe_layers_ok > 0` when packs and GPU mmid are ready.
 - Full HuggingFace Mixtral weights remain optional; missing dir still prints `MIXTRAL DIR MISSING` and exits 0.
 
+
+## Plan G: GGUF + fused gate/up SiLU (2026-10-29)
+
+Plan: `docs/superpowers/plans/2026-10-29-moe-f32-gguf-silu.md`
+Spec: `docs/superpowers/specs/2026-10-29-moe-f32-gguf-silu-design.md`
+Branch: `cursor/moe-f32-gguf-silu`
+
+Approach B (design spec): one CUDA kernel per `(token, slot, inter row)` dots gate and up
+Q4_K expert weights against `x`, applies `silu(gate)*up` on device, and writes F32 `act`.
+Down projection stays on the existing `mmid` path plus host `moe_weighted_sum`. No llama.cpp
+runtime link.
+
+### Super-kernel + runtime + `moe_ffn_q4k`
+
+- Kernel: `stdlib/hetero/kernels/moe_gate_up_silu_q4k_f32.cu` entry `moe_gate_up_silu_q4k_f32`
+- Build/run lab: `scripts/gpu/build_moe_gate_up_silu_q4k_f32.sh`,
+  `scripts/gpu/run_moe_gate_up_silu_q4k_l4_lab.sh` (`srun --gres=gpu:1`, gpuorangefs-r770-proxmox)
+- Runtime: `rt_load_moe_gate_up_silu`, `rt_moe_gate_up_silu_q4k` (`Runtime.gus_q4k_func`) in
+  `stdlib/hetero/runtime.sio`
+- Wire: `moe_ffn_q4k` in `stdlib/hetero/moe.sio` tries fused path first; on success
+  `ms_gate=gus.ms`, `ms_up=0.0`; else two `rt_mul_mat_id_q4k` + host `moe_silu_mul`
+- Hetero demo: `examples/hetero_moe_gate_up_silu_demo.sio` (args: gemm-ptx, mmid-ptx, gus-ptx)
+
+### Q4_K super-kernel measured (L4, 2026-10-29)
+
+Host: gpuorangefs-r770-proxmox, NVIDIA L4, nvcc 12.6 (PTX sm_89). Lab shapes match mmid MoE
+contract: m=4096, k=2048, 128 experts, 4 slots, amax=1e5. Oracle: CPU dequant+dot gate/up,
+host SiLU*mul. Baseline: two mmid launches (vec n=1 / dp4a n>1) + host silu_mul.
+
+Source artifact: `stdlib/hetero/kernels/moe_gate_up_silu_q4k_f32_lab_out.txt`
+
+| n | NMSE | us/run | baseline_us | gate |
+|---|------|--------|-------------|------|
+| 1 | 3.34545851e-13 | 218.70 | 366.66 | NMSE<=5e-4 |
+| 4 | 4.06218005e-13 | 1281.45 | 1681.16 | NMSE<=5e-4 |
+
+`LAB_EXIT:0`. All NMSE <= 5e-4.
+
+L4 hetero FFN smoke (`examples/hetero_moe_gate_up_silu_demo.sio`):
+
+```text
+moe gus: kernels ready
+moe gus: gate_ms=0.062592 up_ms=0.000000 down_ms=0.037312
+MOE GUS DONE
+DEMO_EXIT:0
+```
+
+`up_ms=0` confirms super-kernel path (not dual-mmid fallback).
+
+### GGUF reader + fixture + `llama_load_gguf`
+
+- Reader: `stdlib/llm/gguf.sio` (GGUF v3; F32, F16, Q4_K nbytes; `gguf_open`, `gguf_find`)
+- Probe: `examples/gguf_probe_demo.sio` (missing path -> `ok=false`)
+- Fixture generator:
+
+```bash
+python3 scripts/llm/gen_tiny_mixtral_gguf.py --out /workspace/llm-models/tiny-mixtral-moe.gguf
+```
+
+Fixture shapes: hidden=256, moe_inter=512, layers=2, experts=8, slots=2, vocab=64.
+Q4_K MoE tensors: `blk.N.ffn_gate_exps.weight`, `blk.N.ffn_up_exps.weight`,
+`blk.N.ffn_down_exps.weight` (llama.cpp MoE naming). ~5.0 MiB on disk.
+
+- Loader: `llama_load_gguf` in `stdlib/llm/llama.sio` fills Plan F MoE pack/strides (same
+  contract as `llama_load_moe` sidecars)
+- Load smoke: `examples/llama_gguf_load_smoke.sio` -> `loaded=1 n_experts=8`, `moe_pack_tensors=6`
+
+### Prefill demo (GGUF path, ntok 1 and 4)
+
+Example: `examples/llama_gguf_forward_demo.sio`
+
+Default fixture: `/workspace/llm-models/tiny-mixtral-moe.gguf`. Missing file:
+`GGUF FIXTURE MISSING`, `LLAMA GGUF FORWARD DONE`, exit 0.
+
+Loads PTX: `gemm_naive_f32`, `mmid_q4k_dp4a_f32`, `moe_gate_up_silu_q4k_f32` when GPU ready.
+Optional 5th argv real GGUF: `GGUF REAL SKIP` if path missing or load fails (load-only smoke;
+no full forward on real weights in this cycle).
+
+Measured on L4 (payload tar with ELF + fixture + 3 PTX; log `/tmp/llama_gguf_fwd_l4.log`):
+
+```text
+ntok=1 gpu_ready=1 last_moe_layers_ok=2 finite_logits=1
+ntok=4 gpu_ready=1 last_moe_layers_ok=2 finite_logits=1
+GGUF REAL SKIP
+LLAMA GGUF FORWARD DONE
+DEMO_EXIT:0
+```
+
+Verify locally:
+
+```bash
+python3 scripts/llm/gen_tiny_mixtral_gguf.py --out /workspace/llm-models/tiny-mixtral-moe.gguf
+bin/souc check examples/llama_gguf_forward_demo.sio
+bin/souc build examples/llama_gguf_forward_demo.sio -o /tmp/llama_gguf_forward_demo.elf
+```
+
+### Q5_K super-kernel (deferred)
+
+Q5_K super-kernel deferred; `moe_ffn_q5k` keeps two-mmid + host SiLU.
+
+Rationale: Q5_K block dequant differs from the Q4_K path in `moe_gate_up_silu_q4k_f32.cu`;
+a twin needs a separate kernel, L4 lab gate, runtime symbol, and `moe_ffn_q5k` wire, not a
+mechanical copy. Plan G SiLU fusion ships on Q4_K; Q5_K MoE remains on Plan E mmid stack
+(`rt_mul_mat_id_q5k`, `examples/hetero_moe_q5k_demo.sio`).
+
+Changelog fragment: `changelog.d/moe-f32-gguf-silu.added.md`.
+
+## Plan H: mega-combine (2026-10-29)
+
+Plan: `docs/superpowers/plans/2026-10-29-moe-f32-mega-combine.md`
+Spec: `docs/superpowers/specs/2026-10-29-moe-f32-mega-combine-design.md`
+Branch: `cursor/moe-f32-gguf-silu` (shared with Plan G; SDD Tasks 1-8; human-gated commit)
+
+### Approach B
+
+One CUDA block per token fuses gate/up Q*_K dots against `x`, SiLU `g/(1.f+expf(-g))`,
+down projection, and router-weighted combine into F32 `dst`. When mega PTX is loaded,
+`moe_ffn_q4k` / `moe_ffn_q5k` / `moe_ffn_q8_0` early-return with `ms_up=0` and
+`ms_down=0`. Fallback order: Plan G GUS + mmid down (Q4) or Plan E dual-mmid + host
+SiLU (Q5/Q8 when mega missing).
+
+Kernels: `moe_ffn_mega_q4k_f32.cu`, `moe_ffn_mega_q5k_f32.cu`, `moe_ffn_mega_q8_0_f32.cu`
+Runtime: `rt_load_moe_ffn_mega` (+ per-quant loaders), `rt_moe_ffn_mega_q4k` /
+`rt_moe_ffn_mega_q5k` / `rt_moe_ffn_mega_q8_0` in `stdlib/hetero/runtime.sio`.
+
+Host: gpuorangefs-r770-proxmox, NVIDIA L4, nvcc 12.6 (PTX sm_89). Lab contract (Tasks 1/4/5):
+`hidden=inter=256`, `experts=4`, `slots=2`, `ntokens in {1,4}`, `amax=1e5`. Oracle: CPU
+dequant + full MoE FFN + weighted combine. Gate: NMSE <= 5e-4, `LAB_EXIT:0`.
+
+### Q4_K mega lab + microbench vs pipeline
+
+Pipeline baseline (timed in lab host): `moe_gate_up_silu_q4k_f32` + `mmid_q4k_*` on `act`
++ host weighted sum.
+
+Build/run: `scripts/gpu/build_moe_ffn_mega_q4k_f32.sh`,
+`scripts/gpu/run_moe_ffn_mega_q4k_l4_lab.sh`
+
+Source artifact: `stdlib/hetero/kernels/moe_ffn_mega_q4k_f32_lab_out.txt`
+
+| n | NMSE | mega_us | pipeline_us |
+|---|------|---------|-------------|
+| 1 | 3.09729184e-14 | 27.83 | 24.25 |
+| 4 | 5.67271065e-14 | 27.88 | 30.63 |
+
+At this 256x256 lab shape, pipeline is slightly faster at n=1; mega wins accuracy of
+full fused combine on device and drops host combine. Production shapes differ from mmid
+L4 (4096x2048); compare mega vs pipeline only within the same lab binary.
+
+### Q5_K mega lab + microbench vs pipeline
+
+Build/run: `scripts/gpu/build_moe_ffn_mega_q5k_f32.sh`,
+`scripts/gpu/run_moe_ffn_mega_q5k_l4_lab.sh`
+
+Source artifact: `stdlib/hetero/kernels/moe_ffn_mega_q5k_f32_lab_out.txt`
+
+| n | NMSE | mega_us | pipeline_us |
+|---|------|---------|-------------|
+| 1 | 2.91671503e-13 | 36.31 | 27.17 |
+| 4 | 2.88811923e-13 | 36.39 | 34.74 |
+
+`LAB_EXIT:0`. Plan G deferred Q5 GUS; Plan H mega is the Q5 SiLU+down+combine path.
+
+### Q8_0 mega path (PATH=mega)
+
+Task 5 chose **Approach B mega** only. Mixed path (mmid Q8 + GPU `moe_weighted_sum_f32`)
+was not needed; lab artifact tags `PATH=mega`.
+
+Build/run: `scripts/gpu/build_moe_ffn_mega_q8_0_f32.sh`,
+`scripts/gpu/run_moe_ffn_mega_q8_0_l4_lab.sh`
+
+Source artifact: `stdlib/hetero/kernels/moe_ffn_mega_q8_0_f32_lab_out.txt`
+
+| n | NMSE | mega_us |
+|---|------|---------|
+| 1 | 1.3181987e-13 | 57.35 |
+| 4 | 1.24388746e-13 | 57.58 |
+
+`LAB_EXIT:0`. Lab host does not print pipeline_us for Q8 (mega-only receipt).
+
+### Hetero demo receipts (L4)
+
+- `examples/hetero_moe_ffn_mega_demo.sio` (Q4 mega PTX argv)
+- `examples/hetero_moe_q5k_demo.sio` / `examples/hetero_moe_q8_0_demo.sio` (optional mega PTX)
+
+Measured Q4 mega demo on L4 (`/tmp/moe_mega_demo_l4.log`):
+
+```text
+moe mega: kernels ready
+moe mega: gate_ms=0.109216 up_ms=0.000000 down_ms=0.000000
+MOE MEGA DONE
+DEMO_EXIT:0
+```
+
+`up_ms=0` and `down_ms=0` confirm mega-kernel path (not GUS+down or dual-mmid).
+
+### GGUF fixtures + llama prefill (Tasks 6-7)
+
+Fixture generator (per-quant tiny Mixtral MoE GGUF):
+
+```bash
+python3 scripts/llm/gen_tiny_mixtral_gguf.py --quant q4k --out /workspace/llm-models/tiny-mixtral-moe-q4k.gguf
+python3 scripts/llm/gen_tiny_mixtral_gguf.py --quant q5k --out /workspace/llm-models/tiny-mixtral-moe-q5k.gguf
+python3 scripts/llm/gen_tiny_mixtral_gguf.py --quant q8_0 --out /workspace/llm-models/tiny-mixtral-moe-q8_0.gguf
+```
+
+`llama_load_gguf` sets `moe_quant` from layer-0 expert dtype (0=Q4_K, 1=Q5_K, 2=Q8_0).
+All MoE layers must share one quant; mixed gate/up/down dtypes abort bind.
+
+Example: `examples/llama_gguf_forward_demo.sio` loads mmid/gus/mega PTX by `moe_quant`,
+prints mega vs mmid fallback, optional real GGUF argv (skip when missing).
+
+L4 prefill matrix (gpuorangefs-r770-proxmox, staged ELF+PTX+fixture tar):
+
+| quant | ntok=1 | ntok=4 |
+|-------|--------|--------|
+| q4k | DONE RC=0, mega, layers_ok=2, finite=1 | DONE RC=0, mega, layers_ok=2, finite=1 |
+| q5k | DONE RC=0, mega, layers_ok=2, finite=1 | DONE RC=0, mega, layers_ok=2, finite=1 |
+| q8_0 | DONE RC=0, mega, layers_ok=2, finite=1 | DONE RC=0, mega, layers_ok=2, finite=1 |
+
+Load smoke: `examples/llama_gguf_load_smoke.sio` (`bin/souc check` OK for q5k/q8 fixtures).
+
+Changelog fragment: `changelog.d/moe-f32-mega-combine.added.md`.
