@@ -1,0 +1,301 @@
+// stdlib::hetero::cuda_exec - CUDA driver execution substrate via
+// dlopen/dlsym call-through (see probe_cuda.sio for why this path).
+//
+// Context, device memory, transfers, module loading from PTX text, kernel
+// launch and CUDA-event timing - everything a Tensor2 GPU backend needs,
+// from a pure Sounio binary with no link-time CUDA dependency. Failures are
+// return codes/flags, never crashes: a CPU-only machine gets ok=false.
+
+extern "C" {
+    fn dlopen(filename: *mut u8, flags: i32) -> *mut u8
+    fn dlsym(handle: *mut u8, symbol: *mut u8) -> *mut u8
+    fn dlclose(handle: *mut u8) -> i32
+}
+
+use hetero::probe_cuda::{pb_cstr}
+use tensor2::convert::{f32_bits_to_f64}
+
+pub struct CudaExec {
+    pub cuda: *mut u8,
+    pub ok: bool,
+}
+
+fn ce_sym(exec: &CudaExec, name: string) -> *mut u8 with Alloc, Mut {
+    dlsym(exec.cuda, pb_cstr(name))
+}
+
+/// Open libcuda, cuInit, retain + set the primary context of device 0.
+///
+/// # Return
+/// CudaExec with ok=false on any failure (including: no libcuda at all).
+///
+/// # Complexity
+/// O(1)
+pub fn ce_open() -> CudaExec with Alloc, Mut, Panic {
+    var exec = CudaExec { cuda: 0 as *mut u8, ok: false }
+    let cuda = dlopen(pb_cstr("libcuda.so.1"), 1)
+    if (cuda as i64) == 0 { return exec }
+    exec.cuda = cuda
+    let raw_init = ce_sym(&exec, "cuInit")
+    if (raw_init as i64) == 0 { return exec }
+    let cu_init = raw_init as fn(i32) -> i32
+    if cu_init(0) != 0 { return exec }
+    let devbuf = heap_alloc(8)
+    write_i64(devbuf as *mut i64, 0, 0)
+    let raw_get = ce_sym(&exec, "cuDeviceGet")
+    if (raw_get as i64) == 0 { return exec }
+    let cu_get = raw_get as fn(*mut u8, i32) -> i32
+    if cu_get(devbuf, 0) != 0 { return exec }
+    let dev = read_i64(devbuf as *mut i64, 0) & 4294967295
+    let ctxbuf = heap_alloc(8)
+    write_i64(ctxbuf as *mut i64, 0, 0)
+    let raw_ctx = ce_sym(&exec, "cuDevicePrimaryCtxRetain")
+    if (raw_ctx as i64) == 0 { return exec }
+    let cu_ctx = raw_ctx as fn(*mut u8, i64) -> i32
+    if cu_ctx(ctxbuf, dev) != 0 { return exec }
+    let raw_set = ce_sym(&exec, "cuCtxSetCurrent")
+    if (raw_set as i64) == 0 { return exec }
+    let cu_set = raw_set as fn(i64) -> i32
+    if cu_set(read_i64(ctxbuf as *mut i64, 0)) != 0 { return exec }
+    exec.ok = true
+    exec
+}
+
+/// Allocate device memory. Returns device pointer (0 on failure).
+///
+/// # Parameters
+/// - `exec`: open exec. - `bytes`: allocation size.
+///
+/// # Complexity
+/// O(1)
+pub fn ce_alloc(exec: &CudaExec, bytes: i64) -> i64 with Alloc, Mut, Panic {
+    let buf = heap_alloc(8)
+    write_i64(buf as *mut i64, 0, 0)
+    let raw = ce_sym(exec, "cuMemAlloc_v2")
+    if (raw as i64) == 0 { return 0 }
+    let f = raw as fn(*mut u8, i64) -> i32
+    if f(buf, bytes) != 0 { return 0 }
+    read_i64(buf as *mut i64, 0)
+}
+
+/// Allocate page-locked (pinned) host memory via cuMemHostAlloc.
+/// Transfers to/from pinned memory run at full PCIe bandwidth; pageable
+/// heap memory measured ~3.5 GB/s effective on the L4 node vs the pinned
+/// path - the difference dominates runtime end-to-end for f64 masters.
+/// Returns null on failure (callers fall back to heap buffers).
+pub fn ce_host_alloc(exec: &CudaExec, bytes: i64) -> *mut u8 with Alloc, Mut, Panic {
+    let buf = heap_alloc(8)
+    write_i64(buf as *mut i64, 0, 0)
+    let raw = ce_sym(exec, "cuMemHostAlloc")
+    if (raw as i64) == 0 { return 0 as *mut u8 }
+    let f = raw as fn(*mut u8, i64, i32) -> i32
+    if f(buf, bytes, 0) != 0 { return 0 as *mut u8 }
+    read_i64(buf as *mut i64, 0) as *mut u8
+}
+
+pub fn ce_h2d(exec: &CudaExec, dst_dev: i64, src_host: *mut u8, bytes: i64) -> i32 with Alloc, Mut, Panic {
+    let raw = ce_sym(exec, "cuMemcpyHtoD_v2")
+    if (raw as i64) == 0 { return -1 }
+    let f = raw as fn(i64, i64, i64) -> i32
+    f(dst_dev, src_host as i64, bytes)
+}
+
+pub fn ce_d2h(exec: &CudaExec, dst_host: *mut u8, src_dev: i64, bytes: i64) -> i32 with Alloc, Mut, Panic {
+    let raw = ce_sym(exec, "cuMemcpyDtoH_v2")
+    if (raw as i64) == 0 { return -1 }
+    let f = raw as fn(i64, i64, i64) -> i32
+    f(dst_host as i64, src_dev, bytes)
+}
+
+pub fn ce_sync(exec: &CudaExec) -> i32 with Alloc, Mut, Panic {
+    let raw = ce_sym(exec, "cuCtxSynchronize")
+    if (raw as i64) == 0 { return -1 }
+    let f = raw as fn() -> i32
+    f()
+}
+
+/// Load a PTX module from NUL-terminated text. Returns module handle (0 on failure).
+///
+/// # Parameters
+/// - `exec`: open exec. - `ptx_cstr`: PTX text as C string.
+///
+/// # Complexity
+/// O(PTX size) driver JIT.
+pub fn ce_module(exec: &CudaExec, ptx_cstr: *mut u8) -> i64 with Alloc, Mut, Panic {
+    let buf = heap_alloc(8)
+    write_i64(buf as *mut i64, 0, 0)
+    let raw = ce_sym(exec, "cuModuleLoadData")
+    if (raw as i64) == 0 { return 0 }
+    let f = raw as fn(*mut u8, *mut u8) -> i32
+    if f(buf, ptx_cstr) != 0 { return 0 }
+    read_i64(buf as *mut i64, 0)
+}
+
+/// Load a PTX module; on failure print the driver JIT error log.
+///
+/// # Parameters
+/// - `exec`: open exec. - `ptx_cstr`: PTX text as C string.
+///
+/// # Return
+/// Module handle, or 0 with the JIT log printed.
+///
+/// # Complexity
+/// O(PTX size) driver JIT.
+pub fn ce_module_log(exec: &CudaExec, ptx_cstr: *mut u8) -> i64 with Alloc, Mut, Panic, IO {
+    let buf = heap_alloc(8)
+    write_i64(buf as *mut i64, 0, 0)
+    let logbuf = heap_alloc(2048)
+    var i: i64 = 0
+    while i < 256 { write_i64(logbuf as *mut i64, i, 0); i = i + 1 }
+    // CUjit_option: ERROR_LOG_BUFFER=5, ERROR_LOG_BUFFER_SIZE_BYTES=6.
+    let opts = heap_alloc(8)
+    write_i64(opts as *mut i64, 0, 5 + 6 * 4294967296)
+    let vals = heap_alloc(16)
+    write_i64(vals as *mut i64, 0, logbuf as i64)
+    write_i64(vals as *mut i64, 1, 2048)
+    let raw = ce_sym(exec, "cuModuleLoadDataEx")
+    if (raw as i64) == 0 { print("jit: cuModuleLoadDataEx missing\n"); return 0 }
+    let f = raw as fn(*mut u8, *mut u8, i32, *mut u8, *mut u8) -> i32
+    let rc = f(buf, ptx_cstr, 2, opts, vals)
+    if rc != 0 {
+        print("jit error rc=")
+        print_int(rc as i64)
+        print(": ")
+        i = 0
+        while i < 2048 {
+            let c = (read_i64(logbuf as *mut i64, i / 8) >> ((i % 8) * 8)) & 255
+            if c == 0 { print("\n"); return 0 }
+            print_char(c)
+            i = i + 1
+        }
+        print("\n")
+        return 0
+    }
+    read_i64(buf as *mut i64, 0)
+}
+
+/// Resolve a kernel function in a loaded module (0 on failure).
+///
+/// # Parameters
+/// - `exec`: open exec. - `module`: module handle. - `name`: kernel name.
+///
+/// # Complexity
+/// O(1)
+pub fn ce_function(exec: &CudaExec, module: i64, name: string) -> i64 with Alloc, Mut, Panic {
+    let buf = heap_alloc(8)
+    write_i64(buf as *mut i64, 0, 0)
+    let raw = ce_sym(exec, "cuModuleGetFunction")
+    if (raw as i64) == 0 { return 0 }
+    let f = raw as fn(*mut u8, i64, *mut u8) -> i32
+    if f(buf, module, pb_cstr(name)) != 0 { return 0 }
+    read_i64(buf as *mut i64, 0)
+}
+
+fn ce_arg_cell(v: i64) -> *mut u8 with Alloc, Mut {
+    let cell = heap_alloc(8)
+    write_i64(cell as *mut i64, 0, v)
+    cell
+}
+
+/// Launch gemm_naive_f32 (stdlib/hetero/kernels/gemm_naive_f32.ptx).
+///
+/// # Parameters
+/// - `exec`: open exec. - `func`: kernel function.
+/// - `da`, `db`, `dc`: device pointers. - `m`, `n`, `k`: GEMM dims.
+///
+/// # Return
+/// Driver status (0 = launched; call ce_sync for completion).
+///
+/// # Complexity
+/// O(1) host side.
+pub fn ce_launch_gemm(exec: &CudaExec, func: i64, da: i64, db: i64, dc: i64, m: i64, n: i64, k: i64) -> i32 with Alloc, Mut, Panic, Div {
+    let params = heap_alloc(8 * 6)
+    write_i64(params as *mut i64, 0, ce_arg_cell(da) as i64)
+    write_i64(params as *mut i64, 1, ce_arg_cell(db) as i64)
+    write_i64(params as *mut i64, 2, ce_arg_cell(dc) as i64)
+    write_i64(params as *mut i64, 3, ce_arg_cell(m) as i64)
+    write_i64(params as *mut i64, 4, ce_arg_cell(n) as i64)
+    write_i64(params as *mut i64, 5, ce_arg_cell(k) as i64)
+    let grid_x = (n + 15) / 16
+    let grid_y = (m + 15) / 16
+    let raw = ce_sym(exec, "cuLaunchKernel")
+    if (raw as i64) == 0 { return -1 }
+    let f = raw as fn(i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
+    f(func, grid_x, grid_y, 1, 16, 16, 1, 0, 0, params as i64, 0)
+}
+
+/// Allocate one kernel-argument cell holding `v` (address is passed in the
+/// kernelParams array). Public so callers can build arbitrary launches.
+///
+/// # Parameters
+/// - `v`: argument value (pointer or scalar; scalars use the low bytes).
+///
+/// # Return
+/// Heap cell whose address is the kernelParams entry.
+///
+/// # Complexity
+/// O(1)
+pub fn ce_arg(v: i64) -> *mut u8 with Alloc, Mut {
+    ce_arg_cell(v)
+}
+
+/// Launch a kernel on a 1D grid with a caller-built kernelParams array.
+///
+/// # Parameters
+/// - `exec`: open exec. - `func`: kernel function.
+/// - `grid_x`, `block_x`: launch dims (y/z = 1).
+/// - `params`: heap array of arg-cell addresses (see ce_arg).
+///
+/// # Return
+/// Driver status (0 = launched).
+///
+/// # Complexity
+/// O(1) host side.
+pub fn ce_launch_raw(exec: &CudaExec, func: i64, grid_x: i64, block_x: i64, params: *mut u8) -> i32 with Alloc, Mut, Panic {
+    let raw = ce_sym(exec, "cuLaunchKernel")
+    if (raw as i64) == 0 { return -1 }
+    let f = raw as fn(i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
+    f(func, grid_x, 1, 1, block_x, 1, 1, 0, 0, params as i64, 0)
+}
+
+pub fn ce_event_create(exec: &CudaExec) -> i64 with Alloc, Mut, Panic {
+    let buf = heap_alloc(8)
+    write_i64(buf as *mut i64, 0, 0)
+    let raw = ce_sym(exec, "cuEventCreate")
+    if (raw as i64) == 0 { return 0 }
+    let f = raw as fn(*mut u8, i32) -> i32
+    if f(buf, 0) != 0 { return 0 }
+    read_i64(buf as *mut i64, 0)
+}
+
+pub fn ce_event_record(exec: &CudaExec, ev: i64) -> i32 with Alloc, Mut, Panic {
+    let raw = ce_sym(exec, "cuEventRecord")
+    if (raw as i64) == 0 { return -1 }
+    let f = raw as fn(i64, i64) -> i32
+    f(ev, 0)
+}
+
+/// Elapsed milliseconds between two recorded events.
+///
+/// # Parameters
+/// - `exec`: open exec. - `start`, `stop`: event handles (stop recorded).
+///
+/// # Return
+/// Milliseconds, or 0.0 on failure.
+///
+/// # Complexity
+/// O(1) after stop completes.
+pub fn ce_event_elapsed_ms(exec: &CudaExec, start: i64, stop: i64) -> f64 with Alloc, Mut, Panic {
+    let raw_sync = ce_sym(exec, "cuEventSynchronize")
+    if (raw_sync as i64) == 0 { return 0.0 }
+    let f_sync = raw_sync as fn(i64) -> i32
+    if f_sync(stop) != 0 { return 0.0 }
+    let buf = heap_alloc(8)
+    write_i64(buf as *mut i64, 0, 0)
+    let raw = ce_sym(exec, "cuEventElapsedTime")
+    if (raw as i64) == 0 { return 0.0 }
+    let f = raw as fn(*mut u8, i64, i64) -> i32
+    if f(buf, start, stop) != 0 { return 0.0 }
+    // Elapsed is an f32 in the low 4 bytes; decode via tensor2 conversion.
+    f32_bits_to_f64(read_i64(buf as *mut i64, 0) & 4294967295)
+}

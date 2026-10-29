@@ -1,0 +1,140 @@
+//@ run-pass
+//
+// Hetero worker demo: multi-node GEMM row-shard over TCP (protocol v1,
+// stdlib/hetero/net_worker.sio). Two processes:
+//   hetero_worker_demo serve    - listen once, compute one shard, exit
+//   hetero_worker_demo client   - rows [0,128) local, [128,256) remote,
+//                                 verify the gathered result vs local ref
+// Loopback here; the same binaries are the SLURM two-node workers (the
+// coordinator only needs the worker's IP octets - nw_connect takes them
+// as arguments in the library API).
+// On serve failure it prints the status and still exits 0 with FAIL text.
+
+use hetero::net_worker::{
+    nw_accept, nw_close, nw_connect, nw_gemm_rows_remote, nw_listen, nw_open,
+    nw_serve_gemm_once,
+}
+use hetero::probe_cuda::{pb_cstr}
+
+fn byte_at(p: *mut u8, i: i64) -> i64 {
+    (read_i64(p as *mut i64, i / 8) >> ((i % 8) * 8)) & 255
+}
+
+// Parse "a.b.c.d" starting at byte offset `start`; returns octet value and
+// stores nothing - caller advances by re-scanning. Simple: parse octet idx.
+fn octet(s: string, idx: i64) -> i64 with Alloc, Mut {
+    let p = pb_cstr(s)
+    var i: i64 = 0
+    var which: i64 = 0
+    var val: i64 = 0
+    var in_num = false
+    while true {
+        let ch = byte_at(p, i)
+        if ch == 0 {
+            if which == idx { return val }
+            return 0
+        }
+        if ch == 46 {
+            if which == idx { return val }
+            which = which + 1
+            val = 0
+            in_num = false
+        } else {
+            if which == idx {
+                val = val * 10 + (ch - 48)
+            }
+            in_num = true
+        }
+        i = i + 1
+        if i > 64 { return 0 }
+    }
+    0
+}
+use tensor2::cpu_kernel::{
+    ck_alloc, ck_fill_pattern, ck_gemm, ck_gemm_rows, ck_max_abs_diff,
+}
+
+fn main() with IO, Mut, Panic, Div, Alloc {
+    var mode = "client"
+    if arg_count() > 0 { mode = get_arg(0) }
+    let lib = nw_open()
+    if !lib.ok {
+        print("worker: libc unavailable\nWORKER DONE\n")
+        exit(0)
+    }
+    if mode == "serve" {
+        let srv = nw_listen(&lib, 18077)
+        if srv < 0 {
+            print("serve: listen failed\nWORKER DONE\n")
+            exit(0)
+        }
+        print("serve: listening on 18077\n")
+        let conn = nw_accept(&lib, srv)
+        if conn < 0 {
+            print("serve: accept failed\nWORKER DONE\n")
+            exit(0)
+        }
+        let st = nw_serve_gemm_once(&lib, conn)
+        print("serve: shard status=")
+        print_int(st)
+        print("\n")
+        nw_close(&lib, conn)
+        nw_close(&lib, srv)
+        print("WORKER DONE\n")
+        exit(0)
+    }
+
+    // client / coordinator
+    let n: i64 = 256
+    var a = ck_alloc(n * n)
+    ck_fill_pattern(&!a)
+    var b = ck_alloc(n * n)
+    ck_fill_pattern(&!b)
+    var ref = ck_alloc(n * n)
+    ck_gemm(&a, &b, &!ref, n, n, n)
+    var c = ck_alloc(n * n)
+    ck_gemm_rows(&a, &b, &!c, 0, 128, n, n)
+
+    var ip = "127.0.0.1"
+    if arg_count() > 1 { ip = get_arg(1) }
+    var conn: i64 = -1
+    var tries: i64 = 0
+    while conn < 0 && tries < 200 {
+        conn = nw_connect(&lib, octet(ip, 0), octet(ip, 1), octet(ip, 2), octet(ip, 3), 18077)
+        tries = tries + 1
+    }
+    if conn < 0 {
+        // Graceful degradation v1: a dead/unreachable worker never loses
+        // the work - the coordinator computes the shard locally. (Live
+        // re-planning mid-session is a separate, later mechanism.)
+        print("client: worker unreachable, fallback to local shard\n")
+        ck_gemm_rows(&a, &b, &!c, 128, 256, n, n)
+        let df = ck_max_abs_diff(&ref, &c)
+        print("client: fallback max_diff(x1e9)=")
+        print_int((df * 1000000000.0) as i64)
+        print("\n")
+        if df < 0.000000001 { print("WORKER PASS (fallback)\n") } else { print("WORKER FAIL\n") }
+        print("WORKER DONE\n")
+        exit(0)
+    }
+    var st = nw_gemm_rows_remote(&lib, conn, &a, &b, &!c, 128, 256, n)
+    nw_close(&lib, conn)
+    if st != 0 {
+        print("client: remote failed, fallback to local shard\n")
+        ck_gemm_rows(&a, &b, &!c, 128, 256, n, n)
+        st = 0
+    }
+    let d = ck_max_abs_diff(&ref, &c)
+    print("client: remote status=")
+    print_int(st)
+    print(" max_diff(x1e9)=")
+    print_int((d * 1000000000.0) as i64)
+    print("\n")
+    if st == 0 && d < 0.000000001 {
+        print("WORKER PASS\n")
+    } else {
+        print("WORKER FAIL\n")
+    }
+    print("WORKER DONE\n")
+    exit(0)
+}

@@ -1,0 +1,166 @@
+//@ run-pass
+//
+// SmolLM2-135M end-to-end in pure Sounio: BPE tokenizer (tokenizer.json)
+// -> safetensors weights -> Llama forward with KV cache -> greedy text.
+// Gates printed before generation is believed:
+//   - tokenizer roundtrip: decode(encode(prompt)) == prompt bytes
+//   - logits: prefill-at-once vs token-by-token KV on the real model
+// Usage: llama_smol_demo [model-dir] [prompt] [n-gen]
+// Modules: stdlib/llm/{safetensors,llama,bpe}.sio
+
+use llm::bpe::{bpe_decode_token, bpe_encode, bpe_load}
+use llm::llama::{kv_new, llama_argmax, llama_forward, llama_load}
+use llm::safetensors::{st_byte_at}
+use tensor2::cpu_kernel::{ck_alloc, ck_get, ck_max_abs_diff, ck_set}
+
+fn putb(buf: *mut u8, i: i64, v: i64) {
+    let w = read_i64(buf as *mut i64, i / 8)
+    let sh = (i % 8) * 8
+    let cleared = w & ((0 - 1) - (255 << sh))
+    write_i64(buf as *mut i64, i / 8, cleared | ((v & 255) << sh))
+}
+
+fn main() with IO, Mut, Panic, Div, Alloc {
+    var ok = true
+    var dir = "/workspace/llm-models/SmolLM2-135M"
+    if arg_count() > 0 { dir = get_arg(0) }
+    var prompt = "The capital of France is"
+    if arg_count() > 1 { prompt = get_arg(1) }
+    var ngen: i64 = 24
+    if arg_count() > 2 { ngen = 24 }
+
+    let bp = bpe_load(dir ++ "/tokenizer.json")
+    print("bpe ok=")
+    print_int(if bp.ok { 1 } else { 0 })
+    print(" vocab=")
+    print_int(bp.n_vocab)
+    print(" merges=")
+    print_int(bp.n_merges)
+    print(" specials=")
+    print_int(bp.n_special)
+    print("\n")
+    if !bp.ok { print("SMOL FAIL\nSMOL DONE\n"); exit(0) }
+
+    // prompt bytes into a raw buffer
+    let plen = str_len(prompt)
+    let pbuf = heap_alloc(plen + 16)
+    var i: i64 = 0
+    while i < plen {
+        putb(pbuf, i, str_char_at(prompt, i) & 255)
+        i = i + 1
+    }
+    let enc = bpe_encode(&bp, pbuf, plen)
+    print("prompt tokens=")
+    print_int(enc.len)
+    print(" ids=")
+    i = 0
+    while i < enc.len {
+        print_int((ck_get(&enc, i)) as i64)
+        print(" ")
+        i = i + 1
+    }
+    print("\n")
+
+    // roundtrip gate
+    let dbuf = heap_alloc(65536)
+    let tbuf = heap_alloc(8192)
+    var dlen: i64 = 0
+    i = 0
+    while i < enc.len {
+        let nb = bpe_decode_token(&bp, (ck_get(&enc, i)) as i64, tbuf)
+        var j: i64 = 0
+        while j < nb {
+            putb(dbuf, 32768 + dlen, st_byte_at(tbuf, j))
+            dlen = dlen + 1
+            j = j + 1
+        }
+        i = i + 1
+    }
+    var rt_ok = dlen == plen
+    i = 0
+    while i < plen {
+        if st_byte_at(dbuf, 32768 + i) != (str_char_at(prompt, i) & 255) { rt_ok = false }
+        i = i + 1
+    }
+    print("roundtrip=")
+    print_int(if rt_ok { 1 } else { 0 })
+    print(" decoded=[")
+    i = 0
+    while i < dlen {
+        print_char(st_byte_at(dbuf, 32768 + i))
+        i = i + 1
+    }
+    print("]\n")
+    if !rt_ok { ok = false; print("FAIL roundtrip\n") }
+
+    // model
+    let m = llama_load(dir)
+    print("loaded=")
+    print_int(if m.loaded { 1 } else { 0 })
+    print(" tied=")
+    print_int(if m.cfg.tied { 1 } else { 0 })
+    print("\n")
+    if !m.loaded { print("SMOL FAIL\nSMOL DONE\n"); exit(0) }
+
+    // full sequence ids: BOS(0) + prompt
+    let nseq = enc.len + 1
+    var ids = ck_alloc(nseq + 64)
+    ck_set(&!ids, 0, 0.0)
+    i = 0
+    while i < enc.len {
+        ck_set(&!ids, 1 + i, ck_get(&enc, i))
+        i = i + 1
+    }
+
+    // (a) prefill at once
+    var kv1 = kv_new(&m, 512)
+    let la = llama_forward(&m, &!kv1, &ids, nseq)
+    // (b) token by token
+    var kv2 = kv_new(&m, 512)
+    var lb = ck_alloc(1)
+    i = 0
+    while i < nseq {
+        var one = ck_alloc(1)
+        ck_set(&!one, 0, ck_get(&ids, i))
+        lb = llama_forward(&m, &!kv2, &one, 1)
+        i = i + 1
+    }
+    let d = ck_max_abs_diff(&la, &lb)
+    print("logits kv-vs-prefill max_diff(x1e6)=")
+    print_int((d * 1000000.0) as i64)
+    print(" argmax=")
+    print_int(llama_argmax(&la))
+    print("\n")
+    if d > 0.001 { ok = false; print("FAIL logits gate\n") }
+
+    // greedy generation continuing kv1
+    print("gen: [")
+    i = 0
+    while i < plen {
+        print_char(str_char_at(prompt, i) & 255)
+        i = i + 1
+    }
+    var logits = la
+    var g: i64 = 0
+    while g < ngen {
+        let nxt = llama_argmax(&logits)
+        if nxt == 0 { g = ngen }
+        else {
+            let nb2 = bpe_decode_token(&bp, nxt, dbuf)
+            var j2: i64 = 0
+            while j2 < nb2 {
+                print_char(st_byte_at(dbuf, j2))
+                j2 = j2 + 1
+            }
+            var one2 = ck_alloc(1)
+            ck_set(&!one2, 0, nxt as f64)
+            logits = llama_forward(&m, &!kv1, &one2, 1)
+        }
+        g = g + 1
+    }
+    print("]\n")
+
+    if ok { print("SMOL PASS\n") } else { print("SMOL FAIL\n") }
+    print("SMOL DONE\n")
+    exit(0)
+}

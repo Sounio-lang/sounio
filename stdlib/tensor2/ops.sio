@@ -1,0 +1,398 @@
+// stdlib::tensor2::ops - Tensor v2 operations, CPU reference backend.
+//
+// Scalar reference implementations: every value is read through the dtype
+// conversion (convert.sio), computed in f64, and written back through the
+// output dtype. GPU backends (Fase 2) must match these within the declared
+// per-dtype tolerance against this reference. Loops are kept in the simple
+// form the native backend vectorizes (AVX-512); semantics first, speed is
+// the backend's job, measured - not assumed.
+
+use math::pure::{exp}
+use tensor2::types::{
+    Tensor2, T2Shape,
+    t2_dtype_bf16, t2_dtype_bytes, t2_dtype_f16, t2_dtype_f32, t2_dtype_f64,
+    t2_dtype_i32, t2_dtype_i64, t2_dtype_u8,
+    t2_shape_eq, t2_shape_from,
+}
+use tensor2::convert::{
+    bf16_bits_to_f64, f16_bits_to_f64, f32_bits_to_f64,
+    f64_to_bf16_bits, f64_to_f16_bits, f64_to_f32_bits,
+}
+
+// ---- raw byte access over the shared storage (word read-modify-write) ----
+
+fn t2_read_byte(data: *mut u8, byte_off: i64) -> i64 {
+    let word = read_i64(data as *mut i64, byte_off / 8)
+    (word >> ((byte_off % 8) * 8)) & 255
+}
+
+fn t2_write_byte(data: *mut u8, byte_off: i64, v: i64) with Mut {
+    let widx = byte_off / 8
+    let shift = (byte_off % 8) * 8
+    let mask = (0 - 1) - (255 << shift)
+    let word = (read_i64(data as *mut i64, widx) & mask) | ((v & 255) << shift)
+    write_i64(data as *mut i64, widx, word)
+}
+
+fn t2_read_u16le(data: *mut u8, byte_off: i64) -> i64 {
+    t2_read_byte(data, byte_off) | (t2_read_byte(data, byte_off + 1) << 8)
+}
+
+fn t2_write_u16le(data: *mut u8, byte_off: i64, v: i64) with Mut {
+    t2_write_byte(data, byte_off, v & 255)
+    t2_write_byte(data, byte_off + 1, (v >> 8) & 255)
+}
+
+fn t2_read_u32le(data: *mut u8, byte_off: i64) -> i64 {
+    t2_read_byte(data, byte_off) | (t2_read_byte(data, byte_off + 1) << 8) | (t2_read_byte(data, byte_off + 2) << 16) | (t2_read_byte(data, byte_off + 3) << 24)
+}
+
+fn t2_write_u32le(data: *mut u8, byte_off: i64, v: i64) with Mut {
+    t2_write_byte(data, byte_off, v & 255)
+    t2_write_byte(data, byte_off + 1, (v >> 8) & 255)
+    t2_write_byte(data, byte_off + 2, (v >> 16) & 255)
+    t2_write_byte(data, byte_off + 3, (v >> 24) & 255)
+}
+
+fn t2_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 40 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+
+// ---- lifecycle: refcounted storage ----
+
+/// Allocate a zero-initialized tensor on the CPU device.
+///
+/// # Parameters
+/// - `shape`: tensor shape. - `dtype`: dtype code.
+/// - `device`: device code (v1: CPU only, value recorded for the planner).
+///
+/// # Return
+/// Tensor2 owning a fresh storage with refcount 1.
+///
+/// # Complexity
+/// O(numel) for zeroing.
+pub fn t2_alloc(shape: T2Shape, dtype: i32, device: i32) -> Tensor2 with Alloc, Mut, Panic, Div {
+    let nbytes = (shape.len as i64) * t2_dtype_bytes(dtype)
+    let padded = nbytes + 8
+    let data = heap_alloc(padded) as *mut u8
+    let rc = heap_alloc(8 as i64) as *mut i64
+    write_i64(rc, 0, 1)
+    Tensor2 { data: data, rc: rc, offset: 0, shape: shape, dtype: dtype, device: device, owner: true }
+}
+
+pub fn t2_zeros(shape: T2Shape, dtype: i32, device: i32) -> Tensor2 with Alloc, Mut, Panic, Div {
+    t2_alloc(shape, dtype, device)
+}
+
+/// Allocate and fill with one value (converted through the dtype).
+///
+/// # Parameters
+/// - `shape`: tensor shape. - `dtype`: dtype code. - `device`: device code.
+/// - `value`: fill value, rounded by the dtype encoding on store.
+///
+/// # Return
+/// New tensor with every element equal to the stored encoding of `value`.
+///
+/// # Complexity
+/// O(numel)
+pub fn t2_full(shape: T2Shape, dtype: i32, device: i32, value: f64) -> Tensor2 with Alloc, Mut, Panic, Div {
+    var t = t2_alloc(shape, dtype, device)
+    var i: i64 = 0
+    while i < (shape.len as i64) {
+        t2_set(&!t, i, value)
+        i = i + 1
+    }
+    t
+}
+
+/// Share storage: returns a tensor pointing at the same buffer, refcount + 1.
+///
+/// # Parameters
+/// - `t`: tensor whose storage is shared.
+///
+/// # Return
+/// A new Tensor2 handle over the same storage; release it independently.
+///
+/// # Complexity
+/// O(1)
+pub fn t2_clone_shared(t: &Tensor2) -> Tensor2 with Mut {
+    if t.owner {
+        write_i64(t.rc, 0, read_i64(t.rc, 0) + 1)
+    }
+    Tensor2 { data: t.data, rc: t.rc, offset: t.offset, shape: t.shape, dtype: t.dtype, device: t.device, owner: t.owner }
+}
+
+pub fn t2_refcount(t: &Tensor2) -> i64 {
+    if t.owner { read_i64(t.rc, 0) } else { 0 }
+}
+
+/// Release one handle; frees storage when the refcount reaches zero.
+///
+/// # Parameters
+/// - `t`: handle to release, invalidated in place.
+///
+/// # Return
+/// Nothing.
+///
+/// # Complexity
+/// O(1)
+pub fn t2_release(t: &!Tensor2) with Alloc, Mut {
+    if t.owner && t.data != 0 as *mut u8 {
+        let left = read_i64(t.rc, 0) - 1
+        write_i64(t.rc, 0, left)
+        if left <= 0 {
+            heap_free(t.data as *mut i8)
+            heap_free(t.rc as *mut i8)
+        }
+        t.data = 0 as *mut u8
+        t.owner = false
+    }
+}
+
+// ---- element access through dtype conversion ----
+
+fn t2_byte_offset(t: &Tensor2, linear_idx: i64) -> i64 {
+    (t.offset + linear_idx) * t2_dtype_bytes(t.dtype)
+}
+
+/// Read one element as f64 (exact for f16/bf16/f32 sources).
+///
+/// # Parameters
+/// - `t`: tensor. - `linear_idx`: row-major linear index.
+///
+/// # Return
+/// Element value converted to f64.
+///
+/// # Complexity
+/// O(1)
+pub fn t2_get(t: &Tensor2, linear_idx: i64) -> f64 with Mut {
+    let bo = t2_byte_offset(t, linear_idx)
+    if t.dtype == t2_dtype_f64() { return bits_to_f64(read_i64(t.data as *mut i64, bo / 8)) }
+    if t.dtype == t2_dtype_i64() { return (read_i64(t.data as *mut i64, bo / 8)) as f64 }
+    if t.dtype == t2_dtype_f32() { return f32_bits_to_f64(t2_read_u32le(t.data, bo)) }
+    if t.dtype == t2_dtype_i32() {
+        var v = t2_read_u32le(t.data, bo)
+        if v >= 2147483648 { v = v - 4294967296 }
+        return v as f64
+    }
+    if t.dtype == t2_dtype_bf16() { return bf16_bits_to_f64(t2_read_u16le(t.data, bo)) }
+    if t.dtype == t2_dtype_f16() { return f16_bits_to_f64(t2_read_u16le(t.data, bo)) }
+    if t.dtype == t2_dtype_u8() { return (t2_read_byte(t.data, bo)) as f64 }
+    0.0
+}
+
+/// Write one element, rounding through the tensor's dtype encoding.
+///
+/// # Parameters
+/// - `t`: tensor. - `linear_idx`: row-major linear index. - `value`: value.
+///
+/// # Return
+/// Nothing.
+///
+/// # Complexity
+/// O(1)
+pub fn t2_set(t: &!Tensor2, linear_idx: i64, value: f64) with Mut {
+    let bo = t2_byte_offset(t, linear_idx)
+    if t.dtype == t2_dtype_f64() { write_i64(t.data as *mut i64, bo / 8, f64_to_bits(value)); return }
+    if t.dtype == t2_dtype_i64() { write_i64(t.data as *mut i64, bo / 8, value as i64); return }
+    if t.dtype == t2_dtype_f32() { t2_write_u32le(t.data, bo, f64_to_f32_bits(value)); return }
+    if t.dtype == t2_dtype_i32() { t2_write_u32le(t.data, bo, (value as i64) & 4294967295); return }
+    if t.dtype == t2_dtype_bf16() { t2_write_u16le(t.data, bo, f64_to_bf16_bits(value)); return }
+    if t.dtype == t2_dtype_f16() { t2_write_u16le(t.data, bo, f64_to_f16_bits(value)); return }
+    if t.dtype == t2_dtype_u8() { t2_write_byte(t.data, bo, value as i64); return }
+}
+
+pub fn t2_get2(t: &Tensor2, i: i64, j: i64) -> f64 with Mut {
+    t2_get(t, i * (t.shape.dims[1] as i64) + j)
+}
+
+pub fn t2_set2(t: &!Tensor2, i: i64, j: i64, value: f64) with Mut {
+    let idx = i * (t.shape.dims[1] as i64) + j
+    t2_set(t, idx, value)
+}
+
+// ---- elementwise and reductions (reference semantics) ----
+
+pub fn t2_add(a: &Tensor2, b: &Tensor2) -> Tensor2 with Alloc, Mut, Panic, Div {
+    if !t2_shape_eq(a.shape, b.shape) { assert(false) }
+    var out = t2_alloc(a.shape, a.dtype, a.device)
+    var i: i64 = 0
+    let n = a.shape.len as i64
+    while i < n {
+        t2_set(&!out, i, t2_get(a, i) + t2_get(b, i))
+        i = i + 1
+    }
+    out
+}
+
+pub fn t2_mul(a: &Tensor2, b: &Tensor2) -> Tensor2 with Alloc, Mut, Panic, Div {
+    if !t2_shape_eq(a.shape, b.shape) { assert(false) }
+    var out = t2_alloc(a.shape, a.dtype, a.device)
+    var i: i64 = 0
+    let n = a.shape.len as i64
+    while i < n {
+        t2_set(&!out, i, t2_get(a, i) * t2_get(b, i))
+        i = i + 1
+    }
+    out
+}
+
+pub fn t2_sum_all(t: &Tensor2) -> f64 with Mut {
+    var s = 0.0
+    var i: i64 = 0
+    while i < (t.shape.len as i64) {
+        s = s + t2_get(t, i)
+        i = i + 1
+    }
+    s
+}
+
+/// 2D matrix multiply [M,K] x [K,N] -> [M,N], accumulating in f64 here
+/// (canonical rule: backends accumulate in at least f32; the reference
+/// oracle is allowed to be more accurate, tolerance covers the difference).
+///
+/// # Parameters
+/// - `a`: left matrix. - `b`: right matrix.
+///
+/// # Return
+/// New tensor with a's dtype/device.
+///
+/// # Complexity
+/// O(M*K*N)
+pub fn t2_matmul(a: &Tensor2, b: &Tensor2) -> Tensor2 with Alloc, Mut, Panic, Div {
+    if a.shape.rank != 2 as usize || b.shape.rank != 2 as usize { assert(false) }
+    let m = a.shape.dims[0] as i64
+    let k = a.shape.dims[1] as i64
+    let n = b.shape.dims[1] as i64
+    if b.shape.dims[0] as i64 != k { assert(false) }
+    var dims = [0 as usize; 8]
+    dims[0] = m as usize
+    dims[1] = n as usize
+    var out = t2_alloc(t2_shape_from(dims, 2 as usize), a.dtype, a.device)
+    var i: i64 = 0
+    while i < m {
+        var j: i64 = 0
+        while j < n {
+            var acc = 0.0
+            var p: i64 = 0
+            while p < k {
+                acc = acc + t2_get2(a, i, p) * t2_get2(b, p, j)
+                p = p + 1
+            }
+            t2_set2(&!out, i, j, acc)
+            j = j + 1
+        }
+        i = i + 1
+    }
+    out
+}
+
+fn t2_shape2_from_dims(dims: [usize; 8]) -> T2Shape with Mut, Panic, Div {
+    t2_shape_from(dims, 2 as usize)
+}
+
+/// Transpose of a 2D tensor (new storage).
+///
+/// # Parameters
+/// - `a`: matrix [M, N].
+///
+/// # Return
+/// New tensor [N, M].
+///
+/// # Complexity
+/// O(M*N)
+pub fn t2_transpose2(a: &Tensor2) -> Tensor2 with Alloc, Mut, Panic, Div {
+    let m = a.shape.dims[0] as i64
+    let n = a.shape.dims[1] as i64
+    var dims = [0 as usize; 8]
+    dims[0] = n as usize
+    dims[1] = m as usize
+    var out = t2_alloc(t2_shape2_from_dims(dims), a.dtype, a.device)
+    var i: i64 = 0
+    while i < m {
+        var j: i64 = 0
+        while j < n {
+            t2_set2(&!out, j, i, t2_get2(a, i, j))
+            j = j + 1
+        }
+        i = i + 1
+    }
+    out
+}
+
+/// Row-wise softmax of a 2D tensor, max-subtracted for stability.
+///
+/// # Parameters
+/// - `a`: matrix [rows, cols].
+///
+/// # Return
+/// New tensor, same shape/dtype; each row sums to 1 in exact arithmetic.
+///
+/// # Complexity
+/// O(rows*cols)
+pub fn t2_softmax_rows(a: &Tensor2) -> Tensor2 with Alloc, Mut, Panic, Div {
+    let rows = a.shape.dims[0] as i64
+    let cols = a.shape.dims[1] as i64
+    var out = t2_alloc(a.shape, a.dtype, a.device)
+    var i: i64 = 0
+    while i < rows {
+        var mx = t2_get2(a, i, 0)
+        var j: i64 = 1
+        while j < cols {
+            let v = t2_get2(a, i, j)
+            if v > mx { mx = v }
+            j = j + 1
+        }
+        var sum = 0.0
+        j = 0
+        while j < cols {
+            sum = sum + exp(t2_get2(a, i, j) - mx)
+            j = j + 1
+        }
+        j = 0
+        while j < cols {
+            t2_set2(&!out, i, j, exp(t2_get2(a, i, j) - mx) / sum)
+            j = j + 1
+        }
+        i = i + 1
+    }
+    out
+}
+
+/// Row-wise RMSNorm without weight: y = x / sqrt(mean(x^2) + eps).
+///
+/// # Parameters
+/// - `a`: matrix [rows, cols]. - `eps`: epsilon inside the root.
+///
+/// # Return
+/// New tensor, same shape/dtype; each row has RMS 1 (up to eps).
+///
+/// # Complexity
+/// O(rows*cols)
+pub fn t2_rmsnorm_rows(a: &Tensor2, eps: f64) -> Tensor2 with Alloc, Mut, Panic, Div {
+    let rows = a.shape.dims[0] as i64
+    let cols = a.shape.dims[1] as i64
+    var out = t2_alloc(a.shape, a.dtype, a.device)
+    var i: i64 = 0
+    while i < rows {
+        var ss = 0.0
+        var j: i64 = 0
+        while j < cols {
+            let v = t2_get2(a, i, j)
+            ss = ss + v * v
+            j = j + 1
+        }
+        let inv = 1.0 / t2_sqrt(ss / (cols as f64) + eps)
+        j = 0
+        while j < cols {
+            t2_set2(&!out, i, j, t2_get2(a, i, j) * inv)
+            j = j + 1
+        }
+        i = i + 1
+    }
+    out
+}

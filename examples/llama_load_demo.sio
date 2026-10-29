@@ -1,0 +1,82 @@
+//@ run-pass
+//
+// LLM load demo: safetensors reader against real model files.
+// Prints config values scanned from config.json, header entries found,
+// and stats of one decoded tensor; a missing tensor must report
+// found=false / len 0, never crash.
+// Usage: llama_load_demo [model-dir]
+// Module: stdlib/llm/safetensors.sio
+
+use llm::safetensors::{
+    st_find, st_load_f64, st_read_all, st_scan_f64, st_scan_i64,
+}
+use tensor2::cpu_kernel::{ck_get}
+
+fn main() with IO, Mut, Panic, Div, Alloc {
+    var ok = true
+    var dir = "/workspace/llm-models/tiny-random-Llama"
+    if arg_count() > 0 { dir = get_arg(0) }
+
+    let cfg = st_read_all(dir ++ "/config.json")
+    if !cfg.ok { print("FAIL config read\nLOAD DONE\n"); exit(0) }
+    print("config hidden=")
+    print_int(st_scan_i64(cfg.data, cfg.len, "hidden_size"))
+    print(" layers=")
+    print_int(st_scan_i64(cfg.data, cfg.len, "num_hidden_layers"))
+    print(" heads=")
+    print_int(st_scan_i64(cfg.data, cfg.len, "num_attention_heads"))
+    print(" kv_heads=")
+    print_int(st_scan_i64(cfg.data, cfg.len, "num_key_value_heads"))
+    print(" vocab=")
+    print_int(st_scan_i64(cfg.data, cfg.len, "vocab_size"))
+    print(" theta(x100)=")
+    print_int((st_scan_f64(cfg.data, cfg.len, "rope_theta") * 100.0) as i64)
+    print("\n")
+
+    let st = st_read_all(dir ++ "/model.safetensors")
+    if !st.ok { print("FAIL safetensors read\nLOAD DONE\n"); exit(0) }
+    print("st bytes=")
+    print_int(st.len)
+    print(" hdr_len=")
+    print_int(st.hdr_len)
+    print("\n")
+
+    let emb = st_find(&st, "model.embed_tokens.weight")
+    print("embed found=")
+    print_int(if emb.found { 1 } else { 0 })
+    print(" dtype=")
+    print_int(emb.dtype as i64)
+    print(" shape=[")
+    print_int(emb.dims[0])
+    print(",")
+    print_int(emb.dims[1])
+    print("] count=")
+    print_int(emb.count)
+    print("\n")
+    if !emb.found { ok = false }
+
+    let nw = st_load_f64(&st, "model.layers.0.input_layernorm.weight")
+    print("norm0 len=")
+    print_int(nw.len)
+    if nw.len > 0 {
+        var s: f64 = 0.0
+        var i: i64 = 0
+        while i < nw.len { s = s + ck_get(&nw, i); i = i + 1 }
+        print(" sum(x1000)=")
+        print_int((s * 1000.0) as i64)
+        print(" first(x1000)=")
+        print_int((ck_get(&nw, 0) * 1000.0) as i64)
+    }
+    print("\n")
+    if nw.len == 0 { ok = false }
+
+    let miss = st_find(&st, "model.layers.99.input_layernorm.weight")
+    print("missing found=")
+    print_int(if miss.found { 1 } else { 0 })
+    print("\n")
+    if miss.found { ok = false }
+
+    if ok { print("LOAD PASS\n") } else { print("LOAD FAIL\n") }
+    print("LOAD DONE\n")
+    exit(0)
+}

@@ -1,0 +1,73 @@
+//@ run-pass
+//
+// Llama forward demo on the tiny-random model: gates the KV-cache path
+// against the same forward called with the whole sequence at once, and
+// both against run-to-run determinism. Random weights - the gate is
+// numerical equivalence of two execution strategies, not text quality.
+// Usage: llama_tiny_demo [model-dir]
+// Module: stdlib/llm/llama.sio
+
+use llm::llama::{kv_new, llama_argmax, llama_forward, llama_load}
+use tensor2::cpu_kernel::{ck_alloc, ck_get, ck_max_abs_diff, ck_set}
+
+fn main() with IO, Mut, Panic, Div, Alloc {
+    var ok = true
+    var dir = "/workspace/llm-models/tiny-random-Llama"
+    if arg_count() > 0 { dir = get_arg(0) }
+    let m = llama_load(dir)
+    print("loaded=")
+    print_int(if m.loaded { 1 } else { 0 })
+    print(" hidden=")
+    print_int(m.cfg.hidden)
+    print(" layers=")
+    print_int(m.cfg.layers as i64)
+    print(" vocab=")
+    print_int(m.cfg.vocab)
+    print("\n")
+    if !m.loaded { print("TINY FAIL\nTINY DONE\n"); exit(0) }
+
+    var toks = ck_alloc(6)
+    ck_set(&!toks, 0, 1.0)
+    ck_set(&!toks, 1, 15043.0)
+    ck_set(&!toks, 2, 29892.0)
+    ck_set(&!toks, 3, 1234.0)
+    ck_set(&!toks, 4, 5678.0)
+    ck_set(&!toks, 5, 42.0)
+
+    // (a) whole sequence at once, fresh cache
+    var kv1 = kv_new(&m, 64)
+    let la = llama_forward(&m, &!kv1, &toks, 6)
+    // (b) token by token through the cache
+    var kv2 = kv_new(&m, 64)
+    var lb = ck_alloc(1)
+    var i: i64 = 0
+    while i < 6 {
+        var one = ck_alloc(1)
+        ck_set(&!one, 0, ck_get(&toks, i))
+        lb = llama_forward(&m, &!kv2, &one, 1)
+        i = i + 1
+    }
+    let d = ck_max_abs_diff(&la, &lb)
+    print("kv-vs-full max_diff(x1e9)=")
+    print_int((d * 1000000000.0) as i64)
+    print("\n")
+    if d > 0.000001 { ok = false; print("FAIL kv equivalence\n") }
+
+    // (c) determinism: same call again, must be bit-equal
+    var kv3 = kv_new(&m, 64)
+    let lc = llama_forward(&m, &!kv3, &toks, 6)
+    let d2 = ck_max_abs_diff(&la, &lc)
+    print("determinism max_diff(x1e9)=")
+    print_int((d2 * 1000000000.0) as i64)
+    print(" argmax=")
+    print_int(llama_argmax(&la))
+    print(" argmax_kv=")
+    print_int(llama_argmax(&lb))
+    print("\n")
+    if d2 != 0.0 { ok = false; print("FAIL determinism\n") }
+    if llama_argmax(&la) != llama_argmax(&lb) { ok = false; print("FAIL argmax\n") }
+
+    if ok { print("TINY PASS\n") } else { print("TINY FAIL\n") }
+    print("TINY DONE\n")
+    exit(0)
+}

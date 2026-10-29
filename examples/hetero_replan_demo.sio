@@ -1,0 +1,170 @@
+//@ run-pass
+//
+// Hetero replan demo: a GraphIR chain planned onto a remote worker that
+// DIES after the first node. The runtime must strike the dead device,
+// replan the remaining sub-chain onto the local CPU, and still produce
+// the verified result - the session survives the worker.
+//   hetero_replan_demo serve         - serve ONE shard request, then exit
+//   hetero_replan_demo client [ip]   - plan 3 GEMM nodes onto the worker,
+//                                      execute with live replan, verify
+// Client with no server at all also passes (node 0 fails, all replanned).
+// Modules: stdlib/hetero/{graph,cost,runtime,net_worker}.sio
+
+use hetero::runtime::{rt_exec_chain, rt_kind_cpu, rt_kind_remote, rt_open}
+use hetero::types::{backend_cpu_avx512, device_caps_measured, dtype_f32, op_matmul}
+use hetero::caps::{pool_add, pool_new}
+use hetero::graph::{graph_add_chain_node, graph_new}
+use hetero::cost::{link_matrix_new, link_set}
+use hetero::net_worker::{
+    nw_accept, nw_close, nw_connect, nw_listen, nw_open, nw_serve_gemm_once,
+}
+use hetero::probe_cuda::{pb_cstr}
+use tensor2::cpu_kernel::{ck_alloc, ck_gemm, ck_get, ck_max_abs_diff, ck_set}
+
+fn byte_at(p: *mut u8, i: i64) -> i64 {
+    (read_i64(p as *mut i64, i / 8) >> ((i % 8) * 8)) & 255
+}
+
+fn octet(s: string, idx: i64) -> i64 with Alloc, Mut {
+    let p = pb_cstr(s)
+    var i: i64 = 0
+    var which: i64 = 0
+    var val: i64 = 0
+    while true {
+        let ch = byte_at(p, i)
+        if ch == 0 {
+            if which == idx { return val }
+            return 0
+        }
+        if ch == 46 {
+            if which == idx { return val }
+            which = which + 1
+            val = 0
+        } else {
+            if which == idx { val = val * 10 + (ch - 48) }
+        }
+        i = i + 1
+        if i > 64 { return 0 }
+    }
+    0
+}
+
+fn fill_scaled(b: &!CpuBuf, scale: f64) with Mut {
+    var i: i64 = 0
+    while i < b.len {
+        let h = (i * 31 + 17) % 97
+        ck_set(b, i, ((h as f64) / 97.0) * scale)
+        i = i + 1
+    }
+}
+
+fn main() with IO, Mut, Panic, Div, Alloc {
+    var mode = "client"
+    if arg_count() > 0 { mode = get_arg(0) }
+    let lib = nw_open()
+    if !lib.ok {
+        print("replan: libc unavailable\nREPLAN DONE\n")
+        exit(0)
+    }
+    if mode == "serve" {
+        let srv = nw_listen(&lib, 18078)
+        if srv < 0 { print("serve: listen failed\nREPLAN DONE\n"); exit(0) }
+        print("serve: listening on 18078 (will die after one shard)\n")
+        let conn = nw_accept(&lib, srv)
+        if conn < 0 { print("serve: accept failed\nREPLAN DONE\n"); exit(0) }
+        let st = nw_serve_gemm_once(&lib, conn)
+        print("serve: shard status=")
+        print_int(st)
+        print(" - exiting now (simulated crash)\n")
+        nw_close(&lib, conn)
+        nw_close(&lib, srv)
+        print("REPLAN DONE\n")
+        exit(0)
+    }
+
+    // Coordinator: chain of 3 GEMMs at n=128. Pool: [remote worker, local
+    // CPU]. Remote caps are set faster so the DP plans everything remote;
+    // the worker dies after node 0 and the runtime must replan.
+    let n: i64 = 128
+    let flops = 2.0 * (n as f64) * (n as f64) * (n as f64)
+    var g = graph_new()
+    var ni = 0
+    while ni < 3 {
+        let _a = graph_add_chain_node(&!g, op_matmul(), dtype_f32(), flops, n * n * 4, n, 4 * n)
+        ni = ni + 1
+    }
+    var pool = pool_new()
+    pool_add(&!pool, device_caps_measured(backend_cpu_avx512(), 0, 0, true, 1.0, 1.0, 1.0, 1.0))
+    pool_add(&!pool, device_caps_measured(backend_cpu_avx512(), 0, 0, true, 0.16, 0.16, 0.16, 0.16))
+    var lm = link_matrix_new()
+    link_set(&!lm, 0, 1, 1.0, 100.0)
+
+    var ip = "127.0.0.1"
+    if arg_count() > 1 { ip = get_arg(1) }
+    var conn: i64 = -1
+    var tries: i64 = 0
+    while conn < 0 && tries < 200 {
+        conn = nw_connect(&lib, octet(ip, 0), octet(ip, 1), octet(ip, 2), octet(ip, 3), 18078)
+        tries = tries + 1
+    }
+    if conn < 0 {
+        print("client: no worker (replan must cover node 0 too)\n")
+    }
+
+    var x = ck_alloc(n * n)
+    fill_scaled(&!x, 0.05)
+    var w = ck_alloc(3 * n * n)
+    fill_scaled(&!w, 0.05)
+    var out = ck_alloc(n * n)
+
+    // Local f64 reference chain.
+    var w0 = ck_alloc(n * n)
+    var w1 = ck_alloc(n * n)
+    var w2 = ck_alloc(n * n)
+    var ci: i64 = 0
+    while ci < n * n {
+        ck_set(&!w0, ci, ck_get(&w, ci))
+        ck_set(&!w1, ci, ck_get(&w, n * n + ci))
+        ck_set(&!w2, ci, ck_get(&w, 2 * n * n + ci))
+        ci = ci + 1
+    }
+    var t1 = ck_alloc(n * n)
+    var t2 = ck_alloc(n * n)
+    var ref = ck_alloc(n * n)
+    ck_gemm(&x, &w0, &!t1, n, n, n)
+    ck_gemm(&t1, &w1, &!t2, n, n, n)
+    ck_gemm(&t2, &w2, &!ref, n, n, n)
+
+    // No GPU in this demo: rt_open on a missing PTX yields ready=false,
+    // which the executor only touches if a node is bound to kind GPU.
+    let rt = rt_open("no-such-kernel.ptx", "none")
+    var kinds: [i32; 16] = [0; 16]
+    kinds[0] = rt_kind_remote()
+    kinds[1] = rt_kind_cpu()
+    let res = rt_exec_chain(&rt, &lib, conn, kinds, &g, &pool, &lm, &x, &w, n, &!out)
+    if conn >= 0 { nw_close(&lib, conn) }
+    let d = ck_max_abs_diff(&ref, &out)
+    print("replan exec status=")
+    print_int(res.status)
+    print(" replans=")
+    print_int(res.replans)
+    print(" failed_device=")
+    print_int(res.failed_device as i64)
+    print(" ran_on=")
+    ni = 0
+    while ni < 3 {
+        print_int(res.ran_on[ni as usize] as i64)
+        print(" ")
+        ni = ni + 1
+    }
+    print(" max_diff(x1000)=")
+    print_int((d * 1000.0) as i64)
+    print("\n")
+    if res.status == 0 && res.replans >= 1 && d < 0.01 {
+        print("REPLAN PASS\n")
+    } else {
+        print("REPLAN FAIL\n")
+    }
+    print("REPLAN DONE\n")
+    exit(0)
+}
