@@ -9895,6 +9895,14 @@ fn lower_opt_type_return_layout_name(opt: &Option<Box<TypeExpr>>) -> Name with M
 // Struct-type name of a parameter, unwrapping `&T` / `&!T`. Used so a method body's
 // `self.method()` (and `param.method()`) can resolve the receiver's type — params were
 // previously bound with an empty struct_type, so `self.other()` hit the body-less-fn crash.
+// `__tupN`, the parser's temporary for a destructured tuple let (tplet_temp_name
+// in parser/stmts.sio; the checker tests the same prefix,
+// checker_name_is_destructure_temp).
+fn lower_name_is_tuple_destructure_temp(n: Name) -> bool {
+    n.len > 5 && n.buf[0] == 95 as i8 && n.buf[1] == 95 as i8 && n.buf[2] == 116 as i8
+        && n.buf[3] == 117 as i8 && n.buf[4] == 112 as i8
+}
+
 fn lower_type_expr_is_box(ty: &TypeExpr) -> bool with Mut, Panic, Div {
     if (*ty).kind != TypeExprKind::TypeNamed {
         return false
@@ -14820,6 +14828,16 @@ impl Lowerer {
         if (*e).kind == ExprKind::ExprFieldAccess {
             match (*e).left {
                 Some(owner) => {
+                    // `let (a, b) = f()` reaches here as `let a = __tupN.0` (parser
+                    // desugar, stmts.sio). __tupN is a compiler temporary that holds
+                    // the tuple value and nothing else names, so its elements are
+                    // moved out, not copied. The copy doubled the arena of every
+                    // destructure of an aggregate: Madaros compiling itself has ~470
+                    // of them on hot paths, and gen3 ran its 64 GiB arena dry after
+                    // 69 of 130 modules (rc 181, #2966).
+                    if (*owner).kind == ExprKind::ExprIdent && lower_name_is_tuple_destructure_temp((*owner).name) {
+                        return (self, reg)
+                    }
                     let owner_st = self.expr_receiver_struct_type_ref(&(*owner))
                     if self.field_box_inner_type_for_struct(owner_st, (*e).name).len > 0 { return (self, reg) }
                     if self.field_option_box_inner_type_for_struct(owner_st, (*e).name).len > 0 { return (self, reg) }
