@@ -49,6 +49,135 @@ if device_barrier_relation_valid; then
 fi
 rm -f "$GRANT_FILE"
 
+# Select the barrier probe from the grant mode. Do not call the probe that
+# is required to fail: status-attached on a detached SLURM host writes
+# "expected device barrier is not attached" to stderr.
+(
+  attached_calls=0
+  detached_calls=0
+  compute_calls=0
+  attached_fail=0
+  detached_fail=0
+  device_barrier_attached() {
+    attached_calls=$((attached_calls + 1))
+    if [[ "$attached_fail" == 1 ]]; then
+      printf 'pireus-device-barrier: expected device barrier is not attached\n' >&2
+      return 42
+    fi
+    return 0
+  }
+  device_barrier_detached() {
+    detached_calls=$((detached_calls + 1))
+    if [[ "$detached_fail" == 1 ]]; then
+      printf 'pireus-device-barrier: device barrier is unexpectedly attached\n' >&2
+      return 42
+    fi
+    return 0
+  }
+  external_compute_processes_absent() {
+    compute_calls=$((compute_calls + 1))
+    return "${compute_rc:-0}"
+  }
+  external_mps_processes_absent() { return 0; }
+  external_gpu_fds_absent() { return 0; }
+  consumer_err="$(mktemp)"
+  consumer_out="$(mktemp)"
+  rc=0
+  err=''
+
+  reset_counts() {
+    attached_calls=0
+    detached_calls=0
+    compute_calls=0
+    attached_fail=0
+    detached_fail=0
+    compute_rc=0
+  }
+
+  run_consumers() {
+    rc=0
+    gpu_consumer_set_exact >"$consumer_out" 2>"$consumer_err" || rc=$?
+    err="$(cat "$consumer_err")"
+  }
+
+  expect_detached() {
+    local mode="$1"
+    reset_counts
+    if [[ -n "$mode" ]]; then
+      printf 'mode=%s\n' "$mode" > "$GRANT_FILE"
+    else
+      rm -f "$GRANT_FILE"
+    fi
+    run_consumers
+    [[ "$rc" == 0 && "$attached_calls" == 0 && "$detached_calls" == 1 && \
+       "$compute_calls" == 1 && -z "$err" ]] || {
+      printf 'host-fence-unit: mode %s called the attached probe or hid stderr (rc=%s attached=%s detached=%s compute=%s err=%s)\n' \
+        "${mode:-<empty>}" "$rc" "$attached_calls" "$detached_calls" "$compute_calls" "$err" >&2
+      exit 1
+    }
+  }
+
+  expect_detached SLURM
+  expect_detached COMMITTING_SLURM
+  expect_detached COMMITTING_K8S
+  expect_detached K8S
+  expect_detached ''
+
+  reset_counts
+  detached_fail=1
+  printf 'mode=SLURM\n' > "$GRANT_FILE"
+  run_consumers
+  [[ "$rc" == 42 && "$attached_calls" == 0 && "$detached_calls" == 1 && \
+     "$err" == 'pireus-device-barrier: device barrier is unexpectedly attached' ]] || {
+    printf 'host-fence-unit: detached failure was swallowed (rc=%s attached=%s err=%s)\n' \
+      "$rc" "$attached_calls" "$err" >&2
+    exit 1
+  }
+
+  reset_counts
+  compute_rc=1
+  printf 'mode=SLURM\n' > "$GRANT_FILE"
+  run_consumers
+  [[ "$rc" == 1 && "$attached_calls" == 0 && "$detached_calls" == 1 && \
+     "$compute_calls" == 1 && -z "$err" ]] || {
+    printf 'host-fence-unit: SLURM consumer failure did not propagate (rc=%s attached=%s compute=%s err=%s)\n' \
+      "$rc" "$attached_calls" "$compute_calls" "$err" >&2
+    exit 1
+  }
+
+  reset_counts
+  printf 'mode=FENCED\n' > "$GRANT_FILE"
+  run_consumers
+  [[ "$rc" == 0 && "$attached_calls" == 1 && "$detached_calls" == 0 && \
+     "$compute_calls" == 0 && -z "$err" ]] || {
+    printf 'host-fence-unit: FENCED did not take the attached path (rc=%s attached=%s detached=%s compute=%s err=%s)\n' \
+      "$rc" "$attached_calls" "$detached_calls" "$compute_calls" "$err" >&2
+    exit 1
+  }
+
+  reset_counts
+  attached_fail=1
+  printf 'mode=FENCED\n' > "$GRANT_FILE"
+  run_consumers
+  [[ "$rc" == 42 && "$attached_calls" == 1 && "$detached_calls" == 0 && \
+     "$err" == 'pireus-device-barrier: expected device barrier is not attached' ]] || {
+    printf 'host-fence-unit: FENCED attached failure was swallowed (rc=%s detached=%s err=%s)\n' \
+      "$rc" "$detached_calls" "$err" >&2
+    exit 1
+  }
+
+  reset_counts
+  printf 'mode=NOT_A_MODE\n' > "$GRANT_FILE"
+  run_consumers
+  [[ "$rc" == 1 && "$attached_calls" == 0 && "$detached_calls" == 0 && -z "$err" ]] || {
+    printf 'host-fence-unit: unknown grant mode probed a barrier (rc=%s attached=%s detached=%s err=%s)\n' \
+      "$rc" "$attached_calls" "$detached_calls" "$err" >&2
+    exit 1
+  }
+  rm -f "$consumer_err" "$consumer_out"
+)
+rm -f "$GRANT_FILE"
+
 systemd_root="$WORK_DIR/systemd-root"
 install -D -m 0755 "$HOST_FENCE_SCRIPT" \
   "$systemd_root/usr/local/lib/pireus/spark-pair-host-fence"
