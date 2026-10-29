@@ -16,9 +16,11 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.frontdoor.readme
 
 [English](README.md) · [Ελληνικά — ξεκινήστε εδώ](README.el.md)
 
+**Sounio (formerly Demetrios).** Sounio was previously released as Demetrios, the former name of this language.
+
 **Scientific computing with explicit uncertainty, units and effects — powered by a self-hosted compiler.**
 
-> **Research language — pre-1.0**: Sounio is an active research platform. The compiler and standard library are under development. This is not production-ready software; expect breaking changes, incomplete surfaces, and documented limitations ([KNOWN_LIMITATIONS.md](docs/compiler/KNOWN_LIMITATIONS.md)).
+> **Status: research language (pre-1.0).** APIs may change; not recommended for production use. Open limits: [KNOWN_LIMITATIONS.md](docs/compiler/KNOWN_LIMITATIONS.md).
 
 Sounio is an epistemic systems language created by **Demetrios Chiuratto Agourakis**. Its scientific abstractions and compiler are developed together: measurements carry uncertainty, quantities carry dimensions, and computations declare effects. Explore the language, the compiler and a scientific library spanning eight research domains below.
 

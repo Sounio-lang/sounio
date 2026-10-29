@@ -1,5 +1,11 @@
 export const CODE_REPOSITORY = 'https://github.com/Sounio-lang/sounio';
 
+/** Former public name of the language. Not a second language. */
+export const FORMER_LANGUAGE_NAME = 'Demetrios';
+
+/** Record URL for sameAs. This repository does not otherwise mention 18040325. */
+export const FORMER_RELEASE_URL = 'https://zenodo.org/records/18040325';
+
 export function isoDateOrNothing(value) {
   if (typeof value !== 'string') return undefined;
   const match = /^(\d{4}-\d{2}-\d{2})$/.exec(value.trim());
@@ -17,6 +23,8 @@ export function softwareApplication({ description, siteOrigin }) {
     '@context': 'https://schema.org',
     '@type': 'SoftwareApplication',
     name: 'Sounio',
+    alternateName: FORMER_LANGUAGE_NAME,
+    sameAs: [FORMER_RELEASE_URL],
     applicationCategory: 'DeveloperApplication',
     operatingSystem: 'Linux x86_64 (committed prebuilt); macOS arm64 (source-built)',
     programmingLanguage: 'Sounio',
@@ -43,6 +51,8 @@ export function softwareSourceCode() {
     '@context': 'https://schema.org',
     '@type': 'SoftwareSourceCode',
     name: 'Sounio',
+    alternateName: FORMER_LANGUAGE_NAME,
+    sameAs: [FORMER_RELEASE_URL],
     codeRepository: CODE_REPOSITORY,
     programmingLanguage: 'Sounio',
     license: 'https://opensource.org/licenses/Apache-2.0',

@@ -97,7 +97,7 @@ The claim-closure gate checks that the repo has no unregistered public claim sur
 
 ## What Must Not Be Claimed
 
-- Do not claim Sounio is production-ready as a general-purpose language.
+- Do not claim Sounio is ready for production use. The public status is: research language (pre-1.0). APIs may change; not recommended for production use.
 - Do not claim all spec sections are implemented and tested.
 - Do not claim the modular compiler tree is the checked binary source of truth until parity gates prove it.
 - Do not claim broad GPU runtime or performance support without exact hardware and gate logs.

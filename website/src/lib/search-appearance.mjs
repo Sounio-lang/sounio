@@ -1,3 +1,5 @@
+import { FORMER_LANGUAGE_NAME } from './structured-data.mjs';
+
 /**
  * English <title> and meta description for the pages that Search Console
  * showed at positions 5–7 with almost no clicks (audit 27 Oct 2026).
@@ -58,6 +60,7 @@ export const SELF_HOSTED_PAGE = {
   about: {
     '@type': 'SoftwareApplication',
     name: 'Sounio',
+    alternateName: FORMER_LANGUAGE_NAME,
   },
 };
 
