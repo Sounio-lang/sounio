@@ -69,9 +69,7 @@ FILES=(
   self-hosted/resolve/imports.sio
   self-hosted/resolve/resolve.sio
   self-hosted/resolve/mod.sio
-  self-hosted/resolve/scopes.sio
   self-hosted/resolve/modules.sio
-  self-hosted/resolve/packages.sio
 
   # ── 5. Check layer ──────────────────────────────────────────────
   self-hosted/check/types.sio
@@ -92,23 +90,11 @@ FILES=(
   self-hosted/check/infer.sio
   self-hosted/check/const_eval.sio
   self-hosted/check/traits.sio
-  self-hosted/check/macros.sio
-  self-hosted/check/lifetimes.sio
-  self-hosted/check/borrows.sio
-  self-hosted/check/monomorph.sio
   self-hosted/check/pat_decision.sio
-  self-hosted/check/type_erasure.sio
-  self-hosted/check/gadts.sio
   self-hosted/check/dependent.sio
   self-hosted/check/ownership.sio
   self-hosted/check/lint.sio
   self-hosted/check/layout.sio
-
-  # ── 6. Effects layer ────────────────────────────────────────────
-  self-hosted/effects/types.sio
-  self-hosted/effects/mod.sio
-  self-hosted/effects/checker.sio
-  self-hosted/effects/handlers.sio
 
   # ── 6b. Diagnostics engine ────────────────────────────────────
   self-hosted/diagnostics/mod.sio
@@ -122,12 +108,9 @@ FILES=(
   self-hosted/ir/lower.sio
   self-hosted/ir/normalize.sio
   self-hosted/ir/serialize.sio
-  self-hosted/ir/disasm.sio
   self-hosted/ir/verify.sio
   self-hosted/ir/optimize.sio
   self-hosted/ir/ssa.sio
-  self-hosted/ir/closure.sio
-  self-hosted/ir/dep_graph.sio
   self-hosted/ir/cfg.sio
   self-hosted/ir/inline.sio
   self-hosted/ir/async_lower.sio
@@ -139,10 +122,6 @@ FILES=(
   self-hosted/ir/egraph.sio
   self-hosted/ir/opt_cleanup.sio
   self-hosted/ir/loop_opt.sio
-  self-hosted/ir/auto_vectorize.sio
-  self-hosted/ir/memory_analysis.sio
-  self-hosted/ir/incremental.sio
-  self-hosted/ir/locality.sio
   self-hosted/ir/mod.sio
 
   # ── 8. HLIR (High-Level IR) ─────────────────────────────────────
@@ -405,9 +384,7 @@ if [ "$BOOTSTRAP_PROFILE" != "full" ]; then
     self-hosted/resolve/imports.sio
     self-hosted/resolve/resolve.sio
     self-hosted/resolve/mod.sio
-    self-hosted/resolve/scopes.sio
     self-hosted/resolve/modules.sio
-    self-hosted/resolve/packages.sio
 
     # 5. Check layer
     self-hosted/check/types.sio
@@ -428,13 +405,7 @@ if [ "$BOOTSTRAP_PROFILE" != "full" ]; then
     self-hosted/check/infer.sio
     self-hosted/check/const_eval.sio
     self-hosted/check/traits.sio
-    self-hosted/check/macros.sio
-    self-hosted/check/lifetimes.sio
-    self-hosted/check/borrows.sio
-    self-hosted/check/monomorph.sio
     self-hosted/check/pat_decision.sio
-    self-hosted/check/type_erasure.sio
-    self-hosted/check/gadts.sio
     self-hosted/check/dependent.sio
     self-hosted/check/ownership.sio
     self-hosted/check/lint.sio
@@ -446,22 +417,15 @@ if [ "$BOOTSTRAP_PROFILE" != "full" ]; then
     # 5c. Analysis layer
     self-hosted/analysis/abstract_interp.sio
 
-    # 5d. Effects checker
-    self-hosted/effects/checker.sio
-    self-hosted/effects/handlers.sio
-
     # 6. IR layer
     self-hosted/ir/ir.sio
     self-hosted/ir/algebra.sio
     self-hosted/ir/lower.sio
     self-hosted/ir/normalize.sio
     self-hosted/ir/serialize.sio
-    self-hosted/ir/disasm.sio
     self-hosted/ir/verify.sio
     self-hosted/ir/optimize.sio
     self-hosted/ir/ssa.sio
-    self-hosted/ir/closure.sio
-    self-hosted/ir/dep_graph.sio
     self-hosted/ir/cfg.sio
     self-hosted/ir/inline.sio
     self-hosted/ir/async_lower.sio
@@ -470,10 +434,6 @@ if [ "$BOOTSTRAP_PROFILE" != "full" ]; then
     self-hosted/ir/const_prop.sio
     self-hosted/ir/egraph.sio
     self-hosted/ir/loop_opt.sio
-    self-hosted/ir/auto_vectorize.sio
-    self-hosted/ir/memory_analysis.sio
-    self-hosted/ir/incremental.sio
-    self-hosted/ir/locality.sio
     self-hosted/ir/mod.sio
 
     # 7. Native codegen layer
