@@ -1672,3 +1672,20 @@ Job 19629. md5 `fdce2620e78c5173f4762e20b0468432`.
 Those sixteen words are 2.0 through 17.0. The stored word is 888.0. The inputs were not overwritten. Barriers 4 and 5 survived a fourth registration.
 
 Gate. Node `gpuorangefs-r770-proxmox`, `--gres=gpu:1`, `--mem=16G`, `--cpus-per-task=4`. The 0.0018 s threshold is not moved. This cut does not pass it.
+
+
+## 68. Nine products (2026-10-29, OBSERVED)
+
+The eighth product left the text at 480 bytes. The ninth needs two more loads and one more `FFMA`. Counted from the original 2600-byte container, the tail after the old text shifts by 272 bytes. The file is 2872 bytes. `.text` is 528 bytes, `0x210`. `e_shoff` is `0x790`. `e_phoff` is `0xa90`. The `stamp` symbol size is 528. The load of the constant bank plus the text has file size and memory size `0x3d0`. `.debug_frame` still carries the length 256. The driver loaded the image.
+
+The ninth pair reuses R4 and R6. Barriers 2 and 3 are registered a fifth time, for 18.0 and 19.0, after the seventh `FFMA` has waited on the fourth registration. The ninth `FFMA` waits on mask 12. The eighth still waits on mask 48. The store displacement is 72. `EXIT` is at pc 512, so the exit-offset attribute now uses two bytes: the low byte is 0 and the next byte is 2. The register count stays 12.
+
+The host writes the bits of 2.0 through 19.0. In f32, the nine products from 2 times 3 through 18 times 19 sum to 1230.0. The bits of 1230.0 are `0x4499c000`, which is 1150926848. The node was idle. No drain was cleared.
+
+Job 19653. md5 `0c6e3ec49cad29fd5dabdca33785d7c5`.
+
+`OWN=1073741824`, `OWN_ADD=1077936128`, `OWN_SRC=1082130432`, `OWN_WIDE=1084227584`, `OWN_EXT=1086324736`, `OWN_EXT2=1088421888`, `OWN_E8=1090519040`, `OWN_E9=1091567616`, `OWN_E10=1092616192`, `OWN_E11=1093664768`, `OWN_E12=1094713344`, `OWN_E13=1095761920`, `OWN_E14=1096810496`, `OWN_E15=1097859072`, `OWN_E16=1098907648`, `OWN_E17=1099431936`, `OWN_E18=1099956224`, `OWN_E19=1100480512`, `OWN_SUM=1150926848`, `EXIT:0`.
+
+Those eighteen words are 2.0 through 19.0. The stored word is 1230.0. The inputs were not overwritten. Barriers 2 and 3 survived a fifth registration.
+
+Gate. Node `gpuorangefs-r770-proxmox`, `--gres=gpu:1`, `--mem=16G`, `--cpus-per-task=4`. The 0.0018 s threshold is not moved. This cut does not pass it.
