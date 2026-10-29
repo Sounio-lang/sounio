@@ -1,0 +1,211 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: NUMDIFF_CHECKED_PASS
+use math::numdiff_checked::{diff_controls,diff_result,diff_summary,derivative_into,gradient_into,jacobian_into,hessian_into}
+use collections::numeric_buffer::{NumericBuffer,numeric_buffer_new,numeric_buffer_at,numeric_buffer_set,numeric_buffer_resize,numeric_buffer_close}
+use math::pure::{exp,sin}
+use io::sci_print::{println_f64_sci}
+fn scalar(x:f64,ctx:&!NumericBuffer)->f64 with Mut,Div,Panic {
+    let count=numeric_buffer_at(ctx,0)+1.0
+    numeric_buffer_set(ctx,0,count)
+    let mode=numeric_buffer_at(ctx,1)
+    if mode==0.0 {return x*x*x+2.0*x+1.0}
+    if mode==1.0 {return exp(x)}
+    if mode==2.0 {return sin(x)}
+    if mode==3.0 {return x}
+    if mode==4.0 {
+        if count>=numeric_buffer_at(ctx,2) {var z:f64=0.0;return z/z}
+        return x
+    }
+    1000.0
+}
+fn vector(x:&NumericBuffer,n:i64,y:&!NumericBuffer,m:i64,ctx:&!NumericBuffer)->i64 with Mut,Div,Panic {
+    let count=numeric_buffer_at(ctx,0)+1.0
+    numeric_buffer_set(ctx,0,count)
+    let mode=numeric_buffer_at(ctx,1)
+    if mode==2.0 {if count>=9.0 {return 17}}
+    if mode==3.0 {if count>=9.0 {numeric_buffer_set(y,0,1.0);return 0}}
+    if mode==1.0 {
+        var sum:f64=0.0
+        var value:f64=1000.0
+        var i:i64=0
+        while i<n {
+            let a=numeric_buffer_at(x,i)
+            sum=sum+a
+            value=value+((i%7+1) as f64)*a*a
+            i=i+1
+        }
+        numeric_buffer_set(y,0,value+0.125*sum*sum)
+        return 0
+    }
+    var row:i64=0
+    while row<m {
+        var value=100.0*((row+1) as f64)
+        var i:i64=0
+        while i<n {
+            let a=numeric_buffer_at(x,i)
+            value=value+((i%7+1) as f64)*a*a+((row+1) as f64)*a
+            i=i+1
+        }
+        numeric_buffer_set(y,row,value)
+        row=row+1
+    }
+    0
+}
+fn scalar_rows() with IO,Alloc,Mut,Div,Panic {
+    var ctx=numeric_buffer_new(3,24)
+    var r=diff_result()
+    let c=diff_controls(1.0e-11,1.0e-8,256)
+    var id:i64=0
+    while id<10 {
+        var mode:f64=0.0
+        var at:f64=0.0
+        var h:f64=0.125
+        if id==1 {at=1.0}
+        if id==2 {mode=1.0}
+        if id==3 {mode=1.0;at=3.0}
+        if id==4 {mode=2.0;at=0.3}
+        if id==5 {mode=2.0;at=0.0-2.0}
+        if id==6 {mode=3.0;at=1.0e-300;h=1.0e-310}
+        if id==7 {mode=3.0;at=1.0e300;h=1.0e285}
+        if id==8 {mode=3.0;at=1.0;h=3.0*(2.2204460492503131e-16/2.0)}
+        if id==9 {mode=5.0}
+        numeric_buffer_set(&!ctx,0,0.0);numeric_buffer_set(&!ctx,1,mode);numeric_buffer_set(&!ctx,2,0.0)
+        let status=derivative_into(scalar,at,h,30,&c,&!ctx,&!r)
+        assert(status==0 && r.status==0 && r.converged && r.error_available)
+        let calls:i64=r.callback_count
+        assert(numeric_buffer_at(&ctx,0)==(calls as f64))
+        print("DIFF ");print(id);print(" ");println(calls)
+        let estimate:f64=r.estimate
+        let error:f64=r.error_estimate
+        let step:f64=r.step
+        let left:f64=r.left_step
+        let right:f64=r.right_step
+        println_f64_sci(estimate,15);println_f64_sci(error,15)
+        println_f64_sci(step,15);println_f64_sci(left,15);println_f64_sci(right,15)
+        id=id+1
+    }
+    // Stale success is cleared for every refusal and failed callback.
+    numeric_buffer_set(&!ctx,0,0.0);numeric_buffer_set(&!ctx,1,0.0)
+    let short=diff_controls(0.0,0.0,4)
+    assert(derivative_into(scalar,1.0,0.125,4,&short,&!ctx,&!r)==3)
+    assert(r.callback_count==0 && r.estimate==0.0 && r.error_estimate==0.0 && !r.error_available && !r.converged)
+    assert(numeric_buffer_at(&ctx,0)==0.0)
+    assert(derivative_into(scalar,9007199254740992.0,1.0,4,&c,&!ctx,&!r)==4)
+    assert(r.callback_count==0)
+    assert(derivative_into(scalar,1.0,0.0-0.125,4,&c,&!ctx,&!r)==1)
+    var zero:f64=0.0
+    assert(derivative_into(scalar,zero/zero,0.125,4,&c,&!ctx,&!r)==1)
+    numeric_buffer_set(&!ctx,0,0.0);numeric_buffer_set(&!ctx,1,4.0);numeric_buffer_set(&!ctx,2,3.0)
+    assert(derivative_into(scalar,1.0,0.125,4,&c,&!ctx,&!r)==5)
+    assert(r.callback_count==3 && numeric_buffer_at(&ctx,0)==3.0 && r.estimate==0.0)
+    numeric_buffer_set(&!ctx,0,0.0);numeric_buffer_set(&!ctx,1,0.0)
+    let exact=diff_controls(0.0,0.0,100)
+    assert(derivative_into(scalar,1.0,0.125,2,&exact,&!ctx,&!r)==7)
+    assert(r.callback_count==5 && r.error_estimate==0.0 && !r.error_available)
+    numeric_buffer_set(&!ctx,0,0.0)
+    let five=diff_controls(0.0,0.0,5)
+    assert(derivative_into(scalar,1.0,0.125,10,&five,&!ctx,&!r)==3)
+    assert(r.callback_count==5 && numeric_buffer_at(&ctx,0)==5.0)
+    numeric_buffer_set(&!ctx,0,0.0);numeric_buffer_set(&!ctx,1,3.0)
+    let overflow_tol=diff_controls(1.7976931348623157e308,1.7976931348623157e308,20)
+    assert(derivative_into(scalar,1.0,0.125,2,&overflow_tol,&!ctx,&!r)==6)
+    let quantum=2.2250738585072014e-308/4503599627370496.0
+    numeric_buffer_set(&!ctx,0,0.0)
+    assert(derivative_into(scalar,0.0,quantum,2,&c,&!ctx,&!r)==4)
+    assert(r.callback_count==0)
+    assert(derivative_into(scalar,0.0,quantum*4.0,2,&c,&!ctx,&!r)==0)
+    assert(r.estimate==1.0 && r.callback_count==5)
+    println("DIFF_EDGE_CASES_PASS")
+    numeric_buffer_set(&!ctx,1,3.0)
+    let hot=diff_controls(0.0,0.0,5)
+    var count:i64=0
+    var checksum:f64=0.0
+    while count<1000000 {
+        numeric_buffer_set(&!ctx,0,0.0)
+        assert(derivative_into(scalar,0.5,0.125,2,&hot,&!ctx,&!r)==0)
+        assert(r.callback_count==5)
+        checksum=checksum+r.estimate
+        count=count+1
+    }
+    println("DIFF_HOT_CHECKSUM")
+    println_f64_sci(checksum,15)
+    numeric_buffer_close(ctx)
+}
+fn vector_rows(n:i64,m:i64,hessian:bool) with IO,Alloc,Mut,Div,Panic {
+    let cells=if hessian {n*n} else {n*m}
+    let scratch=if hessian {9+2*cells} else {4*m+2*cells}
+    var x=numeric_buffer_new(n,n*8)
+    var steps=numeric_buffer_new(n,n*8)
+    var sample=numeric_buffer_new(n,n*8)
+    var values=numeric_buffer_new(m,m*8)
+    var work=numeric_buffer_new(scratch,scratch*8)
+    var out=numeric_buffer_new(cells+1,(cells+1)*8)
+    var errors=numeric_buffer_new(cells+1,(cells+1)*8)
+    var ctx=numeric_buffer_new(3,24)
+    var r=diff_summary()
+    let budget:i64=if hessian {1+4*n+16*(n*(n-1)/2)} else {1+4*n}
+    let c=diff_controls(0.0,0.0,budget)
+    var i:i64=0
+    while i<n {
+        numeric_buffer_set(&!x,i,((i%5-2) as f64)/4.0)
+        numeric_buffer_set(&!steps,i,0.125)
+        i=i+1
+    }
+    i=0
+    while i<=cells {numeric_buffer_set(&!out,i,77.0);numeric_buffer_set(&!errors,i,88.0);i=i+1}
+    numeric_buffer_set(&!ctx,0,0.0);numeric_buffer_set(&!ctx,1,if hessian {1.0} else {0.0});numeric_buffer_set(&!ctx,2,0.0)
+    var status:i64=0
+    if hessian {status=hessian_into(vector,&x,&steps,n,&c,&!sample,&!values,&!work,&!out,&!errors,&!ctx,&!r)} else if m==1 {status=gradient_into(vector,&x,&steps,n,&c,&!sample,&!values,&!work,&!out,&!errors,&!ctx,&!r)} else {status=jacobian_into(vector,&x,&steps,n,m,&c,&!sample,&!values,&!work,&!out,&!errors,&!ctx,&!r)}
+    assert(status==0 && r.status==0 && r.converged)
+    assert(r.callback_count==budget && numeric_buffer_at(&ctx,0)==(budget as f64))
+    assert(numeric_buffer_at(&out,cells)==77.0 && numeric_buffer_at(&errors,cells)==88.0)
+    let kind:i64=if hessian {2} else if m==1 {0} else {1}
+    print("VECTOR ");print(kind);print(" ");print(n);print(" ");print(m);print(" ");println(budget)
+    i=0
+    while i<cells {
+        let a=numeric_buffer_at(&out,i)
+        let e=numeric_buffer_at(&errors,i)
+        println_f64_sci(a,15);println_f64_sci(e,15)
+        i=i+1
+    }
+    // Late bad step is rejected globally, before scratch/callback/public writes.
+    i=0
+    while i<cells {numeric_buffer_set(&!out,i,77.0);numeric_buffer_set(&!errors,i,88.0);i=i+1}
+    numeric_buffer_set(&!work,0,99.0)
+    numeric_buffer_set(&!steps,n-1,0.0)
+    numeric_buffer_set(&!ctx,0,0.0)
+    if hessian {status=hessian_into(vector,&x,&steps,n,&c,&!sample,&!values,&!work,&!out,&!errors,&!ctx,&!r)} else {status=jacobian_into(vector,&x,&steps,n,m,&c,&!sample,&!values,&!work,&!out,&!errors,&!ctx,&!r)}
+    assert(status==1 && r.callback_count==0 && numeric_buffer_at(&ctx,0)==0.0 && numeric_buffer_at(&work,0)==99.0)
+    numeric_buffer_set(&!steps,n-1,0.125)
+    assert(numeric_buffer_resize(&!work,scratch-1)==0)
+    if hessian {status=hessian_into(vector,&x,&steps,n,&c,&!sample,&!values,&!work,&!out,&!errors,&!ctx,&!r)} else {status=jacobian_into(vector,&x,&steps,n,m,&c,&!sample,&!values,&!work,&!out,&!errors,&!ctx,&!r)}
+    assert(status==2 && r.callback_count==0 && numeric_buffer_at(&ctx,0)==0.0 && numeric_buffer_at(&work,0)==99.0)
+    assert(numeric_buffer_resize(&!work,scratch)==0)
+    let insufficient=diff_controls(0.0,0.0,budget-1)
+    if hessian {status=hessian_into(vector,&x,&steps,n,&insufficient,&!sample,&!values,&!work,&!out,&!errors,&!ctx,&!r)} else {status=jacobian_into(vector,&x,&steps,n,m,&insufficient,&!sample,&!values,&!work,&!out,&!errors,&!ctx,&!r)}
+    assert(status==3 && r.callback_count==0 && numeric_buffer_at(&ctx,0)==0.0)
+    if hessian {status=hessian_into(vector,&x,&steps,9223372036854775807,&c,&!sample,&!values,&!work,&!out,&!errors,&!ctx,&!r)} else {status=jacobian_into(vector,&x,&steps,9223372036854775807,9223372036854775807,&c,&!sample,&!values,&!work,&!out,&!errors,&!ctx,&!r)}
+    assert(status==2 && r.callback_count==0 && numeric_buffer_at(&ctx,0)==0.0)
+    numeric_buffer_set(&!ctx,1,2.0)
+    if hessian {status=hessian_into(vector,&x,&steps,n,&c,&!sample,&!values,&!work,&!out,&!errors,&!ctx,&!r)} else {status=jacobian_into(vector,&x,&steps,n,m,&c,&!sample,&!values,&!work,&!out,&!errors,&!ctx,&!r)}
+    assert(status==5 && r.callback_status==17 && r.callback_count==9 && numeric_buffer_at(&ctx,0)==9.0)
+    i=0
+    while i<cells {assert(numeric_buffer_at(&out,i)==77.0 && numeric_buffer_at(&errors,i)==88.0);i=i+1}
+    if m>1 {
+        numeric_buffer_set(&!ctx,0,0.0);numeric_buffer_set(&!ctx,1,3.0)
+        status=jacobian_into(vector,&x,&steps,n,m,&c,&!sample,&!values,&!work,&!out,&!errors,&!ctx,&!r)
+        assert(status==5 && r.callback_count==9 && r.callback_status==0)
+        i=0
+        while i<cells {assert(numeric_buffer_at(&out,i)==77.0 && numeric_buffer_at(&errors,i)==88.0);i=i+1}
+    }
+    numeric_buffer_close(x);numeric_buffer_close(steps);numeric_buffer_close(sample);numeric_buffer_close(values);numeric_buffer_close(work);numeric_buffer_close(out);numeric_buffer_close(errors);numeric_buffer_close(ctx)
+}
+fn main()->i32 with IO,Alloc,Mut,Div,Panic {
+    scalar_rows()
+    vector_rows(257,1,false)
+    vector_rows(257,3,false)
+    vector_rows(65,1,true)
+    println("NUMDIFF_CHECKED_PASS")
+    0
+}
