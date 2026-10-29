@@ -1,0 +1,204 @@
+// Full diagnostic schema 1. A preflight refusal has no BEGIN/END pair.
+// Integer immediates and f64 payloads use two unsigned 32-bit limbs; this
+// avoids signed-minimum formatting and preserves -0 and NaN payloads exactly.
+fn native_v2_full_trace_number(value:i64) with IO {print(" ");print_int(value)}
+fn native_v2_full_trace_bits(value:i64) with IO {
+    native_v2_full_trace_number((value >> 32) & 4294967295)
+    native_v2_full_trace_number(value & 4294967295)
+}
+fn native_v2_full_trace_name(tag:string,fi:i64,ii:i64,name:Name) with IO,Mut,Panic,Div {
+    print(tag)
+    native_v2_full_trace_number(fi)
+    native_v2_full_trace_number(ii)
+    native_v2_full_trace_number(name.len)
+    var k:i64=0
+    while k<name.len {
+        native_v2_full_trace_number((name.buf[k as usize] as i64)&255)
+        k=k+1
+    }
+    print("\n")
+}
+fn native_v2_full_trace_refuse(reason:i64,fi:i64,ii:i64) with IO {
+    print("NV2_IR_FULL_REFUSED 1")
+    native_v2_full_trace_number(reason)
+    native_v2_full_trace_number(fi)
+    native_v2_full_trace_number(ii)
+    print("\n")
+}
+fn native_v2_trace_full_module_ir_ref(module:&IrModule) with IO,Mut,Panic,Div {
+    // Explicit diagnostic limits, independent of the serializer's 128-KiB
+    // image ceiling. A future increase needs a parser/gate schema review.
+    let max_instructions:i64=131072
+    let max_arguments:i64=524288
+    let float_capacity=ir_float_bits_capacity()
+    if module.fn_count<0 || module.fn_count>IR_MAX_FUNCS {
+        native_v2_full_trace_refuse(1,-1,-1);return
+    }
+    if float_capacity<=0 || float_capacity>65536 || float_capacity%32!=0 {
+        native_v2_full_trace_refuse(2,-1,-1);return
+    }
+    let float_words=float_capacity/32
+    if IR_ARG_POOL_LEN<0 || IR_ARG_POOL_LEN>ir_arg_pool_capacity() {
+        native_v2_full_trace_refuse(3,-1,-1);return
+    }
+    var total_instructions:i64=0
+    var total_arguments:i64=0
+    var total_name_bytes:i64=0
+    var fi:i64=0
+    // Validate the complete capture first. No bounded prefix is accepted.
+    while fi<module.fn_count {
+        let f=ir_fn_get(module,fi)
+        if f.instr_count<0 || f.instr_count>IR_MAX_INSTRS || !ir_reg_count_is_valid(f.reg_count) ||
+           f.label_count<0 || f.param_count<0 || f.param_count>64 ||
+           f.name.len<0 || f.name.len>384 ||
+           f.return_struct_name.len<0 || f.return_struct_name.len>384 {
+            native_v2_full_trace_refuse(4,fi,-1);return
+        }
+        if f.instr_count>max_instructions-total_instructions {
+            native_v2_full_trace_refuse(5,fi,-1);return
+        }
+        total_instructions=total_instructions+f.instr_count
+        total_name_bytes=total_name_bytes+f.name.len+f.return_struct_name.len
+        if f.instr_count>0 {
+            if ir_region_status(&f.region)!=IR_ARENA_OK ||
+               f.instr_count>ir_region_len(&f.region) || f.instr_count>ir_region_cap(&f.region) {
+                native_v2_full_trace_refuse(6,fi,-1);return
+            }
+        }
+        var pi:i64=0
+        while pi<f.param_count {
+            if f.param_regs[pi as usize]<0 || f.param_regs[pi as usize]>=f.reg_count {
+                native_v2_full_trace_refuse(4,fi,pi);return
+            }
+            pi=pi+1
+        }
+        var ii:i64=0
+        while ii<f.instr_count {
+            let slot=ir_region_slot_r(f.region,ii)
+            if slot<0 || slot>=ir_instr_arena_capacity() {
+                native_v2_full_trace_refuse(6,fi,ii);return
+            }
+            let ins=ir_arena_load(slot)
+            if ins.name_id<0 || ins.name_id>IR_NAME_POOL_COUNT || ins.name_id>IR_NAME_POOL_MAX {
+                native_v2_full_trace_refuse(7,fi,ii);return
+            }
+            let name=ir_name_at(ins.name_id)
+            if name.len<0 || name.len>384 {
+                native_v2_full_trace_refuse(7,fi,ii);return
+            }
+            total_name_bytes=total_name_bytes+name.len
+            let argc=ins.arg_count
+            let base=IR_A_ARG_BASE[slot as usize]
+            if argc<0 || argc>64 || base<0 || (argc>0 && base>IR_ARG_POOL_LEN-argc) {
+                native_v2_full_trace_refuse(8,fi,ii);return
+            }
+            if argc>max_arguments-total_arguments {
+                native_v2_full_trace_refuse(9,fi,ii);return
+            }
+            total_arguments=total_arguments+argc
+            ii=ii+1
+        }
+        fi=fi+1
+    }
+    print("NV2_IR_FULL_BEGIN 1")
+    native_v2_full_trace_number(module.fn_count)
+    native_v2_full_trace_number(total_instructions)
+    native_v2_full_trace_number(total_arguments)
+    native_v2_full_trace_number(total_name_bytes)
+    native_v2_full_trace_number(float_words)
+    native_v2_full_trace_number(IR_ARG_POOL_LEN)
+    native_v2_full_trace_number(ir_instr_arena_capacity())
+    native_v2_full_trace_number(IR_NAME_POOL_COUNT)
+    print("\n")
+    var emitted_functions:i64=0
+    var emitted_instructions:i64=0
+    var emitted_arguments:i64=0
+    var emitted_name_bytes:i64=0
+    fi=0
+    while fi<module.fn_count {
+        let f=ir_fn_get(module,fi)
+        print("NV2_IR_FULL_FN")
+        native_v2_full_trace_number(fi)
+        native_v2_full_trace_number(f.region.slot)
+        native_v2_full_trace_number(f.region.generation)
+        native_v2_full_trace_number(ir_region_status(&f.region))
+        native_v2_full_trace_number(if ir_region_is_sealed(&f.region) {1}else{0})
+        native_v2_full_trace_number(ir_region_len(&f.region))
+        native_v2_full_trace_number(ir_region_cap(&f.region))
+        native_v2_full_trace_number(f.instr_count)
+        native_v2_full_trace_number(f.reg_count)
+        native_v2_full_trace_number(f.label_count)
+        native_v2_full_trace_number(f.param_count)
+        native_v2_full_trace_number(f.compile_strategy)
+        native_v2_full_trace_number(f.returns_float)
+        native_v2_full_trace_number(f.return_kn_value_float)
+        native_v2_full_trace_number(f.return_fixed_array_len)
+        native_v2_full_trace_number(f.prof_counter_id)
+        native_v2_full_trace_number(f.hyper_algebra_kind)
+        native_v2_full_trace_number(f.is_sret)
+        native_v2_full_trace_number(f.sret_dest_reg)
+        native_v2_full_trace_number(f.bss_size)
+        native_v2_full_trace_number(f.first_param_is_ref)
+        native_v2_full_trace_number(f.f128_param_mask)
+        native_v2_full_trace_number(f.ref_struct_param_mask)
+        print("\n")
+        native_v2_full_trace_name("NV2_IR_FULL_FN_NAME",fi,-1,f.name)
+        native_v2_full_trace_name("NV2_IR_FULL_RETURN_NAME",fi,-1,f.return_struct_name)
+        emitted_name_bytes=emitted_name_bytes+f.name.len+f.return_struct_name.len
+        print("NV2_IR_FULL_PARAMS")
+        native_v2_full_trace_number(fi)
+        var k:i64=0
+        while k<64 {native_v2_full_trace_number(f.param_regs[k as usize]);k=k+1}
+        print("\nNV2_IR_FULL_FLOAT_BITS")
+        native_v2_full_trace_number(fi)
+        native_v2_full_trace_number(float_words)
+        k=0
+        while k<float_words {native_v2_full_trace_number(f.float_reg_bits[k as usize]);k=k+1}
+        print("\n")
+        var ii:i64=0
+        while ii<f.instr_count {
+            let slot=ir_region_slot_r(f.region,ii)
+            let ins=ir_arena_load(slot)
+            let exact_float_bits:i64=f64_to_bits(ins.imm_f64)
+            print("NV2_IR_FULL_INSTR")
+            native_v2_full_trace_number(fi)
+            native_v2_full_trace_number(ii)
+            native_v2_full_trace_number(slot)
+            native_v2_full_trace_number(ins.op as i64)
+            native_v2_full_trace_number(ins.dst)
+            native_v2_full_trace_number(ins.src1)
+            native_v2_full_trace_number(ins.src2)
+            native_v2_full_trace_bits(ins.imm_i64)
+            native_v2_full_trace_bits(exact_float_bits)
+            native_v2_full_trace_number(ins.label_id)
+            native_v2_full_trace_number(ins.fn_id)
+            native_v2_full_trace_number(ins.field_idx)
+            native_v2_full_trace_number(ins.imm_flags)
+            native_v2_full_trace_number(ins.bin_op as i64)
+            native_v2_full_trace_number(ins.un_op as i64)
+            native_v2_full_trace_number(ins.name_id)
+            native_v2_full_trace_number(ins.arg_count)
+            native_v2_full_trace_number(IR_A_ARG_BASE[slot as usize])
+            k=0
+            while k<ins.arg_count {
+                native_v2_full_trace_number(ir_arena_arg_at(slot,k))
+                k=k+1
+                emitted_arguments=emitted_arguments+1
+            }
+            print("\n")
+            let name=ir_name_at(ins.name_id)
+            native_v2_full_trace_name("NV2_IR_FULL_INSTR_NAME",fi,ii,name)
+            emitted_name_bytes=emitted_name_bytes+name.len
+            emitted_instructions=emitted_instructions+1
+            ii=ii+1
+        }
+        emitted_functions=emitted_functions+1
+        fi=fi+1
+    }
+    print("NV2_IR_FULL_END 1")
+    native_v2_full_trace_number(emitted_functions)
+    native_v2_full_trace_number(emitted_instructions)
+    native_v2_full_trace_number(emitted_arguments)
+    native_v2_full_trace_number(emitted_name_bytes)
+    print("\n")
+}
