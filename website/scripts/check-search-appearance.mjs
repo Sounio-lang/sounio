@@ -39,6 +39,31 @@ function decode(text) {
   return text.replace(/&(?:amp|lt|gt|quot|#39|apos);/g, decodeEntity);
 }
 
+// Drop <script>…</script> elements, including a space before the closing
+// angle bracket, so the FAQ visibility check reads the page and not the
+// JSON-LD block. A tag-shaped regular expression is the wrong tool here:
+// it misses `</script >` and a partial replace can reassemble the tag.
+function withoutScriptElements(source) {
+  const open = '<script';
+  const close = '</script';
+  const lower = source.toLowerCase();
+  let out = '';
+  let cursor = 0;
+  while (cursor < source.length) {
+    const start = lower.indexOf(open, cursor);
+    if (start < 0) return out + source.slice(cursor);
+    out += source.slice(cursor, start);
+    const openEnd = source.indexOf('>', start);
+    if (openEnd < 0) return out;
+    const endTag = lower.indexOf(close, openEnd + 1);
+    if (endTag < 0) return out;
+    const endGt = source.indexOf('>', endTag);
+    if (endGt < 0) return out;
+    cursor = endGt + 1;
+  }
+  return out;
+}
+
 function webPath(relFile) {
   const clean = relFile.split(path.sep).join('/');
   if (clean === 'index.html') return '/';
@@ -339,7 +364,7 @@ for await (const file of walk(dist)) {
     if (entities.length !== EFFECTS_FAQ.length) {
       errors.push(`${route}: FAQPage has ${entities.length} questions`);
     }
-    const visibleHtml = decode(html.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, ''));
+    const visibleHtml = decode(withoutScriptElements(html));
     EFFECTS_FAQ.forEach((item, index) => {
       const entity = entities[index];
       if (entity?.name !== item.question || entity?.acceptedAnswer?.text !== item.answer) {
