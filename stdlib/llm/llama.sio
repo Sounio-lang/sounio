@@ -18,11 +18,13 @@
 // these same functions, not a new forward.
 
 use llm::safetensors::{StFile, st_find, st_load_f64, st_read_all, st_scan_bool, st_scan_f64, st_scan_i64}
+use llm::gguf::{GgufFile, GgufTensor, gguf_byte_at, gguf_dtype_f32, gguf_find, gguf_kv_f32, gguf_kv_u32, gguf_moe_quant_for_dtype, gguf_open, gguf_row_quant_bytes}
+use tensor2::convert::f32_bits_to_f64
 use tensor2::cpu_kernel::{CpuBuf, ck_alloc, ck_gemm, ck_get, ck_set}
 use math::pure::{cos, exp, pow, sin, sqrt}
 use hetero::cuda_exec::{CudaExec}
 use hetero::runtime::{Runtime, rt_gemm_rect}
-use hetero::moe::{moe_topk, moe_ffn_q4k, moe_ffn_q5k, MoeFfnResult}
+use hetero::moe::{moe_topk, moe_ffn_q4k, moe_ffn_q5k, moe_ffn_q8_0, MoeFfnResult}
 use hetero::cublas_bench::{gb_host_f32, gb_host_get, gb_host_set}
 // Layer weight names are built with the str_concat builtin plus a
 // hand-rolled digit renderer (stdlib/str shadows the string builtins
@@ -297,6 +299,186 @@ pub fn llama_load_moe(dir: string) -> Llama with Alloc, Mut, Panic, Div {
 }
 
 
+fn ll_gguf_f32_at(raw: *mut u8, i: i64) -> f64 with Mut {
+    var bits: i64 = 0
+    let b = i * 4
+    var j: i64 = 0
+    while j < 4 {
+        bits = bits | (gguf_byte_at(raw, b + j) << (j * 8))
+        j = j + 1
+    }
+    f32_bits_to_f64(bits)
+}
+
+fn ll_gguf_load_f64(gf: &GgufFile, name: string) -> CpuBuf with Alloc, Mut, Panic, Div {
+    let t = gguf_find(gf, name)
+    if !t.found || t.dtype != gguf_dtype_f32() || (t.raw as i64) == 0 { return ll_empty() }
+    var out = ck_alloc(t.count)
+    var i: i64 = 0
+    while i < t.count {
+        write_f64(out.data, i, ll_gguf_f32_at(t.raw, i))
+        i = i + 1
+    }
+    out
+}
+
+fn ll_gguf_load_t(gf: &GgufFile, name: string) -> CpuBuf with Alloc, Mut, Panic, Div {
+    let t = gguf_find(gf, name)
+    if !t.found || t.dtype != gguf_dtype_f32() || t.rank < 2 || (t.raw as i64) == 0 {
+        return ll_empty()
+    }
+    let raw = ll_gguf_load_f64(gf, name)
+    if raw.len == 0 { return raw }
+    ll_transpose(&raw, t.dims[0], t.dims[1])
+}
+
+
+fn ll_gguf_moe_fail(msg: string) with Panic {
+    print(msg)
+    assert(false)
+}
+
+fn ll_gguf_bind_moe_layer(
+    m: &!Llama,
+    tg: GgufTensor,
+    tu: GgufTensor,
+    td: GgufTensor,
+    li: i32
+) with Mut, Panic {
+    let li_u = li as usize
+    if !tg.found && !tu.found && !td.found { return }
+    if !tg.found || !tu.found || !td.found {
+        ll_gguf_moe_fail("llama_load_gguf: incomplete MoE expert triple (gate/up/down)")
+    }
+    if (tg.raw as i64) == 0 || (tu.raw as i64) == 0 || (td.raw as i64) == 0 {
+        ll_gguf_moe_fail("llama_load_gguf: MoE expert tensor payload missing")
+    }
+    if tg.dtype != tu.dtype || tg.dtype != td.dtype {
+        ll_gguf_moe_fail("llama_load_gguf: mixed MoE expert dtypes in one layer")
+    }
+    let mq = gguf_moe_quant_for_dtype(tg.dtype)
+    if mq < 0 {
+        ll_gguf_moe_fail("llama_load_gguf: unsupported MoE expert dtype")
+    }
+    if m.cfg.moe_quant != mq {
+        ll_gguf_moe_fail("llama_load_gguf: MoE expert dtype differs across layers")
+    }
+    m.moe_gate_w[li_u] = tg.raw
+    m.moe_gate_bytes[li_u] = tg.nbytes
+    m.moe_up_w[li_u] = tu.raw
+    m.moe_up_bytes[li_u] = tu.nbytes
+    m.moe_down_w[li_u] = td.raw
+    m.moe_down_bytes[li_u] = td.nbytes
+}
+
+// Fixture KV keys (gen_tiny_mixtral_gguf.py): general.architecture, general.name,
+// llama.block_count, llama.context_length, llama.embedding_length,
+// llama.feed_forward_length, llama.attention.head_count, llama.attention.head_count_kv,
+// llama.vocab_size, llama.expert_count, llama.expert_used_count,
+// llama.rope.freq_base, llama.attention.layer_norm_rms_epsilon.
+pub fn llama_load_gguf(path: string) -> Llama with Alloc, Mut, Panic, Div {
+    let gf = gguf_open(path)
+    var cfg = LlamaCfg {
+        hidden: 0, inter: 0, layers: 0, heads: 0, kv_heads: 0, vocab: 0,
+        head_dim: 0, eps: 0.00001, theta: 10000.0, tied: false,
+        n_experts: 0, n_expert_used: 0, moe_inter: 0, moe_quant: 0, ok: false,
+    }
+    if gf.ok {
+        cfg.hidden = gguf_kv_u32(&gf, "llama.embedding_length")
+        cfg.inter = gguf_kv_u32(&gf, "llama.feed_forward_length")
+        cfg.layers = gguf_kv_u32(&gf, "llama.block_count") as i32
+        cfg.heads = gguf_kv_u32(&gf, "llama.attention.head_count")
+        cfg.kv_heads = gguf_kv_u32(&gf, "llama.attention.head_count_kv")
+        if cfg.kv_heads == 0 { cfg.kv_heads = cfg.heads }
+        cfg.vocab = gguf_kv_u32(&gf, "llama.vocab_size")
+        cfg.eps = gguf_kv_f32(&gf, "llama.attention.layer_norm_rms_epsilon")
+        cfg.theta = gguf_kv_f32(&gf, "llama.rope.freq_base")
+        if cfg.theta <= 0.0 { cfg.theta = 10000.0 }
+        cfg.n_experts = gguf_kv_u32(&gf, "llama.expert_count")
+        cfg.n_expert_used = gguf_kv_u32(&gf, "llama.expert_used_count")
+        cfg.moe_inter = cfg.inter
+        if cfg.heads > 0 { cfg.head_dim = cfg.hidden / cfg.heads }
+        cfg.ok = cfg.hidden > 0 && cfg.layers > 0 && cfg.vocab > 0
+    }
+    var m = Llama {
+        cfg: cfg, embed: ll_empty(), lm_head_t: ll_empty(), final_norm: ll_empty(),
+        wq: [ll_empty(); 64], wk: [ll_empty(); 64], wv: [ll_empty(); 64], wo: [ll_empty(); 64],
+        qb: [ll_empty(); 64], kb: [ll_empty(); 64], vb: [ll_empty(); 64],
+        gate: [ll_empty(); 64], up: [ll_empty(); 64], down: [ll_empty(); 64],
+        in_norm: [ll_empty(); 64], post_norm: [ll_empty(); 64],
+        moe_router: [ll_empty(); 64],
+        moe_gate_w: [0 as *mut u8; 64], moe_up_w: [0 as *mut u8; 64], moe_down_w: [0 as *mut u8; 64],
+        moe_gate_bytes: [0; 64], moe_up_bytes: [0; 64], moe_down_bytes: [0; 64],
+        moe_expert_stride_g: 0, moe_row_stride_g: 0,
+        moe_expert_stride_u: 0, moe_row_stride_u: 0,
+        moe_expert_stride_d: 0, moe_row_stride_d: 0,
+        last_moe_used: false, last_moe_status: 0, last_moe_layers_ok: 0, loaded: false,
+    }
+    if !cfg.ok || !gf.ok { return m }
+    let moe_active = cfg.n_experts > 0 && cfg.n_expert_used > 0
+    var moe_inter_eff = cfg.moe_inter
+    var moe_dtype: i32 = -1
+    if moe_active {
+        if moe_inter_eff <= 0 { moe_inter_eff = cfg.inter }
+        let tg0 = gguf_find(&gf, "blk.0.ffn_gate_exps.weight")
+        let tu0 = gguf_find(&gf, "blk.0.ffn_up_exps.weight")
+        let td0 = gguf_find(&gf, "blk.0.ffn_down_exps.weight")
+        if tg0.found && tu0.found && td0.found {
+            if tg0.dtype != tu0.dtype || tg0.dtype != td0.dtype {
+                ll_gguf_moe_fail("llama_load_gguf: mixed MoE expert dtypes in layer 0")
+            }
+            moe_dtype = tg0.dtype
+            let mq0 = gguf_moe_quant_for_dtype(moe_dtype)
+            if mq0 < 0 {
+                ll_gguf_moe_fail("llama_load_gguf: unsupported MoE expert dtype")
+            }
+            m.cfg.moe_quant = mq0
+        }
+        let row_g = gguf_row_quant_bytes(moe_dtype, cfg.hidden)
+        let row_u = gguf_row_quant_bytes(moe_dtype, cfg.hidden)
+        let row_d = gguf_row_quant_bytes(moe_dtype, moe_inter_eff)
+        if row_g <= 0 || row_u <= 0 || row_d <= 0 {
+            ll_gguf_moe_fail("llama_load_gguf: MoE K dims not aligned to quant block size")
+        }
+        m.moe_expert_stride_g = moe_inter_eff * row_g
+        m.moe_row_stride_g = row_g
+        m.moe_expert_stride_u = moe_inter_eff * row_u
+        m.moe_row_stride_u = row_u
+        m.moe_expert_stride_d = cfg.hidden * row_d
+        m.moe_row_stride_d = row_d
+    }
+    m.embed = ll_gguf_load_t(&gf, "token_embd.weight")
+    m.final_norm = ll_gguf_load_f64(&gf, "output_norm.weight")
+    var li: i32 = 0
+    while li < cfg.layers && li < 64 {
+        let i = li as i64
+        let bp = str_concat("blk.", ll_num(i))
+        m.in_norm[li as usize] = ll_gguf_load_f64(&gf, str_concat(bp, ".attn_norm.weight"))
+        m.post_norm[li as usize] = ll_gguf_load_f64(&gf, str_concat(bp, ".ffn_norm.weight"))
+        m.wq[li as usize] = ll_gguf_load_t(&gf, str_concat(bp, ".attn_q.weight"))
+        m.wk[li as usize] = ll_gguf_load_t(&gf, str_concat(bp, ".attn_k.weight"))
+        m.wv[li as usize] = ll_gguf_load_t(&gf, str_concat(bp, ".attn_v.weight"))
+        m.wo[li as usize] = ll_gguf_load_t(&gf, str_concat(bp, ".attn_output.weight"))
+        if moe_active {
+            m.moe_router[li as usize] = ll_gguf_load_t(&gf, str_concat(bp, ".ffn_gate_inp.weight"))
+            let tg = gguf_find(&gf, str_concat(bp, ".ffn_gate_exps.weight"))
+            let tu = gguf_find(&gf, str_concat(bp, ".ffn_up_exps.weight"))
+            let td = gguf_find(&gf, str_concat(bp, ".ffn_down_exps.weight"))
+            ll_gguf_bind_moe_layer(&!m, tg, tu, td, li)
+        }
+        li = li + 1
+    }
+    let head = ll_gguf_load_t(&gf, "output.weight")
+    if head.len == 0 {
+        m.lm_head_t = ll_transpose(&m.embed, cfg.vocab, cfg.hidden)
+    } else {
+        m.lm_head_t = ll_transpose(&head, cfg.vocab, cfg.hidden)
+    }
+    m.loaded = m.embed.len == cfg.vocab * cfg.hidden && m.final_norm.len == cfg.hidden
+    m
+}
+
+
 pub fn kv_new(m: &Llama, max_seq: i64) -> KvCache with Alloc {
     var kv = KvCache { k: [ll_empty(); 64], v: [ll_empty(); 64], len: 0, cap: max_seq }
     let kvdim = m.cfg.kv_heads * m.cfg.head_dim
@@ -377,7 +559,7 @@ fn ll_add_into(dst: &!CpuBuf, src: &CpuBuf) {
 }
 
 fn ll_no_rt() -> Runtime {
-    Runtime { exec: CudaExec { cuda: 0 as *mut u8, ok: false }, func: 0, ready: false, cvt_down: 0, cvt_up: 0, mmid_func: 0, mmid_vec_func: 0, mmid_q5k_func: 0, mmid_q5k_vec_func: 0, mmid_q8_0_func: 0, mmid_q8_0_vec_func: 0 }
+    Runtime { exec: CudaExec { cuda: 0 as *mut u8, ok: false }, func: 0, ready: false, cvt_down: 0, cvt_up: 0, mmid_func: 0, mmid_vec_func: 0, mmid_q5k_func: 0, mmid_q5k_vec_func: 0, mmid_q8_0_func: 0, mmid_q8_0_vec_func: 0, gus_q4k_func: 0, mega_q4k_func: 0, mega_q5k_func: 0, mega_q8_0_func: 0 }
 }
 
 fn ll_f64_to_f32(src: &CpuBuf, n: i64) -> *mut u8 with Alloc, Mut {
@@ -407,6 +589,8 @@ fn ll_moe_ready_layer(m: &Llama, rt: &Runtime, use_gpu: bool, ntok: i64, li: i32
     if li < 0 || li >= m.cfg.layers || li >= 64 { return false }
     if m.cfg.moe_quant == 1 {
         if rt.mmid_q5k_func == 0 || rt.mmid_q5k_vec_func == 0 { return false }
+    } else if m.cfg.moe_quant == 2 {
+        if rt.mmid_q8_0_func == 0 || rt.mmid_q8_0_vec_func == 0 { return false }
     } else {
         if rt.mmid_func == 0 || rt.mmid_vec_func == 0 { return false }
     }
@@ -642,7 +826,7 @@ pub struct LlamaMoeFfnCfg {
 
 /// One MoE FFN: top-k on router_logits then moe_ffn_q4k or moe_ffn_q5k.
 /// x_f32 / dst_f32 are f32[n_tokens * hidden]; router_logits f32[n_tokens * n_experts].
-/// Expert packs are Q4_K or Q5_K bytes (cfg.moe_quant). Dense SwiGLU path in ll_forward_impl is unchanged.
+/// Expert packs are Q4_K, Q5_K, or Q8_0 bytes (cfg.moe_quant 0/1/2). Dense SwiGLU path in ll_forward_impl is unchanged.
 pub fn llama_moe_ffn_block(
     rt: &Runtime,
     cfg: &LlamaMoeFfnCfg,
@@ -664,6 +848,19 @@ pub fn llama_moe_ffn_block(
     moe_topk(router_logits, cfg.n_tokens, cfg.n_experts, cfg.slots, ids, route_w)
     if cfg.moe_quant == 1 {
         moe_ffn_q5k(
+            rt, x_f32, cfg.hidden, cfg.n_tokens, cfg.slots,
+            ids, route_w,
+            gate_w, cfg.gate_bytes,
+            up_w, cfg.up_bytes,
+            down_w, cfg.down_bytes,
+            cfg.n_experts, cfg.inter,
+            cfg.expert_stride_g, cfg.row_stride_g,
+            cfg.expert_stride_u, cfg.row_stride_u,
+            cfg.expert_stride_d, cfg.row_stride_d,
+            dst_f32
+        )
+    } else if cfg.moe_quant == 2 {
+        moe_ffn_q8_0(
             rt, x_f32, cfg.hidden, cfg.n_tokens, cfg.slots,
             ids, route_w,
             gate_w, cfg.gate_bytes,
