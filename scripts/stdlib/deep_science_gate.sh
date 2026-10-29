@@ -470,6 +470,13 @@ fi
 record arrow-gate scripts/arrow_ipc_gate.sh "$arrow_rc"
 
 rc=0
+# SIO-93: current-main logarithm boundaries and discriminating guard control.
+# (Re-applied after the oracle-queue refactor: main now compiles
+# normalization_into_reference through the oracle queue above.)
+LN_BOUNDARY_OUT="$out/math-pure-ln-boundary" bash scripts/stdlib/math_pure_ln_boundary_gate.sh > "$out/math-pure-ln-boundary.log" 2>&1 || rc=$?
+record concordance math-pure-ln-boundary "$rc"
+
+rc=0
 sha256sum -c "$out/INPUTS.sha256" > "$out/INPUTS.verify.txt" 2>&1 || rc=$?
 record input-hashes unchanged "$rc"
 rc=0
