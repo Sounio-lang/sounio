@@ -1,0 +1,501 @@
+// Experimental final-IR component. Not wired into cleanup or code emission.
+// Whole-function CFG, must-definition and token-stack proof; no prefix proof.
+// Private bounded scratch is compiler-sequential and grants no reusable authority.
+module ir::loop_checkpoint_elision
+use ir::ir::*
+use parser::ast::*
+
+pub struct LoopCheckpointAudit {pub status:i64,pub entries:i64,pub eligible:i64,pub neutralized:i64}
+var LCE_SLOT:[i64;1024]=[0;1024]
+var LCE_SUCC0:[i64;1024]=[-1;1024]
+var LCE_SUCC1:[i64;1024]=[-1;1024]
+var LCE_LABEL:[i64;1024]=[-1;1024]
+var LCE_TOP:[i64;1024]=[-2;1024]
+var LCE_PARENT:[i64;1024]=[-2;1024]
+var LCE_QUEUE:[i64;1024]=[0;1024]
+var LCE_KIND:[i64;1024]=[0;1024]
+var LCE_OWNER:[i64;1024]=[-1;1024]
+var LCE_SAFE:[i64;1024]=[0;1024]
+var LCE_CLOSES:[i64;1024]=[0;1024]
+var LCE_TOKEN:[i64;512]=[-1;512]
+var LCE_UNIT:[i64;512]=[-1;512]
+var LCE_ZERO:[i64;512]=[0;512]
+var LCE_DEFCOUNT:[i64;512]=[0;512]
+var LCE_DEFAT:[i64;512]=[-1;512]
+var LCE_PARAM_MASK:[i64;16]=[0;16]
+var LCE_OUT:[i64;16384]=[0;16384]
+
+fn lce_audit(status:i64,entries:i64,eligible:i64)->LoopCheckpointAudit {
+ LoopCheckpointAudit {status:status,entries:entries,eligible:eligible,neutralized:0}
+}
+fn lce_binary(op:BinaryOp)->bool {
+ match op {
+  BinaryOp::OpAdd=>true,BinaryOp::OpSub=>true,BinaryOp::OpMul=>true,
+  BinaryOp::OpDiv=>true,BinaryOp::OpRem=>true,BinaryOp::OpEq=>true,
+  BinaryOp::OpNe=>true,BinaryOp::OpLt=>true,BinaryOp::OpLe=>true,
+  BinaryOp::OpGt=>true,BinaryOp::OpGe=>true,BinaryOp::OpAnd=>true,
+  BinaryOp::OpOr=>true,BinaryOp::OpBitAnd=>true,BinaryOp::OpBitOr=>true,
+  BinaryOp::OpBitXor=>true,BinaryOp::OpShl=>true,BinaryOp::OpShr=>true,
+  BinaryOp::OpUDiv=>true,BinaryOp::OpURem=>true,BinaryOp::OpUShr=>true,
+  _=>false,
+ }
+}
+fn lce_float_binary(op:BinaryOp)->bool {
+ op==BinaryOp::OpAdd || op==BinaryOp::OpSub || op==BinaryOp::OpMul || op==BinaryOp::OpDiv ||
+ op==BinaryOp::OpEq || op==BinaryOp::OpNe || op==BinaryOp::OpLt ||
+ op==BinaryOp::OpLe || op==BinaryOp::OpGt || op==BinaryOp::OpGe
+}
+fn lce_known(op:IrOpcode)->bool {
+ match op {
+  IrOpcode::IrLoadImm=>true,IrOpcode::IrLoadFloat=>true,IrOpcode::IrLoadBool=>true,
+  IrOpcode::IrLoadString=>true,IrOpcode::IrCopy=>true,IrOpcode::IrBinOp=>true,
+  IrOpcode::IrUnaryOp=>true,IrOpcode::IrIntToFloat=>true,IrOpcode::IrFloatToInt=>true,
+  IrOpcode::IrCall=>true,IrOpcode::IrReturn=>true,IrOpcode::IrJump=>true,
+  IrOpcode::IrBranchTrue=>true,IrOpcode::IrBranchFalse=>true,
+  IrOpcode::IrFieldGet=>true,IrOpcode::IrFieldSet=>true,
+  IrOpcode::IrIndexGet=>true,IrOpcode::IrIndexSet=>true,IrOpcode::IrArrayLen=>true,
+  IrOpcode::IrAlloc=>true,IrOpcode::IrLabel=>true,IrOpcode::IrNop=>true,
+  _=>false,
+ }
+}
+fn lce_def(slot:i64)->i64 {
+ let op=IR_A_OP[slot as usize] as IrOpcode
+ if op==IrOpcode::IrNop || op==IrOpcode::IrLabel || op==IrOpcode::IrJump ||
+    op==IrOpcode::IrBranchTrue || op==IrOpcode::IrBranchFalse ||
+    op==IrOpcode::IrReturn || op==IrOpcode::IrFieldSet || op==IrOpcode::IrIndexSet {return -1}
+ IR_A_DST[slot as usize]
+}
+fn lce_uses(slot:i64)->i64 {
+ let op=IR_A_OP[slot as usize] as IrOpcode
+ if op==IrOpcode::IrCall {return IR_A_ARG_COUNT[slot as usize]}
+ if op==IrOpcode::IrIndexSet {return 3}
+ if op==IrOpcode::IrBinOp || op==IrOpcode::IrFieldSet || op==IrOpcode::IrIndexGet {return 2}
+ if op==IrOpcode::IrCopy || op==IrOpcode::IrUnaryOp || op==IrOpcode::IrIntToFloat ||
+    op==IrOpcode::IrFloatToInt || op==IrOpcode::IrReturn ||
+    op==IrOpcode::IrBranchTrue || op==IrOpcode::IrBranchFalse ||
+    op==IrOpcode::IrFieldGet || op==IrOpcode::IrArrayLen {return 1}
+ 0
+}
+fn lce_use(slot:i64,k:i64)->i64 with Mut,Div,Panic {
+ if (IR_A_OP[slot as usize] as IrOpcode)==IrOpcode::IrCall {return ir_arena_arg_at(slot,k)}
+ if k==0 {return IR_A_SRC1[slot as usize]}
+ if k==1 {return IR_A_SRC2[slot as usize]}
+ IR_A_IMM_I64[slot as usize]
+}
+fn lce_call_shape(module:&IrModule,slot:i64,regs:i64)->bool with Mut,Div,Panic {
+ let argc=IR_A_ARG_COUNT[slot as usize]
+ let base=IR_A_ARG_BASE[slot as usize]
+ let target=IR_A_FN_ID[slot as usize]
+ if target<0 || target>=module.fn_count || argc<0 || argc>64 {return false}
+ if IR_ARG_POOL_LEN<0 || IR_ARG_POOL_LEN>ir_arg_pool_capacity() {return false}
+ if argc==0 {
+  return base==0 && IR_A_SRC1[slot as usize]==-1 && IR_A_SRC2[slot as usize]==-1
+ }
+ if base<0 || base>IR_ARG_POOL_LEN-argc {return false}
+ var k:i64=0
+ while k<argc {
+  let reg=ir_arena_arg_at(slot,k)
+  if reg<0 || reg>=regs {return false}
+  if k==0 && reg!=IR_A_SRC1[slot as usize] {return false}
+  if k==1 && reg!=IR_A_SRC2[slot as usize] {return false}
+  k=k+1
+ }
+ if argc==1 && IR_A_SRC2[slot as usize]!=-1 {return false}
+ true
+}
+// 0 ordinary, 1 enter, 2 scalar close, 3 keep-local, 4 leave; -1 corrupt.
+fn lce_region_kind(module:&IrModule,slot:i64)->i64 with Mut,Div,Panic {
+ let flag=IR_A_IMM_FLAGS[slot as usize]
+ if flag<64076 || flag>64079 {return 0}
+ if (IR_A_OP[slot as usize] as IrOpcode)!=IrOpcode::IrCall {return -1}
+ var name=make_name("__rgn_enter")
+ var argc:i64=0
+ var kind:i64=1
+ if flag==64077 {name=make_name("__rgn_exit_scalar");argc=2;kind=2}
+ if flag==64078 {name=make_name("@region1:keep_local");argc=2;kind=3}
+ if flag==64079 {name=make_name("__rgn_leave");argc=1;kind=4}
+ let target=IR_A_FN_ID[slot as usize]
+ let raw_float_bits:i64=f64_to_bits(IR_A_IMM_F64[slot as usize])
+ if IR_A_IMM_I64[slot as usize]!=0 || raw_float_bits!=0 || IR_A_LABEL_ID[slot as usize]!= -1 ||
+    IR_A_FIELD_IDX[slot as usize]!= -1 {return -1}
+ if target<0 || target>=module.fn_count || IR_A_ARG_COUNT[slot as usize]!=argc {return -1}
+ let callee=ir_fn_get(module,target)
+ if callee.instr_count!=0 || callee.reg_count!=0 || callee.label_count!=0 ||
+    callee.param_count!=0 || callee.compile_strategy!=0 || callee.bss_size!=0 ||
+    callee.prof_counter_id!= -1 || callee.hyper_algebra_kind!= -1 || callee.sret_dest_reg!= -1 ||
+    callee.returns_float!=0 || callee.return_kn_value_float!= -1 ||
+    callee.is_sret!=0 || callee.first_param_is_ref!=0 || callee.f128_param_mask!=0 ||
+    callee.ref_struct_param_mask!=0 || callee.return_struct_name.len!=0 ||
+    callee.return_fixed_array_len!= -1 {return -1}
+ if ir_fn_instr_count(module,target)!=0 ||
+    !ir_name_eq(ir_function_name_at(module,target),name) ||
+    !ir_name_eq(ir_name_at(IR_A_NAME_ID[slot as usize]),name) {return -1}
+ kind
+}
+fn lce_body_primitive(slot:i64)->bool {
+ let op=IR_A_OP[slot as usize] as IrOpcode
+ let flag=IR_A_IMM_FLAGS[slot as usize]
+ if op==IrOpcode::IrLoadImm || op==IrOpcode::IrLoadFloat {return flag==0}
+ if op==IrOpcode::IrLoadBool {return flag==0 && (IR_A_IMM_I64[slot as usize]==0 || IR_A_IMM_I64[slot as usize]==1)}
+ if op==IrOpcode::IrCopy {return flag==0}
+ if op==IrOpcode::IrIntToFloat || op==IrOpcode::IrFloatToInt {return flag==0}
+ if op==IrOpcode::IrBinOp {
+  let binary=IR_A_BIN_OP[slot as usize] as BinaryOp
+  if flag==0 {return lce_binary(binary)}
+  return (flag==2 || flag==4 || flag==6) && lce_float_binary(binary)
+ }
+ if op==IrOpcode::IrUnaryOp {
+  let unary=IR_A_UN_OP[slot as usize] as UnaryOp
+  return flag==0 && (unary==UnaryOp::OpNeg || unary==UnaryOp::OpNot || unary==UnaryOp::OpBitNot)
+ }
+ if op==IrOpcode::IrNop {return flag==0 || flag==64064}
+ flag==0 && (op==IrOpcode::IrLabel || op==IrOpcode::IrJump ||
+ op==IrOpcode::IrBranchTrue || op==IrOpcode::IrBranchFalse)
+}
+fn lce_in_mask(node:i64,word:i64,count:i64)->i64 with Mut,Div,Panic {
+ if node==0 {return LCE_PARAM_MASK[word as usize]}
+ var value:i64=4294967295
+ var found=false
+ var p:i64=0
+ while p<count {
+  if LCE_TOP[p as usize]!=-2 && (LCE_SUCC0[p as usize]==node || LCE_SUCC1[p as usize]==node) {
+   value=value & LCE_OUT[(p*16+word) as usize]
+   found=true
+  }
+  p=p+1
+ }
+ if !found {return 0}
+ value
+}
+pub fn loop_checkpoint_analyze_function(module:&IrModule,fi:i64)->LoopCheckpointAudit with Mut,Div,Panic {
+ if module.fn_count<0 || module.fn_count>IR_MAX_FUNCS || fi<0 || fi>=module.fn_count {return lce_audit(1,0,0)}
+ let func=ir_fn_get(module,fi)
+ let count=func.instr_count
+ let regs=func.reg_count
+ if count<=0 || count>1024 || regs<=0 || regs>512 || func.label_count<0 ||
+    func.label_count>1024 || func.param_count<0 || func.param_count>64 {return lce_audit(1,0,0)}
+ if func.compile_strategy!=0 || func.is_sret!=0 || func.first_param_is_ref!=0 ||
+    func.ref_struct_param_mask!=0 || func.f128_param_mask!=0 ||
+    func.return_kn_value_float!= -1 || func.returns_float<0 || func.returns_float>1 {return lce_audit(13,0,0)}
+ let region=func.region
+ if ir_region_status(&region)!=IR_ARENA_OK || ir_region_is_sealed(&region) ||
+    count>ir_region_len(&region) || count>ir_region_cap(&region) {return lce_audit(2,0,0)}
+ if !ir_function_regs_are_valid(&func) {return lce_audit(3,0,0)}
+ var i:i64=0
+ while i<1024 {
+  LCE_LABEL[i as usize]=-1;LCE_TOP[i as usize]=-2;LCE_PARENT[i as usize]=-2
+  LCE_KIND[i as usize]=0;LCE_OWNER[i as usize]=-1;LCE_SAFE[i as usize]=0;LCE_CLOSES[i as usize]=0
+  LCE_SUCC0[i as usize]=-1;LCE_SUCC1[i as usize]=-1
+  i=i+1
+ }
+ i=0
+ while i<512 {
+  LCE_TOKEN[i as usize]=-1;LCE_UNIT[i as usize]=-1;LCE_ZERO[i as usize]=0
+  LCE_DEFCOUNT[i as usize]=0;LCE_DEFAT[i as usize]=-1;i=i+1
+ }
+ i=0
+ while i<16 {LCE_PARAM_MASK[i as usize]=0;i=i+1}
+ i=0
+ while i<func.param_count {
+  let reg=func.param_regs[i as usize]
+  if reg<0 || reg>=regs || LCE_DEFCOUNT[reg as usize]!=0 {return lce_audit(3,0,0)}
+  LCE_DEFCOUNT[reg as usize]=1
+  let w=reg/32;let bit=1<<(reg%32)
+  LCE_PARAM_MASK[w as usize]=LCE_PARAM_MASK[w as usize]|bit
+  i=i+1
+ }
+ var entries:i64=0
+ i=0
+ while i<count {
+  let slot=ir_region_slot_r(region,i)
+  if slot<0 {return lce_audit(2,entries,0)}
+  LCE_SLOT[i as usize]=slot
+  let op=IR_A_OP[slot as usize] as IrOpcode
+  if !lce_known(op) {return lce_audit(4,entries,0)}
+  if (op==IrOpcode::IrLabel || op==IrOpcode::IrJump || op==IrOpcode::IrBranchTrue ||
+      op==IrOpcode::IrBranchFalse) && IR_A_IMM_FLAGS[slot as usize]!=0 {return lce_audit(14,entries,0)}
+  // Native-v2's -4242 LoadImm is an I/O adjacency sentinel, not a literal.
+  // Reject globally: neutralizing a neighboring call must not activate it.
+  if op==IrOpcode::IrLoadImm && IR_A_IMM_I64[slot as usize]== -4242 {return lce_audit(12,entries,0)}
+  let definition=lce_def(slot)
+  if definition>=0 {
+   LCE_DEFCOUNT[definition as usize]=LCE_DEFCOUNT[definition as usize]+1
+   LCE_DEFAT[definition as usize]=i
+  }
+  if op==IrOpcode::IrCall {
+   if !lce_call_shape(module,slot,regs) {return lce_audit(5,entries,0)}
+  }else {
+   if IR_A_ARG_COUNT[slot as usize]!=0 || IR_A_ARG_BASE[slot as usize]!=0 {return lce_audit(5,entries,0)}
+   let n=lce_uses(slot)
+   if n==0 && (IR_A_SRC1[slot as usize]!=-1 || IR_A_SRC2[slot as usize]!=-1) {return lce_audit(5,entries,0)}
+   if n==1 && IR_A_SRC2[slot as usize]!=-1 {return lce_audit(5,entries,0)}
+  }
+  let kind=lce_region_kind(module,slot)
+  if kind<0 {return lce_audit(6,entries,0)}
+  LCE_KIND[i as usize]=kind
+  if kind==1 {
+   let token=IR_A_DST[slot as usize]
+   if token<0 || token>=regs || LCE_TOKEN[token as usize]>=0 {return lce_audit(7,entries,0)}
+   LCE_TOKEN[token as usize]=i;LCE_SAFE[i as usize]=1;entries=entries+1
+  }
+  if kind>=2 && IR_A_DST[slot as usize]>=0 {
+   let result=IR_A_DST[slot as usize]
+   if LCE_UNIT[result as usize]>=0 {return lce_audit(7,entries,0)}
+   LCE_UNIT[result as usize]=i
+  }
+  if op==IrOpcode::IrLabel {
+   let id=IR_A_LABEL_ID[slot as usize]
+   if id<0 || id>=func.label_count || LCE_LABEL[id as usize]!=-1 {return lce_audit(8,entries,0)}
+   LCE_LABEL[id as usize]=i
+  }
+  i=i+1
+ }
+ // Bind every exit and every token/unit use over the entire function, including
+ // textually late and unreachable observers. Flags alone confer no authority.
+ i=0
+ while i<count {
+  let slot=LCE_SLOT[i as usize]
+  let kind=LCE_KIND[i as usize]
+  if kind>=2 {
+   let token=IR_A_SRC1[slot as usize]
+   if token<0 || token>=regs || LCE_TOKEN[token as usize]<0 {return lce_audit(7,entries,0)}
+   LCE_OWNER[i as usize]=LCE_TOKEN[token as usize]
+   if kind==2 {
+    let zero=IR_A_SRC2[slot as usize]
+    if zero<0 || zero>=regs {return lce_audit(7,entries,0)}
+    LCE_ZERO[zero as usize]=1
+   }
+  }
+  let n=lce_uses(slot);var k:i64=0
+  while k<n {
+   let reg=lce_use(slot,k)
+   if reg<0 || reg>=regs {return lce_audit(3,entries,0)}
+   if LCE_TOKEN[reg as usize]>=0 && !(kind>=2 && k==0 && LCE_OWNER[i as usize]==LCE_TOKEN[reg as usize]) {return lce_audit(7,entries,0)}
+   if LCE_UNIT[reg as usize]>=0 {return lce_audit(7,entries,0)}
+   k=k+1
+  }
+  if (IR_A_OP[slot as usize] as IrOpcode)==IrOpcode::IrNop && IR_A_DST[slot as usize]>=0 {
+   let marked=IR_A_DST[slot as usize]
+   if LCE_TOKEN[marked as usize]>=0 || LCE_UNIT[marked as usize]>=0 {return lce_audit(7,entries,0)}
+  }
+  let op=IR_A_OP[slot as usize] as IrOpcode
+  if op!=IrOpcode::IrReturn {
+   if i+1>=count && op!=IrOpcode::IrJump {return lce_audit(8,entries,0)}
+   if op!=IrOpcode::IrJump {LCE_SUCC0[i as usize]=i+1}
+  }
+  if op==IrOpcode::IrJump || op==IrOpcode::IrBranchTrue || op==IrOpcode::IrBranchFalse {
+   let id=IR_A_LABEL_ID[slot as usize]
+   if id<0 || id>=func.label_count || LCE_LABEL[id as usize]<0 {return lce_audit(8,entries,0)}
+   if op==IrOpcode::IrJump {LCE_SUCC0[i as usize]=LCE_LABEL[id as usize]}
+   else {LCE_SUCC1[i as usize]=LCE_LABEL[id as usize]}
+  }
+  i=i+1
+ }
+ i=0
+ while i<regs {
+  if LCE_TOKEN[i as usize]>=0 || LCE_UNIT[i as usize]>=0 || LCE_ZERO[i as usize]!=0 {
+   if LCE_DEFCOUNT[i as usize]!=1 || ir_float_bits_get(&func,i) {return lce_audit(7,entries,0)}
+  }
+  if LCE_ZERO[i as usize]!=0 {
+   let at=LCE_DEFAT[i as usize]
+   if at<0 {return lce_audit(7,entries,0)}
+   let slot=LCE_SLOT[at as usize]
+   if (IR_A_OP[slot as usize] as IrOpcode)!=IrOpcode::IrLoadImm || IR_A_IMM_I64[slot as usize]!=0 ||
+      IR_A_IMM_FLAGS[slot as usize]!=0 {return lce_audit(7,entries,0)}
+  }
+  i=i+1
+ }
+ // Unit scalar operands also have no observers anywhere in the function.
+ i=0
+ while i<count {
+  let slot=LCE_SLOT[i as usize]
+  let n=lce_uses(slot)
+  let op=IR_A_OP[slot as usize] as IrOpcode
+  let marked=IR_A_DST[slot as usize]
+  if op==IrOpcode::IrNop && marked>=0 && LCE_ZERO[marked as usize]!=0 {return lce_audit(7,entries,0)}
+  var k:i64=0
+  while k<n {
+   let reg=lce_use(slot,k)
+   if LCE_ZERO[reg as usize]!=0 && !(LCE_KIND[i as usize]==2 && k==1) {return lce_audit(7,entries,0)}
+   k=k+1
+  }
+  i=i+1
+ }
+ // A unique stack state must reach every CFG join. Revisiting an entry while
+ // still active, mismatched exits, unclosed returns and jump-in paths refuse.
+ var front:i64=0;var back:i64=1
+ LCE_QUEUE[0]=0;LCE_TOP[0]=-1
+ while front<back {
+  let at=LCE_QUEUE[front as usize];front=front+1
+  let slot=LCE_SLOT[at as usize]
+  let kind=LCE_KIND[at as usize]
+  var top=LCE_TOP[at as usize]
+  if kind==1 {
+   var ancestor=top
+   while ancestor>=0 {
+    if ancestor==at {return lce_audit(9,entries,0)}
+    ancestor=LCE_PARENT[ancestor as usize]
+   }
+   if LCE_PARENT[at as usize]!=-2 && LCE_PARENT[at as usize]!=top {return lce_audit(9,entries,0)}
+   LCE_PARENT[at as usize]=top;top=at
+  }else {
+   if kind>=2 {
+    if top<0 || LCE_OWNER[at as usize]!=top {return lce_audit(9,entries,0)}
+    if kind==3 {
+     // Keep-local may refer to aggregate roots. No scalar-origin proof in MVP.
+     var ancestor=top
+     while ancestor>=0 {LCE_SAFE[ancestor as usize]=0;ancestor=LCE_PARENT[ancestor as usize]}
+    }else {
+     LCE_CLOSES[top as usize]=LCE_CLOSES[top as usize]+1
+     top=LCE_PARENT[top as usize]
+    }
+   }else {
+    if top>=0 && !lce_body_primitive(slot) {
+     var ancestor=top
+     while ancestor>=0 {LCE_SAFE[ancestor as usize]=0;ancestor=LCE_PARENT[ancestor as usize]}
+    }
+   }
+  }
+  if (IR_A_OP[slot as usize] as IrOpcode)==IrOpcode::IrReturn && top>=0 {return lce_audit(9,entries,0)}
+  var edge:i64=0
+  while edge<2 {
+   let next=if edge==0 {LCE_SUCC0[at as usize]}else{LCE_SUCC1[at as usize]}
+   if next>=0 {
+    if LCE_TOP[next as usize]==-2 {
+     if back>=1024 {return lce_audit(1,entries,0)}
+     LCE_TOP[next as usize]=top;LCE_QUEUE[back as usize]=next;back=back+1
+    }else {if LCE_TOP[next as usize]!=top {return lce_audit(9,entries,0)}}
+   }
+   edge=edge+1
+  }
+ }
+ i=0
+ while i<count {
+  if LCE_KIND[i as usize]>0 && LCE_TOP[i as usize]==-2 {return lce_audit(9,entries,0)}
+  i=i+1
+ }
+ // Must-defined forward fixpoint over all reachable instructions. Every source
+ // must be defined on every incoming path; backedges never invent definitions.
+ let words=(regs+31)/32
+ i=0
+ while i<count {
+  var w:i64=0
+  while w<words {LCE_OUT[(i*16+w) as usize]=4294967295;w=w+1}
+  i=i+1
+ }
+ var changed=true;var rounds:i64=0
+ while changed {
+  if rounds>count+1 {return lce_audit(10,entries,0)}
+  changed=false;rounds=rounds+1;i=0
+  while i<count {
+   if LCE_TOP[i as usize]!=-2 {
+    let definition=lce_def(LCE_SLOT[i as usize])
+    var w:i64=0
+    while w<words {
+     var value=lce_in_mask(i,w,count)
+     if definition>=0 && definition/32==w {value=value|(1<<(definition%32))}
+     let position=i*16+w
+     if LCE_OUT[position as usize]!=value {LCE_OUT[position as usize]=value;changed=true}
+     w=w+1
+    }
+   }
+   i=i+1
+  }
+ }
+ i=0
+ while i<count {
+  let slot=LCE_SLOT[i as usize]
+  if LCE_TOP[i as usize]!=-2 {
+   let n=lce_uses(slot);var k:i64=0
+   while k<n {
+    let reg=lce_use(slot,k)
+    if (lce_in_mask(i,reg/32,count)&(1<<(reg%32)))==0 {return lce_audit(10,entries,0)}
+    if LCE_ZERO[reg as usize]!=0 && !(LCE_KIND[i as usize]==2 && k==1) {return lce_audit(7,entries,0)}
+    k=k+1
+   }
+  }
+  i=i+1
+ }
+ var eligible:i64=0;i=0
+ while i<count {
+  if LCE_KIND[i as usize]==1 && LCE_SAFE[i as usize]==1 {
+   if LCE_CLOSES[i as usize]<=0 {return lce_audit(9,entries,0)}
+   eligible=eligible+1
+  }
+  i=i+1
+ }
+ lce_audit(0,entries,eligible)
+}
+// Compare all arena columns, including flat argument-pool identity. This is a
+// transaction guard on cloning, never a substitute for the semantic proof.
+fn lce_same_slot(a:i64,b:i64)->bool with Mut,Div,Panic {
+ let av=ir_arena_load(a);let bv=ir_arena_load(b)
+ let af:i64=f64_to_bits(av.imm_f64);let bf:i64=f64_to_bits(bv.imm_f64)
+ av.op==bv.op && av.dst==bv.dst && av.src1==bv.src1 && av.src2==bv.src2 &&
+ av.imm_i64==bv.imm_i64 && af==bf && av.label_id==bv.label_id &&
+ av.fn_id==bv.fn_id && av.field_idx==bv.field_idx && av.imm_flags==bv.imm_flags &&
+ av.bin_op==bv.bin_op && av.un_op==bv.un_op && av.name_id==bv.name_id &&
+ av.arg_count==bv.arg_count && IR_A_ARG_BASE[a as usize]==IR_A_ARG_BASE[b as usize]
+}
+// Public analysis returns counts only. Applying reproves current IR, clones
+// ONLY the target region offline, preserves full per-slot arguments, and
+// publishes only after successful neutralization. Unknown aliases stay intact.
+pub fn loop_checkpoint_elide_function(module:&!IrModule,fi:i64)->LoopCheckpointAudit with Mut,Div,Panic {
+ var audit=loop_checkpoint_analyze_function(&(*module),fi)
+ if audit.status!=0 || audit.eligible==0 {return audit}
+ var func=ir_fn_get(&(*module),fi)
+ let region=func.region
+ let count=func.instr_count
+ var owned=ir_region_invalid()
+ if ir_region_clone(&region,&!owned)!=IR_ARENA_OK {return lce_audit(2,audit.entries,0)}
+ var i:i64=0
+ while i<count {
+  let original=ir_region_slot_r(region,i)
+  let target=ir_region_slot_w(owned,i)
+  if original!=LCE_SLOT[i as usize] || target<0 {return lce_audit(2,audit.entries,0)}
+  let instruction=ir_arena_load(original)
+  ir_arena_store_from(target,instruction,original)
+  if !lce_same_slot(original,target) {return lce_audit(2,audit.entries,0)}
+  i=i+1
+ }
+ i=0
+ while i<count {
+  let kind=LCE_KIND[i as usize]
+  let owner=if kind==1 {i}else{LCE_OWNER[i as usize]}
+  if kind>0 && owner>=0 && LCE_SAFE[owner as usize]==1 {
+   let slot=ir_region_slot_w(owned,i)
+   let dst=IR_A_DST[LCE_SLOT[i as usize] as usize]
+   if dst>=0 {ir_arena_store(slot,ir_load_imm(dst,0))}
+   else {ir_arena_store(slot,ir_nop())}
+   audit.neutralized=audit.neutralized+1
+  }
+  i=i+1
+ }
+ if ir_instr_arena_violation() {return lce_audit(2,audit.entries,0)}
+ func.region=owned
+ ir_fn_set(module,fi,func)
+ audit
+}
+
+pub struct LoopCheckpointModuleAudit {
+ pub status:i64,pub functions:i64,pub refused:i64,pub entries:i64,
+ pub eligible:i64,pub neutralized:i64
+}
+// Aggregate diagnostics only: no reusable certificate and no region handle
+// escapes. Each function is freshly proved immediately before its transaction.
+pub fn loop_checkpoint_elide_module(module:&!IrModule)->LoopCheckpointModuleAudit with Mut,Div,Panic {
+ var summary=LoopCheckpointModuleAudit {status:0,functions:0,refused:0,entries:0,eligible:0,neutralized:0}
+ if module.fn_count<0 || module.fn_count>IR_MAX_FUNCS {summary.status=1;return summary}
+ let count=module.fn_count
+ var fi:i64=0
+ while fi<count {
+  let audit=loop_checkpoint_elide_function(module,fi)
+  summary.functions=summary.functions+1
+  if audit.status!=0 {summary.refused=summary.refused+1}
+  summary.entries=summary.entries+audit.entries
+  summary.eligible=summary.eligible+audit.eligible
+  summary.neutralized=summary.neutralized+audit.neutralized
+  fi=fi+1
+ }
+ summary
+}

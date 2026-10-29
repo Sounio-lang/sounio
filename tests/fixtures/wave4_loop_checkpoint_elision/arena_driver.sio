@@ -1,0 +1,98 @@
+// Artifact driver, not a compiler hook. Uses the public production frontend,
+// existing SOIR serializer, complete supplemental arena dump, and native writer.
+use compiler::module_frontend::{load_multimodule_ir}
+use ir::ir::*
+use ir::lower::{lower_rgn_backend_opt_in}
+use ir::serialize::{serialize_ir_module_ref}
+use ir::loop_checkpoint_elision::{loop_checkpoint_analyze_function,loop_checkpoint_elide_function}
+use native::codegen_x86_linux::{compile_native_v2_preview_to_file,native_resolve_target}
+use parser::ast::*
+fn number(value:i64) with IO {print(" ");print_int(value)}
+fn name_bytes(tag:string,fi:i64,ii:i64,name:Name) with IO,Mut,Div,Panic {
+ print(tag);number(fi);number(ii);number(name.len)
+ var k:i64=0
+ while k<name.len {number((name.buf[k as usize] as i64)&255);k=k+1}
+ print("\n")
+}
+fn dump_arena(module:&IrModule,phase:string) with IO,Mut,Div,Panic,Alloc {
+ print("LCE_DUMP ");print(phase);number(module.fn_count);print("\n")
+ var fi:i64=0
+ while fi<module.fn_count {
+  let f=ir_fn_get(module,fi)
+  print("LCE_FN");number(fi);number(f.instr_count);number(f.reg_count);number(f.label_count)
+  number(f.param_count);number(f.compile_strategy);number(f.returns_float);number(f.return_kn_value_float)
+  number(f.return_fixed_array_len);number(f.prof_counter_id);number(f.hyper_algebra_kind)
+  number(f.is_sret);number(f.sret_dest_reg);number(f.bss_size);number(f.first_param_is_ref)
+  number(f.f128_param_mask);number(f.ref_struct_param_mask);print("\n")
+  name_bytes("LCE_FN_NAME",fi,-1,f.name)
+  name_bytes("LCE_RETURN_NAME",fi,-1,f.return_struct_name)
+  print("LCE_PARAMS");number(fi)
+  var k:i64=0
+  while k<64 {number(f.param_regs[k as usize]);k=k+1}
+  print("\nLCE_FLOAT_BITS");number(fi);k=0
+  while k<64 {number(f.float_reg_bits[k as usize]);k=k+1}
+  print("\n")
+  var i:i64=0
+  while i<f.instr_count {
+   let slot=ir_region_slot_r(f.region,i)
+   let ins=ir_arena_load(slot)
+   let bits:i64=f64_to_bits(ins.imm_f64)
+   print("LCE_IR");number(fi);number(i);number(ins.op as i64);number(ins.dst);number(ins.src1);number(ins.src2)
+   number(ins.imm_i64);number(bits);number(ins.label_id);number(ins.fn_id);number(ins.field_idx);number(ins.imm_flags)
+   number(ins.bin_op as i64);number(ins.un_op as i64);number(ins.name_id);number(ins.arg_count)
+   number(IR_A_ARG_BASE[slot as usize])
+   k=0
+   while k<ins.arg_count {number(ir_arena_arg_at(slot,k));k=k+1}
+   print("\n")
+   name_bytes("LCE_INSTR_NAME",fi,i,ir_name_at(ins.name_id))
+   i=i+1
+  }
+  fi=fi+1
+ }
+ print("LCE_DUMP_END ");print(phase);print("\n")
+}
+fn serializer_receipt(module:&IrModule) with IO,Mut,Div,Panic,Alloc {
+ var image:[i8;131072]=[0;131072]
+ var size:i64=0
+ serialize_ir_module_ref(module,&!image,&!size)
+ print("LCE_SOIR_SIZE");number(size);print("\n")
+ if size>0 {
+  var i:i64=0
+  while i<size {print("LCE_SOIR_BYTE");number(i);number((image[i as usize] as i64)&255);print("\n");i=i+1}
+ }else {println("LCE_SOIR_REFUSED_SUPPLEMENTAL_ARENA_RETAINED")}
+}
+fn main()->i32 with IO,Mut,Div,Panic,Alloc {
+ if arg_count()!=3 {return 64}
+ let path=get_arg(0)
+ let output=get_arg(1)
+ let mode=get_arg(2)
+ let apply=str_eq(mode,"apply")
+ if !apply && !str_eq(mode,"before") {return 64}
+ lower_rgn_backend_opt_in()
+ let loaded=load_multimodule_ir(path)
+ if !loaded.ok {print("LCE_FRONTEND_REFUSED ");println(loaded.error_msg);return 2}
+ var module=loaded.module
+ dump_arena(&(*module),"before")
+ serializer_receipt(&(*module))
+ var fi:i64=0
+ var seen:i64=0
+ while fi<module.fn_count {
+  let name=ir_function_name_at(&(*module),fi)
+  if ir_name_eq(name,make_name("wide_core_literal")) || ir_name_eq(name,make_name("wide_core_hoist")) {
+   let audit=if apply {loop_checkpoint_elide_function(&!(*module),fi)}
+             else {loop_checkpoint_analyze_function(&(*module),fi)}
+   print("LCE_AUDIT");number(fi);number(audit.status);number(audit.entries);number(audit.eligible);number(audit.neutralized);print("\n")
+   seen=seen+1
+  }
+  fi=fi+1
+ }
+ if seen!=2 {println("LCE_KERNEL_SELECTION_REFUSED");return 3}
+ dump_arena(&(*module),"after")
+ let sealed=ir_module_seal_functions(&(*module))
+ if sealed<0 || ir_instr_arena_violation() {return 4}
+ let target=native_resolve_target("x86_64-linux","auto",true)
+ let result=compile_native_v2_preview_to_file(&(*module),target,output)
+ if result!=0 {return result}
+ println("LOOP_CHECKPOINT_PRODUCTION_COMPONENT_ONLY_OK")
+ 0
+}
