@@ -1,0 +1,43 @@
+//@ run-pass
+//@ expect-stdout: NATIVE_CERTIFIED_F64_POOL_OK
+use ffi::platform::{PlatformValue,platform_open,platform_status,platform_call,platform_close}
+use thread::native_pool::{native_pool_reservation}
+use thread::native_pool_f64::{NativePoolF64Result,native_pool_f64_new,native_pool_f64_status,native_pool_f64_submit_into,native_pool_f64_result_into,native_pool_f64_shutdown,native_pool_f64_join,native_pool_f64_close}
+fn identity(x:f64)->f64 {x}
+fn half(x:f64)->f64 {x*0.5}
+fn main()->i32 with IO,Alloc,Mut,Div,Panic {
+ let p=platform_open()
+ assert(platform_status(&p)==0)
+ let budget=native_pool_reservation(&p,2,4)
+ assert(budget.status==0)
+ var pool=native_pool_f64_new(&p,worker_fn_f64(identity),2,4,budget.value)
+ assert(native_pool_f64_status(&pool)==0)
+ var bits:[i64;4]=[0,0-9223372036854775807-1,4602678819172646912,9221120237041090626]
+ var task=PlatformValue {value:0,status:0}
+ var result=NativePoolF64Result {task_id:0,value:0.0,status:0}
+ var i:i64=0
+ while i<10000 {
+  native_pool_f64_submit_into(&p,&!pool,bits_to_f64(bits[(i%4) as usize]),5000,&!task)
+  assert(task.status==0 && task.value==i)
+  native_pool_f64_result_into(&p,&!pool,task.value,5000,&!result)
+  assert(result.status==0 && result.task_id==i)
+  assert(f64_to_bits(result.value)==bits[(i%4) as usize])
+  i=i+1
+ }
+ assert(native_pool_f64_shutdown(&p,&!pool,false).status==0)
+ assert(native_pool_f64_join(&p,&!pool)==0)
+ assert(native_pool_f64_close(&p,pool)==0)
+ var second=native_pool_f64_new(&p,worker_fn_f64(half),2,4,budget.value)
+ assert(native_pool_f64_status(&second)==0)
+ native_pool_f64_submit_into(&p,&!second,1.0,5000,&!task)
+ assert(task.status==0)
+ native_pool_f64_result_into(&p,&!second,task.value,5000,&!result)
+ assert(result.status==0 && f64_to_bits(result.value)==f64_to_bits(0.5))
+ assert(native_pool_f64_shutdown(&p,&!second,false).status==0)
+ assert(native_pool_f64_join(&p,&!second)==0)
+ assert(native_pool_f64_close(&p,second)==0)
+ assert(platform_call(&p,3,0,0,0,0).value==0)
+ platform_close(p)
+ println("NATIVE_CERTIFIED_F64_POOL_OK")
+ return 0
+}

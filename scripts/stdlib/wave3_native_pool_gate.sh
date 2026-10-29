@@ -18,6 +18,8 @@ mkdir "$OUT"
 mkdir "$OUT/inputs" "$OUT/runs"
 printf '%s\n' "$AUTHORITY" > "$OUT/EXECUTION_AUTHORITY"
 CXX=${CXX:-g++}
+TIME_BIN=${TIME_BIN:-/usr/bin/time}
+[[ "$TIME_BIN" == /* && -x "$TIME_BIN" ]] || exit 64
 WRAPPER="$ROOT/scripts/ci/souc-native-wrapper.sh"
 export SOUC_NATIVE_BIN="$RAW" SOUNIO_SOUC_BIN="$RAW" SOUNIO_SOUC_RAW_MODE=modular SOUNIO_STDLIB_PATH="$ROOT/stdlib"
 export SOUNIO_MADAROS_NOCACHE=1 SOUNIO_MADAROS_CACHE_READONLY=1
@@ -41,7 +43,7 @@ trap finish EXIT
  find stdlib tests/stdlib/wave3-native-pool -type f -print0
  printf '%s\0' tests/stdlib/massive/test_csv_stream.sio tests/stdlib/massive/test_deadline_socket.sio runtime/stdlib_platform.cpp scripts/stdlib/wave3_native_pool_gate.sh scripts/ci/souc-native-wrapper.sh tests/reference/wave3_native_pool_reference.cpp tests/reference/wave3_adc_pipeline_reference.cpp
 ) | sort -zu | while IFS= read -r -d '' p;do sha256sum "$ROOT/$p";done > "$OUT/SOURCES.sha256"
-sha256sum "$RAW" "$(command -v "$CXX")" "$SDK/lib/x86_64-linux-gnu/libarrow.so.2600.0.0" > "$OUT/TOOLS.sha256"
+sha256sum "$RAW" "$TIME_BIN" "$(command -v "$CXX")" "$SDK/lib/x86_64-linux-gnu/libarrow.so.2600.0.0" > "$OUT/TOOLS.sha256"
 "$CXX" --version > "$OUT/CXX_VERSION"
 printf 'case\tphase\tstatus\n' > "$OUT/RESULTS.tsv"
 : > "$OUT/EXECUTABLES.sha256"
@@ -69,7 +71,11 @@ for tool in "$(command -v "$CXX")" "$("$CXX" -print-prog-name=cc1plus)" "$("$CXX
  if [[ "$tool" != */* ]];then tool=$(command -v "$tool");fi
  tool=$(realpath -e "$tool")
  sha256sum "$tool" >> "$OUT/TOOLS.sha256"
- ldd "$tool" >> "$OUT/CXX_TOOLS.ldd"
+ if [[ $(od -An -tx1 -N4 "$tool"|tr -d ' \n') == 7f454c46 ]];then
+  ldd "$tool" >> "$OUT/CXX_TOOLS.ldd"
+ elif [[ $(head -c 2 "$tool") == '#!' ]];then
+  printf 'HASHED_SCRIPT_DRIVER %s\n' "$tool" >> "$OUT/CXX_TOOLS.ldd"
+ else echo "unsupported compiler tool format: $tool" >&2;exit 1;fi
 done
 ! grep -q 'not found' "$OUT/CXX_TOOLS.ldd"
 awk '/=> \//{print $3} /^[[:space:]]*\//{print $1}' "$OUT/CXX_TOOLS.ldd" | sort -u | xargs -r sha256sum > "$OUT/DYNAMIC.sha256"
@@ -118,7 +124,7 @@ for variant in one two four scale;do
  [[ $variant != scale ]] || rows=1000000
  phase "$variant" generate 60 "$OUT/adc-reference" generate "$OUT/runs/$variant" "$rows"
  sha256sum "$OUT/runs/$variant/input.csv" >> "$OUT/INPUTS.sha256"
- (cd "$OUT/runs/$variant";phase "$variant" native 600 /usr/bin/time -v -o "$OUT/$variant.resource" "$OUT/$variant.elf")
+ (cd "$OUT/runs/$variant";phase "$variant" native 600 "$TIME_BIN" -v -o "$OUT/$variant.resource" "$OUT/$variant.elf")
  grep -Fxq ADC_PIPELINE_RESOURCES_CLOSED "$OUT/$variant.native.stdout"
  grep -Fxq ADC_CSV_ARROW_OK "$OUT/$variant.native.stdout"
  phase "$variant" verify 120 "$OUT/adc-reference" verify "$OUT/runs/$variant/input.csv" "$OUT/runs/$variant/output.arrow"
@@ -190,11 +196,21 @@ phase double-close check-refusal 300 bash "$WRAPPER" check "$ROOT/tests/stdlib/w
 [[ $r != 0 ]]
 grep -Eq 'E039' "$OUT/double-close.check-refusal."{stdout,stderr}
 cp "$ROOT/tests/stdlib/wave3-native-pool/captured_callback.sio.in" "$OUT/inputs/captured_callback.sio"
-phase captured check 300 bash "$WRAPPER" check "$OUT/inputs/captured_callback.sio"
-r=0
-phase captured compile-refusal 600 bash "$WRAPPER" compile "$OUT/inputs/captured_callback.sio" -o "$OUT/captured.elf" || r=$?
-[[ $r != 0 && ! -s "$OUT/captured.elf" ]]
-grep -Eq '^error: a capturing closure' "$OUT/captured.compile-refusal."{stdout,stderr}
+sha256sum "$OUT/inputs/captured_callback.sio" >> "$OUT/INPUTS.sha256"
+for mode in check compile;do
+ r=0
+ if [[ $mode == check ]];then
+  phase captured check-refusal 300 bash "$WRAPPER" check "$OUT/inputs/captured_callback.sio" || r=$?
+  log="$OUT/captured.check-refusal"
+ else
+  phase captured compile-refusal 600 bash "$WRAPPER" compile "$OUT/inputs/captured_callback.sio" -o "$OUT/captured.elf" || r=$?
+  log="$OUT/captured.compile-refusal"
+ fi
+ [[ $r == 1 && ! -e "$OUT/captured.elf" ]]
+ cat "$log.stdout" "$log.stderr" > "$log.diagnostics"
+ ! grep -Eq 'E137|PARSE_REFUSED|parse error|unknown identifier' "$log.diagnostics"
+ grep -Eq 'WorkerFn capability refused: constructor requires a named function item' "$log.diagnostics"
+done
 
 
 # Replay original strict CSV bytes/Unicode/quoting with path-only relocation.
@@ -227,7 +243,7 @@ tcp_run(){
  mkdir "$OUT/runs/$name"
  cp "$input" "$OUT/runs/$name/input.csv"
  sha256sum "$OUT/runs/$name/input.csv" >> "$OUT/INPUTS.sha256"
- (cd "$OUT/runs/$name";phase "$name" native 180 /usr/bin/time -v -o "$OUT/$name.resource" "$elf") &
+ (cd "$OUT/runs/$name";phase "$name" native 180 "$TIME_BIN" -v -o "$OUT/$name.resource" "$elf") &
  local producer=$!
  for attempt in {1..250};do
   if grep -Fxq TCP_LISTENING "$OUT/$name.native.stdout" 2>/dev/null;then

@@ -1,0 +1,51 @@
+//@ run-pass
+//@ expect-stdout: NORMAL_TCP_ARROW_OK
+use ffi::platform::{platform_open,platform_status,platform_call,platform_close}
+use io::native_file::{native_file_from_tcp,native_file_status}
+use net::native::{native_tcp_listen,native_tcp_connect,native_tcp_accept,native_socket_port,native_socket_status,native_socket_send_all_until,native_socket_receive,native_socket_shutdown,native_socket_close}
+use collections::byte_buffer::{ByteBuffer,byte_buffer_new,byte_buffer_push,byte_buffer_len,byte_buffer_close}
+use thread::native_pool::{native_pool_reservation}
+use science::normal_pipeline::{NormalPipelineConfig,normal_reader_to_arrow}
+fn bytes(s:string)->ByteBuffer with Alloc,Mut,Div,Panic {
+ var b=byte_buffer_new(4096)
+ var i:i64=0
+ while i<str_len(s){assert(byte_buffer_push(&!b,str_char_at(s,i))==0);i=i+1}
+ return b
+}
+fn main()->i32 with IO,Alloc,Mut,Div,Panic {
+ let p=platform_open()
+ assert(platform_status(&p)==0)
+ let listener=native_tcp_listen(&p,2130706433,0,4)
+ assert(native_socket_status(&listener)==0)
+ let port=native_socket_port(&p,&listener)
+ assert(port.status==0)
+ println("TCP_LISTENING")
+ println(port.value)
+ let server=native_tcp_accept(&p,&listener,5000)
+ assert(native_socket_status(&server)==0)
+ let deadline=platform_call(&p,30,0,0,0,0).value+180000000000
+ let reader=native_file_from_tcp(&p,&server,deadline,33554432)
+ assert(native_file_status(&reader)==0)
+ var probe=byte_buffer_new(1)
+ assert(native_socket_receive(&p,&server,&!probe,1,0).status==16)
+ byte_buffer_close(probe)
+ assert(native_socket_close(&p,server)==0)
+ assert(native_socket_close(&p,listener)==0)
+ let output=bytes("output.arrow")
+ let budget=native_pool_reservation(&p,1,16)
+ let cfg=NormalPipelineConfig {parallel:true,workers_per_kernel:1,task_capacity:16,total_pool_budget_bytes:4*budget.value,read_chunk_bytes:17,max_row_bytes:128,max_samples:1000000,task_timeout_ms:5000}
+ let result=normal_reader_to_arrow(&p,reader,&output,&cfg)
+ byte_buffer_close(output)
+ println(result.status)
+ println(result.cleanup_status)
+ println(result.accepted_rows)
+ println(result.written_rows)
+ assert(platform_call(&p,3,0,0,0,0).value==0)
+ platform_close(p)
+ println("NORMAL_TCP_RESOURCES_CLOSED")
+ if result.status!=0 {return result.status as i32}
+ assert(result.status==0 && result.cleanup_status==0)
+ assert(result.accepted_rows>0 && result.written_rows==result.accepted_rows)
+ println("NORMAL_TCP_ARROW_OK")
+ return 0
+}

@@ -1,0 +1,86 @@
+// Fixed native workers and a bounded number of admitted scalar tasks.
+// The compiler certifies the transitive WorkerFnF64 closure is runtime-state-free.
+// Arguments/results are f64 IEEE-754 data; no owners, loans or captured environments.
+// Callbacks must
+// terminate; shutdown cannot interrupt a running callback.
+use ffi::platform::{Platform,PlatformValue,platform_call,platform_call_into}
+use ffi::worker::{platform_pool_new_f64}
+pub linear struct NativeThreadPoolF64 {id:i64,status:i64,joined:bool,last_result:PlatformValue}
+pub struct NativePoolF64Result {pub task_id:i64,pub value:f64,pub status:i64}
+// Reservation charges control/slots, dedicated 1MiB worker stacks, 4KiB stack
+// guards and pthread handles. OS allocator bookkeeping/shared pages are excluded.
+pub fn native_pool_f64_reservation(p:&Platform,workers:i64,capacity:i64)->PlatformValue with IO {
+ return platform_call(p,139,workers,capacity,0,0)
+}
+pub fn native_pool_f64_new(p:&Platform,callback:WorkerFnF64,workers:i64,capacity:i64,max_bytes:i64)->NativeThreadPoolF64 with IO {
+ let r=platform_pool_new_f64(p,callback,workers,capacity,max_bytes)
+ return NativeThreadPoolF64 {id:r.value,status:r.status,joined:false,last_result:PlatformValue {value:0,status:0}}
+}
+pub fn native_pool_f64_status(pool:&NativeThreadPoolF64)->i64 {pool.status}
+// timeout_ms=0 is nonblocking (EAGAIN). On error no task was admitted.
+// IDs are monotonic and never reused. Completed, uncollected results occupy slots.
+pub fn native_pool_f64_submit(p:&Platform,pool:&!NativeThreadPoolF64,value:f64,timeout_ms:i64)->PlatformValue with IO {
+ if pool.status!=0 {return PlatformValue {value:0,status:pool.status}}
+ return platform_call(p,131,pool.id,f64_to_bits(value),timeout_ms,0)
+}
+// Collect one named task exactly once. Timeout leaves it owned by the pool.
+// ECANCELED consumes a canceled queued task; ENOENT means unknown/already taken.
+pub fn native_pool_f64_result(p:&Platform,pool:&!NativeThreadPoolF64,id:i64,timeout_ms:i64)->NativePoolF64Result with IO {
+ if pool.status!=0 {return NativePoolF64Result {task_id:id,value:0.0,status:pool.status}}
+ let r=platform_call(p,132,pool.id,id,timeout_ms,0)
+ return NativePoolF64Result {task_id:id,value:bits_to_f64(r.value),status:r.status}
+}
+// cancel_pending=false drains; true cancels queued tasks. Running work finishes.
+pub fn native_pool_f64_shutdown(p:&Platform,pool:&!NativeThreadPoolF64,cancel_pending:bool)->PlatformValue with IO {
+ if pool.status!=0 {return PlatformValue {value:0,status:pool.status}}
+ return platform_call(p,133,pool.id,if cancel_pending {1} else {0},0,0)
+}
+pub fn native_pool_f64_join(p:&Platform,pool:&!NativeThreadPoolF64)->i64 with IO,Mut {
+ if pool.status!=0 {return pool.status}
+ if pool.joined {return 22}
+ let r=platform_call(p,134,pool.id,0,0,0)
+ if r.status==0 {pool.joined=true}
+ return r.status
+}
+pub fn native_pool_f64_outstanding(p:&Platform,pool:&NativeThreadPoolF64)->PlatformValue with IO {
+ if pool.status!=0 {return PlatformValue {value:0,status:pool.status}}
+ return platform_call(p,135,pool.id,0,0,0)
+}
+pub fn native_pool_f64_peak_running(p:&Platform,pool:&NativeThreadPoolF64)->PlatformValue with IO {
+ if pool.status!=0 {return PlatformValue {value:0,status:pool.status}}
+ return platform_call(p,135,pool.id,4,0,0)
+}
+// Consumes the owner. Cancel queued work, join workers, discard remaining scalar
+// results, then destroy. A failed join is reported and never mislabeled cleanup.
+pub fn native_pool_f64_close(p:&Platform,pool:NativeThreadPoolF64)->i64 with IO {
+ let NativeThreadPoolF64 {id,status,joined,last_result}=pool
+ if status!=0 {return status}
+ if !joined {
+  let stopped=platform_call(p,133,id,1,0,0)
+  if stopped.status!=0 {return stopped.status}
+  let joined_now=platform_call(p,134,id,0,0,0)
+  if joined_now.status!=0 {return joined_now.status}
+ }
+ let discarded=platform_call(p,136,id,0,0,0)
+ if discarded.status!=0 {return discarded.status}
+ return platform_call(p,2,id,0,0,0).status
+}
+
+
+// Reuses caller-owned result storage; avoids a managed 24-byte object per task
+// on engines whose by-value aggregate handles live until process exit.
+pub fn native_pool_f64_result_into(p:&Platform,pool:&!NativeThreadPoolF64,id:i64,timeout_ms:i64,out:&!NativePoolF64Result) with IO,Mut {
+ out.task_id=id
+ out.value=0.0
+ out.status=pool.status
+ if pool.status!=0 {return}
+ platform_call_into(p,132,pool.id,id,timeout_ms,0,&!pool.last_result)
+ out.value=bits_to_f64(pool.last_result.value)
+ out.status=pool.last_result.status
+}
+pub fn native_pool_f64_submit_into(p:&Platform,pool:&!NativeThreadPoolF64,value:f64,timeout_ms:i64,out:&!PlatformValue) with IO,Mut {
+ out.value=0
+ out.status=pool.status
+ if pool.status!=0 {return}
+ platform_call_into(p,131,pool.id,f64_to_bits(value),timeout_ms,0,out)
+}

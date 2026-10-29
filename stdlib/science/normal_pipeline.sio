@@ -1,0 +1,322 @@
+// Standard-normal probabilities for bounded incremental CSV input.
+// CSV: sample_id,z_milli, with consecutive IDs and |z_milli|<=40000.
+// Workers receive only z:f64; producer retains all CSV/Arrow owners.
+// Four separately certified kernels avoid encoding selectors in floating input.
+// The serial executor spawns no workers; both executors share parser and kernels.
+use ffi::platform::{Platform,PlatformValue}
+use math::pure::{is_finite}
+use collections::byte_buffer::{ByteBuffer}
+use io::native_file::{NativeFile,native_file_open,native_file_close}
+use io::buffered_reader::{buffered_reader_new}
+use data::csv_stream::{CsvStream,CsvOwnedRow,csv_stream_new,csv_stream_next,csv_stream_close,csv_owned_row_new,csv_owned_row_close,csv_row_fields,csv_row_field_range,csv_row_field_byte,csv_row_i64_checked_into}
+use thread::native_pool::{native_pool_reservation}
+use thread::native_pool_f64::{NativeThreadPoolF64,NativePoolF64Result,native_pool_f64_new,native_pool_f64_status,native_pool_f64_submit_into,native_pool_f64_result_into,native_pool_f64_shutdown,native_pool_f64_join,native_pool_f64_close}
+use stats::normal_scalar::{normal_cdf_scalar,normal_sf_scalar,normal_logcdf_scalar,normal_logsf_scalar}
+use arrow::flatbuf::{fb_new}
+use arrow::lib::{ArrowBatch,arrow_schema_new,arrow_schema_add,arrow_type_int,arrow_type_float,arrow_batch_new,arrow_batch_shape,arrow_batch_set_i64,arrow_batch_set_f64,arrow_batch_workspace_new,arrow_buf_new}
+use arrow::native_stream::{arrow_stream_writer_new,arrow_stream_writer_status,arrow_stream_writer_begin,arrow_stream_writer_push_reuse,arrow_stream_writer_finish,arrow_stream_writer_close,arrow_stream_writer_abort}
+pub struct NormalPipelineConfig {
+ pub parallel:bool,pub workers_per_kernel:i64,pub task_capacity:i64,pub total_pool_budget_bytes:i64,
+ pub read_chunk_bytes:i64,pub max_row_bytes:i64,pub max_samples:i64,pub task_timeout_ms:i64
+}
+pub struct NormalPipelineSummary {
+ pub status:i64,pub cleanup_status:i64,pub accepted_rows:i64,pub written_rows:i64
+}
+fn normal_header(r:&CsvOwnedRow,field:i64,text:string)->bool with Div,Panic {
+ let range=csv_row_field_range(r,field)
+ if range.status!=0 || range.len!=str_len(text) {return false}
+ var i:i64=0
+ while i<range.len {
+  if csv_row_field_byte(r,field,i).value!=str_char_at(text,i) {return false}
+  i=i+1
+ }
+ return true
+}
+// Shared incremental parser: caller owns reusable result cells.
+fn normal_next(p:&Platform,stream:&!CsvStream,row:&!CsvOwnedRow,expected:i64,max_samples:i64,sample:&!PlatformValue)->i64 with IO,Alloc,Mut,Div,Panic {
+ let code=csv_stream_next(p,stream,row)
+ if code!=0 {return code}
+ if expected>=max_samples {return 75}
+ // Reuse one caller-owned cell: validate ID, then parse its numeric sample.
+ csv_row_i64_checked_into(row,0,sample)
+ if sample.status!=0 {return sample.status}
+ if sample.value!=expected {return 22}
+ csv_row_i64_checked_into(row,1,sample)
+ if sample.status!=0 {return sample.status}
+ if sample.value<0-40000 || sample.value>40000 {return 34}
+ return 0
+}
+fn normal_emit_values(batch:&!ArrowBatch,row:i64,cdf:f64,sf:f64,logcdf:f64,logsf:f64)->i64 with Mut,Panic {
+ // Finite input in [-40,40] has finite log probabilities. Arithmetic
+ // unavailability/nonconvergence must not become a successful NaN row.
+ if !is_finite(cdf) || !is_finite(sf) || !is_finite(logcdf) || !is_finite(logsf) {return 33}
+ if cdf<0.0 || cdf>1.0 || sf<0.0 || sf>1.0 || logcdf>0.0 || logsf>0.0 {return 33}
+ var code=arrow_batch_set_f64(batch,2,row,cdf,0)
+ if code==0 {code=arrow_batch_set_f64(batch,3,row,sf,0)}
+ if code==0 {code=arrow_batch_set_f64(batch,4,row,logcdf,0)}
+ if code==0 {code=arrow_batch_set_f64(batch,5,row,logsf,0)}
+ return code
+}
+
+fn normal_pool_finish(p:&Platform,pool:NativeThreadPoolF64,cancel:bool)->i64 with IO,Mut {
+ var active=pool
+ var status:i64=0
+ if native_pool_f64_status(&active)==0 {
+  let stopped=native_pool_f64_shutdown(p,&!active,cancel)
+  status=stopped.status
+  let joined=native_pool_f64_join(p,&!active)
+  if status==0 {status=joined}
+ }
+ let closed=native_pool_f64_close(p,active)
+ if status==0 {status=closed}
+ return status
+}
+fn normal_reader_parallel(p:&Platform,source:NativeFile,output:&ByteBuffer,cfg:&NormalPipelineConfig,reservation:i64)->NormalPipelineSummary with IO,Alloc,Mut,Div,Panic {
+ var cdf_pool=native_pool_f64_new(p,worker_fn_f64(normal_cdf_scalar),cfg.workers_per_kernel,cfg.task_capacity,reservation)
+ var sf_pool=native_pool_f64_new(p,worker_fn_f64(normal_sf_scalar),cfg.workers_per_kernel,cfg.task_capacity,reservation)
+ var logcdf_pool=native_pool_f64_new(p,worker_fn_f64(normal_logcdf_scalar),cfg.workers_per_kernel,cfg.task_capacity,reservation)
+ var logsf_pool=native_pool_f64_new(p,worker_fn_f64(normal_logsf_scalar),cfg.workers_per_kernel,cfg.task_capacity,reservation)
+ var status=native_pool_f64_status(&cdf_pool)
+ if status==0 {status=native_pool_f64_status(&sf_pool)}
+ if status==0 {status=native_pool_f64_status(&logcdf_pool)}
+ if status==0 {status=native_pool_f64_status(&logsf_pool)}
+ var stream=csv_stream_new(buffered_reader_new(source,cfg.read_chunk_bytes,cfg.read_chunk_bytes),2)
+ var row=csv_owned_row_new(cfg.max_row_bytes,2)
+ let target=native_file_open(p,output,1)
+ var writer=arrow_stream_writer_new(target)
+ if status==0 {status=arrow_stream_writer_status(&writer)}
+ var schema=arrow_schema_new()
+ var code=arrow_schema_add(&!schema,"sample_id",0,arrow_type_int(),64,1,0)
+ if status==0 {status=code}
+ code=arrow_schema_add(&!schema,"z_milli",0,arrow_type_int(),64,1,0)
+ if status==0 {status=code}
+ code=arrow_schema_add(&!schema,"cdf",0,arrow_type_float(),0,0,2)
+ if status==0 {status=code}
+ code=arrow_schema_add(&!schema,"sf",0,arrow_type_float(),0,0,2)
+ if status==0 {status=code}
+ code=arrow_schema_add(&!schema,"logcdf",0,arrow_type_float(),0,0,2)
+ if status==0 {status=code}
+ code=arrow_schema_add(&!schema,"logsf",0,arrow_type_float(),0,0,2)
+ if status==0 {status=code}
+ if status==0 {
+  code=csv_stream_next(p,&!stream,&!row)
+  if code!=0 {status=if code==1 {22} else {code}}
+  else if csv_row_fields(&row)!=2 || !normal_header(&row,0,"sample_id") || !normal_header(&row,1,"z_milli") {status=22}
+ }
+ if status==0 {status=arrow_stream_writer_begin(p,&!writer,&schema)}
+ var accepted:i64=0
+ var written:i64=0
+ var ended:bool=false
+ let window=if cfg.task_capacity<16 {cfg.task_capacity} else {16}
+ var task_ids:[i64;16]=[0;16]
+ var milli:[i64;16]=[0;16]
+ var batch=arrow_batch_new()
+ var frame=arrow_buf_new()
+ var workspace=arrow_batch_workspace_new()
+ var builder=fb_new()
+ var result=NativePoolF64Result {task_id:0,value:0.0,status:0}
+ var sample=PlatformValue {value:0,status:0}
+ var task=PlatformValue {value:0,status:0}
+ var z:f64=0.0
+ var cdf:f64=0.0
+ var sf:f64=0.0
+ var logcdf:f64=0.0
+ var logsf:f64=0.0
+ while status==0 && !ended {
+  var count:i64=0
+  while count<window && status==0 && !ended {
+   code=normal_next(p,&!stream,&!row,accepted,cfg.max_samples,&!sample)
+   if code==1 {ended=true}
+   else if code!=0 {status=code}
+   else {
+    z=(sample.value as f64)/1000.0
+    native_pool_f64_submit_into(p,&!cdf_pool,z,cfg.task_timeout_ms,&!task)
+    if task.status!=0 {status=task.status}
+    else if task.value!=accepted {status=5}
+    if status==0 {
+     native_pool_f64_submit_into(p,&!sf_pool,z,cfg.task_timeout_ms,&!task)
+     if task.status!=0 {status=task.status}
+     else if task.value!=accepted {status=5}
+    }
+    if status==0 {
+     native_pool_f64_submit_into(p,&!logcdf_pool,z,cfg.task_timeout_ms,&!task)
+     if task.status!=0 {status=task.status}
+     else if task.value!=accepted {status=5}
+    }
+    if status==0 {
+     native_pool_f64_submit_into(p,&!logsf_pool,z,cfg.task_timeout_ms,&!task)
+     if task.status!=0 {status=task.status}
+     else if task.value!=accepted {status=5}
+    }
+    if status==0 {
+     task_ids[count as usize]=accepted
+     milli[count as usize]=sample.value
+     accepted=accepted+1
+     count=count+1
+    }
+   }
+  }
+  if status==0 {status=arrow_batch_shape(&!batch,count,6)}
+  var i:i64=0
+  while status==0 && i<count {
+   z=(milli[i as usize] as f64)/1000.0
+   native_pool_f64_result_into(p,&!cdf_pool,task_ids[i as usize],cfg.task_timeout_ms,&!result)
+   if result.status!=0 {status=result.status}
+   else if result.task_id!=written+i {status=5}
+   else {cdf=result.value}
+   if status==0 {
+    native_pool_f64_result_into(p,&!sf_pool,task_ids[i as usize],cfg.task_timeout_ms,&!result)
+    if result.status!=0 {status=result.status}
+    else if result.task_id!=written+i {status=5}
+    else {sf=result.value}
+   }
+   if status==0 {
+    native_pool_f64_result_into(p,&!logcdf_pool,task_ids[i as usize],cfg.task_timeout_ms,&!result)
+    if result.status!=0 {status=result.status}
+    else if result.task_id!=written+i {status=5}
+    else {logcdf=result.value}
+   }
+   if status==0 {
+    native_pool_f64_result_into(p,&!logsf_pool,task_ids[i as usize],cfg.task_timeout_ms,&!result)
+    if result.status!=0 {status=result.status}
+    else if result.task_id!=written+i {status=5}
+    else {logsf=result.value}
+   }
+   if status==0 {
+    code=arrow_batch_set_i64(&!batch,0,i,written+i,0)
+    if code==0 {code=arrow_batch_set_i64(&!batch,1,i,milli[i as usize],0)}
+    if code==0 {code=normal_emit_values(&!batch,i,cdf,sf,logcdf,logsf)}
+    if code!=0 {status=code}
+   }
+   i=i+1
+  }
+  if status==0 && count>0 {
+   status=arrow_stream_writer_push_reuse(p,&!writer,&schema,&batch,&!frame,&!workspace,&!builder)
+   if status==0 {written=written+count}
+  }
+ }
+ var cleanup=normal_pool_finish(p,cdf_pool,status!=0)
+ code=normal_pool_finish(p,sf_pool,status!=0)
+ if cleanup==0 {cleanup=code}
+ code=normal_pool_finish(p,logcdf_pool,status!=0)
+ if cleanup==0 {cleanup=code}
+ code=normal_pool_finish(p,logsf_pool,status!=0)
+ if cleanup==0 {cleanup=code}
+ if status==0 && cleanup==0 {status=arrow_stream_writer_finish(p,&!writer)}
+ code=if status==0 && cleanup==0 {arrow_stream_writer_close(p,writer)} else {arrow_stream_writer_abort(p,writer)}
+ if cleanup==0 {cleanup=code}
+ code=csv_stream_close(p,stream)
+ if cleanup==0 {cleanup=code}
+ csv_owned_row_close(row)
+ if status==0 {status=cleanup}
+ return NormalPipelineSummary {status:status,cleanup_status:cleanup,accepted_rows:accepted,written_rows:written}
+}
+
+fn normal_reader_serial(p:&Platform,source:NativeFile,output:&ByteBuffer,cfg:&NormalPipelineConfig)->NormalPipelineSummary with IO,Alloc,Mut,Div,Panic {
+ var status:i64=0
+ var stream=csv_stream_new(buffered_reader_new(source,cfg.read_chunk_bytes,cfg.read_chunk_bytes),2)
+ var row=csv_owned_row_new(cfg.max_row_bytes,2)
+ let target=native_file_open(p,output,1)
+ var writer=arrow_stream_writer_new(target)
+ if status==0 {status=arrow_stream_writer_status(&writer)}
+ var schema=arrow_schema_new()
+ var code=arrow_schema_add(&!schema,"sample_id",0,arrow_type_int(),64,1,0)
+ if status==0 {status=code}
+ code=arrow_schema_add(&!schema,"z_milli",0,arrow_type_int(),64,1,0)
+ if status==0 {status=code}
+ code=arrow_schema_add(&!schema,"cdf",0,arrow_type_float(),0,0,2)
+ if status==0 {status=code}
+ code=arrow_schema_add(&!schema,"sf",0,arrow_type_float(),0,0,2)
+ if status==0 {status=code}
+ code=arrow_schema_add(&!schema,"logcdf",0,arrow_type_float(),0,0,2)
+ if status==0 {status=code}
+ code=arrow_schema_add(&!schema,"logsf",0,arrow_type_float(),0,0,2)
+ if status==0 {status=code}
+ if status==0 {
+  code=csv_stream_next(p,&!stream,&!row)
+  if code!=0 {status=if code==1 {22} else {code}}
+  else if csv_row_fields(&row)!=2 || !normal_header(&row,0,"sample_id") || !normal_header(&row,1,"z_milli") {status=22}
+ }
+ if status==0 {status=arrow_stream_writer_begin(p,&!writer,&schema)}
+ var accepted:i64=0
+ var written:i64=0
+ var ended:bool=false
+ let window=if cfg.task_capacity<16 {cfg.task_capacity} else {16}
+ var milli:[i64;16]=[0;16]
+ var batch=arrow_batch_new()
+ var frame=arrow_buf_new()
+ var workspace=arrow_batch_workspace_new()
+ var builder=fb_new()
+ var sample=PlatformValue {value:0,status:0}
+ var z:f64=0.0
+ var cdf:f64=0.0
+ var sf:f64=0.0
+ var logcdf:f64=0.0
+ var logsf:f64=0.0
+ while status==0 && !ended {
+  var count:i64=0
+  while count<window && status==0 && !ended {
+   code=normal_next(p,&!stream,&!row,accepted,cfg.max_samples,&!sample)
+   if code==1 {ended=true}
+   else if code!=0 {status=code}
+   else {
+    if status==0 {
+     milli[count as usize]=sample.value
+     accepted=accepted+1
+     count=count+1
+    }
+   }
+  }
+  if status==0 {status=arrow_batch_shape(&!batch,count,6)}
+  var i:i64=0
+  while status==0 && i<count {
+   z=(milli[i as usize] as f64)/1000.0
+   cdf=normal_cdf_scalar(z)
+   sf=normal_sf_scalar(z)
+   logcdf=normal_logcdf_scalar(z)
+   logsf=normal_logsf_scalar(z)
+   if status==0 {
+    code=arrow_batch_set_i64(&!batch,0,i,written+i,0)
+    if code==0 {code=arrow_batch_set_i64(&!batch,1,i,milli[i as usize],0)}
+    if code==0 {code=normal_emit_values(&!batch,i,cdf,sf,logcdf,logsf)}
+    if code!=0 {status=code}
+   }
+   i=i+1
+  }
+  if status==0 && count>0 {
+   status=arrow_stream_writer_push_reuse(p,&!writer,&schema,&batch,&!frame,&!workspace,&!builder)
+   if status==0 {written=written+count}
+  }
+ }
+ var cleanup:i64=0
+ if status==0 && cleanup==0 {status=arrow_stream_writer_finish(p,&!writer)}
+ code=if status==0 && cleanup==0 {arrow_stream_writer_close(p,writer)} else {arrow_stream_writer_abort(p,writer)}
+ if cleanup==0 {cleanup=code}
+ code=csv_stream_close(p,stream)
+ if cleanup==0 {cleanup=code}
+ csv_owned_row_close(row)
+ if status==0 {status=cleanup}
+ return NormalPipelineSummary {status:status,cleanup_status:cleanup,accepted_rows:accepted,written_rows:written}
+}
+
+pub fn normal_reader_to_arrow(p:&Platform,source:NativeFile,output:&ByteBuffer,cfg:&NormalPipelineConfig)->NormalPipelineSummary with IO,Alloc,Mut,Div,Panic {
+ let reservation=native_pool_reservation(p,cfg.workers_per_kernel,cfg.task_capacity)
+ if cfg.workers_per_kernel<1 || cfg.workers_per_kernel>16 || cfg.task_capacity<1 || cfg.task_capacity>1048576 ||
+    reservation.status!=0 || cfg.total_pool_budget_bytes<0 ||
+    cfg.read_chunk_bytes<1 || cfg.max_row_bytes<1 || cfg.max_samples<0 || cfg.max_samples>1000000 ||
+    cfg.task_timeout_ms<1 || cfg.task_timeout_ms>2147483647 {
+  let closed=native_file_close(p,source)
+  return NormalPipelineSummary {status:22,cleanup_status:closed,accepted_rows:0,written_rows:0}
+ } else if cfg.parallel && cfg.total_pool_budget_bytes<4*reservation.value {
+  let closed=native_file_close(p,source)
+  return NormalPipelineSummary {status:105,cleanup_status:closed,accepted_rows:0,written_rows:0}
+ } else if cfg.parallel {
+  return normal_reader_parallel(p,source,output,cfg,reservation.value)
+ } else {
+  return normal_reader_serial(p,source,output,cfg)
+ }
+}
+pub fn normal_csv_to_arrow(p:&Platform,input:&ByteBuffer,output:&ByteBuffer,cfg:&NormalPipelineConfig)->NormalPipelineSummary with IO,Alloc,Mut,Div,Panic {
+ let source=native_file_open(p,input,0)
+ return normal_reader_to_arrow(p,source,output,cfg)
+}
