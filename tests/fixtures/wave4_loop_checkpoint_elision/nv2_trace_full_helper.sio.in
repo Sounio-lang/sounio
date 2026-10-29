@@ -26,6 +26,22 @@ fn native_v2_full_trace_refuse(stage:i64,reason:i64,fi:i64,ii:i64) with IO {
     native_v2_full_trace_number(ii)
     print("\n")
 }
+// Function signatures and global DATA share IrFunction storage. For strategy
+// 99 param_count is a BSS byte offset, not an arity; other reused fields are
+// serialized verbatim. This diagnostic profile grants no callable authority.
+fn native_v2_full_trace_frame_shape_valid(f:&IrFunction)->bool with Mut,Panic,Div {
+    if f.compile_strategy==99 {
+        if f.instr_count!=0 || f.reg_count!=0 || f.label_count!=0 ||
+           f.param_count<0 || f.bss_size<0 {return false}
+        return f.param_count<=9223372036854775807-f.bss_size
+    }
+    if f.param_count<0 || f.param_count>64 {return false}
+    if f.instr_count==0 {
+        return f.compile_strategy==0 && f.reg_count==0 && f.label_count==0
+    }
+    true
+}
+
 fn native_v2_trace_full_module_ir_ref(module:&IrModule,stage:i64) with IO,Mut,Panic,Div {
     // Explicit diagnostic limits, independent of the serializer's 128-KiB
     // image ceiling. A future increase needs a parser/gate schema review.
@@ -50,7 +66,7 @@ fn native_v2_trace_full_module_ir_ref(module:&IrModule,stage:i64) with IO,Mut,Pa
     while fi<module.fn_count {
         let f=ir_fn_get(module,fi)
         if f.instr_count<0 || f.instr_count>IR_MAX_INSTRS || !ir_reg_count_is_valid(f.reg_count) ||
-           f.label_count<0 || f.param_count<0 || f.param_count>64 ||
+           f.label_count<0 || !native_v2_full_trace_frame_shape_valid(&f) ||
            f.name.len<0 || f.name.len>384 ||
            f.return_struct_name.len<0 || f.return_struct_name.len>384 {
             native_v2_full_trace_refuse(stage,4,fi,-1);return
@@ -66,10 +82,20 @@ fn native_v2_trace_full_module_ir_ref(module:&IrModule,stage:i64) with IO,Mut,Pa
                 native_v2_full_trace_refuse(stage,6,fi,-1);return
             }
         }
+        // No vregs exist in a canonical empty signature or DATA descriptor.
+        // Check the complete fixed array, never iterate a global byte offset.
+        let inactive_params=f.instr_count==0
+        let param_limit=if inactive_params {64}else{f.param_count}
         var pi:i64=0
-        while pi<f.param_count {
-            if f.param_regs[pi as usize]<0 || f.param_regs[pi as usize]>=f.reg_count {
-                native_v2_full_trace_refuse(stage,4,fi,pi);return
+        while pi<param_limit {
+            if inactive_params {
+                if f.param_regs[pi as usize]!= -1 {
+                    native_v2_full_trace_refuse(stage,4,fi,pi);return
+                }
+            }else {
+                if f.param_regs[pi as usize]<0 || f.param_regs[pi as usize]>=f.reg_count {
+                    native_v2_full_trace_refuse(stage,4,fi,pi);return
+                }
             }
             pi=pi+1
         }

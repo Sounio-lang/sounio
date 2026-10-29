@@ -7,8 +7,9 @@ component=$(realpath "$1");oracle=$(realpath "$2");schema1=$(realpath "$3");out=
 test -x "$component";test -x "$oracle";test -s "$schema1";test ! -e "$out";mkdir -p "$out"
 sha256sum "$component" "$oracle" "$schema1" > "$out/ARTIFACTS.sha256"
 printf 'phase\texpected\tactual\n' > "$out/RESULTS.tsv"
+TIME_BIN=${TIME_BIN:-/usr/bin/time}
 bad=0;last=0
-phase(){ local name="$1" expected="$2";shift 2;last=0;/usr/bin/time -v "$@" > "$out/$name.stdout" 2> "$out/$name.stderr" || last=$?;printf '%s\t%s\t%s\n' "$name" "$expected" "$last" >> "$out/RESULTS.tsv";if test "$last" != "$expected";then bad=1;fi; }
+phase(){ local name="$1" expected="$2";shift 2;last=0;"$TIME_BIN" -v "$@" > "$out/$name.stdout" 2> "$out/$name.stderr" || last=$?;printf '%s\t%s\t%s\n' "$name" "$expected" "$last" >> "$out/RESULTS.tsv";if test "$last" != "$expected";then bad=1;fi; }
 for stage in source prepared;do
  phase "$stage-valid" 0 env SOUNIO_NV2_IR_TRACE_FULL=1 SOUNIO_NV2_IR_TRACE_FULL_STAGE="$stage" timeout 30 "$component" valid
  phase "$stage-oracle" 0 "$oracle" --probe "$stage" "$out/$stage-valid.stdout"
@@ -20,6 +21,27 @@ for stage in source prepared;do
  for control in truncate duplicate total args bits name float-word unknown end stage;do
   phase "$stage-mutate-$control" 0 "$oracle" --mutate "$control" "$out/$stage-valid.stdout" "$out/$stage-control-$control.stdout"
   phase "$stage-reject-$control" 1 "$oracle" --probe "$stage" "$out/$stage-control-$control.stdout"
+ done
+ for profile in extern0 extern1 extern2 global_base global_large global_maxextent global_raw;do
+  phase "$stage-$profile" 0 env SOUNIO_NV2_IR_TRACE_FULL=1 SOUNIO_NV2_IR_TRACE_FULL_STAGE="$stage" timeout 30 "$component" "$profile"
+  phase "$stage-profile-$profile" 0 "$oracle" --profile "$profile" "$stage" "$out/$stage-$profile.stdout"
+ done
+ for control in data-negative-offset data-negative-size data-overflow data-body data-not-global inactive-vreg;do
+  phase "$stage-data-mutate-$control" 0 "$oracle" --mutate "$control" "$out/$stage-global_large.stdout" "$out/$stage-data-control-$control.stdout"
+  phase "$stage-data-reject-$control" 1 "$oracle" --check "$stage" "$out/$stage-data-control-$control.stdout"
+ done
+ for control in stub-label stub-frame inactive-vreg;do
+  phase "$stage-extern-mutate-$control" 0 "$oracle" --mutate "$control" "$out/$stage-extern2.stdout" "$out/$stage-extern-control-$control.stdout"
+  phase "$stage-extern-reject-$control" 1 "$oracle" --check "$stage" "$out/$stage-extern-control-$control.stdout"
+ done
+ phase "$stage-defined-vreg-mutate" 0 "$oracle" --mutate defined-vreg "$out/$stage-valid.stdout" "$out/$stage-defined-vreg.stdout"
+ phase "$stage-defined-vreg-reject" 1 "$oracle" --check "$stage" "$out/$stage-defined-vreg.stdout"
+ phase "$stage-data-truncate" 0 "$oracle" --mutate truncate "$out/$stage-global_large.stdout" "$out/$stage-data-partial.stdout"
+ phase "$stage-data-reject-partial" 1 "$oracle" --check "$stage" "$out/$stage-data-partial.stdout"
+ for mode in stub_badreg stub_badlabels stub_badpadding defined_badreg global_negative_offset global_negative_size global_overflow global_body global_badreg global_badlabels;do
+  phase "$stage-$mode" 0 env SOUNIO_NV2_IR_TRACE_FULL=1 SOUNIO_NV2_IR_TRACE_FULL_STAGE="$stage" timeout 30 "$component" "$mode"
+  phase "$stage-refusal-$mode" 0 "$oracle" --refusal "$stage" 4 "$out/$stage-$mode.stdout"
+  phase "$stage-reject-$mode" 1 "$oracle" --check "$stage" "$out/$stage-$mode.stdout"
  done
  for pair in badargs:8 badname:7 badregion:6 badparam:4 budget:5;do
   mode="${pair%:*}";reason="${pair#*:}"

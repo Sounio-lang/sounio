@@ -31,10 +31,20 @@ struct Parser{
   I ni=0,na=0,nb=0;bool minimum=false,negative_zero=false,nan_payload=false,args_from_slot=false,float_bitmap=false;
   for(I fi=0;fi<h[1];++fi){
    const auto f=take("NV2_IR_FULL_FN");size(f,23);
-   if(f.v[0]!=fi||f.v[7]<0||f.v[8]<0||f.v[10]<0||f.v[10]>64||f.v[7]>h[2]-ni)bad("function bounds");
+   if(f.v[0]!=fi||f.v[7]<0||f.v[8]<0||f.v[9]<0||f.v[7]>h[2]-ni)bad("function bounds");
+   const bool data=f.v[11]==99,empty=f.v[7]==0;
+   if(data){
+    if(!empty||f.v[8]!=0||f.v[9]!=0||f.v[10]<0||f.v[19]<0||f.v[10]>std::numeric_limits<I>::max()-f.v[19])bad("global DATA extent/shape");
+   }else{
+    if(f.v[10]<0||f.v[10]>64)bad("function arity");
+    if(empty&&(f.v[8]!=0||f.v[9]!=0||f.v[11]!=0))bad("empty function frame");
+   }
    nb+=name("NV2_IR_FULL_FN_NAME",fi,-1);
    nb+=name("NV2_IR_FULL_RETURN_NAME",fi,-1);
    const auto params=take("NV2_IR_FULL_PARAMS");size(params,65);if(params.v[0]!=fi)bad("parameter function");
+   if(empty){for(std::size_t p=1;p<params.v.size();++p)if(params.v[p]!= -1)bad("inactive parameter register");}
+   else{for(I p=0;p<f.v[10];++p)if(params.v[static_cast<std::size_t>(p+1)]<0||params.v[static_cast<std::size_t>(p+1)]>=f.v[8])bad("active parameter register");}
+
    const auto fp=take("NV2_IR_FULL_FLOAT_BITS");size(fp,std::size_t(2+h[5]));
    if(fp.v[0]!=fi||fp.v[1]!=h[5])bad("float-word count");
    for(std::size_t w=2;w<fp.v.size();++w)if(fp.v[w]<0||fp.v[w]>4294967295LL)bad("float bitmap word");
@@ -75,6 +85,20 @@ void mutate(std::string_view kind,const char*input,const char*output){
  else if(kind=="unknown"){auto p=seek("NV2_IR_FULL_PARAMS ");if(p==lines.end())bad("no params");lines.insert(p,"NV2_IR_FULL_UNKNOWN 1");}
  else if(kind=="end"){auto p=seek("NV2_IR_FULL_END ");if(p==lines.end())bad("no end");lines.push_back(*p);}
  else if(kind=="stage"){auto p=seek("NV2_IR_FULL_BEGIN ");auto q=seek("NV2_IR_FULL_END ");if(p==lines.end()||q==lines.end())bad("no group");auto a=row(*p),b=row(*q);a.v[1]=1-a.v[1];b.v[1]=a.v[1];*p=render(a);*q=render(b);}
+ else if(kind=="data-negative-offset"||kind=="data-negative-size"||kind=="data-overflow"||kind=="data-body"||kind=="stub-label"||kind=="stub-frame"||kind=="data-not-global"){
+  auto p=seek("NV2_IR_FULL_FN 5 ");if(p==lines.end())bad("no metadata target");auto r=row(*p);size(r,23);
+  if(kind=="data-negative-offset")r.v[10]= -1;
+  if(kind=="data-negative-size")r.v[19]= -1;
+  if(kind=="data-overflow"){r.v[10]=std::numeric_limits<I>::max();r.v[19]=1;}
+  if(kind=="data-body")r.v[7]=1;
+  if(kind=="stub-label")r.v[9]=1;
+  if(kind=="stub-frame")r.v[8]=1;
+  if(kind=="data-not-global")r.v[11]=98;
+  *p=render(r);
+ }
+ else if(kind=="inactive-vreg"||kind=="defined-vreg"){
+  auto p=seek(kind=="defined-vreg"?"NV2_IR_FULL_PARAMS 0 ":"NV2_IR_FULL_PARAMS 5 ");if(p==lines.end())bad("no parameter target");auto r=row(*p);size(r,65);r.v[1]=kind=="defined-vreg"? -1:0;*p=render(r);
+ }
  else bad("unknown control");
  write(output,lines);
 }
@@ -82,6 +106,20 @@ I stage(std::string_view s){if(s=="source")return 0;if(s=="prepared")return 1;re
 int main(int argc,char**argv){try{
  if(argc==4&&(std::string_view(argv[1])=="--check"||std::string_view(argv[1])=="--probe")){
   const auto wanted=stage(argv[2]);if(wanted<0)return 64;Parser p(load(argv[3]));p.verify(std::string_view(argv[1])=="--probe",wanted);return 0;
+ }
+ if(argc==5&&std::string_view(argv[1])=="--profile"){
+  const auto wanted=stage(argv[3]);if(wanted<0)return 64;Parser p(load(argv[4]));p.verify(true,wanted);
+  Row f;for(const auto&r:p.rows)if(r.tag=="NV2_IR_FULL_FN"&&r.v.at(0)==5)f=r;size(f,23);
+  const std::string_view mode=argv[2];I offset=0,extent=0,init=0,value= -1,width= -1,strategy=0;
+  if(mode=="extern0")offset=0;else if(mode=="extern1")offset=1;else if(mode=="extern2")offset=2;
+  else{strategy=99;offset=8;extent=8;init=1;value=1024;width=8;
+   if(mode=="global_large")offset=4096;
+   else if(mode=="global_maxextent")offset=std::numeric_limits<I>::max()-8;
+   else if(mode=="global_raw"){offset=4096;extent=0;init= -7;value= -31;width=17;}
+   else if(mode!="global_base")return 64;
+  }
+  if(f.v[7]!=0||f.v[8]!=0||f.v[9]!=0||f.v[10]!=offset||f.v[11]!=strategy||f.v[12]!=init||f.v[15]!=value||f.v[16]!=width||f.v[19]!=extent)bad("raw descriptor fields changed");
+  std::cout<<"NV2_FULL_DESCRIPTOR_PROFILE_CPP23_OK mode="<<mode<<" stage="<<wanted<<" classification="<<(strategy==99?"DATA":"EXTERN")<<'\n';return 0;
  }
  if(argc==5&&std::string_view(argv[1])=="--mutate"){mutate(argv[2],argv[3],argv[4]);return 0;}
  if(argc==5&&std::string_view(argv[1])=="--refusal"){

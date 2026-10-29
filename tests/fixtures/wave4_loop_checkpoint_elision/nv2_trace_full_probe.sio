@@ -127,6 +127,22 @@ fn native_v2_full_trace_refuse(stage:i64,reason:i64,fi:i64,ii:i64) with IO {
     native_v2_full_trace_number(ii)
     print("\n")
 }
+// Function signatures and global DATA share IrFunction storage. For strategy
+// 99 param_count is a BSS byte offset, not an arity; other reused fields are
+// serialized verbatim. This diagnostic profile grants no callable authority.
+fn native_v2_full_trace_frame_shape_valid(f:&IrFunction)->bool with Mut,Panic,Div {
+    if f.compile_strategy==99 {
+        if f.instr_count!=0 || f.reg_count!=0 || f.label_count!=0 ||
+           f.param_count<0 || f.bss_size<0 {return false}
+        return f.param_count<=9223372036854775807-f.bss_size
+    }
+    if f.param_count<0 || f.param_count>64 {return false}
+    if f.instr_count==0 {
+        return f.compile_strategy==0 && f.reg_count==0 && f.label_count==0
+    }
+    true
+}
+
 fn native_v2_trace_full_module_ir_ref(module:&IrModule,stage:i64) with IO,Mut,Panic,Div {
     // Explicit diagnostic limits, independent of the serializer's 128-KiB
     // image ceiling. A future increase needs a parser/gate schema review.
@@ -151,7 +167,7 @@ fn native_v2_trace_full_module_ir_ref(module:&IrModule,stage:i64) with IO,Mut,Pa
     while fi<module.fn_count {
         let f=ir_fn_get(module,fi)
         if f.instr_count<0 || f.instr_count>IR_MAX_INSTRS || !ir_reg_count_is_valid(f.reg_count) ||
-           f.label_count<0 || f.param_count<0 || f.param_count>64 ||
+           f.label_count<0 || !native_v2_full_trace_frame_shape_valid(&f) ||
            f.name.len<0 || f.name.len>384 ||
            f.return_struct_name.len<0 || f.return_struct_name.len>384 {
             native_v2_full_trace_refuse(stage,4,fi,-1);return
@@ -167,10 +183,20 @@ fn native_v2_trace_full_module_ir_ref(module:&IrModule,stage:i64) with IO,Mut,Pa
                 native_v2_full_trace_refuse(stage,6,fi,-1);return
             }
         }
+        // No vregs exist in a canonical empty signature or DATA descriptor.
+        // Check the complete fixed array, never iterate a global byte offset.
+        let inactive_params=f.instr_count==0
+        let param_limit=if inactive_params {64}else{f.param_count}
         var pi:i64=0
-        while pi<f.param_count {
-            if f.param_regs[pi as usize]<0 || f.param_regs[pi as usize]>=f.reg_count {
-                native_v2_full_trace_refuse(stage,4,fi,pi);return
+        while pi<param_limit {
+            if inactive_params {
+                if f.param_regs[pi as usize]!= -1 {
+                    native_v2_full_trace_refuse(stage,4,fi,pi);return
+                }
+            }else {
+                if f.param_regs[pi as usize]<0 || f.param_regs[pi as usize]>=f.reg_count {
+                    native_v2_full_trace_refuse(stage,4,fi,pi);return
+                }
             }
             pi=pi+1
         }
@@ -358,6 +384,41 @@ fn main()->i32 with IO,Mut,Div,Panic,Alloc {
   module.fn_count=2048
   var i:i64=0
   while i<2048 {ir_fn_pool_ensure(&(*module),i);ir_fn_set(&!(*module),i,f);i=i+1}
+ }
+ // Canonical empty externs have an arity but no vreg assignments.
+ if str_eq(mode,"extern0") || str_eq(mode,"extern1") || str_eq(mode,"extern2") ||
+    str_eq(mode,"stub_badreg") || str_eq(mode,"stub_badlabels") || str_eq(mode,"stub_badpadding") {
+  var signature=ir_fn_get(&(*module),5)
+  if str_eq(mode,"extern1") {signature.param_count=1}
+  if str_eq(mode,"extern2") {signature.param_count=2}
+  if str_eq(mode,"stub_badreg") {signature.param_count=1;signature.reg_count=1;signature.param_regs[0]=0}
+  if str_eq(mode,"stub_badlabels") {signature.label_count=1}
+  if str_eq(mode,"stub_badpadding") {signature.param_regs[63]=0}
+  ir_fn_set(&!(*module),5,signature)
+ }
+ if str_eq(mode,"defined_badreg") {f.param_regs[0]= -1;ir_fn_set(&!(*module),0,f)}
+ if str_eq(mode,"global_base") || str_eq(mode,"global_large") || str_eq(mode,"global_maxextent") || str_eq(mode,"global_raw") ||
+    str_eq(mode,"global_negative_offset") || str_eq(mode,"global_negative_size") || str_eq(mode,"global_overflow") ||
+    str_eq(mode,"global_body") || str_eq(mode,"global_badreg") || str_eq(mode,"global_badlabels") {
+  var data=ir_fn_get(&(*module),5)
+  data.compile_strategy=99;data.param_count=8;data.bss_size=8
+  data.returns_float=1;data.prof_counter_id=1024;data.hyper_algebra_kind=8
+  if str_eq(mode,"global_large") {data.param_count=4096}
+  if str_eq(mode,"global_maxextent") {data.param_count=9223372036854775807-8}
+  if str_eq(mode,"global_raw") {
+   data.param_count=4096;data.bss_size=0;data.returns_float= -7
+   data.prof_counter_id= -31;data.hyper_algebra_kind=17
+  }
+  if str_eq(mode,"global_negative_offset") {data.param_count= -1}
+  if str_eq(mode,"global_negative_size") {data.bss_size= -1}
+  if str_eq(mode,"global_overflow") {data.param_count=9223372036854775807;data.bss_size=1}
+  if str_eq(mode,"global_body") {
+   assert(ir_function_alloc_region(&!data)==IR_ARENA_OK)
+   emit(&!data,ir_nop())
+  }
+  if str_eq(mode,"global_badreg") {data.param_regs[0]=0}
+  if str_eq(mode,"global_badlabels") {data.label_count=1}
+  ir_fn_set(&!(*module),5,data)
  }
  native_v2_full_trace_source_stage_ref(&(*module))
  // Simulate a prepared module with a distinct function census.
