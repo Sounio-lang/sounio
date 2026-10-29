@@ -13,9 +13,11 @@ import assert from 'node:assert/strict';
 import { readdir, readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { ENGLISH_SEARCH, SELF_HOSTED_PAGE } from '../src/lib/search-appearance.mjs';
+import { parse } from 'parse5';
+import { EFFECTS_PAGE, ENGLISH_SEARCH, SELF_HOSTED_PAGE } from '../src/lib/search-appearance.mjs';
+import { EFFECTS_FAQ } from '../src/lib/effect-system-page.mjs';
 import { rehypeDemoteH1 } from '../src/lib/rehype-demote-h1.mjs';
-import { isoDateOrNothing, CODE_REPOSITORY } from '../src/lib/structured-data.mjs';
+import { isoDateOrNothing, CODE_REPOSITORY, FORMER_LANGUAGE_NAME, FORMER_RELEASE_URL } from '../src/lib/structured-data.mjs';
 import { barePath, localeFromPath, isRedirectPath, absoluteUrl, htmlLang, canonicalPathname } from '../src/lib/seo-locales.mjs';
 
 const website = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -63,6 +65,47 @@ function jsonLd(html) {
     blocks.push(JSON.parse(match[1]));
   }
   return blocks;
+}
+
+function collectAlternateNames(value, found) {
+  if (!value || typeof value !== 'object') return;
+  if (Array.isArray(value)) {
+    for (const item of value) collectAlternateNames(item, found);
+    return;
+  }
+  const alt = value.alternateName;
+  if (typeof alt === 'string') found.add(alt);
+  else if (Array.isArray(alt)) {
+    for (const item of alt) if (typeof item === 'string') found.add(item);
+  }
+  for (const child of Object.values(value)) collectAlternateNames(child, found);
+}
+
+const FORMER_NAME_NOTE = 'Sounio (formerly Demetrios). Sounio was previously released as Demetrios, the former name of this language.';
+const FORMER_NAME_NOTE_PT = 'Sounio (anteriormente Demetrios). O Sounio foi lançado anteriormente como Demetrios, o nome anterior desta linguagem.';
+
+// HTML5 end tags may carry whitespace or ignored attributes before `>`,
+// as in `</script >`. A regexp that requires a bare `</script>` leaves
+// that element body in the visible text. parse5 follows the HTML parser.
+function collectVisibleText(node, parts) {
+  if (!node || typeof node !== 'object') return;
+  const name = node.nodeName;
+  if (name === 'script' || name === 'style') return;
+  if (name === '#text') {
+    parts.push(node.value);
+    return;
+  }
+  const children = node.childNodes;
+  if (children) {
+    for (const child of children) collectVisibleText(child, parts);
+  }
+  if (node.content) collectVisibleText(node.content, parts);
+}
+
+function visibleProse(html) {
+  const parts = [];
+  collectVisibleText(parse(html), parts);
+  return parts.join(' ').replace(/\s+/g, ' ');
 }
 
 function titleOf(html) {
@@ -127,6 +170,30 @@ function selfTest() {
   assert.equal(decode('&lt;h1&gt;'), '<h1>');
   assert.equal(decode('&amp;lt;'), '&lt;');
   assert.equal(decode('&amp;amp;'), '&amp;');
+
+  const aboutSnippet = `<section><h1>About</h1><p>
+        Sounio (formerly Demetrios). Sounio was previously released as Demetrios, the former name of this language.
+      </p></section>`;
+  assert.equal(visibleProse(aboutSnippet).includes(FORMER_NAME_NOTE), true);
+
+  const closings = [
+    '</script >',
+    '</script\t>',
+    '</script\n>',
+    '</script foo="bar">',
+    '</script\t\n bar>',
+    '</SCRIPT >',
+  ];
+  for (const closing of closings) {
+    const hidden = `<script>SECRET_TOKEN ${FORMER_NAME_NOTE}${closing}<p>visible only</p>`;
+    const prose = visibleProse(hidden);
+    assert.equal(prose.includes('SECRET_TOKEN'), false, closing);
+    assert.equal(prose.includes(FORMER_NAME_NOTE), false, closing);
+    assert.equal(prose.includes('visible only'), true, closing);
+  }
+  const styled = '<style>SECRET_STYLE</style ><p>visible only</p>';
+  assert.equal(visibleProse(styled).includes('SECRET_STYLE'), false);
+  assert.equal(visibleProse(styled).includes('visible only'), true);
 }
 
 selfTest();
@@ -170,6 +237,23 @@ for await (const file of walk(dist)) {
   }
   const software = blocks.filter((block) => block['@type'] === 'SoftwareApplication');
   const source = blocks.filter((block) => block['@type'] === 'SoftwareSourceCode');
+  if (bare === '/' || bare === '/about/') {
+    const names = new Set();
+    for (const block of blocks) collectAlternateNames(block, names);
+    if (!names.has(FORMER_LANGUAGE_NAME)) {
+      errors.push(`${route}: JSON-LD missing alternateName ${FORMER_LANGUAGE_NAME}`);
+    }
+    const serialized = JSON.stringify(blocks);
+    if (!serialized.includes(FORMER_RELEASE_URL)) {
+      errors.push(`${route}: JSON-LD missing former-release sameAs ${FORMER_RELEASE_URL}`);
+    }
+  }
+  if (bare === '/about/') {
+    const expectedNote = locale === 'pt' ? FORMER_NAME_NOTE_PT : FORMER_NAME_NOTE;
+    if (!visibleProse(html).includes(expectedNote)) {
+      errors.push(`${route}: visible former-name note is missing`);
+    }
+  }
   const articles = blocks.filter((block) => block['@type'] === 'TechArticle');
   const crumbs = blocks.filter((block) => block['@type'] === 'BreadcrumbList');
 
@@ -249,12 +333,24 @@ for await (const file of walk(dist)) {
   }
   const article = articles[0];
   if (article) {
-    const headline = bare === '/learn/compiler/self-hosted/' ? SELF_HOSTED_PAGE.h1 : expected.title;
+    const isSelfHostedPage = bare === '/learn/compiler/self-hosted/';
+    const isEffectsPage = bare === '/learn/effects/';
+    const headline = isSelfHostedPage
+      ? SELF_HOSTED_PAGE.h1
+      : isEffectsPage
+        ? EFFECTS_PAGE.h1
+        : expected.title;
     if (article.headline !== headline) errors.push(`${route}: TechArticle headline does not match ${JSON.stringify(headline)}`);
     if (article.description !== expected.description) errors.push(`${route}: TechArticle description does not match the meta description`);
     if (article.inLanguage !== 'en') errors.push(`${route}: TechArticle inLanguage`);
     if (article.url !== absoluteUrl(bare)) errors.push(`${route}: TechArticle url ${article.url}`);
-    if ('dateModified' in article) errors.push(`${route}: dateModified was emitted without a calendar date in the source`);
+    if (isEffectsPage) {
+      if (article.dateModified !== EFFECTS_PAGE.dateModified) {
+        errors.push(`${route}: dateModified is ${JSON.stringify(article.dateModified)}`);
+      }
+    } else if ('dateModified' in article) {
+      errors.push(`${route}: dateModified was emitted without a calendar date in the source`);
+    }
   }
   if (bare === '/learn/compiler/self-hosted/') {
     if (headings[0] !== SELF_HOSTED_PAGE.h1) {
@@ -289,6 +385,61 @@ for await (const file of walk(dist)) {
       errors.push(`${route}: TechArticle about ${JSON.stringify(article?.about)}`);
     }
   }
+  if (bare === '/learn/effects/') {
+    if (headings[0] !== EFFECTS_PAGE.h1) {
+      errors.push(`${route}: H1 is ${JSON.stringify(headings[0])}, expected ${JSON.stringify(EFFECTS_PAGE.h1)}`);
+    }
+    const lede = firstParagraphAfterH1(html);
+    if (lede !== EFFECTS_PAGE.lede) errors.push(`${route}: first paragraph after H1 does not match the answer`);
+    const versionHit = html.match(/v0\.80|v0\.99|v0\.100|v1\.0/);
+    if (versionHit) errors.push(`${route}: compiler version ${versionHit[0]} appears in the HTML`);
+    if (/\bAsync\b/.test(html)) errors.push(`${route}: Async appears in the HTML`);
+    if (/handle&lt;(?!\/)|handle<(?!\/)/.test(html)) {
+      errors.push(`${route}: handle< appears in the HTML`);
+    }
+    if (/\bphysician\b|\bPhD\b|\bDr\.|\bMD\b|honorificPrefix/.test(html)) {
+      errors.push(`${route}: forbidden credential or honorificPrefix in the HTML`);
+    }
+    if ('softwareVersion' in (article ?? {})) errors.push(`${route}: softwareVersion on TechArticle`);
+    if (JSON.stringify(article?.author) !== JSON.stringify(EFFECTS_PAGE.author)) {
+      errors.push(`${route}: TechArticle author ${JSON.stringify(article?.author)}`);
+    }
+    if (JSON.stringify(article?.about) !== JSON.stringify(EFFECTS_PAGE.about)) {
+      errors.push(`${route}: TechArticle about ${JSON.stringify(article?.about)}`);
+    }
+    if (JSON.stringify(article?.isPartOf) !== JSON.stringify(EFFECTS_PAGE.isPartOf)) {
+      errors.push(`${route}: TechArticle isPartOf ${JSON.stringify(article?.isPartOf)}`);
+    }
+    if (article?.proficiencyLevel !== EFFECTS_PAGE.proficiencyLevel) {
+      errors.push(`${route}: TechArticle proficiencyLevel`);
+    }
+    if (JSON.stringify(article?.dependencies) !== '[]') {
+      errors.push(`${route}: TechArticle dependencies ${JSON.stringify(article?.dependencies)}`);
+    }
+    const faq = blocks.find((block) => block['@type'] === 'FAQPage');
+    if (!faq) errors.push(`${route}: FAQPage missing`);
+    const entities = faq?.mainEntity ?? [];
+    if (entities.length !== EFFECTS_FAQ.length) {
+      errors.push(`${route}: FAQPage has ${entities.length} questions`);
+    }
+    const visibleHtml = visibleProse(html);
+    EFFECTS_FAQ.forEach((item, index) => {
+      const entity = entities[index];
+      if (entity?.name !== item.question || entity?.acceptedAnswer?.text !== item.answer) {
+        errors.push(`${route}: FAQPage item ${index} does not match the source strings`);
+      }
+      if (!visibleHtml.includes(item.question) || !visibleHtml.includes(item.answer)) {
+        errors.push(`${route}: FAQ item ${index} is not visible`);
+      }
+    });
+    for (const rel of [
+      'tests/compile-fail/effect_io_in_pure.sio',
+      'tests/compile-fail/effects_unhandled.sio',
+      'tests/run-pass/effect_handler_basic.sio',
+    ]) {
+      if (!html.includes(rel)) errors.push(`${route}: missing test path ${rel}`);
+    }
+  }
   if (bare === '/') {
     const app = software[0];
     if (app && app.description !== expected.description) errors.push(`${route}: SoftwareApplication description drifted from the meta description`);
@@ -306,6 +457,12 @@ for (const page of Object.keys(ENGLISH_SEARCH)) {
 }
 
 if (pages === 0) errors.push('no HTML pages checked');
+
+const readmePath = path.join(website, '..', 'README.md');
+const readmeHead = (await readFile(readmePath, 'utf8')).split('\n').slice(0, 25).join('\n');
+if (!readmeHead.includes('Sounio (formerly Demetrios)') || !readmeHead.includes('previously released as Demetrios, the former name of this language.')) {
+  errors.push('README.md: former-name note is missing from the top of the file');
+}
 
 for (const warning of warnings) console.warn(`search-appearance: WARN ${warning}`);
 if (errors.length) {

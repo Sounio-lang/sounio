@@ -249,6 +249,30 @@ var FO_INLINE_CAP: i64 = 8
 var FO_INLINE_BUDGET: i64 = 96
 var FO_INLINE_COUNT: i64 = 0
 var FO_INLINE_TRUNCATED: i64 = 0
+// Virtual-register budget for a speculative FO paste. A paste re-lowers the
+// whole helper body for ONE field of its result, so a struct literal built
+// from N fields of helper calls pastes the helper N times: cd_product_16
+// (stdlib/math/cayley_dickson.sio) pasted the ~2000-vreg oct64_mul body once
+// per Sed16Comp field and ran fresh_reg past IR_MAX_VREGS. The paste's
+// instructions are rolled back on that hard error but its vregs are not (they
+// may carry float marks, see the rollback sites), so the function's REAL code
+// then found reg_count == IR_MAX_VREGS and the whole compile failed.
+// A paste is therefore admitted only while the function has room for the
+// largest paste seen so far plus FO_INLINE_VREG_SLACK for the real code that
+// follows. Refused pastes raise FO_INLINE_TRUNCATED like the depth/budget caps.
+var FO_INLINE_VREG_MAX_COST: i64 = 0
+let FO_INLINE_VREG_SLACK: i64 = 1024
+
+fn fo_inline_vreg_room_ok(reg_count: i64) -> bool {
+    reg_count <= IR_MAX_VREGS - FO_INLINE_VREG_MAX_COST - FO_INLINE_VREG_SLACK
+}
+
+fn fo_inline_note_vreg_cost(before: i64, after: i64) with Mut {
+    let cost = after - before
+    if cost > FO_INLINE_VREG_MAX_COST {
+        FO_INLINE_VREG_MAX_COST = cost
+    }
+}
 // Loop bodies are real IR. Re-lowering one is only sound for an explicit
 // uncertainty query. A straight-line helper is different: the sensitivity
 // has to be recorded on the let, or a later variance_of(local) reads the seed.
@@ -20823,6 +20847,18 @@ impl Lowerer {
     // as a pure helper: an f64 parameter carries the argument's variance and
     // sensitivities; a loop, match or nested closure was not recorded.
     fn fo_closure_call_variance(self, local: Name, args: &Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        let regs_before = (*self.current_func).reg_count
+        if !fo_inline_vreg_room_ok(regs_before) {
+            FO_INLINE_TRUNCATED = 1
+            return (self, 0 - 1)
+        }
+        let r = self.fo_closure_call_variance_paste(local, args)
+        let lo_r = r.0
+        fo_inline_note_vreg_cost(regs_before, (*lo_r.current_func).reg_count)
+        (lo_r, r.1)
+    }
+
+    fn fo_closure_call_variance_paste(self, local: Name, args: &Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         var lo = self
         if FO_INLINE_DEPTH >= 8 {
             FO_INLINE_TRUNCATED = 1
@@ -22448,7 +22484,20 @@ impl Lowerer {
     // `path[0..npath]` (root to leaf) projects a field out of a struct-returning
     // callee: the tail must be a struct literal (directly, or the last `let`'s
     // right-hand side), and the variance is that of the leaf field's initialiser.
+    // Vreg-budget gate around every helper paste (see FO_INLINE_VREG_MAX_COST).
     fn fo_inline_call_variance_ex(self, callee: Name, args: &Option<Box<ExprList>>, recv: Name, has_recv: bool, path: [Name; 8], npath: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        let regs_before = (*self.current_func).reg_count
+        if !fo_inline_vreg_room_ok(regs_before) {
+            FO_INLINE_TRUNCATED = 1
+            return (self, 0 - 1)
+        }
+        let r = self.fo_inline_call_variance_paste(callee, args, recv, has_recv, path, npath)
+        let lo_r = r.0
+        fo_inline_note_vreg_cost(regs_before, (*lo_r.current_func).reg_count)
+        (lo_r, r.1)
+    }
+
+    fn fo_inline_call_variance_paste(self, callee: Name, args: &Option<Box<ExprList>>, recv: Name, has_recv: bool, path: [Name; 8], npath: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         var lo = self
         if FO_INLINE_DEPTH >= FO_INLINE_CAP || FO_INLINE_DEPTH >= 8 {
             FO_INLINE_TRUNCATED = 1
