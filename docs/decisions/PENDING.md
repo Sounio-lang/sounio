@@ -13,7 +13,7 @@ Cada seção abaixo é uma decisão que não cabe a quem corrige bugs: semântic
 
 Formato de cada seção: **Origem** (issue, PRs relacionados) · **Pergunta** (uma frase) · **Opções** · **Recomendação** · **Teste discriminante** (o teste que passa a existir/ser verdadeiro conforme a opção escolhida) · **Causa localizada** (arquivo e função, medida em `main` `c2e3df23c`).
 
-Os ADRs de [`README.md`](README.md) registram decisões já tomadas; este arquivo registra as que ainda não foram. Quando uma for tomada, ela vira ADR e a seção sai daqui.
+Os ADRs de [`README.md`](README.md) registram decisões já tomadas; este arquivo registra as que ainda não foram. Quando uma for tomada, ela vira ADR e a seção sai daqui. D-15, D-16, D-20, D-22, D-24, D-25, D-26 e D-27 foram decididas em 2026-10-25: [ADR-020](adr-020-rulings-2026-10-25.md).
 
 | § | decisão | origem |
 |---|---|---|
@@ -31,19 +31,11 @@ Os ADRs de [`README.md`](README.md) registram decisões já tomadas; este arquiv
 | [D-12](#d-12) | Gate de regressão de corpus: baseline e fiação | #2306 |
 | [D-13](#d-13) | Os dois pipelines `-O` | #2368 |
 | [D-14](#d-14) | Censo de alcançabilidade (~314 módulos sem importador) | #2371 |
-| [D-15](#d-15) | Grafia do conjunto vazio de efeitos | #2293 |
-| [D-16](#d-16) | Palavras-chave como nome de campo | #2833 |
 | [D-17](#d-17) | Variantes de enum com payload | #645 |
 | [D-18](#d-18) | Aliasing de retornos de tupla-array (não reproduzível) | #1582 |
 | [D-19](#d-19) | `Knowledge<T where {...}>`: o predicado é imposto? | #2753 |
-| [D-20](#d-20) | Erros de tipo em módulos importados no `lean_single` | #1494 |
 | [D-21](#d-21) | SOIR: colisão magic+versão 6 | #1162 |
-| [D-22](#d-22) | PBPK: AUC de sangue total rotulada como plasma | #2816 |
 | [D-23](#d-23) | `Knowledge ⊗ Knowledge` no Madaros (E245) e NaN além do teto de recursão | #1706 |
-| [D-24](#d-24) | Valor adimensional passado a parâmetro com unidade | #2874 |
-| [D-25](#d-25) | `i64 as string` é legal? | #2354 |
-| [D-26](#d-26) | Empréstimo implícito de temporários e campos em chamadas | #2820 |
-| [D-27](#d-27) | Goldens de química após arredondamento correto de literais | #2826, #1644 |
 | [D-28](#d-28) | Operadores infixos `!` e `~` (aplicado provisoriamente no PR #2921) | #2249 |
 | [D-29](#d-29) | Seed macOS ARM64 com recibo de proveniência | #821 |
 | [D-30](#d-30) | Raízes precisas para o GC de handles | #1491 |
@@ -193,26 +185,6 @@ Os ADRs de [`README.md`](README.md) registram decisões já tomadas; este arquiv
 - **Teste discriminante:** o censo refeito com as raízes completas reporta a nova contagem de módulos inalcançáveis (`ir/locality.sio` 3500 linhas, `effects/handlers.sio` 2991, `ir/incremental.sio` 2936, `check/type_erasure.sio` 3179 têm 0 importadores).
 - **Causa localizada:** a lista de 4 raízes do censo estava incompleta (`scripts/ci/epistemic_witness_gate.sh:35`, `epistemic_monotonicity_gate.sh:45` compilam o driver diretamente).
 
-<a id="d-15"></a>
-## D-15 — Conjunto vazio de efeitos
-
-- **Origem:** #2293.
-- **Pergunta:** qual a grafia (ou regra) para um tipo de função pura, de modo que um combinador puro saia da catraca do tipo-fn?
-- **Opções:** (1) linha vazia explícita (`with ()` recomendado, ou `with Pure`); (2) a catraca aceita tipo-fn nu comprovadamente sem efeitos; (3) status quo.
-- **Recomendação:** (1) com `with ()`.
-- **Teste discriminante:** `fn apply(f: fn(f64) -> f64 with (), x: f64)` passa em `check` nos dois engines (hoje: Madaros E246 para `with Pure` e erro de parse para `with ()`; `lean_single` lê `with Pure, x: f64` de outro modo e dá E006).
-- **Causa localizada:** `docs/spec/S06_EFFECTS_ROWS.md` §6.1.0 (lista fechada) e §6.6; `examples/higher_order.sio:27-31` ainda sobre-declara `with Mut, Panic, Div`.
-
-<a id="d-16"></a>
-## D-16 — Palavras-chave como nome de campo
-
-- **Origem:** #2833.
-- **Pergunta:** palavras-chave são válidas como nome de campo?
-- **Opções:** (a) sim, contextualmente (o próprio código do compilador usa `module:`/`.module`/`.const`), e o `lean_single` passa a aceitar todas; (b) não, e o Madaros passa a recusar.
-- **Recomendação:** (a), emendando a spec §2.2.
-- **Teste discriminante:** `struct G { mu: f64, var: f64 }` + `g.var` e os campos `type`, `fn`, `let`, `module` rodam e imprimem o mesmo valor nos dois engines (hoje Madaros `2`, `lean_single` "missing field in struct literal", exceto `module`).
-- **Causa localizada:** Madaros: `self-hosted/parser/parser.sio` `expect_ident` aceita `Ident || tk_is_keyword(k)`; `lean_single`: o casamento de campo em literal/acesso aceita só alguns tokens-palavra-chave.
-
 <a id="d-17"></a>
 ## D-17 — Variantes de enum com payload
 
@@ -243,16 +215,6 @@ Os ADRs de [`README.md`](README.md) registram decisões já tomadas; este arquiv
 - **Teste discriminante:** sob (a), com `Knowledge<Patient where { age >= 18 }>`: `age = 13` sai com código ≠ 0 e `age = 21` imprime `age=21` com rc=0, nos dois engines. Sob (b) ambos são erro E269 (`tests/compile-fail/knowledge_where_refinement_refused_invalid_2753.sio`). Em `main` hoje: Madaros `age=13`, rc=0; `lean_single` P0003 (fronteira ε, não o predicado) também para 21.
 - **Causa localizada:** check/lower do Madaros não carregam predicado para refinamentos de `Knowledge<T>` (a expansão vive em `scripts/ontology/expand_knowledge_runtime_guards.sh`); o P0003 do `lean_single` vem da checagem de confiança.
 
-<a id="d-20"></a>
-## D-20 — Erros de tipo em módulos importados no `lean_single`
-
-- **Origem:** #1494 (ramo `009ea863f` com a mudança, empilhado em #2845).
-- **Pergunta:** erros de tipo em módulo importado passam a ser fatais no `lean_single`?
-- **Opções:** (a) fatais (recomendado); (b) recusar a geração só do construto com falha; (c) documentar a tolerância.
-- **Recomendação:** (a), porém medindo antes: com a mudança, 121 arquivos do corpus passam a ser recusados; é preciso decidir se isso é correção do corpus ou regressão.
-- **Teste discriminante:** `helper.sio` com `let x: i64 = true` e `main.sio` com `use helper::{bad}`: `check` e `run` retornam rc≠0 (Madaros já; `lean_single` hoje `check` imprime E001 e sai com rc=0, `run` imprime `2`).
-- **Causa localizada:** `self-hosted/compiler/lean_single.sio` `tc_mark_failed` (~4659), `note_limit_error` (~1159), `tc_effect_violation` (~5463): retornam cedo sem marcar `TYPECHECK_FAILED` quando `FN_EFFECTS[CURRENT_FN] & 2048` (função importada).
-
 <a id="d-21"></a>
 ## D-21 — SOIR: colisão de magic + versão 6
 
@@ -263,16 +225,6 @@ Os ADRs de [`README.md`](README.md) registram decisões já tomadas; este arquiv
 - **Teste discriminante:** bytes de `serialize_ir_module(empty)` entregues a `soir_v6_reader` e um contêiner seccionado v6 entregue a `deserialize_ir_module` são ambos recusados com status estável. Esse teste não existe em `main`.
 - **Causa localizada:** `self-hosted/ir/serialize.sio:56` (`SOIR_VERSION: i8 = 6`, aceita também v5 em `:4781`); `ir/soir_v6_writer.sio:16` (`SOIR_V6_WRITER_VERSION: i8 = 6`), `soir_v6_reader.sio:12,199-212`; o v5 sombra de arena em `ir/soir_writer.sio:13` também coexiste.
 
-<a id="d-22"></a>
-## D-22 — PBPK: AUC de sangue total rotulada como plasma
-
-- **Origem:** #2816 (PR #2916 documenta o estado).
-- **Pergunta:** converter (dividir por `rb_ratio`) ou reetiquetar?
-- **Opções:** (a) converter nos 6 pontos de acoplamento; (b) reetiquetar como sangue total.
-- **Recomendação:** (a).
-- **Teste discriminante:** haloperidol (`rb_ratio = 1`) bit-idêntico antes e depois; a AUC da rapamicina escala exatamente por `1/0.58`.
-- **Causa localizada:** `stdlib/darwin_pbpk/scenarios/steady_state_runner.sio:135,166,205,230`; `docs/audit/DARWIN_PBPK_BLOOD_AS_PLASMA_BBB_DRIVER_2026-09-26.md:12` ("Status: OPEN").
-
 <a id="d-23"></a>
 ## D-23 — `Knowledge ⊗ Knowledge` no Madaros (E245) e NaN além do teto de recursão
 
@@ -282,46 +234,6 @@ Os ADRs de [`README.md`](README.md) registram decisões já tomadas; este arquiv
 - **Recomendação:** 1: retirar E245 só junto com a regra explícita de confiança/proveniência (o `lean_single` já passa o teste com #2941); 2: recusa em compilação quando o teto é atingido (NaN nunca é um valor honesto de "não sei").
 - **Teste discriminante:** 1: `tests/known_failures/madaros_gum_fo_knowledge_ops` passa a rodar e dá a variância analítica; 2: `pw(a, 8)` com valor analítico 2621,44 dá o valor ou é recusada em compilação.
 - **Causa localizada:** 1: emissão de E245 em `self-hosted/check/check.sio` (exceção E230/E245 em ~8098–8130, #2140); 2: o desenrolamento por re-lowering em `self-hosted/ir/lower.sio` (PR #2945).
-
-<a id="d-24"></a>
-## D-24 — Valor adimensional passado a parâmetro com unidade
-
-- **Origem:** #2874; PRs #2905, #2924, #2939.
-- **Pergunta:** passar um número sem unidade a um parâmetro com unidade é erro?
-- **Opções:** (a) erro nos dois engines; (b) aceito nos dois.
-- **Recomendação:** (a), por consistência com `let dose: mg = 500.0` exigir a unidade.
-- **Teste discriminante:** `tests/run-pass/unit_parameter_representation_issue2874.sio` e `tests/multimodule/unit_representation_2874` passam hoje a um parâmetro `kg` um valor adimensional: o `lean_single` recusa (`unit_call_arg_mismatch`), o Madaros aceita, e dois testes do repositório fixam respostas opostas. Sob (a) eles ganham a unidade; sob (b) o `lean_single` deve aceitar.
-- **Causa localizada:** `self-hosted/compiler/lean_single.sio:2049` (`unit_call_arg_mismatch`), chamado em `:18344`; no Madaros a checagem de argumento não compara dimensão com adimensional.
-
-<a id="d-25"></a>
-## D-25 — `i64 as string`
-
-- **Origem:** #2354; PR #2908 (recusa com E270) e #2938.
-- **Pergunta:** `n as string` converte número em texto ou é sempre erro?
-- **Opções:** (a) E270 permanente (usar uma função de formatação explícita); (b) o cast passa a formatar o inteiro nos dois engines.
-- **Recomendação:** (a): nenhum engine formata hoje, e a recusa fecha o SIGSEGV.
-- **Teste discriminante:** `println(n as string)` é erro de compilação E270 (a) ou imprime o número nos dois engines (b).
-- **Causa localizada:** `self-hosted/check/check.sio` ~12878–12884 (E270, PR #2908).
-
-<a id="d-26"></a>
-## D-26 — Empréstimo implícito de temporários e campos
-
-- **Origem:** #2820 (PR #2946 relata a divergência).
-- **Pergunta:** um temporário (`getw(make_w())`, `getw(W { .. })`) ou um campo (`sum2(o.inner, ..)`) pode ser emprestado implicitamente em chamada?
-- **Opções:** (a) sim, nos dois engines (o `lean_single` já aceita); (b) só identificadores (o Madaros já impõe), e o `lean_single` passa a recusar.
-- **Recomendação:** (b): empréstimo de temporário esconde tempo de vida; exigir `&` explícito.
-- **Teste discriminante:** `getw(make_w())` e `sum2(o.inner, ..)` dão o mesmo veredito nos dois engines (hoje Madaros E009 "expected &W, found W", `lean_single` aceita).
-- **Causa localizada:** `self-hosted/check/check.sio:21635` ("Allow implicit borrow syntax at call boundaries"), que só admite identificador; e `lean_single.sio` na checagem de argumento.
-
-<a id="d-27"></a>
-## D-27 — Goldens de química após arredondamento correto de literais
-
-- **Origem:** #2826 e #1644 (PR #2904, vermelho apenas em "Chemistry probe golden").
-- **Pergunta:** os números do paper (`benchmarks/chemistry/RESULTS.md`) são re-derivados e os goldens regenerados agora que o `lean_single` converte literais com arredondamento correto?
-- **Opções:** (a) aceitar a mudança, regenerar `gbs_oracle.lean_single.txt` e `rep_traj_bug` (`REGEN=1 bash scripts/ci/chemistry_probe_golden_gate.sh`) e atualizar `RESULTS.md`; (b) não corrigir o arredondamento no `lean_single`.
-- **Recomendação:** (a): o gate diz que um diff significa "um número do paper se moveu: re-derive, não regenere para passar"; a nova saída é a mais correta, e a mudança é de ruído numérico (p.ex. profundidade 3: `5730155586 → 5730156985` em ×1e18), mas quem escreve o paper deve conferir.
-- **Teste discriminante:** `bash scripts/ci/chemistry_probe_golden_gate.sh` verde contra os goldens regenerados, com `RESULTS.md` consistente.
-- **Causa localizada:** `flc_tok_bits` em `self-hosted/compiler/lean_single.sio` (PR #2904) altera os bits dos literais; o gate compara com `benchmarks/chemistry/golden/*.lean_single.txt`.
 
 <a id="d-28"></a>
 ## D-28 — Operadores infixos `!` e `~`

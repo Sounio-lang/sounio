@@ -96,7 +96,7 @@ check ref_option_local_match_typed REF_OPTION_LOCAL_MATCH_TYPED_OK
 check global_option_list_match_typed GLOBAL_OPTION_LIST_MATCH_TYPED_OK
 check box_field_local_typed BOX_FIELD_LOCAL_TYPED_OK
 check let_match_some_payload_typed LET_MATCH_SOME_PAYLOAD_TYPED_OK
-check uninit_struct_array_field UNINIT_STRUCT_ARRAY_FIELD_OK
+check uninit_struct_array_field_global UNINIT_STRUCT_ARRAY_FIELD_OK
 check tuple_raw_slot_deref TUPLE_RAW_SLOT_OK
 
 cat >"$WORK/refuse.sio" <<'SIO'

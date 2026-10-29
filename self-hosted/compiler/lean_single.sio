@@ -420,6 +420,9 @@ var RESOLVE_TY: i64 = 0
 var RESOLVE_TY_HASH: i64 = 0
 var LEX_ERROR_LINE: i64 = 0
 var LEX_ERROR_KIND: i64 = 0
+var LEX_ERROR_BYTE: i64 = 0
+var LEX_ERROR_COL: i64 = 0
+var LEX_ERROR_TOK: i64 = 0
 var MATCH_SCRUT_TY: i64 = 0
 var MATCH_SCRUT_HASH: i64 = 0
 
@@ -5182,6 +5185,99 @@ fn tc_error_hard(tok: i64, msg: string) -> i64 with IO, Mut, Panic {
     return 0
 }
 
+// ADR-015 row 1 (E276), lean_single half: refuse an integer literal that fits
+// no 64-bit integer type instead of wrapping it. The shared parser refuses the
+// same set (parser_span_int_literal_overflow), with the same message text, so
+// one fixture pattern pins both engines.
+//
+// Returns 0 = fits some 64-bit type; 1 = wider than 2^64-1; 2 = exactly 2^63,
+// which the caller refuses unless a prefix minus absorbs the sign bit.
+//
+// Deliberately no hand-copied ASCII tables of 2^63/2^64: one drifted from the
+// constant it claimed to encode and refused u64 MAX. And no 19- or 20-digit
+// accumulation: that overflows i64 and lands on a negative number, which made an
+// earlier cut of the shared test accept 99999999999999999999. Split instead as
+// <2 digits> * 10^18 + <18 digits>; 10^18-1 < 2^63, so each part is exact.
+fn lit_int_width_class(s: i64, e: i64) -> i64 with Mut, Panic {
+    if e <= s { return 0 }
+    var base: i64 = 10
+    var dfrom = s
+    if sb(s) == 48 && s + 1 < e && (sb(s + 1) == 120 || sb(s + 1) == 88) {
+        base = 16
+        dfrom = s + 2
+    }
+    // Significant digits: leading zeros carry no width. Separators are handled by
+    // the shared lexer's own scan, which never reaches here with `_` inside.
+    var first = dfrom
+    while first < e && sb(first) == 48 { first = first + 1 }
+    let digits = e - first
+    if digits <= 0 { return 0 }              // the literal is zero
+    if base == 16 {
+        if digits > 16 { return 1 }
+        return 0
+    }
+    if digits > 20 { return 1 }
+    if digits < 19 { return 0 }
+    if first + 1 >= e { return 0 }
+    let lead2 = (sb(first) - 48) * 10 + (sb(first + 1) - 48)
+    var acc: i64 = 0
+    var walked: i64 = 0
+    var i = first + 2
+    while i < e && walked < 18 {
+        let c = sb(i)
+        if c < 48 || c > 57 { break }
+        acc = acc * 10 + (c - 48)
+        walked = walked + 1
+        i = i + 1
+    }
+    if digits == 20 {
+        // 2^64 = 18 * 10^18 + 446744073709551616.
+        if lead2 != 18 {
+            if lead2 > 18 { return 1 }
+            return 0
+        }
+        if acc >= 446744073709551616 { return 1 }
+        return 0
+    }
+    // 19 digits. 2^63 = 92 * 10^18 + 23372036854775808; i64 MAX is one below it,
+    // and nothing else with 19 digits is a boundary this half of the rule decides.
+    if lead2 != 92 { return 0 }
+    if acc != 23372036854775808 { return 0 }
+    2
+}
+
+// Digits that are not an integer at all: `.5` or `5e9` continues a float, and
+// the fraction of a C99 hex float reaches here as its own decimal token
+// (`0x1.0000000000000800000000000000000000001p+0` has 37 of them), because the
+// hex token stops at the `.`. `p`/`P` right after the run is what says so.
+fn lit_is_float_tail(start: i64, end: i64) -> bool with Mut, Panic {
+    let nx = sb(end)
+    if nx == 101 || nx == 69 { return true }                     // decimal exponent
+    let after = sb(end + 1)
+    if nx == 46 && after >= 48 && after <= 57 { return true }    // `.digit`
+    if nx != 112 && nx != 80 { return false }                     // not a p-exponent
+    // A C99 hex float is `0x<hex>[.<hex>]p<exp>`. Its mantissa never carries a
+    // `.` here (the hex token stops at one), and no integer is followed by `p`,
+    // so a `.` anywhere around this run of digits can only mean a float fraction.
+    if start > 0 && sb(start - 1) == 46 { return true }
+    false
+}
+
+
+// The minus before the literal being lexed now is a prefix operator (so
+// `-9223372036854775808` spells i64 MIN, and the literal itself fits) unless
+// the token before that minus can already end a value, which makes it the
+// binary subtraction operator. Uses token kinds, because the shared lexer has
+// them in hand: IntLit 4, Ident 5, FloatLit 53, `)` 7, `]` 42, and Minus is 18.
+fn lit_prefix_minus_is_unary() -> bool with Mut, Panic {
+    if TC < 1 { return true }
+    if TK[(TC - 1) as usize] != 18 { return false }
+    if TC < 2 { return true }
+    let k = TK[(TC - 2) as usize]
+    if k == 4 || k == 5 || k == 53 || k == 7 || k == 42 { return false }
+    true
+}
+
 // #2751: the wording follows Madaros' E001 for the same refusal ("this binding
 // expects a different type"), so one fixture pattern pins both engines.
 fn tc_let_unit_mismatch(tok: i64) -> i64 with IO, Mut, Panic {
@@ -6901,10 +6997,12 @@ fn stmt_is_deref_indexed_elem_field_store(p0: i64) -> bool with Panic, Mut {
     if TK[(p0 + 3) as usize] != 7 { return false }  // )
     var p = p0 + 4
     var saw_index: i64 = 0
+    var fields: i64 = 0
     while p < TC {
         if TK[p as usize] == 50 {                   // . field
             if TK[(p + 1) as usize] != 3 { return false }
             p = p + 2
+            fields = fields + 1
             continue
         }
         if TK[p as usize] == 41 {                   // [ … ]
@@ -6919,7 +7017,11 @@ fn stmt_is_deref_indexed_elem_field_store(p0: i64) -> bool with Panic, Mut {
             continue
         }
         if TK[p as usize] == 16 {                   // =
-            if saw_index == 0 { return false }
+            // Without an index, three or more field hops: `(*c).a.b.c = v`. One and
+            // two hops have their own handlers, dispatched earlier; three fell to the
+            // generic path and lost the store (self-hosted/check/mod.sio:876-882,
+            // 918, 935, 948, 969: the ontology kernel's counts and profile flags).
+            if saw_index == 0 && fields < 3 { return false }
             if p < p0 + 6 { return false }
             // Two terminal forms: `. field =` stores into a field, `] =` stores into an
             // array ELEMENT. The element form is the one ir/opt_cleanup.sio uses for its
@@ -6953,10 +7055,12 @@ fn stmt_is_ident_indexed_elem_field_store(p0: i64) -> bool with Panic, Mut {
     if TK[(p0 + 1) as usize] != 50 { return false } // must start with `. field`, not `[`
     var p = p0 + 1
     var saw_index: i64 = 0
+    var fields: i64 = 0
     while p < TC {
         if TK[p as usize] == 50 {                   // . field
             if TK[(p + 1) as usize] != 3 { return false }
             p = p + 2
+            fields = fields + 1
             continue
         }
         if TK[p as usize] == 41 {                   // [ … ]
@@ -6971,7 +7075,10 @@ fn stmt_is_ident_indexed_elem_field_store(p0: i64) -> bool with Panic, Mut {
             continue
         }
         if TK[p as usize] == 16 {                   // =
-            if saw_index == 0 { return false }
+            // As the deref twin: three or more field hops with no index
+            // (`s.builder.func.abi = abi`, self-hosted/hlir/lower.sio:524-1993) had no
+            // handler and lost the store.
+            if saw_index == 0 && fields < 3 { return false }
             if p < p0 + 3 { return false }
             // Same two terminal forms as the deref twin: `. field =` (field of an element)
             // and `] =` (the element itself).
@@ -6995,12 +7102,25 @@ fn stmt_is_ident_indexed_elem_field_store(p0: i64) -> bool with Panic, Mut {
 // this predicate accepts the whole chain grammar rather than a single shape.
 // Base address: load the root, add the inner field offsets (inline), then LOAD the pointer
 // stored in the final inner field — that is the deref the `(* )` spells.
+// `(*(*name).field…)<chain>`: the same root spelled with an explicit inner deref,
+// `(*(*lo).struct_layouts).count = n` (self-hosted/ir/lower.sio:4989, 5002, 5013,
+// 5574, 7107). It had no handler and lost the store.
+fn deref_inner_root_explicit(p0: i64) -> bool with Panic, Mut {
+    return TK[p0 as usize] == 6 && TK[(p0 + 1) as usize] == 19 && TK[(p0 + 2) as usize] == 6
+        && TK[(p0 + 3) as usize] == 19 && TK[(p0 + 4) as usize] == 3 && TK[(p0 + 5) as usize] == 7
+        && TK[(p0 + 6) as usize] == 50
+}
+
 fn stmt_is_deref_inner_root_store(p0: i64) -> bool with Panic, Mut {
     if TK[p0 as usize] != 6 { return false }        // (
     if TK[(p0 + 1) as usize] != 19 { return false } // *
-    if TK[(p0 + 2) as usize] != 3 { return false }  // simple-name root
-    if TK[(p0 + 3) as usize] != 50 { return false } // `.` — NOT the (*name) forms
     var p = p0 + 3
+    if deref_inner_root_explicit(p0) {
+        p = p0 + 6
+    } else {
+        if TK[(p0 + 2) as usize] != 3 { return false }  // simple-name root
+        if TK[(p0 + 3) as usize] != 50 { return false } // `.` — NOT the (*name) forms
+    }
     while p < TC && TK[p as usize] == 50 && TK[(p + 1) as usize] == 3 {
         p = p + 2
     }
@@ -7702,7 +7822,7 @@ fn scan_type(p0: i64) with IO, Mut, Panic, Div {
                                 }
                                 if pp < TC && TK[pp as usize] == 53 {
                                     var fbv = TV[pp as usize]
-                                    if pred_neg == 1 { fbv = fbv | 0 - 9223372036854775808 }  // flip sign bit
+                                    if pred_neg == 1 { fbv = fbv | 0x8000000000000000 }  // flip sign bit (i64 MIN bit pattern)
                                     // PR-7: capture fractional parts for rational comparison
                                     SCAN_PRED_BOUND_FRAC = TF[pp as usize]
                                     SCAN_PRED_BOUND_DENOM = TD[pp as usize]
@@ -7734,7 +7854,7 @@ fn scan_type(p0: i64) with IO, Mut, Panic, Div {
                                             }
                                             if pp < TC && TK[pp as usize] == 53 {
                                                 var fbv2 = TV[pp as usize]
-                                                if pred_neg2 == 1 { fbv2 = fbv2 | 0 - 9223372036854775808 }
+                                                if pred_neg2 == 1 { fbv2 = fbv2 | 0x8000000000000000 }
                                                 // PR-7: capture fractional parts for second bound
                                                 SCAN_PRED_BOUND2_FRAC = TF[pp as usize]
                                                 SCAN_PRED_BOUND2_DENOM = TD[pp as usize]
@@ -8469,6 +8589,8 @@ fn lex_all() with IO, Mut, Panic, Div {
     TC = 0
     LEX_ERROR_LINE = 0
     LEX_ERROR_KIND = 0
+    LEX_ERROR_COL = 0
+    LEX_ERROR_TOK = 0
     var p: i64 = 0
     var cur_line: i64 = 1
     while p < SRC_LEN && TC + 1 < token_capacity() {
@@ -8491,7 +8613,13 @@ fn lex_all() with IO, Mut, Panic, Div {
         // String literal
         if c == 34 {
             let s = p; p = p + 1
-            while p < SRC_LEN && sb(p) != 34 {
+            let str_line = cur_line
+            var str_col: i64 = 1
+            var cb: i64 = s - 1
+            while cb >= 0 && sb(cb) != 10 && sb(cb) != 2 { str_col = str_col + 1; cb = cb - 1 }
+            // A string ends at its closing quote, at a file-boundary marker
+            // (\x01), at the generated prelude, or at end of file (SIO-266).
+            while p < SRC_LEN && sb(p) != 34 && sb(p) != 1 && !(LMR_PRELUDE_SRC_START >= 0 && s < LMR_PRELUDE_SRC_START && p >= LMR_PRELUDE_SRC_START) {
                 let sc = sb(p)
                 if sc == 10 { cur_line = cur_line + 1 }
                 if sc == 92 {
@@ -8528,8 +8656,16 @@ fn lex_all() with IO, Mut, Panic, Div {
                 }
                 p = p + 1
             }
-            if p < SRC_LEN && sb(p) == 34 { p = p + 1 }
-            TK[TC as usize] = 5; TS[TC as usize] = s; TE[TC as usize] = p; TL[TC as usize] = cur_line; TC = TC + 1; continue
+            if p < SRC_LEN && sb(p) == 34 { p = p + 1 } else if LEX_ERROR_LINE == 0 {
+                // SIO-266: no closing quote before end of file. Without this,
+                // the string swallows the rest of the module (closing braces
+                // included) and Pass 0b reports only `unbalanced braces`.
+                LEX_ERROR_LINE = str_line
+                LEX_ERROR_COL = str_col
+                LEX_ERROR_KIND = 5
+                LEX_ERROR_TOK = TC
+            }
+            TK[TC as usize] = 5; TS[TC as usize] = s; TE[TC as usize] = p; TL[TC as usize] = str_line; TC = TC + 1; continue
         }
         // Number (decimal or hex 0x...)
         if c >= 48 && c <= 57 {
@@ -8549,8 +8685,30 @@ fn lex_all() with IO, Mut, Panic, Div {
                     else if h >= 65 && h <= 70 { v = v * 16 + h - 55; p = p + 1 }
                     else { hx = 0 }
                 }
+                // ADR-015 row 1: refuse a hex literal wider than 64 bits before
+                // the wrapped value reaches the token table. A trailing `p` makes
+                // it a C99 hex-float (`0x1…p-80`), whose mantissa is not an
+                // integer at all — the shared parser guards the same case with
+                // parser_hex_float_tail_ahead before calling parse_int_literal.
+                if !lit_is_float_tail(s, p) && lit_int_width_class(s, p) == 1 {
+                    tc_error_hard(TC, "E276: integer literal does not fit any 64-bit integer type")
+                }
             } else {
                 while p < SRC_LEN && sb(p) >= 48 && sb(p) <= 57 { v = v * 10 + sb(p) - 48; p = p + 1 }
+                // ADR-015 row 1: same refusal for the decimal spelling. Class 2
+                // (exactly 2^63) is refused only when the minus before it is not
+                // a prefix operator, because `-9223372036854775808` is how the
+                // corpus writes i64 MIN and the literal itself does fit.
+                // A `.`+digit or `e`/`E` tail makes this a float: its integer part
+                // is a mantissa, not a value any integer type must hold (the shared
+                // parser does not need this test because the lexer has already
+                // decided the token kind by then).
+                if !lit_is_float_tail(s, p) {
+                    let width_class = lit_int_width_class(s, p)
+                    if width_class == 1 || (width_class == 2 && !lit_prefix_minus_is_unary()) {
+                        tc_error_hard(TC, "E276: integer literal does not fit any 64-bit integer type")
+                    }
+                }
             }
             // Check for float: digits.digits (dot followed by digit, not .field)
             // When integer part is zero, leading fractional zeros are absorbed
@@ -8679,6 +8837,15 @@ fn lex_all() with IO, Mut, Panic, Div {
             if src_match(s, l, "None") { k = 58 }
             if src_match(s, l, "Ok") { k = 59 }
             if src_match(s, l, "Err") { k = 60 }
+            // `Act::None`: a user enum's variant, not Option's None. As a keyword
+            // it broke the match arm (`Act::None => input,` compiled `input`
+            // and then `,` as an expression). `Option::None`/`Result::Ok` keep
+            // the keyword, which is how lean_single implements them.
+            if k >= 57 && k <= 60 && TC >= 2 && TK[(TC - 1) as usize] == 51 && TK[(TC - 2) as usize] == 3 {
+                let pq = TS[(TC - 2) as usize]
+                let pl = TE[(TC - 2) as usize] - pq
+                if !src_match(pq, pl, "Option") && !src_match(pq, pl, "Result") { k = 3 }
+            }
             TK[TC as usize] = k; TS[TC as usize] = s; TE[TC as usize] = p; TL[TC as usize] = cur_line; TC = TC + 1; continue
         }
         // Two-char operators
@@ -8772,9 +8939,81 @@ fn lex_all() with IO, Mut, Panic, Div {
             LEX_ERROR_LINE = cur_line
             LEX_ERROR_KIND = 1
         }
+        // An ASCII byte that no rule above consumes. It used to be skipped,
+        // which changed the program instead of refusing it: `1 $ 2` printed
+        // 1, and a character literal vanished, so `[' '; 120]` filled with 0
+        // and `let c = 'b'` read the identifier `b`. lean_single has no
+        // character literals (Madaros does; its source uses none), so they
+        // are refused. `'` before an identifier with no closing quote is a
+        // lifetime (`&'static`) and is still skipped. So is `@`, the unit
+        // annotation of a type (`v: f64@L`, stdlib/darwin_pbpk): lean_single
+        // has no units and drops the annotation, which loses a check but not
+        // a value.
+        if c > 32 && c < 128 && c != 64 && LEX_ERROR_LINE == 0 {
+            if c == 39 {
+                var is_char_lit: i64 = 0
+                if p + 2 < SRC_LEN && sb(p + 1) != 92 && sb(p + 2) == 39 { is_char_lit = 1 }
+                if p + 1 < SRC_LEN && sb(p + 1) == 92 {
+                    var q: i64 = p + 2
+                    while q < SRC_LEN && q < p + 6 && sb(q) != 39 && sb(q) != 10 { q = q + 1 }
+                    if q < SRC_LEN && sb(q) == 39 { is_char_lit = 1 }
+                }
+                // A lifetime is `'` and an identifier with no quote after it.
+                // Anything else is refused: a quoted run such as `'ab'` used to
+                // drop both quotes and read the identifier `ab`, and a `'` before
+                // no identifier (`''`, `'12'`, the close of `'a b'`) vanished.
+                var lt_end: i64 = p + 1
+                let lt_c0 = if p + 1 < SRC_LEN { sb(p + 1) } else { 0 }
+                let lt_start = (lt_c0 >= 65 && lt_c0 <= 90) || (lt_c0 >= 97 && lt_c0 <= 122) || lt_c0 == 95
+                if lt_start {
+                    while lt_end < SRC_LEN && ((sb(lt_end) >= 65 && sb(lt_end) <= 90) || (sb(lt_end) >= 97 && sb(lt_end) <= 122) || (sb(lt_end) >= 48 && sb(lt_end) <= 57) || sb(lt_end) == 95) { lt_end = lt_end + 1 }
+                    if lt_end < SRC_LEN && sb(lt_end) == 39 { is_char_lit = 1 }
+                }
+                if is_char_lit == 1 {
+                    LEX_ERROR_LINE = cur_line
+                    LEX_ERROR_KIND = 3
+                } else if !lt_start {
+                    LEX_ERROR_LINE = cur_line
+                    LEX_ERROR_KIND = 4
+                    LEX_ERROR_BYTE = c
+                }
+            } else {
+                LEX_ERROR_LINE = cur_line
+                LEX_ERROR_KIND = 4
+                LEX_ERROR_BYTE = c
+            }
+        }
         p = p + 1
     }
     TK[TC as usize] = 0; TL[TC as usize] = cur_line; TC = TC + 1
+    lex_enum_variant_names()
+}
+
+// A variant of a user enum may be called None, Some, Ok or Err. The lexer makes
+// those words keywords (TK 57-60), so `enum Act { None, Neg }` declared no
+// variant named None and `Act::None` (made an identifier in lex_all) named
+// nothing. Inside an enum body, a keyword in variant position is a name.
+fn lex_enum_variant_names() with Mut, Panic {
+    var i: i64 = 0
+    while i + 2 < TC {
+        if TK[i as usize] == 47 && TK[(i + 1) as usize] == 3 && TK[(i + 2) as usize] == 8 {
+            var j: i64 = i + 3
+            var depth: i64 = 1
+            var at_variant: i64 = 1
+            while j < TC && depth > 0 {
+                let k = TK[j as usize]
+                if depth == 1 && at_variant == 1 && k >= 57 && k <= 60 { TK[j as usize] = 3 }
+                if k == 8 || k == 6 || k == 41 { depth = depth + 1 }
+                if k == 9 || k == 7 || k == 42 { depth = depth - 1 }
+                at_variant = 0
+                if depth == 1 && k == 28 { at_variant = 1 }
+                j = j + 1
+            }
+            i = j
+        } else {
+            i = i + 1
+        }
+    }
 }
 
 // ─── Variable lookup ───
@@ -10294,6 +10533,411 @@ fn emit_f128_ensure_libgcc_x86() with Mut, Panic, Div {
     emit_f128_resolve_sym_x86("__trunctfdf2", F128_RT_TRUNC_BSS_OFF)
     emit_store_imm64_to_abs_qword_x86(GL_BSS_BASE + F128_RT_READY_BSS_OFF, 1)
     patch32(already, CL)
+}
+
+// -- correctly rounded decimal -> binary64, at compile time (#2826, #1644) --
+//
+// A float literal must not lower through a run-time divsd/mulsd chain: that
+// chain rounds at every step, so 1.0e-300 landed 13 ulps off, values in
+// [2^-1075, 2^-1074) read as 0.0, and the literals behind the chemistry
+// goldens took the binary64 neighbours of the ~0.8903 grid spacing. This is
+// Madaros' conversion ported (#1626): exact fast paths where a shortcut is
+// provably exact, bignum Algorithm M otherwise. The lexer has already
+// consumed the digits into an i64 significand it cannot extend, so the token
+// text is re-read from source -- and when a nonzero digit did not fit the
+// i64, the first 800 significant digits are read into the bignum instead,
+// with a nonzero tail remembered as sticky. 800 suffices for a proof: a
+// binary64 midpoint's exact decimal expansion has at most 769 significant
+// digits, so no midpoint lies strictly inside the retained interval (see
+// parser.sio's identical path). FLC_OK=1 means "bits answer for this token";
+// every other shape keeps the old run-time lowering.
+// Base 2^31 limbs so limb*10 + carry stays inside i64; 160 limbs is 4960
+// bits (800 retained digits are 2658 bits, 10^1123 is 3730 bits).
+var FLC_N: [i64; 160] = [0; 160]
+var FLC_NL: i64 = 0
+var FLC_D: [i64; 160] = [0; 160]
+var FLC_DL: i64 = 0
+var FLC_OK: i64 = 0
+var FLC_OVERFLOW: i64 = 0
+
+fn flc_set(is_num: i64, v: i64) with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < 160 {
+        if is_num == 1 { FLC_N[i as usize] = 0 } else { FLC_D[i as usize] = 0 }
+        i = i + 1
+    }
+    var n: i64 = 0
+    var x = v
+    while x > 0 {
+        if is_num == 1 { FLC_N[n as usize] = x % 2147483648 } else { FLC_D[n as usize] = x % 2147483648 }
+        x = x / 2147483648
+        n = n + 1
+    }
+    if is_num == 1 { FLC_NL = n } else { FLC_DL = n }
+}
+
+fn flc_mul_small(is_num: i64, m: i64) with Mut, Panic, Div {
+    var len = FLC_DL
+    if is_num == 1 { len = FLC_NL }
+    if len == 0 { return }
+    var carry: i64 = 0
+    var i: i64 = 0
+    while i < len {
+        var v = FLC_D[i as usize]
+        if is_num == 1 { v = FLC_N[i as usize] }
+        v = v * m + carry
+        if is_num == 1 { FLC_N[i as usize] = v % 2147483648 } else { FLC_D[i as usize] = v % 2147483648 }
+        carry = v / 2147483648
+        i = i + 1
+    }
+    while carry > 0 && len < 160 {
+        if is_num == 1 { FLC_N[len as usize] = carry % 2147483648 } else { FLC_D[len as usize] = carry % 2147483648 }
+        carry = carry / 2147483648
+        len = len + 1
+    }
+    if carry > 0 { FLC_OVERFLOW = 1 }
+    if is_num == 1 { FLC_NL = len } else { FLC_DL = len }
+}
+
+// FLC_N = FLC_N * 10 + d, digit-by-digit significand assembly.
+fn flc_num_mul10_add(d: i64) with Mut, Panic, Div {
+    if FLC_NL == 0 {
+        if d != 0 { FLC_N[0] = d  FLC_NL = 1 }
+        return
+    }
+    flc_mul_small(1, 10)
+    var carry = d
+    var i: i64 = 0
+    while carry > 0 {
+        if i >= FLC_NL {
+            if FLC_NL >= 160 { FLC_OVERFLOW = 1  return }
+            FLC_NL = FLC_NL + 1
+        }
+        let v = FLC_N[i as usize] + carry
+        FLC_N[i as usize] = v % 2147483648
+        carry = v / 2147483648
+        i = i + 1
+    }
+}
+
+fn flc_cmp() -> i64 with Mut, Panic {
+    if FLC_NL != FLC_DL {
+        if FLC_NL > FLC_DL { return 1 }
+        return 0 - 1
+    }
+    var i = FLC_NL - 1
+    while i >= 0 {
+        if FLC_N[i as usize] != FLC_D[i as usize] {
+            if FLC_N[i as usize] > FLC_D[i as usize] { return 1 }
+            return 0 - 1
+        }
+        i = i - 1
+    }
+    return 0
+}
+
+// N = N - D, requires N >= D.
+fn flc_sub() with Mut, Panic {
+    var borrow: i64 = 0
+    var i: i64 = 0
+    while i < FLC_NL {
+        var dv: i64 = 0
+        if i < FLC_DL { dv = FLC_D[i as usize] }
+        var v = FLC_N[i as usize] - dv - borrow
+        if v < 0 { v = v + 2147483648  borrow = 1 } else { borrow = 0 }
+        FLC_N[i as usize] = v
+        i = i + 1
+    }
+    while FLC_NL > 0 && FLC_N[(FLC_NL - 1) as usize] == 0 { FLC_NL = FLC_NL - 1 }
+}
+
+fn flc_is_zero(is_num: i64) -> i64 with Mut, Panic {
+    if is_num == 1 {
+        if FLC_NL == 0 { return 1 }
+        return 0
+    }
+    if FLC_DL == 0 { return 1 }
+    return 0
+}
+
+fn flc_scale2(v: f64, n: i64) -> f64 with Mut, Panic, Div {
+    var r = v
+    var k = n
+    while k > 0 { r = r * 2.0  k = k - 1 }
+    while k < 0 { r = r / 2.0  k = k + 1 }
+    return r
+}
+
+fn flc_bits(is_num: i64) -> i64 with Mut, Panic, Div {
+    var len = FLC_DL
+    if is_num == 1 { len = FLC_NL }
+    if len == 0 { return 0 }
+    var top = FLC_D[(len - 1) as usize]
+    if is_num == 1 { top = FLC_N[(len - 1) as usize] }
+    var b: i64 = 0
+    var t = top
+    while t > 0 { b = b + 1  t = t / 2 }
+    return (len - 1) * 31 + b
+}
+
+fn flc_shl(is_num: i64, k: i64) with Mut, Panic, Div {
+    var j: i64 = 0
+    while j < k { flc_mul_small(is_num, 2)  j = j + 1 }
+}
+
+// FLC_N * 10^dexp, correctly rounded, significand already in FLC_N.
+// Faithful port of Madaros' pfl_slow (bit-length normalization, e from 0):
+// normalize to 1 <= N/D < 2, extract significand bits by long division,
+// then round by comparing the doubled remainder with the denominator.
+// `sticky`=1 says the true value is strictly above the retained
+// significand, which only breaks an exact tie upward (see the header).
+fn flc_slow_prepared(dexp: i64, sticky: i64) -> f64 with Mut, Panic, Div {
+    flc_set(0, 1)
+    var k: i64 = 0
+    if dexp > 0 {
+        while k < dexp { flc_mul_small(1, 10)  k = k + 1 }
+    } else {
+        while k < 0 - dexp { flc_mul_small(0, 10)  k = k + 1 }
+    }
+    if FLC_OVERFLOW == 1 { return 0.0 }
+    var e: i64 = 0
+    let diff = flc_bits(1) - flc_bits(0)
+    if diff > 0 { flc_shl(0, diff)  e = e + diff }
+    if diff < 0 { flc_shl(1, 0 - diff)  e = e + diff }
+    if flc_cmp() < 0 { flc_shl(1, 1)  e = e - 1 }
+    if FLC_OVERFLOW == 1 { return 0.0 }
+    var want: i64 = 53
+    if e < 0 - 1022 { want = e + 1075 }
+    if want == 0 {
+        // [2^-1075, 2^-1074): no significand bit kept, still rounded.
+        flc_sub()
+        if flc_is_zero(1) == 1 && sticky == 0 { return 0.0 }
+        return flc_scale2(1.0, 0 - 1074)
+    }
+    if want < 1 { return 0.0 }
+    if want > 53 { want = 53 }
+    var q: i64 = 1
+    flc_sub()
+    var i: i64 = 1
+    while i < want {
+        flc_shl(1, 1)
+        if FLC_OVERFLOW == 1 { return 0.0 }
+        q = q * 2
+        if flc_cmp() >= 0 { flc_sub()  q = q + 1 }
+        i = i + 1
+    }
+    flc_shl(1, 1)
+    if FLC_OVERFLOW == 1 { return 0.0 }
+    var round_up: i64 = 0
+    if flc_cmp() >= 0 {
+        flc_sub()
+        if flc_is_zero(1) == 0 || sticky == 1 { round_up = 1 }
+        else { if q % 2 == 1 { round_up = 1 } }
+    }
+    if round_up == 1 { q = q + 1 }
+    var qmax: i64 = 1
+    var z: i64 = 0
+    while z < want { qmax = qmax * 2  z = z + 1 }
+    if q >= qmax { q = q / 2  e = e + 1 }
+    return flc_scale2(q as f64, e - (want - 1))
+}
+
+fn flc_slow(sig: i64, dexp: i64) -> f64 with Mut, Panic, Div {
+    flc_set(1, sig)
+    return flc_slow_prepared(dexp, 0)
+}
+
+fn flc_pow10_exact(k: i64) -> f64 with Mut, Panic, Div {
+    var n = k
+    if n > 22 { n = 22 }
+    if n < 0 { n = 0 }
+    var v: f64 = 1.0
+    while n > 0 { v = v * 10.0  n = n - 1 }
+    return v
+}
+
+var FLC_BIG_DEXP: i64 = 0
+var FLC_BIG_STICKY: i64 = 0
+var FLC_BIG_LEAD: i64 = 0
+
+// Build the first 800 significant digits of token [s, e) into FLC_N and
+// set FLC_BIG_* for flc_slow_prepared. Returns 1 when a nonzero digit was
+// found. `exp_signed` is the already-parsed explicit exponent.
+fn flc_scan_big(s: i64, e: i64, exp_signed: i64) -> i64 with Mut, Panic, Div {
+    var int_digits: i64 = 0
+    var seen_dot: i64 = 0
+    var i = s
+    while i < e {
+        let cc = sb(i)
+        if cc == 101 || cc == 69 { i = e }
+        else {
+            if cc == 46 { seen_dot = 1 }
+            else {
+                if cc >= 48 && cc <= 57 && seen_dot == 0 { int_digits = int_digits + 1 }
+            }
+            i = i + 1
+        }
+    }
+    FLC_OVERFLOW = 0
+    flc_set(1, 0)
+    FLC_BIG_STICKY = 0
+    var started: i64 = 0
+    var retained: i64 = 0
+    var first_pow: i64 = 0
+    var power = int_digits - 1
+    i = s
+    while i < e {
+        let cc = sb(i)
+        if cc == 101 || cc == 69 { i = e }
+        else {
+            if cc >= 48 && cc <= 57 {
+                let d = cc - 48
+                if started == 0 && d == 0 {
+                    // leading zero: no significand yet
+                } else {
+                    if started == 0 { started = 1  first_pow = power + exp_signed }
+                    if retained < 800 {
+                        flc_num_mul10_add(d)
+                        retained = retained + 1
+                    } else {
+                        if d != 0 { FLC_BIG_STICKY = 1 }
+                    }
+                }
+                power = power - 1
+            }
+            i = i + 1
+        }
+    }
+    if started == 0 { return 0 }
+    FLC_BIG_LEAD = first_pow
+    FLC_BIG_DEXP = first_pow - (retained - 1)
+    return 1
+}
+
+// Compile-time bits for a plain decimal float token, or FLC_OK=0 when the
+// token is not one (hex float, leading dot, anything the payload check
+// below does not reproduce exactly). Re-lexing is the validation: silent
+// mis-lowering is the failure this exists to prevent, so no claim is made
+// on a token whose payload cannot be reproduced digit for digit.
+fn flc_tok_bits(tok: i64) -> i64 with Mut, Panic, Div {
+    FLC_OK = 0
+    FLC_OVERFLOW = 0
+    let s = TS[tok as usize]
+    let e = TE[tok as usize]
+    if s >= e { return 0 }
+    let c0 = sb(s)
+    if c0 < 48 || c0 > 57 { return 0 }
+    if s + 1 < e {
+        let c1 = sb(s + 1)
+        if c0 == 48 && (c1 == 120 || c1 == 88) { return 0 }
+    }
+    var i = s
+    var v: i64 = 0
+    var any_digits: i64 = 0
+    while i < e && sb(i) >= 48 && sb(i) <= 57 {
+        v = v * 10 + (sb(i) - 48)
+        i = i + 1
+        any_digits = 1
+    }
+    if any_digits == 0 { return 0 }
+    var frac: i64 = 0
+    var denom: i64 = 1
+    if i < e && sb(i) == 46 {
+        i = i + 1
+        // Mirror the lexer exactly: with a zero integer part, leading
+        // fractional zeros fold into TX instead of spending the 18-digit
+        // frac/denom budget (lexer comment at the float arm).
+        var fd: i64 = 0
+        var seen_nz: i64 = 0
+        if v != 0 { seen_nz = 1 }
+        while i < e && sb(i) >= 48 && sb(i) <= 57 {
+            let d = sb(i) - 48
+            if seen_nz == 0 && d == 0 {
+                // absorbed leading zero: not part of frac/denom
+            } else {
+                seen_nz = 1
+                if fd < 18 { frac = frac * 10 + d  denom = denom * 10  fd = fd + 1 }
+            }
+            i = i + 1
+        }
+    }
+    var neg: i64 = 0
+    var ev: i64 = 0
+    if i < e && (sb(i) == 101 || sb(i) == 69) {
+        i = i + 1
+        if i < e && sb(i) == 45 { neg = 1  i = i + 1 }
+        if i < e && sb(i) == 43 { i = i + 1 }
+        while i < e && sb(i) >= 48 && sb(i) <= 57 {
+            ev = ev * 10 + (sb(i) - 48)
+            i = i + 1
+        }
+    }
+    var sig: i64 = 0
+    var dexp: i64 = 0
+    var tail_nonzero: i64 = 0
+    var seen_dot: i64 = 0
+    i = s
+    while i < e {
+        let cc = sb(i)
+        var stop: i64 = 0
+        if cc == 46 { seen_dot = 1 }
+        else {
+            if cc >= 48 && cc <= 57 {
+                if sig < 922337203685477580 {
+                    sig = sig * 10 + (cc - 48)
+                    if seen_dot == 1 { dexp = dexp - 1 }
+                } else {
+                    if cc != 48 { tail_nonzero = 1 }
+                    if seen_dot == 0 { dexp = dexp + 1 }
+                }
+            } else { stop = 1 }
+        }
+        if stop == 1 { i = e } else { i = i + 1 }
+    }
+    var exp_signed = ev
+    if neg == 1 { dexp = dexp - ev  exp_signed = 0 - ev } else { dexp = dexp + ev }
+    if v != TV[tok as usize] || frac != TF[tok as usize] || denom != TD[tok as usize] {
+        return 0
+    }
+    if sig == 0 { FLC_OK = 1  return 0 }
+    if tail_nonzero == 1 {
+        if flc_scan_big(s, e, exp_signed) != 1 { return 0 }
+        if FLC_BIG_LEAD > 308 { FLC_OK = 1  return 9218868437227405312 }
+        if FLC_BIG_LEAD < 0 - 324 { FLC_OK = 1  return 0 }
+        let vbig = flc_slow_prepared(FLC_BIG_DEXP, FLC_BIG_STICKY)
+        if FLC_OVERFLOW == 1 { return 0 }
+        FLC_OK = 1
+        return f64_to_bits(vbig)
+    }
+    if dexp > 400 { dexp = 400 }
+    if dexp < 0 - 400 { dexp = 0 - 400 }
+    let two53: i64 = 9007199254740992
+    var fast_ok: i64 = 0
+    var val: f64 = 0.0
+    if sig < two53 && dexp >= 0 - 22 && dexp <= 22 { fast_ok = 1 }
+    if fast_ok == 1 {
+        val = sig as f64
+        if dexp >= 0 { val = val * flc_pow10_exact(dexp) }
+        else { val = val / flc_pow10_exact(0 - dexp) }
+    } else if sig < two53 && dexp > 22 {
+        // Extended window (mirrors Madaros): grow the significand by exact
+        // x10 steps to walk dexp down into the exact window. The #2904 form
+        // counted trailing zeros (`keep`) and then multiplied by the CLAMPED
+        // power without stripping them, which read 1.0e24 as exactly 1e23.
+        var s2: f64 = sig as f64
+        var e2 = dexp
+        while e2 > 22 && s2 <= 900719925474099.0 { s2 = s2 * 10.0  e2 = e2 - 1 }
+        if e2 <= 22 {
+            val = s2 * flc_pow10_exact(e2)
+            fast_ok = 1
+        }
+    }
+    if fast_ok == 0 {
+        val = flc_slow(sig, dexp)
+        if FLC_OVERFLOW == 1 { return 0 }
+    }
+    FLC_OK = 1
+    return f64_to_bits(val)
 }
 
 // A float literal lowers through binary64 (cvtsi2sd/divsd/mulsd). Widening that
@@ -13712,48 +14356,139 @@ fn emit_mmap_len_in_rax_x86() with Mut {
     em(0x0f); em(0x05)                      // syscall
 }
 
-fn emit_heap_alloc_x86() with Mut {
-    // rax = requested size. Allocate size+8 via mmap, write header, return user ptr.
-    emit_rtmmap_count_x86()
-    em(0x48); em(0x83); em(0xc0); em(8)     // add rax, 8 (total = size + header)
-    em(0x48); em(0x89); em(0xc6)             // mov rsi, rax (mmap size arg)
-    em(0x50)                                  // push rax (save total size)
+// Native heap ABI (#874), identical on every engine -- see
+// self-hosted/native/codegen_x86_linux.sio (native_v2_heap_header_bytes):
+//   base = mmap(page_round_up(n + 16));
+//   [base+0] = logical payload size (= ptr-16);
+//   [base+8] = mapping length (= ptr-8);
+//   ptr = base + 16 (16-byte aligned, zero filled).
+// heap_alloc(n<=0 / overflow / mmap failure) = 0; heap_free(0) is a no-op;
+// heap_realloc(0, n) = heap_alloc(n); heap_realloc(p, n<=0 / overflow /
+// mremap failure) = 0 with the old block intact. A grow zeroes
+// [old_logical, new_logical) so a shrink and a later grow inside the same
+// page cannot resurrect bytes past the shrunk length. Before #874 the
+// payload was base+8 (8-byte aligned) and a failed mmap was written through.
+fn emit_heap_alloc_core_x86() with Mut, Panic {
+    // rax = requested size -> rax = user ptr or 0.
+    em(0x48); em(0x85); em(0xc0)             // test rax, rax
+    em(0x0f); em(0x8e)                       // jle fail
+    let p_nonpos = CL
+    em32(0)
+    em(0x50)                                  // push rax (logical size)
+    em(0x48); em(0x05); em32(4111)           // add rax, 16 + 4095
+    em(0x48); em(0x85); em(0xc0)             // test rax, rax
+    em(0x0f); em(0x8e)                       // jle fail_pop (overflow)
+    let p_ovf = CL
+    em32(0)
+    em(0x48); em(0x25); em32(0 - 4096)       // and rax, -4096 (mapping length)
+    em(0x48); em(0x89); em(0xc6)             // mov rsi, rax (mmap size; survives syscall)
     em(0x48); em(0x31); em(0xff)             // xor rdi, rdi (addr = NULL)
     em(0xba); em32(3)                        // mov edx, 3 (PROT_READ|PROT_WRITE)
     em(0x41); em(0xba); em32(0x22)           // mov r10d, 0x22 (MAP_PRIVATE|MAP_ANON)
     em(0x49); em(0xc7); em(0xc0); em32(-1)  // mov r8, -1 (fd)
     em(0x4d); em(0x31); em(0xc9)             // xor r9, r9 (offset)
     em(0xb8); em32(9)                        // mov eax, 9 (SYS_mmap)
-    em(0x0f); em(0x05)                       // syscall → rax = mmap base
-    em(0x59)                                  // pop rcx (total size)
-    em(0x48); em(0x89); em(0x08)             // mov [rax], rcx (write header)
-    em(0x48); em(0x83); em(0xc0); em(8)     // add rax, 8 (return user ptr)
+    em(0x0f); em(0x05)                       // syscall -> rax = mmap base
+    em(0x48); em(0x85); em(0xc0)             // test rax, rax
+    em(0x0f); em(0x88)                       // js fail_pop (mmap error)
+    let p_err = CL
+    em32(0)
+    em(0x59)                                  // pop rcx (logical size)
+    em(0x48); em(0x89); em(0x08)             // mov [rax], rcx
+    em(0x48); em(0x89); em(0x70); em(8)     // mov [rax+8], rsi (mapping length)
+    em(0x48); em(0x83); em(0xc0); em(16)    // add rax, 16 (user ptr)
+    em(0xe9)                                  // jmp done
+    let p_done = CL
+    em32(0)
+    em32_at(p_ovf, CL - (p_ovf + 4))
+    em32_at(p_err, CL - (p_err + 4))
+    em(0x59)                                  // fail_pop: pop rcx
+    em32_at(p_nonpos, CL - (p_nonpos + 4))
+    em(0x31); em(0xc0)                       // fail: xor eax, eax
+    em32_at(p_done, CL - (p_done + 4))
 }
 
-fn emit_heap_free_x86() with Mut {
-    // rax = user pointer. Read header at [ptr-8], munmap(base, total).
-    em(0x48); em(0x83); em(0xe8); em(8)     // sub rax, 8 (back to mmap base)
+fn emit_heap_alloc_x86() with Mut, Panic {
+    // rax = requested size. rax = 16-byte-aligned zeroed user ptr or 0.
+    emit_rtmmap_count_x86()
+    emit_heap_alloc_core_x86()
+}
+
+fn emit_heap_free_x86() with Mut, Panic {
+    // rax = user pointer (0 is a no-op). munmap(ptr-16, [ptr-8]).
+    em(0x48); em(0x85); em(0xc0)             // test rax, rax
+    em(0x0f); em(0x84)                       // jz done
+    let p_null = CL
+    em32(0)
+    em(0x48); em(0x83); em(0xe8); em(16)    // sub rax, 16 (mmap base)
     em(0x48); em(0x89); em(0xc7)             // mov rdi, rax (munmap addr)
-    em(0x48); em(0x8b); em(0x37)             // mov rsi, [rdi] (total size)
+    em(0x48); em(0x8b); em(0x77); em(8)     // mov rsi, [rdi+8] (mapping length)
     em(0xb8); em32(11)                       // mov eax, 11 (SYS_munmap)
     em(0x0f); em(0x05)                       // syscall
+    em32_at(p_null, CL - (p_null + 4))
 }
 
-fn emit_heap_realloc_x86() with Mut {
-    // stack = [old_user_ptr], rax = new_size.
-    // mremap(old_base, old_total, new_total, MREMAP_MAYMOVE)
+fn emit_heap_realloc_x86() with Mut, Panic {
+    // stack = [old_user_ptr], rax = new_size -> rax = new user ptr or 0.
     emit_rtmmap_count_x86()
-    em(0x48); em(0x83); em(0xc0); em(8)     // add rax, 8 (new_total = new_size + header)
-    em(0x48); em(0x89); em(0xc2)             // mov rdx, rax (new_total for mremap arg3)
-    em(0x49); em(0x89); em(0xc0)             // mov r8, rax (save new_total)
     em(0x5f)                                  // pop rdi (old_user_ptr)
-    em(0x48); em(0x83); em(0xef); em(8)     // sub rdi, 8 (old mmap base)
-    em(0x48); em(0x8b); em(0x37)             // mov rsi, [rdi] (old_total)
+    em(0x48); em(0x85); em(0xff)             // test rdi, rdi
+    em(0x0f); em(0x84)                       // jz alloc (realloc(NULL, n))
+    let p_alloc = CL
+    em32(0)
+    em(0x4c); em(0x8b); em(0xc8)             // mov r9, rax (new logical; survives mremap)
+    em(0x48); em(0x85); em(0xc0)             // test rax, rax
+    em(0x0f); em(0x8e)                       // jle fail
+    let p_nonpos = CL
+    em32(0)
+    em(0x48); em(0x05); em32(4111)           // add rax, 16 + 4095
+    em(0x48); em(0x85); em(0xc0)             // test rax, rax
+    em(0x0f); em(0x8e)                       // jle fail (overflow)
+    let p_ovf = CL
+    em32(0)
+    em(0x48); em(0x25); em32(0 - 4096)       // and rax, -4096 (new mapping length)
+    em(0x48); em(0x89); em(0xc2)             // mov rdx, rax (new length; survives syscall)
+    em(0x48); em(0x83); em(0xef); em(16)    // sub rdi, 16 (old mmap base)
+    em(0x48); em(0x8b); em(0x77); em(8)     // mov rsi, [rdi+8] (old mapping length)
     em(0x41); em(0xba); em32(1)              // mov r10d, 1 (MREMAP_MAYMOVE)
     em(0xb8); em32(25)                       // mov eax, 25 (SYS_mremap)
-    em(0x0f); em(0x05)                       // syscall → rax = new mmap base
-    em(0x4c); em(0x89); em(0x00)             // mov [rax], r8 (write new header)
-    em(0x48); em(0x83); em(0xc0); em(8)     // add rax, 8 (return user ptr)
+    em(0x0f); em(0x05)                       // syscall -> rax = new mmap base
+    em(0x48); em(0x85); em(0xc0)             // test rax, rax
+    em(0x0f); em(0x88)                       // js fail (mremap error; old block intact)
+    let p_err = CL
+    em32(0)
+    em(0x4c); em(0x8b); em(0x00)             // mov r8, [rax] (old logical)
+    em(0x48); em(0x89); em(0x50); em(8)     // mov [rax+8], rdx (new mapping length)
+    em(0x4c); em(0x89); em(0x08)             // mov [rax], r9 (new logical)
+    em(0x4d); em(0x3b); em(0xc8)             // cmp r9, r8
+    em(0x0f); em(0x86)                       // jbe no_zero
+    let p_zero = CL
+    em32(0)
+    em(0x50)                                  // push rax (base)
+    em(0x48); em(0x8d); em(0x78); em(16)    // lea rdi, [rax+16]
+    em(0x4c); em(0x01); em(0xc7)             // add rdi, r8
+    em(0x4c); em(0x89); em(0xc9)             // mov rcx, r9
+    em(0x49); em(0x2b); em(0xc8)             // sub rcx, r8
+    em(0x31); em(0xc0)                       // xor eax, eax
+    em(0xfc)                                  // cld
+    em(0xf3); em(0xaa)                       // rep stosb
+    em(0x58)                                  // pop rax
+    em32_at(p_zero, CL - (p_zero + 4))       // no_zero:
+    em(0x48); em(0x83); em(0xc0); em(16)    // add rax, 16 (user ptr)
+    em(0xe9)                                  // jmp done
+    let p_done1 = CL
+    em32(0)
+    em32_at(p_alloc, CL - (p_alloc + 4))
+    emit_heap_alloc_core_x86()               // alloc: rax = new_size
+    em(0xe9)                                  // jmp done
+    let p_done2 = CL
+    em32(0)
+    em32_at(p_nonpos, CL - (p_nonpos + 4))
+    em32_at(p_ovf, CL - (p_ovf + 4))
+    em32_at(p_err, CL - (p_err + 4))
+    em(0x31); em(0xc0)                       // fail: xor eax, eax
+    em32_at(p_done1, CL - (p_done1 + 4))
+    em32_at(p_done2, CL - (p_done2 + 4))
 }
 
 // ============================================================================
@@ -16278,6 +17013,21 @@ fn flt_fill_bits(int_part: i64, frac: i64, denom_in: i64, exp: i64) with Mut, Di
     FLT_BITS_OK = 1
 }
 
+// Token-first entry: the exact source conversion (#2826) when the token is a
+// plain decimal it can reproduce; the payload path above otherwise. The
+// payload path alone cannot be right in general -- its i64 significand has
+// already discarded every digit past the first 19 (and past 18 fraction
+// digits), which is exactly the long-decimal midpoint failure.
+fn flt_fill_bits_tok(tok: i64) with Mut, Div, Panic {
+    let bits = flc_tok_bits(tok)
+    if FLC_OK == 1 {
+        FLT_BITS = bits
+        FLT_BITS_OK = 1
+        return
+    }
+    flt_fill_bits(TV[tok as usize], TF[tok as usize], TD[tok as usize], TX[tok as usize])
+}
+
 // A token that starts no expression reaches the last arm of compile_primary
 // (and compile_primary_a64), which consumes it and loads 0. That arm is
 // load-bearing for recovery: on 2026-10-22, 166 files in tests/, stdlib/ and
@@ -16456,19 +17206,33 @@ fn compile_format_print(name_tok: i64, newline: i64, a64: i64) with IO, Mut, Pan
     }
 }
 
-fn primary_fallback_refuses(tok: i64) -> bool with Panic, Mut {
-    let k = TK[tok as usize]
-    if k == 62 || k == 71 || k == 73 { return true }
-    if k == 50 {
-        let after = TE[tok as usize]
-        if after < SRC_LEN {
-            let d = SRC[after as usize] as i64
-            if d >= 48 && d <= 57 { return true }
-        }
+// A one-argument print builtin (print_int, print_f64) given more arguments.
+// The rest used to be dropped: `print_f64(x, 16)` printed 6 decimals, as
+// `print_f64(x)` does. Refused, as Madaros refuses it; EP is left on the `)`.
+// print_f64_n(x, decimals) is the lean_single builtin that takes a precision.
+fn builtin_one_arg_refuse_rest(name_tok: i64) with IO, Mut, Panic {
+    if TK[EP as usize] != 28 { return }
+    var extra: i64 = 0
+    var depth: i64 = 0
+    while EP < TC {
+        let k = TK[EP as usize]
+        if depth == 0 && k == 7 { break }
+        if depth == 0 && k == 28 && TK[(EP + 1) as usize] != 7 { extra = extra + 1 }
+        if k == 6 || k == 41 || k == 8 { depth = depth + 1 }
+        if (k == 7 || k == 42 || k == 9) && depth > 0 { depth = depth - 1 }
+        EP = EP + 1
     }
-    return false
+    tc_wrong_arity_hard(name_tok, 1, 1 + extra)
 }
 
+// compile_primary's last arm: the token starts no expression. It used to load
+// 0 and move on, so the program compiled and computed something else: `.5` was
+// 0; `affine`, `linear`, `study` and `var` read as names were 0; `println()`
+// printed 0; `+5` was 0; a block `{ ... }` dropped the rest of the function;
+// an unsupported assignment dropped the write. Each of those now has its own
+// handling or refusal, and a tree-wide sweep with this report in place finds
+// no program that compiles and still reaches it (only compile-fail tests and
+// programs Madaros alone accepts). So every token that gets here is refused.
 fn primary_fallback_report(tok: i64) with IO, Mut, Panic {
     print("parse error: expected expression at ")
     print_src_loc_for_tok(tok)
@@ -16542,7 +17306,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
         // Gen 19: _suffix unit annotation (e.g. 9.8_m)
         let flit_uh = TU[EP as usize]
         let fl_exp = TX[EP as usize]
-        flt_fill_bits(fl_int, fl_frac, fl_denom, fl_exp)
+        flt_fill_bits_tok(EP)
         EP = EP + 1
         if FLT_BITS_OK == 1 {
             em(0x48); em(0xb8); em64(FLT_BITS)
@@ -17133,6 +17897,39 @@ fn compile_primary() with IO, Mut, Panic, Div {
         return
     }
     // Parenthesized expression or tuple literal
+    // `{ stmts; tail }` as a value: the tail's value, or unit. A `{` here used
+    // to fall to the last arm and load 0, and the block's statements were then
+    // compiled as if they followed it; its `}` closed the enclosing body, so
+    // everything after a standalone block was dropped (a statement `{ ... }`
+    // silently deleted the rest of the function).
+    if k == 8 {
+        EP = EP + 1
+        LAST_STMT_HAS_VALUE = 0
+        while ep_before_body_close() && TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt() }
+        if TK[EP as usize] == 9 { EP = EP + 1 }
+        if LAST_STMT_HAS_VALUE == 1 {
+            EXPR_TY = LAST_STMT_TY
+            EXPR_TY_HASH = LAST_STMT_TY_HASH
+            if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
+        } else {
+            em(0x31); em(0xc0)
+            EXPR_IS_F64 = 0
+            EXPR_TY = 5
+            EXPR_TY_HASH = 0
+        }
+        return
+    }
+    // `()`: the unit value, typed as the aarch64 twin types it
+    // (compile_primary_a64). compile_or used to be handed the `)`, which fell to
+    // the last arm below; `return ()` loaded 0 by accident.
+    if k == 6 && TK[(EP + 1) as usize] == 7 {
+        EP = EP + 2
+        em(0x31); em(0xc0)
+        EXPR_IS_F64 = 0
+        EXPR_TY = 5
+        EXPR_TY_HASH = 0
+        return
+    }
     if k == 6 {
         let paren_open = EP
         EP = EP + 1
@@ -18252,9 +19049,15 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 EXPR_TY = 5
                 return
             }
-            // Check for print_int(expr)
-            if src_match(ns, ne - ns, "print_int") {
+            // Check for print_int(expr). print_int, print_f64, print_f64_n and
+            // print_char are builtins only when the program defines no function
+            // of that name, as print/println already were: a user's
+            // `fn print_f64(x: f64, decimals: i64)` was never called, its second
+            // argument was dropped, and the value printed with 6 decimals
+            // (examples/cayley_dickson_*.sio). Madaros calls the user's function.
+            if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "print_int") {
                 EP = EP + 1; compile_or()
+                builtin_one_arg_refuse_rest(name_tok)
                 // Observation boundary: printing Unobserved<T> is IO that collapses uncertainty
                 if ty_is_unobserved(EXPR_TY) && (FN_EFFECTS[CURRENT_FN as usize] & 64) == 0 {
                     tc_observe_boundary(name_tok, "cannot print Unobserved<T> — IO collapses uncertainty")
@@ -18267,8 +19070,9 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 return
             }
             // Check for print_f64(expr)
-            if src_match(ns, ne - ns, "print_f64") {
+            if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "print_f64") {
                 EP = EP + 1; compile_or()
+                builtin_one_arg_refuse_rest(name_tok)
                 // Observation boundary: printing Unobserved<T> is IO that collapses uncertainty
                 if ty_is_unobserved(EXPR_TY) && (FN_EFFECTS[CURRENT_FN as usize] & 64) == 0 {
                     tc_observe_boundary(name_tok, "cannot print Unobserved<T> — IO collapses uncertainty")
@@ -18280,7 +19084,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 EXPR_TY = 5
                 return
             }
-            if src_match(ns, ne - ns, "print_f64_n") {
+            if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "print_f64_n") {
                 EP = EP + 1
                 if TK[EP as usize] == 7 {
                     tc_wrong_arity(name_tok, 2, 0)
@@ -18317,7 +19121,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 EXPR_TY_HASH = 0
                 return
             }
-            if src_match(ns, ne - ns, "print_char") {
+            if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "print_char") {
                 if (FN_EFFECTS[CURRENT_FN as usize] & 1) == 0 { tc_effect_violation(name_tok, 1, FN_EFFECTS[CURRENT_FN as usize]) }
                 EP = EP + 1
                 if TK[EP as usize] == 7 {
@@ -19114,9 +19918,13 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 return
             }
             if src_match(ns, ne - ns, "str_concat") {
-                BUILTIN_SLOT_A = NEXT_SLOT
+                // SIO-378: per-call locals, not the BUILTIN_SLOT_* globals. A
+                // nested str_concat/str_slice in either argument overwrites the
+                // globals between slot assignment and emit, hijacking this
+                // node's emit (silent "CCCC;" corruption at depth >= 3).
+                let sc_slot_a = NEXT_SLOT
                 NEXT_SLOT = NEXT_SLOT + 1
-                BUILTIN_SLOT_B = NEXT_SLOT
+                let sc_slot_b = NEXT_SLOT
                 NEXT_SLOT = NEXT_SLOT + 1
                 EP = EP + 1
                 if TK[EP as usize] == 7 {
@@ -19126,7 +19934,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 } else {
                     compile_or()
                     if EXPR_TY != 0 && EXPR_TY != 3 { tc_error(name_tok, "str_concat requires string arguments") }
-                    emit_store_var(BUILTIN_SLOT_A)
+                    emit_store_var(sc_slot_a)
                     if TK[EP as usize] == 28 { EP = EP + 1 } else { tc_wrong_arity(name_tok, 2, 1) }
                     if TK[EP as usize] != 7 && TK[EP as usize] != 0 {
                         compile_or()
@@ -19134,12 +19942,12 @@ fn compile_primary() with IO, Mut, Panic, Div {
                     } else {
                         em(0x31); em(0xc0)
                     }
-                    emit_store_var(BUILTIN_SLOT_B)
+                    emit_store_var(sc_slot_b)
                     if TK[EP as usize] == 28 {
                         tc_wrong_arity(name_tok, 2, 3)
                         while TK[EP as usize] != 7 && TK[EP as usize] != 0 { EP = EP + 1 }
                     }
-                    emit_str_concat_slots_x86(BUILTIN_SLOT_A, BUILTIN_SLOT_B)
+                    emit_str_concat_slots_x86(sc_slot_a, sc_slot_b)
                     if TK[EP as usize] == 7 { EP = EP + 1 }
                 }
                 EXPR_IS_F64 = 0
@@ -19161,11 +19969,15 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 return
             }
             if src_match(ns, ne - ns, "str_slice") {
-                BUILTIN_SLOT_A = NEXT_SLOT
+                // SIO-378: per-call locals, not the BUILTIN_SLOT_* globals. A
+                // nested str_concat/str_slice in either argument overwrites the
+                // globals between slot assignment and emit, hijacking this
+                // node's emit (silent "CCCC;" corruption at depth >= 3).
+                let ss_slot_a = NEXT_SLOT
                 NEXT_SLOT = NEXT_SLOT + 1
-                BUILTIN_SLOT_B = NEXT_SLOT
+                let ss_slot_b = NEXT_SLOT
                 NEXT_SLOT = NEXT_SLOT + 1
-                BUILTIN_SLOT_CNT = NEXT_SLOT
+                let ss_slot_c = NEXT_SLOT
                 NEXT_SLOT = NEXT_SLOT + 1
                 EP = EP + 1
                 if TK[EP as usize] == 7 {
@@ -19179,7 +19991,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 }
                 compile_or()
                 if EXPR_TY != 0 && EXPR_TY != 3 { tc_error(name_tok, "str_slice requires a string receiver") }
-                emit_store_var(BUILTIN_SLOT_A)
+                emit_store_var(ss_slot_a)
                 if TK[EP as usize] == 28 { EP = EP + 1 } else { tc_wrong_arity(name_tok, 2, 1) }
                 if TK[EP as usize] != 7 && TK[EP as usize] != 0 {
                     compile_or()
@@ -19187,7 +19999,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 } else {
                     em(0x31); em(0xc0)
                 }
-                emit_store_var(BUILTIN_SLOT_B)
+                emit_store_var(ss_slot_b)
                 if TK[EP as usize] == 28 {
                     EP = EP + 1
                     if TK[EP as usize] != 7 && TK[EP as usize] != 0 {
@@ -19196,16 +20008,16 @@ fn compile_primary() with IO, Mut, Panic, Div {
                     } else {
                         em(0x31); em(0xc0)
                     }
-                    emit_store_var(BUILTIN_SLOT_CNT)
+                    emit_store_var(ss_slot_c)
                     if TK[EP as usize] == 28 {
                         tc_wrong_arity(name_tok, 3, 4)
                         while TK[EP as usize] != 7 && TK[EP as usize] != 0 { EP = EP + 1 }
                     }
-                    emit_str_slice_range_slots_x86(BUILTIN_SLOT_A, BUILTIN_SLOT_B, BUILTIN_SLOT_CNT)
+                    emit_str_slice_range_slots_x86(ss_slot_a, ss_slot_b, ss_slot_c)
                 } else {
-                    emit_load_var(BUILTIN_SLOT_A)
+                    emit_load_var(ss_slot_a)
                     emit_push()
-                    emit_load_var(BUILTIN_SLOT_B)
+                    emit_load_var(ss_slot_b)
                     em(0x59)
                     em(0x48); em(0x01); em(0xc8)  // add rax, rcx
                 }
@@ -22633,7 +23445,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                             let fl_frac = TF[CONST_TOK_IDX[ci as usize] as usize]
                             let fl_denom = TD[CONST_TOK_IDX[ci as usize] as usize]
                             let fl_exp = TX[CONST_TOK_IDX[ci as usize] as usize]
-                            flt_fill_bits(fl_int, fl_frac, fl_denom, fl_exp)
+                            flt_fill_bits_tok(CONST_TOK_IDX[ci as usize])
                             if FLT_BITS_OK == 1 {
                                 em(0x48); em(0xb8); em64(FLT_BITS)
                                 if CONST_NEG[ci as usize] != 0 {
@@ -22715,7 +23527,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
         }
         return
     }
-    if primary_fallback_refuses(EP) { primary_fallback_report(EP) }
+    primary_fallback_report(EP)
     EP = EP + 1
     em(0x31); em(0xc0)
     EXPR_IS_F64 = 0
@@ -29879,12 +30691,18 @@ fn compile_deref_indexed_elem_field_store_x86() with IO, Mut, Panic, Div {
     var name_tok = EP
     var chain_start = EP + 1
     var root_inner: i64 = 0   // 1 = `(*name.field…)` root: deref of a pointer FIELD
+    var inner_start = EP + 3  // first `.` of the inner field chain
     if TK[EP as usize] == 6 {
         name_tok = EP + 2
         chain_start = EP + 4
-        if TK[(EP + 3) as usize] == 50 {
+        if deref_inner_root_explicit(EP) {
+            // `(*(*name).field…)` is `(*name.field…)` with the root's deref spelled out.
+            name_tok = EP + 4
+            inner_start = EP + 6
+        }
+        if TK[inner_start as usize] == 50 && (inner_start == EP + 6 || TK[(EP + 3) as usize] == 50) {
             root_inner = 1
-            var rp = EP + 3
+            var rp = inner_start
             while rp < TC && TK[rp as usize] == 50 && TK[(rp + 1) as usize] == 3 {
                 rp = rp + 2
             }
@@ -29970,7 +30788,7 @@ fn compile_deref_indexed_elem_field_store_x86() with IO, Mut, Panic, Div {
     // offsets, then LOAD the pointer stored in the final inner field. That load is the deref
     // the `(* )` spells, and it is what no existing predicate was willing to emit.
     if root_inner == 1 {
-        var ip = name_tok + 1
+        var ip = inner_start
         var inner_off: i64 = 0
         var inner_bad: i64 = 0
         while inner_bad == 0 && TK[ip as usize] == 50 {
@@ -33397,7 +34215,17 @@ fn compile_stmt() with IO, Mut, Panic, Div {
     }
 
     // Expression statement
+    let expr_stmt_start = EP
     compile_or()
+    // An assignment whose target matched none of the shapes above. It used to
+    // be compiled as an expression statement: the target was evaluated as a
+    // value, the `=` fell to compile_primary's last arm, and the write was
+    // dropped (`ws[1].text[2] = 77` left the element 0). Refused instead.
+    if TK[EP as usize] == 16 {
+        tc_error_hard(expr_stmt_start, "lean_single cannot compile an assignment to this target; it would have dropped the write")
+        while ep_before_body_close() && TK[EP as usize] != 0 && TL[EP as usize] == TL[expr_stmt_start as usize] { EP = EP + 1 }
+        return
+    }
     LAST_STMT_HAS_VALUE = 1
     LAST_STMT_TY = EXPR_TY
     LAST_STMT_TY_HASH = EXPR_TY_HASH
@@ -40389,11 +41217,23 @@ fn emit_seq_set_slots_a64(slot_s: i64, slot_idx: i64, slot_v: i64) with Mut, Pan
 }
 
 
-fn emit_heap_alloc_a64() with Mut {
-    // x0 = requested size. Allocate size+8 via mmap, write header, return user ptr.
-    em32(0x91002000)               // add x0, x0, #8 (total = size + header)
-    em32(0xAA0003E9)               // mov x9, x0 (save total size in x9)
-    em32(0xAA0003E1)               // mov x1, x0 (mmap size arg)
+fn emit_heap_alloc_a64() with Mut, Panic {
+    // x0 = requested size -> x0 = 16-byte-aligned user ptr or 0.
+    // Same contract as emit_heap_alloc_core_x86: page-round 4096, logical size
+    // at [base+0], mapping length at [base+8]. n<=0, overflow and a failed
+    // mmap return 0 without writing through the syscall result.
+    em32(0xF100001F)               // cmp x0, #0
+    let p_nonpos = CL
+    em32(0x5400000D)               // b.le fail
+    em32(0xAA0003E9)               // mov x9, x0 (logical size; survives svc)
+    em32(0xB1004001)               // adds x1, x0, #16
+    let p_ovf1 = CL
+    em32(0x54000006)               // b.vs fail
+    em32(0xB13FFC21)               // adds x1, x1, #4095
+    let p_ovf2 = CL
+    em32(0x54000006)               // b.vs fail
+    em32(0xD34CFC21)               // lsr x1, x1, #12
+    em32(0xD374CC21)               // lsl x1, x1, #12 (mapping length; survives svc)
     em32(0xD2800000)               // movz x0, #0 (addr = NULL)
     em32(0xD2800062)               // movz x2, #3 (PROT_READ|PROT_WRITE)
     if TARGET_OS == 2 {
@@ -40408,39 +41248,102 @@ fn emit_heap_alloc_a64() with Mut {
     } else {
         em32(0xD2800000 | ((222 & 0xFFFF) << 5) | 8) // movz x8, #222 (SYS_mmap Linux)
     }
-    emit_syscall_a64()             // x0 = mmap base
-    em32(0xF9000009)               // str x9, [x0] (write header)
-    em32(0x91002000)               // add x0, x0, #8 (return user ptr)
+    emit_syscall_a64()             // x0 = mmap base (Darwin carry already negated)
+    em32(0xF100001F)               // cmp x0, #0
+    let p_err = CL
+    em32(0x5400000B)               // b.lt fail
+    em32(0xF9000009)               // str x9, [x0] (logical size)
+    em32(0xF9000401)               // str x1, [x0, #8] (mapping length)
+    em32(0x91004000)               // add x0, x0, #16 (user ptr)
+    let p_done = CL
+    em32(0x14000000)               // b done
+    patch_branch_a64(p_nonpos, CL)
+    patch_branch_a64(p_ovf1, CL)
+    patch_branch_a64(p_ovf2, CL)
+    patch_branch_a64(p_err, CL)
+    em32(0xD2800000)               // fail: movz x0, #0
+    patch_branch_a64(p_done, CL)
 }
 
-fn emit_heap_free_a64() with Mut {
-    // x0 = user pointer. Read header at [ptr-8], munmap(base, total).
-    em32(0xD1002000)               // sub x0, x0, #8 (back to mmap base)
-    em32(0xF9400001)               // ldr x1, [x0] (total size)
+fn emit_heap_free_a64() with Mut, Panic {
+    // x0 = user pointer. NULL is a no-op. Otherwise munmap(ptr-16, [ptr-8]).
+    let p_null = CL
+    em32(0xB4000000)               // cbz x0, done
+    em32(0xD1004000)               // sub x0, x0, #16 (mmap base)
+    em32(0xF9400401)               // ldr x1, [x0, #8] (mapping length)
     if TARGET_OS == 2 {
         emit_imm64_reg_a64(16, 73)
     } else {
         em32(0xD2800000 | ((215 & 0xFFFF) << 5) | 8) // movz x8, #215 (SYS_munmap Linux)
     }
     emit_syscall_a64()
+    patch_branch_a64(p_null, CL)
 }
 
-fn emit_heap_realloc_a64() with Mut {
-    // x10 = old_user_ptr (saved by caller), x0 = new_size.
-    // Linux mremap(old_base, old_total, new_total, MREMAP_MAYMOVE)
-    em32(0x91002000)               // add x0, x0, #8 (new_total)
-    em32(0xAA0003E9)               // mov x9, x0 (save new_total in x9)
-    // x10 = old_user_ptr, x0 = new_size (already added 8 above)
-    em32(0xD100214A)               // sub x10, x10, #8 (old mmap base)
-    em32(0xF940014B)               // ldr x11, [x10] (old_total)
-    em32(0xAA0A03E0)               // mov x0, x10 (old base → arg1)
-    em32(0xAA0B03E1)               // mov x1, x11 (old_total → arg2)
-    em32(0xAA0903E2)               // mov x2, x9 (new_total → arg3)
+fn emit_heap_realloc_a64() with Mut, Panic {
+    // x10 = old user ptr (saved by the caller), x0 = new size.
+    // NULL reallocates. n<=0, overflow and a failed mremap return 0 and leave
+    // the old block intact. Linux mremap only (syscall 216); Darwin has no
+    // mremap here, so that path fails closed. A grow zeroes
+    // [old_logical, new_logical) so a same-page shrink+grow cannot resurrect
+    // bytes past the shrunk length. Page rounding matches x86 (4096).
+    let p_alloc = CL
+    em32(0xB400000A)               // cbz x10, alloc
+    em32(0xAA0003E9)               // mov x9, x0 (new logical; survives svc)
+    em32(0xF100001F)               // cmp x0, #0
+    let p_nonpos = CL
+    em32(0x5400000D)               // b.le fail
+    em32(0xB1004001)               // adds x1, x0, #16
+    let p_ovf1 = CL
+    em32(0x54000006)               // b.vs fail
+    em32(0xB13FFC21)               // adds x1, x1, #4095
+    let p_ovf2 = CL
+    em32(0x54000006)               // b.vs fail
+    em32(0xD34CFC21)               // lsr x1, x1, #12
+    em32(0xD374CC21)               // lsl x1, x1, #12 (new mapping length)
+    em32(0xAA0103E2)               // mov x2, x1 (mremap new length; survives svc)
+    em32(0xD100414A)               // sub x10, x10, #16 (old mmap base)
+    em32(0xF9400541)               // ldr x1, [x10, #8] (old mapping length)
+    em32(0xAA0A03E0)               // mov x0, x10
     em32(0xD2800023)               // movz x3, #1 (MREMAP_MAYMOVE)
     em32(0xD2800000 | ((216 & 0xFFFF) << 5) | 8) // movz x8, #216 (SYS_mremap Linux)
     emit_syscall_a64()             // x0 = new mmap base
-    em32(0xF9000009)               // str x9, [x0] (write new header)
-    em32(0x91002000)               // add x0, x0, #8 (return user ptr)
+    em32(0xF100001F)               // cmp x0, #0
+    let p_err = CL
+    em32(0x5400000B)               // b.lt fail (old block intact)
+    em32(0xF940000B)               // ldr x11, [x0] (old logical)
+    em32(0xF9000402)               // str x2, [x0, #8] (new mapping length)
+    em32(0xF9000009)               // str x9, [x0] (new logical)
+    em32(0xEB0B013F)               // cmp x9, x11
+    let p_nozero = CL
+    em32(0x54000009)               // b.ls no_zero
+    em32(0x9100400C)               // add x12, x0, #16
+    em32(0x8B0B018C)               // add x12, x12, x11
+    em32(0xCB0B012D)               // sub x13, x9, x11
+    let loop_head = CL
+    em32(0xB400000D)               // cbz x13, no_zero
+    em32(0x3900019F)               // strb wzr, [x12]
+    em32(0x9100058C)               // add x12, x12, #1
+    em32(0xD10005AD)               // sub x13, x13, #1
+    let p_loop = CL
+    em32(0x14000000)               // b loop_head
+    patch_branch_a64(p_loop, loop_head)
+    patch_branch_a64(p_nozero, CL)
+    patch_branch_a64(loop_head, CL) // cbz x13 -> no_zero
+    em32(0x91004000)               // no_zero: add x0, x0, #16
+    let p_done1 = CL
+    em32(0x14000000)               // b done
+    patch_branch_a64(p_alloc, CL)
+    emit_heap_alloc_a64()          // alloc: x0 = new size -> user ptr or 0
+    let p_done2 = CL
+    em32(0x14000000)               // b done
+    patch_branch_a64(p_nonpos, CL)
+    patch_branch_a64(p_ovf1, CL)
+    patch_branch_a64(p_ovf2, CL)
+    patch_branch_a64(p_err, CL)
+    em32(0xD2800000)               // fail: movz x0, #0
+    patch_branch_a64(p_done1, CL)
+    patch_branch_a64(p_done2, CL)
 }
 
 fn compile_acknowledge_call_a64(call_tok: i64) with IO, Mut, Panic, Div {
@@ -40850,7 +41753,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
         let fl_frac = TF[EP as usize]
         let fl_denom = TD[EP as usize]
         let fl_exp = TX[EP as usize]
-        flt_fill_bits(fl_int, fl_frac, fl_denom, fl_exp)
+        flt_fill_bits_tok(EP)
         EP = EP + 1
         if FLT_BITS_OK == 1 {
             emit_imm64_a64(FLT_BITS)
@@ -41302,6 +42205,24 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
         return
     }
     // Parenthesized
+    // `{ stmts; tail }` as a value: see compile_primary.
+    if k == 8 {
+        EP = EP + 1
+        LAST_STMT_HAS_VALUE = 0
+        while ep_before_body_close() && TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt_a64() }
+        if TK[EP as usize] == 9 { EP = EP + 1 }
+        if LAST_STMT_HAS_VALUE == 1 {
+            EXPR_TY = LAST_STMT_TY
+            EXPR_TY_HASH = LAST_STMT_TY_HASH
+            if EXPR_TY == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
+        } else {
+            em32(0xD2800000)  // movz x0, #0
+            EXPR_IS_F64 = 0
+            EXPR_TY = 5
+            EXPR_TY_HASH = 0
+        }
+        return
+    }
     if k == 6 {
         EP = EP + 1
         // Unit literal `()`: nothing to compile. Without this, compile_or_a64 ran on
@@ -42320,8 +43241,9 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 EXPR_TY = 5
                 return
             }
-            if src_match(ns, ne - ns, "print_int") {
+            if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "print_int") {
                 EP = EP + 1; compile_or_a64()
+                builtin_one_arg_refuse_rest(name_tok)
                 if ty_is_unobserved(EXPR_TY) && (FN_EFFECTS[CURRENT_FN as usize] & 64) == 0 {
                     tc_observe_boundary(name_tok, "cannot print Unobserved<T> — IO collapses uncertainty")
                 }
@@ -42329,7 +43251,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 emit_print_int_a64()
                 em32(0xD2800000); EXPR_IS_F64 = 0; EXPR_TY = 5; return
             }
-            if src_match(ns, ne - ns, "print_char") {
+            if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "print_char") {
                 if (FN_EFFECTS[CURRENT_FN as usize] & 1) == 0 { tc_effect_violation(name_tok, 1, FN_EFFECTS[CURRENT_FN as usize]) }
                 EP = EP + 1
                 if TK[EP as usize] == 7 {
@@ -42345,8 +43267,9 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 }
                 EXPR_IS_F64 = 0; EXPR_TY = 5; return
             }
-            if src_match(ns, ne - ns, "print_f64") {
+            if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "print_f64") {
                 EP = EP + 1; compile_or_a64()
+                builtin_one_arg_refuse_rest(name_tok)
                 if ty_is_unobserved(EXPR_TY) && (FN_EFFECTS[CURRENT_FN as usize] & 64) == 0 {
                     tc_observe_boundary(name_tok, "cannot print Unobserved<T> — IO collapses uncertainty")
                 }
@@ -42354,7 +43277,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 emit_print_f64_a64()
                 em32(0xD2800000); EXPR_IS_F64 = 0; EXPR_TY = 5; return
             }
-            if src_match(ns, ne - ns, "print_f64_n") {
+            if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "print_f64_n") {
                 EP = EP + 1
                 if TK[EP as usize] == 7 {
                     tc_wrong_arity(name_tok, 2, 0)
@@ -43054,9 +43977,13 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
             }
             // str_concat(a: string, b: string) -> string — parity with x86 twin (~13066).
             if src_match(ns, ne - ns, "str_concat") {
-                BUILTIN_SLOT_A = NEXT_SLOT
+                // SIO-378: per-call locals, not the BUILTIN_SLOT_* globals. A
+                // nested str_concat/str_slice in either argument overwrites the
+                // globals between slot assignment and emit, hijacking this
+                // node's emit (silent "CCCC;" corruption at depth >= 3).
+                let sc_slot_a = NEXT_SLOT
                 NEXT_SLOT = NEXT_SLOT + 1
-                BUILTIN_SLOT_B = NEXT_SLOT
+                let sc_slot_b = NEXT_SLOT
                 NEXT_SLOT = NEXT_SLOT + 1
                 EP = EP + 1
                 if TK[EP as usize] == 7 {
@@ -43066,7 +43993,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 } else {
                     compile_or_a64()
                     if EXPR_TY != 0 && EXPR_TY != 3 { tc_error(name_tok, "str_concat requires string arguments") }
-                    emit_store_var_a64(BUILTIN_SLOT_A)
+                    emit_store_var_a64(sc_slot_a)
                     if TK[EP as usize] == 28 { EP = EP + 1 } else { tc_wrong_arity(name_tok, 2, 1) }
                     if TK[EP as usize] != 7 && TK[EP as usize] != 0 {
                         compile_or_a64()
@@ -43074,12 +44001,12 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                     } else {
                         em32(0xD2800000)
                     }
-                    emit_store_var_a64(BUILTIN_SLOT_B)
+                    emit_store_var_a64(sc_slot_b)
                     if TK[EP as usize] == 28 {
                         tc_wrong_arity(name_tok, 2, 3)
                         while TK[EP as usize] != 7 && TK[EP as usize] != 0 { EP = EP + 1 }
                     }
-                    emit_str_concat_slots_a64(BUILTIN_SLOT_A, BUILTIN_SLOT_B)
+                    emit_str_concat_slots_a64(sc_slot_a, sc_slot_b)
                     if TK[EP as usize] == 7 { EP = EP + 1 }
                 }
                 EXPR_IS_F64 = 0
@@ -43089,11 +44016,15 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
             }
             // str_slice(s, start[, end]) -> string — parity with x86 twin (~13230).
             if src_match(ns, ne - ns, "str_slice") {
-                BUILTIN_SLOT_A = NEXT_SLOT
+                // SIO-378: per-call locals, not the BUILTIN_SLOT_* globals. A
+                // nested str_concat/str_slice in either argument overwrites the
+                // globals between slot assignment and emit, hijacking this
+                // node's emit (silent "CCCC;" corruption at depth >= 3).
+                let ss_slot_a = NEXT_SLOT
                 NEXT_SLOT = NEXT_SLOT + 1
-                BUILTIN_SLOT_B = NEXT_SLOT
+                let ss_slot_b = NEXT_SLOT
                 NEXT_SLOT = NEXT_SLOT + 1
-                BUILTIN_SLOT_CNT = NEXT_SLOT
+                let ss_slot_c = NEXT_SLOT
                 NEXT_SLOT = NEXT_SLOT + 1
                 EP = EP + 1
                 if TK[EP as usize] == 7 {
@@ -43107,7 +44038,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 }
                 compile_or_a64()
                 if EXPR_TY != 0 && EXPR_TY != 3 { tc_error(name_tok, "str_slice requires a string receiver") }
-                emit_store_var_a64(BUILTIN_SLOT_A)
+                emit_store_var_a64(ss_slot_a)
                 if TK[EP as usize] == 28 { EP = EP + 1 } else { tc_wrong_arity(name_tok, 2, 1) }
                 if TK[EP as usize] != 7 && TK[EP as usize] != 0 {
                     compile_or_a64()
@@ -43115,7 +44046,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 } else {
                     em32(0xD2800000)
                 }
-                emit_store_var_a64(BUILTIN_SLOT_B)
+                emit_store_var_a64(ss_slot_b)
                 if TK[EP as usize] == 28 {
                     EP = EP + 1
                     if TK[EP as usize] != 7 && TK[EP as usize] != 0 {
@@ -43124,16 +44055,16 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                     } else {
                         em32(0xD2800000)
                     }
-                    emit_store_var_a64(BUILTIN_SLOT_CNT)
+                    emit_store_var_a64(ss_slot_c)
                     if TK[EP as usize] == 28 {
                         tc_wrong_arity(name_tok, 3, 4)
                         while TK[EP as usize] != 7 && TK[EP as usize] != 0 { EP = EP + 1 }
                     }
-                    emit_str_slice_range_slots_a64(BUILTIN_SLOT_A, BUILTIN_SLOT_B, BUILTIN_SLOT_CNT)
+                    emit_str_slice_range_slots_a64(ss_slot_a, ss_slot_b, ss_slot_c)
                 } else {
-                    emit_load_var_a64(BUILTIN_SLOT_A)
+                    emit_load_var_a64(ss_slot_a)
                     emit_push_a64()
-                    emit_load_var_a64(BUILTIN_SLOT_B)
+                    emit_load_var_a64(ss_slot_b)
                     emit_pop_x1_a64()
                     em32(0x8B010000)  // add x0, x0, x1   (s + start)
                 }
@@ -44433,7 +45364,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                         let ci = CONST_FOUND_IDX
                         if CONST_TYPE[ci as usize] == 2 && CONST_TOK_IDX[ci as usize] >= 0 {
                             let ct = CONST_TOK_IDX[ci as usize]
-                            flt_fill_bits(TV[ct as usize], TF[ct as usize], TD[ct as usize], TX[ct as usize])
+                            flt_fill_bits_tok(ct)
                             if FLT_BITS_OK == 1 {
                                 emit_imm64_a64(FLT_BITS)
                                 if CONST_NEG[ci as usize] != 0 {
@@ -44484,7 +45415,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
         }
         return
     }
-    if primary_fallback_refuses(EP) { primary_fallback_report(EP) }
+    primary_fallback_report(EP)
     EP = EP + 1
     em32(0xD2800000)
     EXPR_IS_F64 = 0
@@ -51886,11 +52817,28 @@ fn main() -> i64 with IO, Mut, Panic, Div {
     if precheck_temporal_window_conflict() != 0 { return 1 }
     lex_all()
     if LEX_ERROR_LINE != 0 {
+        if LEX_ERROR_KIND == 5 {
+            // SIO-266: same code and wording as Madaros E273, at the opening quote.
+            print("error[E273]: unterminated string literal at ")
+            print_src_loc_for_tok(LEX_ERROR_TOK)
+            print(":")
+            print_int(LEX_ERROR_COL)
+            print("\n")
+            return 1
+        }
         print("lex error line ")
         print_int(LEX_ERROR_LINE)
         print(": ")
         if LEX_ERROR_KIND == 2 {
             print("invalid escape sequence\n")
+        } else if LEX_ERROR_KIND == 3 {
+            print("character literals are not supported by lean_single; write the byte value, e.g. `32 as u8` for ' '\n")
+        } else if LEX_ERROR_KIND == 4 {
+            print("Unexpected character `")
+            print_char(LEX_ERROR_BYTE)
+            print("` (byte ")
+            print_int(LEX_ERROR_BYTE)
+            print(")\n")
         } else {
             print("Unexpected character\n")
         }
