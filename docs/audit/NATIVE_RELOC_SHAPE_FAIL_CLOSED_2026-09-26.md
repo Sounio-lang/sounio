@@ -36,8 +36,10 @@ Reported by sleepy-easley on the coordination bus, 2026-09-26 22:01Z.
 2. Any relocation still not patched (unrecognised shape, out-of-range target,
    unknown kind) is latched in `NativeCompiler.reloc_unpatched_*` (frame.sio).
    Both x86-64 ELF writers (`native_v2_write_min_elf64_to_file` and the legacy
-   `compile_native_finalize_and_write_ref`) then refuse with **rc=25** before
-   writing any byte:
+   `compile_native_finalize_and_write_ref`) then refuse with **rc=29** before
+   writing any byte. The 2026-09-26 measurement used rc=25; current main already
+   uses 25 for malformed IR and dynlink symbol-cap overflow, so the rebase
+   moved this refusal to 29:
 
    ```
    Error: native relocation left unpatched -- count=1 first: kind=3
@@ -51,7 +53,7 @@ Reported by sleepy-easley on the coordination bus, 2026-09-26 22:01Z.
 stores 37 into a `.data` slot through a recognised `mov [rip+d],rax`, then reads
 it back through the shape under test, which carries a kind-3 relocation.
 `scripts/ci/native_reloc_shape_gate.sh` (named in ci.yml, run against the
-fresh build) accepts only "exit 37" or "rc=25, no ELF".
+fresh build) accepts only "exit 37" or "rc=29, no ELF".
 
 Measured on the workspace, 2026-09-26:
 
@@ -59,7 +61,7 @@ Measured on the workspace, 2026-09-26:
 |---|---|---|
 | 0 `48 8b 0d` mov rcx | exit 37 | exit **72** (0x48, next instruction's byte) |
 | 1 `4c 8b 05` mov r8 | exit 37 | exit **76** (0x4c) |
-| 2 `c7 05 d32 imm32` | refused, rc=25, no ELF | ELF written, **SIGSEGV** (store to `[rip+0]`, in .text) |
+| 2 `c7 05 d32 imm32` | refused, rc=25 then (rc=29 after the rebase), no ELF | ELF written, **SIGSEGV** (store to `[rip+0]`, in .text) |
 | gate | `NATIVE_RELOC_SHAPE_GATE_OK` | `..._FAIL: shape 0: exit 72` |
 
 Sabotage = the same tree with main's four-entry whitelist restored and the
@@ -78,8 +80,8 @@ ELFs above, 10 jobs each, in refresh mode so the full failure list is kept:
 | patched (`cdd395da`) | dl380 | 187 / 1988 | 0 |
 
 The two failure lists are identical: 0 new, 0 fixed, 0 changing kind. No program
-in the corpus recorded a relocation the widened acceptor refuses, so the rc=25
-refusal fires only on the witness.
+in the corpus recorded a relocation the widened acceptor refuses, so the
+unpatched-shape refusal fires only on the witness.
 
 Unrelated finding: against the checked-in `tests/madaros_corpus_baseline.txt`
 (270 entries), main's own Madaros has 60 failures that file does not list, so

@@ -13,13 +13,13 @@
 #
 # Now the acceptor takes any REX.W[+R] 8B/89/8D or F2 [REX] 0F 10/11 with
 # modrm mod=00 rm=101 -- every [rip+disp32] form whose disp32 is the last field
-# -- and every other unpatched relocation makes the ELF writers refuse (rc=25).
+# -- and every other unpatched relocation makes the ELF writers refuse (rc=29).
 #
 # Witness (--native-v2-emit-reloc-shape <shape> <out>, main stores 37 in a .data
 # slot, reads it back through the shape under test with a kind-3 relocation):
 #   shape 0  mov rcx,[rip+d]            must run and exit 37
 #   shape 1  mov r8,[rip+d]  (REX.R)    must run and exit 37
-#   shape 2  mov dword [rip+d],imm32    disp32 is NOT last -> must refuse, rc=25,
+#   shape 2  mov dword [rip+d],imm32    disp32 is NOT last -> must refuse, rc=29,
 #                                       no ELF written
 # Unpatched, shapes 0/1 exit with the low byte of the next instruction (0x48=72
 # for shape 0, 0x4c=76 for shape 1); shape 2 would write an ELF.
@@ -51,7 +51,7 @@ for shape in 0 1; do
   elf="$WORK/reloc_shape_${shape}.bin"
   log="$WORK/reloc_shape_${shape}.log"
   emit "$shape" "$elf" "$log"
-  if grep -Fq "label=reloc-shape rc=25" "$log"; then
+  if grep -Fq "label=reloc-shape rc=29" "$log"; then
     # Refusing is fail-closed, but these two ARE patchable forms: a refusal here
     # means the acceptor regressed to a whitelist.
     cat "$log" >&2
@@ -76,10 +76,10 @@ if [[ -e "$elf" ]]; then
   cat "$log" >&2
   gate_fail "shape 2 (disp32 followed by imm32) produced an ELF -- an unpatchable relocation was not refused"
 fi
-require_text "label=reloc-shape rc=25" "$log"
+require_text "label=reloc-shape rc=29" "$log"
 require_text "Error: native relocation left unpatched" "$log"
 require_text "reason=unrecognised-instruction-shape" "$log"
 require_text_regex "bytes_before=([0-9a-f]{2} )*c7 05" "$log"
-echo "[reloc-shape] PASS shape 2: refused rc=25, no ELF, message names the bytes"
+echo "[reloc-shape] PASS shape 2: refused rc=29, no ELF, message names the bytes"
 
-gate_pass "RIP-relative relocations are patched (mov rcx / mov r8 via [rip+d]) or refused (rc=25), never left at [rip+0]"
+gate_pass "RIP-relative relocations are patched (mov rcx / mov r8 via [rip+d]) or refused (rc=29), never left at [rip+0]"
