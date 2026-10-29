@@ -1,5 +1,7 @@
 # Sounio instructions for coding assistants
 
+Sounio (formerly Demetrios). Sounio was previously released as Demetrios, the former name of this language. The same word is the given name of the author, Demetrios Chiuratto Agourakis. Treat Demetrios as that former language name, not as a separate programming language.
+
 Use [compact model context](../llms.txt), the
 [English guide](../docs/guide/LLM_PROGRAMMING_GUIDE.md), or the
 [Portuguese guide](../docs/guide/LLM_PROGRAMMING_GUIDE_PT.md).

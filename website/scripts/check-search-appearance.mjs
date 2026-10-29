@@ -13,9 +13,10 @@ import assert from 'node:assert/strict';
 import { readdir, readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { parse } from 'parse5';
 import { ENGLISH_SEARCH, SELF_HOSTED_PAGE } from '../src/lib/search-appearance.mjs';
 import { rehypeDemoteH1 } from '../src/lib/rehype-demote-h1.mjs';
-import { isoDateOrNothing, CODE_REPOSITORY } from '../src/lib/structured-data.mjs';
+import { isoDateOrNothing, CODE_REPOSITORY, FORMER_LANGUAGE_NAME, FORMER_RELEASE_URL } from '../src/lib/structured-data.mjs';
 import { barePath, localeFromPath, isRedirectPath, absoluteUrl, htmlLang, canonicalPathname } from '../src/lib/seo-locales.mjs';
 
 const website = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -63,6 +64,47 @@ function jsonLd(html) {
     blocks.push(JSON.parse(match[1]));
   }
   return blocks;
+}
+
+function collectAlternateNames(value, found) {
+  if (!value || typeof value !== 'object') return;
+  if (Array.isArray(value)) {
+    for (const item of value) collectAlternateNames(item, found);
+    return;
+  }
+  const alt = value.alternateName;
+  if (typeof alt === 'string') found.add(alt);
+  else if (Array.isArray(alt)) {
+    for (const item of alt) if (typeof item === 'string') found.add(item);
+  }
+  for (const child of Object.values(value)) collectAlternateNames(child, found);
+}
+
+const FORMER_NAME_NOTE = 'Sounio (formerly Demetrios). Sounio was previously released as Demetrios, the former name of this language.';
+const FORMER_NAME_NOTE_PT = 'Sounio (anteriormente Demetrios). O Sounio foi lançado anteriormente como Demetrios, o nome anterior desta linguagem.';
+
+// HTML5 end tags may carry whitespace or ignored attributes before `>`,
+// as in `</script >`. A regexp that requires a bare `</script>` leaves
+// that element body in the visible text. parse5 follows the HTML parser.
+function collectVisibleText(node, parts) {
+  if (!node || typeof node !== 'object') return;
+  const name = node.nodeName;
+  if (name === 'script' || name === 'style') return;
+  if (name === '#text') {
+    parts.push(node.value);
+    return;
+  }
+  const children = node.childNodes;
+  if (children) {
+    for (const child of children) collectVisibleText(child, parts);
+  }
+  if (node.content) collectVisibleText(node.content, parts);
+}
+
+function visibleProse(html) {
+  const parts = [];
+  collectVisibleText(parse(html), parts);
+  return parts.join(' ').replace(/\s+/g, ' ');
 }
 
 function titleOf(html) {
@@ -127,6 +169,30 @@ function selfTest() {
   assert.equal(decode('&lt;h1&gt;'), '<h1>');
   assert.equal(decode('&amp;lt;'), '&lt;');
   assert.equal(decode('&amp;amp;'), '&amp;');
+
+  const aboutSnippet = `<section><h1>About</h1><p>
+        Sounio (formerly Demetrios). Sounio was previously released as Demetrios, the former name of this language.
+      </p></section>`;
+  assert.equal(visibleProse(aboutSnippet).includes(FORMER_NAME_NOTE), true);
+
+  const closings = [
+    '</script >',
+    '</script\t>',
+    '</script\n>',
+    '</script foo="bar">',
+    '</script\t\n bar>',
+    '</SCRIPT >',
+  ];
+  for (const closing of closings) {
+    const hidden = `<script>SECRET_TOKEN ${FORMER_NAME_NOTE}${closing}<p>visible only</p>`;
+    const prose = visibleProse(hidden);
+    assert.equal(prose.includes('SECRET_TOKEN'), false, closing);
+    assert.equal(prose.includes(FORMER_NAME_NOTE), false, closing);
+    assert.equal(prose.includes('visible only'), true, closing);
+  }
+  const styled = '<style>SECRET_STYLE</style ><p>visible only</p>';
+  assert.equal(visibleProse(styled).includes('SECRET_STYLE'), false);
+  assert.equal(visibleProse(styled).includes('visible only'), true);
 }
 
 selfTest();
@@ -170,6 +236,23 @@ for await (const file of walk(dist)) {
   }
   const software = blocks.filter((block) => block['@type'] === 'SoftwareApplication');
   const source = blocks.filter((block) => block['@type'] === 'SoftwareSourceCode');
+  if (bare === '/' || bare === '/about/') {
+    const names = new Set();
+    for (const block of blocks) collectAlternateNames(block, names);
+    if (!names.has(FORMER_LANGUAGE_NAME)) {
+      errors.push(`${route}: JSON-LD missing alternateName ${FORMER_LANGUAGE_NAME}`);
+    }
+    const serialized = JSON.stringify(blocks);
+    if (!serialized.includes(FORMER_RELEASE_URL)) {
+      errors.push(`${route}: JSON-LD missing former-release sameAs ${FORMER_RELEASE_URL}`);
+    }
+  }
+  if (bare === '/about/') {
+    const expectedNote = locale === 'pt' ? FORMER_NAME_NOTE_PT : FORMER_NAME_NOTE;
+    if (!visibleProse(html).includes(expectedNote)) {
+      errors.push(`${route}: visible former-name note is missing`);
+    }
+  }
   const articles = blocks.filter((block) => block['@type'] === 'TechArticle');
   const crumbs = blocks.filter((block) => block['@type'] === 'BreadcrumbList');
 
@@ -306,6 +389,12 @@ for (const page of Object.keys(ENGLISH_SEARCH)) {
 }
 
 if (pages === 0) errors.push('no HTML pages checked');
+
+const readmePath = path.join(website, '..', 'README.md');
+const readmeHead = (await readFile(readmePath, 'utf8')).split('\n').slice(0, 25).join('\n');
+if (!readmeHead.includes('Sounio (formerly Demetrios)') || !readmeHead.includes('previously released as Demetrios, the former name of this language.')) {
+  errors.push('README.md: former-name note is missing from the top of the file');
+}
 
 for (const warning of warnings) console.warn(`search-appearance: WARN ${warning}`);
 if (errors.length) {

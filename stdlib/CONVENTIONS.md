@@ -1,93 +1,40 @@
-# Convenções da Standard Library (stdlib) do Sounio
+# Standard library conventions
 
-Este documento define os padrões **rigorosos** para o desenvolvimento e manutenção de toda a standard library do Sounio. Seu cumprimento é **obrigatório** para contribuições.
+Rules for new stdlib code. They describe the forms the tree already uses. They are not a claim that every existing file complies, and they are not evidence that a function runs.
 
-## 1. Nomenclatura
+## Names
 
-- **Funções e variáveis**: `snake_case`
-  - Exemplo: `compute_mean`
-- **Tipos/structs**: `PascalCase`
-  - Exemplo: `EpistemicMatrix`
-- **Constantes**: `SCREAMING_SNAKE_CASE`
-  - Exemplo: `PI`
+- Functions and variables: `snake_case`.
+- Structs and other types: `PascalCase`.
+- Constants: `SCREAMING_SNAKE_CASE` when a module uses that form.
 
-## 2. Estrutura de Módulos
+## Layout
 
-Todo módulo `MODULO` em `stdlib/` deve ter exatamente esta estrutura:
+A top-level directory under `stdlib/` is a module area. It does not have to contain all of `mod.sio`, `lib.sio`, `README.md`, and `EXAMPLES.md`.
 
-- `mod.sio`: **Apenas** exports `pub use` e declarações `pub fn` (sem implementações).
-- `lib.sio`: Implementações privadas (`fn` sem `pub`) + testes inline.
-- `README.md`: Visão geral do módulo + exemplos executáveis simples.
-- `EXAMPLES.md`: Casos de uso avançados com código compilável.
-- `BENCHMARKS.md` (se aplicável): Metas de performance vs SciPy/NumPy, com benchmarks executáveis.
+On 2026-10-27, `bash scripts/stdlib/scan_stdlib.sh` found 1,741 `.sio` files, 102 `lib.sio`, 79 `mod.sio`, and no `*.sio.disabled`. Only `chemistry`, `core`, `database`, and `dataframe` have all four of those files at the top of the directory.
 
-## 3. Documentação
+Where a module has a public surface, put callable exports in `lib.sio` or in the file the generator already indexes. `scripts/build/gen_stdlib_api_md.sh` lists `pub fn` and skips a directory that has none.
 
-Todo `pub fn` **deve** ter docstring `///` completa, incluindo:
+## Epistemic values
 
-* **Parâmetros**: Descrição detalhada de cada `param`.
-* **Retorno**: Tipo exato, destacando `Epistemic` se numérico.
-* **Complexidade**: Notação O(?), ex: `O(n log n)`.
-* **Referências bibliográficas**: DOIs, papers ou standards (NIST, GUM, etc.).
+The checked epistemic struct is `Epistemic` in `stdlib/epistemic/knowledge.sio`. Its fields are `val`, `variance`, and `confidence` (`i64`, 0..1000).
 
-**Exemplos compiláveis** diretamente no docstring:
+Use the free functions. There is no checked `+` or `*` overload on `Epistemic`.
 
-```sio
-/// Calcula a média aritmética com propagação epistêmica.
-///
-/// # Parâmetros
-/// - `data`: Vetor de medidas com incerteza.
-///
-/// # Retorno
-/// `Epistemic` com média e confidence propagado (confidence é i64, 0..1000).
-///
-/// # Complexidade
-/// O(n)
-///
-/// # Exemplo
-/// ```sio
-/// use epistemic::knowledge::{ep_measured, ep_is_credible}
-/// let data = [ep_measured(1.0, 0.01), ep_measured(2.0, 0.02)]
-/// let mean = compute_mean(&data)
-/// assert(ep_is_credible(&mean, 900))
-/// ```
-///
-/// # Referências
-/// - GUM 2008, JCGM 100:2008
-pub fn compute_mean(data: &[Epistemic]) -> Epistemic
-```
+- `ep_measured(val, std_dev)` stores `variance = std_dev * std_dev` and confidence 900.
+- `ep_add` and `ep_sub` are the uncorrelated GUM sum and difference. They scale the minimum confidence by 99/100.
+- `ep_mul` scales it by 98/100. `ep_div` scales it by 97/100 and requires `Div` and `Panic`.
+- `ep_scale` and `ep_shift` keep confidence. `ep_merge` averages the two confidences.
 
-## 4. Integração Epistêmica
+`print` and `println` take one argument. Print a number with `print_f64`. `ep_std` requires the caller to declare `Mut`, `Div`, and `Panic`.
 
-- **Todo resultado numérico**: Retornar `Epistemic` (`stdlib/epistemic/knowledge.sio`) ou `GUMResult` ([`gum.sio`](epistemic/gum.sio)).
-- **Propagação**: Incerteza propaga pelas funções livres `ep_add`, `ep_sub`, `ep_mul`, `ep_div` (método GUM delta, entradas não correlacionadas). Não há sobrecarga de `+`/`*` para `Epistemic` na superfície checada.
-- **Confidence**: `i64` na escala 0..1000. Combinações aplicam decaimento operação-específico à menor confidence de entrada: `ep_add`/`ep_sub` multiplicam por 99/100, `ep_mul` por 98/100, `ep_div` por 97/100 (nunca aumenta). `ep_scale`/`ep_shift` preservam; `ep_merge` faz a média das duas confidences (`(a + b)/2`).
+Not every numeric function returns `Epistemic`. Returning `f64` is normal. Return `Epistemic` only when the function is propagating a measurement.
 
-Exemplo mínimo em todo `pub fn` numérico:
+## Tests
 
-```sio
-use epistemic::knowledge::{Epistemic, ep_add}
+Prefer a `//@ run-pass` file under `tests/stdlib/<module>/` for a function you claim is callable. A `pub fn` line is not that claim.
 
-pub fn add_measurements(a: Epistemic, b: Epistemic) -> Epistemic {
-    ep_add(&a, &b)
-}
-```
+## What not to copy
 
-## 5. Testes
-
-- **Unit tests**: Inline em `lib.sio`, usando `assert`.
-- **E2E tests**: Diretório `tests/stdlib/MODULO/` com cenários reais.
-- **Validação vs referências**: Comparar resultados com SciPy, NIST datasets, etc.
-
-Exemplo de test inline:
-
-```sio
-use epistemic::knowledge::{ep_certain, ep_val, ep_confidence}
-
-fn test_compute_mean() with Panic {
-    let data = [ep_certain(1.0), ep_certain(3.0)]
-    let mean = compute_mean(&data)
-    assert(ep_val(&mean) == 2.0)
-    assert(ep_confidence(&mean) == 1000)
-}
-```
+`compute_mean` is not a function in this tree. Do not add a docstring example that calls it. Do not require a DOI on every `pub fn`; most of the tree does not have one.
