@@ -1,0 +1,13 @@
+# Immutable p00 hoist composed with the dyadic sampler
+
+The library candidate adds one immutable local `p00 = p.p00` before b01 and replaces the two corresponding reads with p00. The existing exact reciprocal 2^-32, RNG64 recurrence, draws, category thresholds, API and assertions are unchanged. The standalone cores are extracted byte for byte from the current baseline/candidate body; only their Tape argument/replay is replaced with the existing BasisProb argument.
+
+Base: fc271161afcdb7f9ecf3d68f29d4194c68cd04da. SOURCE_LEDGER.json pins the complete before/after library, extracted bodies, template and oracle. The C++23 oracle is an unchanged copy of the original-division reference.
+
+Slurm 19693 completed 0 in 1m03 (4 CPUs, 8 GiB requested). Raw03 SHA-256 e0279ff62e97e861415cd8b105b854ae645aa61865b33b1e2b91184d2c28bf54. All 14 cases matched for both cores in LOOP_REGIONS=0 and =1; p00=p01 compiled and ran, then was rejected by the unchanged oracle. The three original fast imports (QPU CHSH, born shot law and QASM tape) passed check/compile/native and ALL_PASS in both modes. All source/input/tool/executable identity guards passed.
+
+All three 10M pairs were retained per mode. Aggregate ratios were 1.00933491 (mode0) and 1.0417172 (mode1). These short measurements do not qualify the original slow workload or establish a general speed claim. No 61B workload was run.
+
+Raw04 elision eligibility and accepted full-arena capture are separate pending gates. Numerical comparison alone does not prove checkpoint removal.
+
+Slurm 19702 completed FAILED1 in 2m23. Its two full numerical gates, ELISION=0 and =1, both completed0 with all14 cases, all three fast original imports and the oracle mutant controls, in both LOOP_REGIONS modes. NUMERICAL_STATUS=0 is retained separately. The four additional capture compilations succeeded, but the strict FULL-schema checks all refused: the counts driver reports reason4/function0/param0; the imported QPU reports reason4/function176/param0. CAPTURE_STATUS=1 and aggregate STATUS=1 remain failures. The imported enabled audit reports8 eligible regions/16 neutralized operations across197 functions; it does not attribute those changes to wide_counts, so this receipt makes no target-elision claim.
