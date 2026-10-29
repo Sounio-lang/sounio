@@ -407,7 +407,14 @@ fn impure_function() -> string with IO {
 }
 ```
 
-Effects compose and propagate through the call graph automatically.
+Effects are declared, not inferred. A named function must list in its `with`
+clause every effect that its body, or any function it calls, performs;
+otherwise the checker reports E035 ("effect not declared in function
+signature"). Two narrow exceptions: a closure's effects are taken from its body
+(the enclosing function must still declare them), and `main` may call the
+printing builtins without `with IO` (but not a user function marked `with IO`).
+Inference across function boundaries exists only as an opt-in experiment
+(`SOUNIO_EFFECT_INFER=1`), off by default.
 
 ### What's the type inference algorithm?
 
@@ -418,19 +425,15 @@ Effects compose and propagate through the call graph automatically.
 
 ### Can I write custom effects?
 
-Yes (advanced feature):
-```sio
-effect State<S> {
-    fn get() -> S
-    fn put(s: S) -> ()
-}
-
-fn stateful_computation() -> i32 with State<i32> {
-    let x = do State.get()
-    do State.put(x + 1)
-    x
-}
-```
+Not yet. An `effect Name { ... }` declaration parses, but the default compiler
+(Madaros) does not register it (EFF-021 in `docs/spec/2026-10/03-evidence.tsv`).
+Using it in a `with` clause is refused with E246 ("not a declared user
+effect"). A few names on a temporary hold list (`effect_name_is_held` in
+`self-hosted/check/effects.sio`; for example `Choice`, `Counter`, `Fail`) are
+accepted and then dropped without a diagnostic, so a program that compiles with
+one of them is not evidence that user effects work. Generic effects such as
+`effect State<S>` do not parse, and `handle` has no execution semantics (see
+`docs/spec/S07_EFFECT_HANDLERS.md`).
 
 ### Are refinement types fully supported?
 
