@@ -26,7 +26,32 @@ const literal=t.slice(t.indexOf('fn wide_core_literal('),t.indexOf('\nfn wide_co
 const dyadic=t.slice(t.indexOf('fn wide_core_dyadic('),t.indexOf('\nfn emit_counts(')).trim();
 const candidate=literal.replace('fn wide_core_literal','fn wide_core_dyadic').replace('let scale = 4294967296.0','let inverse_scale = 0.00000000023283064365386962890625').replace(' / scale',' * inverse_scale');
 if(candidate!==dyadic)throw Error('candidate changed beyond exact reciprocal');
-if(original!==literal&&original.replace('fn wide_core_literal','fn wide_core_dyadic')!==dyadic)throw Error('source body mismatch');
+function exactOnce(s,a,b){if(s.split(a).length!==2)throw Error('nonunique hoist normalization');return s.replace(a,b);}
+function sourceKind(body){
+ if(body===literal)return 'literal';
+ if(body.replace('fn wide_core_literal','fn wide_core_dyadic')===dyadic)return 'dyadic';
+ let normalized=exactOnce(body,'    let p00 = p.p00\n','');
+ normalized=exactOnce(normalized,'    let b01 = p00 + p.p01\n','    let b01 = p.p00 + p.p01\n');
+ normalized=exactOnce(normalized,'if u < p00 {','if u < p.p00 {');
+ if(normalized.replace('fn wide_core_literal','fn wide_core_dyadic')!==dyadic)throw Error('source body mismatch after exact hoist');
+ return 'dyadic-hoist';
+}
+const dyadicOriginal=dyadic.replace('fn wide_core_dyadic','fn wide_core_literal');
+const hoisted=dyadicOriginal.replace('    let b01 = p.p00 + p.p01\n','    let p00 = p.p00\n    let b01 = p00 + p.p01\n').replace('if u < p.p00 {','if u < p00 {');
+if(sourceKind(literal)!=='literal'||sourceKind(dyadicOriginal)!=='dyadic'||sourceKind(hoisted)!=='dyadic-hoist')throw Error('source validator positive control');
+for(const [name,bad] of [
+ ['extra-operation',hoisted.replace('s = s *','s = s +')],
+ ['wrong-p00',hoisted.replace('let p00 = p.p00','let p00 = p.p01')],
+ ['missing-declaration',hoisted.replace('    let p00 = p.p00\n','')],
+ ['duplicate-declaration',hoisted.replace('    let p00 = p.p00\n','    let p00 = p.p00\n    let p00 = p.p00\n')],
+ ['literal-hoist',hoisted.replace(' * inverse_scale',' / scale').replace('let inverse_scale = 0.00000000023283064365386962890625','let scale = 4294967296.0')],
+ ['changed-threshold',hoisted.replace('if u < b01 {','if u <= b01 {')]
+]){
+ let rejected=false;try{sourceKind(bad);}catch{rejected=true;}
+ if(!rejected)throw Error('source validator accepted '+name);
+}
+console.log('SOURCE_VALIDATOR_CONTROLS_OK positives=3 negatives=6');
+console.log('EXPLICIT_SOURCE_KIND '+sourceKind(original));
 if(t.split('@CALLS@').length!==2)throw Error('marker');
 const driver=t.replace('@CALLS@',fs.readFileSync(o+'/generated/CALLS.sio','utf8'));
 fs.writeFileSync(o+'/driver.sio',driver);
