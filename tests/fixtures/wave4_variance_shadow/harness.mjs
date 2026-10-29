@@ -4,6 +4,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import {spawn} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
+import {captureAdmission,successfulCompilerResult,elfIdentity} from './admission.mjs';
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'../../..');
 const fixture='tests/fixtures/wave4_variance_shadow/';
 const manifestPath=path.join(root,fixture,'manifest.json');
@@ -31,11 +32,22 @@ async function run(exe,args,prefix,seconds,env={}){
    },seconds*1000);
   });
   fs.writeFileSync(prefix+'.result.json',JSON.stringify({exe,args,seconds,...result},null,2)+'\n',{flag:'wx'});
-  return result;
+  return {...result,prefix};
  }finally{clearTimeout(timer);clearTimeout(killTimer);fs.closeSync(out);fs.closeSync(err)}
 }
 function ok(r,where){if(r.code!==0||r.signal||r.timedout)fail(where+' failed')}
 function refused(r,where){if(r.code===0||r.signal||r.timedout)fail(where+' needs ordinary nonzero status')}
+function compilerOk(r,where){try{successfulCompilerResult(r,r.prefix)}catch(e){fail(where+': '+e.message)}}
+async function nativeRun(elf,prefix,seconds,env,args=[]){
+ const before=elfIdentity(elf);
+ fs.writeFileSync(prefix+'.elf.before.json',JSON.stringify(before,null,2)+'\n',{flag:'wx'});
+ try{return await run(elf,args,prefix,seconds,env)}
+ finally{
+  const after=elfIdentity(elf);
+  fs.writeFileSync(prefix+'.elf.after.json',JSON.stringify(after,null,2)+'\n',{flag:'wx'});
+  if(before.sha256!==after.sha256||before.bytes!==after.bytes)fail('compiled ELF changed during native execution');
+ }
+}
 const mode=process.argv[2]??'--inventory';
 guard();
 if(mode==='--inventory'){
@@ -48,11 +60,18 @@ if(mode==='--inventory'){
  const cxxSha=process.env.CXX_SHA256??fail('explicit CXX_SHA256 required');
  if(sha(cxx)!==cxxSha)fail('CXX pin mismatch');
  const oracle=path.join(dest,'reference');
+ let admittedAuth=null;
  try{
+  if(mode==='--language-components'){
+   const authPath=process.env.SHADOW_AUTHORIZATION??fail('manual root authorization required');
+   admittedAuth=JSON.parse(fs.readFileSync(authPath,'utf8'));
+   captureAdmission(admittedAuth,manifest,dest,'before');
+   fs.copyFileSync(authPath,path.join(dest,'AUTHORIZATION.json'));
+  }
   ok(await run(cxx,['-std=c++23','-O2','-Wall','-Wextra','-Werror',
    path.join(root,'tests/reference/wave4_variance_shadow_reference.cpp'),'-o',oracle],
    path.join(dest,'oracle.build'),120),'C++23 oracle build');
-  ok(await run(oracle,['--emit'],path.join(dest,'oracle.emit'),10),'oracle emit');
+  ok(await nativeRun(oracle,path.join(dest,'oracle.emit'),10,{},['--emit']),'oracle emit');
   const expected=fs.readFileSync(path.join(dest,'oracle.emit.stdout'),'utf8');
   for(const[kind,text]of [
    ['complete',expected],['wrong',expected.replace('0 4','0 5')],
@@ -60,24 +79,13 @@ if(mode==='--inventory'){
    ['extra',expected+expected.split('\n')[0]+'\n'],
    ['truncated','0 4']]){
    const f=path.join(dest,kind+'.txt');fs.writeFileSync(f,text);
-   const r=await run(oracle,['--check',f],path.join(dest,'control.'+kind),10);
+   const r=await nativeRun(oracle,path.join(dest,'control.'+kind),10,{},['--check',f]);
    kind==='complete'?ok(r,kind):refused(r,kind);
   }
   if(mode==='--oracle-controls'){
    fs.writeFileSync(path.join(dest,'ORACLE_COMPONENT_ONLY'),'PASS; no Sounio compiler invoked\n');
   }else if(mode==='--language-components'){
-   // This envelope records explicit root authorization. It does not mint permission.
-   const authPath=process.env.SHADOW_AUTHORIZATION??fail('root authorization envelope required');
-   const auth=JSON.parse(fs.readFileSync(authPath,'utf8'));
-   const raw=path.resolve(auth.raw),source=path.resolve(auth.source);
-   if(auth.authorized_by!=='root'||auth.patch_sha256!==manifest.patch_sha256)
-    fail('authorization/patch identity mismatch');
-   if(sha(auth.raw_ready)!==auth.raw_ready_sha256||sha(raw)!==auth.raw_sha256)
-    fail('RAW_READY/compiler identity mismatch');
-   if(auth.lower_sha256!==manifest.candidate_lower_sha256||
-      sha(path.join(source,'self-hosted/ir/lower.sio'))!==auth.lower_sha256)
-    fail('candidate lower identity mismatch; never apply patch in this harness');
-   fs.copyFileSync(authPath,path.join(dest,'AUTHORIZATION.json'));
+   const auth=admittedAuth,raw=auth.raw,source=auth.source;
    const env={SOUNIO_STDLIB_PATH:path.join(source,'stdlib'),
     SOUNIO_LOOP_CHECKPOINT_ELISION:'0',SOUNIO_NV2_IR_TRACE_FULL:'1',
     SOUNIO_NV2_IR_TRACE_FULL_STAGE:'source'};
@@ -88,33 +96,38 @@ if(mode==='--inventory'){
     for(const rel of [manifest.native,...manifest.canonical.map(r=>r.file)]){
      const base=path.basename(rel,'.sio'),prefix=path.join(dest,tag+'.'+base);
      const elf=prefix+'.elf';
-     ok(await run(raw,['check',path.join(root,rel)],prefix+'.check',1200,e),'check '+rel);
-     ok(await run(raw,['compile',...flags,path.join(root,rel),'-o',elf],prefix+'.compile',1200,e),'compile '+rel);
-     if(!fs.existsSync(elf))fail('successful compile missing ELF');
-     ok(await run(elf,[],prefix+'.native',120,e),'native '+rel);
+     compilerOk(await run(raw,['check',path.join(root,rel)],prefix+'.check',1200,e),'check '+rel);
+     compilerOk(await run(raw,['compile',...flags,path.join(root,rel),'-o',elf],prefix+'.compile',1200,e),'compile '+rel);
+     ok(await nativeRun(elf,prefix+'.native',120,e),'native '+rel);
      if(rel===manifest.native)
-      ok(await run(oracle,['--check',prefix+'.native.stdout'],prefix+'.oracle',10),'numeric agreement');
+      ok(await nativeRun(oracle,prefix+'.oracle',10,{},['--check',prefix+'.native.stdout']),'numeric agreement');
      const row=manifest.canonical.find(r=>r.file===rel);
      if(row?.marker&&!fs.readFileSync(prefix+'.native.stdout','utf8').includes(row.marker))
       fail('missing canonical marker '+rel);
+     if(row)fs.writeFileSync(prefix+'.canonical-validation.json',JSON.stringify({
+      source:rel,runtime_assertions:'process-exit-zero',marker:row.marker,
+      independent_cpp_oracle:'NOT_EXECUTED_BY_THIS_DRAFT'
+     },null,2)+'\n',{flag:'wx'});
     }
     const m=path.join(dest,tag+'.assertion-mutant'),mutant=m+'.elf';
-    ok(await run(raw,['check',path.join(root,manifest.assertion_mutant)],m+'.check',1200,e),'mutant check');
-    ok(await run(raw,['compile',...flags,path.join(root,manifest.assertion_mutant),'-o',mutant],m+'.compile',1200,e),'mutant compile');
-    refused(await run(mutant,[],m+'.native',30,e),'assertion mutant');
+    compilerOk(await run(raw,['check',path.join(root,manifest.assertion_mutant)],m+'.check',1200,e),'mutant check');
+    compilerOk(await run(raw,['compile',...flags,path.join(root,manifest.assertion_mutant),'-o',mutant],m+'.compile',1200,e),'mutant compile');
+    refused(await nativeRun(mutant,m+'.native',30,e),'assertion mutant');
     for(const row of manifest.semantic_refusals){
      const n=path.join(dest,tag+'.'+path.basename(row.file,'.sio')),elf=n+'.elf';
-     ok(await run(raw,['check',path.join(root,row.file)],n+'.check',1200,e),'semantic input check');
+     compilerOk(await run(raw,['check',path.join(root,row.file)],n+'.check',1200,e),'semantic input check');
      refused(await run(raw,['compile',...flags,path.join(root,row.file),'-o',elf],n+'.compile',1200,e),'semantic refusal');
      if(fs.existsSync(elf))fail('semantic refusal published ELF');
      const output=fs.readFileSync(n+'.compile.stdout','utf8')+fs.readFileSync(n+'.compile.stderr','utf8');
      if(!output.includes(row.diagnostic))fail('wrong refusal cause; parse/check/other error is not acceptance');
     }
    }
-   if(sha(raw)!==auth.raw_sha256||
-    sha(path.join(source,'self-hosted/ir/lower.sio'))!==auth.lower_sha256)fail('compiler/source changed');
+
    fs.writeFileSync(path.join(dest,'LANGUAGE_COMPONENTS_ONLY'),
     'No full qualification: CFG, private Lowerer, wide profile and existing regression receipts remain mandatory.\n');
   }else fail('unknown mode');
- }finally{guard()}
+ }finally{
+  try{if(admittedAuth)captureAdmission(admittedAuth,manifest,dest,'after')}
+  finally{guard()}
+ }
 }

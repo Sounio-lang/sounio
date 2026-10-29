@@ -22,6 +22,8 @@ non-dominated later uses. Native value agreement alone cannot qualify this fix.
 - Six immutable canonical originals, including GUM runtime branches, loop
   accumulation, helper propagation, direct Knowledge and branded covariance.
   Their original assertions and source/oracle hashes are retained in manifest.json.
+  These canonical C++ oracles are NOT executed by this draft; runtime assertions
+  and markers are a separate validation and do not imply oracle agreement.
 
 MCP sounio_verificado was called first for the small seed recurrence and reported
 one syntax compilation. That is neither compilation of these complete fixtures
@@ -36,7 +38,8 @@ No Sounio compiler runs in that mode.
 
 --language-components additionally requires SHADOW_AUTHORIZATION JSON with
 authorized_by=root, raw/source paths, raw_ready path and hash, raw compiler hash,
-patch hash and exact candidate lower hash. This is an execution record of root
+patch hash, exact candidate lower hash, terminal BUILD_STATUS0 root proof and
+full source/SDK manifests verified before/after (see ADMISSION-02.md). This is an execution record of root
 authorization, not a mechanism for granting it. The harness never applies patches.
 The anticipated candidate lower hash is 291d815f4fec96b9c149df0ed8606bc2ae70228807ea80bc43b4f2fe34b185af;
 a different reviewed candidate requires a visible manifest revision.
