@@ -76,7 +76,7 @@ Recommended PL paper framing:
 4. Evidence: compiler gates, epistemic/GUM gates, formal surfaces, and artifact bundle.
 5. Limits: unfinished general production ecosystem, scaffolded surfaces, research GPU/hypercomplex lanes.
 
-Do not build the paper around broad claims such as "production-ready language" or "complete GPU stack." Build it around the stronger, narrower claim:
+Do not build the paper around a claim that the language is ready for production use, or around a complete GPU stack. The public status is: research language (pre-1.0). APIs may change; not recommended for production use. Build the paper around the stronger, narrower claim:
 
 > Sounio demonstrates that epistemic/scientific evidence can be made compiler-visible and reproducibly checked in a self-hosted research language.
 
@@ -96,7 +96,7 @@ A bundle is conference-ready only when:
 
 Use this template in every external paper or slide deck:
 
-- Sounio is not yet a production-ready general-purpose language.
+- Status: research language (pre-1.0). APIs may change; not recommended for production use.
 - The checked Linux x86-64 lane is the default live-demo lane, invoked as `./bin/souc` (official route, Madaros-backed).
 - GPU/PTX support is not a broad runtime or performance claim unless a generated bundle includes the exact hardware run.
 - Hypercomplex neural-network work is not a complete training framework unless the cited gate proves that specific surface.

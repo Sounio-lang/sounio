@@ -109,7 +109,7 @@ Our work differs by integrating GPU code generation into a full language compile
 
 ### 2.3 Prior Octonion Implementations
 
-To our knowledge, no production-ready GPU implementation of octonion operations exists. The closest related work includes:
+To our knowledge, no generally shipped GPU implementation of octonion operations is in wide use. The closest related work includes:
 
 - **NumPy octonion extension** [Boyle, 2017]: CPU-only, Python overhead
 - **Julia Octonions.jl**: Provides algebraic operations but no GPU kernels
