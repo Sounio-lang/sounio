@@ -1738,3 +1738,22 @@ The twenty input words are 2.0 through 21.0, unchanged. `OWN_SUM=2985189878`. Th
 The same inputs with the scoreboard on, job 19671, stored 1650.0. With the scoreboard off and no extra gap, job 19674 stored 0. The sixteen stall-15 moves did not turn this program into the 1650 result.
 
 Gate. Node `gpuorangefs-r770-proxmox`, `--gres=gpu:1`, `--mem=16G`, `--cpus-per-task=4`. The 0.0018 s threshold is not moved. The required word 1154367488 is not moved either.
+
+
+## 72. The container emitter replays job 19671 (2026-10-29, OBSERVED)
+
+`emit_container` takes the instruction count, the register count, and the EXIT slot. The growth in words is `ninsns * 2 - 32`. From that one number it moves the section headers and the program headers, and it writes the section size, the `stamp` symbol size, the LOAD sizes, the two header offsets, the register-count bytes, and the EXIT pc. The measured 2600-byte container in `own_word` stays the source of the bytes that do not move.
+
+The first caller is the ten-product program of job 19671. Thirty-six instructions. Register count 12. EXIT at slot 35. The scoreboard masks are on. The file the function produces is 2920 bytes. `e_shoff` is 1984. The EXIT pc is 560.
+
+The required stored word is 1154367488, the bits of 1650.0. It was not rewritten before the run.
+
+The node was idle. No drain was cleared.
+
+Job 19732. md5 `0ad3ed7be39a5116285313f68264254d`.
+
+The twenty input words are 2.0 through 21.0, unchanged. `OWN_SUM=1154367488`, `EXIT:0`.
+
+That is the same word job 19671 stored, from a program whose container arithmetic is now a function of the instruction count.
+
+Gate. Node `gpuorangefs-r770-proxmox`, `--gres=gpu:1`, `--mem=16G`, `--cpus-per-task=4`. The 0.0018 s threshold is not moved. This cut does not pass it.
