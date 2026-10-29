@@ -2702,6 +2702,126 @@ fn flow_join_x86(left: i64, right: i64) -> i64 {
     if left != 0 || right != 0 { return 1 }
     return 0
 }
+// x86-only coverage sidecar. EN is a legacy spelling-hash registry;
+// validation binds each accepted entry back to unique source tokens.
+var FLOW_EN_DECL_TOK_X86: [i64; 256] = [-1; 256]
+var FLOW_EN_VALID_X86: [i64; 256] = [0; 256]
+var FLOW_EN_VARIANT_TOK_X86: [i64; 65536] = [-1; 65536]
+
+fn flow_delim_matches_x86(open: i64, close: i64) -> bool {
+    if open == 6 && close == 7 { return true }
+    if open == 8 && close == 9 { return true }
+    if open == 41 && close == 42 { return true }
+    return false
+}
+
+fn flow_validate_enum_x86(ei: i64) -> bool with Mut, Panic, Div {
+    if ei < 0 || ei >= EN_COUNT || ei >= 256 { return false }
+    let nt = FLOW_EN_DECL_TOK_X86[ei as usize]
+    if nt <= 0 || nt + 1 >= TC { return false }
+    if TK[(nt - 1) as usize] != 47 || TK[nt as usize] != 3 || TK[(nt + 1) as usize] != 8 { return false }
+    let ns = TS[nt as usize]
+    let ne = TE[nt as usize]
+    let hash = EN[(ei * 256) as usize]
+    if hash != gl_name_hash(ns, ne) { return false }
+    // Unknown ownership, duplicate spellings and hash collisions all conserve.
+    var other: i64 = 0
+    while other < EN_COUNT {
+        if other != ei && EN[(other * 256) as usize] == hash { return false }
+        let ot = FLOW_EN_DECL_TOK_X86[other as usize]
+        if other != ei && ot >= 0 && ot < TC {
+            if name_eq(ns, ne, TS[ot as usize], TE[ot as usize]) { return false }
+        }
+        other = other + 1
+    }
+    other = 0
+    while other < ST_COUNT {
+        if ST[(other * 130) as usize] == hash { return false }
+        if ST_DECL_NE[other as usize] > ST_DECL_NS[other as usize] {
+            if name_eq(ns, ne, ST_DECL_NS[other as usize], ST_DECL_NE[other as usize]) { return false }
+        }
+        other = other + 1
+    }
+    let expected = EN[(ei * 256 + 1) as usize]
+    if expected <= 0 || expected > 254 { return false }
+    var p: i64 = nt + 2
+    var count: i64 = 0
+    var steps: i64 = 0
+    var stack: [i64; 64] = [0; 64]
+    while p < TC && steps < 2048 {
+        steps = steps + 1
+        if TK[p as usize] == 9 {
+            if count != expected { return false }
+            return true
+        }
+        if TK[p as usize] != 3 || count >= 254 || count >= expected { return false }
+        let vt = p
+        let vh = gl_name_hash(TS[vt as usize], TE[vt as usize])
+        if EN[(ei * 256 + 2 + count) as usize] != vh { return false }
+        var prior: i64 = 0
+        while prior < count {
+            let pt = FLOW_EN_VARIANT_TOK_X86[(ei * 256 + prior) as usize]
+            if pt < 0 || pt >= TC { return false }
+            if gl_name_hash(TS[pt as usize], TE[pt as usize]) == vh { return false }
+            if name_eq(TS[pt as usize], TE[pt as usize], TS[vt as usize], TE[vt as usize]) { return false }
+            prior = prior + 1
+        }
+        FLOW_EN_VARIANT_TOK_X86[(ei * 256 + count) as usize] = vt
+        count = count + 1
+        p = p + 1
+        // Payload identifiers are never variants. All three delimiter families
+        // must balance; the token/depth/variant budgets are explicit.
+        if p < TC && (TK[p as usize] == 6 || TK[p as usize] == 8) {
+            var depth: i64 = 1
+            stack[0 as usize] = TK[p as usize]
+            p = p + 1
+            while p < TC && depth > 0 && steps < 2048 {
+                let k = TK[p as usize]
+                steps = steps + 1
+                if k == 6 || k == 8 || k == 41 {
+                    if depth >= 64 { return false }
+                    stack[depth as usize] = k
+                    depth = depth + 1
+                } else if k == 7 || k == 9 || k == 42 {
+                    if !flow_delim_matches_x86(stack[(depth - 1) as usize], k) { return false }
+                    depth = depth - 1
+                } else if k == 0 { return false }
+                p = p + 1
+            }
+            if depth != 0 { return false }
+        }
+        if p >= TC { return false }
+        if TK[p as usize] == 28 { p = p + 1 }
+        else if TK[p as usize] != 9 { return false }
+    }
+    return false
+}
+
+fn flow_enum_for_hash_x86(hash: i64) -> i64 with Mut, Panic {
+    var i: i64 = 0
+    while i < EN_COUNT && i < 256 {
+        if FLOW_EN_VALID_X86[i as usize] == 1 && EN[(i * 256) as usize] == hash { return i }
+        i = i + 1
+    }
+    return -1
+}
+
+fn flow_enum_variant_x86(ei: i64, et: i64, vt: i64) -> i64 with Mut, Panic {
+    if ei < 0 || ei >= EN_COUNT || ei >= 256 || et < 0 || vt < 0 || et >= TC || vt >= TC { return -1 }
+    if FLOW_EN_VALID_X86[ei as usize] != 1 || TK[et as usize] != 3 || TK[vt as usize] != 3 { return -1 }
+    let nt = FLOW_EN_DECL_TOK_X86[ei as usize]
+    if nt < 0 || nt >= TC { return -1 }
+    if !name_eq(TS[nt as usize], TE[nt as usize], TS[et as usize], TE[et as usize]) { return -1 }
+    var i: i64 = 0
+    let count = EN[(ei * 256 + 1) as usize]
+    while i < count {
+        let it = FLOW_EN_VARIANT_TOK_X86[(ei * 256 + i) as usize]
+        if it < 0 || it >= TC { return -1 }
+        if name_eq(TS[it as usize], TE[it as usize], TS[vt as usize], TE[vt as usize]) { return i }
+        i = i + 1
+    }
+    return -1
+}
 
 // A join owns runtime slots for the live scalar value's metadata. Never point
 // a live path at a shadow slot initialized only in an arm which returned.
@@ -2757,54 +2877,230 @@ fn flow_spill_shadows_x86(base: i64) with Mut {
     em(0x58)
 }
 
-fn flow_restore_shadows_x86(base: i64) with Mut {
-    EXPR_VSHADOW = base + 0
-    EXPR_SSHADOW = base + 1
-    EXPR_SSHADOW_1 = base + 2
-    EXPR_SSHADOW_2 = base + 3
-    EXPR_SSHADOW_3 = base + 4
-    EXPR_SSHADOW_4 = base + 5
-    EXPR_SSHADOW_5 = base + 6
-    EXPR_SSHADOW_6 = base + 7
-    EXPR_SSHADOW_7 = base + 8
-    EXPR_HSHADOW_00 = base + 9
-    EXPR_HSHADOW_01 = base + 10
-    EXPR_HSHADOW_02 = base + 11
-    EXPR_HSHADOW_03 = base + 12
-    EXPR_HSHADOW_04 = base + 13
-    EXPR_HSHADOW_05 = base + 14
-    EXPR_HSHADOW_06 = base + 15
-    EXPR_HSHADOW_07 = base + 16
-    EXPR_HSHADOW_11 = base + 17
-    EXPR_HSHADOW_12 = base + 18
-    EXPR_HSHADOW_13 = base + 19
-    EXPR_HSHADOW_14 = base + 20
-    EXPR_HSHADOW_15 = base + 21
-    EXPR_HSHADOW_16 = base + 22
-    EXPR_HSHADOW_17 = base + 23
-    EXPR_HSHADOW_22 = base + 24
-    EXPR_HSHADOW_23 = base + 25
-    EXPR_HSHADOW_24 = base + 26
-    EXPR_HSHADOW_25 = base + 27
-    EXPR_HSHADOW_26 = base + 28
-    EXPR_HSHADOW_27 = base + 29
-    EXPR_HSHADOW_33 = base + 30
-    EXPR_HSHADOW_34 = base + 31
-    EXPR_HSHADOW_35 = base + 32
-    EXPR_HSHADOW_36 = base + 33
-    EXPR_HSHADOW_37 = base + 34
-    EXPR_HSHADOW_44 = base + 35
-    EXPR_HSHADOW_45 = base + 36
-    EXPR_HSHADOW_46 = base + 37
-    EXPR_HSHADOW_47 = base + 38
-    EXPR_HSHADOW_55 = base + 39
-    EXPR_HSHADOW_56 = base + 40
-    EXPR_HSHADOW_57 = base + 41
-    EXPR_HSHADOW_66 = base + 42
-    EXPR_HSHADOW_67 = base + 43
-    EXPR_HSHADOW_77 = base + 44
-    var i: i64 = 0
-    while i < 24 { EXPR_SX[i as usize] = base + 45 + i; i = i + 1 }
+fn flow_shadow_bit_x86(index: i64) -> i64 {
+    if index < 0 || index >= 32 { return 0 }
+    return 1 << index
+}
+
+fn flow_shadow_mask_x86(group: i64) -> i64 with Mut, Panic {
+    var mask: i64 = 0
+    if group == 0 {
+        if EXPR_VSHADOW >= 0 { mask = mask | flow_shadow_bit_x86(0) }
+        if EXPR_SSHADOW >= 0 { mask = mask | flow_shadow_bit_x86(1) }
+        if EXPR_SSHADOW_1 >= 0 { mask = mask | flow_shadow_bit_x86(2) }
+        if EXPR_SSHADOW_2 >= 0 { mask = mask | flow_shadow_bit_x86(3) }
+        if EXPR_SSHADOW_3 >= 0 { mask = mask | flow_shadow_bit_x86(4) }
+        if EXPR_SSHADOW_4 >= 0 { mask = mask | flow_shadow_bit_x86(5) }
+        if EXPR_SSHADOW_5 >= 0 { mask = mask | flow_shadow_bit_x86(6) }
+        if EXPR_SSHADOW_6 >= 0 { mask = mask | flow_shadow_bit_x86(7) }
+        if EXPR_SSHADOW_7 >= 0 { mask = mask | flow_shadow_bit_x86(8) }
+        if EXPR_HSHADOW_00 >= 0 { mask = mask | flow_shadow_bit_x86(9) }
+        if EXPR_HSHADOW_01 >= 0 { mask = mask | flow_shadow_bit_x86(10) }
+        if EXPR_HSHADOW_02 >= 0 { mask = mask | flow_shadow_bit_x86(11) }
+        if EXPR_HSHADOW_03 >= 0 { mask = mask | flow_shadow_bit_x86(12) }
+        if EXPR_HSHADOW_04 >= 0 { mask = mask | flow_shadow_bit_x86(13) }
+        if EXPR_HSHADOW_05 >= 0 { mask = mask | flow_shadow_bit_x86(14) }
+        if EXPR_HSHADOW_06 >= 0 { mask = mask | flow_shadow_bit_x86(15) }
+        if EXPR_HSHADOW_07 >= 0 { mask = mask | flow_shadow_bit_x86(16) }
+        if EXPR_HSHADOW_11 >= 0 { mask = mask | flow_shadow_bit_x86(17) }
+        if EXPR_HSHADOW_12 >= 0 { mask = mask | flow_shadow_bit_x86(18) }
+        if EXPR_HSHADOW_13 >= 0 { mask = mask | flow_shadow_bit_x86(19) }
+        if EXPR_HSHADOW_14 >= 0 { mask = mask | flow_shadow_bit_x86(20) }
+        if EXPR_HSHADOW_15 >= 0 { mask = mask | flow_shadow_bit_x86(21) }
+        if EXPR_HSHADOW_16 >= 0 { mask = mask | flow_shadow_bit_x86(22) }
+        if EXPR_HSHADOW_17 >= 0 { mask = mask | flow_shadow_bit_x86(23) }
+        if EXPR_HSHADOW_22 >= 0 { mask = mask | flow_shadow_bit_x86(24) }
+        if EXPR_HSHADOW_23 >= 0 { mask = mask | flow_shadow_bit_x86(25) }
+        if EXPR_HSHADOW_24 >= 0 { mask = mask | flow_shadow_bit_x86(26) }
+        if EXPR_HSHADOW_25 >= 0 { mask = mask | flow_shadow_bit_x86(27) }
+        if EXPR_HSHADOW_26 >= 0 { mask = mask | flow_shadow_bit_x86(28) }
+        if EXPR_HSHADOW_27 >= 0 { mask = mask | flow_shadow_bit_x86(29) }
+        if EXPR_HSHADOW_33 >= 0 { mask = mask | flow_shadow_bit_x86(30) }
+        if EXPR_HSHADOW_34 >= 0 { mask = mask | flow_shadow_bit_x86(31) }
+    }
+    if group == 1 {
+        if EXPR_HSHADOW_35 >= 0 { mask = mask | flow_shadow_bit_x86(0) }
+        if EXPR_HSHADOW_36 >= 0 { mask = mask | flow_shadow_bit_x86(1) }
+        if EXPR_HSHADOW_37 >= 0 { mask = mask | flow_shadow_bit_x86(2) }
+        if EXPR_HSHADOW_44 >= 0 { mask = mask | flow_shadow_bit_x86(3) }
+        if EXPR_HSHADOW_45 >= 0 { mask = mask | flow_shadow_bit_x86(4) }
+        if EXPR_HSHADOW_46 >= 0 { mask = mask | flow_shadow_bit_x86(5) }
+        if EXPR_HSHADOW_47 >= 0 { mask = mask | flow_shadow_bit_x86(6) }
+        if EXPR_HSHADOW_55 >= 0 { mask = mask | flow_shadow_bit_x86(7) }
+        if EXPR_HSHADOW_56 >= 0 { mask = mask | flow_shadow_bit_x86(8) }
+        if EXPR_HSHADOW_57 >= 0 { mask = mask | flow_shadow_bit_x86(9) }
+        if EXPR_HSHADOW_66 >= 0 { mask = mask | flow_shadow_bit_x86(10) }
+        if EXPR_HSHADOW_67 >= 0 { mask = mask | flow_shadow_bit_x86(11) }
+        if EXPR_HSHADOW_77 >= 0 { mask = mask | flow_shadow_bit_x86(12) }
+        if EXPR_SX[0 as usize] >= 0 { mask = mask | flow_shadow_bit_x86(13) }
+        if EXPR_SX[1 as usize] >= 0 { mask = mask | flow_shadow_bit_x86(14) }
+        if EXPR_SX[2 as usize] >= 0 { mask = mask | flow_shadow_bit_x86(15) }
+        if EXPR_SX[3 as usize] >= 0 { mask = mask | flow_shadow_bit_x86(16) }
+        if EXPR_SX[4 as usize] >= 0 { mask = mask | flow_shadow_bit_x86(17) }
+        if EXPR_SX[5 as usize] >= 0 { mask = mask | flow_shadow_bit_x86(18) }
+        if EXPR_SX[6 as usize] >= 0 { mask = mask | flow_shadow_bit_x86(19) }
+        if EXPR_SX[7 as usize] >= 0 { mask = mask | flow_shadow_bit_x86(20) }
+        if EXPR_SX[8 as usize] >= 0 { mask = mask | flow_shadow_bit_x86(21) }
+        if EXPR_SX[9 as usize] >= 0 { mask = mask | flow_shadow_bit_x86(22) }
+        if EXPR_SX[10 as usize] >= 0 { mask = mask | flow_shadow_bit_x86(23) }
+        if EXPR_SX[11 as usize] >= 0 { mask = mask | flow_shadow_bit_x86(24) }
+        if EXPR_SX[12 as usize] >= 0 { mask = mask | flow_shadow_bit_x86(25) }
+        if EXPR_SX[13 as usize] >= 0 { mask = mask | flow_shadow_bit_x86(26) }
+        if EXPR_SX[14 as usize] >= 0 { mask = mask | flow_shadow_bit_x86(27) }
+        if EXPR_SX[15 as usize] >= 0 { mask = mask | flow_shadow_bit_x86(28) }
+        if EXPR_SX[16 as usize] >= 0 { mask = mask | flow_shadow_bit_x86(29) }
+        if EXPR_SX[17 as usize] >= 0 { mask = mask | flow_shadow_bit_x86(30) }
+        if EXPR_SX[18 as usize] >= 0 { mask = mask | flow_shadow_bit_x86(31) }
+    }
+    if group == 2 {
+        if EXPR_SX[19 as usize] >= 0 { mask = mask | flow_shadow_bit_x86(0) }
+        if EXPR_SX[20 as usize] >= 0 { mask = mask | flow_shadow_bit_x86(1) }
+        if EXPR_SX[21 as usize] >= 0 { mask = mask | flow_shadow_bit_x86(2) }
+        if EXPR_SX[22 as usize] >= 0 { mask = mask | flow_shadow_bit_x86(3) }
+        if EXPR_SX[23 as usize] >= 0 { mask = mask | flow_shadow_bit_x86(4) }
+    }
+    return mask
+}
+
+fn flow_restore_shadows_x86(base: i64, mask0: i64, mask1: i64, mask2: i64) with Mut {
+    EXPR_VSHADOW = -1
+    if (mask0 & flow_shadow_bit_x86(0)) != 0 { EXPR_VSHADOW = base + 0 }
+    EXPR_SSHADOW = -1
+    if (mask0 & flow_shadow_bit_x86(1)) != 0 { EXPR_SSHADOW = base + 1 }
+    EXPR_SSHADOW_1 = -1
+    if (mask0 & flow_shadow_bit_x86(2)) != 0 { EXPR_SSHADOW_1 = base + 2 }
+    EXPR_SSHADOW_2 = -1
+    if (mask0 & flow_shadow_bit_x86(3)) != 0 { EXPR_SSHADOW_2 = base + 3 }
+    EXPR_SSHADOW_3 = -1
+    if (mask0 & flow_shadow_bit_x86(4)) != 0 { EXPR_SSHADOW_3 = base + 4 }
+    EXPR_SSHADOW_4 = -1
+    if (mask0 & flow_shadow_bit_x86(5)) != 0 { EXPR_SSHADOW_4 = base + 5 }
+    EXPR_SSHADOW_5 = -1
+    if (mask0 & flow_shadow_bit_x86(6)) != 0 { EXPR_SSHADOW_5 = base + 6 }
+    EXPR_SSHADOW_6 = -1
+    if (mask0 & flow_shadow_bit_x86(7)) != 0 { EXPR_SSHADOW_6 = base + 7 }
+    EXPR_SSHADOW_7 = -1
+    if (mask0 & flow_shadow_bit_x86(8)) != 0 { EXPR_SSHADOW_7 = base + 8 }
+    EXPR_HSHADOW_00 = -1
+    if (mask0 & flow_shadow_bit_x86(9)) != 0 { EXPR_HSHADOW_00 = base + 9 }
+    EXPR_HSHADOW_01 = -1
+    if (mask0 & flow_shadow_bit_x86(10)) != 0 { EXPR_HSHADOW_01 = base + 10 }
+    EXPR_HSHADOW_02 = -1
+    if (mask0 & flow_shadow_bit_x86(11)) != 0 { EXPR_HSHADOW_02 = base + 11 }
+    EXPR_HSHADOW_03 = -1
+    if (mask0 & flow_shadow_bit_x86(12)) != 0 { EXPR_HSHADOW_03 = base + 12 }
+    EXPR_HSHADOW_04 = -1
+    if (mask0 & flow_shadow_bit_x86(13)) != 0 { EXPR_HSHADOW_04 = base + 13 }
+    EXPR_HSHADOW_05 = -1
+    if (mask0 & flow_shadow_bit_x86(14)) != 0 { EXPR_HSHADOW_05 = base + 14 }
+    EXPR_HSHADOW_06 = -1
+    if (mask0 & flow_shadow_bit_x86(15)) != 0 { EXPR_HSHADOW_06 = base + 15 }
+    EXPR_HSHADOW_07 = -1
+    if (mask0 & flow_shadow_bit_x86(16)) != 0 { EXPR_HSHADOW_07 = base + 16 }
+    EXPR_HSHADOW_11 = -1
+    if (mask0 & flow_shadow_bit_x86(17)) != 0 { EXPR_HSHADOW_11 = base + 17 }
+    EXPR_HSHADOW_12 = -1
+    if (mask0 & flow_shadow_bit_x86(18)) != 0 { EXPR_HSHADOW_12 = base + 18 }
+    EXPR_HSHADOW_13 = -1
+    if (mask0 & flow_shadow_bit_x86(19)) != 0 { EXPR_HSHADOW_13 = base + 19 }
+    EXPR_HSHADOW_14 = -1
+    if (mask0 & flow_shadow_bit_x86(20)) != 0 { EXPR_HSHADOW_14 = base + 20 }
+    EXPR_HSHADOW_15 = -1
+    if (mask0 & flow_shadow_bit_x86(21)) != 0 { EXPR_HSHADOW_15 = base + 21 }
+    EXPR_HSHADOW_16 = -1
+    if (mask0 & flow_shadow_bit_x86(22)) != 0 { EXPR_HSHADOW_16 = base + 22 }
+    EXPR_HSHADOW_17 = -1
+    if (mask0 & flow_shadow_bit_x86(23)) != 0 { EXPR_HSHADOW_17 = base + 23 }
+    EXPR_HSHADOW_22 = -1
+    if (mask0 & flow_shadow_bit_x86(24)) != 0 { EXPR_HSHADOW_22 = base + 24 }
+    EXPR_HSHADOW_23 = -1
+    if (mask0 & flow_shadow_bit_x86(25)) != 0 { EXPR_HSHADOW_23 = base + 25 }
+    EXPR_HSHADOW_24 = -1
+    if (mask0 & flow_shadow_bit_x86(26)) != 0 { EXPR_HSHADOW_24 = base + 26 }
+    EXPR_HSHADOW_25 = -1
+    if (mask0 & flow_shadow_bit_x86(27)) != 0 { EXPR_HSHADOW_25 = base + 27 }
+    EXPR_HSHADOW_26 = -1
+    if (mask0 & flow_shadow_bit_x86(28)) != 0 { EXPR_HSHADOW_26 = base + 28 }
+    EXPR_HSHADOW_27 = -1
+    if (mask0 & flow_shadow_bit_x86(29)) != 0 { EXPR_HSHADOW_27 = base + 29 }
+    EXPR_HSHADOW_33 = -1
+    if (mask0 & flow_shadow_bit_x86(30)) != 0 { EXPR_HSHADOW_33 = base + 30 }
+    EXPR_HSHADOW_34 = -1
+    if (mask0 & flow_shadow_bit_x86(31)) != 0 { EXPR_HSHADOW_34 = base + 31 }
+    EXPR_HSHADOW_35 = -1
+    if (mask1 & flow_shadow_bit_x86(0)) != 0 { EXPR_HSHADOW_35 = base + 32 }
+    EXPR_HSHADOW_36 = -1
+    if (mask1 & flow_shadow_bit_x86(1)) != 0 { EXPR_HSHADOW_36 = base + 33 }
+    EXPR_HSHADOW_37 = -1
+    if (mask1 & flow_shadow_bit_x86(2)) != 0 { EXPR_HSHADOW_37 = base + 34 }
+    EXPR_HSHADOW_44 = -1
+    if (mask1 & flow_shadow_bit_x86(3)) != 0 { EXPR_HSHADOW_44 = base + 35 }
+    EXPR_HSHADOW_45 = -1
+    if (mask1 & flow_shadow_bit_x86(4)) != 0 { EXPR_HSHADOW_45 = base + 36 }
+    EXPR_HSHADOW_46 = -1
+    if (mask1 & flow_shadow_bit_x86(5)) != 0 { EXPR_HSHADOW_46 = base + 37 }
+    EXPR_HSHADOW_47 = -1
+    if (mask1 & flow_shadow_bit_x86(6)) != 0 { EXPR_HSHADOW_47 = base + 38 }
+    EXPR_HSHADOW_55 = -1
+    if (mask1 & flow_shadow_bit_x86(7)) != 0 { EXPR_HSHADOW_55 = base + 39 }
+    EXPR_HSHADOW_56 = -1
+    if (mask1 & flow_shadow_bit_x86(8)) != 0 { EXPR_HSHADOW_56 = base + 40 }
+    EXPR_HSHADOW_57 = -1
+    if (mask1 & flow_shadow_bit_x86(9)) != 0 { EXPR_HSHADOW_57 = base + 41 }
+    EXPR_HSHADOW_66 = -1
+    if (mask1 & flow_shadow_bit_x86(10)) != 0 { EXPR_HSHADOW_66 = base + 42 }
+    EXPR_HSHADOW_67 = -1
+    if (mask1 & flow_shadow_bit_x86(11)) != 0 { EXPR_HSHADOW_67 = base + 43 }
+    EXPR_HSHADOW_77 = -1
+    if (mask1 & flow_shadow_bit_x86(12)) != 0 { EXPR_HSHADOW_77 = base + 44 }
+    EXPR_SX[0 as usize] = -1
+    if (mask1 & flow_shadow_bit_x86(13)) != 0 { EXPR_SX[0 as usize] = base + 45 }
+    EXPR_SX[1 as usize] = -1
+    if (mask1 & flow_shadow_bit_x86(14)) != 0 { EXPR_SX[1 as usize] = base + 46 }
+    EXPR_SX[2 as usize] = -1
+    if (mask1 & flow_shadow_bit_x86(15)) != 0 { EXPR_SX[2 as usize] = base + 47 }
+    EXPR_SX[3 as usize] = -1
+    if (mask1 & flow_shadow_bit_x86(16)) != 0 { EXPR_SX[3 as usize] = base + 48 }
+    EXPR_SX[4 as usize] = -1
+    if (mask1 & flow_shadow_bit_x86(17)) != 0 { EXPR_SX[4 as usize] = base + 49 }
+    EXPR_SX[5 as usize] = -1
+    if (mask1 & flow_shadow_bit_x86(18)) != 0 { EXPR_SX[5 as usize] = base + 50 }
+    EXPR_SX[6 as usize] = -1
+    if (mask1 & flow_shadow_bit_x86(19)) != 0 { EXPR_SX[6 as usize] = base + 51 }
+    EXPR_SX[7 as usize] = -1
+    if (mask1 & flow_shadow_bit_x86(20)) != 0 { EXPR_SX[7 as usize] = base + 52 }
+    EXPR_SX[8 as usize] = -1
+    if (mask1 & flow_shadow_bit_x86(21)) != 0 { EXPR_SX[8 as usize] = base + 53 }
+    EXPR_SX[9 as usize] = -1
+    if (mask1 & flow_shadow_bit_x86(22)) != 0 { EXPR_SX[9 as usize] = base + 54 }
+    EXPR_SX[10 as usize] = -1
+    if (mask1 & flow_shadow_bit_x86(23)) != 0 { EXPR_SX[10 as usize] = base + 55 }
+    EXPR_SX[11 as usize] = -1
+    if (mask1 & flow_shadow_bit_x86(24)) != 0 { EXPR_SX[11 as usize] = base + 56 }
+    EXPR_SX[12 as usize] = -1
+    if (mask1 & flow_shadow_bit_x86(25)) != 0 { EXPR_SX[12 as usize] = base + 57 }
+    EXPR_SX[13 as usize] = -1
+    if (mask1 & flow_shadow_bit_x86(26)) != 0 { EXPR_SX[13 as usize] = base + 58 }
+    EXPR_SX[14 as usize] = -1
+    if (mask1 & flow_shadow_bit_x86(27)) != 0 { EXPR_SX[14 as usize] = base + 59 }
+    EXPR_SX[15 as usize] = -1
+    if (mask1 & flow_shadow_bit_x86(28)) != 0 { EXPR_SX[15 as usize] = base + 60 }
+    EXPR_SX[16 as usize] = -1
+    if (mask1 & flow_shadow_bit_x86(29)) != 0 { EXPR_SX[16 as usize] = base + 61 }
+    EXPR_SX[17 as usize] = -1
+    if (mask1 & flow_shadow_bit_x86(30)) != 0 { EXPR_SX[17 as usize] = base + 62 }
+    EXPR_SX[18 as usize] = -1
+    if (mask1 & flow_shadow_bit_x86(31)) != 0 { EXPR_SX[18 as usize] = base + 63 }
+    EXPR_SX[19 as usize] = -1
+    if (mask2 & flow_shadow_bit_x86(0)) != 0 { EXPR_SX[19 as usize] = base + 64 }
+    EXPR_SX[20 as usize] = -1
+    if (mask2 & flow_shadow_bit_x86(1)) != 0 { EXPR_SX[20 as usize] = base + 65 }
+    EXPR_SX[21 as usize] = -1
+    if (mask2 & flow_shadow_bit_x86(2)) != 0 { EXPR_SX[21 as usize] = base + 66 }
+    EXPR_SX[22 as usize] = -1
+    if (mask2 & flow_shadow_bit_x86(3)) != 0 { EXPR_SX[22 as usize] = base + 67 }
+    EXPR_SX[23 as usize] = -1
+    if (mask2 & flow_shadow_bit_x86(4)) != 0 { EXPR_SX[23 as usize] = base + 68 }
 }
 
 
@@ -32335,6 +32631,9 @@ fn compile_stmt_body_x86() with IO, Mut, Panic, Div {
             compile_or()
             let il_scrut_flow_x86 = LAST_STMT_CAN_FALLTHROUGH_X86
             var il_shadow_base_x86: i64 = -1
+            var il_mask0_x86: i64 = 0
+            var il_mask1_x86: i64 = 0
+            var il_mask2_x86: i64 = 0
             // Record scrutinee type for binding propagation
             MATCH_SCRUT_TY   = EXPR_TY
             MATCH_SCRUT_HASH = EXPR_TY_HASH
@@ -32409,6 +32708,9 @@ fn compile_stmt_body_x86() with IO, Mut, Panic, Div {
             let il_then_hash = LAST_STMT_TY_HASH
             if il_then_flow_x86 != 0 && il_then_has_value == 1 && il_then_ty == 2 {
                 il_shadow_base_x86 = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 69
+                il_mask0_x86 = il_mask0_x86 | flow_shadow_mask_x86(0)
+                il_mask1_x86 = il_mask1_x86 | flow_shadow_mask_x86(1)
+                il_mask2_x86 = il_mask2_x86 | flow_shadow_mask_x86(2)
                 flow_spill_shadows_x86(il_shadow_base_x86)
             }
             if TK[EP as usize] == 9 { EP = EP + 1 }
@@ -32442,7 +32744,10 @@ fn compile_stmt_body_x86() with IO, Mut, Panic, Div {
                 let il_else_ch_set_x86 = EXPR_CH_SET
                 if il_else_flow_x86 != 0 && il_else_has_value == 1 && il_else_ty == 2 {
                     if il_shadow_base_x86 < 0 { il_shadow_base_x86 = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 69 }
-                    flow_spill_shadows_x86(il_shadow_base_x86)
+                    il_mask0_x86 = il_mask0_x86 | flow_shadow_mask_x86(0)
+                il_mask1_x86 = il_mask1_x86 | flow_shadow_mask_x86(1)
+                il_mask2_x86 = il_mask2_x86 | flow_shadow_mask_x86(2)
+                flow_spill_shadows_x86(il_shadow_base_x86)
                 }
                 patch32(il_jmp_off, CL)
                 LAST_STMT_CAN_FALLTHROUGH_X86 = flow_sequence_x86(il_scrut_flow_x86, flow_join_x86(il_then_flow_x86, il_else_flow_x86))
@@ -32465,7 +32770,7 @@ fn compile_stmt_body_x86() with IO, Mut, Panic, Div {
                 EXPR_IS_F64 = 0
                 if LAST_STMT_HAS_VALUE == 1 && LAST_STMT_TY == 2 {
                     EXPR_IS_F64 = 1
-                    if il_shadow_base_x86 >= 0 { flow_restore_shadows_x86(il_shadow_base_x86) }
+                    if il_shadow_base_x86 >= 0 { flow_restore_shadows_x86(il_shadow_base_x86, il_mask0_x86, il_mask1_x86, il_mask2_x86) }
                 }
             } else {
                 if il_je_off > 0 { patch32(il_je_off, CL) }
@@ -32511,21 +32816,6 @@ fn compile_stmt_body_x86() with IO, Mut, Panic, Div {
         let then_flow_x86 = LAST_STMT_CAN_FALLTHROUGH_X86
         let then_ty = LAST_STMT_TY
         let then_hash = LAST_STMT_TY_HASH
-        // KL-16e: capture then FO/H00 shadow slot indices before else overwrites EXPR_*.
-        let then_s0 = EXPR_SSHADOW
-        let then_s1 = EXPR_SSHADOW_1
-        let then_s2 = EXPR_SSHADOW_2
-        let then_s3 = EXPR_SSHADOW_3
-        let then_s4 = EXPR_SSHADOW_4
-        let then_s5 = EXPR_SSHADOW_5
-        let then_s6 = EXPR_SSHADOW_6
-        let then_s7 = EXPR_SSHADOW_7
-        let then_sx = sx_snap()
-        let then_h00 = EXPR_HSHADOW_00
-        // #2776: the GUM variance joins too (it used to take the ELSE arm's slot
-        // only, so `if true { a * b } else { a + b }` read an else-arm slot that
-        // never ran: 0).
-        let then_v = EXPR_VSHADOW
         if TK[EP as usize] == 9 { EP = EP + 1 }
         LAST_STMT_HAS_VALUE = 0
         LAST_STMT_TY = 0
@@ -32533,49 +32823,16 @@ fn compile_stmt_body_x86() with IO, Mut, Panic, Div {
         LAST_STMT_CAN_FALLTHROUGH_X86 = 1
         if TK[EP as usize] == 14 {
             EP = EP + 1
-            // KL-16e: allocate join slots + spill then shadows before jmp-to-end.
-            // Only one arm executes at runtime; both arms write the same slots.
-            var merge_s0: i64 = -1
-            var merge_s1: i64 = -1
-            var merge_s2: i64 = -1
-            var merge_s3: i64 = -1
-            var merge_s4: i64 = -1
-            var merge_s5: i64 = -1
-            var merge_s6: i64 = -1
-            var merge_s7: i64 = -1
-            var merge_h00: i64 = -1
-            var merge_v: i64 = -1
-            var merge_sx: i64 = -1
-            var do_shadow_merge: i64 = 0
-            if then_has_value == 1 && then_ty == 2 {
-                do_shadow_merge = 1
-                merge_s0 = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
-                merge_s1 = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
-                merge_s2 = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
-                merge_s3 = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
-                merge_s4 = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
-                merge_s5 = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
-                merge_s6 = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
-                merge_s7 = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
-                merge_h00 = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
-                merge_v = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
-                emit_kl16e_spill_fo_h00(
-                    merge_s0, merge_s1, merge_s2, merge_s3, merge_s4, merge_s5, merge_s6, merge_s7, merge_h00,
-                    then_s0, then_s1, then_s2, then_s3, then_s4, then_s5, then_s6, then_s7, then_h00
-                )
-                em(0x50)  // push rax (the arm's value)
-                emit_spill_shadow_slot(merge_v, then_v)
-                // #2776: the extra channels join through their own slots.
-                if FSH_ACTIVE != 0 {
-                    merge_sx = NEXT_SLOT
-                    NEXT_SLOT = NEXT_SLOT + 24
-                    var msx: i64 = 0
-                    while msx < 24 {
-                        emit_spill_shadow_slot(merge_sx + msx, sx_at(then_sx, msx))
-                        msx = msx + 1
-                    }
-                }
-                em(0x58)  // pop rax
+            var if_shadow_base_x86: i64 = -1
+            var if_mask0_x86: i64 = 0
+            var if_mask1_x86: i64 = 0
+            var if_mask2_x86: i64 = 0
+            if then_flow_x86 != 0 && then_has_value == 1 && then_ty == 2 {
+                if_shadow_base_x86 = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 69
+                if_mask0_x86 = flow_shadow_mask_x86(0)
+                if_mask1_x86 = flow_shadow_mask_x86(1)
+                if_mask2_x86 = flow_shadow_mask_x86(2)
+                flow_spill_shadows_x86(if_shadow_base_x86)
             }
             em(0xe9)
             let jmp_off = CL; em32(0)
@@ -32608,17 +32865,6 @@ fn compile_stmt_body_x86() with IO, Mut, Panic, Div {
             // per this same rule, so EXPR_CH_SET is the full union from the
             // recursive call.
             let if_else_ch_set = EXPR_CH_SET
-            let else_s0 = EXPR_SSHADOW
-            let else_s1 = EXPR_SSHADOW_1
-            let else_s2 = EXPR_SSHADOW_2
-            let else_s3 = EXPR_SSHADOW_3
-            let else_s4 = EXPR_SSHADOW_4
-            let else_s5 = EXPR_SSHADOW_5
-            let else_s6 = EXPR_SSHADOW_6
-            let else_s7 = EXPR_SSHADOW_7
-            let else_sx = sx_snap()
-            let else_h00 = EXPR_HSHADOW_00
-            let else_v = EXPR_VSHADOW
             // Linear branch asymmetry check: compare then vs else VAR_USED
             var lchk: i64 = 0
             while lchk < VAR_COUNT {
@@ -32648,22 +32894,12 @@ fn compile_stmt_body_x86() with IO, Mut, Panic, Div {
             let else_flow_x86 = LAST_STMT_CAN_FALLTHROUGH_X86
             let else_ty = LAST_STMT_TY
             let else_hash = LAST_STMT_TY_HASH
-            // KL-16e: spill else shadows into the same join slots before fall-through.
-            if do_shadow_merge == 1 && else_has_value == 1 && else_ty == 2 {
-                emit_kl16e_spill_fo_h00(
-                    merge_s0, merge_s1, merge_s2, merge_s3, merge_s4, merge_s5, merge_s6, merge_s7, merge_h00,
-                    else_s0, else_s1, else_s2, else_s3, else_s4, else_s5, else_s6, else_s7, else_h00
-                )
-                em(0x50)
-                emit_spill_shadow_slot(merge_v, else_v)
-                if merge_sx >= 0 {
-                    var esx: i64 = 0
-                    while esx < 24 {
-                        emit_spill_shadow_slot(merge_sx + esx, sx_at(else_sx, esx))
-                        esx = esx + 1
-                    }
-                }
-                em(0x58)
+            if else_flow_x86 != 0 && else_has_value == 1 && else_ty == 2 {
+                if if_shadow_base_x86 < 0 { if_shadow_base_x86 = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 69 }
+                if_mask0_x86 = if_mask0_x86 | flow_shadow_mask_x86(0)
+                if_mask1_x86 = if_mask1_x86 | flow_shadow_mask_x86(1)
+                if_mask2_x86 = if_mask2_x86 | flow_shadow_mask_x86(2)
+                flow_spill_shadows_x86(if_shadow_base_x86)
             }
             patch32(jmp_off, CL)
             LAST_STMT_CAN_FALLTHROUGH_X86 = flow_sequence_x86(if_cond_flow_x86, flow_join_x86(then_flow_x86, else_flow_x86))
@@ -32685,40 +32921,8 @@ fn compile_stmt_body_x86() with IO, Mut, Panic, Div {
                 // the if-expression's EXPR_CH_SET.  Matches `Typing.tIf`'s
                 // conclusion `Sc ∪ (S1 ∪ S2)` in formal/GradientTopology.lean §3.
                 EXPR_CH_SET = if_cond_ch_set | if_then_ch_set | if_else_ch_set
-                // KL-16e: point EXPR FO/H00 at join slots. Other H pairs stay
-                // OPEN through if (multi-pair if-merge not in this rung).
-                if do_shadow_merge == 1 {
-                    if then_v >= 0 || else_v >= 0 { EXPR_VSHADOW = merge_v } else { EXPR_VSHADOW = -1 }
-                    EXPR_SSHADOW = merge_s0
-                    EXPR_SSHADOW_1 = merge_s1
-                    EXPR_SSHADOW_2 = merge_s2
-                    EXPR_SSHADOW_3 = merge_s3
-                    EXPR_SSHADOW_4 = merge_s4
-                    EXPR_SSHADOW_5 = merge_s5
-                    EXPR_SSHADOW_6 = merge_s6
-                    EXPR_SSHADOW_7 = merge_s7
-                    sx_clear()
-                    if merge_sx >= 0 {
-                        var jsx: i64 = 0
-                        while jsx < 24 { EXPR_SX[jsx as usize] = merge_sx + jsx; jsx = jsx + 1 }
-                    }
-                    EXPR_HSHADOW_00 = merge_h00
-                    EXPR_HSHADOW_01 = -1; EXPR_HSHADOW_02 = -1; EXPR_HSHADOW_03 = -1
-                    EXPR_HSHADOW_11 = -1; EXPR_HSHADOW_12 = -1; EXPR_HSHADOW_13 = -1
-                    EXPR_HSHADOW_22 = -1; EXPR_HSHADOW_23 = -1; EXPR_HSHADOW_33 = -1
-                    EXPR_HSHADOW_04 = -1; EXPR_HSHADOW_05 = -1; EXPR_HSHADOW_06 = -1; EXPR_HSHADOW_07 = -1
-                    EXPR_HSHADOW_14 = -1; EXPR_HSHADOW_15 = -1; EXPR_HSHADOW_16 = -1; EXPR_HSHADOW_17 = -1
-                    EXPR_HSHADOW_24 = -1; EXPR_HSHADOW_25 = -1; EXPR_HSHADOW_26 = -1; EXPR_HSHADOW_27 = -1
-                    EXPR_HSHADOW_34 = -1; EXPR_HSHADOW_35 = -1; EXPR_HSHADOW_36 = -1; EXPR_HSHADOW_37 = -1
-                    EXPR_HSHADOW_44 = -1; EXPR_HSHADOW_45 = -1; EXPR_HSHADOW_46 = -1; EXPR_HSHADOW_47 = -1
-                    EXPR_HSHADOW_55 = -1; EXPR_HSHADOW_56 = -1; EXPR_HSHADOW_57 = -1
-                    EXPR_HSHADOW_66 = -1; EXPR_HSHADOW_67 = -1
-                    EXPR_HSHADOW_77 = -1
-                } else {
-                    EXPR_SSHADOW = -1
-                    EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1
-                    EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1; sx_clear()
-                    EXPR_HSHADOW_00 = -1
+                if then_ty == 2 && if_shadow_base_x86 >= 0 {
+                    flow_restore_shadows_x86(if_shadow_base_x86, if_mask0_x86, if_mask1_x86, if_mask2_x86)
                 }
             } else if then_flow_x86 == 0 && else_flow_x86 != 0 && else_value_x86 {
                 LAST_STMT_HAS_VALUE = 1
@@ -32728,8 +32932,9 @@ fn compile_stmt_body_x86() with IO, Mut, Panic, Div {
                 EXPR_TY_HASH = else_hash
                 if else_ty == 2 { EXPR_IS_F64 = 1 } else { EXPR_IS_F64 = 0 }
                 EXPR_CH_SET = if_cond_ch_set | if_else_ch_set
-                // Else is the sole live branch; its current scalar/shadow
-                // metadata already describes the value that reaches the join.
+                if else_ty == 2 && if_shadow_base_x86 >= 0 {
+                    flow_restore_shadows_x86(if_shadow_base_x86, if_mask0_x86, if_mask1_x86, if_mask2_x86)
+                }
             } else {
                 LAST_STMT_HAS_VALUE = 0
                 LAST_STMT_TY = 0
@@ -33247,8 +33452,14 @@ fn compile_stmt_body_x86() with IO, Mut, Panic, Div {
         var match_live_x86: i64 = 0
         var match_exhaustive_x86: i64 = 0
         var match_option_mask_x86: i64 = 0
-        var match_result_mask_x86: i64 = 0
+        var match_bool_mask_x86: i64 = 0
+        var match_nominal_ei_x86: i64 = -1
+        if match_scrut_ty == 7 { match_nominal_ei_x86 = flow_enum_for_hash_x86(match_scrut_hash) }
+        var match_nominal_covered_x86: [i64; 254] = [0; 254]
         var match_shadow_base_x86: i64 = -1
+        var match_mask0_x86: i64 = 0
+        var match_mask1_x86: i64 = 0
+        var match_mask2_x86: i64 = 0
         var match_all_value: i64 = 1
         var match_arms: i64 = 0
         // β⁹ GTT week-7: accumulate each arm's tail EXPR_CH_SET into this union.
@@ -33266,6 +33477,9 @@ fn compile_stmt_body_x86() with IO, Mut, Panic, Div {
             var is_tuple_pattern: i64 = 0
             var tpat_count: i64 = 0
             let arm_tk = TK[EP as usize]
+            var arm_nominal_index_x86: i64 = -1
+            if arm_tk == 35 { disc = 1; EP = EP + 1 }
+            if arm_tk == 36 { disc = 0; EP = EP + 1 }
             // Some(v) pattern — tag=1, bind inner value
             if arm_tk == 57 {
                 EP = EP + 1
@@ -33320,11 +33534,14 @@ fn compile_stmt_body_x86() with IO, Mut, Panic, Div {
                 if pne - pns == 1 && sb(pns) == 95 {
                     is_wildcard = 1; EP = EP + 1
                 } else if TK[(EP + 1) as usize] == 51 {
+                    let enum_tok_x86 = EP
                     let eh = gl_name_hash(pns, pne)
                     EP = EP + 2
                     let vh = gl_name_hash(TS[EP as usize], TE[EP as usize])
                     EP = EP + 1
                     disc = en_variant_value(eh, vh)
+                    arm_nominal_index_x86 = flow_enum_variant_x86(match_nominal_ei_x86, enum_tok_x86, EP - 1)
+                    if arm_nominal_index_x86 != disc { arm_nominal_index_x86 = -1 }
                 } else if match_arm_const_int(pns, pne) != 0 && CONST_FOUND_VAL >= 0 {
                     // #2377: a module-level integer constant is a value pattern.
                     disc = CONST_FOUND_VAL; EP = EP + 1
@@ -33373,7 +33590,18 @@ fn compile_stmt_body_x86() with IO, Mut, Panic, Div {
                 }
                 if TK[EP as usize] == 7 { EP = EP + 1 }  // consume )
             }
-            if arm_tk != 57 && arm_tk != 58 && arm_tk != 59 && arm_tk != 60 && arm_tk != 3 && arm_tk != 4 && arm_tk != 6 { EP = EP + 1 }
+            if arm_tk != 57 && arm_tk != 58 && arm_tk != 59 && arm_tk != 60 && arm_tk != 3 && arm_tk != 4 && arm_tk != 6 && arm_tk != 35 && arm_tk != 36 { EP = EP + 1 }
+            if TK[EP as usize] == 45 || TK[EP as usize] == 52 {
+                if match_scrut_ty == 4 {
+                    if arm_tk == 35 { match_bool_mask_x86 = match_bool_mask_x86 | 2 }
+                    if arm_tk == 36 { match_bool_mask_x86 = match_bool_mask_x86 | 1 }
+                }
+                if match_scrut_ty == 11 && option_hash_is(match_scrut_hash) {
+                    if arm_tk == 57 { match_option_mask_x86 = match_option_mask_x86 | 2 }
+                    if arm_tk == 58 { match_option_mask_x86 = match_option_mask_x86 | 1 }
+                }
+                if arm_nominal_index_x86 >= 0 { match_nominal_covered_x86[arm_nominal_index_x86 as usize] = 1 }
+            }
             // Phase 1.4: Or-pattern detection (A | B | C => body)
             var is_or_pattern: i64 = 0
             // `v | w => ..` (an or-pattern whose first alternative is a binding):
@@ -33396,6 +33624,11 @@ fn compile_stmt_body_x86() with IO, Mut, Panic, Div {
                 // Parse additional alternatives
                 while TK[EP as usize] == 45 {
                     EP = EP + 1
+                    if OR_ALT_COUNT >= 8 {
+                        tc_error_hard(EP, "or-pattern exceeds x86 alternative budget")
+                        while TK[EP as usize] != 52 && TK[EP as usize] != 9 && TK[EP as usize] != 0 { EP = EP + 1 }
+                        break
+                    }
                     let alt_i = OR_ALT_COUNT
                     var a_disc: i64 = -1
                     var a_tagged: i64 = 0
@@ -33404,6 +33637,9 @@ fn compile_stmt_body_x86() with IO, Mut, Panic, Div {
                     var a_bind_ne: i64 = 0
                     var a_is_wild: i64 = 0
                     let a_tk = TK[EP as usize]
+                    var a_nominal_index_x86: i64 = -1
+                    if a_tk == 35 { EP = EP + 1; a_disc = 1 }
+                    if a_tk == 36 { EP = EP + 1; a_disc = 0 }
                     if a_tk == 57 { EP = EP + 1; a_disc = 1; a_tagged = 1; if TK[EP as usize] == 6 { EP = EP + 1; a_bind_ns = TS[EP as usize]; a_bind_ne = TE[EP as usize]; a_has_bind = 1; EP = EP + 1; if TK[EP as usize] == 7 { EP = EP + 1 } } }
                     if a_tk == 58 { EP = EP + 1; a_disc = 0; a_tagged = 1 }
                     if a_tk == 59 { EP = EP + 1; a_disc = 0; a_tagged = 1; if TK[EP as usize] == 6 { EP = EP + 1; a_bind_ns = TS[EP as usize]; a_bind_ne = TE[EP as usize]; a_has_bind = 1; EP = EP + 1; if TK[EP as usize] == 7 { EP = EP + 1 } } }
@@ -33411,11 +33647,22 @@ fn compile_stmt_body_x86() with IO, Mut, Panic, Div {
                     if a_tk == 3 {
                         let ans = TS[EP as usize]; let ane = TE[EP as usize]
                         if ane - ans == 1 && sb(ans) == 95 { a_is_wild = 1; EP = EP + 1 }
-                        else if TK[(EP + 1) as usize] == 51 { let aeh = gl_name_hash(ans, ane); EP = EP + 2; let avh = gl_name_hash(TS[EP as usize], TE[EP as usize]); EP = EP + 1; a_disc = en_variant_value(aeh, avh) }
+                        else if TK[(EP + 1) as usize] == 51 { let aenum_tok_x86 = EP; let aeh = gl_name_hash(ans, ane); EP = EP + 2; let avh = gl_name_hash(TS[EP as usize], TE[EP as usize]); EP = EP + 1; a_disc = en_variant_value(aeh, avh); a_nominal_index_x86 = flow_enum_variant_x86(match_nominal_ei_x86, aenum_tok_x86, EP - 1); if a_nominal_index_x86 != a_disc { a_nominal_index_x86 = -1 } }
                         else if match_arm_const_int(ans, ane) != 0 && CONST_FOUND_VAL >= 0 { a_disc = CONST_FOUND_VAL; EP = EP + 1 }
                         else { EP = EP + 1 }
                     }
                     if a_tk == 4 { a_disc = TV[EP as usize]; EP = EP + 1 }
+                    if TK[EP as usize] == 45 || TK[EP as usize] == 52 {
+                        if match_scrut_ty == 4 {
+                            if a_tk == 35 { match_bool_mask_x86 = match_bool_mask_x86 | 2 }
+                            if a_tk == 36 { match_bool_mask_x86 = match_bool_mask_x86 | 1 }
+                        }
+                        if match_scrut_ty == 11 && option_hash_is(match_scrut_hash) {
+                            if a_tk == 57 { match_option_mask_x86 = match_option_mask_x86 | 2 }
+                            if a_tk == 58 { match_option_mask_x86 = match_option_mask_x86 | 1 }
+                        }
+                        if a_nominal_index_x86 >= 0 { match_nominal_covered_x86[a_nominal_index_x86 as usize] = 1 }
+                    }
                     OR_ALT_DISC[alt_i as usize] = a_disc
                     OR_ALT_TAGGED[alt_i as usize] = a_tagged
                     OR_ALT_HAS_BIND[alt_i as usize] = a_has_bind
@@ -33496,7 +33743,7 @@ fn compile_stmt_body_x86() with IO, Mut, Panic, Div {
                 var or_has_wild: i64 = 0
                 var owj: i64 = 0
                 while owj < OR_ALT_COUNT { if OR_ALT_IS_WILD[owj as usize] == 1 { or_has_wild = 1 }; owj = owj + 1 }
-                if or_has_wild == 1 { match_exhaustive_x86 = 1; if match_arms < 1000000 { match_arms = 1000000 } }
+                if or_has_wild == 1 && TK[EP as usize] == 52 { match_exhaustive_x86 = 1; if match_arms < 1000000 { match_arms = 1000000 } }
                 // Compile arm body
                 if TK[EP as usize] == 52 { EP = EP + 1 }
                 var or_arm_block: i64 = 0
@@ -33518,21 +33765,16 @@ fn compile_stmt_body_x86() with IO, Mut, Panic, Div {
                     else if ty_eq(match_ty, match_hash, LAST_STMT_TY, LAST_STMT_TY_HASH) == false { tc_error_hard(EP - 1, "match arm type does not match other arms") }
                         if LAST_STMT_TY == 2 {
                             if match_shadow_base_x86 < 0 { match_shadow_base_x86 = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 69 }
-                            flow_spill_shadows_x86(match_shadow_base_x86)
+                            match_mask0_x86 = match_mask0_x86 | flow_shadow_mask_x86(0)
+                        match_mask1_x86 = match_mask1_x86 | flow_shadow_mask_x86(1)
+                        match_mask2_x86 = match_mask2_x86 | flow_shadow_mask_x86(2)
+                        flow_spill_shadows_x86(match_shadow_base_x86)
                         }
                     } else { match_all_value = 0 }
                 }
                 em(0xe9); match_ends[arm_count as usize] = CL; em32(0)
                 arm_count = arm_count + 1
                 if or_skip_patch >= 0 { patch32(or_skip_patch, CL) }
-            }
-            // Only recognized tagged Option/Result patterns prove two-tag coverage.
-            // Duplicate arms, integers and guarded bindings never provide that proof.
-            if is_or_pattern == 0 && type_is_option_inline(match_scrut_ty, match_scrut_hash) {
-                if arm_tk == 57 { match_option_mask_x86 = match_option_mask_x86 | 2 }
-                if arm_tk == 58 { match_option_mask_x86 = match_option_mask_x86 | 1 }
-                if arm_tk == 59 { match_result_mask_x86 = match_result_mask_x86 | 1 }
-                if arm_tk == 60 { match_result_mask_x86 = match_result_mask_x86 | 2 }
             }
             // Tuple pattern emission: `(p0, p1, ...) => body`. Scrutinee is a tuple pointer in
             // match_slot; element i is at [tuple + off_i] and is itself a pointer to the
@@ -33609,7 +33851,10 @@ fn compile_stmt_body_x86() with IO, Mut, Panic, Div {
                     else if ty_eq(match_ty, match_hash, LAST_STMT_TY, LAST_STMT_TY_HASH) == false { tc_error_hard(EP - 1, "match arm type does not match other arms") }
                         if LAST_STMT_TY == 2 {
                             if match_shadow_base_x86 < 0 { match_shadow_base_x86 = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 69 }
-                            flow_spill_shadows_x86(match_shadow_base_x86)
+                            match_mask0_x86 = match_mask0_x86 | flow_shadow_mask_x86(0)
+                        match_mask1_x86 = match_mask1_x86 | flow_shadow_mask_x86(1)
+                        match_mask2_x86 = match_mask2_x86 | flow_shadow_mask_x86(2)
+                        flow_spill_shadows_x86(match_shadow_base_x86)
                         }
                     } else { match_all_value = 0 }
                 }
@@ -33648,6 +33893,7 @@ fn compile_stmt_body_x86() with IO, Mut, Panic, Div {
                     em(0x48); em(0x85); em(0xc0)  // test rax, rax
                     em(0x0f); em(0x84); vb_guard_skip = CL; em32(0)  // je guard_fail
                 }
+                let vb_unguarded_complete_x86 = vb_has_guard == 0 && TK[EP as usize] == 52
                 if TK[EP as usize] == 52 { EP = EP + 1 }  // skip =>
                 var vb_arm_has_block: i64 = 0
                 if TK[EP as usize] == 8 { vb_arm_has_block = 1; EP = EP + 1 }
@@ -33661,7 +33907,7 @@ fn compile_stmt_body_x86() with IO, Mut, Panic, Div {
                 if LAST_STMT_CAN_FALLTHROUGH_X86 != 0 { match_arms_ch_union = match_arms_ch_union | EXPR_CH_SET }
                 match_arms = match_arms + 1
                 // No guard → acts as wildcard for exhaustiveness
-                if vb_has_guard == 0 { match_exhaustive_x86 = 1; if match_arms < 1000000 { match_arms = 1000000 } }
+                if vb_unguarded_complete_x86 { match_exhaustive_x86 = 1; if match_arms < 1000000 { match_arms = 1000000 } }
                 if LAST_STMT_CAN_FALLTHROUGH_X86 != 0 {
                     match_live_x86 = 1
                     if LAST_STMT_HAS_VALUE == 1 && LAST_STMT_TY != 5 {
@@ -33669,7 +33915,10 @@ fn compile_stmt_body_x86() with IO, Mut, Panic, Div {
                     else if ty_eq(match_ty, match_hash, LAST_STMT_TY, LAST_STMT_TY_HASH) == false { tc_error_hard(EP - 1, "match arm type does not match other arms") }
                         if LAST_STMT_TY == 2 {
                             if match_shadow_base_x86 < 0 { match_shadow_base_x86 = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 69 }
-                            flow_spill_shadows_x86(match_shadow_base_x86)
+                            match_mask0_x86 = match_mask0_x86 | flow_shadow_mask_x86(0)
+                        match_mask1_x86 = match_mask1_x86 | flow_shadow_mask_x86(1)
+                        match_mask2_x86 = match_mask2_x86 | flow_shadow_mask_x86(2)
+                        flow_spill_shadows_x86(match_shadow_base_x86)
                         }
                     } else { match_all_value = 0 }
                 }
@@ -33739,7 +33988,10 @@ fn compile_stmt_body_x86() with IO, Mut, Panic, Div {
                         }
                             if LAST_STMT_TY == 2 {
                                 if match_shadow_base_x86 < 0 { match_shadow_base_x86 = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 69 }
-                                flow_spill_shadows_x86(match_shadow_base_x86)
+                                match_mask0_x86 = match_mask0_x86 | flow_shadow_mask_x86(0)
+                        match_mask1_x86 = match_mask1_x86 | flow_shadow_mask_x86(1)
+                        match_mask2_x86 = match_mask2_x86 | flow_shadow_mask_x86(2)
+                        flow_spill_shadows_x86(match_shadow_base_x86)
                             }
                         } else { match_all_value = 0 }
                     }
@@ -33780,7 +34032,10 @@ fn compile_stmt_body_x86() with IO, Mut, Panic, Div {
                         }
                             if LAST_STMT_TY == 2 {
                                 if match_shadow_base_x86 < 0 { match_shadow_base_x86 = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 69 }
-                                flow_spill_shadows_x86(match_shadow_base_x86)
+                                match_mask0_x86 = match_mask0_x86 | flow_shadow_mask_x86(0)
+                        match_mask1_x86 = match_mask1_x86 | flow_shadow_mask_x86(1)
+                        match_mask2_x86 = match_mask2_x86 | flow_shadow_mask_x86(2)
+                        flow_spill_shadows_x86(match_shadow_base_x86)
                             }
                         } else { match_all_value = 0 }
                     }
@@ -33790,7 +34045,7 @@ fn compile_stmt_body_x86() with IO, Mut, Panic, Div {
                 }
             }
             if is_or_pattern == 0 && is_wildcard == 1 {
-                match_exhaustive_x86 = 1
+                if TK[EP as usize] == 52 { match_exhaustive_x86 = 1 }
                 if match_arms < 1000000 { match_arms = 1000000 }
                 if TK[EP as usize] == 52 { EP = EP + 1 }
                 var arm_has_block3: i64 = 0
@@ -33818,7 +34073,10 @@ fn compile_stmt_body_x86() with IO, Mut, Panic, Div {
                     }
                         if LAST_STMT_TY == 2 {
                             if match_shadow_base_x86 < 0 { match_shadow_base_x86 = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 69 }
-                            flow_spill_shadows_x86(match_shadow_base_x86)
+                            match_mask0_x86 = match_mask0_x86 | flow_shadow_mask_x86(0)
+                        match_mask1_x86 = match_mask1_x86 | flow_shadow_mask_x86(1)
+                        match_mask2_x86 = match_mask2_x86 | flow_shadow_mask_x86(2)
+                        flow_spill_shadows_x86(match_shadow_base_x86)
                         }
                     } else { match_all_value = 0 }
                 }
@@ -33835,7 +34093,18 @@ fn compile_stmt_body_x86() with IO, Mut, Panic, Div {
         // so CD[CL-1] != 0xc3 and the epilogue is emitted. Harmless for value-matches (value in
         // rax) and for all-returning matches (unreachable merge = dead nop).
         em(0x90)
-        if match_scrut_ty == 7 && match_arms < 1000000 && match_arms < en_variant_count(match_scrut_hash) {
+        if match_nominal_ei_x86 >= 0 {
+            var all_nominal_x86: i64 = 1
+            var nvi_x86: i64 = 0
+            let nvc_x86 = EN[(match_nominal_ei_x86 * 256 + 1) as usize]
+            while nvi_x86 < nvc_x86 {
+                if match_nominal_covered_x86[nvi_x86 as usize] != 1 { all_nominal_x86 = 0 }
+                nvi_x86 = nvi_x86 + 1
+            }
+            if all_nominal_x86 == 1 { match_exhaustive_x86 = 1 }
+        }
+        if match_option_mask_x86 == 3 || match_bool_mask_x86 == 3 { match_exhaustive_x86 = 1 }
+        if match_scrut_ty == 7 && match_exhaustive_x86 == 0 {
             tc_error_hard(EP - 1, "match must be exhaustive")
             LAST_STMT_CAN_FALLTHROUGH_X86 = 1
             LAST_STMT_HAS_VALUE = 0
@@ -33843,7 +34112,6 @@ fn compile_stmt_body_x86() with IO, Mut, Panic, Div {
             LAST_STMT_TY_HASH = 0
             return
         }
-        if match_option_mask_x86 == 3 || match_result_mask_x86 == 3 { match_exhaustive_x86 = 1 }
         if match_exhaustive_x86 == 0 { match_live_x86 = 1; match_all_value = 0 }
         LAST_STMT_CAN_FALLTHROUGH_X86 = flow_sequence_x86(match_scrut_flow_x86, match_live_x86)
         LAST_STMT_HAS_VALUE = 0
@@ -33860,7 +34128,7 @@ fn compile_stmt_body_x86() with IO, Mut, Panic, Div {
             // β⁹ GTT week-7 stage 2: final topology = scrutinee ∪ union-of-arms.
             // Matches `Typing.tMatch` conclusion `Sc.union (chsetUnionFin Ss)`.
             EXPR_CH_SET = match_scrut_ch_set | match_arms_ch_union
-            if match_ty == 2 && match_shadow_base_x86 >= 0 { flow_restore_shadows_x86(match_shadow_base_x86) }
+            if match_ty == 2 && match_shadow_base_x86 >= 0 { flow_restore_shadows_x86(match_shadow_base_x86, match_mask0_x86, match_mask1_x86, match_mask2_x86) }
         }
         return
     }
@@ -37292,6 +37560,9 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
             let en_ne = TE[p as usize]
             let eh = gl_name_hash(en_ns, en_ne)
             let ei = EN_COUNT
+            if ei >= 256 { tc_error_hard(p, "enum registry capacity exceeded"); break }
+            FLOW_EN_DECL_TOK_X86[ei as usize] = p
+            FLOW_EN_VALID_X86[ei as usize] = 0
             let base = ei * 256
             EN[base as usize] = eh
             p = p + 1  // skip name
@@ -37327,6 +37598,11 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
             continue
         }
         p = p + 1
+    }
+    var flow_ei_x86: i64 = 0
+    while flow_ei_x86 < EN_COUNT {
+        if flow_validate_enum_x86(flow_ei_x86) { FLOW_EN_VALID_X86[flow_ei_x86 as usize] = 1 }
+        flow_ei_x86 = flow_ei_x86 + 1
     }
     resolve_forward_struct_types()
     p = 0

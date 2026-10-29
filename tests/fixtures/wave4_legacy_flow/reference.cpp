@@ -22,6 +22,23 @@ static std::vector<Case> cases() {
  for(auto n:{"return_if_allreturn","both_return_dead","closure_return_dead","array_for_continue","while_let_break","or_match","discard_mixed_if","discard_mixed_iflet","discard_mixed_match","while_break","while_continue","for_continue","closure_both_return","closure_outer_live","partial_match","panic_branch","shortcircuit"}) c.push_back({n,false,"FLOW 11\n"});
  for(auto n:{"unit_value_if","unit_value_iflet","unit_value_match","missing_else","missing_loop","duplicate_tags","guard_not_coverage","unmatched_value","unit_value_nested"}) c.push_back({n,true,""});
  for(auto shape:{"small","array"}) for(auto form:{"plain","implicit","explicit"}) for(auto k:{"0","1","2"}) c.push_back({std::string(shape)+"-"+form+"-"+k,false,"PACKET_RETURN 11 22 33\n"});
+ for(auto n:{"nominal_0","nominal_1","nominal_or","nominal_nested","bool_true","bool_false","bool_or"}) c.push_back({n,false,"FLOW 11\n"});
+ for(auto n:{"nominal_duplicate","nominal_wrong_owner","nominal_homonym","nominal_struct_conflict","nominal_alias_scalar","nominal_payload_identifiers","nominal_payload_nested","nominal_guard","bool_integer","bool_duplicate","result_hash_zero"}) c.push_back({n,true,""});
+ for(auto form:{"if","iflet","match"}) for(auto k:{"0","1"}) {
+  double value=1.0,variance=0.0;
+  for(unsigned i=2;i<32;++i) value+=1.0;
+  for(unsigned i=0;i<32;++i) variance+=(0.5*0.5);
+  c.push_back({std::string("shadow32_")+form+"_"+k,false,"SHADOW32 "+std::to_string(std::bit_cast<std::int64_t>(value))+" "+std::to_string(std::bit_cast<std::int64_t>(variance))+" "+std::to_string(std::bit_cast<std::int64_t>(1.0))+" "+std::to_string(std::bit_cast<std::int64_t>(1.0))+"\n"});
+ }
+ c.push_back({"shadow_cap32",false,"CAP32 "+std::to_string(std::bit_cast<std::int64_t>(0.5*0.5))+" 0\n"});
+ c.push_back({"hash_collision",true,""});
+ for(auto n:{"mixed_explicit_0","mixed_explicit_1"}) c.push_back({n,false,"F64 "+std::to_string(std::bit_cast<std::int64_t>(1.0))+"\n"});
+ c.push_back({"pure_float",false,"F64 "+std::to_string(std::bit_cast<std::int64_t>(1.25))+"\n"});
+ c.push_back({"mixed_direct",true,""});
+ for(auto form:{"if","iflet","match"}) c.push_back({std::string("shadow_cap32_unique_")+form,false,"CAP32 "+std::to_string(std::bit_cast<std::int64_t>(0.5*0.5))+" 0\n"});
+ c.push_back({"nominal_depth_budget",true,""});
+ c.push_back({"or_budget",true,""});
+ c.push_back({"variant_hash_collision",true,""});
  c.push_back({"flow_component",false,"FLOW 11\n"});
  return c;
 }
