@@ -1,0 +1,64 @@
+use llm::serve::{sv_parse_params, sv_sse_done, sv_sse_token}
+use llm::safetensors::{st_byte_at}
+use tensor2::cpu_kernel::{CpuBuf, ck_alloc, ck_get}
+fn putb(buf: *mut u8, i: i64, v: i64) {
+    let w = read_i64(buf as *mut i64, i / 8)
+    let sh = (i % 8) * 8
+    let cleared = w & ((0 - 1) - (255 << sh))
+    write_i64(buf as *mut i64, i / 8, cleared | ((v & 255) << sh))
+}
+fn load_str(buf: *mut u8, s: string) -> i64 with Mut {
+    var i: i64 = 0
+    while i < str_len(s) {
+        putb(buf, i, str_char_at(s, i) & 255)
+        i = i + 1
+    }
+    i
+}
+fn main() with IO, Mut, Panic, Div, Alloc {
+    var ok = true
+    let buf = heap_alloc(8192)
+    var prm = ck_alloc(5)
+    var n = load_str(buf, "{}")
+    if sv_parse_params(buf, n, 0, &!prm) != 0 { ok = false }
+    if ck_get(&prm, 0) != 0.0 { ok = false }
+    if ck_get(&prm, 1) != 1.0 { ok = false }
+    if ck_get(&prm, 2) != 12345.0 { ok = false }
+    if ck_get(&prm, 3) != 16.0 { ok = false }
+    if ck_get(&prm, 4) != 0.0 { ok = false }
+    n = load_str(buf, "{\"temperature\": 0.8}")
+    if sv_parse_params(buf, n, 0, &!prm) != 0 { ok = false }
+    n = load_str(buf, "{\"temperature\": -1}")
+    if sv_parse_params(buf, n, 0, &!prm) != 1 { ok = false }
+    n = load_str(buf, "{\"top_p\": 1.5}")
+    if sv_parse_params(buf, n, 0, &!prm) != 2 { ok = false }
+    n = load_str(buf, "{\"top_p\": 0}")
+    if sv_parse_params(buf, n, 0, &!prm) != 2 { ok = false }
+    n = load_str(buf, "{\"max_tokens\": 9999}")
+    if sv_parse_params(buf, n, 0, &!prm) != 0 { ok = false }
+    if ck_get(&prm, 3) != 256.0 { ok = false }
+    n = load_str(buf, "{\"max_tokens\": 0}")
+    if sv_parse_params(buf, n, 0, &!prm) != 0 { ok = false }
+    if ck_get(&prm, 3) != 1.0 { ok = false }
+    n = load_str(buf, "{\"seed\": 7, \"max_tokens\": 5, \"stream\": true}")
+    if sv_parse_params(buf, n, 0, &!prm) != 0 { ok = false }
+    if ck_get(&prm, 2) != 7.0 { ok = false }
+    if ck_get(&prm, 3) != 5.0 { ok = false }
+    if ck_get(&prm, 4) != 1.0 { ok = false }
+    let out = heap_alloc(4096)
+    let tx = heap_alloc(16)
+    putb(tx, 0, 72)
+    putb(tx, 1, 105)
+    var p = sv_sse_token(out, 0, 3, "m", tx, 2)
+    if st_byte_at(out, 0) != 100 { ok = false }
+    if st_byte_at(out, 5) != 32 { ok = false }
+    if st_byte_at(out, p - 2) != 10 { ok = false }
+    if st_byte_at(out, p - 1) != 10 { ok = false }
+    p = sv_sse_done(out, 0)
+    if p != 15 { ok = false }
+    if st_byte_at(out, 0) != 100 { ok = false }
+    if ok { print("SERVJPARAMS PASS") } else { print("SERVJPARAMS FAIL") }
+    print("\n")
+    if !ok { exit(1) }
+    exit(0)
+}

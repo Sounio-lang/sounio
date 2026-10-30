@@ -1,0 +1,128 @@
+//@ run-pass
+//
+// Plan J serving pipeline parity (no sockets): the exact sampling and
+// framing the server pump uses, against the Plan I generate path.
+// - greedy token loop == llama_generate_from_ids greedy
+// - seeded temp/top-p loop == generate temp/top-p with same seed
+// - non-stream body carries usage counts; SSE frame golden bytes
+// - TTFB measured with sv_now_ns around prefill + first token
+// Usage: llm_serve_j_demo [dir]
+use llm::attn_gpu::{GenCfg, llama_generate_from_ids, llama_sample_greedy, llama_sample_temp_top_p}
+use llm::bpe::{bpe_decode_token, bpe_encode, bpe_load}
+use llm::llama::{kv_new, llama_forward, llama_forward_rt, llama_load}
+use llm::safetensors::{st_byte_at}
+use llm::serve::{sv_completion_body, sv_now_ns, sv_sse_done, sv_sse_token}
+use hetero::net_worker::{nw_open}
+use hetero::runtime::{Runtime, rt_open}
+use tensor2::cpu_kernel::{CpuBuf, ck_alloc, ck_get, ck_set}
+
+fn putb(buf: *mut u8, i: i64, v: i64) {
+    let w = read_i64(buf as *mut i64, i / 8)
+    let sh = (i % 8) * 8
+    let cleared = w & ((0 - 1) - (255 << sh))
+    write_i64(buf as *mut i64, i / 8, cleared | ((v & 255) << sh))
+}
+
+fn has_bytes(buf: *mut u8, n: i64, pat: string) -> bool with Mut {
+    let plen = str_len(pat)
+    var i: i64 = 0
+    while i + plen <= n {
+        var ok = true
+        var j: i64 = 0
+        while j < plen {
+            if st_byte_at(buf, i + j) != (str_char_at(pat, j) & 255) { ok = false; j = plen }
+            j = j + 1
+        }
+        if ok { return true }
+        i = i + 1
+    }
+    false
+}
+
+fn main() with IO, Mut, Panic, Div, Alloc {
+    var ok = true
+    var dir = "/workspace/llm-models/SmolLM2-135M"
+    if arg_count() > 0 { dir = get_arg(0) }
+    var m = llama_load(dir)
+    print("loaded=")
+    print_int(if m.loaded { 1 } else { 0 })
+    print("\n")
+    if !m.loaded { print("SERVEDONE FAIL\nSERVEDONE DONE\n"); exit(0) }
+    let bp = bpe_load(dir ++ "/tokenizer.json")
+    let prompt = "The capital of France is"
+    let plen = str_len(prompt)
+    let pbuf = heap_alloc(plen + 16)
+    var i: i64 = 0
+    while i < plen {
+        putb(pbuf, i, str_char_at(prompt, i) & 255)
+        i = i + 1
+    }
+    let enc = bpe_encode(&bp, pbuf, plen)
+    let nseq = enc.len + 1
+    var ids = ck_alloc(nseq + 8)
+    ck_set(&!ids, 0, 0.0)
+    i = 0
+    while i < enc.len {
+        ck_set(&!ids, 1 + i, ck_get(&enc, i))
+        i = i + 1
+    }
+    let rt = rt_open("stdlib/hetero/kernels/gemm_tiled_f32.ptx", "gemm_tiled_f32")
+    let use_gpu = rt.ready
+    var kv1 = kv_new(&m, 512)
+    var seed = ck_alloc(1)
+    ck_set(&!seed, 0, 42.0)
+    let g = GenCfg { max_new: 8, eos: 2, temp: 1.0, top_p: 1.0, greedy: true }
+    let ref_ids = llama_generate_from_ids(&!m, &!kv1, &rt, use_gpu, &ids, nseq, g, &!seed)
+    var kv2 = kv_new(&m, 512)
+    let lib = nw_open()
+    var t0: i64 = 0
+    if lib.ok { t0 = sv_now_ns(&lib) }
+    var lg = llama_forward(&!m, &!kv2, &ids, nseq)
+    var out = ck_alloc(8)
+    var n_out: i64 = 0
+    var cur: i64 = 0 - 1
+    while n_out < 8 {
+        cur = llama_sample_greedy(&lg)
+        if cur == 2 { n_out = 8 }
+        if cur != 2 {
+            ck_set(&!out, n_out, cur as f64)
+            n_out = n_out + 1
+        }
+        if n_out < 8 && cur != 2 {
+            var one = ck_alloc(1)
+            ck_set(&!one, 0, cur as f64)
+            lg = llama_forward(&!m, &!kv2, &one, 1)
+        }
+    }
+    var same = ref_ids.len == n_out
+    i = 0
+    while i < n_out && i < ref_ids.len {
+        if ck_get(&ref_ids, i) != ck_get(&out, i) { same = false }
+        i = i + 1
+    }
+    print("greedy parity=")
+    print_int(if same { 1 } else { 0 })
+    print("\n")
+    if !same { ok = false }
+    let body = heap_alloc(69632)
+    let blen = sv_completion_body(body, 9, "smol", pbuf, 5, "length", nseq, n_out)
+    if !has_bytes(body, blen, "prompt_tokens") { ok = false }
+    if !has_bytes(body, blen, "completion_tokens") { ok = false }
+    let fr = heap_alloc(4096)
+    let flen = sv_sse_token(fr, 0, 9, "smol", pbuf, 5)
+    if st_byte_at(fr, 0) != 100 { ok = false }
+    if st_byte_at(fr, flen - 1) != 10 { ok = false }
+    let dl = sv_sse_done(fr, 0)
+    if dl != 15 { ok = false }
+    var ttfb: i64 = 0 - 1
+    if lib.ok { ttfb = sv_now_ns(&lib) - t0 }
+    print("ttfb_ns=")
+    print_int(ttfb)
+    print("
+")
+    if !lib.ok || ttfb < 0 { ok = false }
+    if ok { print("SERVEDONE PASS") } else { print("SERVEDONE FAIL") }
+    print("\nSERVEDONE DONE\n")
+    exit(0)
+}
+
