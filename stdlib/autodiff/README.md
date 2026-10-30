@@ -56,9 +56,7 @@ See [`VALIDATION_REPORT.md`](../../benchmarks/stdlib_validation/VALIDATION_REPOR
 | [`tape`](./tape.sio) | Reverse-mode AD via Wengert tape |
 | [`dual`](./dual.sio) | Forward-mode AD with dual numbers |
 | [`epistemic_dual`](./epistemic_dual.sio) | Dual numbers with uncertainty |
-| [`linear_ad`](./linear_ad.sio) | Linear AD for Jacobians |
 | [`grad`](./grad.sio) | `Dual` struct only (gradient fns internal) |
-| [`differentiable`](./differentiable.sio) | Differentiable function traits |
 
 ## Tape Implementation Details
 
