@@ -25148,6 +25148,32 @@ impl Lowerer {
         }
     }
 
+    // `base[i]` where `base` is a `[string; N]` local: an array local whose
+    // scalar kind or recorded element type is string. Out of line on
+    // purpose: the same lookups written inside expr_result_is_string_ref's
+    // `match (*e).left { Some(indexed) => .. }` arm made the lean_single-built
+    // aggregate_field_identity_driver segfault at `lower_array: seed_begin`.
+    fn index_of_string_array_local_ref(self, e: &Expr) -> bool with Mut, Panic, Div, Alloc {
+        var base_name = ir_empty_name()
+        match (*e).left {
+            Some(b) => {
+                if (*b).kind != ExprKind::ExprIdent { return false }
+                base_name = (*b).name
+            }
+            None => { return false }
+        }
+        if self.lookup_local_fixed_array_len(base_name) < 0 {
+            if !self.lookup_local_struct_type_is_array_elem(base_name) {
+                return false
+            }
+        }
+        if self.lookup_local_scalar_kind(base_name) == 3 {
+            return true
+        }
+        let elem_type = self.lookup_local_struct_type(base_name)
+        lower_name_is_string_type(elem_type)
+    }
+
     fn expr_result_is_string_ref(self, e: &Expr) -> bool with Mut, Panic, Div, Alloc {
         if (*e).kind == ExprKind::ExprStringLit {
             return true
@@ -25231,6 +25257,10 @@ impl Lowerer {
         // family of refusals exists to prevent. elem_type_name_id already carries
         // the declared element type; nothing read it for string-ness.
         if (*e).kind == ExprKind::ExprIndex {
+            // `names[i]` on a `[string; N]` local: the element is a string.
+            if self.index_of_string_array_local_ref(e) {
+                return true
+            }
             match (*e).left {
                 Some(indexed) => {
                     if (*indexed).kind == ExprKind::ExprFieldAccess {
@@ -25266,16 +25296,6 @@ impl Lowerer {
                     }
                     // `names[i]` on a `[string; N]` local or param: the element
                     // type is the declared `string`.
-                    // A `[string; N]` local is bound with scalar kind 3 (string)
-                    // from its declaration; on an ARRAY local that kind
-                    // describes the elements.
-                    if (*indexed).kind == ExprKind::ExprIdent
-                        && (self.lookup_local_fixed_array_len((*indexed).name) >= 0
-                            || self.lookup_local_struct_type_is_array_elem((*indexed).name))
-                        && (self.lookup_local_scalar_kind((*indexed).name) == 3
-                            || lower_name_is_string_type(self.lookup_local_struct_type((*indexed).name))) {
-                        return true
-                    }
                 }
                 None => {}
             }
