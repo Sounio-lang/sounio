@@ -1,0 +1,40 @@
+//@ run-pass
+//@ expect-stdout: RAW_REF_ALIAS_OK
+// `&(*p)` / `&!(*p)` with p a raw `*mut S` reach a `&S` / `&!S` callee as a
+// reference to the raw payload itself: reads see it, `&!` writes land in it.
+// With a fixed-array field, `&(*p)` passes a read-only copy (the layouts
+// disagree past the array; `&!` is refused, see the typed-field gate). A
+// `&!(*(*c).ns_table)` noise-set call read an inline mask word as an array
+// handle (gen2 ud2 in ns_intern_scratch, #2966).
+struct S { a: i64, b: i64, c: i64 }
+struct D { arr: [i64; 4], n: i64, m: i64 }
+struct Holder { pad: i64, s: *mut S }
+
+fn get_b(r: &S) -> i64 with Mut, Panic, Div { r.b }
+fn bump_c(r: &!S) with Mut, Panic, Div { r.c = r.c + 5 }
+fn d_read(r: &D) -> i64 with Mut, Panic, Div { r.n * 10 + r.m + r.arr[2] * 100 }
+
+fn main() -> i32 with IO, Mut, Panic, Div, Alloc {
+    let p = heap_alloc(64) as *mut S
+    (*p).a = 1
+    (*p).b = 2
+    (*p).c = 3
+    let read = get_b(&(*p))
+    bump_c(&!(*p))
+    let h = heap_alloc(64) as *mut Holder
+    (*h).s = p
+    bump_c(&!(*(*h).s))
+    let q = heap_alloc(256) as *mut D
+    (*q).arr[2] = 4
+    (*q).n = 7
+    (*q).m = 8
+    let dr = d_read(&(*q))
+    if read == 2 && (*p).c == 13 && dr == 478 && (*q).arr[2] == 4 {
+        println("RAW_REF_ALIAS_OK")
+    } else {
+        println(read)
+        println((*p).c)
+        println(dr)
+    }
+    return 0
+}

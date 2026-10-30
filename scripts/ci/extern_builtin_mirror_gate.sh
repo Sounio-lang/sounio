@@ -138,6 +138,8 @@ grep    -E '^ffi_' "$WORK/backend_all.txt" | sed -E 's/^ffi_//' | sort -u > "$WO
 grep -v -E '^ffi_' "$WORK/backend_all.txt"                      | sort -u > "$WORK/backend_plain.txt"
 
 # --- parser side -----------------------------------------------------------
+# Names are matched as `make_name("x")` or as the literal argument of
+# name_eq_lit / ir_name_eq_lit, which replaced `name_eq(n, make_name("x"))`.
 # extern_name_has_ffi_intrinsic decides which declarations get a forwarding
 # body. A name it wraps without a backend arm compiles to a call into nothing;
 # a name it does NOT wrap while the checker binds ffi_<name> is a dead binding.
@@ -149,8 +151,8 @@ awk '
     inside && /^}/                      { inside = 0 }
     inside                              { print }
 ' "$PARSER" \
-  | grep -oE 'make_name\("[a-z_0-9]+"\)' \
-  | sed -E 's/^make_name\("//; s/"\)$//' \
+  | grep -oE '(make_name\(|_lit\([^"]*)"[a-z_0-9]+"' \
+  | sed -E 's/.*"([a-z_0-9]+)"$/\1/' \
   | sort -u > "$WORK/parser_ffi.txt"
 
 # --- checker ffi binding side ----------------------------------------------
@@ -161,8 +163,8 @@ awk '
     inside && /^}/                                 { inside = 0 }
     inside                                         { print }
 ' "$CHECK" \
-  | grep -oE 'make_name\("ffi_[a-z_0-9]+"\)' \
-  | sed -E 's/^make_name\("ffi_//; s/"\)$//' \
+  | grep -oE '(make_name\(|_lit\([^"]*)"ffi_[a-z_0-9]+"' \
+  | sed -E 's/.*"ffi_([a-z_0-9]+)"$/\1/' \
   | sort -u > "$WORK/checker_ffi.txt"
 
 # --- checker side ----------------------------------------------------------
@@ -171,8 +173,8 @@ awk '
     inside && /^}/                       { inside = 0 }
     inside                               { print }
 ' "$CHECK" \
-  | grep -oE 'make_name\("[a-z_0-9]+"\)' \
-  | sed -E 's/^make_name\("//; s/"\)$//' \
+  | grep -oE '(make_name\(|_lit\([^"]*)"[a-z_0-9]+"' \
+  | sed -E 's/.*"([a-z_0-9]+)"$/\1/' \
   | sort -u > "$WORK/checker.txt"
 
 sort -u "$WORK/backend_plain.txt" "$WORK/parser_ffi.txt" > "$WORK/backend.txt"
@@ -235,5 +237,20 @@ if ! diff -u "$WORK/backend.txt" "$WORK/checker.txt" > "$WORK/diff.txt"; then
              ($CODEGEN, $PARSER)
   Mirror:    name_is_native_backend_builtin ($CHECK)"
 fi
+
+# Builtin ids must be unique across names. A merge gave id 72 to both
+# __ptr_of_ref (this backend's `v as *mut T`) and main's array_concat, so a
+# raw-pointer cast called the array_concat emitter (SIGILL in
+# raw_ptr_of_managed_object, #2966). Every `name test -> { return N }` arm in
+# the backend is collected; an id named by two different names fails, except the
+# deliberate aliases below.
+ID_PAIRS="$(grep -E '\{ return [0-9]+ \}' "$CODEGEN" | grep -E 'name_eq_lit\(|name_is_[a-z_0-9]+\(' \
+  | sed -E 's/.*name_eq_lit\([^,]+, "([^"]+)"\).*\{ return ([0-9]+) \}.*/\2 \1/; s/.*name_is_(_*[a-z_0-9]+)\(.*\{ return ([0-9]+) \}.*/\2 \1/' \
+  | grep -E '^[0-9]+ ' | sort -u)"
+ID_N="$(printf '%s\n' "$ID_PAIRS" | awk '{print $1}' | sort -u | grep -c .)"
+[[ "$ID_N" -ge 40 ]] || fail "builtin id uniqueness: parsed only $ID_N distinct ids from $CODEGEN (expected >= 40); the extraction no longer matches the backend"
+DUP_IDS="$(printf '%s\n' "$ID_PAIRS" | awk '{n[$1]=n[$1]" "$2; c[$1]++} END{for (k in c) if (c[k] > 1) print k ":" n[k]}' \
+  | grep -vxE '23: heap_alloc malloc|24: free heap_free|49: ffi_pow pow' || true)"
+[[ -z "$DUP_IDS" ]] || fail "builtin id shared by different names: $DUP_IDS"
 
 echo "[extern-mirror] PASS: $BACKEND_N callable builtin names ($BACKEND_FFI_N via ffi_* wrappers), checker, parser and backend agree"

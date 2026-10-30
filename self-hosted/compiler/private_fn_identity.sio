@@ -342,20 +342,6 @@ fn pfi_fn_def_ptr(opt: Option<Box<FnDef> >) -> *mut FnDef with Mut, Panic, Div, 
     }
 }
 
-fn pfi_sl_ptr(opt: Option<Box<StringList> >) -> *mut StringList with Mut, Panic, Div, Alloc {
-    match opt {
-        Some(l) => l as *mut StringList
-        None => 0 as *mut StringList
-    }
-}
-
-fn pfi_sl_next(node: *mut StringList) -> *mut StringList with Mut, Panic, Div {
-    match (*node).tail {
-        Some(n) => n as *mut StringList
-        None => 0 as *mut StringList
-    }
-}
-
 fn pfi_importlist_ptr(opt: Option<Box<ImportItemList> >) -> *mut ImportItemList with Mut, Panic, Div, Alloc {
     match opt {
         Some(l) => l as *mut ImportItemList
@@ -371,22 +357,29 @@ fn pfi_importlist_next(node: *mut ImportItemList) -> *mut ImportItemList with Mu
 }
 
 // Overwrite the LAST segment of a multi-segment path whose first tail node is
-// `first_tail` (the head segment is never the last one here). 1-level stores
-// through a node pointer only.
-fn pfi_sl_set_last(first_tail: *mut StringList, m: Name) with Mut, Panic, Div {
-    if first_tail == 0 as *mut StringList { return }
-    var node = first_tail
+// `first_tail` (the head segment is never the last one here). Through the Box,
+// not a `*mut StringList`: StringList holds a [i8; 384], which a raw pointer
+// addresses with the raw layout (48 inline words, head_len at word 48), while
+// the node is a managed object (head_buf a handle, head_len at slot 1). The
+// raw store wrote 48 words over whatever followed the node (#2966).
+fn pfi_sl_set_last_box(first_tail: Option<Box<StringList> >, m: Name) with Mut, Panic, Div, Alloc {
+    var cur = first_tail
     var going = true
     while going {
-        let next = pfi_sl_next(node)
-        if next == 0 as *mut StringList {
-            going = false
-        } else {
-            node = next
+        match cur {
+            Some(b) => {
+                match (*b).tail {
+                    Some(n) => { cur = Some(n) }
+                    None => {
+                        (*b).head_buf = m.buf
+                        (*b).head_len = m.len
+                        going = false
+                    }
+                }
+            }
+            None => { going = false }
         }
     }
-    (*node).head_buf = m.buf
-    (*node).head_len = m.len
 }
 
 // ---------------------------------------------------------------------------
@@ -470,7 +463,7 @@ fn pfi_item_real_fn(it: Item) -> bool with Mut, Panic, Div {
         }
     }
     if name_is_empty(it.name) { return false }
-    if name_eq(it.name, make_name("main")) { return false }
+    if name_eq_lit(it.name, "main") { return false }
     true
 }
 
@@ -606,7 +599,7 @@ fn pfi_census_items(items: Option<Box<ItemList> >, mod_idx: i64) -> bool with IO
                         print_int((*list).head.visibility.kind)
                         print("\n")
                     }
-                    if !name_is_empty((*list).head.name) && !name_eq((*list).head.name, make_name("main")) {
+                    if !name_is_empty((*list).head.name) && !name_eq_lit((*list).head.name, "main") {
                         if !pfi_census_note(ast_name_hash((*list).head.name), mod_idx) {
                             return false
                         }
@@ -1401,8 +1394,7 @@ fn pfi_rename_expr_node(p: *mut Expr) with Mut, Panic, Div, Alloc {
         if t >= 0 {
             let m = pfi_mangle(ir_path_last_name((*p).path), t)
             if m.len > 0 {
-                let sp = pfi_sl_ptr((*p).path.segments.tail)
-                pfi_sl_set_last(sp, m)
+                pfi_sl_set_last_box((*p).path.segments.tail, m)
             }
         }
     }
@@ -1435,8 +1427,7 @@ fn pfi_rename_args_head(node: *mut ExprList) with Mut, Panic, Div, Alloc {
         if t >= 0 {
             let m = pfi_mangle(ir_path_last_name((*node).head.path), t)
             if m.len > 0 {
-                let sp = pfi_sl_ptr((*node).head.path.segments.tail)
-                pfi_sl_set_last(sp, m)
+                pfi_sl_set_last_box((*node).head.path.segments.tail, m)
             }
         }
     }
@@ -1504,8 +1495,7 @@ fn pfi_rewrite_use(node: *mut ItemList, ord: i64) with Mut, Panic, Div, Alloc {
         if idx2 >= 0 && PFI_T_UNSAFE[idx2 as usize] == 0 && PFI_T_DEF[idx2 as usize] == 0 && PFI_T_TGT[idx2 as usize] == tgt {
             let m2 = pfi_mangle_entry(idx2)
             if m2.len > 0 {
-                let sp = pfi_sl_ptr((*node).head.use_path.segments.tail)
-                pfi_sl_set_last(sp, m2)
+                pfi_sl_set_last_box((*node).head.use_path.segments.tail, m2)
             }
         }
     }
@@ -2647,29 +2637,29 @@ fn bsh_disabled() -> bool with IO, Mut, Panic, Div {
 // intercept stands for.
 fn bsh_name_is_intercepted_builtin(n: Name) -> bool with Mut, Panic, Div {
     if n.len <= 0 { return false }
-    if name_eq(n, make_name("measure")) { return true }
-    if name_eq(n, make_name("acknowledge")) { return true }
-    if name_eq(n, make_name("Knowledge")) { return true }
-    if name_eq(n, make_name("require_confidence")) { return true }
-    if name_eq(n, make_name("variance_of")) { return true }
-    if name_eq(n, make_name("uncertainty_of")) { return true }
-    if name_eq(n, make_name("sensitivity_of")) { return true }
-    if name_eq(n, make_name("hessian_of")) { return true }
-    if name_eq(n, make_name("correlate")) { return true }
-    if name_eq(n, make_name("second_order_mean")) { return true }
-    if name_eq(n, make_name("lift_knowledge")) { return true }
-    if name_eq(n, make_name("slice_len")) { return true }
-    if name_eq(n, make_name("assert")) { return true }
-    if name_eq(n, make_name("print")) { return true }
-    if name_eq(n, make_name("print_int")) { return true }
-    if name_eq(n, make_name("print_char")) { return true }
+    if name_eq_lit(n, "measure") { return true }
+    if name_eq_lit(n, "acknowledge") { return true }
+    if name_eq_lit(n, "Knowledge") { return true }
+    if name_eq_lit(n, "require_confidence") { return true }
+    if name_eq_lit(n, "variance_of") { return true }
+    if name_eq_lit(n, "uncertainty_of") { return true }
+    if name_eq_lit(n, "sensitivity_of") { return true }
+    if name_eq_lit(n, "hessian_of") { return true }
+    if name_eq_lit(n, "correlate") { return true }
+    if name_eq_lit(n, "second_order_mean") { return true }
+    if name_eq_lit(n, "lift_knowledge") { return true }
+    if name_eq_lit(n, "slice_len") { return true }
+    if name_eq_lit(n, "assert") { return true }
+    if name_eq_lit(n, "print") { return true }
+    if name_eq_lit(n, "print_int") { return true }
+    if name_eq_lit(n, "print_char") { return true }
     // println/print of an f64 lowers to a call of the runtime `print_f64` by bare
     // name (ir/lower.sio println_dispatch_name). A user `print_f64` -- such as
     // stdlib/plot/bar.sio's private `print_f64(value, decimals)` -- was found first,
     // so every println(f64) in a program importing it called the user fn with a
     // garbage second argument (an unbounded digit stream). Renamed to
     // `print_f64__user`, it no longer captures the runtime printer.
-    if name_eq(n, make_name("print_f64")) { return true }
+    if name_eq_lit(n, "print_f64") { return true }
     // `string == string` / `!=` and string-literal match patterns lower to a
     // call of the runtime `str_eq` by bare name (ir/lower.sio, the SIO-322
     // pattern compare and the binary-op string-equality arm). A user
@@ -2677,45 +2667,45 @@ fn bsh_name_is_intercepted_builtin(n: Name) -> bool with Mut, Panic, Div {
     // was bound instead, so every string comparison in a program that also
     // called it passed two string handles to the Str comparator (ud2/SIGILL).
     // Renamed to `str_eq__user`, it no longer captures string equality.
-    if name_eq(n, make_name("str_eq")) { return true }
-    if name_eq(n, make_name("println")) { return true }
-    if name_eq(n, make_name("syscall6")) { return true }
-    if name_eq(n, make_name("seq_new")) { return true }
-    if name_eq(n, make_name("seq_push")) { return true }
-    if name_eq(n, make_name("seq_get")) { return true }
-    if name_eq(n, make_name("seq_set")) { return true }
-    if name_eq(n, make_name("seq_len")) { return true }
-    if name_eq(n, make_name("seq_count")) { return true }
-    if name_eq(n, make_name("prove_robust")) { return true }
-    if name_eq(n, make_name("validate_manifest")) { return true }
-    if name_eq(n, make_name("admit_action")) { return true }
-    if name_eq(n, make_name("defer_action")) { return true }
-    if name_eq(n, make_name("deferral_reason")) { return true }
-    if name_eq(n, make_name("plan_acquisition")) { return true }
-    if name_eq(n, make_name("acquisition_reason")) { return true }
-    if name_eq(n, make_name("plan_recourse")) { return true }
-    if name_eq(n, make_name("recourse_reason")) { return true }
-    if name_eq(n, make_name("propose_alternatives")) { return true }
-    if name_eq(n, make_name("commit_alternative")) { return true }
-    if name_eq(n, make_name("alternative_count")) { return true }
-    if name_eq(n, make_name("alternative_option")) { return true }
-    if name_eq(n, make_name("alternative_reason")) { return true }
-    if name_eq(n, make_name("transition_reason")) { return true }
-    if name_eq(n, make_name("transition_step_count")) { return true }
-    if name_eq(n, make_name("observe_transition")) { return true }
-    if name_eq(n, make_name("rollback_transition")) { return true }
-    if name_eq(n, make_name("gpu_thread_id_x")) { return true }
-    if name_eq(n, make_name("gpu_thread_id_y")) { return true }
-    if name_eq(n, make_name("gpu_thread_id_z")) { return true }
-    if name_eq(n, make_name("gpu_block_id_x")) { return true }
-    if name_eq(n, make_name("gpu_block_id_y")) { return true }
-    if name_eq(n, make_name("gpu_block_id_z")) { return true }
-    if name_eq(n, make_name("gpu_block_dim_x")) { return true }
-    if name_eq(n, make_name("gpu_block_dim_y")) { return true }
-    if name_eq(n, make_name("gpu_block_dim_z")) { return true }
-    if name_eq(n, make_name("gpu_barrier")) { return true }
-    if name_eq(n, make_name("gpu_barrier_sync")) { return true }
-    if name_eq(n, make_name("gpu_sync_threads")) { return true }
+    if name_eq_lit(n, "str_eq") { return true }
+    if name_eq_lit(n, "println") { return true }
+    if name_eq_lit(n, "syscall6") { return true }
+    if name_eq_lit(n, "seq_new") { return true }
+    if name_eq_lit(n, "seq_push") { return true }
+    if name_eq_lit(n, "seq_get") { return true }
+    if name_eq_lit(n, "seq_set") { return true }
+    if name_eq_lit(n, "seq_len") { return true }
+    if name_eq_lit(n, "seq_count") { return true }
+    if name_eq_lit(n, "prove_robust") { return true }
+    if name_eq_lit(n, "validate_manifest") { return true }
+    if name_eq_lit(n, "admit_action") { return true }
+    if name_eq_lit(n, "defer_action") { return true }
+    if name_eq_lit(n, "deferral_reason") { return true }
+    if name_eq_lit(n, "plan_acquisition") { return true }
+    if name_eq_lit(n, "acquisition_reason") { return true }
+    if name_eq_lit(n, "plan_recourse") { return true }
+    if name_eq_lit(n, "recourse_reason") { return true }
+    if name_eq_lit(n, "propose_alternatives") { return true }
+    if name_eq_lit(n, "commit_alternative") { return true }
+    if name_eq_lit(n, "alternative_count") { return true }
+    if name_eq_lit(n, "alternative_option") { return true }
+    if name_eq_lit(n, "alternative_reason") { return true }
+    if name_eq_lit(n, "transition_reason") { return true }
+    if name_eq_lit(n, "transition_step_count") { return true }
+    if name_eq_lit(n, "observe_transition") { return true }
+    if name_eq_lit(n, "rollback_transition") { return true }
+    if name_eq_lit(n, "gpu_thread_id_x") { return true }
+    if name_eq_lit(n, "gpu_thread_id_y") { return true }
+    if name_eq_lit(n, "gpu_thread_id_z") { return true }
+    if name_eq_lit(n, "gpu_block_id_x") { return true }
+    if name_eq_lit(n, "gpu_block_id_y") { return true }
+    if name_eq_lit(n, "gpu_block_id_z") { return true }
+    if name_eq_lit(n, "gpu_block_dim_x") { return true }
+    if name_eq_lit(n, "gpu_block_dim_y") { return true }
+    if name_eq_lit(n, "gpu_block_dim_z") { return true }
+    if name_eq_lit(n, "gpu_barrier") { return true }
+    if name_eq_lit(n, "gpu_barrier_sync") { return true }
+    if name_eq_lit(n, "gpu_sync_threads") { return true }
     false
 }
 

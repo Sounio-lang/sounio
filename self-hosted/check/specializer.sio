@@ -3031,16 +3031,24 @@ pub fn spec_append_item_lists(a: Option<Box<ItemList>>, b: Option<Box<ItemList>>
 // any hash value, including 0 itself. Same fix as pfi_census_note/
 // pfi_census_mods in private_fn_identity.sio, for the identical bug class in a
 // different hash table.
-let SPEC_DCE_SLOTS: i64 = 16384
-let SPEC_DCE_SLOT_MASK: i64 = 16383
+// 65536 slots, 32768 marks: 50% load, same ratio as the 16384/8192 table.
+// The self-compile saturated 8192 marks in 3 rounds (proof 40921263240,
+// 2026-10-29) and spec_dce_mm refused, so every function was lowered. gen3
+// then died rc=181, arena full, at dep_begin of module 70 of 131. The
+// 2026-08-19 census named this date: raise the cap in lockstep with the
+// arrays once marks approach 7800, rather than leave DCE off for main.sio.
+// 32768 is four times the saturated count. A still-incomplete set still
+// refuses; it does not delete.
+let SPEC_DCE_SLOTS: i64 = 65536
+let SPEC_DCE_SLOT_MASK: i64 = 65535
 // 50% load. Past this the probe lengths stop being constant and, more to the
 // point, the pass must refuse rather than guess.
-let SPEC_DCE_MAX: i64 = 8192
+let SPEC_DCE_MAX: i64 = 32768
 // Fixed-point rounds. Was the same constant as the table size, which meant
 // nothing in particular; reachability over this graph converges in far fewer.
 let SPEC_DCE_MAX_ROUNDS: i64 = 64
 
-fn spec_dce_hash_find(marks: &[i64; 16384], count: i64, h: i64) -> bool with Mut, Panic, Div {
+fn spec_dce_hash_find(marks: &[i64; 65536], count: i64, h: i64) -> bool with Mut, Panic, Div {
     let key = h + 1
     var slot = h % SPEC_DCE_SLOTS
     var probes: i64 = 0
@@ -3058,7 +3066,7 @@ fn spec_dce_hash_find(marks: &[i64; 16384], count: i64, h: i64) -> bool with Mut
     false
 }
 
-fn spec_dce_hash_insert(marks: &! [i64; 16384], count: &! i64, h: i64) -> bool with Mut, Panic, Div {
+fn spec_dce_hash_insert(marks: &! [i64; 65536], count: &! i64, h: i64) -> bool with Mut, Panic, Div {
     let key = h + 1
     if *count >= SPEC_DCE_MAX {
         // Do NOT insert and do NOT pretend this was a no-op: the caller reads
@@ -3112,7 +3120,7 @@ fn spec_dce_bare_callee_name(e: &Expr) -> Name with Mut, Panic, Div {
 
 // Walk an expression tree; insert callee / method name hashes into `marks`.
 // `&Expr`, not Expr: the caller's callee box must still be there when we hash it.
-fn spec_dce_scan_expr(e: &Expr, marks: &! [i64; 16384], count: &! i64) with Mut, Panic, Div {
+fn spec_dce_scan_expr(e: &Expr, marks: &! [i64; 65536], count: &! i64) with Mut, Panic, Div {
     if (*e).kind == ExprKind::ExprCall {
         let callee = spec_dce_bare_callee_name(e)
         if !name_is_empty(callee) {
@@ -3316,7 +3324,7 @@ fn spec_dce_struct_has_f128_field(sd: &StructDef) -> bool with Mut, Panic, Div {
     found
 }
 
-fn spec_dce_scan_fn_def(fd: &FnDef, marks: &! [i64; 16384], count: &! i64) with Mut, Panic, Div {
+fn spec_dce_scan_fn_def(fd: &FnDef, marks: &! [i64; 65536], count: &! i64) with Mut, Panic, Div {
     if spec_dce_fn_sig_uses_f128(fd) {
         spec_dce_mark_f128_desugar_targets(marks, count)
     }
@@ -3330,7 +3338,7 @@ fn spec_dce_scan_fn_def(fd: &FnDef, marks: &! [i64; 16384], count: &! i64) with 
 // left a body-less stub, and the backend refused it with ud2 (SIGILL, exit 132
 // on Linux x86_64) unless main happened to call one of them itself. An f128
 // let is the AST-visible trigger for that desugar, so it marks both names.
-fn spec_dce_mark_f128_desugar_targets(marks: &! [i64; 16384], count: &! i64) with Mut, Panic, Div {
+fn spec_dce_mark_f128_desugar_targets(marks: &! [i64; 65536], count: &! i64) with Mut, Panic, Div {
     var _a = spec_dce_hash_insert(marks, count, ast_name_hash(make_name("f128_bits_soft_add")))
     var _b = spec_dce_hash_insert(marks, count, ast_name_hash(make_name("f128_bits_soft_sub")))
     // V0-E.5.2: `*`, unary `-`, and the six comparisons are also lowering-introduced.
@@ -3480,7 +3488,7 @@ pub fn spec_program_mentions_f128(prog: &Program) -> bool with Mut, Panic, Div {
     false
 }
 
-fn spec_dce_scan_block(b: Block, marks: &! [i64; 16384], count: &! i64) with Mut, Panic, Div {
+fn spec_dce_scan_block(b: Block, marks: &! [i64; 65536], count: &! i64) with Mut, Panic, Div {
     var cur = b.stmts
     var going = true
     while going {
@@ -3513,7 +3521,7 @@ fn spec_dce_scan_block(b: Block, marks: &! [i64; 16384], count: &! i64) with Mut
 // was inserted.
 fn spec_dce_scan_item_if_marked(
     it: Item,
-    marks: &! [i64; 16384],
+    marks: &! [i64; 65536],
     count: &! i64
 ) -> bool with Mut, Panic, Div {
     let before = *count
@@ -3603,7 +3611,7 @@ fn spec_dce_scan_item_if_marked(
 
 fn spec_dce_scan_list_if_marked(
     items: Option<Box<ItemList>>,
-    marks: &! [i64; 16384],
+    marks: &! [i64; 65536],
     count: &! i64
 ) -> bool with Mut, Panic, Div {
     var changed = false
@@ -3666,7 +3674,7 @@ fn spec_dce_count_item_fns(items: Option<Box<ItemList>>) -> i64 with Mut, Panic,
 // non-fn item (and keep order of survivors).
 fn spec_dce_filter_items(
     items: Option<Box<ItemList>>,
-    marks: &[i64; 16384],
+    marks: &[i64; 65536],
     mark_count: i64
 ) -> Option<Box<ItemList>> with Mut, Alloc, Panic, Div {
     match items {
@@ -3739,9 +3747,13 @@ fn spec_dce_filter_items(
 // dropped by lean_single ("Handoff MUST NOT rely on nested field-in-array
 // store"). So the marks are computed once into globals and the caller filters
 // at its two READ sites, where the result is an ordinary local.
-var SPEC_DCE_G_MARKS: [i64; 16384]
+var SPEC_DCE_G_MARKS: [i64; 65536]
 var SPEC_DCE_G_COUNT: i64 = 0
 var SPEC_DCE_G_READY: i64 = 0
+// Single-list entry (spec_dce_unreachable_item_fns). Same table, not a local:
+// 65536 i64s is 512 KiB, and the self-compile runs that entry on a 1.5 MiB
+// stack (souc_invoke stack=1572864).
+var SPEC_DCE_L_MARKS: [i64; 65536]
 
 // Memoised for the same reason as every other read_env in this file: the
 // runtime allocator never reclaims, so a call per invocation is a per-compile
@@ -3885,10 +3897,14 @@ pub fn spec_dce_unreachable_item_fns(
     if !spec_dce_has_main(items) {
         return items
     }
-    var marks: [i64; 16384] = [0; 16384]
+    var z: i64 = 0
+    while z < SPEC_DCE_SLOTS {
+        SPEC_DCE_L_MARKS[z as usize] = 0
+        z = z + 1
+    }
     var mark_count: i64 = 0
     let main_h = ast_name_hash(make_name("main"))
-    var _seeded = spec_dce_hash_insert(&! marks, &! mark_count, main_h)
+    var _seeded = spec_dce_hash_insert(&! SPEC_DCE_L_MARKS, &! mark_count, main_h)
 
     // Fixed-point: scan bodies of marked callables, extend mark set.
     //
@@ -3900,7 +3916,7 @@ pub fn spec_dce_unreachable_item_fns(
     var fuel: i64 = 0
     var going = true
     while going {
-        let changed = spec_dce_scan_list_if_marked(items, &! marks, &! mark_count)
+        let changed = spec_dce_scan_list_if_marked(items, &! SPEC_DCE_L_MARKS, &! mark_count)
         fuel = fuel + 1
         if !changed || fuel > SPEC_DCE_MAX_ROUNDS {
             going = false
@@ -3931,7 +3947,7 @@ pub fn spec_dce_unreachable_item_fns(
     }
 
     let before_fns = spec_dce_count_item_fns(items)
-    let out = spec_dce_filter_items(items, &marks, mark_count)
+    let out = spec_dce_filter_items(items, &SPEC_DCE_L_MARKS, mark_count)
     let after_fns = spec_dce_count_item_fns(out)
     if str_eq(read_env("SOUNIO_MM_SPEC_TRACE"), "1") {
         print("spec_dce: item_fns ")

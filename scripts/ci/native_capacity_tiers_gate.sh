@@ -67,9 +67,9 @@ SELF="$(readlink -f "${BASH_SOURCE[0]}")"
 ROOT="$(dirname "$(dirname "$(dirname "$SELF")")")"
 CHECKER="$ROOT/scripts/ci/native_capacity_tiers_check.py"
 
-EXPECT_CODE=134217728       # NC_BIG_CODE           128 MiB
-EXPECT_RELOC=2097152        # NC_FLAT_RELOC_* x4    2,097,152 entries
-EXPECT_ELF=167772160        # NC_BIG_ELF            160 MiB
+EXPECT_CODE=201326592       # NC_BIG_CODE           192 MiB
+EXPECT_RELOC=2621440        # NC_FLAT_RELOC_* x4    2,621,440 entries
+EXPECT_ELF=234881024        # NC_BIG_ELF            224 MiB
 EXPECT_LEGACY_ELF=16777216  # NATIVE_ELF_BUF        16 MiB
 ELF_BASE_ADDR=4194304      # 0x400000 — load address, NOT a capacity
 EXPECT_LABEL=16384         # NC_V2_LABEL_* x3     16,384 labels/patches per fn

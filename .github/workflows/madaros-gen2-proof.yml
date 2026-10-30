@@ -11,11 +11,14 @@ on:
       - self-hosted/gpu/kernel_ir.sio
       - self-hosted/gpu/opt/autotune.sio
       - self-hosted/ir/lower.sio
+      - self-hosted/check/specializer.sio
       - self-hosted/ir/opt_cleanup.sio
       - self-hosted/ir/loop_opt.sio
       - tests/gpu/check_gpu_opcode_surface.py
       - .github/workflows/madaros-gen2-proof.yml
       - self-hosted/native/codegen_x86_linux.sio
+      - self-hosted/native/frame.sio
+      - scripts/ci/madaros_fixed_point_gate.sh
       - scripts/ci/madaros_bounds_check_probe_gate.sh
       - tests/madaros-bounds/**
   workflow_dispatch:
@@ -32,7 +35,7 @@ jobs:
     name: Executed Madaros gen2 rung
     # PR code stays on isolated GitHub-hosted hardware, without shared caches.
     runs-on: ubuntu-24.04
-    timeout-minutes: 110
+    timeout-minutes: 300
     env:
       SOUNIO_MADAROS_NOCACHE: "1"
       SOUNIO_MADAROS_F64_LOWERING_GATE_DIR: /tmp/madaros-gen2-proof
@@ -50,22 +53,63 @@ jobs:
         run: |
           free -m
           df -h /mnt
-          # Local rung run measured 63,570,060 KiB RSS; retain the same gate.
-          sudo fallocate -l 48G /mnt/swapfile-gen2
+          # Local rung run measured 63,570,060 KiB RSS for gen2. gen3 runs in a
+          # 128 GiB arena (madaros_fixed_point_gate.sh) and filled 64 GiB at
+          # module 116 of 130, so the swap covers more than 64 GiB. The runner
+          # root disk has ~85 GiB free.
+          sudo fallocate -l 72G /mnt/swapfile-gen2
           sudo chmod 600 /mnt/swapfile-gen2
           sudo mkswap /mnt/swapfile-gen2
           sudo swapon /mnt/swapfile-gen2
           free -m
+      - name: Install gdb for the gen3 crash backtrace
+        # madaros_fixed_point_gate.sh calls scripts/ci/madaros_crash_backtrace.sh
+        # when gen3 dies on a signal; parse it here so a broken helper fails early.
+        run: |
+          command -v gdb || (sudo apt-get update -qq && sudo apt-get install -y -qq gdb)
+          bash -n scripts/ci/madaros_crash_backtrace.sh
       - name: Build current-source gen1 and run f64 lowering gates
         run: bash scripts/ci/madaros_current_source_f64_lowering_gate.sh
       - name: Preserve scalar PTX emission and refusals
         env:
           SOUNIO_MADAROS_BIN: /tmp/madaros-gen2-proof/madaros
         run: bash tests/gpu/gate_ptx_scalar_literals.sh
+      - name: Runtime arena size follows SOUNIO_NV2_ARENA_GIB
+        env:
+          MADAROS_BIN: /tmp/madaros-gen2-proof/madaros
+        run: bash scripts/ci/madaros_arena_size_gate.sh
+      - name: A payload-free enum return reclaims its region
+        env:
+          MADAROS_BIN: /tmp/madaros-gen2-proof/madaros
+        run: bash scripts/ci/madaros_enum_region_gate.sh
+      - name: Symbol map names functions and leaves the ELF unchanged
+        env:
+          MADAROS_BIN: /tmp/madaros-gen2-proof/madaros
+        run: bash scripts/ci/madaros_symbol_map_gate.sh
       - name: Logical operators short-circuit (ADR-014)
         env:
           MADAROS_BIN: /tmp/madaros-gen2-proof/madaros
         run: bash scripts/ci/madaros_short_circuit_gate.sh
+      - name: Tuple and deref'd Option<Box<T>> fields read the declared struct
+        env:
+          MADAROS_BIN: /tmp/madaros-gen2-proof/madaros
+        run: bash scripts/ci/madaros_typed_field_slots_gate.sh
+      - name: SOUNIO_NV2_HANDLE_LOG2 sizes the handle table
+        env:
+          MADAROS_BIN: /tmp/madaros-gen2-proof/madaros
+        run: bash scripts/ci/madaros_handle_capacity_gate.sh
+      - name: Byte arrays are packed one byte per element
+        env:
+          MADAROS_BIN: /tmp/madaros-gen2-proof/madaros
+        run: bash scripts/ci/madaros_packed_bytes_gate.sh
+      - name: An exhausted IR name-id pool refuses the build
+        env:
+          MADAROS_BIN: /tmp/madaros-gen2-proof/madaros
+        run: bash scripts/ci/madaros_name_pool_overflow_gate.sh
+      - name: Use, algebra and effect items get no IR function slot
+        env:
+          MADAROS_BIN: /tmp/madaros-gen2-proof/madaros
+        run: bash scripts/ci/madaros_preseed_item_slots_gate.sh
       - name: Bounds-check probe (ADR-023 §1, SOUNIO_NV2_BOUNDS_CHECK=1)
         env:
           MADAROS_BIN: /tmp/madaros-gen2-proof/madaros
@@ -76,6 +120,14 @@ jobs:
           SOUNIO_MADAROS_FP_DIR: /tmp/madaros-gen2-proof/fixed-point
           SOUNIO_MADAROS_FP_MIN_INTO_ACC_DONE: "122"
         run: bash scripts/ci/madaros_fixed_point_gate.sh
+      - name: gen1 and gen2 lower the parity corpus to identical IR
+        if: always()
+        run: |
+          if [ -x /tmp/madaros-gen2-proof/fixed-point/madaros.gen2 ]; then
+            bash scripts/ci/madaros_gen1_gen2_ir_parity_gate.sh /tmp/madaros-gen2-proof/madaros /tmp/madaros-gen2-proof/fixed-point/madaros.gen2
+          else
+            echo "no gen2 was produced; the fixed-point step reports why"
+          fi
       - name: Upload compiler and executed rung evidence
         if: always()
         uses: actions/upload-artifact@v4
