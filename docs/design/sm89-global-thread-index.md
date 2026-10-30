@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.design.sm89-global-thread-index
+authority: repo_only
+audience: users
+last_validated: unvalidated
+validated_by: none
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.design.sm89-global-thread-index
+-->
+
 # sm_89 global thread index
 
 Status: design note for the experimental implementation in `926f1e9078`. Section 75 of `docs/design/heterogeneous-gpu-framework.md` records the earlier `TID_SUM=155392` against the unchanged requirement of 165600. The later single-block regression job 20147 passed with `TID_SUM=165600` and `BAD_TIDS=0`; it does not erase or rewrite the earlier observation. The multi-block results are recorded below.

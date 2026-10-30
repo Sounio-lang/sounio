@@ -8,7 +8,6 @@ extern "C" {
 }
 
 use hetero::cuda_exec::{CudaExec}
-use hetero::probe_cuda::{pb_cstr}
 use hetero::silicon::image::{si_gemv_grid_sm89}
 
 // Returns payload bytes for supported dimensions, otherwise zero.
@@ -31,25 +30,42 @@ pub fn sg_layout_ok(base: i64, capacity: i64, n: i64, k: i64) -> bool with Div {
     true
 }
 
-fn sg_sym(exec: &CudaExec, name: string) -> *mut u8 with Alloc, Mut {
-    let c = pb_cstr(name)
-    let raw = dlsym(exec.cuda, c)
-    heap_free(c as *mut i8)
-    raw
+// The caller owns a checked 32-byte scratch buffer. All symbol names must
+// fit, including their NUL; do not allocate while resolving driver symbols.
+fn sg_cstr(scratch: *mut u8, name: string) -> bool with Mut, Div {
+    let n = str_len(name)
+    if n >= 32 { return false }
+    var i: i64 = 0
+    while i < 4 {
+        write_i64(scratch as *mut i64, i, 0)
+        i = i + 1
+    }
+    i = 0
+    while i < n {
+        let word = read_i64(scratch as *mut i64, i / 8)
+        write_i64(scratch as *mut i64, i / 8, word | (str_char_at(name, i) << ((i % 8) * 8)))
+        i = i + 1
+    }
+    true
+}
+
+fn sg_sym(exec: &CudaExec, name: string, scratch: *mut u8) -> *mut u8 with Mut, Div {
+    if !sg_cstr(scratch, name) { return 0 as *mut u8 }
+    dlsym(exec.cuda, scratch)
 }
 
 // Scratch is owned and freed by the outer wrapper. Status: 0 success;
 // 1 invalid layout, 2 context/device/allocation refusal, 3 missing symbol;
 // 4 module/function failure, 5 launch/sync/unload failure (writes possible).
 fn sg_launch_inner(exec: &CudaExec, base: i64, n: i64, k: i64, scratch: *mut u8) -> i64 with Alloc, Mut, Div, Panic {
-    let raw_ctx = sg_sym(exec, "cuCtxGetDevice")
-    let raw_attr = sg_sym(exec, "cuDeviceGetAttribute")
-    let raw_range = sg_sym(exec, "cuMemGetAddressRange_v2")
-    let raw_load = sg_sym(exec, "cuModuleLoadData")
-    let raw_func = sg_sym(exec, "cuModuleGetFunction")
-    let raw_launch = sg_sym(exec, "cuLaunchKernel")
-    let raw_sync = sg_sym(exec, "cuCtxSynchronize")
-    let raw_unload = sg_sym(exec, "cuModuleUnload")
+    let raw_ctx = sg_sym(exec, "cuCtxGetDevice", scratch)
+    let raw_attr = sg_sym(exec, "cuDeviceGetAttribute", scratch)
+    let raw_range = sg_sym(exec, "cuMemGetAddressRange_v2", scratch)
+    let raw_load = sg_sym(exec, "cuModuleLoadData", scratch)
+    let raw_func = sg_sym(exec, "cuModuleGetFunction", scratch)
+    let raw_launch = sg_sym(exec, "cuLaunchKernel", scratch)
+    let raw_sync = sg_sym(exec, "cuCtxSynchronize", scratch)
+    let raw_unload = sg_sym(exec, "cuModuleUnload", scratch)
     if (raw_ctx as i64) == 0 || (raw_attr as i64) == 0 || (raw_range as i64) == 0 ||
        (raw_load as i64) == 0 || (raw_func as i64) == 0 || (raw_launch as i64) == 0 ||
        (raw_sync as i64) == 0 || (raw_unload as i64) == 0 { return 3 }
@@ -84,10 +100,12 @@ fn sg_launch_inner(exec: &CudaExec, base: i64, n: i64, k: i64, scratch: *mut u8)
     let module = read_i64(scratch as *mut i64, 0)
     let unload = raw_unload as fn(i64) -> i32
     let get_func = raw_func as fn(*mut u8, i64, *mut u8) -> i32
-    let name = pb_cstr("stamp")
+    if !sg_cstr(scratch, "stamp") {
+        if unload(module) != 0 { return 5 }
+        return 4
+    }
     write_i64(scratch as *mut i64, 1, 0)
-    let func_status = get_func(sizeptr, module, name)
-    heap_free(name as *mut i8)
+    let func_status = get_func(sizeptr, module, scratch)
     if func_status != 0 {
         if unload(module) != 0 { return 5 }
         return 4
