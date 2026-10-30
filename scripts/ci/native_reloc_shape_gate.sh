@@ -19,8 +19,10 @@
 # slot, reads it back through the shape under test with a kind-3 relocation):
 #   shape 0  mov rcx,[rip+d]            must run and exit 37
 #   shape 1  mov r8,[rip+d]  (REX.R)    must run and exit 37
-#   shape 2  mov dword [rip+d],imm32    disp32 is NOT last -> must refuse, rc=29,
-#                                       no ELF written
+#   shape 2  mov dword [rip+d],imm32    disp32 is NOT last -> compiler must
+#                                       exit 29, no ELF written. A log line
+#                                       that says rc=29 while the process
+#                                       exits 0 is a failure of this gate.
 # Unpatched, shapes 0/1 exit with the low byte of the next instruction (0x48=72
 # for shape 0, 0x4c=76 for shape 1); shape 2 would write an ELF.
 #
@@ -41,16 +43,23 @@ require_executable "$WRAPPER"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/sounio-reloc-shape.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
 
+# The compiler status is the contract. Do not discard it: a refusal that
+# exits 0 is the defect this gate exists to catch.
 emit() {
   local shape="$1" out="$2" log="$3"
   MADAROS_RAW_BIN="$RAW" "$WRAPPER" --native-v2-emit-reloc-shape "$shape" "$out" >"$log" 2>&1
-  return 0
+  return $?
 }
 
 for shape in 0 1; do
   elf="$WORK/reloc_shape_${shape}.bin"
   log="$WORK/reloc_shape_${shape}.log"
   emit "$shape" "$elf" "$log"
+  cli=$?
+  if [[ "$cli" -ne 0 ]]; then
+    cat "$log" >&2
+    gate_fail "shape $shape: compiler exit $cli, expected 0 (a patchable form must emit)"
+  fi
   if grep -Fq "label=reloc-shape rc=29" "$log"; then
     # Refusing is fail-closed, but these two ARE patchable forms: a refusal here
     # means the acceptor regressed to a whitelist.
@@ -72,6 +81,11 @@ done
 elf="$WORK/reloc_shape_2.bin"
 log="$WORK/reloc_shape_2.log"
 emit 2 "$elf" "$log"
+cli=$?
+if [[ "$cli" -ne 29 ]]; then
+  cat "$log" >&2
+  gate_fail "shape 2: compiler exit $cli, expected 29 (logging rc=29 and exiting 0 is not a refusal)"
+fi
 if [[ -e "$elf" ]]; then
   cat "$log" >&2
   gate_fail "shape 2 (disp32 followed by imm32) produced an ELF -- an unpatchable relocation was not refused"
@@ -80,6 +94,6 @@ require_text "label=reloc-shape rc=29" "$log"
 require_text "Error: native relocation left unpatched" "$log"
 require_text "reason=unrecognised-instruction-shape" "$log"
 require_text_regex "bytes_before=([0-9a-f]{2} )*c7 05" "$log"
-echo "[reloc-shape] PASS shape 2: refused rc=29, no ELF, message names the bytes"
+echo "[reloc-shape] PASS shape 2: compiler exit 29, no ELF, message names the bytes"
 
-gate_pass "RIP-relative relocations are patched (mov rcx / mov r8 via [rip+d]) or refused (rc=29), never left at [rip+0]"
+gate_pass "RIP-relative relocations are patched (mov rcx / mov r8 via [rip+d], compiler exit 0, ELF exit 37) or refused (compiler exit 29, no ELF), never left at [rip+0]"
