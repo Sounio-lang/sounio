@@ -91,3 +91,47 @@ Consequences for a PBPK-28 ODE kernel body:
 - Task 2b (MC kernel): MRG32k3a done and bit-exact
   (`stdlib/random/mrg32k3a.sio` + oracle test); per-thread skip-ahead
   via A1p76 powers; identical polar/lognormal/fail-closed rules.
+
+## Execution evidence (2026-10-30, branch pbpk-28-gpu-parity)
+
+- O44 EXECUTED (not only typechecked): SLURM job 20386 on cpu-ops
+  compiled a module-mode driver holding the byte-identical O44 test
+  body (sha256 ad0482ca3a15..., extracted from
+  self-hosted/test_gpu_oracle.sio:573-589, hash-matched in-job) plus
+  a 3-line main, against committed lowering code, and ran it:
+  "O44 OK  rem expands div+mul+sub", ELF exit 0. Artifacts:
+  /var/lib/cephfs-slurm/training/sounio-o44-proof/oracle-O44-20386.txt,
+  driver-build-20386.log, o44-driver-20386.sio in the same dir.
+- Vehicle note (logged in job): the committed oracle file is
+  concat-style (no use-decls, pokes private lowering fns), so the
+  driver used a scratch in-tree shim copy of hlir_to_gpu.sio with
+  exactly 3 mechanical visibility edits (fn -> pub fn for
+  hlir_to_gpu_state_new, hlir_gpu_map_value, hlir_lower_instr; full
+  diff in job log). Committed files untouched. Effect annotations of
+  the test body verified as-is against the real callee effects.
+- Full-concat execution is impossible by design (pre-existing, not
+  branch-caused): the 245-file stage1 bundle (390,668 lines) exceeds
+  the 2M-token lexer cap -- madaros refuses fail-closed (E229,
+  job 20330 log), the pinned souc checker segfaults (exit 139,
+  job 20311). Split the module instead of raising the ceiling, per
+  the refusal note. The 2M-token wall also bounds future GPU-kernel
+  test bundles: keep oracle bundles small and many.
+- Pre-existing tree hazards found while building the vehicle (all on
+  files this branch does not modify; documented, not fixed here):
+  duplicate pub gpu_lower_to_ptx with different effects in
+  lower_to_ptx.sio (with IO) vs lower_to_ptx_wmma_lean.sio (without);
+  same-name pub helpers across gpu files (e.g. metal_buf_print) that
+  forbid flat concatenation; oracle tests calling private lowering
+  fns (E175 under module mode).
+- Fresh-built-compiler strictness (forge job 20289, full-compiler
+  profile): the rebuilt compiler enforces E035 missing-effect errors
+  that the committed Oct-23 artifacts binary does not, failing 291
+  corpus tests across unrelated areas (async_*, algebra_*,
+  borrow_*, ...), plus fast 15-16s infra failures in the later
+  native-trust/science-spine/semantic/f64/gum phases and a PASS on
+  bootstrap_fixed_point. Of the branch tests: rapamycin_gum_vs_mc
+  and semaglutide_drugs_consistency PASS under the fresh build;
+  random_mrg32k3a_oracle failed E035 (check_u/check_s call print
+  without IO) -- fixed on this branch (with IO added, uncommitted
+  at time of writing). The 291-wide drift belongs to the fleet
+  delta (114 files vs origin/main), not to the 6 branch commits.
