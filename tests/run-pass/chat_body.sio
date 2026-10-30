@@ -1,0 +1,57 @@
+//@ run-pass
+//
+// K2 chat body test: tool_calls lift from a canned <tool_call> span
+// and plain content fallback. No model needed.
+use llm::serve::{sv_chat_body}
+use llm::safetensors::{st_byte_at}
+fn putb(buf: *mut u8, i: i64, v: i64) {
+    let w = read_i64(buf as *mut i64, i / 8)
+    let sh = (i % 8) * 8
+    let cleared = w & ((0 - 1) - (255 << sh))
+    write_i64(buf as *mut i64, i / 8, cleared | ((v & 255) << sh))
+}
+fn load_str(buf: *mut u8, off: i64, s: string) -> i64 with Mut {
+    var i: i64 = 0
+    while i < str_len(s) {
+        putb(buf, off + i, str_char_at(s, i) & 255)
+        i = i + 1
+    }
+    i
+}
+fn has_pat(buf: *mut u8, blen: i64, pat: string) -> bool with Mut {
+    let plen = str_len(pat)
+    var i: i64 = 0
+    while i + plen <= blen {
+        var k: i64 = 0
+        while k < plen {
+            if st_byte_at(buf, i + k) != str_char_at(pat, k) { break }
+            k = k + 1
+        }
+        if k == plen { return true }
+        i = i + 1
+    }
+    false
+}
+fn main() with IO, Mut, Panic, Div, Alloc {
+    var ok = true
+    let tx = heap_alloc(512)
+    let tlen = load_str(tx, 0, "Thinking... <tool_call>{\"name\":\"get_weather\",\"arguments\":{\"city\":\"Paris\"}}</tool_call> done")
+    let body = heap_alloc(4096)
+    let blen = sv_chat_body(body, 7, "smol", tx, tlen, "stop", 12, 5, 1)
+    if !has_pat(body, blen, "\"tool_calls\"") { ok = false }
+    if !has_pat(body, blen, "\"name\":\"get_weather\"") { ok = false }
+    if !has_pat(body, blen, "Paris") { ok = false }
+    if !has_pat(body, blen, "\"finish_reason\":\"tool_calls\"") { ok = false }
+    if !has_pat(body, blen, "\"completion_tokens\":5") { ok = false }
+    let px = heap_alloc(128)
+    let plen = load_str(px, 0, "Just a plain answer.")
+    let pbody = heap_alloc(2048)
+    let pblen = sv_chat_body(pbody, 8, "smol", px, plen, "length", 10, 4, 0)
+    if !has_pat(pbody, pblen, "\"content\":\"Just a plain answer.\"") { ok = false }
+    if !has_pat(pbody, pblen, "\"finish_reason\":\"length\"") { ok = false }
+    if has_pat(pbody, pblen, "tool_calls") { ok = false }
+    if ok { print("CHATBODY PASS") } else { print("CHATBODY FAIL") }
+    print("\n")
+    if !ok { exit(1) }
+    exit(0)
+}
