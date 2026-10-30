@@ -1793,6 +1793,31 @@ impl Parser {
     fn parse_index_expr_box(self, base: Box<Expr>) -> Parser with Mut, IO, Panic, Div, Alloc {
         let start = base.span
         var p = self.advance()  // skip [
+        // Prefix range index: `bytes[..n]`, `bytes[..=n]`, `bytes[..]`. `..` is
+        // not an expression start, so parse_expr stopped at it ("expected
+        // expression, found `..`"). The range has no start (left = None); the
+        // checker and lowerer read a missing bound as 0 / the length.
+        if parser_peek(p) == TokenKind::DotDot || parser_peek(p) == TokenKind::DotDotEq {
+            let range_start = p.current_span()
+            let range_op = if parser_peek(p) == TokenKind::DotDot { BinaryOp::OpRange } else { BinaryOp::OpRangeInclusive }
+            p = p.advance()  // skip .. / ..=
+            var range_e = mk_expr(ExprKind::ExprRange, range_start)
+            range_e.bin_op = range_op
+            range_e.left = None
+            range_e.right = None
+            if p.at_expr_start() {
+                p = p.parse_expr()
+                range_e.right = Some(parser_take_expr_box())
+            }
+            range_e.span = p.span_from(range_start)
+            p = p.expect(TokenKind::RBracket)
+            let span_r = p.span_from(start)
+            var e_r = mk_expr(ExprKind::ExprIndex, span_r)
+            e_r.left = Some(base)
+            e_r.right = Some(Box::new(range_e))
+            parser_store_expr_box(Box::new(e_r))
+            return p
+        }
         p = p.parse_expr()
         var index_box = parser_take_expr_box()
         if parser_peek(p) == TokenKind::As {
