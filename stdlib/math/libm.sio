@@ -236,8 +236,11 @@ pub fn libm_cosh(x: f64) -> f64 with Mut, Div, Panic {
 //   k_sin.c / k_cos.c / e_rem_pio2.c, Copyright (C) 1993 Sun Microsystems,
 //   "Permission to use, copy, modify, and distribute this software is freely
 //   granted, provided that this notice is preserved.")
-// NaN and +-inf return NaN. |x| >= 1e18 also returns NaN (the i64 quotient
-// would overflow): that is a refusal, not an approximation.
+// NaN and +-inf return NaN, and so does every |x| > 1.6e6: past 2^20 * pi/2
+// (~1.647e6) the products n*pio2_k stop being exact and the single-double
+// quotient picks the wrong quadrant (x = 1e16 gives sin ~0.232 against the true
+// ~0.780). Returning NaN there is a refusal, not an approximation; a
+// Payne-Hanek reduction would be needed to accept larger angles.
 // Accuracy: within 1 ulp of glibc on 421 points (300 log-spaced in 1e-6..1.6e6 of
 // both signs, plus k*pi/2 for |k| <= 60); the regression points and their
 // glibc bit patterns are in tests/stdlib/math/test_libm_trig.sio and
@@ -258,7 +261,7 @@ fn libm_kernel_cos(r: f64) -> f64 {
     w + (((1.0 - w) - hz) + z * p)
 }
 
-// Nearest integer to x * 2/pi. Callers have already refused |x| >= 1e18.
+// Nearest integer to x * 2/pi. Callers have already refused |x| > 1.6e6.
 fn libm_trig_quadrant(x: f64) -> i64 {
     let q = x * 6.36619772367581382433e-01
     if q >= 0.0 { (q + 0.5) as i64 } else { (q - 0.5) as i64 }
@@ -270,14 +273,22 @@ fn libm_trig_reduce(x: f64, n: i64) -> f64 {
     (((x - nf * 1.57079632673412561417e+00) - nf * 6.07710050630396597660e-11) - nf * 2.02226624871116645580e-21) - nf * 8.47842766036889956997e-32
 }
 
+// Largest |x| the reduction above is validated for (see the header comment).
 fn libm_trig_refused(x: f64) -> bool {
     if x != x { return true }
-    x >= 1.0e18 || x <= -1.0e18
+    x > 1.6e6 || x < -1.6e6
 }
 
-/// sin(x). Measured within 1 ulp of glibc for |x| < 1.6e6 (421 points).
+// A quiet NaN from inf - inf: no division, no bit-cast builtin, so it means
+// the same on both engines.
+fn libm_trig_nan() -> f64 {
+    let inf = 1.0e308 * 10.0
+    inf - inf
+}
+
+/// sin(x). Within 1 ulp of glibc for |x| <= 1.6e6 (421 points); NaN outside.
 pub fn libm_sin(x: f64) -> f64 {
-    if libm_trig_refused(x) { return bits_to_f64(0x7FF8000000000000) }
+    if libm_trig_refused(x) { return libm_trig_nan() }
     let n = libm_trig_quadrant(x)
     let r = libm_trig_reduce(x, n)
     let k = n & 3
@@ -287,9 +298,9 @@ pub fn libm_sin(x: f64) -> f64 {
     0.0 - libm_kernel_cos(r)
 }
 
-/// cos(x). Measured within 1 ulp of glibc for |x| < 1.6e6 (421 points).
+/// cos(x). Within 1 ulp of glibc for |x| <= 1.6e6 (421 points); NaN outside.
 pub fn libm_cos(x: f64) -> f64 {
-    if libm_trig_refused(x) { return bits_to_f64(0x7FF8000000000000) }
+    if libm_trig_refused(x) { return libm_trig_nan() }
     let n = libm_trig_quadrant(x)
     let r = libm_trig_reduce(x, n)
     let k = n & 3
