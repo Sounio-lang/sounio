@@ -1,0 +1,125 @@
+//@ run-pass
+// GPU MC parity: substream draws vs mrg32k3a reference, bitwise.
+// Closed-form normal/lognormal checks, K-AXI emitter asserts,
+// K-AXI sim execution proof of the advance step.
+
+use gpu::pbpk28_mc_kernel::*
+use random::mrg32k3a::*
+use gpu::kaxi_backend::*
+
+fn str_contains(haystack: string, needle: string) -> bool with Mut, Panic, Div {
+    let hlen = str_len(haystack)
+    let nlen = str_len(needle)
+    if nlen == 0 { return true }
+    if hlen < nlen { return false }
+    var i: i64 = 0
+    while i <= (hlen - nlen) {
+        var j: i64 = 0
+        var ok: bool = true
+        while j < nlen {
+            if str_char_at(haystack, i + j) != str_char_at(needle, j) {
+                ok = false
+                break
+            }
+            j = j + 1
+        }
+        if ok { return true }
+        i = i + 1
+    }
+    false
+}
+
+fn abs_f64(x: f64) -> f64 with Mut {
+    if x < 0.0 { return 0.0 - x }
+    x
+}
+
+fn check_mc_substreams() -> i64 with IO, Mut, Div, Panic {
+    var fails: i64 = 0
+    let seed = mrg32k3a_default_seed()
+    let k0 = pbpk28_mc_substream_u01(seed, 0)
+    let c0 = mrg32k3a_next_u01(seed)
+    if !k0.2 { fails = fails + 1 }
+    if k0.0 != c0.0 { fails = fails + 1 }
+    if k0.1.s0 != c0.1.s0 { fails = fails + 1 }
+    if k0.1.s5 != c0.1.s5 { fails = fails + 1 }
+    var st = seed
+    st = mrg32k3a_next_substream(st)
+    st = mrg32k3a_next_substream(st)
+    st = mrg32k3a_next_substream(st)
+    let c3 = mrg32k3a_next_u01(st)
+    let k3 = pbpk28_mc_substream_u01(seed, 3)
+    if !k3.2 { fails = fails + 1 }
+    if k3.0 != c3.0 { fails = fails + 1 }
+    if k3.1.s2 != c3.1.s2 { fails = fails + 1 }
+    if k3.1.s5 != c3.1.s5 { fails = fails + 1 }
+    let bad = pbpk28_mc_substream_u01(seed, 0 - 1)
+    if bad.2 { fails = fails + 1 }
+    if fails != 0 {
+        print("FAIL gpu_mc substreams\n")
+    }
+    fails
+}
+
+fn check_mc_draws() -> i64 with IO, Mut, Div, Panic {
+    var fails: i64 = 0
+    let zn = pbpk28_mc_normal_from_u01(0.75, 0.25)
+    if !zn.ok { fails = fails + 1 }
+    if abs_f64(zn.value - 0.8325546111576977) > 0.000000000001 { fails = fails + 1 }
+    let zr = pbpk28_mc_normal_from_u01(0.5, 0.5)
+    if zr.ok { fails = fails + 1 }
+    let xl = pbpk28_mc_lognormal_from_z(1.0, 0.25, 0.5)
+    if !xl.ok { fails = fails + 1 }
+    if abs_f64(xl.value - 1.1327163389269201) > 0.000000000001 { fails = fails + 1 }
+    let xm = pbpk28_mc_lognormal_from_z(0.0, 0.25, 0.5)
+    if !xm.ok { fails = fails + 1 }
+    if xm.value != 0.0 { fails = fails + 1 }
+    let xv = pbpk28_mc_lognormal_from_z(1.0, 0.0, 0.5)
+    if !xv.ok { fails = fails + 1 }
+    if xv.value != 1.0 { fails = fails + 1 }
+    if fails != 0 {
+        print("FAIL gpu_mc draws\n")
+    }
+    fails
+}
+
+fn check_mc_emitter() -> i64 with IO, Mut, Panic, Div, Alloc {
+    var fails: i64 = 0
+    let seed = mrg32k3a_default_seed()
+    let asm = kaxi_emit_pbpk28_mc_advance_asm(seed.s0, seed.s1, seed.s2, seed.s3, seed.s4, seed.s5)
+    let text = kaxi_asm_to_string(asm)
+    if !str_contains(text, "load_imm") { fails = fails + 1 }
+    if !str_contains(text, "mul") { fails = fails + 1 }
+    if !str_contains(text, "div") { fails = fails + 1 }
+    if !str_contains(text, "sub") { fails = fails + 1 }
+    if !str_contains(text, "add") { fails = fails + 1 }
+    if !str_contains(text, "store_global") { fails = fails + 1 }
+    if !str_contains(text, "ret") { fails = fails + 1 }
+    if str_contains(text, "nop") { fails = fails + 1 }
+    if fails != 0 {
+        print("FAIL gpu_mc emitter text\n")
+    }
+    fails
+}
+
+fn check_mc_sim() -> i64 with IO, Mut, Div, Panic, Alloc {
+    let fails = pbpk28_mc_sim_proof()
+    if fails != 0 {
+        print("FAIL gpu_mc sim\n")
+    }
+    fails
+}
+
+fn main() -> i64 with IO, Mut, Div, Panic, Alloc {
+    var fails: i64 = 0
+    fails = fails + check_mc_substreams()
+    fails = fails + check_mc_draws()
+    fails = fails + check_mc_emitter()
+    fails = fails + check_mc_sim()
+    if fails == 0 {
+        print("PASS gpu_pbpk28_mc_parity\n")
+    } else {
+        print("FAIL gpu_pbpk28_mc_parity\n")
+    }
+    fails
+}
