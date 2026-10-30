@@ -8770,6 +8770,28 @@ fn lower_cast_type_is_unsigned_int(ct: &Option<Box<TypeExpr>>) -> bool with Mut,
     }
 }
 
+// Bit mask for a cast to a narrow unsigned integer type: u8 -> 0xFF,
+// u16 -> 0xFFFF, u32 -> 0xFFFF_FFFF. 0 means "no mask": the target is not one
+// of those three (u64/usize/signed/float/other types), or has no type.
+fn lower_cast_narrow_unsigned_mask(ct: &Option<Box<TypeExpr>>) -> i64 with Mut, Panic, Div {
+    match *ct {
+        Some(te) => {
+            if (*te).kind != TypeExprKind::TypeNamed { return 0 }
+            let n = ir_path_first_name((*te).path)
+            if n.len == 2 {
+                if n.buf[0] == 117 as i8 && n.buf[1] == 56 as i8 { return 255 }
+                return 0
+            }
+            if n.len == 3 && n.buf[0] == 117 as i8 {
+                if n.buf[1] == 49 as i8 && n.buf[2] == 54 as i8 { return 65535 }
+                if n.buf[1] == 51 as i8 && n.buf[2] == 50 as i8 { return 4294967295 }
+            }
+            0
+        },
+        None => 0,
+    }
+}
+
 fn lower_type_expr_is_string(te: &TypeExpr) -> bool with Mut, Panic, Div {
     if (*te).kind != TypeExprKind::TypeNamed { return false }
     let seg = (*te).path.segments
@@ -36504,7 +36526,18 @@ impl Lowerer {
             let dst = p.1
             (lo2.emit(ir_float_to_int(dst, src_reg)), dst)
         } else {
-            (lo1, src_reg)
+            // Integer -> u8/u16/u32: the value lives in a 64-bit slot, so the cast
+            // must mask to the destination width (300 as u8 == 44, -1 as u8 == 255).
+            let mask = lower_cast_narrow_unsigned_mask(&e.cast_type)
+            if mask == 0 {
+                return (lo1, src_reg)
+            }
+            let mp = lo1.emit_i64_const(mask)
+            var lo2 = mp.0
+            let p = lo2.fresh_reg()
+            lo2 = p.0
+            let dst = p.1
+            (lo2.emit(ir_binop(dst, src_reg, BinaryOp::OpBitAnd, mp.1)), dst)
         }
     }
 
