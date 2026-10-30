@@ -86,21 +86,16 @@ See [`tools/mcp/examples/claude_code_usage.md`](tools/mcp/examples/claude_code_u
 
 ## 7. Sounio syntax (NOT Rust)
 
-Critical differences. **Five of the seven rows below were measured on
-2026-08-20 and are style, not enforcement** — the compiler accepts the Rust form.
-Write the Sounio form; do not expect a diagnostic if you slip. Rows marked ✓ are
-enforced.
+Critical differences. The `;` row is style, not enforcement (measured 2026-08-20: the compiler accepts it). Rows marked ✓ are enforced. Unary minus and `x >> 4` work as written.
 
 | Wrong (Rust) | Correct (Sounio) |
 |---|---|
 | `let x = 5;` | `let x = 5` — **style, not a compile error.** Measured 2026-08-20: the trailing `;` is accepted and the program runs. Prefer the semicolon-free form; do not expect the compiler to enforce it. |
 | `let mut y = 10` | `var y = 10` — ✓ enforced, `error[E040]` |
 | `&mut T` | `&!T` — ✓ enforced, `error[E041]` |
-| `assert!(cond)` | `assert(cond)` — ✓ enforced as of the ELF this repo ships, `error[E043]` (*Sounio does not use Rust macros*). **The old "DANGEROUS, checks clean and is inert" reading was true of the committed binary, not of the source**: measured 2026-08-29, `assert!(1 == 2)` is refused by a Madaros built from `self-hosted/`, and accepted-then-inert by the ELF that was committed before it. The one-character footgun is closed the moment the shipped ELF is refreshed. |
-| `println!("hi")` | `println("hi")` — ✓ enforced, `error[E043]`, same measurement and same caveat as the row above. The *"check clean and SIGSEGV at run time (`rc=139`)"* behaviour recorded in `docs/audit/RUST_MACRO_ACCEPTANCE_2026-08-20.md` is what the **committed** ELF still does; source refuses. |
+| `assert!(cond)` | `assert(cond)` — ✓ enforced, `error[E043]` (*Sounio does not use Rust macros*). The ELF committed before the source fix accepts it and the assert is inert; see `docs/audit/RUST_MACRO_ACCEPTANCE_2026-08-20.md`. |
+| `println!("hi")` | `println("hi")` — ✓ enforced, `error[E043]`; same committed-ELF caveat as `assert!`. |
 | `#[test]`, `#[derive()]` | No attributes — ✓ enforced, fails to parse |
-| ~~`-42`~~ | **STALE — unary minus works.** Measured 2026-08-20 on both engines: `-3.5`, `f(-7)`, `10 - -3` and `[-1, -2, -3]` all check and compute correctly. `0 - x` is no longer required. |
-| `x >> 4` | `x >> 4u8` — **STALE.** Measured 2026-08-20: `x >> 4` checks and computes correctly (`64 >> 4 = 4`). |
 
 Helpers must be defined before callers — no forward references.
 
@@ -163,18 +158,7 @@ Headline limitations (full list in [`docs/compiler/KNOWN_LIMITATIONS.md`](docs/c
 - `--show-ast` / `--show-types` on `compile` or `build` are rejected by default Madaros (`error: madaros build: unsupported option`, exit 2). Measured 2026-10-15: `check --show-ast` and `check --show-types` are **ignored** and still print `check: OK`. `SOUNIO_SOUC_ENGINE=lean_single souc check --show-ast` prints compiler stats, not a source AST. A REPL does exist (`souc repl` -> `tools/repl.sh`) -- it's a file-based compile-and-run loop over whichever engine `bin/souc` currently resolves to, not a true interactive evaluator.
 - `&![T; N]` bare array mutation broken in JIT — use struct wrapper or `(*arr)[i]`
 - GPU: two records, not re-run on 2026-10-15. `TOUR.md` §6 (2026-10-04) measured `souc build --backend gpu` as PTX for empty kernel bodies only. An older note in this section said `examples/kernel_vec_add.sio` emitted valid PTX under Madaros, and that `lean_single` has no GPU CLI (verified 2026-08-17). The root README (2026-10-11) records scoped Spark evidence for GPU/Pireus and says the generic GPU CLI needs its own status. Do not teach a general kernel launch from this bullet.
-- **Dual-engine divergence.** `f128` is a working binary128 type on **both** engines, but they cover different surfaces. Both give 113 halvings to `1 + eps == 1` (binary64 gives 53) and print `1/3` as `3.33333333333333333333333333333333317e-0001` via `math::softfloat_f128_fmt::print_f128`.
-  - **Madaros** computes `+ - * / %`, unary minus and IEEE compares, and supports params/returns, struct fields, methods, fixed arrays, exact 36-digit printing and exact literals. Measured: `7.5 % 2.0 = 1.5`; `2/3` through a struct field and an array element is correct to the last digit. It refuses, fail-closed:
-    - `as` casts between `f128` and `f64` (**E248**, "wide-float casts fail closed");
-    - values that flow through an `f128` global or a `type` alias over `f128` (V0-E.4.1 lowering refusal). The declarations alone build: an unused `let G: f128` or `type Wide = f128` compiles;
-    - mixing an `f128` with an untyped literal or an `f256` (**E004**). Write typed constants, e.g. `let three: f128 = 3.0; x / three`, not `x / 3.0`.
-  - **lean_single** (#2387/#2426) computes binary128 through libgcc for locals, direct-call params/returns, IEEE compares, and `as` casts in both directions. It refuses, fail-closed: struct fields, arrays, reading an `f128` global (an unused one builds; a `type` alias over `f128` works), tuples, methods, fn values, `println` of an `f128` (the stdlib `print_f128` works), and `%` ("modulo requires integer operands").
-  - **Literal exactness differs by engine.** Measured 2026-09-26:
-    - **Madaros** parses an f128 literal straight to binary128 (V0-E.5.9) and accepts the literals its parser can prove exact in binary128. Decimal digits accumulate in 128 bits (`self-hosted/parser/f128_literal.sio`), so a very long decimal is refused even when its value is exact, such as the full expansion of 2^200. `0.1` fails. `1e23` prints exactly, and so does the hex-float `0x1.0000000000000001p+0` (1 + 2⁻⁶⁴). The hex-float exponent sign is optional, as in C99: `…p0` and `…p+0` are the same literal (the unsigned form was refused with E012/E137 until the parser fix in `docs/audit/MADAROS_HEX_FLOAT_UNSIGNED_EXPONENT_DISPATCH_2026-09-26.md`).
-    - **lean_single** widens through binary64 and refuses any literal not exact in binary64 (`f128_widen_refuses_inexact_literal` in `lean_single.sio`), so it also rejects `1e23` and that hex-float.
-    - Portable constants: small dyadic decimals that are exact in binary64 (`0.25`, `3.0`), `f128_from_limbs(lo, hi)` (works on both), or computation (`one / ten`).
-  - **Not implemented anywhere:** `Knowledge<f128>` and GUM over `f128` (KL-15).
-  - **`f256`** on Madaros: declarations and some operators typecheck (an unused f256 enum field or global builds), but executable f256 value lowering is refused fail-closed (V0-E.4.1), never lowered as f64. lean_single refuses `f256` outright (KL-9). Only `stdlib/math/softfloat_f256.sio` add/sub over `F256Bits` computes f256 values (KL-15a); there is no f256 mul, div, fields, arrays or printing.
+- **Dual-engine divergence (`f128`/`f256`).** `f128` is a working binary128 type on both engines but they cover different surfaces and refuse different constructs (casts, globals, literals; E248, E004). `Knowledge<f128>`/GUM over `f128` is not implemented (KL-15); `f256` has no executable lowering on Madaros and is refused by lean_single. Full per-engine table: [`docs/compiler/F128_ENGINE_DIVERGENCE.md`](docs/compiler/F128_ENGINE_DIVERGENCE.md).
 - **Cross-call first-order variance (KL-11) is narrowed, not closed.** Pure helpers carry first-order channels (ledger, 2026-10-13). A general user call still does not: `tests/run-pass/gum_fo_across_call.sio` and `tests/run-pass/fo_call_boundary_arity3.sio` keep `//@ known-failure`. Do not treat every call as variance-preserving.
 
 ---
