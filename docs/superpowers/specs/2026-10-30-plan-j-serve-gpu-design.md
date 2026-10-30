@@ -25,3 +25,8 @@ The approved design said worker pool plus GPU lock. The language has no thread p
 - tests/run-pass/serve_j_params: defaults, clamps, rejects, SSE bytes.
 - examples/llm_serve_j_demo: serving-loop parity with generate, usage counts, SSE golden bytes, TTFB via clock_gettime.
 - Live overlap with two curl clients plus full-compiler forge run: pending a GPU lane.
+
+## Forge receipt
+
+- corpus-smoke run sounio-20261030T152953Z-90d38b: pass (cpu pass=3 fail=0, job 20304), snapshot of fd6ef70ddc.
+- Artifacts: /orangefs/training/sounio-foundry/runs/sounio-20261030T152953Z-90d38b.
