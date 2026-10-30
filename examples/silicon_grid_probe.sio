@@ -1,0 +1,178 @@
+// Structural and checked-launch regression. Run GPU work only under Slurm.
+extern "C" {
+    fn dlsym(handle: *mut u8, symbol: *mut u8) -> *mut u8
+}
+use hetero::cuda_exec::{ce_alloc, ce_d2h, ce_h2d, ce_open}
+use hetero::probe_cuda::{pb_cstr}
+use hetero::silicon::gemv::{sg_layout_ok, sg_launch_sm89, sg_payload}
+use hetero::silicon::image::{si_gemv_grid_sm89, si_gemv_sm89}
+use hetero::silicon::nvidia::atlas::{atlas_iadd3_hi, atlas_iadd3_lo}
+use tensor2::convert::{f32_bits_to_f64, f64_to_f32_bits}
+
+fn word32(buf: *mut u8, index: i64) -> i64 with Div {
+    (read_i64(buf as *mut i64, index / 2) >> ((index % 2) * 32)) & 4294967295
+}
+
+fn put32(buf: *mut u8, index: i64, value: i64) with Mut, Div {
+    let shift = (index % 2) * 32
+    let mask = (0 - 1) - (4294967295 << shift)
+    let old = read_i64(buf as *mut i64, index / 2)
+    write_i64(buf as *mut i64, index / 2, (old & mask) | ((value & 4294967295) << shift))
+}
+
+fn structural() with Alloc, Mut, Div, Panic {
+    if si_gemv_grid_sm89(0, 1).ok || si_gemv_grid_sm89(65536, 1).ok { exit(1) }
+    if si_gemv_grid_sm89(1, 0).ok || si_gemv_grid_sm89(1, 4097).ok { exit(1) }
+    if si_gemv_grid_sm89(9223372036854775807, 1).ok { exit(1) }
+    let image = si_gemv_grid_sm89(129, 7)
+    let old = si_gemv_sm89(129, 7)
+    if !image.ok || image.nbytes != 3112 || !old.ok { exit(1) }
+    // The first six instructions and the complete original body are shared.
+    var i: i64 = 0
+    while i < 12 {
+        if read_i64(image.ptr as *mut i64, 176 + i) != read_i64(old.ptr as *mut i64, 176 + i) { exit(1) }
+        i = i + 1
+    }
+    i = 12
+    while i < 70 {
+        if read_i64(image.ptr as *mut i64, 176 + i + 26) != read_i64(old.ptr as *mut i64, 176 + i) { exit(1) }
+        i = i + 1
+    }
+    if read_i64(image.ptr as *mut i64, 176 + 6 * 2) != 31001 + 18 * 65536 { exit(1) }
+    if read_i64(image.ptr as *mut i64, 177 + 6 * 2) != 14106734184374528 + 1024 + 70368744177664 { exit(1) }
+    i = 0
+    while i < 7 {
+        let wait = if i == 0 { 9007199254740992 } else { 0 }
+        if read_i64(image.ptr as *mut i64, 176 + (7 + i) * 2) != atlas_iadd3_lo(18, 18, 18, 0) { exit(1) }
+        if read_i64(image.ptr as *mut i64, 177 + (7 + i) * 2) != atlas_iadd3_hi(0) + wait { exit(1) }
+        i = i + 1
+    }
+    if read_i64(image.ptr as *mut i64, 176 + 14 * 2) != atlas_iadd3_lo(4, 4, 18, 0) { exit(1) }
+    if read_i64(image.ptr as *mut i64, 177 + 14 * 2) != atlas_iadd3_hi(0) + 4503599627370496 { exit(1) }
+    if read_i64(image.ptr as *mut i64, 176 + 15 * 2) != 30732 + 4 * 16777216 + 129 * 4294967296 { exit(1) }
+    // Branches: live lanes skip the unconditional tail branch to EXIT.
+    if read_i64(image.ptr as *mut i64, 176 + 17 * 2) != 2375 + 16 * 4294967296 { exit(1) }
+    if read_i64(image.ptr as *mut i64, 176 + 18 * 2) != 31047 + 448 * 4294967296 { exit(1) }
+    if read_i64(image.ptr as *mut i64, 111) != 269316 + 47 * 16 * 4294967296 { exit(1) }
+    heap_free(image.ptr as *mut i8)
+    heap_free(old.ptr as *mut i8)
+    let payload = sg_payload(129, 7)
+    let last = payload + 4 * 129 - 4
+    let limit = 4294967295 - last
+    let aligned = limit - limit % 4
+    if !sg_layout_ok(aligned, payload, 129, 7) { exit(1) }
+    if sg_layout_ok(aligned + 4, payload, 129, 7) { exit(1) }
+    if sg_layout_ok(4096, payload - 1, 129, 7) { exit(1) }
+    if sg_layout_ok(4097, payload, 129, 7) { exit(1) }
+    if sg_layout_ok(0, payload, 129, 7) { exit(1) }
+    if sg_layout_ok(9223372036854775804, payload, 129, 7) { exit(1) }
+    print("GRID STRUCTURAL PASS\n")
+}
+
+fn main() with IO, Alloc, Mut, Div, Panic {
+    structural()
+    let exec = ce_open()
+    if !exec.ok { print("CUDA OPEN FAIL\n"); exit(1) }
+    // Native main's thread-only exit leaves CUDA worker threads behind.
+    // libc _exit uses exit_group; this is confined to the standalone probe.
+    let exit_name = pb_cstr("_exit")
+    let raw_exit = dlsym(exec.cuda, exit_name)
+    heap_free(exit_name as *mut i8)
+    if (raw_exit as i64) == 0 { print("EXIT SYMBOL FAIL\n"); exit(1) }
+    let free_name = pb_cstr("cuMemFree_v2")
+    let raw_free = dlsym(exec.cuda, free_name)
+    heap_free(free_name as *mut i8)
+    if (raw_free as i64) == 0 { print("FREE SYMBOL FAIL\n"); exit(1) }
+    let free_device = raw_free as fn(i64) -> i32
+    let ns: [i64; 16] = [1, 1, 31, 127, 128, 129, 255, 256, 257, 576, 1023, 1024, 1025, 2049, 4096, 65535]
+    let ks: [i64; 16] = [1, 4096, 7, 17, 17, 17, 31, 31, 31, 64, 7, 7, 7, 7, 7, 1]
+    var case: i64 = 0
+    while case < 32 {
+        let shape = case % 16
+        let fractional = case >= 16
+        let n = ns[shape]
+        let k = ks[shape]
+        let span = if n > k { n } else { k }
+        let payload = sg_payload(n, k)
+        let total = payload + 512
+        let host = heap_alloc(total + 8)
+        let result = heap_alloc(total + 8)
+        var i: i64 = 0
+        while i < (total + 7) / 8 {
+            write_i64(host as *mut i64, i, 6510615555426900570)
+            write_i64(result as *mut i64, i, 0)
+            i = i + 1
+        }
+        // The second pass uses non-dyadic decimals rounded to f32.
+        i = 0
+        while i < k {
+            let x = (i % 3) + 1
+            let xv = if fractional { (x as f64) / 10.0 } else { x as f64 }
+            put32(host, 64 + 2 * n + i, f64_to_f32_bits(xv))
+            var col: i64 = 0
+            while col < n {
+                let weight = ((i + col) % 5) + 1
+                let wv = if fractional { (weight as f64) / 7.0 } else { weight as f64 }
+                put32(host, 64 + 2 * n + span + i * n + col, f64_to_f32_bits(wv))
+                col = col + 1
+            }
+            i = i + 1
+        }
+        let allocation = ce_alloc(&exec, total)
+        let base = allocation + 256
+        if allocation == 0 || !sg_layout_ok(base, payload, n, k) { print("ALLOCATION FAIL\n"); exit(1) }
+        if ce_h2d(&exec, allocation, host, total) != 0 { exit(1) }
+        if sg_launch_sm89(&exec, 0, n, k) == 0 { exit(1) }
+        if sg_launch_sm89(&exec, base + 1, n, k) == 0 { exit(1) }
+        if sg_launch_sm89(&exec, allocation + total - 4, n, k) == 0 { exit(1) }
+        if sg_launch_sm89(&exec, 4, n, k) == 0 { exit(1) }
+        if ce_d2h(&exec, result, allocation, total) != 0 { exit(1) }
+        i = 0
+        while i < total / 4 {
+            if word32(host, i) != word32(result, i) { print("REJECTION WROTE MEMORY\n"); exit(1) }
+            i = i + 1
+        }
+        let status = sg_launch_sm89(&exec, base, n, k)
+        if status != 0 { print("LAUNCH STATUS "); print_int(status); print("\n"); exit(1) }
+        if ce_d2h(&exec, result, allocation, total) != 0 { exit(1) }
+        var col: i64 = 0
+        while col < n {
+            var expected: f64 = 0.0
+            i = 0
+            while i < k {
+                let xbits = word32(host, 64 + 2 * n + i)
+                let wbits = word32(host, 64 + 2 * n + span + i * n + col)
+                expected = expected + f32_bits_to_f64(xbits) * f32_bits_to_f64(wbits)
+                i = i + 1
+            }
+            let actual_bits = word32(result, 64 + col)
+            if (actual_bits & 2139095040) == 2139095040 { print("NONFINITE DOT\n"); exit(1) }
+            let actual = f32_bits_to_f64(actual_bits)
+            let delta = if actual > expected { actual - expected } else { expected - actual }
+            let magnitude = if expected > 0.0 { expected } else { 0.0 - expected }
+            // Integer cases are exact; the longer fractional reduction has
+            // a separate bound for accumulated f32 rounding.
+            let relative = if k > 64 { 0.0005 } else { 0.00001 }
+            if !fractional && actual_bits != f64_to_f32_bits(expected) { print("DOT FAIL\n"); exit(1) }
+            if fractional && delta > 0.00001 + relative * magnitude { print("DOT FAIL\n"); exit(1) }
+            if word32(result, 64 + n + col) != col { print("TID FAIL\n"); exit(1) }
+            col = col + 1
+        }
+        i = 0
+        while i < total / 4 {
+            if (i < 64 || i >= 64 + 2 * n) && word32(host, i) != word32(result, i) {
+                print("CANARY OR INPUT FAIL\n")
+                exit(1)
+            }
+            i = i + 1
+        }
+        print("GRID CASE "); print_int(n); print(" "); print_int(k); print(" "); print_int(if fractional { 1 } else { 0 }); print("\n")
+        if free_device(allocation) != 0 { print("FREE FAIL\n"); exit(1) }
+        heap_free(host as *mut i8)
+        heap_free(result as *mut i8)
+        case = case + 1
+    }
+    print("GRID CHECKED PASS\n")
+    let process_exit = raw_exit as fn(i32) -> i32
+    let _unused = process_exit(0)
+}

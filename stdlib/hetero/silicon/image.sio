@@ -16,7 +16,7 @@ use hetero::silicon::nvidia::reg::{sm89_sub_image, sm89_sub_nbytes}
 use hetero::silicon::nvidia::movk::{sm89_movk_image, sm89_movk_nbytes}
 use hetero::silicon::nvidia::amp86::{sm86_dmul_image, sm86_dmul_nbytes, sm86_movk_image, sm86_movk_nbytes}
 use hetero::silicon::nvidia::volta::{sm70_movk_image, sm70_movk_nbytes}
-use hetero::silicon::nvidia::elf::{sm89_own_image, sm89_own_nbytes}
+use hetero::silicon::nvidia::elf::{sm89_gemv_image, sm89_grid_image, sm89_grid_nbytes, sm89_own_image, sm89_own_nbytes}
 use hetero::silicon::amd::rdna::{rdna_stamp_nbytes}
 use hetero::silicon::apple::agx::{agx_stamp_nbytes}
 
@@ -117,4 +117,30 @@ pub fn si_volta_mov() -> SiImage with Alloc, Mut {
 
 pub fn si_own() -> SiImage with Alloc, Mut, Div {
     SiImage { ptr: sm89_own_image(), nbytes: sm89_own_nbytes(), ok: true }
+}
+
+// Experimental image only, not a general GEMV launch API. One block of n
+// threads takes a single device pointer to packed f32 storage:
+// output[n], tid[n] (u32), input[max(n,k)] (padded), weights[k][n].
+// The caller must validate buffer size and require all addresses, including
+// the final increment of the weight pointer, to remain in the same 4-GiB
+// region as the base: this image does not propagate 32-bit address carries.
+pub fn si_gemv_sm89(n: i64, k: i64) -> SiImage with Alloc, Mut, Div {
+    if n < 1 || n > 1024 || k < 1 || k > 4096 {
+        return SiImage { ptr: 0 as *mut u8, nbytes: 0, ok: false }
+    }
+    SiImage { ptr: sm89_gemv_image(n, k), nbytes: sm89_own_nbytes(), ok: true }
+}
+
+// Image-only API; use the checked launcher for CUDA execution. Launch geometry
+// is fixed at 128 threads and ceil(n/128) blocks, with one packed pointer.
+pub fn si_gemv_grid_sm89(n: i64, k: i64) -> SiImage with Alloc, Mut, Div {
+    if n < 1 || n > 65535 || k < 1 || k > 4096 {
+        return SiImage { ptr: 0 as *mut u8, nbytes: 0, ok: false }
+    }
+    let ptr = sm89_grid_image(n, k)
+    if (ptr as i64) == 0 {
+        return SiImage { ptr: ptr, nbytes: 0, ok: false }
+    }
+    SiImage { ptr: ptr, nbytes: sm89_grid_nbytes(), ok: true }
 }
