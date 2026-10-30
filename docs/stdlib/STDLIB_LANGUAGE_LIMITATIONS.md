@@ -134,7 +134,8 @@ warns. Do not write it; it means nothing.
 
 There is no `parse` method on `string` and no `FromStr` trait. Use the
 type-specific free functions: `str_to_i64` and `str_to_f64` in
-`stdlib/str/lib.sio`, or `parse_i64` / `parse_f64` in `stdlib/data/csv_loader.sio`.
+`stdlib/str/lib.sio`, or `csv_parse_i64` / `csv_parse_f64` in `stdlib/data/csv_loader.sio`
+(not `parse_i64` / `parse_f64`: lean_single resolves those bare names to its own builtins).
 
 ### One instantiation per generic template
 
@@ -169,7 +170,7 @@ Measured today:
 |---|---|---|
 | `stdlib/stats/effect_sizes.sio` | rejected | 2× E019 — `.push()` on a slice |
 | `stdlib/graph/nulls/configuration.sio` | rejected | 22× E019 + 5× E009 |
-| `stdlib/data/csv_loader.sio` | rejected | 16 parse errors — character literals |
+| `stdlib/data/csv_loader.sio` | checks (2026-10-30) | rewritten on byte codes and fixed-capacity buffers; was 16 parse errors — character literals |
 
 None of that is about generics.
 
