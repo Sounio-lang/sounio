@@ -1,0 +1,137 @@
+fn byte_load(ptr:*mut i8,index:i64)->i64 {
+    let p=((ptr as i64)+index) as *mut i8
+    return (*p as i64) & 255
+}
+fn byte_store(ptr:*mut i8,index:i64,value:i8) with Mut {
+    let p=((ptr as i64)+index) as *mut i8
+    *p=value
+}
+// Native byte storage. Status: 0 OK, 1 invalid size/budget, 2 budget,
+// 3 allocation failure, 4 bounds, 5 invalid UTF-8. Budget is payload bytes.
+pub linear struct ByteBuffer {
+    ptr: *mut i8,
+    size: i64,
+    capacity: i64,
+    max_bytes: i64,
+    status: i64,
+}
+pub struct ByteValue { pub value: i64, pub status: i64 }
+
+pub fn byte_buffer_new(max_bytes: i64) -> ByteBuffer {
+    let code = if max_bytes < 0 { 1 } else { 0 }
+    ByteBuffer { ptr: 0 as *mut i8, size: 0, capacity: 0, max_bytes: max_bytes, status: code }
+}
+pub fn byte_buffer_status(b: &ByteBuffer) -> i64 { b.status }
+pub fn byte_buffer_len(b: &ByteBuffer) -> i64 { b.size }
+pub fn byte_buffer_capacity(b: &ByteBuffer) -> i64 { b.capacity }
+pub fn byte_buffer_reserve(b: &!ByteBuffer, n: i64) -> i64 with Alloc, Mut {
+    if b.status != 0 { return b.status }
+    if n < 0 { return 1 }
+    if n > b.max_bytes { return 2 }
+    if n <= b.capacity { return 0 }
+    let p = if b.capacity == 0 { heap_alloc(n) } else { heap_realloc(b.ptr, n) }
+    if (p as i64) <= 0 { return 3 }
+    b.ptr = p as *mut i8
+    b.capacity = n
+    return 0
+}
+pub fn byte_buffer_get(b: &ByteBuffer, index: i64) -> ByteValue {
+    if b.status != 0 { return ByteValue { value: 0, status: b.status } }
+    if index < 0 || index >= b.size { return ByteValue { value: 0, status: 4 } }
+    return ByteValue { value: (byte_load(b.ptr, index) as i64) & 255, status: 0 }
+}
+pub fn byte_buffer_push(b: &!ByteBuffer, value: i64) -> i64 with Alloc, Mut, Div {
+    if b.status != 0 { return b.status }
+    if value < 0 || value > 255 { return 1 }
+    if b.size >= b.max_bytes { return 2 }
+    if b.size == b.capacity {
+        var next = if b.capacity == 0 { 16 } else { b.capacity }
+        if next > b.max_bytes / 2 { next = b.max_bytes } else { next = next * 2 }
+        if next > b.max_bytes { next = b.max_bytes }
+        let code = byte_buffer_reserve(b, next)
+        if code != 0 { return code }
+    }
+    byte_store(b.ptr, b.size, value as i8)
+    b.size = b.size + 1
+    return 0
+}
+// Validates complete UTF-8, rejecting overlong forms, surrogates and >U+10FFFF.
+// A valid result carries scalar count; byte length remains byte_buffer_len.
+pub fn byte_buffer_utf8_count(b: &ByteBuffer) -> ByteValue with Mut, Div {
+    if b.status != 0 { return ByteValue { value: 0, status: b.status } }
+    var i:i64 = 0
+    var count:i64 = 0
+    while i < b.size {
+        let lead = (byte_load(b.ptr, i) as i64) & 255
+        var width:i64 = 1
+        var cp:i64 = lead
+        var minimum:i64 = 0
+        if lead >= 128 {
+            if lead < 194 { return ByteValue { value: 0, status: 5 } }
+            if lead < 224 { width = 2; cp = lead & 31; minimum = 128 }
+            else if lead < 240 { width = 3; cp = lead & 15; minimum = 2048 }
+            else if lead < 245 { width = 4; cp = lead & 7; minimum = 65536 }
+            else { return ByteValue { value: 0, status: 5 } }
+        }
+        if width > b.size - i { return ByteValue { value: 0, status: 5 } }
+        var j:i64 = 1
+        while j < width {
+            let part = (byte_load(b.ptr, i+j) as i64) & 255
+            if part < 128 || part > 191 { return ByteValue { value: 0, status: 5 } }
+            cp = cp * 64 + (part & 63)
+            j = j + 1
+        }
+        if cp < minimum || cp > 1114111 { return ByteValue { value: 0, status: 5 } }
+        if cp >= 55296 { if cp <= 57343 { return ByteValue { value: 0, status: 5 } } }
+        count = count + 1
+        i = i + width
+    }
+    return ByteValue { value: count, status: 0 }
+}
+pub fn byte_buffer_clear(b: &!ByteBuffer) with Mut { b.size = 0 }
+pub fn byte_buffer_close(b: ByteBuffer) with Alloc {
+    let ByteBuffer { ptr, size, capacity, max_bytes, status } = b
+    if capacity > 0 { heap_free(ptr) }
+}
+
+use ffi::platform::{Platform,PlatformValue,platform_call}
+// PlatformValue uses Linux errno; local ByteValue keeps the storage codes above.
+fn byte_buffer_errno(status:i64)->i64 {
+    if status==0 {return 0}
+    if status==2 {return 105}
+    if status==3 {return 12}
+    return 22
+}
+// Only this owner module computes a byte-buffer pointer for the FFI boundary.
+pub fn byte_buffer_native_send(p:&Platform,socket:i64,b:&ByteBuffer,offset:i64,n:i64,deadline:i64,datagram:bool)->PlatformValue with IO {
+    if b.status!=0 {return PlatformValue {value:0,status:byte_buffer_errno(b.status)}}
+    if offset<0 || n<0 {return PlatformValue {value:0,status:22}}
+    if offset>b.size {return PlatformValue {value:0,status:22}}
+    if n>b.size-offset {return PlatformValue {value:0,status:22}}
+    let address=(b.ptr as i64)+offset
+    return platform_call(p,if datagram {61} else {54},socket,address,n,deadline)
+}
+pub fn byte_buffer_native_receive(p:&Platform,socket:i64,b:&!ByteBuffer,n:i64,deadline:i64,datagram:bool)->PlatformValue with IO,Alloc,Mut {
+    if b.status!=0 {return PlatformValue {value:0,status:byte_buffer_errno(b.status)}}
+    if n<0 {return PlatformValue {value:0,status:22}}
+    if n>b.max_bytes-b.size {return PlatformValue {value:0,status:105}}
+    let status=byte_buffer_reserve(b,b.size+n)
+    if status!=0 {return PlatformValue {value:0,status:byte_buffer_errno(status)}}
+    let r=platform_call(p,if datagram {62} else {55},socket,(b.ptr as i64)+b.size,n,deadline)
+    if r.status!=0 {return r}
+    if r.value<0 || r.value>n {return PlatformValue {value:0,status:71}}
+    b.size=b.size+r.value
+    return r
+}
+pub fn byte_buffer_system_random(p:&Platform,b:&!ByteBuffer,n:i64)->PlatformValue with IO,Alloc,Mut {
+    if b.status!=0 {return PlatformValue {value:0,status:byte_buffer_errno(b.status)}}
+    if n<0 {return PlatformValue {value:0,status:22}}
+    if n>b.max_bytes-b.size {return PlatformValue {value:0,status:105}}
+    let status=byte_buffer_reserve(b,b.size+n)
+    if status!=0 {return PlatformValue {value:0,status:byte_buffer_errno(status)}}
+    let r=platform_call(p,40,(b.ptr as i64)+b.size,n,0,0)
+    if r.status!=0 {return r}
+    if r.value!=n {return PlatformValue {value:0,status:5}}
+    b.size=b.size+n
+    return r
+}
