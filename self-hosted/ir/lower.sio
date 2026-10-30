@@ -35238,20 +35238,6 @@ impl Lowerer {
             lowerer_mark_hard_error(&! lo_refuse)
             return (lo_refuse, 0)
         }
-        // Fail-closed: array `++` has no native-v2 lowering yet. The checker
-        // admits OpConcat only for string++string and array++array; the string
-        // arm below routes to str_concat, but an array concat fell through to
-        // a generic IrBinOp that nc_emit_core_binop has no Concat arm for, so
-        // the compile died as bare rc=12 naming nothing (Native-v2 gaps card).
-        // Refuse by name until the alloc+copy lowering exists.
-        if e.bin_op == BinaryOp::OpConcat
-            && !self.opt_expr_result_is_string_ref(&e.left)
-            && !self.opt_expr_result_is_string_ref(&e.right) {
-            print("error: array concatenation (BinaryOp::OpConcat) is not implemented on Madaros native-v2 (fail-closed; was unnamed rc=12). Build the result element-wise into a pre-sized array until array-concat lowering lands.\n")
-            var lo_concat_refuse = self
-            lowerer_mark_hard_error(&! lo_concat_refuse)
-            return (lo_concat_refuse, 0)
-        }
         // Fail-closed: a dereference whose pointee cannot be typed here, as an
         // operand next to an f64. The checker only admits `*x <op> f64` when *x
         // is itself an f64, but this lowering would classify the dereference as
@@ -35342,6 +35328,21 @@ impl Lowerer {
                 let sc_args: Option<Box<IrRegList>> = Some(Box::new(ir_reg_list_cons(lhs, Some(Box::new(ir_reg_list_single(rhs))))))
                 let lo_call = lo_sc.emit(ir_call(dst, sc_fn, make_name("str_concat"), sc_args, 2))
                 return (lo_call, dst)
+            } else if e.bin_op == BinaryOp::OpConcat {
+                // Array concatenation: route array++array to the array_concat
+                // builtin (heap alloc + copy). The checker admits OpConcat only
+                // for string++string and array++array, so a non-string OpConcat
+                // that reaches here is an array concatenation. OpAdd with
+                // non-string operands keeps falling through to integer add.
+                var lo_ac = lo3
+                let ac_fn = lowerer_find_or_add_fn_id_mut(&! lo_ac, make_name("array_concat"))
+                let ac_args: Option<Box<IrRegList>> = Some(Box::new(ir_reg_list_cons(lhs, Some(Box::new(ir_reg_list_single(rhs))))))
+                var lo_call_ac = lo_ac.emit(ir_call(dst, ac_fn, make_name("array_concat"), ac_args, 2))
+                if lo_call_ac.lookup_reg_array_elem_float(lhs) || lo_call_ac.lookup_reg_array_elem_float(rhs) {
+                    lo_call_ac = lo_call_ac.emit(ir_mark_float_reg(dst))
+                    lo_call_ac = lo_call_ac.bind_reg_array_elem_float(dst)
+                }
+                return (lo_call_ac, dst)
             }
         }
         // R6 Correlated (id 29): the only Knowledge (x) Knowledge combinations
