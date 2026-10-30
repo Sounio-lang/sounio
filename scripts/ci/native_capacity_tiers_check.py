@@ -295,8 +295,11 @@ def main():
         fail("elf_base_addr_occurrence_count_%d" % len(occ))
     if not re.search(r"^fn nc_elf_base_addr\(\) -> i64 with Mut \{ NC_HANDLE_CAPACITY \}$", cgx, re.MULTILINE):
         fail("nc_elf_base_addr_accessor_missing")
+    # 8 since #2966: the second native_v2_write_min_elf64_to_file call (the
+    # reloc-applying writer) still passed the literal 4194304 after a main
+    # merge; it takes the accessor now, like every other ELF writer call.
     base_calls = len(re.findall(r"nc_elf_base_addr\(\)", cgx)) - 1
-    if base_calls != 7:
+    if base_calls != 8:
         fail("nc_elf_base_addr_call_count_%d" % base_calls)
 
     check_1646(frame, cgx, cg, irsrc, elfsrc, lowerir, driver,

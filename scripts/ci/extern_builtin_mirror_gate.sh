@@ -238,4 +238,19 @@ if ! diff -u "$WORK/backend.txt" "$WORK/checker.txt" > "$WORK/diff.txt"; then
   Mirror:    name_is_native_backend_builtin ($CHECK)"
 fi
 
+# Builtin ids must be unique across names. A merge gave id 72 to both
+# __ptr_of_ref (this backend's `v as *mut T`) and main's array_concat, so a
+# raw-pointer cast called the array_concat emitter (SIGILL in
+# raw_ptr_of_managed_object, #2966). Every `name test -> { return N }` arm in
+# the backend is collected; an id named by two different names fails, except the
+# deliberate aliases below.
+ID_PAIRS="$(grep -E '\{ return [0-9]+ \}' "$CODEGEN" | grep -E 'name_eq_lit\(|name_is_[a-z_0-9]+\(' \
+  | sed -E 's/.*name_eq_lit\([^,]+, "([^"]+)"\).*\{ return ([0-9]+) \}.*/\2 \1/; s/.*name_is_(_*[a-z_0-9]+)\(.*\{ return ([0-9]+) \}.*/\2 \1/' \
+  | grep -E '^[0-9]+ ' | sort -u)"
+ID_N="$(printf '%s\n' "$ID_PAIRS" | awk '{print $1}' | sort -u | grep -c .)"
+[[ "$ID_N" -ge 40 ]] || fail "builtin id uniqueness: parsed only $ID_N distinct ids from $CODEGEN (expected >= 40); the extraction no longer matches the backend"
+DUP_IDS="$(printf '%s\n' "$ID_PAIRS" | awk '{n[$1]=n[$1]" "$2; c[$1]++} END{for (k in c) if (c[k] > 1) print k ":" n[k]}' \
+  | grep -vxE '23: heap_alloc malloc|24: free heap_free|49: ffi_pow pow' || true)"
+[[ -z "$DUP_IDS" ]] || fail "builtin id shared by different names: $DUP_IDS"
+
 echo "[extern-mirror] PASS: $BACKEND_N callable builtin names ($BACKEND_FFI_N via ffi_* wrappers), checker, parser and backend agree"
