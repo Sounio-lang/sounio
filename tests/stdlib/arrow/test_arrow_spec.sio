@@ -1,0 +1,500 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: ARROW_SPEC_OK
+// Schema, nested record batches, dictionaries, views, metadata, lz4 and zstd.
+// https://arrow.apache.org/docs/format/Columnar.html#format-ipc
+
+use arrow::lib::{
+    ArrowBatch,
+    ArrowBuf,
+    arrow_batch_f64,
+    arrow_batch_i64,
+    arrow_batch_is_null,
+    arrow_batch_add_msg_meta,
+    arrow_batch_new,
+    arrow_batch_set_f64,
+    arrow_batch_set_i64,
+    arrow_batch_set_list,
+    arrow_batch_set_node_len,
+    arrow_batch_set_str,
+    arrow_batch_shape,
+    arrow_batch_str_byte,
+    arrow_batch_str_len,
+    arrow_buf_new,
+    arrow_codec_lz4,
+    arrow_codec_zstd,
+    arrow_cursor_new,
+    arrow_dict_str_byte,
+    arrow_dict_str_len,
+    arrow_dicts_new,
+    arrow_feature_compressed,
+    arrow_field_set_extension,
+    arrow_ipc_file_begin,
+    arrow_ipc_file_end,
+    arrow_ipc_file_push,
+    arrow_ipc_file_push_dict,
+    arrow_ipc_next_ex,
+    arrow_ipc_open,
+    arrow_ipc_open_ex,
+    arrow_ipc_read,
+    arrow_ipc_stream_begin,
+    arrow_ipc_stream_end,
+    arrow_ipc_stream_push,
+    arrow_ipc_stream_push_dict,
+    arrow_ipc_view,
+    arrow_schema_add,
+    arrow_schema_add_child,
+    arrow_schema_add_meta,
+    arrow_schema_add_msg_meta,
+    arrow_schema_new,
+    arrow_schema_set_dict,
+    arrow_schema_set_endian,
+    arrow_schema_set_extra,
+    arrow_schema_set_feature,
+    arrow_schema_set_timezone,
+    arrow_spans_new,
+    arrow_type_date,
+    arrow_type_decimal,
+    arrow_type_fixed_binary,
+    arrow_type_float,
+    arrow_type_int,
+    arrow_type_interval,
+    arrow_type_large_list,
+    arrow_type_large_utf8,
+    arrow_type_list,
+    arrow_type_list_view,
+    arrow_type_map,
+    arrow_type_run_end,
+    arrow_type_struct,
+    arrow_type_time,
+    arrow_type_timestamp,
+    arrow_type_union,
+    arrow_type_utf8,
+    arrow_type_utf8_view,
+}
+
+fn byte_of(v: i64) -> i64 {
+    if v < 0 { v + 256 } else { v }
+}
+
+fn meta_key_is(bytes: &[u8; 128], lens: &[i64; 4], i: i64, text: string) -> i64 with Panic {
+    let n = str_len(text)
+    if lens[i as usize] != n { return 0 }
+    var k: i64 = 0
+    while k < n {
+        var want = text[k as usize] as i64
+        want = byte_of(want)
+        let got = byte_of(bytes[(i * 32 + k) as usize] as i64)
+        if got != want { return 0 }
+        k = k + 1
+    }
+    1
+}
+
+fn str_eq(batch: &ArrowBatch, col: i64, row: i64, text: string) -> i64 with Panic {
+    let n = str_len(text)
+    if arrow_batch_str_len(batch, col, row) != n { return 0 }
+    var i: i64 = 0
+    while i < n {
+        var want = text[i as usize] as i64
+        want = byte_of(want)
+        if arrow_batch_str_byte(batch, col, row, i) != want { return 0 }
+        i = i + 1
+    }
+    1
+}
+
+fn test_nested() -> i64 with IO, Mut, Panic, Div {
+    var schema = arrow_schema_new()
+    if arrow_schema_add(&!schema, "col1", 1, arrow_type_struct(), 0, 0, 0) != 0 { return 1 }
+    if arrow_schema_add_child(&!schema, 0, "a", 1, arrow_type_int(), 32, 1, 0) != 1 { return 2 }
+    if arrow_schema_add_child(&!schema, 0, "b", 1, arrow_type_list(), 0, 0, 0) != 2 { return 3 }
+    if arrow_schema_add_child(&!schema, 2, "item", 1, arrow_type_int(), 64, 1, 0) != 3 { return 4 }
+    if arrow_schema_add_child(&!schema, 0, "c", 1, arrow_type_float(), 0, 0, 2) != 4 { return 5 }
+    if arrow_schema_add(&!schema, "col2", 1, arrow_type_utf8(), 0, 0, 0) != 0 { return 6 }
+    if arrow_schema_add_meta(&!schema, "app:ns", "s") != 0 { return 7 }
+    if arrow_schema_add_msg_meta(&!schema, "k", "m") != 0 { return 8 }
+    if arrow_field_set_extension(&!schema, 5, "myorg.word", "v1") != 0 { return 9 }
+    var batch = arrow_batch_new()
+    if arrow_batch_shape(&!batch, 2, 2) != 0 { return 10 }
+    if arrow_batch_set_i64(&!batch, 1, 0, 1, 0) != 0 { return 11 }
+    if arrow_batch_set_i64(&!batch, 1, 1, 0, 1) != 0 { return 12 }
+    if arrow_batch_set_list(&!batch, 2, 0, 2) != 0 { return 13 }
+    if arrow_batch_set_list(&!batch, 2, 1, 1) != 0 { return 14 }
+    if arrow_batch_set_i64(&!batch, 3, 0, 10, 0) != 0 { return 15 }
+    if arrow_batch_set_i64(&!batch, 3, 1, 11, 0) != 0 { return 16 }
+    if arrow_batch_set_i64(&!batch, 3, 2, 12, 0) != 0 { return 17 }
+    if arrow_batch_set_f64(&!batch, 4, 0, 1.5, 0) != 0 { return 18 }
+    if arrow_batch_set_f64(&!batch, 4, 1, 0.0, 1) != 0 { return 19 }
+    if arrow_batch_set_str(&!batch, 5, 0, "ab", 0) != 0 { return 20 }
+    if arrow_batch_set_str(&!batch, 5, 1, "no", 1) != 0 { return 21 }
+    var buf = arrow_buf_new()
+    if arrow_ipc_stream_begin(&schema, &!buf) != 0 { return 22 }
+    let view = arrow_ipc_view(&buf, 0)
+    if view.header_type != 1 || view.body_len != 0 || view.status != 0 { return 23 }
+    if arrow_ipc_stream_push(&schema, &batch, &!buf) != 0 { return 24 }
+    if arrow_ipc_stream_end(&!buf) != 0 { return 25 }
+    let n = write_file("/tmp/sounio_arrow_nested.arrows", buf.data, buf.len)
+    if n != buf.len { return 26 }
+    var schema2 = arrow_schema_new()
+    var got = arrow_batch_new()
+    if arrow_ipc_read(&buf, &!schema2, &!got) != 0 { return 27 }
+    if schema2.n_fields != 2 || schema2.n_nodes != 6 { return 28 }
+    if schema2.type_tag[0] != arrow_type_struct() { return 29 }
+    if schema2.n_child[0] != 3 || schema2.parent[3] != 2 { return 30 }
+    if arrow_batch_i64(&got, 1, 0) != 1 { return 31 }
+    if arrow_batch_is_null(&got, 1, 1) != 1 { return 32 }
+    if got.list_n[2 * 16] != 2 || got.list_n[2 * 16 + 1] != 1 { return 33 }
+    if arrow_batch_i64(&got, 3, 0) != 10 || arrow_batch_i64(&got, 3, 2) != 12 { return 34 }
+    if arrow_batch_f64(&got, 4, 0) != 1.5 { return 35 }
+    if arrow_batch_is_null(&got, 4, 1) != 1 { return 36 }
+    if str_eq(&got, 5, 0, "ab") == 0 { return 37 }
+    if schema2.smeta_n != 1 { return 38 }
+    if meta_key_is(&schema2.smeta_k, &schema2.smeta_kl, 0, "app:ns") == 0 { return 39 }
+    if schema2.mmeta_n != 1 { return 40 }
+    if schema2.meta_n[5] != 2 { return 41 }
+    if meta_key_is(&schema2.mmeta_k, &schema2.mmeta_kl, 0, "k") == 0 { return 42 }
+    var spans = arrow_spans_new()
+    if arrow_ipc_file_begin(&schema, &!buf) != 0 { return 43 }
+    if arrow_ipc_file_push(&schema, &batch, &!buf, &!spans) != 0 { return 44 }
+    if arrow_ipc_file_end(&schema, &!buf, &spans) != 0 { return 45 }
+    if arrow_ipc_read(&buf, &!schema2, &!got) != 0 { return 46 }
+    if arrow_batch_i64(&got, 3, 1) != 11 { return 47 }
+    if schema2.mmeta_n != 1 { return 48 }
+    0
+}
+
+fn test_dict() -> i64 with IO, Mut, Panic, Div {
+    var schema = arrow_schema_new()
+    if arrow_schema_add(&!schema, "s", 1, arrow_type_utf8(), 0, 0, 0) != 0 { return 50 }
+    if arrow_schema_set_dict(&!schema, 0, 0, 32, 1, 0) != 0 { return 51 }
+    var dict = arrow_batch_new()
+    if arrow_batch_shape(&!dict, 3, 1) != 0 { return 52 }
+    if arrow_batch_set_str(&!dict, 0, 0, "A", 0) != 0 { return 53 }
+    if arrow_batch_set_str(&!dict, 0, 1, "B", 0) != 0 { return 54 }
+    if arrow_batch_set_str(&!dict, 0, 2, "C", 0) != 0 { return 55 }
+    var batch = arrow_batch_new()
+    if arrow_batch_shape(&!batch, 4, 1) != 0 { return 56 }
+    if arrow_batch_set_i64(&!batch, 0, 0, 0, 0) != 0 { return 57 }
+    if arrow_batch_set_i64(&!batch, 0, 1, 1, 0) != 0 { return 58 }
+    if arrow_batch_set_i64(&!batch, 0, 2, 2, 0) != 0 { return 59 }
+    if arrow_batch_set_i64(&!batch, 0, 3, 1, 0) != 0 { return 60 }
+    var buf = arrow_buf_new()
+    if arrow_ipc_stream_begin(&schema, &!buf) != 0 { return 61 }
+    if arrow_ipc_stream_push_dict(&schema, 0, 0, &dict, &!buf) != 0 { return 62 }
+    if arrow_ipc_stream_push(&schema, &batch, &!buf) != 0 { return 63 }
+    if arrow_batch_shape(&!dict, 2, 1) != 0 { return 64 }
+    if arrow_batch_set_str(&!dict, 0, 0, "D", 0) != 0 { return 65 }
+    if arrow_batch_set_str(&!dict, 0, 1, "E", 0) != 0 { return 66 }
+    if arrow_ipc_stream_push_dict(&schema, 0, 1, &dict, &!buf) != 0 { return 67 }
+    if arrow_batch_set_i64(&!batch, 0, 0, 3, 0) != 0 { return 68 }
+    if arrow_batch_set_i64(&!batch, 0, 1, 2, 0) != 0 { return 69 }
+    if arrow_batch_set_i64(&!batch, 0, 2, 4, 0) != 0 { return 70 }
+    if arrow_batch_set_i64(&!batch, 0, 3, 0, 0) != 0 { return 71 }
+    if arrow_ipc_stream_push(&schema, &batch, &!buf) != 0 { return 72 }
+    if arrow_ipc_stream_end(&!buf) != 0 { return 73 }
+    let ns = write_file("/tmp/sounio_arrow_dict.arrows", buf.data, buf.len)
+    if ns != buf.len { return 74 }
+    var schema2 = arrow_schema_new()
+    var got = arrow_batch_new()
+    var dicts = arrow_dicts_new()
+    var cur = arrow_cursor_new()
+    if arrow_ipc_open(&buf, &!schema2, &!cur) != 0 { return 75 }
+    if schema2.dict_id[0] != 0 || schema2.dict_width[0] != 32 { return 76 }
+    if arrow_ipc_next_ex(&buf, &schema2, &!cur, &!got, &!dicts) != 0 { return 77 }
+    if arrow_batch_i64(&got, 0, 0) != 0 || arrow_batch_i64(&got, 0, 3) != 1 { return 78 }
+    if dicts.n != 1 || dicts.n_rows[0] != 3 { return 79 }
+    if arrow_dict_str_len(&dicts, 0, 0) != 1 { return 80 }
+    if arrow_dict_str_byte(&dicts, 0, 1, 0) != 66 { return 81 }
+    if arrow_ipc_next_ex(&buf, &schema2, &!cur, &!got, &!dicts) != 0 { return 82 }
+    if dicts.n_rows[0] != 5 { return 83 }
+    if arrow_dict_str_byte(&dicts, 0, 3, 0) != 68 { return 84 }
+    if arrow_dict_str_byte(&dicts, 0, 4, 0) != 69 { return 85 }
+    if arrow_batch_i64(&got, 0, 0) != 3 || arrow_batch_i64(&got, 0, 2) != 4 { return 86 }
+    if arrow_ipc_next_ex(&buf, &schema2, &!cur, &!got, &!dicts) != 1 { return 87 }
+    var spans = arrow_spans_new()
+    if arrow_ipc_file_begin(&schema, &!buf) != 0 { return 88 }
+    if arrow_batch_shape(&!dict, 3, 1) != 0 { return 89 }
+    if arrow_batch_set_str(&!dict, 0, 0, "A", 0) != 0 { return 90 }
+    if arrow_batch_set_str(&!dict, 0, 1, "B", 0) != 0 { return 91 }
+    if arrow_batch_set_str(&!dict, 0, 2, "C", 0) != 0 { return 92 }
+    if arrow_ipc_file_push_dict(&schema, 0, 0, &dict, &!buf, &!spans) != 0 { return 93 }
+    if arrow_batch_shape(&!dict, 1, 1) != 0 { return 94 }
+    if arrow_batch_set_str(&!dict, 0, 0, "Z", 0) != 0 { return 95 }
+    if arrow_ipc_file_push_dict(&schema, 0, 0, &dict, &!buf, &!spans) != -4 { return 96 }
+    0
+}
+
+fn test_view_codec() -> i64 with IO, Mut, Panic, Div {
+    var schema = arrow_schema_new()
+    if arrow_schema_set_feature(&!schema, arrow_feature_compressed()) != 0 { return 100 }
+    if arrow_schema_add(&!schema, "v", 1, arrow_type_utf8_view(), 0, 0, 0) != 0 { return 101 }
+    if arrow_schema_add(&!schema, "id", 0, arrow_type_int(), 64, 1, 0) != 0 { return 102 }
+    if arrow_schema_add(&!schema, "ts", 0, arrow_type_timestamp(), 0, 0, 3) != 0 { return 103 }
+    if arrow_schema_set_timezone(&!schema, 2, "UTC") != 0 { return 104 }
+    var batch = arrow_batch_new()
+    if arrow_batch_shape(&!batch, 2, 3) != 0 { return 105 }
+    if arrow_batch_set_str(&!batch, 0, 0, "hi", 0) != 0 { return 106 }
+    if arrow_batch_set_str(&!batch, 0, 1, "abcdefghijklm", 0) != 0 { return 107 }
+    if arrow_batch_set_i64(&!batch, 1, 0, 1, 0) != 0 { return 108 }
+    if arrow_batch_set_i64(&!batch, 1, 1, 2, 0) != 0 { return 109 }
+    if arrow_batch_set_i64(&!batch, 2, 0, 7, 0) != 0 { return 110 }
+    if arrow_batch_set_i64(&!batch, 2, 1, 8, 0) != 0 { return 111 }
+    var buf = arrow_buf_new()
+    if arrow_batch_set_codec(&!batch, arrow_codec_lz4()) != 0 { return 112 }
+    if arrow_ipc_stream_begin(&schema, &!buf) != 0 { return 113 }
+    if arrow_ipc_stream_push(&schema, &batch, &!buf) != 0 { return 114 }
+    if arrow_ipc_stream_end(&!buf) != 0 { return 115 }
+    let n = write_file("/tmp/sounio_arrow_lz4.arrows", buf.data, buf.len)
+    if n != buf.len { return 116 }
+    var schema2 = arrow_schema_new()
+    var got = arrow_batch_new()
+    if arrow_ipc_read(&buf, &!schema2, &!got) != 0 { return 117 }
+    if str_eq(&got, 0, 0, "hi") == 0 { return 118 }
+    if str_eq(&got, 0, 1, "abcdefghijklm") == 0 { return 119 }
+    if arrow_batch_i64(&got, 1, 1) != 2 { return 120 }
+    if schema2.precision[2] != 3 || schema2.tz_lens[2] != 3 { return 121 }
+    if arrow_batch_set_codec(&!batch, arrow_codec_zstd()) != 0 { return 122 }
+    if arrow_ipc_stream_begin(&schema, &!buf) != 0 { return 123 }
+    if arrow_ipc_stream_push(&schema, &batch, &!buf) != 0 { return 124 }
+    if arrow_ipc_stream_end(&!buf) != 0 { return 125 }
+    let nz = write_file("/tmp/sounio_arrow_zstd.arrows", buf.data, buf.len)
+    if nz != buf.len { return 126 }
+    if arrow_ipc_read(&buf, &!schema2, &!got) != 0 { return 127 }
+    if arrow_batch_i64(&got, 1, 0) != 1 || arrow_batch_i64(&got, 2, 1) != 8 { return 128 }
+    if arrow_schema_set_endian(&!schema, 1) != 0 { return 129 }
+    if arrow_ipc_stream_begin(&schema, &!buf) != -4 { return 130 }
+    0
+}
+
+fn test_ree() -> i64 with IO, Mut, Panic, Div {
+    var schema = arrow_schema_new()
+    if arrow_schema_add(&!schema, "r", 0, arrow_type_run_end(), 0, 0, 0) != 0 { return 140 }
+    if arrow_schema_add_child(&!schema, 0, "run_ends", 0, arrow_type_int(), 32, 1, 0) != 1 { return 141 }
+    if arrow_schema_add_child(&!schema, 0, "values", 1, arrow_type_int(), 64, 1, 0) != 2 { return 142 }
+    var batch = arrow_batch_new()
+    if arrow_batch_shape(&!batch, 4, 1) != 0 { return 143 }
+    if arrow_batch_set_node_len(&!batch, 1, 2) != 0 { return 144 }
+    if arrow_batch_set_node_len(&!batch, 2, 2) != 0 { return 145 }
+    if arrow_batch_set_i64(&!batch, 1, 0, 2, 0) != 0 { return 146 }
+    if arrow_batch_set_i64(&!batch, 1, 1, 4, 0) != 0 { return 147 }
+    if arrow_batch_set_i64(&!batch, 2, 0, 7, 0) != 0 { return 148 }
+    if arrow_batch_set_i64(&!batch, 2, 1, 9, 0) != 0 { return 149 }
+    var buf = arrow_buf_new()
+    if arrow_ipc_stream_begin(&schema, &!buf) != 0 { return 150 }
+    if arrow_ipc_stream_push(&schema, &batch, &!buf) != 0 { return 151 }
+    if arrow_ipc_stream_end(&!buf) != 0 { return 152 }
+    let nr = write_file("/tmp/sounio_arrow_ree.arrows", buf.data, buf.len)
+    if nr != buf.len { return 157 }
+    var schema2 = arrow_schema_new()
+    var got = arrow_batch_new()
+    if arrow_ipc_read(&buf, &!schema2, &!got) != 0 { return 153 }
+    if got.n_rows != 4 || got.node_len[1] != 2 { return 154 }
+    if arrow_batch_i64(&got, 1, 0) != 2 || arrow_batch_i64(&got, 1, 1) != 4 { return 155 }
+    if arrow_batch_i64(&got, 2, 0) != 7 || arrow_batch_i64(&got, 2, 1) != 9 { return 156 }
+    0
+}
+
+fn test_scalars() -> i64 with IO, Mut, Panic, Div {
+    var schema = arrow_schema_new()
+    if arrow_schema_add(&!schema, "d32", 1, arrow_type_date(), 0, 0, 0) != 0 { return 160 }
+    if arrow_schema_add(&!schema, "d64", 0, arrow_type_date(), 0, 0, 1) != 0 { return 161 }
+    if arrow_schema_add(&!schema, "t32", 0, arrow_type_time(), 32, 0, 1) != 0 { return 162 }
+    if arrow_schema_add(&!schema, "t64", 0, arrow_type_time(), 64, 0, 3) != 0 { return 163 }
+    if arrow_schema_add(&!schema, "dec64", 0, arrow_type_decimal(), 64, 0, 10) != 0 { return 164 }
+    if arrow_schema_set_extra(&!schema, 4, 0, 2) != 0 { return 165 }
+    if arrow_schema_add(&!schema, "dec128", 0, arrow_type_decimal(), 128, 0, 38) != 0 { return 166 }
+    if arrow_schema_set_extra(&!schema, 5, 0, 4) != 0 { return 167 }
+    if arrow_schema_add(&!schema, "f32", 0, arrow_type_float(), 0, 0, 1) != 0 { return 168 }
+    if arrow_schema_add(&!schema, "iym", 0, arrow_type_interval(), 0, 0, 0) != 0 { return 169 }
+    var batch = arrow_batch_new()
+    if arrow_batch_shape(&!batch, 2, 8) != 0 { return 170 }
+    if arrow_batch_set_i64(&!batch, 0, 0, 19000, 0) != 0 { return 171 }
+    if arrow_batch_set_i64(&!batch, 0, 1, 0, 1) != 0 { return 172 }
+    if arrow_batch_set_i64(&!batch, 1, 0, 432000000, 0) != 0 { return 173 }
+    if arrow_batch_set_i64(&!batch, 1, 1, -777600000, 0) != 0 { return 174 }
+    if arrow_batch_set_i64(&!batch, 2, 0, 1000, 0) != 0 { return 175 }
+    if arrow_batch_set_i64(&!batch, 2, 1, 86399999, 0) != 0 { return 176 }
+    if arrow_batch_set_i64(&!batch, 3, 0, 7, 0) != 0 { return 177 }
+    if arrow_batch_set_i64(&!batch, 3, 1, 8, 0) != 0 { return 178 }
+    if arrow_batch_set_i64(&!batch, 4, 0, -42, 0) != 0 { return 179 }
+    if arrow_batch_set_i64(&!batch, 4, 1, 42, 0) != 0 { return 180 }
+    if arrow_batch_set_str(&!batch, 5, 0, "0123456789abcde0", 0) != 0 { return 181 }
+    if arrow_batch_set_str(&!batch, 5, 1, "fedcba9876543210", 0) != 0 { return 182 }
+    if arrow_batch_set_i64(&!batch, 6, 0, 3212836864, 0) != 0 { return 183 }
+    if arrow_batch_set_i64(&!batch, 6, 1, 1065353216, 0) != 0 { return 184 }
+    if arrow_batch_set_i64(&!batch, 7, 0, 24, 0) != 0 { return 185 }
+    if arrow_batch_set_i64(&!batch, 7, 1, -3, 0) != 0 { return 186 }
+    if arrow_batch_add_msg_meta(&!batch, "batch", "m1") != 0 { return 187 }
+    var buf = arrow_buf_new()
+    if arrow_ipc_stream_begin(&schema, &!buf) != 0 { return 188 }
+    if arrow_ipc_stream_push(&schema, &batch, &!buf) != 0 { return 189 }
+    if arrow_ipc_stream_end(&!buf) != 0 { return 190 }
+    let ns = write_file("/tmp/sounio_arrow_scalars.arrows", buf.data, buf.len)
+    if ns != buf.len { return 211 }
+    var schema2 = arrow_schema_new()
+    var got = arrow_batch_new()
+    var dicts = arrow_dicts_new()
+    var cur = arrow_cursor_new()
+    if arrow_ipc_open(&buf, &!schema2, &!cur) != 0 { return 191 }
+    if schema2.type_tag[0] != arrow_type_date() || schema2.precision[0] != 0 { return 192 }
+    if schema2.precision[1] != 1 || schema2.bit_width[2] != 32 { return 193 }
+    if schema2.bit_width[3] != 64 || schema2.precision[3] != 3 { return 194 }
+    if schema2.bit_width[4] != 64 || schema2.precision[4] != 10 || schema2.scale[4] != 2 { return 195 }
+    if schema2.bit_width[5] != 128 || schema2.scale[5] != 4 { return 196 }
+    if schema2.precision[6] != 1 || schema2.type_tag[7] != arrow_type_interval() { return 197 }
+    if arrow_ipc_next_ex(&buf, &schema2, &!cur, &!got, &!dicts) != 0 { return 198 }
+    if arrow_batch_i64(&got, 0, 0) != 19000 || arrow_batch_is_null(&got, 0, 1) != 1 { return 199 }
+    if arrow_batch_i64(&got, 1, 0) != 432000000 || arrow_batch_i64(&got, 1, 1) != -777600000 { return 200 }
+    if arrow_batch_i64(&got, 2, 0) != 1000 || arrow_batch_i64(&got, 2, 1) != 86399999 { return 210 }
+    if arrow_batch_i64(&got, 3, 1) != 8 || arrow_batch_i64(&got, 4, 0) != -42 { return 201 }
+    if str_eq(&got, 5, 0, "0123456789abcde0") == 0 { return 202 }
+    if str_eq(&got, 5, 1, "fedcba9876543210") == 0 { return 203 }
+    if arrow_batch_i64(&got, 6, 0) != 3212836864 || arrow_batch_i64(&got, 6, 1) != 1065353216 { return 204 }
+    if arrow_batch_i64(&got, 7, 0) != 24 || arrow_batch_i64(&got, 7, 1) != -3 { return 205 }
+    if got.mmeta_n != 1 { return 206 }
+    if meta_key_is(&got.mmeta_k, &got.mmeta_kl, 0, "batch") == 0 { return 207 }
+    if got.mmeta_vl[0] != 2 { return 208 }
+    if byte_of(got.mmeta_v[0] as i64) != 109 || byte_of(got.mmeta_v[1] as i64) != 49 { return 209 }
+    0
+}
+
+fn test_nested_more() -> i64 with IO, Mut, Panic, Div {
+    var schema = arrow_schema_new()
+    if arrow_schema_add(&!schema, "fb", 0, arrow_type_fixed_binary(), 0, 0, 0) != 0 { return 220 }
+    if arrow_schema_set_extra(&!schema, 0, 3, 0) != 0 { return 221 }
+    if arrow_schema_add(&!schema, "m", 0, arrow_type_map(), 0, 0, 0) != 0 { return 222 }
+    if arrow_schema_set_extra(&!schema, 1, 1, 0) != 0 { return 223 }
+    if arrow_schema_add_child(&!schema, 1, "entries", 0, arrow_type_struct(), 0, 0, 0) != 2 { return 224 }
+    if arrow_schema_add_child(&!schema, 2, "key", 0, arrow_type_int(), 32, 1, 0) != 3 { return 225 }
+    if arrow_schema_add_child(&!schema, 2, "value", 0, arrow_type_int(), 64, 1, 0) != 4 { return 226 }
+    if arrow_schema_add(&!schema, "lu", 1, arrow_type_large_utf8(), 0, 0, 0) != 0 { return 227 }
+    if arrow_schema_add(&!schema, "lv", 0, arrow_type_list_view(), 0, 0, 0) != 0 { return 228 }
+    if arrow_schema_add_child(&!schema, 6, "item", 0, arrow_type_int(), 32, 1, 0) != 7 { return 229 }
+    var batch = arrow_batch_new()
+    if arrow_batch_shape(&!batch, 1, 4) != 0 { return 230 }
+    if arrow_batch_set_str(&!batch, 0, 0, "xyz", 0) != 0 { return 231 }
+    if arrow_batch_set_list(&!batch, 1, 0, 2) != 0 { return 232 }
+    if arrow_batch_set_i64(&!batch, 3, 0, 10, 0) != 0 { return 233 }
+    if arrow_batch_set_i64(&!batch, 3, 1, 20, 0) != 0 { return 234 }
+    if arrow_batch_set_i64(&!batch, 4, 0, 100, 0) != 0 { return 235 }
+    if arrow_batch_set_i64(&!batch, 4, 1, 200, 0) != 0 { return 236 }
+    if arrow_batch_set_str(&!batch, 5, 0, "pq", 0) != 0 { return 237 }
+    if arrow_batch_set_list(&!batch, 6, 0, 2) != 0 { return 238 }
+    if arrow_batch_set_i64(&!batch, 7, 0, 5, 0) != 0 { return 239 }
+    if arrow_batch_set_i64(&!batch, 7, 1, 6, 0) != 0 { return 240 }
+    var buf = arrow_buf_new()
+    if arrow_ipc_stream_begin(&schema, &!buf) != 0 { return 241 }
+    if arrow_ipc_stream_push(&schema, &batch, &!buf) != 0 { return 242 }
+    if arrow_ipc_stream_end(&!buf) != 0 { return 243 }
+    let nm = write_file("/tmp/sounio_arrow_more.arrows", buf.data, buf.len)
+    if nm != buf.len { return 255 }
+    var schema2 = arrow_schema_new()
+    var got = arrow_batch_new()
+    if arrow_ipc_read(&buf, &!schema2, &!got) != 0 { return 244 }
+    if schema2.extra[0] != 3 || schema2.type_tag[1] != arrow_type_map() { return 245 }
+    if schema2.extra[1] != 1 || schema2.n_child[1] != 1 { return 246 }
+    if schema2.type_tag[5] != arrow_type_large_utf8() || schema2.type_tag[6] != arrow_type_list_view() { return 247 }
+    if str_eq(&got, 0, 0, "xyz") == 0 { return 248 }
+    if got.list_n[1 * 16] != 2 { return 249 }
+    if arrow_batch_i64(&got, 3, 0) != 10 || arrow_batch_i64(&got, 3, 1) != 20 { return 250 }
+    if arrow_batch_i64(&got, 4, 0) != 100 || arrow_batch_i64(&got, 4, 1) != 200 { return 251 }
+    if str_eq(&got, 5, 0, "pq") == 0 { return 252 }
+    if got.list_n[6 * 16] != 2 { return 253 }
+    if arrow_batch_i64(&got, 7, 0) != 5 || arrow_batch_i64(&got, 7, 1) != 6 { return 254 }
+    0
+}
+
+fn test_unions() -> i64 with IO, Mut, Panic, Div {
+    var schema = arrow_schema_new()
+    if arrow_schema_add(&!schema, "su", 0, arrow_type_union(), 0, 0, 0) != 0 { return 270 }
+    if arrow_schema_add_child(&!schema, 0, "a", 0, arrow_type_int(), 32, 1, 0) != 1 { return 271 }
+    if arrow_schema_add_child(&!schema, 0, "b", 0, arrow_type_int(), 32, 1, 0) != 2 { return 272 }
+    if arrow_schema_add(&!schema, "du", 0, arrow_type_union(), 0, 0, 0) != 0 { return 273 }
+    if arrow_schema_set_extra(&!schema, 3, 1, 0) != 0 { return 274 }
+    if arrow_schema_add_child(&!schema, 3, "a", 0, arrow_type_int(), 32, 1, 0) != 4 { return 275 }
+    if arrow_schema_add_child(&!schema, 3, "b", 0, arrow_type_int(), 32, 1, 0) != 5 { return 276 }
+    if arrow_schema_add(&!schema, "ll", 0, arrow_type_large_list(), 0, 0, 0) != 0 { return 277 }
+    if arrow_schema_add_child(&!schema, 6, "item", 0, arrow_type_int(), 16, 1, 0) != 7 { return 278 }
+    var batch = arrow_batch_new()
+    if arrow_batch_shape(&!batch, 2, 3) != 0 { return 279 }
+    if arrow_batch_set_i64(&!batch, 0, 0, 0, 0) != 0 { return 280 }
+    if arrow_batch_set_i64(&!batch, 0, 1, 1, 0) != 0 { return 281 }
+    if arrow_batch_set_i64(&!batch, 1, 0, 4, 0) != 0 { return 282 }
+    if arrow_batch_set_i64(&!batch, 1, 1, 0, 0) != 0 { return 283 }
+    if arrow_batch_set_i64(&!batch, 2, 0, 0, 0) != 0 { return 284 }
+    if arrow_batch_set_i64(&!batch, 2, 1, 9, 0) != 0 { return 285 }
+    if arrow_batch_set_i64(&!batch, 3, 0, 0, 0) != 0 { return 286 }
+    if arrow_batch_set_i64(&!batch, 3, 1, 1, 0) != 0 { return 287 }
+    if arrow_batch_set_i64(&!batch, 4, 0, 4, 0) != 0 { return 288 }
+    if arrow_batch_set_i64(&!batch, 5, 0, 9, 0) != 0 { return 289 }
+    if arrow_batch_set_list(&!batch, 6, 0, 1) != 0 { return 290 }
+    if arrow_batch_set_list(&!batch, 6, 1, 1) != 0 { return 291 }
+    if arrow_batch_set_i64(&!batch, 7, 0, 99, 0) != 0 { return 292 }
+    if arrow_batch_set_i64(&!batch, 7, 1, -5, 0) != 0 { return 293 }
+    var buf = arrow_buf_new()
+    if arrow_ipc_stream_begin(&schema, &!buf) != 0 { return 294 }
+    if arrow_ipc_stream_push(&schema, &batch, &!buf) != 0 { return 295 }
+    if arrow_ipc_stream_end(&!buf) != 0 { return 296 }
+    let nu = write_file("/tmp/sounio_arrow_unions.arrows", buf.data, buf.len)
+    if nu != buf.len { return 306 }
+    var schema2 = arrow_schema_new()
+    var got = arrow_batch_new()
+    if arrow_ipc_read(&buf, &!schema2, &!got) != 0 { return 297 }
+    if schema2.extra[0] != 0 || schema2.extra[3] != 1 { return 298 }
+    if schema2.type_tag[6] != arrow_type_large_list() || schema2.bit_width[7] != 16 { return 299 }
+    if arrow_batch_i64(&got, 0, 0) != 0 || arrow_batch_i64(&got, 0, 1) != 1 { return 300 }
+    if arrow_batch_i64(&got, 1, 0) != 4 || arrow_batch_i64(&got, 2, 1) != 9 { return 301 }
+    if got.node_len[4] != 1 || got.node_len[5] != 1 { return 302 }
+    if arrow_batch_i64(&got, 4, 0) != 4 || arrow_batch_i64(&got, 5, 0) != 9 { return 303 }
+    if got.list_n[6 * 16] != 1 || got.list_n[6 * 16 + 1] != 1 { return 304 }
+    if arrow_batch_i64(&got, 7, 0) != 99 || arrow_batch_i64(&got, 7, 1) != -5 { return 305 }
+    0
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    let a = test_nested()
+    if a != 0 {
+        print("FAIL nested ")
+        println(a)
+        return 1
+    }
+    let b = test_dict()
+    if b != 0 {
+        print("FAIL dict ")
+        println(b)
+        return 1
+    }
+    let c = test_view_codec()
+    if c != 0 {
+        print("FAIL view ")
+        println(c)
+        return 1
+    }
+    let d = test_ree()
+    if d != 0 {
+        print("FAIL ree ")
+        println(d)
+        return 1
+    }
+    let e = test_scalars()
+    if e != 0 {
+        print("FAIL scalars ")
+        println(e)
+        return 1
+    }
+    let f = test_nested_more()
+    if f != 0 {
+        print("FAIL nested2 ")
+        println(f)
+        return 1
+    }
+    let g = test_unions()
+    if g != 0 {
+        print("FAIL unions ")
+        println(g)
+        return 1
+    }
+    println("ARROW_SPEC_OK")
+    0
+}

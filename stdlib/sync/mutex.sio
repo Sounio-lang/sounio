@@ -1,60 +1,32 @@
-// stdlib/sync/mutex — Mutex via pthread FFI
-//
-// Provides mutual exclusion using POSIX threads.
-// pthread_mutex_t is heap-allocated (stable address required by pthreads).
-// Functions: mutex_new, mutex_lock, mutex_try_lock, mutex_unlock,
-//            mutex_destroy, mutex_is_locked
-
-extern "C" {
-    fn malloc(size: i64) -> *mut u8;
-    fn free(ptr: *mut u8);
-    fn pthread_mutex_init(mutex: *mut u8, attr: *mut u8) -> i32;
-    fn pthread_mutex_lock(mutex: *mut u8) -> i32;
-    fn pthread_mutex_trylock(mutex: *mut u8) -> i32;
-    fn pthread_mutex_unlock(mutex: *mut u8) -> i32;
-    fn pthread_mutex_destroy(mutex: *mut u8) -> i32;
+// Checked error-checking native mutex. Close consumes the owner after unlock.
+use ffi::platform::{Platform,PlatformValue,platform_call}
+pub linear struct Mutex {id:i64,status:i64}
+pub fn mutex_new(p:&Platform)->Mutex with IO {
+    let r=platform_call(p,16,0,0,0,0)
+    return Mutex {id:r.value,status:r.status}
 }
-
-// pthread_mutex_t is ~48 bytes on Linux x86-64. We allocate 64 bytes
-// to give headroom across platforms and alignment variants.
-struct Mutex {
-    ptr: *mut u8,
+pub fn mutex_status(m:&Mutex)->i64 {m.status}
+pub fn mutex_is_valid(m:&Mutex)->bool {m.status==0 && m.id>0}
+pub fn mutex_lock(p:&Platform,m:&Mutex)->i64 with IO {
+    if m.status!=0 {return m.status}
+    return platform_call(p,17,m.id,0,0,0).status
 }
-
-// Allocate and initialize a new mutex with default attributes.
-pub fn mutex_new() -> Mutex {
-    let ptr = malloc(64)
-    let null_attr = (0 as i64) as *mut u8
-    let _rc = pthread_mutex_init(ptr, null_attr)
-    Mutex { ptr: ptr }
+pub fn mutex_try_lock(p:&Platform,m:&Mutex)->PlatformValue with IO {
+    if m.status!=0 {return PlatformValue {value:0,status:m.status}}
+    return platform_call(p,18,m.id,0,0,0)
 }
-
-// Block until the mutex is acquired.
-pub fn mutex_lock(m: &! Mutex) {
-    let _rc = pthread_mutex_lock(m.ptr)
+pub fn mutex_unlock(p:&Platform,m:&Mutex)->i64 with IO {
+    if m.status!=0 {return m.status}
+    return platform_call(p,19,m.id,0,0,0).status
 }
-
-// Try to acquire the mutex without blocking.
-// Returns true if the lock was acquired, false if already held.
-pub fn mutex_try_lock(m: &! Mutex) -> bool {
-    let rc = pthread_mutex_trylock(m.ptr)
-    rc == 0
+// On EBUSY the caller retains ownership and can unlock before retrying.
+pub fn mutex_destroy(p:&Platform,m:&!Mutex)->i64 with IO,Mut {
+    if m.status!=0 {return m.status}
+    let status=platform_call(p,2,m.id,0,0,0).status
+    if status==0 {m.id=0;m.status=9}
+    return status
 }
-
-// Release the mutex. Caller must hold the lock.
-pub fn mutex_unlock(m: &! Mutex) {
-    let _rc = pthread_mutex_unlock(m.ptr)
-}
-
-// Destroy the mutex and free its heap storage.
-// After this call the Mutex must not be used.
-pub fn mutex_destroy(m: &! Mutex) with Mut {
-    let _rc = pthread_mutex_destroy(m.ptr)
-    free(m.ptr)
-    m.ptr = (0 as i64) as *mut u8
-}
-
-// Returns true if the mutex handle is valid (initialized and not yet destroyed).
-pub fn mutex_is_valid(m: &Mutex) -> bool {
-    (m.ptr as i64) != 0
+pub fn mutex_close(m:Mutex) with Panic {
+    let Mutex {id,status}=m
+    assert(id==0)
 }

@@ -21,7 +21,9 @@ The token contracts checked by `scripts/ci/sounio_stdlib_surface_support_gate.sh
 `scripts/ci/sounio_direct_driver_support_gate.sh` and
 `scripts/ci/sounio_package_support_gate.sh` read this file.
 
-Tiers below mirror the public-claim registry's `claim_level`/`closure_status` columns. "Production" is reserved for rows the registry calls `stable / closed`. Anything the registry marks `prototype` or `stale_conflicting` is tiered accordingly here — even if the feature works on small fixtures.
+**Status: research language (pre-1.0).** APIs may change; not recommended for production use. This file does not name a compiler version.
+
+Tiers below mirror the public-claim registry's `claim_level`/`closure_status` columns. "Production" in the table is only the name of the registry tier for a row marked `stable / closed`. It does not mean the language is recommended for production use. Anything the registry marks `prototype` or `stale_conflicting` is tiered accordingly here — even if the feature works on small fixtures.
 
 ### Production (registry: stable / closed)
 

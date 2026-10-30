@@ -60,9 +60,7 @@ is preserved as `bin/souc-lean-single-x86_64`.
   --diagnose-lowering` now confirms closed expectations for the former
   BSS/global and self-build witnesses.
 
-Do not say "Madaros is production-ready" merely because #356 is closed. Say the
-specific 2026-06-21 blocker cluster is closed, then use the production-ready
-definition below for any broader release claim.
+Do not describe Madaros or Sounio as ready for production use because #356 is closed. The public status is: research language (pre-1.0). APIs may change; not recommended for production use. Record the 2026-06-21 blocker cluster as closed. A broader release claim stays inside that status line, not a separate readiness label.
 
 ## The only valid proof gate
 

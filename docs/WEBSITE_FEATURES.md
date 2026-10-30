@@ -70,7 +70,7 @@ Current committed signals:
 - science runtime regressions remain tracked separately, with `4` soft local failures at the current snapshot
 
 These numbers come from committed status artifacts and should be preferred over
-generic "fully production-ready" language.
+generic language that calls the project ready for production use. The public line is: research language (pre-1.0). APIs may change; not recommended for production use.
 
 ## 4. Website copy rules
 

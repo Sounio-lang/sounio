@@ -1,0 +1,613 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: ARROW_IPC_OK
+// Native Arrow IPC round trip: file and stream, primitive columns, nulls.
+// Also writes /tmp/sounio_arrow_ipc.arrow and .arrows for the pyarrow gate.
+
+use arrow::lib::{
+    ArrowBatch,
+    ArrowBuf,
+    ArrowSchema,
+    arrow_batch_f64,
+    arrow_batch_i64,
+    arrow_batch_is_null,
+    arrow_batch_new,
+    arrow_batch_set_bool,
+    arrow_batch_set_f64,
+    arrow_batch_set_i64,
+    arrow_batch_set_str,
+    arrow_batch_shape,
+    arrow_batch_str_byte,
+    arrow_batch_str_len,
+    arrow_buf_new,
+    arrow_cursor_new,
+    arrow_ipc_file_begin,
+    arrow_ipc_file_end,
+    arrow_ipc_file_push,
+    arrow_ipc_next,
+    arrow_ipc_open,
+    arrow_ipc_read,
+    arrow_batch_set_codec,
+    arrow_codec_lz4,
+    arrow_ipc_stream_begin,
+    arrow_ipc_stream_end,
+    arrow_ipc_stream_push,
+    arrow_ipc_view,
+    arrow_ipc_write_file,
+    arrow_ipc_write_stream,
+    arrow_spans_new,
+    arrow_schema_add,
+    arrow_schema_new,
+    arrow_type_binary,
+    arrow_type_bool,
+    arrow_type_float,
+    arrow_type_int,
+    arrow_type_null,
+    arrow_type_utf8,
+}
+
+fn fill(schema: &!ArrowSchema, batch: &!ArrowBatch) -> i64 with Mut, Panic {
+    if arrow_schema_add(schema, "id", 0, arrow_type_int(), 64, 1, 0) != 0 { return 10 }
+    if arrow_schema_add(schema, "x", 1, arrow_type_float(), 0, 0, 2) != 0 { return 11 }
+    if arrow_schema_add(schema, "ok", 1, arrow_type_bool(), 0, 0, 0) != 0 { return 12 }
+    if arrow_schema_add(schema, "name", 1, arrow_type_utf8(), 0, 0, 0) != 0 { return 13 }
+    if arrow_schema_add(schema, "tiny", 0, arrow_type_int(), 8, 1, 0) != 0 { return 14 }
+    if arrow_schema_add(schema, "code", 0, arrow_type_int(), 16, 0, 0) != 0 { return 15 }
+    if arrow_schema_add(schema, "z", 1, arrow_type_null(), 0, 0, 0) != 0 { return 16 }
+    if arrow_batch_shape(batch, 3, 7) != 0 { return 17 }
+    if arrow_batch_set_i64(batch, 0, 0, 1, 0) != 0 { return 18 }
+    if arrow_batch_set_i64(batch, 0, 1, 2, 0) != 0 { return 19 }
+    if arrow_batch_set_i64(batch, 0, 2, -3, 0) != 0 { return 20 }
+    if arrow_batch_set_f64(batch, 1, 0, 1.5, 0) != 0 { return 21 }
+    if arrow_batch_set_f64(batch, 1, 1, 0.0, 1) != 0 { return 22 }
+    if arrow_batch_set_f64(batch, 1, 2, -2.25, 0) != 0 { return 23 }
+    if arrow_batch_set_bool(batch, 2, 0, 1, 0) != 0 { return 24 }
+    if arrow_batch_set_bool(batch, 2, 1, 0, 0) != 0 { return 25 }
+    if arrow_batch_set_bool(batch, 2, 2, 1, 1) != 0 { return 26 }
+    if arrow_batch_set_str(batch, 3, 0, "ab", 0) != 0 { return 27 }
+    if arrow_batch_set_str(batch, 3, 1, "no", 1) != 0 { return 28 }
+    if arrow_batch_set_str(batch, 3, 2, "c", 0) != 0 { return 29 }
+    if arrow_batch_set_i64(batch, 4, 0, -1, 0) != 0 { return 30 }
+    if arrow_batch_set_i64(batch, 4, 1, 0, 0) != 0 { return 31 }
+    if arrow_batch_set_i64(batch, 4, 2, 127, 0) != 0 { return 32 }
+    if arrow_batch_set_i64(batch, 5, 0, 65535, 0) != 0 { return 33 }
+    if arrow_batch_set_i64(batch, 5, 1, 1, 0) != 0 { return 34 }
+    if arrow_batch_set_i64(batch, 5, 2, 256, 0) != 0 { return 35 }
+    0
+}
+
+fn name_is(schema: &ArrowSchema, col: i64, text: string) -> i64 with Panic {
+    let n = str_len(text)
+    if schema.name_lens[col as usize] != n { return 0 }
+    var i: i64 = 0
+    while i < n {
+        var want = text[i as usize] as i64
+        if want < 0 { want = want + 256 }
+        let gotv = schema.name_bytes[(col * 32 + i) as usize] as i64
+        var got = gotv
+        if got < 0 { got = got + 256 }
+        if got != want { return 0 }
+        i = i + 1
+    }
+    1
+}
+
+fn str_is(batch: &ArrowBatch, col: i64, row: i64, text: string) -> i64 with Panic {
+    let n = str_len(text)
+    if arrow_batch_str_len(batch, col, row) != n { return 0 }
+    var i: i64 = 0
+    while i < n {
+        var want = text[i as usize] as i64
+        if want < 0 { want = want + 256 }
+        if arrow_batch_str_byte(batch, col, row, i) != want { return 0 }
+        i = i + 1
+    }
+    1
+}
+
+fn check_loaded(schema: &ArrowSchema, batch: &ArrowBatch) -> i64 with Mut, Panic {
+    if schema.n_fields != 7 { return 40 }
+    if batch.n_rows != 3 { return 41 }
+    if batch.n_cols != 7 { return 42 }
+    if name_is(schema, 0, "id") == 0 { return 43 }
+    if name_is(schema, 3, "name") == 0 { return 44 }
+    if name_is(schema, 6, "z") == 0 { return 45 }
+    if schema.nullable[0] != 0 { return 46 }
+    if schema.nullable[1] != 1 { return 47 }
+    if schema.type_tag[0] != arrow_type_int() { return 48 }
+    if schema.bit_width[0] != 64 { return 49 }
+    if schema.is_signed[0] != 1 { return 50 }
+    if schema.type_tag[1] != arrow_type_float() { return 51 }
+    if schema.precision[1] != 2 { return 52 }
+    if schema.type_tag[4] != arrow_type_int() { return 53 }
+    if schema.bit_width[4] != 8 { return 54 }
+    if schema.is_signed[5] != 0 { return 55 }
+    if schema.bit_width[5] != 16 { return 56 }
+    if schema.type_tag[6] != arrow_type_null() { return 57 }
+    if arrow_batch_i64(batch, 0, 0) != 1 { return 60 }
+    if arrow_batch_i64(batch, 0, 1) != 2 { return 61 }
+    if arrow_batch_i64(batch, 0, 2) != -3 { return 62 }
+    if arrow_batch_is_null(batch, 1, 0) != 0 { return 63 }
+    if arrow_batch_is_null(batch, 1, 1) != 1 { return 64 }
+    if f64_to_bits(arrow_batch_f64(batch, 1, 0)) != f64_to_bits(1.5) { return 65 }
+    if f64_to_bits(arrow_batch_f64(batch, 1, 2)) != f64_to_bits(-2.25) { return 66 }
+    if arrow_batch_i64(batch, 2, 0) != 1 { return 67 }
+    if arrow_batch_i64(batch, 2, 1) != 0 { return 68 }
+    if arrow_batch_is_null(batch, 2, 2) != 1 { return 69 }
+    if str_is(batch, 3, 0, "ab") == 0 { return 70 }
+    if arrow_batch_is_null(batch, 3, 1) != 1 { return 71 }
+    if arrow_batch_str_len(batch, 3, 1) != 0 { return 72 }
+    if str_is(batch, 3, 2, "c") == 0 { return 73 }
+    if arrow_batch_i64(batch, 4, 0) != -1 { return 74 }
+    if arrow_batch_i64(batch, 4, 1) != 0 { return 75 }
+    if arrow_batch_i64(batch, 4, 2) != 127 { return 76 }
+    if arrow_batch_i64(batch, 5, 0) != 65535 { return 77 }
+    if arrow_batch_i64(batch, 5, 1) != 1 { return 78 }
+    if arrow_batch_i64(batch, 5, 2) != 256 { return 79 }
+    if arrow_batch_is_null(batch, 6, 0) != 1 { return 80 }
+    if arrow_batch_is_null(batch, 6, 1) != 1 { return 81 }
+    if arrow_batch_is_null(batch, 6, 2) != 1 { return 82 }
+    0
+}
+
+fn has_bytes(buf: &ArrowBuf, pat: &[i64; 8], n: i64) -> i64 with Panic {
+    if n <= 0 || buf.len < n { return 0 }
+    var i: i64 = 0
+    while i + n <= buf.len {
+        var ok: i64 = 1
+        var k: i64 = 0
+        while k < n {
+            let v = buf.data[(i + k) as usize] as i64
+            var b = v
+            if b < 0 { b = b + 256 }
+            if b != pat[k as usize] { ok = 0 }
+            k = k + 1
+        }
+        if ok == 1 { return 1 }
+        i = i + 1
+    }
+    0
+}
+
+fn u8_at(buf: &ArrowBuf, i: i64) -> i64 with Panic {
+    let v = buf.data[i as usize] as i64
+    if v < 0 { return v + 256 }
+    v
+}
+
+fn le_i32(buf: &ArrowBuf, i: i64) -> i64 with Panic {
+    let b0 = u8_at(buf, i)
+    let b1 = u8_at(buf, i + 1)
+    let b2 = u8_at(buf, i + 2)
+    let b3 = u8_at(buf, i + 3)
+    var n = b0 + (b1 * 256) + (b2 * 65536) + (b3 * 16777216)
+    if b3 >= 128 { n = n - 4294967296 }
+    n
+}
+
+/// The 8 bytes immediately before the footer are continuation + metadata length 0.
+fn eos_before_footer(buf: &ArrowBuf) -> i64 with Panic {
+    if buf.len < 18 { return 0 }
+    let fsize = le_i32(buf, buf.len - 10)
+    if fsize <= 0 { return 0 }
+    let eos_at = buf.len - 10 - fsize - 8
+    if eos_at < 0 { return 0 }
+    if le_i32(buf, eos_at) != -1 { return 0 }
+    if le_i32(buf, eos_at + 4) != 0 { return 0 }
+    1
+}
+
+fn check_wire(buf: &ArrowBuf) -> i64 with Panic {
+    if buf.len < 10 { return 90 }
+    if buf.data[0] != 65 as u8 { return 91 }
+    if buf.data[1] != 82 as u8 { return 91 }
+    if buf.data[2] != 82 as u8 { return 91 }
+    if buf.data[3] != 79 as u8 { return 91 }
+    if buf.data[4] != 87 as u8 { return 91 }
+    if buf.data[5] != 49 as u8 { return 91 }
+    let end = buf.len - 6
+    if buf.data[end as usize] != 65 as u8 { return 92 }
+    if buf.data[(end + 5) as usize] != 49 as u8 { return 92 }
+    if eos_before_footer(buf) == 0 { return 99 }
+    // continuation
+    var cont: [i64; 8] = [255, 255, 255, 255, 0, 0, 0, 0]
+    if has_bytes(buf, &cont, 4) == 0 { return 93 }
+    // id values 1, 2, -3 as little-endian i64, packed
+    var ids: [i64; 8] = [253, 255, 255, 255, 255, 255, 255, 255]
+    if has_bytes(buf, &ids, 8) == 0 { return 94 }
+    // 1.5 IEEE little-endian
+    var one: [i64; 8] = [0, 0, 0, 0, 0, 0, 248, 63]
+    if has_bytes(buf, &one, 8) == 0 { return 95 }
+    // -2.25
+    var neg: [i64; 8] = [0, 0, 0, 0, 0, 0, 2, 192]
+    if has_bytes(buf, &neg, 8) == 0 { return 96 }
+    // "abc" from the utf8 payload
+    var abc: [i64; 8] = [97, 98, 99, 0, 0, 0, 0, 0]
+    if has_bytes(buf, &abc, 3) == 0 { return 97 }
+    0
+}
+
+fn round_file() -> i64 with IO, Mut, Panic, Div {
+    var schema = arrow_schema_new()
+    var batch = arrow_batch_new()
+    let filled = fill(&!schema, &!batch)
+    if filled != 0 { return filled }
+    var buf = arrow_buf_new()
+    let wr = arrow_ipc_write_file(&schema, &batch, &!buf)
+    if wr != 0 { return wr }
+    let wire = check_wire(&buf)
+    if wire != 0 { return wire }
+    var schema2 = arrow_schema_new()
+    var batch2 = arrow_batch_new()
+    let rd = arrow_ipc_read(&buf, &!schema2, &!batch2)
+    if rd != 0 { return rd }
+    let ck = check_loaded(&schema2, &batch2)
+    if ck != 0 { return ck }
+    let n = write_file("/tmp/sounio_arrow_ipc.arrow", buf.data, buf.len)
+    if n != buf.len { return 98 }
+    0
+}
+
+fn round_stream() -> i64 with IO, Mut, Panic, Div {
+    var schema = arrow_schema_new()
+    var batch = arrow_batch_new()
+    let filled = fill(&!schema, &!batch)
+    if filled != 0 { return 100 + filled }
+    var buf = arrow_buf_new()
+    let wr = arrow_ipc_write_stream(&schema, &batch, &!buf)
+    if wr != 0 { return wr }
+    // stream has no file magic; it starts with the continuation word
+    if buf.len < 8 { return 101 }
+    let b0 = buf.data[0] as i64
+    var c0 = b0
+    if c0 < 0 { c0 = c0 + 256 }
+    if c0 != 255 { return 102 }
+    var schema2 = arrow_schema_new()
+    var batch2 = arrow_batch_new()
+    let rd = arrow_ipc_read(&buf, &!schema2, &!batch2)
+    if rd != 0 { return rd }
+    let ck = check_loaded(&schema2, &batch2)
+    if ck != 0 { return 200 + ck }
+    let n = write_file("/tmp/sounio_arrow_ipc.arrows", buf.data, buf.len)
+    if n != buf.len { return 103 }
+    0
+}
+
+fn round_empty() -> i64 with Mut, Panic, Div {
+    var schema = arrow_schema_new()
+    var batch = arrow_batch_new()
+    if arrow_schema_add(&!schema, "id", 0, arrow_type_int(), 64, 1, 0) != 0 { return 110 }
+    if arrow_batch_shape(&!batch, 0, 1) != 0 { return 111 }
+    var buf = arrow_buf_new()
+    if arrow_ipc_write_file(&schema, &batch, &!buf) != 0 { return 112 }
+    var schema2 = arrow_schema_new()
+    var batch2 = arrow_batch_new()
+    if arrow_ipc_read(&buf, &!schema2, &!batch2) != 0 { return 113 }
+    if batch2.n_rows != 0 { return 114 }
+    if schema2.n_fields != 1 { return 115 }
+    if arrow_ipc_write_stream(&schema, &batch, &!buf) != 0 { return 116 }
+    if arrow_ipc_read(&buf, &!schema2, &!batch2) != 0 { return 117 }
+    if batch2.n_rows != 0 { return 118 }
+    0
+}
+
+fn reject_bad() -> i64 with Mut, Panic, Div {
+    var schema = arrow_schema_new()
+    var batch = arrow_batch_new()
+    var buf = arrow_buf_new()
+    buf.len = 8
+    buf.data[0] = 1 as u8
+    let rd = arrow_ipc_read(&buf, &!schema, &!batch)
+    if rd == 0 { return 120 }
+    if arrow_batch_shape(&!batch, 1, 1) != 0 { return 121 }
+    // no schema fields: shape mismatch
+    let wr = arrow_ipc_write_file(&schema, &batch, &!buf)
+    if wr != -8 { return 122 }
+    0
+}
+
+fn round_binary() -> i64 with Mut, Panic, Div {
+    var schema = arrow_schema_new()
+    var batch = arrow_batch_new()
+    if arrow_schema_add(&!schema, "n", 1, arrow_type_int(), 32, 1, 0) != 0 { return 130 }
+    if arrow_schema_add(&!schema, "blob", 1, arrow_type_binary(), 0, 0, 0) != 0 { return 131 }
+    if arrow_batch_shape(&!batch, 2, 2) != 0 { return 132 }
+    if arrow_batch_set_i64(&!batch, 0, 0, 42, 0) != 0 { return 133 }
+    if arrow_batch_set_i64(&!batch, 0, 1, -5, 1) != 0 { return 134 }
+    if arrow_batch_set_str(&!batch, 1, 0, "xy", 0) != 0 { return 135 }
+    if arrow_batch_set_str(&!batch, 1, 1, "z", 1) != 0 { return 136 }
+    var buf = arrow_buf_new()
+    if arrow_ipc_write_stream(&schema, &batch, &!buf) != 0 { return 137 }
+    var schema2 = arrow_schema_new()
+    var batch2 = arrow_batch_new()
+    if arrow_ipc_read(&buf, &!schema2, &!batch2) != 0 { return 138 }
+    if schema2.type_tag[1] != arrow_type_binary() { return 139 }
+    if schema2.bit_width[0] != 32 { return 140 }
+    if schema2.is_signed[0] != 1 { return 141 }
+    if arrow_batch_i64(&batch2, 0, 0) != 42 { return 142 }
+    if arrow_batch_is_null(&batch2, 0, 1) != 1 { return 143 }
+    if str_is(&batch2, 1, 0, "xy") == 0 { return 144 }
+    if arrow_batch_is_null(&batch2, 1, 1) != 1 { return 145 }
+    if arrow_ipc_write_file(&schema, &batch, &!buf) != 0 { return 146 }
+    if arrow_ipc_read(&buf, &!schema2, &!batch2) != 0 { return 147 }
+    if arrow_batch_i64(&batch2, 0, 0) != 42 { return 148 }
+    if str_is(&batch2, 1, 0, "xy") == 0 { return 149 }
+    0
+}
+
+fn hex_val(c: i64) -> i64 {
+    if c >= 48 && c <= 57 { return c - 48 }
+    if c >= 97 && c <= 102 { return c - 87 }
+    -1
+}
+
+fn append_hex(buf: &!ArrowBuf, hex: string) -> i64 with Mut, Panic, Div {
+    let n = str_len(hex)
+    if n % 2 != 0 { return -1 }
+    let nbytes = n / 2
+    if buf.len + nbytes > 8192 { return -1 }
+    var i: i64 = 0
+    while i < nbytes {
+        let hi_i = i * 2
+        var hi = hex[hi_i as usize] as i64
+        var lo = hex[(hi_i + 1) as usize] as i64
+        if hi < 0 { hi = hi + 256 }
+        if lo < 0 { lo = lo + 256 }
+        let a = hex_val(hi)
+        let b = hex_val(lo)
+        if a < 0 || b < 0 { return -1 }
+        buf.data[(buf.len + i) as usize] = ((a * 16 + b) as i32) as u8
+        i = i + 1
+    }
+    buf.len = buf.len + nbytes
+    0
+}
+
+fn check_py(schema: &ArrowSchema, batch: &ArrowBatch) -> i64 with Mut, Panic {
+    if schema.n_fields != 3 { return 150 }
+    if batch.n_rows != 2 { return 151 }
+    if name_is(schema, 0, "id") == 0 { return 152 }
+    if name_is(schema, 1, "x") == 0 { return 153 }
+    if name_is(schema, 2, "raw") == 0 { return 154 }
+    if schema.nullable[0] != 0 { return 155 }
+    if schema.nullable[1] != 1 { return 156 }
+    if schema.nullable[2] != 1 { return 157 }
+    if schema.type_tag[0] != arrow_type_int() { return 158 }
+    if schema.bit_width[0] != 64 { return 159 }
+    if schema.is_signed[0] != 1 { return 160 }
+    if schema.type_tag[1] != arrow_type_float() { return 161 }
+    if schema.precision[1] != 2 { return 162 }
+    if schema.type_tag[2] != arrow_type_binary() { return 163 }
+    if arrow_batch_i64(batch, 0, 0) != 7 { return 164 }
+    if arrow_batch_i64(batch, 0, 1) != -9 { return 165 }
+    if arrow_batch_is_null(batch, 1, 0) != 0 { return 166 }
+    if arrow_batch_is_null(batch, 1, 1) != 1 { return 167 }
+    if f64_to_bits(arrow_batch_f64(batch, 1, 0)) != f64_to_bits(0.5) { return 168 }
+    if str_is(batch, 2, 0, "xy") == 0 { return 169 }
+    if arrow_batch_is_null(batch, 2, 1) != 1 { return 170 }
+    0
+}
+
+fn load_py_stream(buf: &!ArrowBuf) -> i64 with Mut, Panic, Div {
+    buf.len = 0
+    // pyarrow 26 stream: id i64 [7, -9], x f64 [0.5, null], raw binary ["xy", null]
+    if append_hex(buf, "ffffffffe80000001000000000000a000c000600050008000a000000000104000c0000000800080000000400080000000400000003000000800000004000000004000000d8ffffff000001041000000018000000040000000000000003000000726177000400040004000000100014000800060007000c0000001000100000000000010310000000180000000400000000000000010000007800060008000600") != 0 { return 180 }
+    if append_hex(buf, "0600000000000200100014000800000007000c00000010001000000000000002100000001c0000000400000000000000020000006964000008000c000800070008000000000000014000000000000000fffffffff800000014000000000000000c0016000600050008000c000c0000000003040018000000480000000000000000000a0018000c00040008000a0000008c000000100000000200000000000000") != 0 { return 181 }
+    if append_hex(buf, "0000000007000000000000000000000000000000000000000000000000000000100000000000000010000000000000000100000000000000180000000000000010000000000000002800000000000000010000000000000030000000000000000c000000000000004000000000000000020000000000000000000000030000000200000000000000000000000000000002000000000000000100000000000000") != 0 { return 182 }
+    if append_hex(buf, "020000000000000001000000000000000700000000000000f7ffffffffffffff0100000000000000000000000000e03f00000000000000000100000000000000000000000200000002000000000000007879000000000000ffffffff00000000") != 0 { return 183 }
+    0
+}
+
+fn load_py_file(buf: &!ArrowBuf) -> i64 with Mut, Panic, Div {
+    buf.len = 0
+    if append_hex(buf, "4152524f57310000ffffffffe80000001000000000000a000c000600050008000a000000000104000c0000000800080000000400080000000400000003000000800000004000000004000000d8ffffff000001041000000018000000040000000000000003000000726177000400040004000000100014000800060007000c000000100010000000000001031000000018000000040000000000000001000000") != 0 { return 190 }
+    if append_hex(buf, "78000600080006000600000000000200100014000800000007000c00000010001000000000000002100000001c0000000400000000000000020000006964000008000c000800070008000000000000014000000000000000fffffffff800000014000000000000000c0016000600050008000c000c0000000003040018000000480000000000000000000a0018000c00040008000a0000008c00000010000000") != 0 { return 191 }
+    if append_hex(buf, "02000000000000000000000007000000000000000000000000000000000000000000000000000000100000000000000010000000000000000100000000000000180000000000000010000000000000002800000000000000010000000000000030000000000000000c00000000000000400000000000000002000000000000000000000003000000020000000000000000000000000000000200000000000000") != 0 { return 192 }
+    if append_hex(buf, "0100000000000000020000000000000001000000000000000700000000000000f7ffffffffffffff0100000000000000000000000000e03f00000000000000000100000000000000000000000200000002000000000000007879000000000000ffffffff00000000100000000c001400060008000c0010000c0000000000040038000000280000000400000001000000f8000000000000000001000000000000") != 0 { return 193 }
+    if append_hex(buf, "480000000000000000000000000000000800080000000400080000000400000003000000800000004000000004000000d8ffffff000001041000000018000000040000000000000003000000726177000400040004000000100014000800060007000c00000010001000000000000103100000001800000004000000000000000100000078000600080006000600000000000200100014000800000007000c00") != 0 { return 194 }
+    if append_hex(buf, "000010001000000000000002100000001c0000000400000000000000020000006964000008000c0008000700080000000000000140000000100100004152524f5731") != 0 { return 195 }
+    0
+}
+
+fn round_pyarrow() -> i64 with Mut, Panic, Div {
+    var buf = arrow_buf_new()
+    let ls = load_py_stream(&!buf)
+    if ls != 0 { return ls }
+    var schema = arrow_schema_new()
+    var batch = arrow_batch_new()
+    let rd = arrow_ipc_read(&buf, &!schema, &!batch)
+    if rd != 0 { return rd }
+    let ck = check_py(&schema, &batch)
+    if ck != 0 { return ck }
+    let lf = load_py_file(&!buf)
+    if lf != 0 { return lf }
+    let rd2 = arrow_ipc_read(&buf, &!schema, &!batch)
+    if rd2 != 0 { return rd2 }
+    check_py(&schema, &batch)
+}
+
+fn round_multi() -> i64 with IO, Mut, Panic, Div {
+    var schema = arrow_schema_new()
+    var b0 = arrow_batch_new()
+    var b1 = arrow_batch_new()
+    if arrow_schema_add(&!schema, "id", 0, arrow_type_int(), 64, 1, 0) != 0 { return 210 }
+    if arrow_batch_shape(&!b0, 2, 1) != 0 { return 211 }
+    if arrow_batch_shape(&!b1, 1, 1) != 0 { return 212 }
+    if arrow_batch_set_i64(&!b0, 0, 0, 1, 0) != 0 { return 213 }
+    if arrow_batch_set_i64(&!b0, 0, 1, 2, 0) != 0 { return 214 }
+    if arrow_batch_set_i64(&!b1, 0, 0, 30, 0) != 0 { return 215 }
+    var buf = arrow_buf_new()
+    if arrow_ipc_stream_begin(&schema, &!buf) != 0 { return 216 }
+    if arrow_ipc_stream_push(&schema, &b0, &!buf) != 0 { return 217 }
+    if arrow_ipc_stream_push(&schema, &b1, &!buf) != 0 { return 218 }
+    if arrow_ipc_stream_end(&!buf) != 0 { return 219 }
+    var schema2 = arrow_schema_new()
+    var got = arrow_batch_new()
+    if arrow_ipc_read(&buf, &!schema2, &!got) != -7 { return 220 }
+    var cur = arrow_cursor_new()
+    if arrow_ipc_open(&buf, &!schema2, &!cur) != 0 { return 221 }
+    if schema2.n_fields != 1 { return 222 }
+    if arrow_ipc_next(&buf, &schema2, &!cur, &!got) != 0 { return 223 }
+    if got.n_rows != 2 { return 224 }
+    if arrow_batch_i64(&got, 0, 0) != 1 { return 225 }
+    if arrow_batch_i64(&got, 0, 1) != 2 { return 226 }
+    if arrow_ipc_next(&buf, &schema2, &!cur, &!got) != 0 { return 227 }
+    if got.n_rows != 1 { return 228 }
+    if arrow_batch_i64(&got, 0, 0) != 30 { return 229 }
+    if arrow_ipc_next(&buf, &schema2, &!cur, &!got) != 1 { return 230 }
+    let ns = write_file("/tmp/sounio_arrow_ipc_multi.arrows", buf.data, buf.len)
+    if ns != buf.len { return 231 }
+    var spans = arrow_spans_new()
+    if arrow_ipc_file_begin(&schema, &!buf) != 0 { return 232 }
+    if arrow_ipc_file_push(&schema, &b0, &!buf, &!spans) != 0 { return 233 }
+    if arrow_ipc_file_push(&schema, &b1, &!buf, &!spans) != 0 { return 234 }
+    if arrow_ipc_file_end(&schema, &!buf, &spans) != 0 { return 235 }
+    if eos_before_footer(&buf) == 0 { return 255 }
+    if arrow_ipc_read(&buf, &!schema2, &!got) != -7 { return 236 }
+    if arrow_ipc_open(&buf, &!schema2, &!cur) != 0 { return 237 }
+    if arrow_ipc_next(&buf, &schema2, &!cur, &!got) != 0 { return 238 }
+    if arrow_batch_i64(&got, 0, 1) != 2 { return 239 }
+    if arrow_ipc_next(&buf, &schema2, &!cur, &!got) != 0 { return 240 }
+    if arrow_batch_i64(&got, 0, 0) != 30 { return 241 }
+    if arrow_ipc_next(&buf, &schema2, &!cur, &!got) != 1 { return 242 }
+    let nf = write_file("/tmp/sounio_arrow_ipc_multi.arrow", buf.data, buf.len)
+    if nf != buf.len { return 243 }
+    var spans2 = arrow_spans_new()
+    if arrow_ipc_file_begin(&schema, &!buf) != 0 { return 244 }
+    var k: i64 = 0
+    while k < 8 {
+        if arrow_ipc_file_push(&schema, &b1, &!buf, &!spans2) != 0 { return 245 }
+        k = k + 1
+    }
+    if arrow_ipc_file_push(&schema, &b1, &!buf, &!spans2) != -7 { return 246 }
+    var empty_spans = arrow_spans_new()
+    if arrow_ipc_file_begin(&schema, &!buf) != 0 { return 247 }
+    if arrow_ipc_file_end(&schema, &!buf, &empty_spans) != 0 { return 248 }
+    if eos_before_footer(&buf) == 0 { return 256 }
+    if arrow_ipc_read(&buf, &!schema2, &!got) != 0 { return 249 }
+    if got.n_rows != 0 { return 250 }
+    if arrow_ipc_stream_begin(&schema, &!buf) != 0 { return 251 }
+    if arrow_ipc_stream_end(&!buf) != 0 { return 252 }
+    if arrow_ipc_open(&buf, &!schema2, &!cur) != 0 { return 253 }
+    if arrow_ipc_next(&buf, &schema2, &!cur, &!got) != 1 { return 254 }
+    0
+}
+
+fn round_edges() -> i64 with Mut, Panic, Div {
+    var schema = arrow_schema_new()
+    var i: i64 = 0
+    while i < 8 {
+        if arrow_schema_add(&!schema, "c", 0, arrow_type_int(), 32, 1, 0) != 0 { return 260 }
+        i = i + 1
+    }
+    if arrow_schema_add(&!schema, "c", 0, arrow_type_int(), 32, 1, 0) != -7 { return 261 }
+    var one = arrow_schema_new()
+    var batch = arrow_batch_new()
+    if arrow_schema_add(&!one, "id", 0, arrow_type_int(), 64, 1, 0) != 0 { return 262 }
+    if arrow_batch_shape(&!batch, 1, 1) != 0 { return 263 }
+    if arrow_batch_set_i64(&!batch, 0, 0, 4, 0) != 0 { return 264 }
+    if arrow_batch_set_codec(&!batch, arrow_codec_lz4()) != 0 { return 265 }
+    var buf = arrow_buf_new()
+    if arrow_ipc_stream_begin(&one, &!buf) != 0 { return 266 }
+    if arrow_ipc_stream_push(&one, &batch, &!buf) != -4 { return 267 }
+    if arrow_batch_set_codec(&!batch, 0) != 0 { return 268 }
+    if arrow_ipc_stream_begin(&one, &!buf) != 0 { return 269 }
+    if arrow_ipc_stream_push(&one, &batch, &!buf) != 0 { return 270 }
+    if arrow_ipc_stream_end(&!buf) != 0 { return 271 }
+    let view = arrow_ipc_view(&buf, 0)
+    if view.status != 0 || view.header_type != 1 { return 272 }
+    let eos = arrow_ipc_view(&buf, buf.len)
+    if eos.status != 1 { return 273 }
+    let short = arrow_ipc_view(&buf, buf.len - 1)
+    if short.status != -5 { return 274 }
+    let full = buf.len
+    buf.len = 4
+    var schema2 = arrow_schema_new()
+    var got = arrow_batch_new()
+    if arrow_ipc_read(&buf, &!schema2, &!got) == 0 { return 275 }
+    buf.len = full
+    if arrow_ipc_read(&buf, &!schema2, &!got) != 0 { return 276 }
+    if arrow_batch_i64(&got, 0, 0) != 4 { return 277 }
+    var bare = arrow_buf_new()
+    if arrow_ipc_stream_begin(&one, &!bare) != 0 { return 278 }
+    var z: i64 = 0
+    while z < 4 {
+        bare.data[(bare.len + z) as usize] = 0 as u8
+        z = z + 1
+    }
+    bare.len = bare.len + 4
+    if arrow_ipc_read(&bare, &!schema2, &!got) != 0 { return 279 }
+    if got.n_cols != 1 || got.n_rows != 0 { return 280 }
+    let eos4 = arrow_ipc_view(&bare, bare.len - 4)
+    if eos4.status != 1 { return 281 }
+    var first = arrow_buf_new()
+    var second = arrow_buf_new()
+    if arrow_ipc_stream_begin(&one, &!first) != 0 { return 282 }
+    if arrow_ipc_stream_begin(&one, &!second) != 0 { return 283 }
+    var copy: i64 = 0
+    while copy < second.len {
+        first.data[(first.len + copy) as usize] = second.data[copy as usize]
+        copy = copy + 1
+    }
+    first.len = first.len + second.len
+    if arrow_ipc_stream_end(&!first) != 0 { return 284 }
+    if arrow_ipc_read(&first, &!schema2, &!got) == 0 { return 285 }
+    one.name_lens[0] = 33
+    if arrow_ipc_stream_begin(&one, &!bare) != -7 { return 287 }
+    bare.len = 9000
+    if arrow_ipc_read(&bare, &!schema2, &!got) != -7 { return 286 }
+    0
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    let a = round_file()
+    if a != 0 {
+        print("FAIL file ")
+        println(a)
+        return 1
+    }
+    let b = round_stream()
+    if b != 0 {
+        print("FAIL stream ")
+        println(b)
+        return 1
+    }
+    let c = round_empty()
+    if c != 0 {
+        print("FAIL empty ")
+        println(c)
+        return 1
+    }
+    let d = reject_bad()
+    if d != 0 {
+        print("FAIL reject ")
+        println(d)
+        return 1
+    }
+    let e = round_binary()
+    if e != 0 {
+        print("FAIL binary ")
+        println(e)
+        return 1
+    }
+    let f = round_pyarrow()
+    if f != 0 {
+        print("FAIL pyarrow ")
+        println(f)
+        return 1
+    }
+    let g = round_multi()
+    if g != 0 {
+        print("FAIL multi ")
+        println(g)
+        return 1
+    }
+    let h = round_edges()
+    if h != 0 {
+        print("FAIL edges ")
+        println(h)
+        return 1
+    }
+    println("ARROW_IPC_OK")
+    0
+}

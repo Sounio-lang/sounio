@@ -5555,7 +5555,43 @@ fn ir_reg_span_is_valid(base: i64, width: i64, reg_count: i64) -> bool {
 // Validate the declared register count and every register reference before a
 // native backend derives a stack offset from it. This is intentionally shared
 // by the legacy and native-v2 entry points, including cached SOIR input.
+// Where the FIRST failed ir_function_regs_are_valid stopped: the instruction
+// index (-1 = the function header: reg count, params, sret) and its operands.
+// The validator carries no IO; the native driver prints these next to
+// NATIVE_REFUSAL kind=malformed_ir_registers so the refusal names the
+// instruction instead of only the function's register count. Latched: the
+// driver keeps validating later functions before it reports.
+var IR_VALIDATE_CUR_INSTR: i64 = -1
+var IR_VALIDATE_CUR_OP: i64 = -1
+var IR_VALIDATE_CUR_DST: i64 = -1
+var IR_VALIDATE_CUR_SRC1: i64 = -1
+var IR_VALIDATE_CUR_SRC2: i64 = -1
+var IR_VALIDATE_LATCHED: bool = false
+pub var IR_VALIDATE_FAIL_INSTR: i64 = -1
+pub var IR_VALIDATE_FAIL_OP: i64 = -1
+pub var IR_VALIDATE_FAIL_DST: i64 = -1
+pub var IR_VALIDATE_FAIL_SRC1: i64 = -1
+pub var IR_VALIDATE_FAIL_SRC2: i64 = -1
+
 pub fn ir_function_regs_are_valid(f: &IrFunction) -> bool with Mut, Panic, Div {
+    IR_VALIDATE_CUR_INSTR = -1
+    IR_VALIDATE_CUR_OP = -1
+    IR_VALIDATE_CUR_DST = -1
+    IR_VALIDATE_CUR_SRC1 = -1
+    IR_VALIDATE_CUR_SRC2 = -1
+    let ok = ir_function_regs_are_valid_walk(f)
+    if !ok && !IR_VALIDATE_LATCHED {
+        IR_VALIDATE_LATCHED = true
+        IR_VALIDATE_FAIL_INSTR = IR_VALIDATE_CUR_INSTR
+        IR_VALIDATE_FAIL_OP = IR_VALIDATE_CUR_OP
+        IR_VALIDATE_FAIL_DST = IR_VALIDATE_CUR_DST
+        IR_VALIDATE_FAIL_SRC1 = IR_VALIDATE_CUR_SRC1
+        IR_VALIDATE_FAIL_SRC2 = IR_VALIDATE_CUR_SRC2
+    }
+    ok
+}
+
+fn ir_function_regs_are_valid_walk(f: &IrFunction) -> bool with Mut, Panic, Div {
     if !ir_reg_count_is_valid((*f).reg_count) { return false }
     if (*f).instr_count < 0 || (*f).instr_count > IR_MAX_INSTRS { return false }
     if (*f).param_count < 0 || (*f).param_count > 64 { return false }
@@ -5569,6 +5605,11 @@ pub fn ir_function_regs_are_valid(f: &IrFunction) -> bool with Mut, Panic, Div {
     while i < (*f).instr_count {
         let slot = ir_region_slot_r((*f).region, i)
         let op = IR_A_OP[slot as usize] as IrOpcode
+        IR_VALIDATE_CUR_INSTR = i
+        IR_VALIDATE_CUR_OP = IR_A_OP[slot as usize] as i64
+        IR_VALIDATE_CUR_DST = IR_A_DST[slot as usize]
+        IR_VALIDATE_CUR_SRC1 = IR_A_SRC1[slot as usize]
+        IR_VALIDATE_CUR_SRC2 = IR_A_SRC2[slot as usize]
         if !ir_reg_operand_is_valid(IR_A_DST[slot as usize], (*f).reg_count) { return false }
         if !ir_reg_operand_is_valid(IR_A_SRC1[slot as usize], (*f).reg_count) { return false }
         if op != IrOpcode::IrWideShrLimb && op != IrOpcode::IrWideShr &&
