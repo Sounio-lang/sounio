@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.compiler.f128-engine-divergence
+authority: repo_only
+audience: contributors
+last_validated: 2026-10-30
+validated_by: claude
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.compiler.f128-engine-divergence
+-->
+
 # f128 and f256: Madaros vs lean_single
 
 Moved verbatim from `CLAUDE.md` §13 (2026-10-30). Measurements are dated inline.
