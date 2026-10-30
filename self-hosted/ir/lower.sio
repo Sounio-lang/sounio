@@ -7073,7 +7073,9 @@ fn lowerer_lower_fn_params_mut(
                 if lower_type_expr_is_unsigned_int(&(*list).head.ty) {
                     lowerer_mark_local_unsigned_int_mut(lo, (*list).head.name)
                 }
-                let param_tuple_float_mask = if (*list).head.ty.kind == TypeExprKind::TypeTuple { lower_type_list_float_mask(&(*list).head.ty.type_args, 0) } else { 0 }
+                // An array-of-tuples param (`&[(f64, f64)]`) carries its ELEMENT
+                // tuple's float mask: see lower_type_array_elem_tuple_float_mask.
+                let param_tuple_float_mask = if (*list).head.ty.kind == TypeExprKind::TypeTuple { lower_type_list_float_mask(&(*list).head.ty.type_args, 0) } else { lower_type_array_elem_tuple_float_mask(&(*list).head.ty) }
                 let param_tuple_arr_mask = if (*list).head.ty.kind == TypeExprKind::TypeTuple { lower_type_list_arr_mask(&(*list).head.ty.type_args, 0) } else { 0 }
                 let param_tuple_int_mask = if (*list).head.ty.kind == TypeExprKind::TypeTuple { lower_type_list_int_mask(&(*list).head.ty.type_args, 0) } else { 0 }
                 lowerer_mark_local_tuple_masks_mut(lo, (*list).head.name, param_tuple_float_mask, param_tuple_arr_mask, param_tuple_int_mask)
@@ -9036,6 +9038,49 @@ fn lower_type_list_arr_mask(opt: &Option<Box<TypeExprList>>, bit: i64) -> i64 wi
             }
             m + lower_type_list_arr_mask(&(*list).tail, bit + 1)
         }
+        None => 0,
+    }
+}
+
+// Float mask of the TUPLE ELEMENT of an array type, through `&` / `&!`:
+// `&[(f64, f64)]`, `[(f64, i64); 4]`. 0 for anything else. Stored in the
+// local's tuple_float_mask and read back for `xs[i].K` (an array local has no
+// `.K` of its own, so the slot is free for its element type): without it the
+// f64 slots of a tuple element were integers to every arithmetic site --
+// `xs[0].0 * xs[1].1` multiplied the IEEE bit patterns as i64 (0.000000) and
+// `xs[1].1 + 1.0` added an int to a float (4616189618054758400.000000).
+fn lower_type_array_elem_tuple_float_mask(te: &TypeExpr) -> i64 with Mut, Panic, Div {
+    var cur = te
+    if (*cur).kind == TypeExprKind::TypeReference || (*cur).kind == TypeExprKind::TypeRefMut {
+        match (*cur).inner {
+            Some(inner) => {
+                if (*inner).kind != TypeExprKind::TypeArray { return 0 }
+                match (*inner).inner {
+                    Some(elem) => {
+                        if (*elem).kind != TypeExprKind::TypeTuple { return 0 }
+                        return lower_type_list_float_mask(&(*elem).type_args, 0)
+                    }
+                    None => return 0
+                }
+            }
+            None => return 0
+        }
+    }
+    if (*cur).kind == TypeExprKind::TypeArray {
+        match (*cur).inner {
+            Some(elem) => {
+                if (*elem).kind != TypeExprKind::TypeTuple { return 0 }
+                return lower_type_list_float_mask(&(*elem).type_args, 0)
+            }
+            None => return 0
+        }
+    }
+    0
+}
+
+fn lower_opt_type_array_elem_tuple_float_mask(opt: &Option<Box<TypeExpr>>) -> i64 with Mut, Panic, Div {
+    match *opt {
+        Some(te) => lower_type_array_elem_tuple_float_mask(&(*te)),
         None => 0,
     }
 }
@@ -25270,6 +25315,19 @@ impl Lowerer {
                 if (*base_expr).kind == ExprKind::ExprIdent {
                     return self.lookup_local_tuple_float_mask((*base_expr).name)
                 }
+                // `xs[i].1` on an array of tuples: the array local carries its
+                // element tuple's mask (lower_type_array_elem_tuple_float_mask).
+                if (*base_expr).kind == ExprKind::ExprIndex {
+                    match (*base_expr).left {
+                        Some(arr_e) => {
+                            if (*arr_e).kind == ExprKind::ExprIdent {
+                                return self.lookup_local_tuple_float_mask((*arr_e).name)
+                            }
+                        }
+                        None => {}
+                    }
+                    return 0
+                }
                 // `mk().1` with no intervening binding: take the mask straight off
                 // the callee's encoded return code.
                 if (*base_expr).kind == ExprKind::ExprCall {
@@ -27387,7 +27445,7 @@ impl Lowerer {
                         // functions (count resets, arrays don't), so a stale mask
                         // from an earlier function's tuple local at this slot must
                         // not leak into this param.
-                        (*(*locals).tuple_float_mask).values[idx as usize] = if (*list).head.ty.kind == TypeExprKind::TypeTuple { lower_type_list_float_mask(&(*list).head.ty.type_args, 0) } else { 0 }
+                        (*(*locals).tuple_float_mask).values[idx as usize] = if (*list).head.ty.kind == TypeExprKind::TypeTuple { lower_type_list_float_mask(&(*list).head.ty.type_args, 0) } else { lower_type_array_elem_tuple_float_mask(&(*list).head.ty) }
                         (*(*locals).tuple_arr_mask).values[idx as usize] = if (*list).head.ty.kind == TypeExprKind::TypeTuple { lower_type_list_arr_mask(&(*list).head.ty.type_args, 0) } else { 0 }
                         (*(*locals).tuple_int_mask).values[idx as usize] = if (*list).head.ty.kind == TypeExprKind::TypeTuple { lower_type_list_int_mask(&(*list).head.ty.type_args, 0) } else { 0 }
                         (*(*locals).box_inner_layout).values[idx as usize] = lower_struct_layout_index_of(&(*lo.struct_layouts), lower_box_or_option_inner_type_name(&(*list).head.ty))
@@ -29063,7 +29121,10 @@ impl Lowerer {
         // bind_local -- in the same function, same scope, no function-call
         // boundary for the value to cross -- instead of chasing that
         // separately.
-        let annotated_tuple_mask = lower_opt_type_tuple_float_mask(&s.ty)
+        var annotated_tuple_mask = lower_opt_type_tuple_float_mask(&s.ty)
+        if annotated_tuple_mask == 0 {
+            annotated_tuple_mask = lower_opt_type_array_elem_tuple_float_mask(&s.ty)
+        }
         if annotated_tuple_mask != 0 {
             lo = lo.bind_local_tuple_float_mask(s.name, annotated_tuple_mask)
         } else if rhs_tuple_mask != 0 {
