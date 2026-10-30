@@ -1,0 +1,167 @@
+//@ run-pass
+//
+// Plan I lab: GPU attention packs + KV receipts + prefill/decode parity.
+// - Prefill (ntok>1) vs token-by-token decode: same logits, kv.len receipt.
+// - llama_forward vs llama_forward_rt parity (amax gate, argmax must agree).
+// - Attn sidecar packs + kernel PTX probed honestly: status 0/1/2 printed,
+//   mmid smoke runs only at status 2, otherwise SKIP (no silent pass).
+// Usage: llama_attn_gpu_demo [dir] [gemm-ptx] [cvt-ptx]
+// Modules: stdlib/llm/{llama,attn_gpu}.sio, stdlib/hetero/runtime.sio
+use llm::attn_gpu::{attn_gpu_status, attn_kernels_empty, attn_load_kernels, attn_load_sidecar, attn_packs_ready, attn_proj_mmid}
+use llm::llama::{kv_new, llama_argmax, llama_forward, llama_forward_rt, llama_load}
+use hetero::runtime::{rt_gemm_rect, rt_load_mmid, rt_load_mmid_q5k, rt_open_full}
+use tensor2::cpu_kernel::{ck_alloc, ck_gemm, ck_get, ck_max_abs_diff, ck_set}
+
+fn main() with IO, Mut, Panic, Div, Alloc {
+    var ok = true
+    var dir = "/workspace/llm-models/SmolLM2-135M"
+    if arg_count() > 0 { dir = get_arg(0) }
+    var ptx = "stdlib/hetero/kernels/gemm_tiled_f32.ptx"
+    if arg_count() > 1 { ptx = get_arg(1) }
+    var cvt = "stdlib/hetero/kernels/cvt_f64_f32.ptx"
+    if arg_count() > 2 { cvt = get_arg(2) }
+
+    var rt = rt_open_full(ptx, "gemm_tiled_f32", cvt)
+    print("rt ready=")
+    print_int(if rt.ready { 1 } else { 0 })
+    print("\n")
+
+    var m = llama_load(dir)
+    print("loaded=")
+    print_int(if m.loaded { 1 } else { 0 })
+    print("\n")
+    if !m.loaded { print("ATTNDEMO FAIL\nATTNDEMO DONE\n"); exit(0) }
+
+    // prompt ids: small dense ids, BOS 0 first like the gpu demo
+    let nseq: i64 = 8
+    var ids = ck_alloc(nseq)
+    ck_set(&!ids, 0, 0.0)
+    var i: i64 = 1
+    while i < nseq {
+        ck_set(&!ids, i, ((i * 7 + 3) % 200) as f64)
+        i = i + 1
+    }
+
+    // receipt 1: full prefill grows kv by ntok
+    var kv_pre = kv_new(&m, 64)
+    let before: i64 = 0
+    let lp = llama_forward(&!m, &!kv_pre, &ids, nseq)
+    print("prefill kv.len before=")
+    print_int(before)
+    print(" after=")
+    print_int(kv_pre.len)
+    print(" want=")
+    print_int(nseq)
+    print("\n")
+    if kv_pre.len != nseq { ok = false; print("FAIL prefill receipt\n") }
+
+    // receipt 2: incremental decode appends 1 row per step, same logits
+    var kv_inc = kv_new(&m, 64)
+    var logits_inc = ck_alloc(1)
+    var t: i64 = 0
+    while t < nseq {
+        var one = ck_alloc(1)
+        ck_set(&!one, 0, ck_get(&ids, t))
+        logits_inc = llama_forward(&!m, &!kv_inc, &one, 1)
+        if kv_inc.len != t + 1 { ok = false; print("FAIL decode receipt\n") }
+        t = t + 1
+    }
+    let d_inc = ck_max_abs_diff(&lp, &logits_inc)
+    print("prefill-vs-decode max_diff(x1e6)=")
+    print_int((d_inc * 1000000.0) as i64)
+    print(" argmax=")
+    print_int(llama_argmax(&lp))
+    print("\n")
+    if d_inc > 1.0 { ok = false; print("FAIL prefill/decode\n") }
+    if llama_argmax(&lp) != llama_argmax(&logits_inc) { ok = false; print("FAIL argmax\n") }
+
+    // parity: cpu forward vs runtime forward, fresh caches
+    var kv1 = kv_new(&m, 64)
+    let la = llama_forward(&!m, &!kv1, &ids, nseq)
+    var kv2 = kv_new(&m, 64)
+    let lb = llama_forward_rt(&!m, &!kv2, &ids, nseq, &rt)
+    let d = ck_max_abs_diff(&la, &lb)
+    print("rt-vs-cpu max_diff(x1e6)=")
+    print_int((d * 1000000.0) as i64)
+    print(" kv1=")
+    print_int(kv1.len)
+    print(" kv2=")
+    print_int(kv2.len)
+    print("\n")
+    if d > 1.0 { ok = false; print("FAIL rt parity\n") }
+
+    // dense probe microbench (host-measured ms from the runtime split)
+    var px = ck_alloc(20 * m.cfg.hidden)
+    var pi: i64 = 0
+    while pi < 20 * m.cfg.hidden {
+        ck_set(&!px, pi, (((pi * 31 + 17) % 97) as f64) / 97.0 - 0.5)
+        pi = pi + 1
+    }
+    var po = ck_alloc(20 * m.cfg.hidden)
+    let pr = rt_gemm_rect(&rt, &px, &m.wq[0], &!po, 20, m.cfg.hidden, m.cfg.hidden, 20)
+    print("probe status=")
+    print_int(pr.status)
+    print(" gpu_rows=")
+    print_int(pr.gpu_rows)
+    print(" ms(x1000)=")
+    print_int((pr.ms * 1000.0) as i64)
+    print("\n")
+
+    // attn packs + kernels: honest status, smoke only at level 2
+    let pq4 = attn_load_sidecar(dir, "attn_q4k", m.cfg.layers as i64)
+    let pq5 = attn_load_sidecar(dir, "attn_q5k", m.cfg.layers as i64)
+    var use_q5 = false
+    if attn_packs_ready(&pq5, m.cfg.layers as i64) { use_q5 = true }
+    let have_mmid = rt_load_mmid(&!rt, "stdlib/hetero/kernels/mmid_q4k_dp4a_f32.ptx")
+    let have_mmid5 = rt_load_mmid_q5k(&!rt, "stdlib/hetero/kernels/mmid_q5k_dp4a_f32.ptx")
+    if have_mmid { print("mmid q4k ready=1\n") } else { print("mmid q4k ready=0\n") }
+    if have_mmid5 { print("mmid q5k ready=1\n") } else { print("mmid q5k ready=0\n") }
+    let ks = attn_load_kernels(&rt,
+        "stdlib/hetero/kernels/attn_rope_f32.ptx",
+        "stdlib/hetero/kernels/attn_softmax_causal_f32.ptx",
+        "stdlib/hetero/kernels/attn_av_f32.ptx")
+    var st: i64 = 0
+    if use_q5 {
+        st = attn_gpu_status(&rt, &pq5, &ks, m.cfg.layers as i64)
+    } else {
+        st = attn_gpu_status(&rt, &pq4, &ks, m.cfg.layers as i64)
+    }
+    print("attn_gpu_status=")
+    print_int(st)
+    print(" (0 cpu, 1 dense-rt, 2 quant+ Kernels)\n")
+    if st == 2 {
+        let dh = m.cfg.head_dim
+        let qdim = m.cfg.heads * dh
+        let hidden = m.cfg.hidden
+        let nt: i64 = 4
+        var hx = ck_alloc(nt * hidden)
+        var hi: i64 = 0
+        while hi < nt * hidden {
+            ck_set(&!hx, hi, (((hi * 31 + 17) % 97) as f64) / 97.0 - 0.5)
+            hi = hi + 1
+        }
+        var o_gpu = ck_alloc(nt * qdim)
+        var o_cpu = ck_alloc(nt * qdim)
+        var s: i64 = 0
+        if use_q5 {
+            s = attn_proj_mmid(&rt, &pq5, 0, 0, &hx, &!o_gpu, nt, hidden, qdim)
+        } else {
+            s = attn_proj_mmid(&rt, &pq4, 0, 0, &hx, &!o_gpu, nt, hidden, qdim)
+        }
+        ck_gemm(&hx, &m.wq[0], &!o_cpu, nt, qdim, hidden)
+        let dq = ck_max_abs_diff(&o_gpu, &o_cpu)
+        print("q-proj mmid status=")
+        print_int(s)
+        print(" diff(x1e6)=")
+        print_int((dq * 1000000.0) as i64)
+        print("\n")
+        if s != 0 { ok = false; print("FAIL mmid smoke status\n") }
+        if dq > 5.0 { ok = false; print("FAIL mmid smoke diff\n") }
+    } else {
+        print("SKIP mmid smoke (no packs or PTX on this host)\n")
+    }
+
+    if ok { print("ATTNDEMO PASS\n") } else { print("ATTNDEMO FAIL\n") }
+    print("ATTNDEMO DONE\n")
+    exit(0)
+}

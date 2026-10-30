@@ -1,0 +1,136 @@
+//@ run-pass
+//
+// Plan I generate demo: BPE prompt -> forward loop -> sample -> decode.
+// Greedy path must be deterministic (two runs agree); temp/top-p path must
+// be finite with ids inside vocab. CPU math day-1; GPU when rt is ready.
+// Usage: llama_generate_demo [dir] [prompt]
+// Modules: stdlib/llm/{llama,bpe,attn_gpu}.sio
+use llm::attn_gpu::{GenCfg, llama_generate_from_ids, llama_sample_greedy, llama_sample_temp_top_p}
+use llm::bpe::{Bpe, bpe_decode_token, bpe_encode, bpe_load}
+use llm::llama::{kv_new, llama_forward, llama_load}
+use llm::safetensors::{st_byte_at}
+use hetero::runtime::{Runtime, rt_open}
+use tensor2::cpu_kernel::{CpuBuf, ck_alloc, ck_get, ck_set}
+
+fn putb(buf: *mut u8, i: i64, v: i64) {
+    let w = read_i64(buf as *mut i64, i / 8)
+    let sh = (i % 8) * 8
+    let cleared = w & ((0 - 1) - (255 << sh))
+    write_i64(buf as *mut i64, i / 8, cleared | ((v & 255) << sh))
+}
+
+fn print_tok(bp: &Bpe, id: i64, buf: *mut u8) with Mut, Panic, Div, Alloc, IO {
+    let nb = bpe_decode_token(bp, id, buf)
+    var j: i64 = 0
+    while j < nb {
+        print_char(st_byte_at(buf, j))
+        j = j + 1
+    }
+}
+
+fn main() with IO, Mut, Panic, Div, Alloc {
+    var ok = true
+    var dir = "/workspace/llm-models/SmolLM2-135M"
+    if arg_count() > 0 { dir = get_arg(0) }
+    var prompt = "The capital of France is"
+    if arg_count() > 1 { prompt = get_arg(1) }
+    let max_new: i64 = 8
+
+    var m = llama_load(dir)
+    print("loaded=")
+    print_int(if m.loaded { 1 } else { 0 })
+    print("\n")
+    if !m.loaded { print("GENDONE FAIL\nGENDONE DONE\n"); exit(0) }
+
+    let bp = bpe_load(dir ++ "/tokenizer.json")
+    let plen = str_len(prompt)
+    let pbuf = heap_alloc(plen + 16)
+    var i: i64 = 0
+    while i < plen {
+        putb(pbuf, i, str_char_at(prompt, i) & 255)
+        i = i + 1
+    }
+    let enc = bpe_encode(&bp, pbuf, plen)
+    let nseq = enc.len + 1
+    var ids = ck_alloc(nseq + 8)
+    ck_set(&!ids, 0, 0.0)
+    i = 0
+    while i < enc.len {
+        ck_set(&!ids, 1 + i, ck_get(&enc, i))
+        i = i + 1
+    }
+    print("prefill tokens=")
+    print_int(nseq)
+    print("\n")
+
+    // runtime handle: may be not-ready on CPU-only hosts; generate falls back
+    let rt = rt_open("stdlib/hetero/kernels/gemm_tiled_f32.ptx", "gemm_tiled_f32")
+    let use_gpu = rt.ready
+
+    // greedy twice: must agree exactly
+    var kv1 = kv_new(&m, 512)
+    var seed = ck_alloc(1)
+    ck_set(&!seed, 0, 12345.0)
+    let g = GenCfg { max_new: max_new, eos: 2, temp: 1.0, top_p: 1.0, greedy: true }
+    let o1 = llama_generate_from_ids(&!m, &!kv1, &rt, use_gpu, &ids, nseq, g, &!seed)
+    var kv2 = kv_new(&m, 512)
+    ck_set(&!seed, 0, 12345.0)
+    let o2 = llama_generate_from_ids(&!m, &!kv2, &rt, use_gpu, &ids, nseq, g, &!seed)
+    var same = o1.len == o2.len
+    i = 0
+    while i < o1.len {
+        if ck_get(&o1, i) != ck_get(&o2, i) { same = false }
+        if ck_get(&o1, i) < 0.0 || ck_get(&o1, i) >= (m.cfg.vocab as f64) { ok = false }
+        i = i + 1
+    }
+    if !same { ok = false; print("FAIL greedy nondeterministic\n") }
+    let dbuf = heap_alloc(8192)
+    print("greedy [")
+    i = 0
+    while i < o1.len {
+        print_tok(&bp, ck_get(&o1, i) as i64, dbuf)
+        i = i + 1
+    }
+    print("] n=")
+    print_int(o1.len)
+    print("\n")
+
+    // temp/top-p: finite, in-vocab, and greedy single-step agrees with argmax
+    var kv3 = kv_new(&m, 512)
+    ck_set(&!seed, 0, 999.0)
+    let gt = GenCfg { max_new: max_new, eos: 2, temp: 0.8, top_p: 0.9, greedy: false }
+    let o3 = llama_generate_from_ids(&!m, &!kv3, &rt, use_gpu, &ids, nseq, gt, &!seed)
+    i = 0
+    while i < o3.len {
+        if ck_get(&o3, i) < 0.0 || ck_get(&o3, i) >= (m.cfg.vocab as f64) { ok = false }
+        i = i + 1
+    }
+    print("temp/top-p [")
+    i = 0
+    while i < o3.len {
+        print_tok(&bp, ck_get(&o3, i) as i64, dbuf)
+        i = i + 1
+    }
+    print("] n=")
+    print_int(o3.len)
+    print("\n")
+    if o3.len <= 0 { ok = false; print("FAIL empty sample\n") }
+
+    var kv4 = kv_new(&m, 512)
+    let l1 = llama_forward(&!m, &!kv4, &ids, nseq)
+    let a1 = llama_sample_greedy(&l1)
+    ck_set(&!seed, 0, 7.0)
+    var kv5 = kv_new(&m, 512)
+    let l2 = llama_forward(&!m, &!kv5, &ids, nseq)
+    let a2 = llama_sample_temp_top_p(&l2, 0.0001, 1.0, &!seed)
+    print("argmax=")
+    print_int(a1)
+    print(" cold-temp=")
+    print_int(a2)
+    print("\n")
+    if a1 != a2 { ok = false; print("FAIL cold-temp disagrees\n") }
+
+    if ok { print("GENDONE PASS\n") } else { print("GENDONE FAIL\n") }
+    print("GENDONE DONE\n")
+    exit(0)
+}
