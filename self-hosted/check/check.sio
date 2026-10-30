@@ -7043,14 +7043,13 @@ fn checker_report_multitest_correction_required_inplace(c: *mut Checker, span: S
 
 // The caller must invoke this before popping the scope whose bindings it owns.
 fn checker_require_current_linear_scope_consumed_inplace(c: *mut Checker) with Mut, IO, Panic, Div {
-    let linear_check = (*c).borrows.check_linear_consumed()
-    (*c).borrows = linear_check.0
-    if linear_check.1 > 0 {
+    let linear_check = borrow_check_linear_consumed(&(*c).borrows)
+    if linear_check > 0 {
         (*c).had_error = true
         (*c).error_count = (*c).error_count + 1
         (*c).diag_emitted = true
         print("error[E040]: linear value not consumed (")
-        print_int(linear_check.1)
+        print_int(linear_check)
         print(" unconsumed)\n")
     }
 }
@@ -7100,7 +7099,7 @@ fn checker_check_impl_method_inplace(c: *mut Checker, item: Item) with Mut, Pani
             (*c).multitest_count = 0
             (*c).multitest_corrected = false
             type_env_push_scope_mut(&!(*c).env)
-            (*c).borrows = (*c).borrows.push_scope()
+            borrow_push_scope_mut(&!(*c).borrows)
             checker_push_const_scope_inplace(c)
             checker_bind_fn_params_inplace(c, (*fd).params)
             let body_ty = checker_check_block_inplace(c, (*fd).body)
@@ -7123,7 +7122,7 @@ fn checker_check_impl_method_inplace(c: *mut Checker, item: Item) with Mut, Pani
             }
             checker_require_current_linear_scope_consumed_inplace(c)
             checker_pop_const_scope_inplace(c)
-            (*c).borrows = (*c).borrows.pop_scope()
+            borrow_pop_scope_mut(&!(*c).borrows)
             type_env_pop_scope_mut(&!(*c).env)
             (*c).current_return_type = ty_unit()
             (*c).current_sig_id = 0 - 1
@@ -7371,12 +7370,11 @@ fn checker_warn_large_params_inplace(c: *mut Checker, fn_name: Name, opt: Option
 // caller must skip mark_affine on that code so a shadowed outer name is not
 // stamped affine in place of the binding that did not fit.
 fn checker_track_binding_inplace(c: *mut Checker, name: Name, is_linear: bool, span: Span) -> i64 with Mut, Panic, Div, Alloc, IO {
-    let tracked = (*c).borrows.track(name, is_linear)
-    (*c).borrows = tracked.0
-    if tracked.1 != 0 {
-        checker_report_error_at_inplace(c, span, tracked.1, 0, 0, 0)
+    let tracked = borrow_track_mut(&!(*c).borrows, name, is_linear)
+    if tracked != 0 {
+        checker_report_error_at_inplace(c, span, tracked, 0, 0, 0)
     }
-    tracked.1
+    tracked
 }
 
 fn checker_bind_fn_param_inplace(c: *mut Checker, p: Param) with Mut, Panic, Div, Alloc, IO {
@@ -7386,7 +7384,7 @@ fn checker_bind_fn_param_inplace(c: *mut Checker, p: Param) with Mut, Panic, Div
         let self_linear = checker_is_linear_type_inplace(c, (*c).current_impl_type)
         let track_code = checker_track_binding_inplace(c, p.name, self_linear, p.span)
         if track_code == 0 && self_linear && checker_is_affine_type_inplace(c, (*c).current_impl_type) {
-            (*c).borrows = (*c).borrows.mark_affine(p.name)
+            borrow_mark_affine_mut(&!(*c).borrows, p.name)
         }
     } else {
         let param_ty = checker_lower_type_expr_mut(c, p.ty)
@@ -7395,7 +7393,7 @@ fn checker_bind_fn_param_inplace(c: *mut Checker, p: Param) with Mut, Panic, Div
         let lin = checker_is_linear_type_inplace(c, param_ty)
         let track_code = checker_track_binding_inplace(c, p.name, lin, p.span)
         if track_code == 0 && lin && checker_is_affine_type_inplace(c, param_ty) {
-            (*c).borrows = (*c).borrows.mark_affine(p.name)
+            borrow_mark_affine_mut(&!(*c).borrows, p.name)
         }
     }
 }
@@ -7474,7 +7472,7 @@ fn checker_check_fn_item_inplace(c: *mut Checker, opt: Option<Box<FnDef> >) with
                 return
             }
             type_env_push_scope_mut(&!(*c).env)
-            (*c).borrows = (*c).borrows.push_scope()
+            borrow_push_scope_mut(&!(*c).borrows)
             checker_push_const_scope_inplace(c)
             checker_bind_fn_params_inplace(c, (*fd).params)
             (*c).escape_provenance = 0
@@ -7499,7 +7497,7 @@ fn checker_check_fn_item_inplace(c: *mut Checker, opt: Option<Box<FnDef> >) with
             }
             checker_require_current_linear_scope_consumed_inplace(c)
             checker_pop_const_scope_inplace(c)
-            (*c).borrows = (*c).borrows.pop_scope()
+            borrow_pop_scope_mut(&!(*c).borrows)
             type_env_pop_scope_mut(&!(*c).env)
             (*c).current_return_type = ty_unit()
             (*c).current_sig_id = 0 - 1
@@ -7514,12 +7512,12 @@ fn checker_check_fn_item_inplace(c: *mut Checker, opt: Option<Box<FnDef> >) with
 
 fn checker_check_block_inplace(c: *mut Checker, blk: Block) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     type_env_push_scope_mut(&!(*c).env)
-    (*c).borrows = (*c).borrows.push_scope()
+    borrow_push_scope_mut(&!(*c).borrows)
     checker_push_const_scope_inplace(c)
     let result_ty = checker_check_stmts_inplace(c, blk.stmts)
     checker_require_current_linear_scope_consumed_inplace(c)
     checker_pop_const_scope_inplace(c)
-    (*c).borrows = (*c).borrows.pop_scope()
+    borrow_pop_scope_mut(&!(*c).borrows)
     type_env_pop_scope_mut(&!(*c).env)
     result_ty
 }
@@ -7542,7 +7540,7 @@ fn checker_check_block_inplace(c: *mut Checker, blk: Block) -> TypeEntry with Mu
 // silent miscompile).
 fn checker_place_root_local(c: *mut Checker, place: Expr) -> bool with Mut, Panic, Div, Alloc, IO {
     if place.kind == ExprKind::ExprIdent {
-        (*c).borrows.scope_depth_of(place.name) >= 2
+        borrow_scope_depth_of(&(*c).borrows, place.name) >= 2
     } else if place.kind == ExprKind::ExprFieldAccess {
         let ptr = expr_opt_get(place.left)
         if ptr == 0 as *mut Expr { return false }
@@ -7618,7 +7616,7 @@ fn checker_expr_provenance(c: *mut Checker, e: Expr) -> i64 with Mut, Panic, Div
             0
         }
     } else if e.kind == ExprKind::ExprIdent {
-        (*c).borrows.provenance_of(e.name)
+        borrow_provenance_of(&(*c).borrows, e.name)
     } else if e.kind == ExprKind::ExprStructLit {
         var prov = 0
         var cur = e.fields
@@ -7846,13 +7844,12 @@ fn checker_check_ident_named(c: *mut Checker, name: Name, span: Span) -> TypeEnt
     }
     let ident_ty = (*c).env.lookup(name)
     if checker_is_linear_type_inplace(c, ident_ty) && (*c).suppress_linear_consume_depth == 0 {
-        if (*c).borrows.is_borrowed(name) {
+        if borrow_is_borrowed(&(*c).borrows, name) {
             checker_report_error_at_inplace(c, span, 38, 0, 0, 0)
         } else {
-            let consume_result = (*c).borrows.consume_linear(name)
-            (*c).borrows = consume_result.0
-            if consume_result.1 != 0 {
-                checker_report_error_at_inplace(c, span, consume_result.1, 0, 0, 0)
+            let consume_result = borrow_consume_linear_mut(&!(*c).borrows, name)
+            if consume_result != 0 {
+                checker_report_error_at_inplace(c, span, consume_result, 0, 0, 0)
             }
         }
     }
@@ -9499,7 +9496,7 @@ fn checker_check_while_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
     // Release exclusive borrows before checking the loop body. In a while loop each
     // iteration may re-borrow the same variables; without this the second iteration
     // would fail because the first iteration's exclusive borrows are still active.
-    (*c).borrows = (*c).borrows.release_exclusive_borrows()
+    borrow_release_exclusive_borrows_mut(&!(*c).borrows)
     // env-φ loop widen (codex ruling 2026-08-23, round 4 -- grok-4.6 measured
     // this as a REAL fail-open, not theoretical: `var x=measure(1); while
     // ... {x=x+measure(2)}; let y=x+x` traced union=1 after the loop, i.e.
@@ -9529,7 +9526,7 @@ fn checker_check_loop_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
         return ty_error()
     }
     (*c).loop_depth = (*c).loop_depth + 1
-    (*c).borrows = (*c).borrows.release_exclusive_borrows()
+    borrow_release_exclusive_borrows_mut(&!(*c).borrows)
     let _body_ty = checker_check_opt_block_inplace(c, e.block)
     (*c).loop_depth = (*c).loop_depth - 1
     ty_unit()
@@ -9544,11 +9541,11 @@ fn checker_check_loop_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
 fn checker_check_for_in_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     let _iter_ty = checker_check_opt_expr_inplace(c, e.left)
     type_env_push_scope_mut(&!(*c).env)
-    (*c).borrows = (*c).borrows.push_scope()
+    borrow_push_scope_mut(&!(*c).borrows)
     checker_push_const_scope_inplace(c)
     type_env_bind_mut(&!(*c).env, e.name, ty_i64(), false)
     (*c).loop_depth = (*c).loop_depth + 1
-    (*c).borrows = (*c).borrows.release_exclusive_borrows()
+    borrow_release_exclusive_borrows_mut(&!(*c).borrows)
     // env-φ loop widen (codex ruling 2026-08-23, round 4) -- see the matching
     // comment in checker_check_while_expr_inplace. A `for` body runs 0+
     // times exactly like `while`, so the same top-widen hammer applies.
@@ -9569,7 +9566,7 @@ fn checker_check_for_in_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with
     let _body_ty = checker_check_opt_block_inplace(c, e.block)
     (*c).loop_depth = (*c).loop_depth - 1
     checker_pop_const_scope_inplace(c)
-    (*c).borrows = (*c).borrows.pop_scope()
+    borrow_pop_scope_mut(&!(*c).borrows)
     type_env_pop_scope_mut(&!(*c).env)
     checker_merge_ns_reassigned_inplace(c)
     ty_unit()
@@ -9703,27 +9700,26 @@ fn checker_place_borrow_conflict_inplace(c: *mut Checker, name: Name, want_excl:
     false
 }
 
-fn checker_take_borrow_inplace(c: *mut Checker, name: Name, want_excl: bool) -> i64 with Mut, Panic, Div, Alloc, IO {
+fn checker_take_borrow_inplace(c: *mut Checker,
+ name: Name, want_excl: bool) -> i64 with Mut, Panic, Div, Alloc, IO {
     let is_path = borrow_name_is_path(name)
     if !is_path {
         // Whole variable: the existing rules, plus "no field of it is borrowed
         // incompatibly".
-        let idx = (*c).borrows.find(name)
+        let idx = borrow_find_idx(&(*c).borrows, name)
         if idx >= 0 && checker_place_borrow_conflict_inplace(c, name, want_excl, idx) {
             if want_excl { return 38 }
             return 37
         }
         if want_excl {
-            let r = (*c).borrows.try_exclusive_borrow(name)
-            (*c).borrows = r.0
-            return r.1
+            let r = borrow_try_exclusive_borrow_mut(&!(*c).borrows, name)
+            return r
         }
-        let r2 = (*c).borrows.try_shared_borrow(name)
-        (*c).borrows = r2.0
-        return r2.1
+        let r2 = borrow_try_shared_borrow_mut(&!(*c).borrows, name)
+        return r2
     }
-    if (*c).borrows.find(borrow_path_root(name)) < 0 { return 0 }
-    var idx = (*c).borrows.find(name)
+    if borrow_find_idx(&(*c).borrows, borrow_path_root(name)) < 0 { return 0 }
+    var idx = borrow_find_idx(&(*c).borrows, name)
     // The path's own entry counts too (`&s.y` then `&!s.y`): pass -1 so no
     // entry is skipped.
     if checker_place_borrow_conflict_inplace(c, name, want_excl, 0 - 1) {
@@ -9732,8 +9728,7 @@ fn checker_take_borrow_inplace(c: *mut Checker, name: Name, want_excl: bool) -> 
     }
     if idx < 0 {
         if (*c).borrows.count >= 128 { return 0 }
-        let tracked_path = (*c).borrows.track(name, false)
-        (*c).borrows = tracked_path.0
+        let tracked_path = borrow_track_mut(&!(*c).borrows, name, false)
         idx = (*c).borrows.count - 1
     }
     var e = (*c).borrows.entries[idx as usize]
@@ -9902,16 +9897,14 @@ fn checker_check_slice_borrow_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntr
             }
             if borrow_name.len > 0 {
                 if want_mut {
-                    let borrow_result = (*c).borrows.try_exclusive_borrow(borrow_name)
-                    (*c).borrows = borrow_result.0
-                    if borrow_result.1 != 0 {
-                        checker_report_error_at_inplace(c, e.span, borrow_result.1, 0, 0, 0)
+                    let borrow_result = borrow_try_exclusive_borrow_mut(&!(*c).borrows, borrow_name)
+                    if borrow_result != 0 {
+                        checker_report_error_at_inplace(c, e.span, borrow_result, 0, 0, 0)
                     }
                 } else {
-                    let borrow_result = (*c).borrows.try_shared_borrow(borrow_name)
-                    (*c).borrows = borrow_result.0
-                    if borrow_result.1 != 0 {
-                        checker_report_error_at_inplace(c, e.span, borrow_result.1, 0, 0, 0)
+                    let borrow_result = borrow_try_shared_borrow_mut(&!(*c).borrows, borrow_name)
+                    if borrow_result != 0 {
+                        checker_report_error_at_inplace(c, e.span, borrow_result, 0, 0, 0)
                     }
                 }
             }
@@ -10817,7 +10810,7 @@ fn checker_bind_closure_param_inplace(c: *mut Checker, p: ClosureParam) with Mut
     let lin = checker_is_linear_type_inplace(c, param_ty)
     let track_code = checker_track_binding_inplace(c, p.name, lin, p.span)
     if track_code == 0 && lin && checker_is_affine_type_inplace(c, param_ty) {
-        (*c).borrows = (*c).borrows.mark_affine(p.name)
+        borrow_mark_affine_mut(&!(*c).borrows, p.name)
     }
 }
 
@@ -10954,7 +10947,7 @@ fn checker_check_closure_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry wit
 
     let outer_borrow_count = (*c).borrows.count
     type_env_push_scope_mut(&!(*c).env)
-    (*c).borrows = (*c).borrows.push_scope()
+    borrow_push_scope_mut(&!(*c).borrows)
     checker_push_const_scope_inplace(c)
 
     checker_bind_closure_params_inplace(c, resolved_params)
@@ -11013,7 +11006,7 @@ fn checker_check_closure_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry wit
 
     checker_require_current_linear_scope_consumed_inplace(c)
     checker_pop_const_scope_inplace(c)
-    (*c).borrows = (*c).borrows.pop_scope()
+    borrow_pop_scope_mut(&!(*c).borrows)
     type_env_pop_scope_mut(&!(*c).env)
     (*c).current_sig_id = 0 - 1
     (*c).current_effects = saved_effects
@@ -11105,13 +11098,12 @@ fn checker_check_method_call_with_base_ty_inplace(c: *mut Checker, e: Expr, base
         }
     }
     if name_matches_str3(e.name, 108, 101, 110) && len_method_supported(base_ty) {
-        let call_start_borrows = (*c).borrows
         checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
         match e.args {
             Some(_) => checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
             None => {}
         }
-        checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
+        checker_release_call_arg_borrows_inplace(c, e.args, None)
         // Seq.len() returns Knowledge<i64> under lean_single; arrays/slices stay i64.
         if is_seq_type(base_ty) {
             return ty_knowledge(ty_i64(), 0.0 - 1.0)
@@ -11121,7 +11113,6 @@ fn checker_check_method_call_with_base_ty_inplace(c: *mut Checker, e: Expr, base
     // Seq<T> methods: .push / .count / .get / .set / .push_uncertain (lean_single surface).
     if is_seq_type(base_ty) {
         let elem_ty = seq_elem_type(base_ty)
-        let call_start_borrows = (*c).borrows
         // push(v) / push_uncertain(v, conf, var)
         if name_matches_str4(e.name, 112, 117, 115, 104) {
             let first = expr_list_head(e.args)
@@ -11143,13 +11134,13 @@ fn checker_check_method_call_with_base_ty_inplace(c: *mut Checker, e: Expr, base
                 }
                 None => {}
             }
-            checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
+            checker_release_call_arg_borrows_inplace(c, e.args, None)
             return ty_unit()
         }
         if name_matches_str14(e.name, 112, 117, 115, 104, 95, 117, 110, 99, 101, 114, 116, 97, 105, 110) {
             // push_uncertain
             checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
-            checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
+            checker_release_call_arg_borrows_inplace(c, e.args, None)
             return ty_unit()
         }
         if name_matches_str5(e.name, 99, 111, 117, 110, 116) {
@@ -11159,33 +11150,32 @@ fn checker_check_method_call_with_base_ty_inplace(c: *mut Checker, e: Expr, base
                 Some(_) => checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
                 None => {}
             }
-            checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
+            checker_release_call_arg_borrows_inplace(c, e.args, None)
             return ty_i64()
         }
         if name_matches_str3(e.name, 103, 101, 116) {
             // get(i) -> T
             checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
-            checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
+            checker_release_call_arg_borrows_inplace(c, e.args, None)
             return elem_ty
         }
         if name_matches_str3(e.name, 115, 101, 116) {
             // set(i, v)
             checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
-            checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
+            checker_release_call_arg_borrows_inplace(c, e.args, None)
             return ty_unit()
         }
         checker_report_error_at_inplace(c, e.span, 11, 0, 0, 0)
         checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
-        checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
+        checker_release_call_arg_borrows_inplace(c, e.args, None)
         return ty_error()
     }
     if base_ty.kind == TypeKind::TyKnowledge {
         if name_matches_str6(e.name, 117, 110, 119, 114, 97, 112) {
-            let call_start_borrows = (*c).borrows
             match e.args {
                 None => {
                     checker_report_error_at_inplace(c, e.span, 172, 0, 0, 0)
-                    checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
+                    checker_release_call_arg_borrows_inplace(c, e.args, None)
                     knowledge_inner(base_ty)
                 }
                 Some(arg_list) => {
@@ -11193,15 +11183,14 @@ fn checker_check_method_call_with_base_ty_inplace(c: *mut Checker, e: Expr, base
                         checker_report_error_at_inplace(c, e.span, 173, 0, 0, 0)
                     }
                     checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
-                    checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
+                    checker_release_call_arg_borrows_inplace(c, e.args, None)
                     knowledge_inner(base_ty)
                 }
             }
         } else {
             checker_report_error_at_inplace(c, e.span, 11, 0, 0, 0)
-            let call_start_borrows = (*c).borrows
             checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
-            checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
+            checker_release_call_arg_borrows_inplace(c, e.args, None)
             ty_error()
         }
     } else if base_ty.kind == TypeKind::TyHyper {
@@ -11211,19 +11200,16 @@ fn checker_check_method_call_with_base_ty_inplace(c: *mut Checker, e: Expr, base
             None => ty_error()
         }
         if name_matches_str9(e.name, 99, 111, 110, 106, 117, 103, 97, 116, 101) {
-            let call_start_borrows = (*c).borrows
             checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
-            checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
+            checker_release_call_arg_borrows_inplace(c, e.args, None)
             base_ty
         } else if name_matches_str4(e.name, 110, 111, 114, 109) {
-            let call_start_borrows = (*c).borrows
             checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
-            checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
+            checker_release_call_arg_borrows_inplace(c, e.args, None)
             inner_ty
         } else if name_matches_str7(e.name, 105, 110, 118, 101, 114, 115, 101) {
-            let call_start_borrows = (*c).borrows
             checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
-            checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
+            checker_release_call_arg_borrows_inplace(c, e.args, None)
             if alg > 3 {
                 checker_report_error_at_inplace(c, e.span, 32, 0, 0, 0)
                 ty_error()
@@ -11232,16 +11218,14 @@ fn checker_check_method_call_with_base_ty_inplace(c: *mut Checker, e: Expr, base
             }
         } else {
             checker_report_error_at_inplace(c, e.span, 11, 0, 0, 0)
-            let call_start_borrows = (*c).borrows
             checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
-            checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
+            checker_release_call_arg_borrows_inplace(c, e.args, None)
             ty_error()
         }
     } else if base_ty.kind == TypeKind::TyNamed {
         let sig_id = fn_sig_table_find_method_semantic((*c).fn_sigs, base_ty, e.name)
         if sig_id >= 0 {
             let sig = fn_sig_table_get((*c).fn_sigs, sig_id)
-            let call_start_borrows = (*c).borrows
             var effective_params = fn_param_list_clone(&sig.params)
             var effective_return_type = sig.return_type
             match e.type_args {
@@ -11262,19 +11246,17 @@ fn checker_check_method_call_with_base_ty_inplace(c: *mut Checker, e: Expr, base
             }
             checker_check_call_args_inplace(c, expr_list_handle(e.args), fn_param_list_handle(effective_params), sig.param_count, e.span, 0 - 1)
             checker_check_callee_effects_named_inplace(c, e.span, sig.effects, sig.effect_count, sig.name)
-            checker_release_call_arg_borrows_inplace(c, e.args, effective_params, call_start_borrows)
+            checker_release_call_arg_borrows_inplace(c, e.args, effective_params)
             effective_return_type
         } else {
             checker_report_error_at_inplace(c, e.span, 11, 0, 0, 0)
-            let call_start_borrows = (*c).borrows
             checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
-            checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
+            checker_release_call_arg_borrows_inplace(c, e.args, None)
             ty_error()
         }
     } else if base_ty.kind == TypeKind::TyString {
-        let call_start_borrows = (*c).borrows
         checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
-        checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
+        checker_release_call_arg_borrows_inplace(c, e.args, None)
         if name_matches_str8(e.name, 97, 115, 95, 98, 121, 116, 101, 115) {
             ty_ref(ty_i8())
         } else if name_matches_str3(e.name, 108, 101, 110) {
@@ -11292,7 +11274,6 @@ fn checker_check_method_call_with_base_ty_inplace(c: *mut Checker, e: Expr, base
         let sig_id = fn_sig_table_find_method_semantic((*c).fn_sigs, base_ty, e.name)
         if sig_id >= 0 {
             let sig = fn_sig_table_get((*c).fn_sigs, sig_id)
-            let call_start_borrows = (*c).borrows
             var effective_params = fn_param_list_clone(&sig.params)
             var effective_return_type = sig.return_type
             match e.type_args {
@@ -11313,13 +11294,12 @@ fn checker_check_method_call_with_base_ty_inplace(c: *mut Checker, e: Expr, base
             }
             checker_check_call_args_inplace(c, expr_list_handle(e.args), fn_param_list_handle(effective_params), sig.param_count, e.span, 0 - 1)
             checker_check_callee_effects_named_inplace(c, e.span, sig.effects, sig.effect_count, sig.name)
-            checker_release_call_arg_borrows_inplace(c, e.args, effective_params, call_start_borrows)
+            checker_release_call_arg_borrows_inplace(c, e.args, effective_params)
             effective_return_type
         } else {
             checker_report_error_at_inplace(c, e.span, 19, 0, 0, 0)
-            let call_start_borrows = (*c).borrows
             checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
-            checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
+            checker_release_call_arg_borrows_inplace(c, e.args, None)
             ty_error()
         }
     } else if is_error_or_unknown(base_ty) {
@@ -11331,20 +11311,17 @@ fn checker_check_method_call_with_base_ty_inplace(c: *mut Checker, e: Expr, base
         // See docs/audit/MADAROS_DUAL_GUM_KNOWLEDGE_IMPORT_2026-07-19.md.
         if !fn_sig_table_has_method_name((*c).fn_sigs, e.name) {
             checker_report_error_at_inplace(c, e.span, 11, 0, 0, 0)
-            let call_start_borrows = (*c).borrows
             checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
-            checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
+            checker_release_call_arg_borrows_inplace(c, e.args, None)
             return ty_error()
         }
-        let call_start_borrows = (*c).borrows
         checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
-        checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
+        checker_release_call_arg_borrows_inplace(c, e.args, None)
         base_ty
     } else {
         checker_report_error_at_inplace(c, e.span, 19, 0, 0, 0)
-        let call_start_borrows = (*c).borrows
         checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
-        checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
+        checker_release_call_arg_borrows_inplace(c, e.args, None)
         ty_error()
     }
 }
@@ -11479,13 +11456,12 @@ fn checker_check_one_call_arg_inplace(c: *mut Checker, arg_expr: Expr, param_inf
        checker_is_linear_type_inplace(c, arg_ty) &&
        !implicit_borrow &&
        (*c).suppress_linear_consume_depth == 0 {
-        if (*c).borrows.is_borrowed(arg_expr.name) {
+        if borrow_is_borrowed(&(*c).borrows, arg_expr.name) {
             checker_report_error_at_inplace(c, call_span, 38, 0, 0, 0)
         } else {
-            let consume_result = (*c).borrows.consume_linear(arg_expr.name)
-            (*c).borrows = consume_result.0
-            if consume_result.1 != 0 {
-                checker_report_error_at_inplace(c, call_span, consume_result.1, 0, 0, 0)
+            let consume_result = borrow_consume_linear_mut(&!(*c).borrows, arg_expr.name)
+            if consume_result != 0 {
+                checker_report_error_at_inplace(c, call_span, consume_result, 0, 0, 0)
             }
         }
     }
@@ -11501,7 +11477,8 @@ fn checker_check_one_call_arg_inplace(c: *mut Checker, arg_expr: Expr, param_inf
 // noise_set_id is captured into (*c).last_call_arg_ns, never "last Knowledge
 // arg wins" (grok-4.6 found that fail-open: add_noise(x){x+measure(0)} and
 // first(a,b){a} both narrowed to a real handle instead of top).
-fn checker_check_call_args_inplace(c: *mut Checker, args: ExprListHandle, params: FnParamListHandle, expected_count: i64, call_span: Span, ns_watch_idx: i64) with Mut, Panic, Div, Alloc, IO {
+fn checker_check_call_args_inplace(c: *mut Checker,
+ args: ExprListHandle, params: FnParamListHandle, expected_count: i64, call_span: Span, ns_watch_idx: i64) with Mut, Panic, Div, Alloc, IO {
     var current = args
     var idx: i64 = 0
     while current.ptr != 0 as *mut ExprList {
@@ -11607,13 +11584,12 @@ fn checker_check_call_args_inplace(c: *mut Checker, args: ExprListHandle, params
            checker_is_linear_type_inplace(c, arg_ty) &&
            !implicit_borrow &&
            (*c).suppress_linear_consume_depth == 0 {
-            if (*c).borrows.is_borrowed(arg_expr.name) {
+            if borrow_is_borrowed(&(*c).borrows, arg_expr.name) {
                 checker_report_error_at_inplace(c, call_span, 38, 0, 0, 0)
             } else {
-                let consume_result = (*c).borrows.consume_linear(arg_expr.name)
-                (*c).borrows = consume_result.0
-                if consume_result.1 != 0 {
-                    checker_report_error_at_inplace(c, call_span, consume_result.1, 0, 0, 0)
+                let consume_result = borrow_consume_linear_mut(&!(*c).borrows, arg_expr.name)
+                if consume_result != 0 {
+                    checker_report_error_at_inplace(c, call_span, consume_result, 0, 0, 0)
                 }
             }
         }
@@ -12172,7 +12148,6 @@ fn checker_check_print_i64_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry w
 fn checker_check_slice_len_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     let first_arg = expr_list_head(e.args)
     let second_arg = expr_list_second(e.args)
-    let call_start_borrows = (*c).borrows
     let arg_ty = checker_check_opt_expr_inplace(c, first_arg)
     match first_arg {
         None => checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
@@ -12189,7 +12164,7 @@ fn checker_check_slice_len_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry w
     if !is_ok && !is_error_or_unknown(arg_ty) {
         checker_report_error_at_inplace(c, e.span, 9, 0, 0, 0)
     }
-    checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
+    checker_release_call_arg_borrows_inplace(c, e.args, None)
     ty_i64()
 }
 
@@ -12244,7 +12219,6 @@ fn call_expr_is_box_new(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Div, A
 fn checker_check_box_new_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     let first_arg = expr_list_head(e.args)
     let second_arg = expr_list_second(e.args)
-    let call_start_borrows = (*c).borrows
     let arg_ty = checker_check_opt_expr_inplace(c, first_arg)
     match first_arg {
         None => checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
@@ -12257,7 +12231,7 @@ fn checker_check_box_new_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry wit
         }
         None => {}
     }
-    checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
+    checker_release_call_arg_borrows_inplace(c, e.args, None)
     var box_ty = ty_named(make_name("Box"))
     box_ty.inner = Some(Box::new(arg_ty))
     box_ty
@@ -12489,108 +12463,108 @@ fn checker_reject_invalid_implicit_native_builtin_arity_inplace(c: *mut Checker,
     }
 }
 
-fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
-    if checker_reject_invalid_implicit_native_builtin_arity_inplace(c, e) {
-        return ty_error()
+fn checker_check_call_special_forms_inplace(c: *mut Checker, e: *mut Expr) -> Option<Box<TypeEntry>> with Mut, Panic, Div, Alloc, IO {
+    if checker_reject_invalid_implicit_native_builtin_arity_inplace(c, *e) {
+        return Some(Box::new(ty_error()))
     }
-    if checker_expr_is_gpu_launch_invocation_call(e) {
-        match e.left {
+    if checker_expr_is_gpu_launch_invocation_call(*e) {
+        match (*e).left {
             Some(desc) => {
                 checker_check_expr_list_no_type_no_linear_consume_inplace(c, (*desc).args)
             }
             None => {}
         }
-        checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
-        return ty_unit()
+        checker_check_expr_list_no_type_no_linear_consume_inplace(c, (*e).args)
+        return Some(Box::new(ty_unit()))
     }
-    if checker_expr_is_gpu_launch_descriptor_call(e) || checker_expr_is_gpu_sync_call(e) {
-        checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
-        return ty_unit()
+    if checker_expr_is_gpu_launch_descriptor_call(*e) || checker_expr_is_gpu_sync_call(*e) {
+        checker_check_expr_list_no_type_no_linear_consume_inplace(c, (*e).args)
+        return Some(Box::new(ty_unit()))
     }
     // Intercept the common epistemic builtin measure() with an inplace handler before the
     // by-value bridge below (which SRET-smashes on the 164KB Checker return).
-    if call_expr_is_builtin_measure(e.left) {
-        return checker_check_measure_expr_inplace(c, e)
+    if call_expr_is_builtin_measure((*e).left) {
+        return Some(Box::new(checker_check_measure_expr_inplace(c, *e)))
     }
     // Two Knowledge arguments: the shared-interval contest. One argument is
     // math/pure::sign, including tan's sign(sin(x)).
-    if call_expr_is_builtin_sign(e.left) && expr_list_handle_count(expr_list_handle(e.args)) == 2 {
-        return checker_check_sign_expr_inplace(c, e)
+    if call_expr_is_builtin_sign((*e).left) && expr_list_handle_count(expr_list_handle((*e).args)) == 2 {
+        return Some(Box::new(checker_check_sign_expr_inplace(c, *e)))
     }
-    if call_expr_is_builtin_seq_new(e.left) {
-        return checker_check_seq_new_expr_inplace(c, e)
+    if call_expr_is_builtin_seq_new((*e).left) {
+        return Some(Box::new(checker_check_seq_new_expr_inplace(c, *e)))
     }
-    if call_expr_is_builtin_seq_push(e.left) {
-        return checker_check_seq_push_expr_inplace(c, e)
+    if call_expr_is_builtin_seq_push((*e).left) {
+        return Some(Box::new(checker_check_seq_push_expr_inplace(c, *e)))
     }
-    if call_expr_is_builtin_seq_get(e.left) {
-        return checker_check_seq_get_expr_inplace(c, e)
+    if call_expr_is_builtin_seq_get((*e).left) {
+        return Some(Box::new(checker_check_seq_get_expr_inplace(c, *e)))
     }
-    if call_expr_is_builtin_seq_set(e.left) {
-        return checker_check_seq_set_expr_inplace(c, e)
+    if call_expr_is_builtin_seq_set((*e).left) {
+        return Some(Box::new(checker_check_seq_set_expr_inplace(c, *e)))
     }
-    if call_expr_is_builtin_seq_len(e.left) {
-        return checker_check_seq_len_expr_inplace(c, e)
+    if call_expr_is_builtin_seq_len((*e).left) {
+        return Some(Box::new(checker_check_seq_len_expr_inplace(c, *e)))
     }
-    if call_expr_is_builtin_seq_count(e.left) {
-        return checker_check_seq_count_expr_inplace(c, e)
+    if call_expr_is_builtin_seq_count((*e).left) {
+        return Some(Box::new(checker_check_seq_count_expr_inplace(c, *e)))
     }
-    if call_expr_is_builtin_acknowledge(e.left) {
-        return checker_check_acknowledge_expr_inplace(c, e)
+    if call_expr_is_builtin_acknowledge((*e).left) {
+        return Some(Box::new(checker_check_acknowledge_expr_inplace(c, *e)))
     }
-    if call_expr_is_builtin_knowledge_ctor(e.left) {
-        return checker_check_knowledge_ctor_expr_inplace(c, e)
+    if call_expr_is_builtin_knowledge_ctor((*e).left) {
+        return Some(Box::new(checker_check_knowledge_ctor_expr_inplace(c, *e)))
     }
-    if call_expr_is_builtin_variance_of(e.left) {
-        return checker_check_variance_metric_expr_inplace(c, e)
+    if call_expr_is_builtin_variance_of((*e).left) {
+        return Some(Box::new(checker_check_variance_metric_expr_inplace(c, *e)))
     }
-    if call_expr_is_builtin_covariance_of(e.left) {
-        return checker_check_covariance_metric_expr_inplace(c, e)
+    if call_expr_is_builtin_covariance_of((*e).left) {
+        return Some(Box::new(checker_check_covariance_metric_expr_inplace(c, *e)))
     }
-    if call_expr_is_builtin_uncertainty_of(e.left) {
-        return checker_check_variance_metric_expr_inplace(c, e)
+    if call_expr_is_builtin_uncertainty_of((*e).left) {
+        return Some(Box::new(checker_check_variance_metric_expr_inplace(c, *e)))
     }
-    if call_expr_is_builtin_sensitivity_of(e.left) {
-        return checker_check_sensitivity_metric_expr_inplace(c, e)
+    if call_expr_is_builtin_sensitivity_of((*e).left) {
+        return Some(Box::new(checker_check_sensitivity_metric_expr_inplace(c, *e)))
     }
-    if call_expr_is_builtin_hessian_of(e.left) {
-        return checker_check_hessian_metric_expr_inplace(c, e)
+    if call_expr_is_builtin_hessian_of((*e).left) {
+        return Some(Box::new(checker_check_hessian_metric_expr_inplace(c, *e)))
     }
     // E2 is a mean, not a spread: it type-checks as the variance-family
     // metric -- one expression argument, f64 result, same as variance_of.
-    if call_expr_is_builtin_second_order_mean(e.left) {
-        return checker_check_variance_metric_expr_inplace(c, e)
+    if call_expr_is_builtin_second_order_mean((*e).left) {
+        return Some(Box::new(checker_check_variance_metric_expr_inplace(c, *e)))
     }
     // correlate(a, b, rho) is three arguments, not one. Routing it to
     // checker_check_variance_metric_expr_inplace reports E010 on the second --
     // exactly what the comment on checker_check_sensitivity_metric_expr_inplace
     // warns about, and exactly what I did on the first attempt.
-    if call_expr_is_builtin_correlate(e.left) {
-        return checker_check_correlate_metric_expr_inplace(c, e)
+    if call_expr_is_builtin_correlate((*e).left) {
+        return Some(Box::new(checker_check_correlate_metric_expr_inplace(c, *e)))
     }
-    if call_expr_is_builtin_slice_len(e.left) {
-        return checker_check_slice_len_expr_inplace(c, e)
+    if call_expr_is_builtin_slice_len((*e).left) {
+        return Some(Box::new(checker_check_slice_len_expr_inplace(c, *e)))
     }
-    if call_expr_is_builtin_assert(e.left) {
-        return checker_check_assert_expr_inplace(c, e)
+    if call_expr_is_builtin_assert((*e).left) {
+        return Some(Box::new(checker_check_assert_expr_inplace(c, *e)))
     }
-    if call_expr_is_builtin_print_int(e.left) {
-        return checker_check_print_i64_expr_inplace(c, e)
+    if call_expr_is_builtin_print_int((*e).left) {
+        return Some(Box::new(checker_check_print_i64_expr_inplace(c, *e)))
     }
-    if call_expr_is_builtin_print_char(e.left) {
-        return checker_check_print_i64_expr_inplace(c, e)
+    if call_expr_is_builtin_print_char((*e).left) {
+        return Some(Box::new(checker_check_print_i64_expr_inplace(c, *e)))
     }
-    if call_expr_is_builtin_println(e.left) {
-        let first_arg = expr_list_head(e.args)
+    if call_expr_is_builtin_println((*e).left) {
+        let first_arg = expr_list_head((*e).args)
         let arg_ty = checker_check_opt_expr_inplace(c, first_arg)
         if checker_type_is_unobserved_like(arg_ty) {
             if !has_effect_id((*c).current_effects, (*c).current_effect_count, 13) {
-                checker_report_unobserved_print_inplace(c, e.span)
+                checker_report_unobserved_print_inplace(c, (*e).span)
             }
             var effects_unobserved: [i64; 8] = [0; 8]
             effects_unobserved[0] = 0
-            checker_check_callee_effects_inplace(c, e.span, effects_unobserved, 1)
-            return ty_unit()
+            checker_check_callee_effects_inplace(c, (*e).span, effects_unobserved, 1)
+            return Some(Box::new(ty_unit()))
         }
     }
     // Read-only GPU thread-index intrinsics (gpu_thread_id_*, gpu_block_id_*,
@@ -12599,11 +12573,11 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
     // callee ident does not fall through to the unbound-identifier check (E137).
     // The GPU backend lowers these by name to PTX sregs (%tid.x / %ctaid.x /
     // %ntid.x, etc.); see hlir_to_gpu.sio / lower_to_ptx.sio.
-    if call_expr_is_gpu_builtin(e.left) {
+    if call_expr_is_gpu_builtin((*e).left) {
         // Barriers (gpu_barrier, gpu_barrier_sync, gpu_sync_threads) are void
         // side-effects; the thread-index/dim intrinsics return a u32 coordinate.
-        if call_expr_is_gpu_barrier(e.left) {
-            return ty_unit()
+        if call_expr_is_gpu_barrier((*e).left) {
+            return Some(Box::new(ty_unit()))
         }
         // E004: thread/block coordinate intrinsics return the language's native
         // index type i64 (not u32), so cast-free witness kernels typecheck as
@@ -12613,49 +12587,49 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
         // type (hlir_to_gpu.sio hardcodes GpuU32 for the read; all integer binops
         // lower as i32), so widening the checker type to i64 keeps strict integer
         // typing intact without changing the emitted register width.
-        return ty_i64()
+        return Some(Box::new(ty_i64()))
     }
     // syscall6(nr, a1..a6) -> i64 with IO: raw Linux syscall escape hatch,
     // mirroring the lean_single builtin (lean_single.sio emit_syscall6_x86).
     // No user-declared signature exists; without this arm the callee ident
     // falls through to the unbound-identifier check (E137). Codegen emits the
     // SysV->kernel register shuffle (rcx->r10, nr->rax) as a named builtin.
-    if call_expr_is_syscall6(e.left) {
-        checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
+    if call_expr_is_syscall6((*e).left) {
+        checker_check_expr_list_no_type_no_linear_consume_inplace(c, (*e).args)
         var effects_io: [i64; 8] = [0; 8]
         effects_io[0] = 0  // IO (effects.sio: 0=IO)
-        checker_check_callee_effects_inplace(c, e.span, effects_io, 1)
-        return ty_i64()
+        checker_check_callee_effects_inplace(c, (*e).span, effects_io, 1)
+        return Some(Box::new(ty_i64()))
     }
     // SIO-27 (#2760): attribute IO to the implicit IO builtins, mirroring
     // lean_single (which asks for the IO bit whenever the name does not
     // resolve to a user function). A visible declared function with the same
     // spelling keeps its own signature's effects, checked on the generic
     // path below. print_int/print_char never reach here (specialised arms).
-    match e.left {
+    match (*e).left {
         Some(io_callee) => {
             if (*io_callee).kind == ExprKind::ExprIdent && checker_name_is_io_builtin((*io_callee).name) {
                 let io_sig = checker_fn_sigs_find_inplace(c, (*io_callee).name)
                 if io_sig < 0 || checker_invisible_native_builtin_sig(c, (*io_callee).name) {
-                    checker_check_io_builtin_effects_inplace(c, e.span, (*io_callee).name)
+                    checker_check_io_builtin_effects_inplace(c, (*e).span, (*io_callee).name)
                 }
             }
         }
         None => {}
     }
-    if call_expr_is_box_new(e.left) {
-        return checker_check_box_new_expr_inplace(c, e)
+    if call_expr_is_box_new((*e).left) {
+        return Some(Box::new(checker_check_box_new_expr_inplace(c, *e)))
     }
-    if call_expr_should_bridge_by_value(e) {
+    if call_expr_should_bridge_by_value(*e) {
         // These calls are checked only by the by-value check_call_expr guards
         // (typekind builtins, contest witnesses, method calls). Since #3184
         // checker_check_expr_mut is the dispatch-miss sink, so routing them
         // there refused every such call with "Expr.kind dispatch missed".
-        return checker_check_call_expr_value_bridge(c, e)
+        return Some(Box::new(checker_check_call_expr_value_bridge(c, *e)))
     }
     // Preamble: multitest then hypothesis effects (shallow state, no sub-expr check).
     if multitest_effect_enabled((*c).current_effects, (*c).current_effect_count) {
-        let callee_name = multitest_call_name(e.left)
+        let callee_name = multitest_call_name((*e).left)
         if multitest_is_stat_test_name(callee_name) {
             (*c).multitest_count = (*c).multitest_count + 1
         } else if multitest_is_correction_name(callee_name) {
@@ -12663,15 +12637,33 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
         }
     }
     if hypothesis_effect_enabled((*c).current_effects, (*c).current_effect_count) {
-        let callee_name = multitest_call_name(e.left)
+        let callee_name = multitest_call_name((*e).left)
         if (*c).studies.count > 0 && multitest_is_stat_test_name(callee_name) {
-            let outcome_name = hypothesis_outcome_name_from_args(e.args)
+            let outcome_name = hypothesis_outcome_name_from_args((*e).args)
             if !name_is_empty(outcome_name) && !active_study_has_hypothesis_outcome((*c).studies, outcome_name) {
-                let pen = (*c).report_hypothesis_penalty_warning(e.span, outcome_name)
+                let pen = (*c).report_hypothesis_penalty_warning((*e).span, outcome_name)
                 checker_store_from_value(c, pen)
             }
         }
     }
+    None
+}
+fn checker_check_call_early_shadow_inplace(c: *mut Checker, e: *mut Expr) -> Option<Box<TypeEntry>> with Mut, Panic, Div, Alloc, IO {
+    // Bare builtin names are not calls to an invisible private function in
+    // another module. Return before the ident fallback rebinds that signature.
+    // Qualified calls are left alone.
+    match (*e).left {
+        Some(shadow_callee) => {
+            if (*shadow_callee).kind == ExprKind::ExprIdent && checker_invisible_native_builtin_sig(c, (*shadow_callee).name) {
+                checker_check_expr_list_no_type_no_linear_consume_inplace(c, (*e).args)
+                return Some(Box::new(checker_shadowed_builtin_result((*shadow_callee).name)))
+            }
+        }
+        None => {}
+    }
+    return None
+}
+fn checker_check_call_resolve_packed_inplace(c: *mut Checker, e: *mut Expr) -> i64 with Mut, Panic, Div, Alloc, IO {
     var direct_sig_id: i64 = -1
     // Type::method associated-function path (e.g. E::of / Epistemic::measured).
     // When the method is registered, resolve it so the return type is known and
@@ -12680,7 +12672,7 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
     // path-as-first-segment behaviour rather than hard-rejecting — unknown
     // *instance* methods are rejected in checker_check_method_call_with_base_ty
     // even under TyUnknown receivers (see is_error_or_unknown branch).
-    match e.left {
+    match (*e).left {
         Some(callee_expr) => {
             if (*callee_expr).kind == ExprKind::ExprIdent {
                 direct_sig_id = checker_fn_sigs_find_inplace(c, (*callee_expr).name)
@@ -12736,7 +12728,7 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
                 // fixture in this PR (af_mod::AfNum::quad,
                 // pkg_mod::Widget::make) already compiles and runs.
                 if path_type_name_is_used_module && colliding_semantic_sig_id >= 0 {
-                    checker_report_error_at_inplace(c, e.span, 263, 0, 0, 0)
+                    checker_report_error_at_inplace(c, (*e).span, 263, 0, 0, 0)
                 }
                 direct_sig_id = if path_type_name_is_used_module {
                     -1
@@ -12900,7 +12892,7 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
                                 // arm is a qualifier that is not a known module. One message
                                 // covers both; naming only the qualifier tells the first
                                 // program that its import is missing.
-                                checker_report_error_at_inplace(c, e.span, 266, 0, 0, 0)
+                                checker_report_error_at_inplace(c, (*e).span, 266, 0, 0, 0)
                             } else {
                                 direct_sig_id = free_fn_sig_id
                             }
@@ -12915,7 +12907,7 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
     // same spelling. Calling an already-bound function value does not acquire
     // a private symbol from its defining module.
     var callee_is_local_fn = false
-    match e.left {
+    match (*e).left {
         Some(local_callee) => {
             if (*local_callee).kind==ExprKind::ExprIdent {
                 callee_is_local_fn=checker_binding_is_local_function(c,(*local_callee).name)
@@ -12927,47 +12919,41 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
     // Bare builtin names are not calls to an invisible private function in
     // another module. Return before the ident fallback rebinds that signature.
     // Qualified calls are left alone.
-    match e.left {
-        Some(shadow_callee) => {
-            if (*shadow_callee).kind == ExprKind::ExprIdent && checker_invisible_native_builtin_sig(c, (*shadow_callee).name) {
-                checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
-                return checker_shadowed_builtin_result((*shadow_callee).name)
-            }
-        }
-        None => {}
-    }
     // #2164: a bare call to a math name the native backend cannot emit. Guarded
     // on direct_sig_id < 0 so it fires only where the name resolves to nothing
     // real -- the phantom-builtin case that produces a runtime SIGILL.
     if direct_sig_id < 0 && !callee_is_local_fn {
-        match e.left {
+        match (*e).left {
             Some(callee_expr) => {
                 if (*callee_expr).kind == ExprKind::ExprIdent {
                     if name_is_unimplemented_native_math((*callee_expr).name) {
-                        checker_report_error_at_inplace(c, e.span, 221, 0, 0, 0)
+                        checker_report_error_at_inplace(c, (*e).span, 221, 0, 0, 0)
                     }
                 }
             }
             None => {}
         }
     }
-    if direct_sig_id >= 0 {
+    var packed_fb = 0
+    if callee_is_local_fn { packed_fb = 1 }
+    return (direct_sig_id + 2) * 2 + packed_fb
+}
+fn checker_check_call_direct_sig_inplace(c: *mut Checker, e: *mut Expr, direct_sig_id: i64, callee_is_local_fn: bool) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
         if (*c).enforce_visibility && !checker_fn_sig_visible_inplace(c, direct_sig_id) {
-            checker_report_private_fn_inplace(c, e.span, direct_sig_id)
+            checker_report_private_fn_inplace(c, (*e).span, direct_sig_id)
         }
-        let call_start_borrows = (*c).borrows
         let direct_sig = fn_sig_table_get((*c).fn_sigs, direct_sig_id)
         // #1622: calling an `extern "C"` name the native backend does not
         // implement. This is the live arm -- a plain ident callee resolves via
         // direct_sig_id and returns below, never reaching the TyFn fallback.
         var refused_unimplemented = false
         if direct_sig.is_extern && !name_is_native_backend_builtin(direct_sig.name) && !name_is_dynlink_extern(direct_sig.name) {
-            checker_report_error_at_inplace(c, e.span, 250, 0, 0, 0)
+            checker_report_error_at_inplace(c, (*e).span, 250, 0, 0, 0)
             refused_unimplemented = true
         }
         var effective_params = fn_param_list_clone(&direct_sig.params)
         var effective_return_type = direct_sig.return_type
-        match call_expr_type_args(e) {
+        match call_expr_type_args(*e) {
             Some(type_arg_exprs) => {
                 let lowered_type_args = checker_lower_type_expr_list_mut(c, *type_arg_exprs)
                 var generic_names = collect_fn_generic_names_from_params_in_tables((*c).structs, (*c).enums, fn_param_list_clone(&direct_sig.params), empty_type_param_buf())
@@ -12975,7 +12961,7 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
                 if generic_names.count > 0 {
                     let provided_type_arg_count = type_entry_list_count_value(&lowered_type_args)
                     if provided_type_arg_count != generic_names.count {
-                        checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
+                        checker_report_error_at_inplace(c, (*e).span, 10, 0, 0, 0)
                     }
                     effective_params = checker_substitute_fn_params(effective_params, generic_names, type_entry_list_clone(&lowered_type_args))
                     effective_return_type = substitute_type_param(direct_sig.return_type, generic_names, type_entry_list_clone(&lowered_type_args))
@@ -12995,14 +12981,14 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
         let ns_watch_d = if ns_proj_d.0 { ns_proj_d.1 } else { 0 - 1 }
         checker_check_call_args_inplace(
             c,
-            expr_list_handle(e.args),
+            expr_list_handle((*e).args),
             fn_param_list_handle(effective_params),
             direct_sig.param_count,
-            e.span,
+            (*e).span,
             ns_watch_d,
         )
-        checker_check_callee_effects_named_inplace(c, e.span, direct_sig.effects, direct_sig.effect_count, direct_sig.name)
-        checker_release_call_arg_borrows_inplace(c, e.args, effective_params, call_start_borrows)
+        checker_check_callee_effects_named_inplace(c, (*e).span, direct_sig.effects, direct_sig.effect_count, direct_sig.name)
+        checker_release_call_arg_borrows_inplace(c, (*e).args, effective_params)
         if refused_unimplemented {
             (*c).last_call_arg_ns = outer_arg_ns_d
             return ty_error()
@@ -13010,6 +12996,86 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
         let ns_result = checker_propagate_call_result_ns_inplace(c, effective_return_type, ns_proj_d.0)
         (*c).last_call_arg_ns = outer_arg_ns_d
         return ns_result
+}
+fn checker_check_call_ty_fn_sig_inplace(c: *mut Checker, e: *mut Expr, callee_ty: TypeEntry, callee_is_local_fn: bool) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+        let sig = fn_sig_table_get((*c).fn_sigs, callee_ty.fn_sig_id)
+        if (*c).enforce_visibility && !callee_is_local_fn && !checker_fn_sig_visible_inplace(c, callee_ty.fn_sig_id) {
+            checker_report_private_fn_inplace(c, (*e).span, callee_ty.fn_sig_id)
+        }
+        // #1622: calling an `extern "C"` name the native backend does not
+        // implement. Refuse here rather than emit a call that reads 0.
+        // Checked at the CALL, not at the declaration. A bindings module
+        // declares many names and a program calls few, so a declaration-site
+        // refusal would break the declarations for no gain:
+        // parser_card_a_raw_pointer_types.sio declares malloc and never calls
+        // it, and tests/run-pass/ffi_declared_never_called_is_legal.sio pins
+        // the case this rule exists for -- a declared, never-called name with
+        // no intrinsic at all. That fixture is also the guard on the parser:
+        // it only holds while parser/items.sio leaves such a declaration
+        // bodyless instead of giving it a ffi_<name> forwarding body, because
+        // a wrapper body carries is_extern false and this arm never fires.
+        var refused_unimplemented = false
+        if sig.is_extern && !name_is_native_backend_builtin(sig.name) && !name_is_dynlink_extern(sig.name) {
+            checker_report_error_at_inplace(c, (*e).span, 250, 0, 0, 0)
+            refused_unimplemented = true
+        }
+        var effective_params = fn_param_list_clone(&sig.params)
+        var effective_return_type = sig.return_type
+        match call_expr_type_args(*e) {
+            Some(type_arg_exprs) => {
+                let lowered_type_args = checker_lower_type_expr_list_mut(c, *type_arg_exprs)
+                var generic_names = collect_fn_generic_names_from_params_in_tables((*c).structs, (*c).enums, fn_param_list_clone(&sig.params), empty_type_param_buf())
+                generic_names = collect_fn_generic_names_from_type_in_tables((*c).structs, (*c).enums, sig.return_type, generic_names)
+                if generic_names.count > 0 {
+                    let provided_type_arg_count = type_entry_list_count_value(&lowered_type_args)
+                    if provided_type_arg_count != generic_names.count {
+                        checker_report_error_at_inplace(c, (*e).span, 10, 0, 0, 0)
+                    }
+                    effective_params = checker_substitute_fn_params(effective_params, generic_names, type_entry_list_clone(&lowered_type_args))
+                    effective_return_type = substitute_type_param(sig.return_type, generic_names, type_entry_list_clone(&lowered_type_args))
+                }
+            }
+            None => {}
+        }
+        // N2 (REQ-5, codex ruling 2026-08-23): same save/reset/restore
+        // discipline as the direct_sig_id path above, applied to the
+        // noise-set scratch, plus the callee's proven-projection verdict.
+        let outer_arg_ns = (*c).last_call_arg_ns
+        (*c).last_call_arg_ns = ns_arg_sentinel()
+        // Fail-closed (grok-4.6 re-review 2026-08-23): an INDIRECT call through a
+        // first-class function VALUE must NEVER project. callee_ty.fn_sig_id can be
+        // stale — assignment and CFG-join do not rebind a TyFn value's sig_id
+        // (var f = id; f = add_noise; f(k) would else trust id's projection over
+        // the real callee). Only the DIRECT named-call path (direct_sig_id above)
+        // may project; here we watch nothing so the result defaults to top.
+        let ns_watch = 0 - 1
+        checker_check_call_args_inplace(c, expr_list_handle((*e).args), fn_param_list_handle(effective_params), sig.param_count, (*e).span, ns_watch)
+        checker_check_callee_effects_named_inplace(c, (*e).span, sig.effects, sig.effect_count, sig.name)
+        checker_release_call_arg_borrows_inplace(c, (*e).args, effective_params)
+        if refused_unimplemented {
+            (*c).last_call_arg_ns = outer_arg_ns
+            ty_error()
+        } else {
+            let ns_result = checker_propagate_call_result_ns_inplace(c, effective_return_type, false)
+            (*c).last_call_arg_ns = outer_arg_ns
+            ns_result
+        }
+}
+fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    match checker_check_call_special_forms_inplace(c, &e) {
+        Some(boxed_ty) => { return *boxed_ty }
+        None => {}
+    }
+    match checker_check_call_early_shadow_inplace(c, &e) {
+        Some(boxed_ty) => { return *boxed_ty }
+        None => {}
+    }
+    let packed = checker_check_call_resolve_packed_inplace(c, &e)
+    let packed_fb = packed % 2
+    let direct_sig_id = (packed - packed_fb) / 2 - 2
+    let callee_is_local_fn = packed_fb == 1
+    if direct_sig_id >= 0 {
+        return checker_check_call_direct_sig_inplace(c, &e, direct_sig_id, callee_is_local_fn)
     }
     // Callee via the *mut spine, matched locally so the call path does not pass
     // Option<Box<Expr>> through another *mut helper boundary.
@@ -13056,74 +13122,11 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
         }
     }
     if callee_ty.kind == TypeKind::TyFn && callee_ty.fn_sig_id >= 0 {
-        let sig = fn_sig_table_get((*c).fn_sigs, callee_ty.fn_sig_id)
-        if (*c).enforce_visibility && !callee_is_local_fn && !checker_fn_sig_visible_inplace(c, callee_ty.fn_sig_id) {
-            checker_report_private_fn_inplace(c, e.span, callee_ty.fn_sig_id)
-        }
-        // #1622: calling an `extern "C"` name the native backend does not
-        // implement. Refuse here rather than emit a call that reads 0.
-        // Checked at the CALL, not at the declaration. A bindings module
-        // declares many names and a program calls few, so a declaration-site
-        // refusal would break the declarations for no gain:
-        // parser_card_a_raw_pointer_types.sio declares malloc and never calls
-        // it, and tests/run-pass/ffi_declared_never_called_is_legal.sio pins
-        // the case this rule exists for -- a declared, never-called name with
-        // no intrinsic at all. That fixture is also the guard on the parser:
-        // it only holds while parser/items.sio leaves such a declaration
-        // bodyless instead of giving it a ffi_<name> forwarding body, because
-        // a wrapper body carries is_extern false and this arm never fires.
-        var refused_unimplemented = false
-        if sig.is_extern && !name_is_native_backend_builtin(sig.name) && !name_is_dynlink_extern(sig.name) {
-            checker_report_error_at_inplace(c, e.span, 250, 0, 0, 0)
-            refused_unimplemented = true
-        }
-        let call_start_borrows = (*c).borrows
-        var effective_params = fn_param_list_clone(&sig.params)
-        var effective_return_type = sig.return_type
-        match call_expr_type_args(e) {
-            Some(type_arg_exprs) => {
-                let lowered_type_args = checker_lower_type_expr_list_mut(c, *type_arg_exprs)
-                var generic_names = collect_fn_generic_names_from_params_in_tables((*c).structs, (*c).enums, fn_param_list_clone(&sig.params), empty_type_param_buf())
-                generic_names = collect_fn_generic_names_from_type_in_tables((*c).structs, (*c).enums, sig.return_type, generic_names)
-                if generic_names.count > 0 {
-                    let provided_type_arg_count = type_entry_list_count_value(&lowered_type_args)
-                    if provided_type_arg_count != generic_names.count {
-                        checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
-                    }
-                    effective_params = checker_substitute_fn_params(effective_params, generic_names, type_entry_list_clone(&lowered_type_args))
-                    effective_return_type = substitute_type_param(sig.return_type, generic_names, type_entry_list_clone(&lowered_type_args))
-                }
-            }
-            None => {}
-        }
-        // N2 (REQ-5, codex ruling 2026-08-23): same save/reset/restore
-        // discipline as the direct_sig_id path above, applied to the
-        // noise-set scratch, plus the callee's proven-projection verdict.
-        let outer_arg_ns = (*c).last_call_arg_ns
-        (*c).last_call_arg_ns = ns_arg_sentinel()
-        // Fail-closed (grok-4.6 re-review 2026-08-23): an INDIRECT call through a
-        // first-class function VALUE must NEVER project. callee_ty.fn_sig_id can be
-        // stale — assignment and CFG-join do not rebind a TyFn value's sig_id
-        // (var f = id; f = add_noise; f(k) would else trust id's projection over
-        // the real callee). Only the DIRECT named-call path (direct_sig_id above)
-        // may project; here we watch nothing so the result defaults to top.
-        let ns_watch = 0 - 1
-        checker_check_call_args_inplace(c, expr_list_handle(e.args), fn_param_list_handle(effective_params), sig.param_count, e.span, ns_watch)
-        checker_check_callee_effects_named_inplace(c, e.span, sig.effects, sig.effect_count, sig.name)
-        checker_release_call_arg_borrows_inplace(c, e.args, effective_params, call_start_borrows)
-        if refused_unimplemented {
-            (*c).last_call_arg_ns = outer_arg_ns
-            ty_error()
-        } else {
-            let ns_result = checker_propagate_call_result_ns_inplace(c, effective_return_type, false)
-            (*c).last_call_arg_ns = outer_arg_ns
-            ns_result
-        }
+        return checker_check_call_ty_fn_sig_inplace(c, &e, callee_ty, callee_is_local_fn)
     } else if is_error_or_unknown(callee_ty) {
-        let call_start_borrows = (*c).borrows
         checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
-        checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
-        callee_ty
+        checker_release_call_arg_borrows_inplace(c, e.args, None)
+        return *Box::new(callee_ty)
     } else {
         // Enum tuple-variant constructor (`Event::B(42)`): the callee path typed as
         // ty_named(enum_name) (not TyFn), so it would otherwise hit E017. Check the args for
@@ -13132,9 +13135,8 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
         let variant_enum_idx = call_expr_enum_variant_ctor_enum_idx(c, e.left)
         if variant_enum_idx >= 0 {
             let ei = enum_table_get((*c).enums, variant_enum_idx)
-            let call_start_borrows = (*c).borrows
             checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
-            checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
+            checker_release_call_arg_borrows_inplace(c, e.args, None)
             // E264 (fail-closed): a tuple-variant payload has no lowering -- the lowerer
             // emits the bare discriminant and drops every argument. Refuse it rather than
             // typing the call as the enum and miscompiling.
@@ -13142,9 +13144,8 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
             return ty_named(ei.name)
         }
         checker_report_error_at_inplace(c, e.span, 17, 0, 0, 0)
-        let call_start_borrows = (*c).borrows
         checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
-        checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
+        checker_release_call_arg_borrows_inplace(c, e.args, None)
         ty_error()
     }
 }
@@ -13549,7 +13550,8 @@ fn checker_check_io_builtin_effects_inplace(c: *mut Checker, span: Span, source:
     checker_check_callee_effects_named_inplace(c, span, effects_io, 1, source)
 }
 
-    fn checker_release_call_arg_borrows_inplace(c: *mut Checker, args: Option<Box<ExprList> >, params: Option<Box<FnParamList> >, call_start_borrows: BorrowEnv) with Mut, Panic, Div, Alloc, IO {
+    fn checker_release_call_arg_borrows_inplace(c: *mut Checker,
+ args: Option<Box<ExprList> >, params: Option<Box<FnParamList> >) with Mut, Panic, Div, Alloc, IO {
         match args {
             None => {}
             Some(arg_list) => {
@@ -13577,7 +13579,7 @@ fn checker_check_io_builtin_effects_inplace(c: *mut Checker, span: Span, source:
                     // (the second call saw before_pair.0 == 2 from the first call's
                     // un-released borrow, and skipped the release).
                     if implicit_release_kind == 1 || implicit_release_kind == 2 {
-                        (*c).borrows = (*c).borrows.release_borrow(arg_expr.name)
+                        borrow_release_borrow_mut(&!(*c).borrows, arg_expr.name)
                     }
                 }
 
@@ -13586,35 +13588,35 @@ fn checker_check_io_builtin_effects_inplace(c: *mut Checker, span: Span, source:
                     let borrow_name = checker_borrow_place_name(c, arg_expr.left)
                     if !name_is_empty(borrow_name) {
                         // Unconditionally release call-site borrows after call returns
-                        (*c).borrows = (*c).borrows.release_borrow(borrow_name)
+                        borrow_release_borrow_mut(&!(*c).borrows, borrow_name)
                     }
                 }
 
-                checker_release_call_arg_borrows_inplace(c, (*arg_list).tail, next_params, call_start_borrows)
+                checker_release_call_arg_borrows_inplace(c, (*arg_list).tail, next_params)
             }
         }
     }
 
-fn checker_check_call_arg_borrow_boundary_inplace(c: *mut Checker, arg_expr: Expr, param_ty: TypeEntry, call_span: Span) with Mut, Panic, Div, Alloc, IO {
+fn checker_check_call_arg_borrow_boundary_inplace(c: *mut Checker,
+ arg_expr: Expr, param_ty: TypeEntry, call_span: Span) with Mut, Panic, Div, Alloc, IO {
     if arg_expr.kind != ExprKind::ExprIdent {
         return
     }
     if param_ty.kind == TypeKind::TyRef {
-        let borrow_result = (*c).borrows.try_shared_borrow(arg_expr.name)
-        (*c).borrows = borrow_result.0
-        if borrow_result.1 != 0 {
-            checker_report_error_at_inplace(c, call_span, borrow_result.1, 0, 0, 0)
+        let borrow_result = borrow_try_shared_borrow_mut(&!(*c).borrows, arg_expr.name)
+        if borrow_result != 0 {
+            checker_report_error_at_inplace(c, call_span, borrow_result, 0, 0, 0)
         }
     } else if param_ty.kind == TypeKind::TyRefMut {
-        let borrow_result = (*c).borrows.try_exclusive_borrow(arg_expr.name)
-        (*c).borrows = borrow_result.0
-        if borrow_result.1 != 0 {
-            checker_report_error_at_inplace(c, call_span, borrow_result.1, 0, 0, 0)
+        let borrow_result = borrow_try_exclusive_borrow_mut(&!(*c).borrows, arg_expr.name)
+        if borrow_result != 0 {
+            checker_report_error_at_inplace(c, call_span, borrow_result, 0, 0, 0)
         }
     }
 }
 
-fn checker_check_call_arg_refinement_boundary_inplace(c: *mut Checker, arg_expr: Expr, arg_ty: TypeEntry, param_ty: TypeEntry, call_span: Span) with Mut, Panic, Div, Alloc, IO {
+fn checker_check_call_arg_refinement_boundary_inplace(c: *mut Checker,
+ arg_expr: Expr, arg_ty: TypeEntry, param_ty: TypeEntry, call_span: Span) with Mut, Panic, Div, Alloc, IO {
     let expected_ty = call_ref_inner_or_self(param_ty)
     if expected_ty.refinement_id < 0 || expected_ty.refinement_id >= 128 || is_error_or_unknown(expected_ty) {
         return
@@ -13844,7 +13846,8 @@ fn checker_check_call_arg_refinement_boundary_inplace(c: *mut Checker, arg_expr:
     checker_store_from_value(c, t)
 }
 
-fn checker_check_call_arg_knowledge_boundary_inplace(c: *mut Checker, arg_ty: TypeEntry, param_ty: TypeEntry, call_span: Span) with Mut, Panic, Div, Alloc, IO {
+fn checker_check_call_arg_knowledge_boundary_inplace(c: *mut Checker,
+ arg_ty: TypeEntry, param_ty: TypeEntry, call_span: Span) with Mut, Panic, Div, Alloc, IO {
     let expected_ty = call_ref_inner_or_self(param_ty)
     if !is_epistemic_type(expected_ty) {
         return
@@ -13896,7 +13899,8 @@ fn checker_check_call_arg_knowledge_boundary_inplace(c: *mut Checker, arg_ty: Ty
     }
 }
 
-fn checker_check_call_arg_unit_boundary_inplace(c: *mut Checker, arg_expr: Expr, arg_ty: TypeEntry, param_ty: TypeEntry, call_span: Span) with Mut, Panic, Div, Alloc, IO {
+fn checker_check_call_arg_unit_boundary_inplace(c: *mut Checker,
+ arg_expr: Expr, arg_ty: TypeEntry, param_ty: TypeEntry, call_span: Span) with Mut, Panic, Div, Alloc, IO {
     let expected_ty = call_ref_inner_or_self(param_ty)
     let provided_ty = call_ref_inner_or_self(arg_ty)
     let expected_unit = expected_ty.unit_id
@@ -13989,7 +13993,8 @@ fn checker_name_is_destructure_temp(n: Name) -> bool {
 // *mut ExprIdent leaf — transcription of the by-value ExprIdent arm (13856). env lookup +
 // linear-consume in place; returns only the TypeEntry (no 164KB self SRET — the by-value
 // arm's `(c2, ident_ty)` return was the last bridge before crash in 165 deeply-nested cases).
-fn checker_check_ident_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+fn checker_check_ident_expr_inplace(c: *mut Checker,
+ e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     if !type_env_has_binding(&(*c).env, e.name) {
         // Functions are not bound in env (collect keeps them in fn_sigs only) — resolve a bare
         // function reference via the chunked fn_sigs before reporting E137.
@@ -14015,13 +14020,12 @@ fn checker_check_ident_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
         }
     }
     if checker_is_linear_type_inplace(c, ident_ty) && (*c).suppress_linear_consume_depth == 0 {
-        if (*c).borrows.is_borrowed(e.name) {
+        if borrow_is_borrowed(&(*c).borrows, e.name) {
             checker_report_error_at_inplace(c, e.span, 38, 0, 0, 0)
         } else {
-            let consume_result = (*c).borrows.consume_linear(e.name)
-            (*c).borrows = consume_result.0
-            if consume_result.1 != 0 {
-                checker_report_error_at_inplace(c, e.span, consume_result.1, 0, 0, 0)
+            let consume_result = borrow_consume_linear_mut(&!(*c).borrows, e.name)
+            if consume_result != 0 {
+                checker_report_error_at_inplace(c, e.span, consume_result, 0, 0, 0)
             }
         }
     }
@@ -14133,7 +14137,7 @@ fn checker_pattern_names_global_const_inplace(c: *mut Checker, name: Name) -> bo
 
 fn checker_check_match_arm_inplace(c: *mut Checker, arm: MatchArm, scrut_ty: TypeEntry) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     type_env_push_scope_mut(&!(*c).env)
-    (*c).borrows = (*c).borrows.push_scope()
+    borrow_push_scope_mut(&!(*c).borrows)
     checker_push_const_scope_inplace(c)
     if arm.pattern.kind == PatternKind::PatBinding && checker_pattern_names_global_const_inplace(c, arm.pattern.name) {
         // #2377: value pattern -- binds nothing; the arm compares against the constant.
@@ -14150,7 +14154,7 @@ fn checker_check_match_arm_inplace(c: *mut Checker, arm: MatchArm, scrut_ty: Typ
     let body_ty = checker_check_expr_inplace(c, arm.body)
     checker_require_current_linear_scope_consumed_inplace(c)
     checker_pop_const_scope_inplace(c)
-    (*c).borrows = (*c).borrows.pop_scope()
+    borrow_pop_scope_mut(&!(*c).borrows)
     type_env_pop_scope_mut(&!(*c).env)
     body_ty
 }
@@ -14200,7 +14204,7 @@ fn checker_bind_pattern_inplace(c: *mut Checker, pat: Pattern, scrut_ty: TypeEnt
         let lin = checker_is_linear_type_inplace(c, scrut_ty)
         let track_code = checker_track_binding_inplace(c, pat.name, lin, pat.span)
         if track_code == 0 && lin && checker_is_affine_type_inplace(c, scrut_ty) {
-            (*c).borrows = (*c).borrows.mark_affine(pat.name)
+            borrow_mark_affine_mut(&!(*c).borrows, pat.name)
         }
     } else if pat.kind == PatternKind::PatEnum {
         // E264 (fail-closed): a payload sub-pattern on a USER enum (`Shape::Circle(r)`)
@@ -14641,10 +14645,10 @@ fn checker_check_let_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with Mu
     let lin = checker_is_linear_type_inplace(c, bind_ty) && !checker_name_is_destructure_temp(s.name)
     let track_code = checker_track_binding_inplace(c, s.name, lin, s.span)
     if track_code == 0 && lin && checker_is_affine_type_inplace(c, bind_ty) {
-        (*c).borrows = (*c).borrows.mark_affine(s.name)
+        borrow_mark_affine_mut(&!(*c).borrows, s.name)
     }
     // Propagate escape provenance: `let r = &x` taints r LOCAL; `let r = &self.f` keeps it first-class.
-    (*c).borrows = (*c).borrows.set_provenance(s.name, checker_expr_provenance_opt(c, s.expr))
+    borrow_set_provenance_mut(&!(*c).borrows, s.name, checker_expr_provenance_opt(c, s.expr))
     ty_unit()
 }
 
@@ -14729,9 +14733,9 @@ fn checker_check_var_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with Mu
     let lin = checker_is_linear_type_inplace(c, bind_ty) && !checker_name_is_destructure_temp(s.name)
     let track_code = checker_track_binding_inplace(c, s.name, lin, s.span)
     if track_code == 0 && lin && checker_is_affine_type_inplace(c, bind_ty) {
-        (*c).borrows = (*c).borrows.mark_affine(s.name)
+        borrow_mark_affine_mut(&!(*c).borrows, s.name)
     }
-    (*c).borrows = (*c).borrows.set_provenance(s.name, checker_expr_provenance_opt(c, s.expr))
+    borrow_set_provenance_mut(&!(*c).borrows, s.name, checker_expr_provenance_opt(c, s.expr))
     ty_unit()
 }
 
@@ -28748,13 +28752,12 @@ impl Checker {
         }
         let base_ty = base_pair.1
         if name_matches_str3(e.name, 108, 101, 110) && len_method_supported(base_ty) {
-            let call_start_borrows = c.borrows
             c = c.check_expr_list_no_type_no_linear_consume(e.args)
             match e.args {
                 Some(_) => { c = c.report_error_at(e.span, 10, 0, 0, 0) }
                 None => {}
             }
-            c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
+            c = c.release_call_arg_borrows(e.args, None)
             if is_seq_type(base_ty) {
                 return (c, ty_knowledge(ty_i64(), 0.0 - 1.0))
             }
@@ -28764,11 +28767,10 @@ impl Checker {
             // Knowledge<T>.unwrap() -> T
             if name_matches_str6(e.name, 117, 110, 119, 114, 97, 112) {
                 // "unwrap" = [117, 110, 119, 114, 97, 112]
-                let call_start_borrows = c.borrows
                 match e.args {
                     None => {
                         c = c.report_error_at(e.span, 172, 0, 0, 0)
-                        c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
+                        c = c.release_call_arg_borrows(e.args, None)
                         (c, knowledge_inner(base_ty))
                     }
                     Some(arg_list) => {
@@ -28776,15 +28778,14 @@ impl Checker {
                             c = c.report_error_at(e.span, 173, 0, 0, 0)
                         }
                         c = c.check_expr_list_no_type_no_linear_consume(e.args)
-                        c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
+                        c = c.release_call_arg_borrows(e.args, None)
                         (c, knowledge_inner(base_ty))
                     }
                 }
             } else {
                 c = c.report_error_at(e.span, 11, 0, 0, 0)
-                let call_start_borrows = c.borrows
                 c = c.check_expr_list_no_type_no_linear_consume(e.args)
-                c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
+                c = c.release_call_arg_borrows(e.args, None)
                 (c, ty_error())
             }
         } else if base_ty.kind == TypeKind::TyHyper {
@@ -28796,21 +28797,18 @@ impl Checker {
             }
             // "conjugate" = [99,111,110,106,117,103,97,116,101] (9 chars)
             if name_matches_str9(e.name, 99, 111, 110, 106, 117, 103, 97, 116, 101) {
-                let call_start_borrows = c.borrows
                 c = c.check_expr_list_no_type_no_linear_consume(e.args)
-                c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
+                c = c.release_call_arg_borrows(e.args, None)
                 (c, base_ty)  // conjugate returns same Hyper type
             // "norm" = [110,111,114,109] (4 chars)
             } else if name_matches_str4(e.name, 110, 111, 114, 109) {
-                let call_start_borrows = c.borrows
                 c = c.check_expr_list_no_type_no_linear_consume(e.args)
-                c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
+                c = c.release_call_arg_borrows(e.args, None)
                 (c, inner_ty)  // norm returns scalar
             // "inverse" = [105,110,118,101,114,115,101] (7 chars)
             } else if name_matches_str7(e.name, 105, 110, 118, 101, 114, 115, 101) {
-                let call_start_borrows = c.borrows
                 c = c.check_expr_list_no_type_no_linear_consume(e.args)
-                c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
+                c = c.release_call_arg_borrows(e.args, None)
                 // Only division algebras have inverse (alg <= 3)
                 if alg > 3 {
                     c = c.report_error_at(e.span, 32, 0, 0, 0)
@@ -28820,21 +28818,19 @@ impl Checker {
                 }
             } else {
                 c = c.report_error_at(e.span, 11, 0, 0, 0)
-                let call_start_borrows = c.borrows
                 c = c.check_expr_list_no_type_no_linear_consume(e.args)
-                c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
+                c = c.release_call_arg_borrows(e.args, None)
                 (c, ty_error())
             }
         } else if base_ty.kind == TypeKind::TyNamed {
             let sig_id = fn_sig_table_find_method_semantic(c.fn_sigs, base_ty, e.name)
             if sig_id >= 0 {
                 let sig = fn_sig_table_get(c.fn_sigs, sig_id)
-                let call_start_borrows = c.borrows
                 c = c.check_call_args(e.args, sig.params, sig.param_count, e.span)
                 // Verify callee method's effects are subset of caller's effects
                 c = c.check_callee_effects(e.span, sig.effects, sig.effect_count)
                 // Release borrows taken for method call arguments
-                c = c.release_call_arg_borrows(e.args, sig.params, call_start_borrows)
+                c = c.release_call_arg_borrows(e.args, sig.params)
                 (c, sig.return_type)
             } else {
                 // A named type which is not a declared struct/enum is an unresolved
@@ -28842,24 +28838,21 @@ impl Checker {
                 // generic declaration boundary, so defer concrete method selection
                 // until monomorphization instead of issuing E011 for `F.er_add`.
                 if type_is_unresolved_type_param_in_tables(c.structs, c.enums, base_ty) {
-                    let call_start_borrows = c.borrows
                     c = c.check_expr_list_no_type_no_linear_consume(e.args)
-                    c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
+                    c = c.release_call_arg_borrows(e.args, None)
                     return (c, base_ty)
                 }
                 // Method not found
                 c = c.report_error_at(e.span, 11, 0, 0, 0)
                 // Still check args to accumulate errors
-                let call_start_borrows = c.borrows
                 c = c.check_expr_list_no_type_no_linear_consume(e.args)
-                c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
+                c = c.release_call_arg_borrows(e.args, None)
                 (c, ty_error())
             }
         } else if base_ty.kind == TypeKind::TyString {
             // String methods: .as_bytes() -> &[i8], .len() -> i64
-            let call_start_borrows = c.borrows
             c = c.check_expr_list_no_type_no_linear_consume(e.args)
-            c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
+            c = c.release_call_arg_borrows(e.args, None)
             // "as_bytes" = [97,115,95,98,121,116,101,115]
             if name_matches_str8(e.name, 97, 115, 95, 98, 121, 116, 101, 115) {
                 (c, ty_ref(ty_i8()))
@@ -28878,36 +28871,31 @@ impl Checker {
             let sig_id = fn_sig_table_find_method_semantic(c.fn_sigs, base_ty, e.name)
             if sig_id >= 0 {
                 let sig = fn_sig_table_get(c.fn_sigs, sig_id)
-                let call_start_borrows = c.borrows
                 c = c.check_call_args(e.args, sig.params, sig.param_count, e.span)
                 c = c.check_callee_effects(e.span, sig.effects, sig.effect_count)
-                c = c.release_call_arg_borrows(e.args, sig.params, call_start_borrows)
+                c = c.release_call_arg_borrows(e.args, sig.params)
                 (c, sig.return_type)
             } else {
                 c = c.report_error_at(e.span, 19, 0, 0, 0)
-                let call_start_borrows = c.borrows
                 c = c.check_expr_list_no_type_no_linear_consume(e.args)
-                c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
+                c = c.release_call_arg_borrows(e.args, None)
                 (c, ty_error())
             }
         } else if is_error_or_unknown(base_ty) {
             // Mirror inplace: reject nonexistent method names under untyped receivers.
             if !fn_sig_table_has_method_name(c.fn_sigs, e.name) {
                 c = c.report_error_at(e.span, 11, 0, 0, 0)
-                let call_start_borrows = c.borrows
                 c = c.check_expr_list_no_type_no_linear_consume(e.args)
-                c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
+                c = c.release_call_arg_borrows(e.args, None)
                 return (c, ty_error())
             }
-            let call_start_borrows = c.borrows
             c = c.check_expr_list_no_type_no_linear_consume(e.args)
-            c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
+            c = c.release_call_arg_borrows(e.args, None)
             (c, base_ty)
         } else {
             c = c.report_error_at(e.span, 19, 0, 0, 0)
-            let call_start_borrows = c.borrows
             c = c.check_expr_list_no_type_no_linear_consume(e.args)
-            c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
+            c = c.release_call_arg_borrows(e.args, None)
             (c, ty_error())
         }
     }
@@ -28915,22 +28903,20 @@ impl Checker {
     fn check_method_call_with_base_ty(self, e: Expr, base_ty: TypeEntry) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         var c = self
         if name_matches_str3(e.name, 108, 101, 110) && len_method_supported(base_ty) {
-            let call_start_borrows = c.borrows
             c = c.check_expr_list_no_type_no_linear_consume(e.args)
             match e.args {
                 Some(_) => { c = c.report_error_at(e.span, 10, 0, 0, 0) }
                 None => {}
             }
-            c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
+            c = c.release_call_arg_borrows(e.args, None)
             return (c, ty_i64())
         }
         if base_ty.kind == TypeKind::TyKnowledge {
             if name_matches_str6(e.name, 117, 110, 119, 114, 97, 112) {
-                let call_start_borrows = c.borrows
                 match e.args {
                     None => {
                         c = c.report_error_at(e.span, 172, 0, 0, 0)
-                        c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
+                        c = c.release_call_arg_borrows(e.args, None)
                         (c, knowledge_inner(base_ty))
                     }
                     Some(arg_list) => {
@@ -28938,15 +28924,14 @@ impl Checker {
                             c = c.report_error_at(e.span, 173, 0, 0, 0)
                         }
                         c = c.check_expr_list_no_type_no_linear_consume(e.args)
-                        c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
+                        c = c.release_call_arg_borrows(e.args, None)
                         (c, knowledge_inner(base_ty))
                     }
                 }
             } else {
                 c = c.report_error_at(e.span, 11, 0, 0, 0)
-                let call_start_borrows = c.borrows
                 c = c.check_expr_list_no_type_no_linear_consume(e.args)
-                c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
+                c = c.release_call_arg_borrows(e.args, None)
                 (c, ty_error())
             }
         } else if base_ty.kind == TypeKind::TyHyper {
@@ -28956,19 +28941,16 @@ impl Checker {
                 None => ty_error()
             }
             if name_matches_str9(e.name, 99, 111, 110, 106, 117, 103, 97, 116, 101) {
-                let call_start_borrows = c.borrows
                 c = c.check_expr_list_no_type_no_linear_consume(e.args)
-                c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
+                c = c.release_call_arg_borrows(e.args, None)
                 (c, base_ty)
             } else if name_matches_str4(e.name, 110, 111, 114, 109) {
-                let call_start_borrows = c.borrows
                 c = c.check_expr_list_no_type_no_linear_consume(e.args)
-                c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
+                c = c.release_call_arg_borrows(e.args, None)
                 (c, inner_ty)
             } else if name_matches_str7(e.name, 105, 110, 118, 101, 114, 115, 101) {
-                let call_start_borrows = c.borrows
                 c = c.check_expr_list_no_type_no_linear_consume(e.args)
-                c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
+                c = c.release_call_arg_borrows(e.args, None)
                 if alg > 3 {
                     c = c.report_error_at(e.span, 32, 0, 0, 0)
                     (c, ty_error())
@@ -28977,38 +28959,33 @@ impl Checker {
                 }
             } else {
                 c = c.report_error_at(e.span, 11, 0, 0, 0)
-                let call_start_borrows = c.borrows
                 c = c.check_expr_list_no_type_no_linear_consume(e.args)
-                c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
+                c = c.release_call_arg_borrows(e.args, None)
                 (c, ty_error())
             }
         } else if base_ty.kind == TypeKind::TyNamed {
             let sig_id = fn_sig_table_find_method_semantic(c.fn_sigs, base_ty, e.name)
             if sig_id >= 0 {
                 let sig = fn_sig_table_get(c.fn_sigs, sig_id)
-                let call_start_borrows = c.borrows
                 c = c.check_call_args(e.args, sig.params, sig.param_count, e.span)
                 c = c.check_callee_effects(e.span, sig.effects, sig.effect_count)
-                c = c.release_call_arg_borrows(e.args, sig.params, call_start_borrows)
+                c = c.release_call_arg_borrows(e.args, sig.params)
                 (c, sig.return_type)
             } else {
                 if type_is_unresolved_type_param_in_tables(c.structs, c.enums, base_ty) {
-                    let call_start_borrows = c.borrows
                     c = c.check_expr_list_no_type_no_linear_consume(e.args)
-                    c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
+                    c = c.release_call_arg_borrows(e.args, None)
                     (c, base_ty)
                 } else {
                 c = c.report_error_at(e.span, 11, 0, 0, 0)
-                let call_start_borrows = c.borrows
                 c = c.check_expr_list_no_type_no_linear_consume(e.args)
-                c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
+                c = c.release_call_arg_borrows(e.args, None)
                 (c, ty_error())
                 }
             }
         } else if base_ty.kind == TypeKind::TyString {
-            let call_start_borrows = c.borrows
             c = c.check_expr_list_no_type_no_linear_consume(e.args)
-            c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
+            c = c.release_call_arg_borrows(e.args, None)
             if name_matches_str8(e.name, 97, 115, 95, 98, 121, 116, 101, 115) {
                 (c, ty_ref(ty_i8()))
             } else if name_matches_str3(e.name, 108, 101, 110) {
@@ -29025,36 +29002,31 @@ impl Checker {
             let sig_id = fn_sig_table_find_method_semantic(c.fn_sigs, base_ty, e.name)
             if sig_id >= 0 {
                 let sig = fn_sig_table_get(c.fn_sigs, sig_id)
-                let call_start_borrows = c.borrows
                 c = c.check_call_args(e.args, sig.params, sig.param_count, e.span)
                 c = c.check_callee_effects(e.span, sig.effects, sig.effect_count)
-                c = c.release_call_arg_borrows(e.args, sig.params, call_start_borrows)
+                c = c.release_call_arg_borrows(e.args, sig.params)
                 (c, sig.return_type)
             } else {
                 c = c.report_error_at(e.span, 19, 0, 0, 0)
-                let call_start_borrows = c.borrows
                 c = c.check_expr_list_no_type_no_linear_consume(e.args)
-                c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
+                c = c.release_call_arg_borrows(e.args, None)
                 (c, ty_error())
             }
         } else if is_error_or_unknown(base_ty) {
             // Mirror inplace: reject nonexistent method names under untyped receivers.
             if !fn_sig_table_has_method_name(c.fn_sigs, e.name) {
                 c = c.report_error_at(e.span, 11, 0, 0, 0)
-                let call_start_borrows = c.borrows
                 c = c.check_expr_list_no_type_no_linear_consume(e.args)
-                c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
+                c = c.release_call_arg_borrows(e.args, None)
                 return (c, ty_error())
             }
-            let call_start_borrows = c.borrows
             c = c.check_expr_list_no_type_no_linear_consume(e.args)
-            c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
+            c = c.release_call_arg_borrows(e.args, None)
             (c, base_ty)
         } else {
             c = c.report_error_at(e.span, 19, 0, 0, 0)
-            let call_start_borrows = c.borrows
             c = c.check_expr_list_no_type_no_linear_consume(e.args)
-            c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
+            c = c.release_call_arg_borrows(e.args, None)
             (c, ty_error())
         }
     }
@@ -29067,7 +29039,6 @@ impl Checker {
     fn check_slice_len_call_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         let first_arg = expr_list_head(e.args)
         let second_arg = expr_list_second(e.args)
-        let call_start_borrows = self.borrows
         let first_pair = self.check_opt_expr(first_arg)
         var c = first_pair.0
         let arg_ty = first_pair.1
@@ -29086,7 +29057,7 @@ impl Checker {
         if !is_ok && !is_error_or_unknown(arg_ty) {
             c = c.report_error_at(e.span, 9, 0, 0, 0)
         }
-        c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
+        c = c.release_call_arg_borrows(e.args, None)
         (c, ty_i64())
     }
 
@@ -29125,7 +29096,6 @@ impl Checker {
     fn check_box_new_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         let first_arg = expr_list_head(e.args)
         let second_arg = expr_list_second(e.args)
-        let call_start_borrows = self.borrows
         let first_pair = self.check_opt_expr(first_arg)
         var c = first_pair.0
         let arg_ty = first_pair.1
@@ -29141,7 +29111,7 @@ impl Checker {
             }
             None => {}
         }
-        c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
+        c = c.release_call_arg_borrows(e.args, None)
         var box_ty = ty_named(make_name("Box"))
         box_ty.inner = Some(Box::new(arg_ty))
         (c, box_ty)
@@ -29370,7 +29340,6 @@ impl Checker {
                 c = c.report_error_at(e.span, 250, 0, 0, 0)
                 refused_unimplemented = true
             }
-            let call_start_borrows = c.borrows
             var effective_params = fn_param_list_clone(&sig.params)
             var effective_return_type = sig.return_type
             match call_expr_type_args(e) {
@@ -29396,22 +29365,20 @@ impl Checker {
             c = c.check_callee_effects(e.span, sig.effects, sig.effect_count)
             // Release borrows taken for call arguments — the call has returned,
             // so exclusive/shared borrows on arguments are no longer active.
-            c = c.release_call_arg_borrows(e.args, effective_params, call_start_borrows)
+            c = c.release_call_arg_borrows(e.args, effective_params)
             if refused_unimplemented {
                 (c, ty_error())
             } else {
                 (c, effective_return_type)
             }
         } else if is_error_or_unknown(callee_ty) {
-            let call_start_borrows = c.borrows
             c = c.check_expr_list_no_type_no_linear_consume(e.args)
-            c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
+            c = c.release_call_arg_borrows(e.args, None)
             (c, callee_ty)
         } else {
             c = c.report_error_at(e.span, 17, 0, 0, 0)
-            let call_start_borrows = c.borrows
             c = c.check_expr_list_no_type_no_linear_consume(e.args)
-            c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
+            c = c.release_call_arg_borrows(e.args, None)
             (c, ty_error())
         }
     }
@@ -31389,7 +31356,7 @@ impl Checker {
     //   2) explicit unary borrows:   f(&x) / f(&!x)
     // Release only borrows introduced by this call expression; pre-existing
     // borrows must remain active even if a call-site borrow attempt fails.
-    fn release_call_arg_borrows(self, args: Option<Box<ExprList> >, params: Option<Box<FnParamList> >, call_start_borrows: BorrowEnv) -> Checker with Mut, Panic, Div, Alloc, IO {
+    fn release_call_arg_borrows(self, args: Option<Box<ExprList> >, params: Option<Box<FnParamList> >) -> Checker with Mut, Panic, Div, Alloc, IO {
         var c = self
         match args {
             None => c
@@ -31431,7 +31398,7 @@ impl Checker {
                     }
                 }
 
-                c.release_call_arg_borrows((*arg_list).tail, next_params, call_start_borrows)
+                c.release_call_arg_borrows((*arg_list).tail, next_params)
             }
         }
     }
