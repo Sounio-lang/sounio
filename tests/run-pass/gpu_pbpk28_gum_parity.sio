@@ -53,6 +53,20 @@ fn check_gum_case(dose_mg: f64, t_end: f64, use_sema: bool) -> i64 with IO, Mut,
         print("FAIL gpu_gum case kernel combine failed\n")
         return 1
     }
+    let got_main = gum_main_array(got)
+    let fails = ep28_gum_parity_check(prm, priors, dose_mg, t_end, got_main, got.sensitivity)
+    if fails != 0 {
+        print("FAIL gpu_gum case bitwise mismatch\n")
+    } else {
+        if use_sema {
+            print("gpu_gum semaglutide OK\n")
+        } else {
+            print("gpu_gum rapamycin OK\n")
+        }
+    }
+    fails
+}
+fn gum_main_array(got: GumCombineOut) -> [f64; 8] with Mut {
     var got_main: [f64; 8] = [0.0; 8]
     got_main[0] = got.var_auc_b
     got_main[1] = got.var_cb24
@@ -62,9 +76,40 @@ fn check_gum_case(dose_mg: f64, t_end: f64, use_sema: bool) -> i64 with IO, Mut,
     got_main[5] = got.kp_share_brain
     got_main[6] = got.kp_share_liver
     got_main[7] = got.kp_share_kidney
-    let fails = ep28_gum_parity_check(prm, priors, dose_mg, t_end, got_main, got.sensitivity)
-    if fails != 0 {
-        print("FAIL gpu_gum case bitwise mismatch\n")
+    got_main
+}
+fn check_gum_sabotage() -> i64 with IO, Mut, Div, Panic, Epistemic {
+    var fails: i64 = 0
+    var prm = ep28_rapamycin_params()
+    var priors = ep28_rapamycin_priors()
+    let cols = ep28_jacobian_columns(prm, priors, 5.0, 168.0)
+    if !cols.ok {
+        print("FAIL gpu_gum sabotage setup\n")
+        return 1
+    }
+    let vc = ep28_prior_vc(priors)
+    let got = pbpk28_gum_combine_f64(cols.d_auc_b, cols.d_cb24, cols.d_auc_l, cols.d_auc_k, vc.0, vc.1)
+    if !got.ok {
+        print("FAIL gpu_gum sabotage setup\n")
+        return 1
+    }
+    let base = gum_main_array(got)
+    var bad = base
+    bad[2] = bad[2] + 1.0
+    let f1 = ep28_gum_parity_check(prm, priors, 5.0, 168.0, bad, got.sensitivity)
+    if f1 == 0 {
+        print("FAIL gpu_gum sabotage main survived\n")
+        fails = fails + 1
+    }
+    var bads = got.sensitivity
+    bads[5] = bads[5] + 1.0
+    let f2 = ep28_gum_parity_check(prm, priors, 5.0, 168.0, base, bads)
+    if f2 == 0 {
+        print("FAIL gpu_gum sabotage sens survived\n")
+        fails = fails + 1
+    }
+    if fails == 0 {
+        print("gpu_gum sabotage OK\n")
     }
     fails
 }
@@ -83,6 +128,8 @@ fn check_gum_emitter() -> i64 with IO, Mut, Panic, Div, Alloc {
     if !str_contains(ptx, "st.global.f64") { fails = fails + 1 }
     if fails != 0 {
         print("FAIL gpu_gum emitter text\n")
+    } else {
+        print("gpu_gum emitter OK\n")
     }
     fails
 }
@@ -106,6 +153,8 @@ fn check_gum_fail_closed() -> i64 with IO, Mut, Div, Panic {
     if r3.var_auc_b != 0.0 { fails = fails + 1 }
     if fails != 0 {
         print("FAIL gpu_gum fail-closed\n")
+    } else {
+        print("gpu_gum failclosed OK\n")
     }
     fails
 }
@@ -116,6 +165,7 @@ fn main() -> i64 with IO, Mut, Div, Panic, Alloc, Epistemic {
     fails = fails + check_gum_case(1.0, 168.0, true)
     fails = fails + check_gum_emitter()
     fails = fails + check_gum_fail_closed()
+    fails = fails + check_gum_sabotage()
     if fails == 0 {
         print("PASS gpu_pbpk28_gum_parity\n")
     } else {
