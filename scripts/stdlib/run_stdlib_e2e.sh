@@ -132,7 +132,20 @@ SKIP=0
 ERRORS=""
 
 RESULTS_FILE="$(mktemp)"
-trap 'rm -f "$RESULTS_FILE"' EXIT
+PLATFORM_LIB_DIR="$(mktemp -d)"
+trap 'rm -f "$RESULTS_FILE"; rm -rf "$PLATFORM_LIB_DIR"' EXIT
+
+# stdlib/ffi/platform.sio dlopen()s libstdlib_platform.so; sync, thread,
+# net, time and profile build on it. Build it from runtime/stdlib_platform.cpp
+# so those tests measure the stdlib and not a missing library. A failed build
+# is not hidden: the tests that need it then fail with platform status 2.
+if "${CXX:-g++}" -std=c++23 -O2 -Wall -Wextra -Werror -shared -fPIC -pthread \
+    "$ROOT_DIR/runtime/stdlib_platform.cpp" -o "$PLATFORM_LIB_DIR/libstdlib_platform.so" 2>"$PLATFORM_LIB_DIR/build.log"; then
+  export LD_LIBRARY_PATH="$PLATFORM_LIB_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+else
+  echo "warning: libstdlib_platform.so did not build; platform-backed tests will fail" >&2
+  cat "$PLATFORM_LIB_DIR/build.log" >&2
+fi
 
 b64_encode() {
   printf '%s' "$1" | base64 | tr -d '\n'
