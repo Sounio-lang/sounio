@@ -25,6 +25,16 @@ fn expr_kind_ends_line_stmt(kind: ExprKind) -> bool {
         || kind == ExprKind::ExprForIn
 }
 
+// `a ++ b` for path segment lists (the type-position turbofish joins
+// `HeapVec` and `new` around `::<i64>`). Same by-value node shape as
+// parser::types reverse_string_list_loop.
+fn exprs_string_list_append(a: StringList, b: StringList) -> StringList with Mut, Alloc {
+    match a.tail {
+        None => StringList { head_buf: a.head_buf, head_len: a.head_len, tail: Some(Box::new(b)) },
+        Some(rest) => StringList { head_buf: a.head_buf, head_len: a.head_len, tail: Some(Box::new(exprs_string_list_append(*rest, b))) },
+    }
+}
+
 impl Parser {
     // ============================================================
     // Expression entry point (dispatches to Pratt parser)
@@ -1319,7 +1329,7 @@ impl Parser {
         if parser_peek_ahead(self, 1) == TokenKind::ColonColon {
             let pair = self.parse_type_path()
             var p1 = pair.0
-            let path = pair.1
+            var path = pair.1
 
             // Turbofish: ident_or_path followed by ::<T, U>
             var turbofish_args: Option<Box<TypeExprList>> = None
@@ -1328,6 +1338,34 @@ impl Parser {
                 let ta_pair = p1.parse_type_args()
                 p1 = ta_pair.0
                 turbofish_args = Some(Box::new(ta_pair.1))
+                // Type-position turbofish: `HeapVec::<i64>::new()`. The arguments
+                // name the impl's type parameters, which the specializer already
+                // treats as the associated fn's own free type variables, so the
+                // path continues and the arguments ride on it exactly as in
+                // `HeapVec::new::<i64>()`. Before this the trailing `::new` was
+                // left unparsed ("expected expression, found `::`"), although
+                // lean_single accepts the form (tests/stdlib/collections/
+                // test_heap_vec_generic.sio).
+                if parser_peek(p1) == TokenKind::ColonColon {
+                    let after_k = parser_peek_ahead(p1, 1)
+                    if after_k == TokenKind::Ident || tk_is_keyword(after_k) {
+                        p1 = p1.advance()  // skip ::
+                        let rest_pair = p1.parse_type_path()
+                        p1 = rest_pair.0
+                        let rest = rest_pair.1
+                        let joined = exprs_string_list_append(path.segments, rest.segments)
+                        path = AstPath { segments: joined, seg_count: path.seg_count + rest.seg_count }
+                        // A second turbofish after the continued path would give
+                        // the call two argument lists; refuse it.
+                        if parser_peek(p1) == TokenKind::ColonColon && parser_peek_ahead(p1, 1) == TokenKind::Lt {
+                            p1.had_error = true
+                            p1.error_count = p1.error_count + 1
+                            if p1.error_count <= 20 {
+                                print("error: a path may carry only one turbofish (`Type::<T>::f` or `Type::f::<T>`, not both)\n")
+                            }
+                        }
+                    }
+                }
             }
 
             // E043, path-qualified: `foo::bar!(...)`. Same lexical-adjacency
