@@ -14236,6 +14236,25 @@ fn checker_scrut_is_user_enum_inplace(c: *mut Checker, scrut_ty: TypeEntry) -> b
     enum_table_find((*c).enums, scrut_ty.name) >= 0
 }
 
+// The scrutinee is a user enum, directly or through `&` / `&!`. `match p { .. }` on a
+// `p: &Proposition` parameter types the scrutinee as TyRef(Proposition): the plain
+// check above saw a TyRef, so the E264 refusal never fired, and the payload binding
+// fell to `scrut_ty.inner` -- the enum itself -- typing `Var(name)`'s `name` as
+// `Proposition` (stdlib/logic/pure/types.sio proposition_evaluate: "expected string,
+// found Proposition"). The lowerer has no payload binding through a reference either.
+fn checker_scrut_is_user_enum_or_ref_inplace(c: *mut Checker, scrut_ty: TypeEntry) -> bool with Mut, Panic, Div, Alloc, IO {
+    if checker_scrut_is_user_enum_inplace(c, scrut_ty) {
+        return true
+    }
+    if scrut_ty.kind != TypeKind::TyRef && scrut_ty.kind != TypeKind::TyRefMut {
+        return false
+    }
+    match scrut_ty.inner {
+        Some(inner_box) => checker_scrut_is_user_enum_inplace(c, *inner_box)
+        None => false
+    }
+}
+
 fn checker_bind_pattern_inplace(c: *mut Checker, pat: Pattern, scrut_ty: TypeEntry) with Mut, Panic, Div, Alloc, IO {
     if pat.kind == PatternKind::PatBinding {
         type_env_bind_mut(&!(*c).env, pat.name, scrut_ty, pat.is_mut)
@@ -14249,23 +14268,33 @@ fn checker_bind_pattern_inplace(c: *mut Checker, pat: Pattern, scrut_ty: TypeEnt
         // E264 (fail-closed): a payload sub-pattern on a USER enum (`Shape::Circle(r)`)
         // has no lowering -- lower_match_arm_ref compares the bare discriminant and never
         // binds the sub-patterns. Option/Box scrutinees carry .inner and are unaffected.
-        if checker_scrut_is_user_enum_inplace(c, scrut_ty) && pattern_list_count(pat.sub_patterns) > 0 {
+        // The scrutinee may reach the enum through `&` / `&!` (a `p: &Proposition`
+        // parameter): the refusal and the binding below must see through it.
+        let scrut_user_enum = checker_scrut_is_user_enum_or_ref_inplace(c, scrut_ty)
+        if scrut_user_enum && pattern_list_count(pat.sub_patterns) > 0 {
             checker_report_error_at_inplace(c, pat.span, 264, 0, 0, 0)
         }
-        // Single-payload variant (e.g. Some(x) on Option<T>/Box<T>): the scrutinee
-        // carries the payload type in .inner (Box/Option lowering). Bind the payload
-        // sub-pattern to that inner type so (*x) / (*x).field type correctly. Fall
-        // back to scrut_ty when there is no inner (other enums — positional variant
-        // field types are not otherwise tracked).
-        match scrut_ty.inner {
-            Some(inner_box) => checker_bind_pattern_list_inplace(c, pat.sub_patterns, *inner_box)
-            None => checker_bind_pattern_list_inplace(c, pat.sub_patterns, scrut_ty)
+        if scrut_user_enum {
+            // KL-20: positional variant field types are not tracked, and the arm is
+            // already refused (E264) when it has payload sub-patterns. Bind them to
+            // the error type -- never to the enum itself, which turned the refusal
+            // into a misleading "expected string, found Proposition" cascade at
+            // every use of the binding.
+            checker_bind_pattern_list_inplace(c, pat.sub_patterns, ty_error())
+        } else {
+            // Single-payload variant (e.g. Some(x) on Option<T>/Box<T>): the scrutinee
+            // carries the payload type in .inner (Box/Option lowering). Bind the payload
+            // sub-pattern to that inner type so (*x) / (*x).field type correctly.
+            match scrut_ty.inner {
+                Some(inner_box) => checker_bind_pattern_list_inplace(c, pat.sub_patterns, *inner_box)
+                None => checker_bind_pattern_list_inplace(c, pat.sub_patterns, scrut_ty)
+            }
         }
     } else if pat.kind == PatternKind::PatStruct {
         // E264 (fail-closed): `Shape::Rect { w, h }` on a user enum -- the lowerer skips
         // struct patterns outright ("Unsupported pattern -- skip"), so the arm could never
-        // match and its bindings would never be set.
-        if checker_scrut_is_user_enum_inplace(c, scrut_ty) {
+        // match and its bindings would never be set. Also through `&` / `&!`.
+        if checker_scrut_is_user_enum_or_ref_inplace(c, scrut_ty) {
             checker_report_error_at_inplace(c, pat.span, 264, 0, 0, 0)
         }
         checker_bind_struct_pat_fields_inplace(c, pat.pat_fields, scrut_ty)
