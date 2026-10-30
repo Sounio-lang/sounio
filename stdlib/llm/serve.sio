@@ -11,6 +11,7 @@ use hetero::probe_cuda::{pb_cstr}
 use hetero::runtime::{Runtime}
 use llm::attn_gpu::{llama_sample_greedy, llama_sample_temp_top_p}
 use llm::bpe::{Bpe, bpe_decode_token, bpe_encode}
+use llm::chat::{chat_default_tpl, chat_find_toolcall, chat_render}
 use llm::llama::{Llama, KvCache, kv_new, llama_forward, llama_forward_rt}
 use llm::safetensors::{st_byte_at}
 use tensor2::cpu_kernel::{CpuBuf, ck_alloc, ck_get, ck_set}
@@ -460,7 +461,8 @@ fn sv_begin(
     lib: &NwLib, m: &!Llama, bp: &Bpe, rt: &Runtime, use_gpu: bool,
     model: string, fd: i64, req: i64, rbuf: *mut u8, rlen: i64,
     ids: &!CpuBuf, prm: &!CpuBuf, seed: &!CpuBuf, logi: &!CpuBuf,
-    kvs: &![KvCache; 4], nids: &![i64; 4], gen: &![i64; 4], t0: &![i64; 4], si: i64
+    kvs: &![KvCache; 4], nids: &![i64; 4], gen: &![i64; 4], t0: &![i64; 4], si: i64,
+    chats: &![i64; 4], chtols: &![i64; 4], tpl: *mut u8, tplen: i64
 ) -> i64 with Alloc, Mut, Panic, Div, IO {
     let body = heap_alloc(69632)
     if sv_starts(rbuf, rlen, 0, "GET /health") {
@@ -479,8 +481,9 @@ fn sv_begin(
         sv_reply(lib, fd, "200 OK", body, p)
         return 0 - 1
     }
-    if !sv_starts(rbuf, rlen, 0, "POST /v1/completions") {
-        let p = sv_err_body(body, "route not found (v1: GET /health, GET /v1/models, POST /v1/completions)")
+    let is_chat = sv_starts(rbuf, rlen, 0, "POST /v1/chat/completions")
+    if !sv_starts(rbuf, rlen, 0, "POST /v1/completions") && !is_chat {
+        let p = sv_err_body(body, "route not found (v1: GET /health, GET /v1/models, POST /v1/completions, POST /v1/chat/completions)")
         sv_reply(lib, fd, "404 Not Found", body, p)
         return 0 - 1
     }
@@ -501,7 +504,42 @@ fn sv_begin(
         sv_reply(lib, fd, "400 Bad Request", body, p)
         return 0 - 1
     }
-    let ni = sv_parse_ids(rbuf, rlen, boff, bp, ids)
+    var ni: i64 = 0
+    if is_chat {
+        var croles: [i64; 16] = [0; 16]
+        var coffs: [i64; 16] = [0; 16]
+        var clens: [i64; 16] = [0; 16]
+        let cbuf = heap_alloc(32768)
+        let mc = sv_chat_parse(rbuf, rlen, boff, &!croles, &!coffs, &!clens, cbuf)
+        if mc < 0 {
+            let p = sv_err_body(body, "bad messages (need non-empty array of role/content)")
+            sv_reply(lib, fd, "400 Bad Request", body, p)
+            return 0 - 1
+        }
+        let prbuf = heap_alloc(65536)
+        let plen = chat_render(prbuf, 0, tpl, tplen, &croles, &coffs, &clens, cbuf, mc)
+        if plen < 0 {
+            let p = sv_err_body(body, "chat template unsupported")
+            sv_reply(lib, fd, "400 Bad Request", body, p)
+            return 0 - 1
+        }
+        let enc = bpe_encode(bp, prbuf, plen)
+        if enc.len <= 0 {
+            let p = sv_err_body(body, "empty prompt")
+            sv_reply(lib, fd, "400 Bad Request", body, p)
+            return 0 - 1
+        }
+        ck_set(ids, 0, 0.0)
+        ni = 1
+        var e: i64 = 0
+        while e < enc.len && ni < 4000 {
+            ck_set(ids, ni, ck_get(&enc, e))
+            ni = ni + 1
+            e = e + 1
+        }
+    } else {
+        ni = sv_parse_ids(rbuf, rlen, boff, bp, ids)
+    }
     if ni == 0 - 1 {
         let p = sv_err_body(body, "missing prompt")
         sv_reply(lib, fd, "400 Bad Request", body, p)
@@ -527,6 +565,12 @@ fn sv_begin(
     if cap > 4096 { cap = 4096 }
     if ni + max_tokens > cap { max_tokens = cap - ni }
     ck_set(prm, 3, max_tokens as f64)
+    chats[si as usize] = 0
+    chtols[si as usize] = 0
+    if is_chat {
+        chats[si as usize] = 1
+        if sv_find(rbuf, rlen, boff, "\"tools\"") >= 0 { chtols[si as usize] = 1 }
+    }
     nids[si as usize] = ni
     gen[si as usize] = 0
     t0[si as usize] = sv_now_ns(lib)
@@ -553,7 +597,7 @@ fn sv_turn(
     model: string, fd: i64, req: i64,
     logi: &!CpuBuf, kvs: &![KvCache; 4], seed: &!CpuBuf, prm: &!CpuBuf,
     text: *mut u8, tlen: &![i64; 4], gen: &![i64; 4],
-    ttfb: &![i64; 4], t0: &![i64; 4], nids: &![i64; 4], si: i64
+    ttfb: &![i64; 4], t0: &![i64; 4], nids: &![i64; 4], si: i64, chat: i64, tools_on: i64
 ) -> i64 with Alloc, Mut, Panic, Div, IO {
     let temp = ck_get(prm, 0)
     var cur: i64 = 0
@@ -570,7 +614,12 @@ fn sv_turn(
         let nb = bpe_decode_token(bp, cur, tbuf)
         if ck_get(prm, 4) > 0.5 {
             let out = heap_alloc(69632)
-            let p = sv_sse_token(out, 0, req, model, tbuf, nb)
+            var p: i64 = 0
+            if chat > 0 {
+                p = sv_sse_delta(out, 0, req, model, tbuf, nb)
+            } else {
+                p = sv_sse_token(out, 0, req, model, tbuf, nb)
+            }
             if nw_send_all(lib, fd, out, p) < 0 { return 0 - 1 }
         } else {
             var j: i64 = 0
@@ -602,7 +651,12 @@ fn sv_turn(
         if nw_send_all(lib, fd, out, p) < 0 { return 0 - 1 }
     } else {
         let body = heap_alloc(69632)
-        let p = sv_completion_body(body, req, model, text, tlen[si as usize], finish, nids[si as usize], gen[si as usize])
+        var p: i64 = 0
+        if chat > 0 {
+            p = sv_chat_body(body, req, model, text, tlen[si as usize], finish, nids[si as usize], gen[si as usize], tools_on)
+        } else {
+            p = sv_completion_body(body, req, model, text, tlen[si as usize], finish, nids[si as usize], gen[si as usize])
+        }
         sv_reply(lib, fd, "200 OK", body, p)
     }
     print("served req=")
@@ -623,11 +677,24 @@ fn sv_turn(
     0
 }
 // Serve forever over one select pump. 0 exit ok, negative on setup.
-pub fn llm_serve(m: &!Llama, bp: &Bpe, port: i64, model_name: string, rt: &Runtime, use_gpu: bool) -> i64 with Alloc, Mut, Panic, Div, IO {
+pub fn llm_serve(m: &!Llama, bp: &Bpe, port: i64, model_name: string, rt: &Runtime, use_gpu: bool, tpl_path: string) -> i64 with Alloc, Mut, Panic, Div, IO {
     let lib = nw_open()
     if !lib.ok { return 0 - 1 }
     let srv = nw_listen(&lib, port)
     if srv < 0 { return 0 - 2 }
+    let tplbuf = heap_alloc(8192)
+    var tplen: i64 = 0
+    if str_len(tpl_path) > 0 {
+        let ts = read_file(tpl_path)
+        let tn = str_len(ts)
+        var ti: i64 = 0
+        while ti < tn && ti < 8192 {
+            sv_putb(tplbuf, ti, str_char_at(ts, ti))
+            ti = ti + 1
+        }
+        tplen = ti
+    }
+    if tplen <= 0 { tplen = chat_default_tpl(tplbuf, 0) }
     print("llm serve listening port=")
     print_int(port)
     print(" model=")
@@ -651,6 +718,8 @@ pub fn llm_serve(m: &!Llama, bp: &Bpe, port: i64, model_name: string, rt: &Runti
     var text: [*mut u8; 4] = [0 as *mut u8; 4]
     var tlen: [i64; 4] = [0; 4]
     var reqid: [i64; 4] = [0; 4]
+    var chats: [i64; 4] = [0; 4]
+    var chtols: [i64; 4] = [0; 4]
     var req: i64 = 0
     var probe: [i64; 8] = [0 - 1; 8]
     while 1 == 1 {
@@ -679,6 +748,8 @@ pub fn llm_serve(m: &!Llama, bp: &Bpe, port: i64, model_name: string, rt: &Runti
                     logi[slot as usize] = ck_alloc(m.cfg.vocab)
                     text[slot as usize] = heap_alloc(65536)
                     tlen[slot as usize] = 0
+                    chats[slot as usize] = 0
+                    chtols[slot as usize] = 0
                     req = req + 1
                     reqid[slot as usize] = req
                 }
@@ -701,7 +772,7 @@ pub fn llm_serve(m: &!Llama, bp: &Bpe, port: i64, model_name: string, rt: &Runti
                             rlen[s as usize] = rlen[s as usize] + got
                             let need = sv_need_total(rbuf[s as usize], rlen[s as usize])
                             if need >= 0 && rlen[s as usize] >= need {
-                                let ns = sv_begin(&lib, m, bp, rt, use_gpu, model_name, fd[s as usize], reqid[s as usize], rbuf[s as usize], rlen[s as usize], &!ids[s as usize], &!prm[s as usize], &!seed[s as usize], &!logi[s as usize], &!kvs, &!nids, &!gen, &!t0, s)
+                                let ns = sv_begin(&lib, m, bp, rt, use_gpu, model_name, fd[s as usize], reqid[s as usize], rbuf[s as usize], rlen[s as usize], &!ids[s as usize], &!prm[s as usize], &!seed[s as usize], &!logi[s as usize], &!kvs, &!nids, &!gen, &!t0, s, &!chats, &!chtols, tplbuf, tplen)
                                 if ns < 0 {
                                     nw_close(&lib, fd[s as usize])
                                     fd[s as usize] = 0 - 1
@@ -736,14 +807,14 @@ pub fn llm_serve(m: &!Llama, bp: &Bpe, port: i64, model_name: string, rt: &Runti
         }
         if bn == 1 {
             let s0 = blist[0]
-            let tr = sv_turn(&lib, m, bp, rt, use_gpu, model_name, fd[s0 as usize], reqid[s0 as usize], &!logi[s0 as usize], &!kvs, &!seed[s0 as usize], &!prm[s0 as usize], text[s0 as usize], &!tlen, &!gen, &!ttfb, &!t0, &!nids, s0)
+            let tr = sv_turn(&lib, m, bp, rt, use_gpu, model_name, fd[s0 as usize], reqid[s0 as usize], &!logi[s0 as usize], &!kvs, &!seed[s0 as usize], &!prm[s0 as usize], text[s0 as usize], &!tlen, &!gen, &!ttfb, &!t0, &!nids, s0, chats[s0 as usize], chtols[s0 as usize])
             if tr <= 0 {
                 nw_close(&lib, fd[s0 as usize])
                 fd[s0 as usize] = 0 - 1
                 st[s0 as usize] = 0
             }
         } else if bn > 1 {
-            sv_turn_batch(&lib, m, bp, rt, use_gpu, model_name, &!fd, &!st, &reqid, &!logi, &!kvs, &!seed, &!prm, &text, &!tlen, &!gen, &!ttfb, &!t0, &nids, &blist, bn)
+            sv_turn_batch(&lib, m, bp, rt, use_gpu, model_name, &!fd, &!st, &reqid, &!logi, &!kvs, &!seed, &!prm, &text, &!tlen, &!gen, &!ttfb, &!t0, &nids, &blist, bn, &chats, &chtols)
         }
         if !any {
             probe[0] = srv
@@ -763,7 +834,7 @@ fn sv_turn_batch(
     seeds: &![CpuBuf; 4], prms: &![CpuBuf; 4],
     texts: &[*mut u8; 4], tlens: &![i64; 4], gens: &![i64; 4],
     ttfbs: &![i64; 4], t0s: &![i64; 4], nids: &[i64; 4],
-    slots: &[i64; 4], n: i64
+    slots: &[i64; 4], n: i64, chats: &[i64; 4], chtols: &[i64; 4]
 ) with Alloc, Mut, Panic, Div, IO {
     var cur: [i64; 4] = [0; 4]
     var done: [i64; 4] = [0; 4]
@@ -790,7 +861,12 @@ fn sv_turn_batch(
             let nb = bpe_decode_token(bp, cur[b as usize], tbuf)
             if ck_get(&prms[si as usize], 4) > 0.5 {
                 let out = heap_alloc(69632)
-                let p = sv_sse_token(out, 0, reqids[si as usize], model, tbuf, nb)
+                var p: i64 = 0
+                if chats[si as usize] > 0 {
+                    p = sv_sse_delta(out, 0, reqids[si as usize], model, tbuf, nb)
+                } else {
+                    p = sv_sse_token(out, 0, reqids[si as usize], model, tbuf, nb)
+                }
                 if nw_send_all(lib, fds[si as usize], out, p) < 0 {
                     nw_close(lib, fds[si as usize])
                     fds[si as usize] = 0 - 1
@@ -866,7 +942,12 @@ fn sv_turn_batch(
                 let body = heap_alloc(69632)
                 var fin = "length"
                 if fcode[b as usize] == 1 { fin = "stop" }
-                let p = sv_completion_body(body, reqids[si as usize], model, texts[si as usize], tlens[si as usize], fin, nids[si as usize], gens[si as usize])
+                var p: i64 = 0
+                if chats[si as usize] > 0 {
+                    p = sv_chat_body(body, reqids[si as usize], model, texts[si as usize], tlens[si as usize], fin, nids[si as usize], gens[si as usize], chtols[si as usize])
+                } else {
+                    p = sv_completion_body(body, reqids[si as usize], model, texts[si as usize], tlens[si as usize], fin, nids[si as usize], gens[si as usize])
+                }
                 sv_reply(lib, fds[si as usize], "200 OK", body, p)
                 nw_close(lib, fds[si as usize])
                 fds[si as usize] = 0 - 1
@@ -890,4 +971,169 @@ fn sv_turn_batch(
         }
         b = b + 1
     }
+}
+// ---- K2 chat completions ----
+
+// parse "messages" JSON array into role codes + packed contents.
+// roles: 0 system, 1 user, 2 assistant, 3 tool. returns count or
+// negative: -1 no key, -2 bad role, -3 bad content, -4 empty,
+// -5 content overflow.
+fn sv_chat_parse(buf: *mut u8, n: i64, boff: i64, roles: &![i64; 16], offs: &![i64; 16], lens: &![i64; 16], cbuf: *mut u8) -> i64 with Mut {
+    let mp = sv_find(buf, n, boff, "\"messages\"")
+    if mp < 0 { return 0 - 1 }
+    let colon = sv_find(buf, n, mp, ":")
+    var j = colon + 1
+    while j < n && (sv_byte(buf, j) == 32 || sv_byte(buf, j) == 9 || sv_byte(buf, j) == 10 || sv_byte(buf, j) == 13) { j = j + 1 }
+    if j >= n || sv_byte(buf, j) != 91 { return 0 - 1 }
+    j = j + 1
+    var nm: i64 = 0
+    var coff: i64 = 0
+    while nm < 16 {
+        while j < n && sv_byte(buf, j) != 123 && sv_byte(buf, j) != 93 { j = j + 1 }
+        if j >= n || sv_byte(buf, j) == 93 { break }
+        var depth: i64 = 0
+        var k = j
+        var jc: i64 = 0 - 1
+        while k < n {
+            let c = sv_byte(buf, k)
+            if c == 123 { depth = depth + 1 }
+            if c == 125 {
+                depth = depth - 1
+                if depth == 0 {
+                    jc = k
+                    break
+                }
+            }
+            k = k + 1
+        }
+        if jc < 0 { return 0 - 2 }
+        let rk = sv_find(buf, jc, j, "\"role\"")
+        if rk < 0 { return 0 - 2 }
+        let rc = sv_find(buf, jc, rk, ":")
+        var q = rc + 1
+        while q < jc && (sv_byte(buf, q) == 32 || sv_byte(buf, q) == 9 || sv_byte(buf, q) == 10 || sv_byte(buf, q) == 13) { q = q + 1 }
+        if q >= jc || sv_byte(buf, q) != 34 { return 0 - 2 }
+        var re = q + 1
+        while re < jc && sv_byte(buf, re) != 34 {
+            if sv_byte(buf, re) == 92 { return 0 - 2 }
+            re = re + 1
+        }
+        if re >= jc { return 0 - 2 }
+        var code: i64 = 0 - 2
+        if re - q - 1 == 6 && sv_byte(buf, q + 1) == 115 && sv_byte(buf, q + 2) == 121 && sv_byte(buf, q + 3) == 115 && sv_byte(buf, q + 4) == 116 && sv_byte(buf, q + 5) == 101 && sv_byte(buf, q + 6) == 109 { code = 0 }
+        if re - q - 1 == 4 && sv_byte(buf, q + 1) == 117 && sv_byte(buf, q + 2) == 115 && sv_byte(buf, q + 3) == 101 && sv_byte(buf, q + 4) == 114 { code = 1 }
+        if re - q - 1 == 9 && sv_byte(buf, q + 1) == 97 && sv_byte(buf, q + 2) == 115 && sv_byte(buf, q + 3) == 115 && sv_byte(buf, q + 4) == 105 && sv_byte(buf, q + 5) == 115 && sv_byte(buf, q + 6) == 116 && sv_byte(buf, q + 7) == 97 && sv_byte(buf, q + 8) == 110 { code = 2 }
+        if re - q - 1 == 4 && sv_byte(buf, q + 1) == 116 && sv_byte(buf, q + 2) == 111 && sv_byte(buf, q + 3) == 111 && sv_byte(buf, q + 4) == 108 { code = 3 }
+        if code < 0 { return 0 - 2 }
+        let ck = sv_find(buf, jc, j, "\"content\"")
+        if ck < 0 { return 0 - 3 }
+        let cc = sv_find(buf, jc, ck, ":")
+        var v = cc + 1
+        while v < jc && (sv_byte(buf, v) == 32 || sv_byte(buf, v) == 9 || sv_byte(buf, v) == 10 || sv_byte(buf, v) == 13) { v = v + 1 }
+        if v >= jc || sv_byte(buf, v) != 34 { return 0 - 3 }
+        let dec = sv_jstr(buf, n, v, cbuf, coff)
+        if dec[0] <= 0 || coff + dec[0] > 32768 { return 0 - 5 }
+        roles[nm as usize] = code
+        offs[nm as usize] = coff
+        lens[nm as usize] = dec[0]
+        coff = coff + dec[0]
+        nm = nm + 1
+        j = jc + 1
+    }
+    if nm == 0 { return 0 - 4 }
+    nm
+}
+
+// chat completion body. tools_on lifts the first <tool_call> span
+// into tool_calls (finish tool_calls); otherwise plain content.
+fn sv_chat_body(body: *mut u8, req: i64, model: string, text: *mut u8, tlen: i64, finish: string, nids: i64, gen: i64, tools_on: i64) -> i64 with Mut {
+    var p: i64 = 0
+    p = sv_app_str(body, p, "{\"id\":\"chatcmpl-")
+    p = sv_app_int(body, p, req)
+    p = sv_app_str(body, p, "\",\"object\":\"chat.completion\",\"created\":")
+    p = sv_app_int(body, p, req)
+    p = sv_app_str(body, p, ",\"model\":\"")
+    p = sv_app_str(body, p, model)
+    p = sv_app_str(body, p, "\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",")
+    var fin = finish
+    var lifted = false
+    if tools_on > 0 {
+        var sp: [i64; 2] = [0; 2]
+        if chat_find_toolcall(text, tlen, 0, &!sp) == 1 {
+            let nq = sv_find(text, sp[1], sp[0], "\"name\"")
+            if nq >= 0 {
+                let nc = sv_find(text, sp[1], nq, ":")
+                var nq2 = nc + 1
+                while nq2 < sp[1] && (sv_byte(text, nq2) == 32 || sv_byte(text, nq2) == 9) { nq2 = nq2 + 1 }
+                if nq2 < sp[1] && sv_byte(text, nq2) == 34 {
+                    let ntmp = heap_alloc(512)
+                    let ndec = sv_jstr(text, tlen, nq2, ntmp, 0)
+                    let aq = sv_find(text, sp[1], sp[0], "\"arguments\"")
+                    if aq >= 0 && ndec[0] > 0 {
+                        let ac = sv_find(text, sp[1], aq, ":")
+                        var av = ac + 1
+                        while av < sp[1] && (sv_byte(text, av) == 32 || sv_byte(text, av) == 9 || sv_byte(text, av) == 10 || sv_byte(text, av) == 13) { av = av + 1 }
+                        var ab: i64 = 0 - 1
+                        var ae: i64 = 0 - 1
+                        if av < sp[1] && sv_byte(text, av) == 123 {
+                            var adepth: i64 = 0
+                            var ak = av
+                            while ak < sp[1] {
+                                let ac2 = sv_byte(text, ak)
+                                if ac2 == 123 { adepth = adepth + 1 }
+                                if ac2 == 125 {
+                                    adepth = adepth - 1
+                                    if adepth == 0 {
+                                        ab = av
+                                        ae = ak + 1
+                                        ak = sp[1]
+                                    }
+                                }
+                                ak = ak + 1
+                            }
+                        }
+                        if ab >= 0 {
+                            p = sv_app_str(body, p, "\"content\":null,\"tool_calls\":[{\"id\":\"call_0\",\"type\":\"function\",\"function\":{\"name\":\"")
+                            p = sv_app_escaped(body, p, ntmp, 0, ndec[0])
+                            p = sv_app_str(body, p, "\",\"arguments\":\"")
+                            p = sv_app_escaped(body, p, text, ab, ae - ab)
+                            p = sv_app_str(body, p, "\"}}]}")
+                            fin = "tool_calls"
+                            lifted = true
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if !lifted {
+        p = sv_app_str(body, p, "\"content\":\"")
+        p = sv_app_escaped(body, p, text, 0, tlen)
+        p = sv_app_str(body, p, "\"")
+    }
+    p = sv_app_str(body, p, ",\"finish_reason\":\"")
+    p = sv_app_str(body, p, fin)
+    p = sv_app_str(body, p, "\"}],\"usage\":{\"prompt_tokens\":")
+    p = sv_app_int(body, p, nids)
+    p = sv_app_str(body, p, ",\"completion_tokens\":")
+    p = sv_app_int(body, p, gen)
+    p = sv_app_str(body, p, ",\"total_tokens\":")
+    p = sv_app_int(body, p, nids + gen)
+    p = sv_app_str(body, p, "}}")
+    p
+}
+
+// one SSE delta frame for chat streaming.
+pub fn sv_sse_delta(out: *mut u8, pos: i64, req: i64, model: string, text: *mut u8, tlen: i64) -> i64 with Mut {
+    var p = pos
+    p = sv_app_str(out, p, "data: {\"id\":\"chatcmpl-")
+    p = sv_app_int(out, p, req)
+    p = sv_app_str(out, p, "\",\"object\":\"chat.completion.chunk\",\"created\":")
+    p = sv_app_int(out, p, req)
+    p = sv_app_str(out, p, ",\"model\":\"")
+    p = sv_app_str(out, p, model)
+    p = sv_app_str(out, p, "\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"")
+    p = sv_app_escaped(out, p, text, 0, tlen)
+    p = sv_app_str(out, p, "\"},\"finish_reason\":null}]}\n\n")
+    p
 }
