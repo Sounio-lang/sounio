@@ -2,24 +2,18 @@
 
 ## LSP
 
-- `compiler/src/lsp/server.rs` (main server loop)
-- `compiler/src/lsp/diagnostics.rs`
-- `compiler/src/lsp/semantic_tokens.rs`
-- `compiler/src/lsp/completion.rs`
+- `tools/lsp/` (shell preview, `souc lsp --stdio`)
+- `self-hosted/lsp/server.sio` (pure-Sounio server)
+- `self-hosted/lsp/diagnostics.sio`
+- `self-hosted/lsp/semantic_tokens.sio`
+- `self-hosted/lsp/completions.sio`
 
-## VSCode
+## VS Code
 
-- `editors/vscode/src/extension.ts`
-- `editors/vscode/syntaxes/sounio.tmLanguage.json`
-- `editors/vscode/snippets/sounio.json`
-
-## Playground
-
-- `playground/src/compiler.ts` (WASM compiler bridge)
-- `playground/src/main.ts` (UI wiring)
-- `playground/build-wasm.sh`
+- `tools/editors/vscode/src/extension.ts`
+- `tools/editors/vscode/syntaxes/sounio.tmLanguage.json`
+- `tools/editors/vscode/snippets/sounio.json`
 
 ## Jupyter
 
-- `jupyter/src/main.rs`, `jupyter/src/lib.rs`
-- `jupyter/install.py`, `jupyter/kernel.json`
+- `ecosystem/sounio-jupyter/`

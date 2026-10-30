@@ -2,92 +2,44 @@
 topic_id: repo.docs.stdlib.stdlib-module-organization
 authority: repo_only
 audience: users
-last_validated: unvalidated
-validated_by: none
+last_validated: 2026-10-27
+validated_by: scripts/stdlib/scan_stdlib.sh
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.stdlib.stdlib-module-organization
 -->
 
-# STDLIB Module Organization (Executable View)
+# STDLIB Module Organization
 
-This page describes how STDLIB modules are organized for current reliability
-work, using repository-generated inventory artifacts as ground truth.
+How the standard library is laid out on disk. Counts come from `bash scripts/stdlib/scan_stdlib.sh` on 2026-10-27. They are an inventory, not a claim that every file runs.
 
-Snapshot date: **2026-03-02**
+## File surface
 
-## File Surface Model
+- `lib.sio` is the usual API file where a module has one.
+- `mod.sio` is an entrypoint or a compatibility surface. The scan found no stub `mod.sio` whose only code line is `module <name>`.
+- `*.sio.disabled` is the disabled form. The scan found none.
 
-STDLIB uses a mixed entrypoint structure:
+| Metric | 2026-10-27 scan |
+|---|---:|
+| `sio_files` | 1741 |
+| `disabled_files` | 0 |
+| `mod_files` | 79 |
+| `lib_files` | 102 |
+| `module_entrypoints` | 181 |
+| `stub_mod_files` | 0 |
+| `active_module_entrypoints` | 181 |
+| `hyper_active_files` | 55 |
+| `hyper_disabled_files` | 0 |
+| `hyper_stub_mod_files` | 0 |
 
-- `lib.sio`: primary module API surface where present
-- `mod.sio`: module entrypoint or compatibility surface
-- `*.sio.disabled`: intentionally disabled implementation files
+The committed `artifacts/stdlib/stdlib_inventory.v1.json` is the 2026-05-12 snapshot (927 files). Do not cite it as this tree.
 
-Current inventory (tracked files at `main` HEAD, measured 2026-09-19 via
-`bash scripts/stdlib/scan_stdlib.sh` cross-checked with `git ls-files`; the committed
-`artifacts/stdlib/stdlib_inventory.v1.json` snapshot (2026-05-12) is stale):
+Directories with source and no `pub fn`, omitted by `scripts/build/gen_stdlib_api_md.sh`: `effects`, `fairness`, `geometry`, `interp`, `learn`, `pkg`, `qnn`, `regex`, `regulatory`, `science`, `time`.
 
-- `sio_files`: 1672
-- `disabled_files`: 0
-- `mod_files`: 78
-- `lib_files`: 100
-- `module_entrypoints`: 178
-- `stub_mod_files`: 0
-- `active_module_entrypoints`: 178
-- `hyper_active_files`: 56
-- `hyper_disabled_files`: 0
-- `hyper_stub_mod_files`: 0
+## What the files do not prove
 
-## Contract Levels
+A directory is not an `active_callable` module. The newest committed execution result is `artifacts/stdlib/stdlib_e2e_result.v1.json` (2026-10-06): 196 pass, 165 fail, 172 skip, 533 total. The May reliability JSON that reports 251/0/0/251 is not that result.
 
-Each module lane should be interpreted with one of three levels:
+## Layout that actually occurs
 
-1. `active_callable`
-- Backed by callable API and validated by run-pass tests.
+`stdlib/CONVENTIONS.md` no longer requires every directory to contain `mod.sio`, `lib.sio`, `README.md`, and `EXAMPLES.md`. On 2026-10-27 only `chemistry`, `core`, `database`, and `dataframe` have all four at the top of the directory.
 
-2. `stub_surface`
-- Entry exists but only exposes module surface (often `module <name>` with no
-  reliable callable exports for E2E usage).
-
-3. `disabled_file`
-- Source exists only as `*.sio.disabled`; callable contract is not active.
-
-## Testing Policy Mapping
-
-- `active_callable` -> prefer `//@ run-pass`
-- `stub_surface` -> use `//@ check-only` import/surface checks
-- `disabled_file` -> avoid callable assertions; realign tests to active API and
-  record `//@ contract-adjustment: ...` when intent changes
-- `science lanes` (`tests/stdlib/fmri`, `tests/stdlib/darwin_pbpk`) -> run-pass only; `//@ ignore` is forbidden by gate policy
-- `hyper lanes` (`tests/stdlib/{nn,onn,qnn,snn,math}` required set) -> run-pass only; `//@ ignore` is forbidden by hyper gate policy
-- runtime regression probes (`as_bytes` literal/text/binary + dynamic slice) are always recorded in science status JSON from committed files in `tests/stdlib/runtime_regression/`
-- runtime provenance (`souc_bin`, `souc_version`, `pinned_version_expected`) is always emitted in science status JSON
-- strict runtime regression mode is required in CI full gate (`STDLIB_RUNTIME_REGRESSION_STRICT=1`); local default remains soft telemetry
-- CI strict mode is intentionally fail-closed; runtime probes must pass for strict green status
-- GPU runtime attestation gate is required in CI with `OMEGA_GPU_RUNTIME_GATE_MODE=required`; local default `auto` records remote-unavailable cases as `not_run`
-- canonical pinned `souc` version is sourced from `scripts/omega/omega_resolve_souc_bin.sh` (or explicit `SOUNIO_SOUC_VERSION` override)
-- blocker taxonomy is normalized as `ssh_unreachable`, `remote_env_missing`, `attestation_invalid`, `pinned_version_mismatch`, `gpu_backend_unavailable`, `runtime_test_fail`
-
-## Reliability Workflow
-
-From repository root:
-
-```bash
-bash scripts/stdlib/scan_stdlib.sh --json-out artifacts/stdlib/stdlib_inventory.v1.json
-OMEGA_GPU_RUNTIME_GATE_MODE=required bash scripts/omega/omega_gpu_runtime_attest_gate.sh
-bash scripts/stdlib_hyper_execution_gate.sh
-STDLIB_RUNTIME_REGRESSION_STRICT=1 bash scripts/stdlib_science_pipeline_gate.sh
-STDLIB_RUNTIME_REGRESSION_STRICT=1 bash scripts/stdlib_reliability_gate.sh
-bash scripts/omega/omega_gpu_runtime_attest_gate.sh
-bash scripts/stdlib_hyper_execution_gate.sh
-bash scripts/stdlib_science_pipeline_gate.sh
-bash scripts/stdlib_reliability_gate.sh
-```
-
-Primary status artifact:
-- `artifacts/stdlib/stdlib_reliability_status.v1.json`
-- `artifacts/stdlib/stdlib_science_pipeline_status.v1.json`
-- `artifacts/stdlib/stdlib_hyper_execution_status.v1.json`
-- `artifacts/omega/gpu_runtime_attest_gate.v1.json`
-
-Primary reference page:
-- `docs/stdlib/STDLIB_REFERENCE.md`
+Primary reference: `docs/stdlib/STDLIB_REFERENCE.md`.

@@ -1,0 +1,1 @@
+`ode::solver::high_accuracy_options()` asked for 10 000 000 attempts, ten times the 1..1 000 000 budget that `solve_rk45_exp_decay` accepts, so every solve with the high-accuracy preset returned status 3 (invalid request) with a zero result. The preset now requests 1 000 000 attempts and solves; `tests/stdlib/ode/test_tsit5_e2e.sio` passes.

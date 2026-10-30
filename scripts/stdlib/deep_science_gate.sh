@@ -425,6 +425,57 @@ run_oracle_batch() {
 }
 run_oracle_batch
 
+# Arrow IPC is Madaros-only (lean_single has no bits_to_f64). The full suite
+# skips these fixtures via //@ requires: madaros. This job already holds the
+# fresh Madaros ELF. PyArrow 26.0.0 and NumPy 2.5.4 are installed into a
+# directory this process just created, and the gate must print the oracle markers.
+arrow_rc=0
+py_dir=$(mktemp -d "${TMPDIR:-/tmp}/sounio-pyarrow.XXXXXX") || arrow_rc=$?
+if [[ "$arrow_rc" == 0 ]]; then
+    python3 -m pip install --disable-pip-version-check --target "$py_dir" \
+        'pyarrow==26.0.0' 'numpy==2.5.4' \
+        > "$out/arrow-pyarrow-install.log" 2>&1 || arrow_rc=$?
+fi
+if [[ "$arrow_rc" == 0 ]]; then
+    ARROW_PYARROW_PATH="$py_dir" ARROW_REQUIRE_PYARROW=1 \
+        bash "$repo/scripts/arrow_ipc_gate.sh" > "$out/arrow-ipc-gate.log" 2>&1 || arrow_rc=$?
+fi
+if [[ "$arrow_rc" == 0 ]]; then
+    log="$out/arrow-ipc-gate.log"
+    ok_n=$(grep -cx 'PYARROW_OK' "$log" || true)
+    if ! grep -qx 'Required pyarrow: 26.0.0' "$log" \
+        || ! grep -qx 'SPEC_PYARROW_OK' "$log" \
+        || ! grep -qx 'EXT_PYARROW_OK' "$log" \
+        || ! grep -qx 'ARROW_IPC_OK' "$log" \
+        || ! grep -qx 'CODEC_OK' "$log" \
+        || ! grep -qx 'ARROW_SPEC_OK' "$log" \
+        || ! grep -qx 'ARROW_EXT_OK' "$log" \
+        || ! grep -qx 'FLIGHT_IPC_OK' "$log" \
+        || [[ "$ok_n" != 2 ]]; then
+        echo "FAIL arrow gate missing oracle markers" >> "$log"
+        arrow_rc=1
+    fi
+    if grep -qx 'PYARROW_SKIP' "$log" \
+        || grep -qx 'SPEC_PYARROW_SKIP' "$log" \
+        || grep -qx 'EXT_PYARROW_SKIP' "$log"; then
+        echo "FAIL arrow gate skipped the pyarrow oracle" >> "$log"
+        arrow_rc=1
+    fi
+fi
+if [[ "$arrow_rc" != 0 ]]; then
+    echo "arrow-ipc-gate failed rc=$arrow_rc" >&2
+    [[ -f "$out/arrow-pyarrow-install.log" ]] && tail -n 40 "$out/arrow-pyarrow-install.log" >&2 || true
+    [[ -f "$out/arrow-ipc-gate.log" ]] && tail -n 80 "$out/arrow-ipc-gate.log" >&2 || true
+fi
+record arrow-gate scripts/arrow_ipc_gate.sh "$arrow_rc"
+
+rc=0
+# SIO-93: current-main logarithm boundaries and discriminating guard control.
+# (Re-applied after the oracle-queue refactor: main now compiles
+# normalization_into_reference through the oracle queue above.)
+LN_BOUNDARY_OUT="$out/math-pure-ln-boundary" bash scripts/stdlib/math_pure_ln_boundary_gate.sh > "$out/math-pure-ln-boundary.log" 2>&1 || rc=$?
+record concordance math-pure-ln-boundary "$rc"
+
 rc=0
 sha256sum -c "$out/INPUTS.sha256" > "$out/INPUTS.verify.txt" 2>&1 || rc=$?
 record input-hashes unchanged "$rc"

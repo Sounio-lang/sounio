@@ -82,7 +82,8 @@ else
     esac
 
     case "$path" in
-      *.md|docs/*|AGENTS.md|CLAUDE.md|CLAUDE_HANDOFF.md|FOUNDER_INTENT.md|ONBOARDING.md|README.md)
+      # llms.txt is the model-context sibling of README.md, not a new surface.
+      *.md|docs/*|AGENTS.md|CLAUDE.md|CLAUDE_HANDOFF.md|FOUNDER_INTENT.md|ONBOARDING.md|README.md|llms.txt)
         mark docs
         recognized=true
         ;;

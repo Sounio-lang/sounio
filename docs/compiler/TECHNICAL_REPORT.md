@@ -109,7 +109,7 @@ Our work differs by integrating GPU code generation into a full language compile
 
 ### 2.3 Prior Octonion Implementations
 
-To our knowledge, no production-ready GPU implementation of octonion operations exists. The closest related work includes:
+To our knowledge, no generally shipped GPU implementation of octonion operations is in wide use. The closest related work includes:
 
 - **NumPy octonion extension** [Boyle, 2017]: CPU-only, Python overhead
 - **Julia Octonions.jl**: Provides algebraic operations but no GPU kernels
@@ -689,7 +689,7 @@ octonion_matmul/16x16     time: [57.6 µs 59.0 µs 60.4 µs]
 | Moufang tests | `crates/souc/tests/integration_octonion_moufang.rs` |
 | Numerical tests | `crates/souc/tests/integration_octonion_numerical.rs` |
 | Benchmarks | `benches/compiler/octonion_benchmark.rs` |
-| One-shot reproduction script | `scripts/archive/reproduce_octonion_preprint.sh` |
+| One-shot reproduction script | `reproduce_octonion_preprint.sh` (removed with `scripts/archive/`) |
 
 ---
 

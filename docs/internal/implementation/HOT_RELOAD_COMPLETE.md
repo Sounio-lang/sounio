@@ -282,7 +282,7 @@ println("Server v2 - NOW WITH EMOJI! 🚀")
 
 ## Next Steps
 
-To make this production-ready:
+Still open before any production use:
 
 1. **Integrate with `souc`** - Call the real compiler
 2. **Native runtime** - Port to Rust for performance
