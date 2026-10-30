@@ -1,0 +1,182 @@
+// self-hosted/gpu/pbpk28_gum_kernel.sio
+// PBPK-28 GPU GUM kernel: f64 Knowledge-channel combination step.
+//
+// Scope: the GUM combination (diagonal J-Sigma-JT, sensitivities,
+// Kp shares, confidence) replicated exactly from ep28_run, plus the
+// per-parameter contribution kernel emitted as K-AXI for GPU issue.
+// Staging: the Jacobian fill (2n+1 ODE solves) and the scalar
+// reduction run on the host; the device computes, one thread per
+// parameter, out[i] = d[i] * d[i] * v[i]. Scalar sums, guards, and
+// confidence stay host-side in f64, bit-exact with ep28_run.
+//
+// Device memory layout (single flat f64 buffer, 8 bytes per element):
+//   mem[0..8)   Jacobian column d for one endpoint
+//   mem[8..16)  prior variances v
+//   mem[16..24) contributions out
+// Thread tid reads d[tid] and v[tid], writes out[tid]. Address bases
+// use the integer path (types=2); data moves use the f64 path.
+
+use gpu::kaxi_backend::*
+use math::pure::{is_finite}
+
+pub struct GumCombineOut {
+    pub var_auc_b: f64,
+    pub var_cb24: f64,
+    pub var_auc_l: f64,
+    pub var_auc_k: f64,
+    pub sensitivity: [f64; 8],
+    pub kp_share_brain: f64,
+    pub kp_share_liver: f64,
+    pub kp_share_kidney: f64,
+    pub auc_blood_conf: f64,
+    pub ok: bool,
+}
+
+fn gum_combine_empty() -> GumCombineOut with Mut {
+    GumCombineOut {
+        var_auc_b: 0.0,
+        var_cb24: 0.0,
+        var_auc_l: 0.0,
+        var_auc_k: 0.0,
+        sensitivity: [0.0; 8],
+        kp_share_brain: 0.0,
+        kp_share_liver: 0.0,
+        kp_share_kidney: 0.0,
+        auc_blood_conf: 0.0,
+        ok: false,
+    }
+}
+
+// Exact port of the ep28_run combination section: same operations in
+// the same order, same guards (1e-30, 1e-300). Bitwise equal to
+// ep28_run on valid input; fail-closed (ok=false, zeroed outputs)
+// on non-finite or negative-variance input.
+pub fn pbpk28_gum_combine_f64(
+    d_auc_b: [f64; 8],
+    d_cb24: [f64; 8],
+    d_auc_l: [f64; 8],
+    d_auc_k: [f64; 8],
+    variances: [f64; 8],
+    confidences: [f64; 8],
+) -> GumCombineOut with Mut, Div, Panic {
+    var i: i32 = 0
+    while i < 8 {
+        if !is_finite(d_auc_b[i]) { return gum_combine_empty() }
+        if !is_finite(d_cb24[i]) { return gum_combine_empty() }
+        if !is_finite(d_auc_l[i]) { return gum_combine_empty() }
+        if !is_finite(d_auc_k[i]) { return gum_combine_empty() }
+        if !is_finite(variances[i]) { return gum_combine_empty() }
+        if variances[i] < 0.0 { return gum_combine_empty() }
+        i = i + 1
+    }
+    var var_auc_b: f64 = 0.0
+    var var_cb24: f64 = 0.0
+    var var_auc_l: f64 = 0.0
+    var var_auc_k: f64 = 0.0
+    var sensitivity: [f64; 8] = [0.0; 8]
+    var j: i32 = 0
+    while j < 8 {
+        let vj = variances[j]
+        let contrib = d_auc_b[j] * d_auc_b[j] * vj
+        var_auc_b = var_auc_b + contrib
+        var_cb24 = var_cb24 + d_cb24[j] * d_cb24[j] * vj
+        var_auc_l = var_auc_l + d_auc_l[j] * d_auc_l[j] * vj
+        var_auc_k = var_auc_k + d_auc_k[j] * d_auc_k[j] * vj
+        sensitivity[j] = contrib
+        j = j + 1
+    }
+    var k: i32 = 0
+    while k < 8 {
+        if var_auc_b > 1.0e-30 {
+            sensitivity[k] = sensitivity[k] / var_auc_b
+        }
+        k = k + 1
+    }
+    let kp_share_brain = if var_cb24 > 1.0e-300 { d_cb24[3] * d_cb24[3] * variances[3] / var_cb24 } else { 0.0 }
+    let kp_share_liver = if var_auc_l > 1.0e-300 { d_auc_l[4] * d_auc_l[4] * variances[4] / var_auc_l } else { 0.0 }
+    let kp_share_kidney = if var_auc_k > 1.0e-300 { d_auc_k[5] * d_auc_k[5] * variances[5] / var_auc_k } else { 0.0 }
+    var conf_auc = 0.0
+    var c: i32 = 0
+    while c < 8 {
+        conf_auc = conf_auc + confidences[c] * sensitivity[c]
+        c = c + 1
+    }
+    GumCombineOut {
+        var_auc_b: var_auc_b,
+        var_cb24: var_cb24,
+        var_auc_l: var_auc_l,
+        var_auc_k: var_auc_k,
+        sensitivity: sensitivity,
+        kp_share_brain: kp_share_brain,
+        kp_share_liver: kp_share_liver,
+        kp_share_kidney: kp_share_kidney,
+        auc_blood_conf: conf_auc,
+        ok: true,
+    }
+}
+
+// Device kernel: out[tid] = d[tid] * d[tid] * v[tid], f64 data path,
+// integer address path. Registers: r0=tid, r1=8, r2=tid+8 (v addr),
+// r3=16, r4=tid+16 (out addr), r5=d, r6=v, r7=d*d, r8=out.
+pub fn kaxi_emit_pbpk28_gum_contrib_f64_asm() -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
+    var opcodes: [i64; 256] = [0; 256]
+    var dsts: [i64; 256] = [0; 256]
+    var src_a: [i64; 256] = [0; 256]
+    var src_b: [i64; 256] = [0; 256]
+    var imm: [i64; 256] = [0; 256]
+    var types: [i64; 256] = [0; 256]
+
+    opcodes[0] = GPU_IR_GET_TID
+    dsts[0] = 0
+
+    opcodes[1] = GPU_IR_ADD_IMM
+    dsts[1] = 1
+    imm[1] = 8
+
+    opcodes[2] = GPU_IR_ADD
+    dsts[2] = 2
+    src_a[2] = 0
+    src_b[2] = 1
+    types[2] = 2
+
+    opcodes[3] = GPU_IR_ADD_IMM
+    dsts[3] = 3
+    imm[3] = 16
+
+    opcodes[4] = GPU_IR_ADD
+    dsts[4] = 4
+    src_a[4] = 0
+    src_b[4] = 3
+    types[4] = 2
+
+    opcodes[5] = GPU_IR_LOAD_GLOBAL
+    dsts[5] = 5
+    src_a[5] = 0
+    types[5] = 1
+
+    opcodes[6] = GPU_IR_LOAD_GLOBAL
+    dsts[6] = 6
+    src_a[6] = 2
+    types[6] = 1
+
+    opcodes[7] = GPU_IR_MUL
+    dsts[7] = 7
+    src_a[7] = 5
+    src_b[7] = 5
+    types[7] = 1
+
+    opcodes[8] = GPU_IR_MUL
+    dsts[8] = 8
+    src_a[8] = 7
+    src_b[8] = 6
+    types[8] = 1
+
+    opcodes[9] = GPU_IR_STORE_GLOBAL
+    src_a[9] = 8
+    src_b[9] = 4
+    types[9] = 1
+
+    opcodes[10] = GPU_IR_RET
+
+    gpu_lower_to_kaxi_typed(opcodes, dsts, src_a, src_b, imm, types, 11)
+}

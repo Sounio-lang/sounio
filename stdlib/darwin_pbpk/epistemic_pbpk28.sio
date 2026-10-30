@@ -395,6 +395,51 @@ fn ep28_result_empty() -> EpResult28 {
 }
 
 // ============================================================================
+pub struct EpJac28 {
+    pub d_auc_b: [f64; 8],
+    pub d_cb24: [f64; 8],
+    pub d_auc_l: [f64; 8],
+    pub d_auc_k: [f64; 8],
+    pub ok: bool,
+}
+fn ep28_jacobian_fill(
+    base_prm: PBPKParams28,
+    priors:   EpPrior28,
+    dose_mg:  f64,
+    t_end:    f64
+) -> EpJac28 with Mut, Div, Panic, Epistemic {
+    let n = priors.n
+
+    // Central-difference Jacobian
+    var d_auc_b:  [f64; 8] = [0.0; 8]
+    var d_cb24:   [f64; 8] = [0.0; 8]
+    var d_auc_l:  [f64; 8] = [0.0; 8]
+    var d_auc_k:  [f64; 8] = [0.0; 8]
+
+    var i: i32 = 0
+    while i < n {
+        let pk_i = priors.kn[i]
+        let h = ep28_fdiff_h(pk_i.value, pk_i.variance)
+        if h > 0.0 {
+            let prm_p = ep28_perturb(base_prm, i, h)
+            let prm_n = ep28_perturb(base_prm, i, 0.0 - h)
+            let m_p = ep28_simulate(prm_p, dose_mg, t_end)
+            let m_n = ep28_simulate(prm_n, dose_mg, t_end)
+            // A rejected perturbed trajectory (ep28_simulate_dt: non-finite
+            // state or booked negative mass above the bound) fails the whole
+            // GUM result; leaving its column at 0.0 would report a rejected
+            // solve as a zero sensitivity.
+            if !m_p.success || !m_n.success { return EpJac28 { d_auc_b: [0.0; 8], d_cb24: [0.0; 8], d_auc_l: [0.0; 8], d_auc_k: [0.0; 8], ok: false } }
+            let inv2h = 1.0 / (2.0 * h)
+            d_auc_b[i] = (m_p.auc_blood   - m_n.auc_blood)   * inv2h
+            d_cb24[i]  = (m_p.c_brain_24h - m_n.c_brain_24h) * inv2h
+            d_auc_l[i] = (m_p.auc_liver   - m_n.auc_liver)   * inv2h
+            d_auc_k[i] = (m_p.auc_kidney  - m_n.auc_kidney)  * inv2h
+        }
+        i = i + 1
+    }
+    return EpJac28 { d_auc_b: d_auc_b, d_cb24: d_cb24, d_auc_l: d_auc_l, d_auc_k: d_auc_k, ok: true }
+}
 // MAIN GUM ANALYSIS
 // ============================================================================
 
@@ -416,35 +461,12 @@ pub fn ep28_run(
     let auc_l_ref  = ref_m.auc_liver
     let auc_k_ref  = ref_m.auc_kidney
 
-    // Central-difference Jacobian
-    var d_auc_b:  [f64; 8] = [0.0; 8]
-    var d_cb24:   [f64; 8] = [0.0; 8]
-    var d_auc_l:  [f64; 8] = [0.0; 8]
-    var d_auc_k:  [f64; 8] = [0.0; 8]
-
-    var i: i32 = 0
-    while i < n {
-        let pk_i = priors.kn[i]
-        let h = ep28_fdiff_h(pk_i.value, pk_i.variance)
-        if h > 0.0 {
-            let prm_p = ep28_perturb(base_prm, i, h)
-            let prm_n = ep28_perturb(base_prm, i, 0.0 - h)
-            let m_p = ep28_simulate(prm_p, dose_mg, t_end)
-            let m_n = ep28_simulate(prm_n, dose_mg, t_end)
-            // A rejected perturbed trajectory (ep28_simulate_dt: non-finite
-            // state or booked negative mass above the bound) fails the whole
-            // GUM result; leaving its column at 0.0 would report a rejected
-            // solve as a zero sensitivity.
-            if !m_p.success || !m_n.success { return ep28_result_empty() }
-            let inv2h = 1.0 / (2.0 * h)
-            d_auc_b[i] = (m_p.auc_blood   - m_n.auc_blood)   * inv2h
-            d_cb24[i]  = (m_p.c_brain_24h - m_n.c_brain_24h) * inv2h
-            d_auc_l[i] = (m_p.auc_liver   - m_n.auc_liver)   * inv2h
-            d_auc_k[i] = (m_p.auc_kidney  - m_n.auc_kidney)  * inv2h
-        }
-        i = i + 1
-    }
-
+    let fill = ep28_jacobian_fill(base_prm, priors, dose_mg, t_end)
+    if !fill.ok { return ep28_result_empty() }
+    let d_auc_b = fill.d_auc_b
+    let d_cb24 = fill.d_cb24
+    let d_auc_l = fill.d_auc_l
+    let d_auc_k = fill.d_auc_k
     // GUM variance
     var var_auc_b:  f64 = 0.0
     var var_cb24:   f64 = 0.0
@@ -515,6 +537,53 @@ pub fn ep28_run(
 }
 
 // ============================================================================
+pub fn ep28_jacobian_columns(
+    base_prm: PBPKParams28,
+    priors:   EpPrior28,
+    dose_mg:  f64,
+    t_end:    f64
+) -> EpJac28 with Mut, Div, Panic, Epistemic {
+    ep28_jacobian_fill(base_prm, priors, dose_mg, t_end)
+}
+pub fn ep28_prior_vc(
+    priors: EpPrior28
+) -> ([f64; 8], [f64; 8]) with Mut, Div, Panic, Epistemic {
+    var variances: [f64; 8] = [0.0; 8]
+    var confidences: [f64; 8] = [0.0; 8]
+    var i: i32 = 0
+    while i < 8 {
+        variances[i] = priors.kn[i].variance
+        confidences[i] = priors.kn[i].confidence
+        i = i + 1
+    }
+    (variances, confidences)
+}
+pub fn ep28_gum_parity_check(
+    base_prm: PBPKParams28,
+    priors: EpPrior28,
+    dose_mg: f64,
+    t_end: f64,
+    got_main: [f64; 8],
+    got_sensitivity: [f64; 8]
+) -> i64 with Mut, Div, Panic, Epistemic {
+    var fails: i64 = 0
+    let ref = ep28_run(base_prm, priors, dose_mg, t_end)
+    if !ref.success { return 1 }
+    if got_main[0] != ref.auc_blood_var { fails = fails + 1 }
+    if got_main[1] != ref.c_brain_var { fails = fails + 1 }
+    if got_main[2] != ref.auc_liver_var { fails = fails + 1 }
+    if got_main[3] != ref.auc_kidney_var { fails = fails + 1 }
+    if got_main[4] != ref.auc_blood_conf { fails = fails + 1 }
+    if got_main[5] != ref.kp_share_brain { fails = fails + 1 }
+    if got_main[6] != ref.kp_share_liver { fails = fails + 1 }
+    if got_main[7] != ref.kp_share_kidney { fails = fails + 1 }
+    var k: i32 = 0
+    while k < 8 {
+        if got_sensitivity[k] != ref.sensitivity[k] { fails = fails + 1 }
+        k = k + 1
+    }
+    fails
+}
 // RAPAMYCIN REFERENCE (PBPK28)
 // ============================================================================
 

@@ -1,0 +1,125 @@
+//@ run-pass
+// GPU GUM parity: kernel combine vs live ep28_run, bitwise.
+// Rapamycin 5 mg IV bolus / 168 h and semaglutide 1 mg / 168 h.
+// Plus K-AXI emitter text asserts, PTX f64 asserts, fail-closed.
+
+use gpu::pbpk28_gum_kernel::*
+use darwin_pbpk::epistemic_pbpk28::*
+use gpu::kaxi_backend::*
+use gpu::kaxi_to_ptx::*
+
+fn str_contains(haystack: string, needle: string) -> bool with Mut, Panic, Div {
+    let hlen = str_len(haystack)
+    let nlen = str_len(needle)
+    if nlen == 0 { return true }
+    if hlen < nlen { return false }
+    var i: i64 = 0
+    while i <= (hlen - nlen) {
+        var j: i64 = 0
+        var ok: bool = true
+        while j < nlen {
+            if str_char_at(haystack, i + j) != str_char_at(needle, j) {
+                ok = false
+                break
+            }
+            j = j + 1
+        }
+        if ok { return true }
+        i = i + 1
+    }
+    false
+}
+
+fn check_gum_case(dose_mg: f64, t_end: f64, use_sema: bool) -> i64 with IO, Mut, Div, Panic, Epistemic {
+    var prm = ep28_rapamycin_params()
+    var priors = ep28_rapamycin_priors()
+    if use_sema {
+        prm = ep28_semaglutide_params()
+        priors = ep28_semaglutide_priors()
+    }
+    let ref = ep28_run(prm, priors, dose_mg, t_end)
+    if !ref.success {
+        print("FAIL gpu_gum case ep28_run failed\n")
+        return 1
+    }
+    let cols = ep28_jacobian_columns(prm, priors, dose_mg, t_end)
+    if !cols.ok {
+        print("FAIL gpu_gum case columns failed\n")
+        return 1
+    }
+    let vc = ep28_prior_vc(priors)
+    let got = pbpk28_gum_combine_f64(cols.d_auc_b, cols.d_cb24, cols.d_auc_l, cols.d_auc_k, vc.0, vc.1)
+    if !got.ok {
+        print("FAIL gpu_gum case kernel combine failed\n")
+        return 1
+    }
+    var got_main: [f64; 8] = [0.0; 8]
+    got_main[0] = got.var_auc_b
+    got_main[1] = got.var_cb24
+    got_main[2] = got.var_auc_l
+    got_main[3] = got.var_auc_k
+    got_main[4] = got.auc_blood_conf
+    got_main[5] = got.kp_share_brain
+    got_main[6] = got.kp_share_liver
+    got_main[7] = got.kp_share_kidney
+    let fails = ep28_gum_parity_check(prm, priors, dose_mg, t_end, got_main, got.sensitivity)
+    if fails != 0 {
+        print("FAIL gpu_gum case bitwise mismatch\n")
+    }
+    fails
+}
+
+fn check_gum_emitter() -> i64 with IO, Mut, Panic, Div, Alloc {
+    var fails: i64 = 0
+    let asm = kaxi_emit_pbpk28_gum_contrib_f64_asm()
+    let text = kaxi_asm_to_string(asm)
+    if !str_contains(text, "load_global") { fails = fails + 1 }
+    if !str_contains(text, "store_global") { fails = fails + 1 }
+    if !str_contains(text, "mul") { fails = fails + 1 }
+    if !str_contains(text, "type=f64") { fails = fails + 1 }
+    if !str_contains(text, "ret") { fails = fails + 1 }
+    let ptx = kaxi_transpile_to_ptx_unified(asm, 0)
+    if !str_contains(ptx, "ld.global.f64") { fails = fails + 1 }
+    if !str_contains(ptx, "st.global.f64") { fails = fails + 1 }
+    if fails != 0 {
+        print("FAIL gpu_gum emitter text\n")
+    }
+    fails
+}
+
+fn check_gum_fail_closed() -> i64 with IO, Mut, Div, Panic {
+    var fails: i64 = 0
+    var d: [f64; 8] = [1.0; 8]
+    var v: [f64; 8] = [0.5; 8]
+    var c: [f64; 8] = [0.9; 8]
+    var bad = d
+    bad[3] = 0.0 / 0.0
+    let r1 = pbpk28_gum_combine_f64(bad, d, d, d, v, c)
+    if r1.ok { fails = fails + 1 }
+    var negv = v
+    negv[5] = 0.0 - 1.0
+    let r2 = pbpk28_gum_combine_f64(d, d, d, d, negv, c)
+    if r2.ok { fails = fails + 1 }
+    var zerov: [f64; 8] = [0.0; 8]
+    let r3 = pbpk28_gum_combine_f64(d, d, d, d, zerov, c)
+    if !r3.ok { fails = fails + 1 }
+    if r3.var_auc_b != 0.0 { fails = fails + 1 }
+    if fails != 0 {
+        print("FAIL gpu_gum fail-closed\n")
+    }
+    fails
+}
+
+fn main() -> i64 with IO, Mut, Div, Panic, Alloc, Epistemic {
+    var fails: i64 = 0
+    fails = fails + check_gum_case(5.0, 168.0, false)
+    fails = fails + check_gum_case(1.0, 168.0, true)
+    fails = fails + check_gum_emitter()
+    fails = fails + check_gum_fail_closed()
+    if fails == 0 {
+        print("PASS gpu_pbpk28_gum_parity\n")
+    } else {
+        print("FAIL gpu_pbpk28_gum_parity\n")
+    }
+    fails
+}
