@@ -718,15 +718,32 @@ pub fn llm_serve(m: &!Llama, bp: &Bpe, port: i64, model_name: string, rt: &Runti
                         }
                     }
                 } else {
-                    let tr = sv_turn(&lib, m, bp, rt, use_gpu, model_name, fd[s as usize], reqid[s as usize], &!logi[s as usize], &!kvs, &!seed[s as usize], &!prm[s as usize], text[s as usize], &!tlen, &!gen, &!ttfb, &!t0, &!nids, s)
-                    if tr <= 0 {
-                        nw_close(&lib, fd[s as usize])
-                        fd[s as usize] = 0 - 1
-                        st[s as usize] = 0
-                    }
+                    // K1: GEN slots run in one batched turn below
                 }
             }
             s = s + 1
+        }
+        // K1: one batched decode turn for all GEN slots.
+        var blist: [i64; 4] = [0 - 1; 4]
+        var bn: i64 = 0
+        var g: i64 = 0
+        while g < SV_MAX_SESS {
+            if fd[g as usize] >= 0 && st[g as usize] == 2 {
+                blist[bn as usize] = g
+                bn = bn + 1
+            }
+            g = g + 1
+        }
+        if bn == 1 {
+            let s0 = blist[0]
+            let tr = sv_turn(&lib, m, bp, rt, use_gpu, model_name, fd[s0 as usize], reqid[s0 as usize], &!logi[s0 as usize], &!kvs, &!seed[s0 as usize], &!prm[s0 as usize], text[s0 as usize], &!tlen, &!gen, &!ttfb, &!t0, &!nids, s0)
+            if tr <= 0 {
+                nw_close(&lib, fd[s0 as usize])
+                fd[s0 as usize] = 0 - 1
+                st[s0 as usize] = 0
+            }
+        } else if bn > 1 {
+            sv_turn_batch(&lib, m, bp, rt, use_gpu, model_name, &!fd, &!st, &reqid, &!logi, &!kvs, &!seed, &!prm, &text, &!tlen, &!gen, &!ttfb, &!t0, &nids, &blist, bn)
         }
         if !any {
             probe[0] = srv
@@ -734,4 +751,143 @@ pub fn llm_serve(m: &!Llama, bp: &Bpe, port: i64, model_name: string, rt: &Runti
         }
     }
     0
+}
+// K1 batched decode turn: sample + send/accumulate for every GEN
+// slot in `slots[0..n]`, then ONE llama_forward_batch_rt for the
+// slots that need a forward, then finish the done slots. Slot
+// close/field updates happen here, like the sv_begin contract.
+fn sv_turn_batch(
+    lib: &NwLib, m: &!Llama, bp: &Bpe, rt: &Runtime, use_gpu: bool,
+    model: string, fds: &![i64; 4], sts: &![i64; 4],
+    reqids: &[i64; 4], logis: &![CpuBuf; 4], kvs: &![KvCache; 4],
+    seeds: &![CpuBuf; 4], prms: &![CpuBuf; 4],
+    texts: &[*mut u8; 4], tlens: &![i64; 4], gens: &![i64; 4],
+    ttfbs: &![i64; 4], t0s: &![i64; 4], nids: &[i64; 4],
+    slots: &[i64; 4], n: i64
+) with Alloc, Mut, Panic, Div, IO {
+    var cur: [i64; 4] = [0; 4]
+    var done: [i64; 4] = [0; 4]
+    var fcode: [i64; 4] = [0; 4]
+    var b: i64 = 0
+    while b < n {
+        let si = slots[b as usize]
+        let temp = ck_get(&prms[si as usize], 0)
+        var tok: i64 = 0
+        if temp <= 0.0 {
+            tok = llama_sample_greedy(&!logis[si as usize])
+        } else {
+            tok = llama_sample_temp_top_p(&!logis[si as usize], temp, ck_get(&prms[si as usize], 1), &!seeds[si as usize])
+        }
+        cur[b as usize] = tok
+        if tok == 0 { fcode[b as usize] = 1; done[b as usize] = 1 }
+        b = b + 1
+    }
+    let tbuf = heap_alloc(8192)
+    b = 0
+    while b < n {
+        let si = slots[b as usize]
+        if done[b as usize] == 0 {
+            let nb = bpe_decode_token(bp, cur[b as usize], tbuf)
+            if ck_get(&prms[si as usize], 4) > 0.5 {
+                let out = heap_alloc(69632)
+                let p = sv_sse_token(out, 0, reqids[si as usize], model, tbuf, nb)
+                if nw_send_all(lib, fds[si as usize], out, p) < 0 {
+                    nw_close(lib, fds[si as usize])
+                    fds[si as usize] = 0 - 1
+                    sts[si as usize] = 0
+                    done[b as usize] = 0 - 1
+                }
+            } else {
+                var j: i64 = 0
+                while j < nb && tlens[si as usize] < 60000 {
+                    sv_putb(texts[si as usize], tlens[si as usize], st_byte_at(tbuf, j))
+                    tlens[si as usize] = tlens[si as usize] + 1
+                    j = j + 1
+                }
+            }
+            if done[b as usize] == 0 {
+                gens[si as usize] = gens[si as usize] + 1
+                if ttfbs[si as usize] == 0 { ttfbs[si as usize] = sv_now_ns(lib) - t0s[si as usize] }
+                if gens[si as usize] >= ck_get(&prms[si as usize], 3) as i64 { fcode[b as usize] = 2; done[b as usize] = 1 }
+            }
+        }
+        b = b + 1
+    }
+    // one batched forward for the live rows
+    var live: [i64; 4] = [0; 4]
+    var ltoks: [i64; 4] = [0; 4]
+    var nl: i64 = 0
+    b = 0
+    while b < n {
+        if done[b as usize] == 0 {
+            live[nl as usize] = slots[b as usize]
+            ltoks[nl as usize] = cur[b as usize]
+            nl = nl + 1
+        }
+        b = b + 1
+    }
+    if nl > 0 {
+        var batched = ck_alloc(1)
+        if use_gpu && rt.ready {
+            batched = llama_forward_batch_rt(m, kvs, &live, &ltoks, nl, rt)
+        } else {
+            batched = llama_forward_batch(m, kvs, &live, &ltoks, nl)
+        }
+        let vocab = m.cfg.vocab
+        var r: i64 = 0
+        while r < nl {
+            let si = live[r as usize]
+            var v: i64 = 0
+            while v < vocab {
+                write_f64(&!logis[si as usize].data, v, read_f64(batched.data, r * vocab + v))
+                v = v + 1
+            }
+            r = r + 1
+        }
+    }
+    // finish the done rows
+    b = 0
+    while b < n {
+        let si = slots[b as usize]
+        if done[b as usize] == 1 {
+            if ck_get(&prms[si as usize], 4) > 0.5 {
+                let out = heap_alloc(64)
+                let p = sv_sse_done(out, 0)
+                if nw_send_all(lib, fds[si as usize], out, p) < 0 {
+                    nw_close(lib, fds[si as usize])
+                    fds[si as usize] = 0 - 1
+                    sts[si as usize] = 0
+                } else {
+                    nw_close(lib, fds[si as usize])
+                    fds[si as usize] = 0 - 1
+                    sts[si as usize] = 0
+                }
+            } else {
+                let body = heap_alloc(69632)
+                var fin = "length"
+                if fcode[b as usize] == 1 { fin = "stop" }
+                let p = sv_completion_body(body, reqids[si as usize], model, texts[si as usize], tlens[si as usize], fin, nids[si as usize], gens[si as usize])
+                sv_reply(lib, fds[si as usize], "200 OK", body, p)
+                nw_close(lib, fds[si as usize])
+                fds[si as usize] = 0 - 1
+                sts[si as usize] = 0
+            }
+            print("served req=")
+            print_int(reqids[si as usize])
+            print(" sess=")
+            print_int(si)
+            print(" prompt_tokens=")
+            print_int(nids[si as usize])
+            print(" completion_tokens=")
+            print_int(gens[si as usize])
+            print(" finish=")
+            if fcode[b as usize] == 1 { print("stop") } else { print("length") }
+            print(" ttfb_us=")
+            print_int(ttfbs[si as usize] / 1000)
+            print(" gpu=")
+            print_int(if use_gpu && rt.ready { 1 } else { 0 })
+            print("\n")
+        }
+        b = b + 1
+    }
 }

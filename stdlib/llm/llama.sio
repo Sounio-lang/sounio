@@ -887,3 +887,214 @@ pub fn llama_moe_ffn_block(
         )
     }
 }
+// Batched decode: one forward for `n` single-token slots. Row-wise
+// ops (norm, projections, MLP) run stacked as one GEMM per weight;
+// rope, KV append, and attention stay per slot on its own cache.
+// Returns stacked logits [n * vocab]; row s holds batch row s.
+// Matches n single forwards exactly when rows do not interact.
+pub fn llama_forward_batch(m: &!Llama, kvs: &![KvCache; 4], slots: &[i64; 4], toks: &[i64; 4], n: i64) -> CpuBuf with Alloc, Mut, Panic, Div {
+    let rt = ll_no_rt()
+    ll_forward_batch_impl(m, kvs, slots, toks, n, &rt, false)
+}
+
+pub fn llama_forward_batch_rt(m: &!Llama, kvs: &![KvCache; 4], slots: &[i64; 4], toks: &[i64; 4], n: i64, rt: &Runtime) -> CpuBuf with Alloc, Mut, Panic, Div {
+    ll_forward_batch_impl(m, kvs, slots, toks, n, rt, true)
+}
+
+fn ll_forward_batch_impl(m: &!Llama, kvs: &![KvCache; 4], slots: &[i64; 4], toks: &[i64; 4], n: i64, rt: &Runtime, use_gpu: bool) -> CpuBuf with Alloc, Mut, Panic, Div {
+    m.last_moe_used = false
+    m.last_moe_status = 0
+    m.last_moe_layers_ok = 0
+    let hidden = m.cfg.hidden
+    let inter = m.cfg.inter
+    let dh = m.cfg.head_dim
+    let qdim = m.cfg.heads * dh
+    let kvdim = m.cfg.kv_heads * dh
+    let rep = m.cfg.heads / m.cfg.kv_heads
+    var maxcap: i64 = 0
+    var c: i64 = 0
+    while c < n {
+        let cap = kvs[slots[c as usize] as usize].cap
+        if cap > maxcap { maxcap = cap }
+        c = c + 1
+    }
+    var x = ck_alloc(n * hidden)
+    var s: i64 = 0
+    while s < n {
+        let tok = toks[s as usize]
+        var j: i64 = 0
+        while j < hidden {
+            write_f64(x.data, s * hidden + j, read_f64(m.embed.data, tok * hidden + j))
+            j = j + 1
+        }
+        s = s + 1
+    }
+    var scores = ck_alloc(maxcap)
+    var li: i32 = 0
+    while li < m.cfg.layers {
+        let h = ll_rmsnorm(&x, &m.in_norm[li as usize], n, hidden, m.cfg.eps)
+        var q = ck_alloc(n * qdim)
+        let _ps = ll_proj(rt, use_gpu, &h, &m.wq[li as usize], &!q, n, qdim, hidden)
+        var kk = ck_alloc(n * kvdim)
+        let _ps2 = ll_proj(rt, use_gpu, &h, &m.wk[li as usize], &!kk, n, kvdim, hidden)
+        var vv = ck_alloc(n * kvdim)
+        let _ps3 = ll_proj(rt, use_gpu, &h, &m.wv[li as usize], &!vv, n, kvdim, hidden)
+        if m.qb[li as usize].len > 0 {
+            ll_add_bias(&!q, &m.qb[li as usize], n, qdim)
+            ll_add_bias(&!kk, &m.kb[li as usize], n, kvdim)
+            ll_add_bias(&!vv, &m.vb[li as usize], n, kvdim)
+        }
+        var att = ck_alloc(n * qdim)
+        let scale = 1.0 / sqrt(dh as f64)
+        s = 0
+        while s < n {
+            let si = slots[s as usize]
+            let pos0 = kvs[si as usize].len
+            var qr = ck_alloc(qdim)
+            var kr = ck_alloc(kvdim)
+            var j: i64 = 0
+            while j < qdim {
+                write_f64(qr.data, j, read_f64(q.data, s * qdim + j))
+                j = j + 1
+            }
+            j = 0
+            while j < kvdim {
+                write_f64(kr.data, j, read_f64(kk.data, s * kvdim + j))
+                j = j + 1
+            }
+            ll_rope(&!qr, 1, m.cfg.heads, dh, pos0, m.cfg.theta)
+            ll_rope(&!kr, 1, m.cfg.kv_heads, dh, pos0, m.cfg.theta)
+            j = 0
+            while j < qdim {
+                write_f64(q.data, s * qdim + j, read_f64(qr.data, j))
+                j = j + 1
+            }
+            var cp: i64 = 0
+            while cp < kvdim {
+                write_f64(kvs[si as usize].k[li as usize].data, pos0 * kvdim + cp, read_f64(kr.data, cp))
+                write_f64(kvs[si as usize].v[li as usize].data, pos0 * kvdim + cp, read_f64(vv.data, s * kvdim + cp))
+                cp = cp + 1
+            }
+            let upto = pos0 + 1
+            var hd: i64 = 0
+            while hd < m.cfg.heads {
+                let kvh = hd / rep
+                var mx: f64 = 0.0 - 1000000000.0
+                var tt: i64 = 0
+                while tt < upto {
+                    var dot: f64 = 0.0
+                    var d: i64 = 0
+                    while d < dh {
+                        dot = dot + read_f64(q.data, s * qdim + hd * dh + d) * read_f64(kvs[si as usize].k[li as usize].data, tt * kvdim + kvh * dh + d)
+                        d = d + 1
+                    }
+                    let sc = dot * scale
+                    write_f64(scores.data, tt, sc)
+                    if sc > mx { mx = sc }
+                    tt = tt + 1
+                }
+                var sum: f64 = 0.0
+                tt = 0
+                while tt < upto {
+                    let e = exp(read_f64(scores.data, tt) - mx)
+                    write_f64(scores.data, tt, e)
+                    sum = sum + e
+                    tt = tt + 1
+                }
+                var d2: i64 = 0
+                while d2 < dh {
+                    var acc: f64 = 0.0
+                    var t2: i64 = 0
+                    while t2 < upto {
+                        acc = acc + (read_f64(scores.data, t2) / sum) * read_f64(kvs[si as usize].v[li as usize].data, t2 * kvdim + kvh * dh + d2)
+                        t2 = t2 + 1
+                    }
+                    write_f64(att.data, s * qdim + hd * dh + d2, acc)
+                    d2 = d2 + 1
+                }
+                hd = hd + 1
+            }
+            s = s + 1
+        }
+        var o = ck_alloc(n * hidden)
+        let _ps4 = ll_proj(rt, use_gpu, &att, &m.wo[li as usize], &!o, n, hidden, qdim)
+        ll_add_into(&!x, &o)
+        let h2 = ll_rmsnorm(&x, &m.post_norm[li as usize], n, hidden, m.cfg.eps)
+        var used_moe = false
+        if ll_moe_ready_layer(m, rt, use_gpu, n, li) {
+            var router_logits = ck_alloc(n * m.cfg.n_experts)
+            let _router_status = ll_proj(rt, use_gpu, &h2, &m.moe_router[li as usize], &!router_logits, n, m.cfg.n_experts, hidden)
+            let x_f32 = ll_f64_to_f32(&h2, n * hidden)
+            let logits_f32 = ll_f64_to_f32(&router_logits, n * m.cfg.n_experts)
+            let dst_f32 = gb_host_f32(n * hidden)
+            var moe_inter = m.cfg.moe_inter
+            if moe_inter <= 0 { moe_inter = inter }
+            let moe_cfg = LlamaMoeFfnCfg {
+                n_experts: m.cfg.n_experts, slots: m.cfg.n_expert_used,
+                hidden: hidden, inter: moe_inter, n_tokens: n,
+                gate_bytes: m.moe_gate_bytes[li as usize], up_bytes: m.moe_up_bytes[li as usize], down_bytes: m.moe_down_bytes[li as usize],
+                expert_stride_g: m.moe_expert_stride_g, row_stride_g: m.moe_row_stride_g,
+                expert_stride_u: m.moe_expert_stride_u, row_stride_u: m.moe_row_stride_u,
+                expert_stride_d: m.moe_expert_stride_d, row_stride_d: m.moe_row_stride_d,
+                moe_quant: m.cfg.moe_quant,
+            }
+            let r = llama_moe_ffn_block(
+                rt, &moe_cfg, x_f32, logits_f32,
+                m.moe_gate_w[li as usize], m.moe_up_w[li as usize], m.moe_down_w[li as usize], dst_f32
+            )
+            if r.ok {
+                let dn = ll_f32_to_f64(dst_f32, n * hidden)
+                ll_add_into(&!x, &dn)
+                m.last_moe_layers_ok = m.last_moe_layers_ok + 1
+                m.last_moe_used = true
+                m.last_moe_status = 0
+                used_moe = true
+            } else {
+                m.last_moe_status = r.status
+            }
+        }
+        if !used_moe {
+            var g = ck_alloc(n * inter)
+            let _ps5 = ll_proj(rt, use_gpu, &h2, &m.gate[li as usize], &!g, n, inter, hidden)
+            var u = ck_alloc(n * inter)
+            let _ps6 = ll_proj(rt, use_gpu, &h2, &m.up[li as usize], &!u, n, inter, hidden)
+            var act = ck_alloc(n * inter)
+            var ai: i64 = 0
+            while ai < n * inter {
+                let gv = read_f64(g.data, ai)
+                write_f64(act.data, ai, (gv / (1.0 + exp(0.0 - gv))) * read_f64(u.data, ai))
+                ai = ai + 1
+            }
+            var dn = ck_alloc(n * hidden)
+            let _ps7 = ll_proj(rt, use_gpu, &act, &m.down[li as usize], &!dn, n, hidden, inter)
+            ll_add_into(&!x, &dn)
+        }
+        li = li + 1
+    }
+    s = 0
+    while s < n {
+        let si = slots[s as usize]
+        kvs[si as usize].len = kvs[si as usize].len + 1
+        s = s + 1
+    }
+    var out = ck_alloc(n * m.cfg.vocab)
+    s = 0
+    while s < n {
+        var last = ck_alloc(hidden)
+        var j2: i64 = 0
+        while j2 < hidden {
+            write_f64(last.data, j2, read_f64(x.data, s * hidden + j2))
+            j2 = j2 + 1
+        }
+        let ln = ll_rmsnorm(&last, &m.final_norm, 1, hidden, m.cfg.eps)
+        var logits = ck_alloc(m.cfg.vocab)
+        ck_gemm(&ln, &m.lm_head_t, &!logits, 1, m.cfg.vocab, hidden)
+        var v: i64 = 0
+        while v < m.cfg.vocab {
+            write_f64(out.data, s * m.cfg.vocab + v, read_f64(logits.data, v))
+            v = v + 1
+        }
+        s = s + 1
+    }
+    out
+}
