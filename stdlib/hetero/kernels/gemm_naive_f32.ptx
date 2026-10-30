@@ -1,0 +1,71 @@
+// Naive f32 GEMM kernel (row-major C = A * B), owned PTX artifact.
+// Interim kernel until the Kretikos PTX emitter lowers load/store from
+// `kernel fn` bodies (public surface currently emits empty kernels -
+// docs/design/heterogeneous-gpu-framework.md, Fase 2 limitation register).
+// Launched by stdlib/hetero/cuda_exec.sio through the CUDA driver API.
+.version 7.0
+.target sm_50
+.address_size 64
+
+.visible .entry gemm_naive_f32(
+    .param .u64 param_A,
+    .param .u64 param_B,
+    .param .u64 param_C,
+    .param .s32 param_M,
+    .param .s32 param_N,
+    .param .s32 param_K
+)
+{
+    .reg .f32 %f<4>;
+    .reg .s32 %r<16>;
+    .reg .s64 %rd<10>;
+    .reg .pred %p<3>;
+
+    ld.param.u64 %rd0, [param_A];
+    ld.param.u64 %rd1, [param_B];
+    ld.param.u64 %rd2, [param_C];
+    ld.param.s32 %r3, [param_M];
+    ld.param.s32 %r4, [param_N];
+    ld.param.s32 %r5, [param_K];
+
+    mov.u32 %r0, %ctaid.y;
+    mov.u32 %r1, %ntid.y;
+    mov.u32 %r2, %tid.y;
+    mad.lo.s32 %r0, %r0, %r1, %r2;
+    mov.u32 %r6, %ctaid.x;
+    mov.u32 %r7, %ntid.x;
+    mov.u32 %r8, %tid.x;
+    mad.lo.s32 %r6, %r6, %r7, %r8;
+
+    setp.ge.s32 %p0, %r0, %r3;
+    setp.ge.s32 %p1, %r6, %r4;
+    or.pred %p0, %p0, %p1;
+    @%p0 bra DONE;
+
+    mov.f32 %f0, 0f00000000;
+    mov.s32 %r9, 0;
+LOOP:
+    setp.ge.s32 %p2, %r9, %r5;
+    @%p2 bra STORE;
+    mul.lo.s32 %r10, %r0, %r5;
+    add.s32 %r10, %r10, %r9;
+    mul.wide.s32 %rd3, %r10, 4;
+    add.s64 %rd3, %rd0, %rd3;
+    ld.global.f32 %f1, [%rd3];
+    mul.lo.s32 %r11, %r9, %r4;
+    add.s32 %r11, %r11, %r6;
+    mul.wide.s32 %rd4, %r11, 4;
+    add.s64 %rd4, %rd1, %rd4;
+    ld.global.f32 %f2, [%rd4];
+    fma.rn.f32 %f0, %f1, %f2, %f0;
+    add.s32 %r9, %r9, 1;
+    bra LOOP;
+STORE:
+    mul.lo.s32 %r12, %r0, %r4;
+    add.s32 %r12, %r12, %r6;
+    mul.wide.s32 %rd5, %r12, 4;
+    add.s64 %rd5, %rd2, %rd5;
+    st.global.f32 [%rd5], %f0;
+DONE:
+    ret;
+}

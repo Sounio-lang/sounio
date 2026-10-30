@@ -1,0 +1,122 @@
+//@ run-pass
+//
+// Native Q8_0 MoE-FFN smoke with synthetic zero-valued expert packs.
+// Usage: hetero_moe_q8_0_demo [gemm-ptx] [mmid-q8_0-ptx]
+
+use hetero::runtime::{rt_load_mmid_q8_0, rt_open}
+use hetero::moe::{moe_ffn_q8_0, moe_topk}
+use hetero::cublas_bench::{gb_host_f32, gb_host_get, gb_host_set}
+
+fn write_u8(buf: *mut u8, off: i64, v: i64) with Mut {
+    let shift = (off % 8) * 8
+    let mask = (0 - 1) - (255 << shift)
+    let word = (read_i64(buf as *mut i64, off / 8) & mask) | ((v & 255) << shift)
+    write_i64(buf as *mut i64, off / 8, word)
+}
+
+fn pack_q8_0_zero(buf: *mut u8, n: i64) with Mut {
+    var off: i64 = 0
+    while off + 8 <= n {
+        write_i64(buf as *mut i64, off / 8, 0)
+        off = off + 8
+    }
+    while off < n {
+        write_u8(buf, off, 0)
+        off = off + 1
+    }
+}
+
+fn main() with IO, Mut, Panic, Div, Alloc {
+    var gemm_ptx = "stdlib/hetero/kernels/gemm_naive_f32.ptx"
+    var mmid_ptx = "stdlib/hetero/kernels/mmid_q8_0_dp4a_f32.ptx"
+    if arg_count() > 0 { gemm_ptx = get_arg(0) }
+    if arg_count() > 1 { mmid_ptx = get_arg(1) }
+
+    var rt = rt_open(gemm_ptx, "gemm_naive_f32")
+    if !rt.ready {
+        print("gpu: unavailable\nMOE Q8_0 DONE\n")
+        exit(0)
+    }
+    if !rt_load_mmid_q8_0(&!rt, mmid_ptx) {
+        print("mmid q8_0: PTX load failed\nMOE Q8_0 DONE\n")
+        exit(1)
+    }
+    print("moe q8_0: mmid ready\n")
+
+    let hidden: i64 = 256
+    let inter: i64 = 512
+    let experts: i64 = 8
+    let slots: i64 = 2
+    let n_tokens: i64 = 1
+
+    let row_g = (hidden / 32) * 34
+    let row_u = row_g
+    let row_d = (inter / 32) * 34
+    let eg = inter * row_g
+    let eu = inter * row_u
+    let ed = hidden * row_d
+    let gate_w = heap_alloc(experts * eg)
+    let up_w = heap_alloc(experts * eu)
+    let down_w = heap_alloc(experts * ed)
+    pack_q8_0_zero(gate_w, experts * eg)
+    pack_q8_0_zero(up_w, experts * eu)
+    pack_q8_0_zero(down_w, experts * ed)
+
+    let x = gb_host_f32(n_tokens * hidden)
+    let logits = gb_host_f32(n_tokens * experts)
+    let ids = heap_alloc(n_tokens * slots * 4)
+    let route_w = gb_host_f32(n_tokens * slots)
+    let dst = gb_host_f32(n_tokens * hidden)
+    var i: i64 = 0
+    while i < n_tokens * hidden {
+        gb_host_set(x, i, 1.0)
+        i = i + 1
+    }
+    i = 0
+    while i < n_tokens * experts {
+        gb_host_set(logits, i, ((i % experts) as f64) * 0.35)
+        i = i + 1
+    }
+    moe_topk(logits, n_tokens, experts, slots, ids, route_w)
+
+    let run = moe_ffn_q8_0(
+        &rt, x, hidden, n_tokens, slots, ids, route_w,
+        gate_w, experts * eg, up_w, experts * eu, down_w, experts * ed,
+        experts, inter, eg, row_g, eu, row_u, ed, row_d, dst
+    )
+    if !run.ok {
+        print("moe q8_0: ffn failed status=")
+        print(run.status)
+        print("\nMOE Q8_0 DONE\n")
+        exit(1)
+    }
+    var nonfinite: i64 = 0
+    i = 0
+    while i < n_tokens * hidden {
+        let v = gb_host_get(dst, i)
+        if v != v || v <= (0.0 - 1000000000000.0) || v >= 1000000000000.0 {
+            nonfinite = nonfinite + 1
+        }
+        i = i + 1
+    }
+    let out0 = gb_host_get(dst, 0)
+    var finite: i64 = 0
+    if nonfinite == 0 { finite = 1 }
+    print("moe q8_0: gate_ms=")
+    print(run.ms_gate)
+    print(" up_ms=")
+    print(run.ms_up)
+    print(" down_ms=")
+    print(run.ms_down)
+    print(" status=")
+    print(run.status)
+    print(" finite=")
+    print(finite)
+    print(" nonfinite=")
+    print(nonfinite)
+    print(" dst0=")
+    print(out0)
+    print("\nMOE Q8_0 DONE\n")
+    if finite == 0 { exit(1) }
+    exit(0)
+}

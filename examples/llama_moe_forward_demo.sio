@@ -1,0 +1,200 @@
+//@ run-pass
+// Minimal layer-0 Llama forward through the Q4_K MoE hook.
+// Usage: llama_moe_forward_demo [gemm-ptx] [mmid-ptx]
+
+use hetero::runtime::{rt_load_mmid, rt_open}
+use llm::llama::{Llama, LlamaCfg, kv_new, llama_forward_rt}
+use tensor2::cpu_kernel::{CpuBuf, ck_alloc, ck_get, ck_set}
+
+fn empty_buf() -> CpuBuf {
+    CpuBuf { data: 0 as *mut f64, len: 0 }
+}
+
+fn filled_buf(n: i64, value: f64) -> CpuBuf with Alloc, Mut {
+    var out = ck_alloc(n)
+    var i: i64 = 0
+    while i < n {
+        ck_set(&!out, i, value)
+        i = i + 1
+    }
+    out
+}
+
+fn pattern_buf(n: i64, scale: f64) -> CpuBuf with Alloc, Mut {
+    var out = ck_alloc(n)
+    var i: i64 = 0
+    while i < n {
+        ck_set(&!out, i, scale * (((i % 7) + 1) as f64))
+        i = i + 1
+    }
+    out
+}
+
+fn router_buf(hidden: i64, experts: i64) -> CpuBuf with Alloc, Mut {
+    var out = ck_alloc(hidden * experts)
+    var h: i64 = 0
+    while h < hidden {
+        var e: i64 = 0
+        while e < experts {
+            ck_set(&!out, h * experts + e, 0.00001 * ((e + 1) as f64))
+            e = e + 1
+        }
+        h = h + 1
+    }
+    out
+}
+
+fn write_u8(buf: *mut u8, off: i64, v: i64) with Mut {
+    let shift = (off % 8) * 8
+    let mask = (0 - 1) - (255 << shift)
+    let word = (read_i64(buf as *mut i64, off / 8) & mask) | ((v & 255) << shift)
+    write_i64(buf as *mut i64, off / 8, word)
+}
+
+fn f32_to_f16_bits(v: f64) -> i64 {
+    if v <= 0.0 { return 0 }
+    var exp: i64 = 15
+    var mant = v
+    while mant >= 2.0 && exp < 30 {
+        mant = mant / 2.0
+        exp = exp + 1
+    }
+    while mant < 1.0 && exp > 1 {
+        mant = mant * 2.0
+        exp = exp - 1
+    }
+    let frac = ((mant - 1.0) * 1024.0) as i64
+    (exp << 10) | (frac & 1023)
+}
+
+fn pack_q4k(weights: *mut u8, expert_stride: i64, row_stride: i64, experts: i64, m: i64, k: i64, fill: f64) with Mut {
+    let nqb = k / 256
+    let dbits = f32_to_f16_bits(fill / 15.0)
+    var e: i64 = 0
+    while e < experts {
+        var r: i64 = 0
+        while r < m {
+            var ib: i64 = 0
+            while ib < nqb {
+                let base = e * expert_stride + r * row_stride + ib * 144
+                write_u8(weights, base + 0, dbits & 255)
+                write_u8(weights, base + 1, (dbits >> 8) & 255)
+                write_u8(weights, base + 2, 0)
+                write_u8(weights, base + 3, 0)
+                var s: i64 = 0
+                while s < 4 {
+                    write_u8(weights, base + 4 + s, 1)
+                    write_u8(weights, base + 8 + s, 0)
+                    write_u8(weights, base + 12 + s, 1)
+                    s = s + 1
+                }
+                var q: i64 = 0
+                while q < 128 {
+                    write_u8(weights, base + 16 + q, (8 << 4) | 8)
+                    q = q + 1
+                }
+                ib = ib + 1
+            }
+            r = r + 1
+        }
+        e = e + 1
+    }
+}
+
+fn main() with IO, Mut, Panic, Div, Alloc {
+    var gemm_ptx = "stdlib/hetero/kernels/gemm_naive_f32.ptx"
+    var mmid_ptx = "stdlib/hetero/kernels/mmid_q4k_dp4a_f32.ptx"
+    if arg_count() > 0 { gemm_ptx = get_arg(0) }
+    if arg_count() > 1 { mmid_ptx = get_arg(1) }
+
+    var rt = rt_open(gemm_ptx, "gemm_naive_f32")
+    if !rt.ready {
+        print("gpu: unavailable\nLLAMA MOE FORWARD DONE\n")
+        exit(0)
+    }
+    if !rt_load_mmid(&!rt, mmid_ptx) {
+        print("mmid: PTX load failed\nLLAMA MOE FORWARD DONE\n")
+        exit(0)
+    }
+
+    let hidden: i64 = 256
+    let inter: i64 = 512
+    let experts: i64 = 8
+    let slots: i64 = 2
+    let vocab: i64 = 8
+    let heads: i64 = 4
+    let kv_heads: i64 = 1
+    let head_dim: i64 = hidden / heads
+    let kvdim = kv_heads * head_dim
+
+    let row_g = (hidden / 256) * 144
+    let row_u = row_g
+    let row_d = (inter / 256) * 144
+    let eg = inter * row_g
+    let eu = inter * row_u
+    let ed = hidden * row_d
+    let gate_w = heap_alloc(experts * eg)
+    let up_w = heap_alloc(experts * eu)
+    let down_w = heap_alloc(experts * ed)
+    pack_q4k(gate_w, eg, row_g, experts, inter, hidden, 0.02)
+    pack_q4k(up_w, eu, row_u, experts, inter, hidden, 0.02)
+    pack_q4k(down_w, ed, row_d, experts, hidden, inter, 0.02)
+
+    let cfg = LlamaCfg {
+        hidden: hidden, inter: inter, layers: 1, heads: heads, kv_heads: kv_heads,
+        vocab: vocab, head_dim: head_dim, eps: 0.00001, theta: 10000.0,
+        tied: false, n_experts: experts, n_expert_used: slots, moe_inter: inter, ok: true,
+    }
+    var m = Llama {
+        cfg: cfg,
+        embed: pattern_buf(vocab * hidden, 0.001),
+        lm_head_t: pattern_buf(hidden * vocab, 0.0001),
+        final_norm: filled_buf(hidden, 1.0),
+        wq: [empty_buf(); 64], wk: [empty_buf(); 64], wv: [empty_buf(); 64], wo: [empty_buf(); 64],
+        qb: [empty_buf(); 64], kb: [empty_buf(); 64], vb: [empty_buf(); 64],
+        gate: [empty_buf(); 64], up: [empty_buf(); 64], down: [empty_buf(); 64],
+        in_norm: [empty_buf(); 64], post_norm: [empty_buf(); 64],
+        moe_router: router_buf(hidden, experts),
+        moe_gate_w: gate_w, moe_up_w: up_w, moe_down_w: down_w,
+        moe_gate_bytes: experts * eg, moe_up_bytes: experts * eu, moe_down_bytes: experts * ed,
+        moe_expert_stride_g: eg, moe_row_stride_g: row_g,
+        moe_expert_stride_u: eu, moe_row_stride_u: row_u,
+        moe_expert_stride_d: ed, moe_row_stride_d: row_d,
+        last_moe_used: false, last_moe_status: 0, loaded: true,
+    }
+    m.in_norm[0] = filled_buf(hidden, 1.0)
+    m.post_norm[0] = filled_buf(hidden, 1.0)
+    m.wq[0] = pattern_buf(hidden * hidden, 0.000001)
+    m.wk[0] = pattern_buf(hidden * kvdim, 0.000001)
+    m.wv[0] = pattern_buf(hidden * kvdim, 0.000001)
+    m.wo[0] = pattern_buf(hidden * hidden, 0.000001)
+    m.gate[0] = filled_buf(hidden * inter, 0.000001)
+    m.up[0] = filled_buf(hidden * inter, 0.000001)
+    m.down[0] = filled_buf(inter * hidden, 0.000001)
+
+    var tokens = ck_alloc(1)
+    ck_set(&!tokens, 0, 1.0)
+    var kv = kv_new(&m, 4)
+    let logits = llama_forward_rt(&!m, &!kv, &tokens, 1, &rt)
+
+    var bad: i64 = 0
+    var i: i64 = 0
+    while i < logits.len {
+        let v = ck_get(&logits, i)
+        if v != v || v > 1.0e30 || v < 0.0 - 1.0e30 { bad = bad + 1 }
+        i = i + 1
+    }
+    print("last_moe_used=")
+    print_int(if m.last_moe_used { 1 } else { 0 })
+    print(" last_moe_status=")
+    print_int(m.last_moe_status)
+    print(" finite_logits=")
+    print_int(if bad == 0 { 1 } else { 0 })
+    print("\n")
+    if !m.last_moe_used || m.last_moe_status != 0 || bad != 0 {
+        print("LLAMA MOE FORWARD FAIL\n")
+        exit(1)
+    }
+    print("LLAMA MOE FORWARD DONE\n")
+    exit(0)
+}

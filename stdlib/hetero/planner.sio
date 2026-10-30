@@ -1,0 +1,205 @@
+// stdlib::hetero::planner - Split-or-place planner over measured devices.
+//
+// Three modes over one graph (docs/design/heterogeneous-gpu-framework.md):
+//   identity  - one device: no split, no planner overhead in the hot path.
+//   classic   - measured-equal devices: equal shards, standard collectives.
+//   hetero    - unequal devices: shards proportional to measured throughput,
+//               capped by per-device VRAM with surplus redistribution.
+// "Do not split" is a valid planner outcome, not a failure.
+
+use hetero::types::{DeviceCaps, device_throughput, op_matmul, dtype_bf16}
+use hetero::caps::{DevicePool, pool_is_homogeneous}
+
+pub fn plan_identity() -> i32 { 1 }
+pub fn plan_classic() -> i32 { 2 }
+pub fn plan_hetero_split() -> i32 { 3 }
+
+/// Choose the planning mode for a pool.
+///
+/// # Parameters
+/// - `pool`: device pool from the probe.
+///
+/// # Return
+/// `plan_identity`, `plan_classic`, or `plan_hetero_split`.
+///
+/// # Complexity
+/// O(n_devices)
+pub fn plan_mode(pool: &DevicePool) -> i32 with Mut {
+    if pool.n_devices <= 1 { return plan_identity() }
+    if pool_is_homogeneous(pool, 0.05) { return plan_classic() }
+    plan_hetero_split()
+}
+
+/// Equal shards of `total_units` across `n` parts; remainder to the first parts.
+///
+/// # Parameters
+/// - `total_units`: indivisible work units to distribute.
+/// - `n`: number of parts (<= 16).
+///
+/// # Return
+/// Shard sizes; sum equals total_units when n >= 1.
+///
+/// # Complexity
+/// O(n)
+pub fn equal_shards(total_units: i64, n: i32) -> [i64; 16] with Mut {
+    var out: [i64; 16] = [0; 16]
+    if n <= 0 { return out }
+    let base = total_units / (n as i64)
+    var rem = total_units - base * (n as i64)
+    var i = 0
+    while i < n {
+        out[i as usize] = base
+        if rem > 0 { out[i as usize] = base + 1; rem = rem - 1 }
+        i = i + 1
+    }
+    out
+}
+
+/// Proportional shards with per-device VRAM caps and surplus redistribution.
+///
+/// Each device receives work proportional to its measured throughput for
+/// (op, dtype). A device whose proportional share would exceed its VRAM
+/// (bytes_per_unit per work unit) is capped, and the surplus is redistributed
+/// among the devices that still have room, iterating until stable.
+///
+/// # Parameters
+/// - `pool`: device pool.
+/// - `op`: op code. - `dtype`: dtype code.
+/// - `total_units`: work units to distribute.
+/// - `bytes_per_unit`: bytes of device memory one work unit needs.
+///
+/// # Return
+/// Shard per device index. Sum equals total_units unless total VRAM capacity
+/// is insufficient, in which case the sum is the capacity (caller must check).
+///
+/// # Complexity
+/// O(n_devices^2) worst case (one cap per iteration round).
+pub fn proportional_shards(pool: &DevicePool, op: i32, dtype: i32, total_units: i64, bytes_per_unit: i64) -> [i64; 16] with Mut {
+    var out: [i64; 16] = [0; 16]
+    let n = pool.n_devices
+    if n <= 0 || total_units <= 0 { return out }
+
+    // Per-device unit caps from VRAM. bytes_per_unit <= 0 means uncapped.
+    var cap: [i64; 16] = [0; 16]
+    var i = 0
+    while i < n {
+        if bytes_per_unit > 0 {
+            cap[i as usize] = pool.devices[i as usize].vram_bytes / bytes_per_unit
+        } else {
+            cap[i as usize] = total_units
+        }
+        i = i + 1
+    }
+
+    var capped: [bool; 16] = [false; 16]
+    var remaining = total_units
+    var rounds = 0
+    while remaining > 0 && rounds < 16 {
+        // Total throughput of uncapped, measured devices.
+        var tsum = 0.0
+        i = 0
+        while i < n {
+            if !capped[i as usize] {
+                tsum = tsum + device_throughput(pool.devices[i as usize], op, dtype)
+            }
+            i = i + 1
+        }
+        if tsum <= 0.0 {
+            // No measured throughput left: give the rest to uncapped devices equally.
+            var open = 0
+            i = 0
+            while i < n { if !capped[i as usize] { open = open + 1 }; i = i + 1 }
+            if open == 0 { return out }
+            let extra = equal_shards(remaining, open)
+            var k = 0
+            i = 0
+            while i < n {
+                if !capped[i as usize] {
+                    out[i as usize] = out[i as usize] + extra[k as usize]
+                    k = k + 1
+                }
+                i = i + 1
+            }
+            return out
+        }
+        // Assign proportional shares; cap any device that overflows.
+        var assigned_this_round: i64 = 0
+        var any_capped_now = false
+        i = 0
+        while i < n {
+            if !capped[i as usize] {
+                let t = device_throughput(pool.devices[i as usize], op, dtype)
+                var share = ((remaining as f64) * t / tsum) as i64
+                if out[i as usize] + share > cap[i as usize] {
+                    share = cap[i as usize] - out[i as usize]
+                    if share < 0 { share = 0 }
+                    capped[i as usize] = true
+                    any_capped_now = true
+                }
+                out[i as usize] = out[i as usize] + share
+                assigned_this_round = assigned_this_round + share
+            }
+            i = i + 1
+        }
+        remaining = remaining - assigned_this_round
+        if !any_capped_now {
+            // Only integer-rounding residue remains: hand it to the fastest device.
+            if remaining > 0 {
+                var best = 0
+                var best_t = 0.0 - 1.0
+                i = 0
+                while i < n {
+                    let t = device_throughput(pool.devices[i as usize], op, dtype)
+                    if t > best_t && out[i as usize] + remaining <= cap[i as usize] { best = i; best_t = t }
+                    i = i + 1
+                }
+                out[best as usize] = out[best as usize] + remaining
+                remaining = 0
+            }
+        }
+        rounds = rounds + 1
+    }
+    out
+}
+
+/// Estimated makespan (seconds) of a sharded op: slowest shard dominates.
+///
+/// # Parameters
+/// - `pool`: device pool. - `shards`: work units per device.
+/// - `flops_per_unit`: FLOPs of one work unit.
+/// - `op`: op code. - `dtype`: dtype code.
+///
+/// # Return
+/// Max over devices of shard_flops / measured throughput; 0 if unmeasured.
+///
+/// # Complexity
+/// O(n_devices)
+pub fn shard_makespan_s(pool: &DevicePool, shards: [i64; 16], flops_per_unit: f64, op: i32, dtype: i32) -> f64 with Mut {
+    var worst = 0.0
+    var i = 0
+    while i < pool.n_devices {
+        let t = device_throughput(pool.devices[i as usize], op, dtype)
+        if t > 0.0 && shards[i as usize] > 0 {
+            let secs = (shards[i as usize] as f64) * flops_per_unit / (t * 1000000000.0)
+            if secs > worst { worst = secs }
+        }
+        i = i + 1
+    }
+    worst
+}
+
+/// Estimated transfer time in milliseconds over one measured link.
+///
+/// # Parameters
+/// - `bytes`: payload size. - `bandwidth_gbps`: link bandwidth in GB/s.
+/// - `latency_us`: link latency in microseconds.
+///
+/// # Return
+/// latency + bytes / bandwidth, in milliseconds.
+///
+/// # Complexity
+/// O(1)
+pub fn transfer_time_ms(bytes: i64, bandwidth_gbps: f64, latency_us: f64) -> f64 {
+    if bandwidth_gbps <= 0.0 { return 0.0 }
+    latency_us / 1000.0 + (bytes as f64) / (bandwidth_gbps * 1000000000.0) * 1000.0
+}

@@ -1,0 +1,575 @@
+// stdlib::llm::llama - Llama-family forward pass (DecoderBlock arch).
+//
+// One architecture covers Llama/Mistral/Qwen2-style models: RMSNorm,
+// RoPE (rotate-half, the HF convention; config rope_interleaved=false),
+// grouped-query attention with a KV cache, SwiGLU MLP, optional tied
+// embeddings. Weights load from safetensors into f64 host masters;
+// projection matrices are transposed once at load so every projection
+// in the hot path is a plain ck_gemm.
+//
+// The forward appends `ntok` tokens at the cache's current position and
+// returns the last token's logits. Calling it once with the whole
+// sequence or token-by-token through the cache is the same math - the
+// demos gate on exactly that equivalence, against an independent naive
+// reference, before any number is believed.
+//
+// v1 execution is the CPU reference path (f64). Routing the projections
+// through the hetero runtime (GPU/workers) is a backend swap behind
+// these same functions, not a new forward.
+
+use llm::safetensors::{StFile, st_find, st_load_f64, st_read_all, st_scan_bool, st_scan_f64, st_scan_i64}
+use tensor2::cpu_kernel::{CpuBuf, ck_alloc, ck_gemm, ck_get, ck_set}
+use math::pure::{cos, exp, pow, sin, sqrt}
+use hetero::cuda_exec::{CudaExec}
+use hetero::runtime::{Runtime, rt_gemm_rect}
+use hetero::moe::{moe_topk, moe_ffn_q4k, MoeFfnResult}
+use hetero::cublas_bench::{gb_host_f32, gb_host_get, gb_host_set}
+// Layer weight names are built with the str_concat builtin plus a
+// hand-rolled digit renderer (stdlib/str shadows the string builtins
+// with a fixed-buffer Str API - importing it here breaks str_char_at).
+fn ll_digit(d: i64) -> string {
+    if d == 0 { return "0" }
+    if d == 1 { return "1" }
+    if d == 2 { return "2" }
+    if d == 3 { return "3" }
+    if d == 4 { return "4" }
+    if d == 5 { return "5" }
+    if d == 6 { return "6" }
+    if d == 7 { return "7" }
+    if d == 8 { return "8" }
+    "9"
+}
+
+fn ll_num(n: i64) -> string with Alloc {
+    if n < 10 { return ll_digit(n) }
+    str_concat(ll_num(n / 10), ll_digit(n % 10))
+}
+
+pub struct LlamaCfg {
+    pub hidden: i64,
+    pub inter: i64,
+    pub layers: i32,
+    pub heads: i64,
+    pub kv_heads: i64,
+    pub vocab: i64,
+    pub head_dim: i64,
+    pub eps: f64,
+    pub theta: f64,
+    pub tied: bool,
+    pub n_experts: i64,
+    pub n_expert_used: i64,
+    pub moe_inter: i64,
+    pub ok: bool,
+}
+
+fn ll_empty() -> CpuBuf {
+    CpuBuf { data: 0 as *mut f64, len: 0 }
+}
+
+pub struct Llama {
+    pub cfg: LlamaCfg,
+    pub embed: CpuBuf,
+    pub lm_head_t: CpuBuf,
+    pub final_norm: CpuBuf,
+    pub wq: [CpuBuf; 64],
+    pub wk: [CpuBuf; 64],
+    pub wv: [CpuBuf; 64],
+    pub wo: [CpuBuf; 64],
+    pub qb: [CpuBuf; 64],
+    pub kb: [CpuBuf; 64],
+    pub vb: [CpuBuf; 64],
+    pub gate: [CpuBuf; 64],
+    pub up: [CpuBuf; 64],
+    pub down: [CpuBuf; 64],
+    pub in_norm: [CpuBuf; 64],
+    pub post_norm: [CpuBuf; 64],
+    pub moe_router: CpuBuf,
+    pub moe_gate_w: *mut u8,
+    pub moe_up_w: *mut u8,
+    pub moe_down_w: *mut u8,
+    pub moe_gate_bytes: i64,
+    pub moe_up_bytes: i64,
+    pub moe_down_bytes: i64,
+    pub moe_expert_stride_g: i64,
+    pub moe_row_stride_g: i64,
+    pub moe_expert_stride_u: i64,
+    pub moe_row_stride_u: i64,
+    pub moe_expert_stride_d: i64,
+    pub moe_row_stride_d: i64,
+    pub last_moe_used: bool,
+    pub last_moe_status: i64,
+    pub loaded: bool,
+}
+
+pub struct KvCache {
+    pub k: [CpuBuf; 64],
+    pub v: [CpuBuf; 64],
+    pub len: i64,
+    pub cap: i64,
+}
+
+pub fn llama_cfg(dir: string) -> LlamaCfg with Alloc, Mut, Panic, Div {
+    var cfg = LlamaCfg {
+        hidden: 0, inter: 0, layers: 0, heads: 0, kv_heads: 0, vocab: 0,
+        head_dim: 0, eps: 0.00001, theta: 10000.0, tied: false,
+        n_experts: 0, n_expert_used: 0, moe_inter: 0, ok: false,
+    }
+    let f = st_read_all(dir ++ "/config.json")
+    if !f.ok { return cfg }
+    cfg.hidden = st_scan_i64(f.data, f.len, "hidden_size")
+    cfg.inter = st_scan_i64(f.data, f.len, "intermediate_size")
+    cfg.layers = st_scan_i64(f.data, f.len, "num_hidden_layers") as i32
+    cfg.heads = st_scan_i64(f.data, f.len, "num_attention_heads")
+    cfg.kv_heads = st_scan_i64(f.data, f.len, "num_key_value_heads")
+    if cfg.kv_heads == 0 { cfg.kv_heads = cfg.heads }
+    cfg.vocab = st_scan_i64(f.data, f.len, "vocab_size")
+    cfg.eps = st_scan_f64(f.data, f.len, "rms_norm_eps")
+    cfg.theta = st_scan_f64(f.data, f.len, "rope_theta")
+    cfg.tied = st_scan_bool(f.data, f.len, "tie_word_embeddings")
+    if cfg.heads > 0 { cfg.head_dim = cfg.hidden / cfg.heads }
+    cfg.ok = cfg.hidden > 0 && cfg.layers > 0 && cfg.vocab > 0
+    cfg
+}
+
+fn ll_name(i: i64, suffix: string) -> string with Alloc {
+    str_concat(str_concat("model.layers.", ll_num(i)), suffix)
+}
+
+// [rows][cols] -> [cols][rows], so projections are ck_gemm(X, W_t).
+fn ll_transpose(src: &CpuBuf, rows: i64, cols: i64) -> CpuBuf with Alloc {
+    var out = ck_alloc(rows * cols)
+    var i: i64 = 0
+    while i < rows {
+        var j: i64 = 0
+        while j < cols {
+            write_f64(out.data, j * rows + i, read_f64(src.data, i * cols + j))
+            j = j + 1
+        }
+        i = i + 1
+    }
+    out
+}
+
+fn ll_load_t(st: &StFile, name: string) -> CpuBuf with Alloc, Mut, Panic, Div {
+    let e = st_find(st, name)
+    let raw = st_load_f64(st, name)
+    if !e.found || e.rank < 2 { return raw }
+    ll_transpose(&raw, e.dims[0], e.dims[1])
+}
+
+pub fn llama_load(dir: string) -> Llama with Alloc, Mut, Panic, Div {
+    let cfg = llama_cfg(dir)
+    var m = Llama {
+        cfg: cfg, embed: ll_empty(), lm_head_t: ll_empty(), final_norm: ll_empty(),
+        wq: [ll_empty(); 64], wk: [ll_empty(); 64], wv: [ll_empty(); 64], wo: [ll_empty(); 64],
+        qb: [ll_empty(); 64], kb: [ll_empty(); 64], vb: [ll_empty(); 64],
+        gate: [ll_empty(); 64], up: [ll_empty(); 64], down: [ll_empty(); 64],
+        in_norm: [ll_empty(); 64], post_norm: [ll_empty(); 64],
+        moe_router: ll_empty(),
+        moe_gate_w: 0 as *mut u8, moe_up_w: 0 as *mut u8, moe_down_w: 0 as *mut u8,
+        moe_gate_bytes: 0, moe_up_bytes: 0, moe_down_bytes: 0,
+        moe_expert_stride_g: 0, moe_row_stride_g: 0,
+        moe_expert_stride_u: 0, moe_row_stride_u: 0,
+        moe_expert_stride_d: 0, moe_row_stride_d: 0,
+        last_moe_used: false, last_moe_status: 0, loaded: false,
+    }
+    if !cfg.ok { return m }
+    let st = st_read_all(dir ++ "/model.safetensors")
+    if !st.ok { return m }
+    m.embed = st_load_f64(&st, "model.embed_tokens.weight")
+    m.final_norm = st_load_f64(&st, "model.norm.weight")
+    var li: i32 = 0
+    while li < cfg.layers && li < 64 {
+        let i = li as i64
+        m.in_norm[li as usize] = st_load_f64(&st, ll_name(i, ".input_layernorm.weight"))
+        m.post_norm[li as usize] = st_load_f64(&st, ll_name(i, ".post_attention_layernorm.weight"))
+        m.wq[li as usize] = ll_load_t(&st, ll_name(i, ".self_attn.q_proj.weight"))
+        m.wk[li as usize] = ll_load_t(&st, ll_name(i, ".self_attn.k_proj.weight"))
+        m.wv[li as usize] = ll_load_t(&st, ll_name(i, ".self_attn.v_proj.weight"))
+        m.wo[li as usize] = ll_load_t(&st, ll_name(i, ".self_attn.o_proj.weight"))
+        // Qwen2-family QKV biases: present as tensors or absent (len 0).
+        m.qb[li as usize] = st_load_f64(&st, ll_name(i, ".self_attn.q_proj.bias"))
+        m.kb[li as usize] = st_load_f64(&st, ll_name(i, ".self_attn.k_proj.bias"))
+        m.vb[li as usize] = st_load_f64(&st, ll_name(i, ".self_attn.v_proj.bias"))
+        m.gate[li as usize] = ll_load_t(&st, ll_name(i, ".mlp.gate_proj.weight"))
+        m.up[li as usize] = ll_load_t(&st, ll_name(i, ".mlp.up_proj.weight"))
+        m.down[li as usize] = ll_load_t(&st, ll_name(i, ".mlp.down_proj.weight"))
+        li = li + 1
+    }
+    let head = st_load_f64(&st, "lm_head.weight")
+    if cfg.tied || head.len == 0 {
+        m.lm_head_t = ll_transpose(&m.embed, cfg.vocab, cfg.hidden)
+    } else {
+        m.lm_head_t = ll_transpose(&head, cfg.vocab, cfg.hidden)
+    }
+    m.loaded = m.embed.len == cfg.vocab * cfg.hidden && m.final_norm.len == cfg.hidden
+    m
+}
+
+pub fn kv_new(m: &Llama, max_seq: i64) -> KvCache with Alloc {
+    var kv = KvCache { k: [ll_empty(); 64], v: [ll_empty(); 64], len: 0, cap: max_seq }
+    let kvdim = m.cfg.kv_heads * m.cfg.head_dim
+    var li: i32 = 0
+    while li < m.cfg.layers && li < 64 {
+        kv.k[li as usize] = ck_alloc(max_seq * kvdim)
+        kv.v[li as usize] = ck_alloc(max_seq * kvdim)
+        li = li + 1
+    }
+    kv
+}
+
+fn ll_rmsnorm(x: &CpuBuf, w: &CpuBuf, rows: i64, d: i64, eps: f64) -> CpuBuf with Alloc, Mut, Div, Panic {
+    var out = ck_alloc(rows * d)
+    var r: i64 = 0
+    while r < rows {
+        var ss: f64 = 0.0
+        var j: i64 = 0
+        while j < d {
+            let v = read_f64(x.data, r * d + j)
+            ss = ss + v * v
+            j = j + 1
+        }
+        let inv = 1.0 / sqrt(ss / (d as f64) + eps)
+        j = 0
+        while j < d {
+            write_f64(out.data, r * d + j, read_f64(x.data, r * d + j) * inv * read_f64(w.data, j))
+            j = j + 1
+        }
+        r = r + 1
+    }
+    out
+}
+
+fn ll_rope(x: &!CpuBuf, rows: i64, heads: i64, dh: i64, pos0: i64, theta: f64) with Mut, Div, Panic {
+    let half = dh / 2
+    var r: i64 = 0
+    while r < rows {
+        let pos = pos0 + r
+        var h: i64 = 0
+        while h < heads {
+            var i: i64 = 0
+            while i < half {
+                let ang = (pos as f64) * pow(theta, (0.0 - (2.0 * (i as f64))) / (dh as f64))
+                let c = cos(ang)
+                let s = sin(ang)
+                let base = r * (heads * dh) + h * dh
+                let a = read_f64(x.data, base + i)
+                let b = read_f64(x.data, base + i + half)
+                write_f64(x.data, base + i, a * c - b * s)
+                write_f64(x.data, base + i + half, b * c + a * s)
+                i = i + 1
+            }
+            h = h + 1
+        }
+        r = r + 1
+    }
+}
+
+fn ll_add_bias(x: &!CpuBuf, bias: &CpuBuf, rows: i64, d: i64) {
+    var r: i64 = 0
+    while r < rows {
+        var j: i64 = 0
+        while j < d {
+            write_f64(x.data, r * d + j, read_f64(x.data, r * d + j) + read_f64(bias.data, j))
+            j = j + 1
+        }
+        r = r + 1
+    }
+}
+
+fn ll_add_into(dst: &!CpuBuf, src: &CpuBuf) {
+    var i: i64 = 0
+    while i < dst.len {
+        write_f64(dst.data, i, read_f64(dst.data, i) + read_f64(src.data, i))
+        i = i + 1
+    }
+}
+
+fn ll_no_rt() -> Runtime {
+    Runtime { exec: CudaExec { cuda: 0 as *mut u8, ok: false }, func: 0, ready: false, cvt_down: 0, cvt_up: 0, mmid_func: 0, mmid_vec_func: 0, mmid_q5k_func: 0, mmid_q5k_vec_func: 0, mmid_q8_0_func: 0, mmid_q8_0_vec_func: 0 }
+}
+
+fn ll_f64_to_f32(src: &CpuBuf, n: i64) -> *mut u8 with Alloc, Mut {
+    let out = gb_host_f32(n)
+    var i: i64 = 0
+    while i < n {
+        gb_host_set(out, i, ck_get(src, i))
+        i = i + 1
+    }
+    out
+}
+
+fn ll_f32_to_f64(src: *mut u8, n: i64) -> CpuBuf with Alloc, Mut {
+    var out = ck_alloc(n)
+    var i: i64 = 0
+    while i < n {
+        ck_set(&!out, i, gb_host_get(src, i))
+        i = i + 1
+    }
+    out
+}
+
+// True when the single-token GPU MoE FFN path can run for this model.
+fn ll_moe_ready(m: &Llama, rt: &Runtime, use_gpu: bool, ntok: i64) -> bool {
+    if !use_gpu { return false }
+    if ntok != 1 { return false }
+    if m.cfg.n_experts <= 0 || m.cfg.n_expert_used <= 0 { return false }
+    if m.cfg.n_expert_used > 16 || m.cfg.n_expert_used > m.cfg.n_experts { return false }
+    if !rt.exec.ok { return false }
+    if rt.mmid_vec_func == 0 { return false }
+    if m.moe_gate_w == 0 as *mut u8 || m.moe_up_w == 0 as *mut u8 || m.moe_down_w == 0 as *mut u8 { return false }
+    if m.moe_gate_bytes <= 0 || m.moe_up_bytes <= 0 || m.moe_down_bytes <= 0 { return false }
+    if m.moe_router.len <= 0 { return false }
+    true
+}
+
+// One projection: GPU rows through the hetero runtime when requested
+// and ready (remainder rows land on CPU inside rt_gemm_rect), else the
+// CPU reference GEMM. A GPU failure recomputes on CPU and reports the
+// status - the caller decides whether to believe the result.
+fn ll_proj(rt: &Runtime, use_gpu: bool, x: &CpuBuf, w: &CpuBuf, out: &!CpuBuf, rows: i64, outd: i64, ind: i64) -> i64 with Alloc, Mut, Panic, Div {
+    if use_gpu && rt.ready {
+        let r = rt_gemm_rect(rt, x, w, out, rows, outd, ind, rows)
+        if r.status == 0 { return 0 }
+        ck_gemm(x, w, out, rows, outd, ind)
+        return r.status
+    }
+    ck_gemm(x, w, out, rows, outd, ind)
+    0
+}
+
+// Forward `ntok` tokens (ids as f64 in `tokens`) appended at kv.len.
+// Returns logits [vocab] of the last token. Cache grows by ntok.
+pub fn llama_forward(m: &!Llama, kv: &!KvCache, tokens: &CpuBuf, ntok: i64) -> CpuBuf with Alloc, Mut, Panic, Div {
+    let rt = ll_no_rt()
+    ll_forward_impl(m, kv, tokens, ntok, &rt, false)
+}
+
+// Same forward with projections routed to the hetero runtime (GPU
+// prefill; decode rows < 16 stay on CPU inside rt_gemm_rect).
+pub fn llama_forward_rt(m: &!Llama, kv: &!KvCache, tokens: &CpuBuf, ntok: i64, rt: &Runtime) -> CpuBuf with Alloc, Mut, Panic, Div {
+    ll_forward_impl(m, kv, tokens, ntok, rt, true)
+}
+
+fn ll_forward_impl(m: &!Llama, kv: &!KvCache, tokens: &CpuBuf, ntok: i64, rt: &Runtime, use_gpu: bool) -> CpuBuf with Alloc, Mut, Panic, Div {
+    m.last_moe_used = false
+    m.last_moe_status = 0
+    let hidden = m.cfg.hidden
+    let inter = m.cfg.inter
+    let dh = m.cfg.head_dim
+    let qdim = m.cfg.heads * dh
+    let kvdim = m.cfg.kv_heads * dh
+    let rep = m.cfg.heads / m.cfg.kv_heads
+    let pos0 = kv.len
+    var x = ck_alloc(ntok * hidden)
+    var t: i64 = 0
+    while t < ntok {
+        let tok = (ck_get(tokens, t)) as i64
+        var j: i64 = 0
+        while j < hidden {
+            write_f64(x.data, t * hidden + j, read_f64(m.embed.data, tok * hidden + j))
+            j = j + 1
+        }
+        t = t + 1
+    }
+    var scores = ck_alloc(kv.cap)
+    var li: i32 = 0
+    while li < m.cfg.layers {
+        let h = ll_rmsnorm(&x, &m.in_norm[li as usize], ntok, hidden, m.cfg.eps)
+        var q = ck_alloc(ntok * qdim)
+        let _ps = ll_proj(rt, use_gpu, &h, &m.wq[li as usize], &!q, ntok, qdim, hidden)
+        var kk = ck_alloc(ntok * kvdim)
+        let _ps2 = ll_proj(rt, use_gpu, &h, &m.wk[li as usize], &!kk, ntok, kvdim, hidden)
+        var vv = ck_alloc(ntok * kvdim)
+        let _ps3 = ll_proj(rt, use_gpu, &h, &m.wv[li as usize], &!vv, ntok, kvdim, hidden)
+        if m.qb[li as usize].len > 0 {
+            ll_add_bias(&!q, &m.qb[li as usize], ntok, qdim)
+            ll_add_bias(&!kk, &m.kb[li as usize], ntok, kvdim)
+            ll_add_bias(&!vv, &m.vb[li as usize], ntok, kvdim)
+        }
+        ll_rope(&!q, ntok, m.cfg.heads, dh, pos0, m.cfg.theta)
+        ll_rope(&!kk, ntok, m.cfg.kv_heads, dh, pos0, m.cfg.theta)
+        // Append K/V rows to the cache.
+        var cp: i64 = 0
+        while cp < ntok * kvdim {
+            write_f64(kv.k[li as usize].data, pos0 * kvdim + cp, read_f64(kk.data, cp))
+            write_f64(kv.v[li as usize].data, pos0 * kvdim + cp, read_f64(vv.data, cp))
+            cp = cp + 1
+        }
+        // Causal GQA attention for the new rows.
+        var att = ck_alloc(ntok * qdim)
+        let scale = 1.0 / sqrt(dh as f64)
+        var si: i64 = 0
+        while si < ntok {
+            let upto = pos0 + si + 1
+            var hd: i64 = 0
+            while hd < m.cfg.heads {
+                let kvh = hd / rep
+                var mx: f64 = 0.0 - 1000000000.0
+                var tt: i64 = 0
+                while tt < upto {
+                    var dot: f64 = 0.0
+                    var d: i64 = 0
+                    while d < dh {
+                        dot = dot + read_f64(q.data, si * qdim + hd * dh + d) * read_f64(kv.k[li as usize].data, tt * kvdim + kvh * dh + d)
+                        d = d + 1
+                    }
+                    let sc = dot * scale
+                    write_f64(scores.data, tt, sc)
+                    if sc > mx { mx = sc }
+                    tt = tt + 1
+                }
+                var sum: f64 = 0.0
+                tt = 0
+                while tt < upto {
+                    let e = exp(read_f64(scores.data, tt) - mx)
+                    write_f64(scores.data, tt, e)
+                    sum = sum + e
+                    tt = tt + 1
+                }
+                var d2: i64 = 0
+                while d2 < dh {
+                    var acc: f64 = 0.0
+                    var t2: i64 = 0
+                    while t2 < upto {
+                        acc = acc + (read_f64(scores.data, t2) / sum) * read_f64(kv.v[li as usize].data, t2 * kvdim + kvh * dh + d2)
+                        t2 = t2 + 1
+                    }
+                    write_f64(att.data, si * qdim + hd * dh + d2, acc)
+                    d2 = d2 + 1
+                }
+                hd = hd + 1
+            }
+            si = si + 1
+        }
+        var o = ck_alloc(ntok * hidden)
+        let _ps4 = ll_proj(rt, use_gpu, &att, &m.wo[li as usize], &!o, ntok, hidden, qdim)
+        ll_add_into(&!x, &o)
+        let h2 = ll_rmsnorm(&x, &m.post_norm[li as usize], ntok, hidden, m.cfg.eps)
+        var used_moe = false
+        if li == 0 && ll_moe_ready(m, rt, use_gpu, ntok) {
+            var router_logits = ck_alloc(ntok * m.cfg.n_experts)
+            let _router_status = ll_proj(rt, use_gpu, &h2, &m.moe_router, &!router_logits, ntok, m.cfg.n_experts, hidden)
+            let x_f32 = ll_f64_to_f32(&h2, ntok * hidden)
+            let logits_f32 = ll_f64_to_f32(&router_logits, ntok * m.cfg.n_experts)
+            let dst_f32 = gb_host_f32(ntok * hidden)
+            var moe_inter = m.cfg.moe_inter
+            if moe_inter <= 0 { moe_inter = inter }
+            let moe_cfg = LlamaMoeFfnCfg {
+                n_experts: m.cfg.n_experts, slots: m.cfg.n_expert_used,
+                hidden: hidden, inter: moe_inter, n_tokens: ntok,
+                gate_bytes: m.moe_gate_bytes, up_bytes: m.moe_up_bytes, down_bytes: m.moe_down_bytes,
+                expert_stride_g: m.moe_expert_stride_g, row_stride_g: m.moe_row_stride_g,
+                expert_stride_u: m.moe_expert_stride_u, row_stride_u: m.moe_row_stride_u,
+                expert_stride_d: m.moe_expert_stride_d, row_stride_d: m.moe_row_stride_d,
+            }
+            let r = llama_moe_ffn_block(
+                rt, &moe_cfg, x_f32, logits_f32,
+                m.moe_gate_w, m.moe_up_w, m.moe_down_w, dst_f32
+            )
+            if r.ok {
+                let dn = ll_f32_to_f64(dst_f32, ntok * hidden)
+                ll_add_into(&!x, &dn)
+                m.last_moe_used = true
+                m.last_moe_status = 0
+                used_moe = true
+            } else {
+                m.last_moe_status = r.status
+            }
+        }
+        if !used_moe {
+            var g = ck_alloc(ntok * inter)
+            let _ps5 = ll_proj(rt, use_gpu, &h2, &m.gate[li as usize], &!g, ntok, inter, hidden)
+            var u = ck_alloc(ntok * inter)
+            let _ps6 = ll_proj(rt, use_gpu, &h2, &m.up[li as usize], &!u, ntok, inter, hidden)
+            var act = ck_alloc(ntok * inter)
+            var ai: i64 = 0
+            while ai < ntok * inter {
+                let gv = read_f64(g.data, ai)
+                write_f64(act.data, ai, (gv / (1.0 + exp(0.0 - gv))) * read_f64(u.data, ai))
+                ai = ai + 1
+            }
+            var dn = ck_alloc(ntok * hidden)
+            let _ps7 = ll_proj(rt, use_gpu, &act, &m.down[li as usize], &!dn, ntok, hidden, inter)
+            ll_add_into(&!x, &dn)
+        }
+        li = li + 1
+    }
+    kv.len = pos0 + ntok
+    // Logits of the last position.
+    var last = ck_alloc(hidden)
+    var j2: i64 = 0
+    while j2 < hidden {
+        write_f64(last.data, j2, read_f64(x.data, (ntok - 1) * hidden + j2))
+        j2 = j2 + 1
+    }
+    let ln = ll_rmsnorm(&last, &m.final_norm, 1, hidden, m.cfg.eps)
+    var logits = ck_alloc(m.cfg.vocab)
+    ck_gemm(&ln, &m.lm_head_t, &!logits, 1, m.cfg.vocab, hidden)
+    logits
+}
+
+pub fn llama_argmax(v: &CpuBuf) -> i64 {
+    var best: i64 = 0
+    var bv: f64 = 0.0 - 1000000000.0
+    var i: i64 = 0
+    while i < v.len {
+        let x = read_f64(v.data, i)
+        if x > bv { bv = x; best = i }
+        i = i + 1
+    }
+    best
+}
+
+pub struct LlamaMoeFfnCfg {
+    pub n_experts: i64,
+    pub slots: i64,
+    pub hidden: i64,
+    pub inter: i64,
+    pub n_tokens: i64,
+    pub gate_bytes: i64,
+    pub up_bytes: i64,
+    pub down_bytes: i64,
+    pub expert_stride_g: i64,
+    pub row_stride_g: i64,
+    pub expert_stride_u: i64,
+    pub row_stride_u: i64,
+    pub expert_stride_d: i64,
+    pub row_stride_d: i64,
+}
+
+/// One MoE FFN: top-k on router_logits then moe_ffn_q4k.
+/// x_f32 / dst_f32 are f32[n_tokens * hidden]; router_logits f32[n_tokens * n_experts].
+/// Expert packs are Q4_K bytes. Dense SwiGLU path in ll_forward_impl is unchanged.
+pub fn llama_moe_ffn_block(
+    rt: &Runtime,
+    cfg: &LlamaMoeFfnCfg,
+    x_f32: *mut u8,
+    router_logits: *mut u8,
+    gate_w: *mut u8,
+    up_w: *mut u8,
+    down_w: *mut u8,
+    dst_f32: *mut u8
+) -> MoeFfnResult with Alloc, Mut, Panic, Div {
+    let bad = MoeFfnResult { ok: false, status: -20, ms_gate: 0.0, ms_up: 0.0, ms_down: 0.0 }
+    if cfg.n_experts <= 0 || cfg.slots <= 0 || cfg.hidden <= 0 || cfg.inter <= 0 {
+        return bad
+    }
+    if cfg.n_tokens <= 0 { return bad }
+    if cfg.slots > 16 || cfg.slots > cfg.n_experts { return bad }
+    let ids = heap_alloc(cfg.n_tokens * cfg.slots * 4)
+    let route_w = heap_alloc(cfg.n_tokens * cfg.slots * 4)
+    moe_topk(router_logits, cfg.n_tokens, cfg.n_experts, cfg.slots, ids, route_w)
+    moe_ffn_q4k(
+        rt, x_f32, cfg.hidden, cfg.n_tokens, cfg.slots,
+        ids, route_w,
+        gate_w, cfg.gate_bytes,
+        up_w, cfg.up_bytes,
+        down_w, cfg.down_bytes,
+        cfg.n_experts, cfg.inter,
+        cfg.expert_stride_g, cfg.row_stride_g,
+        cfg.expert_stride_u, cfg.row_stride_u,
+        cfg.expert_stride_d, cfg.row_stride_d,
+        dst_f32
+    )
+}
