@@ -99,6 +99,22 @@ check let_match_some_payload_typed LET_MATCH_SOME_PAYLOAD_TYPED_OK
 check uninit_struct_array_field_global UNINIT_STRUCT_ARRAY_FIELD_OK
 check tuple_raw_slot_deref TUPLE_RAW_SLOT_OK
 check box_field_let_keeps_handle BOX_FIELD_LET_KEEPS_HANDLE_OK
+check place_copy_move_last_use PLACE_COPY_MOVE_LAST_USE_OK
+# The output above proves every observable SIO-278 copy is kept. It cannot show
+# the elided one (fn `moved` prints the same either way), so the IR must: no
+# allocation in `moved`, at least one in each function whose copy is observable.
+# Before move-on-last-use, `let p = self.check_x(..); var c = p.0` copied the
+# whole Checker at ~110 Madaros sites, 25 MB of gen2 code (#2966).
+( ulimit -s 1572864 2>/dev/null || true; SOUNIO_NV2_IR_TRACE=1 "$MADAROS" build "$ROOT_DIR/tests/run-pass/place_copy_move_last_use.sio" "$WORK/pm_ir.elf" ) >"$WORK/pm_ir.log" 2>&1 \
+  || fail "place_copy_move_last_use: IR-trace build failed"
+pm_allocs() {
+  awk -v want="$1" '/^NV2_IR function/{ n = ($0 ~ ("name=" want " ")) } n && /^NV2_IR fn=.* op=alloc /{ c++ } END{ print c + 0 }' "$WORK/pm_ir.log"
+}
+grep -q '^NV2_IR function fn=[0-9]* name=moved ' "$WORK/pm_ir.log" || fail "place_copy_move_last_use: the IR trace lists no function 'moved'"
+[[ "$(pm_allocs moved)" -eq 0 ]] || fail "place_copy_move_last_use: 'moved' still allocates ($(pm_allocs moved)); the last-use copy was not elided"
+for f in owner_read_later owner_outside_loop owner_from_literal; do
+  [[ "$(pm_allocs "$f")" -ge 1 ]] || fail "place_copy_move_last_use: '$f' allocates nothing; an observable SIO-278 copy was dropped"
+done
 
 cat >"$WORK/refuse.sio" <<'SIO'
 struct Seg { buf: [i8; 16], len: i64 }

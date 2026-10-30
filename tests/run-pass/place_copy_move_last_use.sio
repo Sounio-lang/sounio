@@ -1,0 +1,70 @@
+//@ run-pass
+//@ expect-stdout: PLACE_COPY_MOVE_LAST_USE_OK
+// SIO-278 value-copies `var c = p.s` when `s` holds a fixed array. The copy is
+// elided only when it cannot be observed: `p` was bound by a call in the same
+// block and is never mentioned again (move on last use, lower_place_move_ok).
+// Each case below checks one side of that rule; every copy that IS observable
+// must still happen.
+struct Inner { arr: [i64; 4], k: i64 }
+struct Outer { s: Inner, tag: i64 }
+
+fn mk(v: i64) -> Outer with Mut, Panic, Div { Outer { s: Inner { arr: [v; 4], k: v }, tag: v } }
+
+// 1. Move: `p` dies here, so `c` may take the field itself.
+fn moved() -> i64 with Mut, Panic, Div {
+    let p = mk(5)
+    var c = p.s
+    c.arr[0] = 9
+    c.arr[0] + c.k
+}
+
+// 2. `p` is read after `c` is written: the copy is observable and must stay.
+fn owner_read_later() -> i64 with Mut, Panic, Div {
+    let p = mk(1)
+    var c = p.s
+    c.arr[0] = 70
+    p.s.arr[0] + c.arr[0]
+}
+
+// 3. `p` is bound outside the loop: every iteration must see the original.
+fn owner_outside_loop() -> i64 with Mut, Panic, Div {
+    let p = mk(2)
+    var acc: i64 = 0
+    var i: i64 = 0
+    while i < 3 {
+        var c = p.s
+        c.arr[0] = c.arr[0] + 10
+        acc = acc + c.arr[0]
+        i = i + 1
+    }
+    acc
+}
+
+// 4. `p` comes from a struct literal, not a call: keep the copy.
+fn owner_from_literal() -> i64 with Mut, Panic, Div {
+    var p = Outer { s: Inner { arr: [3; 4], k: 3 }, tag: 3 }
+    let c = p.s
+    p.s.arr[0] = 99
+    c.arr[0]
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    let a = moved()               // 9 + 5 = 14
+    let b = owner_read_later()    // 1 + 70 = 71
+    let d = owner_outside_loop()  // 12 * 3 = 36
+    let e = owner_from_literal()  // 3
+    if a == 14 && b == 71 && d == 36 && e == 3 {
+        println("PLACE_COPY_MOVE_LAST_USE_OK")
+    } else {
+        print("PLACE_COPY_MOVE_LAST_USE_BAD ")
+        print_int(a)
+        print(" ")
+        print_int(b)
+        print(" ")
+        print_int(d)
+        print(" ")
+        print_int(e)
+        println("")
+    }
+    0
+}

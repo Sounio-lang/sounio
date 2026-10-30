@@ -9927,6 +9927,163 @@ fn lower_name_is_tuple_destructure_temp(n: Name) -> bool {
         && n.buf[3] == 117 as i8 && n.buf[4] == 112 as i8
 }
 
+// Move-on-last-use for the SIO-278 place copy. lower_block_ref sets this to
+// 1 just before lowering a `let`/`var` whose initializer is `owner.f` when
+// lower_place_move_ok holds; emit_place_aggregate_value_copy consumes it.
+// 0 everywhere else, so every other path keeps the copy.
+var LOWER_PLACE_MOVE_OK: i64 = 0
+
+// Conservative "does `name` appear as an identifier anywhere in this expression":
+// every child field of the node is visited, and running out of depth answers
+// true. A miss here would drop an observable copy, so when in doubt it says yes.
+fn lower_expr_mentions_name(e: &Expr, name: Name, depth: i64) -> bool with Mut, Panic, Div {
+    if depth > 64 { return true }
+    if (*e).kind == ExprKind::ExprIdent && ir_name_eq((*e).name, name) { return true }
+    match (*e).left {
+        Some(x) => { if lower_expr_mentions_name(&(*x), name, depth + 1) { return true } }
+        None => {}
+    }
+    match (*e).right {
+        Some(x) => { if lower_expr_mentions_name(&(*x), name, depth + 1) { return true } }
+        None => {}
+    }
+    match (*e).else_expr {
+        Some(x) => { if lower_expr_mentions_name(&(*x), name, depth + 1) { return true } }
+        None => {}
+    }
+    match (*e).closure_body {
+        Some(x) => { if lower_expr_mentions_name(&(*x), name, depth + 1) { return true } }
+        None => {}
+    }
+    match (*e).block {
+        Some(b) => { if lower_stmt_list_mentions_name(&(*b).stmts, name, depth + 1) { return true } }
+        None => {}
+    }
+    match (*e).handler_block {
+        Some(b) => { if lower_stmt_list_mentions_name(&(*b).stmts, name, depth + 1) { return true } }
+        None => {}
+    }
+    var args = &(*e).args
+    while true {
+        match *args {
+            Some(a) => {
+                if lower_expr_mentions_name(&(*a).head, name, depth + 1) { return true }
+                args = &(*a).tail
+            }
+            None => break
+        }
+    }
+    var arms = &(*e).arms
+    while true {
+        match *arms {
+            Some(al) => {
+                match (*al).head.guard {
+                    Some(g) => { if lower_expr_mentions_name(&(*g), name, depth + 1) { return true } }
+                    None => {}
+                }
+                if lower_expr_mentions_name(&(*al).head.body, name, depth + 1) { return true }
+                arms = &(*al).tail
+            }
+            None => break
+        }
+    }
+    var fields = &(*e).fields
+    while true {
+        match *fields {
+            Some(fl) => {
+                if lower_expr_mentions_name(&(*fl).head.value, name, depth + 1) { return true }
+                fields = &(*fl).tail
+            }
+            None => break
+        }
+    }
+    false
+}
+
+fn lower_stmt_list_mentions_name(opt: &Option<Box<StmtList>>, name: Name, depth: i64) -> bool with Mut, Panic, Div {
+    if depth > 64 { return true }
+    var cur = opt
+    while true {
+        match *cur {
+            Some(sl) => {
+                match (*sl).head.expr {
+                    Some(x) => { if lower_expr_mentions_name(&(*x), name, depth + 1) { return true } }
+                    None => {}
+                }
+                match (*sl).head.target {
+                    Some(x) => { if lower_expr_mentions_name(&(*x), name, depth + 1) { return true } }
+                    None => {}
+                }
+                cur = &(*sl).tail
+            }
+            None => break
+        }
+    }
+    false
+}
+
+// `var c = pair.f`, the `idx`-th statement of the list `start`, may bind the
+// field without the SIO-278 copy when the copy cannot be observed:
+//   - `pair` is bound by a `let`/`var` earlier in this same list whose
+//     initializer is a call (a call result is bound without a copy already,
+//     `let c = f()`, so the aliasing class is unchanged), and
+//   - `pair` is not mentioned in any later statement of the list (`tail`).
+// Same-list scope also covers loops: the body rebinds `pair` every iteration.
+// Madaros's own `let p = self.check_x(..); var c = p.0` sites copied the whole
+// Checker inline (~203 KB of code per function, 25 MB of gen2) and per call.
+fn lower_place_move_ok(start: &Option<Box<StmtList>>, idx: i64, head: &Stmt, tail: &Option<Box<StmtList>>) -> bool with Mut, Panic, Div {
+    if (*head).kind != StmtKind::StmtLet && (*head).kind != StmtKind::StmtVar { return false }
+    var owner = ir_empty_name()
+    match (*head).expr {
+        Some(rhs) => {
+            if (*rhs).kind != ExprKind::ExprFieldAccess { return false }
+            match (*rhs).left {
+                Some(o) => {
+                    if (*o).kind != ExprKind::ExprIdent { return false }
+                    owner = (*o).name
+                }
+                None => { return false }
+            }
+        }
+        None => { return false }
+    }
+    if owner.len <= 0 { return false }
+    // The latest binding of `owner` before `idx` in this list must be a call.
+    var bound_by_call = false
+    var seen_binding = false
+    var cur = start
+    var i: i64 = 0
+    while i < idx {
+        match *cur {
+            Some(sl) => {
+                if ((*sl).head.kind == StmtKind::StmtLet || (*sl).head.kind == StmtKind::StmtVar)
+                    && ir_name_eq((*sl).head.name, owner) {
+                    seen_binding = true
+                    bound_by_call = false
+                    match (*sl).head.expr {
+                        Some(init) => {
+                            bound_by_call = (*init).kind == ExprKind::ExprCall || (*init).kind == ExprKind::ExprMethodCall
+                        }
+                        None => {}
+                    }
+                } else if seen_binding {
+                    // An assignment to `owner` (or any statement touching it)
+                    // between the binding and here: give up.
+                    match (*sl).head.target {
+                        Some(t) => { if lower_expr_mentions_name(&(*t), owner, 0) { bound_by_call = false } }
+                        None => {}
+                    }
+                }
+                cur = &(*sl).tail
+            }
+            None => { return false }
+        }
+        i = i + 1
+    }
+    if !seen_binding || !bound_by_call { return false }
+    !lower_stmt_list_mentions_name(tail, owner, 0)
+}
+
 fn lower_type_expr_is_box(ty: &TypeExpr) -> bool with Mut, Panic, Div {
     if (*ty).kind != TypeExprKind::TypeNamed {
         return false
@@ -14860,6 +15017,13 @@ impl Lowerer {
                     // of them on hot paths, and gen3 ran its 64 GiB arena dry after
                     // 69 of 130 modules (rc 181, #2966).
                     if (*owner).kind == ExprKind::ExprIdent && lower_name_is_tuple_destructure_temp((*owner).name) {
+                        return (self, reg)
+                    }
+                    // Move on last use: lower_block_ref found `owner` bound by a
+                    // call in this block and never mentioned again
+                    // (lower_place_move_ok), so the copy cannot be observed.
+                    if (*owner).kind == ExprKind::ExprIdent && LOWER_PLACE_MOVE_OK == 1 {
+                        LOWER_PLACE_MOVE_OK = 0
                         return (self, reg)
                     }
                     let owner_st = self.expr_receiver_struct_type_ref(&(*owner))
@@ -28717,10 +28881,15 @@ impl Lowerer {
         var current = &blk.stmts
         var reg = IR_INVALID_REG
         var saw_stmt = false
+        var stmt_idx: i64 = 0
         while true {
             match *current {
                 Some(list) => {
                     let stmt_ref = &(*list).head
+                    LOWER_PLACE_MOVE_OK = 0
+                    if lower_place_move_ok(&blk.stmts, stmt_idx, stmt_ref, &(*list).tail) {
+                        LOWER_PLACE_MOVE_OK = 1
+                    }
                     var is_tail_stmt = false
                     match (*list).tail {
                         Some(rest) => { is_tail_stmt = false }
@@ -28754,6 +28923,8 @@ impl Lowerer {
                     } else {
                         lo.lower_assign_stmt_ref(stmt_ref)
                     }
+                    LOWER_PLACE_MOVE_OK = 0
+                    stmt_idx = stmt_idx + 1
                     lo = pair.0
                     reg = pair.1
                     saw_stmt = true
