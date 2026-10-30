@@ -1730,6 +1730,13 @@ pub fn lower_use_modules_collect(items: &Option<Box<ItemList>>, module_id: i64) 
 // Native source-lowering return payloads, keyed by exact interned function
 // name. Keep the declared IR return name unchanged; this is not SOIR metadata.
 var LOWER_OPTION_BOX_RETURN_INNER: [i64; 65537] = [0; 65537]
+// `-> Option<T>` with a plain payload: the payload's scalar kind
+// (lower_type_expr_option_payload_kind) and, for a named type, its interned
+// name, so `let o = f(..)` gives its `Some(p)` binder the payload type. Only
+// `Option<Box<T>>` was recorded (above), so `match f(..) { Some(p) => p.y }`
+// bound `p` as a Box handle and `p.y` read through it (SIGILL / SIGSEGV).
+var LOWER_OPTION_RETURN_SCALAR_KIND: [i64; 65537] = [0; 65537]
+var LOWER_OPTION_RETURN_PAYLOAD_NAME: [i64; 65537] = [0; 65537]
 
 fn lower_record_option_box_return(name: Name, rt: &Option<Box<TypeExpr>>) with Mut, Panic, Div {
     let nid = ir_intern_name(name)
@@ -1745,6 +1752,26 @@ fn lower_record_option_box_return(name: Name, rt: &Option<Box<TypeExpr>>) with M
         None => {}
     }
     LOWER_OPTION_BOX_RETURN_INNER[nid as usize] = inner_id
+    var scalar_kind: i64 = 0
+    var payload_name_id: i64 = 0
+    match *rt {
+        Some(ty2) => {
+            if inner_id <= 0 && (*ty2).kind == TypeExprKind::TypeNamed && ir_name_eq(ir_path_first_name((*ty2).path), make_name("Option")) {
+                scalar_kind = lower_type_expr_option_payload_kind(&(*ty2))
+                match (*ty2).type_args {
+                    Some(args) => {
+                        if (*args).head.kind == TypeExprKind::TypeNamed {
+                            payload_name_id = ir_intern_name(ir_path_first_name((*args).head.path))
+                        }
+                    }
+                    None => {}
+                }
+            }
+        }
+        None => {}
+    }
+    LOWER_OPTION_RETURN_SCALAR_KIND[nid as usize] = scalar_kind
+    LOWER_OPTION_RETURN_PAYLOAD_NAME[nid as usize] = payload_name_id
 }
 
 fn lower_option_box_return_layout(module: Box<IrModule>, table: &StructLayoutTable, fn_id: i64) -> i64 with Mut, Panic, Div {
@@ -1853,6 +1880,8 @@ pub fn lower_fn_tuple_arr_reset() with Mut {
     var oi: i64 = 0
     while oi < 65537 {
         LOWER_OPTION_BOX_RETURN_INNER[oi as usize] = 0
+        LOWER_OPTION_RETURN_SCALAR_KIND[oi as usize] = 0
+        LOWER_OPTION_RETURN_PAYLOAD_NAME[oi as usize] = 0
         LOWER_FN_TUPLE_INT_MASK_BY_NID[oi as usize] = 0
         oi = oi + 1
     }
@@ -15915,6 +15944,22 @@ impl Lowerer {
                 if (*e).kind == ExprKind::ExprIdent {
                     let k = self.lookup_local_opt_payload_kind((*e).name)
                     if k > 0 { return k }
+                }
+                // `let o = f(..)` with `fn f(..) -> Option<T>`: the declared payload.
+                if (*e).kind == ExprKind::ExprCall || (*e).kind == ExprKind::ExprMethodCall {
+                    let fid = self.expr_method_fn_id(&(*e))
+                    if fid >= 0 && fid < (*self.module).fn_count {
+                        let nid = ir_intern_name(ir_fn_get(&(*self.module), fid as usize).name)
+                        if nid > 0 && nid <= 65536 {
+                            let sk = LOWER_OPTION_RETURN_SCALAR_KIND[nid as usize]
+                            if sk > 0 { return sk }
+                            let pn = LOWER_OPTION_RETURN_PAYLOAD_NAME[nid as usize]
+                            if pn > 0 {
+                                let li = lower_struct_layout_index_of(&(*self.struct_layouts), ir_name_at(pn))
+                                if li >= 0 { return lower_opt_payload_struct_base() + li }
+                            }
+                        }
+                    }
                 }
                 0
             }
