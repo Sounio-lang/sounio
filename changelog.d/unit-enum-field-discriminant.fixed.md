@@ -1,0 +1,1 @@
+A unit-enum field such as `Tag::C` is no longer treated as a handle id. Field loads keep the discriminant as an integer, so a later field access does not fault at address `0x20`. A missing object base is left unused instead of being loaded as payload.

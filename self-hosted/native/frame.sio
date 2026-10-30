@@ -374,6 +374,15 @@ pub var NC_LABEL_PATCH_LABEL_IDS: [i64; 256] = [0; 256]
 // NC_VREG_LIMIT (== IR_MAX_VREGS); the lowerer refuses anything larger
 // (NATIVE_REFUSAL kind=ir_vreg_limit), so no vreg the backend sees is untyped.
 pub var NC_IS_FLOAT_REG: [i64; 16384] = [0; 16384]
+// 1 when the vreg holds a unit-enum discriminant (a raw integer tag), not a
+// handle id. Tags and handle ids share [0, 2^22), so the resolver must not
+// guess from the magnitude. Cleared per function; only entries below
+// NC_RAW_TAG_HIGH are live.
+pub var NC_RAW_TAG_REG: [i64; 16384] = [0; 16384]
+pub var NC_RAW_TAG_HIGH: i64 = 0
+// IrFieldGet label_id: the load's result is a raw integer tag. The parent is
+// still a handle. A later field-get of this vreg must not resolve.
+pub fn nc_raw_tag_label_id() -> i64 { 5 }
 pub var NC_REG_TYPE: [i64; 2048] = [0; 2048]
 pub var NC_FIELD_FLOAT_BASE_REGS: [i64; 256] = [0; 256]
 pub var NC_FIELD_FLOAT_INDICES: [i64; 256] = [0; 256]
@@ -620,6 +629,33 @@ pub fn nc_is_float_reg_clear() with Mut {
     }
 }
 
+pub fn nc_raw_tag_reset() with Mut {
+    var i: i64 = 0
+    while i < NC_RAW_TAG_HIGH {
+        NC_RAW_TAG_REG[i as usize] = 0
+        i = i + 1
+    }
+    NC_RAW_TAG_HIGH = 0
+}
+
+pub fn nc_raw_tag_get(reg: i64) -> bool with Mut, Panic, Div {
+    if reg < 0 || reg >= NC_VREG_LIMIT { return false }
+    NC_RAW_TAG_REG[reg as usize] == 1
+}
+
+pub fn nc_raw_tag_set(reg: i64) with Mut, Panic, Div {
+    if reg < 0 || reg >= NC_VREG_LIMIT { return }
+    NC_RAW_TAG_REG[reg as usize] = 1
+    if reg + 1 > NC_RAW_TAG_HIGH {
+        NC_RAW_TAG_HIGH = reg + 1
+    }
+}
+
+pub fn nc_raw_tag_clear(reg: i64) with Mut, Panic, Div {
+    if reg < 0 || reg >= NC_VREG_LIMIT { return }
+    NC_RAW_TAG_REG[reg as usize] = 0
+}
+
 pub fn nc_reg_class_reset() with Mut {
     var i: i64 = 0
     while i < NC_REG_CLASS_HIGH_WATER {
@@ -756,6 +792,7 @@ pub fn compiler_new() -> NativeCompiler with Mut {
         i = i + 1
     }
     nc_is_float_reg_clear()
+    nc_raw_tag_reset()
     nc_reg_class_reset()
     out
 }
@@ -781,6 +818,7 @@ pub fn reset_function_state_mut(nc: &! NativeCompiler) with Mut, Panic, Div {
         j = j + 1
     }
     nc_is_float_reg_clear()
+    nc_raw_tag_reset()
     nc_reg_class_reset()
     (*nc).field_float_count = 0
     var fj = 0

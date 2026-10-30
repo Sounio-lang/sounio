@@ -365,6 +365,48 @@ fn module_frontend_import_is_ident_ch(c: i8) -> bool {
     c == 95 as i8
 }
 
+// The seed drops `&&` / `||` short-circuit in large scanners and still
+// evaluates data[pos - 1] when pos is 0 (SIGSEGV, index -1). Keep the
+// negative index inside these small functions.
+fn module_frontend_prev_byte(data: string, pos: i64) -> i64 {
+    if pos <= 0 {
+        return 10
+    }
+    data[(pos - 1) as usize] as i64
+}
+
+fn module_frontend_left_is_boundary(data: string, pos: i64) -> bool {
+    if pos <= 0 {
+        return true
+    }
+    !module_frontend_import_is_ident_ch(data[(pos - 1) as usize])
+}
+
+// The seed, inside large compile functions, lowers `paths[i] = some_string`
+// as `movb %al, (%rdx,%rbx)` with the array handle id as the address
+// (SIGSEGV after `imported_compile: load_done`, rdx = handle). The same
+// function's `[""; 256]` init resolves the handle and stores a qword. Keep
+// the variable-string store in this small function so that resolve survives.
+fn module_frontend_store_string_slot(dst: &! [string; 256], index: i64, value: string) with Mut, Panic {
+    if index < 0 {
+        return
+    }
+    if index >= 256 {
+        return
+    }
+    (*dst)[index as usize] = value
+}
+
+fn module_frontend_load_string_slot(src: & [string; 256], index: i64) -> string with Mut, Panic {
+    if index < 0 {
+        return ""
+    }
+    if index >= 256 {
+        return ""
+    }
+    (*src)[index as usize]
+}
+
 fn module_frontend_import_byte_to_str(c: i8) -> string {
     let v = c as i64
     if v >= 97 && v <= 122 {
@@ -950,7 +992,7 @@ fn module_frontend_named_import_terminal_is_type(parent_file_path: string, termi
             && raw[(i + 3) as usize] == (109 as i8) {
             kw_len = 4
         }
-        if kw_len > 0 && (i == 0 || !module_frontend_import_is_ident_ch(raw[(i - 1) as usize]))
+        if kw_len > 0 && module_frontend_left_is_boundary(raw, i)
             && (i + kw_len >= n || !module_frontend_import_is_ident_ch(raw[(i + kw_len) as usize])) {
             var j = i + kw_len
             // Copilot review (PR #2515), "Handle newlines when scanning
@@ -3192,7 +3234,7 @@ fn module_frontend_import_is_use_at(data: string, pos: i64, size: i64) -> bool {
     if pos + 3 >= size {
         return false
     }
-    if pos > 0 && data[(pos - 1) as usize] != (10 as i8) {
+    if module_frontend_prev_byte(data, pos) != 10 {
         return false
     }
     data[pos as usize] == (117 as i8) &&
@@ -3363,7 +3405,7 @@ fn module_frontend_source_is_fn_at(data: string, pos: i64, size: i64) -> bool {
     if pos + 2 >= size {
         return false
     }
-    if pos > 0 && data[(pos - 1) as usize] != (10 as i8) {
+    if module_frontend_prev_byte(data, pos) != 10 {
         return false
     }
     if data[pos as usize] == (102 as i8) &&
@@ -5902,11 +5944,11 @@ fn module_frontend_populate_imported_programs(
 ) -> i64 with IO, Mut, Panic, Div, Alloc {
     var file_paths: [string; 256] = [""; 256]
     (*programs)[0] = load_module_file(main_path)
-    file_paths[0] = main_path
+    module_frontend_store_string_slot(&! file_paths, 0, main_path)
     var loaded: i64 = 1
     var visited_paths: [string; 256] = [""; 256]
     var visited_count: i64 = 1
-    visited_paths[0] = main_path
+    module_frontend_store_string_slot(&! visited_paths, 0, main_path)
     var work_front: i64 = 0
 
     trace.loaded_modules = 1
@@ -5914,16 +5956,16 @@ fn module_frontend_populate_imported_programs(
     trace.last_module_index = 0
 
     while work_front < loaded && loaded < 256 {
-        let work_imports = module_frontend_import_files_from_source(file_paths[work_front])
+        let work_imports = module_frontend_import_files_from_source(module_frontend_load_string_slot(&file_paths, work_front))
         work_front = work_front + 1
         var i: i64 = 0
         while i < work_imports.count && loaded < 256 {
             let file_path = work_imports.paths[i]
             if !visited_contains(visited_paths, visited_count, file_path) && file_exists(file_path) {
-                visited_paths[visited_count] = file_path
+                module_frontend_store_string_slot(&! visited_paths, visited_count, file_path)
                 visited_count = visited_count + 1
                 (*programs)[loaded] = load_module_file(file_path)
-                file_paths[loaded] = file_path
+                module_frontend_store_string_slot(&! file_paths, loaded, file_path)
                 loaded = loaded + 1
                 trace.loaded_modules = loaded
                 trace.last_stage = "load_deps"
@@ -6828,7 +6870,7 @@ pub fn module_frontend_identity_pass(
 fn module_frontend_pfi_find_loaded(file_paths: [string; 256], loaded: i64, path: string) -> i64 with Mut, Panic, Div {
     var j: i64 = 0
     while j < loaded && j < 256 {
-        if str_eq(file_paths[j as usize], path) {
+        if str_eq(module_frontend_load_string_slot(&file_paths, j), path) {
             return j
         }
         j = j + 1
@@ -6853,7 +6895,7 @@ fn module_frontend_pfi_note_use_targets(
     var x: i64 = 0
     while x < loaded && x < 256 {
         var prog = (*programs)[x as usize]
-        let cur_dir = module_frontend_path_directory_slice(file_paths[x as usize])
+        let cur_dir = module_frontend_path_directory_slice(module_frontend_load_string_slot(&file_paths, x))
         pfi_use_map_module_begin(x)
         var cur = prog.items
         var going = true
@@ -7335,11 +7377,11 @@ fn module_frontend_compile_imported_to_file_target_impl(
     var programs: [Program; 256] = [mf_empty_program(); 256]
     var file_paths: [string; 256] = [""; 256]
     programs[0] = main_prog
-    file_paths[0] = main_path
+    module_frontend_store_string_slot(&! file_paths, 0, main_path)
     var loaded: i64 = 1
     var visited_paths: [string; 256] = [""; 256]
     var visited_count: i64 = 0
-    visited_paths[0] = main_path
+    module_frontend_store_string_slot(&! visited_paths, 0, main_path)
     visited_count = 1
     var work_front: i64 = 0
     var dep_i: i64 = 0
@@ -7363,7 +7405,7 @@ fn module_frontend_compile_imported_to_file_target_impl(
     while bfs_again {
         bfs_again = false
         while work_front < loaded && loaded < 256 {
-            let work_imports = module_frontend_import_files_from_source(file_paths[work_front])
+            let work_imports = module_frontend_import_files_from_source(module_frontend_load_string_slot(&file_paths, work_front))
             if module_frontend_lower_trace_enabled() {
                 print("imported_compile: scan_front=")
                 print_int(work_front)
@@ -7387,11 +7429,11 @@ fn module_frontend_compile_imported_to_file_target_impl(
                     print("\n")
                 }
                 if !visited_contains(visited_paths, visited_count, file_path) {
-                    visited_paths[visited_count] = file_path
+                    module_frontend_store_string_slot(&! visited_paths, visited_count, file_path)
                     visited_count = visited_count + 1
                     if file_exists(file_path) {
                         programs[loaded] = load_module_file(file_path)
-                        file_paths[loaded] = file_path
+                        module_frontend_store_string_slot(&! file_paths, loaded, file_path)
                         loaded = loaded + 1
                         trace.loaded_modules = loaded
                         trace.last_stage = "load_deps"
@@ -7418,11 +7460,11 @@ fn module_frontend_compile_imported_to_file_target_impl(
                 let soft_rel: string = "math/softfloat_f128.sio"
                 let soft_path = module_frontend_resolve_import_relpath(soft_rel, module_frontend_path_directory_slice(main_path))
                 if !visited_contains(visited_paths, visited_count, soft_path) {
-                    visited_paths[visited_count] = soft_path
+                    module_frontend_store_string_slot(&! visited_paths, visited_count, soft_path)
                     visited_count = visited_count + 1
                     if file_exists(soft_path) {
                         programs[loaded] = load_module_file(soft_path)
-                        file_paths[loaded] = soft_path
+                        module_frontend_store_string_slot(&! file_paths, loaded, soft_path)
                         loaded = loaded + 1
                         trace.loaded_modules = loaded
                         trace.last_stage = "load_implicit_f128"
@@ -7439,11 +7481,11 @@ fn module_frontend_compile_imported_to_file_target_impl(
                 let fmt_rel: string = "math/softfloat_f128_fmt.sio"
                 let fmt_path = module_frontend_resolve_import_relpath(fmt_rel, module_frontend_path_directory_slice(main_path))
                 if !visited_contains(visited_paths, visited_count, fmt_path) {
-                    visited_paths[visited_count] = fmt_path
+                    module_frontend_store_string_slot(&! visited_paths, visited_count, fmt_path)
                     visited_count = visited_count + 1
                     if file_exists(fmt_path) {
                         programs[loaded] = load_module_file(fmt_path)
-                        file_paths[loaded] = fmt_path
+                        module_frontend_store_string_slot(&! file_paths, loaded, fmt_path)
                         loaded = loaded + 1
                         trace.loaded_modules = loaded
                         trace.last_stage = "load_implicit_f128_fmt"
@@ -8757,29 +8799,29 @@ fn load_multimodule_ir_to_box_traced(main_path: string, trace: &! LoadMultimodul
     var programs: [Program; 256] = [mf_empty_program(); 256]
     var file_paths: [string; 256] = [""; 256]
     programs[0] = main_prog
-    file_paths[0] = main_path
+    module_frontend_store_string_slot(&! file_paths, 0, main_path)
     var loaded: i64 = 1
     var visited_paths: [string; 256] = [""; 256]
     var visited_count: i64 = 0
-    visited_paths[0] = main_path
+    module_frontend_store_string_slot(&! visited_paths, 0, main_path)
     visited_count = 1
     var work_front: i64 = 0
     var i: i64 = 0
 
     while work_front < loaded && loaded < 256 {
-        let work_imports = module_frontend_import_files_from_source(file_paths[work_front])
+        let work_imports = module_frontend_import_files_from_source(module_frontend_load_string_slot(&file_paths, work_front))
         work_front = work_front + 1
         i = 0
         while i < work_imports.count && loaded < 256 {
             let file_path = work_imports.paths[i]
             if !visited_contains(visited_paths, visited_count, file_path) {
-                visited_paths[visited_count] = file_path
+                module_frontend_store_string_slot(&! visited_paths, visited_count, file_path)
                 visited_count = visited_count + 1
                 if file_exists(file_path) {
                     if module_frontend_lower_trace_enabled() { print("module_frontend_full: load_dep_begin\n") }
                     programs[loaded] = load_module_file(file_path)
                     if module_frontend_lower_trace_enabled() { print("module_frontend_full: load_dep_done\n") }
-                    file_paths[loaded] = file_path
+                    module_frontend_store_string_slot(&! file_paths, loaded, file_path)
                     loaded = loaded + 1
                     trace.loaded_modules = loaded
                     trace.last_stage = "load_deps"
@@ -8790,7 +8832,7 @@ fn load_multimodule_ir_to_box_traced(main_path: string, trace: &! LoadMultimodul
         }
     }
 
-    let main_imports = module_frontend_import_files_from_source(file_paths[0])
+    let main_imports = module_frontend_import_files_from_source(module_frontend_load_string_slot(&file_paths, 0))
     let needs_resolution = loaded > 1 || main_imports.count > 0
     if needs_resolution {
         trace.last_stage = "resolve"
@@ -8986,27 +9028,27 @@ pub fn load_multimodule_ir_counts_traced(main_path: string, trace: &! LoadMultim
     var programs: [Program; 256] = [mf_empty_program(); 256]
     var file_paths: [string; 256] = [""; 256]
     programs[0] = main_prog
-    file_paths[0] = main_path
+    module_frontend_store_string_slot(&! file_paths, 0, main_path)
     var loaded: i64 = 1
     var visited_paths: [string; 256] = [""; 256]
     var visited_count: i64 = 0
-    visited_paths[0] = main_path
+    module_frontend_store_string_slot(&! visited_paths, 0, main_path)
     visited_count = 1
     var work_front: i64 = 0
     var i: i64 = 0
 
     while work_front < loaded && loaded < 256 {
-        let work_imports = module_frontend_import_files_from_source(file_paths[work_front])
+        let work_imports = module_frontend_import_files_from_source(module_frontend_load_string_slot(&file_paths, work_front))
         work_front = work_front + 1
         i = 0
         while i < work_imports.count && loaded < 256 {
             let file_path = work_imports.paths[i]
             if !visited_contains(visited_paths, visited_count, file_path) {
-                visited_paths[visited_count] = file_path
+                module_frontend_store_string_slot(&! visited_paths, visited_count, file_path)
                 visited_count = visited_count + 1
                 if file_exists(file_path) {
                     programs[loaded] = load_module_file(file_path)
-                    file_paths[loaded] = file_path
+                    module_frontend_store_string_slot(&! file_paths, loaded, file_path)
                     loaded = loaded + 1
                     trace.loaded_modules = loaded
                     trace.last_stage = "load_deps"
@@ -9017,7 +9059,7 @@ pub fn load_multimodule_ir_counts_traced(main_path: string, trace: &! LoadMultim
         }
     }
 
-    let main_imports = module_frontend_import_files_from_source(file_paths[0])
+    let main_imports = module_frontend_import_files_from_source(module_frontend_load_string_slot(&file_paths, 0))
     let needs_resolution = loaded > 1 || main_imports.count > 0
     if needs_resolution {
         trace.last_stage = "resolve"
@@ -9040,7 +9082,7 @@ pub fn load_multimodule_ir_counts_traced(main_path: string, trace: &! LoadMultim
         trace.last_stage = "typecheck_imported_summary"
         trace.last_module_index = i
         trace.typechecked_modules = trace.typechecked_modules + 1
-        let prog_lower = load_module_file(file_paths[i])
+        let prog_lower = load_module_file(module_frontend_load_string_slot(&file_paths, i))
         var module_fn_count: i64 = 0
         var module_string_count: i64 = 0
         var module_contest_count: i64 = 0
@@ -9178,11 +9220,11 @@ pub fn load_multimodule_ir_probe_summary_traced(main_path: string, trace: &! Loa
     var programs: [Program; 256] = [mf_empty_program(); 256]
     var file_paths: [string; 256] = [""; 256]
     programs[0] = main_prog
-    file_paths[0] = main_path
+    module_frontend_store_string_slot(&! file_paths, 0, main_path)
     var loaded: i64 = 1
     var visited_paths: [string; 256] = [""; 256]
     var visited_count: i64 = 0
-    visited_paths[0] = main_path
+    module_frontend_store_string_slot(&! visited_paths, 0, main_path)
     visited_count = 1
     var work_front: i64 = 0
     var i: i64 = 0
@@ -9191,18 +9233,18 @@ pub fn load_multimodule_ir_probe_summary_traced(main_path: string, trace: &! Loa
     trace.last_module_index = 0
 
     while work_front < loaded && loaded < 256 {
-        let cur_dir = module_frontend_path_directory_slice(file_paths[work_front])
+        let cur_dir = module_frontend_path_directory_slice(module_frontend_load_string_slot(&file_paths, work_front))
         let work_imports = extract_imports_from_ast(programs[work_front])
         work_front = work_front + 1
         i = 0
         while i < work_imports.count && loaded < 256 {
             let file_path = resolve_import_file_path(work_imports.paths[i], cur_dir)
             if !visited_contains(visited_paths, visited_count, file_path) {
-                visited_paths[visited_count] = file_path
+                module_frontend_store_string_slot(&! visited_paths, visited_count, file_path)
                 visited_count = visited_count + 1
                 if file_exists(file_path) {
                     programs[loaded] = load_module_file(file_path)
-                    file_paths[loaded] = file_path
+                    module_frontend_store_string_slot(&! file_paths, loaded, file_path)
                     loaded = loaded + 1
                     trace.loaded_modules = loaded
                     trace.last_stage = "load_deps"
@@ -9236,14 +9278,14 @@ pub fn load_multimodule_ir_probe_summary_traced(main_path: string, trace: &! Loa
     var seed_epistemic = ir_empty_epistemic_section()
     trace.last_stage = "typecheck"
     trace.last_module_index = 0
-    let seed_verdict = module_frontend_check_items_with_source_context(programs[0].items, file_paths[0])
+    let seed_verdict = module_frontend_check_items_with_source_context(programs[0].items, module_frontend_load_string_slot(&file_paths, 0))
     if seed_verdict != 0 {
         print("Type check failed during IR lowering for module 0\n")
         return multimodule_ir_error("type_check_failed")
     }
     trace.typechecked_modules = 1
     trace.last_stage = "lower"
-    let seed_prog_lower = load_module_file(file_paths[0])
+    let seed_prog_lower = load_module_file(module_frontend_load_string_slot(&file_paths, 0))
     var seed_lower_result = module_frontend_summary_module(seed_prog_lower)
     if seed_lower_result.fn_count <= 0 {
         print("IR lowering failed for module 0\n")
@@ -9258,7 +9300,7 @@ pub fn load_multimodule_ir_probe_summary_traced(main_path: string, trace: &! Loa
         var epistemic = ir_empty_epistemic_section()
         trace.last_stage = "typecheck"
         trace.last_module_index = i
-        let verdict = module_frontend_check_items_with_source_context(programs[i].items, file_paths[i])
+        let verdict = module_frontend_check_items_with_source_context(programs[i].items, module_frontend_load_string_slot(&file_paths, i))
         if verdict != 0 {
             print("Type check failed during IR lowering for module ")
             print_int(i)
@@ -9267,7 +9309,7 @@ pub fn load_multimodule_ir_probe_summary_traced(main_path: string, trace: &! Loa
         }
         trace.typechecked_modules = trace.typechecked_modules + 1
         trace.last_stage = "lower"
-        let prog_lower = load_module_file(file_paths[i])
+        let prog_lower = load_module_file(module_frontend_load_string_slot(&file_paths, i))
         var lower_result = module_frontend_summary_module(prog_lower)
         if lower_result.fn_count <= 0 {
             print("IR lowering failed for module ")
@@ -9310,28 +9352,28 @@ pub fn load_multimodule_epistemic_into(main_path: string, out: &! IrEpistemicSec
     var programs: [Program; 256] = [mf_empty_program(); 256]
     var file_paths: [string; 256] = [""; 256]
     programs[0] = main_prog
-    file_paths[0] = main_path
+    module_frontend_store_string_slot(&! file_paths, 0, main_path)
     var loaded: i64 = 1
     var visited_paths: [string; 256] = [""; 256]
     var visited_count: i64 = 0
-    visited_paths[0] = main_path
+    module_frontend_store_string_slot(&! visited_paths, 0, main_path)
     visited_count = 1
     var work_front: i64 = 0
     var i: i64 = 0
 
     while work_front < loaded && loaded < 256 {
-        let cur_dir = module_frontend_path_directory_slice(file_paths[work_front])
+        let cur_dir = module_frontend_path_directory_slice(module_frontend_load_string_slot(&file_paths, work_front))
         let work_imports = extract_imports_from_ast(programs[work_front])
         work_front = work_front + 1
         i = 0
         while i < work_imports.count && loaded < 256 {
             let file_path = resolve_import_file_path(work_imports.paths[i], cur_dir)
             if !visited_contains(visited_paths, visited_count, file_path) {
-                visited_paths[visited_count] = file_path
+                module_frontend_store_string_slot(&! visited_paths, visited_count, file_path)
                 visited_count = visited_count + 1
                 if file_exists(file_path) {
                     programs[loaded] = load_module_file(file_path)
-                    file_paths[loaded] = file_path
+                    module_frontend_store_string_slot(&! file_paths, loaded, file_path)
                     loaded = loaded + 1
                 }
             }
