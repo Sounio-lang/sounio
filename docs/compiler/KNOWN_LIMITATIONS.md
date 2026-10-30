@@ -445,6 +445,47 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
   founder-run step. Until then: do not use `Hyper<…>` values under
   `SOUNIO_SOUC_ENGINE=lean_single`.
 
+### KL-22 — `--backend gpu` emits only empty kernel bodies
+
+- Engine: Madaros (`lean_single` has no GPU CLI and rejects the invocation).
+  Measured 2026-10-30. `souc build SRC -o OUT.ptx --backend gpu` is an
+  emission skeleton, not a backend: it writes PTX for a `kernel fn` whose
+  body is empty, and refuses fail-closed as soon as the body holds a `var`.
+- **Empty body — emits.** `kernel fn step(n: i64) with GPU { }` writes 159
+  bytes of PTX. Every `kernel fn` in the tree has an empty body, including
+  the epistemically named ones in `examples/gpu_epistemic_showcase.sio`
+  (`pharmacokinetic_dilution`, `pharmacokinetic_clearance`,
+  `sensor_fusion_weighted`), so nothing in `examples/` exercises more.
+- **One `var` local — refused, no output.** Build
+
+  ```sounio
+  kernel fn step(n: i64, k: f64) with GPU, Div, Panic {
+      var acc: f64 = 0.0
+      var i: i64 = 0
+      while i < n { acc = acc + k * 1.5; i = i + 1 }
+  }
+  fn main() -> i32 with IO { 0 }
+  ```
+
+  and the compiler prints `GPU codegen refused: a `var` local (stack slot)
+  in a kernel body has no PTX storage: the emitter does not allocate it, so
+  its loads and stores would address an unwritten register; no output
+  written (a wrong kernel is worse than none)`. This is the correct
+  behaviour, and it is also the ceiling: a kernel that computes needs stack
+  slots.
+- **Target divergence.** The dispatch line announces `target=cuda-sm80`
+  while the emitted PTX carries `.target sm_50`. Relevant on its own to any
+  parity claim that compares a GPU artifact against a CPU reference.
+- **Consequence for PBPK-28.** The Crank–Nicolson solver is arrays and
+  accumulators throughout, so it cannot reach PTX by this path. Real GPU
+  work in this repository goes through hand-written emitters
+  (`self-hosted/gpu/emit_*_ptx.sio`), which is a separate and much larger
+  undertaking. Do not read a green `--backend gpu` on an empty kernel as
+  evidence that a numerical kernel compiles.
+- Parameter sweeps do not need the GPU anyway: one PBPK-28 steady-state
+  solve costs 9.51 ms, so a 101 × 41 grid (4141 solves) finishes in 39 s on
+  one core.
+
 ### KL-17 — #2773: same-named items in different modules
 
 - **Madaros, functions — CLOSED for plain `pub` and private fns (#2773).** A
