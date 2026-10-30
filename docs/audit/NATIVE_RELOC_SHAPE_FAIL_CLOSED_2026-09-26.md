@@ -62,7 +62,10 @@ Reported by sleepy-easley on the coordination bus, 2026-09-26 22:01Z.
 stores 37 into a `.data` slot through a recognised `mov [rip+d],rax`, then reads
 it back through the shape under test, which carries a kind-3 relocation.
 `scripts/ci/native_reloc_shape_gate.sh` (named in ci.yml, run against the
-fresh build) accepts only "exit 37" or "rc=29, no ELF".
+fresh build) accepts only "compiler exit 0, ELF exit 37" or "compiler exit
+29, no ELF". The writer code is the process status of
+`--native-v2-emit-reloc-shape`. A log line that says `rc=29` while the
+process exits 0 is not a refusal.
 
 Measured on the workspace, 2026-09-26:
 
