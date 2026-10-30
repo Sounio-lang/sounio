@@ -30991,6 +30991,98 @@ impl Lowerer {
         self.lower_expr_ref(e)
     }
 
+    // One syscall6 argument. The kernel needs a raw address wherever the
+    // program writes `&x` / `&!x`, and lower_expr_raw_arg_ref's borrow
+    // stripping only yields one for a BSS global (its rvalue IS the BSS
+    // address). For a LOCAL the stripped rvalue is the value itself: measured
+    // before this fix, `syscall6(1, 1, &!buf, 3, ..)` on a local `[i8; 4]`
+    // passed its GC handle (write(1, 0x1, 3) = EFAULT), `&!buf[0]` passed the
+    // element value, and `&!status` on a local i64 passed its value -- so
+    // wait4(pid, &!status, ..) handed the kernel NULL and every exit status
+    // read back as 0.
+    //   - local scalar (int/float): keep the borrow. Native OpRef is the LEA
+    //     of the variable's own stack slot, the same address `f(&!x)` passes,
+    //     so the kernel reads and writes x itself.
+    //   - local array or other aggregate, an element/field borrow: refused.
+    //     A local array is a GC object whose elements are 8-byte boxed slots
+    //     (KL-14a), so there is no address at which the kernel would see the
+    //     bytes the program wrote. A module-level array is laid out flat in
+    //     BSS and keeps working.
+    fn lower_syscall6_arg_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        if e.kind == ExprKind::ExprUnary && (e.un_op == UnaryOp::OpRef || e.un_op == UnaryOp::OpRefMut) {
+            match e.left {
+                Some(inner) => {
+                    if (*inner).kind == ExprKind::ExprIdent {
+                        let nm = (*inner).name
+                        let sk = self.lookup_local_scalar_kind(nm)
+                        if !self.lookup_local_is_global(nm) && !self.lookup_local_is_ref(nm)
+                            && self.lookup_local_fixed_array_len(nm) < 0
+                            && !self.lookup_local_struct_type_is_array_elem(nm)
+                            && (sk == 1 || sk == 2) {
+                            return self.lower_unary_expr_ref(e)
+                        }
+                        if !self.lookup_local_is_global(nm)
+                            && (self.lookup_local_fixed_array_len(nm) >= 0
+                                || self.lookup_local_struct_type_is_array_elem(nm)
+                                || self.lookup_local_array_copy_word_scalar(nm)
+                                || self.lookup_local_array_elem_float(nm)) {
+                            print("error: syscall6 cannot pass a borrow of the local array `")
+                            print(str_from_bytes(nm.buf, nm.len))
+                            print("`: Madaros stores a local array as a GC object of 8-byte boxed slots, so the kernel would not see its bytes (it used to receive the GC handle)\n")
+                            print("  help: declare the buffer at module level (`var BUF: [i8; N] = [0; N]`) and pass `&!BUF`\n")
+                            var lo_arr = self
+                            lowerer_mark_hard_error(&! lo_arr)
+                            return (lo_arr, IR_INVALID_REG)
+                        }
+                    } else if (*inner).kind == ExprKind::ExprIndex || (*inner).kind == ExprKind::ExprFieldAccess {
+                        print("error: syscall6 cannot pass a borrow of an array element or a struct field: the kernel would receive the element's value, not its address\n")
+                        print("  help: pass a module-level buffer (`&!BUF`) or a local scalar (`&!x`)\n")
+                        var lo_elem = self
+                        lowerer_mark_hard_error(&! lo_elem)
+                        return (lo_elem, IR_INVALID_REG)
+                    }
+                }
+                None => {}
+            }
+        }
+        self.lower_expr_raw_arg_ref(e)
+    }
+
+    fn lower_syscall6_args_ref(self, opt: &Option<Box<ExprList>>) -> LowerExprArgsResult with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        var current = opt
+        var regs: [i64; 64] = [0; 64]
+        var reg_count: i64 = 0
+        while true {
+            match *current {
+                Some(list) => {
+                    let pair_head = lo.lower_syscall6_arg_ref(&(*list).head)
+                    lo = pair_head.0
+                    if reg_count < 64 {
+                        regs[reg_count as usize] = pair_head.1
+                        reg_count = reg_count + 1
+                    } else {
+                        break
+                    }
+                    current = &(*list).tail
+                }
+                _ => break
+            }
+        }
+        if reg_count <= 0 {
+            let empty = IrRegList { head: 0, tail: None }
+            LowerExprArgsResult { lowerer: lo, regs: empty, count: 0 }
+        } else {
+            var idx = reg_count - 1
+            var args = IrRegList { head: regs[idx as usize], tail: None }
+            while idx > 0 {
+                idx = idx - 1
+                args = IrRegList { head: regs[idx as usize], tail: Some(Box::new(args)) }
+            }
+            LowerExprArgsResult { lowerer: lo, regs: args, count: reg_count }
+        }
+    }
+
     // Like lower_expr_args_ref, but every argument goes through the raw-value
     // path (borrow-stripping) for the syscall6 builtin.
     fn lower_expr_args_raw_ref(self, opt: &Option<Box<ExprList>>) -> LowerExprArgsResult with Mut, Panic, Div, Alloc, IO {
@@ -34155,7 +34247,7 @@ impl Lowerer {
             // binds it to the emitted syscall stub.
             var lo_sys = self
             let fn_id_sys = lowerer_find_or_add_fn_id_mut(&! lo_sys, callee_name)
-            let pair_args_sys: LowerExprArgsResult = lo_sys.lower_expr_args_raw_ref(&e.args)
+            let pair_args_sys: LowerExprArgsResult = lo_sys.lower_syscall6_args_ref(&e.args)
             let lo_args_sys = pair_args_sys.lowerer
             let args_sys: Option<Box<IrRegList>> = if pair_args_sys.count <= 0 { None } else { Some(Box::new(pair_args_sys.regs)) }
             let argc_sys = pair_args_sys.count
