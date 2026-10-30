@@ -4,13 +4,12 @@ Sounio is designed for safety-critical environments (including clinical dosing a
 
 ## Supported Versions
 
-Security patches are actively backported to all stable and pre-release milestones:
+`souc --version` reports `3.0.0-rc.1`. Security patches apply to that toolchain series:
 
 | Major Version Series | Supported |
 | -------------------- | ------------------ |
-| 2.x.x (Current Self-Hosted) | :white_check_mark: |
-| 1.0.x-beta (WASM / Legacy) | :white_check_mark: |
-| < 1.0.0 (Prerelease prototypes) | :x: |
+| 3.0.x (`3.0.0-rc.1`, as reported by `souc --version`) | :white_check_mark: |
+| < 3.0 | :x: |
 
 ---
 

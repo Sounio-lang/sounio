@@ -8,8 +8,7 @@ description: "Keep `examples/` compiling and aligned with the compiler; use when
 ## Workflow
 
 1) Run the example gate
-- Use `scripts/check_all_examples.sh`.
-- Failures are logged to `/tmp/sounio_examples_failures.txt`.
+- Use `scripts/dev/gen_examples_index.sh` (runs every `examples/**/*.sio` that has `fn main` and writes `examples/INDEX.md`).
 
 2) Fix first, stub only when a feature is missing
 - Prefer minimal, targeted fixes (effects, syntax, imports) that keep the example intact.
@@ -18,6 +17,7 @@ description: "Keep `examples/` compiling and aligned with the compiler; use when
 3) Keep syntax Sounio-native
 - No Rust macros or attributes in `.sio`.
 - Use `var` and `&!` and explicit `with` effects.
+- Drift scan: `skills/sounio-language/scripts/scan_syntax_drift.py` (also invoked by `scripts/dev/fast_gate.sh`).
 
 4) Keep docs in sync if you changed visible semantics
 - Update `docs/implementation/MV_CORE_CHECKLIST.md` and `docs/guide/LLM_PROGRAMMING_GUIDE.md` when behavior shifts.
@@ -25,9 +25,7 @@ description: "Keep `examples/` compiling and aligned with the compiler; use when
 ## References
 - `docs/implementation/MV_CORE_CHECKLIST.md`
 - `docs/guide/LLM_PROGRAMMING_GUIDE.md`
-- `.claude/commands/sounio-check.md`
-- `.claude/commands/sounio-syntax.md`
 
 ## Scripts
-- `scripts/check_all_examples.sh`
-- `scripts/scan_syntax_drift.py`
+- `scripts/dev/gen_examples_index.sh`
+- `skills/sounio-language/scripts/scan_syntax_drift.py`

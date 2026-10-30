@@ -15,6 +15,8 @@ All thirty task cards are also available with `--lang el`; the context
 generator now validates ninety en/pt/el packs. Earlier bilingual preparation
 receipts retain their original sixty-pack scope rather than being rewritten.
 
+**Status: research language (pre-1.0).** APIs may change; not recommended for production use. Do not describe Sounio as ready for production use, and do not name a compiler version in that status line.
+
 Give the model a small, accurate language context, a complete existing program
 close to the task, and access to an identified compiler. Then make one bounded
 change at a time and preserve the check, compilation, and execution evidence.

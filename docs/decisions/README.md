@@ -60,20 +60,25 @@ Grounded in: commit, artifact, or empirical result
 | 011 | Boundary and scope of Mathlib in formal verification | accepted | 2026-09-24 |
 | 012 | Bridge `IrHyperMulO` to the native-v2 backend pipeline | experimental | 2026-09-24 |
 | 013 | Format printing with `{}` placeholders | accepted | 2026-10-22 |
+| 014 | `&&` and `\|\|` short-circuit | accepted | 2026-10-23 |
 | 015 | Lexical structure (the thirteen rulings of D-33) | accepted | 2026-10-24 |
 | 016 | Epistemic merge, contradiction, typed zeros and provenance trust | accepted | 2026-10-24 |
 | 018 | Release trains, editions and the compatibility contract | accepted | 2026-10-24 |
 | 020 | Eight rulings from the 2026-10-25 decision session (D-15, D-16, D-20, D-22, D-24–D-27) | accepted | 2026-10-25 |
+| 021 | Oracle stack for the Sounio-to-FPGA backend (U250) | experimental | 2026-10-26 |
+| 022 | FPGA backend MVP — profile subset, kernel IR, first kernel | experimental | 2026-10-26 |
+| 023 | Checked indexing, path-conditioned obligations and proof-erased `Panic` | accepted | 2026-10-28 |
+| 024 | Metrological index obligations and graded `Panic ≤ ε` | accepted | 2026-10-28 |
+| 025 | Epistemic decisions: flip budgets, attribution and the value of remeasuring | accepted | 2026-10-28 |
 
 Reserved by open pull requests (not yet on `main`):
 
 | ADR | Title | PR |
 |-----|-------|----|
-| 014 | `&&` and `\|\|` short-circuit | #3046 |
 | 017 | Single authority for IR memory effects (`ir::effects`) | #2686 (renumbered from a colliding 013) |
 | 019 | Certified intervals | #3101 |
 
-The next free number is **021**.
+The next free number is **026**.
 
 ## Files
 
@@ -90,10 +95,16 @@ The next free number is **021**.
 - [ADR-011](./adr-011-mathlib-scope-in-formal-verification.md)
 - [ADR-012](./adr-012-hyper-native-v2-bridge.md)
 - [ADR-013](./adr-013-format-printing.md)
+- [ADR-014](./adr-014-short-circuit-logical-operators.md)
 - [ADR-015](./adr-015-lexical-structure.md)
 - [ADR-016](./adr-016-epistemic-merge-and-provenance-trust.md)
 - [ADR-018](./adr-018-release-cycle-and-versioning.md)
 - [ADR-020](./adr-020-rulings-2026-10-25.md)
+- [ADR-021](./adr-021-fpga-backend-oracle-stack.md)
+- [ADR-022](./adr-022-fpga-backend-mvp.md)
+- [ADR-023](./adr-023-checked-indexing-and-proof-erased-panic.md)
+- [ADR-024](./adr-024-metrological-index-obligations.md)
+- [ADR-025](./adr-025-decision-flip-budget-and-attribution.md)
 - [Claim-oracle inventory schema](./claim_oracle_inventory.schema.md)
 
 ## Related Docs
