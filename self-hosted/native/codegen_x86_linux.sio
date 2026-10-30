@@ -51,7 +51,7 @@ var NATIVE_ELF_OFF: i64 = 0
 // check at all; a large module can push the assembled image past this legacy
 // 16 MiB buffer (measured 2026-09-02: self-hosted/compiler/main.sio needs
 // 53,515,198 code bytes at merged_ir_functions=13140, so NC_BIG_CODE -- the
-// native_v2 code tier this legacy path shares -- was raised to 128 MiB; this
+// native_v2 code tier this legacy path shares -- was raised to 144 MiB; this
 // legacy ELF buffer was left at 16 MiB since the legacy writer is not on that
 // path), so the store is bounded and the writer refuses to emit rather than
 // shipping a truncated ELF. i64 (0/1) rather than bool: module-global bool
@@ -111,13 +111,13 @@ fn nc_note_label_overflow(nc: &! NativeCompiler) with Mut, Panic {
 // for large programs (isa ELF ~700KB, evm ~2.1MB) and itself a large-stack-frame
 // hazard. This module-global BSS array (demand-paged, ~0 RSS until touched) holds
 // the assembled ELF image. Written INLINE only (direct NC_BIG_ELF[i]).
-var NC_BIG_ELF: [i8; 167772160] = [0; 167772160]
+var NC_BIG_ELF: [i8; 201326592] = [0; 201326592]
 // Single source of truth for the NC_BIG_ELF bound. The DECLARATION above must
 // stay a literal; every bound CHECK calls this accessor. NOTE: this value must
 // never be confused with the ELF LOAD BASE ADDRESS 0x400000 (4194304), which is
 // passed as the `base_addr` argument at several call sites and is unrelated to
 // buffer capacity. Pinned by scripts/ci/native_capacity_tiers_gate.sh.
-fn nc_elf_capacity_bytes() -> i64 { 167772160 }
+fn nc_elf_capacity_bytes() -> i64 { 201326592 }
 // Scratch IR functions for the sret witness. These are module-scope to avoid
 // putting IrFunction-sized temporaries on the Madaros runtime stack.
 var NV2_SRET_MAIN_FN: IrFunction = ir_empty_function()
@@ -3855,6 +3855,70 @@ fn native_v2_resolve_handle_to_object_base_rax_into(nc: &! NativeCompiler) with 
     nc_patch_u32_le(nc, live_jnz + 2, live_target - (live_jnz + 6))
 }
 
+// Same resolve as native_v2_resolve_handle_to_object_base_rax_into, but a
+// missing object base is rax=0 rather than ud2. Field load/store must test
+// that result before any payload operand. A tag in the handle-id range has
+// no slot; loading payload word 0 of that null base is the 0x20 SIGSEGV.
+fn native_v2_resolve_handle_to_object_base_or_zero_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_mov_rbx_rax(nc)
+    nc_emit_mov_rax_imm(nc, native_v2_handle_raw_ptr_threshold())
+    nc_emit_cmp_rbx_rax(nc)
+    nc_emit_setae_al(nc)
+    nc_emit_movzx_rax_al(nc)
+    nc_emit_test_rax_rax(nc)
+    let raw_jnz = (*nc).code.len
+    nc_emit_jnz_rel32(nc)
+
+    nc_emit_mov_rax_rbx(nc)
+    nc_emit_imul_rbx_rbx_imm8(nc, native_v2_handle_entry_size())
+    nc_emit_mov_reg_reg(nc, 7, 3)
+    emit_load_runtime_context_field_rax_into(nc, runtime_context_field_handle_table_base())
+    nc_emit_mov_reg_reg(nc, 3, 7)
+    nc_emit_add_rax_rbx(nc)
+    nc_emit_load_rax_mem_rax_disp32(nc, native_v2_handle_entry_field_object_base())
+    nc_emit_test_rax_rax(nc)
+    let empty_jz = (*nc).code.len
+    nc_emit_jz_rel32(nc)
+    let have_jmp = (*nc).code.len
+    nc_emit_jmp_rel32(nc)
+
+    let empty = (*nc).code.len
+    nc_patch_u32_le(nc, empty_jz + 2, empty - (empty_jz + 6))
+    nc_emit_xor_rax_rax(nc)
+    let empty_done = (*nc).code.len
+    nc_emit_jmp_rel32(nc)
+
+    let raw_target = (*nc).code.len
+    nc_patch_u32_le(nc, raw_jnz + 2, raw_target - (raw_jnz + 6))
+    nc_emit_mov_rax_rbx(nc)
+    let done_target = (*nc).code.len
+    nc_patch_u32_le(nc, have_jmp + 1, done_target - (have_jmp + 5))
+    nc_patch_u32_le(nc, empty_done + 1, done_target - (empty_done + 5))
+    nc_emit_test_rax_rax(nc)
+    let live_jnz = (*nc).code.len
+    nc_emit_jnz_rel32(nc)
+    nc_emit_xor_rax_rax(nc)
+    let live_target = (*nc).code.len
+    nc_patch_u32_le(nc, live_jnz + 2, live_target - (live_jnz + 6))
+}
+
+// rax is the resolved object base. rdx holds the pre-resolve value. A null
+// base must not be used as a payload address; the original integer is the value.
+fn nc_emit_load_payload_word_if_base_live(nc: &! NativeCompiler, field_word: i64) with Mut, Panic, Div {
+    nc_emit_test_rax_rax(nc)
+    let null_jz = (*nc).code.len
+    nc_emit_jz_rel32(nc)
+    nc_emit_mov_reg_imm(nc, 3, field_word)
+    nc_emit_mov_rax_mem_rax_rbx8(nc)
+    let done_jmp = (*nc).code.len
+    nc_emit_jmp_rel32(nc)
+    let null_target = (*nc).code.len
+    nc_patch_u32_le(nc, null_jz + 2, null_target - (null_jz + 6))
+    nc_emit_mov_rax_rdx(nc)
+    let done_target = (*nc).code.len
+    nc_patch_u32_le(nc, done_jmp + 1, done_target - (done_jmp + 5))
+}
+
 fn nc_flat_data_prepare_into(nc: &! NativeCompiler) with Mut, Panic, Div {
     if (*nc).flat_data_len > 0 { return }
     var i: i64 = 0
@@ -4715,7 +4779,7 @@ fn nc_core_intern_alloc_fail_explain_into(nc: &! NativeCompiler, fail_code: i64)
     let off = native_v2_rodata_len_into(nc)
     // Print the handle-table size from the accessor, not a decimal literal:
     // native_capacity_tiers_check.py counts every 4194304 in this file as the
-    // ELF load address 0x400000 and requires exactly six argument-form hits.
+    // ELF load address 0x400000 and requires exactly seven argument-form hits.
     nc_alloc_diag_append_ascii_into(nc, "  the generated program's handle table (")
     nc_alloc_diag_append_decimal_into(nc, native_v2_handle_table_capacity_default())
     nc_alloc_diag_append_ascii_into(nc, " managed objects, never\n")
@@ -9952,6 +10016,7 @@ pub fn compile_ir_function_v2(nc: NativeCompiler, func: IrFunction, machine_func
     c.label_patch_count = 0
     c.current_frame_size = 0
     nc_is_float_reg_clear()
+    nc_raw_tag_reset()
     nc_reg_class_reset()
     c.current_strategy = 0
     var rst_ra = 0
@@ -10237,6 +10302,18 @@ fn nc_core_mark_int_reg(nc: &! NativeCompiler, reg: i64) with Mut, Panic, Div {
     }
 }
 
+// A unit-enum field load (label_id 5, or a field literally named kind) leaves
+// the discriminant in the destination. That integer is not a handle id.
+fn nc_field_get_result_is_raw_tag(func: &IrFunction, instr_index: i64) -> bool with Mut, Panic, Div {
+    let slot = ir_region_slot_r((*func).region, (instr_index))
+    if IR_A_LABEL_ID[slot as usize] == nc_raw_tag_label_id() {
+        return true
+    }
+    let nid = IR_A_NAME_ID[slot as usize]
+    if nid <= 0 { return false }
+    ir_name_eq(ir_name_at(nid), make_name("kind"))
+}
+
 fn nc_core_mark_float_field(nc: &! NativeCompiler, base_reg: i64, field_idx: i64) with Mut, Panic, Div {
     if base_reg < 0 || field_idx < 0 { return }
     var i: i64 = 0
@@ -10474,7 +10551,7 @@ fn nc_core_emit_alloc_fail_into(nc: &! NativeCompiler, slow_jnz: i64, fail_code:
 }
 
 fn nc_core_emit_alloc_into(nc: &! NativeCompiler, dst: i64, type_tag: i64, elem_count: i64) -> bool with Mut, Panic, Div {
-    nc_core_emit_alloc_kind_into(nc, dst, type_tag, elem_count, false)
+    nc_core_emit_alloc_kind_into(nc, dst, type_tag, elem_count, false, false)
 }
 
 // `is_array` marks an array-literal allocation (ir_alloc_array). An array is
@@ -10484,7 +10561,10 @@ fn nc_core_emit_alloc_into(nc: &! NativeCompiler, dst: i64, type_tag: i64, elem_
 // array by retargeting its handle entry, so a raw base sent the growth path
 // through a garbage handle entry and segfaulted on the first push past the
 // initial capacity.
-fn nc_core_emit_alloc_kind_into(nc: &! NativeCompiler, dst: i64, type_tag: i64, elem_count: i64, is_array: bool) -> bool with Mut, Panic, Div {
+// `force_managed` is the Box path. Tag 8 is a small-value tag, and the unboxed
+// emitter stamps handle_id 0 and creates no table slot. (*box).field then
+// resolves handle 0 and reads address 0x20.
+fn nc_core_emit_alloc_kind_into(nc: &! NativeCompiler, dst: i64, type_tag: i64, elem_count: i64, is_array: bool, force_managed: bool) -> bool with Mut, Panic, Div {
     let payload_size = native_v2_alloc_size_from_tag(type_tag)
     let total_size = payload_size + native_v2_object_header_size()
     let descriptor_id = native_v2_alloc_descriptor_from_tag(type_tag)
@@ -10495,8 +10575,9 @@ fn nc_core_emit_alloc_kind_into(nc: &! NativeCompiler, dst: i64, type_tag: i64, 
 
     // ≤16 B value structs (SysV two-register return): heap-bump only, return the
     // raw object base. No handle-table slot — eliminates the 2^20 wrap trigger
-    // for Rational / Box / other two-int value returns (issue #919 root fix).
-    let unboxed = !is_array && elem_count == 0 && native_v2_is_small_value_struct_tag(type_tag)
+    // for Rational / other two-int value returns (issue #919 root fix).
+    // Arrays and Boxes must not take that path.
+    let unboxed = !force_managed && !is_array && elem_count == 0 && native_v2_is_small_value_struct_tag(type_tag)
 
     emit_load_runtime_context_field_rax_into(nc, runtime_context_field_heap_cursor())
     nc_emit_mov_rdx_rax(nc)
@@ -10650,7 +10731,9 @@ fn nc_core_emit_box_alloc_into(nc: &! NativeCompiler, dst: i64, type_tag: i64, e
     emit_store_rax_runtime_context_field_into(nc, runtime_context_field_heap_cursor())
     emit_load_runtime_context_field_rax_into(nc, runtime_context_field_box_heap_limit())
     emit_store_rax_runtime_context_field_into(nc, runtime_context_field_heap_limit())
-    if !nc_core_emit_alloc_into(nc, dst, type_tag, elem_count) { return false }
+    // force_managed: the Box object must occupy a handle-table slot whose
+    // object_base is this allocation, not the empty slot 0.
+    if !nc_core_emit_alloc_kind_into(nc, dst, type_tag, elem_count, false, true) { return false }
     emit_load_runtime_context_field_rax_into(nc, runtime_context_field_heap_cursor())
     emit_store_rax_runtime_context_field_into(nc, runtime_context_field_box_heap_cursor())
     nc_emit_pop_rax(nc)
@@ -11740,6 +11823,15 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
             }
         }
         let instr_op = (IR_A_OP[(ir_region_slot_r((*func).region, (i))) as usize] as IrOpcode)
+        // A later def of this vreg is not the tag a previous field-get stored.
+        // Leave the mark if this instruction reads that same vreg as its source.
+        if instr_op != IrOpcode::IrNop {
+            let kill_dst = IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize]
+            let kill_src = IR_A_SRC1[(ir_region_slot_r((*func).region, (i))) as usize]
+            if kill_dst != kill_src {
+                nc_raw_tag_clear(kill_dst)
+            }
+        }
         if instr_op == IrOpcode::IrNop && IR_A_IMM_FLAGS[(ir_region_slot_r((*func).region, (i))) as usize] == IR_FLOAT_REG_MARKER_FLAG
  {
             let mark_reg = IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize]
@@ -11808,18 +11900,32 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
             nc_add_rodata_reloc(nc, lea_pos + 3, str_offset)
             nc_core_store_rax_to_temp(nc, IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize])
         } else if instr_op == IrOpcode::IrFieldGet {
-            if IR_A_LABEL_ID[(ir_region_slot_r((*func).region, (i))) as usize] == 1 {
-                native_v2_core_emit_load_ref_field_into(nc, IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize], IR_A_SRC1[(ir_region_slot_r((*func).region, (i))) as usize], IR_A_FIELD_IDX[(ir_region_slot_r((*func).region, (i))) as usize])
-            } else if IR_A_LABEL_ID[(ir_region_slot_r((*func).region, (i))) as usize] == 2 {
+            let field_src = IR_A_SRC1[(ir_region_slot_r((*func).region, (i))) as usize]
+            let field_dst = IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize]
+            let field_label = IR_A_LABEL_ID[(ir_region_slot_r((*func).region, (i))) as usize]
+            // The source is already a unit-enum discriminant. Resolving it
+            // indexes the handle table with the tag (2 selects handle 2, whose
+            // payload word 0 is 0; the next resolve of 0 faults at 0x20).
+            // The tag has no fields. The value is the tag.
+            if nc_raw_tag_get(field_src) {
+                nc_core_load_temp_to_rax(nc, field_src)
+                nc_core_store_rax_to_temp(nc, field_dst)
+                nc_raw_tag_set(field_dst)
+            } else if field_label == 1 {
+                native_v2_core_emit_load_ref_field_into(nc, field_dst, field_src, IR_A_FIELD_IDX[(ir_region_slot_r((*func).region, (i))) as usize])
+            } else if field_label == 2 {
                 // *mut payload: the register is the object address, not a handle
                 // and not a pointer to a handle slot. No header.
-                native_v2_core_emit_load_raw_field_into(nc, IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize], IR_A_SRC1[(ir_region_slot_r((*func).region, (i))) as usize], IR_A_FIELD_IDX[(ir_region_slot_r((*func).region, (i))) as usize])
+                native_v2_core_emit_load_raw_field_into(nc, field_dst, field_src, IR_A_FIELD_IDX[(ir_region_slot_r((*func).region, (i))) as usize])
             } else {
-                nc_core_load_temp_to_rax(nc, IR_A_SRC1[(ir_region_slot_r((*func).region, (i))) as usize])
-                native_v2_resolve_handle_to_object_base_rax_into(nc)
-                nc_emit_mov_reg_imm(nc, 3, IR_A_FIELD_IDX[(ir_region_slot_r((*func).region, (i))) as usize] + native_v2_object_header_size() / 8)
-                nc_emit_mov_rax_mem_rax_rbx8(nc)
-                nc_core_store_rax_to_temp(nc, IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize])
+                nc_core_load_temp_to_rax(nc, field_src)
+                nc_emit_mov_rdx_rax(nc)
+                native_v2_resolve_handle_to_object_base_or_zero_into(nc)
+                nc_emit_load_payload_word_if_base_live(nc, IR_A_FIELD_IDX[(ir_region_slot_r((*func).region, (i))) as usize] + native_v2_object_header_size() / 8)
+                nc_core_store_rax_to_temp(nc, field_dst)
+                if nc_field_get_result_is_raw_tag(func, i) {
+                    nc_raw_tag_set(field_dst)
+                }
             }
             if IR_A_IMM_FLAGS[(ir_region_slot_r((*func).region, (i))) as usize] == IR_FLOAT_REG_MARKER_FLAG || nc_core_field_is_float(nc, IR_A_SRC1[(ir_region_slot_r((*func).region, (i))) as usize], IR_A_FIELD_IDX[(ir_region_slot_r((*func).region, (i))) as usize]) {
                 nc_core_mark_float_reg(nc, IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize])
@@ -11834,11 +11940,16 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
                 native_v2_core_emit_store_raw_field_into(nc, IR_A_SRC1[(ir_region_slot_r((*func).region, (i))) as usize], IR_A_FIELD_IDX[(ir_region_slot_r((*func).region, (i))) as usize], IR_A_SRC2[(ir_region_slot_r((*func).region, (i))) as usize])
             } else {
                 nc_core_load_temp_to_rax(nc, IR_A_SRC1[(ir_region_slot_r((*func).region, (i))) as usize])
-                native_v2_resolve_handle_to_object_base_rax_into(nc)
+                native_v2_resolve_handle_to_object_base_or_zero_into(nc)
+                nc_emit_test_rax_rax(nc)
+                let null_base = (*nc).code.len
+                nc_emit_jz_rel32(nc)
                 nc_emit_mov_rdx_rax(nc)
                 nc_core_load_temp_to_rax(nc, IR_A_SRC2[(ir_region_slot_r((*func).region, (i))) as usize])
                 nc_emit_mov_reg_imm(nc, 3, IR_A_FIELD_IDX[(ir_region_slot_r((*func).region, (i))) as usize] + native_v2_object_header_size() / 8)
                 nc_emit_store_rax_mem_rdx_rbx8(nc)
+                let stored = (*nc).code.len
+                nc_patch_u32_le(nc, null_base + 2, stored - (null_base + 6))
             }
             if IR_A_SRC2[(ir_region_slot_r((*func).region, (i))) as usize] >= 0 && IR_A_SRC2[(ir_region_slot_r((*func).region, (i))) as usize] < NC_VREG_LIMIT {
                 if NC_IS_FLOAT_REG[IR_A_SRC2[(ir_region_slot_r((*func).region, (i))) as usize] as usize] == 1 {
@@ -11964,13 +12075,18 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
                 return false
             }
         } else if instr_op == IrOpcode::IrCopy {
-            nc_core_load_temp_to_rax(nc, IR_A_SRC1[(ir_region_slot_r((*func).region, (i))) as usize])
-            nc_core_store_rax_to_temp(nc, IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize])
-            if IR_A_SRC1[(ir_region_slot_r((*func).region, (i))) as usize] >= 0 && IR_A_SRC1[(ir_region_slot_r((*func).region, (i))) as usize] < NC_VREG_LIMIT {
-                if NC_IS_FLOAT_REG[IR_A_SRC1[(ir_region_slot_r((*func).region, (i))) as usize] as usize] == 1 {
-                    nc_core_mark_float_reg(nc, IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize])
+            let copy_src = IR_A_SRC1[(ir_region_slot_r((*func).region, (i))) as usize]
+            let copy_dst = IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize]
+            nc_core_load_temp_to_rax(nc, copy_src)
+            nc_core_store_rax_to_temp(nc, copy_dst)
+            if nc_raw_tag_get(copy_src) {
+                nc_raw_tag_set(copy_dst)
+            }
+            if copy_src >= 0 && copy_src < NC_VREG_LIMIT {
+                if NC_IS_FLOAT_REG[copy_src as usize] == 1 {
+                    nc_core_mark_float_reg(nc, copy_dst)
                 } else {
-                    nc_core_mark_int_reg(nc, IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize])
+                    nc_core_mark_int_reg(nc, copy_dst)
                 }
             }
         } else if instr_op == IrOpcode::IrUnaryOp {
@@ -12084,7 +12200,7 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
             if IR_A_IMM_FLAGS[alloc_slot as usize] == IR_BOX_ALLOC_FLAG {
                 if !nc_core_emit_box_alloc_into(nc, IR_A_DST[alloc_slot as usize], IR_A_IMM_I64[alloc_slot as usize], alloc_elem_count) { return false }
             } else {
-                if !nc_core_emit_alloc_kind_into(nc, IR_A_DST[alloc_slot as usize], IR_A_IMM_I64[alloc_slot as usize], alloc_elem_count, alloc_elem_count_raw >= 0) { return false }
+                if !nc_core_emit_alloc_kind_into(nc, IR_A_DST[alloc_slot as usize], IR_A_IMM_I64[alloc_slot as usize], alloc_elem_count, alloc_elem_count_raw >= 0, false) { return false }
             }
         } else if instr_op == IrOpcode::IrCall && NC_RGN_BARRIER_SLOT >= 0
             && IR_A_FN_ID[(ir_region_slot_r((*func).region, (i))) as usize] == NC_RGN_BARRIER_SLOT
