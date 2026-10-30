@@ -403,7 +403,16 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
     (E001), `hessian_of`, `seq_set` (E200), `seq_len` (P0003); no output:
     `seq_count`, `seq_get`, `str_len`; failed to compile: `acknowledge`,
     `require_confidence`, `f128_to_lo`.
+  - **Runtime callees named by the lowerer (2026-10-30).** The lowerer also
+    reaches runtime functions by bare name for operators, not only calls:
+    `println(f64)` -> `print_f64`, and `string == string` / `!=` / a string
+    literal `match` arm -> `str_eq`. A user fn of that name was bound instead
+    (`stdlib/str/lib.sio`'s `pub fn str_eq(a: &Str, b: &Str)` received two
+    string handles). Both names are on the shadow list now, so the user fn is
+    `<name>__user` and the operator keeps the runtime.
 - Pins: `tests/run-pass/user_fn_shadows_builtin_measure.sio`,
+  `tests/run-pass/user_print_f64_does_not_capture_println.sio`,
+  `tests/run-pass/user_str_eq_does_not_capture_string_eq.sio`,
   `tests/run-pass/user_fn_shadows_builtin_names.sio`,
   `tests/run-pass/user_fn_shadows_builtin_pub_measure.sio`,
   `tests/multimodule/user_fn_shadows_builtin_pub_main.sio` (+ `_leaf`),

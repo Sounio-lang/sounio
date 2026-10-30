@@ -9891,9 +9891,8 @@ fn checker_check_slice_borrow_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntr
                                     checker_report_mismatch_inplace(c, e.span, 55, ty_i64(), start_ty)
                                 }
                             }
-                            None => {
-                                checker_report_error_at_inplace(c, e.span, 13, 0, 0, 0)
-                            }
+                            // `&a[..hi]`: the start is 0.
+                            None => {}
                         }
                         match (*range_expr).right {
                             Some(end_expr) => {
@@ -9902,9 +9901,8 @@ fn checker_check_slice_borrow_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntr
                                     checker_report_mismatch_inplace(c, e.span, 55, ty_i64(), end_ty)
                                 }
                             }
-                            None => {
-                                checker_report_error_at_inplace(c, e.span, 13, 0, 0, 0)
-                            }
+                            // `&a[lo..]`: the end is the length.
+                            None => {}
                         }
                     }
                 }
@@ -11377,7 +11375,9 @@ fn checker_check_method_call_with_base_ty_inplace(c: *mut Checker, e: Expr, base
         checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
         checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
         if name_matches_str8(e.name, 97, 115, 95, 98, 121, 116, 101, 115) {
-            ty_ref(ty_i8())
+            // A fresh `[u8]` holding the string's bytes (lowered as a copy). It
+            // was typed `&i8`, which has no `.len()` and cannot be sliced.
+            ty_array(ty_u8(), 0 - 1)
         } else if name_matches_str3(e.name, 108, 101, 110) {
             ty_i64()
         } else {
@@ -13224,6 +13224,13 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
         let call_start_borrows = (*c).borrows
         checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
         checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
+        // The runtime `read_file` is bound import-unknown, so its result reached
+        // method calls with an unknown type (`read_file(p).as_bytes()`, `.len()`
+        // were E011). It returns the file's contents as a string; a user
+        // `read_file` has a signature and never reaches this arm.
+        if callee_ty.kind == TypeKind::TyUnknown && checker_callee_is_bare_ident(e.left, make_name("read_file")) {
+            return ty_string()
+        }
         callee_ty
     } else {
         // Enum tuple-variant constructor (`Event::B(42)`): the callee path typed as
@@ -14294,6 +14301,25 @@ fn checker_scrut_is_user_enum_inplace(c: *mut Checker, scrut_ty: TypeEntry) -> b
     enum_table_find((*c).enums, scrut_ty.name) >= 0
 }
 
+// The scrutinee is a user enum, directly or through `&` / `&!`. `match p { .. }` on a
+// `p: &Proposition` parameter types the scrutinee as TyRef(Proposition): the plain
+// check above saw a TyRef, so the E264 refusal never fired, and the payload binding
+// fell to `scrut_ty.inner` -- the enum itself -- typing `Var(name)`'s `name` as
+// `Proposition` (stdlib/logic/pure/types.sio proposition_evaluate: "expected string,
+// found Proposition"). The lowerer has no payload binding through a reference either.
+fn checker_scrut_is_user_enum_or_ref_inplace(c: *mut Checker, scrut_ty: TypeEntry) -> bool with Mut, Panic, Div, Alloc, IO {
+    if checker_scrut_is_user_enum_inplace(c, scrut_ty) {
+        return true
+    }
+    if scrut_ty.kind != TypeKind::TyRef && scrut_ty.kind != TypeKind::TyRefMut {
+        return false
+    }
+    match scrut_ty.inner {
+        Some(inner_box) => checker_scrut_is_user_enum_inplace(c, *inner_box)
+        None => false
+    }
+}
+
 fn checker_bind_pattern_inplace(c: *mut Checker, pat: Pattern, scrut_ty: TypeEntry) with Mut, Panic, Div, Alloc, IO {
     if pat.kind == PatternKind::PatBinding {
         type_env_bind_mut(&!(*c).env, pat.name, scrut_ty, pat.is_mut)
@@ -14307,23 +14333,33 @@ fn checker_bind_pattern_inplace(c: *mut Checker, pat: Pattern, scrut_ty: TypeEnt
         // E264 (fail-closed): a payload sub-pattern on a USER enum (`Shape::Circle(r)`)
         // has no lowering -- lower_match_arm_ref compares the bare discriminant and never
         // binds the sub-patterns. Option/Box scrutinees carry .inner and are unaffected.
-        if checker_scrut_is_user_enum_inplace(c, scrut_ty) && pattern_list_count(pat.sub_patterns) > 0 {
+        // The scrutinee may reach the enum through `&` / `&!` (a `p: &Proposition`
+        // parameter): the refusal and the binding below must see through it.
+        let scrut_user_enum = checker_scrut_is_user_enum_or_ref_inplace(c, scrut_ty)
+        if scrut_user_enum && pattern_list_count(pat.sub_patterns) > 0 {
             checker_report_error_at_inplace(c, pat.span, 264, 0, 0, 0)
         }
-        // Single-payload variant (e.g. Some(x) on Option<T>/Box<T>): the scrutinee
-        // carries the payload type in .inner (Box/Option lowering). Bind the payload
-        // sub-pattern to that inner type so (*x) / (*x).field type correctly. Fall
-        // back to scrut_ty when there is no inner (other enums — positional variant
-        // field types are not otherwise tracked).
-        match scrut_ty.inner {
-            Some(inner_box) => checker_bind_pattern_list_inplace(c, pat.sub_patterns, *inner_box)
-            None => checker_bind_pattern_list_inplace(c, pat.sub_patterns, scrut_ty)
+        if scrut_user_enum {
+            // KL-20: positional variant field types are not tracked, and the arm is
+            // already refused (E264) when it has payload sub-patterns. Bind them to
+            // the error type -- never to the enum itself, which turned the refusal
+            // into a misleading "expected string, found Proposition" cascade at
+            // every use of the binding.
+            checker_bind_pattern_list_inplace(c, pat.sub_patterns, ty_error())
+        } else {
+            // Single-payload variant (e.g. Some(x) on Option<T>/Box<T>): the scrutinee
+            // carries the payload type in .inner (Box/Option lowering). Bind the payload
+            // sub-pattern to that inner type so (*x) / (*x).field type correctly.
+            match scrut_ty.inner {
+                Some(inner_box) => checker_bind_pattern_list_inplace(c, pat.sub_patterns, *inner_box)
+                None => checker_bind_pattern_list_inplace(c, pat.sub_patterns, scrut_ty)
+            }
         }
     } else if pat.kind == PatternKind::PatStruct {
         // E264 (fail-closed): `Shape::Rect { w, h }` on a user enum -- the lowerer skips
         // struct patterns outright ("Unsupported pattern -- skip"), so the arm could never
-        // match and its bindings would never be set.
-        if checker_scrut_is_user_enum_inplace(c, scrut_ty) {
+        // match and its bindings would never be set. Also through `&` / `&!`.
+        if checker_scrut_is_user_enum_or_ref_inplace(c, scrut_ty) {
             checker_report_error_at_inplace(c, pat.span, 264, 0, 0, 0)
         }
         checker_bind_struct_pat_fields_inplace(c, pat.pat_fields, scrut_ty)
@@ -21052,6 +21088,7 @@ fn name_is_native_backend_builtin(n: Name) -> bool with Mut, Panic, Div, Alloc, 
     if name_eq_lit(n, "__sounio_seq_get") { return true }  // id 52
     if name_eq_lit(n, "__sounio_seq_set") { return true }  // id 53
     if name_eq_lit(n, "__sounio_seq_push_scalar") { return true } // id 70
+    if name_eq_lit(n, "array_concat") { return true }      // id 72 (SIO-389: working emitter emit_builtin_array_concat + dispatch/persist arms)
     // read_byte/arena_mark/arena_reset/panic/untracked_counter (ids 55-59) are
     // NOT mirrored here on purpose. Each is already bound
     // checker_bind_import_unknown_inplace, arity-unchecked; adding it here too
@@ -21266,6 +21303,14 @@ fn call_expr_is_builtin_println(opt: Option<Box<Expr> >) -> bool with Mut, Panic
             }
             name_matches_str7((*expr).name, 112, 114, 105, 110, 116, 108, 110)
         }
+        None => false
+    }
+}
+
+// `callee` is the bare identifier `name` (not a path, not a method).
+fn checker_callee_is_bare_ident(callee: Option<Box<Expr> >, name: Name) -> bool with Mut, Panic, Div {
+    match callee {
+        Some(ce) => (*ce).kind == ExprKind::ExprIdent && name_eq((*ce).name, name)
         None => false
     }
 }
@@ -22974,9 +23019,19 @@ fn slice_borrow_result_type(base_ty: TypeEntry, want_mut: bool) -> TypeEntry wit
     }
 }
 
+// The operand of `&` / `&!` is a range index, `a[lo..hi]` (bounds optional).
+// This used to test whether the OPERAND itself was a range, but `&a[lo..hi]`
+// parses as Unary(&, Index(a, Range)), so the slice-borrow checker was never
+// reached and the range fell to the scalar index check (E014).
 fn expr_is_half_open_range(opt: Option<Box<Expr> >) -> bool {
     match opt {
-        Some(expr) => (*expr).kind == ExprKind::ExprRange && (*expr).bin_op == BinaryOp::OpRange
+        Some(expr) => {
+            if (*expr).kind != ExprKind::ExprIndex { return false }
+            match (*expr).right {
+                Some(idx) => (*idx).kind == ExprKind::ExprRange
+                None => false
+            }
+        }
         None => false
     }
 }
@@ -28560,9 +28615,7 @@ impl Checker {
                                         c = c.report_mismatch(e.span, 55, ty_i64(), start_pair.1)
                                     }
                                 }
-                                None => {
-                                    c = c.report_error_at(e.span, 13, 0, 0, 0)
-                                }
+                                None => {}
                             }
                             match (*range_expr).right {
                                 Some(end_expr) => {
@@ -28572,9 +28625,7 @@ impl Checker {
                                         c = c.report_mismatch(e.span, 55, ty_i64(), end_pair.1)
                                     }
                                 }
-                                None => {
-                                    c = c.report_error_at(e.span, 13, 0, 0, 0)
-                                }
+                                None => {}
                             }
                         }
                     }
@@ -28997,7 +29048,7 @@ impl Checker {
             c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
             // "as_bytes" = [97,115,95,98,121,116,101,115]
             if name_matches_str8(e.name, 97, 115, 95, 98, 121, 116, 101, 115) {
-                (c, ty_ref(ty_i8()))
+                (c, ty_array(ty_u8(), 0 - 1))
             // "len" = [108,101,110]
             } else if name_matches_str3(e.name, 108, 101, 110) {
                 (c, ty_i64())
@@ -29145,7 +29196,7 @@ impl Checker {
             c = c.check_expr_list_no_type_no_linear_consume(e.args)
             c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
             if name_matches_str8(e.name, 97, 115, 95, 98, 121, 116, 101, 115) {
-                (c, ty_ref(ty_i8()))
+                (c, ty_array(ty_u8(), 0 - 1))
             } else if name_matches_str3(e.name, 108, 101, 110) {
                 (c, ty_i64())
             } else {

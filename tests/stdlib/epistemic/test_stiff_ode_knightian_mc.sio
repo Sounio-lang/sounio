@@ -52,6 +52,15 @@ fn k_sqrt(x: f64) -> f64 with Mut, Div, Panic {
   y
 }
 
+// Trajectory parameters shared by main and the Monte Carlo sampler. They are
+// module-level so the sampler closure reads them without capturing: Madaros
+// refuses a capturing closure passed as a fn value (#1542), because the
+// captured values cannot be supplied through the fn pointer.
+let VDP_X0: f64 = 0.5
+let VDP_Y0: f64 = 0.0
+let VDP_DT: f64 = 0.02
+let VDP_STEPS: i64 = 80   // enough for a few "oscillations" / jumps in vdp
+
 // Deterministic vdp euler step (from systems/lib, van der Pol rhs)
 // dx = y
 // dy = mu*(1-x^2)*y - x
@@ -96,7 +105,7 @@ fn vdp_step_knightian(xb: &PBox, yb: &PBox, dt: f64, mub: &PBox) -> (PBox, PBox)
   // non-mono segment: x*x -> grid on support (as fallback)
   let xlo = pb_lo_mean(xb)
   let xhi = pb_hi_mean(xb)
-  let (x2lo, x2hi) = grid_min_max(xlo, xhi, |t| t * t, 7)
+  let (x2lo, x2hi) = grid_min_max(xlo, xhi, |t: f64| -> f64 { t * t }, 7)
   let x2b = pb_new(x2lo, x2hi, 0.0, pb_confidence(xb))
 
   let one = pb_from_knowledge(1.0, 0.0, 1000)
@@ -111,7 +120,7 @@ fn vdp_step_knightian(xb: &PBox, yb: &PBox, dt: f64, mub: &PBox) -> (PBox, PBox)
   // euler update: + dt * rhs  (monotone inc in rhs for dt>0 -> use apply2 on the scale)
   let dtb = pb_from_knowledge(dt, 0.0, 1000)
   // euler scale dt * rhs : use pb_mul (sound outer; dt>0 but rhs may straddle so general mul)
-  let dx_upd = pb_mul(&dtb, &dxb)
+  let dx_upd = pb_mul(&dtb, dxb)
   let dy_upd = pb_mul(&dtb, &dyb)
 
   let xnext = pb_add(xb, &dx_upd)
@@ -119,21 +128,21 @@ fn vdp_step_knightian(xb: &PBox, yb: &PBox, dt: f64, mub: &PBox) -> (PBox, PBox)
   (xnext, ynext)
 }
 
-fn main() -> i32 with IO, Mut, Div, Panic {
+fn main() -> i32 with IO, Mut, Div, Panic, Prob {
   var fail: bool = false
 
   // Params for stiff vdp (mu ~5 is stiffish for euler demo; var gives ~10% rel u on mu)
   let mu0: f64 = 5.0
   let mu_var: f64 = 0.25
-  let x0: f64 = 0.5
+  let x0: f64 = VDP_X0
   let x0_var: f64 = 0.01
-  let y0: f64 = 0.0
-  let dt: f64 = 0.02
-  let n_steps: i64 = 80   // enough for a few "oscillations" / jumps in vdp
+  let y0: f64 = VDP_Y0
+  let dt: f64 = VDP_DT
+  let n_steps: i64 = VDP_STEPS
 
   // 1. MC on mu (Epistemic), n=5000 per spec. Sampler runs full deterministic trajectory.
   let mu_ep = epistemic_new(mu0, mu_var, 850)
-  let final_mc = monte_carlo(mu_ep, |m: f64| -> f64 { vdp_final_y(m, x0, y0, dt, n_steps) }, 5000)
+  let final_mc = monte_carlo(mu_ep, |m: f64| -> f64 { vdp_final_y(m, VDP_X0, VDP_Y0, VDP_DT, VDP_STEPS) }, 5000)
 
   let mc_mean = final_mc.val()
   let mc_var = final_mc.variance()
@@ -161,7 +170,7 @@ fn main() -> i32 with IO, Mut, Div, Panic {
   // Demonstrate pb_apply2_monotone_inc_inc on a monotone segment of the "ODE result" readout
   // (max_abs_y >=0, scale>0 => inc in both; correct extrema at (lo,lo)/(hi,hi))
   let readout_scale = pb_from_knowledge(1.05, 0.0, 1000)
-  let stiff_readout = pb_apply2_monotone_inc_inc(|s, v| s * v, &readout_scale, &k_box)
+  let stiff_readout = pb_apply2_monotone_inc_inc(|s: f64, v: f64| -> f64 { s * v }, &readout_scale, &k_box)
 
   // Assert 1: MC mean inside knightian outer band
   let mean_in = (k_lo <= mc_mean) && (mc_mean <= k_hi)
@@ -217,13 +226,18 @@ fn main() -> i32 with IO, Mut, Div, Panic {
   let tightness = if mc_std > 1.0e-9 { k_width / (2.0 * mc_std) } else { 999.0 }
 
   if fail {
+    // Flags printed as typed i64 bindings: Madaros refuses to print an untyped
+    // `if c { 1 } else { 0 }` argument (unresolved scalar kind).
+    let mean_in_flag: i64 = if mean_in { 1 } else { 0 }
+    let wider_flag: i64 = if wider { 1 } else { 0 }
+    let assert3_flag: i64 = if assert3 { 1 } else { 0 }
     println("STIFF_ODE_KLIB_BRIDGE_FAIL")
     println("mean_in_band")
-    println(if mean_in { 1 } else { 0 })
+    println(mean_in_flag)
     println("wider_than_delta")
-    println(if wider { 1 } else { 0 })
+    println(wider_flag)
     println("klib_lower_prag")
-    println(if assert3 { 1 } else { 0 })
+    println(assert3_flag)
     println("RATIO")
     println(ratio)
     println("TIGHTNESS")

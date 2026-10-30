@@ -1,0 +1,1 @@
+`syscall6(.., &!x, ..)` with a local scalar `x` now passes the address of `x` on Madaros. The borrow was stripped to the value, so `wait4(pid, &!status, ..)` handed the kernel `status`'s value (NULL for a zeroed status, every exit status read back as 0), and `write(fd, &!x, n)` failed with EFAULT. Module-level buffers (`&!GLOBAL`) are unchanged.

@@ -495,6 +495,20 @@ fn module_frontend_file_path_mod_fallback(path: string) -> string with Mut, Pani
     str_concat(str_concat(base, "/mod"), ".sio")
 }
 
+// `X.sio` -> `X/lib.sio`: the second directory-module root lean_single
+// accepts for stdlib directories (after `X/mod.sio`).
+fn module_frontend_file_path_lib_fallback(path: string) -> string with Mut, Panic, Div {
+    let path_len = str_len(path)
+    if path_len < 5 {
+        return path
+    }
+    if str_char_at(path, path_len - 4) != 46 {
+        return path
+    }
+    let base = str_slice(path, 0, path_len - 4)
+    str_concat(str_concat(base, "/lib"), ".sio")
+}
+
 fn module_frontend_resolve_import_relpath(rel_path: string, cur_dir: string) -> string with IO, Mut, Panic, Div {
     let local_path = str_concat(str_concat(cur_dir, "/"), rel_path)
     if file_exists(local_path) {
@@ -562,6 +576,56 @@ fn module_frontend_resolve_import_relpath(rel_path: string, cur_dir: string) -> 
     let pkg_path = module_frontend_relpath_to_package_path(rel_path)
     if str_len(pkg_path) > 0 && file_exists(pkg_path) {
         return pkg_path
+    }
+    // Directory modules (MOD-002 step 8). `use json::*` names the directory
+    // stdlib/json/, whose root is stdlib/json/mod.sio or stdlib/json/lib.sio;
+    // no stdlib/json.sio exists. lean_single has always loaded these
+    // (`X/mod.sio`, then `X/lib.sio` for stdlib roots); Madaros tried the
+    // directory root only for the packages/ candidate, so every directory
+    // stdlib module was an unresolved import here (json, http, ffi, infra,
+    // systems, ...). Every file candidate above is tried first, so an import
+    // that already resolved to a `.sio` file keeps exactly that resolution.
+    var rel_has_slash = false
+    var rs: i64 = 0
+    let rel_len = str_len(rel_path)
+    while rs < rel_len {
+        if str_char_at(rel_path, rs) == 47 {
+            rel_has_slash = true
+        }
+        rs = rs + 1
+    }
+    if !rel_has_slash {
+        let local_mod = module_frontend_file_path_mod_fallback(local_path)
+        if file_exists(local_mod) {
+            return local_mod
+        }
+    }
+    let raw_mod = module_frontend_file_path_mod_fallback(rel_path)
+    if file_exists(raw_mod) {
+        return raw_mod
+    }
+    if str_len(stdlib_env_root) > 0 {
+        let stdlib_env_dir = str_concat(str_concat(stdlib_env_root, "/"), rel_path)
+        let stdlib_env_mod = module_frontend_file_path_mod_fallback(stdlib_env_dir)
+        if file_exists(stdlib_env_mod) {
+            return stdlib_env_mod
+        }
+        let stdlib_env_lib = module_frontend_file_path_lib_fallback(stdlib_env_dir)
+        if file_exists(stdlib_env_lib) {
+            return stdlib_env_lib
+        }
+    }
+    let stdlib_mod = module_frontend_file_path_mod_fallback(stdlib_path)
+    if file_exists(stdlib_mod) {
+        return stdlib_mod
+    }
+    let stdlib_lib = module_frontend_file_path_lib_fallback(stdlib_path)
+    if file_exists(stdlib_lib) {
+        return stdlib_lib
+    }
+    let self_hosted_mod = module_frontend_file_path_mod_fallback(self_hosted_path)
+    if file_exists(self_hosted_mod) {
+        return self_hosted_mod
     }
     let pkg_mod = module_frontend_file_path_mod_fallback(pkg_path)
     if str_len(pkg_mod) > 0 && file_exists(pkg_mod) {

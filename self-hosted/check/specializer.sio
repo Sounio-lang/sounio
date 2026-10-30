@@ -161,6 +161,21 @@ var SPEC_CAP_OVERFLOW_CODE: i64 = 0
 // Generic methods require an explicit, unambiguous turbofish so the
 // specializer can choose the same-name clone before IR lowering.
 var SPEC_METHOD_TARG_UNSUPPORTED: bool = false
+// Generic METHOD templates name their impl's target type (SPEC_GF_OWNER_HASH,
+// 0 for a free generic fn). A turbofish-less call `v.push(10)` that matches a
+// template only by name is recorded in SPEC_GF_UNTARGETED_CALL instead of
+// failing the compile at once: this AST-only pass cannot see the receiver,
+// and `push` is also the name of HeapI64Vec::push, a plain method. The call
+// can only reach the generic template when a value of the owner type can
+// exist, i.e. when the owner is named somewhere outside its own impl and
+// struct declaration (SPEC_MENTION_*). Only then is the turbofish required.
+var SPEC_GF_OWNER_HASH: [i64; 256] = [0; 256]
+var SPEC_GF_UNTARGETED_CALL: [bool; 256] = [false; 256]
+let SPEC_MENTION_MAX: i64 = 2048
+var SPEC_MENTION_HASHES: [i64; 2048] = [0; 2048]
+var SPEC_MENTION_COUNT: i64 = 0
+var SPEC_MENTION_OVERFLOW: bool = false
+var SPEC_MENTION_SKIP: i64 = 0
 var SPEC_ST_COUNT: i64 = 0
 var SPEC_ST_PTRS: [i64; 256] = [0; 256]
 var SPEC_EMITTED_HASHES: [i64; 64] = [0; 64]
@@ -182,8 +197,13 @@ fn spec_reset_state() with Mut {
         SPEC_GF_POISONED[i as usize] = false
         SPEC_GF_CLONE_PTR[i as usize] = 0
         SPEC_ST_PTRS[i as usize] = 0
+        SPEC_GF_OWNER_HASH[i as usize] = 0
+        SPEC_GF_UNTARGETED_CALL[i as usize] = false
         i = i + 1
     }
+    SPEC_MENTION_COUNT = 0
+    SPEC_MENTION_OVERFLOW = false
+    SPEC_MENTION_SKIP = 0
     SPEC_GF_COUNT = 0
     SPEC_ST_COUNT = 0
     SPEC_UNSOUND_POISON = false
@@ -1096,7 +1116,7 @@ fn spec_collect_generic_fns(items: Option<Box<ItemList>>, known: SpecKnownNames)
     }
 }
 
-fn spec_collect_generic_method_items(methods: Option<Box<ItemList>>, known: SpecKnownNames) with IO, Mut, Panic, Div, Alloc {
+fn spec_collect_generic_method_items(methods: Option<Box<ItemList>>, known: SpecKnownNames, owner_hash: i64) with IO, Mut, Panic, Div, Alloc {
     match methods {
         None => {}
         Some(list) => {
@@ -1126,6 +1146,7 @@ fn spec_collect_generic_method_items(methods: Option<Box<ItemList>>, known: Spec
                                 (*p).visibility = it.visibility
                                 SPEC_GF_PTRS[slot as usize] = p as i64
                                 SPEC_GF_IS_METHOD[slot as usize] = true
+                                SPEC_GF_OWNER_HASH[slot as usize] = owner_hash
                                 SPEC_GF_NEEDED[slot as usize] = false
                                 SPEC_GF_COUNT = SPEC_GF_COUNT + 1
                             }
@@ -1134,7 +1155,7 @@ fn spec_collect_generic_method_items(methods: Option<Box<ItemList>>, known: Spec
                     None => {}
                 }
             }
-            spec_collect_generic_method_items((*list).tail, known)
+            spec_collect_generic_method_items((*list).tail, known, owner_hash)
         }
     }
 }
@@ -1146,7 +1167,7 @@ fn spec_collect_generic_methods(items: Option<Box<ItemList>>, known: SpecKnownNa
             let it = (*list).head
             if it.kind == ItemKind::ItemImpl {
                 match it.impl_def {
-                    Some(id) => spec_collect_generic_method_items((*id).methods, known)
+                    Some(id) => spec_collect_generic_method_items((*id).methods, known, spec_impl_owner_hash((*id).target_type.path))
                     None => {}
                 }
             }
@@ -2199,12 +2220,24 @@ fn spec_scan_expr(e: Expr) with IO, Mut, Panic, Div, Alloc {
                     None => {}
                 }
                 if !specialized {
-                    SPEC_GF_NEEDED[gt_idx as usize] = true
+                    // A name-only method match against an owned template is not
+                    // yet a reference to it; spec_resolve_untargeted_method_calls
+                    // marks it needed only when the owner type can reach the call.
+                    if !(e.kind == ExprKind::ExprMethodCall && SPEC_GF_OWNER_HASH[gt_idx as usize] != 0) {
+                        SPEC_GF_NEEDED[gt_idx as usize] = true
+                    }
                     if e.kind == ExprKind::ExprMethodCall {
                         // Generic method inference is not represented in the
                         // AST-only specializer. Keeping the generic method body
                         // would silently hand free type variables to lowering.
-                        SPEC_METHOD_TARG_UNSUPPORTED = true
+                        // A method template is matched here by NAME only; whether
+                        // the receiver can be its owner type is decided after the
+                        // scan (spec_resolve_untargeted_method_calls).
+                        if SPEC_GF_OWNER_HASH[gt_idx as usize] != 0 {
+                            SPEC_GF_UNTARGETED_CALL[gt_idx as usize] = true
+                        } else {
+                            SPEC_METHOD_TARG_UNSUPPORTED = true
+                        }
                     }
                 }
             } else if e.kind == ExprKind::ExprMethodCall {
@@ -2276,18 +2309,35 @@ fn spec_scan_struct_field_list_opt(opt: Option<Box<StructFieldList>>) with IO, M
     }
 }
 
-fn spec_scan_method_items(methods: Option<Box<ItemList>>) with IO, Mut, Panic, Div, Alloc {
+// The generic-method template slot for method `name` of the impl whose target
+// type hashes to `owner_hash`, or -1. Templates are keyed by bare name, so a
+// plain method that shares a template's name (HeapI64Vec::push next to
+// HeapVec<T>::push) must not be taken for it: it would be skipped by the scan
+// and dropped by the finalize pass as an unreferenced template.
+fn spec_method_template_slot(name: Name, owner_hash: i64) -> i64 with Mut, Panic, Div {
+    let slot = spec_generic_table_find(name)
+    if slot < 0 { return 0 - 1 }
+    if SPEC_GF_OWNER_HASH[slot as usize] != owner_hash { return 0 - 1 }
+    slot
+}
+
+fn spec_impl_owner_hash(target_path: AstPath) -> i64 with Mut, Panic, Div {
+    let owner = Name { buf: target_path.segments.head_buf, len: target_path.segments.head_len }
+    if owner.len > 0 { ast_name_hash(owner) } else { 0 }
+}
+
+fn spec_scan_method_items(methods: Option<Box<ItemList>>, owner_hash: i64) with IO, Mut, Panic, Div, Alloc {
     match methods {
         None => {}
         Some(list) => {
             let it = (*list).head
-            if it.kind == ItemKind::ItemFn && spec_generic_table_find(it.name) < 0 {
+            if it.kind == ItemKind::ItemFn && spec_method_template_slot(it.name, owner_hash) < 0 {
                 match it.fn_def {
                     Some(fd_box) => spec_scan_block((*fd_box).body)
                     None => {}
                 }
             }
-            spec_scan_method_items((*list).tail)
+            spec_scan_method_items((*list).tail, owner_hash)
         }
     }
 }
@@ -2297,14 +2347,14 @@ fn spec_scan_items(items: Option<Box<ItemList>>) with IO, Mut, Panic, Div, Alloc
         None => {}
         Some(list) => {
             let it = (*list).head
-            if it.kind == ItemKind::ItemFn && spec_generic_table_find(it.name) < 0 {
+            if it.kind == ItemKind::ItemFn && spec_method_template_slot(it.name, 0) < 0 {
                 match it.fn_def {
                     Some(fd_box) => spec_scan_block((*fd_box).body)
                     None => {}
                 }
             } else if it.kind == ItemKind::ItemImpl {
                 match it.impl_def {
-                    Some(id) => spec_scan_method_items((*id).methods)
+                    Some(id) => spec_scan_method_items((*id).methods, spec_impl_owner_hash((*id).target_type.path))
                     None => {}
                 }
             }
@@ -2432,14 +2482,14 @@ fn spec_finalize_fn_instances(slot: i64, rest: Option<Box<ItemList>>) -> Option<
 //   - multiple instances: emit all clones and rewrite each call to its symbol;
 //   - never referenced: drop it so the checker never sees a body with free
 //     type vars.
-fn spec_finalize_method_items(methods: Option<Box<ItemList>>) -> Option<Box<ItemList>> with Mut, Panic, Div, Alloc {
+fn spec_finalize_method_items(methods: Option<Box<ItemList>>, owner_hash: i64) -> Option<Box<ItemList>> with Mut, Panic, Div, Alloc {
     match methods {
         None => None
         Some(list) => {
             let it = (*list).head
-            let rest = spec_finalize_method_items((*list).tail)
+            let rest = spec_finalize_method_items((*list).tail, owner_hash)
             if it.kind == ItemKind::ItemFn {
-                let gt_idx = spec_generic_table_find(it.name)
+                let gt_idx = spec_method_template_slot(it.name, owner_hash)
                 if gt_idx >= 0 {
                     if SPEC_GF_POISONED[gt_idx as usize] || SPEC_GF_NEEDED[gt_idx as usize] {
                         return Some(Box::new(ItemList { head: it, tail: rest }))
@@ -2459,7 +2509,7 @@ fn spec_finalize_items(items: Option<Box<ItemList>>) -> Option<Box<ItemList>> wi
             let it = (*list).head
             let rest = spec_finalize_items((*list).tail)
             if it.kind == ItemKind::ItemFn {
-                let gt_idx = spec_generic_table_find(it.name)
+                let gt_idx = spec_method_template_slot(it.name, 0)
                 if gt_idx >= 0 {
                     if SPEC_GF_POISONED[gt_idx as usize] || SPEC_GF_NEEDED[gt_idx as usize] {
                         return Some(Box::new(ItemList { head: it, tail: rest }))
@@ -2472,7 +2522,7 @@ fn spec_finalize_items(items: Option<Box<ItemList>>) -> Option<Box<ItemList>> wi
                         let ip = heap_alloc(16384) as *mut SpecImplDefStage
                         let tmp_id = (*id)
                         (*ip).id = tmp_id
-                        (*ip).id.methods = spec_finalize_method_items((*ip).id.methods)
+                        (*ip).id.methods = spec_finalize_method_items((*ip).id.methods, spec_impl_owner_hash((*ip).id.target_type.path))
                         var out_it = it
                         out_it.impl_def = Some(Box::new((*ip).id))
                         return Some(Box::new(ItemList { head: out_it, tail: rest }))
@@ -2522,7 +2572,244 @@ fn spec_trace_out_items(items: Option<Box<ItemList>>) with IO, Mut, Panic, Div {
 
 // Shared tail of both specialize_generics and specialize_generics_multi,
 // after their own module-registration + discovery-scan setup has run.
+// ============================================================
+// Owner-type mentions (see SPEC_GF_UNTARGETED_CALL)
+// ============================================================
+// Every path segment and type name written anywhere in the program, except
+// inside `impl Owner { .. }` and `struct Owner { .. }` for the owner being
+// checked (SPEC_MENTION_SKIP). Conservative by construction: a name counted that could not
+// actually produce a value only keeps the turbofish requirement.
+
+fn spec_mention_note(n: Name) with Mut, Panic, Div {
+    if n.len <= 0 { return }
+    let h = ast_name_hash(n)
+    var i: i64 = 0
+    while i < SPEC_MENTION_COUNT {
+        if SPEC_MENTION_HASHES[i as usize] == h { return }
+        i = i + 1
+    }
+    if SPEC_MENTION_COUNT >= SPEC_MENTION_MAX {
+        SPEC_MENTION_OVERFLOW = true
+        return
+    }
+    SPEC_MENTION_HASHES[SPEC_MENTION_COUNT as usize] = h
+    SPEC_MENTION_COUNT = SPEC_MENTION_COUNT + 1
+}
+
+fn spec_mention_has(h: i64) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < SPEC_MENTION_COUNT {
+        if SPEC_MENTION_HASHES[i as usize] == h { return true }
+        i = i + 1
+    }
+    false
+}
+
+fn spec_mention_string_list(sl: StringList) with Mut, Panic, Div {
+    spec_mention_note(Name { buf: sl.head_buf, len: sl.head_len })
+    match sl.tail {
+        Some(rest) => spec_mention_string_list(*rest),
+        None => {}
+    }
+}
+
+fn spec_mention_path(path: AstPath) with Mut, Panic, Div {
+    if path.seg_count <= 0 { return }
+    spec_mention_string_list(path.segments)
+}
+
+fn spec_mention_type_opt(opt: Option<Box<TypeExpr>>) with Mut, Panic, Div {
+    match opt {
+        Some(t) => spec_mention_type(*t),
+        None => {}
+    }
+}
+
+fn spec_mention_type(te: TypeExpr) with Mut, Panic, Div {
+    spec_mention_path(te.path)
+    spec_mention_type_opt(te.inner)
+    spec_mention_type_list_opt(te.type_args)
+}
+
+fn spec_mention_type_list_opt(opt: Option<Box<TypeExprList>>) with Mut, Panic, Div {
+    match opt {
+        Some(list) => {
+            spec_mention_type((*list).head)
+            spec_mention_type_list_opt((*list).tail)
+        }
+        None => {}
+    }
+}
+
+fn spec_mention_expr_opt(opt: Option<Box<Expr>>) with Mut, Panic, Div {
+    match opt {
+        Some(b) => spec_mention_expr(*b),
+        None => {}
+    }
+}
+
+fn spec_mention_expr(e: Expr) with Mut, Panic, Div {
+    spec_mention_path(e.path)
+    spec_mention_type_opt(e.cast_type)
+    spec_mention_type_list_opt(e.type_args)
+    spec_mention_expr_opt(e.left)
+    spec_mention_expr_opt(e.right)
+    spec_mention_block_opt(e.block)
+    spec_mention_expr_opt(e.else_expr)
+    spec_mention_expr_list_opt(e.args)
+    spec_mention_arm_list_opt(e.arms)
+    spec_mention_field_init_list_opt(e.fields)
+    spec_mention_block_opt(e.handler_block)
+    spec_mention_expr_opt(e.closure_body)
+}
+
+fn spec_mention_expr_list_opt(opt: Option<Box<ExprList>>) with Mut, Panic, Div {
+    match opt {
+        Some(list) => {
+            spec_mention_expr((*list).head)
+            spec_mention_expr_list_opt((*list).tail)
+        }
+        None => {}
+    }
+}
+
+fn spec_mention_arm_list_opt(opt: Option<Box<MatchArmList>>) with Mut, Panic, Div {
+    match opt {
+        Some(list) => {
+            spec_mention_expr_opt((*list).head.guard)
+            spec_mention_expr((*list).head.body)
+            spec_mention_arm_list_opt((*list).tail)
+        }
+        None => {}
+    }
+}
+
+fn spec_mention_field_init_list_opt(opt: Option<Box<StructFieldList>>) with Mut, Panic, Div {
+    match opt {
+        Some(list) => {
+            spec_mention_expr((*list).head.value)
+            spec_mention_field_init_list_opt((*list).tail)
+        }
+        None => {}
+    }
+}
+
+fn spec_mention_block_opt(opt: Option<Box<Block>>) with Mut, Panic, Div {
+    match opt {
+        Some(b) => spec_mention_stmt_list_opt((*b).stmts),
+        None => {}
+    }
+}
+
+fn spec_mention_stmt_list_opt(opt: Option<Box<StmtList>>) with Mut, Panic, Div {
+    match opt {
+        Some(list) => {
+            spec_mention_type_opt((*list).head.ty)
+            spec_mention_expr_opt((*list).head.expr)
+            spec_mention_expr_opt((*list).head.target)
+            spec_mention_stmt_list_opt((*list).tail)
+        }
+        None => {}
+    }
+}
+
+fn spec_mention_params_opt(opt: Option<Box<ParamList>>) with Mut, Panic, Div {
+    match opt {
+        Some(list) => {
+            spec_mention_type((*list).head.ty)
+            spec_mention_params_opt((*list).tail)
+        }
+        None => {}
+    }
+}
+
+fn spec_mention_fn_def(fd: FnDef) with Mut, Panic, Div {
+    spec_mention_params_opt(fd.params)
+    spec_mention_type_opt(fd.return_type)
+    spec_mention_stmt_list_opt(fd.body.stmts)
+}
+
+fn spec_mention_field_defs_opt(opt: Option<Box<FieldDefList>>) with Mut, Panic, Div {
+    match opt {
+        Some(list) => {
+            spec_mention_type((*list).head.ty)
+            spec_mention_field_defs_opt((*list).tail)
+        }
+        None => {}
+    }
+}
+
+fn spec_mention_items(items: Option<Box<ItemList>>) with Mut, Panic, Div {
+    match items {
+        None => {}
+        Some(list) => {
+            let it = (*list).head
+            if it.kind == ItemKind::ItemFn {
+                match it.fn_def {
+                    Some(fd) => spec_mention_fn_def(*fd),
+                    None => {}
+                }
+            } else if it.kind == ItemKind::ItemImpl {
+                match it.impl_def {
+                    Some(id) => {
+                        let owner = Name { buf: (*id).target_type.path.segments.head_buf, len: (*id).target_type.path.segments.head_len }
+                        let skip_self = owner.len > 0 && ast_name_hash(owner) == SPEC_MENTION_SKIP
+                        if !skip_self {
+                            spec_mention_type((*id).target_type)
+                            spec_mention_items((*id).methods)
+                        }
+                    }
+                    None => {}
+                }
+            } else if it.kind == ItemKind::ItemStruct {
+                if ast_name_hash(it.name) != SPEC_MENTION_SKIP {
+                    match it.struct_def {
+                        Some(sd) => spec_mention_field_defs_opt((*sd).fields),
+                        None => {}
+                    }
+                }
+            } else if it.kind == ItemKind::ItemTypeAlias {
+                spec_mention_type_opt(it.type_alias_ty)
+            }
+            spec_mention_items((*list).tail)
+        }
+    }
+}
+
+// A name-only match of a turbofish-less method call against a generic method
+// template is an error only when the template's owner type is named somewhere
+// a value of it could come from. Otherwise the call is a plain method of
+// another type (HeapI64Vec::push vs HeapVec<T>::push) and the checker, which
+// sees the receiver, binds it.
+fn spec_resolve_untargeted_method_calls(items: Option<Box<ItemList>>) with IO, Mut, Panic, Div {
+    var slot: i64 = 0
+    while slot < SPEC_GF_COUNT {
+        if SPEC_GF_UNTARGETED_CALL[slot as usize] {
+            let owner = SPEC_GF_OWNER_HASH[slot as usize]
+            SPEC_MENTION_COUNT = 0
+            SPEC_MENTION_OVERFLOW = false
+            SPEC_MENTION_SKIP = owner
+            spec_mention_items(items)
+            SPEC_MENTION_SKIP = 0
+            let named_elsewhere = SPEC_MENTION_OVERFLOW || spec_mention_has(owner)
+            if named_elsewhere {
+                SPEC_GF_NEEDED[slot as usize] = true
+                SPEC_METHOD_TARG_UNSUPPORTED = true
+            }
+            if spec_trace_enabled() {
+                print("specializer: untargeted method slot=")
+                print_int(slot)
+                print(" owner_named_elsewhere=")
+                print_int(if named_elsewhere { 1 } else { 0 })
+                print("\n")
+            }
+        }
+        slot = slot + 1
+    }
+}
+
 fn spec_finish_generics_after_scan(items: Option<Box<ItemList>>) -> Option<Box<ItemList>> with IO, Mut, Panic, Div, Alloc {
+    spec_resolve_untargeted_method_calls(items)
     var slot: i64 = 0
     while slot < SPEC_GF_COUNT {
         if SPEC_GF_INST_COUNT[slot as usize] > 1 && SPEC_GF_NEEDED[slot as usize] {

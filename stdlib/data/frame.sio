@@ -1,234 +1,263 @@
-// stdlib/data/frame.d
-// DataFrame - Tabular Data with Epistemic Integration
+// stdlib/data/frame.sio
+// DataFrame — tabular data with epistemic columns, on fixed-capacity storage.
 //
-// A DataFrame holds named columns of different types. This implementation
-// uses a type-erased column approach where each column is stored separately.
+// A DataFrame holds up to FRAME_MAX_COLS named columns of FRAME_MAX_ROWS
+// rows each. A Column stores its values in fixed buffers ([T; 64]) with an
+// explicit `len`; one buffer is used according to `dtype`:
+//
+//   0 float  float_data          1 int   int_data
+//   2 string string_data         3 bool  bool_data
+//   4 epistemic: float_data (value), uncert_data (standard uncertainty),
+//     conf_data (confidence in [0, 1])
+//
+// There are no growable arrays. Inputs are passed as a [T; 64] buffer plus a
+// length, the same convention as stats::validation; results are new frames.
+// String cells are FrameStr values (a struct holding one string), not bare
+// strings: on Madaros native-v2 a store into a `[string; N]` element
+// segfaults and a load reads the pointer as an integer (measured 2026-10-30),
+// while a string inside a struct element round-trips.
+//
+// Fail closed, never truncate:
+//   - a column built from len < 0 or len > FRAME_MAX_ROWS panics;
+//   - dataframe_add_column returns a status, and leaves the frame unchanged,
+//     when the frame is full (FRAME_ERR_COL_CAPACITY) or the column's length
+//     differs from the frame's row count (FRAME_ERR_LENGTH_MISMATCH);
+//   - a lookup by a name that is absent, or by an index out of range, panics
+//     (dataframe_has_column / dataframe_column_index test first) instead of
+//     returning an empty column or a 0.0 that looks like data;
+//   - dataframe_filter panics on a mask whose length is not the row count.
+// Slicing clamps its end to the row count: [start, end) beyond the data is the
+// data that exists, as for any range.
 
-extern "C" {
-    fn sqrt(x: f64) -> f64;
+fn frm_sqrt(x: f64) -> f64 with Mut, Div {
+    if x <= 0.0 { return 0.0 }
+    // Range reduction to [1, 4), then Newton (exact to the last bits).
+    var v = x
+    var scale = 1.0
+    while v < 1.0 { v = v * 4.0; scale = scale * 0.5 }
+    while v >= 4.0 { v = v * 0.25; scale = scale * 2.0 }
+    var y = 1.5
+    var i = 0
+    while i < 8 { y = 0.5 * (y + v / y); i = i + 1 }
+    y * scale
 }
 
-fn frm_sqrt_f64(x: f64) -> f64 {
-    if x < 0.0 { return 0.0 }
-    return sqrt(x)
+pub const FRAME_MAX_ROWS: i64 = 64
+pub const FRAME_MAX_COLS: i64 = 8
+
+pub const FRAME_OK: i64 = 0
+pub const FRAME_ERR_COL_CAPACITY: i64 = 1
+pub const FRAME_ERR_LENGTH_MISMATCH: i64 = 2
+
+// One string cell (see the header for why strings are wrapped).
+pub struct FrameStr {
+    pub text: string,
 }
 
+pub fn frame_str(text: string) -> FrameStr { FrameStr { text: text } }
+
+pub const DTYPE_FLOAT: i32 = 0
+pub const DTYPE_INT: i32 = 1
+pub const DTYPE_STRING: i32 = 2
+pub const DTYPE_BOOL: i32 = 3
+pub const DTYPE_EPISTEMIC: i32 = 4
+
 // ============================================================================
-// COLUMN TYPE - Type-erased column storage
+// COLUMN
 // ============================================================================
 
-// Column types: 0=Float, 1=Int, 2=String, 3=Bool, 4=Epistemic
 pub struct Column {
-    pub name: String,
-    pub dtype: i32,           // Type discriminator
-    pub float_data: [f64],
-    pub int_data: [i64],
-    pub string_data: [String],
-    pub bool_data: [bool],
-    // Epistemic data
-    pub uncert_data: [f64],   // Uncertainties (for epistemic)
-    pub conf_data: [f64],     // Confidences (for epistemic)
+    pub name: string,
+    pub dtype: i32,
+    pub len: i64,
+    pub float_data: [f64; 64],
+    pub int_data: [i64; 64],
+    pub string_data: [FrameStr; 64],
+    pub bool_data: [bool; 64],
+    pub uncert_data: [f64; 64],
+    pub conf_data: [f64; 64],
 }
 
-pub fn column_float(name: String, data: [f64]) -> Column {
-    var empty_i: [i64] = []
-    var empty_s: [String] = []
-    var empty_b: [bool] = []
-    var empty_u: [f64] = []
-    var empty_c: [f64] = []
+fn frm_column_empty(name: string, dtype: i32, len: i64) -> Column with Panic {
+    if len < 0 || len > FRAME_MAX_ROWS {
+        panic("data::frame: column length must be in 0..FRAME_MAX_ROWS")
+    }
     Column {
         name: name,
-        dtype: 0,
-        float_data: data,
-        int_data: empty_i,
-        string_data: empty_s,
-        bool_data: empty_b,
-        uncert_data: empty_u,
-        conf_data: empty_c,
+        dtype: dtype,
+        len: len,
+        float_data: [0.0; 64],
+        int_data: [0; 64],
+        string_data: [FrameStr { text: "" }; 64],
+        bool_data: [false; 64],
+        uncert_data: [0.0; 64],
+        conf_data: [0.0; 64],
     }
 }
 
-pub fn column_int(name: String, data: [i64]) -> Column {
-    var empty_f: [f64] = []
-    var empty_s: [String] = []
-    var empty_b: [bool] = []
-    var empty_u: [f64] = []
-    var empty_c: [f64] = []
-    Column {
-        name: name,
-        dtype: 1,
-        float_data: empty_f,
-        int_data: data,
-        string_data: empty_s,
-        bool_data: empty_b,
-        uncert_data: empty_u,
-        conf_data: empty_c,
+pub fn column_float(name: string, data: &[f64; 64], len: i64) -> Column with Mut, Panic {
+    var c = frm_column_empty(name, DTYPE_FLOAT, len)
+    var i: i64 = 0
+    while i < len { c.float_data[i] = data[i]; i = i + 1 }
+    c
+}
+
+pub fn column_int(name: string, data: &[i64; 64], len: i64) -> Column with Mut, Panic {
+    var c = frm_column_empty(name, DTYPE_INT, len)
+    var i: i64 = 0
+    while i < len { c.int_data[i] = data[i]; i = i + 1 }
+    c
+}
+
+pub fn column_string(name: string, data: &[FrameStr; 64], len: i64) -> Column with Mut, Panic {
+    var c = frm_column_empty(name, DTYPE_STRING, len)
+    var i: i64 = 0
+    while i < len { c.string_data[i] = data[i]; i = i + 1 }
+    c
+}
+
+pub fn column_bool(name: string, data: &[bool; 64], len: i64) -> Column with Mut, Panic {
+    var c = frm_column_empty(name, DTYPE_BOOL, len)
+    var i: i64 = 0
+    while i < len { c.bool_data[i] = data[i]; i = i + 1 }
+    c
+}
+
+pub fn column_epistemic(name: string, values: &[f64; 64], uncerts: &[f64; 64], confs: &[f64; 64], len: i64) -> Column with Mut, Panic {
+    var c = frm_column_empty(name, DTYPE_EPISTEMIC, len)
+    var i: i64 = 0
+    while i < len {
+        c.float_data[i] = values[i]
+        c.uncert_data[i] = uncerts[i]
+        c.conf_data[i] = confs[i]
+        i = i + 1
     }
+    c
 }
 
-pub fn column_string(name: String, data: [String]) -> Column {
-    var empty_f: [f64] = []
-    var empty_i: [i64] = []
-    var empty_b: [bool] = []
-    var empty_u: [f64] = []
-    var empty_c: [f64] = []
-    Column {
-        name: name,
-        dtype: 2,
-        float_data: empty_f,
-        int_data: empty_i,
-        string_data: data,
-        bool_data: empty_b,
-        uncert_data: empty_u,
-        conf_data: empty_c,
-    }
+pub fn column_len(col: &Column) -> i64 { col.len }
+
+// Cell i of a string column; panics outside 0..len or on another dtype.
+pub fn column_string_at(col: &Column, i: i64) -> string with Panic {
+    if col.dtype != DTYPE_STRING { panic("column_string_at: column is not string") }
+    if i < 0 || i >= col.len { panic("column_string_at: row out of range") }
+    col.string_data[i].text
 }
 
-pub fn column_bool(name: String, data: [bool]) -> Column {
-    var empty_f: [f64] = []
-    var empty_i: [i64] = []
-    var empty_s: [String] = []
-    var empty_u: [f64] = []
-    var empty_c: [f64] = []
-    Column {
-        name: name,
-        dtype: 3,
-        float_data: empty_f,
-        int_data: empty_i,
-        string_data: empty_s,
-        bool_data: data,
-        uncert_data: empty_u,
-        conf_data: empty_c,
-    }
-}
-
-pub fn column_epistemic(name: String, values: [f64], uncerts: [f64], confs: [f64]) -> Column {
-    var empty_i: [i64] = []
-    var empty_s: [String] = []
-    var empty_b: [bool] = []
-    Column {
-        name: name,
-        dtype: 4,
-        float_data: values,
-        int_data: empty_i,
-        string_data: empty_s,
-        bool_data: empty_b,
-        uncert_data: uncerts,
-        conf_data: confs,
-    }
-}
-
-pub fn column_len(col: Column) -> usize {
-    if col.dtype == 0 { return col.float_data.len() }
-    if col.dtype == 1 { return col.int_data.len() }
-    if col.dtype == 2 { return col.string_data.len() }
-    if col.dtype == 3 { return col.bool_data.len() }
-    if col.dtype == 4 { return col.float_data.len() }
-    0
-}
-
-pub fn column_dtype_str(col: Column) -> String {
-    if col.dtype == 0 { return "float" }
-    if col.dtype == 1 { return "int" }
-    if col.dtype == 2 { return "string" }
-    if col.dtype == 3 { return "bool" }
-    if col.dtype == 4 { return "epistemic" }
+pub fn column_dtype_str(col: &Column) -> string {
+    if col.dtype == DTYPE_FLOAT { return "float" }
+    if col.dtype == DTYPE_INT { return "int" }
+    if col.dtype == DTYPE_STRING { return "string" }
+    if col.dtype == DTYPE_BOOL { return "bool" }
+    if col.dtype == DTYPE_EPISTEMIC { return "epistemic" }
     "unknown"
 }
 
-pub fn column_is_numeric(col: Column) -> bool {
-    col.dtype == 0 || col.dtype == 1 || col.dtype == 4
+pub fn column_is_numeric(col: &Column) -> bool {
+    col.dtype == DTYPE_FLOAT || col.dtype == DTYPE_INT || col.dtype == DTYPE_EPISTEMIC
+}
+
+// Rows [start, end) of a column (end clamped to len).
+fn frm_column_slice(col: &Column, start: i64, end: i64) -> Column with Mut, Panic {
+    let e = if end < col.len { end } else { col.len }
+    let s = if start < 0 { 0 } else { start }
+    let n = if e > s { e - s } else { 0 }
+    var c = frm_column_empty(col.name, col.dtype, n)
+    var j: i64 = 0
+    while j < n {
+        c.float_data[j] = col.float_data[s + j]
+        c.int_data[j] = col.int_data[s + j]
+        c.string_data[j] = col.string_data[s + j]
+        c.bool_data[j] = col.bool_data[s + j]
+        c.uncert_data[j] = col.uncert_data[s + j]
+        c.conf_data[j] = col.conf_data[s + j]
+        j = j + 1
+    }
+    c
 }
 
 // ============================================================================
-// DATAFRAME TYPE
+// DATAFRAME
 // ============================================================================
 
 pub struct DataFrame {
-    pub columns: [Column],
-    pub index_name: String,
+    pub columns: [Column; 8],
+    pub ncols: i64,
+    pub index_name: string,
 }
 
-pub fn dataframe_new() -> DataFrame {
-    var empty: [Column] = []
-    DataFrame { columns: empty, index_name: "" }
+pub fn dataframe_new() -> DataFrame with Panic {
+    let blank = frm_column_empty("", DTYPE_FLOAT, 0)
+    DataFrame { columns: [blank; 8], ncols: 0, index_name: "" }
 }
 
-pub fn dataframe_ncols(df: DataFrame) -> usize {
-    df.columns.len()
+pub fn dataframe_ncols(df: &DataFrame) -> i64 { df.ncols }
+
+pub fn dataframe_nrows(df: &DataFrame) -> i64 {
+    if df.ncols == 0 { return 0 }
+    df.columns[0].len
 }
 
-pub fn dataframe_nrows(df: DataFrame) -> usize {
-    if df.columns.len() == 0 { return 0 }
-    column_len(df.columns[0])
+pub fn dataframe_shape(df: &DataFrame) -> (i64, i64) {
+    (dataframe_nrows(df), df.ncols)
 }
 
-pub fn dataframe_shape(df: DataFrame) -> (usize, usize) {
-    (dataframe_nrows(df), dataframe_ncols(df))
+// Append a column. Returns FRAME_OK, or an error status with the frame
+// unchanged: FRAME_ERR_COL_CAPACITY when it already holds FRAME_MAX_COLS
+// columns, FRAME_ERR_LENGTH_MISMATCH when the column's length is not the
+// frame's row count (the first column sets the row count).
+pub fn dataframe_add_column(df: &!DataFrame, col: &Column) -> i64 with Mut {
+    if df.ncols >= FRAME_MAX_COLS { return FRAME_ERR_COL_CAPACITY }
+    if df.ncols > 0 && col.len != df.columns[0].len { return FRAME_ERR_LENGTH_MISMATCH }
+    df.columns[df.ncols] = *col
+    df.ncols = df.ncols + 1
+    FRAME_OK
 }
 
-pub fn dataframe_add_column(df: DataFrame, col: Column) -> DataFrame {
-    var cols = df.columns
-    cols.push(col)
-    DataFrame { columns: cols, index_name: df.index_name }
+pub fn dataframe_column_name(df: &DataFrame, idx: i64) -> string with Panic {
+    if idx < 0 || idx >= df.ncols { panic("dataframe_column_name: index out of range") }
+    df.columns[idx].name
 }
 
-pub fn dataframe_column_names(df: DataFrame) -> [String] {
-    var names: [String] = []
-    var i: usize = 0
-    while i < df.columns.len() {
-        names.push(df.columns[i].name)
+// Index of the first column with this name, or -1.
+pub fn dataframe_column_index(df: &DataFrame, name: string) -> i64 with Mut {
+    var i: i64 = 0
+    while i < df.ncols {
+        if df.columns[i].name == name { return i }
         i = i + 1
     }
-    names
+    0 - 1
 }
 
-// Get column by name
-pub fn dataframe_get_column(df: DataFrame, name: String) -> Column {
-    var i: usize = 0
-    while i < df.columns.len() {
-        if df.columns[i].name == name {
-            return df.columns[i]
-        }
-        i = i + 1
-    }
-    // Return empty column if not found
-    var empty: [f64] = []
-    column_float("", empty)
+pub fn dataframe_has_column(df: &DataFrame, name: string) -> bool with Mut {
+    dataframe_column_index(df, name) >= 0
 }
 
-// Get column by index
-pub fn dataframe_get_column_idx(df: DataFrame, idx: usize) -> Column {
-    if idx < df.columns.len() {
-        return df.columns[idx]
-    }
-    var empty: [f64] = []
-    column_float("", empty)
+pub fn dataframe_get_column_idx(df: &DataFrame, idx: i64) -> Column with Panic {
+    if idx < 0 || idx >= df.ncols { panic("dataframe_get_column_idx: index out of range") }
+    df.columns[idx]
 }
 
-// Check if column exists
-pub fn dataframe_has_column(df: DataFrame, name: String) -> bool {
-    var i: usize = 0
-    while i < df.columns.len() {
-        if df.columns[i].name == name {
-            return true
-        }
-        i = i + 1
-    }
-    false
+// Column by name; panics when absent.
+pub fn dataframe_get_column(df: &DataFrame, name: string) -> Column with Mut, Panic {
+    let i = dataframe_column_index(df, name)
+    if i < 0 { panic("dataframe_get_column: no column of that name") }
+    df.columns[i]
 }
 
-// Drop column by name
-pub fn dataframe_drop_column(df: DataFrame, name: String) -> DataFrame {
-    var new_cols: [Column] = []
-    var i: usize = 0
-    while i < df.columns.len() {
+// Copy without every column of this name (an absent name copies all).
+pub fn dataframe_drop_column(df: &DataFrame, name: string) -> DataFrame with Mut, Panic {
+    var out = dataframe_new()
+    out.index_name = df.index_name
+    var i: i64 = 0
+    while i < df.ncols {
         if df.columns[i].name != name {
-            new_cols.push(df.columns[i])
+            out.columns[out.ncols] = df.columns[i]
+            out.ncols = out.ncols + 1
         }
         i = i + 1
     }
-    DataFrame { columns: new_cols, index_name: df.index_name }
+    out
 }
 
 // ============================================================================
@@ -236,370 +265,223 @@ pub fn dataframe_drop_column(df: DataFrame, name: String) -> DataFrame {
 // ============================================================================
 
 pub struct Row {
-    pub column_names: [String],
-    pub float_values: [f64],
-    pub int_values: [i64],
-    pub string_values: [String],
-    pub bool_values: [bool],
-    pub dtypes: [i32],
+    pub ncols: i64,
+    pub column_names: [FrameStr; 8],
+    pub dtypes: [i32; 8],
+    pub float_values: [f64; 8],    // float and epistemic columns (the value)
+    pub int_values: [i64; 8],
+    pub string_values: [FrameStr; 8],
+    pub bool_values: [bool; 8],
 }
 
-pub fn dataframe_get_row(df: DataFrame, row_idx: usize) -> Row {
-    var names: [String] = []
-    var floats: [f64] = []
-    var ints: [i64] = []
-    var strings: [String] = []
-    var bools: [bool] = []
-    var types: [i32] = []
-
-    var i: usize = 0
-    while i < df.columns.len() {
-        let col = df.columns[i]
-        names.push(col.name)
-        types.push(col.dtype)
-
-        if col.dtype == 0 {
-            if row_idx < col.float_data.len() {
-                floats.push(col.float_data[row_idx])
-            } else {
-                floats.push(0.0)
-            }
-            ints.push(0)
-            strings.push("")
-            bools.push(false)
-        } else if col.dtype == 1 {
-            floats.push(0.0)
-            if row_idx < col.int_data.len() {
-                ints.push(col.int_data[row_idx])
-            } else {
-                ints.push(0)
-            }
-            strings.push("")
-            bools.push(false)
-        } else if col.dtype == 2 {
-            floats.push(0.0)
-            ints.push(0)
-            if row_idx < col.string_data.len() {
-                strings.push(col.string_data[row_idx])
-            } else {
-                strings.push("")
-            }
-            bools.push(false)
-        } else if col.dtype == 3 {
-            floats.push(0.0)
-            ints.push(0)
-            strings.push("")
-            if row_idx < col.bool_data.len() {
-                bools.push(col.bool_data[row_idx])
-            } else {
-                bools.push(false)
-            }
-        } else if col.dtype == 4 {
-            // Epistemic: return value as float
-            if row_idx < col.float_data.len() {
-                floats.push(col.float_data[row_idx])
-            } else {
-                floats.push(0.0)
-            }
-            ints.push(0)
-            strings.push("")
-            bools.push(false)
-        }
-
+// Row r of every column; panics when r is not in 0..nrows.
+pub fn dataframe_get_row(df: &DataFrame, r: i64) -> Row with Mut, Panic {
+    if r < 0 || r >= dataframe_nrows(df) { panic("dataframe_get_row: row out of range") }
+    var row = Row {
+        ncols: df.ncols,
+        column_names: [FrameStr { text: "" }; 8],
+        dtypes: [0; 8],
+        float_values: [0.0; 8],
+        int_values: [0; 8],
+        string_values: [FrameStr { text: "" }; 8],
+        bool_values: [false; 8],
+    }
+    var i: i64 = 0
+    while i < df.ncols {
+        row.column_names[i] = FrameStr { text: df.columns[i].name }
+        row.dtypes[i] = df.columns[i].dtype
+        row.float_values[i] = df.columns[i].float_data[r]
+        row.int_values[i] = df.columns[i].int_data[r]
+        row.string_values[i] = df.columns[i].string_data[r]
+        row.bool_values[i] = df.columns[i].bool_data[r]
         i = i + 1
     }
-
-    Row {
-        column_names: names,
-        float_values: floats,
-        int_values: ints,
-        string_values: strings,
-        bool_values: bools,
-        dtypes: types,
-    }
+    row
 }
 
-// Get float value from row by column name
-pub fn row_get_float(row: Row, col_name: String) -> f64 {
-    var i: usize = 0
-    while i < row.column_names.len() {
-        if row.column_names[i] == col_name {
-            return row.float_values[i]
-        }
+fn frm_row_index(row: &Row, col_name: string) -> i64 with Mut, Panic {
+    var i: i64 = 0
+    while i < row.ncols {
+        if row.column_names[i].text == col_name { return i }
         i = i + 1
     }
-    0.0
+    panic("row: no column of that name")
+    0 - 1
 }
 
-// Get string value from row by column name
-pub fn row_get_string(row: Row, col_name: String) -> String {
-    var i: usize = 0
-    while i < row.column_names.len() {
-        if row.column_names[i] == col_name {
-            return row.string_values[i]
-        }
-        i = i + 1
-    }
-    ""
+// Float (or epistemic value) of a named column; panics when absent or when
+// the column is not float or epistemic.
+pub fn row_get_float(row: &Row, col_name: string) -> f64 with Mut, Panic {
+    let i = frm_row_index(row, col_name)
+    if row.dtypes[i] != DTYPE_FLOAT && row.dtypes[i] != DTYPE_EPISTEMIC { panic("row_get_float: column is not float") }
+    row.float_values[i]
+}
+
+pub fn row_get_string(row: &Row, col_name: string) -> string with Mut, Panic {
+    let i = frm_row_index(row, col_name)
+    if row.dtypes[i] != DTYPE_STRING { panic("row_get_string: column is not string") }
+    row.string_values[i].text
 }
 
 // ============================================================================
 // SLICING / FILTERING
 // ============================================================================
 
-// Get rows by range [start, end)
-pub fn dataframe_slice(df: DataFrame, start: usize, end: usize) -> DataFrame {
-    var new_cols: [Column] = []
-    var i: usize = 0
-
-    while i < df.columns.len() {
-        let col = df.columns[i]
-
-        if col.dtype == 0 {
-            var new_data: [f64] = []
-            var j = start
-            while j < end && j < col.float_data.len() {
-                new_data.push(col.float_data[j])
-                j = j + 1
-            }
-            new_cols.push(column_float(col.name, new_data))
-        } else if col.dtype == 1 {
-            var new_data: [i64] = []
-            var j = start
-            while j < end && j < col.int_data.len() {
-                new_data.push(col.int_data[j])
-                j = j + 1
-            }
-            new_cols.push(column_int(col.name, new_data))
-        } else if col.dtype == 2 {
-            var new_data: [String] = []
-            var j = start
-            while j < end && j < col.string_data.len() {
-                new_data.push(col.string_data[j])
-                j = j + 1
-            }
-            new_cols.push(column_string(col.name, new_data))
-        } else if col.dtype == 3 {
-            var new_data: [bool] = []
-            var j = start
-            while j < end && j < col.bool_data.len() {
-                new_data.push(col.bool_data[j])
-                j = j + 1
-            }
-            new_cols.push(column_bool(col.name, new_data))
-        } else if col.dtype == 4 {
-            var vals: [f64] = []
-            var uncerts: [f64] = []
-            var confs: [f64] = []
-            var j = start
-            while j < end && j < col.float_data.len() {
-                vals.push(col.float_data[j])
-                uncerts.push(col.uncert_data[j])
-                confs.push(col.conf_data[j])
-                j = j + 1
-            }
-            new_cols.push(column_epistemic(col.name, vals, uncerts, confs))
-        }
-
+// Rows [start, end), end clamped to the row count.
+pub fn dataframe_slice(df: &DataFrame, start: i64, end: i64) -> DataFrame with Mut, Panic {
+    var out = dataframe_new()
+    out.index_name = df.index_name
+    var i: i64 = 0
+    while i < df.ncols {
+        out.columns[i] = frm_column_slice(&df.columns[i], start, end)
         i = i + 1
     }
-
-    DataFrame { columns: new_cols, index_name: df.index_name }
+    out.ncols = df.ncols
+    out
 }
 
-// Head - first n rows
-pub fn dataframe_head(df: DataFrame, n: usize) -> DataFrame {
+pub fn dataframe_head(df: &DataFrame, n: i64) -> DataFrame with Mut, Panic {
     dataframe_slice(df, 0, n)
 }
 
-// Tail - last n rows
-pub fn dataframe_tail(df: DataFrame, n: usize) -> DataFrame {
+pub fn dataframe_tail(df: &DataFrame, n: i64) -> DataFrame with Mut, Panic {
     let nrows = dataframe_nrows(df)
-    if n >= nrows {
-        return df
-    }
-    dataframe_slice(df, nrows - n, nrows)
+    let start = if n >= nrows { 0 } else { nrows - n }
+    dataframe_slice(df, start, nrows)
 }
 
-// Filter by boolean mask
-pub fn dataframe_filter(df: DataFrame, mask: [bool]) -> DataFrame {
-    var new_cols: [Column] = []
-    var i: usize = 0
-
-    while i < df.columns.len() {
+// Rows whose mask entry is true. mask_len must equal the row count.
+pub fn dataframe_filter(df: &DataFrame, mask: &[bool; 64], mask_len: i64) -> DataFrame with Mut, Panic {
+    let nrows = dataframe_nrows(df)
+    if mask_len != nrows { panic("dataframe_filter: mask length is not the row count") }
+    var out = dataframe_new()
+    out.index_name = df.index_name
+    var i: i64 = 0
+    while i < df.ncols {
         let col = df.columns[i]
-
-        if col.dtype == 0 {
-            var new_data: [f64] = []
-            var j: usize = 0
-            while j < col.float_data.len() && j < mask.len() {
-                if mask[j] {
-                    new_data.push(col.float_data[j])
-                }
-                j = j + 1
+        var c = frm_column_empty(col.name, col.dtype, 0)
+        var j: i64 = 0
+        var k: i64 = 0
+        while j < nrows {
+            if mask[j] {
+                c.float_data[k] = col.float_data[j]
+                c.int_data[k] = col.int_data[j]
+                c.string_data[k] = col.string_data[j]
+                c.bool_data[k] = col.bool_data[j]
+                c.uncert_data[k] = col.uncert_data[j]
+                c.conf_data[k] = col.conf_data[j]
+                k = k + 1
             }
-            new_cols.push(column_float(col.name, new_data))
-        } else if col.dtype == 1 {
-            var new_data: [i64] = []
-            var j: usize = 0
-            while j < col.int_data.len() && j < mask.len() {
-                if mask[j] {
-                    new_data.push(col.int_data[j])
-                }
-                j = j + 1
-            }
-            new_cols.push(column_int(col.name, new_data))
-        } else if col.dtype == 2 {
-            var new_data: [String] = []
-            var j: usize = 0
-            while j < col.string_data.len() && j < mask.len() {
-                if mask[j] {
-                    new_data.push(col.string_data[j])
-                }
-                j = j + 1
-            }
-            new_cols.push(column_string(col.name, new_data))
-        } else if col.dtype == 3 {
-            var new_data: [bool] = []
-            var j: usize = 0
-            while j < col.bool_data.len() && j < mask.len() {
-                if mask[j] {
-                    new_data.push(col.bool_data[j])
-                }
-                j = j + 1
-            }
-            new_cols.push(column_bool(col.name, new_data))
-        } else if col.dtype == 4 {
-            var vals: [f64] = []
-            var uncerts: [f64] = []
-            var confs: [f64] = []
-            var j: usize = 0
-            while j < col.float_data.len() && j < mask.len() {
-                if mask[j] {
-                    vals.push(col.float_data[j])
-                    uncerts.push(col.uncert_data[j])
-                    confs.push(col.conf_data[j])
-                }
-                j = j + 1
-            }
-            new_cols.push(column_epistemic(col.name, vals, uncerts, confs))
+            j = j + 1
         }
-
+        c.len = k
+        out.columns[i] = c
         i = i + 1
     }
-
-    DataFrame { columns: new_cols, index_name: df.index_name }
+    out.ncols = df.ncols
+    out
 }
 
 // ============================================================================
 // COLUMN OPERATIONS
 // ============================================================================
 
-// Sum of numeric column
-pub fn dataframe_col_sum(df: DataFrame, col_name: String) -> f64 {
-    let col = dataframe_get_column(df, col_name)
-    if col.dtype == 0 {
-        var total = 0.0
-        var i: usize = 0
-        while i < col.float_data.len() {
-            total = total + col.float_data[i]
-            i = i + 1
+// Sum of a numeric column; panics when absent or not numeric.
+pub fn dataframe_col_sum(df: &DataFrame, col_name: string) -> f64 with Mut, Panic {
+    let i = dataframe_column_index(df, col_name)
+    if i < 0 { panic("dataframe_col_sum: no column of that name") }
+    let col = df.columns[i]
+    if !column_is_numeric(&col) { panic("dataframe_col_sum: column is not numeric") }
+    var total = 0.0
+    var j: i64 = 0
+    while j < col.len {
+        if col.dtype == DTYPE_INT {
+            total = total + (col.int_data[j] as f64)
+        } else {
+            total = total + col.float_data[j]
         }
-        return total
+        j = j + 1
     }
-    if col.dtype == 1 {
-        var total: i64 = 0
-        var i: usize = 0
-        while i < col.int_data.len() {
-            total = total + col.int_data[i]
-            i = i + 1
-        }
-        return total as f64
-    }
-    if col.dtype == 4 {
-        var total = 0.0
-        var i: usize = 0
-        while i < col.float_data.len() {
-            total = total + col.float_data[i]
-            i = i + 1
-        }
-        return total
-    }
-    0.0
+    total
 }
 
-// Mean of numeric column
-pub fn dataframe_col_mean(df: DataFrame, col_name: String) -> f64 {
-    let col = dataframe_get_column(df, col_name)
-    let n = column_len(col)
-    if n == 0 { return 0.0 }
-    dataframe_col_sum(df, col_name) / (n as f64)
+// Mean of a numeric column; panics when absent, not numeric or empty.
+pub fn dataframe_col_mean(df: &DataFrame, col_name: string) -> f64 with Mut, Panic {
+    let sum = dataframe_col_sum(df, col_name)
+    let n = df.columns[dataframe_column_index(df, col_name)].len
+    if n == 0 { panic("dataframe_col_mean: empty column") }
+    sum / (n as f64)
 }
 
-// Epistemic mean of epistemic column (with uncertainty propagation)
 pub struct EpistemicResult {
     pub value: f64,
     pub uncertainty: f64,
     pub confidence: f64,
 }
 
-pub fn dataframe_col_mean_epistemic(df: DataFrame, col_name: String) -> EpistemicResult {
-    let col = dataframe_get_column(df, col_name)
-    let n = col.float_data.len()
-
-    if n == 0 || col.dtype != 4 {
-        return EpistemicResult { value: 0.0, uncertainty: 0.0, confidence: 0.0 }
-    }
-
-    // Calculate mean
+// Mean of an epistemic column: GUM u(mean) = sqrt(sum u_i^2) / n for
+// uncorrelated entries; confidence = the minimum confidence. Panics when the
+// column is absent, not epistemic or empty.
+pub fn dataframe_col_mean_epistemic(df: &DataFrame, col_name: string) -> EpistemicResult with Mut, Div, Panic {
+    let idx = dataframe_column_index(df, col_name)
+    if idx < 0 { panic("dataframe_col_mean_epistemic: no column of that name") }
+    let col = df.columns[idx]
+    if col.dtype != DTYPE_EPISTEMIC { panic("dataframe_col_mean_epistemic: column is not epistemic") }
+    let n = col.len
+    if n == 0 { panic("dataframe_col_mean_epistemic: empty column") }
     var sum_val = 0.0
-    var i: usize = 0
+    var sum_u2 = 0.0
+    var min_conf = 1.0
+    var i: i64 = 0
     while i < n {
         sum_val = sum_val + col.float_data[i]
+        sum_u2 = sum_u2 + col.uncert_data[i] * col.uncert_data[i]
+        if col.conf_data[i] < min_conf { min_conf = col.conf_data[i] }
         i = i + 1
     }
-    let mean_val = sum_val / (n as f64)
-
-    // GUM: u(mean)^2 = (1/n^2) * sum(u_i^2)
-    var sum_u_sq = 0.0
-    i = 0
-    while i < n {
-        let ui = col.uncert_data[i]
-        sum_u_sq = sum_u_sq + ui * ui
-        i = i + 1
+    EpistemicResult {
+        value: sum_val / (n as f64),
+        uncertainty: frm_sqrt(sum_u2) / (n as f64),
+        confidence: min_conf,
     }
-    let mean_u = frm_sqrt_f64(sum_u_sq) / (n as f64)
-
-    // Minimum confidence
-    var min_conf = 1.0
-    i = 0
-    while i < n {
-        if col.conf_data[i] < min_conf {
-            min_conf = col.conf_data[i]
-        }
-        i = i + 1
-    }
-
-    EpistemicResult { value: mean_val, uncertainty: mean_u, confidence: min_conf }
 }
 
 // ============================================================================
 // DISPLAY
 // ============================================================================
 
-pub fn dataframe_info(df: DataFrame) -> String {
-    let shape = dataframe_shape(df)
-    var result = "DataFrame: " ++ (shape.0 as String) ++ " rows x " ++ (shape.1 as String) ++ " columns\n"
-    result = result ++ "Columns:\n"
+fn frm_digit(d: i64) -> string {
+    if d == 0 { return "0" }
+    if d == 1 { return "1" }
+    if d == 2 { return "2" }
+    if d == 3 { return "3" }
+    if d == 4 { return "4" }
+    if d == 5 { return "5" }
+    if d == 6 { return "6" }
+    if d == 7 { return "7" }
+    if d == 8 { return "8" }
+    "9"
+}
 
-    var i: usize = 0
-    while i < df.columns.len() {
-        let col = df.columns[i]
-        result = result ++ "  " ++ col.name ++ " (" ++ column_dtype_str(col) ++ ")\n"
+// Decimal text of a non-negative integer.
+fn frm_int_str(v: i64) -> string with Mut {
+    if v <= 0 { return "0" }
+    var out = ""
+    var x = v
+    while x > 0 {
+        out = frm_digit(x % 10) ++ out
+        x = x / 10
+    }
+    out
+}
+
+pub fn dataframe_info(df: &DataFrame) -> string with Mut {
+    var result = "DataFrame: " ++ frm_int_str(dataframe_nrows(df)) ++ " rows x " ++ frm_int_str(df.ncols) ++ " columns\n"
+    result = result ++ "Columns:\n"
+    var i: i64 = 0
+    while i < df.ncols {
+        result = result ++ "  " ++ df.columns[i].name ++ " (" ++ column_dtype_str(&df.columns[i]) ++ ")\n"
         i = i + 1
     }
     result
 }
-
-// ============================================================================
-// TESTS
