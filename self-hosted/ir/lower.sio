@@ -25238,11 +25238,46 @@ impl Lowerer {
         }
     }
 
+    // `base[i]` where `base` is a `[string; N]` local: an array local whose
+    // scalar kind or recorded element type is string. Out of line on
+    // purpose: the same lookups written inside expr_result_is_string_ref's
+    // `match (*e).left { Some(indexed) => .. }` arm made the lean_single-built
+    // aggregate_field_identity_driver segfault at `lower_array: seed_begin`.
+    fn index_of_string_array_local_ref(self, e: &Expr) -> bool with Mut, Panic, Div, Alloc {
+        var base_name = ir_empty_name()
+        match (*e).left {
+            Some(b) => {
+                if (*b).kind != ExprKind::ExprIdent { return false }
+                base_name = (*b).name
+            }
+            None => { return false }
+        }
+        if self.lookup_local_fixed_array_len(base_name) < 0 {
+            if !self.lookup_local_struct_type_is_array_elem(base_name) {
+                return false
+            }
+        }
+        if self.lookup_local_scalar_kind(base_name) == 3 {
+            return true
+        }
+        let elem_type = self.lookup_local_struct_type(base_name)
+        lower_name_is_string_type(elem_type)
+    }
+
     fn expr_result_is_string_ref(self, e: &Expr) -> bool with Mut, Panic, Div, Alloc {
         if (*e).kind == ExprKind::ExprStringLit {
             return true
         }
         if (*e).kind == ExprKind::ExprIdent {
+            // A `[string; N]` local records its ELEMENT type ("string") in
+            // struct_types. It is an array of string pointers, not a string:
+            // classifying it as one routed `names[i]` to the raw-byte index
+            // (label 3) -- a store `names[1] = "zeta"` wrote one byte into the
+            // GC handle word (SIGSEGV) and a read yielded a byte as a char*.
+            if self.lookup_local_fixed_array_len((*e).name) >= 0
+                || self.lookup_local_struct_type_is_array_elem((*e).name) {
+                return false
+            }
             if self.lookup_local_scalar_kind((*e).name) == 3 {
                 return true
             }
@@ -25312,6 +25347,10 @@ impl Lowerer {
         // family of refusals exists to prevent. elem_type_name_id already carries
         // the declared element type; nothing read it for string-ness.
         if (*e).kind == ExprKind::ExprIndex {
+            // `names[i]` on a `[string; N]` local: the element is a string.
+            if self.index_of_string_array_local_ref(e) {
+                return true
+            }
             match (*e).left {
                 Some(indexed) => {
                     if (*indexed).kind == ExprKind::ExprFieldAccess {
@@ -25345,6 +25384,8 @@ impl Lowerer {
                             return true
                         }
                     }
+                    // `names[i]` on a `[string; N]` local or param: the element
+                    // type is the declared `string`.
                 }
                 None => {}
             }
@@ -26404,6 +26445,10 @@ impl Lowerer {
             }
             if self.index_base_elem_is_float_ref(&(*e).left) {
                 return 2
+            }
+            // `names[i]` on a `[string; N]`: a string, not the pointer word.
+            if self.expr_result_is_string_ref(e) {
+                return 3
             }
             return 1
         }
