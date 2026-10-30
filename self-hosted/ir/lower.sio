@@ -25153,6 +25153,15 @@ impl Lowerer {
             return true
         }
         if (*e).kind == ExprKind::ExprIdent {
+            // A `[string; N]` local records its ELEMENT type ("string") in
+            // struct_types. It is an array of string pointers, not a string:
+            // classifying it as one routed `names[i]` to the raw-byte index
+            // (label 3) -- a store `names[1] = "zeta"` wrote one byte into the
+            // GC handle word (SIGSEGV) and a read yielded a byte as a char*.
+            if self.lookup_local_fixed_array_len((*e).name) >= 0
+                || self.lookup_local_struct_type_is_array_elem((*e).name) {
+                return false
+            }
             if self.lookup_local_scalar_kind((*e).name) == 3 {
                 return true
             }
@@ -25254,6 +25263,18 @@ impl Lowerer {
                         if lower_name_is_string_type(ir_fn_get(&(*self.module), fn_id as usize).return_struct_name) {
                             return true
                         }
+                    }
+                    // `names[i]` on a `[string; N]` local or param: the element
+                    // type is the declared `string`.
+                    // A `[string; N]` local is bound with scalar kind 3 (string)
+                    // from its declaration; on an ARRAY local that kind
+                    // describes the elements.
+                    if (*indexed).kind == ExprKind::ExprIdent
+                        && (self.lookup_local_fixed_array_len((*indexed).name) >= 0
+                            || self.lookup_local_struct_type_is_array_elem((*indexed).name))
+                        && (self.lookup_local_scalar_kind((*indexed).name) == 3
+                            || lower_name_is_string_type(self.lookup_local_struct_type((*indexed).name))) {
+                        return true
                     }
                 }
                 None => {}
@@ -26301,6 +26322,10 @@ impl Lowerer {
             }
             if self.index_base_elem_is_float_ref(&(*e).left) {
                 return 2
+            }
+            // `names[i]` on a `[string; N]`: a string, not the pointer word.
+            if self.expr_result_is_string_ref(e) {
+                return 3
             }
             return 1
         }
