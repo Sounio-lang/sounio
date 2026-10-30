@@ -24,7 +24,9 @@ The approved design said worker pool plus GPU lock. The language has no thread p
 
 - tests/run-pass/serve_j_params: defaults, clamps, rejects, SSE bytes.
 - examples/llm_serve_j_demo: serving-loop parity with generate, usage counts, SSE golden bytes, TTFB via clock_gettime.
-- Live overlap with two curl clients plus full-compiler forge run: pending a GPU lane.
+- Live overlap on NVIDIA L4 (gpuorangefs-r770, job 20457, ExitCode 0:0): STEP1 SERVJPARAMS PASS; STEP2 greedy parity=1 SERVEDONE PASS; STEP3 health True, a-status 200 (253 B non-stream JSON with usage), b-status 200 (1210 B SSE frames ending data: [DONE]), OVERLAP-OK.
+- Session isolation on GPU: req=2 served on sess=0, req=3 on sess=1, each completion_tokens=8 finish=length; TTFB 6.9 s and 8.2 s with gpu=1.
+- GPU lane fixes: attn_fail and ll_gguf_moe_fail print, so they declare IO (E035) with propagation to callers; SSE DONE frame is 14 bytes, test and demo expectation fixed from 15; stream sends tested nw_send_all != 0 but it returns sent bytes, so each stream send closed the slot right after the headers (200 with empty body): checks are now < 0.
 
 ## Forge receipt
 
