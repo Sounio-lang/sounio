@@ -1,0 +1,122 @@
+//@ run-pass
+//@ expect-stdout: ACTIVE_BELIEF_UPDATE_PASS
+
+// epistemic::active on the flat Epistemic (val, variance, confidence 0..1000):
+// precision-weighted belief update with the Beta-posterior confidence rule,
+// action selection by expected free energy, the exploration strategies, and
+// the Klibanoff -> active bridge. Every expected number comes from the C++23
+// oracle tests/oracles/active_belief_update.cpp.
+//
+// Confidence rule (stdlib/epistemic/active.sio header): prior Beta of mean
+// c / 1000 and concentration n0 (default 2 = Beta(1, 1)); successes =
+// trunc(10 * obs_precision / prior_precision), failures = 1; new confidence =
+// round(1000 * alpha / (alpha + beta)).
+
+use epistemic::knowledge::{Epistemic, ep_new}
+use epistemic::active::*
+use epistemic::walley::{cs_neighborhood}
+use epistemic::klibanoff::{klibanoff_compose_with_active, kl_walley_ce}
+
+fn ad(a: f64, b: f64) -> f64 { if a > b { a - b } else { b - a } }
+
+fn idx_or(r: Option<usize>, fallback: i64) -> i64 {
+    match r {
+        Some(i) => i as i64,
+        None => fallback,
+    }
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var fails: i64 = 0
+
+    // A. prior N(10, 4) at c = 500, observation 12 with variance 1.
+    //    precision ratio 4 -> 40 successes; Beta(1 + 40, 1 + 1) -> 41/43.
+    let a_prior = ep_new(10.0, 4.0, 500)
+    let a = update_belief(&a_prior, 12.0, 1.0)
+    if ad(a.val, 11.6) > 1.0e-12 { println("FAIL A val"); fails = fails + 1 }
+    if ad(a.variance, 0.8) > 1.0e-12 { println("FAIL A variance"); fails = fails + 1 }
+    if a.confidence != 953 { println("FAIL A confidence"); fails = fails + 1 }
+
+    // B. prior N(1, 1) at c = 900, observation 1 with variance 4.
+    //    ratio 0.25 -> trunc(2.5) = 2 successes; Beta(1.8 + 2, 0.2 + 1) -> 0.76.
+    let b_prior = ep_new(1.0, 1.0, 900)
+    let b = update_belief(&b_prior, 1.0, 4.0)
+    if ad(b.val, 1.0) > 1.0e-12 { println("FAIL B val"); fails = fails + 1 }
+    if ad(b.variance, 0.8) > 1.0e-12 { println("FAIL B variance"); fails = fails + 1 }
+    if b.confidence != 760 { println("FAIL B confidence"); fails = fails + 1 }
+
+    // C. same as B with a prior worth 20 observations: Beta(18 + 2, 2 + 1) -> 870.
+    let c = update_belief_with_prior_strength(&b_prior, 1.0, 4.0, 20.0)
+    if c.confidence != 870 { println("FAIL C confidence"); fails = fails + 1 }
+
+    // D. the posterior map directly, and its refusal of a non-prior.
+    if beta_posterior_confidence(1000, 2.0, 0.0, 1.0) != 667 { println("FAIL D1"); fails = fails + 1 }
+    if beta_posterior_confidence(0, 2.0, 0.0, 1.0) != 0 { println("FAIL D2"); fails = fails + 1 }
+    if beta_posterior_confidence(500, 0.0, 1.0, 1.0) != 0 - 1 { println("FAIL D3"); fails = fails + 1 }
+
+    // E. sequential update over parallel slices: (1, var 1) then (2, var 0.5).
+    let obs_v = [1.0, 2.0]
+    let obs_u = [1.0, 0.5]
+    let seq_prior = ep_new(0.0, 1.0, 500)
+    let seq = update_sequential(&seq_prior, &obs_v, &obs_u)
+    if ad(seq.val, 1.25) > 1.0e-12 { println("FAIL E val"); fails = fails + 1 }
+    if ad(seq.variance, 0.25) > 1.0e-12 { println("FAIL E variance"); fails = fails + 1 }
+    if seq.confidence != 899 { println("FAIL E confidence"); fails = fails + 1 }
+
+    // F. action selection by EFE. current variance 1; reductions 0.5, 0.1, 0.9;
+    //    rewards 0, 0, 1. Totals (w = 1): -0.3466, -1.1513, -1.0527 -> 1.
+    //    With w = 2 the third total is -2.0527 -> 2.
+    let cur = ep_new(0.0, 1.0, 500)
+    let red = [0.5, 0.1, 0.9]
+    let rew = [0.0, 0.0, 1.0]
+    if idx_or(select_action_idx(&red, &rew, &cur, 1.0), 0 - 1) != 1 { println("FAIL F w1"); fails = fails + 1 }
+    if idx_or(select_action_idx(&red, &rew, &cur, 2.0), 0 - 1) != 2 { println("FAIL F w2"); fails = fails + 1 }
+    let rew_short = [0.0, 0.0]
+    if idx_or(select_action_idx(&red, &rew_short, &cur, 1.0), 0 - 1) != 0 - 1 { println("FAIL F mismatch"); fails = fails + 1 }
+    let efe = expected_free_energy(&cur, 0.1, 0.0, 1.0)
+    if ad(efe_total(&efe), 0.0 - 1.151292546497023) > 1.0e-12 { println("FAIL F efe"); fails = fails + 1 }
+
+    // G. entropy of a unit-variance Gaussian: 0.5 ln(2 pi e).
+    if ad(entropy(&cur), 1.4189385332046727) > 1.0e-12 { println("FAIL G entropy"); fails = fails + 1 }
+
+    // H. exploration: the wider of two equally confident beliefs is explored first;
+    //    with equal variance the less confident one is.
+    let arms = [ep_new(0.65, 0.01, 500), ep_new(0.60, 0.0004, 500)]
+    if exploration_priority(&arms) != 0 { println("FAIL H priority"); fails = fails + 1 }
+    if ad(exploration_score(&arms[0], 1.0), 1.5099503308531681) > 1.0e-12 { println("FAIL H score"); fails = fails + 1 }
+    let confs = [ep_new(1.0, 0.01, 900), ep_new(1.0, 0.01, 100)]
+    if exploration_priority(&confs) != 1 { println("FAIL H confidence"); fails = fails + 1 }
+    if idx_or(most_uncertain(&confs), 0 - 1) != 1 { println("FAIL H most_uncertain"); fails = fails + 1 }
+
+    // I. UCB, Thompson and epsilon-greedy.
+    let cands = [ep_new(1.0, 0.0, 500), ep_new(0.5, 1.0, 500)]
+    if idx_or(ucb_select(&cands, 1.0), 0 - 1) != 1 { println("FAIL I ucb c=1"); fails = fails + 1 }
+    if idx_or(ucb_select(&cands, 0.1), 0 - 1) != 0 { println("FAIL I ucb c=0.1"); fails = fails + 1 }
+    let zs = [0.0, 0.0 - 1.0]
+    if idx_or(thompson_select(&cands, &zs), 0 - 1) != 0 { println("FAIL I thompson"); fails = fails + 1 }
+    let z1 = [0.0]
+    if idx_or(thompson_select(&cands, &z1), 0 - 1) != 0 - 1 { println("FAIL I thompson short"); fails = fails + 1 }
+    if idx_or(epsilon_greedy(&cands, 0.1, 0.05), 0 - 1) != 1 { println("FAIL I explore"); fails = fails + 1 }
+    if idx_or(epsilon_greedy(&cands, 0.1, 0.5), 0 - 1) != 0 { println("FAIL I exploit"); fails = fails + 1 }
+
+    // J. Klibanoff bridge: reward credal set (10, eps 0.2, support [5, 15]),
+    //    lambda 1, weight 1, posterior variance 0.25 -> epistemic 0.5 ln 4.
+    //    pragmatic: walley 5 <= smooth(alpha 1) 6.5828 <= precise 9.
+    let rc = cs_neighborhood(10.0, 1.0, 0.2, 5.0, 15.0, 800)
+    let e_s = klibanoff_compose_with_active(&rc, 1.0, 1.0, &cur, 0.25, 1.0)
+    let e_p = klibanoff_compose_with_active(&rc, 0.0, 1.0, &cur, 0.25, 1.0)
+    if ad(e_s.epistemic, 0.69314718055994529) > 1.0e-12 { println("FAIL J epistemic"); fails = fails + 1 }
+    if ad(e_s.pragmatic, 6.5828429270917077) > 1.0e-9 { println("FAIL J smooth"); fails = fails + 1 }
+    if ad(e_p.pragmatic, 9.0) > 1.0e-12 { println("FAIL J precise"); fails = fails + 1 }
+    if ad(e_p.total, 0.0 - 9.6931471805599454) > 1.0e-12 { println("FAIL J total"); fails = fails + 1 }
+    let w = kl_walley_ce(&rc, 1.0)
+    if !(w <= e_s.pragmatic && e_s.pragmatic <= e_p.pragmatic) { println("FAIL J sandwich"); fails = fails + 1 }
+
+    if fails != 0 {
+        println("ACTIVE_BELIEF_UPDATE_FAIL")
+        println(fails)
+        return 1
+    }
+    println("ACTIVE_BELIEF_UPDATE_PASS")
+    0
+}
