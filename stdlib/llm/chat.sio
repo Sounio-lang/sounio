@@ -1,0 +1,448 @@
+// stdlib::llm::chat - mini-Jinja chat templates + tool-call protocol.
+//
+// Byte-buffer engine (same word-access idiom as llm::serve: no
+// pointer indexing or arithmetic in Sounio). Supported subset,
+// strict (anything else returns -1 so callers can 400):
+//   literal text (copied verbatim)
+//   {{ m.role }} {{ m.content }} {{ m['role'] }} {{ m['content'] }}
+//   {% for X in messages %} ... {% endfor %} (X any name, one level)
+//   {% if X.role == 'user' %} {% elif ... %} {% else %} {% endif %}
+//     (== and != against 'system' 'user' 'assistant' 'tool')
+// Roles are int codes: 0 system, 1 user, 2 assistant, 3 tool.
+// Message contents live packed in cbuf; offs/lens index it.
+
+fn ch_get(buf: *mut u8, i: i64) -> i64 with Mut {
+    (read_i64(buf as *mut i64, i / 8) >> ((i % 8) * 8)) & 255
+}
+
+fn ch_putb(buf: *mut u8, i: i64, v: i64) with Mut {
+    let w = read_i64(buf as *mut i64, i / 8)
+    let sh = (i % 8) * 8
+    let cleared = w & ((0 - 1) - (255 << sh))
+    write_i64(buf as *mut i64, i / 8, cleared | ((v & 255) << sh))
+}
+
+fn ch_copy(out: *mut u8, pos: i64, src: *mut u8, soff: i64, len: i64) -> i64 with Mut {
+    var i: i64 = 0
+    while i < len {
+        ch_putb(out, pos + i, ch_get(src, soff + i))
+        i = i + 1
+    }
+    pos + len
+}
+
+fn ch_is_space(c: i64) -> bool {
+    c == 32 || c == 10 || c == 13 || c == 9
+}
+
+// 2-byte needle find; -1 when absent
+fn ch_find2(hay: *mut u8, hlen: i64, from: i64, n0: i64, n1: i64) -> i64 with Mut {
+    var i = from
+    while i + 1 < hlen {
+        if ch_get(hay, i) == n0 && ch_get(hay, i + 1) == n1 { return i }
+        i = i + 1
+    }
+    0 - 1
+}
+
+// match the 6 bytes "endfor" at pos
+fn ch_at_endfor(buf: *mut u8, blen: i64, pos: i64) -> bool with Mut {
+    if pos + 6 > blen { return false }
+    ch_get(buf, pos) == 101 && ch_get(buf, pos + 1) == 110 && ch_get(buf, pos + 2) == 100 && ch_get(buf, pos + 3) == 102 && ch_get(buf, pos + 4) == 111 && ch_get(buf, pos + 5) == 114
+}
+
+// match the 8 bytes "messages" at pos
+fn ch_at_messages(buf: *mut u8, blen: i64, pos: i64) -> bool with Mut {
+    if pos + 8 > blen { return false }
+    ch_get(buf, pos) == 109 && ch_get(buf, pos + 1) == 101 && ch_get(buf, pos + 2) == 115 && ch_get(buf, pos + 3) == 115 && ch_get(buf, pos + 4) == 97 && ch_get(buf, pos + 5) == 103 && ch_get(buf, pos + 6) == 101 && ch_get(buf, pos + 7) == 115
+}
+
+// role literal at (buf, pos, len) -> code; -1 unknown
+fn ch_role_code(buf: *mut u8, blen: i64, pos: i64, len: i64) -> i64 with Mut {
+    if len == 6 && pos + 6 <= blen {
+        if ch_get(buf, pos) == 115 && ch_get(buf, pos + 1) == 121 && ch_get(buf, pos + 2) == 115 && ch_get(buf, pos + 3) == 116 && ch_get(buf, pos + 4) == 101 && ch_get(buf, pos + 5) == 109 { return 0 }
+    }
+    if len == 4 && pos + 4 <= blen {
+        if ch_get(buf, pos) == 117 && ch_get(buf, pos + 1) == 115 && ch_get(buf, pos + 2) == 101 && ch_get(buf, pos + 3) == 114 { return 1 }
+        if ch_get(buf, pos) == 116 && ch_get(buf, pos + 1) == 111 && ch_get(buf, pos + 2) == 111 && ch_get(buf, pos + 3) == 108 { return 3 }
+    }
+    if len == 9 && pos + 9 <= blen {
+        if ch_get(buf, pos) == 97 && ch_get(buf, pos + 1) == 115 && ch_get(buf, pos + 2) == 115 && ch_get(buf, pos + 3) == 105 && ch_get(buf, pos + 4) == 115 && ch_get(buf, pos + 5) == 116 && ch_get(buf, pos + 6) == 97 && ch_get(buf, pos + 7) == 110 && ch_get(buf, pos + 8) == 116 { return 2 }
+    }
+    0 - 1
+}
+
+// write role bytes; returns new pos
+fn ch_role_str(out: *mut u8, pos: i64, code: i64) -> i64 with Mut {
+    if code == 0 {
+        ch_putb(out, pos, 115)
+        ch_putb(out, pos + 1, 121)
+        ch_putb(out, pos + 2, 115)
+        ch_putb(out, pos + 3, 116)
+        ch_putb(out, pos + 4, 101)
+        ch_putb(out, pos + 5, 109)
+        return pos + 6
+    }
+    if code == 1 {
+        ch_putb(out, pos, 117)
+        ch_putb(out, pos + 1, 115)
+        ch_putb(out, pos + 2, 101)
+        ch_putb(out, pos + 3, 114)
+        return pos + 4
+    }
+    if code == 2 {
+        ch_putb(out, pos, 97)
+        ch_putb(out, pos + 1, 115)
+        ch_putb(out, pos + 2, 115)
+        ch_putb(out, pos + 3, 105)
+        ch_putb(out, pos + 4, 115)
+        ch_putb(out, pos + 5, 116)
+        ch_putb(out, pos + 6, 97)
+        ch_putb(out, pos + 7, 110)
+        ch_putb(out, pos + 8, 116)
+        return pos + 9
+    }
+    ch_putb(out, pos, 116)
+    ch_putb(out, pos + 1, 111)
+    ch_putb(out, pos + 2, 111)
+    ch_putb(out, pos + 3, 108)
+    pos + 4
+}
+
+// compare template slice [p, q) with loopvar bytes; true when equal
+fn ch_is_loopvar(tpl: *mut u8, tplen: i64, p: i64, q: i64, lvo: i64, lvlen: i64) -> bool with Mut {
+    if q - p != lvlen { return false }
+    var i: i64 = 0
+    while i < lvlen {
+        if ch_get(tpl, p + i) != ch_get(tpl, lvo + i) { return false }
+        i = i + 1
+    }
+    true
+}
+
+// eval `X OP 'lit'` with X in (tpl, base, len), loop var (lv, lvlen),
+// message role. returns 11 match, 10 no-match, -1 unsupported.
+fn ch_eval_cond(tpl: *mut u8, tplen: i64, base: i64, len: i64, lvo: i64, lvlen: i64, role: i64) -> i64 with Mut {
+    var p = base
+    let end = base + len
+    while p < end && ch_is_space(ch_get(tpl, p)) { p = p + 1 }
+    var q = p
+    while q < end && !ch_is_space(ch_get(tpl, q)) && ch_get(tpl, q) != 46 && ch_get(tpl, q) != 91 { q = q + 1 }
+    if !ch_is_loopvar(tpl, tplen, p, q, lvo, lvlen) { return 0 - 1 }
+    p = q
+    while p < end && ch_is_space(ch_get(tpl, p)) { p = p + 1 }
+    // .role or ['role']
+    var is_role = false
+    if p + 5 <= end && ch_get(tpl, p) == 46 && ch_get(tpl, p + 1) == 114 && ch_get(tpl, p + 2) == 111 && ch_get(tpl, p + 3) == 108 && ch_get(tpl, p + 4) == 101 {
+        is_role = true
+        p = p + 5
+    } else if p + 8 <= end && ch_get(tpl, p) == 91 {
+        let qc = ch_get(tpl, p + 1)
+        if qc != 39 && qc != 34 { return 0 - 1 }
+        if ch_get(tpl, p + 2) != 114 || ch_get(tpl, p + 3) != 111 || ch_get(tpl, p + 4) != 108 || ch_get(tpl, p + 5) != 101 { return 0 - 1 }
+        if ch_get(tpl, p + 6) != qc || ch_get(tpl, p + 7) != 93 { return 0 - 1 }
+        is_role = true
+        p = p + 8
+    } else {
+        return 0 - 1
+    }
+    if !is_role { return 0 - 1 }
+    while p < end && ch_is_space(ch_get(tpl, p)) { p = p + 1 }
+    var want_eq = true
+    if p + 2 <= end && ch_get(tpl, p) == 61 && ch_get(tpl, p + 1) == 61 {
+        want_eq = true
+        p = p + 2
+    } else if p + 2 <= end && ch_get(tpl, p) == 33 && ch_get(tpl, p + 1) == 61 {
+        want_eq = false
+        p = p + 2
+    } else {
+        return 0 - 1
+    }
+    while p < end && ch_is_space(ch_get(tpl, p)) { p = p + 1 }
+    if p >= end { return 0 - 1 }
+    let qc2 = ch_get(tpl, p)
+    if qc2 != 39 && qc2 != 34 { return 0 - 1 }
+    var r = p + 1
+    while r < end && ch_get(tpl, r) != qc2 { r = r + 1 }
+    if r >= end { return 0 - 1 }
+    let code = ch_role_code(tpl, tplen, p + 1, r - p - 1)
+    if code < 0 { return 0 - 1 }
+    var matchb = false
+    if role == code { matchb = true }
+    var res: i64 = 10
+    if (matchb && want_eq) || (!matchb && !want_eq) { res = 11 }
+    res
+}
+
+// render one {{ expr }} slice; returns new tpos or -1.
+fn ch_emit_expr(out: *mut u8, tpos: i64, tpl: *mut u8, tplen: i64, base: i64, len: i64, lvo: i64, lvlen: i64, role: i64, cbuf: *mut u8, coff: i64, clen: i64) -> i64 with Mut {
+    var p = base
+    let end = base + len
+    while p < end && ch_is_space(ch_get(tpl, p)) { p = p + 1 }
+    var q = end
+    while q > p && ch_is_space(ch_get(tpl, q - 1)) { q = q - 1 }
+    if q <= p { return 0 - 1 }
+    let f0 = ch_get(tpl, p)
+    if f0 == 39 || f0 == 34 {
+        if q - p < 2 { return 0 - 1 }
+        if ch_get(tpl, q - 1) != f0 { return 0 - 1 }
+        return ch_copy(out, tpos, tpl, p + 1, q - p - 2)
+    }
+    if lvlen == 0 { return 0 - 1 }
+    // Xname ends at . or [
+    var dot = p
+    while dot < q && ch_get(tpl, dot) != 46 && ch_get(tpl, dot) != 91 { dot = dot + 1 }
+    if dot >= q { return 0 - 1 }
+    if !ch_is_loopvar(tpl, tplen, p, dot, lvo, lvlen) { return 0 - 1 }
+    if ch_get(tpl, dot) == 46 {
+        // .content (8) or .role (5)
+        if dot + 8 == q && ch_get(tpl, dot + 1) == 99 && ch_get(tpl, dot + 2) == 111 && ch_get(tpl, dot + 3) == 110 && ch_get(tpl, dot + 4) == 116 && ch_get(tpl, dot + 5) == 101 && ch_get(tpl, dot + 6) == 110 && ch_get(tpl, dot + 7) == 116 {
+            return ch_copy(out, tpos, cbuf, coff, clen)
+        }
+        if dot + 5 == q && ch_get(tpl, dot + 1) == 114 && ch_get(tpl, dot + 2) == 111 && ch_get(tpl, dot + 3) == 108 && ch_get(tpl, dot + 4) == 101 {
+            return ch_role_str(out, tpos, role)
+        }
+        return 0 - 1
+    }
+    // ['k'] form: dot points at [
+    var r = dot + 1
+    if r >= q { return 0 - 1 }
+    let qc = ch_get(tpl, r)
+    if qc != 39 && qc != 34 { return 0 - 1 }
+    var s = r + 1
+    while s < q && ch_get(tpl, s) != qc { s = s + 1 }
+    if s + 2 != q { return 0 - 1 }
+    if ch_get(tpl, s + 1) != 93 { return 0 - 1 }
+    if s - r - 1 == 7 && ch_get(tpl, r + 1) == 99 && ch_get(tpl, r + 2) == 111 && ch_get(tpl, r + 3) == 110 && ch_get(tpl, r + 4) == 116 && ch_get(tpl, r + 5) == 101 && ch_get(tpl, r + 6) == 110 && ch_get(tpl, r + 7) == 116 {
+        return ch_copy(out, tpos, cbuf, coff, clen)
+    }
+    if s - r - 1 == 4 && ch_get(tpl, r + 1) == 114 && ch_get(tpl, r + 2) == 111 && ch_get(tpl, r + 3) == 108 && ch_get(tpl, r + 4) == 101 {
+        return ch_role_str(out, tpos, role)
+    }
+    0 - 1
+}
+
+// render body span [bbase, bbend) for one message; handles
+// if/elif/else/endif and {{ }}. returns new tpos or -1.
+fn ch_render_body(out: *mut u8, tpos: i64, tpl: *mut u8, tplen: i64, bbase: i64, bbend: i64, lvo: i64, lvlen: i64, role: i64, cbuf: *mut u8, coff: i64, clen: i64) -> i64 with Mut, Panic, Div {
+    var wpos = tpos
+    var p = bbase
+    var emitting = true
+    var taken = false
+    var has_if = false
+    while p < bbend {
+        var nt = bbend
+        var is_var = false
+        var i = p
+        while i + 1 < bbend {
+            let c0 = ch_get(tpl, i)
+            let c1 = ch_get(tpl, i + 1)
+            if (c0 == 123 && c1 == 123) || (c0 == 123 && c1 == 37) {
+                nt = i
+                if c1 == 123 { is_var = true }
+                break
+            }
+            i = i + 1
+        }
+        if emitting && nt > p {
+            wpos = ch_copy(out, wpos, tpl, p, nt - p)
+        }
+        if nt >= bbend { break }
+        if is_var {
+            let close = ch_find2(tpl, tplen, nt + 2, 125, 125)
+            if close < 0 || close >= bbend { return 0 - 1 }
+            if emitting {
+                wpos = ch_emit_expr(out, wpos, tpl, tplen, nt + 2, close - nt - 2, lvo, lvlen, role, cbuf, coff, clen)
+                if wpos < 0 { return 0 - 1 }
+            }
+            p = close + 2
+        } else {
+            let close = ch_find2(tpl, tplen, nt + 2, 37, 125)
+            if close < 0 || close >= bbend { return 0 - 1 }
+            var a = nt + 2
+            var b = close
+            while a < b && ch_is_space(ch_get(tpl, a)) { a = a + 1 }
+            while b > a && ch_is_space(ch_get(tpl, b - 1)) { b = b - 1 }
+            if b - a >= 2 && ch_get(tpl, a) == 105 && ch_get(tpl, a + 1) == 102 && (b - a == 2 || ch_is_space(ch_get(tpl, a + 2))) {
+                if has_if { return 0 - 1 }
+                has_if = true
+                taken = false
+                let r = ch_eval_cond(tpl, tplen, a + 2, b - a - 2, lvo, lvlen, role)
+                if r < 10 { return 0 - 1 }
+                emitting = r == 11
+                if emitting { taken = true }
+            } else if b - a >= 4 && ch_get(tpl, a) == 101 && ch_get(tpl, a + 1) == 108 && ch_get(tpl, a + 2) == 105 && ch_get(tpl, a + 3) == 102 && (b - a == 4 || ch_is_space(ch_get(tpl, a + 4))) {
+                if !has_if { return 0 - 1 }
+                if taken {
+                    emitting = false
+                } else {
+                    let r2 = ch_eval_cond(tpl, tplen, a + 4, b - a - 4, lvo, lvlen, role)
+                    if r2 < 10 { return 0 - 1 }
+                    emitting = r2 == 11
+                    if emitting { taken = true }
+                }
+            } else if b - a == 4 && ch_get(tpl, a) == 101 && ch_get(tpl, a + 1) == 108 && ch_get(tpl, a + 2) == 115 && ch_get(tpl, a + 3) == 101 {
+                if !has_if { return 0 - 1 }
+                emitting = !taken
+                taken = true
+            } else if b - a == 5 && ch_get(tpl, a) == 101 && ch_get(tpl, a + 1) == 110 && ch_get(tpl, a + 2) == 100 && ch_get(tpl, a + 3) == 105 && ch_get(tpl, a + 4) == 102 {
+                if !has_if { return 0 - 1 }
+                has_if = false
+                taken = false
+                emitting = true
+            } else {
+                return 0 - 1
+            }
+            p = close + 2
+        }
+    }
+    if has_if { return 0 - 1 }
+    wpos
+}
+
+// top-level render: literal text, {{ }} (loopvar empty), and one
+// {% for X in messages %}...{% endfor %}. returns end pos or -1.
+pub fn chat_render(out: *mut u8, tpos: i64, tpl: *mut u8, tplen: i64, roles: &[i64; 16], offs: &[i64; 16], lens: &[i64; 16], cbuf: *mut u8, nmsg: i64) -> i64 with Mut, Panic, Div {
+    var wpos = tpos
+    var p: i64 = 0
+    while p < tplen {
+        var nt = tplen
+        var is_var = false
+        var i = p
+        while i + 1 < tplen {
+            let c0 = ch_get(tpl, i)
+            let c1 = ch_get(tpl, i + 1)
+            if (c0 == 123 && c1 == 123) || (c0 == 123 && c1 == 37) {
+                nt = i
+                if c1 == 123 { is_var = true }
+                break
+            }
+            i = i + 1
+        }
+        if nt > p {
+            wpos = ch_copy(out, wpos, tpl, p, nt - p)
+        }
+        if nt >= tplen { break }
+        if is_var {
+            let close = ch_find2(tpl, tplen, nt + 2, 125, 125)
+            if close < 0 { return 0 - 1 }
+            wpos = ch_emit_expr(out, wpos, tpl, tplen, nt + 2, close - nt - 2, 0, 0, 0 - 1, cbuf, 0, 0)
+            if wpos < 0 { return 0 - 1 }
+            p = close + 2
+        } else {
+            let close = ch_find2(tpl, tplen, nt + 2, 37, 125)
+            if close < 0 { return 0 - 1 }
+            var a = nt + 2
+            var b = close
+            while a < b && ch_is_space(ch_get(tpl, a)) { a = a + 1 }
+            while b > a && ch_is_space(ch_get(tpl, b - 1)) { b = b - 1 }
+            // must be: for X in messages
+            if b - a < 15 { return 0 - 1 }
+            if ch_get(tpl, a) != 102 || ch_get(tpl, a + 1) != 111 || ch_get(tpl, a + 2) != 114 || !ch_is_space(ch_get(tpl, a + 3)) { return 0 - 1 }
+            var x0 = a + 4
+            while x0 < b && ch_is_space(ch_get(tpl, x0)) { x0 = x0 + 1 }
+            var x1 = x0
+            while x1 < b && !ch_is_space(ch_get(tpl, x1)) { x1 = x1 + 1 }
+            if x1 <= x0 { return 0 - 1 }
+            var iw = x1
+            while iw < b && ch_is_space(ch_get(tpl, iw)) { iw = iw + 1 }
+            if iw + 11 != b { return 0 - 1 }
+            if ch_get(tpl, iw) != 105 || ch_get(tpl, iw + 1) != 110 { return 0 - 1 }
+            if ch_get(tpl, iw + 2) != 32 { return 0 - 1 }
+            if !ch_at_messages(tpl, tplen, iw + 3) { return 0 - 1 }
+            // find matching endfor; a nested for is unsupported.
+            // scan every tag in order: {{ }} spans are skipped.
+            var k = close + 2
+            var body_end: i64 = 0 - 1
+            while k < tplen {
+                var os = tplen
+                var is_var = false
+                let ov = ch_find2(tpl, tplen, k, 123, 123)
+                let ob = ch_find2(tpl, tplen, k, 123, 37)
+                if ov >= 0 && (ob < 0 || ov < ob) {
+                    os = ov
+                    is_var = true
+                } else if ob >= 0 {
+                    os = ob
+                } else {
+                    break
+                }
+                if is_var {
+                    let ce = ch_find2(tpl, tplen, os + 2, 125, 125)
+                    if ce < 0 { break }
+                    k = ce + 2
+                } else {
+                    let ce = ch_find2(tpl, tplen, os + 2, 37, 125)
+                    if ce < 0 { break }
+                    var ta = os + 2
+                    var tb = ce
+                    while ta < tb && ch_is_space(ch_get(tpl, ta)) { ta = ta + 1 }
+                    while tb > ta && ch_is_space(ch_get(tpl, tb - 1)) { tb = tb - 1 }
+                    if tb - ta >= 3 && ch_get(tpl, ta) == 102 && ch_get(tpl, ta + 1) == 111 && ch_get(tpl, ta + 2) == 114 && (tb - ta == 3 || ch_is_space(ch_get(tpl, ta + 3))) {
+                        return 0 - 1
+                    }
+                    if tb - ta == 6 && ch_at_endfor(tpl, tplen, ta) {
+                        body_end = os
+                        k = ce + 2
+                        break
+                    }
+                    k = ce + 2
+                }
+            }
+            if body_end < 0 { return 0 - 1 }
+            var m: i64 = 0
+            while m < nmsg {
+                wpos = ch_render_body(out, wpos, tpl, tplen, close + 2, body_end, x0, x1 - x0, roles[m as usize], cbuf, offs[m as usize], lens[m as usize])
+                if wpos < 0 { return 0 - 1 }
+                m = m + 1
+            }
+            p = k
+        }
+    }
+    wpos
+}
+
+// find <tool_call>...</tool_call> in text[from..len]; writes inner
+// span into span[0..2] (start, end), returns 1 found, 0 absent.
+pub fn chat_find_toolcall(text: *mut u8, len: i64, from: i64, span: &![i64; 2]) -> i64 with Mut {
+    var i = from
+    var open: i64 = 0 - 1
+    while i + 11 <= len {
+        if ch_get(text, i) == 60 && ch_get(text, i + 1) == 116 && ch_get(text, i + 2) == 111 && ch_get(text, i + 3) == 111 && ch_get(text, i + 4) == 108 && ch_get(text, i + 5) == 95 && ch_get(text, i + 6) == 99 && ch_get(text, i + 7) == 97 && ch_get(text, i + 8) == 108 && ch_get(text, i + 9) == 108 && ch_get(text, i + 10) == 62 {
+            open = i + 11
+            break
+        }
+        i = i + 1
+    }
+    if open < 0 { return 0 }
+    i = open
+    while i + 12 <= len {
+        if ch_get(text, i) == 60 && ch_get(text, i + 1) == 47 && ch_get(text, i + 2) == 116 && ch_get(text, i + 3) == 111 && ch_get(text, i + 4) == 111 && ch_get(text, i + 5) == 108 && ch_get(text, i + 6) == 95 && ch_get(text, i + 7) == 99 && ch_get(text, i + 8) == 97 && ch_get(text, i + 9) == 108 && ch_get(text, i + 10) == 108 && ch_get(text, i + 11) == 62 {
+            span[0] = open
+            span[1] = i
+            return 1
+        }
+        i = i + 1
+    }
+    0
+}
+
+// copy a string literal into a byte buffer; returns end pos.
+fn ch_copy_str(out: *mut u8, pos: i64, s: string) -> i64 with Mut {
+    var i: i64 = 0
+    while i < str_len(s) {
+        ch_putb(out, pos + i, str_char_at(s, i))
+        i = i + 1
+    }
+    pos + i
+}
+
+// builtin ChatML template into out at pos; returns end pos.
+pub fn chat_default_tpl(out: *mut u8, pos: i64) -> i64 with Mut {
+    var p = pos
+    p = ch_copy_str(out, p, "{% for m in messages %}{% if m.role == 'system' %}<|im_start|>system\n")
+    p = ch_copy_str(out, p, "{{ m.content }}<|im_end|>\n{% elif m.role == 'user' %}<|im_start|>user\n")
+    p = ch_copy_str(out, p, "{{ m.content }}<|im_end|>\n{% elif m.role == 'assistant' %}<|im_start|>assistant\n")
+    p = ch_copy_str(out, p, "{{ m.content }}<|im_end|>\n{% endif %}{% endfor %}<|im_start|>assistant\n")
+    p
+}
