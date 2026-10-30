@@ -1,0 +1,409 @@
+// stdlib::llm::attn_gpu - Plan I GPU attention packs, sampling, generate.
+//
+// Day-1 runs on the CPU reference math with honest fallback status;
+// the mmid Q4_K/Q5_K projection path and RoPE/softmax/AV kernels engage
+// only when packs and PTX are present. No silent greedy on bad params.
+use llm::llama::{Llama, KvCache, kv_new, llama_forward, llama_forward_rt, llama_argmax}
+use llm::bpe::{Bpe, bpe_encode, bpe_decode_token}
+use llm::gguf::{GgufTensor, gguf_dtype_q4_k, gguf_dtype_q5_k, gguf_row_quant_bytes}
+use llm::safetensors::{st_read_all}
+use hetero::cuda_exec::{CudaExec, ce_function, ce_module_log}
+use hetero::probe_cuda::{pb_cstr}
+use hetero::runtime::{Runtime, rt_mul_mat_id_q4k, rt_mul_mat_id_q5k}
+use hetero::cublas_bench::{gb_host_f32, gb_host_get, gb_host_set}
+use tensor2::cpu_kernel::{CpuBuf, ck_alloc, ck_get, ck_set, ck_max_abs_diff}
+use math::pure::{exp, sqrt}
+
+fn attn_empty() -> CpuBuf {
+    CpuBuf { data: 0 as *mut f64, len: 0 }
+}
+
+fn attn_num(i: i64) -> string with Alloc {
+    if i < 10 {
+        if i == 0 { return "0" }
+        if i == 1 { return "1" }
+        if i == 2 { return "2" }
+        if i == 3 { return "3" }
+        if i == 4 { return "4" }
+        if i == 5 { return "5" }
+        if i == 6 { return "6" }
+        if i == 7 { return "7" }
+        if i == 8 { return "8" }
+        return "9"
+    }
+    str_concat(attn_num(i / 10), attn_num(i % 10))
+}
+
+// One quant pack per projection, per layer. experts=1 on the mmid path.
+pub struct AttnPacks {
+    pub q: [*mut u8; 64],
+    pub k: [*mut u8; 64],
+    pub v: [*mut u8; 64],
+    pub o: [*mut u8; 64],
+    pub q_bytes: [i64; 64],
+    pub k_bytes: [i64; 64],
+    pub v_bytes: [i64; 64],
+    pub o_bytes: [i64; 64],
+    pub dtype: i32,
+    pub quant: i64,
+    pub ok: bool,
+}
+
+pub fn attn_packs_empty() -> AttnPacks {
+    AttnPacks {
+        q: [0 as *mut u8; 64], k: [0 as *mut u8; 64],
+        v: [0 as *mut u8; 64], o: [0 as *mut u8; 64],
+        q_bytes: [0; 64], k_bytes: [0; 64], v_bytes: [0; 64], o_bytes: [0; 64],
+        dtype: -1, quant: -1, ok: false,
+    }
+}
+
+fn attn_fail(msg: string) with Panic {
+    print(msg)
+    assert(false)
+}
+
+// Row stride for a quant pack row of width k. 0 = not aligned.
+pub fn attn_row_stride(dtype: i32, k: i64) -> i64 {
+    gguf_row_quant_bytes(dtype, k)
+}
+
+// Sidecar: dir/sub/layer{i}_{q,k,v,o}.bin, sub attn_q4k or attn_q5k.
+// Missing files leave ok=false; a present-but-short triple fails loudly.
+pub fn attn_load_sidecar(dir: string, sub: string, layers: i64) -> AttnPacks with Alloc, Mut, Panic, Div {
+    var p = attn_packs_empty()
+    var want_dtype = gguf_dtype_q4_k()
+    var want_quant: i64 = 0
+    if sub == "attn_q5k" { want_quant = 1 }
+    if sub == "attn_q5k" { want_dtype = gguf_dtype_q5_k() }
+    var li: i64 = 0
+    while li < layers && li < 64 {
+        let base = str_concat(str_concat(str_concat(str_concat(dir, "/"), sub), "/layer"), attn_num(li))
+        let fq = st_read_all(str_concat(base, "_q.bin"))
+        let fk = st_read_all(str_concat(base, "_k.bin"))
+        let fv = st_read_all(str_concat(base, "_v.bin"))
+        let fo = st_read_all(str_concat(base, "_o.bin"))
+        if fq.ok && fk.ok && fv.ok && fo.ok && fq.len > 0 {
+            p.q[li as usize] = fq.data
+            p.k[li as usize] = fk.data
+            p.v[li as usize] = fv.data
+            p.o[li as usize] = fo.data
+            p.q_bytes[li as usize] = fq.len
+            p.k_bytes[li as usize] = fk.len
+            p.v_bytes[li as usize] = fv.len
+            p.o_bytes[li as usize] = fo.len
+        } else if fq.ok || fk.ok || fv.ok || fo.ok {
+            attn_fail("attn_load_sidecar: partial attn pack quad (q/k/v/o)\n")
+        }
+        li = li + 1
+    }
+    p.dtype = want_dtype
+    p.quant = want_quant
+    p.ok = (p.q[0 as usize] as i64) != 0
+    p
+}
+
+// GGUF bind for one attn projection tensor. F32 or absent means dense
+// stays on the CPU path (return 0). Quant dtype mismatch fails loudly.
+pub fn attn_bind_gguf_layer(p: &!AttnPacks, t: GgufTensor, li: i32, which: i64) -> i64 with Mut, Panic {
+    if !t.found || (t.raw as i64) == 0 { return 0 }
+    if t.dtype != gguf_dtype_q4_k() && t.dtype != gguf_dtype_q5_k() { return 0 }
+    if p.dtype != -1 && p.dtype != t.dtype {
+        attn_fail("attn_bind_gguf_layer: mixed attn quant dtypes across layers\n")
+    }
+    p.dtype = t.dtype
+    if t.dtype == gguf_dtype_q5_k() { p.quant = 1 } else { p.quant = 0 }
+    let i = li as usize
+    if which == 0 { p.q[i] = t.raw }
+    else if which == 1 { p.k[i] = t.raw }
+    else if which == 2 { p.v[i] = t.raw }
+    else { p.o[i] = t.raw }
+    1
+}
+
+// Ready when every layer holds a full q/k/v/o quad with sane bytes.
+pub fn attn_packs_ready(p: &AttnPacks, layers: i64) -> bool {
+    if !p.ok { return false }
+    if p.quant != 0 && p.quant != 1 { return false }
+    var li: i64 = 0
+    while li < layers && li < 64 {
+        let i = li as usize
+        if (p.q[i] as i64) == 0 || (p.k[i] as i64) == 0 { return false }
+        if (p.v[i] as i64) == 0 || (p.o[i] as i64) == 0 { return false }
+        if p.q_bytes[i] <= 0 || p.o_bytes[i] <= 0 { return false }
+        li = li + 1
+    }
+    true
+}
+
+fn attn_f64_to_f32(src: &CpuBuf, n: i64) -> *mut u8 with Alloc, Mut {
+    let out = gb_host_f32(n)
+    var i: i64 = 0
+    while i < n {
+        gb_host_set(out, i, ck_get(src, i))
+        i = i + 1
+    }
+    out
+}
+
+fn attn_f32_to_f64_into(src: *mut u8, dst: &!CpuBuf, n: i64) with Mut {
+    var i: i64 = 0
+    while i < n {
+        ck_set(dst, i, gb_host_get(src, i))
+        i = i + 1
+    }
+}
+
+// One dense projection through mmid with a trivial ids row (all expert 0).
+// Returns 0 on the GPU path, nonzero status on fallback/failure.
+pub fn attn_proj_mmid(
+    rt: &Runtime, p: &AttnPacks, li: i64, which: i64,
+    x: &CpuBuf, out: &!CpuBuf, ntok: i64, k: i64, m: i64
+) -> i64 with Alloc, Mut, Panic, Div {
+    let i = li as usize
+    var w: *mut u8 = p.q[i]
+    var wb: i64 = p.q_bytes[i]
+    if which == 1 { w = p.k[i] }
+    if which == 1 { wb = p.k_bytes[i] }
+    if which == 2 { w = p.v[i] }
+    if which == 2 { wb = p.v_bytes[i] }
+    if which == 3 { w = p.o[i] }
+    if which == 3 { wb = p.o_bytes[i] }
+    if (w as i64) == 0 || wb <= 0 { return -10 }
+    let rs = attn_row_stride(p.dtype, k)
+    if rs <= 0 { return -11 }
+    let expert_stride = m * rs
+    let xf = attn_f64_to_f32(x, ntok * k)
+    let dst = gb_host_f32(ntok * m)
+    let ids = heap_alloc(ntok * 4)
+    var w0: i64 = 0
+    while w0 * 8 < ntok * 4 {
+        write_i64(ids as *mut i64, w0, 0)
+        w0 = w0 + 1
+    }
+    let x_nb1 = k * 4
+    let dst_nb1 = m * 4
+    var ok = false
+    var st: i64 = -1
+    if p.quant == 1 {
+        let r = rt_mul_mat_id_q5k(rt, w, wb, xf, ntok * k * 4, ids, ntok * 4,
+            dst, ntok * m * 4, k, m, 1, 1, ntok, expert_stride, rs,
+            x_nb1, x_nb1, 4, dst_nb1, dst_nb1, 1)
+        ok = r.ok
+        st = r.status
+    } else {
+        let r = rt_mul_mat_id_q4k(rt, w, wb, xf, ntok * k * 4, ids, ntok * 4,
+            dst, ntok * m * 4, k, m, 1, 1, ntok, expert_stride, rs,
+            x_nb1, x_nb1, 4, dst_nb1, dst_nb1, 1)
+        ok = r.ok
+        st = r.status
+    }
+    if !ok { return st }
+    attn_f32_to_f64_into(dst, out, ntok * m)
+    0
+}
+
+// Device kernel handles. ok=false means CPU fallback (honest, not silent).
+pub struct AttnKernels {
+    pub rope: i64,
+    pub softmax: i64,
+    pub av: i64,
+    pub ok: bool,
+}
+
+pub fn attn_kernels_empty() -> AttnKernels {
+    AttnKernels { rope: 0, softmax: 0, av: 0, ok: false }
+}
+
+pub fn attn_load_kernels(rt: &Runtime, rope_ptx: string, softmax_ptx: string, av_ptx: string) -> AttnKernels with Alloc, Mut, Panic, Div, IO {
+    var ks = attn_kernels_empty()
+    if !rt.exec.ok { return ks }
+    let rp = read_file(rope_ptx)
+    if str_len(rp) > 0 {
+        let mod = ce_module_log(&rt.exec, pb_cstr(rp))
+        if mod != 0 { ks.rope = ce_function(&rt.exec, mod, "attn_rope_f32") }
+    }
+    let sp = read_file(softmax_ptx)
+    if str_len(sp) > 0 {
+        let mod = ce_module_log(&rt.exec, pb_cstr(sp))
+        if mod != 0 { ks.softmax = ce_function(&rt.exec, mod, "attn_softmax_causal_f32") }
+    }
+    let ap = read_file(av_ptx)
+    if str_len(ap) > 0 {
+        let mod = ce_module_log(&rt.exec, pb_cstr(ap))
+        if mod != 0 { ks.av = ce_function(&rt.exec, mod, "attn_av_f32") }
+    }
+    ks.ok = ks.rope != 0 && ks.softmax != 0 && ks.av != 0
+    ks
+}
+
+// 0 = CPU, 1 = dense runtime projections, 2 = quant attn + kernels ready.
+pub fn attn_gpu_status(rt: &Runtime, p: &AttnPacks, ks: &AttnKernels, layers: i64) -> i64 {
+    if attn_packs_ready(p, layers) && ks.ok {
+        if p.quant == 1 && rt.mmid_q5k_func != 0 { return 2 }
+        if p.quant == 0 && rt.mmid_func != 0 { return 2 }
+    }
+    if rt.ready { return 1 }
+    0
+}
+
+pub fn llama_sample_greedy(logits: &CpuBuf) -> i64 {
+    llama_argmax(logits)
+}
+
+fn attn_lcg_next(seed: &!CpuBuf) -> f64 with Mut, Panic {
+    let a: i64 = 1664525
+    let c: i64 = 1013904223
+    let mask: i64 = 4294967295
+    let s = (a * (ck_get(seed, 0) as i64) + c) & mask
+    ck_set(seed, 0, s as f64)
+    (s as f64) / 4294967296.0
+}
+
+// Temperature + top-p sampling. Loud reject on bad params, never silent greedy.
+pub fn llama_sample_temp_top_p(logits: &CpuBuf, temp: f64, top_p: f64, seed: &!CpuBuf) -> i64 with Alloc, Mut, Panic, Div {
+    if temp <= 0.0 { attn_fail("llama_sample_temp_top_p: temp must be > 0\n") }
+    if top_p <= 0.0 || top_p > 1.0 { attn_fail("llama_sample_temp_top_p: top_p must be in (0, 1]\n") }
+    let n = logits.len
+    if n <= 0 { attn_fail("llama_sample_temp_top_p: empty logits\n") }
+    var mx = ck_get(logits, 0)
+    var i: i64 = 1
+    while i < n {
+        let v = ck_get(logits, i)
+        if v > mx { mx = v }
+        i = i + 1
+    }
+    var probs = ck_alloc(n)
+    var sum: f64 = 0.0
+    i = 0
+    while i < n {
+        let e = exp((ck_get(logits, i) - mx) / temp)
+        ck_set(&!probs, i, e)
+        sum = sum + e
+        i = i + 1
+    }
+    i = 0
+    while i < n {
+        ck_set(&!probs, i, ck_get(&probs, i) / sum)
+        i = i + 1
+    }
+    // Max-heap over token ids by prob, then take the top-p prefix.
+    let heap = heap_alloc(n * 8) as *mut i64
+    i = 0
+    while i < n {
+        write_i64(heap, i, i)
+        i = i + 1
+    }
+    var b = n / 2 - 1
+    while b >= 0 {
+        var r = b
+        var done = false
+        while !done {
+            let l = r * 2 + 1
+            let rr = r * 2 + 2
+            var big = r
+            if l < n && ck_get(&probs, read_i64(heap, l)) > ck_get(&probs, read_i64(heap, big)) { big = l }
+            if rr < n && ck_get(&probs, read_i64(heap, rr)) > ck_get(&probs, read_i64(heap, big)) { big = rr }
+            if big == r { done = true } else {
+                let tmp = read_i64(heap, r)
+                write_i64(heap, r, read_i64(heap, big))
+                write_i64(heap, big, tmp)
+                r = big
+            }
+        }
+        b = b - 1
+    }
+    var kept = ck_alloc(n)
+    var nk: i64 = 0
+    var cum: f64 = 0.0
+    var hn = n
+    while hn > 0 {
+        let top = read_i64(heap, 0)
+        hn = hn - 1
+        write_i64(heap, 0, read_i64(heap, hn))
+        var r = 0
+        var done = false
+        while !done {
+            let l = r * 2 + 1
+            let rr = r * 2 + 2
+            var big = r
+            if l < hn && ck_get(&probs, read_i64(heap, l)) > ck_get(&probs, read_i64(heap, big)) { big = l }
+            if rr < hn && ck_get(&probs, read_i64(heap, rr)) > ck_get(&probs, read_i64(heap, big)) { big = rr }
+            if big == r { done = true } else {
+                let tmp = read_i64(heap, r)
+                write_i64(heap, r, read_i64(heap, big))
+                write_i64(heap, big, tmp)
+                r = big
+            }
+        }
+        ck_set(&!kept, nk, top as f64)
+        nk = nk + 1
+        cum = cum + ck_get(&probs, top)
+        if cum >= top_p { hn = 0 }
+    }
+    var u = attn_lcg_next(seed) * cum
+    i = 0
+    while i < nk {
+        u = u - ck_get(&probs, ck_get(&kept, i) as i64)
+        if u <= 0.0 { return ck_get(&kept, i) as i64 }
+        i = i + 1
+    }
+    ck_get(&kept, nk - 1) as i64
+}
+
+pub struct GenCfg {
+    pub max_new: i64,
+    pub eos: i64,
+    pub temp: f64,
+    pub top_p: f64,
+    pub greedy: bool,
+}
+
+// Encode-free generate: `ids` holds nids prompt ids; returns new ids only.
+// Stop at eos or max_new. kv must be fresh (len 0) on entry.
+pub fn llama_generate_from_ids(
+    m: &!Llama, kv: &!KvCache, rt: &Runtime, use_gpu: bool,
+    ids: &CpuBuf, nids: i64, cfg: GenCfg, seed: &!CpuBuf
+) -> CpuBuf with Alloc, Mut, Panic, Div {
+    if nids <= 0 { attn_fail("llama_generate_from_ids: empty prompt\n") }
+    if cfg.max_new <= 0 { attn_fail("llama_generate_from_ids: max_new must be > 0\n") }
+    if !cfg.greedy {
+        if cfg.temp <= 0.0 { attn_fail("llama_generate_from_ids: temp must be > 0\n") }
+        if cfg.top_p <= 0.0 || cfg.top_p > 1.0 { attn_fail("llama_generate_from_ids: top_p must be in (0, 1]\n") }
+    }
+    var out = ck_alloc(cfg.max_new)
+    var n_out: i64 = 0
+    var cur: i64 = 0
+    var prompt_done = false
+    while n_out < cfg.max_new {
+        var logits = attn_empty()
+        if !prompt_done {
+            if use_gpu && rt.ready {
+                logits = llama_forward_rt(m, kv, ids, nids, rt)
+            } else {
+                logits = llama_forward(m, kv, ids, nids)
+            }
+            prompt_done = true
+        } else {
+            var one = ck_alloc(1)
+            ck_set(&!one, 0, cur as f64)
+            if use_gpu && rt.ready {
+                logits = llama_forward_rt(m, kv, &one, 1, rt)
+            } else {
+                logits = llama_forward(m, kv, &one, 1)
+            }
+        }
+        if cfg.greedy {
+            cur = llama_sample_greedy(&logits)
+        } else {
+            cur = llama_sample_temp_top_p(&logits, cfg.temp, cfg.top_p, seed)
+        }
+        if cur == cfg.eos { n_out = cfg.max_new }
+        if cur != cfg.eos {
+            ck_set(&!out, n_out, cur as f64)
+            n_out = n_out + 1
+        }
+    }
+    out.len = n_out
+    out
+}
