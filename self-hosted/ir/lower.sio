@@ -36581,6 +36581,23 @@ impl Lowerer {
     }
 
     fn lower_unary_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        if e.un_op == UnaryOp::OpRef || e.un_op == UnaryOp::OpRefMut {
+            match e.left {
+                Some(rb_index) => {
+                    if (*rb_index).kind == ExprKind::ExprIndex {
+                        match (*rb_index).right {
+                            Some(rb_range) => {
+                                if (*rb_range).kind == ExprKind::ExprRange {
+                                    return self.lower_range_borrow_ref(e, &(*rb_index), &(*rb_range))
+                                }
+                            }
+                            None => {}
+                        }
+                    }
+                }
+                None => {}
+            }
+        }
         // V0-E.4.1 fail-closed: unary on f128/f256 must not use f64 neg.
         // V0-E.5.2: `-x` on a ready language f128 desugars to f128_bits_soft_neg.
         if self.opt_expr_result_is_wide_float_ref(&e.left) {
@@ -36996,6 +37013,191 @@ impl Lowerer {
         }
     }
 
+    // Two-argument runtime call `name(a, b)` into a fresh register.
+    fn emit_runtime_call2(self, name: Name, a: i64, b: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        let fn_id = lowerer_find_or_add_fn_id_mut(&! lo, name)
+        let pair_d = lo.fresh_reg()
+        lo = pair_d.0
+        let dst = pair_d.1
+        let args: Option<Box<IrRegList>> = Some(Box::new(ir_reg_list_cons(a, Some(Box::new(ir_reg_list_single(b))))))
+        (lo.emit(ir_call(dst, fn_id, name, args, 2)), dst)
+    }
+
+    fn emit_runtime_call1(self, name: Name, a: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        let fn_id = lowerer_find_or_add_fn_id_mut(&! lo, name)
+        let pair_d = lo.fresh_reg()
+        lo = pair_d.0
+        let dst = pair_d.1
+        let args: Option<Box<IrRegList>> = Some(Box::new(ir_reg_list_single(a)))
+        (lo.emit(ir_call(dst, fn_id, name, args, 1)), dst)
+    }
+
+    fn emit_binop_fresh(self, a: i64, op: BinaryOp, b: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        let pair_d = self.fresh_reg()
+        let lo = pair_d.0
+        let dst = pair_d.1
+        (lo.emit(ir_binop(dst, a, op, b)), dst)
+    }
+
+    // A fresh growable array (Seq layout, flags = length) holding
+    // src[lo..hi] read through `read_kind`: 0 = array element (IndexGet on a
+    // GC array handle), 1 = string byte (str_char_at, zero-extended).
+    fn emit_copy_range_to_new_array(self, src: i64, lo_reg: i64, hi_reg: i64, read_kind: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        let pair_arr = self.fresh_reg()
+        var lo = pair_arr.0
+        let arr = pair_arr.1
+        lo = lo.emit(ir_alloc_array(arr, lo.aggregate_storage_bytes(4), 0))
+        let pair_iv = lo.fresh_reg()
+        lo = pair_iv.0
+        let iv = pair_iv.1
+        lo = lo.emit(ir_copy(iv, lo_reg))
+        let pair_top = lo.fresh_label()
+        lo = pair_top.0
+        let l_top = pair_top.1
+        let pair_end = lo.fresh_label()
+        lo = pair_end.0
+        let l_end = pair_end.1
+        lo = lo.fo_extend_rows_for_loop().emit(ir_label(l_top))
+        let pair_cond = lo.emit_binop_fresh(iv, BinaryOp::OpLt, hi_reg)
+        lo = pair_cond.0
+        lo = lo.emit(ir_branch_false(pair_cond.1, l_end))
+        var elem = IR_INVALID_REG
+        if read_kind == 1 {
+            let pair_ch = lo.emit_runtime_call2(make_name("str_char_at"), src, iv)
+            lo = pair_ch.0
+            elem = pair_ch.1
+        } else {
+            let pair_el = lo.fresh_reg()
+            lo = pair_el.0
+            elem = pair_el.1
+            lo = lo.emit(ir_index_get(elem, src, iv))
+        }
+        let pair_push = lo.emit_runtime_call2(make_name("__sounio_seq_push"), arr, elem)
+        lo = pair_push.0
+        let pair_one = lo.fresh_reg()
+        lo = pair_one.0
+        let one = pair_one.1
+        lo = lo.emit(ir_load_imm(one, 1))
+        let pair_next = lo.emit_binop_fresh(iv, BinaryOp::OpAdd, one)
+        lo = pair_next.0
+        lo = lo.emit(ir_copy(iv, pair_next.1))
+        lo = lo.emit(ir_jump(l_top))
+        lo = lo.emit(ir_label(l_end))
+        (lo, arr)
+    }
+
+    // `s.as_bytes()` -> a fresh `[u8]` with the string's str_len bytes
+    // (a C string: the bytes before the first NUL, as read_file and every
+    // other Madaros string operation see it). It had no lowering at all; the
+    // checker typed it `&i8`, so no program reached here.
+    fn lower_str_as_bytes_ref(self, recv: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        let pair_s = self.lower_expr_ref(recv)
+        var lo = pair_s.0
+        let s_reg = pair_s.1
+        let pair_n = lo.emit_runtime_call1(make_name("str_len"), s_reg)
+        lo = pair_n.0
+        let pair_zero = lo.fresh_reg()
+        lo = pair_zero.0
+        let zero = pair_zero.1
+        lo = lo.emit(ir_load_imm(zero, 0))
+        lo.emit_copy_range_to_new_array(s_reg, zero, pair_n.1, 1)
+    }
+
+    // `&base[lo..hi]` (either bound optional) on an array of integer words:
+    // a bounds-checked COPY of the range into a fresh array, borrowed exactly
+    // like `&arr` (the address of the slot holding the handle), so `.len()`,
+    // indexing and `&[T]` parameters treat it as any other array reference.
+    // The checker always accepted the form, but its detection never matched
+    // (the slice-borrow arm tested the operand for a range instead of an
+    // index by a range) and there was no lowering. Fail-closed where a copy
+    // would be observably wrong or the element metadata would be lost:
+    // `&!` (writes would not reach the base), `..=`, float and struct
+    // elements.
+    fn lower_range_borrow_ref(self, e: &Expr, index_e: &Expr, range_e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        var refuse = e.un_op == UnaryOp::OpRefMut || (*range_e).bin_op != BinaryOp::OpRange
+        match (*index_e).left {
+            Some(base_chk) => {
+                if (*base_chk).kind == ExprKind::ExprIdent {
+                    if self.lookup_local_array_elem_float((*base_chk).name)
+                        || self.lookup_local_struct_type_is_array_elem((*base_chk).name) {
+                        refuse = true
+                    }
+                } else if (*base_chk).kind != ExprKind::ExprMethodCall && (*base_chk).kind != ExprKind::ExprCall {
+                    refuse = true
+                }
+            }
+            None => { refuse = true }
+        }
+        if refuse {
+            print("error: this range borrow is not supported by Madaros: only a shared `&a[lo..hi]` of an integer-element array lowers (as a bounds-checked copy); `&!a[..]`, `..=` and float or struct elements are refused\n")
+            var lo_bad = self
+            lowerer_mark_hard_error(&! lo_bad)
+            return (lo_bad, IR_INVALID_REG)
+        }
+        var lo = self
+        var handle = IR_INVALID_REG
+        match (*index_e).left {
+            Some(base_e) => {
+                let pair_h = lo.lower_expr_as_array_handle_ref(&(*base_e))
+                lo = pair_h.0
+                handle = pair_h.1
+            }
+            None => {}
+        }
+        let pair_len = lo.fresh_reg()
+        lo = pair_len.0
+        let len_reg = pair_len.1
+        lo = lo.emit(ir_array_len(len_reg, handle))
+        var lo_reg = IR_INVALID_REG
+        match (*range_e).left {
+            Some(start_e) => {
+                let pair_lo = lo.lower_expr_ref(&(*start_e))
+                lo = pair_lo.0
+                lo_reg = pair_lo.1
+            }
+            None => {
+                let pair_z = lo.fresh_reg()
+                lo = pair_z.0
+                lo_reg = pair_z.1
+                lo = lo.emit(ir_load_imm(lo_reg, 0))
+            }
+        }
+        var hi_reg = len_reg
+        match (*range_e).right {
+            Some(end_e) => {
+                let pair_hi = lo.lower_expr_ref(&(*end_e))
+                lo = pair_hi.0
+                hi_reg = pair_hi.1
+            }
+            None => {}
+        }
+        // 0 <= lo <= hi <= len, else the program stops (exit 1) like assert.
+        let pair_zero = lo.fresh_reg()
+        lo = pair_zero.0
+        let zero = pair_zero.1
+        lo = lo.emit(ir_load_imm(zero, 0))
+        let pair_c1 = lo.emit_binop_fresh(lo_reg, BinaryOp::OpGe, zero)
+        lo = pair_c1.0
+        let pair_a1 = lo.emit_runtime_call1(make_name("assert"), pair_c1.1)
+        lo = pair_a1.0
+        let pair_c2 = lo.emit_binop_fresh(lo_reg, BinaryOp::OpLe, hi_reg)
+        lo = pair_c2.0
+        let pair_a2 = lo.emit_runtime_call1(make_name("assert"), pair_c2.1)
+        lo = pair_a2.0
+        let pair_c3 = lo.emit_binop_fresh(hi_reg, BinaryOp::OpLe, len_reg)
+        lo = pair_c3.0
+        let pair_a3 = lo.emit_runtime_call1(make_name("assert"), pair_c3.1)
+        lo = pair_a3.0
+        let pair_copy = lo.emit_copy_range_to_new_array(handle, lo_reg, hi_reg, 0)
+        lo = pair_copy.0
+        let pair_ref = lo.fresh_reg()
+        lo = pair_ref.0
+        let dst = pair_ref.1
+        (lo.emit(ir_unaryop(dst, UnaryOp::OpRef, pair_copy.1)), dst)
+    }
+
     fn lower_method_call_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         if self.expr_is_gpu_sync_call_ref(e) {
             // Unit. A plain integer zero -- emit_f64_const would mark the
@@ -37007,6 +37209,19 @@ impl Lowerer {
             return (lo_u, reg_u)
         }
         let recv_type = self.lower_method_recv_type(&e.left)
+        // `s.as_bytes()`: the checker admits it on strings only and types it
+        // `[u8]`. A user method of that name keeps the ordinary path.
+        if ir_name_eq(e.name, make_name("as_bytes")) && self.lower_method_call_fn_id_ref(e) < 0 {
+            match e.args {
+                None => {
+                    match e.left {
+                        Some(recv_ab) => return self.lower_str_as_bytes_ref(&(*recv_ab)),
+                        None => {}
+                    }
+                }
+                Some(_) => {}
+            }
+        }
         if ir_name_eq(recv_type, make_name("Knowledge")) && ir_name_eq(e.name, make_name("unwrap")) {
             match e.args {
                 Some(reason_args) => {

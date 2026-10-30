@@ -9879,9 +9879,8 @@ fn checker_check_slice_borrow_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntr
                                     checker_report_mismatch_inplace(c, e.span, 55, ty_i64(), start_ty)
                                 }
                             }
-                            None => {
-                                checker_report_error_at_inplace(c, e.span, 13, 0, 0, 0)
-                            }
+                            // `&a[..hi]`: the start is 0.
+                            None => {}
                         }
                         match (*range_expr).right {
                             Some(end_expr) => {
@@ -9890,9 +9889,8 @@ fn checker_check_slice_borrow_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntr
                                     checker_report_mismatch_inplace(c, e.span, 55, ty_i64(), end_ty)
                                 }
                             }
-                            None => {
-                                checker_report_error_at_inplace(c, e.span, 13, 0, 0, 0)
-                            }
+                            // `&a[lo..]`: the end is the length.
+                            None => {}
                         }
                     }
                 }
@@ -11319,7 +11317,9 @@ fn checker_check_method_call_with_base_ty_inplace(c: *mut Checker, e: Expr, base
         checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
         checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
         if name_matches_str8(e.name, 97, 115, 95, 98, 121, 116, 101, 115) {
-            ty_ref(ty_i8())
+            // A fresh `[u8]` holding the string's bytes (lowered as a copy). It
+            // was typed `&i8`, which has no `.len()` and cannot be sliced.
+            ty_array(ty_u8(), 0 - 1)
         } else if name_matches_str3(e.name, 108, 101, 110) {
             ty_i64()
         } else {
@@ -13166,6 +13166,13 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
         let call_start_borrows = (*c).borrows
         checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
         checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
+        // The runtime `read_file` is bound import-unknown, so its result reached
+        // method calls with an unknown type (`read_file(p).as_bytes()`, `.len()`
+        // were E011). It returns the file's contents as a string; a user
+        // `read_file` has a signature and never reaches this arm.
+        if callee_ty.kind == TypeKind::TyUnknown && checker_callee_is_bare_ident(e.left, make_name("read_file")) {
+            return ty_string()
+        }
         callee_ty
     } else {
         // Enum tuple-variant constructor (`Event::B(42)`): the callee path typed as
@@ -21213,6 +21220,14 @@ fn call_expr_is_builtin_println(opt: Option<Box<Expr> >) -> bool with Mut, Panic
     }
 }
 
+// `callee` is the bare identifier `name` (not a path, not a method).
+fn checker_callee_is_bare_ident(callee: Option<Box<Expr> >, name: Name) -> bool with Mut, Panic, Div {
+    match callee {
+        Some(ce) => (*ce).kind == ExprKind::ExprIdent && name_eq((*ce).name, name)
+        None => false
+    }
+}
+
 // SIO-27 (#2760): the implicit IO builtins. lean_single requires the IO bit
 // for these names whenever they do not resolve to a user function; Madaros
 // bound them as import-unknown with no attributed effects, so a call in a
@@ -22917,9 +22932,19 @@ fn slice_borrow_result_type(base_ty: TypeEntry, want_mut: bool) -> TypeEntry wit
     }
 }
 
+// The operand of `&` / `&!` is a range index, `a[lo..hi]` (bounds optional).
+// This used to test whether the OPERAND itself was a range, but `&a[lo..hi]`
+// parses as Unary(&, Index(a, Range)), so the slice-borrow checker was never
+// reached and the range fell to the scalar index check (E014).
 fn expr_is_half_open_range(opt: Option<Box<Expr> >) -> bool {
     match opt {
-        Some(expr) => (*expr).kind == ExprKind::ExprRange && (*expr).bin_op == BinaryOp::OpRange
+        Some(expr) => {
+            if (*expr).kind != ExprKind::ExprIndex { return false }
+            match (*expr).right {
+                Some(idx) => (*idx).kind == ExprKind::ExprRange
+                None => false
+            }
+        }
         None => false
     }
 }
@@ -28469,9 +28494,7 @@ impl Checker {
                                         c = c.report_mismatch(e.span, 55, ty_i64(), start_pair.1)
                                     }
                                 }
-                                None => {
-                                    c = c.report_error_at(e.span, 13, 0, 0, 0)
-                                }
+                                None => {}
                             }
                             match (*range_expr).right {
                                 Some(end_expr) => {
@@ -28481,9 +28504,7 @@ impl Checker {
                                         c = c.report_mismatch(e.span, 55, ty_i64(), end_pair.1)
                                     }
                                 }
-                                None => {
-                                    c = c.report_error_at(e.span, 13, 0, 0, 0)
-                                }
+                                None => {}
                             }
                         }
                     }
@@ -28906,7 +28927,7 @@ impl Checker {
             c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
             // "as_bytes" = [97,115,95,98,121,116,101,115]
             if name_matches_str8(e.name, 97, 115, 95, 98, 121, 116, 101, 115) {
-                (c, ty_ref(ty_i8()))
+                (c, ty_array(ty_u8(), 0 - 1))
             // "len" = [108,101,110]
             } else if name_matches_str3(e.name, 108, 101, 110) {
                 (c, ty_i64())
@@ -29054,7 +29075,7 @@ impl Checker {
             c = c.check_expr_list_no_type_no_linear_consume(e.args)
             c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
             if name_matches_str8(e.name, 97, 115, 95, 98, 121, 116, 101, 115) {
-                (c, ty_ref(ty_i8()))
+                (c, ty_array(ty_u8(), 0 - 1))
             } else if name_matches_str3(e.name, 108, 101, 110) {
                 (c, ty_i64())
             } else {
