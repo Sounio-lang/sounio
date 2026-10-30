@@ -64,8 +64,22 @@ int main() {
                 static_cast<long long>(beta_posterior_confidence(500, 0.0, 1.0, 1.0)));
     const Ep s1 = update({0.0, 1.0, 500}, 1.0, 1.0, 2.0);
     const Ep s2 = update(s1, 2.0, 0.5, 2.0);
-    std::printf("SEQ val %.17g var %.17g conf %lld (after 1: conf %lld)\n", s2.val, s2.var,
-                static_cast<long long>(s2.conf), static_cast<long long>(s1.conf));
+    std::printf("CHAIN (update_belief twice) val %.17g var %.17g conf %lld (after 1: conf %lld)\n",
+                s2.val, s2.var, static_cast<long long>(s2.conf), static_cast<long long>(s1.conf));
+    // update_sequential: one Beta carried across both observations.
+    {
+        double alpha = 2.0 * 0.5, beta = 2.0 * 0.5, mean = 0.0, var = 1.0;
+        const double ov[2] = {1.0, 2.0}, ou[2] = {1.0, 0.5};
+        for (int i = 0; i < 2; ++i) {
+            const double pp = 1.0 / std::max(var, kFloor), op = 1.0 / std::max(ou[i], kFloor);
+            mean = (pp * mean + op * ov[i]) / (pp + op);
+            var = 1.0 / (pp + op);
+            alpha += std::trunc(op / pp * 10.0);
+            beta += 1.0;
+        }
+        std::printf("SEQ (cumulative) val %.17g var %.17g alpha %g beta %g conf %lld\n", mean, var, alpha,
+                    beta, static_cast<long long>(clamp_conf(static_cast<int64_t>(1000.0 * alpha / (alpha + beta) + 0.5))));
+    }
 
     const Ep cur{0.0, 1.0, 500};
     const double vr[3] = {0.5, 0.1, 0.9}, rw[3] = {0.0, 0.0, 1.0};

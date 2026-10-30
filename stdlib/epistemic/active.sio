@@ -362,9 +362,19 @@ pub fn update_belief(
 }
 
 // Sequential belief updating: observation i has value obs_values[i] and
-// variance obs_variances[i]. Slices of different lengths do not describe an
-// observation sequence and panic (fail closed) rather than updating on a
-// prefix.
+// variance obs_variances[i].
+//
+// The confidence is exact cumulative Bayes: the Beta prior is rebuilt from
+// prior.confidence once (mean c/1000, concentration
+// active_default_prior_strength()), every observation adds its counts
+// (successes = trunc(10 * obs_precision / current_precision), failures = 1) to
+// the same alpha and beta, and the result is rounded to 0..1000 only at the end.
+// Chaining update_belief instead would re-round the confidence and rebuild a
+// strength-2 prior at every step, discarding the evidence already counted.
+// The mean and variance follow the same precision weighting as update_belief.
+//
+// Slices of different lengths do not describe an observation sequence and
+// panic (fail closed) rather than updating on a prefix.
 pub fn update_sequential(
     prior: &Epistemic,
     obs_values: &[f64],
@@ -374,15 +384,31 @@ pub fn update_sequential(
     if obs_variances.len() != n {
         panic("update_sequential: obs_values and obs_variances differ in length")
     }
-    var current = ep_new(prior.val, prior.variance, prior.confidence)
+    let n0 = active_default_prior_strength()
+    let p0 = (ep_clamp_conf(prior.confidence) as f64) / 1000.0
+    var alpha = n0 * p0
+    var beta = n0 * (1.0 - p0)
+    var mean = prior.val
+    var variance = prior.variance
     var i: usize = 0
     while i < n {
         let ov = obs_values[i]
         let ou = obs_variances[i]
-        current = update_belief(&current, ov, ou)
+        let prior_prec = 1.0 / act_max(variance, active_variance_floor())
+        let obs_prec = 1.0 / act_max(ou, active_variance_floor())
+        let total_prec = prior_prec + obs_prec
+        mean = (prior_prec * mean + obs_prec * ov) / total_prec
+        variance = 1.0 / total_prec
+        alpha = alpha + act_trunc_count(obs_prec / prior_prec * 10.0)
+        beta = beta + 1.0
         i = i + 1
     }
-    current
+    let conf = if n == 0 {
+        ep_clamp_conf(prior.confidence)
+    } else {
+        ep_clamp_conf((1000.0 * alpha / (alpha + beta) + 0.5) as i64)
+    }
+    ep_new(mean, variance, conf)
 }
 
 // ============================================================================
