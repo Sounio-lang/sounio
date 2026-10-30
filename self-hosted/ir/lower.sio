@@ -9936,38 +9936,50 @@ var LOWER_PLACE_MOVE_OK: i64 = 0
 // Conservative "does `name` appear as an identifier anywhere in this expression":
 // every child field of the node is visited, and running out of depth answers
 // true. A miss here would drop an observable copy, so when in doubt it says yes.
-fn lower_expr_mentions_name(e: &Expr, name: Name, depth: i64) -> bool with Mut, Panic, Div {
+fn lower_expr_mentions_name(e: &Expr, name: Name, moved_field: Name, depth: i64) -> bool with Mut, Panic, Div {
     if depth > 64 { return true }
+    // With a moved field f, a later `p.g` (g != f) reads storage the move did not
+    // touch, so it is not a use; `p.f` and bare `p` are.
+    if moved_field.len > 0 && (*e).kind == ExprKind::ExprFieldAccess {
+        match (*e).left {
+            Some(fo) => {
+                if (*fo).kind == ExprKind::ExprIdent && ir_name_eq((*fo).name, name) {
+                    return ir_name_eq((*e).name, moved_field)
+                }
+            }
+            None => {}
+        }
+    }
     if (*e).kind == ExprKind::ExprIdent && ir_name_eq((*e).name, name) { return true }
     match (*e).left {
-        Some(x) => { if lower_expr_mentions_name(&(*x), name, depth + 1) { return true } }
+        Some(x) => { if lower_expr_mentions_name(&(*x), name, moved_field, depth + 1) { return true } }
         None => {}
     }
     match (*e).right {
-        Some(x) => { if lower_expr_mentions_name(&(*x), name, depth + 1) { return true } }
+        Some(x) => { if lower_expr_mentions_name(&(*x), name, moved_field, depth + 1) { return true } }
         None => {}
     }
     match (*e).else_expr {
-        Some(x) => { if lower_expr_mentions_name(&(*x), name, depth + 1) { return true } }
+        Some(x) => { if lower_expr_mentions_name(&(*x), name, moved_field, depth + 1) { return true } }
         None => {}
     }
     match (*e).closure_body {
-        Some(x) => { if lower_expr_mentions_name(&(*x), name, depth + 1) { return true } }
+        Some(x) => { if lower_expr_mentions_name(&(*x), name, moved_field, depth + 1) { return true } }
         None => {}
     }
     match (*e).block {
-        Some(b) => { if lower_stmt_list_mentions_name(&(*b).stmts, name, depth + 1) { return true } }
+        Some(b) => { if lower_stmt_list_mentions_name(&(*b).stmts, name, moved_field, depth + 1) { return true } }
         None => {}
     }
     match (*e).handler_block {
-        Some(b) => { if lower_stmt_list_mentions_name(&(*b).stmts, name, depth + 1) { return true } }
+        Some(b) => { if lower_stmt_list_mentions_name(&(*b).stmts, name, moved_field, depth + 1) { return true } }
         None => {}
     }
     var args = &(*e).args
     while true {
         match *args {
             Some(a) => {
-                if lower_expr_mentions_name(&(*a).head, name, depth + 1) { return true }
+                if lower_expr_mentions_name(&(*a).head, name, moved_field, depth + 1) { return true }
                 args = &(*a).tail
             }
             None => break
@@ -9978,10 +9990,10 @@ fn lower_expr_mentions_name(e: &Expr, name: Name, depth: i64) -> bool with Mut, 
         match *arms {
             Some(al) => {
                 match (*al).head.guard {
-                    Some(g) => { if lower_expr_mentions_name(&(*g), name, depth + 1) { return true } }
+                    Some(g) => { if lower_expr_mentions_name(&(*g), name, moved_field, depth + 1) { return true } }
                     None => {}
                 }
-                if lower_expr_mentions_name(&(*al).head.body, name, depth + 1) { return true }
+                if lower_expr_mentions_name(&(*al).head.body, name, moved_field, depth + 1) { return true }
                 arms = &(*al).tail
             }
             None => break
@@ -9991,7 +10003,7 @@ fn lower_expr_mentions_name(e: &Expr, name: Name, depth: i64) -> bool with Mut, 
     while true {
         match *fields {
             Some(fl) => {
-                if lower_expr_mentions_name(&(*fl).head.value, name, depth + 1) { return true }
+                if lower_expr_mentions_name(&(*fl).head.value, name, moved_field, depth + 1) { return true }
                 fields = &(*fl).tail
             }
             None => break
@@ -10000,18 +10012,18 @@ fn lower_expr_mentions_name(e: &Expr, name: Name, depth: i64) -> bool with Mut, 
     false
 }
 
-fn lower_stmt_list_mentions_name(opt: &Option<Box<StmtList>>, name: Name, depth: i64) -> bool with Mut, Panic, Div {
+fn lower_stmt_list_mentions_name(opt: &Option<Box<StmtList>>, name: Name, moved_field: Name, depth: i64) -> bool with Mut, Panic, Div {
     if depth > 64 { return true }
     var cur = opt
     while true {
         match *cur {
             Some(sl) => {
                 match (*sl).head.expr {
-                    Some(x) => { if lower_expr_mentions_name(&(*x), name, depth + 1) { return true } }
+                    Some(x) => { if lower_expr_mentions_name(&(*x), name, moved_field, depth + 1) { return true } }
                     None => {}
                 }
                 match (*sl).head.target {
-                    Some(x) => { if lower_expr_mentions_name(&(*x), name, depth + 1) { return true } }
+                    Some(x) => { if lower_expr_mentions_name(&(*x), name, moved_field, depth + 1) { return true } }
                     None => {}
                 }
                 cur = &(*sl).tail
@@ -10027,16 +10039,19 @@ fn lower_stmt_list_mentions_name(opt: &Option<Box<StmtList>>, name: Name, depth:
 //   - `pair` is bound by a `let`/`var` earlier in this same list whose
 //     initializer is a call (a call result is bound without a copy already,
 //     `let c = f()`, so the aliasing class is unchanged), and
-//   - `pair` is not mentioned in any later statement of the list (`tail`).
+//   - no later statement of the list (`tail`) mentions `pair` itself or
+//     `pair.f`; reading another field `pair.g` afterwards is allowed.
 // Same-list scope also covers loops: the body rebinds `pair` every iteration.
 // Madaros's own `let p = self.check_x(..); var c = p.0` sites copied the whole
 // Checker inline (~203 KB of code per function, 25 MB of gen2) and per call.
 fn lower_place_move_ok(start: &Option<Box<StmtList>>, idx: i64, head: &Stmt, tail: &Option<Box<StmtList>>) -> bool with Mut, Panic, Div {
     if (*head).kind != StmtKind::StmtLet && (*head).kind != StmtKind::StmtVar { return false }
     var owner = ir_empty_name()
+    var field = ir_empty_name()
     match (*head).expr {
         Some(rhs) => {
             if (*rhs).kind != ExprKind::ExprFieldAccess { return false }
+            field = (*rhs).name
             match (*rhs).left {
                 Some(o) => {
                     if (*o).kind != ExprKind::ExprIdent { return false }
@@ -10070,7 +10085,7 @@ fn lower_place_move_ok(start: &Option<Box<StmtList>>, idx: i64, head: &Stmt, tai
                     // An assignment to `owner` (or any statement touching it)
                     // between the binding and here: give up.
                     match (*sl).head.target {
-                        Some(t) => { if lower_expr_mentions_name(&(*t), owner, 0) { bound_by_call = false } }
+                        Some(t) => { if lower_expr_mentions_name(&(*t), owner, ir_empty_name(), 0) { bound_by_call = false } }
                         None => {}
                     }
                 }
@@ -10081,7 +10096,15 @@ fn lower_place_move_ok(start: &Option<Box<StmtList>>, idx: i64, head: &Stmt, tai
         i = i + 1
     }
     if !seen_binding || !bound_by_call { return false }
-    !lower_stmt_list_mentions_name(tail, owner, 0)
+    // Last use of the FIELD: a later `p.g` (g != f) is fine, `p.f` or bare `p`
+    // is not. This covers Madaros's own `let pair = self.check_x(..); var c =
+    // pair.0; let ty = pair.1` idiom (111 of 114 such sites read another field
+    // next), which copied the whole 109-field Checker per call: 94% of the IR of
+    // Checker_check_box_new_expr. Re-reading p.f keeps the copy, so a mutation
+    // of the binding is never visible through p.f (lean_single parity).
+    // Residual: a field g that aliases into f inside the returned value (e.g.
+    // `(c, c.borrows)`) would observe writes to the binding.
+    !lower_stmt_list_mentions_name(tail, owner, field, 0)
 }
 
 fn lower_type_expr_is_box(ty: &TypeExpr) -> bool with Mut, Panic, Div {

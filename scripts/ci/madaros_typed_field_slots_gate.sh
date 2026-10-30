@@ -112,7 +112,9 @@ pm_allocs() {
 }
 grep -q '^NV2_IR function fn=[0-9]* name=moved ' "$WORK/pm_ir.log" || fail "place_copy_move_last_use: the IR trace lists no function 'moved'"
 [[ "$(pm_allocs moved)" -eq 0 ]] || fail "place_copy_move_last_use: 'moved' still allocates ($(pm_allocs moved)); the last-use copy was not elided"
-for f in owner_read_later owner_outside_loop owner_from_literal; do
+[[ "$(pm_allocs tuple_moved)" -eq 0 ]] || fail "place_copy_move_last_use: 'tuple_moved' still allocates ($(pm_allocs tuple_moved)); .0 was copied although only .1 is read afterwards"
+[[ "$(pm_allocs named_field_moved)" -eq 0 ]] || fail "place_copy_move_last_use: 'named_field_moved' still allocates ($(pm_allocs named_field_moved)); p.s was copied although only p.tag is read afterwards"
+for f in owner_read_later owner_outside_loop owner_from_literal tuple_reread_after_move; do
   [[ "$(pm_allocs "$f")" -ge 1 ]] || fail "place_copy_move_last_use: '$f' allocates nothing; an observable SIO-278 copy was dropped"
 done
 
