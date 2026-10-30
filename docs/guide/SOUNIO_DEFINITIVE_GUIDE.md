@@ -62,15 +62,9 @@ fn main() with IO {
 // WRONG - Rust mutable reference
 fn foo(x: &mut i32) { *x = 42 }  // Should be &!i32 with Mut
 
-// WRONG - Rust implicit return
-fn add(a: i32, b: i32) -> i32 { a + b }  // Should have return
-
 // WRONG - Rust methods
 arr.len()    // No! Use manual tracking
 arr.push(1)  // No! Fixed arrays only
-
-// WRONG - Rust semicolons
-let x = 42;  // No semicolons!
 ```
 
 ### ✅ ALWAYS WRITE (Sounio Patterns):
@@ -80,20 +74,12 @@ fn foo(x: &!i32) with Mut {
     (*x) = 42  // EXPLICIT DEREFERENCE!
 }
 
-// CORRECT - Explicit return
-fn add(a: i32, b: i32) -> i32 {
-    return a + b  // EXPLICIT!
-}
-
 // CORRECT - Manual iteration
 var i = 0
 while i < array_size {
     // process array[i]
     i = i + 1
 }
-
-// CORRECT - No semicolons
-let x = 42  // Good!
 ```
 
 ## 3. 📋 DEFINITIVE Language Rules
@@ -179,11 +165,8 @@ println("Hello, Sounio!")
 - [ ] No Rust methods (`.len()`, `.push()`, etc.)
 
 ### ✅ MUST NOT HAVE
-- [ ] NO semicolons (except maybe in arrays?)
 - [ ] NO `Vec<T>` or heap types
 - [ ] NO `&mut` (use `&!`)
-- [ ] NO implicit returns (use `return`)
-- [ ] NO `.iter()` or for-each loops
 
 ## 6. 🎯 Quick Reference
 
@@ -219,9 +202,6 @@ println("Hello, Sounio!")
 2. **`.push()`** → Fixed arrays only
 3. **`&mut`** → `&!`
 4. **`Vec::new()`** → `[Type; Size]`
-5. **Semicolons** → Remove them
-6. **Implicit return** → Add `return`
-7. **`for x in iter`** → `while i < n`
 8. **Generics `<T>`** → Concrete types only
 
 ## 9. ✅ Verification Script
@@ -243,10 +223,6 @@ grep -n "&mut" *.sio
 # Check for Vec
 echo "\n3. Checking for Vec (should be fixed arrays):"
 grep -n "Vec" *.sio
-
-# Check for semicolons (except in array literals)
-echo "\n4. Checking for semicolons:"
-grep -n ";" *.sio | grep -v "^.*:\s*\[.*;.*\]" | head -20
 
 echo "\n✅ Validation complete"
 ```

@@ -1,6 +1,6 @@
 ---
 name: sounio-tests-suite
-description: "Add and maintain Sounio tests: `tests/run-pass`, `tests/compile-fail`, `tests/ui`, and Rust integration tests under `compiler/tests`; use when writing regressions or adjusting diagnostics expectations."
+description: "Add and maintain Sounio tests: `tests/run-pass`, `tests/compile-fail`, and `tests/ui`; use when writing regressions or adjusting diagnostics expectations."
 ---
 
 # Sounio Tests Suite
@@ -16,7 +16,6 @@ Write minimal, high-signal tests that protect language semantics, diagnostics, a
 - `tests/run-pass/`: should compile and run
 - `tests/compile-fail/`: should fail to compile
 - `tests/ui/`: diagnostics/error message matching via `//@ error-pattern:`
-- `compiler/tests/`: Rust integration tests for compiler subsystems
 
 ### 2) Keep tests small and explicit
 
@@ -25,8 +24,7 @@ Write minimal, high-signal tests that protect language semantics, diagnostics, a
 
 ### 3) Run the narrowest validation first
 
-- If you changed Rust compiler code: `cd compiler && cargo test <name>`
-- If you changed language behavior: run the smallest relevant test subset first
+- If you changed language behavior: run the smallest relevant test subset first with `./bin/souc check` or `./bin/souc run`
 
 ## References
 

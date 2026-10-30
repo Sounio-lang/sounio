@@ -11,7 +11,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.imple
 
 ## Overview
 
-Sounio already has a **production-ready string interning system** in `self-hosted/intern.sio`. This implementation provides significant memory savings through string deduplication.
+Sounio already has a **string interning system** in `self-hosted/intern.sio`. This implementation provides significant memory savings through string deduplication.
 
 ## Benchmark Results
 
@@ -342,7 +342,7 @@ struct Ident {
 
 ✅ **21.17% memory savings** demonstrated on self-hosted compiler
 
-✅ **Production-ready** with O(1) lookups and epistemic tracking
+✅ **O(1) lookups** and epistemic tracking in this note
 
 ✅ **Easy to integrate** - just thread interner through compiler phases
 

@@ -79,6 +79,11 @@ struct LowerLocalStack {
     // 32-63 of one i64 pushes array slot 31 onto the sign bit of the combined
     // value, corrupting it. See lower_fn_tuple_f64_array_mask.
     tuple_arr_mask: Box<LowerLocalI64Slots>,
+    // Tuple-typed local: bit k set iff element k is POSITIVELY an integer or
+    // bool (print_int kind 1). Own table for the same reason as tuple_arr_mask.
+    // Without it `let (st, v) = f()` left `st` at scalar kind 0 and
+    // `print(st)` was refused as "unresolved scalar kind".
+    tuple_int_mask: Box<LowerLocalI64Slots>,
     // Layout index for an aggregate element carried by a local: tuple slot-0
     // fixed arrays and Seq<T> share this slot because those shapes are disjoint.
     tuple0_array_elem_layout: Box<LowerLocalI64Slots>,
@@ -192,6 +197,30 @@ var FO_INLINE_CAP: i64 = 8
 var FO_INLINE_BUDGET: i64 = 96
 var FO_INLINE_COUNT: i64 = 0
 var FO_INLINE_TRUNCATED: i64 = 0
+// Virtual-register budget for a speculative FO paste. A paste re-lowers the
+// whole helper body for ONE field of its result, so a struct literal built
+// from N fields of helper calls pastes the helper N times: cd_product_16
+// (stdlib/math/cayley_dickson.sio) pasted the ~2000-vreg oct64_mul body once
+// per Sed16Comp field and ran fresh_reg past IR_MAX_VREGS. The paste's
+// instructions are rolled back on that hard error but its vregs are not (they
+// may carry float marks, see the rollback sites), so the function's REAL code
+// then found reg_count == IR_MAX_VREGS and the whole compile failed.
+// A paste is therefore admitted only while the function has room for the
+// largest paste seen so far plus FO_INLINE_VREG_SLACK for the real code that
+// follows. Refused pastes raise FO_INLINE_TRUNCATED like the depth/budget caps.
+var FO_INLINE_VREG_MAX_COST: i64 = 0
+let FO_INLINE_VREG_SLACK: i64 = 1024
+
+fn fo_inline_vreg_room_ok(reg_count: i64) -> bool {
+    reg_count <= IR_MAX_VREGS - FO_INLINE_VREG_MAX_COST - FO_INLINE_VREG_SLACK
+}
+
+fn fo_inline_note_vreg_cost(before: i64, after: i64) with Mut {
+    let cost = after - before
+    if cost > FO_INLINE_VREG_MAX_COST {
+        FO_INLINE_VREG_MAX_COST = cost
+    }
+}
 // Loop bodies are real IR. Re-lowering one is only sound for an explicit
 // uncertainty query. A straight-line helper is different: the sensitivity
 // has to be recorded on the let, or a later variance_of(local) reads the seed.
@@ -247,6 +276,7 @@ fn empty_lower_local_stack() -> LowerLocalStack with Alloc, Mut {
         scalar_kind: lowerer_box_local_i64_slots(0),
         tuple_float_mask: lowerer_box_local_i64_slots(0),
         tuple_arr_mask: lowerer_box_local_i64_slots(0),
+        tuple_int_mask: lowerer_box_local_i64_slots(0),
         tuple0_array_elem_layout: lowerer_box_local_i64_slots(-1),
         tuple_struct_layout: lowerer_box_local_i64_slots(-1),
         tuple_struct_slot: lowerer_box_local_i64_slots(-1),
@@ -1796,10 +1826,34 @@ var LOWER_HOF_TRANSPARENT_HASH: [i64; 4096] = [0; 4096]
 var LOWER_HOF_TRANSPARENT_LEN: [i64; 4096] = [0; 4096]
 var LOWER_HOF_TRANSPARENT_COUNT: i64 = 0
 
+// Integer/bool slots of a function's declared tuple return type, indexed by the
+// interned name id and stored as mask + 1 (0 = no tuple-returning fn recorded).
+// The first declaration collected under a name wins, the same precedence the
+// f64-array table uses (the owner's own items are collected first).
+var LOWER_FN_TUPLE_INT_MASK_BY_NID: [i64; 65537] = [0; 65537]
+
+fn lower_fn_tuple_int_mask_note(name: Name, rt: &TypeExpr) with Mut, Panic, Div {
+    if (*rt).kind != TypeExprKind::TypeTuple { return }
+    let nid = ir_intern_name(name)
+    if nid <= 0 || nid > 65536 { return }
+    if LOWER_FN_TUPLE_INT_MASK_BY_NID[nid as usize] != 0 { return }
+    LOWER_FN_TUPLE_INT_MASK_BY_NID[nid as usize] = lower_type_list_int_mask(&(*rt).type_args, 0) + 1
+}
+
+pub fn lower_fn_tuple_int_mask(name: Name) -> i64 with Mut, Panic, Div {
+    if name.len <= 0 { return 0 }
+    let nid = ir_intern_name(name)
+    if nid <= 0 || nid > 65536 { return 0 }
+    let stored = LOWER_FN_TUPLE_INT_MASK_BY_NID[nid as usize]
+    if stored <= 0 { return 0 }
+    stored - 1
+}
+
 pub fn lower_fn_tuple_arr_reset() with Mut {
     var oi: i64 = 0
     while oi < 65537 {
         LOWER_OPTION_BOX_RETURN_INNER[oi as usize] = 0
+        LOWER_FN_TUPLE_INT_MASK_BY_NID[oi as usize] = 0
         oi = oi + 1
     }
     LOWER_HOF_TRANSPARENT_COUNT = 0
@@ -1940,6 +1994,7 @@ fn lower_fn_tuple_f64_arrays_collect_one(name: Name, fd_opt_ref: &Option<Box<FnD
             match *rt_opt_ref {
                 Some(rt) => {
                     if (*rt).kind == TypeExprKind::TypeTuple {
+                        lower_fn_tuple_int_mask_note(name, &(*rt))
                         let mask = lower_type_list_f64_array_mask(&(*rt).type_args, 0)
                         // Table is sized to IR_MAX_FUNCS (ir.sio:35), the hard
                         // ceiling on the number of functions any program can
@@ -2643,6 +2698,11 @@ var LOWER_KERNEL_TID_REG: i64 = 0 - 1
 // #2766: the scrutinee of the match being lowered is a reference local, so a
 // struct-pattern arm reads its fields through the reference (field_get label 1).
 var LOWER_MATCH_SCRUT_IS_REF: bool = false
+// SIO-322: f64-element mask (bit k = element k is f64) of the tuple scrutinee
+// of the match being lowered, from expr_result_tuple_float_mask_ref at the
+// match site. Tuple-pattern element bindings/tests read it; 0 when the
+// scrutinee's element types are not known there (same limit as destructuring).
+var LOWER_MATCH_SCRUT_TUPLE_FLOAT_MASK: i64 = 0
 
 // Label of the lane-increment block while a `kernel fn` body is lowered; -1
 // outside a kernel. `return` inside a kernel ends THAT LANE, not the launch —
@@ -5212,6 +5272,21 @@ fn lower_opt_type_fixed_array_len(ty_opt: &Option<Box<TypeExpr>>) -> i64 {
     }
 }
 
+// SIO-311: the type is spelled `[T]` with no size expression -- an open,
+// growable array, as opposed to `[T; N]` (Some size, literal or not).
+fn lower_opt_type_is_dynamic_array(ty_opt: &Option<Box<TypeExpr>>) -> bool {
+    match *ty_opt {
+        Some(ty) => {
+            if (*ty).kind != TypeExprKind::TypeArray { return false }
+            match (*ty).array_size {
+                None => true,
+                Some(_) => false,
+            }
+        }
+        None => false,
+    }
+}
+
 fn lower_name_is_direct_word_scalar_type(n: Name) -> bool with Panic, Div {
     // Native-v2 local arrays use one boxed 8-byte slot per primitive element,
     // including narrow integers. Keep this list explicit so structs, nested
@@ -6429,6 +6504,7 @@ fn lowerer_bind_local_mut(
         // a plain f64 slot as an f64-ARRAY. Explicit 0, mirroring bind_local.
         (*(*locals_box).tuple_float_mask).values[idx as usize] = 0
         (*(*locals_box).tuple_arr_mask).values[idx as usize] = 0
+        (*(*locals_box).tuple_int_mask).values[idx as usize] = 0
         // Post-#2084: tuple0_array_elem_layout was added on main to track when a
         // tuple slot-0 is a fixed array, which gates the aggregate-shallow-copy path.
         (*(*locals_box).tuple0_array_elem_layout).values[idx as usize] = 0 - 1
@@ -6538,7 +6614,8 @@ fn lowerer_mark_local_tuple_masks_mut(
     lo: &! Lowerer,
     name: Name,
     float_mask: i64,
-    arr_mask: i64
+    arr_mask: i64,
+    int_mask: i64
 ) with Mut, Alloc, Panic, Div {
     var locals_box = (*lo).locals
     var i = (*locals_box).count - 1
@@ -6546,6 +6623,7 @@ fn lowerer_mark_local_tuple_masks_mut(
         if (*(*locals_box).depths).values[i as usize] <= (*lo).scope_depth && ir_name_eq((*(*locals_box).names).values[i as usize], name) {
             (*(*locals_box).tuple_float_mask).values[i as usize] = float_mask
             (*(*locals_box).tuple_arr_mask).values[i as usize] = arr_mask
+            (*(*locals_box).tuple_int_mask).values[i as usize] = int_mask
             (*lo).locals = locals_box
             return
         }
@@ -6997,7 +7075,8 @@ fn lowerer_lower_fn_params_mut(
                 }
                 let param_tuple_float_mask = if (*list).head.ty.kind == TypeExprKind::TypeTuple { lower_type_list_float_mask(&(*list).head.ty.type_args, 0) } else { 0 }
                 let param_tuple_arr_mask = if (*list).head.ty.kind == TypeExprKind::TypeTuple { lower_type_list_arr_mask(&(*list).head.ty.type_args, 0) } else { 0 }
-                lowerer_mark_local_tuple_masks_mut(lo, (*list).head.name, param_tuple_float_mask, param_tuple_arr_mask)
+                let param_tuple_int_mask = if (*list).head.ty.kind == TypeExprKind::TypeTuple { lower_type_list_int_mask(&(*list).head.ty.type_args, 0) } else { 0 }
+                lowerer_mark_local_tuple_masks_mut(lo, (*list).head.name, param_tuple_float_mask, param_tuple_arr_mask, param_tuple_int_mask)
                 let param_elem_wide_bits = lower_type_expr_array_elem_wide_bits(&(*list).head.ty)
                 if param_elem_wide_bits > 0 {
                     // V0-E.5.7: `[f128; N]` / `&[f128; N]` param — element reads are
@@ -8985,6 +9064,33 @@ fn lower_opt_type_tuple_arr_mask(opt: &Option<Box<TypeExpr>>) -> i64 with Mut, P
         Some(te) => {
             if (*te).kind != TypeExprKind::TypeTuple { return 0 }
             lower_type_list_arr_mask(&(*te).type_args, 0)
+        }
+        None => 0,
+    }
+}
+
+// Integer-slot counterpart of lower_type_list_float_mask: bit k set iff element
+// k of a declared tuple type is an integer or bool (both print as kind 1).
+fn lower_type_list_int_mask(opt: &Option<Box<TypeExprList>>, bit: i64) -> i64 with Mut, Panic, Div {
+    match *opt {
+        Some(list) => {
+            var m: i64 = 0
+            if bit < 32 {
+                if lower_type_expr_is_integer(&(*list).head) || lower_type_expr_is_bool(&(*list).head) {
+                    m = 1 << (bit as i32)
+                }
+            }
+            m + lower_type_list_int_mask(&(*list).tail, bit + 1)
+        }
+        None => 0,
+    }
+}
+
+fn lower_opt_type_tuple_int_mask(opt: &Option<Box<TypeExpr>>) -> i64 with Mut, Panic, Div {
+    match *opt {
+        Some(te) => {
+            if (*te).kind != TypeExprKind::TypeTuple { return 0 }
+            lower_type_list_int_mask(&(*te).type_args, 0)
         }
         None => 0,
     }
@@ -13756,6 +13862,42 @@ impl Lowerer {
     // nc_core_field_is_float / nc_core_mark_float_field. The index ops carry
     // four label_id-selected addressing variants (ref/BSS/param/local) that do
     // not apply to a struct handle.
+    // A zeroed struct slot is handle 0. An uninitialized `[T; N]` field must
+    // own storage before the first indexed store, or that store lands at 0x20.
+    fn emit_uninit_struct_array_fields(self, dst_reg: i64, type_name: Name, slot_count: i64) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        var i: i64 = 0
+        while i < slot_count && i < 128 {
+            let pos = lo.struct_layout_field_pos(type_name, i)
+            var n = lo.struct_layout_pos_array_len(pos)
+            let noted = lower_raw_arr_len_for(type_name, i)
+            if noted > n { n = noted }
+            if pos >= 0 {
+                let si = pos / 128
+                let fi = pos - si * 128
+                if si >= 0 && si < (*lo.struct_layouts).count {
+                    let field = (*lo.struct_layouts).entries[si as usize].fields[fi as usize]
+                    if field.fixed_array_len > n { n = field.fixed_array_len }
+                    if field.word_scalar_array_len > n { n = field.word_scalar_array_len }
+                }
+            }
+            if n > 0 {
+                let fname = lo.struct_layout_pos_field_name(pos)
+                let pair = lo.fresh_reg()
+                lo = pair.0
+                let arr = pair.1
+                lo = lo.emit(ir_alloc_array(arr, lo.aggregate_storage_bytes(n), n))
+                if lo.struct_layout_pos_is_float(pos) == 2 {
+                    lo = lo.emit(ir_mark_float_reg(arr))
+                    lo = lo.bind_reg_array_elem_float(arr)
+                }
+                lo = lo.emit(ir_field_set(dst_reg, i, arr, fname))
+            }
+            i = i + 1
+        }
+        lo
+    }
+
     fn emit_struct_value_copy(self, src_reg: i64, type_name: Name, slot_count: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         let pair_dst = self.fresh_reg()
         var lo = pair_dst.0
@@ -14148,6 +14290,312 @@ impl Lowerer {
         if self.lookup_local_is_ref(name) { return false }
         if self.lookup_local_is_global(name) { return false }
         true
+    }
+
+    // SIO-278: value-copy the aggregate a `let` reads through a deref or a
+    // field access, as `let copy = t` already does for a plain identifier
+    // (emit_ident_aggregate_value_copy). `let saved = *b` and `let s = o.f`
+    // bound the SOURCE storage, so a later write through the source showed
+    // through the binding: `(*b).a[0] = 99` changed `saved.a[0]`. The copy
+    // is the same budgeted deep copy the identifier path uses -- aggregate
+    // fields get fresh backing, Box fields keep reference semantics.
+    fn emit_place_aggregate_value_copy(self, e: &Expr, reg: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        let st = self.expr_receiver_struct_type_ref(e)
+        if st.len > 0 && !ir_name_is_box(st) && !ir_name_eq(st, make_name("Knowledge")) {
+            let slot_count = self.struct_layout_slot_count(st)
+            if slot_count > 0 {
+                // The unrolled copy costs ~2 instructions per slot at EVERY
+                // site, and deref/field reads of the compiler's own large
+                // AST structs are frequent enough that copying all of them
+                // pushed the gen2 self-compile past the native code buffer
+                // (149663889 > 134217728 bytes, SIO-278 first attempt). Emit
+                // the copy only where it changes an observable value: the
+                // type read has a word-scalar fixed-array field of its own
+                // (the deep copy then follows nested structs below it as
+                // usual). Copying every struct read this way -- even as an
+                // O(1) loop, even gated to small structs or to aggregates
+                // reachable through one nested struct -- still pushed gen2
+                // past the code buffer (134895818 > 134217728): deref/field
+                // reads are that frequent in the self-compile. A struct
+                // whose array fields sit behind a nested struct field, or
+                // that has none, keeps the pre-SIO-278 shared handle --
+                // the residual the size cap forces, never worse than the
+                // behaviour this replaces.
+                if self.struct_layout_has_array_field(st) {
+                    return self.emit_place_struct_value_copy(reg, st, slot_count)
+                }
+                return (self, reg)
+            }
+        }
+        if (*e).kind == ExprKind::ExprFieldAccess {
+            match (*e).left {
+                Some(owner) => {
+                    let owner_type = self.expr_receiver_struct_type_ref(&(*owner))
+                    let fld = self.struct_layout_field_array_info(owner_type, (*e).name)
+                    if fld.0 > 0 {
+                        return self.emit_fixed_array_value_copy(reg, fld.0, fld.1)
+                    }
+                }
+                None => {}
+            }
+        }
+        if (*e).kind == ExprKind::ExprUnary && (*e).un_op == UnaryOp::OpDeref {
+            match (*e).left {
+                Some(operand) => {
+                    if (*operand).kind == ExprKind::ExprIdent && self.lookup_local_is_ref((*operand).name) {
+                        let arr_len = self.lookup_local_fixed_array_len((*operand).name)
+                        if arr_len >= 0 && self.lookup_local_array_copy_word_scalar((*operand).name) {
+                            let elem_is_float = self.lookup_local_array_elem_float((*operand).name)
+                            return self.emit_fixed_array_value_copy(reg, arr_len, elem_is_float)
+                        }
+                    }
+                }
+                None => {}
+            }
+        }
+        (self, reg)
+    }
+
+    // Whether the registered layout of `type_name` has a word-scalar
+    // fixed-array field, read straight off the layout entries.
+    fn struct_layout_has_array_field(self, type_name: Name) -> bool with Mut, Panic, Div, Alloc {
+        if type_name.len <= 0 { return false }
+        var si: i64 = 0
+        while si < (*self.struct_layouts).count {
+            if ir_name_eq((*self.struct_layouts).entries[si as usize].type_name, type_name) {
+                var fi: i64 = 0
+                let fc = (*self.struct_layouts).entries[si as usize].field_count
+                while fi < fc && fi < 128 {
+                    if (*self.struct_layouts).entries[si as usize].fields[fi as usize].word_scalar_array_len > 0 { return true }
+                    fi = fi + 1
+                }
+                return false
+            }
+            si = si + 1
+        }
+        false
+    }
+
+    // SIO-278: whether a value copy of `type_name` would follow at least one
+    // aggregate field within the deep copy's depth cap -- a fixed-array
+    // field on the type itself, or on a nested struct field one level down
+    // (the deep copy follows depth 0 and 1 the same way). One pass over the
+    // layout entries per level: this runs at every deref/field `let` site,
+    // where the projected-cost walk (struct_deep_copy_cost) re-scans the
+    // layout registry per slot and made gen2 self-compile time explode.
+    fn struct_type_has_copyable_aggregate(self, type_name: Name) -> bool with Mut, Panic, Div, Alloc {
+        if self.struct_layout_has_array_field(type_name) { return true }
+        var si: i64 = 0
+        while si < (*self.struct_layouts).count {
+            if ir_name_eq((*self.struct_layouts).entries[si as usize].type_name, type_name) {
+                var fi: i64 = 0
+                let fc = (*self.struct_layouts).entries[si as usize].field_count
+                while fi < fc && fi < 128 {
+                    let entry = (*self.struct_layouts).entries[si as usize].fields[fi as usize]
+                    if entry.word_scalar_array_len <= 0 {
+                        let nested_name = ir_name_at(entry.named_type_name_id)
+                        if self.nested_struct_field_slot_count(nested_name) > 0 {
+                            if self.struct_layout_has_array_field(nested_name) { return true }
+                        }
+                    }
+                    fi = fi + 1
+                }
+                return false
+            }
+            si = si + 1
+        }
+        false
+    }
+
+    // SIO-278: flat value copy of a struct handle as a runtime LOOP over
+    // the slots -- ir_index_get/set address the same header-plus-words
+    // layout ir_field_get/set do -- so the emitted code is O(1) in the
+    // slot count instead of ~2 unrolled instructions per slot. Even gated
+    // to structs with a reachable aggregate or <= 16 slots, the unrolled
+    // copy pushed gen2 to code_bytes_needed=147171366 > 134217728. The
+    // descriptor records the slot count (ir_alloc_array) so a
+    // bounds-checked index stays in range. Scalar f64 fields additionally
+    // get an unrolled field_get/field_set pair: the native codegen tracks
+    // a field's float class per (register, index) from field stores, and
+    // the raw word loop would leave the fresh handle's f64 fields
+    // classified as int for later field reads.
+    fn emit_struct_value_copy_loop(self, src_reg: i64, type_name: Name, slot_count: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        let pair_dst = self.fresh_reg()
+        var lo = pair_dst.0
+        let dst_reg = pair_dst.1
+        lo = lo.emit(ir_alloc_array(dst_reg, lo.aggregate_storage_bytes(slot_count), slot_count))
+        if slot_count <= 0 {
+            return (lo, dst_reg)
+        }
+        let pair_idx = lo.emit_i64_const(0)
+        lo = pair_idx.0
+        let idx_reg = pair_idx.1
+        let pair_limit = lo.emit_i64_const(slot_count)
+        lo = pair_limit.0
+        let limit_reg = pair_limit.1
+        let pair_one = lo.emit_i64_const(1)
+        lo = pair_one.0
+        let one_reg = pair_one.1
+        let pair_top = lo.fresh_label()
+        lo = pair_top.0
+        let top_label = pair_top.1
+        let pair_end = lo.fresh_label()
+        lo = pair_end.0
+        let end_label = pair_end.1
+        lo = lo.emit(ir_label(top_label))
+        let pair_cond = lo.fresh_reg()
+        lo = pair_cond.0
+        let cond_reg = pair_cond.1
+        lo = lo.emit(ir_binop(cond_reg, idx_reg, BinaryOp::OpLt, limit_reg))
+        lo = lo.emit(ir_branch_false(cond_reg, end_label))
+        let pair_elem = lo.fresh_reg()
+        lo = pair_elem.0
+        let elem_reg = pair_elem.1
+        lo = lo.emit(ir_index_get(elem_reg, src_reg, idx_reg))
+        lo = lo.emit(ir_index_set(dst_reg, idx_reg, elem_reg))
+        let pair_next = lo.fresh_reg()
+        lo = pair_next.0
+        let next_reg = pair_next.1
+        lo = lo.emit(ir_binop(next_reg, idx_reg, BinaryOp::OpAdd, one_reg))
+        lo = lo.emit(ir_copy(idx_reg, next_reg))
+        lo = lo.emit(ir_jump(top_label))
+        lo = lo.emit(ir_label(end_label))
+        var i: i64 = 0
+        while i < slot_count && i < 128 {
+            let pos = lo.struct_layout_field_pos(type_name, i)
+            if lo.struct_layout_pos_is_float(pos) == 1 {
+                let fname = lo.struct_layout_pos_field_name(pos)
+                let pair_slot = lo.fresh_reg()
+                lo = pair_slot.0
+                let slot_reg = pair_slot.1
+                lo = lo.emit(ir_field_get(slot_reg, src_reg, i, fname))
+                lo = lo.emit(ir_field_set(dst_reg, i, slot_reg, fname))
+            }
+            i = i + 1
+        }
+        (lo, dst_reg)
+    }
+
+    // SIO-278: emit_struct_value_copy_deep with the flat part as the loop
+    // above; only the aggregate fields stay unrolled. The field handle is
+    // read back out of the fresh copy and replaced under the same
+    // null-handle guard the unrolled deep copy uses.
+    fn emit_struct_value_copy_deep_loop(self, src_reg: i64, type_name: Name, slot_count: i64, depth: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        let flat_pair = self.emit_struct_value_copy_loop(src_reg, type_name, slot_count)
+        var lo = flat_pair.0
+        let dst_reg = flat_pair.1
+        var i: i64 = 0
+        while i < slot_count && i < 128 {
+            let pos = lo.struct_layout_field_pos(type_name, i)
+            let fname = lo.struct_layout_pos_field_name(pos)
+            let arr_len = lo.struct_layout_pos_array_len(pos)
+            var nested_name = ir_empty_name()
+            var nested_slots: i64 = 0 - 1
+            if arr_len <= 0 && depth < lo.struct_deep_copy_max_depth() {
+                nested_name = lo.struct_layout_pos_named_type(pos)
+                nested_slots = lo.nested_struct_field_slot_count(nested_name)
+            }
+            if arr_len > 0 || nested_slots > 0 {
+                let pair_slot = lo.fresh_reg()
+                lo = pair_slot.0
+                let slot_reg = pair_slot.1
+                lo = lo.emit(ir_field_get(slot_reg, dst_reg, i, fname))
+                let pair_zero = lo.emit_i64_const(0)
+                lo = pair_zero.0
+                let zero_reg = pair_zero.1
+                let pair_cond = lo.fresh_reg()
+                lo = pair_cond.0
+                let cond_reg = pair_cond.1
+                lo = lo.emit(ir_binop(cond_reg, slot_reg, BinaryOp::OpNe, zero_reg))
+                let pair_skip = lo.fresh_label()
+                lo = pair_skip.0
+                let skip_label = pair_skip.1
+                lo = lo.emit(ir_branch_false(cond_reg, skip_label))
+                if arr_len > 0 {
+                    let elem_is_float = lo.struct_layout_pos_is_float(pos) == 2
+                    let arr_pair = lo.emit_fixed_array_value_copy(slot_reg, arr_len, elem_is_float)
+                    lo = arr_pair.0
+                    lo = lo.emit(ir_field_set(dst_reg, i, arr_pair.1, fname))
+                } else {
+                    let sub_pair = lo.emit_struct_value_copy_deep_loop(slot_reg, nested_name, nested_slots, depth + 1)
+                    lo = sub_pair.0
+                    lo = lo.emit(ir_field_set(dst_reg, i, sub_pair.1, fname))
+                }
+                lo = lo.emit(ir_label(skip_label))
+            }
+            i = i + 1
+        }
+        (lo, dst_reg)
+    }
+
+    // SIO-278: the budgeted copy for the deref/field path, with the cost
+    // estimated from direct layout reads. emit_struct_value_copy_budgeted
+    // prices the deep copy with struct_deep_copy_cost, which re-scans the
+    // layout registry for every slot; at deref/field `let` frequency that
+    // pricing dominated gen2 build time. This estimate reads each level's
+    // layout entries once. It only ever decides deep-vs-flat, and the flat
+    // copy is the documented floor, so a rough estimate is safe.
+    fn emit_place_struct_value_copy(self, src_reg: i64, type_name: Name, slot_count: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        if self.struct_type_has_copyable_aggregate(type_name) {
+            let deep_room = IR_MAX_INSTRS - self.struct_deep_copy_instr_headroom() - self.current_func.instr_count
+            if self.place_deep_copy_cost(type_name, slot_count, 0) <= deep_room {
+                return self.emit_struct_value_copy_deep_loop(src_reg, type_name, slot_count, 0)
+            }
+        }
+        self.emit_struct_value_copy_loop(src_reg, type_name, slot_count)
+    }
+
+    fn place_deep_copy_cost(self, type_name: Name, slot_count: i64, depth: i64) -> i64 with Mut, Panic, Div, Alloc {
+        var total: i64 = self.struct_deep_copy_array_cost()
+        var si: i64 = 0
+        while si < (*self.struct_layouts).count {
+            if ir_name_eq((*self.struct_layouts).entries[si as usize].type_name, type_name) {
+                var fi: i64 = 0
+                let fc = (*self.struct_layouts).entries[si as usize].field_count
+                while fi < fc && fi < 128 {
+                    let entry = (*self.struct_layouts).entries[si as usize].fields[fi as usize]
+                    if entry.index >= 0 && entry.index < slot_count {
+                        if entry.is_float == 1 { total = total + 2 }
+                        if entry.word_scalar_array_len > 0 {
+                            total = total + self.struct_deep_copy_guard_cost() + self.struct_deep_copy_array_cost()
+                        } else if depth < self.struct_deep_copy_max_depth() {
+                            let nested_name = ir_name_at(entry.named_type_name_id)
+                            let nested_slots = self.nested_struct_field_slot_count(nested_name)
+                            if nested_slots > 0 {
+                                total = total + self.struct_deep_copy_guard_cost() + self.place_deep_copy_cost(nested_name, nested_slots, depth + 1)
+                            }
+                        }
+                    }
+                    fi = fi + 1
+                }
+                return total
+            }
+            si = si + 1
+        }
+        total
+    }
+
+    // (word-scalar element count, element is float) of a fixed-array FIELD
+    // addressed by name; (0, false) when the field is not one.
+    fn struct_layout_field_array_info(self, type_name: Name, field_name: Name) -> (i64, bool) with Mut, Panic, Div, Alloc {
+        if type_name.len <= 0 || field_name.len <= 0 { return (0, false) }
+        var si: i64 = 0
+        while si < (*self.struct_layouts).count {
+            if ir_name_eq((*self.struct_layouts).entries[si as usize].type_name, type_name) {
+                var fi: i64 = 0
+                let fc = (*self.struct_layouts).entries[si as usize].field_count
+                while fi < fc && fi < 128 {
+                    if ir_name_eq(ir_name_at((*self.struct_layouts).entries[si as usize].fields[fi as usize].name_id), field_name) {
+                        let entry = (*self.struct_layouts).entries[si as usize].fields[fi as usize]
+                        return (entry.word_scalar_array_len, entry.is_float == 1)
+                    }
+                    fi = fi + 1
+                }
+                return (0, false)
+            }
+            si = si + 1
+        }
+        (0, false)
     }
 
     fn expr_is_zero_fill_value(self, e: Expr) -> bool {
@@ -14825,6 +15273,7 @@ impl Lowerer {
                 if idx < 4096 { LOWER_RGN_NUM_SLOT_EPOCH[idx as usize] = 0 }
                 (*(*stk).tuple_float_mask).values[idx as usize] = 0
                 (*(*stk).tuple_arr_mask).values[idx as usize] = 0
+                (*(*stk).tuple_int_mask).values[idx as usize] = 0
                 (*(*stk).tuple0_array_elem_layout).values[idx as usize] = 0 - 1
                 (*(*stk).tuple_struct_layout).values[idx as usize] = 0 - 1
                 (*(*stk).tuple_struct_slot).values[idx as usize] = 0 - 1
@@ -14925,6 +15374,89 @@ impl Lowerer {
             i = i - 1
         }
         lo
+    }
+
+    // Integer-slot counterpart of bind_local_tuple_arr_mask (tuple_int_mask).
+    fn bind_local_tuple_int_mask(self, name: Name, mask: i64) -> Lowerer with Mut, Alloc, Panic, Div {
+        var lo = self
+        if mask == 0 { return lo }
+        var stk = *lo.locals
+        var i = stk.count - 1
+        while i >= 0 {
+            if (*stk.depths).values[i as usize] <= lo.scope_depth && ir_name_eq((*stk.names).values[i as usize], name) {
+                (*stk.tuple_int_mask).values[i as usize] = mask
+                lo.locals = Box::new(stk)
+                return lo
+            }
+            i = i - 1
+        }
+        lo
+    }
+
+    fn lookup_local_tuple_int_mask(self, name: Name) -> i64 with Mut, Panic, Div, Alloc {
+        var i = (*self.locals).count - 1
+        while i >= 0 {
+            if (*(*self.locals).depths).values[i as usize] <= self.scope_depth && ir_name_eq((*(*self.locals).names).values[i as usize], name) {
+                return (*(*self.locals).tuple_int_mask).values[i as usize]
+            }
+            i = i - 1
+        }
+        0
+    }
+
+    // Integer slots of a tuple-producing expression: a call or method call
+    // (declared return type), an alias of a tracked tuple local, or a tuple
+    // literal whose element is positively an integer.
+    fn expr_result_tuple_int_mask_ref(self, e: &Expr) -> i64 with Mut, Panic, Div, Alloc {
+        if (*e).kind == ExprKind::ExprIdent {
+            return self.lookup_local_tuple_int_mask((*e).name)
+        }
+        if (*e).kind == ExprKind::ExprCall {
+            match (*e).left {
+                Some(callee_expr) => {
+                    let callee_name = self.expr_to_callee_name_ref(&(*callee_expr))
+                    return lower_fn_tuple_int_mask(callee_name)
+                }
+                None => { return 0 }
+            }
+        }
+        if (*e).kind == ExprKind::ExprMethodCall {
+            let recv_type = self.lower_method_recv_type(&(*e).left)
+            if recv_type.len <= 0 { return 0 }
+            return lower_fn_tuple_int_mask(ir_mangle_method_name(recv_type, (*e).name))
+        }
+        if (*e).kind == ExprKind::ExprTupleLit {
+            var m: i64 = 0
+            var bit: i64 = 0
+            var cur = &(*e).args
+            while bit < 32 {
+                match *cur {
+                    Some(list) => {
+                        if self.expr_result_scalar_kind_ref(&(*list).head) == 1 {
+                            m = m | (1 << (bit as i32))
+                        }
+                        bit = bit + 1
+                        cur = &(*list).tail
+                    }
+                    None => { break }
+                }
+            }
+            return m
+        }
+        0
+    }
+
+    // `t.K` where slot K of the tuple local / call `t` is positively an integer.
+    fn tuple_slot_is_int_ref(self, e: &Expr) -> bool with Mut, Panic, Div, Alloc {
+        let k = lower_name_tuple_index((*e).name)
+        if k < 0 || k >= 32 { return false }
+        match (*e).left {
+            Some(base) => {
+                let m = self.expr_result_tuple_int_mask_ref(&(*base))
+                ((m >> (k as i32)) & 1) == 1
+            }
+            None => false,
+        }
     }
 
     fn bind_local_tuple_struct(self, name: Name, layout_idx: i64, slot: i64) -> Lowerer with Mut, Alloc, Panic, Div {
@@ -19639,6 +20171,18 @@ impl Lowerer {
     // as a pure helper: an f64 parameter carries the argument's variance and
     // sensitivities; a loop, match or nested closure was not recorded.
     fn fo_closure_call_variance(self, local: Name, args: &Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        let regs_before = (*self.current_func).reg_count
+        if !fo_inline_vreg_room_ok(regs_before) {
+            FO_INLINE_TRUNCATED = 1
+            return (self, 0 - 1)
+        }
+        let r = self.fo_closure_call_variance_paste(local, args)
+        let lo_r = r.0
+        fo_inline_note_vreg_cost(regs_before, (*lo_r.current_func).reg_count)
+        (lo_r, r.1)
+    }
+
+    fn fo_closure_call_variance_paste(self, local: Name, args: &Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         var lo = self
         if FO_INLINE_DEPTH >= 8 {
             FO_INLINE_TRUNCATED = 1
@@ -21262,7 +21806,20 @@ impl Lowerer {
     // `path[0..npath]` (root to leaf) projects a field out of a struct-returning
     // callee: the tail must be a struct literal (directly, or the last `let`'s
     // right-hand side), and the variance is that of the leaf field's initialiser.
+    // Vreg-budget gate around every helper paste (see FO_INLINE_VREG_MAX_COST).
     fn fo_inline_call_variance_ex(self, callee: Name, args: &Option<Box<ExprList>>, recv: Name, has_recv: bool, path: [Name; 8], npath: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        let regs_before = (*self.current_func).reg_count
+        if !fo_inline_vreg_room_ok(regs_before) {
+            FO_INLINE_TRUNCATED = 1
+            return (self, 0 - 1)
+        }
+        let r = self.fo_inline_call_variance_paste(callee, args, recv, has_recv, path, npath)
+        let lo_r = r.0
+        fo_inline_note_vreg_cost(regs_before, (*lo_r.current_func).reg_count)
+        (lo_r, r.1)
+    }
+
+    fn fo_inline_call_variance_paste(self, callee: Name, args: &Option<Box<ExprList>>, recv: Name, has_recv: bool, path: [Name; 8], npath: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         var lo = self
         if FO_INLINE_DEPTH >= FO_INLINE_CAP || FO_INLINE_DEPTH >= 8 {
             FO_INLINE_TRUNCATED = 1
@@ -22839,11 +23396,14 @@ impl Lowerer {
                             let stmt_ref = &(*list).head
                             // Only a let that is safe to evaluate twice: the value
                             // path has already run this arm once.
-                            if stmt_ref.kind == StmtKind::StmtLet {
+                            if stmt_ref.kind == StmtKind::StmtLet && !skip_later_expr {
                                 if lower_opt_expr_relower_safe(&stmt_ref.expr) {
                                     let lp = lo.lower_let_stmt_ref(stmt_ref, false)
                                     lo = lp.0
                                 } else {
+                                    // Later aliases may name this unbound local.
+                                    // Keep the whole remaining replay unknown;
+                                    // do not lower those initializers either.
                                     skip_later_expr = true
                                 }
                             }
@@ -25718,6 +26278,9 @@ impl Lowerer {
             if self.field_is_int_for_base_ref(&(*e).left, (*e).name) || self.field_is_int_by_name_simple((*e).name) {
                 return 1
             }
+            if self.tuple_slot_is_int_ref(e) {
+                return 1
+            }
         }
         // println i64-segfault fix (array-element axis): an array subscript `a[i]`
         // (including a struct-field array `s.c[i]`) yields a scalar element. The
@@ -26826,6 +27389,7 @@ impl Lowerer {
                         // not leak into this param.
                         (*(*locals).tuple_float_mask).values[idx as usize] = if (*list).head.ty.kind == TypeExprKind::TypeTuple { lower_type_list_float_mask(&(*list).head.ty.type_args, 0) } else { 0 }
                         (*(*locals).tuple_arr_mask).values[idx as usize] = if (*list).head.ty.kind == TypeExprKind::TypeTuple { lower_type_list_arr_mask(&(*list).head.ty.type_args, 0) } else { 0 }
+                        (*(*locals).tuple_int_mask).values[idx as usize] = if (*list).head.ty.kind == TypeExprKind::TypeTuple { lower_type_list_int_mask(&(*list).head.ty.type_args, 0) } else { 0 }
                         (*(*locals).box_inner_layout).values[idx as usize] = lower_struct_layout_index_of(&(*lo.struct_layouts), lower_box_or_option_inner_type_name(&(*list).head.ty))
                         if lower_type_expr_is_box(&(*list).head.ty) && lower_box_trace_enabled(1) {
                             print("boxtrace: WRITE-B ")
@@ -28328,10 +28892,12 @@ impl Lowerer {
         // left with the twin of the bug just fixed.
         var rhs_tuple_arr_mask: i64 = 0
         var rhs_tuple_mask: i64 = 0
+        var rhs_tuple_int_mask: i64 = 0
         match s.expr {
             Some(rhs_mask_pre) => {
                 rhs_tuple_arr_mask = lo.expr_result_tuple_arr_mask_ref(&(*rhs_mask_pre))
                 rhs_tuple_mask = lo.expr_result_tuple_float_mask_ref(&(*rhs_mask_pre))
+                rhs_tuple_int_mask = lo.expr_result_tuple_int_mask_ref(&(*rhs_mask_pre))
             }
             _ => {}
         }
@@ -28396,6 +28962,9 @@ impl Lowerer {
                         lo = uninit_pair.0
                         let uninit_dst = uninit_pair.1
                         lo = lo.emit(ir_alloc(uninit_dst, lo.aggregate_storage_bytes(st_slot_count)))
+                        // Array fields are handles, not inline words. A zero slot
+                        // is handle 0, and the first indexed store lands at 0x20.
+                        lo = lo.emit_uninit_struct_array_fields(uninit_dst, st_name, st_slot_count)
                         lo = lo.bind_local_struct_type(s.name, st_name, false)
                         bind_reg = uninit_dst
                     }
@@ -28454,6 +29023,15 @@ impl Lowerer {
                         lo = lo.emit(ir_copy(copy_reg, reg))
                         bind_reg = copy_reg
                     }
+                } else if (*rhs_ident).kind == ExprKind::ExprUnary || (*rhs_ident).kind == ExprKind::ExprFieldAccess {
+                    // SIO-278: `let saved = *b` / `let s = o.f` bound the
+                    // source storage itself, so `(*b).a[0] = 99` showed
+                    // through `saved.a[0]` (lean_single prints the copied
+                    // value). Apply the same value copy the identifier path
+                    // above applies; non-aggregate places keep the handle.
+                    let place_pair = lo.emit_place_aggregate_value_copy(&(*rhs_ident), reg)
+                    lo = place_pair.0
+                    bind_reg = place_pair.1
                 }
             }
             _ => {}
@@ -28503,6 +29081,13 @@ impl Lowerer {
             lo = lo.bind_local_tuple_arr_mask(s.name, annotated_tuple_arr_mask)
         } else if rhs_tuple_arr_mask != 0 {
             lo = lo.bind_local_tuple_arr_mask(s.name, rhs_tuple_arr_mask)
+        }
+        // Integer-slot counterpart, same precedence (annotation, then initialiser).
+        let annotated_tuple_int_mask = lower_opt_type_tuple_int_mask(&s.ty)
+        if annotated_tuple_int_mask != 0 {
+            lo = lo.bind_local_tuple_int_mask(s.name, annotated_tuple_int_mask)
+        } else if rhs_tuple_int_mask != 0 {
+            lo = lo.bind_local_tuple_int_mask(s.name, rhs_tuple_int_mask)
         }
         // See the `var out: SomeStruct` (no initializer) note above: the local
         // must exist on the stack (bind_local, just above) before
@@ -28733,7 +29318,13 @@ impl Lowerer {
         if raw_pointee.len > 0 && lower_struct_layout_index_of(&(*lo.struct_layouts), raw_pointee) >= 0 {
             lo = lo.bind_local_struct_type(s.name, raw_pointee, false)
         }
-        if fixed_array_len >= 0 {
+        if lower_opt_type_is_dynamic_array(&s.ty) {
+            // SIO-311: an annotated `[T]` stays dynamic even when its
+            // initializer is a literal of known length; recording that
+            // length here would mark the local as a fixed array and hide
+            // it from the .push path.
+            lo = lo.bind_local_fixed_array_len(s.name, 0 - 1)
+        } else if fixed_array_len >= 0 {
             lo = lo.bind_local_fixed_array_len(s.name, fixed_array_len)
         }
         if fixed_array_word_scalar {
@@ -31571,6 +32162,44 @@ impl Lowerer {
             lo = lo.emit(ir_jump(l_end))
             lo = lo.emit(ir_label(l_skip))
             lo
+        } else if pat.kind == PatternKind::PatStringLit {
+            // SIO-322: string literal -- content-compare via str_eq, exactly
+            // like `s == "lit"`. Before, this fell to "Unsupported pattern --
+            // skip" below, so a string match silently never matched and every
+            // scrutinee took the wildcard arm.
+            let pair_l = self.fresh_label()
+            var lo = pair_l.0
+            let l_skip = pair_l.1
+            lo = lo.lower_string_eq_test(scrut, pat.name, l_skip)
+            lo = lo.lower_arm_guard(&arm.guard, l_skip)
+            let pair_b = lo.lower_expr_ref(&arm.body)
+            lo = pair_b.0
+            let body_reg = pair_b.1
+            lo = lo.emit(ir_copy(res, body_reg))
+            lo = lo.emit(ir_jump(l_end))
+            lo = lo.emit(ir_label(l_skip))
+            lo
+        } else if pat.kind == PatternKind::PatTuple {
+            // SIO-322: tuple pattern -- test/bind each element slot of the
+            // scrutinee aggregate. Before, this fell to "Unsupported pattern
+            // -- skip" below, so `(0, _) => ..` never matched and even the
+            // irrefutable `(a, b) => ..` arm silently did not run.
+            let pair_l = self.fresh_label()
+            var lo = pair_l.0
+            let l_skip = pair_l.1
+            let pt = lo.lower_tuple_pattern_elements(scrut, &pat.sub_patterns, 0, l_skip, LOWER_MATCH_SCRUT_TUPLE_FLOAT_MASK)
+            lo = pt.0
+            if !pt.1 {
+                return lo.lower_match_pattern_refused("a tuple-pattern element (supported elements: bindings, `_`, integer/bool/string literals, nested tuples of those)")
+            }
+            lo = lo.lower_arm_guard(&arm.guard, l_skip)
+            let pair_b = lo.lower_expr_ref(&arm.body)
+            lo = pair_b.0
+            let body_reg = pair_b.1
+            lo = lo.emit(ir_copy(res, body_reg))
+            lo = lo.emit(ir_jump(l_end))
+            lo = lo.emit(ir_label(l_skip))
+            lo
         } else if pat.kind == PatternKind::PatStruct {
             // #2766: `S { a, b: y, c: _ } => body` on a struct scrutinee is
             // irrefutable: bind each field from the scrutinee and run the arm.
@@ -31590,8 +32219,105 @@ impl Lowerer {
             lo = lo.emit(ir_label(l_skip))
             lo
         } else {
-            // Unsupported pattern — skip
-            self
+            // SIO-322: an unhandled pattern kind used to land here and the arm
+            // was silently skipped, so the match picked a later arm (or the
+            // 0 the end label loads) with check: OK. Every PatternKind is
+            // handled above; refuse fail-closed rather than skip.
+            self.lower_match_pattern_refused("this pattern kind")
+        }
+    }
+
+    // SIO-322: fail-closed refusal for a match pattern this lowerer cannot
+    // test honestly, in the shape of lower_option_pattern_refused.
+    fn lower_match_pattern_refused(self, what: string) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        print("error: Madaros cannot lower this match pattern: ")
+        print(what)
+        print(" (supported: `_`, bindings, module-level constants, integer/bool/string literals, enum variants, struct field patterns, or-patterns of literals, tuple patterns of those). Refused rather than silently skipping the arm.\n")
+        var lo = self
+        lowerer_mark_hard_error(&! lo)
+        lo
+    }
+
+    // SIO-322: emit `str_eq(lhs, lit)` and branch to l_skip when not equal --
+    // the same content compare `s == "lit"` lowers to (34663).
+    fn lower_string_eq_test(self, lhs: i64, lit: Name, l_skip: i64) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        let lit_name = ir_normalize_string_literal_name(lit)
+        let pair_idx = self.intern_string(lit_name)
+        var lo = pair_idx.0
+        let idx = pair_idx.1
+        let pair_reg = lo.fresh_reg()
+        lo = pair_reg.0
+        let lit_reg = pair_reg.1
+        lo = lo.emit(ir_load_string(lit_reg, idx, lit_name))
+        let se_fn = lowerer_find_or_add_fn_id_mut(&! lo, make_name("str_eq"))
+        let se_args: Option<Box<IrRegList>> = Some(Box::new(ir_reg_list_cons(lhs, Some(Box::new(ir_reg_list_single(lit_reg))))))
+        let pair_eq = lo.fresh_reg()
+        lo = pair_eq.0
+        let eq_reg = pair_eq.1
+        lo = lo.emit(ir_call(eq_reg, se_fn, make_name("str_eq"), se_args, 2))
+        lo.emit(ir_branch_false(eq_reg, l_skip))
+    }
+
+    // SIO-322: test/bind tuple element slots against sub-patterns, in order.
+    // Any failing test branches to l_skip. Returns false when a sub-pattern
+    // kind is unsupported (the caller refuses fail-closed). float_mask bit k
+    // marks element k as f64 (only known for the outermost tuple; nested
+    // tuples pass 0, the same limit destructuring has).
+    fn lower_tuple_pattern_elements(self, scrut: i64, pats: &Option<Box<PatternList> >, idx: i64, l_skip: i64, float_mask: i64) -> (Lowerer, bool) with Mut, Panic, Div, Alloc, IO {
+        match *pats {
+            Some(list) => {
+                let pair_e = self.fresh_reg()
+                var lo = pair_e.0
+                let elem = pair_e.1
+                lo = lo.emit(ir_field_get(elem, scrut, idx, ir_empty_name()))
+                let is_float = idx < 63 && ((float_mask >> idx) & 1) == 1
+                if is_float {
+                    lo = lo.emit(ir_mark_float_reg(elem))
+                }
+                let ps = lo.lower_tuple_subpattern(elem, &(*list).head, l_skip, is_float)
+                lo = ps.0
+                if !ps.1 {
+                    return (lo, false)
+                }
+                lo.lower_tuple_pattern_elements(scrut, &(*list).tail, idx + 1, l_skip, float_mask)
+            }
+            None => (self, true),
+        }
+    }
+
+    fn lower_tuple_subpattern(self, elem: i64, sub: &Pattern, l_skip: i64, is_float: bool) -> (Lowerer, bool) with Mut, Panic, Div, Alloc, IO {
+        if (*sub).kind == PatternKind::PatWildcard {
+            (self, true)
+        } else if (*sub).kind == PatternKind::PatBinding {
+            var lo = self.bind_local((*sub).name, elem, (*sub).is_mut)
+            if is_float {
+                lo = lo.bind_local_scalar_kind((*sub).name, 2)
+            }
+            (lo, true)
+        } else if (*sub).kind == PatternKind::PatIntLit {
+            if is_float {
+                (self, false)
+            } else {
+                let pair_d = self.fresh_reg()
+                var lo = pair_d.0
+                let lit_reg = pair_d.1
+                lo = lo.emit(ir_load_imm(lit_reg, (*sub).int_val))
+                let pair_c = lo.fresh_reg()
+                lo = pair_c.0
+                let cmp_reg = pair_c.1
+                lo = lo.emit(ir_binop(cmp_reg, elem, BinaryOp::OpEq, lit_reg))
+                (lo.emit(ir_branch_false(cmp_reg, l_skip)), true)
+            }
+        } else if (*sub).kind == PatternKind::PatBoolTrue {
+            if is_float { (self, false) } else { (self.emit(ir_branch_false(elem, l_skip)), true) }
+        } else if (*sub).kind == PatternKind::PatBoolFalse {
+            if is_float { (self, false) } else { (self.emit(ir_branch_true(elem, l_skip)), true) }
+        } else if (*sub).kind == PatternKind::PatStringLit {
+            if is_float { (self, false) } else { (self.lower_string_eq_test(elem, (*sub).name, l_skip), true) }
+        } else if (*sub).kind == PatternKind::PatTuple {
+            self.lower_tuple_pattern_elements(elem, &(*sub).sub_patterns, 0, l_skip, 0)
+        } else {
+            (self, false)
         }
     }
 
@@ -34457,7 +35183,47 @@ impl Lowerer {
         }
     }
 
+    // `a && b` and `a || b` short-circuit (ADR-014, closing EXEC-040): the
+    // right operand is evaluated only when the left one does not decide the
+    // result. lower_binary_expr_ref used to lower both operands before the
+    // binop, so `n.len > 5 && n.buf[0] == 95` read n.buf even when the length
+    // check failed. lean_single short-circuits, Madaros's own source relies on
+    // it, and gen2 trapped on exactly that guard in checker_name_is_destructure_temp
+    // (#2966).
+    //
+    //   res = lhs
+    //   && : if !lhs goto end      || : if lhs goto end
+    //   res = rhs
+    //   end:
+    fn lower_short_circuit_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        let pair_l = self.lower_opt_expr_ref(&e.left)
+        var lo = pair_l.0
+        let lhs = pair_l.1
+        lo.pending_variance_reg = -1
+        let pair_res = lo.fresh_reg()
+        lo = pair_res.0
+        let res = pair_res.1
+        lo = lo.emit(ir_copy(res, lhs))
+        let pair_end = lo.fresh_label()
+        lo = pair_end.0
+        let end_label = pair_end.1
+        if e.bin_op == BinaryOp::OpAnd {
+            lo = lo.emit(ir_branch_false(lhs, end_label))
+        } else {
+            lo = lo.emit(ir_branch_true(lhs, end_label))
+        }
+        let pair_r = lo.lower_opt_expr_ref(&e.right)
+        lo = pair_r.0
+        lo.pending_variance_reg = -1
+        lo = lo.emit(ir_copy(res, pair_r.1))
+        lo = lo.emit(ir_label(end_label))
+        (lo, res)
+    }
+
     fn lower_binary_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        if e.bin_op == BinaryOp::OpAnd || e.bin_op == BinaryOp::OpOr {
+            return self.lower_short_circuit_ref(e)
+        }
         // V0-E.4.1 fail-closed: never lower f128/f256 ops as f64 (lean_single greenwash).
         // V0-E.5.1: same-format f128 + / - on 2-limb locals desugars to stdlib softfloat.
         // V0-E.5.2: * and the six comparisons (bool result). V0-E.5.3: `/`. KL-8: `%`.
@@ -34471,6 +35237,20 @@ impl Lowerer {
             var lo_refuse = self
             lowerer_mark_hard_error(&! lo_refuse)
             return (lo_refuse, 0)
+        }
+        // Fail-closed: array `++` has no native-v2 lowering yet. The checker
+        // admits OpConcat only for string++string and array++array; the string
+        // arm below routes to str_concat, but an array concat fell through to
+        // a generic IrBinOp that nc_emit_core_binop has no Concat arm for, so
+        // the compile died as bare rc=12 naming nothing (Native-v2 gaps card).
+        // Refuse by name until the alloc+copy lowering exists.
+        if e.bin_op == BinaryOp::OpConcat
+            && !self.opt_expr_result_is_string_ref(&e.left)
+            && !self.opt_expr_result_is_string_ref(&e.right) {
+            print("error: array concatenation (BinaryOp::OpConcat) is not implemented on Madaros native-v2 (fail-closed; was unnamed rc=12). Build the result element-wise into a pre-sized array until array-concat lowering lands.\n")
+            var lo_concat_refuse = self
+            lowerer_mark_hard_error(&! lo_concat_refuse)
+            return (lo_concat_refuse, 0)
         }
         // Fail-closed: a dereference whose pointee cannot be typed here, as an
         // operand next to an f64. The checker only admits `*x <op> f64` when *x
@@ -36291,6 +37071,23 @@ impl Lowerer {
                                 }
                                 return (lo.emit(len_instr), dst)
                             }
+                            // SIO-311: `.len()` on an array held in a struct
+                            // field (`b.items.len()`). Evaluating the field
+                            // access yields the array handle, exactly what
+                            // ir_array_len reads; the ident-only path above
+                            // otherwise fell through and invented a body-less
+                            // `len`. The fn_id guard keeps a user-defined
+                            // `len` method on the field's type on the generic
+                            // path.
+                            if (*recv).kind == ExprKind::ExprFieldAccess && self.lower_method_call_fn_id_ref(e) < 0 {
+                                let pair_b = self.lower_expr_ref(&(*recv))
+                                var lo = pair_b.0
+                                let base_reg = pair_b.1
+                                let pair_d = lo.fresh_reg()
+                                lo = pair_d.0
+                                let dst = pair_d.1
+                                return (lo.emit(ir_array_len(dst, base_reg)), dst)
+                            }
                         }
                         None => {}
                     }
@@ -36303,6 +37100,48 @@ impl Lowerer {
                     lowerer_mark_error(&! lo_bad)
                     return (lo_bad, IR_INVALID_REG)
                 }
+            }
+        }
+        // SIO-311: `.push(v)` on a dynamic array ([T]). The checker admits
+        // it only there (fixed arrays keep E019); the append is
+        // __sounio_seq_push, which grows the shared aggregate layout
+        // (flags = logical length, payload_size = capacity) and retargets
+        // the handle-table entry when it grows, so every alias observes
+        // the append. Only an ident receiver is recognised here -- the
+        // local tables are what tell an open array apart (element type in
+        // struct_types with array_lens < 0); other receiver shapes keep
+        // the generic path below.
+        if ir_name_eq(e.name, make_name("push")) && !ir_name_eq(recv_type, make_name("Seq")) {
+            match e.left {
+                Some(recv) => {
+                    if (*recv).kind == ExprKind::ExprIdent
+                        && !self.lookup_local_is_ref((*recv).name)
+                        && self.lookup_local_fixed_array_len((*recv).name) < 0
+                        && (self.lookup_local_struct_type_is_array_elem((*recv).name)
+                            || self.lookup_local_array_copy_word_scalar((*recv).name)
+                            || self.lookup_local_array_elem_float((*recv).name)) {
+                        let pair_b_push = self.lower_expr_ref(&(*recv))
+                        var lo_push = pair_b_push.0
+                        let base_reg_push = pair_b_push.1
+                        let pair_args_push: LowerExprArgsResult = lo_push.lower_expr_args_raw_ref(&e.args)
+                        lo_push = pair_args_push.lowerer
+                        if pair_args_push.count != 1 {
+                            lowerer_mark_hard_error(&! lo_push)
+                            return (lo_push, IR_INVALID_REG)
+                        }
+                        let call_name_push = make_name("__sounio_seq_push")
+                        let fn_id_push = lowerer_find_or_add_fn_id_mut(&! lo_push, call_name_push)
+                        let call_args_push: Option<Box<IrRegList>> = Some(Box::new(ir_reg_list_cons(
+                            base_reg_push,
+                            Some(Box::new(pair_args_push.regs)),
+                        )))
+                        let pair_d_push = lo_push.fresh_reg()
+                        lo_push = pair_d_push.0
+                        let dst_push = pair_d_push.1
+                        return (lo_push.emit(ir_call(dst_push, fn_id_push, call_name_push, call_args_push, 2)), dst_push)
+                    }
+                }
+                None => {}
             }
         }
         // Impl methods are lowered as mangled free functions (ir_mangle_method_name).
@@ -36395,6 +37234,36 @@ impl Lowerer {
                 lowerer_mark_hard_error(&! lo_bad_seq_method)
                 return (lo_bad_seq_method, IR_INVALID_REG)
             }
+        }
+        // SIO-311: `.push(v)` on a dynamic array through a non-ident
+        // receiver (a field, a deref, a call result). When no impl method
+        // named `push` is registered for the receiver type, a bare push
+        // call can only be the dynamic-array append the checker admitted
+        // (Seq is handled above; every other receiver keeps E019 there),
+        // so emit __sounio_seq_push on the evaluated handle. Evaluating
+        // the receiver yields the array handle in each of those shapes,
+        // and the intrinsic retargets its handle-table entry when it
+        // grows, so the append is observed through the place itself.
+        if ir_name_eq(e.name, make_name("push")) && self.lower_method_call_fn_id_ref(e) < 0 {
+            let pair_b_push = self.lower_opt_expr_ref(&e.left)
+            var lo_push = pair_b_push.0
+            let base_reg_push = pair_b_push.1
+            let pair_args_push: LowerExprArgsResult = lo_push.lower_expr_args_raw_ref(&e.args)
+            lo_push = pair_args_push.lowerer
+            if pair_args_push.count != 1 {
+                lowerer_mark_hard_error(&! lo_push)
+                return (lo_push, IR_INVALID_REG)
+            }
+            let call_name_push = make_name("__sounio_seq_push")
+            let fn_id_push = lowerer_find_or_add_fn_id_mut(&! lo_push, call_name_push)
+            let call_args_push: Option<Box<IrRegList>> = Some(Box::new(ir_reg_list_cons(
+                base_reg_push,
+                Some(Box::new(pair_args_push.regs)),
+            )))
+            let pair_d_push = lo_push.fresh_reg()
+            lo_push = pair_d_push.0
+            let dst_push = pair_d_push.1
+            return (lo_push.emit(ir_call(dst_push, fn_id_push, call_name_push, call_args_push, 2)), dst_push)
         }
         let call_name = if recv_type.len > 0 { ir_mangle_method_name(recv_type, e.name) } else { e.name }
         if recv_type.len == 0 && lower_recv_trace_enabled() {
@@ -36657,9 +37526,16 @@ impl Lowerer {
         lo = pair_end.0
         let l_end = pair_end.1
         let scrut_opk = lo.opt_expr_option_payload_kind_ref(&e.left)
+        let scrut_tuple_float_mask = match e.left {
+            Some(se) => lo.expr_result_tuple_float_mask_ref(&(*se)),
+            None => 0,
+        }
+        let saved_tuple_float_mask = LOWER_MATCH_SCRUT_TUPLE_FLOAT_MASK
         LOWER_MATCH_SCRUT_IS_REF = scrut_is_ref
+        LOWER_MATCH_SCRUT_TUPLE_FLOAT_MASK = scrut_tuple_float_mask
         lo = lo.lower_match_arms_ref(scrut, res, l_end, &e.arms, payload_layout, scrut_opk)
         LOWER_MATCH_SCRUT_IS_REF = saved_scrut_is_ref
+        LOWER_MATCH_SCRUT_TUPLE_FLOAT_MASK = saved_tuple_float_mask
         lo = lo.emit(ir_load_imm(res, 0))
         lo = lo.emit(ir_label(l_end))
         if res_is_float {

@@ -523,4 +523,4 @@ Esta integração posiciona o Sounio na vanguarda da computação científica ep
 **Status**: ✅ **Implementação Completa**  
 **Documentação**: ✅ **Finalizada**  
 **Testes**: ✅ **Validada**  
-**Integração**: ✅ **Production Ready**
+**Integração**: nota histórica deste arquivo; não é o status atual do projeto.
