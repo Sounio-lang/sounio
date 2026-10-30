@@ -982,7 +982,7 @@ _run_test_case() {
             category="pass"
         fi
     else
-        if $is_known_failure; then
+        if [[ $is_known_failure; then
             status="xfail"
             category="known-failure"
         elif $is_vacuous_baseline; then
