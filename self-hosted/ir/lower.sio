@@ -4676,12 +4676,214 @@ fn lower_collect_enum_variant_ptrs(variants: Option<Box<VariantDefList>>, count:
     }
 }
 
+// ---------------------------------------------------------------------------
+// KL-20: payload-carrying enums (docs/compiler/ENUM_PAYLOAD_LAYOUT.md).
+//
+// An enum ANY of whose variants declares payload fields is a payload enum. Every
+// value of it -- unit variants included -- is a pointer to a tagged cell of
+// 1 + maxf words: word 0 is the discriminant, words 1..n the variant's payload
+// fields in declaration order (one word each: an integer, a bool, the bits of
+// an f64, or the handle of a string/struct/array/Box/enum). maxf is the largest
+// field count over the enum's variants, so every cell of one enum has the same
+// size. An enum with no payload variant keeps the bare-discriminant
+// representation, unchanged.
+//
+// The table below is keyed by the enum and variant name hashes and holds the
+// VariantDefList node of each variant, so construction and patterns read the
+// declared field types straight from the AST. Flat i64 arrays only: global
+// aggregate arrays do not round-trip on the lean_single-built compiler
+// (check/specializer.sio, backend-safety notes).
+var LOWER_PE_COUNT: i64 = 0
+var LOWER_PE_ENUM_HASH: [i64; 2048] = [0; 2048]
+var LOWER_PE_VARIANT_HASH: [i64; 2048] = [0; 2048]
+var LOWER_PE_NODE: [i64; 2048] = [0; 2048]
+var LOWER_PE_FIELD_COUNT: [i64; 2048] = [0; 2048]
+var LOWER_PE_DISC: [i64; 2048] = [0; 2048]
+var LOWER_PE_MAXF: [i64; 2048] = [0; 2048]
+var LOWER_PE_OVERFLOWED: bool = false
+
+fn lower_pe_field_list_count(fields: &Option<Box<FieldDefList>>) -> i64 with Mut, Panic, Div {
+    var n: i64 = 0
+    var cur = fields
+    while true {
+        match *cur {
+            Some(fl) => {
+                n = n + 1
+                cur = &(*fl).tail
+            }
+            None => break
+        }
+    }
+    n
+}
+
+// Record the variants of `enum_name` when at least one carries a payload.
+// Idempotent: the same enum is registered by several preseed paths.
+fn lower_payload_enum_note(enum_name: Name, variants: &Option<Box<VariantDefList>>) with Mut, Panic, Div, Alloc {
+    var maxf: i64 = 0
+    var cur = variants
+    while true {
+        match *cur {
+            Some(vl) => {
+                let n = lower_pe_field_list_count(&(*vl).head.fields)
+                if n > maxf { maxf = n }
+                cur = &(*vl).tail
+            }
+            None => break
+        }
+    }
+    if maxf == 0 {
+        return
+    }
+    let eh = ast_name_hash(enum_name)
+    var disc: i64 = 0
+    var cur2 = variants
+    while true {
+        match *cur2 {
+            Some(vl) => {
+                let vh = ast_name_hash((*vl).head.name)
+                var slot: i64 = 0 - 1
+                var i: i64 = 0
+                while i < LOWER_PE_COUNT {
+                    if LOWER_PE_ENUM_HASH[i as usize] == eh && LOWER_PE_VARIANT_HASH[i as usize] == vh {
+                        slot = i
+                    }
+                    i = i + 1
+                }
+                if slot < 0 {
+                    if LOWER_PE_COUNT >= 2048 {
+                        LOWER_PE_OVERFLOWED = true
+                        return
+                    }
+                    slot = LOWER_PE_COUNT
+                    LOWER_PE_COUNT = LOWER_PE_COUNT + 1
+                }
+                let node = vl as *mut VariantDefList
+                LOWER_PE_ENUM_HASH[slot as usize] = eh
+                LOWER_PE_VARIANT_HASH[slot as usize] = vh
+                LOWER_PE_NODE[slot as usize] = node as i64
+                LOWER_PE_FIELD_COUNT[slot as usize] = lower_pe_field_list_count(&(*vl).head.fields)
+                LOWER_PE_DISC[slot as usize] = disc
+                LOWER_PE_MAXF[slot as usize] = maxf
+                disc = disc + 1
+                cur2 = &(*vl).tail
+            }
+            None => break
+        }
+    }
+}
+
+// Slot of a payload-enum variant, or -1. An empty enum name (a single-segment
+// path) matches the first payload enum declaring the variant.
+fn lower_pe_slot(enum_name: Name, variant_name: Name) -> i64 with Mut, Panic, Div {
+    if variant_name.len <= 0 { return 0 - 1 }
+    let vh = ast_name_hash(variant_name)
+    let eh = if enum_name.len > 0 { ast_name_hash(enum_name) } else { 0 }
+    var i: i64 = 0
+    while i < LOWER_PE_COUNT {
+        if LOWER_PE_VARIANT_HASH[i as usize] == vh {
+            if enum_name.len <= 0 || LOWER_PE_ENUM_HASH[i as usize] == eh {
+                return i
+            }
+        }
+        i = i + 1
+    }
+    0 - 1
+}
+
+// KL-20: does any recorded payload-enum variant belong to `enum_name`?
+fn lower_pe_enum_is_payload(enum_name: Name) -> bool with Mut, Panic, Div {
+    if enum_name.len <= 0 { return false }
+    let eh = ast_name_hash(enum_name)
+    var i: i64 = 0
+    while i < LOWER_PE_COUNT {
+        if LOWER_PE_ENUM_HASH[i as usize] == eh { return true }
+        i = i + 1
+    }
+    false
+}
+
+fn lower_pattern_list_all_wildcards(pats: &Option<Box<PatternList>>) -> bool with Mut, Panic, Div {
+    var cur = pats
+    while true {
+        match *cur {
+            Some(pl) => {
+                if (*pl).head.kind != PatternKind::PatWildcard { return false }
+                cur = &(*pl).tail
+            }
+            None => break
+        }
+    }
+    true
+}
+
+fn lower_pe_slot_for_path(p: AstPath) -> i64 with Mut, Panic, Div, Alloc {
+    lower_pe_slot(ir_path_qualifier_name(p), ir_path_last_name(p))
+}
+
+// The FieldDefList node of payload field `k` of slot's variant, as an address
+// (0 when k is out of range).
+fn lower_pe_field_node(slot: i64, k: i64) -> i64 with Mut, Panic, Div {
+    if slot < 0 || slot >= LOWER_PE_COUNT { return 0 }
+    let node = LOWER_PE_NODE[slot as usize] as *mut VariantDefList
+    var cur = &(*node).head.fields
+    var i: i64 = 0
+    while true {
+        match *cur {
+            Some(fl) => {
+                if i == k {
+                    let p = fl as *mut FieldDefList
+                    return p as i64
+                }
+                i = i + 1
+                cur = &(*fl).tail
+            }
+            None => break
+        }
+    }
+    0
+}
+
+// Position (0-based) of the payload field named `fname` in slot's variant, or -1.
+fn lower_pe_field_index_by_name(slot: i64, fname: Name) -> i64 with Mut, Panic, Div {
+    if slot < 0 || slot >= LOWER_PE_COUNT { return 0 - 1 }
+    let node = LOWER_PE_NODE[slot as usize] as *mut VariantDefList
+    var cur = &(*node).head.fields
+    var i: i64 = 0
+    while true {
+        match *cur {
+            Some(fl) => {
+                if ir_name_eq((*fl).head.name, fname) {
+                    return i
+                }
+                i = i + 1
+                cur = &(*fl).tail
+            }
+            None => break
+        }
+    }
+    0 - 1
+}
+
+// Payload field types the one-word cell slot represents. A tuple payload, an
+// f128/f256 and a Knowledge<T> carry more than one word (or side state) and
+// are refused at construction and in patterns rather than truncated.
+fn lower_pe_field_type_supported(te: &TypeExpr) -> bool with Mut, Panic, Div {
+    if (*te).kind == TypeExprKind::TypeTuple { return false }
+    if (*te).kind == TypeExprKind::TypeKnowledge { return false }
+    if lower_type_expr_is_wide_float(te) { return false }
+    true
+}
+
 fn lowerer_register_enum_variants_mut(
     lo: &! Lowerer,
     enum_name: Name,
     variants: &Option<Box<VariantDefList>>,
     next_disc: i64
 ) with Mut, Panic, Div, Alloc, IO {
+    if next_disc == 0 {
+        lower_payload_enum_note(enum_name, variants)
+    }
     let variant_count = lower_collect_enum_variant_ptrs(*variants, 0)
     var vi: i64 = 0
     while vi < variant_count {
@@ -24497,6 +24699,25 @@ impl Lowerer {
     // The field's declared type is a payload-free enum (ItemKind, StmtKind, ...).
     // Its payload word is the discriminant. A later IrFieldGet of that word
     // resolves tag 1/2 as handle 1/2.
+    // KL-20: the declared type of `owner.field` is a payload-carrying enum.
+    fn field_type_is_payload_enum_for_owner(self, owner: &Option<Box<Expr>>, field_name: Name) -> bool with Mut, Panic, Div, Alloc, IO {
+        let type_name = match *owner {
+            Some(o) => self.expr_receiver_struct_type_ref(&(*o)),
+            None => ir_empty_name(),
+        }
+        if type_name.len <= 0 { return false }
+        let si = lower_struct_layout_index_of(&(*self.struct_layouts), type_name)
+        if si < 0 { return false }
+        var fi: i64 = 0
+        while fi < (*self.struct_layouts).entries[si as usize].field_count {
+            if ir_name_eq(ir_name_at((*self.struct_layouts).entries[si as usize].fields[fi as usize].name_id), field_name) {
+                return lower_pe_enum_is_payload(ir_name_at((*self.struct_layouts).entries[si as usize].fields[fi as usize].named_type_name_id))
+            }
+            fi = fi + 1
+        }
+        false
+    }
+
     fn field_type_is_enum_discriminant(self, type_name: Name, field_name: Name) -> bool with Mut, Panic, Div {
         if type_name.len <= 0 { return false }
         var si: i64 = 0
@@ -24505,7 +24726,9 @@ impl Lowerer {
                 var fi: i64 = 0
                 while fi < (*self.struct_layouts).entries[si as usize].field_count {
                     if ir_name_eq(ir_name_at((*self.struct_layouts).entries[si as usize].fields[fi as usize].name_id), field_name) {
-                        return self.name_is_registered_enum(ir_name_at((*self.struct_layouts).entries[si as usize].fields[fi as usize].named_type_name_id))
+                        // KL-20: a payload enum field holds a cell handle, not a raw tag.
+                        let fty_name = ir_name_at((*self.struct_layouts).entries[si as usize].fields[fi as usize].named_type_name_id)
+                        return self.name_is_registered_enum(fty_name) && !lower_pe_enum_is_payload(fty_name)
                     }
                     fi = fi + 1
                 }
@@ -26625,6 +26848,9 @@ impl Lowerer {
 
     // Phase 3.1: Register enum variant discriminants
     fn register_enum_variants_ref(self, enum_name: Name, variants: &Option<Box<VariantDefList>>, next_disc: i64) -> Lowerer with Mut, Panic, Div, Alloc {
+        if next_disc == 0 {
+            lower_payload_enum_note(enum_name, variants)
+        }
         var lo = self
         var current = variants
         var disc = next_disc
@@ -32174,12 +32400,32 @@ impl Lowerer {
             val_reg = pr.1
             lo = lo.emit(ir_load_imm(val_reg, if (*alt).kind == PatternKind::PatBoolTrue { 1 } else { 0 }))
         } else if (*alt).kind == PatternKind::PatEnum {
+            // KL-20: a variant of a payload-carrying enum whose sub-patterns are
+            // all `_` (`Shape::Circle(_) | Shape::Dot`): compare the cell's tag.
+            let alt_pe_slot = if (*alt).path.seg_count >= 2 { lower_pe_slot_for_path((*alt).path) } else { 0 - 1 }
+            if alt_pe_slot >= 0 && lower_pattern_list_all_wildcards(&(*alt).sub_patterns) {
+                let pt = lo.fresh_reg()
+                lo = pt.0
+                let tag_reg = pt.1
+                var gi = ir_field_get(tag_reg, scrut, 0, ir_empty_name())
+                if LOWER_MATCH_SCRUT_IS_REF { gi.label_id = 1 }
+                lo = lo.emit(gi)
+                let pd = lo.fresh_reg()
+                lo = pd.0
+                lo = lo.emit(ir_load_imm(pd.1, LOWER_PE_DISC[alt_pe_slot as usize]))
+                let pc = lo.fresh_reg()
+                lo = pc.0
+                lo = lo.emit(ir_binop(pc.1, tag_reg, BinaryOp::OpEq, pd.1))
+                lo = lo.emit(ir_branch_true(pc.1, l_hit))
+                return (lo, true)
+            }
             match (*alt).sub_patterns {
                 Some(_) => return (self, false),
                 None => {}
             }
             let vname = ir_path_last_name((*alt).path)
             if ir_name_is_some(vname) || ir_name_is_none(vname) { return (self, false) }
+            if alt_pe_slot >= 0 { return (self, false) }
             let disc = lo.lookup_variant_discriminant_by_path(ir_path_qualifier_name((*alt).path), vname)
             if disc < 0 { return (self, false) }
             let pr = lo.fresh_reg()
@@ -32295,6 +32541,14 @@ impl Lowerer {
             lo
         } else if pat.kind == PatternKind::PatEnum {
             let variant_name = ir_path_last_name(pat.path)
+            // KL-20: a variant of a payload-carrying enum (a bare `Some`/`None` is
+            // always Option's).
+            if pat.path.seg_count >= 2 || !(ir_name_is_some(variant_name) || ir_name_is_none(variant_name)) {
+                let pe_slot = lower_pe_slot_for_path(pat.path)
+                if pe_slot >= 0 {
+                    return self.lower_pe_match_arm(scrut, res, l_end, arm, pe_slot)
+                }
+            }
             // Option<T> (#2787): None is 0 and Some(v) is a one-word heap cell holding v
             // (lower_option_some_cell), for EVERY payload type. The discriminant is the
             // word itself and never the payload, so Some(0), Some(0.0) and Some(false)
@@ -32491,6 +32745,13 @@ impl Lowerer {
             // irrefutable: bind each field from the scrutinee and run the arm.
             // This arm used to fall to "unsupported -- skip", so the match produced
             // the 0 the end label loads (0.000000 for an f64 body) with check: OK.
+            // KL-20: `E::V { f, .. }` over a payload-carrying enum is a variant test.
+            if pat.path.seg_count >= 2 {
+                let pe_slot_s = lower_pe_slot_for_path(pat.path)
+                if pe_slot_s >= 0 {
+                    return self.lower_pe_match_arm(scrut, res, l_end, arm, pe_slot_s)
+                }
+            }
             var lo = self.bind_struct_pattern_fields(scrut, ir_path_first_name(pat.path), &pat.pat_fields)
             if lo.had_error { return lo }
             let pair_l = lo.fresh_label()
@@ -34081,6 +34342,302 @@ impl Lowerer {
     // Uniform for every payload type on purpose -- the lowerer cannot type a
     // match scrutinee in general, so construction and match must agree without
     // asking it (an Option<Box<T>> payload is one more indirection now).
+    // KL-20: a fresh tagged cell for slot's variant (word 0 = discriminant).
+    fn lower_pe_alloc_cell(self, slot: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        let pair_c = self.fresh_reg()
+        var lo = pair_c.0
+        let cell = pair_c.1
+        lo = lo.emit(ir_alloc(cell, lo.aggregate_storage_bytes(1 + LOWER_PE_MAXF[slot as usize])))
+        let pair_t = lo.fresh_reg()
+        lo = pair_t.0
+        let tag = pair_t.1
+        lo = lo.emit(ir_load_imm(tag, LOWER_PE_DISC[slot as usize]))
+        lo = lo.emit(ir_field_set(cell, 0, tag, ir_empty_name()))
+        (lo, cell)
+    }
+
+    fn lower_pe_refused(self, what: string) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        print("error: Madaros cannot lower this enum payload: ")
+        print(what)
+        print(" (KL-20: a payload field is one word -- an integer, bool, f64/f32, string, struct, array, Box<T>, Option<T> or enum; a tuple, f128/f256 or Knowledge<T> field is refused, and so is a sub-pattern other than a binding, `_`, a literal or a variant pattern). Refused rather than dropping the payload.\n")
+        var lo = self
+        lowerer_mark_hard_error(&! lo)
+        lo
+    }
+
+    // KL-20: `E::V(a0, a1, ..)` -- values stored in declaration order at words 1..n.
+    fn lower_pe_ctor_args(self, slot: i64, args: &Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        let pc = self.lower_pe_alloc_cell(slot)
+        var lo = pc.0
+        let cell = pc.1
+        var cur = args
+        var k: i64 = 0
+        while true {
+            match *cur {
+                Some(al) => {
+                    let fnode = lower_pe_field_node(slot, k)
+                    if fnode == 0 {
+                        return (lo.lower_pe_refused("more values than the variant declares"), IR_INVALID_REG)
+                    }
+                    let fp = fnode as *mut FieldDefList
+                    if !lower_pe_field_type_supported(&(*fp).head.ty) {
+                        return (lo.lower_pe_refused("a payload field of this type"), IR_INVALID_REG)
+                    }
+                    let pv = lo.lower_expr_ref(&(*al).head)
+                    lo = pv.0
+                    if pv.1 < 0 {
+                        return (lo, pv.1)
+                    }
+                    lo = lo.emit(ir_field_set(cell, k + 1, pv.1, ir_empty_name()))
+                    k = k + 1
+                    cur = &(*al).tail
+                }
+                None => break
+            }
+        }
+        if k != LOWER_PE_FIELD_COUNT[slot as usize] {
+            return (lo.lower_pe_refused("fewer values than the variant declares"), IR_INVALID_REG)
+        }
+        (lo, cell)
+    }
+
+    // KL-20: `E::V { f: x, .. }` -- each init lands on its declared field's word.
+    fn lower_pe_ctor_fields(self, slot: i64, fields: &Option<Box<StructFieldList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        let pc = self.lower_pe_alloc_cell(slot)
+        var lo = pc.0
+        let cell = pc.1
+        var cur = fields
+        var n: i64 = 0
+        while true {
+            match *cur {
+                Some(fl) => {
+                    let k = lower_pe_field_index_by_name(slot, (*fl).head.name)
+                    if k < 0 {
+                        return (lo.lower_pe_refused("a field the variant does not declare"), IR_INVALID_REG)
+                    }
+                    let fp = lower_pe_field_node(slot, k) as *mut FieldDefList
+                    if !lower_pe_field_type_supported(&(*fp).head.ty) {
+                        return (lo.lower_pe_refused("a payload field of this type"), IR_INVALID_REG)
+                    }
+                    let pv = lo.lower_expr_ref(&(*fl).head.value)
+                    lo = pv.0
+                    if pv.1 < 0 {
+                        return (lo, pv.1)
+                    }
+                    lo = lo.emit(ir_field_set(cell, k + 1, pv.1, ir_empty_name()))
+                    n = n + 1
+                    cur = &(*fl).tail
+                }
+                None => break
+            }
+        }
+        if n != LOWER_PE_FIELD_COUNT[slot as usize] {
+            return (lo.lower_pe_refused("a field init list that does not cover the variant"), IR_INVALID_REG)
+        }
+        (lo, cell)
+    }
+
+    // KL-20: bind a payload value to a local with the metadata a parameter of the
+    // declared field type gets (lower_fn_params_ref): float/int kind, struct type,
+    // Box inner layout, f64-array elements, fixed array length, Option payload kind.
+    fn bind_pe_local(self, name: Name, reg: i64, ty: &TypeExpr, is_mut: bool) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        var lo = self.bind_local(name, reg, is_mut)
+        if lower_type_expr_is_f64(ty) {
+            lo = lo.bind_local_scalar_kind(name, 2)
+        } else if lower_type_expr_is_integer(ty) || lower_type_expr_is_bool(ty) {
+            lo = lo.bind_local_scalar_kind(name, 1)
+        }
+        let sname = lower_param_struct_type_name(ty)
+        if sname.len > 0 {
+            lo = lo.bind_local_struct_type(name, sname, false)
+        }
+        if lower_type_expr_is_box(ty) {
+            lo = lo.bind_local_box_inner_layout(name, lower_struct_layout_index_of(&(*lo.struct_layouts), lower_box_or_option_inner_type_name(ty)))
+        }
+        if lower_type_expr_is_array_of_f64(ty) {
+            lo = lo.bind_local_array_elem_float(name)
+        }
+        let alen = lower_type_expr_fixed_array_len_ref(ty)
+        if alen >= 0 {
+            lo = lo.bind_local_fixed_array_len(name, alen)
+        }
+        let opk = lower_type_expr_option_payload_kind_in(ty, &(*lo.struct_layouts))
+        if opk != 0 {
+            lo = lo.bind_local_opt_payload_kind(name, opk)
+        }
+        lo
+    }
+
+    // KL-20: branch to l_skip unless `val` (a payload-enum cell, read through a
+    // reference when val_is_ref) holds slot's variant.
+    fn lower_pe_tag_test(self, val: i64, val_is_ref: bool, slot: i64, l_skip: i64) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        let pair_t = self.fresh_reg()
+        var lo = pair_t.0
+        let tag = pair_t.1
+        var gi = ir_field_get(tag, val, 0, ir_empty_name())
+        if val_is_ref { gi.label_id = 1 }
+        lo = lo.emit(gi)
+        let pair_d = lo.fresh_reg()
+        lo = pair_d.0
+        let disc = pair_d.1
+        lo = lo.emit(ir_load_imm(disc, LOWER_PE_DISC[slot as usize]))
+        let pair_c = lo.fresh_reg()
+        lo = pair_c.0
+        let cmp = pair_c.1
+        lo = lo.emit(ir_binop(cmp, tag, BinaryOp::OpEq, disc))
+        lo.emit(ir_branch_false(cmp, l_skip))
+    }
+
+    // KL-20: test the variant pattern `pat` (PatEnum or PatStruct naming slot's
+    // variant) against `val`, binding its payload sub-patterns.
+    fn lower_pe_variant_pattern(self, val: i64, val_is_ref: bool, pat: &Pattern, slot: i64, l_skip: i64) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        var lo = self.lower_pe_tag_test(val, val_is_ref, slot, l_skip)
+        if (*pat).kind == PatternKind::PatStruct {
+            var fcur = &(*pat).pat_fields
+            while true {
+                match *fcur {
+                    Some(pfl) => {
+                        let k = lower_pe_field_index_by_name(slot, (*pfl).head.name)
+                        if k < 0 {
+                            return lo.lower_pe_refused("a field the variant does not declare")
+                        }
+                        let fp = lower_pe_field_node(slot, k) as *mut FieldDefList
+                        lo = lo.lower_pe_payload_subpattern(val, val_is_ref, k, &(*pfl).head.pattern, &(*fp).head.ty, l_skip)
+                        if lo.had_error { return lo }
+                        fcur = &(*pfl).tail
+                    }
+                    None => break
+                }
+            }
+            return lo
+        }
+        var cur = &(*pat).sub_patterns
+        var k: i64 = 0
+        while true {
+            match *cur {
+                Some(pl) => {
+                    let fnode = lower_pe_field_node(slot, k)
+                    if fnode == 0 {
+                        return lo.lower_pe_refused("more sub-patterns than the variant declares")
+                    }
+                    let fp = fnode as *mut FieldDefList
+                    lo = lo.lower_pe_payload_subpattern(val, val_is_ref, k, &(*pl).head, &(*fp).head.ty, l_skip)
+                    if lo.had_error { return lo }
+                    k = k + 1
+                    cur = &(*pl).tail
+                }
+                None => break
+            }
+        }
+        lo
+    }
+
+    // KL-20: payload field k of `cell` against sub-pattern `sub` of declared type `ty`.
+    fn lower_pe_payload_subpattern(self, cell: i64, cell_is_ref: bool, k: i64, sub: &Pattern, ty: &TypeExpr, l_skip: i64) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        if (*sub).kind == PatternKind::PatWildcard {
+            return self
+        }
+        if !lower_pe_field_type_supported(ty) {
+            return self.lower_pe_refused("a payload field of this type")
+        }
+        let is_float = lower_type_expr_is_f64(ty)
+        let pair_v = self.fresh_reg()
+        var lo = pair_v.0
+        let v = pair_v.1
+        var gi = ir_field_get(v, cell, k + 1, ir_empty_name())
+        if cell_is_ref { gi.label_id = 1 }
+        if is_float { gi.imm_flags = IR_FLOAT_REG_MARKER_FLAG }
+        lo = lo.emit(gi)
+        if is_float {
+            lo = lo.emit(ir_mark_float_reg(v))
+        }
+        if (*sub).kind == PatternKind::PatBinding {
+            if lo.pattern_names_global_const_ref((*sub).name) {
+                return lo.lower_pe_refused("a module-level constant as a payload sub-pattern")
+            }
+            return lo.bind_pe_local((*sub).name, v, ty, (*sub).is_mut)
+        }
+        if (*sub).kind == PatternKind::PatIntLit {
+            if is_float || lower_type_expr_is_string(ty) {
+                return lo.lower_pe_refused("an integer literal against a non-integer payload")
+            }
+            let pair_k = lo.fresh_reg()
+            lo = pair_k.0
+            let lit = pair_k.1
+            lo = lo.emit(ir_load_imm(lit, (*sub).int_val))
+            let pair_c = lo.fresh_reg()
+            lo = pair_c.0
+            let cmp = pair_c.1
+            lo = lo.emit(ir_binop(cmp, v, BinaryOp::OpEq, lit))
+            return lo.emit(ir_branch_false(cmp, l_skip))
+        }
+        if (*sub).kind == PatternKind::PatBoolTrue {
+            return lo.emit(ir_branch_false(v, l_skip))
+        }
+        if (*sub).kind == PatternKind::PatBoolFalse {
+            return lo.emit(ir_branch_true(v, l_skip))
+        }
+        if (*sub).kind == PatternKind::PatStringLit {
+            if !lower_type_expr_is_string(ty) {
+                return lo.lower_pe_refused("a string literal against a non-string payload")
+            }
+            return lo.lower_string_eq_test(v, (*sub).name, l_skip)
+        }
+        if (*sub).kind == PatternKind::PatEnum || (*sub).kind == PatternKind::PatStruct {
+            let vname = ir_path_last_name((*sub).path)
+            let single = (*sub).path.seg_count <= 1
+            if (*sub).kind == PatternKind::PatEnum && single && ir_name_is_none(vname) {
+                return lo.emit(ir_branch_true(v, l_skip))
+            }
+            if (*sub).kind == PatternKind::PatEnum && single && ir_name_is_some(vname) {
+                lo = lo.emit(ir_branch_false(v, l_skip))
+                let opk = lower_type_expr_option_payload_kind_in(ty, &(*lo.struct_layouts))
+                return lo.lower_option_payload_pattern(v, &(*sub).sub_patterns, l_skip, opk, 0 - 1)
+            }
+            let inner_slot = lower_pe_slot_for_path((*sub).path)
+            if inner_slot >= 0 {
+                return lo.lower_pe_variant_pattern(v, false, sub, inner_slot, l_skip)
+            }
+            if (*sub).kind == PatternKind::PatStruct {
+                return lo.lower_pe_refused("a struct pattern inside a payload")
+            }
+            match (*sub).sub_patterns {
+                Some(_) => return lo.lower_pe_refused("a payload sub-pattern on a variant the lowerer cannot resolve"),
+                None => {}
+            }
+            let disc = lo.lookup_variant_discriminant_by_path(ir_path_qualifier_name((*sub).path), vname)
+            if disc < 0 {
+                return lo.lower_pe_refused("an enum variant the lowerer cannot resolve")
+            }
+            let pair_d = lo.fresh_reg()
+            lo = pair_d.0
+            let dreg = pair_d.1
+            lo = lo.emit(ir_load_imm(dreg, disc))
+            let pair_e = lo.fresh_reg()
+            lo = pair_e.0
+            let eq = pair_e.1
+            lo = lo.emit(ir_binop(eq, v, BinaryOp::OpEq, dreg))
+            return lo.emit(ir_branch_false(eq, l_skip))
+        }
+        lo.lower_pe_refused("this sub-pattern kind")
+    }
+
+    // KL-20: a match arm whose pattern names a payload-enum variant.
+    fn lower_pe_match_arm(self, scrut: i64, res: i64, l_end: i64, arm: &MatchArm, slot: i64) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        let pair_l = self.fresh_label()
+        var lo = pair_l.0
+        let l_skip = pair_l.1
+        lo = lo.lower_pe_variant_pattern(scrut, LOWER_MATCH_SCRUT_IS_REF, &arm.pattern, slot, l_skip)
+        if lo.had_error { return lo }
+        lo = lo.lower_arm_guard(&arm.guard, l_skip)
+        let pair_b = lo.lower_expr_ref(&arm.body)
+        lo = pair_b.0
+        let body_reg = pair_b.1
+        lo = lo.emit(ir_copy(res, body_reg))
+        lo = lo.emit(ir_jump(l_end))
+        lo.emit(ir_label(l_skip))
+    }
+
     fn lower_option_some_cell(self, args: &Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         match *args {
             Some(list) => {
@@ -34192,6 +34749,11 @@ impl Lowerer {
                     if ir_name_is_some(vname) {
                         lo = lo.emit(ir_branch_false(payload, l_skip))
                         return lo.lower_option_payload_pattern(payload, &(*inner).sub_patterns, l_skip, 0, 0 - 1)
+                    }
+                    // KL-20: `Some(E::V(..))` -- the payload is a payload-enum cell.
+                    let inner_pe_slot = lower_pe_slot_for_path((*inner).path)
+                    if inner_pe_slot >= 0 {
+                        return lo.lower_pe_variant_pattern(payload, false, inner, inner_pe_slot, l_skip)
                     }
                     match (*inner).sub_patterns {
                         Some(_) => return lo.lower_option_pattern_refused("an enum variant with a payload"),
@@ -35977,6 +36539,18 @@ impl Lowerer {
             || ir_name_eq(callee_short, make_name("f128_to_hi")) {
             return lo.lower_f128_intrinsic_call_ref(e)
         }
+        // KL-20: `E::V(a, ..)` on a payload-carrying enum builds its tagged cell.
+        match e.left {
+            Some(callee_pe) => {
+                if (*callee_pe).kind == ExprKind::ExprPath && (*callee_pe).path.seg_count >= 2 {
+                    let ctor_slot = lower_pe_slot_for_path((*callee_pe).path)
+                    if ctor_slot >= 0 {
+                        return lo.lower_pe_ctor_args(ctor_slot, &e.args)
+                    }
+                }
+            }
+            None => {}
+        }
         if lo.call_expr_uses_special_a_ref(e) {
             return lo.lower_call_expr_special_a_ref(e)
         }
@@ -36648,6 +37222,11 @@ impl Lowerer {
             // label 5: result is a raw integer tag, not a handle. Emit skips
             // resolve on a later field-get of this register.
             instr.label_id = 5
+        } else if lo1.field_type_is_payload_enum_for_owner(&e.left, e.name) {
+            // KL-20, label 6: the field holds a payload-enum CELL handle. Without it
+            // the backend's name fallback treats a field called `kind` as a raw
+            // unit-enum tag, and the cell's tag load returned the handle id.
+            instr.label_id = 6
         }
         if field_is_float || field_array_elem_is_float {
             instr.imm_flags = IR_FLOAT_REG_MARKER_FLAG
@@ -38827,6 +39406,13 @@ impl Lowerer {
     }
 
     fn lower_struct_literal_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        // KL-20: `E::V { f: x }` on a payload-carrying enum builds its tagged cell.
+        if e.path.seg_count >= 2 {
+            let lit_pe_slot = lower_pe_slot_for_path(e.path)
+            if lit_pe_slot >= 0 {
+                return self.lower_pe_ctor_fields(lit_pe_slot, &e.fields)
+            }
+        }
         let pair_dst = self.fresh_reg()
         var lo = pair_dst.0
         let dst = pair_dst.1
@@ -39186,6 +39772,14 @@ impl Lowerer {
                     let reg = pair.1
                     let lo2 = lo.emit(ir_load_imm(reg, 0))
                     return (lo2, reg)
+                }
+                // KL-20: a unit variant of a payload-carrying enum is a tag-only cell.
+                let pe_slot = lower_pe_slot_for_path(e.path)
+                if pe_slot >= 0 {
+                    if LOWER_PE_FIELD_COUNT[pe_slot as usize] > 0 {
+                        return (self.lower_pe_refused("a payload variant named without its payload values"), IR_INVALID_REG)
+                    }
+                    return self.lower_pe_alloc_cell(pe_slot)
                 }
                 let disc = self.lookup_variant_discriminant_by_path(ir_path_qualifier_name(e.path), variant_name)
                 if disc >= 0 {
