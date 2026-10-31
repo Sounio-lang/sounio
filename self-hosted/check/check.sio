@@ -5122,6 +5122,13 @@ fn checker_selective_import_resolves(c: *mut Checker, name: Name) -> bool with M
     if struct_table_find((*c).structs, name) >= 0 { return true }
     if enum_table_find((*c).enums, name) >= 0 { return true }
     if enum_table_find_variant_enum((*c).enums, name) >= 0 { return true }
+    // A declared `effect X { .. }` is importable (`use m::lib::{X}`); the
+    // registry is filled by checker_collect_effect_def_inplace.
+    var e: i64 = 0
+    while e < (*c).effects.count && e < 32 {
+        if name_eq((*c).effects.entries[e as usize].name, name) { return true }
+        e = e + 1
+    }
     if checker_defined_name_known(name) { return true }
     false
 }
@@ -6589,6 +6596,14 @@ fn checker_collect_item_inplace(c: *mut Checker, item: Item) with Mut, Panic, Di
         if !name_is_empty(item.name) {
             checker_collect_unit_decl_inplace(c, item.name, item.type_alias_ty)
         }
+    } else if item.kind == ItemKind::ItemEffect {
+        // Until 2026-10-31 this arm did not exist, the third time this spine has
+        // missed an item kind the by-value collect pass handles (ItemAlgebra on
+        // 2026-09-01, ItemUnit on 2026-09-09). Every `effect X { .. }` was inert
+        // under Madaros: the user-effect registry stayed empty, so each `with X`
+        // drew E246 ("not a declared user effect") and the declaring module
+        // could not be checked. lean_single accepted the same source.
+        checker_collect_effect_def_inplace(c, item.effect_def)
     } else if item.kind == ItemKind::ItemOntology {
         checker_collect_ontology_def_inplace(c, item.ontology_def)
     } else if item.kind == ItemKind::ItemModels {
@@ -6608,6 +6623,77 @@ fn checker_collect_item_inplace(c: *mut Checker, item: Item) with Mut, Panic, Di
     }
 }
 
+
+// Register every `effect` item of one module (idempotent per name).
+pub fn checker_collect_effect_items_inplace(c: *mut Checker, items: Option<Box<ItemList> >) with Mut, Panic, Div, Alloc, IO {
+    var cursor = items
+    while true {
+        match cursor {
+            Some(list) => {
+                let item = (*list).head
+                if item.kind == ItemKind::ItemEffect {
+                    checker_collect_effect_def_inplace(c, item.effect_def)
+                }
+                cursor = (*list).tail
+            }
+            None => break
+        }
+    }
+}
+
+// *mut collector for `effect Name { fn op(..) -> T ... }`. Mirrors the by-value
+// collect_item_effect / collect_effect_op_defs (user effect ids are 100 + the
+// registry index; each op records its effect id and lowered return type), but
+// writes the registry in place, so the ~164KB Checker is never copied.
+fn checker_collect_effect_def_inplace(c: *mut Checker, opt: Option<Box<EffectDef> >) with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        None => {}
+        Some(edef) => {
+            // Already registered by the effects-first pre-pass: keep one entry,
+            // so ids stay 100 + index and ops are not duplicated.
+            var k: i64 = 0
+            while k < (*c).effects.count && k < 32 {
+                if name_eq((*c).effects.entries[k as usize].name, (*edef).name) { return }
+                k = k + 1
+            }
+            let idx = (*c).effects.count
+            if idx >= 32 { return }
+            let eid = 100 + idx
+            let first_op_id = (*c).effect_ops.count
+            var cursor = (*edef).ops
+            while true {
+                match cursor {
+                    Some(node) => {
+                        let head = (*node).head
+                        var ret_ty = ty_unit()
+                        match head.ret_ty {
+                            None => {}
+                            Some(te_box) => { ret_ty = checker_lower_type_expr_mut(c, *te_box) }
+                        }
+                        let op_idx = (*c).effect_ops.count
+                        if op_idx < 128 {
+                            (*c).effect_ops.entries[op_idx] = EffectOpInfo {
+                                name: head.name,
+                                effect_id: eid,
+                                param_count: 0,
+                                ret_ty: ret_ty,
+                            }
+                            (*c).effect_ops.count = op_idx + 1
+                        }
+                        cursor = (*node).tail
+                    }
+                    None => break
+                }
+            }
+            (*c).effects.entries[idx] = EffectInfo {
+                name: (*edef).name,
+                op_count: (*c).effect_ops.count - first_op_id,
+                first_op_id: first_op_id,
+            }
+            (*c).effects.count = idx + 1
+        }
+    }
+}
 // Declared laws of an algebra as a bitmask, first line per op wins:
 //   bit0 add_commutative, bit1 add_associative, bit2 mul_commutative,
 //   bit3 mul_associative, bit4 mul_alternative. Defaults = `empty_algebra_info` (15).
@@ -6784,6 +6870,11 @@ pub fn checker_collect_items_inplace(c: *mut Checker, items: Option<Box<ItemList
     // pointer write — persists where deep ontology_kernel mutation does not.
     (*c).ontology_items = items
     checker_collect_runtime_builtins_inplace(c)
+    // Effects first: a `with X` in a signature is resolved while that
+    // signature is collected, so X must already be registered even when its
+    // `effect X { .. }` comes later in the file. The multi-module driver
+    // runs this over every module before any signature for the same reason.
+    checker_collect_effect_items_inplace(c, items)
     var cursor = items
     while true {
         match cursor {
@@ -8275,6 +8366,8 @@ fn checker_check_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, P
         result = checker_check_break_expr_inplace(c, e)
     } else if e.kind == ExprKind::ExprContinue {
         result = checker_check_continue_expr_inplace(c, e)
+    } else if e.kind == ExprKind::ExprHandle {
+        result = checker_check_handle_expr_inplace(c, e)
     } else {
         result = checker_check_expr_mut(c, e)
     }
@@ -8284,6 +8377,39 @@ fn checker_check_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, P
     result
 }
 
+
+// *mut ExprHandle handler: `handle<Effect> { body } with { handlers }`. ExprHandle
+// fell to checker_check_expr_mut, which refuses any kind it is handed ("expression
+// kind was not checked in place"), so every handle expression failed --check on
+// Madaros, including the #830 f32-join fixtures. Faithful transcription of the
+// by-value check_handle_expr: the handled effect is added for the body only, then
+// discharged before the handler block is checked; the body's type is the result.
+fn checker_check_handle_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    var eff_name_buf: [i8; 64] = [0; 64]
+    var i: i64 = 0
+    while i < e.name.len && i < 64 {
+        eff_name_buf[i as usize] = e.name.buf[i as usize]
+        i = i + 1
+    }
+    let eff_id = effect_name_to_id(eff_name_buf, e.name.len)
+    let saved_effects = (*c).current_effects
+    let saved_count = (*c).current_effect_count
+    if eff_id >= 0 && (*c).current_effect_count < 8 {
+        if !has_effect_id((*c).current_effects, (*c).current_effect_count, eff_id) {
+            (*c).current_effects[(*c).current_effect_count as usize] = eff_id
+            (*c).current_effect_count = (*c).current_effect_count + 1
+        }
+    }
+    let body_ty = checker_check_opt_block_inplace(c, e.block)
+    (*c).current_sig_id = 0 - 1
+    (*c).current_effects = saved_effects
+    (*c).current_effect_count = saved_count
+    match e.handler_block {
+        Some(hb) => { let _h = checker_check_block_inplace(c, *hb) }
+        None => {}
+    }
+    body_ty
+}
 // *mut ExprRange handler: checks both endpoints in place (returns only TypeEntry),
 // so the ~164KB `self` Checker is never SRET-moved. ExprRange previously fell to the
 // by-value `checker_check_expr_mut` else-branch, whose (Checker,TypeEntry) return
