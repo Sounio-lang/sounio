@@ -94,3 +94,35 @@ with one device pointer (GUM 8 threads over a 24-double buffer with
 d, v, out slots; MC 1 thread over a 7-word buffer), sync, copy back.
 Slurm jobs in this record used `--gres=gpu:a5000:1` with output to the
 shared bench dir and base64 payload injection with sha256 checks.
+
+## Addendum: integer defect class sweep, 2026-10-31
+
+A systematic sweep of every integer lowering followed, because the suite
+had passed 318 goldens and 10 parity cases with two live miscompiles.
+Findings and fixes on top of commit `ad16753b6c`:
+
+1. `min` and `max` on the integer lane lowered unsigned (`min.u64`,
+   `max.u64`) in all modes. Sounio integer min and max are signed, so
+   negative operands diverged. Now `min.s64` and `max.s64` on the
+   integer lanes of every mode. The float lanes are untouched.
+2. The `i32` lane (`type=i32`, `%r` bank) is coherent within
+   load, arithmetic, and store, and no in-tree pattern mixes it with
+   setp, selp, or address consumers, which all read `%rd`. Verdict:
+   keep, with the contract pinned in the transpiler header: i32 values
+   never feed addresses, setp, or selp. The GUM kernel was the only
+   mixer and now uses type 3.
+3. Negative immediates are not representable: the sim stream packs
+   16-bit unsigned fields and the assembler clamps negatives to 0,
+   while the transpiler would emit a wrapping `mov`. So `load_imm`
+   accepts 0 to 65535 only, and kernels must build negatives
+   arithmetically (the oracle does `sub r1, r21, r20`). The larger
+   MC immediates already follow this rule with hi and lo parts.
+   No behavior was changed here; the contract is now documented.
+
+Device oracle `tests/run-pass/gpu_int_oracle.sio` (also run by the
+suite for sim and PTX asserts): one thread computes div, all six
+setps, min, max, abs, neg, selp, add, sub, and mul on -7 and 3,
+stores 16 words. Sim asserts every covered slot with negatives;
+PTX asserts pin the s64 lowerings plus a sabotage arm. On the A5000
+all 16 device words matched bit for bit:
+-2, 0, -7, 3, 7, -3, -7, -4, -10, -21, 1, 0, 1, 0, 0, 1.
