@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.guide.agent-reference-details
+authority: repo_only
+audience: users
+last_validated: unvalidated
+validated_by: none
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.guide.agent-reference-details
+-->
+
 # Agent reference details
 
 Snapshot of the detailed agent guide before context trimming (2026-10-30). Historical measurements retain their original dates; repository files and current compiler evidence take precedence. Daily instructions: [CLAUDE.md](../../CLAUDE.md). Links below were originally relative to the repository root.
