@@ -1,1 +1,0 @@
-CI ontology and deep-science gates now schedule independent workers with fail-closed verdict and result auditing; the reviewed self-hosted knowledge-runtime lane runs asynchronously with a required receipt.

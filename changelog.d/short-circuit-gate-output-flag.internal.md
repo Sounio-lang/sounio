@@ -1,1 +1,0 @@
-`scripts/ci/madaros_short_circuit_gate.sh` passes the output path with `-o`, so it now runs with its default compiler (`bin/souc`) and through `bin/madaros`, not only with a raw Madaros ELF in `MADAROS_BIN`. The wrappers refuse a bare positional output path ("unsupported option").
