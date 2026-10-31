@@ -136,13 +136,15 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
 - Locus: `ir/lower.sio` Knowledge layout / `variance_*_regs` / `pending_variance_reg`.
   Audit: `docs/audit/EPISTEMIC_FABRICATION_DETECT_2026-08-17.md`,
   `docs/audit/MADAROS_FO_CALL_BOUNDARY_DISPATCH_2026-08-18.md`.
-- **`pow` FO / Hessian transfer — CLOSED (KL-11 partial, 2026-09-12).**
+- **`pow` FO / Hessian transfer — CLOSED (KL-11 partial, 2026-09-12; mixed exponent 2026-10-31).**
   `fo_xfer_seed_transcendentals` registers `pow` as kind 9; `fo_apply_transfer_kind`
-  emits `∂/∂x`, `∂²/∂x²`, and first-order `∂/∂y` when the exponent carries
-  sensitivity. Witness: `tests/run-pass/kl11_pow_fo_hessian.sio`
-  (`hessian_of(pow(x, 3.0), 0, 0)` at `x=0.5` → `3.0`). Pin:
-  `scripts/ci/madaros_kl11_pow_fo_gate.sh`. Mixed Hessian in the exponent, and
-  FO across arbitrary user `fn` bodies, remain open.
+  emits `∂/∂x`, `∂²/∂x²`, first-order `∂/∂y`, `∂²/∂y²`, and the mixed `∂²/∂x∂y`.
+  Witnesses: `tests/run-pass/kl11_pow_fo_hessian.sio`
+  (`hessian_of(pow(x, 3.0), 0, 0)` at `x=0.5` → `3.0`) and
+  `tests/run-pass/kl11_pow_mixed_hessian.sio` (at `x=2`, `y=3`:
+  `Hxx=12`, `Hxy=x^(y-1)*(1+y*ln x)`, `Hyy=x^y*(ln x)^2`). Pin:
+  `scripts/ci/madaros_kl11_pow_fo_gate.sh`. FO across arbitrary user `fn`
+  bodies remains open.
 
 
 ### KL-13 — derived units and unit loss (#2388) — CLOSED
