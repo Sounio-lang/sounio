@@ -408,9 +408,45 @@ pub fn llama_generate_from_ids(
     out.len = n_out
     out
 }
+// M1 lookup drafter (prompt-lookup decoding): h holds prompt +
+// accepted tokens. Take the trailing n-gram (n = 4 down to 1),
+// find its most recent earlier occurrence, copy up to k following
+// tokens into d. Returns tokens written; 0 means no match and the
+// caller fills echo. Cost is O(4 * hlen) compares, demo scale only;
+// a server keeps a persistent index. Verify keeps output bit-exact
+// whatever the draft is.
+pub fn llama_lookup_draft(h: &CpuBuf, hlen: i64, k: i64, d: &!CpuBuf) -> i64 with Mut {
+    if hlen < 2 || k < 1 { return 0 }
+    var n = hlen - 1
+    if n > 4 { n = 4 }
+    while n >= 1 {
+        var p = hlen - n - 1
+        while p >= 0 {
+            var same = true
+            var j: i64 = 0
+            while j < n {
+                if ck_get(h, p + j) != ck_get(h, hlen - n + j) { same = false }
+                j = j + 1
+            }
+            if same && p + n < hlen {
+                var m = hlen - (p + n)
+                if m > k { m = k }
+                var c: i64 = 0
+                while c < m {
+                    ck_set(d, c, ck_get(h, p + n + c))
+                    c = c + 1
+                }
+                return m
+            }
+            p = p - 1
+        }
+        n = n - 1
+    }
+    0
+}
 // L-spec: greedy speculative decoding. Draft mode 0 = echo last
-// token, 1 = oracle continuation (oracle/olen). stats: [0]=single
-// forwards, [1]=verify forwards, [2]=accepted drafts, [3]=rounds.
+// token, 1 = oracle continuation (oracle/olen), 2 = prompt-lookup.
+// stats: [0]=single forwards, [1]=verify, [2]=accepted, [3]=rounds.
 // Non-greedy cfg falls back to plain generate (documented): exact
 // speculative sampling for temp/top-p needs a sampler the draft
 // shares, which no on-disk draft does.
@@ -442,14 +478,34 @@ pub fn llama_generate_spec_from_ids(
         if n_out + kk > cfg.max_new { kk = cfg.max_new - n_out }
         let t0 = llama_argmax(&logits)
         var d = ck_alloc(kk)
-        var di: i64 = 0
-        while di < kk {
-            if draft_mode == 1 && n_out + di < olen {
-                ck_set(&!d, di, ck_get(oracle, n_out + di))
-            } else {
-                ck_set(&!d, di, cur as f64)
+        if draft_mode == 2 {
+            var hist = ck_alloc(nids + n_out)
+            var hi: i64 = 0
+            while hi < nids {
+                ck_set(&!hist, hi, ck_get(ids, hi))
+                hi = hi + 1
             }
-            di = di + 1
+            var ho: i64 = 0
+            while ho < n_out {
+                ck_set(&!hist, nids + ho, ck_get(&out, ho))
+                ho = ho + 1
+            }
+            let nd = llama_lookup_draft(&hist, nids + n_out, kk, &!d)
+            var dj: i64 = nd
+            while dj < kk {
+                ck_set(&!d, dj, cur as f64)
+                dj = dj + 1
+            }
+        } else {
+            var di: i64 = 0
+            while di < kk {
+                if draft_mode == 1 && n_out + di < olen {
+                    ck_set(&!d, di, ck_get(oracle, n_out + di))
+                } else {
+                    ck_set(&!d, di, cur as f64)
+                }
+                di = di + 1
+            }
         }
         if kk < 2 || t0 != ck_get(&d, 0) as i64 {
             cur = t0
