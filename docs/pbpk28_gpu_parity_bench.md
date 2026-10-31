@@ -126,3 +126,94 @@ stores 16 words. Sim asserts every covered slot with negatives;
 PTX asserts pin the s64 lowerings plus a sabotage arm. On the A5000
 all 16 device words matched bit for bit:
 -2, 0, -7, 3, 7, -3, -7, -4, -10, -21, 1, 0, 1, 0, 0, 1.
+## Addendum: memory-fed population-MC kernel, 2026-10-31
+
+The per-draw kernel baked MRG32k3a state into immediates, so every
+draw paid a full recompile (about 9.4 s: 9.36 s souc emit plus 29 ms
+ptxas) against a 68 us CPU step. The memory-fed emitter
+(kaxi_emit_pbpk28_mc_advance_memfed_asm) takes no state arguments:
+one cubin, N threads, per-thread state at mem[tid*9 .. tid*9+6),
+z out at mem[tid*9+6]. The host uploads substream states and reads
+back advances; one compile serves any draw count and any seed.
+Emit cost is unchanged in kind (9.41 s souc emit, measured this
+round) and is now paid once instead of per draw. Per-draw device
+launch latency was not separately timed this round; the structural
+per-draw cost is one HtoD (1152 B for 16 draws) plus one launch plus
+one DtoH. The GPU is not claimed faster than the CPU here; the win
+is compile-once plus batching, with timed batch kernels later work.
+
+Correctness, all bitwise. Sim: two legs, tid 0 reads slice 0
+(imm-fed equivalence) and tid 1 reads slice 1 (stride addressing),
+both against mrg32k3a_next_u01. PTX: get_tid lowers to
+mov.u32 plus cvt.u64.u32, state moves through ld.global.u64 and
+st.global.u64, arithmetic through the signed integer path
+(div.s64, setp.*.s64, selp.b64); no f32 or s32 in the integer lane.
+Device (RTX A5000, cc 8.6, driver 595.71.05, PTX JIT-loaded,
+sync rc=0): 16 threads, 144 of 144 words exact versus the Sounio
+reference. That is 96 state words plus 16 z words equal to the CPU
+next state per substream, plus 32 gap words still zero, which proves
+no thread touched a neighbour slice.
+
+The first device attempt (job 20694) ran but compared against a
+packed 96-word upload while the kernel strides 9 words per thread,
+so only slice 0 was valid input. The rerun (job 20777) uploads a
+strided 144-word buffer with explicit zero gaps and diffs all 144
+words. The misaligned run is kept as evidence that the comparison
+is sensitive: wrong inputs produced visibly wrong words, including
+z = 4294967087 from zero-state slices.
+
+## Appendix: integer-op audit, 2026-10-31
+
+Every integer lowering after the signedness fixes, with verdict and
+evidence. CORRECT means sim, PTX, and device agree on the Sounio i64
+semantics; FIXED means it miscompiled before this round.
+
+- add, sub: add.u64 and sub.u64 in every mode. Two-complement
+  wraparound is bit-identical to signed, so CORRECT. Oracle sim,
+  PTX, and device (values include -7, 3, -4, -10).
+- mul: mul.lo.u64 in every mode. CORRECT for in-range products; the
+  MRG32k3a products stay below 2 to the 48. Oracle plus both MC
+  kernels on device.
+- div: div.s64 in every untyped mode. FIXED (was div.u64). Oracle
+  covers negative dividends and divisors; device 16 of 16.
+- setp lt, le, eq, ge, gt, ne: setp.*.s64. FIXED (were unsigned).
+  All six oracle-covered, sim plus PTX plus device.
+- selp: selp.b64 on the predicate bit. CORRECT, type-agnostic by
+  construction. Oracle plus mem-fed device (z select included).
+- min, max: min.s64 and max.s64 in every mode. FIXED (were u64 in
+  all modes). Twelve goldens regenerated with ub64-to-s64-only
+  diffs; golden gate 318 of 318; oracle negatives on device.
+- abs, neg: abs.s64 and neg.s64. CORRECT already; signed from the
+  start. Oracle-covered (-7 to 7, 3 to -3).
+- load_imm: mov.u64, accepts 0 to 65535. CORRECT with the
+  documented contract; negatives must be built arithmetically
+  (the oracle does sub r1, r21, r20; MC splits mults hi and lo).
+- load_global and store_global, untyped: ld.global.u64 and
+  st.global.u64 on the %rd bank. CORRECT. GUM, MC, oracle, and
+  mem-fed kernels all device-verified through this path.
+- load_global and store_global, type i32: ld.global.s32 and
+  st.global.s32 on the %r bank. Coherent within load, arithmetic,
+  and store by code inspection; the pinned contract keeps i32
+  values out of addresses, setp, and selp. Negative-operand and
+  overflow device behavior unexercised; no in-tree kernel drives
+  the i32 lane out of range.
+- load_global and store_global, types f64 and f32: unchanged float
+  lanes. CORRECT, pre-existing; GUM device-verified bitwise.
+- get_tid, get_bid, get_ntid: special regs through u32 to u64.
+  CORRECT. Mem-fed device proof addresses 16 slices through tid.
+- mul_imm, add_imm: lower to load_imm (known quirk, noted in the
+  source). No in-tree integer kernel depends on immediate folding.
+- and, or, xor, shl: no lowering arms; they fall through to nop.
+  GAP, openly: no in-tree kernel uses them, and the emitter tests
+  assert nop-free text, so a future user gets a loud failure, not
+  a silent wrong answer.
+- integer atomics (add, sub, min, max): no lowering arms; only
+  atomic_addf is reachable in the transpiler. GAP, same status as
+  bitwise ops: unused, nop-guarded by the emitter asserts.
+- fma on the integer lane: lowers through f32. FMA is a float op
+  with no exact integer semantics claimed; no in-tree integer
+  kernel emits it. Left as-is, recorded here.
+- div boundary: every divisor in every proof is a nonzero
+  constant. Divide-by-zero is uncompared (sim Panic versus PTX
+  undefined); no kernel divides by a computed zero.
+
