@@ -246,6 +246,8 @@ fn spec_mi_reset_state() with Mut {
     SPEC_II_DONE = 0
     SPEC_II_ITEM_HEAD = 0
     SPEC_ENV_COUNT = 0
+    SPEC_DEFER_COUNT = 0
+    SPEC_DEFER_DONE = 0
     SPEC_ENV_BASE = 0
     SPEC_ENV_OVERFLOW = false
     var i: i64 = 0
@@ -3152,12 +3154,58 @@ fn spec_mi_recv_determined(r: Expr) -> bool with Mut, Panic, Div, Alloc {
     spec_mi_expr_is_inst(r)
 }
 
+// Signature and field types only DESCRIBE values; they never build one. An
+// instance named only there is created once some site that does build a
+// value (`S::<A>::f(..)`, a let annotation, a method turbofish) has
+// instantiated an MI struct, so a library fn taking `&S<i64>` does not
+// specialize every importer that never makes an S. Deferred types are
+// flushed by spec_mi_process_all; overflow falls back to creating eagerly.
+let SPEC_DEFER_MAX: i64 = 1024
+var SPEC_DEFER_COUNT: i64 = 0
+var SPEC_DEFER_DONE: i64 = 0
+var SPEC_DEFER_PTRS: [i64; 1024] = [0; 1024]
+
+fn spec_mi_defer_type(te: TypeExpr) with Mut, Panic, Div, Alloc {
+    var leaf = true
+    match te.inner {
+        Some(_i) => { leaf = false }
+        None => {}
+    }
+    match te.type_args {
+        Some(_a) => { leaf = false }
+        None => {}
+    }
+    if leaf { return }
+    if SPEC_DEFER_COUNT >= SPEC_DEFER_MAX {
+        let unused = spec_mi_type(te, true)
+        return
+    }
+    let p = heap_alloc(32768) as *mut SpecTypeStage
+    (*p).ty = te
+    SPEC_DEFER_PTRS[SPEC_DEFER_COUNT as usize] = p as i64
+    SPEC_DEFER_COUNT = SPEC_DEFER_COUNT + 1
+}
+
+// Emit instance impls; while any instance exists, also create the deferred
+// signature instances (whose impls can defer more) until nothing is pending.
+fn spec_mi_process_all() with IO, Mut, Panic, Div, Alloc {
+    spec_mi_process_instances()
+    while SPEC_II_COUNT > 0 && SPEC_DEFER_DONE < SPEC_DEFER_COUNT {
+        while SPEC_DEFER_DONE < SPEC_DEFER_COUNT {
+            let p = SPEC_DEFER_PTRS[SPEC_DEFER_DONE as usize] as *mut SpecTypeStage
+            SPEC_DEFER_DONE = SPEC_DEFER_DONE + 1
+            let unused = spec_mi_type((*p).ty, true)
+        }
+        spec_mi_process_instances()
+    }
+}
+
 fn spec_mi_scan_params(opt: Option<Box<ParamList>>) with Mut, Panic, Div, Alloc {
     match opt {
         None => {}
         Some(list) => {
             let ty = (*list).head.ty
-            let unused = spec_mi_type(ty, true)
+            spec_mi_defer_type(ty)
             let det = (*list).head.is_self || spec_mi_type_is_inst(ty)
             spec_env_push(ast_name_hash((*list).head.name), det)
             spec_mi_scan_params((*list).tail)
@@ -3187,7 +3235,7 @@ fn spec_mi_scan_field_types(opt: Option<Box<FieldDefList>>) with Mut, Panic, Div
     match opt {
         None => {}
         Some(list) => {
-            let unused = spec_mi_type((*list).head.ty, true)
+            spec_mi_defer_type((*list).head.ty)
             spec_mi_scan_field_types((*list).tail)
         }
     }
@@ -3204,7 +3252,10 @@ fn spec_scan_fn_body(fd: FnDef) with IO, Mut, Panic, Div, Alloc {
     let saved_base = SPEC_ENV_BASE
     SPEC_ENV_BASE = SPEC_ENV_COUNT
     spec_mi_scan_params(fd.params)
-    let unused = spec_mi_type_opt(fd.return_type, true)
+    match fd.return_type {
+        Some(rt) => spec_mi_defer_type(*rt),
+        None => {}
+    }
     spec_scan_block(fd.body)
     SPEC_ENV_COUNT = saved_count
     SPEC_ENV_BASE = saved_base
@@ -3939,7 +3990,7 @@ fn spec_resolve_untargeted_method_calls(items: Option<Box<ItemList>>) with IO, M
 }
 
 fn spec_finish_generics_after_scan(items: Option<Box<ItemList>>) -> Option<Box<ItemList>> with IO, Mut, Panic, Div, Alloc {
-    spec_mi_process_instances()
+    spec_mi_process_all()
     spec_resolve_untargeted_method_calls(items)
     spec_mi_resolve_refusals(items)
     var slot: i64 = 0
