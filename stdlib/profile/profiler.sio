@@ -1,6 +1,8 @@
 // stdlib/profile/profiler.sio — Synchronous Wall-Clock Profiler
 //
-// Provides named timing slots using POSIX clock_gettime(CLOCK_MONOTONIC).
+// Provides named timing slots using clock_gettime(CLOCK_MONOTONIC), issued
+// as the raw Linux syscall (SYS_clock_gettime = 228 on x86-64): the native
+// backend has no libc to link an `extern "C"` clock_gettime against.
 // Up to 64 named slots. Linear search for slot lookup (no hash map).
 //
 // Usage:
@@ -15,12 +17,13 @@
 //   CLOCK_MONOTONIC (clockid=1) — monotonic wall clock, unaffected by NTP
 
 // ============================================================================
-// FFI Declarations
+// Clock syscall buffer
 // ============================================================================
 
-extern "C" {
-    fn clock_gettime(clockid: i32, tp: *mut i64) -> i32;
-}
+// syscall6 receives this buffer by address. It is a module global, as in
+// stdlib/os/env.sio, because `&!local_array` passed to syscall6 does not
+// reach the kernel as the array's address on the native backend.
+var PROFILER_TS: [i64; 2] = [0; 2]
 
 // ============================================================================
 // Types
@@ -45,10 +48,9 @@ struct Profiler {
 
 // Read current monotonic time in nanoseconds via clock_gettime(CLOCK_MONOTONIC).
 // The timespec struct is represented as [seconds, nanoseconds] in a 2-element i64 array.
-fn profiler_now_ns() -> i64 {
-    var ts: [i64; 2] = [0; 2]
-    clock_gettime(1, &!ts as *mut i64)
-    ts[0] * 1000000000 + ts[1]
+fn profiler_now_ns() -> i64 with IO {
+    let _rc = syscall6(228, 1, &!PROFILER_TS, 0, 0, 0, 0)
+    PROFILER_TS[0] * 1000000000 + PROFILER_TS[1]
 }
 
 // Find a slot index by name. Returns -1 if not found.
@@ -86,7 +88,7 @@ pub fn profiler_begin(p: &!Profiler, name: string) with Mut, IO, Panic {
     }
     // Allocate a new slot
     if p.slot_count >= 64 {
-        println("profiler_begin: slot limit (64) reached, ignoring: ", name)
+        println("profiler_begin: slot limit (64) reached, ignoring: {}", name)
         return
     }
     let new_idx = p.slot_count
@@ -103,7 +105,7 @@ pub fn profiler_end(p: &!Profiler, name: string) with Mut, IO, Panic {
     let now = profiler_now_ns()
     let idx = profiler_find_slot(p as &Profiler, name)
     if idx < 0 {
-        println("profiler_end: slot not found: ", name)
+        println("profiler_end: slot not found: {}", name)
         return
     }
     let elapsed = now - p.slots[idx as usize].start_ns
@@ -136,7 +138,7 @@ pub fn profiler_report(p: Profiler) with IO, Mut, Div, Panic {
         } else {
             0.0
         }
-        println("  ", slot.name, ": total=", total_ms, "ms  calls=", slot.call_count, "  avg=", avg_us, "us")
+        println("  {}: total={}ms  calls={}  avg={}us", slot.name, total_ms, slot.call_count, avg_us)
         i = i + 1
     }
     println("=======================")

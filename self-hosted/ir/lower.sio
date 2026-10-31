@@ -25216,6 +25216,14 @@ impl Lowerer {
                 None => {}
             }
         }
+        // `.as_bytes()` on a string is that same packed-byte storage (the
+        // identity view lowered in lower_method_call_expr_ref), so its result
+        // is string evidence too: `let b = s.as_bytes()` binds a kind-3 local
+        // and `b.len()` / `b[i]` keep the string paths instead of falling
+        // into array-length reads over the packed pointer.
+        if (*e).kind == ExprKind::ExprMethodCall && ir_name_eq((*e).name, make_name("as_bytes")) {
+            return self.opt_expr_result_is_string_ref(&(*e).left)
+        }
         false
     }
 
@@ -37029,6 +37037,27 @@ impl Lowerer {
                     lowerer_mark_error(&! lo_bad)
                     return (lo_bad, IR_INVALID_REG)
                 }
+            }
+        }
+        // `.as_bytes()` on a string is the packed-byte view of the same
+        // storage (the lean_single pass-through): emit the receiver
+        // unchanged. The checker types the result as TyString, so `.len()`
+        // and indexing on it keep their string paths; without this arm the
+        // generic path invents a body-less `as_bytes` and codegen emits a
+        // stub that traps (SIGILL). Other receivers keep the generic path.
+        if ir_name_eq(e.name, make_name("as_bytes")) {
+            match e.args {
+                None => {
+                    match e.left {
+                        Some(recv) => {
+                            if self.expr_result_is_string_ref(&(*recv)) {
+                                return self.lower_opt_expr_ref(&e.left)
+                            }
+                        }
+                        None => {}
+                    }
+                }
+                Some(_) => {}
             }
         }
         // SIO-311: `.push(v)` on a dynamic array ([T]). The checker admits
