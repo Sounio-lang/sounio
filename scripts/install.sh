@@ -185,11 +185,15 @@ fi
 
 # Mirror scripts/lib at $PREFIX/scripts/lib so launcher's
 # $ROOT_DIR/scripts/lib/macos_codesign.sh path resolves.
+# Every link in the prefix is RELATIVE: release.sh stages into a temporary
+# directory and tars it, so an absolute link would point into a directory that
+# no longer exists once the archive is extracted (3.0.0-rc.2 shipped that way:
+# bin/madaros died on a dangling scripts/lib/resolve_madaros.sh).
 mkdir -p "$PREFIX/scripts/lib"
-ln -sfn "$LIB_SCRIPTS/resolve_souc.sh"   "$PREFIX/scripts/lib/resolve_souc.sh"
-ln -sfn "$LIB_SCRIPTS/macos_codesign.sh" "$PREFIX/scripts/lib/macos_codesign.sh"
-ln -sfn "$LIB_SCRIPTS/resolve_madaros.sh" "$PREFIX/scripts/lib/resolve_madaros.sh"
-ln -sfn "$LIB_SCRIPTS/materialize_madaros_prebuilt.sh" "$PREFIX/scripts/lib/materialize_madaros_prebuilt.sh"
+ln -sfn "../../lib/sounio/scripts/lib/resolve_souc.sh" "$PREFIX/scripts/lib/resolve_souc.sh"
+ln -sfn "../../lib/sounio/scripts/lib/macos_codesign.sh" "$PREFIX/scripts/lib/macos_codesign.sh"
+ln -sfn "../../lib/sounio/scripts/lib/resolve_madaros.sh" "$PREFIX/scripts/lib/resolve_madaros.sh"
+ln -sfn "../../lib/sounio/scripts/lib/materialize_madaros_prebuilt.sh" "$PREFIX/scripts/lib/materialize_madaros_prebuilt.sh"
 
 # `souc --version` reports the newest CHANGELOG.md section, then CITATION.cff
 # (ADR-018 §1), both read from the root the launcher resolves. Ship both at the
@@ -204,7 +208,7 @@ if [[ "$COPY_STDLIB" -eq 1 ]]; then
   # Copy without preserving owner (cross-user installs).
   (cd "$ROOT_DIR" && tar -cf - stdlib) | (cd "$LIB_ROOT" && tar -xf -)
   # The launcher looks at $ROOT_DIR/stdlib; provide a symlink.
-  ln -sfn "$LIB_STDLIB" "$PREFIX/stdlib"
+  ln -sfn "lib/sounio/stdlib" "$PREFIX/stdlib"
 fi
 
 # ------------------------------------------------------------------ docs
@@ -224,7 +228,7 @@ if [[ -f "$ROOT_DIR/tools/repl.sh" ]]; then
   mkdir -p "$LIB_ROOT/tools"
   install -m 0755 "$ROOT_DIR/tools/repl.sh" "$LIB_ROOT/tools/repl.sh"
   mkdir -p "$PREFIX/tools"
-  ln -sfn "$LIB_ROOT/tools/repl.sh" "$PREFIX/tools/repl.sh"
+  ln -sfn "../lib/sounio/tools/repl.sh" "$PREFIX/tools/repl.sh"
 fi
 
 # ------------------------------------------------------------------ smoke

@@ -114,6 +114,29 @@ run_step souc-check-hello env -u SOUC_BIN -u SOUNIO_SOUC_BIN \
   -u MADAROS_BIN -u MADAROS_RAW_BIN -u SOUNIO_MADAROS_BIN \
   SOUNIO_STDLIB_PATH="$INSTALLED_STDLIB" "$INSTALLED_SOUC" check examples/hello.sio
 
+# A release archive is this prefix, staged in a temporary directory and
+# extracted elsewhere. Every link must therefore be relative, and the toolchain
+# must still run once the prefix has moved: before this check, install.sh wrote
+# absolute links into the staging directory and the extracted 3.0.0-rc.2
+# bin/madaros died on a dangling scripts/lib/resolve_madaros.sh.
+absolute_links="$(find "$PREFIX" -type l -lname '/*' -print)"
+if [[ -n "$absolute_links" ]]; then
+  echo "[install-support] FAIL: absolute symlinks in the prefix (they dangle once the archive is extracted):" >&2
+  echo "$absolute_links" >&2
+  exit 1
+fi
+MOVED="$WORK_DIR/moved-prefix"
+mv "$PREFIX" "$MOVED"
+run_step moved-madaros-version env -u MADAROS_BIN -u MADAROS_RAW_BIN -u SOUNIO_MADAROS_BIN \
+  "$MOVED/bin/madaros" --version
+assert_nonempty_log moved-madaros-version
+# No SOUNIO_STDLIB_PATH: the moved prefix must find its stdlib through its own
+# (relative) stdlib link.
+run_step moved-souc-check-hello env -u SOUC_BIN -u SOUNIO_SOUC_BIN -u SOUNIO_STDLIB_PATH \
+  -u MADAROS_BIN -u MADAROS_RAW_BIN -u SOUNIO_MADAROS_BIN \
+  "$MOVED/bin/souc" check examples/hello.sio
+mv "$MOVED" "$PREFIX"
+
 if [[ "$KEEP_WORK_DIR" == "1" ]]; then
   echo "SOUNIO_INSTALL_SUPPORT_GATE_ARTIFACT_DIR=$WORK_DIR"
 fi
