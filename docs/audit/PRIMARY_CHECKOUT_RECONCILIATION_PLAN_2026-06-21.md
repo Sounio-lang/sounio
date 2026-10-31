@@ -91,7 +91,7 @@ contract for one of these surfaces.
 
 ### Bucket D — Scripts Requiring Hardening Before Promotion
 
-The archived helper scripts are not production-ready as-is:
+The archived helper scripts are not ready to ship as-is:
 
 | Item | Finding | Required before PR |
 |---|---|---|

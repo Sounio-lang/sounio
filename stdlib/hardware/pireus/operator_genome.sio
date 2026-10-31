@@ -13,7 +13,7 @@ use hardware::pireus::operator_genesis_bilinear::{
 }
 use crypto::sha256::{
     SHA256State,
-    sha256_init, sha256_update, sha256_finalize, sha256_digest_byte,
+    sha256_init, sha256_update_be64, sha256_finalize, sha256_digest_byte,
 }
 
 pub const PIREUS_GENOME_SCHEMA: i64 = 723000
@@ -349,37 +349,34 @@ fn pog_bilinear_digest_matches(
     pog_words_equal(&digest.words, expected)
 }
 
-fn pog_digest_add_i64(state: SHA256State, value: i64) -> SHA256State
+// #2820: in place. The by-value form (sha256_update over a fresh [u8; 256],
+// returning a new SHA256State) left ~3 KB of never-reclaimed Madaros arena per
+// absorbed word: SHA256State is an integer-bearing aggregate, so neither this
+// helper nor sha256_update opens a reclaiming region. sha256_update_be64 gives
+// byte-for-byte the same digest.
+fn pog_digest_add_i64(state: &!SHA256State, value: i64)
 with Mut, Panic, Div {
-    var bytes: [u8; 256] = [0; 256]
-    var index: i64 = 0
-    while index < 8 {
-        bytes[index] = ((value >> ((7 - index) * 8)) & 255) as u8
-        index = index + 1
-    }
-    sha256_update(state, bytes, 8)
+    sha256_update_be64(state, value)
 }
 
-fn pog_digest_add_bool(state: SHA256State, value: bool) -> SHA256State
+fn pog_digest_add_bool(state: &!SHA256State, value: bool)
 with Mut, Panic, Div {
     pog_digest_add_i64(state, if value { 1 } else { 0 })
 }
 
-fn pog_digest_add_words(state: SHA256State, words: &[i64; 8]) -> SHA256State
+fn pog_digest_add_words(state: &!SHA256State, words: &[i64; 8])
 with Mut, Panic, Div {
-    var next = state
     var index: i64 = 0
     while index < 8 {
-        next = pog_digest_add_i64(next, words[index])
+        pog_digest_add_i64(state, words[index])
         index = index + 1
     }
-    next
 }
 
 fn pog_digest_add_digest(
-    state: SHA256State,
+    state: &!SHA256State,
     digest: &PireusOperatorGenomeDigest,
-) -> SHA256State with Mut, Panic, Div {
+) with Mut, Panic, Div {
     pog_digest_add_words(state, &digest.words)
 }
 
@@ -1054,19 +1051,19 @@ fn pog_digest_lineage(
     lineage: &PireusOperatorGenomeLineage,
 ) -> PireusOperatorGenomeDigest with Mut, Panic, Div, Epistemic {
     var state = sha256_init()
-    state = pog_digest_add_words(state, &lineage.parent_source_sha256)
-    state = pog_digest_add_words(state, &lineage.parent_semantics_sha256)
-    state = pog_digest_add_words(state, &lineage.parent_transcript_sha256)
-    state = pog_digest_add_words(state, &lineage.parent_selected_sha256)
-    state = pog_digest_add_words(state, &lineage.parent_contract_sha256)
-    state = pog_digest_add_words(state, &lineage.parent_freeze_sha256)
-    state = pog_digest_add_words(state, &lineage.cd_sigma_source_sha256)
-    state = pog_digest_add_words(state, &lineage.xor_operation_source_sha256)
-    state = pog_digest_add_words(state, &lineage.xor_legality_source_sha256)
-    state = pog_digest_add_bool(state, lineage.parent_live_match)
-    state = pog_digest_add_bool(state, lineage.parent_selected_match)
-    state = pog_digest_add_bool(state, lineage.parent_receipt_scope_match)
-    state = pog_digest_add_bool(state, lineage.complete)
+    pog_digest_add_words(&! state, &lineage.parent_source_sha256)
+    pog_digest_add_words(&! state, &lineage.parent_semantics_sha256)
+    pog_digest_add_words(&! state, &lineage.parent_transcript_sha256)
+    pog_digest_add_words(&! state, &lineage.parent_selected_sha256)
+    pog_digest_add_words(&! state, &lineage.parent_contract_sha256)
+    pog_digest_add_words(&! state, &lineage.parent_freeze_sha256)
+    pog_digest_add_words(&! state, &lineage.cd_sigma_source_sha256)
+    pog_digest_add_words(&! state, &lineage.xor_operation_source_sha256)
+    pog_digest_add_words(&! state, &lineage.xor_legality_source_sha256)
+    pog_digest_add_bool(&! state, lineage.parent_live_match)
+    pog_digest_add_bool(&! state, lineage.parent_selected_match)
+    pog_digest_add_bool(&! state, lineage.parent_receipt_scope_match)
+    pog_digest_add_bool(&! state, lineage.complete)
     pog_digest_finish(state)
 }
 
@@ -1074,27 +1071,27 @@ fn pog_digest_genotype(
     genotype: &PireusOperatorGenotype,
 ) -> PireusOperatorGenomeDigest with Mut, Panic, Div, Epistemic {
     var state = sha256_init()
-    state = pog_digest_add_i64(state, genotype.bits)
-    state = pog_digest_add_i64(state, genotype.dimension)
-    state = pog_digest_add_i64(state, genotype.class_id)
-    state = pog_digest_add_i64(state, genotype.quadratic_code)
-    state = pog_digest_add_i64(state, genotype.packed_matrix)
+    pog_digest_add_i64(&! state, genotype.bits)
+    pog_digest_add_i64(&! state, genotype.dimension)
+    pog_digest_add_i64(&! state, genotype.class_id)
+    pog_digest_add_i64(&! state, genotype.quadratic_code)
+    pog_digest_add_i64(&! state, genotype.packed_matrix)
     var index: i64 = 0
     while index < 4 {
-        state = pog_digest_add_i64(state, genotype.matrix_rows[index])
+        pog_digest_add_i64(&! state, genotype.matrix_rows[index])
         index = index + 1
     }
     index = 0
     while index < 256 {
-        state = pog_digest_add_i64(state, genotype.sign_bits[index])
+        pog_digest_add_i64(&! state, genotype.sign_bits[index])
         index = index + 1
     }
-    state = pog_digest_add_i64(state, genotype.base_range_checks)
-    state = pog_digest_add_i64(state, genotype.base_range_failures)
-    state = pog_digest_add_i64(state, genotype.negative_count)
-    state = pog_digest_add_i64(state, genotype.negative_recount)
-    state = pog_digest_add_i64(state, genotype.negative_recount_failures)
-    state = pog_digest_add_bool(state, genotype.complete)
+    pog_digest_add_i64(&! state, genotype.base_range_checks)
+    pog_digest_add_i64(&! state, genotype.base_range_failures)
+    pog_digest_add_i64(&! state, genotype.negative_count)
+    pog_digest_add_i64(&! state, genotype.negative_recount)
+    pog_digest_add_i64(&! state, genotype.negative_recount_failures)
+    pog_digest_add_bool(&! state, genotype.complete)
     pog_digest_finish(state)
 }
 
@@ -1102,21 +1099,21 @@ fn pog_digest_microprogram(
     micro: &PireusOperatorMicroProgram,
 ) -> PireusOperatorGenomeDigest with Mut, Panic, Div, Epistemic {
     var state = sha256_init()
-    state = pog_digest_add_i64(state, micro.cell_count)
+    pog_digest_add_i64(&! state, micro.cell_count)
     var cell: i64 = 0
     while cell < 256 {
-        state = pog_digest_add_i64(state, micro.destinations[cell])
-        state = pog_digest_add_i64(state, micro.lhs_indices[cell])
-        state = pog_digest_add_i64(state, micro.rhs_indices[cell])
-        state = pog_digest_add_i64(state, micro.sign_bits[cell])
-        state = pog_digest_add_i64(state, micro.ordinals[cell])
+        pog_digest_add_i64(&! state, micro.destinations[cell])
+        pog_digest_add_i64(&! state, micro.lhs_indices[cell])
+        pog_digest_add_i64(&! state, micro.rhs_indices[cell])
+        pog_digest_add_i64(&! state, micro.sign_bits[cell])
+        pog_digest_add_i64(&! state, micro.ordinals[cell])
         cell = cell + 1
     }
-    state = pog_digest_add_i64(state, micro.partner_permutation_checks)
-    state = pog_digest_add_i64(state, micro.partner_permutation_failures)
-    state = pog_digest_add_i64(state, micro.coverage_checks)
-    state = pog_digest_add_i64(state, micro.coverage_failures)
-    state = pog_digest_add_bool(state, micro.complete)
+    pog_digest_add_i64(&! state, micro.partner_permutation_checks)
+    pog_digest_add_i64(&! state, micro.partner_permutation_failures)
+    pog_digest_add_i64(&! state, micro.coverage_checks)
+    pog_digest_add_i64(&! state, micro.coverage_failures)
+    pog_digest_add_bool(&! state, micro.complete)
     pog_digest_finish(state)
 }
 
@@ -1124,20 +1121,20 @@ fn pog_digest_groups(
     micro: &PireusOperatorMicroProgram,
 ) -> PireusOperatorGenomeDigest with Mut, Panic, Div, Epistemic {
     var state = sha256_init()
-    state = pog_digest_add_i64(state, micro.group_count)
+    pog_digest_add_i64(&! state, micro.group_count)
     var group: i64 = 0
     while group < 32 {
-        state = pog_digest_add_i64(state, micro.group_displacements[group])
-        state = pog_digest_add_i64(state, micro.group_source_chunks[group])
-        state = pog_digest_add_i64(state, micro.group_rhs_chunks[group])
-        state = pog_digest_add_i64(state, micro.group_negative_masks[group])
-        state = pog_digest_add_i64(state, micro.group_first_ordinals[group])
-        state = pog_digest_add_i64(state, micro.group_last_ordinals[group])
-        state = pog_digest_add_bool(state, micro.group_cross_chunk[group])
+        pog_digest_add_i64(&! state, micro.group_displacements[group])
+        pog_digest_add_i64(&! state, micro.group_source_chunks[group])
+        pog_digest_add_i64(&! state, micro.group_rhs_chunks[group])
+        pog_digest_add_i64(&! state, micro.group_negative_masks[group])
+        pog_digest_add_i64(&! state, micro.group_first_ordinals[group])
+        pog_digest_add_i64(&! state, micro.group_last_ordinals[group])
+        pog_digest_add_bool(&! state, micro.group_cross_chunk[group])
         group = group + 1
     }
-    state = pog_digest_add_i64(state, micro.same_chunk_groups)
-    state = pog_digest_add_i64(state, micro.cross_chunk_groups)
+    pog_digest_add_i64(&! state, micro.same_chunk_groups)
+    pog_digest_add_i64(&! state, micro.cross_chunk_groups)
     pog_digest_finish(state)
 }
 
@@ -1147,17 +1144,17 @@ fn pog_digest_evaluation(
     var state = sha256_init()
     var index: i64 = 0
     while index < 16 {
-        state = pog_digest_add_i64(state, f64_to_bits(evaluation.lhs[index]))
-        state = pog_digest_add_i64(state, f64_to_bits(evaluation.rhs[index]))
-        state = pog_digest_add_i64(
-            state, evaluation.direct_output_bits[index])
-        state = pog_digest_add_i64(
-            state, evaluation.microprogram_output_bits[index])
+        pog_digest_add_i64(&! state, f64_to_bits(evaluation.lhs[index]))
+        pog_digest_add_i64(&! state, f64_to_bits(evaluation.rhs[index]))
+        pog_digest_add_i64(
+            &! state, evaluation.direct_output_bits[index])
+        pog_digest_add_i64(
+            &! state, evaluation.microprogram_output_bits[index])
         index = index + 1
     }
-    state = pog_digest_add_i64(state, evaluation.output_checks)
-    state = pog_digest_add_i64(state, evaluation.output_failures)
-    state = pog_digest_add_bool(state, evaluation.fixture_bit_exact)
+    pog_digest_add_i64(&! state, evaluation.output_checks)
+    pog_digest_add_i64(&! state, evaluation.output_failures)
+    pog_digest_add_bool(&! state, evaluation.fixture_bit_exact)
     pog_digest_finish(state)
 }
 
@@ -1165,28 +1162,28 @@ fn pog_digest_targets(
     targets: &PireusOperatorMaterializationEnvelope,
 ) -> PireusOperatorGenomeDigest with Mut, Panic, Div, Epistemic {
     var state = sha256_init()
-    state = pog_digest_add_i64(state, targets.target_count)
+    pog_digest_add_i64(&! state, targets.target_count)
     var target: i64 = 0
     while target < 4 {
-        state = pog_digest_add_i64(state, targets.target_ids[target])
-        state = pog_digest_add_bool(state, targets.canonical[target])
-        state = pog_digest_add_bool(state, targets.observed[target])
-        state = pog_digest_add_i64(state, targets.obligation_counts[target])
-        state = pog_digest_add_i64(state, targets.discharged_counts[target])
-        state = pog_digest_add_i64(
-            state, targets.material_receipt_counts[target])
-        state = pog_digest_add_i64(state, targets.lowering_counts[target])
-        state = pog_digest_add_i64(state, targets.cost_record_counts[target])
-        state = pog_digest_add_bool(state, targets.strict_order_required[target])
+        pog_digest_add_i64(&! state, targets.target_ids[target])
+        pog_digest_add_bool(&! state, targets.canonical[target])
+        pog_digest_add_bool(&! state, targets.observed[target])
+        pog_digest_add_i64(&! state, targets.obligation_counts[target])
+        pog_digest_add_i64(&! state, targets.discharged_counts[target])
+        pog_digest_add_i64(
+            &! state, targets.material_receipt_counts[target])
+        pog_digest_add_i64(&! state, targets.lowering_counts[target])
+        pog_digest_add_i64(&! state, targets.cost_record_counts[target])
+        pog_digest_add_bool(&! state, targets.strict_order_required[target])
         target = target + 1
     }
-    state = pog_digest_add_i64(state, targets.u250_required_cards)
-    state = pog_digest_add_i64(state, targets.u250_declared_engine_slots)
-    state = pog_digest_add_words(
-        state, &targets.target_profile_source_sha256)
-    state = pog_digest_add_words(state, &targets.u250_admission_source_sha256)
-    state = pog_digest_add_i64(state, targets.unresolved_obligations)
-    state = pog_digest_add_bool(state, targets.complete)
+    pog_digest_add_i64(&! state, targets.u250_required_cards)
+    pog_digest_add_i64(&! state, targets.u250_declared_engine_slots)
+    pog_digest_add_words(
+        &! state, &targets.target_profile_source_sha256)
+    pog_digest_add_words(&! state, &targets.u250_admission_source_sha256)
+    pog_digest_add_i64(&! state, targets.unresolved_obligations)
+    pog_digest_add_bool(&! state, targets.complete)
     pog_digest_finish(state)
 }
 
@@ -1194,35 +1191,35 @@ fn pog_digest_receipt(
     receipt: &PireusOperatorGenomeReceipt,
 ) -> PireusOperatorGenomeDigest with Mut, Panic, Div, Epistemic {
     var state = sha256_init()
-    state = pog_digest_add_i64(state, receipt.schema)
-    state = pog_digest_add_i64(state, receipt.producer_language)
-    state = pog_digest_add_i64(state, receipt.producer_role)
-    state = pog_digest_add_i64(state, receipt.stage)
-    state = pog_digest_add_bool(state, receipt.parent_lineage_bound)
-    state = pog_digest_add_bool(state, receipt.genotype_derived)
-    state = pog_digest_add_bool(state, receipt.canonical_cells_complete)
-    state = pog_digest_add_bool(state, receipt.comparison_groups_complete)
-    state = pog_digest_add_bool(state, receipt.fixture_evaluators_agree)
-    state = pog_digest_add_bool(state, receipt.target_envelopes_emitted)
-    state = pog_digest_add_bool(
-        state, receipt.hardware_semantics_mutation_absent)
-    state = pog_digest_add_bool(
-        state, receipt.parent_receipt_relative_semantic_novelty)
-    state = pog_digest_add_bool(state, receipt.executable_genome_derivation)
-    state = pog_digest_add_bool(state, receipt.semantics_frozen)
-    state = pog_digest_add_bool(state, receipt.formal_parity_open)
-    state = pog_digest_add_bool(state, receipt.effect_parity_open)
-    state = pog_digest_add_bool(state, receipt.material_parity_open)
-    state = pog_digest_add_bool(state, receipt.target_lowering_admitted)
-    state = pog_digest_add_bool(state, receipt.target_cost_admitted)
-    state = pog_digest_add_bool(state, receipt.target_performance_admitted)
-    state = pog_digest_add_bool(state, receipt.algorithmic_novelty)
-    state = pog_digest_add_bool(state, receipt.material_novelty)
-    state = pog_digest_add_bool(state, receipt.scientific_novelty)
-    state = pog_digest_add_bool(state, receipt.global_novelty)
-    state = pog_digest_add_bool(state, receipt.historical_novelty)
-    state = pog_digest_add_bool(state, receipt.priority_claim)
-    state = pog_digest_add_bool(state, receipt.claim_ready)
+    pog_digest_add_i64(&! state, receipt.schema)
+    pog_digest_add_i64(&! state, receipt.producer_language)
+    pog_digest_add_i64(&! state, receipt.producer_role)
+    pog_digest_add_i64(&! state, receipt.stage)
+    pog_digest_add_bool(&! state, receipt.parent_lineage_bound)
+    pog_digest_add_bool(&! state, receipt.genotype_derived)
+    pog_digest_add_bool(&! state, receipt.canonical_cells_complete)
+    pog_digest_add_bool(&! state, receipt.comparison_groups_complete)
+    pog_digest_add_bool(&! state, receipt.fixture_evaluators_agree)
+    pog_digest_add_bool(&! state, receipt.target_envelopes_emitted)
+    pog_digest_add_bool(
+        &! state, receipt.hardware_semantics_mutation_absent)
+    pog_digest_add_bool(
+        &! state, receipt.parent_receipt_relative_semantic_novelty)
+    pog_digest_add_bool(&! state, receipt.executable_genome_derivation)
+    pog_digest_add_bool(&! state, receipt.semantics_frozen)
+    pog_digest_add_bool(&! state, receipt.formal_parity_open)
+    pog_digest_add_bool(&! state, receipt.effect_parity_open)
+    pog_digest_add_bool(&! state, receipt.material_parity_open)
+    pog_digest_add_bool(&! state, receipt.target_lowering_admitted)
+    pog_digest_add_bool(&! state, receipt.target_cost_admitted)
+    pog_digest_add_bool(&! state, receipt.target_performance_admitted)
+    pog_digest_add_bool(&! state, receipt.algorithmic_novelty)
+    pog_digest_add_bool(&! state, receipt.material_novelty)
+    pog_digest_add_bool(&! state, receipt.scientific_novelty)
+    pog_digest_add_bool(&! state, receipt.global_novelty)
+    pog_digest_add_bool(&! state, receipt.historical_novelty)
+    pog_digest_add_bool(&! state, receipt.priority_claim)
+    pog_digest_add_bool(&! state, receipt.claim_ready)
     pog_digest_finish(state)
 }
 
@@ -1236,13 +1233,13 @@ fn pog_digest_genome(
     receipt: &PireusOperatorGenomeDigest,
 ) -> PireusOperatorGenomeDigest with Mut, Panic, Div, Epistemic {
     var state = sha256_init()
-    state = pog_digest_add_digest(state, lineage)
-    state = pog_digest_add_digest(state, genotype)
-    state = pog_digest_add_digest(state, microprogram)
-    state = pog_digest_add_digest(state, group)
-    state = pog_digest_add_digest(state, evaluation)
-    state = pog_digest_add_digest(state, targets)
-    state = pog_digest_add_digest(state, receipt)
+    pog_digest_add_digest(&! state, lineage)
+    pog_digest_add_digest(&! state, genotype)
+    pog_digest_add_digest(&! state, microprogram)
+    pog_digest_add_digest(&! state, group)
+    pog_digest_add_digest(&! state, evaluation)
+    pog_digest_add_digest(&! state, targets)
+    pog_digest_add_digest(&! state, receipt)
     pog_digest_finish(state)
 }
 

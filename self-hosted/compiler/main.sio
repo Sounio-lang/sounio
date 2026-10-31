@@ -93,6 +93,7 @@ use gpu::hlir_to_gpu::*
 use gpu::epistemic_spirv::*
 use gpu::ptx::*
 use gpu::kaxi_to_ptx::*
+use compiler::codegen::hardware::fpga_emit::{fpga_emit_file}
 use gpu::metal::*
 use gpu::cuda_tile::*
 
@@ -3071,6 +3072,16 @@ fn run_native_v2_compile_mode(args: ArgList, flag_index: i64) with IO, Mut, Pani
     // Visibility preflight also typechecks. Give it the same scoped target
     // capability as the actual compile, without relaxing Linux/check defaults.
     let requested_target = compiler_mode_option_string(args, "-t", "--target", "native")
+    if str_eq(requested_target, "fpga-u250") {
+        // FPGA U250 target (SIO-307, ADR-022 subset v0): emit Vitis HLS C++
+        // for the first non-main fn; outside-subset input fails loudly with
+        // SIO_FPGA_EMIT_FAIL from the emitter. No native object is produced.
+        fpga_emit_file(source_path, out_path)
+        print("native_v2_compile: emitted path=")
+        print(out_path)
+        print("\n")
+        return
+    }
     let explicit_target = (compiler_mode_has_flag(args, "-t") || compiler_mode_has_flag(args, "--target")) && requested_target != "native" && requested_target != "native-auto"
     let preflight_target = native_resolve_target(requested_target, "auto", explicit_target)
     let previous_math = checker_swap_darwin_math(preflight_target.arch_id == ARCH_AARCH64() && preflight_target.os_id == OS_MACOS())
@@ -3116,7 +3127,7 @@ fn compiler_try_default_native_v2_single(opts: CompilerOptions) -> bool with IO,
     if str_len(opts.gpu_target) > 0 {
         return false
     }
-    if str_eq(opts.target, "llvm") || str_eq(opts.target, "wasm") {
+    if str_eq(opts.target, "llvm") || str_eq(opts.target, "wasm") || str_eq(opts.target, "fpga-u250") {
         return false
     }
     if !compiler_preflight_source_input(opts.input_file) {
@@ -3314,6 +3325,36 @@ fn run_native_v2_emit_sret(args: ArgList, flag_index: i64) with IO, Mut, Panic, 
         return
     }
     print("native_v2_emit_exit_code: emitted label=sret path=")
+    print(out_path)
+    print("\n")
+}
+
+// Relocation-shape witness: --native-v2-emit-reloc-shape <shape> <out_path>.
+// shape 0 = mov rcx,[rip+d], 1 = mov r8,[rip+d] (both must patch: compiler
+// exit 0, ELF exit 37);
+// shape 2 = mov dword [rip+d],imm32 (disp32 not last: must refuse). A
+// recorded relocation may be patched or refused -- never left at [rip+0].
+// A writer refusal is a failing command. The process status is that rc
+// (29 for an unpatched known kind, 20 for an unknown kind), not a log line
+// followed by exit 0. The empty exit_process() in this file does not
+// terminate, and the lean_single seed that builds Madaros does not bind the
+// Madaros exit builtin (E200). SYS_exit via syscall6 is the termination that
+// seed emits.
+fn run_native_v2_emit_reloc_shape(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
+    if flag_index + 2 >= args.len {
+        panic("native-v2-emit-reloc-shape: usage --native-v2-emit-reloc-shape <shape> <out_path>")
+    }
+    let parsed = parse_i64_decimal(arg_list_get(args, flag_index + 1))
+    let out_path = arg_list_get(args, flag_index + 2)
+    let rc = compile_native_v2_reloc_shape_witness_to_file(out_path, parsed.1)
+    if rc != 0 {
+        print("native_v2_emit_exit_code: FAIL to_file label=reloc-shape rc=")
+        print_int(rc as i64)
+        print("\n")
+        syscall6(60, rc as i64, 0, 0, 0, 0, 0)
+        return
+    }
+    print("native_v2_emit_exit_code: emitted label=reloc-shape path=")
     print(out_path)
     print("\n")
 }
@@ -5074,6 +5115,20 @@ fn compile(opts: CompilerOptions) -> CompileResult with IO, Mut, Panic, Div, All
             success: false,
             errors: file_errors,
             output: "",
+        }
+    }
+
+    if str_eq(opts.target, "fpga-u250") {
+        // FPGA U250 target (SIO-307, ADR-022 subset v0): emit Vitis HLS C++
+        // for the first non-main fn; outside-subset input fails loudly with
+        // SIO_FPGA_EMIT_FAIL from the emitter. No native object is produced.
+        var fpga_output = opts.output_file
+        if str_len(fpga_output) == 0 { fpga_output = "fpga_kernel.cpp" }
+        fpga_emit_file(opts.input_file, fpga_output)
+        return CompileResult {
+            success: true,
+            errors: compile_errors_new(),
+            output: fpga_output,
         }
     }
 
@@ -30552,6 +30607,9 @@ fn main() with IO, Mut, Panic, Div, Alloc {
             return
         } else if mode == "--native-v2-emit-sret-plaincall" {
             run_native_v2_emit_sret_plaincall(args, arg_idx)
+            return
+        } else if mode == "--native-v2-emit-reloc-shape" {
+            run_native_v2_emit_reloc_shape(args, arg_idx)
             return
         } else if mode == "--native-v2-emit-call5" {
             run_native_v2_emit_call5(args, arg_idx)

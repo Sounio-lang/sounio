@@ -80,7 +80,14 @@ pub fn compute_orbit(c: Sedenion64, config: OrbitConfig) -> OrbitResult {
         // ---- Hessian recursion (if enabled) ----
         if config.compute_hessian == 1 {
             // Transport: J_{z_n}(H_n) — apply Jz to each fibre H[:,j,k]
-            var H_new = tensor16_jordan_transport(Jz, H)
+            let H_transport = tensor16_jordan_transport(Jz, H)
+            // Curvature source, filled in a local buffer. Each (i,a,b) receives
+            // exactly one term (from pair (a,b) if a <= b, else from (b,a)), so
+            // transport + source is bit-identical to accumulating into the
+            // tensor -- which, done with by-value tensor16_get/tensor16_set,
+            // copied the 32 KiB tensor ~2e5 times per orbit and exhausted the
+            // never-reclaimed runtime arena (tests/stdlib/neuro/test_neuro.sio).
+            var H_src: [f64; 4096] = [0.0; 4096]
 
             // Curvature source: for each (j,k), Jordan product of J_n*e_j and J_n*e_k
             // Jordan(u, v) = u*v + v*u as sedenions
@@ -98,15 +105,13 @@ pub fn compute_orbit(c: Sedenion64, config: OrbitConfig) -> OrbitResult {
                     // Jordan product of Jj and Jk
                     let jp = sed64_jordan(Jj, Jk)
 
-                    // Add to H_new
+                    // Source term for H[i,j,k] and its mirror H[i,k,j]
                     var i = 0
                     while i < 16 {
                         let val = sed64_get(jp, i)
-                        let old_jk = tensor16_get(H_new, i, j, k)
-                        H_new = tensor16_set(H_new, i, j, k, old_jk + val)
+                        H_src[i * 256 + j * 16 + k] = val
                         if k != j {
-                            let old_kj = tensor16_get(H_new, i, k, j)
-                            H_new = tensor16_set(H_new, i, k, j, old_kj + val)
+                            H_src[i * 256 + k * 16 + j] = val
                         }
                         i = i + 1
                     }
@@ -114,7 +119,7 @@ pub fn compute_orbit(c: Sedenion64, config: OrbitConfig) -> OrbitResult {
                 }
                 j = j + 1
             }
-            H = H_new
+            H = tensor16_add(H_transport, tensor16_from_data(H_src))
         }
 
         z = z_new

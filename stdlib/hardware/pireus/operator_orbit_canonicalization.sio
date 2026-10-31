@@ -637,25 +637,38 @@ fn poc_action_value(
     }
 }
 
-fn poc_action_section(
+// #2820: writes the section into the caller's buffer. Returned by value,
+// every one of the GL4_COUNT * SWAP_COUNT action views per canonicalisation
+// took a fresh managed object (an integer-bearing aggregate opens no
+// reclaiming region), and the ~6.5M views of a run filled Madaros's
+// 4,194,304-entry handle table (rc=182). The values are unchanged: q[0] and the
+// basis entries stay 0, every other entry is rewritten before it is read.
+fn poc_action_section_into(
+    section: &!PocGaugeSection,
     table: &[i64; 256], matrix: i64, swap: i64,
-) -> PocGaugeSection with Mut, Panic {
-    var q: [i64; 16] = [0; 16]
+) with Mut, Panic {
     var word: i64 = 0
-    var vector: i64 = 1
+    var vector: i64 = 0
+    while vector < PIREUS_POC_LANES {
+        (*section).values[vector] = 0
+        vector = vector + 1
+    }
+    vector = 1
     while vector < PIREUS_POC_LANES {
         if !poc_is_basis(vector) {
             let edge = poc_highest_basis(vector)
             let parent = vector ^ edge
-            q[vector] = poc_action_value(
-                table, matrix, swap, parent, edge) ^ q[parent]
-            if q[vector] != 0 {
+            let value = poc_action_value(
+                table, matrix, swap, parent, edge) ^
+                (*section).values[parent]
+            (*section).values[vector] = value
+            if value != 0 {
                 word = word | (1 << poc_gauge_index(vector))
             }
         }
         vector = vector + 1
     }
-    PocGaugeSection { values: q, word: word }
+    (*section).word = word
 }
 
 fn poc_normalized_action_value(
@@ -695,12 +708,13 @@ fn poc_canonicalize(
     var pivot_failures: i64 = 0
     var comparisons: i64 = 0
     var replacements: i64 = 0
+    var section = PocGaugeSection { values: [0; 16], word: 0 }
     var index: i64 = 0
     while index < matrices.count && index < PIREUS_POC_GL4_COUNT {
         let matrix = matrices.codes[index]
         var swap: i64 = 0
         while swap < PIREUS_POC_SWAP_COUNT {
-            let section = poc_action_section(table, matrix, swap)
+            poc_action_section_into(&! section, table, matrix, swap)
             action_views = action_views + 1
             var vector: i64 = 1
             while vector < PIREUS_POC_LANES {
@@ -750,8 +764,9 @@ fn poc_canonicalize(
         index = index + 1
     }
 
-    let winning_section = poc_action_section(
-        table, best_matrix, best_swap)
+    var winning_section = PocGaugeSection { values: [0; 16], word: 0 }
+    poc_action_section_into(
+        &! winning_section, table, best_matrix, best_swap)
     var replay_checks: i64 = 0
     var replay_failures: i64 = 0
     var cell: i64 = 0

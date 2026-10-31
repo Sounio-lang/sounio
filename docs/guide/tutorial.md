@@ -78,7 +78,7 @@ On Linux x86-64:
 
 ## 2. Basic Syntax
 
-These forms are the small-program surface the claim registry marks stable (`core.syntax`, `core.execution`, `core.structs`) and that `CLAUDE.md` §7 records as enforced or accepted. Payload enum variants are not in that surface (KL-20). Closures are not a safe user surface.
+These forms are the small-program surface the claim registry marks stable (`core.syntax`, `core.execution`, `core.structs`) and that `CLAUDE.md` §7 records as enforced or accepted. Payload enum variants run on default Madaros only (KL-20; `tests/run-pass/enum_payload_*.sio`), not on lean_single. Closures are not a safe user surface.
 
 ### Variables
 
@@ -145,7 +145,7 @@ let numbers: [i64; 5] = [1, 2, 3, 4, 5]
 let first = numbers[0]
 ```
 
-Payload-free enums are usable. `enum Result<T, E> { Ok(T), Err(E) }` is not: variants with payloads have no runtime representation on either engine (KL-20, `TOUR.md` §6). Do not match on `Ok(value)`.
+Payload-free enums are usable. Non-generic payload enums (`enum Shape { Circle(f64), Rect { w: f64, h: f64 } }`) run on default Madaros (KL-20). `enum Result<T, E> { Ok(T), Err(E) }` is not: Madaros does not parse a generic enum, and the builtin `Ok(..)`/`Err(..)` have no lowering. Do not match on `Ok(value)`.
 
 ---
 

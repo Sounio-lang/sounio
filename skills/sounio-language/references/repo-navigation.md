@@ -13,10 +13,8 @@
 - `tests/run-pass/` (what should work)
 - `tests/compile-fail/` and `tests/ui/` (what should fail + diagnostics)
 - `stdlib/` (real-world Sounio usage patterns)
-- `compiler/src/parser/tests/` (parser-level truth for new syntax)
 
 ## Common entry points when changing syntax
 
-- Parser: `compiler/src/parser/mod.rs`
-- AST: `compiler/src/ast/mod.rs`
-- Lexer: `compiler/src/lexer/` (Rust lexer) and `stdlib/compiler/lexer/` (Sounio lexer tests)
+- Parser: `self-hosted/parser/`
+- Lexer: `self-hosted/lexer/` and `stdlib/compiler/lexer/` (Sounio lexer tests)

@@ -11,14 +11,72 @@ export SOUNIO_STDLIB_PATH="$repo/stdlib" SOUNIO_SOUC_ENGINE=madaros
 export SOUNIO_MADAROS_NOCACHE=1 SOUNIO_MADAROS_CACHE_READONLY=1
 ulimit -s 524288
 printf 'kind\tsource\texit_status\n' > "$out/RESULTS.tsv"
+mkdir -p "$out/result-rows" || exit 65
 sha256sum "$MADAROS_RAW_BIN" > "$out/COMPILER.sha256" || exit 65
 find stdlib tests -type f -print0 | sort -z | xargs -0 sha256sum > "$out/INPUTS.sha256" || exit 65
 g++ --version > "$out/CXX_TOOLCHAIN.txt" || exit 65
 fail=0
 record() {
-    printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "$out/RESULTS.tsv"
+    local tmp
+    tmp="$(mktemp "$out/result-rows/row.XXXXXX")" || { fail=1; return 1; }
+    printf '%s\t%s\t%s\n' "$1" "$2" "$3" > "$tmp" || { fail=1; return 1; }
+    mv -- "$tmp" "$tmp.tsv" || { fail=1; return 1; }
     [[ "$3" == 0 ]] || fail=1
+    return 0
 }
+resolve_jobs() {
+    local cpus memory_bytes memory_current host_memory_bytes memory_jobs jobs
+    if [[ -n "${STDLIB_DEEP_JOBS:-}" ]]; then
+        [[ "$STDLIB_DEEP_JOBS" =~ ^[1-9][0-9]*$ ]] || return 2
+        printf '%s\n' "$STDLIB_DEEP_JOBS"
+        return 0
+    fi
+    cpus="$(nproc 2>/dev/null || echo 1)"
+    if [[ -r /sys/fs/cgroup/memory.max ]]; then
+        read -r memory_bytes < /sys/fs/cgroup/memory.max
+        if [[ "$memory_bytes" == max ]]; then
+            memory_bytes="$(awk '/^MemAvailable:/ { printf "%.0f\n", $2 * 1024; exit }' /proc/meminfo)"
+        elif [[ "$memory_bytes" =~ ^[0-9]+$ && -r /sys/fs/cgroup/memory.current ]]; then
+            read -r memory_current < /sys/fs/cgroup/memory.current
+            if [[ "$memory_current" =~ ^[0-9]+$ && "$memory_current" -lt "$memory_bytes" ]]; then
+                memory_bytes=$((memory_bytes - memory_current))
+            else
+                memory_bytes=1
+            fi
+        else
+            [[ "$memory_bytes" =~ ^[0-9]+$ ]] || memory_bytes=""
+        fi
+    elif [[ -r /sys/fs/cgroup/memory/memory.limit_in_bytes ]]; then
+        read -r memory_bytes < /sys/fs/cgroup/memory/memory.limit_in_bytes
+        memory_current=0
+        [[ ! -r /sys/fs/cgroup/memory/memory.usage_in_bytes ]] \
+            || read -r memory_current < /sys/fs/cgroup/memory/memory.usage_in_bytes
+        if [[ "$memory_bytes" =~ ^[0-9]+$ && "$memory_current" =~ ^[0-9]+$ && "$memory_current" -lt "$memory_bytes" ]]; then
+            memory_bytes=$((memory_bytes - memory_current))
+            host_memory_bytes="$(awk '/^MemAvailable:/ { printf "%.0f\n", $2 * 1024; exit }' /proc/meminfo)"
+            if [[ "$host_memory_bytes" =~ ^[1-9][0-9]*$ ]]; then
+                if (( memory_bytes > host_memory_bytes )); then
+                    memory_bytes="$host_memory_bytes"
+                fi
+            else
+                memory_bytes=1
+            fi
+        else
+            memory_bytes=1
+        fi
+    else
+        memory_bytes="$(awk '/^MemAvailable:/ { printf "%.0f\n", $2 * 1024; exit }' /proc/meminfo)"
+    fi
+    [[ "$cpus" =~ ^[1-9][0-9]*$ ]] || cpus=1
+    [[ "$memory_bytes" =~ ^[1-9][0-9]*$ ]] || memory_bytes=$((4 * 1024 * 1024 * 1024))
+    memory_jobs=$((memory_bytes / (4 * 1024 * 1024 * 1024)))
+    (( memory_jobs > 0 )) || memory_jobs=1
+    jobs=2
+    (( jobs > cpus )) && jobs="$cpus"
+    (( jobs > memory_jobs )) && jobs="$memory_jobs"
+    printf '%s\n' "$jobs"
+}
+jobs="$(resolve_jobs)" || { echo "invalid STDLIB_DEEP_JOBS (expected a positive integer)" >&2; exit 64; }
 native() {
     local src=$1 name=$2 rc=0
     timeout 180 bin/souc check "$src" > "$out/$name.check.txt" 2>&1 || rc=$?
@@ -41,27 +99,72 @@ native() {
         record stdout-marker "$src" "$marker_rc"
     fi
 }
-for src in tests/compile-fail/stdlib_deep_*.sio; do
-    name=$(basename "$src" .sio); rc=0
-    timeout 120 bin/souc check "$src" > "$out/$name.check.txt" 2>&1 || rc=$?
-    pattern=linear
-    [[ "$name" != *forge* ]] || pattern=private
-    [[ "$name" != *callback_private* ]] || pattern=E175
-    if [[ $rc != 1 ]] || ! grep -qi "$pattern" "$out/$name.check.txt"; then record negative "$src" 1
-    else record negative "$src" 0; fi
-done
-for src in tests/run-pass/stdlib_deep_*.sio; do native "$src" "$(basename "$src" .sio)"; done
-for name in stdlib_scale_normalization_into stdlib_scale_normalization_status stdlib_scale_count_likelihood_difference stdlib_scale_count_profile_nested_bootstrap; do native "tests/run-pass/$name.sio" "$name"; done
+NATIVE_SOURCES=()
+NATIVE_NAMES=()
+queue_native() {
+    NATIVE_SOURCES+=("$1")
+    NATIVE_NAMES+=("$2")
+}
+emit_fixture() {
+    local stem="$1" suffix="$2" mode="$3" rc=0
+    if [[ -n "$mode" ]]; then
+        timeout 180 "$out/$stem" "$mode" > "$out/$stem$suffix.sio" 2> "$out/$stem$suffix.emitter.stderr" || rc=$?
+    else
+        timeout 180 "$out/$stem" > "$out/$stem$suffix.sio" 2> "$out/$stem$suffix.emitter.stderr" || rc=$?
+    fi
+    record emit "$stem$suffix" "$rc"
+    [[ "$rc" != 0 ]] || queue_native "$out/$stem$suffix.sio" "$stem$suffix.generated"
+}
+native_worker() {
+    local src="$1" name="$2" idx="$3" rc=0 tmp
+    fail=0
+    native "$src" "$name" || rc=$?
+    [[ "$fail" == 0 ]] || rc=1
+    tmp="$(mktemp "$out/.native-status.XXXXXX")" || exit 65
+    printf '%s\n' "$rc" > "$tmp" || exit 65
+    mv -- "$tmp" "$out/native.$idx.status" || exit 65
+    return "$rc"
+}
+run_native_batch() {
+    local active=0 idx worker_rc
+    printf '[deep-science] native workers=%s fixtures=%s\n' "$jobs" "${#NATIVE_SOURCES[@]}"
+    for ((idx=0; idx<${#NATIVE_SOURCES[@]}; idx++)); do
+        native_worker "${NATIVE_SOURCES[$idx]}" "${NATIVE_NAMES[$idx]}" "$idx" &
+        active=$((active + 1))
+        if (( active >= jobs )); then
+            wait -n || true
+            active=$((active - 1))
+        fi
+    done
+    while (( active > 0 )); do
+        wait -n || true
+        active=$((active - 1))
+    done
+    for ((idx=0; idx<${#NATIVE_SOURCES[@]}; idx++)); do
+        if [[ -f "$out/native.$idx.status" ]]; then
+            IFS= read -r worker_rc < "$out/native.$idx.status" || worker_rc=""
+            if [[ "$worker_rc" =~ ^[0-9]+$ ]]; then
+                record native-worker "${NATIVE_NAMES[$idx]}" "$worker_rc"
+            else
+                record native-worker "${NATIVE_NAMES[$idx]}:invalid-status" 1
+            fi
+        else
+            record native-worker "${NATIVE_NAMES[$idx]}:missing-status" 1
+        fi
+    done
+}
+for src in tests/run-pass/stdlib_deep_*.sio; do queue_native "$src" "$(basename "$src" .sio)"; done
+for name in stdlib_scale_normalization_into stdlib_scale_normalization_status stdlib_scale_count_likelihood_difference stdlib_scale_count_profile_nested_bootstrap; do queue_native "tests/run-pass/$name.sio" "$name"; done
 # Legacy render paths are replayed in the canonical engine as well as the
 # Stage2 full suite: these names exposed nested-label and first-tick defects.
 for name in stats_inference_forest viz_bootstrap_forest viz_count_matrix_qc \
     viz_entropy_covariance viz_information_channels viz_scatter_viewport \
     viz_scientific_clip viz_statistical_interval_forest viz_bca_mean \
     viz_permutation_mc viz_axis_first_tick_guard; do
-    native "tests/run-pass/$name.sio" "$name"
+    queue_native "tests/run-pass/$name.sio" "$name"
 done
 for name in viz_dynamic_count_workflow viz_dynamic_ode_diagnostics; do
-    native "examples/$name.sio" "$name"
+    queue_native "examples/$name.sio" "$name"
 done
 compare() {
     local stem=$1 fixture=$2 rc=0
@@ -76,17 +179,54 @@ compare_mode() {
     record concordance "$stem:$mode" "$rc"
 }
 emit() {
-    local stem=$1 suffix=$2 mode=$3 rc=0
-    if [[ -n "$mode" ]]; then timeout 180 "$out/$stem" "$mode" > "$out/$stem$suffix.sio" 2> "$out/$stem$suffix.emitter.stderr" || rc=$?
-    else timeout 180 "$out/$stem" > "$out/$stem$suffix.sio" 2> "$out/$stem$suffix.emitter.stderr" || rc=$?; fi
-    record emit "$stem$suffix" "$rc"
-    [[ $rc != 0 ]] || native "$out/$stem$suffix.sio" "$stem$suffix.generated"
+    local stem=$1 suffix=$2
+    [[ -f "$out/$stem$suffix.generated.stdout" ]] \
+        || record emit "$stem$suffix:missing-native-fixture" 1
 }
-for src in tests/reference/deep_*.cpp; do
-    stem=$(basename "$src" .cpp); rc=0
-    timeout 180 g++ -std=c++23 -O2 -Wall -Wextra "$src" -lquadmath -o "$out/$stem" > "$out/$stem.cpp.txt" 2>&1 || rc=$?
+
+compile_cpp() {
+    local src="$1" stem="$2" extra="$3" rc=0
+    timeout 180 g++ -std=c++23 -O2 -Wall -Wextra "$src" ${extra:+$extra} \
+        -o "$out/$stem" > "$out/$stem.cpp.txt" 2>&1 || rc=$?
     record cpp-compile "$src" "$rc"
-    [[ $rc == 0 ]] || continue
+}
+
+# Build every independent oracle before starting native fixture work or comparisons.
+for src in tests/reference/deep_*.cpp; do
+    compile_cpp "$src" "$(basename "$src" .cpp)" "-lquadmath"
+done
+for stem in count_dispersion_increment_reference count_profile_lr_fixed_reference \
+    count_profile_lr_v10_reference count_likelihood_difference_reference; do
+    compile_cpp "tests/reference/$stem.cpp" "$stem" "-lquadmath"
+done
+compile_cpp tests/reference/display_font_orientation_reference.cpp display_font_orientation_reference ""
+compile_cpp tests/reference/normalization_into_reference.cpp normalization_into_reference ""
+for src in tests/compile-fail/stdlib_deep_*.sio; do
+    name=$(basename "$src" .sio); rc=0
+    timeout 120 bin/souc check "$src" > "$out/$name.check.txt" 2>&1 || rc=$?
+    pattern=linear
+    [[ "$name" != *forge* ]] || pattern=private
+    [[ "$name" != *callback_private* ]] || pattern=E175
+    if [[ $rc != 1 ]] || ! grep -qi "$pattern" "$out/$name.check.txt"; then record negative "$src" 1
+    else record negative "$src" 0; fi
+done
+queue_native tests/run-pass/display_font_orientation.sio display_font_orientation
+for stem in deep_ode_reference deep_special_reference deep_ode_dynamic_reference \
+    deep_factor_reference deep_svd_reference deep_ros4_reference deep_kde_reference \
+    deep_dynamic_count_tsv_reference deep_numeric_select_reference; do
+    emit_fixture "$stem" "" ""
+done
+emit_fixture deep_count_sampling_reference "" ""
+emit_fixture deep_count_sampling_reference .moments --emit-moments
+for pair in "pcg.into emit-pcg-into" "count.into emit-count-into-million" "ptrs.into emit-ptrs-into-million"; do
+    read -r suffix mode <<< "$pair"
+    emit_fixture deep_count_sampling_reference ".$suffix" "--$mode"
+done
+run_native_batch
+
+oracle_deep_case() {
+    local stem="$1" rc=0 expected=0 verified=0 rejected=0 mode suffix generator checker pair
+    fail=0
     case "$stem" in
       deep_ode_reference|deep_special_reference|deep_ode_dynamic_reference|deep_factor_reference|deep_svd_reference|deep_ros4_reference|deep_kde_reference|deep_dynamic_count_tsv_reference|deep_numeric_select_reference)
         emit "$stem" "" "" ;;
@@ -186,54 +326,190 @@ for src in tests/reference/deep_*.cpp; do
         done ;;
       *) record unregistered-oracle "$stem" 1 ;;
     esac
-done
-lr_data=tests/reference/data/count_profile_lr_20261024
-for stem in count_dispersion_increment_reference count_profile_lr_fixed_reference count_profile_lr_v10_reference count_likelihood_difference_reference; do
- rc=0
- timeout 180 g++ -std=c++23 -O2 -Wall -Wextra "tests/reference/$stem.cpp" -lquadmath -o "$out/$stem" > "$out/$stem.cpp.txt" 2>&1 || rc=$?
- record cpp-compile "$stem" "$rc"
- [[ $rc == 0 ]] || continue
- rc=0
- case "$stem" in
-  count_dispersion_increment_reference) timeout 600 "$out/$stem" > "$out/$stem.concordance.stdout" 2> "$out/$stem.concordance.stderr" || rc=$? ;;
-  count_profile_lr_fixed_reference) timeout 180 "$out/$stem" "$lr_data/case-3.stdout" "$lr_data/case-11.stdout" "$lr_data/case-13.stdout" > "$out/$stem.concordance.stdout" 2> "$out/$stem.concordance.stderr" || rc=$? ;;
-  count_profile_lr_v10_reference) timeout 180 "$out/$stem" "$lr_data/v10.stdout" > "$out/$stem.concordance.stdout" 2> "$out/$stem.concordance.stderr" || rc=$? ;;
-  count_likelihood_difference_reference) timeout 180 "$out/$stem" --native "$out/stdlib_scale_count_likelihood_difference.stdout" "$lr_data/case-3.stdout" "$lr_data/case-11.stdout" "$lr_data/case-13.stdout" > "$out/$stem.concordance.stdout" 2> "$out/$stem.concordance.stderr" || rc=$? ;;
- esac
- record concordance "$stem" "$rc"
- if [[ "$stem" == count_dispersion_increment_reference || "$stem" == count_profile_lr_fixed_reference ]]; then
-  rc=0
-  if [[ "$stem" == count_profile_lr_fixed_reference ]]; then timeout 180 "$out/$stem" --mutant-sign "$lr_data/case-3.stdout" "$lr_data/case-11.stdout" "$lr_data/case-13.stdout" > "$out/$stem.mutant.stdout" 2> "$out/$stem.mutant.stderr" || rc=$?
-  else timeout 180 "$out/$stem" --mutant-sign > "$out/$stem.mutant.stdout" 2> "$out/$stem.mutant.stderr" || rc=$?; fi
-  rejected=1; [[ "$rc" != 2 ]] || rejected=0
-  record mutant-rejection "$stem:orientation:expected=2:actual=$rc" "$rejected"
- fi
-done
+    return "$fail"
+}
+oracle_tail_case() {
+    local stem="$1" rc=0 lr_data=tests/reference/data/count_profile_lr_20261024 rejected=0
+    fail=0
+    case "$stem" in
+      count_dispersion_increment_reference)
+        timeout 600 "$out/$stem" > "$out/$stem.concordance.stdout" 2> "$out/$stem.concordance.stderr" || rc=$?
+        record concordance "$stem" "$rc"
+        rc=0
+        timeout 180 "$out/$stem" --mutant-sign > "$out/$stem.mutant.stdout" 2> "$out/$stem.mutant.stderr" || rc=$?
+        rejected=1; [[ "$rc" != 2 ]] || rejected=0
+        record mutant-rejection "$stem:orientation:expected=2:actual=$rc" "$rejected"
+        ;;
+      count_profile_lr_fixed_reference)
+        timeout 180 "$out/$stem" "$lr_data/case-3.stdout" "$lr_data/case-11.stdout" "$lr_data/case-13.stdout" > "$out/$stem.concordance.stdout" 2> "$out/$stem.concordance.stderr" || rc=$?
+        record concordance "$stem" "$rc"
+        rc=0
+        timeout 180 "$out/$stem" --mutant-sign "$lr_data/case-3.stdout" "$lr_data/case-11.stdout" "$lr_data/case-13.stdout" > "$out/$stem.mutant.stdout" 2> "$out/$stem.mutant.stderr" || rc=$?
+        rejected=1; [[ "$rc" != 2 ]] || rejected=0
+        record mutant-rejection "$stem:orientation:expected=2:actual=$rc" "$rejected"
+        ;;
+      count_profile_lr_v10_reference)
+        timeout 180 "$out/$stem" "$lr_data/v10.stdout" > "$out/$stem.concordance.stdout" 2> "$out/$stem.concordance.stderr" || rc=$?
+        record concordance "$stem" "$rc"
+        ;;
+      count_likelihood_difference_reference)
+        timeout 180 "$out/$stem" --native "$out/stdlib_scale_count_likelihood_difference.stdout" "$lr_data/case-3.stdout" "$lr_data/case-11.stdout" "$lr_data/case-13.stdout" > "$out/$stem.concordance.stdout" 2> "$out/$stem.concordance.stderr" || rc=$?
+        record concordance "$stem" "$rc"
+        ;;
+      display_font_orientation_reference)
+        timeout 180 "$out/$stem" --canonical tests/reference/data/font8x8_basic.h "$out/display_font_orientation.stdout" > "$out/$stem.concordance.stdout" 2> "$out/$stem.concordance.stderr" || rc=$?
+        record concordance font-canonical "$rc"
+        ;;
+      normalization_into_reference)
+        compare "$stem" stdlib_scale_normalization_into
+        ;;
+    esac
+    return "$fail"
+}
 
-# Canonical bitmap data and actual native raster orientation, including clipping.
-native tests/run-pass/display_font_orientation.sio display_font_orientation
-rc=0
-timeout 180 g++ -std=c++23 -O2 -Wall -Wextra tests/reference/display_font_orientation_reference.cpp -o "$out/display_font_orientation_reference" > "$out/display_font_orientation_reference.cpp.txt" 2>&1 || rc=$?
-record cpp-compile display_font_orientation_reference "$rc"
-if [[ $rc == 0 ]]; then
- rc=0
- timeout 180 "$out/display_font_orientation_reference" --canonical tests/reference/data/font8x8_basic.h "$out/display_font_orientation.stdout" > "$out/display_font_orientation_reference.concordance.stdout" 2> "$out/display_font_orientation_reference.concordance.stderr" || rc=$?
- record concordance font-canonical "$rc"
+ORACLE_KINDS=()
+ORACLE_STEMS=()
+queue_oracle() {
+    ORACLE_KINDS+=("$1")
+    ORACLE_STEMS+=("$2")
+}
+for src in tests/reference/deep_*.cpp; do
+    queue_oracle deep "$(basename "$src" .cpp)"
+done
+for stem in count_dispersion_increment_reference count_profile_lr_fixed_reference \
+    count_profile_lr_v10_reference count_likelihood_difference_reference \
+    display_font_orientation_reference normalization_into_reference; do
+    queue_oracle tail "$stem"
+done
+oracle_worker() {
+    local kind="$1" stem="$2" idx="$3" rc=0 tmp
+    fail=0
+    if [[ "$kind" == deep ]]; then
+        oracle_deep_case "$stem" || rc=$?
+    else
+        oracle_tail_case "$stem" || rc=$?
+    fi
+    [[ "$fail" == 0 ]] || rc=1
+    tmp="$(mktemp "$out/.oracle-status.XXXXXX")" || exit 65
+    printf '%s\n' "$rc" > "$tmp" || exit 65
+    mv -- "$tmp" "$out/oracle.$idx.status" || exit 65
+    return "$rc"
+}
+run_oracle_batch() {
+    local active=0 idx worker_rc
+    printf '[deep-science] oracle workers=%s cases=%s\n' "$jobs" "${#ORACLE_STEMS[@]}"
+    for ((idx=0; idx<${#ORACLE_STEMS[@]}; idx++)); do
+        oracle_worker "${ORACLE_KINDS[$idx]}" "${ORACLE_STEMS[$idx]}" "$idx" &
+        active=$((active + 1))
+        if (( active >= jobs )); then
+            wait -n || true
+            active=$((active - 1))
+        fi
+    done
+    while (( active > 0 )); do
+        wait -n || true
+        active=$((active - 1))
+    done
+    for ((idx=0; idx<${#ORACLE_STEMS[@]}; idx++)); do
+        if [[ -f "$out/oracle.$idx.status" ]]; then
+            IFS= read -r worker_rc < "$out/oracle.$idx.status" || worker_rc=""
+            if [[ "$worker_rc" =~ ^[0-9]+$ ]]; then
+                record oracle-worker "${ORACLE_KINDS[$idx]}:${ORACLE_STEMS[$idx]}" "$worker_rc"
+            else
+                record oracle-worker "${ORACLE_STEMS[$idx]}:invalid-status" 1
+            fi
+        else
+            record oracle-worker "${ORACLE_STEMS[$idx]}:missing-status" 1
+        fi
+    done
+}
+run_oracle_batch
+
+# Arrow IPC is Madaros-only (lean_single has no bits_to_f64). The full suite
+# skips these fixtures via //@ requires: madaros. This job already holds the
+# fresh Madaros ELF. PyArrow 26.0.0 and NumPy 2.5.4 are installed into a
+# directory this process just created, and the gate must print the oracle markers.
+arrow_rc=0
+py_dir=$(mktemp -d "${TMPDIR:-/tmp}/sounio-pyarrow.XXXXXX") || arrow_rc=$?
+if [[ "$arrow_rc" == 0 ]]; then
+    python3 -m pip install --disable-pip-version-check --target "$py_dir" \
+        'pyarrow==26.0.0' 'numpy==2.5.4' \
+        > "$out/arrow-pyarrow-install.log" 2>&1 || arrow_rc=$?
 fi
+if [[ "$arrow_rc" == 0 ]]; then
+    ARROW_PYARROW_PATH="$py_dir" ARROW_REQUIRE_PYARROW=1 \
+        bash "$repo/scripts/arrow_ipc_gate.sh" > "$out/arrow-ipc-gate.log" 2>&1 || arrow_rc=$?
+fi
+if [[ "$arrow_rc" == 0 ]]; then
+    log="$out/arrow-ipc-gate.log"
+    ok_n=$(grep -cx 'PYARROW_OK' "$log" || true)
+    if ! grep -qx 'Required pyarrow: 26.0.0' "$log" \
+        || ! grep -qx 'SPEC_PYARROW_OK' "$log" \
+        || ! grep -qx 'EXT_PYARROW_OK' "$log" \
+        || ! grep -qx 'ARROW_IPC_OK' "$log" \
+        || ! grep -qx 'CODEC_OK' "$log" \
+        || ! grep -qx 'ARROW_SPEC_OK' "$log" \
+        || ! grep -qx 'ARROW_EXT_OK' "$log" \
+        || ! grep -qx 'FLIGHT_IPC_OK' "$log" \
+        || [[ "$ok_n" != 2 ]]; then
+        echo "FAIL arrow gate missing oracle markers" >> "$log"
+        arrow_rc=1
+    fi
+    if grep -qx 'PYARROW_SKIP' "$log" \
+        || grep -qx 'SPEC_PYARROW_SKIP' "$log" \
+        || grep -qx 'EXT_PYARROW_SKIP' "$log"; then
+        echo "FAIL arrow gate skipped the pyarrow oracle" >> "$log"
+        arrow_rc=1
+    fi
+fi
+if [[ "$arrow_rc" != 0 ]]; then
+    echo "arrow-ipc-gate failed rc=$arrow_rc" >&2
+    [[ -f "$out/arrow-pyarrow-install.log" ]] && tail -n 40 "$out/arrow-pyarrow-install.log" >&2 || true
+    [[ -f "$out/arrow-ipc-gate.log" ]] && tail -n 80 "$out/arrow-ipc-gate.log" >&2 || true
+fi
+record arrow-gate scripts/arrow_ipc_gate.sh "$arrow_rc"
 
 rc=0
-timeout 180 g++ -std=c++23 -O2 -Wall -Wextra tests/reference/normalization_into_reference.cpp -o "$out/normalization_into_reference" > "$out/normalization_into_reference.cpp.txt" 2>&1 || rc=$?
-record cpp-compile normalization_into_reference "$rc"
-if [[ $rc == 0 ]]; then compare normalization_into_reference stdlib_scale_normalization_into; fi
-# SIO-93 backport (release/3.0 has no oracle queue: normalization stays inline
-# above): current logarithm boundaries and discriminating guard control.
+# SIO-93: current-main logarithm boundaries and discriminating guard control.
+# (Re-applied after the oracle-queue refactor: main now compiles
+# normalization_into_reference through the oracle queue above.)
 LN_BOUNDARY_OUT="$out/math-pure-ln-boundary" bash scripts/stdlib/math_pure_ln_boundary_gate.sh > "$out/math-pure-ln-boundary.log" 2>&1 || rc=$?
 record concordance math-pure-ln-boundary "$rc"
+
 rc=0
 sha256sum -c "$out/INPUTS.sha256" > "$out/INPUTS.verify.txt" 2>&1 || rc=$?
 record input-hashes unchanged "$rc"
 rc=0
 sha256sum -c "$out/COMPILER.sha256" > "$out/COMPILER.verify.txt" 2>&1 || rc=$?
 record compiler-hash unchanged "$rc"
-printf '%s\n' "$fail" > "$out/STATUS"
+
+results_tmp="$out/RESULTS.tsv.tmp"
+{
+    printf 'kind\tsource\texit_status\n'
+    for row in "$out"/result-rows/*.tsv; do
+        [[ -f "$row" ]] && cat "$row"
+    done
+} > "$out/RESULTS.unsorted.tsv"
+{
+    head -n 1 "$out/RESULTS.unsorted.tsv"
+    tail -n +2 "$out/RESULTS.unsorted.tsv" | LC_ALL=C sort -t $'\t' -k1,1 -k2,2 -k3,3
+} > "$results_tmp"
+mv -- "$results_tmp" "$out/RESULTS.tsv"
+
+audit_fail=0
+if [[ "$(head -n 1 "$out/RESULTS.tsv")" != $'kind\tsource\texit_status' ]]; then
+    audit_fail=1
+fi
+while IFS=$'\t' read -r kind source exit_status; do
+    [[ -n "$kind" && -n "$source" && "$exit_status" =~ ^[0-9]+$ ]] || {
+        audit_fail=1
+        continue
+    }
+    [[ "$exit_status" == 0 ]] || audit_fail=1
+done < <(tail -n +2 "$out/RESULTS.tsv")
+[[ -s "$out/RESULTS.tsv" ]] && [[ "$(tail -n +2 "$out/RESULTS.tsv" | wc -l)" -gt 0 ]] || audit_fail=1
+(( audit_fail == 0 )) || fail=1
+status_tmp="$(mktemp "$out/.status.XXXXXX")" || exit 65
+printf '%s\n' "$fail" > "$status_tmp" || exit 65
+mv -- "$status_tmp" "$out/STATUS" || exit 65
 exit "$fail"
