@@ -1,0 +1,110 @@
+//@ run-pass
+//
+// L-spec demo: speculative generate must match plain greedy exactly,
+// with echo draft (reject path) and oracle draft (accept-all path).
+// Reports forward counts: baseline singles vs spec singles+verifies.
+// Usage: llama_spec_demo [dir] [prompt]
+// Modules: stdlib/llm/{llama,bpe,attn_gpu}.sio
+use llm::attn_gpu::{GenCfg, llama_generate_from_ids, llama_generate_spec_from_ids}
+use llm::bpe::{Bpe, bpe_encode, bpe_load}
+use llm::llama::{KvCache, kv_new, llama_load}
+use hetero::runtime::{Runtime, rt_open}
+use tensor2::cpu_kernel::{CpuBuf, ck_alloc, ck_get, ck_set}
+
+fn putb(buf: *mut u8, i: i64, v: i64) {
+    let w = read_i64(buf as *mut i64, i / 8)
+    let sh = (i % 8) * 8
+    let cleared = w & ((0 - 1) - (255 << sh))
+    write_i64(buf as *mut i64, i / 8, cleared | ((v & 255) << sh))
+}
+
+fn enc_ids(bp: &Bpe, prompt: string) -> CpuBuf with Alloc, Mut, Panic, Div {
+    let plen = str_len(prompt)
+    let pbuf = heap_alloc(plen + 16)
+    var i: i64 = 0
+    while i < plen {
+        putb(pbuf, i, str_char_at(prompt, i) & 255)
+        i = i + 1
+    }
+    let enc = bpe_encode(bp, pbuf, plen)
+    let nseq = enc.len + 1
+    var ids = ck_alloc(nseq)
+    ck_set(&!ids, 0, 0.0)
+    i = 0
+    while i < enc.len {
+        ck_set(&!ids, 1 + i, ck_get(&enc, i))
+        i = i + 1
+    }
+    ids
+}
+
+fn same_ids(a: &CpuBuf, b: &CpuBuf) -> bool {
+    if a.len != b.len { return false }
+    var i: i64 = 0
+    while i < a.len {
+        if ck_get(a, i) != ck_get(b, i) { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn main() with IO, Mut, Panic, Div, Alloc {
+    var ok = true
+    var dir = "/workspace/llm-models/SmolLM2-135M"
+    if arg_count() > 0 { dir = get_arg(0) }
+    var prompt = "The capital of France is"
+    if arg_count() > 1 { prompt = get_arg(1) }
+    var m = llama_load(dir)
+    print("loaded=")
+    print_int(if m.loaded { 1 } else { 0 })
+    print("\n")
+    if !m.loaded { print("SPECDONE FAIL\nSPECDONE DONE\n"); exit(0) }
+    let bp = bpe_load(dir ++ "/tokenizer.json")
+    let rt = rt_open("stdlib/hetero/kernels/gemm_tiled_f32.ptx", "gemm_tiled_f32")
+    let use_gpu = rt.ready
+    let ids = enc_ids(&bp, prompt)
+    let nseq = ids.len
+    let g = GenCfg { max_new: 16, eos: 2, temp: 1.0, top_p: 1.0, greedy: true }
+    var kvs: [KvCache; 4] = [kv_new(&m, 512); 4]
+    kvs[0] = kv_new(&m, 512)
+    kvs[1] = kv_new(&m, 512)
+    kvs[2] = kv_new(&m, 512)
+    var seed = ck_alloc(1)
+    ck_set(&!seed, 0, 7.0)
+    let base = llama_generate_from_ids(&!m, &!kvs[0], &rt, use_gpu, &ids, nseq, g, &!seed)
+    var st_echo: [i64; 4] = [0; 4]
+    ck_set(&!seed, 0, 7.0)
+    let se = llama_generate_spec_from_ids(&!m, &!kvs[1], &rt, use_gpu, &ids, nseq, g, &!seed, 4, 0, &ids, 0, &!st_echo)
+    if !same_ids(&base, &se) { ok = false }
+    var st_or: [i64; 4] = [0; 4]
+    ck_set(&!seed, 0, 7.0)
+    let so = llama_generate_spec_from_ids(&!m, &!kvs[2], &rt, use_gpu, &ids, nseq, g, &!seed, 4, 1, &base, base.len, &!st_or)
+    if !same_ids(&base, &so) { ok = false }
+    print("tokens=")
+    print_int(base.len)
+    print("\n")
+    print("base_singles=")
+    print_int(base.len)
+    print("\n")
+    print("echo_singles=")
+    print_int(st_echo[0])
+    print("\n")
+    print("echo_verifies=")
+    print_int(st_echo[1])
+    print("\n")
+    print("echo_accepted=")
+    print_int(st_echo[2])
+    print("\n")
+    print("oracle_singles=")
+    print_int(st_or[0])
+    print("\n")
+    print("oracle_verifies=")
+    print_int(st_or[1])
+    print("\n")
+    print("oracle_accepted=")
+    print_int(st_or[2])
+    print("\n")
+    if ok { print("SPECDONE PASS\nSPECDONE DONE\n") } else { print("SPECDONE FAIL\nSPECDONE DONE\n") }
+    if !ok { exit(1) }
+    exit(0)
+}

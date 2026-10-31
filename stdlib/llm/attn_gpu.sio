@@ -3,7 +3,7 @@
 // Day-1 runs on the CPU reference math with honest fallback status;
 // the mmid Q4_K/Q5_K projection path and RoPE/softmax/AV kernels engage
 // only when packs and PTX are present. No silent greedy on bad params.
-use llm::llama::{Llama, KvCache, kv_new, llama_forward, llama_forward_rt, llama_argmax}
+use llm::llama::{Llama, KvCache, kv_new, llama_forward, llama_forward_rt, llama_argmax, llama_forward_rows, llama_forward_rows_rt}
 use llm::bpe::{Bpe, bpe_encode, bpe_decode_token}
 use llm::gguf::{GgufTensor, gguf_dtype_q4_k, gguf_dtype_q5_k, gguf_row_quant_bytes}
 use llm::safetensors::{st_read_all}
@@ -403,6 +403,129 @@ pub fn llama_generate_from_ids(
         if cur != cfg.eos {
             ck_set(&!out, n_out, cur as f64)
             n_out = n_out + 1
+        }
+    }
+    out.len = n_out
+    out
+}
+// L-spec: greedy speculative decoding. Draft mode 0 = echo last
+// token, 1 = oracle continuation (oracle/olen). stats: [0]=single
+// forwards, [1]=verify forwards, [2]=accepted drafts, [3]=rounds.
+// Non-greedy cfg falls back to plain generate (documented): exact
+// speculative sampling for temp/top-p needs a sampler the draft
+// shares, which no on-disk draft does.
+pub fn llama_generate_spec_from_ids(
+    m: &!Llama, kv: &!KvCache, rt: &Runtime, use_gpu: bool,
+    ids: &CpuBuf, nids: i64, cfg: GenCfg, seed: &!CpuBuf,
+    k: i64, draft_mode: i64, oracle: &CpuBuf, olen: i64, stats: &![i64; 4]
+) -> CpuBuf with Alloc, Mut, Panic, Div, IO {
+    if nids <= 0 { attn_fail("llama_generate_spec_from_ids: empty prompt\n") }
+    if cfg.max_new <= 0 { attn_fail("llama_generate_spec_from_ids: max_new must be > 0\n") }
+    if !cfg.greedy { attn_fail("llama_generate_spec_from_ids: spec needs greedy (temp/top-p use plain generate)\n") }
+    if k < 2 { attn_fail("llama_generate_spec_from_ids: k must be >= 2\n") }
+    var out = ck_alloc(cfg.max_new)
+    var n_out: i64 = 0
+    var logits = attn_empty()
+    if use_gpu && rt.ready {
+        logits = llama_forward_rt(m, kv, ids, nids, rt)
+    } else {
+        logits = llama_forward(m, kv, ids, nids)
+    }
+    var cur = llama_argmax(&logits)
+    if cur == cfg.eos {
+        out.len = 0
+        return out
+    }
+    while n_out < cfg.max_new {
+        stats[3] = stats[3] + 1
+        var kk = k
+        if n_out + kk > cfg.max_new { kk = cfg.max_new - n_out }
+        let t0 = llama_argmax(&logits)
+        var d = ck_alloc(kk)
+        var di: i64 = 0
+        while di < kk {
+            if draft_mode == 1 && n_out + di < olen {
+                ck_set(&!d, di, ck_get(oracle, n_out + di))
+            } else {
+                ck_set(&!d, di, cur as f64)
+            }
+            di = di + 1
+        }
+        if kk < 2 || t0 != ck_get(&d, 0) as i64 {
+            cur = t0
+            if cur == cfg.eos {
+                n_out = cfg.max_new
+            } else {
+                ck_set(&!out, n_out, cur as f64)
+                n_out = n_out + 1
+                var one = ck_alloc(1)
+                ck_set(&!one, 0, cur as f64)
+                if use_gpu && rt.ready {
+                    logits = llama_forward_rt(m, kv, &one, 1, rt)
+                } else {
+                    logits = llama_forward(m, kv, &one, 1)
+                }
+                stats[0] = stats[0] + 1
+            }
+        } else {
+            let l0 = kv.len
+            var rows = attn_empty()
+            if use_gpu && rt.ready {
+                rows = llama_forward_rows_rt(m, kv, &d, kk, rt)
+            } else {
+                rows = llama_forward_rows(m, kv, &d, kk)
+            }
+            stats[1] = stats[1] + 1
+            var na: i64 = 1
+            while na < kk {
+                var lr = ck_alloc(m.cfg.vocab)
+                var v: i64 = 0
+                while v < m.cfg.vocab {
+                    write_f64(lr.data, v, read_f64(rows.data, (na - 1) * m.cfg.vocab + v))
+                    v = v + 1
+                }
+                if llama_argmax(&lr) != ck_get(&d, na) as i64 { break }
+                na = na + 1
+            }
+            stats[2] = stats[2] + na
+            kv.len = l0 + na
+            var e: i64 = 0
+            while e < na && n_out < cfg.max_new {
+                let tok = ck_get(&d, e) as i64
+                if tok == cfg.eos {
+                    n_out = cfg.max_new
+                    e = na
+                } else {
+                    ck_set(&!out, n_out, tok as f64)
+                    n_out = n_out + 1
+                    cur = tok
+                }
+                e = e + 1
+            }
+            if n_out < cfg.max_new {
+                var br = ck_alloc(m.cfg.vocab)
+                var v2: i64 = 0
+                while v2 < m.cfg.vocab {
+                    write_f64(br.data, v2, read_f64(rows.data, (na - 1) * m.cfg.vocab + v2))
+                    v2 = v2 + 1
+                }
+                let bonus = llama_argmax(&br)
+                if bonus == cfg.eos {
+                    n_out = cfg.max_new
+                } else {
+                    var one = ck_alloc(1)
+                    ck_set(&!one, 0, bonus as f64)
+                    if use_gpu && rt.ready {
+                        logits = llama_forward_rt(m, kv, &one, 1, rt)
+                    } else {
+                        logits = llama_forward(m, kv, &one, 1)
+                    }
+                    stats[0] = stats[0] + 1
+                    ck_set(&!out, n_out, bonus as f64)
+                    n_out = n_out + 1
+                    cur = bonus
+                }
+            }
         }
     }
     out.len = n_out
