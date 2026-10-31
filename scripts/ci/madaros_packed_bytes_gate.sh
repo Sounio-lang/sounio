@@ -26,6 +26,10 @@
 #   5. `x as i8` is the sign-extended low byte (cast_i8_sign_extends.sio), so
 #      `CODE[i] == (0x89 as i8)` holds; gen2 compared opcode bytes that way and
 #      left every relocation in gen3 unpatched.
+#   6. A global array passed by value to a user function (`a: [T; N]`, word,
+#      f64 and u8 elements, a method parameter, a relay through a second
+#      call) reads the global from its first element (global_array_byval_arg.sio,
+#      SIO-279); it read 4 words late.
 #
 # Usage: madaros_packed_bytes_gate.sh   (MADAROS_BIN = compiler under test,
 #                                        default bin/souc)
@@ -66,6 +70,12 @@ set +e
 ci8_out="$("$WORK/ci8.elf" 2>&1)"; ci8_rc=$?
 set -e
 [[ "$ci8_rc" -eq 0 && "$ci8_out" == "CAST_I8_OK" ]] || fail "x as i8 must be the sign-extended low byte: rc=$ci8_rc output=$(tr '\n' ' ' <<<"$ci8_out")"
+
+build "$ROOT_DIR/tests/run-pass/global_array_byval_arg.sio" "$WORK/gab.elf"
+set +e
+gab_out="$("$WORK/gab.elf" 2>&1)"; gab_rc=$?
+set -e
+[[ "$gab_rc" -eq 0 && "$gab_out" == "GLOBAL_ARRAY_BYVAL_OK" ]] || fail "a global array passed by value must read from its first element: rc=$gab_rc output=$(tr '\n' ' ' <<<"$gab_out")"
 
 # write_file from a packed byte global: the gen3 path (NC_BIG_ELF). The file
 # must hold exactly the bytes written, not every 8th one.
@@ -135,4 +145,4 @@ set -e
 [[ "$mem_rc" -eq 0 && "$mem_out" == "34650000" ]] \
   || fail "700k Name-like structs in 2 GiB: rc=$mem_rc output=$(head -n 2 <<<"$mem_out" | tr '\n' ' ') (181 = arena full: buffers not packed)"
 
-echo "[madaros-packed-bytes] PASS: byte-array semantics hold; the first global indexes by reference; packed byte globals carry a header (by reference, str_from_bytes, write_file); x as i8 sign-extends; 700k Name-like structs fit the default 2 GiB arena and sum to 34650000"
+echo "[madaros-packed-bytes] PASS: byte-array semantics hold; the first global indexes by reference; packed byte globals carry a header (by reference, str_from_bytes, write_file); x as i8 sign-extends; a global array passed by value reads from element 0; 700k Name-like structs fit the default 2 GiB arena and sum to 34650000"
