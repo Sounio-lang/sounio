@@ -1,0 +1,1 @@
+The shipped Madaros prebuilt is rebuilt from `main` plus the user-effect registration fix, so `bin/souc` and `bin/madaros` accept declared `effect X { .. }` declarations, including effects imported from another module or declared after their first use.
