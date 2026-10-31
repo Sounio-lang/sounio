@@ -9,7 +9,8 @@
 //
 // - MC n=5000 on mu (as Epistemic) using monte_carlo + internal xoshiro; each sample runs
 //   deterministic forward Euler trajectory, returns max |y| (fast stiff variable peak) as the measure.
-// - Knightian: lift mu + init to PBox (pb_from_knowledge), propagate band step-by-step over
+// - Knightian: lift mu to its expanded-uncertainty band (pb_expanded, k=3) and the fixed
+//   initial state to degenerate boxes (pb_from_knowledge), propagate band step-by-step over
 //   the RHS using pb_ arith + pb_apply2_monotone_inc_inc on the monotone integration update
 //   (dt * rhs, which is inc in rhs for dt>0) and on mu*term (inc_inc when positive).
 //   For the non-monotone quadratic segment (x*x in (1-x^2)) fall back to explicit grid + min/max
@@ -21,6 +22,10 @@
 // - Assert 3: klib CE (alpha=2, lambda=1) fed via the bridge (klibanoff_compose_with_active) as
 //   expected_reward, with the MC-derived ODE stiff Epistemic as `current`, produces strictly lower
 //   pragmatic than the precise limit (alpha=0 path), when ODE state feeds the active EFE.
+//   The size of the gap is predicted, not thresholded: for CARA phi_a, the smooth CE is
+//   E_w[x] - (a/2) Var_w[x] + O(a^2 * spread^3), so the observed penalty must match the
+//   second-order prediction within 10 %. (An absolute 1e-3 margin cannot hold: the rewards
+//   here are O(1e-2) and the penalty scales with their square, O(1e-6).)
 // - Prints explicit tightness (ratio, containment), the three values, diffs, and PASS/FAIL.
 //
 // Harness pattern matching other epistemic tests. n=5000 per spec (native fast enough for gate).
@@ -59,7 +64,11 @@ fn k_sqrt(x: f64) -> f64 with Mut, Div, Panic {
 let VDP_X0: f64 = 0.5
 let VDP_Y0: f64 = 0.0
 let VDP_DT: f64 = 0.02
-let VDP_STEPS: i64 = 80   // enough for a few "oscillations" / jumps in vdp
+// Horizon t = 0.8. Interval Euler on van der Pol amplifies a mu sub-box's width
+// by ~1.3x per step past t ~ 1 (wrapping through x^2 and mu*(1-x^2)*y), so at
+// 80 steps the band reaches +-inf even with 4096 sub-boxes; at 40 steps 64
+// sub-boxes already give a band within 0.3 % of the 512-sub-box band.
+let VDP_STEPS: i64 = 40
 
 // Deterministic vdp euler step (from systems/lib, van der Pol rhs)
 // dx = y
@@ -149,20 +158,40 @@ fn main() -> i32 with IO, Mut, Div, Panic, Prob {
   let mc_std = k_sqrt(mc_var)
 
   // 2. Knightian PBox lift + step-by-step RHS prop (apply2 on monotone update segments, grid on x^2 non-mono)
-  let mu_box = pb_from_knowledge(mu0, mu_var, 850)
+  // mu is the random input of the MC run, so its spread has to enter the band: a zero-gap
+  // lift would enclose only the nominal trajectory f(mu0), not the MC mean.
+  let mu_box = pb_expanded(mu0, mu_var, 3.0, 850)
   let x_box = pb_from_knowledge(x0, x0_var, 900)
   let y_box = pb_from_knowledge(y0, 0.0, 1000)
 
-  var step: i64 = 0
-  var cur_x = x_box
-  var cur_y = y_box
-  while step < n_steps {
-    let (nx, ny) = vdp_step_knightian(&cur_x, &cur_y, dt, &mu_box)
-    cur_x = nx
-    cur_y = ny
-    step = step + 1
+  // Interval Euler on the whole mu band diverges (wrapping: mu, x and y re-enter every
+  // product through pb_mul's corners, so the band doubles in a few dozen steps and reaches
+  // +-inf by step 80). Subdividing mu and taking the hull keeps each sub-box's wrapping at
+  // O(width) while staying an outer enclosure: the union of sound enclosures over a cover
+  // of the mu band is a sound enclosure over the band.
+  let n_sub: i64 = 64
+  let mu_lo_all = pb_lo_mean(&mu_box)
+  let mu_w = (pb_hi_mean(&mu_box) - mu_lo_all) / (n_sub as f64)
+  var hull_lo: f64 = 1.0e300
+  var hull_hi: f64 = -1.0e300
+  var sub: i64 = 0
+  while sub < n_sub {
+    let lo_s = mu_lo_all + (sub as f64) * mu_w
+    let mu_sub = pb_new(lo_s, lo_s + mu_w, 0.0, pb_confidence(&mu_box))
+    var step: i64 = 0
+    var cur_x = x_box
+    var cur_y = y_box
+    while step < n_steps {
+      let (nx, ny) = vdp_step_knightian(&cur_x, &cur_y, dt, &mu_sub)
+      cur_x = nx
+      cur_y = ny
+      step = step + 1
+    }
+    if pb_lo_mean(&cur_y) < hull_lo { hull_lo = pb_lo_mean(&cur_y) }
+    if pb_hi_mean(&cur_y) > hull_hi { hull_hi = pb_hi_mean(&cur_y) }
+    sub = sub + 1
   }
-  let k_box = cur_y   // final stiff var band (max_abs_y proxy)
+  let k_box = pb_new(hull_lo, hull_hi, 0.0, pb_confidence(&mu_box))   // final stiff var band
   let k_lo = pb_lo_mean(&k_box)
   let k_hi = pb_hi_mean(&k_box)
   let k_width = k_hi - k_lo
@@ -209,21 +238,39 @@ fn main() -> i32 with IO, Mut, Div, Panic, Prob {
   let ce_p = kl_precise_ce(&rew_c, 1.0)
   let prag_k_derived = ce_k * 1.0
   let prag_p_derived = ce_p * 1.0
-  let lower_prag = prag_k_derived < prag_p_derived - 0.001
+  let penalty_obs = prag_p_derived - prag_k_derived
+  let w0 = 1.0 - cs_epsilon(&rew_c)
+  let w_lo = cs_epsilon(&rew_c) * 1.0
+  let w_hi = cs_epsilon(&rew_c) * 0.0
+  let x0r = cs_nominal_mean(&rew_c)
+  let xlo = cs_support_lo(&rew_c)
+  let xhi = cs_support_hi(&rew_c)
+  let ew = w0 * x0r + w_lo * xlo + w_hi * xhi
+  let var_w = w0 * (x0r - ew) * (x0r - ew) + w_lo * (xlo - ew) * (xlo - ew) + w_hi * (xhi - ew) * (xhi - ew)
+  let penalty_pred = 0.5 * 2.0 * var_w
+  let penalty_rel_err = if penalty_pred > 0.0 { k_abs(penalty_obs - penalty_pred) / penalty_pred } else { 999.0 }
+  let lower_prag = penalty_obs > 0.0 && penalty_rel_err < 0.10
 
   // If fields accessible in this context, cross-check with returned
   let prag_k = efe_k.pragmatic
   let prag_p = efe_p.pragmatic
-  let lower_prag2 = prag_k < prag_p - 0.001
-  let assert3 = lower_prag || lower_prag2
+  let lower_prag2 = prag_k < prag_p
+  let assert3 = lower_prag && lower_prag2
 
   if !assert3 {
     println("ASSERT3_FAIL klib pragmatic not strictly lower than precise")
     fail = true
   }
 
-  // Enclosure tightness print
+  // Assert 4: the band is not vacuous. For a near-linear f over mu0 +- 3 sigma the band
+  // spans 6 sigma_f while 2 * mc_std spans 2 sigma_f, so tightness ~ 3; an infinite or
+  // wrapped-out band (the failure mode of interval Euler) would pass asserts 1-2 trivially.
   let tightness = if mc_std > 1.0e-9 { k_width / (2.0 * mc_std) } else { 999.0 }
+  let non_vacuous = tightness > 2.0 && tightness < 6.0
+  if !non_vacuous {
+    println("ASSERT4_FAIL band vacuous or tighter than the 3-sigma input")
+    fail = true
+  }
 
   if fail {
     // Flags printed as typed i64 bindings: Madaros refuses to print an untyped
@@ -266,5 +313,7 @@ fn main() -> i32 with IO, Mut, Div, Panic, Prob {
   println(prag_k_derived)
   println("PRAG_PREC")
   println(prag_p_derived)
+  println("PENALTY_REL_ERR")
+  println(penalty_rel_err)
   0
 }
