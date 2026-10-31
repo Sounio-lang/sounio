@@ -61,21 +61,25 @@ Use `sounio_check` first in the `.sio` repair loop; after every edit run `./bin/
 
 ## 7. Sounio syntax (NOT Rust)
 
-Read this before writing `.sio`. Prefer semicolon-free code. Use `var` (not `let mut`), `&!T` (not `&mut T`), and `assert(...)` / `println(...)` (no Rust macros). Rust attributes are unsupported. Define helpers before callers. Unary minus and untyped shift amounts work; older prohibitions are stale. Macro rejection depends on the compiler binary: do not trust an old ELF merely because `check` succeeds.
+Critical differences. **Five of the seven rows below were measured on
+2026-08-20 and are style, not enforcement** — the compiler accepts the Rust form.
+Write the Sounio form; do not expect a diagnostic if you slip. Rows marked ✓ are
+enforced.
 
-```sounio
-let x = 5
-var y = 10
-var buf: [i64; 8] = [0; 8]
-fn f(x: i32) -> i32 with IO { }
-impl MyStruct {
-    fn get(self: &MyStruct) -> i64 { self.val }
-    fn set(self: &!MyStruct, v: i64) with Mut { self.val = v }
-}
-for i in 0..10 { }   // exclusive; 0..=10 is inclusive
-```
+| Wrong (Rust) | Correct (Sounio) |
+|---|---|
+| `let x = 5;` | `let x = 5` — **style, not a compile error.** Measured 2026-08-20: the trailing `;` is accepted and the program runs. Prefer the semicolon-free form; do not expect the compiler to enforce it. |
+| `let mut y = 10` | `var y = 10` — ✓ enforced, `error[E040]` |
+| `&mut T` | `&!T` — ✓ enforced, `error[E041]` |
+| `assert!(cond)` | `assert(cond)` — ✓ enforced as of the ELF this repo ships, `error[E043]` (*Sounio does not use Rust macros*). **The old "DANGEROUS, checks clean and is inert" reading was true of the committed binary, not of the source**: measured 2026-08-29, `assert!(1 == 2)` is refused by a Madaros built from `self-hosted/`, and accepted-then-inert by the ELF that was committed before it. The one-character footgun is closed the moment the shipped ELF is refreshed. |
+| `println!("hi")` | `println("hi")` — ✓ enforced, `error[E043]`, same measurement and same caveat as the row above. The *"check clean and SIGSEGV at run time (`rc=139`)"* behaviour recorded in `docs/audit/RUST_MACRO_ACCEPTANCE_2026-08-20.md` is what the **committed** ELF still does; source refuses. |
+| `#[test]`, `#[derive()]` | No attributes — ✓ enforced, fails to parse |
+| ~~`-42`~~ | **STALE — unary minus works.** Measured 2026-08-20 on both engines: `-3.5`, `f(-7)`, `10 - -3` and `[-1, -2, -3]` all check and compute correctly. `0 - x` is no longer required. |
+| `x >> 4` | `x >> 4u8` — **STALE.** Measured 2026-08-20: `x >> 4` checks and computes correctly (`64 >> 4 = 4`). |
 
-Effects: `IO`, `Mut`, `Div`, `Panic`, `Alloc`, `Async`, `GPU`, `Prob`, `Observe`. Full syntax: [`docs/guide/LLM_PROGRAMMING_GUIDE.md`](docs/guide/LLM_PROGRAMMING_GUIDE.md). Dated syntax measurements and extended examples: [reference details](docs/guide/AGENT_REFERENCE_DETAILS.md#7-sounio-syntax-not-rust).
+Helpers must be defined before callers — no forward references.
+
+Dated measurements and extended examples: [reference details](docs/guide/AGENT_REFERENCE_DETAILS.md#7-sounio-syntax-not-rust). Full syntax: [`docs/guide/LLM_PROGRAMMING_GUIDE.md`](docs/guide/LLM_PROGRAMMING_GUIDE.md).
 
 ---
 
