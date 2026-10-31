@@ -1,0 +1,150 @@
+//@ run-pass
+//@ expect-stdout-contains: KP_THREE_METHODS_PARITY_PASS
+//
+// Parity witness for core/kp_methods.sio against the values that were checked
+// outside Sounio, so that a refactor cannot silently move the numbers the
+// dissertation's argument rests on.
+//
+// PROVENANCE OF THE REFERENCE VALUES
+// ----------------------------------
+// Schmitt: the mechanistic core here reproduces
+// httk::predict_partitioning_schmitt (httk 2.7.4, R) to 1.000x on 10 of 11
+// tissues in both regression modes.  The single 0.4% deviation was gut, and it
+// is explained -- httk normalises Fcell and Fint by their sum and gut is the
+// only tissue whose sum is not 1.000 (0.900 + 0.096 = 0.996).  That
+// normalisation is applied in kp_methods.sio, so muscle agrees exactly.
+//
+// Rodgers-Rowland and Poulin-Theil have no executable oracle; their reference
+// values come from an independent C++23 implementation of the primary-source
+// equations (Rodgers & Rowland 2007 Eqs. 1-3 + Tabs. II/VII; Peyret 2010 Eq. 9
+// + Tabs. 2/3).  Agreement between two independent implementations of the same
+// published equations is weaker evidence than an oracle, and is recorded as
+// such by kpm_pt_oracle_validated() returning false.
+//
+// Reference Kpu at muscle:
+//   drug          R-R      Schmitt(raw)   Poulin-Theil
+//   haloperidol   80.90        796.29           8.69
+//   midazolam     35.16         32.10          31.00
+//
+// WHAT THIS TEST IS FOR.  The dissertation claim is that inter-method
+// dispersion is usable as a model-form term only inside the declared domain:
+// 1.1x agreement for a weak base, ~92x for a strong base.  T3 and T4 below pin
+// both halves of that claim, so it cannot decay into a tuning artefact.
+
+use darwin_pbpk::core::kp_methods::*
+
+fn pabs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+// Relative agreement within tol.
+fn near(a: f64, b: f64, tol: f64) -> bool with Div {
+    if b == 0.0 { return pabs(a) < tol }
+    pabs(a - b) / pabs(b) < tol
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var fails = 0
+    let tol = 0.001           // 0.1% -- the implementations agree far better
+
+    let hal = kpm_drug_haloperidol()
+    let mdz = kpm_drug_midazolam()
+
+    // T1 -- haloperidol, three members against the reference values.
+    let h_rr = kpm_member_kpu(kpm_rodgers_rowland(hal))
+    let h_sc = kpm_member_kpu(kpm_schmitt_raw(hal))
+    let h_pt = kpm_member_kpu(kpm_poulin_theil(hal))
+    println("haloperidol Kpu muscle -- R-R / Schmitt / Poulin-Theil:")
+    println(h_rr)
+    println(h_sc)
+    println(h_pt)
+    if near(h_rr, 80.903, tol) {
+        if near(h_sc, 796.291, tol) {
+            if near(h_pt, 8.6874, tol) {
+                println("T1 PASS: haloperidol parity on all three members")
+            } else { println("T1 FAIL: Poulin-Theil off reference"); fails = fails + 1 }
+        } else { println("T1 FAIL: Schmitt off reference (oracle-validated value)"); fails = fails + 1 }
+    } else { println("T1 FAIL: Rodgers-Rowland off reference"); fails = fails + 1 }
+
+    // T2 -- midazolam, three members.  This exercises the Rodgers-Rowland
+    // WEAK-base route (Eq. 2, albumin), not the strong-base one.
+    let m_rr = kpm_member_kpu(kpm_rodgers_rowland(mdz))
+    let m_sc = kpm_member_kpu(kpm_schmitt_raw(mdz))
+    let m_pt = kpm_member_kpu(kpm_poulin_theil(mdz))
+    println("midazolam Kpu muscle -- R-R / Schmitt / Poulin-Theil:")
+    println(m_rr)
+    println(m_sc)
+    println(m_pt)
+    if near(m_rr, 35.158, tol) {
+        if near(m_sc, 32.103, tol) {
+            if near(m_pt, 31.0006, tol) {
+                println("T2 PASS: midazolam parity, weak-base route exercised")
+            } else { println("T2 FAIL: Poulin-Theil off reference"); fails = fails + 1 }
+        } else { println("T2 FAIL: Schmitt off reference"); fails = fails + 1 }
+    } else { println("T2 FAIL: Rodgers-Rowland weak-base route off reference"); fails = fails + 1 }
+
+    // T3 -- IN DOMAIN the dispersion is small and usable.  Measured spread
+    // 35.158 / 32.103 / 31.001 is 1.13x, giving u = 0.0650 on ln Kpu, i.e. a
+    // 6.5% relative standard uncertainty.  Pinned to a band, not a point, so
+    // the test survives a last-digit change but not a change of character.
+    let e_in = kpm_ensemble(mdz, false)
+    println("in-domain u_model_form (relative, expect ~0.065):")
+    println(kpm_ens_u(e_in))
+    if kpm_ens_valid(e_in) {
+        if kpm_ens_n(e_in) == 3 {
+            if kpm_ens_u(e_in) > 0.05 {
+                if kpm_ens_u(e_in) < 0.08 {
+                    println("T3 PASS: in-domain term is 5-8% relative, a usable Type B")
+                } else { println("T3 FAIL: in-domain u above band"); fails = fails + 1 }
+            } else { println("T3 FAIL: in-domain u below band"); fails = fails + 1 }
+        } else { println("T3 FAIL: expected 3 admitted members"); fails = fails + 1 }
+    } else { println("T3 FAIL: in-domain ensemble refused"); fails = fails + 1 }
+
+    // T4 -- OUT OF DOMAIN there is no term at all.  The raw spread for
+    // haloperidol is 796.291 / 8.6874 = 91.7x, and the point of the gate is
+    // that this number is NEVER reported as an uncertainty: the ensemble
+    // refuses with the domain code and u stays exactly 0.
+    let spread = h_sc / h_pt
+    println("out-of-domain raw spread (expect ~91.7x), reported as uncertainty: no")
+    println(spread)
+    let e_out = kpm_ensemble(hal, false)
+    if !kpm_ens_valid(e_out) {
+        if kpm_ens_refusal(e_out) == 1 {
+            if kpm_ens_u(e_out) == 0.0 {
+                if spread > 50.0 {
+                    println("T4 PASS: 91.7x spread refused on domain, u = 0, not reported")
+                } else { println("T4 FAIL: expected spread above 50x"); fails = fails + 1 }
+            } else { println("T4 FAIL: refusal leaked a non-zero u"); fails = fails + 1 }
+        } else { println("T4 FAIL: wrong refusal code"); fails = fails + 1 }
+    } else { println("T4 FAIL: out-of-domain ensemble admitted"); fails = fails + 1 }
+
+    // T5 -- calibration is never averaged with non-calibration.  The Pearce
+    // member is the only calibrated one, so its sub-ensemble is a singleton and
+    // no dispersion term exists for it.  That is the honest consequence of the
+    // confounding: a calibrated predictor has no peer to disperse against here.
+    let e_cal = kpm_ensemble(mdz, true)
+    if !kpm_ens_valid(e_cal) {
+        if kpm_ens_refusal(e_cal) == 2 {
+            println("T5 PASS: calibrated sub-ensemble is a singleton, no term")
+        } else { println("T5 FAIL: wrong refusal code for singleton"); fails = fails + 1 }
+    } else { println("T5 FAIL: singleton produced a term"); fails = fails + 1 }
+
+    // T6 -- the Pearce shrinkage is large where the mechanistic prediction is
+    // large.  b = 0.658 < 1, so for haloperidol (raw Kpu ~796) the calibrated
+    // member must come down by more than 4x.  Measured factor is ~6.3x.
+    let c_hal = kpm_member_kpu(kpm_schmitt_pearce(hal))
+    println("haloperidol Schmitt+Pearce Kpu, and shrinkage factor:")
+    println(c_hal)
+    println(h_sc / c_hal)
+    if c_hal < h_sc {
+        if h_sc / c_hal > 4.0 {
+            println("T6 PASS: Pearce shrinks a large prediction by more than 4x")
+        } else { println("T6 FAIL: shrinkage smaller than expected"); fails = fails + 1 }
+    } else { println("T6 FAIL: no shrinkage"); fails = fails + 1 }
+
+    if fails == 0 {
+        println("KP_THREE_METHODS_PARITY_PASS")
+        return 0
+    }
+    print("KP_THREE_METHODS_PARITY_FAIL fails=")
+    println(fails)
+    return 1
+}
