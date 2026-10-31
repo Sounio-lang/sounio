@@ -10416,6 +10416,34 @@ fn lower_binary_op_is_compare(op: BinaryOp) -> bool {
     lower_binary_op_to_wide_cmp(op) >= 0
 }
 
+// Raw builtins whose result word is an f64: read_f64 (backend builtin 35) and
+// bits_to_f64 (26). They have no declared IrFunction, so the returns_float lookup in
+// expr_result_is_float_ref missed them and the result classified as integer.
+// Arithmetic still came out right (the backend types the builtin dst as float),
+// but `read_f64(p, i) as i64` -- and `x as i64` for `let x = read_f64(p, i)` --
+// lowered as an integer identity cast and passed on the raw IEEE-754 bits.
+// bf_join_inner gathers rows by `read_f64(sp, read_f64(ml, j) as i64)`, so row
+// 1 indexed at 0x3ff0000000000000 and SIGSEGV'd
+// (tests/stdlib/data/test_bigframe_ops_stdlib.sio).
+fn lower_name_is_f64_raw_builtin(n: Name) -> bool with Mut, Panic, Div {
+    ir_name_eq(n, make_name("read_f64")) || ir_name_eq(n, make_name("bits_to_f64"))
+}
+
+// The call names the builtin, not a user function: nothing resolves, or what
+// resolves is the placeholder find_or_add_fn_id creates when the inner call is
+// lowered (no body, no params, returns_float 0 -- the cast lowers its operand
+// BEFORE classifying it, so the placeholder already exists by then). A user fn
+// of that name is pre-declared with its signature, so it has params and its own
+// returns_float; the backend makes the same split (builtin only while
+// instr_count == 0, see native_v2_builtin_id_for_func_ref).
+fn lowerer_call_is_f64_raw_builtin(lo: &Lowerer, callee_name: Name, fn_id: i64) -> bool with Mut, Panic, Div {
+    if !lower_name_is_f64_raw_builtin(callee_name) { return false }
+    if fn_id < 0 { return true }
+    if fn_id >= (*(*lo).module).fn_count { return false }
+    let f = ir_fn_get(&(*(*lo).module), fn_id as usize)
+    f.instr_count == 0 && f.param_count == 0
+}
+
 fn lower_opt_expr_has_float_source(opt: &Option<Box<Expr>>) -> bool with Mut, Panic, Div {
     match *opt {
         Some(e) => {
@@ -25905,6 +25933,9 @@ impl Lowerer {
                         }
                     }
                     let fn_id = lowerer_lookup_fn_id_by_name_ref(&self, callee_name)
+                    if lowerer_call_is_f64_raw_builtin(&self, callee_name, fn_id) {
+                        return true
+                    }
                     if fn_id >= 0 && fn_id < self.module.fn_count {
                         return ir_fn_get(&(*self.module), fn_id as usize).returns_float == 1
                     }
@@ -26683,6 +26714,9 @@ impl Lowerer {
                 Some(callee_expr) => {
                     let callee_name = self.expr_to_callee_name_ref(&(*callee_expr))
                     let fn_id = lowerer_lookup_fn_id_by_name_ref(&self, callee_name)
+                    if lowerer_call_is_f64_raw_builtin(&self, callee_name, fn_id) {
+                        return 2
+                    }
                     if fn_id >= 0 && fn_id < self.module.fn_count {
                         let callee_fn = ir_fn_get(&(*self.module), fn_id)
                         if lower_name_is_integer_type(callee_fn.return_struct_name)
