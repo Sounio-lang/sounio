@@ -217,3 +217,41 @@ semantics; FIXED means it miscompiled before this round.
   constant. Divide-by-zero is uncompared (sim Panic versus PTX
   undefined); no kernel divides by a computed zero.
 
+## Addendum 2: measured launch timings plus batched GUM, 2026-10-31
+
+CUDA-event timing around the unchanged kernels (A5000, cc 8.6,
+driver 595.71.05, PTX JIT-loaded, one warmup launch excluded):
+
+- mem-fed MC, 16 threads: HtoD 8 us, launch 10 to 11 us steady
+  (31 us cold post-JIT), DtoH 2 us. About 20 us per 16 draws.
+- mem-fed MC, 256 threads: HtoD 14 us, launch 11 to 12 us steady,
+  DtoH 2 us. About 28 us per 256 draws, 0.11 us amortized.
+- batched GUM, 64 threads over 8 endpoints: HtoD 8 us, launch 9
+  to 11 us steady, DtoH 3 us. About 22 us per 8-endpoint batch.
+
+Reference points from the earlier round: CPU single draw 68 us;
+single-endpoint GUM 6.7 to 7.0 us on device versus 6.2 us on CPU.
+The CPU figures are single-unit latency; the GPU figures are
+batched throughput, so the honest reading is throughput per draw
+at batch scale, not latency of one draw. A per-draw CPU batch
+comparison was not run.
+
+Correctness with the final single launch per run (inputs reloaded
+after the timed repetitions, so the readback is exactly one
+advance): mem-fed 144 of 144 words at 16 threads and 2304 of
+2304 at 256 threads versus the Sounio reference, including the
+zero gap words; batched GUM 64 of 64 endpoint contribs bitwise
+versus the host double computation, with the 128 input words
+echoed back untouched. The batched layout is strided per endpoint
+(d, v, out blocks of 8); an earlier blocked-layout upload ran
+correctly per its own addresses but did not match endpoint
+semantics, and was redone strided.
+
+Implementation note: the batched emitter uses direct text emission
+rather than the typed IR lowering because KaxiAsmBuf carries a
+2 MB inline buffer copied by value on every append, so an 18-op
+kernel exceeds the 2 GiB test-process arena while the 11-op
+contrib kernel fits. Same reason the mem-fed emitter (about 100
+lines) already used text emission. No behavior change, only the
+emission path.
+
