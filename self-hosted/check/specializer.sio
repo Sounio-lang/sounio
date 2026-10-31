@@ -20,6 +20,10 @@
 //      distinct deterministic symbols when there are multiple instances.
 //      Generic methods remain singleton-only until receiver dispatch supports
 //      separate instance names. Unrepresentable instances fail closed.
+//      Exception: an inherent impl of a generic struct over exactly its own
+//      parameters (`impl S<T> { .. }`) is cloned once per struct instance as
+//      `impl S__A { .. }` (SPEC_MI_*), so receiver dispatch in the checker
+//      picks the instance and its methods need no turbofish.
 //   4. After discovery, rewrite call targets in every surviving body, including
 //      recursive/transitive clones, through heap-staged *mut fields. Preserve
 //      original templates needed for arity diagnostics; refuse ambiguous mixed
@@ -155,7 +159,7 @@ var SPEC_GF_CLONE_PTR: [i64; 256] = [0; 256]
 var SPEC_UNSOUND_POISON: bool = false
 // Fail-closed state for formerly silent fixed-capacity truncation.
 // Codes: 1=>4 type params, 2=>256 generic fns, 3=>256 generic structs,
-// 4=>64 emitted specialization hashes.
+// 4=>64 emitted specialization hashes, 8=>per-instance impl tables (SPEC_MI_*).
 var SPEC_CAP_OVERFLOW: bool = false
 var SPEC_CAP_OVERFLOW_CODE: i64 = 0
 // Generic methods require an explicit, unambiguous turbofish so the
@@ -176,13 +180,94 @@ var SPEC_MENTION_HASHES: [i64; 2048] = [0; 2048]
 var SPEC_MENTION_COUNT: i64 = 0
 var SPEC_MENTION_OVERFLOW: bool = false
 var SPEC_MENTION_SKIP: i64 = 0
+// MI refusal only: count names written where a value can be BUILT (expressions
+// and let annotations), not declaration types (fn signatures, struct fields,
+// impl targets). A signature like `fn f(v: &S<i64>)` cannot produce an S;
+// every S value comes from some expression that names S.
+var SPEC_MENTION_EXPR_ONLY: bool = false
 var SPEC_ST_COUNT: i64 = 0
 var SPEC_ST_PTRS: [i64; 256] = [0; 256]
 var SPEC_EMITTED_HASHES: [i64; 64] = [0; 64]
 var SPEC_EMITTED_COUNT: i64 = 0
 var SPEC_EXTRA_HEAD: i64 = 0
 
+// Impl monomorphization (MI). An inherent `impl S<T, ..> { .. }` whose target
+// arguments are exactly the generic struct S's own parameters, and whose
+// methods have no free type variables beyond them, is specialized per struct
+// INSTANCE, not per method call: every instance `S__A` gets its own
+// `impl S__A { .. }` with all methods substituted. Method calls then dispatch
+// on the receiver's concrete type in the checker, so `v.push(10)` needs no
+// turbofish once `v` is an `S__i64`; the instance's type arguments come from
+// the receiver's construction (`S::<i64>::new()`, a typed binding, or literal
+// arguments of an associated fn), never from the method name. Such methods are
+// not entered in the name-keyed generic-fn table at all.
+//   SPEC_MI_*      one entry per MI impl: owner struct slot and the original
+//                  impl item (staged).
+//   SPEC_ST_MI_*   per generic struct slot: has MI impls / blocked (some impl
+//                  of S is not MI-eligible, so S stays on the per-method path).
+//   SPEC_MM_*      (method-name hash, owner hash) of every moved method.
+//   SPEC_CM_*      names of every method that is NOT moved (concrete methods
+//                  and per-method-path templates), for the refusal rule.
+//   SPEC_II_*      worklist of struct instances whose impls must be emitted.
+//   SPEC_ENV_*     syntactic receiver typing for the current body: binding
+//                  name hash -> "its type is a known MI instance".
+let SPEC_MI_MAX: i64 = 64
+var SPEC_MI_COUNT: i64 = 0
+var SPEC_MI_ST: [i64; 64] = [0; 64]
+var SPEC_MI_ITEM_PTR: [i64; 64] = [0; 64]
+var SPEC_ST_HAS_MI: [bool; 256] = [false; 256]
+var SPEC_ST_MI_BLOCKED: [bool; 256] = [false; 256]
+var SPEC_ST_UNDET: [bool; 256] = [false; 256]
+var SPEC_ST_UNDET_NOCONC: [bool; 256] = [false; 256]
+var SPEC_ST_II_COUNT: [i64; 256] = [0; 256]
+let SPEC_MM_MAX: i64 = 1024
+var SPEC_MM_COUNT: i64 = 0
+var SPEC_MM_HASH: [i64; 1024] = [0; 1024]
+var SPEC_MM_OWNER: [i64; 1024] = [0; 1024]
+var SPEC_MM_ST: [i64; 1024] = [0; 1024]
+let SPEC_CM_MAX: i64 = 16384
+var SPEC_CM_COUNT: i64 = 0
+var SPEC_CM_OVERFLOW: bool = false
+var SPEC_CM_HASH: [i64; 16384] = [0; 16384]
+let SPEC_II_MAX: i64 = 64
+var SPEC_II_COUNT: i64 = 0
+var SPEC_II_DONE: i64 = 0
+var SPEC_II_PTRS: [i64; 64] = [0; 64]
+var SPEC_II_NAME_HASH: [i64; 64] = [0; 64]
+var SPEC_II_ITEM_HEAD: i64 = 0
+let SPEC_ENV_MAX: i64 = 4096
+var SPEC_ENV_COUNT: i64 = 0
+var SPEC_ENV_OVERFLOW: bool = false
+var SPEC_ENV_HASH: [i64; 4096] = [0; 4096]
+var SPEC_ENV_DET: [bool; 4096] = [false; 4096]
+var SPEC_ENV_BASE: i64 = 0
+
+fn spec_mi_reset_state() with Mut {
+    SPEC_MI_COUNT = 0
+    SPEC_MM_COUNT = 0
+    SPEC_CM_COUNT = 0
+    SPEC_CM_OVERFLOW = false
+    SPEC_II_COUNT = 0
+    SPEC_II_DONE = 0
+    SPEC_II_ITEM_HEAD = 0
+    SPEC_ENV_COUNT = 0
+    SPEC_DEFER_COUNT = 0
+    SPEC_DEFER_DONE = 0
+    SPEC_ENV_BASE = 0
+    SPEC_ENV_OVERFLOW = false
+    var i: i64 = 0
+    while i < 256 {
+        SPEC_ST_HAS_MI[i as usize] = false
+        SPEC_ST_MI_BLOCKED[i as usize] = false
+        SPEC_ST_UNDET[i as usize] = false
+        SPEC_ST_UNDET_NOCONC[i as usize] = false
+        SPEC_ST_II_COUNT[i as usize] = 0
+        i = i + 1
+    }
+}
+
 fn spec_reset_state() with Mut {
+    spec_mi_reset_state()
     SPEC_FN_INST_COUNT = 0
     SPEC_FN_MULTI = false
     SPEC_SOURCE_ITEMS = 0
@@ -204,6 +289,7 @@ fn spec_reset_state() with Mut {
     SPEC_MENTION_COUNT = 0
     SPEC_MENTION_OVERFLOW = false
     SPEC_MENTION_SKIP = 0
+    SPEC_MENTION_EXPR_ONLY = false
     SPEC_GF_COUNT = 0
     SPEC_ST_COUNT = 0
     SPEC_UNSOUND_POISON = false
@@ -252,6 +338,8 @@ pub fn spec_report_cap_overflow() -> bool with IO {
         print("a compilation unit supports at most 256 generic structs")
     } else if SPEC_CAP_OVERFLOW_CODE == 4 {
         print("a compilation unit supports at most 64 emitted generic struct specializations")
+    } else if SPEC_CAP_OVERFLOW_CODE == 8 {
+        print("at most 64 per-instance generic impls, 64 impl instances and 1024 instance-specialized methods")
     } else if SPEC_CAP_OVERFLOW_CODE == 7 {
         print("at most 4096 module-scoped lowercase `use` suffixes (SPEC_USE_MODULE_HASH)")
     } else {
@@ -265,7 +353,8 @@ pub fn spec_report_cap_overflow() -> bool with IO {
 pub fn spec_report_unsupported_method_generic() -> bool with IO {
     if !SPEC_METHOD_TARG_UNSUPPORTED { return false }
     print("error: generic method specialization requires one unambiguous explicit turbofish type-argument list\n")
-    print("  help: call the method as receiver.method::<T>(...), and use a unique generic method name in this compilation unit\n")
+    print("  help: give the receiver of a generic struct's method a concrete type: build it as S::<T>::new(..) or bind it as let v: S<T> = ..\n")
+    print("  help: a generic method of a non-generic type is called as receiver.method::<T>(...), with a unique method name in this compilation unit\n")
     true
 }
 
@@ -1167,7 +1256,14 @@ fn spec_collect_generic_methods(items: Option<Box<ItemList>>, known: SpecKnownNa
             let it = (*list).head
             if it.kind == ItemKind::ItemImpl {
                 match it.impl_def {
-                    Some(id) => spec_collect_generic_method_items((*id).methods, known, spec_impl_owner_hash((*id).target_type.path))
+                    Some(id) => {
+                        // MI impls are specialized per struct instance
+                        // (spec_mi_collect); their methods never enter the
+                        // name-keyed generic-fn table.
+                        if spec_mi_impl_owner_st((*id).target_type) < 0 {
+                            spec_collect_generic_method_items((*id).methods, known, spec_impl_owner_hash((*id).target_type.path))
+                        }
+                    }
                     None => {}
                 }
             }
@@ -1412,6 +1508,7 @@ fn spec_items_have_symbol(items: Option<Box<ItemList>>, symbol: Name) -> bool wi
 // Called only after discovery reaches its fixed point. ctx=-1 in the existing
 // heap-staged traversal means rename-only: type substitution is a no-op.
 fn spec_rewrite_call_mut(p: *mut SpecExprStage) with Mut, Panic, Div, Alloc {
+    if SPEC_II_COUNT > 0 { spec_mi_rewrite_expr_mut(p) }
     if (*p).e.kind != ExprKind::ExprCall { return }
     let base = spec_call_expr_callee_name((*p).e)
     let slot = spec_generic_table_find(base)
@@ -1670,6 +1767,9 @@ fn spec_subst_stmt_list_opt(opt: Option<Box<StmtList>>, ctx: i64, targs: Option<
             (*sp).s = tmp
             (*sp).s.ty = spec_subst_type_opt((*sp).s.ty, ctx, targs)
             (*sp).s.expr = spec_subst_expr_opt((*sp).s.expr, ctx, targs)
+            if ctx == 0 - 1 && SPEC_II_COUNT > 0 {
+                spec_mi_rewrite_let_mut(sp)
+            }
             (*sp).s.target = spec_subst_expr_opt((*sp).s.target, ctx, targs)
             Some(Box::new(StmtList { head: (*sp).s, tail: spec_subst_stmt_list_opt((*list).tail, ctx, targs) }))
         }
@@ -1805,6 +1905,11 @@ fn spec_get_or_create_struct_instance(st_idx: i64, base: Name, targs: Option<Box
     if spec_name_is_empty(mangled) { return base }
     if spec_emitted_has(mangled) { return mangled }
     if !spec_emitted_push(mangled) { return base }
+    // MI owner: queue this instance's impls (emitted after the scan by
+    // spec_mi_process_instances; never from inside this deep call).
+    if st_idx >= 0 && st_idx < 256 && SPEC_ST_HAS_MI[st_idx as usize] {
+        spec_mi_enqueue_instance(st_idx, ast_name_hash(mangled), targs)
+    }
 
     match spec_struct_table_sd(st_idx) {
         None => {}
@@ -1965,7 +2070,7 @@ fn spec_ensure_instance(base_name: Name, targs: Option<Box<TypeExprList>>) with 
             // so the OUTER scan continues under its own correct module.
             let caller_module_id = SPEC_CURRENT_MODULE_ID
             SPEC_CURRENT_MODULE_ID = spec_item_module_lookup(base_name)
-            spec_scan_block((*fp).fd.body)
+            spec_scan_fn_body((*fp).fd)
             SPEC_CURRENT_MODULE_ID = caller_module_id
             let np = heap_alloc(16384) as *mut SpecItemNode
             (*np).it = spec_make_fn_item((*fp).fd.name, (*fp).fd, spec_generic_table_visibility(gt_idx))
@@ -2188,6 +2293,15 @@ fn spec_scan_expr(e: Expr) with IO, Mut, Panic, Div, Alloc {
     spec_scan_block_opt(e.handler_block)
     spec_scan_expr_opt(e.closure_body)
 
+    var mi_handled = false
+    if SPEC_MI_COUNT > 0 {
+        if e.kind == ExprKind::ExprCall {
+            spec_mi_scan_assoc_call(e)
+        } else if e.kind == ExprKind::ExprMethodCall {
+            mi_handled = spec_mi_scan_method_call(e)
+        }
+    }
+
     if e.kind == ExprKind::ExprCall || e.kind == ExprKind::ExprMethodCall {
         let callee_name = if e.kind == ExprKind::ExprMethodCall {
             e.name
@@ -2240,7 +2354,7 @@ fn spec_scan_expr(e: Expr) with IO, Mut, Panic, Div, Alloc {
                         }
                     }
                 }
-            } else if e.kind == ExprKind::ExprMethodCall {
+            } else if e.kind == ExprKind::ExprMethodCall && !mi_handled {
                 match spec_call_expr_type_args(e) {
                     Some(_) => {
                         // The checker may see a concrete signature after this
@@ -2273,6 +2387,9 @@ fn spec_scan_stmt_list_opt(opt: Option<Box<StmtList>>) with IO, Mut, Panic, Div,
         Some(list) => {
             spec_scan_expr_opt((*list).head.expr)
             spec_scan_expr_opt((*list).head.target)
+            if SPEC_MI_COUNT > 0 {
+                spec_mi_scan_binding((*list).head)
+            }
             spec_scan_stmt_list_opt((*list).tail)
         }
     }
@@ -2331,9 +2448,11 @@ fn spec_scan_method_items(methods: Option<Box<ItemList>>, owner_hash: i64) with 
         None => {}
         Some(list) => {
             let it = (*list).head
-            if it.kind == ItemKind::ItemFn && spec_method_template_slot(it.name, owner_hash) < 0 {
+            // A moved MI method's generic body is only scanned through its
+            // per-instance clones (spec_mi_emit_impl).
+            if it.kind == ItemKind::ItemFn && spec_method_template_slot(it.name, owner_hash) < 0 && !spec_mm_is_moved(it.name, owner_hash) {
                 match it.fn_def {
-                    Some(fd_box) => spec_scan_block((*fd_box).body)
+                    Some(fd_box) => spec_scan_fn_body((*fd_box))
                     None => {}
                 }
             }
@@ -2349,7 +2468,14 @@ fn spec_scan_items(items: Option<Box<ItemList>>) with IO, Mut, Panic, Div, Alloc
             let it = (*list).head
             if it.kind == ItemKind::ItemFn && spec_method_template_slot(it.name, 0) < 0 {
                 match it.fn_def {
-                    Some(fd_box) => spec_scan_block((*fd_box).body)
+                    Some(fd_box) => spec_scan_fn_body((*fd_box))
+                    None => {}
+                }
+            } else if it.kind == ItemKind::ItemStruct && SPEC_MI_COUNT > 0 && spec_struct_table_find(it.name) < 0 {
+                // A concrete struct with a field of an MI instance type
+                // (`items: HeapVec<i64>`) needs that instance to exist.
+                match it.struct_def {
+                    Some(sd) => spec_mi_scan_field_types((*sd).fields),
                     None => {}
                 }
             } else if it.kind == ItemKind::ItemImpl {
@@ -2359,6 +2485,1050 @@ fn spec_scan_items(items: Option<Box<ItemList>>) with IO, Mut, Panic, Div, Alloc
                 }
             }
             spec_scan_items((*list).tail)
+        }
+    }
+}
+
+// ============================================================
+// Impl monomorphization per generic-struct instance (MI)
+// ============================================================
+// See SPEC_MI_* above. Decision rule for a turbofish-less method call `r.m(..)`
+// whose name is a moved MI method of owner S:
+//   - r's type is syntactically an S instance (a binding of `S::<A>::f(..)`,
+//     `S::f(literal..)`, an annotation or parameter of type S<A>, or `self`):
+//     the checker dispatches on the receiver's concrete `S__A`; nothing to do.
+//   - otherwise the call is ambiguous here. It is refused when S is named
+//     outside its own declarations (a value of S can reach the call) and
+//     either no other method is called `m` (it can only mean S's) or no S
+//     instance exists (then nothing was specialized and the erased template
+//     would reach lowering). With instances and another `m` around, the
+//     checker decides: S's own impl no longer carries `m`, so an erased S
+//     receiver fails closed there.
+
+struct SpecMiInstance {
+    st_idx: i64,
+    targs: Option<Box<TypeExprList>>,
+}
+struct SpecKnownStage { k: SpecKnownNames }
+var SPEC_KNOWN_PTR: i64 = 0
+
+fn spec_mi_struct_name(st: i64) -> Name with Mut, Panic, Div {
+    match spec_struct_table_sd(st) {
+        Some(sd) => (*sd).name,
+        None => empty_name(),
+    }
+}
+
+fn spec_mi_struct_name_hash(st: i64) -> i64 with Mut, Panic, Div {
+    if st < 0 || st >= SPEC_ST_COUNT { return 0 - 1 }
+    let p = SPEC_ST_PTRS[st as usize] as *mut SpecStNode
+    (*p).name_hash
+}
+
+// Generic struct slot named by an impl target / type head, or -1.
+fn spec_mi_target_st(tt: TypeExpr) -> i64 with Mut, Panic, Div {
+    if tt.kind != TypeExprKind::TypeNamed || tt.path.seg_count != 1 { return 0 - 1 }
+    spec_struct_table_find(spec_path_single_name(tt.path))
+}
+
+// Owner struct slot of an MI impl target, or -1.
+fn spec_mi_impl_owner_st(tt: TypeExpr) -> i64 with Mut, Panic, Div {
+    if SPEC_MI_COUNT == 0 { return 0 - 1 }
+    let st = spec_mi_target_st(tt)
+    if st < 0 || st >= 256 { return 0 - 1 }
+    if SPEC_ST_HAS_MI[st as usize] { st } else { 0 - 1 }
+}
+
+fn spec_mi_struct_has_tp(st: i64, h: i64) -> bool with Mut, Panic, Div {
+    var k: i64 = 0
+    let n = spec_struct_table_tp_count(st)
+    while k < n {
+        if spec_struct_table_tp_hash(st, k) == h { return true }
+        k = k + 1
+    }
+    false
+}
+
+// `impl S<T, ..>` with exactly S's own parameter names, in order.
+fn spec_mi_target_args_are_params(tt: TypeExpr, st: i64) -> bool with Mut, Panic, Div, Alloc {
+    let n = spec_struct_table_tp_count(st)
+    if n <= 0 { return false }
+    if spec_type_args_count(tt.type_args) != n { return false }
+    var k: i64 = 0
+    while k < n {
+        let a = spec_type_args_nth(tt.type_args, k)
+        if a.kind != TypeExprKind::TypeNamed || a.path.seg_count != 1 { return false }
+        match a.type_args {
+            Some(_x) => { return false }
+            None => {}
+        }
+        if ast_name_hash(spec_path_single_name(a.path)) != spec_struct_table_tp_hash(st, k) { return false }
+        k = k + 1
+    }
+    true
+}
+
+// Every method's free type variables are parameters of S.
+fn spec_mi_methods_within(methods: Option<Box<ItemList>>, known: SpecKnownNames, st: i64) -> bool with Mut, Panic, Div {
+    match methods {
+        None => true
+        Some(list) => {
+            let it = (*list).head
+            if it.kind != ItemKind::ItemFn { return false }
+            match it.fn_def {
+                Some(fd) => {
+                    let tp = spec_collect_free_vars_from_fndef((*fd), known)
+                    var i: i64 = 0
+                    while i < tp.count {
+                        if !spec_mi_struct_has_tp(st, spec_tp_hash_at(tp, i)) { return false }
+                        i = i + 1
+                    }
+                }
+                None => { return false }
+            }
+            spec_mi_methods_within((*list).tail, known, st)
+        }
+    }
+}
+
+// Pass 1: a generic struct with any impl that is not MI-eligible keeps every
+// one of its impls on the per-method path.
+fn spec_mi_block_pass(items: Option<Box<ItemList>>, known: SpecKnownNames) with Mut, Panic, Div, Alloc {
+    match items {
+        None => {}
+        Some(list) => {
+            let it = (*list).head
+            if it.kind == ItemKind::ItemImpl {
+                match it.impl_def {
+                    Some(id) => {
+                        let st = spec_mi_target_st((*id).target_type)
+                        if st >= 0 && st < 256 {
+                            let eligible = (*id).trait_name.len == 0 && spec_mi_target_args_are_params((*id).target_type, st) && spec_mi_methods_within((*id).methods, known, st)
+                            if !eligible { SPEC_ST_MI_BLOCKED[st as usize] = true }
+                        }
+                    }
+                    None => {}
+                }
+            }
+            spec_mi_block_pass((*list).tail, known)
+        }
+    }
+}
+
+fn spec_mi_register_moved(methods: Option<Box<ItemList>>, known: SpecKnownNames, owner_hash: i64, st: i64) with Mut, Panic, Div {
+    match methods {
+        None => {}
+        Some(list) => {
+            let it = (*list).head
+            match it.fn_def {
+                Some(fd) => {
+                    let tp = spec_collect_free_vars_from_fndef((*fd), known)
+                    if tp.count > 0 {
+                        if SPEC_MM_COUNT >= SPEC_MM_MAX {
+                            spec_mark_cap_overflow(8)
+                        } else {
+                            SPEC_MM_HASH[SPEC_MM_COUNT as usize] = ast_name_hash(it.name)
+                            SPEC_MM_OWNER[SPEC_MM_COUNT as usize] = owner_hash
+                            SPEC_MM_ST[SPEC_MM_COUNT as usize] = st
+                            SPEC_MM_COUNT = SPEC_MM_COUNT + 1
+                        }
+                    }
+                }
+                None => {}
+            }
+            spec_mi_register_moved((*list).tail, known, owner_hash, st)
+        }
+    }
+}
+
+// Pass 2: register the MI impls of unblocked generic structs.
+fn spec_mi_register_pass(items: Option<Box<ItemList>>, known: SpecKnownNames) with Mut, Panic, Div, Alloc {
+    match items {
+        None => {}
+        Some(list) => {
+            let it = (*list).head
+            if it.kind == ItemKind::ItemImpl {
+                match it.impl_def {
+                    Some(id) => {
+                        let st = spec_mi_target_st((*id).target_type)
+                        if st >= 0 && st < 256 && !SPEC_ST_MI_BLOCKED[st as usize] {
+                            if SPEC_MI_COUNT >= SPEC_MI_MAX {
+                                spec_mark_cap_overflow(8)
+                            } else {
+                                let np = heap_alloc(16384) as *mut SpecItemNode
+                                (*np).it = it
+                                (*np).next = 0
+                                SPEC_MI_ITEM_PTR[SPEC_MI_COUNT as usize] = np as i64
+                                SPEC_MI_ST[SPEC_MI_COUNT as usize] = st
+                                SPEC_MI_COUNT = SPEC_MI_COUNT + 1
+                                SPEC_ST_HAS_MI[st as usize] = true
+                                spec_mi_register_moved((*id).methods, known, spec_impl_owner_hash((*id).target_type.path), st)
+                            }
+                        }
+                    }
+                    None => {}
+                }
+            }
+            spec_mi_register_pass((*list).tail, known)
+        }
+    }
+}
+
+fn spec_mi_concrete_methods(methods: Option<Box<ItemList>>, owner_hash: i64) with Mut, Panic, Div {
+    match methods {
+        None => {}
+        Some(list) => {
+            let it = (*list).head
+            if it.kind == ItemKind::ItemFn && !spec_mm_is_moved(it.name, owner_hash) {
+                if SPEC_CM_COUNT >= SPEC_CM_MAX {
+                    SPEC_CM_OVERFLOW = true
+                } else {
+                    SPEC_CM_HASH[SPEC_CM_COUNT as usize] = ast_name_hash(it.name)
+                    SPEC_CM_COUNT = SPEC_CM_COUNT + 1
+                }
+            }
+            spec_mi_concrete_methods((*list).tail, owner_hash)
+        }
+    }
+}
+
+// Pass 3: every method name that is not a moved MI method.
+fn spec_mi_concrete_pass(items: Option<Box<ItemList>>) with Mut, Panic, Div {
+    match items {
+        None => {}
+        Some(list) => {
+            let it = (*list).head
+            if it.kind == ItemKind::ItemImpl {
+                match it.impl_def {
+                    Some(id) => spec_mi_concrete_methods((*id).methods, spec_impl_owner_hash((*id).target_type.path)),
+                    None => {}
+                }
+            }
+            spec_mi_concrete_pass((*list).tail)
+        }
+    }
+}
+
+fn spec_mi_collect(items: Option<Box<ItemList>>, known: SpecKnownNames) with Mut, Panic, Div, Alloc {
+    let kp = heap_alloc(65536) as *mut SpecKnownStage
+    (*kp).k = known
+    SPEC_KNOWN_PTR = kp as i64
+    if SPEC_ST_COUNT == 0 { return }
+    spec_mi_block_pass(items, known)
+    spec_mi_register_pass(items, known)
+    if SPEC_MI_COUNT > 0 {
+        spec_mi_concrete_pass(items)
+    }
+}
+
+fn spec_mm_is_moved(name: Name, owner_hash: i64) -> bool with Mut, Panic, Div {
+    if SPEC_MM_COUNT == 0 { return false }
+    let h = ast_name_hash(name)
+    var k: i64 = 0
+    while k < SPEC_MM_COUNT {
+        if SPEC_MM_HASH[k as usize] == h && SPEC_MM_OWNER[k as usize] == owner_hash { return true }
+        k = k + 1
+    }
+    false
+}
+
+fn spec_mm_any_hash(h: i64) -> bool with Mut, Panic, Div {
+    var k: i64 = 0
+    while k < SPEC_MM_COUNT {
+        if SPEC_MM_HASH[k as usize] == h { return true }
+        k = k + 1
+    }
+    false
+}
+
+// Conservative on overflow: no proven concrete counterpart.
+fn spec_cm_has(h: i64) -> bool with Mut, Panic, Div {
+    if SPEC_CM_OVERFLOW { return false }
+    var k: i64 = 0
+    while k < SPEC_CM_COUNT {
+        if SPEC_CM_HASH[k as usize] == h { return true }
+        k = k + 1
+    }
+    false
+}
+
+// ---- free-variable guard for instance arguments ----
+
+fn spec_mi_type_closed(te: TypeExpr) -> bool with Mut, Panic, Div {
+    if SPEC_KNOWN_PTR != 0 {
+        let kp = SPEC_KNOWN_PTR as *mut SpecKnownStage
+        if spec_type_is_free_var(te, (*kp).k) { return false }
+    }
+    match te.inner {
+        Some(i) => { if !spec_mi_type_closed(*i) { return false } }
+        None => {}
+    }
+    spec_mi_targs_closed(te.type_args)
+}
+
+fn spec_mi_targs_closed(opt: Option<Box<TypeExprList>>) -> bool with Mut, Panic, Div {
+    match opt {
+        None => true
+        Some(list) => {
+            if !spec_mi_type_closed((*list).head) { return false }
+            spec_mi_targs_closed((*list).tail)
+        }
+    }
+}
+
+// ---- instance worklist ----
+
+fn spec_mi_enqueue_instance(st: i64, name_hash: i64, targs: Option<Box<TypeExprList>>) with Mut, Panic, Div, Alloc {
+    if SPEC_II_COUNT >= SPEC_II_MAX {
+        spec_mark_cap_overflow(8)
+        return
+    }
+    let p = heap_alloc(4096) as *mut SpecMiInstance
+    (*p).st_idx = st
+    (*p).targs = targs
+    SPEC_II_PTRS[SPEC_II_COUNT as usize] = p as i64
+    SPEC_II_NAME_HASH[SPEC_II_COUNT as usize] = name_hash
+    SPEC_II_COUNT = SPEC_II_COUNT + 1
+    SPEC_ST_II_COUNT[st as usize] = SPEC_ST_II_COUNT[st as usize] + 1
+}
+
+fn spec_ii_name_known(h: i64) -> bool with Mut, Panic, Div {
+    var k: i64 = 0
+    while k < SPEC_II_COUNT {
+        if SPEC_II_NAME_HASH[k as usize] == h { return true }
+        k = k + 1
+    }
+    false
+}
+
+// Get-or-create the instance S<targs> (arguments rewritten like any other
+// type first, so nested instances name themselves consistently).
+fn spec_mi_create_instance(st: i64, targs: Option<Box<TypeExprList>>) with Mut, Panic, Div, Alloc {
+    if !spec_mi_targs_closed(targs) { return }
+    let args = spec_mi_type_list_opt(targs, true)
+    let base = spec_mi_struct_name(st)
+    if spec_name_is_empty(base) { return }
+    let made = spec_get_or_create_struct_instance(st, base, args)
+}
+
+fn spec_mi_clone_methods(opt: Option<Box<ItemList>>, ctx: i64, targs: Option<Box<TypeExprList>>) -> Option<Box<ItemList>> with IO, Mut, Panic, Div, Alloc {
+    match opt {
+        None => None
+        Some(list) => {
+            let it = (*list).head
+            let rest = spec_mi_clone_methods((*list).tail, ctx, targs)
+            match it.fn_def {
+                None => Some(Box::new(ItemList { head: it, tail: rest })),
+                Some(fd) => {
+                    let fp = heap_alloc(32768) as *mut SpecFnDefStage
+                    let tmp = *fd
+                    (*fp).fd = tmp
+                    (*fp).fd.params = spec_subst_param_list_opt((*fp).fd.params, ctx, targs)
+                    (*fp).fd.return_type = spec_subst_type_opt((*fp).fd.return_type, ctx, targs)
+                    (*fp).fd.body = spec_subst_block((*fp).fd.body, ctx, targs)
+                    spec_scan_fn_body((*fp).fd)
+                    let np = heap_alloc(16384) as *mut SpecItemNode
+                    (*np).it = it
+                    (*np).it.fn_def = Some(Box::new((*fp).fd))
+                    (*np).next = 0
+                    Some(Box::new(ItemList { head: (*np).it, tail: rest }))
+                }
+            }
+        }
+    }
+}
+
+// `impl S<T> { .. }` -> `impl S__A { .. }` with every method substituted, then
+// scanned (its bodies can name further instances and generic fns).
+fn spec_mi_emit_impl(m: i64, st: i64, targs: Option<Box<TypeExprList>>) with IO, Mut, Panic, Div, Alloc {
+    let src = SPEC_MI_ITEM_PTR[m as usize] as *mut SpecItemNode
+    let base = spec_mi_struct_name(st)
+    let mangled = spec_mangle_name(base, targs)
+    if spec_name_is_empty(mangled) { return }
+    let caller_module_id = SPEC_CURRENT_MODULE_ID
+    SPEC_CURRENT_MODULE_ID = spec_item_module_lookup(spec_mi_struct_name(st))
+    match (*src).it.impl_def {
+        None => {}
+        Some(id) => {
+            let ip = heap_alloc(16384) as *mut SpecImplDefStage
+            let tmp_id = *id
+            (*ip).id = tmp_id
+            let tp = heap_alloc(32768) as *mut SpecTypeStage
+            (*tp).ty = (*ip).id.target_type
+            (*tp).ty.path = spec_name_to_path(mangled)
+            (*tp).ty.type_args = None
+            (*ip).id.target_type = (*tp).ty
+            let ctx = spec_ctx_from_struct_slot(st)
+            (*ip).id.methods = spec_mi_clone_methods((*ip).id.methods, ctx, targs)
+            let np = heap_alloc(16384) as *mut SpecItemNode
+            (*np).it = (*src).it
+            (*np).it.impl_def = Some(Box::new((*ip).id))
+            // The impl ITEM name is the IR method-symbol prefix
+            // (ir_mangle_method_name in lower.sio): keeping the template's
+            // `S` would give every instance the same `S_push`. Recomputed
+            // here, after the deep clone call (Name locals do not survive it).
+            (*np).it.name = spec_mangle_name(spec_mi_struct_name(st), targs)
+            (*np).next = SPEC_II_ITEM_HEAD
+            SPEC_II_ITEM_HEAD = np as i64
+        }
+    }
+    SPEC_CURRENT_MODULE_ID = caller_module_id
+}
+
+// Drain the worklist; emitting an impl can enqueue further instances.
+fn spec_mi_process_instances() with IO, Mut, Panic, Div, Alloc {
+    while SPEC_II_DONE < SPEC_II_COUNT {
+        let k = SPEC_II_DONE
+        SPEC_II_DONE = SPEC_II_DONE + 1
+        let p = SPEC_II_PTRS[k as usize] as *mut SpecMiInstance
+        let st = (*p).st_idx
+        var m: i64 = 0
+        while m < SPEC_MI_COUNT {
+            if SPEC_MI_ST[m as usize] == st {
+                spec_mi_emit_impl(m, st, (*p).targs)
+            }
+            m = m + 1
+        }
+    }
+}
+
+fn spec_mi_finish_methods(opt: Option<Box<ItemList>>) -> Option<Box<ItemList>> with Mut, Panic, Div, Alloc {
+    match opt {
+        None => None
+        Some(list) => {
+            let it = (*list).head
+            let rest = spec_mi_finish_methods((*list).tail)
+            Some(Box::new(ItemList { head: spec_finish_fn_item(it, it.name), tail: rest }))
+        }
+    }
+}
+
+// Instance impls, finalized (call-site rewrite) after discovery completes.
+fn spec_mi_instance_items_to_list() -> Option<Box<ItemList>> with Mut, Panic, Div, Alloc {
+    var out: Option<Box<ItemList>> = None
+    var cur = SPEC_II_ITEM_HEAD
+    while cur != 0 {
+        let p = cur as *mut SpecItemNode
+        match (*p).it.impl_def {
+            Some(id) => {
+                let ip = heap_alloc(16384) as *mut SpecImplDefStage
+                let tmp_id = *id
+                (*ip).id = tmp_id
+                (*ip).id.methods = spec_mi_finish_methods((*ip).id.methods)
+                let np = heap_alloc(16384) as *mut SpecItemNode
+                (*np).it = (*p).it
+                (*np).it.impl_def = Some(Box::new((*ip).id))
+                out = Some(Box::new(ItemList { head: (*np).it, tail: out }))
+            }
+            None => {}
+        }
+        cur = (*p).next
+    }
+    out
+}
+
+// ---- syntactic receiver typing (scan-time environment) ----
+
+fn spec_env_push(h: i64, det: bool) with Mut, Panic, Div {
+    if SPEC_ENV_COUNT >= SPEC_ENV_MAX {
+        SPEC_ENV_OVERFLOW = true
+        return
+    }
+    SPEC_ENV_HASH[SPEC_ENV_COUNT as usize] = h
+    SPEC_ENV_DET[SPEC_ENV_COUNT as usize] = det
+    SPEC_ENV_COUNT = SPEC_ENV_COUNT + 1
+}
+
+// Latest binding of `h` in the current body; unknown or overflowed: false.
+fn spec_env_lookup(h: i64) -> bool with Mut, Panic, Div {
+    if SPEC_ENV_OVERFLOW { return false }
+    var k = SPEC_ENV_COUNT - 1
+    while k >= SPEC_ENV_BASE {
+        if SPEC_ENV_HASH[k as usize] == h { return SPEC_ENV_DET[k as usize] }
+        k = k - 1
+    }
+    false
+}
+
+fn spec_name_is_self(n: Name) -> bool with Mut, Panic, Div {
+    if n.len != 4 { return false }
+    str_eq(spec_name_to_string(n), "self")
+}
+
+// Is this type an MI instance: S<A> for an MI owner S, or an emitted S__A?
+fn spec_mi_type_is_inst(te: TypeExpr) -> bool with Mut, Panic, Div {
+    if te.kind == TypeExprKind::TypeReference || te.kind == TypeExprKind::TypeRefMut {
+        match te.inner {
+            Some(i) => { return spec_mi_type_is_inst(*i) }
+            None => { return false }
+        }
+    }
+    if te.kind != TypeExprKind::TypeNamed || te.path.seg_count != 1 { return false }
+    let head = spec_path_single_name(te.path)
+    if spec_ii_name_known(ast_name_hash(head)) { return true }
+    let st = spec_struct_table_find(head)
+    if st < 0 || st >= 256 || !SPEC_ST_HAS_MI[st as usize] { return false }
+    spec_type_args_count(te.type_args) == spec_struct_table_tp_count(st)
+}
+
+// `S::f(..)` with S an MI owner: S's slot, else -1.
+fn spec_mi_assoc_owner(e: Expr) -> i64 with Mut, Panic, Div {
+    match e.left {
+        None => 0 - 1
+        Some(callee) => {
+            if (*callee).kind != ExprKind::ExprPath || (*callee).path.seg_count != 2 { return 0 - 1 }
+            let head = Name { buf: (*callee).path.segments.head_buf, len: (*callee).path.segments.head_len }
+            let st = spec_struct_table_find(head)
+            if st < 0 || st >= 256 || !SPEC_ST_HAS_MI[st as usize] { return 0 - 1 }
+            st
+        }
+    }
+}
+
+fn spec_mi_assoc_fn_name(e: Expr) -> Name with Mut, Panic, Div {
+    match e.left {
+        None => empty_name()
+        Some(callee) => spec_string_list_nth_name((*callee).path.segments, 1)
+    }
+}
+
+fn spec_mi_find_method_in(methods: Option<Box<ItemList>>, name: Name) -> Option<Box<FnDef>> with Mut, Panic, Div {
+    match methods {
+        None => None
+        Some(list) => {
+            if (*list).head.kind == ItemKind::ItemFn && name_eq((*list).head.name, name) {
+                return (*list).head.fn_def
+            }
+            spec_mi_find_method_in((*list).tail, name)
+        }
+    }
+}
+
+fn spec_mi_find_method(st: i64, name: Name) -> Option<Box<FnDef>> with Mut, Panic, Div {
+    var m: i64 = 0
+    while m < SPEC_MI_COUNT {
+        if SPEC_MI_ST[m as usize] == st {
+            let src = SPEC_MI_ITEM_PTR[m as usize] as *mut SpecItemNode
+            match (*src).it.impl_def {
+                Some(id) => {
+                    match spec_mi_find_method_in((*id).methods, name) {
+                        Some(fd) => { return Some(fd) }
+                        None => {}
+                    }
+                }
+                None => {}
+            }
+        }
+        m = m + 1
+    }
+    None
+}
+
+// S's parameters inferred from literal-typed arguments of `S::f(..)` whose
+// formal type is a bare parameter; the same scalar rule as free generic fns.
+fn spec_mi_infer_assoc_targs(e: Expr, st: i64) -> Option<Box<TypeExprList>> with Mut, Panic, Div, Alloc {
+    let count = spec_struct_table_tp_count(st)
+    if count <= 0 || count > 4 { return None }
+    let ctx = spec_ctx_from_struct_slot(st)
+    let inferred = heap_alloc(4096) as *mut SpecInferredScalarArgs
+    (*inferred).type0 = None
+    (*inferred).type1 = None
+    (*inferred).type2 = None
+    (*inferred).type3 = None
+    match spec_mi_find_method(st, spec_mi_assoc_fn_name(e)) {
+        None => { return None }
+        Some(fd) => {
+            var params = &(*fd).params
+            var args = &e.args
+            while true {
+                match *params {
+                    Some(p) => {
+                        match *args {
+                            Some(a) => {
+                                let formal = &(*p).head.ty
+                                if (*formal).kind == TypeExprKind::TypeNamed && (*formal).path.seg_count == 1 {
+                                    let index = spec_ctx_tp_index(ctx, ast_name_hash(spec_path_single_name((*formal).path)))
+                                    if index >= 0 {
+                                        let actual = spec_literal_scalar_type(&(*a).head)
+                                        if spec_type_arg_is_scalar(actual) {
+                                            match spec_inferred_scalar_at(inferred, index) {
+                                                Some(previous) => {
+                                                    let old = spec_name_to_string(spec_path_single_name((*previous).path))
+                                                    let new = spec_name_to_string(spec_path_single_name(actual.path))
+                                                    if !str_eq(old, new) { return None }
+                                                }
+                                                None => {}
+                                            }
+                                            let found = Some(Box::new(actual))
+                                            if index == 0 { (*inferred).type0 = found }
+                                            if index == 1 { (*inferred).type1 = found }
+                                            if index == 2 { (*inferred).type2 = found }
+                                            if index == 3 { (*inferred).type3 = found }
+                                        }
+                                    }
+                                }
+                                args = &(*a).tail
+                            }
+                            None => break,
+                        }
+                        params = &(*p).tail
+                    }
+                    None => break,
+                }
+            }
+        }
+    }
+    var result: Option<Box<TypeExprList>> = None
+    var i = count - 1
+    while i >= 0 {
+        match spec_inferred_scalar_at(inferred, i) {
+            Some(ty) => { result = Some(Box::new(TypeExprList { head: *ty, tail: result })) }
+            None => return None,
+        }
+        i = i - 1
+    }
+    result
+}
+
+// Type arguments of `S::f(..)`: the explicit turbofish (`S::<A>::f`,
+// `S::f::<A>`) when its arity matches, else inferred from literal arguments.
+fn spec_mi_assoc_targs(e: Expr, st: i64) -> Option<Box<TypeExprList>> with Mut, Panic, Div, Alloc {
+    var explicit: Option<Box<TypeExprList>> = e.type_args
+    match explicit {
+        Some(_x) => {}
+        None => {
+            match e.left {
+                Some(callee) => { explicit = (*callee).type_args }
+                None => {}
+            }
+        }
+    }
+    match explicit {
+        Some(a) => {
+            if spec_type_args_count(Some(a)) == spec_struct_table_tp_count(st) { return Some(a) }
+            return None
+        }
+        None => {}
+    }
+    spec_mi_infer_assoc_targs(e, st)
+}
+
+// `S::f(..)` (owner, arguments known) whose declared return type is S.
+fn spec_mi_assoc_call_yields_inst(e: Expr) -> bool with Mut, Panic, Div, Alloc {
+    let st = spec_mi_assoc_owner(e)
+    if st < 0 { return false }
+    match spec_mi_assoc_targs(e, st) {
+        None => { return false }
+        Some(_t) => {}
+    }
+    match spec_mi_find_method(st, spec_mi_assoc_fn_name(e)) {
+        None => false
+        Some(fd) => {
+            match (*fd).return_type {
+                None => false
+                Some(rt) => {
+                    if (*rt).kind != TypeExprKind::TypeNamed || (*rt).path.seg_count != 1 { return false }
+                    ast_name_hash(spec_path_single_name((*rt).path)) == spec_mi_struct_name_hash(st)
+                }
+            }
+        }
+    }
+}
+
+fn spec_mi_expr_is_inst(e: Expr) -> bool with Mut, Panic, Div, Alloc {
+    if e.kind == ExprKind::ExprCall { return spec_mi_assoc_call_yields_inst(e) }
+    if e.kind == ExprKind::ExprStructLit && e.path.seg_count == 1 {
+        return spec_ii_name_known(ast_name_hash(spec_path_single_name(e.path)))
+    }
+    false
+}
+
+fn spec_mi_recv_determined(r: Expr) -> bool with Mut, Panic, Div, Alloc {
+    if r.kind == ExprKind::ExprIdent {
+        if spec_name_is_self(r.name) { return true }
+        return spec_env_lookup(ast_name_hash(r.name))
+    }
+    if r.kind == ExprKind::ExprPath && r.path.seg_count == 1 {
+        return spec_env_lookup(ast_name_hash(spec_path_single_name(r.path)))
+    }
+    if r.kind == ExprKind::ExprUnary && (r.un_op == UnaryOp::OpDeref || r.un_op == UnaryOp::OpRef || r.un_op == UnaryOp::OpRefMut) {
+        match r.left {
+            Some(inner) => { return spec_mi_recv_determined(*inner) }
+            None => { return false }
+        }
+    }
+    spec_mi_expr_is_inst(r)
+}
+
+// Signature and field types only DESCRIBE values; they never build one. An
+// instance named only there is created once some site that does build a
+// value (`S::<A>::f(..)`, a let annotation, a method turbofish) has
+// instantiated an MI struct, so a library fn taking `&S<i64>` does not
+// specialize every importer that never makes an S. Deferred types are
+// flushed by spec_mi_process_all; overflow falls back to creating eagerly.
+let SPEC_DEFER_MAX: i64 = 1024
+var SPEC_DEFER_COUNT: i64 = 0
+var SPEC_DEFER_DONE: i64 = 0
+var SPEC_DEFER_PTRS: [i64; 1024] = [0; 1024]
+
+fn spec_mi_defer_type(te: TypeExpr) with Mut, Panic, Div, Alloc {
+    var leaf = true
+    match te.inner {
+        Some(_i) => { leaf = false }
+        None => {}
+    }
+    match te.type_args {
+        Some(_a) => { leaf = false }
+        None => {}
+    }
+    if leaf { return }
+    if SPEC_DEFER_COUNT >= SPEC_DEFER_MAX {
+        let unused = spec_mi_type(te, true)
+        return
+    }
+    let p = heap_alloc(32768) as *mut SpecTypeStage
+    (*p).ty = te
+    SPEC_DEFER_PTRS[SPEC_DEFER_COUNT as usize] = p as i64
+    SPEC_DEFER_COUNT = SPEC_DEFER_COUNT + 1
+}
+
+// Emit instance impls; while any instance exists, also create the deferred
+// signature instances (whose impls can defer more) until nothing is pending.
+fn spec_mi_process_all() with IO, Mut, Panic, Div, Alloc {
+    spec_mi_process_instances()
+    while SPEC_II_COUNT > 0 && SPEC_DEFER_DONE < SPEC_DEFER_COUNT {
+        while SPEC_DEFER_DONE < SPEC_DEFER_COUNT {
+            let p = SPEC_DEFER_PTRS[SPEC_DEFER_DONE as usize] as *mut SpecTypeStage
+            SPEC_DEFER_DONE = SPEC_DEFER_DONE + 1
+            let unused = spec_mi_type((*p).ty, true)
+        }
+        spec_mi_process_instances()
+    }
+}
+
+fn spec_mi_scan_params(opt: Option<Box<ParamList>>) with Mut, Panic, Div, Alloc {
+    match opt {
+        None => {}
+        Some(list) => {
+            let ty = (*list).head.ty
+            spec_mi_defer_type(ty)
+            let det = (*list).head.is_self || spec_mi_type_is_inst(ty)
+            spec_env_push(ast_name_hash((*list).head.name), det)
+            spec_mi_scan_params((*list).tail)
+        }
+    }
+}
+
+fn spec_mi_scan_binding(s: Stmt) with Mut, Panic, Div, Alloc {
+    if s.kind != StmtKind::StmtLet && s.kind != StmtKind::StmtVar { return }
+    var det = false
+    match s.ty {
+        Some(t) => {
+            let unused = spec_mi_type(*t, true)
+            det = spec_mi_type_is_inst(*t)
+        }
+        None => {
+            match s.expr {
+                Some(x) => { det = spec_mi_expr_is_inst(*x) }
+                None => {}
+            }
+        }
+    }
+    spec_env_push(ast_name_hash(s.name), det)
+}
+
+fn spec_mi_scan_field_types(opt: Option<Box<FieldDefList>>) with Mut, Panic, Div, Alloc {
+    match opt {
+        None => {}
+        Some(list) => {
+            spec_mi_defer_type((*list).head.ty)
+            spec_mi_scan_field_types((*list).tail)
+        }
+    }
+}
+
+// Every scanned body goes through here so its parameters and bindings type
+// MI receivers; the environment is local to the body.
+fn spec_scan_fn_body(fd: FnDef) with IO, Mut, Panic, Div, Alloc {
+    if SPEC_MI_COUNT == 0 {
+        spec_scan_block(fd.body)
+        return
+    }
+    let saved_count = SPEC_ENV_COUNT
+    let saved_base = SPEC_ENV_BASE
+    SPEC_ENV_BASE = SPEC_ENV_COUNT
+    spec_mi_scan_params(fd.params)
+    match fd.return_type {
+        Some(rt) => spec_mi_defer_type(*rt),
+        None => {}
+    }
+    spec_scan_block(fd.body)
+    SPEC_ENV_COUNT = saved_count
+    SPEC_ENV_BASE = saved_base
+}
+
+fn spec_mi_scan_assoc_call(e: Expr) with Mut, Panic, Div, Alloc {
+    let st = spec_mi_assoc_owner(e)
+    if st < 0 { return }
+    match spec_mi_assoc_targs(e, st) {
+        Some(t) => spec_mi_create_instance(st, Some(t)),
+        None => {}
+    }
+}
+
+// True when `e.name` is a moved MI method: the generic-fn path then leaves
+// this call alone.
+fn spec_mi_scan_method_call(e: Expr) -> bool with Mut, Panic, Div, Alloc {
+    let h = ast_name_hash(e.name)
+    if !spec_mm_any_hash(h) { return false }
+    match e.type_args {
+        Some(ta) => {
+            // `r.m::<A>(..)` names the owner's impl parameters: make sure the
+            // instance exists. The checker still dispatches on r's type, so
+            // the receiver must be typed like any other (below).
+            var matched = false
+            var k: i64 = 0
+            while k < SPEC_MM_COUNT {
+                if SPEC_MM_HASH[k as usize] == h {
+                    let st = SPEC_MM_ST[k as usize]
+                    if spec_type_args_count(Some(ta)) == spec_struct_table_tp_count(st) && spec_mi_targs_closed(Some(ta)) {
+                        spec_mi_create_instance(st, Some(ta))
+                        matched = true
+                    }
+                }
+                k = k + 1
+            }
+            if !matched { SPEC_METHOD_TARG_UNSUPPORTED = true }
+        }
+        None => {}
+    }
+    match e.left {
+        Some(r) => {
+            if !spec_mi_recv_determined(*r) {
+                let concrete = spec_cm_has(h)
+                var k: i64 = 0
+                while k < SPEC_MM_COUNT {
+                    if SPEC_MM_HASH[k as usize] == h {
+                        let st = SPEC_MM_ST[k as usize]
+                        SPEC_ST_UNDET[st as usize] = true
+                        if !concrete { SPEC_ST_UNDET_NOCONC[st as usize] = true }
+                    }
+                    k = k + 1
+                }
+            }
+        }
+        None => {}
+    }
+    true
+}
+
+fn spec_mi_resolve_refusals(items: Option<Box<ItemList>>) with IO, Mut, Panic, Div {
+    var st: i64 = 0
+    while st < SPEC_ST_COUNT && st < 256 {
+        if SPEC_ST_HAS_MI[st as usize] && SPEC_ST_UNDET[st as usize] {
+            let owner = spec_mi_struct_name_hash(st)
+            SPEC_MENTION_COUNT = 0
+            SPEC_MENTION_OVERFLOW = false
+            SPEC_MENTION_SKIP = owner
+            SPEC_MENTION_EXPR_ONLY = true
+            spec_mention_items(items)
+            SPEC_MENTION_EXPR_ONLY = false
+            SPEC_MENTION_SKIP = 0
+            let named_elsewhere = SPEC_MENTION_OVERFLOW || spec_mention_has(owner)
+            let refuse = named_elsewhere && (SPEC_ST_UNDET_NOCONC[st as usize] || SPEC_ST_II_COUNT[st as usize] == 0)
+            if refuse { SPEC_METHOD_TARG_UNSUPPORTED = true }
+            if spec_trace_enabled() {
+                print("specializer: mi_undetermined_receiver st=")
+                print_int(st)
+                print(" named_elsewhere=")
+                print_int(if named_elsewhere { 1 } else { 0 })
+                print(" instances=")
+                print_int(SPEC_ST_II_COUNT[st as usize])
+                print(" refused=")
+                print_int(if refuse { 1 } else { 0 })
+                print("\n")
+            }
+        }
+        st = st + 1
+    }
+}
+
+// ---- finalize-time rewrite (ctx = -1) ----
+
+// `let v: S<A> = S { .. }`: the annotation names the instance, and the
+// literal of the same struct takes it (`S__A { .. }`).
+fn spec_mi_rewrite_let_mut(sp: *mut SpecStmtStage) with Mut, Panic, Div, Alloc {
+    match (*sp).s.ty {
+        None => {}
+        Some(t) => {
+            let before = *t
+            let after = spec_mi_type(before, false)
+            if before.kind != TypeExprKind::TypeNamed || before.path.seg_count != 1 { 
+                (*sp).s.ty = Some(Box::new(after))
+                return
+            }
+            let base_hash = ast_name_hash(spec_path_single_name(before.path))
+            let renamed = ast_name_hash(spec_path_single_name(after.path)) != base_hash
+            (*sp).s.ty = Some(Box::new(after))
+            if !renamed { return }
+            match (*sp).s.expr {
+                None => {}
+                Some(x) => {
+                    if (*x).kind == ExprKind::ExprStructLit && (*x).path.seg_count == 1 && ast_name_hash(spec_path_single_name((*x).path)) == base_hash {
+                        let q = heap_alloc(32768) as *mut SpecExprStage
+                        let tmp = *x
+                        (*q).e = tmp
+                        match (*sp).s.ty {
+                            Some(t2) => { (*q).e.path = (*t2).path }
+                            None => {}
+                        }
+                        (*sp).s.expr = Some(Box::new((*q).e))
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn spec_mi_two_seg_path(a: Name, b: Name) -> AstPath with Alloc {
+    AstPath {
+        segments: StringList { head_buf: a.buf, head_len: a.len, tail: Some(Box::new(StringList { head_buf: b.buf, head_len: b.len, tail: None })) },
+        seg_count: 2,
+    }
+}
+
+// `S::<A>::f(..)` / `S::f::<A>(..)` / `S::f(lit..)` -> `S__A::f(..)`;
+// a method turbofish on a moved MI method is dropped (dispatch is by receiver).
+fn spec_mi_rewrite_expr_mut(p: *mut SpecExprStage) with Mut, Panic, Div, Alloc {
+    if (*p).e.kind == ExprKind::ExprCall {
+        let st = spec_mi_assoc_owner((*p).e)
+        if st < 0 { return }
+        match spec_mi_assoc_targs((*p).e, st) {
+            None => {}
+            Some(t) => {
+                if !spec_mi_targs_closed(Some(t)) { return }
+                let args = spec_mi_type_list_opt(Some(t), false)
+                match (*p).e.left {
+                    None => {}
+                    Some(callee) => {
+                        let q = heap_alloc(32768) as *mut SpecExprStage
+                        let tmp = *callee
+                        (*q).e = tmp
+                        let fname = spec_string_list_nth_name((*q).e.path.segments, 1)
+                        let mangled = spec_mangle_name(spec_mi_struct_name(st), args)
+                        if spec_name_is_empty(mangled) || !spec_emitted_has(mangled) { return }
+                        (*q).e.path = spec_mi_two_seg_path(mangled, fname)
+                        (*q).e.type_args = None
+                        (*p).e.left = Some(Box::new((*q).e))
+                        (*p).e.type_args = None
+                    }
+                }
+            }
+        }
+    } else if (*p).e.kind == ExprKind::ExprMethodCall {
+        match (*p).e.type_args {
+            Some(_x) => {
+                if spec_mm_any_hash(ast_name_hash((*p).e.name)) { (*p).e.type_args = None }
+            }
+            None => {}
+        }
+    }
+}
+
+// `S<A>` -> `S__A` for MI owners. create=true (scan) also makes the instance;
+// create=false (finalize) only rewrites to an instance that exists.
+fn spec_mi_type(te: TypeExpr, create: bool) -> TypeExpr with Mut, Panic, Div, Alloc {
+    // Leaf types (no arguments, no inner type) are the common case: nothing
+    // to rewrite, and the staging buffer would never be reclaimed.
+    var leaf = true
+    match te.inner {
+        Some(_i) => { leaf = false }
+        None => {}
+    }
+    match te.type_args {
+        Some(_a) => { leaf = false }
+        None => {}
+    }
+    if leaf { return te }
+    let out = heap_alloc(32768) as *mut SpecTypeStage
+    (*out).ty = te
+    (*out).ty.inner = spec_mi_type_opt(te.inner, create)
+    (*out).ty.type_args = spec_mi_type_list_opt(te.type_args, create)
+    if (*out).ty.kind == TypeExprKind::TypeNamed && (*out).ty.path.seg_count == 1 {
+        match (*out).ty.type_args {
+            Some(al) => {
+                let base = spec_path_single_name((*out).ty.path)
+                let st = spec_struct_table_find(base)
+                if st >= 0 && st < 256 && SPEC_ST_HAS_MI[st as usize] && spec_type_args_count(Some(al)) == spec_struct_table_tp_count(st) && spec_mi_targs_closed(Some(al)) {
+                    if create {
+                        let made = spec_get_or_create_struct_instance(st, base, Some(al))
+                        if !spec_name_is_empty(made) && spec_emitted_has(made) {
+                            (*out).ty.path = spec_name_to_path(made)
+                            (*out).ty.type_args = None
+                        }
+                    } else {
+                        let mangled = spec_mangle_name(base, Some(al))
+                        if !spec_name_is_empty(mangled) && spec_emitted_has(mangled) {
+                            (*out).ty.path = spec_name_to_path(mangled)
+                            (*out).ty.type_args = None
+                        }
+                    }
+                }
+            }
+            None => {}
+        }
+    }
+    (*out).ty
+}
+
+fn spec_mi_type_opt(opt: Option<Box<TypeExpr>>, create: bool) -> Option<Box<TypeExpr>> with Mut, Panic, Div, Alloc {
+    match opt {
+        None => None
+        Some(t) => Some(Box::new(spec_mi_type(*t, create)))
+    }
+}
+
+fn spec_mi_type_list_opt(opt: Option<Box<TypeExprList>>, create: bool) -> Option<Box<TypeExprList>> with Mut, Panic, Div, Alloc {
+    match opt {
+        None => None
+        Some(list) => Some(Box::new(TypeExprList { head: spec_mi_type((*list).head, create), tail: spec_mi_type_list_opt((*list).tail, create) }))
+    }
+}
+
+fn spec_mi_rewrite_param_list_opt(opt: Option<Box<ParamList>>) -> Option<Box<ParamList>> with Mut, Panic, Div, Alloc {
+    match opt {
+        None => None
+        Some(list) => {
+            let p = (*list).head
+            let np = Param { name: p.name, ty: spec_mi_type(p.ty, false), is_self: p.is_self, is_self_mut: p.is_self_mut, span: p.span }
+            Some(Box::new(ParamList { head: np, tail: spec_mi_rewrite_param_list_opt((*list).tail) }))
+        }
+    }
+}
+
+fn spec_mi_rewrite_field_list_opt(opt: Option<Box<FieldDefList>>) -> Option<Box<FieldDefList>> with Mut, Panic, Div, Alloc {
+    match opt {
+        None => None
+        Some(list) => {
+            let f = (*list).head
+            let nf = FieldDef { name: f.name, ty: spec_mi_type(f.ty, false), is_pub: f.is_pub, span: f.span }
+            Some(Box::new(FieldDefList { head: nf, tail: spec_mi_rewrite_field_list_opt((*list).tail) }))
+        }
+    }
+}
+
+fn spec_mi_rewrite_struct_item(it: Item) -> Item with Mut, Panic, Div, Alloc {
+    match it.struct_def {
+        None => it
+        Some(sd) => {
+            let sp = heap_alloc(16384) as *mut SpecStructDefStage
+            let tmp_sd = *sd
+            (*sp).sd = tmp_sd
+            (*sp).sd.fields = spec_mi_rewrite_field_list_opt((*sp).sd.fields)
+            let np = heap_alloc(16384) as *mut SpecItemNode
+            (*np).it = it
+            (*np).it.struct_def = Some(Box::new((*sp).sd))
+            (*np).it
         }
     }
 }
@@ -2388,7 +3558,9 @@ fn spec_extra_items_to_list() -> Option<Box<ItemList>> with Mut, Panic, Div, All
 }
 
 fn spec_finish_fn_item(it: Item, symbol: Name) -> Item with Mut, Panic, Div, Alloc {
-    if !SPEC_FN_MULTI { return it }
+    // MI instances also need the rewrite: `S::<A>::f(..)` -> `S__A::f(..)` and
+    // `S<A>` in signatures/let annotations -> `S__A`.
+    if !SPEC_FN_MULTI && SPEC_II_COUNT == 0 { return it }
     // This runs for EVERY ordinary (non-generic-template) item too, not
     // only generic ones -- spec_finalize_items's final branch calls
     // spec_finish_fn_item(it, it.name) unconditionally -- so it is exactly
@@ -2445,6 +3617,10 @@ fn spec_finish_fn_item(it: Item, symbol: Name) -> Item with Mut, Panic, Div, All
             (*fp).fd = tmp
             (*fp).fd.name = symbol
             (*fp).fd.body = spec_subst_block((*fp).fd.body, 0 - 1, None)
+            if SPEC_II_COUNT > 0 {
+                (*fp).fd.params = spec_mi_rewrite_param_list_opt((*fp).fd.params)
+                (*fp).fd.return_type = spec_mi_type_opt((*fp).fd.return_type, false)
+            }
             let np = heap_alloc(16384) as *mut SpecItemNode
             (*np).it = it
             (*np).it.name = symbol
@@ -2489,6 +3665,8 @@ fn spec_finalize_method_items(methods: Option<Box<ItemList>>, owner_hash: i64) -
             let it = (*list).head
             let rest = spec_finalize_method_items((*list).tail, owner_hash)
             if it.kind == ItemKind::ItemFn {
+                // Moved MI methods live on only in their `impl S__A` clones.
+                if spec_mm_is_moved(it.name, owner_hash) { return rest }
                 let gt_idx = spec_method_template_slot(it.name, owner_hash)
                 if gt_idx >= 0 {
                     if SPEC_GF_POISONED[gt_idx as usize] || SPEC_GF_NEEDED[gt_idx as usize] {
@@ -2529,6 +3707,8 @@ fn spec_finalize_items(items: Option<Box<ItemList>>) -> Option<Box<ItemList>> wi
                     }
                     None => {}
                 }
+            } else if it.kind == ItemKind::ItemStruct && SPEC_II_COUNT > 0 && spec_struct_table_find(it.name) < 0 {
+                return Some(Box::new(ItemList { head: spec_mi_rewrite_struct_item(it), tail: rest }))
             }
             Some(Box::new(ItemList { head: spec_finish_fn_item(it, it.name), tail: rest }))
         }
@@ -2564,6 +3744,15 @@ fn spec_trace_out_items(items: Option<Box<ItemList>>) with IO, Mut, Panic, Div {
                 print("specializer: out_struct ")
                 print(spec_name_to_string(it.name))
                 print("\n")
+            } else if it.kind == ItemKind::ItemImpl {
+                match it.impl_def {
+                    Some(id) => {
+                        print("specializer: out_impl ")
+                        print(spec_name_to_string(spec_path_single_name((*id).target_type.path)))
+                        print("\n")
+                    }
+                    None => {}
+                }
             }
             spec_trace_out_items((*list).tail)
         }
@@ -2724,8 +3913,10 @@ fn spec_mention_params_opt(opt: Option<Box<ParamList>>) with Mut, Panic, Div {
 }
 
 fn spec_mention_fn_def(fd: FnDef) with Mut, Panic, Div {
-    spec_mention_params_opt(fd.params)
-    spec_mention_type_opt(fd.return_type)
+    if !SPEC_MENTION_EXPR_ONLY {
+        spec_mention_params_opt(fd.params)
+        spec_mention_type_opt(fd.return_type)
+    }
     spec_mention_stmt_list_opt(fd.body.stmts)
 }
 
@@ -2755,20 +3946,20 @@ fn spec_mention_items(items: Option<Box<ItemList>>) with Mut, Panic, Div {
                         let owner = Name { buf: (*id).target_type.path.segments.head_buf, len: (*id).target_type.path.segments.head_len }
                         let skip_self = owner.len > 0 && ast_name_hash(owner) == SPEC_MENTION_SKIP
                         if !skip_self {
-                            spec_mention_type((*id).target_type)
+                            if !SPEC_MENTION_EXPR_ONLY { spec_mention_type((*id).target_type) }
                             spec_mention_items((*id).methods)
                         }
                     }
                     None => {}
                 }
             } else if it.kind == ItemKind::ItemStruct {
-                if ast_name_hash(it.name) != SPEC_MENTION_SKIP {
+                if ast_name_hash(it.name) != SPEC_MENTION_SKIP && !SPEC_MENTION_EXPR_ONLY {
                     match it.struct_def {
                         Some(sd) => spec_mention_field_defs_opt((*sd).fields),
                         None => {}
                     }
                 }
-            } else if it.kind == ItemKind::ItemTypeAlias {
+            } else if it.kind == ItemKind::ItemTypeAlias && !SPEC_MENTION_EXPR_ONLY {
                 spec_mention_type_opt(it.type_alias_ty)
             }
             spec_mention_items((*list).tail)
@@ -2809,7 +4000,9 @@ fn spec_resolve_untargeted_method_calls(items: Option<Box<ItemList>>) with IO, M
 }
 
 fn spec_finish_generics_after_scan(items: Option<Box<ItemList>>) -> Option<Box<ItemList>> with IO, Mut, Panic, Div, Alloc {
+    spec_mi_process_all()
     spec_resolve_untargeted_method_calls(items)
+    spec_mi_resolve_refusals(items)
     var slot: i64 = 0
     while slot < SPEC_GF_COUNT {
         if SPEC_GF_INST_COUNT[slot as usize] > 1 && SPEC_GF_NEEDED[slot as usize] {
@@ -2818,7 +4011,9 @@ fn spec_finish_generics_after_scan(items: Option<Box<ItemList>>) -> Option<Box<I
         slot = slot + 1
     }
     let finalized = spec_finalize_items(items)
-    let out = spec_append_items(finalized, spec_extra_items_to_list())
+    // Instance impls go after the emitted struct instances they target.
+    let with_structs = spec_append_items(finalized, spec_extra_items_to_list())
+    let out = spec_append_items(with_structs, spec_mi_instance_items_to_list())
     if spec_trace_enabled() {
         print("specializer: instances=")
         print_int(SPEC_EMITTED_COUNT)
@@ -2846,15 +4041,20 @@ pub fn specialize_generics(items: Option<Box<ItemList>>) -> Option<Box<ItemList>
     spec_item_module_reset()
     spec_use_modules_collect(items, 0)
     let known = spec_collect_known_names(items, SpecKnownNames { names: [empty_name(); 32], count: 0 })
+    // Structs first: MI detection (spec_mi_collect) needs the struct table,
+    // and generic-method collection skips MI impls.
+    spec_collect_generic_structs(items)
+    spec_mi_collect(items, known)
     spec_collect_generic_fns(items, known)
     spec_collect_generic_methods(items, known)
-    spec_collect_generic_structs(items)
     if spec_trace_enabled() {
         print("specializer: generic_fns=")
         print_int(SPEC_GF_COUNT)
+        print(" mi_impls=")
+        print_int(SPEC_MI_COUNT)
         print("\n")
     }
-    if SPEC_GF_COUNT == 0 {
+    if SPEC_GF_COUNT == 0 && SPEC_MI_COUNT == 0 {
         return items
     }
     let roots = heap_alloc(4096) as *mut SpecItemsStage
@@ -2910,15 +4110,20 @@ pub fn specialize_generics_multi(items: Option<Box<ItemList>>, programs: &! [Pro
         i = i + 1
     }
     let known = spec_collect_known_names(items, SpecKnownNames { names: [empty_name(); 32], count: 0 })
+    // Structs first: MI detection (spec_mi_collect) needs the struct table,
+    // and generic-method collection skips MI impls.
+    spec_collect_generic_structs(items)
+    spec_mi_collect(items, known)
     spec_collect_generic_fns(items, known)
     spec_collect_generic_methods(items, known)
-    spec_collect_generic_structs(items)
     if spec_trace_enabled() {
         print("specializer: generic_fns=")
         print_int(SPEC_GF_COUNT)
+        print(" mi_impls=")
+        print_int(SPEC_MI_COUNT)
         print("\n")
     }
-    if SPEC_GF_COUNT == 0 {
+    if SPEC_GF_COUNT == 0 && SPEC_MI_COUNT == 0 {
         return items
     }
     let roots = heap_alloc(4096) as *mut SpecItemsStage
