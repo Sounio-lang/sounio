@@ -14,6 +14,8 @@
 #   gpu-mc-emitter ....... integer advance asm text asserts (no nop fallback)
 #   gpu-mc-sim ........... cycle-simulator advance == CPU next_u01 (6 words + z)
 #   gpu-mc-sabotage ...... wrong-seed reference MUST mismatch (negative control)
+#   gpu-mc-memfed-emitter  one-cubin N-thread advance: get_tid + mem addressing text asserts
+#   gpu-mc-memfed-sim .... mem-fed advance == CPU next_u01, tid 0 slice + tid 1 stride
 #
 # PENDING (not failures): venlafaxine / haloperidol / midazolam have no
 # ep28 (PBPK28 + 8-dim priors) model support yet — their PK parity lives in
@@ -63,7 +65,7 @@ timeout 900 "$SOUC_BIN" run tests/run-pass/gpu_pbpk28_mc_parity.sio > "$MC_LOG" 
   tail -n 20 "$MC_LOG" >&2
   exit 1
 }
-for marker in "gpu_mc substreams OK" "gpu_mc draws OK" "gpu_mc emitter OK" "gpu_mc sim OK" "gpu_mc sabotage OK" "PASS gpu_pbpk28_mc_parity"; do
+for marker in "gpu_mc substreams OK" "gpu_mc draws OK" "gpu_mc emitter OK" "gpu_mc sim OK" "gpu_mc sabotage OK" "gpu_mc memfed emitter OK" "gpu_mc memfed sim OK" "PASS gpu_pbpk28_mc_parity"; do
   if ! grep -qF "$marker" "$MC_LOG"; then
     echo "[pbpk28-gpu-parity] FAIL: MC log missing marker: $marker" >&2
     tail -n 20 "$MC_LOG" >&2
@@ -76,4 +78,4 @@ echo "[pbpk28-gpu-parity] PEND venlafaxine GPU-GUM (no ep28 priors yet; PK parit
 echo "[pbpk28-gpu-parity] PEND haloperidol GPU-GUM (no ep28 priors yet; PK parity in pbpk28-parity cases 14-16)"
 echo "[pbpk28-gpu-parity] PEND midazolam GPU-GUM (no ep28 priors yet; PK parity in pbpk28-parity cases 17-19)"
 
-gate_pass "10/10 GPU parity cases (2 drugs GUM + MC + fail-closed + sabotage); 3 drug arms PENDING ep28 priors"
+gate_pass "12/12 GPU parity cases (2 drugs GUM + MC + fail-closed + sabotage + mem-fed MC); 3 drug arms PENDING ep28 priors"
