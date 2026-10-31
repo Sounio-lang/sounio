@@ -180,6 +180,11 @@ var SPEC_MENTION_HASHES: [i64; 2048] = [0; 2048]
 var SPEC_MENTION_COUNT: i64 = 0
 var SPEC_MENTION_OVERFLOW: bool = false
 var SPEC_MENTION_SKIP: i64 = 0
+// MI refusal only: count names written where a value can be BUILT (expressions
+// and let annotations), not declaration types (fn signatures, struct fields,
+// impl targets). A signature like `fn f(v: &S<i64>)` cannot produce an S;
+// every S value comes from some expression that names S.
+var SPEC_MENTION_EXPR_ONLY: bool = false
 var SPEC_ST_COUNT: i64 = 0
 var SPEC_ST_PTRS: [i64; 256] = [0; 256]
 var SPEC_EMITTED_HASHES: [i64; 64] = [0; 64]
@@ -284,6 +289,7 @@ fn spec_reset_state() with Mut {
     SPEC_MENTION_COUNT = 0
     SPEC_MENTION_OVERFLOW = false
     SPEC_MENTION_SKIP = 0
+    SPEC_MENTION_EXPR_ONLY = false
     SPEC_GF_COUNT = 0
     SPEC_ST_COUNT = 0
     SPEC_UNSOUND_POISON = false
@@ -3324,7 +3330,9 @@ fn spec_mi_resolve_refusals(items: Option<Box<ItemList>>) with IO, Mut, Panic, D
             SPEC_MENTION_COUNT = 0
             SPEC_MENTION_OVERFLOW = false
             SPEC_MENTION_SKIP = owner
+            SPEC_MENTION_EXPR_ONLY = true
             spec_mention_items(items)
+            SPEC_MENTION_EXPR_ONLY = false
             SPEC_MENTION_SKIP = 0
             let named_elsewhere = SPEC_MENTION_OVERFLOW || spec_mention_has(owner)
             let refuse = named_elsewhere && (SPEC_ST_UNDET_NOCONC[st as usize] || SPEC_ST_II_COUNT[st as usize] == 0)
@@ -3905,8 +3913,10 @@ fn spec_mention_params_opt(opt: Option<Box<ParamList>>) with Mut, Panic, Div {
 }
 
 fn spec_mention_fn_def(fd: FnDef) with Mut, Panic, Div {
-    spec_mention_params_opt(fd.params)
-    spec_mention_type_opt(fd.return_type)
+    if !SPEC_MENTION_EXPR_ONLY {
+        spec_mention_params_opt(fd.params)
+        spec_mention_type_opt(fd.return_type)
+    }
     spec_mention_stmt_list_opt(fd.body.stmts)
 }
 
@@ -3936,20 +3946,20 @@ fn spec_mention_items(items: Option<Box<ItemList>>) with Mut, Panic, Div {
                         let owner = Name { buf: (*id).target_type.path.segments.head_buf, len: (*id).target_type.path.segments.head_len }
                         let skip_self = owner.len > 0 && ast_name_hash(owner) == SPEC_MENTION_SKIP
                         if !skip_self {
-                            spec_mention_type((*id).target_type)
+                            if !SPEC_MENTION_EXPR_ONLY { spec_mention_type((*id).target_type) }
                             spec_mention_items((*id).methods)
                         }
                     }
                     None => {}
                 }
             } else if it.kind == ItemKind::ItemStruct {
-                if ast_name_hash(it.name) != SPEC_MENTION_SKIP {
+                if ast_name_hash(it.name) != SPEC_MENTION_SKIP && !SPEC_MENTION_EXPR_ONLY {
                     match it.struct_def {
                         Some(sd) => spec_mention_field_defs_opt((*sd).fields),
                         None => {}
                     }
                 }
-            } else if it.kind == ItemKind::ItemTypeAlias {
+            } else if it.kind == ItemKind::ItemTypeAlias && !SPEC_MENTION_EXPR_ONLY {
                 spec_mention_type_opt(it.type_alias_ty)
             }
             spec_mention_items((*list).tail)
