@@ -7455,6 +7455,9 @@ fn lowerer_emit_deferred_global_inits_mut(lo: &! Lowerer) with Mut, Panic, Div, 
                     if slots > 0 {
                         let dst = lowerer_fresh_reg_mut(lo)
                         (*lo) = (*lo).emit(ir_alloc(dst, (*lo).aggregate_storage_bytes(slots)))
+                        // Array and nested-struct fields are handles: give them
+                        // storage too, exactly as the local `var s: S` path does.
+                        (*lo) = (*lo).emit_uninit_struct_array_fields(dst, st, slots)
                         (*lo) = (*lo).emit(ir_store_global(dst, slot.param_count, slot.name))
                     }
                 }
@@ -13946,7 +13949,28 @@ impl Lowerer {
     // not apply to a struct handle.
     // A zeroed struct slot is handle 0. An uninitialized `[T; N]` field must
     // own storage before the first indexed store, or that store lands at 0x20.
+    //
+    // A nested STRUCT field is a handle too (the layout is one word per field;
+    // see emit_struct_value_copy_deep), so the same rule applies one level
+    // down: `var l: Outer` followed by `l.inner.x = 1` (directly or through
+    // `&!l`) loaded handle 0 from the `inner` slot, the handle-table lookup
+    // came back null and codegen's guard trapped with ud2 (SIGILL). Every
+    // nested struct field therefore gets its own zeroed storage, recursively,
+    // with its own array fields allocated in turn.
     fn emit_uninit_struct_array_fields(self, dst_reg: i64, type_name: Name, slot_count: i64) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        self.emit_uninit_struct_fields_at_depth(dst_reg, type_name, slot_count, 0)
+    }
+
+    // Depth cap for the nested-struct walk above. A DEPTH cap rather than a
+    // visited-type set for the reason struct_deep_copy_max_depth gives: a
+    // self-referential spelling must terminate at lowering time. Box and
+    // Knowledge fields are never followed (nested_struct_field_slot_count).
+    fn uninit_struct_nested_max_depth(self) -> i64 {
+        let _lo = self
+        8
+    }
+
+    fn emit_uninit_struct_fields_at_depth(self, dst_reg: i64, type_name: Name, slot_count: i64, depth: i64) -> Lowerer with Mut, Panic, Div, Alloc, IO {
         var lo = self
         var i: i64 = 0
         while i < slot_count && i < 128 {
@@ -13974,6 +13998,21 @@ impl Lowerer {
                     lo = lo.bind_reg_array_elem_float(arr)
                 }
                 lo = lo.emit(ir_field_set(dst_reg, i, arr, fname))
+            } else if depth < lo.uninit_struct_nested_max_depth() {
+                let nested_name = lo.struct_layout_pos_named_type(pos)
+                let nested_slots = lo.nested_struct_field_slot_count(nested_name)
+                // Same headroom the deep copy keeps below IR_MAX_INSTRS: past
+                // it the field keeps handle 0, which is the previous behaviour.
+                let room = IR_MAX_INSTRS - lo.struct_deep_copy_instr_headroom() - lo.current_func.instr_count
+                if nested_slots > 0 && room > 2 * nested_slots + 2 {
+                    let fname = lo.struct_layout_pos_field_name(pos)
+                    let pair = lo.fresh_reg()
+                    lo = pair.0
+                    let sub = pair.1
+                    lo = lo.emit(ir_alloc(sub, lo.aggregate_storage_bytes(nested_slots)))
+                    lo = lo.emit_uninit_struct_fields_at_depth(sub, nested_name, nested_slots, depth + 1)
+                    lo = lo.emit(ir_field_set(dst_reg, i, sub, fname))
+                }
             }
             i = i + 1
         }
