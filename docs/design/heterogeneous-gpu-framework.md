@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.design.heterogeneous-gpu-framework
+authority: repo_only
+audience: users
+last_validated: unvalidated
+validated_by: none
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.design.heterogeneous-gpu-framework
+-->
+
 # Framework de computação heterogênea em Sounio — design
 
 Status: Fase 0 (design + planner core). Data: 2026-10-23. Branch de referência: `main`.

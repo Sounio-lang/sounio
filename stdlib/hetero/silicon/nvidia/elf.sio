@@ -481,8 +481,10 @@ fn own_s2r_tid_hi() -> i64 { 14106734184374528 }
 
 
 
-pub fn sm89_own_image() -> *mut u8 with Alloc, Mut, Div {
+fn sm89_own_build(n: i64, k: i64, shape: bool) -> *mut u8 with Alloc, Mut, Div {
+    let span = if k > n { k } else { n }
     let buf = heap_alloc(emit_nbytes(35))
+    if (buf as i64) == 0 { return 0 as *mut u8 }
     var i: i64 = 0
     while i < 208 {
         write_i64(buf as *mut i64, i, own_word(i))
@@ -495,9 +497,10 @@ pub fn sm89_own_image() -> *mut u8 with Alloc, Mut, Div {
     put_insn(buf, 4, atlas_imad_mov_lo(0, 0), own_imad_hi_stall5())
     put_insn(buf, 5, own_s2r_lo(4), own_s2r_tid_hi())
     put_insn(buf, 6, atlas_imad_mov_lo(10, 4), own_imad_hi_stall5())
-    put_insn(buf, 7, atlas_imad_mov_lo(11, 2304), own_imad_hi_stall5())
+    put_insn(buf, 7, atlas_imad_mov_lo(11, n * 4), own_imad_hi_stall5())
     put_insn(buf, 8, atlas_imad_mov_lo(12, 1), own_imad_hi_stall5())
-    put_insn(buf, 9, atlas_iadd3_lo(5, 4, 4, 0), atlas_iadd3_hi(0))
+    // S2R writes R4 through scoreboard 0. Keep the existing wait for 2.
+    put_insn(buf, 9, atlas_iadd3_lo(5, 4, 4, 0), atlas_iadd3_hi(0) + 4503599627370496)
     put_insn(buf, 10, atlas_iadd3_lo(15, 5, 5, 0), atlas_iadd3_hi(0))
     put_insn(buf, 11, atlas_iadd3_lo(6, 2, 0, 0), atlas_iadd3_hi(0))
     put_insn(buf, 12, atlas_iadd3_lo(7, 3, 0, 0), atlas_iadd3_hi(0))
@@ -506,7 +509,12 @@ pub fn sm89_own_image() -> *mut u8 with Alloc, Mut, Div {
     put_insn(buf, 15, atlas_iadd3_lo(6, 6, 11, 0), atlas_iadd3_hi(0))
     put_insn(buf, 16, atlas_iadd3_lo(8, 6, 0, 0), atlas_iadd3_hi(0))
     put_insn(buf, 17, atlas_iadd3_lo(9, 7, 0, 0), atlas_iadd3_hi(0))
-    put_insn(buf, 18, atlas_iadd3_lo(8, 8, 11, 0), atlas_iadd3_hi(0))
+    if shape {
+        // IADD3 immediate: advance past the padded input vector.
+        put_insn(buf, 18, atlas_iadd3_lo(8, 8, 0, 0) + 6 * 256 + span * 4 * 4294967296, atlas_iadd3_hi(0))
+    } else {
+        put_insn(buf, 18, atlas_iadd3_lo(8, 8, 11, 0), atlas_iadd3_hi(0))
+    }
     put_insn(buf, 19, atlas_iadd3_lo(8, 8, 15, 0), atlas_iadd3_hi(0))
     put_insn(buf, 20, atlas_imad_mov_lo(5, 0), own_imad_hi_stall5())
     put_insn(buf, 21, atlas_ldg_lo(13, 6, 0) + 2 * 4294967296, 203299072 + atlas_sched(1, 1, 2, 7, 0))
@@ -515,15 +523,73 @@ pub fn sm89_own_image() -> *mut u8 with Alloc, Mut, Div {
     put_insn(buf, 24, atlas_iadd3_lo(6, 6, 10, 0), atlas_iadd3_hi(0))
     put_insn(buf, 25, atlas_iadd3_lo(8, 8, 11, 0), atlas_iadd3_hi(0))
     put_insn(buf, 26, atlas_iadd3_lo(5, 5, 12, 0), atlas_iadd3_hi(0))
-    put_insn(buf, 27, own_isetp_lo(5, 576), own_isetp_hi())
+    put_insn(buf, 27, own_isetp_lo(5, k), own_isetp_hi())
     put_insn(buf, 28, own_plop3_lo(), own_plop3_hi())
     put_insn(buf, 29, own_bra_p0_lo(-144), own_bra_hi_disp(-144))
     put_insn(buf, 30, atlas_iadd3_lo(16, 2, 15, 0), atlas_iadd3_hi(0))
-    put_insn(buf, 31, own_stg_disp(16, 0, 0), atlas_stg_hi())
-    put_insn(buf, 32, atlas_iadd3_lo(16, 16, 11, 0), atlas_iadd3_hi(0))
-    put_insn(buf, 33, own_stg_disp(16, 4, 0), atlas_stg_hi())
+    // Preserve the tested store barrier and wait with separate address pairs.
+    put_insn(buf, 31, own_stg_disp(16, 0, 0), atlas_stg_hi() - 3940649673949184)
+    // R6 is dead after the loop; R7 retains the high output-address word.
+    put_insn(buf, 32, atlas_iadd3_lo(6, 16, 11, 0), atlas_iadd3_hi(0) + 4503599627370496)
+    put_insn(buf, 33, own_stg_disp(6, 4, 0), atlas_stg_hi())
     put_insn(buf, 34, atlas_exit_lo(), atlas_exit_hi())
     emit_container(buf, 35, 20, 34)
+    buf
+}
+pub fn sm89_own_image() -> *mut u8 with Alloc, Mut, Div {
+    sm89_own_build(576, 576, false)
+}
+
+// Experimental single-block image. The caller must enforce the packed-buffer
+// layout, exact launch dimensions and 32-bit address-carry restriction.
+pub fn sm89_gemv_image(n: i64, k: i64) -> *mut u8 with Alloc, Mut, Div {
+    if n < 1 || n > 1024 || k < 1 || k > 4096 { return 0 as *mut u8 }
+    sm89_own_build(n, k, true)
+}
+// Experimental 128-thread grid image. As with the single-block image, the
+// caller must validate the packed allocation and the 32-bit carry restriction.
+// The prefix was exercised on sm_89; it is not a general scheduling rule.
+pub fn sm89_grid_nbytes() -> i64 { emit_nbytes(48) }
+
+pub fn sm89_grid_image(n: i64, k: i64) -> *mut u8 with Alloc, Mut, Div {
+    if n < 1 || n > 65535 || k < 1 || k > 4096 { return 0 as *mut u8 }
+    let original = sm89_own_build(n, k, true)
+    if (original as i64) == 0 { return 0 as *mut u8 }
+    let buf = heap_alloc(sm89_grid_nbytes())
+    if (buf as i64) == 0 {
+        heap_free(original as *mut i8)
+        return 0 as *mut u8
+    }
+    var i: i64 = 0
+    while i < 208 {
+        write_i64(buf as *mut i64, i, own_word(i))
+        i = i + 1
+    }
+    i = 0
+    while i < 6 {
+        put_insn(buf, i, read_i64(original as *mut i64, 176 + 2 * i), read_i64(original as *mut i64, 177 + 2 * i))
+        i = i + 1
+    }
+    // CTAID uses scoreboard 1, independent of the TID read on scoreboard 0.
+    put_insn(buf, 6, own_s2r_lo(18), own_s2r_tid_hi() + 1024 + 70368744177664)
+    i = 0
+    while i < 7 {
+        let wait = if i == 0 { 9007199254740992 } else { 0 }
+        put_insn(buf, 7 + i, atlas_iadd3_lo(18, 18, 18, 0), atlas_iadd3_hi(0) + wait)
+        i = i + 1
+    }
+    put_insn(buf, 14, atlas_iadd3_lo(4, 4, 18, 0), atlas_iadd3_hi(0) + 4503599627370496)
+    put_insn(buf, 15, own_isetp_lo(4, n), own_isetp_hi())
+    put_insn(buf, 16, own_plop3_lo(), own_plop3_hi())
+    put_insn(buf, 17, own_bra_p0_lo(16), own_bra_hi_disp(16))
+    put_insn(buf, 18, own_bra_lo_disp(448), own_bra_hi_disp(448))
+    i = 6
+    while i < 35 {
+        put_insn(buf, i + 13, read_i64(original as *mut i64, 176 + 2 * i), read_i64(original as *mut i64, 177 + 2 * i))
+        i = i + 1
+    }
+    heap_free(original as *mut i8)
+    emit_container(buf, 48, 22, 47)
     buf
 }
 

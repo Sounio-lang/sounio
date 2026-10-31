@@ -1,0 +1,49 @@
+// CPU-side structural and refusal checks for the experimental sm89 image.
+use hetero::silicon::image::{si_gemv_sm89, si_own}
+use hetero::silicon::nvidia::elf::{sm89_gemv_image}
+
+fn img_byte(data: *mut u8, off: i64) -> i64 with Div {
+    (read_i64(data as *mut i64, off / 8) >> ((off % 8) * 8)) & 255
+}
+
+fn img_u32(data: *mut u8, off: i64) -> i64 with Div {
+    img_byte(data, off) + img_byte(data, off + 1) * 256 + img_byte(data, off + 2) * 65536 + img_byte(data, off + 3) * 16777216
+}
+
+fn main() with IO, Alloc, Mut, Div, Panic {
+    if si_gemv_sm89(0, 1).ok { exit(1) }
+    if si_gemv_sm89(1025, 1).ok { exit(1) }
+    if si_gemv_sm89(1, 0).ok { exit(1) }
+    if si_gemv_sm89(1, 4097).ok { exit(1) }
+    if si_gemv_sm89(-1, 1).ok { exit(1) }
+    if si_gemv_sm89(1, -1).ok { exit(1) }
+    let rejected = si_gemv_sm89(9223372036854775807, 1)
+    if rejected.ok || rejected.nbytes != 0 || (rejected.ptr as i64) != 0 { exit(1) }
+    if (sm89_gemv_image(1, 0) as i64) != 0 { exit(1) }
+    if (sm89_gemv_image(1025, 1) as i64) != 0 { exit(1) }
+
+    let ns: [i64; 9] = [1, 1, 31, 32, 33, 128, 576, 1024, 1024]
+    let ks: [i64; 9] = [1, 2, 64, 65, 128, 7, 576, 2048, 4096]
+    let old = si_own()
+    var j: i64 = 0
+    while j < 9 {
+        let n = ns[j]
+        let k = ks[j]
+        let span = if n > k { n } else { k }
+        let image = si_gemv_sm89(n, k)
+        if !image.ok || image.nbytes != 2904 { exit(1) }
+        if img_u32(image.ptr, 1524) != n * 4 { exit(1) }
+        if img_u32(image.ptr, 1700) != span * 4 { exit(1) }
+        if img_u32(image.ptr, 1844) != k { exit(1) }
+        var i: i64 = 0
+        while i < 2904 {
+            // Only the stride, weight-base instruction, and loop limit vary.
+            if (i < 1524 || i >= 1528) && (i < 1696 || i >= 1712) && (i < 1844 || i >= 1848) {
+                if img_byte(image.ptr, i) != img_byte(old.ptr, i) { exit(1) }
+            }
+            i = i + 1
+        }
+        j = j + 1
+    }
+    print("SILICON SHAPE PASS\n")
+}
