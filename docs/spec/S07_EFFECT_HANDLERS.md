@@ -12,7 +12,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.spec.s07-effec
 Spec-Section: `SOUNIO-SPEC-07`
 Frame: `docs/spec/E2E_SPECIFICATION_FRAME.md`
 
-Status: **undefined.** No normative statement has been ruled.
+Status: **ruled 2026-10-31** (founder): Implemented, deep handlers, linear one-shot continuations. Backend landing on PR #3371 (phases P0-P5); until P5 closes, do not describe handlers as shipping.
 
 ## 7.1 `handle` reaches the type checker and stops there
 
@@ -157,23 +157,82 @@ exactly one test. So the specification documents two forms neither engine
 implements, the corpus exercises a third, and §7.3 has already measured that
 `ExprHandle` reaches `ir/`, `native/` and `enir/` **zero** times.
 
-## 7.4 Rulings owed
+## 7.4 Ruling (2026-10-31, founder)
 
-- **Does `handle` exist?** Three answers are coherent and they are very
-  different. *Reserved*: the surface is refused with a named diagnostic until
-  implemented — honest, and cheap. *Implemented*: handlers acquire lowering and
-  execution semantics. *Withdrawn*: the surface is removed. What is not coherent
-  is the present state, in which a program that appears to use algebraic effects
-  type-checks.
-- **If implemented, which discipline?** One-shot or multi-shot continuations;
-  deep or shallow handlers; whether a handler may itself perform effects. None
-  of these is decidable from the code, because no execution exists to read them
-  off.
+**Implemented.** `handle` exists with execution semantics. Discipline:
+
+- **Deep** handlers: resuming re-installs the handler around the resumed
+  computation, and a `perform` issued inside a handler clause is handled by
+  the next enclosing (outer) handler, never by the clause's own handler.
+- **Linear one-shot continuations**: the resume capability must be used at
+  most once on every path through a clause. This is enforced by the checker;
+  any runtime guard is an assertion backstop only, never the mechanism.
+- **Zero resume is affine, with defined teardown** (see FX-5). Strictly-linear
+  (zero resume = error) was rejected: it forbids abort/escape handlers.
+  Multi-shot continuations and shallow handlers are non-goals.
+
+### Grammar (canonical surface)
+
+    effect E { op1(a: T1, ...) -> R1   op2(...) -> R2 }   // top-level declaration
+    handle<E> { body } [with { on op1(x, ...) -> expr
+                               on _ -> expr                // optional catch-all
+                               return(x) -> expr }]        // optional return clause
+    perform E.op1(args)
+    resume(value)        // only inside `on` clauses; linear
+
+The two `LANGUAGE_SPECIFICATION.md` section 4.8 spellings remain unimplemented
+(non-goal). `resume(e)` has the handle answer type: it evaluates to whatever
+the resumed computation produces when it next performs or completes the
+handle. `on` clauses may appear in any order; a duplicate clause for one op
+is a compile error.
+
+### Operational semantics (small-step)
+
+Notation: `F = (E, H, k)` is a handler frame for effect `E`, clause map `H`,
+outer continuation `k`. Answer type `A` is the handle expression's type.
+
+- **FX-1 (install)** `handle<E>{B} with H` pushes frame `F` and evaluates
+  `B`. Without `with`, `H` is empty (any perform of `E` in `B` then fails
+  FX-8 at compile time unless `B` performs nothing of `E`).
+- **FX-2 (capture)** `perform op(v)` with nearest enclosing frame `F` for
+  `E` captures the delimited continuation `K` (the rest of `B` up to `F`),
+  suspends the body stack segment, and transfers control to `F`'s clause.
+- **FX-3 (dispatch/deep)** `F` is disarmed while its clause runs: a
+  `perform` inside the clause is dispatched to the next enclosing frame
+  for that effect (FX-2 applies there), or is an unhandled perform (FX-8
+  makes this unreachable statically when types are known).
+- **FX-4 (resume)** `resume(w)` consumes `K`, re-installs `F` around the
+  resumed segment, and continues `B` with `w` as the value of the
+  `perform`. `resume` evaluates to the next captured operation (dispatched
+  per FX-3) or, when the resumed `B` completes under FX-6, to the
+  handle's final value.
+- **FX-5 (zero resume, affine teardown)** If a clause completes with
+  value `u` and `K` unconsumed: `K`'s stack segment is freed
+  deterministically, `u` is the handle's value, and FX-6 does not apply.
+  Linear obligations owned by the suspended computation must be
+  discharged at the perform point; the checker refuses a clause that
+  would drop one.
+- **FX-6 (return)** When `B` completes with value `v` (initially or via
+  FX-4) and a `return(x) -> R` clause exists, the handle's value is
+  `R[x:=v]`; otherwise it is `v`. The frame is popped.
+- **FX-7 (linearity)** Statically: the resume capability is used 0..1
+  times on every path through each clause. Violation is a compile error.
+- **FX-8 (exhaustivity, no silent effects)** Every op of `E` performable
+  in `B` must have a clause or a catch-all; otherwise compile error.
+  Unknown effect names and unknown ops in `handle`/`perform` are compile
+  errors (this closes the section 7.2 silence at handler sites).
+- **FX-9 (nesting)** Frames nest dynamically; FX-2 always selects the
+  nearest enclosing frame for the performed effect.
+
+Implementation note: the runtime model chosen in phase P0 is one stack
+segment per handler (OCaml-5 style), proven by probe; copying the body
+stack in place is excluded. Each FX rule above has at least one derived
+test in phase P5 (`tests/run-pass/fxN_*.sio`).
 
 ## Claims forbidden
 
-- Do not describe Sounio as having algebraic effect handlers. The surface exists
-  and reaches no backend.
+- Until phase P5 closes, do not describe Sounio as shipping algebraic effect
+  handlers; the section 7.4 semantics are ruled and landing on PR #3371.
 - Do not cite `examples/_attic/effects.sio` or `examples/effects/*.sio` as evidence
   that handlers run. That a file uses the syntax says only that the syntax
   parses.
