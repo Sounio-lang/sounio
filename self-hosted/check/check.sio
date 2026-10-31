@@ -6624,6 +6624,23 @@ fn checker_collect_item_inplace(c: *mut Checker, item: Item) with Mut, Panic, Di
 }
 
 
+// Register every `effect` item of one module (idempotent per name).
+pub fn checker_collect_effect_items_inplace(c: *mut Checker, items: Option<Box<ItemList> >) with Mut, Panic, Div, Alloc, IO {
+    var cursor = items
+    while true {
+        match cursor {
+            Some(list) => {
+                let item = (*list).head
+                if item.kind == ItemKind::ItemEffect {
+                    checker_collect_effect_def_inplace(c, item.effect_def)
+                }
+                cursor = (*list).tail
+            }
+            None => break
+        }
+    }
+}
+
 // *mut collector for `effect Name { fn op(..) -> T ... }`. Mirrors the by-value
 // collect_item_effect / collect_effect_op_defs (user effect ids are 100 + the
 // registry index; each op records its effect id and lowered return type), but
@@ -6632,6 +6649,13 @@ fn checker_collect_effect_def_inplace(c: *mut Checker, opt: Option<Box<EffectDef
     match opt {
         None => {}
         Some(edef) => {
+            // Already registered by the effects-first pre-pass: keep one entry,
+            // so ids stay 100 + index and ops are not duplicated.
+            var k: i64 = 0
+            while k < (*c).effects.count && k < 32 {
+                if name_eq((*c).effects.entries[k as usize].name, (*edef).name) { return }
+                k = k + 1
+            }
             let idx = (*c).effects.count
             if idx >= 32 { return }
             let eid = 100 + idx
@@ -6846,6 +6870,11 @@ pub fn checker_collect_items_inplace(c: *mut Checker, items: Option<Box<ItemList
     // pointer write — persists where deep ontology_kernel mutation does not.
     (*c).ontology_items = items
     checker_collect_runtime_builtins_inplace(c)
+    // Effects first: a `with X` in a signature is resolved while that
+    // signature is collected, so X must already be registered even when its
+    // `effect X { .. }` comes later in the file. The multi-module driver
+    // runs this over every module before any signature for the same reason.
+    checker_collect_effect_items_inplace(c, items)
     var cursor = items
     while true {
         match cursor {
