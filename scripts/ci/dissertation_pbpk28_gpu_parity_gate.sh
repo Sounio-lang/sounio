@@ -9,6 +9,7 @@
 #   gpu-gum-emitter ...... K-AXI asm text + PTX f64 transpile asserts
 #   gpu-gum-failclosed ... NaN / negative-variance / zero-variance guards
 #   gpu-gum-sabotage .... corrupted combine output MUST be detected (negative control)
+#   gpu-gum-batched ...... E-endpoint multi-eval emitter: tid/8 addressing text + PTX asserts
 #   gpu-mc-substreams .... substream draws (k=0,3) == MRG32k3a reference, fail-closed index
 #   gpu-mc-draws ......... closed-form normal/lognormal spot values
 #   gpu-mc-emitter ....... integer advance asm text asserts (no nop fallback)
@@ -50,7 +51,7 @@ timeout 900 "$SOUC_BIN" run tests/run-pass/gpu_pbpk28_gum_parity.sio > "$GUM_LOG
   tail -n 20 "$GUM_LOG" >&2
   exit 1
 }
-for marker in "gpu_gum rapamycin OK" "gpu_gum semaglutide OK" "gpu_gum emitter OK" "gpu_gum failclosed OK" "gpu_gum sabotage OK" "PASS gpu_pbpk28_gum_parity"; do
+for marker in "gpu_gum rapamycin OK" "gpu_gum semaglutide OK" "gpu_gum emitter OK" "gpu_gum failclosed OK" "gpu_gum sabotage OK" "gpu_gum batched emitter OK" "PASS gpu_pbpk28_gum_parity"; do
   if ! grep -qF "$marker" "$GUM_LOG"; then
     echo "[pbpk28-gpu-parity] FAIL: GUM log missing marker: $marker" >&2
     tail -n 20 "$GUM_LOG" >&2
@@ -78,4 +79,4 @@ echo "[pbpk28-gpu-parity] PEND venlafaxine GPU-GUM (no ep28 priors yet; PK parit
 echo "[pbpk28-gpu-parity] PEND haloperidol GPU-GUM (no ep28 priors yet; PK parity in pbpk28-parity cases 14-16)"
 echo "[pbpk28-gpu-parity] PEND midazolam GPU-GUM (no ep28 priors yet; PK parity in pbpk28-parity cases 17-19)"
 
-gate_pass "12/12 GPU parity cases (2 drugs GUM + MC + fail-closed + sabotage + mem-fed MC); 3 drug arms PENDING ep28 priors"
+gate_pass "13/13 GPU parity cases (2 drugs GUM + MC + fail-closed + sabotage + mem-fed MC + batched GUM emitter); 3 drug arms PENDING ep28 priors"

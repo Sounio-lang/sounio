@@ -115,6 +115,138 @@ pub fn pbpk28_gum_combine_f64(
     }
 }
 
+// Batched device kernel: E endpoints per launch, 8 threads each.
+// Thread tid handles endpoint e = tid / 8, param p = tid - e * 8.
+// Per-endpoint buffer of 24 f64 words at base = e * 24:
+// d at base+p, v at base+8+p, out at base+16+p. The emitter is
+// fixed-size for any E; E only sets the buffer size and the
+// thread count at launch. Address math rides the untyped integer
+// path (exact below 2 to the 32); data moves on the f64 path.
+// Direct text emission (gb_ helpers mirror the mc_ pattern): the
+// typed IR lowering copies its 2 MB inline asm buffer by value
+// per op, so an 18-op kernel exceeds the 2 GiB test-process arena
+// while the 11-op contrib kernel fits.
+pub fn kaxi_emit_pbpk28_gum_contrib_batched_asm() -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
+    var text = "; K-AXI batched GUM kernel\n"
+    var seq: i64 = 0
+    text = gb_get_tid(text, 0, seq); seq = seq + 1
+    text = gb_load_imm(text, 1, 8, seq); seq = seq + 1
+    text = gb_r3(text, "div", 9, 0, 1, "var=+75.0%", seq); seq = seq + 1
+    text = gb_r3(text, "mul", 10, 9, 1, "var=+62.5%", seq); seq = seq + 1
+    text = gb_r3(text, "sub", 11, 0, 10, "var=+12.5%", seq); seq = seq + 1
+    text = gb_load_imm(text, 12, 24, seq); seq = seq + 1
+    text = gb_r3(text, "mul", 13, 9, 12, "var=+62.5%", seq); seq = seq + 1
+    text = gb_r3(text, "add", 14, 13, 11, "var=+12.5%", seq); seq = seq + 1
+    text = gb_r3(text, "add", 15, 14, 1, "var=+12.5%", seq); seq = seq + 1
+    text = gb_load_imm(text, 16, 16, seq); seq = seq + 1
+    text = gb_r3(text, "add", 17, 13, 16, "var=+12.5%", seq); seq = seq + 1
+    text = gb_r3(text, "add", 18, 17, 11, "var=+12.5%", seq); seq = seq + 1
+    text = gb_load_global_f64(text, 19, 14, seq); seq = seq + 1
+    text = gb_load_global_f64(text, 20, 15, seq); seq = seq + 1
+    text = gb_r3f(text, "mul", 21, 19, 19, seq); seq = seq + 1
+    text = gb_r3f(text, "mul", 22, 21, 20, seq); seq = seq + 1
+    text = gb_store_global_f64(text, 22, 18, seq); seq = seq + 1
+    text = gb_ret(text, seq); seq = seq + 1
+    kaxi_asm_push_str(kaxi_asm_new(), text)
+}
+fn gb_get_tid(text: string, dst: i64, seq: i64) -> string with Mut, Panic, Div, Alloc {
+    var t = str_concat(text, "get_tid r")
+    t = str_concat(t, gb_i64_to_string(dst))
+    t = str_concat(t, ", var=0%, seq=")
+    t = str_concat(t, gb_i64_to_string(seq))
+    t = str_concat(t, "\n")
+    t
+}
+fn gb_load_imm(text: string, dst: i64, imm: i64, seq: i64) -> string with Mut, Panic, Div, Alloc {
+    var t = str_concat(text, "load_imm r")
+    t = str_concat(t, gb_i64_to_string(dst))
+    t = str_concat(t, ", imm=")
+    t = str_concat(t, gb_i64_to_string(imm))
+    t = str_concat(t, ", seq=")
+    t = str_concat(t, gb_i64_to_string(seq))
+    t = str_concat(t, "\n")
+    t
+}
+fn gb_r3(text: string, op: string, dst: i64, a: i64, b: i64, suffix: string, seq: i64) -> string with Mut, Panic, Div, Alloc {
+    var t = str_concat(text, op)
+    t = str_concat(t, " r")
+    t = str_concat(t, gb_i64_to_string(dst))
+    t = str_concat(t, ", r")
+    t = str_concat(t, gb_i64_to_string(a))
+    t = str_concat(t, ", r")
+    t = str_concat(t, gb_i64_to_string(b))
+    t = str_concat(t, ", ")
+    t = str_concat(t, suffix)
+    t = str_concat(t, ", seq=")
+    t = str_concat(t, gb_i64_to_string(seq))
+    t = str_concat(t, "\n")
+    t
+}
+fn gb_r3f(text: string, op: string, dst: i64, a: i64, b: i64, seq: i64) -> string with Mut, Panic, Div, Alloc {
+    var t = str_concat(text, op)
+    t = str_concat(t, " r")
+    t = str_concat(t, gb_i64_to_string(dst))
+    t = str_concat(t, ", r")
+    t = str_concat(t, gb_i64_to_string(a))
+    t = str_concat(t, ", r")
+    t = str_concat(t, gb_i64_to_string(b))
+    t = str_concat(t, ", var=+62.5%, seq=")
+    t = str_concat(t, gb_i64_to_string(seq))
+    t = str_concat(t, ", type=f64")
+    t = str_concat(t, "\n")
+    t
+}
+fn gb_load_global_f64(text: string, dst: i64, addr: i64, seq: i64) -> string with Mut, Panic, Div, Alloc {
+    var t = str_concat(text, "load_global r")
+    t = str_concat(t, gb_i64_to_string(dst))
+    t = str_concat(t, ", addr=r")
+    t = str_concat(t, gb_i64_to_string(addr))
+    t = str_concat(t, ", seq=")
+    t = str_concat(t, gb_i64_to_string(seq))
+    t = str_concat(t, ", type=f64")
+    t = str_concat(t, "\n")
+    t
+}
+fn gb_store_global_f64(text: string, src: i64, addr: i64, seq: i64) -> string with Mut, Panic, Div, Alloc {
+    var t = str_concat(text, "store_global r")
+    t = str_concat(t, gb_i64_to_string(src))
+    t = str_concat(t, ", addr=r")
+    t = str_concat(t, gb_i64_to_string(addr))
+    t = str_concat(t, ", seq=")
+    t = str_concat(t, gb_i64_to_string(seq))
+    t = str_concat(t, ", type=f64")
+    t = str_concat(t, "\n")
+    t
+}
+fn gb_ret(text: string, seq: i64) -> string with Mut, Panic, Div, Alloc {
+    var t = str_concat(text, "ret seq=")
+    t = str_concat(t, gb_i64_to_string(seq))
+    t = str_concat(t, "\n")
+    t
+}
+fn gb_i64_to_string(v: i64) -> string with Mut, Panic, Div {
+    if v == 0 {
+        return "0"
+    }
+    var digits = ""
+    var x = v
+    while x > 0 {
+        let d = x - (x / 10) * 10
+        var ch = "0"
+        if d == 1 { ch = "1" }
+        if d == 2 { ch = "2" }
+        if d == 3 { ch = "3" }
+        if d == 4 { ch = "4" }
+        if d == 5 { ch = "5" }
+        if d == 6 { ch = "6" }
+        if d == 7 { ch = "7" }
+        if d == 8 { ch = "8" }
+        if d == 9 { ch = "9" }
+        digits = str_concat(ch, digits)
+        x = x / 10
+    }
+    digits
+}
 // Device kernel: out[tid] = d[tid] * d[tid] * v[tid], f64 data path,
 // integer address path. Registers: r0=tid, r1=8, r2=tid+8 (v addr),
 // r3=16, r4=tid+16 (out addr), r5=d, r6=v, r7=d*d, r8=out.
