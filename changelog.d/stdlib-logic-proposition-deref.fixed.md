@@ -1,0 +1,1 @@
+stdlib/logic: `proposition_evaluate` passes `&(*q)` for its `Box<Proposition>` sub-terms; Madaros has no `Box<T>`-to-`&T` coercion, so the module did not check once payload enums did (`tests/stdlib/logic/test_logic.sio`).
