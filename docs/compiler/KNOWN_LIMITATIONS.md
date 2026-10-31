@@ -476,15 +476,39 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
 - **Target divergence.** The dispatch line announces `target=cuda-sm80`
   while the emitted PTX carries `.target sm_50`. Relevant on its own to any
   parity claim that compares a GPU artifact against a CPU reference.
-- **Consequence for PBPK-28.** The Crank–Nicolson solver is arrays and
-  accumulators throughout, so it cannot reach PTX by this path. Real GPU
-  work in this repository goes through hand-written emitters
-  (`self-hosted/gpu/emit_*_ptx.sio`), which is a separate and much larger
-  undertaking. Do not read a green `--backend gpu` on an empty kernel as
-  evidence that a numerical kernel compiles.
-- Parameter sweeps do not need the GPU anyway: one PBPK-28 steady-state
-  solve costs 9.51 ms, so a 101 × 41 grid (4141 solves) finishes in 39 s on
-  one core.
+- **This is the `kernel fn` frontend only, not every GPU route.** The
+  limitation above is scoped to `build --backend gpu` over a `kernel fn`
+  declaration. Production GPU work goes through **K-AXI**, a separate
+  lowering with its own IR and golden PTX tests
+  (`self-hosted/gpu/kaxi_to_ptx.sio`, `kaxi_backend.sio`,
+  `tests/golden/kaxi_ptx/`). K-AXI kernels do compute, and the PBPK-28 GUM
+  and Monte-Carlo kernels written against it
+  (`self-hosted/gpu/pbpk28_{gum,mc}_kernel.sio`, branch
+  `pbpk-28-gpu-parity`) verify bitwise on an RTX A5000. Do not read this
+  entry as "the compiler cannot emit a working GPU kernel"; read it as "the
+  `kernel fn` surface cannot, so use K-AXI".
+- **Consequence for PBPK-28.** The Crank–Nicolson solver as written is
+  arrays and accumulators throughout, so it cannot reach PTX through
+  `kernel fn`. Reaching the GPU means writing the kernel against K-AXI.
+  Do not read a green `--backend gpu` on an empty kernel as evidence that a
+  numerical kernel compiles.
+- **Device testing is not optional on this route.** Measured on
+  `pbpk-28-gpu-parity`, golden PTX and simulation both passed while two
+  K-AXI miscompiles were live: integer `div`/`setp` lowered unsigned where
+  the CPU reference is signed `i64`, and `i32`-bank address math in the GUM
+  kernel. Goldens had enshrined both. They were found only by running on
+  the device and fixed in `5e9551c2f8`, which regenerated 14 goldens. A
+  golden test pins what the emitter does, not what is correct.
+- **A working GPU kernel is still not a faster parameter sweep.** Measured
+  on one node, RTX A5000 against Xeon Gold 6148: per launch the GUM kernel
+  takes 6.7 µs on the GPU against a 6.2 µs/combine slope on the CPU — a
+  tie, because the GPU path is launch-bound. End to end the Monte-Carlo
+  path costs ~9.4 s per draw, almost all of it re-emitting a cubin, because
+  each draw bakes its seed into a fresh one. For comparison, one PBPK-28
+  steady-state solve on the CPU costs 9.51 ms, so a 101 × 41 grid (4141
+  solves) finishes in 39 s on one core. Choose the GPU here for bitwise
+  cross-checking of the kernel, not for sweep throughput, until the
+  memory-fed MC advance kernel lands.
 
 ### KL-17 — #2773: same-named items in different modules
 
