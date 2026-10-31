@@ -8366,6 +8366,8 @@ fn checker_check_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, P
         result = checker_check_break_expr_inplace(c, e)
     } else if e.kind == ExprKind::ExprContinue {
         result = checker_check_continue_expr_inplace(c, e)
+    } else if e.kind == ExprKind::ExprHandle {
+        result = checker_check_handle_expr_inplace(c, e)
     } else {
         result = checker_check_expr_mut(c, e)
     }
@@ -8375,6 +8377,39 @@ fn checker_check_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, P
     result
 }
 
+
+// *mut ExprHandle handler: `handle<Effect> { body } with { handlers }`. ExprHandle
+// fell to checker_check_expr_mut, which refuses any kind it is handed ("expression
+// kind was not checked in place"), so every handle expression failed --check on
+// Madaros, including the #830 f32-join fixtures. Faithful transcription of the
+// by-value check_handle_expr: the handled effect is added for the body only, then
+// discharged before the handler block is checked; the body's type is the result.
+fn checker_check_handle_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    var eff_name_buf: [i8; 64] = [0; 64]
+    var i: i64 = 0
+    while i < e.name.len && i < 64 {
+        eff_name_buf[i as usize] = e.name.buf[i as usize]
+        i = i + 1
+    }
+    let eff_id = effect_name_to_id(eff_name_buf, e.name.len)
+    let saved_effects = (*c).current_effects
+    let saved_count = (*c).current_effect_count
+    if eff_id >= 0 && (*c).current_effect_count < 8 {
+        if !has_effect_id((*c).current_effects, (*c).current_effect_count, eff_id) {
+            (*c).current_effects[(*c).current_effect_count as usize] = eff_id
+            (*c).current_effect_count = (*c).current_effect_count + 1
+        }
+    }
+    let body_ty = checker_check_opt_block_inplace(c, e.block)
+    (*c).current_sig_id = 0 - 1
+    (*c).current_effects = saved_effects
+    (*c).current_effect_count = saved_count
+    match e.handler_block {
+        Some(hb) => { let _h = checker_check_block_inplace(c, *hb) }
+        None => {}
+    }
+    body_ty
+}
 // *mut ExprRange handler: checks both endpoints in place (returns only TypeEntry),
 // so the ~164KB `self` Checker is never SRET-moved. ExprRange previously fell to the
 // by-value `checker_check_expr_mut` else-branch, whose (Checker,TypeEntry) return
