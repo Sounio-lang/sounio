@@ -2,12 +2,14 @@
 topic_id: repo.docs.design.sm89-global-thread-index
 authority: repo_only
 audience: users
-last_validated: unvalidated
-validated_by: none
+last_validated: 2026-10-31
+validated_by: warp
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.design.sm89-global-thread-index
 -->
 
 # sm_89 global thread index
+
+> **Status**: Beta | **Last validated**: 2026-10-31 | **Source**: Slurm jobs 20147 and 20215
 
 Status: design note for the experimental implementation in `926f1e9078`. Section 75 of `docs/design/heterogeneous-gpu-framework.md` records the earlier `TID_SUM=155392` against the unchanged requirement of 165600. The later single-block regression job 20147 passed with `TID_SUM=165600` and `BAD_TIDS=0`; it does not erase or rewrite the earlier observation. The multi-block results are recorded below.
 
@@ -55,6 +57,8 @@ The measured `S2R` control word is `0x00321e00`. Stall 15, yield 0, bits 46–48
 
 Alternative A does not copy that control word for `SR_CTAID.X`. Slot 6 adds `1<<46` (`70368744177664`) as well as the selector. That sets the destination-barrier field to 1. The comment at `elf.sio:573` calls this independence from the TID read on scoreboard 0. It is not a measured residue. The first doubling waits on mask bit 1 (`9007199254740992`), on top of the `IADD3` mask 4, so its wait is `SB1|SB2`. Later doublings keep mask 4 and publish no scoreboard. The gid add waits on `SB0`.
 
+The copied loads still register barriers 2 and 3, and the `FFMA` still waits on mask 12. The prefix must not publish scoreboards 2 or 3. The `SB2` bit in the first doubling is the inherited `IADD3` mask, not a wait for those loads. They have not been issued yet.
+
 That split is the intended schedule. Job 20215 exercised it successfully for the tested images and shapes. Its interpretation and generality remain risks:
 
 - If bit 46 is not the destination barrier on this opcode, the `SB1` wait can hang, or both `S2R`s still publish on scoreboard 0. The second then retires the barrier before R4 is consumed.
@@ -70,9 +74,35 @@ No instruction in either image propagates a 32-bit carry. `MOV R2, c[0][0x160]` 
 
 The last live thread increments its weight pointer after the last load. The address that must stay in the same 4 GiB region is `base + 2*n*4 + span*4 + gid*4 + k*n*4` for `gid=n-1`. The large term is `k*n*4`, not the block index. Live threads do not widen it relative to a one-block launch of the same `n`.
 
-`sg_layout_ok` (`stdlib/hetero/silicon/gemv.sio` 23–31) refuses a payload that does not fit, an unaligned base, an i64 overflow, and a low-half sum `(base & 0xffffffff) + (payload + 4*n - 4)` that exceeds `0xffffffff`. Capacity is not ownership. `sg_launch_sm89` queries `cuMemGetAddressRange_v2` and refuses unless the current device reports attributes 75 and 76 as 8 and 9. Rejected launches must not write; the probe compares the buffer before the accepted launch.
+`sg_layout_ok` (`stdlib/hetero/silicon/gemv.sio` 22–31) refuses a payload that does not fit, an unaligned base, an i64 overflow, and a low-half sum `(base & 0xffffffff) + (payload + 4*n - 4)` that exceeds `0xffffffff`. Capacity is not ownership. `sg_launch_sm89` queries `cuMemGetAddressRange_v2` and refuses unless the current device reports attributes 75 and 76 as 8 and 9. Status 1 through 4 return before `cuLaunchKernel`. Status 5 is a launch, sync, or unload failure, and a write may already have happened. The probe's refused bases are the pre-launch cases; it compares the buffer before the accepted launch.
 
 Tail threads are the extra address risk. For `n=576`, grid 5 covers gids 576..639. Those loads would pass the end of `weights[k][n]` even when the allocation does not cross 4 GiB. The branch to EXIT is before the `LDG` for that reason. The Python oracle checks the rounded final pointer only for the live `n`, not for the rounded grid. A tail that falls through is outside that check.
+
+## Implementation constraints
+
+These bounds are part of the image, not suggestions.
+
+The block size is 128. `sg_launch_sm89` launches `block=128` and `grid=ceil(n/128)`. The factor 128 is seven `IADD3` doublings. A different block size needs a new measured multiply, or the exact-slice path in alternative B. Block 576 with `grid>1` is not available.
+
+`si_gemv_grid_sm89` accepts `n` in `1..65535` and `k` in `1..4096`. The tail compare writes `n` into the `ISETP` immediate. 65535 fits in the two bytes that held 576, and that case passed in job 20215. `n=65535` and `k=4096` were not launched together. Do not raise either cap without a new device row.
+
+The packed layout and the single pointer at `c[0][0x160]` stay. There is no second kernel parameter. `R11` is both the buffer skip and the weight-row stride, so a column slice cannot be made by adding `base_col*4` to that pointer.
+
+No instruction propagates a 32-bit carry. `sg_layout_ok` must refuse a base whose low half plus `payload + 4*n - 4` wraps. Capacity is not ownership. The launcher must query `cuMemGetAddressRange_v2` and refuse a device whose attributes 75 and 76 are not 8 and 9.
+
+The tail branch stays before the first `LDG`. A gid at or above `n` must not form a weight address. Do not insert instructions between the copied `LDG` and its `@P0 BRA -144`. The tail check must consume `P0` before the loop's `ISETP` overwrites it. There is one `EXIT`, at slot 47. `emit_container` writes that slot into the exit-offset attribute at container word 111. This launch ignores the attribute. The `EXIT` instruction is what ends the thread. The host probe still checks the word.
+
+The caller keeps the allocation alive and does not change the current CUDA context during `sg_launch_sm89`. The launcher has no PTX fallback. Status 5 must not be treated as a clean refusal.
+
+`emit_container` is called with register count 22. The measured rule is max GPR + 3, which for R18 is 21. Do not lower the count below 21. Do not replace `sm89_own_image()` with this prefix. GPU proof stays inside Slurm. Job 20215 does not license a new opcode, a new scoreboard residue, or a change to the required sum 165600.
+
+## Validation
+
+Job 20147 is the later single-block regression. One block of 576 passed with `TID_SUM=165600` and `BAD_TIDS=0`. It does not erase section 75, which recorded 155392, and it does not move the required sum.
+
+Job 20215, on the NVIDIA L4, exited `0:0`. Two repetitions of 32 checked-launch cases passed, as did 64 raw-image SASS/CPU/PTX cases and 68 legacy single-block cases. Integer and dyadic dots matched exactly. Non-dyadic f32 dots stayed within `1e-5` absolute and `1e-5` relative, or `5e-4` relative when `k>64`. `tid[col]` was the global index. Inputs and canaries were unchanged. Refused bases did not write. `n=65535` and `k=4096` passed separately, not as one product. The log is `/orangefs/training/hetero-probe/sio482-checked.h7gs8X/final-gate-20215.out`.
+
+These rows cover the tested combinations on that device. They do not make the bit-46 split a general scheduling rule.
 
 ## What not to do
 
