@@ -5122,6 +5122,13 @@ fn checker_selective_import_resolves(c: *mut Checker, name: Name) -> bool with M
     if struct_table_find((*c).structs, name) >= 0 { return true }
     if enum_table_find((*c).enums, name) >= 0 { return true }
     if enum_table_find_variant_enum((*c).enums, name) >= 0 { return true }
+    // A declared `effect X { .. }` is importable (`use m::lib::{X}`); the
+    // registry is filled by checker_collect_effect_def_inplace.
+    var e: i64 = 0
+    while e < (*c).effects.count && e < 32 {
+        if name_eq((*c).effects.entries[e as usize].name, name) { return true }
+        e = e + 1
+    }
     if checker_defined_name_known(name) { return true }
     false
 }
@@ -6589,6 +6596,14 @@ fn checker_collect_item_inplace(c: *mut Checker, item: Item) with Mut, Panic, Di
         if !name_is_empty(item.name) {
             checker_collect_unit_decl_inplace(c, item.name, item.type_alias_ty)
         }
+    } else if item.kind == ItemKind::ItemEffect {
+        // Until 2026-10-31 this arm did not exist, the third time this spine has
+        // missed an item kind the by-value collect pass handles (ItemAlgebra on
+        // 2026-09-01, ItemUnit on 2026-09-09). Every `effect X { .. }` was inert
+        // under Madaros: the user-effect registry stayed empty, so each `with X`
+        // drew E246 ("not a declared user effect") and the declaring module
+        // could not be checked. lean_single accepted the same source.
+        checker_collect_effect_def_inplace(c, item.effect_def)
     } else if item.kind == ItemKind::ItemOntology {
         checker_collect_ontology_def_inplace(c, item.ontology_def)
     } else if item.kind == ItemKind::ItemModels {
@@ -6608,6 +6623,77 @@ fn checker_collect_item_inplace(c: *mut Checker, item: Item) with Mut, Panic, Di
     }
 }
 
+
+// Register every `effect` item of one module (idempotent per name).
+pub fn checker_collect_effect_items_inplace(c: *mut Checker, items: Option<Box<ItemList> >) with Mut, Panic, Div, Alloc, IO {
+    var cursor = items
+    while true {
+        match cursor {
+            Some(list) => {
+                let item = (*list).head
+                if item.kind == ItemKind::ItemEffect {
+                    checker_collect_effect_def_inplace(c, item.effect_def)
+                }
+                cursor = (*list).tail
+            }
+            None => break
+        }
+    }
+}
+
+// *mut collector for `effect Name { fn op(..) -> T ... }`. Mirrors the by-value
+// collect_item_effect / collect_effect_op_defs (user effect ids are 100 + the
+// registry index; each op records its effect id and lowered return type), but
+// writes the registry in place, so the ~164KB Checker is never copied.
+fn checker_collect_effect_def_inplace(c: *mut Checker, opt: Option<Box<EffectDef> >) with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        None => {}
+        Some(edef) => {
+            // Already registered by the effects-first pre-pass: keep one entry,
+            // so ids stay 100 + index and ops are not duplicated.
+            var k: i64 = 0
+            while k < (*c).effects.count && k < 32 {
+                if name_eq((*c).effects.entries[k as usize].name, (*edef).name) { return }
+                k = k + 1
+            }
+            let idx = (*c).effects.count
+            if idx >= 32 { return }
+            let eid = 100 + idx
+            let first_op_id = (*c).effect_ops.count
+            var cursor = (*edef).ops
+            while true {
+                match cursor {
+                    Some(node) => {
+                        let head = (*node).head
+                        var ret_ty = ty_unit()
+                        match head.ret_ty {
+                            None => {}
+                            Some(te_box) => { ret_ty = checker_lower_type_expr_mut(c, *te_box) }
+                        }
+                        let op_idx = (*c).effect_ops.count
+                        if op_idx < 128 {
+                            (*c).effect_ops.entries[op_idx] = EffectOpInfo {
+                                name: head.name,
+                                effect_id: eid,
+                                param_count: 0,
+                                ret_ty: ret_ty,
+                            }
+                            (*c).effect_ops.count = op_idx + 1
+                        }
+                        cursor = (*node).tail
+                    }
+                    None => break
+                }
+            }
+            (*c).effects.entries[idx] = EffectInfo {
+                name: (*edef).name,
+                op_count: (*c).effect_ops.count - first_op_id,
+                first_op_id: first_op_id,
+            }
+            (*c).effects.count = idx + 1
+        }
+    }
+}
 // Declared laws of an algebra as a bitmask, first line per op wins:
 //   bit0 add_commutative, bit1 add_associative, bit2 mul_commutative,
 //   bit3 mul_associative, bit4 mul_alternative. Defaults = `empty_algebra_info` (15).
@@ -6784,6 +6870,11 @@ pub fn checker_collect_items_inplace(c: *mut Checker, items: Option<Box<ItemList
     // pointer write — persists where deep ontology_kernel mutation does not.
     (*c).ontology_items = items
     checker_collect_runtime_builtins_inplace(c)
+    // Effects first: a `with X` in a signature is resolved while that
+    // signature is collected, so X must already be registered even when its
+    // `effect X { .. }` comes later in the file. The multi-module driver
+    // runs this over every module before any signature for the same reason.
+    checker_collect_effect_items_inplace(c, items)
     var cursor = items
     while true {
         match cursor {
@@ -8275,6 +8366,8 @@ fn checker_check_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, P
         result = checker_check_break_expr_inplace(c, e)
     } else if e.kind == ExprKind::ExprContinue {
         result = checker_check_continue_expr_inplace(c, e)
+    } else if e.kind == ExprKind::ExprHandle {
+        result = checker_check_handle_expr_inplace(c, e)
     } else {
         result = checker_check_expr_mut(c, e)
     }
@@ -8284,6 +8377,39 @@ fn checker_check_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, P
     result
 }
 
+
+// *mut ExprHandle handler: `handle<Effect> { body } with { handlers }`. ExprHandle
+// fell to checker_check_expr_mut, which refuses any kind it is handed ("expression
+// kind was not checked in place"), so every handle expression failed --check on
+// Madaros, including the #830 f32-join fixtures. Faithful transcription of the
+// by-value check_handle_expr: the handled effect is added for the body only, then
+// discharged before the handler block is checked; the body's type is the result.
+fn checker_check_handle_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    var eff_name_buf: [i8; 64] = [0; 64]
+    var i: i64 = 0
+    while i < e.name.len && i < 64 {
+        eff_name_buf[i as usize] = e.name.buf[i as usize]
+        i = i + 1
+    }
+    let eff_id = effect_name_to_id(eff_name_buf, e.name.len)
+    let saved_effects = (*c).current_effects
+    let saved_count = (*c).current_effect_count
+    if eff_id >= 0 && (*c).current_effect_count < 8 {
+        if !has_effect_id((*c).current_effects, (*c).current_effect_count, eff_id) {
+            (*c).current_effects[(*c).current_effect_count as usize] = eff_id
+            (*c).current_effect_count = (*c).current_effect_count + 1
+        }
+    }
+    let body_ty = checker_check_opt_block_inplace(c, e.block)
+    (*c).current_sig_id = 0 - 1
+    (*c).current_effects = saved_effects
+    (*c).current_effect_count = saved_count
+    match e.handler_block {
+        Some(hb) => { let _h = checker_check_block_inplace(c, *hb) }
+        None => {}
+    }
+    body_ty
+}
 // *mut ExprRange handler: checks both endpoints in place (returns only TypeEntry),
 // so the ~164KB `self` Checker is never SRET-moved. ExprRange previously fell to the
 // by-value `checker_check_expr_mut` else-branch, whose (Checker,TypeEntry) return
@@ -9125,6 +9251,15 @@ fn checker_check_binary_with_operand_types_inplace(c: *mut Checker, e: Expr, lef
             result = ty_bool()
         }
     }
+    // KL-20: a payload-carrying enum value is a pointer to its tagged cell, so `==`
+    // would compare cell addresses (two equal `Shape::Circle(1.0)` differ) and the
+    // enum-vs-integer form above would compare an address with a discriminant.
+    // Refused (E279); compare with `match`.
+    if (e.bin_op == BinaryOp::OpEq || e.bin_op == BinaryOp::OpNe)
+        && (enum_type_has_payload((*c).enums, left_ty) || enum_type_has_payload((*c).enums, right_ty)) {
+        checker_report_error_at_inplace(c, e.span, 279, 0, 0, 0)
+        return ty_bool()
+    }
     // Type-directed == lift (warn-only): boolean equality on the stdlib uncertain
     // scalar (a struct literally named "Epistemic") ignores uncertainty. Result
     // stays bool — no semantic change. "Epistemic" = E p i s t e m i c (9 chars).
@@ -9879,9 +10014,8 @@ fn checker_check_slice_borrow_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntr
                                     checker_report_mismatch_inplace(c, e.span, 55, ty_i64(), start_ty)
                                 }
                             }
-                            None => {
-                                checker_report_error_at_inplace(c, e.span, 13, 0, 0, 0)
-                            }
+                            // `&a[..hi]`: the start is 0.
+                            None => {}
                         }
                         match (*range_expr).right {
                             Some(end_expr) => {
@@ -9890,9 +10024,8 @@ fn checker_check_slice_borrow_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntr
                                     checker_report_mismatch_inplace(c, e.span, 55, ty_i64(), end_ty)
                                 }
                             }
-                            None => {
-                                checker_report_error_at_inplace(c, e.span, 13, 0, 0, 0)
-                            }
+                            // `&a[lo..]`: the end is the length.
+                            None => {}
                         }
                     }
                 }
@@ -10324,7 +10457,143 @@ fn checker_check_match_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
     // arm, in the now-restored outer scope -- same counterpart-to-the-
     // result-value-join role as the if/else site.
     checker_merge_ns_reassigned_inplace(c)
+    checker_check_payload_enum_match_exhaustive_inplace(c, e, scrut_ty)
     result_ty
+}
+
+// KL-20: a pattern that matches every value of its type: `_`, a binding that is
+// not a module-level constant, or a tuple of such.
+fn checker_pattern_is_irrefutable_inplace(c: *mut Checker, pat: Pattern) -> bool with Mut, Panic, Div, Alloc, IO {
+    if pat.kind == PatternKind::PatWildcard {
+        return true
+    }
+    if pat.kind == PatternKind::PatBinding {
+        return !checker_pattern_names_global_const_inplace(c, pat.name)
+    }
+    if pat.kind == PatternKind::PatTuple {
+        return checker_pattern_list_all_irrefutable_inplace(c, pat.sub_patterns)
+    }
+    false
+}
+
+fn checker_pattern_list_all_irrefutable_inplace(c: *mut Checker, opt: Option<Box<PatternList> >) -> bool with Mut, Panic, Div, Alloc, IO {
+    var cur = opt
+    while true {
+        match cur {
+            Some(list) => {
+                if !checker_pattern_is_irrefutable_inplace(c, (*list).head) {
+                    return false
+                }
+                cur = (*list).tail
+            }
+            None => break
+        }
+    }
+    true
+}
+
+fn checker_pat_field_list_all_irrefutable_inplace(c: *mut Checker, opt: Option<Box<PatFieldList> >) -> bool with Mut, Panic, Div, Alloc, IO {
+    var cur = opt
+    while true {
+        match cur {
+            Some(list) => {
+                if !checker_pattern_is_irrefutable_inplace(c, (*list).head.pattern) {
+                    return false
+                }
+                cur = (*list).tail
+            }
+            None => break
+        }
+    }
+    true
+}
+
+// KL-20: does `pat` match EVERY value of variant `vname` (or every value at all)?
+// A variant pattern covers it when each payload sub-pattern is irrefutable; an
+// or-pattern covers it when one alternative does. Conservative: a variant split
+// across several arms by refutable sub-patterns (`V(0)`, `V(_)` aside) counts
+// as uncovered, so such a match needs a final `_` arm.
+fn checker_pattern_covers_variant_inplace(c: *mut Checker, pat: Pattern, vname: Name) -> bool with Mut, Panic, Div, Alloc, IO {
+    if checker_pattern_is_irrefutable_inplace(c, pat) {
+        return true
+    }
+    if pat.kind == PatternKind::PatEnum {
+        if !name_eq(checker_copy_string_list_tail_to_name(pat.path.segments), vname) {
+            return false
+        }
+        return checker_pattern_list_all_irrefutable_inplace(c, pat.sub_patterns)
+    }
+    if pat.kind == PatternKind::PatStruct {
+        if !name_eq(checker_copy_string_list_tail_to_name(pat.path.segments), vname) {
+            return false
+        }
+        return checker_pat_field_list_all_irrefutable_inplace(c, pat.pat_fields)
+    }
+    if pat.kind == PatternKind::PatOr {
+        var cur = pat.sub_patterns
+        while true {
+            match cur {
+                Some(list) => {
+                    if checker_pattern_covers_variant_inplace(c, (*list).head, vname) {
+                        return true
+                    }
+                    cur = (*list).tail
+                }
+                None => break
+            }
+        }
+    }
+    false
+}
+
+// KL-20: a `match` over a payload-carrying enum must cover every variant (E280).
+// Before payload enums had a representation, a value no arm matched produced the
+// 0 the match's end label loads; for a tagged cell that is a null pointer handed
+// on as the enum value. Payload-free enums keep their existing behaviour.
+fn checker_check_payload_enum_match_exhaustive_inplace(c: *mut Checker, e: Expr, scrut_ty: TypeEntry) with Mut, Panic, Div, Alloc, IO {
+    let enum_idx = checker_scrut_user_enum_idx_inplace(c, scrut_ty)
+    if enum_idx < 0 {
+        return
+    }
+    let ei = enum_table_get((*c).enums, enum_idx)
+    if !variant_info_list_any_payload(ei.variants) {
+        return
+    }
+    var missing: i64 = 0
+    var vcur = ei.variants
+    while true {
+        match vcur {
+            Some(vl) => {
+                let vname = (*vl).head.name
+                var covered = false
+                var acur = e.arms
+                while !covered {
+                    match acur {
+                        Some(al) => {
+                            var guarded = false
+                            match (*al).head.guard {
+                                Some(_) => { guarded = true }
+                                None => {}
+                            }
+                            if !guarded && checker_pattern_covers_variant_inplace(c, (*al).head.pattern, vname) {
+                                covered = true
+                            }
+                            acur = (*al).tail
+                        }
+                        None => break
+                    }
+                }
+                if !covered {
+                    missing = missing + 1
+                }
+                vcur = (*vl).tail
+            }
+            None => break
+        }
+    }
+    if missing > 0 {
+        checker_report_error_at_inplace(c, e.span, 280, missing, 0, 0)
+    }
 }
 
 
@@ -10693,29 +10962,12 @@ fn checker_check_struct_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
             let ei = enum_table_get((*c).enums, enum_idx)
             if variant_info_list_has(ei.variants, variant_name) {
                 let vfields = variant_info_list_find_fields(ei.variants, variant_name)
-                // E264 (fail-closed): the lowerer represents every enum value as a bare
-                // discriminant (ir/lower.sio lower_match_arm_ref), so a struct-variant payload
-                // was silently dropped -- measured: `Shape::Rect { w: 3, h: 4 }` matched as
-                // tag 0 and every payload read as 0. Refuse the construction until a payload
-                // representation exists. Field inits are still checked for nested diagnostics.
-                if field_info_list_count(vfields) > 0 {
+                // KL-20: a struct-variant payload is stored in the enum's tagged cell
+                // (ir/lower.sio lower_pe_ctor_fields); its field inits are validated
+                // below like a struct literal's. A field the one-word slot cannot hold
+                // is E264.
+                if variant_fields_have_unsupported_payload(vfields) {
                     checker_report_error_at_inplace(c, e.span, 264, 0, 0, 0)
-                    let call_start_borrows_ev = (*c).borrows
-                    var cur_ev264 = e.fields
-                    var done_ev264 = false
-                    while !done_ev264 {
-                        match cur_ev264 {
-                            Some(list) => {
-                                let _init_ty264 = checker_check_expr_inplace(c, (*list).head.value)
-                                cur_ev264 = (*list).tail
-                            }
-                            None => {
-                                done_ev264 = true
-                            }
-                        }
-                    }
-                    (*c).borrows = call_start_borrows_ev
-                    return ty_named(struct_name)
                 }
                 // Count check first (E046), mirroring the non-generic struct branch:
                 // report and still yield ty_named so the variant type is known downstream.
@@ -11319,11 +11571,9 @@ fn checker_check_method_call_with_base_ty_inplace(c: *mut Checker, e: Expr, base
         checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
         checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
         if name_matches_str8(e.name, 97, 115, 95, 98, 121, 116, 101, 115) {
-            // .as_bytes() is a pass-through view of the packed string bytes
-            // (lean_single keeps the string pointer, result kind = string), so
-            // it types as TyString here: .len()/.indexing keep working on the
-            // result, and the native lowerer emits it as the identity.
-            ty_string()
+            // A fresh `[u8]` holding the string's bytes (lowered as a copy). It
+            // was typed `&i8`, which has no `.len()` and cannot be sliced.
+            ty_array(ty_u8(), 0 - 1)
         } else if name_matches_str3(e.name, 108, 101, 110) {
             ty_i64()
         } else {
@@ -13188,6 +13438,13 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
         let call_start_borrows = (*c).borrows
         checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
         checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
+        // The runtime `read_file` is bound import-unknown, so its result reached
+        // method calls with an unknown type (`read_file(p).as_bytes()`, `.len()`
+        // were E011). It returns the file's contents as a string; a user
+        // `read_file` has a signature and never reaches this arm.
+        if callee_ty.kind == TypeKind::TyUnknown && checker_callee_is_bare_ident(e.left, make_name("read_file")) {
+            return ty_string()
+        }
         callee_ty
     } else {
         // Enum tuple-variant constructor (`Event::B(42)`): the callee path typed as
@@ -13197,13 +13454,11 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
         let variant_enum_idx = call_expr_enum_variant_ctor_enum_idx(c, e.left)
         if variant_enum_idx >= 0 {
             let ei = enum_table_get((*c).enums, variant_enum_idx)
-            let call_start_borrows = (*c).borrows
-            checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
-            checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
-            // E264 (fail-closed): a tuple-variant payload has no lowering -- the lowerer
-            // emits the bare discriminant and drops every argument. Refuse it rather than
-            // typing the call as the enum and miscompiling.
-            checker_report_error_at_inplace(c, e.span, 264, 0, 0, 0)
+            let vname = match e.left {
+                Some(callee) => checker_copy_string_list_tail_to_name((*callee).path.segments)
+                None => empty_name()
+            }
+            checker_check_user_variant_ctor_args_inplace(c, e, ei.variants, vname)
             return ty_named(ei.name)
         }
         checker_report_error_at_inplace(c, e.span, 17, 0, 0, 0)
@@ -14130,6 +14385,12 @@ fn checker_check_cast_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
                 checker_report_error_at_inplace(c, e.span, 248, 0, 0, 0)
                 return ty_error()
             }
+            // KL-20 (E279): `v as i64` on a payload enum would yield its cell address,
+            // not a discriminant.
+            if enum_type_has_payload((*c).enums, src_ty) && (is_numeric_type(target_ty) || target_ty.kind == TypeKind::TyBool) {
+                checker_report_error_at_inplace(c, e.span, 279, 0, 0, 0)
+                return ty_error()
+            }
             // #2354 (E270): `n as string` on a number/bool/char is not a
             // conversion on this engine -- nothing formats the value, so the
             // integer was later used as a string pointer (`let s: string = n as
@@ -14242,6 +14503,52 @@ fn pattern_list_count(opt: Option<Box<PatternList> >) -> i64 with Mut, Panic, Di
     }
 }
 
+// KL-20: `E::V(a0, a1, ..)`. Each argument is checked against the variant's payload
+// field in declaration order and MOVED into the value (a struct-literal field init
+// consumes the same way). A count that differs from the declaration is E277; a
+// mismatched argument is E009.
+fn checker_check_user_variant_ctor_args_inplace(c: *mut Checker, e: Expr, variants: Option<Box<VariantInfoList>>, vname: Name) with Mut, Panic, Div, Alloc, IO {
+    let vfields = variant_info_list_find_fields(variants, vname)
+    if variant_fields_have_unsupported_payload(vfields) {
+        checker_report_error_at_inplace(c, e.span, 264, 0, 0, 0)
+    }
+    let na = expr_list_count_opt(e.args)
+    let nf = field_info_list_count(vfields)
+    if na != nf {
+        checker_report_error_at_inplace(c, e.span, 277, na, nf, 0)
+    }
+    var acur = e.args
+    var fcur = vfields
+    while true {
+        match acur {
+            Some(al) => {
+                let arg_ty = checker_check_expr_inplace(c, (*al).head)
+                match fcur {
+                    Some(fl) => {
+                        let fty = (*fl).head.ty
+                        if !is_error_or_unknown(arg_ty) && !is_error_or_unknown(fty) {
+                            if !checker_contextual_expr_compatible((*al).head, arg_ty, fty) {
+                                checker_report_mismatch_inplace(c, (*al).head.span, 9, fty, arg_ty)
+                            }
+                        }
+                        fcur = (*fl).tail
+                    }
+                    None => {}
+                }
+                acur = (*al).tail
+            }
+            None => break
+        }
+    }
+}
+
+fn expr_list_count_opt(opt: Option<Box<ExprList> >) -> i64 with Mut, Panic, Div, Alloc {
+    match opt {
+        None => 0
+        Some(list) => 1 + expr_list_count_opt((*list).tail)
+    }
+}
+
 // A named, inner-less scrutinee type that is a user-declared enum (not a struct, not
 // Option/Box, which carry their payload type in .inner).
 fn checker_scrut_is_user_enum_inplace(c: *mut Checker, scrut_ty: TypeEntry) -> bool with Mut, Panic, Div, Alloc, IO {
@@ -14258,6 +14565,113 @@ fn checker_scrut_is_user_enum_inplace(c: *mut Checker, scrut_ty: TypeEntry) -> b
     enum_table_find((*c).enums, scrut_ty.name) >= 0
 }
 
+// The scrutinee is a user enum, directly or through `&` / `&!`. `match p { .. }` on a
+// `p: &Proposition` parameter types the scrutinee as TyRef(Proposition): the plain
+// check above saw a TyRef, so the E264 refusal never fired, and the payload binding
+// fell to `scrut_ty.inner` -- the enum itself -- typing `Var(name)`'s `name` as
+// `Proposition` (stdlib/logic/pure/types.sio proposition_evaluate: "expected string,
+// found Proposition"). The lowerer has no payload binding through a reference either.
+fn checker_scrut_is_user_enum_or_ref_inplace(c: *mut Checker, scrut_ty: TypeEntry) -> bool with Mut, Panic, Div, Alloc, IO {
+    if checker_scrut_is_user_enum_inplace(c, scrut_ty) {
+        return true
+    }
+    if scrut_ty.kind != TypeKind::TyRef && scrut_ty.kind != TypeKind::TyRefMut {
+        return false
+    }
+    match scrut_ty.inner {
+        Some(inner_box) => checker_scrut_is_user_enum_inplace(c, *inner_box)
+        None => false
+    }
+}
+
+// KL-20: index of the user enum the scrutinee names, directly or through `&` /
+// `&!`; -1 otherwise.
+fn checker_scrut_user_enum_idx_inplace(c: *mut Checker, scrut_ty: TypeEntry) -> i64 with Mut, Panic, Div, Alloc, IO {
+    if checker_scrut_is_user_enum_inplace(c, scrut_ty) {
+        return enum_table_find((*c).enums, scrut_ty.name)
+    }
+    if scrut_ty.kind != TypeKind::TyRef && scrut_ty.kind != TypeKind::TyRefMut {
+        return -1
+    }
+    match scrut_ty.inner {
+        Some(inner_box) => {
+            let inner = *inner_box
+            if checker_scrut_is_user_enum_inplace(c, inner) {
+                return enum_table_find((*c).enums, inner.name)
+            }
+            -1
+        }
+        None => -1
+    }
+}
+
+// KL-20: `E::V(p0, p1, ..)` against a user enum. Each sub-pattern binds to the
+// variant's payload field in declaration order (`_0`, `_1`, .. for a tuple
+// variant). A count that differs from the declaration is E278; `E::V` with no
+// sub-patterns tests the tag only. A path that names no variant of the
+// scrutinee's enum binds its sub-patterns to the error type.
+fn checker_bind_user_variant_pattern_inplace(c: *mut Checker, pat: Pattern, enum_idx: i64) with Mut, Panic, Div, Alloc, IO {
+    let ei = enum_table_get((*c).enums, enum_idx)
+    let vname = checker_copy_string_list_tail_to_name(pat.path.segments)
+    if !variant_info_list_has(ei.variants, vname) {
+        checker_bind_pattern_list_inplace(c, pat.sub_patterns, ty_error())
+        return
+    }
+    let vfields = variant_info_list_find_fields(ei.variants, vname)
+    let np = pattern_list_count(pat.sub_patterns)
+    let nf = field_info_list_count(vfields)
+    if np > 0 && np != nf {
+        checker_report_error_at_inplace(c, pat.span, 278, np, nf, 0)
+    }
+    var pcur = pat.sub_patterns
+    var fcur = vfields
+    while true {
+        match pcur {
+            Some(pl) => {
+                var fty = ty_error()
+                match fcur {
+                    Some(fl) => {
+                        fty = (*fl).head.ty
+                        fcur = (*fl).tail
+                    }
+                    None => {}
+                }
+                checker_bind_pattern_inplace(c, (*pl).head, fty)
+                pcur = (*pl).tail
+            }
+            None => break
+        }
+    }
+}
+
+// KL-20: `E::V { f: p, .. }` against a user enum: each field binds to the type
+// that field has in the named variant. A field the variant does not declare is
+// E012.
+fn checker_bind_user_variant_struct_pattern_inplace(c: *mut Checker, pat: Pattern, enum_idx: i64) with Mut, Panic, Div, Alloc, IO {
+    let ei = enum_table_get((*c).enums, enum_idx)
+    let vname = checker_copy_string_list_tail_to_name(pat.path.segments)
+    let known_variant = variant_info_list_has(ei.variants, vname)
+    let vfields = variant_info_list_find_fields(ei.variants, vname)
+    var cur = pat.pat_fields
+    while true {
+        match cur {
+            Some(list) => {
+                var fty = ty_error()
+                if known_variant {
+                    if field_info_list_has(vfields, (*list).head.name) {
+                        fty = field_info_list_find(vfields, (*list).head.name)
+                    } else {
+                        checker_report_error_at_inplace(c, (*list).head.pattern.span, 12, 0, 0, 0)
+                    }
+                }
+                checker_bind_pattern_inplace(c, (*list).head.pattern, fty)
+                cur = (*list).tail
+            }
+            None => break
+        }
+    }
+}
+
 fn checker_bind_pattern_inplace(c: *mut Checker, pat: Pattern, scrut_ty: TypeEntry) with Mut, Panic, Div, Alloc, IO {
     if pat.kind == PatternKind::PatBinding {
         type_env_bind_mut(&!(*c).env, pat.name, scrut_ty, pat.is_mut)
@@ -14268,29 +14682,31 @@ fn checker_bind_pattern_inplace(c: *mut Checker, pat: Pattern, scrut_ty: TypeEnt
             (*c).borrows = (*c).borrows.mark_affine(pat.name)
         }
     } else if pat.kind == PatternKind::PatEnum {
-        // E264 (fail-closed): a payload sub-pattern on a USER enum (`Shape::Circle(r)`)
-        // has no lowering -- lower_match_arm_ref compares the bare discriminant and never
-        // binds the sub-patterns. Option/Box scrutinees carry .inner and are unaffected.
-        if checker_scrut_is_user_enum_inplace(c, scrut_ty) && pattern_list_count(pat.sub_patterns) > 0 {
-            checker_report_error_at_inplace(c, pat.span, 264, 0, 0, 0)
-        }
-        // Single-payload variant (e.g. Some(x) on Option<T>/Box<T>): the scrutinee
-        // carries the payload type in .inner (Box/Option lowering). Bind the payload
-        // sub-pattern to that inner type so (*x) / (*x).field type correctly. Fall
-        // back to scrut_ty when there is no inner (other enums — positional variant
-        // field types are not otherwise tracked).
-        match scrut_ty.inner {
-            Some(inner_box) => checker_bind_pattern_list_inplace(c, pat.sub_patterns, *inner_box)
-            None => checker_bind_pattern_list_inplace(c, pat.sub_patterns, scrut_ty)
+        // KL-20: a payload sub-pattern on a USER enum (`Shape::Circle(r)`) binds
+        // positionally to the variant's declared payload field types. The scrutinee
+        // may reach the enum through `&` / `&!` (a `p: &Proposition` parameter).
+        let scrut_enum_idx = checker_scrut_user_enum_idx_inplace(c, scrut_ty)
+        if scrut_enum_idx >= 0 {
+            checker_bind_user_variant_pattern_inplace(c, pat, scrut_enum_idx)
+        } else {
+            // Single-payload variant (e.g. Some(x) on Option<T>/Box<T>): the scrutinee
+            // carries the payload type in .inner (Box/Option lowering). Bind the payload
+            // sub-pattern to that inner type so (*x) / (*x).field type correctly.
+            match scrut_ty.inner {
+                Some(inner_box) => checker_bind_pattern_list_inplace(c, pat.sub_patterns, *inner_box)
+                None => checker_bind_pattern_list_inplace(c, pat.sub_patterns, scrut_ty)
+            }
         }
     } else if pat.kind == PatternKind::PatStruct {
-        // E264 (fail-closed): `Shape::Rect { w, h }` on a user enum -- the lowerer skips
-        // struct patterns outright ("Unsupported pattern -- skip"), so the arm could never
-        // match and its bindings would never be set.
-        if checker_scrut_is_user_enum_inplace(c, scrut_ty) {
-            checker_report_error_at_inplace(c, pat.span, 264, 0, 0, 0)
+        // KL-20: `Shape::Rect { w, h }` on a user enum binds each named field to the
+        // NAMED variant's field type (not the first variant that has a field of that
+        // name). Also through `&` / `&!`.
+        let scrut_enum_idx_s = checker_scrut_user_enum_idx_inplace(c, scrut_ty)
+        if scrut_enum_idx_s >= 0 {
+            checker_bind_user_variant_struct_pattern_inplace(c, pat, scrut_enum_idx_s)
+        } else {
+            checker_bind_struct_pat_fields_inplace(c, pat.pat_fields, scrut_ty)
         }
-        checker_bind_struct_pat_fields_inplace(c, pat.pat_fields, scrut_ty)
     } else if pat.kind == PatternKind::PatTuple {
         // E213: tuple-destructure arity must match the scrutinee tuple's element
         // count. Fire ONLY on a KNOWN tuple type (never on unknown/incomplete
@@ -14625,8 +15041,9 @@ fn checker_check_let_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with Mu
         // C-style enum↔int assignment: a fieldless enum value coerces to/from a numeric
         // type (canonical bin/souc accepts `let x: i64 = E::A`). Matches the binary ==/!=
         // rule; this *mut fn has (*c).enums to detect enum-named types.
-        let init_enum = init_ty.kind == TypeKind::TyNamed && enum_table_find((*c).enums, init_ty.name) >= 0
-        let ann_enum = ann_ty.kind == TypeKind::TyNamed && enum_table_find((*c).enums, ann_ty.name) >= 0
+        // KL-20: only a FIELDLESS enum is an integer; a payload enum is a cell.
+        let init_enum = init_ty.kind == TypeKind::TyNamed && enum_table_find((*c).enums, init_ty.name) >= 0 && !enum_type_has_payload((*c).enums, init_ty)
+        let ann_enum = ann_ty.kind == TypeKind::TyNamed && enum_table_find((*c).enums, ann_ty.name) >= 0 && !enum_type_has_payload((*c).enums, ann_ty)
         let enum_int_ok = (init_enum && is_numeric_type(ann_ty)) || (is_numeric_type(init_ty) && ann_enum)
         var init_context_ok = false
         // #2752: a unit-branded f64 binding is decided by DIMENSION, exactly as
@@ -19656,11 +20073,15 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 262 { print("ontology classes are unrelated: no subsumption between them, so the operator cannot say what the result is an amount of") }
     else if code == 251 { print("product variance shortcut is unsound beyond the octonions: |xy| != |x||y| on Sedenion/Clifford, so Var(x*y) = |y|^2 Var x + |x|^2 Var y fabricates precision") }
     else if code == 252 { print("algebra declares a reassociation strategy its multiplication law cannot certify: `free` needs an associative product, `fano_selective` needs the octonion level") }
-    else if code == 264 { print("enum variant with a payload is not supported by this compiler: the native lowering represents an enum value as a bare discriminant, so the payload would be dropped") }
+    else if code == 264 { print("enum variant payload field of this type is not supported by this compiler: a tagged-cell payload word holds one value, and a tuple, f128/f256 or Knowledge<T> field does not fit") }
     else if code == 266 { print("qualified call resolves to no definition: the qualifier is unresolved or the target function is undefined") }
     else if code == 267 { print("cannot assign through a shared reference: the place is reached through `&T`, which is read-only") }
     else if code == 268 { print("affine value used more than once") }
     else if code == 275 { print("borrow checker capacity exceeded: a linear or affine binding was not registered") }
+    else if code == 277 { print("enum variant constructor has the wrong number of payload values for its declaration") }
+    else if code == 278 { print("enum variant pattern has the wrong number of payload sub-patterns for its declaration") }
+    else if code == 279 { print("an enum whose variants carry payloads is not an integer: its values are tagged cells, so `==`/`!=` or an `as` integer cast would use an address") }
+    else if code == 280 { print("match over an enum whose variants carry payloads is not exhaustive: some variant is matched by no arm") }
     else if code == 269 { print("a `where` refinement on Knowledge<T> is not enforced by this compiler yet: the predicate would be silently ignored, so it is refused") }
     else if code == 270 { print("`as string` does not convert a number, bool or char to text: no engine formats the value, so the cast is refused") }
     else if code == 263 { print("qualified call is ambiguous: this qualifier names a module you `use`d, but also collides with an unrelated struct/enum method of the same name, and the compiler cannot yet guarantee which one runs") }
@@ -19982,7 +20403,19 @@ fn print_error_help(code: i64) with IO, Mut, Panic, Div {
         print("   |\n   = help: print the value directly (`println(n)`, `print_int(n)`, `print_f64(x)`); there is no number-to-string conversion yet\n")
     }
     else if code == 264 {
-        print("   |\n   = help: carry the payload in a struct next to a payload-free enum tag, e.g. `struct Shape { kind: ShapeKind, a: f64, b: f64 }`; or use Option<T> for a single optional value\n")
+        print("   |\n   = help: box the value (`Box<(f64, f64)>` or a struct) so the payload word holds a handle, or split it into separate payload fields\n")
+    }
+    else if code == 277 {
+        print("   |\n   = help: pass one value per payload field, in declaration order (`Shape::Rect(w, h)` for `Rect(f64, f64)`)\n")
+    }
+    else if code == 278 {
+        print("   |\n   = help: give one sub-pattern per payload field (`_` for a field you do not use), or write the bare variant path to test only the variant\n")
+    }
+    else if code == 279 {
+        print("   |\n   = help: compare or classify with a `match` (`match a { Shape::Circle(r) => r == 1.0, _ => false }`)\n")
+    }
+    else if code == 280 {
+        print("   |\n   = help: add an arm for each missing variant, or a final `_ =>` arm; an arm with an `if` guard or a refutable payload sub-pattern does not cover its variant\n")
     }
     else if code == 249 {
         print("   |\n   = help: V0-A exposes binary128/binary256 descriptors internally but rejects every source-level use before IR\n")
@@ -20344,7 +20777,7 @@ fn print_error_note(code: i64) with IO, Mut, Panic, Div {
         print("   = note: V0-A defines format identity only and intentionally emits no wide value or lowering\n")
     }
     else if code == 264 {
-        print("   = note: payload-free enums (`enum Color { Red, Green }`) are supported; see docs/compiler/KNOWN_LIMITATIONS.md (KL-20)\n")
+        print("   = note: integer, bool, f64/f32, string, struct, array, Box<T>, Option<T> and enum payload fields are supported; see docs/compiler/ENUM_PAYLOAD_LAYOUT.md (KL-20)\n")
     }
     else if code == 249 {
         print("   = note: no literal, field, alias, binding, signature, conversion, ABI, or native carrier is implemented\n")
@@ -21016,6 +21449,7 @@ fn name_is_native_backend_builtin(n: Name) -> bool with Mut, Panic, Div, Alloc, 
     if name_eq(n, make_name("__sounio_seq_get")) { return true }  // id 52
     if name_eq(n, make_name("__sounio_seq_set")) { return true }  // id 53
     if name_eq(n, make_name("__sounio_seq_push_scalar")) { return true } // id 70
+    if name_eq(n, make_name("array_concat")) { return true }      // id 72 (SIO-389: working emitter emit_builtin_array_concat + dispatch/persist arms)
     // read_byte/arena_mark/arena_reset/panic/untracked_counter (ids 55-59) are
     // NOT mirrored here on purpose. Each is already bound
     // checker_bind_import_unknown_inplace, arity-unchecked; adding it here too
@@ -21230,6 +21664,14 @@ fn call_expr_is_builtin_println(opt: Option<Box<Expr> >) -> bool with Mut, Panic
             }
             name_matches_str7((*expr).name, 112, 114, 105, 110, 116, 108, 110)
         }
+        None => false
+    }
+}
+
+// `callee` is the bare identifier `name` (not a path, not a method).
+fn checker_callee_is_bare_ident(callee: Option<Box<Expr> >, name: Name) -> bool with Mut, Panic, Div {
+    match callee {
+        Some(ce) => (*ce).kind == ExprKind::ExprIdent && name_eq((*ce).name, name)
         None => false
     }
 }
@@ -22938,9 +23380,19 @@ fn slice_borrow_result_type(base_ty: TypeEntry, want_mut: bool) -> TypeEntry wit
     }
 }
 
+// The operand of `&` / `&!` is a range index, `a[lo..hi]` (bounds optional).
+// This used to test whether the OPERAND itself was a range, but `&a[lo..hi]`
+// parses as Unary(&, Index(a, Range)), so the slice-borrow checker was never
+// reached and the range fell to the scalar index check (E014).
 fn expr_is_half_open_range(opt: Option<Box<Expr> >) -> bool {
     match opt {
-        Some(expr) => (*expr).kind == ExprKind::ExprRange && (*expr).bin_op == BinaryOp::OpRange
+        Some(expr) => {
+            if (*expr).kind != ExprKind::ExprIndex { return false }
+            match (*expr).right {
+                Some(idx) => (*idx).kind == ExprKind::ExprRange
+                None => false
+            }
+        }
         None => false
     }
 }
@@ -23396,8 +23848,9 @@ fn checker_fn_body_return_compatible_inplace(c: *mut Checker, body_ty: TypeEntry
     let float_lit_wide = (*c).last_literal_kind == 2
         && body_ty.kind == TypeKind::TyF64
         && is_wide_float_type(return_ty)
-    let body_enum = body_ty.kind == TypeKind::TyNamed && enum_table_find((*c).enums, body_ty.name) >= 0
-    let ret_enum = return_ty.kind == TypeKind::TyNamed && enum_table_find((*c).enums, return_ty.name) >= 0
+    // KL-20: only a FIELDLESS enum is an integer; a payload enum is a cell.
+    let body_enum = body_ty.kind == TypeKind::TyNamed && enum_table_find((*c).enums, body_ty.name) >= 0 && !enum_type_has_payload((*c).enums, body_ty)
+    let ret_enum = return_ty.kind == TypeKind::TyNamed && enum_table_find((*c).enums, return_ty.name) >= 0 && !enum_type_has_payload((*c).enums, return_ty)
     let enum_int_ok = (body_enum && is_numeric_type(return_ty)) || (is_numeric_type(body_ty) && ret_enum)
     int_lit_narrow || float_lit_wide || enum_int_ok
 }
@@ -27355,8 +27808,8 @@ impl Checker {
                     let int_lit_narrow = c.last_literal_kind == 1
                         && body_ty.kind == TypeKind::TyI64
                         && is_integer_type(sig2.return_type)
-                    let body_enum = body_ty.kind == TypeKind::TyNamed && enum_table_find(c.enums, body_ty.name) >= 0
-                    let ret_enum = sig2.return_type.kind == TypeKind::TyNamed && enum_table_find(c.enums, sig2.return_type.name) >= 0
+                    let body_enum = body_ty.kind == TypeKind::TyNamed && enum_table_find(c.enums, body_ty.name) >= 0 && !enum_type_has_payload(c.enums, body_ty)
+                    let ret_enum = sig2.return_type.kind == TypeKind::TyNamed && enum_table_find(c.enums, sig2.return_type.name) >= 0 && !enum_type_has_payload(c.enums, sig2.return_type)
                     let enum_int_ok = (body_enum && is_numeric_type(sig2.return_type))
                         || (is_numeric_type(body_ty) && ret_enum)
                     // Implicit-tail return: four-axis epistemic subsumption is
@@ -28223,6 +28676,11 @@ impl Checker {
                 result = ty_bool()
             }
         }
+        // KL-20: see the in-place twin -- `==` on a payload-carrying enum is E279.
+        if (e.bin_op == BinaryOp::OpEq || e.bin_op == BinaryOp::OpNe)
+            && (enum_type_has_payload(c.enums, left_ty) || enum_type_has_payload(c.enums, right_ty)) {
+            return (c.report_error_at(e.span, 279, 0, 0, 0), ty_bool())
+        }
         // Type-directed == lift (warn-only): boolean equality on the stdlib uncertain
         // scalar (a struct literally named "Epistemic") ignores uncertainty. Result
         // stays bool — no semantic change. "Epistemic" = E p i s t e m i c (9 chars).
@@ -28490,9 +28948,7 @@ impl Checker {
                                         c = c.report_mismatch(e.span, 55, ty_i64(), start_pair.1)
                                     }
                                 }
-                                None => {
-                                    c = c.report_error_at(e.span, 13, 0, 0, 0)
-                                }
+                                None => {}
                             }
                             match (*range_expr).right {
                                 Some(end_expr) => {
@@ -28502,9 +28958,7 @@ impl Checker {
                                         c = c.report_mismatch(e.span, 55, ty_i64(), end_pair.1)
                                     }
                                 }
-                                None => {
-                                    c = c.report_error_at(e.span, 13, 0, 0, 0)
-                                }
+                                None => {}
                             }
                         }
                     }
@@ -28928,7 +29382,7 @@ impl Checker {
             c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
             // "as_bytes" = [97,115,95,98,121,116,101,115]
             if name_matches_str8(e.name, 97, 115, 95, 98, 121, 116, 101, 115) {
-                (c, ty_string())
+                (c, ty_array(ty_u8(), 0 - 1))
             // "len" = [108,101,110]
             } else if name_matches_str3(e.name, 108, 101, 110) {
                 (c, ty_i64())
@@ -29076,7 +29530,7 @@ impl Checker {
             c = c.check_expr_list_no_type_no_linear_consume(e.args)
             c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
             if name_matches_str8(e.name, 97, 115, 95, 98, 121, 116, 101, 115) {
-                (c, ty_string())
+                (c, ty_array(ty_u8(), 0 - 1))
             } else if name_matches_str3(e.name, 108, 101, 110) {
                 (c, ty_i64())
             } else {

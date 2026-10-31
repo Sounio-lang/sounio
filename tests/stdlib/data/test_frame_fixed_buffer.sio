@@ -1,0 +1,100 @@
+//@ run-pass
+//@ expect-stdout: DATA_FRAME_FIXED_PASS
+// stdlib/data/frame.sio on fixed-capacity columns: build, query, slice,
+// filter, aggregate, and fail-closed add_column statuses (frame unchanged).
+use data::frame::*
+
+fn ad(a: f64, b: f64) -> f64 { if a > b { a - b } else { b - a } }
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var fails: i64 = 0
+
+    var ages: [i64; 64] = [0; 64]
+    ages[0] = 30
+    ages[1] = 40
+    ages[2] = 50
+    var names: [FrameStr; 64] = [frame_str(""); 64]
+    names[0] = frame_str("ana")
+    names[1] = frame_str("bia")
+    names[2] = frame_str("caio")
+    var weights: [f64; 64] = [0.0; 64]
+    weights[0] = 60.0
+    weights[1] = 70.5
+    weights[2] = 80.0
+
+    var df = dataframe_new()
+    let age_col = column_int("age", &ages, 3)
+    if dataframe_add_column(&!df, &age_col) != FRAME_OK { println("FAIL add age"); fails = fails + 1 }
+    let name_col = column_string("name", &names, 3)
+    if dataframe_add_column(&!df, &name_col) != FRAME_OK { println("FAIL add name"); fails = fails + 1 }
+    let w_col = column_float("weight", &weights, 3)
+    if dataframe_add_column(&!df, &w_col) != FRAME_OK { println("FAIL add weight"); fails = fails + 1 }
+
+    let shape = dataframe_shape(&df)
+    if shape.0 != 3 || shape.1 != 3 { println("FAIL shape"); fails = fails + 1 }
+    if dataframe_column_name(&df, 1) != "name" { println("FAIL column name"); fails = fails + 1 }
+    if !dataframe_has_column(&df, "age") || dataframe_has_column(&df, "height") { println("FAIL has_column"); fails = fails + 1 }
+    if dataframe_column_index(&df, "height") != 0 - 1 { println("FAIL index absent"); fails = fails + 1 }
+    let got = dataframe_get_column(&df, "weight")
+    if column_dtype_str(&got) != "float" || column_len(&got) != 3 { println("FAIL get_column"); fails = fails + 1 }
+
+    let row = dataframe_get_row(&df, 1)
+    if row_get_float(&row, "weight") != 70.5 || row_get_string(&row, "name") != "bia" { println("FAIL row"); fails = fails + 1 }
+
+    if dataframe_col_sum(&df, "age") != 120.0 { println("FAIL sum"); fails = fails + 1 }
+    if ad(dataframe_col_mean(&df, "weight"), 70.16666666666667) > 1.0e-12 { println("FAIL mean"); fails = fails + 1 }
+
+    let head = dataframe_head(&df, 2)
+    if dataframe_nrows(&head) != 2 { println("FAIL head"); fails = fails + 1 }
+    let tail = dataframe_tail(&df, 2)
+    let tail_age = dataframe_get_column(&tail, "age")
+    if dataframe_nrows(&tail) != 2 || tail_age.int_data[0] != 40 { println("FAIL tail"); fails = fails + 1 }
+    let beyond = dataframe_slice(&df, 1, 99)
+    if dataframe_nrows(&beyond) != 2 { println("FAIL slice clamp"); fails = fails + 1 }
+
+    var mask: [bool; 64] = [false; 64]
+    mask[0] = true
+    mask[2] = true
+    let f = dataframe_filter(&df, &mask, 3)
+    let f_names = dataframe_get_column(&f, "name")
+    if dataframe_nrows(&f) != 2 || column_string_at(&f_names, 1) != "caio" { println("FAIL filter"); fails = fails + 1 }
+
+    let dropped = dataframe_drop_column(&df, "weight")
+    if dataframe_ncols(&dropped) != 2 || dataframe_has_column(&dropped, "weight") { println("FAIL drop"); fails = fails + 1 }
+
+    // Epistemic mean: values 10, 12; u 0.3, 0.4 -> u(mean) = 0.5 / 2; min confidence 0.8.
+    var ev: [f64; 64] = [0.0; 64]
+    var eu: [f64; 64] = [0.0; 64]
+    var ec: [f64; 64] = [0.0; 64]
+    ev[0] = 10.0
+    ev[1] = 12.0
+    eu[0] = 0.3
+    eu[1] = 0.4
+    ec[0] = 0.9
+    ec[1] = 0.8
+    var df2 = dataframe_new()
+    let ep_col = column_epistemic("m", &ev, &eu, &ec, 2)
+    if dataframe_add_column(&!df2, &ep_col) != FRAME_OK { println("FAIL add epistemic"); fails = fails + 1 }
+    let em = dataframe_col_mean_epistemic(&df2, "m")
+    if ad(em.value, 11.0) > 1.0e-12 || ad(em.uncertainty, 0.25) > 1.0e-12 || em.confidence != 0.8 { println("FAIL epistemic mean"); fails = fails + 1 }
+
+    // Fail closed: a column of the wrong length is refused, the frame is unchanged.
+    let short = column_float("short", &weights, 2)
+    if dataframe_add_column(&!df, &short) != FRAME_ERR_LENGTH_MISMATCH { println("FAIL length mismatch accepted"); fails = fails + 1 }
+    if dataframe_ncols(&df) != 3 { println("FAIL frame changed on refusal"); fails = fails + 1 }
+    // Fill to FRAME_MAX_COLS, then the next column is refused.
+    var k: i64 = dataframe_ncols(&df)
+    while k < FRAME_MAX_COLS {
+        if dataframe_add_column(&!df, &w_col) != FRAME_OK { println("FAIL fill"); fails = fails + 1 }
+        k = k + 1
+    }
+    if dataframe_add_column(&!df, &w_col) != FRAME_ERR_COL_CAPACITY { println("FAIL capacity accepted"); fails = fails + 1 }
+    if dataframe_ncols(&df) != FRAME_MAX_COLS { println("FAIL capacity changed frame"); fails = fails + 1 }
+
+    if fails != 0 {
+        println("DATA_FRAME_FIXED_FAIL")
+        return 1
+    }
+    println("DATA_FRAME_FIXED_PASS")
+    0
+}

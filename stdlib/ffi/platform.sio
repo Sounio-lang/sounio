@@ -1,0 +1,70 @@
+// Linux platform loader. Runtime resources must be closed before platform_close.
+// The only ABI entry is checked dispatch; status is POSIX errno, 0 on success.
+extern "C" {
+    fn dlopen(name:*mut u8,flags:i32)->*mut u8
+    fn dlsym(handle:*mut u8,name:*mut u8)->*mut u8
+    fn dlclose(handle:*mut u8)->i32
+}
+pub linear struct Platform {
+    handle:*mut u8,
+    dispatch:*mut u8,
+    status:i64,
+}
+pub struct PlatformValue {pub value:i64,pub status:i64}
+fn platform_c_string(text:string)->*mut u8 with Alloc,Mut,Div {
+    let p=heap_alloc(128) as *mut i8
+    if (p as i64)<=0 {return 0 as *mut u8}
+    var i:i64=0
+    while i<127 {
+        let value=str_char_at(text,i)
+        let cell=((p as i64)+i) as *mut i8
+        if value<=0 {*cell=0;return p as *mut u8}
+        *cell=value as i8;i=i+1
+    }
+    heap_free(p)
+    return 0 as *mut u8
+}
+pub fn platform_open()->Platform with IO,Alloc,Mut,Div {
+    let name=platform_c_string("libstdlib_platform.so")
+    if (name as i64)==0 {return Platform {handle:0 as *mut u8,dispatch:0 as *mut u8,status:12}}
+    let handle=dlopen(name,2)
+    heap_free(name as *mut i8)
+    if (handle as i64)==0 {return Platform {handle:handle,dispatch:0 as *mut u8,status:2}}
+    let symbol=platform_c_string("sounio_platform_call")
+    if (symbol as i64)==0 {
+        let ignored=dlclose(handle)
+        return Platform {handle:0 as *mut u8,dispatch:0 as *mut u8,status:12}
+    }
+    let raw=dlsym(handle,symbol)
+    heap_free(symbol as *mut i8)
+    if (raw as i64)==0 {
+        let ignored=dlclose(handle)
+        return Platform {handle:0 as *mut u8,dispatch:0 as *mut u8,status:38}
+    }
+    let call=raw as fn(i64,i64,i64,i64,i64)->i64
+    let version=call(1,0,0,0,0)
+    if version!=1 {
+        let ignored=dlclose(handle)
+        return Platform {handle:0 as *mut u8,dispatch:0 as *mut u8,status:38}
+    }
+    return Platform {handle:handle,dispatch:raw,status:0}
+}
+pub fn platform_status(p:&Platform)->i64 {return p.status}
+// Low-level FFI boundary. Pointer-bearing operations are internal to owners;
+// safe higher-level users call typed resource/buffer wrappers.
+pub fn platform_call(p:&Platform,op:i64,a:i64,b:i64,c:i64,d:i64)->PlatformValue with IO {
+    if p.status!=0 {return PlatformValue {value:0,status:p.status}}
+    if op==0 {return PlatformValue {value:0,status:22}}
+    let call=p.dispatch as fn(i64,i64,i64,i64,i64)->i64
+    let value=call(op,a,b,c,d)
+    let status=call(0,0,0,0,0)
+    return PlatformValue {value:value,status:status}
+}
+pub fn platform_close(p:Platform) with IO,Panic {
+    let Platform {handle,dispatch,status}=p
+    if status==0 {
+        let call=dispatch as fn(i64,i64,i64,i64,i64)->i64
+        assert(call(3,0,0,0,0)==0)
+        assert(dlclose(handle)==0)
+    }
+}

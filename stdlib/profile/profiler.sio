@@ -1,15 +1,13 @@
 // stdlib/profile/profiler.sio — Synchronous Wall-Clock Profiler
 //
-// Provides named timing slots using clock_gettime(CLOCK_MONOTONIC), issued
-// as the raw Linux syscall (SYS_clock_gettime = 228 on x86-64): the native
-// backend has no libc to link an `extern "C"` clock_gettime against.
+// Provides named timing slots using POSIX clock_gettime(CLOCK_MONOTONIC).
 // Up to 64 named slots. Linear search for slot lookup (no hash map).
 //
 // Usage:
 //   var p = profiler_new()
-//   profiler_begin(&!p, "phase1")
+//   profiler_begin(&platform, &!p, "phase1")
 //   // ... work ...
-//   profiler_end(&!p, "phase1")
+//   profiler_end(&platform, &!p, "phase1")
 //   profiler_report(p)
 //
 // References:
@@ -17,13 +15,10 @@
 //   CLOCK_MONOTONIC (clockid=1) — monotonic wall clock, unaffected by NTP
 
 // ============================================================================
-// Clock syscall buffer
+// FFI Declarations
 // ============================================================================
 
-// syscall6 receives this buffer by address. It is a module global, as in
-// stdlib/os/env.sio, because `&!local_array` passed to syscall6 does not
-// reach the kernel as the array's address on the native backend.
-var PROFILER_TS: [i64; 2] = [0; 2]
+use ffi::platform::{Platform,platform_call}
 
 // ============================================================================
 // Types
@@ -48,10 +43,7 @@ struct Profiler {
 
 // Read current monotonic time in nanoseconds via clock_gettime(CLOCK_MONOTONIC).
 // The timespec struct is represented as [seconds, nanoseconds] in a 2-element i64 array.
-fn profiler_now_ns() -> i64 with IO {
-    let _rc = syscall6(228, 1, &!PROFILER_TS, 0, 0, 0, 0)
-    PROFILER_TS[0] * 1000000000 + PROFILER_TS[1]
-}
+
 
 // Find a slot index by name. Returns -1 if not found.
 fn profiler_find_slot(p: &Profiler, name: string) -> i64 {
@@ -79,39 +71,43 @@ pub fn profiler_new() -> Profiler {
 
 /// Begin timing a named slot. Creates the slot if it does not exist.
 /// Records the current monotonic timestamp as start_ns.
-pub fn profiler_begin(p: &!Profiler, name: string) with Mut, IO, Panic {
-    let idx = profiler_find_slot(p as &Profiler, name)
-    if idx >= 0 {
-        p.slots[idx as usize].start_ns = profiler_now_ns()
-        p.slots[idx as usize].active = true
-        return
+pub fn profiler_begin(platform:&Platform,p:&!Profiler,name:string)->i64 with Mut,IO,Panic {
+    let idx=profiler_find_slot(p as &Profiler,name)
+    if idx>=0 {if p.slots[idx as usize].active {return 114}}
+    else {if p.slot_count>=64 {return 28}}
+    let now=platform_call(platform,30,0,0,0,0)
+    if now.status!=0 {return now.status}
+    if idx>=0 {
+        p.slots[idx as usize].start_ns=now.value
+        p.slots[idx as usize].active=true
+        return 0
     }
-    // Allocate a new slot
-    if p.slot_count >= 64 {
-        println("profiler_begin: slot limit (64) reached, ignoring: {}", name)
-        return
-    }
-    let new_idx = p.slot_count
-    p.slots[new_idx as usize].name = name
-    p.slots[new_idx as usize].total_ns = 0
-    p.slots[new_idx as usize].call_count = 0
-    p.slots[new_idx as usize].start_ns = profiler_now_ns()
-    p.slots[new_idx as usize].active = true
-    p.slot_count = p.slot_count + 1
+    let new_idx=p.slot_count
+    p.slots[new_idx as usize].name=name
+    p.slots[new_idx as usize].total_ns=0
+    p.slots[new_idx as usize].call_count=0
+    p.slots[new_idx as usize].start_ns=now.value
+    p.slots[new_idx as usize].active=true
+    p.slot_count=p.slot_count+1
+    return 0
 }
 
 /// End timing a named slot. Adds elapsed nanoseconds to total_ns, increments call_count.
-pub fn profiler_end(p: &!Profiler, name: string) with Mut, IO, Panic {
-    let now = profiler_now_ns()
-    let idx = profiler_find_slot(p as &Profiler, name)
-    if idx < 0 {
-        println("profiler_end: slot not found: {}", name)
-        return
-    }
-    let elapsed = now - p.slots[idx as usize].start_ns
-    p.slots[idx as usize].total_ns = p.slots[idx as usize].total_ns + elapsed
-    p.slots[idx as usize].call_count = p.slots[idx as usize].call_count + 1
-    p.slots[idx as usize].active = false
+pub fn profiler_end(platform:&Platform,p:&!Profiler,name:string)->i64 with Mut,IO,Panic {
+    let idx=profiler_find_slot(p as &Profiler,name)
+    if idx<0 {return 2}
+    if !p.slots[idx as usize].active {return 22}
+    let now=platform_call(platform,30,0,0,0,0)
+    if now.status!=0 {return now.status}
+    let start=p.slots[idx as usize].start_ns
+    if now.value<start {return 71}
+    let elapsed=now.value-start
+    if elapsed>9223372036854775807-p.slots[idx as usize].total_ns {return 75}
+    if p.slots[idx as usize].call_count==9223372036854775807 {return 75}
+    p.slots[idx as usize].total_ns=p.slots[idx as usize].total_ns+elapsed
+    p.slots[idx as usize].call_count=p.slots[idx as usize].call_count+1
+    p.slots[idx as usize].active=false
+    return 0
 }
 
 /// Reset all timing data (zero totals and counts, keep slot names).

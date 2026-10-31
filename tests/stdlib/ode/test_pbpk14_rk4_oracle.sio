@@ -1,0 +1,45 @@
+//@ run-pass
+// solve_pbpk14_rk4 against the converged C++23 reference in
+// tests/oracles/pbpk14_rk4_stability.cpp. Plain RK4 at the caller's step
+// (24 h / 100 = 0.24 h) diverges to NaN on this stiff model (||A||_1 = 875/h);
+// the solver now substeps so that h * ||A||_1 <= 2.5.
+
+use ode::pbpk14_rk4::{PBPK14State, default_params, solve_pbpk14_rk4, pbpk14_stiffness_bound}
+
+fn rel_close(got: f64, want: f64, rel: f64) -> bool {
+    let d = got - want
+    let ad = if d < 0.0 { 0.0 - d } else { d }
+    let aw = if want < 0.0 { 0.0 - want } else { want }
+    ad <= rel * aw
+}
+
+fn oral(dose: f64) -> PBPK14State {
+    PBPK14State {
+        gut: dose, art: 0.0, ven: 0.0, lung: 0.0,
+        heart: 0.0, brain: 0.0, muscle: 0.0, adipose: 0.0,
+        skin: 0.0, bone: 0.0, spleen: 0.0, gut_tis: 0.0,
+        liver: 0.0, kidney: 0.0
+    }
+}
+
+fn main() -> i32 with IO, Mut, Div {
+    var fail: i64 = 0
+    let p = default_params()
+    if pbpk14_stiffness_bound(p) != 875.0 { print("FAIL stiffness bound\n"); fail = fail + 1 }
+
+    let s = solve_pbpk14_rk4(oral(100.0), p, 24.0, 100)
+    let total6 = s.gut + s.art + s.ven + s.lung + s.liver + s.kidney
+    if s.nsteps != 100 { print("FAIL nsteps\n"); fail = fail + 1 }
+    if s.substeps != 8400 { print("FAIL substeps\n"); fail = fail + 1 }
+    // reference (1e6 plain RK4 steps): total6 0.082087174003404817, liver 0.015592864654656919
+    if !rel_close(total6, 0.082087174003404817, 1.0e-9) { print("FAIL total6 at 24 h\n"); fail = fail + 1 }
+    if !rel_close(s.liver, 0.015592864654656919, 1.0e-9) { print("FAIL liver at 24 h\n"); fail = fail + 1 }
+
+    let s2 = solve_pbpk14_rk4(oral(100.0), p, 2.0, 50)
+    // reference (1e6 plain RK4 steps): liver 1.3583615013292529
+    if !rel_close(s2.liver, 1.3583615013292529, 1.0e-9) { print("FAIL liver at 2 h\n"); fail = fail + 1 }
+
+    if fail != 0 { return 1 }
+    print("PASS\n")
+    return 0
+}

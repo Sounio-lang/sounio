@@ -87,6 +87,19 @@ run_step souc-version env -u SOUC_BIN -u SOUNIO_SOUC_BIN \
   -u MADAROS_BIN -u MADAROS_RAW_BIN -u SOUNIO_MADAROS_BIN \
   SOUNIO_STDLIB_PATH="$INSTALLED_STDLIB" "$INSTALLED_SOUC" --version
 assert_nonempty_log souc-version
+# The installed launcher must name the same toolchain version as the tree it
+# was installed from (ADR-018 §1). A non-empty log is not enough: before the
+# Madaros helpers were shipped, --version died on a missing source file and an
+# `unknown` version would also have been non-empty.
+expected_version="$(sed -n 's/^## \[\(.*\)\].*/\1/p' "$ROOT_DIR/CHANGELOG.md" | head -n 1)"
+[[ -n "$expected_version" ]] || expected_version="$(sed -n 's/^version: //p' "$ROOT_DIR/CITATION.cff" | head -n 1)"
+reported_version="$(grep -m1 -oE '^[^ ]+ \(madaros [0-9a-f]+\)$' "$LOG_DIR/souc-version.log" | cut -d' ' -f1 || true)"
+if [[ "$reported_version" != "$expected_version" ]]; then
+  echo "[install-support] FAIL: installed souc --version reports '${reported_version:-<none>}', the tree is '$expected_version'" >&2
+  cat "$LOG_DIR/souc-version.log" >&2
+  exit 1
+fi
+echo "[install-support] souc-version names $reported_version"
 
 run_step madaros-version env -u MADAROS_BIN -u MADAROS_RAW_BIN -u SOUNIO_MADAROS_BIN \
   "$INSTALLED_MADAROS" --version
@@ -100,6 +113,29 @@ assert_nonempty_log souc-info
 run_step souc-check-hello env -u SOUC_BIN -u SOUNIO_SOUC_BIN \
   -u MADAROS_BIN -u MADAROS_RAW_BIN -u SOUNIO_MADAROS_BIN \
   SOUNIO_STDLIB_PATH="$INSTALLED_STDLIB" "$INSTALLED_SOUC" check examples/hello.sio
+
+# A release archive is this prefix, staged in a temporary directory and
+# extracted elsewhere. Every link must therefore be relative, and the toolchain
+# must still run once the prefix has moved: before this check, install.sh wrote
+# absolute links into the staging directory and the extracted 3.0.0-rc.2
+# bin/madaros died on a dangling scripts/lib/resolve_madaros.sh.
+absolute_links="$(find "$PREFIX" -type l -lname '/*' -print)"
+if [[ -n "$absolute_links" ]]; then
+  echo "[install-support] FAIL: absolute symlinks in the prefix (they dangle once the archive is extracted):" >&2
+  echo "$absolute_links" >&2
+  exit 1
+fi
+MOVED="$WORK_DIR/moved-prefix"
+mv "$PREFIX" "$MOVED"
+run_step moved-madaros-version env -u MADAROS_BIN -u MADAROS_RAW_BIN -u SOUNIO_MADAROS_BIN \
+  "$MOVED/bin/madaros" --version
+assert_nonempty_log moved-madaros-version
+# No SOUNIO_STDLIB_PATH: the moved prefix must find its stdlib through its own
+# (relative) stdlib link.
+run_step moved-souc-check-hello env -u SOUC_BIN -u SOUNIO_SOUC_BIN -u SOUNIO_STDLIB_PATH \
+  -u MADAROS_BIN -u MADAROS_RAW_BIN -u SOUNIO_MADAROS_BIN \
+  "$MOVED/bin/souc" check examples/hello.sio
+mv "$MOVED" "$PREFIX"
 
 if [[ "$KEEP_WORK_DIR" == "1" ]]; then
   echo "SOUNIO_INSTALL_SUPPORT_GATE_ARTIFACT_DIR=$WORK_DIR"
