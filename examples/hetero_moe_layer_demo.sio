@@ -1,0 +1,143 @@
+//@ run-pass
+//
+// First native MoE-FFN layer in Sounio: router top-k -> Q4_K mul_mat_id
+// (gate/up/down) -> SiLU*Up -> weighted combine. No llama.cpp.
+// Usage: hetero_moe_layer_demo [gemm-ptx] [mmid-ptx]
+
+use hetero::runtime::{rt_load_mmid, rt_open}
+use hetero::moe::{moe_ffn_q4k, moe_topk}
+use hetero::cublas_bench::{gb_host_f32, gb_host_set}
+
+fn write_u8(buf: *mut u8, off: i64, v: i64) with Mut {
+    let shift = (off % 8) * 8
+    let mask = (0 - 1) - (255 << shift)
+    let word = (read_i64(buf as *mut i64, off / 8) & mask) | ((v & 255) << shift)
+    write_i64(buf as *mut i64, off / 8, word)
+}
+
+fn f32_to_f16_bits(v: f64) -> i64 {
+    if v <= 0.0 { return 0 }
+    var exp: i64 = 15
+    var mant = v
+    while mant >= 2.0 && exp < 30 {
+        mant = mant / 2.0
+        exp = exp + 1
+    }
+    while mant < 1.0 && exp > 1 {
+        mant = mant * 2.0
+        exp = exp - 1
+    }
+    let frac = ((mant - 1.0) * 1024.0) as i64
+    (exp << 10) | (frac & 1023)
+}
+
+fn pack_q4k(weights: *mut u8, expert_stride: i64, row_stride: i64, experts: i64, m: i64, k: i64, fill: f64) with Mut {
+    let nqb = k / 256
+    let dbits = f32_to_f16_bits(fill / 15.0)
+    var e: i64 = 0
+    while e < experts {
+        var r: i64 = 0
+        while r < m {
+            var ib: i64 = 0
+            while ib < nqb {
+                let base = e * expert_stride + r * row_stride + ib * 144
+                write_u8(weights, base + 0, dbits & 255)
+                write_u8(weights, base + 1, (dbits >> 8) & 255)
+                write_u8(weights, base + 2, 0)
+                write_u8(weights, base + 3, 0)
+                var s: i64 = 0
+                while s < 4 {
+                    write_u8(weights, base + 4 + s, 1)
+                    write_u8(weights, base + 8 + s, 0)
+                    write_u8(weights, base + 12 + s, 1)
+                    s = s + 1
+                }
+                var q: i64 = 0
+                while q < 128 {
+                    write_u8(weights, base + 16 + q, (8 << 4) | 8)
+                    q = q + 1
+                }
+                ib = ib + 1
+            }
+            r = r + 1
+        }
+        e = e + 1
+    }
+}
+
+fn main() with IO, Mut, Panic, Div, Alloc {
+    var gemm_ptx = "stdlib/hetero/kernels/gemm_naive_f32.ptx"
+    var mmid_ptx = "stdlib/hetero/kernels/mmid_q4k_dp4a_f32.ptx"
+    if arg_count() > 0 { gemm_ptx = get_arg(0) }
+    if arg_count() > 1 { mmid_ptx = get_arg(1) }
+
+    var rt = rt_open(gemm_ptx, "gemm_naive_f32")
+    if !rt.ready {
+        print("gpu: unavailable\nMOE LAYER DONE\n")
+        exit(0)
+    }
+    if !rt_load_mmid(&!rt, mmid_ptx) {
+        print("mmid: PTX load failed\nMOE LAYER DONE\n")
+        exit(0)
+    }
+    print("moe: mmid ready\n")
+
+    // Compact MoE-FFN shape (still real Q4_K + GPU experts).
+    let hidden: i64 = 256
+    let inter: i64 = 512
+    let experts: i64 = 8
+    let slots: i64 = 2
+    let n_tokens: i64 = 1
+
+    let row_g = (hidden / 256) * 144
+    let row_u = row_g
+    let row_d = (inter / 256) * 144
+    let eg = inter * row_g
+    let eu = inter * row_u
+    let ed = hidden * row_d
+    let gate_w = heap_alloc(experts * eg)
+    let up_w = heap_alloc(experts * eu)
+    let down_w = heap_alloc(experts * ed)
+    pack_q4k(gate_w, eg, row_g, experts, inter, hidden, 1.0)
+    pack_q4k(up_w, eu, row_u, experts, inter, hidden, 1.0)
+    pack_q4k(down_w, ed, row_d, experts, hidden, inter, 1.0)
+
+    let x = gb_host_f32(n_tokens * hidden)
+    let logits = gb_host_f32(n_tokens * experts)
+    let ids = heap_alloc(n_tokens * slots * 4)
+    let route_w = gb_host_f32(n_tokens * slots)
+    let dst = gb_host_f32(n_tokens * hidden)
+    var i: i64 = 0
+    while i < n_tokens * hidden {
+        gb_host_set(x, i, 1.0)
+        i = i + 1
+    }
+    i = 0
+    while i < n_tokens * experts {
+        // Distinct logits so top-k is stable.
+        gb_host_set(logits, i, ((i % experts) as f64) * 0.35)
+        i = i + 1
+    }
+    moe_topk(logits, n_tokens, experts, slots, ids, route_w)
+    print("moe: topk done\n")
+
+    let run = moe_ffn_q4k(
+        &rt, x, hidden, n_tokens, slots, ids, route_w,
+        gate_w, experts * eg, up_w, experts * eu, down_w, experts * ed,
+        experts, inter, eg, row_g, eu, row_u, ed, row_d, dst
+    )
+    if !run.ok {
+        print("moe: ffn failed status=")
+        print(run.status)
+        print("\nMOE LAYER DONE\n")
+        exit(1)
+    }
+    print("moe: gate_ms=")
+    print(run.ms_gate)
+    print(" up_ms=")
+    print(run.ms_up)
+    print(" down_ms=")
+    print(run.ms_down)
+    print("\n")
+    print("MOE LAYER DONE\n")
+}

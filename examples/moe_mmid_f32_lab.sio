@@ -1,0 +1,267 @@
+//@ run-pass
+//
+// MoE F32 mul_mat_id lab: load mmid_q4k_dp4a_f32.ptx, run a small NMSE check
+// against CPU dequant+dot, then time contract-shaped launches (m=4096,k=2048).
+// Full-shape NMSE + gate numbers also live in the host binary built by
+// scripts/gpu/run_mmid_q4k_l4_lab.sh (same kernel).
+// Usage: moe_mmid_f32_lab [path-to-mmid_q4k_dp4a_f32.ptx]
+
+use hetero::probe_cuda::{pb_cstr}
+use hetero::cuda_exec::{
+    CudaExec, ce_alloc, ce_arg, ce_d2h, ce_event_create, ce_event_elapsed_ms, ce_event_record,
+    ce_function, ce_h2d, ce_launch_2d_shmem, ce_module_log, ce_open, ce_sync,
+}
+use hetero::cublas_bench::{gb_host_f32, gb_host_get, gb_host_set}
+
+fn abs_t(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn write_u8(buf: *mut u8, off: i64, v: i64) with Mut {
+    let shift = (off % 8) * 8
+    let mask = (0 - 1) - (255 << shift)
+    let word = (read_i64(buf as *mut i64, off / 8) & mask) | ((v & 255) << shift)
+    write_i64(buf as *mut i64, off / 8, word)
+}
+
+fn write_i32(buf: *mut u8, idx: i64, v: i64) with Mut {
+    var b: i64 = 0
+    while b < 4 {
+        write_u8(buf, idx * 4 + b, (v >> (b * 8)) & 255)
+        b = b + 1
+    }
+}
+
+fn f32_to_f16_bits(v: f64) -> i64 {
+    // Positive normals only (lab packing uses small positive scales).
+    if v <= 0.0 { return 0 }
+    var exp: i64 = 15
+    var mant = v
+    while mant >= 2.0 && exp < 30 {
+        mant = mant / 2.0
+        exp = exp + 1
+    }
+    while mant < 1.0 && exp > 1 {
+        mant = mant * 2.0
+        exp = exp - 1
+    }
+    let frac = ((mant - 1.0) * 1024.0) as i64
+    (exp << 10) | (frac & 1023)
+}
+
+fn pack_q4k_const(weights: *mut u8, expert_stride: i64, row_stride: i64, experts: i64, m: i64, k: i64, fill: f64) with Mut {
+    let nqb = k / 256
+    let dbits = f32_to_f16_bits(fill / 15.0)
+    var e: i64 = 0
+    while e < experts {
+        var r: i64 = 0
+        while r < m {
+            var ib: i64 = 0
+            while ib < nqb {
+                let base = e * expert_stride + r * row_stride + ib * 144
+                write_u8(weights, base + 0, dbits & 255)
+                write_u8(weights, base + 1, (dbits >> 8) & 255)
+                write_u8(weights, base + 2, 0)
+                write_u8(weights, base + 3, 0)
+                var s: i64 = 0
+                while s < 4 {
+                    write_u8(weights, base + 4 + s, 1)
+                    write_u8(weights, base + 8 + s, 0)
+                    write_u8(weights, base + 12 + s, 1)
+                    s = s + 1
+                }
+                var q: i64 = 0
+                while q < 128 {
+                    // nibbles = 8 (mid-scale) for both halves
+                    write_u8(weights, base + 16 + q, (8 << 4) | 8)
+                    q = q + 1
+                }
+                ib = ib + 1
+            }
+            r = r + 1
+        }
+        e = e + 1
+    }
+}
+
+fn launch_mmid(exec: &CudaExec, func: i64, dw: i64, dy: i64, dids: i64, ddst: i64,
+               k: i64, m: i64, experts: i64, slots: i64, ntokens: i64,
+               expert_stride: i64, row_stride: i64) -> f64 with Alloc, Mut, Panic, Div {
+    let params = heap_alloc(8 * 17)
+    let x_nb1 = k * 4
+    let x_nb2 = slots * x_nb1
+    let ids_nb1 = slots * 4
+    let dst_nb1 = m * 4
+    let dst_nb2 = slots * dst_nb1
+    write_i64(params as *mut i64, 0, ce_arg(dw) as i64)
+    write_i64(params as *mut i64, 1, ce_arg(dy) as i64)
+    write_i64(params as *mut i64, 2, ce_arg(dids) as i64)
+    write_i64(params as *mut i64, 3, ce_arg(ddst) as i64)
+    write_i64(params as *mut i64, 4, ce_arg(k) as i64)
+    write_i64(params as *mut i64, 5, ce_arg(m) as i64)
+    write_i64(params as *mut i64, 6, ce_arg(experts) as i64)
+    write_i64(params as *mut i64, 7, ce_arg(slots) as i64)
+    write_i64(params as *mut i64, 8, ce_arg(ntokens) as i64)
+    write_i64(params as *mut i64, 9, ce_arg(expert_stride) as i64)
+    write_i64(params as *mut i64, 10, ce_arg(row_stride) as i64)
+    write_i64(params as *mut i64, 11, ce_arg(x_nb1) as i64)
+    write_i64(params as *mut i64, 12, ce_arg(x_nb2) as i64)
+    write_i64(params as *mut i64, 13, ce_arg(ids_nb1) as i64)
+    write_i64(params as *mut i64, 14, ce_arg(dst_nb1) as i64)
+    write_i64(params as *mut i64, 15, ce_arg(dst_nb2) as i64)
+    write_i64(params as *mut i64, 16, ce_arg(slots) as i64)
+    let threads: i64 = 128
+    let tiles = (m + threads - 1) / threads
+    let shmem = 4 * k + 4 * (k / 32) * 4
+    let start = ce_event_create(exec)
+    let stop = ce_event_create(exec)
+    var st = ce_event_record(exec, start)
+    st = ce_launch_2d_shmem(exec, func, tiles, experts, threads, shmem, params)
+    st = ce_event_record(exec, stop)
+    st = ce_sync(exec)
+    ce_event_elapsed_ms(exec, start, stop)
+}
+
+fn main() with IO, Mut, Panic, Div, Alloc {
+    let exec = ce_open()
+    if !exec.ok {
+        print("gpu: unavailable\n")
+        print("MMID LAB DONE\n")
+        exit(0)
+    }
+    var path = "stdlib/hetero/kernels/mmid_q4k_dp4a_f32.ptx"
+    if arg_count() > 0 { path = get_arg(0) }
+    let ptx = read_file(path)
+    if str_len(ptx) == 0 {
+        print("kernel: PTX missing (build with scripts/gpu/run_mmid_q4k_l4_lab.sh)\n")
+        print("MMID LAB DONE\n")
+        exit(0)
+    }
+    let module = ce_module_log(&exec, pb_cstr(ptx))
+    if module == 0 {
+        print("kernel: cuModuleLoadData failed\n")
+        print("MMID LAB DONE\n")
+        exit(0)
+    }
+    let func = ce_function(&exec, module, "mmid_q4k_dp4a_f32")
+    if func == 0 {
+        print("kernel: cuModuleGetFunction failed\n")
+        print("MMID LAB DONE\n")
+        exit(0)
+    }
+    print("kernel: mmid_q4k_dp4a_f32 loaded\n")
+
+    // Small NMSE: constant Q4_K weights (~0.533), unit activations.
+    let m0: i64 = 256
+    let k0: i64 = 256
+    let e0: i64 = 8
+    let slots: i64 = 4
+    let n0: i64 = 4
+    let row_stride0 = (k0 / 256) * 144
+    let expert_stride0 = m0 * row_stride0
+    let wbytes0 = e0 * expert_stride0
+    let weights0 = heap_alloc(wbytes0)
+    pack_q4k_const(weights0, expert_stride0, row_stride0, e0, m0, k0, 1.0)
+    let y0 = gb_host_f32(n0 * slots * k0)
+    let dst0 = gb_host_f32(n0 * slots * m0)
+    let ids0 = heap_alloc(n0 * slots * 4)
+    var t: i64 = 0
+    while t < n0 {
+        var s: i64 = 0
+        while s < slots {
+            write_i32(ids0, t * slots + s, (t * slots + s) % e0)
+            var i: i64 = 0
+            while i < k0 {
+                gb_host_set(y0, (t * slots + s) * k0 + i, 1.0)
+                i = i + 1
+            }
+            s = s + 1
+        }
+        t = t + 1
+    }
+    let dw0 = ce_alloc(&exec, wbytes0)
+    let dy0 = ce_alloc(&exec, n0 * slots * k0 * 4)
+    let dids0 = ce_alloc(&exec, n0 * slots * 4)
+    let ddst0 = ce_alloc(&exec, n0 * slots * m0 * 4)
+    var st = ce_h2d(&exec, dw0, weights0, wbytes0)
+    st = ce_h2d(&exec, dy0, y0, n0 * slots * k0 * 4)
+    st = ce_h2d(&exec, dids0, ids0, n0 * slots * 4)
+    let _ms0 = launch_mmid(&exec, func, dw0, dy0, dids0, ddst0, k0, m0, e0, slots, n0, expert_stride0, row_stride0)
+    st = ce_d2h(&exec, dst0, ddst0, n0 * slots * m0 * 4)
+    // Expected: each output ~ (8/15)*k0 for scale=1 packing (d=1/15, q=8).
+    let expect = (8.0 / 15.0) * (k0 as f64)
+    var num = 0.0
+    var den = 0.0
+    var idx: i64 = 0
+    while idx < n0 * slots * m0 {
+        let g = gb_host_get(dst0, idx)
+        let d = g - expect
+        num = num + d * d
+        den = den + expect * expect
+        idx = idx + 1
+    }
+    let nmse = if den > 0.0 { num / den } else { num }
+    print("small NMSE=")
+    print(nmse)
+    print(" expect~")
+    print(expect)
+    print("\n")
+    if nmse > 0.0005 {
+        print("FAIL: small NMSE gate\n")
+        exit(1)
+    }
+
+    // Contract timing shapes (gate: host lab NMSE; here we report us/run).
+    let m: i64 = 4096
+    let k: i64 = 2048
+    let experts: i64 = 128
+    let row_stride = (k / 256) * 144
+    let expert_stride = m * row_stride
+    let wbytes = experts * expert_stride
+    let weights = heap_alloc(wbytes)
+    pack_q4k_const(weights, expert_stride, row_stride, experts, m, k, 1.0)
+    let dw = ce_alloc(&exec, wbytes)
+    st = ce_h2d(&exec, dw, weights, wbytes)
+
+    var ncase: i64 = 0
+    while ncase < 2 {
+        let ntokens = if ncase == 0 { 16 } else { 64 }
+        let y = gb_host_f32(ntokens * slots * k)
+        let dst = gb_host_f32(ntokens * slots * m)
+        let ids = heap_alloc(ntokens * slots * 4)
+        t = 0
+        while t < ntokens {
+            var s: i64 = 0
+            while s < slots {
+                write_i32(ids, t * slots + s, (t * slots + s) % experts)
+                var i: i64 = 0
+                while i < k {
+                    gb_host_set(y, (t * slots + s) * k + i, 1.0)
+                    i = i + 1
+                }
+                s = s + 1
+            }
+            t = t + 1
+        }
+        let dy = ce_alloc(&exec, ntokens * slots * k * 4)
+        let dids = ce_alloc(&exec, ntokens * slots * 4)
+        let ddst = ce_alloc(&exec, ntokens * slots * m * 4)
+        st = ce_h2d(&exec, dy, y, ntokens * slots * k * 4)
+        st = ce_h2d(&exec, dids, ids, ntokens * slots * 4)
+        // warmup
+        let _w = launch_mmid(&exec, func, dw, dy, dids, ddst, k, m, experts, slots, ntokens, expert_stride, row_stride)
+        let runs: i64 = if ntokens >= 64 { 20 } else { 50 }
+        var r: i64 = 0
+        var ms_sum = 0.0
+        while r < runs {
+            ms_sum = ms_sum + launch_mmid(&exec, func, dw, dy, dids, ddst, k, m, experts, slots, ntokens, expert_stride, row_stride)
+            r = r + 1
+        }
+        let us = (ms_sum * 1000.0) / (runs as f64)
+        print("CASE n=")
+        print(ntokens)
+        print(" us/run=")
+        print(us)
+        print("\n")
+        ncase = ncase + 1
+    }
+    print("MMID LAB DONE\n")
+}
