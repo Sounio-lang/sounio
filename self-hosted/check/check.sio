@@ -8190,6 +8190,39 @@ fn checker_check_return_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with
     ty_never()
 }
 
+// SIO-378 follow-up (handler_discharge): inplace twin of the by-value check_handle_expr.
+// handle block checks the body with the effect added, discharges it afterwards,
+// checks the optional handler block, and returns the body type. Lowering erases
+// the node, so a checked program compiles, exits 0 and prints nothing until
+// handlers get a backend.
+fn checker_check_handle_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    var eff_name_buf: [i8; 64] = [0; 64]
+    var i: i64 = 0
+    while i < e.name.len && i < 64 {
+        eff_name_buf[i as usize] = e.name.buf[i as usize]
+        i = i + 1
+    }
+    let eff_id = effect_name_to_id(eff_name_buf, e.name.len)
+    var saved_effects = (*c).current_effects
+    var saved_count = (*c).current_effect_count
+    if eff_id >= 0 && (*c).current_effect_count < 8 {
+        if !has_effect_id((*c).current_effects, (*c).current_effect_count, eff_id) {
+            (*c).current_effects[(*c).current_effect_count as usize] = eff_id
+            (*c).current_effect_count = (*c).current_effect_count + 1
+        }
+    }
+    let body_ty = checker_check_opt_block_inplace(c, e.block)
+    (*c).current_sig_id = 0 - 1
+    (*c).current_effects = saved_effects
+    (*c).current_effect_count = saved_count
+    match e.handler_block {
+        Some(hb) => {
+            checker_check_block_inplace(c, *hb)
+        }
+        None => {}
+    }
+    body_ty
+}
 fn checker_check_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     if checker_expr_depth_exceeded((*c).expr_depth) {
         checker_report_error_at_inplace(c, e.span, 61, (*c).expr_depth, MAX_EXPR_DEPTH, 0)
@@ -8256,6 +8289,8 @@ fn checker_check_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, P
         result = checker_check_method_call_inplace(c, e)
     } else if e.kind == ExprKind::ExprCall {
         result = checker_check_call_expr_inplace(c, e)
+    } else if e.kind == ExprKind::ExprHandle {
+        result = checker_check_handle_expr_inplace(c, e)
     } else if e.kind == ExprKind::ExprIdent {
         result = checker_check_ident_expr_inplace(c, e)
     } else if e.kind == ExprKind::ExprCast {
