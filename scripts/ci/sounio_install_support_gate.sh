@@ -87,6 +87,19 @@ run_step souc-version env -u SOUC_BIN -u SOUNIO_SOUC_BIN \
   -u MADAROS_BIN -u MADAROS_RAW_BIN -u SOUNIO_MADAROS_BIN \
   SOUNIO_STDLIB_PATH="$INSTALLED_STDLIB" "$INSTALLED_SOUC" --version
 assert_nonempty_log souc-version
+# The installed launcher must name the same toolchain version as the tree it
+# was installed from (ADR-018 §1). A non-empty log is not enough: before the
+# Madaros helpers were shipped, --version died on a missing source file and an
+# `unknown` version would also have been non-empty.
+expected_version="$(sed -n 's/^## \[\(.*\)\].*/\1/p' "$ROOT_DIR/CHANGELOG.md" | head -n 1)"
+[[ -n "$expected_version" ]] || expected_version="$(sed -n 's/^version: //p' "$ROOT_DIR/CITATION.cff" | head -n 1)"
+reported_version="$(grep -m1 -oE '^[^ ]+ \(madaros [0-9a-f]+\)$' "$LOG_DIR/souc-version.log" | cut -d' ' -f1 || true)"
+if [[ "$reported_version" != "$expected_version" ]]; then
+  echo "[install-support] FAIL: installed souc --version reports '${reported_version:-<none>}', the tree is '$expected_version'" >&2
+  cat "$LOG_DIR/souc-version.log" >&2
+  exit 1
+fi
+echo "[install-support] souc-version names $reported_version"
 
 run_step madaros-version env -u MADAROS_BIN -u MADAROS_RAW_BIN -u SOUNIO_MADAROS_BIN \
   "$INSTALLED_MADAROS" --version

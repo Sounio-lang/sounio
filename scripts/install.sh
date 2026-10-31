@@ -160,6 +160,12 @@ esac
 # ------------------------------------------------------------------ copy support libs
 install -m 0644 "$ROOT_DIR/scripts/lib/resolve_souc.sh"      "$LIB_SCRIPTS/"
 install -m 0644 "$ROOT_DIR/scripts/lib/macos_codesign.sh"    "$LIB_SCRIPTS/"
+# bin/souc and bin/madaros source resolve_madaros.sh on every call, and bin/souc
+# runs materialize_madaros_prebuilt.sh before it trusts the Madaros ELF. Without
+# them an installed or extracted release dies at its first command
+# ("scripts/lib/resolve_madaros.sh: No such file or directory").
+install -m 0644 "$ROOT_DIR/scripts/lib/resolve_madaros.sh"   "$LIB_SCRIPTS/"
+install -m 0644 "$ROOT_DIR/scripts/lib/materialize_madaros_prebuilt.sh" "$LIB_SCRIPTS/"
 
 # ------------------------------------------------------------------ install launcher
 # The shipped launcher resolves its location via $ROOT_DIR=$(.. up from bin/souc).
@@ -182,6 +188,14 @@ fi
 mkdir -p "$PREFIX/scripts/lib"
 ln -sfn "$LIB_SCRIPTS/resolve_souc.sh"   "$PREFIX/scripts/lib/resolve_souc.sh"
 ln -sfn "$LIB_SCRIPTS/macos_codesign.sh" "$PREFIX/scripts/lib/macos_codesign.sh"
+ln -sfn "$LIB_SCRIPTS/resolve_madaros.sh" "$PREFIX/scripts/lib/resolve_madaros.sh"
+ln -sfn "$LIB_SCRIPTS/materialize_madaros_prebuilt.sh" "$PREFIX/scripts/lib/materialize_madaros_prebuilt.sh"
+
+# `souc --version` reports the newest CHANGELOG.md section, then CITATION.cff
+# (ADR-018 §1), both read from the root the launcher resolves. Ship both at the
+# prefix, so an installed toolchain names its own version.
+install -m 0644 "$ROOT_DIR/CITATION.cff" "$PREFIX/CITATION.cff"
+install -m 0644 "$ROOT_DIR/CHANGELOG.md" "$PREFIX/CHANGELOG.md"
 
 # ------------------------------------------------------------------ stdlib
 if [[ "$COPY_STDLIB" -eq 1 ]]; then
