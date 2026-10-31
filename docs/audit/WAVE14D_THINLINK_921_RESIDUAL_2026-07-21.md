@@ -102,7 +102,7 @@ with Wave13 Agent B.
 
 ## What this does **not** claim
 
-- Compact imported-simple-IR is production-ready (it is not; opt-in only).
+- Compact imported-simple-IR as a general capability (it remains opt-in only).
 - All of D3 is closed — exclusive-ref fragile chains / other multi-module
   residuals may remain; only the **#921 filed thin-link rc=12 pairing** is closed
   on the default path.

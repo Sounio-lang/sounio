@@ -97,7 +97,7 @@ Performance targets:
 
 ### QNN Integration
 
-**Status**: Production Ready
+**Label in this archive:** not the current project status. See the status line in the root README.
 
 22 QNN intrinsics implemented:
 - Weight initialization: `quat_init_xavier`, `quat_init_he`, `quat_init_unit`
@@ -115,7 +115,7 @@ Bug fixes:
 
 ### GPU Performance Validation
 
-**Status**: Production Ready
+**Label in this archive:** not the current project status. See the status line in the root README.
 
 Framework components:
 - `system_profiler.rs`: 555 LOC - Unified profiler abstraction

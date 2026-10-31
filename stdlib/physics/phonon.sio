@@ -19,40 +19,42 @@
 //   McNaughton & Abu-Yousef (1998) — portal vein Doppler pulsatility
 //   Taylor (1953) — dispersion in tubes (Taylor-Aris dispersion)
 
+use math::pure::{sin}
+
 // --- Constants ---
-let PHONON_N: i64 = 64           // lattice sites (fits in EState arrays)
-let PI: f64 = 3.14159265358979
+pub const PHONON_N: i64 = 64           // lattice sites (fits in EState arrays)
+let PI: f64 = 3.141592653589793
 
 // --- Phonon parameter indices (in a flat f64 array) ---
 // These mirror ODEParams layout for standalone lattice runs.
-let PP_D_EFF: i64 = 0            // effective axial diffusion (m^2/s)
-let PP_DX: i64 = 1               // site spacing (m)
-let PP_K_RELEASE: i64 = 2        // drug release rate to tissue (1/s)
-let PP_CL_SITE: i64 = 3          // per-site CYP3A4 clearance (1/s)
-let PP_FU: i64 = 4               // fraction unbound in plasma
-let PP_KP: i64 = 5               // liver tissue:plasma partition coefficient
-let PP_C_PORTAL: i64 = 6         // mean portal vein concentration (ng/mL)
-let PP_C_HA: i64 = 7             // mean hepatic artery concentration (ng/mL)
-let PP_F_HEART: i64 = 8          // heart rate (Hz)
-let PP_A_PORTAL: i64 = 9         // portal pulsatility amplitude (fraction)
-let PP_A_HA: i64 = 10            // hepatic artery pulsatility amplitude
-let PP_PHI_HA: i64 = 11          // arterial phase offset (radians)
-let PP_C_TISSUE: i64 = 12        // hepatocyte tissue concentration (ng/mL)
-let PP_V_BLOOD: i64 = 13         // blood velocity in sinusoid (m/s)
-let PP_ZONATION: i64 = 14        // zonation ratio (1.0=uniform, 5.0=5:1 pericentral)
-let PP_COUNT: i64 = 15           // total parameter count
+pub const PP_D_EFF: i64 = 0            // effective axial diffusion (m^2/s)
+pub const PP_DX: i64 = 1               // site spacing (m)
+pub const PP_K_RELEASE: i64 = 2        // drug release rate to tissue (1/s)
+pub const PP_CL_SITE: i64 = 3          // per-site CYP3A4 clearance (1/s)
+pub const PP_FU: i64 = 4               // fraction unbound in plasma
+pub const PP_KP: i64 = 5               // liver tissue:plasma partition coefficient
+pub const PP_C_PORTAL: i64 = 6         // mean portal vein concentration (ng/mL)
+pub const PP_C_HA: i64 = 7             // mean hepatic artery concentration (ng/mL)
+pub const PP_F_HEART: i64 = 8          // heart rate (Hz)
+pub const PP_A_PORTAL: i64 = 9         // portal pulsatility amplitude (fraction)
+pub const PP_A_HA: i64 = 10            // hepatic artery pulsatility amplitude
+pub const PP_PHI_HA: i64 = 11          // arterial phase offset (radians)
+pub const PP_C_TISSUE: i64 = 12        // hepatocyte tissue concentration (ng/mL)
+pub const PP_V_BLOOD: i64 = 13         // blood velocity in sinusoid (m/s)
+pub const PP_ZONATION: i64 = 14        // zonation ratio (1.0=uniform, 5.0=5:1 pericentral)
+pub const PP_COUNT: i64 = 15           // total parameter count
 
 // --- Lattice state ---
 // Stored in two flat arrays: values[0..N-1] = concentrations,
 // variances[0..N-1] = GUM variances per site.
 
-struct PhononState {
-    values: [f64; 64],
-    variances: [f64; 64],
-    n: i64
+pub struct PhononState {
+    pub values: [f64; 64],
+    pub variances: [f64; 64],
+    pub n: i64
 }
 
-fn phonon_state_zero() -> PhononState {
+pub fn phonon_state_zero() -> PhononState {
     PhononState {
         values: [0.0; 64],
         variances: [0.0; 64],
@@ -60,21 +62,18 @@ fn phonon_state_zero() -> PhononState {
     }
 }
 
-// --- sin approximation (no libm dependency) ---
-fn sin_approx(x: f64) -> f64 with Mut {
-    // Reduce to [-pi, pi]
-    var a = x
-    while a > PI { a = a - 2.0 * PI }
-    while a < 0.0 - PI { a = a + 2.0 * PI }
-    // Bhaskara I approximation: sin(x) ≈ 16x(π-x) / (5π²-4x(π-x))
-    let num = 16.0 * a * (PI - a)
-    let den = 5.0 * PI * PI - 4.0 * a * (PI - a)
-    if den == 0.0 { return 0.0 }
-    num / den
+// --- sine of the pulsatile waveform ---
+// math::pure::sin (Taylor on [-pi, pi], ~1e-16). This used to be the Bhaskara I
+// rational approximation 16a(pi-a) / (5pi^2 - 4a(pi-a)), which holds only on
+// [0, pi]; applied to the negative half-cycle it is not odd and gave -1.5 at
+// -pi/2 instead of -1, so every trough of the pulsatile inlet was 1.5 times too
+// deep (tests/oracles/phonon_quantity.cpp).
+fn sin_approx(x: f64) -> f64 with Mut, Div, Panic {
+    sin(x)
 }
 
 // --- Pulsatile boundary condition ---
-fn pulsatile_input(t: f64, params: &[f64; 64]) -> f64 with Mut {
+pub fn pulsatile_input(t: f64, params: &[f64; 64]) -> f64 with Mut, Div, Panic {
     let c_portal = params[PP_C_PORTAL]
     let c_ha = params[PP_C_HA]
     let f_heart = params[PP_F_HEART]
@@ -91,7 +90,7 @@ fn pulsatile_input(t: f64, params: &[f64; 64]) -> f64 with Mut {
 }
 
 // --- Pulsatile boundary variance ---
-fn pulsatile_input_variance(t: f64, params: &[f64; 64]) -> f64 with Mut {
+pub fn pulsatile_input_variance(t: f64, params: &[f64; 64]) -> f64 with Mut, Div, Panic {
     // Assume 10% coefficient of variation on the pulsatile amplitude
     let c_mean = pulsatile_input(t, params)
     let cv = 0.10
@@ -100,7 +99,7 @@ fn pulsatile_input_variance(t: f64, params: &[f64; 64]) -> f64 with Mut {
 
 // --- RHS: 1D lattice dynamics ---
 // dC_i/dt = diffusion + release_to_tissue + metabolism
-fn phonon_rhs(
+pub fn phonon_rhs(
     t: f64,
     state: &PhononState,
     params: &[f64; 64],
@@ -209,7 +208,7 @@ fn phonon_rhs(
 }
 
 // --- RK4 step for the lattice ---
-fn phonon_rk4_step(
+pub fn phonon_rk4_step(
     t: f64,
     state: &!PhononState,
     params: &[f64; 64],
@@ -270,7 +269,7 @@ fn phonon_rk4_step(
 }
 
 // --- Run the lattice for a given duration ---
-fn phonon_simulate(
+pub fn phonon_simulate(
     state: &!PhononState,
     params: &[f64; 64],
     t_start: f64,
@@ -290,7 +289,7 @@ fn phonon_simulate(
 
 // --- Spatial statistics ---
 
-fn phonon_spatial_average(state: &PhononState) -> f64 with Mut {
+pub fn phonon_spatial_average(state: &PhononState) -> f64 with Mut {
     var sum: f64 = 0.0
     var i: i64 = 0
     while i < state.n {
@@ -300,7 +299,7 @@ fn phonon_spatial_average(state: &PhononState) -> f64 with Mut {
     sum / (state.n as f64)
 }
 
-fn phonon_spatial_variance(state: &PhononState) -> f64 with Mut {
+pub fn phonon_spatial_variance(state: &PhononState) -> f64 with Mut {
     let mean = phonon_spatial_average(state)
     var sum_sq: f64 = 0.0
     var i: i64 = 0
@@ -312,16 +311,16 @@ fn phonon_spatial_variance(state: &PhononState) -> f64 with Mut {
     sum_sq / (state.n as f64)
 }
 
-fn phonon_outflow_concentration(state: &PhononState) -> f64 {
+pub fn phonon_outflow_concentration(state: &PhononState) -> f64 {
     // Venous end = last site
     state.values[state.n - 1]
 }
 
-fn phonon_outflow_variance(state: &PhononState) -> f64 {
+pub fn phonon_outflow_variance(state: &PhononState) -> f64 {
     state.variances[state.n - 1]
 }
 
-fn phonon_mean_variance(state: &PhononState) -> f64 with Mut {
+pub fn phonon_mean_variance(state: &PhononState) -> f64 with Mut {
     var sum: f64 = 0.0
     var i: i64 = 0
     while i < state.n {
@@ -332,7 +331,7 @@ fn phonon_mean_variance(state: &PhononState) -> f64 with Mut {
 }
 
 // --- Default rapamycin parameters ---
-fn rapamycin_phonon_params() -> [f64; 64] {
+pub fn rapamycin_phonon_params() -> [f64; 64] {
     var p: [f64; 64] = [0.0; 64]
     p[PP_D_EFF] = 1.0e-9         // m^2/s (Taylor dispersion in sinusoid)
     p[PP_DX] = 3.9e-6            // m (250μm / 64 sites ≈ 3.9μm)

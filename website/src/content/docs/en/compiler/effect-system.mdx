@@ -1,42 +1,34 @@
 ---
-title: "Effect System"
-description: "Algebraic effects with handlers: checking, inference, and runtime dispatch."
+title: "Effect checker internals"
+description: "How the Sounio compiler checks effects: source map of self-hosted/check/effects.sio and the effects subsystem, and what handlers do today."
 weight: 63
 category: "compiler"
 topic_id: "website.docs.compiler.effect-system"
 authority: "dual"
 audience: "contributors"
-last_validated: "unvalidated"
-validated_by: "none"
+last_validated: "2026-10-29"
+validated_by: "compiler-sources"
 source_of_truth: "docs/governance/topic-registry.v1.json#website.docs.compiler.effect-system"
 ---
 
-# Effect System
+The [effect system overview](/learn/effects/) is the user-facing contract: a named function declares `with`, and a caller that omits a callee's effect is rejected. This page is the contributor map of the checker that enforces that contract, and of what handlers do today.
 
-The effect system sits at the intersection of language design and active implementation. A comprehensive page needs to acknowledge the dedicated effect subsystem in the self-hosted tree while still keeping the public teaching contract centered on explicit `with ...` clauses.
+## What the checker runs
 
-## Current source map
+`self-hosted/check/effects.sio` is the set. It names 30 built-in effects, ids 0 through 29 (`effect_named_id_max` returns 29), and `effects_subset` is the call check: every required id must appear in the declared array. `self-hosted/check/check.sio` calls that check. The same file keeps `current_effects` as eight slots. A ninth distinct effect is E246 (`checker_emit_e246`), not a silent drop. An unknown name that is not held is E246 as well. Held names are listed in `effect_name_is_held` and are still dropped.
 
-- `self-hosted/check/effects.sio` covers effect-aware semantic checking.
-- `self-hosted/effects/types.sio`, `checker.sio`, and `handlers.sio` show the dedicated self-hosted implementation split.
-- `docs/architecture/EFFECT_HANDLERS_IMPLEMENTATION.md` remains useful as a broader design reference, but implementation truth should come from the current tree and verified behavior.
+Named functions are not inferred by default. A missing `with` is E035. Closure bodies are inferred onto the closure signature in `checker_check_closure_expr_inplace`, and the enclosing function's effect set is restored afterwards. Cross-function inference for named functions is `SOUNIO_EFFECT_INFER=1`, off by default (`checker_effect_inference_enabled`).
 
-## What public docs should emphasize
+lean_single is the other engine. It stores a bitmask in `FN_EFFECTS` (`self-hosted/compiler/lean_single.sio`) and checks calls with `bitset_is_subset`. The eight-slot ceiling is Madaros. lean_single accepts nine. Both engines emit E035 when the callee's effect is not in the caller.
 
-- Effects are explicit in function signatures.
-- The `IO` effect remains the clearest everyday example for users.
-- The richer handler architecture exists in the repo and in design docs, but not every path should be presented as equally validated in the checked public artifact.
+## What is parsed and not implemented
 
-## Signature-level effect tracking
+`effect` items are parsed in `self-hosted/parser/items.sio`. A semicolon after an operation is optional: the item parser skips a semicolon or a newline before the next operation. The collector Madaros runs, `checker_collect_item_inplace`, has no arm for an effect item, so the declaration is not registered. See EFF-021 in `docs/spec/2026-10/03-evidence.tsv`.
 
-```sio
-fn read_config(path: string) -> string with IO {
-    read_file(path)
-}
-```
+`handle` is parsed in `self-hosted/parser/exprs.sio` (`parse_handle_expr`). `self-hosted/ir/lower.sio` treats `ExprHandle` as unsupported control flow. Madaros fails the check with "expression kind was not checked in place". lean_single reports E200. There is no handler backend.
 
-## Contributor guidance
+`TyEffectVar` and `TyEffectRow` exist in `self-hosted/check/types.sio`. Nothing calls `ty_effect_var` or `ty_effect_row`. `self-hosted/check/effects_row.sio` is not imported by the checker that runs. `self-hosted/effects/` has no `use effects::` importer under `self-hosted/`.
 
-- If you are tracing effect behavior, start with the self-hosted checker file and then step into the dedicated effect modules.
-- If you are writing user docs, do not skip the signature-level contract just because the underlying implementation is more complex.
-- If you are documenting handlers, be explicit about whether you are describing the current checked path or the fuller design space.
+## Where to read next
+
+Start with the [effect system overview](/learn/effects/) if you want the rule a program has to follow. Stay on this page if you are tracing a diagnostic back to a function. The compile-fail witness for a pure caller of an IO function is `tests/compile-fail/effect_io_in_pure.sio`.

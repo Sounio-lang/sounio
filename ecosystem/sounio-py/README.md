@@ -130,6 +130,6 @@ result = model.run(dose=Knowledge(500.0, uncertainty=25.0))
 
 ---
 
-**Próximo arquivo:** `ecosystem/sounio-py/src/sounio/__init__.py` (prototipagem)
+**Fonte Python:** `ecosystem/sounio-py/python/sounio/__init__.py` (`python-source = "python"`)
 
 Esta API foi projetada para ser **natural para cientistas** enquanto preserva todo o poder epistêmico do Sounio.

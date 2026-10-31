@@ -54,19 +54,20 @@ Existing languages treat uncertainty as an afterthought (manual error propagatio
 - Units of measure are a prototype. They reject some mismatches and still accept others (#2751, #2752)
 - First-class support for scientific workflows
 
-### Is Sounio production-ready?
+### What is the maturity status?
 
-**Current checked artifact (`Madaros v0.80.0`, measured 2026-10-15)**: suitable for
-research and artifact-backed workflows, but not "everything in the source tree is public".
-`souc --version` does not print `1.0.0-beta.4`. Native execution is Linux x86-64.
-- ✅ Core language and science lanes are artifact-backed
+**Status: research language (pre-1.0).** APIs may change; not recommended for production use.
+
+That is the only public maturity line. It does not name a compiler version. Earlier answers to this question did, and those version strings are not restated here. Native execution of the committed prebuilt is Linux x86-64; other targets have their own notes. Feature evidence is route-specific.
+
+- Core language and science lanes are artifact-backed where a named test says so
 - GPU: not re-run on 2026-10-15. `TOUR.md` §6 measured an empty-body PTX skeleton. The root README records scoped Spark evidence only.
-- 🚧 No JIT tier — Cranelift is not compiled in any checked artifact (measured 2026-08-27)
-- ✅ The repo-wide checkpoint now includes self-hosted render/bootstrap proofs and the skills/dispatch wave
-- 🚧 Advanced or alternate-build features such as LLVM, SMT, and LSP remain profile-dependent
-- 📋 Public docs should still track the exact artifact and gate behind each claim
+- No JIT tier — Cranelift is not compiled in any checked artifact (measured 2026-08-27)
+- The repo-wide checkpoint includes self-hosted render/bootstrap proofs and the skills/dispatch wave
+- Advanced or alternate-build features such as LLVM, SMT, and LSP remain profile-dependent
+- Public docs should still track the exact artifact and gate behind each claim
 
-See [Current State](../README.md#current-state) for details.
+See [Honest Status](../README.md#honest-status) for route-specific evidence. That section is not a second maturity line.
 
 ### How does Sounio compare to Rust?
 

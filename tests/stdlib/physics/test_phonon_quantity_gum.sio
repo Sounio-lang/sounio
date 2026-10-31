@@ -1,0 +1,90 @@
+//@ run-pass
+//@ expect-stdout: PHONON_QUANTITY_GUM_PASS
+// tests/stdlib/physics/test_phonon_quantity_gum.sio
+//
+// The variances of stdlib/physics/phonon_quantity.sio are first-order GUM
+// propagated through forward sensitivities. The model is linear in each
+// concentration input, so a central finite difference of the concentration
+// itself recovers the sensitivity exactly up to rounding:
+//
+//   variance_i  ==  (dC_i/dc * u(c))^2,   dC_i/dc = (C_i(c + h) - C_i(c - h)) / 2h.
+//
+// Checked for u(c_portal) and for the initial-state uncertainty, at the
+// outlet after one cardiac cycle (8334 RK4 steps), against the finite
+// difference computed in the same program. The C++23 oracle
+// tests/oracles/phonon_quantity.cpp integrates the same lattice. A variance
+// path that is not the derivative of the value path (as the variance channel
+// of stdlib/physics/phonon.sio is not) fails here.
+
+use physics::phonon_quantity::*
+use units::lib::*
+
+fn rel(a: f64, b: f64) -> f64 {
+    let d = if a > b { a - b } else { b - a }
+    let m = if b < 0.0 { 0.0 - b } else { b }
+    if m == 0.0 { d } else { d / m }
+}
+
+fn params_with(c_portal: f64, u_portal: f64) -> PhononParams {
+    let b = rapamycin_phonon_params_q()
+    PhononParams {
+        d_eff: b.d_eff, dx: b.dx, k_release: b.k_release, cl_site: b.cl_site,
+        fu: b.fu, kp: b.kp,
+        c_portal: q_concentration_mass(c_portal, u_portal),
+        c_ha: q_concentration_mass(8.0e-6, 0.0),
+        f_heart: b.f_heart, a_portal: b.a_portal, a_ha: b.a_ha, phi_ha: b.phi_ha,
+        c_tissue: q_concentration_mass(2.0e-6, 0.0),
+        v_blood: b.v_blood, zonation: b.zonation,
+    }
+}
+
+fn outlet_after_cycle(c_portal: f64, u_portal: f64, c0: f64, var0: f64) -> Lattice64 with Mut, Div, Panic {
+    let p = params_with(c_portal, u_portal)
+    var s = lattice64_init(c0, var0)
+    let steps = phonon_simulate_q(&!s, &p, 0.0, 1.0 / 1.2)
+    if steps <= 0 { panic("no steps") }
+    s
+}
+
+fn main() -> i64 with IO, Mut, Div, Panic {
+    var fails: i64 = 0
+
+    // 1. u(c_portal) = 1e-6 kg/m^3, everything else exact, empty lattice.
+    let cp = 1.0e-5
+    let up = 1.0e-6
+    let h = 1.0e-7
+    let s = outlet_after_cycle(cp, up, 0.0, 0.0)
+    let plus = outlet_after_cycle(cp + h, 0.0, 0.0, 0.0)
+    let minus = outlet_after_cycle(cp - h, 0.0, 0.0, 0.0)
+    let dc = (plus.values[63] - minus.values[63]) / (2.0 * h)
+    let expect1 = dc * up * dc * up
+    // oracle: dC63/dc_portal = 0.4099052898, dC0/dc_portal = 0.74552421
+    if rel(dc, 0.4099052898) > 1.0e-6 { println("FAIL portal sensitivity vs oracle"); fails = fails + 1 }
+    if rel(s.variances[63], expect1) > 1.0e-6 { println("FAIL portal variance"); fails = fails + 1 }
+    // The inlet site sees the portal blood almost directly.
+    let dc0 = (plus.values[0] - minus.values[0]) / (2.0 * h)
+    if rel(dc0, 0.74552421) > 1.0e-6 { println("FAIL inlet sensitivity vs oracle"); fails = fails + 1 }
+    if rel(s.variances[0], dc0 * up * dc0 * up) > 1.0e-6 { println("FAIL portal variance inlet"); fails = fails + 1 }
+
+    // 2. Initial-state uncertainty: uniform c0 known to variance v0, exact inputs.
+    let c0 = 5.0e-6
+    let v0 = 1.0e-14
+    let h0 = 1.0e-7
+    let t = outlet_after_cycle(cp, 0.0, c0, v0)
+    let tp = outlet_after_cycle(cp, 0.0, c0 + h0, 0.0)
+    let tm = outlet_after_cycle(cp, 0.0, c0 - h0, 0.0)
+    let d0 = (tp.values[63] - tm.values[63]) / (2.0 * h0)
+    let expect2 = d0 * d0 * v0
+    if rel(t.variances[63], expect2) > 1.0e-6 { println("FAIL initial-state variance"); fails = fails + 1 }
+    // The initial state washes out but has not vanished after one transit.
+    // oracle: dC63/dc0 = 0.397481215
+    if rel(d0, 0.397481215) > 1.0e-6 { println("FAIL initial-state sensitivity vs oracle"); fails = fails + 1 }
+
+    if fails != 0 {
+        println("PHONON_QUANTITY_GUM_FAIL")
+        println(fails)
+        return 1
+    }
+    println("PHONON_QUANTITY_GUM_PASS")
+    0
+}
