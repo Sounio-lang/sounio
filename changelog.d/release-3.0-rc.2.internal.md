@@ -1,1 +1,1 @@
-Release 3.0.0-rc.2: main@cef370956 merged into release/3.0; CITATION.cff and SECURITY.md name 3.0.0-rc.2; the science-pipeline snapshot is regenerated on this branch. The CHANGELOG section is assembled in a separate docs-only PR (ADR-018 §4).
+Release 3.0.0-rc.2: main@3ab32211c merged into release/3.0; CITATION.cff and SECURITY.md name 3.0.0-rc.2. The CHANGELOG section and the stdlib/science snapshots follow in a separate PR (ADR-018 §4).
