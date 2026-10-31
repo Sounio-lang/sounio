@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.guide.device-compatibility
+authority: repo_only
+audience: users
+last_validated: unvalidated
+validated_by: none
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.guide.device-compatibility
+-->
+
 # Device compatibility
 
 Only rows with a measurement from this repository. An empty cell is

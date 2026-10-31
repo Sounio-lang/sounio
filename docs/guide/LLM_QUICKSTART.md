@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.guide.llm-quickstart
+authority: repo_only
+audience: users
+last_validated: unvalidated
+validated_by: none
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.guide.llm-quickstart
+-->
+
 # Sounio LLM quickstart
 
 Linux x86-64. The compiler entry point is `bin/souc` in this repository.
