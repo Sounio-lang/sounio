@@ -1,1 +1,0 @@
-Claim-oracle inventory: the Python SAN scan model is demoted to external_corroboration_only (ADR-021 step 1), and the inventory scanner now applies human overrides from claim_oracle_inventory.overrides.tsv.

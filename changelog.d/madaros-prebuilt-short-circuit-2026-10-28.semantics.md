@@ -1,1 +1,0 @@
-The shipped Madaros prebuilt is rebuilt from `main` at the ADR-014 merge, so `&&` and `||` now short-circuit for everyone using `bin/souc` or `bin/madaros`, matching `lean_single`. The right operand is evaluated only when the left one does not decide the result.

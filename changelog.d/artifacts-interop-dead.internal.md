@@ -1,1 +1,0 @@
-The February 2026 Cargo diagnostic snapshot, the unused F# interop port, the standalone SNIO protocol script, three inventory-only example smokes, and two stale agent-note directories were removed. No compiler, runtime, or stdlib behaviour changes.
