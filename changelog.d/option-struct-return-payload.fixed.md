@@ -1,1 +1,0 @@
-`let o = f(..)` where `f` returns `Option<P>` with a plain payload (a struct, or a scalar such as `f64`) now gives the `Some(p)` arm the payload's type on Madaros. Only `Option<Box<T>>` returns were recorded, so `p` was bound as a Box handle and `p.y` crashed with SIGILL. An annotated `let o: Option<P> = f(..)` already worked.

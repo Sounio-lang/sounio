@@ -1,1 +1,0 @@
-ADR-022 plus a prototype FPGA emitter: examples/fpga/san_scan_kernel.sio translates to HLS C++ judged bit-exact by the Futhark reference in fpga_prototype_gate.sh; prototype tooling only, no souc behaviour change.

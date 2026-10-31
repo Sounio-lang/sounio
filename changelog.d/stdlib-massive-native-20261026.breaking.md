@@ -1,1 +1,0 @@
-Canonical atomic and mutex operations now require a checked Platform context and explicit resource closure; monotonic instants and profiler begin/end use the same context and return acquisition or state errors. Existing stdlib consumers and the atomic example are migrated.

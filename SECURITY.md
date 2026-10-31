@@ -4,11 +4,11 @@ Sounio is designed for safety-critical environments (including clinical dosing a
 
 ## Supported Versions
 
-`souc --version` reports `3.0.0-rc.1`. Security patches apply to that toolchain series:
+`souc --version` reports `3.0.0-rc.2`. Security patches apply to that toolchain series:
 
 | Major Version Series | Supported |
 | -------------------- | ------------------ |
-| 3.0.x (`3.0.0-rc.1`, as reported by `souc --version`) | :white_check_mark: |
+| 3.0.x (`3.0.0-rc.2`, as reported by `souc --version`) | :white_check_mark: |
 | < 3.0 | :x: |
 
 ---

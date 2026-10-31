@@ -1,1 +1,0 @@
-A shallow call is no longer rejected as deeper than the expression cap. The checker was reading that counter from the wrong word. Expression checks stay on the checker they were given, and a missing function-name handle is refused instead of stored through.
