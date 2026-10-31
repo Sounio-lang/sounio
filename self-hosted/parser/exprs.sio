@@ -341,6 +341,9 @@ impl Parser {
         else if k == TokenKind::Perform {
             self.parse_perform_expr()
         }
+        else if k == TokenKind::Resume {
+            self.parse_resume_expr()
+        }
         // Async/spawn blocks are parsed conservatively as block-shaped
         // expressions; async runtime lowering is handled outside this layer.
         else if k == TokenKind::Async {
@@ -695,29 +698,141 @@ impl Parser {
         p = body_pair.0
         let body = body_pair.1
 
-        // Parse optional handler: with { ... }
-        var handler_opt: Option<Box<Block>> = None
+        // Parse optional handler: with { on/return clauses } (SIO-417)
+        var clauses_opt: Option<Box<HandlerClauseList>> = None
         if parser_peek(p) == TokenKind::With {
             p = p.advance()  // skip 'with'
-            let handler_pair = p.parse_block()
-            p = handler_pair.0
-            handler_opt = Some(Box::new(handler_pair.1))
+            p = p.expect(TokenKind::LBrace)
+            var rev_clauses: Option<Box<HandlerClauseList>> = None
+            while parser_peek(p) != TokenKind::RBrace && parser_peek(p) != TokenKind::Eof {
+                while parser_peek(p) == TokenKind::Semi || parser_peek(p) == TokenKind::Newline {
+                    p = p.advance()
+                }
+                if parser_peek(p) == TokenKind::RBrace || parser_peek(p) == TokenKind::Eof { break }
+                let cl_span = p.current_span()
+                if parser_peek(p) == TokenKind::On || parser_peek(p) == TokenKind::Return {
+                    let is_ret = parser_peek(p) == TokenKind::Return
+                    p = p.advance()
+                    var op_name = empty_name()
+                    var is_catchall = false
+                    if !is_ret {
+                        op_name = p.current_name()
+                        is_catchall = op_name.len == 1 && op_name.buf[0] == 95 as i8
+                        p = p.advance()
+                    }
+                    var params_opt: Option<Box<ClosureParamList>> = None
+                    if parser_peek(p) == TokenKind::LParen {
+                        p = parser_advance(p)
+                        if parser_peek(p) != TokenKind::RParen {
+                            let cp = p.parse_clause_params()
+                            p = cp.0
+                            params_opt = cp.1
+                        }
+                        if parser_peek(p) == TokenKind::RParen {
+                            p = parser_advance(p)
+                        }
+                    }
+                    p = p.expect(TokenKind::Arrow)
+                    var body_block: Option<Box<Block>> = None
+                    var body_expr: Option<Box<Expr>> = None
+                    if parser_peek(p) == TokenKind::LBrace {
+                        let bpair = p.parse_block()
+                        p = bpair.0
+                        body_block = Some(Box::new(bpair.1))
+                    } else {
+                        p = p.parse_expr()
+                        body_expr = parser_take_expr_box()
+                    }
+                    let clause = HandlerClause { op_name: op_name, is_catchall: is_catchall, is_return: is_ret, params: params_opt, body_block: body_block, body_expr: body_expr, span: cl_span }
+                    rev_clauses = Some(Box::new(HandlerClauseList { head: clause, tail: rev_clauses }))
+                } else {
+                    p = p.advance()
+                }
+            }
+            p = p.expect(TokenKind::RBrace)
+            clauses_opt = reverse_handler_clause_list_opt(rev_clauses)
         }
 
         let span = p.span_from(start)
         var e = mk_expr(ExprKind::ExprHandle, span)
         e.name = effect_name
         e.block = Some(Box::new(body))
-        e.handler_block = handler_opt
+        e.handler_clauses = clauses_opt
         parser_store_expr_box(Box::new(e))
         p
     }
 
     fn parse_perform_expr(self) -> Parser with Mut, IO, Panic, Div, Alloc {
+        // perform Effect.op(args) -- a real node since SIO-417 (was transparent).
+        let start = self.current_span()
         var p = self.advance()  // skip 'perform'
-        p = p.parse_expr()
-        // The performed operation expression remains in LAST_EXPR.
+        let eff_name = p.current_name()
+        p = p.advance()
+        p = p.expect(TokenKind::Dot)
+        let op_name = p.current_name()
+        p = p.advance()
+        var args_opt: Option<Box<ExprList>> = None
+        if parser_peek(p) == TokenKind::LParen {
+            p = parser_advance(p)  // skip (
+            if parser_peek(p) != TokenKind::RParen {
+                let pair = p.parse_call_arg_expr()
+                p = pair.0
+                let first = pair.1
+                var rev_list_opt: Option<Box<ExprList>> = Some(Box::new(*first))
+                while parser_peek(p) == TokenKind::Comma {
+                    p = p.advance()
+                    if parser_peek(p) == TokenKind::RParen { break }
+                    let pair2 = p.parse_call_arg_expr()
+                    p = pair2.0
+                    let next = pair2.1
+                    let new_node = ExprList { label: next.label, head: next.head, tail: rev_list_opt }
+                    rev_list_opt = Some(Box::new(new_node))
+                }
+                args_opt = reverse_expr_list_opt(rev_list_opt)
+            }
+            if parser_peek(p) == TokenKind::RParen {
+                p = parser_advance(p)
+            }
+        }
+        let span = p.span_from(start)
+        var e = mk_expr(ExprKind::ExprPerform, span)
+        e.name = eff_name
+        e.op_name = op_name
+        e.args = args_opt
+        parser_store_expr_box(Box::new(e))
         p
+    }
+
+    fn parse_resume_expr(self) -> Parser with Mut, IO, Panic, Div, Alloc {
+        // resume(value) -- only meaningful inside on-clauses (checker enforces).
+        let start = self.current_span()
+        var p = self.advance()  // skip 'resume'
+        p = p.expect(TokenKind::LParen)
+        p = p.parse_expr()
+        let val_box = parser_take_expr_box()
+        p = p.expect(TokenKind::RParen)
+        let span = p.span_from(start)
+        var e = mk_expr(ExprKind::ExprResume, span)
+        e.left = Some(val_box)
+        parser_store_expr_box(Box::new(e))
+        p
+    }
+
+    // Clause params: same shape as closure params, comma-separated, ends at ')'.
+    fn parse_clause_params(self) -> (Parser, Option<Box<ClosureParamList>>) with Mut, IO, Panic, Div, Alloc {
+        let pair = self.parse_closure_param()
+        var p = pair.0
+        let head = pair.1
+        var tail: Option<Box<ClosureParamList>> = None
+        if parser_peek(p) == TokenKind::Comma {
+            p = p.advance()
+            if parser_peek(p) != TokenKind::RParen {
+                let rest_pair = p.parse_clause_params()
+                p = rest_pair.0
+                tail = rest_pair.1
+            }
+        }
+        (p, Some(Box::new(ClosureParamList { head: head, tail: tail })))
     }
 
     fn parse_async_like_block_expr(self) -> Parser with Mut, IO, Panic, Div, Alloc {
@@ -2235,6 +2350,22 @@ fn fmt_reverse_stmts(current: Option<Box<StmtList>>, acc: Option<Box<StmtList>>)
 // ============================================================
 // Linked-list helpers for expression parsing
 // ============================================================
+
+fn reverse_handler_clause_list_opt(list: Option<Box<HandlerClauseList>>) -> Option<Box<HandlerClauseList>> with Mut, Alloc {
+    var rev: Option<Box<HandlerClauseList>> = None
+    var cur = list
+    while true {
+        match cur {
+            Some(node) => {
+                let nxt = (*node).tail
+                rev = Some(Box::new(HandlerClauseList { head: (*node).head, tail: rev }))
+                cur = nxt
+            }
+            None => { break }
+        }
+    }
+    rev
+}
 
 fn reverse_expr_list_opt(list: Option<Box<ExprList>>) -> Option<Box<ExprList>> with Mut, Alloc {
     reverse_expr_list_loop(list, None)

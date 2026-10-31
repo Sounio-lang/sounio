@@ -460,6 +460,17 @@ pub struct Checker {
     // vars were reassigned. Mirrors the source-cap-64 -> unknown saturation in
     // noise_sets.sio: on overflow we must lose precision, never soundness.
     pub ns_reassigned_overflow: bool,
+    // SIO-417 handler backend (P3): performed-op tracking (exhaustivity),
+    // handle-frame stack, clause context for resume typing.
+    pub fx_perf_ops: [i64; 64],
+    pub fx_perf_owner: [i64; 64],
+    pub fx_perf_count: i64,
+    pub fx_frame_eff: [i64; 8],
+    pub fx_depth: i64,
+    pub fx_in_clause: i64,
+    pub fx_clause_op_ret: TypeEntry,
+    pub fx_answer_ty: TypeEntry,
+    pub fx_op_params: *mut FxOpParamTable,
 }
 
 // Wrapper for inferred type arguments (avoids &![T;N] JIT bug)
@@ -1467,6 +1478,15 @@ pub fn checker_new() -> Checker with Mut, Panic, Div, Alloc {
         effect_ops: effect_op_table_new(),
         handler_depth: 0,
         current_handler_op_id: -1,
+        fx_perf_ops: [0; 64],
+        fx_perf_owner: [0; 64],
+        fx_perf_count: 0,
+        fx_frame_eff: [0; 8],
+        fx_depth: 0,
+        fx_in_clause: 0,
+        fx_clause_op_ret: empty_type_entry(),
+        fx_answer_ty: empty_type_entry(),
+        fx_op_params: fx_op_param_table_alloc(),
         ownership: own_context_new(),
         trait_registry: trait_registry_new(),
         impl_registry: impl_register_builtins(impl_registry_new()),
@@ -1596,6 +1616,12 @@ pub fn checker_init_in_place(raw: *mut Checker) with Mut, Panic, Div, Alloc {
     (*raw).effect_ops = effect_op_table_new()
     (*raw).handler_depth = 0
     (*raw).current_handler_op_id = -1
+    (*raw).fx_perf_count = 0
+    (*raw).fx_depth = 0
+    (*raw).fx_in_clause = 0
+    (*raw).fx_clause_op_ret = empty_type_entry()
+    (*raw).fx_answer_ty = empty_type_entry()
+    (*raw).fx_op_params = fx_op_param_table_alloc()
     (*raw).ownership = own_context_new()
     (*raw).trait_registry = trait_registry_new()
     (*raw).impl_registry = impl_register_builtins(impl_registry_new())
@@ -1703,6 +1729,15 @@ fn checker_store_from_value(dst: *mut Checker, src: Checker) with Mut, Panic, Di
     (*dst).effect_ops = src.effect_ops
     (*dst).handler_depth = src.handler_depth
     (*dst).current_handler_op_id = src.current_handler_op_id
+    (*dst).fx_perf_ops = src.fx_perf_ops
+    (*dst).fx_perf_owner = src.fx_perf_owner
+    (*dst).fx_perf_count = src.fx_perf_count
+    (*dst).fx_frame_eff = src.fx_frame_eff
+    (*dst).fx_depth = src.fx_depth
+    (*dst).fx_in_clause = src.fx_in_clause
+    (*dst).fx_clause_op_ret = src.fx_clause_op_ret
+    (*dst).fx_answer_ty = src.fx_answer_ty
+    (*dst).fx_op_params = src.fx_op_params
     (*dst).ownership = src.ownership
     (*dst).trait_registry = src.trait_registry
     (*dst).impl_registry = src.impl_registry
@@ -6595,6 +6630,11 @@ fn checker_collect_item_inplace(c: *mut Checker, item: Item) with Mut, Panic, Di
         checker_collect_models_def_inplace(c, item.name, item.models_def)
     } else if item.kind == ItemKind::ItemPolicy {
         checker_collect_policy_def_inplace(c, item.name, item.policy_def)
+    } else if item.kind == ItemKind::ItemEffect {
+        // SIO-417: this arm did not exist; user effect declarations were inert
+        // in the Madaros checker (same class as the ItemUnit/ItemAlgebra
+        // no-ops documented below), so no op ever reached the registry.
+        checker_collect_effect_item_inplace(c, item.effect_def)
     } else if item.kind == ItemKind::ItemAlgebra {
         // Until 2026-09-01 this arm did not exist: every `algebra ... { }` declaration was
         // INERT in the Madaros checker (registry never populated; check_hyper_binary fell
@@ -6776,6 +6816,65 @@ pub fn checker_collect_runtime_builtins_once_mut(c: *mut Checker) with Mut, Pani
 
 pub fn checker_collect_item_only_mut(c: *mut Checker, item: Item) with Mut, Panic, Div, Alloc, IO {
     checker_collect_item_inplace(c, item)
+}
+
+// SIO-417: in-place twin of collect_item_effect (+ op param lowering).
+fn checker_collect_effect_ops_inplace(c: *mut Checker, ops: Option<Box<EffectOpDefList> >, effect_id: i64) with Mut, Panic, Div, Alloc, IO {
+    match ops {
+        Some(node) => {
+            let head = (*node).head
+            var ret_ty = ty_unit()
+            match head.ret_ty {
+                Some(te_box) => { ret_ty = checker_lower_type_expr_mut(c, *te_box) }
+                None => {}
+            }
+            let op_idx = (*c).effect_ops.count
+            var pcount: i64 = 0
+            var plist = head.params
+            while true {
+                match plist {
+                    Some(pnode) => {
+                        let pty = checker_lower_type_expr_mut(c, (*pnode).head.ty)
+                        if op_idx < 128 && pcount < 8 {
+                            (*(*c).fx_op_params).tys[(op_idx * 8 + pcount) as usize] = pty
+                        }
+                        pcount = pcount + 1
+                        plist = (*pnode).tail
+                    }
+                    None => { break }
+                }
+            }
+            if op_idx < 128 {
+                (*(*c).fx_op_params).counts[op_idx as usize] = pcount
+            }
+            let add_result = (*c).effect_ops.add(EffectOpInfo {
+                name: head.name,
+                effect_id: effect_id,
+                param_count: pcount,
+                ret_ty: ret_ty,
+            })
+            (*c).effect_ops = add_result.0
+            checker_collect_effect_ops_inplace(c, (*node).tail, effect_id)
+        }
+        None => {}
+    }
+}
+
+fn checker_collect_effect_item_inplace(c: *mut Checker, opt: Option<Box<EffectDef> >) with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(edef) => {
+            let eid = 100 + (*c).effects.count
+            let first_op_id = (*c).effect_ops.count
+            checker_collect_effect_ops_inplace(c, (*edef).ops, eid)
+            let add_result = (*c).effects.add(EffectInfo {
+                name: (*edef).name,
+                op_count: (*c).effect_ops.count - first_op_id,
+                first_op_id: first_op_id,
+            })
+            (*c).effects = add_result.0
+        }
+        None => {}
+    }
 }
 
 pub fn checker_collect_items_inplace(c: *mut Checker, items: Option<Box<ItemList> >) with Mut, Panic, Div, Alloc, IO {
@@ -8190,19 +8289,404 @@ fn checker_check_return_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with
     ty_never()
 }
 
-// SIO-378 follow-up (handler_discharge): inplace twin of the by-value check_handle_expr.
-// handle block checks the body with the effect added, discharges it afterwards,
-// checks the optional handler block, and returns the body type. Lowering erases
-// the node, so a checked program compiles, exits 0 and prints nothing until
-// handlers get a backend.
-fn checker_check_handle_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
-    var eff_name_buf: [i8; 64] = [0; 64]
+// SIO-417 handler backend (P3): checker side of SPEC-07 section 7.4.
+// Deep handlers, linear one-shot continuations (FX-7), affine zero-resume
+// (FX-5), mandatory exhaustivity (FX-8). Discharge stays static here;
+// lowering/runtime land in P4.
+
+fn fx_resolve_effect(c: *mut Checker, name: Name) -> i64 with Mut, Panic, Div {
+    var buf: [i8; 64] = [0; 64]
     var i: i64 = 0
-    while i < e.name.len && i < 64 {
-        eff_name_buf[i as usize] = e.name.buf[i as usize]
+    while i < name.len && i < 64 {
+        buf[i as usize] = name.buf[i as usize]
         i = i + 1
     }
-    let eff_id = effect_name_to_id(eff_name_buf, e.name.len)
+    let b = effect_name_to_id(buf, name.len)
+    if b >= 0 { return b }
+    var j: i64 = 0
+    while j < (*c).effects.count {
+        if name_eq((*c).effects.entries[j as usize].name, name) {
+            return 100 + j
+        }
+        j = j + 1
+    }
+    0 - 1
+}
+
+fn fx_find_op(c: *mut Checker, op_name: Name, eff_id: i64) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < (*c).effect_ops.count {
+        let en = (*c).effect_ops.entries[i as usize]
+        if en.effect_id == eff_id && name_eq(en.name, op_name) {
+            return i
+        }
+        i = i + 1
+    }
+    0 - 1
+}
+
+// FX-5 (conservative): a perform point with live linear bindings is refused,
+// because a non-resuming clause would drop the suspended computation.
+fn fx_has_live_linear(c: *mut Checker) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < (*c).env.count {
+        if checker_is_linear_type_inplace(c, (*c).env.bindings[i as usize].ty) {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+fn checker_check_perform_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    let eff_id = fx_resolve_effect(c, e.name)
+    if eff_id < 0 {
+        checker_report_error_at_inplace(c, e.span, 280, 0, 0, 0)
+        return ty_error()
+    }
+    let op_idx = fx_find_op(c, e.op_name, eff_id)
+    if op_idx < 0 {
+        checker_report_error_at_inplace(c, e.span, 281, 0, 0, 0)
+        return ty_error()
+    }
+    if !has_effect_id((*c).current_effects, (*c).current_effect_count, eff_id) {
+        checker_report_error_at_inplace(c, e.span, 282, 0, 0, 0)
+        return ty_error()
+    }
+    if fx_has_live_linear(c) {
+        checker_report_error_at_inplace(c, e.span, 288, 0, 0, 0)
+        return ty_error()
+    }
+    let want = (*(*c).fx_op_params).counts[op_idx as usize]
+    var got: i64 = 0
+    var args = e.args
+    while true {
+        match args {
+            Some(node) => {
+                let aty = checker_check_expr_inplace(c, (*node).head)
+                if got < want && got < 8 {
+                    let pty = (*(*c).fx_op_params).tys[(op_idx * 8 + got) as usize]
+                    if aty.kind != TypeKind::TyError && pty.kind != TypeKind::TyError && !types_equal(aty, pty) {
+                        checker_report_error_at_inplace(c, (*node).head.span, 1, 0, 0, 0)
+                    }
+                }
+                got = got + 1
+                args = (*node).tail
+            }
+            None => { break }
+        }
+    }
+    if got != want {
+        checker_report_error_at_inplace(c, e.span, 287, 0, 0, 0)
+    }
+    // FX-8 bookkeeping: record for the nearest enclosing frame of this effect.
+    var d = (*c).fx_depth - 1
+    while d >= 0 {
+        if (*c).fx_frame_eff[d as usize] == eff_id {
+            if (*c).fx_perf_count < 64 {
+                (*c).fx_perf_ops[(*c).fx_perf_count as usize] = op_idx
+                (*c).fx_perf_owner[(*c).fx_perf_count as usize] = d
+                (*c).fx_perf_count = (*c).fx_perf_count + 1
+            }
+            d = 0 - 1
+        } else {
+            d = d - 1
+        }
+    }
+    let fx_op_entry = (*c).effect_ops.entries[op_idx as usize]
+    fx_op_entry.ret_ty
+}
+
+fn checker_check_resume_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    var vty = ty_error()
+    match e.left {
+        Some(v) => { vty = checker_check_expr_inplace(c, *v) }
+        None => {}
+    }
+    if (*c).fx_in_clause != 1 {
+        checker_report_error_at_inplace(c, e.span, 283, 0, 0, 0)
+        return ty_error()
+    }
+    if vty.kind != TypeKind::TyError && (*c).fx_clause_op_ret.kind != TypeKind::TyError && !types_equal(vty, (*c).fx_clause_op_ret) {
+        checker_report_error_at_inplace(c, e.span, 1, 0, 0, 0)
+    }
+    (*c).fx_answer_ty
+}
+
+// ---- FX-7 linearity: max resume uses on any single path (saturates at 2).
+fn fx_sat2(n: i64) -> i64 with Mut, Panic, Div {
+    if n > 2 { 2 } else { n }
+}
+
+fn fx_uses_opt(o: &Option<Box<Expr> >) -> i64 with Mut, Panic, Div, Alloc {
+    match *o {
+        Some(x) => fx_uses_expr(&(*x))
+        None => 0
+    }
+}
+
+fn fx_uses_list(l: &Option<Box<ExprList> >) -> i64 with Mut, Panic, Div, Alloc {
+    match *l {
+        Some(node) => fx_sat2(fx_uses_expr(&(*node).head) + fx_uses_list(&(*node).tail))
+        None => 0
+    }
+}
+
+fn fx_uses_block(b: &Block) -> i64 with Mut, Panic, Div, Alloc {
+    fx_uses_stmts(&(*b).stmts)
+}
+
+fn fx_uses_stmts(l: &Option<Box<StmtList> >) -> i64 with Mut, Panic, Div, Alloc {
+    match *l {
+        Some(node) => {
+            var n = fx_uses_opt(&(*node).head.expr)
+            n = n + fx_uses_opt(&(*node).head.target)
+            fx_sat2(n + fx_uses_stmts(&(*node).tail))
+        }
+        None => 0
+    }
+}
+
+fn fx_uses_children(e: &Expr) -> i64 with Mut, Panic, Div, Alloc {
+    var n: i64 = 0
+    n = n + fx_uses_opt(&(*e).left)
+    n = n + fx_uses_opt(&(*e).right)
+    n = n + fx_uses_opt(&(*e).else_expr)
+    match (*e).block {
+        Some(b) => { n = n + fx_uses_block(&(*b)) }
+        None => {}
+    }
+    match (*e).handler_block {
+        Some(b) => { n = n + fx_uses_block(&(*b)) }
+        None => {}
+    }
+    n = n + fx_uses_list(&(*e).args)
+    match (*e).closure_body {
+        Some(x) => { n = n + fx_uses_expr(&(*x)) }
+        None => {}
+    }
+    fx_sat2(n)
+}
+
+fn fx_uses_expr(e: &Expr) -> i64 with Mut, Panic, Div, Alloc {
+    let k = (*e).kind
+    if k == ExprKind::ExprWhile || k == ExprKind::ExprLoop || k == ExprKind::ExprForIn || k == ExprKind::ExprClosure || k == ExprKind::ExprHandle {
+        // A resume inside a loop, closure or nested handle is misuse.
+        if fx_uses_children(e) > 0 { return 2 }
+        return 0
+    }
+    var n: i64 = 0
+    if k == ExprKind::ExprResume { n = 1 }
+    if k == ExprKind::ExprIf {
+        var m = fx_uses_opt(&(*e).left)
+        var t: i64 = 0
+        match (*e).block {
+            Some(b) => { t = fx_uses_block(&(*b)) }
+            None => {}
+        }
+        var el: i64 = 0
+        match (*e).else_expr {
+            Some(x) => { el = fx_uses_expr(&(*x)) }
+            None => {}
+        }
+        if t > el { m = m + t } else { m = m + el }
+        return fx_sat2(n + m)
+    }
+    if k == ExprKind::ExprMatch {
+        var m = fx_uses_opt(&(*e).left)
+        var best: i64 = 0
+        var arms = (*e).arms
+        while true {
+            match arms {
+                Some(an) => {
+                    var u = fx_uses_expr(&(*an).head.body)
+                    match (*an).head.guard {
+                        Some(g) => { u = u + fx_uses_expr(&(*g)) }
+                        None => {}
+                    }
+                    if u > best { best = u }
+                    arms = (*an).tail
+                }
+                None => { break }
+            }
+        }
+        return fx_sat2(n + m + best)
+    }
+    fx_sat2(n + fx_uses_children(e))
+}
+
+fn fx_clause_uses(cl: HandlerClause) -> i64 with Mut, Panic, Div, Alloc {
+    match cl.body_block {
+        Some(b) => { return fx_uses_block(&(*b)) }
+        None => {}
+    }
+    match cl.body_expr {
+        Some(x) => { return fx_uses_expr(&(*x)) }
+        None => {}
+    }
+    0
+}
+
+fn fx_check_clause_body_inplace(c: *mut Checker, cl: HandlerClause) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    match cl.body_block {
+        Some(b) => { return checker_check_block_inplace(c, *b) }
+        None => {}
+    }
+    match cl.body_expr {
+        Some(x) => { return checker_check_expr_inplace(c, *x) }
+        None => {}
+    }
+    ty_unit()
+}
+
+fn fx_check_one_clause_inplace(c: *mut Checker, cl: HandlerClause, answer_ty: TypeEntry, op_idx: i64) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    if fx_clause_uses(cl) > 1 {
+        checker_report_error_at_inplace(c, cl.span, 284, 0, 0, 0)
+    }
+    let saved_in_clause = (*c).fx_in_clause
+    let saved_op_ret = (*c).fx_clause_op_ret
+    let saved_answer = (*c).fx_answer_ty
+    (*c).fx_answer_ty = answer_ty
+    var result = ty_unit()
+    if op_idx < 0 {
+        // Catch-all: resume is unavailable here (283 fires in resume check).
+        (*c).fx_in_clause = 2
+        (*c).fx_clause_op_ret = ty_error()
+        result = fx_check_clause_body_inplace(c, cl)
+    } else {
+        (*c).fx_in_clause = 1
+        (*c).fx_clause_op_ret = (*c).effect_ops.entries[op_idx as usize].ret_ty
+        type_env_push_scope_mut(&!(*c).env)
+        var pp = cl.params
+        var pi: i64 = 0
+        while true {
+            match pp {
+                Some(pn) => {
+                    var pty = ty_error()
+                    if pi < 8 { pty = (*(*c).fx_op_params).tys[(op_idx * 8 + pi) as usize] }
+                    type_env_bind_mut(&!(*c).env, (*pn).head.name, pty, false)
+                    pi = pi + 1
+                    pp = (*pn).tail
+                }
+                None => { break }
+            }
+        }
+        if pi != (*(*c).fx_op_params).counts[op_idx as usize] {
+            checker_report_error_at_inplace(c, cl.span, 287, 0, 0, 0)
+        }
+        result = fx_check_clause_body_inplace(c, cl)
+        type_env_pop_scope_mut(&!(*c).env)
+    }
+    (*c).fx_in_clause = saved_in_clause
+    (*c).fx_clause_op_ret = saved_op_ret
+    (*c).fx_answer_ty = saved_answer
+    if result.kind != TypeKind::TyError && answer_ty.kind != TypeKind::TyError && !types_equal(result, answer_ty) {
+        checker_report_error_at_inplace(c, cl.span, 1, 0, 0, 0)
+    }
+    result
+}
+
+fn fx_check_clauses_inplace(c: *mut Checker, e: Expr, eff_id: i64, slot: i64, body_ty: TypeEntry) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    // The return clause (FX-6) fixes the answer type when present.
+    var answer_ty = body_ty
+    var cl = e.handler_clauses
+    while true {
+        match cl {
+            Some(node) => {
+                let h = (*node).head
+                if h.is_return {
+                    type_env_push_scope_mut(&!(*c).env)
+                    var pc: i64 = 0
+                    var pp = h.params
+                    while true {
+                        match pp {
+                            Some(pn) => {
+                                type_env_bind_mut(&!(*c).env, (*pn).head.name, body_ty, false)
+                                pc = pc + 1
+                                pp = (*pn).tail
+                            }
+                            None => { break }
+                        }
+                    }
+                    if pc != 1 {
+                        checker_report_error_at_inplace(c, h.span, 287, 0, 0, 0)
+                    }
+                    answer_ty = fx_check_clause_body_inplace(c, h)
+                    type_env_pop_scope_mut(&!(*c).env)
+                }
+                cl = (*node).tail
+            }
+            None => { break }
+        }
+    }
+    // On-clauses: duplicates, unknown ops, per-clause checking.
+    var seen: [i64; 32] = [0; 32]
+    var seen_count: i64 = 0
+    var has_catchall = false
+    cl = e.handler_clauses
+    while true {
+        match cl {
+            Some(node) => {
+                let h = (*node).head
+                if !h.is_return {
+                    if h.is_catchall {
+                        has_catchall = true
+                        fx_check_one_clause_inplace(c, h, answer_ty, 0 - 1)
+                    } else {
+                        let op_idx = fx_find_op(c, h.op_name, eff_id)
+                        if op_idx < 0 {
+                            checker_report_error_at_inplace(c, h.span, 281, 0, 0, 0)
+                        } else {
+                            var dup = false
+                            var si: i64 = 0
+                            while si < seen_count {
+                                if seen[si as usize] == op_idx { dup = true }
+                                si = si + 1
+                            }
+                            if dup {
+                                checker_report_error_at_inplace(c, h.span, 286, 0, 0, 0)
+                            } else {
+                                if seen_count < 32 {
+                                    seen[seen_count as usize] = op_idx
+                                    seen_count = seen_count + 1
+                                }
+                                fx_check_one_clause_inplace(c, h, answer_ty, op_idx)
+                            }
+                        }
+                    }
+                }
+                cl = (*node).tail
+            }
+            None => { break }
+        }
+    }
+    // FX-8 exhaustivity for ops recorded against this frame.
+    if slot >= 0 && !has_catchall {
+        var i: i64 = 0
+        while i < (*c).fx_perf_count {
+            if (*c).fx_perf_owner[i as usize] == slot {
+                let need = (*c).fx_perf_ops[i as usize]
+                var covered = false
+                var si2: i64 = 0
+                while si2 < seen_count {
+                    if seen[si2 as usize] == need { covered = true }
+                    si2 = si2 + 1
+                }
+                if !covered {
+                    checker_report_error_at_inplace(c, e.span, 285, 0, 0, 0)
+                }
+            }
+            i = i + 1
+        }
+    }
+    answer_ty
+}
+
+fn checker_check_handle_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    let eff_id = fx_resolve_effect(c, e.name)
+    if eff_id < 0 {
+        checker_report_error_at_inplace(c, e.span, 280, 0, 0, 0)
+    }
     var saved_effects = (*c).current_effects
     var saved_count = (*c).current_effect_count
     if eff_id >= 0 && (*c).current_effect_count < 8 {
@@ -8211,17 +8695,32 @@ fn checker_check_handle_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with
             (*c).current_effect_count = (*c).current_effect_count + 1
         }
     }
+    var slot: i64 = 0 - 1
+    let base = (*c).fx_perf_count
+    if eff_id >= 0 && (*c).fx_depth < 8 {
+        slot = (*c).fx_depth
+        (*c).fx_frame_eff[slot as usize] = eff_id
+        (*c).fx_depth = (*c).fx_depth + 1
+    }
     let body_ty = checker_check_opt_block_inplace(c, e.block)
     (*c).current_sig_id = 0 - 1
     (*c).current_effects = saved_effects
     (*c).current_effect_count = saved_count
-    match e.handler_block {
-        Some(hb) => {
-            checker_check_block_inplace(c, *hb)
+    if slot >= 0 { (*c).fx_depth = (*c).fx_depth - 1 }
+    if eff_id < 0 { return body_ty }
+    var result = body_ty
+    match e.handler_clauses {
+        Some(_) => { result = fx_check_clauses_inplace(c, e, eff_id, slot, body_ty) }
+        None => {
+            // Legacy ASTs: with-block checked as plain statements.
+            match e.handler_block {
+                Some(hb) => { checker_check_block_inplace(c, *hb) }
+                None => {}
+            }
         }
-        None => {}
     }
-    body_ty
+    (*c).fx_perf_count = base
+    result
 }
 fn checker_check_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     if checker_expr_depth_exceeded((*c).expr_depth) {
@@ -8291,6 +8790,10 @@ fn checker_check_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, P
         result = checker_check_call_expr_inplace(c, e)
     } else if e.kind == ExprKind::ExprHandle {
         result = checker_check_handle_expr_inplace(c, e)
+    } else if e.kind == ExprKind::ExprPerform {
+        result = checker_check_perform_expr_inplace(c, e)
+    } else if e.kind == ExprKind::ExprResume {
+        result = checker_check_resume_expr_inplace(c, e)
     } else if e.kind == ExprKind::ExprIdent {
         result = checker_check_ident_expr_inplace(c, e)
     } else if e.kind == ExprKind::ExprCast {
@@ -19635,6 +20138,16 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 267 { print("cannot assign through a shared reference: the place is reached through `&T`, which is read-only") }
     else if code == 268 { print("affine value used more than once") }
     else if code == 275 { print("borrow checker capacity exceeded: a linear or affine binding was not registered") }
+    // SIO-417 handler diagnostics (280-288)
+    else if code == 280 { print("unknown effect in handle/perform") }
+    else if code == 281 { print("unknown operation for effect") }
+    else if code == 282 { print("perform of effect not declared or handled here") }
+    else if code == 283 { print("resume outside an on-clause (or in a catch-all clause)") }
+    else if code == 284 { print("resume capability used more than once on some path (continuations are linear)") }
+    else if code == 285 { print("handle is missing a clause for a performed operation (exhaustivity)") }
+    else if code == 286 { print("duplicate clause for operation") }
+    else if code == 287 { print("operation argument count mismatch") }
+    else if code == 288 { print("perform with live linear bindings (a non-resuming handler would drop them)") }
     else if code == 269 { print("a `where` refinement on Knowledge<T> is not enforced by this compiler yet: the predicate would be silently ignored, so it is refused") }
     else if code == 270 { print("`as string` does not convert a number, bool or char to text: no engine formats the value, so the cast is refused") }
     else if code == 263 { print("qualified call is ambiguous: this qualifier names a module you `use`d, but also collides with an unrelated struct/enum method of the same name, and the compiler cannot yet guarantee which one runs") }
@@ -24787,10 +25300,31 @@ impl Checker {
                 }
                 c = ret_pair.0
                 let ret_ty = ret_pair.1
+                // SIO-417: lower op param types into the fx side table.
+                let op_idx = c.effect_ops.count
+                var pcount: i64 = 0
+                var plist = head.params
+                while true {
+                    match plist {
+                        Some(pnode) => {
+                            let pty_pair = c.lower_type_expr((*pnode).head.ty)
+                            c = pty_pair.0
+                            if op_idx < 128 && pcount < 8 {
+                                (*c.fx_op_params).tys[(op_idx * 8 + pcount) as usize] = pty_pair.1
+                            }
+                            pcount = pcount + 1
+                            plist = (*pnode).tail
+                        }
+                        None => { break }
+                    }
+                }
+                if op_idx < 128 {
+                    (*c.fx_op_params).counts[op_idx as usize] = pcount
+                }
                 let op_info = EffectOpInfo {
                     name: head.name,
                     effect_id: effect_id,
-                    param_count: 0,
+                    param_count: pcount,
                     ret_ty: ret_ty,
                 }
                 let add_result = c.effect_ops.add(op_info)
@@ -27948,7 +28482,21 @@ impl Checker {
             ExprKind::ExprTupleLit => c.check_tuple_lit(e)
             ExprKind::ExprRange => c.check_range_expr(e)
             ExprKind::ExprCast => c.check_cast_expr(e)
-            ExprKind::ExprHandle => c.check_handle_expr(e)
+            ExprKind::ExprHandle => {
+                var cc = c
+                let ty = checker_check_handle_expr_inplace((&! cc) as *mut Checker, e)
+                (cc, ty)
+            }
+            ExprKind::ExprPerform => {
+                var cc = c
+                let ty = checker_check_perform_expr_inplace((&! cc) as *mut Checker, e)
+                (cc, ty)
+            }
+            ExprKind::ExprResume => {
+                var cc = c
+                let ty = checker_check_resume_expr_inplace((&! cc) as *mut Checker, e)
+                (cc, ty)
+            }
             ExprKind::ExprClosure => c.check_closure_expr(e)
             ExprKind::ExprContest => c.check_contest_expr_no_annotation(e)
             ExprKind::ExprAuditAttach => c.check_audit_attach_expr(e)
