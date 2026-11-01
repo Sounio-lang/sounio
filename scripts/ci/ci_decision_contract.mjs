@@ -6,7 +6,8 @@ import path from "node:path";
 import assert from "node:assert/strict";
 const root=process.argv[2];
 if(!root)throw Error("usage: ci_decision_contract.mjs REPO [--selftest]");
-const nativeGuard="    if: ${{ !cancelled() && (needs.impact.outputs.compiler == 'true' || needs.impact.outputs.full == 'true') && needs.source-bootstrap-selfhost-linux-x86_64.result == 'success' }}";
+// ADR-027 §3: the macOS lane is event-selected (not on pull_request) as well as impact-selected.
+const nativeGuard="    if: ${{ !cancelled() && github.event_name != 'pull_request' && (needs.impact.outputs.compiler == 'true' || needs.impact.outputs.full == 'true') && needs.source-bootstrap-selfhost-linux-x86_64.result == 'success' }}";
 const fullGuard="    if: ${{ !cancelled() && (needs.impact.outputs.compiler == 'true' || needs.impact.outputs.runtime == 'true' || needs.impact.outputs.stdlib == 'true' || needs.impact.outputs.tests == 'true' || needs.impact.outputs.full == 'true') && needs.native-selfhost-linux-x86_64.result == 'success' }}";
 function check(workflow,decision,additive){
  const lines=workflow.split(/\r?\n/), start=lines.indexOf("  ci-decision:");

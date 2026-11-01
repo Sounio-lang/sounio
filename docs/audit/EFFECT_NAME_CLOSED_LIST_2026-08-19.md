@@ -147,6 +147,8 @@ unmergeable. `ci.yml` is under another lane's claim; a dedicated
 workflow is still a reachable gate. A gate that never runs is not
 a gate (#1994).
 
+> Moved 2026-11-01 (ADR-027 §1): this gate now runs as a step of the `Fast Checks` job in `.github/workflows/ci.yml`; the dedicated workflow was removed. The step keeps the same script, flags and `continue-on-error` setting described here.
+
 ## Reproduce
 
 ```bash

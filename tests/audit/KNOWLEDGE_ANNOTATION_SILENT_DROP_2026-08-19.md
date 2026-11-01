@@ -126,6 +126,8 @@ gate exits 1 until a named diagnostic refuses that witness. Wiring:
 (`continue-on-error: true` so the accusation stays visible without
 blocking unrelated merges).
 
+> Moved 2026-11-01 (ADR-027 §1): this gate now runs as a step of the `Fast Checks` job in `.github/workflows/ci.yml`; the dedicated workflow was removed. The step keeps the same script, flags and `continue-on-error` setting described here.
+
 Do not close this by adding `Source` / `Literature` / `Input` keywords.
 That is a founder language decision. Close it by refusing the unknown
 component with a named diagnostic.
