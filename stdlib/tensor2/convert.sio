@@ -1,0 +1,179 @@
+// stdlib::tensor2::convert - IEEE-754 conversions between f64 (the compute
+// scalar in Sounio source) and the stored f32 / bf16 / f16 encodings.
+//
+// Pure bit manipulation on f64_to_bits/bits_to_f64. Round-to-nearest-even.
+// These conversions define Tensor v2 rounding on every backend: a value
+// stored as bf16 loses exactly the bits the GPU tensor would lose.
+
+fn shl(x: i64, n: i64) -> i64 { x << n }
+fn shr(x: i64, n: i64) -> i64 { x >> n }
+
+/// f64 -> f32 bits (as i64 in 0..2^32), round-to-nearest-even.
+///
+/// # Parameters
+/// - `v`: value to convert.
+///
+/// # Return
+/// IEEE-754 binary32 bit pattern.
+///
+/// # Complexity
+/// O(1)
+pub fn f64_to_f32_bits(v: f64) -> i64 with Mut {
+    let bits = f64_to_bits(v)
+    let sign = (shr(bits, 63) & 1) << 31
+    var exp = (shr(bits, 52) & 2047) - 1023
+    var mant = bits & 4503599627370495
+    if exp == 1024 {
+        // Inf / NaN
+        if mant != 0 { return sign | 2143289344 | 4194304 }
+        return sign | 2139095040
+    }
+    if exp == -1023 {
+        // f64 subnormal: far below f32 range.
+        return sign
+    }
+    mant = mant | 4503599627370496
+    exp = exp + 127
+    if exp >= 255 { return sign | 2139095040 }
+    if exp <= 0 {
+        // f32 subnormal: shift the 53-bit significand right, RNE.
+        let shift = (1 - exp) + 29
+        if shift >= 54 { return sign }
+        let dropped_mask = (1 << shift) - 1
+        let dropped = mant & dropped_mask
+        var keep = shr(mant, shift)
+        let half = 1 << (shift - 1)
+        if dropped > half || (dropped == half && (keep & 1) == 1) { keep = keep + 1 }
+        return sign | keep
+    }
+    // Normal f32: drop 29 bits, RNE.
+    let dropped = mant & 536870911
+    var keep = shr(mant, 29)
+    if dropped > 268435456 || (dropped == 268435456 && (keep & 1) == 1) { keep = keep + 1 }
+    if keep == 16777216 { keep = 8388608; exp = exp + 1 }
+    if exp >= 255 { return sign | 2139095040 }
+    sign | (exp << 23) | (keep & 8388607)
+}
+
+/// f32 bits -> f64, exact.
+///
+/// # Parameters
+/// - `b`: IEEE-754 binary32 bit pattern (low 32 bits used).
+///
+/// # Return
+/// The exactly-representable f64 value.
+///
+/// # Complexity
+/// O(1)
+pub fn f32_bits_to_f64(b: i64) -> f64 with Mut {
+    let bits = b & 4294967295
+    let sign = shr(bits, 31) & 1
+    var exp = shr(bits, 23) & 255
+    var mant = bits & 8388607
+    if exp == 255 {
+        if mant != 0 { return bits_to_f64((sign << 63) | 9219994337134243840 | 1125899906842624) }
+        return bits_to_f64((sign << 63) | 9218868437227405312)
+    }
+    if exp == 0 {
+        if mant == 0 { return bits_to_f64(sign << 63) }
+        // Normalize f32 subnormal.
+        exp = 1
+        while (mant & 8388608) == 0 {
+            mant = mant << 1
+            exp = exp - 1
+        }
+        mant = mant & 8388607
+    }
+    let e64 = exp - 127 + 1023
+    bits_to_f64((sign << 63) | (e64 << 52) | (mant << 29))
+}
+
+/// f64 -> bf16 bits (low 16 bits), round-to-nearest-even via f32.
+///
+/// # Parameters
+/// - `v`: value to convert.
+///
+/// # Return
+/// bfloat16 bit pattern.
+///
+/// # Complexity
+/// O(1)
+pub fn f64_to_bf16_bits(v: f64) -> i64 with Mut {
+    let f = f64_to_f32_bits(v)
+    let rounded = f + 32767 + ((f >> 16) & 1)
+    (rounded >> 16) & 65535
+}
+
+/// bf16 bits -> f64, exact.
+///
+/// # Parameters
+/// - `b`: bfloat16 bit pattern (low 16 bits used).
+///
+/// # Return
+/// The exactly-representable f64 value.
+///
+/// # Complexity
+/// O(1)
+pub fn bf16_bits_to_f64(b: i64) -> f64 with Mut {
+    f32_bits_to_f64((b & 65535) << 16)
+}
+
+/// f64 -> f16 bits (low 16 bits), round-to-nearest-even via f32.
+///
+/// # Parameters
+/// - `v`: value to convert.
+///
+/// # Return
+/// IEEE-754 binary16 bit pattern.
+///
+/// # Complexity
+/// O(1)
+pub fn f64_to_f16_bits(v: f64) -> i64 with Mut {
+    let f = f64_to_f32_bits(v)
+    let sign = (f >> 16) & 32768
+    var exp = ((f >> 23) & 255) - 112
+    var mant = f & 8388607
+    if exp >= 32 {
+        if mant != 0 && ((f >> 23) & 255) == 255 { return sign | 31744 }
+        return sign | 31744
+    }
+    if exp <= 0 {
+        if exp < -10 { return sign }
+        mant = mant | 8388608
+        let shift = 14 - exp
+        let add = ((1 << (shift - 1)) - 1) + ((mant >> shift) & 1)
+        return sign | ((mant + add) >> shift)
+    }
+    sign | (exp << 10) | ((mant + 4095 + ((mant >> 13) & 1)) >> 13)
+}
+
+/// f16 bits -> f64, exact.
+///
+/// # Parameters
+/// - `b`: IEEE-754 binary16 bit pattern (low 16 bits used).
+///
+/// # Return
+/// The exactly-representable f64 value.
+///
+/// # Complexity
+/// O(1)
+pub fn f16_bits_to_f64(b: i64) -> f64 with Mut {
+    let bits = b & 65535
+    let sign = (bits >> 15) & 1
+    var exp = (bits >> 10) & 31
+    var mant = bits & 1023
+    if exp == 31 {
+        if mant != 0 { return f32_bits_to_f64((sign << 31) | 2143289344 | 4194304) }
+        return f32_bits_to_f64((sign << 31) | 2139095040)
+    }
+    if exp == 0 {
+        if mant == 0 { return f32_bits_to_f64(sign << 31) }
+        exp = 1
+        while (mant & 1024) == 0 {
+            mant = mant << 1
+            exp = exp - 1
+        }
+        mant = mant & 1023
+    }
+    f32_bits_to_f64((sign << 31) | ((exp - 15 + 127) << 23) | (mant << 13))
+}
