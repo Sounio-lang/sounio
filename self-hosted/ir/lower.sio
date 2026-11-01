@@ -1386,6 +1386,9 @@ var LOWER_KN_FIELD_NAME: [i64; 2048] = [0; 2048]
 var LOWER_KN_FIELD_KIND: [i64; 2048] = [0; 2048]
 
 fn lower_kn_field_note(type_name: Name, field_name: Name, ty: &TypeExpr) with Mut, Panic, Div {
+    // SIO-557: every struct declaration walk funnels through here, so one
+    // hook records raw-ptr byte fields for all of them.
+    lower_byteptr_field_note(type_name, field_name, ty)
     if (*ty).kind != TypeExprKind::TypeKnowledge { return }
     let kind = lower_type_expr_knowledge_value_float(ty)
     let tid = ir_intern_name(type_name)
@@ -1403,6 +1406,74 @@ fn lower_kn_field_note(type_name: Name, field_name: Name, ty: &TypeExpr) with Mu
     LOWER_KN_FIELD_NAME[LOWER_KN_FIELD_COUNT as usize] = fid
     LOWER_KN_FIELD_KIND[LOWER_KN_FIELD_COUNT as usize] = kind
     LOWER_KN_FIELD_COUNT = LOWER_KN_FIELD_COUNT + 1
+}
+
+// SIO-557: declared `*mut i8` / `*mut u8` struct fields, so `*(b.ptr)`
+// derefs can narrow to a byte load. Same-named struct/field collisions
+// collapse to 0 ("unknown", keep the word load) like the table above.
+var LOWER_BYTEPTR_FIELD_COUNT: i64 = 0
+var LOWER_BYTEPTR_FIELD_TYPE: [i64; 2048] = [0; 2048]
+var LOWER_BYTEPTR_FIELD_NAME: [i64; 2048] = [0; 2048]
+var LOWER_BYTEPTR_FIELD_SIGN: [i64; 2048] = [0; 2048]
+
+// SIO-557 R3: a pointer laundered out of a borrow (`&x as *mut i8`,
+// possibly through int casts) addresses a word-backed scalar slot. Byte
+// traffic through it would disagree with the slot's word reads/writes
+// (251 vs -5), so borrow-derived pointers keep the word width. Heap, int,
+// field, and param pointers still narrow.
+fn expr_is_slot_borrow_ref(expr: &Expr) -> bool with Mut, Panic, Div, Alloc {
+    if (*expr).kind == ExprKind::ExprUnary
+        && ((*expr).un_op == UnaryOp::OpRef || (*expr).un_op == UnaryOp::OpRefMut) {
+        return true
+    }
+    if (*expr).kind == ExprKind::ExprCast {
+        match (*expr).left {
+            Some(inner) => { return expr_is_slot_borrow_ref(&(*inner)) }
+            None => {}
+        }
+    }
+    false
+}
+
+fn lower_byteptr_field_note(type_name: Name, field_name: Name, ty: &TypeExpr) with Mut, Panic, Div {
+    if (*ty).kind != TypeExprKind::TypeRawPtr { return }
+    let inner = lower_opt_type_named_name(&(*ty).inner)
+    var sign = 0
+    if inner.len == 2 && inner.buf[0] == 105 as i8 && inner.buf[1] == 56 as i8 { sign = 1 }
+    if inner.len == 2 && inner.buf[0] == 117 as i8 && inner.buf[1] == 56 as i8 { sign = 2 }
+    // SIO-557 R2: non-byte pointees (sign 0) also reconcile: the same
+    // (struct, field) declared *mut i8 in one module and *mut i64 in
+    // another must collapse to 0 (word) rather than keep the first sign.
+    let tid = ir_intern_name(type_name)
+    let fid = ir_intern_name(field_name)
+    var i: i64 = 0
+    while i < LOWER_BYTEPTR_FIELD_COUNT {
+        if LOWER_BYTEPTR_FIELD_TYPE[i as usize] == tid && LOWER_BYTEPTR_FIELD_NAME[i as usize] == fid {
+            if LOWER_BYTEPTR_FIELD_SIGN[i as usize] != sign { LOWER_BYTEPTR_FIELD_SIGN[i as usize] = 0 }
+            return
+        }
+        i = i + 1
+    }
+    if sign == 0 { return }
+    if LOWER_BYTEPTR_FIELD_COUNT >= 2048 { return }
+    LOWER_BYTEPTR_FIELD_TYPE[LOWER_BYTEPTR_FIELD_COUNT as usize] = tid
+    LOWER_BYTEPTR_FIELD_NAME[LOWER_BYTEPTR_FIELD_COUNT as usize] = fid
+    LOWER_BYTEPTR_FIELD_SIGN[LOWER_BYTEPTR_FIELD_COUNT as usize] = sign
+    LOWER_BYTEPTR_FIELD_COUNT = LOWER_BYTEPTR_FIELD_COUNT + 1
+}
+
+fn lower_byteptr_field_width(type_name: Name, field_name: Name) -> i64 with Mut, Panic, Div {
+    if type_name.len <= 0 { return 0 }
+    let tid = ir_intern_name(type_name)
+    let fid = ir_intern_name(field_name)
+    var i: i64 = 0
+    while i < LOWER_BYTEPTR_FIELD_COUNT {
+        if LOWER_BYTEPTR_FIELD_TYPE[i as usize] == tid && LOWER_BYTEPTR_FIELD_NAME[i as usize] == fid {
+            return LOWER_BYTEPTR_FIELD_SIGN[i as usize]
+        }
+        i = i + 1
+    }
+    0
 }
 
 fn lower_kn_field_kind(type_name: Name, field_name: Name) -> i64 with Mut, Panic, Div {
@@ -25890,6 +25961,62 @@ impl Lowerer {
         }
     }
 
+    // Width of an OpDeref load: 1 = *mut i8 (movsx), 2 = *mut u8 (movzx),
+    // 0 = word. The default 8-byte load miscompiles byte derefs (SIO-557:
+    // `*cell as i64` over heap bytes read the whole word, 26470 instead of
+    // 102). Shapes: a cast to a raw byte pointer, or an ident whose recorded
+    // pointee is i8/u8 (a `p: *mut i8` parameter records its pointee).
+    fn deref_narrow_width_ref(self, operand_opt: &Option<Box<Expr>>) -> i64 with Mut, Panic, Div, Alloc {
+        match *operand_opt {
+            Some(operand) => {
+                if (*operand).kind == ExprKind::ExprCast {
+                    match (*operand).cast_type {
+                        Some(ct) => {
+                            if (*ct).kind == TypeExprKind::TypeRawPtr {
+                                // SIO-557 R3: borrow-derived keeps word width.
+                                if expr_is_slot_borrow_ref(&(*operand)) { return 0 }
+                                let inner = lower_opt_type_named_name(&(*ct).inner)
+                                if inner.len == 2 && inner.buf[0] == 105 as i8 && inner.buf[1] == 56 as i8 { return 1 }
+                                if inner.len == 2 && inner.buf[0] == 117 as i8 && inner.buf[1] == 56 as i8 { return 2 }
+                            }
+                        }
+                        None => {}
+                    }
+                    return 0
+                }
+                // SIO-557: never narrow through a borrow. `let pp = &p` copies
+                // p's recorded pointee onto pp, but pp's slot holds an
+                // ADDRESS: `*pp` must be a word load (4660, not its low byte
+                // 52). A borrow of a genuine byte slot still reads correctly
+                // as a word because locals live in word slots.
+                if (*operand).kind == ExprKind::ExprIdent && !self.lookup_local_is_ref((*operand).name) {
+                    let pointee = self.lookup_local_struct_type((*operand).name)
+                    if pointee.len == 2 && pointee.buf[0] == 105 as i8 && pointee.buf[1] == 56 as i8 { return 1 }
+                    if pointee.len == 2 && pointee.buf[0] == 117 as i8 && pointee.buf[1] == 56 as i8 { return 2 }
+                }
+                // SIO-557: `*(b.ptr)` where ptr: *mut i8 — resolve the field's
+                // declared pointee through the owner struct. Unresolvable
+                // owners keep the word load (status quo, never a new refusal).
+                if (*operand).kind == ExprKind::ExprFieldAccess {
+                    // Mirror field_is_box_for_base_ref: unwrap the base Option
+                    // explicitly; passing &left directly mis-resolves the owner.
+                    match (*operand).left {
+                        Some(base) => {
+                            let owner = self.expr_receiver_struct_type_ref(&(*base))
+                            if owner.len > 0 {
+                                return lower_byteptr_field_width(owner, (*operand).name)
+                            }
+                        }
+                        None => {}
+                    }
+                    return 0
+                }
+                0
+            }
+            None => 0,
+        }
+    }
+
     fn expr_result_is_float_ref(self, e: &Expr) -> bool with Mut, Panic, Div, Alloc {
         if (*e).kind == ExprKind::ExprIntLit {
             return false
@@ -29825,8 +29952,57 @@ impl Lowerer {
                 None => {}
             }
         }
-        if raw_pointee.len > 0 && lower_struct_layout_index_of(&(*lo.struct_layouts), raw_pointee) >= 0 {
+        // SIO-557 R3: `let xp = (&!x) as *mut i8` aliases a word-backed slot;
+        // recording i8 would narrow `*xp` and disagree with the slot's word
+        // reads. Borrow-derived BYTE aliases keep the word width; f64, wide,
+        // bool, and struct pointees keep their recordings (float lowering and
+        // field resolution need them).
+        match s.expr {
+            Some(rhs_borrow) => {
+                if (*rhs_borrow).kind == ExprKind::ExprCast && expr_is_slot_borrow_ref(&(*rhs_borrow)) {
+                    let rp = raw_pointee
+                    if rp.len == 2 && ((rp.buf[0] == 105 as i8 && rp.buf[1] == 56 as i8)
+                        || (rp.buf[0] == 117 as i8 && rp.buf[1] == 56 as i8)) {
+                        raw_pointee = ir_empty_name()
+                    }
+                }
+            }
+            None => {}
+        }
+        // SIO-557: record scalar pointees too, mirroring the &T/&!T binding
+        // above (integer/float/bool). Without this a `let c = ... as *mut i8`
+        // local has no recorded type, so `*c` cannot be narrowed to a byte
+        // load and reads a whole word.
+        if raw_pointee.len > 0 && (lower_name_is_f64_scalar_type(raw_pointee)
+            || lower_name_is_wide_float_type(raw_pointee)
+            || lower_name_is_integer_type(raw_pointee)
+            || lower_name_is_bool_type(raw_pointee)
+            || lower_struct_layout_index_of(&(*lo.struct_layouts), raw_pointee) >= 0) {
             lo = lo.bind_local_struct_type(s.name, raw_pointee, false)
+        }
+        // SIO-557 R2: `let cell = b.ptr` where ptr is a declared byte-pointer
+        // field — propagate the field's width so `*cell` narrows exactly like
+        // `*(b.ptr)` does. Only annotations and casts populated raw_pointee.
+        match s.expr {
+            Some(rhs_field) => {
+                if (*rhs_field).kind == ExprKind::ExprFieldAccess {
+                    match (*rhs_field).left {
+                        Some(rhs_base) => {
+                            let rhs_owner = lo.expr_receiver_struct_type_ref(&(*rhs_base))
+                            if rhs_owner.len > 0 {
+                                let rhs_w = lower_byteptr_field_width(rhs_owner, (*rhs_field).name)
+                                if rhs_w == 1 {
+                                    lo = lo.bind_local_struct_type(s.name, make_name("i8"), false)
+                                } else if rhs_w == 2 {
+                                    lo = lo.bind_local_struct_type(s.name, make_name("u8"), false)
+                                }
+                            }
+                        }
+                        None => {}
+                    }
+                }
+            }
+            None => {}
         }
         if lower_opt_type_is_dynamic_array(&s.ty) {
             // SIO-311: an annotated `[T]` stays dynamic even when its
@@ -31361,7 +31537,17 @@ impl Lowerer {
                             if is_box_t {
                                 lo = lo.emit(ir_field_set(ptr_reg, 0, rhs, ir_empty_name()))
                             } else {
-                                lo = lo.emit(ir_store_ptr(ptr_reg, rhs))
+                                // SIO-557 R2: `*p = v` through *mut i8/*mut u8 is a
+                                // byte store — the default word store zeroes the
+                                // seven neighbour bytes. Same width shapes as loads.
+                                var store_instr = ir_store_ptr(ptr_reg, rhs)
+                                let store_narrow = lo.deref_narrow_width_ref(&(*target_expr).left)
+                                if store_narrow == 1 {
+                                    store_instr.imm_flags = IR_DEREF_NARROW_SIGNED_FLAG
+                                } else if store_narrow == 2 {
+                                    store_instr.imm_flags = IR_DEREF_NARROW_UNSIGNED_FLAG
+                                }
+                                lo = lo.emit(store_instr)
                             }
                             (lo, rhs)
                         } else {
@@ -37739,6 +37925,9 @@ impl Lowerer {
         // an f64, so mark it float (the box arm reads field 0 and is untouched).
         let deref_yields_float = e.un_op == UnaryOp::OpDeref && !is_box_deref
             && lo1.deref_operand_pointee_kind_ref(&e.left) == 2
+        // SIO-557: a deref through *mut i8/*mut u8 carries its width so the
+        // backend emits a byte load instead of the default word load.
+        let deref_narrow = if e.un_op == UnaryOp::OpDeref && !is_box_deref { lo1.deref_narrow_width_ref(&e.left) } else { 0 }
         let pair_d = lo1.fresh_reg()
         let lo2 = pair_d.0
         let dst = pair_d.1
@@ -37755,6 +37944,11 @@ impl Lowerer {
             // so a vreg past the 2048-bit set still flips the sign bit.
             if src_is_float && e.un_op == UnaryOp::OpNeg {
                 uins.imm_flags = 2
+            }
+            if deref_narrow == 1 {
+                uins.imm_flags = IR_DEREF_NARROW_SIGNED_FLAG
+            } else if deref_narrow == 2 {
+                uins.imm_flags = IR_DEREF_NARROW_UNSIGNED_FLAG
             }
             lo2.emit(uins)
         }
