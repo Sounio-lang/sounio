@@ -10,8 +10,8 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.evidence.call-
 # Constant-stack call-argument borrow release
 
 Status: the requested targeted stack/borrow acceptance gates PASS on the pinned
-source-built candidate. The supplementary full checker-source check is still
-running, and the full stdlib sprint remains OPEN.
+source-built candidate. The supplementary full checker-source check also PASSED. Its following
+ordinary rebuild is running, and the full stdlib sprint remains OPEN.
 
 ## Scope and source correspondence
 
@@ -29,8 +29,9 @@ contribution to the historical/current stack difference has not been measured.
 Patch branch: `cursor/call-arg-release-stack`, based on
 `ed9de5bc0775a55237bc7ac8ac2d925b754e87e2`. The local origin/main at inspection
 (`137bebc92647`) already contains a separate removal of the fourth argument.
-Integration must reconcile that independently reviewed change; this patch
-intentionally follows the requested four-argument contract.
+Review PR #3405 targets cursor/call-arg-release-base at ed9de5bc0775, keeping
+the sprint parent history outside this diff. Integration with main must
+reconcile that history and its independent signature change.
 
 ## Historical proof
 
@@ -149,8 +150,9 @@ run-pass fixture; the fixture was copied unchanged and v3 passed. All attempts
 remain under the private worker results directory.
 
 The supplementary full `madaros check self-hosted/check/check.sio` in the
-20996 batch is still running at this receipt snapshot. Its following ordinary
-build therefore has no result yet. The mapped candidate build in step 20996.0
+20996 batch completed with `run_check_mode: verdict=0` and `check: OK`.
+See `results/checker-source-check.log`. Its following ordinary rebuild is
+running and has no result yet. The mapped candidate build in step 20996.0
 has completed and is the compiler exercised above. The step's original
 `MAP_BUILD_STATUS=139` covers the first combined build-plus-gate script, whose
 runtime probe failed; it is not a failure to produce the candidate ELF.
@@ -165,3 +167,6 @@ against the pinned candidate. The full massive-sprint gate has actually resumed 
 step using the pinned candidate. See `STDLIB_CONTINUITY.md` for observed
 failures and native permission-replay results. This does not establish
 whole-sprint completion. No merge to main is authorized.
+
+Committed text extracts normalise trailing whitespace; raw diagnostics and
+byte-for-byte comparisons remain preserved in the worker results and archive.

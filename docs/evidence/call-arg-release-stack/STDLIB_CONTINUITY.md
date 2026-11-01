@@ -63,9 +63,9 @@ the targeted 8 MiB acceptance result.
 
 ## Remaining gates
 
-1. Obtain the terminal result of the full checker-source check in the 20996
-   batch and its following ordinary build. They are still pending here; the
-   mapped candidate used in the targeted gate is already built and pinned.
+1. The full checker-source check in batch 20996 PASSED (verdict 0, check OK).
+   Obtain the terminal result of its following ordinary rebuild, which remains
+   running. The mapped candidate used in the targeted gate is built and pinned.
 2. Finish/audit the slow suite's terminal receipt, preserving failures/skips.
 3. Repair the harness's generated-ELF execute mode in its own claimed change
    and rerun affected runtime/concordance phases.
