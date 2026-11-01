@@ -229,10 +229,29 @@ segment per handler (OCaml-5 style), proven by probe; copying the body
 stack in place is excluded. Each FX rule above has at least one derived
 test in phase P5 (`tests/run-pass/fxN_*.sio`).
 
-## Claims forbidden
+## Status (2026-11-01, SIO-417 P5)
 
-- Until phase P5 closes, do not describe Sounio as shipping algebraic effect
-  handlers; the section 7.4 semantics are ruled and landing on PR #3371.
+The section 7.4 semantics are implemented in Madaros and landing on PR #3371:
+parser/AST (`ExprPerform`/`ExprResume`, `on`/`return` clauses), checker
+(op resolution FX-8, linear resume FX-7, diagnostics 280-288), lowering
+(synthetic clause functions, handler frame), and the native backend
+(builtins `__sounio_fx_install/perform/resume/body_done`: one stack segment
+per handler, deep dispatch, affine zero-resume teardown). Every FX rule has
+a derived test (`tests/run-pass/fx{1,2,2b,3,4,5,6,9}_*.sio`,
+`tests/compile-fail/fx{7,8}_*.sio`), and `tests/run-pass/handler_discharge.sio`
+prints `handler: PASS` for the reason its name claims.
+
+v1 limits (named compile-time refusals, never silent miscompiles): scalar
+i64 ops and answers only (no f64), perform only in the handled body of the
+same function, no captured locals in clauses, at most 5 perform arguments.
+
+Implementation note (regression guard): the fx lowering methods in
+`self-hosted/ir/lower.sio` must stay inside the existing `impl Lowerer`
+block. Wrapping them in a second `impl Lowerer` block makes the seed
+mis-register the methods that follow it; the resulting compiler segfaults
+lowering any closure (bisected 2026-11-01, SIO-417 P5). Do not reintroduce
+a separate impl block for these methods.
+
 - Do not cite `examples/_attic/effects.sio` or `examples/effects/*.sio` as evidence
   that handlers run. That a file uses the syntax says only that the syntax
   parses.
