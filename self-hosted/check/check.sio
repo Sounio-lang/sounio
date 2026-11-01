@@ -9254,11 +9254,82 @@ fn checker_finish_binary_knowledge_result_inplace(c: *mut Checker, span: Span, o
             final_result
         }
         if final_inner.kind == TypeKind::TyHyper {
-            let rh = (*c).record_hyper_expr(span, final_inner.algebra_kind, 1, true)
-            checker_store_from_value(c, rh)
+            checker_record_hyper_expr_inplace(c, span, final_inner.algebra_kind, 1, true)
         }
     }
     final_result
+}
+
+// SIO-417 stack diet: inplace mirrors of by-value Checker reporters, so the
+// diet helpers below never bridge through (*c). A bridge copies the whole
+// Checker in and out per call (and trips checker_spine_parity_gate.sh); the
+// mirrors mutate through *mut with identical diagnostics.
+fn checker_record_hyper_expr_inplace(c: *mut Checker, span: Span, algebra_tag: i64, op_kind: i64, knowledge_wrapped: bool) with Mut, Panic, Div {
+    if algebra_tag < 0 || op_kind <= 0 {
+        return
+    }
+    let info = HyperExprInfo {
+        span_start: span.start,
+        span_end: span.end,
+        algebra_tag: algebra_tag,
+        op_kind: op_kind,
+        knowledge_wrapped: knowledge_wrapped,
+    }
+    let tbl = (*c).hyper_exprs
+    let add_result = tbl.add(info)
+    (*c).hyper_exprs = add_result.0
+}
+
+fn checker_report_warning_at_inplace(c: *mut Checker, span: Span, code: i64, msg_a: i64, msg_b: i64, msg_c: i64) with Mut, IO, Panic, Div {
+    (*c).warning_count = (*c).warning_count + 1
+    print("warning[W")
+    if code < 100 { print("0") }
+    if code < 10 { print("0") }
+    print_int(code)
+    print("]")
+    if span.start > 0 || span.end > 0 {
+        print(" at ")
+        print_int(span.start)
+        print("..")
+        print_int(span.end)
+    }
+    print(": ")
+    print_warning_message(code)
+    print("\n")
+}
+
+fn checker_report_hypothesis_penalty_warning_inplace(c: *mut Checker, span: Span, outcome_name: Name) with Mut, IO, Panic, Div {
+    (*c).warning_count = (*c).warning_count + 1
+    print("warning[W041]")
+    if span.start > 0 || span.end > 0 {
+        print(" at ")
+        print_int(span.start)
+        print("..")
+        print_int(span.end)
+    }
+    print(": statistical test on unregistered variable '")
+    print_name_value(outcome_name)
+    print("' - confidence penalty applied\n")
+    print("   = note: Hypothesis currently applies this penalty as an advisory warning; automatic Knowledge<T> confidence scaling is pending\n")
+}
+
+fn checker_report_unit_call_mismatch_inplace(c: *mut Checker, span: Span, arg_uid: i64, param_uid: i64) with Mut, Panic, Div, Alloc, IO {
+    (*c).had_error = true
+    (*c).error_count = (*c).error_count + 1
+    print("error[E041]: unit mismatch in call argument\n")
+    print("  argument unit: ")
+    if arg_uid >= 0 {
+        print_unit_dim((*c).units.get_dim(arg_uid))
+    } else {
+        print("(dimensionless)")
+    }
+    print("\n  parameter unit: ")
+    if param_uid >= 0 {
+        print_unit_dim((*c).units.get_dim(param_uid))
+    } else {
+        print("(dimensionless)")
+    }
+    print("\n")
 }
 
 fn checker_check_binary_hyper_path_inplace(c: *mut Checker, span: Span, op: BinaryOp, left_ty: TypeEntry, right_ty: TypeEntry) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
@@ -9267,8 +9338,7 @@ fn checker_check_binary_hyper_path_inplace(c: *mut Checker, span: Span, op: Bina
     let typed_result = hr.1
     let final_result = checker_finish_binary_inplace(c, span, op, left_ty, right_ty, typed_result)
     if op == BinaryOp::OpMul && final_result.kind == TypeKind::TyHyper {
-        let rh = (*c).record_hyper_expr(span, final_result.algebra_kind, 1, false)
-        checker_store_from_value(c, rh)
+        checker_record_hyper_expr_inplace(c, span, final_result.algebra_kind, 1, false)
     }
     final_result
 }
@@ -13520,8 +13590,7 @@ fn checker_check_call_expr_preflight_inplace(c: *mut Checker, e: Expr) -> (i64, 
         if (*c).studies.count > 0 && multitest_is_stat_test_name(callee_name) {
             let outcome_name = hypothesis_outcome_name_from_args(e.args)
             if !name_is_empty(outcome_name) && !active_study_has_hypothesis_outcome((*c).studies, outcome_name) {
-                let pen = (*c).report_hypothesis_penalty_warning(e.span, outcome_name)
-                checker_store_from_value(c, pen)
+                checker_report_hypothesis_penalty_warning_inplace(c, e.span, outcome_name)
             }
         }
     }
@@ -14229,8 +14298,7 @@ fn checker_refine_prove_ident_env_ontology_inplace(c: *mut Checker, call_span: S
     // Build conjunction and discharge with one call
     if axiom_count > 0 {
         if axiom_overflow {
-            let t = (*c).report_warning_at(call_span, 42, 0, 0, 0)
-            checker_store_from_value(c, t)
+            checker_report_warning_at_inplace(c, call_span, 42, 0, 0, 0)
         }
         var conjoined = axiom_preds[0]
         var ci: i64 = 1
@@ -14284,8 +14352,7 @@ fn checker_refine_defer_epistemic_inplace(c: *mut Checker, call_span: Span) with
     // To suppress: #[allow(W040)] on the call site (not yet implemented).
     // To force proof: annotate the argument with an explicit refinement type.
     (*c).refine_runtime_checked = (*c).refine_runtime_checked + 1
-    let t = (*c).report_warning_at(call_span, 40, 0, 0, 0)
-    checker_store_from_value(c, t)
+    checker_report_warning_at_inplace(c, call_span, 40, 0, 0, 0)
 }
 
 // SIO-417 stack diet: the router below keeps the exact refinement-boundary
@@ -14389,16 +14456,14 @@ fn checker_check_call_arg_knowledge_boundary_inplace(c: *mut Checker, arg_ty: Ty
 fn checker_report_call_arg_unit_loss_inplace(c: *mut Checker, call_span: Span, provided_unit: i64, expected_unit: i64) with Mut, Panic, Div, Alloc, IO {
     // KL-13: unit-tagged argument into a bare (unit_id < 0) parameter is a
     // call-boundary loss — refuse; require an explicit cast.
-    let t = (*c).report_unit_call_mismatch(call_span, provided_unit, expected_unit)
-    checker_store_from_value(c, t)
+    checker_report_unit_call_mismatch_inplace(c, call_span, provided_unit, expected_unit)
 }
 
 fn checker_report_call_arg_unit_hole_inplace(c: *mut Checker, call_span: Span, provided_unit: i64, expected_unit: i64) with Mut, Panic, Div, Alloc, IO {
     // D-24 (ADR-020): the symmetric hole. A dimensionless value flowing into
     // a unit-bearing parameter was silently accepted; it is an error on both
     // engines. Pure literal expressions keep adopting the parameter unit.
-    let t = (*c).report_unit_call_mismatch(call_span, provided_unit, expected_unit)
-    checker_store_from_value(c, t)
+    checker_report_unit_call_mismatch_inplace(c, call_span, provided_unit, expected_unit)
 }
 
 fn checker_check_call_arg_unit_addable_inplace(c: *mut Checker, call_span: Span, provided_unit: i64, expected_unit: i64) with Mut, Panic, Div, Alloc, IO {
@@ -14412,8 +14477,7 @@ fn checker_check_call_arg_unit_addable_inplace(c: *mut Checker, call_span: Span,
     // addability test the binary operator uses, so the two agree by
     // construction.
     if !checker_units_addable(c, provided_unit, expected_unit) {
-        let t = (*c).report_unit_call_mismatch(call_span, provided_unit, expected_unit)
-        checker_store_from_value(c, t)
+        checker_report_unit_call_mismatch_inplace(c, call_span, provided_unit, expected_unit)
     }
 }
 
