@@ -1,0 +1,104 @@
+// tensor2/cpu_kernel — direct typed-loop CPU kernels over raw f64 buffers.
+//
+// WHY: the Tensor2 element accessor (byte-level IEEE-754 access) measures
+// ~0.0015 GFLOP/s — it measures the ACCESSOR, not the core. Real CPU work
+// (shards in the heterogeneous runtime, the CPU side of a split GEMM)
+// needs direct loops over typed buffers. This module is that kernel.
+// Host master buffers in the runtime are f64; conversion to f32 bytes for
+// device transfer happens once per transfer (O(n)), never in the hot loop.
+//
+// Layout: row-major, C[m][n] = A[m][k] * B[k][n].
+
+pub struct CpuBuf {
+    pub data: *mut f64,
+    pub len: i64,
+}
+
+pub fn ck_alloc(n: i64) -> CpuBuf with Alloc {
+    let p = heap_alloc((n * 8) as usize) as *mut f64
+    CpuBuf { data: p, len: n }
+}
+
+pub fn ck_set(b: &!CpuBuf, i: i64, v: f64) {
+    write_f64(b.data, i, v)
+}
+
+pub fn ck_get(b: &CpuBuf, i: i64) -> f64 {
+    read_f64(b.data, i)
+}
+
+// Deterministic pseudo-values in [0,1): idx-hash, no RNG state.
+pub fn ck_fill_pattern(b: &!CpuBuf) {
+    var i: i64 = 0
+    while i < b.len {
+        let h = (i * 31 + 17) % 97
+        write_f64(b.data, i, (h as f64) / 97.0)
+        i = i + 1
+    }
+}
+
+pub fn ck_zero(b: &!CpuBuf) {
+    var i: i64 = 0
+    while i < b.len {
+        write_f64(b.data, i, 0.0)
+        i = i + 1
+    }
+}
+
+// Full GEMM = the row kernel over all rows (single source of arithmetic).
+pub fn ck_gemm(a: &CpuBuf, b: &CpuBuf, c: &!CpuBuf, m: i64, n: i64, k: i64) {
+    ck_gemm_rows(a, b, c, 0, m, n, k)
+}
+
+// GEMM restricted to rows [r0, r1) of C (and A): one shard of a split GEMM.
+// i-k-j streaming (B row and C row sequential; the C row stays cache-hot),
+// j unrolled 4-wide. A register-blocked i-j-k variant measured SLOWER
+// (0.11 vs 0.16 GFLOP/s, job 16336): strided B column reads lose to
+// streaming despite fewer C accesses - recorded, not repeated.
+pub fn ck_gemm_rows(a: &CpuBuf, b: &CpuBuf, c: &!CpuBuf, r0: i64, r1: i64, n: i64, k: i64) {
+    var i: i64 = r0
+    let n4 = (n / 4) * 4
+    while i < r1 {
+        let crow = i * n
+        var j: i64 = 0
+        while j < n {
+            write_f64(c.data, crow + j, 0.0)
+            j = j + 1
+        }
+        var kk: i64 = 0
+        while kk < k {
+            let aik = read_f64(a.data, i * k + kk)
+            if aik != 0.0 {
+                let brow = kk * n
+                var jj: i64 = 0
+                while jj < n4 {
+                    write_f64(c.data, crow + jj, read_f64(c.data, crow + jj) + aik * read_f64(b.data, brow + jj))
+                    write_f64(c.data, crow + jj + 1, read_f64(c.data, crow + jj + 1) + aik * read_f64(b.data, brow + jj + 1))
+                    write_f64(c.data, crow + jj + 2, read_f64(c.data, crow + jj + 2) + aik * read_f64(b.data, brow + jj + 2))
+                    write_f64(c.data, crow + jj + 3, read_f64(c.data, crow + jj + 3) + aik * read_f64(b.data, brow + jj + 3))
+                    jj = jj + 4
+                }
+                while jj < n {
+                    write_f64(c.data, crow + jj, read_f64(c.data, crow + jj) + aik * read_f64(b.data, brow + jj))
+                    jj = jj + 1
+                }
+            }
+            kk = kk + 1
+        }
+        i = i + 1
+    }
+}
+
+pub fn ck_max_abs_diff(a: &CpuBuf, b: &CpuBuf) -> f64 {
+    var m: f64 = 0.0
+    var i: i64 = 0
+    while i < a.len {
+        let d = read_f64(a.data, i) - read_f64(b.data, i)
+        let ad = if d < 0.0 { 0.0 - d } else { d }
+        if ad > m {
+            m = ad
+        }
+        i = i + 1
+    }
+    m
+}
