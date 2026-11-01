@@ -33,7 +33,7 @@ export CURL_CA_BUNDLE=/tmp/ca-certificates.crt
 NVCC=""
 if [[ -x "$CUDAENV/bin/nvcc" ]]; then
   NVCC="$CUDAENV/bin/nvcc"
-elif command -v nvcc >/dev/null 2>&1; then
+elif command -v nvcc >/dev/null 2>&1 && [[ -d "$CUDAENV/bin" ]]; then
   NVCC="$(command -v nvcc)"
 fi
 
@@ -57,10 +57,10 @@ fi
 
 export PATH="$CUDAENV/bin:$(dirname "$NVCC"):${PATH:-}"
 export LD_LIBRARY_PATH="$CUDAENV/lib:${LD_LIBRARY_PATH:-}"
-CXX="$(ls "$CUDAENV"/bin/*g++ 2>/dev/null | head -1 || true)"
-CC="$(ls "$CUDAENV"/bin/*gcc 2>/dev/null | grep -v g++ | head -1 || true)"
+CXX="$(find "$CUDAENV/bin" -maxdepth 1 -type f -executable -name '*-g++' 2>/dev/null | sort | head -1 || true)"
+CC="$(find "$CUDAENV/bin" -maxdepth 1 -type f -executable -name '*-gcc' 2>/dev/null | sort | head -1 || true)"
 if [[ -z "${CXX:-}" ]]; then echo "missing conda g++" >&2; exit 1; fi
-if [[ -z "${CC:-}" ]]; then CC="$CXX"; fi
+if [[ -z "${CC:-}" ]]; then echo "missing conda gcc" >&2; exit 1; fi
 export CXX CC
 ln -sfn "$CC" "$CUDAENV/bin/gcc"
 ln -sfn "$CXX" "$CUDAENV/bin/g++"

@@ -18,8 +18,10 @@ if [[ ! -x /tmp/cudaenv126/bin/nvcc ]]; then
 fi
 export PATH=/tmp/cudaenv126/bin:$PATH
 export LD_LIBRARY_PATH=/tmp/cudaenv126/lib:${LD_LIBRARY_PATH:-}
-CXX=$(ls /tmp/cudaenv126/bin/*g++ | head -1)
-CC=$(ls /tmp/cudaenv126/bin/*gcc | grep -v g++ | head -1)
+CXX=$(find /tmp/cudaenv126/bin -maxdepth 1 -type f -executable -name '*-g++' | sort | head -1)
+CC=$(find /tmp/cudaenv126/bin -maxdepth 1 -type f -executable -name '*-gcc' | sort | head -1)
+if [[ -z "$CXX" ]]; then echo "missing conda triplet g++" >&2; exit 1; fi
+if [[ -z "$CC" ]]; then echo "missing conda triplet gcc" >&2; exit 1; fi
 ln -sfn "$CC" /tmp/cudaenv126/bin/gcc
 ln -sfn "$CXX" /tmp/cudaenv126/bin/g++
 nvcc --version | tail -2
