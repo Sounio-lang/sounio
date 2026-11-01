@@ -1,6 +1,6 @@
 //@ run-pass
 //@ requires: madaros
-//@ expect-stdout: -5:251:5102109
+//@ expect-stdout: -5:251:5102109:4660:100:77
 // SIO-557: dereferencing a *mut i8/*mut u8 performs a byte load with the
 // pointee's signedness (movsx/movzx), not the default 8-byte word load.
 // Before, `*cell as i64` over heap bytes read the whole word (26470
@@ -48,6 +48,26 @@ fn uneg() -> i64 with Mut {
     *back as i64
 }
 
+// Borrow round-trip: pp's slot holds an ADDRESS, so `*pp` stays a word
+// load even though p points to bytes (4660, not its low byte 52).
+fn ppround() -> i64 with Mut {
+    let p = 4660 as *mut i8
+    let pp = &p
+    *pp as i64
+}
+
+// Direct field deref: `*(b.ptr)` narrows through the field's declared
+// `*mut i8`, like the cast form does.
+fn fieldderef(b: &PBuf) -> i64 {
+    *(b.ptr) as i64
+}
+
+// Store-free body: without any store the function keeps the MIR pipeline,
+// which used to drop the width flags and emit a word load.
+fn ronly(p: *mut i8) -> i64 {
+    *p as i64
+}
+
 fn main() -> i32 with Mut, IO {
     var a: [i64; 4] = [0; 4]
     var z = palloc(1)
@@ -70,6 +90,18 @@ fn main() -> i32 with Mut, IO {
     print_int(uneg())
     print(":")
     print_int(r)
+    print(":")
+    print_int(ppround())
+    print(":")
+    print_int(fieldderef(&b[0]))
+    print(":")
+    var m = palloc(2)
+    let v77: i8 = 77 as i8
+    pset(&!m, 1, v77)
+    // let-bound: nesting a BinOp pointer computation directly as a call arg
+    // segfaults the compiler (pre-existing, unrelated to byte widths).
+    let off = ((m.ptr as i64) + 1) as *mut i8
+    print_int(ronly(off))
     println("")
     return 0
 }

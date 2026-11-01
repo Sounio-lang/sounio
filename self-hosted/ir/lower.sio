@@ -1386,6 +1386,9 @@ var LOWER_KN_FIELD_NAME: [i64; 2048] = [0; 2048]
 var LOWER_KN_FIELD_KIND: [i64; 2048] = [0; 2048]
 
 fn lower_kn_field_note(type_name: Name, field_name: Name, ty: &TypeExpr) with Mut, Panic, Div {
+    // SIO-557: every struct declaration walk funnels through here, so one
+    // hook records raw-ptr byte fields for all of them.
+    lower_byteptr_field_note(type_name, field_name, ty)
     if (*ty).kind != TypeExprKind::TypeKnowledge { return }
     let kind = lower_type_expr_knowledge_value_float(ty)
     let tid = ir_intern_name(type_name)
@@ -1403,6 +1406,52 @@ fn lower_kn_field_note(type_name: Name, field_name: Name, ty: &TypeExpr) with Mu
     LOWER_KN_FIELD_NAME[LOWER_KN_FIELD_COUNT as usize] = fid
     LOWER_KN_FIELD_KIND[LOWER_KN_FIELD_COUNT as usize] = kind
     LOWER_KN_FIELD_COUNT = LOWER_KN_FIELD_COUNT + 1
+}
+
+// SIO-557: declared `*mut i8` / `*mut u8` struct fields, so `*(b.ptr)`
+// derefs can narrow to a byte load. Same-named struct/field collisions
+// collapse to 0 ("unknown", keep the word load) like the table above.
+var LOWER_BYTEPTR_FIELD_COUNT: i64 = 0
+var LOWER_BYTEPTR_FIELD_TYPE: [i64; 2048] = [0; 2048]
+var LOWER_BYTEPTR_FIELD_NAME: [i64; 2048] = [0; 2048]
+var LOWER_BYTEPTR_FIELD_SIGN: [i64; 2048] = [0; 2048]
+
+fn lower_byteptr_field_note(type_name: Name, field_name: Name, ty: &TypeExpr) with Mut, Panic, Div {
+    if (*ty).kind != TypeExprKind::TypeRawPtr { return }
+    let inner = lower_opt_type_named_name(&(*ty).inner)
+    var sign = 0
+    if inner.len == 2 && inner.buf[0] == 105 as i8 && inner.buf[1] == 56 as i8 { sign = 1 }
+    if inner.len == 2 && inner.buf[0] == 117 as i8 && inner.buf[1] == 56 as i8 { sign = 2 }
+    if sign == 0 { return }
+    let tid = ir_intern_name(type_name)
+    let fid = ir_intern_name(field_name)
+    var i: i64 = 0
+    while i < LOWER_BYTEPTR_FIELD_COUNT {
+        if LOWER_BYTEPTR_FIELD_TYPE[i as usize] == tid && LOWER_BYTEPTR_FIELD_NAME[i as usize] == fid {
+            if LOWER_BYTEPTR_FIELD_SIGN[i as usize] != sign { LOWER_BYTEPTR_FIELD_SIGN[i as usize] = 0 }
+            return
+        }
+        i = i + 1
+    }
+    if LOWER_BYTEPTR_FIELD_COUNT >= 2048 { return }
+    LOWER_BYTEPTR_FIELD_TYPE[LOWER_BYTEPTR_FIELD_COUNT as usize] = tid
+    LOWER_BYTEPTR_FIELD_NAME[LOWER_BYTEPTR_FIELD_COUNT as usize] = fid
+    LOWER_BYTEPTR_FIELD_SIGN[LOWER_BYTEPTR_FIELD_COUNT as usize] = sign
+    LOWER_BYTEPTR_FIELD_COUNT = LOWER_BYTEPTR_FIELD_COUNT + 1
+}
+
+fn lower_byteptr_field_width(type_name: Name, field_name: Name) -> i64 with Mut, Panic, Div {
+    if type_name.len <= 0 { return 0 }
+    let tid = ir_intern_name(type_name)
+    let fid = ir_intern_name(field_name)
+    var i: i64 = 0
+    while i < LOWER_BYTEPTR_FIELD_COUNT {
+        if LOWER_BYTEPTR_FIELD_TYPE[i as usize] == tid && LOWER_BYTEPTR_FIELD_NAME[i as usize] == fid {
+            return LOWER_BYTEPTR_FIELD_SIGN[i as usize]
+        }
+        i = i + 1
+    }
+    0
 }
 
 fn lower_kn_field_kind(type_name: Name, field_name: Name) -> i64 with Mut, Panic, Div {
@@ -25911,10 +25960,32 @@ impl Lowerer {
                     }
                     return 0
                 }
-                if (*operand).kind == ExprKind::ExprIdent {
+                // SIO-557: never narrow through a borrow. `let pp = &p` copies
+                // p's recorded pointee onto pp, but pp's slot holds an
+                // ADDRESS: `*pp` must be a word load (4660, not its low byte
+                // 52). A borrow of a genuine byte slot still reads correctly
+                // as a word because locals live in word slots.
+                if (*operand).kind == ExprKind::ExprIdent && !self.lookup_local_is_ref((*operand).name) {
                     let pointee = self.lookup_local_struct_type((*operand).name)
                     if pointee.len == 2 && pointee.buf[0] == 105 as i8 && pointee.buf[1] == 56 as i8 { return 1 }
                     if pointee.len == 2 && pointee.buf[0] == 117 as i8 && pointee.buf[1] == 56 as i8 { return 2 }
+                }
+                // SIO-557: `*(b.ptr)` where ptr: *mut i8 — resolve the field's
+                // declared pointee through the owner struct. Unresolvable
+                // owners keep the word load (status quo, never a new refusal).
+                if (*operand).kind == ExprKind::ExprFieldAccess {
+                    // Mirror field_is_box_for_base_ref: unwrap the base Option
+                    // explicitly; passing &left directly mis-resolves the owner.
+                    match (*operand).left {
+                        Some(base) => {
+                            let owner = self.expr_receiver_struct_type_ref(&(*base))
+                            if owner.len > 0 {
+                                return lower_byteptr_field_width(owner, (*operand).name)
+                            }
+                        }
+                        None => {}
+                    }
+                    return 0
                 }
                 0
             }
