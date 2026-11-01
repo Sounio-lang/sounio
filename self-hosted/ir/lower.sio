@@ -1416,6 +1416,25 @@ var LOWER_BYTEPTR_FIELD_TYPE: [i64; 2048] = [0; 2048]
 var LOWER_BYTEPTR_FIELD_NAME: [i64; 2048] = [0; 2048]
 var LOWER_BYTEPTR_FIELD_SIGN: [i64; 2048] = [0; 2048]
 
+// SIO-557 R3: a pointer laundered out of a borrow (`&x as *mut i8`,
+// possibly through int casts) addresses a word-backed scalar slot. Byte
+// traffic through it would disagree with the slot's word reads/writes
+// (251 vs -5), so borrow-derived pointers keep the word width. Heap, int,
+// field, and param pointers still narrow.
+fn expr_is_slot_borrow_ref(expr: &Expr) -> bool with Mut, Panic, Div, Alloc {
+    if (*expr).kind == ExprKind::ExprUnary
+        && ((*expr).un_op == UnaryOp::OpRef || (*expr).un_op == UnaryOp::OpRefMut) {
+        return true
+    }
+    if (*expr).kind == ExprKind::ExprCast {
+        match (*expr).left {
+            Some(inner) => { return expr_is_slot_borrow_ref(&(*inner)) }
+            None => {}
+        }
+    }
+    false
+}
+
 fn lower_byteptr_field_note(type_name: Name, field_name: Name, ty: &TypeExpr) with Mut, Panic, Div {
     if (*ty).kind != TypeExprKind::TypeRawPtr { return }
     let inner = lower_opt_type_named_name(&(*ty).inner)
@@ -25954,6 +25973,8 @@ impl Lowerer {
                     match (*operand).cast_type {
                         Some(ct) => {
                             if (*ct).kind == TypeExprKind::TypeRawPtr {
+                                // SIO-557 R3: borrow-derived keeps word width.
+                                if expr_is_slot_borrow_ref(&(*operand)) { return 0 }
                                 let inner = lower_opt_type_named_name(&(*ct).inner)
                                 if inner.len == 2 && inner.buf[0] == 105 as i8 && inner.buf[1] == 56 as i8 { return 1 }
                                 if inner.len == 2 && inner.buf[0] == 117 as i8 && inner.buf[1] == 56 as i8 { return 2 }
@@ -29930,6 +29951,23 @@ impl Lowerer {
                 }
                 None => {}
             }
+        }
+        // SIO-557 R3: `let xp = (&!x) as *mut i8` aliases a word-backed slot;
+        // recording i8 would narrow `*xp` and disagree with the slot's word
+        // reads. Borrow-derived BYTE aliases keep the word width; f64, wide,
+        // bool, and struct pointees keep their recordings (float lowering and
+        // field resolution need them).
+        match s.expr {
+            Some(rhs_borrow) => {
+                if (*rhs_borrow).kind == ExprKind::ExprCast && expr_is_slot_borrow_ref(&(*rhs_borrow)) {
+                    let rp = raw_pointee
+                    if rp.len == 2 && ((rp.buf[0] == 105 as i8 && rp.buf[1] == 56 as i8)
+                        || (rp.buf[0] == 117 as i8 && rp.buf[1] == 56 as i8)) {
+                        raw_pointee = ir_empty_name()
+                    }
+                }
+            }
+            None => {}
         }
         // SIO-557: record scalar pointees too, mirroring the &T/&!T binding
         // above (integer/float/bool). Without this a `let c = ... as *mut i8`
