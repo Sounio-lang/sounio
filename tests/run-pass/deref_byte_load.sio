@@ -1,6 +1,6 @@
 //@ run-pass
 //@ requires: madaros
-//@ expect-stdout: -5:251:5102109:4660:100:77
+//@ expect-stdout: -5:251:5102109:4660:100:1:77:100:200
 // SIO-557: dereferencing a *mut i8/*mut u8 performs a byte load with the
 // pointee's signedness (movsx/movzx), not the default 8-byte word load.
 // Before, `*cell as i64` over heap bytes read the whole word (26470
@@ -9,6 +9,11 @@
 
 struct PBuf {
     ptr: *mut i8,
+    len: i64,
+}
+
+struct PBufU {
+    ptr: *mut u8,
     len: i64,
 }
 
@@ -68,6 +73,17 @@ fn ronly(p: *mut i8) -> i64 {
     *p as i64
 }
 
+// Field-alias: `let cell = b.ptr` narrows exactly like `*(b.ptr)` does,
+// signed and unsigned (a movsx mix-up reads 200 as -56).
+fn aliasi8(b: &PBuf) -> i64 {
+    let cell = b.ptr
+    *cell as i64
+}
+fn aliasu8(b: &PBufU) -> i64 {
+    let cell = b.ptr
+    *cell as i64
+}
+
 fn main() -> i32 with Mut, IO {
     var a: [i64; 4] = [0; 4]
     var z = palloc(1)
@@ -95,13 +111,27 @@ fn main() -> i32 with Mut, IO {
     print(":")
     print_int(fieldderef(&b[0]))
     print(":")
-    var m = palloc(2)
+    // Sentinel LAST-byte-first: a word store at [1] would zero the [2]
+    // sentinel, so pget(2) == 1 proves byte stores; ronly == 77 with the
+    // sentinel intact (word load would read 333) proves byte loads.
+    var m = palloc(8)
     let v77: i8 = 77 as i8
+    let v1: i8 = 1 as i8
+    pset(&!m, 2, v1)
     pset(&!m, 1, v77)
     // let-bound: nesting a BinOp pointer computation directly as a call arg
     // segfaults the compiler (pre-existing, unrelated to byte widths).
     let off = ((m.ptr as i64) + 1) as *mut i8
+    print_int(pget(&m, 2))
+    print(":")
     print_int(ronly(off))
+    print(":")
+    print_int(aliasi8(&b[0]))
+    print(":")
+    var mu = PBufU { ptr: heap_alloc(4), len: 4 }
+    *(mu.ptr) = 200 as u8
+    *(((mu.ptr as i64) + 1) as *mut u8) = 201 as u8
+    print_int(aliasu8(&mu))
     println("")
     return 0
 }

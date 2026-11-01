@@ -1422,7 +1422,9 @@ fn lower_byteptr_field_note(type_name: Name, field_name: Name, ty: &TypeExpr) wi
     var sign = 0
     if inner.len == 2 && inner.buf[0] == 105 as i8 && inner.buf[1] == 56 as i8 { sign = 1 }
     if inner.len == 2 && inner.buf[0] == 117 as i8 && inner.buf[1] == 56 as i8 { sign = 2 }
-    if sign == 0 { return }
+    // SIO-557 R2: non-byte pointees (sign 0) also reconcile: the same
+    // (struct, field) declared *mut i8 in one module and *mut i64 in
+    // another must collapse to 0 (word) rather than keep the first sign.
     let tid = ir_intern_name(type_name)
     let fid = ir_intern_name(field_name)
     var i: i64 = 0
@@ -1433,6 +1435,7 @@ fn lower_byteptr_field_note(type_name: Name, field_name: Name, ty: &TypeExpr) wi
         }
         i = i + 1
     }
+    if sign == 0 { return }
     if LOWER_BYTEPTR_FIELD_COUNT >= 2048 { return }
     LOWER_BYTEPTR_FIELD_TYPE[LOWER_BYTEPTR_FIELD_COUNT as usize] = tid
     LOWER_BYTEPTR_FIELD_NAME[LOWER_BYTEPTR_FIELD_COUNT as usize] = fid
@@ -29939,6 +29942,30 @@ impl Lowerer {
             || lower_struct_layout_index_of(&(*lo.struct_layouts), raw_pointee) >= 0) {
             lo = lo.bind_local_struct_type(s.name, raw_pointee, false)
         }
+        // SIO-557 R2: `let cell = b.ptr` where ptr is a declared byte-pointer
+        // field — propagate the field's width so `*cell` narrows exactly like
+        // `*(b.ptr)` does. Only annotations and casts populated raw_pointee.
+        match s.expr {
+            Some(rhs_field) => {
+                if (*rhs_field).kind == ExprKind::ExprFieldAccess {
+                    match (*rhs_field).left {
+                        Some(rhs_base) => {
+                            let rhs_owner = lo.expr_receiver_struct_type_ref(&(*rhs_base))
+                            if rhs_owner.len > 0 {
+                                let rhs_w = lower_byteptr_field_width(rhs_owner, (*rhs_field).name)
+                                if rhs_w == 1 {
+                                    lo = lo.bind_local_struct_type(s.name, make_name("i8"), false)
+                                } else if rhs_w == 2 {
+                                    lo = lo.bind_local_struct_type(s.name, make_name("u8"), false)
+                                }
+                            }
+                        }
+                        None => {}
+                    }
+                }
+            }
+            None => {}
+        }
         if lower_opt_type_is_dynamic_array(&s.ty) {
             // SIO-311: an annotated `[T]` stays dynamic even when its
             // initializer is a literal of known length; recording that
@@ -31472,7 +31499,17 @@ impl Lowerer {
                             if is_box_t {
                                 lo = lo.emit(ir_field_set(ptr_reg, 0, rhs, ir_empty_name()))
                             } else {
-                                lo = lo.emit(ir_store_ptr(ptr_reg, rhs))
+                                // SIO-557 R2: `*p = v` through *mut i8/*mut u8 is a
+                                // byte store — the default word store zeroes the
+                                // seven neighbour bytes. Same width shapes as loads.
+                                var store_instr = ir_store_ptr(ptr_reg, rhs)
+                                let store_narrow = lo.deref_narrow_width_ref(&(*target_expr).left)
+                                if store_narrow == 1 {
+                                    store_instr.imm_flags = IR_DEREF_NARROW_SIGNED_FLAG
+                                } else if store_narrow == 2 {
+                                    store_instr.imm_flags = IR_DEREF_NARROW_UNSIGNED_FLAG
+                                }
+                                lo = lo.emit(store_instr)
                             }
                             (lo, rhs)
                         } else {
