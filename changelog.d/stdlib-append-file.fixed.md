@@ -1,0 +1,1 @@
+The Linux x86-64 native backend now implements append_file with the same handle-buffer ABI as write_file, preserving existing bytes and returning the write status. Both compiler engines are covered by a binary NUL/high-byte, append, truncation and failed-open regression. The Windows native backend explicitly refuses this new append operation.
