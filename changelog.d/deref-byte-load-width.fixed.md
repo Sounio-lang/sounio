@@ -1,0 +1,1 @@
+Native-v2: dereferencing a `*mut i8`/`*mut u8` now performs a byte load with the pointee's signedness (movsx/movzx) instead of the default 8-byte word load, which returned whole words (e.g. 26470 for a byte holding 102). The width travels on the deref instruction from the lowerer; other pointees are unchanged.
