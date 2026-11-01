@@ -1441,6 +1441,11 @@ fn lower_byteptr_field_note(type_name: Name, field_name: Name, ty: &TypeExpr) wi
     var sign = 0
     if inner.len == 2 && inner.buf[0] == 105 as i8 && inner.buf[1] == 56 as i8 { sign = 1 }
     if inner.len == 2 && inner.buf[0] == 117 as i8 && inner.buf[1] == 56 as i8 { sign = 2 }
+    // SIO-556: the same table also tracks float pointees (3 = f64/f32 scalar,
+    // 4 = f128/f256 wide) so field derefs resolve float-ness; the width
+    // lookup below still only answers 1/2.
+    if lower_name_is_f64_scalar_type(inner) { sign = 3 }
+    if lower_name_is_wide_float_type(inner) { sign = 4 }
     // SIO-557 R2: non-byte pointees (sign 0) also reconcile: the same
     // (struct, field) declared *mut i8 in one module and *mut i64 in
     // another must collapse to 0 (word) rather than keep the first sign.
@@ -1454,7 +1459,12 @@ fn lower_byteptr_field_note(type_name: Name, field_name: Name, ty: &TypeExpr) wi
         }
         i = i + 1
     }
-    if sign == 0 { return }
+    // SIO-556 review: retain sign-0 entries instead of discarding them. A
+    // non-byte/non-float raw pointee (e.g. *mut i64) declared BEFORE a
+    // conflicting *mut i8/*mut f64 must still collapse the shared key to
+    // unknown (0) when the float/byte declaration arrives; discarding
+    // sign-0 made classification depend on module order. A stored 0 reads
+    // exactly like a missing entry in both lookups (word width, not float).
     if LOWER_BYTEPTR_FIELD_COUNT >= 2048 { return }
     LOWER_BYTEPTR_FIELD_TYPE[LOWER_BYTEPTR_FIELD_COUNT as usize] = tid
     LOWER_BYTEPTR_FIELD_NAME[LOWER_BYTEPTR_FIELD_COUNT as usize] = fid
@@ -1470,6 +1480,24 @@ fn lower_byteptr_field_width(type_name: Name, field_name: Name) -> i64 with Mut,
     while i < LOWER_BYTEPTR_FIELD_COUNT {
         if LOWER_BYTEPTR_FIELD_TYPE[i as usize] == tid && LOWER_BYTEPTR_FIELD_NAME[i as usize] == fid {
             return LOWER_BYTEPTR_FIELD_SIGN[i as usize]
+        }
+        i = i + 1
+    }
+    0
+}
+
+// SIO-556: float-ness of a declared raw-pointer field deref: 2 = f64 scalar,
+// 5 = wide float (mirrors deref_operand_pointee_kind_ref's codes), else 0.
+fn lower_floatptr_field_kind(type_name: Name, field_name: Name) -> i64 with Mut, Panic, Div {
+    if type_name.len <= 0 { return 0 }
+    let tid = ir_intern_name(type_name)
+    let fid = ir_intern_name(field_name)
+    var i: i64 = 0
+    while i < LOWER_BYTEPTR_FIELD_COUNT {
+        if LOWER_BYTEPTR_FIELD_TYPE[i as usize] == tid && LOWER_BYTEPTR_FIELD_NAME[i as usize] == fid {
+            if LOWER_BYTEPTR_FIELD_SIGN[i as usize] == 3 { return 2 }
+            if LOWER_BYTEPTR_FIELD_SIGN[i as usize] == 4 { return 5 }
+            return 0
         }
         i = i + 1
     }
@@ -25941,7 +25969,14 @@ impl Lowerer {
         match *operand_opt {
             Some(operand) => {
                 if (*operand).kind == ExprKind::ExprIdent {
+                    // SIO-556: raw-pointer locals/params (`p: *mut f64`) carry
+                    // their pointee in the same slot as borrows; only floats
+                    // resolve here (non-float raws keep 0, today's behavior).
                     if !self.lookup_local_is_ref((*operand).name) {
+                        let pointee = self.lookup_local_struct_type((*operand).name)
+                        if pointee.len <= 0 { return 0 }
+                        if lower_name_is_f64_scalar_type(pointee) { return 2 }
+                        if lower_name_is_wide_float_type(pointee) { return 5 }
                         return 0
                     }
                     let pointee = self.lookup_local_struct_type((*operand).name)
@@ -25952,6 +25987,35 @@ impl Lowerer {
                         || lower_name_is_bool_type(pointee)
                         || lower_name_is_string_type(pointee) {
                         return 1
+                    }
+                    return 0
+                }
+                // SIO-556: `*((p as i64) as *mut f64)` — a cast to a raw float
+                // pointer yields a float. Non-float casts keep 0.
+                if (*operand).kind == ExprKind::ExprCast {
+                    match (*operand).cast_type {
+                        Some(ct) => {
+                            if (*ct).kind == TypeExprKind::TypeRawPtr {
+                                let inner = lower_opt_type_named_name(&(*ct).inner)
+                                if lower_name_is_f64_scalar_type(inner) { return 2 }
+                                if lower_name_is_wide_float_type(inner) { return 5 }
+                            }
+                        }
+                        None => {}
+                    }
+                    return 0
+                }
+                // SIO-556: `*(b.ptr)` where ptr is a declared *mut f64 field —
+                // resolve through the owner struct like the width table does.
+                if (*operand).kind == ExprKind::ExprFieldAccess {
+                    match (*operand).left {
+                        Some(base) => {
+                            let owner = self.expr_receiver_struct_type_ref(&(*base))
+                            if owner.len > 0 {
+                                return lower_floatptr_field_kind(owner, (*operand).name)
+                            }
+                        }
+                        None => {}
                     }
                     return 0
                 }
