@@ -15309,6 +15309,126 @@ fn a64_preview_unop_name(op: UnaryOp) -> string {
     "unknown_unop"
 }
 
+// SIO-32: builtin print bodies for the a64 preview (mirrors the x86_64
+// emit_builtin_print_* helpers). Without these, `print` compiles to an empty
+// stub: the ELF exits 0 but never writes a byte. Callers pass the first arg
+// in x0 (MIR_OP_ARG_MOVE targets register arg_index). Bodies are frameless
+// leaves of fixed single-instruction encodings; branch offsets are byte
+// offsets from the branch instruction, documented against each layout.
+// Linux write is x8=64, x0=fd, x1=buf, x2=len, svc #0.
+fn a64_preview_emit_builtin_print_str(c: A64PreviewCompiler) -> A64PreviewCompiler with Mut, Panic, Div {
+    var out = c
+    // x0 = NUL-terminated string.
+    //   +0  mov  x1, x0        (ORR alias; no SP involved, safe)
+    //   +4  movz x2, #0
+    //   +8  loop: ldrb w3, [x1]
+    //   +12 cbz  x3, done      (+28 => +16)
+    //   +16 add  x1, x1, #1
+    //   +20 add  x2, x2, #1
+    //   +24 b    loop          (+8 => -16)
+    //   +28 done: sub x1, x1, x2
+    //   +32 movz x0, #1
+    //   +36 movz x8, #64
+    //   +40 svc  #0
+    //   +44 ret
+    out.code = a64_emit_mov(out.code, A64_X1, A64_X0)
+    out.code = a64_emit_movz(out.code, A64_X2, 0, 0)
+    out.code = a64_emit_ldrb(out.code, A64_X3, A64_X1, 0)
+    out.code = a64_emit_cbz(out.code, A64_X3, 16)
+    out.code = a64_emit_add_imm(out.code, A64_X1, A64_X1, 1)
+    out.code = a64_emit_add_imm(out.code, A64_X2, A64_X2, 1)
+    out.code = a64_emit_b(out.code, -16)
+    out.code = a64_emit_sub(out.code, A64_X1, A64_X1, A64_X2)
+    out.code = a64_emit_movz(out.code, A64_X0, 1, 0)
+    out.code = a64_emit_movz(out.code, A64_X8, 64, 0)
+    out.code = a64_emit_svc(out.code, 0)
+    out.code = a64_emit_ret(out.code)
+    out
+}
+
+// print_int: x0 = i64 value. Repeated udiv by 10 into a 32-byte stack
+// buffer, backwards from [sp, #31]; '-' prepended when negative.
+//   +0   sub  sp, sp, #32
+//   +4   mov  x1, x0
+//   +8   movz x7, #0            (neg flag)
+//   +12  cmp  x1, #0
+//   +16  b.ge positive         (+28 => +12)
+//   +20  neg  x1, x1
+//   +24  movz x7, #1
+//   +28  positive: add x4, sp, #31
+//   +32  movz x2, #0            (len)
+//   +36  movz x5, #10
+//   +40  loop: udiv x6, x1, x5
+//   +44  msub x3, x6, x5, x1    (x3 = x1 - x6*x5)
+//   +48  add  x3, x3, #48
+//   +52  strb w3, [x4]
+//   +56  sub  x4, x4, #1
+//   +60  add  x2, x2, #1
+//   +64  mov  x1, x6
+//   +68  cbnz x1, loop          (+40 => -28)
+//   +72  cbz  x7, nosign        (+92 => +20)
+//   +76  movz x3, #45           ('-')
+//   +80  strb w3, [x4]
+//   +84  sub  x4, x4, #1
+//   +88  add  x2, x2, #1
+//   +92  nosign: add x4, x4, #1
+//   +96  mov  x1, x4
+//   +100 movz x0, #1
+//   +104 movz x8, #64
+//   +108 svc  #0
+//   +112 add  sp, sp, #32
+//   +116 ret
+fn a64_preview_emit_builtin_print_int(c: A64PreviewCompiler) -> A64PreviewCompiler with Mut, Panic, Div {
+    var out = c
+    out.code = a64_emit_sub_imm(out.code, A64_SP, A64_SP, 32)
+    out.code = a64_emit_mov(out.code, A64_X1, A64_X0)
+    out.code = a64_emit_movz(out.code, A64_X7, 0, 0)
+    out.code = a64_emit_cmp_imm(out.code, A64_X1, 0)
+    out.code = a64_emit_b_cond(out.code, A64_COND_GE, 12)
+    out.code = a64_emit_neg(out.code, A64_X1, A64_X1)
+    out.code = a64_emit_movz(out.code, A64_X7, 1, 0)
+    out.code = a64_emit_add_imm(out.code, A64_X4, A64_SP, 31)
+    out.code = a64_emit_movz(out.code, A64_X2, 0, 0)
+    out.code = a64_emit_movz(out.code, A64_X5, 10, 0)
+    out.code = a64_emit_udiv(out.code, A64_X6, A64_X1, A64_X5)
+    out.code = a64_emit_msub(out.code, A64_X3, A64_X6, A64_X5, A64_X1)
+    out.code = a64_emit_add_imm(out.code, A64_X3, A64_X3, 48)
+    out.code = a64_emit_strb(out.code, A64_X3, A64_X4, 0)
+    out.code = a64_emit_sub_imm(out.code, A64_X4, A64_X4, 1)
+    out.code = a64_emit_add_imm(out.code, A64_X2, A64_X2, 1)
+    out.code = a64_emit_mov(out.code, A64_X1, A64_X6)
+    out.code = a64_emit_cbnz(out.code, A64_X1, -28)
+    out.code = a64_emit_cbz(out.code, A64_X7, 20)
+    out.code = a64_emit_movz(out.code, A64_X3, 45, 0)
+    out.code = a64_emit_strb(out.code, A64_X3, A64_X4, 0)
+    out.code = a64_emit_sub_imm(out.code, A64_X4, A64_X4, 1)
+    out.code = a64_emit_add_imm(out.code, A64_X2, A64_X2, 1)
+    out.code = a64_emit_add_imm(out.code, A64_X4, A64_X4, 1)
+    out.code = a64_emit_mov(out.code, A64_X1, A64_X4)
+    out.code = a64_emit_movz(out.code, A64_X0, 1, 0)
+    out.code = a64_emit_movz(out.code, A64_X8, 64, 0)
+    out.code = a64_emit_svc(out.code, 0)
+    out.code = a64_emit_add_imm(out.code, A64_SP, A64_SP, 32)
+    out.code = a64_emit_ret(out.code)
+    out
+}
+
+// print_char: x0 low byte is the character. One byte via a 16-byte slot.
+// `mov x1, sp` would be the ORR alias (r31 reads XZR there); ADD #0 honors SP.
+fn a64_preview_emit_builtin_print_char(c: A64PreviewCompiler) -> A64PreviewCompiler with Mut, Panic, Div {
+    var out = c
+    out.code = a64_emit_sub_imm(out.code, A64_SP, A64_SP, 16)
+    out.code = a64_emit_strb(out.code, A64_X0, A64_SP, 0)
+    out.code = a64_emit_add_imm(out.code, A64_X1, A64_SP, 0)
+    out.code = a64_emit_movz(out.code, A64_X2, 1, 0)
+    out.code = a64_emit_movz(out.code, A64_X0, 1, 0)
+    out.code = a64_emit_movz(out.code, A64_X8, 64, 0)
+    out.code = a64_emit_svc(out.code, 0)
+    out.code = a64_emit_add_imm(out.code, A64_SP, A64_SP, 16)
+    out.code = a64_emit_ret(out.code)
+    out
+}
+
 fn a64_preview_emit_machine_instr(c: A64PreviewCompiler, instr: MachineInstr) -> (A64PreviewCompiler, string) with Mut, Panic, Div {
     var out = c
 
@@ -15563,6 +15683,24 @@ fn a64_preview_emit_machine_instr(c: A64PreviewCompiler, instr: MachineInstr) ->
 fn a64_preview_compile_function(c: A64PreviewCompiler, func: IrFunction, machine_func: MachineFunction, fn_index: i64) -> (A64PreviewCompiler, string) with Mut, Panic, Div {
     var out = a64_preview_reset_function_state(c)
     out.fn_offsets[fn_index as usize] = out.code.len
+
+    // SIO-32: builtin print dispatch (mirrors the x86_64 empty-stub
+    // interception). Only bodyless builtins are intercepted; user/stdlib
+    // bodies that share the name compile as ordinary IR.
+    if machine_func.blocks[0].instr_count == 0 {
+        if name_is_print(func.name) {
+            out = a64_preview_emit_builtin_print_str(out)
+            return (out, "")
+        }
+        if name_is_print_int(func.name) {
+            out = a64_preview_emit_builtin_print_int(out)
+            return (out, "")
+        }
+        if name_is_print_char(func.name) {
+            out = a64_preview_emit_builtin_print_char(out)
+            return (out, "")
+        }
+    }
 
     let frame_size = a64_preview_frame_size(machine_func.temp_count)
     out.code = a64_emit_prologue(out.code, frame_size)
