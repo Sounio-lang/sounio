@@ -254,4 +254,15 @@ kernel exceeds the 2 GiB test-process arena while the 11-op
 contrib kernel fits. Same reason the mem-fed emitter (about 100
 lines) already used text emission. No behavior change, only the
 emission path.
+Addendum 2026-11-01, typed-lowering borrow fix: all KaxiAsmBuf
+writers now take the buffer by mutable borrow (in place) and all
+readers by shared borrow; 51 appenders plus the two lowerers and
+the line transpilers converted, about 1100 call sites updated
+across 26 files. An 18-op typed lowering that died at 13 ops
+before now completes in the same arena (TYPED18-ALIVE, RC=0). The
+K-AXI golden gate stays 318/318 byte-identical and the
+dissertation parity gate stays 13/13, so emitted PTX is unchanged;
+the text emitters were kept as is (no behavior change either way).
+kaxi_assemble still takes the buffer by value (one copy per kernel,
+not per op) and the lowerers still return it by value.
 
