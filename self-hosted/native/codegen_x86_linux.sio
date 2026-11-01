@@ -15023,6 +15023,14 @@ struct A64PreviewCompiler {
     call_patch_targets: [i64; 64],
     call_patch_count: i64,
     entry_offset: i64,
+    // SIO-32: rodata image under construction plus the address fixups that
+    // bind emitted adrp/add pairs to it. Fixups resolve after the final
+    // code size is known (rodata vaddr depends on it); patching rewrites
+    // words in place and never changes the code length.
+    rodata: StringTable,
+    data_patch_offsets: [i64; 64],
+    data_patch_rodata: [i64; 64],
+    data_patch_count: i64,
 }
 
 fn a64_preview_compiler_new() -> A64PreviewCompiler {
@@ -15042,6 +15050,10 @@ fn a64_preview_compiler_new() -> A64PreviewCompiler {
         call_patch_targets: [0; 64],
         call_patch_count: 0,
         entry_offset: 0,
+        rodata: string_table_new(),
+        data_patch_offsets: [0; 64],
+        data_patch_rodata: [0; 64],
+        data_patch_count: 0,
     }
 }
 
@@ -15131,6 +15143,20 @@ fn a64_preview_record_call_patch(c: A64PreviewCompiler, patch_offset: i64, targe
         out.call_patch_targets[idx as usize] = target_fn
         out.call_patch_count = idx + 1
     }
+    out
+}
+
+// SIO-32: record one rodata address fixup. adrp_offset points at the adrp
+// word (the add follows 4 bytes later); rodata_offset is the string's
+// offset inside the under-construction rodata image. Capacity is checked
+// by the emitter before recording; a dropped fixup would silently corrupt
+// the binary, so the emitter refuses loudly instead.
+fn a64_preview_record_data_patch(c: A64PreviewCompiler, adrp_offset: i64, rodata_offset: i64) -> A64PreviewCompiler with Mut, Panic, Div {
+    var out = c
+    let idx = out.data_patch_count
+    out.data_patch_offsets[idx as usize] = adrp_offset
+    out.data_patch_rodata[idx as usize] = rodata_offset
+    out.data_patch_count = idx + 1
     out
 }
 
@@ -15241,6 +15267,48 @@ fn a64_preview_mir_op_name(opcode: i64) -> string {
     "unknown_mir_op"
 }
 
+// SIO-32: name the BinaryOp behind an int/float binop refusal. The bare
+// "binop" told the operator nothing about which comparison or arithmetic
+// the backend cannot encode yet.
+fn a64_preview_binop_name(op: BinaryOp) -> string {
+    if op == BinaryOp::OpAdd { return "add" }
+    if op == BinaryOp::OpSub { return "sub" }
+    if op == BinaryOp::OpMul { return "mul" }
+    if op == BinaryOp::OpDiv { return "div" }
+    if op == BinaryOp::OpRem { return "rem" }
+    if op == BinaryOp::OpEq { return "eq" }
+    if op == BinaryOp::OpNe { return "ne" }
+    if op == BinaryOp::OpLt { return "lt" }
+    if op == BinaryOp::OpLe { return "le" }
+    if op == BinaryOp::OpGt { return "gt" }
+    if op == BinaryOp::OpGe { return "ge" }
+    if op == BinaryOp::OpAnd { return "and" }
+    if op == BinaryOp::OpOr { return "or" }
+    if op == BinaryOp::OpBitAnd { return "bitand" }
+    if op == BinaryOp::OpBitOr { return "bitor" }
+    if op == BinaryOp::OpBitXor { return "bitxor" }
+    if op == BinaryOp::OpShl { return "shl" }
+    if op == BinaryOp::OpShr { return "shr" }
+    if op == BinaryOp::OpConcat { return "concat" }
+    if op == BinaryOp::OpRange { return "range" }
+    if op == BinaryOp::OpRangeInclusive { return "range_inclusive" }
+    if op == BinaryOp::OpUDiv { return "udiv" }
+    if op == BinaryOp::OpURem { return "urem" }
+    if op == BinaryOp::OpUShr { return "ushr" }
+    "unknown_binop"
+}
+
+// SIO-32: same naming for unary refusals.
+fn a64_preview_unop_name(op: UnaryOp) -> string {
+    if op == UnaryOp::OpNeg { return "neg" }
+    if op == UnaryOp::OpNot { return "not" }
+    if op == UnaryOp::OpRef { return "ref" }
+    if op == UnaryOp::OpRefMut { return "refmut" }
+    if op == UnaryOp::OpDeref { return "deref" }
+    if op == UnaryOp::OpBitNot { return "bitnot" }
+    "unknown_unop"
+}
+
 fn a64_preview_emit_machine_instr(c: A64PreviewCompiler, instr: MachineInstr) -> (A64PreviewCompiler, string) with Mut, Panic, Div {
     var out = c
 
@@ -15295,15 +15363,33 @@ fn a64_preview_emit_machine_instr(c: A64PreviewCompiler, instr: MachineInstr) ->
             out.code = a64_emit_asr(out.code, A64_X9, A64_X9, A64_X10)
         } else if instr.bin_op == BinaryOp::OpUShr {
             out.code = a64_emit_lsr(out.code, A64_X9, A64_X9, A64_X10)
+        } else if instr.bin_op == BinaryOp::OpEq || instr.bin_op == BinaryOp::OpNe || instr.bin_op == BinaryOp::OpLt || instr.bin_op == BinaryOp::OpLe || instr.bin_op == BinaryOp::OpGt || instr.bin_op == BinaryOp::OpGe {
+            // SIO-32: integer comparisons. X9 holds lhs, X10 rhs
+            // (legalize moves both into temps first). Sounio integers are
+            // signed; the macOS backend uses the same signed conditions.
+            out.code = a64_emit_cmp(out.code, A64_X9, A64_X10)
+            var cc: i64 = A64_COND_EQ
+            if instr.bin_op == BinaryOp::OpNe { cc = A64_COND_NE }
+            else if instr.bin_op == BinaryOp::OpLt { cc = A64_COND_LT }
+            else if instr.bin_op == BinaryOp::OpLe { cc = A64_COND_LE }
+            else if instr.bin_op == BinaryOp::OpGt { cc = A64_COND_GT }
+            else if instr.bin_op == BinaryOp::OpGe { cc = A64_COND_GE }
+            out.code = a64_emit_cset(out.code, A64_X9, cc)
         } else {
-            return (out, "aarch64_binop_pending:" + native_v2_ir_opcode_name(IrOpcode::IrBinOp))
+            return (out, "aarch64_binop_pending:" + a64_preview_binop_name(instr.bin_op))
         }
         out.code = a64_preview_emit_store_slot(out.code, A64_X9, instr.dst.value)
         return (out, "")
     }
     if instr.opcode == MIR_OP_UNARY {
         out.code = a64_preview_emit_load_slot(out.code, A64_X9, instr.src1.value)
-        if instr.un_op == UnaryOp::OpNeg {
+        if machine_instr_aux_value(instr) == 1 && instr.un_op == UnaryOp::OpNeg {
+            // SIO-32: float negation. The integer neg below would flip the
+            // top BIT of the double instead of negating its value.
+            out.code = a64_emit_fmov_x_to_d(out.code, A64_D0, A64_X9)
+            out.code = a64_emit_fneg(out.code, A64_D0, A64_D0)
+            out.code = a64_emit_fmov_d_to_x(out.code, A64_X9, A64_D0)
+        } else if instr.un_op == UnaryOp::OpNeg {
             out.code = a64_emit_neg(out.code, A64_X9, A64_X9)
         } else if instr.un_op == UnaryOp::OpNot {
             out.code = a64_emit_mov_imm64(out.code, A64_X10, 1)
@@ -15311,8 +15397,111 @@ fn a64_preview_emit_machine_instr(c: A64PreviewCompiler, instr: MachineInstr) ->
         } else if instr.un_op == UnaryOp::OpBitNot {
             out.code = a64_emit_mvn(out.code, A64_X9, A64_X9)
         } else {
-            return (out, "aarch64_unary_pending")
+            return (out, "aarch64_unary_pending:" + a64_preview_unop_name(instr.un_op))
         }
+        out.code = a64_preview_emit_store_slot(out.code, A64_X9, instr.dst.value)
+        return (out, "")
+    }
+    // SIO-32: string literal address. The bytes are interned into the
+    // preview rodata image; the adrp/add pair is emitted with zero
+    // immediates and patched once the final code size (hence the rodata
+    // vaddr) is known. Refusals are loud: a dropped fixup or an overfull
+    // table would otherwise silently corrupt the binary.
+    if instr.opcode == MIR_OP_LOAD_DATA_ADDR {
+        if instr.name.len < 0 || out.rodata.len + instr.name.len + 1 > 8192 {
+            return (out, "aarch64_rodata_overflow")
+        }
+        if out.data_patch_count >= 64 {
+            return (out, "aarch64_rodata_patches_exhausted")
+        }
+        var ro = out.rodata
+        ro = string_table_add(ro, instr.name.buf, instr.name.len)
+        out.rodata = ro
+        out.code = a64_emit_adrp(out.code, A64_X9, 0)
+        let adrp_at = out.code.len - 4
+        out.code = a64_emit_add_imm(out.code, A64_X9, A64_X9, 0)
+        out = a64_preview_record_data_patch(out, adrp_at, ro.last_offset)
+        out.code = a64_preview_emit_store_slot(out.code, A64_X9, instr.dst.value)
+        return (out, "")
+    }
+    // SIO-32: double constant. The f64 bit pattern is materialized with
+    // movz/movk (no rodata needed); the slot keeps the bits, matching the
+    // float-slot invariant used by the float arms below.
+    if instr.opcode == MIR_OP_LOAD_FLOAT_RIP {
+        let bits = instr.src1.value
+        out.code = a64_emit_movz(out.code, A64_X9, bits & 65535, 0)
+        out.code = a64_emit_movk(out.code, A64_X9, (bits >> 16) & 65535, 16)
+        out.code = a64_emit_movk(out.code, A64_X9, (bits >> 32) & 65535, 32)
+        out.code = a64_emit_movk(out.code, A64_X9, (bits >> 48) & 65535, 48)
+        out.code = a64_preview_emit_store_slot(out.code, A64_X9, instr.dst.value)
+        return (out, "")
+    }
+    // SIO-32: int value <-> double bits. Slots hold f64 values as raw bit
+    // patterns in integer slots; D registers are transient.
+    if instr.opcode == MIR_OP_INT_TO_FLOAT {
+        out.code = a64_preview_emit_load_slot(out.code, A64_X9, instr.src1.value)
+        out.code = a64_emit_scvtf(out.code, A64_D0, A64_X9)
+        out.code = a64_emit_fmov_d_to_x(out.code, A64_X9, A64_D0)
+        out.code = a64_preview_emit_store_slot(out.code, A64_X9, instr.dst.value)
+        return (out, "")
+    }
+    if instr.opcode == MIR_OP_FLOAT_TO_INT {
+        out.code = a64_preview_emit_load_slot(out.code, A64_X9, instr.src1.value)
+        out.code = a64_emit_fmov_x_to_d(out.code, A64_D0, A64_X9)
+        out.code = a64_emit_fcvtzs(out.code, A64_X9, A64_D0)
+        out.code = a64_preview_emit_store_slot(out.code, A64_X9, instr.dst.value)
+        return (out, "")
+    }
+    if instr.opcode == MIR_OP_FLOAT_MOVE {
+        out.code = a64_preview_emit_load_slot(out.code, A64_X9, instr.src1.value)
+        out.code = a64_preview_emit_store_slot(out.code, A64_X9, instr.dst.value)
+        return (out, "")
+    }
+    // SIO-32: double arithmetic and comparisons. aux bit 0/1 mark float
+    // src1/src2 (see native_v2_make_float_binop); integer sides convert
+    // with scvtf. Comparison results are ints (cset); arithmetic results
+    // stay double bits (the dst slot is float-marked by legalize).
+    if instr.opcode == MIR_OP_FLOAT_BINOP {
+        let fflags = machine_instr_aux_value(instr)
+        let s1f = fflags & 1
+        let s2f = (fflags / 2) & 1
+        out.code = a64_preview_emit_load_slot(out.code, A64_X9, instr.src1.value)
+        out.code = a64_preview_emit_load_slot(out.code, A64_X10, instr.src2.value)
+        if s1f == 1 {
+            out.code = a64_emit_fmov_x_to_d(out.code, A64_D0, A64_X9)
+        } else {
+            out.code = a64_emit_scvtf(out.code, A64_D0, A64_X9)
+        }
+        if s2f == 1 {
+            out.code = a64_emit_fmov_x_to_d(out.code, A64_D1, A64_X10)
+        } else {
+            out.code = a64_emit_scvtf(out.code, A64_D1, A64_X10)
+        }
+        if instr.bin_op == BinaryOp::OpAdd {
+            out.code = a64_emit_fadd(out.code, A64_D0, A64_D0, A64_D1)
+        } else if instr.bin_op == BinaryOp::OpSub {
+            out.code = a64_emit_fsub(out.code, A64_D0, A64_D0, A64_D1)
+        } else if instr.bin_op == BinaryOp::OpMul {
+            out.code = a64_emit_fmul(out.code, A64_D0, A64_D0, A64_D1)
+        } else if instr.bin_op == BinaryOp::OpDiv {
+            out.code = a64_emit_fdiv(out.code, A64_D0, A64_D0, A64_D1)
+        } else if instr.bin_op == BinaryOp::OpEq || instr.bin_op == BinaryOp::OpNe || instr.bin_op == BinaryOp::OpLt || instr.bin_op == BinaryOp::OpLe || instr.bin_op == BinaryOp::OpGt || instr.bin_op == BinaryOp::OpGe {
+            // Ordered float conditions mirror the macOS backend; NaN is
+            // unordered, so Lt/Le/Gt/Ge on NaN correctly yield 0.
+            out.code = a64_emit_fcmp(out.code, A64_D0, A64_D1)
+            var fcc: i64 = A64_COND_EQ
+            if instr.bin_op == BinaryOp::OpNe { fcc = A64_COND_NE }
+            else if instr.bin_op == BinaryOp::OpLt { fcc = A64_COND_MI }
+            else if instr.bin_op == BinaryOp::OpLe { fcc = A64_COND_LS }
+            else if instr.bin_op == BinaryOp::OpGt { fcc = A64_COND_GT }
+            else if instr.bin_op == BinaryOp::OpGe { fcc = A64_COND_GE }
+            out.code = a64_emit_cset(out.code, A64_X9, fcc)
+            out.code = a64_preview_emit_store_slot(out.code, A64_X9, instr.dst.value)
+            return (out, "")
+        } else {
+            return (out, "aarch64_float_binop_pending:" + a64_preview_binop_name(instr.bin_op))
+        }
+        out.code = a64_emit_fmov_d_to_x(out.code, A64_X9, A64_D0)
         out.code = a64_preview_emit_store_slot(out.code, A64_X9, instr.dst.value)
         return (out, "")
     }
@@ -16223,7 +16412,27 @@ fn compile_to_elf_aarch64_preview(module: &IrModule) -> NativeCompileResult with
     c = a64_preview_emit_entry_trampoline_linux(c, main_idx)
     c = a64_preview_patch_calls(c)
 
-    let rodata = string_table_new()
+    // SIO-32: resolve rodata address fixups now that the code size is
+    // final. Layout (see finalize_elf64_for_machine): text at
+    // base+4096, rodata at base+align_page(4096 + code.len), so the target
+    // of every adrp/add pair is computable; words are rewritten in place
+    // and the code length never changes here.
+    let text_vaddr = 4194304 + 4096
+    let rodata_vaddr = 4194304 + align_page(4096 + c.code.len)
+    var di: i64 = 0
+    while di < c.data_patch_count {
+        let at = c.data_patch_offsets[di as usize]
+        let target = rodata_vaddr + c.data_patch_rodata[di as usize]
+        let pc = text_vaddr + at
+        let page_off = (target / 4096) - (pc / 4096)
+        let lo12 = target - ((target / 4096) * 4096)
+        let adrp_word = 0x90000000 | (((page_off & 3)) << 29) | ((((page_off / 4) & 524287)) << 5) | (A64_X9 & 31)
+        c.code = patch_u32_le(c.code, at, adrp_word)
+        let add_word = 0x91000000 | ((lo12 & 4095) << 10) | ((A64_X9 & 31) << 5) | (A64_X9 & 31)
+        c.code = patch_u32_le(c.code, at + 4, add_word)
+        di = di + 1
+    }
+
     let data = string_table_new()
     // A64PreviewCompiler keeps 256 slots. The ELF finalizer takes the
     // IR-wide table. Copy, do not grow the preview compiler onto the stack.
@@ -16235,7 +16444,7 @@ fn compile_to_elf_aarch64_preview(module: &IrModule) -> NativeCompileResult with
     }
     let elf = finalize_elf64_for_machine(
         c.code,
-        rodata,
+        c.rodata,
         data,
         c.entry_offset,
         4194304,
