@@ -41,7 +41,9 @@ function check(workflow,decision,additive){
  assert(text.includes("run: python3 scripts/ci/evaluate_ci_decision.py"),"legacy evaluator disconnected");
  assert(/- name: Require selected deep scientific replay\n        if: always\(\)\n        env:\n          NEEDS_JSON: \$\{\{ toJSON\(needs\) \}\}\n        run: bash scripts\/ci\/stdlib_deep_ci_decision\.sh/.test(text),"additive decision disconnected or conditionally skipped");
  assert(additive.includes('result=$(jq -r \'.["stdlib-deep-science"].result // "missing"\''),"additive job lookup missing");
- const expected=new Set([...keys,addition]);
+ // The layered aggregators are part of the verdict too: a red fast or deep
+ // gate must fail ci-decision, not merely show up as its own red check.
+ const expected=new Set([...keys,addition,"fast-pr-gate","deep-compiler-gate"]);
  const actual=new Set(needs.filter(x=>x!=="impact"));
  const missing=[...actual].filter(x=>!expected.has(x)).sort();
  const extra=[...expected].filter(x=>!actual.has(x)).sort();
@@ -62,6 +64,8 @@ if(process.argv[3]==="--selftest"){
   [workflow.replace("      - full-test-suite\n",""),decision,additive],
   [workflow,decision.replace('        "contracts": True,\n',""),additive],
   [workflow,decision,additive.replaceAll('["stdlib-deep-science"]','["unrelated"]')],
+  [workflow.replace("      - fast-pr-gate\n",""),decision,additive],
+  [workflow.replace("      - deep-compiler-gate\n",""),decision,additive],
  ];
  for(const [i,args]of controls.entries())assert.throws(()=>check(...args),"accepted mutation "+i);
  console.log("CI_DECISION_CONTRACT_MUTATIONS_PASS controls="+controls.length);
