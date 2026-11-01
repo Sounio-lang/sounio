@@ -151,7 +151,7 @@ remain under the private worker results directory.
 
 The supplementary full `madaros check self-hosted/check/check.sio` in the
 20996 batch completed with `run_check_mode: verdict=0` and `check: OK`.
-See `results/checker-source-check.log`. Its following ordinary rebuild is
+See `results/checker-source-check.txt`. Its following ordinary rebuild is
 running and has no result yet. The mapped candidate build in step 20996.0
 has completed and is the compiler exercised above. The step's original
 `MAP_BUILD_STATUS=139` covers the first combined build-plus-gate script, whose
