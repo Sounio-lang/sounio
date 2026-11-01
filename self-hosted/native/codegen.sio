@@ -5471,6 +5471,16 @@ struct A64PreviewCompiler {
     code: CodeBuffer,
     fn_offsets: [i64; 256],
     fn_count: i64,
+    // SIO-32: call-arg table. The legalized machine stream carries CALL
+    // without ARG_MOVE, so the preview reads args from the IR arena
+    // (mirrors the x86 backend's nc_core_load_call_arg_into). Lowering is
+    // order-preserving, so the k-th machine CALL is the k-th IR call; the
+    // recorded target is verified at emission and mismatch refuses loudly.
+    call_site_count: i64,
+    call_site_targets: [i64; 16],
+    call_site_argc: [i64; 16],
+    call_site_args: [i64; 96],
+    call_emit_index: i64,
     label_offsets: [i64; 64],
     label_patch_offsets: [i64; 128],
     label_patch_labels: [i64; 128],
@@ -5512,6 +5522,11 @@ fn a64_preview_compiler_new() -> A64PreviewCompiler {
         data_patch_offsets: [0; 64],
         data_patch_rodata: [0; 64],
         data_patch_count: 0,
+        call_site_count: 0,
+        call_site_targets: [0; 16],
+        call_site_argc: [0; 16],
+        call_site_args: [0; 96],
+        call_emit_index: 0,
     }
 }
 
@@ -5882,6 +5897,47 @@ fn a64_preview_emit_builtin_print_char(c: A64PreviewCompiler) -> A64PreviewCompi
     out
 }
 
+// SIO-32: collect call args from the IR arena, in IR order (mirrors the
+// x86 backend's nc_core_load_call_arg_into reads). The legalized machine
+// stream carries CALL without ARG_MOVE, and lowering is order-preserving,
+// so the k-th machine CALL matches the k-th IR call collected here.
+fn a64_preview_collect_call_args(c: A64PreviewCompiler, func: IrFunction) -> (A64PreviewCompiler, string) with Mut, Panic, Div {
+    var out = c
+    out.call_site_count = 0
+    out.call_emit_index = 0
+    var i: i64 = 0
+    while i < func.instr_count {
+        let at = ir_region_slot_r(func.region, (i))
+        if (IR_A_OP[at as usize] as IrOpcode) == IrOpcode::IrCall {
+            if out.call_site_count >= 16 {
+                return (out, "aarch64_call_table_exhausted")
+            }
+            let ci = out.call_site_count
+            out.call_site_targets[ci as usize] = IR_A_FN_ID[at as usize]
+            let argc = IR_A_ARG_COUNT[at as usize]
+            if argc > 6 {
+                return (out, "aarch64_call_arity_gt_6")
+            }
+            if argc < 0 {
+                return (out, "aarch64_call_arity_negative")
+            }
+            out.call_site_argc[ci as usize] = argc
+            var a: i64 = 0
+            while a < argc {
+                let arg = ir_arena_arg_at(at, a)
+                if arg < 0 {
+                    return (out, "aarch64_missing_call_arg")
+                }
+                out.call_site_args[(ci * 6 + a) as usize] = arg
+                a = a + 1
+            }
+            out.call_site_count = ci + 1
+        }
+        i = i + 1
+    }
+    (out, "")
+}
+
 fn a64_preview_emit_machine_instr(c: A64PreviewCompiler, instr: MachineInstr) -> (A64PreviewCompiler, string) with Mut, Panic, Div {
     var out = c
 
@@ -6090,6 +6146,23 @@ fn a64_preview_emit_machine_instr(c: A64PreviewCompiler, instr: MachineInstr) ->
         return (out, "")
     }
     if instr.opcode == MIR_OP_CALL {
+        // SIO-32: pass call args. The machine stream carries no ARG_MOVE,
+        // so args come from the IR call table (k-th CALL matches k-th IR
+        // call). The recorded target is verified; mismatch refuses loudly
+        // rather than calling with another site's args.
+        let ci = out.call_emit_index
+        if ci < 0 || ci >= out.call_site_count {
+            return (out, "aarch64_call_site_missing")
+        }
+        if out.call_site_targets[ci as usize] != instr.src1.value {
+            return (out, "aarch64_call_target_mismatch")
+        }
+        var a: i64 = 0
+        while a < out.call_site_argc[ci as usize] {
+            out.code = a64_preview_emit_load_slot(out.code, a, out.call_site_args[(ci * 6 + a) as usize])
+            a = a + 1
+        }
+        out.call_emit_index = ci + 1
         let patch_offset = out.code.len
         out.code = a64_emit_bl(out.code, 0)
         out = a64_preview_record_call_patch(out, patch_offset, instr.src1.value)
@@ -6138,6 +6211,13 @@ fn a64_preview_compile_function(c: A64PreviewCompiler, func: IrFunction, machine
             out = a64_preview_emit_builtin_print_char(out)
             return (out, "")
         }
+    }
+
+    // SIO-32: collect call args before emitting (see above).
+    let collected = a64_preview_collect_call_args(out, func)
+    out = collected.0
+    if str_len(collected.1) > 0 {
+        return (out, collected.1)
     }
 
     let frame_size = a64_preview_frame_size(machine_func.temp_count)
