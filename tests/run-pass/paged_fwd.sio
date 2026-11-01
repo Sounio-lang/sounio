@@ -1,0 +1,41 @@
+//@ run-pass
+//
+// M2a forward parity: llama_forward_paged matches llama_forward
+// token-for-token (prefill + greedy steps) on tiny-random-Llama CPU.
+use llm::attn_gpu::llama_sample_greedy
+use llm::llama::{kv_new, llama_forward, llama_forward_paged, llama_load, paged_kv_new_layers}
+use tensor2::cpu_kernel::{CpuBuf, ck_alloc, ck_set}
+
+fn main() with IO, Mut, Panic, Div, Alloc {
+    var ok = true
+    var m = llama_load("/workspace/llm-models/tiny-random-Llama")
+    if !m.loaded { ok = false }
+    var ids = ck_alloc(4)
+    ck_set(&!ids, 0, 1.0)
+    ck_set(&!ids, 1, 150.0)
+    ck_set(&!ids, 2, 2700.0)
+    ck_set(&!ids, 3, 13.0)
+    var kv = kv_new(&m, 64)
+    var lg = llama_forward(&!m, &!kv, &ids, 4)
+    var pk = paged_kv_new_layers(&m, 16)
+    var pv = paged_kv_new_layers(&m, 16)
+    var pg = llama_forward_paged(&!m, &!pk, &!pv, &ids, 4)
+    var i: i64 = 0
+    while i < 6 {
+        let a = llama_sample_greedy(&lg)
+        let b = llama_sample_greedy(&pg)
+        if a != b { ok = false }
+        if a == 1 { i = 6 }
+        if a != 1 {
+            var one = ck_alloc(1)
+            ck_set(&!one, 0, a as f64)
+            lg = llama_forward(&!m, &!kv, &one, 1)
+            pg = llama_forward_paged(&!m, &!pk, &!pv, &one, 1)
+        }
+        i = i + 1
+    }
+    if ok { print("PAGEDFWD PASS") } else { print("PAGEDFWD FAIL") }
+    print("\n")
+    if !ok { exit(1) }
+    exit(0)
+}

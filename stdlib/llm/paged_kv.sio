@@ -1,0 +1,65 @@
+// stdlib::llm::paged_kv - Plan M2a block-paged KV sequence store.
+//
+// Each sequence owns an ordered list of fixed-size blocks; token p
+// lives in block p / B at offset p % B. Same values as a contiguous
+// cache, different addresses (bit-exact by construction).
+// Truncation (spec rollback) is a length cut; stale blocks past len
+// are reused on regrow. Blocks are never shared between sequences,
+// so no free-list is needed at this layer (M2b owns the pool).
+use tensor2::cpu_kernel::{CpuBuf, ck_alloc, ck_get, ck_set}
+
+pub struct PagedKv {
+    pub blocks: [CpuBuf; 64],
+    pub nblocks: i64,
+    pub len: i64,
+    pub b: i64,
+    pub d: i64,
+}
+
+pub fn paged_new(b: i64, d: i64) -> PagedKv with Alloc {
+    var pk = PagedKv { blocks: [ck_alloc(1); 64], nblocks: 0, len: 0, b: b, d: d }
+    pk
+}
+
+fn paged_grow(pk: &!PagedKv) with Alloc, Mut {
+    var nb = ck_alloc(pk.b * pk.d)
+    pk.blocks[pk.nblocks as usize] = nb
+    pk.nblocks = pk.nblocks + 1
+}
+
+pub fn paged_append(pk: &!PagedKv, row: &CpuBuf) with Alloc, Mut, Panic, Div {
+    if pk.len >= pk.nblocks * pk.b {
+        paged_grow(pk)
+    }
+    let blk = (pk.len / pk.b) as usize
+    let off = pk.len % pk.b
+    var j: i64 = 0
+    while j < pk.d {
+        ck_set(&!pk.blocks[blk], off * pk.d + j, ck_get(row, j))
+        j = j + 1
+    }
+    pk.len = pk.len + 1
+}
+
+pub fn paged_row(pk: &PagedKv, pos: i64, out: &!CpuBuf) with Mut, Panic, Div {
+    let blk = (pos / pk.b) as usize
+    let off = pos % pk.b
+    var j: i64 = 0
+    while j < pk.d {
+        ck_set(out, j, ck_get(&pk.blocks[blk], off * pk.d + j))
+        j = j + 1
+    }
+}
+
+pub fn paged_truncate(pk: &!PagedKv, len: i64) with Mut {
+    pk.len = len
+}
+
+pub fn paged_get(pk: &PagedKv, pos: i64, off: i64) -> f64 with Panic, Div {
+    let blk = (pos / pk.b) as usize
+    read_f64(pk.blocks[blk].data, (pos % pk.b) * pk.d + off)
+}
+
+pub fn paged_len(pk: &PagedKv) -> i64 {
+    pk.len
+}

@@ -12,7 +12,8 @@ use hetero::runtime::{Runtime}
 use llm::attn_gpu::{llama_sample_greedy, llama_sample_temp_top_p}
 use llm::bpe::{Bpe, bpe_decode_token, bpe_encode}
 use llm::chat::{chat_default_tpl, chat_find_toolcall, chat_render}
-use llm::llama::{Llama, KvCache, kv_new, llama_forward, llama_forward_rt}
+use llm::llama::{Llama, KvCache, kv_new, llama_forward, llama_forward_batch_runs, llama_forward_batch_runs_rt, llama_forward_rt}
+use llm::paged_kv::{PagedKv, paged_truncate}
 use llm::safetensors::{st_byte_at}
 use tensor2::cpu_kernel::{CpuBuf, ck_alloc, ck_get, ck_set}
 
@@ -1136,4 +1137,186 @@ pub fn sv_sse_delta(out: *mut u8, pos: i64, req: i64, model: string, text: *mut 
     p = sv_app_escaped(out, p, text, 0, tlen)
     p = sv_app_str(out, p, "\"},\"finish_reason\":null}]}\n\n")
     p
+}
+// ---- M2b continuous-batching engine (no sockets) ----
+// Slots own paged tables: slot s uses layers [s*64 .. s*64+63].
+// rpos is ABSOLUTE (M2 spec notes): rows of one slot in one call
+// arrive ascending with no gaps; each append lands at len == pos0.
+// Slot states live in soff: -1 free, else bank offset of the prompt.
+// prompt). Prompt tokens live in the caller-owned bank. Struct
+// arrays cross many-param fns directly (f2i frontend fix, SIO-559).
+// unreliable, so the engine never takes struct arrays).
+pub const SVB_NSLOT: i64 = 4
+pub const SVB_NROW: i64 = 16
+pub const SVB_QCAP: i64 = 8
+
+// Slot states live in slots (off -1 free, else bank offset of the
+// prompt). Prompt tokens live in the caller-owned bank. Struct
+// arrays cross many-param fns directly (f2i frontend fix, SIO-559).
+pub struct SvSlot {
+    pub off: i64,
+    pub nid: i64,
+    pub cur: i64,
+    pub gen: i64,
+    pub maxgen: i64,
+    pub last: i64,
+}
+
+pub struct SvQueue {
+    pub off: [i64; 8],
+    pub n: [i64; 8],
+    pub pmax: [i64; 8],
+    pub count: i64,
+}
+
+// waiting queue: bank offsets plus lengths and limits. push/shift
+// return the new count (-1 when full).
+pub fn svb_qpush(q: &!SvQueue, off: i64, pn: i64, pmax: i64) -> i64 with Mut {
+    if q.count >= SVB_QCAP { return 0 - 1 }
+    if q.count < 0 { return 0 - 1 }
+    q.off[q.count as usize] = off
+    q.n[q.count as usize] = pn
+    q.pmax[q.count as usize] = pmax
+    q.count = q.count + 1
+    q.count
+}
+
+pub fn svb_qshift(q: &!SvQueue) -> i64 with Mut {
+    let qc = q.count
+    if qc <= 0 { return qc }
+    var i: i64 = 0
+    while i + 1 < qc {
+        q.off[i as usize] = q.off[(i + 1) as usize]
+        q.n[i as usize] = q.n[(i + 1) as usize]
+        q.pmax[i as usize] = q.pmax[(i + 1) as usize]
+        i = i + 1
+    }
+    q.count = qc - 1
+    qc - 1
+}
+
+// admit queued arrivals onto free slots; returns new queue count.
+fn svb_admit_all(slots: &![SvSlot; 4], q: &!SvQueue) -> i64 with Mut {
+    while q.count > 0 {
+        var s: i64 = 0 - 1
+        var i: i64 = 0
+        while i < SVB_NSLOT {
+            if slots[i as usize].off < 0 { s = i; i = SVB_NSLOT }
+            i = i + 1
+        }
+        if s < 0 { return q.count }
+        slots[s as usize].off = q.off[0]
+        slots[s as usize].nid = q.n[0]
+        slots[s as usize].cur = 0
+        slots[s as usize].gen = 0
+        slots[s as usize].maxgen = q.pmax[0]
+        slots[s as usize].last = 0
+        q.count = svb_qshift(q)
+    }
+    q.count
+}
+
+// build this turn's rows: prefill chunks plus one decode row per
+// decoding slot. seedrow records each finishing slot's final row.
+// returns the row count.
+fn svb_build_rows(slots: &![SvSlot; 4], bank: &[i64; 512], chunk: i64, rslot: &![i64; 16], rpos: &![i64; 16], toks: &![i64; 16], kind: &![i64; 16], rowtok: &![i64; 16], seedrow: &![i64; 4]) -> i64 with Mut {
+    var n: i64 = 0
+    var s: i64 = 0
+    while s < SVB_NSLOT {
+        if slots[s as usize].off >= 0 && slots[s as usize].cur < slots[s as usize].nid {
+            var k: i64 = 0
+            while k < chunk && slots[s as usize].cur + k < slots[s as usize].nid && n < SVB_NROW {
+                rslot[n as usize] = s
+                rpos[n as usize] = slots[s as usize].cur + k
+                toks[n as usize] = bank[(slots[s as usize].off + slots[s as usize].cur + k) as usize]
+                kind[n as usize] = 0
+                rowtok[n as usize] = 0 - 1
+                n = n + 1
+                k = k + 1
+            }
+            slots[s as usize].cur = slots[s as usize].cur + k
+            if slots[s as usize].cur >= slots[s as usize].nid {
+                seedrow[s as usize] = n - 1
+            }
+        } else if slots[s as usize].off >= 0 {
+            if n < SVB_NROW {
+                rslot[n as usize] = s
+                rpos[n as usize] = slots[s as usize].cur
+                toks[n as usize] = slots[s as usize].last
+                kind[n as usize] = 1
+                rowtok[n as usize] = 0 - 1
+                n = n + 1
+            }
+        }
+        s = s + 1
+    }
+    n
+}
+
+// sample every row, advance cursors, close finished slots
+// (truncate tables, free slot). returns finished count.
+fn svb_sample_rows(out: &CpuBuf, rslot: &[i64; 16], kind: &[i64; 16], rowtok: &![i64; 16], seedrow: &[i64; 4], n: i64, slots: &![SvSlot; 4], pks_k: &![PagedKv; 256], pks_v: &![PagedKv; 256], vocab: i64) -> i64 with Alloc, Mut, Panic, Div {
+    var done_n: i64 = 0
+    var r: i64 = 0
+    while r < n {
+        let si = rslot[r as usize]
+        var row = ck_alloc(vocab)
+        var v: i64 = 0
+        while v < vocab {
+            write_f64(row.data, v, read_f64(out.data, r * vocab + v))
+            v = v + 1
+        }
+        if kind[r as usize] == 0 {
+            if seedrow[si as usize] == r {
+                slots[si as usize].last = llama_sample_greedy(&row)
+                rowtok[r as usize] = slots[si as usize].last
+            }
+        } else {
+            let tok = llama_sample_greedy(&row)
+            slots[si as usize].last = tok
+            rowtok[r as usize] = tok
+            slots[si as usize].gen = slots[si as usize].gen + 1
+            slots[si as usize].cur = slots[si as usize].cur + 1
+            if tok == 0 || slots[si as usize].gen >= slots[si as usize].maxgen {
+                var li: i64 = 0
+                while li < 64 {
+                    paged_truncate(&!pks_k[(si * 64 + li) as usize], 0)
+                    paged_truncate(&!pks_v[(si * 64 + li) as usize], 0)
+                    li = li + 1
+                }
+                slots[si as usize].off = 0 - 1
+                done_n = done_n + 1
+            }
+        }
+        r = r + 1
+    }
+    done_n
+}
+
+// one pump turn: admit queued arrivals, build prefill-chunk plus
+// decode rows, run one batch forward, sample and advance. Fills the
+// row layout (rslot/rpos/toks/kind: 0 prefill, 1 decode), the sampled
+// token per row (rowtok, -1 when a prefill row seeds nothing) and
+// meta (meta[0] row count, meta[1] queue count, meta[2] finished).
+// Returns stacked row logits.
+pub fn svb_pump(m: &!Llama, pks_k: &![PagedKv; 256], pks_v: &![PagedKv; 256], slots: &![SvSlot; 4], bank: &[i64; 512], q: &!SvQueue, rt: &Runtime, use_gpu: bool, chunk: i64, rslot: &![i64; 16], rpos: &![i64; 16], toks: &![i64; 16], kind: &![i64; 16], rowtok: &![i64; 16], meta: &![i64; 4]) -> CpuBuf with Alloc, Mut, Panic, Div {
+    svb_admit_all(slots, q)
+    var seedrow: [i64; 4] = [0 - 1; 4]
+    let n = svb_build_rows(slots, bank, chunk, rslot, rpos, toks, kind, rowtok, &!seedrow)
+    meta[0] = n
+    meta[1] = q.count
+    meta[2] = 0
+    meta[3] = 0
+    if n <= 0 {
+        return ck_alloc(1)
+    }
+    var out = ck_alloc(1)
+    if use_gpu && rt.ready {
+        out = llama_forward_batch_runs_rt(m, pks_k, pks_v, rslot, rpos, toks, n, rt)
+    } else {
+        out = llama_forward_batch_runs(m, pks_k, pks_v, rslot, rpos, toks, n)
+    }
+    let dn = svb_sample_rows(&out, rslot, kind, rowtok, &seedrow, n, slots, pks_k, pks_v, m.cfg.vocab)
+    meta[2] = dn
+    out
 }

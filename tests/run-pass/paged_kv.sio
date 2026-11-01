@@ -1,0 +1,67 @@
+//@ run-pass
+//
+// M2a paged KV test: block-paged store matches contiguous values
+// across block boundaries, truncation reuses stale blocks.
+// No model needed.
+use llm::paged_kv::{PagedKv, paged_new, paged_append, paged_row, paged_truncate, paged_len}
+use tensor2::cpu_kernel::{CpuBuf, ck_alloc, ck_get, ck_set}
+
+fn main() with IO, Mut, Panic, Div, Alloc {
+    var ok = true
+    var pk = paged_new(4, 3)
+    // 10 rows of [i, 10i, 100i]: spans 3 blocks (B=4).
+    var i: i64 = 0
+    while i < 10 {
+        var r = ck_alloc(3)
+        ck_set(&!r, 0, i as f64)
+        ck_set(&!r, 1, (i * 10) as f64)
+        ck_set(&!r, 2, (i * 100) as f64)
+        paged_append(&!pk, &r)
+        i = i + 1
+    }
+    if paged_len(&pk) != 10 { ok = false }
+    // read back every row, including cross-block positions 3/4 and 7/8
+    i = 0
+    while i < 10 {
+        var o = ck_alloc(3)
+        paged_row(&pk, i, &!o)
+        if ck_get(&o, 0) as i64 != i { ok = false }
+        if ck_get(&o, 1) as i64 != i * 10 { ok = false }
+        if ck_get(&o, 2) as i64 != i * 100 { ok = false }
+        i = i + 1
+    }
+    // truncate to 6 (spec rollback shape), regrow with new values
+    paged_truncate(&!pk, 6)
+    if paged_len(&pk) != 6 { ok = false }
+    i = 0
+    while i < 2 {
+        var r = ck_alloc(3)
+        ck_set(&!r, 0, (100 + i) as f64)
+        ck_set(&!r, 1, (200 + i) as f64)
+        ck_set(&!r, 2, (300 + i) as f64)
+        paged_append(&!pk, &r)
+        i = i + 1
+    }
+    if paged_len(&pk) != 8 { ok = false }
+    i = 0
+    while i < 6 {
+        var o = ck_alloc(3)
+        paged_row(&pk, i, &!o)
+        if ck_get(&o, 0) as i64 != i { ok = false }
+        i = i + 1
+    }
+    var o6 = ck_alloc(3)
+    paged_row(&pk, 6, &!o6)
+    if ck_get(&o6, 0) as i64 != 100 { ok = false }
+    if ck_get(&o6, 1) as i64 != 200 { ok = false }
+    if ck_get(&o6, 2) as i64 != 300 { ok = false }
+    var o7 = ck_alloc(3)
+    paged_row(&pk, 7, &!o7)
+    if ck_get(&o7, 0) as i64 != 101 { ok = false }
+    if ck_get(&o7, 1) as i64 != 201 { ok = false }
+    if ck_get(&o7, 2) as i64 != 301 { ok = false }
+    if ok { print("PAGEDKV PASS") } else { print("PAGEDKV FAIL") }
+    print("\n")
+    if !ok { exit(1) }
+    exit(0)
+}
