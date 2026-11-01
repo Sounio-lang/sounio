@@ -12,12 +12,16 @@ use hetero::runtime::{Runtime}
 use llm::attn_gpu::{llama_sample_greedy, llama_sample_temp_top_p}
 use llm::bpe::{Bpe, bpe_decode_token, bpe_encode}
 use llm::chat::{chat_default_tpl, chat_find_toolcall, chat_render}
-use llm::llama::{Llama, KvCache, kv_new, llama_forward, llama_forward_batch_runs, llama_forward_batch_runs_rt, llama_forward_rt}
+use llm::llama::{Llama, KvCache, kv_new, llama_forward, llama_forward_batch_runs, llama_forward_batch_runs_rt, llama_forward_rt, paged_kv_new_batch}
 use llm::paged_kv::{PagedKv, paged_truncate}
 use llm::safetensors::{st_byte_at}
 use tensor2::cpu_kernel::{CpuBuf, ck_alloc, ck_get, ck_set}
 
 pub const SV_MAX_SESS: i64 = 4
+// M3 pump wiring: 1 takes every GEN slot through sv_pump_turn
+// (continuous batching over paged KV). 0 keeps the legacy single
+// (sv_turn) and batch-decode (sv_turn_batch) paths as rollback.
+pub const SV_PUMP: i64 = 1
 
 fn sv_putb(buf: *mut u8, i: i64, v: i64) with Mut {
     let w = read_i64(buf as *mut i64, i / 8)
@@ -458,12 +462,15 @@ pub fn sv_completion_body(body: *mut u8, req: i64, model: string, text: *mut u8,
 }
 // begin a session from a complete request head. returns 2 GEN,
 // -1 close. fills ids/prm/seed/logi/kvs/nids/gen/t0 + headers.
+// In pump mode (SV_PUMP) the prompt goes to the bank lane and the
+// pump slot is armed; no contiguous prefill runs here.
 fn sv_begin(
     lib: &NwLib, m: &!Llama, bp: &Bpe, rt: &Runtime, use_gpu: bool,
     model: string, fd: i64, req: i64, rbuf: *mut u8, rlen: i64,
     ids: &!CpuBuf, prm: &!CpuBuf, seed: &!CpuBuf, logi: &!CpuBuf,
     kvs: &![KvCache; 4], nids: &![i64; 4], gen: &![i64; 4], t0: &![i64; 4], si: i64,
-    chats: &![i64; 4], chtols: &![i64; 4], tpl: *mut u8, tplen: i64
+    chats: &![i64; 4], chtols: &![i64; 4], tpl: *mut u8, tplen: i64,
+    psl: &![SvSlot; 4], bank: &![i64; 16384]
 ) -> i64 with Alloc, Mut, Panic, Div, IO {
     let body = heap_alloc(69632)
     if sv_starts(rbuf, rlen, 0, "GET /health") {
@@ -575,14 +582,28 @@ fn sv_begin(
     nids[si as usize] = ni
     gen[si as usize] = 0
     t0[si as usize] = sv_now_ns(lib)
-    kvs[si as usize] = kv_new(m, cap)
-    var lg = ck_alloc(1)
-    if use_gpu && rt.ready {
-        lg = llama_forward_rt(m, &!kvs[si as usize], ids, ni, rt)
+    if SV_PUMP == 1 {
+        var e: i64 = 0
+        while e < ni {
+            bank[(si * SVB_LANE + e) as usize] = ck_get(ids, e) as i64
+            e = e + 1
+        }
+        psl[si as usize].off = si * SVB_LANE
+        psl[si as usize].nid = ni
+        psl[si as usize].cur = 0
+        psl[si as usize].gen = 0
+        psl[si as usize].maxgen = ck_get(prm, 3) as i64
+        psl[si as usize].last = 0
     } else {
-        lg = llama_forward(m, &!kvs[si as usize], ids, ni)
+        kvs[si as usize] = kv_new(m, cap)
+        var lg = ck_alloc(1)
+        if use_gpu && rt.ready {
+            lg = llama_forward_rt(m, &!kvs[si as usize], ids, ni, rt)
+        } else {
+            lg = llama_forward(m, &!kvs[si as usize], ids, ni)
+        }
+        sv_copy(logi, &lg)
     }
-    sv_copy(logi, &lg)
     ck_set(seed, 0, ck_get(prm, 2))
     if ck_get(prm, 4) > 0.5 {
         let out = heap_alloc(512)
@@ -721,6 +742,13 @@ pub fn llm_serve(m: &!Llama, bp: &Bpe, port: i64, model_name: string, rt: &Runti
     var reqid: [i64; 4] = [0; 4]
     var chats: [i64; 4] = [0; 4]
     var chtols: [i64; 4] = [0; 4]
+    // M3 pump sidecar: 1:1 with the session slots above. Slot free
+    // iff off < 0. Bank lane s owns prompt ids [s*4096 ..].
+    var psl: [SvSlot; 4] = [SvSlot { off: 0 - 1, nid: 0, cur: 0, gen: 0, maxgen: 0, last: 0 }; 4]
+    var bank: [i64; 16384] = [0; 16384]
+    var pkk = paged_kv_new_batch(m, 16)
+    var pkv = paged_kv_new_batch(m, 16)
+    var pq = SvQueue { off: [0; 8], n: [0; 8], pmax: [0; 8], count: 0 }
     var req: i64 = 0
     var probe: [i64; 8] = [0 - 1; 8]
     while 1 == 1 {
@@ -773,7 +801,7 @@ pub fn llm_serve(m: &!Llama, bp: &Bpe, port: i64, model_name: string, rt: &Runti
                             rlen[s as usize] = rlen[s as usize] + got
                             let need = sv_need_total(rbuf[s as usize], rlen[s as usize])
                             if need >= 0 && rlen[s as usize] >= need {
-                                let ns = sv_begin(&lib, m, bp, rt, use_gpu, model_name, fd[s as usize], reqid[s as usize], rbuf[s as usize], rlen[s as usize], &!ids[s as usize], &!prm[s as usize], &!seed[s as usize], &!logi[s as usize], &!kvs, &!nids, &!gen, &!t0, s, &!chats, &!chtols, tplbuf, tplen)
+                                let ns = sv_begin(&lib, m, bp, rt, use_gpu, model_name, fd[s as usize], reqid[s as usize], rbuf[s as usize], rlen[s as usize], &!ids[s as usize], &!prm[s as usize], &!seed[s as usize], &!logi[s as usize], &!kvs, &!nids, &!gen, &!t0, s, &!chats, &!chtols, tplbuf, tplen, &!psl, &!bank)
                                 if ns < 0 {
                                     nw_close(&lib, fd[s as usize])
                                     fd[s as usize] = 0 - 1
@@ -806,7 +834,11 @@ pub fn llm_serve(m: &!Llama, bp: &Bpe, port: i64, model_name: string, rt: &Runti
             }
             g = g + 1
         }
-        if bn == 1 {
+        if SV_PUMP == 1 {
+            if bn > 0 {
+                sv_pump_turn(&lib, m, bp, rt, use_gpu, model_name, &!fd, &!st, &reqid, &prm, &!seed, &text, &!tlen, &!gen, &!ttfb, &!t0, &nids, &blist, bn, &chats, &chtols, &!psl, &!pkk, &!pkv, &!bank, &!pq)
+            }
+        } else if bn == 1 {
             let s0 = blist[0]
             let tr = sv_turn(&lib, m, bp, rt, use_gpu, model_name, fd[s0 as usize], reqid[s0 as usize], &!logi[s0 as usize], &!kvs, &!seed[s0 as usize], &!prm[s0 as usize], text[s0 as usize], &!tlen, &!gen, &!ttfb, &!t0, &!nids, s0, chats[s0 as usize], chtols[s0 as usize])
             if tr <= 0 {
@@ -973,6 +1005,145 @@ fn sv_turn_batch(
         b = b + 1
     }
 }
+// M3 pump turn: one svb_pump_fwd over every GEN slot in
+// `slots[0..n]`, server-side sampling (greedy or temp/top-p per
+// slot, same helpers as the single path), per-row emission (SSE
+// delta or accumulate), then svb_pump_adv applies the sampled
+// tokens and frees finished slots. finish/close/receipt match the
+// sv_turn_batch contract.
+fn sv_pump_turn(
+    lib: &NwLib, m: &!Llama, bp: &Bpe, rt: &Runtime, use_gpu: bool,
+    model: string, fds: &![i64; 4], sts: &![i64; 4],
+    reqids: &[i64; 4], prms: &[CpuBuf; 4], seeds: &![CpuBuf; 4],
+    texts: &[*mut u8; 4], tlens: &![i64; 4], gens: &![i64; 4],
+    ttfbs: &![i64; 4], t0s: &![i64; 4], nids: &[i64; 4],
+    slots: &[i64; 4], n: i64, chats: &[i64; 4], chtols: &[i64; 4],
+    psl: &![SvSlot; 4], pkk: &![PagedKv; 256], pkv: &![PagedKv; 256],
+    bank: &[i64; 16384], q: &!SvQueue
+) with Alloc, Mut, Panic, Div, IO {
+    var rslot: [i64; 16] = [0; 16]
+    var rpos: [i64; 16] = [0; 16]
+    var toks: [i64; 16] = [0; 16]
+    var kind: [i64; 16] = [0; 16]
+    var rowtok: [i64; 16] = [0 - 1; 16]
+    var seedrow: [i64; 4] = [0 - 1; 4]
+    var meta: [i64; 4] = [0; 4]
+    var pdone: [i64; 4] = [0; 4]
+    let vocab = m.cfg.vocab
+    let out = svb_pump_fwd(m, pkk, pkv, psl, bank, q, rt, use_gpu, SVB_CHUNK, &!rslot, &!rpos, &!toks, &!kind, &!rowtok, &!seedrow, &!meta)
+    let rn = meta[0]
+    let tbuf = heap_alloc(8192)
+    var r: i64 = 0
+    while r < rn {
+        let si = rslot[r as usize]
+        if pdone[si as usize] == 0 && (kind[r as usize] == 1 || seedrow[si as usize] == r) {
+            var row = ck_alloc(vocab)
+            var v: i64 = 0
+            while v < vocab {
+                write_f64(row.data, v, read_f64(out.data, r * vocab + v))
+                v = v + 1
+            }
+            let temp = ck_get(&prms[si as usize], 0)
+            var tok: i64 = 0
+            if temp <= 0.0 {
+                tok = llama_sample_greedy(&row)
+            } else {
+                tok = llama_sample_temp_top_p(&row, temp, ck_get(&prms[si as usize], 1), &!seeds[si as usize])
+            }
+            if tok == 0 {
+                pdone[si as usize] = 1
+                rowtok[r as usize] = 0
+            } else {
+                let nb = bpe_decode_token(bp, tok, tbuf)
+                if ck_get(&prms[si as usize], 4) > 0.5 {
+                    let sout = heap_alloc(69632)
+                    var p: i64 = 0
+                    if chats[si as usize] > 0 {
+                        p = sv_sse_delta(sout, 0, reqids[si as usize], model, tbuf, nb)
+                    } else {
+                        p = sv_sse_token(sout, 0, reqids[si as usize], model, tbuf, nb)
+                    }
+                    if nw_send_all(lib, fds[si as usize], sout, p) < 0 {
+                        nw_close(lib, fds[si as usize])
+                        fds[si as usize] = 0 - 1
+                        sts[si as usize] = 0
+                        pdone[si as usize] = 0 - 1
+                        rowtok[r as usize] = 0 - 1
+                    } else {
+                        rowtok[r as usize] = tok
+                    }
+                } else {
+                    var j: i64 = 0
+                    while j < nb && tlens[si as usize] < 60000 {
+                        sv_putb(texts[si as usize], tlens[si as usize], st_byte_at(tbuf, j))
+                        tlens[si as usize] = tlens[si as usize] + 1
+                        j = j + 1
+                    }
+                    rowtok[r as usize] = tok
+                }
+                if pdone[si as usize] == 0 {
+                    gens[si as usize] = gens[si as usize] + 1
+                    if ttfbs[si as usize] == 0 { ttfbs[si as usize] = sv_now_ns(lib) - t0s[si as usize] }
+                    if gens[si as usize] >= ck_get(&prms[si as usize], 3) as i64 { pdone[si as usize] = 2 }
+                }
+            }
+        }
+        r = r + 1
+    }
+    meta[2] = svb_pump_adv(psl, pkk, pkv, &rslot, &kind, &rowtok, &seedrow, rn, &pdone)
+    // finish the done sessions: same close/receipt contract as
+    // sv_turn_batch.
+    var b: i64 = 0
+    while b < n {
+        let si = slots[b as usize]
+        if pdone[si as usize] > 0 {
+            if ck_get(&prms[si as usize], 4) > 0.5 {
+                let dout = heap_alloc(64)
+                let dp = sv_sse_done(dout, 0)
+                if nw_send_all(lib, fds[si as usize], dout, dp) < 0 {
+                    nw_close(lib, fds[si as usize])
+                    fds[si as usize] = 0 - 1
+                    sts[si as usize] = 0
+                } else {
+                    nw_close(lib, fds[si as usize])
+                    fds[si as usize] = 0 - 1
+                    sts[si as usize] = 0
+                }
+            } else {
+                let body = heap_alloc(69632)
+                var fin = "length"
+                if pdone[si as usize] == 1 { fin = "stop" }
+                var p: i64 = 0
+                if chats[si as usize] > 0 {
+                    p = sv_chat_body(body, reqids[si as usize], model, texts[si as usize], tlens[si as usize], fin, nids[si as usize], gens[si as usize], chtols[si as usize])
+                } else {
+                    p = sv_completion_body(body, reqids[si as usize], model, texts[si as usize], tlens[si as usize], fin, nids[si as usize], gens[si as usize])
+                }
+                sv_reply(lib, fds[si as usize], "200 OK", body, p)
+                nw_close(lib, fds[si as usize])
+                fds[si as usize] = 0 - 1
+                sts[si as usize] = 0
+            }
+            print("served req=")
+            print_int(reqids[si as usize])
+            print(" sess=")
+            print_int(si)
+            print(" prompt_tokens=")
+            print_int(nids[si as usize])
+            print(" completion_tokens=")
+            print_int(gens[si as usize])
+            print(" finish=")
+            if pdone[si as usize] == 1 { print("stop") } else { print("length") }
+            print(" ttfb_us=")
+            print_int(ttfbs[si as usize] / 1000)
+            print(" gpu=")
+            print_int(if use_gpu && rt.ready { 1 } else { 0 })
+            print("\n")
+        }
+        b = b + 1
+    }
+}
+
 // ---- K2 chat completions ----
 
 // parse "messages" JSON array into role codes + packed contents.
@@ -1149,6 +1320,12 @@ pub fn sv_sse_delta(out: *mut u8, pos: i64, req: i64, model: string, text: *mut 
 pub const SVB_NSLOT: i64 = 4
 pub const SVB_NROW: i64 = 16
 pub const SVB_QCAP: i64 = 8
+// M3 serve bank: one lane of 4096 prompt tokens per session slot,
+// so an over-cap prompt grows the bank instead of 429 (user choice).
+pub const SVB_LANE: i64 = 4096
+pub const SVB_BANK: i64 = 16384
+// M3 serve chunk: prefill rows per slot per pump turn.
+pub const SVB_CHUNK: i64 = 64
 
 // Slot states live in slots (off -1 free, else bank offset of the
 // prompt). Prompt tokens live in the caller-owned bank. Struct
@@ -1219,7 +1396,7 @@ fn svb_admit_all(slots: &![SvSlot; 4], q: &!SvQueue) -> i64 with Mut {
 // build this turn's rows: prefill chunks plus one decode row per
 // decoding slot. seedrow records each finishing slot's final row.
 // returns the row count.
-fn svb_build_rows(slots: &![SvSlot; 4], bank: &[i64; 512], chunk: i64, rslot: &![i64; 16], rpos: &![i64; 16], toks: &![i64; 16], kind: &![i64; 16], rowtok: &![i64; 16], seedrow: &![i64; 4]) -> i64 with Mut {
+fn svb_build_rows(slots: &![SvSlot; 4], bank: &[i64; 16384], chunk: i64, rslot: &![i64; 16], rpos: &![i64; 16], toks: &![i64; 16], kind: &![i64; 16], rowtok: &![i64; 16], seedrow: &![i64; 4]) -> i64 with Mut {
     var n: i64 = 0
     var s: i64 = 0
     while s < SVB_NSLOT {
@@ -1293,16 +1470,15 @@ fn svb_sample_rows(out: &CpuBuf, rslot: &[i64; 16], kind: &[i64; 16], rowtok: &!
     done_n
 }
 
-// one pump turn: admit queued arrivals, build prefill-chunk plus
-// decode rows, run one batch forward, sample and advance. Fills the
-// row layout (rslot/rpos/toks/kind: 0 prefill, 1 decode), the sampled
-// token per row (rowtok, -1 when a prefill row seeds nothing) and
-// meta (meta[0] row count, meta[1] queue count, meta[2] finished).
-// Returns stacked row logits.
-pub fn svb_pump(m: &!Llama, pks_k: &![PagedKv; 256], pks_v: &![PagedKv; 256], slots: &![SvSlot; 4], bank: &[i64; 512], q: &!SvQueue, rt: &Runtime, use_gpu: bool, chunk: i64, rslot: &![i64; 16], rpos: &![i64; 16], toks: &![i64; 16], kind: &![i64; 16], rowtok: &![i64; 16], meta: &![i64; 4]) -> CpuBuf with Alloc, Mut, Panic, Div {
+// forward half of a pump turn: admit queued arrivals, build the
+// prefill-chunk plus decode rows, run one batch forward. Fills the
+// row layout (rslot/rpos/toks/kind: 0 prefill, 1 decode) and meta
+// (meta[0] row count, meta[1] queue count). The caller samples the
+// emitting rows (seed rows plus decode rows) and applies them with
+// svb_pump_adv. Returns stacked row logits.
+pub fn svb_pump_fwd(m: &!Llama, pks_k: &![PagedKv; 256], pks_v: &![PagedKv; 256], slots: &![SvSlot; 4], bank: &[i64; 16384], q: &!SvQueue, rt: &Runtime, use_gpu: bool, chunk: i64, rslot: &![i64; 16], rpos: &![i64; 16], toks: &![i64; 16], kind: &![i64; 16], rowtok: &![i64; 16], seedrow: &![i64; 4], meta: &![i64; 4]) -> CpuBuf with Alloc, Mut, Panic, Div {
     svb_admit_all(slots, q)
-    var seedrow: [i64; 4] = [0 - 1; 4]
-    let n = svb_build_rows(slots, bank, chunk, rslot, rpos, toks, kind, rowtok, &!seedrow)
+    let n = svb_build_rows(slots, bank, chunk, rslot, rpos, toks, kind, rowtok, seedrow)
     meta[0] = n
     meta[1] = q.count
     meta[2] = 0
@@ -1315,6 +1491,59 @@ pub fn svb_pump(m: &!Llama, pks_k: &![PagedKv; 256], pks_v: &![PagedKv; 256], sl
         out = llama_forward_batch_runs_rt(m, pks_k, pks_v, rslot, rpos, toks, n, rt)
     } else {
         out = llama_forward_batch_runs(m, pks_k, pks_v, rslot, rpos, toks, n)
+    }
+    out
+}
+
+// apply half of a pump turn: the caller sampled every emitting row
+// into rowtok and decided each slot fate in pdone (0 alive, 1 stop,
+// 2 length, negative transport error). Non-seed prefill rows carry
+// -1 and are skipped. Slots with nonzero pdone truncate their table
+// rows and free. Returns finished count.
+pub fn svb_pump_adv(slots: &![SvSlot; 4], pks_k: &![PagedKv; 256], pks_v: &![PagedKv; 256], rslot: &[i64; 16], kind: &[i64; 16], rowtok: &[i64; 16], seedrow: &[i64; 4], n: i64, pdone: &[i64; 4]) -> i64 with Mut {
+    var done_n: i64 = 0
+    var r: i64 = 0
+    while r < n {
+        let si = rslot[r as usize]
+        let t = rowtok[r as usize]
+        if kind[r as usize] == 0 {
+            if seedrow[si as usize] == r && t >= 0 {
+                slots[si as usize].last = t
+            }
+        } else {
+            if t >= 0 {
+                slots[si as usize].last = t
+                slots[si as usize].gen = slots[si as usize].gen + 1
+                slots[si as usize].cur = slots[si as usize].cur + 1
+            }
+        }
+        if pdone[si as usize] != 0 && slots[si as usize].off >= 0 {
+            var li: i64 = 0
+            while li < 64 {
+                paged_truncate(&!pks_k[(si * 64 + li) as usize], 0)
+                paged_truncate(&!pks_v[(si * 64 + li) as usize], 0)
+                li = li + 1
+            }
+            slots[si as usize].off = 0 - 1
+            done_n = done_n + 1
+        }
+        r = r + 1
+    }
+    done_n
+}
+
+// one pump turn: admit queued arrivals, build prefill-chunk plus
+// decode rows, run one batch forward, sample and advance. Fills the
+// row layout (rslot/rpos/toks/kind: 0 prefill, 1 decode), the sampled
+// token per row (rowtok, -1 when a prefill row seeds nothing) and
+// meta (meta[0] row count, meta[1] queue count, meta[2] finished).
+// Returns stacked row logits.
+pub fn svb_pump(m: &!Llama, pks_k: &![PagedKv; 256], pks_v: &![PagedKv; 256], slots: &![SvSlot; 4], bank: &[i64; 16384], q: &!SvQueue, rt: &Runtime, use_gpu: bool, chunk: i64, rslot: &![i64; 16], rpos: &![i64; 16], toks: &![i64; 16], kind: &![i64; 16], rowtok: &![i64; 16], meta: &![i64; 4]) -> CpuBuf with Alloc, Mut, Panic, Div {
+    var seedrow: [i64; 4] = [0 - 1; 4]
+    let out = svb_pump_fwd(m, pks_k, pks_v, slots, bank, q, rt, use_gpu, chunk, rslot, rpos, toks, kind, rowtok, &!seedrow, meta)
+    let n = meta[0]
+    if n <= 0 {
+        return out
     }
     let dn = svb_sample_rows(&out, rslot, kind, rowtok, &seedrow, n, slots, pks_k, pks_v, m.cfg.vocab)
     meta[2] = dn

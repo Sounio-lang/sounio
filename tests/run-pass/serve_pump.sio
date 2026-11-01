@@ -1,0 +1,260 @@
+//@ run-pass
+// M3 pump wiring: the split turn (svb_pump_fwd + host sampling +
+// svb_pump_adv) runs lockstep against the whole svb_pump path over
+// scripted arrivals: same meta, same rowtok, same token streams,
+// same slot reuse. Sampling here mirrors the engine rules (seed
+// rows seed only, decode rows gen++ and close); the server-rule
+// accounting (legacy max_tokens) is covered by SERVEPUMP-LIVE.
+use llm::attn_gpu::llama_sample_greedy
+use llm::llama::{Llama, llama_load, paged_kv_new_batch}
+use llm::serve::{svb_pump, svb_pump_fwd, svb_pump_adv, svb_qpush, SvQueue, SvSlot}
+use hetero::runtime::{Runtime, rt_open}
+use tensor2::cpu_kernel::{CpuBuf, ck_alloc, ck_get, ck_set}
+
+fn grab_row(out: &CpuBuf, r: i64, vocab: i64) -> CpuBuf with Alloc, Mut, Panic, Div {
+    var row = ck_alloc(vocab)
+    var v: i64 = 0
+    while v < vocab {
+        ck_set(&!row, v, ck_get(out, r * vocab + v))
+        v = v + 1
+    }
+    row
+}
+
+fn scenario(m: &!Llama, rt: &Runtime, use_gpu: bool) -> bool with Alloc, Mut, Panic, Div {
+    let vocab = m.cfg.vocab
+    let chunk: i64 = 2
+    // prompt bank: A=[1,150,2700,13] @0, B=[1,500,9000] @4, C=[1,777,888] @7.
+    var bank: [i64; 16384] = [0; 16384]
+    bank[0] = 1
+    bank[1] = 150
+    bank[2] = 2700
+    bank[3] = 13
+    bank[4] = 1
+    bank[5] = 500
+    bank[6] = 9000
+    bank[7] = 1
+    bank[8] = 777
+    bank[9] = 888
+    let amax: i64 = 3
+    let bmax: i64 = 2
+    let cmax: i64 = 2
+    // whole-path state.
+    var pka = paged_kv_new_batch(m, 16)
+    var pva = paged_kv_new_batch(m, 16)
+    var sa: [SvSlot; 4] = [SvSlot { off: 0 - 1, nid: 0, cur: 0, gen: 0, maxgen: 0, last: 0 }; 4]
+    var qa = SvQueue { off: [0; 8], n: [0; 8], pmax: [0; 8], count: 0 }
+    var rslot: [i64; 16] = [0; 16]
+    var rpos: [i64; 16] = [0; 16]
+    var toks: [i64; 16] = [0; 16]
+    var kind: [i64; 16] = [0; 16]
+    var rowtok: [i64; 16] = [0; 16]
+    var meta: [i64; 4] = [0; 4]
+    // split-path state.
+    var pkb = paged_kv_new_batch(m, 16)
+    var pvb = paged_kv_new_batch(m, 16)
+    var sb: [SvSlot; 4] = [SvSlot { off: 0 - 1, nid: 0, cur: 0, gen: 0, maxgen: 0, last: 0 }; 4]
+    var qb = SvQueue { off: [0; 8], n: [0; 8], pmax: [0; 8], count: 0 }
+    var fslot: [i64; 16] = [0; 16]
+    var fpos: [i64; 16] = [0; 16]
+    var ftoks: [i64; 16] = [0; 16]
+    var fkind: [i64; 16] = [0; 16]
+    var frowtok: [i64; 16] = [0 - 1; 16]
+    var fseed: [i64; 4] = [0 - 1; 4]
+    var fmeta: [i64; 4] = [0; 4]
+    var fpdone: [i64; 4] = [0; 4]
+    var egen: [i64; 4] = [0; 4]
+    // seq identity per engine slot, both paths.
+    var sseqa: [i64; 4] = [0 - 1; 4]
+    var sseqb: [i64; 4] = [0 - 1; 4]
+    var donea: [i64; 3] = [0; 3]
+    var doneb: [i64; 3] = [0; 3]
+    // emitted (slot, tok) streams, both paths.
+    var wps: [i64; 64] = [0; 64]
+    var wtk: [i64; 64] = [0; 64]
+    var wlen: i64 = 0
+    var fps: [i64; 64] = [0; 64]
+    var ftk: [i64; 64] = [0; 64]
+    var flen: i64 = 0
+    var pushed_b = false
+    var pushed_ca = false
+    var pushed_cb = false
+    var mixed = false
+    var reuse_ok = false
+    var ok = true
+    var turn: i64 = 0
+    while turn < 16 {
+        turn = turn + 1
+        if turn == 1 {
+            qa.count = svb_qpush(&!qa, 0, 4, amax)
+            qb.count = svb_qpush(&!qb, 0, 4, amax)
+        }
+        if turn == 2 && !pushed_b {
+            qa.count = svb_qpush(&!qa, 4, 3, bmax)
+            qb.count = svb_qpush(&!qb, 4, 3, bmax)
+            pushed_b = true
+        }
+        if pushed_b && !pushed_ca && (donea[0] == 1 || donea[1] == 1) {
+            qa.count = svb_qpush(&!qa, 7, 3, cmax)
+            pushed_ca = true
+        }
+        if pushed_b && !pushed_cb && (doneb[0] == 1 || doneb[1] == 1) {
+            qb.count = svb_qpush(&!qb, 7, 3, cmax)
+            pushed_cb = true
+        }
+        let out = svb_pump(m, &!pka, &!pva, &!sa, &bank, &!qa, rt, use_gpu, chunk, &!rslot, &!rpos, &!toks, &!kind, &!rowtok, &!meta)
+        qa.count = meta[1]
+        var z: i64 = 0
+        while z < 4 {
+            fseed[z as usize] = 0 - 1
+            fpdone[z as usize] = 0
+            z = z + 1
+        }
+        let fout = svb_pump_fwd(m, &!pkb, &!pvb, &!sb, &bank, &!qb, rt, use_gpu, chunk, &!fslot, &!fpos, &!ftoks, &!fkind, &!frowtok, &!fseed, &!fmeta)
+        qb.count = fmeta[1]
+        let n = meta[0]
+        let fn2 = fmeta[0]
+        if n != fn2 { ok = false }
+        if n <= 0 {
+            if donea[0] == 1 && donea[1] == 1 && donea[2] == 1 && doneb[0] == 1 && doneb[1] == 1 && doneb[2] == 1 { turn = 100 }
+        } else {
+            var hk0 = false
+            var hk1 = false
+            var r: i64 = 0
+            while r < n {
+                if kind[r as usize] == 0 { hk0 = true } else { hk1 = true }
+                r = r + 1
+            }
+            if hk0 && hk1 { mixed = true }
+            // discover newly admitted slots by prompt head token.
+            var s: i64 = 0
+            while s < 4 {
+                if sa[s as usize].off >= 0 && sseqa[s as usize] < 0 {
+                    let h1 = bank[(sa[s as usize].off + 1) as usize]
+                    if h1 == 150 { sseqa[s as usize] = 0 }
+                    if h1 == 500 { sseqa[s as usize] = 1 }
+                    if h1 == 777 { sseqa[s as usize] = 2 }
+                }
+                if sb[s as usize].off >= 0 && sseqb[s as usize] < 0 {
+                    let h1 = bank[(sb[s as usize].off + 1) as usize]
+                    if h1 == 150 { sseqb[s as usize] = 0 }
+                    if h1 == 500 { sseqb[s as usize] = 1 }
+                    if h1 == 777 { sseqb[s as usize] = 2 }
+                    egen[s as usize] = 0
+                    if sseqb[s as usize] == 2 && (doneb[0] == 1 || doneb[1] == 1) { reuse_ok = true }
+                }
+                s = s + 1
+            }
+            if fmeta[1] != meta[1] { ok = false }
+            // host sampling on the split path, engine rules.
+            var f: i64 = 0
+            while f < fn2 {
+                let fsi = fslot[f as usize]
+                if fkind[f as usize] == 0 {
+                    if fseed[fsi as usize] == f {
+                        let row = grab_row(&fout, f, vocab)
+                        let t = llama_sample_greedy(&row)
+                        frowtok[f as usize] = t
+                        fps[flen as usize] = fsi
+                        ftk[flen as usize] = t
+                        flen = flen + 1
+                    }
+                } else {
+                    let row = grab_row(&fout, f, vocab)
+                    let t = llama_sample_greedy(&row)
+                    frowtok[f as usize] = t
+                    fps[flen as usize] = fsi
+                    ftk[flen as usize] = t
+                    flen = flen + 1
+                    egen[fsi as usize] = egen[fsi as usize] + 1
+                    if t == 0 {
+                        fpdone[fsi as usize] = 1
+                    } else if egen[fsi as usize] >= sb[fsi as usize].maxgen {
+                        fpdone[fsi as usize] = 2
+                    }
+                }
+                f = f + 1
+            }
+            let fdn = svb_pump_adv(&!sb, &!pkb, &!pvb, &fslot, &fkind, &frowtok, &fseed, fn2, &fpdone)
+            if fdn != meta[2] { ok = false }
+            // lockstep: same rows, same sampled tokens.
+            r = 0
+            while r < n {
+                if fslot[r as usize] != rslot[r as usize] { ok = false }
+                if fkind[r as usize] != kind[r as usize] { ok = false }
+                if frowtok[r as usize] != rowtok[r as usize] { ok = false }
+                r = r + 1
+            }
+            // whole-path stream record + close detection.
+            r = 0
+            while r < n {
+                let si = rslot[r as usize]
+                if kind[r as usize] == 0 {
+                    if rowtok[r as usize] >= 0 {
+                        wps[wlen as usize] = si
+                        wtk[wlen as usize] = rowtok[r as usize]
+                        wlen = wlen + 1
+                    }
+                } else {
+                    wps[wlen as usize] = si
+                    wtk[wlen as usize] = rowtok[r as usize]
+                    wlen = wlen + 1
+                }
+                r = r + 1
+            }
+            s = 0
+            while s < 4 {
+                if sseqa[s as usize] >= 0 && sa[s as usize].off < 0 {
+                    donea[sseqa[s as usize] as usize] = 1
+                    sseqa[s as usize] = 0 - 1
+                }
+                if sseqb[s as usize] >= 0 && sb[s as usize].off < 0 {
+                    doneb[sseqb[s as usize] as usize] = 1
+                    sseqb[s as usize] = 0 - 1
+                }
+                s = s + 1
+            }
+        }
+        if donea[0] == 1 && donea[1] == 1 && donea[2] == 1 && doneb[0] == 1 && doneb[1] == 1 && doneb[2] == 1 {
+            var allfree = true
+            var s2: i64 = 0
+            while s2 < 4 {
+                if sa[s2 as usize].off >= 0 { allfree = false }
+                if sb[s2 as usize].off >= 0 { allfree = false }
+                s2 = s2 + 1
+            }
+            if allfree && qa.count == 0 && qb.count == 0 { turn = 100 }
+        }
+    }
+    if !mixed { ok = false }
+    if !reuse_ok { ok = false }
+    var d: i64 = 0
+    while d < 3 {
+        if donea[d as usize] != 1 { ok = false }
+        if doneb[d as usize] != 1 { ok = false }
+        d = d + 1
+    }
+    if wlen != flen { ok = false }
+    var w: i64 = 0
+    while w < wlen {
+        if wps[w as usize] != fps[w as usize] { ok = false }
+        if wtk[w as usize] != ftk[w as usize] { ok = false }
+        w = w + 1
+    }
+    ok
+}
+
+fn main() with IO, Mut, Panic, Div, Alloc {
+    var m = llama_load("tests/fixtures/tiny-random-Llama")
+    if !m.loaded { print("SERVEPUMP FAIL\n") exit(1) }
+    let rt = rt_open("stdlib/hetero/kernels/gemm_tiled_f32.ptx", "gemm_tiled_f32")
+    var ok = scenario(&!m, &rt, false)
+    if rt.ready {
+        var m2 = llama_load("tests/fixtures/tiny-random-Llama")
+        if !m2.loaded { ok = false }
+        if !scenario(&!m2, &rt, true) { ok = false }
+    }
+    if ok { print("SERVEPUMP PASS\n") } else { print("SERVEPUMP FAIL\n") }
+    if !ok { exit(1) }
+    exit(0)
+}
