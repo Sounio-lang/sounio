@@ -15913,7 +15913,17 @@ pub fn compile_native_v2_preview_to_file(module: &IrModule, target_spec: NativeT
     if target_spec.arch_id == ARCH_AARCH64() && target_spec.os_id == OS_MACOS() {
         return compile_arm64_macos_to_file(module, output_path)
     }
+    // SIO-32: aarch64-linux emits through the local preview twin below.
+    // Anything else is a named refusal, never a bare number.
+    if target_spec.arch_id == ARCH_AARCH64() && target_spec.os_id == OS_LINUX() {
+        return compile_aarch64_linux_to_file(module, output_path)
+    }
     if !(target_spec.arch_id == ARCH_X86_64() && target_spec.os_id == OS_LINUX()) {
+        print("Error: target ")
+        print(target_spec.resolved_target)
+        print(" is not supported by this backend yet (requested ")
+        print(target_spec.requested_target)
+        print(")\n")
         return 11
     }
 
@@ -16117,6 +16127,96 @@ pub fn compile_native_v2_preview_to_file(module: &IrModule, target_spec: NativeT
         return 23
     }
     native_v2_write_min_elf64_to_file(output_path, &! nc, entry, 4194304)
+}
+
+// SIO-32: aarch64-linux ELF emission. Local twin of the shared preview
+// backend (native::codegen::compile_to_elf_aarch64_preview): same machine
+// module, same tabulated encoder, same Linux entry trampoline, same ELF
+// finalizer. Only the result narrowing is local (this file's 128 KiB
+// NativeCompileResult contract, with a loud refusal past it instead of a
+// silent truncate). Unsupported opcodes surface as named backend errors.
+fn compile_to_elf_aarch64_preview(module: &IrModule) -> NativeCompileResult with Mut, Panic, Div, Alloc {
+    let built = native_v2_build_machine_module(module, true)
+    if !built.supported {
+        return native_compile_result_error(ERR_BACKEND_NOT_IMPLEMENTED(), "native_v2_unsupported_opcode:" + built.unsupported_detail)
+    }
+
+    var c = a64_preview_compiler_new()
+    c.fn_count = module.fn_count
+    var symbols = symbol_data_new()
+
+    var fi: i64 = 0
+    while fi < module.fn_count {
+        let func = ir_fn_get(module, fi as usize)
+        symbols = symbol_data_add_name(symbols, fi, func.name.buf, func.name.len)
+        let pair = a64_preview_compile_function(c, func, machine_module_function_get(&built, fi), fi)
+        c = pair.0
+        if str_len(pair.1) > 0 {
+            return native_compile_result_error(ERR_BACKEND_NOT_IMPLEMENTED(), "native_v2_unsupported_opcode:" + pair.1)
+        }
+        fi = fi + 1
+    }
+
+    let main_idx = find_main_index(module)
+    if main_idx < 0 {
+        return native_compile_result_error(ERR_INVALID_TARGET(), "native_v2_aarch64_missing_main")
+    }
+    c = a64_preview_emit_entry_trampoline_linux(c, main_idx)
+    c = a64_preview_patch_calls(c)
+
+    let rodata = string_table_new()
+    let data = string_table_new()
+    // A64PreviewCompiler keeps 256 slots. The ELF finalizer takes the
+    // IR-wide table. Copy, do not grow the preview compiler onto the stack.
+    var fn_offsets_wide: [i64; 16384] = [-1; 16384]
+    var oi: i64 = 0
+    while oi < c.fn_count && oi < 256 {
+        fn_offsets_wide[oi as usize] = c.fn_offsets[oi as usize]
+        oi = oi + 1
+    }
+    let elf = finalize_elf64_for_machine(
+        c.code,
+        rodata,
+        data,
+        c.entry_offset,
+        4194304,
+        elf_machine_aarch64(),
+        symbols,
+        fn_offsets_wide,
+        c.fn_count,
+        0,
+        BSS_BASE_LINUX
+    )
+    if elf.len > 131072 {
+        return native_compile_result_error(ERR_BACKEND_NOT_IMPLEMENTED(), "native_v2_aarch64_elf_too_large")
+    }
+    native_compile_result_ok_elf(elf.bytes, elf.len, FORMAT_ELF64())
+}
+
+// SIO-32: file-writing shell for the aarch64-linux preview backend.
+// Mirrors the arm64-macos shell: named backend errors propagate as
+// sentences, the byte count is verified against the write.
+fn compile_aarch64_linux_to_file(module: &IrModule, output_path: string) -> i32 with IO, Mut, Panic, Div, Alloc {
+    let result = compile_to_elf_aarch64_preview(module)
+    if !result.ok {
+        print("Error: aarch64-linux native backend: ")
+        print(result.error_msg)
+        print("\n")
+        return 1
+    }
+    let wrote = write_file(output_path, result.bytes, result.len)
+    if wrote != result.len {
+        print("Error: failed to write aarch64-linux ELF to ")
+        print(output_path)
+        print("\n")
+        return 1
+    }
+    print("elf_aarch64_linux: ")
+    print(output_path)
+    print(" ")
+    print_int(result.len)
+    print(" bytes\n")
+    0
 }
 
 fn compile_to_macho_arm64_preview(module: &IrModule, target_spec: NativeTargetSpec) -> NativeCompileResult with Mut, Panic, Div, Alloc {
