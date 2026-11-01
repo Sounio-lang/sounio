@@ -312,6 +312,12 @@ var FN_NAME_TOK: [i64; 65536] = [0; 65536]
 var FN_BODY_OPEN: [i64; 65536] = [0; 65536]
 var FN_BODY_CLOSE: [i64; 65536] = [0; 65536]
 var FN_NEEDS_SESSION: [i64; 65536] = [0; 65536]
+// User-declared `effect Name { ... }` registry for lean_single. Declared
+// effects get distinct high bits instead of all collapsing into the legacy
+// Custom/Session bit 32.
+var USER_EFFECT_NS: [i64; 24] = [0; 24]
+var USER_EFFECT_NE: [i64; 24] = [0; 24]
+var USER_EFFECT_COUNT: i64 = 0
 var CURRENT_FN: i64 = 0
 var CURRENT_BODY_CLOSE: i64 = 0
 // When inside an `impl Type { ... }` block, this is set to Type's hash.
@@ -4096,26 +4102,122 @@ fn name_eq(s1: i64, e1: i64, s2: i64, e2: i64) -> bool with Panic, Mut {
     while i < l { if sb(s1 + i) != sb(s2 + i) { return false }; i = i + 1 }
     return true
 }
+fn user_effect_base_bit() -> i64 {
+    return 1073741824
+}
+
+fn user_effect_bit(idx: i64) -> i64 with Panic, Mut, Div {
+    var bit: i64 = user_effect_base_bit()
+    var i: i64 = 0
+    while i < idx {
+        bit = bit * 2
+        i = i + 1
+    }
+    return bit
+}
+
+fn user_effect_lookup(ns: i64, ne: i64) -> i64 with Panic, Mut, Div {
+    var i: i64 = 0
+    while i < USER_EFFECT_COUNT {
+        if name_eq(ns, ne, USER_EFFECT_NS[i as usize], USER_EFFECT_NE[i as usize]) {
+            return user_effect_bit(i)
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn user_effect_mask_all() -> i64 with Panic, Mut, Div {
+    var mask: i64 = 0
+    var i: i64 = 0
+    while i < USER_EFFECT_COUNT {
+        mask = mask | user_effect_bit(i)
+        i = i + 1
+    }
+    return mask
+}
+
+fn user_effect_bits_from_mask(mask: i64) -> i64 with Panic, Mut, Div {
+    return mask & user_effect_mask_all()
+}
+
+fn effect_call_mask(mask: i64) -> i64 with Panic, Mut, Div {
+    return (mask & 1023) | user_effect_bits_from_mask(mask)
+}
+
+fn user_effect_register(tok: i64) with IO, Panic, Mut, Div {
+    if TK[tok as usize] != 3 { return }
+    let ns = TS[tok as usize]
+    let ne = TE[tok as usize]
+    if user_effect_lookup(ns, ne) != 0 { return }
+    if USER_EFFECT_COUNT >= 24 {
+        tc_error_hard(tok, "too many user-declared effects for lean_single")
+        return
+    }
+    USER_EFFECT_NS[USER_EFFECT_COUNT as usize] = ns
+    USER_EFFECT_NE[USER_EFFECT_COUNT as usize] = ne
+    USER_EFFECT_COUNT = USER_EFFECT_COUNT + 1
+}
+
+fn token_is_effect_keyword(tok: i64) -> bool with Panic, Mut {
+    if TK[tok as usize] != 3 { return false }
+    let ns = TS[tok as usize]
+    return src_match(ns, TE[tok as usize] - ns, "effect")
+}
+
+fn scan_user_effect_decls() with IO, Panic, Mut, Div {
+    USER_EFFECT_COUNT = 0
+    var p: i64 = 0
+    var depth: i64 = 0
+    while p < TC {
+        if TK[p as usize] == 8 {
+            depth = depth + 1
+            p = p + 1
+            continue
+        }
+        if TK[p as usize] == 9 {
+            if depth > 0 { depth = depth - 1 }
+            p = p + 1
+            continue
+        }
+        if depth == 0 && token_is_effect_keyword(p) && p + 1 < TC && TK[(p + 1) as usize] == 3 {
+            user_effect_register(p + 1)
+        }
+        p = p + 1
+    }
+}
+
+fn effect_builtin_mask(ns: i64, ne: i64) -> i64 with Panic, Mut {
+    let l = ne - ns
+    if src_match(ns, l, "IO") { return 1 }
+    if src_match(ns, l, "Mut") { return 2 }
+    if src_match(ns, l, "Panic") { return 4 }
+    if src_match(ns, l, "Div") { return 8 }
+    if src_match(ns, l, "Alloc") { return 16 }
+    if src_match(ns, l, "Observe") { return 64 }
+    if src_match(ns, l, "Audit") { return 128 }
+    if src_match(ns, l, "Hypothesis") { return 256 }
+    if src_match(ns, l, "Confidence") || src_match(ns, l, "Epistemic") { return 512 }
+    if src_match(ns, l, "GPU") { return 8192 }
+    if src_match(ns, l, "ZD") { return 16384 }
+    if src_match(ns, l, "Witness") { return 32768 }
+    if src_match(ns, l, "Temporal") { return 65536 }
+    if src_match(ns, l, "Learn") { return 131072 }
+    if src_match(ns, l, "Approx") { return 262144 }
+    if src_match(ns, l, "Causal") { return 524288 }
+    if src_match(ns, l, "NaturalityG2") { return 1048576 }
+    if src_match(ns, l, "Correlated") { return 2097152 }
+    return 0
+}
 
 fn ty_is_numeric(k: i64) -> bool { return k == 1 || k == 2 || k == 13 }
 
-fn tok_is_effect_name(p: i64) -> bool with Panic, Mut {
+fn tok_is_effect_name(p: i64) -> bool with Panic, Mut, Div {
     if TK[p as usize] != 3 { return false }
     let ns = TS[p as usize]
     let ne = TE[p as usize]
-    if src_match(ns, ne - ns, "IO") { return true }
-    if src_match(ns, ne - ns, "Mut") { return true }
-    if src_match(ns, ne - ns, "Panic") { return true }
-    if src_match(ns, ne - ns, "Div") { return true }
-    if src_match(ns, ne - ns, "Alloc") { return true }
-    if src_match(ns, ne - ns, "Observe") { return true }
-    if src_match(ns, ne - ns, "Audit") { return true }
-    if src_match(ns, ne - ns, "Hypothesis") { return true }
-    if src_match(ns, ne - ns, "MultiTest") { return true }
-    if src_match(ns, ne - ns, "ZD") { return true }
-    if src_match(ns, ne - ns, "Approx") { return true }
-    if src_match(ns, ne - ns, "Causal") { return true }
-    if src_match(ns, ne - ns, "NaturalityG2") { return true }
+    if effect_builtin_mask(ns, ne) != 0 { return true }
+    if user_effect_lookup(ns, ne) != 0 { return true }
     return false
 }
 
@@ -7554,6 +7656,11 @@ fn scan_fn_type_signature(p0: i64) with IO, Mut, Panic, Div {
         while tok_is_effect_name(p) {
             eff_mask = eff_mask | ety_parse_effect_name(TS[p as usize], TE[p as usize])
             p = p + 1
+            if TK[p as usize] == 6 {
+                p = p + 1
+                while TK[p as usize] != 7 && TK[p as usize] != 0 { p = p + 1 }
+                if TK[p as usize] == 7 { p = p + 1 }
+            }
             if TK[p as usize] == 28 && tok_is_effect_name(p + 1) {
                 p = p + 1
             } else {
@@ -22502,9 +22609,10 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 if SCAN_TY == 9 && EXPR_TY == 9 && EXPR_TY_HASH > 0 {
                     let etarg_eff = FNSIG_EFF[EXPR_TY_HASH as usize]
                     if etarg_eff != 0 && (SCAN_TY_HASH <= 0 || SCAN_TY_HASH >= 256 || FNSIG_EFF[SCAN_TY_HASH as usize] == 0) {
-                        let etcaller_eff = FN_EFFECTS[CURRENT_FN as usize] & 1023
-                        if bitset_is_subset(etarg_eff, etcaller_eff) == false {
-                            tc_effect_call_violation(call_tok, etarg_eff, etcaller_eff)
+                        let etarg_call_eff = effect_call_mask(etarg_eff)
+                        let etcaller_eff = effect_call_mask(FN_EFFECTS[CURRENT_FN as usize])
+                        if bitset_is_subset(etarg_call_eff, etcaller_eff) == false {
+                            tc_effect_call_violation(call_tok, etarg_call_eff, etcaller_eff)
                         }
                         // Approx effect check for closures (bit 18)
                         if (etarg_eff & 262144) != 0 && (FN_EFFECTS[CURRENT_FN as usize] & 262144) == 0 {
@@ -22556,8 +22664,8 @@ fn compile_primary() with IO, Mut, Panic, Div {
             PB_N = prev_pb_n
             if fi >= 0 {
                 if FN_ARITY[fi as usize] != argc { tc_wrong_arity_hard(call_tok, FN_ARITY[fi as usize], argc) }
-                let callee_eff = FN_EFFECTS[fi as usize] & 1023  // mask out visibility bits
-                let caller_eff = FN_EFFECTS[CURRENT_FN as usize] & 1023
+                let callee_eff = effect_call_mask(FN_EFFECTS[fi as usize])
+                let caller_eff = effect_call_mask(FN_EFFECTS[CURRENT_FN as usize])
                 let callee_is_import = (FN_EFFECTS[fi as usize] & 2048) != 0
                 let caller_is_import = (FN_EFFECTS[CURRENT_FN as usize] & 2048) != 0
                 if bitset_is_subset(callee_eff, caller_eff) == false && !(callee_is_import && caller_is_import) {
@@ -22585,7 +22693,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 }
                 // Effect inference: propagate callee effects into enclosing closure body
                 if CL_DEPTH > 0 {
-                    CL_FNSIG_EFF[(CL_DEPTH - 1) as usize] = CL_FNSIG_EFF[(CL_DEPTH - 1) as usize] | (callee_eff & 63)
+                    CL_FNSIG_EFF[(CL_DEPTH - 1) as usize] = CL_FNSIG_EFF[(CL_DEPTH - 1) as usize] | (callee_eff & 63) | user_effect_bits_from_mask(callee_eff)
                 }
                 // Approx propagation into closures
                 if (FN_EFFECTS[fi as usize] & 262144) != 0 && CL_DEPTH > 0 {
@@ -27757,8 +27865,8 @@ fn compile_gpu_launch_stmt_x86() with IO, Mut, Panic, Div {
 
     if fi >= 0 {
         if FN_ARITY[fi as usize] != argc { tc_wrong_arity(call_tok, FN_ARITY[fi as usize], argc) }
-        let callee_eff = FN_EFFECTS[fi as usize]
-        let caller_eff = FN_EFFECTS[CURRENT_FN as usize]
+        let callee_eff = effect_call_mask(FN_EFFECTS[fi as usize])
+        let caller_eff = effect_call_mask(FN_EFFECTS[CURRENT_FN as usize])
         let gpu_callee_imp = (FN_EFFECTS[fi as usize] & 2048) != 0
         let gpu_caller_imp = (FN_EFFECTS[CURRENT_FN as usize] & 2048) != 0
         if bitset_is_subset(callee_eff, caller_eff) == false && !(gpu_callee_imp && gpu_caller_imp) {
@@ -34433,28 +34541,10 @@ fn ety_unify(ty_a: i64, conf_a: i64, ty_b: i64, conf_b: i64) -> i64 with Mut, Di
 }
 
 // Effect bitset parsing from function signatures
-fn ety_parse_effect_name(ns: i64, ne: i64) -> i64 with Panic, Mut {
-    let l = ne - ns
-    if src_match(ns, l, "IO") { return 1 }
-    if src_match(ns, l, "Mut") { return 2 }
-    if src_match(ns, l, "Panic") { return 4 }
-    if src_match(ns, l, "Div") { return 8 }
-    if src_match(ns, l, "Alloc") { return 16 }
-    if src_match(ns, l, "Observe") { return 32 }
-    // Gen 20: GPU = bit 13 (8192) — above the & 1023 call-site mask, no propagation required
-    if src_match(ns, l, "GPU") { return 8192 }
-    // ZD = bit 14 (16384) — zero-divisor effect for sedenion-based exact erasure
-    if src_match(ns, l, "ZD") { return 16384 }
-    // Approx = bit 18 (262144) — numerical approximation tracking
-    if src_match(ns, l, "Approx") { return 262144 }
-    // Causal = bit 19 (524288) — causal inference effect
-    if src_match(ns, l, "Causal") { return 524288 }
-    // NaturalityG2 = bit 20 (1048576) — homology functor F: C_dial → C_𝕆
-    // is G₂-equivariant. Functions carrying this effect will emit a Lean
-    // obligation at IR-emit time (deferred to M4). For now, declaring the
-    // effect is enough to type-check.
-    if src_match(ns, l, "NaturalityG2") { return 1048576 }
-    return 0
+fn ety_parse_effect_name(ns: i64, ne: i64) -> i64 with Panic, Mut, Div {
+    let builtin = effect_builtin_mask(ns, ne)
+    if builtin != 0 { return builtin }
+    return user_effect_lookup(ns, ne)
 }
 
 fn epistemic_infer_pass() with IO, Mut, Panic, Div {
@@ -37044,6 +37134,9 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
     init_unit_table()
     // #2874: per-file declarations that shadow a built-in unit type name.
     unit_shadow_scan()
+    // SIO-3336: collect `effect Name { ... }` before signatures so `with Name`
+    // receives a distinct bit even when the declaration appears later.
+    scan_user_effect_decls()
 
     // C4: Pass 0 (token rewrite) — resolve `Self` inside impl blocks.
     // scan_type() has no "Self" case (it only understands a single bare
@@ -38381,6 +38474,13 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                                     FN_EPISTEMIC_MIN[eff_fi as usize] = min_val
                                 }
                                 while ew < eq && TK[ew as usize] != 7 { ew = ew + 1 }
+                            }
+                        }
+                        if matched_builtin == 0 {
+                            let user_eff_bit = user_effect_lookup(ens, ene)
+                            if user_eff_bit != 0 {
+                                FN_EFFECTS[eff_fi as usize] = FN_EFFECTS[eff_fi as usize] | user_eff_bit
+                                matched_builtin = 1
                             }
                         }
                         if matched_builtin == 0 { FN_EFFECTS[eff_fi as usize] = FN_EFFECTS[eff_fi as usize] | 32 }
@@ -44627,8 +44727,8 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 // visibility/meta bits (pub=1024, import=2048, and higher marker bits)
                 // before the effect subset check. Imported/pub callees otherwise look
                 // like they "require" effects the caller lacks -> false effect errors.
-                let callee_eff = FN_EFFECTS[fi as usize] & 1023
-                let caller_eff = FN_EFFECTS[CURRENT_FN as usize]
+                let callee_eff = effect_call_mask(FN_EFFECTS[fi as usize])
+                let caller_eff = effect_call_mask(FN_EFFECTS[CURRENT_FN as usize])
                 let a64_callee_imp = (FN_EFFECTS[fi as usize] & 2048) != 0
                 let a64_caller_imp = (FN_EFFECTS[CURRENT_FN as usize] & 2048) != 0
                 if bitset_is_subset(callee_eff, caller_eff) == false && !(a64_callee_imp && a64_caller_imp) { tc_effect_call_violation(call_tok, callee_eff, caller_eff) }
