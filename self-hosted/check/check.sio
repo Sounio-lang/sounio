@@ -13484,40 +13484,12 @@ fn checker_resolve_call_direct_sig_id_inplace(c: *mut Checker, e: Expr) -> i64 w
     direct_sig_id
 }
 
-fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
-    if checker_reject_invalid_implicit_native_builtin_arity_inplace(c, e) {
-        return ty_error()
-    }
-    let gpu_launch = checker_check_call_gpu_launch_forms_inplace(c, e)
-    if gpu_launch.0 {
-        return gpu_launch.1
-    }
-    let metric_forms = checker_check_call_metric_forms_inplace(c, e)
-    if metric_forms.0 {
-        return metric_forms.1
-    }
-    let native_forms = checker_check_call_native_forms_inplace(c, e)
-    if native_forms.0 {
-        return native_forms.1
-    }
-    // read_file(path) -> string: the native builtin returns the file's bytes
-    // as a string (ir/lower.sio lowers the call by name). The prelude binds
-    // the name unknown, so without this arm the result types as TyUnknown and
-    // string methods (.len()/.as_bytes()) on it refuse with E011/E019. A
-    // user-declared read_file keeps the generic signature path below.
-    match e.left {
-        Some(rf_callee) => {
-            if (*rf_callee).kind == ExprKind::ExprIdent && name_matches_str9((*rf_callee).name, 114, 101, 97, 100, 95, 102, 105, 108, 101) {
-                let rf_sig = checker_fn_sigs_find_inplace(c, (*rf_callee).name)
-                if rf_sig < 0 || checker_invisible_native_builtin_sig(c, (*rf_callee).name) {
-                    checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
-                    checker_check_io_builtin_effects_inplace(c, e.span, (*rf_callee).name)
-                    return ty_string()
-                }
-            }
-        }
-        None => {}
-    }
+// SIO-417 stack diet: pre-recursion phase of checker_check_call_expr_inplace.
+// IO-attribute check, multitest/hypothesis shallow state, direct-sig id
+// resolution and lexical-callback shadowing all run BEFORE the argument walk
+// recurses, so they live here and this frame is gone by nesting time. Returns
+// (direct_sig_id, callee_is_local_fn); the shell keeps only the consuming tail.
+fn checker_check_call_expr_preflight_inplace(c: *mut Checker, e: Expr) -> (i64, bool) with Mut, Panic, Div, Alloc, IO {
     // SIO-27 (#2760): attribute IO to the implicit IO builtins, mirroring
     // lean_single (which asks for the IO bit whenever the name does not
     // resolve to a user function). A visible declared function with the same
@@ -13533,10 +13505,6 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
             }
         }
         None => {}
-    }
-    let bridge_forms = checker_check_call_bridge_forms_inplace(c, e)
-    if bridge_forms.0 {
-        return bridge_forms.1
     }
     // Preamble: multitest then hypothesis effects (shallow state, no sub-expr check).
     if multitest_effect_enabled((*c).current_effects, (*c).current_effect_count) {
@@ -13571,6 +13539,55 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
         None => {}
     }
     if callee_is_local_fn { direct_sig_id = 0 - 1 }
+    (direct_sig_id, callee_is_local_fn)
+}
+
+fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    if checker_reject_invalid_implicit_native_builtin_arity_inplace(c, e) {
+        return ty_error()
+    }
+    let gpu_launch = checker_check_call_gpu_launch_forms_inplace(c, e)
+    if gpu_launch.0 {
+        return gpu_launch.1
+    }
+    let metric_forms = checker_check_call_metric_forms_inplace(c, e)
+    if metric_forms.0 {
+        return metric_forms.1
+    }
+    let native_forms = checker_check_call_native_forms_inplace(c, e)
+    if native_forms.0 {
+        return native_forms.1
+    }
+    // read_file(path) -> string: the native builtin returns the file bytes
+    // as a string (ir/lower.sio lowers the call by name). The prelude binds
+    // the name unknown, so without this arm the result types as TyUnknown and
+    // string methods (.len()/.as_bytes()) on it refuse with E011/E019. A
+    // user-declared read_file keeps the generic signature path below.
+    match e.left {
+        Some(rf_callee) => {
+            if (*rf_callee).kind == ExprKind::ExprIdent && name_matches_str9((*rf_callee).name, 114, 101, 97, 100, 95, 102, 105, 108, 101) {
+                let rf_sig = checker_fn_sigs_find_inplace(c, (*rf_callee).name)
+                if rf_sig < 0 || checker_invisible_native_builtin_sig(c, (*rf_callee).name) {
+                    checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
+                    checker_check_io_builtin_effects_inplace(c, e.span, (*rf_callee).name)
+                    return ty_string()
+                }
+            }
+        }
+        None => {}
+    }
+    // SIO-417 stack diet: all pre-recursion phase work (IO attributes,
+    // multitest/hypothesis state, sig resolution, lexical shadowing) runs in
+    // the preflight helper and its frame is gone before the argument walk
+    // recurses; only the two i64/bool answers stay live here. Position kept
+    // where the IO block was so bridge-form priority is unchanged.
+    let preflight = checker_check_call_expr_preflight_inplace(c, e)
+    let direct_sig_id = preflight.0
+    let callee_is_local_fn = preflight.1
+    let bridge_forms = checker_check_call_bridge_forms_inplace(c, e)
+    if bridge_forms.0 {
+        return bridge_forms.1
+    }
     let shadow_forms = checker_check_call_shadow_forms_inplace(c, e, direct_sig_id, callee_is_local_fn)
     if shadow_forms.0 {
         return shadow_forms.1
