@@ -279,7 +279,7 @@ def main():
             continue
         if re.search(r"\b%d\b" % base_addr, stripped):
             occ.append(stripped)
-    if len(occ) != 6:
+    if len(occ) != 7:
         fail("elf_base_addr_occurrence_count_%d" % len(occ))
     arg_form = re.compile(r"(?:,\s*%d\)|,\s*%d,|let base_addr: i64 = %d)"
                           % (base_addr, base_addr, base_addr))

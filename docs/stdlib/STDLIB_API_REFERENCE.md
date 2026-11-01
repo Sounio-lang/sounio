@@ -14,7 +14,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.stdlib.stdlib-
 This reference lists all public functions (`pub fn`) in the Sounio standard library,
 organized by module. Generated from source on the date shown below.
 
-**Generated**: 2026-09-27
+**Generated**: 2026-10-27
 **Source**: `stdlib/**/*.sio`
 
 ---
@@ -31,6 +31,27 @@ organized by module. Generated from source on the date shown below.
 - `pub fn pentagon_products(` — *algebra/associator_field.sio*
 - `pub fn pentagon_variance(ps: &[f64; 40]) -> f64 with Mut, Div {` — *algebra/associator_field.sio*
 - `pub fn pentagon_edge_norm(ps: &[f64; 40], i: i64, j: i64) -> f64 with Mut, Div, Panic {` — *algebra/associator_field.sio*
+- `pub fn cd_sigma_exact_i64(a: i32, b: i32, bits: i32) -> i32 with Mut, Panic, Div {` — *algebra/cayley_dickson_exact_i64.sio*
+- `pub fn cd_zero_exact_i64(k: i32) -> CDElementExactI64 with Mut, Panic {` — *algebra/cayley_dickson_exact_i64.sio*
+- `pub fn cd_one_exact_i64(k: i32) -> CDElementExactI64 with Mut, Panic {` — *algebra/cayley_dickson_exact_i64.sio*
+- `pub fn cd_basis_exact_i64(k: i32, idx: i32) -> CDElementExactI64 with Mut, Panic {` — *algebra/cayley_dickson_exact_i64.sio*
+- `pub fn cd_add_exact_i64(a: CDElementExactI64, b: CDElementExactI64) -> CDElementExactI64 with Mut, Panic, Div {` — *algebra/cayley_dickson_exact_i64.sio*
+- `pub fn cd_sub_exact_i64(a: CDElementExactI64, b: CDElementExactI64) -> CDElementExactI64 with Mut, Panic, Div {` — *algebra/cayley_dickson_exact_i64.sio*
+- `pub fn cd_mul_exact_i64(a: CDElementExactI64, b: CDElementExactI64) -> CDElementExactI64 with Mut, Panic, Div {` — *algebra/cayley_dickson_exact_i64.sio*
+- `pub fn cd_associator_exact_i64(a: CDElementExactI64, b: CDElementExactI64, c: CDElementExactI64) -> CDElementExactI64 with Mut, Panic, Div {` — *algebra/cayley_dickson_exact_i64.sio*
+- `pub fn cd_is_zero_exact_i64(x: CDElementExactI64) -> bool with Mut, Panic {` — *algebra/cayley_dickson_exact_i64.sio*
+- `pub fn cd_eq_exact_i64(a: CDElementExactI64, b: CDElementExactI64) -> bool with Mut, Panic {` — *algebra/cayley_dickson_exact_i64.sio*
+- `pub fn zd_exact_i64(a: CDElementExactI64, b: CDElementExactI64) -> bool with Mut, Panic, Div {` — *algebra/cayley_dickson_exact_i64.sio*
+- `pub fn cd_zero_exact<F: ExactRing>(k: i32, zero: F) -> CDElementExact<F> with Mut, Panic, Div {` — *algebra/cayley_dickson_exact.sio*
+- `pub fn cd_one_exact<F: ExactRing>(k: i32, zero: F, one: F) -> CDElementExact<F> with Mut, Panic, Div {` — *algebra/cayley_dickson_exact.sio*
+- `pub fn cd_basis_exact<F: ExactRing>(k: i32, idx: i32, zero: F, one: F) -> CDElementExact<F> with Mut, Panic, Div {` — *algebra/cayley_dickson_exact.sio*
+- `pub fn cd_add_exact<F: ExactRing>(a: CDElementExact<F>, b: CDElementExact<F>, zero: F) -> CDElementExact<F> with Mut, Panic, Div {` — *algebra/cayley_dickson_exact.sio*
+- `pub fn cd_sub_exact<F: ExactRing>(a: CDElementExact<F>, b: CDElementExact<F>, zero: F) -> CDElementExact<F> with Mut, Panic, Div {` — *algebra/cayley_dickson_exact.sio*
+- `pub fn cd_mul_exact<F: ExactRing>(a: CDElementExact<F>, b: CDElementExact<F>, zero: F) -> CDElementExact<F> with Mut, Panic, Div {` — *algebra/cayley_dickson_exact.sio*
+- `pub fn cd_associator_exact<F: ExactRing>(a: CDElementExact<F>, b: CDElementExact<F>, c: CDElementExact<F>, zero: F) -> CDElementExact<F> with Mut, Panic, Div {` — *algebra/cayley_dickson_exact.sio*
+- `pub fn cd_is_zero_exact<F: ExactRing>(x: CDElementExact<F>) -> bool with Mut, Panic {` — *algebra/cayley_dickson_exact.sio*
+- `pub fn cd_eq_exact<F: ExactRing>(a: CDElementExact<F>, b: CDElementExact<F>) -> bool with Mut, Panic {` — *algebra/cayley_dickson_exact.sio*
+- `pub fn zd_exact<F: ExactRing>(a: CDElementExact<F>, b: CDElementExact<F>, zero: F) -> bool with Mut, Panic, Div {` — *algebra/cayley_dickson_exact.sio*
 - `pub fn cd_sigma(a: i32, b: i32, bits: i32) -> i32 with Mut, Panic, Div {` — *algebra/cayley_dickson.sio*
 - `pub fn cd_zero(k: i32) -> CDElement with Mut, Panic {` — *algebra/cayley_dickson.sio*
 - `pub fn cd_one(k: i32) -> CDElement with Mut, Panic {` — *algebra/cayley_dickson.sio*
@@ -52,27 +73,19 @@ organized by module. Generated from source on the date shown below.
 - `pub fn cd_is_division(bits: i32) -> bool { bits <= 3 }` — *algebra/cayley_dickson.sio*
 - `pub fn cd_dim(bits: i32) -> i32 { 1 << bits }` — *algebra/cayley_dickson.sio*
 - `pub fn cd_name(bits: i32) -> i32 {` — *algebra/cayley_dickson.sio*
-- `pub fn cd_zero_exact<F: ExactRing>(k: i32, zero: F) -> CDElementExact<F> with Mut, Panic, Div {` — *algebra/cayley_dickson_exact.sio*
-- `pub fn cd_one_exact<F: ExactRing>(k: i32, zero: F, one: F) -> CDElementExact<F> with Mut, Panic, Div {` — *algebra/cayley_dickson_exact.sio*
-- `pub fn cd_basis_exact<F: ExactRing>(k: i32, idx: i32, zero: F, one: F) -> CDElementExact<F> with Mut, Panic, Div {` — *algebra/cayley_dickson_exact.sio*
-- `pub fn cd_add_exact<F: ExactRing>(a: CDElementExact<F>, b: CDElementExact<F>, zero: F) -> CDElementExact<F> with Mut, Panic, Div {` — *algebra/cayley_dickson_exact.sio*
-- `pub fn cd_sub_exact<F: ExactRing>(a: CDElementExact<F>, b: CDElementExact<F>, zero: F) -> CDElementExact<F> with Mut, Panic, Div {` — *algebra/cayley_dickson_exact.sio*
-- `pub fn cd_mul_exact<F: ExactRing>(a: CDElementExact<F>, b: CDElementExact<F>, zero: F) -> CDElementExact<F> with Mut, Panic, Div {` — *algebra/cayley_dickson_exact.sio*
-- `pub fn cd_associator_exact<F: ExactRing>(a: CDElementExact<F>, b: CDElementExact<F>, c: CDElementExact<F>, zero: F) -> CDElementExact<F> with Mut, Panic, Div {` — *algebra/cayley_dickson_exact.sio*
-- `pub fn cd_is_zero_exact<F: ExactRing>(x: CDElementExact<F>) -> bool with Mut, Panic {` — *algebra/cayley_dickson_exact.sio*
-- `pub fn cd_eq_exact<F: ExactRing>(a: CDElementExact<F>, b: CDElementExact<F>) -> bool with Mut, Panic {` — *algebra/cayley_dickson_exact.sio*
-- `pub fn zd_exact<F: ExactRing>(a: CDElementExact<F>, b: CDElementExact<F>, zero: F) -> bool with Mut, Panic, Div {` — *algebra/cayley_dickson_exact.sio*
-- `pub fn cd_sigma_exact_i64(a: i32, b: i32, bits: i32) -> i32 with Mut, Panic, Div {` — *algebra/cayley_dickson_exact_i64.sio*
-- `pub fn cd_zero_exact_i64(k: i32) -> CDElementExactI64 with Mut, Panic {` — *algebra/cayley_dickson_exact_i64.sio*
-- `pub fn cd_one_exact_i64(k: i32) -> CDElementExactI64 with Mut, Panic {` — *algebra/cayley_dickson_exact_i64.sio*
-- `pub fn cd_basis_exact_i64(k: i32, idx: i32) -> CDElementExactI64 with Mut, Panic {` — *algebra/cayley_dickson_exact_i64.sio*
-- `pub fn cd_add_exact_i64(a: CDElementExactI64, b: CDElementExactI64) -> CDElementExactI64 with Mut, Panic, Div {` — *algebra/cayley_dickson_exact_i64.sio*
-- `pub fn cd_sub_exact_i64(a: CDElementExactI64, b: CDElementExactI64) -> CDElementExactI64 with Mut, Panic, Div {` — *algebra/cayley_dickson_exact_i64.sio*
-- `pub fn cd_mul_exact_i64(a: CDElementExactI64, b: CDElementExactI64) -> CDElementExactI64 with Mut, Panic, Div {` — *algebra/cayley_dickson_exact_i64.sio*
-- `pub fn cd_associator_exact_i64(a: CDElementExactI64, b: CDElementExactI64, c: CDElementExactI64) -> CDElementExactI64 with Mut, Panic, Div {` — *algebra/cayley_dickson_exact_i64.sio*
-- `pub fn cd_is_zero_exact_i64(x: CDElementExactI64) -> bool with Mut, Panic {` — *algebra/cayley_dickson_exact_i64.sio*
-- `pub fn cd_eq_exact_i64(a: CDElementExactI64, b: CDElementExactI64) -> bool with Mut, Panic {` — *algebra/cayley_dickson_exact_i64.sio*
-- `pub fn zd_exact_i64(a: CDElementExactI64, b: CDElementExactI64) -> bool with Mut, Panic, Div {` — *algebra/cayley_dickson_exact_i64.sio*
+- `pub fn cl_opt_init(p: i32, q: i32) -> ClOptCtx with Mut, Panic, Div {` — *algebra/clifford_opt.sio*
+- `pub fn clo_basis(ctx: ClOptCtx, i: i32) -> CloEl with Mut, Panic {` — *algebra/clifford_opt.sio*
+- `pub fn clo_scalar(v: f64) -> CloEl with Mut, Panic {` — *algebra/clifford_opt.sio*
+- `pub fn clo_mul(ctx: ClOptCtx, a: CloEl, b: CloEl) -> CloEl with Mut, Panic, Div {` — *algebra/clifford_opt.sio*
+- `pub fn cls_blade(mask: i32, value: f64) -> ClSparse with Mut, Panic {` — *algebra/clifford_opt.sio*
+- `pub fn cls_mul(ctx: ClOptCtx, a: ClSparse, b: ClSparse) -> ClSparse with Mut, Panic, Div {` — *algebra/clifford_opt.sio*
+- `pub fn cls_vector4(t: f64, x: f64, y: f64, z: f64) -> ClSparse with Mut, Panic {` — *algebra/clifford_opt.sio*
+- `pub fn cl31_zero() -> Cl31 with Mut, Panic { Cl31 { c: [0.0; 16] } }` — *algebra/clifford_opt.sio*
+- `pub fn cl31_scalar(v: f64) -> Cl31 with Mut, Panic {` — *algebra/clifford_opt.sio*
+- `pub fn cl31_vector(t: f64, x: f64, y: f64, z: f64) -> Cl31 with Mut, Panic {` — *algebra/clifford_opt.sio*
+- `pub fn cl31_mul(ctx: ClOptCtx, a: Cl31, b: Cl31) -> Cl31 with Mut, Panic, Div {` — *algebra/clifford_opt.sio*
+- `pub fn cl31_inner(a: Cl31, b: Cl31) -> f64 {` — *algebra/clifford_opt.sio*
+- `pub fn cl31_norm_sq(a: Cl31) -> f64 {` — *algebra/clifford_opt.sio*
 - `pub fn cl_new(p: i32, q: i32) -> ClAlgebra {` — *algebra/clifford.sio*
 - `pub fn cl_zero() -> ClElement with Mut, Panic {` — *algebra/clifford.sio*
 - `pub fn cl_scalar(val: f64) -> ClElement with Mut, Panic {` — *algebra/clifford.sio*
@@ -90,23 +103,10 @@ organized by module. Generated from source on the date shown below.
 - `pub fn cl_generators(alg: ClAlgebra) -> i32 { alg.n }` — *algebra/clifford.sio*
 - `pub fn cl_signature_p(alg: ClAlgebra) -> i32 { alg.p }` — *algebra/clifford.sio*
 - `pub fn cl_signature_q(alg: ClAlgebra) -> i32 { alg.q }` — *algebra/clifford.sio*
-- `pub fn cl_opt_init(p: i32, q: i32) -> ClOptCtx with Mut, Panic, Div {` — *algebra/clifford_opt.sio*
-- `pub fn clo_basis(ctx: ClOptCtx, i: i32) -> CloEl with Mut, Panic {` — *algebra/clifford_opt.sio*
-- `pub fn clo_scalar(v: f64) -> CloEl with Mut, Panic {` — *algebra/clifford_opt.sio*
-- `pub fn clo_mul(ctx: ClOptCtx, a: CloEl, b: CloEl) -> CloEl with Mut, Panic, Div {` — *algebra/clifford_opt.sio*
-- `pub fn cls_blade(mask: i32, value: f64) -> ClSparse with Mut, Panic {` — *algebra/clifford_opt.sio*
-- `pub fn cls_mul(ctx: ClOptCtx, a: ClSparse, b: ClSparse) -> ClSparse with Mut, Panic, Div {` — *algebra/clifford_opt.sio*
-- `pub fn cls_vector4(t: f64, x: f64, y: f64, z: f64) -> ClSparse with Mut, Panic {` — *algebra/clifford_opt.sio*
-- `pub fn cl31_zero() -> Cl31 with Mut, Panic { Cl31 { c: [0.0; 16] } }` — *algebra/clifford_opt.sio*
-- `pub fn cl31_scalar(v: f64) -> Cl31 with Mut, Panic {` — *algebra/clifford_opt.sio*
-- `pub fn cl31_vector(t: f64, x: f64, y: f64, z: f64) -> Cl31 with Mut, Panic {` — *algebra/clifford_opt.sio*
-- `pub fn cl31_mul(ctx: ClOptCtx, a: Cl31, b: Cl31) -> Cl31 with Mut, Panic, Div {` — *algebra/clifford_opt.sio*
-- `pub fn cl31_inner(a: Cl31, b: Cl31) -> f64 {` — *algebra/clifford_opt.sio*
-- `pub fn cl31_norm_sq(a: Cl31) -> f64 {` — *algebra/clifford_opt.sio*
+- `pub fn fano_auts_into(out: &![i64; 1176]) with Mut {` — *algebra/fano_auts.sio*
+- `pub fn fano_auts_count() -> i64 { return 168 }` — *algebra/fano_auts.sio*
 - `pub fn is_fano_line(i: i64, j: i64, k: i64) -> bool with Mut, Div {` — *algebra/fano.sio*
 - `pub fn non_fano_ordered_triples(` — *algebra/fano.sio*
-- `pub fn fano_auts_into(out: &[i64; 1176]) with Mut {` — *algebra/fano_auts.sio*
-- `pub fn fano_auts_count() -> i64 { return 168 }` — *algebra/fano_auts.sio*
 - `pub fn f1_state_contribution(h0: &[f64; 8]) -> f64 with Mut, Div, Panic {` — *algebra/features.sio*
 - `pub fn f2_state_contribution(h0: &[f64; 8], h1: &[f64; 8]) -> f64 with Mut, Div, Panic {` — *algebra/features.sio*
 - `pub fn f3_state_contribution(h0: &[f64; 8], h1: &[f64; 8]) -> f64 with Mut, Div, Panic {` — *algebra/features.sio*
@@ -130,6 +130,14 @@ organized by module. Generated from source on the date shown below.
 - `pub fn trust_region_clip(step: f64, radius: f64) -> f64 with Div {` — *algebra/mandelbrot_d2.sio*
 - `pub fn md2_squash(v: f64) -> f64 with Div {` — *algebra/mandelbrot_d2.sio*
 - `pub fn md2_orbit_feature(seed: f64, delta: f64) -> f64 with Mut, Div {` — *algebra/mandelbrot_d2.sio*
+- `pub fn oct_lmul(a: &[f64; 8], v: &[f64; 8], out: &![f64; 8]) with Mut, Div, NonAssoc {` — *algebra/octonion_action.sio*
+- `pub fn oct_lmul_composed(` — *algebra/octonion_action.sio*
+- `pub fn oct_lmul_sequential(` — *algebra/octonion_action.sio*
+- `pub fn oct_lmul_discrepancy(` — *algebra/octonion_action.sio*
+- `pub fn oct_lmul_forced_discrepancy(` — *algebra/octonion_action.sio*
+- `pub fn oct_project_H(x: &[f64; 8], out: &![f64; 8]) with Mut {` — *algebra/octonion_action.sio*
+- `pub fn oct_lmul_discrepancy_nsq(` — *algebra/octonion_action.sio*
+- `pub fn oct_lmul_forced_discrepancy_nsq(` — *algebra/octonion_action.sio*
 - `pub fn cd_sigma(a: i64, b: i64) -> i64 with Mut, Div {` — *algebra/octonion.sio*
 - `pub fn cd_sigma_sedenion(a: i64, b: i64) -> i64 with Mut, Div {` — *algebra/octonion.sio*
 - `pub fn oct_mul(a: &[f64; 8], b: &[f64; 8], out: &![f64; 8]) with Mut, Div, NonAssoc {` — *algebra/octonion.sio*
@@ -139,30 +147,6 @@ organized by module. Generated from source on the date shown below.
 - `pub fn oct_real(x: f64) -> [f64; 8] with Mut {` — *algebra/octonion.sio*
 - `pub fn is_fano_triple(i: i64, j: i64, k: i64) -> bool with Mut, Div {` — *algebra/octonion.sio*
 - `pub fn oct_xor(a: i64, b: i64) -> i64 {` — *algebra/octonion.sio*
-- `pub fn oct_lmul(a: &[f64; 8], v: &[f64; 8], out: &![f64; 8]) with Mut, Div, NonAssoc {` — *algebra/octonion_action.sio*
-- `pub fn oct_lmul_composed(` — *algebra/octonion_action.sio*
-- `pub fn oct_lmul_sequential(` — *algebra/octonion_action.sio*
-- `pub fn oct_lmul_discrepancy(` — *algebra/octonion_action.sio*
-- `pub fn oct_lmul_forced_discrepancy(` — *algebra/octonion_action.sio*
-- `pub fn oct_project_H(x: &[f64; 8], out: &![f64; 8]) with Mut {` — *algebra/octonion_action.sio*
-- `pub fn oct_lmul_discrepancy_nsq(` — *algebra/octonion_action.sio*
-- `pub fn oct_lmul_forced_discrepancy_nsq(` — *algebra/octonion_action.sio*
-- `pub fn sed_zero(out: &![f64; 16]) with Mut {` — *algebra/sedenion.sio*
-- `pub fn sed_basis(k: i64, out: &![f64; 16]) with Mut {` — *algebra/sedenion.sio*
-- `pub fn sed_zd_z(out: &![f64; 16]) with Mut {` — *algebra/sedenion.sio*
-- `pub fn sed_zd_w(out: &![f64; 16]) with Mut {` — *algebra/sedenion.sio*
-- `pub fn sed_canonical_zd_z(out: &![f64; 16]) with Mut { sed_zd_z(out) }` — *algebra/sedenion.sio*
-- `pub fn sed_canonical_zd_w(out: &![f64; 16]) with Mut { sed_zd_w(out) }` — *algebra/sedenion.sio*
-- `pub fn sed_from_pair(h0: &[f64; 8], h1: &[f64; 8], out: &![f64; 16]) with Mut {` — *algebra/sedenion.sio*
-- `pub fn sed_l1_norm(a: &[f64; 16]) -> f64 with Mut {` — *algebra/sedenion.sio*
-- `pub fn sed_add(a: &[f64; 16], b: &[f64; 16], out: &![f64; 16]) with Mut {` — *algebra/sedenion.sio*
-- `pub fn sed_sub(a: &[f64; 16], b: &[f64; 16], out: &![f64; 16]) with Mut {` — *algebra/sedenion.sio*
-- `pub fn sed_scale(a: &[f64; 16], s: f64, out: &![f64; 16]) with Mut {` — *algebra/sedenion.sio*
-- `pub fn sed_norm_sq(a: &[f64; 16]) -> f64 with Mut {` — *algebra/sedenion.sio*
-- `pub fn sed_norm(a: &[f64; 16]) -> f64 with Mut, Div, Panic {` — *algebra/sedenion.sio*
-- `pub fn sed_dot(a: &[f64; 16], b: &[f64; 16]) -> f64 with Mut {` — *algebra/sedenion.sio*
-- `pub fn sed_mul(a: &[f64; 16], b: &[f64; 16], out: &![f64; 16]) with Mut {` — *algebra/sedenion.sio*
-- `pub fn sed_associator(a: &[f64; 16], b: &[f64; 16], c: &[f64; 16], out: &![f64; 16]) with Mut {` — *algebra/sedenion.sio*
 - `pub fn sed_embed_oct(o: &[f64; 8], out: &![f64; 16]) with Mut {` — *algebra/sedenion_action.sio*
 - `pub fn sed_lmul(a: &[f64; 16], v: &[f64; 16], out: &![f64; 16]) with Mut {` — *algebra/sedenion_action.sio*
 - `pub fn sed_lmul_composed(` — *algebra/sedenion_action.sio*
@@ -209,6 +193,22 @@ organized by module. Generated from source on the date shown below.
 - `pub fn verdict_measured_f64() -> Verdict { Verdict::MeasuredF64 }` — *algebra/sedenion_verdict.sio*
 - `pub fn verdict_measured_f256() -> Verdict { Verdict::MeasuredF256 }` — *algebra/sedenion_verdict.sio*
 - `pub fn requires_proof(v: Verdict) -> bool {` — *algebra/sedenion_verdict.sio*
+- `pub fn sed_zero(out: &![f64; 16]) with Mut {` — *algebra/sedenion.sio*
+- `pub fn sed_basis(k: i64, out: &![f64; 16]) with Mut {` — *algebra/sedenion.sio*
+- `pub fn sed_zd_z(out: &![f64; 16]) with Mut {` — *algebra/sedenion.sio*
+- `pub fn sed_zd_w(out: &![f64; 16]) with Mut {` — *algebra/sedenion.sio*
+- `pub fn sed_canonical_zd_z(out: &![f64; 16]) with Mut { sed_zd_z(out) }` — *algebra/sedenion.sio*
+- `pub fn sed_canonical_zd_w(out: &![f64; 16]) with Mut { sed_zd_w(out) }` — *algebra/sedenion.sio*
+- `pub fn sed_from_pair(h0: &[f64; 8], h1: &[f64; 8], out: &![f64; 16]) with Mut {` — *algebra/sedenion.sio*
+- `pub fn sed_l1_norm(a: &[f64; 16]) -> f64 with Mut {` — *algebra/sedenion.sio*
+- `pub fn sed_add(a: &[f64; 16], b: &[f64; 16], out: &![f64; 16]) with Mut {` — *algebra/sedenion.sio*
+- `pub fn sed_sub(a: &[f64; 16], b: &[f64; 16], out: &![f64; 16]) with Mut {` — *algebra/sedenion.sio*
+- `pub fn sed_scale(a: &[f64; 16], s: f64, out: &![f64; 16]) with Mut {` — *algebra/sedenion.sio*
+- `pub fn sed_norm_sq(a: &[f64; 16]) -> f64 with Mut {` — *algebra/sedenion.sio*
+- `pub fn sed_norm(a: &[f64; 16]) -> f64 with Mut, Div, Panic {` — *algebra/sedenion.sio*
+- `pub fn sed_dot(a: &[f64; 16], b: &[f64; 16]) -> f64 with Mut {` — *algebra/sedenion.sio*
+- `pub fn sed_mul(a: &[f64; 16], b: &[f64; 16], out: &![f64; 16]) with Mut {` — *algebra/sedenion.sio*
+- `pub fn sed_associator(a: &[f64; 16], b: &[f64; 16], c: &[f64; 16], out: &![f64; 16]) with Mut {` — *algebra/sedenion.sio*
 - `pub fn xor_convolution_admit(` — *algebra/xor_convolution.sio*
 - `pub fn xor_convolution_cayley_dickson_contract(bits: i64)` — *algebra/xor_convolution.sio*
 - `pub fn xor_convolution_direct(` — *algebra/xor_convolution.sio*
@@ -222,7 +222,7 @@ organized by module. Generated from source on the date shown below.
 
 ## algo (`stdlib/algo/`)
 
-**7 public functions** across 4 files
+**13 public functions** across 4 files
 
 - `pub fn dijkstra(adj: &[[f64; 100]; 100], n: usize, source: usize) -> [f64; 100] with Panic, Div, Mut {` — *algo/graph.sio*
 - `pub fn dfs(adj: &[[i32; 10]; 100], n: usize, source: usize) -> [i32; 100] with Panic, Div, Mut {` — *algo/graph.sio*
@@ -230,6 +230,12 @@ organized by module. Generated from source on the date shown below.
 - `pub fn topological_sort(adj: &[[i32; 10]; 100], n: usize) -> [i32; 100] with Panic, Div, Mut {` — *algo/graph.sio*
 - `pub fn has_cycle(adj: &[[i32; 10]; 100], n: usize) -> bool with Panic, Div, Mut {` — *algo/graph.sio*
 - `pub fn graph_run_tests() -> bool with Panic, Div, Mut {` — *algo/graph.sio*
+- `pub fn heapsort_i64(arr: &![i64; 1024], n: i32) with Mut, Div, Panic {` — *algo/sort.sio*
+- `pub fn is_sorted_i64(arr: &[i64; 1024], n: i32) -> bool with Mut, Div, Panic {` — *algo/sort.sio*
+- `pub fn is_sorted_f64(arr: &[f64; 1024], n: i32) -> bool with Mut, Div, Panic {` — *algo/sort.sio*
+- `pub fn quicksort_i64(arr: &![i64; 1024], n: i32) with Mut, Div, Panic {` — *algo/sort.sio*
+- `pub fn quicksort_f64(arr: &![f64; 1024], n: i32) with Mut, Div, Panic {` — *algo/sort.sio*
+- `pub fn mergesort_i64(arr: &![i64; 1024], n: i32) with Mut, Div, Panic {` — *algo/sort.sio*
 - `pub fn main() -> i32 with IO, Mut, Div, Panic {` — *algo/sort.sio*
 
 ---
@@ -243,6 +249,166 @@ organized by module. Generated from source on the date shown below.
 - `pub fn numerical_integral_simpson(f_id: i32, a: f64, b: f64, n: i32) -> f64` — *analysis/lib.sio*
 - `pub fn richardson_extrapolation(f_id: i32, x: f64, h: f64) -> ConvergenceResult` — *analysis/lib.sio*
 - `pub fn romberg_integration(f_id: i32, a: f64, b: f64, max_iter: i32) -> ConvergenceResult` — *analysis/lib.sio*
+
+---
+
+## arrow (`stdlib/arrow/`)
+
+**140 public functions** across 6 files
+
+- `pub fn codec_buf_new() -> CodecBuf {` — *arrow/compress.sio*
+- `pub fn codec_compress_lz4(src: &[u8; 4096], n: i64, dst: &!CodecBuf) -> i64 with Mut, Panic {` — *arrow/compress.sio*
+- `pub fn codec_decompress_lz4(src: &[u8; 4096], n: i64, dst: &!CodecBuf) -> i64 with Mut, Panic {` — *arrow/compress.sio*
+- `pub fn codec_compress_zstd(src: &[u8; 4096], n: i64, dst: &!CodecBuf) -> i64 with Mut, Panic {` — *arrow/compress.sio*
+- `pub fn codec_decompress_zstd(src: &[u8; 4096], n: i64, dst: &!CodecBuf) -> i64 with Mut, Panic {` — *arrow/compress.sio*
+- `pub fn arrow_ext_none() -> i64 { 0 }` — *arrow/ext.sio*
+- `pub fn arrow_ext_uuid() -> i64 { 1 }` — *arrow/ext.sio*
+- `pub fn arrow_ext_json() -> i64 { 2 }` — *arrow/ext.sio*
+- `pub fn arrow_ext_bool8() -> i64 { 3 }` — *arrow/ext.sio*
+- `pub fn arrow_ext_opaque() -> i64 { 4 }` — *arrow/ext.sio*
+- `pub fn arrow_ext_fixed_tensor() -> i64 { 5 }` — *arrow/ext.sio*
+- `pub fn arrow_ext_var_tensor() -> i64 { 6 }` — *arrow/ext.sio*
+- `pub fn arrow_ext_variant() -> i64 { 7 }` — *arrow/ext.sio*
+- `pub fn arrow_ext_ts_offset() -> i64 { 8 }` — *arrow/ext.sio*
+- `pub fn arrow_ext_other() -> i64 { 9 }` — *arrow/ext.sio*
+- `pub fn arrow_ext_meta_is(s: &ArrowSchema, node: i64, text: string) -> i64 with Panic {` — *arrow/ext.sio*
+- `pub fn arrow_ext_kind(s: &ArrowSchema, node: i64) -> i64 with Panic {` — *arrow/ext.sio*
+- `pub fn arrow_ext_check(s: &ArrowSchema, node: i64) -> i64 with Mut, Panic {` — *arrow/ext.sio*
+- `pub fn arrow_ext_set_uuid(s: &!ArrowSchema, node: i64) -> i64 with Mut, Panic {` — *arrow/ext.sio*
+- `pub fn arrow_ext_set_json(s: &!ArrowSchema, node: i64) -> i64 with Mut, Panic {` — *arrow/ext.sio*
+- `pub fn arrow_ext_set_bool8(s: &!ArrowSchema, node: i64) -> i64 with Mut, Panic {` — *arrow/ext.sio*
+- `pub fn arrow_ext_set_opaque(s: &!ArrowSchema, node: i64, type_name: string, vendor_name: string) -> i64 with Mut, Panic {` — *arrow/ext.sio*
+- `pub fn arrow_ext_set_fixed_tensor(s: &!ArrowSchema, node: i64, shape: &[i64; 4], nshape: i64, perm: &[i64; 4], nperm: i64, names: &[u8; 64], name_lens: &[i64; 4], nnames: i64) -> i64 with Mut, Panic, Div {` — *arrow/ext.sio*
+- `pub fn arrow_ext_set_var_tensor(s: &!ArrowSchema, node: i64, perm: &[i64; 4], nperm: i64, names: &[u8; 64], name_lens: &[i64; 4], nnames: i64, uniform: &[i64; 4], nuniform: i64) -> i64 with Mut, Panic, Div {` — *arrow/ext.sio*
+- `pub fn arrow_ext_set_variant(s: &!ArrowSchema, node: i64) -> i64 with Mut, Panic {` — *arrow/ext.sio*
+- `pub fn arrow_ext_set_ts_offset(s: &!ArrowSchema, node: i64) -> i64 with Mut, Panic {` — *arrow/ext.sio*
+- `pub fn fb_bytes_new() -> FbBytes {` — *arrow/flatbuf.sio*
+- `pub fn fb_new() -> FbBuilder {` — *arrow/flatbuf.sio*
+- `pub fn fb_reset(b: &!FbBuilder) with Mut {` — *arrow/flatbuf.sio*
+- `pub fn fb_len(b: &FbBuilder) -> i64 {` — *arrow/flatbuf.sio*
+- `pub fn fb_prep(b: &!FbBuilder, size: i64, additional: i64) -> i64 with Mut, Panic, Div {` — *arrow/flatbuf.sio*
+- `pub fn fb_place_u8(b: &!FbBuilder, v: i64) -> i64 with Mut, Panic {` — *arrow/flatbuf.sio*
+- `pub fn fb_uoffset_rel(b: &!FbBuilder, off: i64) -> i64 with Mut, Panic, Div {` — *arrow/flatbuf.sio*
+- `pub fn fb_start_object(b: &!FbBuilder, n: i64) -> i64 with Mut, Panic {` — *arrow/flatbuf.sio*
+- `pub fn fb_slot(b: &!FbBuilder, slot: i64) with Mut, Panic {` — *arrow/flatbuf.sio*
+- `pub fn fb_end_object(b: &!FbBuilder) -> i64 with Mut, Panic, Div {` — *arrow/flatbuf.sio*
+- `pub fn fb_start_vector(b: &!FbBuilder, elem_size: i64, count: i64, alignment: i64) -> i64 with Mut, Panic, Div {` — *arrow/flatbuf.sio*
+- `pub fn fb_end_vector(b: &!FbBuilder) -> i64 with Mut, Panic {` — *arrow/flatbuf.sio*
+- `pub fn fb_create_string(b: &!FbBuilder, src: &FbBytes) -> i64 with Mut, Panic, Div {` — *arrow/flatbuf.sio*
+- `pub fn fb_slot_u8(b: &!FbBuilder, slot: i64, val: i64, default_val: i64) -> i64 with Mut, Panic, Div {` — *arrow/flatbuf.sio*
+- `pub fn fb_slot_i16(b: &!FbBuilder, slot: i64, val: i64, default_val: i64) -> i64 with Mut, Panic, Div {` — *arrow/flatbuf.sio*
+- `pub fn fb_slot_i32(b: &!FbBuilder, slot: i64, val: i64, default_val: i64) -> i64 with Mut, Panic, Div {` — *arrow/flatbuf.sio*
+- `pub fn fb_slot_i64(b: &!FbBuilder, slot: i64, val: i64, default_val: i64) -> i64 with Mut, Panic, Div {` — *arrow/flatbuf.sio*
+- `pub fn fb_slot_off(b: &!FbBuilder, slot: i64, off: i64, default_val: i64) -> i64 with Mut, Panic, Div {` — *arrow/flatbuf.sio*
+- `pub fn fb_finish(b: &!FbBuilder, root: i64) -> i64 with Mut, Panic, Div {` — *arrow/flatbuf.sio*
+- `pub fn flight_desc_new() -> FlightDesc {` — *arrow/flight.sio*
+- `pub fn flight_meta_new() -> FlightMeta {` — *arrow/flight.sio*
+- `pub fn flight_desc_add_path(d: &!FlightDesc, text: string) -> i64 with Mut, Panic {` — *arrow/flight.sio*
+- `pub fn flight_desc_set_cmd(d: &!FlightDesc, text: string) -> i64 with Mut, Panic {` — *arrow/flight.sio*
+- `pub fn flight_meta_set(m: &!FlightMeta, i: i64, text: string) -> i64 with Mut, Panic {` — *arrow/flight.sio*
+- `pub fn flight_desc_encode(desc: &FlightDesc, out: &!ArrowBuf) -> i64 with Mut, Panic {` — *arrow/flight.sio*
+- `pub fn do_put_write(desc: &FlightDesc, ipc: &ArrowBuf, meta: &FlightMeta, out: &!ArrowBuf) -> i64 with Mut, Panic, Div {` — *arrow/flight.sio*
+- `pub fn do_exchange_write(desc: &FlightDesc, ipc: &ArrowBuf, meta: &FlightMeta, include_desc: i64, out: &!ArrowBuf) -> i64 with Mut, Panic, Div {` — *arrow/flight.sio*
+- `pub fn do_put_read(buf: &ArrowBuf, desc: &!FlightDesc, ipc: &!ArrowBuf, meta: &!FlightMeta) -> i64 with Mut, Panic, Div {` — *arrow/flight.sio*
+- `pub fn do_exchange_read(buf: &ArrowBuf, desc: &!FlightDesc, ipc: &!ArrowBuf, meta: &!FlightMeta) -> i64 with Mut, Panic, Div {` — *arrow/flight.sio*
+- `pub fn put_result_write(text: string, out: &!ArrowBuf) -> i64 with Mut, Panic {` — *arrow/flight.sio*
+- `pub fn put_result_read(buf: &ArrowBuf, meta: &!FlightMeta) -> i64 with Mut, Panic {` — *arrow/flight.sio*
+- `pub fn arrow_type_null() -> i64 { 1 }` — *arrow/lib.sio*
+- `pub fn arrow_type_int() -> i64 { 2 }` — *arrow/lib.sio*
+- `pub fn arrow_type_float() -> i64 { 3 }` — *arrow/lib.sio*
+- `pub fn arrow_type_binary() -> i64 { 4 }` — *arrow/lib.sio*
+- `pub fn arrow_type_utf8() -> i64 { 5 }` — *arrow/lib.sio*
+- `pub fn arrow_type_bool() -> i64 { 6 }` — *arrow/lib.sio*
+- `pub fn arrow_type_decimal() -> i64 { 7 }` — *arrow/lib.sio*
+- `pub fn arrow_type_date() -> i64 { 8 }` — *arrow/lib.sio*
+- `pub fn arrow_type_time() -> i64 { 9 }` — *arrow/lib.sio*
+- `pub fn arrow_type_timestamp() -> i64 { 10 }` — *arrow/lib.sio*
+- `pub fn arrow_type_interval() -> i64 { 11 }` — *arrow/lib.sio*
+- `pub fn arrow_type_list() -> i64 { 12 }` — *arrow/lib.sio*
+- `pub fn arrow_type_struct() -> i64 { 13 }` — *arrow/lib.sio*
+- `pub fn arrow_type_union() -> i64 { 14 }` — *arrow/lib.sio*
+- `pub fn arrow_type_fixed_binary() -> i64 { 15 }` — *arrow/lib.sio*
+- `pub fn arrow_type_fixed_list() -> i64 { 16 }` — *arrow/lib.sio*
+- `pub fn arrow_type_map() -> i64 { 17 }` — *arrow/lib.sio*
+- `pub fn arrow_type_duration() -> i64 { 18 }` — *arrow/lib.sio*
+- `pub fn arrow_type_large_binary() -> i64 { 19 }` — *arrow/lib.sio*
+- `pub fn arrow_type_large_utf8() -> i64 { 20 }` — *arrow/lib.sio*
+- `pub fn arrow_type_large_list() -> i64 { 21 }` — *arrow/lib.sio*
+- `pub fn arrow_type_run_end() -> i64 { 22 }` — *arrow/lib.sio*
+- `pub fn arrow_type_binary_view() -> i64 { 23 }` — *arrow/lib.sio*
+- `pub fn arrow_type_utf8_view() -> i64 { 24 }` — *arrow/lib.sio*
+- `pub fn arrow_type_list_view() -> i64 { 25 }` — *arrow/lib.sio*
+- `pub fn arrow_type_large_list_view() -> i64 { 26 }` — *arrow/lib.sio*
+- `pub fn arrow_feature_dict_replace() -> i64 { 1 }` — *arrow/lib.sio*
+- `pub fn arrow_feature_compressed() -> i64 { 2 }` — *arrow/lib.sio*
+- `pub fn arrow_codec_lz4() -> i64 { 1 }` — *arrow/lib.sio*
+- `pub fn arrow_codec_zstd() -> i64 { 2 }` — *arrow/lib.sio*
+- `pub fn arrow_schema_new() -> ArrowSchema {` — *arrow/lib.sio*
+- `pub fn arrow_batch_new() -> ArrowBatch {` — *arrow/lib.sio*
+- `pub fn arrow_dicts_new() -> ArrowDicts {` — *arrow/lib.sio*
+- `pub fn arrow_buf_new() -> ArrowBuf {` — *arrow/lib.sio*
+- `pub fn arrow_spans_new() -> ArrowSpans {` — *arrow/lib.sio*
+- `pub fn arrow_cursor_new() -> ArrowCursor {` — *arrow/lib.sio*
+- `pub fn arrow_schema_add(` — *arrow/lib.sio*
+- `pub fn arrow_schema_add_child(` — *arrow/lib.sio*
+- `pub fn arrow_schema_set_extra(s: &!ArrowSchema, node: i64, extra: i64, scale: i64) -> i64 with Mut, Panic {` — *arrow/lib.sio*
+- `pub fn arrow_schema_set_timezone(s: &!ArrowSchema, node: i64, tz: string) -> i64 with Mut, Panic {` — *arrow/lib.sio*
+- `pub fn arrow_schema_add_union_id(s: &!ArrowSchema, node: i64, id: i64) -> i64 with Mut, Panic {` — *arrow/lib.sio*
+- `pub fn arrow_schema_set_dict(s: &!ArrowSchema, node: i64, id: i64, index_width: i64, index_signed: i64, ordered: i64) -> i64 with Mut, Panic {` — *arrow/lib.sio*
+- `pub fn arrow_schema_add_meta(s: &!ArrowSchema, key: string, val: string) -> i64 with Mut, Panic {` — *arrow/lib.sio*
+- `pub fn arrow_schema_add_msg_meta(s: &!ArrowSchema, key: string, val: string) -> i64 with Mut, Panic {` — *arrow/lib.sio*
+- `pub fn arrow_field_add_meta(s: &!ArrowSchema, node: i64, key: string, val: string) -> i64 with Mut, Panic {` — *arrow/lib.sio*
+- `pub fn arrow_field_set_extension_buf(s: &!ArrowSchema, node: i64, name: string, metadata: &[u8; 128], nmeta: i64) -> i64 with Mut, Panic {` — *arrow/lib.sio*
+- `pub fn arrow_field_set_extension(s: &!ArrowSchema, node: i64, name: string, metadata: string) -> i64 with Mut, Panic {` — *arrow/lib.sio*
+- `pub fn arrow_schema_set_feature(s: &!ArrowSchema, feature: i64) -> i64 with Mut {` — *arrow/lib.sio*
+- `pub fn arrow_schema_set_endian(s: &!ArrowSchema, endian: i64) -> i64 with Mut {` — *arrow/lib.sio*
+- `pub fn arrow_batch_set_codec(b: &!ArrowBatch, codec: i64) -> i64 with Mut {` — *arrow/lib.sio*
+- `pub fn arrow_batch_add_msg_meta(b: &!ArrowBatch, key: string, val: string) -> i64 with Mut, Panic {` — *arrow/lib.sio*
+- `pub fn arrow_batch_set_list(b: &!ArrowBatch, node: i64, row: i64, n: i64) -> i64 with Mut, Panic {` — *arrow/lib.sio*
+- `pub fn arrow_batch_set_node_len(b: &!ArrowBatch, node: i64, n: i64) -> i64 with Mut, Panic {` — *arrow/lib.sio*
+- `pub fn arrow_batch_shape(b: &!ArrowBatch, rows: i64, cols: i64) -> i64 with Mut {` — *arrow/lib.sio*
+- `pub fn arrow_batch_set_i64(b: &!ArrowBatch, col: i64, row: i64, val: i64, is_null: i64) -> i64 with Mut, Panic {` — *arrow/lib.sio*
+- `pub fn arrow_batch_set_f64(b: &!ArrowBatch, col: i64, row: i64, val: f64, is_null: i64) -> i64 with Mut, Panic {` — *arrow/lib.sio*
+- `pub fn arrow_batch_set_bool(b: &!ArrowBatch, col: i64, row: i64, val: i64, is_null: i64) -> i64 with Mut, Panic {` — *arrow/lib.sio*
+- `pub fn arrow_batch_set_str(b: &!ArrowBatch, col: i64, row: i64, text: string, is_null: i64) -> i64 with Mut, Panic {` — *arrow/lib.sio*
+- `pub fn arrow_batch_is_null(b: &ArrowBatch, col: i64, row: i64) -> i64 with Panic {` — *arrow/lib.sio*
+- `pub fn arrow_batch_i64(b: &ArrowBatch, col: i64, row: i64) -> i64 with Panic {` — *arrow/lib.sio*
+- `pub fn arrow_batch_f64(b: &ArrowBatch, col: i64, row: i64) -> f64 with Panic {` — *arrow/lib.sio*
+- `pub fn arrow_batch_str_len(b: &ArrowBatch, col: i64, row: i64) -> i64 with Panic {` — *arrow/lib.sio*
+- `pub fn arrow_batch_str_byte(b: &ArrowBatch, col: i64, row: i64, i: i64) -> i64 with Panic {` — *arrow/lib.sio*
+- `pub fn arrow_ipc_file_begin(schema: &ArrowSchema, out: &!ArrowBuf) -> i64 with Mut, Panic, Div {` — *arrow/lib.sio*
+- `pub fn arrow_ipc_file_push(schema: &ArrowSchema, batch: &ArrowBatch, out: &!ArrowBuf, spans: &!ArrowSpans) -> i64 with Mut, Panic, Div {` — *arrow/lib.sio*
+- `pub fn arrow_ipc_file_end(schema: &ArrowSchema, out: &!ArrowBuf, spans: &ArrowSpans) -> i64 with Mut, Panic, Div {` — *arrow/lib.sio*
+- `pub fn arrow_ipc_stream_begin(schema: &ArrowSchema, out: &!ArrowBuf) -> i64 with Mut, Panic, Div {` — *arrow/lib.sio*
+- `pub fn arrow_ipc_stream_push(schema: &ArrowSchema, batch: &ArrowBatch, out: &!ArrowBuf) -> i64 with Mut, Panic, Div {` — *arrow/lib.sio*
+- `pub fn arrow_ipc_stream_push_dict(schema: &ArrowSchema, node: i64, is_delta: i64, values: &ArrowBatch, out: &!ArrowBuf) -> i64 with Mut, Panic, Div {` — *arrow/lib.sio*
+- `pub fn arrow_ipc_file_push_dict(schema: &ArrowSchema, node: i64, is_delta: i64, values: &ArrowBatch, out: &!ArrowBuf, spans: &!ArrowSpans) -> i64 with Mut, Panic, Div {` — *arrow/lib.sio*
+- `pub fn arrow_ipc_stream_end(out: &!ArrowBuf) -> i64 with Mut, Panic {` — *arrow/lib.sio*
+- `pub fn arrow_ipc_write_file(schema: &ArrowSchema, batch: &ArrowBatch, out: &!ArrowBuf) -> i64 with Mut, Panic, Div {` — *arrow/lib.sio*
+- `pub fn arrow_ipc_write_stream(schema: &ArrowSchema, batch: &ArrowBatch, out: &!ArrowBuf) -> i64 with Mut, Panic, Div {` — *arrow/lib.sio*
+- `pub fn arrow_ipc_write_path(path: string, schema: &ArrowSchema, batch: &ArrowBatch) -> i64 with IO, Mut, Panic, Div {` — *arrow/lib.sio*
+- `pub fn arrow_ipc_open(buf: &ArrowBuf, schema: &!ArrowSchema, cur: &!ArrowCursor) -> i64 with Mut, Panic, Div {` — *arrow/lib.sio*
+- `pub fn arrow_ipc_next(buf: &ArrowBuf, schema: &ArrowSchema, cur: &!ArrowCursor, batch: &!ArrowBatch) -> i64 with Mut, Panic, Div {` — *arrow/lib.sio*
+- `pub fn arrow_ipc_open_ex(buf: &ArrowBuf, schema: &!ArrowSchema, cur: &!ArrowCursor, dicts: &!ArrowDicts) -> i64 with Mut, Panic, Div {` — *arrow/lib.sio*
+- `pub fn arrow_ipc_next_ex(buf: &ArrowBuf, schema: &ArrowSchema, cur: &!ArrowCursor, batch: &!ArrowBatch, dicts: &!ArrowDicts) -> i64 with Mut, Panic, Div {` — *arrow/lib.sio*
+- `pub fn arrow_dict_i64(dicts: &ArrowDicts, slot: i64, row: i64) -> i64 with Panic {` — *arrow/lib.sio*
+- `pub fn arrow_dict_str_len(dicts: &ArrowDicts, slot: i64, row: i64) -> i64 with Panic {` — *arrow/lib.sio*
+- `pub fn arrow_dict_str_byte(dicts: &ArrowDicts, slot: i64, row: i64, i: i64) -> i64 with Panic {` — *arrow/lib.sio*
+- `pub fn arrow_ipc_view(buf: &ArrowBuf, pos: i64) -> ArrowIpcView with Mut, Panic, Div {` — *arrow/lib.sio*
+- `pub fn arrow_ipc_read(buf: &ArrowBuf, schema: &!ArrowSchema, batch: &!ArrowBatch) -> i64 with Mut, Panic, Div {` — *arrow/lib.sio*
+
+---
+
+## async (`stdlib/async/`)
+
+**6 public functions** across 12 files
+
+- `pub fn new() -> Executor {` — *async/executor.sio*
+- `pub fn poll_pending() -> PollResult {` — *async/future.sio*
+- `pub fn poll_ready(v: i64) -> PollResult {` — *async/future.sio*
+- `pub fn poll_is_ready(p: &PollResult) -> bool {` — *async/future.sio*
+- `pub fn poll_is_pending(p: &PollResult) -> bool {` — *async/future.sio*
+- `pub fn poll_value(p: &PollResult) -> i64 {` — *async/future.sio*
 
 ---
 
@@ -264,8 +430,15 @@ organized by module. Generated from source on the date shown below.
 
 ## Automatic Differentiation (`stdlib/autodiff/`)
 
-**13 public functions** across 10 files
+**20 public functions** across 10 files
 
+- `pub fn dual_const(val: f64) -> Dual {` — *autodiff/dual.sio*
+- `pub fn dual_var(val: f64) -> Dual {` — *autodiff/dual.sio*
+- `pub fn dual_add(a: Dual, b: Dual) -> Dual {` — *autodiff/dual.sio*
+- `pub fn dual_sub(a: Dual, b: Dual) -> Dual {` — *autodiff/dual.sio*
+- `pub fn dual_mul(a: Dual, b: Dual) -> Dual with Mut, Div, Panic {` — *autodiff/dual.sio*
+- `pub fn dual_exp(a: Dual) -> Dual with Mut, Div, Panic {` — *autodiff/dual.sio*
+- `pub fn dual_sin(a: Dual) -> Dual with Mut, Div, Panic {` — *autodiff/dual.sio*
 - `pub fn edual_to_gum_uncertainty(d: EpistemicDual) -> GUMUncertainty {` — *autodiff/epistemic_bridge.sio*
 - `pub fn gum_to_edual(val: f64, u: GUMUncertainty) -> EpistemicDual {` — *autodiff/epistemic_bridge.sio*
 - `pub fn gum_result_to_edual(r: GUMResult) -> EpistemicDual {` — *autodiff/epistemic_bridge.sio*
@@ -284,14 +457,29 @@ organized by module. Generated from source on the date shown below.
 
 ## bayes (`stdlib/bayes/`)
 
-**9 public functions** across 5 files
+**24 public functions** across 5 files
 
 - `pub fn bayes_rhat(chains: &[f64; 1024], n_chains: i32, chain_len: i32) -> f64 {` — *bayes/diagnostics.sio*
 - `pub fn bayes_ess(chain: &[f64; 256], n: i32) -> f64 {` — *bayes/diagnostics.sio*
 - `pub fn bayes_geweke(chain: &[f64; 256], n: i32) -> f64 {` — *bayes/diagnostics.sio*
 - `pub fn mcmc_config_default(model_id: i32) -> MCMCConfig {` — *bayes/mcmc.sio*
-- `pub fn mcmc_run(config: MCMCConfig, data: &[f64; 256], n_data: i32, seed: i64) -> MCMCResult {` — *bayes/mcmc.sio*
-- `pub fn mcmc_run_linear(config: MCMCConfig, x_data: &[f64; 256], y_data: &[f64; 256], n_data: i32, seed: i64) -> MCMCResult {` — *bayes/mcmc.sio*
+- `pub fn lcg_uniform(state: i64) -> LCGResult {` — *bayes/mcmc.sio*
+- `pub fn mcmc_run(config: MCMCConfig, data: &[f64; 256], n_data: i32, seed: i64) -> MCMCResult with Panic, Div {` — *bayes/mcmc.sio*
+- `pub fn mcmc_run_linear(config: MCMCConfig, x_data: &[f64; 256], y_data: &[f64; 256], n_data: i32, seed: i64) -> MCMCResult with Panic, Div {` — *bayes/mcmc.sio*
+- `pub fn prior_normal(mu: f64, sigma: f64) -> Prior {` — *bayes/prior.sio*
+- `pub fn log_prob_normal(x: f64, mu: f64, sigma: f64) -> PriorEval {` — *bayes/prior.sio*
+- `pub fn log_prob_lognormal(x: f64, mu: f64, sigma: f64) -> PriorEval {` — *bayes/prior.sio*
+- `pub fn prior_uniform(lower: f64, upper: f64) -> Prior {` — *bayes/prior.sio*
+- `pub fn log_prob_uniform(x: f64, lower: f64, upper: f64) -> PriorEval {` — *bayes/prior.sio*
+- `pub fn log_prob_beta(x: f64, alpha: f64, beta: f64) -> PriorEval {` — *bayes/prior.sio*
+- `pub fn log_prob_gamma(x: f64, shape: f64, rate: f64) -> PriorEval {` — *bayes/prior.sio*
+- `pub fn log_prob_half_normal(x: f64, sigma: f64) -> PriorEval {` — *bayes/prior.sio*
+- `pub fn log_prob_exponential(x: f64, rate: f64) -> PriorEval {` — *bayes/prior.sio*
+- `pub fn log_prob_cauchy(x: f64, location: f64, scale: f64) -> PriorEval {` — *bayes/prior.sio*
+- `pub fn log_prob_half_cauchy(x: f64, scale: f64) -> PriorEval {` — *bayes/prior.sio*
+- `pub fn prior_log_prob(prior: Prior, x: f64) -> PriorEval {` — *bayes/prior.sio*
+- `pub fn prior_weakly_informative_coef() -> Prior {` — *bayes/prior.sio*
+- `pub fn prior_weakly_informative_scale() -> Prior {` — *bayes/prior.sio*
 - `pub fn vi_params_new(n: i32) -> VIParams {` — *bayes/vi.sio*
 - `pub fn vi_elbo(params: VIParams, data: &[f64; 256], n_data: i32) -> f64 {` — *bayes/vi.sio*
 - `pub fn vi_step(params: VIParams, data: &[f64; 256], n_data: i32, lr: f64) -> VIParams {` — *bayes/vi.sio*
@@ -795,15 +983,55 @@ organized by module. Generated from source on the date shown below.
 
 ## Collections (`stdlib/collections/`)
 
-**27 public functions** across 14 files
+**69 public functions** across 16 files
 
 - `pub fn main() -> i32 with IO, Mut, Div, Panic {` — *collections/bitset.sio*
+- `pub fn new() -> IntDeque {` — *collections/deque.sio*
+- `pub fn new() -> IntIntMap {` — *collections/hashmap.sio*
 - `pub fn hashmap_new() -> HashMap64 {` — *collections/hashmap.sio*
-- `pub fn hashmap_insert(m: &! HashMap64, key: i64, value: f64) -> bool {` — *collections/hashmap.sio*
+- `pub fn hashmap_insert(m: &! HashMap64, key: i64, value: f64) -> bool with Mut {` — *collections/hashmap.sio*
 - `pub fn hashmap_get(m: &HashMap64, key: i64) -> f64 {` — *collections/hashmap.sio*
 - `pub fn hashmap_contains(m: &HashMap64, key: i64) -> bool {` — *collections/hashmap.sio*
-- `pub fn hashmap_remove(m: &! HashMap64, key: i64) -> bool {` — *collections/hashmap.sio*
+- `pub fn hashmap_remove(m: &! HashMap64, key: i64) -> bool with Mut {` — *collections/hashmap.sio*
 - `pub fn hashmap_count(m: &HashMap64) -> i64 {` — *collections/hashmap.sio*
+- `pub fn new() -> IntSet {` — *collections/hashset.sio*
+- `pub fn heap_int_int_map_new() -> HeapIntIntMap {` — *collections/heap_map.sio*
+- `pub fn heap_i64_vec_new() -> HeapI64Vec {` — *collections/heap_vec.sio*
+- `pub fn heap_f64_vec_new() -> HeapF64Vec {` — *collections/heap_vec.sio*
+- `pub fn new() -> IntHeap {` — *collections/heap.sio*
+- `pub fn integer_buffer_new(n: i64, max_bytes: i64) -> IntegerBuffer with Alloc, Mut, Div {` — *collections/integer_buffer.sio*
+- `pub fn integer_buffer_status(b: &IntegerBuffer) -> i64 { b.status }` — *collections/integer_buffer.sio*
+- `pub fn integer_buffer_len(b: &IntegerBuffer) -> i64 { b.size }` — *collections/integer_buffer.sio*
+- `pub fn integer_buffer_capacity(b: &IntegerBuffer) -> i64 { b.capacity }` — *collections/integer_buffer.sio*
+- `pub fn integer_buffer_budget(b: &IntegerBuffer) -> i64 { b.max_bytes }` — *collections/integer_buffer.sio*
+- `pub fn integer_buffer_reserve(b: &!IntegerBuffer, required: i64) -> i64 with Alloc, Mut, Div {` — *collections/integer_buffer.sio*
+- `pub fn integer_buffer_resize(b: &!IntegerBuffer, n: i64) -> i64 with Alloc, Mut, Div {` — *collections/integer_buffer.sio*
+- `pub fn integer_buffer_get(b: &IntegerBuffer, index: i64) -> IntegerValue {` — *collections/integer_buffer.sio*
+- `pub fn integer_buffer_at(b: &IntegerBuffer, index: i64) -> i64 with Panic {` — *collections/integer_buffer.sio*
+- `pub fn integer_buffer_set(b: &!IntegerBuffer, index: i64, value: i64) -> i64 with Mut {` — *collections/integer_buffer.sio*
+- `pub fn integer_buffer_push(b: &!IntegerBuffer, value: i64) -> i64 with Alloc, Mut, Div {` — *collections/integer_buffer.sio*
+- `pub fn integer_buffer_close(b: IntegerBuffer) with Alloc {` — *collections/integer_buffer.sio*
+- `pub fn numeric_buffer_new(n: i64, max_bytes: i64) -> NumericBuffer with Alloc, Mut, Div {` — *collections/numeric_buffer.sio*
+- `pub fn numeric_buffer_status(b: &NumericBuffer) -> i64 { b.status }` — *collections/numeric_buffer.sio*
+- `pub fn numeric_buffer_len(b: &NumericBuffer) -> i64 { b.size }` — *collections/numeric_buffer.sio*
+- `pub fn numeric_buffer_capacity(b: &NumericBuffer) -> i64 { b.capacity }` — *collections/numeric_buffer.sio*
+- `pub fn numeric_buffer_budget(b: &NumericBuffer) -> i64 { b.max_bytes }` — *collections/numeric_buffer.sio*
+- `pub fn numeric_buffer_reserve(b: &!NumericBuffer, required: i64) -> i64 with Alloc, Mut, Div {` — *collections/numeric_buffer.sio*
+- `pub fn numeric_buffer_resize(b: &!NumericBuffer, n: i64) -> i64 with Alloc, Mut, Div {` — *collections/numeric_buffer.sio*
+- `pub fn numeric_buffer_get(b: &NumericBuffer, index: i64) -> NumericValue {` — *collections/numeric_buffer.sio*
+- `pub fn numeric_buffer_at(b: &NumericBuffer, index: i64) -> f64 with Panic {` — *collections/numeric_buffer.sio*
+- `pub fn numeric_buffer_set(b: &!NumericBuffer, index: i64, value: f64) -> i64 with Mut {` — *collections/numeric_buffer.sio*
+- `pub fn numeric_buffer_push(b: &!NumericBuffer, value: f64) -> i64 with Alloc, Mut, Div {` — *collections/numeric_buffer.sio*
+- `pub fn numeric_buffer_close(b: NumericBuffer) with Alloc {` — *collections/numeric_buffer.sio*
+- `pub fn numeric_matrix(n: i64, rows: i64, cols: i64, row_stride: i64,` — *collections/numeric_buffer.sio*
+- `pub fn numeric_matrix_status(m: &NumericMatrix) -> i64 { m.status }` — *collections/numeric_buffer.sio*
+- `pub fn numeric_matrix_rows(m: &NumericMatrix) -> i64 { m.rows }` — *collections/numeric_buffer.sio*
+- `pub fn numeric_matrix_cols(m: &NumericMatrix) -> i64 { m.cols }` — *collections/numeric_buffer.sio*
+- `pub fn numeric_matrix_get(b: &NumericBuffer, m: &NumericMatrix, row: i64, col: i64) -> NumericValue {` — *collections/numeric_buffer.sio*
+- `pub fn numeric_matrix_fits(b:&NumericBuffer,m:&NumericMatrix)->bool {` — *collections/numeric_buffer.sio*
+- `pub fn numeric_matrix_at(b:&NumericBuffer,m:&NumericMatrix,row:i64,col:i64)->f64 with Panic {` — *collections/numeric_buffer.sio*
+- `pub fn numeric_matrix_set(b: &!NumericBuffer, m: &NumericMatrix, row: i64, col: i64, value: f64) -> i64 with Mut {` — *collections/numeric_buffer.sio*
+- `pub fn numeric_buffer_rotate_rows(b:&!NumericBuffer,first:i64,second:i64,n:i64,c:f64,s:f64)->i64 with Mut,Div {` — *collections/numeric_buffer.sio*
 - `pub fn stack_new() -> Stack64 {` — *collections/stack.sio*
 - `pub fn stack_push(s: &!Stack64, val: i64) -> bool with Mut, Panic {` — *collections/stack.sio*
 - `pub fn stack_pop(s: &!Stack64) -> i64 with Mut, Panic {` — *collections/stack.sio*
@@ -812,6 +1040,8 @@ organized by module. Generated from source on the date shown below.
 - `pub fn stack_size(s: &Stack64) -> i64 { s.top }` — *collections/stack.sio*
 - `pub fn stack_clear(s: &!Stack64) with Mut { s.top = 0 }` — *collections/stack.sio*
 - `pub fn main() -> i32 with IO, Mut, Panic, Div {` — *collections/stack.sio*
+- `pub fn new() -> IntVec {` — *collections/vec.sio*
+- `pub fn new() -> FloatVec {` — *collections/vec.sio*
 - `pub fn vec_new() -> VecF64 {` — *collections/vec.sio*
 - `pub fn vec_push(v: &!VecF64, value: f64) with Mut {` — *collections/vec.sio*
 - `pub fn vec_pop(v: &!VecF64) -> f64 with Mut {` — *collections/vec.sio*
@@ -1225,8 +1455,19 @@ organized by module. Generated from source on the date shown below.
 
 ## core (`stdlib/core/`)
 
-**19 public functions** across 5 files
+**30 public functions** across 5 files
 
+- `pub fn int_none() -> IntOption {` — *core/option.sio*
+- `pub fn int_some(v: i64) -> IntOption {` — *core/option.sio*
+- `pub fn int_option_is_some(opt: &IntOption) -> bool {` — *core/option.sio*
+- `pub fn int_option_is_none(opt: &IntOption) -> bool {` — *core/option.sio*
+- `pub fn int_option_unwrap(opt: &IntOption) -> i64 {` — *core/option.sio*
+- `pub fn int_option_unwrap_or(opt: &IntOption, default: i64) -> i64 {` — *core/option.sio*
+- `pub fn float_none() -> FloatOption {` — *core/option.sio*
+- `pub fn float_some(v: f64) -> FloatOption {` — *core/option.sio*
+- `pub fn float_option_is_some(opt: &FloatOption) -> bool {` — *core/option.sio*
+- `pub fn float_option_is_none(opt: &FloatOption) -> bool {` — *core/option.sio*
+- `pub fn float_option_unwrap_or(opt: &FloatOption, default: f64) -> f64 {` — *core/option.sio*
 - `pub fn int_ok(v: i64) -> IntResult {` — *core/result.sio*
 - `pub fn int_err(e: i64) -> IntResult {` — *core/result.sio*
 - `pub fn int_result_is_ok(r: &IntResult) -> bool {` — *core/result.sio*
@@ -1251,11 +1492,12 @@ organized by module. Generated from source on the date shown below.
 
 ## Cryptography (`stdlib/crypto/`)
 
-**7 public functions** across 5 files
+**8 public functions** across 3 files
 
 - `pub fn sha256_compress(h: [i64; 8], block: [u8; 64]) -> [i64; 8] with Mut, Panic, Div {` — *crypto/sha256.sio*
 - `pub fn sha256_init() -> SHA256State {` — *crypto/sha256.sio*
 - `pub fn sha256_update(state: SHA256State, data: [u8; 256], len: i32) -> SHA256State with Mut, Panic, Div {` — *crypto/sha256.sio*
+- `pub fn sha256_update_be64(s: &!SHA256State, value: i64) with Mut, Panic, Div {` — *crypto/sha256.sio*
 - `pub fn sha256_finalize(state: SHA256State) -> SHA256Digest with Mut, Panic, Div {` — *crypto/sha256.sio*
 - `pub fn sha256_digest_byte(digest: &SHA256Digest, index: i32) -> i64 with Panic {` — *crypto/sha256.sio*
 - `pub fn sha256_hash(data: [u8; 256], len: i32) -> SHA256Digest with Mut, Panic, Div {` — *crypto/sha256.sio*
@@ -1410,7 +1652,7 @@ organized by module. Generated from source on the date shown below.
 
 ## darwin_pbpk (`stdlib/darwin_pbpk/`)
 
-**485 public functions** across 121 files
+**604 public functions** across 125 files
 
 - `pub fn absorption_state_zero() -> AbsorptionState {` — *darwin_pbpk/absorption.sio*
 - `pub fn absorption_state_with_dose(dose_mg: f64) -> AbsorptionState {` — *darwin_pbpk/absorption.sio*
@@ -1522,10 +1764,12 @@ organized by module. Generated from source on the date shown below.
 - `pub fn cumulant_update(state: CumulantState, x: f64) -> CumulantState with Div {` — *darwin_pbpk/cumulants.sio*
 - `pub fn cumulant_finalize(state: CumulantState) -> CumulantSummary with Div {` — *darwin_pbpk/cumulants.sio*
 - `pub fn lognormal_cumulants_from_mean_variance(mean: f64, variance: f64) -> LognormalCumulants with Mut, Div, Panic {` — *darwin_pbpk/cumulants.sio*
+- `pub fn m5_simulate_ledger(prm: PBPKParams28, dose_mg: f64, t_end: f64,` — *darwin_pbpk/cumulants.sio*
 - `pub fn extract_pbpk28_derivatives(` — *darwin_pbpk/cumulants.sio*
 - `pub fn extract_auc_inverse_derivatives(dose: f64, cl: f64, v: f64, h: f64) -> DerivativeBudget with Div {` — *darwin_pbpk/cumulants.sio*
 - `pub fn variance_budget_4th(` — *darwin_pbpk/cumulants.sio*
 - `pub fn variance_budget_4th_from_hessian(` — *darwin_pbpk/cumulants.sio*
+- `pub fn m5_pbpk28_u_mc_canonical() -> f64 { return 0.211790 }` — *darwin_pbpk/cumulants.sio*
 - `pub fn m5_pbpk28_convergence_budget() -> VarianceBudget4th with Mut, Div, Panic, Epistemic {` — *darwin_pbpk/cumulants.sio*
 - `pub fn m5_pbpk28_second_order_reference() -> Pbpk28HessianBudget with Mut, Div, Panic, Epistemic {` — *darwin_pbpk/cumulants.sio*
 - `pub fn cyp3a_inhibition_factor(i_unbound: f64, ki: f64) -> f64 with Div {` — *darwin_pbpk/ddi/cyp3a_competitive.sio*
@@ -1535,6 +1779,40 @@ organized by module. Generated from source on the date shown below.
 - `pub fn cyp3a_clh(s: Cyp3aSubstrate, factor: f64) -> f64 with Div {` — *darwin_pbpk/ddi/cyp3a_competitive.sio*
 - `pub fn cyp3a_f_oral(s: Cyp3aSubstrate, factor: f64) -> f64 with Div {` — *darwin_pbpk/ddi/cyp3a_competitive.sio*
 - `pub fn cyp3a_aucr(s: Cyp3aSubstrate, factor: f64) -> f64 with Div {` — *darwin_pbpk/ddi/cyp3a_competitive.sio*
+- `pub fn md_cyp3a4() -> i32 { return 0 }` — *darwin_pbpk/ddi/multidrug28.sio*
+- `pub fn md_cyp2d6() -> i32 { return 1 }` — *darwin_pbpk/ddi/multidrug28.sio*
+- `pub fn md_cyp2c9() -> i32 { return 2 }` — *darwin_pbpk/ddi/multidrug28.sio*
+- `pub fn md_cyp2c19() -> i32 { return 3 }` — *darwin_pbpk/ddi/multidrug28.sio*
+- `pub fn md_site_liver() -> i32 { return 0 }` — *darwin_pbpk/ddi/multidrug28.sio*
+- `pub fn md_site_gut() -> i32 { return 1 }` — *darwin_pbpk/ddi/multidrug28.sio*
+- `pub fn md_method_trbdf2() -> i32 { return 0 }` — *darwin_pbpk/ddi/multidrug28.sio*
+- `pub fn md_method_cn_legacy() -> i32 { return 1 }` — *darwin_pbpk/ddi/multidrug28.sio*
+- `pub fn md_default_dt() -> f64 { return 0.02 }` — *darwin_pbpk/ddi/multidrug28.sio*
+- `pub fn md_new(portal: bool) -> MultiDrug28 {` — *darwin_pbpk/ddi/multidrug28.sio*
+- `pub fn md_params_error(p: PBPKParams28, portal: bool) -> i32 with Mut {` — *darwin_pbpk/ddi/multidrug28.sio*
+- `pub fn md_add_drug(md: &!MultiDrug28, p: PBPKParams28, fu_b: f64, fa: f64, ka: f64) -> i32 with Mut, Panic {` — *darwin_pbpk/ddi/multidrug28.sio*
+- `pub fn md_set_fu_site(md: &!MultiDrug28, drug: i32, site: i32, fu: f64) with Mut, Panic {` — *darwin_pbpk/ddi/multidrug28.sio*
+- `pub fn md_set_clint(md: &!MultiDrug28, drug: i32, site: i32, enz: i32, clint_u: f64) with Mut, Panic {` — *darwin_pbpk/ddi/multidrug28.sio*
+- `pub fn md_set_ki(md: &!MultiDrug28, drug: i32, enz: i32, ki_u: f64) with Mut, Panic {` — *darwin_pbpk/ddi/multidrug28.sio*
+- `pub fn md_set_ext_load(md: &!MultiDrug28, site: i32, enz: i32, load: f64) with Mut, Panic {` — *darwin_pbpk/ddi/multidrug28.sio*
+- `pub fn md_restart_pending(md: &MultiDrug28, i: i32) -> bool with Panic {` — *darwin_pbpk/ddi/multidrug28.sio*
+- `pub fn md_oral_dose_ok(md: &MultiDrug28, drug: i32, mg: f64) -> bool with Mut, Panic {` — *darwin_pbpk/ddi/multidrug28.sio*
+- `pub fn md_bolus_dose_ok(md: &MultiDrug28, drug: i32, mg: f64) -> bool with Mut, Div, Panic {` — *darwin_pbpk/ddi/multidrug28.sio*
+- `pub fn md_dose_oral(md: &!MultiDrug28, drug: i32, mg: f64) with Mut, Panic {` — *darwin_pbpk/ddi/multidrug28.sio*
+- `pub fn md_dose_iv_bolus(md: &!MultiDrug28, drug: i32, mg: f64) with Mut, Div, Panic {` — *darwin_pbpk/ddi/multidrug28.sio*
+- `pub fn md_set_iv_rate(md: &!MultiDrug28, drug: i32, mg_per_h: f64) with Mut, Panic {` — *darwin_pbpk/ddi/multidrug28.sio*
+- `pub fn md_params_of(md: &MultiDrug28, i: i32) -> PBPKParams28 with Mut, Panic {` — *darwin_pbpk/ddi/multidrug28.sio*
+- `pub fn md_state_of(md: &MultiDrug28, i: i32) -> PBPKState28 with Mut, Panic {` — *darwin_pbpk/ddi/multidrug28.sio*
+- `pub fn md_absorbed_fraction(y: f64) -> f64 with Mut, Div, Panic {` — *darwin_pbpk/ddi/multidrug28.sio*
+- `pub fn md_config_error(md: &MultiDrug28) -> i32 {` — *darwin_pbpk/ddi/multidrug28.sio*
+- `pub fn md_step(md: &!MultiDrug28, dt: f64) with Mut, Div, Panic {` — *darwin_pbpk/ddi/multidrug28.sio*
+- `pub fn md_run_to_error(md: &MultiDrug28, t_end: f64, dt: f64) -> i32 with Mut {` — *darwin_pbpk/ddi/multidrug28.sio*
+- `pub fn md_run_to(md: &!MultiDrug28, t_end: f64, dt: f64) with Mut, Div, Panic {` — *darwin_pbpk/ddi/multidrug28.sio*
+- `pub fn md_body_mass(md: &MultiDrug28, i: i32) -> f64 with Mut, Div, Panic {` — *darwin_pbpk/ddi/multidrug28.sio*
+- `pub fn md_mass_residual(md: &MultiDrug28, i: i32) -> f64 with Mut, Div, Panic {` — *darwin_pbpk/ddi/multidrug28.sio*
+- `pub fn md_clamped(md: &MultiDrug28, i: i32) -> f64 with Panic {` — *darwin_pbpk/ddi/multidrug28.sio*
+- `pub fn md_neg_min_rel(md: &MultiDrug28, i: i32) -> f64 with Panic {` — *darwin_pbpk/ddi/multidrug28.sio*
+- `pub fn md_factor_now(md: &MultiDrug28, i: i32, site: i32, enz: i32) -> f64 with Mut, Div, Panic {` — *darwin_pbpk/ddi/multidrug28.sio*
 - `pub fn ddi_sequence_inhib(triple: CypDDITriple, order: [i32; 3],` — *darwin_pbpk/ddi/polypharmacy_fano.sio*
 - `pub fn ddi_is_associative(triple: CypDDITriple, c_a: f64, c_b: f64, eps: f64)` — *darwin_pbpk/ddi/polypharmacy_fano.sio*
 - `pub fn olanz_halo_carbamazepine_triple() -> CypDDITriple {` — *darwin_pbpk/ddi/polypharmacy_fano.sio*
@@ -1597,12 +1875,19 @@ organized by module. Generated from source on the date shown below.
 - `pub fn venlafaxine_cl_odv_pgx(pheno: i32) -> f64 {` — *darwin_pbpk/drugs/venlafaxine.sio*
 - `pub fn venlafaxine_cl_parent_nonformation_nm() -> f64 with Div, Panic {` — *darwin_pbpk/drugs/venlafaxine.sio*
 - `pub fn venlafaxine_cl_parent_central_pgx(pheno: i32) -> f64 with Div, Panic {` — *darwin_pbpk/drugs/venlafaxine.sio*
-- `pub fn ep14_rapamycin_params() -> PBPKParams14 with Mut {` — *darwin_pbpk/epistemic_pbpk14.sio*
-- `pub fn ep14_rapamycin_priors() -> EpPrior14 with Mut {` — *darwin_pbpk/epistemic_pbpk14.sio*
-- `pub fn ep14_rapamycin_priors_extended() -> EpPrior14Extended with Mut {` — *darwin_pbpk/epistemic_pbpk14.sio*
 - `pub fn hessian_pbpk14_auc(` — *darwin_pbpk/epistemic_pbpk14_hessian.sio*
 - `pub fn hessian_emit_csv_header() with IO, Mut, Panic, Div {` — *darwin_pbpk/epistemic_pbpk14_hessian.sio*
 - `pub fn hessian_emit_budget_csv(bud: Pbpk14HessianBudget)` — *darwin_pbpk/epistemic_pbpk14_hessian.sio*
+- `pub fn ep14_rapamycin_params() -> PBPKParams14 with Mut {` — *darwin_pbpk/epistemic_pbpk14.sio*
+- `pub fn ep14_rapamycin_priors() -> EpPrior14 with Mut {` — *darwin_pbpk/epistemic_pbpk14.sio*
+- `pub fn ep14_rapamycin_priors_extended() -> EpPrior14Extended with Mut {` — *darwin_pbpk/epistemic_pbpk14.sio*
+- `pub fn h28_simulate_ledger(prm: PBPKParams28, dose_mg: f64, t_end: f64,` — *darwin_pbpk/epistemic_pbpk28_hessian.sio*
+- `pub fn hessian_pbpk28_auc(` — *darwin_pbpk/epistemic_pbpk28_hessian.sio*
+- `pub fn h28_nonlinearity_ratio_literal(` — *darwin_pbpk/epistemic_pbpk28_hessian.sio*
+- `pub fn h28_nonlinearity_ratio_normalized(` — *darwin_pbpk/epistemic_pbpk28_hessian.sio*
+- `pub fn h28_emit_csv_header() with IO, Mut, Panic, Div {` — *darwin_pbpk/epistemic_pbpk28_hessian.sio*
+- `pub fn h28_emit_budget_csv(bud: Pbpk28HessianBudget, priors: EpPrior28) with IO, Mut, Panic, Div, Epistemic {` — *darwin_pbpk/epistemic_pbpk28_hessian.sio*
+- `pub fn ep28_mass_gate(dt: f64, prm: PBPKParams28, dose_mg: f64, t_end: f64) -> bool with IO, Mut, Div, Panic {` — *darwin_pbpk/epistemic_pbpk28.sio*
 - `pub fn ep28_rapamycin_priors() -> EpPrior28 with Mut {` — *darwin_pbpk/epistemic_pbpk28.sio*
 - `pub fn ep28_run(` — *darwin_pbpk/epistemic_pbpk28.sio*
 - `pub fn ep28_rapamycin_params() -> PBPKParams28 {` — *darwin_pbpk/epistemic_pbpk28.sio*
@@ -1616,11 +1901,6 @@ organized by module. Generated from source on the date shown below.
 - `pub fn ep28_semaglutide_chebi_id() -> i32 {` — *darwin_pbpk/epistemic_pbpk28.sio*
 - `pub fn ep28_semaglutide_clearance_process_id() -> i32 {` — *darwin_pbpk/epistemic_pbpk28.sio*
 - `pub fn ep28_semaglutide_priors() -> EpPrior28 with Mut {` — *darwin_pbpk/epistemic_pbpk28.sio*
-- `pub fn hessian_pbpk28_auc(` — *darwin_pbpk/epistemic_pbpk28_hessian.sio*
-- `pub fn h28_nonlinearity_ratio_literal(` — *darwin_pbpk/epistemic_pbpk28_hessian.sio*
-- `pub fn h28_nonlinearity_ratio_normalized(` — *darwin_pbpk/epistemic_pbpk28_hessian.sio*
-- `pub fn h28_emit_csv_header() with IO, Mut, Panic, Div {` — *darwin_pbpk/epistemic_pbpk28_hessian.sio*
-- `pub fn h28_emit_budget_csv(bud: Pbpk28HessianBudget, priors: EpPrior28) with IO, Mut, Panic, Div, Epistemic {` — *darwin_pbpk/epistemic_pbpk28_hessian.sio*
 - `pub fn sim_sqrt(x: f64) -> f64 with Mut, Div {` — *darwin_pbpk/epistemic_sim.sio*
 - `pub fn pbpk_params_default() -> PBPKParams {` — *darwin_pbpk/epistemic_sim.sio*
 - `pub fn pbpk_state_initial(params: &PBPKParams) -> PBPKState with Mut, Div {` — *darwin_pbpk/epistemic_sim.sio*
@@ -1670,6 +1950,46 @@ organized by module. Generated from source on the date shown below.
 - `pub fn kb_contains(inner: KPBox, outer: KPBox) -> i64 {` — *darwin_pbpk/knightian_pbpk.sio*
 - `pub fn kb_guarantees(p: KPBox, threshold: f64) -> i64 {` — *darwin_pbpk/knightian_pbpk.sio*
 - `pub fn gnn_rapamycin() -> GNNPrediction with Mut, Div, Panic {` — *darwin_pbpk/ml/gnn_inference.sio*
+- `pub fn p28c_liver_fuclint(cl_h: f64, q_l: f64, ps_l: f64) -> f64 with Div, Panic {` — *darwin_pbpk/pbpk28_calibration.sio*
+- `pub fn p28c_liver_clh(fuclint: f64, q_l: f64, ps_l: f64) -> f64 with Div {` — *darwin_pbpk/pbpk28_calibration.sio*
+- `pub fn p28c_liver_fh(fuclint: f64, q_l: f64, ps_l: f64) -> f64 with Div {` — *darwin_pbpk/pbpk28_calibration.sio*
+- `pub fn p28c_gut_asymmetric(f_g: f64, e_sys: f64, q_g: f64) -> (f64, f64) with Div, Panic {` — *darwin_pbpk/pbpk28_calibration.sio*
+- `pub fn p28c_gut_fg(fuclint_g: f64, ps_g: f64, kp_g: f64, q_g: f64) -> f64 with Div {` — *darwin_pbpk/pbpk28_calibration.sio*
+- `pub fn p28c_gut_esys(fuclint_g: f64, ps_g: f64, kp_g: f64, q_g: f64) -> f64 with Div {` — *darwin_pbpk/pbpk28_calibration.sio*
+- `pub fn pbpk28_work_new() -> PBPK28Work {` — *darwin_pbpk/pbpk28_hepatic.sio*
+- `pub fn pbpk28_hepatic_none() -> PBPK28Hepatic {` — *darwin_pbpk/pbpk28_hepatic.sio*
+- `pub fn pbpk28_input_none() -> PBPK28Input {` — *darwin_pbpk/pbpk28_hepatic.sio*
+- `pub fn pbpk28_sink_from_clint(clint_u: f64, fu_b: f64, kp: f64) -> f64 with Div {` — *darwin_pbpk/pbpk28_hepatic.sio*
+- `pub fn pbpk28_is_splanchnic(i: i32) -> bool {` — *darwin_pbpk/pbpk28_hepatic.sio*
+- `pub fn pbpk28_hepatic_artery_flow_unchecked(p: PBPKParams28) -> f64 {` — *darwin_pbpk/pbpk28_hepatic.sio*
+- `pub fn pbpk28_hepatic_artery_flow(p: PBPKParams28) -> f64 with Panic {` — *darwin_pbpk/pbpk28_hepatic.sio*
+- `pub fn pbpk28_hepatic_cn_step_ws(` — *darwin_pbpk/pbpk28_hepatic.sio*
+- `pub fn pbpk28_hepatic_cn_step_mut(` — *darwin_pbpk/pbpk28_hepatic.sio*
+- `pub fn pbpk28_hepatic_cn_step(` — *darwin_pbpk/pbpk28_hepatic.sio*
+- `pub fn pbpk28_hepatic_elim_step(` — *darwin_pbpk/pbpk28_hepatic.sio*
+- `pub fn pbpk28_hepatic_theta_step_ws(` — *darwin_pbpk/pbpk28_hepatic.sio*
+- `pub fn pbpk28_hepatic_theta_step_mut(` — *darwin_pbpk/pbpk28_hepatic.sio*
+- `pub fn pbpk28_hepatic_theta_step(` — *darwin_pbpk/pbpk28_hepatic.sio*
+- `pub fn pbpk28_hepatic_elim_step_theta(` — *darwin_pbpk/pbpk28_hepatic.sio*
+- `pub fn pbpk28_trbdf2_d() -> f64 with Div {` — *darwin_pbpk/pbpk28_hepatic.sio*
+- `pub fn pbpk28_trbdf2_w() -> f64 with Div {` — *darwin_pbpk/pbpk28_hepatic.sio*
+- `pub fn pbpk28_negativity_tol_k() -> f64 { return 1024.0 }` — *darwin_pbpk/pbpk28_hepatic.sio*
+- `pub fn pbpk28_tol_ceiling() -> f64 { return 1.0e-6 }` — *darwin_pbpk/pbpk28_hepatic.sio*
+- `pub fn pbpk28_step_tol(dt: f64, lam: f64) -> f64 {` — *darwin_pbpk/pbpk28_hepatic.sio*
+- `pub fn pbpk28_dt_max(lam: f64) -> f64 with Div {` — *darwin_pbpk/pbpk28_hepatic.sio*
+- `pub fn pbpk28_step_certifiable(dt: f64, lam: f64) -> bool {` — *darwin_pbpk/pbpk28_hepatic.sio*
+- `pub fn pbpk28_lambda_max(p: PBPKParams28, hep: PBPK28Hepatic) -> f64 with Mut, Div {` — *darwin_pbpk/pbpk28_hepatic.sio*
+- `pub fn pbpk28_step_check_code(state: &PBPKState28, ws: &PBPK28Work) -> i32 with Mut {` — *darwin_pbpk/pbpk28_hepatic.sio*
+- `pub fn pbpk28_hepatic_trbdf2_step_ws(` — *darwin_pbpk/pbpk28_hepatic.sio*
+- `pub fn pbpk28_hepatic_be2_step_ws(` — *darwin_pbpk/pbpk28_hepatic.sio*
+- `pub fn pbpk28_hepatic_be2_floor_step_ws(` — *darwin_pbpk/pbpk28_hepatic.sio*
+- `pub fn pbpk28_hepatic_cn_step_saved_ws(` — *darwin_pbpk/pbpk28_hepatic.sio*
+- `pub fn pbpk28_hepatic_elim_quad_ws(` — *darwin_pbpk/pbpk28_hepatic.sio*
+- `pub fn pbpk28_hepatic_auc_quad_ws(state: &PBPKState28, ws: &PBPK28Work, dt: f64, w0: f64, wg: f64, w1: f64) -> f64 with Mut {` — *darwin_pbpk/pbpk28_hepatic.sio*
+- `pub fn pbpk28_input_rate(inp: PBPK28Input) -> f64 with Mut {` — *darwin_pbpk/pbpk28_hepatic.sio*
+- `pub fn pbpk28_ecm_x(clint_u: f64, fu_b: f64, ps: f64) -> f64 with Div {` — *darwin_pbpk/pbpk28_hepatic.sio*
+- `pub fn pbpk28_ecm_clh(q_liver: f64, x: f64) -> f64 with Div {` — *darwin_pbpk/pbpk28_hepatic.sio*
+- `pub fn pbpk28_ecm_fh(q_liver: f64, x: f64) -> f64 with Div {` — *darwin_pbpk/pbpk28_hepatic.sio*
 - `pub fn bergman_gb()    -> f64 { return 100.0 }      // mg/dL` — *darwin_pbpk/pd/bergman_glucose_insulin.sio*
 - `pub fn bergman_ib()    -> f64 { return 10.0 }       // mU/L` — *darwin_pbpk/pd/bergman_glucose_insulin.sio*
 - `pub fn bergman_sg()    -> f64 { return 1.5 }        // 1/h` — *darwin_pbpk/pd/bergman_glucose_insulin.sio*
@@ -1791,12 +2111,32 @@ organized by module. Generated from source on the date shown below.
 - `pub fn oral_trace_zero() -> OralBBBTrace {` — *darwin_pbpk/scenarios/oral_rapamycin_bbb.sio*
 - `pub fn oral_bbb_run(` — *darwin_pbpk/scenarios/oral_rapamycin_bbb.sio*
 - `pub fn oral_bbb_print_csv(trace: OralBBBTrace) with IO, Mut, Panic, Div {` — *darwin_pbpk/scenarios/oral_rapamycin_bbb.sio*
+- `pub fn sema_dose_mg() -> f64 { return 1.0 }` — *darwin_pbpk/scenarios/semaglutide_sc_depot.sio*
+- `pub fn sema_f() -> f64       { return 0.89 }` — *darwin_pbpk/scenarios/semaglutide_sc_depot.sio*
+- `pub fn sema_ka() -> f64      { return 0.011552453009332421 }   // ln(2)/60 h` — *darwin_pbpk/scenarios/semaglutide_sc_depot.sio*
+- `pub fn sema_release_rate_at(t: f64) -> f64 with Mut, Div {` — *darwin_pbpk/scenarios/semaglutide_sc_depot.sio*
+- `pub fn sema_scenario_init() -> SemaglutideScenario {` — *darwin_pbpk/scenarios/semaglutide_sc_depot.sio*
+- `pub fn sema_strang_step(scen: SemaglutideScenario, p: PBPKParams28,` — *darwin_pbpk/scenarios/semaglutide_sc_depot.sio*
+- `pub fn sema_integrate_to(scen: SemaglutideScenario, p: PBPKParams28,` — *darwin_pbpk/scenarios/semaglutide_sc_depot.sio*
 - `pub fn rapamycin_qd_regimen(n_days: i32) -> DosingRegimen {` — *darwin_pbpk/scenarios/steady_state_runner.sio*
 - `pub fn run_oral_multidose_cfg(` — *darwin_pbpk/scenarios/steady_state_runner.sio*
 - `pub fn ssr_print_report(r: SteadyStateReport) with IO, Mut, Panic, Div {` — *darwin_pbpk/scenarios/steady_state_runner.sio*
 - `pub fn run_oral_multidose(` — *darwin_pbpk/scenarios/steady_state_runner.sio*
-- `pub fn vfx_odv_parent_ratio(scen: VenlafaxineXrScenario) -> f64 with Mut, Div, Panic {` — *darwin_pbpk/scenarios/venlafaxine_xr.sio*
+- `pub fn vfx_scenario_init(pheno: i32) -> VenlafaxineXrScenario {` — *darwin_pbpk/scenarios/venlafaxine_xr.sio*
+- `pub fn vfx_parent_step_with_formation(` — *darwin_pbpk/scenarios/venlafaxine_xr.sio*
 - `pub fn vfx_integrate_to(` — *darwin_pbpk/scenarios/venlafaxine_xr.sio*
+- `pub fn vfx_released_qtau(` — *darwin_pbpk/scenarios/venlafaxine_xr.sio*
+- `pub fn vfx_ss_interval(` — *darwin_pbpk/scenarios/venlafaxine_xr.sio*
+- `pub fn vfx_ss_regimen_interval(pheno: i32, dt: f64) -> VfxSsInterval with Mut, Div, Panic {` — *darwin_pbpk/scenarios/venlafaxine_xr.sio*
+- `pub fn vfx_ss_ratio(iv: VfxSsInterval) -> f64 with Div {` — *darwin_pbpk/scenarios/venlafaxine_xr.sio*
+- `pub fn vfx_ss_ratio_lo(iv: VfxSsInterval) -> f64 with Div {` — *darwin_pbpk/scenarios/venlafaxine_xr.sio*
+- `pub fn vfx_ss_ratio_hi(iv: VfxSsInterval) -> f64 with Div {` — *darwin_pbpk/scenarios/venlafaxine_xr.sio*
+- `pub fn vfx_ss_odv_parent_ratio(pheno: i32, dt: f64) -> f64 with Mut, Div, Panic {` — *darwin_pbpk/scenarios/venlafaxine_xr.sio*
+- `pub fn vfx_ss_ratio_closed_form(pheno: i32) -> f64 with Mut, Div, Panic {` — *darwin_pbpk/scenarios/venlafaxine_xr.sio*
+- `pub fn vfx_formation_fraction_closed_form(pheno: i32) -> f64 with Mut, Div, Panic {` — *darwin_pbpk/scenarios/venlafaxine_xr.sio*
+- `pub fn vfx_ss_ratio_band_lo(pheno: i32) -> f64 {` — *darwin_pbpk/scenarios/venlafaxine_xr.sio*
+- `pub fn vfx_ss_ratio_band_hi(pheno: i32) -> f64 {` — *darwin_pbpk/scenarios/venlafaxine_xr.sio*
+- `pub fn vfx_ss_ratio_in_band(pheno: i32, r: f64) -> bool {` — *darwin_pbpk/scenarios/venlafaxine_xr.sio*
 - `pub fn raw_observation_table_new() -> RawObservationTable with Mut {` — *darwin_pbpk/schema/observation.sio*
 - `pub fn raw_observation_count(table: RawObservationTable) -> usize {` — *darwin_pbpk/schema/observation.sio*
 - `pub fn raw_observation_table_add(` — *darwin_pbpk/schema/observation.sio*
@@ -1806,6 +2146,23 @@ organized by module. Generated from source on the date shown below.
 - `pub fn normalized_observation_table_add(` — *darwin_pbpk/schema/observation.sio*
 - `pub fn normalized_observation_get(` — *darwin_pbpk/schema/observation.sio*
 - `pub fn normalized_observation_table_concat(` — *darwin_pbpk/schema/observation.sio*
+- `pub fn pbpk28_ledger_zero() -> PBPK28Ledger {` — *darwin_pbpk/theta_pbpk28.sio*
+- `pub fn pbpk28_theta_step_routed_sink_mut(` — *darwin_pbpk/theta_pbpk28.sio*
+- `pub fn pbpk28_theta_step_sink_mut(` — *darwin_pbpk/theta_pbpk28.sio*
+- `pub fn pbpk28_theta_step_mut(` — *darwin_pbpk/theta_pbpk28.sio*
+- `pub fn pbpk28_rannacher_step_routed_sink_mut(` — *darwin_pbpk/theta_pbpk28.sio*
+- `pub fn pbpk28_rannacher_step_sink_mut(` — *darwin_pbpk/theta_pbpk28.sio*
+- `pub fn pbpk28_rannacher_step_mut(` — *darwin_pbpk/theta_pbpk28.sio*
+- `pub fn pbpk28_rannacher_startup_steps() -> i32 { return 2 }` — *darwin_pbpk/theta_pbpk28.sio*
+- `pub fn pbpk28_trbdf2_step_routed_sink_mut(` — *darwin_pbpk/theta_pbpk28.sio*
+- `pub fn pbpk28_trbdf2_step_sink_mut(` — *darwin_pbpk/theta_pbpk28.sio*
+- `pub fn pbpk28_trbdf2_step_mut(` — *darwin_pbpk/theta_pbpk28.sio*
+- `pub fn pbpk28_ledger_residual(ledger: PBPK28Ledger, s: PBPKState28, p: PBPKParams28, m0: f64) -> f64 with Mut {` — *darwin_pbpk/theta_pbpk28.sio*
+- `pub fn pbpk28_mass_tol_rel(steps: i32) -> f64 {` — *darwin_pbpk/theta_pbpk28.sio*
+- `pub fn pbpk28_neg_mass_bound_mg() -> f64 { return 5.0e-7 }` — *darwin_pbpk/theta_pbpk28.sio*
+- `pub fn pbpk28_mass_gate_ok(ledger: PBPK28Ledger, s: PBPKState28, p: PBPKParams28, m0: f64, scale: f64) -> bool with Mut {` — *darwin_pbpk/theta_pbpk28.sio*
+- `pub fn pbpk28_mass_gate_report(ledger: PBPK28Ledger, s: PBPKState28, p: PBPKParams28, m0: f64) -> bool with IO, Mut {` — *darwin_pbpk/theta_pbpk28.sio*
+- `pub fn pbpk28_bolus_run_mut(` — *darwin_pbpk/theta_pbpk28.sio*
 - `pub fn fkbp12_mw_rapamycin_da() -> f64 { return 914.17 }` — *darwin_pbpk/tmdd/fkbp12_mtorc1.sio*
 - `pub fn fkbp12_kdeg() -> f64 { return 0.05 }    // 1/h, receptor turnover` — *darwin_pbpk/tmdd/fkbp12_mtorc1.sio*
 - `pub fn fkbp12_kon()  -> f64 { return 0.10 }    // L/(nmol·h), binding rate` — *darwin_pbpk/tmdd/fkbp12_mtorc1.sio*
@@ -1891,12 +2248,24 @@ organized by module. Generated from source on the date shown below.
 - `pub fn default_ode_config() -> ODEConfig14 {` — *darwin_pbpk/tsit5_pbpk14.sio*
 - `pub fn tight_ode_config() -> ODEConfig14 {` — *darwin_pbpk/tsit5_pbpk14.sio*
 - `pub fn solve_pbpk14(` — *darwin_pbpk/tsit5_pbpk14.sio*
+- `pub fn pbpk28_full_cn_step_sink_mut(` — *darwin_pbpk/tsit5_pbpk28.sio*
 - `pub fn pbpk28_full_cn_step_mut(state: &!PBPKState28, p: PBPKParams28, rel_mid: f64, dt: f64) with Mut, Div {` — *darwin_pbpk/tsit5_pbpk28.sio*
 - `pub fn pbpk28_full_cn_step(state: PBPKState28, p: PBPKParams28, rel_mid: f64, dt: f64)` — *darwin_pbpk/tsit5_pbpk28.sio*
 - `pub fn pbpk28_organ_average(s: PBPKState28, p: PBPKParams28, i: i32) -> f64 with Div {` — *darwin_pbpk/tsit5_pbpk28.sio*
 - `pub fn pbpk28_ontology_identities() -> (i32, i32) {` — *darwin_pbpk/tsit5_pbpk28.sio*
 - `pub fn pbpk28_dt_convergence_auc(base_dt: f64, prm: PBPKParams28, dose_mg: f64, t_end: f64) -> (f64, f64, f64, f64) with Mut, Div, Panic {` — *darwin_pbpk/tsit5_pbpk28.sio*
+- `pub fn mc28_simulate_ledger(prm: PBPKParams28, dose_mg: f64,` — *darwin_pbpk/validation/pbpk28_mc_cross_validation.sio*
 - `pub fn mc28_hierarchical_selftest_main() -> i32 with IO, Mut, Div, Panic, Epistemic {` — *darwin_pbpk/validation/pbpk28_mc_cross_validation.sio*
+- `pub fn ms28_simulate_ledger(prm: PBPKParams28, dose_mg: f64,` — *darwin_pbpk/validation/pbpk28_mc_prior_family_sweep.sio*
+- `pub fn sp28_simulate_ledger(prm: PBPKParams28, dose_mg: f64,` — *darwin_pbpk/validation/pbpk28_sobol_pce.sio*
+
+---
+
+## darwin (`stdlib/darwin/`)
+
+**1 public functions** across 2 files
+
+- `pub fn complement_base(b: u8) -> u8  with Mut, Div, Panic {` — *darwin/atlas.sio*
 
 ---
 
@@ -1905,17 +2274,6 @@ organized by module. Generated from source on the date shown below.
 **1206 public functions** across 67 files
 
 - `pub fn df_write_sio1(df: &DataFrame, path: string) -> i64 with Mut, Panic, IO, Div {` — *data/arrow_bridge.sio*
-- `pub fn bf_new(n_cols: i64, capacity_rows: i64) -> BigFrame with Alloc {` — *data/bigframe.sio*
-- `pub fn bf_push_row(bf: &!BigFrame, row: &[f64; 64], n_cols: i64) with Alloc, Mut {` — *data/bigframe.sio*
-- `pub fn bf_set(bf: &!BigFrame, r: i64, c: i64, v: f64) with Mut {` — *data/bigframe.sio*
-- `pub fn bf_get(bf: &BigFrame, r: i64, c: i64) -> f64 {` — *data/bigframe.sio*
-- `pub fn bf_nrows(bf: &BigFrame) -> i64 {` — *data/bigframe.sio*
-- `pub fn bf_ncols(bf: &BigFrame) -> i64 {` — *data/bigframe.sio*
-- `pub fn bf_cap_rows(bf: &BigFrame) -> i64 {` — *data/bigframe.sio*
-- `pub fn bf_col_ptr(bf: &BigFrame, c: i64) -> i64 { bf.col_ptrs[c] }` — *data/bigframe.sio*
-- `pub fn bf_col_sum(bf: &BigFrame, c: i64) -> f64 {` — *data/bigframe.sio*
-- `pub fn bf_col_mean(bf: &BigFrame, c: i64) -> f64 {` — *data/bigframe.sio*
-- `pub fn bf_free(bf: &!BigFrame) with Alloc, Mut {` — *data/bigframe.sio*
 - `pub fn bf_accuracy_by(src: &BigFrame, key_col: i64, yt_col: i64, yp_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_clfmetric(src, key_col, yt_col, yp_col, 0) }` — *data/bigframe_ml.sio*
 - `pub fn bf_precision_by(src: &BigFrame, key_col: i64, yt_col: i64, yp_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_clfmetric(src, key_col, yt_col, yp_col, 1) }` — *data/bigframe_ml.sio*
 - `pub fn bf_recall_by(src: &BigFrame, key_col: i64, yt_col: i64, yp_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_clfmetric(src, key_col, yt_col, yp_col, 2) }` — *data/bigframe_ml.sio*
@@ -2445,6 +2803,47 @@ organized by module. Generated from source on the date shown below.
 - `pub fn bf_cles_by(src: &BigFrame, key_col: i64, grp_col: i64, val_col: i64, vmax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_twosample_rank(src, key_col, grp_col, val_col, vmax, 1) }` — *data/bigframe_ops.sio*
 - `pub fn bf_rank_biserial_by(src: &BigFrame, key_col: i64, grp_col: i64, val_col: i64, vmax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_twosample_rank(src, key_col, grp_col, val_col, vmax, 2) }` — *data/bigframe_ops.sio*
 - `pub fn bf_ks_stat_by(src: &BigFrame, key_col: i64, grp_col: i64, val_col: i64, vmax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_twosample_rank(src, key_col, grp_col, val_col, vmax, 3) }` — *data/bigframe_ops.sio*
+- `pub fn bf_pd_rolling_cov(src: &BigFrame, c1: i64, c2: i64, w: i64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_roll2(src, c1, c2, w, 0) }` — *data/bigframe_pd_ext.sio*
+- `pub fn bf_pd_rolling_corr(src: &BigFrame, c1: i64, c2: i64, w: i64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_roll2(src, c1, c2, w, 1) }` — *data/bigframe_pd_ext.sio*
+- `pub fn bf_pd_rolling_dot(src: &BigFrame, c1: i64, c2: i64, w: i64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_roll2(src, c1, c2, w, 2) }` — *data/bigframe_pd_ext.sio*
+- `pub fn bf_pd_rolling_beta(src: &BigFrame, c1: i64, c2: i64, w: i64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_roll2(src, c1, c2, w, 3) }` — *data/bigframe_pd_ext.sio*
+- `pub fn bf_pd_rolling_covpop(src: &BigFrame, c1: i64, c2: i64, w: i64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_roll2(src, c1, c2, w, 4) }` — *data/bigframe_pd_ext.sio*
+- `pub fn bf_pd_rolling_r2(src: &BigFrame, c1: i64, c2: i64, w: i64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_roll2(src, c1, c2, w, 5) }` — *data/bigframe_pd_ext.sio*
+- `pub fn bf_pd_rolling_meanprod(src: &BigFrame, c1: i64, c2: i64, w: i64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_roll2(src, c1, c2, w, 6) }` — *data/bigframe_pd_ext.sio*
+- `pub fn bf_pd_rolling_median(src: &BigFrame, col: i64, w: i64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_rollsort(src, col, w, 0) }` — *data/bigframe_pd_ext.sio*
+- `pub fn bf_pd_rolling_q10(src: &BigFrame, col: i64, w: i64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_rollsort(src, col, w, 1) }` — *data/bigframe_pd_ext.sio*
+- `pub fn bf_pd_rolling_q25(src: &BigFrame, col: i64, w: i64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_rollsort(src, col, w, 2) }` — *data/bigframe_pd_ext.sio*
+- `pub fn bf_pd_rolling_q75(src: &BigFrame, col: i64, w: i64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_rollsort(src, col, w, 3) }` — *data/bigframe_pd_ext.sio*
+- `pub fn bf_pd_rolling_q90(src: &BigFrame, col: i64, w: i64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_rollsort(src, col, w, 4) }` — *data/bigframe_pd_ext.sio*
+- `pub fn bf_pd_rolling_iqr(src: &BigFrame, col: i64, w: i64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_rollsort(src, col, w, 5) }` — *data/bigframe_pd_ext.sio*
+- `pub fn bf_pd_expanding_median(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_expandsort(src, col, 0) }` — *data/bigframe_pd_ext.sio*
+- `pub fn bf_pd_expanding_q25(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_expandsort(src, col, 1) }` — *data/bigframe_pd_ext.sio*
+- `pub fn bf_pd_expanding_q75(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_expandsort(src, col, 2) }` — *data/bigframe_pd_ext.sio*
+- `pub fn bf_pd_expanding_iqr(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_expandsort(src, col, 3) }` — *data/bigframe_pd_ext.sio*
+- `pub fn bf_pd_eq_scalar(src: &BigFrame, col: i64, s: f64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_smap(src, col, s, 0) }` — *data/bigframe_pd_ext.sio*
+- `pub fn bf_pd_ne_scalar(src: &BigFrame, col: i64, s: f64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_smap(src, col, s, 1) }` — *data/bigframe_pd_ext.sio*
+- `pub fn bf_pd_lt_scalar(src: &BigFrame, col: i64, s: f64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_smap(src, col, s, 2) }` — *data/bigframe_pd_ext.sio*
+- `pub fn bf_pd_le_scalar(src: &BigFrame, col: i64, s: f64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_smap(src, col, s, 3) }` — *data/bigframe_pd_ext.sio*
+- `pub fn bf_pd_floor(src: &BigFrame, col: i64, s: f64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_smap(src, col, s, 4) }` — *data/bigframe_pd_ext.sio*
+- `pub fn bf_pd_ceil(src: &BigFrame, col: i64, s: f64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_smap(src, col, s, 5) }` — *data/bigframe_pd_ext.sio*
+- `pub fn bf_pd_sign(src: &BigFrame, col: i64, s: f64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_smap(src, col, s, 6) }` — *data/bigframe_pd_ext.sio*
+- `pub fn bf_pd_reciprocal(src: &BigFrame, col: i64, s: f64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_smap(src, col, s, 7) }` — *data/bigframe_pd_ext.sio*
+- `pub fn bf_pd_abs(src: &BigFrame, col: i64, s: f64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_smap(src, col, s, 8) }` — *data/bigframe_pd_ext.sio*
+- `pub fn bf_pd_neg(src: &BigFrame, col: i64, s: f64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_smap(src, col, s, 9) }` — *data/bigframe_pd_ext.sio*
+- `pub fn bf_pd_square(src: &BigFrame, col: i64, s: f64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_smap(src, col, s, 10) }` — *data/bigframe_pd_ext.sio*
+- `pub fn bf_pd_cube(src: &BigFrame, col: i64, s: f64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_smap(src, col, s, 11) }` — *data/bigframe_pd_ext.sio*
+- `pub fn bf_pd_lead(src: &BigFrame, col: i64, k: i64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_lag(src, col, k, 0) }` — *data/bigframe_pd_ext.sio*
+- `pub fn bf_pd_diff2(src: &BigFrame, col: i64, k: i64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_lag(src, col, k, 1) }` — *data/bigframe_pd_ext.sio*
+- `pub fn bf_pd_fwd_diff(src: &BigFrame, col: i64, k: i64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_lag(src, col, k, 2) }` — *data/bigframe_pd_ext.sio*
+- `pub fn bf_pd_abs_diff(src: &BigFrame, col: i64, k: i64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_lag(src, col, k, 3) }` — *data/bigframe_pd_ext.sio*
+- `pub fn bf_pd_maxabs(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { pdx_reduce(src, col, 0) }` — *data/bigframe_pd_ext.sio*
+- `pub fn bf_pd_minabs(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { pdx_reduce(src, col, 1) }` — *data/bigframe_pd_ext.sio*
+- `pub fn bf_pd_midrange(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { pdx_reduce(src, col, 2) }` — *data/bigframe_pd_ext.sio*
+- `pub fn bf_pd_skew_sample(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { pdx_reduce(src, col, 3) }` — *data/bigframe_pd_ext.sio*
+- `pub fn bf_pd_kurt_sample(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { pdx_reduce(src, col, 4) }` — *data/bigframe_pd_ext.sio*
+- `pub fn bf_pd_sum_positive(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { pdx_reduce(src, col, 5) }` — *data/bigframe_pd_ext.sio*
+- `pub fn bf_pd_sum_negative(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { pdx_reduce(src, col, 6) }` — *data/bigframe_pd_ext.sio*
+- `pub fn bf_pd_mean_positive(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { pdx_reduce(src, col, 7) }` — *data/bigframe_pd_ext.sio*
 - `pub fn bf_pd_rolling_sum(src: &BigFrame, col: i64, w: i64) -> BigFrame with Alloc, Mut, Div, Panic { pd_roll(src, col, w, 0) }` — *data/bigframe_pd.sio*
 - `pub fn bf_pd_rolling_mean(src: &BigFrame, col: i64, w: i64) -> BigFrame with Alloc, Mut, Div, Panic { pd_roll(src, col, w, 1) }` — *data/bigframe_pd.sio*
 - `pub fn bf_pd_rolling_min(src: &BigFrame, col: i64, w: i64) -> BigFrame with Alloc, Mut, Div, Panic { pd_roll(src, col, w, 2) }` — *data/bigframe_pd.sio*
@@ -2553,47 +2952,6 @@ organized by module. Generated from source on the date shown below.
 - `pub fn bf_pd_euclidean(src: &BigFrame, c1: i64, c2: i64) -> f64 with Alloc, Mut, Div, Panic { pd_binreduce(src, c1, c2, 4) }` — *data/bigframe_pd.sio*
 - `pub fn bf_pd_manhattan(src: &BigFrame, c1: i64, c2: i64) -> f64 with Alloc, Mut, Div, Panic { pd_binreduce(src, c1, c2, 5) }` — *data/bigframe_pd.sio*
 - `pub fn bf_pd_crosssum(src: &BigFrame, c1: i64, c2: i64) -> f64 with Alloc, Mut, Div, Panic { pd_binreduce(src, c1, c2, 6) }` — *data/bigframe_pd.sio*
-- `pub fn bf_pd_rolling_cov(src: &BigFrame, c1: i64, c2: i64, w: i64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_roll2(src, c1, c2, w, 0) }` — *data/bigframe_pd_ext.sio*
-- `pub fn bf_pd_rolling_corr(src: &BigFrame, c1: i64, c2: i64, w: i64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_roll2(src, c1, c2, w, 1) }` — *data/bigframe_pd_ext.sio*
-- `pub fn bf_pd_rolling_dot(src: &BigFrame, c1: i64, c2: i64, w: i64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_roll2(src, c1, c2, w, 2) }` — *data/bigframe_pd_ext.sio*
-- `pub fn bf_pd_rolling_beta(src: &BigFrame, c1: i64, c2: i64, w: i64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_roll2(src, c1, c2, w, 3) }` — *data/bigframe_pd_ext.sio*
-- `pub fn bf_pd_rolling_covpop(src: &BigFrame, c1: i64, c2: i64, w: i64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_roll2(src, c1, c2, w, 4) }` — *data/bigframe_pd_ext.sio*
-- `pub fn bf_pd_rolling_r2(src: &BigFrame, c1: i64, c2: i64, w: i64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_roll2(src, c1, c2, w, 5) }` — *data/bigframe_pd_ext.sio*
-- `pub fn bf_pd_rolling_meanprod(src: &BigFrame, c1: i64, c2: i64, w: i64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_roll2(src, c1, c2, w, 6) }` — *data/bigframe_pd_ext.sio*
-- `pub fn bf_pd_rolling_median(src: &BigFrame, col: i64, w: i64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_rollsort(src, col, w, 0) }` — *data/bigframe_pd_ext.sio*
-- `pub fn bf_pd_rolling_q10(src: &BigFrame, col: i64, w: i64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_rollsort(src, col, w, 1) }` — *data/bigframe_pd_ext.sio*
-- `pub fn bf_pd_rolling_q25(src: &BigFrame, col: i64, w: i64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_rollsort(src, col, w, 2) }` — *data/bigframe_pd_ext.sio*
-- `pub fn bf_pd_rolling_q75(src: &BigFrame, col: i64, w: i64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_rollsort(src, col, w, 3) }` — *data/bigframe_pd_ext.sio*
-- `pub fn bf_pd_rolling_q90(src: &BigFrame, col: i64, w: i64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_rollsort(src, col, w, 4) }` — *data/bigframe_pd_ext.sio*
-- `pub fn bf_pd_rolling_iqr(src: &BigFrame, col: i64, w: i64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_rollsort(src, col, w, 5) }` — *data/bigframe_pd_ext.sio*
-- `pub fn bf_pd_expanding_median(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_expandsort(src, col, 0) }` — *data/bigframe_pd_ext.sio*
-- `pub fn bf_pd_expanding_q25(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_expandsort(src, col, 1) }` — *data/bigframe_pd_ext.sio*
-- `pub fn bf_pd_expanding_q75(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_expandsort(src, col, 2) }` — *data/bigframe_pd_ext.sio*
-- `pub fn bf_pd_expanding_iqr(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_expandsort(src, col, 3) }` — *data/bigframe_pd_ext.sio*
-- `pub fn bf_pd_eq_scalar(src: &BigFrame, col: i64, s: f64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_smap(src, col, s, 0) }` — *data/bigframe_pd_ext.sio*
-- `pub fn bf_pd_ne_scalar(src: &BigFrame, col: i64, s: f64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_smap(src, col, s, 1) }` — *data/bigframe_pd_ext.sio*
-- `pub fn bf_pd_lt_scalar(src: &BigFrame, col: i64, s: f64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_smap(src, col, s, 2) }` — *data/bigframe_pd_ext.sio*
-- `pub fn bf_pd_le_scalar(src: &BigFrame, col: i64, s: f64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_smap(src, col, s, 3) }` — *data/bigframe_pd_ext.sio*
-- `pub fn bf_pd_floor(src: &BigFrame, col: i64, s: f64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_smap(src, col, s, 4) }` — *data/bigframe_pd_ext.sio*
-- `pub fn bf_pd_ceil(src: &BigFrame, col: i64, s: f64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_smap(src, col, s, 5) }` — *data/bigframe_pd_ext.sio*
-- `pub fn bf_pd_sign(src: &BigFrame, col: i64, s: f64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_smap(src, col, s, 6) }` — *data/bigframe_pd_ext.sio*
-- `pub fn bf_pd_reciprocal(src: &BigFrame, col: i64, s: f64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_smap(src, col, s, 7) }` — *data/bigframe_pd_ext.sio*
-- `pub fn bf_pd_abs(src: &BigFrame, col: i64, s: f64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_smap(src, col, s, 8) }` — *data/bigframe_pd_ext.sio*
-- `pub fn bf_pd_neg(src: &BigFrame, col: i64, s: f64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_smap(src, col, s, 9) }` — *data/bigframe_pd_ext.sio*
-- `pub fn bf_pd_square(src: &BigFrame, col: i64, s: f64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_smap(src, col, s, 10) }` — *data/bigframe_pd_ext.sio*
-- `pub fn bf_pd_cube(src: &BigFrame, col: i64, s: f64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_smap(src, col, s, 11) }` — *data/bigframe_pd_ext.sio*
-- `pub fn bf_pd_lead(src: &BigFrame, col: i64, k: i64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_lag(src, col, k, 0) }` — *data/bigframe_pd_ext.sio*
-- `pub fn bf_pd_diff2(src: &BigFrame, col: i64, k: i64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_lag(src, col, k, 1) }` — *data/bigframe_pd_ext.sio*
-- `pub fn bf_pd_fwd_diff(src: &BigFrame, col: i64, k: i64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_lag(src, col, k, 2) }` — *data/bigframe_pd_ext.sio*
-- `pub fn bf_pd_abs_diff(src: &BigFrame, col: i64, k: i64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_lag(src, col, k, 3) }` — *data/bigframe_pd_ext.sio*
-- `pub fn bf_pd_maxabs(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { pdx_reduce(src, col, 0) }` — *data/bigframe_pd_ext.sio*
-- `pub fn bf_pd_minabs(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { pdx_reduce(src, col, 1) }` — *data/bigframe_pd_ext.sio*
-- `pub fn bf_pd_midrange(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { pdx_reduce(src, col, 2) }` — *data/bigframe_pd_ext.sio*
-- `pub fn bf_pd_skew_sample(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { pdx_reduce(src, col, 3) }` — *data/bigframe_pd_ext.sio*
-- `pub fn bf_pd_kurt_sample(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { pdx_reduce(src, col, 4) }` — *data/bigframe_pd_ext.sio*
-- `pub fn bf_pd_sum_positive(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { pdx_reduce(src, col, 5) }` — *data/bigframe_pd_ext.sio*
-- `pub fn bf_pd_sum_negative(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { pdx_reduce(src, col, 6) }` — *data/bigframe_pd_ext.sio*
-- `pub fn bf_pd_mean_positive(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { pdx_reduce(src, col, 7) }` — *data/bigframe_pd_ext.sio*
 - `pub fn bf_sp_gamma(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { sp_map(src, col, 0) }` — *data/bigframe_sp.sio*
 - `pub fn bf_sp_gammaln(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { sp_map(src, col, 1) }` — *data/bigframe_sp.sio*
 - `pub fn bf_sp_loggamma(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { sp_map(src, col, 2) }` — *data/bigframe_sp.sio*
@@ -2702,6 +3060,17 @@ organized by module. Generated from source on the date shown below.
 - `pub fn bf_one_prop_ztest_pvalue_by(src: &BigFrame, key_col: i64, out_col: i64, p0: f64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_oneprop(src, key_col, out_col, p0, 1) }` — *data/bigframe_stats.sio*
 - `pub fn bf_wilson_ci_lo_by(src: &BigFrame, key_col: i64, out_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_oneprop(src, key_col, out_col, 0.5, 2) }` — *data/bigframe_stats.sio*
 - `pub fn bf_wilson_ci_hi_by(src: &BigFrame, key_col: i64, out_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_oneprop(src, key_col, out_col, 0.5, 3) }` — *data/bigframe_stats.sio*
+- `pub fn bf_new(n_cols: i64, capacity_rows: i64) -> BigFrame with Alloc {` — *data/bigframe.sio*
+- `pub fn bf_push_row(bf: &!BigFrame, row: &[f64; 64], n_cols: i64) with Alloc, Mut {` — *data/bigframe.sio*
+- `pub fn bf_set(bf: &!BigFrame, r: i64, c: i64, v: f64) with Mut {` — *data/bigframe.sio*
+- `pub fn bf_get(bf: &BigFrame, r: i64, c: i64) -> f64 {` — *data/bigframe.sio*
+- `pub fn bf_nrows(bf: &BigFrame) -> i64 {` — *data/bigframe.sio*
+- `pub fn bf_ncols(bf: &BigFrame) -> i64 {` — *data/bigframe.sio*
+- `pub fn bf_cap_rows(bf: &BigFrame) -> i64 {` — *data/bigframe.sio*
+- `pub fn bf_col_ptr(bf: &BigFrame, c: i64) -> i64 { bf.col_ptrs[c] }` — *data/bigframe.sio*
+- `pub fn bf_col_sum(bf: &BigFrame, c: i64) -> f64 {` — *data/bigframe.sio*
+- `pub fn bf_col_mean(bf: &BigFrame, c: i64) -> f64 {` — *data/bigframe.sio*
+- `pub fn bf_free(bf: &!BigFrame) with Alloc, Mut {` — *data/bigframe.sio*
 - `pub fn unat_from_i64(x: i64) -> BigNat with Mut, Panic, Div {` — *data/bigrat.sio*
 - `pub fn unat_is_zero(a: BigNat) -> bool with Mut, Panic {` — *data/bigrat.sio*
 - `pub fn unat_cmp(a: BigNat, b: BigNat) -> i64 with Mut, Panic {` — *data/bigrat.sio*
@@ -2747,11 +3116,6 @@ organized by module. Generated from source on the date shown below.
 - `pub fn conf_upper(r: GUMResult, upper: f64) -> i64 with Div, Panic {` — *data/conformance.sio*
 - `pub fn conf_lower(r: GUMResult, lower: f64) -> i64 with Div, Panic {` — *data/conformance.sio*
 - `pub fn conf_guarded(r: GUMResult, lower: f64, upper: f64, g: f64) -> i64 with Div, Panic {` — *data/conformance.sio*
-- `pub fn csv_field_str(col: i64, s: string) -> i64 with IO, Mut, Div, Panic {` — *data/csv.sio*
-- `pub fn csv_field_int(col: i64, v: i64) -> i64 with IO, Mut, Div, Panic {` — *data/csv.sio*
-- `pub fn csv_field_fixed(col: i64, scaled: i64, decimals: i64) -> i64 with IO, Mut, Div, Panic {` — *data/csv.sio*
-- `pub fn csv_field_f64(col: i64, value: f64, decimals: i64) -> i64 with IO, Mut, Div, Panic {` — *data/csv.sio*
-- `pub fn csv_end_row(col: i64) -> i64 with IO, Mut, Div, Panic {` — *data/csv.sio*
 - `pub fn parse_edge_list(csv_content: string) -> NetworkData with Mut, Div, Panic {` — *data/csv_loader.sio*
 - `pub fn load_edge_list(filepath: string) -> NetworkData with IO {` — *data/csv_loader.sio*
 - `pub fn to_adjacency_list(net: &NetworkData) -> [[usize]] with Mut, Div, Panic {` — *data/csv_loader.sio*
@@ -2774,24 +3138,11 @@ organized by module. Generated from source on the date shown below.
 - `pub fn csv_field_range(r: &CsvReader, col: i64) -> CsvRange with Mut, Panic, Div {` — *data/csv_reader.sio*
 - `pub fn csv_byte(r: &CsvReader, i: i64) -> i64 with Mut, Panic, Div {` — *data/csv_reader.sio*
 - `pub fn csv_open_file(path: string) -> CsvReader with IO, Mut, Panic, Div {` — *data/csv_reader.sio*
-- `pub fn df_new(n_cols: i64) -> DataFrame {` — *data/dataframe.sio*
-- `pub fn df_set(df: &!DataFrame, row: i64, col: i64, val: f64) with Mut, Panic {` — *data/dataframe.sio*
-- `pub fn df_get(df: &DataFrame, row: i64, col: i64) -> f64 with Panic {` — *data/dataframe.sio*
-- `pub fn df_add_row(df: &!DataFrame, values: &[f64; 64]) with Mut, Div, Panic {` — *data/dataframe.sio*
-- `pub fn df_col_mean(df: &DataFrame, col: i64) -> f64 with Mut, Div, Panic {` — *data/dataframe.sio*
-- `pub fn df_col_std(df: &DataFrame, col: i64) -> f64 with Mut, Div, Panic {` — *data/dataframe.sio*
-- `pub fn df_col_min(df: &DataFrame, col: i64) -> f64 with Mut, Div, Panic {` — *data/dataframe.sio*
-- `pub fn df_col_max(df: &DataFrame, col: i64) -> f64 with Mut, Div, Panic {` — *data/dataframe.sio*
-- `pub fn df_col_sum(df: &DataFrame, col: i64) -> f64 with Mut, Div, Panic {` — *data/dataframe.sio*
-- `pub fn df_filter_gt(df: &DataFrame, col: i64, threshold: f64) -> DataFrame with Mut, Div, Panic {` — *data/dataframe.sio*
-- `pub fn df_select_cols(df: &DataFrame, cols: &[i64; 64], n_sel: i64) -> DataFrame with Mut, Div, Panic {` — *data/dataframe.sio*
-- `pub fn df_sort_by(df: &DataFrame, col: i64) -> DataFrame with Mut, Div, Panic {` — *data/dataframe.sio*
-- `pub fn df_from_csv_data(data: &[f64; 65536], n_rows: i64, n_cols: i64) -> DataFrame with Mut, Div, Panic {` — *data/dataframe.sio*
-- `pub fn df_describe(df: &DataFrame) with IO, Mut, Div, Panic {` — *data/dataframe.sio*
-- `pub fn df_set_col_name(df: &!DataFrame, col: i64, name_id: i64) with Mut, Panic {` — *data/dataframe.sio*
-- `pub fn df_get_col_name(df: &DataFrame, col: i64) -> i64 with Panic {` — *data/dataframe.sio*
-- `pub fn df_nrows(df: &DataFrame) -> i64 { df.n_rows }` — *data/dataframe.sio*
-- `pub fn df_ncols(df: &DataFrame) -> i64 { df.n_cols }` — *data/dataframe.sio*
+- `pub fn csv_field_str(col: i64, s: string) -> i64 with IO, Mut, Div, Panic {` — *data/csv.sio*
+- `pub fn csv_field_int(col: i64, v: i64) -> i64 with IO, Mut, Div, Panic {` — *data/csv.sio*
+- `pub fn csv_field_fixed(col: i64, scaled: i64, decimals: i64) -> i64 with IO, Mut, Div, Panic {` — *data/csv.sio*
+- `pub fn csv_field_f64(col: i64, value: f64, decimals: i64) -> i64 with IO, Mut, Div, Panic {` — *data/csv.sio*
+- `pub fn csv_end_row(col: i64) -> i64 with IO, Mut, Div, Panic {` — *data/csv.sio*
 - `pub fn df_apply(df: &DataFrame, col: i64, op: i64, operand: f64) -> DataFrame with Mut, Div, Panic {` — *data/dataframe_apply.sio*
 - `pub fn df_apply_all(df: &DataFrame, op: i64, operand: f64) -> DataFrame with Mut, Div, Panic {` — *data/dataframe_apply.sio*
 - `pub fn df_add(a: &DataFrame, b: &DataFrame) -> DataFrame with Mut, Div, Panic { binop(a, b, 0) }` — *data/dataframe_arith.sio*
@@ -2905,6 +3256,24 @@ organized by module. Generated from source on the date shown below.
 - `pub fn df_pct_change(df: &DataFrame) -> DataFrame with Mut, Div, Panic {` — *data/dataframe_window.sio*
 - `pub fn df_rolling_mean(df: &DataFrame, w: i64) -> DataFrame with Mut, Div, Panic { rolling(df, w, 0) }` — *data/dataframe_window.sio*
 - `pub fn df_rolling_sum(df: &DataFrame, w: i64) -> DataFrame with Mut, Div, Panic { rolling(df, w, 1) }` — *data/dataframe_window.sio*
+- `pub fn df_new(n_cols: i64) -> DataFrame {` — *data/dataframe.sio*
+- `pub fn df_set(df: &!DataFrame, row: i64, col: i64, val: f64) with Mut, Panic {` — *data/dataframe.sio*
+- `pub fn df_get(df: &DataFrame, row: i64, col: i64) -> f64 with Panic {` — *data/dataframe.sio*
+- `pub fn df_add_row(df: &!DataFrame, values: &[f64; 64]) with Mut, Div, Panic {` — *data/dataframe.sio*
+- `pub fn df_col_mean(df: &DataFrame, col: i64) -> f64 with Mut, Div, Panic {` — *data/dataframe.sio*
+- `pub fn df_col_std(df: &DataFrame, col: i64) -> f64 with Mut, Div, Panic {` — *data/dataframe.sio*
+- `pub fn df_col_min(df: &DataFrame, col: i64) -> f64 with Mut, Div, Panic {` — *data/dataframe.sio*
+- `pub fn df_col_max(df: &DataFrame, col: i64) -> f64 with Mut, Div, Panic {` — *data/dataframe.sio*
+- `pub fn df_col_sum(df: &DataFrame, col: i64) -> f64 with Mut, Div, Panic {` — *data/dataframe.sio*
+- `pub fn df_filter_gt(df: &DataFrame, col: i64, threshold: f64) -> DataFrame with Mut, Div, Panic {` — *data/dataframe.sio*
+- `pub fn df_select_cols(df: &DataFrame, cols: &[i64; 64], n_sel: i64) -> DataFrame with Mut, Div, Panic {` — *data/dataframe.sio*
+- `pub fn df_sort_by(df: &DataFrame, col: i64) -> DataFrame with Mut, Div, Panic {` — *data/dataframe.sio*
+- `pub fn df_from_csv_data(data: &[f64; 65536], n_rows: i64, n_cols: i64) -> DataFrame with Mut, Div, Panic {` — *data/dataframe.sio*
+- `pub fn df_describe(df: &DataFrame) with IO, Mut, Div, Panic {` — *data/dataframe.sio*
+- `pub fn df_set_col_name(df: &!DataFrame, col: i64, name_id: i64) with Mut, Panic {` — *data/dataframe.sio*
+- `pub fn df_get_col_name(df: &DataFrame, col: i64) -> i64 with Panic {` — *data/dataframe.sio*
+- `pub fn df_nrows(df: &DataFrame) -> i64 { df.n_rows }` — *data/dataframe.sio*
+- `pub fn df_ncols(df: &DataFrame) -> i64 { df.n_cols }` — *data/dataframe.sio*
 - `pub fn rat_make(num: i64, den: i64) -> Rat with Mut, Div, Panic {` — *data/exact.sio*
 - `pub fn rat_from_int(n: i64) -> Rat { Rat { num: n, den: 1 } }` — *data/exact.sio*
 - `pub fn rat_num(r: Rat) -> i64 { r.num }` — *data/exact.sio*
@@ -2948,6 +3317,16 @@ organized by module. Generated from source on the date shown below.
 - `pub fn dataframe_col_mean(df: DataFrame, col_name: String) -> f64 {` — *data/frame.sio*
 - `pub fn dataframe_col_mean_epistemic(df: DataFrame, col_name: String) -> EpistemicResult {` — *data/frame.sio*
 - `pub fn dataframe_info(df: DataFrame) -> String {` — *data/frame.sio*
+- `pub fn ivr_make(lo: BigRat, hi: BigRat) -> IntervalRat with Mut, Panic, Div {` — *data/interval_rat.sio*
+- `pub fn ivr_point(x: BigRat) -> IntervalRat { IntervalRat { lo: x, hi: x } }` — *data/interval_rat.sio*
+- `pub fn ivr_from_decimal(lo: string, hi: string) -> IntervalRat with Mut, Panic, Div {` — *data/interval_rat.sio*
+- `pub fn ivr_lo(a: IntervalRat) -> BigRat { a.lo }` — *data/interval_rat.sio*
+- `pub fn ivr_hi(a: IntervalRat) -> BigRat { a.hi }` — *data/interval_rat.sio*
+- `pub fn ivr_width(a: IntervalRat) -> BigRat with Mut, Panic, Div { bigrat_sub(a.hi, a.lo) }` — *data/interval_rat.sio*
+- `pub fn ivr_add(a: IntervalRat, b: IntervalRat) -> IntervalRat with Mut, Panic, Div {` — *data/interval_rat.sio*
+- `pub fn ivr_sub(a: IntervalRat, b: IntervalRat) -> IntervalRat with Mut, Panic, Div {` — *data/interval_rat.sio*
+- `pub fn ivr_mul(a: IntervalRat, b: IntervalRat) -> IntervalRat with Mut, Panic, Div {` — *data/interval_rat.sio*
+- `pub fn ivr_contains(a: IntervalRat, x: BigRat) -> bool with Mut, Panic, Div {` — *data/interval_rat.sio*
 - `pub fn iv(lo: f64, hi: f64) -> Interval { if lo <= hi { Interval { lo: lo, hi: hi } } else { Interval { lo: hi, hi: lo } } }` — *data/interval.sio*
 - `pub fn iv_point(x: f64) -> Interval { Interval { lo: x, hi: x } }` — *data/interval.sio*
 - `pub fn iv_pm(c: f64, h: f64) -> Interval { let a = fabs(h); Interval { lo: c - a, hi: c + a } }` — *data/interval.sio*
@@ -2965,16 +3344,6 @@ organized by module. Generated from source on the date shown below.
 - `pub fn iv_contains(a: Interval, x: f64) -> bool { a.lo <= x && x <= a.hi }` — *data/interval.sio*
 - `pub fn iv_overlaps(a: Interval, b: Interval) -> bool { a.lo <= b.hi && b.lo <= a.hi }` — *data/interval.sio*
 - `pub fn iv_hull(a: Interval, b: Interval) -> Interval { Interval { lo: fmin(a.lo, b.lo), hi: fmax(a.hi, b.hi) } }` — *data/interval.sio*
-- `pub fn ivr_make(lo: BigRat, hi: BigRat) -> IntervalRat with Mut, Panic, Div {` — *data/interval_rat.sio*
-- `pub fn ivr_point(x: BigRat) -> IntervalRat { IntervalRat { lo: x, hi: x } }` — *data/interval_rat.sio*
-- `pub fn ivr_from_decimal(lo: string, hi: string) -> IntervalRat with Mut, Panic, Div {` — *data/interval_rat.sio*
-- `pub fn ivr_lo(a: IntervalRat) -> BigRat { a.lo }` — *data/interval_rat.sio*
-- `pub fn ivr_hi(a: IntervalRat) -> BigRat { a.hi }` — *data/interval_rat.sio*
-- `pub fn ivr_width(a: IntervalRat) -> BigRat with Mut, Panic, Div { bigrat_sub(a.hi, a.lo) }` — *data/interval_rat.sio*
-- `pub fn ivr_add(a: IntervalRat, b: IntervalRat) -> IntervalRat with Mut, Panic, Div {` — *data/interval_rat.sio*
-- `pub fn ivr_sub(a: IntervalRat, b: IntervalRat) -> IntervalRat with Mut, Panic, Div {` — *data/interval_rat.sio*
-- `pub fn ivr_mul(a: IntervalRat, b: IntervalRat) -> IntervalRat with Mut, Panic, Div {` — *data/interval_rat.sio*
-- `pub fn ivr_contains(a: IntervalRat, x: BigRat) -> bool with Mut, Panic, Div {` — *data/interval_rat.sio*
 - `pub fn json_obj_open() with IO, Mut, Div, Panic { print("{") }` — *data/json.sio*
 - `pub fn json_obj_close() with IO, Mut, Div, Panic { print("}") }` — *data/json.sio*
 - `pub fn json_arr_open() with IO, Mut, Div, Panic { print("[") }` — *data/json.sio*
@@ -3207,8 +3576,8 @@ organized by module. Generated from source on the date shown below.
 - `pub fn embed_row_into(i: i64, out: &![f64; 8]) with Mut, Div, Panic, NaturalityG2 {` — *dialogue/embed.sio*
 - `pub fn embed_into(hash: i64, out: &![f64; 8]) with Mut, Div, Panic, NaturalityG2 {` — *dialogue/embed.sio*
 - `pub fn traj_empty() -> Trajectory {` — *dialogue/trajectory.sio*
-- `pub fn traj_push(t: &Trajectory, speaker: i64, hash: i64,` — *dialogue/trajectory.sio*
-- `pub fn traj_set_payload(t: &Trajectory, i: i64, j: i64, v: f64) with Mut {` — *dialogue/trajectory.sio*
+- `pub fn traj_push(t: &!Trajectory, speaker: i64, hash: i64,` — *dialogue/trajectory.sio*
+- `pub fn traj_set_payload(t: &!Trajectory, i: i64, j: i64, v: f64) with Mut {` — *dialogue/trajectory.sio*
 - `pub fn traj_speaker(t: &Trajectory, i: i64) -> i64 {` — *dialogue/trajectory.sio*
 - `pub fn traj_hash(t: &Trajectory, i: i64) -> i64 {` — *dialogue/trajectory.sio*
 - `pub fn traj_affect(t: &Trajectory, i: i64) -> i64 {` — *dialogue/trajectory.sio*
@@ -3223,19 +3592,8 @@ organized by module. Generated from source on the date shown below.
 
 ## display (`stdlib/display/`)
 
-**50 public functions** across 6 files
+**51 public functions** across 6 files
 
-- `pub fn canvas_from_window(win: &!Window) -> Canvas with Mut {` — *display/canvas.sio*
-- `pub fn canvas_set_pixel(c: &!Canvas, x: i64, y: i64, r: i64, g: i64, b: i64) with Mut {` — *display/canvas.sio*
-- `pub fn canvas_clear(c: &!Canvas, r: i64, g: i64, b: i64) with Mut {` — *display/canvas.sio*
-- `pub fn canvas_fill_rect(` — *display/canvas.sio*
-- `pub fn canvas_draw_rect(` — *display/canvas.sio*
-- `pub fn canvas_draw_line(` — *display/canvas.sio*
-- `pub fn canvas_draw_circle(` — *display/canvas.sio*
-- `pub fn canvas_fill_circle(` — *display/canvas.sio*
-- `pub fn canvas_draw_char(` — *display/canvas.sio*
-- `pub fn canvas_draw_text(` — *display/canvas.sio*
-- `pub fn canvas_fill_gradient_v(` — *display/canvas.sio*
 - `pub fn canvas_blend_pixel(c: &!Canvas, x: i64, y: i64, r: i64, g: i64, b: i64, cov: i64) with Mut, Div {` — *display/canvas_ext.sio*
 - `pub fn canvas_blend_pixel_bayer(c: &!Canvas, x: i64, y: i64, r: i64, g: i64, b: i64, cov: i64) with Mut {` — *display/canvas_ext.sio*
 - `pub fn canvas_draw_line_aa(` — *display/canvas_ext.sio*
@@ -3248,6 +3606,18 @@ organized by module. Generated from source on the date shown below.
 - `pub fn canvas_bond_cylinder(` — *display/canvas_ext.sio*
 - `pub fn canvas_fxaa(c: &!Canvas, scratch: *mut i64) with Mut, Div {` — *display/canvas_ext.sio*
 - `pub fn canvas_bloom(c: &!Canvas, scratch: *mut i64, threshold: i64, cov: i64) with Mut, Div {` — *display/canvas_ext.sio*
+- `pub fn canvas_draw_line_aa_scissored(c: &!Canvas, sc: &PixelScissor,` — *display/canvas_ext.sio*
+- `pub fn canvas_from_window(win: &!Window) -> Canvas with Mut {` — *display/canvas.sio*
+- `pub fn canvas_set_pixel(c: &!Canvas, x: i64, y: i64, r: i64, g: i64, b: i64) with Mut {` — *display/canvas.sio*
+- `pub fn canvas_clear(c: &!Canvas, r: i64, g: i64, b: i64) with Mut {` — *display/canvas.sio*
+- `pub fn canvas_fill_rect(` — *display/canvas.sio*
+- `pub fn canvas_draw_rect(` — *display/canvas.sio*
+- `pub fn canvas_draw_line(` — *display/canvas.sio*
+- `pub fn canvas_draw_circle(` — *display/canvas.sio*
+- `pub fn canvas_fill_circle(` — *display/canvas.sio*
+- `pub fn canvas_draw_char(` — *display/canvas.sio*
+- `pub fn canvas_draw_text(` — *display/canvas.sio*
+- `pub fn canvas_fill_gradient_v(` — *display/canvas.sio*
 - `pub fn event_none() -> Event {` — *display/event.sio*
 - `pub fn event_is_key(ev: Event, k: i64) -> bool {` — *display/event.sio*
 - `pub fn event_is_close(ev: Event) -> bool {` — *display/event.sio*
@@ -3339,19 +3709,6 @@ organized by module. Generated from source on the date shown below.
 - `pub fn eisa_compile(src: Str) -> BackendResult with Mut, Div, Panic {` — *eisa/backend.sio*
 - `pub fn bridge_translate(img: EisaxImage, out: &![i8; 131072]) -> BridgeMeta with Mut, Div, Panic {` — *eisa/bridge_x86.sio*
 - `pub fn bridge_write_elf(path: string, out: &[i8; 131072], meta: BridgeMeta) -> bool with IO {` — *eisa/bridge_x86.sio*
-- `pub fn eisa_fuse_origin(a: i64, b: i64) -> i64 {` — *eisa/core.sio*
-- `pub fn eisa_origins_correlated(a: i64, b: i64) -> i64 {` — *eisa/core.sio*
-- `pub fn ereg_exact(v: f64) -> EReg {` — *eisa/core.sio*
-- `pub fn ereg_measured(v: f64, sigma: f64) -> EReg {` — *eisa/core.sio*
-- `pub fn ereg_origin(v: f64, sigma: f64, origin: i64) -> EReg {` — *eisa/core.sio*
-- `pub fn ereg_true(x: EReg) -> Dd64 {` — *eisa/core.sio*
-- `pub fn eadd(x: EReg, y: EReg) -> EReg with Mut, Div {` — *eisa/core.sio*
-- `pub fn esub(x: EReg, y: EReg) -> EReg with Mut, Div {` — *eisa/core.sio*
-- `pub fn emul(x: EReg, y: EReg) -> EReg with Mut, Div {` — *eisa/core.sio*
-- `pub fn ediv(x: EReg, y: EReg) -> EReg with Div, Mut {` — *eisa/core.sio*
-- `pub fn esqrt(x: EReg) -> EReg with Mut, Div {` — *eisa/core.sio*
-- `pub fn egate(x: EReg, k: i64) -> i64 with Mut, Div {` — *eisa/core.sio*
-- `pub fn egate_names(code: i64) -> string {` — *eisa/core.sio*
 - `pub fn ereg2_exact(v: f64) -> EReg2 {` — *eisa/core_v2.sio*
 - `pub fn ereg2_measured(v: f64, sigma: f64) -> EReg2 {` — *eisa/core_v2.sio*
 - `pub fn ereg2_true(x: EReg2) -> Qd128 with Mut, Panic {` — *eisa/core_v2.sio*
@@ -3365,6 +3722,19 @@ organized by module. Generated from source on the date shown below.
 - `pub fn ediv2(x: EReg2, y: EReg2) -> EReg2 with Mut, Div, Panic {` — *eisa/core_v2.sio*
 - `pub fn esqrt2(x: EReg2) -> EReg2 with Mut, Div, Panic {` — *eisa/core_v2.sio*
 - `pub fn egate2(x: EReg2, k: i64) -> i64 with Mut, Div {` — *eisa/core_v2.sio*
+- `pub fn eisa_fuse_origin(a: i64, b: i64) -> i64 {` — *eisa/core.sio*
+- `pub fn eisa_origins_correlated(a: i64, b: i64) -> i64 {` — *eisa/core.sio*
+- `pub fn ereg_exact(v: f64) -> EReg {` — *eisa/core.sio*
+- `pub fn ereg_measured(v: f64, sigma: f64) -> EReg {` — *eisa/core.sio*
+- `pub fn ereg_origin(v: f64, sigma: f64, origin: i64) -> EReg {` — *eisa/core.sio*
+- `pub fn ereg_true(x: EReg) -> Dd64 {` — *eisa/core.sio*
+- `pub fn eadd(x: EReg, y: EReg) -> EReg with Mut, Div {` — *eisa/core.sio*
+- `pub fn esub(x: EReg, y: EReg) -> EReg with Mut, Div {` — *eisa/core.sio*
+- `pub fn emul(x: EReg, y: EReg) -> EReg with Mut, Div {` — *eisa/core.sio*
+- `pub fn ediv(x: EReg, y: EReg) -> EReg with Div, Mut {` — *eisa/core.sio*
+- `pub fn esqrt(x: EReg) -> EReg with Mut, Div {` — *eisa/core.sio*
+- `pub fn egate(x: EReg, k: i64) -> i64 with Mut, Div {` — *eisa/core.sio*
+- `pub fn egate_names(code: i64) -> string {` — *eisa/core.sio*
 - `pub fn evm_new() -> EvmMachine {` — *eisa/evm.sio*
 - `pub fn evm_load(img: EisaxImage) -> EvmMachine with Mut, Div, Panic {` — *eisa/evm.sio*
 - `pub fn evm_step(m: &!EvmMachine) -> i64 with IO, Mut, Div, Panic {` — *eisa/evm.sio*
@@ -3500,7 +3870,7 @@ organized by module. Generated from source on the date shown below.
 
 ## Epistemic Computing (`stdlib/epistemic/`)
 
-**968 public functions** across 99 files
+**1023 public functions** across 93 files
 
 - `pub fn precision(k: &Epistemic) -> f64 {` — *epistemic/active.sio*
 - `pub fn entropy(k: &Epistemic) -> f64 {` — *epistemic/active.sio*
@@ -3571,6 +3941,21 @@ organized by module. Generated from source on the date shown below.
 - `pub fn budget64_print_report(b: &Budget64) with IO, Mut {` — *epistemic/budget64.sio*
 - `pub fn claim_new(` — *epistemic/claim_ast.sio*
 - `pub fn claim_with_provenance(` — *epistemic/claim_ast.sio*
+- `pub fn claim_sqrt(x: f64) -> f64 with Mut, Div {` — *epistemic/claim_meet.sio*
+- `pub fn claim_meet(mean_a: f64, var_a: f64, mean_b: f64, var_b: f64) -> ClaimMeet with Mut, Div {` — *epistemic/claim_meet.sio*
+- `pub fn centre_seat(` — *epistemic/claim_meet.sio*
+- `pub fn seat_code(seat: CentreSeat) -> i64 {` — *epistemic/claim_meet.sio*
+- `pub fn held_centre(seat: CentreSeat, centre_a: f64, centre_b: f64) -> HeldCentre {` — *epistemic/claim_meet.sio*
+- `pub fn seat_moments(mean_a: f64, var_a: f64, mean_b: f64, var_b: f64) -> CentreSeat with Mut, Div {` — *epistemic/claim_meet.sio*
+- `pub fn seat_log(centre_a: f64, u_a: f64, centre_b: f64, u_b: f64) -> CentreSeat with Mut {` — *epistemic/claim_meet.sio*
+- `pub fn scale_contest(centre_a: f64, u_a: f64, centre_b: f64, u_b: f64) -> ScaleContest with Mut, Div {` — *epistemic/claim_meet.sio*
+- `pub fn cross_reading(scales: ScaleContest, centre_a: f64, centre_b: f64) -> CrossReading {` — *epistemic/claim_meet.sio*
+- `pub fn reading_band(mean_a: f64, var_a: f64, mean_b: f64, var_b: f64) -> CrossReading with Mut, Div {` — *epistemic/claim_meet.sio*
+- `pub fn held_across_scales(scales: ScaleContest, centre_a: f64, centre_b: f64) -> HeldCentre with Div {` — *epistemic/claim_meet.sio*
+- `pub fn centre_if_fit_allows(held: HeldCentre, refused: bool) -> HeldCentre with Div {` — *epistemic/claim_meet.sio*
+- `pub fn series_remainder(p0: f64, s: f64) -> f64 with Div {` — *epistemic/claim_meet.sio*
+- `pub fn exp_mean_vote(p0: f64, s: f64) -> ExpMeanVote with Mut, Div {` — *epistemic/claim_meet.sio*
+- `pub fn ce_min_i64(a: i64, b: i64) -> i64 { if a < b { a } else { b } }` — *epistemic/composed_effects.sio*
 - `pub fn ck_new(value: f64, variance: f64, approx_bound: f64,` — *epistemic/composed_effects.sio*
 - `pub fn ck_from_knowledge(value: f64, variance: f64, confidence: i64) -> ComposedKnowledge {` — *epistemic/composed_effects.sio*
 - `pub fn ck_vacuous(value: f64) -> ComposedKnowledge {` — *epistemic/composed_effects.sio*
@@ -3708,6 +4093,19 @@ organized by module. Generated from source on the date shown below.
 - `pub fn graded_compose_indep(a: GradedProb, b: GradedProb, w: Independence) -> GradedProb with Mut, Div, Panic {` — *epistemic/graded_effects.sio*
 - `pub fn ep_distance(a: &Epistemic, b: &Epistemic) -> f64 with Mut, Div, Panic {` — *epistemic/graded_eq.sio*
 - `pub fn ep_approx_eq(a: &Epistemic, b: &Epistemic, eps: f64) -> bool with Mut, Div, Panic {` — *epistemic/graded_eq.sio*
+- `pub fn numerical_jacobian_1d(f: fn(f64) -> f64, x: f64, h: f64) -> f64 {` — *epistemic/gum_supplement1.sio*
+- `pub fn numerical_jacobian_2d(f: fn(f64, f64) -> f64, x1: f64, x2: f64, h: f64) -> [f64; 2] {` — *epistemic/gum_supplement1.sio*
+- `pub fn numerical_jacobian_3d(f: fn(f64, f64, f64) -> f64, x1: f64, x2: f64, x3: f64, h: f64) -> [f64; 3] {` — *epistemic/gum_supplement1.sio*
+- `pub fn propagate_covariance_2d(` — *epistemic/gum_supplement1.sio*
+- `pub fn propagate_covariance_3d(` — *epistemic/gum_supplement1.sio*
+- `pub fn gum_s1_add_correlated(x1: GUMResult, x2: GUMResult, correlation: f64) -> GUMResult {` — *epistemic/gum_supplement1.sio*
+- `pub fn gum_s1_sub_correlated(x1: GUMResult, x2: GUMResult, correlation: f64) -> GUMResult {` — *epistemic/gum_supplement1.sio*
+- `pub fn gum_s1_product_correlated(x1: GUMResult, x2: GUMResult, correlation: f64) -> GUMResult {` — *epistemic/gum_supplement1.sio*
+- `pub fn gum_s1_div_correlated(x1: GUMResult, x2: GUMResult, correlation: f64) -> GUMResult {` — *epistemic/gum_supplement1.sio*
+- `pub fn cov_from_gum_results_2(r1: GUMResult, r2: GUMResult, correlation: f64) -> CovarianceMatrix {` — *epistemic/gum_supplement1.sio*
+- `pub fn cov_from_gum_results_3(` — *epistemic/gum_supplement1.sio*
+- `pub fn validate_s1_vs_gum(s1_uncertainty: f64, gum_uncertainty: f64) -> f64 {` — *epistemic/gum_supplement1.sio*
+- `pub fn welch_satterthwaite_correlated_2(` — *epistemic/gum_supplement1.sio*
 - `pub fn gum_type_a(std_dev: f64, n: i64) -> GUMComponent with Mut, Div, Panic {` — *epistemic/gum.sio*
 - `pub fn gum_type_b(std_u: f64) -> GUMComponent {` — *epistemic/gum.sio*
 - `pub fn gum_type_b_uniform(half_width: f64) -> GUMComponent {` — *epistemic/gum.sio*
@@ -3733,19 +4131,6 @@ organized by module. Generated from source on the date shown below.
 - `pub fn welch_satterthwaite_3(u1: GUMUncertainty, u2: GUMUncertainty, u3: GUMUncertainty) -> f64 with Mut, Div, Panic {` — *epistemic/gum.sio*
 - `pub fn coverage_factor_95(dof: f64) -> f64 with Div, Panic {` — *epistemic/gum.sio*
 - `pub fn main() -> i32 with IO, Mut, Div, Panic {` — *epistemic/gum.sio*
-- `pub fn numerical_jacobian_1d(f: fn(f64) -> f64, x: f64, h: f64) -> f64 {` — *epistemic/gum_supplement1.sio*
-- `pub fn numerical_jacobian_2d(f: fn(f64, f64) -> f64, x1: f64, x2: f64, h: f64) -> [f64; 2] {` — *epistemic/gum_supplement1.sio*
-- `pub fn numerical_jacobian_3d(f: fn(f64, f64, f64) -> f64, x1: f64, x2: f64, x3: f64, h: f64) -> [f64; 3] {` — *epistemic/gum_supplement1.sio*
-- `pub fn propagate_covariance_2d(` — *epistemic/gum_supplement1.sio*
-- `pub fn propagate_covariance_3d(` — *epistemic/gum_supplement1.sio*
-- `pub fn gum_s1_add_correlated(x1: GUMResult, x2: GUMResult, correlation: f64) -> GUMResult {` — *epistemic/gum_supplement1.sio*
-- `pub fn gum_s1_sub_correlated(x1: GUMResult, x2: GUMResult, correlation: f64) -> GUMResult {` — *epistemic/gum_supplement1.sio*
-- `pub fn gum_s1_product_correlated(x1: GUMResult, x2: GUMResult, correlation: f64) -> GUMResult {` — *epistemic/gum_supplement1.sio*
-- `pub fn gum_s1_div_correlated(x1: GUMResult, x2: GUMResult, correlation: f64) -> GUMResult {` — *epistemic/gum_supplement1.sio*
-- `pub fn cov_from_gum_results_2(r1: GUMResult, r2: GUMResult, correlation: f64) -> CovarianceMatrix {` — *epistemic/gum_supplement1.sio*
-- `pub fn cov_from_gum_results_3(` — *epistemic/gum_supplement1.sio*
-- `pub fn validate_s1_vs_gum(s1_uncertainty: f64, gum_uncertainty: f64) -> f64 {` — *epistemic/gum_supplement1.sio*
-- `pub fn welch_satterthwaite_correlated_2(` — *epistemic/gum_supplement1.sio*
 - `pub fn kaxi_fuse(s: Seq<Knowledge<f64>>) -> Knowledge<f64> with Alloc, Mut, Epistemic, Div, Panic {` — *epistemic/kaxi.sio*
 - `pub fn kl_precise_ce(c: &CredalSet, lambda: f64) -> f64 {` — *epistemic/klibanoff.sio*
 - `pub fn kl_walley_ce(c: &CredalSet, lambda: f64) -> f64 with Mut {` — *epistemic/klibanoff.sio*
@@ -3825,8 +4210,10 @@ organized by module. Generated from source on the date shown below.
 - `pub fn sqrt(self: &Epistemic) -> Epistemic with Mut, Div, Panic { ep_sqrt_ep(self) }` — *epistemic/knowledge.sio*
 - `pub fn rel_uncertainty(self: &Epistemic) -> f64 with Mut, Div, Panic {` — *epistemic/knowledge.sio*
 - `pub fn main() -> i32 with IO, Mut, Div, Panic {` — *epistemic/knowledge.sio*
+- `pub fn uncertainty_exact() -> Uncertainty {` — *epistemic/lib.sio*
 - `pub fn uncert_to_std(u: Uncertainty) -> f64 {` — *epistemic/lib.sio*
 - `pub fn epistemic_std(value: f64, uncertainty: f64, confidence: f64) -> EpistemicValue {` — *epistemic/lib.sio*
+- `pub fn epistemic_exact(value: f64, confidence: f64) -> EpistemicValue {` — *epistemic/lib.sio*
 - `pub fn get_value(k: EpistemicValue) -> f64 {` — *epistemic/lib.sio*
 - `pub fn get_confidence(k: EpistemicValue) -> f64 {` — *epistemic/lib.sio*
 - `pub fn get_std_uncertainty(k: EpistemicValue) -> f64 {` — *epistemic/lib.sio*
@@ -3834,6 +4221,7 @@ organized by module. Generated from source on the date shown below.
 - `pub fn sub_epistemic(a: EpistemicValue, b: EpistemicValue) -> EpistemicValue {` — *epistemic/lib.sio*
 - `pub fn mul_epistemic(a: EpistemicValue, b: EpistemicValue) -> EpistemicValue {` — *epistemic/lib.sio*
 - `pub fn div_epistemic(a: EpistemicValue, b: EpistemicValue) -> EpistemicValue {` — *epistemic/lib.sio*
+- `pub fn check_invariants(k: EpistemicValue) -> bool {` — *epistemic/lib.sio*
 - `pub fn from_q(q: f64, df: i64) -> Heterogeneity {` — *epistemic/meta.sio*
 - `pub fn is_significant(self: &Heterogeneity, alpha: f64) -> bool {` — *epistemic/meta.sio*
 - `pub fn interpretation(self: &Heterogeneity) -> string {` — *epistemic/meta.sio*
@@ -3857,9 +4245,11 @@ organized by module. Generated from source on the date shown below.
 - `pub fn ode_system_chem_simple() -> ODESystem {` — *epistemic/ode.sio*
 - `pub fn ode_system_pbpk_clearance() -> ODESystem {` — *epistemic/ode.sio*
 - `pub fn solver_options_fixed(dt: f64, max_steps: i64) -> SolverOptions {` — *epistemic/ode.sio*
+- `pub fn solver_options_adaptive(dt_init: f64, rtol: f64, atol: f64, max_steps: i64) -> SolverOptions {` — *epistemic/ode.sio*
 - `pub fn solution_get_value(sol: &ODESolution, step: i64, dim: i64) -> f64 {` — *epistemic/ode.sio*
 - `pub fn solution_get_variance(sol: &ODESolution, step: i64, dim: i64) -> f64 {` — *epistemic/ode.sio*
 - `pub fn solve_ode(` — *epistemic/ode.sio*
+- `pub fn solve_ode_adaptive(` — *epistemic/ode.sio*
 - `pub fn solve_exp_decay(` — *epistemic/ode.sio*
 - `pub fn pbpk_14_default_params() -> ODEParams with Mut {` — *epistemic/ode.sio*
 - `pub fn pbpk_14_iv_dose(dose_mg: f64, dose_var: f64, v_plasma: f64) -> EState with Mut, Div, Panic {` — *epistemic/ode.sio*
@@ -4396,6 +4786,13 @@ organized by module. Generated from source on the date shown below.
 - `pub fn monte_carlo_square(x: Epistemic, n_samples: i64) -> Epistemic with Prob, Mut, Div, Panic {` — *epistemic/propagate.sio*
 - `pub fn monte_carlo(` — *epistemic/propagate.sio*
 - `pub fn monte_carlo_2d(` — *epistemic/propagate.sio*
+- `pub fn reg_sqrt(x: f64) -> f64 with Mut, Div {` — *epistemic/regression.sio*
+- `pub fn ols_line(xs: [f64; 8], ys: [f64; 8], n: i64) -> LineFit with Mut, Div {` — *epistemic/regression.sio*
+- `pub fn ols_mean_var(fit: LineFit, x: f64) -> f64 with Div {` — *epistemic/regression.sio*
+- `pub fn ols_predict_var(fit: LineFit, x: f64) -> f64 with Div {` — *epistemic/regression.sio*
+- `pub fn gum_var(s0: f64, s1: f64, v0: f64, v1: f64, cov: f64) -> f64 {` — *epistemic/regression.sio*
+- `pub fn fit_centre_refused(chi_red: f64, df: f64, t_star: f64, t_min: f64, t_max: f64) -> bool with Mut, Div, Panic {` — *epistemic/regression.sio*
+- `pub fn plateau_pressure(` — *epistemic/regression.sio*
 - `pub fn risk_model_form(source: i64, residual_fraction: f64) -> ModelRisk {` — *epistemic/roi.sio*
 - `pub fn empty_debt() -> EntropyDebt {` — *epistemic/roi.sio*
 - `pub fn empty_risk() -> ModelRisk {` — *epistemic/roi.sio*
@@ -4403,13 +4800,41 @@ organized by module. Generated from source on the date shown below.
 - `pub fn ledger_add_risk(ledger: EpistemicLedger, risk: ModelRisk) -> EpistemicLedger {` — *epistemic/roi.sio*
 - `pub fn ledger_risk_total_bits(ledger: EpistemicLedger) -> f64 {` — *epistemic/roi.sio*
 - `pub fn ledger_risk_count(ledger: EpistemicLedger) -> i32 {` — *epistemic/roi.sio*
-- `pub fn saltelli_run(` — *epistemic/sobol.sio*
+- `pub fn sign_interval(mean_a: f64, var_a: f64, mean_b: f64, var_b: f64) -> Signed with Mut, Div {` — *epistemic/sign.sio*
+- `pub fn sign_knowledge(a: Knowledge<f64>, b: Knowledge<f64>) -> Knowledge<f64> with Epistemic, Mut, Div {` — *epistemic/sign.sio*
+- `pub fn relative_half_width(k: Knowledge<f64>) -> f64 with Epistemic, Mut, Div {` — *epistemic/sign.sio*
+- `pub fn inside_window(k: Knowledge<f64>, lo: f64, hi: f64) -> bool with Epistemic, Mut, Div {` — *epistemic/sign.sio*
 - `pub fn cap() -> i64 { 16384 }` — *epistemic/sobol_indices.sio*
 - `pub fn variance(xs: &[f64; 16384], n: i64) -> f64 with Mut, Div {` — *epistemic/sobol_indices.sio*
 - `pub fn total_index_jansen(fa: &[f64; 16384], fab: &[f64; 16384], n: i64, var_tot: f64) -> f64 with Div {` — *epistemic/sobol_indices.sio*
 - `pub fn first_order_jansen(fa: &[f64; 16384], fb: &[f64; 16384], fab: &[f64; 16384], n: i64, var_tot: f64) -> f64 with Div {` — *epistemic/sobol_indices.sio*
 - `pub fn log_linear_indices(sigmas: &[f64; 16384], out: &![f64; 16384], n: i64) with Mut, Div {` — *epistemic/sobol_indices.sio*
 - `pub fn run_tests() -> i32 with Mut, Div {` — *epistemic/sobol_indices.sio*
+- `pub fn saltelli_run(` — *epistemic/sobol.sio*
+- `pub fn abs_f64(x: f64) -> f64 {` — *epistemic/stats.sio*
+- `pub fn beta_uniform() -> Beta {` — *epistemic/stats.sio*
+- `pub fn beta_jeffreys() -> Beta {` — *epistemic/stats.sio*
+- `pub fn beta_informative(mean: f64, concentration: f64) -> Beta {` — *epistemic/stats.sio*
+- `pub fn beta_mean(b: Beta) -> f64 {` — *epistemic/stats.sio*
+- `pub fn beta_variance(b: Beta) -> f64 {` — *epistemic/stats.sio*
+- `pub fn beta_mode(b: Beta) -> f64 {` — *epistemic/stats.sio*
+- `pub fn beta_sample_size(b: Beta) -> f64 {` — *epistemic/stats.sio*
+- `pub fn beta_update(prior: Beta, successes: f64, failures: f64) -> Beta {` — *epistemic/stats.sio*
+- `pub fn epistemic_from_beta(b: Beta) -> EpistemicValue {` — *epistemic/stats.sio*
+- `pub fn epistemic_point(value: f64, variance: f64) -> EpistemicValue {` — *epistemic/stats.sio*
+- `pub fn epistemic_mul(a: EpistemicValue, b: EpistemicValue) -> EpistemicValue {` — *epistemic/stats.sio*
+- `pub fn epistemic_scale(e: EpistemicValue, k: f64) -> EpistemicValue {` — *epistemic/stats.sio*
+- `pub fn expected_info_gain(b: Beta) -> f64 {` — *epistemic/stats.sio*
+- `pub fn expected_variance_reduction(b: Beta) -> f64 {` — *epistemic/stats.sio*
+- `pub fn expected_variance_reduction_k(b: Beta, k: f64) -> f64 {` — *epistemic/stats.sio*
+- `pub fn exploration_exploitation_score(b: Beta, exploit_threshold: f64) -> f64 {` — *epistemic/stats.sio*
+- `pub fn variance_penalty_loss(base_loss: f64, prediction_variance: f64, lambda: f64) -> VariancePenalty {` — *epistemic/stats.sio*
+- `pub fn curriculum_sample_weight(variance: f64, base_weight: f64) -> f64 {` — *epistemic/stats.sio*
+- `pub fn beta_hierarchical_combine(distributions: [Beta]) -> Beta {` — *epistemic/stats.sio*
+- `pub fn beta_precision_weighted(distributions: [Beta]) -> Beta {` — *epistemic/stats.sio*
+- `pub fn beta_kl_divergence(p: Beta, q: Beta) -> f64 {` — *epistemic/stats.sio*
+- `pub fn observations_for_target_variance(current: Beta, target_variance: f64) -> f64 {` — *epistemic/stats.sio*
+- `pub fn data_collection_priority(b: Beta, importance_weight: f64) -> f64 {` — *epistemic/stats.sio*
 - `pub fn ep_eq_prob(a: &Epistemic, b: &Epistemic, eps: f64) -> f64 with Mut, Div, Panic {` — *epistemic/uncertain_eq.sio*
 - `pub fn ep_decide(p: f64, confidence: f64) -> bool {` — *epistemic/uncertain_eq.sio*
 - `pub fn ep_eq_field(a: &Epistemic, b: &Epistemic, eps: f64) -> EqField with Mut, Div, Panic {` — *epistemic/uncertain_eq.sio*
@@ -4508,6 +4933,26 @@ organized by module. Generated from source on the date shown below.
 - `pub fn ffi_sizeof_ptr() -> i64 { return 8 }` — *ffi/mod.sio*
 - `pub fn ffi_i64_read(ptr: *mut i64) -> i64 with Mut {` — *ffi/mod.sio*
 - `pub fn ffi_i64_write(ptr: *mut i64, value: i64) with Mut {` — *ffi/mod.sio*
+
+---
+
+## Brain Imaging (fMRI) (`stdlib/fmri/`)
+
+**13 public functions** across 9 files
+
+- `pub fn pearson_corr(x: [f64; 100], y: [f64; 100], n: i64) -> f64 {` — *fmri/connectivity.sio*
+- `pub fn compute_fc(x: [f64; 100], y: [f64; 100], n: i64) -> FCResult {` — *fmri/connectivity.sio*
+- `pub fn node_degree(corr_row: [f64; 10], n_nodes: i64, threshold: f64) -> i64 {` — *fmri/connectivity.sio*
+- `pub fn nifti_error_code(err: NiftiError) -> i64 {` — *fmri/nifti.sio*
+- `pub fn nifti_header_new() -> NiftiHeader {` — *fmri/nifti.sio*
+- `pub fn nifti_file_buffer_new() -> NiftiFileBuffer {` — *fmri/nifti.sio*
+- `pub fn nifti_parse_header_buffer_into(buf: &NiftiFileBuffer, out: &!NiftiHeader) -> i64 {` — *fmri/nifti.sio*
+- `pub fn run_fmri_pipeline_gate(path_nifti1: string, path_nifti2: string, path_motion: string) -> i32 with IO, Mut, Div, Panic {` — *fmri/pipeline_real.sio*
+- `pub fn motion_params_new() -> MotionParams {` — *fmri/preprocess.sio*
+- `pub fn framewise_displacement(prev: MotionParams, curr: MotionParams) -> f64 {` — *fmri/preprocess.sio*
+- `pub fn gaussian_kern_new(fwhm_mm: f64, voxel_size: f64) -> SmoothKernel {` — *fmri/preprocess.sio*
+- `pub fn bandpass_config_rsfmri(tr: f64) -> BandpassConfig {` — *fmri/preprocess.sio*
+- `pub fn demean(data: [f64; 200], n: i64) -> [f64; 200] {` — *fmri/preprocess.sio*
 
 ---
 
@@ -4625,7 +5070,7 @@ organized by module. Generated from source on the date shown below.
 
 ## genomics (`stdlib/genomics/`)
 
-**23 public functions** across 19 files
+**70 public functions** across 23 files
 
 - `pub fn dna_complement(base: i32) -> i32 {` — *genomics/core.sio*
 - `pub fn dna_complement_seq(seq: &[i32; 256], seq_len: i32) -> Seq256 with Mut, Div, Panic {` — *genomics/core.sio*
@@ -4635,10 +5080,51 @@ organized by module. Generated from source on the date shown below.
 - `pub fn dna_align_score(` — *genomics/core.sio*
 - `pub fn codon_to_aa(b0: i32, b1: i32, b2: i32) -> i32 {` — *genomics/core.sio*
 - `pub fn dna_translate(seq: &[i32; 256], start: i32, n_codons: i32) -> AA64 with Mut, Div, Panic {` — *genomics/core.sio*
-- `pub fn dna_kmer_count(seq: &[i32; 256], seq_len: i32, k: i32) -> Kmer256 with Mut, Div, Panic {` — *genomics/core.sio*
+- `pub fn dna_kmer_count_checked(seq:&[i32;256],seq_len:i32,k:i32)->KmerState with Mut,Div,Panic {` — *genomics/core.sio*
+- `pub fn dna_kmer_count(seq:&[i32;256],seq_len:i32,k:i32)->Kmer256 with Mut,Div,Panic {` — *genomics/core.sio*
 - `pub fn ascii_to_base(c: i32) -> i32 {` — *genomics/core.sio*
+- `pub fn count_dataset_align(count_keys:&IntegerBuffer,metadata_keys:&IntegerBuffer,` — *genomics/count_dataset.sio*
+- `pub fn count_dataset_gene(counts:&IntegerBuffer,genes:i64,samples:i64,gene:i64,` — *genomics/count_dataset.sio*
+- `pub fn count_dataset_offsets(log_factors:&NumericBuffer,log_exposure:&NumericBuffer,` — *genomics/count_dataset.sio*
+- `pub fn count_dataset_budget_new(max_genes:i64,max_evaluations:i64)->CountDatasetBudget {` — *genomics/count_dataset.sio*
+- `pub fn count_dataset_reserve_gene(b:&!CountDatasetBudget,evaluation_cap:i64)->i64 with Mut {` — *genomics/count_dataset.sio*
+- `pub fn count_dataset_budget_info(b:&CountDatasetBudget)->CountDatasetBudgetInfo {` — *genomics/count_dataset.sio*
+- `pub fn dispersion_shrinkage_workspace(n:i64)->DispersionWorkspace with Div {` — *genomics/dispersion_shrinkage.sio*
+- `pub fn dispersion_shrinkage_fit(means:&NumericBuffer,estimates:&NumericBuffer,` — *genomics/dispersion_shrinkage.sio*
+- `pub fn dynamic_normalization_workspace(genes:i64,samples:i64)->i64 with Div {` — *genomics/dynamic_normalization.sio*
+- `pub fn dynamic_median_ratio_size_factors_workspace(genes:i64,samples:i64)->DynamicNormalizationWorkspace with Div {` — *genomics/dynamic_normalization.sio*
+- `pub fn dynamic_size_factors_slot()->DynamicSizeFactorsSlot {` — *genomics/dynamic_normalization.sio*
+- `pub fn dynamic_size_factors_slot_status(out:&DynamicSizeFactorsSlot)->i64 {out.result.status}` — *genomics/dynamic_normalization.sio*
+- `pub fn dynamic_size_factors_slot_genes_used(out:&DynamicSizeFactorsSlot)->i64 {out.result.genes_used}` — *genomics/dynamic_normalization.sio*
+- `pub fn dynamic_size_factors_slot_genes_excluded(out:&DynamicSizeFactorsSlot)->i64 {out.result.genes_excluded}` — *genomics/dynamic_normalization.sio*
+- `pub fn dynamic_size_factors_snapshot(out:&DynamicSizeFactorsSlot)->DynamicSizeFactors {` — *genomics/dynamic_normalization.sio*
+- `pub fn dynamic_median_ratio_size_factors_into(counts:&IntegerBuffer,genes:i64,samples:i64,` — *genomics/dynamic_normalization.sio*
+- `pub fn dynamic_median_ratio_size_factors(counts:&IntegerBuffer,genes:i64,samples:i64,mode:i64,` — *genomics/dynamic_normalization.sio*
+- `pub fn kmer_count(seq:&[i32;4096],seq_len:i32,k:i32)->KmerProfile with Mut,Div,Panic {` — *genomics/embedding.sio*
+- `pub fn kmer_normalize(p:&!KmerProfile)->bool with Mut,Div,Panic {` — *genomics/embedding.sio*
+- `pub fn kmer_distance_checked(a:&KmerProfile,b:&KmerProfile)->KmerDistance with Mut,Div,Panic {` — *genomics/embedding.sio*
+- `pub fn kmer_distance(a:&KmerProfile,b:&KmerProfile)->f64 with Mut,Div,Panic {` — *genomics/embedding.sio*
+- `pub fn tpm_new() -> TpmAccumulator {` — *genomics/expression.sio*
+- `pub fn tpm_accumulate(state: &!TpmAccumulator, count: f64, effective_length: f64) -> bool with Mut, Div, Panic {` — *genomics/expression.sio*
+- `pub fn tpm_value(state: &TpmAccumulator, count: f64, effective_length: f64) -> ExpressionValue with Mut, Div, Panic {` — *genomics/expression.sio*
 - `pub fn gf4_self_test() -> i32 with Mut, Panic, Div {` — *genomics/gpu/gf4.sio*
 - `pub fn genomics_gpu_module_ready() -> i32 { 1 }` — *genomics/gpu/mod.sio*
+- `pub fn count_tsv_new(samples:i64)->CountTsvState {` — *genomics/io/count_tsv.sio*
+- `pub fn count_tsv_feed(state:&!CountTsvState,bytes:&[i64;256],length:i64)->CountTsvFeed with Mut,Div,Panic {` — *genomics/io/count_tsv.sio*
+- `pub fn count_tsv_ack_row(state:&!CountTsvState)->bool with Mut,Panic {` — *genomics/io/count_tsv.sio*
+- `pub fn count_tsv_finish(state:&!CountTsvState)->CountTsvFeed with Mut,Panic {` — *genomics/io/count_tsv.sio*
+- `pub fn count_qc_new(samples:i64)->CountQcState {` — *genomics/io/count_tsv.sio*
+- `pub fn count_qc_add_row(state:&!CountQcState,row:&[i64;8])->i64 with Mut,Panic {` — *genomics/io/count_tsv.sio*
+- `pub fn count_matrix_append_checked(matrix:&![i64;2048],rows:i64,row:&[i64;8],samples:i64)->CountMatrixAppend with Mut,Panic {` — *genomics/io/count_tsv.sio*
+- `pub fn dynamic_count_tsv_new(samples:i64,max_count:i64)->DynamicCountTsv {` — *genomics/io/dynamic_count_tsv.sio*
+- `pub fn dynamic_count_tsv_info(s:&DynamicCountTsv)->DynamicCountTsvInfo {` — *genomics/io/dynamic_count_tsv.sio*
+- `pub fn dynamic_count_tsv_feed_slot()->DynamicCountTsvFeed {` — *genomics/io/dynamic_count_tsv.sio*
+- `pub fn dynamic_count_tsv_feed_into(s:&!DynamicCountTsv,row:&!IntegerBuffer,` — *genomics/io/dynamic_count_tsv.sio*
+- `pub fn dynamic_count_tsv_feed(s:&!DynamicCountTsv,row:&!IntegerBuffer,` — *genomics/io/dynamic_count_tsv.sio*
+- `pub fn dynamic_count_tsv_ack_row(s:&!DynamicCountTsv,row:&!IntegerBuffer)->bool with Mut {` — *genomics/io/dynamic_count_tsv.sio*
+- `pub fn dynamic_count_tsv_finish_into(s:&!DynamicCountTsv,row:&!IntegerBuffer,out:&!DynamicCountTsvFeed)->i64 with Mut {` — *genomics/io/dynamic_count_tsv.sio*
+- `pub fn dynamic_count_tsv_finish(s:&!DynamicCountTsv,row:&!IntegerBuffer)->DynamicCountTsvFeed with Mut {` — *genomics/io/dynamic_count_tsv.sio*
+- `pub fn dynamic_count_tsv_append_row(s:&DynamicCountTsv,row:&IntegerBuffer,` — *genomics/io/dynamic_count_tsv.sio*
 - `pub fn fasta_err_ok() -> i32 { 0 }` — *genomics/io/fasta.sio*
 - `pub fn fasta_err_empty() -> i32 { 1 }` — *genomics/io/fasta.sio*
 - `pub fn fasta_err_no_header() -> i32 { 2 }` — *genomics/io/fasta.sio*
@@ -4649,7 +5135,13 @@ organized by module. Generated from source on the date shown below.
 - `pub fn test_fasta_parse_basic() -> bool with Mut, Div, Panic {` — *genomics/io/fasta.sio*
 - `pub fn test_fasta_gc_from_parse() -> bool with Mut, Div, Panic {` — *genomics/io/fasta.sio*
 - `pub fn genomics_io_module_ready() -> i32 { 1 }` — *genomics/io/mod.sio*
+- `pub fn kmer_new(k: i64) -> KmerState {` — *genomics/kmer.sio*
+- `pub fn kmer_push_base(s: &!KmerState, base: i32) -> bool with Mut, Div, Panic {` — *genomics/kmer.sio*
+- `pub fn kmer_push_chunk(s: &!KmerState, seq: &[i32; 256], n: i64) -> bool with Mut, Div, Panic {` — *genomics/kmer.sio*
+- `pub fn kmer_probability(s: &KmerState, index: i64) -> KmerProbability with Mut, Div, Panic {` — *genomics/kmer.sio*
 - `pub fn genomics_module_ready() -> i32 { 1 }` — *genomics/mod.sio*
+- `pub fn median_ratio_size_factors(counts:&[i64;2048],genes:i64,samples:i64)->SizeFactorResult with Mut,Div,Panic {` — *genomics/normalization.sio*
+- `pub fn size_factor_normalized_count(count:i64,factors:&SizeFactorResult,sample:i64)->NormalizedCountResult with Mut,Div,Panic {` — *genomics/normalization.sio*
 
 ---
 
@@ -4825,7 +5317,7 @@ organized by module. Generated from source on the date shown below.
 
 ## graphics (`stdlib/graphics/`)
 
-**208 public functions** across 32 files
+**199 public functions** across 29 files
 
 - `pub fn animate_line_buildup(` — *graphics/animate.sio*
 - `pub fn animate_line_sequence(` — *graphics/animate.sio*
@@ -4844,13 +5336,6 @@ organized by module. Generated from source on the date shown below.
 - `pub fn tiled_draw_boxplot_raster(ts: TiledSurface, data: &[f64; 256], n: i64, cx: i64, config: BoxPlotConfig) -> TiledSurface with Mut, Panic, Div {` — *graphics/boxplot.sio*
 - `pub fn plot_boxplot_png(data: &[f64; 256], n: i64, width: i64, height: i64, filename: string) -> bool with IO, Mut, Panic, Div {` — *graphics/boxplot.sio*
 - `pub fn tiled_plot_boxplot_png(data: &[f64; 256], n: i64, width: i64, height: i64, filename: string) -> bool with IO, Mut, Panic, Div {` — *graphics/boxplot.sio*
-- `pub fn chart_config_default() -> ChartConfig {` — *graphics/chart.sio*
-- `pub fn draw_chart_line_raster(s: Surface, xs: &[f64; 256], ys: &[f64; 256], n: i64, config: ChartConfig) -> Surface with Mut, Panic, Div {` — *graphics/chart.sio*
-- `pub fn draw_chart_scatter_raster(s: Surface, xs: &[f64; 256], ys: &[f64; 256], n: i64, config: ChartConfig) -> Surface with Mut, Panic, Div {` — *graphics/chart.sio*
-- `pub fn draw_chart_bar_raster(s: Surface, values: &[f64; 64], n: i64, config: ChartConfig) -> Surface with Mut, Panic, Div {` — *graphics/chart.sio*
-- `pub fn tiled_draw_chart_line_raster(ts: TiledSurface, xs: &[f64; 256], ys: &[f64; 256], n: i64, config: ChartConfig) -> TiledSurface with Mut, Panic, Div {` — *graphics/chart.sio*
-- `pub fn plot_chart_line_png(xs: &[f64; 256], ys: &[f64; 256], n: i64, config: ChartConfig, filename: string) -> bool with IO, Mut, Panic, Div {` — *graphics/chart.sio*
-- `pub fn tiled_plot_chart_line_png(xs: &[f64; 256], ys: &[f64; 256], n: i64, config: ChartConfig, filename: string) -> bool with IO, Mut, Panic, Div {` — *graphics/chart.sio*
 - `pub fn color_black() -> Color { Color { r: 0, g: 0, b: 0, a: 255 } }` — *graphics/drawing.sio*
 - `pub fn color_white() -> Color { Color { r: 255, g: 255, b: 255, a: 255 } }` — *graphics/drawing.sio*
 - `pub fn color_red() -> Color { Color { r: 255, g: 0, b: 0, a: 255 } }` — *graphics/drawing.sio*
@@ -4929,12 +5414,12 @@ organized by module. Generated from source on the date shown below.
 - `pub fn tiled_draw_pie_raster(ts: TiledSurface, values: &[f64; 16], n: i64, colors: &[Color; 16], config: PieConfig) -> TiledSurface with Mut, Panic, Div {` — *graphics/pie.sio*
 - `pub fn plot_pie_png(values: &[f64; 16], n: i64, colors: &[Color; 16], width: i64, height: i64, filename: string) -> bool with IO, Mut, Panic, Div {` — *graphics/pie.sio*
 - `pub fn tiled_plot_pie_png(values: &[f64; 16], n: i64, colors: &[Color; 16], width: i64, height: i64, filename: string) -> bool with IO, Mut, Panic, Div {` — *graphics/pie.sio*
-- `pub fn line_plot_config_default() -> LinePlotConfig {` — *graphics/plot.sio*
-- `pub fn plot_line_raster(` — *graphics/plot.sio*
 - `pub fn plot_line_png(xs: &[f64; 256], ys: &[f64; 256], n: i64, width: i64, height: i64, filename: string) -> bool with IO, Mut, Panic, Div {` — *graphics/plot_png.sio*
 - `pub fn plot_scatter_png(xs: &[f64; 256], ys: &[f64; 256], n: i64, width: i64, height: i64, filename: string) -> bool with IO, Mut, Panic, Div {` — *graphics/plot_png.sio*
 - `pub fn plot_heatmap_png(data: &[f64; 4096], rows: i64, cols: i64, width: i64, height: i64, filename: string) -> bool with IO, Mut, Panic, Div {` — *graphics/plot_png.sio*
 - `pub fn plot_epistemic_band_png(xs: &[f64; 256], center: &[f64; 256], lower: &[f64; 256], upper: &[f64; 256], n: i64, width: i64, height: i64, filename: string) -> bool with IO, Mut, Panic, Div {` — *graphics/plot_png.sio*
+- `pub fn line_plot_config_default() -> LinePlotConfig {` — *graphics/plot.sio*
+- `pub fn plot_line_raster(` — *graphics/plot.sio*
 - `pub fn pixel_to_i8(v: i64) -> i8 {` — *graphics/png.sio*
 - `pub fn png_write_chunk(filename: string, type_bytes: [i8; 4], data: &[i8; 32800], data_len: i64) -> bool with IO, Mut {` — *graphics/png.sio*
 - `pub fn png_write_sig(filename: string) -> bool with IO, Mut {` — *graphics/png.sio*
@@ -4946,8 +5431,6 @@ organized by module. Generated from source on the date shown below.
 - `pub fn png_encode_surface(s: &Surface, filename: string) -> bool with IO, Mut, Panic, Div {` — *graphics/png.sio*
 - `pub fn png_encode_surface_rgba(s: &Surface, filename: string) -> bool with IO, Mut, Panic, Div {` — *graphics/png.sio*
 - `pub fn png_export(s: &Surface, filename: string) -> bool with IO, Mut, Panic, Div {` — *graphics/png.sio*
-- `pub fn png_decode_surface(filename: string) -> Surface with IO, Mut, Panic, Div {` — *graphics/png_decode.sio*
-- `pub fn main() -> i32 with IO, Mut, Panic, Div {` — *graphics/png_decode_test.sio*
 - `pub fn quality_line_plot_config_default() -> QualityLinePlotConfig {` — *graphics/quality.sio*
 - `pub fn quality_heatmap_config_default() -> QualityHeatmapConfig {` — *graphics/quality.sio*
 - `pub fn quality_contour_config_default() -> QualityContourConfig {` — *graphics/quality.sio*
@@ -5098,7 +5581,7 @@ organized by module. Generated from source on the date shown below.
 - `pub fn pireus_apple_negative_malformed_json() -> bool` — *hardware/pireus/apple_metal_import.sio*
 - `pub fn pireus_apple_negative_duplicate_case() -> bool with Mut, Panic {` — *hardware/pireus/apple_metal_import.sio*
 - `pub fn pireus_apple_negative_capacity() -> bool with Mut, Panic, Div {` — *hardware/pireus/apple_metal_import.sio*
-- `pub fn pireus_apple_negative_empty_digest() -> bool with Mut, Panic {` — *hardware/pireus/apple_metal_import.sio*
+- `pub fn pireus_apple_negative_empty_digest() -> bool with Mut, Panic, Div {` — *hardware/pireus/apple_metal_import.sio*
 - `pub fn pireus_apple_metal_inventory_store(` — *hardware/pireus/apple_metal_import.sio*
 - `pub fn pireus_apple_query_by(` — *hardware/pireus/apple_metal_import.sio*
 - `pub fn pireus_cubic_forge_digest_nonzero(` — *hardware/pireus/cubic_operator_forge.sio*
@@ -5141,15 +5624,15 @@ organized by module. Generated from source on the date shown below.
 - `pub fn pireus_v0_store() -> TripleStore with Mut {` — *hardware/pireus/model.sio*
 - `pub fn pireus_query_permutation(` — *hardware/pireus/model.sio*
 - `pub fn pireus_result_contains(` — *hardware/pireus/model.sio*
+- `pub fn pireus_mbc_frozen_mismatch_code(` — *hardware/pireus/multiprobe_block_certification_frozen.sio*
+- `pub fn pireus_mbc_matches_frozen_v14(` — *hardware/pireus/multiprobe_block_certification_frozen.sio*
+- `pub fn pireus_mbc_frozen_matcher_self_test() -> bool with Mut, Panic {` — *hardware/pireus/multiprobe_block_certification_frozen.sio*
 - `pub fn pireus_mbc_digest_nonzero(digest: &PireusMbcDigest) -> bool` — *hardware/pireus/multiprobe_block_certification.sio*
 - `pub fn pireus_mbc_block_shape_valid(` — *hardware/pireus/multiprobe_block_certification.sio*
 - `pub fn pireus_multiprobe_block_certification_request() -> PireusMbcRequest {` — *hardware/pireus/multiprobe_block_certification.sio*
 - `pub fn pireus_multiprobe_block_certification_paths() -> PireusMbcPaths {` — *hardware/pireus/multiprobe_block_certification.sio*
 - `pub fn pireus_mbc_request_error(request: &PireusMbcRequest) -> i64 {` — *hardware/pireus/multiprobe_block_certification.sio*
 - `pub fn pireus_multiprobe_block_certification_evaluate(` — *hardware/pireus/multiprobe_block_certification.sio*
-- `pub fn pireus_mbc_frozen_mismatch_code(` — *hardware/pireus/multiprobe_block_certification_frozen.sio*
-- `pub fn pireus_mbc_matches_frozen_v14(` — *hardware/pireus/multiprobe_block_certification_frozen.sio*
-- `pub fn pireus_mbc_frozen_matcher_self_test() -> bool with Mut, Panic {` — *hardware/pireus/multiprobe_block_certification_frozen.sio*
 - `pub fn pireus_mbc_reuse_admission_error(` — *hardware/pireus/multiprobe_block_reuse_admission.sio*
 - `pub fn pireus_mbc_reuse_admission_decide(` — *hardware/pireus/multiprobe_block_reuse_admission.sio*
 - `pub fn pireus_mbc_reuse_fixture_request() -> PireusMbcReuseAdmissionRequest {` — *hardware/pireus/multiprobe_block_reuse_admission.sio*
@@ -5161,11 +5644,6 @@ organized by module. Generated from source on the date shown below.
 - `pub fn pireus_operator_discovery_engine_request() -> PireusOdeRequest {` — *hardware/pireus/operator_discovery_engine.sio*
 - `pub fn pireus_operator_discovery_engine_paths() -> PireusOdePaths {` — *hardware/pireus/operator_discovery_engine.sio*
 - `pub fn pireus_operator_discovery_engine_execute(` — *hardware/pireus/operator_discovery_engine.sio*
-- `pub fn pireus_operator_genesis_request() -> GenesisAuthorityRequest {` — *hardware/pireus/operator_genesis.sio*
-- `pub fn pireus_genesis_digest_nonzero(digest: &PireusGenesisDigest) -> bool` — *hardware/pireus/operator_genesis.sio*
-- `pub fn pireus_operator_genesis_evaluate(` — *hardware/pireus/operator_genesis.sio*
-- `pub fn pireus_operator_genesis_frozen_mismatch_code(` — *hardware/pireus/operator_genesis.sio*
-- `pub fn pireus_operator_genesis_matches_frozen_semantics(` — *hardware/pireus/operator_genesis.sio*
 - `pub fn pireus_bilinear_digest_nonzero(digest: &BilinearGenesisDigest) -> bool` — *hardware/pireus/operator_genesis_bilinear.sio*
 - `pub fn pireus_operator_genesis_bilinear_request()` — *hardware/pireus/operator_genesis_bilinear.sio*
 - `pub fn pireus_operator_genesis_bilinear_evaluate(` — *hardware/pireus/operator_genesis_bilinear.sio*
@@ -5176,6 +5654,11 @@ organized by module. Generated from source on the date shown below.
 - `pub fn pireus_operator_genesis_gl4_evaluate(` — *hardware/pireus/operator_genesis_gl4.sio*
 - `pub fn pireus_operator_genesis_gl4_frozen_mismatch_code(` — *hardware/pireus/operator_genesis_gl4.sio*
 - `pub fn pireus_operator_genesis_gl4_matches_frozen_semantics(` — *hardware/pireus/operator_genesis_gl4.sio*
+- `pub fn pireus_operator_genesis_request() -> GenesisAuthorityRequest {` — *hardware/pireus/operator_genesis.sio*
+- `pub fn pireus_genesis_digest_nonzero(digest: &PireusGenesisDigest) -> bool` — *hardware/pireus/operator_genesis.sio*
+- `pub fn pireus_operator_genesis_evaluate(` — *hardware/pireus/operator_genesis.sio*
+- `pub fn pireus_operator_genesis_frozen_mismatch_code(` — *hardware/pireus/operator_genesis.sio*
+- `pub fn pireus_operator_genesis_matches_frozen_semantics(` — *hardware/pireus/operator_genesis.sio*
 - `pub fn pireus_operator_genome_digest_nonzero(` — *hardware/pireus/operator_genome.sio*
 - `pub fn pireus_operator_genome_request() -> PireusOperatorGenomeRequest {` — *hardware/pireus/operator_genome.sio*
 - `pub fn pireus_operator_genome_evaluate(` — *hardware/pireus/operator_genome.sio*
@@ -5221,7 +5704,7 @@ organized by module. Generated from source on the date shown below.
 - `pub fn pireus_ptx_negative_unknown_shape() -> bool` — *hardware/pireus/ptx_import.sio*
 - `pub fn pireus_ptx_negative_malformed_html() -> bool` — *hardware/pireus/ptx_import.sio*
 - `pub fn pireus_ptx_negative_capacity() -> bool with Mut, Panic, Div {` — *hardware/pireus/ptx_import.sio*
-- `pub fn pireus_ptx_negative_empty_digest() -> bool with Mut, Panic {` — *hardware/pireus/ptx_import.sio*
+- `pub fn pireus_ptx_negative_empty_digest() -> bool with Mut, Panic, Div {` — *hardware/pireus/ptx_import.sio*
 - `pub fn pireus_ptx_inventory_store(` — *hardware/pireus/ptx_import.sio*
 - `pub fn pireus_ptx_query_objects_by(` — *hardware/pireus/ptx_import.sio*
 - `pub fn pireus_quotient_digest_nonzero(` — *hardware/pireus/quotient_novelty_forge.sio*
@@ -5327,19 +5810,84 @@ organized by module. Generated from source on the date shown below.
 
 ## heliobiology (`stdlib/heliobiology/`)
 
-**5 public functions** across 6 files
+**70 public functions** across 5 files
 
+- `pub fn helio_u_from_ci95(lower: f64, upper: f64) -> f64 with Div {` — *heliobiology/effects.sio*
+- `pub fn published_to_epistemic(p: PublishedCI95) -> Epistemic with Div {` — *heliobiology/effects.sio*
+- `pub fn SEASON_WINTER() -> i32 { 0 }` — *heliobiology/effects.sio*
+- `pub fn SEASON_SPRING() -> i32 { 1 }` — *heliobiology/effects.sio*
+- `pub fn SEASON_SUMMER() -> i32 { 2 }` — *heliobiology/effects.sio*
+- `pub fn SEASON_FALL() -> i32 { 3 }` — *heliobiology/effects.sio*
+- `pub fn OUTCOME_TOTAL() -> i32 { 0 }   // total non-accidental deaths` — *heliobiology/effects.sio*
+- `pub fn OUTCOME_CVD() -> i32 { 1 }     // ICD-10 I00-I99` — *heliobiology/effects.sio*
+- `pub fn OUTCOME_MI() -> i32 { 2 }      // ICD-10 I21-I23` — *heliobiology/effects.sio*
+- `pub fn OUTCOME_STROKE() -> i32 { 3 }  // ICD-10 I60-I69` — *heliobiology/effects.sio*
+- `pub fn gmd_mortality_published(season: i32, outcome: i32, pm25_adjusted: bool) -> PublishedCI95 {` — *heliobiology/effects.sio*
+- `pub fn gmd_mortality_pct_per_sd_kp(season: i32, outcome: i32, pm25_adjusted: bool) -> Epistemic with Div {` — *heliobiology/effects.sio*
+- `pub fn gmd_mortality_rr_per_sd_kp(season: i32, outcome: i32, pm25_adjusted: bool) -> Epistemic with Div {` — *heliobiology/effects.sio*
+- `pub fn hrv_intense_gmd_sdnn_change_published() -> PublishedCI95 {` — *heliobiology/effects.sio*
+- `pub fn hrv_intense_gmd_rmssd_change_published() -> PublishedCI95 {` — *heliobiology/effects.sio*
+- `pub fn hrv_intense_gmd_sdnn_change_ms() -> Epistemic with Div {` — *heliobiology/effects.sio*
+- `pub fn hrv_intense_gmd_rmssd_change_ms() -> Epistemic with Div {` — *heliobiology/effects.sio*
+- `pub fn KP_QUIET() -> i32 { 0 }` — *heliobiology/indices.sio*
+- `pub fn KP_G1_MINOR() -> i32 { 1 }` — *heliobiology/indices.sio*
+- `pub fn KP_G2_MODERATE() -> i32 { 2 }` — *heliobiology/indices.sio*
+- `pub fn KP_G3_STRONG() -> i32 { 3 }` — *heliobiology/indices.sio*
+- `pub fn KP_G4_SEVERE() -> i32 { 4 }` — *heliobiology/indices.sio*
+- `pub fn KP_G5_EXTREME() -> i32 { 5 }` — *heliobiology/indices.sio*
+- `pub fn kp_to_storm_level(kp: f64) -> i32 {` — *heliobiology/indices.sio*
+- `pub fn DST_QUIET() -> i32 { 0 }       // Dst > -30 nT: no storm` — *heliobiology/indices.sio*
+- `pub fn DST_WEAK() -> i32 { 1 }` — *heliobiology/indices.sio*
+- `pub fn DST_MODERATE() -> i32 { 2 }` — *heliobiology/indices.sio*
+- `pub fn DST_INTENSE() -> i32 { 3 }` — *heliobiology/indices.sio*
+- `pub fn DST_MAJOR() -> i32 { 4 }       // "Major" in the source` — *heliobiology/indices.sio*
+- `pub fn classify_dst(dst: f64) -> i32 {` — *heliobiology/indices.sio*
+- `pub fn S_SCALE_S1() -> i32 { 1 }` — *heliobiology/indices.sio*
+- `pub fn S_SCALE_S2() -> i32 { 2 }` — *heliobiology/indices.sio*
+- `pub fn S_SCALE_S3() -> i32 { 3 }` — *heliobiology/indices.sio*
+- `pub fn S_SCALE_S4() -> i32 { 4 }` — *heliobiology/indices.sio*
+- `pub fn S_SCALE_S5() -> i32 { 5 }` — *heliobiology/indices.sio*
+- `pub fn S_SCALE_NONE() -> i32 { 0 }` — *heliobiology/indices.sio*
+- `pub fn classify_proton_storm(flux: f64) -> i32 {` — *heliobiology/indices.sio*
+- `pub fn imf_magnitude(v: IMFVector) -> f64 {` — *heliobiology/indices.sio*
+- `pub fn imf_geoeffective_bz(v: IMFVector) -> f64 {` — *heliobiology/indices.sio*
 - `pub fn heliobiology_module_ready() -> i32 { 1 }` — *heliobiology/mod.sio*
-- `pub fn gauss_to_tesla(g: G) -> T {` — *heliobiology/units.sio*
-- `pub fn tesla_to_gauss(t: T) -> G {` — *heliobiology/units.sio*
-- `pub fn gamma_to_nT(g: gamma) -> nT {` — *heliobiology/units.sio*
-- `pub fn sfu_to_si(s: SFU) -> f64 {` — *heliobiology/units.sio*
+- `pub fn FLARE_A() -> i32 { 0 }` — *heliobiology/solar.sio*
+- `pub fn FLARE_B() -> i32 { 1 }` — *heliobiology/solar.sio*
+- `pub fn FLARE_C() -> i32 { 2 }` — *heliobiology/solar.sio*
+- `pub fn FLARE_M() -> i32 { 3 }` — *heliobiology/solar.sio*
+- `pub fn FLARE_X() -> i32 { 4 }` — *heliobiology/solar.sio*
+- `pub fn flare_new(flare_class: i32, intensity: f64) -> FlareDesignation {` — *heliobiology/solar.sio*
+- `pub fn flare_peak_flux(f: FlareDesignation) -> f64 {` — *heliobiology/solar.sio*
+- `pub fn R_NONE() -> i32 { 0 }` — *heliobiology/solar.sio*
+- `pub fn R1_MINOR() -> i32 { 1 }` — *heliobiology/solar.sio*
+- `pub fn R2_MODERATE() -> i32 { 2 }` — *heliobiology/solar.sio*
+- `pub fn R3_STRONG() -> i32 { 3 }` — *heliobiology/solar.sio*
+- `pub fn R4_SEVERE() -> i32 { 4 }` — *heliobiology/solar.sio*
+- `pub fn R5_EXTREME() -> i32 { 5 }` — *heliobiology/solar.sio*
+- `pub fn flare_radio_scale(f: FlareDesignation) -> i32 {` — *heliobiology/solar.sio*
+- `pub fn AU_KM() -> f64 { 149597870.7 }` — *heliobiology/solar.sio*
+- `pub fn cme_transit_ballistic_hours(cme: CME) -> f64 {` — *heliobiology/solar.sio*
+- `pub fn CYCLE_MINIMUM() -> i32 { 0 }` — *heliobiology/solar.sio*
+- `pub fn CYCLE_RISING() -> i32 { 1 }` — *heliobiology/solar.sio*
+- `pub fn CYCLE_MAXIMUM() -> i32 { 2 }` — *heliobiology/solar.sio*
+- `pub fn CYCLE_DECLINING() -> i32 { 3 }` — *heliobiology/solar.sio*
+- `pub fn MW_ALPHA() -> i32 { 0 }` — *heliobiology/solar.sio*
+- `pub fn MW_BETA() -> i32 { 1 }` — *heliobiology/solar.sio*
+- `pub fn MW_BETA_GAMMA() -> i32 { 2 }` — *heliobiology/solar.sio*
+- `pub fn MW_GAMMA() -> i32 { 3 }` — *heliobiology/solar.sio*
+- `pub fn MW_BETA_DELTA() -> i32 { 4 }` — *heliobiology/solar.sio*
+- `pub fn MW_BETA_GAMMA_DELTA() -> i32 { 5 }` — *heliobiology/solar.sio*
+- `pub fn gauss_to_tesla(g_gauss: f64) -> f64 {` — *heliobiology/units.sio*
+- `pub fn tesla_to_gauss(t_tesla: f64) -> f64 {` — *heliobiology/units.sio*
+- `pub fn gamma_to_nT(g_gamma: f64) -> f64 {` — *heliobiology/units.sio*
+- `pub fn sfu_to_si(s_sfu: f64) -> f64 {` — *heliobiology/units.sio*
 
 ---
 
 ## http (`stdlib/http/`)
 
-**21 public functions** across 3 files
+**32 public functions** across 4 files
 
 - `pub fn HTTP_GET() -> i32 { 0 }` — *http/http.sio*
 - `pub fn HTTP_POST() -> i32 { 1 }` — *http/http.sio*
@@ -5362,6 +5910,17 @@ organized by module. Generated from source on the date shown below.
 - `pub fn http_client_error(resp: HttpResponse) -> bool {` — *http/http.sio*
 - `pub fn http_server_error(resp: HttpResponse) -> bool {` — *http/http.sio*
 - `pub fn http_quality_score(resp: HttpResponse) -> f64 {` — *http/http.sio*
+- `pub fn http_body(response: string) -> string with Mut, Div, Panic {` — *http/post.sio*
+- `pub fn http_open(a: i64, b: i64, c: i64, d: i64, port: i64) -> HttpConn with IO, Mut, Div, Panic {` — *http/post.sio*
+- `pub fn http_close(conn: HttpConn) -> i64 with IO, Mut {` — *http/post.sio*
+- `pub fn http_recv(conn: HttpConn) -> HttpReply with IO, Mut, Div, Panic {` — *http/post.sio*
+- `pub fn http_send_get(conn: HttpConn, a: i64, b: i64, c: i64, d: i64, path: string, last: i64) -> i64 with IO, Mut, Div, Panic {` — *http/post.sio*
+- `pub fn http_send_post(conn: HttpConn, a: i64, b: i64, c: i64, d: i64, path: string, extra: string, body: string, last: i64) -> i64 with IO, Mut, Div, Panic {` — *http/post.sio*
+- `pub fn http_send_shots(conn: HttpConn, a: i64, b: i64, c: i64, d: i64, shots: i64, qir: string, last: i64) -> i64 with IO, Mut, Div, Panic {` — *http/post.sio*
+- `pub fn http_get(a: i64, b: i64, c: i64, d: i64, port: i64, path: string) -> HttpReply with IO, Mut, Div, Panic {` — *http/post.sio*
+- `pub fn http_post(a: i64, b: i64, c: i64, d: i64, port: i64, path: string, extra: string, body: string) -> HttpReply with IO, Mut, Div, Panic {` — *http/post.sio*
+- `pub fn http_shots(a: i64, b: i64, c: i64, d: i64, port: i64, shots: i64, qir: string) -> HttpReply with IO, Mut, Div, Panic {` — *http/post.sio*
+- `pub fn http_exchange(a: i64, b: i64, c: i64, d: i64, port: i64, request: string) -> string with IO, Mut, Div, Panic {` — *http/post.sio*
 
 ---
 
@@ -5403,7 +5962,7 @@ organized by module. Generated from source on the date shown below.
 
 ## Hypercomplex Graphs (`stdlib/hypercomplex_graph/`)
 
-**43 public functions** across 5 files
+**44 public functions** across 5 files
 
 - `pub fn label_cyclic(u: i64, v: i64, weight: f64) -> Oct with Mut, Panic, Div {` — *hypercomplex_graph/connectome.sio*
 - `pub fn label_degree(deg_u: i64, deg_v: i64, weight: f64) -> Oct with Mut, Panic, Div {` — *hypercomplex_graph/connectome.sio*
@@ -5436,6 +5995,7 @@ organized by module. Generated from source on the date shown below.
 - `pub fn erdos_run_realizable_gap_binary(T: i64) -> i64 with IO, Mut, Panic, Div {` — *hypercomplex_graph/erdos_unit_distance.sio*
 - `pub fn erdos_unit_distance_module_ready() -> i32 { 1 }` — *hypercomplex_graph/erdos_unit_distance.sio*
 - `pub fn hypercomplex_graph_module_ready() -> i32 { 1 }` — *hypercomplex_graph/mod.sio*
+- `pub fn bg_new(n: i64) -> BinGraph {` — *hypercomplex_graph/orc.sio*
 - `pub fn bg_has_edge(g: BinGraph, u: i64, v: i64) -> bool with Panic {` — *hypercomplex_graph/orc.sio*
 - `pub fn bg_set_edge(g: BinGraph, u: i64, v: i64) -> BinGraph with Mut, Panic {` — *hypercomplex_graph/orc.sio*
 - `pub fn bg_from_matrix(data: [f64; 40000], n: i64, threshold: f64) -> BinGraph with Mut, Panic, Div {` — *hypercomplex_graph/orc.sio*
@@ -5549,7 +6109,7 @@ organized by module. Generated from source on the date shown below.
 
 ## Input/Output (`stdlib/io/`)
 
-**78 public functions** across 8 files
+**83 public functions** across 9 files
 
 - `pub fn parse(args: [String]) -> ParsedArgs {` — *io/argparse.sio*
 - `pub fn has_arg(args: ParsedArgs, name: String) -> bool {` — *io/argparse.sio*
@@ -5577,6 +6137,8 @@ organized by module. Generated from source on the date shown below.
 - `pub fn io_buf_write(buf: IoBuffer, data: &[u8; 256], n: i32) -> IoBuffer {` — *io/io.sio*
 - `pub fn io_buf_read(buf: &!IoBuffer, out: &![u8; 256], n: i32) -> i32 with Mut, Panic, Div {` — *io/io.sio*
 - `pub fn io_buf_remaining(buf: &IoBuffer) -> i32 {` — *io/io.sio*
+- `pub fn io_buf_len(buf: &IoBuffer) -> i32 {` — *io/io.sio*
+- `pub fn io_buf_pos(buf: &IoBuffer) -> i32 {` — *io/io.sio*
 - `pub fn io_buf_capacity(buf: &IoBuffer) -> i32 {` — *io/io.sio*
 - `pub fn io_buf_is_empty(buf: &IoBuffer) -> bool {` — *io/io.sio*
 - `pub fn io_buf_reset(buf: IoBuffer) -> IoBuffer {` — *io/io.sio*
@@ -5594,6 +6156,9 @@ organized by module. Generated from source on the date shown below.
 - `pub fn generate_asd_connectome(n: i64, seed: i64) -> AdjMatrix with Mut, Panic, Div {` — *io/matrix_reader.sio*
 - `pub fn make_test_ring6() -> AdjMatrix with Mut, Panic {` — *io/matrix_reader.sio*
 - `pub fn make_test_bimodular8() -> AdjMatrix with Mut, Panic {` — *io/matrix_reader.sio*
+- `pub fn sci_is_nan(x: f64) -> bool {` — *io/sci_print.sio*
+- `pub fn print_f64_sci(x: f64, sig: i64) with IO, Mut {` — *io/sci_print.sio*
+- `pub fn println_f64_sci(x: f64, sig: i64) with IO, Mut {` — *io/sci_print.sio*
 - `pub fn scidata_new() -> SciDataset {` — *io/scidata.sio*
 - `pub fn scidata_add_array(` — *io/scidata.sio*
 - `pub fn scidata_get_array(` — *io/scidata.sio*
@@ -5701,7 +6266,7 @@ organized by module. Generated from source on the date shown below.
 
 ## Linear Algebra (`stdlib/linalg/`)
 
-**118 public functions** across 16 files
+**147 public functions** across 18 files
 
 - `pub fn blas_available() -> bool { false }` — *linalg/blas_ffi.sio*
 - `pub fn dgemm_available() -> bool { false }` — *linalg/blas_ffi.sio*
@@ -5709,7 +6274,28 @@ organized by module. Generated from source on the date shown below.
 - `pub fn blas_dgemm_rowmajor(` — *linalg/blas_ffi.sio*
 - `pub fn blas_dgemm(` — *linalg/blas_ffi.sio*
 - `pub fn blas_dgesvd_approx(` — *linalg/blas_ffi.sio*
+- `pub fn mat8_get(m: Matrix8, r: i32, c: i32) -> f64 with Panic {` — *linalg/decomp.sio*
+- `pub fn mat8_set(m: Matrix8, r: i32, c: i32, val: f64) -> Matrix8 with Mut, Panic {` — *linalg/decomp.sio*
+- `pub fn mat8_zeros(rows: i32, cols: i32) -> Matrix8 {` — *linalg/decomp.sio*
+- `pub fn mat8_identity(n: i32) -> Matrix8 with Mut, Panic, Div {` — *linalg/decomp.sio*
+- `pub fn qr_decompose(a: Matrix8) -> QRResult with Mut, Panic, Div {` — *linalg/decomp.sio*
+- `pub fn eigen_decompose(a: Matrix8) -> EigenResult with Mut, Panic, Div {` — *linalg/decomp.sio*
+- `pub fn qr_reconstruction_error(a: Matrix8, result: QRResult) -> f64 with Mut, Panic, Div {` — *linalg/decomp.sio*
+- `pub fn qr_orthogonality_error(result: QRResult) -> f64 with Mut, Panic, Div {` — *linalg/decomp.sio*
+- `pub fn qr_upper_triangular_error(result: QRResult) -> f64 with Mut, Panic, Div {` — *linalg/decomp.sio*
+- `pub fn eigen_residual(a: Matrix8, result: EigenResult) -> f64 with Mut, Panic, Div {` — *linalg/decomp.sio*
 - `pub fn main() -> i32 with IO, Mut, Div, Panic {` — *linalg/decomp.sio*
+- `pub fn dynamic_factor_workspace(n:i64)->DynamicFactorWorkspace with Mut,Div {` — *linalg/dynamic_factorize.sio*
+- `pub fn dynamic_lu(` — *linalg/dynamic_factorize.sio*
+- `pub fn dynamic_cholesky(` — *linalg/dynamic_factorize.sio*
+- `pub fn dynamic_lu_solve(` — *linalg/dynamic_factorize.sio*
+- `pub fn dynamic_cholesky_solve(` — *linalg/dynamic_factorize.sio*
+- `pub fn dynamic_qr_workspace(rows:i64,columns:i64)->i64 with Div {` — *linalg/dynamic_least_squares.sio*
+- `pub fn dynamic_qr_workspace_layout(rows:i64,columns:i64)->DynamicQrWorkspaceLayout with Div {` — *linalg/dynamic_least_squares.sio*
+- `pub fn dynamic_qr_least_squares(a:&NumericBuffer,layout:&NumericMatrix,` — *linalg/dynamic_least_squares.sio*
+- `pub fn dynamic_qr_factorize(a:&NumericBuffer,layout:&NumericMatrix,` — *linalg/dynamic_least_squares.sio*
+- `pub fn dynamic_svd_workspace(rows:i64,cols:i64)->DynamicSvdWorkspace with Mut,Div {` — *linalg/dynamic_svd.sio*
+- `pub fn dynamic_svd(` — *linalg/dynamic_svd.sio*
 - `pub fn eigen_workspace_reset(n: i32) with Mut, Div, Panic {` — *linalg/eigen.sio*
 - `pub fn eigen_workspace_n() -> i32 {` — *linalg/eigen.sio*
 - `pub fn eigen_workspace_set(row: i32, col: i32, value: f64) with Mut, Panic {` — *linalg/eigen.sio*
@@ -5771,6 +6357,11 @@ organized by module. Generated from source on the date shown below.
 - `pub fn etensor_confidence_summary(m: &EpistemicTensor) -> TensorConfidenceSummary with Mut, Div, Panic {` — *linalg/epistemic_tensor.sio*
 - `pub fn etensor_svd_approx(m: &EpistemicTensor, batch_idx: i64) -> [EpistemicScalar; 16] with Mut, Div, Panic {` — *linalg/epistemic_tensor.sio*
 - `pub fn main() with Mut, Div, Panic {` — *linalg/epistemic_tensor.sio*
+- `pub fn least_squares_restore(value: f64, factor: f64, divisor: f64) -> LeastSquaresNumber with Mut, Div, Panic {` — *linalg/least_squares_scale.sio*
+- `pub fn least_squares_scaled_product_into(value:f64,multiplier1:f64,multiplier2:f64,` — *linalg/least_squares_scale.sio*
+- `pub fn least_squares_scaled_product(value:f64,multiplier1:f64,multiplier2:f64,` — *linalg/least_squares_scale.sio*
+- `pub fn qr_least_squares(a: &[f64;2048], b: &[f64;256], m: i64, p: i64,` — *linalg/least_squares.sio*
+- `pub fn qr_least_squares_factor(a: &[f64;2048], b: &[f64;256], m: i64, p: i64,` — *linalg/least_squares.sio*
 - `pub fn mat16_zeros() -> Mat16 {` — *linalg/mat16.sio*
 - `pub fn mat16_identity() -> Mat16 {` — *linalg/mat16.sio*
 - `pub fn mat16_get(m: Mat16, row: i32, col: i32) -> f64 {` — *linalg/mat16.sio*
@@ -5804,15 +6395,16 @@ organized by module. Generated from source on the date shown below.
 - `pub fn matnm_inv(m: MatNM) -> MatNM with Mut, Div, Panic {` — *linalg/matnm.sio*
 - `pub fn matnm_qr(a: MatNM) -> QRResult_NM with Mut, Div, Panic {` — *linalg/matnm.sio*
 - `pub fn matnm_show(label: string, m: MatNM) with IO, Mut, Div, Panic {` — *linalg/matnm.sio*
+- `pub fn mat2_new(m00: f64, m01: f64, m10: f64, m11: f64) -> Mat2 {` — *linalg/matrix.sio*
+- `pub fn mat2_zero() -> Mat2 {` — *linalg/matrix.sio*
+- `pub fn mat2_identity() -> Mat2 {` — *linalg/matrix.sio*
+- `pub fn mat2_add(a: Mat2, b: Mat2) -> Mat2 {` — *linalg/matrix.sio*
+- `pub fn mat2_mul(a: Mat2, b: Mat2) -> Mat2 {` — *linalg/matrix.sio*
+- `pub fn mat2_det(m: Mat2) -> f64 {` — *linalg/matrix.sio*
+- `pub fn mat2_trace(m: Mat2) -> f64 {` — *linalg/matrix.sio*
+- `pub fn mat2_inverse(m: Mat2) -> Mat2 {` — *linalg/matrix.sio*
 - `pub fn mat3_new(` — *linalg/matrix.sio*
 - `pub fn main() -> i32 with IO, Mut, Div, Panic {` — *linalg/matrix.sio*
-- `pub fn slop_dot(a: &[f64; 64], b: &[f64; 64], n: i32) -> f64 with Mut, Panic {` — *linalg/slice_ops.sio*
-- `pub fn slop_norm(a: &[f64; 64], n: i32) -> f64 with Mut, Div, Panic {` — *linalg/slice_ops.sio*
-- `pub fn slop_scale(a: &[f64; 64], alpha: f64, out: &![f64; 64], n: i32) with Mut, Panic {` — *linalg/slice_ops.sio*
-- `pub fn slop_axpy(alpha: f64, a: &[f64; 64], b: &[f64; 64], out: &![f64; 64], n: i32) with Mut, Panic {` — *linalg/slice_ops.sio*
-- `pub fn slop_matvec(a: &[f64; 4096], x: &[f64; 64], out: &![f64; 64],` — *linalg/slice_ops.sio*
-- `pub fn slop_matmul(a: &[f64; 4096], b: &[f64; 4096], c: &![f64; 4096],` — *linalg/slice_ops.sio*
-- `pub fn slop_transpose(a: &[f64; 4096], b: &![f64; 4096], m: i32, n: i32) with Mut, Panic {` — *linalg/slice_ops.sio*
 - `pub fn tensor16_zeros() -> Tensor16 {` — *linalg/tensor16.sio*
 - `pub fn tensor16_get(t: Tensor16, i: i32, j: i32, k: i32) -> f64 {` — *linalg/tensor16.sio*
 - `pub fn tensor16_set(t: Tensor16, i: i32, j: i32, k: i32, val: f64) -> Tensor16 {` — *linalg/tensor16.sio*
@@ -5821,6 +6413,8 @@ organized by module. Generated from source on the date shown below.
 - `pub fn tensor16_jordan_transport(jz: Mat16, h: Tensor16) -> Tensor16 {` — *linalg/tensor16.sio*
 - `pub fn tensor16_add(a: Tensor16, b: Tensor16) -> Tensor16 {` — *linalg/tensor16.sio*
 - `pub fn main() -> i32 with IO, Mut, Div, Panic {` — *linalg/vector.sio*
+- `pub fn weighted_qr_least_squares(a: &[f64;2048], b: &[f64;256],` — *linalg/weighted_least_squares.sio*
+- `pub fn weighted_qr_least_squares_factor(a: &[f64;2048], b: &[f64;256],` — *linalg/weighted_least_squares.sio*
 
 ---
 
@@ -5872,11 +6466,17 @@ organized by module. Generated from source on the date shown below.
 
 ## Mathematics (`stdlib/math/`)
 
-**250 public functions** across 51 files
+**291 public functions** across 43 files
 
 - `pub fn approx_taylor_sin(x: f64, terms: i64) -> f64 with Approx, Mut, Div, Panic {` — *math/approx.sio*
 - `pub fn approx_newton_sqrt(x: f64) -> f64 with Approx, Mut, Div, Panic {` — *math/approx.sio*
 - `pub fn approx_finite_diff(f: fn(f64) -> f64 with Approx, x: f64, h: f64) -> f64 with Approx, Mut, Div, Panic {` — *math/approx.sio*
+- `pub fn cd_product_16(` — *math/cayley_dickson.sio*
+- `pub fn oct64_norm_sq_components(` — *math/cayley_dickson.sio*
+- `pub fn bsc_capacity_bits(p:f64)->InformationResult with Mut,Div,Panic {` — *math/channels.sio*
+- `pub fn awgn_capacity_nats(snr:f64)->InformationResult with Mut,Div,Panic {` — *math/channels.sio*
+- `pub fn pinsker_bound_nats(kl:f64)->InformationResult with Mut,Div,Panic {` — *math/channels.sio*
+- `pub fn cramer_rao_bound(fisher_info:f64)->InformationResult with Mut,Div,Panic {` — *math/channels.sio*
 - `pub fn next_permutation(p: &!Perm128, n: i32) -> bool with Mut, Panic {` — *math/combinatorics_perm.sio*
 - `pub fn count_permutations(n: i32) -> i32 with Mut, Panic {` — *math/combinatorics_perm.sio*
 - `pub fn shuffle_perm(p: &!Perm128, n: i32, seed: i64) -> i64 with Mut, Div, Panic {` — *math/combinatorics_perm.sio*
@@ -5915,6 +6515,15 @@ organized by module. Generated from source on the date shown below.
 - `pub fn hyp_exp(x: HypPoint, t: HypTangent) -> HypPoint with Mut, Div, Panic {` — *math/hyperbolic.sio*
 - `pub fn hyp_log(x: HypPoint, y: HypPoint) -> HypTangent with Mut, Div, Panic {` — *math/hyperbolic.sio*
 - `pub fn hyp_tangent_norm(t: HypTangent) -> f64 with Mut, Div, Panic {` — *math/hyperbolic.sio*
+- `pub fn shannon_entropy_exact(p:[f64;8],k:i64)->f64 with Mut,Div,Panic {` — *math/information.sio*
+- `pub fn renyi_entropy_alpha2(p:[f64;8],k:i64)->f64 with Mut,Div,Panic {` — *math/information.sio*
+- `pub fn min_entropy(p:[f64;8],k:i64)->f64 with Mut,Div,Panic {` — *math/information.sio*
+- `pub fn kl_divergence_exact(p:[f64;8],q:[f64;8],k:i64)->f64 with Mut,Div,Panic {` — *math/information.sio*
+- `pub fn jsd_divergence_exact(p:[f64;8],q:[f64;8],k:i64)->f64 with Mut,Div,Panic {` — *math/information.sio*
+- `pub fn pinsker_tv_bound(kl:f64)->f64 with Mut,Div,Panic {` — *math/information.sio*
+- `pub fn channel_capacity_bsc(p:f64)->f64 with Mut,Div,Panic {` — *math/information.sio*
+- `pub fn channel_capacity_awgn(snr:f64)->f64 with Mut,Div,Panic {` — *math/information.sio*
+- `pub fn cramer_rao_lower_bound(info:f64)->f64 with Mut,Div,Panic {` — *math/information.sio*
 - `pub fn libm_fabs(x: f64) -> f64 {` — *math/libm.sio*
 - `pub fn libm_floor(x: f64) -> f64 {` — *math/libm.sio*
 - `pub fn libm_ceil(x: f64) -> f64 {` — *math/libm.sio*
@@ -5924,6 +6533,12 @@ organized by module. Generated from source on the date shown below.
 - `pub fn libm_tanh(x: f64) -> f64 with Mut, Div, Panic {` — *math/libm.sio*
 - `pub fn libm_sinh(x: f64) -> f64 with Mut, Div, Panic {` — *math/libm.sio*
 - `pub fn libm_cosh(x: f64) -> f64 with Mut, Div, Panic {` — *math/libm.sio*
+- `pub fn log1p_checked_into(x:f64,out:&!CheckedLog)->i64 with Mut,Div {` — *math/logarithmic.sio*
+- `pub fn log1p_checked(x:f64)->CheckedLog with Mut,Div {` — *math/logarithmic.sio*
+- `pub fn log1pmx_checked_into(x:f64,out:&!CheckedLog)->i64 with Mut,Div {` — *math/logarithmic.sio*
+- `pub fn log1pmx_checked(x:f64)->CheckedLog with Mut,Div {` — *math/logarithmic.sio*
+- `pub fn log1p_phi_checked_into(x:f64,out:&!CheckedLog)->i64 with Mut,Div {` — *math/logarithmic.sio*
+- `pub fn log1p_phi_checked(x:f64)->CheckedLog with Mut,Div {` — *math/logarithmic.sio*
 - `pub fn lyap_logistic(r: f64) -> f64 with Mut, Div, Panic {` — *math/lyapunov.sio*
 - `pub fn lyap_tent(mu: f64) -> f64 with Mut, Div, Panic {` — *math/lyapunov.sio*
 - `pub fn lyap_is_chaotic(lambda: f64) -> bool { lambda > 0.0 }` — *math/lyapunov.sio*
@@ -5931,6 +6546,16 @@ organized by module. Generated from source on the date shown below.
 - `pub fn lyap_flow_largest(sys: i64, dt: f64, warmup: i64, steps: i64) -> f64 with Mut, Div, Panic {` — *math/lyapunov.sio*
 - `pub fn lyap_lorenz() -> f64 with Mut, Div, Panic { lyap_flow_largest(0, 0.01, 5000, 200000) }` — *math/lyapunov.sio*
 - `pub fn lyap_rossler() -> f64 with Mut, Div, Panic { lyap_flow_largest(1, 0.01, 20000, 600000) }` — *math/lyapunov.sio*
+- `pub fn gcd(a: i64, b: i64) -> i64 with Mut, Div, Panic {` — *math/number_theory.sio*
+- `pub fn lcm(a: i64, b: i64) -> i64 with Mut, Div, Panic {` — *math/number_theory.sio*
+- `pub fn mod_pow(base: i64, exp: i64, modulus: i64) -> i64 with Mut, Div, Panic {` — *math/number_theory.sio*
+- `pub fn mod_inv(a: i64, m: i64) -> i64 with Mut, Div, Panic {` — *math/number_theory.sio*
+- `pub fn is_prime(n: i64) -> bool with Mut, Div, Panic {` — *math/number_theory.sio*
+- `pub fn next_prime(n: i64) -> i64 with Mut, Div, Panic {` — *math/number_theory.sio*
+- `pub fn fibonacci(n: i32) -> i64 with Mut, Div, Panic {` — *math/number_theory.sio*
+- `pub fn lucas(n: i32) -> i64 with Mut, Div, Panic {` — *math/number_theory.sio*
+- `pub fn integer_sqrt(n: i64) -> i64 with Mut, Div, Panic {` — *math/number_theory.sio*
+- `pub fn is_perfect_square(n: i64) -> bool with Mut, Div, Panic {` — *math/number_theory.sio*
 - `pub fn oct(a: f64, b: f64, c: f64, d: f64, e: f64, f: f64, g: f64, h: f64) -> Octonion {` — *math/octonion.sio*
 - `pub fn oct_conj(o: Octonion) -> Octonion {` — *math/octonion.sio*
 - `pub fn oct_norm_sq(o: Octonion) -> f64 {` — *math/octonion.sio*
@@ -5946,12 +6571,22 @@ organized by module. Generated from source on the date shown below.
 - `pub fn oct_to_quaternion_parts(o: Octonion) -> OctonionParts {` — *math/octonion.sio*
 - `pub fn oct_from_quaternion_parts(p: OctonionParts) -> Octonion {` — *math/octonion.sio*
 - `pub fn oct_decomposition_error(o: Octonion) -> f64 {` — *math/octonion.sio*
+- `pub fn information_shannon(p: &[f64; 8], k: i64) -> InformationResult with Mut, Div, Panic {` — *math/probability.sio*
+- `pub fn information_collision(p: &[f64; 8], k: i64) -> InformationResult with Mut, Div, Panic {` — *math/probability.sio*
+- `pub fn information_min(p: &[f64; 8], k: i64) -> InformationResult with Mut, Div, Panic {` — *math/probability.sio*
+- `pub fn information_kl(p: &[f64; 8], q: &[f64; 8], k: i64) -> InformationResult with Mut, Div, Panic {` — *math/probability.sio*
+- `pub fn information_js(p: &[f64; 8], q: &[f64; 8], k: i64) -> InformationResult with Mut, Div, Panic {` — *math/probability.sio*
 - `pub fn sqrt(x: f64) -> f64 with Mut, Div, Panic {` — *math/pure.sio*
-- `pub fn ln(x: f64) -> f64 with Mut, Div, Panic {` — *math/pure.sio*
+- `pub fn ln(x: f64) -> f64 with Mut, Div, Panic { ln_core(x) }` — *math/pure.sio*
+- `pub fn ln_checked_into(x:f64,out:&!CheckedLog) -> i64 with Mut, Div {` — *math/pure.sio*
+- `pub fn ln_checked(x:f64) -> CheckedLog with Mut, Div {` — *math/pure.sio*
 - `pub fn log10(x: f64) -> f64 with Mut, Div, Panic {` — *math/pure.sio*
 - `pub fn log2(x: f64) -> f64 with Mut, Div, Panic {` — *math/pure.sio*
-- `pub fn exp(x: f64) -> f64 with Mut, Div, Panic {` — *math/pure.sio*
+- `pub fn exp(x: f64) -> f64 {` — *math/pure.sio*
 - `pub fn pow(x: f64, n: f64) -> f64 with Mut, Div, Panic {` — *math/pure.sio*
+- `pub fn cos(x: f64) -> f64 with Mut, Div, Panic {` — *math/pure.sio*
+- `pub fn sin(x: f64) -> f64 with Mut, Div, Panic {` — *math/pure.sio*
+- `pub fn is_finite(x: f64) -> bool {` — *math/pure.sio*
 - `pub fn tan(x: f64) -> f64 with Mut, Div, Panic {` — *math/pure.sio*
 - `pub fn atan(x: f64) -> f64 with Mut, Div, Panic {` — *math/pure.sio*
 - `pub fn asin(x: f64) -> f64 with Mut, Div, Panic {` — *math/pure.sio*
@@ -5959,6 +6594,8 @@ organized by module. Generated from source on the date shown below.
 - `pub fn tanh(x: f64) -> f64 with Mut, Div, Panic {` — *math/pure.sio*
 - `pub fn log_sum_exp(a: f64, b: f64) -> f64 with Mut, Div, Panic {` — *math/pure.sio*
 - `pub fn main() -> i32 with IO, Mut, Div, Panic {` — *math/pure.sio*
+- `pub fn qd_zero() -> Qd128 {` — *math/qd128_core.sio*
+- `pub fn qd_from_f64(a: f64) -> Qd128 {` — *math/qd128_core.sio*
 - `pub fn qd_zero() -> Qd128 {` — *math/qd128.sio*
 - `pub fn qd_from_f64(a: f64) -> Qd128 {` — *math/qd128.sio*
 - `pub fn qd_from_dd(a: Dd64) -> Qd128 with Mut {` — *math/qd128.sio*
@@ -5985,8 +6622,6 @@ organized by module. Generated from source on the date shown below.
 - `pub fn qd_powi(a: Qd128, n: i64) -> Qd128 with Mut, Div, Panic {` — *math/qd128.sio*
 - `pub fn qd_pow(a: Qd128, b: Qd128) -> Qd128 with Mut, Div, Panic {` — *math/qd128.sio*
 - `pub fn qd_log10(a: Qd128) -> Qd128 with Mut, Div, Panic {` — *math/qd128.sio*
-- `pub fn qd_zero() -> Qd128 {` — *math/qd128_core.sio*
-- `pub fn qd_from_f64(a: f64) -> Qd128 {` — *math/qd128_core.sio*
 - `pub fn rat_invalid() -> Rational { return Rational { num: 0, den: 0 }; }` — *math/rational.sio*
 - `pub fn rat_valid(a: Rational) -> bool { return a.den != 0; }` — *math/rational.sio*
 - `pub fn rat_make(n: i64, d: i64) -> Rational with Mut, Div, Panic {` — *math/rational.sio*
@@ -6078,6 +6713,12 @@ organized by module. Generated from source on the date shown below.
 - `pub fn sed64_normalize(s: Sedenion64) -> Sedenion64 with Panic {` — *math/sedenion64.sio*
 - `pub fn sed64_putative_inv(s: Sedenion64) -> Sedenion64 with Panic {` — *math/sedenion64.sio*
 - `pub fn sed64_zero_divisor_distance(s: Sedenion64) -> f64 {` — *math/sedenion64.sio*
+- `pub fn f128_to_hex_string(x: f128) -> string with Mut, Panic, Div {` — *math/softfloat_f128_fmt.sio*
+- `pub fn print_f128_hex(x: f128) with IO, Mut, Panic, Div {` — *math/softfloat_f128_fmt.sio*
+- `pub fn println_f128_hex(x: f128) with IO, Mut, Panic, Div {` — *math/softfloat_f128_fmt.sio*
+- `pub fn f128_to_string(x: f128) -> string with Mut, Panic, Div {` — *math/softfloat_f128_fmt.sio*
+- `pub fn print_f128(x: f128) with IO, Mut, Panic, Div {` — *math/softfloat_f128_fmt.sio*
+- `pub fn println_f128(x: f128) with IO, Mut, Panic, Div {` — *math/softfloat_f128_fmt.sio*
 - `pub fn f128_bits_soft_add(a: F128Bits, b: F128Bits) -> F128Bits with Mut, Panic, Div {` — *math/softfloat_f128.sio*
 - `pub fn f128_bits_soft_sub(a: F128Bits, b: F128Bits) -> F128Bits with Mut, Panic, Div {` — *math/softfloat_f128.sio*
 - `pub fn f128_bits_soft_mul(a: F128Bits, b: F128Bits) -> F128Bits with Mut, Panic, Div {` — *math/softfloat_f128.sio*
@@ -6098,12 +6739,6 @@ organized by module. Generated from source on the date shown below.
 - `pub fn f128_from_limbs(lo: i64, hi: i64) -> f128 {` — *math/softfloat_f128.sio*
 - `pub fn f128_to_lo(x: f128) -> i64 {` — *math/softfloat_f128.sio*
 - `pub fn f128_to_hi(x: f128) -> i64 {` — *math/softfloat_f128.sio*
-- `pub fn f128_to_hex_string(x: f128) -> string with Mut, Panic, Div {` — *math/softfloat_f128_fmt.sio*
-- `pub fn print_f128_hex(x: f128) with IO, Mut, Panic, Div {` — *math/softfloat_f128_fmt.sio*
-- `pub fn println_f128_hex(x: f128) with IO, Mut, Panic, Div {` — *math/softfloat_f128_fmt.sio*
-- `pub fn f128_to_string(x: f128) -> string with Mut, Panic, Div {` — *math/softfloat_f128_fmt.sio*
-- `pub fn print_f128(x: f128) with IO, Mut, Panic, Div {` — *math/softfloat_f128_fmt.sio*
-- `pub fn println_f128(x: f128) with IO, Mut, Panic, Div {` — *math/softfloat_f128_fmt.sio*
 - `pub fn f256_bits_soft_add(a: F256Bits, b: F256Bits) -> F256Bits with Mut, Panic, Div {` — *math/softfloat_f256.sio*
 - `pub fn f256_bits_soft_sub(a: F256Bits, b: F256Bits) -> F256Bits with Mut, Panic, Div {` — *math/softfloat_f256.sio*
 - `pub fn f128_bits_zero() -> F128Bits {` — *math/wide_float.sio*
@@ -6129,19 +6764,8 @@ organized by module. Generated from source on the date shown below.
 
 ## Medical Computing (`stdlib/medical/`)
 
-**83 public functions** across 14 files
+**48 public functions** across 9 files
 
-- `pub fn predict_treatment_response(` — *medical/clinical_orc.sio*
-- `pub fn compute_trajectory_trend(` — *medical/clinical_orc.sio*
-- `pub fn sweep_ppi_thresholds(` — *medical/clinical_orc.sio*
-- `pub fn compute_e_value(effect_rr: f64) -> f64 {` — *medical/clinical_orc.sio*
-- `pub fn extract_features(profile: &ClinicalCurvatureProfile) -> CurvatureFeatureVector {` — *medical/clinical_orc.sio*
-- `pub fn normalize_features(` — *medical/clinical_orc.sio*
-- `pub fn test_treatment_prediction() -> bool {` — *medical/clinical_orc.sio*
-- `pub fn test_e_value() -> bool {` — *medical/clinical_orc.sio*
-- `pub fn test_feature_extraction() -> bool {` — *medical/clinical_orc.sio*
-- `pub fn test_trajectory_trend() -> bool {` — *medical/clinical_orc.sio*
-- `pub fn run_clinical_orc_tests() -> bool {` — *medical/clinical_orc.sio*
 - `pub fn cyp_1a2() -> i32 { 1 }` — *medical/cyp450_fano.sio*
 - `pub fn cyp_2c9() -> i32 { 2 }` — *medical/cyp450_fano.sio*
 - `pub fn cyp_2c8() -> i32 { 3 }` — *medical/cyp450_fano.sio*
@@ -6160,30 +6784,6 @@ organized by module. Generated from source on the date shown below.
 - `pub fn cardiology_cascade() -> CYP450Cascade with Mut, Panic {` — *medical/cyp450_fano.sio*
 - `pub fn gi_antiplatelet_cascade() -> CYP450Cascade with Mut, Panic {` — *medical/cyp450_fano.sio*
 - `pub fn transplant_cascade() -> CYP450Cascade with Mut, Panic {` — *medical/cyp450_fano.sio*
-- `pub fn drug_ssri() -> i32 { 1 }` — *medical/drug_cascade.sio*
-- `pub fn drug_snri() -> i32 { 2 }` — *medical/drug_cascade.sio*
-- `pub fn drug_benzo() -> i32 { 3 }` — *medical/drug_cascade.sio*
-- `pub fn drug_typical_ap() -> i32 { 4 }` — *medical/drug_cascade.sio*
-- `pub fn drug_atypical_ap() -> i32 { 5 }` — *medical/drug_cascade.sio*
-- `pub fn drug_mood_stabilizer() -> i32 { 6 }` — *medical/drug_cascade.sio*
-- `pub fn drug_stimulant() -> i32 { 7 }` — *medical/drug_cascade.sio*
-- `pub fn cascade_is_on_fano_line(a: i32, b: i32, c: i32) -> bool with Mut, Panic, Div {` — *medical/drug_cascade.sio*
-- `pub fn cascade_classify_triple(a: i32, b: i32, c: i32) -> i32 with Mut, Panic, Div {` — *medical/drug_cascade.sio*
-- `pub fn cascade_compute_partition() -> [i32; 3] with Mut, Panic, Div {` — *medical/drug_cascade.sio*
-- `pub fn cascade_new() -> DrugCascade {` — *medical/drug_cascade.sio*
-- `pub fn cascade_add(c: DrugCascade, drug: i32, day: i32, resp: f64) -> DrugCascade with Mut, Panic, Div {` — *medical/drug_cascade.sio*
-- `pub fn cascade_nonassoc_fraction(c: DrugCascade) -> f64 with Mut, Panic, Div {` — *medical/drug_cascade.sio*
-- `pub fn cascade_list_nonassoc(c: DrugCascade, out_i: &![i32; 16], out_j: &![i32; 16], out_k: &![i32; 16]) -> i32 with Mut, Panic, Div {` — *medical/drug_cascade.sio*
-- `pub fn cascade_energy(c: DrugCascade) -> f64 with Mut, Panic, Div {` — *medical/drug_cascade.sio*
-- `pub fn star_d_cascade() -> DrugCascade with Mut, Panic, Div {` — *medical/drug_cascade.sio*
-- `pub fn alternative_cascade() -> DrugCascade with Mut, Panic, Div {` — *medical/drug_cascade.sio*
-- `pub fn schizophrenia_cascade() -> DrugCascade with Mut, Panic, Div {` — *medical/drug_cascade.sio*
-- `pub fn adhd_anxiety_cascade() -> DrugCascade with Mut, Panic, Div {` — *medical/drug_cascade.sio*
-- `pub fn shared_fano_line(a: i32, b: i32) -> i32 with Mut, Panic, Div {` — *medical/drug_cascade.sio*
-- `pub fn aa_class(aa: i32) -> i32 {` — *medical/genetic_code_168.sio*
-- `pub fn build_codon_table() -> [i32; 64] with Mut, Panic, Div {` — *medical/genetic_code_168.sio*
-- `pub fn hamming_z26(a: i32, b: i32) -> i32 {` — *medical/genetic_code_168.sio*
-- `pub fn is_on_pg_line(a: i32, b: i32, c: i32) -> bool {` — *medical/genetic_code_168.sio*
 - `pub fn medical_module_ready() -> i32 { 1 }` — *medical/mod.sio*
 - `pub fn eeg_band_data_new(n_ch: i32, band: i32) -> EegBandData {` — *medical/sedenion_eeg.sio*
 - `pub fn eeg_multiband_new(n_ch: i32) -> EegMultiBandData {` — *medical/sedenion_eeg.sio*
@@ -6257,7 +6857,7 @@ organized by module. Generated from source on the date shown below.
 - `pub fn omega_matrix_new(dim: i64) -> OmegaMatrix {` — *medlang/population/variability.sio*
 - `pub fn omega_matrix_diagonal(variances: &Vec<f64>) -> OmegaMatrix {` — *medlang/population/variability.sio*
 - `pub fn omega_get(omega: &OmegaMatrix, i: i64, j: i64) -> f64 {` — *medlang/population/variability.sio*
-- `pub fn omega_set(omega: &OmegaMatrix, i: i64, j: i64, value: f64) {` — *medlang/population/variability.sio*
+- `pub fn omega_set(omega: &!OmegaMatrix, i: i64, j: i64, value: f64) {` — *medlang/population/variability.sio*
 - `pub fn omega_variance(omega: &OmegaMatrix, i: i64) -> f64 {` — *medlang/population/variability.sio*
 - `pub fn omega_std(omega: &OmegaMatrix, i: i64) -> f64 {` — *medlang/population/variability.sio*
 - `pub fn omega_correlation(omega: &OmegaMatrix, i: i64, j: i64) -> f64 {` — *medlang/population/variability.sio*
@@ -6491,7 +7091,7 @@ organized by module. Generated from source on the date shown below.
 
 ## Neural Networks (`stdlib/nn/`)
 
-**173 public functions** across 23 files
+**174 public functions** across 23 files
 
 - `pub fn AD2_VAR() -> i32 { 0 }` — *nn/autograd_v2.sio*
 - `pub fn AD2_ADD() -> i32 { 1 }` — *nn/autograd_v2.sio*
@@ -6530,6 +7130,22 @@ organized by module. Generated from source on the date shown below.
 - `pub fn tape_backward(t: Tape, output: i32) -> Tape with Mut, Div, Panic {` — *nn/autograd_v2.sio*
 - `pub fn tape_value(t: &Tape, idx: i32) -> f64 with Panic {` — *nn/autograd_v2.sio*
 - `pub fn tape_grad(t: &Tape, idx: i32) -> f64 with Panic {` — *nn/autograd_v2.sio*
+- `pub fn vec4_new(v0: f64, v1: f64, v2: f64, v3: f64) -> Vec4 {` — *nn/dense_layer.sio*
+- `pub fn vec4_zero() -> Vec4 {` — *nn/dense_layer.sio*
+- `pub fn vec4_ones() -> Vec4 {` — *nn/dense_layer.sio*
+- `pub fn vec4_add(a: Vec4, b: Vec4) -> Vec4 {` — *nn/dense_layer.sio*
+- `pub fn vec4_scale(vec: Vec4, scalar: f64) -> Vec4 {` — *nn/dense_layer.sio*
+- `pub fn vec4_dot(a: Vec4, b: Vec4) -> f64 {` — *nn/dense_layer.sio*
+- `pub fn vec4_apply_activation(vec: Vec4, activation: i64) -> Vec4 {` — *nn/dense_layer.sio*
+- `pub fn mat4x4_identity() -> Mat4x4 {` — *nn/dense_layer.sio*
+- `pub fn mat4x4_zeros() -> Mat4x4 {` — *nn/dense_layer.sio*
+- `pub fn mat4x4_mul_vec(weights: Mat4x4, input: Vec4) -> Vec4 {` — *nn/dense_layer.sio*
+- `pub fn dense_layer4_new(weights: Mat4x4, bias: Vec4, activation: i64) -> DenseLayer4 {` — *nn/dense_layer.sio*
+- `pub fn dense_layer4_identity() -> DenseLayer4 {` — *nn/dense_layer.sio*
+- `pub fn dense_layer4_forward(layer: DenseLayer4, input: Vec4) -> Vec4 {` — *nn/dense_layer.sio*
+- `pub fn mlp_4_4_4_new(layer1: DenseLayer4, layer2: DenseLayer4) -> MLP_4_4_4 {` — *nn/dense_layer.sio*
+- `pub fn mlp_4_4_4_forward(model: MLP_4_4_4, input: Vec4) -> Vec4 {` — *nn/dense_layer.sio*
+- `pub fn backward(tape: Tape, out: i64) -> Tape {` — *nn/dense.sio*
 - `pub fn dense_new(w: f64, b: f64) -> DenseLayer {` — *nn/dense.sio*
 - `pub fn dense_forward(layer: DenseLayer, x: f64) -> Tape {` — *nn/dense.sio*
 - `pub fn dense_output(t: Tape) -> f64 {` — *nn/dense.sio*
@@ -6559,21 +7175,6 @@ organized by module. Generated from source on the date shown below.
 - `pub fn dense2_update(layer: Dense2Layer, dw1: f64, dw2: f64, db: f64, lr: f64) -> Dense2Layer {` — *nn/dense2.sio*
 - `pub fn mse_loss(predicted: f64, target: f64) -> f64 {` — *nn/dense2.sio*
 - `pub fn mse_loss_grad(predicted: f64, target: f64) -> f64 {` — *nn/dense2.sio*
-- `pub fn vec4_new(v0: f64, v1: f64, v2: f64, v3: f64) -> Vec4 {` — *nn/dense_layer.sio*
-- `pub fn vec4_zero() -> Vec4 {` — *nn/dense_layer.sio*
-- `pub fn vec4_ones() -> Vec4 {` — *nn/dense_layer.sio*
-- `pub fn vec4_add(a: Vec4, b: Vec4) -> Vec4 {` — *nn/dense_layer.sio*
-- `pub fn vec4_scale(vec: Vec4, scalar: f64) -> Vec4 {` — *nn/dense_layer.sio*
-- `pub fn vec4_dot(a: Vec4, b: Vec4) -> f64 {` — *nn/dense_layer.sio*
-- `pub fn vec4_apply_activation(vec: Vec4, activation: i64) -> Vec4 {` — *nn/dense_layer.sio*
-- `pub fn mat4x4_identity() -> Mat4x4 {` — *nn/dense_layer.sio*
-- `pub fn mat4x4_zeros() -> Mat4x4 {` — *nn/dense_layer.sio*
-- `pub fn mat4x4_mul_vec(weights: Mat4x4, input: Vec4) -> Vec4 {` — *nn/dense_layer.sio*
-- `pub fn dense_layer4_new(weights: Mat4x4, bias: Vec4, activation: i64) -> DenseLayer4 {` — *nn/dense_layer.sio*
-- `pub fn dense_layer4_identity() -> DenseLayer4 {` — *nn/dense_layer.sio*
-- `pub fn dense_layer4_forward(layer: DenseLayer4, input: Vec4) -> Vec4 {` — *nn/dense_layer.sio*
-- `pub fn mlp_4_4_4_new(layer1: DenseLayer4, layer2: DenseLayer4) -> MLP_4_4_4 {` — *nn/dense_layer.sio*
-- `pub fn mlp_4_4_4_forward(model: MLP_4_4_4, input: Vec4) -> Vec4 {` — *nn/dense_layer.sio*
 - `pub fn epistemic_layer_grad_zero(out: &!EpistemicLayerGrad) with Mut, Panic {` — *nn/epistemic_backward.sio*
 - `pub fn epistemic_dense_backward(` — *nn/epistemic_backward.sio*
 - `pub fn epistemic_dense_update(` — *nn/epistemic_backward.sio*
@@ -6690,8 +7291,18 @@ organized by module. Generated from source on the date shown below.
 
 ## Differential Equations (`stdlib/ode/`)
 
-**23 public functions** across 21 files
+**43 public functions** across 22 files
 
+- `pub fn solve_dp54_dynamic(` — *ode/checked_dynamic.sio*
+- `pub fn solve_verlet_dynamic(` — *ode/checked_dynamic.sio*
+- `pub fn solve_dp54_64(` — *ode/checked64.sio*
+- `pub fn solve_verlet64(` — *ode/checked64.sio*
+- `pub fn diagnostic_observer_workspace(capacity:i64)->i64 with Div {` — *ode/diagnostic_observer.sio*
+- `pub fn diagnostic_observer_init(c:&!NumericBuffer,capacity:i64,max_observations:i64,direction:i64)->i64 with Mut,Div,Panic {` — *ode/diagnostic_observer.sio*
+- `pub fn diagnostic_observer_push(c:&!NumericBuffer,time:f64,quantity:f64,event:f64)->i64 with Mut,Div,Panic {` — *ode/diagnostic_observer.sio*
+- `pub fn diagnostic_observer_status(c:&NumericBuffer)->i64 with Div,Panic {` — *ode/diagnostic_observer.sio*
+- `pub fn diagnostic_observer_get_into(c:&NumericBuffer,index:i64,out:&!NumericBuffer)->i64 with Mut,Div,Panic {` — *ode/diagnostic_observer.sio*
+- `pub fn diagnostic_observer_info(c:&NumericBuffer)->DiagnosticObserverInfo with Div,Panic {` — *ode/diagnostic_observer.sio*
 - `pub fn pk_conc_dual_val(t: f64, ka: EpistemicDual, ke: EpistemicDual,` — *ode/epistemic_pk_fit.sio*
 - `pub fn pk_conc_dual_dot(t: f64, ka: EpistemicDual, ke: EpistemicDual,` — *ode/epistemic_pk_fit.sio*
 - `pub fn epistemic_pk_gauss_newton(` — *ode/epistemic_pk_fit.sio*
@@ -6705,15 +7316,25 @@ organized by module. Generated from source on the date shown below.
 - `pub fn rk4_step(` — *ode/rk4.sio*
 - `pub fn rk4_integrate(` — *ode/rk4.sio*
 - `pub fn main() -> i32 with IO, Mut, Div, Panic {` — *ode/rk4.sio*
+- `pub fn ros4_workspace(n:i64)->Ros4Workspace with Mut,Div {` — *ode/rosenbrock_dynamic.sio*
+- `pub fn ros4_step_dynamic(` — *ode/rosenbrock_dynamic.sio*
+- `pub fn solve_rosenbrock4_dynamic(rhs:fn(f64,&NumericBuffer,&!NumericBuffer)->i64 with Mut,Div,Panic,` — *ode/rosenbrock_dynamic.sio*
+- `pub fn solve_rosenbrock4_observed(rhs:fn(f64,&NumericBuffer,&!NumericBuffer)->i64 with Mut,Div,Panic,` — *ode/rosenbrock_dynamic.sio*
 - `pub fn default_options() -> ODEOptions {` — *ode/solver.sio*
 - `pub fn high_accuracy_options() -> ODEOptions {` — *ode/solver.sio*
 - `pub fn fast_options() -> ODEOptions {` — *ode/solver.sio*
-- `pub fn solve_rk45_exp_decay(u0: f64, t_start: f64, t_end: f64, opts: ODEOptions) -> SolverODESolution with Mut, Div {` — *ode/solver.sio*
-- `pub fn solve_rk4_exp_decay(u0: f64, t_start: f64, t_end: f64, n_steps: i64) -> SolverODESolution with Mut, Div {` — *ode/solver.sio*
-- `pub fn solve_pk3_rk4(s0: State3, p: SolverPKParams3, t_end: f64, n_steps: i64) -> ODESolutionVec3 with Mut, Div {` — *ode/solver.sio*
-- `pub fn solve_bdf1_exp_decay(u0: f64, t_start: f64, t_end: f64, n_steps: i64) -> SolverODESolution with Mut, Div {` — *ode/solver.sio*
-- `pub fn solver_exp_decay_analytical(u0: f64, k: f64, t: f64) -> f64 {` — *ode/solver.sio*
-- `pub fn exp_decay_analytical(u0: f64, k: f64, t: f64) -> f64 {` — *ode/solver.sio*
+- `pub fn solve_rk45_exp_decay(u0:f64,t_start:f64,t_end:f64,opts:ODEOptions)->SolverODESolution with Mut,Div {` — *ode/solver.sio*
+- `pub fn solve_rk4_exp_decay(u0:f64,t_start:f64,t_end:f64,n_steps:i64)->SolverODESolution with Mut,Div {` — *ode/solver.sio*
+- `pub fn solver_default_pk3_params() -> SolverPKParams3 {` — *ode/solver.sio*
+- `pub fn solve_pk3_rk4(s0:State3,p:SolverPKParams3,t_end:f64,n_steps:i64)->ODESolutionVec3 with Mut,Div {` — *ode/solver.sio*
+- `pub fn solve_bdf1_exp_decay(u0:f64,t_start:f64,t_end:f64,n_steps:i64)->SolverODESolution with Mut,Div {` — *ode/solver.sio*
+- `pub fn solver_exp_decay_analytical(u0: f64, k: f64, t: f64) -> f64 with Mut, Div {` — *ode/solver.sio*
+- `pub fn exp_decay_analytical(u0: f64, k: f64, t: f64) -> f64 with Mut, Div {` — *ode/solver.sio*
+- `pub fn default_pk_params() -> PKParams {` — *ode/tsit5_multicomp.sio*
+- `pub fn pk_ode(state_in: PKState, t: f64, p: PKParams) -> PKDeriv {` — *ode/tsit5_multicomp.sio*
+- `pub fn tsit5_step_pk(state_in: PKState, t: f64, dt: f64, p: PKParams) -> PKStepResult {` — *ode/tsit5_multicomp.sio*
+- `pub fn default_config() -> SolverConfig {` — *ode/tsit5_multicomp.sio*
+- `pub fn solve_pk(` — *ode/tsit5_multicomp.sio*
 - `pub fn main() -> i32 with IO, Mut, Div, Panic {` — *ode/tsit5.sio*
 
 ---
@@ -6778,6 +7399,12 @@ organized by module. Generated from source on the date shown below.
 - `pub fn loinc_glucose_blood() -> LOINCCode {` — *ontology/biomedical/loinc.sio*
 - `pub fn loinc_creatinine_serum() -> LOINCCode {` — *ontology/biomedical/loinc.sio*
 - `pub fn loinc_egfr() -> LOINCCode {` — *ontology/biomedical/loinc.sio*
+- `pub fn sctid_new(id: i64) -> SCTID {` — *ontology/biomedical/snomed_concept.sio*
+- `pub fn equals(self: &SCTID, other: &SCTID) -> bool {` — *ontology/biomedical/snomed_concept.sio*
+- `pub fn clone(self: &SCTID) -> SCTID {` — *ontology/biomedical/snomed_concept.sio*
+- `pub fn sctid_is_valid(id: i64) -> bool {` — *ontology/biomedical/snomed_concept.sio*
+- `pub fn snomed_concept_new(id: i64) -> SNOMEDConcept {` — *ontology/biomedical/snomed_concept.sio*
+- `pub fn snomed_concept_with_tag(id: i64, tag: i64) -> SNOMEDConcept {` — *ontology/biomedical/snomed_concept.sio*
 - `pub fn padf0(x: i64) -> i64 { x + 0 }` — *ontology/biomedical/snomed.sio*
 - `pub fn padf1(x: i64) -> i64 { x + 1 }` — *ontology/biomedical/snomed.sio*
 - `pub fn padf2(x: i64) -> i64 { x + 2 }` — *ontology/biomedical/snomed.sio*
@@ -6817,31 +7444,25 @@ organized by module. Generated from source on the date shown below.
 - `pub fn snomed_subsumes_elplus(self: &SNOMEDElplus, sub_sctid: i64, sup_sctid: i64) -> bool with Div, Panic {` — *ontology/biomedical/snomed.sio*
 - `pub fn snomed_subsumes_ex_elplus(self: &SNOMEDElplus, sub_sctid: i64, type_sctid: i64, filler_sctid: i64) -> bool with Div, Panic {` — *ontology/biomedical/snomed.sio*
 - `pub fn snomed_role_targets_elplus(self: &SNOMEDElplus, source_sctid: i64, type_sctid: i64, out: &![i64; 64]) -> i64 with Mut, Div, Panic {` — *ontology/biomedical/snomed.sio*
-- `pub fn sctid_new(id: i64) -> SCTID {` — *ontology/biomedical/snomed_concept.sio*
-- `pub fn equals(self: &SCTID, other: &SCTID) -> bool {` — *ontology/biomedical/snomed_concept.sio*
-- `pub fn clone(self: &SCTID) -> SCTID {` — *ontology/biomedical/snomed_concept.sio*
-- `pub fn sctid_is_valid(id: i64) -> bool {` — *ontology/biomedical/snomed_concept.sio*
-- `pub fn snomed_concept_new(id: i64) -> SNOMEDConcept {` — *ontology/biomedical/snomed_concept.sio*
-- `pub fn snomed_concept_with_tag(id: i64, tag: i64) -> SNOMEDConcept {` — *ontology/biomedical/snomed_concept.sio*
 - `pub fn cache_entry_new(iri_id: i64) -> CacheEntry {` — *ontology/cache.sio*
-- `pub fn cache_entry_mark_loaded(entry: &CacheEntry, size: i64, time: i64) with Mut {` — *ontology/cache.sio*
-- `pub fn cache_entry_touch(entry: &CacheEntry, time: i64) with Mut {` — *ontology/cache.sio*
-- `pub fn cache_entry_evict(entry: &CacheEntry) with Mut {` — *ontology/cache.sio*
+- `pub fn cache_entry_mark_loaded(entry: &!CacheEntry, size: i64, time: i64) with Mut {` — *ontology/cache.sio*
+- `pub fn cache_entry_touch(entry: &!CacheEntry, time: i64) with Mut {` — *ontology/cache.sio*
+- `pub fn cache_entry_evict(entry: &!CacheEntry) with Mut {` — *ontology/cache.sio*
 - `pub fn ontology_cache_new(max_size: i64) -> OntologyCache {` — *ontology/cache.sio*
 - `pub fn ontology_cache_default() -> OntologyCache {` — *ontology/cache.sio*
 - `pub fn cache_find(cache: &OntologyCache, iri_id: i64) -> i64 with Epistemic {` — *ontology/cache.sio*
 - `pub fn cache_contains(cache: &OntologyCache, iri_id: i64) -> bool with Epistemic {` — *ontology/cache.sio*
-- `pub fn cache_put(cache: &OntologyCache, iri_id: i64, size: i64) -> bool with Mut, Epistemic {` — *ontology/cache.sio*
-- `pub fn cache_get(cache: &OntologyCache, iri_id: i64) -> bool with Mut, Epistemic {` — *ontology/cache.sio*
-- `pub fn cache_clear(cache: &OntologyCache) with Mut, Epistemic {` — *ontology/cache.sio*
+- `pub fn cache_put(cache: &!OntologyCache, iri_id: i64, size: i64) -> bool with Mut, Epistemic {` — *ontology/cache.sio*
+- `pub fn cache_get(cache: &!OntologyCache, iri_id: i64) -> bool with Mut, Epistemic {` — *ontology/cache.sio*
+- `pub fn cache_clear(cache: &!OntologyCache) with Mut, Epistemic {` — *ontology/cache.sio*
 - `pub fn cache_hit_rate(cache: &OntologyCache) -> f64 {` — *ontology/cache.sio*
 - `pub fn cache_utilization(cache: &OntologyCache) -> f64 {` — *ontology/cache.sio*
 - `pub fn lazy_ontology_new(iri: i64) -> LazyOntology {` — *ontology/cache.sio*
 - `pub fn lazy_ontology_is_loaded(ont: &LazyOntology) -> bool {` — *ontology/cache.sio*
 - `pub fn lazy_ontology_needs_loading(ont: &LazyOntology) -> bool {` — *ontology/cache.sio*
-- `pub fn lazy_ontology_mark_loading(ont: &LazyOntology) with Mut {` — *ontology/cache.sio*
-- `pub fn lazy_ontology_mark_loaded(ont: &LazyOntology, concepts: i64, properties: i64, time_ms: i64) with Mut {` — *ontology/cache.sio*
-- `pub fn lazy_ontology_mark_error(ont: &LazyOntology) with Mut {` — *ontology/cache.sio*
+- `pub fn lazy_ontology_mark_loading(ont: &!LazyOntology) with Mut {` — *ontology/cache.sio*
+- `pub fn lazy_ontology_mark_loaded(ont: &!LazyOntology, concepts: i64, properties: i64, time_ms: i64) with Mut {` — *ontology/cache.sio*
+- `pub fn lazy_ontology_mark_error(ont: &!LazyOntology) with Mut {` — *ontology/cache.sio*
 - `pub fn prefetch_hint_new(base: i64, hint_type: i64, depth: i64) -> PrefetchHint {` — *ontology/cache.sio*
 - `pub fn prefetch_subclasses(base: i64, depth: i64) -> PrefetchHint {` — *ontology/cache.sio*
 - `pub fn prefetch_superclasses(base: i64, depth: i64) -> PrefetchHint {` — *ontology/cache.sio*
@@ -6915,7 +7536,7 @@ organized by module. Generated from source on the date shown below.
 - `pub fn ontology_compute_stats(ont: &Ontology) -> OntologyStats with Epistemic {` — *ontology/model.sio*
 - `pub fn namespace_registry_new() -> NamespaceRegistry {` — *ontology/namespaces.sio*
 - `pub fn namespace_registry_with_defaults() -> NamespaceRegistry {` — *ontology/namespaces.sio*
-- `pub fn namespace_registry_add(reg: &NamespaceRegistry, ns_id: i64, is_standard: bool) {` — *ontology/namespaces.sio*
+- `pub fn namespace_registry_add(reg: &!NamespaceRegistry, ns_id: i64, is_standard: bool) {` — *ontology/namespaces.sio*
 - `pub fn namespace_registry_has(reg: &NamespaceRegistry, ns_id: i64) -> bool {` — *ontology/namespaces.sio*
 - `pub fn is_rdf_type(iri_id: i64) -> bool {` — *ontology/namespaces.sio*
 - `pub fn is_rdfs_label(iri_id: i64) -> bool {` — *ontology/namespaces.sio*
@@ -6944,10 +7565,10 @@ organized by module. Generated from source on the date shown below.
 - `pub fn sparql_select(q: &SparqlQuery, var_id: i64) {` — *ontology/query.sio*
 - `pub fn sparql_add_pattern(q: &SparqlQuery, pattern: TriplePattern) {` — *ontology/query.sio*
 - `pub fn sparql_add_filter(q: &SparqlQuery, filter: Filter) {` — *ontology/query.sio*
-- `pub fn sparql_set_limit(q: &SparqlQuery, limit: i64) with Mut {` — *ontology/query.sio*
-- `pub fn sparql_set_offset(q: &SparqlQuery, offset: i64) with Mut {` — *ontology/query.sio*
+- `pub fn sparql_set_limit(q: &!SparqlQuery, limit: i64) with Mut {` — *ontology/query.sio*
+- `pub fn sparql_set_offset(q: &!SparqlQuery, offset: i64) with Mut {` — *ontology/query.sio*
 - `pub fn sparql_result_new() -> SparqlResult {` — *ontology/query.sio*
-- `pub fn sparql_result_add(result: &SparqlResult, row: SolutionRow) with Mut {` — *ontology/query.sio*
+- `pub fn sparql_result_add(result: &!SparqlResult, row: SolutionRow) with Mut {` — *ontology/query.sio*
 - `pub fn sparql_result_count(result: &SparqlResult) -> i64 with Epistemic {` — *ontology/query.sio*
 - `pub fn triple_iri(s: i64, p: i64, o: i64) -> Triple {` — *ontology/query.sio*
 - `pub fn triple_literal(s: i64, p: i64, lit_id: i64, lit_value: f64) -> Triple {` — *ontology/query.sio*
@@ -6970,10 +7591,10 @@ organized by module. Generated from source on the date shown below.
 - `pub fn reasoner_add_superclass(r: &Reasoner, sub_idx: i64, super_id: i64) with Epistemic {` — *ontology/reasoner.sio*
 - `pub fn reasoner_init_individuals(r: &Reasoner, n_individuals: i64) {` — *ontology/reasoner.sio*
 - `pub fn reasoner_add_individual_type(r: &Reasoner, ind_idx: i64, type_id: i64) with Epistemic {` — *ontology/reasoner.sio*
-- `pub fn reasoner_compute_closure(r: &Reasoner) with Mut, Epistemic {` — *ontology/reasoner.sio*
-- `pub fn reasoner_compute_depths(r: &Reasoner) with Mut, Epistemic {` — *ontology/reasoner.sio*
-- `pub fn reasoner_classify_individuals(r: &Reasoner) with Mut, Epistemic {` — *ontology/reasoner.sio*
-- `pub fn reasoner_materialize(r: &Reasoner) with Mut, Epistemic {` — *ontology/reasoner.sio*
+- `pub fn reasoner_compute_closure(r: &!Reasoner) with Mut, Epistemic {` — *ontology/reasoner.sio*
+- `pub fn reasoner_compute_depths(r: &!Reasoner) with Mut, Epistemic {` — *ontology/reasoner.sio*
+- `pub fn reasoner_classify_individuals(r: &!Reasoner) with Mut, Epistemic {` — *ontology/reasoner.sio*
+- `pub fn reasoner_materialize(r: &!Reasoner) with Mut, Epistemic {` — *ontology/reasoner.sio*
 - `pub fn reasoner_is_subclass(r: &Reasoner, sub_idx: i64, super_id: i64) -> ReasoningResult with Epistemic {` — *ontology/reasoner.sio*
 - `pub fn reasoner_is_instance(r: &Reasoner, ind_idx: i64, class_id: i64) -> ReasoningResult with Epistemic {` — *ontology/reasoner.sio*
 - `pub fn reasoner_all_superclasses(r: &Reasoner, class_idx: i64) -> Seq<i64> with Epistemic {` — *ontology/reasoner.sio*
@@ -8541,8 +9162,12 @@ organized by module. Generated from source on the date shown below.
 
 ## Optimization (`stdlib/optimize/`)
 
-**25 public functions** across 9 files
+**34 public functions** across 9 files
 
+- `pub fn bfgs_config_default() -> BFGSConfig {` — *optimize/bfgs.sio*
+- `pub fn bfgs_rosenbrock(params: [f64; 20]) -> f64 {` — *optimize/bfgs.sio*
+- `pub fn bfgs_bfgs_quadratic(initial: [f64; 20], n_params: i64, config: BFGSConfig) -> BFGSResult {` — *optimize/bfgs.sio*
+- `pub fn bfgs_bfgs_rosenbrock(initial: [f64; 20], n_params: i64, config: BFGSConfig) -> BFGSResult {` — *optimize/bfgs.sio*
 - `pub fn egrad_zeros(n: i32) -> EpistemicGradient with Panic {` — *optimize/epistemic_bfgs.sio*
 - `pub fn egrad_norm(g: &EpistemicGradient) -> f64 with Mut, Div, Panic {` — *optimize/epistemic_bfgs.sio*
 - `pub fn egrad_unc_norm(g: &EpistemicGradient) -> f64 with Mut, Div, Panic {` — *optimize/epistemic_bfgs.sio*
@@ -8561,13 +9186,18 @@ organized by module. Generated from source on the date shown below.
 - `pub fn ebfgs_update(` — *optimize/epistemic_bfgs.sio*
 - `pub fn ebfgs_compute_step_size(` — *optimize/epistemic_bfgs.sio*
 - `pub fn epistemic_bfgs_quadratic(` — *optimize/epistemic_bfgs.sio*
-- `pub fn main() {` — *optimize/epistemic_bfgs.sio*
+- `pub fn main() with Mut, Panic, Div {` — *optimize/epistemic_bfgs.sio*
 - `pub fn nm_config_default() -> NMConfig {` — *optimize/nelder_mead.sio*
 - `pub fn quadratic(params: [f64; 20]) -> f64 {` — *optimize/nelder_mead.sio*
 - `pub fn rosenbrock(params: [f64; 20]) -> f64 {` — *optimize/nelder_mead.sio*
 - `pub fn find_best_worst(s: Simplex) -> BestWorstResult with Mut {` — *optimize/nelder_mead.sio*
 - `pub fn nm_quadratic(initial: [f64; 20], n_params: i64, config: NMConfig) -> NMResult with Mut, Div {` — *optimize/nelder_mead.sio*
 - `pub fn nm_rosenbrock(initial: [f64; 20], n_params: i64, config: NMConfig) -> NMResult with Mut, Div {` — *optimize/nelder_mead.sio*
+- `pub fn uncertainty_new(n: i64) -> ParamUncertainty {` — *optimize/uncertainty.sio*
+- `pub fn t_quantile_95(dof: i64) -> f64 {` — *optimize/uncertainty.sio*
+- `pub fn estimate_covariance_from_jacobian(` — *optimize/uncertainty.sio*
+- `pub fn propagate_uncertainty_linear(` — *optimize/uncertainty.sio*
+- `pub fn relative_se(estimate: f64, se: f64) -> f64 {` — *optimize/uncertainty.sio*
 
 ---
 
@@ -8612,18 +9242,18 @@ organized by module. Generated from source on the date shown below.
 
 **6 public functions** across 2 files
 
+- `pub fn emit_scalar(op: string, cs: i64, val: f64) with IO, Mut, Div, Panic {` — *parity/emit_mat.sio*
+- `pub fn emit_mat(op: string, cs: i64, role: string, m: MatNM) with IO, Mut, Div, Panic {` — *parity/emit_mat.sio*
 - `pub fn emit1(name: string, a_bits: i64, val_bits: i64) with IO, Mut, Panic {` — *parity/emit.sio*
 - `pub fn emit2(name: string, a_bits: i64, b_bits: i64, val_bits: i64) with IO, Mut, Panic {` — *parity/emit.sio*
 - `pub fn emit3(name: string, a_bits: i64, b_bits: i64, c_bits: i64, val_bits: i64) with IO, Mut, Panic {` — *parity/emit.sio*
 - `pub fn emit4(name: string, a_bits: i64, b_bits: i64, c_bits: i64, d_bits: i64, val_bits: i64) with IO, Mut, Panic {` — *parity/emit.sio*
-- `pub fn emit_scalar(op: string, cs: i64, val: f64) with IO, Mut, Div, Panic {` — *parity/emit_mat.sio*
-- `pub fn emit_mat(op: string, cs: i64, role: string, m: MatNM) with IO, Mut, Div, Panic {` — *parity/emit_mat.sio*
 
 ---
 
 ## particle_physics (`stdlib/particle_physics/`)
 
-**676 public functions** across 38 files
+**832 public functions** across 41 files
 
 - `pub fn eemm_qed_amplitude_sq(s: f64, cos_theta: f64) -> Epistemic with Mut, Div, Panic {` — *particle_physics/amplitude.sio*
 - `pub fn eemm_qed_diff_cross_section(s: f64, cos_theta: f64) -> Epistemic with Mut, Div, Panic {` — *particle_physics/amplitude.sio*
@@ -8647,6 +9277,10 @@ organized by module. Generated from source on the date shown below.
 - `pub fn h_decay_width_gammagamma(m_h: f64) -> f64 with Mut, Div, Panic {` — *particle_physics/amplitude.sio*
 - `pub fn h_decay_width_gg(m_h: f64) -> f64 with Mut, Div, Panic {` — *particle_physics/amplitude.sio*
 - `pub fn h_total_width() -> f64 with Mut, Div, Panic {` — *particle_physics/amplitude.sio*
+- `pub fn alpha_s_lo_ep_gum(mu_gev: f64) -> Epistemic with Perturbative, Mut, Div, Panic {` — *particle_physics/approx_effects_gum.sio*
+- `pub fn ggh_lo_xsec_ep_gum(m_h_gev: f64, sqrt_s_gev: f64) -> Epistemic with Perturbative, Mut, Div, Panic {` — *particle_physics/approx_effects_gum.sio*
+- `pub fn z_partial_width_nwa_ep_gum(` — *particle_physics/approx_effects_gum.sio*
+- `pub fn h_bb_width_nwa_ep_gum() -> Epistemic with NarrowWidthApproximation, Perturbative, Mut, Div, Panic {` — *particle_physics/approx_effects_gum.sio*
 - `pub fn alpha_s_lo_ep(mu_gev: f64) -> Epistemic with Perturbative, Mut, Div, Panic {` — *particle_physics/approx_effects.sio*
 - `pub fn ggh_lo_xsec_ep(m_h_gev: f64, sqrt_s_gev: f64) -> Epistemic with Perturbative, Mut, Div, Panic {` — *particle_physics/approx_effects.sio*
 - `pub fn z_partial_width_nwa_ep(` — *particle_physics/approx_effects.sio*
@@ -8668,10 +9302,6 @@ organized by module. Generated from source on the date shown below.
 - `pub fn approx_ack_nwa() -> i64 with NarrowWidthApproximation {` — *particle_physics/approx_effects.sio*
 - `pub fn run_approx_effects_tests() with IO, Perturbative, NarrowWidthApproximation, Mut, Div, Panic {` — *particle_physics/approx_effects.sio*
 - `pub fn main() -> i32 with IO, Perturbative, NarrowWidthApproximation, Mut, Div, Panic {` — *particle_physics/approx_effects.sio*
-- `pub fn alpha_s_lo_ep_gum(mu_gev: f64) -> Epistemic with Perturbative, Mut, Div, Panic {` — *particle_physics/approx_effects_gum.sio*
-- `pub fn ggh_lo_xsec_ep_gum(m_h_gev: f64, sqrt_s_gev: f64) -> Epistemic with Perturbative, Mut, Div, Panic {` — *particle_physics/approx_effects_gum.sio*
-- `pub fn z_partial_width_nwa_ep_gum(` — *particle_physics/approx_effects_gum.sio*
-- `pub fn h_bb_width_nwa_ep_gum() -> Epistemic with NarrowWidthApproximation, Perturbative, Mut, Div, Panic {` — *particle_physics/approx_effects_gum.sio*
 - `pub fn mediator_zprime(m_med: f64, g_dm: f64, g_q: f64) -> Mediator {` — *particle_physics/bsm_physics.sio*
 - `pub fn mediator_scalar(m_med: f64, g_dm: f64, g_q: f64) -> Mediator {` — *particle_physics/bsm_physics.sio*
 - `pub fn neutralino_1(mass: f64) -> SUSYParticle {` — *particle_physics/bsm_physics.sio*
@@ -8749,6 +9379,12 @@ organized by module. Generated from source on the date shown below.
 - `pub fn calorimeter_resolution_ep(e: f64, a: f64, b: f64, c: f64) -> Epistemic with Div {` — *particle_physics/detector.sio*
 - `pub fn highland_scattering_ep(momentum: f64, mass: f64, charge: f64, x_over_x0: f64) -> Epistemic with Div {` — *particle_physics/detector.sio*
 - `pub fn run_detector_ep_tests() with Div, Panic, Mut {` — *particle_physics/detector.sio*
+- `pub fn eemm_qed_xsec_ep(sqrt_s_gev: f64) -> Epistemic with Mut, Div, Panic {` — *particle_physics/epistemic_chain_z.sio*
+- `pub fn eemm_qed_xsec_pb_gated(sqrt_s_gev: f64, min_conf: i64) -> Epistemic with Mut, Div, Panic {` — *particle_physics/epistemic_chain_z.sio*
+- `pub fn z_width_ee_ep() -> Epistemic with Mut, Div, Panic {` — *particle_physics/epistemic_chain_z.sio*
+- `pub fn z_width_ee_budget() -> [f64; 4] with Mut, Div, Panic {` — *particle_physics/epistemic_chain_z.sio*
+- `pub fn chain_gate_qed_xsec(sqrt_s_gev: f64, min_conf: i64) -> i64 with Mut, Div, Panic {` — *particle_physics/epistemic_chain_z.sio*
+- `pub fn chain_gate_z_width(min_conf: i64) -> i64 with Mut, Div, Panic {` — *particle_physics/epistemic_chain_z.sio*
 - `pub fn eemm_qed_xsec_ep(sqrt_s_gev: f64) -> Epistemic with Mut, Div, Panic {` — *particle_physics/epistemic_chain.sio*
 - `pub fn eemm_qed_xsec_pb_gated(sqrt_s_gev: f64, min_conf: i64) -> Epistemic with Mut, Div, Panic {` — *particle_physics/epistemic_chain.sio*
 - `pub fn z_width_ee_ep() -> Epistemic with Mut, Div, Panic {` — *particle_physics/epistemic_chain.sio*
@@ -8774,12 +9410,6 @@ organized by module. Generated from source on the date shown below.
 - `pub fn chain_gate_higgs_gg(sqrt_s: f64, min_conf: i64) -> i64 with Mut, Div, Panic {` — *particle_physics/epistemic_chain.sio*
 - `pub fn test_chain7_higgs_production() with IO, Mut, Div, Panic {` — *particle_physics/epistemic_chain.sio*
 - `pub fn run_epistemic_chain_tests() with IO, Mut, Div, Panic {` — *particle_physics/epistemic_chain.sio*
-- `pub fn eemm_qed_xsec_ep(sqrt_s_gev: f64) -> Epistemic with Mut, Div, Panic {` — *particle_physics/epistemic_chain_z.sio*
-- `pub fn eemm_qed_xsec_pb_gated(sqrt_s_gev: f64, min_conf: i64) -> Epistemic with Mut, Div, Panic {` — *particle_physics/epistemic_chain_z.sio*
-- `pub fn z_width_ee_ep() -> Epistemic with Mut, Div, Panic {` — *particle_physics/epistemic_chain_z.sio*
-- `pub fn z_width_ee_budget() -> [f64; 4] with Mut, Div, Panic {` — *particle_physics/epistemic_chain_z.sio*
-- `pub fn chain_gate_qed_xsec(sqrt_s_gev: f64, min_conf: i64) -> i64 with Mut, Div, Panic {` — *particle_physics/epistemic_chain_z.sio*
-- `pub fn chain_gate_z_width(min_conf: i64) -> i64 with Mut, Div, Panic {` — *particle_physics/epistemic_chain_z.sio*
 - `pub fn event_record_new() -> EventRecord {` — *particle_physics/event_pipeline.sio*
 - `pub fn event_add_particle(ev: &!EventRecord, pdg: i64, status: i64, p: LorentzVector, charge: f64, mass: f64) with Mut {` — *particle_physics/event_pipeline.sio*
 - `pub fn compute_met(ev: &!EventRecord) -> f64 with Mut, Div, Panic {` — *particle_physics/event_pipeline.sio*
@@ -8957,6 +9587,162 @@ organized by module. Generated from source on the date shown below.
 - `pub fn gev2_to_picobarn() -> f64 {` — *particle_physics/kinematics.sio*
 - `pub fn cross_section_pb(sigma_gev2: f64) -> f64 {` — *particle_physics/kinematics.sio*
 - `pub fn decay_width_2_body(m_parent: f64, m3: f64, m4: f64, amplitude_sq: f64) -> f64 with Mut, Div, Panic {` — *particle_physics/kinematics.sio*
+- `pub fn lg_set_L(L: i64) -> i64 with Mut {` — *particle_physics/lattice_gauge.sio*
+- `pub fn lat_l() -> i64 { LG_L }` — *particle_physics/lattice_gauge.sio*
+- `pub fn lat_nd() -> i64 { 4 }` — *particle_physics/lattice_gauge.sio*
+- `pub fn lat_nsites() -> i64 with Mut, Div {` — *particle_physics/lattice_gauge.sio*
+- `pub fn lat_nlinks() -> i64 with Mut, Div {` — *particle_physics/lattice_gauge.sio*
+- `pub fn lat_flat_len() -> i64 with Mut, Div {` — *particle_physics/lattice_gauge.sio*
+- `pub fn lat_flat_cap() -> i64 { 65536 }` — *particle_physics/lattice_gauge.sio*
+- `pub fn lg_seed(seed: i64) with Mut {` — *particle_physics/lattice_gauge.sio*
+- `pub fn su2_id_w() -> f64 { 1.0 }` — *particle_physics/lattice_gauge.sio*
+- `pub fn su2_id_x() -> f64 { 0.0 }` — *particle_physics/lattice_gauge.sio*
+- `pub fn su2_id_y() -> f64 { 0.0 }` — *particle_physics/lattice_gauge.sio*
+- `pub fn su2_id_z() -> f64 { 0.0 }` — *particle_physics/lattice_gauge.sio*
+- `pub fn su2_mul(` — *particle_physics/lattice_gauge.sio*
+- `pub fn su2_dag(w: f64, x: f64, y: f64, z: f64) -> (f64, f64, f64, f64) {` — *particle_physics/lattice_gauge.sio*
+- `pub fn su2_half_re_trace(w: f64, x: f64, y: f64, z: f64) -> f64 {` — *particle_physics/lattice_gauge.sio*
+- `pub fn su2_normalize(w: f64, x: f64, y: f64, z: f64) -> (f64, f64, f64, f64) with Mut, Div, Panic {` — *particle_physics/lattice_gauge.sio*
+- `pub fn su2_random_near_id(eps: f64) -> (f64, f64, f64, f64) with Mut, Div, Panic {` — *particle_physics/lattice_gauge.sio*
+- `pub fn site_index(x: i64, y: i64, z: i64, t: i64) -> i64 {` — *particle_physics/lattice_gauge.sio*
+- `pub fn site_coords(s: i64) -> (i64, i64, i64, i64) {` — *particle_physics/lattice_gauge.sio*
+- `pub fn link_base(s: i64, mu: i64) -> i64 {` — *particle_physics/lattice_gauge.sio*
+- `pub fn neighbour(s: i64, mu: i64, sign: i64) -> i64 {` — *particle_physics/lattice_gauge.sio*
+- `pub fn link_get(lat: &[f64; 65536], s: i64, mu: i64) -> (f64, f64, f64, f64) with Mut, Div, Panic {` — *particle_physics/lattice_gauge.sio*
+- `pub fn link_set(lat: &![f64; 65536], s: i64, mu: i64, w: f64, x: f64, y: f64, z: f64) with Mut, Div, Panic {` — *particle_physics/lattice_gauge.sio*
+- `pub fn lattice_cold(lat: &![f64; 65536]) with Mut, Div, Panic {` — *particle_physics/lattice_gauge.sio*
+- `pub fn lattice_hot(lat: &![f64; 65536]) with Mut, Div, Panic {` — *particle_physics/lattice_gauge.sio*
+- `pub fn lattice_copy(src: &[f64; 65536], dst: &![f64; 65536]) with Mut, Div, Panic {` — *particle_physics/lattice_gauge.sio*
+- `pub fn ape_smear_step(` — *particle_physics/lattice_gauge.sio*
+- `pub fn ape_smear_n(` — *particle_physics/lattice_gauge.sio*
+- `pub fn plaquette_half_re(` — *particle_physics/lattice_gauge.sio*
+- `pub fn mean_plaquette(lat: &[f64; 65536]) -> f64 with Mut, Div, Panic {` — *particle_physics/lattice_gauge.sio*
+- `pub fn wilson_action(lat: &[f64; 65536], beta: f64) -> f64 with Mut, Div, Panic {` — *particle_physics/lattice_gauge.sio*
+- `pub fn metropolis_link(` — *particle_physics/lattice_gauge.sio*
+- `pub fn metropolis_sweep(lat: &![f64; 65536], beta: f64, eps: f64) -> i64 with Mut, Div, Panic {` — *particle_physics/lattice_gauge.sio*
+- `pub fn thermalize(` — *particle_physics/lattice_gauge.sio*
+- `pub fn su2_heatbath_generate(xi: f64) -> (f64, f64, f64, f64) with Mut, Div, Panic {` — *particle_physics/lattice_gauge.sio*
+- `pub fn heatbath_link(` — *particle_physics/lattice_gauge.sio*
+- `pub fn heatbath_sweep(lat: &![f64; 65536], beta: f64) -> i64 with Mut, Div, Panic {` — *particle_physics/lattice_gauge.sio*
+- `pub fn heatbath_thermalize(` — *particle_physics/lattice_gauge.sio*
+- `pub fn wilson_loop_rect(lat: &[f64; 65536], r: i64, t_len: i64) -> f64 with Mut, Div, Panic {` — *particle_physics/lattice_gauge.sio*
+- `pub fn creutz_ratio(lat: &[f64; 65536], r: i64) -> (f64, i64) with Mut, Div, Panic {` — *particle_physics/lattice_gauge.sio*
+- `pub fn measure_ensemble(` — *particle_physics/lattice_gauge.sio*
+- `pub fn sample_mean_std(buf: &[f64; 256], n: i64, valid: &[i64; 256], use_valid: i64) -> (f64, f64) with Mut, Div, Panic {` — *particle_physics/lattice_gauge.sio*
+- `pub fn plaquette_ep(plaq_samples: &[f64; 256], n: i64) -> Epistemic with Mut, Div, Panic {` — *particle_physics/lattice_gauge.sio*
+- `pub fn string_tension_ep(chi2_samples: &[f64; 256], chi2_valid: &[i64; 256], n: i64) -> Epistemic with Mut, Div, Panic {` — *particle_physics/lattice_gauge.sio*
+- `pub fn sem_floor(sem: f64, val: f64, rel_floor: f64) -> f64 with Mut, Div, Panic {` — *particle_physics/lattice_gauge.sio*
+- `pub fn mass_over_sqrt_sigma_ep(m: f64, m_sem: f64, sigma: f64, sigma_sem: f64) -> Epistemic with Mut, Div, Panic {` — *particle_physics/lattice_gauge.sio*
+- `pub fn inv_var_weighted_mean(` — *particle_physics/lattice_gauge.sio*
+- `pub fn jackknife_mean(` — *particle_physics/lattice_gauge.sio*
+- `pub fn mass_gap_proxy_ep(sigma_a2: &Epistemic) -> Epistemic with Mut, Div, Panic {` — *particle_physics/lattice_gauge.sio*
+- `pub fn run_su2_mass_gap_probe(` — *particle_physics/lattice_gauge.sio*
+- `pub fn glueball_op_slice(lat: &[f64; 65536], t: i64) -> f64 with Mut, Div, Panic {` — *particle_physics/lattice_gauge.sio*
+- `pub fn glueball_ops_all(lat: &[f64; 65536], ops: &![f64; 8]) with Mut, Div, Panic {` — *particle_physics/lattice_gauge.sio*
+- `pub fn glueball_accum(` — *particle_physics/lattice_gauge.sio*
+- `pub fn glueball_connected(` — *particle_physics/lattice_gauge.sio*
+- `pub fn glueball_meff_log(c_tau: f64, c_tau1: f64) -> (f64, i64) with Mut, Div, Panic {` — *particle_physics/lattice_gauge.sio*
+- `pub fn glueball_meff_cosh(c_m1: f64, c0: f64, c_p1: f64) -> (f64, i64) with Mut, Div, Panic {` — *particle_physics/lattice_gauge.sio*
+- `pub fn glueball_meff_ep_from_samples(` — *particle_physics/lattice_gauge.sio*
+- `pub fn measure_glueball_ensemble(` — *particle_physics/lattice_gauge.sio*
+- `pub fn run_su2_glueball_mass_gap(` — *particle_physics/lattice_gauge.sio*
+- `pub fn measure_glueball_smeared_ensemble(` — *particle_physics/lattice_gauge.sio*
+- `pub fn measure_glueball_thin_and_ape(` — *particle_physics/lattice_gauge.sio*
+- `pub fn measure_glueball_thin_and_ape_hb(` — *particle_physics/lattice_gauge.sio*
+- `pub fn measure_ensemble_hb(` — *particle_physics/lattice_gauge.sio*
+- `pub fn static_potential_local(w_t: f64, w_tp1: f64) -> (f64, i64) with Mut, Div, Panic {` — *particle_physics/lattice_gauge.sio*
+- `pub fn static_potential_scan(` — *particle_physics/lattice_gauge.sio*
+- `pub fn static_force_from_v(` — *particle_physics/lattice_gauge.sio*
+- `pub fn sommer_c_of_r(r: i64, f_r: f64) -> f64 {` — *particle_physics/lattice_gauge.sio*
+- `pub fn sommer_r0_interpolate(` — *particle_physics/lattice_gauge.sio*
+- `pub fn sommer_r0_from_sigma(sigma: f64, c_target: f64) -> (f64, i64) with Mut, Div, Panic {` — *particle_physics/lattice_gauge.sio*
+- `pub fn measure_potential_hb(` — *particle_physics/lattice_gauge.sio*
+- `pub fn measure_ensemble_hb_multi_r(` — *particle_physics/lattice_gauge.sio*
+- `pub fn measure_ensemble_hb_multi_r4(` — *particle_physics/lattice_gauge.sio*
+- `pub fn measure_glueball_correlator_full_hb(` — *particle_physics/lattice_gauge.sio*
+- `pub fn glueball_meff_scan(` — *particle_physics/lattice_gauge.sio*
+- `pub fn glueball_plateau_test(` — *particle_physics/lattice_gauge.sio*
+- `pub fn glueball_meff_best_tau(` — *particle_physics/lattice_gauge.sio*
+- `pub fn glueball_n_valid_meff(valid: &[i64; 8], meff: &[f64; 8], n_tau: i64) -> i64 with Mut {` — *particle_physics/lattice_gauge.sio*
+- `pub fn glueball_mass_claim(` — *particle_physics/lattice_gauge.sio*
+- `pub fn mass_gap_ratio_or_kill(` — *particle_physics/lattice_gauge.sio*
+- `pub fn gevp_2x2(` — *particle_physics/lattice_gauge.sio*
+- `pub fn gevp_mass(lambda: f64, dtau: f64) -> (f64, i64) with Mut, Div, Panic {` — *particle_physics/lattice_gauge.sio*
+- `pub fn measure_variational_2smear_hb(` — *particle_physics/lattice_gauge.sio*
+- `pub fn measure_variational_3smear_hb(` — *particle_physics/lattice_gauge.sio*
+- `pub fn mat3_det(a: &[f64; 9]) -> f64 {` — *particle_physics/lattice_gauge.sio*
+- `pub fn mat3_inv(a: &[f64; 9], out: &![f64; 9]) -> i64 with Mut, Div, Panic {` — *particle_physics/lattice_gauge.sio*
+- `pub fn mat3_mul(a: &[f64; 9], b: &[f64; 9], c: &![f64; 9]) with Mut {` — *particle_physics/lattice_gauge.sio*
+- `pub fn mat3_eig_max_power(a: &[f64; 9], n_iter: i64) -> (f64, i64) with Mut, Div, Panic {` — *particle_physics/lattice_gauge.sio*
+- `pub fn gevp_fill_c3(` — *particle_physics/lattice_gauge.sio*
+- `pub fn gevp_3x3(` — *particle_physics/lattice_gauge.sio*
+- `pub fn gevp3_mass(lambda: f64, dtau: f64) -> (f64, i64) with Mut, Div, Panic {` — *particle_physics/lattice_gauge.sio*
+- `pub fn gevp3_meff_scan(` — *particle_physics/lattice_gauge.sio*
+- `pub fn gevp2_meff_scan(` — *particle_physics/lattice_gauge.sio*
+- `pub fn gevp3_meff_local_scan(` — *particle_physics/lattice_gauge.sio*
+- `pub fn glueball_mass_cascade(` — *particle_physics/lattice_gauge.sio*
+- `pub fn dd_plaquette_half_re(` — *particle_physics/lattice_prec.sio*
+- `pub fn dd_mean_plaquette(lat: &[f64; 65536]) -> Dd64 with Mut, Div, Panic {` — *particle_physics/lattice_prec.sio*
+- `pub fn dd_mean_plaquette_via_w11(lat: &[f64; 65536]) -> Dd64 with Mut, Div, Panic {` — *particle_physics/lattice_prec.sio*
+- `pub fn plaquette_site_residual(` — *particle_physics/lattice_prec.sio*
+- `pub fn dd_wilson_loop_rect(lat: &[f64; 65536], r: i64, t_len: i64) -> Dd64 with Mut, Div, Panic {` — *particle_physics/lattice_prec.sio*
+- `pub fn dd_creutz_ratio(lat: &[f64; 65536], r: i64) -> (f64, i64) with Mut, Div, Panic {` — *particle_physics/lattice_prec.sio*
+- `pub fn prec_residual(o_f64: f64, o_dd64: f64) -> PrecResidual with Mut, Div, Panic {` — *particle_physics/lattice_prec.sio*
+- `pub fn prec_gate_ok(abs_delta: f64, sem: f64, eps_abs: f64, kappa: f64) -> i64 with Mut {` — *particle_physics/lattice_prec.sio*
+- `pub fn dual_path_config(lat: &[f64; 65536]) -> (f64, f64, f64, f64, i64, i64) with Mut, Div, Panic {` — *particle_physics/lattice_prec.sio*
+- `pub fn dual_path_wilson_spot(lat: &[f64; 65536]) -> (f64, f64, f64) with Mut, Div, Panic {` — *particle_physics/lattice_prec.sio*
+- `pub fn su3_set_L(L: i64) -> i64 with Mut {` — *particle_physics/lattice_su3.sio*
+- `pub fn su3_lat_l() -> i64 { SU3_L }` — *particle_physics/lattice_su3.sio*
+- `pub fn su3_lat_nd() -> i64 { 4 }` — *particle_physics/lattice_su3.sio*
+- `pub fn su3_nsites() -> i64 with Mut, Div {` — *particle_physics/lattice_su3.sio*
+- `pub fn su3_nlinks() -> i64 with Mut, Div {` — *particle_physics/lattice_su3.sio*
+- `pub fn su3_comps() -> i64 { 18 }` — *particle_physics/lattice_su3.sio*
+- `pub fn su3_flat_len() -> i64 with Mut, Div {` — *particle_physics/lattice_su3.sio*
+- `pub fn su3_flat_cap() -> i64 { 93312 }` — *particle_physics/lattice_su3.sio*
+- `pub fn su3_seed(seed: i64) with Mut {` — *particle_physics/lattice_su3.sio*
+- `pub fn su3_zero(m: &![f64; 18]) with Mut {` — *particle_physics/lattice_su3.sio*
+- `pub fn su3_id(m: &![f64; 18]) with Mut {` — *particle_physics/lattice_su3.sio*
+- `pub fn su3_copy(src: &[f64; 18], dst: &![f64; 18]) with Mut {` — *particle_physics/lattice_su3.sio*
+- `pub fn su3_mul(a: &[f64; 18], b: &[f64; 18], c: &![f64; 18]) with Mut, Div, Panic {` — *particle_physics/lattice_su3.sio*
+- `pub fn su3_dag(a: &[f64; 18], b: &![f64; 18]) with Mut {` — *particle_physics/lattice_su3.sio*
+- `pub fn su3_re_trace(a: &[f64; 18]) -> f64 {` — *particle_physics/lattice_su3.sio*
+- `pub fn su3_norm_trace(a: &[f64; 18]) -> f64 {` — *particle_physics/lattice_su3.sio*
+- `pub fn su3_add(a: &[f64; 18], b: &[f64; 18], c: &![f64; 18]) with Mut {` — *particle_physics/lattice_su3.sio*
+- `pub fn su3_scale(a: &![f64; 18], s: f64) with Mut {` — *particle_physics/lattice_su3.sio*
+- `pub fn su3_project(m: &![f64; 18]) with Mut, Div, Panic {` — *particle_physics/lattice_su3.sio*
+- `pub fn su3_site_index(x: i64, y: i64, z: i64, t: i64) -> i64 {` — *particle_physics/lattice_su3.sio*
+- `pub fn su3_site_coords(s: i64) -> (i64, i64, i64, i64) {` — *particle_physics/lattice_su3.sio*
+- `pub fn su3_neighbour(s: i64, mu: i64, sign: i64) -> i64 {` — *particle_physics/lattice_su3.sio*
+- `pub fn su3_link_base(s: i64, mu: i64) -> i64 {` — *particle_physics/lattice_su3.sio*
+- `pub fn su3_link_get(lat: &[f64; 93312], s: i64, mu: i64, out: &![f64; 18]) with Mut, Div, Panic {` — *particle_physics/lattice_su3.sio*
+- `pub fn su3_link_set(lat: &![f64; 93312], s: i64, mu: i64, mat: &[f64; 18]) with Mut, Div, Panic {` — *particle_physics/lattice_su3.sio*
+- `pub fn su3_lattice_cold(lat: &![f64; 93312]) with Mut, Div, Panic {` — *particle_physics/lattice_su3.sio*
+- `pub fn su3_plaquette_norm(` — *particle_physics/lattice_su3.sio*
+- `pub fn su3_mean_plaquette(lat: &[f64; 93312]) -> f64 with Mut, Div, Panic {` — *particle_physics/lattice_su3.sio*
+- `pub fn su3_metropolis_link(` — *particle_physics/lattice_su3.sio*
+- `pub fn su3_metropolis_sweep(lat: &![f64; 93312], beta: f64, eps: f64) -> i64 with Mut, Div, Panic {` — *particle_physics/lattice_su3.sio*
+- `pub fn su3_thermalize(lat: &![f64; 93312], beta: f64, eps: f64, n_sweeps: i64) -> f64 with Mut, Div, Panic {` — *particle_physics/lattice_su3.sio*
+- `pub fn su3_heatbath_link(` — *particle_physics/lattice_su3.sio*
+- `pub fn su3_heatbath_sweep(lat: &![f64; 93312], beta: f64) -> i64 with Mut, Div, Panic {` — *particle_physics/lattice_su3.sio*
+- `pub fn su3_heatbath_thermalize(` — *particle_physics/lattice_su3.sio*
+- `pub fn su3_wilson_loop_rect(lat: &[f64; 93312], r: i64, t_len: i64) -> f64 with Mut, Div, Panic {` — *particle_physics/lattice_su3.sio*
+- `pub fn su3_creutz_ratio(lat: &[f64; 93312], r: i64) -> (f64, i64) with Mut, Div, Panic {` — *particle_physics/lattice_su3.sio*
+- `pub fn su3_measure_ensemble(` — *particle_physics/lattice_su3.sio*
+- `pub fn su3_plaquette_ep(plaq_s: &[f64; 256], n: i64) -> Epistemic with Mut, Div, Panic {` — *particle_physics/lattice_su3.sio*
+- `pub fn su3_string_tension_ep(chi_s: &[f64; 256], chi_v: &[i64; 256], n: i64) -> Epistemic with Mut, Div, Panic {` — *particle_physics/lattice_su3.sio*
+- `pub fn su3_mass_gap_proxy_ep(sigma_a2: &Epistemic) -> Epistemic with Mut, Div, Panic {` — *particle_physics/lattice_su3.sio*
+- `pub fn su3_lattice_copy(src: &[f64; 93312], dst: &![f64; 93312]) with Mut, Div, Panic {` — *particle_physics/lattice_su3.sio*
+- `pub fn su3_ape_smear_step(` — *particle_physics/lattice_su3.sio*
+- `pub fn su3_ape_smear_n(` — *particle_physics/lattice_su3.sio*
+- `pub fn su3_glueball_op_slice(lat: &[f64; 93312], t: i64) -> f64 with Mut, Div, Panic {` — *particle_physics/lattice_su3.sio*
+- `pub fn su3_glueball_ops_all(lat: &[f64; 93312], ops: &![f64; 8]) with Mut, Div, Panic {` — *particle_physics/lattice_su3.sio*
+- `pub fn su3_glueball_meff_log(c0: f64, c1: f64) -> (f64, i64) with Mut, Div, Panic {` — *particle_physics/lattice_su3.sio*
+- `pub fn su3_measure_glueball_correlator_full_hb(` — *particle_physics/lattice_su3.sio*
+- `pub fn su3_glueball_meff_ep(samples: &[f64; 256], valid: &[i64; 256], n: i64) -> Epistemic with Mut, Div, Panic {` — *particle_physics/lattice_su3.sio*
+- `pub fn su3_measure_glueball_thin_and_ape(` — *particle_physics/lattice_su3.sio*
+- `pub fn su3_measure_glueball_thin_and_ape_hb(` — *particle_physics/lattice_su3.sio*
+- `pub fn su3_measure_ensemble_hb_multi_r(` — *particle_physics/lattice_su3.sio*
+- `pub fn su3_measure_ensemble_hb(` — *particle_physics/lattice_su3.sio*
 - `pub fn lorentz_new(t: f64, x: f64, y: f64, z: f64) -> LorentzVector {` — *particle_physics/lorentz.sio*
 - `pub fn lorentz_zero() -> LorentzVector {` — *particle_physics/lorentz.sio*
 - `pub fn metric_eta(mu: i64, nu: i64) -> f64 {` — *particle_physics/lorentz.sio*
@@ -9040,6 +9826,9 @@ organized by module. Generated from source on the date shown below.
 - `pub fn ggh_xsec_nlo_ep(mu0_sq: f64, xsec_lo: f64) -> Epistemic with Div, Panic, Mut {` — *particle_physics/nlo_kfactor.sio*
 - `pub fn scale_uncertainty_band(k: Epistemic) -> (f64, f64) with Div, Panic {` — *particle_physics/nlo_kfactor.sio*
 - `pub fn run_nlo_kfactor_tests() with Div, Panic, Mut {` — *particle_physics/nlo_kfactor.sio*
+- `pub fn eemm_z_amplitude_nu(s: f64, gamma_z: f64) -> NonUnitary with Mut, Div, Panic {` — *particle_physics/nonunitary_amp.sio*
+- `pub fn cc_w_leptonic_amplitude_nu(s: f64, gamma_w: f64) -> NonUnitary with Mut, Div, Panic {` — *particle_physics/nonunitary_amp.sio*
+- `pub fn h_bb_yukawa_amplitude_nu(s: f64, gamma_h: f64) -> NonUnitary with Mut, Div, Panic {` — *particle_physics/nonunitary_amp.sio*
 - `pub fn NU_PHOTON() -> i64 { 0 }` — *particle_physics/nonunitary.sio*
 - `pub fn NU_Z() -> i64 { 1 }` — *particle_physics/nonunitary.sio*
 - `pub fn NU_W() -> i64 { 2 }` — *particle_physics/nonunitary.sio*
@@ -9085,9 +9874,6 @@ organized by module. Generated from source on the date shown below.
 - `pub fn nu_reduced_xi_joint_uncorr_ep(s: f64, mass: Epistemic, gamma: Epistemic) -> Epistemic with Mut, Div, Panic {` — *particle_physics/nonunitary.sio*
 - `pub fn nu_unitarity_threshold_joint_ep(mass: Epistemic, gamma: Epistemic, threshold: f64, rho: f64) -> Epistemic with Mut, Div, Panic {` — *particle_physics/nonunitary.sio*
 - `pub fn run_nonunitary_tests() with IO, NonUnitary, Mut, Div, Panic {` — *particle_physics/nonunitary.sio*
-- `pub fn eemm_z_amplitude_nu(s: f64, gamma_z: f64) -> NonUnitary with Mut, Div, Panic {` — *particle_physics/nonunitary_amp.sio*
-- `pub fn cc_w_leptonic_amplitude_nu(s: f64, gamma_w: f64) -> NonUnitary with Mut, Div, Panic {` — *particle_physics/nonunitary_amp.sio*
-- `pub fn h_bb_yukawa_amplitude_nu(s: f64, gamma_h: f64) -> NonUnitary with Mut, Div, Panic {` — *particle_physics/nonunitary_amp.sio*
 - `pub fn cf() -> f64 { 4.0 / 3.0 }` — *particle_physics/parton_shower.sio*
 - `pub fn ca() -> f64 { 3.0 }` — *particle_physics/parton_shower.sio*
 - `pub fn tf() -> f64 { 0.5 }` — *particle_physics/parton_shower.sio*
@@ -9327,11 +10113,6 @@ organized by module. Generated from source on the date shown below.
 
 **463 public functions** across 64 files
 
-- `pub fn rap2_params() -> Rap2CmtParams with Mut, Div, Panic {` — *pbpk/rapamycin_2cmt.sio*
-- `pub fn rap2_params_bridged() -> Rap2CmtParams with Mut, Div, Panic {` — *pbpk/rapamycin_2cmt.sio*
-- `pub fn euler_step(` — *pbpk/rapamycin_2cmt.sio*
-- `pub fn simulate(` — *pbpk/rapamycin_2cmt.sio*
-- `pub fn c_plasma_gate(c_val: f64, c_std: f64) -> i64 {` — *pbpk/rapamycin_2cmt.sio*
 - `pub fn full_2cmt_params(` — *pbpk/rapamycin_2cmt_full.sio*
 - `pub fn classify_full_2cmt(` — *pbpk/rapamycin_2cmt_full.sio*
 - `pub fn conf_full_2cmt(` — *pbpk/rapamycin_2cmt_full.sio*
@@ -9340,6 +10121,11 @@ organized by module. Generated from source on the date shown below.
 - `pub fn conf_standard_full(ke_var: f64, k12_var: f64, k21_var: f64) -> i64 with Mut, Div, Panic {` — *pbpk/rapamycin_2cmt_full.sio*
 - `pub fn dominant_standard_full(ke_var: f64, k12_var: f64, k21_var: f64) -> i64 with Mut, Div, Panic {` — *pbpk/rapamycin_2cmt_full.sio*
 - `pub fn budget_3stage_fires() -> bool with Epistemic, Mut, Div, Panic {` — *pbpk/rapamycin_2cmt_full.sio*
+- `pub fn rap2_params() -> Rap2CmtParams with Mut, Div, Panic {` — *pbpk/rapamycin_2cmt.sio*
+- `pub fn rap2_params_bridged() -> Rap2CmtParams with Mut, Div, Panic {` — *pbpk/rapamycin_2cmt.sio*
+- `pub fn euler_step(` — *pbpk/rapamycin_2cmt.sio*
+- `pub fn simulate(` — *pbpk/rapamycin_2cmt.sio*
+- `pub fn c_plasma_gate(c_val: f64, c_std: f64) -> i64 {` — *pbpk/rapamycin_2cmt.sio*
 - `pub fn as_cv_hplc() -> f64 { 0.05 }` — *pbpk/rapamycin_assay.sio*
 - `pub fn as_cv_cmia() -> f64 { 0.12 }` — *pbpk/rapamycin_assay.sio*
 - `pub fn as_cv_poor() -> f64 { 0.25 }` — *pbpk/rapamycin_assay.sio*
@@ -9377,9 +10163,6 @@ organized by module. Generated from source on the date shown below.
 - `pub fn conf_standard_auc(ke_var: f64) -> i64 with Mut, Div, Panic {` — *pbpk/rapamycin_auc_gate.sio*
 - `pub fn auc_dominant_standard(ke_var: f64) -> i64 with Mut, Div, Panic {` — *pbpk/rapamycin_auc_gate.sio*
 - `pub fn auc_trough_diverge(ke_var: f64) -> bool with Epistemic, Mut, Div, Panic {` — *pbpk/rapamycin_auc_gate.sio*
-- `pub fn simulate_budget(` — *pbpk/rapamycin_budget.sio*
-- `pub fn budget_dominant(frac: &[f64; 5]) -> i64 {` — *pbpk/rapamycin_budget.sio*
-- `pub fn budget_sum_ok(frac: &[f64; 5], tol: f64) -> bool {` — *pbpk/rapamycin_budget.sio*
 - `pub fn classify_2cmt_trough(` — *pbpk/rapamycin_budget_guide.sio*
 - `pub fn conf_2cmt_trough(` — *pbpk/rapamycin_budget_guide.sio*
 - `pub fn dominant_source_2cmt(` — *pbpk/rapamycin_budget_guide.sio*
@@ -9387,6 +10170,9 @@ organized by module. Generated from source on the date shown below.
 - `pub fn conf_standard_2cmt(ke_var: f64, k12_var: f64) -> i64 with Mut, Div, Panic {` — *pbpk/rapamycin_budget_guide.sio*
 - `pub fn dominant_standard_2cmt(ke_var: f64, k12_var: f64) -> i64 with Mut, Div, Panic {` — *pbpk/rapamycin_budget_guide.sio*
 - `pub fn budget_improvement_fires(` — *pbpk/rapamycin_budget_guide.sio*
+- `pub fn simulate_budget(` — *pbpk/rapamycin_budget.sio*
+- `pub fn budget_dominant(frac: &[f64; 5]) -> i64 {` — *pbpk/rapamycin_budget.sio*
+- `pub fn budget_sum_ok(frac: &[f64; 5], tol: f64) -> bool {` — *pbpk/rapamycin_budget.sio*
 - `pub fn trough_floor_mg_l()  -> f64 { 0.004  }   // 4 ng/mL — subtherapeutic below` — *pbpk/rapamycin_clinical.sio*
 - `pub fn trough_ceil_mg_l()   -> f64 { 0.020  }   // 20 ng/mL — toxicity above` — *pbpk/rapamycin_clinical.sio*
 - `pub fn auc_floor_mg_h_l()   -> f64 { 0.001  }   // minimum detectable AUC` — *pbpk/rapamycin_clinical.sio*
@@ -9694,6 +10480,8 @@ organized by module. Generated from source on the date shown below.
 - `pub fn gate_fires(` — *pbpk/rapamycin_precision.sio*
 - `pub fn classify_standard_iv(ke_var: f64) -> i64 with Epistemic, Mut, Div, Panic {` — *pbpk/rapamycin_precision.sio*
 - `pub fn conf_standard_iv(ke_var: f64) -> i64 with Mut, Div, Panic {` — *pbpk/rapamycin_precision.sio*
+- `pub fn run_sprint1_gate() with IO, Mut, Div, Panic {` — *pbpk/rapamycin_sprint1_gate.sio*
+- `pub fn main() -> i32 with IO, Mut, Div, Panic {` — *pbpk/rapamycin_sprint1_gate.sio*
 - `pub fn main() -> i32 with IO, Epistemic, Mut, Div, Panic {` — *pbpk/rapamycin_sprint10_gate.sio*
 - `pub fn main() -> i32 with IO, Epistemic, Mut, Div, Panic {` — *pbpk/rapamycin_sprint11_gate.sio*
 - `pub fn main() -> i32 with IO, Epistemic, Mut, Div, Panic {` — *pbpk/rapamycin_sprint12_gate.sio*
@@ -9704,14 +10492,12 @@ organized by module. Generated from source on the date shown below.
 - `pub fn main() -> i32 with IO, Epistemic, Mut, Div, Panic {` — *pbpk/rapamycin_sprint17_gate.sio*
 - `pub fn main() -> i32 with IO, Epistemic, Mut, Div, Panic {` — *pbpk/rapamycin_sprint18_gate.sio*
 - `pub fn main() -> i32 with IO, Epistemic, Mut, Div, Panic {` — *pbpk/rapamycin_sprint19_gate.sio*
-- `pub fn run_sprint1_gate() with IO, Mut, Div, Panic {` — *pbpk/rapamycin_sprint1_gate.sio*
-- `pub fn main() -> i32 with IO, Mut, Div, Panic {` — *pbpk/rapamycin_sprint1_gate.sio*
+- `pub fn run_sprint2_gate() with IO, Mut, Div, Panic {` — *pbpk/rapamycin_sprint2_gate.sio*
+- `pub fn main() -> i32 with IO, Mut, Div, Panic {` — *pbpk/rapamycin_sprint2_gate.sio*
 - `pub fn main() -> i32 with IO, Epistemic, Mut, Div, Panic {` — *pbpk/rapamycin_sprint20_gate.sio*
 - `pub fn rapamycin_sprint25_gate() -> i64 with Mut, Div, Panic {` — *pbpk/rapamycin_sprint25_gate.sio*
 - `pub fn rapamycin_sprint26_gate() -> i64 with Mut, Div, Panic {` — *pbpk/rapamycin_sprint26_gate.sio*
 - `pub fn rapamycin_sprint27_gate() -> i64 with Mut, Div, Panic {` — *pbpk/rapamycin_sprint27_gate.sio*
-- `pub fn run_sprint2_gate() with IO, Mut, Div, Panic {` — *pbpk/rapamycin_sprint2_gate.sio*
-- `pub fn main() -> i32 with IO, Mut, Div, Panic {` — *pbpk/rapamycin_sprint2_gate.sio*
 - `pub fn run_sprint3_gate() with IO, Mut, Div, Panic {` — *pbpk/rapamycin_sprint3_gate.sio*
 - `pub fn main() -> i32 with IO, Mut, Div, Panic {` — *pbpk/rapamycin_sprint3_gate.sio*
 - `pub fn run_sprint4_gate() with IO, Mut, Div, Panic, Epistemic {` — *pbpk/rapamycin_sprint4_gate.sio*
@@ -9795,7 +10581,7 @@ organized by module. Generated from source on the date shown below.
 
 ## physics (`stdlib/physics/`)
 
-**92 public functions** across 8 files
+**98 public functions** across 11 files
 
 - `pub fn classical_force(mass: &Quantity, acc: &Quantity) -> Quantity {` — *physics/classical.sio*
 - `pub fn classical_ke(mass: &Quantity, vel: &Quantity) -> Quantity {` — *physics/classical.sio*
@@ -9807,21 +10593,22 @@ organized by module. Generated from source on the date shown below.
 - `pub fn test_force_components() -> bool {` — *physics/classical.sio*
 - `pub fn pos_3d(s0: [f64; 3], v0: [f64; 3], a: [f64; 3], t: f64) -> [f64; 3] {` — *physics/classical.sio*
 - `pub fn test_pos_3d() -> bool {` — *physics/classical.sio*
+- `pub fn vec3_new(x: f64, y: f64, z: f64) -> Vec3 { Vec3 { x: x, y: y, z: z } }` — *physics/em.sio*
 - `pub fn coulomb_force(q1: f64, uq1: f64, q2: f64, uq2: f64, r: f64, ur: f64) -> (f64, f64) {` — *physics/em.sio*
 - `pub fn point_charge_e_field(q: f64, uq: f64, r: f64, ur: f64) -> (f64, f64) {` — *physics/em.sio*
 - `pub fn point_charge_potential(q: f64, uq: f64, r: f64, ur: f64) -> (f64, f64) {` — *physics/em.sio*
 - `pub fn potential_energy(q: f64, uq: f64, v: f64, uv: f64) -> (f64, f64) {` — *physics/em.sio*
-- `pub fn lorentz_force_scalar(q: f64, uq: f64, e: f64, ue: f64, v: f64, uv: f64, b: f64, ub: f64) -> (f64, f64) {` — *physics/em.sio*
+- `pub fn lorentz_force_scalar(q: f64, uq: f64, e: f64, ue: f64, v: f64, uv: f64, b: f64, ub: f64) -> (f64, f64) with Mut, Div, Panic {` — *physics/em.sio*
 - `pub fn wire_b_field(i: f64, ui: f64, r: f64, ur: f64) -> (f64, f64) {` — *physics/em.sio*
 - `pub fn electric_energy_density(e: f64, ue: f64) -> (f64, f64) {` — *physics/em.sio*
 - `pub fn test_coulomb() -> bool {` — *physics/em.sio*
 - `pub fn test_e_field() -> bool {` — *physics/em.sio*
 - `pub fn test_wire_b() -> bool {` — *physics/em.sio*
-- `pub fn test_lorentz() -> bool {` — *physics/em.sio*
+- `pub fn test_lorentz() -> bool with Mut, Div, Panic {` — *physics/em.sio*
 - `pub fn parallel_wires_force(I1: f64, uI1: f64, I2: f64, uI2: f64, L: f64, uL: f64, d: f64, ud: f64) -> (f64, f64) {` — *physics/em.sio*
 - `pub fn capacitor_energy(C: f64, uC: f64, V: f64, uV: f64) -> (f64, f64) {` — *physics/em.sio*
 - `pub fn magnetic_force_on_wire(I: f64, uI: f64, L: f64, uL: f64, B: f64, uB: f64) -> (f64, f64) {` — *physics/em.sio*
-- `pub fn lorentz_force_3d(q: f64, uq: f64, e: Vec3, ue: f64, v: Vec3, uv: f64, b: Vec3, ub: f64) -> (Vec3, f64) {` — *physics/em.sio*
+- `pub fn lorentz_force_3d(q: f64, uq: f64, e: Vec3, ue: f64, v: Vec3, uv: f64, b: Vec3, ub: f64) -> (Vec3, f64) with Mut, Div, Panic {` — *physics/em.sio*
 - `pub fn test_parallel_wires() -> bool {` — *physics/em.sio*
 - `pub fn test_capacitor() -> bool {` — *physics/em.sio*
 - `pub fn poynting_vec(e: Vec3, ue: f64, b: Vec3, ub: f64) -> (Vec3, f64) {` — *physics/em.sio*
@@ -9840,10 +10627,15 @@ organized by module. Generated from source on the date shown below.
 - `pub fn test_em_wave_particle_ode() -> bool with Mut, Div, Panic {` — *physics/em.sio*
 - `pub fn radiation_pressure(s: f64, us: f64) -> (f64, f64) {` — *physics/em.sio*
 - `pub fn test_radiation() -> bool {` — *physics/em.sio*
-- `pub fn test_lorentz_3d() -> bool {` — *physics/em.sio*
+- `pub fn test_lorentz_3d() -> bool with Mut, Div, Panic {` — *physics/em.sio*
+- `pub fn isothermal_entropy_independent(n: f64, un: f64, vf: f64, uvf: f64, vi: f64, uvi: f64) -> EntropyResult with Mut, Div, Panic {` — *physics/entropy.sio*
+- `pub fn isothermal_entropy_correlated_volumes(n: f64, un: f64, vf: f64, uvf: f64, vi: f64, uvi: f64, rho: f64) -> EntropyResult with Mut, Div, Panic {` — *physics/entropy.sio*
 - `pub fn quantity_from_epistemic_components(val: f64, std: f64, dim: units::UnitDim) -> units::Quantity {` — *physics/lib.sio*
 - `pub fn energy_gev(val: f64, unc: f64) -> units::Quantity {` — *physics/lib.sio*
 - `pub fn mass_kg(val: f64, unc: f64) -> units::Quantity {` — *physics/lib.sio*
+- `pub fn lorentz_force_independent(q:f64,uq:f64,e:&[f64;3],ue:&[f64;3],v:&[f64;3],uv:&[f64;3],b:&[f64;3],ub:&[f64;3])->LorentzResult with Mut,Div,Panic {` — *physics/lorentz.sio*
+- `pub fn lorentz_force_scalar_independent(q:f64,uq:f64,e:f64,ue:f64,v:f64,uv:f64,b:f64,ub:f64)->LorentzScalarResult with Mut,Div,Panic {` — *physics/lorentz.sio*
+- `pub fn electron_compton_shift(theta: f64, angular_standard_uncertainty: f64) -> ComptonShift with Mut, Div, Panic {` — *physics/scattering.sio*
 - `pub fn gamma(v: f64, uv: f64) -> (f64, f64) {` — *physics/sr.sio*
 - `pub fn time_dilation(t0: f64, ut0: f64, v: f64, uv: f64) -> (f64, f64) {` — *physics/sr.sio*
 - `pub fn length_contraction(l0: f64, ul0: f64, v: f64, uv: f64) -> (f64, f64) {` — *physics/sr.sio*
@@ -9867,22 +10659,22 @@ organized by module. Generated from source on the date shown below.
 - `pub fn test_four_force() -> bool {` — *physics/sr.sio*
 - `pub fn four_force_long(m: f64, um: f64, a: f64, ua: f64, v: f64, uv: f64) -> (f64, f64) {` — *physics/sr.sio*
 - `pub fn test_four_force_long() -> bool {` — *physics/sr.sio*
-- `pub fn compton_shift(theta: f64, utheta: f64) -> (f64, f64) {` — *physics/sr.sio*
-- `pub fn test_compton() -> bool {` — *physics/sr.sio*
+- `pub fn compton_shift(theta: f64, utheta: f64) -> (f64, f64) with Mut, Div, Panic {` — *physics/sr.sio*
+- `pub fn test_compton() -> bool with Mut, Div, Panic {` — *physics/sr.sio*
 - `pub fn boost_e_p(e: f64, ue: f64, p: f64, up: f64, v: f64, uv: f64) -> ((f64,f64), (f64,f64)) {` — *physics/sr.sio*
 - `pub fn test_boost() -> bool {` — *physics/sr.sio*
 - `pub fn ideal_gas_p(n: f64, un: f64, t: f64, ut: f64, v: f64, uv: f64) -> (f64, f64) {` — *physics/thermo.sio*
-- `pub fn first_law_delta_u(q: f64, uq: f64, w: f64, uw: f64) -> (f64, f64) {` — *physics/thermo.sio*
+- `pub fn first_law_delta_u(q: f64, uq: f64, w: f64, uw: f64) -> (f64, f64) with Mut, Div {` — *physics/thermo.sio*
 - `pub fn carnot_efficiency(th: f64, uth: f64, tc: f64, utc: f64) -> (f64, f64) {` — *physics/thermo.sio*
-- `pub fn isothermal_entropy(n: f64, un: f64, vf: f64, uvf: f64, vi: f64, uvi: f64) -> (f64, f64) {` — *physics/thermo.sio*
-- `pub fn boltzmann_entropy(w: f64, uw: f64) -> (f64, f64) {` — *physics/thermo.sio*
+- `pub fn isothermal_entropy(n:f64,un:f64,vf:f64,uvf:f64,vi:f64,uvi:f64)->(f64,f64) with Mut,Div,Panic {` — *physics/thermo.sio*
+- `pub fn boltzmann_entropy(w: f64, uw: f64) -> (f64, f64) with Mut, Div {` — *physics/thermo.sio*
 - `pub fn adiabatic_temp_volume(T1: f64, uT1: f64, V1: f64, uV1: f64, V2: f64, uV2: f64) -> (f64, f64) with Mut, Div, Panic {` — *physics/thermo.sio*
 - `pub fn isobaric_work(P: f64, uP: f64, V1: f64, uV1: f64, V2: f64, uV2: f64) -> (f64, f64) {` — *physics/thermo.sio*
 - `pub fn cv_mono(n: f64, un: f64) -> (f64, f64) {` — *physics/thermo.sio*
 - `pub fn test_ideal_gas() -> bool {` — *physics/thermo.sio*
-- `pub fn test_first_law() -> bool {` — *physics/thermo.sio*
+- `pub fn test_first_law() -> bool with Mut, Div {` — *physics/thermo.sio*
 - `pub fn test_carnot() -> bool {` — *physics/thermo.sio*
-- `pub fn test_boltzmann() -> bool {` — *physics/thermo.sio*
+- `pub fn test_boltzmann() -> bool with Mut, Div {` — *physics/thermo.sio*
 - `pub fn test_adiabatic() -> bool with Mut, Div, Panic {` — *physics/thermo.sio*
 - `pub fn test_isobaric() -> bool {` — *physics/thermo.sio*
 - `pub fn carnot_cycle_work(th: f64, uth: f64, tc: f64, utc: f64, qh: f64, uqh: f64) -> (f64, f64) {` — *physics/thermo.sio*
@@ -9894,10 +10686,28 @@ organized by module. Generated from source on the date shown below.
 
 ## Visualization (`stdlib/plot/`)
 
-**2 public functions** across 10 files
+**20 public functions** across 10 files
 
+- `pub fn bar_entry_new(label: string, value: f64) -> BarEntry {` — *plot/bar.sio*
+- `pub fn bar_entry_colored(label: string, value: f64, color: string) -> BarEntry {` — *plot/bar.sio*
+- `pub fn bar_config_default() -> BarChartConfig {` — *plot/bar.sio*
+- `pub fn bar_config_new(title: string, width: i64) -> BarChartConfig {` — *plot/bar.sio*
+- `pub fn bar_chart_horizontal(entries: &[BarEntry], n: i64, config: &BarChartConfig) with Div, Panic, Mut, Panic, Mut, Div, IO {` — *plot/bar.sio*
+- `pub fn bar_chart(labels: &[string], values: &[f64], n: i64, title: string) with Div, Panic, Mut, IO {` — *plot/bar.sio*
+- `pub fn bar_chart_colored(labels: &[string], values: &[f64], n: i64, title: string) with Div, Panic, Mut, IO {` — *plot/bar.sio*
+- `pub fn comparison_bar(label: string, value: f64, reference: f64, width: i64) with Div, Mut, Panic, IO {` — *plot/bar.sio*
+- `pub fn canvas_new(width: i64, height: i64) -> Canvas {` — *plot/canvas.sio*
 - `pub fn error_bar_entry(label: string, value: f64, uncertainty: f64, confidence: f64) -> ErrorBarEntry {` — *plot/epistemic.sio*
 - `pub fn error_bar_chart(entries: &[ErrorBarEntry], n: i64, title: string) with Mut, Panic, Div, IO {` — *plot/epistemic.sio*
+- `pub fn line_series_new(label: string, marker: string, color: string) -> LineSeries {` — *plot/line.sio*
+- `pub fn line_series_add(s: &!LineSeries, value: f64) with Mut {` — *plot/line.sio*
+- `pub fn line_config_default() -> LinePlotConfig {` — *plot/line.sio*
+- `pub fn line_config_new(title: string, width: i64, height: i64) -> LinePlotConfig {` — *plot/line.sio*
+- `pub fn line_plot(values: &[f64], n: i64, title: string) with Div, Mut, Panic, IO {` — *plot/line.sio*
+- `pub fn line_plot_single(values: &[f64], n: i64, config: &LinePlotConfig) with Div, Div, Mut, Mut, Panic, Panic, IO {` — *plot/line.sio*
+- `pub fn line_plot_multi(` — *plot/line.sio*
+- `pub fn sparkline(values: &[f64], n: i64) with Panic, Div, Mut, IO {` — *plot/line.sio*
+- `pub fn sparkline_colored(values: &[f64], n: i64) with Panic, Div, Mut, IO {` — *plot/line.sio*
 
 ---
 
@@ -9955,8 +10765,20 @@ organized by module. Generated from source on the date shown below.
 
 ## Probability (`stdlib/prob/`)
 
-**23 public functions** across 11 files
+**49 public functions** across 11 files
 
+- `pub fn beta_new(alpha: f64, b: f64) -> Beta {` — *prob/beta.sio*
+- `pub fn beta_uniform() -> Beta {` — *prob/beta.sio*
+- `pub fn beta_jeffreys() -> Beta {` — *prob/beta.sio*
+- `pub fn beta_weak() -> Beta {` — *prob/beta.sio*
+- `pub fn beta_posterior(prior: Beta, successes: i64, failures: i64) -> Beta {` — *prob/beta.sio*
+- `pub fn beta_mean(b: Beta) -> f64 {` — *prob/beta.sio*
+- `pub fn beta_variance(b: Beta) -> f64 {` — *prob/beta.sio*
+- `pub fn beta_std(b: Beta) -> f64 {` — *prob/beta.sio*
+- `pub fn beta_sample_size(b: Beta) -> f64 {` — *prob/beta.sio*
+- `pub fn beta_mode(b: Beta) -> f64 {` — *prob/beta.sio*
+- `pub fn beta_risk_adjusted_mean(b: Beta, lambda: f64) -> f64 {` — *prob/beta.sio*
+- `pub fn beta_ci_normal(b: Beta, z: f64) -> CI {` — *prob/beta.sio*
 - `pub fn dist_normal_pdf(x: f64, mu: f64, sigma: f64) -> f64 with Mut, Div, Panic {` — *prob/distributions.sio*
 - `pub fn normal_cdf_full(x: f64, mu: f64, sigma: f64) -> f64 with Mut, Div, Panic {` — *prob/distributions.sio*
 - `pub fn gamma_log_pdf(x: f64, alpha: f64, beta: f64) -> f64 with Mut, Div, Panic {` — *prob/distributions.sio*
@@ -9980,6 +10802,20 @@ organized by module. Generated from source on the date shown below.
 - `pub fn normal_as_gum(mu: f64, sigma: f64) -> GUMResult with Mut, Div, Panic {` — *prob/epistemic.sio*
 - `pub fn exponential_as_gum(lambda: f64) -> GUMResult with Mut, Div, Panic {` — *prob/epistemic.sio*
 - `pub fn uniform_as_gum(a: f64, b: f64) -> GUMResult with Mut, Div, Panic {` — *prob/epistemic.sio*
+- `pub fn normal_new(mu: f64, sigma: f64) -> Normal {` — *prob/normal.sio*
+- `pub fn normal_standard() -> Normal {` — *prob/normal.sio*
+- `pub fn normal_mean(n: Normal) -> f64 {` — *prob/normal.sio*
+- `pub fn normal_variance(n: Normal) -> f64 {` — *prob/normal.sio*
+- `pub fn normal_std(n: Normal) -> f64 {` — *prob/normal.sio*
+- `pub fn normal_pdf(n: Normal, x: f64) -> f64 {` — *prob/normal.sio*
+- `pub fn normal_zscore(n: Normal, x: f64) -> f64 {` — *prob/normal.sio*
+- `pub fn normal_from_zscore(n: Normal, z: f64) -> f64 {` — *prob/normal.sio*
+- `pub fn normal_ci(n: Normal, z: f64) -> NormalCI {` — *prob/normal.sio*
+- `pub fn normal_risk_adjusted_mean(n: Normal, lambda: f64) -> f64 {` — *prob/normal.sio*
+- `pub fn normal_shift(n: Normal, c: f64) -> Normal {` — *prob/normal.sio*
+- `pub fn normal_scale(n: Normal, c: f64) -> Normal {` — *prob/normal.sio*
+- `pub fn normal_sum(n1: Normal, n2: Normal) -> Normal {` — *prob/normal.sio*
+- `pub fn vmap_config_default() -> VmapConfig {` — *prob/vmap_traces.sio*
 
 ---
 
@@ -9999,6 +10835,33 @@ organized by module. Generated from source on the date shown below.
 
 ---
 
+## qpu (`stdlib/qpu/`)
+
+**20 public functions** across 3 files
+
+- `pub fn qpu_s(e0: f64, e1: f64, e2: f64, e3: f64) -> f64 {` — *qpu/chsh.sio*
+- `pub fn qpu_keep(s: f64) -> i64 {` — *qpu/chsh.sio*
+- `pub fn qpu_corr(c: ShotCounts) -> f64 with Div {` — *qpu/chsh.sio*
+- `pub fn qpu_bell_job(pi: f64, shots: i64) -> string with Mut, Div, Panic {` — *qpu/chsh.sio*
+- `pub fn qpu_basis_job(pi: f64, flip0: i32, flip1: i32, shots: i64) -> string with Mut, Div, Panic {` — *qpu/chsh.sio*
+- `pub fn qpu_shift_job(delta_a: f64, delta_b: f64, epsilon: f64, pi: f64, shots: i64) -> string with Mut, Div, Panic {` — *qpu/chsh.sio*
+- `pub fn qpu_partial_job(phi: f64, beta: f64, pi: f64, shots: i64) -> string with Mut, Div, Panic {` — *qpu/chsh.sio*
+- `pub fn qpu_party_shots_from(sigma: f64, pi: f64, shots: i64, seed0: i64) -> PartyMean with Mut, Div, Panic {` — *qpu/chsh.sio*
+- `pub fn qpu_party_shots(sigma: f64, pi: f64, shots: i64) -> PartyMean with Mut, Div, Panic {` — *qpu/chsh.sio*
+- `pub fn qpu_copy_shots(sigma: f64, pi: f64, shots: i64) -> PartyMean with Mut, Div, Panic {` — *qpu/chsh.sio*
+- `pub fn qpu_both_from(delta_a: f64, delta_b: f64, epsilon: f64, pi: f64, shots: i64, seed0: i64) -> BothShot with Mut, Div, Panic {` — *qpu/chsh.sio*
+- `pub fn qpu_both_wide(delta_a: f64, delta_b: f64, epsilon: f64, pi: f64, shots: i64, seed0: i64) -> BothShot with Mut, Div, Panic {` — *qpu/chsh.sio*
+- `pub fn qpu_anti_shots_from(sigma: f64, pi: f64, shots: i64, seed0: i64) -> PartyMean with Mut, Div, Panic {` — *qpu/chsh.sio*
+- `pub fn qpu_anti_shots(sigma: f64, pi: f64, shots: i64) -> PartyMean with Mut, Div, Panic {` — *qpu/chsh.sio*
+- `pub fn qpu_block_read(sigma: f64, pi: f64, shots: i64) -> BlockRead with Mut, Div, Panic {` — *qpu/chsh.sio*
+- `pub fn qpu_assoc(a: Octonion, b: Octonion, c: Octonion) -> Octonion {` — *qpu/hyper.sio*
+- `pub fn qpu_assoc_norm(a: Octonion, b: Octonion, c: Octonion) -> f64 {` — *qpu/hyper.sio*
+- `pub fn qpu_quat_u(w: f64, x: f64, y: f64, z: f64) -> U2 {` — *qpu/hyper.sio*
+- `pub fn qpu_u_mul(p: U2, q: U2) -> U2 {` — *qpu/hyper.sio*
+- `pub fn qpu_zero_divisor_norm() -> f64 with Panic {` — *qpu/hyper.sio*
+
+---
+
 ## quantnn (`stdlib/quantnn/`)
 
 **3 public functions** across 1 files
@@ -10006,6 +10869,176 @@ organized by module. Generated from source on the date shown below.
 - `pub fn quant_state_hadamard_zero() -> QuantState {` — *quantnn/mod.sio*
 - `pub fn quant_state_norm_sq(state: QuantState) -> f64 {` — *quantnn/mod.sio*
 - `pub fn quant_state_prob_one(state: QuantState) -> f64 {` — *quantnn/mod.sio*
+
+---
+
+## Quantum Computing (`stdlib/quantum/`)
+
+**163 public functions** across 8 files
+
+- `pub fn band_filled(c: BandChannel) -> i64 {` — *quantum/born_channel.sio*
+- `pub fn band_variance(c: BandChannel) -> f64 with Panic {` — *quantum/born_channel.sio*
+- `pub fn band_u_first(c: BandChannel) -> f64 with Panic {` — *quantum/born_channel.sio*
+- `pub fn band_u_second(c: BandChannel) -> f64 with Panic {` — *quantum/born_channel.sio*
+- `pub fn born_prepared(angle: Epistemic) -> Born with Mut, Div, Panic {` — *quantum/born_channel.sio*
+- `pub fn born_one_shot(theta: f64, seed: f64) -> Born with Mut, Div, Panic {` — *quantum/born_channel.sio*
+- `pub fn born_pair_one_angle(angle: Epistemic) -> BornPair with Mut, Div, Panic {` — *quantum/born_channel.sio*
+- `pub fn born_pair_two_angles(a: Epistemic, b: Epistemic) -> BornPair with Mut, Div, Panic {` — *quantum/born_channel.sio*
+- `pub fn pair_var_sum(pair: BornPair) -> f64 with Panic {` — *quantum/born_channel.sio*
+- `pub fn mixture_of_three(p1: f64, p2: f64, p3: f64) -> MixtureLaw {` — *quantum/born_shot_law.sio*
+- `pub fn ry_gh_x(i: i64) -> f64 with Panic {` — *quantum/born_shot_law.sio*
+- `pub fn ry_gh_w(i: i64) -> f64 with Panic {` — *quantum/born_shot_law.sio*
+- `pub fn ry_shot_law(theta: f64, sigma: f64) -> ShotLaw with Mut, Div, Panic {` — *quantum/born_shot_law.sio*
+- `pub fn ry_product_cov(theta: f64, sigma: f64) -> WireCov with Mut, Div, Panic {` — *quantum/born_shot_law.sio*
+- `pub fn ry_cnot_cov(theta: f64, sigma: f64) -> WireCov with Mut, Div, Panic {` — *quantum/born_shot_law.sio*
+- `pub fn ry_cz_cov(theta: f64, sigma: f64) -> WireCov with Mut, Div, Panic {` — *quantum/born_shot_law.sio*
+- `pub fn ry_gaussian_shape(theta: f64, sigma: f64) -> AngleShape with Mut, Div, Panic {` — *quantum/born_shot_law.sio*
+- `pub fn ry_two_point_matched(theta: f64, target_var: f64) -> AngleShape with Mut, Div, Panic {` — *quantum/born_shot_law.sio*
+- `pub fn ry_record_split(theta: f64, sigma: f64, target_var: f64) -> RecordSplit with Mut, Div, Panic {` — *quantum/born_shot_law.sio*
+- `pub fn target_read(w: WireCov) -> TargetRead {` — *quantum/born_shot_law.sio*
+- `pub fn ry_parity_bound(theta: f64, sigma: f64, target_var: f64) -> ParityBound with Mut, Div, Panic {` — *quantum/born_shot_law.sio*
+- `pub fn ry4_product_parity(theta: f64) -> StateParity with Mut, Div, Panic {` — *quantum/born_shot_law.sio*
+- `pub fn ghz4_parity() -> StateParity with Mut, Div, Panic {` — *quantum/born_shot_law.sio*
+- `pub fn ry_chsh_exit(pi: f64) -> ChshExit with Mut, Div, Panic {` — *quantum/born_shot_law.sio*
+- `pub fn ry_chsh_shifted(delta_a: f64, delta_b: f64, pi: f64) -> f64 with Mut, Div, Panic {` — *quantum/born_shot_law.sio*
+- `pub fn ry_chsh_party_noise(sigma: f64, pi: f64) -> f64 with Mut, Div, Panic {` — *quantum/born_shot_law.sio*
+- `pub fn ry_chsh_party(delta_a: f64, delta_b: f64, pi: f64) -> ChshScale with Mut, Div, Panic {` — *quantum/born_shot_law.sio*
+- `pub fn ry_chsh_copy_noise(sigma: f64, pi: f64) -> f64 with Mut, Div, Panic {` — *quantum/born_shot_law.sio*
+- `pub fn ry_chsh_anti_noise(sigma: f64, pi: f64) -> f64 with Mut, Div, Panic {` — *quantum/born_shot_law.sio*
+- `pub fn ry_chsh_split(epsilon: f64, pi: f64) -> ChshScale with Mut, Div, Panic {` — *quantum/born_shot_law.sio*
+- `pub fn ry_chsh_both(delta_a: f64, delta_b: f64, epsilon: f64, pi: f64) -> ChshScale with Mut, Div, Panic {` — *quantum/born_shot_law.sio*
+- `pub fn ry_partial_chsh(phi: f64, beta: f64, pi: f64) -> PartialRead with Mut, Div, Panic {` — *quantum/born_shot_law.sio*
+- `pub fn elin_ry_prob_one(theta: f64) -> f64 with Mut, Div, Panic {` — *quantum/epistemic_linear.sio*
+- `pub fn elin_ry_teleport_prob_one(theta: f64) -> f64 with Mut, Div, Panic {` — *quantum/epistemic_linear.sio*
+- `pub fn elin_ry_dprob(theta: f64) -> f64 with Mut, Div, Panic {` — *quantum/epistemic_linear.sio*
+- `pub fn elin_ry_teleport_dprob(theta: f64) -> f64 with Mut, Div, Panic {` — *quantum/epistemic_linear.sio*
+- `pub fn elin_ry_d2prob(theta: f64) -> f64 with Mut, Div, Panic {` — *quantum/epistemic_linear.sio*
+- `pub fn elin_ry_gum(angle: Epistemic) -> LinearGum with Mut, Div, Panic {` — *quantum/epistemic_linear.sio*
+- `pub fn vqe_pi() -> f64 {` — *quantum/epistemic_vqe.sio*
+- `pub fn vqe_sqrt(x: f64) -> f64 with Mut, Div, Panic {` — *quantum/epistemic_vqe.sio*
+- `pub fn vqe_sin(x: f64) -> f64 with Mut, Div, Panic {` — *quantum/epistemic_vqe.sio*
+- `pub fn vqe_cos(x: f64) -> f64 with Mut, Div, Panic {` — *quantum/epistemic_vqe.sio*
+- `pub fn vqe_atan2(y: f64, x: f64) -> f64 with Mut, Div, Panic {` — *quantum/epistemic_vqe.sio*
+- `pub fn sv_zero(n_qubits: i32) -> Statevector with Mut, Div, Panic {` — *quantum/epistemic_vqe.sio*
+- `pub fn sv_apply_rx(sv: Statevector, qubit: i32, theta: f64) -> Statevector with Mut, Div, Panic {` — *quantum/epistemic_vqe.sio*
+- `pub fn sv_apply_ry(sv: Statevector, qubit: i32, theta: f64) -> Statevector with Mut, Div, Panic {` — *quantum/epistemic_vqe.sio*
+- `pub fn sv_apply_rz(sv: Statevector, qubit: i32, theta: f64) -> Statevector with Mut, Div, Panic {` — *quantum/epistemic_vqe.sio*
+- `pub fn sv_apply_h(sv: Statevector, qubit: i32) -> Statevector with Mut, Div, Panic {` — *quantum/epistemic_vqe.sio*
+- `pub fn sv_apply_cx(sv: Statevector, control: i32, target: i32) -> Statevector with Mut, Div, Panic {` — *quantum/epistemic_vqe.sio*
+- `pub fn sv_measure_z(sv: &Statevector, qubit: i32) -> f64 with Mut, Div, Panic {` — *quantum/epistemic_vqe.sio*
+- `pub fn expectation_pauli_z(sv: &Statevector, qubit: i32) -> f64 with Mut, Div, Panic {` — *quantum/epistemic_vqe.sio*
+- `pub fn expectation_zz(sv: &Statevector, q1: i32, q2: i32) -> f64 with Mut, Div, Panic {` — *quantum/epistemic_vqe.sio*
+- `pub fn h2_c0() -> f64 { return 0.0 - 0.4804 }   // identity` — *quantum/epistemic_vqe.sio*
+- `pub fn h2_c1() -> f64 { return 0.3435 }         // Z0` — *quantum/epistemic_vqe.sio*
+- `pub fn h2_c2() -> f64 { return 0.0 - 0.4347 }   // Z1` — *quantum/epistemic_vqe.sio*
+- `pub fn h2_c3() -> f64 { return 0.5716 }         // Z0 Z1` — *quantum/epistemic_vqe.sio*
+- `pub fn h2_c4() -> f64 { return 0.0910 }         // X0 X1 + Y0 Y1` — *quantum/epistemic_vqe.sio*
+- `pub fn h2_hamiltonian(sv: &Statevector) -> f64 with Mut, Div, Panic {` — *quantum/epistemic_vqe.sio*
+- `pub fn h2_exact_ground_energy() -> f64 with Mut, Div, Panic {` — *quantum/epistemic_vqe.sio*
+- `pub fn vqe_ansatz(params: &[f64; 16], n_params: i32, n_qubits: i32) -> Statevector with Mut, Div, Panic {` — *quantum/epistemic_vqe.sio*
+- `pub fn vqe_cost(params: &[f64; 16], n_params: i32) -> f64 with Mut, Div, Panic {` — *quantum/epistemic_vqe.sio*
+- `pub fn vqe_optimize(n_iterations: i32, learning_rate: f64) -> VQEResult with Mut, Div, Panic {` — *quantum/epistemic_vqe.sio*
+- `pub fn vqe_gradient(params: &[f64; 16]) -> [f64; 16] with Mut, Div, Panic {` — *quantum/epistemic_vqe.sio*
+- `pub fn vqe_hessian(params: &[f64; 16]) -> [f64; 16] with Mut, Div, Panic {` — *quantum/epistemic_vqe.sio*
+- `pub fn vqe_gum2(params: &[f64; 16], gate_unc: f64) -> GumBand with Mut, Div, Panic {` — *quantum/epistemic_vqe.sio*
+- `pub fn vqe_rng_new(seed: i64) -> VqeRng with Mut, Div, Panic {` — *quantum/epistemic_vqe.sio*
+- `pub fn vqe_mc_band(params: &[f64; 16], gate_unc: f64, n: i32, seed: i64) -> McBand with Mut, Div, Panic {` — *quantum/epistemic_vqe.sio*
+- `pub fn vqe_print_sci(x: f64, digits: i32) with IO, Mut, Div, Panic {` — *quantum/epistemic_vqe.sio*
+- `pub fn vqe_epistemic(n_iterations: i32, gate_unc: f64) -> VQEResult with Mut, Div, Panic {` — *quantum/epistemic_vqe.sio*
+- `pub fn quantum_state_new() -> QuantumState with Mut, Div, Panic {` — *quantum/linear.sio*
+- `pub fn qubit_alloc(qs: &!QuantumState) -> Qubit with Mut, Div, Panic {` — *quantum/linear.sio*
+- `pub fn hadamard(q: Qubit, qs: &!QuantumState) -> Qubit with Mut, Div, Panic {` — *quantum/linear.sio*
+- `pub fn pauli_x(q: Qubit, qs: &!QuantumState) -> Qubit with Mut, Div, Panic {` — *quantum/linear.sio*
+- `pub fn pauli_y(q: Qubit, qs: &!QuantumState) -> Qubit with Mut, Div, Panic {` — *quantum/linear.sio*
+- `pub fn pauli_z(q: Qubit, qs: &!QuantumState) -> Qubit with Mut, Div, Panic {` — *quantum/linear.sio*
+- `pub fn s_gate(q: Qubit, qs: &!QuantumState) -> Qubit with Mut, Div, Panic {` — *quantum/linear.sio*
+- `pub fn t_gate(q: Qubit, qs: &!QuantumState) -> Qubit with Mut, Div, Panic {` — *quantum/linear.sio*
+- `pub fn rx(q: Qubit, qs: &!QuantumState, theta: f64) -> Qubit with Mut, Div, Panic {` — *quantum/linear.sio*
+- `pub fn ry(q: Qubit, qs: &!QuantumState, theta: f64) -> Qubit with Mut, Div, Panic {` — *quantum/linear.sio*
+- `pub fn rz(q: Qubit, qs: &!QuantumState, theta: f64) -> Qubit with Mut, Div, Panic {` — *quantum/linear.sio*
+- `pub fn cnot(control: Qubit, target: Qubit, qs: &!QuantumState) -> QubitPair with Mut, Div, Panic {` — *quantum/linear.sio*
+- `pub fn cz(control: Qubit, target: Qubit, qs: &!QuantumState) -> QubitPair with Mut, Div, Panic {` — *quantum/linear.sio*
+- `pub fn swap(q1: Qubit, q2: Qubit, qs: &!QuantumState) -> QubitPair with Mut, Div, Panic {` — *quantum/linear.sio*
+- `pub fn ccnot(c1: Qubit, c2: Qubit, target: Qubit, qs: &!QuantumState) -> QubitTriple with Mut, Div, Panic {` — *quantum/linear.sio*
+- `pub fn measure_qubit(q: Qubit, qs: &!QuantumState, rng_seed: f64) -> MeasurementResult with Mut, Div, Panic {` — *quantum/linear.sio*
+- `pub fn bell_pair(q1: Qubit, q2: Qubit, qs: &!QuantumState) -> QubitPair with Mut, Div, Panic {` — *quantum/linear.sio*
+- `pub fn ghz3(q0: Qubit, q1: Qubit, q2: Qubit, qs: &!QuantumState) -> QubitTriple with Mut, Div, Panic {` — *quantum/linear.sio*
+- `pub fn teleport(msg: Qubit, alice: Qubit, bob: Qubit, qs: &!QuantumState, seed1: f64, seed2: f64) -> TeleportResult with Mut, Div, Panic {` — *quantum/linear.sio*
+- `pub fn quantum_state_info(qs: &QuantumState) -> StateInfo with Mut, Div, Panic {` — *quantum/linear.sio*
+- `pub fn amp_real(qs: &QuantumState, idx: i32) -> f64 with Mut, Div, Panic {` — *quantum/linear.sio*
+- `pub fn amp_imag(qs: &QuantumState, idx: i32) -> f64 with Mut, Div, Panic {` — *quantum/linear.sio*
+- `pub fn amp_prob(qs: &QuantumState, idx: i32) -> f64 with Mut, Div, Panic {` — *quantum/linear.sio*
+- `pub fn tape_new(n_qubits: i32) -> Tape {` — *quantum/qasm_tape.sio*
+- `pub fn tape_h(t: Tape, q: i32) -> Tape with Mut, Div, Panic {` — *quantum/qasm_tape.sio*
+- `pub fn tape_ry(t: Tape, q: i32, angle: f64) -> Tape with Mut, Div, Panic {` — *quantum/qasm_tape.sio*
+- `pub fn tape_rz(t: Tape, q: i32, angle: f64) -> Tape with Mut, Div, Panic {` — *quantum/qasm_tape.sio*
+- `pub fn tape_cx(t: Tape, control: i32, target: i32) -> Tape with Mut, Div, Panic {` — *quantum/qasm_tape.sio*
+- `pub fn tape_measure(t: Tape, q: i32) -> Tape with Mut, Div, Panic {` — *quantum/qasm_tape.sio*
+- `pub fn tape_bell() -> Tape with Mut, Div, Panic {` — *quantum/qasm_tape.sio*
+- `pub fn tape_bell_x(pi: f64) -> Tape with Mut, Div, Panic {` — *quantum/qasm_tape.sio*
+- `pub fn tape_basis_x(pi: f64, flip0: i32, flip1: i32) -> Tape with Mut, Div, Panic {` — *quantum/qasm_tape.sio*
+- `pub fn tape_basis(pi: f64, flip0: i32, flip1: i32) -> Tape with Mut, Div, Panic {` — *quantum/qasm_tape.sio*
+- `pub fn tape_idle() -> Tape with Mut, Div, Panic {` — *quantum/qasm_tape.sio*
+- `pub fn tape_ry_flip(angle: f64) -> Tape with Mut, Div, Panic {` — *quantum/qasm_tape.sio*
+- `pub fn tape_dec(x: f64) -> string with Mut, Panic, Div {` — *quantum/qasm_tape.sio*
+- `pub fn tape_qasm(t: Tape) -> string with Mut, Panic, Div {` — *quantum/qasm_tape.sio*
+- `pub fn tape_qir(t: Tape) -> string with Mut, Panic, Div {` — *quantum/qasm_tape.sio*
+- `pub fn tape_shots(t: Tape, shots: i64) -> ShotRequest with Mut, Panic, Div {` — *quantum/qasm_tape.sio*
+- `pub fn tape_pair_shots(z: Tape, x: Tape, shots: i64) -> PairRequest with Mut, Panic, Div {` — *quantum/qasm_tape.sio*
+- `pub fn tape_counts(t: Tape, shots: i64, seed: i64) -> ShotCounts with Mut, Div, Panic {` — *quantum/qasm_tape.sio*
+- `pub fn tape_judge(probs: BasisProb, counts: ShotCounts) -> CountVerdict with Div {` — *quantum/qasm_tape.sio*
+- `pub fn tape_read(text: string) -> ShotCounts with Mut, Panic, Div {` — *quantum/qasm_tape.sio*
+- `pub fn tape_write(counts: ShotCounts) -> string with Mut, Panic, Div {` — *quantum/qasm_tape.sio*
+- `pub fn tape_check(t: Tape, text: string) -> CountVerdict with Mut, Div, Panic {` — *quantum/qasm_tape.sio*
+- `pub fn shot_add(a: ShotCounts, b: ShotCounts) -> ShotCounts {` — *quantum/qasm_tape.sio*
+- `pub fn tape_face(counts: ShotCounts) -> ShotFace with Div {` — *quantum/qasm_tape.sio*
+- `pub fn tape_pair(z_counts: ShotCounts, x_counts: ShotCounts) -> PairRead with Div {` — *quantum/qasm_tape.sio*
+- `pub fn tape_witness(z_text: string, x_text: string) -> PairRead with Mut, Div, Panic {` — *quantum/qasm_tape.sio*
+- `pub fn tape_device_job(z: Tape, x: Tape, shots: i64) -> DeviceJob with Mut, Panic, Div {` — *quantum/qasm_tape.sio*
+- `pub fn tape_device_return(z_text: string, x_text: string) -> DeviceRead with Mut, Div, Panic {` — *quantum/qasm_tape.sio*
+- `pub fn tape_device_oracle(z: Tape, x: Tape, shots: i64, seed: i64) -> DeviceRead with Mut, Div, Panic {` — *quantum/qasm_tape.sio*
+- `pub fn tape_replay_1(t: Tape) -> f64 with Mut, Div, Panic {` — *quantum/qasm_tape.sio*
+- `pub fn tape_replay_2(t: Tape) -> BasisProb with Mut, Div, Panic {` — *quantum/qasm_tape.sio*
+- `pub fn pauli_i() -> i32 { return 0 }` — *quantum/vqe.sio*
+- `pub fn pauli_x() -> i32 { return 1 }` — *quantum/vqe.sio*
+- `pub fn pauli_y() -> i32 { return 2 }` — *quantum/vqe.sio*
+- `pub fn pauli_z() -> i32 { return 3 }` — *quantum/vqe.sio*
+- `pub fn pauli_string(op_q0: i32, op_q1: i32, op_q2: i32, op_q3: i32, coeff: f64) -> PauliString with Mut {` — *quantum/vqe.sio*
+- `pub fn pauli_weight(p: &PauliString) -> i32 with Mut {` — *quantum/vqe.sio*
+- `pub fn pauli_commutes(a: &PauliString, b: &PauliString) -> bool with Mut, Div, Panic {` — *quantum/vqe.sio*
+- `pub fn hamiltonian_new(n_qubits: i32, constant: f64) -> Hamiltonian {` — *quantum/vqe.sio*
+- `pub fn hamiltonian_add(h: Hamiltonian, p: PauliString) -> Hamiltonian with Mut, Div, Panic {` — *quantum/vqe.sio*
+- `pub fn h2_pauli_hamiltonian() -> Hamiltonian with Mut, Div, Panic {` — *quantum/vqe.sio*
+- `pub fn hamiltonian_grouping(h: &Hamiltonian, group: &![i32; 32]) -> i32 with Mut, Div, Panic {` — *quantum/vqe.sio*
+- `pub fn circuit_state_zero(n_qubits: i32) -> CircuitState with Mut, Div, Panic {` — *quantum/vqe.sio*
+- `pub fn pauli_expectation(s: &CircuitState, p: &PauliString) -> f64 with Mut, Div, Panic {` — *quantum/vqe.sio*
+- `pub fn hamiltonian_expectation(h: &Hamiltonian, s: &CircuitState) -> f64 with Mut, Div, Panic {` — *quantum/vqe.sio*
+- `pub fn hamiltonian_ground_energy(h: &Hamiltonian) -> f64 with Mut, Div, Panic {` — *quantum/vqe.sio*
+- `pub fn gate_h() -> i32 { return 1 }` — *quantum/vqe.sio*
+- `pub fn gate_x() -> i32 { return 2 }` — *quantum/vqe.sio*
+- `pub fn gate_y() -> i32 { return 3 }` — *quantum/vqe.sio*
+- `pub fn gate_z() -> i32 { return 4 }` — *quantum/vqe.sio*
+- `pub fn gate_s() -> i32 { return 5 }` — *quantum/vqe.sio*
+- `pub fn gate_sdg() -> i32 { return 6 }` — *quantum/vqe.sio*
+- `pub fn gate_t() -> i32 { return 7 }` — *quantum/vqe.sio*
+- `pub fn gate_rx() -> i32 { return 8 }` — *quantum/vqe.sio*
+- `pub fn gate_ry() -> i32 { return 9 }` — *quantum/vqe.sio*
+- `pub fn gate_rz() -> i32 { return 10 }` — *quantum/vqe.sio*
+- `pub fn gate_cnot() -> i32 { return 11 }` — *quantum/vqe.sio*
+- `pub fn gate_cz() -> i32 { return 12 }` — *quantum/vqe.sio*
+- `pub fn gate_swap() -> i32 { return 13 }` — *quantum/vqe.sio*
+- `pub fn gate1(kind: i32, q: i32) -> Gate {` — *quantum/vqe.sio*
+- `pub fn gate2(kind: i32, control: i32, target: i32) -> Gate {` — *quantum/vqe.sio*
+- `pub fn gate_rot(kind: i32, q: i32, angle: f64) -> Gate {` — *quantum/vqe.sio*
+- `pub fn gate_rot_param(kind: i32, q: i32, param: i32) -> Gate {` — *quantum/vqe.sio*
+- `pub fn circuit_new(n_qubits: i32) -> Circuit {` — *quantum/vqe.sio*
+- `pub fn circuit_push(c: Circuit, g: Gate) -> Circuit with Mut, Div, Panic {` — *quantum/vqe.sio*
+- `pub fn hardware_efficient(n_qubits: i32, depth: i32) -> Circuit with Mut, Div, Panic {` — *quantum/vqe.sio*
+- `pub fn circuit_run(c: &Circuit, params: &[f64; 64]) -> CircuitState with Mut, Div, Panic {` — *quantum/vqe.sio*
+- `pub fn vqe_energy(h: &Hamiltonian, c: &Circuit, params: &[f64; 64]) -> f64 with Mut, Div, Panic {` — *quantum/vqe.sio*
+- `pub fn circuit_rotosolve_valid(c: &Circuit) -> i32 with Mut, Div, Panic {` — *quantum/vqe.sio*
+- `pub fn vqe_minimize(h: &Hamiltonian, c: &Circuit, start: &[f64; 64], max_sweeps: i32) -> CircuitVQEResult with Mut, Div, Panic {` — *quantum/vqe.sio*
+- `pub fn within_chemical_accuracy(energy: f64, exact: f64) -> bool {` — *quantum/vqe.sio*
 
 ---
 
@@ -10027,8 +11060,20 @@ organized by module. Generated from source on the date shown below.
 
 ## random (`stdlib/random/`)
 
-**30 public functions** across 7 files
+**54 public functions** across 7 files
 
+- `pub fn uniform_new(low: f64, high: f64) -> Uniform {` — *random/distributions.sio*
+- `pub fn uniform_mean(dist: Uniform) -> f64 {` — *random/distributions.sio*
+- `pub fn uniform_variance(dist: Uniform) -> f64 {` — *random/distributions.sio*
+- `pub fn normal_new(mean: f64, std: f64) -> Normal {` — *random/distributions.sio*
+- `pub fn normal_mean(dist: Normal) -> f64 { dist.mean }` — *random/distributions.sio*
+- `pub fn normal_variance(dist: Normal) -> f64 { dist.std * dist.std }` — *random/distributions.sio*
+- `pub fn exponential_new(rate: f64) -> Exponential {` — *random/distributions.sio*
+- `pub fn exponential_mean(dist: Exponential) -> f64 { 1.0 / dist.rate }` — *random/distributions.sio*
+- `pub fn beta_new(alpha: f64, beta_val: f64) -> Beta {` — *random/distributions.sio*
+- `pub fn beta_mean(dist: Beta) -> f64 {` — *random/distributions.sio*
+- `pub fn poisson_new(rate: f64) -> Poisson {` — *random/distributions.sio*
+- `pub fn poisson_mean(dist: Poisson) -> f64 { dist.rate }` — *random/distributions.sio*
 - `pub fn pm_new(seed: i64) -> ParkMiller with Mut, Div, Panic {` — *random/park_miller.sio*
 - `pub fn pm_uniform(rng: &!ParkMiller) -> f64 with Mut, Div, Panic {` — *random/park_miller.sio*
 - `pub fn pm_standard_normal(rng: &!ParkMiller) -> f64 with Mut, Div, Panic {` — *random/park_miller.sio*
@@ -10046,8 +11091,20 @@ organized by module. Generated from source on the date shown below.
 - `pub fn pcg_next_f64_nonzero(rng: PcgState) -> (PcgState, f64) {` — *random/pcg64_core.sio*
 - `pub fn pcg_bounded(rng: PcgState, n: i64) -> (PcgState, i64) {` — *random/pcg64_core.sio*
 - `pub fn pcg_umod(x: i64, n: i64) -> i64 {` — *random/pcg64_core.sio*
+- `pub fn pcg_step_into(rng:&!PcgState)->i64 with Mut {` — *random/pcg64_core.sio*
+- `pub fn pcg_next_f64_into(rng:&!PcgState)->f64 with Mut,Div {` — *random/pcg64_core.sio*
 - `pub fn rng_pcg_new(seed: i64) -> RngPcgWrapper {` — *random/rng.sio*
 - `pub fn rng_pcg_bounded(state: RngPcgWrapper, n: i64) -> (RngPcgWrapper, i64) {` — *random/rng.sio*
+- `pub fn rng_new(seed: i64) -> RngState with Mut {` — *random/rng.sio*
+- `pub fn rng_next(state: RngState) -> (i64, RngState) with Mut {` — *random/rng.sio*
+- `pub fn rng_uniform(state: RngState) -> (f64, RngState) with Mut, Div, Panic {` — *random/rng.sio*
+- `pub fn rng_uniform_range(state: RngState, lo: f64, hi: f64) -> (f64, RngState) with Mut, Div, Panic {` — *random/rng.sio*
+- `pub fn rng_normal(state: RngState, mu: f64, sigma: f64) -> (f64, RngState) with Mut, Div, Panic {` — *random/rng.sio*
+- `pub fn rng_exponential(state: RngState, lambda: f64) -> (f64, RngState) with Mut, Div, Panic {` — *random/rng.sio*
+- `pub fn rng_bernoulli(state: RngState, p: f64) -> (i32, RngState) with Mut, Div, Panic {` — *random/rng.sio*
+- `pub fn rng_geometric(state: RngState, p: f64) -> (i64, RngState) with Mut, Div, Panic {` — *random/rng.sio*
+- `pub fn rng_shuffle(state: RngState, arr: [f64; 256], n: i32) -> (RngState, [f64; 256]) with Mut, Div, Panic {` — *random/rng.sio*
+- `pub fn rng_fill_uniform(state: RngState, n: i32) -> (RngState, [f64; 256]) with Mut, Div, Panic {` — *random/rng.sio*
 - `pub fn rng_fill_normal(state: RngState, n: i32, mu: f64, sigma: f64) -> (RngState, [f64; 256]) with Mut, Div, Panic {` — *random/rng.sio*
 - `pub fn xoshiro_seed(seed: i64) -> Xoshiro256 with Mut {` — *random/xoshiro.sio*
 - `pub fn xoshiro_next_i64(rng: &!Xoshiro256) -> i64 with Mut {` — *random/xoshiro.sio*
@@ -10121,12 +11178,12 @@ organized by module. Generated from source on the date shown below.
 - `pub fn proof_checker_family_matrix_audit_fingerprint(` — *safety/proof_checker_family_matrix.sio*
 - `pub fn proof_checker_microkernel_suite_check(` — *safety/proof_checker_microkernel_suite.sio*
 - `pub fn proof_checker_microkernel_suite_audit_fingerprint(` — *safety/proof_checker_microkernel_suite.sio*
-- `pub fn runtime_abi_gate_blocker_check(` — *safety/runtime_abi_gate_blocker.sio*
-- `pub fn runtime_abi_gate_blocker_audit_fingerprint(` — *safety/runtime_abi_gate_blocker.sio*
 - `pub fn runtime_abi_gate_blocker_query_mask(` — *safety/runtime_abi_gate_blocker_query_envelope.sio*
 - `pub fn runtime_abi_gate_blocker_query(` — *safety/runtime_abi_gate_blocker_query_envelope.sio*
 - `pub fn runtime_abi_gate_blocker_query_envelope_fingerprint(` — *safety/runtime_abi_gate_blocker_query_envelope.sio*
 - `pub fn runtime_abi_gate_blocker_query_receipt_check(` — *safety/runtime_abi_gate_blocker_query_envelope.sio*
+- `pub fn runtime_abi_gate_blocker_check(` — *safety/runtime_abi_gate_blocker.sio*
+- `pub fn runtime_abi_gate_blocker_audit_fingerprint(` — *safety/runtime_abi_gate_blocker.sio*
 
 ---
 
@@ -10169,10 +11226,10 @@ organized by module. Generated from source on the date shown below.
 - `pub fn index_of_minmax_i64(arr: &[i64], len: usize) -> Option<(usize, usize)> with Panic, Div, Mut {` — *search/basic.sio*
 - `pub fn run_tests() -> bool with Panic, Div, Mut {` — *search/basic.sio*
 - `pub fn new_ttt_tree(root_state: i64) -> TTTTree {` — *search/mcts/examples/tictactoe.sio*
-- `pub fn add_ttt_child(tree: &TTTTree, parent_idx: i32, state: i64, action: i32, move_count: i32) -> i32 {` — *search/mcts/examples/tictactoe.sio*
+- `pub fn add_ttt_child(tree: &!TTTTree, parent_idx: i32, state: i64, action: i32, move_count: i32) -> i32 {` — *search/mcts/examples/tictactoe.sio*
 - `pub fn select_to_leaf_ttt(tree: &TTTTree) -> i32 {` — *search/mcts/examples/tictactoe.sio*
 - `pub fn expand_ttt(tree: &TTTTree, node_idx: i32) {` — *search/mcts/examples/tictactoe.sio*
-- `pub fn backprop_ttt(tree: &TTTTree, leaf_idx: i32, value: f64) {` — *search/mcts/examples/tictactoe.sio*
+- `pub fn backprop_ttt(tree: &!TTTTree, leaf_idx: i32, value: f64) {` — *search/mcts/examples/tictactoe.sio*
 - `pub fn run_mcts_ttt(tree: &TTTTree, iterations: i32) {` — *search/mcts/examples/tictactoe.sio*
 - `pub fn best_move_ttt(tree: &TTTTree) -> i32 {` — *search/mcts/examples/tictactoe.sio*
 - `pub fn measured(mean: f64, std_dev: f64) -> MeasuredValue {` — *search/mcts/examples/uncertainty_demo.sio*
@@ -10180,9 +11237,9 @@ organized by module. Generated from source on the date shown below.
 - `pub fn add_values(a: &MeasuredValue, b: &MeasuredValue) -> MeasuredValue {` — *search/mcts/examples/uncertainty_demo.sio*
 - `pub fn get_std(v: &MeasuredValue) -> f64 {` — *search/mcts/examples/uncertainty_demo.sio*
 - `pub fn new_var_tree(root_state: i64) -> VarTree {` — *search/mcts/examples/uncertainty_demo.sio*
-- `pub fn add_var_child(tree: &VarTree, parent_idx: i32, state: i64, action: i32) -> i32 {` — *search/mcts/examples/uncertainty_demo.sio*
+- `pub fn add_var_child(tree: &!VarTree, parent_idx: i32, state: i64, action: i32) -> i32 {` — *search/mcts/examples/uncertainty_demo.sio*
 - `pub fn select_leaf_var(tree: &VarTree) -> i32 {` — *search/mcts/examples/uncertainty_demo.sio*
-- `pub fn backprop_var(tree: &VarTree, leaf_idx: i32, value: &MeasuredValue) {` — *search/mcts/examples/uncertainty_demo.sio*
+- `pub fn backprop_var(tree: &!VarTree, leaf_idx: i32, value: &MeasuredValue) {` — *search/mcts/examples/uncertainty_demo.sio*
 - `pub fn get_node_val(tree: &VarTree, node_idx: i32) -> MeasuredValue {` — *search/mcts/examples/uncertainty_demo.sio*
 - `pub fn new_root(state: i64) -> MCTSNode {` — *search/mcts/node.sio*
 - `pub fn new_child(state: i64, action: i32, parent_idx: i32, prior: f64) -> MCTSNode {` — *search/mcts/node.sio*
@@ -10237,7 +11294,7 @@ organized by module. Generated from source on the date shown below.
 
 ## Signal Processing (`stdlib/signal/`)
 
-**28 public functions** across 7 files
+**31 public functions** across 7 files
 
 - `pub fn fft_pi() -> f64 { 3.14159265358979323846 }` — *signal/fft.sio*
 - `pub fn fft_sqrt(x: f64) -> f64 with Mut, Div, Panic {` — *signal/fft.sio*
@@ -10251,6 +11308,8 @@ organized by module. Generated from source on the date shown below.
 - `pub fn fft_power(arr: &ComplexArray, out: &![f64; 256]) with Mut {` — *signal/fft.sio*
 - `pub fn fft_phase(arr: &ComplexArray, out: &![f64; 256]) with Mut, Div, Panic {` — *signal/fft.sio*
 - `pub fn main() -> i32 with IO, Mut, Div, Panic {` — *signal/fft.sio*
+- `pub fn flt_pi() -> f64 { 3.14159265358979323846 }` — *signal/filter.sio*
+- `pub fn flt_sin(x: f64) -> f64 with Mut, Div, Panic {` — *signal/filter.sio*
 - `pub fn iir1_lowpass(fc: f64, fs: f64) -> IIR1 with Mut, Div, Panic {` — *signal/filter.sio*
 - `pub fn iir1_highpass(fc: f64, fs: f64) -> IIR1 with Mut, Div, Panic {` — *signal/filter.sio*
 - `pub fn iir1_step(f: &!IIR1, x: f64) -> f64 with Mut {` — *signal/filter.sio*
@@ -10267,6 +11326,7 @@ organized by module. Generated from source on the date shown below.
 - `pub fn permutation_entropy(signal: &[f64; 1024], n: i64, m: i64) -> f64 with Mut, Div, Panic {` — *signal/fractal.sio*
 - `pub fn dfa(signal: &[f64; 1024], n: i64) -> f64 with Mut, Div, Panic {` — *signal/fractal.sio*
 - `pub fn main() -> i32 with IO, Mut, Div, Panic {` — *signal/fractal.sio*
+- `pub fn psd_result_new() -> PSDResult {` — *signal/spectral.sio*
 
 ---
 
@@ -10379,7 +11439,7 @@ organized by module. Generated from source on the date shown below.
 
 ## Special Functions (`stdlib/special/`)
 
-**57 public functions** across 12 files
+**61 public functions** across 13 files
 
 - `pub fn airy_ai(x: f64) -> f64 with Mut, Div, Panic {` — *special/airy.sio*
 - `pub fn airy_bi(x: f64) -> f64 with Mut, Div, Panic {` — *special/airy.sio*
@@ -10410,6 +11470,10 @@ organized by module. Generated from source on the date shown below.
 - `pub fn caputo_power_exact(beta: f64, alpha: f64, t: f64) -> f64 with Mut, Div, Panic {` — *special/caputo.sio*
 - `pub fn mittag_leffler_e_alpha(alpha: f64, z: f64) -> f64 with Mut, Div, Panic {` — *special/caputo.sio*
 - `pub fn fractional_decay_ml(c0: f64, lambda: f64, t: f64, alpha: f64) -> f64 with Mut, Div, Panic {` — *special/caputo.sio*
+- `pub fn gamma_pq_checked(a:f64,x:f64,budget:i64,tol:f64)->CheckedSpecialPair with Mut,Div,Panic {` — *special/checked_gamma_beta.sio*
+- `pub fn beta_pq_checked(a:f64,b:f64,x:f64,budget:i64,tol:f64)->CheckedSpecialPair with Mut,Div,Panic {` — *special/checked_gamma_beta.sio*
+- `pub fn gamma_inverse_checked(a:f64,p:f64,upper:bool,budget:i64,tol:f64)->CheckedSpecialInverse with Mut,Div,Panic {` — *special/checked_gamma_beta.sio*
+- `pub fn beta_inverse_checked(a:f64,b:f64,p:f64,upper:bool,budget:i64,tol:f64)->CheckedSpecialInverse with Mut,Div,Panic {` — *special/checked_gamma_beta.sio*
 - `pub fn elliptic_k(k: f64) -> f64 with Mut, Div, Panic {` — *special/elliptic.sio*
 - `pub fn elliptic_e(k: f64) -> f64 with Mut, Div, Panic {` — *special/elliptic.sio*
 - `pub fn erf(x: f64) -> f64 with Mut, Div, Panic {` — *special/erf.sio*
@@ -10481,10 +11545,9 @@ organized by module. Generated from source on the date shown below.
 
 ## Statistics (`stdlib/stats/`)
 
-**465 public functions** across 163 files
+**595 public functions** across 195 files
 
-- `pub fn anderson_darling(x: &[f64; 256], n: i32) -> ADResult with Mut, Div, Panic {` — *stats/anderson_darling.sio*
-- `pub fn run_tests() -> bool with IO, Mut, Div, Panic {` — *stats/anderson_darling.sio*
+- `pub fn anderson_darling(x:&[f64;256],n:i32)->ADResult with Mut,Div,Panic {` — *stats/anderson_darling.sio*
 - `pub fn anova_oneway(data: &[f64; 256], sizes: &[i64; 16], k: i32) -> AnovaResult with Mut, Div, Panic {` — *stats/anova.sio*
 - `pub fn run_tests() -> bool with IO, Mut, Div, Panic {` — *stats/anova.sio*
 - `pub fn ar1(x: &[f64; 256], n: i32) -> AR1Result with Mut, Div, Panic {` — *stats/ar1.sio*
@@ -10501,6 +11564,15 @@ organized by module. Generated from source on the date shown below.
 - `pub fn beta_binomial(a0: f64, b0: f64, k: i64, n: i64, conf: f64) -> BetaPosterior with Mut, Div, Panic {` — *stats/bayes_conjugate.sio*
 - `pub fn normal_normal(m0: f64, v0: f64, xbar: f64, lik_var: f64, n_obs: i64, conf: f64) -> NormalPosterior with Mut, Div, Panic {` — *stats/bayes_conjugate.sio*
 - `pub fn run_tests() -> bool with IO, Mut, Div, Panic {` — *stats/bayes_conjugate.sio*
+- `pub fn psis_log1p(x: f64) -> f64 with Mut, Div {` — *stats/bayesian/psis_loo.sio*
+- `pub fn psis_expm1(x: f64) -> f64 with Mut, Div {` — *stats/bayesian/psis_loo.sio*
+- `pub fn psis_sort(v: &![f64; 16384], ix: &![i64; 16384], n: i64) with Mut, Div, Panic {` — *stats/bayesian/psis_loo.sio*
+- `pub fn psis_lse(v: &[f64; 16384], n: i64) -> f64 with Mut, Div, Panic {` — *stats/bayesian/psis_loo.sio*
+- `pub fn psis_gpdfit(x: &[f64; 16384], n: i64, out: &![f64; 4]) with Mut, Div, Panic {` — *stats/bayesian/psis_loo.sio*
+- `pub fn psis_loo_i(ll: &[f64; 16384], s: i64, out: &![f64; 4]) with Mut, Div, Panic {` — *stats/bayesian/psis_loo.sio*
+- `pub fn run_tests() -> bool with IO, Mut, Div, Panic {` — *stats/bayesian/psis_loo.sio*
+- `pub fn bca_normal_cdf(z:f64)->BcaNormalValue with Mut, Div {` — *stats/bca_normal.sio*
+- `pub fn bca_normal_quantile(p:f64)->BcaNormalValue with Mut, Div {` — *stats/bca_normal.sio*
 - `pub fn beta_tail_leq(a: f64, b: f64, t: f64) -> f64 with Mut, Div, Panic {` — *stats/beta_hdi.sio*
 - `pub fn beta_hdi(a: f64, b: f64, conf: f64) -> BetaPostResult with Mut, Div, Panic {` — *stats/beta_hdi.sio*
 - `pub fn run_tests() -> bool with IO, Mut, Div, Panic {` — *stats/beta_hdi.sio*
@@ -10510,28 +11582,40 @@ organized by module. Generated from source on the date shown below.
 - `pub fn run_tests() -> bool with IO, Mut, Div, Panic {` — *stats/bic.sio*
 - `pub fn bland_altman(a: &[f64; 256], b: &[f64; 256], n: i32, conf: f64) -> BAResult with Mut, Div, Panic {` — *stats/bland_altman.sio*
 - `pub fn run_tests() -> bool with IO, Mut, Div, Panic {` — *stats/bland_altman.sio*
-- `pub fn bootstrap_mean(x: &[f64; 256], n: i32, b: i32, conf: f64, seed: i64) -> BootResult with Mut, Div, Panic {` — *stats/bootstrap.sio*
-- `pub fn run_tests() -> bool with IO, Mut, Div, Panic {` — *stats/bootstrap.sio*
 - `pub fn bootstrap_corr(x: &[f64; 256], y: &[f64; 256], n: i32, b: i32, conf: f64, seed: i64) -> BootCorrResult with Mut, Div, Panic {` — *stats/bootstrap_corr.sio*
 - `pub fn run_tests() -> bool with IO, Mut, Div, Panic {` — *stats/bootstrap_corr.sio*
 - `pub fn bootstrap_diff(x: &[f64; 256], nx: i32, y: &[f64; 256], ny: i32, b: i32, conf: f64, seed: i64) -> BootDiffResult with Mut, Div, Panic {` — *stats/bootstrap_diff.sio*
 - `pub fn run_tests() -> bool with IO, Mut, Div, Panic {` — *stats/bootstrap_diff.sio*
+- `pub fn bootstrap_mean(x:&[f64;256],n:i32,b:i32,conf:f64,seed:i64)->BootResult with Mut, Div, Panic {` — *stats/bootstrap.sio*
+- `pub fn bootstrap_bca_mean(x:&[f64;256],n:i32,b:i32,conf:f64,seed:i64)->BcaResult with Mut, Div, Panic {` — *stats/bootstrap.sio*
 - `pub fn bowker(table: &[f64; 256], k: i32) -> BowkerResult with Mut, Div, Panic {` — *stats/bowker.sio*
 - `pub fn run_tests() -> bool with IO, Mut, Div, Panic {` — *stats/bowker.sio*
 - `pub fn breslow_day(a: &[f64; 16], b: &[f64; 16], c: &[f64; 16], d: &[f64; 16], k: i32) -> BDResult with Mut, Div, Panic {` — *stats/breslow_day.sio*
 - `pub fn run_tests() -> bool with IO, Mut, Div, Panic {` — *stats/breslow_day.sio*
+- `pub fn brown_forsythe(a:&[f64;100],na:i64,b:&[f64;100],nb:i64)->BrownForsytheResult with Mut,Div,Panic {` — *stats/brown_forsythe.sio*
 - `pub fn arithmetic_mean(x: &[f64; 256], n: i32) -> f64 with Mut, Div, Panic {` — *stats/central_tendency.sio*
 - `pub fn geometric_mean(x: &[f64; 256], n: i32) -> f64 with Mut, Div, Panic {` — *stats/central_tendency.sio*
 - `pub fn harmonic_mean(x: &[f64; 256], n: i32) -> f64 with Mut, Div, Panic {` — *stats/central_tendency.sio*
 - `pub fn rms(x: &[f64; 256], n: i32) -> f64 with Mut, Div, Panic {` — *stats/central_tendency.sio*
 - `pub fn run_tests() -> bool with IO, Mut, Div, Panic {` — *stats/central_tendency.sio*
-- `pub fn chi2_independence(table: &[f64; 256], r: i32, c: i32) -> ChiIndep with Mut, Div, Panic {` — *stats/chi2_independence.sio*
-- `pub fn run_tests() -> bool with IO, Mut, Div, Panic {` — *stats/chi2_independence.sio*
+- `pub fn count_rng(seed:i64)->PcgState {` — *stats/checked_count_sampling.sio*
+- `pub fn count_cursor_new(rng:PcgState)->CountCursor {` — *stats/checked_count_sampling.sio*
+- `pub fn count_cursor_rng(s:&CountCursor)->PcgState {` — *stats/checked_count_sampling.sio*
+- `pub fn count_draw_value()->CountDrawValue {` — *stats/checked_count_sampling.sio*
+- `pub fn gamma_draw_value()->GammaDrawValue {` — *stats/checked_count_sampling.sio*
+- `pub fn poisson_count_draw_into(s:&!CountCursor,mean:f64,max_uniforms:i64,max_proposals:i64,out:&!CountDrawValue)->i64 with Mut,Div,Panic {` — *stats/checked_count_sampling.sio*
+- `pub fn gamma_unit_draw_into(s:&!CountCursor,shape:f64,max_uniforms:i64,max_proposals:i64,out:&!GammaDrawValue)->i64 with Mut,Div,Panic {` — *stats/checked_count_sampling.sio*
+- `pub fn nb2_count_draw_into(s:&!CountCursor,mean:f64,alpha:f64,max_uniforms:i64,max_proposals:i64,out:&!CountDrawValue)->i64 with Mut,Div,Panic {` — *stats/checked_count_sampling.sio*
+- `pub fn poisson_count_draw(rng:PcgState,mean:f64,max_uniforms:i64,max_proposals:i64)->CountDraw with Mut,Div,Panic {` — *stats/checked_count_sampling.sio*
+- `pub fn gamma_unit_draw(rng:PcgState,shape:f64,max_uniforms:i64,max_proposals:i64)->GammaDraw with Mut,Div,Panic {` — *stats/checked_count_sampling.sio*
+- `pub fn nb2_count_draw(rng:PcgState,mean:f64,alpha:f64,max_uniforms:i64,max_proposals:i64)->CountDraw with Mut,Div,Panic {` — *stats/checked_count_sampling.sio*
 - `pub fn chi2_pdf(x: f64, k: f64) -> f64 with Mut, Div, Panic {` — *stats/chi_square.sio*
 - `pub fn chi2_sf(x: f64, k: f64) -> f64 with Mut, Div, Panic {` — *stats/chi_square.sio*
 - `pub fn chi2_quantile(p: f64, k: f64) -> f64 with Mut, Div, Panic {` — *stats/chi_square.sio*
 - `pub fn chi2_variance_ci(s2: f64, n: i64, conf: f64) -> VarCI with Mut, Div, Panic {` — *stats/chi_square.sio*
 - `pub fn run_tests() -> bool with IO, Mut, Div, Panic {` — *stats/chi_square.sio*
+- `pub fn chi2_independence(table: &[f64; 256], r: i32, c: i32) -> ChiIndep with Mut, Div, Panic {` — *stats/chi2_independence.sio*
+- `pub fn run_tests() -> bool with IO, Mut, Div, Panic {` — *stats/chi2_independence.sio*
 - `pub fn cles_from_d(d: f64) -> f64 with Mut, Div, Panic {` — *stats/cles.sio*
 - `pub fn cles_from_samples(x: &[f64; 256], nx: i32, y: &[f64; 256], ny: i32) -> f64 with Mut, Div, Panic {` — *stats/cles.sio*
 - `pub fn run_tests() -> bool with IO, Mut, Div, Panic {` — *stats/cles.sio*
@@ -10551,8 +11635,15 @@ organized by module. Generated from source on the date shown below.
 - `pub fn run_tests() -> bool with IO, Mut, Div, Panic {` — *stats/cooks_distance.sio*
 - `pub fn corr_ci(r: f64, n: i32, conf: f64) -> CorrCIResult with Mut, Div, Panic {` — *stats/corr_ci.sio*
 - `pub fn run_tests() -> bool with IO, Mut, Div, Panic {` — *stats/corr_ci.sio*
-- `pub fn pearson(x: &[f64; 256], y: &[f64; 256], n: i32, conf: f64) -> CorrResult with Mut, Div, Panic {` — *stats/correlation.sio*
-- `pub fn spearman(x: &[f64; 256], y: &[f64; 256], n: i32) -> SpearmanCorr with Mut, Div, Panic {` — *stats/correlation.sio*
+- `pub fn pearson_checked(x: &[f64;256], y: &[f64;256], n: i64) -> CorrelationEstimate with Mut, Div, Panic {` — *stats/correlation_core.sio*
+- `pub fn spearman_checked(x: &[f64;256], y: &[f64;256], n: i64) -> CorrelationEstimate with Mut, Div, Panic {` — *stats/correlation_core.sio*
+- `pub fn correlation_prepare_indexed(x: &[f64;256], y: &[f64;256], n: i64, ranked: bool,` — *stats/correlation_core.sio*
+- `pub fn correlation_prepare(x: &[f64;256], y: &[f64;256], n: i64, ranked: bool,` — *stats/correlation_core.sio*
+- `pub fn pearson_inference(x:&[f64;256],y:&[f64;256],n:i64,conf:f64,` — *stats/correlation_inference.sio*
+- `pub fn spearman_inference(x:&[f64;256],y:&[f64;256],n:i64,` — *stats/correlation_inference.sio*
+- `pub fn correlation_permutation(x: &[f64;256], y: &[f64;256], n: i64,` — *stats/correlation_permutation.sio*
+- `pub fn pearson(x:&[f64;256],y:&[f64;256],n:i32,conf:f64)->CorrResult with Mut,Div,Panic {` — *stats/correlation.sio*
+- `pub fn spearman(x:&[f64;256],y:&[f64;256],n:i32)->SpearmanCorr with Mut,Div,Panic {` — *stats/correlation.sio*
 - `pub fn run_tests() -> bool with IO, Mut, Div, Panic {` — *stats/correlation.sio*
 - `pub fn cramer_von_mises(x: &[f64; 256], n: i32) -> CvMResult with Mut, Div, Panic {` — *stats/cramer_von_mises.sio*
 - `pub fn run_tests() -> bool with IO, Mut, Div, Panic {` — *stats/cramer_von_mises.sio*
@@ -10580,6 +11671,7 @@ organized by module. Generated from source on the date shown below.
 - `pub fn binomial_cdf(k: i64, n: i64, p: f64) -> f64 with Mut, Div, Panic {` — *stats/densities.sio*
 - `pub fn geometric_pmf(k: i64, p: f64) -> f64 with Mut, Div, Panic {` — *stats/densities.sio*
 - `pub fn run_tests() -> bool with IO, Mut, Div, Panic {` — *stats/densities.sio*
+- `pub fn mad(data: [f64; 100], n: i64, med: f64) -> f64 with Mut, Div, Panic {` — *stats/descriptive.sio*
 - `pub fn mde_two_means(n_per_group: i32, alpha: f64, power: f64) -> f64 with Mut, Div, Panic {` — *stats/detectable_effect.sio*
 - `pub fn mde_one_mean(n: i32, alpha: f64, power: f64) -> f64 with Mut, Div, Panic {` — *stats/detectable_effect.sio*
 - `pub fn run_tests() -> bool with IO, Mut, Div, Panic {` — *stats/detectable_effect.sio*
@@ -10600,6 +11692,16 @@ organized by module. Generated from source on the date shown below.
 - `pub fn run_tests() -> bool with Mut, Div, Panic {` — *stats/distributions.sio*
 - `pub fn durbin_watson(e: &[f64; 256], n: i32) -> DWResult with Mut, Div, Panic {` — *stats/durbin_watson.sio*
 - `pub fn run_tests() -> bool with IO, Mut, Div, Panic {` — *stats/durbin_watson.sio*
+- `pub fn dynamic_histogram_counts(values:&NumericBuffer,available:&IntegerBuffer,` — *stats/dynamic_histogram.sio*
+- `pub fn dynamic_histogram_density(counts:&IntegerBuffer,edges:&NumericBuffer,` — *stats/dynamic_histogram.sio*
+- `pub fn gaussian_kde_dynamic(` — *stats/dynamic_kde.sio*
+- `pub fn dynamic_adjust_pvalues(p:&NumericBuffer,available:&IntegerBuffer,` — *stats/dynamic_multiple_testing.sio*
+- `pub fn dynamic_adjust_by(p:&NumericBuffer,available:&IntegerBuffer,` — *stats/dynamic_multiple_testing.sio*
+- `pub fn numeric_heapsort(a:&!NumericBuffer,n:i64)->i64 with Mut,Div,Panic {` — *stats/dynamic_order.sio*
+- `pub fn numeric_select(a:&!NumericBuffer,n:i64,k:i64,partition_budget:i64)->NumericSelection with Mut,Div,Panic {` — *stats/dynamic_order.sio*
+- `pub fn dynamic_summary_order(values:&NumericBuffer,available:&IntegerBuffer,` — *stats/dynamic_summaries.sio*
+- `pub fn dynamic_quantile_sorted(sorted:&NumericBuffer,n:i64,q:f64)->DynamicQuantile with Div,Panic {` — *stats/dynamic_summaries.sio*
+- `pub fn dynamic_box_sorted(sorted:&NumericBuffer,n:i64)->DynamicBoxSummary with Mut,Div,Panic {` — *stats/dynamic_summaries.sio*
 - `pub fn d_to_r(d: f64) -> f64 with Mut, Div, Panic {` — *stats/effect_convert.sio*
 - `pub fn r_to_d(r: f64) -> f64 with Mut, Div, Panic {` — *stats/effect_convert.sio*
 - `pub fn d_to_logor(d: f64) -> f64 {` — *stats/effect_convert.sio*
@@ -10628,12 +11730,16 @@ organized by module. Generated from source on the date shown below.
 - `pub fn run_effect_size_tests() -> bool with Mut, Div, Panic {` — *stats/effect_sizes.sio*
 - `pub fn epi_2x2(a: i64, b: i64, c: i64, d: i64, conf: f64) -> EpiResult with Mut, Div, Panic {` — *stats/epidemiology.sio*
 - `pub fn run_tests() -> bool with IO, Mut, Div, Panic {` — *stats/epidemiology.sio*
+- `pub fn shapiro_wilk_test(data:[f64;100],n:i64)->ShapiroResult with Mut,Div,Panic {` — *stats/epistemic/assumptions.sio*
+- `pub fn levene_test(group1:[f64;100],n1:i64,group2:[f64;100],n2:i64)->BrownForsytheResult with Mut,Div,Panic {` — *stats/epistemic/assumptions.sio*
+- `pub fn breusch_pagan_test(residuals:[f64;100],x:[f64;100],n:i64)->KoenkerResult with Mut,Div,Panic {` — *stats/epistemic/assumptions.sio*
+- `pub fn anderson_darling_test(data:[f64;100],n:i64)->ADResult with Mut,Div,Panic {` — *stats/epistemic/assumptions.sio*
 - `pub fn rng_new(seed: i64) -> RNG {` — *stats/epistemic/bootstrap.sio*
 - `pub fn rng_next(rng: &!RNG) -> i64 with Mut, Div, Panic {` — *stats/epistemic/bootstrap.sio*
 - `pub fn rng_next_range(rng: &!RNG, max: i64) -> i64 with Mut, Div, Panic {` — *stats/epistemic/bootstrap.sio*
 - `pub fn bootstrap_resample(` — *stats/epistemic/bootstrap.sio*
 - `pub fn bootstrap_mean_ci(` — *stats/epistemic/bootstrap.sio*
-- `pub fn bootstrap_ci_bca_mean(` — *stats/epistemic/bootstrap.sio*
+- `pub fn bootstrap_ci_bca_mean(data:[f64;100],n:i64,n_bootstrap:i64,` — *stats/epistemic/bootstrap.sio*
 - `pub fn exp_smoothing(x: &[f64; 256], n: i32, alpha: f64) -> SESResult with Mut, Div, Panic {` — *stats/exp_smoothing.sio*
 - `pub fn run_tests() -> bool with IO, Mut, Div, Panic {` — *stats/exp_smoothing.sio*
 - `pub fn exp_survival(time: &[f64; 256], event: &[i64; 256], n: i32, t_query: f64) -> ExpSurvResult with Mut, Div, Panic {` — *stats/exp_survival.sio*
@@ -10668,6 +11774,7 @@ organized by module. Generated from source on the date shown below.
 - `pub fn run_tests() -> bool with IO, Mut, Div, Panic {` — *stats/grouped_stats.sio*
 - `pub fn gwet_ac1(table: &[f64; 256], k: i32) -> AC1Result with Mut, Div, Panic {` — *stats/gwet_ac1.sio*
 - `pub fn run_tests() -> bool with IO, Mut, Div, Panic {` — *stats/gwet_ac1.sio*
+- `pub fn koenker_bp_simple(e:&[f64;100],x:&[f64;100],n:i64)->KoenkerResult with Mut,Div,Panic {` — *stats/heteroscedasticity.sio*
 - `pub fn hl_one(x: &[f64; 256], n: i32) -> f64 with Mut, Div, Panic {` — *stats/hodges_lehmann.sio*
 - `pub fn hl_two(x: &[f64; 256], nx: i32, y: &[f64; 256], ny: i32) -> f64 with Mut, Div, Panic {` — *stats/hodges_lehmann.sio*
 - `pub fn run_tests() -> bool with IO, Mut, Div, Panic {` — *stats/hodges_lehmann.sio*
@@ -10687,8 +11794,12 @@ organized by module. Generated from source on the date shown below.
 - `pub fn mann_whitney_u(` — *stats/hypothesis.sio*
 - `pub fn icc_forms(data: &[f64; 256], n: i32, k: i32) -> ICCFormsResult with Mut, Div, Panic {` — *stats/icc_forms.sio*
 - `pub fn run_tests() -> bool with IO, Mut, Div, Panic {` — *stats/icc_forms.sio*
-- `pub fn spearman_rho(x: [f64; 100], y: [f64; 100], n: i64) -> f64 with Mut, Div, Panic {` — *stats/inferential.sio*
-- `pub fn spearman_test(x: [f64; 100], y: [f64; 100], n: i64) -> SpearmanResult with Mut, Div, Panic {` — *stats/inferential.sio*
+- `pub fn t_test_one_sample(data: [f64; 100], n: i64, mu0: f64) -> TTestResult with Mut, Div, Panic {` — *stats/inferential.sio*
+- `pub fn t_test_independent(x: [f64; 100], nx: i64, y: [f64; 100], ny: i64) -> TTestResult with Mut, Div, Panic {` — *stats/inferential.sio*
+- `pub fn t_test_welch(x: [f64; 100], nx: i64, y: [f64; 100], ny: i64) -> TTestResult with Mut, Div, Panic {` — *stats/inferential.sio*
+- `pub fn t_test_paired(x: [f64; 100], y: [f64; 100], n: i64) -> TTestResult with Mut, Div, Panic {` — *stats/inferential.sio*
+- `pub fn spearman_rho(x:[f64;100],y:[f64;100],n:i64)->f64 with Mut,Div,Panic {` — *stats/inferential.sio*
+- `pub fn spearman_test(x:[f64;100],y:[f64;100],n:i64)->SpearmanResult with Mut,Div,Panic {` — *stats/inferential.sio*
 - `pub fn jackknife_mean(x: &[f64; 256], n: i32) -> JackResult with Mut, Div, Panic {` — *stats/jackknife.sio*
 - `pub fn jackknife_variance(x: &[f64; 256], n: i32) -> JackResult with Mut, Div, Panic {` — *stats/jackknife.sio*
 - `pub fn run_tests() -> bool with IO, Mut, Div, Panic {` — *stats/jackknife.sio*
@@ -10696,16 +11807,16 @@ organized by module. Generated from source on the date shown below.
 - `pub fn run_tests() -> bool with IO, Mut, Div, Panic {` — *stats/jonckheere.sio*
 - `pub fn kendall_tau(x: &[f64; 256], y: &[f64; 256], n: i32) -> KendallResult with Mut, Div, Panic {` — *stats/kendall_tau.sio*
 - `pub fn run_tests() -> bool with IO, Mut, Div, Panic {` — *stats/kendall_tau.sio*
-- `pub fn km(time: &[f64; 256], event: &[i64; 256], n: i32, t_query: f64) -> KMResult with Mut, Div, Panic {` — *stats/km.sio*
-- `pub fn run_tests() -> bool with IO, Mut, Div, Panic {` — *stats/km.sio*
 - `pub fn km_greenwood(time: &[f64; 256], event: &[i64; 256], n: i32, t_query: f64, conf: f64) -> KMCIResult with Mut, Div, Panic {` — *stats/km_greenwood.sio*
 - `pub fn run_tests() -> bool with IO, Mut, Div, Panic {` — *stats/km_greenwood.sio*
+- `pub fn km(time: &[f64; 256], event: &[i64; 256], n: i32, t_query: f64) -> KMResult with Mut, Div, Panic {` — *stats/km.sio*
+- `pub fn run_tests() -> bool with IO, Mut, Div, Panic {` — *stats/km.sio*
 - `pub fn krippendorff(rating: &[i64; 256], n_units: i32, m_raters: i32, k: i32) -> f64 with Mut, Div, Panic {` — *stats/krippendorff.sio*
 - `pub fn run_tests() -> bool with IO, Mut, Div, Panic {` — *stats/krippendorff.sio*
 - `pub fn kruskal_wallis(data: &[f64; 256], sizes: &[i64; 16], k: i32) -> KWResult with Mut, Div, Panic {` — *stats/kruskal_wallis.sio*
 - `pub fn run_tests() -> bool with IO, Mut, Div, Panic {` — *stats/kruskal_wallis.sio*
-- `pub fn ks_one_normal(x: &[f64; 256], n: i32, mu: f64, sigma: f64) -> KSResult with Mut, Div, Panic {` — *stats/ks_test.sio*
-- `pub fn ks_two(x: &[f64; 256], nx: i32, y: &[f64; 256], ny: i32) -> KSResult with Mut, Div, Panic {` — *stats/ks_test.sio*
+- `pub fn ks_one_normal(x:&[f64;256],n:i32,mu:f64,sigma:f64)->KSResult with Mut,Div,Panic {` — *stats/ks_test.sio*
+- `pub fn ks_two(x:&[f64;256],nx:i32,y:&[f64;256],ny:i32)->KSResult with Mut,Div,Panic {` — *stats/ks_test.sio*
 - `pub fn run_tests() -> bool with IO, Mut, Div, Panic {` — *stats/ks_test.sio*
 - `pub fn levene(values: &[f64; 256], sizes: &[i32; 16], k: i32, center: i32) -> LeveneResult with Mut, Div, Panic {` — *stats/levene.sio*
 - `pub fn run_tests() -> bool with IO, Mut, Div, Panic {` — *stats/levene.sio*
@@ -10742,13 +11853,15 @@ organized by module. Generated from source on the date shown below.
 - `pub fn holm_bonferroni(` — *stats/multiple_testing.sio*
 - `pub fn nelson_aalen(time: &[f64; 256], event: &[i64; 256], n: i32, t_query: f64) -> NAResult with Mut, Div, Panic {` — *stats/nelson_aalen.sio*
 - `pub fn run_tests() -> bool with IO, Mut, Div, Panic {` — *stats/nelson_aalen.sio*
-- `pub fn normality(x: &[f64; 256], n: i32) -> NormalityResult with Mut, Div, Panic {` — *stats/normality.sio*
+- `pub fn normality(x: &[f64;256], n:i32) -> NormalityResult with Mut,Div,Panic {` — *stats/normality.sio*
 - `pub fn run_tests() -> bool with IO, Mut, Div, Panic {` — *stats/normality.sio*
 - `pub fn minmax(x: &[f64; 256], n: i32, out: &![f64; 256]) -> MinMaxResult with Mut, Div, Panic {` — *stats/normalize.sio*
 - `pub fn robust_scale(x: &[f64; 256], n: i32, out: &![f64; 256]) -> RobustResult with Mut, Div, Panic {` — *stats/normalize.sio*
 - `pub fn run_tests() -> bool with IO, Mut, Div, Panic {` — *stats/normalize.sio*
 - `pub fn r_squared_n(x: &[f64; 256], y: &[f64; 256], n: i32) -> f64 with Div, Panic {` — *stats/ols_fixed.sio*
 - `pub fn linear_regression_n(x: &[f64; 256], y: &[f64; 256], n: i32) -> OlsFit with Div, Panic {` — *stats/ols_fixed.sio*
+- `pub fn sort100(a:&![f64;100],n:i64)->bool with Mut,Div,Panic {` — *stats/order.sio*
+- `pub fn sort256(a:&![f64;256],n:i64)->bool with Mut,Div,Panic {` — *stats/order.sio*
 - `pub fn tukey_outliers(x: &[f64; 256], n: i32, k: f64) -> OutlierFences with Mut, Div, Panic {` — *stats/outlier.sio*
 - `pub fn grubbs(x: &[f64; 256], n: i32) -> GrubbsResult with Mut, Div, Panic {` — *stats/outlier.sio*
 - `pub fn modified_z(x: &[f64; 256], n: i32, thresh: f64) -> ModZResult with Mut, Div, Panic {` — *stats/outlier.sio*
@@ -10763,7 +11876,8 @@ organized by module. Generated from source on the date shown below.
 - `pub fn run_tests() -> bool with IO, Mut, Div, Panic {` — *stats/pca2.sio*
 - `pub fn perm_test(x: &[f64; 256], nx: i32, y: &[f64; 256], ny: i32, b: i32, seed: i64) -> PermResult with Mut, Div, Panic {` — *stats/perm_test.sio*
 - `pub fn run_tests() -> bool with IO, Mut, Div, Panic {` — *stats/perm_test.sio*
-- `pub fn perm_test_means(x: &[f64; 256], nx: i32, y: &[f64; 256], ny: i32, iters: i32, seed: i64) -> f64 with Mut, Div, Panic {` — *stats/permutation.sio*
+- `pub fn permutation_means(x: &[f64;256], nx: i32, y: &[f64;256], ny: i32,` — *stats/permutation.sio*
+- `pub fn perm_test_means(x: &[f64;256], nx: i32, y: &[f64;256], ny: i32,` — *stats/permutation.sio*
 - `pub fn point_biserial(x: &[f64; 256], y: &[f64; 256], n: i32) -> PointBiserialResult with Mut, Div, Panic {` — *stats/point_biserial.sio*
 - `pub fn run_tests() -> bool with IO, Mut, Div, Panic {` — *stats/point_biserial.sio*
 - `pub fn poisson_gamma(a0: f64, b0: f64, count: f64, exposure: f64, conf: f64) -> RatePosterior with Mut, Div, Panic {` — *stats/poisson_gamma.sio*
@@ -10796,25 +11910,104 @@ organized by module. Generated from source on the date shown below.
 - `pub fn reg_pred_band(fit: &RegFit, x: f64, conf: f64) -> (f64, f64) with Mut, Div, Panic {` — *stats/reg_bands.sio*
 - `pub fn reg_slope_ci(fit: &RegFit, conf: f64) -> (f64, f64) with Mut, Div, Panic {` — *stats/reg_bands.sio*
 - `pub fn run_tests() -> bool with IO, Mut, Div, Panic {` — *stats/reg_bands.sio*
+- `pub fn assess_simple_linear(x:&[f64;100],y:&[f64;100],n:i64)->SimpleRegressionAssessment with Mut,Div,Panic {` — *stats/regression/assessments.sio*
+- `pub fn count_profile_embedding_validate(null_design:&NumericBuffer,null_layout:&NumericMatrix,null_offsets:&NumericBuffer,` — *stats/regression/count_profile_embedding.sio*
+- `pub fn count_profile_embedding_warm(embedding:&NumericBuffer,null_coefficients:&NumericBuffer,` — *stats/regression/count_profile_embedding.sio*
+- `pub fn dynamic_count_bootstrap_workspace(n:i64,p0:i64,p1:i64)->CountBootstrapWorkspace with Div {` — *stats/regression/dynamic_count_bootstrap.sio*
+- `pub fn dynamic_count_lrt_bootstrap(null_design:&NumericBuffer,null_layout:&NumericMatrix,null_offsets:&NumericBuffer,` — *stats/regression/dynamic_count_bootstrap.sio*
+- `pub fn dynamic_count_fisher_workspace(n:i64,p:i64)->DynamicCountFisherWorkspace with Div {` — *stats/regression/dynamic_count_fisher.sio*
+- `pub fn dynamic_count_fit_fisher(a:&NumericBuffer,layout:&NumericMatrix,` — *stats/regression/dynamic_count_fisher.sio*
+- `pub fn dynamic_count_fisher_contrast(fisher:&DynamicCountFisher,coefficients:&NumericBuffer,` — *stats/regression/dynamic_count_fisher.sio*
+- `pub fn dynamic_count_workspace(n:i64,p:i64)->DynamicCountWorkspace with Div {` — *stats/regression/dynamic_count_glm.sio*
+- `pub fn dynamic_count_fit(a:&NumericBuffer,layout:&NumericMatrix,counts:&IntegerBuffer,` — *stats/regression/dynamic_count_glm.sio*
+- `pub fn dynamic_count_profile_bootstrap_workspace(n:i64,p0:i64,p1:i64)->CountProfileBootstrapWorkspace with Div {` — *stats/regression/dynamic_count_profile_bootstrap.sio*
+- `pub fn dynamic_count_profile_bootstrap_nested_workspace(n:i64,p0:i64,p1:i64)->CountProfileBootstrapWorkspace with Div {` — *stats/regression/dynamic_count_profile_bootstrap.sio*
+- `pub fn dynamic_count_profile_lrt_bootstrap(null_design:&NumericBuffer,null_layout:&NumericMatrix,null_offsets:&NumericBuffer,` — *stats/regression/dynamic_count_profile_bootstrap.sio*
+- `pub fn dynamic_count_profile_lrt_bootstrap_nested(null_design:&NumericBuffer,null_layout:&NumericMatrix,null_offsets:&NumericBuffer,` — *stats/regression/dynamic_count_profile_bootstrap.sio*
+- `pub fn dynamic_dispersion_workspace(n:i64,p:i64,method:i64)->DynamicDispersionWorkspace with Div {` — *stats/regression/dynamic_dispersion.sio*
+- `pub fn dynamic_dispersion_fit(a:&NumericBuffer,layout:&NumericMatrix,` — *stats/regression/dynamic_dispersion.sio*
+- `pub fn dynamic_dispersion_fit_seeded(a:&NumericBuffer,layout:&NumericMatrix,` — *stats/regression/dynamic_dispersion.sio*
+- `pub fn dynamic_robust_workspace(n:i64,p:i64)->DynamicRobustWorkspace with Div {` — *stats/regression/dynamic_robust_covariance.sio*
+- `pub fn dynamic_linear_hc3(a:&NumericBuffer,layout:&NumericMatrix,y:&NumericBuffer,rcond:f64,` — *stats/regression/dynamic_robust_covariance.sio*
+- `pub fn dynamic_linear_cluster(a:&NumericBuffer,layout:&NumericMatrix,y:&NumericBuffer,ids:&IntegerBuffer,method:i64,rcond:f64,` — *stats/regression/dynamic_robust_covariance.sio*
+- `pub fn dynamic_robust_contrast(result:&DynamicRobustResult,contrast:&NumericBuffer,` — *stats/regression/dynamic_robust_covariance.sio*
 - `pub fn builder() -> LinearRegression {` — *stats/regression/linear.sio*
 - `pub fn new() -> LinearRegression {` — *stats/regression/linear.sio*
-- `pub fn with_x(self, x: [f64; 100]) -> LinearRegression {` — *stats/regression/linear.sio*
-- `pub fn with_y(self, y: [f64; 100]) -> LinearRegression {` — *stats/regression/linear.sio*
-- `pub fn with_n(self, n: i64) -> LinearRegression {` — *stats/regression/linear.sio*
-- `pub fn with_data(self, x: [f64; 100], y: [f64; 100], n: i64) -> LinearRegression {` — *stats/regression/linear.sio*
-- `pub fn fit_simple(self) -> LinearModel {` — *stats/regression/linear.sio*
-- `pub fn fit_epistemic(self) -> KnowledgeLinearModel {` — *stats/regression/linear.sio*
-- `pub fn predict(&self, x_val: f64) -> f64 {` — *stats/regression/linear.sio*
-- `pub fn intercept(&self) -> f64 {` — *stats/regression/linear.sio*
-- `pub fn slope(&self) -> f64 {` — *stats/regression/linear.sio*
-- `pub fn slope_se(&self) -> f64 {` — *stats/regression/linear.sio*
-- `pub fn r2(&self) -> f64 {` — *stats/regression/linear.sio*
-- `pub fn adj_r2(&self) -> f64 {` — *stats/regression/linear.sio*
-- `pub fn is_slope_significant(&self) -> bool {` — *stats/regression/linear.sio*
-- `pub fn slope_ci(&self) -> (f64, f64) {` — *stats/regression/linear.sio*
-- `pub fn fit_simple_linear_regression(` — *stats/regression/linear.sio*
-- `pub fn fit_linear_regression_epistemic(` — *stats/regression/linear.sio*
+- `pub fn with_x(self, x: [f64; 100]) -> LinearRegression with Mut {` — *stats/regression/linear.sio*
+- `pub fn with_y(self, y: [f64; 100]) -> LinearRegression with Mut {` — *stats/regression/linear.sio*
+- `pub fn with_n(self, n: i64) -> LinearRegression with Mut {` — *stats/regression/linear.sio*
+- `pub fn with_data(self, x: [f64; 100], y: [f64; 100], n: i64) -> LinearRegression with Mut {` — *stats/regression/linear.sio*
+- `pub fn fit_simple(self) -> LinearModel with Mut, Div, Panic {` — *stats/regression/linear.sio*
+- `pub fn fit_epistemic(self) -> KnowledgeLinearModel with Mut, Div, Panic {` — *stats/regression/linear.sio*
+- `pub fn predict(self: &LinearModel, x_val: f64) -> f64 {` — *stats/regression/linear.sio*
+- `pub fn intercept(self: &LinearModel) -> f64 {` — *stats/regression/linear.sio*
+- `pub fn slope(self: &LinearModel) -> f64 {` — *stats/regression/linear.sio*
+- `pub fn slope_se(self: &LinearModel) -> f64 {` — *stats/regression/linear.sio*
+- `pub fn r2(self: &LinearModel) -> f64 {` — *stats/regression/linear.sio*
+- `pub fn adj_r2(self: &LinearModel) -> f64 {` — *stats/regression/linear.sio*
+- `pub fn is_slope_significant(self: &LinearModel) -> bool {` — *stats/regression/linear.sio*
+- `pub fn slope_ci(self: &LinearModel) -> (f64, f64) with Mut, Div, Panic {` — *stats/regression/linear.sio*
+- `pub fn fit_simple_linear_regression(x: [f64;100], y: [f64;100], n: i64) -> LinearModel with Mut, Div, Panic {` — *stats/regression/linear.sio*
+- `pub fn linear_slope_ci(model: &LinearModel) -> (f64,f64) with Mut, Div, Panic {` — *stats/regression/linear.sio*
+- `pub fn fit_linear_regression_epistemic(x: [f64;100], y: [f64;100], n: i64) -> KnowledgeLinearModel with Mut, Div, Panic {` — *stats/regression/linear.sio*
 - `pub fn linear_regression_new() -> LinearRegression {` — *stats/regression/linear.sio*
+- `pub fn logistic_normal_two_tail(z:f64)->LogisticNormalTail with Mut,Div,Panic {` — *stats/regression/logistic.sio*
+- `pub fn sigmoid(z: f64) -> f64 with Mut, Div, Panic {` — *stats/regression/logistic.sio*
+- `pub fn logit(p: f64) -> f64 with Mut, Div, Panic {` — *stats/regression/logistic.sio*
+- `pub fn fit_logistic_simple(` — *stats/regression/logistic.sio*
+- `pub fn logistic_probability(eta:f64)->LogisticProbability with Mut,Div,Panic {` — *stats/regression/logistic.sio*
+- `pub fn logistic_fit_checked(a:&[f64;2048],y:&[f64;256],n:i64,p:i64,` — *stats/regression/logistic.sio*
+- `pub fn multiple_linear_fit(design:&[f64;2048],response:&[f64;256],` — *stats/regression/multiple.sio*
+- `pub fn weighted_multiple_linear_fit(design:&[f64;2048],response:&[f64;256],` — *stats/regression/multiple.sio*
+- `pub fn nb2_moment_dispersion(counts:&[i64;256],means:&[f64;256],n:i64,parameters_declared:i64)->NbDispersion with Mut,Div,Panic {` — *stats/regression/nb_dispersion.sio*
+- `pub fn nb2_deviance_slot()->Nb2DevianceSlot {` — *stats/regression/nb2_deviance.sio*
+- `pub fn nb2_deviance_slot_reset(s:&!Nb2DevianceSlot) with Mut {` — *stats/regression/nb2_deviance.sio*
+- `pub fn nb2_deviance_slot_status(s:&Nb2DevianceSlot)->i64 {s.result.status}` — *stats/regression/nb2_deviance.sio*
+- `pub fn nb2_deviance_slot_deviance_status(s:&Nb2DevianceSlot)->i64 {s.result.deviance_status}` — *stats/regression/nb2_deviance.sio*
+- `pub fn nb2_deviance_slot_deviance(s:&Nb2DevianceSlot)->f64 {s.result.deviance}` — *stats/regression/nb2_deviance.sio*
+- `pub fn nb2_deviance_slot_residual(s:&Nb2DevianceSlot)->f64 {s.result.residual}` — *stats/regression/nb2_deviance.sio*
+- `pub fn nb2_deviance_slot_poisson_limit(s:&Nb2DevianceSlot)->bool {s.result.poisson_limit}` — *stats/regression/nb2_deviance.sio*
+- `pub fn nb2_deviance_snapshot(s:&Nb2DevianceSlot)->Nb2Deviance {` — *stats/regression/nb2_deviance.sio*
+- `pub fn nb2_deviance_into(count:i64,mean:f64,alpha:f64,s:&!Nb2DevianceSlot)->i64 with Mut,Div,Panic {` — *stats/regression/nb2_deviance.sio*
+- `pub fn nb2_deviance(count:i64,mean:f64,alpha:f64)->Nb2Deviance with Mut,Div,Panic {` — *stats/regression/nb2_deviance.sio*
+- `pub fn nb2_count_diagnostic(count:i64,mean:f64,alpha:f64)->Nb2CountDiagnostic with Mut,Div,Panic {` — *stats/regression/nb2_diagnostics.sio*
+- `pub fn nb2_likelihood_slot()->Nb2LikelihoodSlot {` — *stats/regression/nb2_likelihood.sio*
+- `pub fn nb2_likelihood_slot_reset(s:&!Nb2LikelihoodSlot) with Mut,Panic {` — *stats/regression/nb2_likelihood.sio*
+- `pub fn nb2_likelihood_slot_status(s:&Nb2LikelihoodSlot)->i64 {s.result.status}` — *stats/regression/nb2_likelihood.sio*
+- `pub fn nb2_likelihood_slot_count(s:&Nb2LikelihoodSlot)->i64 {s.result.count}` — *stats/regression/nb2_likelihood.sio*
+- `pub fn nb2_likelihood_slot_log_probability(s:&Nb2LikelihoodSlot)->f64 {s.result.log_probability}` — *stats/regression/nb2_likelihood.sio*
+- `pub fn nb2_likelihood_slot_normalizer_status(s:&Nb2LikelihoodSlot)->i64 {s.result.normalizer_status}` — *stats/regression/nb2_likelihood.sio*
+- `pub fn nb2_likelihood_slot_saturated_log_probability(s:&Nb2LikelihoodSlot)->f64 {s.result.saturated_log_probability}` — *stats/regression/nb2_likelihood.sio*
+- `pub fn nb2_likelihood_slot_residual_status(s:&Nb2LikelihoodSlot)->i64 {s.result.residual_status}` — *stats/regression/nb2_likelihood.sio*
+- `pub fn nb2_likelihood_slot_residual(s:&Nb2LikelihoodSlot)->f64 {s.result.residual}` — *stats/regression/nb2_likelihood.sio*
+- `pub fn nb2_likelihood_slot_deviance_status(s:&Nb2LikelihoodSlot)->i64 {s.result.deviance_status}` — *stats/regression/nb2_likelihood.sio*
+- `pub fn nb2_likelihood_slot_deviance(s:&Nb2LikelihoodSlot)->f64 {s.result.deviance}` — *stats/regression/nb2_likelihood.sio*
+- `pub fn nb2_likelihood_slot_poisson_limit(s:&Nb2LikelihoodSlot)->bool {s.result.poisson_limit}` — *stats/regression/nb2_likelihood.sio*
+- `pub fn nb2_likelihood_slot_stirling_used(s:&Nb2LikelihoodSlot)->bool {s.result.stirling_used}` — *stats/regression/nb2_likelihood.sio*
+- `pub fn nb2_likelihood_slot_remainder_estimate(s:&Nb2LikelihoodSlot)->f64 {s.result.normalizer_remainder_estimate}` — *stats/regression/nb2_likelihood.sio*
+- `pub fn nb2_likelihood_slot_remainder_estimate_available(s:&Nb2LikelihoodSlot)->bool {s.result.remainder_estimate_available}` — *stats/regression/nb2_likelihood.sio*
+- `pub fn nb2_likelihood_slot_assumptions_assessed(s:&Nb2LikelihoodSlot)->bool {s.result.assumptions_assessed}` — *stats/regression/nb2_likelihood.sio*
+- `pub fn nb2_log_probability_into(count:i64,mean:f64,alpha:f64,s:&!Nb2LikelihoodSlot)->i64 with Mut,Div,Panic {` — *stats/regression/nb2_likelihood.sio*
+- `pub fn nb2_likelihood_snapshot(s:&Nb2LikelihoodSlot)->Nb2Likelihood {` — *stats/regression/nb2_likelihood.sio*
+- `pub fn nb2_saturated_log_probability(count:i64,alpha:f64)->Nb2Normalizer with Mut,Div,Panic {` — *stats/regression/nb2_likelihood.sio*
+- `pub fn nb2_log_probability(count:i64,mean:f64,alpha:f64)->Nb2Likelihood with Mut,Div,Panic {` — *stats/regression/nb2_likelihood.sio*
+- `pub fn nb2_likelihood_difference_slot()->Nb2LikelihoodDifferenceSlot {` — *stats/regression/nb2_likelihood.sio*
+- `pub fn nb2_likelihood_difference_status(s:&Nb2LikelihoodDifferenceSlot)->i64 {s.status}` — *stats/regression/nb2_likelihood.sio*
+- `pub fn nb2_likelihood_difference_value(s:&Nb2LikelihoodDifferenceSlot)->f64 {s.value}` — *stats/regression/nb2_likelihood.sio*
+- `pub fn nb2_likelihood_difference_first_status(s:&Nb2LikelihoodDifferenceSlot)->i64 {s.first_status}` — *stats/regression/nb2_likelihood.sio*
+- `pub fn nb2_likelihood_difference_second_status(s:&Nb2LikelihoodDifferenceSlot)->i64 {s.second_status}` — *stats/regression/nb2_likelihood.sio*
+- `pub fn nb2_likelihood_difference_snapshot(s:&Nb2LikelihoodDifferenceSlot)->Nb2LikelihoodDifference {` — *stats/regression/nb2_likelihood.sio*
+- `pub fn nb2_log_probability_difference_into(count:i64,first_mean:f64,first_alpha:f64,` — *stats/regression/nb2_likelihood.sio*
+- `pub fn nb2_log_probability_mean_difference_into(counts:&IntegerBuffer,first:&NumericBuffer,first_alpha:f64,` — *stats/regression/nb2_likelihood.sio*
+- `pub fn nb2_same_alpha_increment_into(count:i64,mu:f64,trial:f64,alpha:f64,out:&!LeastSquaresNumber)->i64 with Mut,Div,Panic {` — *stats/regression/nb2_log_increment.sio*
+- `pub fn nb2_dispersion_increment_into(count:i64,mu:f64,first_alpha:f64,` — *stats/regression/nb2_log_increment.sio*
+- `pub fn ols_fit_simple(x: &[f64;100], y: &[f64;100], n: i64) -> SimpleOlsFit with Mut, Div, Panic {` — *stats/regression/ols.sio*
+- `pub fn ols_influence_simple(x: &[f64;100], y: &[f64;100], n: i64) -> OlsInfluence with Mut, Div, Panic {` — *stats/regression/ols.sio*
+- `pub fn poisson_fit_offset(a:&[f64;2048],counts:&[i64;256],log_offset:&[f64;256],n:i64,p:i64,rcond:f64,max_iterations:i64,tolerance:f64)->PoissonFit with Mut,Div,Panic {` — *stats/regression/poisson.sio*
+- `pub fn multiple_linear_hc3(design:&[f64;2048],response:&[f64;256],n:i64,p:i64,rcond:f64)->LinearHc3Result with Mut,Div,Panic {` — *stats/regression/robust_covariance.sio*
+- `pub fn multiple_linear_cluster(design:&[f64;2048],response:&[f64;256],cluster_ids:&[i64;256],n:i64,p:i64,rcond:f64,method:i64)->LinearClusterResult with Mut,Div,Panic {` — *stats/regression/robust_covariance.sio*
+- `pub fn robust_fit_checked(a:&[f64;2048],b:&[f64;256],n:i64,p:i64,` — *stats/regression/robust.sio*
+- `pub fn weighted_linear_inference(a: &[f64;2048], b: &[f64;256], w: &[f64;256],` — *stats/regression/weighted_inference.sio*
 - `pub fn icc(data: &[f64; 256], n_subj: i32, n_rater: i32) -> ICCResult with Mut, Div, Panic {` — *stats/reliability.sio*
 - `pub fn cronbach_alpha(data: &[f64; 256], n_subj: i32, n_item: i32) -> f64 with Mut, Div, Panic {` — *stats/reliability.sio*
 - `pub fn run_tests() -> bool with IO, Mut, Div, Panic {` — *stats/reliability.sio*
@@ -10838,21 +12031,20 @@ organized by module. Generated from source on the date shown below.
 - `pub fn run_tests() -> bool with IO, Mut, Div, Panic {` — *stats/roc.sio*
 - `pub fn runs_test(seq: &[i64; 256], n: i32) -> RunsResult with Mut, Div, Panic {` — *stats/runs_test.sio*
 - `pub fn run_tests() -> bool with IO, Mut, Div, Panic {` — *stats/runs_test.sio*
-- `pub fn n_two_props(p1: f64, p2: f64, alpha: f64, power: f64) -> i64 with Mut, Div, Panic {` — *stats/sample_size.sio*
-- `pub fn n_one_prop(p0: f64, p1: f64, alpha: f64, power: f64) -> i64 with Mut, Div, Panic {` — *stats/sample_size.sio*
-- `pub fn n_correlation(r: f64, alpha: f64, power: f64) -> i64 with Mut, Div, Panic {` — *stats/sample_size.sio*
-- `pub fn run_tests() -> bool with IO, Mut, Div, Panic {` — *stats/sample_size.sio*
 - `pub fn ss_mean(sigma: f64, margin: f64, conf: f64) -> i64 with Mut, Div, Panic {` — *stats/sample_size_precision.sio*
 - `pub fn ss_proportion(p: f64, margin: f64, conf: f64) -> i64 with Mut, Div, Panic {` — *stats/sample_size_precision.sio*
 - `pub fn run_tests() -> bool with IO, Mut, Div, Panic {` — *stats/sample_size_precision.sio*
 - `pub fn ss_survival(hr: f64, alpha: f64, power: f64, alloc: f64, event_prob: f64) -> SurvSSResult with Mut, Div, Panic {` — *stats/sample_size_survival.sio*
 - `pub fn run_tests() -> bool with IO, Mut, Div, Panic {` — *stats/sample_size_survival.sio*
+- `pub fn n_two_props(p1: f64, p2: f64, alpha: f64, power: f64) -> i64 with Mut, Div, Panic {` — *stats/sample_size.sio*
+- `pub fn n_one_prop(p0: f64, p1: f64, alpha: f64, power: f64) -> i64 with Mut, Div, Panic {` — *stats/sample_size.sio*
+- `pub fn n_correlation(r: f64, alpha: f64, power: f64) -> i64 with Mut, Div, Panic {` — *stats/sample_size.sio*
+- `pub fn run_tests() -> bool with IO, Mut, Div, Panic {` — *stats/sample_size.sio*
 - `pub fn scheffe(means: &[f64; 16], sizes: &[i32; 16], k: i32, mse: f64, coeff: &[f64; 16], df_error: i32) -> ScheffeResult with Mut, Div, Panic {` — *stats/scheffe.sio*
 - `pub fn run_tests() -> bool with IO, Mut, Div, Panic {` — *stats/scheffe.sio*
 - `pub fn shape(x: &[f64; 256], n: i32) -> ShapeResult with Mut, Div, Panic {` — *stats/shape.sio*
 - `pub fn run_tests() -> bool with IO, Mut, Div, Panic {` — *stats/shape.sio*
-- `pub fn shapiro_wilk(x: &[f64; 256], n: i32) -> ShapiroResult with Mut, Div, Panic {` — *stats/shapiro_wilk.sio*
-- `pub fn run_tests() -> bool with IO, Mut, Div, Panic {` — *stats/shapiro_wilk.sio*
+- `pub fn shapiro_wilk(x:&[f64;100],n:i64)->ShapiroResult with Mut,Div,Panic {` — *stats/shapiro_wilk.sio*
 - `pub fn beta_new(a: f64, b: f64) -> BetaConfidence { BetaConfidence { alpha: a, beta: b } }` — *stats/shared.sio*
 - `pub fn beta_mean(b: &BetaConfidence) -> f64 { b.alpha / (b.alpha + b.beta) }` — *stats/shared.sio*
 - `pub fn beta_combine(b1: &BetaConfidence, b2: &BetaConfidence) -> BetaConfidence {` — *stats/shared.sio*
@@ -10884,6 +12076,8 @@ organized by module. Generated from source on the date shown below.
 - `pub fn run_tests() -> bool with IO, Mut, Div, Panic {` — *stats/summary_inference.sio*
 - `pub fn theil_sen(x: &[f64; 256], y: &[f64; 256], n: i32) -> TSFit with Mut, Div, Panic {` — *stats/theil_sen.sio*
 - `pub fn run_tests() -> bool with IO, Mut, Div, Panic {` — *stats/theil_sen.sio*
+- `pub fn levinson_durbin(acf_vals: [f64; 20], order: i64) -> [f64; 5] with Mut, Div, Panic {` — *stats/timeseries/arima.sio*
+- `pub fn fit_ar(` — *stats/timeseries/arima.sio*
 - `pub fn cochran_armitage(events: &[f64; 32], totals: &[f64; 32],` — *stats/trend.sio*
 - `pub fn run_tests() -> bool with IO, Mut, Div, Panic {` — *stats/trend.sio*
 - `pub fn q_range_cdf(w: f64, k: i32) -> f64 with Mut, Div, Panic {` — *stats/tukey.sio*
@@ -10994,6 +12188,22 @@ organized by module. Generated from source on the date shown below.
 - `pub fn str_from_f64(val: f64, decimals: i32) -> Str with Mut, Div, Panic {` — *str/lib.sio*
 - `pub fn str_to_i64(s: &Str) -> i64 with Mut, Div, Panic {` — *str/lib.sio*
 - `pub fn str_to_f64(s: &Str) -> f64 with Mut, Div, Panic {` — *str/lib.sio*
+
+---
+
+## string (`stdlib/string/`)
+
+**9 public functions** across 1 files
+
+- `pub fn str_is_continuation(b: u8) -> i64 {` — *string/string.sio*
+- `pub fn str_char_count(buf: [u8; 256], byte_len: i64) -> i64 {` — *string/string.sio*
+- `pub fn str_buf_eq(a: [u8; 256], a_len: i64, b: [u8; 256], b_len: i64) -> i64 {` — *string/string.sio*
+- `pub fn str_starts_with(buf: [u8; 256], buf_len: i64, prefix: [u8; 256], prefix_len: i64) -> i64 {` — *string/string.sio*
+- `pub fn str_find_byte(buf: [u8; 256], buf_len: i64, needle: u8) -> i64 {` — *string/string.sio*
+- `pub fn str_trim_start(buf: [u8; 256], buf_len: i64) -> i64 {` — *string/string.sio*
+- `pub fn str_trim_end(buf: [u8; 256], buf_len: i64) -> i64 {` — *string/string.sio*
+- `pub fn str_to_upper_byte(b: i64) -> i64 {` — *string/string.sio*
+- `pub fn str_to_lower_byte(b: i64) -> i64 {` — *string/string.sio*
 
 ---
 
@@ -11835,6 +13045,10 @@ organized by module. Generated from source on the date shown below.
 - `pub fn lorenz_i256_cover_child3_obligation_seed_audit_fingerprint(` — *systems/lorenz_i256_child3_obligation_seed.sio*
 - `pub fn lorenz_i256_cover_child3_validation_core_check(` — *systems/lorenz_i256_child3_validation_core.sio*
 - `pub fn lorenz_i256_cover_child3_validation_core_audit_fingerprint(` — *systems/lorenz_i256_child3_validation_core.sio*
+- `pub fn lorenz_i256_cover_child4_boundary_face_obligations_check(` — *systems/lorenz_i256_child4_boundary_face_obligations.sio*
+- `pub fn lorenz_i256_cover_child4_boundary_face_obligations_audit_fingerprint(` — *systems/lorenz_i256_child4_boundary_face_obligations.sio*
+- `pub fn lorenz_i256_cover_child4_boundary_face_preflight_bundle_check(` — *systems/lorenz_i256_child4_boundary_face_preflight_bundle.sio*
+- `pub fn lorenz_i256_cover_child4_boundary_face_preflight_bundle_audit_fingerprint(` — *systems/lorenz_i256_child4_boundary_face_preflight_bundle.sio*
 - `pub fn lorenz_i256_cover_child4_boundary_face0_preflight_check(` — *systems/lorenz_i256_child4_boundary_face0_preflight.sio*
 - `pub fn lorenz_i256_cover_child4_boundary_face0_preflight_audit_fingerprint(` — *systems/lorenz_i256_child4_boundary_face0_preflight.sio*
 - `pub fn lorenz_i256_cover_child4_boundary_face1_preflight_check(` — *systems/lorenz_i256_child4_boundary_face1_preflight.sio*
@@ -11845,10 +13059,6 @@ organized by module. Generated from source on the date shown below.
 - `pub fn lorenz_i256_cover_child4_boundary_face3_preflight_audit_fingerprint(` — *systems/lorenz_i256_child4_boundary_face3_preflight.sio*
 - `pub fn lorenz_i256_cover_child4_boundary_face4_preflight_check(` — *systems/lorenz_i256_child4_boundary_face4_preflight.sio*
 - `pub fn lorenz_i256_cover_child4_boundary_face4_preflight_audit_fingerprint(` — *systems/lorenz_i256_child4_boundary_face4_preflight.sio*
-- `pub fn lorenz_i256_cover_child4_boundary_face_obligations_check(` — *systems/lorenz_i256_child4_boundary_face_obligations.sio*
-- `pub fn lorenz_i256_cover_child4_boundary_face_obligations_audit_fingerprint(` — *systems/lorenz_i256_child4_boundary_face_obligations.sio*
-- `pub fn lorenz_i256_cover_child4_boundary_face_preflight_bundle_check(` — *systems/lorenz_i256_child4_boundary_face_preflight_bundle.sio*
-- `pub fn lorenz_i256_cover_child4_boundary_face_preflight_bundle_audit_fingerprint(` — *systems/lorenz_i256_child4_boundary_face_preflight_bundle.sio*
 - `pub fn lorenz_i256_cover_child4_boundary_gluing_input_guard_check(` — *systems/lorenz_i256_child4_boundary_gluing_input_guard.sio*
 - `pub fn lorenz_i256_cover_child4_boundary_gluing_input_guard_audit_fingerprint(` — *systems/lorenz_i256_child4_boundary_gluing_input_guard.sio*
 - `pub fn lorenz_i256_cover_child4_boundary_gluing_obligation_seed_check(` — *systems/lorenz_i256_child4_boundary_gluing_obligation_seed.sio*
@@ -12120,14 +13330,30 @@ organized by module. Generated from source on the date shown below.
 
 ## testmod (`stdlib/testmod/`)
 
-**20 public functions** across 6 files
+**38 public functions** across 18 files
 
 - `pub fn af_twice(x: f64) -> f64 {` — *testmod/af_mod.sio*
 - `pub fn quad(v: f64) -> f64 with Mut, Panic {` — *testmod/af_mod.sio*
+- `pub fn leaf_add(a: i64, b: i64) -> i64 with Mut, Panic {` — *testmod/dep_chain_leaf.sio*
+- `pub fn mid_call(x: i64) -> i64 with Mut, Panic {` — *testmod/dep_chain_mid.sio*
+- `pub fn wrapper_touch(k: i64, z: i64) -> i64 with Mut, Panic {` — *testmod/gen_big_wrapper.sio*
 - `pub fn gbig_zero<F>(k: i64, z: F) -> GBig<F> with Mut, Panic {` — *testmod/gen_big.sio*
 - `pub fn gbig_basis<F>(k: i64, idx: i64, z: F, o: F) -> GBig<F> with Mut, Panic {` — *testmod/gen_big.sio*
 - `pub fn gbig2_zero<F: ERing>(k: i32, zero: F) -> GBig2<F> with Mut, Panic {` — *testmod/gen_big2.sio*
 - `pub fn gbig2_basis<F: ERing>(k: i32, idx: i32, zero: F, one: F) -> GBig2<F> with Mut, Panic {` — *testmod/gen_big2.sio*
+- `pub fn long_module_name_add(a: i64, b: i64) -> i64 with Mut, Panic {` — *testmod/module_name_that_is_definitely_longer_than_sixty_four_bytes_for_testing.sio*
+- `pub fn tc_c(x: i64) -> i64 with Mut, Panic {` — *testmod/named_item_holder.sio*
+- `pub fn nr_energy() -> f64 { 1.5 }` — *testmod/nr_a.sio*
+- `pub fn nr_scale() -> f64 { 2.0 }` — *testmod/nr_a.sio*
+- `pub fn nr_a_twice() -> f64 { nr_energy() * nr_scale() }` — *testmod/nr_a.sio*
+- `pub fn nr_energy() -> f64 { 0.0 - 7.25 }` — *testmod/nr_b.sio*
+- `pub fn nr_scale() -> f64 { 10.0 }` — *testmod/nr_b.sio*
+- `pub fn nr_b_other() -> f64 { nr_energy() * 2.0 }` — *testmod/nr_b.sio*
+- `pub fn nr_b_shadow() -> f64 {` — *testmod/nr_b.sio*
+- `pub fn nr_sa_res(v: f64) -> f64 {` — *testmod/nr_sa.sio*
+- `pub fn nr_sa_pt_sum(v: f64) -> f64 {` — *testmod/nr_sa.sio*
+- `pub fn nr_sb_res(v: f64) -> f64 {` — *testmod/nr_sb.sio*
+- `pub fn nr_sc_pt_prod(v: f64) -> f64 {` — *testmod/nr_sc.sio*
 - `pub fn big_zero(k: i32) -> Big with Mut, Panic {` — *testmod/sret_min.sio*
 - `pub fn big_basis(k: i32, idx: i32) -> Big with Mut, Panic {` — *testmod/sret_min.sio*
 - `pub fn imported_scalar(x: i64) -> i64 with Mut, Panic {` — *testmod/sret_min.sio*
@@ -12142,13 +13368,17 @@ organized by module. Generated from source on the date shown below.
 - `pub fn tc_b_first(x: i64) -> i64 with Mut, Panic { x * 2 }` — *testmod/tc_b.sio*
 - `pub fn tc_b_second(x: i64) -> i64 with Mut, Panic, Div { tc_c_add(x, 5) }` — *testmod/tc_b.sio*
 - `pub fn tc_c_add(a: i64, b: i64) -> i64 with Mut, Panic { a + b + 100 }` — *testmod/tc_c.sio*
+- `pub fn call_named_tc_c(x: i64) -> i64 with Mut, Panic {` — *testmod/uses_named_tc_c.sio*
+- `pub fn call_real_tc_c(a: i64, b: i64) -> i64 with Mut, Panic {` — *testmod/uses_real_tc_c_module.sio*
 
 ---
 
 ## text (`stdlib/text/`)
 
-**3 public functions** across 7 files
+**5 public functions** across 7 files
 
+- `pub fn i64_to_str(n: i64) -> string with Mut, Panic, Div {` — *text/format.sio*
+- `pub fn f64_to_str(x: f64) -> string with Mut, Panic, Div {` — *text/format.sio*
 - `pub fn interp_str(template: string, key: string, value: string) -> string with Mut, Div {` — *text/interpolate.sio*
 - `pub fn interp_i64(template: string, key: string, value: i64) -> string with Mut, Div, Panic {` — *text/interpolate.sio*
 - `pub fn interp_f64(template: string, key: string, value: f64) -> string with Mut, Div, Panic {` — *text/interpolate.sio*
@@ -12157,7 +13387,7 @@ organized by module. Generated from source on the date shown below.
 
 ## Theorem Proving (`stdlib/theorem/`)
 
-**2437 public functions** across 36 files
+**2488 public functions** across 31 files
 
 - `pub fn card_exactly_one_alo_id() -> i64 {` — *theorem/cardinality.sio*
 - `pub fn card_exactly_one_clause_count(n: i64) -> i64 {` — *theorem/cardinality.sio*
@@ -12254,6 +13484,42 @@ organized by module. Generated from source on the date shown below.
 - `pub fn cdcl_dbg_wnext(ctx: &!CdclCtx, i: i32) -> i32 { return ctx.wnext[i] }` — *theorem/cdcl.sio*
 - `pub fn cdcl_dbg_litcode(l: i64) -> i32 { return lit_code(l) }` — *theorem/cdcl.sio*
 - `pub fn cdcl_dbg_litval(ctx: &!CdclCtx, l: i64) -> i32 { return litval(ctx, l) }` — *theorem/cdcl.sio*
+- `pub fn PROP_EQ() -> i32 { 1 }` — *theorem/core.sio*
+- `pub fn PROP_LT() -> i32 { 2 }` — *theorem/core.sio*
+- `pub fn PROP_AND() -> i32 { 3 }` — *theorem/core.sio*
+- `pub fn PROP_OR() -> i32 { 4 }` — *theorem/core.sio*
+- `pub fn PROP_NOT() -> i32 { 5 }` — *theorem/core.sio*
+- `pub fn PROP_IMPLIES() -> i32 { 6 }` — *theorem/core.sio*
+- `pub fn PROP_FORALL() -> i32 { 7 }` — *theorem/core.sio*
+- `pub fn PROP_EXISTS() -> i32 { 8 }` — *theorem/core.sio*
+- `pub fn PROP_CUSTOM() -> i32 { 9 }` — *theorem/core.sio*
+- `pub fn PROP_TRUE() -> i32 { 10 }` — *theorem/core.sio*
+- `pub fn PROP_FALSE() -> i32 { 11 }` — *theorem/core.sio*
+- `pub fn th_prop_new(kind: i32, lhs: i32, rhs: i32, name_id: i32) -> ThProp {` — *theorem/core.sio*
+- `pub fn th_prop_eq(a: i32, b: i32) -> ThProp {` — *theorem/core.sio*
+- `pub fn th_prop_lt(a: i32, b: i32) -> ThProp {` — *theorem/core.sio*
+- `pub fn th_prop_and(a: i32, b: i32) -> ThProp {` — *theorem/core.sio*
+- `pub fn th_prop_or(a: i32, b: i32) -> ThProp {` — *theorem/core.sio*
+- `pub fn th_prop_not(a: i32) -> ThProp {` — *theorem/core.sio*
+- `pub fn th_prop_implies(a: i32, b: i32) -> ThProp {` — *theorem/core.sio*
+- `pub fn th_prop_custom(id: i32) -> ThProp {` — *theorem/core.sio*
+- `pub fn th_prop_true() -> ThProp {` — *theorem/core.sio*
+- `pub fn th_prop_false() -> ThProp {` — *theorem/core.sio*
+- `pub fn ctx_new() -> ProofCtx {` — *theorem/core.sio*
+- `pub fn ctx_add_prop(ctx: ProofCtx, p: ThProp) -> ThResult with Div, Panic, Mut {` — *theorem/core.sio*
+- `pub fn ctx_get_prop(ctx: ProofCtx, idx: i32) -> ThPropResult {` — *theorem/core.sio*
+- `pub fn ctx_is_trusted(ctx: ProofCtx, idx: i32) -> ThBoolResult {` — *theorem/core.sio*
+- `pub fn ctx_trust(ctx: ProofCtx, idx: i32) -> ProofCtx with Div, Panic, Mut {` — *theorem/core.sio*
+- `pub fn ctx_prop_count(ctx: ProofCtx) -> i32 {` — *theorem/core.sio*
+- `pub fn ctx_trust_count(ctx: ProofCtx) -> i32 {` — *theorem/core.sio*
+- `pub fn th_refl(ctx: ProofCtx, x: i32) -> ThResult with Div, Panic, Mut {` — *theorem/core.sio*
+- `pub fn th_symm(ctx: ProofCtx, eq_idx: i32) -> ThResult with Div, Panic, Mut {` — *theorem/core.sio*
+- `pub fn th_trans(ctx: ProofCtx, ab_idx: i32, bc_idx: i32) -> ThResult with Div, Panic, Mut {` — *theorem/core.sio*
+- `pub fn th_modus_ponens(ctx: ProofCtx, p_idx: i32, pq_idx: i32) -> ThResult with Div, Panic, Mut {` — *theorem/core.sio*
+- `pub fn th_and_intro(ctx: ProofCtx, p_idx: i32, q_idx: i32) -> ThResult with Div, Panic, Mut {` — *theorem/core.sio*
+- `pub fn th_and_elim_l(ctx: ProofCtx, pq_idx: i32) -> ThResult with Div, Panic, Mut {` — *theorem/core.sio*
+- `pub fn th_and_elim_r(ctx: ProofCtx, pq_idx: i32) -> ThResult with Div, Panic, Mut {` — *theorem/core.sio*
+- `pub fn th_axiom(ctx: ProofCtx, p: ThProp) -> ThResult with Div, Panic, Mut {` — *theorem/core.sio*
 - `pub fn div_witness_check_i64(numerator: i64, denominator: i64,` — *theorem/div_witness.sio*
 - `pub fn div_witness_check_i256(numerator: i256, denominator: i256,` — *theorem/div_witness.sio*
 - `pub fn div_witness_all3(ok0: i64, ok1: i64, ok2: i64) -> i64 {` — *theorem/div_witness.sio*
@@ -12266,6 +13532,21 @@ organized by module. Generated from source on the date shown below.
 - `pub fn erdos508_chi6_preflight(` — *theorem/erdos_scope.sio*
 - `pub fn erdos90_external_disproof_scope(` — *theorem/erdos_scope.sio*
 - `pub fn unsat_claim_acceptance_gate(` — *theorem/erdos_scope.sio*
+- `pub fn prop_true() -> Prop {` — *theorem/kernel.sio*
+- `pub fn prop_false() -> Prop {` — *theorem/kernel.sio*
+- `pub fn prop_and(left_id: i64, right_id: i64) -> Prop {` — *theorem/kernel.sio*
+- `pub fn prop_or(left_id: i64, right_id: i64) -> Prop {` — *theorem/kernel.sio*
+- `pub fn prop_implies(antecedent_id: i64, consequent_id: i64) -> Prop {` — *theorem/kernel.sio*
+- `pub fn prop_not(inner_id: i64) -> Prop {` — *theorem/kernel.sio*
+- `pub fn prop_forall(var_id: i64, body_id: i64) -> Prop {` — *theorem/kernel.sio*
+- `pub fn prop_exists(var_id: i64, body_id: i64) -> Prop {` — *theorem/kernel.sio*
+- `pub fn prop_eq(lhs: i64, rhs: i64) -> Prop {` — *theorem/kernel.sio*
+- `pub fn prop_iff(p_id: i64, q_id: i64) -> Prop {` — *theorem/kernel.sio*
+- `pub fn prop_custom(pred_id: i64) -> Prop {` — *theorem/kernel.sio*
+- `pub fn verify_ok(conf: f64) -> VerifyResult {` — *theorem/kernel.sio*
+- `pub fn verify_fail(reason: i32) -> VerifyResult {` — *theorem/kernel.sio*
+- `pub fn prop_eq_check(a: Prop, b: Prop) -> bool {` — *theorem/kernel.sio*
+- `pub fn prop_tag_name(tag: i32) -> i32 {` — *theorem/kernel.sio*
 - `pub fn lrat_reset() with Mut {` — *theorem/lrat.sio*
 - `pub fn lrat_clause_count() -> i64 {` — *theorem/lrat.sio*
 - `pub fn lrat_has_active(id: i64) -> i64 {` — *theorem/lrat.sio*
@@ -12290,6 +13571,12 @@ organized by module. Generated from source on the date shown below.
 - `pub fn lrat_deletion_lifecycle_manifest_fingerprint(` — *theorem/lrat.sio*
 - `pub fn lrat_deletion_lifecycle_audit_fingerprint(` — *theorem/lrat.sio*
 - `pub fn lrat_deletion_lifecycle_unsat_envelope_fingerprint(` — *theorem/lrat.sio*
+- `pub fn pb_row3_sum_i64(` — *theorem/pb_highwidth_microkernel.sio*
+- `pub fn pb_row3_ge_check(` — *theorem/pb_highwidth_microkernel.sio*
+- `pub fn pb_row3_conflict_check(` — *theorem/pb_highwidth_microkernel.sio*
+- `pub fn pb_row3_forced_lit_check(` — *theorem/pb_highwidth_microkernel.sio*
+- `pub fn pb_highwidth_microkernel_receipt_check(` — *theorem/pb_highwidth_microkernel.sio*
+- `pub fn pb_highwidth_microkernel_audit_fingerprint(` — *theorem/pb_highwidth_microkernel.sio*
 - `pub fn pb_sense_le() -> i64 {` — *theorem/pb.sio*
 - `pub fn pb_sense_ge() -> i64 {` — *theorem/pb.sio*
 - `pub fn pb_small_nonneg(x: i64) -> i64 {` — *theorem/pb.sio*
@@ -12346,12 +13633,6 @@ organized by module. Generated from source on the date shown below.
 - `pub fn pb_row_check_add3(a: PbRow3, b: PbRow3, out: PbRow3) -> i64 {` — *theorem/pb.sio*
 - `pub fn pb_kernel_trace_propagation_fingerprint3(` — *theorem/pb.sio*
 - `pub fn pb_kernel_trace_propagation_audit_fingerprint3(` — *theorem/pb.sio*
-- `pub fn pb_row3_sum_i64(` — *theorem/pb_highwidth_microkernel.sio*
-- `pub fn pb_row3_ge_check(` — *theorem/pb_highwidth_microkernel.sio*
-- `pub fn pb_row3_conflict_check(` — *theorem/pb_highwidth_microkernel.sio*
-- `pub fn pb_row3_forced_lit_check(` — *theorem/pb_highwidth_microkernel.sio*
-- `pub fn pb_highwidth_microkernel_receipt_check(` — *theorem/pb_highwidth_microkernel.sio*
-- `pub fn pb_highwidth_microkernel_audit_fingerprint(` — *theorem/pb_highwidth_microkernel.sio*
 - `pub fn portfolio_checker_lrat_replay() -> i64 { return 1 }` — *theorem/portfolio_checkers.sio*
 - `pub fn portfolio_checker_smt_core() -> i64 { return 2 }` — *theorem/portfolio_checkers.sio*
 - `pub fn portfolio_checker_qflra_farkas() -> i64 { return 3 }` — *theorem/portfolio_checkers.sio*
@@ -14547,6 +15828,11 @@ organized by module. Generated from source on the date shown below.
 - `pub fn auto_prove(ctx: &!ProofContext, goal: i64, max_depth: i64) -> i64 with Mut, Div {` — *theorem/search.sio*
 - `pub fn tactic_or(ctx: &!ProofContext, goal: i64, tac1: i64, tac2: i64) -> i64 with Mut, Div {` — *theorem/search.sio*
 - `pub fn tactic_then(ctx: &!ProofContext, goal: i64, tac1_result: i64, tac2_fn_id: i64) -> i64 with Mut, Div {` — *theorem/search.sio*
+- `pub fn smt_farkas2_lhs_sum(a1: i64, a2: i64, y1: i64, y2: i64) -> i64 {` — *theorem/smt_farkas_microkernel.sio*
+- `pub fn smt_farkas2_rhs_sum(b1: i64, b2: i64, y1: i64, y2: i64) -> i64 {` — *theorem/smt_farkas_microkernel.sio*
+- `pub fn smt_farkas2_unsat_check(` — *theorem/smt_farkas_microkernel.sio*
+- `pub fn smt_farkas_microkernel_receipt_check(` — *theorem/smt_farkas_microkernel.sio*
+- `pub fn smt_farkas_microkernel_audit_fingerprint(` — *theorem/smt_farkas_microkernel.sio*
 - `pub fn smt_new() -> SmtContext {` — *theorem/smt.sio*
 - `pub fn smt_reset_activities(ctx: &!SmtContext) with Mut {` — *theorem/smt.sio*
 - `pub fn smt_set_score_mode(ctx: &!SmtContext, mode: i32) with Mut {` — *theorem/smt.sio*
@@ -14579,11 +15865,10 @@ organized by module. Generated from source on the date shown below.
 - `pub fn smt_add_lia(ctx: &!SmtContext, coeffs: &[i64; 16], bound: i64) with Mut {` — *theorem/smt.sio*
 - `pub fn smt_get_assignment(ctx: &SmtContext, var_idx: i32) -> i32 {` — *theorem/smt.sio*
 - `pub fn smt_solve(ctx: &!SmtContext) -> i32 with Mut, Div {` — *theorem/smt.sio*
-- `pub fn smt_farkas2_lhs_sum(a1: i64, a2: i64, y1: i64, y2: i64) -> i64 {` — *theorem/smt_farkas_microkernel.sio*
-- `pub fn smt_farkas2_rhs_sum(b1: i64, b2: i64, y1: i64, y2: i64) -> i64 {` — *theorem/smt_farkas_microkernel.sio*
-- `pub fn smt_farkas2_unsat_check(` — *theorem/smt_farkas_microkernel.sio*
-- `pub fn smt_farkas_microkernel_receipt_check(` — *theorem/smt_farkas_microkernel.sio*
-- `pub fn smt_farkas_microkernel_audit_fingerprint(` — *theorem/smt_farkas_microkernel.sio*
+- `pub fn solver_proof_profile_dispatch_mask(` — *theorem/solver_proof_profile_dispatch_envelope.sio*
+- `pub fn solver_proof_profile_dispatch_query(` — *theorem/solver_proof_profile_dispatch_envelope.sio*
+- `pub fn solver_proof_profile_dispatch_envelope_fingerprint(` — *theorem/solver_proof_profile_dispatch_envelope.sio*
+- `pub fn solver_proof_profile_dispatch_receipt_check(` — *theorem/solver_proof_profile_dispatch_envelope.sio*
 - `pub fn solver_proof_format_family(proof_format: i64) -> i64 {` — *theorem/solver_proof_profile.sio*
 - `pub fn solver_domain_accepts_proof_format(` — *theorem/solver_proof_profile.sio*
 - `pub fn solver_proof_profile_acceptance_gate(` — *theorem/solver_proof_profile.sio*
@@ -14592,10 +15877,14 @@ organized by module. Generated from source on the date shown below.
 - `pub fn solver_proof_profile_lorenz_numeric_receipt_gate(` — *theorem/solver_proof_profile.sio*
 - `pub fn solver_proof_profile_receipt_check(` — *theorem/solver_proof_profile.sio*
 - `pub fn solver_proof_profile_audit_fingerprint(` — *theorem/solver_proof_profile.sio*
-- `pub fn solver_proof_profile_dispatch_mask(` — *theorem/solver_proof_profile_dispatch_envelope.sio*
-- `pub fn solver_proof_profile_dispatch_query(` — *theorem/solver_proof_profile_dispatch_envelope.sio*
-- `pub fn solver_proof_profile_dispatch_envelope_fingerprint(` — *theorem/solver_proof_profile_dispatch_envelope.sio*
-- `pub fn solver_proof_profile_dispatch_receipt_check(` — *theorem/solver_proof_profile_dispatch_envelope.sio*
+
+---
+
+## thread (`stdlib/thread/`)
+
+**1 public functions** across 3 files
+
+- `pub fn new(num_workers: i64) -> ThreadPool {` — *thread/pool.sio*
 
 ---
 
@@ -14620,9 +15909,12 @@ organized by module. Generated from source on the date shown below.
 
 ## trace (`stdlib/trace/`)
 
-**4 public functions** across 3 files
+**7 public functions** across 3 files
 
 - `pub fn tracer_new() -> Tracer {` — *trace/trace.sio*
+- `pub fn tracer_count(t: &Tracer) -> i32 {` — *trace/trace.sio*
+- `pub fn tracer_span_parent(t: &Tracer, id: i64) -> i64 {` — *trace/trace.sio*
+- `pub fn tracer_span_tag(t: &Tracer, id: i64) -> i64 {` — *trace/trace.sio*
 - `pub fn tracer_begin(t: &!Tracer, parent: i64, tag: i64, now: i64) -> i64 with Mut {` — *trace/trace.sio*
 - `pub fn tracer_end(t: &!Tracer, id: i64, now: i64) with Mut {` — *trace/trace.sio*
 - `pub fn tracer_span_duration(t: &Tracer, id: i64) -> i64 {` — *trace/trace.sio*
@@ -14777,10 +16069,17 @@ organized by module. Generated from source on the date shown below.
 
 ## viz (`stdlib/viz/`)
 
-**194 public functions** across 20 files
+**270 public functions** across 41 files
 
 - `pub fn viz_audit_hash(scene: &VizScene) -> i64 with Mut {` — *viz/audit.sio*
 - `pub fn viz_audit_node_hash(scene: &VizScene, node_idx: i64) -> i64 with Mut {` — *viz/audit.sio*
+- `pub fn axis_measure_labels(ticks:&AxisTicks,vertical:bool,x:i64,y:i64,extent:i64,` — *viz/axis_layout.sio*
+- `pub fn axis_fit_labels(lo:f64,hi:f64,max_intervals:i64,vertical:bool,` — *viz/axis_layout.sio*
+- `pub fn axis_label(value: f64) -> AxisLabel with Mut, Div {` — *viz/axis.sio*
+- `pub fn axis_ticks(lo: f64, hi: f64, intervals: i64) -> AxisTicks with Mut, Div {` — *viz/axis.sio*
+- `pub fn axis_offset(index: i64, intervals: i64, extent: i64) -> i64 with Div {` — *viz/axis.sio*
+- `pub fn bar_pair_width(x0:f64,x1:f64,pair_count:i64,xmin:f64,xmax:f64,x:i64,w:i64)->BarWidth with Div {` — *viz/bar.sio*
+- `pub fn bar_project(sx:f64,sy:f64,xmin:f64,xmax:f64,ymin:f64,ymax:f64,` — *viz/bar.sio*
 - `pub fn causal_candidate_adjustment_identified(` — *viz/causal_canvas.sio*
 - `pub fn causal_render_confounding_receipt(` — *viz/causal_canvas.sio*
 - `pub fn chart_series_r(series_idx: i64) -> i64 { chart_cat_r(series_idx) }` — *viz/chart.sio*
@@ -14792,6 +16091,9 @@ organized by module. Generated from source on the date shown below.
 - `pub fn chart_heatmap(` — *viz/chart.sio*
 - `pub fn chart_spaghetti(` — *viz/chart.sio*
 - `pub fn chart_uncertainty_band(` — *viz/chart.sio*
+- `pub fn clip_unit_segment(ax: f64, ay: f64, bx: f64, by: f64) -> ClipSegment with Mut, Div {` — *viz/clip.sio*
+- `pub fn clip_series_segment(ax: f64, ay: f64, bx: f64, by: f64,` — *viz/clip.sio*
+- `pub fn clip_pixel(origin: i64, extent: i64, unit: f64) -> i64 {` — *viz/clip.sio*
 - `pub fn viridis_r(t: f64) -> i64 with Div {` — *viz/colormap.sio*
 - `pub fn viridis_g(t: f64) -> i64 with Div {` — *viz/colormap.sio*
 - `pub fn viridis_b(t: f64) -> i64 with Div {` — *viz/colormap.sio*
@@ -14809,12 +16111,41 @@ organized by module. Generated from source on the date shown below.
 - `pub fn magma_u32(t: f64) -> u32 with Div { cm_pack_rgb8(magma_r(t), magma_g(t), magma_b(t)) }` — *viz/colormap.sio*
 - `pub fn viridis_u32(t: f64) -> u32 with Div { cm_pack_rgb8(viridis_r(t), viridis_g(t), viridis_b(t)) }` — *viz/colormap.sio*
 - `pub fn plasma_u32(t: f64) -> u32 with Div { cm_pack_rgb8(plasma_r(t), plasma_g(t), plasma_b(t)) }` — *viz/colormap.sio*
+- `pub fn contour_saddle_sign(a:f64,b:f64,c:f64,d:f64,level:f64)->ContourSign with Mut,Div,Panic {` — *viz/contour_predicate.sio*
 - `pub fn coord_new(` — *viz/coord.sio*
 - `pub fn coord_map_x(cs: &CoordSystem, data_x: f64) -> i64 with Div {` — *viz/coord.sio*
 - `pub fn coord_map_y(cs: &CoordSystem, data_y: f64) -> i64 with Div {` — *viz/coord.sio*
 - `pub fn coord_draw_frame(cs: &CoordSystem, c: &!Canvas) with Mut {` — *viz/coord.sio*
 - `pub fn coord_draw_grid(cs: &CoordSystem, c: &!Canvas, n_ticks: i64) with Mut, Div {` — *viz/coord.sio*
 - `pub fn coord_draw_axes(cs: &CoordSystem, c: &!Canvas) with Mut, Div {` — *viz/coord.sio*
+- `pub fn count_diagnostic_workspace(n:i64)->i64 with Div {` — *viz/count_diagnostics.sio*
+- `pub fn count_diagnostic_prepare(fit:&DynamicCountFit,counts:&IntegerBuffer,means:&NumericBuffer,` — *viz/count_diagnostics.sio*
+- `pub fn count_diagnostic_plan(data:&CountDiagnosticData,width:i64,height:i64)->ScientificDocumentPlan with Mut,Div {` — *viz/count_diagnostics.sio*
+- `pub fn count_diagnostic_svg(fit:&DynamicCountFit,data:&CountDiagnosticData,plan:&ScientificDocumentPlan,` — *viz/count_diagnostics.sio*
+- `pub fn count_diagnostic_canvas(c:&!Canvas,fit:&DynamicCountFit,data:&CountDiagnosticData,plan:&ScientificDocumentPlan,` — *viz/count_diagnostics.sio*
+- `pub fn dynamic_contour_canvas(c:&!Canvas,s:&DynamicPlotSpec,xs:&NumericBuffer,ys:&NumericBuffer,b:&NumericBuffer,m:&NumericMatrix,mask:&IntegerBuffer,levels:&NumericBuffer,maxwork:i64,maxsegments:i64)->DynamicContourResult with Mut,Div,Panic {` — *viz/dynamic_contour.sio*
+- `pub fn dynamic_contour_svg(s:&DynamicPlotSpec,xs:&NumericBuffer,ys:&NumericBuffer,b:&NumericBuffer,m:&NumericMatrix,mask:&IntegerBuffer,levels:&NumericBuffer,maxwork:i64,maxsegments:i64,id:i64)->DynamicContourResult with IO,Mut,Div,Panic {` — *viz/dynamic_contour.sio*
+- `pub fn dynamic_histogram_canvas(c:&!Canvas,s:&DynamicPlotSpec,edges:&NumericBuffer,heights:&NumericBuffer,a:&IntegerBuffer,kind:i64)->DistributionCounts with Mut,Div,Panic {` — *viz/dynamic_distribution_plot.sio*
+- `pub fn dynamic_histogram_svg(s:&DynamicPlotSpec,edges:&NumericBuffer,heights:&NumericBuffer,a:&IntegerBuffer,kind:i64)->DistributionCounts with IO,Mut,Div,Panic {` — *viz/dynamic_distribution_plot.sio*
+- `pub fn dynamic_box_canvas(c:&!Canvas,s:&DynamicPlotSpec,p:&DynamicBoxPolicy,group:&NumericBuffer,q1:&NumericBuffer,median:&NumericBuffer,q3:&NumericBuffer,lo:&NumericBuffer,hi:&NumericBuffer,a:&IntegerBuffer)->DistributionCounts with Mut,Div,Panic {` — *viz/dynamic_distribution_plot.sio*
+- `pub fn dynamic_box_svg(s:&DynamicPlotSpec,p:&DynamicBoxPolicy,group:&NumericBuffer,q1:&NumericBuffer,median:&NumericBuffer,q3:&NumericBuffer,lo:&NumericBuffer,hi:&NumericBuffer,a:&IntegerBuffer)->DistributionCounts with IO,Mut,Div,Panic {` — *viz/dynamic_distribution_plot.sio*
+- `pub fn dynamic_scatter_validate(s:&DynamicPlotSpec,x:&NumericBuffer,y:&NumericBuffer,a:&IntegerBuffer)->i64 with Mut,Div,Panic {` — *viz/dynamic_fields.sio*
+- `pub fn dynamic_scatter_canvas(c:&!Canvas,s:&DynamicPlotSpec,x:&NumericBuffer,y:&NumericBuffer,a:&IntegerBuffer)->DynamicFieldResult with Mut,Div,Panic {` — *viz/dynamic_fields.sio*
+- `pub fn dynamic_scatter_svg(s:&DynamicPlotSpec,x:&NumericBuffer,y:&NumericBuffer,a:&IntegerBuffer)->DynamicFieldResult with IO,Mut,Div,Panic {` — *viz/dynamic_fields.sio*
+- `pub fn dynamic_heatmap_canvas(c:&!Canvas,s:&DynamicHeatmapSpec,b:&NumericBuffer,m:&NumericMatrix,a:&IntegerBuffer)->DynamicFieldResult with Mut,Div,Panic {` — *viz/dynamic_fields.sio*
+- `pub fn dynamic_heatmap_svg(s:&DynamicHeatmapSpec,b:&NumericBuffer,m:&NumericMatrix,a:&IntegerBuffer)->DynamicFieldResult with IO,Mut,Div,Panic {` — *viz/dynamic_fields.sio*
+- `pub fn dynamic_line_reduce(x:&NumericBuffer,y:&NumericBuffer,available:&IntegerBuffer,xmin:f64,xmax:f64,buckets:i64,indices:&!IntegerBuffer)->LineReduction with Mut,Div,Panic {` — *viz/dynamic_line_reduce.sio*
+- `pub fn dynamic_line_canvas(c:&!Canvas,s:&DynamicPlotSpec,x:&NumericBuffer,y:&NumericBuffer,a:&IntegerBuffer,indices:&IntegerBuffer,count:i64)->DynamicPlotResult with Mut,Div,Panic {` — *viz/dynamic_plot.sio*
+- `pub fn dynamic_line_svg(s:&DynamicPlotSpec,x:&NumericBuffer,y:&NumericBuffer,a:&IntegerBuffer,indices:&IntegerBuffer,count:i64,id:i64)->DynamicPlotResult with IO,Mut,Div,Panic {` — *viz/dynamic_plot.sio*
+- `pub fn dynamic_interval_canvas(c:&!Canvas,s:&DynamicPlotSpec,x:&NumericBuffer,mean:&NumericBuffer,lower:&NumericBuffer,upper:&NumericBuffer,a:&IntegerBuffer)->DynamicPlotResult with Mut,Div,Panic {` — *viz/dynamic_plot.sio*
+- `pub fn dynamic_interval_svg(s:&DynamicPlotSpec,x:&NumericBuffer,mean:&NumericBuffer,lower:&NumericBuffer,upper:&NumericBuffer,a:&IntegerBuffer,id:i64)->DynamicPlotResult with IO,Mut,Div,Panic {` — *viz/dynamic_plot.sio*
+- `pub fn dynamic_scale_xy(x:&NumericBuffer,y:&NumericBuffer,a:&IntegerBuffer,tx:&!NumericBuffer,ty:&!NumericBuffer,xs:&ScaleSpec,ys:&ScaleSpec)->DynamicScaleResult with Mut,Div,Panic {` — *viz/dynamic_scaled_plot.sio*
+- `pub fn dynamic_scale_intervals(x:&NumericBuffer,mean:&NumericBuffer,lower:&NumericBuffer,upper:&NumericBuffer,a:&IntegerBuffer,tx:&!NumericBuffer,tm:&!NumericBuffer,tl:&!NumericBuffer,tu:&!NumericBuffer,xs:&ScaleSpec,ys:&ScaleSpec)->DynamicScaleResult with Mut,Div,Panic {` — *viz/dynamic_scaled_plot.sio*
+- `pub fn dynamic_scaled_plot(raw:&DynamicPlotSpec,xs:&ScaleSpec,ys:&ScaleSpec)->DynamicScaledPlot with Mut,Div {` — *viz/dynamic_scaled_plot.sio*
+- `pub fn dynamic_scaled_line_canvas(c:&!Canvas,s:&DynamicScaledPlot,x:&NumericBuffer,y:&NumericBuffer,a:&IntegerBuffer,tx:&!NumericBuffer,ty:&!NumericBuffer,indices:&!IntegerBuffer,buckets:i64)->DynamicScaledRender with Mut,Div,Panic {` — *viz/dynamic_scaled_plot.sio*
+- `pub fn dynamic_scaled_line_svg(s:&DynamicScaledPlot,x:&NumericBuffer,y:&NumericBuffer,a:&IntegerBuffer,tx:&!NumericBuffer,ty:&!NumericBuffer,indices:&!IntegerBuffer,buckets:i64,id:i64)->DynamicScaledRender with IO,Mut,Div,Panic {` — *viz/dynamic_scaled_plot.sio*
+- `pub fn dynamic_scaled_interval_canvas(c:&!Canvas,s:&DynamicScaledPlot,x:&NumericBuffer,mean:&NumericBuffer,lower:&NumericBuffer,upper:&NumericBuffer,a:&IntegerBuffer,tx:&!NumericBuffer,tm:&!NumericBuffer,tl:&!NumericBuffer,tu:&!NumericBuffer)->DynamicScaledRender with Mut,Div,Panic {` — *viz/dynamic_scaled_plot.sio*
+- `pub fn dynamic_scaled_interval_svg(s:&DynamicScaledPlot,x:&NumericBuffer,mean:&NumericBuffer,lower:&NumericBuffer,upper:&NumericBuffer,a:&IntegerBuffer,tx:&!NumericBuffer,tm:&!NumericBuffer,tl:&!NumericBuffer,tu:&!NumericBuffer,id:i64)->DynamicScaledRender with IO,Mut,Div,Panic {` — *viz/dynamic_scaled_plot.sio*
 - `pub fn viz_edit_frame_empty() -> VizEditFrame {` — *viz/editor.sio*
 - `pub fn viz_edit_trace_new() -> VizEditTrace {` — *viz/editor.sio*
 - `pub fn viz_editor_target(scene: &VizScene) -> i64 {` — *viz/editor.sio*
@@ -14849,6 +16180,12 @@ organized by module. Generated from source on the date shown below.
 - `pub fn field_pbox_threshold_class(p: &PBox, threshold: f64) -> i64 {` — *viz/field_canvas.sio*
 - `pub fn field_render_value_uncertainty(` — *viz/field_canvas.sio*
 - `pub fn field_render_epistemic_frontier(` — *viz/field_canvas.sio*
+- `pub fn forest_layout(n:i64,x:i64,y:i64,w:i64,h:i64)->ForestLayout with Mut,Div {` — *viz/forest.sio*
+- `pub fn forest_page_plan(total:i64,first:i64,x:i64,y:i64,w:i64,h:i64)->ForestPage with Mut,Div {` — *viz/forest.sio*
+- `pub fn forest_domain(xmin:f64,xmax:f64)->bool {` — *viz/forest.sio*
+- `pub fn forest_prefix(estimates:&[f64;1024],vars:&[f64;1024],lower:&[f64;1024],upper:&[f64;1024],` — *viz/forest.sio*
+- `pub fn forest_project(estimate:f64,lower:f64,upper:f64,row:i64,n:i64,` — *viz/forest.sio*
+- `pub fn forest_clip_rect(rx:i64,ry:i64,rw:i64,rh:i64,x:i64,y:i64,w:i64,h:i64)->ForestRect with Mut {` — *viz/forest.sio*
 - `pub fn viz_inspector_draw(scene: &VizScene, c: &!Canvas, x: i64, y: i64, w: i64, h: i64) with Mut {` — *viz/inspector.sio*
 - `pub fn viz_inspector_hit_node(scene: &VizScene, x: i64, y: i64, w: i64, h: i64, px: i64, py: i64) -> i64 {` — *viz/inspector.sio*
 - `pub fn viz_inspector_select(scene: &!VizScene, x: i64, y: i64, w: i64, h: i64, px: i64, py: i64) -> i64 with Mut {` — *viz/inspector.sio*
@@ -14882,8 +16219,10 @@ organized by module. Generated from source on the date shown below.
 - `pub fn viz_add_line_chart(scene: &!VizScene, xs: &[f64; 1024], ys: &[f64; 1024], n: i64, layout: VizLayout, style: VizStyle) -> i64 with Mut {` — *viz/ir.sio*
 - `pub fn viz_add_scatter_chart(scene: &!VizScene, xs: &[f64; 1024], ys: &[f64; 1024], n: i64, layout: VizLayout, style: VizStyle) -> i64 with Mut {` — *viz/ir.sio*
 - `pub fn viz_add_bar_chart(scene: &!VizScene, xs: &[f64; 1024], ys: &[f64; 1024], n: i64, layout: VizLayout, style: VizStyle) -> i64 with Mut {` — *viz/ir.sio*
-- `pub fn viz_add_uncertainty_band(scene: &!VizScene, xs: &[f64; 1024], ys: &[f64; 1024], vars: &[f64; 1024], n: i64, layout: VizLayout, style: VizStyle) -> i64 with Mut {` — *viz/ir.sio*
-- `pub fn viz_add_forest_plot(scene: &!VizScene, estimates: &[f64; 1024], variances: &[f64; 1024], n: i64, layout: VizLayout, style: VizStyle) -> i64 with Mut {` — *viz/ir.sio*
+- `pub fn viz_add_uncertainty_band(scene:&!VizScene,xs:&[f64;1024],ys:&[f64;1024],vars:&[f64;1024],` — *viz/ir.sio*
+- `pub fn viz_add_forest_plot(scene:&!VizScene,estimates:&[f64;1024],variances:&[f64;1024],n:i64,` — *viz/ir.sio*
+- `pub fn viz_add_forest_interval_page(scene:&!VizScene,estimates:&[f64;1024],lower:&[f64;1024],upper:&[f64;1024],` — *viz/ir.sio*
+- `pub fn viz_add_forest_interval_plot(scene:&!VizScene,estimates:&[f64;1024],lower:&[f64;1024],upper:&[f64;1024],` — *viz/ir.sio*
 - `pub fn viz_add_waterfall(scene: &!VizScene, values: &[f64; 1024], n: i64, layout: VizLayout, style: VizStyle) -> i64 with Mut {` — *viz/ir.sio*
 - `pub fn viz_add_heatmap(scene: &!VizScene, values: &[f64; 4096], rows: i64, cols: i64, min_value: f64, max_value: f64, layout: VizLayout) -> i64 with Mut {` — *viz/ir.sio*
 - `pub fn viz_add_molecule(scene: &!VizScene, mol: MoleculeViz, layout: VizLayout, style: VizStyle) -> i64 with Mut {` — *viz/ir.sio*
@@ -14923,6 +16262,14 @@ organized by module. Generated from source on the date shown below.
 - `pub fn viz_scene_pointer_update(scene: &!VizScene, px: i64, py: i64) -> i64 with Mut, Div {` — *viz/ir.sio*
 - `pub fn viz_scene_key_press(scene: &!VizScene, key: i64) -> bool with Mut {` — *viz/ir.sio*
 - `pub fn viz_scene_handle_event(scene: &!VizScene, ev: Event) -> bool with Mut, Div {` — *viz/ir.sio*
+- `pub fn viz_add_axis(scene: &!VizScene, lo: f64, hi: f64, intervals: i64,` — *viz/ir.sio*
+- `pub fn viz_add_fitted_axis(scene:&!VizScene,lo:f64,hi:f64,max_intervals:i64,` — *viz/ir.sio*
+- `pub fn viz_line_set_viewport(scene: &!VizScene, node_idx: i64,` — *viz/ir.sio*
+- `pub fn viz_add_series_legend(scene: &!VizScene, chart_idx: i64, text: &[i8; 64],` — *viz/ir.sio*
+- `pub fn viz_line_set_standard_uncertainty(scene:&!VizScene,node_idx:i64,` — *viz/ir.sio*
+- `pub fn viz_scatter_set_viewport(scene:&!VizScene,node_idx:i64,` — *viz/ir.sio*
+- `pub fn viz_bar_set_viewport(scene:&!VizScene,node_idx:i64,` — *viz/ir.sio*
+- `pub fn legend_layout(x: i64, y: i64, w: i64, h: i64, len: i64) -> LegendLayout with Mut, Div {` — *viz/legend.sio*
 - `pub fn viz_version() -> i64 { 15 }` — *viz/mod.sio*
 - `pub fn mol3d_precompute_shadow(mol: &MoleculeViz, shadow: &![f64; 64]) with Mut, Div {` — *viz/mol3d.sio*
 - `pub fn mol3d_precompute_ao(mol: &MoleculeViz, ao: &![f64; 64]) with Mut, Div {` — *viz/mol3d.sio*
@@ -14932,6 +16279,7 @@ organized by module. Generated from source on the date shown below.
 - `pub fn mol3d_render_ao(` — *viz/mol3d.sio*
 - `pub fn mol3d_render_shadow(` — *viz/mol3d.sio*
 - `pub fn mol3d_render_hbonds(` — *viz/mol3d.sio*
+- `pub fn axis_nice_cover(lo:f64, hi:f64, budget:i64) -> NiceAxis with Mut, Div {` — *viz/nice_axis.sio*
 - `pub fn atom_viz_default(z: i64, x: f64, y: f64, zz: f64) -> AtomViz {` — *viz/physchem.sio*
 - `pub fn bond_viz(a: i64, b: i64, order: i64, length_value: f64, length_uncertainty: f64) -> BondViz {` — *viz/physchem.sio*
 - `pub fn molecule_empty() -> MoleculeViz {` — *viz/physchem.sio*
@@ -14949,28 +16297,48 @@ organized by module. Generated from source on the date shown below.
 - `pub fn lattice_field_phonon_demo(rows: i64, cols: i64) -> LatticeField2D with Mut, Div {` — *viz/physchem.sio*
 - `pub fn particle_event_view_empty() -> ParticleEventView {` — *viz/physchem.sio*
 - `pub fn particle_event_view_demo(n: i64) -> ParticleEventView with Mut, Div {` — *viz/physchem.sio*
+- `pub fn viz_auto_plot_axes(scene: &!VizScene, chart:i64, style:VizStyle) -> PlotAxes with Mut, Div {` — *viz/plot.sio*
+- `pub fn viz_plot_share_domain(scene: &!VizScene, source:i64, target:i64) -> bool with Mut {` — *viz/plot.sio*
+- `pub fn scale_valid(spec: &ScaleSpec)->bool {` — *viz/scale.sio*
+- `pub fn scale_forward(x:f64,spec:&ScaleSpec)->ScaleValue with Mut, Div {` — *viz/scale.sio*
+- `pub fn scale_inverse(t:f64,spec:&ScaleSpec)->ScaleValue with Mut, Div {` — *viz/scale.sio*
+- `pub fn axis_scaled_ticks(lo:f64,hi:f64,intervals:i64,spec:&ScaleSpec)->AxisTicks with Mut, Div {` — *viz/scale.sio*
+- `pub fn viz_add_scaled_plot(scene:&!VizScene,xs:&[f64;1024],ys:&[f64;1024],n:i64,` — *viz/scaled_plot.sio*
+- `pub fn scatter_finite(v:f64)->bool {` — *viz/scatter.sio*
+- `pub fn scatter_geometry(x:i64,y:i64,w:i64,h:i64)->bool {` — *viz/scatter.sio*
+- `pub fn scatter_project(sample_x:f64,sample_y:f64,xmin:f64,xmax:f64,ymin:f64,ymax:f64,` — *viz/scatter.sio*
 - `pub fn sci_lattice_heatmap(` — *viz/sci.sio*
 - `pub fn sci_lattice_variance(` — *viz/sci.sio*
 - `pub fn sci_pbpk_series(` — *viz/sci.sio*
 - `pub fn sci_mcmc_trace(` — *viz/sci.sio*
 - `pub fn sci_mcmc_histogram(` — *viz/sci.sio*
+- `pub fn scientific_two_panel_plan(width:i64,height:i64,xmin0:f64,xmax0:f64,ymin0:f64,ymax0:f64,` — *viz/scientific_document.sio*
+- `pub fn scientific_document_validate(p:&ScientificDocumentPlan,t:&ScientificDocumentText,bytes:&IntegerBuffer,` — *viz/scientific_document.sio*
+- `pub fn scientific_document_svg(p:&ScientificDocumentPlan,t:&ScientificDocumentText,bytes:&IntegerBuffer,` — *viz/scientific_document.sio*
+- `pub fn scientific_document_canvas(c:&!Canvas,p:&ScientificDocumentPlan,t:&ScientificDocumentText,bytes:&IntegerBuffer,` — *viz/scientific_document.sio*
+- `pub fn uncertainty_bounds(mean:f64,variance:f64)->UncertaintyBounds with Mut,Div,Panic {` — *viz/uncertainty.sio*
+- `pub fn uncertainty_prefix(xs:&[f64;1024],means:&[f64;1024],vars:&[f64;1024],n:i64)->bool with Mut,Div,Panic {` — *viz/uncertainty.sio*
+- `pub fn uncertainty_domain(xmin:f64,xmax:f64,ymin:f64,ymax:f64)->bool {` — *viz/uncertainty.sio*
+- `pub fn uncertainty_strip(sx:f64,mean:f64,variance:f64,` — *viz/uncertainty.sio*
+- `pub fn uncertainty_segment(ax:f64,ay:f64,bx:f64,by:f64,` — *viz/uncertainty.sio*
+- `pub fn uncertainty_raster_segment(ax:i64,ay:i64,bx:i64,by:i64,` — *viz/uncertainty.sio*
 - `pub fn viz_app_new(bg_r: i64, bg_g: i64, bg_b: i64) -> VizApp {` — *viz/viz_app.sio*
 - `pub fn viz_app_handle_event(app: &!VizApp, scene: &!VizScene, ev: Event) -> bool with Mut, Div {` — *viz/viz_app.sio*
-- `pub fn viz_app_render(app: &!VizApp, scene: &!VizScene, c: &!Canvas) with Mut, Div, Alloc {` — *viz/viz_app.sio*
+- `pub fn viz_app_render(app: &!VizApp, scene: &!VizScene, c: &!Canvas) with Mut, Div, Alloc, Panic {` — *viz/viz_app.sio*
 - `pub fn viz_app_frame_hash(app: &VizApp, scene: &VizScene, c: &Canvas) -> i64 with Mut {` — *viz/viz_app.sio*
-- `pub fn viz_app_step(app: &!VizApp, scene: &!VizScene, c: &!Canvas, ev: Event) -> bool with Mut, Div, Alloc {` — *viz/viz_app.sio*
-- `pub fn viz_canvas_render_scene(scene: &VizScene, c: &!Canvas) with Mut, Div, Alloc {` — *viz/viz_canvas.sio*
-- `pub fn viz_html_emit_scene(scene: &VizScene, width: i64, height: i64) with IO, Mut, Div {` — *viz/viz_html.sio*
+- `pub fn viz_app_step(app: &!VizApp, scene: &!VizScene, c: &!Canvas, ev: Event) -> bool with Mut, Div, Alloc, Panic {` — *viz/viz_app.sio*
+- `pub fn viz_canvas_render_scene(scene: &VizScene, c: &!Canvas) with Mut, Div, Alloc, Panic {` — *viz/viz_canvas.sio*
+- `pub fn viz_html_emit_scene(scene: &VizScene, width: i64, height: i64) with IO, Mut, Div, Panic {` — *viz/viz_html.sio*
 - `pub fn viz_replay_frame_empty() -> VizReplayFrame {` — *viz/viz_replay.sio*
 - `pub fn viz_replay_trace_new() -> VizReplayTrace {` — *viz/viz_replay.sio*
-- `pub fn viz_replay_present(app: &!VizApp, scene: &!VizScene, c: &!Canvas) -> i64 with Mut, Div, Alloc {` — *viz/viz_replay.sio*
-- `pub fn viz_replay_events(app: &!VizApp, scene: &!VizScene, c: &!Canvas, events: &[Event; 32], count: i64) -> i64 with Mut, Div, Alloc {` — *viz/viz_replay.sio*
-- `pub fn viz_replay_trace_events(app: &!VizApp, scene: &!VizScene, c: &!Canvas, events: &[Event; 32], count: i64) -> VizReplayTrace with Mut, Div, Alloc {` — *viz/viz_replay.sio*
+- `pub fn viz_replay_present(app: &!VizApp, scene: &!VizScene, c: &!Canvas) -> i64 with Mut, Div, Alloc, Panic {` — *viz/viz_replay.sio*
+- `pub fn viz_replay_events(app: &!VizApp, scene: &!VizScene, c: &!Canvas, events: &[Event; 32], count: i64) -> i64 with Mut, Div, Alloc, Panic {` — *viz/viz_replay.sio*
+- `pub fn viz_replay_trace_events(app: &!VizApp, scene: &!VizScene, c: &!Canvas, events: &[Event; 32], count: i64) -> VizReplayTrace with Mut, Div, Alloc, Panic {` — *viz/viz_replay.sio*
 - `pub fn viz_replay_dump(scene: &VizScene) with IO, Mut, Div {` — *viz/viz_replay.sio*
 - `pub fn viz_window_pump_events(app: &!VizApp, scene: &!VizScene, win: &!Window, max_events: i64) -> i64 with IO, Mut, Div {` — *viz/viz_window.sio*
-- `pub fn viz_window_present_if_dirty(app: &!VizApp, scene: &!VizScene, win: &!Window) -> bool with IO, Mut, Div, Alloc {` — *viz/viz_window.sio*
-- `pub fn viz_window_step(app: &!VizApp, scene: &!VizScene, win: &!Window, max_events: i64) -> bool with IO, Mut, Div, Alloc {` — *viz/viz_window.sio*
-- `pub fn viz_workbench_build_scene(scene: &!VizScene) -> VizWorkbenchIds with Mut, Div {` — *viz/workbench.sio*
+- `pub fn viz_window_present_if_dirty(app: &!VizApp, scene: &!VizScene, win: &!Window) -> bool with IO, Mut, Div, Alloc, Panic {` — *viz/viz_window.sio*
+- `pub fn viz_window_step(app: &!VizApp, scene: &!VizScene, win: &!Window, max_events: i64) -> bool with IO, Mut, Div, Alloc, Panic {` — *viz/viz_window.sio*
+- `pub fn viz_workbench_build_scene(scene: &!VizScene) -> VizWorkbenchIds with Mut, Div, Panic {` — *viz/workbench.sio*
 - `pub fn viz_workbench_event(kind: i64, key: i64, x: i64, y: i64, mods: i64) -> Event {` — *viz/workbench.sio*
 - `pub fn viz_workbench_default_events(events: &![Event; 32]) -> i64 with Mut {` — *viz/workbench.sio*
 
@@ -15035,6 +16403,6 @@ organized by module. Generated from source on the date shown below.
 
 ## Summary
 
-- **124** modules with public APIs
-- **14145** total public functions
+- **132** modules with public APIs
+- **15457** total public functions
 - Generated from `stdlib/` source files

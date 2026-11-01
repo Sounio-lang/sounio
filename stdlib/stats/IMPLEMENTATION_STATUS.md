@@ -355,59 +355,11 @@ Replaces heuristic `t_variance = se_diff² * 0.1` with proper resampling.
 
 ---
 
-### ✅ Task 4: Integration Tests (Python & R)
+### ✅ Task 4: Integration Tests
 
-**Files:**
-- [`tests/stats/test_epistemic_stats.py`](../../tests/stats/test_epistemic_stats.py) - Python/SciPy
-- [`tests/stats/test_epistemic_stats.R`](../../tests/stats/test_epistemic_stats.R) - R
+**Gate:** `bash scripts/stats_scipy_e2e_gate.sh`
 
-**Test Coverage:**
-
-#### Python/SciPy Tests
-1. **T-Test Cross-Validation**
-   - Validates against `scipy.stats.ttest_ind()`
-   - Checks t-statistic, p-value, Cohen's d
-   - Expected: t ≈ 4.5-5.0, p < 0.001, d ≈ 2.5-3.0
-
-2. **Normality Tests**
-   - Normal data: `scipy.stats.shapiro()` should pass (p > 0.05)
-   - Uniform data: should fail (p < 0.05)
-
-3. **Levene's Test**
-   - Equal variances: pass (p > 0.05)
-   - 3x variance ratio: fail (p < 0.05)
-
-4. **Linear Regression**
-   - y = 2 + 3x + noise
-   - `scipy.stats.linregress()` validation
-   - β₀ ≈ 2.0, β₁ ≈ 3.0, R² > 0.95
-
-5. **Bootstrap CI**
-   - 1000 bootstrap samples
-   - Percentile method
-   - CI contains true mean
-
-6. **Graded Confidence Philosophy**
-   - Demonstrates BetaConfidence mapping
-   - Shows degradation with violations
-
-#### R Tests (Gold Standard)
-1. **T-Test** - `t.test()` with var.equal = TRUE
-2. **Shapiro-Wilk** - `shapiro.test()`
-3. **Levene's Test** - `car::leveneTest()`
-4. **Linear Regression** - `lm()` with diagnostics
-5. **Bootstrap CI** - Base R resampling
-
-**Usage:**
-```bash
-# Python tests
-python3 tests/stats/test_epistemic_stats.py
-
-# R tests (requires car package)
-Rscript tests/stats/test_epistemic_stats.R
-```
-
-**Status:** ✅ Complete (Python: 320 lines, R: 280 lines)
+**Status:** ✅ `scripts/stats_scipy_e2e_gate.sh`
 
 ---
 
@@ -420,7 +372,7 @@ Rscript tests/stats/test_epistemic_stats.R
 | Linear Regression | `regression/linear.sio` | ~610 | ✅ |
 | Assumption Checks | `epistemic/assumptions.sio` | ~460 | ✅ |
 | Bootstrap | `epistemic/bootstrap.sio` | ~470 | ✅ |
-| Integration Tests (Py) | `tests/stats/test_epistemic_stats.py` | ~320 | ✅ |
+| Integration Tests | `scripts/stats_scipy_e2e_gate.sh` | gate | ✅ |
 | **Phase 2: Clinical & Robust** | | | |
 | Logistic Regression | `regression/logistic.sio` | ~660 | ✅ |
 | Meta-Analysis | `clinical/meta_analysis.sio` | ~520 | ✅ |
@@ -685,40 +637,8 @@ fn main() {
 
 ## Testing
 
-### Run Integration Tests
-
 ```bash
-# Python (SciPy cross-validation)
-cd /home/demetrios/work/sounio
-python3 tests/stats/test_epistemic_stats.py
-
-# R (gold standard cross-validation)
-Rscript tests/stats/test_epistemic_stats.R
-```
-
-Expected output:
-```
-================================================================
-Sounio Epistemic Statistics Integration Tests
-Cross-validation against SciPy (Python)
-================================================================
-
-=== T-Test Cross-Validation ===
-  SciPy:  t = 4.7234, p = 0.0003
-✓ t-statistic in expected range
-✓ p-value in expected range
-✓ Cohen's d in expected range (large effect)
-
-=== Normality Test Cross-Validation ===
-  SciPy Shapiro-Wilk: W = 0.9845, p = 0.6234
-✓ Normal data passes Shapiro-Wilk (p > 0.05)
-  SciPy Shapiro-Wilk (uniform): W = 0.9234, p = 0.0023
-✓ Uniform data fails Shapiro-Wilk (p < 0.05)
-
-...
-
-Results: 6/6 test suites passed
-✓ ALL TESTS PASSED
+bash scripts/stats_scipy_e2e_gate.sh
 ```
 
 ---

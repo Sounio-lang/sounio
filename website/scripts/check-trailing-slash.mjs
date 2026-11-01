@@ -6,7 +6,9 @@
  * vercel.json `routes`, in this order:
  *   1. /docs and /:lang/docs (with or without a slash, one or two slug
  *      segments, no file extension) 308 to /learn/ or /:lang/learn/.
- *   2. The same three routes `@vercel/routing-utils` `convertTrailingSlash(true)`
+ *   2. /sitemap.xml (optional trailing slash) 308 to /sitemap-index.xml.
+ *      The built file stays sitemap-index.xml; robots.txt is unchanged.
+ *   3. The same three routes `@vercel/routing-utils` `convertTrailingSlash(true)`
  *      emits: pass `/.well-known`, 308-add a slash on extensionless paths,
  *      308-strip a slash on paths whose last segment has an extension.
  *
@@ -48,6 +50,8 @@ const ACCEPTANCE = [
   ['/about/', null, null],
   ['/learn/', null, null],
   ['/robots.txt', null, null],
+  ['/sitemap.xml', 308, '/sitemap-index.xml'],
+  ['/sitemap.xml/', 308, '/sitemap-index.xml'],
   ['/sitemap-index.xml', null, null],
   ['/feed.xml', null, null],
   ['/llms.txt', null, null],
@@ -189,6 +193,13 @@ async function readConfig() {
   const astro = await readFile(path.join(root, 'astro.config.mjs'), 'utf8');
   if (!astro.includes("trailingSlash: 'always'")) {
     errors.push("astro.config.mjs must set trailingSlash: 'always'");
+  }
+  const robots = await readFile(path.join(root, 'public', 'robots.txt'), 'utf8');
+  if (!robots.includes('Sitemap: https://www.souniolang.org/sitemap-index.xml')) {
+    errors.push('robots.txt must keep Sitemap pointed at /sitemap-index.xml');
+  }
+  if (/^Sitemap:.*\/sitemap\.xml\s*$/m.test(robots)) {
+    errors.push('robots.txt must not advertise /sitemap.xml; that path 308s to /sitemap-index.xml');
   }
   const vercel = JSON.parse(await readFile(path.join(root, 'vercel.json'), 'utf8'));
   if (vercel.trailingSlash === true) {

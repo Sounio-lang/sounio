@@ -37,7 +37,6 @@ It converts existing CI and self-host gate outputs into a claim-backed evidence 
   - `scripts/ci/check_feature_matrix.sh`
   - `scripts/selfhost/selfhost_zero_fallback_gate.sh`
   - `scripts/ci/selfhost_driver_output_gate.sh`
-  - `poseidon_gate.sh` was retired on 2026-10-06 (it compares against a Cargo-built baseline compiler, which no longer exists) and removed with `scripts/archive/`
 - Primary CI mapping:
   - `.github/workflows/ci.yml` jobs: `fast-gate`, `selfhost-zero-fallback`, `joss-smoke`.
 
@@ -52,22 +51,7 @@ Workload classes (anonymized):
 - `inventory-commit`: stock reservation/decrement and consistency checks.
 - `payment-reconcile`: idempotency/retry-safe reconciliation transitions.
 
-Execution mechanism (already implemented):
-
-- `poseidon_gate.sh` with `MATRIX_FILE=<private_matrix>` was the execution mechanism. It was removed with `scripts/archive/` and is not a command in this tree.
-- Matrix schema is defined in `scripts/poseidon_compat_matrix.txt`:
-  - `case_id|mode|command|compare`
-  - modes: `run_selfhost` and `direct`
-  - compare tokens: `exit`, `stdout`, `stderr`
-
-Required acceptance criteria:
-
-- All enterprise matrix cases emit `PASS [<case_id>] baseline and candidate match (...)`.
-- Gate emits `PASS [full-selfhost] ...`.
-- Summary emits `Summary: PASS=<N> FAIL=0`.
-- If `SOUNIO_SELFHOST_NO_RUST_FALLBACK=1`, no fallback/oracle markers are present in gate logs:
-  - `SELFHOST=driver-first schema=v1 event=driver_orchestration ... status=fallback`
-  - `SELFHOST=oracle backend=rust`
+No public command currently executes this lane. The previous gate left the tree with `scripts/archive/` on 2026-10-06.
 
 ## Metrics and Gates
 
@@ -81,8 +65,6 @@ Required acceptance criteria:
 | Parse-all report completeness | same as above | `PASS [parse-all-report] ...` | Pass marker present |
 | Parse-all shard completeness | same as above | `PASS [parse-all-shards] ...` | Pass marker present |
 | Full self-host strict pass | same as above | `PASS [full-selfhost] strict no-fallback gate passed` | Pass marker present |
-| Compatibility parity matrix | removed with `scripts/archive/` (`poseidon_gate.sh`) | `PASS [<case_id>] baseline and candidate match (...)` | historical; not a current command |
-| Poseidon full-suite summary | removed with `scripts/archive/` (`poseidon_gate.sh`) | `Summary: PASS=<n> FAIL=<m>` | historical; not a current command |
 | JOSS smoke examples | CI `joss-smoke` in `.github/workflows/ci.yml` | step success (`Run required JOSS examples`) | Job green |
 | Compile-fail diagnostic behavior | CI `joss-smoke` in `.github/workflows/ci.yml` | step success (`Compile-fail smoke ...`) | Job green |
 
@@ -95,8 +77,6 @@ Required acceptance criteria:
 | `C3` | Self-host path passes strict no-fallback corpus gate | `scripts/selfhost/selfhost_zero_fallback_gate.sh`, CI `selfhost-zero-fallback` | `PASS [full-selfhost] ...`, `PASS [parse-all-report] ...`, `PASS [parse-all-shards] ...`, `SELFHOST_ZERO_GATE_SUMMARY ... fail=0` |
 | `C3b` | Self-host driver can emit decodable bytecode artifacts (bootstrap subset) | `scripts/ci/selfhost_driver_output_gate.sh` | `PASS [ret_42] ...`, `PASS [print_boot] ...`, `SELFHOST_DRIVER_OUTPUT_GATE_SUMMARY ... fail=0` |
 | `C4` | Ontology mismatch diagnostics are enforced in end-to-end checks | `scripts/dev/e2e_gate.sh` ontology cross-check | presence of `semantic distance` diagnostic in failure path check |
-| `C5` | Self-host/non-self-host parity is regression-tested | `poseidon_gate.sh` (removed with `scripts/archive/`), `scripts/poseidon_compat_matrix.txt` | historical markers: `PASS [<case_id>] baseline and candidate match (...)`, `Summary: PASS=<n> FAIL=0` |
-| `C6` | Enterprise backend workload compatibility can be validated without disclosing proprietary implementation details | `poseidon_gate.sh` with private `MATRIX_FILE` (removed with `scripts/archive/`) | historical: anonymized `PASS [<enterprise_case>] ...` lines + `FAIL=0` summary + no fallback markers in strict mode |
 
 ## Reproducibility Protocol
 
@@ -125,8 +105,6 @@ Expected log markers:
 - `"SELFHOST_ZERO_GATE_SUMMARY ... fail=0"` in `selfhost_zero_gate.log`
 - `"SELFHOST_DRIVER_OUTPUT_GATE_SUMMARY ... fail=0"` in `selfhost_driver_output_gate.log`
 
-`poseidon_gate.sh` (public and enterprise lanes) was removed with `scripts/archive/`. Do not invoke it. Git history holds the old `MATRIX_FILE` interface and its markers (`PASS [<case_id>]`, `Summary: PASS=<n> FAIL=0`).
-
 ### 3) Verify marker presence quickly
 
 ```bash
@@ -147,7 +125,6 @@ rg -n "SELFHOST_DRIVER_OUTPUT_GATE_SUMMARY .*fail=0" "$ARTIFACT_ROOT/selfhost_dr
 - Hardware/runtime variance can change runtime magnitude; this spec treats gate pass/fail markers as primary evidence.
 - GPU validation in `e2e_gate` includes compile smoke plus a remote-attested runtime gate; throughput claims still require separate hardware-specific benchmarking.
 - Enterprise lane hides implementation details by design; reproducibility is at the interface/marker level, not full workload publication.
-- Baseline commit selection in `poseidon_gate.sh` (`BASELINE_COMMIT`) may require periodic updates to avoid stale comparisons.
 
 ## Paper Packaging Checklist
 

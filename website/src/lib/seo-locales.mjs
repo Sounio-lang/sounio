@@ -159,7 +159,7 @@ const tutorialHubLocales = localesWithAny(tutorials);
  * Shell routes whose main prose is translated in code or JSON rather than
  * in a content collection. Anything not listed here, and not a content
  * document, is English-only: translated chrome or a handful of labels do
- * not count (proof, packages, about, playground, plan, credits,
+ * not count (proof, packages, playground, plan, credits,
  * dissertation, the insights index, the showcases index).
  *
  * Explicit shells:
@@ -172,6 +172,8 @@ const tutorialHubLocales = localesWithAny(tutorials);
  * - `/scientist/` follows scientistCopy.json (`pt`, `el`).
  * - `/honesty/` has a full Portuguese article; other locales render the
  *   English article.
+ * - `/about/` has a full Portuguese article; other locales render the
+ *   English article. `/about/vision/` and `/about/roadmap/` stay English.
  * - `/releases/` carries a distinct notes array for every locale, including
  *   `zh-hk`, in src/pages/releases/index.astro.
  */
@@ -185,6 +187,7 @@ const EXPLICIT_SHELLS = {
   '/compiler/': ['en', 'el'],
   '/scientist/': scientistLocales,
   '/honesty/': ['en', 'pt'],
+  '/about/': ['en', 'pt'],
 };
 
 const REDIRECT_EXACT = new Set([

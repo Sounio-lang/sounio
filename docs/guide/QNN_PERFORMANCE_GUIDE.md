@@ -96,7 +96,7 @@ TOTAL                  | 14.8K     | 59.2K        | 4.0x
 | **Batch Linear** | 4.3 | 80-120 | 20-30x | Good for batch ≥ 32 |
 | **Fully Connected** | 2.0 | 50-80 | 25-40x | Best for large batches |
 
-**GPU Kernels Implemented**: 7 production-ready kernels in `compiler/src/codegen/gpu/bio.rs:504-910`
+**GPU Kernels Implemented**: 7 kernels in `compiler/src/codegen/gpu/bio.rs:504-910`
 
 ---
 
@@ -107,17 +107,6 @@ TOTAL                  | 14.8K     | 59.2K        | 4.0x
 #### A. Batch Processing
 
 **Principle**: Amortize function call overhead and improve cache utilization.
-
-**Implementation**:
-```rust
-// Bad: Individual operations
-for i in 0..1000 {
-    quat_mul(&q1[i], &q2[i], &out[i]);  // 1000 function calls
-}
-
-// Good: Batch operation
-quat_batch_mul(&q1[..1000], &q2[..1000], &out[..1000]);  // 1 function call
-```
 
 **Performance Impact**: 5-10x faster for 1000+ operations
 
@@ -141,21 +130,6 @@ quat_batch_mul(&q1[..1000], &q2[..1000], &out[..1000]);  // 1 function call
 #### C. Loop Unrolling
 
 **Principle**: Reduce loop overhead for small, known iteration counts.
-
-**Example**:
-```rust
-// Unrolled quaternion norm
-fn quat_norm_unrolled(q: &[f32; 4]) -> f32 {
-    (q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]).sqrt()
-}
-
-// vs looped version
-fn quat_norm_loop(q: &[f32; 4]) -> f32 {
-    let mut sum = 0.0;
-    for i in 0..4 { sum += q[i] * q[i]; }
-    sum.sqrt()
-}
-```
 
 **Performance Impact**: 1.2-1.5x for small operations
 

@@ -1,4 +1,0 @@
-Command exited with non-zero status 126
-elapsed_seconds=0.00
-max_rss_kib=1592
-exit_code=126

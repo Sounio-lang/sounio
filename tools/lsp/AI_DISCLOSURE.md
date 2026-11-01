@@ -21,9 +21,5 @@ Scope of this reactivation:
   `./bin/souc self-hosted/lsp/server.sio bin/sounio-lsp` (the raw
   pass-through; `souc compile -o` remains broken in 1.0.0-beta.5 — see
   `coordination/HANDOFFS.md`).
-- Sprint-2 items (`SPRINT2_TODO.md`) were not started.
 
-The operator will re-run `lsp_audit.py` independently before merging
-`feature/lsp-parity-patches` to `main`. Until that audit returns
-green, public-facing copy (README, LinkedIn, Show HN) continues to use
-the conservative phrasing CC-2 drafted.
+The v0.3.0 parity patches (2026-05-17) are on `main`.

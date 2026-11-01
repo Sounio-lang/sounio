@@ -1,0 +1,1 @@
+Unreferenced Omega sprint paste, duplicated sprint 2.1 reports, and a duplicated brain-OSSM result dump were removed from `artifacts/omega`. Live CUBIN evidence, GPU bins, the GPU compiler profile, and the surviving `brain_ossm` copies stay. No compiler, runtime, or stdlib behaviour changes.

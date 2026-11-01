@@ -42,7 +42,6 @@ description: "Choose which AI model to use for a given Sounio task: type-checker
 | Name a new language feature | GPT-5.3-Codex |
 | Find every use of X in 30 files | Gemini 3.1 Pro |
 | Complete a render example (heatmap, DAG, 3D) | Sonnet 4.6 |
-| Add rasterize_* primitive to stdlib/render/ | Sonnet 4.6 |
 | Fix self-hosted --check failure | Opus 4.6 |
 | Debug --native-compile bootstrap crash | Opus 4.6 + GLM-5 cross-check |
 | Add a new PGO pass (new ir/*.sio module) | Opus 4.6 |

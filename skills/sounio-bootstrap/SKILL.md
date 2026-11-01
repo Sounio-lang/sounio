@@ -9,7 +9,7 @@ description: "Work on the self-hosted Sounio compiler bootstrap path: self-hoste
 
 `self-hosted/main.sio` is the entry point for the self-hosted Sounio compiler. It runs the full pipeline — lex → parse → resolve → check → lower → native compile — as a pure `.sio` program executed by the native `souc` wrapper.
 
-The self-hosted pipeline is separate from the Rust `compiler/` pipeline. Changes here affect the self-hosted path only.
+Changes here affect the self-hosted path only.
 
 ## Workflow
 

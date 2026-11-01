@@ -40,7 +40,7 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
 | KL-14 | FFI: 14a–14d3 CLOSED | madaros |
 | KL-15 | `f256` surface (15a softfloat add/sub partial), `Knowledge<f128>`/GUM | madaros |
 | KL-16 | Hessian Tier-4 (16a–16f CLOSED; residual H-multi/non-H00 if/a64 atan2) | lean_single |
-| KL-20 | enum variants with payloads (`Circle(f64)`, `Rect { w: f64 }`): no runtime representation | both |
+| KL-20 | enum variants with payloads: Madaros CLOSED for non-generic enums (tagged cells, 2026-10-30); generic enums do not parse; lean_single unchanged | lean_single (+ generic enums) |
 | KL-21 | user fns named like compiler builtins: `pub` residual on Madaros; seed hijacks or rejects | both |
 | KL-18 | `Hyper<…>` CPU values: Madaros fail-closed; lean_single prints a wrong value (seed) | both |
 | KL-17 | #2773 same-named items across modules: fns resolved per module on both engines; differing same-named structs refused instead of kept apart | both (types) |
@@ -279,6 +279,26 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
 
 ### KL-20 — enum payload variants (P1.3)
 
+- **Madaros: CLOSED for non-generic enums (2026-10-30, `fix/kl20-20261030`).**
+  A payload enum value is a tagged cell `[tag, payload words..]` sized for the
+  largest variant; layout and the alternatives not taken are in
+  [ENUM_PAYLOAD_LAYOUT.md](ENUM_PAYLOAD_LAYOUT.md). Construction (call and
+  struct-literal form), unit variants, `match` with payload binding (by value
+  and through `&`), nested variant / literal / `Some(..)` sub-patterns,
+  or-patterns, guards, struct and array and `Box<Self>` payloads, passing,
+  returning and methods all lower. The checker types each payload binding with
+  its declared field type, checks constructor arity (E277) and argument types
+  (E009), pattern arity (E278), refuses `==` on a payload enum (E279) and a
+  match that misses a variant (E280). E264 now only refuses a payload field that
+  is not one word (tuple, f128/f256, Knowledge<T>). Pins:
+  `tests/run-pass/enum_payload_{scalar,aggregate,nested}.sio`,
+  `tests/compile-fail/enum_payload_*.sio`. The repro below prints `12`.
+- **Still open:** generic enums (`enum Opt<T> { S(T), N }` is a parse error on
+  Madaros: the enum header takes no type parameters); builtin `Result<T, E>`
+  (`Ok(..)`/`Err(..)` are untyped in the checker and lower to a trapping stub);
+  lean_single (seed) has no payload representation. History of the refusal
+  follows.
+
 - Engine: `both`. Repro (measured 2026-10-06, `origin/main` `fa695abaa`):
 
   ```sounio
@@ -403,7 +423,16 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
     (E001), `hessian_of`, `seq_set` (E200), `seq_len` (P0003); no output:
     `seq_count`, `seq_get`, `str_len`; failed to compile: `acknowledge`,
     `require_confidence`, `f128_to_lo`.
+  - **Runtime callees named by the lowerer (2026-10-30).** The lowerer also
+    reaches runtime functions by bare name for operators, not only calls:
+    `println(f64)` -> `print_f64`, and `string == string` / `!=` / a string
+    literal `match` arm -> `str_eq`. A user fn of that name was bound instead
+    (`stdlib/str/lib.sio`'s `pub fn str_eq(a: &Str, b: &Str)` received two
+    string handles). Both names are on the shadow list now, so the user fn is
+    `<name>__user` and the operator keeps the runtime.
 - Pins: `tests/run-pass/user_fn_shadows_builtin_measure.sio`,
+  `tests/run-pass/user_print_f64_does_not_capture_println.sio`,
+  `tests/run-pass/user_str_eq_does_not_capture_string_eq.sio`,
   `tests/run-pass/user_fn_shadows_builtin_names.sio`,
   `tests/run-pass/user_fn_shadows_builtin_pub_measure.sio`,
   `tests/multimodule/user_fn_shadows_builtin_pub_main.sio` (+ `_leaf`),

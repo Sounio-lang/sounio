@@ -1,251 +1,244 @@
-// Darwin Atlas Kernels - Library (single-file, module-free)
-// Operators, symmetry, approximate metric, and quaternion lift.
+// stdlib/darwin/atlas.sio — Darwin Atlas kernels
+//
+// Symmetry operators on DNA sequences (cyclic shift, reversal, complement),
+// orbit statistics under the dihedral group, an approximate symmetry metric
+// (d_min), and the quaternion lift of the dihedral group to the dicyclic
+// group Dic_n.
+//
+// Sequences are fixed-capacity buffers: a `DnaSeq` holds up to
+// ATLAS_MAX_LEN bases in `bases[0..len]`, encoded A = 0, C = 1, G = 2, T = 3.
+// Growable `[u8]` arrays (`.push`, `[]`) are not part of the API: every
+// operator writes its result into a new DnaSeq of the same length, so no
+// result can outgrow its input. Building a sequence goes through
+// `dna_seq_push`, which panics on the base that would not fit and on a code
+// outside 0..3 (`dna_seq_try_push` returns false instead) -- a sequence is
+// never silently truncated or padded.
+// `dna_seq_from` copies `len` bases out of a `[u8; 256]` buffer under the
+// same checks.
 
-let BASE_A: u8 = 0
-let BASE_C: u8 = 1
-let BASE_G: u8 = 2
-let BASE_T: u8 = 3
+use math::pure::{sin, cos, atan}
 
-let PI: f64 = 3.14159265358979323846
+pub const BASE_A: u8 = 0
+pub const BASE_C: u8 = 1
+pub const BASE_G: u8 = 2
+pub const BASE_T: u8 = 3
 
-fn abs_f64(x: f64) -> f64  with Mut, Div, Panic {
-    if x < 0.0 { return -x }
-    return x
+pub const ATLAS_MAX_LEN: i64 = 256
+
+fn atlas_pi() -> f64 { 3.141592653589793 }
+
+// ============================================================================
+// SEQUENCE BUFFER
+// ============================================================================
+
+pub struct DnaSeq {
+    pub bases: [u8; 256],
+    pub len: i64,
 }
 
-fn normalize_angle(x: f64) -> f64  with Mut, Div, Panic {
-    var angle = x
-    while angle > PI {
-        angle = angle - 2.0 * PI
-    }
-    while angle < -PI {
-        angle = angle + 2.0 * PI
-    }
-    return angle
+pub fn dna_seq_empty() -> DnaSeq {
+    DnaSeq { bases: [0 as u8; 256], len: 0 }
 }
 
-fn sin_approx(x: f64) -> f64  with Mut, Div, Panic {
-    let angle = normalize_angle(x)
-    let x2 = angle * angle
-    let x3 = angle * x2
-    let x5 = x3 * x2
-    let x7 = x5 * x2
-    return angle - x3 / 6.0 + x5 / 120.0 - x7 / 5040.0
+pub fn dna_seq_len(s: &DnaSeq) -> i64 { s.len }
+
+// Append one base. Returns false, and leaves the sequence unchanged, when
+// the buffer is full or the code is not 0..3.
+pub fn dna_seq_try_push(s: &!DnaSeq, b: u8) -> bool with Mut {
+    if s.len < 0 || s.len >= ATLAS_MAX_LEN { return false }
+    if b > BASE_T { return false }
+    s.bases[s.len] = b
+    s.len = s.len + 1
+    true
 }
 
-fn cos_approx(x: f64) -> f64  with Mut, Div, Panic {
-    let angle = normalize_angle(x)
-    let x2 = angle * angle
-    let x4 = x2 * x2
-    let x6 = x4 * x2
-    return 1.0 - x2 / 2.0 + x4 / 24.0 - x6 / 720.0
+// Append one base; panics when the buffer is full or the code is not 0..3.
+pub fn dna_seq_push(s: &!DnaSeq, b: u8) with Mut, Panic {
+    if !dna_seq_try_push(s, b) {
+        panic("dna_seq_push: DnaSeq full (ATLAS_MAX_LEN bases) or base code outside 0..3")
+    }
 }
 
-fn atan(x: f64) -> f64  with Mut, Div, Panic {
-    let ax = abs_f64(x)
-    if ax <= 1.0 {
-        let x2 = x * x
-        return x * (1.0 - x2 * (1.0 / 3.0 - x2 * (1.0 / 5.0 - x2 * (1.0 / 7.0))))
+// Base at index i; panics outside 0..len.
+pub fn dna_seq_get(s: &DnaSeq, i: i64) -> u8 with Panic {
+    if i < 0 || i >= s.len {
+        panic("dna_seq_get: index out of range")
     }
-    let sign = if x > 0.0 { 1.0 } else { -1.0 }
-    let inv = 1.0 / x
-    let inv2 = inv * inv
-    return sign * (PI / 2.0 - inv * (1.0 - inv2 * (1.0 / 3.0 - inv2 * (1.0 / 5.0))))
+    s.bases[i]
 }
 
-fn atan2(y: f64, x: f64) -> f64  with Mut, Div, Panic {
-    if x > 0.0 {
-        return atan(y / x)
+// Copy the first `len` codes of a fixed buffer; panics on len outside
+// 0..ATLAS_MAX_LEN or a code outside 0..3.
+pub fn dna_seq_from(buf: &[u8; 256], len: i64) -> DnaSeq with Mut, Panic {
+    if len < 0 || len > ATLAS_MAX_LEN {
+        panic("dna_seq_from: len must be in 0..ATLAS_MAX_LEN")
     }
-    if x < 0.0 && y >= 0.0 {
-        return atan(y / x) + PI
-    }
-    if x < 0.0 && y < 0.0 {
-        return atan(y / x) - PI
-    }
-    if x == 0.0 && y > 0.0 {
-        return PI / 2.0
-    }
-    if x == 0.0 && y < 0.0 {
-        return -PI / 2.0
-    }
-    return 0.0
-}
-
-fn sequence_shift(seq: [u8], k: usize) -> [u8]  with Mut, Div, Panic {
-    let n = seq.len()
-    if n == 0 { return [] }
-
-    let k_mod = k % n
-    var result: [u8] = []
-    var i: usize = 0
-    while i < n {
-        let idx = (i + k_mod) % n
-        result.push(seq[idx])
+    var s = dna_seq_empty()
+    var i: i64 = 0
+    while i < len {
+        dna_seq_push(&!s, buf[i])
         i = i + 1
     }
-    return result
+    s
 }
 
-fn sequence_reverse(seq: [u8]) -> [u8]  with Mut, Div, Panic {
-    let n = seq.len()
-    if n == 0 { return [] }
+// ============================================================================
+// OPERATORS
+// ============================================================================
 
-    var result: [u8] = []
-    var i: usize = 0
+pub fn complement_base(b: u8) -> u8 {
+    b ^ 3
+}
+
+// out[i] = seq[(i + k) mod n]
+pub fn sequence_shift(seq: &DnaSeq, k: i64) -> DnaSeq with Mut, Div, Panic {
+    var out = dna_seq_empty()
+    let n = seq.len
+    if n == 0 { return out }
+    var k_mod = k % n
+    if k_mod < 0 { k_mod = k_mod + n }
+    var i: i64 = 0
     while i < n {
-        result.push(seq[n - 1 - i])
+        out.bases[i] = seq.bases[(i + k_mod) % n]
         i = i + 1
     }
-    return result
+    out.len = n
+    out
 }
 
-pub fn complement_base(b: u8) -> u8  with Mut, Div, Panic {
-    return b ^ 3
-}
-
-fn sequence_complement(seq: [u8]) -> [u8]  with Mut, Div, Panic {
-    let n = seq.len()
-    if n == 0 { return [] }
-
-    var result: [u8] = []
-    var i: usize = 0
+pub fn sequence_reverse(seq: &DnaSeq) -> DnaSeq with Mut {
+    var out = dna_seq_empty()
+    let n = seq.len
+    var i: i64 = 0
     while i < n {
-        result.push(complement_base(seq[i]))
+        out.bases[i] = seq.bases[n - 1 - i]
         i = i + 1
     }
-    return result
+    out.len = n
+    out
 }
 
-fn sequence_reverse_complement(seq: [u8]) -> [u8]  with Mut, Div, Panic {
+pub fn sequence_complement(seq: &DnaSeq) -> DnaSeq with Mut {
+    var out = dna_seq_empty()
+    let n = seq.len
+    var i: i64 = 0
+    while i < n {
+        out.bases[i] = complement_base(seq.bases[i])
+        i = i + 1
+    }
+    out.len = n
+    out
+}
+
+pub fn sequence_reverse_complement(seq: &DnaSeq) -> DnaSeq with Mut {
     let rev = sequence_reverse(seq)
-    return sequence_complement(rev)
+    sequence_complement(&rev)
 }
 
-fn sequences_equal(a: [u8], b: [u8]) -> bool  with Mut, Div, Panic {
-    let len_a = a.len()
-    let len_b = b.len()
-    if len_a != len_b { return false }
-
-    var i: usize = 0
-    while i < len_a {
-        if a[i] != b[i] { return false }
+pub fn sequences_equal(a: &DnaSeq, b: &DnaSeq) -> bool with Mut {
+    if a.len != b.len { return false }
+    var i: i64 = 0
+    while i < a.len {
+        if a.bases[i] != b.bases[i] { return false }
         i = i + 1
     }
-    return true
+    true
 }
 
-fn hamming_distance(a: [u8], b: [u8]) -> usize  with Mut, Div, Panic {
-    let len_a = a.len()
-    let len_b = b.len()
-    if len_a != len_b { return 0 }
-
-    var count: usize = 0
-    var i: usize = 0
-    while i < len_a {
-        if a[i] != b[i] {
-            count = count + 1
-        }
+// Hamming distance of two sequences of equal length; sequences of different
+// lengths have no Hamming distance and panic.
+pub fn hamming_distance(a: &DnaSeq, b: &DnaSeq) -> i64 with Mut, Panic {
+    if a.len != b.len {
+        panic("hamming_distance: sequences differ in length")
+    }
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < a.len {
+        if a.bases[i] != b.bases[i] { count = count + 1 }
         i = i + 1
     }
-    return count
+    count
 }
 
-fn cyclic_period(seq: [u8]) -> usize  with Mut, Div, Panic {
-    let n = seq.len()
+// ============================================================================
+// SYMMETRY STATISTICS (dihedral group D_n acting by shift and reversal)
+// ============================================================================
+
+// Smallest k >= 1 with shift(seq, k) == seq (n for an aperiodic sequence; 1
+// for the empty sequence).
+pub fn cyclic_period(seq: &DnaSeq) -> i64 with Mut, Div, Panic {
+    let n = seq.len
     if n == 0 { return 1 }
-
-    var k: usize = 1
+    var k: i64 = 1
     while k <= n {
         if n % k == 0 {
             let shifted = sequence_shift(seq, k)
-            if sequences_equal(seq, shifted) {
-                return k
-            }
+            if sequences_equal(seq, &shifted) { return k }
         }
         k = k + 1
     }
-    return n
+    n
 }
 
-fn rotational_symmetries(seq: [u8]) -> usize  with Mut, Div, Panic {
-    let n = seq.len()
+pub fn rotational_period(seq: &DnaSeq) -> i64 with Mut, Div, Panic {
+    cyclic_period(seq)
+}
+
+pub fn rotational_symmetries(seq: &DnaSeq) -> i64 with Mut, Div, Panic {
+    let n = seq.len
     if n == 0 { return 1 }
-    return n / cyclic_period(seq)
+    n / cyclic_period(seq)
 }
 
-fn has_reflective_symmetry(seq: [u8]) -> bool  with Mut, Div, Panic {
-    let n = seq.len()
+pub fn has_reflective_symmetry(seq: &DnaSeq) -> bool with Mut, Div, Panic {
+    let n = seq.len
     if n == 0 { return true }
-
     let rev = sequence_reverse(seq)
-    var k: usize = 0
+    var k: i64 = 0
     while k < n {
-        let shifted_rev = sequence_shift(rev, k)
-        if sequences_equal(seq, shifted_rev) {
-            return true
-        }
+        let shifted_rev = sequence_shift(&rev, k)
+        if sequences_equal(seq, &shifted_rev) { return true }
         k = k + 1
     }
-    return false
+    false
 }
 
-fn orbit_size(seq: [u8]) -> usize  with Mut, Div, Panic {
-    let n = seq.len()
+// |orbit| = |D_n| / |stabiliser| = 2n / (rotations * (2 if reflective else 1))
+pub fn orbit_size(seq: &DnaSeq) -> i64 with Mut, Div, Panic {
+    let n = seq.len
     if n == 0 { return 1 }
-
-    let group_order = 2 * n
-    let rot_sym = rotational_symmetries(seq)
-    let ref_factor: usize = if has_reflective_symmetry(seq) { 2 } else { 1 }
-    let stabilizer_size = rot_sym * ref_factor
-    return group_order / stabilizer_size
+    let ref_factor: i64 = if has_reflective_symmetry(seq) { 2 } else { 1 }
+    (2 * n) / (rotational_symmetries(seq) * ref_factor)
 }
 
-fn orbit_ratio(seq: [u8]) -> f64  with Mut, Div, Panic {
-    let n = seq.len()
+pub fn orbit_ratio(seq: &DnaSeq) -> f64 with Mut, Div, Panic {
+    let n = seq.len
     if n == 0 { return 1.0 }
-    return (orbit_size(seq) as f64) / ((2 * n) as f64)
+    (orbit_size(seq) as f64) / ((2 * n) as f64)
 }
 
-fn is_palindrome(seq: [u8]) -> bool  with Mut, Div, Panic {
+pub fn is_palindrome(seq: &DnaSeq) -> bool with Mut {
     let rev = sequence_reverse(seq)
-    return sequences_equal(seq, rev)
+    sequences_equal(seq, &rev)
 }
 
-fn is_rc_fixed(seq: [u8]) -> bool  with Mut, Div, Panic {
+pub fn is_rc_fixed(seq: &DnaSeq) -> bool with Mut {
     let rc = sequence_reverse_complement(seq)
-    return sequences_equal(seq, rc)
+    sequences_equal(seq, &rc)
 }
 
-fn rotational_period(seq: [u8]) -> usize  with Mut, Div, Panic {
-    let n = seq.len()
-    if n == 0 { return 1 }
-
-    var k: usize = 1
-    while k <= n {
-        if n % k == 0 {
-            let shifted = sequence_shift(seq, k)
-            if sequences_equal(seq, shifted) {
-                return k
-            }
-        }
-        k = k + 1
-    }
-    return n
+pub struct SymmetryStats {
+    pub length: i64,
+    pub orbit_size: i64,
+    pub orbit_ratio: f64,
+    pub is_palindrome: bool,
+    pub is_rc_fixed: bool,
+    pub rotational_period: i64,
 }
 
-struct SymmetryStats {
-    length: usize,
-    orbit_size: usize,
-    orbit_ratio: f64,
-    is_palindrome: bool,
-    is_rc_fixed: bool,
-    rotational_period: usize,
-}
-
-fn compute_symmetry_stats(seq: [u8]) -> SymmetryStats  with Mut, Div, Panic {
+pub fn compute_symmetry_stats(seq: &DnaSeq) -> SymmetryStats with Mut, Div, Panic {
     SymmetryStats {
-        length: seq.len(),
+        length: seq.len,
         orbit_size: orbit_size(seq),
         orbit_ratio: orbit_ratio(seq),
         is_palindrome: is_palindrome(seq),
@@ -254,128 +247,87 @@ fn compute_symmetry_stats(seq: [u8]) -> SymmetryStats  with Mut, Div, Panic {
     }
 }
 
-fn TRANSFORM_SHIFT() -> i32  with Mut, Div, Panic { 0 }
-fn TRANSFORM_REVERSE_SHIFT() -> i32  with Mut, Div, Panic { 1 }
-fn TRANSFORM_RC_SHIFT() -> i32  with Mut, Div, Panic { 2 }
+// ============================================================================
+// APPROXIMATE SYMMETRY: d_min
+// ============================================================================
 
-struct NearestTransform {
-    kind: i32,
-    k: usize,
+pub fn TRANSFORM_SHIFT() -> i32 { 0 }
+pub fn TRANSFORM_REVERSE_SHIFT() -> i32 { 1 }
+pub fn TRANSFORM_RC_SHIFT() -> i32 { 2 }
+
+pub struct NearestTransform {
+    pub kind: i32,
+    pub k: i64,
+    pub distance: i64,
 }
 
-fn dmin(seq: [u8], include_rc: bool) -> usize  with Mut, Div, Panic {
-    let n = seq.len()
-    if n == 0 { return 0 }
-
-    var min_dist = n
-
-    var k: usize = 1
+// Nearest non-identity group element: minimum Hamming distance from seq to
+// its non-trivial shifts, its reversed shifts and (with include_rc) its
+// reverse-complement shifts. Ties keep the first found, in that order.
+pub fn nearest_transform(seq: &DnaSeq, include_rc: bool) -> NearestTransform with Mut, Div, Panic {
+    let n = seq.len
+    var best = NearestTransform { kind: TRANSFORM_SHIFT(), k: 0, distance: 0 }
+    if n == 0 { return best }
+    best.distance = n
+    best.k = 1
+    var k: i64 = 1
     while k < n {
-        let shifted = sequence_shift(seq, k)
-        let d = hamming_distance(seq, shifted)
-        if d < min_dist { min_dist = d }
+        let sh = sequence_shift(seq, k)
+        let d = hamming_distance(seq, &sh)
+        if d < best.distance { best.distance = d; best.kind = TRANSFORM_SHIFT(); best.k = k }
         k = k + 1
     }
-
     let rev = sequence_reverse(seq)
     k = 0
     while k < n {
-        let shifted_rev = sequence_shift(rev, k)
-        let d = hamming_distance(seq, shifted_rev)
-        if d < min_dist { min_dist = d }
+        let sh = sequence_shift(&rev, k)
+        let d = hamming_distance(seq, &sh)
+        if d < best.distance { best.distance = d; best.kind = TRANSFORM_REVERSE_SHIFT(); best.k = k }
         k = k + 1
     }
-
     if include_rc {
         let rc = sequence_reverse_complement(seq)
         k = 0
         while k < n {
-            let shifted_rc = sequence_shift(rc, k)
-            let d = hamming_distance(seq, shifted_rc)
-            if d < min_dist { min_dist = d }
+            let sh = sequence_shift(&rc, k)
+            let d = hamming_distance(seq, &sh)
+            if d < best.distance { best.distance = d; best.kind = TRANSFORM_RC_SHIFT(); best.k = k }
             k = k + 1
         }
     }
-
-    return min_dist
+    best
 }
 
-fn dmin_normalized(seq: [u8], include_rc: bool) -> f64  with Mut, Div, Panic {
-    let n = seq.len()
+pub fn dmin(seq: &DnaSeq, include_rc: bool) -> i64 with Mut, Div, Panic {
+    let t = nearest_transform(seq, include_rc)
+    t.distance
+}
+
+pub fn dmin_normalized(seq: &DnaSeq, include_rc: bool) -> f64 with Mut, Div, Panic {
+    let n = seq.len
     if n == 0 { return 0.0 }
-    return (dmin(seq, include_rc) as f64) / (n as f64)
+    (dmin(seq, include_rc) as f64) / (n as f64)
 }
 
-fn nearest_transform(seq: [u8], include_rc: bool) -> (usize, NearestTransform)  with Mut, Div, Panic {
-    let n = seq.len()
-    if n == 0 {
-        return (0, NearestTransform { kind: TRANSFORM_SHIFT(), k: 0 })
-    }
+// ============================================================================
+// QUATERNION LIFT: Dic_n -> D_n double cover
+// ============================================================================
 
-    var min_dist = n
-    var nearest_kind = TRANSFORM_SHIFT()
-    var nearest_k: usize = 1
-
-    var k: usize = 1
-    while k < n {
-        let d = hamming_distance(seq, sequence_shift(seq, k))
-        if d < min_dist {
-            min_dist = d
-            nearest_kind = TRANSFORM_SHIFT()
-            nearest_k = k
-        }
-        k = k + 1
-    }
-
-    let rev = sequence_reverse(seq)
-    k = 0
-    while k < n {
-        let d = hamming_distance(seq, sequence_shift(rev, k))
-        if d < min_dist {
-            min_dist = d
-            nearest_kind = TRANSFORM_REVERSE_SHIFT()
-            nearest_k = k
-        }
-        k = k + 1
-    }
-
-    if include_rc {
-        let rc = sequence_reverse_complement(seq)
-        k = 0
-        while k < n {
-            let d = hamming_distance(seq, sequence_shift(rc, k))
-            if d < min_dist {
-                min_dist = d
-                nearest_kind = TRANSFORM_RC_SHIFT()
-                nearest_k = k
-            }
-            k = k + 1
-        }
-    }
-
-    return (min_dist, NearestTransform { kind: nearest_kind, k: nearest_k })
+pub struct Quaternion {
+    pub w: f64,
+    pub x: f64,
+    pub y: f64,
+    pub z: f64,
 }
 
-struct Quaternion {
-    w: f64,
-    x: f64,
-    y: f64,
-    z: f64,
-}
-
-fn quaternion_new(w: f64, x: f64, y: f64, z: f64) -> Quaternion  with Mut, Div, Panic {
+pub fn quaternion_new(w: f64, x: f64, y: f64, z: f64) -> Quaternion {
     Quaternion { w: w, x: x, y: y, z: z }
 }
 
-fn quaternion_identity() -> Quaternion  with Mut, Div, Panic {
-    quaternion_new(1.0, 0.0, 0.0, 0.0)
-}
+pub fn quaternion_identity() -> Quaternion { quaternion_new(1.0, 0.0, 0.0, 0.0) }
+pub fn quaternion_neg_identity() -> Quaternion { quaternion_new(0.0 - 1.0, 0.0, 0.0, 0.0) }
 
-fn quaternion_neg_identity() -> Quaternion  with Mut, Div, Panic {
-    quaternion_new(-1.0, 0.0, 0.0, 0.0)
-}
-
-fn quaternion_mul(a: &Quaternion, b: &Quaternion) -> Quaternion  with Mut, Div, Panic {
+pub fn quaternion_mul(a: &Quaternion, b: &Quaternion) -> Quaternion {
     quaternion_new(
         a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z,
         a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
@@ -384,104 +336,113 @@ fn quaternion_mul(a: &Quaternion, b: &Quaternion) -> Quaternion  with Mut, Div, 
     )
 }
 
-fn quaternion_neg(q: &Quaternion) -> Quaternion  with Mut, Div, Panic {
-    quaternion_new(-q.w, -q.x, -q.y, -q.z)
+pub fn quaternion_neg(q: &Quaternion) -> Quaternion {
+    quaternion_new(0.0 - q.w, 0.0 - q.x, 0.0 - q.y, 0.0 - q.z)
 }
 
-fn quaternion_approx_eq(a: &Quaternion, b: &Quaternion, tol: f64) -> bool  with Mut, Div, Panic {
-    abs_f64(a.w - b.w) < tol
-        && abs_f64(a.x - b.x) < tol
-        && abs_f64(a.y - b.y) < tol
-        && abs_f64(a.z - b.z) < tol
+fn atlas_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+pub fn quaternion_approx_eq(a: &Quaternion, b: &Quaternion, tol: f64) -> bool {
+    atlas_abs(a.w - b.w) < tol && atlas_abs(a.x - b.x) < tol
+        && atlas_abs(a.y - b.y) < tol && atlas_abs(a.z - b.z) < tol
 }
 
-struct DicyclicGroup {
-    n: usize,
+// atan2 with the C99 quadrant conventions for finite arguments.
+fn atlas_atan2(y: f64, x: f64) -> f64 with Mut, Div, Panic {
+    if x > 0.0 { return atan(y / x) }
+    if x < 0.0 && y >= 0.0 { return atan(y / x) + atlas_pi() }
+    if x < 0.0 && y < 0.0 { return atan(y / x) - atlas_pi() }
+    if y > 0.0 { return atlas_pi() / 2.0 }
+    if y < 0.0 { return 0.0 - atlas_pi() / 2.0 }
+    0.0
 }
 
-fn dicyclic_group_new(n: usize) -> DicyclicGroup  with Mut, Div, Panic {
+pub struct DicyclicGroup {
+    pub n: i64,
+}
+
+// Dic_n for n >= 1; panics otherwise.
+pub fn dicyclic_group_new(n: i64) -> DicyclicGroup with Panic {
+    if n < 1 { panic("dicyclic_group_new: n must be >= 1") }
     DicyclicGroup { n: n }
 }
 
-fn dicyclic_order(g: &DicyclicGroup) -> usize  with Mut, Div, Panic {
-    return 4 * g.n
+pub fn dicyclic_order(g: &DicyclicGroup) -> i64 { 4 * g.n }
+
+pub struct DicyclicElement {
+    pub q: Quaternion,
 }
 
-struct DicyclicElement {
-    q: Quaternion,
-}
-
-fn dicyclic_element(g: &DicyclicGroup, k: usize, is_reflection: bool) -> DicyclicElement  with Mut, Div, Panic {
-    let n = g.n
-    let theta = PI * (k as f64) / (n as f64)
-    let a_k = quaternion_new(cos_approx(theta), sin_approx(theta), 0.0, 0.0)
-
+// a^k (a = exp(i pi / n)) or a^k b (b = j) for the reflections.
+pub fn dicyclic_element(g: &DicyclicGroup, k: i64, is_reflection: bool) -> DicyclicElement with Mut, Div, Panic {
+    let theta = atlas_pi() * (k as f64) / (g.n as f64)
+    let a_k = quaternion_new(cos(theta), sin(theta), 0.0, 0.0)
     if is_reflection {
         let b = quaternion_new(0.0, 0.0, 1.0, 0.0)
         return DicyclicElement { q: quaternion_mul(&a_k, &b) }
     }
-    return DicyclicElement { q: a_k }
+    DicyclicElement { q: a_k }
 }
 
-fn project_to_dihedral(elem: &DicyclicElement, g: &DicyclicGroup) -> (usize, bool)  with Mut, Div, Panic {
-    let q = &elem.q
-    let n = g.n
-    let is_reflection = abs_f64(q.y) > 0.0000000001 || abs_f64(q.z) > 0.0000000001
+pub struct DihedralImage {
+    pub k: i64,
+    pub is_reflection: bool,
+}
 
-    let angle = atan2(q.x, q.w)
-    let k_float = angle * (n as f64) / PI
+// Image of a Dic_n element in D_n: rotation index k mod n and reflection flag.
+pub fn project_to_dihedral(elem: &DicyclicElement, g: &DicyclicGroup) -> DihedralImage with Mut, Div, Panic {
+    let q = elem.q
+    let n = g.n
+    let is_reflection = atlas_abs(q.y) > 0.0000000001 || atlas_abs(q.z) > 0.0000000001
+    // For a^k b = (cos t, sin t, 0, 0)(0, 0, 1, 0) = (0, 0, cos t, sin t) the
+    // rotation angle sits in (y, z); for a^k in (w, x).
+    let angle = if is_reflection { atlas_atan2(q.z, q.y) } else { atlas_atan2(q.x, q.w) }
+    let k_float = angle * (n as f64) / atlas_pi()
     let k_raw: i64 = if k_float >= 0.0 { (k_float + 0.5) as i64 } else { (k_float - 0.5) as i64 }
-    let n_i64 = n as i64
-    let k_mod = ((k_raw % n_i64) + n_i64) % n_i64
-    let k = k_mod as usize
-
-    return (k, is_reflection)
+    let k_mod = ((k_raw % n) + n) % n
+    DihedralImage { k: k_mod, is_reflection: is_reflection }
 }
 
-fn verify_double_cover(g: &DicyclicGroup) -> bool  with Mut, Div, Panic {
+// q and -q project to the same element of D_n for every element of Dic_n.
+pub fn verify_double_cover(g: &DicyclicGroup) -> bool with Mut, Div, Panic {
     let n = g.n
-
-    var k: usize = 0
+    var k: i64 = 0
     while k < 2 * n {
-        var is_ref_idx: usize = 0
-        while is_ref_idx < 2 {
-            let is_ref = is_ref_idx == 1
-            let elem = dicyclic_element(g, k, is_ref)
+        var r: i64 = 0
+        while r < 2 {
+            let elem = dicyclic_element(g, k, r == 1)
             let neg_elem = DicyclicElement { q: quaternion_neg(&elem.q) }
-
-            let proj1 = project_to_dihedral(&elem, g)
-            let proj2 = project_to_dihedral(&neg_elem, g)
-
-            if proj1.0 != proj2.0 || proj1.1 != proj2.1 {
-                return false
-            }
-            is_ref_idx = is_ref_idx + 1
+            let p1 = project_to_dihedral(&elem, g)
+            let p2 = project_to_dihedral(&neg_elem, g)
+            if p1.k != p2.k || p1.is_reflection != p2.is_reflection { return false }
+            r = r + 1
         }
         k = k + 1
     }
-    return true
+    true
 }
 
-struct AtlasMetrics {
-    length: usize,
-    orbit_size: usize,
-    orbit_ratio: f64,
-    dmin: usize,
-    dmin_normalized: f64,
-    is_palindrome: bool,
-    is_rc_fixed: bool,
-    rotational_period: usize,
-    double_cover_ok: bool,
+// ============================================================================
+// PIPELINE
+// ============================================================================
+
+pub struct AtlasMetrics {
+    pub length: i64,
+    pub orbit_size: i64,
+    pub orbit_ratio: f64,
+    pub dmin: i64,
+    pub dmin_normalized: f64,
+    pub is_palindrome: bool,
+    pub is_rc_fixed: bool,
+    pub rotational_period: i64,
+    pub double_cover_ok: bool,
 }
 
-fn run_atlas_metrics(seq: [u8], include_rc: bool, dicyclic_n: usize) -> AtlasMetrics  with Mut, Div, Panic {
+pub fn run_atlas_metrics(seq: &DnaSeq, include_rc: bool, dicyclic_n: i64) -> AtlasMetrics with Mut, Div, Panic {
     let stats = compute_symmetry_stats(seq)
     let dmin_value = dmin(seq, include_rc)
     let dmin_norm = if stats.length == 0 { 0.0 } else { (dmin_value as f64) / (stats.length as f64) }
-
     let g = dicyclic_group_new(dicyclic_n)
-    let double_cover_ok = verify_double_cover(&g)
-
     AtlasMetrics {
         length: stats.length,
         orbit_size: stats.orbit_size,
@@ -491,20 +452,29 @@ fn run_atlas_metrics(seq: [u8], include_rc: bool, dicyclic_n: usize) -> AtlasMet
         is_palindrome: stats.is_palindrome,
         is_rc_fixed: stats.is_rc_fixed,
         rotational_period: stats.rotational_period,
-        double_cover_ok: double_cover_ok,
+        double_cover_ok: verify_double_cover(&g),
     }
 }
 
-fn pipeline_ok(metrics: AtlasMetrics) -> bool  with Mut, Div, Panic {
+pub fn pipeline_ok(metrics: &AtlasMetrics) -> bool {
     if metrics.length == 0 { return false }
     if metrics.orbit_size < 1 { return false }
     if metrics.orbit_ratio < 0.0 || metrics.orbit_ratio > 1.0 { return false }
     if metrics.dmin > metrics.length { return false }
     if metrics.dmin_normalized < 0.0 || metrics.dmin_normalized > 1.0 { return false }
-    if !metrics.double_cover_ok { return false }
-    return true
+    metrics.double_cover_ok
 }
 
-fn sample_sequence() -> [u8]  with Mut, Div, Panic {
-    [BASE_A, BASE_C, BASE_G, BASE_T, BASE_A, BASE_C, BASE_G, BASE_T]
+// ACGTACGT
+pub fn sample_sequence() -> DnaSeq with Mut, Panic {
+    var s = dna_seq_empty()
+    var r: i64 = 0
+    while r < 2 {
+        dna_seq_push(&!s, BASE_A)
+        dna_seq_push(&!s, BASE_C)
+        dna_seq_push(&!s, BASE_G)
+        dna_seq_push(&!s, BASE_T)
+        r = r + 1
+    }
+    s
 }

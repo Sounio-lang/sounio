@@ -7,9 +7,9 @@ The Sounio preview LSP speaks JSON-RPC over stdio and is invoked as
 
 | Editor | Path | Status |
 |---|---|---|
-| VS Code | `editors/vscode/` | Preview extension with syntax highlighting, snippets, command wiring, and LSP client |
-| Helix | `editors/helix/languages.toml` | LSP-only (no tree-sitter grammar yet) |
-| Neovim | `editors/neovim/lspconfig.lua` | LSP via `nvim-lspconfig` |
+| VS Code | `tools/editors/vscode/` | Preview extension with syntax highlighting, snippets, command wiring, and LSP client |
+| Helix | `tools/editors/helix/languages.toml` | LSP-only (no tree-sitter grammar yet) |
+| Neovim | `tools/editors/neovim/lspconfig.lua` | LSP via `nvim-lspconfig` |
 
 See `tools/lsp/README.md` for the LSP feature surface.
 
@@ -50,7 +50,7 @@ Requires `neovim/nvim-lspconfig`.
 
 ## Sharing the TextMate grammar
 
-`editors/vscode/syntaxes/sounio.tmLanguage.json` is the syntax-
+`tools/editors/vscode/syntaxes/sounio.tmLanguage.json` is the syntax-
 highlighting source of truth. VS Code uses it directly. For Helix /
 Neovim a tree-sitter grammar is the right long-term path; until that
 exists, syntax highlighting in those editors will be plain or relies on

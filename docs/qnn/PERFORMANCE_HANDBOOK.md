@@ -60,20 +60,7 @@ Quaternion Neural Networks achieve 4× parameter efficiency by encoding four val
 
 ### 2.1 SIMD Dispatch Architecture
 
-Sounio's native backend automatically selects the optimal SIMD implementation at runtime:
-
-```rust
-// compiler/src/backend/native/quat_simd_dispatch.rs
-pub enum SimdLevel {
-    Scalar = 0,    // Baseline (always available)
-    Neon = 1,      // ARM 128-bit (aarch64)
-    Avx2 = 2,      // x86-64 256-bit
-    Avx512 = 3,    // x86-64 512-bit
-}
-
-// Detection happens once at startup via OnceLock
-static SIMD_LEVEL: OnceLock<SimdLevel> = OnceLock::new();
-```
+Sounio's native backend selects the SIMD implementation at runtime.
 
 **Key Feature**: Zero runtime dispatch overhead after initialization.
 
@@ -216,25 +203,7 @@ z_i8 = clamp(round(z / scale), -128, 127)
 
 ### 4.2 INT8 Hamilton Product
 
-Compute in INT32 to prevent overflow:
-
-```rust
-fn quat_mul_i8(q1: [i8; 4], q2: [i8; 4], scale1: f32, scale2: f32) -> ([i8; 4], f32) {
-    // INT32 accumulation
-    let w_i32 = q1[0] as i32 * q2[0] as i32
-              - q1[1] as i32 * q2[1] as i32
-              - q1[2] as i32 * q2[2] as i32
-              - q1[3] as i32 * q2[3] as i32;
-    // ... x, y, z components
-
-    // Requantize
-    let combined_scale = scale1 * scale2;
-    let w_fp = w_i32 as f32 * combined_scale;
-    let new_scale = max(|w_fp|, |x_fp|, |y_fp|, |z_fp|) / 127.0;
-
-    ([clamp(w_fp/new_scale), ...], new_scale)
-}
-```
+Compute in INT32 to prevent overflow.
 
 **GPU Acceleration**: `dp4a` instruction for 2× speedup
 

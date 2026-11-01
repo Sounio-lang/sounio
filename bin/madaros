@@ -105,14 +105,24 @@ fi
 #   3. bin/madaros-linux-x86_64 (checked-in prebuilt)
 _resolve_modular_elf() {
   local cand
-  for cand in "${MADAROS_RAW_BIN:-}" "${SOUNIO_MADAROS_BIN:-}" "$(sounio_madaros_host_raw || true)" "$ROOT_DIR/artifacts/self-hosted/madaros" "$ROOT_DIR/bin/madaros-linux-x86_64"; do
+  # Resolve explicit pins before probing host fallbacks. Shell expands a
+  # for-list eagerly; provenance materialization above remains unchanged.
+  for cand in "${MADAROS_RAW_BIN:-}" "${SOUNIO_MADAROS_BIN:-}"; do
     if [[ -n "$cand" && -x "$cand" && "$(head -c 2 "$cand" 2>/dev/null)" != "#!" ]]; then
-      echo "$cand"
-      return 0
+      echo "$cand"; return 0
+    fi
+  done
+  cand="$(sounio_madaros_host_raw || true)"
+  if [[ -n "$cand" && -x "$cand" && "$(head -c 2 "$cand" 2>/dev/null)" != "#!" ]]; then
+    echo "$cand"; return 0
+  fi
+  for cand in "$ROOT_DIR/artifacts/self-hosted/madaros" "$ROOT_DIR/bin/madaros-linux-x86_64"; do
+    if [[ -n "$cand" && -x "$cand" && "$(head -c 2 "$cand" 2>/dev/null)" != "#!" ]]; then
+      echo "$cand"; return 0
     fi
   done
   echo "error: madaros: no modular compiler raw ELF found" >&2
-  echo "  tried: MADAROS_RAW_BIN, SOUNIO_MADAROS_BIN, $ROOT_DIR/artifacts/self-hosted/madaros, $ROOT_DIR/bin/madaros-linux-x86_64" >&2
+  echo "  tried: MADAROS_RAW_BIN, SOUNIO_MADAROS_BIN, host compiler, $ROOT_DIR/artifacts/self-hosted/madaros, $ROOT_DIR/bin/madaros-linux-x86_64" >&2
   echo "  run: make build-madaros" >&2
   return 1
 }
@@ -134,7 +144,7 @@ if [[ "${SOUNIO_REQUIRE_COMMITTED_MADAROS:-0}" == "1" ]]; then
 fi
 
 MADAROS_VMEM_LIMIT_KB="${MADAROS_VMEM_LIMIT_KB:-33554432}"
-SCIENCE_BOUNDARY_TOOL="$ROOT_DIR/tools/science_boundary/attestor.py"
+SCIENCE_BOUNDARY_TOOL="$ROOT_DIR/tools/science_boundary/attestor.mjs"
 SCIENCE_PACKAGE_RELEASE_TOOL="$ROOT_DIR/tools/science_boundary/package_release.py"
 SCIENCE_BOUNDARY_MODE="auto"
 SCIENCE_MANIFEST=""
@@ -374,7 +384,7 @@ _science_evaluate() {
     return 2
   fi
   local command=(
-    python3 "$SCIENCE_BOUNDARY_TOOL" evaluate
+    node "$SCIENCE_BOUNDARY_TOOL" evaluate
     --source "$src"
     --mode "$SCIENCE_BOUNDARY_MODE"
     --compiler "$RAW_MADAROS"
@@ -418,7 +428,7 @@ _science_finalize() {
   local artifact_label="$4"
   local receipt="$5"
   local command=(
-    python3 "$SCIENCE_BOUNDARY_TOOL" finalize
+    node "$SCIENCE_BOUNDARY_TOOL" finalize
     --preflight-receipt "$preflight_receipt"
     --source "$src"
     --compiler "$RAW_MADAROS"
@@ -479,36 +489,7 @@ find_project_root() {
 project_manifest_value() {
   local root="$1"
   local key="$2"
-  python3 - "$root/sounio.toml" "$key" <<'PY'
-import sys
-try:
-    import tomllib
-except ModuleNotFoundError:
-    raise SystemExit(3)
-path, key = sys.argv[1], sys.argv[2]
-text = open(path, "rb").read().decode("utf-8")
-data = tomllib.loads(text)
-if key == "package.name":
-    print(data.get("package", {}).get("name", "sounio-project"))
-elif key == "entry":
-    bins = data.get("bin", [])
-    if isinstance(bins, list) and bins:
-        value = bins[0].get("path", "")
-        if value:
-            print(value)
-            raise SystemExit(0)
-    value = data.get("project", {}).get("entry", "")
-    if value:
-        print(value)
-        raise SystemExit(0)
-    value = data.get("lib", {}).get("path", "")
-    if value and "[[bin]]" not in text:
-        print(value)
-        raise SystemExit(0)
-    print("src/main.sio")
-else:
-    raise SystemExit(2)
-PY
+  node "$ROOT_DIR/tools/science_boundary/manifest_value.mjs" "$root/sounio.toml" "$key"
 }
 
 resolve_source_or_project() {

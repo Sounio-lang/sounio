@@ -15,7 +15,7 @@ use lexer::numparse::*
 use lexer::tables::*
 use lexer::token::{TokenKind}
 use parser::ast::*
-use parser::parser::{parser_set_token_at, parser_set_token_flat, parser_set_token_int_value, parser_set_token_scalar, parser_set_last_errors}
+use parser::parser::{parser_set_token_at, parser_set_token_flat, parser_set_token_int_value, parser_set_token_scalar, parser_set_last_errors, parser_span_int_literal_overflow}
 use parser::mod::{parse_items_preloaded}
 
 // Maximum tokens per file (2097152) — use literal not constant: boot4 leaves let globals at 0.
@@ -128,11 +128,35 @@ pub fn lexer_report_token_overflow_if_any() -> bool with IO, Mut {
 //
 // LEXER_LEX_ERROR_KIND: 0 = none, 1 = unexpected character, 2 = unterminated
 // block comment, 3 = unterminated string literal, 4 = invalid escape sequence
-// in a string literal, 5 = invalid escape sequence in a character literal.
+// in a string literal, 5 = invalid escape sequence in a character literal,
+// 6 = integer literal wider than any 64-bit integer type (ADR-015 row 1).
 var LEXER_LEX_ERROR_KIND: i64 = 0
 var LEXER_LEX_ERROR_LINE: i64 = 0
 var LEXER_LEX_ERROR_COL: i64 = 0
 var LEXER_LEX_ERROR_BYTE: i64 = 0
+
+// True when the digit run starting at `start` is a float's fraction rather than
+// an integer: the byte before it is a `.` that a number's digits or a hex
+// mantissa just ended at.
+fn parser_float_fraction_tail(start: i64, end: i64) -> bool with Mut, Panic {
+    if start < 1 { return false }
+    if cursor_source_byte(start - 1) != (46 as i8) { return false }
+    // The digits run to a float's exponent, which is the only thing that makes
+    // them a fraction rather than a member access (`x.4` also starts after a `.`,
+    // and its integer genuinely must stay width-checked). A hex float's fraction
+    // ends at `p`; a decimal one at `e`/`E`.
+    var i = end
+    var c = cursor_source_byte(i)
+    if c == (101 as i8) || c == (69 as i8) { return true }
+    if c != (112 as i8) && c != (80 as i8) { return false }
+    i = i + 1
+    c = cursor_source_byte(i)
+    if c == (43 as i8) || c == (45 as i8) { i = i + 1 }
+    let e = cursor_source_byte(i)
+    e >= (48 as i8) && e <= (57 as i8)
+}
+
+
 
 pub fn lexer_reset_lex_error() with Mut {
     LEXER_LEX_ERROR_KIND = 0
@@ -204,6 +228,12 @@ pub fn lexer_report_lex_error_if_any(path: string) -> bool with IO, Mut {
         print("error[E273]: unterminated string literal")
         lexer_print_location(path)
         print("  = note: no closing `\"` before end of file\n")
+    } else if LEXER_LEX_ERROR_KIND == 6 {
+        print("error[E276]: integer literal does not fit any 64-bit integer type")
+        lexer_print_location(path)
+        print("  = note: the digits were previously wrapped into the value, so\n")
+        print("          `99999999999999999999` compiled as 7766279631452241919\n")
+        print("  = help: write it as a float (`...e0`) or keep it within 2^64-1\n")
     } else {
         let in_char = LEXER_LEX_ERROR_KIND == 5
         print("error[E274]: invalid escape sequence `\\")
@@ -972,6 +1002,10 @@ pub fn lex_source_to_globals(source_len: i64) -> i64 with Mut, Div, Panic {
         if is_digit(ch) {
             let start = pos
             let start_col = col
+            // Decimal and hex integer literals are width-checked below (see the
+            // ADR-015 row 1 notes at the two emits). Floats are exempt by
+            // construction: is_float_token is set as soon as a `.digit` or an
+            // exponent is seen, and a mantissa's digits are not integers.
             var value: i64 = 0
             var is_float_token = false
             if ch == 48 as i8 && pos + 1 < n &&
@@ -991,6 +1025,22 @@ pub fn lex_source_to_globals(source_len: i64) -> i64 with Mut, Div, Panic {
                     }
                     pos = pos + 1
                     col = col + 1
+                }
+                // ADR-015 row 1, refused HERE rather than at each parse site:
+                // every consumer of the wrapped value (expressions, patterns,
+                // attribute payloads, array lengths in types.sio — 27 call sites
+                // read int_value) goes through this emit. A hex literal past 16
+                // digits fits no 64-bit type.
+                // A `p`/`P` or a `.` right after the digits makes this a C99
+                // hex-float (`0x1p0`, `0x1.8p+0`), whose long mantissa is not an
+                // integer: the shared parser decides that later
+                // (parser_hex_float_tail_ahead), so the emit must not refuse it.
+                let hex_nx = cursor_source_byte(pos)
+                if hex_nx != (112 as i8) && hex_nx != (80 as i8) && hex_nx != (46 as i8) {
+                    if parser_span_int_literal_overflow(start, pos) {
+                        lexer_mark_lex_error(6, line, start_col, start)
+                        break
+                    }
                 }
                 tc = lexer_push_flat(tc, 129, start, pos, line, start_col, value)
                 if tc < 0 { break }
@@ -1040,6 +1090,29 @@ pub fn lex_source_to_globals(source_len: i64) -> i64 with Mut, Div, Panic {
             if is_float_token {
                 tc = lexer_push_flat(tc, 125, start, pos, line, start_col, 0)
             } else {
+                // Same refusal as the hex path above, and only on the integer
+                // branch: is_float_token is already set when a `.digit` or an
+                // exponent was consumed, so `3.14159265358979323846` — how stdlib
+                // writes pi, in ~370 places — never reaches this test.
+                //
+                // The remaining hole is a C99 hex float with a fraction:
+                // `0x1.0000000000000800000000000000000000001p+0` ends its hex
+                // token at the `.`, so the 37 fraction digits arrive here as a
+                // separate decimal token and look like a huge integer. The sign
+                // that says otherwise is the `p`/`P` exponent right after them:
+                // no integer literal is followed by that, and `x.field` digits are
+                // not preceded by a radix point that follows a hex literal.
+                // Same refusal as the hex path, on the integer branch only.
+                // is_float_token already excludes `3.14…` and `1e30`; the case it
+                // cannot exclude is the digit run that *follows* a dot when that
+                // run is itself long (`3.<40 digits>`), because the lexer splits a
+                // float's fraction into its own token before deciding.
+                if !parser_float_fraction_tail(start, pos) {
+                    if parser_span_int_literal_overflow(start, pos) {
+                        lexer_mark_lex_error(6, line, start_col, start)
+                        break
+                    }
+                }
                 tc = lexer_push_flat(tc, 124, start, pos, line, start_col, value)
             }
             if tc < 0 { break }

@@ -14,6 +14,8 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.guide.llm-prog
 **Edition:** October 2026. **Prepared:** 2026-10-16.
 **Source baseline:** `f5b2c5850be9f3d3995719ffcade44a6d851658a`.
 
+**Status: research language (pre-1.0).** APIs may change; not recommended for production use. Do not describe Sounio as ready for production use, and do not name a compiler version in that status line.
+
 This is a practical guide for generating, explaining, repairing, and verifying
 Sounio programs. It is designed to work as retrieved context for small models
 as well as a deep reference for stronger coding agents. Start with a complete

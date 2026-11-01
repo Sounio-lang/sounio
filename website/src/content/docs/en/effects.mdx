@@ -1,46 +1,112 @@
 ---
 title: "Effects"
-description: "Make side effects explicit with `with IO`, `with Panic`, `with Async`, and custom effects."
+description: "How Sounio's effect system works: with IO, Mut, Div and Panic in every signature, custom effects, and what handlers do today. Code from real tests."
 weight: 30
 category: "effects"
 topic_id: "website.docs.effects"
 authority: "website_only"
 audience: "users"
-last_validated: "unvalidated"
-validated_by: "none"
+last_validated: "2026-10-29"
+validated_by: "compiler-sources"
 source_of_truth: "docs/governance/topic-registry.v1.json#website.docs.effects"
 ---
 
-# Effects
+import EffectSystemExamples from '../../../components/docs/EffectSystemExamples.astro';
+import EffectSystemFaq from '../../../components/docs/EffectSystemFaq.astro';
 
-Effects are still one of Sounio's defining ideas. The clearest current contract is simple: side effects belong in the type signature, and pure computation should stay separate from effectful boundaries whenever possible.
+Research language; Sounio 3.0 (pre-release).
 
-## What is solid today
+## Why effects are in the signature
 
-- The checked artifact advertises algebraic effects with handlers as a language feature.
-- The public docs should treat explicit `with ...` clauses as real, user-visible syntax rather than as an internal detail.
-- For everyday programs, the most important concrete effect is still `IO`, because it shows up in simple examples and public fixtures.
+A function that only computes a result is interchangeable with its result. A function that also prints, writes memory, divides, or aborts is not. An effect annotation is the compiler's copy of that difference. The reader of a signature can see the difference without opening the body, and the checker can reject a call that would smuggle the difference into a caller that did not admit it.
 
-## Basic pattern
+That matters for tests and for scientific code. A pure helper can be called from anywhere and its result depends only on its arguments. An effectful boundary stays at the edge, where the program talks to the console, the file system, or a mutable buffer. The split is a property of the type, so a later edit that adds a print inside a pure helper is a compile error rather than a surprise in a log.
 
-```sio
-fn double(x: i32) -> i32 {
-    x * 2
-}
+Sounio does not infer effects for a named function by default. Every named function that performs an effect must write `with` and name it. Omit the clause and both compilers report E035, "effect not declared in function signature". Madaros prints that text from `self-hosted/check/check.sio` when `effects_subset` fails. lean_single prints the same sentence from `tc_effect_violation` and `tc_effect_call_violation` in `self-hosted/compiler/lean_single.sio`.
 
-fn greet() with IO {
-    println("Hello")
-}
-```
+Closures are the exception inside a named function. `checker_check_closure_expr_inplace` sets `in_closure_body`, accumulates effects the body needs, and publishes that set onto the closure's own signature (`self-hosted/check/check.sio`, from the closure checker through the point where `current_effects` is restored). The enclosing named function does not receive those effects for free. After the closure is checked, the outer effect set is restored. Calling the closure later is an ordinary call: the named function must still declare what the closure requires, or the call is E035.
 
-## Where the work lives in the repo
+There is an opt-in for named functions. `SOUNIO_EFFECT_INFER=1` turns on `checker_effect_inference_enabled`. While it is on, a missing effect can be added to the set in force and, when the current signature name still matches, written back onto that function. The flag is off by default. The shipped compilers require the declaration. Nothing on this page should be read as "effects propagate automatically."
 
-- `self-hosted/check/effects.sio` handles effect-aware checking in the self-hosted path.
-- `self-hosted/effects/types.sio`, `self-hosted/effects/checker.sio`, and `self-hosted/effects/handlers.sio` map the dedicated effect implementation surface.
-- `docs/architecture/EFFECT_HANDLERS_IMPLEMENTATION.md` is still useful for broader design context, but implementation truth should come from the current self-hosted tree and checked fixtures.
+## Built-in effects
 
-## How to document effects accurately
+The names you will see most often are IO, Mut, Div and Panic.
 
-- Document the explicit signature requirement first.
-- Describe richer handler semantics as design-plus-implementation work unless you have a current fixture proving the exact behavior you are claiming.
-- Keep effectful logic at the edge of examples so readers can see the distinction between pure transforms and real-world interaction.
+IO covers interaction with the world outside the process: printing, reading, and the other operations the standard library marks with that name. A `println` in a function that does not say `with IO` is rejected. The [IO effect](/learn/effects/io/) page is the short tour of that boundary.
+
+Mut is the effect of writing through an exclusive reference. Sounio spells that reference `&!`, and the function that stores through it declares `with Mut`. A pure reader of a shared reference does not.
+
+Div is division and remainder. A function that divides declares `with Div`, because division by zero is a checked effect rather than an invisible arithmetic accident.
+
+Panic is the abort path: assertions, out-of-range indexing, and casts that the compiler treats as able to abort. A function that can panic says so. A function that does not say so is not allowed to call one that does.
+
+Those four are the common ones. They are not the whole set. `self-hosted/check/effects.sio` defines a closed list of 30 built-in effect names, ids 0 through 29. `effect_named_id_max` returns 29. A name outside that list, outside the held-name list, and outside the user-effect registry is refused. Madaros reports E246 for an unknown name (`checker_emit_e246` in `self-hosted/check/check.sio`). The closed list is the contract. Adding a thirty-first built-in name is a compiler change, not a program.
+
+Madaros stores the effects of the function it is checking in `current_effects`, an array of eight ids (`self-hosted/check/check.sio`). A ninth distinct effect does not fit. The collector emits E246 and does not drop the extra name silently. That ceiling is Madaros. lean_single stores effects in the `FN_EFFECTS` bitmask and accepts nine. The eight-slot refusal is not a rule of both engines.
+
+The subset check exists in both. Madaros calls `effects_subset` (`self-hosted/check/effects.sio`): every id the callee requires must occur in the caller's declared array. lean_single calls `bitset_is_subset` (`self-hosted/compiler/lean_single.sio`): the callee's bits must already be set on the caller. Either way, the caller declares a set and the callee's set has to be contained in it. There is no second, hidden set that the compiler invents for a named function.
+
+This is not row polymorphism. `TyEffectVar` and `TyEffectRow` are type tags in `self-hosted/check/types.sio`, and `ty_effect_var` and `ty_effect_row` build them. Nothing calls those constructors. The helpers in `self-hosted/check/effects_row.sio` (`effect_row_contains`, `effect_row_subset`, `check_handler_coverage`) are defined there and are not called from the rest of the tree. Koka's row is a different language. Sounio's live check is a set.
+
+## What the compiler rejects
+
+The smallest witness is a pure function calling an IO function. `greet` declares IO and prints. `pure_caller` has no `with` clause and calls `greet`. The compilers reject `pure_caller`. `main` in the same file returns 0 and does not call `greet`, so the diagnostic is about the pure caller, not about `main`. The file is a compile-fail test. Its harness comment records the pattern `effect not declared in function signature`.
+
+<EffectSystemExamples group="checked" />
+
+Read that file as the compiler reads it. The call is illegal because the callee's effect is not in the caller's signature. Declaring `with IO` on `pure_caller` would make the call legal and would push the obligation one frame up, to whoever calls `pure_caller`. The obligation stops only at a function that both declares the effect and is the root the program actually runs. It does not stop because the compiler guessed.
+
+The same rule is what a test harness wants. A function under test that declares no effects cannot reach a printer, a store, or a panic unless the test declares those effects too. The signature is the list of ways the test is allowed to leave pure computation.
+
+## Parsed, not yet implemented
+
+User-declared effects do not work yet. The parser accepts an `effect` item (`parse_effect_item` in `self-hosted/parser/items.sio`). The checker that Madaros actually runs, `checker_collect_item_inplace`, has no arm for that item. The item falls through to the branch marked not yet collected (`self-hosted/check/check.sio`). A by-value collector elsewhere in the same file does know how to register an effect item. That is not the collector on the path Madaros runs. The evidence note EFF-021 in `docs/spec/2026-10/03-evidence.tsv` records the skip. On lean_single, `ety_parse_effect_name` returns 0 for a name that is not in its built-in list (`self-hosted/compiler/lean_single.sio`), so a user name does not become its own bit.
+
+A trailing semicolon on an effect operation is optional. `parse_effect_item` skips a semicolon or a newline before the next operation, and `parse_effect_op_def` does not require one. The first file below writes the semicolon. The second omits it. Both forms parse. The form with the semicolon is the one to copy if you are showing the syntax. Copying it does not make the effect exist at compile time.
+
+Two further facts keep these files from being a working example. `Fail` and `Choice` are on the held-name list in `effect_name_is_held` (`self-hosted/check/effects.sio`). A held name is dropped instead of registered and instead of E246. And the live collector never registered the `effect` item, so there is no distinct user effect for the `with` clause to point at. The files show the syntax the parser accepts. They are not a custom-effect implementation.
+
+<EffectSystemExamples group="parsed" />
+
+To [declare a custom effect](/learn/effects/custom/) in the sense of a checked, distinct effect that your program invents, there is nothing to turn on. The page that used to sketch one now says the same thing this section says.
+
+`handle` is in the same state. `parse_handle_expr` in `self-hosted/parser/exprs.sio` builds an `ExprHandle` node. Lowering treats that kind as control flow it does not follow (`fo_expr_has_unsupported_ctl` in `self-hosted/ir/lower.sio` returns true for `ExprHandle`). lean_single reports E200. Madaros reports that the expression kind was not checked in place (`self-hosted/check/check.sio`) and sets the checker's error flag. The expression is not erased and then accepted. There is no backend that runs a handler, resumes a continuation, or chooses one-shot versus multi-shot. Resumption is not specified. The spec that would define it is still marked undefined.
+
+## What is checked, and what is only parsed
+
+| Piece | Status |
+| --- | --- |
+| `with` on a named function | Required. A missing effect is E035 on both engines. |
+| Built-in names | Closed list of 30, ids 0-29. IO, Mut, Div and Panic are the common ones. |
+| Eight effects in one signature | Madaros only. The ninth is E246. lean_single uses a bitmask and accepts nine. |
+| Subset check at a call | Both engines: `effects_subset`, and `bitset_is_subset`. |
+| `effect` declaration | Parsed, not implemented. |
+| `handle` | Parsed, not implemented. |
+| Effect rows | `TyEffectVar` and `TyEffectRow` exist. Nothing calls the constructors. |
+
+The row you can rely on is the second one, together with the subset check. The rows under it are syntax or unused types. A program that needs a handler today has to write the control flow with ordinary functions and an explicit result, and declare IO, Mut, Div or Panic where those built-ins are real.
+
+## How this compares
+
+The table states only what those projects' own docs say. It is a map of neighbors, not a claim that Sounio implements their features.
+
+| Language | What the official docs say |
+| --- | --- |
+| Koka | A strongly typed language with effect types and handlers, and a polymorphic type- and effect system ([readme](https://github.com/koka-lang/koka/blob/master/readme.md)). Effect rows on the types page are an angle-bracket list of labels, a bar, and a tail variable, illustrated there as div, exn, and a row variable ([std/core/types](https://koka-lang.github.io/koka/doc/std_core_types.html)). |
+| Effekt | Lexical effect handlers, from the language's own history of the 2020 paper ([evolution](https://effekt-lang.org/evolution)). Contextual effect polymorphism: a block argument's effects are handled at the call site ([effect polymorphism](https://effekt-lang.org/docs/concepts/effect-polymorphism)). User-defined handlers can resume ([handlers](https://effekt-lang.org/docs/concepts/effect-handlers)). |
+| Flix | "Flix effect handlers use dynamic scope, deep handlers, and support multiple resumptions." Algebraic effects with multiple resumptions are part of the same chapter ([effects and handlers](https://doc.flix.dev/effects-and-handlers.html)). |
+| OCaml 5.3 | Handlers were introduced in 5.0. Syntax support for deep handlers was introduced in 5.3. "effect handlers in OCaml do not provide effect safety; the compiler does not statically ensure that all the effects performed by the program are handled." Delimited continuations "must be used linearly"; using one more than once raises `Continuation_already_resumed`. "OCaml does not support multi-shot continuations." ([manual](https://ocaml.org/manual/5.3/effects.html)) |
+| Eff | Effects are first-class, and handlers override them. "We discourage the use of Eff in production" ([eff-lang.org](https://www.eff-lang.org/)). |
+| Sounio | Built-in effects are checked in the signature. User-declared effects and handlers are parsed, not implemented. |
+
+## Questions
+
+<EffectSystemFaq />
+
+## Next steps
+
+[Install Sounio](/learn/getting-started/) and check a program that prints. The function that prints declares `with IO`, and so does `main` if `main` is the one that prints.
+
+[Star Sounio on GitHub](https://github.com/Sounio-lang/sounio?utm_source=souniolang&utm_medium=docs&utm_campaign=effects).
+
+From here: the [IO effect](/learn/effects/io/), how to [declare a custom effect](/learn/effects/custom/) (parsed, not implemented), and the [effect checker internals](/learn/compiler/effect-system/) for the files named above.

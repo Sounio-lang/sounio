@@ -13,19 +13,20 @@ This page is the stable reference entrypoint linked from the repository README.
 
 ## Core References
 
-- Executable STDLIB snapshot (inventory + reliability gate): `../STDLIB_REFERENCE.md`
+- Inventory and the newest committed E2E result: [`../stdlib/STDLIB_REFERENCE.md`](../stdlib/STDLIB_REFERENCE.md)
+- Generated signatures: [`../stdlib/STDLIB_API_REFERENCE.md`](../stdlib/STDLIB_API_REFERENCE.md)
 - `Knowledge<T>` and uncertainty usage: `KNOWLEDGE_REFERENCE.md`
-- Language specification: `../../spec/LANGUAGE_SPECIFICATION.md`
+- Language specification: `../spec/LANGUAGE_SPECIFICATION.md`
 
-## API Doc Generation (`souniodoc`)
+## API doc generation
 
-Generate docs from the repository root:
+From the repository root:
 
 ```bash
-cargo run -p souc --bin souniodoc -- generate stdlib --output target/doc
+bash scripts/build/gen_stdlib_api_md.sh
 ```
 
-This generates browsable API docs for stdlib modules.
+That rewrites `docs/stdlib/STDLIB_API_REFERENCE.md` from `stdlib/**/*.sio`. There is no root `Cargo.toml`, so `cargo run -p souc --bin souniodoc` is not a command in this checkout.
 
 ## Reliability Gate
 
@@ -35,10 +36,11 @@ Run the fail-closed STDLIB gate from repository root:
 bash scripts/stdlib_reliability_gate.sh
 ```
 
-Artifacts:
-- `artifacts/stdlib/stdlib_reliability_status.v1.json`
-- `artifacts/stdlib/stdlib_inventory.v1.json`
-- `artifacts/stdlib/stdlib_hyper_execution_status.v1.json`
+Those commands were not re-run on 2026-10-27. The files they write, if left at the committed snapshots, are not the current tree:
+
+- `artifacts/stdlib/stdlib_reliability_status.v1.json` is 2026-05-12 and says 251/0/0/251.
+- `artifacts/stdlib/stdlib_inventory.v1.json` is 2026-05-12 and says 927 files.
+- The newest committed execution result is `artifacts/stdlib/stdlib_e2e_result.v1.json` (2026-10-06): 196 pass, 165 fail, 172 skip, 533 total.
 
 ## Hyper Execution Gate
 

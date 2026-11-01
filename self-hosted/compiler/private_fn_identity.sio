@@ -2361,6 +2361,12 @@ fn pfi_array_size_eq(a: Option<Box<Expr> >, b: Option<Box<Expr> >) -> bool with 
     }
 }
 
+fn pfi_type_box_eq(a: Box<TypeExpr>, b: Box<TypeExpr>) -> bool with Mut, Panic, Div {
+    if a as i64 == 0 { return false }
+    if b as i64 == 0 { return false }
+    pfi_type_eq(*a, *b)
+}
+
 fn pfi_type_eq(a: TypeExpr, b: TypeExpr) -> bool with Mut, Panic, Div {
     if a.kind != b.kind { return false }
     if a.path.seg_count != b.path.seg_count { return false }
@@ -2379,7 +2385,7 @@ fn pfi_type_eq(a: TypeExpr, b: TypeExpr) -> bool with Mut, Panic, Div {
             match b.inner {
                 None => { return false }
                 Some(ib) => {
-                    if !pfi_type_eq(*ia, *ib) { return false }
+                    if !pfi_type_box_eq(ia, ib) { return false }
                 }
             }
         }
@@ -2431,7 +2437,13 @@ fn pfi_type_param_count(opt: Option<Box<TypeParamDefList> >) -> i64 with Mut, Pa
     n
 }
 
+fn pfi_box_live(p: i64) -> bool {
+    p != 0
+}
+
 fn pfi_struct_def_eq(a: Box<StructDef>, b: Box<StructDef>) -> bool with Mut, Panic, Div {
+    if !pfi_box_live(a as i64) { return false }
+    if !pfi_box_live(b as i64) { return false }
     if (*a).is_linear != (*b).is_linear { return false }
     if (*a).is_affine != (*b).is_affine { return false }
     if pfi_type_param_count((*a).type_params) != pfi_type_param_count((*b).type_params) { return false }
@@ -2481,13 +2493,19 @@ fn pfi_find_struct_def(items: Option<Box<ItemList> >, n: Name) -> Option<Box<Str
         match cur {
             None => { going = false }
             Some(list) => {
-                if (*list).head.kind == ItemKind::ItemStruct && name_eq((*list).head.name, n) {
+                if !pfi_box_live(list as i64) {
+                    going = false
+                } else if (*list).head.kind == ItemKind::ItemStruct && name_eq((*list).head.name, n) {
                     match (*list).head.struct_def {
-                        Some(sd) => { return Some(sd) }
+                        Some(sd) => {
+                            if pfi_box_live(sd as i64) { return Some(sd) }
+                        }
                         None => {}
                     }
+                    cur = (*list).tail
+                } else {
+                    cur = (*list).tail
                 }
-                cur = (*list).tail
             }
         }
     }
@@ -2663,6 +2681,21 @@ fn bsh_name_is_intercepted_builtin(n: Name) -> bool with Mut, Panic, Div {
     if name_eq(n, make_name("print")) { return true }
     if name_eq(n, make_name("print_int")) { return true }
     if name_eq(n, make_name("print_char")) { return true }
+    // println/print of an f64 lowers to a call of the runtime `print_f64` by bare
+    // name (ir/lower.sio println_dispatch_name). A user `print_f64` -- such as
+    // stdlib/plot/bar.sio's private `print_f64(value, decimals)` -- was found first,
+    // so every println(f64) in a program importing it called the user fn with a
+    // garbage second argument (an unbounded digit stream). Renamed to
+    // `print_f64__user`, it no longer captures the runtime printer.
+    if name_eq(n, make_name("print_f64")) { return true }
+    // `string == string` / `!=` and string-literal match patterns lower to a
+    // call of the runtime `str_eq` by bare name (ir/lower.sio, the SIO-322
+    // pattern compare and the binary-op string-equality arm). A user
+    // `str_eq` -- stdlib/str/lib.sio's `pub fn str_eq(a: &Str, b: &Str)` --
+    // was bound instead, so every string comparison in a program that also
+    // called it passed two string handles to the Str comparator (ud2/SIGILL).
+    // Renamed to `str_eq__user`, it no longer captures string equality.
+    if name_eq(n, make_name("str_eq")) { return true }
     if name_eq(n, make_name("println")) { return true }
     if name_eq(n, make_name("syscall6")) { return true }
     if name_eq(n, make_name("seq_new")) { return true }

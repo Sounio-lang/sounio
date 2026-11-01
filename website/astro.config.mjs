@@ -55,9 +55,10 @@ const sounioSiteTheme = {
 export default defineConfig({
   site: 'https://www.souniolang.org',
   // Directory URLs are the indexable form. Vercel mirrors this in vercel.json
-  // (docs redirects first, then the same trailing-slash routes `trailingSlash:
-  // true` would emit). A bare `trailingSlash: true` runs before user redirects
-  // and would turn /docs into /docs/ instead of /learn/.
+  // (docs redirects first, then /sitemap.xml → /sitemap-index.xml, then the
+  // same trailing-slash routes `trailingSlash: true` would emit). A bare
+  // `trailingSlash: true` runs before user redirects and would turn /docs
+  // into /docs/ instead of /learn/.
   trailingSlash: 'always',
 
   integrations: [

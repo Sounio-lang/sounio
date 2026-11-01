@@ -95,11 +95,11 @@ $SOUC check examples/arithmetic.sio
 $SOUC run examples/hello.sio
 
 # Compile to native ELF
-$SOUC compile examples/autodiff/gradient.sio -o gradient.elf
+$SOUC compile examples/autodiff/grad_demo.sio -o gradient.elf
 
 # With GPU support (requires souc-linux-x86_64-gpu binary)
 SOUC_GPU=./artifacts/omega/souc-bin/souc-linux-x86_64-gpu
-$SOUC_GPU run examples/gpu/matrix_mul.sio
+$SOUC_GPU run examples/algorithms/matrix_mul.sio
 ```
 
 > **For curated scientific examples by research domain**, see [SCIENTIFIC_INDEX.md](SCIENTIFIC_INDEX.md).

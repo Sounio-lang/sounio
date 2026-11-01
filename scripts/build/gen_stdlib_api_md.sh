@@ -139,8 +139,13 @@ HEADER
 
 } > "${OUT_FILE}.tmp"
 
-# Replace date placeholder
-sed -i "s/GENDATE/$(date +%Y-%m-%d)/" "${OUT_FILE}.tmp"
+# Replace date placeholder. BSD sed requires a backup suffix for -i; write a new file instead.
+python3 - "${OUT_FILE}.tmp" "$(date +%Y-%m-%d)" <<'PY'
+import pathlib, sys
+path, day = sys.argv[1], sys.argv[2]
+file = pathlib.Path(path)
+file.write_text(file.read_text(encoding="utf-8").replace("GENDATE", day), encoding="utf-8")
+PY
 mv "${OUT_FILE}.tmp" "${OUT_FILE}"
 
 echo "[gen_stdlib_api_md] Wrote ${total_pub_fn} pub fn across ${total_modules} modules → ${OUT_FILE}"

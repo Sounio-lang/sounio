@@ -591,13 +591,26 @@ directory upward before search. For a resulting relative path, the search in
 6. Working-directory `self-hosted/`.
 7. Working-directory `packages/`: first namespace component maps underscores
    to hyphens; a lone package uses `src/lib.sio`, a longer path uses `src/...`.
-8. That package path's `/mod.sio` fallback.
+8. Directory-module roots, only after every file candidate above has missed,
+   so a path that names a `.sio` file keeps that file: `X.sio` is retried as
+   `X/mod.sio` against the importing file's directory (single-segment paths
+   only), the working directory, `SOUNIO_STDLIB_PATH` and `stdlib/` (the two
+   stdlib roots also as `X/lib.sio`, after `X/mod.sio`), `self-hosted/`, and
+   the package path.
 
 The first existing file wins. Failure returns the initial local candidate for
 diagnosis. This is environment-sensitive source behavior, not a hermetic package
-resolution standard. The `/mod.sio` fallback here is specifically on the package
-candidate, not a blanket local-directory module rule. `crate`/`self` keyword
-acceptance in paths does not establish Rust-like root rewrites in this search.
+resolution standard. Step 8 is the language decision for directory modules:
+`use json::*` loads `stdlib/json/mod.sio`, and a directory with only `lib.sio`
+(`stdlib/cmp/`) loads that, as `lean_single` always has (its import loader
+tries `X.sio`, `X/mod.sio`, `X/lib.sio` for stdlib roots). Madaros used to try
+`/mod.sio` only on the package candidate, so every stdlib directory module was
+an unresolved import (`tests/run-pass/use_stdlib_directory_module_root.sio`).
+The one ordering difference: `lean_single` tries a directory root right after
+the same location's file, Madaros only after all file candidates; the two pick
+different files only when `X.sio` exists at a later candidate and `X/mod.sio`
+or `X/lib.sio` at an earlier one. `crate`/`self` keyword acceptance in paths
+does not establish Rust-like root rewrites in this search.
 
 `MOD-003` (**source-observed**, named-item fallback). `use a::b::f` is ambiguous
 between a module file and a named item. `resolve_import_file_path` first tries

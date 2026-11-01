@@ -1,6 +1,6 @@
 ---
 name: sounio-tooling
-description: "Work on Sounio tooling: LSP, VSCode extension, playground (WASM), and Jupyter kernel; use when editing `compiler/src/lsp/`, `editors/vscode/`, `playground/`, or `jupyter/`."
+description: "Work on Sounio tooling: LSP, VS Code extension, and Jupyter kernel; use when editing `tools/lsp/`, `self-hosted/lsp/`, `tools/editors/vscode/`, or `ecosystem/sounio-jupyter/`."
 ---
 
 # Sounio Tooling
@@ -13,10 +13,9 @@ Make changes to developer tooling without breaking the compiler’s APIs or the 
 
 ### 1) Pick the target
 
-- LSP server: `compiler/src/lsp/`
-- VSCode extension: `editors/vscode/`
-- Playground: `playground/`
-- Jupyter kernel: `jupyter/`
+- LSP server: `tools/lsp/` and `self-hosted/lsp/`
+- VS Code extension: `tools/editors/vscode/`
+- Jupyter kernel: `ecosystem/sounio-jupyter/`
 
 ### 2) Keep interfaces stable
 
