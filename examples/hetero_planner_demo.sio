@@ -1,0 +1,72 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+//
+// Hetero planner demo: homogeneous, heterogeneous, single-device and
+// VRAM-capped pools over measured device capabilities.
+// Module source: stdlib/hetero/{types,caps,planner}.sio
+
+use hetero::types::{
+    backend_cpu_avx512, backend_cuda_ptx,
+    device_caps_measured, dtype_bf16, op_matmul,
+}
+use hetero::caps::{pool_add, pool_is_homogeneous, pool_new, pool_size}
+use hetero::planner::{
+    equal_shards, plan_classic, plan_hetero_split, plan_identity, plan_mode,
+    proportional_shards,
+}
+
+fn sum16(a: [i64; 16]) -> i64 with Mut {
+    var s: i64 = 0
+    var i = 0
+    while i < 16 { s = s + a[i]; i = i + 1 }
+    s
+}
+
+fn main() with IO, Mut, Panic, Div {
+    var ok = true
+
+    // Test 1: equal shards keep the total, remainder first.
+    let eq = equal_shards(10, 3)
+    if eq[0] != 4 || eq[1] != 3 || eq[2] != 3 { ok = false; print("FAIL eq\n") }
+
+    // Test 2: single measured device -> identity plan, all work on it.
+    var single = pool_new()
+    pool_add(&!single, device_caps_measured(backend_cuda_ptx(), 89, 24000000000, false, 100.0, 50.0, 80.0, 10.0))
+    if pool_size(&single) != 1 { ok = false; print("FAIL single size\n") }
+    if plan_mode(&single) != plan_identity() { ok = false; print("FAIL single mode\n") }
+    let s1 = proportional_shards(&single, op_matmul(), dtype_bf16(), 1000, 0)
+    if s1[0] != 1000 || sum16(s1) != 1000 { ok = false; print("FAIL single shard\n") }
+
+    // Test 3: two measured-equal GPUs -> classic mode, equal split.
+    var homo = pool_new()
+    pool_add(&!homo, device_caps_measured(backend_cuda_ptx(), 89, 24000000000, false, 100.0, 50.0, 80.0, 10.0))
+    pool_add(&!homo, device_caps_measured(backend_cuda_ptx(), 89, 24000000000, false, 102.0, 51.0, 81.0, 10.0))
+    if !pool_is_homogeneous(&homo, 0.05) { ok = false; print("FAIL homo detect\n") }
+    if plan_mode(&homo) != plan_classic() { ok = false; print("FAIL homo mode\n") }
+    let s2 = proportional_shards(&homo, op_matmul(), dtype_bf16(), 1000, 0)
+    if sum16(s2) != 1000 { ok = false; print("FAIL homo sum\n") }
+    if s2[0] < 490 || s2[0] > 510 { ok = false; print("FAIL homo balance\n") }
+
+    // Test 4: GPU 3x faster than CPU -> hetero mode, ~75/25 split.
+    var hetero = pool_new()
+    pool_add(&!hetero, device_caps_measured(backend_cuda_ptx(), 89, 24000000000, false, 300.0, 150.0, 240.0, 30.0))
+    pool_add(&!hetero, device_caps_measured(backend_cpu_avx512(), 0, 64000000000, false, 100.0, 90.0, 60.0, 20.0))
+    if pool_is_homogeneous(&hetero, 0.05) { ok = false; print("FAIL hetero detect\n") }
+    if plan_mode(&hetero) != plan_hetero_split() { ok = false; print("FAIL hetero mode\n") }
+    let s3 = proportional_shards(&hetero, op_matmul(), dtype_bf16(), 1000, 0)
+    if sum16(s3) != 1000 { ok = false; print("FAIL hetero sum\n") }
+    if s3[0] < 740 || s3[0] > 760 { ok = false; print("FAIL hetero gpu share\n") }
+    if s3[1] < 240 || s3[1] > 260 { ok = false; print("FAIL hetero cpu share\n") }
+
+    // Test 5: VRAM cap on the fast device redistributes the surplus.
+    // Fast device: 300 GFLOP/s but only 200 units fit (100 bytes/unit, 20 KB).
+    var capped = pool_new()
+    pool_add(&!capped, device_caps_measured(backend_cuda_ptx(), 89, 20000, false, 300.0, 150.0, 240.0, 30.0))
+    pool_add(&!capped, device_caps_measured(backend_cpu_avx512(), 0, 64000000000, false, 100.0, 90.0, 60.0, 20.0))
+    let s4 = proportional_shards(&capped, op_matmul(), dtype_bf16(), 1000, 100)
+    if s4[0] != 200 { ok = false; print("FAIL cap gpu\n") }
+    if sum16(s4) != 1000 { ok = false; print("FAIL cap sum\n") }
+    if s4[1] != 800 { ok = false; print("FAIL cap cpu\n") }
+
+    if ok { print("ALL PASS") } else { print("SOME FAIL") }
+}

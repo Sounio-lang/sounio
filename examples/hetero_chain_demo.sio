@@ -1,0 +1,159 @@
+//@ run-pass
+//
+// Hetero chain demo: GraphIR -> plan_chain -> rt_exec_chain, end to end.
+// A 3-node GEMM chain (x * W0 * W1 * W2) is planned over a measured pool
+// [GPU, CPU] with unmeasured links (so the DP must place, not split),
+// executed by the runtime, and verified against a CPU f64 reference
+// chain. Also reports: predicted vs executed makespan, and the runtime
+// end-to-end (staging included) vs kernel-direct time at n=1024 - the
+// homogeneous-path overhead of the runtime itself.
+// Usage: hetero_chain_demo [ptx-path] [kernel-name]
+// Modules: stdlib/hetero/{graph,cost,runtime}.sio
+
+use hetero::runtime::{rt_exec_chain, rt_gemm_split, rt_kind_cpu, rt_kind_gpu, rt_master, rt_open_full}
+use hetero::types::{
+    backend_cpu_avx512, backend_cuda_ptx, device_caps_measured, dtype_f32,
+    op_matmul,
+}
+use hetero::caps::{pool_add, pool_new}
+use hetero::graph::{graph_add_chain_node, graph_new}
+use hetero::cost::{link_matrix_new, plan_chain}
+use hetero::net_worker::{nw_open}
+use hetero::cuda_exec::{ce_event_create, ce_event_elapsed_ms, ce_event_record}
+use tensor2::cpu_kernel::{
+    CpuBuf, ck_alloc, ck_gemm, ck_get, ck_max_abs_diff, ck_set,
+}
+
+fn fill_scaled(b: &!CpuBuf, scale: f64) with Mut {
+    var i: i64 = 0
+    while i < b.len {
+        let h = (i * 31 + 17) % 97
+        ck_set(b, i, ((h as f64) / 97.0) * scale)
+        i = i + 1
+    }
+}
+
+fn main() with IO, Mut, Panic, Div, Alloc {
+    var ok = true
+    var ptx = "stdlib/hetero/kernels/gemm_tiled_f32.ptx"
+    if arg_count() > 0 { ptx = get_arg(0) }
+    var kname = "gemm_tiled_f32"
+    if arg_count() > 1 { kname = get_arg(1) }
+    var cvt = "stdlib/hetero/kernels/cvt_f64_f32.ptx"
+    if arg_count() > 2 { cvt = get_arg(2) }
+    let rt = rt_open_full(ptx, kname, cvt)
+    if rt.cvt_down != 0 { print("runtime: device-side cvt kernels loaded\n") }
+    if !rt.ready {
+        print("gpu: unavailable (chain demo needs the GPU path)\nCHAIN DONE\n")
+        exit(0)
+    }
+    let lib = nw_open()
+
+    // ---- Chain of 3 GEMMs at n=256, planned then executed ----
+    let n: i64 = 256
+    let flops = 2.0 * (n as f64) * (n as f64) * (n as f64)
+    var g = graph_new()
+    var ni = 0
+    while ni < 3 {
+        let _a = graph_add_chain_node(&!g, op_matmul(), dtype_f32(), flops, n * n * 4, n, 4 * n)
+        ni = ni + 1
+    }
+    var pool = pool_new()
+    pool_add(&!pool, device_caps_measured(backend_cuda_ptx(), 89, 22000000000, false, 2394.0, 2394.0, 2394.0, 100.0))
+    pool_add(&!pool, device_caps_measured(backend_cpu_avx512(), 0, 0, true, 0.16, 0.16, 0.16, 0.16))
+    let lm = link_matrix_new()
+    let plan = plan_chain(&g, &pool, &lm)
+    print("chain plan predicted_ms(x1000)=")
+    print_int((plan.predicted_s * 1000000.0) as i64)
+    print(" assign=")
+    ni = 0
+    while ni < 3 {
+        print_int(plan.assign[ni as usize] as i64)
+        print(" ")
+        ni = ni + 1
+    }
+    print("\n")
+
+    var x = rt_master(&rt, n * n)
+    fill_scaled(&!x, 0.05)
+    var w = rt_master(&rt, 3 * n * n)
+    fill_scaled(&!w, 0.05)
+    var out = rt_master(&rt, n * n)
+
+    // CPU f64 reference chain.
+    var t1 = ck_alloc(n * n)
+    var t2 = ck_alloc(n * n)
+    var ref = ck_alloc(n * n)
+    // views into w for the reference: node matrices are contiguous blocks
+    var w0 = ck_alloc(n * n)
+    var w1 = ck_alloc(n * n)
+    var w2 = ck_alloc(n * n)
+    var ci: i64 = 0
+    while ci < n * n {
+        ck_set(&!w0, ci, ck_get(&w, ci))
+        ck_set(&!w1, ci, ck_get(&w, n * n + ci))
+        ck_set(&!w2, ci, ck_get(&w, 2 * n * n + ci))
+        ci = ci + 1
+    }
+    ck_gemm(&x, &w0, &!t1, n, n, n)
+    ck_gemm(&t1, &w1, &!t2, n, n, n)
+    ck_gemm(&t2, &w2, &!ref, n, n, n)
+
+    var kinds: [i32; 16] = [0; 16]
+    kinds[0] = rt_kind_gpu()
+    kinds[1] = rt_kind_cpu()
+    let res = rt_exec_chain(&rt, &lib, -1, kinds, &g, &pool, &lm, &x, &w, n, &!out)
+    let d = ck_max_abs_diff(&ref, &out)
+    print("chain exec resident=")
+    print_int(res.resident)
+    print(" node_ms(x1000)=")
+    ni = 0
+    while ni < 3 {
+        print_int((res.node_ms[ni as usize] * 1000.0) as i64)
+        print(" ")
+        ni = ni + 1
+    }
+    print("\n")
+    print("chain exec status=")
+    print_int(res.status)
+    print(" replans=")
+    print_int(res.replans)
+    print(" ms_total(x1000)=")
+    print_int((res.ms_total * 1000.0) as i64)
+    print(" ran_on=")
+    ni = 0
+    while ni < 3 {
+        print_int(res.ran_on[ni as usize] as i64)
+        print(" ")
+        ni = ni + 1
+    }
+    print(" max_diff(x1000)=")
+    print_int((d * 1000.0) as i64)
+    print("\n")
+    if res.status != 0 || d > 0.01 { ok = false; print("FAIL chain\n") }
+
+    // ---- Runtime end-to-end vs kernel-direct at n=1024 ----
+    let nb: i64 = 1024
+    var ab = rt_master(&rt, nb * nb)
+    fill_scaled(&!ab, 0.05)
+    var bb = rt_master(&rt, nb * nb)
+    fill_scaled(&!bb, 0.05)
+    var cb = rt_master(&rt, nb * nb)
+    let ev0 = ce_event_create(&rt.exec)
+    let ev1 = ce_event_create(&rt.exec)
+    var st = ce_event_record(&rt.exec, ev0)
+    let r1 = rt_gemm_split(&rt, &ab, &bb, &!cb, nb, nb)
+    st = ce_event_record(&rt.exec, ev1)
+    let e2e_ms = ce_event_elapsed_ms(&rt.exec, ev0, ev1)
+    print("runtime e2e 1024 ms(x1000)=")
+    print_int((e2e_ms * 1000.0) as i64)
+    print(" kernel_window_ms(x1000)=")
+    print_int((r1.ms * 1000.0) as i64)
+    print(" status=")
+    print_int(r1.status)
+    print("\n")
+
+    if ok { print("CHAIN PASS\n") } else { print("CHAIN FAIL\n") }
+    print("CHAIN DONE\n")
+    exit(0)
+}

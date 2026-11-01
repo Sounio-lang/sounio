@@ -1,0 +1,37 @@
+//@ run-pass
+//
+// CostModel prediction printout, calibrated ONLY on the measured L4 tiled
+// GEMM at n=1024 (2394 GFLOP/s, Slurm job 16135). Prints predicted ms for
+// n=512 and n=2048 so the job log can be compared against execution -
+// the Fase 3 predicted-vs-executed gate. Module: stdlib/hetero/cost.sio
+
+use hetero::types::{backend_cuda_ptx, device_caps_measured, dtype_f32, op_matmul}
+use hetero::caps::{pool_add, pool_new}
+use hetero::graph::{graph_add_chain_node, graph_new}
+use hetero::cost::{link_matrix_new, node_time_s, plan_chain}
+
+fn main() with IO, Mut, Panic, Div, Alloc {
+    var pool = pool_new()
+    // Measured on NVIDIA L4 (SM89, 22 GiB), tiled GEMM f32, job 16135.
+    pool_add(&!pool, device_caps_measured(backend_cuda_ptx(), 89, 22000000000, false, 2394.0, 2394.0, 2394.0, 100.0))
+    var sizes: [i64; 3] = [512, 1024, 2048]
+    var si = 0
+    while si < 3 {
+        let n = sizes[si]
+        let flops = 2.0 * (n as f64) * (n as f64) * (n as f64)
+        var g = graph_new()
+        let _x = graph_add_chain_node(&!g, op_matmul(), dtype_f32(), flops, n * n * 4, n, 4 * n)
+        let lm = link_matrix_new()
+        let plan = plan_chain(&g, &pool, &lm)
+        print("predict n=")
+        print_int(n)
+        print(" ms(x1000)=")
+        print_int((plan.predicted_s * 1000000.0) as i64)
+        print(" direct_ms(x1000)=")
+        print_int((node_time_s(&pool, 0, op_matmul(), dtype_f32(), flops) * 1000000.0) as i64)
+        print("\n")
+        si = si + 1
+    }
+    print("PREDICT DONE\n")
+    exit(0)
+}

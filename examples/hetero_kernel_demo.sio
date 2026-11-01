@@ -1,0 +1,137 @@
+//@ run-pass
+//
+// Hetero kernel demo: a real GEMM executing on a GPU, launched from a pure
+// Sounio binary (CUDA driver via dlopen/dlsym, PTX artifact in
+// stdlib/hetero/kernels/gemm_naive_f32.ptx), verified against the CPU
+// result and timed with CUDA events -> measured GFLOP/s for DeviceCaps.
+// Usage: hetero_kernel_demo [path-to-gemm_naive_f32.ptx]
+// On a machine without CUDA it prints "gpu: unavailable" and passes.
+
+use hetero::probe_cuda::{pb_cstr}
+use hetero::cuda_exec::{
+    ce_alloc, ce_d2h, ce_event_create, ce_event_elapsed_ms, ce_event_record,
+    ce_function, ce_h2d, ce_launch_gemm, ce_module_log, ce_open, ce_sync,
+}
+use hetero::cublas_bench::{gb_host_f32, gb_host_get, gb_host_set}
+
+fn abs_t(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn main() with IO, Mut, Panic, Div, Alloc {
+    let exec = ce_open()
+    if !exec.ok {
+        print("gpu: unavailable (CPU-only machine, substrate OK)\n")
+        print("KERNEL DONE\n")
+        exit(0)
+    }
+    var path = "stdlib/hetero/kernels/gemm_naive_f32.ptx"
+    if arg_count() > 0 { path = get_arg(0) }
+    let ptx = read_file(path)
+    if str_len(ptx) == 0 {
+        print("kernel: PTX not found at path\n")
+        print("KERNEL DONE\n")
+        exit(0)
+    }
+    let module = ce_module_log(&exec, pb_cstr(ptx))
+    if module == 0 {
+        print("kernel: cuModuleLoadData failed (JIT log above)\n")
+        print("KERNEL DONE\n")
+        exit(0)
+    }
+    var kname = "gemm_naive_f32"
+    if arg_count() > 1 { kname = get_arg(1) }
+    let func = ce_function(&exec, module, kname)
+    if func == 0 {
+        print("kernel: cuModuleGetFunction failed\n")
+        print("KERNEL DONE\n")
+        exit(0)
+    }
+    print("kernel: module loaded, launching gemm_naive_f32\n")
+
+    // Verify n=64 against CPU.
+    let n: i64 = 64
+    let a = gb_host_f32(n * n)
+    let b = gb_host_f32(n * n)
+    let c = gb_host_f32(n * n)
+    var i: i64 = 0
+    while i < n * n {
+        gb_host_set(a, i, ((i % 7) as f64) - 3.0)
+        gb_host_set(b, i, ((i % 5) as f64) - 2.0)
+        i = i + 1
+    }
+    let bytes = n * n * 4
+    let da = ce_alloc(&exec, bytes)
+    let db = ce_alloc(&exec, bytes)
+    let dc = ce_alloc(&exec, bytes)
+    var st = ce_h2d(&exec, da, a, bytes)
+    st = ce_h2d(&exec, db, b, bytes)
+    st = ce_launch_gemm(&exec, func, da, db, dc, n, n, n)
+    st = ce_sync(&exec)
+    st = ce_d2h(&exec, c, dc, bytes)
+    var max_err = 0.0
+    var r: i64 = 0
+    while r < n {
+        var col: i64 = 0
+        while col < n {
+            var acc = 0.0
+            var k: i64 = 0
+            while k < n {
+                acc = acc + gb_host_get(a, r * n + k) * gb_host_get(b, k * n + col)
+                k = k + 1
+            }
+            let err = abs_t(gb_host_get(c, r * n + col) - acc)
+            if err > max_err { max_err = err }
+            col = col + 1
+        }
+        r = r + 1
+    }
+    print("gemm 64 max_err(x1e6)=")
+    print_int((max_err * 1000000.0) as i64)
+    print("\n")
+    if max_err < 0.01 { print("gemm verify: PASS\n") } else { print("gemm verify: FAIL\n") }
+
+    // Bench several sizes between CUDA events (buffers reused per size).
+    var sizes: [i64; 3] = [512, 1024, 2048]
+    var si = 0
+    while si < 3 {
+        let bn = sizes[si]
+        let bbytes = bn * bn * 4
+        let ba = gb_host_f32(bn * bn)
+        i = 0
+        while i < bn * bn {
+            gb_host_set(ba, i, ((i % 7) as f64) - 3.0)
+            i = i + 1
+        }
+        let bda = ce_alloc(&exec, bbytes)
+        let bdb = ce_alloc(&exec, bbytes)
+        let bdc = ce_alloc(&exec, bbytes)
+        st = ce_h2d(&exec, bda, ba, bbytes)
+        st = ce_h2d(&exec, bdb, ba, bbytes)
+        st = ce_launch_gemm(&exec, func, bda, bdb, bdc, bn, bn, bn)
+        st = ce_sync(&exec)
+        let ev0 = ce_event_create(&exec)
+        let ev1 = ce_event_create(&exec)
+        st = ce_event_record(&exec, ev0)
+        var it: i64 = 0
+        while it < 10 {
+            st = ce_launch_gemm(&exec, func, bda, bdb, bdc, bn, bn, bn)
+            it = it + 1
+        }
+        st = ce_event_record(&exec, ev1)
+        let ms = ce_event_elapsed_ms(&exec, ev0, ev1)
+        print("bench n=")
+        print_int(bn)
+        if ms > 0.0 {
+            let gflops = 2.0 * (bn as f64) * (bn as f64) * (bn as f64) * 10.0 / (ms / 1000.0) / 1000000000.0
+            print(" gflops(x100)=")
+            print_int((gflops * 100.0) as i64)
+            print(" ms_per_iter(x1000)=")
+            print_int(((ms / 10.0) * 1000.0) as i64)
+            print("\n")
+        } else {
+            print(" event timing failed\n")
+        }
+        si = si + 1
+    }
+    print("KERNEL DONE\n")
+    exit(0)
+}

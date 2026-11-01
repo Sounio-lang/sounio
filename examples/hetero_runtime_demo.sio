@@ -1,0 +1,191 @@
+//@ run-pass
+//
+// Hetero runtime demo: multi-device execution on one host. A GEMM is
+// row-sharded between GPU (own PTX tiled kernel) and CPU (direct typed
+// loops) under a planner split computed from MEASURED throughputs
+// (calibrated in-program), the CPU shard overlapping the GPU kernel.
+// Correctness: split result vs full CPU reference. Reported: per-device
+// calibration, planned shard, gpu-only / cpu-only / split makespans and
+// heterogeneous efficiency = split GFLOP/s / (gpu + cpu GFLOP/s).
+// Usage: hetero_runtime_demo [ptx-path] [kernel-name]
+// On a machine without CUDA it verifies the CPU kernel and passes.
+// Modules: stdlib/hetero/runtime.sio, stdlib/tensor2/cpu_kernel.sio
+
+use hetero::runtime::{rt_gemm_split, rt_open}
+use hetero::types::{
+    backend_cpu_avx512, backend_cuda_ptx, device_caps_measured, dtype_f32,
+    op_matmul,
+}
+use hetero::caps::{pool_add, pool_new}
+use hetero::planner::{proportional_shards}
+use hetero::cuda_exec::{ce_event_create, ce_event_elapsed_ms, ce_event_record}
+use tensor2::cpu_kernel::{
+    ck_alloc, ck_fill_pattern, ck_gemm, ck_gemm_rows, ck_get, ck_max_abs_diff,
+    ck_set,
+}
+
+fn gflops(n: i64, ms: f64) -> f64 {
+    if ms <= 0.0 { return 0.0 }
+    2.0 * (n as f64) * (n as f64) * (n as f64) / (ms / 1000.0) / 1000000000.0
+}
+
+fn main() with IO, Mut, Panic, Div, Alloc {
+    var ok = true
+
+    // 1) CPU kernel vs row-sharded CPU kernel: same arithmetic, exact.
+    let n0: i64 = 48
+    var a0 = ck_alloc(n0 * n0)
+    ck_fill_pattern(&!a0)
+    var b0 = ck_alloc(n0 * n0)
+    ck_fill_pattern(&!b0)
+    var cref = ck_alloc(n0 * n0)
+    ck_gemm(&a0, &b0, &!cref, n0, n0, n0)
+    var c0 = ck_alloc(n0 * n0)
+    ck_gemm_rows(&a0, &b0, &!c0, 0, n0, n0, n0)
+    let d0 = ck_max_abs_diff(&cref, &c0)
+    print("cpu kernel vs rows max_diff(x1e9)=")
+    print_int((d0 * 1000000000.0) as i64)
+    print("\n")
+    if d0 > 0.000000001 { ok = false; print("FAIL cpu kernel\n") }
+
+    var ptx = "stdlib/hetero/kernels/gemm_tiled_f32.ptx"
+    if arg_count() > 0 { ptx = get_arg(0) }
+    var kname = "gemm_tiled_f32"
+    if arg_count() > 1 { kname = get_arg(1) }
+    let rt = rt_open(ptx, kname)
+    if !rt.ready {
+        print("gpu: unavailable (CPU kernel verified, substrate OK)\n")
+        if ok { print("RUNTIME PASS\n") } else { print("RUNTIME FAIL\n") }
+        print("RUNTIME DONE\n")
+        exit(0)
+    }
+    print("runtime: GPU ready\n")
+
+    // 2) Split correctness at n=128, forced 64/64 rows.
+    let nv: i64 = 128
+    var av = ck_alloc(nv * nv)
+    ck_fill_pattern(&!av)
+    var bv = ck_alloc(nv * nv)
+    ck_fill_pattern(&!bv)
+    var vref = ck_alloc(nv * nv)
+    ck_gemm(&av, &bv, &!vref, nv, nv, nv)
+    var vc = ck_alloc(nv * nv)
+    let vr = rt_gemm_split(&rt, &av, &bv, &!vc, nv, 64)
+    let dv = ck_max_abs_diff(&vref, &vc)
+    print("split 128 status=")
+    print_int(vr.status)
+    print(" gpu_rows=")
+    print_int(vr.gpu_rows)
+    print(" cpu_rows=")
+    print_int(vr.cpu_rows)
+    print(" max_diff(x1000)=")
+    print_int((dv * 1000.0) as i64)
+    print("\n")
+    if vr.status != 0 || dv > 0.1 { ok = false; print("FAIL split verify\n") }
+
+    // 3) In-program calibration at n=512 (CUDA events; the CPU number is
+    // stream-idle event time around the host loop - an approximation,
+    // labelled as such wherever it is used).
+    let nc: i64 = 512
+    var ac = ck_alloc(nc * nc)
+    ck_fill_pattern(&!ac)
+    var bc = ck_alloc(nc * nc)
+    ck_fill_pattern(&!bc)
+    var cc = ck_alloc(nc * nc)
+    let ev0 = ce_event_create(&rt.exec)
+    let ev1 = ce_event_create(&rt.exec)
+    var st = ce_event_record(&rt.exec, ev0)
+    ck_gemm_rows(&ac, &bc, &!cc, 0, nc, nc, nc)
+    st = ce_event_record(&rt.exec, ev1)
+    let cpu_ms = ce_event_elapsed_ms(&rt.exec, ev0, ev1)
+    let cpu_g = gflops(nc, cpu_ms)
+    let gr512 = rt_gemm_split(&rt, &ac, &bc, &!cc, nc, nc)
+    let gpu_g = gflops(nc, gr512.ms)
+    print("calib 512 cpu_ms(x1000)=")
+    print_int((cpu_ms * 1000.0) as i64)
+    print(" cpu_gflops(x100)=")
+    print_int((cpu_g * 100.0) as i64)
+    print(" gpu_ms(x1000)=")
+    print_int((gr512.ms * 1000.0) as i64)
+    print(" gpu_gflops(x100)=")
+    print_int((gpu_g * 100.0) as i64)
+    print("\n")
+
+    // 4) Planner decides the n=1024 split from the measured pool.
+    let nb: i64 = 1024
+    var pool = pool_new()
+    pool_add(&!pool, device_caps_measured(backend_cuda_ptx(), 89, 22000000000, false, gpu_g, gpu_g, gpu_g, gpu_g))
+    pool_add(&!pool, device_caps_measured(backend_cpu_avx512(), 0, 0, true, cpu_g, cpu_g, cpu_g, cpu_g))
+    let shards = proportional_shards(&pool, op_matmul(), dtype_f32(), nb, 0)
+    let plan_gpu_rows = shards[0]
+    print("plan 1024 gpu_rows=")
+    print_int(plan_gpu_rows)
+    print(" cpu_rows=")
+    print_int(shards[1])
+    print("\n")
+    if shards[1] == 0 {
+        print("planner verdict: PLACEMENT gpu-only (cpu share below one row)\n")
+    }
+
+    var ab = ck_alloc(nb * nb)
+    ck_fill_pattern(&!ab)
+    var bb = ck_alloc(nb * nb)
+    ck_fill_pattern(&!bb)
+    var cb = ck_alloc(nb * nb)
+
+    let r_gpu = rt_gemm_split(&rt, &ab, &bb, &!cb, nb, nb)
+    let gpu1024_g = gflops(nb, r_gpu.ms)
+    print("bench 1024 gpu-only ms(x1000)=")
+    print_int((r_gpu.ms * 1000.0) as i64)
+    print(" gflops(x100)=")
+    print_int((gpu1024_g * 100.0) as i64)
+    print("\n")
+    var refb = ck_alloc(nb * nb)
+    var ci: i64 = 0
+    while ci < nb * nb {
+        ck_set(&!refb, ci, ck_get(&cb, ci))
+        ci = ci + 1
+    }
+
+    // Forced concurrent split (768 GPU rows / 256 CPU rows), verified
+    // against the gpu-only result: proves the executor overlaps shards
+    // and gathers correctly even where the planner refuses to split.
+    let r_forced = rt_gemm_split(&rt, &ab, &bb, &!cb, nb, 768)
+    let df = ck_max_abs_diff(&refb, &cb)
+    let forced_g = gflops(nb, r_forced.ms)
+    print("bench 1024 forced-split ms(x1000)=")
+    print_int((r_forced.ms * 1000.0) as i64)
+    print(" gflops(x100)=")
+    print_int((forced_g * 100.0) as i64)
+    print(" gpu_rows=")
+    print_int(r_forced.gpu_rows)
+    print(" cpu_rows=")
+    print_int(r_forced.cpu_rows)
+    print(" max_diff_vs_gpu(x1000)=")
+    print_int((df * 1000.0) as i64)
+    print("\n")
+    if r_forced.status != 0 || df > 0.1 { ok = false; print("FAIL forced split\n") }
+    // Heterogeneous efficiency of the forced split: achieved vs the sum
+    // of the parts measured at this size. Expected << 1 here: the CPU
+    // shard is the makespan and the GPU idles - exactly why the planner
+    // chose placement above.
+    print("forced hetero efficiency(x1000)=")
+    print_int(((forced_g / (gpu1024_g + cpu_g)) * 1000.0) as i64)
+    print(" forced_vs_gpu(x1000)=")
+    print_int(((r_gpu.ms / r_forced.ms) * 1000.0) as i64)
+    print("\n")
+
+    st = ce_event_record(&rt.exec, ev0)
+    ck_gemm_rows(&ab, &bb, &!cb, 0, nb, nb, nb)
+    st = ce_event_record(&rt.exec, ev1)
+    let cpu_only_ms = ce_event_elapsed_ms(&rt.exec, ev0, ev1)
+    print("bench 1024 cpu-only ms(x1000)=")
+    print_int((cpu_only_ms * 1000.0) as i64)
+    print(" gflops(x100)=")
+    print_int((gflops(nb, cpu_only_ms) * 100.0) as i64)
+    print("\n")
+
+    if ok { print("RUNTIME PASS\n") } else { print("RUNTIME FAIL\n") }
+    print("RUNTIME DONE\n")
+    exit(0)
+}

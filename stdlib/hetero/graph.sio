@@ -1,0 +1,141 @@
+// stdlib::hetero::graph - GraphIR: the single graph for inference and training.
+//
+// Nodes are ops with declared (op, dtype, FLOPs, output bytes, shardable
+// dimension). Edges carry activation bytes. The same graph is what the
+// planner partitions (Fase 3), what the runtime executes (Fase 4) and what
+// reverse-mode autodiff walks backwards (Fase 6) - one IR, three consumers.
+// Fixed capacities with bounds checks (ADR-004).
+
+pub fn graph_capacity() -> i32 { 64 }
+pub fn edge_capacity() -> i32 { 128 }
+
+pub struct GraphNode {
+    pub op: i32,
+    pub dtype: i32,
+    pub flops: f64,
+    pub out_bytes: i64,
+    // Work units along the shardable dimension (e.g. rows of a GEMM);
+    // 0 means the node cannot be split, only placed.
+    pub shard_units: i64,
+    pub bytes_per_unit: i64,
+}
+
+pub struct GraphEdge {
+    pub from_node: i32,
+    pub to_node: i32,
+    pub bytes: i64,
+}
+
+pub struct Graph {
+    pub nodes: [GraphNode; 64],
+    pub n_nodes: i32,
+    pub edges: [GraphEdge; 128],
+    pub n_edges: i32,
+}
+
+fn graph_empty_node() -> GraphNode {
+    GraphNode { op: 0, dtype: 0, flops: 0.0, out_bytes: 0, shard_units: 0, bytes_per_unit: 0 }
+}
+
+fn graph_empty_edge() -> GraphEdge {
+    GraphEdge { from_node: 0, to_node: 0, bytes: 0 }
+}
+
+pub fn graph_new() -> Graph {
+    Graph { nodes: [graph_empty_node(); 64], n_nodes: 0, edges: [graph_empty_edge(); 128], n_edges: 0 }
+}
+
+/// Append a node; returns its index, or -1 when full (ADR-004: refuse, never corrupt).
+///
+/// # Parameters
+/// - `g`: graph being built.
+/// - `op`, `dtype`: op/dtype codes (hetero::types). - `flops`: node FLOPs.
+/// - `out_bytes`: output size. - `shard_units`, `bytes_per_unit`: split shape.
+///
+/// # Return
+/// Node index >= 0, or -1 at capacity.
+///
+/// # Complexity
+/// O(1)
+pub fn graph_add_node(g: &!Graph, op: i32, dtype: i32, flops: f64, out_bytes: i64, shard_units: i64, bytes_per_unit: i64) -> i32 with Mut {
+    if g.n_nodes >= graph_capacity() { return -1 }
+    let idx = g.n_nodes
+    g.nodes[idx as usize] = GraphNode { op: op, dtype: dtype, flops: flops, out_bytes: out_bytes, shard_units: shard_units, bytes_per_unit: bytes_per_unit }
+    g.n_nodes = g.n_nodes + 1
+    idx
+}
+
+/// Append an edge from one node to another.
+///
+/// # Parameters
+/// - `g`: graph. - `from_node`, `to_node`: node indices. - `bytes`: activation bytes.
+///
+/// # Return
+/// True when added; false at capacity or on bad indices.
+///
+/// # Complexity
+/// O(1)
+pub fn graph_add_edge(g: &!Graph, from_node: i32, to_node: i32, bytes: i64) -> bool with Mut {
+    if g.n_edges >= edge_capacity() { return false }
+    if from_node < 0 || to_node < 0 || from_node >= g.n_nodes || to_node >= g.n_nodes { return false }
+    g.edges[g.n_edges as usize] = GraphEdge { from_node: from_node, to_node: to_node, bytes: bytes }
+    g.n_edges = g.n_edges + 1
+    true
+}
+
+/// Convenience: append a node and an edge from the previous node (chain graphs).
+///
+/// # Parameters
+/// - `g`: graph; same node fields as graph_add_node.
+///
+/// # Return
+/// New node index, or -1 at capacity.
+///
+/// # Complexity
+/// O(1)
+pub fn graph_add_chain_node(g: &!Graph, op: i32, dtype: i32, flops: f64, out_bytes: i64, shard_units: i64, bytes_per_unit: i64) -> i32 with Mut {
+    let prev = g.n_nodes - 1
+    let idx = graph_add_node(g, op, dtype, flops, out_bytes, shard_units, bytes_per_unit)
+    if idx > 0 {
+        let _e = graph_add_edge(g, prev, idx, out_bytes)
+    }
+    idx
+}
+
+pub fn graph_node(g: &Graph, idx: i32) -> GraphNode {
+    g.nodes[idx as usize]
+}
+
+/// Total FLOPs of the graph.
+///
+/// # Parameters
+/// - `g`: graph.
+///
+/// # Complexity
+/// O(n_nodes)
+pub fn graph_total_flops(g: &Graph) -> f64 with Mut {
+    var s = 0.0
+    var i = 0
+    while i < g.n_nodes {
+        s = s + g.nodes[i as usize].flops
+        i = i + 1
+    }
+    s
+}
+
+/// Bytes on the edge from->to, or 0 when there is no such edge.
+///
+/// # Parameters
+/// - `g`: graph. - `from_node`, `to_node`: node indices.
+///
+/// # Complexity
+/// O(n_edges)
+pub fn graph_edge_bytes(g: &Graph, from_node: i32, to_node: i32) -> i64 with Mut {
+    var i = 0
+    while i < g.n_edges {
+        let e = g.edges[i as usize]
+        if e.from_node == from_node && e.to_node == to_node { return e.bytes }
+        i = i + 1
+    }
+    0
+}
