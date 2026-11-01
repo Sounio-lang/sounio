@@ -3306,6 +3306,44 @@ fn ir_hex_digit_value(c: i8) -> i64 {
     0 - 1
 }
 
+
+
+
+fn ir_name_push_byte(out: Name, b: i64) -> Name {
+    var next = out
+    if next.len >= 384 { return next }
+    var byte = b
+    if byte > 127 { byte = byte - 256 }
+    next.buf[next.len as usize] = byte as i8
+    next.len = next.len + 1
+    next
+}
+
+fn ir_name_push_utf8(out: Name, cp: i64) -> Name {
+    if cp < 128 {
+        return ir_name_push_byte(out, cp)
+    }
+    if cp < 2048 {
+        let b0 = 192 + cp / 64
+        let b1 = 128 + (cp - (cp / 64) * 64)
+        return ir_name_push_byte(ir_name_push_byte(out, b0), b1)
+    }
+    if cp < 65536 {
+        let b0 = 224 + cp / 4096
+        let rest = cp - (cp / 4096) * 4096
+        let b1 = 128 + rest / 64
+        let b2 = 128 + (rest - (rest / 64) * 64)
+        return ir_name_push_byte(ir_name_push_byte(ir_name_push_byte(out, b0), b1), b2)
+    }
+    let b0 = 240 + cp / 262144
+    let rest = cp - (cp / 262144) * 262144
+    let b1 = 128 + rest / 4096
+    let rest2 = rest - (rest / 4096) * 4096
+    let b2 = 128 + rest2 / 64
+    let b3 = 128 + (rest2 - (rest2 / 64) * 64)
+    ir_name_push_byte(ir_name_push_byte(ir_name_push_byte(ir_name_push_byte(out, b0), b1), b2), b3)
+}
+
 fn ir_normalize_string_literal_name(n: Name) -> Name {
     var out = ir_empty_name()
     var start: i64 = 0
@@ -3336,12 +3374,38 @@ fn ir_normalize_string_literal_name(n: Name) -> Name {
                 // \0 is NUL. It was copied as the digit '0' (measured
                 // 2026-10-22: "a\0b" printed "a0b"); lean_single decodes NUL.
                 out.buf[out.len as usize] = 0 as i8
+            } else if nxt == 39 as i8 {
+                out.buf[out.len as usize] = 39 as i8
             } else if nxt == 120 as i8 && i + 3 < end && ir_hex_digit_value(n.buf[(i + 2) as usize]) >= 0 && ir_hex_digit_value(n.buf[(i + 3) as usize]) >= 0 {
                 // \xHH is one byte. It was copied as the text "xHH", so every
                 // ANSI sequence in stdlib/plot ("\x1b[0m") printed as text.
                 let hv = ir_hex_digit_value(n.buf[(i + 2) as usize]) * 16 + ir_hex_digit_value(n.buf[(i + 3) as usize])
                 out.buf[out.len as usize] = hv as i8
                 i = i + 2
+            } else if nxt == 117 as i8 && i + 3 < end && n.buf[(i + 2) as usize] == 123 as i8 {
+                // \u{…}: one Unicode scalar, written as UTF-8. The lexer has
+                // already refused a scalar outside U+0000..=U+10FFFF.
+                var ui = i + 3
+                var digits: i64 = 0
+                var cp: i64 = 0
+                var u_ok = true
+                while ui < end && digits < 6 {
+                    let hv = ir_hex_digit_value(n.buf[ui as usize])
+                    if hv < 0 { break }
+                    cp = cp * 16 + hv
+                    digits = digits + 1
+                    ui = ui + 1
+                }
+                if digits < 1 || ui >= end || n.buf[ui as usize] != 125 as i8 || cp > 1114111 || (cp >= 55296 && cp <= 57343) {
+                    u_ok = false
+                }
+                if u_ok {
+                    out = ir_name_push_utf8(out, cp)
+                    i = ui + 1
+                    continue
+                } else {
+                    out.buf[out.len as usize] = nxt
+                }
             } else {
                 // Unreachable from file input: the lexer refuses every other
                 // escape (E274). Kept for in-memory sources that bypass it.
@@ -39587,10 +39651,11 @@ impl Lowerer {
     // storage, which is larger than an 8 MiB stack. Keep the canonical hello
     // shape on a narrow path while emitting the same string and call IR.
     fn lower_print_string_literal_ref(self, literal: Name) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        let decoded = ir_normalize_string_literal_name(literal)
         let print_name = make_name("print")
         var lo = self
         let fn_id = lowerer_find_or_add_fn_id_mut(&! lo, print_name)
-        let value_pair = lo.emit_name_string(ir_normalize_string_literal_name(literal))
+        let value_pair = lo.emit_name_string(decoded)
         let lo_value = value_pair.0
         let value_reg = value_pair.1
         let dst_pair = lo_value.fresh_reg()

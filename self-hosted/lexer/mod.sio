@@ -182,19 +182,50 @@ fn lexer_mark_lex_error(kind: i64, line: i64, col: i64, byte_val: i64) with Mut 
     }
 }
 
-// A string escape the lowering decodes (ir_normalize_string_literal_name):
-// \n \t \r \0 \\ \" and \xHH. This is the union of what the two engines decode
-// today; lean_single refuses every other escape, and so does this lexer now.
-fn lexer_escape_ok(pos: i64, n: i64) -> bool with Mut, Panic {
-    // pos is the backslash; the caller guarantees pos + 1 < n.
+// ADR-015 row 3. pos is the backslash. Returns the source width of a
+// closed-set escape, or 0 if it is not in the set. \u{…} is a Unicode
+// scalar (1 to 6 hex digits, not a surrogate, at most U+10FFFF) encoded
+// later as UTF-8. Anything else, including \u without braces, is refused.
+fn lexer_hex_value(c: i8) -> i64 {
+    if c >= 48 as i8 && c <= 57 as i8 { return (c as i64) - 48 }
+    if c >= 97 as i8 && c <= 102 as i8 { return (c as i64) - 87 }
+    if c >= 65 as i8 && c <= 70 as i8 { return (c as i64) - 55 }
+    0 - 1
+}
+
+fn lexer_unicode_escape_span(pos: i64, n: i64) -> i64 with Mut, Panic {
+    if pos + 3 >= n { return 0 }
+    if CURSOR_SOURCE[(pos + 1) as usize] != 117 as i8 { return 0 }
+    if CURSOR_SOURCE[(pos + 2) as usize] != 123 as i8 { return 0 }
+    var i = pos + 3
+    var digits: i64 = 0
+    var cp: i64 = 0
+    while i < n && digits < 6 {
+        let hv = lexer_hex_value(CURSOR_SOURCE[i as usize])
+        if hv < 0 { break }
+        cp = cp * 16 + hv
+        digits = digits + 1
+        i = i + 1
+    }
+    if digits < 1 || i >= n || CURSOR_SOURCE[i as usize] != 125 as i8 { return 0 }
+    if cp > 1114111 { return 0 }
+    if cp >= 55296 && cp <= 57343 { return 0 }
+    (i + 1) - pos
+}
+
+fn lexer_escape_span(pos: i64, n: i64) -> i64 with Mut, Panic {
+    if pos + 1 >= n { return 0 }
     let e = CURSOR_SOURCE[(pos + 1) as usize]
-    if e == 110 as i8 || e == 116 as i8 || e == 114 as i8 || e == 48 as i8 || e == 92 as i8 || e == 34 as i8 {
-        return true
+    if e == 110 as i8 || e == 116 as i8 || e == 114 as i8 || e == 48 as i8 || e == 92 as i8 || e == 34 as i8 || e == 39 as i8 {
+        return 2
     }
-    if e == 120 as i8 && pos + 3 < n {
-        return is_hex_digit(CURSOR_SOURCE[(pos + 2) as usize]) && is_hex_digit(CURSOR_SOURCE[(pos + 3) as usize])
+    if e == 120 as i8 && pos + 3 < n && is_hex_digit(CURSOR_SOURCE[(pos + 2) as usize]) && is_hex_digit(CURSOR_SOURCE[(pos + 3) as usize]) {
+        return 4
     }
-    false
+    if e == 117 as i8 {
+        return lexer_unicode_escape_span(pos, n)
+    }
+    0
 }
 
 fn lexer_print_location(path: string) with IO {
@@ -251,7 +282,7 @@ pub fn lexer_report_lex_error_if_any(path: string) -> bool with IO, Mut {
         } else {
             print("` in string literal")
             lexer_print_location(path)
-            print("  = note: accepted escapes are \\n \\t \\r \\0 \\\\ \\\" and \\xHH (two hex digits)\n")
+            print("  = note: accepted escapes are \\n \\t \\r \\0 \\\\ \\\" \\' \\xHH and \\u{…}\n")
         }
     }
     true
@@ -1129,20 +1160,19 @@ pub fn lex_source_to_globals(source_len: i64) -> i64 with Mut, Div, Panic {
             // later token (and diagnostic) is reported lines too early.
             while pos < n && CURSOR_SOURCE[pos as usize] != 34 as i8 {
                 if CURSOR_SOURCE[pos as usize] == 92 as i8 && pos + 1 < n {
-                    if !lexer_escape_ok(pos, n) {
+                    let span = lexer_escape_span(pos, n)
+                    if span <= 0 {
                         let bad = (CURSOR_SOURCE[(pos + 1) as usize] as i64) & 255
                         lexer_mark_lex_error(4, line, col, bad)
                     }
-                    if CURSOR_SOURCE[(pos + 1) as usize] == 120 as i8 && lexer_escape_ok(pos, n) {
-                        pos = pos + 4
-                        col = col + 4
-                    } else if CURSOR_SOURCE[(pos + 1) as usize] == 10 as i8 {
-                        pos = pos + 2
+                    let step = if span > 0 { span } else { 2 }
+                    if CURSOR_SOURCE[(pos + 1) as usize] == 10 as i8 {
+                        pos = pos + step
                         line = line + 1
                         col = 1
                     } else {
-                        pos = pos + 2
-                        col = col + 2
+                        pos = pos + step
+                        col = col + step
                     }
                 } else if CURSOR_SOURCE[pos as usize] == 10 as i8 {
                     pos = pos + 1

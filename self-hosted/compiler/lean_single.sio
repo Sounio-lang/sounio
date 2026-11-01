@@ -2788,7 +2788,8 @@ fn emit_call_abs_qword_x86(addr: i64, argc: i64) with Mut {
 fn emit_inline_cstr_from_string_x86(s: string) with Mut, Panic, Div {
     let n = str_len(s)
     em(0xe9)
-    em32(n + 1)
+    em32(n + 9)
+    em64(n)
     let start = CL
     var i: i64 = 0
     while i < n {
@@ -2803,7 +2804,8 @@ fn emit_inline_cstr_from_string_x86(s: string) with Mut, Panic, Div {
 fn emit_inline_cstr_from_src_x86(ns: i64, ne: i64) with Mut, Panic {
     let n = ne - ns
     em(0xe9)
-    em32(n + 1)
+    em32(n + 9)
+    em64(n)
     let start = CL
     var i: i64 = 0
     while i < n {
@@ -2817,7 +2819,8 @@ fn emit_inline_cstr_from_src_x86(ns: i64, ne: i64) with Mut, Panic {
 
 fn emit_inline_cstr_from_ptx_x86(off: i64, len: i64) with Mut, Panic {
     em(0xe9)
-    em32(len + 1)
+    em32(len + 9)
+    em64(len)
     let start = CL
     var i: i64 = 0
     while i < len {
@@ -8584,6 +8587,110 @@ fn mono_infer_from_nth_arg(gi: i64, call_arg_start: i64) -> i64 with Panic, Mut 
     return mono_find_inst(gi, 0, inf_tys, inf_tye)
 }
 
+// ADR-015 row 3. p is the backslash. On success STR_ESC_OK is 1, STR_ESC_ADV
+// is the source width, and STR_ESC_B0..B3 hold STR_ESC_N decoded bytes.
+// \u{…} is one Unicode scalar (1 to 6 hex digits, not a surrogate, at most
+// U+10FFFF) written as UTF-8. Anything else is refused by the lexer.
+var STR_ESC_OK: i64 = 0
+var STR_ESC_ADV: i64 = 0
+var STR_ESC_N: i64 = 0
+var STR_ESC_B0: i64 = 0
+var STR_ESC_B1: i64 = 0
+var STR_ESC_B2: i64 = 0
+var STR_ESC_B3: i64 = 0
+
+fn str_hex_val(c: i64) -> i64 {
+    if c >= 48 && c <= 57 { return c - 48 }
+    if c >= 97 && c <= 102 { return c - 87 }
+    if c >= 65 && c <= 70 { return c - 55 }
+    0 - 1
+}
+
+fn str_esc_byte(k: i64) -> i64 {
+    if k == 0 { return STR_ESC_B0 }
+    if k == 1 { return STR_ESC_B1 }
+    if k == 2 { return STR_ESC_B2 }
+    STR_ESC_B3
+}
+
+fn str_store_utf8(cp: i64) with Mut {
+    STR_ESC_N = 1
+    STR_ESC_B0 = cp
+    STR_ESC_B1 = 0
+    STR_ESC_B2 = 0
+    STR_ESC_B3 = 0
+    if cp < 128 { return }
+    if cp < 2048 {
+        STR_ESC_N = 2
+        STR_ESC_B0 = 192 + cp / 64
+        STR_ESC_B1 = 128 + (cp - (cp / 64) * 64)
+        return
+    }
+    if cp < 65536 {
+        STR_ESC_N = 3
+        STR_ESC_B0 = 224 + cp / 4096
+        let rest = cp - (cp / 4096) * 4096
+        STR_ESC_B1 = 128 + rest / 64
+        STR_ESC_B2 = 128 + (rest - (rest / 64) * 64)
+        return
+    }
+    STR_ESC_N = 4
+    STR_ESC_B0 = 240 + cp / 262144
+    let rest = cp - (cp / 262144) * 262144
+    STR_ESC_B1 = 128 + rest / 4096
+    let rest2 = rest - (rest / 4096) * 4096
+    STR_ESC_B2 = 128 + rest2 / 64
+    STR_ESC_B3 = 128 + (rest2 - (rest2 / 64) * 64)
+}
+
+fn str_decode_escape(p: i64, se: i64) with Mut, Panic {
+    STR_ESC_OK = 0
+    STR_ESC_ADV = 2
+    STR_ESC_N = 0
+    STR_ESC_B0 = 0
+    STR_ESC_B1 = 0
+    STR_ESC_B2 = 0
+    STR_ESC_B3 = 0
+    if p + 1 >= se { return }
+    let c2 = sb(p + 1)
+    if c2 == 110 { STR_ESC_OK = 1; STR_ESC_N = 1; STR_ESC_B0 = 10; return }
+    if c2 == 116 { STR_ESC_OK = 1; STR_ESC_N = 1; STR_ESC_B0 = 9; return }
+    if c2 == 114 { STR_ESC_OK = 1; STR_ESC_N = 1; STR_ESC_B0 = 13; return }
+    if c2 == 48 { STR_ESC_OK = 1; STR_ESC_N = 1; STR_ESC_B0 = 0; return }
+    if c2 == 92 { STR_ESC_OK = 1; STR_ESC_N = 1; STR_ESC_B0 = 92; return }
+    if c2 == 34 { STR_ESC_OK = 1; STR_ESC_N = 1; STR_ESC_B0 = 34; return }
+    if c2 == 39 { STR_ESC_OK = 1; STR_ESC_N = 1; STR_ESC_B0 = 39; return }
+    if c2 == 120 {
+        if p + 3 >= se { return }
+        let v1 = str_hex_val(sb(p + 2))
+        let v2 = str_hex_val(sb(p + 3))
+        if v1 < 0 || v2 < 0 { return }
+        STR_ESC_OK = 1
+        STR_ESC_ADV = 4
+        STR_ESC_N = 1
+        STR_ESC_B0 = v1 * 16 + v2
+        return
+    }
+    if c2 == 117 {
+        if p + 3 >= se || sb(p + 2) != 123 { return }
+        var i = p + 3
+        var digits: i64 = 0
+        var cp: i64 = 0
+        while i < se && digits < 6 {
+            let hv = str_hex_val(sb(i))
+            if hv < 0 { break }
+            cp = cp * 16 + hv
+            digits = digits + 1
+            i = i + 1
+        }
+        if digits < 1 || i >= se || sb(i) != 125 { return }
+        if cp > 1114111 || (cp >= 55296 && cp <= 57343) { return }
+        str_store_utf8(cp)
+        STR_ESC_OK = 1
+        STR_ESC_ADV = (i + 1) - p
+    }
+}
+
 // ─── Lexer ───
 fn lex_all() with IO, Mut, Panic, Div {
     TC = 0
@@ -8631,27 +8738,13 @@ fn lex_all() with IO, Mut, Panic, Div {
                         p = p + 1
                         continue
                     }
-                    let esc = sb(p + 1)
-                    if esc == 120 && p + 3 < SRC_LEN {
-                        let h1 = sb(p + 2)
-                        let h2 = sb(p + 3)
-                        var h1_ok: i64 = 0
-                        if (h1 >= 48 && h1 <= 57) || (h1 >= 97 && h1 <= 102) || (h1 >= 65 && h1 <= 70) { h1_ok = 1 }
-                        var h2_ok: i64 = 0
-                        if (h2 >= 48 && h2 <= 57) || (h2 >= 97 && h2 <= 102) || (h2 >= 65 && h2 <= 70) { h2_ok = 1 }
-                        if h1_ok == 1 && h2_ok == 1 {
-                            p = p + 4
-                            continue
-                        }
+                    str_decode_escape(p, SRC_LEN)
+                    if STR_ESC_OK != 1 && LEX_ERROR_LINE == 0 {
+                        LEX_ERROR_LINE = cur_line
+                        LEX_ERROR_KIND = 2
                     }
-                    if esc != 110 && esc != 116 && esc != 48 && esc != 92 && esc != 34 {
-                        if LEX_ERROR_LINE == 0 {
-                            LEX_ERROR_LINE = cur_line
-                            LEX_ERROR_KIND = 2
-                        }
-                    }
-                    if esc == 10 { cur_line = cur_line + 1 }
-                    p = p + 2
+                    if sb(p + 1) == 10 { cur_line = cur_line + 1 }
+                    if STR_ESC_OK == 1 { p = p + STR_ESC_ADV } else { p = p + 2 }
                     continue
                 }
                 p = p + 1
@@ -12347,55 +12440,51 @@ fn emit_print_src(tok: i64, ss: i64, se: i64, braces: i64) with IO, Mut, Panic, 
     var zi: i64 = 0
     while zi < 256 { SQW[zi as usize] = 0; zi = zi + 1 }
     var si: i64 = ss
-    while si < se {
+    var stop = false
+    while si < se && !stop {
         let c = sb(si)
-        var byte: i64 = c
+        var nout: i64 = 1
+        var out0: i64 = c
+        var out1: i64 = 0
+        var out2: i64 = 0
+        var out3: i64 = 0
         if braces == 1 && (c == 123 || c == 125) && si + 1 < se && sb(si + 1) == c {
             si = si + 2
         } else if c == 92 && si + 1 < se {
-            let c2 = sb(si + 1)
-            if c2 == 120 && si + 3 < se {
-                let h1 = sb(si + 2)
-                let h2 = sb(si + 3)
-                var v1: i64 = 0 - 1
-                if h1 >= 48 && h1 <= 57 { v1 = h1 - 48 }
-                else if h1 >= 97 && h1 <= 102 { v1 = h1 - 87 }
-                else if h1 >= 65 && h1 <= 70 { v1 = h1 - 55 }
-                var v2: i64 = 0 - 1
-                if h2 >= 48 && h2 <= 57 { v2 = h2 - 48 }
-                else if h2 >= 97 && h2 <= 102 { v2 = h2 - 87 }
-                else if h2 >= 65 && h2 <= 70 { v2 = h2 - 55 }
-                if v1 >= 0 && v2 >= 0 {
-                    byte = v1 * 16 + v2
-                    si = si + 4
-                } else {
-                    byte = c2
-                    si = si + 2
-                }
+            str_decode_escape(si, se)
+            if STR_ESC_OK == 1 {
+                nout = STR_ESC_N
+                out0 = STR_ESC_B0
+                out1 = STR_ESC_B1
+                out2 = STR_ESC_B2
+                out3 = STR_ESC_B3
+                si = si + STR_ESC_ADV
             } else {
-                if c2 == 110 { byte = 10 }
-                else if c2 == 116 { byte = 9 }
-                else if c2 == 48 { byte = 0 }
-                else { byte = c2 }
+                out0 = sb(si + 1)
                 si = si + 2
             }
         } else { si = si + 1 }
-        let qi = slen / 8
-        if qi >= 256 {
-            // SQW is [i64; 256]; this function packs 8 decoded bytes per
-            // slot, so qi (not slen) is the real bound -- overflow here
-            // needs a ~2048-byte literal, unlike the 256-byte cap in the
-            // unpacked `let s = "..."` decoders (compile_primary /
-            // compile_primary_a64). emit_print_a64 uses this same pack.
-            // Without this, SQW[qi] would write past index 255 into FN_NS.
-            tc_error_hard(tok, "string literal exceeds maximum of 2048 bytes")
-            TYPECHECK_FAILED = 1
-            slen = 0
-            break
-        } else {
-            let bi = slen - qi * 8
-            SQW[qi as usize] = SQW[qi as usize] | (byte << (bi * 8))
-            slen = slen + 1
+        var k: i64 = 0
+        while k < nout && !stop {
+            let byte = if k == 0 { out0 } else if k == 1 { out1 } else if k == 2 { out2 } else { out3 }
+            let qi = slen / 8
+            if qi >= 256 {
+                // SQW is [i64; 256]; this function packs 8 decoded bytes per
+                // slot, so qi (not slen) is the real bound -- overflow here
+                // needs a ~2048-byte literal, unlike the 256-byte cap in the
+                // unpacked `let s = "..."` decoders (compile_primary /
+                // compile_primary_a64). emit_print_a64 uses this same pack.
+                // Without this, SQW[qi] would write past index 255 into FN_NS.
+                tc_error_hard(tok, "string literal exceeds maximum of 2048 bytes")
+                TYPECHECK_FAILED = 1
+                slen = 0
+                stop = true
+            } else {
+                let bi = slen - qi * 8
+                SQW[qi as usize] = SQW[qi as usize] | (byte << (bi * 8))
+                slen = slen + 1
+            }
+            k = k + 1
         }
     }
     let nq = (slen + 7) / 8
@@ -12413,16 +12502,10 @@ fn emit_print(tok: i64) with IO, Mut, Panic, Div {
 }
 
 fn emit_print_cstr() with Mut {
-    // rax = C string pointer
-    em(0x48); em(0x89); em(0xc7)  // mov rdi, rax (ptr)
-    em(0x48); em(0x31); em(0xc9)  // xor rcx, rcx
-    let slp = CL
-    em(0x80); em(0x3c); em(0x0f); em(0x00)  // cmp byte [rdi+rcx], 0
-    em(0x74); em(0x04)  // je done
-    em(0x48); em(0xff); em(0xc1)  // inc rcx
-    em(0xeb); em(0xf5 as i64 & 0xFF)  // jmp loop
-    em(0x48); em(0x89); em(0xfe)  // mov rsi, rdi
-    em(0x48); em(0x89); em(0xca)  // mov rdx, rcx
+    // Sounio string ABI: payload pointer, byte count at payload - 8.
+    // Every producer owns this prefix; foreign C strings are copied on import.
+    em(0x48); em(0x89); em(0xc6)  // mov rsi, rax
+    em(0x48); em(0x8b); em(0x50); em(0xf8)  // mov rdx, [rax-8]
     em(0xb8); em32(1)
     em(0xbf); em32(1)
     em(0x0f); em(0x05)
@@ -14136,25 +14219,18 @@ fn emit_arg_count() with Mut {
     em(0x48); em(0x8b); em(0x00)  // mov rax, [rax]
 }
 
-fn emit_get_arg() with Mut {
+fn emit_get_arg() with Mut, Panic, Div {
     // rax = arg index. argv stored at BSS+8. argv[i] = [argv_base + i*8]
     let argv_addr = GL_BSS_BASE - 8    // argv at BSS base + 8
     em(0x48); em(0x89); em(0xc1)  // mov rcx, rax (index)
     em(0x48); em(0xb8); em64(argv_addr)
     em(0x48); em(0x8b); em(0x00)  // mov rax, [rax] = argv base
     em(0x48); em(0x8b); em(0x04); em(0xc8)  // mov rax, [rax + rcx*8]
+    emit_import_cstr_x86()
 }
 
 fn emit_str_len() with Mut {
-    // rax = string ptr; count until null byte
-    em(0x48); em(0x89); em(0xc1)  // mov rcx, rax (ptr)
-    em(0x48); em(0x31); em(0xc0)  // xor rax, rax (count=0)
-    let top = CL
-    em(0x80); em(0x3c); em(0x01); em(0x00)  // cmp byte [rcx+rax], 0
-    em(0x74); em(0x04)  // je done (+4)
-    em(0x48); em(0xff); em(0xc0)  // inc rax
-    em(0xeb); em(0xf5 as i64 & 0xFF)  // jmp top (relative back)
-    // done: rax = length
+    em(0x48); em(0x8b); em(0x40); em(0xf8)  // mov rax, [rax-8]
 }
 
 fn emit_print_char_x86() with Mut {
@@ -14168,70 +14244,84 @@ fn emit_print_char_x86() with Mut {
     em(0x48); em(0x83); em(0xc4); em(8)
 }
 
-fn emit_str_eq_regs_x86() with Mut {
+fn emit_str_eq_regs_x86() with Mut, Panic {
     em(0x48); em(0x89); em(0xcf)  // mov rdi, rcx
     em(0x48); em(0x89); em(0xc6)  // mov rsi, rax
-    em(0x48); em(0x0f); em(0xb6); em(0x07)  // movzx rax, byte [rdi]
-    em(0x3a); em(0x06)                      // cmp al, [rsi]
-    em(0x75); em(12)                        // jne not_equal
-    em(0x84); em(0xc0)                      // test al, al
-    em(0x74); em(13)                        // jz equal
-    em(0x48); em(0xff); em(0xc7)            // inc rdi
-    em(0x48); em(0xff); em(0xc6)            // inc rsi
-    em(0xeb); em(0xec as i64 & 0xFF)        // jmp loop
-    em(0x48); em(0x31); em(0xc0)            // not_equal: xor rax, rax
-    em(0xeb); em(7)                         // jmp done
-    em(0x48); em(0xc7); em(0xc0); em32(1)   // equal: mov rax, 1
+    em(0x48); em(0x8b); em(0x4f); em(0xf8)  // mov rcx, [rdi-8]
+    em(0x48); em(0x3b); em(0x4e); em(0xf8)  // cmp rcx, [rsi-8]
+    em(0x0f); em(0x85); let unequal = CL; em32(0)
+    em(0x48); em(0x85); em(0xc9)            // test rcx, rcx (empty strings)
+    em(0x0f); em(0x84); let empty = CL; em32(0)
+    em(0xfc); em(0xf3); em(0xa6)           // cld; repe cmpsb
+    em(0x0f); em(0x94); em(0xc0)           // sete al
+    em(0x48); em(0x0f); em(0xb6); em(0xc0)
+    em(0xe9); let done = CL; em32(0)
+    patch32(unequal, CL)
+    em(0x31); em(0xc0)
+    em(0xe9); let done_false = CL; em32(0)
+    patch32(empty, CL)
+    emit_imm64(1)
+    patch32(done, CL)
+    patch32(done_false, CL)
 }
 
-// arm64 twin of emit_str_eq_regs_x86: compare NUL-terminated strings at x1 and x0,
+// arm64 twin of emit_str_eq_regs_x86: compare length-bearing strings at x1 and x0,
 // result (0/1) in x0.
 fn emit_str_eq_regs_a64() with Mut {
-    em32(0x39400029)  // loop: ldrb w9, [x1]
-    em32(0x3940000A)  //       ldrb w10, [x0]
-    em32(0x6B0A013F)  //       cmp w9, w10
-    em32(0x540000A1)  //       b.ne +5 (not_equal)
-    em32(0x340000C9)  //       cbz w9, +6 (equal)
-    em32(0x91000421)  //       add x1, x1, #1
-    em32(0x91000400)  //       add x0, x0, #1
-    em32(0x17FFFFF9)  //       b -7 (loop)
-    em32(0xD2800000)  // not_equal: mov x0, #0
-    em32(0x14000002)  //       b +2 (done)
+    em32(0xF85F802B)  // ldur x11, [x1, #-8]
+    em32(0xF85F800C)  // ldur x12, [x0, #-8]
+    em32(0xEB0C017F)  // cmp x11, x12
+    em32(0x54000141)  // b.ne not_equal
+    em32(0xB40000EB)  // loop: cbz x11, equal
+    em32(0x38401429)  // ldrb w9, [x1], #1
+    em32(0x3840140A)  // ldrb w10, [x0], #1
+    em32(0x6B0A013F)  // cmp w9, w10
+    em32(0x540000A1)  // b.ne not_equal
+    em32(0xD100056B)  // sub x11, x11, #1
+    em32(0x17FFFFFA)  // b loop
     em32(0xD2800020)  // equal: mov x0, #1
-    // done:
+    em32(0x14000002)  // b done
+    em32(0xD2800000)  // not_equal: mov x0, #0
 }
 
-fn emit_starts_with_regs_x86() with Mut {
+fn emit_starts_with_regs_x86() with Mut, Panic {
     em(0x48); em(0x89); em(0xcf)  // mov rdi, rcx
     em(0x48); em(0x89); em(0xc6)  // mov rsi, rax
-    em(0x48); em(0x0f); em(0xb6); em(0x06)  // movzx rax, byte [rsi]
-    em(0x84); em(0xc0)                      // test al, al
-    em(0x74); em(12)                        // jz match
-    em(0x3a); em(0x07)                      // cmp al, [rdi]
-    em(0x75); em(17)                        // jne no_match
-    em(0x48); em(0xff); em(0xc7)            // inc rdi
-    em(0x48); em(0xff); em(0xc6)            // inc rsi
-    em(0xeb); em(0xec as i64 & 0xFF)        // jmp loop
-    em(0x48); em(0xc7); em(0xc0); em32(1)   // match: mov rax, 1
-    em(0xeb); em(3)                         // jmp done
-    em(0x48); em(0x31); em(0xc0)            // no_match: xor rax, rax
+    em(0x48); em(0x8b); em(0x4e); em(0xf8)  // prefix length
+    em(0x48); em(0x3b); em(0x4f); em(0xf8)  // cmp rcx, receiver length
+    em(0x0f); em(0x87); let too_long = CL; em32(0)
+    em(0x48); em(0x85); em(0xc9)
+    em(0x0f); em(0x84); let empty = CL; em32(0)
+    em(0xfc); em(0xf3); em(0xa6)
+    em(0x0f); em(0x94); em(0xc0)
+    em(0x48); em(0x0f); em(0xb6); em(0xc0)
+    em(0xe9); let done = CL; em32(0)
+    patch32(too_long, CL)
+    em(0x31); em(0xc0)
+    em(0xe9); let done_false = CL; em32(0)
+    patch32(empty, CL)
+    emit_imm64(1)
+    patch32(done, CL)
+    patch32(done_false, CL)
 }
 
 // arm64 twin of emit_starts_with_regs_x86: does the string at x1 start with the
 // prefix at x0?  Iterates the prefix (x0); result (0/1) in x0.
 fn emit_starts_with_regs_a64() with Mut {
-    em32(0x3940000A)  // loop: ldrb w10, [x0]  (prefix byte)
-    em32(0x340000EA)  //       cbz w10, +7 (match — prefix exhausted)
-    em32(0x39400029)  //       ldrb w9, [x1]   (string byte)
-    em32(0x6B09015F)  //       cmp w10, w9
-    em32(0x540000C1)  //       b.ne +6 (no_match)
-    em32(0x91000421)  //       add x1, x1, #1
-    em32(0x91000400)  //       add x0, x0, #1
-    em32(0x17FFFFF9)  //       b -7 (loop)
+    em32(0xF85F800B)  // ldur x11, [x0, #-8] (prefix)
+    em32(0xF85F802C)  // ldur x12, [x1, #-8] (receiver)
+    em32(0xEB0C017F)  // cmp x11, x12
+    em32(0x54000148)  // b.hi no_match
+    em32(0xB40000EB)  // loop: cbz x11, match
+    em32(0x38401429)  // ldrb w9, [x1], #1
+    em32(0x3840140A)  // ldrb w10, [x0], #1
+    em32(0x6B0A013F)  // cmp w9, w10
+    em32(0x540000A1)  // b.ne no_match
+    em32(0xD100056B)  // sub x11, x11, #1
+    em32(0x17FFFFFA)  // b loop
     em32(0xD2800020)  // match: mov x0, #1
-    em32(0x14000002)  //       b +2 (done)
+    em32(0x14000002)  // b done
     em32(0xD2800000)  // no_match: mov x0, #0
-    // done:
 }
 
 // Copy x2 bytes from [x1] to [x0], advancing x0 and x1 (x0 ends past the region).
@@ -14260,7 +14350,7 @@ fn emit_str_concat_slots_a64(slot_a: i64, slot_b: i64) with Mut, Panic, Div {
     emit_load_var_a64(slot_len_b); emit_pop_x1_a64()  // x0 = len_b, x1 = len_a
     em32(0x8B010000)   // add x0, x0, x1
     em32(0x91000400)   // add x0, x0, #1
-    emit_heap_alloc_a64()
+    emit_string_alloc_a64()
     emit_store_var_a64(slot_res)
     // copy a: dst=res, src=a, len=len_a
     emit_load_var_a64(slot_len_a); em32(0xAA0003E2)  // x2 = len_a
@@ -14286,7 +14376,7 @@ fn emit_str_from_bytes_slots_a64(slot_buf: i64, slot_len: i64) with Mut, Panic, 
     emit_store_var_a64(slot_len)
     emit_load_var_a64(slot_len)
     em32(0x91000400)   // add x0, x0, #1
-    emit_heap_alloc_a64()
+    emit_string_alloc_a64()
     emit_store_var_a64(slot_res)
     emit_load_var_a64(slot_len); em32(0xAA0003E2)   // x2 = len
     emit_load_var_a64(slot_buf); em32(0xAA0003E1)   // x1 = buf
@@ -14300,15 +14390,31 @@ fn emit_str_from_bytes_slots_a64(slot_buf: i64, slot_len: i64) with Mut, Panic, 
 fn emit_str_slice_range_slots_a64(slot_s: i64, slot_start: i64, slot_end: i64) with Mut, Panic, Div {
     let slot_len = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
     let slot_res = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+    emit_load_var_a64(slot_s); emit_str_len_a64()
+    em32(0xAA0003E2)   // x2 = source length
+    emit_load_var_a64(slot_start)
+    em32(0xF100001F)   // cmp x0, #0
+    em32(0x9A9FA000)   // csel x0, x0, xzr, ge
+    em32(0xEB02001F)   // cmp x0, x2
+    em32(0x9A82D000)   // csel x0, x0, x2, le
+    emit_store_var_a64(slot_start)
+    emit_load_var_a64(slot_end)
+    em32(0xF100001F)
+    em32(0x9A9FA000)
+    em32(0xEB02001F)
+    em32(0x9A82D000)
+    emit_store_var_a64(slot_end)
     // len = end - start
     emit_load_var_a64(slot_end); emit_push_a64()
     emit_load_var_a64(slot_start); emit_pop_x1_a64()  // x0 = start, x1 = end
     em32(0xCB000020)   // sub x0, x1, x0   (end - start)
+    em32(0xF100001F)
+    em32(0x9A9FA000)   // reversed bounds produce an empty string
     emit_store_var_a64(slot_len)
     // buffer = heap_alloc(len + 1)
     emit_load_var_a64(slot_len)
     em32(0x91000400)   // add x0, x0, #1
-    emit_heap_alloc_a64()
+    emit_string_alloc_a64()
     emit_store_var_a64(slot_res)
     // copy: dst=res, src=s+start, len=len
     emit_load_var_a64(slot_len); em32(0xAA0003E2)   // x2 = len
@@ -14784,6 +14890,70 @@ fn emit_pool_alloc_rax_x86() with Mut, Panic, Div {
     em(0xe8); em32(POOL_ALLOC_ROUTINE_CL - (CL + 4)) // call routine (rax = size in)
 }
 
+// Input is byte length plus one trailing zero. The generic heap ABI is unchanged.
+fn emit_string_alloc_x86() with Mut, Panic, Div {
+    em(0x50)
+    em(0x48); em(0x83); em(0xc0); em(8)
+    emit_pool_alloc_rax_x86()
+    em(0x59)
+    em(0x48); em(0xff); em(0xc9)
+    em(0x48); em(0x89); em(0x08)
+    em(0x48); em(0x83); em(0xc0); em(8)
+}
+
+fn emit_string_alloc_a64() with Mut, Panic, Div {
+    emit_push_a64()
+    em32(0x91002000)  // add x0, x0, #8
+    emit_heap_alloc_a64()
+    emit_pop_x1_a64()
+    em32(0xD1000421)  // sub x1, x1, #1
+    em32(0xF9000001)  // str x1, [x0]
+    em32(0x91002000)  // add x0, x0, #8
+}
+
+// Foreign pointers have no prefix. Copy the C payload into an owned string.
+fn emit_import_cstr_x86() with Mut, Panic, Div {
+    em(0x50)
+    em(0x31); em(0xc9)
+    let loop_top = CL
+    em(0x80); em(0x3c); em(0x08); em(0)
+    em(0x0f); em(0x84); let found = CL; em32(0)
+    em(0x48); em(0xff); em(0xc1)
+    em(0xe9); em32(loop_top - (CL + 4))
+    patch32(found, CL)
+    em(0x51)
+    em(0x48); em(0x8d); em(0x41); em(1)
+    emit_string_alloc_x86()
+    em(0x59); em(0x5e)
+    em(0x48); em(0x89); em(0xc7)
+    em(0xfc); em(0xf3); em(0xa4)
+    em(0xc6); em(0x07); em(0)
+}
+
+fn emit_import_cstr_a64() with Mut, Panic, Div {
+    emit_push_a64()
+    em32(0xAA0003E9)
+    em32(0xD2800000)
+    let top = CL
+    em32(0x3860692A)  // ldrb w10, [x9, x0]
+    let found = CL
+    em32(0x3400000A)
+    em32(0x91000400)
+    let back = CL
+    em32(0x14000000)
+    patch_branch_a64(back, top)
+    patch_branch_a64(found, CL)
+    emit_push_a64()
+    em32(0x91000400)
+    emit_string_alloc_a64()
+    em32(0xAA0003EC)
+    em32(0xF84107E2)  // pop count into x2
+    emit_pop_x1_a64()
+    emit_memcpy_a64()
+    em32(0x3900001F)
+    em32(0xAA0C03E0)
+}
+
 fn emit_str_concat_slots_x86(slot_a: i64, slot_b: i64) with Mut, Panic, Div {
     let slot_len_a = NEXT_SLOT
     NEXT_SLOT = NEXT_SLOT + 1
@@ -14806,7 +14976,7 @@ fn emit_str_concat_slots_x86(slot_a: i64, slot_b: i64) with Mut, Panic, Div {
     em(0x59)
     em(0x48); em(0x01); em(0xc8)            // add rax, rcx
     em(0x48); em(0x83); em(0xc0); em(1)     // add rax, 1
-    emit_pool_alloc_rax_x86()
+    emit_string_alloc_x86()
     emit_store_var(slot_res)
 
     em(0xfc)                                // cld
@@ -14844,7 +15014,7 @@ fn emit_str_from_bytes_slots_x86(slot_buf: i64, slot_len: i64) with Mut, Panic, 
     emit_store_var(slot_len)
     emit_load_var(slot_len)
     em(0x48); em(0x83); em(0xc0); em(1)     // add rax, 1
-    emit_pool_alloc_rax_x86()
+    emit_string_alloc_x86()
     emit_store_var(slot_res)
     em(0xfc)                                // cld
     emit_load_var(slot_len)
@@ -14863,6 +15033,24 @@ fn emit_str_slice_range_slots_x86(slot_s: i64, slot_start: i64, slot_end: i64) w
     NEXT_SLOT = NEXT_SLOT + 1
     let slot_res = NEXT_SLOT
     NEXT_SLOT = NEXT_SLOT + 1
+    // Clamp each bound to [0, source length], including the suffix form.
+    emit_load_var(slot_s)
+    emit_str_len()
+    em(0x48); em(0x89); em(0xc2)            // mov rdx, rax
+    emit_load_var(slot_start)
+    em(0x31); em(0xc9)
+    em(0x48); em(0x85); em(0xc0)
+    em(0x48); em(0x0f); em(0x48); em(0xc1) // cmovs rax, rcx
+    em(0x48); em(0x39); em(0xd0)
+    em(0x48); em(0x0f); em(0x4f); em(0xc2) // cmovg rax, rdx
+    emit_store_var(slot_start)
+    emit_load_var(slot_end)
+    em(0x31); em(0xc9)
+    em(0x48); em(0x85); em(0xc0)
+    em(0x48); em(0x0f); em(0x48); em(0xc1)
+    em(0x48); em(0x39); em(0xd0)
+    em(0x48); em(0x0f); em(0x4f); em(0xc2)
+    emit_store_var(slot_end)
 
     emit_load_var(slot_end)
     emit_push()
@@ -14870,11 +15058,14 @@ fn emit_str_slice_range_slots_x86(slot_s: i64, slot_start: i64, slot_end: i64) w
     em(0x59)
     em(0x48); em(0x29); em(0xc1)            // sub rcx, rax
     em(0x48); em(0x89); em(0xc8)            // mov rax, rcx
+    em(0x31); em(0xc9)
+    em(0x48); em(0x85); em(0xc0)
+    em(0x48); em(0x0f); em(0x48); em(0xc1) // reversed bounds -> zero length
     emit_store_var(slot_len)
 
     emit_load_var(slot_len)
     em(0x48); em(0x83); em(0xc0); em(1)     // add rax, 1
-    emit_pool_alloc_rax_x86()
+    emit_string_alloc_x86()
     emit_store_var(slot_res)
 
     em(0xfc)                                // cld
@@ -14974,9 +15165,11 @@ fn emit_read_file() with Mut, Panic, Div {
     // dst = pool_alloc(len + 64)
     em(0x51)  // push rcx (len)                           stack=[fd, scratch, len]
     em(0x48); em(0x89); em(0xc8)  // mov rax, rcx
-    em(0x48); em(0x83); em(0xc0); em(64)  // add rax, 64
+    em(0x48); em(0x83); em(0xc0); em(72)  // prefix + 64-byte tail
     em(0xe8); em32(POOL_ALLOC_ROUTINE_CL - (CL + 4))  // call pool routine -> rax = dst
     em(0x59)  // pop rcx (len)                            stack=[fd, scratch]
+    em(0x48); em(0x89); em(0x08)  // store byte count
+    em(0x48); em(0x83); em(0xc0); em(8)
     // copy len bytes scratch -> dst, then 64 zero tail bytes
     em(0x50)  // push rax (dst, the return value)         stack=[fd, scratch, dst]
     em(0x48); em(0x89); em(0xc7)  // mov rdi, rax (dst)
@@ -15047,15 +15240,9 @@ fn emit_read_byte_x86() with Mut {
 
 // Gen 19: read_line() — read one line from stdin (fd=0) into a fresh mmap buffer.
 // Strips trailing newline. Returns null-terminated string pointer.
-fn emit_read_line_x86() with Mut {
-    // mmap(NULL, 4096, PROT_RW, MAP_PRIVATE|MAP_ANON, -1, 0)
-    em(0x48); em(0x31); em(0xff)              // xor rdi, rdi
-    em(0xbe); em32(4096)                      // mov esi, 4096
-    em(0xba); em32(3)                         // mov edx, PROT_READ|PROT_WRITE
-    em(0x41); em(0xba); em32(0x22)            // mov r10d, MAP_PRIVATE|MAP_ANON
-    em(0x49); em(0xc7); em(0xc0); em32(-1)   // mov r8, -1
-    em(0x4d); em(0x31); em(0xc9)              // xor r9, r9
-    em(0xb8); em32(9); em(0x0f); em(0x05)    // mmap → buf in rax
+fn emit_read_line_x86() with Mut, Panic, Div {
+    emit_imm64(4096)
+    emit_string_alloc_x86()
     em(0x50)                                  // push buf
     // read(0, buf, 4095)
     em(0x48); em(0x89); em(0xc6)              // mov rsi, rax (buf)
@@ -15063,17 +15250,23 @@ fn emit_read_line_x86() with Mut {
     em(0xba); em32(4095)                      // mov edx, 4095 (leave room for \0)
     em(0x48); em(0x31); em(0xc0)              // xor rax, rax (sys_read=0)
     em(0x0f); em(0x05)                        // syscall → bytes_read in rax
-    // If bytes_read <= 0, rax stays negative/zero — still null-terminate
+    // Clamp read errors before indexing the buffer.
     em(0x48); em(0x85); em(0xc0)              // test rax, rax
-    em(0x7e); em(0x08)                        // jle read_done (skip newline strip)
+    em(0x7d); em(0x02)
+    em(0x31); em(0xc0)
+    em(0x48); em(0x85); em(0xc0)
+    em(0x0f); em(0x84); let no_bytes = CL; em32(0)
     // Strip trailing '\n' (10) if present
     em(0x48); em(0x8b); em(0x0c); em(0x24)   // mov rcx, [rsp] (buf)
     em(0x48); em(0x0f); em(0xbe); em(0x4c); em(0x01); em(0xff) // movsx rcx, byte[rcx+rax-1]
     em(0x48); em(0x83); em(0xf9); em(0x0a)   // cmp rcx, 10  ('\n')
-    em(0x75); em(0x02)                        // jne read_done
+    em(0x0f); em(0x85); let no_newline = CL; em32(0)
     em(0x48); em(0xff); em(0xc8)              // dec rax
+    patch32(no_bytes, CL)
+    patch32(no_newline, CL)
     // read_done: null-terminate buf[rax]
     em(0x48); em(0x8b); em(0x0c); em(0x24)   // mov rcx, [rsp] (buf)
+    em(0x48); em(0x89); em(0x41); em(0xf8)   // store final count
     em(0xc6); em(0x04); em(0x01); em(0x00)   // mov byte[rcx+rax], 0
     em(0x58)                                  // pop rax (return buf)
 }
@@ -18131,51 +18324,47 @@ fn compile_primary() with IO, Mut, Panic, Div {
         var zi: i64 = 0
         while zi < 256 { SQW[zi as usize] = 0; zi = zi + 1 }
         var si: i64 = ss
-        while si < se {
+        var stop = false
+        while si < se && !stop {
             let ch = sb(si)
-            var byte: i64 = ch
+            var nout: i64 = 1
+            var out0: i64 = ch
+            var out1: i64 = 0
+            var out2: i64 = 0
+            var out3: i64 = 0
             if ch == 92 && si + 1 < se {
-                let c2 = sb(si + 1)
-                if c2 == 120 && si + 3 < se {
-                    let h1 = sb(si + 2)
-                    let h2 = sb(si + 3)
-                    var v1: i64 = 0 - 1
-                    if h1 >= 48 && h1 <= 57 { v1 = h1 - 48 }
-                    else if h1 >= 97 && h1 <= 102 { v1 = h1 - 87 }
-                    else if h1 >= 65 && h1 <= 70 { v1 = h1 - 55 }
-                    var v2: i64 = 0 - 1
-                    if h2 >= 48 && h2 <= 57 { v2 = h2 - 48 }
-                    else if h2 >= 97 && h2 <= 102 { v2 = h2 - 87 }
-                    else if h2 >= 65 && h2 <= 70 { v2 = h2 - 55 }
-                    if v1 >= 0 && v2 >= 0 {
-                        byte = v1 * 16 + v2
-                        si = si + 4
-                    } else {
-                        byte = c2
-                        si = si + 2
-                    }
+                str_decode_escape(si, se)
+                if STR_ESC_OK == 1 {
+                    nout = STR_ESC_N
+                    out0 = STR_ESC_B0
+                    out1 = STR_ESC_B1
+                    out2 = STR_ESC_B2
+                    out3 = STR_ESC_B3
+                    si = si + STR_ESC_ADV
                 } else {
-                    if c2 == 110 { byte = 10 }
-                    else if c2 == 116 { byte = 9 }
-                    else if c2 == 48 { byte = 0 }
-                    else { byte = c2 }
+                    out0 = sb(si + 1)
                     si = si + 2
                 }
             } else { si = si + 1 }
-            if slen >= 256 {
-                tc_error_hard(EP, "string literal exceeds maximum of 256 bytes")
-                // tc_error_hard -> tc_mark_failed() early-returns without
-                // setting TYPECHECK_FAILED for FN_EFFECTS & 2048 (imported-
-                // module) functions. Left alone, that lets this fall through
-                // to a binary shipping the literal silently truncated to
-                // empty (slen=0) instead of failing the build. Force it
-                // directly -- same idiom as tc_unbalanced_braces (#1634).
-                TYPECHECK_FAILED = 1
-                slen = 0
-                break
-            } else {
-                SQW[slen as usize] = byte
-                slen = slen + 1
+            var esc_byte_index: i64 = 0
+            while esc_byte_index < nout && !stop {
+                let byte = if esc_byte_index == 0 { out0 } else if esc_byte_index == 1 { out1 } else if esc_byte_index == 2 { out2 } else { out3 }
+                if slen >= 256 {
+                    tc_error_hard(EP, "string literal exceeds maximum of 256 bytes")
+                    // tc_error_hard -> tc_mark_failed() early-returns without
+                    // setting TYPECHECK_FAILED for FN_EFFECTS & 2048 (imported-
+                    // module) functions. Left alone, that lets this fall through
+                    // to a binary shipping the literal silently truncated to
+                    // empty (slen=0) instead of failing the build. Force it
+                    // directly -- same idiom as tc_unbalanced_braces (#1634).
+                    TYPECHECK_FAILED = 1
+                    slen = 0
+                    stop = true
+                } else {
+                    SQW[slen as usize] = byte
+                    slen = slen + 1
+                }
+                esc_byte_index = esc_byte_index + 1
             }
         }
         // Emit: jmp over string data; string bytes; null terminator; lea rax, [rip - N]
@@ -18188,7 +18377,8 @@ fn compile_primary() with IO, Mut, Panic, Div {
         // every length SQW can hold.
         em(0xe9)  // jmp rel32
         let jmp_off = CL
-        em32(slen + 1)  // skip slen + null terminator
+        em32(slen + 9)  // skip owned byte count, payload and null terminator
+        em64(slen)
         let str_start = CL
         var bi: i64 = 0
         while bi < slen { em(SQW[bi as usize] & 0xFF); bi = bi + 1 }
@@ -20016,10 +20206,9 @@ fn compile_primary() with IO, Mut, Panic, Div {
                     emit_str_slice_range_slots_x86(ss_slot_a, ss_slot_b, ss_slot_c)
                 } else {
                     emit_load_var(ss_slot_a)
-                    emit_push()
-                    emit_load_var(ss_slot_b)
-                    em(0x59)
-                    em(0x48); em(0x01); em(0xc8)  // add rax, rcx
+                    emit_str_len()
+                    emit_store_var(ss_slot_c)
+                    emit_str_slice_range_slots_x86(ss_slot_a, ss_slot_b, ss_slot_c)
                 }
                 if TK[EP as usize] == 7 { EP = EP + 1 }
                 EXPR_IS_F64 = 0
@@ -40052,52 +40241,48 @@ fn emit_print_a64_src(tok: i64, ss: i64, se: i64, braces: i64) with IO, Mut, Pan
     var zi: i64 = 0
     while zi < 256 { SQW[zi as usize] = 0; zi = zi + 1 }
     var si: i64 = ss
-    while si < se {
+    var stop = false
+    while si < se && !stop {
         let c = sb(si)
-        var byte: i64 = c
+        var nout: i64 = 1
+        var out0: i64 = c
+        var out1: i64 = 0
+        var out2: i64 = 0
+        var out3: i64 = 0
         if braces == 1 && (c == 123 || c == 125) && si + 1 < se && sb(si + 1) == c {
             si = si + 2
         } else if c == 92 && si + 1 < se {
-            let c2 = sb(si + 1)
-            if c2 == 120 && si + 3 < se {
-                let h1 = sb(si + 2)
-                let h2 = sb(si + 3)
-                var v1: i64 = 0 - 1
-                if h1 >= 48 && h1 <= 57 { v1 = h1 - 48 }
-                else if h1 >= 97 && h1 <= 102 { v1 = h1 - 87 }
-                else if h1 >= 65 && h1 <= 70 { v1 = h1 - 55 }
-                var v2: i64 = 0 - 1
-                if h2 >= 48 && h2 <= 57 { v2 = h2 - 48 }
-                else if h2 >= 97 && h2 <= 102 { v2 = h2 - 87 }
-                else if h2 >= 65 && h2 <= 70 { v2 = h2 - 55 }
-                if v1 >= 0 && v2 >= 0 {
-                    byte = v1 * 16 + v2
-                    si = si + 4
-                } else {
-                    byte = c2
-                    si = si + 2
-                }
+            str_decode_escape(si, se)
+            if STR_ESC_OK == 1 {
+                nout = STR_ESC_N
+                out0 = STR_ESC_B0
+                out1 = STR_ESC_B1
+                out2 = STR_ESC_B2
+                out3 = STR_ESC_B3
+                si = si + STR_ESC_ADV
             } else {
-                if c2 == 110 { byte = 10 }
-                else if c2 == 116 { byte = 9 }
-                else if c2 == 48 { byte = 0 }
-                else { byte = c2 }
+                out0 = sb(si + 1)
                 si = si + 2
             }
         } else { si = si + 1 }
-        // Pack 8 decoded bytes per SQW slot, matching emit_print (x86).
-        // The unpacked `slen >= 256` cap was the #2431 Family A drift:
-        // x86 accepts print() literals up to 2048 bytes; a64 rejected at 256.
-        let qi = slen / 8
-        if qi >= 256 {
-            tc_error_hard(tok, "string literal exceeds maximum of 2048 bytes")
-            TYPECHECK_FAILED = 1
-            slen = 0
-            break
-        } else {
-            let bi = slen - qi * 8
-            SQW[qi as usize] = SQW[qi as usize] | (byte << (bi * 8))
-            slen = slen + 1
+        var k: i64 = 0
+        while k < nout && !stop {
+            let byte = if k == 0 { out0 } else if k == 1 { out1 } else if k == 2 { out2 } else { out3 }
+            // Pack 8 decoded bytes per SQW slot, matching emit_print (x86).
+            // The unpacked `slen >= 256` cap was the #2431 Family A drift:
+            // x86 accepts print() literals up to 2048 bytes; a64 rejected at 256.
+            let qi = slen / 8
+            if qi >= 256 {
+                tc_error_hard(tok, "string literal exceeds maximum of 2048 bytes")
+                TYPECHECK_FAILED = 1
+                slen = 0
+                stop = true
+            } else {
+                let bi = slen - qi * 8
+                SQW[qi as usize] = SQW[qi as usize] | (byte << (bi * 8))
+                slen = slen + 1
+            }
+            k = k + 1
         }
     }
     // Emit: b skip; string_bytes (4-byte padded); skip: adr x1, -(pad_len); ...
@@ -40139,17 +40324,9 @@ fn emit_print_a64(tok: i64) with IO, Mut, Panic, Div {
 }
 
 fn emit_print_cstr_a64() with Mut {
-    // x0 = C string pointer
-    em32(0xAA0003E9)  // mov x9, x0
+    // x0 = owned string payload
+    em32(0xF85F8002)  // ldur x2, [x0, #-8]
     em32(0xAA0003E1)  // mov x1, x0
-    em32(0xD280000A)  // movz x10, #0
-    let slp = CL
-    em32(0x386A6920)  // ldrb w0, [x9, x10]
-    em32(0x34000000 | (3 << 5) | 0)  // cbz w0, done
-    em32(0x9100054A)  // add x10, x10, #1
-    let brel = (slp - CL) / 4
-    em32(0x14000000 | (brel & 0x3FFFFFF))
-    em32(0xAA0A03E2)  // mov x2, x10
     em32(0xD2800020)  // movz x0, #1
     if TARGET_OS == 2 {
         emit_imm64_reg_a64(16, 4)
@@ -40492,7 +40669,7 @@ fn emit_read_byte_a64() with Mut, Panic {
 fn emit_read_line_a64() with Mut, Panic, Div {
     // mmap(NULL, 4096, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANON, -1, 0)
     em32(0xD2800000)  // movz x0, #0 (NULL)
-    emit_imm64_reg_a64(1, 4096)  // x1 = 4096
+    emit_imm64_reg_a64(1, 4104)  // prefix + 4096 bytes
     em32(0xD2800062)  // movz x2, #3 (PROT_READ|PROT_WRITE)
     if TARGET_OS == 2 {
         emit_imm64_reg_a64(3, 0x1002)  // MAP_PRIVATE|MAP_ANON (Darwin)
@@ -40533,7 +40710,7 @@ fn emit_read_line_a64() with Mut, Panic, Div {
     // NUL terminator with no store needed, and the pointer stays valid for
     // the life of the process (unlike a stack address, which would dangle
     // once this function returns).
-    let rl_empty_str_off = bss_alloc_aligned(8)
+    let rl_empty_str_off = bss_alloc_aligned(16) + 8
     var mmap_fail_done: i64 = 0
     if TARGET_OS == 2 {
         let mmap_ok = CL
@@ -40551,6 +40728,7 @@ fn emit_read_line_a64() with Mut, Panic, Div {
         em32(0x14000000)  // b done (patched)
         patch_branch_a64(mmap_ok, CL)
     }
+    em32(0x91002000)  // skip the byte-count prefix
     // x0 = buf. Keep it on the stack (16-byte slot) across the read syscall.
     emit_push_a64()
     // read(0, buf, 4095) -- leave room for '\0'
@@ -40616,6 +40794,7 @@ fn emit_read_line_a64() with Mut, Panic, Div {
     patch_branch_a64(strip_skip_patch, null_terminate_target)
     // Null-terminate buf[bytes_read]
     em32(0xF94003E1)  // ldr x1, [sp] (buf, without popping)
+    em32(0xF81F8020)  // stur x0, [x1, #-8]
     em32(0x8B000021)  // add x1, x1, x0
     em32(0x3900003F)  // strb wzr, [x1]
     emit_pop_x0_a64()  // return buf
@@ -40642,7 +40821,7 @@ fn emit_read_file_a64() with Mut, Panic {
             env_i = env_i + 1
         }
         em32(0xD2800000)
-        emit_imm64_reg_a64(1, 0x400001)
+        emit_imm64_reg_a64(1, 0x400009)
         em32(0xD2800062)
         emit_imm64_reg_a64(3, 0x1002)
         emit_imm64_reg_a64(4, -1)
@@ -40652,7 +40831,8 @@ fn emit_read_file_a64() with Mut, Panic {
         em32(0xF100001F)
         let env_map_fail = CL
         em32(0x5400000D) // b.le allocation_failure
-        em32(0xAA0003EB) // x11 = destination; x0 remains the returned base
+        em32(0x91002000) // payload after prefix
+        em32(0xAA0003EB) // destination; x0 remains the returned payload
         emit_push_a64() // preserve mmap base across the argc/argv loads
         emit_load_abs_qword_a64(GL_BSS_BASE - 16)
         em32(0xAA0003EC) // x12 = argc excluding program name
@@ -40678,6 +40858,8 @@ fn emit_read_file_a64() with Mut, Panic {
         em32_at(env_done, 0xB400000A | (((env_end - env_done) / 4) << 5))
         em32(0x3900017F) // final NUL at [x11]
         emit_pop_x0_a64()
+        em32(0xCB00016B) // sub x11, x11, x0 (payload length)
+        em32(0xF81F800B) // stur x11, [x0, #-8]
         env_return_patch = CL
         em32(0x14000000)
         patch_branch_a64(env_map_fail, CL)
@@ -40713,7 +40895,7 @@ fn emit_read_file_ordinary_a64() with Mut, Panic {
     emit_push_a64()
     // mmap(NULL, 4MB+1, 3, MAP_PRIVATE|MAP_ANON, -1, 0)
     em32(0xD2800000)  // x0 = NULL
-    emit_imm64_reg_a64(1, 0x400001)  // x1 = 4MB+1
+    emit_imm64_reg_a64(1, 0x400009)  // prefix + 4MB+1
     em32(0xD2800060 | 2)  // x2 = 3
     if TARGET_OS == 2 {
         emit_imm64_reg_a64(3, 0x1002)  // x3 = MAP_PRIVATE|MAP_ANON (Darwin)
@@ -40728,6 +40910,7 @@ fn emit_read_file_ordinary_a64() with Mut, Panic {
         em32(0xD2800000 | ((222 & 0xFFFF) << 5) | 8)  // x8 = 222 (mmap)
     }
     emit_syscall_a64()
+    em32(0x91002000)  // payload after prefix
     // x0 = buf. Push it, then len = 0.       stack: [len sp+0, buf sp+16, fd sp+32]
     emit_push_a64()
     em32(0xD2800000)  // movz x0, #0
@@ -40809,6 +40992,7 @@ fn emit_read_file_ordinary_a64() with Mut, Panic {
     patch_branch_a64(rf_eof2, CL)
     em32(0xF9400000 | ((16/8) << 10) | (31 << 5) | 1)  // ldr x1, [sp, #16] (buf)
     em32(0xF9400000 | ((0/8) << 10) | (31 << 5) | 9)   // ldr x9, [sp, #0] (len)
+    em32(0xF81F8029)  // stur x9, [x1, #-8]
     em32(0x8B090021)  // add x1, x1, x9
     em32(0x3900003F)  // strb wzr, [x1]
     em32(0xF9400000 | ((32/8) << 10) | (31 << 5) | 0)  // ldr x0, [sp, #32] (fd)
@@ -40962,24 +41146,18 @@ fn emit_arg_count_a64() with Mut {
 }
 
 // ─── ARM64 get_arg ───
-fn emit_get_arg_a64() with Mut {
+fn emit_get_arg_a64() with Mut, Panic, Div {
     let argv_addr = GL_BSS_BASE - 8
     em32(0xAA0003E9)  // mov x9, x0
     emit_image_addr_a64(argv_addr)
     em32(0xF9400000)  // ldr x0, [x0]
     em32(0xF8697800)  // ldr x0, [x0, x9, lsl #3]
+    emit_import_cstr_a64()
 }
 
 // ─── ARM64 str_len ───
 fn emit_str_len_a64() with Mut {
-    em32(0xAA0003E9)  // mov x9, x0
-    em32(0xD2800000)  // movz x0, #0
-    let top = CL
-    em32(0x38606920 | 10)  // ldrb w10, [x9, x0]
-    em32(0x34000000 | (3 << 5) | 10)  // cbz w10, +3
-    em32(0x91000400)  // add x0, x0, #1
-    let brel = (top - CL) / 4
-    em32(0x14000000 | (brel & 0x3FFFFFF))
+    em32(0xF85F8000)  // ldur x0, [x0, #-8]
 }
 
 // ─── ARM64 f64 binary op helper ───
@@ -42826,53 +43004,50 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
         var zi: i64 = 0
         while zi < 256 { SQW[zi as usize] = 0; zi = zi + 1 }
         var si: i64 = ss
-        while si < se {
+        var stop = false
+        while si < se && !stop {
             let ch = sb(si)
-            var byte: i64 = ch
+            var nout: i64 = 1
+            var out0: i64 = ch
+            var out1: i64 = 0
+            var out2: i64 = 0
+            var out3: i64 = 0
             if ch == 92 && si + 1 < se {
-                let c2 = sb(si + 1)
-                if c2 == 120 && si + 3 < se {
-                    let h1 = sb(si + 2)
-                    let h2 = sb(si + 3)
-                    var v1: i64 = 0 - 1
-                    if h1 >= 48 && h1 <= 57 { v1 = h1 - 48 }
-                    else if h1 >= 97 && h1 <= 102 { v1 = h1 - 87 }
-                    else if h1 >= 65 && h1 <= 70 { v1 = h1 - 55 }
-                    var v2: i64 = 0 - 1
-                    if h2 >= 48 && h2 <= 57 { v2 = h2 - 48 }
-                    else if h2 >= 97 && h2 <= 102 { v2 = h2 - 87 }
-                    else if h2 >= 65 && h2 <= 70 { v2 = h2 - 55 }
-                    if v1 >= 0 && v2 >= 0 {
-                        byte = v1 * 16 + v2
-                        si = si + 4
-                    } else {
-                        byte = c2
-                        si = si + 2
-                    }
+                str_decode_escape(si, se)
+                if STR_ESC_OK == 1 {
+                    nout = STR_ESC_N
+                    out0 = STR_ESC_B0
+                    out1 = STR_ESC_B1
+                    out2 = STR_ESC_B2
+                    out3 = STR_ESC_B3
+                    si = si + STR_ESC_ADV
                 } else {
-                    if c2 == 110 { byte = 10 }
-                    else if c2 == 116 { byte = 9 }
-                    else if c2 == 48 { byte = 0 }
-                    else { byte = c2 }
+                    out0 = sb(si + 1)
                     si = si + 2
                 }
             } else { si = si + 1 }
-            if slen >= 256 {
-                tc_error_hard(EP, "string literal exceeds maximum of 256 bytes")
-                // See the identical x86-64 guard in compile_primary() for why
-                // TYPECHECK_FAILED is forced directly here.
-                TYPECHECK_FAILED = 1
-                slen = 0
-                break
-            } else {
-                SQW[slen as usize] = byte
-                slen = slen + 1
+            var esc_byte_index: i64 = 0
+            while esc_byte_index < nout && !stop {
+                let byte = if esc_byte_index == 0 { out0 } else if esc_byte_index == 1 { out1 } else if esc_byte_index == 2 { out2 } else { out3 }
+                if slen >= 256 {
+                    tc_error_hard(EP, "string literal exceeds maximum of 256 bytes")
+                    // See the identical x86-64 guard in compile_primary() for why
+                    // TYPECHECK_FAILED is forced directly here.
+                    TYPECHECK_FAILED = 1
+                    slen = 0
+                    stop = true
+                } else {
+                    SQW[slen as usize] = byte
+                    slen = slen + 1
+                }
+                esc_byte_index = esc_byte_index + 1
             }
         }
         let total_bytes = slen + 1
         let pad_len = (total_bytes + 3) / 4 * 4
-        let b_off = 1 + pad_len / 4
+        let b_off = 3 + pad_len / 4
         em32(0x14000000 | (b_off & 0x3FFFFFF))
+        em64(slen)
         let str_start = CL
         var bi: i64 = 0
         while bi < pad_len {
@@ -44063,10 +44238,9 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                     emit_str_slice_range_slots_a64(ss_slot_a, ss_slot_b, ss_slot_c)
                 } else {
                     emit_load_var_a64(ss_slot_a)
-                    emit_push_a64()
-                    emit_load_var_a64(ss_slot_b)
-                    emit_pop_x1_a64()
-                    em32(0x8B010000)  // add x0, x0, x1   (s + start)
+                    emit_str_len_a64()
+                    emit_store_var_a64(ss_slot_c)
+                    emit_str_slice_range_slots_a64(ss_slot_a, ss_slot_b, ss_slot_c)
                 }
                 if TK[EP as usize] == 7 { EP = EP + 1 }
                 EXPR_IS_F64 = 0
