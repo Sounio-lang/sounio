@@ -1,433 +1,417 @@
-// stdlib/data/csv_loader — Network Graph CSV Loading
+// stdlib/data/csv_loader — network edge lists from CSV text
 //
-// Loads network/graph data from CSV files in edge list format.
-// Supports both weighted and unweighted networks.
+// Formats, one edge per line:
+//   source,target           unweighted
+//   source,target,weight    weighted (any weighted line marks the network weighted)
+// Node ids are non-negative integers; blank lines and lines starting with '#'
+// are skipped; fields may carry surrounding spaces or tabs.
 //
-// CSV Formats:
-// - Unweighted edge list: source,target
-// - Weighted edge list: source,target,weight
+// Storage is fixed-capacity: a NetworkData holds up to CSV_MAX_EDGES edges in
+// edges[0..num_edges] over node ids 0..CSV_MAX_NODES-1, and an Adjacency is a
+// CSR (compressed sparse row) view of it. There are no growable arrays.
 //
-// Converts to graph representations:
-// - Adjacency list: [[usize]] for unweighted graphs
-// - Weighted adjacency: [[WeightedEdge]] for weighted networks
+// Every result carries a status. Anything that does not fit or does not
+// parse fails closed: the status names the reason and the result holds no
+// edges (num_edges = 0, num_nodes = 0). Nothing is truncated, and no field is
+// read as 0 because it was not a number.
 //
-// References:
-// - Standard edge list format used in networkx, igraph
+// Character codes are compared as integers from str_char_at (no character
+// literals; stdlib/STDLIB_LANGUAGE_LIMITATIONS).
+//
+// References: the edge-list format of networkx / igraph.
 
 module data::csv_loader
 
-extern "C" {
-    fn sqrt(x: f64) -> f64;
-}
+pub const CSV_MAX_EDGES: i64 = 512
+pub const CSV_MAX_NODES: i64 = 512
+
+pub const CSV_OK: i64 = 0
+pub const CSV_ERR_EDGE_CAPACITY: i64 = 1   // more than CSV_MAX_EDGES edges
+pub const CSV_ERR_NODE_CAPACITY: i64 = 2   // a node id >= CSV_MAX_NODES
+pub const CSV_ERR_MALFORMED: i64 = 3       // a line is not id,id[,weight]
+pub const CSV_ERR_UNSUPPORTED: i64 = 4     // operation not available
 
 // ============================================================================
 // DATA STRUCTURES
 // ============================================================================
 
-// Single edge in the network
 pub struct Edge {
-    pub source: usize,
-    pub target: usize,
+    pub source: i64,
+    pub target: i64,
     pub weight: f64,
 }
 
-pub struct WeightedEdge {
-    pub neighbor: usize,
-    pub weight: f64,
-}
-
-// Loaded network data
 pub struct NetworkData {
-    pub num_nodes: usize,
-    pub edges: [Edge],
-    pub node_labels: [string],
+    pub status: i64,
+    pub num_nodes: i64,      // max node id + 1 (0 for an empty network)
+    pub num_edges: i64,
+    pub edges: [Edge; 512],
     pub weighted: bool,
 }
 
-fn network_data_new() -> NetworkData {
-    var edges: [Edge] = []
-    var labels: [string] = []
+pub struct WeightedEdge {
+    pub neighbor: i64,
+    pub weight: f64,
+}
+
+// Undirected CSR adjacency: the neighbours of v are
+// neighbors[offsets[v] .. offsets[v + 1]], in edge order; a self-loop is
+// listed once, every other edge once at each end.
+pub struct Adjacency {
+    pub status: i64,
+    pub num_nodes: i64,
+    pub num_entries: i64,
+    pub offsets: [i64; 513],
+    pub neighbors: [i64; 1024],
+    pub weights: [f64; 1024],
+}
+
+pub fn network_data_empty(status: i64) -> NetworkData {
     NetworkData {
+        status: status,
         num_nodes: 0,
-        edges: edges,
-        node_labels: labels,
+        num_edges: 0,
+        edges: [Edge { source: 0, target: 0, weight: 0.0 }; 512],
         weighted: false,
     }
 }
 
+pub fn adjacency_empty(status: i64) -> Adjacency {
+    Adjacency {
+        status: status,
+        num_nodes: 0,
+        num_entries: 0,
+        offsets: [0; 513],
+        neighbors: [0; 1024],
+        weights: [0.0; 1024],
+    }
+}
+
 // ============================================================================
-// HELPER FUNCTIONS
+// LEXICAL HELPERS (byte codes: space 32, tab 9, LF 10, CR 13, '#' 35,
+// ',' 44, '-' 45, '+' 43, '.' 46, '0'..'9' 48..57, 'e' 101, 'E' 69)
 // ============================================================================
 
-fn abs_i64(x: i64) -> i64 {
-    if x < 0 { -x } else { x }
+fn csv_is_space(c: i64) -> bool {
+    c == 32 || c == 9 || c == 13
 }
 
-fn max_usize(a: usize, b: usize) -> usize {
-    if a > b { a } else { b }
+fn csv_trim_start(s: string, a: i64, b: i64) -> i64 with Mut {
+    var i = a
+    while i < b && csv_is_space(str_char_at(s, i) as i64) { i = i + 1 }
+    i
 }
 
-// Parse string as integer
-fn parse_i64(s: string) -> i64 with Mut, Div {
-    var result: i64 = 0
-    var i: usize = 0
+fn csv_trim_end(s: string, a: i64, b: i64) -> i64 with Mut {
+    var j = b
+    while j > a && csv_is_space(str_char_at(s, j - 1) as i64) { j = j - 1 }
+    j
+}
+
+fn csv_pow10(k: i64) -> f64 with Mut {
+    var p = 1.0
+    var i: i64 = 0
+    while i < k { p = p * 10.0; i = i + 1 }
+    p
+}
+
+// Non-negative integer in s[a..b] (already trimmed). -1 if it is not one.
+fn csv_parse_id(s: string, a: i64, b: i64) -> i64 with Mut {
+    if b <= a { return 0 - 1 }
+    var v: i64 = 0
+    var i = a
+    while i < b {
+        let c = str_char_at(s, i) as i64
+        if c < 48 || c > 57 { return 0 - 1 }
+        if v > 100000000000000 { return 0 - 1 }
+        v = v * 10 + (c - 48)
+        i = i + 1
+    }
+    v
+}
+
+struct CsvNum {
+    ok: bool,
+    value: f64,
+}
+
+// Decimal number [+-]digits[.digits][(e|E)[+-]digits] in s[a..b]. The digits
+// accumulate as an integer and are scaled once by a power of ten, so a value
+// of up to 15 significant digits with |exponent| <= 22 is correctly rounded.
+fn csv_parse_number(s: string, a: i64, b: i64) -> CsvNum with Mut, Div {
+    var i = a
     var neg = false
-
-    // Check for negative sign
-    if i < s.len() {
-        let c = s.char_at(0)
-        if c == '-' {
-            neg = true
-            i = 1
-        } else if c == '+' {
-            i = 1
-        }
+    if i < b {
+        let c0 = str_char_at(s, i) as i64
+        if c0 == 45 { neg = true; i = i + 1 } else if c0 == 43 { i = i + 1 }
     }
-
-    // Parse digits
-    while i < s.len() {
-        let c = s.char_at(i)
-        if c >= '0' && c <= '9' {
-            let digit = (c as i64) - ('0' as i64)
-            result = result * 10 + digit
-        }
-        i = i + 1
-    }
-
-    if neg { -result } else { result }
-}
-
-// Parse string as float
-fn parse_f64(s: string) -> f64 with Mut, Div {
-    var result: f64 = 0.0
-    var i: usize = 0
-    var neg = false
-    var found_dot = false
-    var decimal_places = 0
-
-    // Check for negative sign
-    if i < s.len() {
-        let c = s.char_at(0)
-        if c == '-' {
-            neg = true
-            i = 1
-        } else if c == '+' {
-            i = 1
-        }
-    }
-
-    // Parse digits and decimal point
-    while i < s.len() {
-        let c = s.char_at(i)
-        if c == '.' {
-            found_dot = true
-        } else if c >= '0' && c <= '9' {
-            let digit = ((c as i64) - ('0' as i64)) as f64
-            result = result * 10.0 + digit
-            if found_dot {
-                decimal_places = decimal_places + 1
-            }
-        }
-        i = i + 1
-    }
-
-    // Apply decimal scaling
-    var scale = 1.0
-    var j = 0
-    while j < decimal_places {
-        scale = scale * 0.1
-        j = j + 1
-    }
-    result = result * scale
-
-    if neg { -result } else { result }
-}
-
-// Split string by delimiter
-fn split_string(s: string, delimiter: string) -> [string] with Mut, Div {
-    var parts: [string] = []
-    var current: string = ""
-    var i: usize = 0
-
-    while i < s.len() {
-        if i + delimiter.len() <= s.len() {
-            // Check if delimiter matches at position i
-            var matches = true
-            var j: usize = 0
-            while j < delimiter.len() {
-                if s.char_at(i + j) != delimiter.char_at(j) {
-                    matches = false
-                }
-                j = j + 1
-            }
-
-            if matches {
-                parts.push(current)
-                current = ""
-                i = i + delimiter.len()
-                continue
-            }
-        }
-
-        current = current ++ s.char_at(i)
-        i = i + 1
-    }
-
-    if current.len() > 0 {
-        parts.push(current)
-    }
-
-    parts
-}
-
-// Trim whitespace from string
-fn trim_string(s: string) -> string with Mut, Div {
-    var start: usize = 0
-    var end: usize = s.len()
-
-    // Find first non-whitespace
-    while start < s.len() {
-        let c = s.char_at(start)
-        if c != ' ' && c != '\t' && c != '\n' && c != '\r' {
+    var mant: f64 = 0.0
+    var digits: i64 = 0
+    var frac: i64 = 0
+    var seen_dot = false
+    while i < b {
+        let c = str_char_at(s, i) as i64
+        if c >= 48 && c <= 57 {
+            mant = mant * 10.0 + ((c - 48) as f64)
+            digits = digits + 1
+            if seen_dot { frac = frac + 1 }
+        } else if c == 46 && !seen_dot {
+            seen_dot = true
+        } else {
             break
         }
-        start = start + 1
+        i = i + 1
     }
-
-    // Find last non-whitespace
-    while end > start {
-        let c = s.char_at(end - 1)
-        if c != ' ' && c != '\t' && c != '\n' && c != '\r' {
-            break
+    if digits == 0 { return CsvNum { ok: false, value: 0.0 } }
+    var exp10: i64 = 0
+    if i < b {
+        let ce = str_char_at(s, i) as i64
+        if ce != 101 && ce != 69 { return CsvNum { ok: false, value: 0.0 } }
+        i = i + 1
+        var eneg = false
+        if i < b {
+            let cs = str_char_at(s, i) as i64
+            if cs == 45 { eneg = true; i = i + 1 } else if cs == 43 { i = i + 1 }
         }
-        end = end - 1
-    }
-
-    if end > start {
-        var result: string = ""
-        var i = start
-        while i < end {
-            result = result ++ s.char_at(i)
+        var ed: i64 = 0
+        while i < b {
+            let c = str_char_at(s, i) as i64
+            if c < 48 || c > 57 { return CsvNum { ok: false, value: 0.0 } }
+            if exp10 < 100000 { exp10 = exp10 * 10 + (c - 48) }
+            ed = ed + 1
             i = i + 1
         }
-        result
-    } else {
-        ""
+        if ed == 0 { return CsvNum { ok: false, value: 0.0 } }
+        if eneg { exp10 = 0 - exp10 }
     }
+    let e = exp10 - frac
+    var v = mant
+    if e > 0 { v = mant * csv_pow10(e) }
+    if e < 0 { v = mant / csv_pow10(0 - e) }
+    if neg { v = 0.0 - v }
+    CsvNum { ok: true, value: v }
+}
+
+// Whole-string conversions (surrounding spaces allowed). Malformed input
+// returns 0 / 0.0; use csv_field_ok to tell that from a literal zero. Named
+// csv_parse_* because lean_single resolves a bare `parse_i64` / `parse_f64`
+// call to its own builtin of that name, not to an imported function.
+pub fn csv_field_ok(s: string) -> bool with Mut, Div {
+    let n = str_len(s) as i64
+    let a = csv_trim_start(s, 0, n)
+    let b = csv_trim_end(s, a, n)
+    let r = csv_parse_number(s, a, b)
+    if r.ok { return true }
+    false
+}
+
+pub fn csv_parse_f64(s: string) -> f64 with Mut, Div {
+    let n = str_len(s) as i64
+    let a = csv_trim_start(s, 0, n)
+    let b = csv_trim_end(s, a, n)
+    let r = csv_parse_number(s, a, b)
+    if !r.ok { return 0.0 }
+    r.value
+}
+
+pub fn csv_parse_i64(s: string) -> i64 with Mut, Div {
+    let n = str_len(s) as i64
+    let a = csv_trim_start(s, 0, n)
+    let b = csv_trim_end(s, a, n)
+    if a >= b { return 0 }
+    let c0 = str_char_at(s, a) as i64
+    let signed = c0 == 45 || c0 == 43
+    let first = if signed { a + 1 } else { a }
+    let v = csv_parse_id(s, first, b)
+    if v < 0 { return 0 }
+    if c0 == 45 { 0 - v } else { v }
 }
 
 // ============================================================================
-// MAIN PARSING FUNCTIONS
+// PARSING
 // ============================================================================
 
-// Parse edge list from CSV content string
 pub fn parse_edge_list(csv_content: string) -> NetworkData with Mut, Div, Panic {
-    var net = network_data_new()
-
-    var max_node: usize = 0
-    var lines = split_string(csv_content, "\n")
-
-    var line_idx: usize = 0
-    while line_idx < lines.len() {
-        let line = trim_string(lines[line_idx])
-
-        // Skip empty lines and comments
-        if line.len() == 0 || (line.len() > 0 && line.char_at(0) == '#') {
-            line_idx = line_idx + 1
-            continue
-        }
-
-        // Parse CSV line
-        let parts = split_string(line, ",")
-
-        if parts.len() >= 2 {
-            let source_str = trim_string(parts[0])
-            let target_str = trim_string(parts[1])
-
-            let source = (parse_i64(source_str) as usize)
-            let target = (parse_i64(target_str) as usize)
-
-            var weight = 1.0
-            if parts.len() >= 3 {
-                let weight_str = trim_string(parts[2])
-                weight = parse_f64(weight_str)
+    var net = network_data_empty(CSV_OK)
+    let n = str_len(csv_content) as i64
+    var max_node: i64 = 0 - 1
+    var line_start: i64 = 0
+    while line_start <= n {
+        var line_end = line_start
+        while line_end < n && (str_char_at(csv_content, line_end) as i64) != 10 { line_end = line_end + 1 }
+        let a = csv_trim_start(csv_content, line_start, line_end)
+        let b = csv_trim_end(csv_content, a, line_end)
+        let blank = a >= b
+        let comment = !blank && (str_char_at(csv_content, a) as i64) == 35
+        if !blank && !comment {
+            // Split on commas: up to three fields.
+            var f_start: [i64; 4] = [0; 4]
+            var f_end: [i64; 4] = [0; 4]
+            var nf: i64 = 0
+            var k = a
+            var fs = a
+            var too_many = false
+            while k <= b {
+                let at_end = k == b
+                let is_comma = !at_end && (str_char_at(csv_content, k) as i64) == 44
+                if at_end || is_comma {
+                    if nf < 3 {
+                        f_start[nf] = csv_trim_start(csv_content, fs, k)
+                        f_end[nf] = csv_trim_end(csv_content, f_start[nf], k)
+                    } else {
+                        too_many = true
+                    }
+                    nf = nf + 1
+                    fs = k + 1
+                }
+                k = k + 1
+            }
+            if too_many || nf < 2 { return network_data_empty(CSV_ERR_MALFORMED) }
+            let src = csv_parse_id(csv_content, f_start[0], f_end[0])
+            let tgt = csv_parse_id(csv_content, f_start[1], f_end[1])
+            if src < 0 || tgt < 0 { return network_data_empty(CSV_ERR_MALFORMED) }
+            if src >= CSV_MAX_NODES || tgt >= CSV_MAX_NODES { return network_data_empty(CSV_ERR_NODE_CAPACITY) }
+            var w = 1.0
+            if nf == 3 {
+                let wn = csv_parse_number(csv_content, f_start[2], f_end[2])
+                if !wn.ok { return network_data_empty(CSV_ERR_MALFORMED) }
+                w = wn.value
                 net.weighted = true
             }
-
-            // Track maximum node ID to determine graph size
-            max_node = max_usize(max_node, source)
-            max_node = max_usize(max_node, target)
-
-            // Add edge
-            var edge = Edge {
-                source: source,
-                target: target,
-                weight: weight,
-            }
-            net.edges.push(edge)
+            if net.num_edges >= CSV_MAX_EDGES { return network_data_empty(CSV_ERR_EDGE_CAPACITY) }
+            net.edges[net.num_edges] = Edge { source: src, target: tgt, weight: w }
+            net.num_edges = net.num_edges + 1
+            if src > max_node { max_node = src }
+            if tgt > max_node { max_node = tgt }
         }
-
-        line_idx = line_idx + 1
+        line_start = line_end + 1
     }
-
-    // Number of nodes is max_node + 1
     net.num_nodes = max_node + 1
-
     net
 }
 
-// Load edge list from file
-pub fn load_edge_list(filepath: string) -> NetworkData with IO {
-    var net = network_data_new()
-    // Note: File I/O not implemented in interpreter; would need stdlib::fs module
-    net
+// File input is not provided by this module (no stdlib file reader is
+// imported here): the result is empty with status CSV_ERR_UNSUPPORTED, never
+// an empty network that looks like a successful load. Read the file and call
+// parse_edge_list on its contents.
+pub fn load_edge_list(filepath: string) -> NetworkData {
+    network_data_empty(CSV_ERR_UNSUPPORTED)
 }
 
 // ============================================================================
-// GRAPH CONVERSION FUNCTIONS
+// GRAPH CONVERSION
 // ============================================================================
 
-// Convert NetworkData to adjacency list (undirected, unweighted)
-pub fn to_adjacency_list(net: &NetworkData) -> [[usize]] with Mut, Div, Panic {
-    var adj: [[usize]] = []
-
-    // Initialize adjacency list with empty vectors
-    var i: usize = 0
-    while i < net.num_nodes {
-        var empty: [usize] = []
-        adj.push(empty)
+// Undirected CSR adjacency of a parsed network (weights of an unweighted
+// network are 1.0). A network with a non-OK status converts to an empty
+// adjacency carrying the same status.
+pub fn to_weighted_adjacency(net: &NetworkData) -> Adjacency with Mut, Panic {
+    if net.status != CSV_OK { return adjacency_empty(net.status) }
+    var adj = adjacency_empty(CSV_OK)
+    let nn = net.num_nodes
+    adj.num_nodes = nn
+    // Degree count, then prefix sums, then fill in edge order.
+    var deg: [i64; 512] = [0; 512]
+    var i: i64 = 0
+    while i < net.num_edges {
+        let e = net.edges[i]
+        deg[e.source] = deg[e.source] + 1
+        if e.target != e.source { deg[e.target] = deg[e.target] + 1 }
         i = i + 1
     }
-
-    // Add edges (both directions for undirected graph)
+    var v: i64 = 0
+    while v < nn {
+        adj.offsets[v + 1] = adj.offsets[v] + deg[v]
+        v = v + 1
+    }
+    adj.num_entries = adj.offsets[nn]
+    var fill: [i64; 512] = [0; 512]
     i = 0
-    while i < net.edges.len() {
-        let edge = net.edges[i]
-        let src = edge.source
-        let tgt = edge.target
-
-        // Add forward edge
-        if src < net.num_nodes {
-            adj[src].push(tgt)
+    while i < net.num_edges {
+        let e = net.edges[i]
+        let ps = adj.offsets[e.source] + fill[e.source]
+        adj.neighbors[ps] = e.target
+        adj.weights[ps] = e.weight
+        fill[e.source] = fill[e.source] + 1
+        if e.target != e.source {
+            let pt = adj.offsets[e.target] + fill[e.target]
+            adj.neighbors[pt] = e.source
+            adj.weights[pt] = e.weight
+            fill[e.target] = fill[e.target] + 1
         }
-
-        // Add reverse edge (unless self-loop)
-        if tgt < net.num_nodes && src != tgt {
-            adj[tgt].push(src)
-        }
-
         i = i + 1
     }
-
     adj
 }
 
-// Convert NetworkData to weighted adjacency list
-pub fn to_weighted_adjacency(net: &NetworkData) -> [[WeightedEdge]] with Mut, Div, Panic {
-    var adj: [[WeightedEdge]] = []
-
-    // Initialize adjacency list with empty vectors
-    var i: usize = 0
-    while i < net.num_nodes {
-        var empty: [WeightedEdge] = []
-        adj.push(empty)
-        i = i + 1
+// Same CSR, weights ignored (all 1.0).
+pub fn to_adjacency_list(net: &NetworkData) -> Adjacency with Mut, Panic {
+    var adj = to_weighted_adjacency(net)
+    var k: i64 = 0
+    while k < adj.num_entries {
+        adj.weights[k] = 1.0
+        k = k + 1
     }
-
-    // Add edges (both directions for undirected graph)
-    i = 0
-    while i < net.edges.len() {
-        let edge = net.edges[i]
-        let src = edge.source
-        let tgt = edge.target
-        let w = edge.weight
-
-        // Add forward edge
-        if src < net.num_nodes {
-            var we = WeightedEdge {
-                neighbor: tgt,
-                weight: w,
-            }
-            adj[src].push(we)
-        }
-
-        // Add reverse edge (unless self-loop)
-        if tgt < net.num_nodes && src != tgt {
-            var we_rev = WeightedEdge {
-                neighbor: src,
-                weight: w,
-            }
-            adj[tgt].push(we_rev)
-        }
-
-        i = i + 1
-    }
-
     adj
 }
 
-// ============================================================================
-// VALIDATION FUNCTIONS
-// ============================================================================
+pub fn adjacency_degree(adj: &Adjacency, v: i64) -> i64 with Panic {
+    if v < 0 || v >= adj.num_nodes { panic("adjacency_degree: node out of range") }
+    adj.offsets[v + 1] - adj.offsets[v]
+}
 
-// Validate that edge list is consistent
-pub fn validate_edge_list(net: &NetworkData) -> bool with Mut, Div, Panic {
-    var valid = true
-
-    // Check for invalid node indices
-    var i: usize = 0
-    while i < net.edges.len() {
-        let edge = net.edges[i]
-        if edge.source >= net.num_nodes || edge.target >= net.num_nodes {
-            valid = false
-        }
-        i = i + 1
-    }
-
-    valid
+// j-th neighbour of v (0-based) with its edge weight.
+pub fn adjacency_neighbor(adj: &Adjacency, v: i64, j: i64) -> WeightedEdge with Panic {
+    if v < 0 || v >= adj.num_nodes { panic("adjacency_neighbor: node out of range") }
+    let p = adj.offsets[v] + j
+    if j < 0 || p >= adj.offsets[v + 1] { panic("adjacency_neighbor: neighbour index out of range") }
+    WeightedEdge { neighbor: adj.neighbors[p], weight: adj.weights[p] }
 }
 
 // ============================================================================
-// TESTS
+// VALIDATION
 // ============================================================================
 
-// Test: Parse simple unweighted edge list
+pub fn validate_edge_list(net: &NetworkData) -> bool with Mut {
+    if net.status != CSV_OK { return false }
+    if net.num_edges < 0 || net.num_edges > CSV_MAX_EDGES { return false }
+    var i: i64 = 0
+    while i < net.num_edges {
+        let e = net.edges[i]
+        if e.source < 0 || e.target < 0 { return false }
+        if e.source >= net.num_nodes || e.target >= net.num_nodes { return false }
+        i = i + 1
+    }
+    true
+}
+
+// ============================================================================
+// SELF-TESTS
+// ============================================================================
+
 pub fn test_parse_simple_edge_list() -> bool with Mut, Div, Panic {
-    let csv = "0,1\n1,2\n2,0\n"
-    let net = parse_edge_list(csv)
-
-    // Should have 3 nodes and 3 edges
-    net.num_nodes == 3 && net.edges.len() == 3 && !net.weighted
+    let net = parse_edge_list("0,1\n1,2\n2,0\n")
+    net.status == CSV_OK && net.num_nodes == 3 && net.num_edges == 3 && !net.weighted
 }
 
-// Test: Parse weighted edge list
 pub fn test_parse_weighted_edge_list() -> bool with Mut, Div, Panic {
-    let csv = "0,1,0.5\n1,2,0.7\n2,0,0.3\n"
-    let net = parse_edge_list(csv)
-
-    // Should have 3 nodes, 3 edges, and be marked as weighted
-    net.num_nodes == 3 && net.edges.len() == 3 && net.weighted
+    let net = parse_edge_list("0,1,0.5\n1,2,0.7\n2,0,0.3\n")
+    net.status == CSV_OK && net.num_nodes == 3 && net.num_edges == 3 && net.weighted
+        && net.edges[1].weight == 0.7
 }
 
-// Test: Adjacency list conversion
 pub fn test_adjacency_list_conversion() -> bool with Mut, Div, Panic {
-    let csv = "0,1\n1,2\n"
-    let net = parse_edge_list(csv)
+    let net = parse_edge_list("0,1\n1,2\n")
     let adj = to_adjacency_list(&net)
-
-    // Check adjacency list structure
-    adj.len() == 3 && adj[0].len() >= 1 && adj[2].len() >= 1
+    adj.status == CSV_OK && adj.num_nodes == 3
+        && adjacency_degree(&adj, 0) == 1 && adjacency_degree(&adj, 1) == 2 && adjacency_degree(&adj, 2) == 1
 }
 
-// Test: Handle comments and empty lines
 pub fn test_parse_with_comments() -> bool with Mut, Div, Panic {
-    let csv = "# Comment\n0,1\n\n1,2\n"
-    let net = parse_edge_list(csv)
-
-    net.num_nodes == 3 && net.edges.len() == 2
+    let net = parse_edge_list("# Comment\n0,1\n\n1,2\n")
+    net.status == CSV_OK && net.num_nodes == 3 && net.num_edges == 2
 }
 
-// Master test function
 pub fn run_csv_loader_tests() -> bool with Mut, Div, Panic {
     test_parse_simple_edge_list() &&
     test_parse_weighted_edge_list() &&

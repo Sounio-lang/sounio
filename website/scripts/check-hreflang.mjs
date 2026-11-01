@@ -41,6 +41,19 @@ function assertExamples() {
   if (packageCodes.includes('es') || packageCodes.includes('pt-BR')) {
     errors.push(`packages hreflang still lists untranslated locales: ${packageCodes.join(',')}`);
   }
+  const aboutPt = canonicalPathname('/pt/about/');
+  if (aboutPt !== '/pt/about/') errors.push(`expected /pt/about/ to self-canonicalize, got ${aboutPt}`);
+  const aboutEl = canonicalPathname('/el/about/');
+  if (aboutEl !== '/about/') errors.push(`expected /el/about/ to canonicalize to English, got ${aboutEl}`);
+  const roadmapPt = canonicalPathname('/pt/about/roadmap/');
+  if (roadmapPt !== '/about/roadmap/') {
+    errors.push(`expected /pt/about/roadmap/ to canonicalize to English, got ${roadmapPt}`);
+  }
+  const aboutCodes = hreflangLinks('/about/').map((link) => link.hreflang);
+  const aboutExpected = ['en', 'pt-BR', 'x-default'];
+  if (aboutCodes.length !== aboutExpected.length || aboutExpected.some((code) => !aboutCodes.includes(code))) {
+    errors.push(`about hreflang codes drifted: ${aboutCodes.join(',')}`);
+  }
   return errors;
 }
 

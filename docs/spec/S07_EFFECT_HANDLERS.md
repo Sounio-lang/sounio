@@ -233,7 +233,7 @@ test in phase P5 (`tests/run-pass/fxN_*.sio`).
 
 The section 7.4 semantics are implemented in Madaros and landing on PR #3371:
 parser/AST (`ExprPerform`/`ExprResume`, `on`/`return` clauses), checker
-(op resolution FX-8, linear resume FX-7, diagnostics 280-288), lowering
+(op resolution FX-8, linear resume FX-7, diagnostics 290-298), lowering
 (synthetic clause functions, handler frame), and the native backend
 (builtins `__sounio_fx_install/perform/resume/body_done`: one stack segment
 per handler, deep dispatch, affine zero-resume teardown). Every FX rule has

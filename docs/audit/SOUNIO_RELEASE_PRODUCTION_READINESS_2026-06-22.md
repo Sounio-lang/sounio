@@ -11,8 +11,8 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.sounio-r
 
 ## Scope
 
-This note defines the broader release-production-ready standard for Sounio. It
-is intentionally stricter than the Madaros production-ready gate.
+This note defines the broader release gate for Sounio. It
+is intentionally stricter than the Madaros executable gate. The public status is: research language (pre-1.0). APIs may change; not recommended for production use.
 
 Madaros readiness answers:
 
@@ -22,15 +22,16 @@ Madaros readiness answers:
 
 Sounio release production readiness answers a larger product question:
 
-- Can the repository safely present Sounio as a broad production-ready language
-  distribution, including compiler source lineage, stdlib surface, tooling,
+- Can the repository safely present Sounio as a broad language distribution
+  for production use, including compiler source lineage, stdlib surface, tooling,
   installation, docs, package flow, and public support wording?
 
-As of `origin/main@f9e139a6c4ea7ff5a6e63387c807bbe0578a189c`, the answer is:
+As of `origin/main@f9e139a6c4ea7ff5a6e63387c807bbe0578a189c`, the gate outcomes were:
 
-- **Madaros production-ready:** yes, by the existing executable gate.
-- **Broad Sounio release production-ready:** no, by the stricter release gate
-  introduced here.
+- **Madaros executable gate:** pass, on the gate named below.
+- **Broad release gate:** not passed, by the stricter release gate introduced here.
+
+These outcomes are a dated audit. They are not the public maturity status. The public line is: research language (pre-1.0). APIs may change; not recommended for production use.
 
 This is not a regression. It is a higher bar.
 
@@ -67,7 +68,7 @@ for release sign-off.
 
 ## Release-Critical Blockers
 
-These claim IDs currently block broad release-production-ready status:
+These claim IDs currently block the broad release gate:
 
 The broad `direct_driver` frontier remains `prototype` / `downgraded` and is
 explicitly out of scope for this release-support contract. The release contract
@@ -91,7 +92,7 @@ Each row may be resolved in one of two honest ways:
 1. Close the claim with evidence and move it to `stable` or
    `validated_research` with `closure_status=closed`.
 2. Remove the surface from the release support contract and avoid claiming a
-   broad production-ready language distribution.
+   broad language distribution for production use.
 
 The gate intentionally does not count downgraded claims as release-ready simply
 because they are honestly downgraded. Honest downgrade is sufficient for public
@@ -99,7 +100,7 @@ claim closure; it is not sufficient for a production release claim.
 
 ## What Already Passes
 
-The narrower Madaros production-ready contract is green on current `main`:
+The narrower Madaros gate is green on the `main` this note measured:
 
 - issue #356 is closed,
 - the tracked BSS/global and self-build blockers are resolved,
@@ -109,9 +110,7 @@ The narrower Madaros production-ready contract is green on current `main`:
 - PR-resolution queue is contained,
 - source-to-ELF semantic gate is green.
 
-Those facts support "Madaros is production-ready by its current gate." They do
-not support "Sounio as a whole is a broad production-ready language
-distribution."
+Those facts say the named gate passed. They do not say the language is recommended for production use. The public status is: research language (pre-1.0). APIs may change; not recommended for production use.
 
 ## Live Validation Result
 
@@ -148,18 +147,8 @@ Broad release production readiness should not be declared until these are true:
   `stable`/`validated_research` or intentionally removed from the broad release
   support contract.
 
-## Current Recommended Wording
+## Current recommended public wording
 
-Safe:
+> Status: research language (pre-1.0). APIs may change; not recommended for production use.
 
-> Madaros, the default `bin/souc` compiler path, is production-ready by the
-> current Madaros gate on `main@f9e139a6`. Sounio remains a serious research
-> language with validated compiler and scientific surfaces, but it is not yet a
-> broad production-ready language distribution.
-
-Unsafe:
-
-> Sounio is production-ready.
-
-That wording outruns the current claim registry and release-critical product
-surface evidence.
+That line does not name a compiler version. A gate pass on the 2026-06-22 audit is not a public maturity label. Do not publish a separate sentence that calls the compiler or the language ready for production use.

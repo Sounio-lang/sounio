@@ -67,15 +67,15 @@ SELF="$(readlink -f "${BASH_SOURCE[0]}")"
 ROOT="$(dirname "$(dirname "$(dirname "$SELF")")")"
 CHECKER="$ROOT/scripts/ci/native_capacity_tiers_check.py"
 
-EXPECT_CODE=134217728       # NC_BIG_CODE           128 MiB
+EXPECT_CODE=150994944       # NC_BIG_CODE           144 MiB
 EXPECT_RELOC=2097152        # NC_FLAT_RELOC_* x4    2,097,152 entries
-EXPECT_ELF=167772160        # NC_BIG_ELF            160 MiB
+EXPECT_ELF=201326592        # NC_BIG_ELF            192 MiB
 EXPECT_LEGACY_ELF=16777216  # NATIVE_ELF_BUF        16 MiB
 ELF_BASE_ADDR=4194304      # 0x400000 — load address, NOT a capacity
-EXPECT_LABEL=16384         # NC_V2_LABEL_* x3     16,384 labels/patches per fn
+EXPECT_LABEL=65536         # NC_V2_LABEL_* x3     65,536 labels/patches per fn
                            # (must stay >= IR_MAX_INSTRS — see clause 8)
 EXPECT_RODATA=2097152      # NC_BIG_RODATA         2 MiB (rc=23, clause 9)
-EXPECT_RETURN_JUMPS=16384  # NC_RETURN_JUMPS       >= IR_MAX_INSTRS (clause 10a, rc=22)
+EXPECT_RETURN_JUMPS=65536  # NC_RETURN_JUMPS       >= IR_MAX_INSTRS (clause 10a, rc=22)
 EXPECT_STRTAB=8192         # elf.sio StringTable   8 KiB (clause 10c, rc=28)
 EXPECT_DRV_LABEL=1024      # DRV_LABEL_* x3        driver labels (clause 10d, rc=6)
 

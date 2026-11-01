@@ -1,0 +1,1 @@
+Array `++` (dynamic and fixed) lowers to the new `array_concat` native-v2 builtin (heap alloc + element copy) instead of the interim fail-closed refusal; the compile-fail pin is replaced by a run-pass test covering i64, float-marked f64, and empty sides, and the SNN layer constructor pattern compiles again.

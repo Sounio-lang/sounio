@@ -26,7 +26,7 @@ The reviewers are essentially asking us to (1) narrow/justify claims, and
 
 ### 1) Novelty + Positioning (“first”, “gap”, “why a new language?”)
 Work items:
-- Replace absolute novelty language (“first”, “no production-ready GPU implementation exists”)
+- Replace absolute novelty language (“first”, or a claim that no GPU implementation of octonion operations exists)
   with qualified phrasing unless we can cite and demonstrate it.
 - Expand “Related Work” to include:
   - library-based octonion/hypercomplex tooling (CPU and GPU, if any),

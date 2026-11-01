@@ -23,7 +23,7 @@ Aligned to `docs/serious-language/public-claim-registry.v1.tsv`, `TOUR.md` (meas
 | Effects `IO`, `Mut`, `Div`, `Panic` | Stable for the checked positive and diagnostic cases. Registry: `effects`. |
 | Custom `effect` / `handle` blocks | Not the checked user surface. Do not emit them. |
 | Generics and traits | Prototype. Do not claim a mature trait ecosystem. Registry: `generics.*`. |
-| Enum variants with payloads | Not usable on either engine (KL-20). Payload-free enums work. |
+| Enum variants with payloads | Default Madaros: non-generic payload enums work (KL-20 closed there; `tests/run-pass/enum_payload_*.sio`). Generic enums (`enum Opt<T>`) do not parse. lean_single has no payload representation. |
 | Closures | Not a safe user surface. Registry: `closures.lambdas = stale_conflicting`. |
 | Units of measure | Prototype, and the engines disagree. KL-13 closed derived annotations (`f64<m/s>`, `mol/cm3`). Default Madaros still rejects `let d: m = 100.0` (#2752). lean_single runs `demos/intro/demo_unidades.sio` but still accepts a multiply into a derived unit (#2751). |
 | `Knowledge<T>` / GUM | Validated research, not interpreter-only. Tour witness: `demos/intro/demo_incerteza.sio` on Madaros. Library surface: `epistemic::knowledge`. Pure helpers carry first-order variance (KL-11, 2026-10-13). A general user call does not. |
@@ -145,7 +145,7 @@ enum Color {
 }
 ```
 
-`Rgb(u8, u8, u8)` and any other payload variant are KL-20: no runtime representation on either engine. Payload-free enums are the form this block stands behind. `linear struct` is a checked keyword (`tests/run-pass/linear_struct_field_access.sio`); a `FileHandle` that calls `os.close` is not in this block.
+A payload variant such as `Rgb(u8, u8, u8)` runs on default Madaros (a tagged cell, [ENUM_PAYLOAD_LAYOUT.md](../compiler/ENUM_PAYLOAD_LAYOUT.md)); `match` over such an enum must cover every variant (E280), and `==` on it is refused (E279). lean_single has no payload representation. `linear struct` is a checked keyword (`tests/run-pass/linear_struct_field_access.sio`); a `FileHandle` that calls `os.close` is not in this block.
 
 ### References
 

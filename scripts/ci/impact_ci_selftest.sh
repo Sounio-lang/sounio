@@ -24,6 +24,20 @@ expect "$docs" docs true
 expect "$docs" compiler false
 expect "$docs" lean false
 
+# llms.txt is model context, the same class as the README. Leaving it
+# unrecognized used to mark `full`, and the changelog gate then demanded a
+# fragment for a docs-only edit.
+llms_only="$(classify_pr llms.txt)"
+expect "$llms_only" docs true
+expect "$llms_only" website false
+expect "$llms_only" compiler false
+expect "$llms_only" full false
+llms_with_site="$(classify_pr llms.txt README.md .github/copilot-instructions.md website/src/pages/about/index.astro)"
+expect "$llms_with_site" docs true
+expect "$llms_with_site" website true
+expect "$llms_with_site" compiler false
+expect "$llms_with_site" full false
+
 lean="$(classify_pr formal/lean4/SounioGradedModal.lean)"
 expect "$lean" lean true
 expect "$lean" math true

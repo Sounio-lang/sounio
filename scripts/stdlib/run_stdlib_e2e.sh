@@ -22,7 +22,7 @@
 # had been killed at 30 s although they declare 60 s to 3600 s.
 #
 # Usage:
-#   bash scripts/stdlib/run_stdlib_e2e.sh [--filter PATTERN] [--verbose] [--json-out PATH]
+#   bash scripts/stdlib/run_stdlib_e2e.sh [--filter PATTERN] [--verbose] [--json-out PATH] [--artifacts-dir ABS_FRESH_PATH]
 #   bash scripts/stdlib/run_stdlib_e2e.sh PATTERN --verbose
 
 set -euo pipefail
@@ -37,6 +37,7 @@ sounio_require_souc
 # Stdlib path is mandatory for E2E tests.
 export SOUNIO_STDLIB_PATH="${SOUNIO_STDLIB_PATH:-$ROOT_DIR/stdlib}"
 
+ARTIFACTS_DIR=""
 FILTER=""
 VERBOSE=0
 JSON_OUT="${STDLIB_E2E_JSON_OUT:-}"
@@ -45,7 +46,7 @@ RUN_ALL_RUN_PASS="${STDLIB_E2E_RUN_ALL_RUN_PASS:-1}"
 
 usage() {
   cat <<'USAGE'
-Usage: bash scripts/stdlib/run_stdlib_e2e.sh [--filter PATTERN] [--verbose] [--json-out PATH]
+Usage: bash scripts/stdlib/run_stdlib_e2e.sh [--filter PATTERN] [--verbose] [--json-out PATH] [--artifacts-dir ABS_FRESH_PATH]
 USAGE
 }
 
@@ -71,6 +72,14 @@ while [[ $# -gt 0 ]]; do
       JSON_OUT="$2"
       shift 2
       ;;
+    --artifacts-dir)
+      if [[ $# -lt 2 || -z "$2" ]]; then
+        echo "error: --artifacts-dir requires an absolute fresh path" >&2
+        exit 2
+      fi
+      ARTIFACTS_DIR="$2"
+      shift 2
+      ;;
     --help|-h)
       usage
       exit 0
@@ -93,13 +102,50 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+DIAGNOSTICS_HELPER="$ROOT_DIR/scripts/stdlib/stdlib_e2e_diagnostics.mjs"
+if [[ -n "$ARTIFACTS_DIR" ]]; then
+  node "$DIAGNOSTICS_HELPER" init "$ARTIFACTS_DIR" "$ROOT_DIR" "$SOUC_BIN" "$SOUNIO_STDLIB_PATH" || exit 65
+fi
+
+# Called only in the opt-in command substitution. The raw file preserves bytes
+# that Bash command substitution removes (NUL and trailing newlines).
+capture_command() (
+  local rel="$1" phase="$2" log rc=0
+  shift 2
+  log="$(node "$DIAGNOSTICS_HELPER" begin "$ARTIFACTS_DIR" "$rel" "$phase" "$@")" || exit 65
+  set -o noclobber
+  exec 9> "$log" || exit 65
+  "$@" >&9 2>&1 9>&- || rc=$?
+  exec 9>&-
+  node "$DIAGNOSTICS_HELPER" finish "$ARTIFACTS_DIR" "$rel" "$phase" "$rc" || exit 65
+  cat -- "$log" || exit 65
+  exit "$rc"
+)
+
+verify_capture() {
+  node "$DIAGNOSTICS_HELPER" verify "$ARTIFACTS_DIR" "$1" "$2" "$3" || exit 65
+}
+
 PASS=0
 FAIL=0
 SKIP=0
 ERRORS=""
 
 RESULTS_FILE="$(mktemp)"
-trap 'rm -f "$RESULTS_FILE"' EXIT
+PLATFORM_LIB_DIR="$(mktemp -d)"
+trap 'rm -f "$RESULTS_FILE"; rm -rf "$PLATFORM_LIB_DIR"' EXIT
+
+# stdlib/ffi/platform.sio dlopen()s libstdlib_platform.so; sync, thread,
+# net, time and profile build on it. Build it from runtime/stdlib_platform.cpp
+# so those tests measure the stdlib and not a missing library. A failed build
+# is not hidden: the tests that need it then fail with platform status 2.
+if "${CXX:-g++}" -std=c++23 -O2 -Wall -Wextra -Werror -shared -fPIC -pthread \
+    "$ROOT_DIR/runtime/stdlib_platform.cpp" -o "$PLATFORM_LIB_DIR/libstdlib_platform.so" 2>"$PLATFORM_LIB_DIR/build.log"; then
+  export LD_LIBRARY_PATH="$PLATFORM_LIB_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+else
+  echo "warning: libstdlib_platform.so did not build; platform-backed tests will fail" >&2
+  cat "$PLATFORM_LIB_DIR/build.log" >&2
+fi
 
 b64_encode() {
   printf '%s' "$1" | base64 | tr -d '\n'
@@ -203,7 +249,12 @@ run_test() {
 
   local output
   local exit_code=0
-  output=$("$SOUC_BIN" check "$file" 2>&1) || exit_code=$?
+  if [[ -n "$ARTIFACTS_DIR" ]]; then
+    output=$(capture_command "$relpath" check "$SOUC_BIN" check "$file") || exit_code=$?
+    verify_capture "$relpath" check "$exit_code"
+  else
+    output=$("$SOUC_BIN" check "$file" 2>&1) || exit_code=$?
+  fi
   if [[ $exit_code -ne 0 ]]; then
     local excerpt
     excerpt="$(head -6 <<< "$output")"
@@ -237,9 +288,19 @@ run_test() {
 
   exit_code=0
   if command -v timeout >/dev/null 2>&1; then
-    output=$(timeout "${test_timeout}s" "$SOUC_BIN" run "$file" 2>&1) || exit_code=$?
+    if [[ -n "$ARTIFACTS_DIR" ]]; then
+      output=$(capture_command "$relpath" run timeout "${test_timeout}s" "$SOUC_BIN" run "$file") || exit_code=$?
+      verify_capture "$relpath" run "$exit_code"
+    else
+      output=$(timeout "${test_timeout}s" "$SOUC_BIN" run "$file" 2>&1) || exit_code=$?
+    fi
   else
-    output=$("$SOUC_BIN" run "$file" 2>&1) || exit_code=$?
+    if [[ -n "$ARTIFACTS_DIR" ]]; then
+      output=$(capture_command "$relpath" run "$SOUC_BIN" run "$file") || exit_code=$?
+      verify_capture "$relpath" run "$exit_code"
+    else
+      output=$("$SOUC_BIN" run "$file" 2>&1) || exit_code=$?
+    fi
   fi
   if [[ $exit_code -ne 0 ]]; then
     local excerpt
@@ -285,81 +346,9 @@ emit_json() {
   fi
   mkdir -p "$(dirname "$out_path")"
 
-  python3 - "$RESULTS_FILE" "$out_path" "$PASS" "$FAIL" "$SKIP" "$ROOT_DIR" "$SOUC_BIN" "$SOUNIO_STDLIB_PATH" "$FILTER" <<'PY'
-import base64
-import datetime
-import json
-import pathlib
-import sys
-
-results_path = pathlib.Path(sys.argv[1])
-out_path = pathlib.Path(sys.argv[2])
-pass_count = int(sys.argv[3])
-fail_count = int(sys.argv[4])
-skip_count = int(sys.argv[5])
-root_dir = sys.argv[6]
-souc_bin = sys.argv[7]
-stdlib_path = sys.argv[8]
-filter_value = sys.argv[9]
-
-def decode_field(raw: str) -> str:
-    if not raw:
-        return ""
-    return base64.b64decode(raw.encode("ascii")).decode("utf-8", errors="replace")
-
-results = []
-ignored = []
-for line in results_path.read_text(encoding="utf-8").splitlines():
-    if not line:
-        continue
-    parts = line.split("\t")
-    if len(parts) != 8:
-        continue
-    status, test_path, mode, reason, owner, unblock, exit_code, detail_b64 = parts
-    detail = decode_field(detail_b64)
-    row = {
-        "status": status,
-        "test_path": test_path,
-        "mode": mode,
-        "reason": reason,
-        "owner": owner,
-        "unblock_condition": unblock,
-        "exit_code": int(exit_code),
-        "detail_excerpt": detail,
-    }
-    results.append(row)
-    if mode == "ignore":
-        ignored.append(
-            {
-                "test_path": test_path,
-                "reason": reason,
-                "owner": owner,
-                "unblock_condition": unblock,
-            }
-        )
-
-obj = {
-    "schema": "sounio.stdlib.e2e.result.v1",
-    "generated_at_utc": datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
-    "command": "bash scripts/stdlib/run_stdlib_e2e.sh",
-    "context": {
-        "root_dir": root_dir,
-        "souc_bin": souc_bin,
-        "stdlib_path": stdlib_path,
-        "filter": filter_value,
-    },
-    "totals": {
-        "pass": pass_count,
-        "fail": fail_count,
-        "skip": skip_count,
-        "total": pass_count + fail_count + skip_count,
-    },
-    "results": results,
-    "failures": [r for r in results if r["status"] == "fail"],
-    "ignored": ignored,
-}
-out_path.write_text(json.dumps(obj, indent=2) + "\n", encoding="utf-8")
-PY
+  node "$ROOT_DIR/scripts/stdlib/emit_stdlib_e2e_result.mjs" \
+    "$RESULTS_FILE" "$out_path" "$PASS" "$FAIL" "$SKIP" \
+    "$ROOT_DIR" "$SOUC_BIN" "$SOUNIO_STDLIB_PATH" "$FILTER"
 }
 
 echo "=== Stdlib E2E Test Suite ==="
@@ -378,6 +367,10 @@ echo "  Pass: $PASS"
 echo "  Fail: $FAIL"
 echo "  Skip: $SKIP"
 echo "  Total: $((PASS + FAIL + SKIP))"
+
+if [[ -n "$ARTIFACTS_DIR" ]]; then
+  node "$DIAGNOSTICS_HELPER" finalize "$ARTIFACTS_DIR" || exit 65
+fi
 
 emit_json "$JSON_OUT"
 
