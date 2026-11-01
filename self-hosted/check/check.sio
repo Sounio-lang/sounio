@@ -14198,37 +14198,30 @@ fn checker_refine_check_provided_inplace(c: *mut Checker, call_span: Span, provi
     }
 }
 
-fn checker_refine_prove_ident_const_inplace(c: *mut Checker, call_span: Span, expected_pred: RefinementPred, arg_name: Name) with Mut, Panic, Div, Alloc, IO {
-    // Try known-constant lookup for identifiers
+fn checker_refine_prove_ident_const_inplace(c: *mut Checker, call_span: Span, expected_pred: RefinementPred, arg_name: Name) -> bool with Mut, Panic, Div, Alloc, IO {
+    // Try known-constant lookup for identifiers. Returns true when the
+    // lookup settles the obligation (proved or violated: the caller must
+    // exit the boundary, as the by-value router does); false on miss or
+    // StaticUnknown so the caller falls through to env proof and the
+    // single tail epistemic defer. Emits nothing on the unknown path:
+    // warning before all proofs run would double-report with the tail.
     let const_result = checker_const_int_lookup_mut(c, arg_name)
     if const_result.0 == false {
-        return
+        return false
     }
     let result = refine_static_check_int_literal(expected_pred, const_result.1)
     if result == refine_static_result_proved() {
         (*c).refine_static_proved = (*c).refine_static_proved + 1
-        return
+        return true
     } else if result == refine_static_result_violated() {
         (*c).refine_violations = (*c).refine_violations + 1
         checker_report_error_at_inplace(c, call_span, 42, 0, 0, 0)
-        return
+        return true
     } else {
-        // StaticUnknown. The predicate is not one this checker can
-        // evaluate -- see pred_is_evaluable. Reporting that as a
-        // violation is a claim of proof nobody made, and it is what
-        // rejected `{ n: i32 | n * 2 < 200 }` for the argument 42, and
-        // for 1, and for 500: the coefficient on n has no place in
-        // RefinementPred, so the predicate degrades to op=none and the
-        // binary check called that a violation.
-        //
-        // It now takes the same epistemic fallback an unprovable
-        // obligation already takes: W040, the call compiles, the
-        // warning is the notice. Reported through the *mut reporter
-        // rather than the by-value bridge, so this adds no new entry
-        // to scripts/ci/checker_spine_bridges.frozen.
-        (*c).refine_runtime_checked = (*c).refine_runtime_checked + 1
-        checker_report_warning_at_mut(c, call_span, 40, 0, 0, 0)
-        return
+        // StaticUnknown (see pred_is_evaluable): not a violation claim.
+        // Env proof runs next; if it also misses, the boundary tail
+        // takes the epistemic fallback (W040 via the *mut reporter).
+        return false
     }
 }
 
@@ -14389,9 +14382,13 @@ fn checker_check_call_arg_refinement_boundary_inplace(c: *mut Checker, arg_expr:
         return
     }
 
-    // Try known-constant lookup for identifiers
+    // Try known-constant lookup for identifiers; a settled lookup
+    // (proved or violated) exits the boundary here, as the by-value
+    // router does. Miss/unknown falls through to env proof and the tail.
     if arg_expr.kind == ExprKind::ExprIdent {
-        checker_refine_prove_ident_const_inplace(c, call_span, expected_ref.predicate, arg_expr.name)
+        if checker_refine_prove_ident_const_inplace(c, call_span, expected_ref.predicate, arg_expr.name) {
+            return
+        }
     }
 
     // Try environment-based proof: look up arg type for refinement
