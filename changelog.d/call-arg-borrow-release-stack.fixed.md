@@ -1,0 +1,1 @@
+Call-argument borrow release now traverses argument and parameter lists iteratively, so its stack usage does not grow with call arity. Shared and exclusive call-site release order and the existing internal signature are preserved; targeted raw-compiler gates cover up to 64 arguments at an 8 MiB stack limit.
