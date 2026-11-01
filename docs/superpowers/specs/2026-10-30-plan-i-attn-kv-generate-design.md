@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.superpowers.specs.2026-10-30-plan-i-attn-kv-generate-design
+authority: repo_only
+audience: users
+last_validated: unvalidated
+validated_by: none
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.superpowers.specs.2026-10-30-plan-i-attn-kv-generate-design
+-->
+
 # Plan I: GPU attention + KV + generate (attn QK, KV cache, greedy/temp/top-p)
 
 **Date:** 2026-10-30

@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.pbpk28-gpu-parity-bench
+authority: repo_only
+audience: users
+last_validated: unvalidated
+validated_by: none
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.pbpk28-gpu-parity-bench
+-->
+
 # PBPK-28 GPU parity and A5000 benchmark record
 
 Branch `pbpk-28-gpu-parity`, commit `5e9551c2f8`, 2026-10-31.

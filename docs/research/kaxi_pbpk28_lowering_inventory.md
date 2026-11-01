@@ -1,3 +1,14 @@
+<!-- docs:meta
+topic_id: repo.docs.research.kaxi-pbpk28-lowering-inventory
+authority: historical
+audience: researchers
+last_validated: unvalidated
+validated_by: none
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.kaxi-pbpk28-lowering-inventory
+-->
+
+> Docs status: `historical`
+
 # K-AXI to PTX lowering inventory for PBPK-28 GPU work
 
 Status: working inventory, verified 2026-10-30 on branch
