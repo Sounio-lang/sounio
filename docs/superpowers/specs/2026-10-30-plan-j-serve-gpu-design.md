@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.superpowers.specs.2026-10-30-plan-j-serve-gpu-design
+authority: repo_only
+audience: users
+last_validated: unvalidated
+validated_by: none
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.superpowers.specs.2026-10-30-plan-j-serve-gpu-design
+-->
+
 # Plan J: serving on the GPU forward (select pump + SSE)
 
 **Date:** 2026-10-30

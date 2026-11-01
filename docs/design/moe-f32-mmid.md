@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.design.moe-f32-mmid
+authority: repo_only
+audience: users
+last_validated: unvalidated
+validated_by: none
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.design.moe-f32-mmid
+-->
+
 # MoE F32 mul_mat_id (Q4_K)
 
 ## Goal

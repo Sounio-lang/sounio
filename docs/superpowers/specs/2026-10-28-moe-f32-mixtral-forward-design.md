@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.superpowers.specs.2026-10-28-moe-f32-mixtral-forward-design
+authority: repo_only
+audience: users
+last_validated: unvalidated
+validated_by: none
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.superpowers.specs.2026-10-28-moe-f32-mixtral-forward-design
+-->
+
 # MoE multi-layer + Mixtral loader + prefill (Plan F)
 
 **Date:** 2026-10-28

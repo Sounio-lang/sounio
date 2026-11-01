@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.superpowers.specs.2026-10-29-moe-f32-gguf-silu-design
+authority: repo_only
+audience: users
+last_validated: unvalidated
+validated_by: none
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.superpowers.specs.2026-10-29-moe-f32-gguf-silu-design
+-->
+
 # MoE GGUF loader + fused gate/up SiLU (Plan G)
 
 **Date:** 2026-10-29

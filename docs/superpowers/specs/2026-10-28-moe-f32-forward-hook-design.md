@@ -1,10 +1,10 @@
 <!-- docs:meta
 topic_id: repo.docs.superpowers.specs.2026-10-28-moe-f32-forward-hook-design
 authority: repo_only
-audience: contributors
+audience: users
 last_validated: unvalidated
 validated_by: none
-source_of_truth: docs/superpowers/specs/2026-10-28-moe-f32-forward-hook-design.md
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.superpowers.specs.2026-10-28-moe-f32-forward-hook-design
 -->
 
 # Design: MoE FFN hook in llama forward (plan C follow-up)
