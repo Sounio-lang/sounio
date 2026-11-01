@@ -74,10 +74,15 @@ uses the module graph that the compiler itself computes.
 
 ### 2.1 Cancellation is a pull-request property
 
-`cancel-in-progress` is `${{ github.event_name == 'pull_request' }}`. A
-newer push to a PR still supersedes the older run; a push to `main`
-always completes. The merge group keys on its own ref and was never
-affected.
+A pull request keeps a stable group (`ci-<PR number>`) with
+`cancel-in-progress: true`, so a newer push still supersedes the older
+run. Every other event (push to `main`, merge group, schedule, dispatch)
+gets a group of its own keyed by `github.run_id`, so it is neither
+cancelled nor queued behind a sibling. Turning `cancel-in-progress` off
+alone would not have been enough: a concurrency group holds at most one
+pending run, so with run A in progress, B pending and C arriving, B is
+dropped without a verdict (caught in review of the first draft). The
+merge group already keyed on its own ref and was never affected.
 
 ### 2.2 One `Fast Checks` job, first, inside the required check
 
