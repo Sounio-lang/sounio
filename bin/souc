@@ -278,6 +278,67 @@ if [[ $# -ge 2 && "${1:-}" == *.sio ]]; then
   exit 127
 fi
 
+# lean_single uses raw `SRC OUT` CLI, not the verb-based `run|check|compile`
+# form. Translate verb invocations so callers using `souc run|check|compile
+# <file>` work correctly. Shared by the forced-legacy branch below AND the
+# no-Madaros fallback at the end of this script: the fallback used to exec the
+# raw ELF with untranslated verb arguments, so `souc run file.sio` compiled a
+# source literally named `run` and wrote the output ELF over `file.sio` when
+# such a file existed in the working directory (measured 2026-11-01: exit 0,
+# the user's source replaced by a binary). Passing verbs through untranslated
+# is the silent-success class this wrapper exists to refuse; see
+# docs/audit/SOUC_WRAPPER_BARE_DASH_O_SWALLOW_DISPATCH_2026-08-18.md.
+_lean_single_verb_dispatch() {
+case "${1:-}" in
+  run)
+    _ls_src="${2:-}"
+    _ls_tmp="$(mktemp /tmp/souc-lean-run-XXXXXX)"
+    _ls_log="$(mktemp /tmp/souc-lean-run-log-XXXXXX)"
+    # The compile chatter (source:/tokens:/epistemic: lines) stays quiet on
+    # success, but a failed compile must say why: this used to discard both
+    # streams and exec whatever was left, so 123 of 359 swept programs
+    # exited 1 with zero bytes of output (P0.6, 2026-10-05).
+    # `|| _ls_rc=$?`, not a bare call: under `set -e` a failed compile
+    # would end this script before the diagnostics below are printed.
+    _ls_rc=0
+    "$LEAN_SINGLE" "$_ls_src" "$_ls_tmp" >"$_ls_log" 2>&1 || _ls_rc=$?
+    if [[ $_ls_rc -ne 0 || ! -s "$_ls_tmp" ]]; then
+      if grep -qE '^(error|warning)' "$_ls_log"; then
+        grep -E -A4 '^(error|warning)' "$_ls_log" >&2
+      else
+        tail -n 40 "$_ls_log" >&2
+      fi
+      echo "souc: lean_single failed to compile $_ls_src (rc=$_ls_rc); nothing was run" >&2
+      rm -f "$_ls_tmp" "$_ls_log"
+      exit $(( _ls_rc == 0 ? 1 : _ls_rc ))
+    fi
+    rm -f "$_ls_log"
+    chmod +x "$_ls_tmp"
+    exec "$_ls_tmp" "${@:3}"
+    ;;
+  check)
+    _ls_tmp2="$(mktemp /tmp/souc-lean-check-XXXXXX)"
+    "$LEAN_SINGLE" "${2:-}" "$_ls_tmp2" 2>&1
+    _ls_rc=$?
+    rm -f "$_ls_tmp2"
+    exit $_ls_rc
+    ;;
+  compile)
+    # souc compile <src> -o <out> → lean_single <src> <out>
+    _ls_compile_src="${2:-}"
+    _ls_compile_out=""
+    shift 2
+    while [[ $# -gt 0 ]]; do
+      if [[ "${1:-}" == "-o" ]]; then _ls_compile_out="${2:-}"; shift 2; else shift; fi
+    done
+    exec "$LEAN_SINGLE" "$_ls_compile_src" "${_ls_compile_out:-/dev/null}"
+    ;;
+  *)
+    exec "$LEAN_SINGLE" "$@"
+    ;;
+esac
+}
+
 # 2) Forced legacy engine.
 case "${SOUNIO_SOUC_ENGINE:-madaros}" in
   lean_single|lean-single|leansingle)
@@ -288,56 +349,7 @@ case "${SOUNIO_SOUC_ENGINE:-madaros}" in
       echo "souc: SOUNIO_SOUC_ENGINE=lean_single but no lean_single ELF found at $LEAN_SINGLE" >&2
       exit 127
     fi
-    # lean_single uses raw `SRC OUT` CLI, not the verb-based `run|check|compile` form.
-    # Translate verb invocations so gate scripts using `souc run <file>` work correctly.
-    case "${1:-}" in
-      run)
-        _ls_src="${2:-}"
-        _ls_tmp="$(mktemp /tmp/souc-lean-run-XXXXXX)"
-        _ls_log="$(mktemp /tmp/souc-lean-run-log-XXXXXX)"
-        # The compile chatter (source:/tokens:/epistemic: lines) stays quiet on
-        # success, but a failed compile must say why: this used to discard both
-        # streams and exec whatever was left, so 123 of 359 swept programs
-        # exited 1 with zero bytes of output (P0.6, 2026-10-05).
-        # `|| _ls_rc=$?`, not a bare call: under `set -e` a failed compile
-        # would end this script before the diagnostics below are printed.
-        _ls_rc=0
-        "$LEAN_SINGLE" "$_ls_src" "$_ls_tmp" >"$_ls_log" 2>&1 || _ls_rc=$?
-        if [[ $_ls_rc -ne 0 || ! -s "$_ls_tmp" ]]; then
-          if grep -qE '^(error|warning)' "$_ls_log"; then
-            grep -E -A4 '^(error|warning)' "$_ls_log" >&2
-          else
-            tail -n 40 "$_ls_log" >&2
-          fi
-          echo "souc: lean_single failed to compile $_ls_src (rc=$_ls_rc); nothing was run" >&2
-          rm -f "$_ls_tmp" "$_ls_log"
-          exit $(( _ls_rc == 0 ? 1 : _ls_rc ))
-        fi
-        rm -f "$_ls_log"
-        chmod +x "$_ls_tmp"
-        exec "$_ls_tmp" "${@:3}"
-        ;;
-      check)
-        _ls_tmp2="$(mktemp /tmp/souc-lean-check-XXXXXX)"
-        "$LEAN_SINGLE" "${2:-}" "$_ls_tmp2" 2>&1
-        _ls_rc=$?
-        rm -f "$_ls_tmp2"
-        exit $_ls_rc
-        ;;
-      compile)
-        # souc compile <src> -o <out> → lean_single <src> <out>
-        _ls_compile_src="${2:-}"
-        _ls_compile_out=""
-        shift 2
-        while [[ $# -gt 0 ]]; do
-          if [[ "${1:-}" == "-o" ]]; then _ls_compile_out="${2:-}"; shift 2; else shift; fi
-        done
-        exec "$LEAN_SINGLE" "$_ls_compile_src" "${_ls_compile_out:-/dev/null}"
-        ;;
-      *)
-        exec "$LEAN_SINGLE" "$@"
-        ;;
-    esac
+    _lean_single_verb_dispatch "$@"
     ;;
 esac
 
@@ -441,7 +453,7 @@ if [[ -x "$LEAN_SINGLE" ]]; then
   fi
   echo "souc: Madaros raw ELF not found (run 'make build-madaros') — falling back to the" >&2
   echo "souc: legacy lean_single engine. Set SOUNIO_SOUC_ENGINE=lean_single to silence this." >&2
-  exec "$LEAN_SINGLE" "$@"
+  _lean_single_verb_dispatch "$@"
 fi
 
 echo "souc: no compiler engine available — build Madaros ('make build-madaros') or provide" >&2
