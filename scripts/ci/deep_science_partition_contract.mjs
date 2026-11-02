@@ -14,13 +14,20 @@ function check(w,s,f){
  assert(block.includes('      fail-fast: false\n      matrix:\n        group: [core, integration]\n'),'both partitions must run even if one fails');
  assert(block.includes('          STDLIB_DEEP_GROUP: ${{ matrix.group }}\n'),'partition not passed');
  assert(block.includes('name: stdlib-deep-science-${{ matrix.group }}-${{ github.sha }}-${{ github.run_attempt }}'),'partition artifact collision');
- assert(s.includes('case "$group" in all|core|integration) ;; *) echo "invalid STDLIB_DEEP_GROUP" >&2; exit 64 ;; esac'),'unknown groups must fail');
+ assert(s.includes('case "$group" in all|core|integration|reference-controls) ;; *) echo "invalid STDLIB_DEEP_GROUP" >&2; exit 64 ;; esac'),'unknown groups must fail');
  assert(s.includes('if [[ "$group" == all || "$group" == core ]]; then run_core; fi'),'core disconnected');
  assert(s.includes('if [[ "$group" == all || "$group" == integration ]]; then run_integration; fi'),'integration disconnected');
  assert(s.includes('run_cpp_batch\nfor src in tests/compile-fail/stdlib_deep_'),'CPP preparation disconnected');
  assert(s.includes('(( jobs > memory_jobs )) && jobs="$memory_jobs"'),'worker memory bound removed');
  assert(s.indexOf('run_core() {')<s.indexOf('run_native_batch\n'),'native coverage outside core');
  assert(s.indexOf('run_integration() {')>s.indexOf('run_oracle_batch\n'),'oracle pairing split');
+ const independent=w.split('  scientific-reference-controls:\n')[1]?.split('  current-source-madaros:\n')[0];
+ assert(independent,'missing required independent reference job');
+ assert(independent.includes('    needs: [impact, fast-checks]\n'),'reference controls must not wait for compiler');
+ assert(!independent.includes('current-source-madaros'),'reference controls acquired a compiler dependency');
+ assert(independent.includes('STDLIB_DEEP_GROUP: reference-controls'),'reference mode disconnected');
+ assert(s.includes('if [[ "$group" == reference-controls ]]; then run_reference_controls; fi'),'independent dispatch disconnected');
+ assert(s.includes('[[ "$group" != core || "$1" != count_dispersion_increment_reference ]]'),'core/reference partition drift');
  assert(s.includes('record arrow-gate scripts/arrow_ipc_gate.sh "$arrow_rc"'),'Arrow gate missing');
  assert(s.includes('record concordance math-pure-ln-boundary "$rc"'),'logarithm gate missing');
  assert(w.includes('      - name: Madaros full gate against the fresh build\n        env:\n          MADAROS_RAW_BIN: /tmp/madaros-ci.elf\n          SOUNIO_MADAROS_DEREF_F64_GATE_BIN: /tmp/madaros-ci.elf\n        run: bash scripts/ci/madaros_full_gate.sh'),'full gate CI must bind both compiler entrypoints');
@@ -34,6 +41,8 @@ if(process.argv[3]==='--selftest'){
  [workflow.replace('STDLIB_DEEP_GROUP: ${{ matrix.group }}','STDLIB_DEEP_GROUP: core'),script,full],
  [workflow.replace('stdlib-deep-science-${{ matrix.group }}-','stdlib-deep-science-'),script,full],
  [workflow,script.replace('then run_integration; fi','then :; fi'),full],
+ [workflow.replace('  scientific-reference-controls:', '  unrelated-controls:'),script,full],
+ [workflow,script.replace('then run_reference_controls; fi','then :; fi'),full],
  [workflow,script.replace('run_cpp_batch\nfor src in tests/compile-fail/stdlib_deep_',':\nfor src in tests/compile-fail/stdlib_deep_'),full],
  [workflow,script.replace('(( jobs > memory_jobs )) && jobs="$memory_jobs"',':'),full],
  [workflow.replace('SOUNIO_MADAROS_DEREF_F64_GATE_BIN: /tmp/madaros-ci.elf','IGNORED_BIN: /tmp/madaros-ci.elf'),script,full],
@@ -96,4 +105,50 @@ fi
  assert.notEqual(runPool(mutant,'compile_error').status,0,'lost child failure accepted');
  assert.notEqual(runPool(mutant,'early_exit').status,0,'early child exit accepted without a status');
  console.log('DEEP_CPP_POOL_FAILURE_CONTROLS_PASS');
+}
+
+if(process.argv[3]==='--selftest'){
+ // Sparse repository and stub toolchain: this proves the control job needs no native compiler.
+ const temp=fs.mkdtempSync(path.join(os.tmpdir(),'deep-independent-control-'));
+ try{
+  const repo=path.join(temp,'repo'), bin=path.join(temp,'toolchain');
+  for(const rel of ['scripts/stdlib','tests/reference','stdlib','bin'])fs.mkdirSync(path.join(repo,rel),{recursive:true});
+  fs.mkdirSync(bin);
+  fs.copyFileSync(path.join(root,'scripts/stdlib/deep_science_gate.sh'),path.join(repo,'scripts/stdlib/deep_science_gate.sh'));
+  fs.writeFileSync(path.join(repo,'tests/reference/count_dispersion_increment_reference.cpp'),'// orchestration fixture\n');
+  fs.writeFileSync(path.join(repo,'stdlib/fixture.sio'),'// hash fixture only\n');
+  fs.writeFileSync(path.join(repo,'bin/souc'),String.raw`#!/usr/bin/env bash
+printf 'unexpected native execution\n' > "$FIXTURE_NATIVE_CALLS"
+exit 99
+`);fs.chmodSync(path.join(repo,'bin/souc'),0o755);
+  fs.writeFileSync(path.join(bin,'g++'),String.raw`#!/usr/bin/env bash
+set -eu
+if [[ "$1" == --version ]]; then echo 'orchestration fixture toolchain'; exit 0; fi
+target=''
+while [[ $# != 0 ]]; do
+ if [[ "$1" == -o ]]; then shift; target="$1"; fi
+ shift
+done
+[[ -n "$target" ]] || exit 88
+cat > "$target" <<'PROGRAM'
+#!/usr/bin/env bash
+case "$*" in --mutant-sign) exit 2 ;; *) exit 0 ;; esac
+PROGRAM
+chmod +x "$target"
+`);fs.chmodSync(path.join(bin,'g++'),0o755);
+  cp.execFileSync('git',['-C',repo,'init','-q']);
+  cp.execFileSync('git',['-C',repo,'add','.']);
+  cp.execFileSync('git',['-C',repo,'-c','user.name=CI Fixture','-c','user.email=ci-fixture@example.invalid','commit','-qm','fixture']);
+  const output=path.join(temp,'out'), marker=path.join(temp,'native-called');
+  const env={...process.env,PATH:bin+path.delimiter+process.env.PATH,STDLIB_DEEP_GROUP:'reference-controls',STDLIB_DEEP_JOBS:'1',STDLIB_DEEP_OUT:output,FIXTURE_NATIVE_CALLS:marker};
+  delete env.MADAROS_RAW_BIN;
+  const r=cp.spawnSync('bash',[path.join(repo,'scripts/stdlib/deep_science_gate.sh')],{env,encoding:'utf8'});
+  assert.equal(r.status,0,'independent mode failed: '+r.stdout+r.stderr);
+  assert.equal(fs.readFileSync(path.join(output,'STATUS'),'utf8'),'0\n');
+  assert.equal(fs.readFileSync(path.join(output,'GROUP'),'utf8'),'reference-controls\n');
+  assert(!fs.existsSync(marker),'independent controls executed a native compiler');
+  assert(!fs.existsSync(path.join(output,'COMPILER.sha256')),'independent controls claimed a native compiler identity');
+  assert(fs.readFileSync(path.join(output,'RESULTS.tsv'),'utf8').includes('oracle-worker\ttail:count_dispersion_increment_reference\t0\n'),'missing independent case receipt');
+  console.log('DEEP_REFERENCE_WITHOUT_NATIVE_COMPILER_FIXTURE_PASS');
+ }finally{fs.rmSync(temp,{recursive:true,force:true});}
 }
