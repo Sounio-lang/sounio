@@ -326,12 +326,68 @@ case "${1:-}" in
     ;;
   compile|build)
     # souc compile|build <src> -o <out> → lean_single <src> <out>
+    #
+    # lean_single emits a native x86-64 ELF and nothing else, while the public
+    # `souc --help` contract advertises `souc build <file.sio> --backend gpu -o
+    # OUT` as a GPU (PTX) artifact — a Madaros capability. This branch used to
+    # parse only -o and silently drop every other option, so both lean
+    # configurations (forced legacy and the no-Madaros fallback) exited 0 with
+    # a native ELF written where the caller asked for PTX — the wrong artifact
+    # type reporting success (PR #3400 review, 2026-11-01). Refuse any backend
+    # lean_single cannot honestly emit, before anything is written; accept
+    # `--backend native` because native is exactly what lean_single emits.
     _ls_compile_src="${2:-}"
     _ls_compile_out=""
+    _ls_backend_seen=""
+    _ls_backend=""
     shift 2
     while [[ $# -gt 0 ]]; do
-      if [[ "${1:-}" == "-o" ]]; then _ls_compile_out="${2:-}"; shift 2; else shift; fi
+      case "${1:-}" in
+        -o)
+          _ls_compile_out="${2:-}"
+          shift 2
+          ;;
+        --backend)
+          if [[ $# -lt 2 ]]; then
+            echo "error[E-SRB-BACKEND-001]: --backend requires a value" >&2
+            exit 2
+          fi
+          _ls_backend_seen=1
+          _ls_backend="$2"
+          shift 2
+          ;;
+        --backend=*)
+          _ls_backend_seen=1
+          _ls_backend="${1#--backend=}"
+          shift
+          ;;
+        --gpu-target|--gpu-target=*)
+          echo "error[E-SRB-BACKEND-001]: --gpu-target selects GPU codegen, which the legacy lean_single engine does not provide (it emits a native x86-64 ELF only)" >&2
+          echo "souc: refusing to continue — any output would be a native ELF, not a GPU artifact" >&2
+          echo "souc: run without the legacy engine override, or build Madaros ('make build-madaros'), for GPU backends" >&2
+          exit 1
+          ;;
+        *)
+          shift
+          ;;
+      esac
     done
+    if [[ -n "$_ls_backend_seen" ]]; then
+      case "$_ls_backend" in
+        native)
+          ;; # truthful: lean_single emits a native ELF
+        "")
+          echo "error[E-SRB-BACKEND-001]: --backend requires a non-empty value" >&2
+          exit 2
+          ;;
+        *)
+          echo "error[E-SRB-BACKEND-001]: --backend $_ls_backend is not supported by the legacy lean_single engine (it emits a native x86-64 ELF only)" >&2
+          echo "souc: refusing to write ${_ls_compile_out:-an output artifact} — it would be a native ELF, not the requested $_ls_backend artifact" >&2
+          echo "souc: run without the legacy engine override, or build Madaros ('make build-madaros'), for --backend $_ls_backend" >&2
+          exit 1
+          ;;
+      esac
+    fi
     exec "$LEAN_SINGLE" "$_ls_compile_src" "${_ls_compile_out:-/dev/null}"
     ;;
   *)
