@@ -36,8 +36,10 @@ The integration branch is based on current main and contains only the reviewed c
 
 Fresh current-main Madaros SHA256: af567d40828af64764758229feae30fbb3e0c69fe5b4b76ec601175b44e67599. Public checks of avx512.sio and bytewidth_active_backend.sio passed. Scalar oracle accepted the witness and rejected the widened-read program. Emitter73/73, independent36/36 LLVM cases and36/36 native loads/stores passed. Malformed-case input returned6. No-SIB mutation returned1 and failed T73. Controller log ended INTEGRATION_VALIDATION_PASS.
 
-Slurm21238 is a failed audit assertion, not a compiler failure: the trace correctly showed bin/souc delegating through env MADAROS_RAW_BIN to bin/madaros, but the grep incorrectly expected direct execution. A corrected identity assertion follows that delegation to the raw fresh artifact (Slurm21241). No compiler or tested-source change was made.
+Slurm21238 is a failed audit assertion, not a compiler failure: the trace correctly showed bin/souc delegating through env MADAROS_RAW_BIN to bin/madaros, but the grep incorrectly expected direct execution. Slurm21241 also executed a successful compiler check but its audit grep omitted the timeout wrapper. Slurm21242 then verified both existing execution traces with the actual env/timeout delegation and completed0:0: FRESH_COMPILER_EXECUTION_IDENTITY_CONFIRMED. Both earlier audit jobs failed their overly narrow grep patterns, not the compiler check. No compiler or tested-source change was made.
 
 The generated prebuilt may be materialized by the launcher for provenance comparison even with a valid override. That message alone does not establish which compiler ran; the selected override and execution trace delimit this claim.
 
 GitHub CI is tracked in PR3413 separately. This receipt does not claim completion of every GitHub job or the full manual test suite.
+
+Main branch rules were checked live: required CI Decision, merge queue, no required approving-review count, and resolved review threads. Integration follows the normal queue without an administrative bypass.
