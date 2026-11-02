@@ -1,0 +1,176 @@
+//@ run-pass
+//
+// K1 batch parity demo: batched decode forward must match single
+// forwards bit-exactly (logits) and token-exactly (greedy) over 8
+// steps on two prompts, on CPU and, when ready, on the GPU runtime.
+// Usage: llama_batch_demo [dir]
+// Modules: stdlib/llm/{llama,bpe}.sio
+use llm::bpe::{Bpe, bpe_encode, bpe_load}
+use llm::llama::{KvCache, kv_new, llama_forward, llama_forward_batch, llama_forward_batch_rt, llama_forward_rt, llama_load}
+use hetero::runtime::{Runtime, rt_open}
+use tensor2::cpu_kernel::{CpuBuf, ck_alloc, ck_get, ck_set}
+
+fn putb(buf: *mut u8, i: i64, v: i64) {
+    let w = read_i64(buf as *mut i64, i / 8)
+    let sh = (i % 8) * 8
+    let cleared = w & ((0 - 1) - (255 << sh))
+    write_i64(buf as *mut i64, i / 8, cleared | ((v & 255) << sh))
+}
+
+fn enc_ids(bp: &Bpe, prompt: string) -> CpuBuf with Alloc, Mut, Panic, Div {
+    let plen = str_len(prompt)
+    let pbuf = heap_alloc(plen + 16)
+    var i: i64 = 0
+    while i < plen {
+        putb(pbuf, i, str_char_at(prompt, i) & 255)
+        i = i + 1
+    }
+    let enc = bpe_encode(bp, pbuf, plen)
+    let nseq = enc.len + 1
+    var ids = ck_alloc(nseq)
+    ck_set(&!ids, 0, 0.0)
+    i = 0
+    while i < enc.len {
+        ck_set(&!ids, 1 + i, ck_get(&enc, i))
+        i = i + 1
+    }
+    ids
+}
+
+fn ll_argmax(v: &CpuBuf, n: i64) -> i64 {
+    var best: i64 = 0
+    var bv: f64 = 0.0 - 1000000000.0
+    var i: i64 = 0
+    while i < n {
+        let x = read_f64(v.data, i)
+        if x > bv { bv = x; best = i }
+        i = i + 1
+    }
+    best
+}
+
+fn cmp_logits(a: &CpuBuf, b: &CpuBuf, n: i64) -> bool {
+    var i: i64 = 0
+    while i < n {
+        if read_f64(a.data, i) != read_f64(b.data, i) { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn main() with IO, Mut, Panic, Div, Alloc {
+    var ok = true
+    var dir = "/workspace/llm-models/SmolLM2-135M"
+    if arg_count() > 0 { dir = get_arg(0) }
+    var m = llama_load(dir)
+    print("loaded=")
+    print_int(if m.loaded { 1 } else { 0 })
+    print("\n")
+    if !m.loaded { print("BATCHDONE FAIL\nBATCHDONE DONE\n"); exit(0) }
+    let bp = bpe_load(dir ++ "/tokenizer.json")
+    let rt = rt_open("stdlib/hetero/kernels/gemm_tiled_f32.ptx", "gemm_tiled_f32")
+    let vocab = m.cfg.vocab
+
+    let ids_a = enc_ids(&bp, "The capital of France is")
+    let ids_b = enc_ids(&bp, "The sun rises in the")
+    var kvs: [KvCache; 4] = [kv_new(&m, 512); 4]
+    kvs[0] = kv_new(&m, 512)
+    kvs[1] = kv_new(&m, 512)
+    kvs[2] = kv_new(&m, 512)
+    kvs[3] = kv_new(&m, 512)
+    // identical prefills: single path on 0/1, batch path on 2/3
+    let pa = llama_forward(&!m, &!kvs[0], &ids_a, ids_a.len)
+    let pb = llama_forward(&!m, &!kvs[1], &ids_b, ids_b.len)
+    let pc = llama_forward(&!m, &!kvs[2], &ids_a, ids_a.len)
+    let pd = llama_forward(&!m, &!kvs[3], &ids_b, ids_b.len)
+    if !cmp_logits(&pa, &pc, vocab) { ok = false }
+    if !cmp_logits(&pb, &pd, vocab) { ok = false }
+    var slots: [i64; 4] = [0; 4]
+    slots[0] = 2
+    slots[1] = 3
+    var toks: [i64; 4] = [0; 4]
+    var ta = ll_argmax(&pa, vocab)
+    var tb = ll_argmax(&pb, vocab)
+    var step: i64 = 0
+    while step < 8 {
+        var oa = ck_alloc(1)
+        var ob = ck_alloc(1)
+        ck_set(&!oa, 0, ta as f64)
+        ck_set(&!ob, 0, tb as f64)
+        let la = llama_forward(&!m, &!kvs[0], &oa, 1)
+        let lb = llama_forward(&!m, &!kvs[1], &ob, 1)
+        toks[0] = ta
+        toks[1] = tb
+        let batched = llama_forward_batch(&!m, &!kvs, &slots, &toks, 2)
+        var ra = ck_alloc(vocab)
+        var rb = ck_alloc(vocab)
+        var v: i64 = 0
+        while v < vocab {
+            write_f64(ra.data, v, read_f64(batched.data, v))
+            write_f64(rb.data, v, read_f64(batched.data, vocab + v))
+            v = v + 1
+        }
+        if !cmp_logits(&la, &ra, vocab) { ok = false }
+        if !cmp_logits(&lb, &rb, vocab) { ok = false }
+        let na = ll_argmax(&la, vocab)
+        let nb2 = ll_argmax(&lb, vocab)
+        if na != ll_argmax(&ra, vocab) { ok = false }
+        if nb2 != ll_argmax(&rb, vocab) { ok = false }
+        ta = na
+        tb = nb2
+        step = step + 1
+    }
+    print("cpu parity=")
+    print_int(if ok { 1 } else { 0 })
+    print("\n")
+    if rt.ready {
+        var gok = true
+        var gkvs: [KvCache; 4] = [kv_new(&m, 512); 4]
+        gkvs[0] = kv_new(&m, 512)
+        gkvs[1] = kv_new(&m, 512)
+        gkvs[2] = kv_new(&m, 512)
+        gkvs[3] = kv_new(&m, 512)
+        let ga = llama_forward_rt(&!m, &!gkvs[0], &ids_a, ids_a.len, &rt)
+        let gb = llama_forward_rt(&!m, &!gkvs[1], &ids_b, ids_b.len, &rt)
+        let gc = llama_forward_rt(&!m, &!gkvs[2], &ids_a, ids_a.len, &rt)
+        let gd = llama_forward_rt(&!m, &!gkvs[3], &ids_b, ids_b.len, &rt)
+        if !cmp_logits(&ga, &gc, vocab) { gok = false }
+        if !cmp_logits(&gb, &gd, vocab) { gok = false }
+        var gta = ll_argmax(&ga, vocab)
+        var gtb = ll_argmax(&gb, vocab)
+        var gstep: i64 = 0
+        while gstep < 8 {
+            var goa = ck_alloc(1)
+            var gob = ck_alloc(1)
+            ck_set(&!goa, 0, gta as f64)
+            ck_set(&!gob, 0, gtb as f64)
+            let gla = llama_forward_rt(&!m, &!gkvs[0], &goa, 1, &rt)
+            let glb = llama_forward_rt(&!m, &!gkvs[1], &gob, 1, &rt)
+            toks[0] = gta
+            toks[1] = gtb
+            let gbatched = llama_forward_batch_rt(&!m, &!gkvs, &slots, &toks, 2, &rt)
+            var gra = ck_alloc(vocab)
+            var grb = ck_alloc(vocab)
+            var v: i64 = 0
+            while v < vocab {
+                write_f64(gra.data, v, read_f64(gbatched.data, v))
+                write_f64(grb.data, v, read_f64(gbatched.data, vocab + v))
+                v = v + 1
+            }
+            if !cmp_logits(&gla, &gra, vocab) { gok = false }
+            if !cmp_logits(&glb, &grb, vocab) { gok = false }
+            gta = ll_argmax(&gla, vocab)
+            gtb = ll_argmax(&glb, vocab)
+            if gta != ll_argmax(&gra, vocab) { gok = false }
+            if gtb != ll_argmax(&grb, vocab) { gok = false }
+            gstep = gstep + 1
+        }
+        print("gpu parity=")
+        print_int(if gok { 1 } else { 0 })
+        print("\n")
+        if !gok { ok = false }
+    }
+    if ok { print("BATCHDONE PASS\nBATCHDONE DONE\n") } else { print("BATCHDONE FAIL\nBATCHDONE DONE\n") }
+    if !ok { exit(1) }
+    exit(0)
+}

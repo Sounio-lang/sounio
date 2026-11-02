@@ -184,6 +184,14 @@ struct FoClosureNode {
 var FO_CL_HEAD: Option<Box<FoClosureNode> > = None
 
 var FO_INLINE_DEPTH: i64 = 0
+
+// SIO-573: expression-nesting depth guard state. Lowering recurses once per
+// nesting level at roughly 700KB a level (measured: an 11-deep chain fits an
+// 8MB compiler stack, a 12-deep chain SIGSEGVs), so deep chains must refuse
+// with a diagnostic instead of crashing. Globals match the FO_INLINE_DEPTH
+// precedent: a Lowerer field would not survive the per-call rebuilds.
+var LOWER_EXPR_DEPTH: i64 = 0
+var LOWER_EXPR_BUDGET: i64 = 0 - 1
 // Global, like the FO_XFER_* table: a Lowerer is rebuilt per function, so a
 // Lowerer field would not survive from the helper's lowering to its caller's.
 var FO_INLINE_HEAD: Option<Box<FoInlineNode> > = None
@@ -1386,6 +1394,9 @@ var LOWER_KN_FIELD_NAME: [i64; 2048] = [0; 2048]
 var LOWER_KN_FIELD_KIND: [i64; 2048] = [0; 2048]
 
 fn lower_kn_field_note(type_name: Name, field_name: Name, ty: &TypeExpr) with Mut, Panic, Div {
+    // SIO-557: every struct declaration walk funnels through here, so one
+    // hook records raw-ptr byte fields for all of them.
+    lower_byteptr_field_note(type_name, field_name, ty)
     if (*ty).kind != TypeExprKind::TypeKnowledge { return }
     let kind = lower_type_expr_knowledge_value_float(ty)
     let tid = ir_intern_name(type_name)
@@ -1403,6 +1414,102 @@ fn lower_kn_field_note(type_name: Name, field_name: Name, ty: &TypeExpr) with Mu
     LOWER_KN_FIELD_NAME[LOWER_KN_FIELD_COUNT as usize] = fid
     LOWER_KN_FIELD_KIND[LOWER_KN_FIELD_COUNT as usize] = kind
     LOWER_KN_FIELD_COUNT = LOWER_KN_FIELD_COUNT + 1
+}
+
+// SIO-557: declared `*mut i8` / `*mut u8` struct fields, so `*(b.ptr)`
+// derefs can narrow to a byte load. Same-named struct/field collisions
+// collapse to 0 ("unknown", keep the word load) like the table above.
+var LOWER_BYTEPTR_FIELD_COUNT: i64 = 0
+var LOWER_BYTEPTR_FIELD_TYPE: [i64; 2048] = [0; 2048]
+var LOWER_BYTEPTR_FIELD_NAME: [i64; 2048] = [0; 2048]
+var LOWER_BYTEPTR_FIELD_SIGN: [i64; 2048] = [0; 2048]
+
+// SIO-557 R3: a pointer laundered out of a borrow (`&x as *mut i8`,
+// possibly through int casts) addresses a word-backed scalar slot. Byte
+// traffic through it would disagree with the slot's word reads/writes
+// (251 vs -5), so borrow-derived pointers keep the word width. Heap, int,
+// field, and param pointers still narrow.
+fn expr_is_slot_borrow_ref(expr: &Expr) -> bool with Mut, Panic, Div, Alloc {
+    if (*expr).kind == ExprKind::ExprUnary
+        && ((*expr).un_op == UnaryOp::OpRef || (*expr).un_op == UnaryOp::OpRefMut) {
+        return true
+    }
+    if (*expr).kind == ExprKind::ExprCast {
+        match (*expr).left {
+            Some(inner) => { return expr_is_slot_borrow_ref(&(*inner)) }
+            None => {}
+        }
+    }
+    false
+}
+
+fn lower_byteptr_field_note(type_name: Name, field_name: Name, ty: &TypeExpr) with Mut, Panic, Div {
+    if (*ty).kind != TypeExprKind::TypeRawPtr { return }
+    let inner = lower_opt_type_named_name(&(*ty).inner)
+    var sign = 0
+    if inner.len == 2 && inner.buf[0] == 105 as i8 && inner.buf[1] == 56 as i8 { sign = 1 }
+    if inner.len == 2 && inner.buf[0] == 117 as i8 && inner.buf[1] == 56 as i8 { sign = 2 }
+    // SIO-556: the same table also tracks float pointees (3 = f64/f32 scalar,
+    // 4 = f128/f256 wide) so field derefs resolve float-ness; the width
+    // lookup below still only answers 1/2.
+    if lower_name_is_f64_scalar_type(inner) { sign = 3 }
+    if lower_name_is_wide_float_type(inner) { sign = 4 }
+    // SIO-557 R2: non-byte pointees (sign 0) also reconcile: the same
+    // (struct, field) declared *mut i8 in one module and *mut i64 in
+    // another must collapse to 0 (word) rather than keep the first sign.
+    let tid = ir_intern_name(type_name)
+    let fid = ir_intern_name(field_name)
+    var i: i64 = 0
+    while i < LOWER_BYTEPTR_FIELD_COUNT {
+        if LOWER_BYTEPTR_FIELD_TYPE[i as usize] == tid && LOWER_BYTEPTR_FIELD_NAME[i as usize] == fid {
+            if LOWER_BYTEPTR_FIELD_SIGN[i as usize] != sign { LOWER_BYTEPTR_FIELD_SIGN[i as usize] = 0 }
+            return
+        }
+        i = i + 1
+    }
+    // SIO-556 review: retain sign-0 entries instead of discarding them. A
+    // non-byte/non-float raw pointee (e.g. *mut i64) declared BEFORE a
+    // conflicting *mut i8/*mut f64 must still collapse the shared key to
+    // unknown (0) when the float/byte declaration arrives; discarding
+    // sign-0 made classification depend on module order. A stored 0 reads
+    // exactly like a missing entry in both lookups (word width, not float).
+    if LOWER_BYTEPTR_FIELD_COUNT >= 2048 { return }
+    LOWER_BYTEPTR_FIELD_TYPE[LOWER_BYTEPTR_FIELD_COUNT as usize] = tid
+    LOWER_BYTEPTR_FIELD_NAME[LOWER_BYTEPTR_FIELD_COUNT as usize] = fid
+    LOWER_BYTEPTR_FIELD_SIGN[LOWER_BYTEPTR_FIELD_COUNT as usize] = sign
+    LOWER_BYTEPTR_FIELD_COUNT = LOWER_BYTEPTR_FIELD_COUNT + 1
+}
+
+fn lower_byteptr_field_width(type_name: Name, field_name: Name) -> i64 with Mut, Panic, Div {
+    if type_name.len <= 0 { return 0 }
+    let tid = ir_intern_name(type_name)
+    let fid = ir_intern_name(field_name)
+    var i: i64 = 0
+    while i < LOWER_BYTEPTR_FIELD_COUNT {
+        if LOWER_BYTEPTR_FIELD_TYPE[i as usize] == tid && LOWER_BYTEPTR_FIELD_NAME[i as usize] == fid {
+            return LOWER_BYTEPTR_FIELD_SIGN[i as usize]
+        }
+        i = i + 1
+    }
+    0
+}
+
+// SIO-556: float-ness of a declared raw-pointer field deref: 2 = f64 scalar,
+// 5 = wide float (mirrors deref_operand_pointee_kind_ref's codes), else 0.
+fn lower_floatptr_field_kind(type_name: Name, field_name: Name) -> i64 with Mut, Panic, Div {
+    if type_name.len <= 0 { return 0 }
+    let tid = ir_intern_name(type_name)
+    let fid = ir_intern_name(field_name)
+    var i: i64 = 0
+    while i < LOWER_BYTEPTR_FIELD_COUNT {
+        if LOWER_BYTEPTR_FIELD_TYPE[i as usize] == tid && LOWER_BYTEPTR_FIELD_NAME[i as usize] == fid {
+            if LOWER_BYTEPTR_FIELD_SIGN[i as usize] == 3 { return 2 }
+            if LOWER_BYTEPTR_FIELD_SIGN[i as usize] == 4 { return 5 }
+            return 0
+        }
+        i = i + 1
+    }
+    0
 }
 
 fn lower_kn_field_kind(type_name: Name, field_name: Name) -> i64 with Mut, Panic, Div {
@@ -8951,6 +9058,29 @@ fn lower_name_is_ffi_system(n: Name) -> bool with Div {
         && n.buf[3] == 95 as i8 && n.buf[4] == 115 as i8 && n.buf[5] == 121 as i8
         && n.buf[6] == 115 as i8 && n.buf[7] == 116 as i8 && n.buf[8] == 101 as i8
         && n.buf[9] == 109 as i8
+}
+
+// Bodyless float builtins: backend float ids with no Sounio body (sqrt/exp/
+// log/sin/cos/pow, bits_to_f64, read_f64, acknowledge/require_confidence,
+// ffi_sqrt/floor/ceil/pow/tgamma). The fn_id lookup misses them (never in
+// lo.module), so without this an as-i64 cast on their result skips the
+// conversion and leaks IEEE bits. Mirrors native_v2_builtin_returns_float.
+fn lower_name_is_float_builtin(n: Name) -> bool with Mut, Panic, Div {
+    ir_name_eq(n, make_name("sqrt"))
+        || ir_name_eq(n, make_name("exp"))
+        || ir_name_eq(n, make_name("log"))
+        || ir_name_eq(n, make_name("sin"))
+        || ir_name_eq(n, make_name("cos"))
+        || ir_name_eq(n, make_name("pow"))
+        || ir_name_eq(n, make_name("bits_to_f64"))
+        || ir_name_eq(n, make_name("read_f64"))
+        || ir_name_eq(n, make_name("acknowledge"))
+        || ir_name_eq(n, make_name("require_confidence"))
+        || ir_name_eq(n, make_name("ffi_sqrt"))
+        || ir_name_eq(n, make_name("ffi_floor"))
+        || ir_name_eq(n, make_name("ffi_ceil"))
+        || ir_name_eq(n, make_name("ffi_pow"))
+        || ir_name_eq(n, make_name("ffi_tgamma"))
 }
 
 // Buffer argument index for handle-buf builtins: str_from_bytes(buf,n) → 0,
@@ -25353,6 +25483,23 @@ impl Lowerer {
             }
             return ir_empty_name()
         }
+        // SIO-572: `(... as *mut W)` names W directly. Without this arm the
+        // deref fallback above recursed into the cast and got an empty name,
+        // so field offsets after inline arrays fell back to the field index.
+        // Gated by the same registered-layout check the raw-deref classifier
+        // uses, so scalar casts keep resolving empty exactly as before.
+        if (*expr).kind == ExprKind::ExprCast {
+            var cast_pointee = ir_empty_name()
+            if self.cast_names_registered_struct_pointee_ref(expr) {
+                match (*expr).cast_type {
+                    Some(ct) => {
+                        cast_pointee = lower_opt_type_named_name(&(*ct).inner)
+                    }
+                    None => {}
+                }
+            }
+            return cast_pointee
+        }
         // `pair.0.method()` -- the receiver is a TUPLE SLOT, not a named field.
         // The field-access arm below asks field_named_type_for_struct for a field
         // literally called "0", which no struct has, so it answered empty and the
@@ -25480,7 +25627,7 @@ impl Lowerer {
 
     fn opt_expr_result_is_float_ref(self, opt: &Option<Box<Expr>>) -> bool with Mut, Panic, Div, Alloc {
         match *opt {
-            Some(expr) => self.expr_result_is_float_ref(&(*expr)),
+            Some(expr) => self.expr_result_is_float_ref(&(*expr))
             _ => false,
         }
     }
@@ -25870,7 +26017,14 @@ impl Lowerer {
         match *operand_opt {
             Some(operand) => {
                 if (*operand).kind == ExprKind::ExprIdent {
+                    // SIO-556: raw-pointer locals/params (`p: *mut f64`) carry
+                    // their pointee in the same slot as borrows; only floats
+                    // resolve here (non-float raws keep 0, today's behavior).
                     if !self.lookup_local_is_ref((*operand).name) {
+                        let pointee = self.lookup_local_struct_type((*operand).name)
+                        if pointee.len <= 0 { return 0 }
+                        if lower_name_is_f64_scalar_type(pointee) { return 2 }
+                        if lower_name_is_wide_float_type(pointee) { return 5 }
                         return 0
                     }
                     let pointee = self.lookup_local_struct_type((*operand).name)
@@ -25881,6 +26035,91 @@ impl Lowerer {
                         || lower_name_is_bool_type(pointee)
                         || lower_name_is_string_type(pointee) {
                         return 1
+                    }
+                    return 0
+                }
+                // SIO-556: `*((p as i64) as *mut f64)` — a cast to a raw float
+                // pointer yields a float. Non-float casts keep 0.
+                if (*operand).kind == ExprKind::ExprCast {
+                    match (*operand).cast_type {
+                        Some(ct) => {
+                            if (*ct).kind == TypeExprKind::TypeRawPtr {
+                                let inner = lower_opt_type_named_name(&(*ct).inner)
+                                if lower_name_is_f64_scalar_type(inner) { return 2 }
+                                if lower_name_is_wide_float_type(inner) { return 5 }
+                            }
+                        }
+                        None => {}
+                    }
+                    return 0
+                }
+                // SIO-556: `*(b.ptr)` where ptr is a declared *mut f64 field —
+                // resolve through the owner struct like the width table does.
+                if (*operand).kind == ExprKind::ExprFieldAccess {
+                    match (*operand).left {
+                        Some(base) => {
+                            let owner = self.expr_receiver_struct_type_ref(&(*base))
+                            if owner.len > 0 {
+                                return lower_floatptr_field_kind(owner, (*operand).name)
+                            }
+                        }
+                        None => {}
+                    }
+                    return 0
+                }
+                0
+            }
+            None => 0,
+        }
+    }
+
+    // Width of an OpDeref load: 1 = *mut i8 (movsx), 2 = *mut u8 (movzx),
+    // 0 = word. The default 8-byte load miscompiles byte derefs (SIO-557:
+    // `*cell as i64` over heap bytes read the whole word, 26470 instead of
+    // 102). Shapes: a cast to a raw byte pointer, or an ident whose recorded
+    // pointee is i8/u8 (a `p: *mut i8` parameter records its pointee).
+    fn deref_narrow_width_ref(self, operand_opt: &Option<Box<Expr>>) -> i64 with Mut, Panic, Div, Alloc {
+        match *operand_opt {
+            Some(operand) => {
+                if (*operand).kind == ExprKind::ExprCast {
+                    match (*operand).cast_type {
+                        Some(ct) => {
+                            if (*ct).kind == TypeExprKind::TypeRawPtr {
+                                // SIO-557 R3: borrow-derived keeps word width.
+                                if expr_is_slot_borrow_ref(&(*operand)) { return 0 }
+                                let inner = lower_opt_type_named_name(&(*ct).inner)
+                                if inner.len == 2 && inner.buf[0] == 105 as i8 && inner.buf[1] == 56 as i8 { return 1 }
+                                if inner.len == 2 && inner.buf[0] == 117 as i8 && inner.buf[1] == 56 as i8 { return 2 }
+                            }
+                        }
+                        None => {}
+                    }
+                    return 0
+                }
+                // SIO-557: never narrow through a borrow. `let pp = &p` copies
+                // p's recorded pointee onto pp, but pp's slot holds an
+                // ADDRESS: `*pp` must be a word load (4660, not its low byte
+                // 52). A borrow of a genuine byte slot still reads correctly
+                // as a word because locals live in word slots.
+                if (*operand).kind == ExprKind::ExprIdent && !self.lookup_local_is_ref((*operand).name) {
+                    let pointee = self.lookup_local_struct_type((*operand).name)
+                    if pointee.len == 2 && pointee.buf[0] == 105 as i8 && pointee.buf[1] == 56 as i8 { return 1 }
+                    if pointee.len == 2 && pointee.buf[0] == 117 as i8 && pointee.buf[1] == 56 as i8 { return 2 }
+                }
+                // SIO-557: `*(b.ptr)` where ptr: *mut i8 — resolve the field's
+                // declared pointee through the owner struct. Unresolvable
+                // owners keep the word load (status quo, never a new refusal).
+                if (*operand).kind == ExprKind::ExprFieldAccess {
+                    // Mirror field_is_box_for_base_ref: unwrap the base Option
+                    // explicitly; passing &left directly mis-resolves the owner.
+                    match (*operand).left {
+                        Some(base) => {
+                            let owner = self.expr_receiver_struct_type_ref(&(*base))
+                            if owner.len > 0 {
+                                return lower_byteptr_field_width(owner, (*operand).name)
+                            }
+                        }
+                        None => {}
                     }
                     return 0
                 }
@@ -25919,6 +26158,23 @@ impl Lowerer {
             match (*e).left {
                 Some(callee_expr) => {
                     let callee_name = self.expr_to_callee_name_ref(&(*callee_expr))
+                    // Builtin float math fns lower via dedicated float paths even
+                    // when a bodyless stub with returns_float=0 exists. User fns
+                    // may shadow a builtin name, so trust the list just for a
+                    // missing callee or a bodyless placeholder stub (same split
+                    // as lowerer_call_is_f64_raw_builtin).
+                    if lower_name_is_float_builtin(callee_name) {
+                        let probe_id = lowerer_lookup_fn_id_by_name_ref(&self, callee_name)
+                        if probe_id < 0 {
+                            return true
+                        }
+                        if probe_id < self.module.fn_count {
+                            let probe = ir_fn_get(&(*self.module), probe_id as usize)
+                            if probe.instr_count == 0 && probe.param_count == 0 {
+                                return true
+                            }
+                        }
+                    }
                     if self.name_is_variance_of(callee_name)
                         || self.name_is_covariance_of(callee_name)
                         || self.name_is_uncertainty_of(callee_name)
@@ -29539,6 +29795,26 @@ impl Lowerer {
                     let place_pair = lo.emit_place_aggregate_value_copy(&(*rhs_ident), reg)
                     lo = place_pair.0
                     bind_reg = place_pair.1
+                } else if (*rhs_ident).kind == ExprKind::ExprCast
+                    && lower_cast_type_is_integer(&(*rhs_ident).cast_type)
+                    && lower_opt_type_wide_bits(&(*rhs_ident).cast_type) <= 64 {
+                    // SIO-569: int->int casts erase in lower_cast_expr_ref
+                    // (returns src_reg with no conversion op), so
+                    // `let neg = x as i64` bound neg to x's register and a
+                    // later `x = ...` showed through neg (expected -495,
+                    // got 505). Snapshot exactly like the ExprIdent arm
+                    // above. Gated to scalar integer casts: wide casts
+                    // already materialise fresh wide regs, and a scalar
+                    // ir_copy would keep only limb 0; float and unit casts
+                    // keep the old binding because a fresh ir_copy would lose
+                    // the float-ness marking of the source reg
+                    // (unit_cast_preserves_value needs `raw as molal` to stay
+                    // on the erased float reg).
+                    let cast_copy_pair = lo.fresh_reg()
+                    lo = cast_copy_pair.0
+                    let cast_copy_reg = cast_copy_pair.1
+                    lo = lo.emit(ir_copy(cast_copy_reg, reg))
+                    bind_reg = cast_copy_reg
                 }
             }
             _ => {}
@@ -29825,8 +30101,57 @@ impl Lowerer {
                 None => {}
             }
         }
-        if raw_pointee.len > 0 && lower_struct_layout_index_of(&(*lo.struct_layouts), raw_pointee) >= 0 {
+        // SIO-557 R3: `let xp = (&!x) as *mut i8` aliases a word-backed slot;
+        // recording i8 would narrow `*xp` and disagree with the slot's word
+        // reads. Borrow-derived BYTE aliases keep the word width; f64, wide,
+        // bool, and struct pointees keep their recordings (float lowering and
+        // field resolution need them).
+        match s.expr {
+            Some(rhs_borrow) => {
+                if (*rhs_borrow).kind == ExprKind::ExprCast && expr_is_slot_borrow_ref(&(*rhs_borrow)) {
+                    let rp = raw_pointee
+                    if rp.len == 2 && ((rp.buf[0] == 105 as i8 && rp.buf[1] == 56 as i8)
+                        || (rp.buf[0] == 117 as i8 && rp.buf[1] == 56 as i8)) {
+                        raw_pointee = ir_empty_name()
+                    }
+                }
+            }
+            None => {}
+        }
+        // SIO-557: record scalar pointees too, mirroring the &T/&!T binding
+        // above (integer/float/bool). Without this a `let c = ... as *mut i8`
+        // local has no recorded type, so `*c` cannot be narrowed to a byte
+        // load and reads a whole word.
+        if raw_pointee.len > 0 && (lower_name_is_f64_scalar_type(raw_pointee)
+            || lower_name_is_wide_float_type(raw_pointee)
+            || lower_name_is_integer_type(raw_pointee)
+            || lower_name_is_bool_type(raw_pointee)
+            || lower_struct_layout_index_of(&(*lo.struct_layouts), raw_pointee) >= 0) {
             lo = lo.bind_local_struct_type(s.name, raw_pointee, false)
+        }
+        // SIO-557 R2: `let cell = b.ptr` where ptr is a declared byte-pointer
+        // field — propagate the field's width so `*cell` narrows exactly like
+        // `*(b.ptr)` does. Only annotations and casts populated raw_pointee.
+        match s.expr {
+            Some(rhs_field) => {
+                if (*rhs_field).kind == ExprKind::ExprFieldAccess {
+                    match (*rhs_field).left {
+                        Some(rhs_base) => {
+                            let rhs_owner = lo.expr_receiver_struct_type_ref(&(*rhs_base))
+                            if rhs_owner.len > 0 {
+                                let rhs_w = lower_byteptr_field_width(rhs_owner, (*rhs_field).name)
+                                if rhs_w == 1 {
+                                    lo = lo.bind_local_struct_type(s.name, make_name("i8"), false)
+                                } else if rhs_w == 2 {
+                                    lo = lo.bind_local_struct_type(s.name, make_name("u8"), false)
+                                }
+                            }
+                        }
+                        None => {}
+                    }
+                }
+            }
+            None => {}
         }
         if lower_opt_type_is_dynamic_array(&s.ty) {
             // SIO-311: an annotated `[T]` stays dynamic even when its
@@ -31361,7 +31686,17 @@ impl Lowerer {
                             if is_box_t {
                                 lo = lo.emit(ir_field_set(ptr_reg, 0, rhs, ir_empty_name()))
                             } else {
-                                lo = lo.emit(ir_store_ptr(ptr_reg, rhs))
+                                // SIO-557 R2: `*p = v` through *mut i8/*mut u8 is a
+                                // byte store — the default word store zeroes the
+                                // seven neighbour bytes. Same width shapes as loads.
+                                var store_instr = ir_store_ptr(ptr_reg, rhs)
+                                let store_narrow = lo.deref_narrow_width_ref(&(*target_expr).left)
+                                if store_narrow == 1 {
+                                    store_instr.imm_flags = IR_DEREF_NARROW_SIGNED_FLAG
+                                } else if store_narrow == 2 {
+                                    store_instr.imm_flags = IR_DEREF_NARROW_UNSIGNED_FLAG
+                                }
+                                lo = lo.emit(store_instr)
                             }
                             (lo, rhs)
                         } else {
@@ -36697,10 +37032,68 @@ impl Lowerer {
         if (*e).un_op != UnaryOp::OpDeref { return false }
         match (*e).left {
             Some(operand) => {
+                if (*operand).kind == ExprKind::ExprCast {
+                    // SIO-572: `*((h as i64) as *mut W)` -- an inline cast to a
+                    // raw struct pointer is the same payload access as a
+                    // typed-local deref, but the ident-only gate below sent it
+                    // down the handle path (wrong field offsets after inline
+                    // arrays, SIGILL). Accept it when the pointee names a
+                    // registered struct layout; scalar pointees keep the
+                    // generic path that already handles them. A directly
+                    // borrow-derived subject (`&` / `&!`) keeps the baseline
+                    // path: borrow-derived addresses are a separate defect
+                    // family (broken identically through typed locals).
+                    if self.cast_subject_is_borrow_ref(&(*operand)) { return false }
+                    return self.cast_names_registered_struct_pointee_ref(&(*operand))
+                }
                 if (*operand).kind != ExprKind::ExprIdent { return false }
                 if self.lookup_local_is_ref((*operand).name) { return false }
                 if ir_name_is_box(self.lookup_local_struct_type((*operand).name)) { return false }
                 true
+            }
+            None => false,
+        }
+    }
+
+    // SIO-572: peel a cast chain to its subject. True when the subject is
+    // directly borrow-derived (`&x` / `&!x`, possibly through further
+    // casts): such addresses keep the baseline generic path.
+    fn cast_subject_is_borrow_ref(self, e: &Expr) -> bool with Mut, Panic, Div, Alloc {
+        let _lo = self
+        var current = e
+        var found = false
+        var done = false
+        while !done {
+            if (*current).kind == ExprKind::ExprCast {
+                match (*current).left {
+                    Some(inner) => {
+                        current = &(*inner)
+                    }
+                    None => { done = true }
+                }
+            } else if (*current).kind == ExprKind::ExprUnary
+                && ((*current).un_op == UnaryOp::OpRef || (*current).un_op == UnaryOp::OpRefMut) {
+                found = true
+                done = true
+            } else {
+                done = true
+            }
+        }
+        found
+    }
+
+    // SIO-572: does `e` cast to `*mut T` / `*T` where T names a registered
+    // struct layout? Shared by the raw-deref classifier above and the
+    // struct-type resolver below so both agree on which inline casts carry
+    // layout.
+    fn cast_names_registered_struct_pointee_ref(self, e: &Expr) -> bool with Mut, Panic, Div, Alloc {
+        if (*e).kind != ExprKind::ExprCast { return false }
+        match (*e).cast_type {
+            Some(ct) => {
+                if (*ct).kind != TypeExprKind::TypeRawPtr { return false }
+                let pointee = lower_opt_type_named_name(&(*ct).inner)
+                if pointee.len <= 0 { return false }
+                lower_struct_layout_index_of(&(*self.struct_layouts), pointee) >= 0
             }
             None => false,
         }
@@ -37739,6 +38132,9 @@ impl Lowerer {
         // an f64, so mark it float (the box arm reads field 0 and is untouched).
         let deref_yields_float = e.un_op == UnaryOp::OpDeref && !is_box_deref
             && lo1.deref_operand_pointee_kind_ref(&e.left) == 2
+        // SIO-557: a deref through *mut i8/*mut u8 carries its width so the
+        // backend emits a byte load instead of the default word load.
+        let deref_narrow = if e.un_op == UnaryOp::OpDeref && !is_box_deref { lo1.deref_narrow_width_ref(&e.left) } else { 0 }
         let pair_d = lo1.fresh_reg()
         let lo2 = pair_d.0
         let dst = pair_d.1
@@ -37755,6 +38151,11 @@ impl Lowerer {
             // so a vreg past the 2048-bit set still flips the sign bit.
             if src_is_float && e.un_op == UnaryOp::OpNeg {
                 uins.imm_flags = 2
+            }
+            if deref_narrow == 1 {
+                uins.imm_flags = IR_DEREF_NARROW_SIGNED_FLAG
+            } else if deref_narrow == 2 {
+                uins.imm_flags = IR_DEREF_NARROW_UNSIGNED_FLAG
             }
             lo2.emit(uins)
         }
@@ -39645,6 +40046,70 @@ impl Lowerer {
     }
 
     fn lower_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        // SIO-573: depth guard, see LOWER_EXPR_DEPTH. Every nested expression
+        // passes through here exactly once per level, so this single choke
+        // point covers BinOp, call-arg, unary, index and all other shapes.
+        LOWER_EXPR_DEPTH = LOWER_EXPR_DEPTH + 1
+        let depth_budget = self.lower_expr_depth_budget()
+        if LOWER_EXPR_DEPTH > depth_budget {
+            LOWER_EXPR_DEPTH = LOWER_EXPR_DEPTH - 1
+            if LOWER_EXPR_DEPTH == depth_budget {
+                print("error: Madaros expression nesting too deep for the compiler stack (depth ")
+                print_int(LOWER_EXPR_DEPTH + 1)
+                print(", budget ")
+                print_int(depth_budget)
+                print("); refusing instead of crashing\n")
+                print("  help: rebuild with a bigger compiler stack (ulimit -s 524288) or set MADAROS_STACK_KB=524288\n")
+            }
+            var lo_deep = self
+            lowerer_mark_hard_error(&! lo_deep)
+            return (lo_deep, 0)
+        }
+        let pair = self.lower_expr_inner_ref(e)
+        LOWER_EXPR_DEPTH = LOWER_EXPR_DEPTH - 1
+        pair
+    }
+
+    // SIO-573: decimal parser for MADAROS_STACK_KB. lower.sio keeps a local
+    // copy so the guard has no new cross-module dependency (see
+    // parse_i64_decimal in compiler/main.sio for the shared version).
+    fn lower_parse_stack_kb(self, raw: string) -> i64 with Mut, Panic, Div {
+        let n = str_len(raw)
+        if n <= 0 { return 0 - 1 }
+        if str_char_at(raw, 0) == 117 { return 0 }
+        var i: i64 = 0
+        var v: i64 = 0
+        while i < n {
+            let d = str_char_at(raw, i) - 48
+            if d < 0 || d > 9 { return 0 - 1 }
+            v = v * 10 + d
+            i = i + 1
+        }
+        v
+    }
+
+    // SIO-573: max expression-nesting depth for the current compiler stack.
+    // 1MB per level is conservative against the measured ~700KB; the default
+    // covers the default 512MB reservation, and small explicit stacks get a
+    // small budget so they refuse instead of crashing. Cached: the variable
+    // is process-constant.
+    fn lower_expr_depth_budget(self) -> i64 with Mut, Panic, Div, Alloc, IO {
+        if LOWER_EXPR_BUDGET < 0 {
+            let kb = self.lower_parse_stack_kb(read_env("MADAROS_STACK_KB"))
+            if kb == 0 {
+                LOWER_EXPR_BUDGET = 1000000
+            } else if kb < 0 {
+                LOWER_EXPR_BUDGET = 512
+            } else {
+                var b = kb / 1024
+                if b < 4 { b = 4 }
+                LOWER_EXPR_BUDGET = b
+            }
+        }
+        LOWER_EXPR_BUDGET
+    }
+
+    fn lower_expr_inner_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         if e.kind == ExprKind::ExprIntLit
             || e.kind == ExprKind::ExprFloatLit
             || e.kind == ExprKind::ExprBoolTrue

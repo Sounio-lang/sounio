@@ -8284,6 +8284,90 @@ fn checker_check_return_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with
     ty_never()
 }
 
+// SIO-417 stack diet: check_expr dispatch group A (literals + control).
+// Runs before group B; sequential tuple protocol (no nesting between groups),
+// so only the taken group stays live across nested-call recursion.
+fn checker_check_expr_group_a_inplace(c: *mut Checker, e: Expr) -> (bool, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+    if e.kind == ExprKind::ExprIntLit {
+        (*c).last_literal_int = e.int_val
+        (*c).last_literal_kind = 1
+        return (true, ty_i64())
+    } else if e.kind == ExprKind::ExprDsepProof {
+        // The one producer of this type: see parser/exprs.sio's rewrite of
+        // `d_separated(A, B | Z)`. Claim validity (does the declared graph
+        // actually d-separate these variables) is a separate, already-run
+        // check (checker_verify_dsep_claims_mut); this arm only says what
+        // KIND of thing the expression is, so indep_dsep's declared
+        // `proof: DsepProof` parameter can require it.
+        return (true, ty_dsep_proof())
+    } else if e.kind == ExprKind::ExprFloatLit {
+        (*c).last_literal_float = e.float_val
+        (*c).last_literal_kind = 2
+        return (true, ty_f64())
+    } else if e.kind == ExprKind::ExprBoolTrue {
+        return (true, ty_bool())
+    } else if e.kind == ExprKind::ExprBoolFalse {
+        return (true, ty_bool())
+    } else if e.kind == ExprKind::ExprStringLit {
+        return (true, ty_string())
+    } else if e.kind == ExprKind::ExprCharLit {
+        return (true, ty_char())
+    } else if e.kind == ExprKind::ExprReturn {
+        return (true, checker_check_return_expr_inplace(c, e))
+    } else if e.kind == ExprKind::ExprPath {
+        return (true, checker_check_path_expr_inplace(c, e))
+    } else if e.kind == ExprKind::ExprBinary {
+        return (true, checker_check_binary_expr_inplace(c, e))
+    } else if e.kind == ExprKind::ExprIf {
+        return (true, checker_check_if_expr_inplace(c, e))
+    } else if e.kind == ExprKind::ExprWhile {
+        return (true, checker_check_while_expr_inplace(c, e))
+    } else if e.kind == ExprKind::ExprLoop {
+        return (true, checker_check_loop_expr_inplace(c, e))
+    } else if e.kind == ExprKind::ExprBlock {
+        return (true, checker_check_block_expr_inplace(c, e))
+    } else if e.kind == ExprKind::ExprArrayLit {
+        return (true, checker_check_array_lit_inplace(c, e))
+    } else if e.kind == ExprKind::ExprUnary {
+        return (true, checker_check_unary_expr_inplace(c, e))
+    } else { return (false, ty_error()) }
+}
+
+// SIO-417 stack diet: check_expr dispatch group B (data + call forms).
+fn checker_check_expr_group_b_inplace(c: *mut Checker, e: Expr) -> (bool, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+    if e.kind == ExprKind::ExprFieldAccess {
+        return (true, checker_check_field_access_inplace(c, e))
+    } else if e.kind == ExprKind::ExprIndex {
+        return (true, checker_check_index_inplace(c, e))
+    } else if e.kind == ExprKind::ExprMatch {
+        return (true, checker_check_match_expr_inplace(c, e))
+    } else if e.kind == ExprKind::ExprStructLit {
+        return (true, checker_check_struct_lit_inplace(c, e))
+    } else if e.kind == ExprKind::ExprMethodCall {
+        return (true, checker_check_method_call_inplace(c, e))
+    } else if e.kind == ExprKind::ExprCall {
+        return (true, checker_check_call_expr_inplace(c, e))
+    } else if e.kind == ExprKind::ExprIdent {
+        return (true, checker_check_ident_expr_inplace(c, e))
+    } else if e.kind == ExprKind::ExprCast {
+        return (true, checker_check_cast_expr_inplace(c, e))
+    } else if e.kind == ExprKind::ExprClosure {
+        return (true, checker_check_closure_expr_inplace(c, e))
+    } else if e.kind == ExprKind::ExprForIn {
+        return (true, checker_check_for_in_expr_inplace(c, e))
+    } else if e.kind == ExprKind::ExprRange {
+        return (true, checker_check_range_expr_inplace(c, e))
+    } else if e.kind == ExprKind::ExprTupleLit {
+        return (true, checker_check_tuple_lit_inplace(c, e))
+    } else if e.kind == ExprKind::ExprBreak {
+        return (true, checker_check_break_expr_inplace(c, e))
+    } else if e.kind == ExprKind::ExprContinue {
+        return (true, checker_check_continue_expr_inplace(c, e))
+    } else if e.kind == ExprKind::ExprHandle {
+        return (true, checker_check_handle_expr_inplace(c, e))
+    } else { return (false, ty_error()) }
+}
+
 fn checker_check_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     if checker_expr_depth_exceeded((*c).expr_depth) {
         checker_report_error_at_inplace(c, e.span, 61, (*c).expr_depth, MAX_EXPR_DEPTH, 0)
@@ -8296,80 +8380,16 @@ fn checker_check_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, P
     // recursion that SIGSEGVs/OOMs on any function body (`fn main(){1}`). The
     // if-chain compiles correctly. Root-caused 2026-06-01 by 10-step bisection.
     var result = ty_error()
-    if e.kind == ExprKind::ExprIntLit {
-        (*c).last_literal_int = e.int_val
-        (*c).last_literal_kind = 1
-        result = ty_i64()
-    } else if e.kind == ExprKind::ExprDsepProof {
-        // The one producer of this type: see parser/exprs.sio's rewrite of
-        // `d_separated(A, B | Z)`. Claim validity (does the declared graph
-        // actually d-separate these variables) is a separate, already-run
-        // check (checker_verify_dsep_claims_mut); this arm only says what
-        // KIND of thing the expression is, so indep_dsep's declared
-        // `proof: DsepProof` parameter can require it.
-        result = ty_dsep_proof()
-    } else if e.kind == ExprKind::ExprFloatLit {
-        (*c).last_literal_float = e.float_val
-        (*c).last_literal_kind = 2
-        result = ty_f64()
-    } else if e.kind == ExprKind::ExprBoolTrue {
-        result = ty_bool()
-    } else if e.kind == ExprKind::ExprBoolFalse {
-        result = ty_bool()
-    } else if e.kind == ExprKind::ExprStringLit {
-        result = ty_string()
-    } else if e.kind == ExprKind::ExprCharLit {
-        result = ty_char()
-    } else if e.kind == ExprKind::ExprReturn {
-        result = checker_check_return_expr_inplace(c, e)
-    } else if e.kind == ExprKind::ExprPath {
-        result = checker_check_path_expr_inplace(c, e)
-    } else if e.kind == ExprKind::ExprBinary {
-        result = checker_check_binary_expr_inplace(c, e)
-    } else if e.kind == ExprKind::ExprIf {
-        result = checker_check_if_expr_inplace(c, e)
-    } else if e.kind == ExprKind::ExprWhile {
-        result = checker_check_while_expr_inplace(c, e)
-    } else if e.kind == ExprKind::ExprLoop {
-        result = checker_check_loop_expr_inplace(c, e)
-    } else if e.kind == ExprKind::ExprBlock {
-        result = checker_check_block_expr_inplace(c, e)
-    } else if e.kind == ExprKind::ExprArrayLit {
-        result = checker_check_array_lit_inplace(c, e)
-    } else if e.kind == ExprKind::ExprUnary {
-        result = checker_check_unary_expr_inplace(c, e)
-    } else if e.kind == ExprKind::ExprFieldAccess {
-        result = checker_check_field_access_inplace(c, e)
-    } else if e.kind == ExprKind::ExprIndex {
-        result = checker_check_index_inplace(c, e)
-    } else if e.kind == ExprKind::ExprMatch {
-        result = checker_check_match_expr_inplace(c, e)
-    } else if e.kind == ExprKind::ExprStructLit {
-        result = checker_check_struct_lit_inplace(c, e)
-    } else if e.kind == ExprKind::ExprMethodCall {
-        result = checker_check_method_call_inplace(c, e)
-    } else if e.kind == ExprKind::ExprCall {
-        result = checker_check_call_expr_inplace(c, e)
-    } else if e.kind == ExprKind::ExprIdent {
-        result = checker_check_ident_expr_inplace(c, e)
-    } else if e.kind == ExprKind::ExprCast {
-        result = checker_check_cast_expr_inplace(c, e)
-    } else if e.kind == ExprKind::ExprClosure {
-        result = checker_check_closure_expr_inplace(c, e)
-    } else if e.kind == ExprKind::ExprForIn {
-        result = checker_check_for_in_expr_inplace(c, e)
-    } else if e.kind == ExprKind::ExprRange {
-        result = checker_check_range_expr_inplace(c, e)
-    } else if e.kind == ExprKind::ExprTupleLit {
-        result = checker_check_tuple_lit_inplace(c, e)
-    } else if e.kind == ExprKind::ExprBreak {
-        result = checker_check_break_expr_inplace(c, e)
-    } else if e.kind == ExprKind::ExprContinue {
-        result = checker_check_continue_expr_inplace(c, e)
-    } else if e.kind == ExprKind::ExprHandle {
-        result = checker_check_handle_expr_inplace(c, e)
+    let group_a = checker_check_expr_group_a_inplace(c, e)
+    if group_a.0 {
+        result = group_a.1
     } else {
-        result = checker_check_expr_mut(c, e)
+        let group_b = checker_check_expr_group_b_inplace(c, e)
+        if group_b.0 {
+            result = group_b.1
+        } else {
+            result = checker_check_expr_mut(c, e)
+        }
     }
     if (*c).expr_depth > 0 {
         (*c).expr_depth = (*c).expr_depth - 1
@@ -9059,31 +9079,31 @@ fn checker_check_correlated_on_binary_inplace(c: *mut Checker, e: Expr, left_ty:
     same_slot_identity && has_effect && e.bin_op == BinaryOp::OpAdd
 }
 
-fn checker_check_binary_with_operand_types_inplace(c: *mut Checker, e: Expr, left_ty: TypeEntry, right_ty: TypeEntry) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
-    let correlated_same_slot_add = checker_check_correlated_on_binary_inplace(c, e, left_ty, right_ty)
-    if left_ty.kind == TypeKind::TyUnobserved || right_ty.kind == TypeKind::TyUnobserved {
-        let is_cmp = e.bin_op == BinaryOp::OpEq || e.bin_op == BinaryOp::OpNe
-            || e.bin_op == BinaryOp::OpLt || e.bin_op == BinaryOp::OpLe
-            || e.bin_op == BinaryOp::OpGt || e.bin_op == BinaryOp::OpGe
-        let observe = has_effect_id((*c).current_effects, (*c).current_effect_count, 13)
-        if !is_cmp || !observe {
-            checker_report_error_at_inplace(c, e.span, 36, 0, 0, 0)
-            return ty_error()
-        }
-        if is_error_or_unknown(left_ty) || is_error_or_unknown(right_ty) {
-            checker_report_mismatch_inplace(c, e.span, 4, left_ty, right_ty)
-            return ty_error()
-        }
-        let l = if left_ty.kind == TypeKind::TyUnobserved { ty_i64() } else { left_ty }
-        let r = if right_ty.kind == TypeKind::TyUnobserved { ty_i64() } else { right_ty }
-        if !checker_unobserved_cast_allowed(left_ty, l, observe) || !checker_unobserved_cast_allowed(right_ty, r, observe) {
-            checker_report_mismatch_inplace(c, e.span, 4, left_ty, right_ty)
-            return ty_error()
-        }
-        checker_check_binary_op_types_inplace(c, e.span, e.bin_op, l, r)
-        return ty_bool()
+fn checker_check_binary_unobserved_inplace(c: *mut Checker, span: Span, op: BinaryOp, left_ty: TypeEntry, right_ty: TypeEntry) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    let is_cmp = op == BinaryOp::OpEq || op == BinaryOp::OpNe
+        || op == BinaryOp::OpLt || op == BinaryOp::OpLe
+        || op == BinaryOp::OpGt || op == BinaryOp::OpGe
+    let observe = has_effect_id((*c).current_effects, (*c).current_effect_count, 13)
+    if !is_cmp || !observe {
+        checker_report_error_at_inplace(c, span, 36, 0, 0, 0)
+        return ty_error()
     }
-    checker_check_binary_op_types_inplace(c, e.span, e.bin_op, left_ty, right_ty)
+    if is_error_or_unknown(left_ty) || is_error_or_unknown(right_ty) {
+        checker_report_mismatch_inplace(c, span, 4, left_ty, right_ty)
+        return ty_error()
+    }
+    let l = if left_ty.kind == TypeKind::TyUnobserved { ty_i64() } else { left_ty }
+    let r = if right_ty.kind == TypeKind::TyUnobserved { ty_i64() } else { right_ty }
+    if !checker_unobserved_cast_allowed(left_ty, l, observe) || !checker_unobserved_cast_allowed(right_ty, r, observe) {
+        checker_report_mismatch_inplace(c, span, 4, left_ty, right_ty)
+        return ty_error()
+    }
+    checker_check_binary_op_types_inplace(c, span, op, l, r)
+    ty_bool()
+}
+
+fn checker_check_binary_operand_compat_inplace(c: *mut Checker, span: Span, op: BinaryOp, left_ty: TypeEntry, right_ty: TypeEntry, knowledge_ident_add: bool) with Mut, Panic, Div, Alloc, IO {
+    checker_check_binary_op_types_inplace(c, span, op, left_ty, right_ty)
     // Feature B: Invariant<T,G> comparability gate. Two invariant observables may be
     // added/compared/ratioed only if the (conservative Homeo-default) frame relation
     // lies in the intersection of their groups — i.e. both must be Homeo-group until a
@@ -9091,11 +9111,11 @@ fn checker_check_binary_with_operand_types_inplace(c: *mut Checker, e: Expr, lef
     let inv_l = invariant_group_rank_of_type(left_ty)
     let inv_r = invariant_group_rank_of_type(right_ty)
     if inv_l > 0 && inv_r > 0 {
-        let inv_combine = e.bin_op == BinaryOp::OpAdd || e.bin_op == BinaryOp::OpSub
-            || e.bin_op == BinaryOp::OpMul || e.bin_op == BinaryOp::OpDiv || e.bin_op == BinaryOp::OpRem
-            || e.bin_op == BinaryOp::OpEq || e.bin_op == BinaryOp::OpNe
-            || e.bin_op == BinaryOp::OpLt || e.bin_op == BinaryOp::OpLe
-            || e.bin_op == BinaryOp::OpGt || e.bin_op == BinaryOp::OpGe
+        let inv_combine = op == BinaryOp::OpAdd || op == BinaryOp::OpSub
+            || op == BinaryOp::OpMul || op == BinaryOp::OpDiv || op == BinaryOp::OpRem
+            || op == BinaryOp::OpEq || op == BinaryOp::OpNe
+            || op == BinaryOp::OpLt || op == BinaryOp::OpLe
+            || op == BinaryOp::OpGt || op == BinaryOp::OpGe
         // Same frame (Invariant<T,G,F> with matching F) ⇒ the relating transform is the
         // identity (DiffInf ∈ every group) ⇒ comparable at any group. Otherwise fall
         // back to the conservative cross-frame default (only Homeo-group comparable).
@@ -9107,7 +9127,7 @@ fn checker_check_binary_with_operand_types_inplace(c: *mut Checker, e: Expr, lef
             equiv_record_invariant(inv_l, inv_r, if same_frame { 1 } else { 0 }, comparable)
         }
         if inv_combine && !same_frame && !invariant_comparable_default_ranks(inv_l, inv_r) {
-            checker_report_mismatch_inplace(c, e.span, 4, left_ty, right_ty)
+            checker_report_mismatch_inplace(c, span, 4, left_ty, right_ty)
         }
     }
     // Hypercomplex operands (Octonion/Sedenion/Quaternion/Clifford) are validated by the
@@ -9137,114 +9157,195 @@ fn checker_check_binary_with_operand_types_inplace(c: *mut Checker, e: Expr, lef
     // neither. Found by instrumenting a source build: the site fifteen lines
     // below reported ignunits=1 and reskind=1 (not an error) for exactly the
     // operand pair this line was rejecting.
-    // The supported Knowledge ident-add lane joins metadata rather than
-    // assigning one operand to the other. Its payload/units/noise/validity
-    // checks below remain authoritative even when epsilon bounds differ.
-    let knowledge_ident_add = checker_is_knowledge_ident_add(e, left_ty, right_ty)
     if !both_hyper && !either_cond_indep && !knowledge_ident_add && !is_error_or_unknown(left_ty) && !is_error_or_unknown(right_ty) && !compat_numeric_ignoring_units(left_ty, right_ty) {
-        let is_arith = e.bin_op == BinaryOp::OpAdd || e.bin_op == BinaryOp::OpSub
-            || e.bin_op == BinaryOp::OpMul || e.bin_op == BinaryOp::OpDiv || e.bin_op == BinaryOp::OpRem
-        let is_cmp = e.bin_op == BinaryOp::OpEq || e.bin_op == BinaryOp::OpNe
-            || e.bin_op == BinaryOp::OpLt || e.bin_op == BinaryOp::OpLe
-            || e.bin_op == BinaryOp::OpGt || e.bin_op == BinaryOp::OpGe
+        let is_arith = op == BinaryOp::OpAdd || op == BinaryOp::OpSub
+            || op == BinaryOp::OpMul || op == BinaryOp::OpDiv || op == BinaryOp::OpRem
+        let is_cmp = op == BinaryOp::OpEq || op == BinaryOp::OpNe
+            || op == BinaryOp::OpLt || op == BinaryOp::OpLe
+            || op == BinaryOp::OpGt || op == BinaryOp::OpGe
         if is_arith || is_cmp {
-            checker_report_mismatch_inplace(c, e.span, 4, left_ty, right_ty)
+            checker_report_mismatch_inplace(c, span, 4, left_ty, right_ty)
         }
     }
-    if is_knowledge_type(left_ty) || is_knowledge_type(right_ty) {
-        let left_inner = if is_knowledge_type(left_ty) { knowledge_inner(left_ty) } else { left_ty }
-        let right_inner = if is_knowledge_type(right_ty) { knowledge_inner(right_ty) } else { right_ty }
-        if left_inner.kind == TypeKind::TyHyper && right_inner.kind == TypeKind::TyHyper {
-            let hc = check_hyper_binary(*c, e.span, e.bin_op, left_inner, right_inner)
-            checker_store_from_value(c, hc.0)
-        }
-        // Knowledge (x) Knowledge arithmetic typechecks here but has no lowering:
-        // lower_binary_expr_ref (ir/lower.sio) has no Knowledge arm, so both
-        // operands lower as scalars -- and a Knowledge operand lowers to the
-        // object handle. `kA * kB` therefore multiplies two pointers, and
-        // `.value` on the result dereferences an arbitrary address. Measured on
-        // Madaros: `*` returns the right operand's value (silently wrong), while
-        // `+`, `-` and `/` segfault at runtime. Refuse it rather than answer
-        // wrongly. The mixed Knowledge/scalar forms are already refused above,
-        // and lean_single implements all of this correctly -- see #1706.
-        let kk_both = is_knowledge_type(left_ty) && is_knowledge_type(right_ty)
-        let kk_arith = e.bin_op == BinaryOp::OpAdd || e.bin_op == BinaryOp::OpSub
-            || e.bin_op == BinaryOp::OpMul || e.bin_op == BinaryOp::OpDiv
-            || e.bin_op == BinaryOp::OpRem
-        // Hypercomplex inners take the check_hyper_binary path above, so spare them
-        // rather than refuse on an untested guess. Measured caveat: this guard is
-        // narrower than it looks. `Knowledge<Octonion>` built from the
-        // algebra::octonion STRUCT does not carry TyHyper inners, so it does NOT
-        // take this exemption and IS refused below -- correctly, since it has no
-        // lowering either. What the guard actually spares is only inners the
-        // checker itself classifies as TyHyper, and that case remains unmeasured.
-        let kk_hyper = left_inner.kind == TypeKind::TyHyper && right_inner.kind == TypeKind::TyHyper
-        if kk_both && kk_arith && !kk_hyper && !correlated_same_slot_add && !checker_is_knowledge_ident_add(e, left_ty, right_ty) {
-            checker_report_error_at_inplace(c, e.span, 245, 0, 0, 0)
-        }
-        // Third axis of anti-garbling (formal/lean4/EpistemicEffectsNSA.lean §J-§K). The
-        // product's variance is propagated by the GUM shortcut Var(x*y) = |y|^2 Var x +
-        // |x|^2 Var y (knowledge_binary_result -> epsilon_combine_relative). That formula
-        // silently imposes |xy| = |x||y| -- norm multiplicativity -- which holds exactly on
-        // the composition algebras R, C, H, O (`norm_mult_of_polarBasis`, levels <= 3) and is
-        // FALSE from the sedenions up (`not_polarBasis4`; `sed_shortcut_understates`: reported
-        // 4, true first-order variance 8, with disjoint sources and no re-association). So a
-        // Knowledge<Hyper<Sedenion|Clifford, _>> product would fabricate precision that NS
-        // (E230) cannot see. Refuse it: E251. Addition is unaffected (no norm identity).
-        if kk_both && kk_hyper && e.bin_op == BinaryOp::OpMul
-            && (left_inner.algebra_kind >= 4 || right_inner.algebra_kind >= 4) {
-            checker_report_error_at_inplace(c, e.span, 251, 0, 0, 0)
-        }
-        var knowledge_result = knowledge_binary_result(e.bin_op, left_ty, right_ty, (*c).ns_table)
-        if knowledge_result.kind == TypeKind::TyError {
-            checker_report_error_at_inplace(c, e.span, 36, 0, 0, 0)
-        }
-        // W4: the union above may have exhausted the interning table. That
-        // saturates to unknown, which is sound but turns every later E230 into
-        // an unexplained refusal -- so say it out loud, once per overflow event.
-        if ns_table_overflow_take(&!(*(*c).ns_table)) {
-            checker_report_error_at_inplace(c, e.span, 179, 0, 0, 0)
-        }
-        // N3: anti-garbling gate. An independence-assuming op over operands whose
-        // noise-symbol sets are not provably disjoint understates variance -- E230.
-        // The slot-identity case is not an independence assumption at all (it is
-        // the same measurement counted twice), so it does not belong to what this
-        // gate polices; correlated_same_slot_add also overrides the epsilon below
-        // from the independent-quadrature default to the correlated-linear one, so
-        // a static read of the result type agrees with what lowering computes.
-        if checker_ns_should_refuse((*c).ns_table, e.bin_op, left_ty, right_ty) && !correlated_same_slot_add {
-            checker_report_error_at_inplace(c, e.span, 230, 0, 0, 0)
-        }
-        if correlated_same_slot_add {
-            knowledge_result.knowledge_epsilon = knowledge_same_slot_add_variance(left_ty)
-        }
-        let final_result = checker_finish_binary_inplace(c, e.span, e.bin_op, left_ty, right_ty, knowledge_result)
-        if e.bin_op == BinaryOp::OpMul && left_inner.kind == TypeKind::TyHyper && right_inner.kind == TypeKind::TyHyper {
-            let final_inner = if final_result.kind == TypeKind::TyKnowledge {
-                knowledge_inner(final_result)
-            } else {
-                final_result
-            }
-            if final_inner.kind == TypeKind::TyHyper {
-                let rh = (*c).record_hyper_expr(e.span, final_inner.algebra_kind, 1, true)
-                checker_store_from_value(c, rh)
-            }
-        }
-        return final_result
+}
+
+fn checker_store_binary_knowledge_hyper_inplace(c: *mut Checker, span: Span, op: BinaryOp, left_ty: TypeEntry, right_ty: TypeEntry) with Mut, Panic, Div, Alloc, IO {
+    let left_inner = if is_knowledge_type(left_ty) { knowledge_inner(left_ty) } else { left_ty }
+    let right_inner = if is_knowledge_type(right_ty) { knowledge_inner(right_ty) } else { right_ty }
+    if left_inner.kind == TypeKind::TyHyper && right_inner.kind == TypeKind::TyHyper {
+        let hc = check_hyper_binary(*c, span, op, left_inner, right_inner)
+        checker_store_from_value(c, hc.0)
     }
-    if left_ty.kind == TypeKind::TyHyper && right_ty.kind == TypeKind::TyHyper {
-        let hr = check_hyper_binary(*c, e.span, e.bin_op, left_ty, right_ty)
-        checker_store_from_value(c, hr.0)
-        let typed_result = hr.1
-        let final_result = checker_finish_binary_inplace(c, e.span, e.bin_op, left_ty, right_ty, typed_result)
-        if e.bin_op == BinaryOp::OpMul && final_result.kind == TypeKind::TyHyper {
-            let rh = (*c).record_hyper_expr(e.span, final_result.algebra_kind, 1, false)
-            checker_store_from_value(c, rh)
-        }
-        return final_result
+}
+
+fn checker_check_binary_knowledge_refusals_inplace(c: *mut Checker, span: Span, op: BinaryOp, left_ty: TypeEntry, right_ty: TypeEntry, correlated_same_slot_add: bool, knowledge_ident_add: bool) with Mut, Panic, Div, Alloc, IO {
+    let left_inner = if is_knowledge_type(left_ty) { knowledge_inner(left_ty) } else { left_ty }
+    let right_inner = if is_knowledge_type(right_ty) { knowledge_inner(right_ty) } else { right_ty }
+    // Knowledge (x) Knowledge arithmetic typechecks here but has no lowering:
+    // lower_binary_expr_ref (ir/lower.sio) has no Knowledge arm, so both
+    // operands lower as scalars -- and a Knowledge operand lowers to the
+    // object handle. `kA * kB` therefore multiplies two pointers, and
+    // `.value` on the result dereferences an arbitrary address. Measured on
+    // Madaros: `*` returns the right operand's value (silently wrong), while
+    // `+`, `-` and `/` segfault at runtime. Refuse it rather than answer
+    // wrongly. The mixed Knowledge/scalar forms are already refused above,
+    // and lean_single implements all of this correctly -- see #1706.
+    let kk_both = is_knowledge_type(left_ty) && is_knowledge_type(right_ty)
+    let kk_arith = op == BinaryOp::OpAdd || op == BinaryOp::OpSub
+        || op == BinaryOp::OpMul || op == BinaryOp::OpDiv
+        || op == BinaryOp::OpRem
+    // Hypercomplex inners take the check_hyper_binary path above, so spare them
+    // rather than refuse on an untested guess. Measured caveat: this guard is
+    // narrower than it looks. `Knowledge<Octonion>` built from the
+    // algebra::octonion STRUCT does not carry TyHyper inners, so it does NOT
+    // take this exemption and IS refused below -- correctly, since it has no
+    // lowering either. What the guard actually spares is only inners the
+    // checker itself classifies as TyHyper, and that case remains unmeasured.
+    let kk_hyper = left_inner.kind == TypeKind::TyHyper && right_inner.kind == TypeKind::TyHyper
+    if kk_both && kk_arith && !kk_hyper && !correlated_same_slot_add && !knowledge_ident_add {
+        checker_report_error_at_inplace(c, span, 245, 0, 0, 0)
     }
-    var result = binary_result_type(e.bin_op, left_ty, right_ty)
-    if result.kind == TypeKind::TyError && (e.bin_op == BinaryOp::OpEq || e.bin_op == BinaryOp::OpNe) {
+    // Third axis of anti-garbling (formal/lean4/EpistemicEffectsNSA.lean §J-§K). The
+    // product's variance is propagated by the GUM shortcut Var(x*y) = |y|^2 Var x +
+    // |x|^2 Var y (knowledge_binary_result -> epsilon_combine_relative). That formula
+    // silently imposes |xy| = |x||y| -- norm multiplicativity -- which holds exactly on
+    // the composition algebras R, C, H, O (`norm_mult_of_polarBasis`, levels <= 3) and is
+    // FALSE from the sedenions up (`not_polarBasis4`; `sed_shortcut_understates`: reported
+    // 4, true first-order variance 8, with disjoint sources and no re-association). So a
+    // Knowledge<Hyper<Sedenion|Clifford, _>> product would fabricate precision that NS
+    // (E230) cannot see. Refuse it: E251. Addition is unaffected (no norm identity).
+    if kk_both && kk_hyper && op == BinaryOp::OpMul
+        && (left_inner.algebra_kind >= 4 || right_inner.algebra_kind >= 4) {
+        checker_report_error_at_inplace(c, span, 251, 0, 0, 0)
+    }
+}
+
+fn checker_finish_binary_knowledge_result_inplace(c: *mut Checker, span: Span, op: BinaryOp, left_ty: TypeEntry, right_ty: TypeEntry, correlated_same_slot_add: bool) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    let left_inner = if is_knowledge_type(left_ty) { knowledge_inner(left_ty) } else { left_ty }
+    let right_inner = if is_knowledge_type(right_ty) { knowledge_inner(right_ty) } else { right_ty }
+    var knowledge_result = knowledge_binary_result(op, left_ty, right_ty, (*c).ns_table)
+    if knowledge_result.kind == TypeKind::TyError {
+        checker_report_error_at_inplace(c, span, 36, 0, 0, 0)
+    }
+    // W4: the union above may have exhausted the interning table. That
+    // saturates to unknown, which is sound but turns every later E230 into
+    // an unexplained refusal -- so say it out loud, once per overflow event.
+    if ns_table_overflow_take(&!(*(*c).ns_table)) {
+        checker_report_error_at_inplace(c, span, 179, 0, 0, 0)
+    }
+    // N3: anti-garbling gate. An independence-assuming op over operands whose
+    // noise-symbol sets are not provably disjoint understates variance -- E230.
+    // The slot-identity case is not an independence assumption at all (it is
+    // the same measurement counted twice), so it does not belong to what this
+    // gate polices; correlated_same_slot_add also overrides the epsilon below
+    // from the independent-quadrature default to the correlated-linear one, so
+    // a static read of the result type agrees with what lowering computes.
+    if checker_ns_should_refuse((*c).ns_table, op, left_ty, right_ty) && !correlated_same_slot_add {
+        checker_report_error_at_inplace(c, span, 230, 0, 0, 0)
+    }
+    if correlated_same_slot_add {
+        knowledge_result.knowledge_epsilon = knowledge_same_slot_add_variance(left_ty)
+    }
+    let final_result = checker_finish_binary_inplace(c, span, op, left_ty, right_ty, knowledge_result)
+    if op == BinaryOp::OpMul && left_inner.kind == TypeKind::TyHyper && right_inner.kind == TypeKind::TyHyper {
+        let final_inner = if final_result.kind == TypeKind::TyKnowledge {
+            knowledge_inner(final_result)
+        } else {
+            final_result
+        }
+        if final_inner.kind == TypeKind::TyHyper {
+            checker_record_hyper_expr_inplace(c, span, final_inner.algebra_kind, 1, true)
+        }
+    }
+    final_result
+}
+
+// SIO-417 stack diet: inplace mirrors of by-value Checker reporters, so the
+// diet helpers below never bridge through (*c). A bridge copies the whole
+// Checker in and out per call (and trips checker_spine_parity_gate.sh); the
+// mirrors mutate through *mut with identical diagnostics.
+fn checker_record_hyper_expr_inplace(c: *mut Checker, span: Span, algebra_tag: i64, op_kind: i64, knowledge_wrapped: bool) with Mut, Panic, Div {
+    if algebra_tag < 0 || op_kind <= 0 {
+        return
+    }
+    let info = HyperExprInfo {
+        span_start: span.start,
+        span_end: span.end,
+        algebra_tag: algebra_tag,
+        op_kind: op_kind,
+        knowledge_wrapped: knowledge_wrapped,
+    }
+    let tbl = (*c).hyper_exprs
+    let add_result = tbl.add(info)
+    (*c).hyper_exprs = add_result.0
+}
+
+fn checker_report_warning_at_inplace(c: *mut Checker, span: Span, code: i64, msg_a: i64, msg_b: i64, msg_c: i64) with Mut, IO, Panic, Div {
+    (*c).warning_count = (*c).warning_count + 1
+    print("warning[W")
+    if code < 100 { print("0") }
+    if code < 10 { print("0") }
+    print_int(code)
+    print("]")
+    if span.start > 0 || span.end > 0 {
+        print(" at ")
+        print_int(span.start)
+        print("..")
+        print_int(span.end)
+    }
+    print(": ")
+    print_warning_message(code)
+    print("\n")
+}
+
+fn checker_report_hypothesis_penalty_warning_inplace(c: *mut Checker, span: Span, outcome_name: Name) with Mut, IO, Panic, Div {
+    (*c).warning_count = (*c).warning_count + 1
+    print("warning[W041]")
+    if span.start > 0 || span.end > 0 {
+        print(" at ")
+        print_int(span.start)
+        print("..")
+        print_int(span.end)
+    }
+    print(": statistical test on unregistered variable '")
+    print_name_value(outcome_name)
+    print("' - confidence penalty applied\n")
+    print("   = note: Hypothesis currently applies this penalty as an advisory warning; automatic Knowledge<T> confidence scaling is pending\n")
+}
+
+fn checker_report_unit_call_mismatch_inplace(c: *mut Checker, span: Span, arg_uid: i64, param_uid: i64) with Mut, Panic, Div, Alloc, IO {
+    (*c).had_error = true
+    (*c).error_count = (*c).error_count + 1
+    print("error[E041]: unit mismatch in call argument\n")
+    print("  argument unit: ")
+    if arg_uid >= 0 {
+        print_unit_dim((*c).units.get_dim(arg_uid))
+    } else {
+        print("(dimensionless)")
+    }
+    print("\n  parameter unit: ")
+    if param_uid >= 0 {
+        print_unit_dim((*c).units.get_dim(param_uid))
+    } else {
+        print("(dimensionless)")
+    }
+    print("\n")
+}
+
+fn checker_check_binary_hyper_path_inplace(c: *mut Checker, span: Span, op: BinaryOp, left_ty: TypeEntry, right_ty: TypeEntry) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    let hr = check_hyper_binary(*c, span, op, left_ty, right_ty)
+    checker_store_from_value(c, hr.0)
+    let typed_result = hr.1
+    let final_result = checker_finish_binary_inplace(c, span, op, left_ty, right_ty, typed_result)
+    if op == BinaryOp::OpMul && final_result.kind == TypeKind::TyHyper {
+        checker_record_hyper_expr_inplace(c, span, final_result.algebra_kind, 1, false)
+    }
+    final_result
+}
+
+fn checker_finish_binary_scalar_tail_inplace(c: *mut Checker, span: Span, op: BinaryOp, left_ty: TypeEntry, right_ty: TypeEntry, right_expr: Option<Box<Expr> >) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    var result = binary_result_type(op, left_ty, right_ty)
+    if result.kind == TypeKind::TyError && (op == BinaryOp::OpEq || op == BinaryOp::OpNe) {
         let l_enum = left_ty.kind == TypeKind::TyNamed && enum_table_find((*c).enums, left_ty.name) >= 0
         let r_enum = right_ty.kind == TypeKind::TyNamed && enum_table_find((*c).enums, right_ty.name) >= 0
         if (l_enum && is_numeric_type(right_ty)) || (is_numeric_type(left_ty) && r_enum) {
@@ -9255,36 +9356,57 @@ fn checker_check_binary_with_operand_types_inplace(c: *mut Checker, e: Expr, lef
     // would compare cell addresses (two equal `Shape::Circle(1.0)` differ) and the
     // enum-vs-integer form above would compare an address with a discriminant.
     // Refused (E279); compare with `match`.
-    if (e.bin_op == BinaryOp::OpEq || e.bin_op == BinaryOp::OpNe)
+    if (op == BinaryOp::OpEq || op == BinaryOp::OpNe)
         && (enum_type_has_payload((*c).enums, left_ty) || enum_type_has_payload((*c).enums, right_ty)) {
-        checker_report_error_at_inplace(c, e.span, 279, 0, 0, 0)
+        checker_report_error_at_inplace(c, span, 279, 0, 0, 0)
         return ty_bool()
     }
     // Type-directed == lift (warn-only): boolean equality on the stdlib uncertain
     // scalar (a struct literally named "Epistemic") ignores uncertainty. Result
     // stays bool — no semantic change. "Epistemic" = E p i s t e m i c (9 chars).
-    if result.kind == TypeKind::TyBool && (e.bin_op == BinaryOp::OpEq || e.bin_op == BinaryOp::OpNe) {
+    if result.kind == TypeKind::TyBool && (op == BinaryOp::OpEq || op == BinaryOp::OpNe) {
         let l_ep = left_ty.kind == TypeKind::TyNamed && name_matches_str9(left_ty.name, 69, 112, 105, 115, 116, 101, 109, 105, 99)
         let r_ep = right_ty.kind == TypeKind::TyNamed && name_matches_str9(right_ty.name, 69, 112, 105, 115, 116, 101, 109, 105, 99)
         if l_ep || r_ep {
-            checker_report_warning_at_mut(c, e.span, 43, 0, 0, 0)
+            checker_report_warning_at_mut(c, span, 43, 0, 0, 0)
         }
     }
     if result.kind == TypeKind::TyError && !is_error_or_unknown(left_ty) && !is_error_or_unknown(right_ty) {
-        checker_report_mismatch_inplace(c, e.span, 4, left_ty, right_ty)
+        checker_report_mismatch_inplace(c, span, 4, left_ty, right_ty)
     }
-    if e.bin_op == BinaryOp::OpDiv {
-        let denom_pair = checker_eval_const_int_opt_expr_mut(c, e.right)
+    if op == BinaryOp::OpDiv {
+        let denom_pair = checker_eval_const_int_opt_expr_mut(c, right_expr)
         if denom_pair.0 != 0 && denom_pair.1 == 0 {
-            checker_report_error_at_inplace(c, e.span, 56, 0, 0, 0)
+            checker_report_error_at_inplace(c, span, 56, 0, 0, 0)
         }
-    } else if e.bin_op == BinaryOp::OpRem {
-        let denom_pair = checker_eval_const_int_opt_expr_mut(c, e.right)
+    } else if op == BinaryOp::OpRem {
+        let denom_pair = checker_eval_const_int_opt_expr_mut(c, right_expr)
         if denom_pair.0 != 0 && denom_pair.1 == 0 {
-            checker_report_error_at_inplace(c, e.span, 57, 0, 0, 0)
+            checker_report_error_at_inplace(c, span, 57, 0, 0, 0)
         }
     }
-    checker_finish_binary_inplace(c, e.span, e.bin_op, left_ty, right_ty, result)
+    checker_finish_binary_inplace(c, span, op, left_ty, right_ty, result)
+}
+
+// SIO-417 stack diet: the router below keeps the exact operand-type checks and
+// diagnostic order above, but each branch now owns its temporaries in a
+// separate helper frame instead of sharing one 4.86 MB function frame.
+fn checker_check_binary_with_operand_types_inplace(c: *mut Checker, e: Expr, left_ty: TypeEntry, right_ty: TypeEntry) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    let correlated_same_slot_add = checker_check_correlated_on_binary_inplace(c, e, left_ty, right_ty)
+    let knowledge_ident_add = checker_is_knowledge_ident_add(e, left_ty, right_ty)
+    if left_ty.kind == TypeKind::TyUnobserved || right_ty.kind == TypeKind::TyUnobserved {
+        return checker_check_binary_unobserved_inplace(c, e.span, e.bin_op, left_ty, right_ty)
+    }
+    checker_check_binary_operand_compat_inplace(c, e.span, e.bin_op, left_ty, right_ty, knowledge_ident_add)
+    if is_knowledge_type(left_ty) || is_knowledge_type(right_ty) {
+        checker_store_binary_knowledge_hyper_inplace(c, e.span, e.bin_op, left_ty, right_ty)
+        checker_check_binary_knowledge_refusals_inplace(c, e.span, e.bin_op, left_ty, right_ty, correlated_same_slot_add, knowledge_ident_add)
+        return checker_finish_binary_knowledge_result_inplace(c, e.span, e.bin_op, left_ty, right_ty, correlated_same_slot_add)
+    }
+    if left_ty.kind == TypeKind::TyHyper && right_ty.kind == TypeKind::TyHyper {
+        return checker_check_binary_hyper_path_inplace(c, e.span, e.bin_op, left_ty, right_ty)
+    }
+    checker_finish_binary_scalar_tail_inplace(c, e.span, e.bin_op, left_ty, right_ty, e.right)
 }
 
 fn checker_check_opt_block_inplace(c: *mut Checker, opt: Option<Box<Block> >) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
@@ -11357,13 +11479,12 @@ fn checker_check_method_call_with_base_ty_inplace(c: *mut Checker, e: Expr, base
         }
     }
     if name_matches_str3(e.name, 108, 101, 110) && len_method_supported(base_ty) {
-        let call_start_borrows = (*c).borrows
         checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
         match e.args {
             Some(_) => checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
             None => {}
         }
-        checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
+        checker_release_call_arg_borrows_inplace(c, e.args, None)
         // Seq.len() returns Knowledge<i64> under lean_single; arrays/slices stay i64.
         if is_seq_type(base_ty) {
             return ty_knowledge(ty_i64(), 0.0 - 1.0)
@@ -11373,7 +11494,6 @@ fn checker_check_method_call_with_base_ty_inplace(c: *mut Checker, e: Expr, base
     // Seq<T> methods: .push / .count / .get / .set / .push_uncertain (lean_single surface).
     if is_seq_type(base_ty) {
         let elem_ty = seq_elem_type(base_ty)
-        let call_start_borrows = (*c).borrows
         // push(v) / push_uncertain(v, conf, var)
         if name_matches_str4(e.name, 112, 117, 115, 104) {
             let first = expr_list_head(e.args)
@@ -11395,13 +11515,13 @@ fn checker_check_method_call_with_base_ty_inplace(c: *mut Checker, e: Expr, base
                 }
                 None => {}
             }
-            checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
+            checker_release_call_arg_borrows_inplace(c, e.args, None)
             return ty_unit()
         }
         if name_matches_str14(e.name, 112, 117, 115, 104, 95, 117, 110, 99, 101, 114, 116, 97, 105, 110) {
             // push_uncertain
             checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
-            checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
+            checker_release_call_arg_borrows_inplace(c, e.args, None)
             return ty_unit()
         }
         if name_matches_str5(e.name, 99, 111, 117, 110, 116) {
@@ -11411,24 +11531,24 @@ fn checker_check_method_call_with_base_ty_inplace(c: *mut Checker, e: Expr, base
                 Some(_) => checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
                 None => {}
             }
-            checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
+            checker_release_call_arg_borrows_inplace(c, e.args, None)
             return ty_i64()
         }
         if name_matches_str3(e.name, 103, 101, 116) {
             // get(i) -> T
             checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
-            checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
+            checker_release_call_arg_borrows_inplace(c, e.args, None)
             return elem_ty
         }
         if name_matches_str3(e.name, 115, 101, 116) {
             // set(i, v)
             checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
-            checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
+            checker_release_call_arg_borrows_inplace(c, e.args, None)
             return ty_unit()
         }
         checker_report_error_at_inplace(c, e.span, 11, 0, 0, 0)
         checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
-        checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
+        checker_release_call_arg_borrows_inplace(c, e.args, None)
         return ty_error()
     }
     // Dynamic arrays ([T], array_size < 0): .push(v) appends, growing the
@@ -11443,7 +11563,6 @@ fn checker_check_method_call_with_base_ty_inplace(c: *mut Checker, e: Expr, base
                 Some(elem) => *elem,
                 None => ty_error(),
             }
-            let call_start_borrows = (*c).borrows
             let first = expr_list_head(e.args)
             match first {
                 None => checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
@@ -11465,22 +11584,20 @@ fn checker_check_method_call_with_base_ty_inplace(c: *mut Checker, e: Expr, base
                 }
                 None => {}
             }
-            checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
+            checker_release_call_arg_borrows_inplace(c, e.args, None)
             return ty_unit()
         }
         checker_report_error_at_inplace(c, e.span, 11, 0, 0, 0)
-        let call_start_borrows = (*c).borrows
         checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
-        checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
+        checker_release_call_arg_borrows_inplace(c, e.args, None)
         return ty_error()
     }
     if base_ty.kind == TypeKind::TyKnowledge {
         if name_matches_str6(e.name, 117, 110, 119, 114, 97, 112) {
-            let call_start_borrows = (*c).borrows
             match e.args {
                 None => {
                     checker_report_error_at_inplace(c, e.span, 172, 0, 0, 0)
-                    checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
+                    checker_release_call_arg_borrows_inplace(c, e.args, None)
                     knowledge_inner(base_ty)
                 }
                 Some(arg_list) => {
@@ -11488,15 +11605,14 @@ fn checker_check_method_call_with_base_ty_inplace(c: *mut Checker, e: Expr, base
                         checker_report_error_at_inplace(c, e.span, 173, 0, 0, 0)
                     }
                     checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
-                    checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
+                    checker_release_call_arg_borrows_inplace(c, e.args, None)
                     knowledge_inner(base_ty)
                 }
             }
         } else {
             checker_report_error_at_inplace(c, e.span, 11, 0, 0, 0)
-            let call_start_borrows = (*c).borrows
             checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
-            checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
+            checker_release_call_arg_borrows_inplace(c, e.args, None)
             ty_error()
         }
     } else if base_ty.kind == TypeKind::TyHyper {
@@ -11506,19 +11622,16 @@ fn checker_check_method_call_with_base_ty_inplace(c: *mut Checker, e: Expr, base
             None => ty_error()
         }
         if name_matches_str9(e.name, 99, 111, 110, 106, 117, 103, 97, 116, 101) {
-            let call_start_borrows = (*c).borrows
             checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
-            checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
+            checker_release_call_arg_borrows_inplace(c, e.args, None)
             base_ty
         } else if name_matches_str4(e.name, 110, 111, 114, 109) {
-            let call_start_borrows = (*c).borrows
             checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
-            checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
+            checker_release_call_arg_borrows_inplace(c, e.args, None)
             inner_ty
         } else if name_matches_str7(e.name, 105, 110, 118, 101, 114, 115, 101) {
-            let call_start_borrows = (*c).borrows
             checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
-            checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
+            checker_release_call_arg_borrows_inplace(c, e.args, None)
             if alg > 3 {
                 checker_report_error_at_inplace(c, e.span, 32, 0, 0, 0)
                 ty_error()
@@ -11527,16 +11640,14 @@ fn checker_check_method_call_with_base_ty_inplace(c: *mut Checker, e: Expr, base
             }
         } else {
             checker_report_error_at_inplace(c, e.span, 11, 0, 0, 0)
-            let call_start_borrows = (*c).borrows
             checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
-            checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
+            checker_release_call_arg_borrows_inplace(c, e.args, None)
             ty_error()
         }
     } else if base_ty.kind == TypeKind::TyNamed {
         let sig_id = fn_sig_table_find_method_semantic((*c).fn_sigs, base_ty, e.name)
         if sig_id >= 0 {
             let sig = fn_sig_table_get((*c).fn_sigs, sig_id)
-            let call_start_borrows = (*c).borrows
             var effective_params = fn_param_list_clone(&sig.params)
             var effective_return_type = sig.return_type
             match e.type_args {
@@ -11557,19 +11668,17 @@ fn checker_check_method_call_with_base_ty_inplace(c: *mut Checker, e: Expr, base
             }
             checker_check_call_args_inplace(c, expr_list_handle(e.args), fn_param_list_handle(effective_params), sig.param_count, e.span, 0 - 1)
             checker_check_callee_effects_named_inplace(c, e.span, sig.effects, sig.effect_count, sig.name)
-            checker_release_call_arg_borrows_inplace(c, e.args, effective_params, call_start_borrows)
+            checker_release_call_arg_borrows_inplace(c, e.args, effective_params)
             effective_return_type
         } else {
             checker_report_error_at_inplace(c, e.span, 11, 0, 0, 0)
-            let call_start_borrows = (*c).borrows
             checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
-            checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
+            checker_release_call_arg_borrows_inplace(c, e.args, None)
             ty_error()
         }
     } else if base_ty.kind == TypeKind::TyString {
-        let call_start_borrows = (*c).borrows
         checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
-        checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
+        checker_release_call_arg_borrows_inplace(c, e.args, None)
         if name_matches_str8(e.name, 97, 115, 95, 98, 121, 116, 101, 115) {
             // A fresh `[u8]` holding the string's bytes (lowered as a copy). It
             // was typed `&i8`, which has no `.len()` and cannot be sliced.
@@ -11589,7 +11698,6 @@ fn checker_check_method_call_with_base_ty_inplace(c: *mut Checker, e: Expr, base
         let sig_id = fn_sig_table_find_method_semantic((*c).fn_sigs, base_ty, e.name)
         if sig_id >= 0 {
             let sig = fn_sig_table_get((*c).fn_sigs, sig_id)
-            let call_start_borrows = (*c).borrows
             var effective_params = fn_param_list_clone(&sig.params)
             var effective_return_type = sig.return_type
             match e.type_args {
@@ -11610,13 +11718,12 @@ fn checker_check_method_call_with_base_ty_inplace(c: *mut Checker, e: Expr, base
             }
             checker_check_call_args_inplace(c, expr_list_handle(e.args), fn_param_list_handle(effective_params), sig.param_count, e.span, 0 - 1)
             checker_check_callee_effects_named_inplace(c, e.span, sig.effects, sig.effect_count, sig.name)
-            checker_release_call_arg_borrows_inplace(c, e.args, effective_params, call_start_borrows)
+            checker_release_call_arg_borrows_inplace(c, e.args, effective_params)
             effective_return_type
         } else {
             checker_report_error_at_inplace(c, e.span, 19, 0, 0, 0)
-            let call_start_borrows = (*c).borrows
             checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
-            checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
+            checker_release_call_arg_borrows_inplace(c, e.args, None)
             ty_error()
         }
     } else if is_error_or_unknown(base_ty) {
@@ -11628,20 +11735,17 @@ fn checker_check_method_call_with_base_ty_inplace(c: *mut Checker, e: Expr, base
         // See docs/audit/MADAROS_DUAL_GUM_KNOWLEDGE_IMPORT_2026-07-19.md.
         if !fn_sig_table_has_method_name((*c).fn_sigs, e.name) {
             checker_report_error_at_inplace(c, e.span, 11, 0, 0, 0)
-            let call_start_borrows = (*c).borrows
             checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
-            checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
+            checker_release_call_arg_borrows_inplace(c, e.args, None)
             return ty_error()
         }
-        let call_start_borrows = (*c).borrows
         checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
-        checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
+        checker_release_call_arg_borrows_inplace(c, e.args, None)
         base_ty
     } else {
         checker_report_error_at_inplace(c, e.span, 19, 0, 0, 0)
-        let call_start_borrows = (*c).borrows
         checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
-        checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
+        checker_release_call_arg_borrows_inplace(c, e.args, None)
         ty_error()
     }
 }
@@ -11887,38 +11991,47 @@ fn checker_check_call_args_inplace(c: *mut Checker, args: ExprListHandle, params
         if has_param_info && primitive_exact && (arg_ty.kind == TypeKind::TyF64 || arg_ty.kind == TypeKind::TyI64) {
             checker_check_call_arg_unit_boundary_inplace(c, arg_expr, arg_ty, param_info.ty, call_span)
         }
-        if has_param_info && !primitive_exact {
-            if !checker_call_arg_types_compatible_inplace(c, arg_expr, arg_ty, param_info.ty) {
-                checker_report_mismatch_inplace(c, call_span, 9, param_info.ty, arg_ty)
-            }
-            if arg_ty.kind != TypeKind::TyFn && param_info.ty.kind != TypeKind::TyFn {
-                checker_check_call_arg_borrow_boundary_inplace(c, arg_expr, param_info.ty, call_span)
-                checker_check_call_arg_refinement_boundary_inplace(c, arg_expr, arg_ty, param_info.ty, call_span)
-                checker_check_call_arg_knowledge_boundary_inplace(c, arg_ty, param_info.ty, call_span)
-                checker_check_call_arg_unit_boundary_inplace(c, arg_expr, arg_ty, param_info.ty, call_span)
-                checker_ontology_boundary_check_call_arg_contract_inplace(c, arg_ty, param_info.ty, call_span)
-            }
-        }
-        if has_param_info &&
-           arg_expr.kind == ExprKind::ExprIdent &&
-           checker_is_linear_type_inplace(c, arg_ty) &&
-           !implicit_borrow &&
-           (*c).suppress_linear_consume_depth == 0 {
-            if (*c).borrows.is_borrowed(arg_expr.name) {
-                checker_report_error_at_inplace(c, call_span, 38, 0, 0, 0)
-            } else {
-                let consume_result = (*c).borrows.consume_linear(arg_expr.name)
-                (*c).borrows = consume_result.0
-                if consume_result.1 != 0 {
-                    checker_report_error_at_inplace(c, call_span, consume_result.1, 0, 0, 0)
-                }
-            }
-        }
+        checker_check_call_arg_post_inplace(c, call_span, arg_expr, arg_ty, param_info.ty, has_param_info, primitive_exact, implicit_borrow)
         current = expr_list_handle_next(current)
         idx = idx + 1
     }
     if expected_count >= 0 && idx != expected_count {
         checker_report_error_at_inplace(c, call_span, 10, 0, 0, 0)
+    }
+}
+
+// SIO-417 stack diet: call-arg type-compat + boundary checks + linear consume,
+// extracted from checker_check_call_args_inplace's per-arg loop. The loop
+// computes arg_ty by RECURSION (checker_check_expr_inplace) and only then
+// calls this helper, so the loop frame no longer keeps its temporaries live
+// across the nested call -- it can release them before recursing.
+fn checker_check_call_arg_post_inplace(c: *mut Checker, call_span: Span, arg_expr: Expr, arg_ty: TypeEntry, param_ty: TypeEntry, has_param_info: bool, primitive_exact: bool, implicit_borrow: bool) with Mut, Panic, Div, Alloc, IO {
+    if has_param_info && !primitive_exact {
+        if !checker_call_arg_types_compatible_inplace(c, arg_expr, arg_ty, param_ty) {
+            checker_report_mismatch_inplace(c, call_span, 9, param_ty, arg_ty)
+        }
+        if arg_ty.kind != TypeKind::TyFn && param_ty.kind != TypeKind::TyFn {
+            checker_check_call_arg_borrow_boundary_inplace(c, arg_expr, param_ty, call_span)
+            checker_check_call_arg_refinement_boundary_inplace(c, arg_expr, arg_ty, param_ty, call_span)
+            checker_check_call_arg_knowledge_boundary_inplace(c, arg_ty, param_ty, call_span)
+            checker_check_call_arg_unit_boundary_inplace(c, arg_expr, arg_ty, param_ty, call_span)
+            checker_ontology_boundary_check_call_arg_contract_inplace(c, arg_ty, param_ty, call_span)
+        }
+    }
+    if has_param_info &&
+       arg_expr.kind == ExprKind::ExprIdent &&
+       checker_is_linear_type_inplace(c, arg_ty) &&
+       !implicit_borrow &&
+       (*c).suppress_linear_consume_depth == 0 {
+        if (*c).borrows.is_borrowed(arg_expr.name) {
+            checker_report_error_at_inplace(c, call_span, 38, 0, 0, 0)
+        } else {
+            let consume_result = (*c).borrows.consume_linear(arg_expr.name)
+            (*c).borrows = consume_result.0
+            if consume_result.1 != 0 {
+                checker_report_error_at_inplace(c, call_span, consume_result.1, 0, 0, 0)
+            }
+        }
     }
 }
 
@@ -12469,7 +12582,6 @@ fn checker_check_print_i64_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry w
 fn checker_check_slice_len_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     let first_arg = expr_list_head(e.args)
     let second_arg = expr_list_second(e.args)
-    let call_start_borrows = (*c).borrows
     let arg_ty = checker_check_opt_expr_inplace(c, first_arg)
     match first_arg {
         None => checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
@@ -12486,7 +12598,7 @@ fn checker_check_slice_len_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry w
     if !is_ok && !is_error_or_unknown(arg_ty) {
         checker_report_error_at_inplace(c, e.span, 9, 0, 0, 0)
     }
-    checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
+    checker_release_call_arg_borrows_inplace(c, e.args, None)
     ty_i64()
 }
 
@@ -12541,7 +12653,6 @@ fn call_expr_is_box_new(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Div, A
 fn checker_check_box_new_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     let first_arg = expr_list_head(e.args)
     let second_arg = expr_list_second(e.args)
-    let call_start_borrows = (*c).borrows
     let arg_ty = checker_check_opt_expr_inplace(c, first_arg)
     match first_arg {
         None => checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
@@ -12554,7 +12665,7 @@ fn checker_check_box_new_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry wit
         }
         None => {}
     }
-    checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
+    checker_release_call_arg_borrows_inplace(c, e.args, None)
     var box_ty = ty_named(make_name("Box"))
     box_ty.inner = Some(Box::new(arg_ty))
     box_ty
@@ -12786,10 +12897,7 @@ fn checker_reject_invalid_implicit_native_builtin_arity_inplace(c: *mut Checker,
     }
 }
 
-fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
-    if checker_reject_invalid_implicit_native_builtin_arity_inplace(c, e) {
-        return ty_error()
-    }
+fn checker_check_call_gpu_launch_forms_inplace(c: *mut Checker, e: Expr) -> (bool, TypeEntry) with Mut, Panic, Div, Alloc, IO {
     if checker_expr_is_gpu_launch_invocation_call(e) {
         match e.left {
             Some(desc) => {
@@ -12798,85 +12906,273 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
             None => {}
         }
         checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
-        return ty_unit()
+        return (true, ty_unit())
     }
     if checker_expr_is_gpu_launch_descriptor_call(e) || checker_expr_is_gpu_sync_call(e) {
         checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
-        return ty_unit()
+        return (true, ty_unit())
     }
-    // Intercept the common epistemic builtin measure() with an inplace handler before the
-    // by-value bridge below (which SRET-smashes on the 164KB Checker return).
-    if call_expr_is_builtin_measure(e.left) {
-        return checker_check_measure_expr_inplace(c, e)
+    (false, ty_error())
+}
+
+fn checker_check_call_shadow_forms_inplace(c: *mut Checker, e: Expr, direct_sig_id: i64, callee_is_local_fn: bool) -> (bool, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+    // Bare builtin names are not calls to an invisible private function in
+    // another module. Return before the ident fallback rebinds that signature.
+    // Qualified calls are left alone.
+    match e.left {
+        Some(shadow_callee) => {
+            if (*shadow_callee).kind == ExprKind::ExprIdent && checker_invisible_native_builtin_sig(c, (*shadow_callee).name) {
+                checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
+                return (true, checker_shadowed_builtin_result((*shadow_callee).name))
+            }
+        }
+        None => {}
     }
-    // Two Knowledge arguments: the shared-interval contest. One argument is
-    // math/pure::sign, including tan's sign(sin(x)).
-    if call_expr_is_builtin_sign(e.left) && expr_list_handle_count(expr_list_handle(e.args)) == 2 {
-        return checker_check_sign_expr_inplace(c, e)
+    // #2164: a bare call to a math name the native backend cannot emit. Guarded
+    // on direct_sig_id < 0 so it fires only where the name resolves to nothing
+    // real -- the phantom-builtin case that produces a runtime SIGILL.
+    if direct_sig_id < 0 && !callee_is_local_fn {
+        match e.left {
+            Some(callee_expr) => {
+                if (*callee_expr).kind == ExprKind::ExprIdent {
+                    if name_is_unimplemented_native_math((*callee_expr).name) {
+                        checker_report_error_at_inplace(c, e.span, 221, 0, 0, 0)
+                    }
+                }
+            }
+            None => {}
+        }
     }
-    if call_expr_is_builtin_seq_new(e.left) {
-        return checker_check_seq_new_expr_inplace(c, e)
+    (false, ty_error())
+}
+
+// SIO-417 stack diet: generic-substitution block extracted from
+// checker_check_call_direct_sig_inplace. Runs pre-argument-walk (transient),
+// so its substitution temporaries no longer inflate the direct-sig frame
+// that stays live across the nested-call recursion.
+fn checker_check_call_direct_sig_generics_inplace(c: *mut Checker, e: Expr, direct_sig: FnSig) -> (Option<Box<FnParamList>>, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+    var effective_params = fn_param_list_clone(&direct_sig.params)
+    var effective_return_type = direct_sig.return_type
+    match call_expr_type_args(e) {
+        Some(type_arg_exprs) => {
+            let lowered_type_args = checker_lower_type_expr_list_mut(c, *type_arg_exprs)
+            var generic_names = collect_fn_generic_names_from_params_in_tables((*c).structs, (*c).enums, fn_param_list_clone(&direct_sig.params), empty_type_param_buf())
+            generic_names = collect_fn_generic_names_from_type_in_tables((*c).structs, (*c).enums, direct_sig.return_type, generic_names)
+            if generic_names.count > 0 {
+                let provided_type_arg_count = type_entry_list_count_value(&lowered_type_args)
+                if provided_type_arg_count != generic_names.count {
+                    checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
+                }
+                effective_params = checker_substitute_fn_params(effective_params, generic_names, type_entry_list_clone(&lowered_type_args))
+                effective_return_type = substitute_type_param(direct_sig.return_type, generic_names, type_entry_list_clone(&lowered_type_args))
+            }
+        }
+        None => {}
     }
-    if call_expr_is_builtin_seq_push(e.left) {
-        return checker_check_seq_push_expr_inplace(c, e)
+    (effective_params, effective_return_type)
+}
+
+fn checker_check_call_direct_sig_inplace(c: *mut Checker, e: Expr, direct_sig_id: i64) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    if (*c).enforce_visibility && !checker_fn_sig_visible_inplace(c, direct_sig_id) {
+        checker_report_private_fn_inplace(c, e.span, direct_sig_id)
     }
-    if call_expr_is_builtin_seq_get(e.left) {
-        return checker_check_seq_get_expr_inplace(c, e)
+    let direct_sig = fn_sig_table_get((*c).fn_sigs, direct_sig_id)
+    // #1622: calling an `extern "C"` name the native backend does not
+    // implement. This is the live arm -- a plain ident callee resolves via
+    // direct_sig_id and returns below, never reaching the TyFn fallback.
+    var refused_unimplemented = false
+    if direct_sig.is_extern && !name_is_native_backend_builtin(direct_sig.name) && !name_is_dynlink_extern(direct_sig.name) {
+        checker_report_error_at_inplace(c, e.span, 250, 0, 0, 0)
+        refused_unimplemented = true
     }
-    if call_expr_is_builtin_seq_set(e.left) {
-        return checker_check_seq_set_expr_inplace(c, e)
+    let generic_result = checker_check_call_direct_sig_generics_inplace(c, e, direct_sig)
+    var effective_params = generic_result.0
+    var effective_return_type = generic_result.1
+    // N2 (REQ-5, codex ruling 2026-08-23): save/reset the noise-set
+    // scratch around this call's argument walk, so a nested call in an
+    // argument position cannot leave its own noise_set_id behind for the
+    // outer call. ns_proj_d is this callee's
+    // proven-projection verdict (fail-closed: not-a-projection -> -1,
+    // "watch nothing").
+    let outer_arg_ns_d = (*c).last_call_arg_ns
+    (*c).last_call_arg_ns = ns_arg_sentinel()
+    let ns_proj_d = ns_proj_table_get((*c).ns_proj, direct_sig_id)
+    let ns_watch_d = if ns_proj_d.0 { ns_proj_d.1 } else { 0 - 1 }
+    checker_check_call_args_inplace(
+        c,
+        expr_list_handle(e.args),
+        fn_param_list_handle(effective_params),
+        direct_sig.param_count,
+        e.span,
+        ns_watch_d,
+    )
+    checker_check_callee_effects_named_inplace(c, e.span, direct_sig.effects, direct_sig.effect_count, direct_sig.name)
+    checker_release_call_arg_borrows_inplace(c, e.args, effective_params)
+    if refused_unimplemented {
+        (*c).last_call_arg_ns = outer_arg_ns_d
+        return ty_error()
     }
-    if call_expr_is_builtin_seq_len(e.left) {
-        return checker_check_seq_len_expr_inplace(c, e)
+    let ns_result = checker_propagate_call_result_ns_inplace(c, effective_return_type, ns_proj_d.0)
+    (*c).last_call_arg_ns = outer_arg_ns_d
+    ns_result
+}
+
+fn checker_check_call_indirect_inplace(c: *mut Checker, e: Expr, callee_is_local_fn: bool) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    // Callee via the *mut spine, matched locally so the call path does not pass
+    // Option<Box<Expr>> through another *mut helper boundary.
+    let callee_ty =
+        match e.left {
+            Some(callee_expr) => checker_check_expr_inplace(c, *callee_expr)
+            None => ty_error()
+        }
+    let array_like_ty =
+        if callee_ty.kind == TypeKind::TyArray {
+            callee_ty
+        } else if callee_ty.kind == TypeKind::TyRef || callee_ty.kind == TypeKind::TyRefMut {
+            match callee_ty.inner {
+                Some(inner_ty) => *inner_ty
+                None => ty_error()
+            }
+        } else {
+            ty_error()
+        }
+    if array_like_ty.kind == TypeKind::TyArray {
+        let idx_arg = expr_list_head(e.args)
+        let extra_arg = expr_list_second(e.args)
+        match idx_arg {
+            Some(arg) => {
+                let idx_ty = checker_check_expr_inplace(c, *arg)
+                if !is_error_or_unknown(idx_ty) && !is_integer_type(idx_ty) {
+                    checker_report_error_at_inplace(c, e.span, 14, 0, 0, 0)
+                }
+                match extra_arg {
+                    Some(extra) => {
+                        let _ety = checker_check_expr_inplace(c, *extra)
+                        checker_report_error_at_inplace(c, e.span, 17, 0, 0, 0)
+                        return ty_error()
+                    }
+                    None => {
+                        match array_like_ty.inner {
+                            Some(elem_ty) => return *elem_ty
+                            None => return ty_error()
+                        }
+                    }
+                }
+            }
+            None => {}
+        }
     }
-    if call_expr_is_builtin_seq_count(e.left) {
-        return checker_check_seq_count_expr_inplace(c, e)
+    if callee_ty.kind == TypeKind::TyFn && callee_ty.fn_sig_id >= 0 {
+        let sig = fn_sig_table_get((*c).fn_sigs, callee_ty.fn_sig_id)
+        if (*c).enforce_visibility && !callee_is_local_fn && !checker_fn_sig_visible_inplace(c, callee_ty.fn_sig_id) {
+            checker_report_private_fn_inplace(c, e.span, callee_ty.fn_sig_id)
+        }
+        // #1622: calling an `extern "C"` name the native backend does not
+        // implement. Refuse here rather than emit a call that reads 0.
+        // Checked at the CALL, not at the declaration. A bindings module
+        // declares many names and a program calls few, so a declaration-site
+        // refusal would break the declarations for no gain:
+        // parser_card_a_raw_pointer_types.sio declares malloc and never calls
+        // it, and tests/run-pass/ffi_declared_never_called_is_legal.sio pins
+        // the case this rule exists for -- a declared, never-called name with
+        // no intrinsic at all. That fixture is also the guard on the parser:
+        // it only holds while parser/items.sio leaves such a declaration
+        // bodyless instead of giving it a ffi_<name> forwarding body, because
+        // a wrapper body carries is_extern false and this arm never fires.
+        var refused_unimplemented = false
+        if sig.is_extern && !name_is_native_backend_builtin(sig.name) && !name_is_dynlink_extern(sig.name) {
+            checker_report_error_at_inplace(c, e.span, 250, 0, 0, 0)
+            refused_unimplemented = true
+        }
+        var effective_params = fn_param_list_clone(&sig.params)
+        var effective_return_type = sig.return_type
+        match call_expr_type_args(e) {
+            Some(type_arg_exprs) => {
+                let lowered_type_args = checker_lower_type_expr_list_mut(c, *type_arg_exprs)
+                var generic_names = collect_fn_generic_names_from_params_in_tables((*c).structs, (*c).enums, fn_param_list_clone(&sig.params), empty_type_param_buf())
+                generic_names = collect_fn_generic_names_from_type_in_tables((*c).structs, (*c).enums, sig.return_type, generic_names)
+                if generic_names.count > 0 {
+                    let provided_type_arg_count = type_entry_list_count_value(&lowered_type_args)
+                    if provided_type_arg_count != generic_names.count {
+                        checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
+                    }
+                    effective_params = checker_substitute_fn_params(effective_params, generic_names, type_entry_list_clone(&lowered_type_args))
+                    effective_return_type = substitute_type_param(sig.return_type, generic_names, type_entry_list_clone(&lowered_type_args))
+                }
+            }
+            None => {}
+        }
+        // N2 (REQ-5, codex ruling 2026-08-23): same save/reset/restore
+        // discipline as the direct_sig_id path above, applied to the
+        // noise-set scratch, plus the callee's proven-projection verdict.
+        let outer_arg_ns = (*c).last_call_arg_ns
+        (*c).last_call_arg_ns = ns_arg_sentinel()
+        // Fail-closed (grok-4.6 re-review 2026-08-23): an INDIRECT call through a
+        // first-class function VALUE must NEVER project. callee_ty.fn_sig_id can be
+        // stale — assignment and CFG-join do not rebind a TyFn value's sig_id
+        // (var f = id; f = add_noise; f(k) would else trust id's projection over
+        // the real callee). Only the DIRECT named-call path (direct_sig_id above)
+        // may project; here we watch nothing so the result defaults to top.
+        let ns_watch = 0 - 1
+        checker_check_call_args_inplace(c, expr_list_handle(e.args), fn_param_list_handle(effective_params), sig.param_count, e.span, ns_watch)
+        checker_check_callee_effects_named_inplace(c, e.span, sig.effects, sig.effect_count, sig.name)
+        checker_release_call_arg_borrows_inplace(c, e.args, effective_params)
+        if refused_unimplemented {
+            (*c).last_call_arg_ns = outer_arg_ns
+            ty_error()
+        } else {
+            let ns_result = checker_propagate_call_result_ns_inplace(c, effective_return_type, false)
+            (*c).last_call_arg_ns = outer_arg_ns
+            ns_result
+        }
+    } else if is_error_or_unknown(callee_ty) {
+        checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
+        checker_release_call_arg_borrows_inplace(c, e.args, None)
+        // The runtime `read_file` is bound import-unknown, so its result reached
+        // method calls with an unknown type (`read_file(p).as_bytes()`, `.len()`
+        // were E011). It returns the file's contents as a string; a user
+        // `read_file` has a signature and never reaches this arm.
+        if callee_ty.kind == TypeKind::TyUnknown && checker_callee_is_bare_ident(e.left, make_name("read_file")) {
+            return ty_string()
+        }
+        callee_ty
+    } else {
+        // Enum tuple-variant constructor (`Event::B(42)`): the callee path typed as
+        // ty_named(enum_name) (not TyFn), so it would otherwise hit E017. Check the args for
+        // side effects / nested diagnostics and yield ty_named(enum_name) so a later
+        // `match b { Event::B(n) => .. }` resolves via enum_table_find((*c).enums, scrut_ty.name).
+        let variant_enum_idx = call_expr_enum_variant_ctor_enum_idx(c, e.left)
+        if variant_enum_idx >= 0 {
+            let ei = enum_table_get((*c).enums, variant_enum_idx)
+            let vname = match e.left {
+                Some(callee) => checker_copy_string_list_tail_to_name((*callee).path.segments)
+                None => empty_name()
+            }
+            checker_check_user_variant_ctor_args_inplace(c, e, ei.variants, vname)
+            return ty_named(ei.name)
+        }
+        checker_report_error_at_inplace(c, e.span, 17, 0, 0, 0)
+        checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
+        checker_release_call_arg_borrows_inplace(c, e.args, None)
+        ty_error()
     }
-    if call_expr_is_builtin_acknowledge(e.left) {
-        return checker_check_acknowledge_expr_inplace(c, e)
+}
+
+fn checker_check_call_bridge_forms_inplace(c: *mut Checker, e: Expr) -> (bool, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+    if call_expr_is_box_new(e.left) {
+        return (true, checker_check_box_new_expr_inplace(c, e))
     }
-    if call_expr_is_builtin_knowledge_ctor(e.left) {
-        return checker_check_knowledge_ctor_expr_inplace(c, e)
+    if call_expr_should_bridge_by_value(e) {
+        // These calls are checked only by the by-value check_call_expr guards
+        // (typekind builtins, contest witnesses, method calls). Since #3184
+        // checker_check_expr_mut is the dispatch-miss sink, so routing them
+        // there refused every such call with "Expr.kind dispatch missed".
+        return (true, checker_check_call_expr_value_bridge(c, e))
     }
-    if call_expr_is_builtin_variance_of(e.left) {
-        return checker_check_variance_metric_expr_inplace(c, e)
-    }
-    if call_expr_is_builtin_covariance_of(e.left) {
-        return checker_check_covariance_metric_expr_inplace(c, e)
-    }
-    if call_expr_is_builtin_uncertainty_of(e.left) {
-        return checker_check_variance_metric_expr_inplace(c, e)
-    }
-    if call_expr_is_builtin_sensitivity_of(e.left) {
-        return checker_check_sensitivity_metric_expr_inplace(c, e)
-    }
-    if call_expr_is_builtin_hessian_of(e.left) {
-        return checker_check_hessian_metric_expr_inplace(c, e)
-    }
-    // E2 is a mean, not a spread: it type-checks as the variance-family
-    // metric -- one expression argument, f64 result, same as variance_of.
-    if call_expr_is_builtin_second_order_mean(e.left) {
-        return checker_check_variance_metric_expr_inplace(c, e)
-    }
-    // correlate(a, b, rho) is three arguments, not one. Routing it to
-    // checker_check_variance_metric_expr_inplace reports E010 on the second --
-    // exactly what the comment on checker_check_sensitivity_metric_expr_inplace
-    // warns about, and exactly what I did on the first attempt.
-    if call_expr_is_builtin_correlate(e.left) {
-        return checker_check_correlate_metric_expr_inplace(c, e)
-    }
-    if call_expr_is_builtin_slice_len(e.left) {
-        return checker_check_slice_len_expr_inplace(c, e)
-    }
-    if call_expr_is_builtin_assert(e.left) {
-        return checker_check_assert_expr_inplace(c, e)
-    }
-    if call_expr_is_builtin_print_int(e.left) {
-        return checker_check_print_i64_expr_inplace(c, e)
-    }
-    if call_expr_is_builtin_print_char(e.left) {
-        return checker_check_print_i64_expr_inplace(c, e)
-    }
+    (false, ty_error())
+}
+
+fn checker_check_call_native_forms_inplace(c: *mut Checker, e: Expr) -> (bool, TypeEntry) with Mut, Panic, Div, Alloc, IO {
     if call_expr_is_builtin_println(e.left) {
         let first_arg = expr_list_head(e.args)
         let arg_ty = checker_check_opt_expr_inplace(c, first_arg)
@@ -12887,7 +13183,7 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
             var effects_unobserved: [i64; 8] = [0; 8]
             effects_unobserved[0] = 0
             checker_check_callee_effects_inplace(c, e.span, effects_unobserved, 1)
-            return ty_unit()
+            return (true, ty_unit())
         }
     }
     // Read-only GPU thread-index intrinsics (gpu_thread_id_*, gpu_block_id_*,
@@ -12900,7 +13196,7 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
         // Barriers (gpu_barrier, gpu_barrier_sync, gpu_sync_threads) are void
         // side-effects; the thread-index/dim intrinsics return a u32 coordinate.
         if call_expr_is_gpu_barrier(e.left) {
-            return ty_unit()
+            return (true, ty_unit())
         }
         // E004: thread/block coordinate intrinsics return the language's native
         // index type i64 (not u32), so cast-free witness kernels typecheck as
@@ -12910,7 +13206,7 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
         // type (hlir_to_gpu.sio hardcodes GpuU32 for the read; all integer binops
         // lower as i32), so widening the checker type to i64 keeps strict integer
         // typing intact without changing the emitted register width.
-        return ty_i64()
+        return (true, ty_i64())
     }
     // syscall6(nr, a1..a6) -> i64 with IO: raw Linux syscall escape hatch,
     // mirroring the lean_single builtin (lean_single.sio emit_syscall6_x86).
@@ -12922,71 +13218,192 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
         var effects_io: [i64; 8] = [0; 8]
         effects_io[0] = 0  // IO (effects.sio: 0=IO)
         checker_check_callee_effects_inplace(c, e.span, effects_io, 1)
-        return ty_i64()
+        return (true, ty_i64())
     }
-    // read_file(path) -> string: the native builtin returns the file's bytes
-    // as a string (ir/lower.sio lowers the call by name). The prelude binds
-    // the name unknown, so without this arm the result types as TyUnknown and
-    // string methods (.len()/.as_bytes()) on it refuse with E011/E019. A
-    // user-declared read_file keeps the generic signature path below.
-    match e.left {
-        Some(rf_callee) => {
-            if (*rf_callee).kind == ExprKind::ExprIdent && name_matches_str9((*rf_callee).name, 114, 101, 97, 100, 95, 102, 105, 108, 101) {
-                let rf_sig = checker_fn_sigs_find_inplace(c, (*rf_callee).name)
-                if rf_sig < 0 || checker_invisible_native_builtin_sig(c, (*rf_callee).name) {
-                    checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
-                    checker_check_io_builtin_effects_inplace(c, e.span, (*rf_callee).name)
-                    return ty_string()
-                }
+    (false, ty_error())
+}
+
+fn checker_validate_call_qualifier_inplace(c: *mut Checker, callee: Expr, span: Span, path_type_name: Name, path_method_name: Name, path_type_name_is_used_module: bool) -> i64 with Mut, Panic, Div, Alloc, IO {
+    // path_type_name_is_used_module short-circuits these two
+    // lookups: when the qualifier is a module the CALLER
+    // actually `use`d, treat this as a module-qualified
+    // free-fn call regardless of whether an UNRELATED
+    // same-named struct/enum also exists globally -- see
+    // this arm's own comment above (round-3 comment
+    // 4113834074) for why the caller's own import namespace
+    // must win over a global type-table hit here.
+    if path_type_name_is_used_module || struct_table_find((*c).structs, path_type_name) < 0 {
+        if path_type_name_is_used_module || enum_table_find((*c).enums, path_type_name) < 0 {
+            // `path_type_name` is not a known struct/enum, so this
+            // is plausibly a module-qualified free-fn call
+            // (`mod::f(..)`, `a::mod::f(..)`) rather than
+            // `Type::method`. `path_method_name` is always the
+            // true terminal segment regardless of path length
+            // (checker_copy_string_list_tail_to_name), so this
+            // also covers the >2-segment case correctly.
+            //
+            // Bind the result to the found free-fn signature
+            // (not just check its existence) so the call falls
+            // into the `direct_sig_id >= 0` block below and gets
+            // full treatment: visibility, argument checking,
+            // generics, and effects -- exactly like a bare
+            // `f(..)` call. Previously this only suppressed
+            // W044, leaving direct_sig_id at -1 so `mod::f(..)`
+            // with the wrong argument types, or a call to a
+            // private `mod::private_fn()`, compiled unchecked.
+            //
+            // The terminal name resolving to SOME free fn
+            // signature is not enough on its own (review
+            // comment 4089110672 / finding A): that lookup is
+            // by bare name across the WHOLE program, so
+            // `bogus_module::pubf(..)` bound a real `pubf`'s
+            // signature here even though `bogus_module` was
+            // never `use`d anywhere -- typechecking clean while
+            // the lowerer, which DOES validate the qualifier
+            // against its own module registry, fell through to
+            // its legacy mangled-stub path and emitted a
+            // body-less `bogus_module_pubf` call (SIGILL).
+            // checker_path_qualifier_all_modules_known
+            // confirms every segment before the terminal name
+            // is a real `use`-declared module (the SAME
+            // positive-evidence check the lowerer's
+            // LOWER_USE_MODULE_HASH performs) before trusting
+            // the bare-name match.
+            // Copilot review (PR #2515), comment 4110379040: this
+            // combines two independent whole-program facts --
+            // "qualifier is SOME known use import" and "SOME
+            // global fn named path_method_name exists" -- without
+            // ever checking that the specific fn found is the one
+            // the qualifier's target module actually declares. With
+            // both `use testmod::tc_c;` and `use testmod::
+            // dep_chain_leaf;` imported, `tc_c::leaf_add(..)` binds
+            // to `dep_chain_leaf::leaf_add` if a same-named
+            // `leaf_add` exists there. checker_use_module_known's
+            // registry only proves a qualifier text was `use`d by
+            // the current module (round 3, comment 4089110672); it
+            // was never extended to resolve a qualifier to its
+            // target module id (there is no "declaring module's
+            // qualifier segment -> target module id" table anywhere
+            // in this checker, nor in specializer.sio's identical
+            // gap at spec_call_expr_callee_name or ir/lower.sio's
+            // at callee_path_module_stripped_name). Closing this
+            // for real needs that resolution table built once at
+            // import time and threaded through all three call
+            // sites and both multi-module loading pipelines
+            // (module_loader.sio and module_frontend.sio) -- a
+            // genuine architectural addition out of scope for this
+            // round, left as a known, accepted gap rather than a
+            // partial fix risking a new regression in an already
+            // heavily-revised area (see this PR's specializer.sio/
+            // parser/ast.sio module-provenance comments for the
+            // same scoping judgment on a related finding).
+            let free_fn_sig_id = checker_fn_sigs_find_inplace(c, path_method_name)
+            if free_fn_sig_id < 0 || !checker_path_qualifier_all_modules_known(c, callee.path) {
+                // #1568: this used to be W044, a WARNING -- `check` reported
+                // success and the lowerer then emitted a body-less mangled stub
+                // that native codegen turns into ud2 (SIGILL at run time, or a
+                // silent 0 on older binaries). A call whose target resolves to
+                // no definition is refused here instead (E266), before any code
+                // is produced. lean_single already refuses the same programs.
+                //
+                // The condition is a disjunction (PR #2844 review).
+                // `free_fn_sig_id < 0` is a qualifier the caller did `use`,
+                // whose terminal function does not exist
+                // (`use testmod::tc_c` then `tc_c::missing_fn()`). The other
+                // arm is a qualifier that is not a known module. One message
+                // covers both; naming only the qualifier tells the first
+                // program that its import is missing.
+                checker_report_error_at_inplace(c, span, 266, 0, 0, 0)
+            } else {
+                return free_fn_sig_id
             }
         }
-        None => {}
     }
-    // SIO-27 (#2760): attribute IO to the implicit IO builtins, mirroring
-    // lean_single (which asks for the IO bit whenever the name does not
-    // resolve to a user function). A visible declared function with the same
-    // spelling keeps its own signature's effects, checked on the generic
-    // path below. print_int/print_char never reach here (specialised arms).
-    match e.left {
-        Some(io_callee) => {
-            if (*io_callee).kind == ExprKind::ExprIdent && checker_name_is_io_builtin((*io_callee).name) {
-                let io_sig = checker_fn_sigs_find_inplace(c, (*io_callee).name)
-                if io_sig < 0 || checker_invisible_native_builtin_sig(c, (*io_callee).name) {
-                    checker_check_io_builtin_effects_inplace(c, e.span, (*io_callee).name)
-                }
-            }
-        }
-        None => {}
+    -1
+}
+
+fn checker_check_call_metric_forms_inplace(c: *mut Checker, e: Expr) -> (bool, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+    // Intercept the common epistemic builtin measure() with an inplace handler before the
+    // by-value bridge below (which SRET-smashes on the 164KB Checker return).
+    if call_expr_is_builtin_measure(e.left) {
+        return (true, checker_check_measure_expr_inplace(c, e))
     }
-    if call_expr_is_box_new(e.left) {
-        return checker_check_box_new_expr_inplace(c, e)
+    // Two Knowledge arguments: the shared-interval contest. One argument is
+    // math/pure::sign, including tan's sign(sin(x)).
+    if call_expr_is_builtin_sign(e.left) && expr_list_handle_count(expr_list_handle(e.args)) == 2 {
+        return (true, checker_check_sign_expr_inplace(c, e))
     }
-    if call_expr_should_bridge_by_value(e) {
-        // These calls are checked only by the by-value check_call_expr guards
-        // (typekind builtins, contest witnesses, method calls). Since #3184
-        // checker_check_expr_mut is the dispatch-miss sink, so routing them
-        // there refused every such call with "Expr.kind dispatch missed".
-        return checker_check_call_expr_value_bridge(c, e)
+    if call_expr_is_builtin_seq_new(e.left) {
+        return (true, checker_check_seq_new_expr_inplace(c, e))
     }
-    // Preamble: multitest then hypothesis effects (shallow state, no sub-expr check).
-    if multitest_effect_enabled((*c).current_effects, (*c).current_effect_count) {
-        let callee_name = multitest_call_name(e.left)
-        if multitest_is_stat_test_name(callee_name) {
-            (*c).multitest_count = (*c).multitest_count + 1
-        } else if multitest_is_correction_name(callee_name) {
-            (*c).multitest_corrected = true
-        }
+    if call_expr_is_builtin_seq_push(e.left) {
+        return (true, checker_check_seq_push_expr_inplace(c, e))
     }
-    if hypothesis_effect_enabled((*c).current_effects, (*c).current_effect_count) {
-        let callee_name = multitest_call_name(e.left)
-        if (*c).studies.count > 0 && multitest_is_stat_test_name(callee_name) {
-            let outcome_name = hypothesis_outcome_name_from_args(e.args)
-            if !name_is_empty(outcome_name) && !active_study_has_hypothesis_outcome((*c).studies, outcome_name) {
-                let pen = (*c).report_hypothesis_penalty_warning(e.span, outcome_name)
-                checker_store_from_value(c, pen)
-            }
-        }
+    if call_expr_is_builtin_seq_get(e.left) {
+        return (true, checker_check_seq_get_expr_inplace(c, e))
     }
+    if call_expr_is_builtin_seq_set(e.left) {
+        return (true, checker_check_seq_set_expr_inplace(c, e))
+    }
+    if call_expr_is_builtin_seq_len(e.left) {
+        return (true, checker_check_seq_len_expr_inplace(c, e))
+    }
+    if call_expr_is_builtin_seq_count(e.left) {
+        return (true, checker_check_seq_count_expr_inplace(c, e))
+    }
+    if call_expr_is_builtin_acknowledge(e.left) {
+        return (true, checker_check_acknowledge_expr_inplace(c, e))
+    }
+    if call_expr_is_builtin_knowledge_ctor(e.left) {
+        return (true, checker_check_knowledge_ctor_expr_inplace(c, e))
+    }
+    if call_expr_is_builtin_variance_of(e.left) {
+        return (true, checker_check_variance_metric_expr_inplace(c, e))
+    }
+    if call_expr_is_builtin_covariance_of(e.left) {
+        return (true, checker_check_covariance_metric_expr_inplace(c, e))
+    }
+    if call_expr_is_builtin_uncertainty_of(e.left) {
+        return (true, checker_check_variance_metric_expr_inplace(c, e))
+    }
+    if call_expr_is_builtin_sensitivity_of(e.left) {
+        return (true, checker_check_sensitivity_metric_expr_inplace(c, e))
+    }
+    if call_expr_is_builtin_hessian_of(e.left) {
+        return (true, checker_check_hessian_metric_expr_inplace(c, e))
+    }
+    // E2 is a mean, not a spread: it type-checks as the variance-family
+    // metric -- one expression argument, f64 result, same as variance_of.
+    if call_expr_is_builtin_second_order_mean(e.left) {
+        return (true, checker_check_variance_metric_expr_inplace(c, e))
+    }
+    // correlate(a, b, rho) is three arguments, not one. Routing it to
+    // checker_check_variance_metric_expr_inplace reports E010 on the second --
+    // exactly what the comment on checker_check_sensitivity_metric_expr_inplace
+    // warns about, and exactly what I did on the first attempt.
+    if call_expr_is_builtin_correlate(e.left) {
+        return (true, checker_check_correlate_metric_expr_inplace(c, e))
+    }
+    if call_expr_is_builtin_slice_len(e.left) {
+        return (true, checker_check_slice_len_expr_inplace(c, e))
+    }
+    if call_expr_is_builtin_assert(e.left) {
+        return (true, checker_check_assert_expr_inplace(c, e))
+    }
+    if call_expr_is_builtin_print_int(e.left) {
+        return (true, checker_check_print_i64_expr_inplace(c, e))
+    }
+    if call_expr_is_builtin_print_char(e.left) {
+        return (true, checker_check_print_i64_expr_inplace(c, e))
+    }
+    (false, ty_error())
+}
+
+// SIO-417 stack diet: direct-sig resolution extracted from
+// checker_check_call_expr_inplace. Runs pre-argument-walk (transient),
+// so the qualifier/method lookup temporaries no longer inflate the router
+// frame that stays live across the nested-call recursion.
+fn checker_resolve_call_direct_sig_id_inplace(c: *mut Checker, e: Expr) -> i64 with Mut, Panic, Div, Alloc, IO {
     var direct_sig_id: i64 = -1
     // Type::method associated-function path (e.g. E::of / Epistemic::measured).
     // When the method is registered, resolve it so the return type is known and
@@ -13126,106 +13543,58 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
                 // already 0 today. Promoting to an error requires deciding what they should
                 // be, which is stdlib semantics work, not a checker change.
                 if direct_sig_id < 0 {
-                    // path_type_name_is_used_module short-circuits these two
-                    // lookups: when the qualifier is a module the CALLER
-                    // actually `use`d, treat this as a module-qualified
-                    // free-fn call regardless of whether an UNRELATED
-                    // same-named struct/enum also exists globally -- see
-                    // this arm's own comment above (round-3 comment
-                    // 4113834074) for why the caller's own import namespace
-                    // must win over a global type-table hit here.
-                    if path_type_name_is_used_module || struct_table_find((*c).structs, path_type_name) < 0 {
-                        if path_type_name_is_used_module || enum_table_find((*c).enums, path_type_name) < 0 {
-                            // `path_type_name` is not a known struct/enum, so this
-                            // is plausibly a module-qualified free-fn call
-                            // (`mod::f(..)`, `a::mod::f(..)`) rather than
-                            // `Type::method`. `path_method_name` is always the
-                            // true terminal segment regardless of path length
-                            // (checker_copy_string_list_tail_to_name), so this
-                            // also covers the >2-segment case correctly.
-                            //
-                            // Bind direct_sig_id to the found free-fn signature
-                            // (not just check its existence) so the call falls
-                            // into the `direct_sig_id >= 0` block below and gets
-                            // full treatment: visibility, argument checking,
-                            // generics, and effects -- exactly like a bare
-                            // `f(..)` call. Previously this only suppressed
-                            // W044, leaving direct_sig_id at -1 so `mod::f(..)`
-                            // with the wrong argument types, or a call to a
-                            // private `mod::private_fn()`, compiled unchecked.
-                            //
-                            // The terminal name resolving to SOME free fn
-                            // signature is not enough on its own (review
-                            // comment 4089110672 / finding A): that lookup is
-                            // by bare name across the WHOLE program, so
-                            // `bogus_module::pubf(..)` bound a real `pubf`'s
-                            // signature here even though `bogus_module` was
-                            // never `use`d anywhere -- typechecking clean while
-                            // the lowerer, which DOES validate the qualifier
-                            // against its own module registry, fell through to
-                            // its legacy mangled-stub path and emitted a
-                            // body-less `bogus_module_pubf` call (SIGILL).
-                            // checker_path_qualifier_all_modules_known
-                            // confirms every segment before the terminal name
-                            // is a real `use`-declared module (the SAME
-                            // positive-evidence check the lowerer's
-                            // LOWER_USE_MODULE_HASH performs) before trusting
-                            // the bare-name match.
-                            // Copilot review (PR #2515), comment 4110379040: this
-                            // combines two independent whole-program facts --
-                            // "qualifier is SOME known use import" and "SOME
-                            // global fn named path_method_name exists" -- without
-                            // ever checking that the specific fn found is the one
-                            // the qualifier's target module actually declares. With
-                            // both `use testmod::tc_c;` and `use testmod::
-                            // dep_chain_leaf;` imported, `tc_c::leaf_add(..)` binds
-                            // to `dep_chain_leaf::leaf_add` if a same-named
-                            // `leaf_add` exists there. checker_use_module_known's
-                            // registry only proves a qualifier text was `use`d by
-                            // the current module (round 3, comment 4089110672); it
-                            // was never extended to resolve a qualifier to its
-                            // target module id (there is no "declaring module's
-                            // qualifier segment -> target module id" table anywhere
-                            // in this checker, nor in specializer.sio's identical
-                            // gap at spec_call_expr_callee_name or ir/lower.sio's
-                            // at callee_path_module_stripped_name). Closing this
-                            // for real needs that resolution table built once at
-                            // import time and threaded through all three call
-                            // sites and both multi-module loading pipelines
-                            // (module_loader.sio and module_frontend.sio) -- a
-                            // genuine architectural addition out of scope for this
-                            // round, left as a known, accepted gap rather than a
-                            // partial fix risking a new regression in an already
-                            // heavily-revised area (see this PR's specializer.sio/
-                            // parser/ast.sio module-provenance comments for the
-                            // same scoping judgment on a related finding).
-                            let free_fn_sig_id = checker_fn_sigs_find_inplace(c, path_method_name)
-                            if free_fn_sig_id < 0 || !checker_path_qualifier_all_modules_known(c, (*callee_expr).path) {
-                                // #1568: this used to be W044, a WARNING -- `check` reported
-                                // success and the lowerer then emitted a body-less mangled stub
-                                // that native codegen turns into ud2 (SIGILL at run time, or a
-                                // silent 0 on older binaries). A call whose target resolves to
-                                // no definition is refused here instead (E266), before any code
-                                // is produced. lean_single already refuses the same programs.
-                                //
-                                // The condition is a disjunction (PR #2844 review).
-                                // `free_fn_sig_id < 0` is a qualifier the caller did `use`,
-                                // whose terminal function does not exist
-                                // (`use testmod::tc_c` then `tc_c::missing_fn()`). The other
-                                // arm is a qualifier that is not a known module. One message
-                                // covers both; naming only the qualifier tells the first
-                                // program that its import is missing.
-                                checker_report_error_at_inplace(c, e.span, 266, 0, 0, 0)
-                            } else {
-                                direct_sig_id = free_fn_sig_id
-                            }
-                        }
-                    }
+                    direct_sig_id = checker_validate_call_qualifier_inplace(c, *callee_expr, e.span, path_type_name, path_method_name, path_type_name_is_used_module)
+                }
+                // SIO-417 stack diet: qualifier validation moved to
+                // checker_validate_call_qualifier_inplace (dispatched above).
+            }
+        }
+        None => {}
+    }
+    direct_sig_id
+}
+
+// SIO-417 stack diet: pre-recursion phase of checker_check_call_expr_inplace.
+// IO-attribute check, multitest/hypothesis shallow state, direct-sig id
+// resolution and lexical-callback shadowing all run BEFORE the argument walk
+// recurses, so they live here and this frame is gone by nesting time. Returns
+// (direct_sig_id, callee_is_local_fn); the shell keeps only the consuming tail.
+fn checker_check_call_expr_preflight_inplace(c: *mut Checker, e: Expr) -> (i64, bool) with Mut, Panic, Div, Alloc, IO {
+    // SIO-27 (#2760): attribute IO to the implicit IO builtins, mirroring
+    // lean_single (which asks for the IO bit whenever the name does not
+    // resolve to a user function). A visible declared function with the same
+    // spelling keeps its own signature's effects, checked on the generic
+    // path below. print_int/print_char never reach here (specialised arms).
+    match e.left {
+        Some(io_callee) => {
+            if (*io_callee).kind == ExprKind::ExprIdent && checker_name_is_io_builtin((*io_callee).name) {
+                let io_sig = checker_fn_sigs_find_inplace(c, (*io_callee).name)
+                if io_sig < 0 || checker_invisible_native_builtin_sig(c, (*io_callee).name) {
+                    checker_check_io_builtin_effects_inplace(c, e.span, (*io_callee).name)
                 }
             }
         }
         None => {}
     }
+    // Preamble: multitest then hypothesis effects (shallow state, no sub-expr check).
+    if multitest_effect_enabled((*c).current_effects, (*c).current_effect_count) {
+        let callee_name = multitest_call_name(e.left)
+        if multitest_is_stat_test_name(callee_name) {
+            (*c).multitest_count = (*c).multitest_count + 1
+        } else if multitest_is_correction_name(callee_name) {
+            (*c).multitest_corrected = true
+        }
+    }
+    if hypothesis_effect_enabled((*c).current_effects, (*c).current_effect_count) {
+        let callee_name = multitest_call_name(e.left)
+        if (*c).studies.count > 0 && multitest_is_stat_test_name(callee_name) {
+            let outcome_name = hypothesis_outcome_name_from_args(e.args)
+            if !name_is_empty(outcome_name) && !active_study_has_hypothesis_outcome((*c).studies, outcome_name) {
+                checker_report_hypothesis_penalty_warning_inplace(c, e.span, outcome_name)
+            }
+        }
+    }
+    var direct_sig_id = checker_resolve_call_direct_sig_id_inplace(c, e)
     // Lexical callback parameters shadow unrelated global functions with the
     // same spelling. Calling an already-bound function value does not acquire
     // a private symbol from its defining module.
@@ -13239,234 +13608,66 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
         None => {}
     }
     if callee_is_local_fn { direct_sig_id = 0 - 1 }
-    // Bare builtin names are not calls to an invisible private function in
-    // another module. Return before the ident fallback rebinds that signature.
-    // Qualified calls are left alone.
+    (direct_sig_id, callee_is_local_fn)
+}
+
+fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    if checker_reject_invalid_implicit_native_builtin_arity_inplace(c, e) {
+        return ty_error()
+    }
+    let gpu_launch = checker_check_call_gpu_launch_forms_inplace(c, e)
+    if gpu_launch.0 {
+        return gpu_launch.1
+    }
+    let metric_forms = checker_check_call_metric_forms_inplace(c, e)
+    if metric_forms.0 {
+        return metric_forms.1
+    }
+    let native_forms = checker_check_call_native_forms_inplace(c, e)
+    if native_forms.0 {
+        return native_forms.1
+    }
+    // read_file(path) -> string: the native builtin returns the file bytes
+    // as a string (ir/lower.sio lowers the call by name). The prelude binds
+    // the name unknown, so without this arm the result types as TyUnknown and
+    // string methods (.len()/.as_bytes()) on it refuse with E011/E019. A
+    // user-declared read_file keeps the generic signature path below.
     match e.left {
-        Some(shadow_callee) => {
-            if (*shadow_callee).kind == ExprKind::ExprIdent && checker_invisible_native_builtin_sig(c, (*shadow_callee).name) {
-                checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
-                return checker_shadowed_builtin_result((*shadow_callee).name)
+        Some(rf_callee) => {
+            if (*rf_callee).kind == ExprKind::ExprIdent && name_matches_str9((*rf_callee).name, 114, 101, 97, 100, 95, 102, 105, 108, 101) {
+                let rf_sig = checker_fn_sigs_find_inplace(c, (*rf_callee).name)
+                if rf_sig < 0 || checker_invisible_native_builtin_sig(c, (*rf_callee).name) {
+                    checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
+                    checker_check_io_builtin_effects_inplace(c, e.span, (*rf_callee).name)
+                    return ty_string()
+                }
             }
         }
         None => {}
     }
-    // #2164: a bare call to a math name the native backend cannot emit. Guarded
-    // on direct_sig_id < 0 so it fires only where the name resolves to nothing
-    // real -- the phantom-builtin case that produces a runtime SIGILL.
-    if direct_sig_id < 0 && !callee_is_local_fn {
-        match e.left {
-            Some(callee_expr) => {
-                if (*callee_expr).kind == ExprKind::ExprIdent {
-                    if name_is_unimplemented_native_math((*callee_expr).name) {
-                        checker_report_error_at_inplace(c, e.span, 221, 0, 0, 0)
-                    }
-                }
-            }
-            None => {}
-        }
+    // Bridge (box_new, by-value method calls) claims before the preflight
+    // phase, matching main's arm order: a method call must route to the value
+    // bridge and never reach qualifier resolution (E266). Both helpers run
+    // pre-recursion and their frames die before the argument walk nests.
+    let bridge_forms = checker_check_call_bridge_forms_inplace(c, e)
+    if bridge_forms.0 {
+        return bridge_forms.1
+    }
+    // SIO-417 stack diet: all pre-recursion phase work (IO attributes,
+    // multitest/hypothesis state, sig resolution, lexical shadowing) runs in
+    // the preflight helper and its frame is gone before the argument walk
+    // recurses; only the two i64/bool answers stay live here.
+    let preflight = checker_check_call_expr_preflight_inplace(c, e)
+    let direct_sig_id = preflight.0
+    let callee_is_local_fn = preflight.1
+    let shadow_forms = checker_check_call_shadow_forms_inplace(c, e, direct_sig_id, callee_is_local_fn)
+    if shadow_forms.0 {
+        return shadow_forms.1
     }
     if direct_sig_id >= 0 {
-        if (*c).enforce_visibility && !checker_fn_sig_visible_inplace(c, direct_sig_id) {
-            checker_report_private_fn_inplace(c, e.span, direct_sig_id)
-        }
-        let call_start_borrows = (*c).borrows
-        let direct_sig = fn_sig_table_get((*c).fn_sigs, direct_sig_id)
-        // #1622: calling an `extern "C"` name the native backend does not
-        // implement. This is the live arm -- a plain ident callee resolves via
-        // direct_sig_id and returns below, never reaching the TyFn fallback.
-        var refused_unimplemented = false
-        if direct_sig.is_extern && !name_is_native_backend_builtin(direct_sig.name) && !name_is_dynlink_extern(direct_sig.name) {
-            checker_report_error_at_inplace(c, e.span, 250, 0, 0, 0)
-            refused_unimplemented = true
-        }
-        var effective_params = fn_param_list_clone(&direct_sig.params)
-        var effective_return_type = direct_sig.return_type
-        match call_expr_type_args(e) {
-            Some(type_arg_exprs) => {
-                let lowered_type_args = checker_lower_type_expr_list_mut(c, *type_arg_exprs)
-                var generic_names = collect_fn_generic_names_from_params_in_tables((*c).structs, (*c).enums, fn_param_list_clone(&direct_sig.params), empty_type_param_buf())
-                generic_names = collect_fn_generic_names_from_type_in_tables((*c).structs, (*c).enums, direct_sig.return_type, generic_names)
-                if generic_names.count > 0 {
-                    let provided_type_arg_count = type_entry_list_count_value(&lowered_type_args)
-                    if provided_type_arg_count != generic_names.count {
-                        checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
-                    }
-                    effective_params = checker_substitute_fn_params(effective_params, generic_names, type_entry_list_clone(&lowered_type_args))
-                    effective_return_type = substitute_type_param(direct_sig.return_type, generic_names, type_entry_list_clone(&lowered_type_args))
-                }
-            }
-            None => {}
-        }
-        // N2 (REQ-5, codex ruling 2026-08-23): save/reset the noise-set
-        // scratch around this call's argument walk, so a nested call in an
-        // argument position cannot leave its own noise_set_id behind for the
-        // outer call. ns_proj_d is this callee's
-        // proven-projection verdict (fail-closed: not-a-projection -> -1,
-        // "watch nothing").
-        let outer_arg_ns_d = (*c).last_call_arg_ns
-        (*c).last_call_arg_ns = ns_arg_sentinel()
-        let ns_proj_d = ns_proj_table_get((*c).ns_proj, direct_sig_id)
-        let ns_watch_d = if ns_proj_d.0 { ns_proj_d.1 } else { 0 - 1 }
-        checker_check_call_args_inplace(
-            c,
-            expr_list_handle(e.args),
-            fn_param_list_handle(effective_params),
-            direct_sig.param_count,
-            e.span,
-            ns_watch_d,
-        )
-        checker_check_callee_effects_named_inplace(c, e.span, direct_sig.effects, direct_sig.effect_count, direct_sig.name)
-        checker_release_call_arg_borrows_inplace(c, e.args, effective_params, call_start_borrows)
-        if refused_unimplemented {
-            (*c).last_call_arg_ns = outer_arg_ns_d
-            return ty_error()
-        }
-        let ns_result = checker_propagate_call_result_ns_inplace(c, effective_return_type, ns_proj_d.0)
-        (*c).last_call_arg_ns = outer_arg_ns_d
-        return ns_result
+        return checker_check_call_direct_sig_inplace(c, e, direct_sig_id)
     }
-    // Callee via the *mut spine, matched locally so the call path does not pass
-    // Option<Box<Expr>> through another *mut helper boundary.
-    let callee_ty =
-        match e.left {
-            Some(callee_expr) => checker_check_expr_inplace(c, *callee_expr)
-            None => ty_error()
-        }
-    let array_like_ty =
-        if callee_ty.kind == TypeKind::TyArray {
-            callee_ty
-        } else if callee_ty.kind == TypeKind::TyRef || callee_ty.kind == TypeKind::TyRefMut {
-            match callee_ty.inner {
-                Some(inner_ty) => *inner_ty
-                None => ty_error()
-            }
-        } else {
-            ty_error()
-        }
-    if array_like_ty.kind == TypeKind::TyArray {
-        let idx_arg = expr_list_head(e.args)
-        let extra_arg = expr_list_second(e.args)
-        match idx_arg {
-            Some(arg) => {
-                let idx_ty = checker_check_expr_inplace(c, *arg)
-                if !is_error_or_unknown(idx_ty) && !is_integer_type(idx_ty) {
-                    checker_report_error_at_inplace(c, e.span, 14, 0, 0, 0)
-                }
-                match extra_arg {
-                    Some(extra) => {
-                        let _ety = checker_check_expr_inplace(c, *extra)
-                        checker_report_error_at_inplace(c, e.span, 17, 0, 0, 0)
-                        return ty_error()
-                    }
-                    None => {
-                        match array_like_ty.inner {
-                            Some(elem_ty) => return *elem_ty
-                            None => return ty_error()
-                        }
-                    }
-                }
-            }
-            None => {}
-        }
-    }
-    if callee_ty.kind == TypeKind::TyFn && callee_ty.fn_sig_id >= 0 {
-        let sig = fn_sig_table_get((*c).fn_sigs, callee_ty.fn_sig_id)
-        if (*c).enforce_visibility && !callee_is_local_fn && !checker_fn_sig_visible_inplace(c, callee_ty.fn_sig_id) {
-            checker_report_private_fn_inplace(c, e.span, callee_ty.fn_sig_id)
-        }
-        // #1622: calling an `extern "C"` name the native backend does not
-        // implement. Refuse here rather than emit a call that reads 0.
-        // Checked at the CALL, not at the declaration. A bindings module
-        // declares many names and a program calls few, so a declaration-site
-        // refusal would break the declarations for no gain:
-        // parser_card_a_raw_pointer_types.sio declares malloc and never calls
-        // it, and tests/run-pass/ffi_declared_never_called_is_legal.sio pins
-        // the case this rule exists for -- a declared, never-called name with
-        // no intrinsic at all. That fixture is also the guard on the parser:
-        // it only holds while parser/items.sio leaves such a declaration
-        // bodyless instead of giving it a ffi_<name> forwarding body, because
-        // a wrapper body carries is_extern false and this arm never fires.
-        var refused_unimplemented = false
-        if sig.is_extern && !name_is_native_backend_builtin(sig.name) && !name_is_dynlink_extern(sig.name) {
-            checker_report_error_at_inplace(c, e.span, 250, 0, 0, 0)
-            refused_unimplemented = true
-        }
-        let call_start_borrows = (*c).borrows
-        var effective_params = fn_param_list_clone(&sig.params)
-        var effective_return_type = sig.return_type
-        match call_expr_type_args(e) {
-            Some(type_arg_exprs) => {
-                let lowered_type_args = checker_lower_type_expr_list_mut(c, *type_arg_exprs)
-                var generic_names = collect_fn_generic_names_from_params_in_tables((*c).structs, (*c).enums, fn_param_list_clone(&sig.params), empty_type_param_buf())
-                generic_names = collect_fn_generic_names_from_type_in_tables((*c).structs, (*c).enums, sig.return_type, generic_names)
-                if generic_names.count > 0 {
-                    let provided_type_arg_count = type_entry_list_count_value(&lowered_type_args)
-                    if provided_type_arg_count != generic_names.count {
-                        checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
-                    }
-                    effective_params = checker_substitute_fn_params(effective_params, generic_names, type_entry_list_clone(&lowered_type_args))
-                    effective_return_type = substitute_type_param(sig.return_type, generic_names, type_entry_list_clone(&lowered_type_args))
-                }
-            }
-            None => {}
-        }
-        // N2 (REQ-5, codex ruling 2026-08-23): same save/reset/restore
-        // discipline as the direct_sig_id path above, applied to the
-        // noise-set scratch, plus the callee's proven-projection verdict.
-        let outer_arg_ns = (*c).last_call_arg_ns
-        (*c).last_call_arg_ns = ns_arg_sentinel()
-        // Fail-closed (grok-4.6 re-review 2026-08-23): an INDIRECT call through a
-        // first-class function VALUE must NEVER project. callee_ty.fn_sig_id can be
-        // stale — assignment and CFG-join do not rebind a TyFn value's sig_id
-        // (var f = id; f = add_noise; f(k) would else trust id's projection over
-        // the real callee). Only the DIRECT named-call path (direct_sig_id above)
-        // may project; here we watch nothing so the result defaults to top.
-        let ns_watch = 0 - 1
-        checker_check_call_args_inplace(c, expr_list_handle(e.args), fn_param_list_handle(effective_params), sig.param_count, e.span, ns_watch)
-        checker_check_callee_effects_named_inplace(c, e.span, sig.effects, sig.effect_count, sig.name)
-        checker_release_call_arg_borrows_inplace(c, e.args, effective_params, call_start_borrows)
-        if refused_unimplemented {
-            (*c).last_call_arg_ns = outer_arg_ns
-            ty_error()
-        } else {
-            let ns_result = checker_propagate_call_result_ns_inplace(c, effective_return_type, false)
-            (*c).last_call_arg_ns = outer_arg_ns
-            ns_result
-        }
-    } else if is_error_or_unknown(callee_ty) {
-        let call_start_borrows = (*c).borrows
-        checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
-        checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
-        // The runtime `read_file` is bound import-unknown, so its result reached
-        // method calls with an unknown type (`read_file(p).as_bytes()`, `.len()`
-        // were E011). It returns the file's contents as a string; a user
-        // `read_file` has a signature and never reaches this arm.
-        if callee_ty.kind == TypeKind::TyUnknown && checker_callee_is_bare_ident(e.left, make_name("read_file")) {
-            return ty_string()
-        }
-        callee_ty
-    } else {
-        // Enum tuple-variant constructor (`Event::B(42)`): the callee path typed as
-        // ty_named(enum_name) (not TyFn), so it would otherwise hit E017. Check the args for
-        // side effects / nested diagnostics and yield ty_named(enum_name) so a later
-        // `match b { Event::B(n) => .. }` resolves via enum_table_find((*c).enums, scrut_ty.name).
-        let variant_enum_idx = call_expr_enum_variant_ctor_enum_idx(c, e.left)
-        if variant_enum_idx >= 0 {
-            let ei = enum_table_get((*c).enums, variant_enum_idx)
-            let vname = match e.left {
-                Some(callee) => checker_copy_string_list_tail_to_name((*callee).path.segments)
-                None => empty_name()
-            }
-            checker_check_user_variant_ctor_args_inplace(c, e, ei.variants, vname)
-            return ty_named(ei.name)
-        }
-        checker_report_error_at_inplace(c, e.span, 17, 0, 0, 0)
-        let call_start_borrows = (*c).borrows
-        checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
-        checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
-        ty_error()
-    }
+    return checker_check_call_indirect_inplace(c, e, callee_is_local_fn)
 }
 
 
@@ -13869,7 +14070,7 @@ fn checker_check_io_builtin_effects_inplace(c: *mut Checker, span: Span, source:
     checker_check_callee_effects_named_inplace(c, span, effects_io, 1, source)
 }
 
-    fn checker_release_call_arg_borrows_inplace(c: *mut Checker, args: Option<Box<ExprList> >, params: Option<Box<FnParamList> >, call_start_borrows: BorrowEnv) with Mut, Panic, Div, Alloc, IO {
+    fn checker_release_call_arg_borrows_inplace(c: *mut Checker, args: Option<Box<ExprList> >, params: Option<Box<FnParamList> >) with Mut, Panic, Div, Alloc, IO {
         match args {
             None => {}
             Some(arg_list) => {
@@ -13910,7 +14111,7 @@ fn checker_check_io_builtin_effects_inplace(c: *mut Checker, span: Span, source:
                     }
                 }
 
-                checker_release_call_arg_borrows_inplace(c, (*arg_list).tail, next_params, call_start_borrows)
+                checker_release_call_arg_borrows_inplace(c, (*arg_list).tail, next_params)
             }
         }
     }
@@ -13934,6 +14135,227 @@ fn checker_check_call_arg_borrow_boundary_inplace(c: *mut Checker, arg_expr: Exp
     }
 }
 
+fn checker_refine_check_int_lit_inplace(c: *mut Checker, call_span: Span, expected_pred: RefinementPred, int_val: i64) with Mut, Panic, Div, Alloc, IO {
+    // Constant folding: literal known at compile time.
+    let result = refine_static_check_int_literal(expected_pred, int_val)
+    if result == refine_static_result_proved() {
+        (*c).refine_static_proved = (*c).refine_static_proved + 1
+    } else if result == refine_static_result_violated() {
+        (*c).refine_violations = (*c).refine_violations + 1
+        checker_report_error_at_inplace(c, call_span, 42, 0, 0, 0)
+    } else {
+        // StaticUnknown. The predicate is not one this checker can
+        // evaluate -- see pred_is_evaluable. Reporting that as a
+        // violation is a claim of proof nobody made, and it is what
+        // rejected `{ n: i32 | n * 2 < 200 }` for the argument 42, and
+        // for 1, and for 500: the coefficient on n has no place in
+        // RefinementPred, so the predicate degrades to op=none and the
+        // binary check called that a violation.
+        //
+        // It now takes the same epistemic fallback an unprovable
+        // obligation already takes: W040, the call compiles, the
+        // warning is the notice. Reported through the *mut reporter
+        // rather than the by-value bridge, so this adds no new entry
+        // to scripts/ci/checker_spine_bridges.frozen.
+        (*c).refine_runtime_checked = (*c).refine_runtime_checked + 1
+        checker_report_warning_at_mut(c, call_span, 40, 0, 0, 0)
+    }
+}
+
+fn checker_refine_check_float_lit_inplace(c: *mut Checker, call_span: Span, expected_pred: RefinementPred, float_val: f64) with Mut, Panic, Div, Alloc, IO {
+    let result = refine_static_check_float_literal(expected_pred, float_val)
+    if result == refine_static_result_proved() {
+        (*c).refine_static_proved = (*c).refine_static_proved + 1
+    } else if result == refine_static_result_violated() {
+        (*c).refine_violations = (*c).refine_violations + 1
+        checker_report_error_at_inplace(c, call_span, 42, 0, 0, 0)
+    } else {
+        // StaticUnknown. The predicate is not one this checker can
+        // evaluate -- see pred_is_evaluable. Reporting that as a
+        // violation is a claim of proof nobody made, and it is what
+        // rejected `{ n: i32 | n * 2 < 200 }` for the argument 42, and
+        // for 1, and for 500: the coefficient on n has no place in
+        // RefinementPred, so the predicate degrades to op=none and the
+        // binary check called that a violation.
+        //
+        // It now takes the same epistemic fallback an unprovable
+        // obligation already takes: W040, the call compiles, the
+        // warning is the notice. Reported through the *mut reporter
+        // rather than the by-value bridge, so this adds no new entry
+        // to scripts/ci/checker_spine_bridges.frozen.
+        (*c).refine_runtime_checked = (*c).refine_runtime_checked + 1
+        checker_report_warning_at_mut(c, call_span, 40, 0, 0, 0)
+    }
+}
+
+fn checker_refine_check_provided_inplace(c: *mut Checker, call_span: Span, provided_ty: TypeEntry, expected_pred: RefinementPred) with Mut, Panic, Div, Alloc, IO {
+    let provided_ref = (*c).refinements.entries[provided_ty.refinement_id as usize]
+    if pred_implies(provided_ref.predicate, expected_pred) {
+        (*c).refine_static_proved = (*c).refine_static_proved + 1
+    } else {
+        (*c).refine_violations = (*c).refine_violations + 1
+        checker_report_error_at_inplace(c, call_span, 42, 0, 0, 0)
+    }
+}
+
+fn checker_refine_prove_ident_const_inplace(c: *mut Checker, call_span: Span, expected_pred: RefinementPred, arg_name: Name) -> bool with Mut, Panic, Div, Alloc, IO {
+    // Try known-constant lookup for identifiers. Returns true when the
+    // lookup settles the obligation (proved or violated: the caller must
+    // exit the boundary, as the by-value router does); false on miss or
+    // StaticUnknown so the caller falls through to env proof and the
+    // single tail epistemic defer. Emits nothing on the unknown path:
+    // warning before all proofs run would double-report with the tail.
+    let const_result = checker_const_int_lookup_mut(c, arg_name)
+    if const_result.0 == false {
+        return false
+    }
+    let result = refine_static_check_int_literal(expected_pred, const_result.1)
+    if result == refine_static_result_proved() {
+        (*c).refine_static_proved = (*c).refine_static_proved + 1
+        return true
+    } else if result == refine_static_result_violated() {
+        (*c).refine_violations = (*c).refine_violations + 1
+        checker_report_error_at_inplace(c, call_span, 42, 0, 0, 0)
+        return true
+    } else {
+        // StaticUnknown (see pred_is_evaluable): not a violation claim.
+        // Env proof runs next; if it also misses, the boundary tail
+        // takes the epistemic fallback (W040 via the *mut reporter).
+        return false
+    }
+}
+
+fn checker_refine_prove_ident_env_ontology_inplace(c: *mut Checker, call_span: Span, arg_oid: i64, expected_pred: RefinementPred) -> bool with Mut, Panic, Div, Alloc, IO {
+    // Ontology-aware proof: collect ALL property predicates from
+    // class + ancestors into a single conjunction, then check once.
+    //
+    // This is the canonical form for compound property reasoning:
+    //   axioms = {potency >= 0.0, mw < 1000.0, ...}
+    //   conjoined = (potency >= 0.0) AND (mw < 1000.0) AND ...
+    //   pred_implies_structural(conjoined, expected) succeeds when the
+    //   collected conjunction is strong enough to discharge expected.
+    // Failure is still only an under-approximation of semantic proof.
+    //
+    // Uses pred_implies_structural (var_name independent) because
+    // properties are universally quantified — the bound variable name
+    // is a binder artifact, not a semantic identity.
+    var axiom_preds: [RefinementPred; 16] = [empty_refinement_pred(); 16]
+    var axiom_count: i64 = 0
+    var axiom_overflow = false
+
+    if arg_oid >= 0 && arg_oid < (*c).ontology_kernel.classes.count {
+        // Collect own class property axioms first.
+        var pi: i64 = 0
+        let own_axiom_count = (*c).ontology_kernel.materialized.class_property_counts[arg_oid as usize]
+        while pi < own_axiom_count {
+            let axiom_idx = (*c).ontology_kernel.materialized.class_property_axioms[(arg_oid * 8 + pi) as usize]
+            if axiom_idx >= 0 && axiom_idx < (*c).ontology_kernel.axioms.count {
+                let ontology_axiom = (*c).ontology_kernel.axioms.axioms[axiom_idx as usize]
+                let prop_ref_id = ontology_axiom.refinement_ref_id
+                if prop_ref_id >= 0 && prop_ref_id < 128 {
+                    if axiom_count < 16 {
+                        axiom_preds[axiom_count as usize] = (*c).refinements.entries[prop_ref_id as usize].predicate
+                        axiom_count = axiom_count + 1
+                    } else {
+                        axiom_overflow = true
+                    }
+                }
+            }
+            pi = pi + 1
+        }
+
+        // Collect superclass property axioms via the materialized subclass matrix.
+        var anc_idx: i64 = 0
+        while anc_idx < (*c).ontology_kernel.classes.count {
+            if anc_idx != arg_oid && ontology_kernel_is_subclass((*c).ontology_kernel, arg_oid, anc_idx) {
+                var pj: i64 = 0
+                let anc_axiom_count = (*c).ontology_kernel.materialized.class_property_counts[anc_idx as usize]
+                while pj < anc_axiom_count {
+                    let anc_axiom_idx = (*c).ontology_kernel.materialized.class_property_axioms[(anc_idx * 8 + pj) as usize]
+                    if anc_axiom_idx >= 0 && anc_axiom_idx < (*c).ontology_kernel.axioms.count {
+                        let anc_axiom = (*c).ontology_kernel.axioms.axioms[anc_axiom_idx as usize]
+                        let anc_prop_ref_id = anc_axiom.refinement_ref_id
+                        if anc_prop_ref_id >= 0 && anc_prop_ref_id < 128 {
+                            if axiom_count < 16 {
+                                axiom_preds[axiom_count as usize] = (*c).refinements.entries[anc_prop_ref_id as usize].predicate
+                                axiom_count = axiom_count + 1
+                            } else {
+                                axiom_overflow = true
+                            }
+                        }
+                    }
+                    pj = pj + 1
+                }
+            }
+            anc_idx = anc_idx + 1
+        }
+    }
+
+    // Build conjunction and discharge with one call
+    if axiom_count > 0 {
+        if axiom_overflow {
+            checker_report_warning_at_inplace(c, call_span, 42, 0, 0, 0)
+        }
+        var conjoined = axiom_preds[0]
+        var ci: i64 = 1
+        while ci < axiom_count {
+            conjoined = pred_and(conjoined, axiom_preds[ci as usize])
+            ci = ci + 1
+        }
+        if pred_implies_structural(conjoined, expected_pred) {
+            (*c).refine_static_proved = (*c).refine_static_proved + 1
+            return true
+        }
+    }
+    false
+}
+
+fn checker_refine_prove_ident_env_inplace(c: *mut Checker, call_span: Span, arg_name: Name, expected_pred: RefinementPred) -> bool with Mut, Panic, Div, Alloc, IO {
+    // Try environment-based proof: look up arg type for refinement
+    let env_lookup = type_env_lookup(&(*c).env, arg_name)
+    if env_lookup.refinement_id >= 0 && env_lookup.refinement_id < 128 {
+        let env_ref = (*c).refinements.entries[env_lookup.refinement_id as usize]
+        if pred_implies(env_ref.predicate, expected_pred) {
+            (*c).refine_static_proved = (*c).refine_static_proved + 1
+            return true
+        }
+    }
+
+    // Condition-narrowing proof: use guard predicates accumulated from
+    // enclosing `if` conditions.  E.g., inside `if x > 0 { f(x) }`,
+    // x > 0 is a guard — sufficient to prove `x` satisfies `{ x > 0 }`.
+    let cond_result = refine_static_check_var((*c).refine_cond_env, arg_name, expected_pred)
+    if cond_result == refine_static_result_proved() {
+        (*c).refine_static_proved = (*c).refine_static_proved + 1
+        return true
+    }
+
+    if env_lookup.ontology_id >= 0 {
+        if checker_refine_prove_ident_env_ontology_inplace(c, call_span, env_lookup.ontology_id, expected_pred) {
+            return true
+        }
+    }
+    false
+}
+
+fn checker_refine_defer_epistemic_inplace(c: *mut Checker, call_span: Span) with Mut, Panic, Div, Alloc, IO {
+    // Epistemic fallback: static analysis exhausted — defer to runtime assertion.
+    // W040 semantics: the call compiles. The predicate is NOT proven statically.
+    //   Emit refine_hint: static_unknown diagnostic (W045) alongside W040.
+    //   - Debug mode (future): codegen inserts runtime assertion at this call site.
+    //     If the predicate fails at runtime, panic with "refinement predicate violated".
+    //   - Release mode: trust the programmer. The warning was sufficient notice.
+    // To suppress: #[allow(W040)] on the call site (not yet implemented).
+    // To force proof: annotate the argument with an explicit refinement type.
+    (*c).refine_runtime_checked = (*c).refine_runtime_checked + 1
+    checker_report_warning_at_inplace(c, call_span, 40, 0, 0, 0)
+}
+
+// SIO-417 stack diet: the router below keeps the exact refinement-boundary
+// checks and diagnostic order above, but each proof arm now owns its
+// temporaries in a separate helper frame instead of sharing one 3.6 MB
+// function frame (which crashed the checker on 3-deep nested calls at the
+// default 8MB stack).
 fn checker_check_call_arg_refinement_boundary_inplace(c: *mut Checker, arg_expr: Expr, arg_ty: TypeEntry, param_ty: TypeEntry, call_span: Span) with Mut, Panic, Div, Alloc, IO {
     let expected_ty = call_ref_inner_or_self(param_ty)
     if expected_ty.refinement_id < 0 || expected_ty.refinement_id >= 128 || is_error_or_unknown(expected_ty) {
@@ -13947,221 +14369,36 @@ fn checker_check_call_arg_refinement_boundary_inplace(c: *mut Checker, arg_expr:
     let expected_ref = (*c).refinements.entries[expected_ty.refinement_id as usize]
 
     if arg_expr.kind == ExprKind::ExprIntLit {
-        // Constant folding: literal known at compile time.
-        let result = refine_static_check_int_literal(expected_ref.predicate, arg_expr.int_val)
-        if result == refine_static_result_proved() {
-            (*c).refine_static_proved = (*c).refine_static_proved + 1
-        } else if result == refine_static_result_violated() {
-            (*c).refine_violations = (*c).refine_violations + 1
-            checker_report_error_at_inplace(c, call_span, 42, 0, 0, 0)
-        } else {
-            // StaticUnknown. The predicate is not one this checker can
-            // evaluate -- see pred_is_evaluable. Reporting that as a
-            // violation is a claim of proof nobody made, and it is what
-            // rejected `{ n: i32 | n * 2 < 200 }` for the argument 42, and
-            // for 1, and for 500: the coefficient on n has no place in
-            // RefinementPred, so the predicate degrades to op=none and the
-            // binary check called that a violation.
-            //
-            // It now takes the same epistemic fallback an unprovable
-            // obligation already takes: W040, the call compiles, the
-            // warning is the notice. Reported through the *mut reporter
-            // rather than the by-value bridge, so this adds no new entry
-            // to scripts/ci/checker_spine_bridges.frozen.
-            (*c).refine_runtime_checked = (*c).refine_runtime_checked + 1
-            checker_report_warning_at_mut(c, call_span, 40, 0, 0, 0)
-        }
+        checker_refine_check_int_lit_inplace(c, call_span, expected_ref.predicate, arg_expr.int_val)
         return
     }
     if arg_expr.kind == ExprKind::ExprFloatLit {
-        let result = refine_static_check_float_literal(expected_ref.predicate, arg_expr.float_val)
-        if result == refine_static_result_proved() {
-            (*c).refine_static_proved = (*c).refine_static_proved + 1
-        } else if result == refine_static_result_violated() {
-            (*c).refine_violations = (*c).refine_violations + 1
-            checker_report_error_at_inplace(c, call_span, 42, 0, 0, 0)
-        } else {
-            // StaticUnknown. The predicate is not one this checker can
-            // evaluate -- see pred_is_evaluable. Reporting that as a
-            // violation is a claim of proof nobody made, and it is what
-            // rejected `{ n: i32 | n * 2 < 200 }` for the argument 42, and
-            // for 1, and for 500: the coefficient on n has no place in
-            // RefinementPred, so the predicate degrades to op=none and the
-            // binary check called that a violation.
-            //
-            // It now takes the same epistemic fallback an unprovable
-            // obligation already takes: W040, the call compiles, the
-            // warning is the notice. Reported through the *mut reporter
-            // rather than the by-value bridge, so this adds no new entry
-            // to scripts/ci/checker_spine_bridges.frozen.
-            (*c).refine_runtime_checked = (*c).refine_runtime_checked + 1
-            checker_report_warning_at_mut(c, call_span, 40, 0, 0, 0)
-        }
+        checker_refine_check_float_lit_inplace(c, call_span, expected_ref.predicate, arg_expr.float_val)
         return
     }
 
     if provided_ty.refinement_id >= 0 && provided_ty.refinement_id < 128 {
-        let provided_ref = (*c).refinements.entries[provided_ty.refinement_id as usize]
-        if pred_implies(provided_ref.predicate, expected_ref.predicate) {
-            (*c).refine_static_proved = (*c).refine_static_proved + 1
-        } else {
-            (*c).refine_violations = (*c).refine_violations + 1
-            checker_report_error_at_inplace(c, call_span, 42, 0, 0, 0)
-        }
+        checker_refine_check_provided_inplace(c, call_span, provided_ty, expected_ref.predicate)
         return
     }
 
-    // Try known-constant lookup for identifiers
+    // Try known-constant lookup for identifiers; a settled lookup
+    // (proved or violated) exits the boundary here, as the by-value
+    // router does. Miss/unknown falls through to env proof and the tail.
     if arg_expr.kind == ExprKind::ExprIdent {
-        let const_result = checker_const_int_lookup_mut(c, arg_expr.name)
-        if const_result.0 != false {
-            let result = refine_static_check_int_literal(expected_ref.predicate, const_result.1)
-            if result == refine_static_result_proved() {
-                (*c).refine_static_proved = (*c).refine_static_proved + 1
-                return
-            } else if result == refine_static_result_violated() {
-                (*c).refine_violations = (*c).refine_violations + 1
-                checker_report_error_at_inplace(c, call_span, 42, 0, 0, 0)
-                return
-            } else {
-                // StaticUnknown. The predicate is not one this checker can
-                // evaluate -- see pred_is_evaluable. Reporting that as a
-                // violation is a claim of proof nobody made, and it is what
-                // rejected `{ n: i32 | n * 2 < 200 }` for the argument 42, and
-                // for 1, and for 500: the coefficient on n has no place in
-                // RefinementPred, so the predicate degrades to op=none and the
-                // binary check called that a violation.
-                //
-                // It now takes the same epistemic fallback an unprovable
-                // obligation already takes: W040, the call compiles, the
-                // warning is the notice. Reported through the *mut reporter
-                // rather than the by-value bridge, so this adds no new entry
-                // to scripts/ci/checker_spine_bridges.frozen.
-                (*c).refine_runtime_checked = (*c).refine_runtime_checked + 1
-                checker_report_warning_at_mut(c, call_span, 40, 0, 0, 0)
-                return
-            }
+        if checker_refine_prove_ident_const_inplace(c, call_span, expected_ref.predicate, arg_expr.name) {
+            return
         }
     }
 
     // Try environment-based proof: look up arg type for refinement
     if arg_expr.kind == ExprKind::ExprIdent {
-        let env_lookup = type_env_lookup(&(*c).env, arg_expr.name)
-        if env_lookup.refinement_id >= 0 && env_lookup.refinement_id < 128 {
-            let env_ref = (*c).refinements.entries[env_lookup.refinement_id as usize]
-            if pred_implies(env_ref.predicate, expected_ref.predicate) {
-                (*c).refine_static_proved = (*c).refine_static_proved + 1
-                return
-            }
-        }
-
-        // Condition-narrowing proof: use guard predicates accumulated from
-        // enclosing `if` conditions.  E.g., inside `if x > 0 { f(x) }`,
-        // x > 0 is a guard — sufficient to prove `x` satisfies `{ x > 0 }`.
-        let cond_result = refine_static_check_var((*c).refine_cond_env, arg_expr.name, expected_ref.predicate)
-        if cond_result == refine_static_result_proved() {
-            (*c).refine_static_proved = (*c).refine_static_proved + 1
+        if checker_refine_prove_ident_env_inplace(c, call_span, arg_expr.name, expected_ref.predicate) {
             return
-        }
-
-        // Ontology-aware proof: collect ALL property predicates from
-        // class + ancestors into a single conjunction, then check once.
-        //
-        // This is the canonical form for compound property reasoning:
-        //   axioms = {potency >= 0.0, mw < 1000.0, ...}
-        //   conjoined = (potency >= 0.0) AND (mw < 1000.0) AND ...
-        //   pred_implies_structural(conjoined, expected) succeeds when the
-        //   collected conjunction is strong enough to discharge expected.
-        // Failure is still only an under-approximation of semantic proof.
-        //
-        // Uses pred_implies_structural (var_name independent) because
-        // properties are universally quantified — the bound variable name
-        // is a binder artifact, not a semantic identity.
-        if env_lookup.ontology_id >= 0 {
-            let arg_oid = env_lookup.ontology_id
-            var axiom_preds: [RefinementPred; 16] = [empty_refinement_pred(); 16]
-            var axiom_count: i64 = 0
-            var axiom_overflow = false
-
-            if arg_oid >= 0 && arg_oid < (*c).ontology_kernel.classes.count {
-                // Collect own class property axioms first.
-                var pi: i64 = 0
-                let own_axiom_count = (*c).ontology_kernel.materialized.class_property_counts[arg_oid as usize]
-                while pi < own_axiom_count {
-                    let axiom_idx = (*c).ontology_kernel.materialized.class_property_axioms[(arg_oid * 8 + pi) as usize]
-                    if axiom_idx >= 0 && axiom_idx < (*c).ontology_kernel.axioms.count {
-                        let ontology_axiom = (*c).ontology_kernel.axioms.axioms[axiom_idx as usize]
-                        let prop_ref_id = ontology_axiom.refinement_ref_id
-                        if prop_ref_id >= 0 && prop_ref_id < 128 {
-                            if axiom_count < 16 {
-                                axiom_preds[axiom_count as usize] = (*c).refinements.entries[prop_ref_id as usize].predicate
-                                axiom_count = axiom_count + 1
-                            } else {
-                                axiom_overflow = true
-                            }
-                        }
-                    }
-                    pi = pi + 1
-                }
-
-                // Collect superclass property axioms via the materialized subclass matrix.
-                var anc_idx: i64 = 0
-                while anc_idx < (*c).ontology_kernel.classes.count {
-                    if anc_idx != arg_oid && ontology_kernel_is_subclass((*c).ontology_kernel, arg_oid, anc_idx) {
-                        var pj: i64 = 0
-                        let anc_axiom_count = (*c).ontology_kernel.materialized.class_property_counts[anc_idx as usize]
-                        while pj < anc_axiom_count {
-                            let anc_axiom_idx = (*c).ontology_kernel.materialized.class_property_axioms[(anc_idx * 8 + pj) as usize]
-                            if anc_axiom_idx >= 0 && anc_axiom_idx < (*c).ontology_kernel.axioms.count {
-                                let anc_axiom = (*c).ontology_kernel.axioms.axioms[anc_axiom_idx as usize]
-                                let anc_prop_ref_id = anc_axiom.refinement_ref_id
-                                if anc_prop_ref_id >= 0 && anc_prop_ref_id < 128 {
-                                    if axiom_count < 16 {
-                                        axiom_preds[axiom_count as usize] = (*c).refinements.entries[anc_prop_ref_id as usize].predicate
-                                        axiom_count = axiom_count + 1
-                                    } else {
-                                        axiom_overflow = true
-                                    }
-                                }
-                            }
-                            pj = pj + 1
-                        }
-                    }
-                    anc_idx = anc_idx + 1
-                }
-            }
-
-            // Build conjunction and discharge with one call
-            if axiom_count > 0 {
-                if axiom_overflow {
-                    let t = (*c).report_warning_at(call_span, 42, 0, 0, 0)
-                    checker_store_from_value(c, t)
-                }
-                var conjoined = axiom_preds[0]
-                var ci: i64 = 1
-                while ci < axiom_count {
-                    conjoined = pred_and(conjoined, axiom_preds[ci as usize])
-                    ci = ci + 1
-                }
-                if pred_implies_structural(conjoined, expected_ref.predicate) {
-                    (*c).refine_static_proved = (*c).refine_static_proved + 1
-                    return
-                }
-            }
         }
     }
 
-    // Epistemic fallback: static analysis exhausted — defer to runtime assertion.
-    // W040 semantics: the call compiles. The predicate is NOT proven statically.
-    //   Emit refine_hint: static_unknown diagnostic (W045) alongside W040.
-    //   - Debug mode (future): codegen inserts runtime assertion at this call site.
-    //     If the predicate fails at runtime, panic with "refinement predicate violated".
-    //   - Release mode: trust the programmer. The warning was sufficient notice.
-    // To suppress: #[allow(W040)] on the call site (not yet implemented).
-    // To force proof: annotate the argument with an explicit refinement type.
-    (*c).refine_runtime_checked = (*c).refine_runtime_checked + 1
-    let t = (*c).report_warning_at(call_span, 40, 0, 0, 0)
-    checker_store_from_value(c, t)
+    checker_refine_defer_epistemic_inplace(c, call_span)
 }
 
 fn checker_check_call_arg_knowledge_boundary_inplace(c: *mut Checker, arg_ty: TypeEntry, param_ty: TypeEntry, call_span: Span) with Mut, Panic, Div, Alloc, IO {
@@ -14216,6 +14453,38 @@ fn checker_check_call_arg_knowledge_boundary_inplace(c: *mut Checker, arg_ty: Ty
     }
 }
 
+fn checker_report_call_arg_unit_loss_inplace(c: *mut Checker, call_span: Span, provided_unit: i64, expected_unit: i64) with Mut, Panic, Div, Alloc, IO {
+    // KL-13: unit-tagged argument into a bare (unit_id < 0) parameter is a
+    // call-boundary loss — refuse; require an explicit cast.
+    checker_report_unit_call_mismatch_inplace(c, call_span, provided_unit, expected_unit)
+}
+
+fn checker_report_call_arg_unit_hole_inplace(c: *mut Checker, call_span: Span, provided_unit: i64, expected_unit: i64) with Mut, Panic, Div, Alloc, IO {
+    // D-24 (ADR-020): the symmetric hole. A dimensionless value flowing into
+    // a unit-bearing parameter was silently accepted; it is an error on both
+    // engines. Pure literal expressions keep adopting the parameter unit.
+    checker_report_unit_call_mismatch_inplace(c, call_span, provided_unit, expected_unit)
+}
+
+fn checker_check_call_arg_unit_addable_inplace(c: *mut Checker, call_span: Span, provided_unit: i64, expected_unit: i64) with Mut, Panic, Div, Alloc, IO {
+    // Compare DIMENSIONS, not registry indices. A quantity derived by
+    // arithmetic -- `distance / time` in
+    // tests/run-pass/unit_derived_binding_keeps_value -- is branded with an
+    // anonymous interned entry, while `unit velocity = m / s` has its own
+    // named entry. Identical dimension, different index, and an index
+    // comparison rejects it while printing the SAME dimension on both
+    // lines of the diagnostic, which is how this surfaced. Same
+    // addability test the binary operator uses, so the two agree by
+    // construction.
+    if !checker_units_addable(c, provided_unit, expected_unit) {
+        checker_report_unit_call_mismatch_inplace(c, call_span, provided_unit, expected_unit)
+    }
+}
+
+// SIO-417 stack diet: the router below keeps the exact unit-boundary checks
+// and diagnostic order above, but each refusal arm now owns its temporaries
+// in a separate helper frame instead of sharing one 3.6 MB function frame
+// (which crashed the checker on 3-deep nested calls at the default 8MB stack).
 fn checker_check_call_arg_unit_boundary_inplace(c: *mut Checker, arg_expr: Expr, arg_ty: TypeEntry, param_ty: TypeEntry, call_span: Span) with Mut, Panic, Div, Alloc, IO {
     let expected_ty = call_ref_inner_or_self(param_ty)
     let provided_ty = call_ref_inner_or_self(arg_ty)
@@ -14227,38 +14496,18 @@ fn checker_check_call_arg_unit_boundary_inplace(c: *mut Checker, arg_expr: Expr,
     if provided_ty.kind == TypeKind::TyError || provided_ty.kind == TypeKind::TyUnknown || provided_ty.kind == TypeKind::TyNever {
         return
     }
-    // KL-13: unit-tagged argument into a bare (unit_id < 0) parameter is a
-    // call-boundary loss — refuse; require an explicit cast.
     if provided_unit >= 0 && expected_unit < 0 {
-        let t = (*c).report_unit_call_mismatch(call_span, provided_unit, expected_unit)
-        checker_store_from_value(c, t)
+        checker_report_call_arg_unit_loss_inplace(c, call_span, provided_unit, expected_unit)
         return
     }
-    // D-24 (ADR-020): the symmetric hole. A dimensionless value flowing into
-    // a unit-bearing parameter was silently accepted; it is an error on both
-    // engines. Pure literal expressions keep adopting the parameter unit.
     if provided_unit < 0 && expected_unit >= 0 && !checker_expr_is_unitless_literal_like(arg_expr) {
-        let t = (*c).report_unit_call_mismatch(call_span, provided_unit, expected_unit)
-        checker_store_from_value(c, t)
+        checker_report_call_arg_unit_hole_inplace(c, call_span, provided_unit, expected_unit)
         return
     }
     if expected_unit < 0 || provided_unit < 0 {
         return
     }
-    // Compare DIMENSIONS, not registry indices. A quantity derived by
-    // arithmetic -- `distance / time` in
-    // tests/run-pass/unit_derived_binding_keeps_value -- is branded with an
-    // anonymous interned entry, while `unit velocity = m / s` has its own
-    // named entry. Identical dimension, different index, and an index
-    // comparison rejects it while printing the SAME dimension on both
-    // lines of the diagnostic, which is how this surfaced. Same
-    // addability test the binary operator uses, so the two agree by
-    // construction.
-    if !checker_units_addable(c, provided_unit, expected_unit) {
-        let t = (*c).report_unit_call_mismatch(call_span, provided_unit, expected_unit)
-        checker_store_from_value(c, t)
-        return
-    }
+    checker_check_call_arg_unit_addable_inplace(c, call_span, provided_unit, expected_unit)
 }
 
 fn checker_ontology_boundary_check_call_arg_contract_inplace(c: *mut Checker, arg_ty: TypeEntry, param_ty: TypeEntry, call_span: Span) with Mut, Panic, Div, Alloc, IO {
