@@ -1,0 +1,1 @@
+Prepare independent C++ scientific references concurrently and size automatic replay workers by available CPUs and the existing memory budget, retaining explicit overrides. Propagate failed or missing child-worker receipts to the parent. Scientific case bodies, compiler flags, and tolerances are unchanged.
