@@ -3,3 +3,5 @@ Prepare independent C++ scientific references concurrently and size automatic re
 Run the standalone high-precision dispersion reference and its mutant check in a required job alongside the compiler build. Keep standalone all-mode coverage and aggregate the same case receipts across jobs.
 
 Run the standalone dispersion reference and its mutant check in a required job alongside the compiler build. Retain standalone all-mode coverage and aggregate the same case receipts across jobs.
+
+Publish the fresh Linux stage2 compiler before independent native regressions so the full suite can run concurrently. Require the regression verdict separately and sparsely check out only the scripts used by status aggregators.

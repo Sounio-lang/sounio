@@ -341,3 +341,18 @@ inventory. The independent receipt hashes its own reference executable and
 never claims a Sounio compiler identity. Acceptance requires hosted success
 and equality of the union of core, integration and independent case/status
 rows against the prior full replay, checking per-job hash audits separately.
+
+### Release stage2 without waiting for independent regressions
+
+Run 41495855075 passed with an unchanged scientific case/status multiset,
+but total latency remained 1609 seconds. Native Linux finished after 428
+seconds and only then released Full Test Suite (879 seconds). CI Decision
+took 178 seconds, dominated by checkout. The producer now publishes fresh
+stage2 immediately after the existing host gate; aggregate field identity,
+feature fixed-point checks and runtime manifest proof run unchanged in a
+separate required consumer job. Both suite and regressions download the same
+run-scoped stage2 artifact. The producer keeps source-bootstrap enforcement.
+Missing, skipped, cancelled or failed selected regressions block CI Decision.
+The two status aggregation jobs use non-cone sparse checkout of their exact
+scripts, without a filter override. Hosted success and actual end-to-end
+timing remain the acceptance gate; projected overlap is not a timing receipt.
