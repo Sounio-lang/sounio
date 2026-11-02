@@ -66,6 +66,14 @@ struct LowerLocalStack {
     // 1 = local/param holds a reference (&P / &[T;N] / &![T;N]) to a heap aggregate,
     // i.e. its slot stores a raw address of the caller slot, not the handle directly.
     is_ref: Box<LowerLocalI64Slots>,
+    // SIO-582: 1 = local was bound from a borrow expression (`&x` / `&!x`,
+    // possibly through casts, or an alias of such a local). Its slot stores
+    // the address of a slot holding a HANDLE (struct locals are boxed), not a
+    // payload address, so raw payload derefs must decline to the
+    // handle-resolving generic path. Sibling of is_ref, which only marks
+    // `&`-annotated bindings and has ~25 consumers; this bit has exactly two
+    // (the raw-deref classifier arms) so it cannot ripple elsewhere.
+    is_borrow_handle: Box<LowerLocalI64Slots>,
     // 0=other 1=int 2=float; used by println dispatch to avoid routing i64/f64 vars through print_str
     scalar_kind: Box<LowerLocalI64Slots>,
     // Tuple-typed local: bit k set iff element k of the tuple is f64. 0 = not a
@@ -281,6 +289,7 @@ fn empty_lower_local_stack() -> LowerLocalStack with Alloc, Mut {
         global_bss_sizes: lowerer_box_local_i64_slots(0),
         is_global: lowerer_box_local_i64_slots(0),
         is_ref: lowerer_box_local_i64_slots(0),
+        is_borrow_handle: lowerer_box_local_i64_slots(0),
         scalar_kind: lowerer_box_local_i64_slots(0),
         tuple_float_mask: lowerer_box_local_i64_slots(0),
         tuple_arr_mask: lowerer_box_local_i64_slots(0),
@@ -15762,6 +15771,7 @@ impl Lowerer {
                 // Findings 11 (#2084): zero-init the per-slot unsigned-int flag.
                 (*(*stk).is_unsigned_int).values[idx as usize] = 0
                 (*(*stk).is_ref).values[idx as usize] = 0
+                (*(*stk).is_borrow_handle).values[idx as usize] = 0
                 // Explicit 0: slot may be reused after scope-pop restores count.
                 // Callers that know a positive kind (for-IV int, float local) re-bind.
                 (*(*stk).scalar_kind).values[idx as usize] = 0
@@ -16205,6 +16215,34 @@ impl Lowerer {
         while i >= 0 {
             if (*(*self.locals).depths).values[i as usize] <= self.scope_depth && ir_name_eq((*(*self.locals).names).values[i as usize], name) {
                 return (*(*self.locals).is_ref).values[i as usize] == 1
+            }
+            i = i - 1
+        }
+        false
+    }
+
+    // SIO-582: bind/lookup for the is_borrow_handle bit (see the field
+    // comment). Mirrors bind_local_ref / lookup_local_is_ref.
+    fn bind_local_borrow_handle(self, name: Name) -> Lowerer with Mut, Alloc, Panic, Div {
+        var lo = self
+        var stk = lo.locals
+        var i = (*stk).count - 1
+        while i >= 0 {
+            if (*(*stk).depths).values[i as usize] <= lo.scope_depth && ir_name_eq((*(*stk).names).values[i as usize], name) {
+                (*(*stk).is_borrow_handle).values[i as usize] = 1
+                lo.locals = stk
+                return lo
+            }
+            i = i - 1
+        }
+        lo
+    }
+
+    fn lookup_local_is_borrow_handle(self, name: Name) -> bool with Mut, Panic, Div, Alloc {
+        var i = (*self.locals).count - 1
+        while i >= 0 {
+            if (*(*self.locals).depths).values[i as usize] <= self.scope_depth && ir_name_eq((*(*self.locals).names).values[i as usize], name) {
+                return (*(*self.locals).is_borrow_handle).values[i as usize] == 1
             }
             i = i - 1
         }
@@ -29594,6 +29632,18 @@ impl Lowerer {
             }
             _ => {}
         }
+        // SIO-582: same pre-bind capture for the borrow-handle bit, so
+        // `let h2 = h` propagates it. No array subtlety applies: the bit's
+        // only consumers are the raw-deref classifier arms.
+        var rhs_ident_is_borrow_handle = false
+        match s.expr {
+            Some(rhs_bh_pre) => {
+                if (*rhs_bh_pre).kind == ExprKind::ExprIdent {
+                    rhs_ident_is_borrow_handle = lo.lookup_local_is_borrow_handle((*rhs_bh_pre).name)
+                }
+            }
+            _ => {}
+        }
         var fixed_array_len = lower_opt_type_fixed_array_len(&s.ty)
         var fixed_array_word_scalar = lower_opt_type_fixed_array_word_scalar(&s.ty)
         var rhs_array_elem_is_float = false
@@ -29890,7 +29940,7 @@ impl Lowerer {
             }
             _ => {}
         }
-        let final_pair = lo.lower_let_stmt_finalize_ref(s, is_mut, reg, fixed_array_len, fixed_array_word_scalar, rhs_array_elem_is_float, rhs_ident_is_ref)
+        let final_pair = lo.lower_let_stmt_finalize_ref(s, is_mut, reg, fixed_array_len, fixed_array_word_scalar, rhs_array_elem_is_float, rhs_ident_is_ref, rhs_ident_is_borrow_handle)
         if !has_option_payload { return final_pair }
         var final_lo = final_pair.0
         if has_option_payload {
@@ -29914,7 +29964,8 @@ impl Lowerer {
         fixed_array_len: i64,
         fixed_array_word_scalar: bool,
         rhs_array_elem_is_float: bool,
-        rhs_ident_is_ref: bool
+        rhs_ident_is_ref: bool,
+        rhs_ident_is_borrow_handle: bool
     ) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         var lo = self
         // #2354: record the per-instance kinds of a generic struct literal's fields.
@@ -30152,6 +30203,28 @@ impl Lowerer {
                 }
             }
             None => {}
+        }
+        // SIO-582: mark locals bound from a borrow (`&x` / `&!x`, possibly
+        // through casts, or an alias of a marked local). Struct locals are
+        // boxed: the slot stores the address of a slot holding the HANDLE,
+        // so raw payload derefs of such locals must decline to the
+        // handle-resolving generic path. Heap/call/arithmetic bindings stay
+        // unmarked and keep the raw path.
+        var rhs_is_borrow_handle = rhs_ident_is_borrow_handle
+        match s.expr {
+            Some(rhs_bh) => {
+                if (*rhs_bh).kind == ExprKind::ExprUnary
+                    && ((*rhs_bh).un_op == UnaryOp::OpRef || (*rhs_bh).un_op == UnaryOp::OpRefMut) {
+                    rhs_is_borrow_handle = true
+                } else if (*rhs_bh).kind == ExprKind::ExprCast
+                    && lo.cast_subject_is_borrow_ref(&(*rhs_bh)) {
+                    rhs_is_borrow_handle = true
+                }
+            }
+            None => {}
+        }
+        if rhs_is_borrow_handle {
+            lo = lo.bind_local_borrow_handle(s.name)
         }
         if lower_opt_type_is_dynamic_array(&s.ty) {
             // SIO-311: an annotated `[T]` stays dynamic even when its
@@ -37048,6 +37121,9 @@ impl Lowerer {
                 }
                 if (*operand).kind != ExprKind::ExprIdent { return false }
                 if self.lookup_local_is_ref((*operand).name) { return false }
+                // SIO-582: `*hh` where `hh` is a borrow-handle local keeps
+                // the handle-resolving generic path (see above).
+                if self.lookup_local_is_borrow_handle((*operand).name) { return false }
                 if ir_name_is_box(self.lookup_local_struct_type((*operand).name)) { return false }
                 true
             }
@@ -37058,6 +37134,9 @@ impl Lowerer {
     // SIO-572: peel a cast chain to its subject. True when the subject is
     // directly borrow-derived (`&x` / `&!x`, possibly through further
     // casts): such addresses keep the baseline generic path.
+    // SIO-582: also true when the peeled subject is a borrow-handle
+    // local (`let hh = &!w`); its slot holds a slot address, not a
+    // payload address.
     fn cast_subject_is_borrow_ref(self, e: &Expr) -> bool with Mut, Panic, Div, Alloc {
         let _lo = self
         var current = e
@@ -37073,6 +37152,13 @@ impl Lowerer {
                 }
             } else if (*current).kind == ExprKind::ExprUnary
                 && ((*current).un_op == UnaryOp::OpRef || (*current).un_op == UnaryOp::OpRefMut) {
+                found = true
+                done = true
+            } else if (*current).kind == ExprKind::ExprIdent
+                && _lo.lookup_local_is_borrow_handle((*current).name) {
+                // SIO-582: the peeled subject is a borrow-handle local
+                // (`let hh = &!w`, possibly re-aliased). Its slot holds the
+                // address of a handle slot, not a payload address.
                 found = true
                 done = true
             } else {
