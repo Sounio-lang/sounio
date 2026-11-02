@@ -19,7 +19,8 @@ function check(w,s,f){
  assert(s.indexOf('run_integration() {')>s.indexOf('run_oracle_batch\n'),'oracle pairing split');
  assert(s.includes('record arrow-gate scripts/arrow_ipc_gate.sh "$arrow_rc"'),'Arrow gate missing');
  assert(s.includes('record concordance math-pure-ln-boundary "$rc"'),'logarithm gate missing');
- assert(f.includes('SOUNIO_MADAROS_DEREF_F64_GATE_BIN="$RAW_MADAROS" \\\n  bash "$ROOT_DIR/scripts/ci/madaros_imported_deref_f64_array_gate.sh"'),'full gate rebuilds rather than forwarding its compiler');
+ assert(w.includes('      - name: Madaros full gate against the fresh build\n        env:\n          MADAROS_RAW_BIN: /tmp/madaros-ci.elf\n          SOUNIO_MADAROS_DEREF_F64_GATE_BIN: /tmp/madaros-ci.elf\n        run: bash scripts/ci/madaros_full_gate.sh'),'full gate CI must bind both compiler entrypoints');
+ assert(f.includes('bash "$ROOT_DIR/scripts/ci/madaros_imported_deref_f64_array_gate.sh"'),'full gate lost dereference witness');
 }
 check(workflow,script,full);
 if(process.argv[3]==='--selftest'){
@@ -29,7 +30,7 @@ if(process.argv[3]==='--selftest'){
  [workflow.replace('STDLIB_DEEP_GROUP: ${{ matrix.group }}','STDLIB_DEEP_GROUP: core'),script,full],
  [workflow.replace('stdlib-deep-science-${{ matrix.group }}-','stdlib-deep-science-'),script,full],
  [workflow,script.replace('then run_integration; fi','then :; fi'),full],
- [workflow,script,full.replace('SOUNIO_MADAROS_DEREF_F64_GATE_BIN="$RAW_MADAROS"','IGNORED_BIN="$RAW_MADAROS"')],
+ [workflow.replace('SOUNIO_MADAROS_DEREF_F64_GATE_BIN: /tmp/madaros-ci.elf','IGNORED_BIN: /tmp/madaros-ci.elf'),script,full],
  ];
  for(const [i,args] of cases.entries())assert.throws(()=>check(...args),'accepted mutation '+i);
  console.log('DEEP_SCIENCE_PARTITION_MUTATIONS_PASS controls='+cases.length);
