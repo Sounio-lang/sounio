@@ -16,9 +16,16 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.decisions.adr-
 
 ## 1. Context: what the CI measures today
 
-Every number below was read from the GitHub Actions API on 2026-11-01 over
-the last 300 runs of `.github/workflows/ci.yml` (2026-10-29T12:43Z to
-2026-11-01T07:37Z). Re-run with:
+The following tables preserve the historical 2026-11-01 report of 300 runs
+of `.github/workflows/ci.yml` (2026-10-29T12:43Z to 2026-11-01T07:37Z).
+The original 300-run manifest and the 12 PR / 8 merge-group job sample were
+not retained with that report. These historical distributions have not been
+independently reproduced in this revision; the old one-page command below
+retrieves at most 100 runs and does not reproduce them. Do not use those
+tables as candidate performance acceptance. The dated 2026-11-02 receipt
+below provides the retained two-run baseline and C++23 analyzer.
+
+Historical discovery command (not a reproduction of the tables):
 
 ```bash
 gh api 'repos/Sounio-lang/sounio/actions/workflows/ci.yml/runs?per_page=100&page=1' \

@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.evidence.ci-latency-20261102.readme
+authority: repo_only
+audience: users
+last_validated: unvalidated
+validated_by: none
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.evidence.ci-latency-20261102.readme
+-->
+
 # CI latency baseline, 2026-11-02
 
 GitHub Actions metadata for PR #3413, head run 41433054775 and merge-group

@@ -72,6 +72,8 @@ Grounded in: commit, artifact, or empirical result
 | 025 | Epistemic decisions: flip budgets, attribution and the value of remeasuring | accepted | 2026-10-28 |
 | 026 | Phase arenas for Madaros self-compilation | experimental | 2026-10-31 |
 
+| 027 | Layered CI, graph-directed test selection and receipts | phase 1 accepted; compiler fan-out implemented; later phases proposed | 2026-11-01 |
+
 Reserved by open pull requests (not yet on `main`):
 
 | ADR | Title | PR |
@@ -79,7 +81,7 @@ Reserved by open pull requests (not yet on `main`):
 | 017 | Single authority for IR memory effects (`ir::effects`) | #2686 (renumbered from a colliding 013) |
 | 019 | Certified intervals | #3101 |
 
-The next free number is **027**.
+The next free number is **028**.
 
 ## Files
 
