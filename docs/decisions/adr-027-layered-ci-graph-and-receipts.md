@@ -356,3 +356,31 @@ Missing, skipped, cancelled or failed selected regressions block CI Decision.
 The two status aggregation jobs use non-cone sparse checkout of their exact
 scripts, without a filter override. Hosted success and actual end-to-end
 timing remain the acceptance gate; projected overlap is not a timing receipt.
+
+### Independent Contracts shards and durable verified build cache
+
+Run41502769450 passed in1411 seconds, with Contracts Core taking1218 seconds.
+It still serialised independent research/ontology checks with compiler and
+repository contracts. A core/research matrix now runs both sets concurrently,
+with fail-fast disabled and the existing Contracts join requiring the complete
+matrix verdict. A frozen inventory from de7e51ee15 checks that each prior step's
+command, environment, original impact condition and relative order survive;
+only shared setup/summary runs on both shards. Related NumPy installation and
+self-falsifying checks remain together. The measured-claims gate derives its
+own sabotage census; ontology wrappers and prototype logs use their own scratch
+paths. Gate bodies and the scientific predicates are unchanged.
+
+The modular builder already has a content-addressed seed/Madaros cache. CI now
+transports that existing directory with actions/cache rather than discarding it
+with each hosted runner. The builder still executes unconditionally: it checks
+its source/stdlib tree, bootstrap bytes, build environment, artifact digest and
+clean-diagnostic receipt. An outer restore prefix may recover seed entries for
+another tree, but never authorizes a compiler hit: the builder's internal exact
+key remains decisive. Source changes still invalidate Madaros; unchanged
+lean_single/bootstrap inputs can reuse only their seed. Fresh checkout receipts
+are prepared and verified by consumers as before. Private modified-source SCO
+builds are not redirected to the producer cache.
+
+Acceptance requires a complete hosted cold run, unchanged selected-step
+coverage across the matrix, cache save evidence, then hosted verified warm hits.
+No warm latency gain is claimed from static tests or a cache transport hit alone.

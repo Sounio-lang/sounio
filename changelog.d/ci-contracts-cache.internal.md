@@ -1,0 +1,1 @@
+Run independent research and ontology checks in a parallel required Contracts matrix shard, preserving every gate and its original impact predicate. Persist the existing content-addressed Madaros cache between CI runs while retaining unconditional build validation and fresh checkout receipts.
