@@ -175,7 +175,6 @@ def main() -> None:
     out.parent.mkdir(parents=True, exist_ok=True)
 
     hidden = 256
-    inter = 512
     moe_inter = 512
     layers = 2
     heads = 4

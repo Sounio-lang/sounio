@@ -4,11 +4,12 @@
 // Host fills scores; this kernel only normalizes (max-subtracted exp).
 // Build PTX: nvcc -O3 -ptx -arch=sm_89 -o attn_softmax_causal_f32.ptx attn_softmax_causal_f32.cu
 #include <cuda_fp16.h>
+#include <float.h>
 #include <stdint.h>
 extern "C" __global__ void attn_softmax_causal_f32(float* scores, float* probs, int rows, int upto, int ld) {
     int r = blockIdx.x * blockDim.x + threadIdx.x;
     if (r >= rows) return;
-    float mx = -1.0e30f;
+    float mx = -FLT_MAX;
     for (int t = 0; t < upto; ++t) {
         float v = scores[(size_t)r * (size_t)ld + t];
         if (v > mx) mx = v;
