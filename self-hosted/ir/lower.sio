@@ -66,6 +66,14 @@ struct LowerLocalStack {
     // 1 = local/param holds a reference (&P / &[T;N] / &![T;N]) to a heap aggregate,
     // i.e. its slot stores a raw address of the caller slot, not the handle directly.
     is_ref: Box<LowerLocalI64Slots>,
+    // SIO-582: 1 = local was bound from a borrow expression (`&x` / `&!x`,
+    // possibly through casts, or an alias of such a local). Its slot stores
+    // the address of a slot holding a HANDLE (struct locals are boxed), not a
+    // payload address, so raw payload derefs must decline to the
+    // handle-resolving generic path. Sibling of is_ref, which only marks
+    // `&`-annotated bindings and has ~25 consumers; this bit has exactly two
+    // (the raw-deref classifier arms) so it cannot ripple elsewhere.
+    is_borrow_handle: Box<LowerLocalI64Slots>,
     // 0=other 1=int 2=float; used by println dispatch to avoid routing i64/f64 vars through print_str
     scalar_kind: Box<LowerLocalI64Slots>,
     // Tuple-typed local: bit k set iff element k of the tuple is f64. 0 = not a
@@ -281,6 +289,7 @@ fn empty_lower_local_stack() -> LowerLocalStack with Alloc, Mut {
         global_bss_sizes: lowerer_box_local_i64_slots(0),
         is_global: lowerer_box_local_i64_slots(0),
         is_ref: lowerer_box_local_i64_slots(0),
+        is_borrow_handle: lowerer_box_local_i64_slots(0),
         scalar_kind: lowerer_box_local_i64_slots(0),
         tuple_float_mask: lowerer_box_local_i64_slots(0),
         tuple_arr_mask: lowerer_box_local_i64_slots(0),
@@ -2729,6 +2738,10 @@ struct Lowerer {
     // bound local knows it is a capturing closure.
     closure_caps: Box<ClosureCapTable>,
     pending_closure_fn_id: i64,
+    // SIO-417 (P4): frame reg of the lexically enclosing handle body / clause.
+    fx_frame_reg: i64,
+    fx_frame_fn: i64,
+    fx_clause_frame_reg: i64,
     allow_direct_capturing_closure_literal: bool,
     pending_variance_reg: i64,
     // β-Madaros multi-channel FO GUM (lean_single β¹⁰/β¹¹ parity target).
@@ -3140,6 +3153,9 @@ fn lowerer_new() -> Lowerer with Alloc, Mut, Panic, Div {
         probe_mode: false,
         closure_caps: closure_caps,
         pending_closure_fn_id: -1,
+        fx_frame_reg: -1,
+        fx_frame_fn: -1,
+        fx_clause_frame_reg: -1,
         allow_direct_capturing_closure_literal: false,
         pending_variance_reg: -1,
         fo_nchan: 0,
@@ -3763,6 +3779,9 @@ fn lowerer_new_from_program_summary(summary: &IrProgramSummary, epistemic: &IrEp
         probe_mode: summary.probe_mode,
         closure_caps: closure_caps,
         pending_closure_fn_id: -1,
+        fx_frame_reg: -1,
+        fx_frame_fn: -1,
+        fx_clause_frame_reg: -1,
         allow_direct_capturing_closure_literal: false,
         pending_variance_reg: -1,
         fo_nchan: 0,
@@ -3823,6 +3842,9 @@ fn lowerer_new_from_program_summary_owned(summary: IrProgramSummary, epistemic: 
         probe_mode: summary.probe_mode,
         closure_caps: closure_caps,
         pending_closure_fn_id: -1,
+        fx_frame_reg: -1,
+        fx_frame_fn: -1,
+        fx_clause_frame_reg: -1,
         allow_direct_capturing_closure_literal: false,
         pending_variance_reg: -1,
         fo_nchan: 0,
@@ -3887,6 +3909,9 @@ fn lowerer_from_acc_module(module: Box<IrModule>) -> Lowerer with Alloc, Mut, Pa
         probe_mode: false,
         closure_caps: closure_caps,
         pending_closure_fn_id: -1,
+        fx_frame_reg: -1,
+        fx_frame_fn: -1,
+        fx_clause_frame_reg: -1,
         allow_direct_capturing_closure_literal: false,
         pending_variance_reg: -1,
         fo_nchan: 0,
@@ -7882,6 +7907,10 @@ fn lowerer_lower_fn_item_mut(
 
     lowerer_flush_current_func_mut(lo)
     (*lo).current_fn = fn_id
+    // SIO-417: handler frame context is per-function; a perform in any other
+    // function must see no frame (named v1 refusal), never a stale register.
+    (*lo).fx_frame_reg = -1
+    (*lo).fx_clause_frame_reg = -1
     // REUSE the Box the Lowerer already holds. `var f = ir_empty_function()`
     // followed by `Box::new(f)` allocated ~673 KB per function against a bump
     // cursor that never reclaims, which is the whole of the 1417 KB/function
@@ -10356,6 +10385,8 @@ fn lower_ident_expr_for_name(name: Name, span: Span) -> Expr {
         fields: None,
         cast_type: None,
         handler_block: None,
+        handler_clauses: None,
+        op_name: ir_empty_name(),
         closure_params: None,
         closure_return: None,
         closure_effects: None,
@@ -13770,6 +13801,20 @@ pub fn lower_impl_methods_collect(items: &Option<Box<ItemList>>) with Mut, Panic
     }
 }
 
+fn fx_hash_name(n: Name) -> i64 with Mut, Panic, Div {
+    var h: i64 = 5381
+    var i: i64 = 0
+    while i < n.len {
+        h = h * 33 + (n.buf[i as usize] as i64)
+        i = i + 1
+    }
+    h
+}
+
+fn fx_op_key(eff: Name, op: Name) -> i64 with Mut, Panic, Div {
+    fx_hash_name(eff) * 1000003 + fx_hash_name(op)
+}
+
 impl Lowerer {
     fn current_fn_compile_strategy(self) -> i64 with Mut, Panic, Div {
         if self.current_fn < 0 || self.current_fn >= self.module.fn_count {
@@ -15762,6 +15807,7 @@ impl Lowerer {
                 // Findings 11 (#2084): zero-init the per-slot unsigned-int flag.
                 (*(*stk).is_unsigned_int).values[idx as usize] = 0
                 (*(*stk).is_ref).values[idx as usize] = 0
+                (*(*stk).is_borrow_handle).values[idx as usize] = 0
                 // Explicit 0: slot may be reused after scope-pop restores count.
                 // Callers that know a positive kind (for-IV int, float local) re-bind.
                 (*(*stk).scalar_kind).values[idx as usize] = 0
@@ -16205,6 +16251,34 @@ impl Lowerer {
         while i >= 0 {
             if (*(*self.locals).depths).values[i as usize] <= self.scope_depth && ir_name_eq((*(*self.locals).names).values[i as usize], name) {
                 return (*(*self.locals).is_ref).values[i as usize] == 1
+            }
+            i = i - 1
+        }
+        false
+    }
+
+    // SIO-582: bind/lookup for the is_borrow_handle bit (see the field
+    // comment). Mirrors bind_local_ref / lookup_local_is_ref.
+    fn bind_local_borrow_handle(self, name: Name) -> Lowerer with Mut, Alloc, Panic, Div {
+        var lo = self
+        var stk = lo.locals
+        var i = (*stk).count - 1
+        while i >= 0 {
+            if (*(*stk).depths).values[i as usize] <= lo.scope_depth && ir_name_eq((*(*stk).names).values[i as usize], name) {
+                (*(*stk).is_borrow_handle).values[i as usize] = 1
+                lo.locals = stk
+                return lo
+            }
+            i = i - 1
+        }
+        lo
+    }
+
+    fn lookup_local_is_borrow_handle(self, name: Name) -> bool with Mut, Panic, Div, Alloc {
+        var i = (*self.locals).count - 1
+        while i >= 0 {
+            if (*(*self.locals).depths).values[i as usize] <= self.scope_depth && ir_name_eq((*(*self.locals).names).values[i as usize], name) {
+                return (*(*self.locals).is_borrow_handle).values[i as usize] == 1
             }
             i = i - 1
         }
@@ -26950,6 +27024,10 @@ impl Lowerer {
             // BSS scalar global fallback: see bss_global_scalar_kind.
             return self.bss_global_scalar_kind((*e).name)
         }
+        if (*e).kind == ExprKind::ExprHandle || (*e).kind == ExprKind::ExprPerform || (*e).kind == ExprKind::ExprResume {
+            // SIO-417 v1: handler answers and op results travel as i64 words.
+            return 1
+        }
         if (*e).kind == ExprKind::ExprCast {
             if lower_cast_type_is_f64(&(*e).cast_type) { return 2 }
             // Any word-size integer cast target (i32/i64/u64/…) → print_int kind.
@@ -29594,6 +29672,18 @@ impl Lowerer {
             }
             _ => {}
         }
+        // SIO-582: same pre-bind capture for the borrow-handle bit, so
+        // `let h2 = h` propagates it. No array subtlety applies: the bit's
+        // only consumers are the raw-deref classifier arms.
+        var rhs_ident_is_borrow_handle = false
+        match s.expr {
+            Some(rhs_bh_pre) => {
+                if (*rhs_bh_pre).kind == ExprKind::ExprIdent {
+                    rhs_ident_is_borrow_handle = lo.lookup_local_is_borrow_handle((*rhs_bh_pre).name)
+                }
+            }
+            _ => {}
+        }
         var fixed_array_len = lower_opt_type_fixed_array_len(&s.ty)
         var fixed_array_word_scalar = lower_opt_type_fixed_array_word_scalar(&s.ty)
         var rhs_array_elem_is_float = false
@@ -29890,7 +29980,7 @@ impl Lowerer {
             }
             _ => {}
         }
-        let final_pair = lo.lower_let_stmt_finalize_ref(s, is_mut, reg, fixed_array_len, fixed_array_word_scalar, rhs_array_elem_is_float, rhs_ident_is_ref)
+        let final_pair = lo.lower_let_stmt_finalize_ref(s, is_mut, reg, fixed_array_len, fixed_array_word_scalar, rhs_array_elem_is_float, rhs_ident_is_ref, rhs_ident_is_borrow_handle)
         if !has_option_payload { return final_pair }
         var final_lo = final_pair.0
         if has_option_payload {
@@ -29914,7 +30004,8 @@ impl Lowerer {
         fixed_array_len: i64,
         fixed_array_word_scalar: bool,
         rhs_array_elem_is_float: bool,
-        rhs_ident_is_ref: bool
+        rhs_ident_is_ref: bool,
+        rhs_ident_is_borrow_handle: bool
     ) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         var lo = self
         // #2354: record the per-instance kinds of a generic struct literal's fields.
@@ -30152,6 +30243,28 @@ impl Lowerer {
                 }
             }
             None => {}
+        }
+        // SIO-582: mark locals bound from a borrow (`&x` / `&!x`, possibly
+        // through casts, or an alias of a marked local). Struct locals are
+        // boxed: the slot stores the address of a slot holding the HANDLE,
+        // so raw payload derefs of such locals must decline to the
+        // handle-resolving generic path. Heap/call/arithmetic bindings stay
+        // unmarked and keep the raw path.
+        var rhs_is_borrow_handle = rhs_ident_is_borrow_handle
+        match s.expr {
+            Some(rhs_bh) => {
+                if (*rhs_bh).kind == ExprKind::ExprUnary
+                    && ((*rhs_bh).un_op == UnaryOp::OpRef || (*rhs_bh).un_op == UnaryOp::OpRefMut) {
+                    rhs_is_borrow_handle = true
+                } else if (*rhs_bh).kind == ExprKind::ExprCast
+                    && lo.cast_subject_is_borrow_ref(&(*rhs_bh)) {
+                    rhs_is_borrow_handle = true
+                }
+            }
+            None => {}
+        }
+        if rhs_is_borrow_handle {
+            lo = lo.bind_local_borrow_handle(s.name)
         }
         if lower_opt_type_is_dynamic_array(&s.ty) {
             // SIO-311: an annotated `[T]` stays dynamic even when its
@@ -30661,6 +30774,9 @@ impl Lowerer {
                         && lo.expr_result_scalar_kind_ref(&(*expr_box_sk)) == 1 {
                         // Positively classified computed scalar locals retain their
                         // integer kind for a later println(local).
+                        lo = lo.bind_local_scalar_kind(s.name, 1)
+                    } else if (*expr_box_sk).kind == ExprKind::ExprHandle || (*expr_box_sk).kind == ExprKind::ExprPerform || (*expr_box_sk).kind == ExprKind::ExprResume {
+                        // SIO-417 v1: handler answers / op results are i64 words.
                         lo = lo.bind_local_scalar_kind(s.name, 1)
                     } else if ((*expr_box_sk).kind == ExprKind::ExprBinary || (*expr_box_sk).kind == ExprKind::ExprUnary) {
                         // `let y = x + 1` / `let y = 0 - x` without an integer annotation:
@@ -37048,6 +37164,9 @@ impl Lowerer {
                 }
                 if (*operand).kind != ExprKind::ExprIdent { return false }
                 if self.lookup_local_is_ref((*operand).name) { return false }
+                // SIO-582: `*hh` where `hh` is a borrow-handle local keeps
+                // the handle-resolving generic path (see above).
+                if self.lookup_local_is_borrow_handle((*operand).name) { return false }
                 if ir_name_is_box(self.lookup_local_struct_type((*operand).name)) { return false }
                 true
             }
@@ -37058,6 +37177,9 @@ impl Lowerer {
     // SIO-572: peel a cast chain to its subject. True when the subject is
     // directly borrow-derived (`&x` / `&!x`, possibly through further
     // casts): such addresses keep the baseline generic path.
+    // SIO-582: also true when the peeled subject is a borrow-handle
+    // local (`let hh = &!w`); its slot holds a slot address, not a
+    // payload address.
     fn cast_subject_is_borrow_ref(self, e: &Expr) -> bool with Mut, Panic, Div, Alloc {
         let _lo = self
         var current = e
@@ -37073,6 +37195,13 @@ impl Lowerer {
                 }
             } else if (*current).kind == ExprKind::ExprUnary
                 && ((*current).un_op == UnaryOp::OpRef || (*current).un_op == UnaryOp::OpRefMut) {
+                found = true
+                done = true
+            } else if (*current).kind == ExprKind::ExprIdent
+                && _lo.lookup_local_is_borrow_handle((*current).name) {
+                // SIO-582: the peeled subject is a borrow-handle local
+                // (`let hh = &!w`, possibly re-aliased). Its slot holds the
+                // address of a handle slot, not a payload address.
                 found = true
                 done = true
             } else {
@@ -40125,6 +40254,15 @@ impl Lowerer {
         if e.kind == ExprKind::ExprIf {
             return self.lower_if_expr_ref(e)
         }
+        if e.kind == ExprKind::ExprHandle {
+            return self.lower_handle_expr_ref(e)
+        }
+        if e.kind == ExprKind::ExprPerform {
+            return self.lower_perform_expr_ref(e)
+        }
+        if e.kind == ExprKind::ExprResume {
+            return self.lower_resume_expr_ref(e)
+        }
         if e.kind == ExprKind::ExprCall {
             match e.left {
                 Some(callee) => {
@@ -40490,6 +40628,428 @@ impl Lowerer {
             n.len = 14
         }
         n
+    }
+
+
+    // SIO-417: synthetic clause fns get plain (non-closure) unique names so
+    // the backend never applies closure capture conventions to them.
+    fn make_fx_clause_name(self) -> Name with Mut, Panic, Div {
+        var n = ir_empty_name()
+        let pfx: i64 = 0
+        n.buf[0] = 95
+        n.buf[1] = 95
+        n.buf[2] = 115
+        n.buf[3] = 111
+        n.buf[4] = 117
+        n.buf[5] = 110
+        n.buf[6] = 105
+        n.buf[7] = 111
+        n.buf[8] = 95
+        n.buf[9] = 102
+        n.buf[10] = 120
+        n.buf[11] = 99
+        n.buf[12] = 95
+        n.len = 13
+        let suffix = (*self.module).fn_count
+        if suffix < 10 {
+            n.buf[13] = (48 + suffix) as i8
+            n.len = 14
+        } else if suffix < 100 {
+            n.buf[13] = (48 + suffix / 10) as i8
+            n.buf[14] = (48 + suffix % 10) as i8
+            n.len = 15
+        } else if suffix < 1000 {
+            n.buf[13] = (48 + suffix / 100) as i8
+            n.buf[14] = (48 + (suffix / 10) % 10) as i8
+            n.buf[15] = (48 + suffix % 10) as i8
+            n.len = 16
+        } else {
+            n.buf[13] = (48 + suffix / 1000) as i8
+            n.buf[14] = (48 + (suffix / 100) % 10) as i8
+            n.buf[15] = (48 + (suffix / 10) % 10) as i8
+            n.buf[16] = (48 + suffix % 10) as i8
+            n.len = 17
+        }
+        n
+    }
+
+// ---- SIO-417 (P4): handler lowering -------------------------------------
+// Frame word slots (must match codegen_x86_linux.sio fx builtins):
+//  0 seg_base 1 seg_size 2 body_ctx 3 drive_ctx 4 install_rsp 5 install_ip
+//  6 state 7 event_op 8 answer 9 resume_val 10 body_value 11 ret_fn
+// 12 prev 13 eff_key 14 n_clauses 15.. clause triples (key, fn, argc) x12
+// 51.. mailbox (8 words), 59 scratch, 60 drive_top. Frame = 512 bytes via ffi_malloc.
+// States: 0 running, 1 parked, 2 done, 3 aborted. Ops/answers are i64 (v1).
+
+    fn fx_refuse(self, why: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        print("error: handler backend v1 limitation (scalar i64 ops, same-fn perform, no captured clause locals) -- SIO-417 P4\n")
+        var lo = self
+        if IR_LOWER_HARD_ERROR_REASON == 0 {
+            IR_LOWER_HARD_ERROR_REASON = 9
+            IR_LOWER_HARD_ERROR_NEEDED = why
+            IR_LOWER_HARD_ERROR_LIMIT = 0
+        }
+        lowerer_mark_hard_error(&! lo)
+        lo.emit_unit()
+    }
+
+    fn fx_call2(self, nm: Name, a1: i64, a2: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        let fid = lowerer_find_or_add_fn_id_mut(&! lo, nm)
+        let cargs: Option<Box<IrRegList>> = Some(Box::new(ir_reg_list_cons(a1, Some(Box::new(ir_reg_list_single(a2))))))
+        let dp = lo.fresh_reg()
+        lo = dp.0
+        let dst = dp.1
+        lo = lo.emit(ir_call(dst, fid, nm, cargs, 2))
+        (lo, dst)
+    }
+
+    fn fx_call4(self, nm: Name, a1: i64, a2: i64, a3: i64, a4: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        let fid = lowerer_find_or_add_fn_id_mut(&! lo, nm)
+        let l4: Option<Box<IrRegList>> = Some(Box::new(ir_reg_list_single(a4)))
+        let l3: Option<Box<IrRegList>> = Some(Box::new(ir_reg_list_cons(a3, l4)))
+        let l2: Option<Box<IrRegList>> = Some(Box::new(ir_reg_list_cons(a2, l3)))
+        let cargs: Option<Box<IrRegList>> = Some(Box::new(ir_reg_list_cons(a1, l2)))
+        let dp = lo.fresh_reg()
+        lo = dp.0
+        let dst = dp.1
+        lo = lo.emit(ir_call(dst, fid, nm, cargs, 4))
+        (lo, dst)
+    }
+
+    fn fx_store_imm(self, frame: i64, slot: i64, val: i64) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        let vp = lo.fresh_reg()
+        lo = vp.0
+        lo = lo.emit(ir_load_imm(vp.1, val))
+        var fx_set_imm = ir_field_set(frame, slot, vp.1, ir_empty_name())
+        fx_set_imm.label_id = 2
+        lo = lo.emit(fx_set_imm)
+        lo
+    }
+
+    fn fx_store_reg(self, frame: i64, slot: i64, reg: i64) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        var fx_set_reg = ir_field_set(frame, slot, reg, ir_empty_name())
+        fx_set_reg.label_id = 2
+        lo = lo.emit(fx_set_reg)
+        lo
+    }
+
+    // Lower one on/return clause as a synthetic fn: params are
+    // (frame, op args...) or (frame, value) for the return clause.
+    fn lower_fx_clause_fn_ref(self, cl: &HandlerClause) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        let fx_name = lo.make_fx_clause_name()
+        let fx_fn_id = lowerer_find_or_add_fn_id_mut(&! lo, fx_name)
+        if fx_fn_id < 0 {
+            return lo.emit_unit()
+        }
+        let saved_fn = lo.current_fn
+        let saved_func = lo.current_func
+        let saved_locals = lo.locals
+        let saved_scope = lo.scope_depth
+        let saved_loop = lo.loop_depth
+        let saved_loaded = lo.current_func_loaded
+        let saved_allow = lo.allow_direct_capturing_closure_literal
+        let saved_frame = lo.fx_frame_reg
+        let saved_clause_frame = lo.fx_clause_frame_reg
+        lo.current_fn = fx_fn_id
+        lo.current_func = lowerer_box_empty_function()
+        if (*lo.current_func).region.slot < 0 { ir_function_alloc_region(&! (*lo.current_func)) }
+        (*lo.current_func).name = fx_name
+        (*lo.current_func).returns_float = 0
+        lo.current_func_loaded = true
+        lo.locals = lowerer_box_empty_locals()
+        lo.scope_depth = 0
+        lo.loop_depth = 0
+        lo.allow_direct_capturing_closure_literal = false
+        let fp = lo.fresh_reg()
+        lo = fp.0
+        let frame_reg = fp.1
+        var func_box = lo.current_func
+        (*func_box).param_regs[0] = frame_reg
+        (*func_box).param_count = 1
+        lo.current_func = func_box
+        lo.fx_clause_frame_reg = frame_reg
+        lo.fx_frame_reg = -1
+        var plist = &(*cl).params
+        var pidx: i64 = 1
+        while true {
+            match *plist {
+                Some(pnode) => {
+                    if lower_type_expr_is_f64(&(*pnode).head.ty) {
+                        return lo.fx_refuse(1)
+                    }
+                    if pidx >= 16 {
+                        return lo.fx_refuse(2)
+                    }
+                    let pr = lo.fresh_reg()
+                    lo = pr.0
+                    var fb2 = lo.current_func
+                    (*fb2).param_regs[pidx as usize] = pr.1
+                    (*fb2).param_count = pidx + 1
+                    lo.current_func = fb2
+                    lo = lo.bind_local((*pnode).head.name, pr.1, false)
+                    plist = &(*pnode).tail
+                    pidx = pidx + 1
+                }
+                None => { break }
+            }
+        }
+        var result_reg: i64 = -1
+        var fx_did_body: i64 = 0
+        match (*cl).body_block {
+            Some(b) => {
+                let bp = lo.lower_block_ref(&(*b))
+                lo = bp.0
+                result_reg = bp.1
+                fx_did_body = 1
+            }
+            None => {}
+        }
+        if fx_did_body == 0 {
+            match (*cl).body_expr {
+                Some(x) => {
+                    let xp = lo.lower_expr_ref(&(*x))
+                    lo = xp.0
+                    result_reg = xp.1
+                    fx_did_body = 1
+                }
+                None => {}
+            }
+        }
+        if fx_did_body == 0 {
+            let up = lo.fresh_reg()
+            lo = up.0
+            result_reg = up.1
+            lo = lo.emit(ir_load_imm(result_reg, 0))
+        }
+        lo = lo.emit(ir_return(result_reg))
+        var flush_box = lo.module
+        ir_fn_set(&! (*flush_box), fx_fn_id as usize, *lo.current_func)
+        lo.module = flush_box
+        lo.current_fn = saved_fn
+        lo.current_func = saved_func
+        lo.current_func_loaded = saved_loaded
+        lo.locals = saved_locals
+        lo.scope_depth = saved_scope
+        lo.loop_depth = saved_loop
+        lo.allow_direct_capturing_closure_literal = saved_allow
+        lo.fx_frame_reg = saved_frame
+        lo.fx_clause_frame_reg = saved_clause_frame
+        (lo, fx_fn_id)
+    }
+
+    fn lower_handle_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        if self.expr_result_scalar_kind_ref(e) == 2 { return self.fx_refuse(7) }
+        var lo = self
+        if lo.expr_result_is_float_ref(e) {
+            return lo.fx_refuse(3)
+        }
+        // 1. Clause synthetic fns.
+        var keys: [i64; 12] = [0; 12]
+        var fnids: [i64; 12] = [0; 12]
+        var argcs: [i64; 12] = [0; 12]
+        var ntab: i64 = 0
+        var ret_fn_id: i64 = -1
+        var cl = &e.handler_clauses
+        while true {
+            match *cl {
+                Some(node) => {
+                    let h = &(*node).head
+                    let cf = lo.lower_fx_clause_fn_ref(h)
+                    lo = cf.0
+                    if (*h).is_catchall {
+                        // Lowered but unused until runtime supports catch-alls.
+                    }
+                    if (*h).is_return {
+                        ret_fn_id = cf.1
+                    } else if ntab < 12 {
+                        let kk = if (*h).is_catchall { 0 - 1 } else { fx_op_key(e.name, (*h).op_name) }
+                        var ki: i64 = 0
+                        while ki < ntab {
+                            if keys[ki as usize] == kk { return lo.fx_refuse(10) }
+                            ki = ki + 1
+                        }
+                        keys[ntab as usize] = kk
+                        fnids[ntab as usize] = cf.1
+                        var ac: i64 = 0
+                        var pp = &(*h).params
+                        while true {
+                            match *pp {
+                                Some(pn) => { ac = ac + 1; pp = &(*pn).tail }
+                                None => { break }
+                            }
+                        }
+                        argcs[ntab as usize] = ac
+                        ntab = ntab + 1
+                    } else {
+                        // More clauses than the runtime table holds: refuse
+                        // instead of silently dropping the clause.
+                        return lo.fx_refuse(9)
+                    }
+                    cl = &(*node).tail
+                }
+                None => { break }
+            }
+        }
+        // 2. Frame allocation + slots.
+        let szp = lo.fresh_reg()
+        lo = szp.0
+        lo = lo.emit(ir_load_imm(szp.1, 512))
+        let alloc_pair = lo.fx_call2(make_name("ffi_malloc"), szp.1, szp.1)
+        lo = alloc_pair.0
+        let frame_reg = alloc_pair.1
+        lo = lo.fx_store_imm(frame_reg, 13, fx_hash_name(e.name))
+        lo = lo.fx_store_imm(frame_reg, 6, 0)
+        lo = lo.fx_store_imm(frame_reg, 14, ntab)
+        if ret_fn_id >= 0 {
+            let rp = lo.fresh_reg()
+            lo = rp.0
+            lo = lo.emit(ir_load_fn_ref(rp.1, ret_fn_id))
+            lo = lo.fx_store_reg(frame_reg, 11, rp.1)
+        } else {
+            lo = lo.fx_store_imm(frame_reg, 11, 0)
+        }
+        if lo.fx_frame_reg >= 0 {
+            lo = lo.fx_store_reg(frame_reg, 12, lo.fx_frame_reg)
+        } else {
+            lo = lo.fx_store_imm(frame_reg, 12, 0)
+        }
+        var ti: i64 = 0
+        while ti < ntab {
+            lo = lo.fx_store_imm(frame_reg, 15 + ti * 3, keys[ti as usize])
+            let rp2 = lo.fresh_reg()
+            lo = rp2.0
+            lo = lo.emit(ir_load_fn_ref(rp2.1, fnids[ti as usize]))
+            lo = lo.fx_store_reg(frame_reg, 15 + ti * 3 + 1, rp2.1)
+            lo = lo.fx_store_imm(frame_reg, 15 + ti * 3 + 2, argcs[ti as usize])
+            ti = ti + 1
+        }
+        // 3. Install; body inline on the segment stack.
+        let saved_frame = lo.fx_frame_reg
+        let saved_frame_fn = lo.fx_frame_fn
+        let saved_clause_frame = lo.fx_clause_frame_reg
+        lo.fx_frame_reg = frame_reg
+        lo.fx_frame_fn = lo.current_fn
+        lo.fx_clause_frame_reg = 0 - 1
+        let inst = lo.fx_call2(make_name("__sounio_fx_install"), frame_reg, frame_reg)
+        lo = inst.0
+        let l_done_pair = lo.fresh_label()
+        lo = l_done_pair.0
+        let l_done = l_done_pair.1
+        lo = lo.emit(ir_branch_true(inst.1, l_done))
+        var body_reg: i64 = -1
+        let body_ref = &(*e).block
+        match *body_ref {
+            Some(b) => {
+                let bp = lo.lower_block_ref(&(*b))
+                lo = bp.0
+                body_reg = bp.1
+            }
+            None => {
+                let up = lo.fresh_reg()
+                lo = up.0
+                body_reg = up.1
+                lo = lo.emit(ir_load_imm(body_reg, 0))
+            }
+        }
+        let done_pair = lo.fx_call2(make_name("__sounio_fx_body_done"), frame_reg, body_reg)
+        lo = done_pair.0
+        lo = lo.emit(ir_jump(l_done))
+        lo = lo.emit(ir_label(l_done))
+        let ansp = lo.fresh_reg()
+        lo = ansp.0
+        let ans_reg = ansp.1
+        var fx_get_ans = ir_field_get(ans_reg, frame_reg, 8, ir_empty_name())
+        fx_get_ans.label_id = 2
+        lo = lo.emit(fx_get_ans)
+        let frp = lo.fx_call2(make_name("ffi_free"), frame_reg, frame_reg)
+        lo = frp.0
+        lo.fx_frame_reg = saved_frame
+        lo.fx_frame_fn = saved_frame_fn
+        lo.fx_clause_frame_reg = saved_clause_frame
+        (lo, ans_reg)
+    }
+
+    fn lower_perform_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        var frame_reg: i64 = -1
+        var skip_imm: i64 = 0
+        if lo.fx_clause_frame_reg >= 0 {
+            frame_reg = lo.fx_clause_frame_reg
+            skip_imm = 1
+        } else if lo.fx_frame_reg >= 0 && lo.fx_frame_fn == lo.current_fn {
+            frame_reg = lo.fx_frame_reg
+        } else {
+            return lo.fx_refuse(4)
+        }
+        var argc: i64 = 0
+        var arg_regs: [i64; 5] = [0; 5]
+        var args = &e.args
+        while true {
+            match *args {
+                Some(node) => {
+                    if argc >= 5 {
+                        return lo.fx_refuse(5)
+                    }
+                    let ap2 = lo.lower_expr_ref(&(*node).head)
+                    lo = ap2.0
+                    arg_regs[argc as usize] = ap2.1
+                    argc = argc + 1
+                    args = &(*node).tail
+                }
+                None => { break }
+            }
+        }
+        // Store only after every argument is evaluated: a nested perform
+        // in a later argument would otherwise overwrite earlier slots.
+        var ai: i64 = 0
+        while ai < argc {
+            var fx_set_mbox = ir_field_set(frame_reg, 51 + ai, arg_regs[ai as usize], ir_empty_name())
+            fx_set_mbox.label_id = 2
+            lo = lo.emit(fx_set_mbox)
+            ai = ai + 1
+        }
+        let ekp = lo.fresh_reg()
+        lo = ekp.0
+        lo = lo.emit(ir_load_imm(ekp.1, fx_hash_name(e.name)))
+        let okp = lo.fresh_reg()
+        lo = okp.0
+        lo = lo.emit(ir_load_imm(okp.1, fx_op_key(e.name, e.op_name)))
+        let skp = lo.fresh_reg()
+        lo = skp.0
+        lo = lo.emit(ir_load_imm(skp.1, skip_imm))
+        let call_pair = lo.fx_call4(make_name("__sounio_fx_perform"), frame_reg, ekp.1, okp.1, skp.1)
+        lo = call_pair.0
+        (lo, call_pair.1)
+    }
+
+    fn lower_resume_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        if lo.fx_clause_frame_reg < 0 {
+            return lo.fx_refuse(6)
+        }
+        var wreg: i64 = -1
+        let left_ref = &(*e).left
+        match *left_ref {
+            Some(v) => {
+                let vp = lo.lower_expr_ref(&(*v))
+                lo = vp.0
+                wreg = vp.1
+            }
+            None => {
+                let up = lo.fresh_reg()
+                lo = up.0
+                wreg = up.1
+                lo = lo.emit(ir_load_imm(wreg, 0))
+            }
+        }
+        let call_pair = lo.fx_call2(make_name("__sounio_fx_resume"), lo.fx_clause_frame_reg, wreg)
+        lo = call_pair.0
+        (lo, call_pair.1)
     }
 
     // Sprint 228: Lambda-lift a closure expression into a synthetic top-level function.

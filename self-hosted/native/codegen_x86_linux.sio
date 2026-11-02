@@ -1120,6 +1120,22 @@ fn name_is___sounio_seq_get(n: Name) -> bool with Mut, Panic, Div {
     name_eq(n, make_name("__sounio_seq_get"))
 }
 
+fn name_is___sounio_fx_install(n: Name) -> bool with Mut, Panic, Div {
+    name_eq(n, make_name("__sounio_fx_install"))
+}
+
+fn name_is___sounio_fx_perform(n: Name) -> bool with Mut, Panic, Div {
+    name_eq(n, make_name("__sounio_fx_perform"))
+}
+
+fn name_is___sounio_fx_resume(n: Name) -> bool with Mut, Panic, Div {
+    name_eq(n, make_name("__sounio_fx_resume"))
+}
+
+fn name_is___sounio_fx_body_done(n: Name) -> bool with Mut, Panic, Div {
+    name_eq(n, make_name("__sounio_fx_body_done"))
+}
+
 fn name_is___sounio_seq_set(n: Name) -> bool with Mut, Panic, Div {
     if n.len != 16 { return false }
     name_eq(n, make_name("__sounio_seq_set"))
@@ -1563,6 +1579,10 @@ fn native_v2_builtin_id_for_func_ref(func: &IrFunction) -> i64 with Mut, Panic, 
         if name_is_ffi_exit((*func).name) { return 41 }
         if name_is_ffi_abort((*func).name) { return 42 }
         if name_is_ffi_malloc((*func).name) { return 43 }
+    if name_is___sounio_fx_install((*func).name) { return 76 }
+    if name_is___sounio_fx_perform((*func).name) { return 77 }
+    if name_is___sounio_fx_resume((*func).name) { return 78 }
+    if name_is___sounio_fx_body_done((*func).name) { return 79 }
         if name_is_ffi_free((*func).name) { return 44 }
         if name_is_ffi_system((*func).name) { return 45 }
         if name_is_ffi_sqrt((*func).name) { return 46 }
@@ -4515,6 +4535,360 @@ fn emit_builtin_assert_into(nc: &! NativeCompiler) with Mut, Panic, Div {
 // The mapping length lives at ptr-8; the logical size lives at ptr-16. The
 // payload offset is 16 so the payload satisfies the SysV 16-byte alignment rule.
 fn native_v2_heap_header_bytes() -> i64 { 16 }
+
+
+// ---- SIO-417 (P4): handler runtime builtins (ids 72-75) ------------------
+// Frame byte offsets (must match ir/lower.sio):
+//  0 seg_base 8 seg_size 16 body_ctx 24 drive_ctx 32 install_rsp 40 install_ip
+// 48 state 56 event_op 64 answer 72 resume_val 80 body_value 88 ret_fn
+// 96 prev 104 eff_key 112 n_clauses 120 clause triples (key, fn, argc) x12
+// 408 mailbox (8 words). States: 0 running, 1 parked, 2 done, 3 aborted.
+
+// Stack switch with continuation: pushes a wake address plus the 6
+// callee-saved regs on the current stack, saves rsp to [frame+from_off],
+// restores rsp from [frame+to_off], pops the regs and RETs into the saved
+// continuation. First entry works because fabricated frames carry
+// [6 regs][continuation]. rdx=value -> rax at the wake point.
+fn emit_fx_switch_inline(nc: &! NativeCompiler, rdi_off: i64, rsi_off: i64) with Mut, Panic, Div {
+    // lea rdi, [rbx+rdi_off]
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x8d); nc_emit_byte(nc, 0x7b); nc_emit_byte(nc, rdi_off)
+    // lea rsi, [rbx+rsi_off]
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x8d); nc_emit_byte(nc, 0x73); nc_emit_byte(nc, rsi_off)
+    // lea rax, [rip+wake]
+    let lea_pos = (*nc).code.len
+    nc_emit_lea_rax_rip_disp32(nc, 0)
+    let lea_patch = lea_pos + 3
+    nc_emit_byte(nc, 0x50)                               // push rax (continuation)
+    nc_emit_byte(nc, 0x55)                               // push rbp
+    nc_emit_byte(nc, 0x53)                               // push rbx
+    nc_emit_byte(nc, 0x41); nc_emit_byte(nc, 0x54)       // push r12
+    nc_emit_byte(nc, 0x41); nc_emit_byte(nc, 0x55)       // push r13
+    nc_emit_byte(nc, 0x41); nc_emit_byte(nc, 0x56)       // push r14
+    nc_emit_byte(nc, 0x41); nc_emit_byte(nc, 0x57)       // push r15
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x89); nc_emit_byte(nc, 0x27)   // mov [rdi], rsp
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x8b); nc_emit_byte(nc, 0x26)   // mov rsp, [rsi]
+    nc_emit_byte(nc, 0x41); nc_emit_byte(nc, 0x5f)       // pop r15
+    nc_emit_byte(nc, 0x41); nc_emit_byte(nc, 0x5e)       // pop r14
+    nc_emit_byte(nc, 0x41); nc_emit_byte(nc, 0x5d)       // pop r13
+    nc_emit_byte(nc, 0x41); nc_emit_byte(nc, 0x5c)       // pop r12
+    nc_emit_byte(nc, 0x5b)                               // pop rbx
+    nc_emit_byte(nc, 0x5d)                               // pop rbp
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x89); nc_emit_byte(nc, 0xd0)   // mov rax, rdx
+    nc_emit_byte(nc, 0xc3)                               // ret
+    let wake_pos = (*nc).code.len
+    nc_patch_u32_le(nc, lea_patch, wake_pos - (lea_pos + 7))
+}
+
+// Shared host return: munmap both segments, restore the host callee-saved
+// regs saved at fx_install entry, rax=1, jump to the host continuation.
+// rbx = frame on entry; clobbers rax/rcx/rdi/rsi.
+fn emit_fx_return_to_host(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x8b); nc_emit_byte(nc, 0x7b); nc_emit_byte(nc, 0x00)  // mov rdi, [rbx+0]
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x8b); nc_emit_byte(nc, 0x73); nc_emit_byte(nc, 0x08)  // mov rsi, [rbx+8]
+    nc_emit_mov_rax_imm(nc, 11)
+    nc_emit_syscall(nc)
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x8b); nc_emit_byte(nc, 0xbb)
+    nc_emit_byte(nc, 0xe0); nc_emit_byte(nc, 0x01); nc_emit_byte(nc, 0x00); nc_emit_byte(nc, 0x00)  // mov rdi, [rbx+480] (drive top)
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x81); nc_emit_byte(nc, 0xef)
+    nc_emit_byte(nc, 0x00); nc_emit_byte(nc, 0x00); nc_emit_byte(nc, 0x04); nc_emit_byte(nc, 0x00)  // sub rdi, 256K
+    nc_emit_mov_reg_imm(nc, 6, 262144)                                        // rsi = len
+    nc_emit_mov_rax_imm(nc, 11)
+    nc_emit_syscall(nc)
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x8b); nc_emit_byte(nc, 0x4b); nc_emit_byte(nc, 0x28)  // mov rcx, [rbx+40] (install_ip)
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x8b); nc_emit_byte(nc, 0x63); nc_emit_byte(nc, 0x20)  // mov rsp, [rbx+32] (install_rsp)
+    nc_emit_byte(nc, 0x4c); nc_emit_byte(nc, 0x8b); nc_emit_byte(nc, 0x7c); nc_emit_byte(nc, 0x24); nc_emit_byte(nc, 0xc8)  // mov r15, [rsp-56]
+    nc_emit_byte(nc, 0x4c); nc_emit_byte(nc, 0x8b); nc_emit_byte(nc, 0x74); nc_emit_byte(nc, 0x24); nc_emit_byte(nc, 0xd0)  // mov r14, [rsp-48]
+    nc_emit_byte(nc, 0x4c); nc_emit_byte(nc, 0x8b); nc_emit_byte(nc, 0x6c); nc_emit_byte(nc, 0x24); nc_emit_byte(nc, 0xd8)  // mov r13, [rsp-40]
+    nc_emit_byte(nc, 0x4c); nc_emit_byte(nc, 0x8b); nc_emit_byte(nc, 0x64); nc_emit_byte(nc, 0x24); nc_emit_byte(nc, 0xe0)  // mov r12, [rsp-32]
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x8b); nc_emit_byte(nc, 0x5c); nc_emit_byte(nc, 0x24); nc_emit_byte(nc, 0xe8)  // mov rbx, [rsp-24]
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x8b); nc_emit_byte(nc, 0x6c); nc_emit_byte(nc, 0x24); nc_emit_byte(nc, 0xf0)  // mov rbp, [rsp-16]
+    nc_emit_mov_rax_imm(nc, 1)
+    nc_emit_byte(nc, 0xff); nc_emit_byte(nc, 0xe1)                            // jmp rcx
+}
+
+// Dispatch one parked event: scan clause table for [rbx+56], call the clause
+// with (frame, mailbox args in rsi..r9). Falls through with rax = clause value.
+fn emit_fx_dispatch_block(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x8b); nc_emit_byte(nc, 0x4b); nc_emit_byte(nc, 0x70)   // mov rcx, [rbx+112]
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x8d); nc_emit_byte(nc, 0x93)                            // lea rdx, [rbx+120]
+    nc_emit_byte(nc, 0x78); nc_emit_byte(nc, 0x00); nc_emit_byte(nc, 0x00); nc_emit_byte(nc, 0x00)
+    nc_emit_load_rax_mem_rbx_disp32(nc, 56)                                                             // mov rax, [rbx+56]
+    let scan_pos = (*nc).code.len
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x85); nc_emit_byte(nc, 0xc9)                              // test rcx, rcx
+    let jz_patch = (*nc).code.len + 2
+    nc_emit_byte(nc, 0x0f); nc_emit_byte(nc, 0x84); nc_emit_u32_le(nc, 0)                               // jz trap
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x39); nc_emit_byte(nc, 0x02)                              // cmp [rdx], rax
+    let je_patch = (*nc).code.len + 2
+    nc_emit_byte(nc, 0x0f); nc_emit_byte(nc, 0x84); nc_emit_u32_le(nc, 0)                               // je found
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x83); nc_emit_byte(nc, 0x3a); nc_emit_byte(nc, 0xff)     // cmp qword [rdx], -1
+    let je2_patch = (*nc).code.len + 2
+    nc_emit_byte(nc, 0x0f); nc_emit_byte(nc, 0x84); nc_emit_u32_le(nc, 0)                               // je found (catch-all)
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x83); nc_emit_byte(nc, 0xc2); nc_emit_byte(nc, 0x18)     // add rdx, 24
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0xff); nc_emit_byte(nc, 0xc9)                              // dec rcx
+    let back_pos = (*nc).code.len
+    nc_emit_byte(nc, 0xe9); nc_emit_u32_le(nc, scan_pos - (back_pos + 5))
+    let found_pos = (*nc).code.len
+    nc_patch_u32_le(nc, je_patch, found_pos - (je_patch + 4))
+    nc_patch_u32_le(nc, je2_patch, found_pos - (je2_patch + 4))
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x8b); nc_emit_byte(nc, 0x42); nc_emit_byte(nc, 0x08)     // mov rax, [rdx+8]
+    nc_emit_byte(nc, 0x53)                                                    // push rbx (backend clobbers rbx in calls)
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x89); nc_emit_byte(nc, 0xdf)                              // mov rdi, rbx
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x8b); nc_emit_byte(nc, 0xb3)                              // mov rsi, [rbx+408]
+    nc_emit_byte(nc, 0x98); nc_emit_byte(nc, 0x01); nc_emit_byte(nc, 0x00); nc_emit_byte(nc, 0x00)
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x8b); nc_emit_byte(nc, 0x93)                              // mov rdx, [rbx+416]
+    nc_emit_byte(nc, 0xa0); nc_emit_byte(nc, 0x01); nc_emit_byte(nc, 0x00); nc_emit_byte(nc, 0x00)
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x8b); nc_emit_byte(nc, 0x8b)                              // mov rcx, [rbx+424]
+    nc_emit_byte(nc, 0xa8); nc_emit_byte(nc, 0x01); nc_emit_byte(nc, 0x00); nc_emit_byte(nc, 0x00)
+    nc_emit_byte(nc, 0x4c); nc_emit_byte(nc, 0x8b); nc_emit_byte(nc, 0x83)                              // mov r8, [rbx+432]
+    nc_emit_byte(nc, 0xb0); nc_emit_byte(nc, 0x01); nc_emit_byte(nc, 0x00); nc_emit_byte(nc, 0x00)
+    nc_emit_byte(nc, 0x4c); nc_emit_byte(nc, 0x8b); nc_emit_byte(nc, 0x8b)                              // mov r9, [rbx+440]
+    nc_emit_byte(nc, 0xb8); nc_emit_byte(nc, 0x01); nc_emit_byte(nc, 0x00); nc_emit_byte(nc, 0x00)
+    nc_emit_call_rax(nc)
+    nc_emit_byte(nc, 0x5b)                                                    // pop rbx
+    let jmp_end = (*nc).code.len + 1
+    nc_emit_byte(nc, 0xe9); nc_emit_u32_le(nc, 0)
+    let trap_pos = (*nc).code.len
+    nc_patch_u32_le(nc, jz_patch, trap_pos - (jz_patch + 4))
+    nc_emit_byte(nc, 0x0f); nc_emit_byte(nc, 0x0b)                            // ud2 (no such clause)
+    let end_pos = (*nc).code.len
+    nc_patch_u32_le(nc, jmp_end, end_pos - (jmp_end + 4))
+}
+
+// Apply the return clause (if any) to [rbx+80] -> [rbx+64]. rbx = frame.
+fn emit_fx_apply_ret_block(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_load_rax_mem_rbx_disp32(nc, 88)                                   // mov rax, [rbx+88]
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x85); nc_emit_byte(nc, 0xc0)    // test rax, rax
+    let jz_patch = (*nc).code.len + 2
+    nc_emit_byte(nc, 0x0f); nc_emit_byte(nc, 0x84); nc_emit_u32_le(nc, 0)     // jz no_ret
+    nc_emit_byte(nc, 0x53)                                                    // push rbx
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x89); nc_emit_byte(nc, 0xdf)    // mov rdi, rbx
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x8b); nc_emit_byte(nc, 0x73); nc_emit_byte(nc, 0x50)  // mov rsi, [rbx+80]
+    nc_emit_call_rax(nc)
+    nc_emit_byte(nc, 0x5b)                                                    // pop rbx
+    nc_emit_store_rax_mem_rbx_disp32(nc, 64)                                  // mov [rbx+64], rax
+    let jmp_patch = (*nc).code.len + 1
+    nc_emit_byte(nc, 0xe9); nc_emit_u32_le(nc, 0)                             // jmp end
+    let noret_pos = (*nc).code.len
+    nc_patch_u32_le(nc, jz_patch, noret_pos - (jz_patch + 4))
+    nc_emit_load_rax_mem_rbx_disp32(nc, 80)                                   // mov rax, [rbx+80]
+    nc_emit_store_rax_mem_rbx_disp32(nc, 64)                                  // mov [rbx+64], rax
+    let end_pos = (*nc).code.len
+    nc_patch_u32_le(nc, jmp_patch, end_pos - (jmp_patch + 4))
+}
+
+fn emit_builtin_fx_install_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    // Preserve the HOST callee-saved set: the fabricated body frame must
+    // restore them verbatim, because the body is host code continuing right
+    // after this call on the segment stack.
+    nc_emit_byte(nc, 0x55)                                                    // push rbp
+    nc_emit_byte(nc, 0x53)                                                    // push rbx
+    nc_emit_byte(nc, 0x41); nc_emit_byte(nc, 0x54)                            // push r12
+    nc_emit_byte(nc, 0x41); nc_emit_byte(nc, 0x55)                            // push r13
+    nc_emit_byte(nc, 0x41); nc_emit_byte(nc, 0x56)                            // push r14
+    nc_emit_byte(nc, 0x41); nc_emit_byte(nc, 0x57)                            // push r15
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x89); nc_emit_byte(nc, 0xfb)    // mov rbx, rdi
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x8b); nc_emit_byte(nc, 0x43); nc_emit_byte(nc, 0x30)  // mov rax, [rbx+48] (install_ip slot doubles as save)
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x89); nc_emit_byte(nc, 0x83)
+    nc_emit_byte(nc, 0xd8); nc_emit_byte(nc, 0x01); nc_emit_byte(nc, 0x00); nc_emit_byte(nc, 0x00)  // mov [rbx+472], rax (scratch, word 59)
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x8b); nc_emit_byte(nc, 0x44); nc_emit_byte(nc, 0x24); nc_emit_byte(nc, 0x30)  // mov rax, [rsp+48] (host retaddr)
+    nc_emit_store_rax_mem_rbx_disp32(nc, 40)                                  // install_ip
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x8d); nc_emit_byte(nc, 0x44); nc_emit_byte(nc, 0x24); nc_emit_byte(nc, 0x38)  // lea rax, [rsp+56]
+    nc_emit_store_rax_mem_rbx_disp32(nc, 32)                                  // install_rsp = host rsp after retaddr
+    // mmap(NULL, 1MB, PROT_READ|WRITE=3, MAP_PRIVATE|ANON=34, -1, 0)
+    nc_emit_byte(nc, 0x31); nc_emit_byte(nc, 0xff)                            // xor edi, edi
+    nc_emit_mov_reg_imm(nc, 6, 1048576)                                       // rsi = len
+    nc_emit_mov_reg_imm(nc, 2, 3)                                             // rdx = prot
+    nc_emit_mov_r10_imm32(nc, 34)                                             // r10 = flags
+    nc_emit_byte(nc, 0x49); nc_emit_byte(nc, 0xc7); nc_emit_byte(nc, 0xc0)
+    nc_emit_byte(nc, 0xff); nc_emit_byte(nc, 0xff); nc_emit_byte(nc, 0xff); nc_emit_byte(nc, 0xff)  // mov r8, -1
+    nc_emit_byte(nc, 0x4d); nc_emit_byte(nc, 0x31); nc_emit_byte(nc, 0xc9)    // xor r9, r9
+    nc_emit_mov_rax_imm(nc, 9)
+    nc_emit_syscall(nc)
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x85); nc_emit_byte(nc, 0xc0)    // test rax, rax
+    let js_patch = (*nc).code.len + 2
+    nc_emit_byte(nc, 0x0f); nc_emit_byte(nc, 0x88); nc_emit_u32_le(nc, 0)     // js trap
+    nc_emit_store_rax_mem_rbx_disp32(nc, 0)                                   // seg_base
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0xc7); nc_emit_byte(nc, 0x43); nc_emit_byte(nc, 0x08)
+    nc_emit_byte(nc, 0x00); nc_emit_byte(nc, 0x00); nc_emit_byte(nc, 0x10); nc_emit_byte(nc, 0x00)  // mov qword [rbx+8], 1MB
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x89); nc_emit_byte(nc, 0xc1)    // mov rcx, rax
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x81); nc_emit_byte(nc, 0xc1)
+    nc_emit_byte(nc, 0xc0); nc_emit_byte(nc, 0xff); nc_emit_byte(nc, 0x0f); nc_emit_byte(nc, 0x00)  // add rcx, 1MB-64
+    // Fabricate the body frame from the saved host regs still on the stack:
+    // pops restore r15,r14,r13,r12,rbx,rbp then ret pops the host retaddr.
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x8b); nc_emit_byte(nc, 0x04); nc_emit_byte(nc, 0x24)  // mov rax, [rsp] (saved r15)
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x89); nc_emit_byte(nc, 0x01)                          // mov [rcx], rax
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x8b); nc_emit_byte(nc, 0x44); nc_emit_byte(nc, 0x24); nc_emit_byte(nc, 0x08)  // saved r14
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x89); nc_emit_byte(nc, 0x41); nc_emit_byte(nc, 0x08)
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x8b); nc_emit_byte(nc, 0x44); nc_emit_byte(nc, 0x24); nc_emit_byte(nc, 0x10)  // saved r13
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x89); nc_emit_byte(nc, 0x41); nc_emit_byte(nc, 0x10)
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x8b); nc_emit_byte(nc, 0x44); nc_emit_byte(nc, 0x24); nc_emit_byte(nc, 0x18)  // saved r12
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x89); nc_emit_byte(nc, 0x41); nc_emit_byte(nc, 0x18)
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x8b); nc_emit_byte(nc, 0x44); nc_emit_byte(nc, 0x24); nc_emit_byte(nc, 0x20)  // saved rbx
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x89); nc_emit_byte(nc, 0x41); nc_emit_byte(nc, 0x20)
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x8b); nc_emit_byte(nc, 0x44); nc_emit_byte(nc, 0x24); nc_emit_byte(nc, 0x28)  // saved rbp
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x89); nc_emit_byte(nc, 0x41); nc_emit_byte(nc, 0x28)
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x8b); nc_emit_byte(nc, 0x43); nc_emit_byte(nc, 0x28)  // mov rax, [rbx+40] (install_ip)
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x89); nc_emit_byte(nc, 0x41); nc_emit_byte(nc, 0x30)  // mov [rcx+48], rax
+    // Drive segment (256 KB): fx_install parks its context here so later
+    // host-stack traffic can never overwrite the saved driver context.
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x89); nc_emit_byte(nc, 0x4b); nc_emit_byte(nc, 0x10)  // mov [rbx+16], rcx (body_ctx)
+    nc_emit_byte(nc, 0x31); nc_emit_byte(nc, 0xff)                            // xor edi, edi
+    nc_emit_mov_reg_imm(nc, 6, 262144)                                        // rsi = len
+    nc_emit_mov_reg_imm(nc, 2, 3)                                             // rdx = prot
+    nc_emit_mov_r10_imm32(nc, 34)                                             // r10 = flags
+    nc_emit_byte(nc, 0x49); nc_emit_byte(nc, 0xc7); nc_emit_byte(nc, 0xc0)
+    nc_emit_byte(nc, 0xff); nc_emit_byte(nc, 0xff); nc_emit_byte(nc, 0xff); nc_emit_byte(nc, 0xff)  // mov r8, -1
+    nc_emit_byte(nc, 0x4d); nc_emit_byte(nc, 0x31); nc_emit_byte(nc, 0xc9)    // xor r9, r9
+    nc_emit_mov_rax_imm(nc, 9)
+    nc_emit_syscall(nc)
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x85); nc_emit_byte(nc, 0xc0)    // test rax, rax
+    let js2_patch = (*nc).code.len + 2
+    nc_emit_byte(nc, 0x0f); nc_emit_byte(nc, 0x88); nc_emit_u32_le(nc, 0)     // js trap
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x05)
+    nc_emit_byte(nc, 0x00); nc_emit_byte(nc, 0x00); nc_emit_byte(nc, 0x04); nc_emit_byte(nc, 0x00)  // add rax, 256K
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x89); nc_emit_byte(nc, 0x83)
+    nc_emit_byte(nc, 0xe0); nc_emit_byte(nc, 0x01); nc_emit_byte(nc, 0x00); nc_emit_byte(nc, 0x00)  // mov [rbx+480], rax (drive top, word 60)
+
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0xc7); nc_emit_byte(nc, 0x43); nc_emit_byte(nc, 0x30)
+    nc_emit_byte(nc, 0x01); nc_emit_byte(nc, 0x00); nc_emit_byte(nc, 0x00); nc_emit_byte(nc, 0x00)  // state = parked
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x8b); nc_emit_byte(nc, 0xa3)
+    nc_emit_byte(nc, 0xe0); nc_emit_byte(nc, 0x01); nc_emit_byte(nc, 0x00); nc_emit_byte(nc, 0x00)  // mov rsp, [rbx+480]
+    nc_emit_byte(nc, 0x31); nc_emit_byte(nc, 0xd2)                            // xor edx, edx
+    emit_fx_switch_inline(nc, 24, 16)
+    // wake: state tells the cause
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x83); nc_emit_byte(nc, 0x7b); nc_emit_byte(nc, 0x30); nc_emit_byte(nc, 0x02)  // cmp qword [rbx+48], 2
+    let je_done = (*nc).code.len + 2
+    nc_emit_byte(nc, 0x0f); nc_emit_byte(nc, 0x84); nc_emit_u32_le(nc, 0)     // je done
+    emit_fx_dispatch_block(nc)
+    nc_emit_store_rax_mem_rbx_disp32(nc, 64)                                  // answer = clause value
+    let jmp_fin = (*nc).code.len + 1
+    nc_emit_byte(nc, 0xe9); nc_emit_u32_le(nc, 0)                             // jmp finish
+    let done_pos = (*nc).code.len
+    nc_patch_u32_le(nc, je_done, done_pos - (je_done + 4))
+    emit_fx_apply_ret_block(nc)
+    let fin_pos = (*nc).code.len
+    nc_patch_u32_le(nc, jmp_fin, fin_pos - (jmp_fin + 4))
+    // finish: unmap and return to the host continuation with rax=1
+    emit_fx_return_to_host(nc)
+    let trap_pos = (*nc).code.len
+    nc_patch_u32_le(nc, js_patch, trap_pos - (js_patch + 4))
+    nc_patch_u32_le(nc, js2_patch, trap_pos - (js2_patch + 4))
+    nc_emit_byte(nc, 0x0f); nc_emit_byte(nc, 0x0b)                            // ud2
+}
+
+fn emit_builtin_fx_perform_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    // (frame=rdi, eff=rsi, op=rdx, skip=rcx)
+    nc_emit_byte(nc, 0x57)                                                    // push rdi (origin frame)
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x85); nc_emit_byte(nc, 0xc9)    // test rcx, rcx
+    let jz_walk = (*nc).code.len + 2
+    nc_emit_byte(nc, 0x0f); nc_emit_byte(nc, 0x84); nc_emit_u32_le(nc, 0)     // jz walk
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x8b); nc_emit_byte(nc, 0x7f); nc_emit_byte(nc, 0x60)  // mov rdi, [rdi+96]
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x85); nc_emit_byte(nc, 0xff)    // test rdi, rdi
+    let jz_trap = (*nc).code.len + 2
+    nc_emit_byte(nc, 0x0f); nc_emit_byte(nc, 0x84); nc_emit_u32_le(nc, 0)     // jz trap
+    let walk_pos = (*nc).code.len
+    nc_patch_u32_le(nc, jz_walk, walk_pos - (jz_walk + 4))
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x39); nc_emit_byte(nc, 0x77); nc_emit_byte(nc, 0x68)  // cmp [rdi+104], rsi
+    let je_found = (*nc).code.len + 2
+    nc_emit_byte(nc, 0x0f); nc_emit_byte(nc, 0x84); nc_emit_u32_le(nc, 0)     // je found
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x8b); nc_emit_byte(nc, 0x7f); nc_emit_byte(nc, 0x60)  // mov rdi, [rdi+96]
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x85); nc_emit_byte(nc, 0xff)    // test rdi, rdi
+    let back_pos = (*nc).code.len
+    nc_emit_byte(nc, 0x0f); nc_emit_byte(nc, 0x85); nc_emit_u32_le(nc, walk_pos - (back_pos + 6))  // jnz walk
+    let trap_pos = (*nc).code.len
+    nc_patch_u32_le(nc, jz_trap, trap_pos - (jz_trap + 4))
+    nc_emit_byte(nc, 0x0f); nc_emit_byte(nc, 0x0b)                            // ud2
+    let found_pos = (*nc).code.len
+    nc_patch_u32_le(nc, je_found, found_pos - (je_found + 4))
+    // The walk may have selected an outer frame while the arguments were
+    // written into the origin frame mailbox: copy them over.
+    nc_emit_byte(nc, 0x58)                                                    // pop rax (origin)
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x39); nc_emit_byte(nc, 0xf8)    // cmp rax, rdi
+    let je_copy = (*nc).code.len + 2
+    nc_emit_byte(nc, 0x0f); nc_emit_byte(nc, 0x84); nc_emit_u32_le(nc, 0)     // je skip_copy
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x89); nc_emit_byte(nc, 0xc6)    // mov rsi, rax
+    nc_emit_byte(nc, 0x49); nc_emit_byte(nc, 0x89); nc_emit_byte(nc, 0xf8)    // mov r8, rdi
+    nc_emit_byte(nc, 0xb9); nc_emit_byte(nc, 0x08); nc_emit_byte(nc, 0x00); nc_emit_byte(nc, 0x00); nc_emit_byte(nc, 0x00)  // mov ecx, 8
+    let copy_pos = (*nc).code.len
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x8b); nc_emit_byte(nc, 0x86); nc_emit_byte(nc, 0x98); nc_emit_byte(nc, 0x01); nc_emit_byte(nc, 0x00); nc_emit_byte(nc, 0x00)  // mov rax, [rsi+408]
+    nc_emit_byte(nc, 0x49); nc_emit_byte(nc, 0x89); nc_emit_byte(nc, 0x80); nc_emit_byte(nc, 0x98); nc_emit_byte(nc, 0x01); nc_emit_byte(nc, 0x00); nc_emit_byte(nc, 0x00)  // mov [r8+408], rax
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x83); nc_emit_byte(nc, 0xc6); nc_emit_byte(nc, 0x08)  // add rsi, 8
+    nc_emit_byte(nc, 0x49); nc_emit_byte(nc, 0x83); nc_emit_byte(nc, 0xc0); nc_emit_byte(nc, 0x08)  // add r8, 8
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0xff); nc_emit_byte(nc, 0xc9)    // dec rcx
+    let jnz_copy = (*nc).code.len + 2
+    nc_emit_byte(nc, 0x0f); nc_emit_byte(nc, 0x85); nc_emit_u32_le(nc, copy_pos - (jnz_copy + 4))  // jnz copy_pos
+    let skip_copy = (*nc).code.len
+    nc_patch_u32_le(nc, je_copy, skip_copy - (je_copy + 4))
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x89); nc_emit_byte(nc, 0x57); nc_emit_byte(nc, 0x38)  // mov [rdi+56], rdx
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0xc7); nc_emit_byte(nc, 0x47); nc_emit_byte(nc, 0x30)
+    nc_emit_byte(nc, 0x01); nc_emit_byte(nc, 0x00); nc_emit_byte(nc, 0x00); nc_emit_byte(nc, 0x00)  // state = parked
+    nc_emit_byte(nc, 0x53)                                                    // push rbx
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x89); nc_emit_byte(nc, 0xfb)    // mov rbx, rdi
+    nc_emit_byte(nc, 0x31); nc_emit_byte(nc, 0xd2)                            // xor edx, edx
+    emit_fx_switch_inline(nc, 16, 24)
+    nc_emit_load_rax_mem_rbx_disp32(nc, 72)                                   // rax = resume_val
+    nc_emit_byte(nc, 0x5b)                                                    // pop rbx
+    nc_emit_ret(nc)
+}
+
+fn emit_builtin_fx_resume_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    // (frame=rdi, w=rsi)
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x83); nc_emit_byte(nc, 0x7f); nc_emit_byte(nc, 0x30); nc_emit_byte(nc, 0x01)  // cmp qword [rdi+48], 1
+    let jne_trap = (*nc).code.len + 2
+    nc_emit_byte(nc, 0x0f); nc_emit_byte(nc, 0x85); nc_emit_u32_le(nc, 0)     // jne trap
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x89); nc_emit_byte(nc, 0x77); nc_emit_byte(nc, 0x48)  // mov [rdi+72], rsi
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0xc7); nc_emit_byte(nc, 0x47); nc_emit_byte(nc, 0x30)
+    nc_emit_byte(nc, 0x00); nc_emit_byte(nc, 0x00); nc_emit_byte(nc, 0x00); nc_emit_byte(nc, 0x00)  // state = running
+    nc_emit_byte(nc, 0x53)                                                    // push rbx
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x89); nc_emit_byte(nc, 0xfb)    // mov rbx, rdi
+    nc_emit_load_rax_mem_rbx_disp32(nc, 72)
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x89); nc_emit_byte(nc, 0xc2)    // mov rdx, rax
+    emit_fx_switch_inline(nc, 24, 16)
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x83); nc_emit_byte(nc, 0x7b); nc_emit_byte(nc, 0x30); nc_emit_byte(nc, 0x02)  // cmp state, 2
+    let je_done = (*nc).code.len + 2
+    nc_emit_byte(nc, 0x0f); nc_emit_byte(nc, 0x84); nc_emit_u32_le(nc, 0)     // je done
+    emit_fx_dispatch_block(nc)
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x83); nc_emit_byte(nc, 0x7b); nc_emit_byte(nc, 0x30); nc_emit_byte(nc, 0x01)  // cmp state, 1
+    let je_abort = (*nc).code.len + 2
+    nc_emit_byte(nc, 0x0f); nc_emit_byte(nc, 0x84); nc_emit_u32_le(nc, 0)     // je abort
+    // clause threaded a done value: rax is the answer
+    nc_emit_store_rax_mem_rbx_disp32(nc, 64)
+    nc_emit_byte(nc, 0x5b)                                                    // pop rbx
+    nc_emit_ret(nc)
+    let abort_pos = (*nc).code.len
+    nc_patch_u32_le(nc, je_abort, abort_pos - (je_abort + 4))
+    // The resumed body parked on a new event: dispatch it on this driver.
+    // A clause that does not resume makes its value the handle answer and
+    // abandons the suspended body and clause continuation: go to the host.
+    emit_fx_dispatch_block(nc)
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x83); nc_emit_byte(nc, 0x7b); nc_emit_byte(nc, 0x30); nc_emit_byte(nc, 0x02)  // cmp state, 2
+    let je_done2 = (*nc).code.len + 2
+    nc_emit_byte(nc, 0x0f); nc_emit_byte(nc, 0x84); nc_emit_u32_le(nc, 0)     // je done
+    nc_emit_store_rax_mem_rbx_disp32(nc, 64)
+    emit_fx_return_to_host(nc)
+    let done_pos = (*nc).code.len
+    nc_patch_u32_le(nc, je_done, done_pos - (je_done + 4))
+    nc_patch_u32_le(nc, je_done2, done_pos - (je_done2 + 4))
+    emit_fx_apply_ret_block(nc)
+    nc_emit_load_rax_mem_rbx_disp32(nc, 64)
+    nc_emit_byte(nc, 0x5b)                                                    // pop rbx
+    nc_emit_ret(nc)
+    let trap_pos = (*nc).code.len
+    nc_patch_u32_le(nc, jne_trap, trap_pos - (jne_trap + 4))
+    nc_emit_byte(nc, 0x0f); nc_emit_byte(nc, 0x0b)                            // ud2
+}
+
+fn emit_builtin_fx_body_done_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    // (frame=rdi, value=rsi); never returns to the body
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x89); nc_emit_byte(nc, 0x77); nc_emit_byte(nc, 0x50)  // mov [rdi+80], rsi
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0xc7); nc_emit_byte(nc, 0x47); nc_emit_byte(nc, 0x30)
+    nc_emit_byte(nc, 0x02); nc_emit_byte(nc, 0x00); nc_emit_byte(nc, 0x00); nc_emit_byte(nc, 0x00)  // state = done
+    nc_emit_byte(nc, 0x53)                                                    // push rbx
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x89); nc_emit_byte(nc, 0xfb)    // mov rbx, rdi
+    nc_emit_byte(nc, 0x31); nc_emit_byte(nc, 0xd2)                            // xor edx, edx
+    emit_fx_switch_inline(nc, 16, 24)
+    nc_emit_byte(nc, 0x0f); nc_emit_byte(nc, 0x0b)                            // ud2 (unreachable)
+}
 
 fn emit_builtin_heap_alloc_into(nc: &! NativeCompiler) with Mut, Panic, Div {
     // Reject n <= 0 before anything is pushed.
@@ -9892,6 +10266,10 @@ pub fn native_v2_builtin_id_for_name(name: Name) -> i64 with Mut, Panic, Div {
         if name_is_ffi_exit(name) { return 41 }
         if name_is_ffi_abort(name) { return 42 }
         if name_is_ffi_malloc(name) { return 43 }
+        if name_is___sounio_fx_install(name) { return 76 }
+        if name_is___sounio_fx_perform(name) { return 77 }
+        if name_is___sounio_fx_resume(name) { return 78 }
+        if name_is___sounio_fx_body_done(name) { return 79 }
         if name_is_ffi_free(name) { return 44 }
         if name_is_ffi_system(name) { return 45 }
         if name_is_ffi_sqrt(name) { return 46 }
@@ -9936,6 +10314,10 @@ fn native_v2_emit_builtin_by_id_into(nc: &! NativeCompiler, builtin_id: i64) wit
     // signature shape (rdi in, rax out) and a matched pair — heap_free
     // recovers the mapping length heap_alloc stores at ptr-8 (#874 ABI).
     if builtin_id == 43 { emit_builtin_heap_alloc_into(nc); return }
+    if builtin_id == 76 { emit_builtin_fx_install_into(nc); return }
+    if builtin_id == 77 { emit_builtin_fx_perform_into(nc); return }
+    if builtin_id == 78 { emit_builtin_fx_resume_into(nc); return }
+    if builtin_id == 79 { emit_builtin_fx_body_done_into(nc); return }
     if builtin_id == 44 { emit_builtin_heap_free_into(nc); return }
     if builtin_id == 45 { emit_builtin_ffi_system_into(nc); return }
     if builtin_id == 46 { native_v2_persist_builtin_emit_into(nc, emit_builtin_ffi_sqrt((*nc))); return }
