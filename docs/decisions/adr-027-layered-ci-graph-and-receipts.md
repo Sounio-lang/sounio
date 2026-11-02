@@ -386,3 +386,32 @@ builds are not redirected to the producer cache.
 Acceptance requires a complete hosted cold run, unchanged selected-step
 coverage across the matrix, cache save evidence, then hosted verified warm hits.
 No warm latency gain is claimed from static tests or a cache transport hit alone.
+
+### Canonical full-suite shards and effective worker limits
+
+The efc02646f3 run found one fresh failure: pbpk28_extract_only exceeded the
+unchanged30-second wrapper budget. The predecessor completed that case in17
+seconds. The failed run's log reported seven workers although the workflow
+passed --jobs4: the harness's dynamic policy can raise explicit job counts.
+This establishes a configuration mismatch, not a proven numerical defect or a
+complete explanation of the timeout. No timeout, case, tolerance or model code
+is changed to absorb the failure.
+
+Full Test Suite now runs four required shards, two workers each, with dynamic
+scaling explicitly disabled via the existing SOUNIO_TEST_JOBS_DYNAMIC switch.
+Each shard invokes the public canonical harness's --list-tests, partitions that
+inventory, and proves the sorted union has no omitted or duplicated path before
+running its selected list. No second copy of the harness globs is maintained.
+The same fresh stage2 artifact is downloaded independently by all four shards.
+Receipts retain the canonical/selected lists, shard identity, source SHA, compiler
+hash and JUnit results. Artifact names include shard and run attempt. The qd128
+accuracy replay runs once on shard0 and remains part of the required matrix
+verdict. Fail-fast remains disabled so another shard's failure cannot erase
+coverage evidence. CI Decision still requires the entire selected matrix.
+
+Fixtures use a small canonical-list provider and a compiler that must never be
+invoked. They reject missing/duplicated partition entries and lost matrix shards,
+worker-bound removal, incorrect list routing and disconnected accuracy replay.
+Acceptance requires all four hosted shards, effective worker-count receipts,
+exact canonical-list coverage and the unchanged PBPK test passing within its
+original budget. Historical warm/cold measurements do not qualify a new head.

@@ -95,6 +95,8 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+      - name: Canonical full suite partition contract
+        run: node scripts/ci/full_suite_partition_contract.mjs "$GITHUB_WORKSPACE" --selftest
       - name: Contracts partition and compiler cache wiring contract
         run: node scripts/ci/contracts_parallel_contract.mjs "$GITHUB_WORKSPACE" --selftest
       - name: Deep-science worker failure controls
@@ -1969,13 +1971,17 @@ jobs:
           retention-days: 1
 
   full-test-suite:
-    name: Full Test Suite
+    name: Full Test Suite (${{ matrix.shard }})
     runs-on: ubuntu-24.04
     needs: [impact, fast-checks, native-selfhost-linux-x86_64]
     if: ${{ !cancelled() && (needs.impact.outputs.compiler == 'true' || needs.impact.outputs.runtime == 'true' || needs.impact.outputs.stdlib == 'true' || needs.impact.outputs.tests == 'true' || needs.impact.outputs.full == 'true') && needs.native-selfhost-linux-x86_64.result == 'success' }}
     # The full compiler/test suite routinely exceeds the former 15-minute cap.
     # Let it produce a completed result so CI Decision can evaluate the suite.
     timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
     steps:
       - uses: actions/checkout@v4
       - name: Materialize the committed Madaros prebuilt
@@ -1988,10 +1994,15 @@ jobs:
       - name: Run full test suite
         env:
           SOUNIO_TEST_SOUC_BIN: /tmp/souc-stage2
-          SOUNIO_TEST_JOBS: 4
+          SOUNIO_TEST_JOBS: 2
+          SOUNIO_TEST_JOBS_DYNAMIC: "0"
+          FULL_SUITE_SHARD: ${{ matrix.shard }}
         run: |
+          set -euo pipefail
           chmod +x /tmp/souc-stage2
-          bash scripts/run_sio_test_suite.sh --format junit --jobs 4
+          bash scripts/ci/full_suite_partition.sh "$FULL_SUITE_SHARD" "$RUNNER_TEMP/full-suite"
+          bash scripts/run_sio_test_suite.sh --test-list "$RUNNER_TEMP/full-suite/selected.list" --format junit --jobs 2 2>&1 | tee "$RUNNER_TEMP/full-suite/console.log"
+          grep -Fxq "Parallel jobs: 2" "$RUNNER_TEMP/full-suite/console.log"
       # Numeric accuracy is not something the run-pass harness above can
       # measure: a transcendental that quietly degrades from 212 bits of
       # mantissa to 106 still exits 0 on every identity test. This replays the
@@ -2007,15 +2018,21 @@ jobs:
       # repo default engine instead. Measured 2026-09-02: the two engines return
       # an identical corpus, so nothing is lost by using the default.
       - name: qd128 transcendental accuracy (mpmath corpus replay)
+        if: matrix.shard == 0
         env:
           SOUNIO_STDLIB_PATH: ${{ github.workspace }}/stdlib
         run: bash scripts/ci/qd128_transcendental_accuracy_gate.sh
+      - name: Collect suite shard receipts
+        if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/full-suite"
+          if [[ -f test-results.xml ]]; then cp test-results.xml "$RUNNER_TEMP/full-suite/"; fi
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: test-results
-          path: test-results.xml
+          name: test-results-${{ matrix.shard }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/full-suite/
           retention-days: 30
 
   slow-lane:
