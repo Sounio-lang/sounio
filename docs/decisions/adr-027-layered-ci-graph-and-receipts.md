@@ -9,7 +9,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.decisions.adr-
 
 # ADR-027: Layered CI, graph-directed test selection and receipts as the unit of evidence
 
-**Status**: accepted for phase 1 (this PR); phases 2–4 proposed
+**Status**: phase 1 and current-source compiler fan-out implemented in this PR; remaining phases proposed
 **Date**: 2026-11-01
 **Builds on**: [ADR-018](adr-018-release-cycle-and-versioning.md) (release trains, changelog fragments), [ADR-009](adr-009-verified-foreign-reference.md) (verified foreign reference oracles, the MPFR witness pattern §4.2 generalizes)
 **Grounded in**: the measurement in §1, reproducible with the commands given there
@@ -238,3 +238,36 @@ the board:
 - **Never cancel on main, never cancel on PR either.** Rejected: 166 PR
   runs in three days at 40 min each; superseded PR runs are wasted
   minutes with no verdict anyone reads.
+
+## 2026-11-02 implementation receipt
+
+The workflow now builds one receipt-bound current-source Linux compiler in
+`current-source-madaros`. Witness, Wave0, f64 and Deep Science depend directly
+on that producer and verify the artifact with a constrained composite action.
+Deep Science no longer waits for the entire Witness test job. SCO runs in a
+separate required job with its existing independent rebuild and mutated-source
+refusal controls preserved. Source-bootstrap and native self-host acceptance
+remain independent. No scientific gate was removed.
+
+CI Decision now requires both new jobs when selected, and the f64 evaluator
+includes stdlib impact to match its workflow guard. Positive compiler/stdlib
+fixtures and isolated failed/cancelled/skipped/missing controls cover selection.
+The action text is explicitly pinned by a small repository wiring contract; it
+is not presented as a general shell parser.
+
+Baseline metadata from PR #3413: head run 41433054775 took 2401 seconds;
+merge-group run 41438509619 took 2081 seconds. In the head run f64 took
+2193 seconds, macOS 1866, Deep Science 1023; independent Wave0 and Witness
+build steps took 428 and 369 seconds. The C++23 analyzer and projections are
+in docs/evidence/ci-latency-20261102. Skipped jobs with inverted timestamps
+are excluded explicitly. The analyzer ran on the Mac using Xcode C++23 after
+a Slurm metadata-analysis attempt failed; no Sounio compiler was built locally.
+These are baseline observations, not measured candidate speedups. Hosted CI
+and a completed merge-group run remain the acceptance gate for the new graph.
+
+Validation: receipt same-SHA reuse and tamper controls, impact/decision
+self-tests, eight action/graph mutation controls, actionlint 1.7.12 (shellcheck
+and pyflakes disabled), and diff whitespace checks. The optional coder-next
+review through darwin-llm failed at the MCP transport; no independent model
+approval is claimed. Primary review retained all SCO gate calls and the
+existing knowledge-runtime paths.

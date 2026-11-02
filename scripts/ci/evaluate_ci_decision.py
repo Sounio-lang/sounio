@@ -37,8 +37,14 @@ def main() -> int:
             truthy(impact.get(key)) for key in ("compiler", "runtime", "stdlib", "tests", "full")
         ),
         "source-bootstrap-selfhost-linux-x86_64": truthy(impact.get("compiler")) or truthy(impact.get("full")),
+        "current-source-madaros": any(
+            truthy(impact.get(key)) for key in ("compiler", "runtime", "stdlib", "tests", "full")
+        ),
+        "sco-current-source": any(
+            truthy(impact.get(key)) for key in ("compiler", "stdlib", "tests", "full")
+        ),
         "madaros-current-source-deref-f64": any(
-            truthy(impact.get(key)) for key in ("compiler", "tests", "full")
+            truthy(impact.get(key)) for key in ("compiler", "stdlib", "tests", "full")
         ),
         # ADR-027 §3: macOS arm64 is selected by the EVENT as well as by
         # impact. It is skipped on a pull request and required in the merge

@@ -161,7 +161,7 @@ json_sub() {
   printf '%s' "$out"
 }
 
-good_needs='{"impact":{"outputs":{"compiler":"false","runtime":"false","stdlib":"false","tests":"false","sio":"false","lean":"false","website":"false","full":"false"}},"contracts":{"result":"success"},"fast-checks":{"result":"success"},"native-selfhost-linux-x86_64":{"result":"skipped"},"source-bootstrap-selfhost-linux-x86_64":{"result":"skipped"},"madaros-current-source-deref-f64":{"result":"skipped"},"native-selfhost-macos-arm64":{"result":"skipped"},"full-test-suite":{"result":"skipped"},"madaros-witness-gate":{"result":"skipped"},"gate-wave-0":{"result":"skipped"},"sounio-lint":{"result":"skipped"},"lean-proofs":{"result":"skipped"},"website":{"result":"skipped"},"r6-corpus-sweep":{"result":"skipped"},"slow-lane":{"result":"skipped"}}'
+good_needs='{"impact":{"outputs":{"compiler":"false","runtime":"false","stdlib":"false","tests":"false","sio":"false","lean":"false","website":"false","full":"false"}},"contracts":{"result":"success"},"fast-checks":{"result":"success"},"native-selfhost-linux-x86_64":{"result":"skipped"},"source-bootstrap-selfhost-linux-x86_64":{"result":"skipped"},"current-source-madaros":{"result":"skipped"},"sco-current-source":{"result":"skipped"},"madaros-current-source-deref-f64":{"result":"skipped"},"native-selfhost-macos-arm64":{"result":"skipped"},"full-test-suite":{"result":"skipped"},"madaros-witness-gate":{"result":"skipped"},"gate-wave-0":{"result":"skipped"},"sounio-lint":{"result":"skipped"},"lean-proofs":{"result":"skipped"},"website":{"result":"skipped"},"r6-corpus-sweep":{"result":"skipped"},"slow-lane":{"result":"skipped"}}'
 # Both nightly signals pinned, like every other check below: a skipped
 # r6-corpus-sweep is only correct off the nightly cadence, and
 # is_nightly() (evaluate_ci_decision.py) treats GITHUB_EVENT_NAME=schedule and
@@ -181,7 +181,7 @@ if NEEDS_JSON="$bad_needs" python3 "$DECISION" >/dev/null 2>&1; then
   exit 1
 fi
 
-compiler_needs='{"impact":{"outputs":{"compiler":"true","runtime":"false","stdlib":"false","tests":"false","sio":"true","lean":"false","website":"false","full":"false"}},"contracts":{"result":"success"},"fast-checks":{"result":"success"},"native-selfhost-linux-x86_64":{"result":"success"},"source-bootstrap-selfhost-linux-x86_64":{"result":"success"},"madaros-current-source-deref-f64":{"result":"failure"},"native-selfhost-macos-arm64":{"result":"success"},"full-test-suite":{"result":"success"},"madaros-witness-gate":{"result":"success"},"gate-wave-0":{"result":"success"},"sounio-lint":{"result":"success"},"lean-proofs":{"result":"skipped"},"website":{"result":"skipped"},"r6-corpus-sweep":{"result":"skipped"},"slow-lane":{"result":"skipped"}}'
+compiler_needs='{"impact":{"outputs":{"compiler":"true","runtime":"false","stdlib":"false","tests":"false","sio":"true","lean":"false","website":"false","full":"false"}},"contracts":{"result":"success"},"fast-checks":{"result":"success"},"native-selfhost-linux-x86_64":{"result":"success"},"source-bootstrap-selfhost-linux-x86_64":{"result":"success"},"current-source-madaros":{"result":"success"},"sco-current-source":{"result":"success"},"madaros-current-source-deref-f64":{"result":"failure"},"native-selfhost-macos-arm64":{"result":"success"},"full-test-suite":{"result":"success"},"madaros-witness-gate":{"result":"success"},"gate-wave-0":{"result":"success"},"sounio-lint":{"result":"success"},"lean-proofs":{"result":"skipped"},"website":{"result":"skipped"},"r6-corpus-sweep":{"result":"skipped"},"slow-lane":{"result":"skipped"}}'
 if NEEDS_JSON="$compiler_needs" python3 "$DECISION" >/dev/null 2>&1; then
   echo "impact-ci-selftest: decision accepted failed current-source Madaros gate" >&2
   exit 1
@@ -290,10 +290,33 @@ NEEDS_JSON="$slow_skipped" GITHUB_EVENT_NAME=workflow_dispatch NIGHTLY_INPUT=fal
 
 node "$ROOT_DIR/scripts/ci/ci_decision_contract.mjs" "$ROOT_DIR" --selftest
 
-stdlib_needs='{"impact":{"outputs":{"compiler":"false","runtime":"false","stdlib":"true","tests":"false","sio":"true","lean":"false","website":"false","full":"false"}},"contracts":{"result":"success"},"fast-checks":{"result":"success"},"native-selfhost-linux-x86_64":{"result":"skipped"},"source-bootstrap-selfhost-linux-x86_64":{"result":"skipped"},"madaros-current-source-deref-f64":{"result":"skipped"},"native-selfhost-macos-arm64":{"result":"skipped"},"full-test-suite":{"result":"skipped"},"madaros-witness-gate":{"result":"success"},"sounio-lint":{"result":"success"},"lean-proofs":{"result":"skipped"},"website":{"result":"skipped"},"r6-corpus-sweep":{"result":"skipped"},"slow-lane":{"result":"skipped"}}'
+stdlib_needs='{"impact":{"outputs":{"compiler":"false","runtime":"false","stdlib":"true","tests":"false","sio":"true","lean":"false","website":"false","full":"false"}},"contracts":{"result":"success"},"fast-checks":{"result":"success"},"native-selfhost-linux-x86_64":{"result":"skipped"},"source-bootstrap-selfhost-linux-x86_64":{"result":"skipped"},"current-source-madaros":{"result":"skipped"},"sco-current-source":{"result":"skipped"},"madaros-current-source-deref-f64":{"result":"skipped"},"native-selfhost-macos-arm64":{"result":"skipped"},"full-test-suite":{"result":"skipped"},"madaros-witness-gate":{"result":"success"},"sounio-lint":{"result":"success"},"lean-proofs":{"result":"skipped"},"website":{"result":"skipped"},"r6-corpus-sweep":{"result":"skipped"},"slow-lane":{"result":"skipped"}}'
 if NEEDS_JSON="$stdlib_needs" python3 "$DECISION" >/dev/null 2>&1; then
   echo "impact-ci-selftest: decision accepted stdlib suite without native compiler/full suite" >&2
   exit 1
 fi
 
 echo 'IMPACT_CI_SELFTEST_PASS'
+
+# Newly selected producer and SCO controls must fail closed independently.
+for new_job in current-source-madaros sco-current-source; do
+  for state in failure cancelled skipped missing; do
+    bad=$(jq --arg job "$new_job" --arg state "$state" '.[$job].result=$state' <<< "$compiler_needs")
+    # Clear the original f64 negative so only the new job can cause rejection.
+    bad=$(jq '.["madaros-current-source-deref-f64"].result="success"' <<< "$bad")
+    if NEEDS_JSON="$bad" GITHUB_EVENT_NAME=push NIGHTLY_INPUT=false python3 "$DECISION" >/dev/null 2>&1; then
+      echo "decision accepted selected $new_job as $state" >&2; exit 1
+    fi
+  done
+done
+node "$ROOT_DIR/scripts/ci/current_source_ci_contract.mjs" "$ROOT_DIR" --selftest
+
+# Positive stdlib-only control prevents unrelated missing jobs masking a failure.
+stdlib_green=$(jq '.impact.outputs.compiler="false"|.impact.outputs.stdlib="true"' <<< "$compiler_green_needs")
+NEEDS_JSON="$stdlib_green" GITHUB_EVENT_NAME=push NIGHTLY_INPUT=false python3 "$DECISION" | grep -Fq CI_DECISION_PASS
+for job in current-source-madaros sco-current-source madaros-current-source-deref-f64; do
+  bad=$(jq --arg job "$job" '.[$job].result="skipped"' <<< "$stdlib_green")
+  if NEEDS_JSON="$bad" GITHUB_EVENT_NAME=push NIGHTLY_INPUT=false python3 "$DECISION" >/dev/null 2>&1; then
+    echo "decision accepted skipped stdlib-selected $job" >&2; exit 1
+  fi
+done
