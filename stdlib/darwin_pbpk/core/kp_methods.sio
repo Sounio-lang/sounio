@@ -237,9 +237,15 @@ fn kpm_dow(pow_v: f64, f_n: f64) -> f64 {
 // DIFFERENTIAL error between blood cells and tissue moves it, and extending to
 // more organs needs sourced RATIOS rather than sourced absolutes.
 pub fn kpm_rodgers_rowland(d: KpInputs) -> KpMember with Mut, Div, Panic {
-    let in_dom = kpm_rr_in_domain(d)
+    return KpMember { kpu: kpm_rr_kpu_ph(d, kpm_ph_cell_rr()),
+                      in_domain: kpm_rr_in_domain(d), calibrated: false, code: 0 }
+}
+
+// The Kpu body with the intracellular pH passed in, so that kpm_blindness can
+// perturb a SHARED input across every member.  kpm_rodgers_rowland calls it
+// with this method's native pH, so the oracle-validated numbers are unchanged.
+fn kpm_rr_kpu_ph(d: KpInputs, ph_c: f64) -> f64 with Mut, Div, Panic {
     let p  = kpm_pow10(d.log_p)
-    let ph_c = kpm_ph_cell_rr()
     let ht = kpm_hematocrit()
 
     // ionisation ratios X (cell), Y (plasma), Z (blood cell)
@@ -294,8 +300,7 @@ pub fn kpm_rodgers_rowland(d: KpInputs) -> KpMember with Mut, Div, Panic {
         let kpu_bc = (d.rb - (1.0 - ht)) / (ht * d.fu_p)
         var ka = (kpu_bc - (1.0 + z) / (1.0 + y) * 0.63 - lip_bc / (1.0 + y)) * ((1.0 + y) / (0.57 * z))
         if ka < 0.0 { ka = 0.0 }
-        let kpu_s = iw_term + ka * 2.42 * x / (1.0 + y) + lip_mus / (1.0 + y)
-        return KpMember { kpu: kpu_s, in_domain: in_dom, calibrated: false, code: 0 }
+        return iw_term + ka * 2.42 * x / (1.0 + y) + lip_mus / (1.0 + y)
     }
 
     // Eq. 2 -- albumin route.  The albumin association term is itself
@@ -306,8 +311,7 @@ pub fn kpm_rodgers_rowland(d: KpInputs) -> KpMember with Mut, Div, Panic {
     let lip_pl = p * 0.0032 + (0.3 * p + 0.7) * 0.0021
     var ka_pr = 1.0 / d.fu_p - 1.0 - lip_pl / (1.0 + y)
     if ka_pr < 0.0 { ka_pr = 0.0 }
-    let kpu_w = iw_term + ka_pr * 0.064 + lip_mus / (1.0 + y)
-    return KpMember { kpu: kpu_w, in_domain: in_dom, calibrated: false, code: 0 }
+    return iw_term + ka_pr * 0.064 + lip_mus / (1.0 + y)
 }
 
 // Declared domain: Rodgers-Rowland was derived and validated for small
@@ -343,9 +347,12 @@ pub fn kpm_schmitt_raw(d: KpInputs) -> KpMember with Mut, Div, Panic {
 }
 
 fn kpm_schmitt_core(d: KpInputs) -> f64 with Mut, Div, Panic {
+    kpm_schmitt_core_ph(d, kpm_ph_cell_schmitt())
+}
+
+fn kpm_schmitt_core_ph(d: KpInputs, ph_c: f64) -> f64 with Mut, Div, Panic {
     let pow_v = kpm_pow10(d.log_p)
     let kn_pl = kpm_pow10(d.log_ma)
-    let ph_c  = kpm_ph_cell_schmitt()
 
     let f_n = kpm_f_neutral(d.pka, ph_c, d.is_base)
     let f_c = 1.0 - f_n
@@ -428,9 +435,12 @@ pub fn kpm_schmitt_pearce(d: KpInputs) -> KpMember with Mut, Div, Panic {
 // the olive-oil correlation to muscle understates the dominant lipid term by
 // 7.2x; that error is not made here.
 pub fn kpm_poulin_theil(d: KpInputs) -> KpMember with Mut, Div, Panic {
-    let in_dom = kpm_pt_in_domain(d)
+    return KpMember { kpu: kpm_pt_kpu_ph(d, kpm_ph_cell_pt()),
+                      in_domain: kpm_pt_in_domain(d), calibrated: false, code: 3 }
+}
+
+fn kpm_pt_kpu_ph(d: KpInputs, ph_c: f64) -> f64 with Mut, Div, Panic {
     let pow_v = kpm_pow10(d.log_p)       // n-octanol:water, muscle
-    let ph_c = kpm_ph_cell_pt()
 
     let im = if d.is_base { kpm_pow10(d.pka - ph_c) } else { 0.0 }
     let iw = if d.is_base { kpm_pow10(d.pka - kpm_ph_plasma()) } else { 0.0 }
@@ -447,8 +457,7 @@ pub fn kpm_poulin_theil(d: KpInputs) -> KpMember with Mut, Div, Panic {
     let piw = ((1.0 + iw) * 0.89) / (1.0 + iw) + pprw * 0.015
 
     // Peyret Tab. 2 cellular / interstitial split for muscle
-    let kpu = pcw * 0.877 + piw * 0.123
-    return KpMember { kpu: kpu, in_domain: in_dom, calibrated: false, code: 3 }
+    return pcw * 0.877 + piw * 0.123
 }
 
 // Declared domain: neutrals and WEAK bases.  Poulin-Theil has no acidic-
@@ -583,6 +592,136 @@ pub fn kpm_drug_neutral_logp3() -> KpInputs {
 pub fn kpm_drug_peptide() -> KpInputs {
     return KpInputs { log_p: 0.0 - 2.0, log_ma: 0.0, has_ma: false, pka: 0.0,
                       is_base: false, fu_p: 0.01, rb: 1.00, mw: 4813.0 }
+}
+
+// ============================================================================
+// BLINDNESS OF THE DISPERSION TO A SHARED INPUT
+// ============================================================================
+// The dispersion statistic above is computed over members that read OVERLAPPING
+// inputs: the same tissue composition, and -- hidden until measured -- a cell
+// pH that each method carries internally (Schmitt 6.81, Rodgers-Rowland and
+// Poulin-Theil 7.00, while tissue_composition.sio carries 6.97 for muscle).
+// An input that every member reads the same way moves every prediction together
+// and leaves the spread almost unchanged, so the dispersion cannot see it.
+//
+// kpm_blindness measures that directly, over the ADMITTED, UNCALIBRATED members:
+//
+//     blindness = |d sd(ln Kpu)| / |d mean(ln Kpu)|
+//
+// It has an ANALYTIC CALIBRATION POINT, which is what makes it a scale and not
+// a vibe.  With exactly two admitted members, if a perturbation moves ONE of
+// them by delta and the other not at all, then d mean = delta/2 and
+// d sd = delta/sqrt(2), so blindness = 2/sqrt(2) = sqrt(2) ~ 1.41421.  That is
+// the "only one member sees it" reference, returned by
+// kpm_blindness_reference().  Zero means "every member sees it identically,
+// and the dispersion reports none of it".  T9 below pins the sqrt(2) case.
+//
+// MEASURED 2026-11-02, haloperidol at muscle, the two in-domain members
+// (Rodgers-Rowland and Schmitt raw; Poulin-Theil is refused for a strong base):
+//   cell pH, 6.60 -> 7.40   each prediction moves 5.19x and 5.72x, the mean of
+//                           ln Kpu moves -1.6962, the dispersion -0.0687
+//                           blindness 0.0405, i.e. 2.9% of the sqrt(2) reference
+//   log MA, +0.30           read only by Schmitt: blindness 1.41421 (= the
+//                           reference, exactly, as it must be)
+// So the dispersion is ~35x more responsive to an input one member reads than to
+// an input both read.  The consequence is unwelcome and is the point: the gate
+// makes the in-domain dispersion ROBUST to the shared pH (its span moves 1.10x
+// over 0.80 pH units, against 4.19x when the out-of-domain member is admitted),
+// and that robustness IS the blindness.  A dispersion-based term under-reports
+// exactly the inputs whose provenance is weakest -- cell pH carries the lowest
+// evidence weight in the composition table (tc_eps_ph = 0.40).
+//
+// LIMITS.  One drug, one tissue, two inputs.  The sqrt(2) reference holds only
+// for two admitted members; with three it is 3/sqrt(6) ~ 1.2247 for a
+// single-member perturbation, which is why kpm_blindness_reference takes the
+// member count.  Nothing here converts a dispersion into a standard
+// uncertainty; it bounds what a dispersion can and cannot register.
+
+// Perturbation codes for kpm_blindness.
+//   0  cell pH      -- SHARED: added to each member's own native pH
+//   1  log P        -- SHARED
+//   2  pKa          -- SHARED
+//   3  fu_p         -- SHARED
+//   4  log MA       -- read only by Schmitt (the single-member reference case)
+pub fn kpm_pert_ph() -> i32    { return 0 }
+pub fn kpm_pert_logp() -> i32  { return 1 }
+pub fn kpm_pert_pka() -> i32   { return 2 }
+pub fn kpm_pert_fu() -> i32    { return 3 }
+pub fn kpm_pert_ma() -> i32    { return 4 }
+
+// The analytic reference: a perturbation only ONE of n admitted members reads.
+// d mean = delta/n and d sd = delta*sqrt((n-1)/n)/sqrt(n-1) = delta/sqrt(n),
+// so the ratio is n/sqrt(n) = sqrt(n).
+pub fn kpm_blindness_reference(n: i32) -> f64 with Mut, Div {
+    if n < 2 { return 0.0 }
+    return kpm_sqrt(n as f64)
+}
+
+// Shifted input record for the codes that live in KpInputs.
+fn kpm_shift(d: KpInputs, code: i32, delta: f64) -> KpInputs {
+    if code == 1 { return KpInputs { log_p: d.log_p + delta, log_ma: d.log_ma, has_ma: d.has_ma,
+                                     pka: d.pka, is_base: d.is_base, fu_p: d.fu_p, rb: d.rb, mw: d.mw } }
+    if code == 2 { return KpInputs { log_p: d.log_p, log_ma: d.log_ma, has_ma: d.has_ma,
+                                     pka: d.pka + delta, is_base: d.is_base, fu_p: d.fu_p, rb: d.rb, mw: d.mw } }
+    if code == 3 { return KpInputs { log_p: d.log_p, log_ma: d.log_ma, has_ma: d.has_ma,
+                                     pka: d.pka, is_base: d.is_base, fu_p: d.fu_p + delta, rb: d.rb, mw: d.mw } }
+    if code == 4 { return KpInputs { log_p: d.log_p, log_ma: d.log_ma + delta, has_ma: d.has_ma,
+                                     pka: d.pka, is_base: d.is_base, fu_p: d.fu_p, rb: d.rb, mw: d.mw } }
+    return d
+}
+
+// Mean and sample sd of ln Kpu over the admitted, uncalibrated members, with
+// perturbation `code` of size `delta` applied.  n_out receives the count.
+fn kpm_ln_stats(d: KpInputs, code: i32, delta: f64, want_mean: bool) -> f64 with Mut, Div, Panic {
+    let dp = kpm_shift(d, code, delta)
+    let dph = if code == 0 { delta } else { 0.0 }
+    // domain is judged on the UNPERTURBED record, so a perturbation cannot
+    // silently change which members are admitted mid-measurement
+    var n = 0
+    var s = 0.0
+    var v0 = 0.0
+    var v1 = 0.0
+    var v2 = 0.0
+    if kpm_rr_in_domain(d) {
+        v0 = ln(kpm_rr_kpu_ph(dp, kpm_ph_cell_rr() + dph)); n = n + 1; s = s + v0
+    }
+    if kpm_schmitt_in_domain(d) {
+        v1 = ln(kpm_schmitt_core_ph(dp, kpm_ph_cell_schmitt() + dph)); n = n + 1; s = s + v1
+    }
+    if kpm_pt_in_domain(d) {
+        v2 = ln(kpm_pt_kpu_ph(dp, kpm_ph_cell_pt() + dph)); n = n + 1; s = s + v2
+    }
+    if n < 2 { return 0.0 - 1.0 }
+    let mu = s / (n as f64)
+    if want_mean { return mu }
+    var ss = 0.0
+    if kpm_rr_in_domain(d)      { let e = v0 - mu; ss = ss + e * e }
+    if kpm_schmitt_in_domain(d) { let e = v1 - mu; ss = ss + e * e }
+    if kpm_pt_in_domain(d)      { let e = v2 - mu; ss = ss + e * e }
+    return kpm_sqrt(ss / ((n - 1) as f64))
+}
+
+// How many members the blindness measurement is taken over.
+pub fn kpm_blindness_n(d: KpInputs) -> i32 with Mut {
+    var n = 0
+    if kpm_rr_in_domain(d)      { n = n + 1 }
+    if kpm_schmitt_in_domain(d) { n = n + 1 }
+    if kpm_pt_in_domain(d)      { n = n + 1 }
+    return n
+}
+
+// The blindness index itself.  Returns a negative sentinel when fewer than two
+// members are admitted (no dispersion to speak of) or when the perturbation
+// does not move the mean at all.
+pub fn kpm_blindness(d: KpInputs, code: i32, delta: f64) -> f64 with Mut, Div, Panic {
+    if kpm_blindness_n(d) < 2 { return 0.0 - 1.0 }
+    let m0 = kpm_ln_stats(d, code, 0.0,   true)
+    let m1 = kpm_ln_stats(d, code, delta, true)
+    let s0 = kpm_ln_stats(d, code, 0.0,   false)
+    let s1 = kpm_ln_stats(d, code, delta, false)
+    let dm = kpm_abs(m1 - m0)
+    if dm < 1.0e-12 { return 0.0 - 1.0 }
+    return kpm_abs(s1 - s0) / dm
 }
 
 // ============================================================================
@@ -777,6 +916,53 @@ fn main() -> i32 with IO, Mut, Div, Panic {
         }
     } else {
         println("T8 FAIL: declared-measured midazolam refused"); fails = fails + 1
+    }
+
+    // T9 -- the blindness index, with its ANALYTIC CALIBRATION POINT.
+    //
+    // (a) log MA is read only by Schmitt. With exactly two admitted members
+    //     that is the single-member case, whose closed form is sqrt(2): the
+    //     mean of ln Kpu moves delta/2 while the sd moves delta/sqrt(2).
+    //     Matching the closed form is what licenses the index as a scale.
+    // (b) cell pH is read by BOTH admitted members, in the same direction, so
+    //     the dispersion registers almost none of it even though each
+    //     prediction moves about 5x over the measured pH range.
+    //
+    // Haloperidol is used because the domain gate admits exactly two members
+    // for a strong base (Poulin-Theil is refused), which is the case the
+    // sqrt(2) reference is written for.
+    let hal_b = kpm_drug_haloperidol()
+    if kpm_blindness_n(hal_b) == 2 {
+        let b_ma = kpm_blindness(hal_b, kpm_pert_ma(), 0.30)
+        let b_ph = kpm_blindness(hal_b, kpm_pert_ph(), 0.40)
+        let refn = kpm_blindness_reference(2)
+        println("blindness: log MA (one member) / cell pH (shared) / sqrt(2) reference:")
+        println(b_ma)
+        println(b_ph)
+        println(refn)
+        if kpm_abs(b_ma - refn) < 1.0e-9 {
+            if b_ph >= 0.0 {
+                if b_ph < 0.10 * refn {
+                    println("T9 PASS: index matches sqrt(2) for a one-member input; shared pH under 10% of it")
+                } else {
+                    println("T9 FAIL: shared pH not blind enough to separate the cases"); fails = fails + 1
+                }
+            } else {
+                println("T9 FAIL: shared-pH blindness returned the sentinel"); fails = fails + 1
+            }
+        } else {
+            println("T9 FAIL: one-member case does not match the closed form sqrt(2)"); fails = fails + 1
+        }
+    } else {
+        println("T9 FAIL: expected exactly 2 admitted members for a strong base"); fails = fails + 1
+    }
+
+    // T10 -- the index refuses rather than returning a misleading number when
+    // there is no dispersion to measure. A peptide is out of every domain.
+    if kpm_blindness(kpm_drug_peptide(), kpm_pert_ph(), 0.40) < 0.0 {
+        println("T10 PASS: blindness refuses when fewer than two members are admitted")
+    } else {
+        println("T10 FAIL: blindness returned a value with no admitted ensemble"); fails = fails + 1
     }
 
     if fails == 0 {
