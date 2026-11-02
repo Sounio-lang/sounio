@@ -29730,6 +29730,26 @@ impl Lowerer {
                     let place_pair = lo.emit_place_aggregate_value_copy(&(*rhs_ident), reg)
                     lo = place_pair.0
                     bind_reg = place_pair.1
+                } else if (*rhs_ident).kind == ExprKind::ExprCast
+                    && lower_cast_type_is_integer(&(*rhs_ident).cast_type)
+                    && lower_opt_type_wide_bits(&(*rhs_ident).cast_type) <= 64 {
+                    // SIO-569: int->int casts erase in lower_cast_expr_ref
+                    // (returns src_reg with no conversion op), so
+                    // `let neg = x as i64` bound neg to x's register and a
+                    // later `x = ...` showed through neg (expected -495,
+                    // got 505). Snapshot exactly like the ExprIdent arm
+                    // above. Gated to scalar integer casts: wide casts
+                    // already materialise fresh wide regs, and a scalar
+                    // ir_copy would keep only limb 0; float and unit casts
+                    // keep the old binding because a fresh ir_copy would lose
+                    // the float-ness marking of the source reg
+                    // (unit_cast_preserves_value needs `raw as molal` to stay
+                    // on the erased float reg).
+                    let cast_copy_pair = lo.fresh_reg()
+                    lo = cast_copy_pair.0
+                    let cast_copy_reg = cast_copy_pair.1
+                    lo = lo.emit(ir_copy(cast_copy_reg, reg))
+                    bind_reg = cast_copy_reg
                 }
             }
             _ => {}
