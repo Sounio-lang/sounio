@@ -37,7 +37,7 @@ check(workflow,script,full);
 if(process.argv[3]==='--selftest'){
  const cases=[
  [workflow.replace('group: [core, integration]','group: [core]'),script,full],
- [workflow.replace('fail-fast: false','fail-fast: true'),script,full],
+ [workflow.replace('fail-fast: false\n      matrix:\n        group:', 'fail-fast: true\n      matrix:\n        group:'),script,full],
  [workflow.replace('STDLIB_DEEP_GROUP: ${{ matrix.group }}','STDLIB_DEEP_GROUP: core'),script,full],
  [workflow.replace('stdlib-deep-science-${{ matrix.group }}-','stdlib-deep-science-'),script,full],
  [workflow,script.replace('then run_integration; fi','then :; fi'),full],
