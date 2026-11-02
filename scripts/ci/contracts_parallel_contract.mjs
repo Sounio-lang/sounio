@@ -35,6 +35,7 @@ function check(w){
  const build=job(w,'current-source-madaros');
  assert(build.includes('SOUNIO_MADAROS_CACHE: /tmp/madaros-build-cache'),'cache path not explicitly isolated');
  assert(build.includes('uses: actions/cache@v4'),'cache transport disconnected');
+ assert(!build.includes('restore-keys:'),'cross-recipe prefix restore is forbidden');
  assert(build.includes('path: /tmp/madaros-build-cache'),'restore/build cache mismatch');
  assert(build.includes("hashFiles('self-hosted/**', 'stdlib/**', 'bin/souc-linux-x86_64', 'bin/souc-lean-single-x86_64', 'scripts/ci/build_modular_madaros.sh', 'scripts/dev/madaros-cache.sh', 'scripts/dev/souc-build-lock.sh')"),'cache invalidators lost');
  const buildStep=build.split(/(?=^      - )/m).find(p=>p.startsWith("      - name: Build Madaros from this PR's own source\n"));
@@ -46,6 +47,7 @@ function check(w){
 const result=check(workflow);
 if(process.argv[3]==='--selftest'){
  const mutations=[
+  workflow.replace('          path: /tmp/madaros-build-cache','          path: /tmp/madaros-build-cache\n          restore-keys: madaros-build-v1-'),
   workflow.replace('run: bash scripts/ci/ontology_frontiers_gate.sh','run: true'),
   workflow.replace("if: matrix.shard == 'core'","if: matrix.shard == 'missing'"),
   workflow.replace("matrix.shard == 'research' && (needs.impact.outputs.ontology == 'true' || needs.impact.outputs.full == 'true')","matrix.shard == 'research' && (false)"),

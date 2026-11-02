@@ -374,10 +374,12 @@ The modular builder already has a content-addressed seed/Madaros cache. CI now
 transports that existing directory with actions/cache rather than discarding it
 with each hosted runner. The builder still executes unconditionally: it checks
 its source/stdlib tree, bootstrap bytes, build environment, artifact digest and
-clean-diagnostic receipt. An outer restore prefix may recover seed entries for
-another tree, but never authorizes a compiler hit: the builder's internal exact
-key remains decisive. Source changes still invalidate Madaros; unchanged
-lean_single/bootstrap inputs can reuse only their seed. Fresh checkout receipts
+clean-diagnostic receipt. Only an exact outer key may restore entries: it includes the source/stdlib
+tree, bootstrap bytes and build helper contents. Broad prefix restoration is
+forbidden because the existing internal keys do not include build recipes.
+Changing sources or a helper therefore cold-starts the CI cache. The observed
+32-second warm hit used the exact primary key and is unaffected by this rule.
+Fresh checkout receipts
 are prepared and verified by consumers as before. Private modified-source SCO
 builds are not redirected to the producer cache.
 
