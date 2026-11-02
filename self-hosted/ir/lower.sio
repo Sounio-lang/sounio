@@ -25460,6 +25460,23 @@ impl Lowerer {
             }
             return ir_empty_name()
         }
+        // SIO-572: `(... as *mut W)` names W directly. Without this arm the
+        // deref fallback above recursed into the cast and got an empty name,
+        // so field offsets after inline arrays fell back to the field index.
+        // Gated by the same registered-layout check the raw-deref classifier
+        // uses, so scalar casts keep resolving empty exactly as before.
+        if (*expr).kind == ExprKind::ExprCast {
+            var cast_pointee = ir_empty_name()
+            if self.cast_names_registered_struct_pointee_ref(expr) {
+                match (*expr).cast_type {
+                    Some(ct) => {
+                        cast_pointee = lower_opt_type_named_name(&(*ct).inner)
+                    }
+                    None => {}
+                }
+            }
+            return cast_pointee
+        }
         // `pair.0.method()` -- the receiver is a TUPLE SLOT, not a named field.
         // The field-access arm below asks field_named_type_for_struct for a field
         // literally called "0", which no struct has, so it answered empty and the
@@ -36975,10 +36992,68 @@ impl Lowerer {
         if (*e).un_op != UnaryOp::OpDeref { return false }
         match (*e).left {
             Some(operand) => {
+                if (*operand).kind == ExprKind::ExprCast {
+                    // SIO-572: `*((h as i64) as *mut W)` -- an inline cast to a
+                    // raw struct pointer is the same payload access as a
+                    // typed-local deref, but the ident-only gate below sent it
+                    // down the handle path (wrong field offsets after inline
+                    // arrays, SIGILL). Accept it when the pointee names a
+                    // registered struct layout; scalar pointees keep the
+                    // generic path that already handles them. A directly
+                    // borrow-derived subject (`&` / `&!`) keeps the baseline
+                    // path: borrow-derived addresses are a separate defect
+                    // family (broken identically through typed locals).
+                    if self.cast_subject_is_borrow_ref(&(*operand)) { return false }
+                    return self.cast_names_registered_struct_pointee_ref(&(*operand))
+                }
                 if (*operand).kind != ExprKind::ExprIdent { return false }
                 if self.lookup_local_is_ref((*operand).name) { return false }
                 if ir_name_is_box(self.lookup_local_struct_type((*operand).name)) { return false }
                 true
+            }
+            None => false,
+        }
+    }
+
+    // SIO-572: peel a cast chain to its subject. True when the subject is
+    // directly borrow-derived (`&x` / `&!x`, possibly through further
+    // casts): such addresses keep the baseline generic path.
+    fn cast_subject_is_borrow_ref(self, e: &Expr) -> bool with Mut, Panic, Div, Alloc {
+        let _lo = self
+        var current = e
+        var found = false
+        var done = false
+        while !done {
+            if (*current).kind == ExprKind::ExprCast {
+                match (*current).left {
+                    Some(inner) => {
+                        current = &(*inner)
+                    }
+                    None => { done = true }
+                }
+            } else if (*current).kind == ExprKind::ExprUnary
+                && ((*current).un_op == UnaryOp::OpRef || (*current).un_op == UnaryOp::OpRefMut) {
+                found = true
+                done = true
+            } else {
+                done = true
+            }
+        }
+        found
+    }
+
+    // SIO-572: does `e` cast to `*mut T` / `*T` where T names a registered
+    // struct layout? Shared by the raw-deref classifier above and the
+    // struct-type resolver below so both agree on which inline casts carry
+    // layout.
+    fn cast_names_registered_struct_pointee_ref(self, e: &Expr) -> bool with Mut, Panic, Div, Alloc {
+        if (*e).kind != ExprKind::ExprCast { return false }
+        match (*e).cast_type {
+            Some(ct) => {
+                if (*ct).kind != TypeExprKind::TypeRawPtr { return false }
+                let pointee = lower_opt_type_named_name(&(*ct).inner)
+                if pointee.len <= 0 { return false }
+                lower_struct_layout_index_of(&(*self.struct_layouts), pointee) >= 0
             }
             None => false,
         }
