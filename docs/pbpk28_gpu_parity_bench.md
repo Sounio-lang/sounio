@@ -397,3 +397,24 @@ early-transient dt sensitivity at print resolution) but with no
 tolerance gate attached — that bar belongs to SIO-562, not claimed here.
 Appendix B .tex is not in this repo; figure-to-output linkage for the
 legends is SIO-505, which can cite this table.
+## Addendum: SIO-505 legend-value conference, 2026-11-02
+
+v28 legend values checked against current parity-ref outputs
+(main 55c141ce; PR #3419 touches only a print test + changelog,
+no PBPK path). Method: exact-match search over the full ref logs
+plus referent recovery via (t, organ, field).
+
+| Legend | Referent recovered | Current output | Verdict |
+| --- | --- | --- | --- |
+| rapa 0.001063 | liver cv, t=0.1 h (bolus 0.05 mg) | 1.062903677e-03 -> 0.001063 | CONFIRM |
+| rapa 0.004701 | liver cavg, t=0.1 h | 4.701473755e-03 -> 0.004701 | CONFIRM |
+| halo 0.008882 | plasma, t=0.5 h (oral 5 mg) | HALO\|plasma=0.008882 | CONFIRM exact |
+| midaz 0.022717 | plasma solo, t=0.25 h (oral 5 mg) | MDZ\|plasma_solo=0.022717 | CONFIRM exact |
+| midaz 0.056583 | plasma +keto, t=0.25 h | MDZ\|plasma_inh=0.056583 | CONFIRM exact |
+| venla 0.030624 | no exact referent in current output | absent; neighbours 0.029-0.032 across fields, no derivation (max/avg/VSS) reproduces it | STALE — nucleus changed by the 26/09 ODV fix, as anticipated on the card |
+
+Rounding: rapa prints 10 significant sci digits; halo/midaz/venla
+print 6 fixed decimals. Units mg/L throughout; doses in the table.
+The .tex/PDF location of each legend is outside this repo; the full
+conference table lives on SIO-505. SIO-505 acceptance (legend
+correction) needs the editable appendix, not a repo change.
