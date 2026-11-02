@@ -295,5 +295,5 @@ of result rows against run 41462324982 remain acceptance gates.
 The next candidate also makes impact-selected jobs depend on Fast Checks.
 The workflow-reference ratchet runs there before compilation; its existing
 Contracts Core invocation is kept for in-job receipts. The SCO reuse selftest
-is named directly in Impact, satisfying the direct-reference ratchet without
+is named directly in Fast Checks, satisfying the direct-reference ratchet without
 relaxing its frozen bound.
