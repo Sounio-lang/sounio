@@ -1,0 +1,1 @@
+Locks the SIO-206 acceptance: passing a builtin call directly as a print/println argument compiles and prints the right values. The v0.80.0 lowering refusal ("unresolved scalar kind", only worked around with a `let s: f64` temporary) no longer reproduces on current main; this test guards against regression.
