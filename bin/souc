@@ -336,10 +336,21 @@ case "${1:-}" in
     # type reporting success (PR #3400 review, 2026-11-01). Refuse any backend
     # lean_single cannot honestly emit, before anything is written; accept
     # `--backend native` because native is exactly what lean_single emits.
+    # Target selectors get the same honesty (PR #3400 review, 2026-11-02): the
+    # loop's `*) shift` arm silently dropped `--target`/`--target=...`/`-t`, so
+    # `souc build --target wasm32 file.sio` (docs/FAQ.md) or the FPGA flow's
+    # `souc compile ... -t fpga-u250 -o OUT.cpp` exited 0 with a native x86-64
+    # ELF under the requested output. lean_single's own raw CLI
+    # is no oracle here — it accepts even a bogus target and still emits a
+    # native ELF — so the wrapper refuses every target it cannot honor rather
+    # than passing the selector through. Only the native `x86_64-linux` target
+    # is accepted, because that is exactly the artifact this path emits.
     _ls_compile_src="${2:-}"
     _ls_compile_out=""
     _ls_backend_seen=""
     _ls_backend=""
+    _ls_target_seen=""
+    _ls_target=""
     shift 2
     while [[ $# -gt 0 ]]; do
       case "${1:-}" in
@@ -367,6 +378,29 @@ case "${1:-}" in
           echo "souc: run without the legacy engine override, or build Madaros ('make build-madaros'), for GPU backends" >&2
           exit 1
           ;;
+        --target)
+          if [[ $# -lt 2 ]]; then
+            echo "error[E-SRB-BACKEND-001]: --target requires a value" >&2
+            exit 2
+          fi
+          _ls_target_seen=1
+          _ls_target="$2"
+          shift 2
+          ;;
+        -t)
+          if [[ $# -lt 2 ]]; then
+            echo "error[E-SRB-BACKEND-001]: -t requires a value" >&2
+            exit 2
+          fi
+          _ls_target_seen=1
+          _ls_target="$2"
+          shift 2
+          ;;
+        --target=*)
+          _ls_target_seen=1
+          _ls_target="${1#--target=}"
+          shift
+          ;;
         *)
           shift
           ;;
@@ -384,6 +418,22 @@ case "${1:-}" in
           echo "error[E-SRB-BACKEND-001]: --backend $_ls_backend is not supported by the legacy lean_single engine (it emits a native x86-64 ELF only)" >&2
           echo "souc: refusing to write ${_ls_compile_out:-an output artifact} — it would be a native ELF, not the requested $_ls_backend artifact" >&2
           echo "souc: run without the legacy engine override, or build Madaros ('make build-madaros'), for --backend $_ls_backend" >&2
+          exit 1
+          ;;
+      esac
+    fi
+    if [[ -n "$_ls_target_seen" ]]; then
+      case "$_ls_target" in
+        x86_64-linux)
+          ;; # truthful: this path emits exactly a native x86_64-linux ELF
+        "")
+          echo "error[E-SRB-BACKEND-001]: --target requires a non-empty value" >&2
+          exit 2
+          ;;
+        *)
+          echo "error[E-SRB-BACKEND-001]: --target $_ls_target is not supported by the legacy lean_single engine path (it emits a native x86_64-linux ELF only)" >&2
+          echo "souc: refusing to write ${_ls_compile_out:-an output artifact} — it would be a native x86-64 ELF, not the requested $_ls_target artifact" >&2
+          echo "souc: omit --target for a native build, or run without the legacy engine override (Madaros) for other targets" >&2
           exit 1
           ;;
       esac
