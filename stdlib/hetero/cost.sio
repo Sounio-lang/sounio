@@ -1,0 +1,214 @@
+// stdlib::hetero::cost - CostModel and chain planner over measured caps.
+//
+// Predicted time of a node on a device = FLOPs / measured throughput.
+// Predicted transfer = bytes / measured link bandwidth + measured latency.
+// Nothing here reads a spec sheet: a device or link without measurement is
+// infinitely expensive for planning (it can still receive placement of a
+// whole graph by explicit user request, never a silent split).
+//
+// The chain planner is an exact DP over (node, device): cost of node i on
+// device d plus the cheapest predecessor assignment plus the transfer on
+// the boundary edge when the device changes. Placement (all nodes on one
+// device) is a candidate inside the DP, not a special case - "do not split"
+// emerges from the numbers, including when a slow link kills a fast split.
+
+use hetero::types::{DeviceCaps, device_throughput}
+use hetero::caps::{DevicePool}
+use hetero::graph::{Graph, graph_edge_bytes, graph_node}
+
+pub fn cost_infinite() -> f64 { 1000000000000000000000000000000.0 }
+
+pub struct LinkMatrix {
+    pub bw_gbps: [f64; 256],
+    pub lat_us: [f64; 256],
+    pub measured: [bool; 256],
+}
+
+pub fn link_matrix_new() -> LinkMatrix {
+    LinkMatrix { bw_gbps: [0.0; 256], lat_us: [0.0; 256], measured: [false; 256] }
+}
+
+/// Record a measured link between two devices (symmetric).
+///
+/// # Parameters
+/// - `lm`: matrix. - `a`, `b`: device indices.
+/// - `bw_gbps`: bandwidth GB/s. - `lat_us`: latency in microseconds.
+///
+/// # Complexity
+/// O(1)
+pub fn link_set(lm: &!LinkMatrix, a: i32, b: i32, bw_gbps: f64, lat_us: f64) with Mut {
+    lm.bw_gbps[(a * 16 + b) as usize] = bw_gbps
+    lm.lat_us[(a * 16 + b) as usize] = lat_us
+    lm.measured[(a * 16 + b) as usize] = true
+    lm.bw_gbps[(b * 16 + a) as usize] = bw_gbps
+    lm.lat_us[(b * 16 + a) as usize] = lat_us
+    lm.measured[(b * 16 + a) as usize] = true
+}
+
+/// Predicted seconds for one node on one device; infinite when unmeasured.
+///
+/// # Parameters
+/// - `pool`: device pool. - `dev`: device index.
+/// - `op`, `dtype`: codes. - `flops`: node FLOPs.
+///
+/// # Complexity
+/// O(1)
+pub fn node_time_s(pool: &DevicePool, dev: i32, op: i32, dtype: i32, flops: f64) -> f64 {
+    let t = device_throughput(pool.devices[dev as usize], op, dtype)
+    if t <= 0.0 { return cost_infinite() }
+    flops / (t * 1000000000.0)
+}
+
+/// Predicted seconds to move bytes between two devices (0 when same device,
+/// infinite when the link was never measured).
+///
+/// # Parameters
+/// - `lm`: link matrix. - `a`, `b`: device indices. - `bytes`: payload.
+///
+/// # Complexity
+/// O(1)
+pub fn transfer_time_s(lm: &LinkMatrix, a: i32, b: i32, bytes: i64) -> f64 {
+    if a == b { return 0.0 }
+    if !lm.measured[(a * 16 + b) as usize] { return cost_infinite() }
+    let bw = lm.bw_gbps[(a * 16 + b) as usize]
+    if bw <= 0.0 { return cost_infinite() }
+    lm.lat_us[(a * 16 + b) as usize] / 1000000.0 + (bytes as f64) / (bw * 1000000000.0)
+}
+
+pub struct ChainPlan {
+    pub assign: [i32; 64],
+    pub n: i32,
+    pub predicted_s: f64,
+    pub best_single_device: i32,
+    pub best_single_s: f64,
+    pub n_devices_used: i32,
+}
+
+/// Exact DP plan for a chain graph (edges i-1 -> i dominate; extra edges are
+/// charged when their endpoints land on different devices via graph_edge_bytes
+/// only for consecutive pairs - v1 chain semantics, documented).
+///
+/// # Parameters
+/// - `g`: chain graph. - `pool`: device pool. - `lm`: link matrix.
+///
+/// # Return
+/// ChainPlan with per-node device assignment and predicted makespan (s).
+/// best_single_* reports the best all-on-one-device candidate for comparison.
+///
+/// # Complexity
+/// O(n_nodes * n_devices^2)
+pub fn plan_chain(g: &Graph, pool: &DevicePool, lm: &LinkMatrix) -> ChainPlan with Mut, Panic, Div {
+    let nd = pool.n_devices
+    let nn = g.n_nodes
+    var plan = ChainPlan {
+        assign: [0; 64],
+        n: nn,
+        predicted_s: cost_infinite(),
+        best_single_device: -1,
+        best_single_s: cost_infinite(),
+        n_devices_used: 0,
+    }
+    if nd <= 0 || nn <= 0 { return plan }
+
+    // Best single-device candidate (pure placement).
+    var d = 0
+    while d < nd {
+        var total = 0.0
+        var i = 0
+        while i < nn {
+            let node = graph_node(g, i)
+            total = total + node_time_s(pool, d, node.op, node.dtype, node.flops)
+            i = i + 1
+        }
+        if total < plan.best_single_s {
+            plan.best_single_s = total
+            plan.best_single_device = d
+        }
+        d = d + 1
+    }
+
+    // DP: dp[d] after node i; bp[i*16+d] = predecessor device.
+    var bp: [i32; 1024] = [0; 1024]
+    var dp_prev: [f64; 16] = [0.0; 16]
+    var dp_cur: [f64; 16] = [0.0; 16]
+    d = 0
+    while d < nd {
+        let n0 = graph_node(g, 0)
+        dp_prev[d as usize] = node_time_s(pool, d, n0.op, n0.dtype, n0.flops)
+        bp[d as usize] = -1
+        d = d + 1
+    }
+    var i = 1
+    while i < nn {
+        let node = graph_node(g, i)
+        let edge_b = graph_edge_bytes(g, i - 1, i)
+        d = 0
+        while d < nd {
+            var best = cost_infinite()
+            var best_prev = 0
+            var pd = 0
+            while pd < nd {
+                let cand = dp_prev[pd as usize] + transfer_time_s(lm, pd, d, edge_b)
+                if cand < best { best = cand; best_prev = pd }
+                pd = pd + 1
+            }
+            dp_cur[d as usize] = best + node_time_s(pool, d, node.op, node.dtype, node.flops)
+            bp[(i * 16 + d) as usize] = best_prev
+            d = d + 1
+        }
+        var j = 0
+        while j < nd { dp_prev[j as usize] = dp_cur[j as usize]; j = j + 1 }
+        i = i + 1
+    }
+    // Best final device + backtrace.
+    var best_d = 0
+    d = 0
+    while d < nd {
+        if dp_prev[d as usize] < dp_prev[best_d as usize] { best_d = d }
+        d = d + 1
+    }
+    plan.predicted_s = dp_prev[best_d as usize]
+    var cur = best_d
+    i = nn - 1
+    while i >= 0 {
+        plan.assign[i as usize] = cur
+        cur = bp[(i * 16 + cur) as usize]
+        i = i - 1
+    }
+    // Devices used.
+    var used = 0
+    d = 0
+    while d < nd {
+        var seen = false
+        i = 0
+        while i < nn {
+            if plan.assign[i as usize] == d { seen = true }
+            i = i + 1
+        }
+        if seen { used = used + 1 }
+        d = d + 1
+    }
+    plan.n_devices_used = used
+    plan
+}
+
+/// Predicted seconds of a user-supplied assignment (for auditing a plan).
+///
+/// # Parameters
+/// - `g`: chain graph. - `pool`: pool. - `lm`: links. - `assign`: device per node.
+///
+/// # Complexity
+/// O(n_nodes + n_edges consecutive)
+pub fn plan_evaluate(g: &Graph, pool: &DevicePool, lm: &LinkMatrix, assign: [i32; 64]) -> f64 with Mut {
+    var total = 0.0
+    var i = 0
+    while i < g.n_nodes {
+        let node = graph_node(g, i)
+        total = total + node_time_s(pool, assign[i as usize], node.op, node.dtype, node.flops)
+        if i > 0 {
+            total = total + transfer_time_s(lm, assign[(i - 1) as usize], assign[i as usize], graph_edge_bytes(g, i - 1, i))
+        }
+        i = i + 1
+    }
+    total
+}

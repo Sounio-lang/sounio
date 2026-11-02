@@ -9060,6 +9060,29 @@ fn lower_name_is_ffi_system(n: Name) -> bool with Div {
         && n.buf[9] == 109 as i8
 }
 
+// Bodyless float builtins: backend float ids with no Sounio body (sqrt/exp/
+// log/sin/cos/pow, bits_to_f64, read_f64, acknowledge/require_confidence,
+// ffi_sqrt/floor/ceil/pow/tgamma). The fn_id lookup misses them (never in
+// lo.module), so without this an as-i64 cast on their result skips the
+// conversion and leaks IEEE bits. Mirrors native_v2_builtin_returns_float.
+fn lower_name_is_float_builtin(n: Name) -> bool with Mut, Panic, Div {
+    ir_name_eq(n, make_name("sqrt"))
+        || ir_name_eq(n, make_name("exp"))
+        || ir_name_eq(n, make_name("log"))
+        || ir_name_eq(n, make_name("sin"))
+        || ir_name_eq(n, make_name("cos"))
+        || ir_name_eq(n, make_name("pow"))
+        || ir_name_eq(n, make_name("bits_to_f64"))
+        || ir_name_eq(n, make_name("read_f64"))
+        || ir_name_eq(n, make_name("acknowledge"))
+        || ir_name_eq(n, make_name("require_confidence"))
+        || ir_name_eq(n, make_name("ffi_sqrt"))
+        || ir_name_eq(n, make_name("ffi_floor"))
+        || ir_name_eq(n, make_name("ffi_ceil"))
+        || ir_name_eq(n, make_name("ffi_pow"))
+        || ir_name_eq(n, make_name("ffi_tgamma"))
+}
+
 // Buffer argument index for handle-buf builtins: str_from_bytes(buf,n) → 0,
 // write_file(path,buf,n) → 1. -1 when not a handle-buf builtin.
 fn lower_handle_buf_arg_index(n: Name) -> i64 with Div {
@@ -25604,7 +25627,7 @@ impl Lowerer {
 
     fn opt_expr_result_is_float_ref(self, opt: &Option<Box<Expr>>) -> bool with Mut, Panic, Div, Alloc {
         match *opt {
-            Some(expr) => self.expr_result_is_float_ref(&(*expr)),
+            Some(expr) => self.expr_result_is_float_ref(&(*expr))
             _ => false,
         }
     }
@@ -26135,6 +26158,23 @@ impl Lowerer {
             match (*e).left {
                 Some(callee_expr) => {
                     let callee_name = self.expr_to_callee_name_ref(&(*callee_expr))
+                    // Builtin float math fns lower via dedicated float paths even
+                    // when a bodyless stub with returns_float=0 exists. User fns
+                    // may shadow a builtin name, so trust the list just for a
+                    // missing callee or a bodyless placeholder stub (same split
+                    // as lowerer_call_is_f64_raw_builtin).
+                    if lower_name_is_float_builtin(callee_name) {
+                        let probe_id = lowerer_lookup_fn_id_by_name_ref(&self, callee_name)
+                        if probe_id < 0 {
+                            return true
+                        }
+                        if probe_id < self.module.fn_count {
+                            let probe = ir_fn_get(&(*self.module), probe_id as usize)
+                            if probe.instr_count == 0 && probe.param_count == 0 {
+                                return true
+                            }
+                        }
+                    }
                     if self.name_is_variance_of(callee_name)
                         || self.name_is_covariance_of(callee_name)
                         || self.name_is_uncertainty_of(callee_name)
