@@ -184,6 +184,14 @@ struct FoClosureNode {
 var FO_CL_HEAD: Option<Box<FoClosureNode> > = None
 
 var FO_INLINE_DEPTH: i64 = 0
+
+// SIO-573: expression-nesting depth guard state. Lowering recurses once per
+// nesting level at roughly 700KB a level (measured: an 11-deep chain fits an
+// 8MB compiler stack, a 12-deep chain SIGSEGVs), so deep chains must refuse
+// with a diagnostic instead of crashing. Globals match the FO_INLINE_DEPTH
+// precedent: a Lowerer field would not survive the per-call rebuilds.
+var LOWER_EXPR_DEPTH: i64 = 0
+var LOWER_EXPR_BUDGET: i64 = 0 - 1
 // Global, like the FO_XFER_* table: a Lowerer is rebuilt per function, so a
 // Lowerer field would not survive from the helper's lowering to its caller's.
 var FO_INLINE_HEAD: Option<Box<FoInlineNode> > = None
@@ -39923,6 +39931,70 @@ impl Lowerer {
     }
 
     fn lower_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        // SIO-573: depth guard, see LOWER_EXPR_DEPTH. Every nested expression
+        // passes through here exactly once per level, so this single choke
+        // point covers BinOp, call-arg, unary, index and all other shapes.
+        LOWER_EXPR_DEPTH = LOWER_EXPR_DEPTH + 1
+        let depth_budget = self.lower_expr_depth_budget()
+        if LOWER_EXPR_DEPTH > depth_budget {
+            LOWER_EXPR_DEPTH = LOWER_EXPR_DEPTH - 1
+            if LOWER_EXPR_DEPTH == depth_budget {
+                print("error: Madaros expression nesting too deep for the compiler stack (depth ")
+                print_int(LOWER_EXPR_DEPTH + 1)
+                print(", budget ")
+                print_int(depth_budget)
+                print("); refusing instead of crashing\n")
+                print("  help: rebuild with a bigger compiler stack (ulimit -s 524288) or set MADAROS_STACK_KB=524288\n")
+            }
+            var lo_deep = self
+            lowerer_mark_hard_error(&! lo_deep)
+            return (lo_deep, 0)
+        }
+        let pair = self.lower_expr_inner_ref(e)
+        LOWER_EXPR_DEPTH = LOWER_EXPR_DEPTH - 1
+        pair
+    }
+
+    // SIO-573: decimal parser for MADAROS_STACK_KB. lower.sio keeps a local
+    // copy so the guard has no new cross-module dependency (see
+    // parse_i64_decimal in compiler/main.sio for the shared version).
+    fn lower_parse_stack_kb(self, raw: string) -> i64 with Mut, Panic, Div {
+        let n = str_len(raw)
+        if n <= 0 { return 0 - 1 }
+        if str_char_at(raw, 0) == 117 { return 0 }
+        var i: i64 = 0
+        var v: i64 = 0
+        while i < n {
+            let d = str_char_at(raw, i) - 48
+            if d < 0 || d > 9 { return 0 - 1 }
+            v = v * 10 + d
+            i = i + 1
+        }
+        v
+    }
+
+    // SIO-573: max expression-nesting depth for the current compiler stack.
+    // 1MB per level is conservative against the measured ~700KB; the default
+    // covers the default 512MB reservation, and small explicit stacks get a
+    // small budget so they refuse instead of crashing. Cached: the variable
+    // is process-constant.
+    fn lower_expr_depth_budget(self) -> i64 with Mut, Panic, Div, Alloc, IO {
+        if LOWER_EXPR_BUDGET < 0 {
+            let kb = self.lower_parse_stack_kb(read_env("MADAROS_STACK_KB"))
+            if kb == 0 {
+                LOWER_EXPR_BUDGET = 1000000
+            } else if kb < 0 {
+                LOWER_EXPR_BUDGET = 512
+            } else {
+                var b = kb / 1024
+                if b < 4 { b = 4 }
+                LOWER_EXPR_BUDGET = b
+            }
+        }
+        LOWER_EXPR_BUDGET
+    }
+
+    fn lower_expr_inner_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         if e.kind == ExprKind::ExprIntLit
             || e.kind == ExprKind::ExprFloatLit
             || e.kind == ExprKind::ExprBoolTrue
