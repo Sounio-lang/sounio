@@ -275,3 +275,79 @@ the text emitters were kept as is (no behavior change either way).
 kaxi_assemble still takes the buffer by value (one copy per kernel,
 not per op) and the lowerers still return it by value.
 
+
+## Addendum: bolus-route audit plus archetype verification, 2026-11-01
+
+Route, kernel, and residual scope read from the parity-ref headers
+(haloperidol and midazolam are oral, not bolus; semaglutide is SC):
+
+- rapamycin: IV bolus 0.05 mg into blood; fully-coupled CN 27-state.
+  Total mass (gate case 4 volumes) 0.05 mg at t=0, then 4.21353e-02,
+  2.664243e-02, 1.774005e-02, 8.706973e-03, 2.435438e-03,
+  8.618332e-04, 4.506467e-04, 2.977413e-04, 2.656487e-04,
+  2.446864e-04, 2.272895e-04, 2.055091e-04 mg at 0.1..30 h:
+  monotonic decay, PASS.
+- haloperidol: oral (scenarios/oral_haloperidol_bbb.sio); PBPK14
+  well-stirred plus BBB, fixed-step RK4 same dt both engines.
+  Endpoints HALO| (plasma PK, Kpuu, D2 occupancy). No mass-identity
+  gate (RK4, no clamp); fidelity gap vs adaptive Tsit5 disclosed
+  in the ref header.
+- midazolam: oral plus ketoconazole DDI (CYP3A); fixed-step RK4,
+  same dt both engines. Endpoints F, CL_h, AUCR (distribution
+  nominal, DDI quantities validated).
+- semaglutide: SC depot (k_a = 0.01155 /h, no IV bolus); PBPK28 CN.
+  Node vs Sounio RMSE exactly 0.000000e+00 on all 14 organs
+  (case 7), all 3 TMDD organs R_free/DR (case 8), pancreas
+  DeltaG/DeltaI (case 9). Case-7 peak cavg per organ 0..13:
+  1.0622e-02, 6.423e-03, 7.052e-03, 8.99e-04, 5.916e-03,
+  5.135e-03, 2.426e-03, 1.504e-03, 8.521e-03, 3.306e-03,
+  2.434e-03, 6.044e-03, 7.995e-03, 3.533e-03.
+- venlafaxine XR: oral 75 mg Korsmeyer-Peppas (n = 0.65);
+  fully-coupled CN x2 at dt = 0.5 and 0.25. Cases 10-11 PASS with
+  max per-organ pct 0.000026% (parent) and 0.000195% (ODV).
+  Case 12 matrix release RMSE 0.000000e+00 over 12 samples
+  (peak 75 mg). Case 13 VSS per-dt values, Sounio then Node
+  (residuals scaled x1e12, certified = 1 on both engines):
+  dt=0.5 Sounio rel_err_cf -28.575649, halfwidth 201767.428446,
+  residual parent 0.959954, ODV 0.606848;
+  dt=0.5 Node rel_err_cf -28.573675, halfwidth 201767.430129,
+  residual parent 1.008915, ODV 0.535572;
+  dt=0.25 Sounio rel_err_cf -0.407801, halfwidth 10277.385386,
+  residual parent 0.876021, ODV 0.873079;
+  dt=0.25 Node rel_err_cf -0.406407, halfwidth 10277.385677,
+  residual parent 0.879963, ODV 0.866418.
+
+Measured on Linux x86_64 (sounio-workspace pod) with
+MADAROS_RAW_BIN=/tmp/madaros-build2/madaros and Node v18.19.1;
+Sounio refs RC=0 with DONE markers, 168/168 cavg rows (sema),
+36/36 TMDD rows, 12/12 PD rows, 168/168 parent+ODV rows plus
+certified VSS blocks (venla), 12/12 mass samples (rapa).
+
+Archetype primary sources, each DOI/PMID verified resolving with
+the drug matching (PubMed/PMC/publisher record checked 2026-11-01):
+
+- litio: Wen J et al. 2019, CNS Neurol Disord Drug Targets
+  18(10):769-778. PMID 31724518, DOI 10.2174/1871527318666191114095249.
+  Indexed review: not metabolized, >95% excreted unchanged renal.
+- clozapina: population-PK primary, Br J Clin Pharmacol,
+  DOI 10.1111/bcp.15691 (CYP1A2 demethylation to norclozapine),
+  corroborated by StatPearls NBK535399 (CYP1A2/2D6/3A4, active
+  norclozapine).
+- tacrolimo: Ogasawara K et al. 2013, Clin Pharmacokinet
+  52(9):751-762. PMID 23633119, PMCID PMC3755037,
+  DOI 10.1007/s40262-013-0069-2. Primary clinical PK in kidney
+  transplant recipients (CYP3A4/5 plus MRP2/ABCC2). Added to the
+  tacrolimus.sio source list; blood-plasma distinction vs
+  rapamycin stays in that header (FKBP12 RBC sequestration,
+  F_oral dominance).
+- vancomicina: Matzke GR et al. 1984, Antimicrob Agents Chemother
+  25(4):433-437. PMID 6732213, PMCID PMC185546,
+  DOI 10.1128/aac.25.4.433. Primary renal-elimination study.
+  Corrected the vancomycin.sio header, which cited the wrong
+  journal (Clin Pharmacol Ther); added PMID/DOI plus the
+  infusion-only route note (standard dosing already models
+  R_inf over infusion_h).
+- aripiprazol: review, Drugs 2004;64(15):1715-1736. PMID 15257633
+  (PubMed record fetched live), DOI 10.2165/00003495-200464150-00010.
+  Hepatic CYP3A4 plus CYP2D6 to active dehydro-aripiprazole,
+  t1/2 about 75 h.
