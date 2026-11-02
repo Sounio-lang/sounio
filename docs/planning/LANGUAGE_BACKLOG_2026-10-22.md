@@ -45,11 +45,14 @@ Fixed on the Madaros side by [PR #3016](https://github.com/Sounio-lang/sounio/pu
 
 ## 2. Refusals without a location
 
+### Closed items (with receipts)
+
 Fixed on the Madaros side by PR #3016 (`16477b9517`, merged; receipt §4): unknown character,
 unterminated comment and string, invalid escape, line number after a multi-line
 string, parse diagnostics printing two token numberings, `let x = @y` failing
-with no message. Open: lean_single's misleading messages for an unterminated
-string (`unbalanced braces`).
+with no message.
+
+Fixed on the `lean_single` side by PR #3161 (`9cccda5fdd`, merged; witness `tests/compile-fail/unterminated_string_lean_single.sio`, SIO-266): unterminated string refuses with E273 at opening quote instead of falling through to `unbalanced braces`.
 
 ## 3. Decisions owed
 
@@ -68,7 +71,7 @@ and **D-34**, the five decisions of the interval proposal.
 | `Lowerer` (~4.5 MB) passed by value in 618 methods of `ir/lower.sio` | PR #3015; refactor to `&!Lowerer` sized at weeks | memory audit §2.2 (likely carrier of the unexplained BSS) |
 | 3.8 GB static reservation; 1.23 GB explained by module arrays; seed gives every ≥1 MiB by-value aggregate a fresh block per site (reproduced) | measured | memory audit §2 |
 | committed Madaros touches 1.25 GB to compile one line; source-built 230 MB | measured | memory audit §1.2 |
-| phase arenas that never point upward; `munmap` per phase; `u32` indices | design | memory audit §4; complements [ADR-010](../decisions/adr-010-madaros-region-reclamation.md) |
+| phase arenas that never point upward; `munmap` per phase; `u32` indices | [ADR-026](../decisions/adr-026-phase-arenas.md) | complements [ADR-010](../decisions/adr-010-madaros-region-reclamation.md); memory audit §4 |
 
 ## 5. Specification
 
