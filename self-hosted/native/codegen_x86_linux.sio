@@ -15023,6 +15023,21 @@ struct A64PreviewCompiler {
     call_patch_targets: [i64; 64],
     call_patch_count: i64,
     entry_offset: i64,
+    // SIO-32: rodata image under construction plus the address fixups that
+    // bind emitted adrp/add pairs to it. Fixups resolve after the final
+    // code size is known (rodata vaddr depends on it); patching rewrites
+    // words in place and never changes the code length.
+    rodata: StringTable,
+    data_patch_offsets: [i64; 64],
+    data_patch_rodata: [i64; 64],
+    data_patch_count: i64,
+    // SIO-32: call-arg table mirror (live in codegen.sio; kept in sync so
+    // the two preview compiler shapes never diverge).
+    call_site_count: i64,
+    call_site_targets: [i64; 16],
+    call_site_argc: [i64; 16],
+    call_site_args: [i64; 96],
+    call_emit_index: i64,
 }
 
 fn a64_preview_compiler_new() -> A64PreviewCompiler {
@@ -15042,6 +15057,15 @@ fn a64_preview_compiler_new() -> A64PreviewCompiler {
         call_patch_targets: [0; 64],
         call_patch_count: 0,
         entry_offset: 0,
+        rodata: string_table_new(),
+        data_patch_offsets: [0; 64],
+        data_patch_rodata: [0; 64],
+        data_patch_count: 0,
+        call_site_count: 0,
+        call_site_targets: [0; 16],
+        call_site_argc: [0; 16],
+        call_site_args: [0; 96],
+        call_emit_index: 0,
     }
 }
 
@@ -15134,6 +15158,20 @@ fn a64_preview_record_call_patch(c: A64PreviewCompiler, patch_offset: i64, targe
     out
 }
 
+// SIO-32: record one rodata address fixup. adrp_offset points at the adrp
+// word (the add follows 4 bytes later); rodata_offset is the string's
+// offset inside the under-construction rodata image. Capacity is checked
+// by the emitter before recording; a dropped fixup would silently corrupt
+// the binary, so the emitter refuses loudly instead.
+fn a64_preview_record_data_patch(c: A64PreviewCompiler, adrp_offset: i64, rodata_offset: i64) -> A64PreviewCompiler with Mut, Panic, Div {
+    var out = c
+    let idx = out.data_patch_count
+    out.data_patch_offsets[idx as usize] = adrp_offset
+    out.data_patch_rodata[idx as usize] = rodata_offset
+    out.data_patch_count = idx + 1
+    out
+}
+
 fn a64_preview_patch_label_forwards(c: A64PreviewCompiler) -> A64PreviewCompiler with Mut, Panic, Div {
     var out = c
     var i: i64 = 0
@@ -15180,6 +15218,269 @@ fn a64_preview_patch_calls(c: A64PreviewCompiler) -> A64PreviewCompiler with Mut
         i = i + 1
     }
     out
+}
+
+// SIO-32: name the MIR opcode behind an a64 preview refusal. The bare
+// "pending" sentence told the operator nothing about which operation the
+// backend cannot encode yet; the opcode name turns the refusal into a
+// work order for the next increment.
+fn a64_preview_mir_op_name(opcode: i64) -> string {
+    if opcode == MIR_OP_NOP { return "nop" }
+    if opcode == MIR_OP_PSEUDO_LOAD_IMM { return "pseudo_load_imm" }
+    if opcode == MIR_OP_PSEUDO_LOAD_STRING { return "pseudo_load_string" }
+    if opcode == MIR_OP_PSEUDO_COPY { return "pseudo_copy" }
+    if opcode == MIR_OP_PSEUDO_BINOP { return "pseudo_binop" }
+    if opcode == MIR_OP_PSEUDO_UNARY { return "pseudo_unary" }
+    if opcode == MIR_OP_PSEUDO_CALL { return "pseudo_call" }
+    if opcode == MIR_OP_PSEUDO_RET { return "pseudo_ret" }
+    if opcode == MIR_OP_PSEUDO_JUMP { return "pseudo_jump" }
+    if opcode == MIR_OP_PSEUDO_BRANCH_TRUE { return "pseudo_branch_true" }
+    if opcode == MIR_OP_PSEUDO_BRANCH_FALSE { return "pseudo_branch_false" }
+    if opcode == MIR_OP_PSEUDO_LABEL { return "pseudo_label" }
+    if opcode == MIR_OP_PSEUDO_ALLOC { return "pseudo_alloc" }
+    if opcode == MIR_OP_PSEUDO_FIELD_GET { return "pseudo_field_get" }
+    if opcode == MIR_OP_PSEUDO_FIELD_SET { return "pseudo_field_set" }
+    if opcode == MIR_OP_PSEUDO_INDEX_GET { return "pseudo_index_get" }
+    if opcode == MIR_OP_PSEUDO_INDEX_SET { return "pseudo_index_set" }
+    if opcode == MIR_OP_PSEUDO_LOAD_FLOAT { return "pseudo_load_float" }
+    if opcode == MIR_OP_PSEUDO_INT_TO_FLOAT { return "pseudo_int_to_float" }
+    if opcode == MIR_OP_PSEUDO_FLOAT_TO_INT { return "pseudo_float_to_int" }
+    if opcode == MIR_OP_PSEUDO_LOAD_GLOBAL { return "pseudo_load_global" }
+    if opcode == MIR_OP_PSEUDO_STORE_GLOBAL { return "pseudo_store_global" }
+    if opcode == MIR_OP_LOAD_STACK { return "load_stack" }
+    if opcode == MIR_OP_STORE_STACK { return "store_stack" }
+    if opcode == MIR_OP_MOV_IMM { return "mov_imm" }
+    if opcode == MIR_OP_LOAD_DATA_ADDR { return "load_data_addr" }
+    if opcode == MIR_OP_MOVE { return "move" }
+    if opcode == MIR_OP_BINOP { return "binop" }
+    if opcode == MIR_OP_UNARY { return "unary" }
+    if opcode == MIR_OP_CMP_ZERO { return "cmp_zero" }
+    if opcode == MIR_OP_SETCC { return "setcc" }
+    if opcode == MIR_OP_JMP { return "jmp" }
+    if opcode == MIR_OP_JCC { return "jcc" }
+    if opcode == MIR_OP_LABEL { return "label" }
+    if opcode == MIR_OP_ARG_MOVE { return "arg_move" }
+    if opcode == MIR_OP_CALL { return "call" }
+    if opcode == MIR_OP_CAPTURE_RET { return "capture_ret" }
+    if opcode == MIR_OP_RET { return "ret" }
+    if opcode == MIR_OP_ALLOC { return "alloc" }
+    if opcode == MIR_OP_FIELD_LOAD { return "field_load" }
+    if opcode == MIR_OP_FIELD_STORE { return "field_store" }
+    if opcode == MIR_OP_INDEX_LOAD { return "index_load" }
+    if opcode == MIR_OP_INDEX_STORE { return "index_store" }
+    if opcode == MIR_OP_LEA_STACK { return "lea_stack" }
+    if opcode == MIR_OP_LOAD_FLOAT_RIP { return "load_float_rip" }
+    if opcode == MIR_OP_FLOAT_BINOP { return "float_binop" }
+    if opcode == MIR_OP_INT_TO_FLOAT { return "int_to_float" }
+    if opcode == MIR_OP_FLOAT_TO_INT { return "float_to_int" }
+    if opcode == MIR_OP_FLOAT_MOVE { return "float_move" }
+    if opcode == MIR_OP_LOAD_ABS { return "load_abs" }
+    if opcode == MIR_OP_STORE_ABS { return "store_abs" }
+    "unknown_mir_op"
+}
+
+// SIO-32: name the BinaryOp behind an int/float binop refusal. The bare
+// "binop" told the operator nothing about which comparison or arithmetic
+// the backend cannot encode yet.
+fn a64_preview_binop_name(op: BinaryOp) -> string {
+    if op == BinaryOp::OpAdd { return "add" }
+    if op == BinaryOp::OpSub { return "sub" }
+    if op == BinaryOp::OpMul { return "mul" }
+    if op == BinaryOp::OpDiv { return "div" }
+    if op == BinaryOp::OpRem { return "rem" }
+    if op == BinaryOp::OpEq { return "eq" }
+    if op == BinaryOp::OpNe { return "ne" }
+    if op == BinaryOp::OpLt { return "lt" }
+    if op == BinaryOp::OpLe { return "le" }
+    if op == BinaryOp::OpGt { return "gt" }
+    if op == BinaryOp::OpGe { return "ge" }
+    if op == BinaryOp::OpAnd { return "and" }
+    if op == BinaryOp::OpOr { return "or" }
+    if op == BinaryOp::OpBitAnd { return "bitand" }
+    if op == BinaryOp::OpBitOr { return "bitor" }
+    if op == BinaryOp::OpBitXor { return "bitxor" }
+    if op == BinaryOp::OpShl { return "shl" }
+    if op == BinaryOp::OpShr { return "shr" }
+    if op == BinaryOp::OpConcat { return "concat" }
+    if op == BinaryOp::OpRange { return "range" }
+    if op == BinaryOp::OpRangeInclusive { return "range_inclusive" }
+    if op == BinaryOp::OpUDiv { return "udiv" }
+    if op == BinaryOp::OpURem { return "urem" }
+    if op == BinaryOp::OpUShr { return "ushr" }
+    "unknown_binop"
+}
+
+// SIO-32: same naming for unary refusals.
+fn a64_preview_unop_name(op: UnaryOp) -> string {
+    if op == UnaryOp::OpNeg { return "neg" }
+    if op == UnaryOp::OpNot { return "not" }
+    if op == UnaryOp::OpRef { return "ref" }
+    if op == UnaryOp::OpRefMut { return "refmut" }
+    if op == UnaryOp::OpDeref { return "deref" }
+    if op == UnaryOp::OpBitNot { return "bitnot" }
+    "unknown_unop"
+}
+
+// SIO-32: builtin print bodies for the a64 preview (mirrors the x86_64
+// emit_builtin_print_* helpers). Without these, `print` compiles to an empty
+// stub: the ELF exits 0 but never writes a byte. Callers pass the first arg
+// in x0 (MIR_OP_ARG_MOVE targets register arg_index). Bodies are frameless
+// leaves of fixed single-instruction encodings; branch offsets are byte
+// offsets from the branch instruction, documented against each layout.
+// Linux write is x8=64, x0=fd, x1=buf, x2=len, svc #0.
+fn a64_preview_emit_builtin_print_str(c: A64PreviewCompiler) -> A64PreviewCompiler with Mut, Panic, Div {
+    var out = c
+    // x0 = NUL-terminated string.
+    //   +0  mov  x1, x0        (ORR alias; no SP involved, safe)
+    //   +4  movz x2, #0
+    //   +8  loop: ldrb w3, [x1]
+    //   +12 cbz  x3, done      (+28 => +16)
+    //   +16 add  x1, x1, #1
+    //   +20 add  x2, x2, #1
+    //   +24 b    loop          (+8 => -16)
+    //   +28 done: sub x1, x1, x2
+    //   +32 movz x0, #1
+    //   +36 movz x8, #64
+    //   +40 svc  #0
+    //   +44 ret
+    out.code = a64_emit_mov(out.code, A64_X1, A64_X0)
+    out.code = a64_emit_movz(out.code, A64_X2, 0, 0)
+    out.code = a64_emit_ldrb(out.code, A64_X3, A64_X1, 0)
+    out.code = a64_emit_cbz(out.code, A64_X3, 16)
+    out.code = a64_emit_add_imm(out.code, A64_X1, A64_X1, 1)
+    out.code = a64_emit_add_imm(out.code, A64_X2, A64_X2, 1)
+    out.code = a64_emit_b(out.code, -16)
+    out.code = a64_emit_sub(out.code, A64_X1, A64_X1, A64_X2)
+    out.code = a64_emit_movz(out.code, A64_X0, 1, 0)
+    out.code = a64_emit_movz(out.code, A64_X8, 64, 0)
+    out.code = a64_emit_svc(out.code, 0)
+    out.code = a64_emit_ret(out.code)
+    out
+}
+
+// print_int: x0 = i64 value. Repeated udiv by 10 into a 32-byte stack
+// buffer, backwards from [sp, #31]; '-' prepended when negative.
+//   +0   sub  sp, sp, #32
+//   +4   mov  x1, x0
+//   +8   movz x7, #0            (neg flag)
+//   +12  cmp  x1, #0
+//   +16  b.ge positive         (+28 => +12)
+//   +20  neg  x1, x1
+//   +24  movz x7, #1
+//   +28  positive: add x4, sp, #31
+//   +32  movz x2, #0            (len)
+//   +36  movz x5, #10
+//   +40  loop: udiv x6, x1, x5
+//   +44  msub x3, x6, x5, x1    (x3 = x1 - x6*x5)
+//   +48  add  x3, x3, #48
+//   +52  strb w3, [x4]
+//   +56  sub  x4, x4, #1
+//   +60  add  x2, x2, #1
+//   +64  mov  x1, x6
+//   +68  cbnz x1, loop          (+40 => -28)
+//   +72  cbz  x7, nosign        (+92 => +20)
+//   +76  movz x3, #45           ('-')
+//   +80  strb w3, [x4]
+//   +84  sub  x4, x4, #1
+//   +88  add  x2, x2, #1
+//   +92  nosign: add x4, x4, #1
+//   +96  mov  x1, x4
+//   +100 movz x0, #1
+//   +104 movz x8, #64
+//   +108 svc  #0
+//   +112 add  sp, sp, #32
+//   +116 ret
+fn a64_preview_emit_builtin_print_int(c: A64PreviewCompiler) -> A64PreviewCompiler with Mut, Panic, Div {
+    var out = c
+    out.code = a64_emit_sub_imm(out.code, A64_SP, A64_SP, 32)
+    out.code = a64_emit_mov(out.code, A64_X1, A64_X0)
+    out.code = a64_emit_movz(out.code, A64_X7, 0, 0)
+    out.code = a64_emit_cmp_imm(out.code, A64_X1, 0)
+    out.code = a64_emit_b_cond(out.code, A64_COND_GE, 12)
+    out.code = a64_emit_neg(out.code, A64_X1, A64_X1)
+    out.code = a64_emit_movz(out.code, A64_X7, 1, 0)
+    out.code = a64_emit_add_imm(out.code, A64_X4, A64_SP, 31)
+    out.code = a64_emit_movz(out.code, A64_X2, 0, 0)
+    out.code = a64_emit_movz(out.code, A64_X5, 10, 0)
+    out.code = a64_emit_udiv(out.code, A64_X6, A64_X1, A64_X5)
+    out.code = a64_emit_msub(out.code, A64_X3, A64_X6, A64_X5, A64_X1)
+    out.code = a64_emit_add_imm(out.code, A64_X3, A64_X3, 48)
+    out.code = a64_emit_strb(out.code, A64_X3, A64_X4, 0)
+    out.code = a64_emit_sub_imm(out.code, A64_X4, A64_X4, 1)
+    out.code = a64_emit_add_imm(out.code, A64_X2, A64_X2, 1)
+    out.code = a64_emit_mov(out.code, A64_X1, A64_X6)
+    out.code = a64_emit_cbnz(out.code, A64_X1, -28)
+    out.code = a64_emit_cbz(out.code, A64_X7, 20)
+    out.code = a64_emit_movz(out.code, A64_X3, 45, 0)
+    out.code = a64_emit_strb(out.code, A64_X3, A64_X4, 0)
+    out.code = a64_emit_sub_imm(out.code, A64_X4, A64_X4, 1)
+    out.code = a64_emit_add_imm(out.code, A64_X2, A64_X2, 1)
+    out.code = a64_emit_add_imm(out.code, A64_X4, A64_X4, 1)
+    out.code = a64_emit_mov(out.code, A64_X1, A64_X4)
+    out.code = a64_emit_movz(out.code, A64_X0, 1, 0)
+    out.code = a64_emit_movz(out.code, A64_X8, 64, 0)
+    out.code = a64_emit_svc(out.code, 0)
+    out.code = a64_emit_add_imm(out.code, A64_SP, A64_SP, 32)
+    out.code = a64_emit_ret(out.code)
+    out
+}
+
+// print_char: x0 low byte is the character. One byte via a 16-byte slot.
+// `mov x1, sp` would be the ORR alias (r31 reads XZR there); ADD #0 honors SP.
+fn a64_preview_emit_builtin_print_char(c: A64PreviewCompiler) -> A64PreviewCompiler with Mut, Panic, Div {
+    var out = c
+    out.code = a64_emit_sub_imm(out.code, A64_SP, A64_SP, 16)
+    out.code = a64_emit_strb(out.code, A64_X0, A64_SP, 0)
+    out.code = a64_emit_add_imm(out.code, A64_X1, A64_SP, 0)
+    out.code = a64_emit_movz(out.code, A64_X2, 1, 0)
+    out.code = a64_emit_movz(out.code, A64_X0, 1, 0)
+    out.code = a64_emit_movz(out.code, A64_X8, 64, 0)
+    out.code = a64_emit_svc(out.code, 0)
+    out.code = a64_emit_add_imm(out.code, A64_SP, A64_SP, 16)
+    out.code = a64_emit_ret(out.code)
+    out
+}
+
+// SIO-32: collect call args from the IR arena, in IR order (mirrors the
+// x86 backend's nc_core_load_call_arg_into reads, and the full preview in
+// codegen.sio). The legalized machine stream carries CALL without ARG_MOVE,
+// and lowering is order-preserving, so the k-th machine CALL matches the
+// k-th IR call collected here.
+fn a64_preview_collect_call_args(c: A64PreviewCompiler, func: IrFunction) -> (A64PreviewCompiler, string) with Mut, Panic, Div {
+    var out = c
+    out.call_site_count = 0
+    out.call_emit_index = 0
+    var i: i64 = 0
+    while i < func.instr_count {
+        let at = ir_region_slot_r(func.region, (i))
+        if (IR_A_OP[at as usize] as IrOpcode) == IrOpcode::IrCall {
+            if out.call_site_count >= 16 {
+                return (out, "aarch64_call_table_exhausted")
+            }
+            let ci = out.call_site_count
+            out.call_site_targets[ci as usize] = IR_A_FN_ID[at as usize]
+            let argc = IR_A_ARG_COUNT[at as usize]
+            if argc > 6 {
+                return (out, "aarch64_call_arity_gt_6")
+            }
+            if argc < 0 {
+                return (out, "aarch64_call_arity_negative")
+            }
+            out.call_site_argc[ci as usize] = argc
+            var a: i64 = 0
+            while a < argc {
+                let arg = ir_arena_arg_at(at, a)
+                if arg < 0 {
+                    return (out, "aarch64_missing_call_arg")
+                }
+                out.call_site_args[(ci * 6 + a) as usize] = arg
+                a = a + 1
+            }
+            out.call_site_count = ci + 1
+        }
+        i = i + 1
+    }
+    (out, "")
 }
 
 fn a64_preview_emit_machine_instr(c: A64PreviewCompiler, instr: MachineInstr) -> (A64PreviewCompiler, string) with Mut, Panic, Div {
@@ -15236,15 +15537,33 @@ fn a64_preview_emit_machine_instr(c: A64PreviewCompiler, instr: MachineInstr) ->
             out.code = a64_emit_asr(out.code, A64_X9, A64_X9, A64_X10)
         } else if instr.bin_op == BinaryOp::OpUShr {
             out.code = a64_emit_lsr(out.code, A64_X9, A64_X9, A64_X10)
+        } else if instr.bin_op == BinaryOp::OpEq || instr.bin_op == BinaryOp::OpNe || instr.bin_op == BinaryOp::OpLt || instr.bin_op == BinaryOp::OpLe || instr.bin_op == BinaryOp::OpGt || instr.bin_op == BinaryOp::OpGe {
+            // SIO-32: integer comparisons. X9 holds lhs, X10 rhs
+            // (legalize moves both into temps first). Sounio integers are
+            // signed; the macOS backend uses the same signed conditions.
+            out.code = a64_emit_cmp(out.code, A64_X9, A64_X10)
+            var cc: i64 = A64_COND_EQ
+            if instr.bin_op == BinaryOp::OpNe { cc = A64_COND_NE }
+            else if instr.bin_op == BinaryOp::OpLt { cc = A64_COND_LT }
+            else if instr.bin_op == BinaryOp::OpLe { cc = A64_COND_LE }
+            else if instr.bin_op == BinaryOp::OpGt { cc = A64_COND_GT }
+            else if instr.bin_op == BinaryOp::OpGe { cc = A64_COND_GE }
+            out.code = a64_emit_cset(out.code, A64_X9, cc)
         } else {
-            return (out, "aarch64_binop_pending:" + native_v2_ir_opcode_name(IrOpcode::IrBinOp))
+            return (out, "aarch64_binop_pending:" + a64_preview_binop_name(instr.bin_op))
         }
         out.code = a64_preview_emit_store_slot(out.code, A64_X9, instr.dst.value)
         return (out, "")
     }
     if instr.opcode == MIR_OP_UNARY {
         out.code = a64_preview_emit_load_slot(out.code, A64_X9, instr.src1.value)
-        if instr.un_op == UnaryOp::OpNeg {
+        if machine_instr_aux_value(instr) == 1 && instr.un_op == UnaryOp::OpNeg {
+            // SIO-32: float negation. The integer neg below would flip the
+            // top BIT of the double instead of negating its value.
+            out.code = a64_emit_fmov_x_to_d(out.code, A64_D0, A64_X9)
+            out.code = a64_emit_fneg(out.code, A64_D0, A64_D0)
+            out.code = a64_emit_fmov_d_to_x(out.code, A64_X9, A64_D0)
+        } else if instr.un_op == UnaryOp::OpNeg {
             out.code = a64_emit_neg(out.code, A64_X9, A64_X9)
         } else if instr.un_op == UnaryOp::OpNot {
             out.code = a64_emit_mov_imm64(out.code, A64_X10, 1)
@@ -15252,8 +15571,111 @@ fn a64_preview_emit_machine_instr(c: A64PreviewCompiler, instr: MachineInstr) ->
         } else if instr.un_op == UnaryOp::OpBitNot {
             out.code = a64_emit_mvn(out.code, A64_X9, A64_X9)
         } else {
-            return (out, "aarch64_unary_pending")
+            return (out, "aarch64_unary_pending:" + a64_preview_unop_name(instr.un_op))
         }
+        out.code = a64_preview_emit_store_slot(out.code, A64_X9, instr.dst.value)
+        return (out, "")
+    }
+    // SIO-32: string literal address. The bytes are interned into the
+    // preview rodata image; the adrp/add pair is emitted with zero
+    // immediates and patched once the final code size (hence the rodata
+    // vaddr) is known. Refusals are loud: a dropped fixup or an overfull
+    // table would otherwise silently corrupt the binary.
+    if instr.opcode == MIR_OP_LOAD_DATA_ADDR {
+        if instr.name.len < 0 || out.rodata.len + instr.name.len + 1 > 8192 {
+            return (out, "aarch64_rodata_overflow")
+        }
+        if out.data_patch_count >= 64 {
+            return (out, "aarch64_rodata_patches_exhausted")
+        }
+        var ro = out.rodata
+        ro = string_table_add(ro, instr.name.buf, instr.name.len)
+        out.rodata = ro
+        out.code = a64_emit_adrp(out.code, A64_X9, 0)
+        let adrp_at = out.code.len - 4
+        out.code = a64_emit_add_imm(out.code, A64_X9, A64_X9, 0)
+        out = a64_preview_record_data_patch(out, adrp_at, ro.last_offset)
+        out.code = a64_preview_emit_store_slot(out.code, A64_X9, instr.dst.value)
+        return (out, "")
+    }
+    // SIO-32: double constant. The f64 bit pattern is materialized with
+    // movz/movk (no rodata needed); the slot keeps the bits, matching the
+    // float-slot invariant used by the float arms below.
+    if instr.opcode == MIR_OP_LOAD_FLOAT_RIP {
+        let bits = instr.src1.value
+        out.code = a64_emit_movz(out.code, A64_X9, bits & 65535, 0)
+        out.code = a64_emit_movk(out.code, A64_X9, (bits >> 16) & 65535, 16)
+        out.code = a64_emit_movk(out.code, A64_X9, (bits >> 32) & 65535, 32)
+        out.code = a64_emit_movk(out.code, A64_X9, (bits >> 48) & 65535, 48)
+        out.code = a64_preview_emit_store_slot(out.code, A64_X9, instr.dst.value)
+        return (out, "")
+    }
+    // SIO-32: int value <-> double bits. Slots hold f64 values as raw bit
+    // patterns in integer slots; D registers are transient.
+    if instr.opcode == MIR_OP_INT_TO_FLOAT {
+        out.code = a64_preview_emit_load_slot(out.code, A64_X9, instr.src1.value)
+        out.code = a64_emit_scvtf(out.code, A64_D0, A64_X9)
+        out.code = a64_emit_fmov_d_to_x(out.code, A64_X9, A64_D0)
+        out.code = a64_preview_emit_store_slot(out.code, A64_X9, instr.dst.value)
+        return (out, "")
+    }
+    if instr.opcode == MIR_OP_FLOAT_TO_INT {
+        out.code = a64_preview_emit_load_slot(out.code, A64_X9, instr.src1.value)
+        out.code = a64_emit_fmov_x_to_d(out.code, A64_D0, A64_X9)
+        out.code = a64_emit_fcvtzs(out.code, A64_X9, A64_D0)
+        out.code = a64_preview_emit_store_slot(out.code, A64_X9, instr.dst.value)
+        return (out, "")
+    }
+    if instr.opcode == MIR_OP_FLOAT_MOVE {
+        out.code = a64_preview_emit_load_slot(out.code, A64_X9, instr.src1.value)
+        out.code = a64_preview_emit_store_slot(out.code, A64_X9, instr.dst.value)
+        return (out, "")
+    }
+    // SIO-32: double arithmetic and comparisons. aux bit 0/1 mark float
+    // src1/src2 (see native_v2_make_float_binop); integer sides convert
+    // with scvtf. Comparison results are ints (cset); arithmetic results
+    // stay double bits (the dst slot is float-marked by legalize).
+    if instr.opcode == MIR_OP_FLOAT_BINOP {
+        let fflags = machine_instr_aux_value(instr)
+        let s1f = fflags & 1
+        let s2f = (fflags / 2) & 1
+        out.code = a64_preview_emit_load_slot(out.code, A64_X9, instr.src1.value)
+        out.code = a64_preview_emit_load_slot(out.code, A64_X10, instr.src2.value)
+        if s1f == 1 {
+            out.code = a64_emit_fmov_x_to_d(out.code, A64_D0, A64_X9)
+        } else {
+            out.code = a64_emit_scvtf(out.code, A64_D0, A64_X9)
+        }
+        if s2f == 1 {
+            out.code = a64_emit_fmov_x_to_d(out.code, A64_D1, A64_X10)
+        } else {
+            out.code = a64_emit_scvtf(out.code, A64_D1, A64_X10)
+        }
+        if instr.bin_op == BinaryOp::OpAdd {
+            out.code = a64_emit_fadd(out.code, A64_D0, A64_D0, A64_D1)
+        } else if instr.bin_op == BinaryOp::OpSub {
+            out.code = a64_emit_fsub(out.code, A64_D0, A64_D0, A64_D1)
+        } else if instr.bin_op == BinaryOp::OpMul {
+            out.code = a64_emit_fmul(out.code, A64_D0, A64_D0, A64_D1)
+        } else if instr.bin_op == BinaryOp::OpDiv {
+            out.code = a64_emit_fdiv(out.code, A64_D0, A64_D0, A64_D1)
+        } else if instr.bin_op == BinaryOp::OpEq || instr.bin_op == BinaryOp::OpNe || instr.bin_op == BinaryOp::OpLt || instr.bin_op == BinaryOp::OpLe || instr.bin_op == BinaryOp::OpGt || instr.bin_op == BinaryOp::OpGe {
+            // Ordered float conditions mirror the macOS backend; NaN is
+            // unordered, so Lt/Le/Gt/Ge on NaN correctly yield 0.
+            out.code = a64_emit_fcmp(out.code, A64_D0, A64_D1)
+            var fcc: i64 = A64_COND_EQ
+            if instr.bin_op == BinaryOp::OpNe { fcc = A64_COND_NE }
+            else if instr.bin_op == BinaryOp::OpLt { fcc = A64_COND_MI }
+            else if instr.bin_op == BinaryOp::OpLe { fcc = A64_COND_LS }
+            else if instr.bin_op == BinaryOp::OpGt { fcc = A64_COND_GT }
+            else if instr.bin_op == BinaryOp::OpGe { fcc = A64_COND_GE }
+            out.code = a64_emit_cset(out.code, A64_X9, fcc)
+            out.code = a64_preview_emit_store_slot(out.code, A64_X9, instr.dst.value)
+            return (out, "")
+        } else {
+            return (out, "aarch64_float_binop_pending:" + a64_preview_binop_name(instr.bin_op))
+        }
+        out.code = a64_emit_fmov_d_to_x(out.code, A64_X9, A64_D0)
         out.code = a64_preview_emit_store_slot(out.code, A64_X9, instr.dst.value)
         return (out, "")
     }
@@ -15285,6 +15707,22 @@ fn a64_preview_emit_machine_instr(c: A64PreviewCompiler, instr: MachineInstr) ->
         return (out, "")
     }
     if instr.opcode == MIR_OP_CALL {
+        // SIO-32: pass call args. The machine stream carries no ARG_MOVE,
+        // so args come from the IR call table (k-th CALL matches k-th IR
+        // call; mirrors codegen.sio). Target mismatch refuses loudly.
+        let ci = out.call_emit_index
+        if ci < 0 || ci >= out.call_site_count {
+            return (out, "aarch64_call_site_missing")
+        }
+        if out.call_site_targets[ci as usize] != instr.src1.value {
+            return (out, "aarch64_call_target_mismatch")
+        }
+        var a: i64 = 0
+        while a < out.call_site_argc[ci as usize] {
+            out.code = a64_preview_emit_load_slot(out.code, a, out.call_site_args[(ci * 6 + a) as usize])
+            a = a + 1
+        }
+        out.call_emit_index = ci + 1
         let patch_offset = out.code.len
         out.code = a64_emit_bl(out.code, 0)
         out = a64_preview_record_call_patch(out, patch_offset, instr.src1.value)
@@ -15309,12 +15747,37 @@ fn a64_preview_emit_machine_instr(c: A64PreviewCompiler, instr: MachineInstr) ->
         return (out, "")
     }
 
-    (out, "aarch64_machine_op_pending")
+    (out, "aarch64_machine_op_pending:" + a64_preview_mir_op_name(instr.opcode))
 }
 
 fn a64_preview_compile_function(c: A64PreviewCompiler, func: IrFunction, machine_func: MachineFunction, fn_index: i64) -> (A64PreviewCompiler, string) with Mut, Panic, Div {
     var out = a64_preview_reset_function_state(c)
     out.fn_offsets[fn_index as usize] = out.code.len
+
+    // SIO-32: builtin print dispatch (mirrors the x86_64 empty-stub
+    // interception). Only bodyless builtins are intercepted; user/stdlib
+    // bodies that share the name compile as ordinary IR.
+    if machine_func.blocks[0].instr_count == 0 {
+        if name_is_print(func.name) {
+            out = a64_preview_emit_builtin_print_str(out)
+            return (out, "")
+        }
+        if name_is_print_int(func.name) {
+            out = a64_preview_emit_builtin_print_int(out)
+            return (out, "")
+        }
+        if name_is_print_char(func.name) {
+            out = a64_preview_emit_builtin_print_char(out)
+            return (out, "")
+        }
+    }
+
+    // SIO-32: collect call args before emitting (see above).
+    let collected = a64_preview_collect_call_args(out, func)
+    out = collected.0
+    if str_len(collected.1) > 0 {
+        return (out, collected.1)
+    }
 
     let frame_size = a64_preview_frame_size(machine_func.temp_count)
     out.code = a64_emit_prologue(out.code, frame_size)
@@ -15913,7 +16376,17 @@ pub fn compile_native_v2_preview_to_file(module: &IrModule, target_spec: NativeT
     if target_spec.arch_id == ARCH_AARCH64() && target_spec.os_id == OS_MACOS() {
         return compile_arm64_macos_to_file(module, output_path)
     }
+    // SIO-32: aarch64-linux emits through the local preview twin below.
+    // Anything else is a named refusal, never a bare number.
+    if target_spec.arch_id == ARCH_AARCH64() && target_spec.os_id == OS_LINUX() {
+        return compile_aarch64_linux_to_file(module, output_path)
+    }
     if !(target_spec.arch_id == ARCH_X86_64() && target_spec.os_id == OS_LINUX()) {
+        print("Error: target ")
+        print(target_spec.resolved_target)
+        print(" is not supported by this backend yet (requested ")
+        print(target_spec.requested_target)
+        print(")\n")
         return 11
     }
 
@@ -16117,6 +16590,116 @@ pub fn compile_native_v2_preview_to_file(module: &IrModule, target_spec: NativeT
         return 23
     }
     native_v2_write_min_elf64_to_file(output_path, &! nc, entry, 4194304)
+}
+
+// SIO-32: aarch64-linux ELF emission. Local twin of the shared preview
+// backend (native::codegen::compile_to_elf_aarch64_preview): same machine
+// module, same tabulated encoder, same Linux entry trampoline, same ELF
+// finalizer. Only the result narrowing is local (this file's 128 KiB
+// NativeCompileResult contract, with a loud refusal past it instead of a
+// silent truncate). Unsupported opcodes surface as named backend errors.
+fn compile_to_elf_aarch64_preview(module: &IrModule) -> NativeCompileResult with Mut, Panic, Div, Alloc {
+    let built = native_v2_build_machine_module(module, true)
+    if !built.supported {
+        return native_compile_result_error(ERR_BACKEND_NOT_IMPLEMENTED(), "native_v2_unsupported_opcode:" + built.unsupported_detail)
+    }
+
+    var c = a64_preview_compiler_new()
+    c.fn_count = module.fn_count
+    var symbols = symbol_data_new()
+
+    var fi: i64 = 0
+    while fi < module.fn_count {
+        let func = ir_fn_get(module, fi as usize)
+        symbols = symbol_data_add_name(symbols, fi, func.name.buf, func.name.len)
+        let pair = a64_preview_compile_function(c, func, machine_module_function_get(&built, fi), fi)
+        c = pair.0
+        if str_len(pair.1) > 0 {
+            return native_compile_result_error(ERR_BACKEND_NOT_IMPLEMENTED(), "native_v2_unsupported_opcode:" + pair.1)
+        }
+        fi = fi + 1
+    }
+
+    let main_idx = find_main_index(module)
+    if main_idx < 0 {
+        return native_compile_result_error(ERR_INVALID_TARGET(), "native_v2_aarch64_missing_main")
+    }
+    c = a64_preview_emit_entry_trampoline_linux(c, main_idx)
+    c = a64_preview_patch_calls(c)
+
+    // SIO-32: resolve rodata address fixups now that the code size is
+    // final. Layout (see finalize_elf64_for_machine): text at
+    // base+4096, rodata at base+align_page(4096 + code.len), so the target
+    // of every adrp/add pair is computable; words are rewritten in place
+    // and the code length never changes here.
+    let text_vaddr = 4194304 + 4096
+    let rodata_vaddr = 4194304 + align_page(4096 + c.code.len)
+    var di: i64 = 0
+    while di < c.data_patch_count {
+        let at = c.data_patch_offsets[di as usize]
+        let target = rodata_vaddr + c.data_patch_rodata[di as usize]
+        let pc = text_vaddr + at
+        let page_off = (target / 4096) - (pc / 4096)
+        let lo12 = target - ((target / 4096) * 4096)
+        let adrp_word = 0x90000000 | (((page_off & 3)) << 29) | ((((page_off / 4) & 524287)) << 5) | (A64_X9 & 31)
+        c.code = patch_u32_le(c.code, at, adrp_word)
+        let add_word = 0x91000000 | ((lo12 & 4095) << 10) | ((A64_X9 & 31) << 5) | (A64_X9 & 31)
+        c.code = patch_u32_le(c.code, at + 4, add_word)
+        di = di + 1
+    }
+
+    let data = string_table_new()
+    // A64PreviewCompiler keeps 256 slots. The ELF finalizer takes the
+    // IR-wide table. Copy, do not grow the preview compiler onto the stack.
+    var fn_offsets_wide: [i64; 16384] = [-1; 16384]
+    var oi: i64 = 0
+    while oi < c.fn_count && oi < 256 {
+        fn_offsets_wide[oi as usize] = c.fn_offsets[oi as usize]
+        oi = oi + 1
+    }
+    let elf = finalize_elf64_for_machine(
+        c.code,
+        c.rodata,
+        data,
+        c.entry_offset,
+        4194304,
+        elf_machine_aarch64(),
+        symbols,
+        fn_offsets_wide,
+        c.fn_count,
+        0,
+        BSS_BASE_LINUX
+    )
+    if elf.len > 131072 {
+        return native_compile_result_error(ERR_BACKEND_NOT_IMPLEMENTED(), "native_v2_aarch64_elf_too_large")
+    }
+    native_compile_result_ok_elf(elf.bytes, elf.len, FORMAT_ELF64())
+}
+
+// SIO-32: file-writing shell for the aarch64-linux preview backend.
+// Mirrors the arm64-macos shell: named backend errors propagate as
+// sentences, the byte count is verified against the write.
+fn compile_aarch64_linux_to_file(module: &IrModule, output_path: string) -> i32 with IO, Mut, Panic, Div, Alloc {
+    let result = compile_to_elf_aarch64_preview(module)
+    if !result.ok {
+        print("Error: aarch64-linux native backend: ")
+        print(result.error_msg)
+        print("\n")
+        return 1
+    }
+    let wrote = write_file(output_path, result.bytes, result.len)
+    if wrote != result.len {
+        print("Error: failed to write aarch64-linux ELF to ")
+        print(output_path)
+        print("\n")
+        return 1
+    }
+    print("elf_aarch64_linux: ")
+    print(output_path)
+    print(" ")
+    print_int(result.len)
+    print(" bytes\n")
+    0
 }
 
 fn compile_to_macho_arm64_preview(module: &IrModule, target_spec: NativeTargetSpec) -> NativeCompileResult with Mut, Panic, Div, Alloc {
