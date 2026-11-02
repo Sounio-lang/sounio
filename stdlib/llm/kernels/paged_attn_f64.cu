@@ -53,7 +53,8 @@ static double pure_exp_ref(double x) {
 // table  [nrows, maxblocks] u64 ; lens [nrows] u64 (host stages i64)
 // scale  passed by value here; the PTX takes a device pointer to
 //        one f64 so the Sounio host never needs f64 bit conversion.
-// sco    [nrows, maxblocks*B]   f64 scratch
+// sco    [nrows, heads, maxblocks*B] f64 scratch, one lane
+//        per (row, head); shared layout was a same-row race
 // out    [nrows, heads, dh]     f64 ; proof[0] += finished rows*heads
 void paged_attn_f64_ref(const double *q, const double *pool_k,
                         const double *pool_v,
@@ -79,13 +80,13 @@ void paged_attn_f64_ref(const double *q, const double *pool_k,
                     dot += q[(row * heads + h) * dh + d]
                          * pool_k[(bo * kv_heads + kvh) * dh + d];
                 double sc = dot * scale;
-                sco[row * maxblocks * B + t] = sc;
+                sco[(row * heads + h) * maxblocks * B + t] = sc;
                 if (sc > mx) mx = sc;
             }
             double sum = 0.0;
             for (int t = 0; t < len; t++) {
-                double e = pure_exp_ref(sco[row * maxblocks * B + t] - mx);
-                sco[row * maxblocks * B + t] = e;
+                double e = pure_exp_ref(sco[(row * heads + h) * maxblocks * B + t] - mx);
+                sco[(row * heads + h) * maxblocks * B + t] = e;
                 sum += e;
             }
             for (int d = 0; d < dh; d++) {
@@ -94,7 +95,7 @@ void paged_attn_f64_ref(const double *q, const double *pool_k,
                     int bi = t / B, pos = t % B;
                     unsigned long long bo =
                         table[row * maxblocks + bi] * (unsigned)B + (unsigned)pos;
-                    acc += sco[row * maxblocks * B + t] / sum
+                    acc += sco[(row * heads + h) * maxblocks * B + t] / sum
                          * pool_v[(bo * kv_heads + kvh) * dh + d];
                 }
                 out[(row * heads + h) * dh + d] = acc;
