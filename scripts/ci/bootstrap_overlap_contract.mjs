@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import assert from 'node:assert/strict';
-import {execFileSync,spawnSync} from 'node:child_process';
+import {spawnSync} from 'node:child_process';
 const root=process.argv[2]; assert(root,'usage: bootstrap_overlap_contract.mjs REPO [--selftest]');
 const workflow=fs.readFileSync(path.join(root,'.github/workflows/ci.yml'),'utf8');
 const decision=fs.readFileSync(path.join(root,'scripts/ci/evaluate_ci_decision.py'),'utf8');
