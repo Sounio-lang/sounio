@@ -18,9 +18,13 @@
 //   midazolam (weak base)   35.16         32.10          31.00        1.1x
 //   neutral, logP 3         25.42         16.30          22.35        1.6x
 //
-// In domain the three agree to 1.1x, which is a usable Type B model-form term
-// (~7% relative).  Out of domain they span ~92x -- and that number is NOT an
-// uncertainty, it is the distance to the members that do not apply.  Poulin-
+// In domain the three agree to 1.1x.  That spread is NOT by itself a Type B
+// standard uncertainty: the members read the same composition table and the
+// same drug inputs, so they are correlated and their spread can UNDERSTATE the
+// uncertainty; turning it into a u needs a stated distribution, weights and
+// dependence model, which this module does not supply.  Out of domain they span
+// ~92x, and that number is not an uncertainty either -- it is the distance to
+// the members that do not apply.  Poulin-
 // Theil has no acidic-phospholipid term at all; predicting a strong base with
 // it was the stated motivation for Rodgers-Rowland.  So a dispersion computed
 // over a non-uniform ensemble reports a domain error as an uncertainty.
@@ -34,12 +38,14 @@
 // For haloperidol this moves predicted Vss from 21350 L to 2258 L against
 // 1216 L observed (17.6x -> 1.86x); in adipose, brain and skin the mechanistic
 // part supplies the ORDERING and the regression supplies the LEVEL (factor
-// 0.03-0.04x).  Because Pearce was fitted to in vivo partition data, a
-// dispersion taken between an uncalibrated member and a calibrated one is
-// partly DERIVED FROM the data it would claim to cover -- the calibration /
-// discrepancy confounding of Brynjarsdottir & O'Hagan, located inside a member
-// rather than between members.  Hence kp_ensemble admits only members of one
-// calibration status and refuses to mix.
+// 0.03-0.04x).  Pearce was fitted to in vivo partition data, so a dispersion
+// taken between an uncalibrated member and a calibrated one MAY share data with
+// whatever it is later evaluated against -- the calibration / discrepancy
+// confounding of Brynjarsdottir & O'Hagan.  Whether Pearce 2017's calibration
+// set actually includes the drugs evaluated here has NOT been checked, and a
+// calibrated model is not unusable by that fact alone.  kp_ensemble admits only
+// members of one calibration status as a conservative default, not because the
+// mixing has been shown to be invalid in this case.
 //
 // ORACLE VALIDATION.  The Schmitt predictors here reproduce
 // httk::predict_partitioning_schmitt (httk 2.7.4) to 1.000x on 10 of 11
@@ -116,13 +122,15 @@
 //   Rodgers routes and question interpolation across the pKa 7.0 jump that
 //   this module still reproduces (see the note in kpm_rodgers_rowland).
 //
-// WHAT IS CLAIMED HERE is narrower: not that these methods are confounded --
-// that is established above -- but that a dispersion-based model-form term
-// computed over them is NOT INTERPRETABLE unless every admitted member is in
-// its declared domain and of uniform calibration status, and that the
-// apparatus should therefore REFUSE to produce one rather than produce a wide
-// number. None of the work above prevents the invalid computation from
-// happening; kpm_ensemble does.
+// WHAT THIS MODULE DOES, AND ITS LIMITS.  It implements a refusal: kpm_ensemble
+// declines to form a dispersion statistic when an admitted member is outside
+// its declared domain or calibration status is not uniform.  Three limits:
+//   - it is a RUNTIME check over flags declared by the caller, not a static
+//     guarantee of the type system;
+//   - it cannot authenticate those flags -- a caller who sets has_ma = true on
+//     an imputed membrane affinity is admitted (witnessed by T8 below);
+//   - whether existing tools (PK-Sim, Simcyp, GastroPlus) already gate on
+//     applicability domain has not been checked, so no novelty is claimed.
 //
 // Author: Demetrios Chiuratto Agourakis
 
@@ -135,13 +143,18 @@ use math::pure::{exp, ln, log10}
 // attributable to the methods and not to each paper's own input curation.
 // Note that this does NOT make the members comparable by itself: measured
 // membrane affinity (log_ma) is read only by Schmitt and has no Rodgers-Rowland
-// analogue, so the sensitivity vectors remain nearly disjoint.  Measured
-// 2026-10-31 at muscle, haloperidol, d(ln Kpu)/d(input):
+// analogue.  Measured 2026-10-31 at muscle, haloperidol.  These are
+// SEMI-ELASTICITIES of Kpu, d(ln Kpu)/d(x) per unit of x -- not elasticities,
+// and not of Kp:
 //     logP    R-R  0.49   Schmitt  0.03
 //     pKa     R-R -0.47   Schmitt -0.05
 //     fu_p    R-R -3.95   Schmitt -0.001
 //     R / MA  R-R  1.72   Schmitt  2.26
-// That asymmetry is the measurand ambiguity the ensemble cannot average away.
+// For the quantity that enters Vss the picture changes: the ELASTICITY of Kp
+// (= fu_p * Kpu) to fu_p is about -0.03 for Rodgers-Rowland, because the
+// blood:plasma back-calculation cancels fu_p (Korzekwa & Nagar 2016), and about
+// +1.00 for Schmitt.  The members depend on different inputs; that alone does
+// NOT show that they estimate different quantities.
 
 struct KpInputs {
     log_p:   f64,   // n-octanol:water log P of the NEUTRAL species
@@ -218,8 +231,11 @@ fn kpm_dow(pow_v: f64, f_n: f64) -> f64 {
 // between that calibration and the tissue prediction (Ka scales as 1/AP_rbc
 // while the tissue term scales as Ka*AP_tissue).  Verified numerically:
 // perturbing both [AP-] values by +10% moves ln Kpu by 0.0000.  So Rodgers-
-// Rowland is structurally immune to a uniform [AP-] error, and only a
-// DIFFERENTIAL error between blood cells and tissue is detectable.
+// Rowland depends on [AP-] only through the tissue / blood-cell RATIO.  That is
+// an invariance of the parameterisation, not evidence of a hidden error.  Its
+// practical consequence: a uniform error in [AP-] leaves Kpu unchanged, only a
+// DIFFERENTIAL error between blood cells and tissue moves it, and extending to
+// more organs needs sourced RATIOS rather than sourced absolutes.
 pub fn kpm_rodgers_rowland(d: KpInputs) -> KpMember with Mut, Div, Panic {
     let in_dom = kpm_rr_in_domain(d)
     let p  = kpm_pow10(d.log_p)
@@ -360,9 +376,11 @@ fn kpm_schmitt_core(d: KpInputs) -> f64 with Mut, Div, Panic {
 }
 
 // Declared domain: Schmitt covers every charge class, but its distinctive
-// input is a MEASURED membrane affinity.  Imputing log MA from logP collapses
-// it onto the other members -- the sensitivity vectors stop being disjoint --
-// so an imputed MA is treated as OUT OF DOMAIN rather than silently accepted.
+// input is a MEASURED membrane affinity.  Imputing log MA from logP makes that
+// input a function of one the other members already read, so an imputed MA is
+// treated as OUT OF DOMAIN.  That is a conservative choice, not a demonstrated
+// necessity -- and the gate cannot tell an imputed value from a measured one
+// unless the caller says so truthfully (see T8).
 // Measured 2026-10-31 against httk chem.physical_and_invitro.data (18476
 // compounds): of the dissertation's 15 drugs only haloperidol (3.723),
 // midazolam (2.9) and clozapine (2.954) carry a measured log MA.
@@ -465,12 +483,14 @@ pub fn kpm_schmitt_oracle_validated() -> bool { return true }
 //   2  fewer than two admitted members -- a dispersion needs two
 //   3  calibration status not uniform across the admitted members
 //
-// u_model_form is the sample standard deviation of ln Kpu over the admitted
-// members, i.e. a RELATIVE standard uncertainty, and it is 0.0 whenever the
-// ensemble refuses.  A refusal is not a zero uncertainty: it means no
-// dispersion-based term is defined, which is the whole point of fail-closed.
+// dispersion is the sample standard deviation of ln Kpu over the admitted
+// members.  It is a DESCRIPTIVE STATISTIC, not a standard uncertainty: the
+// members share inputs and composition data, so they are not independent
+// draws, and no distribution or dependence model has been stated.  It is 0.0
+// whenever the ensemble refuses.  A refusal is not a zero uncertainty: it means
+// the statistic is UNAVAILABLE.
 struct KpEnsemble {
-    u_model_form: f64,
+    dispersion: f64,
     n_admitted:   i32,
     valid:        bool,
     refusal:      i32
@@ -507,10 +527,10 @@ pub fn kpm_ensemble(d: KpInputs, want_calibrated: bool) -> KpEnsemble with Mut, 
     // Fail-closed, domain first: an out-of-domain member is a modelling error,
     // not a wide uncertainty, so it is reported even when enough members remain.
     if any_out {
-        return KpEnsemble { u_model_form: 0.0, n_admitted: n, valid: false, refusal: 1 }
+        return KpEnsemble { dispersion: 0.0, n_admitted: n, valid: false, refusal: 1 }
     }
     if n < 2 {
-        return KpEnsemble { u_model_form: 0.0, n_admitted: n, valid: false, refusal: 2 }
+        return KpEnsemble { dispersion: 0.0, n_admitted: n, valid: false, refusal: 2 }
     }
 
     let mu = s / (n as f64)
@@ -521,7 +541,7 @@ pub fn kpm_ensemble(d: KpInputs, want_calibrated: bool) -> KpEnsemble with Mut, 
     if m3.calibrated == want_calibrated { if m3.in_domain { let e = ln(m3.kpu) - mu; ss = ss + e * e } }
 
     let u = kpm_sqrt(ss / ((n - 1) as f64))
-    return KpEnsemble { u_model_form: u, n_admitted: n, valid: true, refusal: 0 }
+    return KpEnsemble { dispersion: u, n_admitted: n, valid: true, refusal: 0 }
 }
 
 // ============================================================================
@@ -549,11 +569,12 @@ pub fn kpm_drug_midazolam() -> KpInputs {
 }
 
 // A synthetic neutral at logP 3, to exercise the neutral route with no
-// ionisation anywhere.  Not a real drug; log MA is set from the Schmitt
-// neutral-compound range and flagged as measured only so the member is
-// admitted in the module's own self-test.
+// ionisation anywhere.  Not a real drug.  Its log MA is a guess from the
+// Schmitt neutral-compound range, so has_ma is FALSE -- an earlier version set
+// it true "so the member is admitted", which is exactly the kind of untruthful
+// metadata the gate cannot detect.
 pub fn kpm_drug_neutral_logp3() -> KpInputs {
-    return KpInputs { log_p: 3.00, log_ma: 2.50, has_ma: true, pka: 0.0,
+    return KpInputs { log_p: 3.00, log_ma: 2.50, has_ma: false, pka: 0.0,
                       is_base: false, fu_p: 0.10, rb: 1.00, mw: 300.0 }
 }
 
@@ -577,7 +598,7 @@ pub fn kpm_member_in_domain(m: KpMember) -> bool { return m.in_domain }
 pub fn kpm_member_calibrated(m: KpMember) -> bool { return m.calibrated }
 pub fn kpm_member_code(m: KpMember) -> i32 { return m.code }
 
-pub fn kpm_ens_u(e: KpEnsemble) -> f64 { return e.u_model_form }
+pub fn kpm_ens_dispersion(e: KpEnsemble) -> f64 { return e.dispersion }
 pub fn kpm_ens_n(e: KpEnsemble) -> i32 { return e.n_admitted }
 pub fn kpm_ens_valid(e: KpEnsemble) -> bool { return e.valid }
 pub fn kpm_ens_refusal(e: KpEnsemble) -> i32 { return e.refusal }
@@ -623,8 +644,8 @@ fn main() -> i32 with IO, Mut, Div, Panic {
     let e_mdz = kpm_ensemble(mdz, false)
     if e_mdz.valid {
         if e_mdz.n_admitted == 3 {
-            if e_mdz.u_model_form < 0.20 {
-                println("T1 PASS: in-domain ensemble valid, 3 members, u < 20% relative")
+            if e_mdz.dispersion < 0.20 {
+                println("T1 PASS: in-domain ensemble valid, 3 members, dispersion < 0.20 on ln Kpu")
             } else {
                 println("T1 FAIL: in-domain dispersion unexpectedly wide"); fails = fails + 1
             }
@@ -641,8 +662,8 @@ fn main() -> i32 with IO, Mut, Div, Panic {
     let e_hal = kpm_ensemble(hal, false)
     if !e_hal.valid {
         if e_hal.refusal == 1 {
-            if e_hal.u_model_form == 0.0 {
-                println("T2 PASS: strong base refused fail-closed on domain, u = 0")
+            if e_hal.dispersion == 0.0 {
+                println("T2 PASS: strong base refused fail-closed on domain, dispersion unavailable")
             } else {
                 println("T2 FAIL: refused but returned a non-zero u"); fails = fails + 1
             }
@@ -701,7 +722,7 @@ fn main() -> i32 with IO, Mut, Div, Panic {
     if kpm_abs(ap_up - ap_base) < 1.0e-12 {
         if kpm_abs(ap_dn - ap_base) < 1.0e-12 {
             if ap_base > 0.0 {
-                println("T5 PASS: uniform [AP-] error cancels exactly in R-R (null direction)")
+                println("T5 PASS: R-R reads [AP-] only via the tissue/blood-cell ratio (invariance)")
             } else {
                 println("T5 FAIL: R-R Kpu non-positive"); fails = fails + 1
             }
@@ -732,6 +753,30 @@ fn main() -> i32 with IO, Mut, Div, Panic {
         }
     } else {
         println("T7 FAIL: Schmitt oracle flag lost"); fails = fails + 1
+    }
+
+    // T8 -- the gate TRUSTS declared metadata; it does not authenticate it.
+    // Same midazolam inputs, has_ma flipped: with has_ma = true the Schmitt
+    // member is admitted and the ensemble is valid; with has_ma = false it is
+    // out of domain and the ensemble refuses. Nothing in the numbers tells the
+    // two apart, so the refusal is only as truthful as the caller's flag. This
+    // is a stated LIMIT of the contract, pinned so it is not forgotten.
+    let mdz_imp = KpInputs { log_p: 3.15, log_ma: 2.90, has_ma: false, pka: 6.01,
+                             is_base: true, fu_p: 0.037, rb: 1.00, mw: 325.77 }
+    let e_true  = kpm_ensemble(mdz, false)
+    let e_false = kpm_ensemble(mdz_imp, false)
+    if e_true.valid {
+        if !e_false.valid {
+            if e_false.refusal == 1 {
+                println("T8 PASS: admission follows the declared has_ma flag alone (limit of the gate)")
+            } else {
+                println("T8 FAIL: wrong refusal code when has_ma is false"); fails = fails + 1
+            }
+        } else {
+            println("T8 FAIL: ensemble admitted an undeclared membrane affinity"); fails = fails + 1
+        }
+    } else {
+        println("T8 FAIL: declared-measured midazolam refused"); fails = fails + 1
     }
 
     if fails == 0 {
