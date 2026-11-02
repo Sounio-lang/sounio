@@ -973,7 +973,7 @@ else
     for f in "$ROOT_DIR"/tests/compile-fail/*.sio; do
         [[ -f "$f" ]] && TEST_FILES+=("$f")
     done
-    for f in "$ROOT_DIR"/tests/ui/type/*.sio "$ROOT_DIR"/tests/ui/effect/*.sio "$ROOT_DIR"/tests/ui/ownership/*.sio "$ROOT_DIR"/tests/ui/resolve/*.sio "$ROOT_DIR"/tests/ui/pattern/*.sio; do
+    for f in "$ROOT_DIR"/tests/ui/type/*.sio "$ROOT_DIR"/tests/ui/effect/*.sio "$ROOT_DIR"/tests/ui/ownership/*.sio "$ROOT_DIR"/tests/ui/resolve/*.sio "$ROOT_DIR"/tests/ui/module/*.sio "$ROOT_DIR"/tests/ui/pattern/*.sio; do
         [[ -f "$f" ]] && TEST_FILES+=("$f")
     done
     for f in "$ROOT_DIR"/tests/stdlib/*/test_*.sio; do
