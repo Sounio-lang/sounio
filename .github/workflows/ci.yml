@@ -62,6 +62,8 @@ jobs:
         run: bash scripts/ci/classify_ci_impact.sh
       - name: Classifier self-test
         run: bash scripts/ci/impact_ci_selftest.sh
+      - name: SCO artifact reuse controls
+        run: bash scripts/ci/sco_artifact_reuse_selftest.sh
       # ADR-018 §4: a PR that changes the compiler, runtime or stdlib adds a
       # changelog.d/<slug>.<kind>.md fragment (kind=internal when nothing is
       # user-visible). Pull requests only: a merge group carries diffs that
@@ -95,6 +97,8 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+      - name: Workflow gate reference ratchet before expensive jobs
+        run: bash scripts/ci/gate_workflow_reference_ratchet.sh
       - name: Materialize the committed Madaros prebuilt
         run: bash scripts/lib/materialize_madaros_prebuilt.sh
       - name: Epistemic shape ratchet — frozen shapes
@@ -170,7 +174,7 @@ jobs:
 
   contracts-core:
     name: Contracts Core
-    needs: impact
+    needs: [impact, fast-checks]
     runs-on: ubuntu-24.04
     # Bounded (#2443). 63 successful runs of this job, 2026-10-06T15:44Z..
     # 2026-10-07T05:11Z (Actions API): median 27.6 min, max 31.0 min. 45 is
@@ -927,7 +931,7 @@ jobs:
   # Preserve the Contracts check as a fail-closed join of both complete jobs.
   contracts-ontology:
     name: Contracts Ontology
-    needs: impact
+    needs: [impact, fast-checks]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -957,7 +961,7 @@ jobs:
 
   r6-corpus-sweep:
     name: R6 Corpus Sweep (Nightly)
-    needs: impact
+    needs: [impact, fast-checks]
     if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (inputs.nightly == true || inputs.nightly == 'true'))
     # R6 is wired NIGHTLY, not per push (#2392). Its I3 clause sweeps every pair
     # of research contracts, O(pairs x functions^2). As the corpus grew to 90
@@ -977,7 +981,7 @@ jobs:
 
   native-selfhost-linux-x86_64:
     name: Native Self-Host (Linux x86_64)
-    needs: impact
+    needs: [impact, fast-checks]
     if: needs.impact.outputs.compiler == 'true' || needs.impact.outputs.runtime == 'true' || needs.impact.outputs.stdlib == 'true' || needs.impact.outputs.tests == 'true' || needs.impact.outputs.full == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -1019,7 +1023,7 @@ jobs:
 
   source-bootstrap-selfhost-linux-x86_64:
     name: Source-Bootstrap Self-Host (Linux x86_64)
-    needs: impact
+    needs: [impact, fast-checks]
     if: needs.impact.outputs.compiler == 'true' || needs.impact.outputs.full == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -1091,7 +1095,7 @@ jobs:
 
   sco-current-source:
     name: SCO Current-Source Controls
-    needs: [impact, current-source-madaros]
+    needs: [impact, fast-checks, current-source-madaros]
     if: needs.impact.outputs.compiler == 'true' || needs.impact.outputs.stdlib == 'true' || needs.impact.outputs.tests == 'true' || needs.impact.outputs.full == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 75
@@ -1142,7 +1146,7 @@ jobs:
 
   madaros-current-source-deref-f64:
     name: Madaros Current-Source f64 Lowering
-    needs: [impact, current-source-madaros]
+    needs: [impact, fast-checks, current-source-madaros]
     outputs:
       rung_outcome: ${{ steps.rung.outcome }}
       # 'true' once the compiler build step has started. A job that fails
@@ -1714,7 +1718,7 @@ jobs:
   native-selfhost-macos-arm64:
     name: Native Self-Host (macOS arm64)
     runs-on: ${{ (vars.SOUNIO_CI_MACOS_RUNNER != '' && (github.event_name == 'merge_group' || (github.event_name != 'pull_request' && github.ref == 'refs/heads/main'))) && vars.SOUNIO_CI_MACOS_RUNNER || 'macos-15' }}
-    needs: [impact, source-bootstrap-selfhost-linux-x86_64]
+    needs: [impact, fast-checks, source-bootstrap-selfhost-linux-x86_64]
     if: ${{ !cancelled() && github.event_name != 'pull_request' && (needs.impact.outputs.compiler == 'true' || needs.impact.outputs.full == 'true') && needs.source-bootstrap-selfhost-linux-x86_64.result == 'success' }}
     timeout-minutes: 60
     env:
@@ -1812,7 +1816,7 @@ jobs:
   full-test-suite:
     name: Full Test Suite
     runs-on: ubuntu-24.04
-    needs: [impact, native-selfhost-linux-x86_64]
+    needs: [impact, fast-checks, native-selfhost-linux-x86_64]
     if: ${{ !cancelled() && (needs.impact.outputs.compiler == 'true' || needs.impact.outputs.runtime == 'true' || needs.impact.outputs.stdlib == 'true' || needs.impact.outputs.tests == 'true' || needs.impact.outputs.full == 'true') && needs.native-selfhost-linux-x86_64.result == 'success' }}
     # The full compiler/test suite routinely exceeds the former 15-minute cap.
     # Let it produce a completed result so CI Decision can evaluate the suite.
@@ -1861,7 +1865,7 @@ jobs:
 
   slow-lane:
     name: Slow Test Lane (Nightly)
-    needs: [impact, native-selfhost-linux-x86_64]
+    needs: [impact, fast-checks, native-selfhost-linux-x86_64]
     # Nightly-only, like r6-corpus-sweep (#2392): these are `//@ requires: slow`
     # tests (full GRI-Mech kinetics integrations, PINN training, a Lyapunov
     # spectrum) that legitimately need minutes on a shared GHA runner, not the
@@ -1919,7 +1923,7 @@ jobs:
 
   current-source-madaros:
     name: Build Current-Source Madaros
-    needs: impact
+    needs: [impact, fast-checks]
     if: needs.impact.outputs.compiler == 'true' || needs.impact.outputs.runtime == 'true' || needs.impact.outputs.stdlib == 'true' || needs.impact.outputs.tests == 'true' || needs.impact.outputs.full == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -1949,7 +1953,7 @@ jobs:
 
   madaros-witness-gate:
     name: Madaros Witness Gate
-    needs: [impact, current-source-madaros]
+    needs: [impact, fast-checks, current-source-madaros]
     if: needs.impact.outputs.compiler == 'true' || needs.impact.outputs.runtime == 'true' || needs.impact.outputs.stdlib == 'true' || needs.impact.outputs.tests == 'true' || needs.impact.outputs.full == 'true'
     runs-on: ubuntu-24.04
     # Raised from 20 with the sabotage gate: it rebuilds each declared witness.
@@ -2263,7 +2267,7 @@ jobs:
 
   stdlib-deep-science:
     name: Stdlib Deep Science (${{ matrix.group }})
-    needs: [impact, current-source-madaros]
+    needs: [impact, fast-checks, current-source-madaros]
     if: needs.impact.outputs.compiler == 'true' || needs.impact.outputs.runtime == 'true' || needs.impact.outputs.stdlib == 'true' || needs.impact.outputs.tests == 'true' || needs.impact.outputs.full == 'true'
     runs-on: ubuntu-24.04
     permissions:
@@ -2328,7 +2332,7 @@ jobs:
 
   gate-wave-0:
     name: Gate Wave 0
-    needs: [impact, current-source-madaros]
+    needs: [impact, fast-checks, current-source-madaros]
     if: needs.impact.outputs.compiler == 'true' || needs.impact.outputs.runtime == 'true' || needs.impact.outputs.stdlib == 'true' || needs.impact.outputs.tests == 'true' || needs.impact.outputs.full == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -2383,7 +2387,7 @@ jobs:
 
   sounio-lint:
     name: Sounio Lint
-    needs: impact
+    needs: [impact, fast-checks]
     if: needs.impact.outputs.compiler == 'true' || needs.impact.outputs.stdlib == 'true' || needs.impact.outputs.tests == 'true' || needs.impact.outputs.sio == 'true' || needs.impact.outputs.full == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 10  # #2443: measured max 2.1 min over the same window
@@ -2396,7 +2400,7 @@ jobs:
 
   lean-proofs:
     name: Lean Proofs
-    needs: impact
+    needs: [impact, fast-checks]
     if: needs.impact.outputs.lean == 'true' || needs.impact.outputs.full == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -2493,7 +2497,7 @@ jobs:
 
   website:
     name: Website
-    needs: impact
+    needs: [impact, fast-checks]
     if: needs.impact.outputs.website == 'true' || needs.impact.outputs.full == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 10  # #2443: measured max 1.7 min over the same window

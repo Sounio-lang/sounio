@@ -28,12 +28,16 @@ function check(w,a){
  function job(name){const match=w.match(new RegExp('^  '+name+':\\n([\\s\\S]*?)(?=^  [a-zA-Z0-9_-]+:|$(?![\\s\\S]))','m'));assert(match,'missing '+name);return match[1];}
  for(const consumer of ['madaros-witness-gate','gate-wave-0','madaros-current-source-deref-f64','stdlib-deep-science','sco-current-source']){
   const b=job(consumer);
-  assert(b.includes('    needs: [impact, current-source-madaros]\n'),consumer+' must depend directly on producer');
+  assert(b.includes('    needs: [impact, fast-checks, current-source-madaros]\n'),consumer+' must depend directly on producer');
   assert.equal(b.split('      - uses: ./.github/actions/current-source-madaros\n').length,2,consumer+' must verify exactly once');
   assert(!b.includes('      - uses: ./.github/actions/current-source-madaros\n        if:'),'conditional receive');
  }
  assert(job('sco-current-source').includes('SCO_COMPILER_ARTIFACT:'),'SCO must consume its verified producer');
+ assert(!w.includes('    needs: impact\n'),'impact-only jobs bypass fast checks');
+ const fast=job('fast-checks');
+ assert(fast.includes('run: bash scripts/ci/gate_workflow_reference_ratchet.sh'),'reference failures must be checked early');
  const producer=job('current-source-madaros');
+ assert(producer.includes('    needs: [impact, fast-checks]\n'),'producer must wait for fast checks');
  assert(producer.includes('bash scripts/ci/build_modular_madaros.sh /tmp/madaros-ci.elf'),'missing source build');
  assert(producer.includes('stdlib_deep_compiler_receipt.sh prepare'),'missing producer receipt');
  assert(producer.includes('uses: actions/upload-artifact@v4'),'missing upload');
@@ -43,7 +47,8 @@ function check(w,a){
 check(workflow,action);
 if(process.argv[3]==='--selftest'){
  const mutations=[
- [workflow.replace('needs: [impact, current-source-madaros]','needs: impact'),action],
+ [workflow.replace('needs: [impact, fast-checks, current-source-madaros]','needs: impact'),action],
+ [workflow.replace('needs: [impact, fast-checks]','needs: impact'),action],
  [workflow.replace('      - uses: ./.github/actions/current-source-madaros\n',''),action],
  [workflow.replace('bash scripts/ci/sco_exact_integral_center_gate.sh','true'),action],
  [workflow,action.replace('shell: bash','shell: bash -seo pipefail {0}')],

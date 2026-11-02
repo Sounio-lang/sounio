@@ -3,3 +3,5 @@ CI (ADR-027 phase 1): `cancel-in-progress` now applies only to pull requests, so
 Build current-source Madaros once for receipt-verified Witness, Wave0, f64 and Deep Science consumers. Start Deep Science after the producer and move unchanged SCO controls to a parallel required job. Preserve independent bootstrap and modified-source refusal builds; require producer and SCO outcomes in CI Decision.
 
 Forward the verified compiler through the full-gate dereference subgate, reuse it for the SCO runtime gate with source/ELF receipts, and run mandatory deep-science core/integration partitions in parallel. Preserve all scientific bodies and the private modified-source SCO refusal build.
+
+Check the workflow-reference ratchet before expensive jobs and make impact-selected jobs wait for Fast Checks. Name the SCO orchestration selftest directly in the workflow.
