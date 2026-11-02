@@ -595,66 +595,92 @@ pub fn kpm_drug_peptide() -> KpInputs {
 }
 
 // ============================================================================
-// BLINDNESS OF THE DISPERSION TO A SHARED INPUT
+// WHAT THE DISPERSION CAN AND CANNOT SEE
 // ============================================================================
-// The dispersion statistic above is computed over members that read OVERLAPPING
+// The dispersion statistic is computed over members that read OVERLAPPING
 // inputs: the same tissue composition, and -- hidden until measured -- a cell
 // pH that each method carries internally (Schmitt 6.81, Rodgers-Rowland and
 // Poulin-Theil 7.00, while tissue_composition.sio carries 6.97 for muscle).
-// An input that every member reads the same way moves every prediction together
-// and leaves the spread almost unchanged, so the dispersion cannot see it.
+// Measured at muscle, haloperidol: that convention alone accounts for 1.51x of
+// the Rodgers-Rowland / Schmitt gap, which falls from 9.84x to 6.50x when
+// Schmitt is evaluated at Rodgers-Rowland's pH. So the claim that one shared
+// input record makes any residual disagreement attributable to the methods is
+// FALSE for pH, and the earlier three-member factorial was really a
+// four-factor one.
 //
-// kpm_blindness measures that directly, over the ADMITTED, UNCALIBRATED members:
+// THE METRIC.  Perturb an input, collect the response of every admitted member
+// as a vector D of changes in ln Kpu, and ask how much of D lies OUTSIDE the
+// direction in which all members move together:
 //
-//     blindness = |d sd(ln Kpu)| / |d mean(ln Kpu)|
+//     blindness = || D - mean(D) * 1 || / || D ||
 //
-// It has an ANALYTIC CALIBRATION POINT, which is what makes it a scale and not
-// a vibe.  With exactly two admitted members, if a perturbation moves ONE of
-// them by delta and the other not at all, then d mean = delta/2 and
-// d sd = delta/sqrt(2), so blindness = 2/sqrt(2) = sqrt(2) ~ 1.41421.  That is
-// the "only one member sees it" reference, returned by
-// kpm_blindness_reference().  Zero means "every member sees it identically,
-// and the dispersion reports none of it".  T9 below pins the sqrt(2) case.
+// Both extremes are closed forms, which is what makes this a scale:
+//   - a perturbation that moves exactly ONE of n members gives
+//     sqrt((n-1)/n)  -- 0.707107 for n = 2, 0.816497 for n = 3;
+//   - a perturbation that moves every member by the SAME amount in ln Kpu
+//     gives 0, because the response is purely uniform.
+// Low values mean the dispersion registers little of the input's effect even
+// though the predictions themselves move.
 //
-// MEASURED 2026-11-02, haloperidol at muscle, the two in-domain members
-// (Rodgers-Rowland and Schmitt raw; Poulin-Theil is refused for a strong base):
-//   cell pH, 6.60 -> 7.40   each prediction moves 5.19x and 5.72x, the mean of
-//                           ln Kpu moves -1.6962, the dispersion -0.0687
-//                           blindness 0.0405, i.e. 2.9% of the sqrt(2) reference
-//   log MA, +0.30           read only by Schmitt: blindness 1.41421 (= the
-//                           reference, exactly, as it must be)
-// So the dispersion is ~35x more responsive to an input one member reads than to
-// an input both read.  The consequence is unwelcome and is the point: the gate
-// makes the in-domain dispersion ROBUST to the shared pH (its span moves 1.10x
-// over 0.80 pH units, against 4.19x when the out-of-domain member is admitted),
-// and that robustness IS the blindness.  A dispersion-based term under-reports
-// exactly the inputs whose provenance is weakest -- cell pH carries the lowest
-// evidence weight in the composition table (tc_eps_ph = 0.40).
+// A FIRST ATTEMPT AT THIS WAS WRONG AND IS RECORDED SO IT IS NOT REPEATED.  The
+// version committed in 5748a2719 used |d sd| / |d mean| instead. That ratio is
+// exactly sqrt(2) for a one-member perturbation when n = 2, which looked like a
+// clean calibration, but it holds ONLY for n = 2: in general the first-order
+// value is n*e_k / ((n-1)*sd), which depends on where the perturbed member sits
+// relative to the centroid. For n = 3 the perturbed member crosses the centroid
+// as delta grows, so the index is non-monotone and does not converge -- measured
+// 1.165857, 0.007324, 0.351425 at delta = 0.30, 0.05, 0.01 on the same input.
+// The projection form above is delta-independent to six decimals.
 //
-// LIMITS.  One drug, one tissue, two inputs.  The sqrt(2) reference holds only
-// for two admitted members; with three it is 3/sqrt(6) ~ 1.2247 for a
-// single-member perturbation, which is why kpm_blindness_reference takes the
-// member count.  Nothing here converts a dispersion into a standard
-// uncertainty; it bounds what a dispersion can and cannot register.
+// MEASURED 2026-11-02, muscle.
+//   haloperidol -- the gate admits TWO members (Poulin-Theil is refused):
+//     log MA +0.30 / +0.05 / +0.01   0.707107 each   = the one-member reference
+//     cell pH +0.40 / +0.10 / +0.02  0.054718 / 0.029139 / 0.023047
+//   midazolam -- the gate admits THREE members:
+//     log MA +0.30 / +0.05 / +0.01   0.816497 each   = the one-member reference
+//     cell pH +0.40 / +0.10 / +0.02  0.807665 / 0.807352 / 0.807227
+//
+// THE RESULT IS NOT WHAT IT FIRST LOOKED LIKE.  With two members the shared pH
+// is nearly invisible to the dispersion; with three it is almost fully visible,
+// at 0.807 against a one-member reference of 0.816. So blindness is NOT a
+// property of an input being shared. It is a property of the admitted members
+// having PROPORTIONAL sensitivities to that input. Rodgers-Rowland and Schmitt
+// happen to share the pH response almost exactly -- over 6.60 to 7.40 their
+// predictions move 5.19x and 5.72x -- because in both the cation / acidic-
+// phospholipid term dominates and scales the same way with pH. Poulin-Theil has
+// no such term at all and moves only 1.12x, so adding it makes the response
+// non-uniform and the dispersion sees pH again.
+//
+// AND THAT CUTS AGAINST THE GATE.  By refusing Poulin-Theil for a strong base,
+// the domain gate removes the member that would have made pH visible. For a
+// strong base it therefore buys robustness against an out-of-domain member --
+// the admitted span moves 1.10x over 0.80 pH units, against 4.19x with
+// Poulin-Theil admitted -- at the price of blinding the dispersion to the input
+// whose provenance is weakest in the composition table (tc_eps_ph = 0.40). The
+// gate trades one failure mode for another, and this has to be reported per
+// input and per admitted set, not asserted once for the ensemble.
+//
+// LIMITS.  Two drugs, one tissue, two inputs. Nothing here converts a
+// dispersion into a standard uncertainty; it bounds what a dispersion registers.
 
 // Perturbation codes for kpm_blindness.
 //   0  cell pH      -- SHARED: added to each member's own native pH
 //   1  log P        -- SHARED
 //   2  pKa          -- SHARED
 //   3  fu_p         -- SHARED
-//   4  log MA       -- read only by Schmitt (the single-member reference case)
+//   4  log MA       -- read only by Schmitt (the one-member reference case)
 pub fn kpm_pert_ph() -> i32    { return 0 }
 pub fn kpm_pert_logp() -> i32  { return 1 }
 pub fn kpm_pert_pka() -> i32   { return 2 }
 pub fn kpm_pert_fu() -> i32    { return 3 }
 pub fn kpm_pert_ma() -> i32    { return 4 }
 
-// The analytic reference: a perturbation only ONE of n admitted members reads.
-// d mean = delta/n and d sd = delta*sqrt((n-1)/n)/sqrt(n-1) = delta/sqrt(n),
-// so the ratio is n/sqrt(n) = sqrt(n).
+// Closed form for a perturbation only ONE of n admitted members reads:
+// the response is delta*e_k, whose uniform component has norm delta/sqrt(n),
+// leaving sqrt(1 - 1/n) = sqrt((n-1)/n) outside it.
 pub fn kpm_blindness_reference(n: i32) -> f64 with Mut, Div {
     if n < 2 { return 0.0 }
-    return kpm_sqrt(n as f64)
+    return kpm_sqrt(((n - 1) as f64) / (n as f64))
 }
 
 // Shifted input record for the codes that live in KpInputs.
@@ -670,38 +696,7 @@ fn kpm_shift(d: KpInputs, code: i32, delta: f64) -> KpInputs {
     return d
 }
 
-// Mean and sample sd of ln Kpu over the admitted, uncalibrated members, with
-// perturbation `code` of size `delta` applied.  n_out receives the count.
-fn kpm_ln_stats(d: KpInputs, code: i32, delta: f64, want_mean: bool) -> f64 with Mut, Div, Panic {
-    let dp = kpm_shift(d, code, delta)
-    let dph = if code == 0 { delta } else { 0.0 }
-    // domain is judged on the UNPERTURBED record, so a perturbation cannot
-    // silently change which members are admitted mid-measurement
-    var n = 0
-    var s = 0.0
-    var v0 = 0.0
-    var v1 = 0.0
-    var v2 = 0.0
-    if kpm_rr_in_domain(d) {
-        v0 = ln(kpm_rr_kpu_ph(dp, kpm_ph_cell_rr() + dph)); n = n + 1; s = s + v0
-    }
-    if kpm_schmitt_in_domain(d) {
-        v1 = ln(kpm_schmitt_core_ph(dp, kpm_ph_cell_schmitt() + dph)); n = n + 1; s = s + v1
-    }
-    if kpm_pt_in_domain(d) {
-        v2 = ln(kpm_pt_kpu_ph(dp, kpm_ph_cell_pt() + dph)); n = n + 1; s = s + v2
-    }
-    if n < 2 { return 0.0 - 1.0 }
-    let mu = s / (n as f64)
-    if want_mean { return mu }
-    var ss = 0.0
-    if kpm_rr_in_domain(d)      { let e = v0 - mu; ss = ss + e * e }
-    if kpm_schmitt_in_domain(d) { let e = v1 - mu; ss = ss + e * e }
-    if kpm_pt_in_domain(d)      { let e = v2 - mu; ss = ss + e * e }
-    return kpm_sqrt(ss / ((n - 1) as f64))
-}
-
-// How many members the blindness measurement is taken over.
+// How many members the measurement is taken over: admitted and uncalibrated.
 pub fn kpm_blindness_n(d: KpInputs) -> i32 with Mut {
     var n = 0
     if kpm_rr_in_domain(d)      { n = n + 1 }
@@ -710,18 +705,44 @@ pub fn kpm_blindness_n(d: KpInputs) -> i32 with Mut {
     return n
 }
 
-// The blindness index itself.  Returns a negative sentinel when fewer than two
-// members are admitted (no dispersion to speak of) or when the perturbation
-// does not move the mean at all.
+// One member's response in ln Kpu to the perturbation, or 0.0 when that member
+// is not admitted. Domain is judged on the UNPERTURBED record, so a
+// perturbation cannot silently change which members are admitted.
+fn kpm_response(d: KpInputs, which: i32, code: i32, delta: f64) -> f64 with Mut, Div, Panic {
+    let dp  = kpm_shift(d, code, delta)
+    let dph = if code == 0 { delta } else { 0.0 }
+    if which == 0 {
+        if !kpm_rr_in_domain(d) { return 0.0 }
+        return ln(kpm_rr_kpu_ph(dp, kpm_ph_cell_rr() + dph)) - ln(kpm_rr_kpu_ph(d, kpm_ph_cell_rr()))
+    }
+    if which == 1 {
+        if !kpm_schmitt_in_domain(d) { return 0.0 }
+        return ln(kpm_schmitt_core_ph(dp, kpm_ph_cell_schmitt() + dph))
+             - ln(kpm_schmitt_core_ph(d, kpm_ph_cell_schmitt()))
+    }
+    if !kpm_pt_in_domain(d) { return 0.0 }
+    return ln(kpm_pt_kpu_ph(dp, kpm_ph_cell_pt() + dph)) - ln(kpm_pt_kpu_ph(d, kpm_ph_cell_pt()))
+}
+
+// The fraction of the response that lies outside the all-members-together
+// direction. Negative sentinel when fewer than two members are admitted, or
+// when the perturbation moves nothing at all.
 pub fn kpm_blindness(d: KpInputs, code: i32, delta: f64) -> f64 with Mut, Div, Panic {
-    if kpm_blindness_n(d) < 2 { return 0.0 - 1.0 }
-    let m0 = kpm_ln_stats(d, code, 0.0,   true)
-    let m1 = kpm_ln_stats(d, code, delta, true)
-    let s0 = kpm_ln_stats(d, code, 0.0,   false)
-    let s1 = kpm_ln_stats(d, code, delta, false)
-    let dm = kpm_abs(m1 - m0)
-    if dm < 1.0e-12 { return 0.0 - 1.0 }
-    return kpm_abs(s1 - s0) / dm
+    let n = kpm_blindness_n(d)
+    if n < 2 { return 0.0 - 1.0 }
+    let r0 = kpm_response(d, 0, code, delta)
+    let r1 = kpm_response(d, 1, code, delta)
+    let r2 = kpm_response(d, 2, code, delta)
+    let total = r0 * r0 + r1 * r1 + r2 * r2
+    if total < 1.0e-24 { return 0.0 - 1.0 }
+    // the mean is taken over ADMITTED members only; a non-admitted member
+    // contributes 0.0 to both sums and must not dilute the mean
+    let mu = (r0 + r1 + r2) / (n as f64)
+    var perp = 0.0
+    if kpm_rr_in_domain(d)      { let e = r0 - mu; perp = perp + e * e }
+    if kpm_schmitt_in_domain(d) { let e = r1 - mu; perp = perp + e * e }
+    if kpm_pt_in_domain(d)      { let e = r2 - mu; perp = perp + e * e }
+    return kpm_sqrt(perp) / kpm_sqrt(total)
 }
 
 // ============================================================================
@@ -918,43 +939,64 @@ fn main() -> i32 with IO, Mut, Div, Panic {
         println("T8 FAIL: declared-measured midazolam refused"); fails = fails + 1
     }
 
-    // T9 -- the blindness index, with its ANALYTIC CALIBRATION POINT.
+    // T9 -- the blindness metric against BOTH of its closed forms, at two
+    // member counts, and the side effect the domain gate has on it.
     //
-    // (a) log MA is read only by Schmitt. With exactly two admitted members
-    //     that is the single-member case, whose closed form is sqrt(2): the
-    //     mean of ln Kpu moves delta/2 while the sd moves delta/sqrt(2).
-    //     Matching the closed form is what licenses the index as a scale.
-    // (b) cell pH is read by BOTH admitted members, in the same direction, so
-    //     the dispersion registers almost none of it even though each
-    //     prediction moves about 5x over the measured pH range.
-    //
-    // Haloperidol is used because the domain gate admits exactly two members
-    // for a strong base (Poulin-Theil is refused), which is the case the
-    // sqrt(2) reference is written for.
+    // (a) log MA is read only by Schmitt, so it is the one-member case and must
+    //     return sqrt((n-1)/n) exactly: 0.707107 at n = 2, 0.816497 at n = 3.
+    //     Matching the closed form at two different n is what licenses the
+    //     metric as a scale rather than a number.
+    // (b) cell pH is read by every member, but that is NOT sufficient for
+    //     blindness. With the two members the gate admits for a strong base the
+    //     dispersion registers almost none of it; with the three admitted for a
+    //     weak base it registers nearly all of it, because Poulin-Theil has no
+    //     cation / acidic-phospholipid term and so does not follow the others.
+    //     Blindness tracks PROPORTIONAL sensitivity, not shared inputs.
+    // (c) The consequence, asserted here so it cannot be quietly dropped: for a
+    //     strong base the gate removes the member that made pH visible.
     let hal_b = kpm_drug_haloperidol()
-    if kpm_blindness_n(hal_b) == 2 {
-        let b_ma = kpm_blindness(hal_b, kpm_pert_ma(), 0.30)
-        let b_ph = kpm_blindness(hal_b, kpm_pert_ph(), 0.40)
-        let refn = kpm_blindness_reference(2)
-        println("blindness: log MA (one member) / cell pH (shared) / sqrt(2) reference:")
-        println(b_ma)
-        println(b_ph)
-        println(refn)
-        if kpm_abs(b_ma - refn) < 1.0e-9 {
-            if b_ph >= 0.0 {
-                if b_ph < 0.10 * refn {
-                    println("T9 PASS: index matches sqrt(2) for a one-member input; shared pH under 10% of it")
+    let mdz_b = kpm_drug_midazolam()
+    let n2 = kpm_blindness_n(hal_b)
+    let n3 = kpm_blindness_n(mdz_b)
+    let ma2 = kpm_blindness(hal_b, kpm_pert_ma(), 0.30)
+    let ma3 = kpm_blindness(mdz_b, kpm_pert_ma(), 0.30)
+    let ph2 = kpm_blindness(hal_b, kpm_pert_ph(), 0.40)
+    let ph3 = kpm_blindness(mdz_b, kpm_pert_ph(), 0.40)
+    println("n (strong base, weak base):")
+    println(n2)
+    println(n3)
+    println("one-member input (log MA): measured, then closed form, at n=2 then n=3:")
+    println(ma2)
+    println(kpm_blindness_reference(2))
+    println(ma3)
+    println(kpm_blindness_reference(3))
+    println("shared input (cell pH): n=2 then n=3:")
+    println(ph2)
+    println(ph3)
+    if n2 == 2 {
+        if n3 == 3 {
+            if kpm_abs(ma2 - kpm_blindness_reference(2)) < 1.0e-6 {
+                if kpm_abs(ma3 - kpm_blindness_reference(3)) < 1.0e-6 {
+                    if ph2 < 0.10 {
+                        if ph3 > 0.70 {
+                            println("T9 PASS: both closed forms matched; shared pH blind at n=2, visible at n=3")
+                        } else {
+                            println("T9 FAIL: shared pH not visible at n=3 -- the gate side effect is unproven"); fails = fails + 1
+                        }
+                    } else {
+                        println("T9 FAIL: shared pH not blind at n=2"); fails = fails + 1
+                    }
                 } else {
-                    println("T9 FAIL: shared pH not blind enough to separate the cases"); fails = fails + 1
+                    println("T9 FAIL: one-member case misses the closed form at n=3"); fails = fails + 1
                 }
             } else {
-                println("T9 FAIL: shared-pH blindness returned the sentinel"); fails = fails + 1
+                println("T9 FAIL: one-member case misses the closed form at n=2"); fails = fails + 1
             }
         } else {
-            println("T9 FAIL: one-member case does not match the closed form sqrt(2)"); fails = fails + 1
+            println("T9 FAIL: weak base did not admit three members"); fails = fails + 1
         }
     } else {
-        println("T9 FAIL: expected exactly 2 admitted members for a strong base"); fails = fails + 1
+        println("T9 FAIL: strong base did not admit exactly two members"); fails = fails + 1
     }
 
     // T10 -- the index refuses rather than returning a misleading number when
