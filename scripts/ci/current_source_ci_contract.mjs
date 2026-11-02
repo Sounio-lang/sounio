@@ -26,13 +26,13 @@ runs:
 function check(w,a){
  assert.equal(a,expectedAction,'receipt action changed: review the execution contract explicitly');
  function job(name){const match=w.match(new RegExp('^  '+name+':\\n([\\s\\S]*?)(?=^  [a-zA-Z0-9_-]+:|$(?![\\s\\S]))','m'));assert(match,'missing '+name);return match[1];}
- for(const consumer of ['madaros-witness-gate','gate-wave-0','madaros-current-source-deref-f64','stdlib-deep-science']){
+ for(const consumer of ['madaros-witness-gate','gate-wave-0','madaros-current-source-deref-f64','stdlib-deep-science','sco-current-source']){
   const b=job(consumer);
   assert(b.includes('    needs: [impact, current-source-madaros]\n'),consumer+' must depend directly on producer');
   assert.equal(b.split('      - uses: ./.github/actions/current-source-madaros\n').length,2,consumer+' must verify exactly once');
   assert(!b.includes('      - uses: ./.github/actions/current-source-madaros\n        if:'),'conditional receive');
  }
- assert(job('sco-current-source').includes('    needs: impact\n'),'independent SCO must start after impact');
+ assert(job('sco-current-source').includes('SCO_COMPILER_ARTIFACT:'),'SCO must consume its verified producer');
  const producer=job('current-source-madaros');
  assert(producer.includes('bash scripts/ci/build_modular_madaros.sh /tmp/madaros-ci.elf'),'missing source build');
  assert(producer.includes('stdlib_deep_compiler_receipt.sh prepare'),'missing producer receipt');

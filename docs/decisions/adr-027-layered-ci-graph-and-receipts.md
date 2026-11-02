@@ -278,3 +278,16 @@ and pyflakes disabled), and diff whitespace checks. The optional coder-next
 review through darwin-llm failed at the MCP transport; no independent model
 approval is claimed. Primary review retained all SCO gate calls and the
 existing knowledge-runtime paths.
+
+### Follow-up: hidden builds and deep-science partitions
+
+The full-gate dereference subgate now receives its parent compiler explicitly.
+The SCO runtime may consume a receipt-verified compiler artifact; invalid
+artifacts fail without falling back to a build. Standalone builds remain
+available, and the exact-integral private modified-source rebuild remains.
+Deep Science runs mandatory core/integration matrix jobs with fail-fast false
+and unique artifacts. Native fixtures remain paired with their scientific
+oracles in core; Arrow and logarithm integration are independent. The original
+scientific bodies are byte-preserved under function wrappers; standalone all
+preserves their original order. Hosted validation and comparison of the union
+of result rows against run 41462324982 remain acceptance gates.

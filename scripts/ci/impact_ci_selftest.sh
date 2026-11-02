@@ -320,3 +320,6 @@ for job in current-source-madaros sco-current-source madaros-current-source-dere
     echo "decision accepted skipped stdlib-selected $job" >&2; exit 1
   fi
 done
+
+node "$ROOT_DIR/scripts/ci/deep_science_partition_contract.mjs" "$ROOT_DIR" --selftest
+bash "$ROOT_DIR/scripts/ci/sco_artifact_reuse_selftest.sh"
