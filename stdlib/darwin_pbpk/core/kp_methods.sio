@@ -245,6 +245,14 @@ pub fn kpm_rodgers_rowland(d: KpInputs) -> KpMember with Mut, Div, Panic {
 // perturb a SHARED input across every member.  kpm_rodgers_rowland calls it
 // with this method's native pH, so the oracle-validated numbers are unchanged.
 fn kpm_rr_kpu_ph(d: KpInputs, ph_c: f64) -> f64 with Mut, Div, Panic {
+    kpm_rr_kpu_full(d, ph_c, 1.0, 1.0, 1.0)
+}
+
+// s_nl, s_np, s_ap are RELATIVE multipliers on the neutral-lipid,
+// neutral-phospholipid and acidic-phospholipid content, applied to BOTH the
+// tissue and the blood-cell figures so that a "shared" composition error can be
+// perturbed the way kpm_blindness needs. All three are 1.0 on the normal path.
+fn kpm_rr_kpu_full(d: KpInputs, ph_c: f64, s_nl: f64, s_np: f64, s_ap: f64) -> f64 with Mut, Div, Panic {
     let p  = kpm_pow10(d.log_p)
     let ht = kpm_hematocrit()
 
@@ -254,8 +262,10 @@ fn kpm_rr_kpu_ph(d: KpInputs, ph_c: f64) -> f64 with Mut, Div, Panic {
     let z = kpm_pow10(d.pka - kpm_ph_rbc())
 
     // lipid term P*f_nl + (0.3P + 0.7)*f_np   (R-R 2007 Eq. 1 lipid group)
-    let lip_mus = p * 0.022   + (0.3 * p + 0.7) * 0.0078
-    let lip_bc  = p * 0.0012  + (0.3 * p + 0.7) * 0.0033
+    let lip_mus = p * (0.022 * s_nl)   + (0.3 * p + 0.7) * (0.0078 * s_np)
+    let lip_bc  = p * (0.0012 * s_nl)  + (0.3 * p + 0.7) * (0.0033 * s_np)
+    let ap_mus  = 2.42 * s_ap
+    let ap_bc   = 0.57 * s_ap
 
     // ROUTE SELECTION.  Rodgers-Rowland use two different mechanisms and the
     // choice is theirs, not a tuning knob: Eq. 1 (association with acidic
@@ -298,9 +308,9 @@ fn kpm_rr_kpu_ph(d: KpInputs, ph_c: f64) -> f64 with Mut, Div, Panic {
     if strong {
         // Kpu of blood cells implied by the measured blood:plasma ratio
         let kpu_bc = (d.rb - (1.0 - ht)) / (ht * d.fu_p)
-        var ka = (kpu_bc - (1.0 + z) / (1.0 + y) * 0.63 - lip_bc / (1.0 + y)) * ((1.0 + y) / (0.57 * z))
+        var ka = (kpu_bc - (1.0 + z) / (1.0 + y) * 0.63 - lip_bc / (1.0 + y)) * ((1.0 + y) / (ap_bc * z))
         if ka < 0.0 { ka = 0.0 }
-        return iw_term + ka * 2.42 * x / (1.0 + y) + lip_mus / (1.0 + y)
+        return iw_term + ka * ap_mus * x / (1.0 + y) + lip_mus / (1.0 + y)
     }
 
     // Eq. 2 -- albumin route.  The albumin association term is itself
@@ -308,7 +318,7 @@ fn kpm_rr_kpu_ph(d: KpInputs, ph_c: f64) -> f64 with Mut, Div, Panic {
     // is not fitted: KaPR*[PR]_p = 1/fu - 1 - P*f_nl_plasma/(1+Y).
     // Plasma neutral lipid 0.0032 and phospholipid 0.0021 (R-R 2007 Tab. VII);
     // muscle:plasma albumin ratio 0.064.
-    let lip_pl = p * 0.0032 + (0.3 * p + 0.7) * 0.0021
+    let lip_pl = p * (0.0032 * s_nl) + (0.3 * p + 0.7) * (0.0021 * s_np)
     var ka_pr = 1.0 / d.fu_p - 1.0 - lip_pl / (1.0 + y)
     if ka_pr < 0.0 { ka_pr = 0.0 }
     return iw_term + ka_pr * 0.064 + lip_mus / (1.0 + y)
@@ -351,6 +361,10 @@ fn kpm_schmitt_core(d: KpInputs) -> f64 with Mut, Div, Panic {
 }
 
 fn kpm_schmitt_core_ph(d: KpInputs, ph_c: f64) -> f64 with Mut, Div, Panic {
+    kpm_schmitt_core_full(d, ph_c, 1.0, 1.0, 1.0)
+}
+
+fn kpm_schmitt_core_full(d: KpInputs, ph_c: f64, s_nl: f64, s_np: f64, s_ap: f64) -> f64 with Mut, Div, Panic {
     let pow_v = kpm_pow10(d.log_p)
     let kn_pl = kpm_pow10(d.log_ma)
 
@@ -362,9 +376,9 @@ fn kpm_schmitt_core_ph(d: KpInputs, ph_c: f64) -> f64 with Mut, Div, Panic {
 
     // cellular inverse-unbound-fraction (Eq. 7)
     let inv_cell = 0.79910
-                   + kn_l  * 0.02387 * 0.5394
-                   + kn_pl * 0.02387 * 0.38170
-                   + ka_pl * 0.02387 * 0.078840
+                   + kn_l  * 0.02387 * 0.5394   * s_nl
+                   + kn_pl * 0.02387 * 0.38170  * s_np
+                   + ka_pl * 0.02387 * 0.078840 * s_ap
                    + kp_pr * 0.17700
     // interstitial (Eq. 4)
     let inv_int = 0.94 + 0.37 * (1.0 / d.fu_p - 0.945)
@@ -440,18 +454,24 @@ pub fn kpm_poulin_theil(d: KpInputs) -> KpMember with Mut, Div, Panic {
 }
 
 fn kpm_pt_kpu_ph(d: KpInputs, ph_c: f64) -> f64 with Mut, Div, Panic {
+    kpm_pt_kpu_full(d, ph_c, 1.0, 1.0)
+}
+
+// Poulin-Theil takes no acidic-phospholipid multiplier because it has no such
+// term: that absence is why a shared [AP-] perturbation moves only Schmitt.
+fn kpm_pt_kpu_full(d: KpInputs, ph_c: f64, s_nl: f64, s_np: f64) -> f64 with Mut, Div, Panic {
     let pow_v = kpm_pow10(d.log_p)       // n-octanol:water, muscle
 
     let im = if d.is_base { kpm_pow10(d.pka - ph_c) } else { 0.0 }
     let iw = if d.is_base { kpm_pow10(d.pka - kpm_ph_plasma()) } else { 0.0 }
 
-    let fwm  = 0.666 + 0.70 * 0.0078
-    let fnlm = 0.022 + 0.30 * 0.0078
+    let fwm  = 0.666 + 0.70 * (0.0078 * s_np)
+    let fnlm = 0.022 * s_nl + 0.30 * (0.0078 * s_np)
     let pcw = ((1.0 + im) * fwm + pow_v * fnlm) / (1.0 + iw)
 
     // interstitium: water plus albumin binding (Peyret Eq. 10).  RECONSTRUCTED,
     // not transcribed -- see kpm_pt_oracle_validated().
-    let fnlp = 0.0035 + 0.30 * 0.00225
+    let fnlp = 0.0035 * s_nl + 0.30 * (0.00225 * s_np)
     var pprw = (1.0 / d.fu_p - 1.0 - pow_v * fnlp / (1.0 + iw)) / 0.029
     if pprw < 0.0 { pprw = 0.0 }
     let piw = ((1.0 + iw) * 0.89) / (1.0 + iw) + pprw * 0.015
@@ -669,11 +689,20 @@ pub fn kpm_drug_peptide() -> KpInputs {
 //   2  pKa          -- SHARED
 //   3  fu_p         -- SHARED
 //   4  log MA       -- read only by Schmitt (the one-member reference case)
+//   5  neutral lipid        -- SHARED, relative multiplier
+//   6  neutral phospholipid -- SHARED, relative multiplier
+//   7  acidic phospholipid  -- SHARED, but Poulin-Theil has no such term and
+//                             Rodgers-Rowland depends on it only through the
+//                             tissue / blood-cell ratio, so a uniform change
+//                             moves ONLY Schmitt
 pub fn kpm_pert_ph() -> i32    { return 0 }
 pub fn kpm_pert_logp() -> i32  { return 1 }
 pub fn kpm_pert_pka() -> i32   { return 2 }
 pub fn kpm_pert_fu() -> i32    { return 3 }
 pub fn kpm_pert_ma() -> i32    { return 4 }
+pub fn kpm_pert_nl() -> i32    { return 5 }
+pub fn kpm_pert_np() -> i32    { return 6 }
+pub fn kpm_pert_ap() -> i32    { return 7 }
 
 // Closed form for a perturbation only ONE of n admitted members reads:
 // the response is delta*e_k, whose uniform component has norm delta/sqrt(n),
@@ -711,17 +740,23 @@ pub fn kpm_blindness_n(d: KpInputs) -> i32 with Mut {
 fn kpm_response(d: KpInputs, which: i32, code: i32, delta: f64) -> f64 with Mut, Div, Panic {
     let dp  = kpm_shift(d, code, delta)
     let dph = if code == 0 { delta } else { 0.0 }
+    // composition codes are RELATIVE multipliers, so 1.0 + delta
+    let s_nl = if code == 5 { 1.0 + delta } else { 1.0 }
+    let s_np = if code == 6 { 1.0 + delta } else { 1.0 }
+    let s_ap = if code == 7 { 1.0 + delta } else { 1.0 }
     if which == 0 {
         if !kpm_rr_in_domain(d) { return 0.0 }
-        return ln(kpm_rr_kpu_ph(dp, kpm_ph_cell_rr() + dph)) - ln(kpm_rr_kpu_ph(d, kpm_ph_cell_rr()))
+        return ln(kpm_rr_kpu_full(dp, kpm_ph_cell_rr() + dph, s_nl, s_np, s_ap))
+             - ln(kpm_rr_kpu_full(d, kpm_ph_cell_rr(), 1.0, 1.0, 1.0))
     }
     if which == 1 {
         if !kpm_schmitt_in_domain(d) { return 0.0 }
-        return ln(kpm_schmitt_core_ph(dp, kpm_ph_cell_schmitt() + dph))
-             - ln(kpm_schmitt_core_ph(d, kpm_ph_cell_schmitt()))
+        return ln(kpm_schmitt_core_full(dp, kpm_ph_cell_schmitt() + dph, s_nl, s_np, s_ap))
+             - ln(kpm_schmitt_core_full(d, kpm_ph_cell_schmitt(), 1.0, 1.0, 1.0))
     }
     if !kpm_pt_in_domain(d) { return 0.0 }
-    return ln(kpm_pt_kpu_ph(dp, kpm_ph_cell_pt() + dph)) - ln(kpm_pt_kpu_ph(d, kpm_ph_cell_pt()))
+    return ln(kpm_pt_kpu_full(dp, kpm_ph_cell_pt() + dph, s_nl, s_np))
+         - ln(kpm_pt_kpu_full(d, kpm_ph_cell_pt(), 1.0, 1.0))
 }
 
 // The fraction of the response that lies outside the all-members-together
@@ -776,20 +811,7 @@ pub fn kpm_inputs(log_p: f64, log_ma: f64, has_ma: bool, pka: f64,
 // kpm_rodgers_rowland.  Kept as a separate entry point rather than a field so
 // that production callers cannot perturb the table by accident.
 pub fn kpm_rr_with_ap_scale(d: KpInputs, s: f64) -> f64 with Mut, Div, Panic {
-    let p  = kpm_pow10(d.log_p)
-    let ph_c = kpm_ph_cell_rr()
-    let ht = kpm_hematocrit()
-    let x = kpm_pow10(d.pka - ph_c)
-    let y = kpm_pow10(d.pka - kpm_ph_plasma())
-    let z = kpm_pow10(d.pka - kpm_ph_rbc())
-    let lip_mus = p * 0.022  + (0.3 * p + 0.7) * 0.0078
-    let lip_bc  = p * 0.0012 + (0.3 * p + 0.7) * 0.0033
-    let ap_mus = 2.42 * s
-    let ap_bc  = 0.57 * s
-    let kpu_bc = (d.rb - (1.0 - ht)) / (ht * d.fu_p)
-    var ka = (kpu_bc - (1.0 + z) / (1.0 + y) * 0.63 - lip_bc / (1.0 + y)) * ((1.0 + y) / (ap_bc * z))
-    if ka < 0.0 { ka = 0.0 }
-    return (1.0 + x) / (1.0 + y) * 0.666 + 0.079 + ka * ap_mus * x / (1.0 + y) + lip_mus / (1.0 + y)
+    kpm_rr_kpu_full(d, kpm_ph_cell_rr(), 1.0, 1.0, s)
 }
 
 // ============================================================================
@@ -1005,6 +1027,64 @@ fn main() -> i32 with IO, Mut, Div, Panic {
         println("T10 PASS: blindness refuses when fewer than two members are admitted")
     } else {
         println("T10 FAIL: blindness returned a value with no admitted ensemble"); fails = fails + 1
+    }
+
+    // T11 -- the same metric on the TISSUE COMPOSITION, which refutes the
+    // tempting generalisation that a dispersion is blind to shared inputs.
+    //
+    // Measured at muscle, both engines, delta-independent to six decimals:
+    //                      haloperidol (n=2)   midazolam (n=3)
+    //   cell pH                 0.054718            0.807665
+    //   neutral lipid           0.645984            0.235045
+    //   neutral phospholipid    0.773990            0.409417
+    //   acidic phospholipid     0.707107            0.816497
+    //
+    // Only cell pH is invisible, and only at n = 2. The composition fractions
+    // are all registered. So blindness is NOT a property of sharing an input:
+    // pH is special because both methods route it through the same
+    // Henderson-Hasselbalch factor on the dominant term, giving near-identical
+    // log-responses, while the composition fractions enter with method-specific
+    // weights (Rodgers-Rowland f_nl 0.022 against Schmitt 0.02387 * 0.5394 =
+    // 0.01288) and so move the members by different amounts.
+    //
+    // That sharpens the pH result rather than weakening it: the one shared
+    // input a two-member dispersion cannot see is also the one carrying the
+    // lowest evidence weight in the composition table (tc_eps_ph = 0.40).
+    //
+    // The acidic-phospholipid row is a CLOSED-FORM PREDICTION, and it is the
+    // reason this test is worth having. A uniform [AP-] change moves only
+    // Schmitt -- Rodgers-Rowland depends on it through the tissue / blood-cell
+    // ratio alone (T5), and Poulin-Theil has no acidic-phospholipid term at all
+    // -- so it must land exactly on the one-member reference at BOTH member
+    // counts, by two different mechanisms: cancellation in the strong-base
+    // route, absence in the weak-base route and in Poulin-Theil. The metric
+    // therefore rediscovers T5's invariance from the outside.
+    let ap2 = kpm_blindness(hal_b, kpm_pert_ap(), 0.10)
+    let ap3 = kpm_blindness(mdz_b, kpm_pert_ap(), 0.10)
+    let nl2 = kpm_blindness(hal_b, kpm_pert_nl(), 0.10)
+    let np2 = kpm_blindness(hal_b, kpm_pert_np(), 0.10)
+    println("composition, n=2: [AP-] / neutral lipid / neutral phospholipid:")
+    println(ap2)
+    println(nl2)
+    println(np2)
+    println("[AP-] at n=3 (expect the n=3 one-member reference):")
+    println(ap3)
+    if kpm_abs(ap2 - kpm_blindness_reference(2)) < 1.0e-6 {
+        if kpm_abs(ap3 - kpm_blindness_reference(3)) < 1.0e-6 {
+            if nl2 > 0.30 {
+                if np2 > 0.30 {
+                    println("T11 PASS: [AP-] hits both one-member forms; composition is NOT blind")
+                } else {
+                    println("T11 FAIL: neutral phospholipid unexpectedly blind at n=2"); fails = fails + 1
+                }
+            } else {
+                println("T11 FAIL: neutral lipid unexpectedly blind at n=2"); fails = fails + 1
+            }
+        } else {
+            println("T11 FAIL: [AP-] misses the one-member form at n=3"); fails = fails + 1
+        }
+    } else {
+        println("T11 FAIL: [AP-] misses the one-member form at n=2"); fails = fails + 1
     }
 
     if fails == 0 {
