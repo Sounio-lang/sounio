@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Native Linux worker only. MADAROS_RAW_BIN must identify a source-built compiler.
 set -uo pipefail
+group="${STDLIB_DEEP_GROUP:-all}"
+case "$group" in all|core|integration) ;; *) echo "invalid STDLIB_DEEP_GROUP" >&2; exit 64 ;; esac
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 out=${STDLIB_DEEP_OUT:?set STDLIB_DEEP_OUT to a dedicated artifact directory}
 [[ "$out" == /* && -f "${MADAROS_RAW_BIN:?set MADAROS_RAW_BIN}" ]] || exit 64
@@ -99,6 +101,7 @@ native() {
         record stdout-marker "$src" "$marker_rc"
     fi
 }
+run_core() {
 NATIVE_SOURCES=()
 NATIVE_NAMES=()
 queue_native() {
@@ -424,7 +427,9 @@ run_oracle_batch() {
     done
 }
 run_oracle_batch
+}
 
+run_integration() {
 # Arrow IPC is Madaros-only (lean_single has no bits_to_f64). The full suite
 # skips these fixtures via //@ requires: madaros. This job already holds the
 # fresh Madaros ELF. PyArrow 26.0.0 and NumPy 2.5.4 are installed into a
@@ -475,6 +480,12 @@ rc=0
 # normalization_into_reference through the oracle queue above.)
 LN_BOUNDARY_OUT="$out/math-pure-ln-boundary" bash scripts/stdlib/math_pure_ln_boundary_gate.sh > "$out/math-pure-ln-boundary.log" 2>&1 || rc=$?
 record concordance math-pure-ln-boundary "$rc"
+}
+
+# Both partitions remain mandatory in CI; standalone all preserves the original order.
+if [[ "$group" == all || "$group" == core ]]; then run_core; fi
+if [[ "$group" == all || "$group" == integration ]]; then run_integration; fi
+printf '%s\n' "$group" > "$out/GROUP"
 
 rc=0
 sha256sum -c "$out/INPUTS.sha256" > "$out/INPUTS.verify.txt" 2>&1 || rc=$?
