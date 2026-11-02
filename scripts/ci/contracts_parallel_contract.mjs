@@ -33,9 +33,9 @@ function check(w){
  const join=job(w,'contracts');assert(join.includes('needs: [contracts-core, contracts-ontology]'),'matrix verdict disconnected');
  assert(join.includes('needs.contracts-core.result'),'matrix result not evaluated');
  const build=job(w,'current-source-madaros');
- assert(build.includes('SOUNIO_MADAROS_CACHE: ${{ runner.temp }}/madaros-build-cache'),'cache path not explicitly isolated');
+ assert(build.includes('SOUNIO_MADAROS_CACHE: /tmp/madaros-build-cache'),'cache path not explicitly isolated');
  assert(build.includes('uses: actions/cache@v4'),'cache transport disconnected');
- assert(build.includes('path: ${{ runner.temp }}/madaros-build-cache'),'restore/build cache mismatch');
+ assert(build.includes('path: /tmp/madaros-build-cache'),'restore/build cache mismatch');
  assert(build.includes("hashFiles('self-hosted/**', 'stdlib/**', 'bin/souc-linux-x86_64', 'bin/souc-lean-single-x86_64', 'scripts/ci/build_modular_madaros.sh', 'scripts/dev/madaros-cache.sh', 'scripts/dev/souc-build-lock.sh')"),'cache invalidators lost');
  const buildStep=build.split(/(?=^      - )/m).find(p=>p.startsWith("      - name: Build Madaros from this PR's own source\n"));
  assert(buildStep&&!/^        if:/m.test(buildStep),'cache hit must still enter verified builder');
@@ -53,7 +53,7 @@ if(process.argv[3]==='--selftest'){
   workflow.replace('fail-fast: false\n      matrix:\n        shard: [core, research]','fail-fast: true\n      matrix:\n        shard: [core, research]'),
   workflow.replace("      - name: Build Madaros from this PR's own source\n","      - name: Build Madaros from this PR's own source\n        if: false\n"),
   workflow.replace('bash scripts/ci/build_modular_madaros.sh /tmp/madaros-ci.elf','cp /tmp/old-madaros /tmp/madaros-ci.elf'),
-  workflow.replace('path: ${{ runner.temp }}/madaros-build-cache','path: /tmp/other-cache'),
+  workflow.replace('path: /tmp/madaros-build-cache','path: /tmp/other-cache'),
   workflow.replace('needs: [contracts-core, contracts-ontology]','needs: [contracts-ontology]'),
  ];
  for(const [i,w]of mutations.entries()){assert.notEqual(w,workflow,'ineffective negative fixture '+i);assert.throws(()=>check(w),'accepted mutant '+i);}
