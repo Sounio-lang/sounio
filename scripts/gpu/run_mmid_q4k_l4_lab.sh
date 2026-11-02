@@ -57,14 +57,18 @@ fi
 
 export PATH="$CUDAENV/bin:$(dirname "$NVCC"):${PATH:-}"
 export LD_LIBRARY_PATH="$CUDAENV/lib:${LD_LIBRARY_PATH:-}"
-CXX="$(find "$CUDAENV/bin" -maxdepth 1 -type f -executable -name '*-g++' 2>/dev/null | sort | head -1 || true)"
-CC="$(find "$CUDAENV/bin" -maxdepth 1 -type f -executable -name '*-gcc' 2>/dev/null | sort | head -1 || true)"
-if [[ -z "${CXX:-}" ]]; then echo "missing conda g++" >&2; exit 1; fi
-if [[ -z "${CC:-}" ]]; then echo "missing conda gcc" >&2; exit 1; fi
+CXX="${CXX_OVERRIDE:-$(find "$CUDAENV/bin" -maxdepth 1 -type f -executable -name '*-g++' 2>/dev/null | sort | head -1 || true)}"
+CC="${CC_OVERRIDE:-$(find "$CUDAENV/bin" -maxdepth 1 -type f -executable -name '*-gcc' 2>/dev/null | sort | head -1 || true)}"
+if [[ -z "${CXX:-}" ]]; then CXX="$(command -v g++ || true)"; fi
+if [[ -z "${CC:-}" ]]; then CC="$(command -v gcc || true)"; fi
+if [[ -z "${CXX:-}" ]]; then echo "missing host g++ (set CXX_OVERRIDE or provide a conda triplet)" >&2; exit 1; fi
+if [[ -z "${CC:-}" ]]; then echo "missing host gcc (set CC_OVERRIDE or provide a conda triplet)" >&2; exit 1; fi
 export CXX CC
-ln -sfn "$CC" "$CUDAENV/bin/gcc"
-ln -sfn "$CXX" "$CUDAENV/bin/g++"
-ln -sfn "$CXX" "$CUDAENV/bin/c++"
+if [[ -d "$CUDAENV/bin" ]]; then
+  ln -sfn "$CC" "$CUDAENV/bin/gcc"
+  ln -sfn "$CXX" "$CUDAENV/bin/g++"
+  ln -sfn "$CXX" "$CUDAENV/bin/c++"
+fi
 
 echo "HOST=$(hostname)"
 echo "CCBIN=$CXX"
