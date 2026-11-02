@@ -42,8 +42,8 @@ export SOUNIO_STDLIB_PATH="${SOUNIO_STDLIB_PATH:-$ROOT_DIR/stdlib}"
 
 # Subject must be built from current source: the check lives in self-hosted/check/check.sio, so a
 # run against the checked-in ELF would say nothing about the working tree. In CI this gate does
-# NOT build: it is wired into the madaros-current-source-deref-f64 job, which builds Madaros once
-# in madaros_current_source_f64_lowering_gate.sh (KEEP=1) and hands the ELF to every later step
+# NOT build: it is wired into the madaros-current-source-deref-f64 job, which uses the
+# receipt-verified ELF from madaros-witness-gate (KEEP=1) and hands that ELF to every later step
 # via *_GATE_BIN. The build below is the local/standalone path only.
 SOUC_BIN="${SOUNIO_MADAROS_UNKNOWN_ASSOC_FN_GATE_BIN:-}"
 if [[ -z "$SOUC_BIN" ]]; then
