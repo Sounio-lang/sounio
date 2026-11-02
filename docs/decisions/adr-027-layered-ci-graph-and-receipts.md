@@ -297,3 +297,62 @@ The workflow-reference ratchet runs there before compilation; its existing
 Contracts Core invocation is kept for in-job receipts. The SCO reuse selftest
 is named directly in Fast Checks, satisfying the direct-reference ratchet without
 relaxing its frozen bound.
+
+### Science queue follow-up
+
+Run 41472572619 passed and its core/integration result union matched the prior
+full replay exactly (excluding duplicated per-job hash audit rows). Total time
+was 1774 seconds, so removal of duplicate builds alone did not reduce the
+observed end-to-end latency. Core replay took 183 seconds in preparation,
+358 in the native queue and 397 in the oracle queue. The next candidate
+prepares C++ references concurrently and removes the extra fixed two-worker
+ceiling, retaining CPU bounds, the existing four-GiB-per-worker budget and
+explicit STDLIB_DEEP_JOBS overrides. Scientific case bodies and compiler flags
+remain unchanged; missing, malformed or failing CPP worker statuses fail the
+parent. Hosted execution and another exact result-row comparison are required.
+
+### Remove the independent-reference false dependency
+
+Run 41483835566 passed with three workers and an unchanged case/status multiset.
+Its total remained 1586 seconds. The count-dispersion reference is a standalone
+C++ program with internal inputs; it uses no native output or compiler. ZIP
+log timestamps place its concordance interval near 390 seconds, with the
+archive timestamp precision applying. It was started only after native replay.
+The next graph runs it in scientific-reference-controls alongside the compiler
+build, requiring its verdict separately in CI Decision. Its C++ source, build
+flags, positive checks, mutant check and timeouts are unchanged. Core omits this
+case only when its required peer job owns it; standalone all retains it. The
+reference-only receipt never claims a Sounio compiler identity. Validation must
+compare the union of core, integration and independent-control case/status rows
+against the prior full replay, with per-job hash audits checked separately.
+
+### Independent reference controls
+
+The 3787 candidate passed with three workers and the full prior case/status
+multiset. Its observed total was 1586 seconds. The dispersion reference is a
+standalone C++ program with internal inputs; it consumes no Sounio output. ZIP
+log timestamps place its concordance interval near 390 seconds (archive
+timestamp precision applies). Starting it after the native queue was a false
+dependency. The next graph starts scientific-reference-controls alongside
+Madaros and requires its verdict separately. C++ source, compiler flags, case
+bodies, mutant check and timeouts remain unchanged. Core delegates this one
+control only to the required peer job; standalone all retains the entire
+inventory. The independent receipt hashes its own reference executable and
+never claims a Sounio compiler identity. Acceptance requires hosted success
+and equality of the union of core, integration and independent case/status
+rows against the prior full replay, checking per-job hash audits separately.
+
+### Release stage2 without waiting for independent regressions
+
+Run 41495855075 passed with an unchanged scientific case/status multiset,
+but total latency remained 1609 seconds. Native Linux finished after 428
+seconds and only then released Full Test Suite (879 seconds). CI Decision
+took 178 seconds, dominated by checkout. The producer now publishes fresh
+stage2 immediately after the existing host gate; aggregate field identity,
+feature fixed-point checks and runtime manifest proof run unchanged in a
+separate required consumer job. Both suite and regressions download the same
+run-scoped stage2 artifact. The producer keeps source-bootstrap enforcement.
+Missing, skipped, cancelled or failed selected regressions block CI Decision.
+The two status aggregation jobs use non-cone sparse checkout of their exact
+scripts, without a filter override. Hosted success and actual end-to-end
+timing remain the acceptance gate; projected overlap is not a timing receipt.
