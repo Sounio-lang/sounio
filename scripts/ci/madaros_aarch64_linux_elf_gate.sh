@@ -80,11 +80,26 @@ case "$WIDE" in
     ;;
 esac
 # Unsupported targets fail with a sentence, never a bare rc.
-if "$SOUC" compile "$OUT/min_a64.sio" -o "$OUT/nope.elf" --target riscv64-linux >"$OUT/refuse.log" 2>&1; then
-  echo "FAIL: riscv64-linux unexpectedly compiled"
-  exit 1
-fi
-grep -q "is not supported by this backend yet" "$OUT/refuse.log" || {
+# Routed through the compile classifier (#2425): rc alone cannot tell a
+# refusal from a segfault, timeout or OOM kill, and this backend's "Error:"
+# messages carry no E-code, so the outcome lands in REFUSED_UNDIAGNOSED
+# unless a crash marker says otherwise. The named fragment below pins which
+# refusal fired.
+# shellcheck disable=SC1091
+source "$ROOT/scripts/lib/classify_compile.sh"
+refuse_rc=0
+sounio_capture_rc refuse_rc "$OUT/refuse.log" -- \
+  "$SOUC" compile "$OUT/min_a64.sio" -o "$OUT/nope.elf" --target riscv64-linux
+sounio_classify_compile "$refuse_rc" "$OUT/refuse.log" "$OUT/nope.elf"
+case "$SOUNIO_CC_CLASS" in
+  REFUSED|REFUSED_UNDIAGNOSED) ;;
+  *)
+    echo "FAIL: riscv64-linux outcome is not a clean refusal: $(sounio_refusal_reason) rc=$refuse_rc"
+    cat "$OUT/refuse.log" || true
+    exit 1
+    ;;
+esac
+grep -qF "is not supported by this backend yet" "$OUT/refuse.log" || {
   echo "FAIL: refusal without a named diagnostic"
   cat "$OUT/refuse.log" || true
   exit 1
