@@ -15441,6 +15441,48 @@ fn a64_preview_emit_builtin_print_char(c: A64PreviewCompiler) -> A64PreviewCompi
     out
 }
 
+// SIO-32: collect call args from the IR arena, in IR order (mirrors the
+// x86 backend's nc_core_load_call_arg_into reads, and the full preview in
+// codegen.sio). The legalized machine stream carries CALL without ARG_MOVE,
+// and lowering is order-preserving, so the k-th machine CALL matches the
+// k-th IR call collected here.
+fn a64_preview_collect_call_args(c: A64PreviewCompiler, func: IrFunction) -> (A64PreviewCompiler, string) with Mut, Panic, Div {
+    var out = c
+    out.call_site_count = 0
+    out.call_emit_index = 0
+    var i: i64 = 0
+    while i < func.instr_count {
+        let at = ir_region_slot_r(func.region, (i))
+        if (IR_A_OP[at as usize] as IrOpcode) == IrOpcode::IrCall {
+            if out.call_site_count >= 16 {
+                return (out, "aarch64_call_table_exhausted")
+            }
+            let ci = out.call_site_count
+            out.call_site_targets[ci as usize] = IR_A_FN_ID[at as usize]
+            let argc = IR_A_ARG_COUNT[at as usize]
+            if argc > 6 {
+                return (out, "aarch64_call_arity_gt_6")
+            }
+            if argc < 0 {
+                return (out, "aarch64_call_arity_negative")
+            }
+            out.call_site_argc[ci as usize] = argc
+            var a: i64 = 0
+            while a < argc {
+                let arg = ir_arena_arg_at(at, a)
+                if arg < 0 {
+                    return (out, "aarch64_missing_call_arg")
+                }
+                out.call_site_args[(ci * 6 + a) as usize] = arg
+                a = a + 1
+            }
+            out.call_site_count = ci + 1
+        }
+        i = i + 1
+    }
+    (out, "")
+}
+
 fn a64_preview_emit_machine_instr(c: A64PreviewCompiler, instr: MachineInstr) -> (A64PreviewCompiler, string) with Mut, Panic, Div {
     var out = c
 
@@ -15665,6 +15707,22 @@ fn a64_preview_emit_machine_instr(c: A64PreviewCompiler, instr: MachineInstr) ->
         return (out, "")
     }
     if instr.opcode == MIR_OP_CALL {
+        // SIO-32: pass call args. The machine stream carries no ARG_MOVE,
+        // so args come from the IR call table (k-th CALL matches k-th IR
+        // call; mirrors codegen.sio). Target mismatch refuses loudly.
+        let ci = out.call_emit_index
+        if ci < 0 || ci >= out.call_site_count {
+            return (out, "aarch64_call_site_missing")
+        }
+        if out.call_site_targets[ci as usize] != instr.src1.value {
+            return (out, "aarch64_call_target_mismatch")
+        }
+        var a: i64 = 0
+        while a < out.call_site_argc[ci as usize] {
+            out.code = a64_preview_emit_load_slot(out.code, a, out.call_site_args[(ci * 6 + a) as usize])
+            a = a + 1
+        }
+        out.call_emit_index = ci + 1
         let patch_offset = out.code.len
         out.code = a64_emit_bl(out.code, 0)
         out = a64_preview_record_call_patch(out, patch_offset, instr.src1.value)
@@ -15712,6 +15770,13 @@ fn a64_preview_compile_function(c: A64PreviewCompiler, func: IrFunction, machine
             out = a64_preview_emit_builtin_print_char(out)
             return (out, "")
         }
+    }
+
+    // SIO-32: collect call args before emitting (see above).
+    let collected = a64_preview_collect_call_args(out, func)
+    out = collected.0
+    if str_len(collected.1) > 0 {
+        return (out, collected.1)
     }
 
     let frame_size = a64_preview_frame_size(machine_func.temp_count)
@@ -16304,45 +16369,9 @@ fn native_v2_trace_module_ir_ref(module: &IrModule) with IO, Mut, Panic, Div {
     }
 }
 
-// SIO-32 diagnostic: dump IR calls (target, argc, args) plus the legalized
-// machine stream when SOUNIO_A64_MIR_DUMP=1. Zero-cost when unset.
-fn a64_preview_dump_ir_calls(module: &IrModule) with IO, Mut, Panic, Div {
-    var fi: i64 = 0
-    while fi < (*module).fn_count {
-        let func = ir_fn_get(module, fi as usize)
-        print("A64IR fn=")
-        print_int(fi)
-        print(" ninstr=")
-        print_int(func.instr_count)
-        print("\n")
-        var i: i64 = 0
-        while i < func.instr_count {
-            let at = ir_region_slot_r(func.region, (i))
-            if (IR_A_OP[at as usize] as IrOpcode) == IrOpcode::IrCall {
-                print("  call opidx=")
-                print_int(i)
-                print(" target=")
-                print_int(IR_A_FN_ID[at as usize])
-                print(" argc=")
-                print_int(IR_A_ARG_COUNT[at as usize])
-                print(" a0=")
-                print_int(ir_arena_arg_at(at, 0))
-                print(" a1=")
-                print_int(ir_arena_arg_at(at, 1))
-                print("\n")
-            }
-            i = i + 1
-        }
-        fi = fi + 1
-    }
-}
-
 pub fn compile_native_v2_preview_to_file(module: &IrModule, target_spec: NativeTargetSpec, output_path: string) -> i32 with IO, Mut, Panic, Div, Alloc {
     if target_spec.matrix_mode < 0 {
         return 10
-    }
-    if str_eq(read_env("SOUNIO_A64_MIR_DUMP"), "1") {
-        a64_preview_dump_ir_calls(module)
     }
     if target_spec.arch_id == ARCH_AARCH64() && target_spec.os_id == OS_MACOS() {
         return compile_arm64_macos_to_file(module, output_path)
