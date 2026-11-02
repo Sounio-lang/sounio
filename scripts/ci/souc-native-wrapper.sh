@@ -97,6 +97,9 @@ fi
 # harness invoke the raw ELF directly through it, bypassing bin/madaros
 # entirely.
 MADAROS_STACK_KB="${MADAROS_STACK_KB:-524288}"
+# SIO-568: report the host OS so the raw ELF can self-elevate its stack
+# address-space limit on Linux when invoked directly.
+export SOUNIO_HOST_OS="$(uname -s)"
 if [[ "$MADAROS_STACK_KB" == "0" ]]; then
   ulimit -s unlimited 2>/dev/null || true
 else
