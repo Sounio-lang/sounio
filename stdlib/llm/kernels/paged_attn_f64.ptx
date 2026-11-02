@@ -1,0 +1,400 @@
+// paged_attn_f64.ptx -- fused paged attention over block tables, f64.
+//
+// Hand-written: no nvcc exists on controlled infra. The C reference
+// is paged_attn_f64.cu. Proven by tests/run-pass/paged_gpu.sio:
+// exact row equality vs the x86 host path plus a device counter.
+//
+// Math mirrors ll_runs_layer op-for-op in f64 (separate mul/add,
+// never fma), including the math::pure::exp sequence from
+// stdlib/math/pure.sio (truncating k, nested inside-out Horner,
+// split (p * 2^k1) * 2^k2). Hex constants are the correctly-rounded
+// parses of the source decimals (note: ln2_hi/lo differ from the
+// Cody-Waite emitter values).
+//
+// Index tables are u64 so the host stages them with plain write_i64
+// (no u32 packing). Scale arrives by device pointer so the host
+// never needs f64 bit conversion (it stages with write_f64).
+//
+// grid: (nrows, nheads), one thread per block (blockDim must be 1;
+// extra threads exit immediately).
+// q: post-rope queries [nrows, nheads, dh] f64.
+// pool_k/pool_v: flat f64 K/V block pools.
+// table: [nrows, maxblocks] u64 pool-block indices.
+// lens: [nrows] u64 row lengths.
+// scale_ptr: device pointer to one f64.
+// sco: [nrows, maxblocks*B] f64 scratch.
+// out: [nrows, nheads, dh] f64.
+// proof: [nrows*nheads] u64, zeroed by the host. Each finished
+// block stores u32 1 to the low word of proof[row*nheads+head]
+// (LE aliasing: the host reads back u64 == 1). No atom: the lane
+// ptxas rejects unscoped atom.global.inc.u64 (exit 84, job 20979).
+.version 7.0
+.target sm_50
+.address_size 64
+
+.visible .entry paged_attn_f64(
+    .param .u64 q_ptr,
+    .param .u64 pool_k,
+    .param .u64 pool_v,
+    .param .u64 table_ptr,
+    .param .u64 lens_ptr,
+    .param .u64 scale_ptr,
+    .param .u64 sco_ptr,
+    .param .u64 out_ptr,
+    .param .u64 proof_ptr,
+    .param .u32 nheads,
+    .param .u32 kv_heads,
+    .param .u32 dh,
+    .param .u32 B,
+    .param .u32 maxblocks,
+    .param .u32 rep
+)
+{
+    .reg .u32 %r_tid, %r_row, %r_head, %r_kvh, %r_kvdim;
+    .reg .u32 %r_rn, %r_rh, %r_sstride, %r_qe;
+    .reg .u32 %r_te, %r_se, %r_c9, %r_t, %r_bi;
+    .reg .u32 %r_pos, %r_d, %r_d2, %r_oe;
+    .reg .u32 %r_nheads, %r_kvheads, %r_dh, %r_B, %r_maxb, %r_rep;
+    .reg .u64 %rd_q, %rd_pk, %rd_pv, %rd_tab, %rd_lens;
+    .reg .u64 %rd_scptr, %rd_sco, %rd_out, %rd_proof, %rd_t0;
+    .reg .u64 %rd_tb, %rd_sb, %rd_qb, %rd_kb, %rd_qe2;
+    .reg .u64 %rd_ke2, %rd_se, %rd_c0, %rd_va, %rd_oe;
+    .reg .u64 %rd_nb, %rd_z, %rd_pe;
+    .reg .u32 %r_one;
+    .reg .u64 %rd_len, %rd_blk, %rd_bp, %rd_kh, %rd_kbo;
+    .reg .u64 %rd_t, %rd_t8, %rd_tb2, %rd_kvdim64, %rd_khd;
+    .reg .u32 %r_kh0, %r_khd;
+    .reg .s64 %rs_n;
+    .reg .f64 %fd_scale, %fd_mx, %fd_dot, %fd_qv, %fd_kv;
+    .reg .f64 %fd_p, %fd_sc, %fd_sum, %fd_x, %fd_t1;
+    .reg .f64 %fd_nf, %fd_a, %fd_hi, %fd_r, %fd_b;
+    .reg .f64 %fd_lo, %fd_acc, %fd_ck, %fd_t2, %fd_e;
+    .reg .f64 %fd_v, %fd_pv, %fd_acc2, %fd_c0;
+    .reg .f64 %fd_e1, %fd_e2, %fd_epos;
+    .reg .s64 %rs_k1, %rs_k2, %rs_m, %rs_neg, %rs_two;
+    .reg .pred %p0, %p1, %p2;
+
+    ld.param.u64 %rd_q, [q_ptr];
+    ld.param.u64 %rd_pk, [pool_k];
+    ld.param.u64 %rd_pv, [pool_v];
+    ld.param.u64 %rd_tab, [table_ptr];
+    ld.param.u64 %rd_lens, [lens_ptr];
+    ld.param.u64 %rd_scptr, [scale_ptr];
+    ld.param.u64 %rd_sco, [sco_ptr];
+    ld.param.u64 %rd_out, [out_ptr];
+    ld.param.u64 %rd_proof, [proof_ptr];
+    ld.param.u32 %r_nheads, [nheads];
+    ld.param.u32 %r_kvheads, [kv_heads];
+    ld.param.u32 %r_dh, [dh];
+    ld.param.u32 %r_B, [B];
+    ld.param.u32 %r_maxb, [maxblocks];
+    ld.param.u32 %r_rep, [rep];
+    ld.global.f64 %fd_scale, [%rd_scptr];
+
+    // single-thread blocks only; extras exit without touching proof.
+    mov.u32 %r_tid, %tid.x;
+    setp.ne.u32 %p0, %r_tid, 0;
+    @%p0 bra PDONE3RET;
+
+    mov.u32 %r_row, %ctaid.x;
+    mov.u32 %r_head, %ctaid.y;
+    div.u32 %r_kvh, %r_head, %r_rep;
+    mul.lo.u32 %r_kvdim, %r_kvheads, %r_dh;
+    mul.lo.u32 %r_rn, %r_row, %r_nheads;
+    add.u32 %r_rh, %r_rn, %r_head;
+    mul.lo.u32 %r_sstride, %r_maxb, %r_B;
+    cvt.u64.u32 %rd_kvdim64, %r_kvdim;
+
+    // row length (u64) and row base pointers.
+    cvt.u64.u32 %rd_t, %r_row;
+    mul.lo.u64 %rd_t0, %rd_t, 8;
+    add.u64 %rd_t0, %rd_lens, %rd_t0;
+    ld.global.u64 %rd_len, [%rd_t0];
+    mul.lo.u32 %r_qe, %r_rh, %r_dh;
+    cvt.u64.u32 %rd_t, %r_qe;
+    mul.lo.u64 %rd_qb, %rd_t, 8;
+    add.u64 %rd_qb, %rd_q, %rd_qb;
+    mul.lo.u32 %r_te, %r_row, %r_maxb;
+    cvt.u64.u32 %rd_t, %r_te;
+    mul.lo.u64 %rd_tb, %rd_t, 8;
+    add.u64 %rd_tb, %rd_tab, %rd_tb;
+    mul.lo.u32 %r_se, %r_row, %r_sstride;
+    cvt.u64.u32 %rd_t, %r_se;
+    mul.lo.u64 %rd_sb, %rd_t, 8;
+    add.u64 %rd_sb, %rd_sco, %rd_sb;
+    // mx = -1e9, built exactly: cvt(1000000000) then negate.
+    mov.u32 %r_c9, 1000000000;
+    cvt.rn.f64.u32 %fd_mx, %r_c9;
+    neg.f64 %fd_mx, %fd_mx;
+
+    // ---- pass 1: dots, store scores, track max ----
+    mov.u32 %r_t, 0;
+PT1:
+    cvt.u64.u32 %rd_t, %r_t;
+    setp.ge.u64 %p0, %rd_t, %rd_len;
+    @%p0 bra PDONE1;
+    div.u32 %r_bi, %r_t, %r_B;
+    rem.u32 %r_pos, %r_t, %r_B;
+    cvt.u64.u32 %rd_t, %r_bi;
+    mul.lo.u64 %rd_tb2, %rd_t, 8;
+    add.u64 %rd_tb2, %rd_tb, %rd_tb2;
+    ld.global.u64 %rd_blk, [%rd_tb2];
+    cvt.u64.u32 %rd_t, %r_B;
+    mul.lo.u64 %rd_bp, %rd_blk, %rd_t;
+    cvt.u64.u32 %rd_t, %r_pos;
+    add.u64 %rd_bp, %rd_bp, %rd_t;
+    mul.lo.u32 %r_kh0, %r_kvh, %r_dh;
+    cvt.u64.u32 %rd_kh, %r_kh0;
+    mul.lo.u64 %rd_kbo, %rd_bp, %rd_kvdim64;
+    add.u64 %rd_kbo, %rd_kbo, %rd_kh;
+    mul.lo.u64 %rd_kb, %rd_kbo, 8;
+    add.u64 %rd_kb, %rd_pk, %rd_kb;
+    mov.u64 %rd_z, 0;
+    mov.b64 %fd_dot, %rd_z;
+    mov.u32 %r_d, 0;
+DT1:
+    setp.ge.u32 %p1, %r_d, %r_dh;
+    @%p1 bra DTDONE1;
+    cvt.u64.u32 %rd_t, %r_d;
+    mul.lo.u64 %rd_t8, %rd_t, 8;
+    add.u64 %rd_qe2, %rd_qb, %rd_t8;
+    ld.global.f64 %fd_qv, [%rd_qe2];
+    add.u64 %rd_ke2, %rd_kb, %rd_t8;
+    ld.global.f64 %fd_kv, [%rd_ke2];
+    mul.rn.f64 %fd_p, %fd_qv, %fd_kv;
+    add.rn.f64 %fd_dot, %fd_dot, %fd_p;
+    add.u32 %r_d, %r_d, 1;
+    bra DT1;
+DTDONE1:
+    mul.rn.f64 %fd_sc, %fd_dot, %fd_scale;
+    cvt.u64.u32 %rd_t, %r_t;
+    mul.lo.u64 %rd_se, %rd_t, 8;
+    add.u64 %rd_se, %rd_sb, %rd_se;
+    st.global.f64 [%rd_se], %fd_sc;
+    setp.gt.f64 %p2, %fd_sc, %fd_mx;
+    selp.f64 %fd_mx, %fd_sc, %fd_mx, %p2;
+    add.u32 %r_t, %r_t, 1;
+    bra PT1;
+PDONE1:
+    // ---- pass 2: exp, store e, accumulate sum ----
+    mov.u64 %rd_z, 0;
+    mov.b64 %fd_sum, %rd_z;
+    mov.u32 %r_t, 0;
+PT2:
+    cvt.u64.u32 %rd_t, %r_t;
+    setp.ge.u64 %p0, %rd_t, %rd_len;
+    @%p0 bra PDONE2;
+    mul.lo.u64 %rd_se, %rd_t, 8;
+    add.u64 %rd_se, %rd_sb, %rd_se;
+    ld.global.f64 %fd_sc, [%rd_se];
+    sub.rn.f64 %fd_x, %fd_sc, %fd_mx;
+    // math::pure::exp replica (Sounio source in stdlib/math/pure.sio,
+    // not libm and not the codegen emitter): range checks, truncating
+    // k, nested Horner from the inside out, split 2^k1 * 2^k2 with
+    // one rounding per multiply, left to right.
+    setp.neu.f64 %p2, %fd_x, %fd_x;
+    @%p2 bra EXP_NAN;
+    mov.u64 %rd_c0, 0x40862E42FEFA39EF;
+    mov.b64 %fd_c0, %rd_c0;
+    setp.gt.f64 %p2, %fd_x, %fd_c0;
+    @%p2 bra EXP_BIG;
+    mov.u64 %rd_c0, 0xC0874910D52D3052;
+    mov.b64 %fd_c0, %rd_c0;
+    setp.lt.f64 %p2, %fd_x, %fd_c0;
+    @%p2 bra EXP_ZERO;
+    mov.u64 %rd_c0, 0x3FF71547652B82FE;
+    mov.b64 %fd_c0, %rd_c0;
+    mul.rn.f64 %fd_t1, %fd_x, %fd_c0;
+    mov.u64 %rd_c0, 0;
+    mov.b64 %fd_c0, %rd_c0;
+    setp.ge.f64 %p2, %fd_t1, %fd_c0;
+    mov.u64 %rd_c0, 0x3FE0000000000000;
+    mov.b64 %fd_ck, %rd_c0;
+    @%p2 bra EXPKPOS;
+    sub.rn.f64 %fd_t1, %fd_t1, %fd_ck;
+    bra EXPKCVT;
+EXPKPOS:
+    add.rn.f64 %fd_t1, %fd_t1, %fd_ck;
+EXPKCVT:
+    cvt.rzi.s64.f64 %rs_n, %fd_t1;
+    cvt.rn.f64.s64 %fd_nf, %rs_n;
+    mov.u64 %rd_c0, 0x3FE62E42FEE00000;
+    mov.b64 %fd_hi, %rd_c0;
+    mul.rn.f64 %fd_a, %fd_nf, %fd_hi;
+    sub.rn.f64 %fd_r, %fd_x, %fd_a;
+    mov.u64 %rd_c0, 0x3DEA39EF35793C76;
+    mov.b64 %fd_lo, %rd_c0;
+    mul.rn.f64 %fd_b, %fd_nf, %fd_lo;
+    sub.rn.f64 %fd_r, %fd_r, %fd_b;
+    // nested Horner, inside out: acc = r*c14, then c_k + r*acc.
+    mov.u64 %rd_c0, 0x3DE6124613A86D09;
+    mov.b64 %fd_ck, %rd_c0;
+    mul.rn.f64 %fd_acc, %fd_r, %fd_ck;
+    mov.u64 %rd_c0, 0x3E21EED8EFF8D898;
+    mov.b64 %fd_ck, %rd_c0;
+    mul.rn.f64 %fd_t2, %fd_r, %fd_acc;
+    add.rn.f64 %fd_acc, %fd_ck, %fd_t2;
+    mov.u64 %rd_c0, 0x3E5AE64567F544E4;
+    mov.b64 %fd_ck, %rd_c0;
+    mul.rn.f64 %fd_t2, %fd_r, %fd_acc;
+    add.rn.f64 %fd_acc, %fd_ck, %fd_t2;
+    mov.u64 %rd_c0, 0x3E927E4FB7789F5C;
+    mov.b64 %fd_ck, %rd_c0;
+    mul.rn.f64 %fd_t2, %fd_r, %fd_acc;
+    add.rn.f64 %fd_acc, %fd_ck, %fd_t2;
+    mov.u64 %rd_c0, 0x3EC71DE3A556C734;
+    mov.b64 %fd_ck, %rd_c0;
+    mul.rn.f64 %fd_t2, %fd_r, %fd_acc;
+    add.rn.f64 %fd_acc, %fd_ck, %fd_t2;
+    mov.u64 %rd_c0, 0x3EFA01A01A01A01A;
+    mov.b64 %fd_ck, %rd_c0;
+    mul.rn.f64 %fd_t2, %fd_r, %fd_acc;
+    add.rn.f64 %fd_acc, %fd_ck, %fd_t2;
+    mov.u64 %rd_c0, 0x3F2A01A01A01A01A;
+    mov.b64 %fd_ck, %rd_c0;
+    mul.rn.f64 %fd_t2, %fd_r, %fd_acc;
+    add.rn.f64 %fd_acc, %fd_ck, %fd_t2;
+    mov.u64 %rd_c0, 0x3F56C16C16C16C17;
+    mov.b64 %fd_ck, %rd_c0;
+    mul.rn.f64 %fd_t2, %fd_r, %fd_acc;
+    add.rn.f64 %fd_acc, %fd_ck, %fd_t2;
+    mov.u64 %rd_c0, 0x3F81111111111111;
+    mov.b64 %fd_ck, %rd_c0;
+    mul.rn.f64 %fd_t2, %fd_r, %fd_acc;
+    add.rn.f64 %fd_acc, %fd_ck, %fd_t2;
+    mov.u64 %rd_c0, 0x3FA5555555555555;
+    mov.b64 %fd_ck, %rd_c0;
+    mul.rn.f64 %fd_t2, %fd_r, %fd_acc;
+    add.rn.f64 %fd_acc, %fd_ck, %fd_t2;
+    mov.u64 %rd_c0, 0x3FC5555555555555;
+    mov.b64 %fd_ck, %rd_c0;
+    mul.rn.f64 %fd_t2, %fd_r, %fd_acc;
+    add.rn.f64 %fd_acc, %fd_ck, %fd_t2;
+    mov.u64 %rd_c0, 0x3FE0000000000000;
+    mov.b64 %fd_ck, %rd_c0;
+    mul.rn.f64 %fd_t2, %fd_r, %fd_acc;
+    add.rn.f64 %fd_acc, %fd_ck, %fd_t2;
+    mov.u64 %rd_c0, 0x3FF0000000000000;
+    mov.b64 %fd_ck, %rd_c0;
+    mul.rn.f64 %fd_t2, %fd_r, %fd_acc;
+    add.rn.f64 %fd_acc, %fd_ck, %fd_t2;
+    mov.u64 %rd_c0, 0x3FF0000000000000;
+    mov.b64 %fd_ck, %rd_c0;
+    mul.rn.f64 %fd_t2, %fd_r, %fd_acc;
+    add.rn.f64 %fd_acc, %fd_ck, %fd_t2;
+    // k1 = k/2 truncating (Sounio i64 div and div.s64 both truncate).
+    mov.s64 %rs_two, 2;
+    div.s64 %rs_k1, %rs_n, %rs_two;
+    sub.s64 %rs_k2, %rs_n, %rs_k1;
+    // e1 = 2^k1: exact field build, one rounding only when negative.
+    neg.s64 %rs_neg, %rs_k1;
+    setp.lt.s64 %p2, %rs_k1, 0;
+    selp.s64 %rs_m, %rs_neg, %rs_k1, %p2;
+    cvt.u64.s64 %rd_nb, %rs_m;
+    add.u64 %rd_nb, %rd_nb, 1023;
+    shl.b64 %rd_nb, %rd_nb, 52;
+    mov.b64 %fd_epos, %rd_nb;
+    mov.u64 %rd_c0, 0x3FF0000000000000;
+    mov.b64 %fd_c0, %rd_c0;
+    @%p2 bra E1NEG;
+    mov.f64 %fd_e1, %fd_epos;
+    bra E1DONE;
+E1NEG:
+    div.rn.f64 %fd_e1, %fd_c0, %fd_epos;
+E1DONE:
+    // e2 = 2^k2, same shape.
+    neg.s64 %rs_neg, %rs_k2;
+    setp.lt.s64 %p2, %rs_k2, 0;
+    selp.s64 %rs_m, %rs_neg, %rs_k2, %p2;
+    cvt.u64.s64 %rd_nb, %rs_m;
+    add.u64 %rd_nb, %rd_nb, 1023;
+    shl.b64 %rd_nb, %rd_nb, 52;
+    mov.b64 %fd_epos, %rd_nb;
+    @%p2 bra E2NEG;
+    mov.f64 %fd_e2, %fd_epos;
+    bra E2DONE;
+E2NEG:
+    div.rn.f64 %fd_e2, %fd_c0, %fd_epos;
+E2DONE:
+    // (p * e1) * e2, left to right like the source.
+    mul.rn.f64 %fd_t2, %fd_acc, %fd_e1;
+    mul.rn.f64 %fd_e, %fd_t2, %fd_e2;
+    bra EXP_DONE;
+EXP_NAN:
+    mov.f64 %fd_e, %fd_x;
+    bra EXP_DONE;
+EXP_BIG:
+    mov.u64 %rd_c0, 0x7FE1CCF385EBC8A0;
+    mov.b64 %fd_t2, %rd_c0;
+    mov.u64 %rd_c0, 0x4024000000000000;
+    mov.b64 %fd_ck, %rd_c0;
+    mul.rn.f64 %fd_e, %fd_t2, %fd_ck;
+    bra EXP_DONE;
+EXP_ZERO:
+    mov.u64 %rd_c0, 0;
+    mov.b64 %fd_e, %rd_c0;
+EXP_DONE:
+    st.global.f64 [%rd_se], %fd_e;
+    add.rn.f64 %fd_sum, %fd_sum, %fd_e;
+    add.u32 %r_t, %r_t, 1;
+    bra PT2;
+PDONE2:
+
+    // ---- pass 3: weighted accumulate ----
+    mov.u32 %r_d2, 0;
+PO3:
+    setp.ge.u32 %p0, %r_d2, %r_dh;
+    @%p0 bra PDONE3;
+    mov.u64 %rd_z, 0;
+    mov.b64 %fd_acc2, %rd_z;
+    mov.u32 %r_t, 0;
+PT3:
+    cvt.u64.u32 %rd_t, %r_t;
+    setp.ge.u64 %p1, %rd_t, %rd_len;
+    @%p1 bra PTDONE3;
+    mul.lo.u64 %rd_se, %rd_t, 8;
+    add.u64 %rd_se, %rd_sb, %rd_se;
+    ld.global.f64 %fd_e, [%rd_se];
+    div.rn.f64 %fd_p, %fd_e, %fd_sum;
+    div.u32 %r_bi, %r_t, %r_B;
+    rem.u32 %r_pos, %r_t, %r_B;
+    cvt.u64.u32 %rd_t, %r_bi;
+    mul.lo.u64 %rd_tb2, %rd_t, 8;
+    add.u64 %rd_tb2, %rd_tb, %rd_tb2;
+    ld.global.u64 %rd_blk, [%rd_tb2];
+    cvt.u64.u32 %rd_t, %r_B;
+    mul.lo.u64 %rd_bp, %rd_blk, %rd_t;
+    cvt.u64.u32 %rd_t, %r_pos;
+    add.u64 %rd_bp, %rd_bp, %rd_t;
+    mul.lo.u32 %r_kh0, %r_kvh, %r_dh;
+    add.u32 %r_khd, %r_kh0, %r_d2;
+    cvt.u64.u32 %rd_khd, %r_khd;
+    cvt.u64.u32 %rd_t, %r_kvdim;
+    mul.lo.u64 %rd_kbo, %rd_bp, %rd_t;
+    add.u64 %rd_kbo, %rd_kbo, %rd_khd;
+    mul.lo.u64 %rd_kbo, %rd_kbo, 8;
+    add.u64 %rd_va, %rd_pv, %rd_kbo;
+    ld.global.f64 %fd_v, [%rd_va];
+    mul.rn.f64 %fd_pv, %fd_p, %fd_v;
+    add.rn.f64 %fd_acc2, %fd_acc2, %fd_pv;
+    add.u32 %r_t, %r_t, 1;
+    bra PT3;
+PTDONE3:
+    mul.lo.u32 %r_oe, %r_rh, %r_dh;
+    add.u32 %r_oe, %r_oe, %r_d2;
+    cvt.u64.u32 %rd_t, %r_oe;
+    mul.lo.u64 %rd_oe, %rd_t, 8;
+    add.u64 %rd_oe, %rd_out, %rd_oe;
+    st.global.f64 [%rd_oe], %fd_acc2;
+    add.u32 %r_d2, %r_d2, 1;
+    bra PO3;
+PDONE3:
+    // completion store, not atom (see header note).
+    cvt.u64.u32 %rd_t, %r_rh;
+    mul.lo.u64 %rd_pe, %rd_t, 8;
+    add.u64 %rd_pe, %rd_proof, %rd_pe;
+    mov.u32 %r_one, 1;
+    st.global.u32 [%rd_pe], %r_one;
+PDONE3RET:
+    ret;
+}

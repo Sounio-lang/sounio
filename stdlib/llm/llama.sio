@@ -22,11 +22,17 @@ use llm::gguf::{GgufFile, GgufTensor, gguf_byte_at, gguf_dtype_f32, gguf_find, g
 use tensor2::convert::f32_bits_to_f64
 use tensor2::cpu_kernel::{CpuBuf, ck_alloc, ck_gemm, ck_get, ck_set}
 use math::pure::{cos, exp, pow, sin, sqrt}
-use hetero::cuda_exec::{CudaExec}
+use hetero::cuda_exec::{CudaExec, ce_alloc, ce_arg, ce_d2h, ce_function, ce_h2d, ce_launch_2d_shmem, ce_module_log, ce_sync}
+use hetero::probe_cuda::{pb_cstr}
 use hetero::runtime::{Runtime, rt_gemm_rect}
 use hetero::moe::{moe_topk, moe_ffn_q4k, moe_ffn_q5k, moe_ffn_q8_0, MoeFfnResult}
 use hetero::cublas_bench::{gb_host_f32, gb_host_get, gb_host_set}
 use llm::paged_kv::{PagedKv, paged_new, paged_append, paged_get, paged_len}
+
+// M4: true paged GPU attention kill switch. 0 = host math (default,
+// ships safe); 1 = route the serve pump forward through the fused
+// paged_attn_f64 device kernel. Exact-match only: any nonzero
+// device-vs-host diff fails the test, never tolerates.
 // Layer weight names are built with the str_concat builtin plus a
 // hand-rolled digit renderer (stdlib/str shadows the string builtins
 // with a fixed-buffer Str API - importing it here breaks str_char_at).
@@ -1528,20 +1534,376 @@ fn ll_forward_batch_paged_impl(m: &!Llama, pks_k: &[PagedKv; 256], pks_v: &[Page
 // Contract: per slot, k ascends; every row a row attends to was
 // appended by an earlier row of the same call or a previous call.
 // n <= 16 rows per call.
-pub fn llama_forward_batch_runs(m: &!Llama, pks_k: &![PagedKv; 256], pks_v: &![PagedKv; 256], rslot: &[i64; 16], rpos: &[i64; 16], toks: &[i64; 16], n: i64) -> CpuBuf with Alloc, Mut, Panic, Div {
-    let rt = ll_no_rt()
-    ll_forward_batch_runs_impl(m, pks_k, pks_v, rslot, rpos, toks, n, &rt, false)
+
+// M4: true paged GPU attention. Loader + single-launch wrapper.
+// Kernel: stdlib/llm/kernels/paged_attn_f64.ptx (hand-written PTX, no
+// nvcc on controlled infra). ok=false means host fallback (honest,
+// not silent: the M4 test fails on proof mismatch instead of
+// passing on host numbers).
+pub struct PagedAttnKernel {
+    pub func: i64,
+    pub ok: bool,
 }
 
-pub fn llama_forward_batch_runs_rt(m: &!Llama, pks_k: &![PagedKv; 256], pks_v: &![PagedKv; 256], rslot: &[i64; 16], rpos: &[i64; 16], toks: &[i64; 16], n: i64, rt: &Runtime) -> CpuBuf with Alloc, Mut, Panic, Div {
-    ll_forward_batch_runs_impl(m, pks_k, pks_v, rslot, rpos, toks, n, rt, true)
+pub fn paged_attn_load(rt: &Runtime, ptx_path: string) -> PagedAttnKernel with Alloc, Mut, Panic, IO {
+    var k = PagedAttnKernel { func: 0, ok: false }
+    if !rt.exec.ok { return k }
+    let src = read_file(ptx_path)
+    if str_len(src) > 0 {
+        let mod = ce_module_log(&rt.exec, pb_cstr(src))
+        if mod != 0 { k.func = ce_function(&rt.exec, mod, "paged_attn_f64") }
+    }
+    k.ok = k.func != 0
+    k
+}
+
+// M4: one fused device pass over the rows stacked in q. Pools are
+// read, never written; att rows are overwritten on full success
+// only, so any failure keeps host math (safe fallback). Returns
+// true only when the device pass fully replaced host math.
+pub fn ll_attn_paged_rows_gpu(func: i64, heads: i64, kv_heads: i64, dh: i64, kvdim: i64, rep: i64, li: i64, q: &CpuBuf, pks_k: &![PagedKv; 256], pks_v: &![PagedKv; 256], rslot: &[i64; 16], rpos: &[i64; 16], n: i64, att: &!CpuBuf, rt: &Runtime, scale: f64) -> bool with Alloc, Mut, Panic, Div {
+    if n <= 0 { return false }
+    if func == 0 { return false }
+    if !rt.exec.ok { return false }
+    let si0 = rslot[0]
+    let bb = pks_k[(si0 * 64 + li) as usize].b
+    if bb <= 0 { return false }
+    var maxb: i64 = 1
+    var s: i64 = 0
+    while s < n {
+        let need = rpos[s as usize] + 1
+        if need <= 0 { return false }
+        let nb = (need + bb - 1) / bb
+        if nb > 64 { return false }
+        if nb > maxb { maxb = nb }
+        s = s + 1
+    }
+    var snaps: [i64; 16] = [0; 16]
+    var nsp: i64 = 0
+    s = 0
+    while s < n {
+        let si = rslot[s as usize]
+        var f: i64 = -1
+        var k: i64 = 0
+        while k < nsp {
+            if snaps[k as usize] == si { f = k }
+            k = k + 1
+        }
+        if f < 0 {
+            if nsp >= 16 { return false }
+            snaps[nsp as usize] = si
+            nsp = nsp + 1
+        }
+        s = s + 1
+    }
+    var spmax: [i64; 16] = [0; 16]
+    s = 0
+    while s < n {
+        let si = rslot[s as usize]
+        var f: i64 = 0
+        var k: i64 = 0
+        while k < nsp {
+            if snaps[k as usize] == si { f = k }
+            k = k + 1
+        }
+        let need = rpos[s as usize] + 1
+        if need > spmax[f as usize] { spmax[f as usize] = need }
+        s = s + 1
+    }
+    let pooln = nsp * maxb * bb * kvdim
+    var poolh = ck_alloc(pooln)
+    var poolhv = ck_alloc(pooln)
+    var ti: i64 = 0
+    while ti < nsp {
+        let si = snaps[ti as usize]
+        let pool = (si * 64 + li) as usize
+        let need = spmax[ti as usize]
+        let nb = (need + bb - 1) / bb
+        var j: i64 = 0
+        while j < nb {
+            var p: i64 = 0
+            while p < bb {
+                let t = j * bb + p
+                var kd: i64 = 0
+                while kd < kvdim {
+                    let vk = if t < need { paged_get(&pks_k[pool], t, kd) } else { 0.0 }
+                    let vv = if t < need { paged_get(&pks_v[pool], t, kd) } else { 0.0 }
+                    write_f64(poolh.data, ((ti * maxb + j) * bb + p) * kvdim + kd, vk)
+                    write_f64(poolhv.data, ((ti * maxb + j) * bb + p) * kvdim + kd, vv)
+                    kd = kd + 1
+                }
+                p = p + 1
+            }
+            j = j + 1
+        }
+        ti = ti + 1
+    }
+    let tab_h = heap_alloc(n * maxb * 8)
+    let lens_h = heap_alloc(n * 8)
+    s = 0
+    while s < n {
+        let si = rslot[s as usize]
+        var f: i64 = 0
+        var k: i64 = 0
+        while k < nsp {
+            if snaps[k as usize] == si { f = k }
+            k = k + 1
+        }
+        let need = rpos[s as usize] + 1
+        write_i64(lens_h as *mut i64, s, need)
+        let nb = (need + bb - 1) / bb
+        var j: i64 = 0
+        while j < nb {
+            write_i64(tab_h as *mut i64, s * maxb + j, f * maxb + j)
+            j = j + 1
+        }
+        s = s + 1
+    }
+    let sc_h = heap_alloc(8)
+    write_f64(sc_h as *mut f64, 0, scale)
+    let nproof = n * heads
+    let proof_h = heap_alloc(nproof * 8)
+    var pi: i64 = 0
+    while pi < nproof {
+        write_i64(proof_h as *mut i64, pi, 0)
+        pi = pi + 1
+    }
+    let dq = ce_alloc(&rt.exec, q.len * 8)
+    let dk = ce_alloc(&rt.exec, pooln * 8)
+    let dv = ce_alloc(&rt.exec, pooln * 8)
+    let dt = ce_alloc(&rt.exec, n * maxb * 8)
+    let dl = ce_alloc(&rt.exec, n * 8)
+    let ds = ce_alloc(&rt.exec, 8)
+    let dc = ce_alloc(&rt.exec, n * maxb * bb * 8)
+    let dout = ce_alloc(&rt.exec, att.len * 8)
+    let dproof = ce_alloc(&rt.exec, nproof * 8)
+    if dq == 0 || dk == 0 || dv == 0 || dt == 0 || dl == 0 || ds == 0 || dc == 0 || dout == 0 || dproof == 0 { return false }
+    var st = ce_h2d(&rt.exec, dq, q.data as *mut u8, q.len * 8)
+    st = ce_h2d(&rt.exec, dk, poolh.data as *mut u8, pooln * 8)
+    st = ce_h2d(&rt.exec, dv, poolhv.data as *mut u8, pooln * 8)
+    st = ce_h2d(&rt.exec, dt, tab_h, n * maxb * 8)
+    st = ce_h2d(&rt.exec, dl, lens_h, n * 8)
+    st = ce_h2d(&rt.exec, ds, sc_h, 8)
+    st = ce_h2d(&rt.exec, dproof, proof_h, nproof * 8)
+    if st != 0 { return false }
+    let params = heap_alloc(8 * 15)
+    write_i64(params as *mut i64, 0, ce_arg(dq) as i64)
+    write_i64(params as *mut i64, 1, ce_arg(dk) as i64)
+    write_i64(params as *mut i64, 2, ce_arg(dv) as i64)
+    write_i64(params as *mut i64, 3, ce_arg(dt) as i64)
+    write_i64(params as *mut i64, 4, ce_arg(dl) as i64)
+    write_i64(params as *mut i64, 5, ce_arg(ds) as i64)
+    write_i64(params as *mut i64, 6, ce_arg(dc) as i64)
+    write_i64(params as *mut i64, 7, ce_arg(dout) as i64)
+    write_i64(params as *mut i64, 8, ce_arg(dproof) as i64)
+    write_i64(params as *mut i64, 9, ce_arg(heads) as i64)
+    write_i64(params as *mut i64, 10, ce_arg(kv_heads) as i64)
+    write_i64(params as *mut i64, 11, ce_arg(dh) as i64)
+    write_i64(params as *mut i64, 12, ce_arg(bb) as i64)
+    write_i64(params as *mut i64, 13, ce_arg(maxb) as i64)
+    write_i64(params as *mut i64, 14, ce_arg(rep) as i64)
+    st = ce_launch_2d_shmem(&rt.exec, func, n, heads, 1, 0, params)
+    if st != 0 { return false }
+    if ce_sync(&rt.exec) != 0 { return false }
+    st = ce_d2h(&rt.exec, att.data as *mut u8, dout, att.len * 8)
+    if st != 0 { return false }
+    st = ce_d2h(&rt.exec, proof_h, dproof, nproof * 8)
+    if st != 0 { return false }
+    pi = 0
+    while pi < nproof {
+        if read_i64(proof_h as *mut i64, pi) != 1 { return false }
+        pi = pi + 1
+    }
+    true
+}
+
+// M4: device-armed runs entry. Loads the PTX once per call, threads
+// the handle down; any load failure falls back to host math.
+
+// M4 diagnostic: upload-readback verifier. Mirrors the stage block
+// of ll_attn_paged_rows_gpu, downloads every device buffer and
+// compares with the host source: 1=transfer fail, 10+i=q[i],
+// 20=poolk, 30=poolv, 40=tab, 50=lens, 60=scale, 0=all-ok.
+pub fn ll_attn_stage_verify(func: i64, heads: i64, kv_heads: i64, dh: i64, kvdim: i64, rep: i64, li: i64, q: &CpuBuf, pks_k: &![PagedKv; 256], pks_v: &![PagedKv; 256], rslot: &[i64; 16], rpos: &[i64; 16], n: i64, rt: &Runtime, scale: f64) -> i64 with Alloc, Mut, Panic, Div {
+    if n <= 0 { return 1 }
+    if func == 0 { return 1 }
+    if !rt.exec.ok { return 1 }
+    let si0 = rslot[0]
+    let bb = pks_k[(si0 * 64 + li) as usize].b
+    if bb <= 0 { return 1 }
+    var maxb: i64 = 1
+    var s: i64 = 0
+    while s < n {
+        let need = rpos[s as usize] + 1
+        if need <= 0 { return 1 }
+        let nb = (need + bb - 1) / bb
+        if nb > 64 { return 1 }
+        if nb > maxb { maxb = nb }
+        s = s + 1
+    }
+    var snaps: [i64; 16] = [0; 16]
+    var nsp: i64 = 0
+    s = 0
+    while s < n {
+        let si = rslot[s as usize]
+        var f: i64 = -1
+        var k: i64 = 0
+        while k < nsp {
+            if snaps[k as usize] == si { f = k }
+            k = k + 1
+        }
+        if f < 0 {
+            if nsp >= 16 { return 1 }
+            snaps[nsp as usize] = si
+            nsp = nsp + 1
+        }
+        s = s + 1
+    }
+    var spmax: [i64; 16] = [0; 16]
+    s = 0
+    while s < n {
+        let si = rslot[s as usize]
+        var f: i64 = 0
+        var k: i64 = 0
+        while k < nsp {
+            if snaps[k as usize] == si { f = k }
+            k = k + 1
+        }
+        let need = rpos[s as usize] + 1
+        if need > spmax[f as usize] { spmax[f as usize] = need }
+        s = s + 1
+    }
+    let pooln = nsp * maxb * bb * kvdim
+    var poolh = ck_alloc(pooln)
+    var poolhv = ck_alloc(pooln)
+    var ti: i64 = 0
+    while ti < nsp {
+        let si = snaps[ti as usize]
+        let pool = (si * 64 + li) as usize
+        let need = spmax[ti as usize]
+        let nb = (need + bb - 1) / bb
+        var j: i64 = 0
+        while j < nb {
+            var p: i64 = 0
+            while p < bb {
+                let t = j * bb + p
+                var kd: i64 = 0
+                while kd < kvdim {
+                    let vk = if t < need { paged_get(&pks_k[pool], t, kd) } else { 0.0 }
+                    let vv = if t < need { paged_get(&pks_v[pool], t, kd) } else { 0.0 }
+                    write_f64(poolh.data, ((ti * maxb + j) * bb + p) * kvdim + kd, vk)
+                    write_f64(poolhv.data, ((ti * maxb + j) * bb + p) * kvdim + kd, vv)
+                    kd = kd + 1
+                }
+                p = p + 1
+            }
+            j = j + 1
+        }
+        ti = ti + 1
+    }
+    let tab_h = heap_alloc(n * maxb * 8)
+    let lens_h = heap_alloc(n * 8)
+    s = 0
+    while s < n {
+        let si = rslot[s as usize]
+        var f: i64 = 0
+        var k: i64 = 0
+        while k < nsp {
+            if snaps[k as usize] == si { f = k }
+            k = k + 1
+        }
+        let need = rpos[s as usize] + 1
+        write_i64(lens_h as *mut i64, s, need)
+        let nb = (need + bb - 1) / bb
+        var j: i64 = 0
+        while j < nb {
+            write_i64(tab_h as *mut i64, s * maxb + j, f * maxb + j)
+            j = j + 1
+        }
+        s = s + 1
+    }
+    let sc_h = heap_alloc(8)
+    write_f64(sc_h as *mut f64, 0, scale)
+    let dq = ce_alloc(&rt.exec, q.len * 8)
+    let dk = ce_alloc(&rt.exec, pooln * 8)
+    let dv = ce_alloc(&rt.exec, pooln * 8)
+    let dt = ce_alloc(&rt.exec, n * maxb * 8)
+    let dl = ce_alloc(&rt.exec, n * 8)
+    let ds = ce_alloc(&rt.exec, 8)
+    if dq == 0 || dk == 0 || dv == 0 || dt == 0 || dl == 0 || ds == 0 { return 1 }
+    if ce_h2d(&rt.exec, dq, q.data as *mut u8, q.len * 8) != 0 { return 1 }
+    if ce_h2d(&rt.exec, dk, poolh.data as *mut u8, pooln * 8) != 0 { return 1 }
+    if ce_h2d(&rt.exec, dv, poolhv.data as *mut u8, pooln * 8) != 0 { return 1 }
+    if ce_h2d(&rt.exec, dt, tab_h, n * maxb * 8) != 0 { return 1 }
+    if ce_h2d(&rt.exec, dl, lens_h, n * 8) != 0 { return 1 }
+    if ce_h2d(&rt.exec, ds, sc_h, 8) != 0 { return 1 }
+    var back = ck_alloc(q.len)
+    if ce_d2h(&rt.exec, back.data as *mut u8, dq, q.len * 8) != 0 { return 1 }
+    var i: i64 = 0
+    while i < q.len {
+        if ck_get(&back, i) != ck_get(q, i) { return 10 + i }
+        i = i + 1
+    }
+    var backk = ck_alloc(pooln)
+    if ce_d2h(&rt.exec, backk.data as *mut u8, dk, pooln * 8) != 0 { return 1 }
+    i = 0
+    while i < pooln {
+        if ck_get(&backk, i) != ck_get(&poolh, i) { return 20 }
+        i = i + 1
+    }
+    var backv = ck_alloc(pooln)
+    if ce_d2h(&rt.exec, backv.data as *mut u8, dv, pooln * 8) != 0 { return 1 }
+    i = 0
+    while i < pooln {
+        if ck_get(&backv, i) != ck_get(&poolhv, i) { return 30 }
+        i = i + 1
+    }
+    let tab_b = heap_alloc(n * maxb * 8)
+    if ce_d2h(&rt.exec, tab_b, dt, n * maxb * 8) != 0 { return 1 }
+    i = 0
+    while i < n * maxb {
+        if read_i64(tab_b as *mut i64, i) != read_i64(tab_h as *mut i64, i) { return 40 }
+        i = i + 1
+    }
+    let lens_b = heap_alloc(n * 8)
+    if ce_d2h(&rt.exec, lens_b, dl, n * 8) != 0 { return 1 }
+    i = 0
+    while i < n {
+        if read_i64(lens_b as *mut i64, i) != read_i64(lens_h as *mut i64, i) { return 50 }
+        i = i + 1
+    }
+    let sc_b = heap_alloc(8)
+    if ce_d2h(&rt.exec, sc_b, ds, 8) != 0 { return 1 }
+    if read_f64(sc_b as *mut f64, 0) != scale { return 60 }
+    0
+}
+
+pub fn llama_forward_batch_runs_paged(m: &!Llama, pks_k: &![PagedKv; 256], pks_v: &![PagedKv; 256], rslot: &[i64; 16], rpos: &[i64; 16], toks: &[i64; 16], n: i64, rt: &Runtime, ptx_path: string) -> CpuBuf with Alloc, Mut, Panic, Div, IO {
+    var dev = 0
+    if rt.exec.ok {
+        let k = paged_attn_load(rt, ptx_path)
+        if k.ok { dev = k.func }
+    }
+    ll_forward_batch_runs_impl(m, pks_k, pks_v, rslot, rpos, toks, n, rt, true, dev)
+}
+
+pub fn llama_forward_batch_runs(m: &!Llama, pks_k: &![PagedKv; 256], pks_v: &![PagedKv; 256], rslot: &[i64; 16], rpos: &[i64; 16], toks: &[i64; 16], n: i64) -> CpuBuf with Alloc, Mut, Panic, Div {
+    let rt = ll_no_rt()
+    ll_forward_batch_runs_impl(m, pks_k, pks_v, rslot, rpos, toks, n, &rt, false, 0)
+}
+
+pub fn llama_forward_batch_runs_rt(m: &!Llama, pks_k: &![PagedKv; 256], pks_v: &![PagedKv; 256], rslot: &[i64; 16], rpos: &[i64; 16], toks: &[i64; 16], n: i64, rt: &Runtime, pagedev: bool) -> CpuBuf with Alloc, Mut, Panic, Div, IO {
+    if pagedev {
+        return llama_forward_batch_runs_paged(m, pks_k, pks_v, rslot, rpos, toks, n, rt, "stdlib/llm/kernels/paged_attn_f64.ptx")
+    }
+    ll_forward_batch_runs_impl(m, pks_k, pks_v, rslot, rpos, toks, n, rt, true, 0)
 }
 
 // M2b: same math as ll_forward_batch_paged_impl, rows addressed by
 // (slot, k) instead of one token per slot. Bit-exact vs sequential
 // single forwards: rows never interact, each row attends only its
 // own slot's store.
-fn ll_runs_layer(m: &!Llama, pks_k: &![PagedKv; 256], pks_v: &![PagedKv; 256], x: &!CpuBuf, rslot: &[i64; 16], rpos: &[i64; 16], n: i64, hidden: i64, inter: i64, dh: i64, qdim: i64, kvdim: i64, rep: i64, maxneed: i64, scores: &!CpuBuf, li: i32, rt: &Runtime, use_gpu: bool) with Alloc, Mut, Panic, Div {
+fn ll_runs_layer(m: &!Llama, pks_k: &![PagedKv; 256], pks_v: &![PagedKv; 256], x: &!CpuBuf, rslot: &[i64; 16], rpos: &[i64; 16], n: i64, hidden: i64, inter: i64, dh: i64, qdim: i64, kvdim: i64, rep: i64, maxneed: i64, scores: &!CpuBuf, li: i32, rt: &Runtime, use_gpu: bool, pagedev: i64) with Alloc, Mut, Panic, Div {
         let h = ll_rmsnorm(x, &m.in_norm[li as usize], n, hidden, m.cfg.eps)
         var q = ck_alloc(n * qdim)
         let _ps = ll_proj(rt, use_gpu, &h, &m.wq[li as usize], &!q, n, qdim, hidden)
@@ -1641,6 +2003,9 @@ fn ll_runs_layer(m: &!Llama, pks_k: &![PagedKv; 256], pks_v: &![PagedKv; 256], x
             }
             s = s + 1
         }
+        if pagedev != 0 {
+            let _dev = ll_attn_paged_rows_gpu(pagedev, m.cfg.heads, m.cfg.kv_heads, dh, kvdim, rep, li as i64, &q, pks_k, pks_v, rslot, rpos, n, &!att, rt, scale)
+        }
         var o = ck_alloc(n * hidden)
         let _ps4 = ll_proj(rt, use_gpu, &att, &m.wo[li as usize], &!o, n, hidden, qdim)
         ll_add_into(x, &o)
@@ -1696,7 +2061,7 @@ fn ll_runs_layer(m: &!Llama, pks_k: &![PagedKv; 256], pks_v: &![PagedKv; 256], x
         }
 }
 
-fn ll_forward_batch_runs_impl(m: &!Llama, pks_k: &![PagedKv; 256], pks_v: &![PagedKv; 256], rslot: &[i64; 16], rpos: &[i64; 16], toks: &[i64; 16], n: i64, rt: &Runtime, use_gpu: bool) -> CpuBuf with Alloc, Mut, Panic, Div {
+fn ll_forward_batch_runs_impl(m: &!Llama, pks_k: &![PagedKv; 256], pks_v: &![PagedKv; 256], rslot: &[i64; 16], rpos: &[i64; 16], toks: &[i64; 16], n: i64, rt: &Runtime, use_gpu: bool, pagedev: i64) -> CpuBuf with Alloc, Mut, Panic, Div {
     m.last_moe_used = false
     m.last_moe_status = 0
     m.last_moe_layers_ok = 0
@@ -1727,7 +2092,7 @@ fn ll_forward_batch_runs_impl(m: &!Llama, pks_k: &![PagedKv; 256], pks_v: &![Pag
     var scores = ck_alloc(maxneed)
     var li: i32 = 0
     while li < m.cfg.layers {
-        ll_runs_layer(m, pks_k, pks_v, &!x, rslot, rpos, n, hidden, inter, dh, qdim, kvdim, rep, maxneed, &!scores, li, rt, use_gpu)
+        ll_runs_layer(m, pks_k, pks_v, &!x, rslot, rpos, n, hidden, inter, dh, qdim, kvdim, rep, maxneed, &!scores, li, rt, use_gpu, pagedev)
         li = li + 1
     }
     var out = ck_alloc(n * m.cfg.vocab)

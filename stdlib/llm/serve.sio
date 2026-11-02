@@ -699,7 +699,7 @@ fn sv_turn(
     0
 }
 // Serve forever over one select pump. 0 exit ok, negative on setup.
-pub fn llm_serve(m: &!Llama, bp: &Bpe, port: i64, model_name: string, rt: &Runtime, use_gpu: bool, tpl_path: string) -> i64 with Alloc, Mut, Panic, Div, IO {
+pub fn llm_serve(m: &!Llama, bp: &Bpe, port: i64, model_name: string, rt: &Runtime, use_gpu: bool, pagedev: bool, tpl_path: string) -> i64 with Alloc, Mut, Panic, Div, IO {
     let lib = nw_open()
     if !lib.ok { return 0 - 1 }
     let srv = nw_listen(&lib, port)
@@ -836,7 +836,7 @@ pub fn llm_serve(m: &!Llama, bp: &Bpe, port: i64, model_name: string, rt: &Runti
         }
         if SV_PUMP == 1 {
             if bn > 0 {
-                sv_pump_turn(&lib, m, bp, rt, use_gpu, model_name, &!fd, &!st, &reqid, &prm, &!seed, &text, &!tlen, &!gen, &!ttfb, &!t0, &nids, &blist, bn, &chats, &chtols, &!psl, &!pkk, &!pkv, &!bank, &!pq)
+                sv_pump_turn(&lib, m, bp, rt, use_gpu, pagedev, model_name, &!fd, &!st, &reqid, &prm, &!seed, &text, &!tlen, &!gen, &!ttfb, &!t0, &nids, &blist, bn, &chats, &chtols, &!psl, &!pkk, &!pkv, &!bank, &!pq)
             }
         } else if bn == 1 {
             let s0 = blist[0]
@@ -1012,7 +1012,7 @@ fn sv_turn_batch(
 // tokens and frees finished slots. finish/close/receipt match the
 // sv_turn_batch contract.
 fn sv_pump_turn(
-    lib: &NwLib, m: &!Llama, bp: &Bpe, rt: &Runtime, use_gpu: bool,
+    lib: &NwLib, m: &!Llama, bp: &Bpe, rt: &Runtime, use_gpu: bool, pagedev: bool,
     model: string, fds: &![i64; 4], sts: &![i64; 4],
     reqids: &[i64; 4], prms: &[CpuBuf; 4], seeds: &![CpuBuf; 4],
     texts: &[*mut u8; 4], tlens: &![i64; 4], gens: &![i64; 4],
@@ -1030,7 +1030,7 @@ fn sv_pump_turn(
     var meta: [i64; 4] = [0; 4]
     var pdone: [i64; 4] = [0; 4]
     let vocab = m.cfg.vocab
-    let out = svb_pump_fwd(m, pkk, pkv, psl, bank, q, rt, use_gpu, SVB_CHUNK, &!rslot, &!rpos, &!toks, &!kind, &!rowtok, &!seedrow, &!meta)
+    let out = svb_pump_fwd(m, pkk, pkv, psl, bank, q, rt, use_gpu, pagedev, SVB_CHUNK, &!rslot, &!rpos, &!toks, &!kind, &!rowtok, &!seedrow, &!meta)
     let rn = meta[0]
     let tbuf = heap_alloc(8192)
     var r: i64 = 0
@@ -1476,7 +1476,7 @@ fn svb_sample_rows(out: &CpuBuf, rslot: &[i64; 16], kind: &[i64; 16], rowtok: &!
 // (meta[0] row count, meta[1] queue count). The caller samples the
 // emitting rows (seed rows plus decode rows) and applies them with
 // svb_pump_adv. Returns stacked row logits.
-pub fn svb_pump_fwd(m: &!Llama, pks_k: &![PagedKv; 256], pks_v: &![PagedKv; 256], slots: &![SvSlot; 4], bank: &[i64; 16384], q: &!SvQueue, rt: &Runtime, use_gpu: bool, chunk: i64, rslot: &![i64; 16], rpos: &![i64; 16], toks: &![i64; 16], kind: &![i64; 16], rowtok: &![i64; 16], seedrow: &![i64; 4], meta: &![i64; 4]) -> CpuBuf with Alloc, Mut, Panic, Div {
+pub fn svb_pump_fwd(m: &!Llama, pks_k: &![PagedKv; 256], pks_v: &![PagedKv; 256], slots: &![SvSlot; 4], bank: &[i64; 16384], q: &!SvQueue, rt: &Runtime, use_gpu: bool, pagedev: bool, chunk: i64, rslot: &![i64; 16], rpos: &![i64; 16], toks: &![i64; 16], kind: &![i64; 16], rowtok: &![i64; 16], seedrow: &![i64; 4], meta: &![i64; 4]) -> CpuBuf with Alloc, Mut, Panic, Div, IO {
     svb_admit_all(slots, q)
     let n = svb_build_rows(slots, bank, chunk, rslot, rpos, toks, kind, rowtok, seedrow)
     meta[0] = n
@@ -1488,7 +1488,7 @@ pub fn svb_pump_fwd(m: &!Llama, pks_k: &![PagedKv; 256], pks_v: &![PagedKv; 256]
     }
     var out = ck_alloc(1)
     if use_gpu && rt.ready {
-        out = llama_forward_batch_runs_rt(m, pks_k, pks_v, rslot, rpos, toks, n, rt)
+        out = llama_forward_batch_runs_rt(m, pks_k, pks_v, rslot, rpos, toks, n, rt, pagedev)
     } else {
         out = llama_forward_batch_runs(m, pks_k, pks_v, rslot, rpos, toks, n)
     }
@@ -1538,9 +1538,9 @@ pub fn svb_pump_adv(slots: &![SvSlot; 4], pks_k: &![PagedKv; 256], pks_v: &![Pag
 // token per row (rowtok, -1 when a prefill row seeds nothing) and
 // meta (meta[0] row count, meta[1] queue count, meta[2] finished).
 // Returns stacked row logits.
-pub fn svb_pump(m: &!Llama, pks_k: &![PagedKv; 256], pks_v: &![PagedKv; 256], slots: &![SvSlot; 4], bank: &[i64; 16384], q: &!SvQueue, rt: &Runtime, use_gpu: bool, chunk: i64, rslot: &![i64; 16], rpos: &![i64; 16], toks: &![i64; 16], kind: &![i64; 16], rowtok: &![i64; 16], meta: &![i64; 4]) -> CpuBuf with Alloc, Mut, Panic, Div {
+pub fn svb_pump(m: &!Llama, pks_k: &![PagedKv; 256], pks_v: &![PagedKv; 256], slots: &![SvSlot; 4], bank: &[i64; 16384], q: &!SvQueue, rt: &Runtime, use_gpu: bool, pagedev: bool, chunk: i64, rslot: &![i64; 16], rpos: &![i64; 16], toks: &![i64; 16], kind: &![i64; 16], rowtok: &![i64; 16], meta: &![i64; 4]) -> CpuBuf with Alloc, Mut, Panic, Div, IO {
     var seedrow: [i64; 4] = [0 - 1; 4]
-    let out = svb_pump_fwd(m, pks_k, pks_v, slots, bank, q, rt, use_gpu, chunk, rslot, rpos, toks, kind, rowtok, &!seedrow, meta)
+    let out = svb_pump_fwd(m, pks_k, pks_v, slots, bank, q, rt, use_gpu, pagedev, chunk, rslot, rpos, toks, kind, rowtok, &!seedrow, meta)
     let n = meta[0]
     if n <= 0 {
         return out
