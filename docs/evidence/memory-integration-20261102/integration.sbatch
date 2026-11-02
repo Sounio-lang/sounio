@@ -60,6 +60,13 @@ rc=$?
 set -e
 test "$rc" -eq 6
 echo MALFORMED_CASE_REJECTED
+sed '/^CASE 13 256 store /s/$/ 999999999999999999999999999999/' "$run/emitter.log" > "$run/terminal-overflow.log"
+set +e
+"$run/encoding-check" docs/evidence/memory-contract-20261102/oracle.txt "$run/terminal-overflow.log" bytes
+rc=$?
+set -e
+test "$rc" -eq 6
+echo TERMINAL_OVERFLOW_REJECTED
 sed '/^    \/\/ RSP\/R12 select/,+3d' self-hosted/native/avx512.sio > "$run/sib-mutant.sio"
 cat docs/evidence/memory-contract-20261102/probe-main.sio >> "$run/sib-mutant.sio"
 timeout 90 "$seed" "$run/sib-mutant.sio" "$run/sib-mutant.elf" > "$run/sib-mutant-build.log" 2>&1

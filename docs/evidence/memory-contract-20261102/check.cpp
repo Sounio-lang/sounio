@@ -23,8 +23,13 @@ int main(int argc,char**argv){
   constexpr std::array bases{2,3,4,5,12,13};
   constexpr std::array displacements{-256,1,256};
   if(base!=bases[cases/6]||disp!=displacements[(cases/2)%3]||op!=(cases%2?"store":"load"))return 6;
-  Bytes b;while(in>>value){if(value<0||value>255)return 6;b.push_back(static_cast<unsigned char>(value));}
-  if(!in.eof())return 6;
+  Bytes b;
+  for(;;){
+   in>>std::ws;
+   if(in.eof())break;
+   if(!(in>>value)||value<0||value>255)return 6;
+   b.push_back(static_cast<unsigned char>(value));
+  }
   if(cases>=refs.size()||b.size()!=static_cast<std::size_t>(len)||b!=refs[cases]){std::cout<<"ENCODING_MISMATCH base="<<base<<" disp="<<disp<<" op="<<op<<" bytes="<<b.size()<<"\n";++bad;++cases;continue;}++cases;
   if(!execute)continue;
   alignas(64) std::array<unsigned char,8192> src{},dst{},expected{};

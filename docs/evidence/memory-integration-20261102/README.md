@@ -43,3 +43,7 @@ The generated prebuilt may be materialized by the launcher for provenance compar
 GitHub CI is tracked in PR3413 separately. This receipt does not claim completion of every GitHub job or the full manual test suite.
 
 Main branch rules were checked live: required CI Decision, merge queue, no required approving-review count, and resolved review threads. Integration follows the normal queue without an administrative bypass.
+
+## Final checker review correction
+
+The final primary review found that checking eof() after integer extraction could accept an overflowing extra integer at the end of a case line. The reader now consumes whitespace before deciding that a line is finished and treats every failed integer extraction as malformed input. Slurm21247 COMPLETED0:0 demonstrates the old checker falsely accepting the terminal-overflow fixture, the corrected checker returning6, the ordinary malformed fixture returning6, and all36 independent-byte/native cases still passing. No compiler source or compiled compiler artifact changed. The integration script retains this negative control. Auto-merge was temporarily disabled while this fix was prepared and is re-enabled for the corrected head.
