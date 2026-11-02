@@ -407,7 +407,13 @@ fn impure_function() -> string with IO {
 }
 ```
 
-Effects compose and propagate through the call graph automatically.
+Named functions must declare the effects of their callees explicitly with
+`with`. A function that calls `impure_function()` also needs `with IO`; otherwise
+the checker reports E035 ("effect not declared in function signature"). The
+automatic inference surface is narrow: closure bodies infer their effects for
+the enclosing named function, and cross-function inference is an opt-in
+diagnostic mode behind `SOUNIO_EFFECT_INFER=1`, not the default language
+behaviour.
 
 ### What's the type inference algorithm?
 
@@ -418,19 +424,11 @@ Effects compose and propagate through the call graph automatically.
 
 ### Can I write custom effects?
 
-Yes (advanced feature):
-```sio
-effect State<S> {
-    fn get() -> S
-    fn put(s: S) -> ()
-}
-
-fn stateful_computation() -> i32 with State<i32> {
-    let x = do State.get()
-    do State.put(x + 1)
-    x
-}
-```
+Not in the checked public artifacts yet. The parser accepts effect declarations
+as syntax, but user-defined effects are not a supported end-to-end feature in
+the default compiler path. Today, write explicit `with` clauses using the
+implemented effect names and treat custom effect examples as design intent rather
+than runnable code.
 
 ### Are refinement types fully supported?
 

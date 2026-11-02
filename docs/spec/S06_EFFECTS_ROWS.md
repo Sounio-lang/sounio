@@ -79,7 +79,7 @@ caller anywhere, internal or external.
 with the comment *"Confidence is an alias of Epistemic (id 8). Not a new
 variant."*
 
-### 6.1.0 CORRECTION — thirty names, twenty-nine ids, and this is not a row
+### 6.1.0 CORRECTION — thirty-one names, thirty ids, and this is not a row
 
 Raised by an independent review of this section on 2026-08-20 (fable-1, consulted
 for disagreement rather than agreement). Four criticisms; three land.
@@ -87,11 +87,11 @@ for disagreement rather than agreement). Four criticisms; three land.
 **The count. §6.1 says 23 names. It is stale.** Derivation, from
 `self-hosted/check/effects.sio`:
 
-    fn effect_named_id_max() -> i64 { 28 }
+    fn effect_named_id_max() -> i64 { 29 }
 
-so ids run `0..=28` — **29 named effects** — and `effect_name_to_id` opens with a
+so ids run `0..=29` — **30 named effects** — and `effect_name_to_id` opens with a
 hardcoded alias, *"Confidence is an alias of Epistemic (id 8). Not a new
-variant."* That is **30 names over 29 identities**, and it matches the closed-list
+variant."* That is **31 names over 30 identities**, and it matches the closed-list
 gate (`scripts/ci/effect_name_closed_list_gate.sh`) exactly. The two numbers were
 never in conflict about the world; this document was simply behind the table.
 
@@ -156,9 +156,9 @@ uses. Maximum arity measured is **6**, so the eight-slot cap does not bite today
 So four fifths of all effect declarations are propagated up the call graph,
 consume slots against the cap, and are read by nothing. That is the measured
 shape of 6.6's "set or row" question, and it is why 6.6 now carries a third
-option., and the ninth is dropped in silence
+option.
 
-`self-hosted/check/check.sio:285` declares
+`self-hosted/check/check.sio:347` declares
 
     current_effects: [i64; 8],
 
