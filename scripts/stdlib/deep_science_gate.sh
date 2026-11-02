@@ -73,7 +73,8 @@ resolve_jobs() {
     [[ "$memory_bytes" =~ ^[1-9][0-9]*$ ]] || memory_bytes=$((4 * 1024 * 1024 * 1024))
     memory_jobs=$((memory_bytes / (4 * 1024 * 1024 * 1024)))
     (( memory_jobs > 0 )) || memory_jobs=1
-    jobs=2
+    # Use available CPUs within the existing four-GiB-per-worker budget.
+    jobs="$cpus"
     (( jobs > cpus )) && jobs="$cpus"
     (( jobs > memory_jobs )) && jobs="$memory_jobs"
     printf '%s\n' "$jobs"
@@ -194,16 +195,65 @@ compile_cpp() {
     record cpp-compile "$src" "$rc"
 }
 
+# CPP_POOL_BEGIN: orchestration-only selftest extracts this bounded queue.
+CPP_SOURCES=()
+CPP_NAMES=()
+CPP_EXTRAS=()
+queue_cpp() {
+    CPP_SOURCES+=("$1")
+    CPP_NAMES+=("$2")
+    CPP_EXTRAS+=("$3")
+}
+cpp_worker() {
+    local src="$1" name="$2" extra="$3" idx="$4" rc=0 tmp
+    fail=0
+    compile_cpp "$src" "$name" "$extra" || rc=$?
+    [[ "$fail" == 0 ]] || rc=1
+    tmp="$(mktemp "$out/.cpp-status.XXXXXX")" || exit 65
+    printf '%s\n' "$rc" > "$tmp" || exit 65
+    mv -- "$tmp" "$out/cpp.$idx.status" || exit 65
+    return "$rc"
+}
+run_cpp_batch() {
+    local active=0 idx worker_rc
+    printf '[deep-science] cpp workers=%s references=%s\n' "$jobs" "${#CPP_SOURCES[@]}"
+    for ((idx=0; idx<${#CPP_SOURCES[@]}; idx++)); do
+        cpp_worker "${CPP_SOURCES[$idx]}" "${CPP_NAMES[$idx]}" "${CPP_EXTRAS[$idx]}" "$idx" &
+        active=$((active + 1))
+        if (( active >= jobs )); then
+            wait -n || true
+            active=$((active - 1))
+        fi
+    done
+    while (( active > 0 )); do
+        wait -n || true
+        active=$((active - 1))
+    done
+    for ((idx=0; idx<${#CPP_SOURCES[@]}; idx++)); do
+        worker_rc=""
+        if [[ -f "$out/cpp.$idx.status" ]]; then
+            IFS= read -r worker_rc < "$out/cpp.$idx.status" || worker_rc=""
+        fi
+        if [[ "$worker_rc" != 0 ]]; then
+            # A child can lose shell globals or exit before recording a row.
+            # Missing/malformed status must therefore fail in the parent too.
+            record cpp-worker "${CPP_SOURCES[$idx]}:failed-or-missing-status" 1
+        fi
+    done
+}
+# CPP_POOL_END
+
 # Build every independent oracle before starting native fixture work or comparisons.
 for src in tests/reference/deep_*.cpp; do
-    compile_cpp "$src" "$(basename "$src" .cpp)" "-lquadmath"
+    queue_cpp "$src" "$(basename "$src" .cpp)" "-lquadmath"
 done
 for stem in count_dispersion_increment_reference count_profile_lr_fixed_reference \
     count_profile_lr_v10_reference count_likelihood_difference_reference; do
-    compile_cpp "tests/reference/$stem.cpp" "$stem" "-lquadmath"
+    queue_cpp "tests/reference/$stem.cpp" "$stem" "-lquadmath"
 done
-compile_cpp tests/reference/display_font_orientation_reference.cpp display_font_orientation_reference ""
-compile_cpp tests/reference/normalization_into_reference.cpp normalization_into_reference ""
+queue_cpp tests/reference/display_font_orientation_reference.cpp display_font_orientation_reference ""
+queue_cpp tests/reference/normalization_into_reference.cpp normalization_into_reference ""
+run_cpp_batch
 for src in tests/compile-fail/stdlib_deep_*.sio; do
     name=$(basename "$src" .sio); rc=0
     timeout 120 bin/souc check "$src" > "$out/$name.check.txt" 2>&1 || rc=$?

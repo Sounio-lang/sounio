@@ -297,3 +297,16 @@ The workflow-reference ratchet runs there before compilation; its existing
 Contracts Core invocation is kept for in-job receipts. The SCO reuse selftest
 is named directly in Fast Checks, satisfying the direct-reference ratchet without
 relaxing its frozen bound.
+
+### Science queue follow-up
+
+Run 41472572619 passed and its core/integration result union matched the prior
+full replay exactly (excluding duplicated per-job hash audit rows). Total time
+was 1774 seconds, so removal of duplicate builds alone did not reduce the
+observed end-to-end latency. Core replay took 183 seconds in preparation,
+358 in the native queue and 397 in the oracle queue. The next candidate
+prepares C++ references concurrently and removes the extra fixed two-worker
+ceiling, retaining CPU bounds, the existing four-GiB-per-worker budget and
+explicit STDLIB_DEEP_JOBS overrides. Scientific case bodies and compiler flags
+remain unchanged; missing, malformed or failing CPP worker statuses fail the
+parent. Hosted execution and another exact result-row comparison are required.
