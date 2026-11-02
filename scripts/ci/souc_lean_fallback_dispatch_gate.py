@@ -19,6 +19,14 @@
 #      a NATIVE ELF under OUT where the public `souc --help` contract promises a
 #      GPU (PTX) artifact — the wrong artifact type reporting success (PR #3400
 #      review handoff, 2026-11-01).
+#   3. The same loop's `*) shift` arm also dropped `--target`/`--target=...`
+#      and the short `-t` alias, so `souc build prog.sio --target wasm32 -o
+#      OUT` (a docs/FAQ.md form) or the FPGA flow's `souc compile ... -t
+#      fpga-u250 -o OUT.cpp` exited 0 with a native ELF under OUT (PR #3400
+#      review, 2026-11-02).
+#      lean_single's raw CLI accepts even bogus targets and still emits a
+#      native ELF, so the wrapper refuses every target except the native
+#      x86_64-linux it actually produces — it does NOT pass selectors through.
 #
 # Both defects are silent successes: nothing complained, and the measurement or
 # the filesystem then told a lie. This gate exists because no committed test
@@ -100,6 +108,13 @@ def scrubbed_env(extra=None):
         "MADAROS_RAW_BIN",
         "SOUNIO_MADAROS_BIN",
         "SOUNIO_REQUIRE_COMMITTED_MADAROS",
+        # An inherited SOUNIO_SOUC_ENGINE=lean_single would silently turn every
+        # purported automatic-fallback case into a forced-engine case and then
+        # fail the Madaros controls even when the dispatch is correct (PR #3400
+        # review, 2026-11-02). The forced cases below restore it explicitly
+        # through extra_env, so the automatic cases are automatic regardless of
+        # the environment this gate is invoked from.
+        "SOUNIO_SOUC_ENGINE",
     ):
         env.pop(var, None)
     env["SOUNIO_STDLIB_PATH"] = os.path.join(ROOT, "stdlib")
@@ -213,15 +228,24 @@ def main():
         refusal_case("fallback", fake_souc, work, "backend-llvm", ["compile", "prog.sio", "--backend", "llvm", "-o", "x.out"], "x.out", "--backend llvm")
         refusal_case("fallback", fake_souc, work, "gpu-target", ["build", "prog.sio", "--gpu-target", "dgx-sm121", "-o", "g.ptx"], "g.ptx", "--gpu-target")
         refusal_case("fallback", fake_souc, work, "backend-missing-value", ["build", "prog.sio", "--backend"], "prog.sio.x", "--backend")
+        refusal_case("fallback", fake_souc, work, "target-wasm32", ["build", "prog.sio", "--target", "wasm32", "-o", "out.wasm"], "out.wasm", "--target wasm32")
+        refusal_case("fallback", fake_souc, work, "target-equals-aarch64", ["build", "prog.sio", "--target=aarch64-linux", "-o", "a64.elf"], "a64.elf", "--target aarch64-linux")
+        refusal_case("fallback", fake_souc, work, "target-missing-value", ["build", "prog.sio", "--target"], "prog.sio.x", "--target")
+        refusal_case("fallback", fake_souc, work, "target-short-fpga", ["build", "prog.sio", "-t", "fpga-u250", "-o", "san.cpp"], "san.cpp", "--target fpga-u250")
         acceptance_case("fallback", fake_souc, work, "backend-native", ["--backend", "native"])
         acceptance_case("fallback", fake_souc, work, "backend-native-equals", ["--backend=native"])
+        acceptance_case("fallback", fake_souc, work, "target-native", ["--target", "x86_64-linux"])
+        acceptance_case("fallback", fake_souc, work, "target-native-equals", ["--target=x86_64-linux"])
+        acceptance_case("fallback", fake_souc, work, "target-native-short", ["-t", "x86_64-linux"])
 
         print("[fallback-dispatch] forced legacy engine:")
         forced = {"SOUNIO_SOUC_ENGINE": "lean_single"}
         verb_case("forced", fake_souc, work, "forced-run", "run", forced)
         verb_case("forced", fake_souc, work, "forced-build", "build", forced)
         refusal_case("forced", fake_souc, work, "forced-backend-gpu", ["build", "prog.sio", "--backend", "gpu", "-o", "gpu.ptx"], "gpu.ptx", "--backend gpu", forced)
+        refusal_case("forced", fake_souc, work, "forced-target-hls", ["build", "prog.sio", "--target", "hls", "-o", "out.cpp"], "out.cpp", "--target hls", forced)
         acceptance_case("forced", fake_souc, work, "forced-backend-native", ["--backend", "native"], forced)
+        acceptance_case("forced", fake_souc, work, "forced-target-native", ["--target", "x86_64-linux"], forced)
 
     # The default Madaros path must be untouched by the lean-side refusal.
     print("[fallback-dispatch] default Madaros path unaffected:")
