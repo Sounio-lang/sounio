@@ -242,8 +242,15 @@ a derived test (`tests/run-pass/fx{1,2,2b,3,4,5,6,9}_*.sio`,
 prints `handler: PASS` for the reason its name claims.
 
 v1 limits (named compile-time refusals, never silent miscompiles): scalar
-i64 ops and answers only (no f64), perform only in the handled body of the
-same function, no captured locals in clauses, at most 5 perform arguments.
+i64 ops and answers only (no f64, no string: E299), perform only in the
+handled body of the same function, no captured locals in clauses, at most
+5 perform arguments, at most 12 clauses per handle, handler nesting depth
+at most 8 (E299). All caps fail closed at compile time; none may silently
+drop a clause, a perform record, or a frame (review round on PR #3371:
+record table deduplicates per (frame, op) and refuses past 64 distinct
+performed ops per function region, clause keys colliding under the name
+hash are refused at lowering, and the runtime scratch/drive-top slots
+live at frame words 59/60, above the 12-clause table at words 15..50).
 
 Implementation note (regression guard): the fx lowering methods in
 `self-hosted/ir/lower.sio` must stay inside the existing `impl Lowerer`

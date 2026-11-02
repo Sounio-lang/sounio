@@ -8499,7 +8499,15 @@ fn fx_has_live_linear(c: *mut Checker) -> bool with Mut, Panic, Div {
     var i: i64 = 0
     while i < (*c).env.count {
         if checker_is_linear_type_inplace(c, (*c).env.bindings[i as usize].ty) {
-            return true
+            // A binding already consumed (moved) is not live at the perform.
+            var consumed = false
+            var j: i64 = 0
+            while j < (*c).borrows.count {
+                let be = (*c).borrows.entries[j as usize]
+                if be.is_linear && be.consumed && name_eq(be.name, (*c).env.bindings[i as usize].name) { consumed = true }
+                j = j + 1
+            }
+            if !consumed { return true }
         }
         i = i + 1
     }
@@ -8552,9 +8560,20 @@ fn checker_check_perform_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry wit
     while d >= 0 {
         if (*c).fx_frame_eff[d as usize] == eff_id {
             if (*c).fx_perf_count < 64 {
-                (*c).fx_perf_ops[(*c).fx_perf_count as usize] = op_idx
-                (*c).fx_perf_owner[(*c).fx_perf_count as usize] = d
-                (*c).fx_perf_count = (*c).fx_perf_count + 1
+                var dup_rec = false
+                var di: i64 = 0
+                while di < (*c).fx_perf_count {
+                    if (*c).fx_perf_owner[di as usize] == d && (*c).fx_perf_ops[di as usize] == op_idx { dup_rec = true }
+                    di = di + 1
+                }
+                if !dup_rec {
+                    (*c).fx_perf_ops[(*c).fx_perf_count as usize] = op_idx
+                    (*c).fx_perf_owner[(*c).fx_perf_count as usize] = d
+                    (*c).fx_perf_count = (*c).fx_perf_count + 1
+                }
+            } else {
+                // Fail closed: an unrecorded perform would escape FX-8.
+                checker_report_error_at_inplace(c, e.span, 299, 0, 0, 0)
             }
             d = 0 - 1
         } else {
@@ -8562,6 +8581,9 @@ fn checker_check_perform_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry wit
         }
     }
     let fx_op_entry = (*c).effect_ops.entries[op_idx as usize]
+    if fx_op_entry.ret_ty.kind == TypeKind::TyF64 || fx_op_entry.ret_ty.kind == TypeKind::TyF32 || fx_op_entry.ret_ty.kind == TypeKind::TyString {
+        checker_report_error_at_inplace(c, e.span, 299, 0, 0, 0)
+    }
     fx_op_entry.ret_ty
 }
 
@@ -8615,6 +8637,31 @@ fn fx_uses_stmts(l: &Option<Box<StmtList> >) -> i64 with Mut, Panic, Div, Alloc 
     }
 }
 
+fn fx_uses_fields(l: &Option<Box<StructFieldList> >) -> i64 with Mut, Panic, Div, Alloc {
+    match *l {
+        Some(node) => fx_sat2(fx_uses_expr(&(*node).head.value) + fx_uses_fields(&(*node).tail))
+        None => 0
+    }
+}
+
+fn fx_uses_clause_list(l: &Option<Box<HandlerClauseList> >) -> i64 with Mut, Panic, Div, Alloc {
+    match *l {
+        Some(node) => {
+            var n = 0
+            match (*node).head.body_block {
+                Some(b) => { n = fx_uses_block(&(*b)) }
+                None => {}
+            }
+            match (*node).head.body_expr {
+                Some(x) => { n = n + fx_uses_expr(&(*x)) }
+                None => {}
+            }
+            fx_sat2(n + fx_uses_clause_list(&(*node).tail))
+        }
+        None => 0
+    }
+}
+
 fn fx_uses_children(e: &Expr) -> i64 with Mut, Panic, Div, Alloc {
     var n: i64 = 0
     n = n + fx_uses_opt(&(*e).left)
@@ -8629,6 +8676,12 @@ fn fx_uses_children(e: &Expr) -> i64 with Mut, Panic, Div, Alloc {
         None => {}
     }
     n = n + fx_uses_list(&(*e).args)
+    n = n + fx_uses_fields(&(*e).fields)
+    let hcl_all = &(*e).handler_clauses
+    match *hcl_all {
+        Some(_) => { n = n + fx_uses_clause_list(hcl_all) }
+        None => {}
+    }
     match (*e).closure_body {
         Some(x) => { n = n + fx_uses_expr(&(*x)) }
         None => {}
@@ -8663,22 +8716,25 @@ fn fx_uses_expr(e: &Expr) -> i64 with Mut, Panic, Div, Alloc {
     if k == ExprKind::ExprMatch {
         var m = fx_uses_opt(&(*e).left)
         var best: i64 = 0
+        var gsum: i64 = 0
         var arms = (*e).arms
         while true {
             match arms {
                 Some(an) => {
-                    var u = fx_uses_expr(&(*an).head.body)
+                    // Guards run sequentially until one matches, so guard
+                    // uses accumulate across arms; only one body runs.
                     match (*an).head.guard {
-                        Some(g) => { u = u + fx_uses_expr(&(*g)) }
+                        Some(g) => { gsum = fx_sat2(gsum + fx_uses_expr(&(*g))) }
                         None => {}
                     }
+                    let u = fx_uses_expr(&(*an).head.body)
                     if u > best { best = u }
                     arms = (*an).tail
                 }
                 None => { break }
             }
         }
-        return fx_sat2(n + m + best)
+        return fx_sat2(n + m + gsum + best)
     }
     fx_sat2(n + fx_uses_children(e))
 }
@@ -8754,7 +8810,7 @@ fn fx_check_one_clause_inplace(c: *mut Checker, cl: HandlerClause, answer_ty: Ty
     result
 }
 
-fn fx_check_clauses_inplace(c: *mut Checker, e: Expr, eff_id: i64, slot: i64, body_ty: TypeEntry) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+fn fx_check_clauses_inplace(c: *mut Checker, e: Expr, eff_id: i64, slot: i64, body_ty: TypeEntry, base: i64) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     // The return clause (FX-6) fixes the answer type when present.
     var answer_ty = body_ty
     var cl = e.handler_clauses
@@ -8828,9 +8884,11 @@ fn fx_check_clauses_inplace(c: *mut Checker, e: Expr, eff_id: i64, slot: i64, bo
             None => { break }
         }
     }
-    // FX-8 exhaustivity for ops recorded against this frame.
+    // FX-8 exhaustivity for ops recorded against this frame. Only the
+    // range appended by this handle is scanned: slot indices are reused
+    // by later frames, so older records with the same owner are not ours.
     if slot >= 0 && !has_catchall {
-        var i: i64 = 0
+        var i: i64 = base
         while i < (*c).fx_perf_count {
             if (*c).fx_perf_owner[i as usize] == slot {
                 let need = (*c).fx_perf_ops[i as usize]
@@ -8865,29 +8923,56 @@ fn checker_check_handle_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with
     }
     var slot: i64 = 0 - 1
     let base = (*c).fx_perf_count
-    if eff_id >= 0 && (*c).fx_depth < 8 {
-        slot = (*c).fx_depth
-        (*c).fx_frame_eff[slot as usize] = eff_id
-        (*c).fx_depth = (*c).fx_depth + 1
+    let saved_sig = (*c).current_sig_id
+    if eff_id >= 0 {
+        if (*c).fx_depth < 8 {
+            slot = (*c).fx_depth
+            (*c).fx_frame_eff[slot as usize] = eff_id
+            (*c).fx_depth = (*c).fx_depth + 1
+        } else {
+            checker_report_error_at_inplace(c, e.span, 299, 0, 0, 0)
+        }
     }
     let body_ty = checker_check_opt_block_inplace(c, e.block)
-    (*c).current_sig_id = 0 - 1
+    if body_ty.kind == TypeKind::TyF64 || body_ty.kind == TypeKind::TyF32 || body_ty.kind == TypeKind::TyString {
+        checker_report_error_at_inplace(c, e.span, 299, 0, 0, 0)
+    }
+    (*c).current_sig_id = saved_sig
     (*c).current_effects = saved_effects
     (*c).current_effect_count = saved_count
     if slot >= 0 { (*c).fx_depth = (*c).fx_depth - 1 }
     if eff_id < 0 { return body_ty }
     var result = body_ty
     match e.handler_clauses {
-        Some(_) => { result = fx_check_clauses_inplace(c, e, eff_id, slot, body_ty) }
+        Some(_) => { result = fx_check_clauses_inplace(c, e, eff_id, slot, body_ty, base) }
         None => {
             // Legacy ASTs: with-block checked as plain statements.
             match e.handler_block {
                 Some(hb) => { result = checker_check_block_inplace(c, *hb) }
                 None => {}
             }
+            if slot >= 0 {
+                var ri: i64 = base
+                while ri < (*c).fx_perf_count {
+                    if (*c).fx_perf_owner[ri as usize] == slot {
+                        checker_report_error_at_inplace(c, e.span, 295, 0, 0, 0)
+                    }
+                    ri = ri + 1
+                }
+            }
         }
     }
-    (*c).fx_perf_count = base
+    var w: i64 = base
+    var r: i64 = base
+    while r < (*c).fx_perf_count {
+        if (*c).fx_perf_owner[r as usize] != slot {
+            (*c).fx_perf_ops[w as usize] = (*c).fx_perf_ops[r as usize]
+            (*c).fx_perf_owner[w as usize] = (*c).fx_perf_owner[r as usize]
+            w = w + 1
+        }
+        r = r + 1
+    }
+    (*c).fx_perf_count = w
     result
 }
 // *mut ExprRange handler: checks both endpoints in place (returns only TypeEntry),
@@ -20802,6 +20887,7 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 296 { print("duplicate clause for operation") }
     else if code == 297 { print("operation argument count mismatch") }
     else if code == 298 { print("perform with live linear bindings (a non-resuming handler would drop them)") }
+    else if code == 299 { print("handler backend v1 limit exceeded (results and operation values are i64 words; handler nesting depth at most 8)") }
     else if code == 269 { print("a `where` refinement on Knowledge<T> is not enforced by this compiler yet: the predicate would be silently ignored, so it is refused") }
     else if code == 270 { print("`as string` does not convert a number, bool or char to text: no engine formats the value, so the cast is refused") }
     else if code == 263 { print("qualified call is ambiguous: this qualifier names a module you `use`d, but also collides with an unrelated struct/enum method of the same name, and the compiler cannot yet guarantee which one runs") }

@@ -4588,7 +4588,7 @@ fn emit_fx_return_to_host(nc: &! NativeCompiler) with Mut, Panic, Div {
     nc_emit_mov_rax_imm(nc, 11)
     nc_emit_syscall(nc)
     nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x8b); nc_emit_byte(nc, 0xbb)
-    nc_emit_byte(nc, 0x38); nc_emit_byte(nc, 0x01); nc_emit_byte(nc, 0x00); nc_emit_byte(nc, 0x00)  // mov rdi, [rbx+312] (drive top)
+    nc_emit_byte(nc, 0xe0); nc_emit_byte(nc, 0x01); nc_emit_byte(nc, 0x00); nc_emit_byte(nc, 0x00)  // mov rdi, [rbx+480] (drive top)
     nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x81); nc_emit_byte(nc, 0xef)
     nc_emit_byte(nc, 0x00); nc_emit_byte(nc, 0x00); nc_emit_byte(nc, 0x04); nc_emit_byte(nc, 0x00)  // sub rdi, 256K
     nc_emit_mov_reg_imm(nc, 6, 262144)                                        // rsi = len
@@ -4689,7 +4689,7 @@ fn emit_builtin_fx_install_into(nc: &! NativeCompiler) with Mut, Panic, Div {
     nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x89); nc_emit_byte(nc, 0xfb)    // mov rbx, rdi
     nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x8b); nc_emit_byte(nc, 0x43); nc_emit_byte(nc, 0x30)  // mov rax, [rbx+48] (install_ip slot doubles as save)
     nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x89); nc_emit_byte(nc, 0x83)
-    nc_emit_byte(nc, 0x30); nc_emit_byte(nc, 0x01); nc_emit_byte(nc, 0x00); nc_emit_byte(nc, 0x00)  // mov [rbx+304], rax (scratch)
+    nc_emit_byte(nc, 0xd8); nc_emit_byte(nc, 0x01); nc_emit_byte(nc, 0x00); nc_emit_byte(nc, 0x00)  // mov [rbx+472], rax (scratch, word 59)
     nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x8b); nc_emit_byte(nc, 0x44); nc_emit_byte(nc, 0x24); nc_emit_byte(nc, 0x30)  // mov rax, [rsp+48] (host retaddr)
     nc_emit_store_rax_mem_rbx_disp32(nc, 40)                                  // install_ip
     nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x8d); nc_emit_byte(nc, 0x44); nc_emit_byte(nc, 0x24); nc_emit_byte(nc, 0x38)  // lea rax, [rsp+56]
@@ -4741,15 +4741,18 @@ fn emit_builtin_fx_install_into(nc: &! NativeCompiler) with Mut, Panic, Div {
     nc_emit_byte(nc, 0x4d); nc_emit_byte(nc, 0x31); nc_emit_byte(nc, 0xc9)    // xor r9, r9
     nc_emit_mov_rax_imm(nc, 9)
     nc_emit_syscall(nc)
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x85); nc_emit_byte(nc, 0xc0)    // test rax, rax
+    let js2_patch = (*nc).code.len + 2
+    nc_emit_byte(nc, 0x0f); nc_emit_byte(nc, 0x88); nc_emit_u32_le(nc, 0)     // js trap
     nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x05)
     nc_emit_byte(nc, 0x00); nc_emit_byte(nc, 0x00); nc_emit_byte(nc, 0x04); nc_emit_byte(nc, 0x00)  // add rax, 256K
     nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x89); nc_emit_byte(nc, 0x83)
-    nc_emit_byte(nc, 0x38); nc_emit_byte(nc, 0x01); nc_emit_byte(nc, 0x00); nc_emit_byte(nc, 0x00)  // mov [rbx+312], rax (drive top)
+    nc_emit_byte(nc, 0xe0); nc_emit_byte(nc, 0x01); nc_emit_byte(nc, 0x00); nc_emit_byte(nc, 0x00)  // mov [rbx+480], rax (drive top, word 60)
 
     nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0xc7); nc_emit_byte(nc, 0x43); nc_emit_byte(nc, 0x30)
     nc_emit_byte(nc, 0x01); nc_emit_byte(nc, 0x00); nc_emit_byte(nc, 0x00); nc_emit_byte(nc, 0x00)  // state = parked
     nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x8b); nc_emit_byte(nc, 0xa3)
-    nc_emit_byte(nc, 0x38); nc_emit_byte(nc, 0x01); nc_emit_byte(nc, 0x00); nc_emit_byte(nc, 0x00)  // mov rsp, [rbx+312]
+    nc_emit_byte(nc, 0xe0); nc_emit_byte(nc, 0x01); nc_emit_byte(nc, 0x00); nc_emit_byte(nc, 0x00)  // mov rsp, [rbx+480]
     nc_emit_byte(nc, 0x31); nc_emit_byte(nc, 0xd2)                            // xor edx, edx
     emit_fx_switch_inline(nc, 24, 16)
     // wake: state tells the cause
@@ -4769,11 +4772,13 @@ fn emit_builtin_fx_install_into(nc: &! NativeCompiler) with Mut, Panic, Div {
     emit_fx_return_to_host(nc)
     let trap_pos = (*nc).code.len
     nc_patch_u32_le(nc, js_patch, trap_pos - (js_patch + 4))
+    nc_patch_u32_le(nc, js2_patch, trap_pos - (js2_patch + 4))
     nc_emit_byte(nc, 0x0f); nc_emit_byte(nc, 0x0b)                            // ud2
 }
 
 fn emit_builtin_fx_perform_into(nc: &! NativeCompiler) with Mut, Panic, Div {
     // (frame=rdi, eff=rsi, op=rdx, skip=rcx)
+    nc_emit_byte(nc, 0x57)                                                    // push rdi (origin frame)
     nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x85); nc_emit_byte(nc, 0xc9)    // test rcx, rcx
     let jz_walk = (*nc).code.len + 2
     nc_emit_byte(nc, 0x0f); nc_emit_byte(nc, 0x84); nc_emit_u32_le(nc, 0)     // jz walk
@@ -4795,6 +4800,25 @@ fn emit_builtin_fx_perform_into(nc: &! NativeCompiler) with Mut, Panic, Div {
     nc_emit_byte(nc, 0x0f); nc_emit_byte(nc, 0x0b)                            // ud2
     let found_pos = (*nc).code.len
     nc_patch_u32_le(nc, je_found, found_pos - (je_found + 4))
+    // The walk may have selected an outer frame while the arguments were
+    // written into the origin frame mailbox: copy them over.
+    nc_emit_byte(nc, 0x58)                                                    // pop rax (origin)
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x39); nc_emit_byte(nc, 0xf8)    // cmp rax, rdi
+    let je_copy = (*nc).code.len + 2
+    nc_emit_byte(nc, 0x0f); nc_emit_byte(nc, 0x84); nc_emit_u32_le(nc, 0)     // je skip_copy
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x89); nc_emit_byte(nc, 0xc6)    // mov rsi, rax
+    nc_emit_byte(nc, 0x49); nc_emit_byte(nc, 0x89); nc_emit_byte(nc, 0xf8)    // mov r8, rdi
+    nc_emit_byte(nc, 0xb9); nc_emit_byte(nc, 0x08); nc_emit_byte(nc, 0x00); nc_emit_byte(nc, 0x00); nc_emit_byte(nc, 0x00)  // mov ecx, 8
+    let copy_pos = (*nc).code.len
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x8b); nc_emit_byte(nc, 0x86); nc_emit_byte(nc, 0x98); nc_emit_byte(nc, 0x01); nc_emit_byte(nc, 0x00); nc_emit_byte(nc, 0x00)  // mov rax, [rsi+408]
+    nc_emit_byte(nc, 0x49); nc_emit_byte(nc, 0x89); nc_emit_byte(nc, 0x80); nc_emit_byte(nc, 0x98); nc_emit_byte(nc, 0x01); nc_emit_byte(nc, 0x00); nc_emit_byte(nc, 0x00)  // mov [r8+408], rax
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x83); nc_emit_byte(nc, 0xc6); nc_emit_byte(nc, 0x08)  // add rsi, 8
+    nc_emit_byte(nc, 0x49); nc_emit_byte(nc, 0x83); nc_emit_byte(nc, 0xc0); nc_emit_byte(nc, 0x08)  // add r8, 8
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0xff); nc_emit_byte(nc, 0xc9)    // dec rcx
+    let jnz_copy = (*nc).code.len + 2
+    nc_emit_byte(nc, 0x0f); nc_emit_byte(nc, 0x85); nc_emit_u32_le(nc, copy_pos - (jnz_copy + 4))  // jnz copy_pos
+    let skip_copy = (*nc).code.len
+    nc_patch_u32_le(nc, je_copy, skip_copy - (je_copy + 4))
     nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x89); nc_emit_byte(nc, 0x57); nc_emit_byte(nc, 0x38)  // mov [rdi+56], rdx
     nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0xc7); nc_emit_byte(nc, 0x47); nc_emit_byte(nc, 0x30)
     nc_emit_byte(nc, 0x01); nc_emit_byte(nc, 0x00); nc_emit_byte(nc, 0x00); nc_emit_byte(nc, 0x00)  // state = parked
@@ -4833,12 +4857,18 @@ fn emit_builtin_fx_resume_into(nc: &! NativeCompiler) with Mut, Panic, Div {
     nc_emit_ret(nc)
     let abort_pos = (*nc).code.len
     nc_patch_u32_le(nc, je_abort, abort_pos - (je_abort + 4))
+    // The resumed body parked on a new event: dispatch it on this driver.
+    // A clause that does not resume makes its value the handle answer and
+    // abandons the suspended body and clause continuation: go to the host.
+    emit_fx_dispatch_block(nc)
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x83); nc_emit_byte(nc, 0x7b); nc_emit_byte(nc, 0x30); nc_emit_byte(nc, 0x02)  // cmp state, 2
+    let je_done2 = (*nc).code.len + 2
+    nc_emit_byte(nc, 0x0f); nc_emit_byte(nc, 0x84); nc_emit_u32_le(nc, 0)     // je done
     nc_emit_store_rax_mem_rbx_disp32(nc, 64)
-    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x8b); nc_emit_byte(nc, 0x63); nc_emit_byte(nc, 0x20)  // mov rsp, [rbx+32]
-    nc_emit_mov_rax_imm(nc, 1)
-    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0xff); nc_emit_byte(nc, 0x63); nc_emit_byte(nc, 0x28)  // jmp [rbx+40]
+    emit_fx_return_to_host(nc)
     let done_pos = (*nc).code.len
     nc_patch_u32_le(nc, je_done, done_pos - (je_done + 4))
+    nc_patch_u32_le(nc, je_done2, done_pos - (je_done2 + 4))
     emit_fx_apply_ret_block(nc)
     nc_emit_load_rax_mem_rbx_disp32(nc, 64)
     nc_emit_byte(nc, 0x5b)                                                    // pop rbx

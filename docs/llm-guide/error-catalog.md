@@ -486,3 +486,4 @@ page is not a fresh execution receipt.
 | E296 | type-checker/effects | error | duplicate clause for operation (SIO-417) | — |
 | E297 | type-checker/effects | error | operation argument count mismatch (SIO-417) | — |
 | E298 | type-checker/effects | error | perform with live linear bindings (a non-resuming handler would drop them) (SIO-417) | — |
+| E299 | type-checker/effects | error | handler backend v1 limit exceeded (results and operation values are i64 words; handler nesting depth at most 8) (SIO-417) | — |
