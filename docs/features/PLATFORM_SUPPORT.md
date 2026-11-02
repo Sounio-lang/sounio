@@ -89,7 +89,7 @@ The self-hosted compiler accepts these target triples in the current checkout:
 | Target triple | Output format | Status |
 |---------------|---------------|--------|
 | `x86_64-linux` | ELF x86_64 | ✅ |
-| `aarch64-linux` | ELF ARM64 | ✅ emits from Madaros for the hello-world class (IO builtins, heap, arithmetic/control flow); beyond that the backend refuses by name (`target … is not supported by this backend yet`). Execution needs matching hardware (`scripts/dev/a64_run.sh`). |
+| `aarch64-linux` | ELF ARM64 | ✅ emits from Madaros and runs on real arm64 hardware for the verified class: strings/`print`, `print_int`/`print_char` (real `write` bodies), integer arithmetic and comparisons, float arithmetic/comparison/conversion/negation, and call-arg passing; beyond that the backend refuses by name (`aarch64_<site>:<op>` or `target … is not supported by this backend yet`). Execution needs matching hardware (`scripts/dev/a64_run.sh`). |
 | `x86_64-macos` | Mach-O x86_64 | ✅ |
 | `aarch64-macos` | Mach-O arm64 | ✅ |
 

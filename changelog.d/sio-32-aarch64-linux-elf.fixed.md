@@ -18,8 +18,18 @@ unsupported targets fail with a named sentence
 (`target <resolved> is not supported by this backend yet`) instead of a bare
 number, per the issue's requested scope.
 
-Pinned by `scripts/ci/madaros_aarch64_linux_elf_gate.sh` (hello-world emits
-an ARM aarch64 ELF; riscv64-linux refuses by name), wired into the
-current-source CI job. Execution on target hardware stays manual
-(`scripts/dev/a64_run.sh` on the arm64 Slurm nodes); no GHA runner can run an
-aarch64-linux ELF.
+Pinned by `scripts/ci/madaros_aarch64_linux_elf_gate.sh` (hello-world plus a
+wider int/compare/float/convert program emit ARM aarch64 ELFs;
+riscv64-linux refuses by name), wired into the current-source CI job.
+Execution on target hardware stays manual (`scripts/dev/a64_run.sh` on the
+arm64 Slurm nodes); no GHA runner can run an aarch64-linux ELF.
+
+Verified on real arm64 hardware (Nov 2026): empty main exits 0;
+`print("hi")`, `print_int(42)`, int `==`/`<`, float `+`/`>`/negation,
+`as f64`/`as i64` conversions, and multi-arg callees all execute correctly
+(`hi / 42 / eq / lt / fgt / fneg / cv / 3`, exit 0). Three backend bugs
+found and fixed along the way: the frame pointer was zeroed (`mov x29, xzr`
+— ORR reads r31 as XZR; fixed to `add x29, sp, #0`), `print` builtins
+emitted empty stubs (now real `write`-syscall leaves), and call args never
+reached callees (the legalized stream carries CALL without ARG_MOVE, so the
+preview now reads args from the IR arena like the x86 backend does).
