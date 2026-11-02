@@ -415,3 +415,20 @@ worker-bound removal, incorrect list routing and disconnected accuracy replay.
 Acceptance requires all four hosted shards, effective worker-count receipts,
 exact canonical-list coverage and the unchanged PBPK test passing within its
 original budget. Historical warm/cold measurements do not qualify a new head.
+
+### Lean toolchains and exact-input proof products
+
+The Lean job previously transported formal/lean4/.lake under an immutable
+toolchain-only key. Later proof changes rebuilt from that frozen snapshot on
+every run. Keep toolchains in a separate cache keyed by both formal toolchain
+files and platform. Cache both formal/.lake and formal/lean4/.lake under an
+exact key covering all formal inputs (excluding .lake products), Lean gate
+recipes and the workflow. No restore-prefix fallback is used. Non-Lean formal
+inputs are included because proof elaboration may consume certificates/data.
+
+Every existing lake build, V1 mutant control, NS/fusion gate, fresh axiom report
+and inventory check remains mandatory on cache hits. Cache restoration is
+transport; Lake still validates build traces. The orchestration contract pins
+the predecessor proof job byte-for-byte outside the cache block and rejects
+omitted builds, skipped audits, missing input scopes and cross-source fallback.
+Hosted cold/warm results are required before reporting a latency improvement.
