@@ -432,3 +432,18 @@ transport; Lake still validates build traces. The orchestration contract pins
 the predecessor proof job byte-for-byte outside the cache block and rejects
 omitted builds, skipped audits, missing input scopes and cross-source fallback.
 Hosted cold/warm results are required before reporting a latency improvement.
+
+### Overlap native macOS with independent bootstrap regressions
+
+The source-bootstrap producer publishes its fresh macOS seed and source-bound
+Linux stage2 immediately after the host gate and cross-build. A separate
+source-bootstrap-regressions job downloads the same-run stage2, verifies its
+checkout SHA and binary digest, restores execute permission and runs all
+original ABI, ARM64 store/identifier witnesses and modular typecheck proofs.
+Both jobs remain selected and fail-closed in CI Decision. Native macOS still
+requires the successful source-bootstrap producer; independent regressions
+may run concurrently with it and cannot be omitted from the final verdict.
+The original proof commands are frozen in bootstrap_steps_baseline.json and
+compared against their unique assignment in the two jobs. No compiler source,
+proof statement or model changes are involved. Hosted receipts must prove
+the overlap and native CPU/Metal acceptance before claiming a time saving.
