@@ -48,9 +48,40 @@ Madaros oracle (`bin/madaros check`): 29 accept / 5 refuse.
 | 11 | `epistemic/pce.sio:332` — `nodes.7` flagged out of bounds, but `gauss_legendre_nodes()` returns an 8-tuple (`.0`–`.7` all in bounds); fires identically with the module as main | tuple index OOB | pbpk28_consumer_mass_balance | refuses (E259, unrelated) | **checker false positive** (code is correct; needs checker follow-up) |
 | 12 | `graphics/surface.sio:68` — `x >= 0 && x < out.width` (all `i64` by inspection) flagged only when `graphics::svg` is co-imported; a minimal `surface`-only import passes; the committed compiler prints the same diagnostic with exit 0 | ordered-comparison mismatch | graphics_smoke | refuses (fails to parse `svg.sio`) | **checker quirk** (import-context-only type confusion; needs checker follow-up) |
 
-Totals: 32 corpus-defect files, 1 checker false positive, 1 checker quirk.
-Zero regressions: no file is refused for a diagnostic the pre-fix compiler did
-not already print.
+Totals (run-pass census): 32 corpus-defect files, 1 checker false positive,
+1 checker quirk. Zero regressions: no file is refused for a diagnostic the
+pre-fix compiler did not already print.
+
+## Extension: tests/stdlib failures (full-suite shards)
+
+The run-pass census missed `tests/stdlib/`, where the same newly-fatal
+classes refuse 31 more files (all untagged, all passing Madaros check and
+green on the Madaros job today). Same verdict — corpus defects, diagnostics
+pre-existing under the committed compiler (verified per file: committed
+prints the diagnostic with exit 0):
+
+| stdlib root | files |
+|---|---|
+| `os/process.sio:84` (E218) | test_os |
+| `logic/pure/types.sio:59` (E200 `q2`) | test_logic |
+| `random/rng.sio:106` (E218) | test_rng |
+| `random/distributions.sio:378` (return-type) | test_distributions_e2e |
+| `nn/mlp_xor.sio:300` (unknown field) | test_mlp_xor_e2e |
+| `graph/algorithms.sio:76,124` (not indexable) | test_algorithms, test_algorithms_e2e |
+| `snn/sedenion_layer_core.sio:378` (E001) | test_snn_e2e |
+| `graph/entropy.sio:521` (Seq.push receiver) | test_entropy_e2e |
+| `quantum/born_shot_law.sio:792,798` (linear-use) | test_qpu_chsh, test_born_shot_law |
+| `quantum/qasm_tape.sio:774` (linear-use) | test_qasm_tape |
+| `tensor/tape.sio:253` (missing field) | test_tensor_autograd_d2, test_tensor_autograd_d2_hardening, test_nn_primitives_d3, test_caputo_l1_tape |
+| `nn/optimizer.sio:173` (missing field) | test_pinn_caputo_residual_d6 |
+| `chemistry/equilibrium.sio:61,66` (return-type/E218) | test_kinetics_epistemic_ensemble, test_chem_network_ode_sys5, test_kin_sigma_small_variance, test_kinetics_gri_mech, test_equilibrium_acids, test_kinetics_core, test_lib_surface, test_pbpk_ontology, test_pbpk_clearance_ode |
+| `mem/arena.sio:44,108` (E001) | test_arena_e2e |
+| `physics/em.sio:296-297` (numeric) | test_em_e2e |
+| `physics/sr.sio:46-47` (numeric) | test_thermo_sr_e2e |
+| `particle_physics` (E001 call-arg) | test_particle_physics_core |
+
+Grand totals: 63 corpus-defect files, 1 checker false positive, 1 checker
+quirk — 65 files, zero regressions.
 
 ## The 204 E035 files (explicitly out of scope)
 
@@ -71,8 +102,10 @@ remaining ~80 historical files are inside the 204 tolerated E035s.
 
 ## Suite handling (keeps CI green)
 
-- 16 files retagged `//@ requires: madaros` (they run and pass on Madaros
-  today; lean_single refusal documented per file with its stdlib root).
+- 16 run-pass files retagged `//@ requires: madaros` (they run and pass on
+  Madaros today; lean_single refusal documented per file with its stdlib
+  root).
+- 31 tests/stdlib files retagged `//@ requires: madaros` (same basis).
 - 13 files already carried `requires: madaros` — untouched.
 - 5 files fail on both engines → `//@ known-failure`:
   `pbpk28_consumer_mass_balance` (pinned: xfail-expect tuple index out of
