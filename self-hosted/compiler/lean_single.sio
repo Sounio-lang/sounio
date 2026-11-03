@@ -1431,12 +1431,8 @@ fn token_capacity() -> i64 { return 2097152 }
 
 fn note_limit_error(kind: i64) with Mut {
     if LIMIT_ERROR_KIND == 0 { LIMIT_ERROR_KIND = kind }
-    // Import-tolerant: errors in imported functions should not block ELF emission
-    if MAIN_SRC_END > 0 && CURRENT_FN >= 0 && CURRENT_FN < 65536 {
-        if (FN_EFFECTS[CURRENT_FN as usize] & 2048) != 0 {
-            return  // imported function error — don't set TYPECHECK_FAILED
-        }
-    }
+    // D-20 (SIO-60): limit errors in imported functions are fatal too; see
+    // tc_mark_failed.
     TYPECHECK_FAILED = 1
 }
 
@@ -5095,14 +5091,12 @@ fn print_src_loc_for_tok(tok: i64) with IO, Mut, Panic {
     print_int(local_line)
 }
 
-// Guard: errors in imported module functions should NOT block ELF emission.
+// D-20 (SIO-60): type errors in imported-module functions are fatal, exactly
+// like main-module errors (founder decision ADR-020, option (a)). Previously
+// they only bumped the counter so ELF emission could proceed with stubbed
+// functions; now they set TYPECHECK_FAILED.
 fn tc_mark_failed() with Mut {
     TC_FN_ERR_COUNT = TC_FN_ERR_COUNT + 1
-    if MAIN_SRC_END > 0 && CURRENT_FN >= 0 && CURRENT_FN < 65536 {
-        if (FN_EFFECTS[CURRENT_FN as usize] & 2048) != 0 {
-            return
-        }
-    }
     TYPECHECK_FAILED = 1
 }
 
@@ -5143,11 +5137,13 @@ fn tc_error(tok: i64, msg: string) -> i64 with IO, Mut, Panic {
 // Unbalanced braces in a module (#1634).
 //
 // Sets TYPECHECK_FAILED DIRECTLY rather than going through tc_mark_failed or
-// note_limit_error. Both of those early-return for functions carrying
-// FN_EFFECTS & 2048 (imported), which is how an unbalanced brace in an imported
-// module used to fail the build while printing no `error:` line at all -- the
-// only symptom was a scatter of E200s hundreds of tokens later, in a different
-// file, naming a parameter that had nothing to do with it.
+// note_limit_error. (Historical note: both of those used to early-return for
+// functions carrying FN_EFFECTS & 2048 (imported), which is how an unbalanced
+// brace in an imported module used to fail the build while printing no
+// `error:` line at all -- the only symptom was a scatter of E200s hundreds of
+// tokens later, in a different file, naming a parameter that had nothing to
+// do with it. D-20 (SIO-60) removed those early-returns; the direct set stays
+// as the loud-failure idiom.)
 fn tc_unbalanced_braces(tok: i64, d: i64) with IO, Mut, Panic {
     print("error: unbalanced braces in module (")
     if d > 0 {
@@ -5302,6 +5298,38 @@ fn tc_decl_init_mismatch(tok: i64, decl_ty: i64, decl_hash: i64, expr_ty: i64, e
     print(")\n")
     tc_mark_failed()
     return 0
+}
+
+// D-20 (SIO-60): scalar-kind classifier for a module-level `let`/`const`
+// annotation at token p (just past `:`). Returns 1 (int), 2 (float) or 4
+// (bool) for a single-token scalar annotation, else 0 (unchecked, as
+// before). Multi-token types (`[i64; 4]`, `Option<i64>`) stay unchecked.
+fn tc_module_let_decl_scalar(p: i64) -> i64 with Panic, Mut {
+    if TK[p as usize] == 3 && TK[(p + 1) as usize] == 16 {
+        let k = type_name_kind(TS[p as usize], TE[p as usize])
+        if k == 1 || k == 2 || k == 4 { return k }
+    }
+    return 0
+}
+
+// D-20 (SIO-60): module-level `let x: i64 = true` used to bind 0 in silence,
+// in main and imported modules alike. A bool literal against a non-bool
+// scalar annotation (or a numeric literal against `bool`) is E001, reported
+// via tc_mark_failed -- fatal in every module since D-20. int<->float keeps
+// the legacy implicit conversion (unchecked here, as before).
+fn tc_module_let_bool_mismatch(decl_scalar: i64, p: i64) with IO, Mut, Panic, Div {
+    if decl_scalar == 1 || decl_scalar == 2 {
+        // `true`/`false` lex as TK35/TK36, never TK3.
+        if TK[p as usize] == 35 || TK[p as usize] == 36 {
+            tc_decl_init_mismatch(p, decl_scalar, 0, 4, 0)
+        }
+    } else if decl_scalar == 4 {
+        if TK[p as usize] == 4 {
+            tc_decl_init_mismatch(p, 4, 0, 1, 0)
+        } else if TK[p as usize] == 53 {
+            tc_decl_init_mismatch(p, 4, 0, 2, 0)
+        }
+    }
 }
 
 // PR-3: struct-field refinement enforcement. At struct-literal compile time,
@@ -6367,8 +6395,10 @@ fn bitset_clear(bits: i64, clear_mask: i64) -> i64 {
 }
 
 fn tc_effect_violation(tok: i64, callee_eff: i64, caller_eff: i64) -> i64 with IO, Mut, Panic {
-    // Skip effect violations for functions from imported modules — already validated
-    if (FN_EFFECTS[CURRENT_FN as usize] & 2048) != 0 { return 0 }
+    // D-20 (SIO-60): E035 stays import-tolerant (stdlib has ~200 genuine
+    // missing-effect annotations; fatalizing them is follow-up work). Only
+    // hard type errors (E001 path via tc_mark_failed) are import-fatal.
+    if FN_EFFECTS[CURRENT_FN as usize] & 2048 != 0 { return 0 }
     tc_mark_failed()
     print("error[E035]: effect not declared in function signature at line ")
     print_int(TL[tok as usize])
@@ -6378,7 +6408,8 @@ fn tc_effect_violation(tok: i64, callee_eff: i64, caller_eff: i64) -> i64 with I
 
 // Call-site version — callee requires effects caller doesn't have.
 fn tc_effect_call_violation(tok: i64, callee_eff: i64, caller_eff: i64) -> i64 with IO, Mut, Panic {
-    if (FN_EFFECTS[CURRENT_FN as usize] & 2048) != 0 { return 0 }
+    // D-20 (SIO-60): E035 stays import-tolerant; see tc_effect_violation.
+    if FN_EFFECTS[CURRENT_FN as usize] & 2048 != 0 { return 0 }
     tc_mark_failed()
     print("error[E035]: effect not declared in function signature at line ")
     print_int(TL[tok as usize])
@@ -9159,6 +9190,13 @@ fn scan_all_consts() with IO, Panic, Mut, Div {
             cn_ns = TS[p as usize]; cn_ne = TE[p as usize]; p = p + 1
             var cty: i64 = 1
             var ctok: i64 = -1
+            var decl_scalar: i64 = 0
+            // D-20 (SIO-60): `:` lexes as TK43 (the `== 15` below never
+            // matches an annotation). Capture a scalar annotation for the
+            // bool-literal mismatch check after `=`.
+            if TK[p as usize] == 43 {
+                decl_scalar = tc_module_let_decl_scalar(p + 1)
+            }
             if TK[p as usize] == 15 {
                 p = p + 1
                 if TK[p as usize] == 3 && src_match(TS[p as usize], TE[p as usize] - TS[p as usize], "f64") {
@@ -9169,6 +9207,7 @@ fn scan_all_consts() with IO, Panic, Mut, Div {
                 while p < TC && TK[p as usize] != 16 && TK[p as usize] != 0 { p = p + 1 }
             }
             if TK[p as usize] == 16 { p = p + 1 }
+            tc_module_let_bool_mismatch(decl_scalar, p)
             // Constant EXPRESSION initializer (`0 - 1`, `1 << 3`, `(A + 1) * 2`): fold it.
             // Before this, only `[-]LITERAL` was read and the rest of the expression was
             // silently dropped -- `let EG_INVALID: i64 = 0 - 1` became 0 in every source
@@ -9231,6 +9270,11 @@ fn scan_all_consts() with IO, Panic, Mut, Div {
             cn_ns = TS[p as usize]; cn_ne = TE[p as usize]; p = p + 1
             var cty2: i64 = 1
             var ctok2: i64 = -1
+            var decl_scalar2: i64 = 0
+            // D-20 (SIO-60): `:` lexes as TK43; see the `let` arm.
+            if TK[p as usize] == 43 {
+                decl_scalar2 = tc_module_let_decl_scalar(p + 1)
+            }
             if TK[p as usize] == 15 {
                 p = p + 1
                 if TK[p as usize] == 3 && src_match(TS[p as usize], TE[p as usize] - TS[p as usize], "f64") {
@@ -9241,6 +9285,7 @@ fn scan_all_consts() with IO, Panic, Mut, Div {
                 while p < TC && TK[p as usize] != 16 && TK[p as usize] != 0 { p = p + 1 }
             }
             if TK[p as usize] == 16 { p = p + 1 }
+            tc_module_let_bool_mismatch(decl_scalar2, p)
             // Constant EXPRESSION initializer (`0 - 1`, `1 << 3`, `(A + 1) * 2`): fold it.
             // Before this, only `[-]LITERAL` was read and the rest of the expression was
             // silently dropped -- `let EG_INVALID: i64 = 0 - 1` became 0 in every source
@@ -9286,6 +9331,11 @@ fn scan_all_consts() with IO, Panic, Mut, Div {
             cn_ns = TS[p as usize]; cn_ne = TE[p as usize]; p = p + 1
             var cty4: i64 = 1
             var ctok4: i64 = -1
+            var decl_scalar4: i64 = 0
+            // D-20 (SIO-60): `:` lexes as TK43; see the `let` arm.
+            if TK[p as usize] == 43 {
+                decl_scalar4 = tc_module_let_decl_scalar(p + 1)
+            }
             if TK[p as usize] == 15 {
                 p = p + 1
                 if TK[p as usize] == 3 && src_match(TS[p as usize], TE[p as usize] - TS[p as usize], "f64") {
@@ -9296,6 +9346,7 @@ fn scan_all_consts() with IO, Panic, Mut, Div {
                 while p < TC && TK[p as usize] != 16 && TK[p as usize] != 0 { p = p + 1 }
             }
             if TK[p as usize] == 16 { p = p + 1 }
+            tc_module_let_bool_mismatch(decl_scalar4, p)
             // Constant EXPRESSION initializer (`0 - 1`, `1 << 3`, `(A + 1) * 2`): fold it.
             // Before this, only `[-]LITERAL` was read and the rest of the expression was
             // silently dropped -- `let EG_INVALID: i64 = 0 - 1` became 0 in every source
@@ -9337,6 +9388,11 @@ fn scan_all_consts() with IO, Panic, Mut, Div {
         cn_ns = TS[p as usize]; cn_ne = TE[p as usize]; p = p + 1
         var cty3: i64 = 1
         var ctok3: i64 = -1
+        var decl_scalar3: i64 = 0
+        // D-20 (SIO-60): `:` lexes as TK43; see the `let` arm.
+        if TK[p as usize] == 43 {
+            decl_scalar3 = tc_module_let_decl_scalar(p + 1)
+        }
         if TK[p as usize] == 15 {
             p = p + 1
             if TK[p as usize] == 3 && src_match(TS[p as usize], TE[p as usize] - TS[p as usize], "f64") {
@@ -9347,6 +9403,7 @@ fn scan_all_consts() with IO, Panic, Mut, Div {
             while p < TC && TK[p as usize] != 16 && TK[p as usize] != 0 { p = p + 1 }
         }
         if TK[p as usize] == 16 { p = p + 1 }
+        tc_module_let_bool_mismatch(decl_scalar3, p)
         cv = 0; neg_c = 0
         if TK[p as usize] == 18 { neg_c = 1; p = p + 1 }
         if TK[p as usize] == 4 { cv = TV[p as usize]; p = p + 1 }
@@ -18164,12 +18221,13 @@ fn compile_primary() with IO, Mut, Panic, Div {
             } else { si = si + 1 }
             if slen >= 256 {
                 tc_error_hard(EP, "string literal exceeds maximum of 256 bytes")
-                // tc_error_hard -> tc_mark_failed() early-returns without
-                // setting TYPECHECK_FAILED for FN_EFFECTS & 2048 (imported-
-                // module) functions. Left alone, that lets this fall through
-                // to a binary shipping the literal silently truncated to
-                // empty (slen=0) instead of failing the build. Force it
-                // directly -- same idiom as tc_unbalanced_braces (#1634).
+                // Belt-and-braces direct set, same idiom as tc_unbalanced_braces
+                // (#1634). (Historical: tc_mark_failed() used to early-return
+                // without setting TYPECHECK_FAILED for FN_EFFECTS & 2048
+                // (imported-module) functions, which let this fall through to
+                // a binary shipping the literal silently truncated to empty.
+                // D-20 (SIO-60) removed that early-return; the direct set is
+                // now redundant but harmless.)
                 TYPECHECK_FAILED = 1
                 slen = 0
                 break
