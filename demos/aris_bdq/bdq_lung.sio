@@ -35,6 +35,28 @@ fn fabs(x: f64) -> f64 {
     return x
 }
 
+// ---- units of the physical inputs (dimensional audit at the end of the program)
+unit cm;
+unit h;
+unit mL = cm * cm * cm;
+unit flow = mL / h;
+unit area = cm * cm;
+unit permeability = cm / h;
+unit Lph = L / h;
+
+fn ps_typed(perm: permeability, sa: area) -> flow with Mut {
+    perm * sa
+}
+
+fn capacity_typed(v_ew: mL, v_pb: mL, k_ewb: f64, fu_ew: f64) -> mL with Mut, Div {
+    (v_ew + v_pb / k_ewb) / fu_ew
+}
+
+fn k10_typed(cl: Lph, v: L) -> f64 with Mut, Div {
+    let k = cl / v
+    k as f64
+}
+
 struct Params {
     cl: f64, v: f64, q1: f64, vp1: f64, q2: f64, vp2: f64,
     mat_frac: f64, fr: f64, f_bio: f64,
@@ -581,6 +603,28 @@ fn report_budget(tag: string, nominal: f64, c: [f64; 15]) with IO, Mut, Div {
     }
 }
 
+// Dimensional audit: the derived quantities the f64 core uses are recomputed from
+// unit-typed literals of Tables S3 and Svensson Table 3. A swapped or mis-scaled input
+// (mL for L, an area for a volume) does not compile here; a mismatch with derive()
+// fails the run.
+fn units_audit(p: Params, d: DerivedP) -> i32 with IO, Mut, Div {
+    let perm: permeability = 55.7
+    let sa: area = 960000.0
+    let v_ew: mL = 89.2
+    let v_pb: mL = 101.2
+    let cl: Lph = 2.62
+    let v: L = 198.0
+    let ps: f64 = ps_typed(perm, sa) as f64
+    let cap: f64 = capacity_typed(v_ew, v_pb, d.k_ewb, p.fu_ew) as f64
+    let k10: f64 = k10_typed(cl, v)
+    var bad: i32 = 0
+    if fabs(ps - d.ps) > 0.000000000001 * fabs(d.ps) { bad = bad + 1 }
+    if fabs(cap - d.cap_ew) > 0.000000000001 * fabs(d.cap_ew) { bad = bad + 1 }
+    if fabs(k10 - p.cl / p.v) > 0.000000000001 * fabs(p.cl / p.v) { bad = bad + 1 }
+    if bad == 0 { println("BDQ_UNITS_AUDIT_PASS") } else { println("BDQ_UNITS_AUDIT_FAIL") }
+    return bad
+}
+
 // The paper's central claim, restated with the two inputs it actually rests on (see
 // bdq_mic_claim_*.sio). Declared at the honest ceiling: the weakest of its own inputs,
 // fu_pls (ε = 0.30). Raising the declaration above 300 is refused at compile time.
@@ -612,6 +656,7 @@ fn main() -> i32 with IO, Mut, Div, Panic, Epistemic {
     if r.mass_resid_rel > 0.000000001 { ok = 1 }
     if r.cas_resid_rel > 0.000000001 { ok = 1 }
     if ok == 0 { println("BDQ_LUNG_LEDGERS_PASS") } else { println("BDQ_LUNG_LEDGERS_FAIL") }
+    ok = ok + units_audit(p, derive(p))
     // uncertainty the papers report, propagated to the human lung (30 extra simulations)
     var b = Budget { c_lys: [0.0; 15], c_cas6: [0.0; 15] }
     gum_budget(p, &!b)

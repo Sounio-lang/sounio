@@ -48,12 +48,15 @@ Measured on 2026-11-03 with the committed Madaros ELF (`3.0.0-rc.1`, madaros 8ad
 - **Claims carry their evidence.** `Knowledge[f64]` carries a value, ε and provenance. `with Epistemic(N)` rejects any input below N at compile time. The refusal points at the exact source spans: the pH_LYS and fu_pls declarations.
 - **Models carry their own audits.** Mass ledgers are part of the program, not a separate check. Parity against an independent oracle is a script anyone can rerun.
 - **Uncertainty is propagated in the same language and run as the model.**
+- **Physical inputs are checked for dimension.** `units_audit` recomputes the permeability–surface product (cm/h × cm² → mL/h), the extracellular capacity (mL) and k10 (L/h ÷ L) from unit-typed literals and requires equality with what the f64 core uses (`BDQ_UNITS_AUDIT_PASS`). Feeding an area where a volume belongs, or mL where L belongs, does not compile (`units_refuse.sio`, E041).
 
 Not claimed:
 - Superiority over NONMEM, Stan or Monolix.
 - Automatic propagation of every source of uncertainty: the GUM here is explicit central differences, diagonal.
 - Clinical validity of either the paper's model or this reimplementation.
 - The ε values are illustrative and meant to be argued with.
+- The epistemic gate is checked where a `Knowledge` value is opened, not across calls: a helper declared `with Epistemic` at a lower threshold can feed a stricter caller unnoticed. The full-model claim (`lysosomal_claim_mic50`) opens fu_pls and pH_LYS inside the gated function for that reason.
+- The core is f64, not unit-typed end to end. Casting an f64 into a unit type returns 0 on the committed compiler ELF (fixed in source by PR #3390; the shipped binary needs a refresh). The audit uses typed literals and unit→f64 casts only, which work on both.
 
 ## Open questions we would like to work on together
 
