@@ -11,6 +11,7 @@ const builder=fs.readFileSync(path.join(root,'scripts/ci/build_madaros_macos_arm
 function check(w,b){
  const mac=w.split('  native-selfhost-macos-arm64:\n')[1].split(/\n  [a-z][a-z0-9-]+:/)[0];
  assert(!mac.includes('restore-keys:'),'prefix restore forbidden');
+ assert(mac.includes("uses: actions/setup-node@v4\n        with:\n          node-version: '22'"),'verifier runtime unavailable');
  for(const part of ['uses: actions/cache/restore@v4','uses: actions/cache/save@v4','key: ${{ steps.native-cache-inputs.outputs.key }}','path: ${{ runner.temp }}/madaros-native-cache','run: node scripts/ci/macos_native_cache.mjs key','run: node scripts/ci/macos_native_cache.mjs seal'])assert(mac.includes(part),'missing '+part);
  const build=mac.split('      - name: Build and execute current-source native Madaros\n')[1].split('      - name: ')[0];
  assert(!/^        if:/m.test(build),'verified builder must always run');
