@@ -14,6 +14,7 @@ const oracleFingerprint='e0c4006a7deb3bbed718df517e0e7a96da9ccf7c854aadd361f73d7
 function check(w,c,g){
  const mac=w.split('  native-selfhost-macos-arm64:\n')[1].split(/\n  [a-z][a-z0-9-]+:/)[0];
  assert(!mac.includes('restore-keys:'),'prefix restore forbidden');
+ assert(mac.includes('Upload native corpus execution receipts')&&mac.includes('/tmp/madaros-corrected-corpus/**/*.tsv')&&mac.includes('/tmp/madaros-corrected-corpus/**/*.sha256'),'execution receipts must be published');
  const step=mac.split('      - name: Corrected pinned 200 corpus with mandatory real Metal\n')[1].split('      - name: ')[0];
  assert(!/^        if:/m.test(step),'corpus cannot be skipped');
  assert(step.includes('run: bash scripts/ci/madaros_macos_corpus_gate.sh /tmp/madaros-current-macos /tmp/madaros-corrected-corpus'),'corpus command changed');
