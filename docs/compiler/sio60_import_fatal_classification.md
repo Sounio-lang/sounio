@@ -74,7 +74,7 @@ prints the diagnostic with exit 0):
 | `quantum/qasm_tape.sio:774` (linear-use) | test_qasm_tape |
 | `tensor/tape.sio:253` (missing field) | test_tensor_autograd_d2, test_tensor_autograd_d2_hardening, test_nn_primitives_d3, test_caputo_l1_tape |
 | `nn/optimizer.sio:173` (missing field) | test_pinn_caputo_residual_d6 |
-| `chemistry/equilibrium.sio:61,66` (return-type/E218) | test_kinetics_epistemic_ensemble, test_chem_network_ode_sys5, test_kin_sigma_small_variance, test_kinetics_gri_mech, test_equilibrium_acids, test_kinetics_core, test_lib_surface, test_pbpk_ontology, test_pbpk_clearance_ode |
+| `chemistry/equilibrium.sio:61,66` (return-type/E218) | test_kinetics_epistemic_ensemble, test_chem_network_ode_sys5, test_kin_sigma_small_variance, test_kinetics_gri_mech, test_kinetics_core, test_lib_surface, test_pbpk_ontology, test_pbpk_clearance_ode (all retagged); test_equilibrium_acids (manifest entry — the file is website-pinned, so no header edit; `tests/known_failures/hardened_diagnostics_full_suite.txt`) |
 | `mem/arena.sio:44,108` (E001) | test_arena_e2e |
 | `physics/em.sio:296-297` (numeric) | test_em_e2e |
 | `physics/sr.sio:46-47` (numeric) | test_thermo_sr_e2e |
