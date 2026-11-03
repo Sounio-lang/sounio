@@ -1615,3 +1615,85 @@ paste <(grep "^TMASS|m=" "$QTP_SIO_LOG" | sed "s/^TMASS|m=//") \
 
 echo
 echo "[pbpk28-parity] quetiapine oral-IR canonical: tablet lag + gut absorption + systemic PK + mass envelope (11th canonical drug)"
+
+# ════════════════════════════════════════════════════════════════════════════
+# Case 26: Lithium — twelfth canonical drug, fifth oral-IR case, FIRST with
+# zero hepatic clearance and its OWN PS vector (ions need reduced PS in
+# brain/bone/adipose). Single 300 mg carbonate capsule (= 56.4 mg Li+,
+# 8.12 mEq; tlag = 0.25 h) → 1st-order gut absorption (ka = 1.0/h) with NO
+# first-pass loss (F = 1.00) → blood → PBPK28 CN, dt = 0.001. Purely renal
+# sink CL = 1.3 L/h (~22% of GFR). Kp from ECF physiology + measured
+# anchors (Vd ~42 L) — never lipophilic-neutral predictors. Sounio ref
+# drives the stdlib scenario itself; Node side is DEFAULT_PARAMS_LITHIUM.
+#   26a  organ-average cavg   Node ↔ Sounio, STRICT 1% RMSE per organ
+#   26b  mass envelope        0 <= total mass <= cumulative absorbed, 12/12
+# Strict 1% (no absolute floor needed): worst organ is 0.001%. Blood Cmax
+# 0.174 mEq/L single 300 mg dose (below the 0.6-1.0 TDM band, as expected).
+# ════════════════════════════════════════════════════════════════════════════
+echo
+echo "[pbpk28-parity] Case 26: Sounio ↔ Node lithium PBPK28 (oral IR)"
+
+LI_SIO_LOG="$OUT_DIR/li_sounio.txt"
+LI_NODE_LOG="$OUT_DIR/li_node.txt"
+"$SOUC_BIN" run tests/run-pass/dissertation_pbpk28_parity_ref_lithium.sio > "$LI_SIO_LOG" 2>&1 || {
+  echo "[pbpk28-parity:case26] FAIL: Sounio lithium ref returned non-zero" >&2
+  tail -n 20 "$LI_SIO_LOG" >&2; exit 1; }
+if ! grep -q '^DISSERTATION_PBPK28_LITHIUM_PARITY_DONE$' "$LI_SIO_LOG"; then
+  echo "[pbpk28-parity:case26] FAIL: Sounio lithium ref did not emit DONE" >&2; exit 1; fi
+node "$NODE_RUNNER" --drug=lithium > "$LI_NODE_LOG" 2>&1 || {
+  echo "[pbpk28-parity:case26] FAIL: Node lithium runner returned non-zero" >&2
+  tail -n 20 "$LI_NODE_LOG" >&2; exit 1; }
+if ! grep -q '^DISSERTATION_PBPK28_LITHIUM_PARITY_NODE v1$' "$LI_NODE_LOG"; then
+  echo "[pbpk28-parity:case26] FAIL: Node lithium runner header mismatch" >&2; exit 1; fi
+
+LI_SIO_TSV="$OUT_DIR/li_sounio.tsv"
+LI_NODE_TSV="$OUT_DIR/li_node.tsv"
+parse_to_tsv "$LI_SIO_LOG" "$LI_SIO_TSV"
+parse_to_tsv "$LI_NODE_LOG" "$LI_NODE_TSV"
+
+LI_SIO_ROWS=$(wc -l < "$LI_SIO_TSV")
+LI_NODE_ROWS=$(wc -l < "$LI_NODE_TSV")
+if [[ "$LI_SIO_ROWS" -ne "$EXPECTED_ROWS" || "$LI_NODE_ROWS" -ne "$EXPECTED_ROWS" ]]; then
+  echo "[pbpk28-parity:case26] FAIL: lithium row count mismatch — Sounio=$LI_SIO_ROWS Node=$LI_NODE_ROWS expected=$EXPECTED_ROWS" >&2
+  exit 1
+fi
+echo "[pbpk28-parity:case26] both runs emitted $LI_SIO_ROWS records"
+
+LI_JOINED="$OUT_DIR/li_joined.tsv"
+awk -F'\t' '
+  NR==FNR { S[$1"|"$2] = $5; next }
+  { print $1"\t"$2"\t"S[$1"|"$2]"\t"$5 }
+' "$LI_SIO_TSV" "$LI_NODE_TSV" > "$LI_JOINED"
+
+awk -F'\t' -v THR="$RMSE_THRESHOLD_PCT" '
+  {
+    i = $2 + 0; cs = $3 + 0; cn = $4 + 0;
+    d = cs - cn; SS[i] += d * d; NN[i] += 1;
+    if (cs > PK[i]) PK[i] = cs;
+    if (cn > PK[i]) PK[i] = cn;
+  }
+  END {
+    bad = 0;
+    for (i = 0; i < 14; i++) {
+      if (NN[i] == 0) { printf "PBPK28_LITHIUM_PARITY_FAIL organ %d MISSING\n", i; bad += 1; continue; }
+      rmse = sqrt(SS[i] / NN[i]); pk = PK[i] + 0;
+      if (pk == 0) { continue; }
+      pct = 100.0 * rmse / pk;
+      if (pct >= THR + 0) { printf "PBPK28_LITHIUM_PARITY_FAIL organ %d pct=%.4f rmse=%.3g\n", i, pct, rmse; bad += 1; }
+    }
+    if (bad > 0) { exit 1; }
+    printf "PBPK28_LITHIUM_PARITY_PASS 14/14 compartments within %s%% RMSE (strict)\n", THR;
+  }
+' "$LI_JOINED"
+
+paste <(grep "^TMASS|m=" "$LI_SIO_LOG" | sed "s/^TMASS|m=//") \
+      <(grep "^TREL|cum=" "$LI_SIO_LOG" | sed "s/^TREL|cum=//") \
+  | awk -v FAILM="PBPK28_LITHIUM_MASS_FAIL" -v PASS="PBPK28_LITHIUM_MASS_PASS" '
+      { m=($1+0); r=($2+0); n++;
+        if (!(m >= 0 && m <= r)) { printf "%s sample %d: mass %.6f outside [0, %.6f]\n", FAILM, n, m, r; bad=1 } }
+      END { if (n != 12) { printf "%s row count %d != 12\n", FAILM, n; exit 1 }
+        if (bad) exit 1;
+        printf "%s 12/12 samples within [0, absorbed]\n", PASS }'
+
+echo
+echo "[pbpk28-parity] lithium oral-IR canonical: renal-only sink + ion Kp + mass envelope (12th canonical drug)"

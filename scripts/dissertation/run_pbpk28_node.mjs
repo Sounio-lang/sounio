@@ -27,10 +27,11 @@ const {
   DEFAULT_PARAMS_OLANZAPINE,
   DEFAULT_PARAMS_CLOZAPINE,
   DEFAULT_PARAMS_QUETIAPINE,
+  DEFAULT_PARAMS_LITHIUM,
   degenerateParams, N,
 } = core;
 
-// CLI: --drug=rapamycin|semaglutide|tirzepatide|everolimus|tacrolimus|olanzapine|clozapine|quetiapine  --case=literature|degenerate
+// CLI: --drug=rapamycin|semaglutide|tirzepatide|everolimus|tacrolimus|olanzapine|clozapine|quetiapine|lithium  --case=literature|degenerate
 const args = Object.fromEntries(
   process.argv.slice(2)
     .filter(a => a.startsWith('--'))
@@ -55,6 +56,13 @@ if (DRUG === 'tirzepatide') {
     ...DEFAULT_PARAMS_EVEROLIMUS,
     bolusMg: 0.0,         // no IV bolus — Higuchi stent release only
     stentActive: true,
+  };
+}
+ else if (DRUG === 'lithium') {
+  baseParams = {
+    ...DEFAULT_PARAMS_LITHIUM,
+    bolusMg: 0.0,         // no IV bolus — oral IR gut absorption only
+    stentActive: true,    // re-used as 'input active'
   };
 }
  else if (DRUG === 'quetiapine') {
@@ -115,6 +123,9 @@ if (DRUG === 'tirzepatide') {
   out.push('DISSERTATION_PBPK28_TIRZEPATIDE_PARITY_NODE v1');
 } else if (DRUG === 'everolimus') {
   out.push('DISSERTATION_PBPK28_EVEROLIMUS_PARITY_NODE v1');
+}
+ else if (DRUG === 'lithium') {
+  out.push('DISSERTATION_PBPK28_LITHIUM_PARITY_NODE v1');
 }
  else if (DRUG === 'quetiapine') {
   out.push('DISSERTATION_PBPK28_QUETIAPINE_PARITY_NODE v1');
@@ -180,6 +191,9 @@ if (DRUG === 'tirzepatide') {
   out.push('DISSERTATION_PBPK28_TIRZEPATIDE_PARITY_DONE');
 } else if (DRUG === 'everolimus') {
   out.push('DISSERTATION_PBPK28_EVEROLIMUS_PARITY_DONE');
+}
+ else if (DRUG === 'lithium') {
+  out.push('DISSERTATION_PBPK28_LITHIUM_PARITY_DONE');
 }
  else if (DRUG === 'quetiapine') {
   out.push('DISSERTATION_PBPK28_QUETIAPINE_PARITY_DONE');
