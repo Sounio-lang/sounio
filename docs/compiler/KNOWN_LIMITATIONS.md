@@ -36,7 +36,7 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
 | Rung | Scope | Engine |
 |---|---|---|
 | KL-9 | seed: #1494 imported-module typecheck errors non-fatal | lean_single |
-| KL-11 | #1792 first-order / variance across user calls (pow FO closed) | madaros |
+| KL-11 | #1792 first-order / variance across user calls (pow FO + mixed Hessian closed) | madaros |
 | KL-14 | FFI: 14a–14d3 CLOSED | madaros |
 | KL-15 | `f256` surface (15a softfloat add/sub partial), `Knowledge<f128>`/GUM | madaros |
 | KL-16 | Hessian Tier-4 (16a–16f CLOSED; residual H-multi/non-H00 if/a64 atan2) | lean_single |
@@ -136,13 +136,15 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
 - Locus: `ir/lower.sio` Knowledge layout / `variance_*_regs` / `pending_variance_reg`.
   Audit: `docs/audit/EPISTEMIC_FABRICATION_DETECT_2026-08-17.md`,
   `docs/audit/MADAROS_FO_CALL_BOUNDARY_DISPATCH_2026-08-18.md`.
-- **`pow` FO / Hessian transfer — CLOSED (KL-11 partial, 2026-09-12).**
+- **`pow` FO / Hessian transfer — CLOSED (KL-11 partial, 2026-09-12, completed 2026-11-03).**
   `fo_xfer_seed_transcendentals` registers `pow` as kind 9; `fo_apply_transfer_kind`
-  emits `∂/∂x`, `∂²/∂x²`, and first-order `∂/∂y` when the exponent carries
-  sensitivity. Witness: `tests/run-pass/kl11_pow_fo_hessian.sio`
-  (`hessian_of(pow(x, 3.0), 0, 0)` at `x=0.5` → `3.0`). Pin:
-  `scripts/ci/madaros_kl11_pow_fo_gate.sh`. Mixed Hessian in the exponent, and
-  FO across arbitrary user `fn` bodies, remain open.
+  emits `∂/∂x`, `∂²/∂x²`, first-order `∂/∂y`, exponent second derivative `∂²/∂y²`,
+  and mixed derivative `∂²/∂x∂y` when base or exponent carry sensitivity / Hessian.
+  Witnesses: `tests/run-pass/kl11_pow_fo_hessian.sio` (`hessian_of(pow(x, 3.0), 0, 0)`
+  at `x=0.5` → `3.0`) and `tests/run-pass/kl11_pow_mixed_hessian.sio`
+  (`hessian_of(pow(x, y), 0, 1)` at `x=2.0, y=3.0` → `4(1 + 3 ln 2)`). Pin:
+  `scripts/ci/madaros_kl11_pow_fo_gate.sh`. FO across arbitrary user `fn` bodies
+  remains open.
 
 
 ### KL-13 — derived units and unit loss (#2388) — CLOSED

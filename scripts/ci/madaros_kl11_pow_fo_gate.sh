@@ -19,13 +19,11 @@ echo "== madaros_kl11_pow_fo_gate =="
 echo "compiler under test: $SOUC ${SOUNIO_MADAROS_BIN:+(SOUNIO_MADAROS_BIN=$SOUNIO_MADAROS_BIN)}"
 
 fails=0
-SRC=tests/run-pass/kl11_pow_fo_hessian.sio
-SENT=KL11_POW_FO_HESSIAN_PASS
 
 run_one() {
-  local label="$1" expect="$2"; shift 2
+  local label="$1" src="$2" sent="$3" expect="$4"; shift 4
   local elf="$OUT/$label.elf" log="$OUT/$label.log"
-  if ! env "$@" "$SOUC" compile "$SRC" -o "$elf" >"$OUT/$label.compile.log" 2>&1; then
+  if ! env "$@" "$SOUC" compile "$src" -o "$elf" >"$OUT/$label.compile.log" 2>&1; then
     echo "FAIL  $label -- compile"
     tail -40 "$OUT/$label.compile.log" || true
     fails=$((fails + 1)); return
@@ -36,11 +34,11 @@ run_one() {
   local rc=$?
   set -e
   local got=absent
-  grep -q "$SENT" "$log" && got=present
+  grep -q "$sent" "$log" && got=present
   case "$expect" in
     pass)
       if [[ "$rc" -eq 0 && "$got" == present ]]; then
-        echo "ok    $label -- $SENT"
+        echo "ok    $label -- $sent"
         sed 's/^/        /' "$log"
       else
         echo "FAIL  $label -- rc=$rc sentinel=$got"
@@ -51,15 +49,17 @@ run_one() {
       if [[ "$got" == absent ]]; then
         echo "ok    $label -- sabotage kills it (rc=$rc)"
       else
-        echo "FAIL  $label -- sabotage armed and $SENT still printed"
+        echo "FAIL  $label -- sabotage armed and $sent still printed"
         sed 's/^/        /' "$log" || true
         fails=$((fails + 1))
       fi ;;
   esac
 }
 
-run_one pow_hess pass
-run_one pow_hess_sab fail SOUNIO_SABOTAGE_HESSIAN_CHAIN=1
+run_one pow_hess tests/run-pass/kl11_pow_fo_hessian.sio KL11_POW_FO_HESSIAN_PASS pass
+run_one pow_hess_sab tests/run-pass/kl11_pow_fo_hessian.sio KL11_POW_FO_HESSIAN_PASS fail SOUNIO_SABOTAGE_HESSIAN_CHAIN=1
+run_one pow_mixed_hess tests/run-pass/kl11_pow_mixed_hessian.sio KL11_POW_MIXED_HESSIAN_PASS pass
+run_one pow_mixed_hess_sab tests/run-pass/kl11_pow_mixed_hessian.sio KL11_POW_MIXED_HESSIAN_PASS fail SOUNIO_SABOTAGE_HESSIAN_CHAIN=1
 
 if [[ "$fails" -ne 0 ]]; then
   echo "MADAROS_KL11_POW_FO_GATE=FAIL ($fails)"

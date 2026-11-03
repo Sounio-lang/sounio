@@ -25,7 +25,7 @@ owning document records it closed with a receipt.
 
 | item | engine | owner |
 |---|---|---|
-| cross-call first-order variance not carried for general user calls (KL-11) | Madaros | [`KNOWN_LIMITATIONS.md`](../compiler/KNOWN_LIMITATIONS.md) |
+| cross-call first-order variance not carried for general user calls (KL-11) | Madaros | [`KNOWN_LIMITATIONS.md`](../compiler/KNOWN_LIMITATIONS.md) (`pow` FO + mixed Hessian closed) |
 | `Knowledge` propagation carries no rounding term at all | both | [interval proposal](../proposals/CERTIFIED_INTERVAL_PRIMITIVE_2026-10-22.md) §1 |
 
 ### Closed items (with receipts)

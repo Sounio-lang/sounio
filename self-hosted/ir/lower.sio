@@ -19873,6 +19873,7 @@ impl Lowerer {
         let p1 = lo.fo_lower_nth_arg_variance(args, 1)
         lo = p1.0
         let s1 = lo.fo_snapshot_expr_sens()
+        let h1 = lo.so_snapshot_expr_hess()
         if kind == 3 {
             lo = lo.fo_combine_sens_addsub(s0, s1, false)
             return lo.fo_emit_var_from_sens()
@@ -19927,7 +19928,8 @@ impl Lowerer {
         // kind 9: pow(x, y). Emit via ffi_pow (id 49) — a bare `pow` ir_call is
         // an empty_stub_ud2. Derivatives from one evaluation:
         //   f = pow(x,y);  ∂f/∂x = y·f/x;  ∂²f/∂x² = y·(y-1)·f/(x·x);
-        //   ∂f/∂y = f·log(x).
+        //   ∂f/∂y = f·log(x);  ∂²f/∂y² = f·(log(x))²;
+        //   ∂²f/∂x∂y = (f/x)·(1 + y·log(x)).
         if kind == 9 {
             let avalx = lo.fo_lower_nth_arg_value(args, 0)
             lo = avalx.0
@@ -19969,6 +19971,48 @@ impl Lowerer {
             let d2xp = lo.fo_emit_f64_binop(tyf, BinaryOp::OpDiv, xx)
             lo = d2xp.0
             let d2x = d2xp.1
+
+            var s1_live: i64 = 0
+            var qi: i64 = 0
+            while qi < 32 {
+                if s1[qi as usize] >= 0 { s1_live = 1 }
+                qi = qi + 1
+            }
+            var h1_live: i64 = 0
+            var hi: i64 = 0
+            while hi < 36 {
+                if h1[hi as usize] >= 0 { h1_live = 1 }
+                hi = hi + 1
+            }
+            var d1y: i64 = 0 - 1
+            var d2y: i64 = 0 - 1
+            var dxy: i64 = 0 - 1
+            if s1_live == 1 || h1_live == 1 {
+                let lc = lo.fo_emit_math_call(make_name("log"), xv)
+                lo = lc.0
+                let lv = lc.1
+                let d1yp = lo.fo_emit_f64_binop(fv, BinaryOp::OpMul, lv)
+                lo = d1yp.0
+                d1y = d1yp.1
+                if lo.so_enabled && !sab_hessian_chain() {
+                    let d2yp = lo.fo_emit_f64_binop(d1y, BinaryOp::OpMul, lv)
+                    lo = d2yp.0
+                    d2y = d2yp.1
+                    let ylvp = lo.fo_emit_f64_binop(yv, BinaryOp::OpMul, lv)
+                    lo = ylvp.0
+                    let ylv = ylvp.1
+                    let t1p = lo.fo_emit_f64_binop(one, BinaryOp::OpAdd, ylv)
+                    lo = t1p.0
+                    let t1 = t1p.1
+                    let foxp = lo.fo_emit_f64_binop(fv, BinaryOp::OpDiv, xv)
+                    lo = foxp.0
+                    let fox = foxp.1
+                    let dxyp = lo.fo_emit_f64_binop(fox, BinaryOp::OpMul, t1)
+                    lo = dxyp.0
+                    dxy = dxyp.1
+                }
+            }
+
             if lo.so_enabled && !sab_hessian_chain() {
                 var hj9: i64 = 0
                 while hj9 < 8 {
@@ -19976,8 +20020,11 @@ impl Lowerer {
                     while hk9 < 8 {
                         let sj9 = s0[hj9 as usize]
                         let sk9 = s0[hk9 as usize]
+                        let sj1 = s1[hj9 as usize]
+                        let sk1 = s1[hk9 as usize]
                         let hid9 = lo.so_hess_idx(hj9, hk9)
                         let hg9 = h0[hid9 as usize]
+                        let hg1 = h1[hid9 as usize]
                         var acc9: i64 = 0 - 1
                         if hg9 >= 0 {
                             let d = lo.fresh_reg()
@@ -20009,6 +20056,97 @@ impl Lowerer {
                                 acc9 = sum
                             }
                         }
+                        if d1y >= 0 && hg1 >= 0 {
+                            let d = lo.fresh_reg()
+                            lo = d.0
+                            let dr = d.1
+                            lo = lo.emit(ir_binop_typed(dr, d1y, BinaryOp::OpMul, hg1, true, true))
+                            lo = lo.emit(ir_mark_float_reg(dr))
+                            if acc9 < 0 {
+                                acc9 = dr
+                            } else {
+                                let d3 = lo.fresh_reg()
+                                lo = d3.0
+                                let sum = d3.1
+                                lo = lo.emit(ir_binop_typed(sum, acc9, BinaryOp::OpAdd, dr, true, true))
+                                lo = lo.emit(ir_mark_float_reg(sum))
+                                acc9 = sum
+                            }
+                        }
+                        if d2y >= 0 && sj1 >= 0 && sk1 >= 0 {
+                            let d = lo.fresh_reg()
+                            lo = d.0
+                            let pj1 = d.1
+                            lo = lo.emit(ir_binop_typed(pj1, sj1, BinaryOp::OpMul, sk1, true, true))
+                            lo = lo.emit(ir_mark_float_reg(pj1))
+                            let d2 = lo.fresh_reg()
+                            lo = d2.0
+                            let t2y = d2.1
+                            lo = lo.emit(ir_binop_typed(t2y, d2y, BinaryOp::OpMul, pj1, true, true))
+                            lo = lo.emit(ir_mark_float_reg(t2y))
+                            if acc9 < 0 {
+                                acc9 = t2y
+                            } else {
+                                let d3 = lo.fresh_reg()
+                                lo = d3.0
+                                let sum = d3.1
+                                lo = lo.emit(ir_binop_typed(sum, acc9, BinaryOp::OpAdd, t2y, true, true))
+                                lo = lo.emit(ir_mark_float_reg(sum))
+                                acc9 = sum
+                            }
+                        }
+                        if dxy >= 0 {
+                            var cross: i64 = 0 - 1
+                            if sj9 >= 0 && sk1 >= 0 {
+                                let d = lo.fresh_reg()
+                                lo = d.0
+                                let c1 = d.1
+                                lo = lo.emit(ir_binop_typed(c1, sj9, BinaryOp::OpMul, sk1, true, true))
+                                lo = lo.emit(ir_mark_float_reg(c1))
+                                cross = c1
+                            }
+                            if hj9 != hk9 && sk9 >= 0 && sj1 >= 0 {
+                                let d = lo.fresh_reg()
+                                lo = d.0
+                                let c2 = d.1
+                                lo = lo.emit(ir_binop_typed(c2, sk9, BinaryOp::OpMul, sj1, true, true))
+                                lo = lo.emit(ir_mark_float_reg(c2))
+                                if cross < 0 {
+                                    cross = c2
+                                } else {
+                                    let dsum = lo.fresh_reg()
+                                    lo = dsum.0
+                                    let csum = dsum.1
+                                    lo = lo.emit(ir_binop_typed(csum, cross, BinaryOp::OpAdd, c2, true, true))
+                                    lo = lo.emit(ir_mark_float_reg(csum))
+                                    cross = csum
+                                }
+                            } else if hj9 == hk9 && cross >= 0 {
+                                let dsum = lo.fresh_reg()
+                                lo = dsum.0
+                                let csum = dsum.1
+                                lo = lo.emit(ir_binop_typed(csum, cross, BinaryOp::OpAdd, cross, true, true))
+                                lo = lo.emit(ir_mark_float_reg(csum))
+                                cross = csum
+                            }
+                            if cross >= 0 {
+                                let d = lo.fresh_reg()
+                                lo = d.0
+                                let txy = d.1
+                                lo = lo.emit(ir_binop_typed(txy, dxy, BinaryOp::OpMul, cross, true, true))
+                                lo = lo.emit(ir_mark_float_reg(txy))
+                                if acc9 < 0 {
+                                    acc9 = txy
+                                } else {
+                                    let d3 = lo.fresh_reg()
+                                    lo = d3.0
+                                    let sum = d3.1
+                                    lo = lo.emit(ir_binop_typed(sum, acc9, BinaryOp::OpAdd, txy, true, true))
+                                    lo = lo.emit(ir_mark_float_reg(sum))
+                                    acc9 = sum
+                                }
+                            }
+                        }
                         lo.so_expr_hess[hid9 as usize] = acc9
                         hk9 = hk9 + 1
                     }
@@ -20019,20 +20157,8 @@ impl Lowerer {
             }
             var sLx: [i64; 32] = [-1; 32]
             lo = lo.fo_combine_sens_mul(sLx, s0, d1x, xv)
-            var s1_live: i64 = 0
-            var qi: i64 = 0
-            while qi < 32 {
-                if s1[qi as usize] >= 0 { s1_live = 1 }
-                qi = qi + 1
-            }
             if s1_live == 1 {
                 let s_base = lo.fo_snapshot_expr_sens()
-                let lc = lo.fo_emit_math_call(make_name("log"), xv)
-                lo = lc.0
-                let lv = lc.1
-                let d1yp = lo.fo_emit_f64_binop(fv, BinaryOp::OpMul, lv)
-                lo = d1yp.0
-                let d1y = d1yp.1
                 var sLy: [i64; 32] = [-1; 32]
                 lo = lo.fo_combine_sens_mul(sLy, s1, d1y, yv)
                 let s_exp = lo.fo_snapshot_expr_sens()
