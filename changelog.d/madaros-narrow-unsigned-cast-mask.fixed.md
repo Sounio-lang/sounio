@@ -1,0 +1,1 @@
+`as u8`, `as u16` and `as u32` now truncate an integer to the destination width under Madaros: `300 as u8` is 44, `70000 as u16` is 4464 and `-1 as u32` is 4294967295, where they used to keep the full 64-bit value. Casts to `u64`, `usize`, signed types and floats are unchanged. Arithmetic on narrow unsigned values (`u32` + `u32` past 2^32) still does not wrap.

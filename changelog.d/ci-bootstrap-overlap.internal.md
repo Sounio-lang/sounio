@@ -1,0 +1,1 @@
+Publish the freshly source-built macOS seed before independent bootstrap regressions. Run those unchanged regressions in a separate required job, verifying same-run stage2 source and binary identity, so native macOS validation can overlap the modular bootstrap proof.

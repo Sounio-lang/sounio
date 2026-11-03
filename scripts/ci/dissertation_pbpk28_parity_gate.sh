@@ -1124,3 +1124,84 @@ mdz_series_rmse aucr 8 "AUC ratio" "MIDAZOLAM_AUCR_PARITY_PASS" "MIDAZOLAM_AUCR_
 
 echo
 echo "[pbpk28-parity] midazolam CYP3A DDI canonical: solo PK + ketoconazole-inhibited PK + AUCR curve all within ${RMSE_THRESHOLD_PCT}% RMSE (5th canonical drug)"
+
+# ════════════════════════════════════════════════════════════════════════════
+# Case 20: Tirzepatide — sixth canonical drug, second incretin peptide.
+# SC depot (5 mg weekly, ka=0.0164/h, F=0.80, Urva 2022) + proteolytic CL
+# 0.061 L/h (no renal clearance of parent per Martin 2024). PK only:
+# no TMDD/PD layer (SIO-517 follow-up). Sounio ref drives the stdlib
+# scenario itself; Node side is DEFAULT_PARAMS_TIRZEPATIDE.
+#   20a  organ-average cavg   Node ↔ Sounio, <1% RMSE per organ (168 records)
+#   20b  mass envelope        0 <= total mass <= cumulative released, 12/12
+# ════════════════════════════════════════════════════════════════════════════
+echo
+echo "[pbpk28-parity] Case 20: Sounio ↔ Node tirzepatide PBPK28 (SC depot)"
+
+TIRZ_SIO_LOG="$OUT_DIR/tirz_sounio.txt"
+TIRZ_NODE_LOG="$OUT_DIR/tirz_node.txt"
+"$SOUC_BIN" run tests/run-pass/dissertation_pbpk28_parity_ref_tirzepatide.sio > "$TIRZ_SIO_LOG" 2>&1 || {
+  echo "[pbpk28-parity:case20] FAIL: Sounio tirzepatide ref returned non-zero" >&2
+  tail -n 20 "$TIRZ_SIO_LOG" >&2; exit 1; }
+if ! grep -q '^DISSERTATION_PBPK28_TIRZEPATIDE_PARITY_DONE$' "$TIRZ_SIO_LOG"; then
+  echo "[pbpk28-parity:case20] FAIL: Sounio tirzepatide ref did not emit DONE" >&2; exit 1; fi
+node "$NODE_RUNNER" --drug=tirzepatide > "$TIRZ_NODE_LOG" 2>&1 || {
+  echo "[pbpk28-parity:case20] FAIL: Node tirzepatide runner returned non-zero" >&2
+  tail -n 20 "$TIRZ_NODE_LOG" >&2; exit 1; }
+if ! grep -q '^DISSERTATION_PBPK28_TIRZEPATIDE_PARITY_DONE$' "$TIRZ_NODE_LOG"; then
+  echo "[pbpk28-parity:case20] FAIL: Node tirzepatide runner did not emit DONE" >&2; exit 1; fi
+if ! grep -q '^DISSERTATION_PBPK28_TIRZEPATIDE_PARITY_NODE v1$' "$TIRZ_NODE_LOG"; then
+  echo "[pbpk28-parity:case20] FAIL: Node tirzepatide runner header mismatch" >&2; exit 1; fi
+
+TIRZ_SIO_TSV="$OUT_DIR/tirz_sounio.tsv"
+TIRZ_NODE_TSV="$OUT_DIR/tirz_node.tsv"
+parse_to_tsv "$TIRZ_SIO_LOG" "$TIRZ_SIO_TSV"
+parse_to_tsv "$TIRZ_NODE_LOG" "$TIRZ_NODE_TSV"
+
+TIRZ_SIO_ROWS=$(wc -l < "$TIRZ_SIO_TSV")
+TIRZ_NODE_ROWS=$(wc -l < "$TIRZ_NODE_TSV")
+if [[ "$TIRZ_SIO_ROWS" -ne "$EXPECTED_ROWS" || "$TIRZ_NODE_ROWS" -ne "$EXPECTED_ROWS" ]]; then
+  echo "[pbpk28-parity:case20] FAIL: tirzepatide row count mismatch — Sounio=$TIRZ_SIO_ROWS Node=$TIRZ_NODE_ROWS expected=$EXPECTED_ROWS" >&2
+  exit 1
+fi
+echo "[pbpk28-parity:case20] both runs emitted $TIRZ_SIO_ROWS records"
+
+TIRZ_JOINED="$OUT_DIR/tirz_joined.tsv"
+awk -F'\t' '
+  NR==FNR { S[$1"|"$2] = $5; next }
+  { print $1"\t"$2"\t"S[$1"|"$2]"\t"$5 }
+' "$TIRZ_SIO_TSV" "$TIRZ_NODE_TSV" > "$TIRZ_JOINED"
+
+awk -F'\t' -v THR="$RMSE_THRESHOLD_PCT" '
+  {
+    i = $2 + 0; cs = $3 + 0; cn = $4 + 0;
+    d = cs - cn; SS[i] += d * d; NN[i] += 1;
+    if (cs > PK[i]) PK[i] = cs;
+    if (cn > PK[i]) PK[i] = cn;
+  }
+  END {
+    bad = 0;
+    for (i = 0; i < 14; i++) {
+      if (NN[i] == 0) { printf "PBPK28_TIRZEPATIDE_PARITY_FAIL organ %d MISSING\n", i; bad += 1; continue; }
+      rmse = sqrt(SS[i] / NN[i]); pk = PK[i] + 0;
+      if (pk == 0) { continue; }
+      pct = 100.0 * rmse / pk;
+      if (pct >= THR + 0) { printf "PBPK28_TIRZEPATIDE_PARITY_FAIL organ %d pct=%.4f\n", i, pct; bad += 1; }
+    }
+    if (bad > 0) { exit 1; }
+    printf "PBPK28_TIRZEPATIDE_PARITY_PASS 14/14 compartments within %s%% RMSE\n", THR;
+  }
+' "$TIRZ_JOINED"
+
+# Mass envelope: total mass stays within [0, cumulative released] at every
+# sample — the clamp-injection defect class (50 mg bolus -> 85 mg) fails this.
+paste <(grep "^TMASS|m=" "$TIRZ_SIO_LOG" | sed "s/^TMASS|m=//") \
+      <(grep "^TREL|cum=" "$TIRZ_SIO_LOG" | sed "s/^TREL|cum=//") \
+  | awk -v FAILM="PBPK28_TIRZEPATIDE_MASS_FAIL" -v PASS="PBPK28_TIRZEPATIDE_MASS_PASS" '
+      { m=($1+0); r=($2+0); n++;
+        if (!(m >= 0 && m <= r)) { printf "%s sample %d: mass %.6f outside [0, %.6f]\n", FAILM, n, m, r; bad=1 } }
+      END { if (n != 12) { printf "%s row count %d != 12\n", FAILM, n; exit 1 }
+        if (bad) exit 1;
+        printf "%s 12/12 samples within [0, released]\n", PASS }'
+
+echo
+echo "[pbpk28-parity] tirzepatide incretin canonical: SC depot PK + mass envelope within ${RMSE_THRESHOLD_PCT}% RMSE (6th canonical drug)"

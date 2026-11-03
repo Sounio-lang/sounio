@@ -30,7 +30,7 @@ Siga [`CONVENTIONS.md`](CONVENTIONS.md) para benchmarks por módulo.
 | [`bayes`](bayes/lib.sio) | PyMC | <4x | ⏳ Pendente |
 | [`causal`](causal/lib.sio) | doWhy | <3x | ⏳ Pendente |
 | [`ode`](ode/lib.sio) | SciPy.odeint | <2x | ⏳ Cross-lang |
-| [`quantum`](quantum/lib.sio) | Qiskit | <5x | ⏳ Pendente |
+| [`quantum`](quantum/linear.sio) | Qiskit | <5x | ⏳ Pendente |
 | [`signal`](signal/lib.sio) | SciPy.signal | <2x | ⏳ Pendente |
 | [`special`](special/lib.sio) | SciPy.special | <1.5x | ⏳ Pendente |
 | [`collections`](collections/lib.sio) | Rust std | <1.2x | ⏳ Pendente |

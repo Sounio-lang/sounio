@@ -21,10 +21,11 @@ const core = await import(CORE_PATH);
 const {
   initialState, makeScratch, stepStrang, organAverage,
   DEFAULT_PARAMS_RAPAMYCIN, DEFAULT_PARAMS_SEMAGLUTIDE,
+  DEFAULT_PARAMS_TIRZEPATIDE,
   degenerateParams, N,
 } = core;
 
-// CLI: --drug=rapamycin|semaglutide  --case=literature|degenerate
+// CLI: --drug=rapamycin|semaglutide|tirzepatide  --case=literature|degenerate
 const args = Object.fromEntries(
   process.argv.slice(2)
     .filter(a => a.startsWith('--'))
@@ -38,7 +39,13 @@ const DT = 0.001;
 const SAMPLES = [0.1, 0.5, 1.0, 2.0, 4.0, 6.0, 8.0, 12.0, 16.0, 20.0, 24.0, 30.0];
 
 let baseParams;
-if (DRUG === 'semaglutide') {
+if (DRUG === 'tirzepatide') {
+  baseParams = {
+    ...DEFAULT_PARAMS_TIRZEPATIDE,
+    bolusMg: 0.0,         // no IV bolus — SC depot release only
+    stentActive: true,    // re-used as 'depot active'
+  };
+} else if (DRUG === 'semaglutide') {
   baseParams = {
     ...DEFAULT_PARAMS_SEMAGLUTIDE,
     bolusMg: 0.0,         // no IV bolus — SC depot release only
@@ -63,7 +70,9 @@ const scratch = makeScratch();
 let t = 0;
 
 const out = [];
-if (DRUG === 'semaglutide') {
+if (DRUG === 'tirzepatide') {
+  out.push('DISSERTATION_PBPK28_TIRZEPATIDE_PARITY_NODE v1');
+} else if (DRUG === 'semaglutide') {
   out.push('DISSERTATION_PBPK28_SEMAGLUTIDE_PARITY_NODE v1');
 } else {
   out.push('DISSERTATION_PBPK28_PARITY_NODE v1');
@@ -110,7 +119,9 @@ for (const target of SAMPLES) {
     }
   }
 }
-if (DRUG === 'semaglutide') {
+if (DRUG === 'tirzepatide') {
+  out.push('DISSERTATION_PBPK28_TIRZEPATIDE_PARITY_DONE');
+} else if (DRUG === 'semaglutide') {
   out.push('DISSERTATION_PBPK28_SEMAGLUTIDE_PARITY_DONE');
 } else {
   out.push('DISSERTATION_PBPK28_PARITY_DONE');

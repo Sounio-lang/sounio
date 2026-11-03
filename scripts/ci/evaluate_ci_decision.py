@@ -36,7 +36,14 @@ def main() -> int:
         "native-selfhost-linux-x86_64": any(
             truthy(impact.get(key)) for key in ("compiler", "runtime", "stdlib", "tests", "full")
         ),
+        "native-linux-regressions": any(
+            truthy(impact.get(key)) for key in ("compiler", "runtime", "stdlib", "tests", "full")
+        ),
         "source-bootstrap-selfhost-linux-x86_64": truthy(impact.get("compiler")) or truthy(impact.get("full")),
+        "source-bootstrap-regressions": truthy(impact.get("compiler")) or truthy(impact.get("full")),
+        "scientific-reference-controls": any(
+            truthy(impact.get(key)) for key in ("compiler", "runtime", "stdlib", "tests", "full")
+        ),
         "current-source-madaros": any(
             truthy(impact.get(key)) for key in ("compiler", "runtime", "stdlib", "tests", "full")
         ),

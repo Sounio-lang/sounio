@@ -297,3 +297,188 @@ The workflow-reference ratchet runs there before compilation; its existing
 Contracts Core invocation is kept for in-job receipts. The SCO reuse selftest
 is named directly in Fast Checks, satisfying the direct-reference ratchet without
 relaxing its frozen bound.
+
+### Science queue follow-up
+
+Run 41472572619 passed and its core/integration result union matched the prior
+full replay exactly (excluding duplicated per-job hash audit rows). Total time
+was 1774 seconds, so removal of duplicate builds alone did not reduce the
+observed end-to-end latency. Core replay took 183 seconds in preparation,
+358 in the native queue and 397 in the oracle queue. The next candidate
+prepares C++ references concurrently and removes the extra fixed two-worker
+ceiling, retaining CPU bounds, the existing four-GiB-per-worker budget and
+explicit STDLIB_DEEP_JOBS overrides. Scientific case bodies and compiler flags
+remain unchanged; missing, malformed or failing CPP worker statuses fail the
+parent. Hosted execution and another exact result-row comparison are required.
+
+### Remove the independent-reference false dependency
+
+Run 41483835566 passed with three workers and an unchanged case/status multiset.
+Its total remained 1586 seconds. The count-dispersion reference is a standalone
+C++ program with internal inputs; it uses no native output or compiler. ZIP
+log timestamps place its concordance interval near 390 seconds, with the
+archive timestamp precision applying. It was started only after native replay.
+The next graph runs it in scientific-reference-controls alongside the compiler
+build, requiring its verdict separately in CI Decision. Its C++ source, build
+flags, positive checks, mutant check and timeouts are unchanged. Core omits this
+case only when its required peer job owns it; standalone all retains it. The
+reference-only receipt never claims a Sounio compiler identity. Validation must
+compare the union of core, integration and independent-control case/status rows
+against the prior full replay, with per-job hash audits checked separately.
+
+### Independent reference controls
+
+The 3787 candidate passed with three workers and the full prior case/status
+multiset. Its observed total was 1586 seconds. The dispersion reference is a
+standalone C++ program with internal inputs; it consumes no Sounio output. ZIP
+log timestamps place its concordance interval near 390 seconds (archive
+timestamp precision applies). Starting it after the native queue was a false
+dependency. The next graph starts scientific-reference-controls alongside
+Madaros and requires its verdict separately. C++ source, compiler flags, case
+bodies, mutant check and timeouts remain unchanged. Core delegates this one
+control only to the required peer job; standalone all retains the entire
+inventory. The independent receipt hashes its own reference executable and
+never claims a Sounio compiler identity. Acceptance requires hosted success
+and equality of the union of core, integration and independent case/status
+rows against the prior full replay, checking per-job hash audits separately.
+
+### Release stage2 without waiting for independent regressions
+
+Run 41495855075 passed with an unchanged scientific case/status multiset,
+but total latency remained 1609 seconds. Native Linux finished after 428
+seconds and only then released Full Test Suite (879 seconds). CI Decision
+took 178 seconds, dominated by checkout. The producer now publishes fresh
+stage2 immediately after the existing host gate; aggregate field identity,
+feature fixed-point checks and runtime manifest proof run unchanged in a
+separate required consumer job. Both suite and regressions download the same
+run-scoped stage2 artifact. The producer keeps source-bootstrap enforcement.
+Missing, skipped, cancelled or failed selected regressions block CI Decision.
+The two status aggregation jobs use non-cone sparse checkout of their exact
+scripts, without a filter override. Hosted success and actual end-to-end
+timing remain the acceptance gate; projected overlap is not a timing receipt.
+
+### Independent Contracts shards and durable verified build cache
+
+Run41502769450 passed in1411 seconds, with Contracts Core taking1218 seconds.
+It still serialised independent research/ontology checks with compiler and
+repository contracts. A core/research matrix now runs both sets concurrently,
+with fail-fast disabled and the existing Contracts join requiring the complete
+matrix verdict. A frozen inventory from de7e51ee15 checks that each prior step's
+command, environment, original impact condition and relative order survive;
+only shared setup/summary runs on both shards. Related NumPy installation and
+self-falsifying checks remain together. The measured-claims gate derives its
+own sabotage census; ontology wrappers and prototype logs use their own scratch
+paths. Gate bodies and the scientific predicates are unchanged.
+
+The modular builder already has a content-addressed seed/Madaros cache. CI now
+transports that existing directory with actions/cache rather than discarding it
+with each hosted runner. The builder still executes unconditionally: it checks
+its source/stdlib tree, bootstrap bytes, build environment, artifact digest and
+clean-diagnostic receipt. Only an exact outer key may restore entries: it includes the source/stdlib
+tree, bootstrap bytes and build helper contents. Broad prefix restoration is
+forbidden because the existing internal keys do not include build recipes.
+Changing sources or a helper therefore cold-starts the CI cache. The observed
+32-second warm hit used the exact primary key and is unaffected by this rule.
+Fresh checkout receipts
+are prepared and verified by consumers as before. Private modified-source SCO
+builds are not redirected to the producer cache.
+
+Acceptance requires a complete hosted cold run, unchanged selected-step
+coverage across the matrix, cache save evidence, then hosted verified warm hits.
+No warm latency gain is claimed from static tests or a cache transport hit alone.
+
+### Canonical full-suite shards and effective worker limits
+
+The efc02646f3 run found one fresh failure: pbpk28_extract_only exceeded the
+unchanged30-second wrapper budget. The predecessor completed that case in17
+seconds. The failed run's log reported seven workers although the workflow
+passed --jobs4: the harness's dynamic policy can raise explicit job counts.
+This establishes a configuration mismatch, not a proven numerical defect or a
+complete explanation of the timeout. No timeout, case, tolerance or model code
+is changed to absorb the failure.
+
+Full Test Suite now runs four required shards, two workers each, with dynamic
+scaling explicitly disabled via the existing SOUNIO_TEST_JOBS_DYNAMIC switch.
+Each shard invokes the public canonical harness's --list-tests, partitions that
+inventory, and proves the sorted union has no omitted or duplicated path before
+running its selected list. No second copy of the harness globs is maintained.
+The same fresh stage2 artifact is downloaded independently by all four shards.
+Receipts retain the canonical/selected lists, shard identity, source SHA, compiler
+hash and JUnit results. Artifact names include shard and run attempt. The qd128
+accuracy replay runs once on shard0 and remains part of the required matrix
+verdict. Fail-fast remains disabled so another shard's failure cannot erase
+coverage evidence. CI Decision still requires the entire selected matrix.
+
+Fixtures use a small canonical-list provider and a compiler that must never be
+invoked. They reject missing/duplicated partition entries and lost matrix shards,
+worker-bound removal, incorrect list routing and disconnected accuracy replay.
+Acceptance requires all four hosted shards, effective worker-count receipts,
+exact canonical-list coverage and the unchanged PBPK test passing within its
+original budget. Historical warm/cold measurements do not qualify a new head.
+
+### Lean toolchains and exact-input proof products
+
+The Lean job previously transported formal/lean4/.lake under an immutable
+toolchain-only key. Later proof changes rebuilt from that frozen snapshot on
+every run. Keep toolchains in a separate cache keyed by both formal toolchain
+files and platform. Cache both formal/.lake and formal/lean4/.lake under an
+exact key covering all formal inputs (excluding .lake products), Lean gate
+recipes and the workflow. No restore-prefix fallback is used. Non-Lean formal
+inputs are included because proof elaboration may consume certificates/data.
+
+Every existing lake build, V1 mutant control, NS/fusion gate, fresh axiom report
+and inventory check remains mandatory on cache hits. Cache restoration is
+transport; Lake still validates build traces. The orchestration contract pins
+the predecessor proof job byte-for-byte outside the cache block and rejects
+omitted builds, skipped audits, missing input scopes and cross-source fallback.
+Hosted cold/warm results are required before reporting a latency improvement.
+
+### Overlap native macOS with independent bootstrap regressions
+
+The source-bootstrap producer publishes its fresh macOS seed and source-bound
+Linux stage2 immediately after the host gate and cross-build. A separate
+source-bootstrap-regressions job downloads the same-run stage2, verifies its
+checkout SHA and binary digest, restores execute permission and runs all
+original ABI, ARM64 store/identifier witnesses and modular typecheck proofs.
+Both jobs remain selected and fail-closed in CI Decision. Native macOS still
+requires the successful source-bootstrap producer; independent regressions
+may run concurrently with it and cannot be omitted from the final verdict.
+The original proof commands are frozen in bootstrap_steps_baseline.json and
+compared against their unique assignment in the two jobs. No compiler source,
+proof statement or model changes are involved. Hosted receipts must prove
+the overlap and native CPU/Metal acceptance before claiming a time saving.
+
+### Balance required Contracts and avoid historical blob transfer
+
+The previous core shard serialized independent gates. Its measured719s run
+included124s of checkout. Split it into core-a/core-b/core-c, preserving the
+existing research group and every original command, condition, environment
+and ordering. contracts_partition.tsv explicitly assigns each original gate
+to exactly one required shard; the predecessor command inventory stays frozen.
+The existing fail-fast:false matrix result continues to block CI Decision.
+
+Impact and both Contracts jobs retain fetch-depth:0 and complete working trees.
+The checkout filter blob:none transports all commit history while historical
+blobs remain available through Git lazy fetching. No sparse checkout is used
+for these jobs. A real Git fixture must prove historical diff/show operations
+and complete current files still work and reject a shallow-history control.
+Hosted results are required before reporting a time saving.
+
+### Native macOS compilation cache
+
+The native integration build previously compiled Madaros again for every merge,
+including source-equivalent merges. The macOS builder may reuse only a compilation
+bound to the exact self-hosted/stdlib trees, mapped-stack seed probe, build recipe,
+cache implementation/contract, workflow, signed current-source seed bytes and Apple
+OS/architecture/compiler/SDK identity. It recomputes this binding before reuse,
+checks the payload digest, and retains Mach-O/signature checks and seed/ABI execution.
+Normal standalone builds without the explicit CI cache path still compile.
+
+The transport restores only the exact key, without prefix fallback. A mismatching
+or corrupted restored entry fails rather than silently changing compiler routing.
+A miss performs the original compilation. All existing capacity, regression,
+C++23-oracle, CPU, Metal and pinned-200-corpus gates remain unconditional. The cache
+is sealed and saved only after those gates succeed and the inputs still match the
+key computed before the build. Cache availability is an optimization, never a gate
+receipt. Hosted cold/warm and merge-group results must be recorded separately;
+fixture success does not establish a measured latency reduction.

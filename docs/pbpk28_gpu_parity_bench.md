@@ -351,3 +351,70 @@ the drug matching (PubMed/PMC/publisher record checked 2026-11-01):
   (PubMed record fetched live), DOI 10.2165/00003495-200464150-00010.
   Hepatic CYP3A4 plus CYP2D6 to active dehydro-aripiprazole,
   t1/2 about 75 h.
+
+
+## Addendum: SIO-504 bolus-vs-clamped-kernel audit, 2026-11-02
+
+Question: does any Appendix B figure rest on an IV-bolus run through the
+negativity-clamped CN kernel, where the clamp could inject unbooked mass
+(the 50 mg -> 85 mg defect class)? Measured on Linux x86_64
+(sounio-workspace pod) at main 55c141ce with bin/souc run.
+
+Method: instrumented copies of the four self-contained parity refs
+(clamp-fire counter threaded through every floor site for the CN pair;
+per-step state-minimum tracker for the RK4 pair). Each probe output is
+byte-identical to its unmodified ref on all emitted lines
+(rapa/sema 936 PARITY lines, halo 84 HALO lines, midaz 68 MDZ lines),
+so the instrumentation changes no numerics. Probes lived in /tmp only;
+no repo test was modified. Venlafaxine measured via its own scenario
+audit (clamp injection booked into ODV by construction, see header
+lines 224-243 of scenarios/venlafaxine_xr.sio); ref re-run green
+(rc=0, DISSERTATION_PBPK28_VENLAFAXINE_PARITY_DONE) with full washout
+(VMASS -> 0.000000) at this main.
+
+Kernel identity: the clamped kernel is pbpk28_full_cn_step[_sink_mut]
+in stdlib/darwin_pbpk/tsit5_pbpk28.sio (floor via pbpk28_cn_apply_schur).
+theta_pbpk28.sio is clamp-free but none of the five parity refs use it
+(its consumers are epistemic/MC validation, not Appendix B). Halo/midaz
+refs contain no floor on any state (fixed-step RK4 only).
+
+| Scenario | Route | Kernel | Clamp fires / min state | Mass / convergence |
+| --- | --- | --- | --- | --- |
+| rapamycin (IV bolus 0.05 mg) | bolus into blood | own clamped CN copy, dt=0.001 | 0 fires over full 30 h run | total mass 0.05 -> 2.055091e-04 mg monotonic (gate case 4); REF<->ALT dual-dt gate case 1 (RMSE < 1%) |
+| semaglutide (SC depot) | SC release, no bolus | own clamped CN copy + production scenario pbpk28_full_cn_step, dt=0.001 | 0 fires over full 30 h run | Node-Sounio RMSE 0.000000e+00, 14 organs + TMDD + PD |
+| venlafaxine XR (oral 75 mg) | matrix oral | pbpk28_full_cn_step_sink_mut (clamped) | clamp injects into booked ODV term, not masked; residual ~1e-12, VSS certified=1 both engines | cases 10-13 PASS; re-run green at 55c141ce |
+| haloperidol (oral 5 mg) | gut depot oral | fixed RK4 dt=0.002, no clamp in code | min over all steps/organs 0.000000 (no minus sign: never negative) | dt vs dt/2 endpoints agree exactly late (t=48/72h rel <= 9e-05); early transient (t<=1h) <= 2.7% rel at 6-decimal print resolution |
+| midazolam (oral 5 mg +- keto) | gut depot oral | fixed RK4 dt=0.002, no clamp in code, both DDI arms | min over all steps/organs/arms 0.000000 (never negative) | dt vs dt/2 agree exactly late (t=24/36h rel 0); early transient <= 1.1% rel at print resolution |
+
+Verdict: the only bolus-plus-clamped-CN combination in the Appendix B
+set is rapamycin, and its clamp never fires at dt=0.001 over the whole
+run, so no figure carries clamp-injected mass. Venlafaxine runs clamped
+but extravascular with the injection booked and bounded (~1e-12).
+Halo/midazolam cannot mask negativity (no clamp exists in their path)
+and stay non-negative. Step-convergence datum: CN pair covered by the
+CI dual-dt gate; RK4 pair measured here (exact late agreement, small
+early-transient dt sensitivity at print resolution) but with no
+tolerance gate attached — that bar belongs to SIO-562, not claimed here.
+Appendix B .tex is not in this repo; figure-to-output linkage for the
+legends is SIO-505, which can cite this table.
+## Addendum: SIO-505 legend-value conference, 2026-11-02
+
+v28 legend values checked against current parity-ref outputs
+(main 55c141ce; PR #3419 touches only a print test + changelog,
+no PBPK path). Method: exact-match search over the full ref logs
+plus referent recovery via (t, organ, field).
+
+| Legend | Referent recovered | Current output | Verdict |
+| --- | --- | --- | --- |
+| rapa 0.001063 | liver cv, t=0.1 h (bolus 0.05 mg) | 1.062903677e-03 -> 0.001063 | CONFIRM |
+| rapa 0.004701 | liver cavg, t=0.1 h | 4.701473755e-03 -> 0.004701 | CONFIRM |
+| halo 0.008882 | plasma, t=0.5 h (oral 5 mg) | HALO\|plasma=0.008882 | CONFIRM exact |
+| midaz 0.022717 | plasma solo, t=0.25 h (oral 5 mg) | MDZ\|plasma_solo=0.022717 | CONFIRM exact |
+| midaz 0.056583 | plasma +keto, t=0.25 h | MDZ\|plasma_inh=0.056583 | CONFIRM exact |
+| venla 0.030624 | no exact referent in current output | absent; neighbours 0.029-0.032 across fields, no derivation (max/avg/VSS) reproduces it | STALE — nucleus changed by the 26/09 ODV fix, as anticipated on the card |
+
+Rounding: rapa prints 10 significant sci digits; halo/midaz/venla
+print 6 fixed decimals. Units mg/L throughout; doses in the table.
+The .tex/PDF location of each legend is outside this repo; the full
+conference table lives on SIO-505. SIO-505 acceptance (legend
+correction) needs the editable appendix, not a repo change.

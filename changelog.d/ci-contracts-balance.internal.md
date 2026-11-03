@@ -1,0 +1,1 @@
+Balance the required Contracts matrix into three core partitions plus the existing research group. Preserve every gate and condition, keep dependent setup together, and fetch full history without eagerly downloading historical blobs for Impact and Contracts jobs.

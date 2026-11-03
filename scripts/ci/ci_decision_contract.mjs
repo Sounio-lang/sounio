@@ -16,6 +16,23 @@ function check(workflow,decision,additive){
  const suite=lines.indexOf("  full-test-suite:");
  assert(suite>=0 && lines.slice(suite+1,suite+8).includes(fullGuard),"full suite cannot cancel stale workflow");
  assert(start>=0,"missing ci-decision");
+ const job=(id)=>{const p=workflow.indexOf('  '+id+':\n');assert(p>=0,'missing '+id);const rest=workflow.slice(p+1);const e=rest.search(/^  [A-Za-z0-9_-]+:/m);return e<0?workflow.slice(p):workflow.slice(p,p+1+e);};
+ const producer=job('native-selfhost-linux-x86_64'), regression=job('native-linux-regressions');
+ assert(producer.includes('run: bash scripts/ci/selfhost_host_gate.sh'),'source host gate disconnected');
+ assert(producer.includes('SOUNIO_FORCE_SOURCE_BOOTSTRAP: "1"'),'source bootstrap bypass');
+ assert(producer.includes('name: Upload native compiler artifact'),'fresh stage2 not published');
+ assert(!producer.includes('aggregate_field_identity_gate.sh'),'producer still waits for independent regression');
+ assert(regression.includes(fullGuard),'regressions must require successful producer and impact selection');
+ assert(regression.includes('needs: [impact, fast-checks, native-selfhost-linux-x86_64]'),'regression producer dependency missing');
+ assert(regression.includes('name: native-compiler-linux-x86_64\n          path: /tmp/sounio-selfhost-linux-x86_64/artifacts'),'regressions must download same run stage2');
+ assert(regression.includes('run: chmod +x /tmp/sounio-selfhost-linux-x86_64/artifacts/souc-stage2'),'download lost executable permission');
+ for(const cmd of ['run: bash scripts/ci/aggregate_field_identity_gate.sh','bash scripts/ci/souc_v2_gate.sh','run: bash scripts/selfhost/selfhost_native_runtime_proof.sh'])assert(regression.includes(cmd),'lost native check '+cmd);
+ for(const [id,files] of [['ci-decision',['evaluate_ci_decision.py','stdlib_deep_ci_decision.sh']],['contracts',['contracts_shard_decision.sh']]]){
+  const b=job(id);assert(b.includes('sparse-checkout-cone-mode: false'),'aggregation must use exact-file checkout');
+  assert(!/^\s+filter:/m.test(b),'filter overrides sparse checkout');
+  for(const file of files)assert(b.includes('            /scripts/ci/'+file+'\n'),'missing aggregation file '+file);
+ }
+
  let end=lines.findIndex((s,i)=>i>start&&/^  [A-Za-z0-9_-]+:/.test(s));
  if(end<0)end=lines.length;
  const block=lines.slice(start,end);
@@ -55,6 +72,12 @@ const additive=fs.readFileSync(path.join(root,"scripts/ci/stdlib_deep_ci_decisio
 const result=check(workflow,decision,additive);
 if(process.argv[3]==="--selftest"){
  const controls=[
+  [workflow.replace('run: bash scripts/ci/aggregate_field_identity_gate.sh','run: true'),decision,additive],
+  [workflow.replace('run: bash scripts/ci/selfhost_host_gate.sh','run: true'),decision,additive],
+  [workflow.replace('run: chmod +x /tmp/sounio-selfhost-linux-x86_64/artifacts/souc-stage2','run: true'),decision,additive],
+  [workflow.replaceAll('sparse-checkout-cone-mode: false','sparse-checkout-cone-mode: true'),decision,additive],
+  [workflow.replace('            /scripts/ci/evaluate_ci_decision.py','            /scripts/ci/unrelated.py'),decision,additive],
+  [workflow.replace('      - native-linux-regressions\n',''),decision,additive],
   [workflow.replace(fullGuard,fullGuard.replace("!cancelled()","always()")),decision,additive],
   [workflow.replace(nativeGuard,nativeGuard.replace("!cancelled()","always()")),decision,additive],
   [workflow.replace("      - stdlib-deep-science\n",""),decision,additive],
