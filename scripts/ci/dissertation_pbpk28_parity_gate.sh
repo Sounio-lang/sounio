@@ -1533,3 +1533,85 @@ paste <(grep "^TMASS|m=" "$CLZ_SIO_LOG" | sed "s/^TMASS|m=//") \
 
 echo
 echo "[pbpk28-parity] clozapine oral-IR canonical: tablet lag + gut absorption + systemic PK + mass envelope (10th canonical drug)"
+
+# ════════════════════════════════════════════════════════════════════════════
+# Case 25: Quetiapine — eleventh canonical drug, fourth oral-IR case.
+# Single 100 mg tablet (tlag = 0.25 h) → 1st-order gut absorption (ka = 1.5/h,
+# Tmax ~1 h) with NO first-pass loss (F = 1.00) → blood → PBPK28 CN,
+# dt = 0.001. CL = 84 L/h (label/popPK; 600 mg/day steady state ~= 300
+# ng/mL); Kp are quetiapine tissue values (own); PS assumed (SIO-550);
+# fm CYP3A4 0.89 in the drug file; venlafaxine DDI follow-up (own
+# evaluation). Sounio ref drives the stdlib scenario itself; Node side is
+# DEFAULT_PARAMS_QUETIAPINE.
+#   25a  organ-average cavg   Node ↔ Sounio, STRICT 1% RMSE per organ
+#   25b  mass envelope        0 <= total mass <= cumulative absorbed, 12/12
+# Strict 1% (no absolute floor needed): worst organ is 0.03%. Blood Cmax
+# 505 ng/mL single 100 mg dose (fast absorption transient, pre-distribution).
+# ════════════════════════════════════════════════════════════════════════════
+echo
+echo "[pbpk28-parity] Case 25: Sounio ↔ Node quetiapine PBPK28 (oral IR)"
+
+QTP_SIO_LOG="$OUT_DIR/qtp_sounio.txt"
+QTP_NODE_LOG="$OUT_DIR/qtp_node.txt"
+"$SOUC_BIN" run tests/run-pass/dissertation_pbpk28_parity_ref_quetiapine.sio > "$QTP_SIO_LOG" 2>&1 || {
+  echo "[pbpk28-parity:case25] FAIL: Sounio quetiapine ref returned non-zero" >&2
+  tail -n 20 "$QTP_SIO_LOG" >&2; exit 1; }
+if ! grep -q '^DISSERTATION_PBPK28_QUETIAPINE_PARITY_DONE$' "$QTP_SIO_LOG"; then
+  echo "[pbpk28-parity:case25] FAIL: Sounio quetiapine ref did not emit DONE" >&2; exit 1; fi
+node "$NODE_RUNNER" --drug=quetiapine > "$QTP_NODE_LOG" 2>&1 || {
+  echo "[pbpk28-parity:case25] FAIL: Node quetiapine runner returned non-zero" >&2
+  tail -n 20 "$QTP_NODE_LOG" >&2; exit 1; }
+if ! grep -q '^DISSERTATION_PBPK28_QUETIAPINE_PARITY_NODE v1$' "$QTP_NODE_LOG"; then
+  echo "[pbpk28-parity:case25] FAIL: Node quetiapine runner header mismatch" >&2; exit 1; fi
+
+QTP_SIO_TSV="$OUT_DIR/qtp_sounio.tsv"
+QTP_NODE_TSV="$OUT_DIR/qtp_node.tsv"
+parse_to_tsv "$QTP_SIO_LOG" "$QTP_SIO_TSV"
+parse_to_tsv "$QTP_NODE_LOG" "$QTP_NODE_TSV"
+
+QTP_SIO_ROWS=$(wc -l < "$QTP_SIO_TSV")
+QTP_NODE_ROWS=$(wc -l < "$QTP_NODE_TSV")
+if [[ "$QTP_SIO_ROWS" -ne "$EXPECTED_ROWS" || "$QTP_NODE_ROWS" -ne "$EXPECTED_ROWS" ]]; then
+  echo "[pbpk28-parity:case25] FAIL: quetiapine row count mismatch — Sounio=$QTP_SIO_ROWS Node=$QTP_NODE_ROWS expected=$EXPECTED_ROWS" >&2
+  exit 1
+fi
+echo "[pbpk28-parity:case25] both runs emitted $QTP_SIO_ROWS records"
+
+QTP_JOINED="$OUT_DIR/qtp_joined.tsv"
+awk -F'\t' '
+  NR==FNR { S[$1"|"$2] = $5; next }
+  { print $1"\t"$2"\t"S[$1"|"$2]"\t"$5 }
+' "$QTP_SIO_TSV" "$QTP_NODE_TSV" > "$QTP_JOINED"
+
+awk -F'\t' -v THR="$RMSE_THRESHOLD_PCT" '
+  {
+    i = $2 + 0; cs = $3 + 0; cn = $4 + 0;
+    d = cs - cn; SS[i] += d * d; NN[i] += 1;
+    if (cs > PK[i]) PK[i] = cs;
+    if (cn > PK[i]) PK[i] = cn;
+  }
+  END {
+    bad = 0;
+    for (i = 0; i < 14; i++) {
+      if (NN[i] == 0) { printf "PBPK28_QUETIAPINE_PARITY_FAIL organ %d MISSING\n", i; bad += 1; continue; }
+      rmse = sqrt(SS[i] / NN[i]); pk = PK[i] + 0;
+      if (pk == 0) { continue; }
+      pct = 100.0 * rmse / pk;
+      if (pct >= THR + 0) { printf "PBPK28_QUETIAPINE_PARITY_FAIL organ %d pct=%.4f rmse=%.3g\n", i, pct, rmse; bad += 1; }
+    }
+    if (bad > 0) { exit 1; }
+    printf "PBPK28_QUETIAPINE_PARITY_PASS 14/14 compartments within %s%% RMSE (strict)\n", THR;
+  }
+' "$QTP_JOINED"
+
+paste <(grep "^TMASS|m=" "$QTP_SIO_LOG" | sed "s/^TMASS|m=//") \
+      <(grep "^TREL|cum=" "$QTP_SIO_LOG" | sed "s/^TREL|cum=//") \
+  | awk -v FAILM="PBPK28_QUETIAPINE_MASS_FAIL" -v PASS="PBPK28_QUETIAPINE_MASS_PASS" '
+      { m=($1+0); r=($2+0); n++;
+        if (!(m >= 0 && m <= r)) { printf "%s sample %d: mass %.6f outside [0, %.6f]\n", FAILM, n, m, r; bad=1 } }
+      END { if (n != 12) { printf "%s row count %d != 12\n", FAILM, n; exit 1 }
+        if (bad) exit 1;
+        printf "%s 12/12 samples within [0, absorbed]\n", PASS }'
+
+echo
+echo "[pbpk28-parity] quetiapine oral-IR canonical: tablet lag + gut absorption + systemic PK + mass envelope (11th canonical drug)"

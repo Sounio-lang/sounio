@@ -552,6 +552,60 @@ export const DEFAULT_PARAMS_CLOZAPINE = Object.freeze({
   releaseSourceLabel: 'Oral IR (k_a = 1.0 /h, F = 0.55, lag 0.25 h)',
 });
 
+// Seroquel immediate-release quetiapine (SIO-525): single 100 mg oral dose.
+// ka = 1.5/h (Tmax ~1 h), F = 1.00 (complete — no first-pass loss),
+// tlag = 0.25 h. CL = 84 L/h (label/popPK; 600 mg/day steady state ~=
+// 300 ng/mL, inside the 100-500 TDM band). Kp = quetiapine tissue values
+// (Vd ~700 L) — own values. PS assumed flow-limited pattern, SIO-550.
+// fm CYP3A4 0.89 / other 0.11; venlafaxine DDI follow-up (own evaluation).
+export const MW_QUETIAPINE = 383.51;
+
+export const QTP_KA_DEFAULT = 1.5;      // h^-1, Tmax ~1 h
+export const QTP_F_DEFAULT = 1.00;     // complete bioavailability
+export const QTP_TLAG_DEFAULT = 0.25;  // h, tablet dissolution
+export const QTP_DOSE_DEFAULT = 100.0; // mg, single dose
+
+export const KP_QUETIAPINE = Object.freeze([
+  1.00,  // 0 blood (definition)
+  8.0,   // 1 liver
+  4.0,   // 2 kidney
+  3.0,   // 3 brain
+  3.0,   // 4 heart
+  6.0,   // 5 lung
+  6.0,   // 6 muscle
+  5.0,   // 7 adipose (capped)
+  4.0,   // 8 gut
+  3.0,   // 9 skin
+  2.0,   // 10 bone
+  4.0,   // 11 spleen
+  3.0,   // 12 pancreas
+  3.0,   // 13 other
+]);
+
+export const DEFAULT_PARAMS_QUETIAPINE = Object.freeze({
+  clHep: 84.0,
+  higuchiScale: 1.0,
+  vdScale: 1.0,
+  bolusMg: 0.0,
+  stentActive: true,   // re-used as 'input active' (no stent; oral IR)
+  ps: PS_RAPAMYCIN,    // assumed flow-limited pattern, SIO-550
+  vascFrac: VASC_FRAC,
+  kp: KP_QUETIAPINE,
+  mw: MW_QUETIAPINE,
+  releaseModel: 'oral_ir',
+  releaseKa: QTP_KA_DEFAULT,
+  releaseF: QTP_F_DEFAULT,
+  releaseTlag: QTP_TLAG_DEFAULT,
+  releaseDoseMg: QTP_DOSE_DEFAULT,
+  tmddOrgans: [],
+  tmddParams: {},
+  pdOrgans: [],
+  pdParams: {},
+  cVisualMax: 3.0e-5,
+  drugLabel: 'Quetiapine (oral IR)',
+  releaseSourceLabel: 'Oral IR (k_a = 1.5 /h, F = 1.00, lag 0.25 h)',
+});
+
 /**
  * Stent release (Higuchi). Identical to pbpk14_core for cross-model parity.
  */
