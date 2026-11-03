@@ -5681,6 +5681,10 @@ fn checker_collect_runtime_builtins_inplace(c: *mut Checker) with Mut, Panic, Di
     checker_bind_import_unknown_inplace(c, make_name("seq_len"))
     checker_bind_import_unknown_inplace(c, make_name("seq_count"))
     checker_bind_import_unknown_inplace(c, make_name("acknowledge"))
+    // Async runtime builtin lowered by lean_single/native codegen. It has no
+    // source-level definition; without this prelude binding `join(h1, h2)`
+    // reaches the identifier checker as an undeclared callee (E137).
+    checker_bind_import_unknown_inplace(c, make_name("join"))
 }
 
 // *mut declaration collectors — port of the by-value collect_struct_def /
@@ -13717,6 +13721,22 @@ fn checker_check_call_bridge_forms_inplace(c: *mut Checker, e: Expr) -> (bool, T
     (false, ty_error())
 }
 
+fn checker_check_join_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    let argc = expr_list_handle_count(expr_list_handle(e.args))
+    checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
+    var effects_async: [i64; 8] = [0; 8]
+    effects_async[0] = 6  // Async (effects.sio: 6=Async)
+    checker_check_callee_effects_named_inplace(c, e.span, effects_async, 1, make_name("join"))
+    if argc != 2 {
+        checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
+        return ty_error()
+    }
+    let elems = TypeEntryList {
+        head: ty_i64(),
+        tail: Some(Box::new(TypeEntryList { head: ty_i64(), tail: None })),
+    }
+    ty_tuple(elems)
+}
 fn checker_check_call_native_forms_inplace(c: *mut Checker, e: Expr) -> (bool, TypeEntry) with Mut, Panic, Div, Alloc, IO {
     if call_expr_is_builtin_println(e.left) {
         let first_arg = expr_list_head(e.args)
@@ -13764,6 +13784,9 @@ fn checker_check_call_native_forms_inplace(c: *mut Checker, e: Expr) -> (bool, T
         effects_io[0] = 0  // IO (effects.sio: 0=IO)
         checker_check_callee_effects_inplace(c, e.span, effects_io, 1)
         return (true, ty_i64())
+    }
+    if call_expr_is_builtin_join(e.left) {
+        return (true, checker_check_join_expr_inplace(c, e))
     }
     (false, ty_error())
 }
@@ -21936,6 +21959,16 @@ fn call_expr_is_builtin_acknowledge(opt: Option<Box<Expr> >) -> bool with Mut, P
         Some(expr) => {
             if (*expr).kind != ExprKind::ExprIdent { return false }
             name_matches_str11((*expr).name, 97, 99, 107, 110, 111, 119, 108, 101, 100, 103, 101)
+        }
+        None => false
+    }
+}
+
+fn call_expr_is_builtin_join(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(expr) => {
+            if (*expr).kind != ExprKind::ExprIdent { return false }
+            name_eq((*expr).name, make_name("join"))
         }
         None => false
     }
