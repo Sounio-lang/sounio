@@ -20,7 +20,7 @@ Os ADRs de [`README.md`](README.md) registram decisões já tomadas; este arquiv
 | [D-01](#d-01) | Modelo de `Float` na prova em Lean | #2761 |
 | [D-02](#d-02) | Capacidades de autoridade opacas além de structs privadas | #1386 |
 | [D-03](#d-03) | Certificado de suporte de base `Q` para admitir produtos de sedenions (E251) | #2380 |
-| [D-04](#d-04) | `LibraryId` como entidade de FFI de primeira classe | #2535 |
+| [D-04](#d-04) | `LibraryId` como entidade de FFI de primeira classe (passo C fail-closed implementado) | #2535 |
 | [D-05](#d-05) | Semântica de interposição de símbolos de `LibraryId` | #2536 |
 | [D-06](#d-06) | Repositório canônico de produção (R3): corte e remoção de fontes | #1122 |
 | [D-07](#d-07) | Linha de pesquisa epistêmica "source-fresh aliasing / associador": reaterrissar ou aposentar | #1423 |
@@ -82,8 +82,8 @@ Os ADRs de [`README.md`](README.md) registram decisões já tomadas; este arquiv
 - **Pergunta:** `LibraryId` continua uma tabela fixa no codegen ou vira `ExternSymbol` declarável pelo usuário?
 - **Opções:** (A) promover a entidade de primeira classe, começando pela recusa fail-closed de IDs desconhecidos; (B) manter a tabela e documentar; (C) só a recusa fail-closed.
 - **Recomendação:** (A), com (C) como primeiro passo.
-- **Teste discriminante:** `extern "C" from "libm.so.6" { fn cbrt }` deve produzir `NEEDED libm.so.6` no ELF; um nome desconhecido deve ser recusado em vez de cair em `libkl14b_probe.so`.
-- **Causa localizada:** `self-hosted/native/codegen_x86_linux.sio`: `native_v2_dynlink_lib_id_for_name` (~1904–1931, tabela fixa), `native_v2_dynlink_soname_for_lib_id` (~1934–1949, cai silenciosamente em `libkl14b_probe.so`), `native_v2_dynlink_soname_for_bytes` (~1952, sem chamador).
+- **Status / Resolução:** **Passo (C) implementado (fail-closed)**: `native_v2_dynlink_soname_for_lib_id` agora retorna `""` para IDs desconhecidos (eliminando o fallback silencioso para `libkl14b_probe.so`), e `native_v2_write_min_elf64_to_file` recusa com rc=28 qualquer símbolo dinâmico sem biblioteca conhecida. Teste discriminante: `tests/compile-fail/d04_dynlink_unknown_lib_refused.sio`.
+- **Causa localizada:** `self-hosted/native/codegen_x86_linux.sio`: `native_v2_dynlink_lib_id_for_name`, `native_v2_dynlink_soname_for_lib_id`, `native_v2_dynlink_soname_for_bytes`.
 
 <a id="d-05"></a>
 ## D-05 — Interposição de símbolos de `LibraryId`
