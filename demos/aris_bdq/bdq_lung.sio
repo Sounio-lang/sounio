@@ -49,19 +49,75 @@ struct Params {
     flys: f64, ratio1: f64
 }
 
-fn params_nominal() -> Params {
+// ---- every input as Knowledge: value, evidence quality ε, provenance -------------
+// ε is evidence quality, not probability. The scheme used here is explicit and
+// contestable:
+//   0.90  estimated from human data with RSE < 10 %           (Svensson 2016)
+//   0.85  estimated in mice, RSE < 10 %                        (S8, S11, S13)
+//   0.80  physiology tables / drug constants from industry data (S2, S3, S4)
+//   0.70  estimated in mice, RSE 10–30 %
+//   0.60  estimated in mice, RSE > 30 %, or a value read from one image
+//   0.50  assumed, single literature value, no uncertainty given
+//   0.30  assumed and called "difficult to determine" by the authors
+// Reading .value is an epistemic act, so this function carries `with Epistemic`.
+// Confidence gates (`with Epistemic(N)`) are checked per token inside a function,
+// not across calls; the gated claim at the end therefore restates its own inputs.
+
+fn params_from_tables() -> Params with Epistemic, Mut {
+    // plasma, Svensson 2016 Table 3 (95% CI width / 3.92 → RSE)
+    let cl   : Knowledge[f64] = Knowledge(2.62,   ε=0.90, prov="Svensson2016_T3_CL/F_L_per_h_RSE2.5")
+    let v    : Knowledge[f64] = Knowledge(198.0,  ε=0.90, prov="Svensson2016_T3_V/F_L_RSE4.0")
+    let q1   : Knowledge[f64] = Knowledge(3.66,   ε=0.90, prov="Svensson2016_T3_Q1/F_L_per_h_RSE4.3")
+    let vp1  : Knowledge[f64] = Knowledge(8550.0, ε=0.90, prov="Svensson2016_T3_VP1/F_L_RSE3.8")
+    let q2   : Knowledge[f64] = Knowledge(7.34,   ε=0.90, prov="Svensson2016_T3_Q2/F_L_per_h_RSE3.6")
+    let vp2  : Knowledge[f64] = Knowledge(2690.0, ε=0.90, prov="Svensson2016_T3_VP2/F_L_RSE5.6")
+    let matf : Knowledge[f64] = Knowledge(0.66,   ε=0.90, prov="Svensson2016_T3_MAT_fraction_of_6h")
+    let fr   : Knowledge[f64] = Knowledge(0.47,   ε=0.90, prov="Svensson2016_T3_FR_transit_fraction")
+    let fbio : Knowledge[f64] = Knowledge(1.0,    ε=0.50, prov="Svensson2016_F_fixed_relative")
+    // human lung physiology, Karakitsios 2025 Table S3 (mL, mL/h, cm^2)
+    let qlung: Knowledge[f64] = Knowledge(356000.0, ε=0.80, prov="TableS3_human_Qlung_mL_per_h_Gill2016_Simcyp")
+    let sa   : Knowledge[f64] = Knowledge(960000.0, ε=0.80, prov="TableS3_human_SA_cm2_Stone1992")
+    let vpb  : Knowledge[f64] = Knowledge(101.2,  ε=0.80, prov="TableS3_human_Vpb_mL_Gill2016_upper_range")
+    let vew  : Knowledge[f64] = Knowledge(89.2,   ε=0.80, prov="TableS3_human_Vew_mL")
+    let vlys : Knowledge[f64] = Knowledge(5.47,   ε=0.80, prov="TableS3_human_Vlys_mL_1pct_lung")
+    let viw  : Knowledge[f64] = Knowledge(351.0,  ε=0.80, prov="TableS3_human_Viw_mL")
+    let phpl : Knowledge[f64] = Knowledge(7.4,    ε=0.80, prov="TableS3_pH_plasma")
+    let phew : Knowledge[f64] = Knowledge(7.4,    ε=0.80, prov="TableS3_pH_EW_Simcyp")
+    let phiw : Knowledge[f64] = Knowledge(6.69,   ε=0.80, prov="TableS3_human_pH_IW_Simcyp")
+    let phly : Knowledge[f64] = Knowledge(5.0,    ε=0.50, prov="TableS3_pH_lysosome_Simcyp_default_all_species")
+    let phfo : Knowledge[f64] = Knowledge(5.84,   ε=0.50, prov="Kempker2017_pH_foamy_macrophage")
+    // binding and drug constants, Tables S2 and S4
+    let bp   : Knowledge[f64] = Knowledge(1.0,    ε=0.80, prov="TableS4_B/P_Janssen")
+    let fupl : Knowledge[f64] = Knowledge(0.0005, ε=0.30, prov="TableS4_fu_pls_assumed_difficult_to_determine_S10")
+    let fuew : Knowledge[f64] = Knowledge(0.00082, ε=0.50, prov="TableS4_fu_EW_from_fu_pls_eq7")
+    let pkah : Knowledge[f64] = Knowledge(8.5,    ε=0.80, prov="TableS2_pKa_base_Janssen")
+    let pkal : Knowledge[f64] = Knowledge(1.1,    ε=0.80, prov="TableS2_pKa_base_ACD_predicted")
+    // fitted in mice (S8, S11, S13) and carried to humans
+    let perm : Knowledge[f64] = Knowledge(55.7,   ε=0.70, prov="TableS8_Perm_cm_per_h_RSE18.9")
+    let kplf : Knowledge[f64] = Knowledge(3480000.0, ε=0.85, prov="TableS8_KpLYS:IW/fuIW_RSE3.6")
+    let phim : Knowledge[f64] = Knowledge(7.36,   ε=0.80, prov="TableS3_mouse_pH_IW")
+    let ratm : Knowledge[f64] = Knowledge(143000.0, ε=0.85, prov="TableS11_rate_mphi_RSE7.8")
+    let rm   : Knowledge[f64] = Knowledge(5680000.0, ε=0.85, prov="TableS11_Kp_mphi/(fu*fni)_RSE3.6")
+    let ratf : Knowledge[f64] = Knowledge(5780.0, ε=0.70, prov="TableS13_rate_fmphi_RSE25.6")
+    let rf   : Knowledge[f64] = Knowledge(1440000.0, ε=0.70, prov="TableS13_Kp_fmphi/(fu*fni)_RSE27.4")
+    let kpc  : Knowledge[f64] = Knowledge(0.71,   ε=0.70, prov="TableS13_Kp_caseum_RSE29.5")
+    let kcas : Knowledge[f64] = Knowledge(0.25,   ε=0.70, prov="TableS13_k_cas_RSE18.9")
+    let hh   : Knowledge[f64] = Knowledge(0.75,   ε=0.85, prov="TableS13_h_RSE6.7")
+    let tau  : Knowledge[f64] = Knowledge(0.001,  ε=0.50, prov="not_reported_small_constant_insensitive")
+    let flys : Knowledge[f64] = Knowledge(0.078,  ε=0.50, prov="Ufuk2017_lysosomal_fraction_rat_AM_range_3.7-13.9")
+    let rat1 : Knowledge[f64] = Knowledge(1.67,   ε=0.60, prov="Walter2023_ratio1_one_representative_image")
     return Params {
-        cl: 2.62, v: 198.0, q1: 3.66, vp1: 8550.0, q2: 7.34, vp2: 2690.0,
-        mat_frac: 0.66, fr: 0.47, f_bio: 1.0,
-        q_lung: 356000.0, sa: 960000.0,
-        v_pb: 101.2, v_ew: 89.2, v_lys: 5.47, v_iw: 351.0,
-        ph_pl: 7.4, ph_ew: 7.4, ph_iw: 6.69, ph_lys: 5.0, ph_foamy: 5.84,
-        bp: 1.0, fu_pls: 0.0005, fu_ew: 0.00082,
-        pka_hi: 8.5, pka_lo: 1.1,
-        perm: 55.7, kplys_fu_mouse: 3480000.0, ph_iw_mouse: 7.36,
-        rate_m: 143000.0, r_m: 5680000.0, rate_f: 5780.0, r_f: 1440000.0,
-        kp_cas: 0.71, kcas: 0.25, h: 0.75, tau: 0.001,
-        flys: 0.078, ratio1: 1.67
+        cl: cl.value, v: v.value, q1: q1.value, vp1: vp1.value, q2: q2.value, vp2: vp2.value,
+        mat_frac: matf.value, fr: fr.value, f_bio: fbio.value,
+        q_lung: qlung.value, sa: sa.value,
+        v_pb: vpb.value, v_ew: vew.value, v_lys: vlys.value, v_iw: viw.value,
+        ph_pl: phpl.value, ph_ew: phew.value, ph_iw: phiw.value, ph_lys: phly.value, ph_foamy: phfo.value,
+        bp: bp.value, fu_pls: fupl.value, fu_ew: fuew.value,
+        pka_hi: pkah.value, pka_lo: pkal.value,
+        perm: perm.value, kplys_fu_mouse: kplf.value, ph_iw_mouse: phim.value,
+        rate_m: ratm.value, r_m: rm.value, rate_f: ratf.value, r_f: rf.value,
+        kp_cas: kpc.value, kcas: kcas.value, h: hh.value, tau: tau.value,
+        flys: flys.value, ratio1: rat1.value
     }
 }
 
@@ -525,8 +581,21 @@ fn report_budget(tag: string, nominal: f64, c: [f64; 15]) with IO, Mut, Div {
     }
 }
 
-fn main() -> i32 with IO, Mut, Div, Panic {
-    let p = params_nominal()
+// The paper's central claim, restated with the two inputs it actually rests on (see
+// bdq_mic_claim_*.sio). Declared at the honest ceiling: the weakest of its own inputs,
+// fu_pls (ε = 0.30). Raising the declaration above 300 is refused at compile time.
+fn lysosomal_claim_mic50() -> f64 with Epistemic(300), Mut, Div, Panic {
+    let fu_pls: Knowledge[f64] = Knowledge(0.0005, ε=0.30, prov="TableS4_fu_pls_assumed_difficult_to_determine_S10")
+    let ph_lys: Knowledge[f64] = Knowledge(5.0, ε=0.50, prov="TableS3_pH_lysosome_Simcyp_default_all_species")
+    var p = params_from_tables()
+    p.fu_pls = fu_pls.value
+    p.ph_lys = ph_lys.value
+    let r = simulate(p, 0.25)
+    r.lysm_min_w324
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic, Epistemic {
+    let p = params_from_tables()
     let r = simulate(p, 0.25)
     emit("cpu_max_w0-2_ng_per_mL", r.cpu_max_w02)
     emit("lysM_max_w0-2_ng_per_g", r.lysm_max_w02)
@@ -548,5 +617,7 @@ fn main() -> i32 with IO, Mut, Div, Panic {
     gum_budget(p, &!b)
     report_budget("lysM_min_w3-24", r.lysm_min_w324, b.c_lys)
     report_budget("cas6_w24", r.cas6_w24, b.c_cas6)
+    // the efficacy claim, through the full model, at its honest confidence
+    emit("claim_lysM_min_w3-24_eps300", lysosomal_claim_mic50())
     return ok
 }
