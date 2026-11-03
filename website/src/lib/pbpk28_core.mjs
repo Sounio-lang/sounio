@@ -390,6 +390,59 @@ export const DEFAULT_PARAMS_EVEROLIMUS = Object.freeze({
   releaseSourceLabel: 'Xience stent Higuchi (KH fit to 80%/30d)',
 });
 
+// Prograf immediate-release tacrolimus (SIO-516): single 5 mg oral dose,
+// fasted. ka = 0.38/h (Bekersky 1999), F = 0.25 (Kershner 1996, first-pass
+// loss leaves the system). Whole-blood referenced (TDM matrix): CL_wb =
+// 28 L/h (Jusko 1995). Kp = tacrolimus tissue-to-blood values (Iwasaki 2007
+// liver, Saitoh 2006 brain, Staatz 2004 review; adipose capped per the
+// 24-48 h window note) -- NOT rapamycin's. PS mirrors the rapamycin
+// flow-limited pattern, ASSUMED pending SIO-550. Single-dose PK only.
+export const MW_TACROLIMUS = 804.02;
+
+export const TAC_KA_DEFAULT = 0.38;    // h^-1, Bekersky 1999 fasted
+export const TAC_F_DEFAULT = 0.25;     // Kershner 1996
+export const TAC_DOSE_DEFAULT = 5.0;   // mg, single dose
+
+export const KP_TACROLIMUS = Object.freeze([
+  1.00,  // 0 blood (definition)
+  20.0,  // 1 liver (Iwasaki 2007, CYP3A4 site)
+  6.0,   // 2 kidney
+  0.10,  // 3 brain (Saitoh 2006, P-gp restrained)
+  4.0,   // 4 heart
+  8.0,   // 5 lung
+  3.0,   // 6 muscle
+  5.0,   // 7 adipose (capped; 24-48 h window)
+  6.0,   // 8 gut (enterocyte CYP3A4 + P-gp)
+  2.0,   // 9 skin
+  1.5,   // 10 bone
+  8.0,   // 11 spleen (lymphocyte FKBP12)
+  4.0,   // 12 pancreas
+  2.0,   // 13 other
+]);
+
+export const DEFAULT_PARAMS_TACROLIMUS = Object.freeze({
+  clHep: 28.0,
+  higuchiScale: 1.0,
+  vdScale: 1.0,
+  bolusMg: 0.0,
+  stentActive: true,   // re-used as 'input active' (no stent; oral IR)
+  ps: PS_RAPAMYCIN,    // assumed flow-limited pattern, SIO-550
+  vascFrac: VASC_FRAC,
+  kp: KP_TACROLIMUS,
+  mw: MW_TACROLIMUS,
+  releaseModel: 'oral_ir',
+  releaseKa: TAC_KA_DEFAULT,
+  releaseF: TAC_F_DEFAULT,
+  releaseDoseMg: TAC_DOSE_DEFAULT,
+  tmddOrgans: [],
+  tmddParams: {},
+  pdOrgans: [],
+  pdParams: {},
+  cVisualMax: 3.0e-5,
+  drugLabel: 'Tacrolimus (oral IR)',
+  releaseSourceLabel: 'Oral IR (k_a = 0.38 /h, F = 0.25)',
+});
+
 /**
  * Stent release (Higuchi). Identical to pbpk14_core for cross-model parity.
  */
@@ -400,6 +453,15 @@ export function releaseRateAt(tHours, params) {
   if (model === 'sc_depot') {
     // SC depot: rate = F · Dose · k_a · exp(-k_a · t)   (1st-order absorption)
     // higuchiScale is reused as the dose-multiplier slider (G-ε-4).
+    const ka = params.releaseKa;
+    const F  = params.releaseF;
+    const D  = params.releaseDoseMg * (params.higuchiScale ?? 1);
+    return F * D * ka * Math.exp(-ka * Math.max(0, tHours));
+  }
+  if (model === 'oral_ir') {
+    // Oral IR capsule: rate = F * Dose * k_a * exp(-k_a * t)  (1st-order gut
+    // absorption; 1 - F is first-pass loss). Gut pool dosed at t = 0; the
+    // closed form is exact, so both engines evaluate the same function.
     const ka = params.releaseKa;
     const F  = params.releaseF;
     const D  = params.releaseDoseMg * (params.higuchiScale ?? 1);
