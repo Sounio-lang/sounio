@@ -48,14 +48,17 @@ Measured on 2026-11-03 with the committed Madaros ELF (`3.0.0-rc.1`, madaros 8ad
    foamy-macrophage rim, a family of caseum transport laws. With the rim **held at the paper's
    published Table S13 estimates**, so that only the caseum law is fitted:
 
-   | Caseum law | fitted | RSS (log) | ΔAIC |
-   |---|---|---|---|
-   | Fractal k(t) = k_cas/(t+τ)^h, 6 compartments | 2 | 8.51 | — |
-   | Same 6 compartments, constant rate (h = 0) | 1 | 54.05 | +42 |
-   | Fick, constant D, 36 cells of 50 µm | 1 | 71.82 | +49 |
-   | Fick + reversible binding, free | 3 | 54.87 | +47 |
-   | Fick + binding pinned at the measured caseum f_u | 2 | 55.78 | +45 |
-   | Fick, D_eff ≤ free water / 1e4 (equilibrium limit of the above) | 1 | 9226 | +166 |
+   | Caseum law | fitted | RSS (log) | ΔAIC | LOTO CV |
+   |---|---|---|---|---|
+   | Fractal k(t) = k_cas/(t+τ)^h, 6 compartments | 2 | 8.51 | — | **28.8** |
+   | Same 6 compartments, constant rate (h = 0) | 1 | 54.05 | +42 | 132 |
+   | Fick, constant D, 36 cells of 50 µm | 1 | 71.82 | +49 | 448 |
+   | Fick + reversible binding, free | 3 | 54.87 | +47 | 413 |
+   | Fick + binding pinned at the measured caseum f_u | 2 | 55.78 | +45 | 389 |
+   | Fick, D_eff ≤ free water / 1e4 (equilibrium limit of the above) | 1 | 9226 | +166 | 9226 |
+
+   LOTO CV is leave-one-time-out cross-validation: each of the four sampling times is held out,
+   the model refitted without it, and the squared error on the held-out time summed.
 
    - The exponent is nested inside the paper's own structure at h = 0, so it admits a likelihood
      ratio test: **χ²(1) = 44.4, p = 2.7e-11**.
@@ -69,7 +72,8 @@ Measured on 2026-11-03 with the committed Madaros ELF (`3.0.0-rc.1`, madaros 8ad
      <0.01 % is the assay's resolution limit, so the least extreme reading (exactly 1e-4) was used.
      The ceiling on a free-drug D is free-water diffusivity for MW 555, about 400 µm²/s.
    - **The result that goes against the above**: if the rim parameters are released as well,
-     Fick + binding reaches RSS 9.37, as good as the fractal law — but with rate_fmφ and Kp_caseum
+     Fick + binding reaches RSS 9.37 and LOTO CV 23.9, both marginally *better* than the fractal
+     law with a free rim (9.19 fitted, CV 30.8) — but with rate_fmφ and Kp_caseum
      driven two to three orders of magnitude from Table S13, both at the edge of their bounds. The
      caseum transport law and the rim parameters are therefore partly confounded in these data. An
      independent estimate of either would separate them.
