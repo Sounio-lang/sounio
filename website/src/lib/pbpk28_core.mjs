@@ -498,6 +498,60 @@ export const DEFAULT_PARAMS_OLANZAPINE = Object.freeze({
   releaseSourceLabel: 'Oral IR (k_a = 0.6 /h, F = 0.60, lag 0.25 h)',
 });
 
+// Clozapine single 100 mg oral tablet (SIO-521): ka = 1.0/h (Tmax ~2 h),
+// F = 0.55, tlag = 0.25 h. CL = 20 L/h (calibrated: 400 mg/day steady state
+// ~= 460 ng/mL, inside the 350-600 TDM band). Kp = clozapine tissue values
+// (Vd ~400 L) -- high brain uptake (target organ, no P-gp restraint), NOT
+// olanzapine's. PS assumed flow-limited pattern, SIO-550. fm CYP1A2 0.70 /
+// CYP3A4 0.20 / other 0.10 recorded in the drug file; smoker split follow-up.
+export const MW_CLOZAPINE = 326.83;
+
+export const CLZ_KA_DEFAULT = 1.0;     // h^-1, Tmax ~2 h
+export const CLZ_F_DEFAULT = 0.55;     // first-pass CYP1A2
+export const CLZ_TLAG_DEFAULT = 0.25;  // h, tablet dissolution
+export const CLZ_DOSE_DEFAULT = 100.0; // mg, single dose
+
+export const KP_CLOZAPINE = Object.freeze([
+  1.00,  // 0 blood (definition)
+  10.0,  // 1 liver
+  4.0,   // 2 kidney
+  8.0,   // 3 brain (target organ, high uptake)
+  3.0,   // 4 heart
+  6.0,   // 5 lung
+  8.0,   // 6 muscle
+  6.0,   // 7 adipose (capped)
+  4.0,   // 8 gut
+  3.0,   // 9 skin
+  2.0,   // 10 bone
+  4.0,   // 11 spleen
+  3.0,   // 12 pancreas
+  3.0,   // 13 other
+]);
+
+export const DEFAULT_PARAMS_CLOZAPINE = Object.freeze({
+  clHep: 20.0,
+  higuchiScale: 1.0,
+  vdScale: 1.0,
+  bolusMg: 0.0,
+  stentActive: true,   // re-used as 'input active' (no stent; oral IR)
+  ps: PS_RAPAMYCIN,    // assumed flow-limited pattern, SIO-550
+  vascFrac: VASC_FRAC,
+  kp: KP_CLOZAPINE,
+  mw: MW_CLOZAPINE,
+  releaseModel: 'oral_ir',
+  releaseKa: CLZ_KA_DEFAULT,
+  releaseF: CLZ_F_DEFAULT,
+  releaseTlag: CLZ_TLAG_DEFAULT,
+  releaseDoseMg: CLZ_DOSE_DEFAULT,
+  tmddOrgans: [],
+  tmddParams: {},
+  pdOrgans: [],
+  pdParams: {},
+  cVisualMax: 3.0e-5,
+  drugLabel: 'Clozapine (oral IR)',
+  releaseSourceLabel: 'Oral IR (k_a = 1.0 /h, F = 0.55, lag 0.25 h)',
+});
+
 /**
  * Stent release (Higuchi). Identical to pbpk14_core for cross-model parity.
  */

@@ -1451,3 +1451,85 @@ paste <(grep "^TMASS|m=" "$OLZ_SIO_LOG" | sed "s/^TMASS|m=//") \
 
 echo
 echo "[pbpk28-parity] olanzapine oral-IR canonical: tablet lag + gut absorption + systemic PK + mass envelope (9th canonical drug)"
+
+# ════════════════════════════════════════════════════════════════════════════
+# Case 24: Clozapine — tenth canonical drug, third oral-IR case in PBPK-28.
+# Single 100 mg tablet (tlag = 0.25 h) → 1st-order gut absorption (ka = 1.0/h)
+# with first-pass loss (F = 0.55) → blood → PBPK28 CN, dt = 0.001.
+# Plasma referenced (rb ~= 1); CL = 20 L/h calibrated to the TDM band;
+# Kp are clozapine tissue values (NOT olanzapine's); PS assumed (SIO-550);
+# fm CYP1A2 0.70 / CYP3A4 0.20 / other 0.10 in the drug file; smoker split
+# follow-up. Sounio ref drives the stdlib scenario itself; Node side is
+# DEFAULT_PARAMS_CLOZAPINE.
+#   24a  organ-average cavg   Node ↔ Sounio, STRICT 1% RMSE per organ
+#   24b  mass envelope        0 <= total mass <= cumulative absorbed, 12/12
+# Strict 1% (no absolute floor needed): worst organ is 0.002%, three orders
+# of magnitude inside the bar. Blood Cmax 292.5 ng/mL single 100 mg dose.
+# ════════════════════════════════════════════════════════════════════════════
+echo
+echo "[pbpk28-parity] Case 24: Sounio ↔ Node clozapine PBPK28 (oral IR)"
+
+CLZ_SIO_LOG="$OUT_DIR/clz_sounio.txt"
+CLZ_NODE_LOG="$OUT_DIR/clz_node.txt"
+"$SOUC_BIN" run tests/run-pass/dissertation_pbpk28_parity_ref_clozapine.sio > "$CLZ_SIO_LOG" 2>&1 || {
+  echo "[pbpk28-parity:case24] FAIL: Sounio clozapine ref returned non-zero" >&2
+  tail -n 20 "$CLZ_SIO_LOG" >&2; exit 1; }
+if ! grep -q '^DISSERTATION_PBPK28_CLOZAPINE_PARITY_DONE$' "$CLZ_SIO_LOG"; then
+  echo "[pbpk28-parity:case24] FAIL: Sounio clozapine ref did not emit DONE" >&2; exit 1; fi
+node "$NODE_RUNNER" --drug=clozapine > "$CLZ_NODE_LOG" 2>&1 || {
+  echo "[pbpk28-parity:case24] FAIL: Node clozapine runner returned non-zero" >&2
+  tail -n 20 "$CLZ_NODE_LOG" >&2; exit 1; }
+if ! grep -q '^DISSERTATION_PBPK28_CLOZAPINE_PARITY_NODE v1$' "$CLZ_NODE_LOG"; then
+  echo "[pbpk28-parity:case24] FAIL: Node clozapine runner header mismatch" >&2; exit 1; fi
+
+CLZ_SIO_TSV="$OUT_DIR/clz_sounio.tsv"
+CLZ_NODE_TSV="$OUT_DIR/clz_node.tsv"
+parse_to_tsv "$CLZ_SIO_LOG" "$CLZ_SIO_TSV"
+parse_to_tsv "$CLZ_NODE_LOG" "$CLZ_NODE_TSV"
+
+CLZ_SIO_ROWS=$(wc -l < "$CLZ_SIO_TSV")
+CLZ_NODE_ROWS=$(wc -l < "$CLZ_NODE_TSV")
+if [[ "$CLZ_SIO_ROWS" -ne "$EXPECTED_ROWS" || "$CLZ_NODE_ROWS" -ne "$EXPECTED_ROWS" ]]; then
+  echo "[pbpk28-parity:case24] FAIL: clozapine row count mismatch — Sounio=$CLZ_SIO_ROWS Node=$CLZ_NODE_ROWS expected=$EXPECTED_ROWS" >&2
+  exit 1
+fi
+echo "[pbpk28-parity:case24] both runs emitted $CLZ_SIO_ROWS records"
+
+CLZ_JOINED="$OUT_DIR/clz_joined.tsv"
+awk -F'\t' '
+  NR==FNR { S[$1"|"$2] = $5; next }
+  { print $1"\t"$2"\t"S[$1"|"$2]"\t"$5 }
+' "$CLZ_SIO_TSV" "$CLZ_NODE_TSV" > "$CLZ_JOINED"
+
+awk -F'\t' -v THR="$RMSE_THRESHOLD_PCT" '
+  {
+    i = $2 + 0; cs = $3 + 0; cn = $4 + 0;
+    d = cs - cn; SS[i] += d * d; NN[i] += 1;
+    if (cs > PK[i]) PK[i] = cs;
+    if (cn > PK[i]) PK[i] = cn;
+  }
+  END {
+    bad = 0;
+    for (i = 0; i < 14; i++) {
+      if (NN[i] == 0) { printf "PBPK28_CLOZAPINE_PARITY_FAIL organ %d MISSING\n", i; bad += 1; continue; }
+      rmse = sqrt(SS[i] / NN[i]); pk = PK[i] + 0;
+      if (pk == 0) { continue; }
+      pct = 100.0 * rmse / pk;
+      if (pct >= THR + 0) { printf "PBPK28_CLOZAPINE_PARITY_FAIL organ %d pct=%.4f rmse=%.3g\n", i, pct, rmse; bad += 1; }
+    }
+    if (bad > 0) { exit 1; }
+    printf "PBPK28_CLOZAPINE_PARITY_PASS 14/14 compartments within %s%% RMSE (strict)\n", THR;
+  }
+' "$CLZ_JOINED"
+
+paste <(grep "^TMASS|m=" "$CLZ_SIO_LOG" | sed "s/^TMASS|m=//") \
+      <(grep "^TREL|cum=" "$CLZ_SIO_LOG" | sed "s/^TREL|cum=//") \
+  | awk -v FAILM="PBPK28_CLOZAPINE_MASS_FAIL" -v PASS="PBPK28_CLOZAPINE_MASS_PASS" '
+      { m=($1+0); r=($2+0); n++;
+        if (!(m >= 0 && m <= r)) { printf "%s sample %d: mass %.6f outside [0, %.6f]\n", FAILM, n, m, r; bad=1 } }
+      END { if (n != 12) { printf "%s row count %d != 12\n", FAILM, n; exit 1 }
+        if (bad) exit 1;
+        printf "%s 12/12 samples within [0, absorbed]\n", PASS }'
+
+echo
+echo "[pbpk28-parity] clozapine oral-IR canonical: tablet lag + gut absorption + systemic PK + mass envelope (10th canonical drug)"
