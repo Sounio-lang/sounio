@@ -415,3 +415,35 @@ worker-bound removal, incorrect list routing and disconnected accuracy replay.
 Acceptance requires all four hosted shards, effective worker-count receipts,
 exact canonical-list coverage and the unchanged PBPK test passing within its
 original budget. Historical warm/cold measurements do not qualify a new head.
+
+### Lean toolchains and exact-input proof products
+
+The Lean job previously transported formal/lean4/.lake under an immutable
+toolchain-only key. Later proof changes rebuilt from that frozen snapshot on
+every run. Keep toolchains in a separate cache keyed by both formal toolchain
+files and platform. Cache both formal/.lake and formal/lean4/.lake under an
+exact key covering all formal inputs (excluding .lake products), Lean gate
+recipes and the workflow. No restore-prefix fallback is used. Non-Lean formal
+inputs are included because proof elaboration may consume certificates/data.
+
+Every existing lake build, V1 mutant control, NS/fusion gate, fresh axiom report
+and inventory check remains mandatory on cache hits. Cache restoration is
+transport; Lake still validates build traces. The orchestration contract pins
+the predecessor proof job byte-for-byte outside the cache block and rejects
+omitted builds, skipped audits, missing input scopes and cross-source fallback.
+Hosted cold/warm results are required before reporting a latency improvement.
+
+### Overlap native macOS with independent bootstrap regressions
+
+The source-bootstrap producer publishes its fresh macOS seed and source-bound
+Linux stage2 immediately after the host gate and cross-build. A separate
+source-bootstrap-regressions job downloads the same-run stage2, verifies its
+checkout SHA and binary digest, restores execute permission and runs all
+original ABI, ARM64 store/identifier witnesses and modular typecheck proofs.
+Both jobs remain selected and fail-closed in CI Decision. Native macOS still
+requires the successful source-bootstrap producer; independent regressions
+may run concurrently with it and cannot be omitted from the final verdict.
+The original proof commands are frozen in bootstrap_steps_baseline.json and
+compared against their unique assignment in the two jobs. No compiler source,
+proof statement or model changes are involved. Hosted receipts must prove
+the overlap and native CPU/Metal acceptance before claiming a time saving.

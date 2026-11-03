@@ -97,6 +97,10 @@ jobs:
       - uses: actions/checkout@v4
       - name: Canonical full suite partition contract
         run: node scripts/ci/full_suite_partition_contract.mjs "$GITHUB_WORKSPACE" --selftest
+      - name: Source-bootstrap overlap and mandatory regression contract
+        run: node scripts/ci/bootstrap_overlap_contract.mjs "$GITHUB_WORKSPACE" --selftest
+      - name: Lean cache and mandatory proof gates contract
+        run: node scripts/ci/lean_cache_contract.mjs "$GITHUB_WORKSPACE" --selftest
       - name: Contracts partition and compiler cache wiring contract
         run: node scripts/ci/contracts_parallel_contract.mjs "$GITHUB_WORKSPACE" --selftest
       - name: Deep-science worker failure controls
@@ -1192,8 +1196,6 @@ jobs:
         run: bash scripts/lib/materialize_madaros_prebuilt.sh
       - name: Source-bootstrap host self-host gate
         run: bash scripts/codex/action-source-bootstrap-host-gate.sh
-      - name: Execute x86 generic and imported aggregate ABI regressions
-        run: bash scripts/ci/bootstrap_generic_array_layout_gate.sh /tmp/sounio-source-bootstrap-selfhost-linux-x86_64/artifacts/souc-stage2
       - name: Cross-build macOS arm64 compiler artifact
         run: |
           SOUC_STAGE2=/tmp/sounio-source-bootstrap-selfhost-linux-x86_64/artifacts/souc-stage2
@@ -1201,6 +1203,61 @@ jobs:
           "$SOUC_STAGE2" self-hosted/compiler/lean_single.sio "$MACOS_OUT" --target aarch64-macos
           chmod +x "$MACOS_OUT"
           file "$MACOS_OUT" | grep -E "Mach-O 64-bit.*arm64.*executable|Mach-O 64-bit.*executable.*arm64"
+      - name: Bind the source-bootstrap stage2 to this checkout
+        run: |
+          ARTIFACT=/tmp/sounio-source-bootstrap-selfhost-linux-x86_64/artifacts
+          git rev-parse HEAD > "$ARTIFACT/SOURCE_GIT_SHA"
+          (cd "$ARTIFACT" && sha256sum souc-stage2 > souc-stage2.sha256)
+      - name: Publish source-bootstrap stage2 before independent regressions
+        uses: actions/upload-artifact@v4
+        with:
+          name: source-bootstrap-compiler-linux-x86_64
+          path: |
+            /tmp/sounio-source-bootstrap-selfhost-linux-x86_64/artifacts/souc-stage2
+            /tmp/sounio-source-bootstrap-selfhost-linux-x86_64/artifacts/souc-stage2.sha256
+            /tmp/sounio-source-bootstrap-selfhost-linux-x86_64/artifacts/SOURCE_GIT_SHA
+          retention-days: 1
+      - name: Upload source-bootstrap macOS compiler artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: source-bootstrap-native-compiler-macos-arm64
+          path: /tmp/souc-self-hosted-arm64-macos
+          retention-days: 1
+      - name: Upload source-bootstrap self-host gate artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: source-bootstrap-selfhost-gate-linux-x86_64
+          path: /tmp/sounio-source-bootstrap-selfhost-linux-x86_64
+          retention-days: 1
+
+  # Release the fresh macOS seed before the independent modular proof.
+  # Both producer and regressions remain required by CI Decision.
+  source-bootstrap-regressions:
+    name: Source-Bootstrap Regressions (Linux x86_64)
+    needs: [impact, fast-checks, source-bootstrap-selfhost-linux-x86_64]
+    if: ${{ !cancelled() && (needs.impact.outputs.compiler == 'true' || needs.impact.outputs.full == 'true') && needs.source-bootstrap-selfhost-linux-x86_64.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      SOUNIO_SELFHOST_HOST_GATE_DIR: /tmp/sounio-source-bootstrap-selfhost-linux-x86_64
+    steps:
+      - uses: actions/checkout@v4
+      - name: Materialize the committed Madaros prebuilt
+        run: bash scripts/lib/materialize_madaros_prebuilt.sh
+      - name: Download this run's source-bootstrap stage2
+        uses: actions/download-artifact@v4
+        with:
+          name: source-bootstrap-compiler-linux-x86_64
+          path: /tmp/sounio-source-bootstrap-selfhost-linux-x86_64/artifacts
+      - name: Verify source-bootstrap provenance and executable permission
+        run: |
+          ARTIFACT=/tmp/sounio-source-bootstrap-selfhost-linux-x86_64/artifacts
+          test "$(cat "$ARTIFACT/SOURCE_GIT_SHA")" = "$(git rev-parse HEAD)"
+          (cd "$ARTIFACT" && sha256sum -c souc-stage2.sha256)
+          chmod +x "$ARTIFACT/souc-stage2"
+      - name: Execute x86 generic and imported aggregate ABI regressions
+        run: bash scripts/ci/bootstrap_generic_array_layout_gate.sh /tmp/sounio-source-bootstrap-selfhost-linux-x86_64/artifacts/souc-stage2
       - name: Cross-compile ARM64 nested-store witness
         env:
           SOUNIO_ARM64_WITNESS_COMPILER: /tmp/sounio-source-bootstrap-selfhost-linux-x86_64/artifacts/souc-stage2
@@ -1232,22 +1289,16 @@ jobs:
           SOUC_NATIVE="$CHECK_OUT" \
             WORK_DIR=/tmp/sounio-source-bootstrap-native-typecheck-proof \
             bash scripts/selfhost/selfhost_native_typecheck_proof.sh
-      - name: Upload source-bootstrap macOS compiler artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: source-bootstrap-native-compiler-macos-arm64
-          path: /tmp/souc-self-hosted-arm64-macos
-          retention-days: 1
-      - name: Upload source-bootstrap self-host gate artifacts
+      - name: Upload source-bootstrap regression proof artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: source-bootstrap-selfhost-gate-linux-x86_64
+          name: source-bootstrap-regression-proof
           path: |
-            /tmp/sounio-source-bootstrap-selfhost-linux-x86_64
             /tmp/sounio-source-bootstrap-native-typecheck-proof
             /tmp/sounio-arm64-nested-store-witness
             /tmp/sounio-arm64-array-element-field-witness
+            /tmp/sounio-arm64-kernel-identifier-witness
           retention-days: 1
 
   sco-current-source:
@@ -2623,19 +2674,23 @@ jobs:
       - uses: actions/checkout@v4
       - name: Materialize the committed Madaros prebuilt
         run: bash scripts/lib/materialize_madaros_prebuilt.sh
-      - name: Cache elan toolchain
+      # Toolchains and build products have different lifetimes. A toolchain-only
+      # key made immutable .lake snapshots rebuild every later proof change.
+      - name: Cache elan toolchains
+        uses: actions/cache@v4
+        with:
+          path: ~/.elan
+          key: lean-elan-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('formal/lean-toolchain', 'formal/lean4/lean-toolchain') }}
+      # Exact source key only: never restore proof objects from another source
+      # tree or toolchain. All lake builds and fresh axiom/mutant audits below
+      # remain unconditional, including on a cache hit.
+      - name: Cache exact-source Lean build products
         uses: actions/cache@v4
         with:
           path: |
-            ~/.elan
+            formal/.lake
             formal/lean4/.lake
-          # Keyed on the toolchain FILE, which is only meaningful now that the
-          # file names a version. While it read `leanprover/lean4:stable` the
-          # hash never changed even as `stable` advanced, so the cache pinned
-          # the toolchain in place and hid the drift until an eviction. Do not
-          # put a moving ref back in that file without changing this key too.
-          key: lean-${{ runner.os }}-${{ hashFiles('formal/lean4/lean-toolchain') }}
-          restore-keys: lean-${{ runner.os }}-
+          key: lean-build-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('formal/**', '!formal/**/.lake/**', 'scripts/ci/*lean*.sh', 'scripts/ci/epistemic_measure_correspondence_gate.sh', '.github/workflows/ci.yml') }}
       - name: Install elan (Lean toolchain manager)
         run: |
           if ! command -v elan &>/dev/null; then
@@ -2792,6 +2847,7 @@ jobs:
       - native-selfhost-linux-x86_64
       - native-linux-regressions
       - source-bootstrap-selfhost-linux-x86_64
+      - source-bootstrap-regressions
       - current-source-madaros
       - sco-current-source
       - madaros-current-source-deref-f64
