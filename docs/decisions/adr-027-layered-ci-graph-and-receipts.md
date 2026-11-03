@@ -447,3 +447,19 @@ The original proof commands are frozen in bootstrap_steps_baseline.json and
 compared against their unique assignment in the two jobs. No compiler source,
 proof statement or model changes are involved. Hosted receipts must prove
 the overlap and native CPU/Metal acceptance before claiming a time saving.
+
+### Balance required Contracts and avoid historical blob transfer
+
+The previous core shard serialized independent gates. Its measured719s run
+included124s of checkout. Split it into core-a/core-b/core-c, preserving the
+existing research group and every original command, condition, environment
+and ordering. contracts_partition.tsv explicitly assigns each original gate
+to exactly one required shard; the predecessor command inventory stays frozen.
+The existing fail-fast:false matrix result continues to block CI Decision.
+
+Impact and both Contracts jobs retain fetch-depth:0 and complete working trees.
+The checkout filter blob:none transports all commit history while historical
+blobs remain available through Git lazy fetching. No sparse checkout is used
+for these jobs. A real Git fixture must prove historical diff/show operations
+and complete current files still work and reject a shallow-history control.
+Hosted results are required before reporting a time saving.
