@@ -358,6 +358,38 @@ export const DEFAULT_PARAMS_TIRZEPATIDE = Object.freeze({
   releaseSourceLabel: 'Subcutaneous depot (k_a = 0.0164 /h, F = 0.80)',
 });
 
+// Xience V everolimus-eluting stent (SIO-524): CoCr platform, durable
+// fluoropolymer, 100 ug/cm^2, canonical 3.0 x 18 mm device = 0.088 mg.
+// ~80% eluted by 30 days, remainder by ~4 months (SPIRIT FIRST; TAXCO).
+// Systemic sink: CL = 8.8 L/h (transplant popPK, FDA Zortress label).
+// Kp/PS mirror the rapamycin vector (same mTOR class, MW 958 vs 914 Da),
+// assumed pending SIO-550. Arterial-wall fate is NOT modeled (limitation).
+export const MW_EVEROLIMUS = 958.22;
+
+export const EVR_KH_DEFAULT = 0.00262;   // mg/h^1/2: 80% of 0.088 mg at 720 h
+
+export const DEFAULT_PARAMS_EVEROLIMUS = Object.freeze({
+  clHep: 8.8,
+  higuchiScale: 1.0,
+  vdScale: 1.0,
+  bolusMg: 0.0,
+  stentActive: true,
+  ps: PS_RAPAMYCIN,
+  vascFrac: VASC_FRAC,
+  kp: KP,
+  mw: MW_EVEROLIMUS,
+  releaseModel: 'higuchi',
+  releaseKH: EVR_KH_DEFAULT,
+  releaseDoseMg: 0.088,
+  tmddOrgans: [],
+  tmddParams: {},
+  pdOrgans: [],
+  pdParams: {},
+  cVisualMax: 3.0e-5,
+  drugLabel: 'Everolimus (Xience DES)',
+  releaseSourceLabel: 'Xience stent Higuchi (KH fit to 80%/30d)',
+});
+
 /**
  * Stent release (Higuchi). Identical to pbpk14_core for cross-model parity.
  */

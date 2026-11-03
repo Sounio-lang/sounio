@@ -1205,3 +1205,86 @@ paste <(grep "^TMASS|m=" "$TIRZ_SIO_LOG" | sed "s/^TMASS|m=//") \
 
 echo
 echo "[pbpk28-parity] tirzepatide incretin canonical: SC depot PK + mass envelope within ${RMSE_THRESHOLD_PCT}% RMSE (6th canonical drug)"
+
+# ════════════════════════════════════════════════════════════════════════════
+# Case 21: Everolimus — seventh canonical drug, first DES case in PBPK-28.
+# Xience stent (0.088 mg, KH fit to 80%/30d) → blood → PBPK28 CN, dt = 0.001.
+# Sounio ref drives the stdlib scenario itself; Node side is
+# DEFAULT_PARAMS_EVEROLIMUS.
+#   21a  organ-average cavg   Node ↔ Sounio, dual criterion per organ
+#   21b  mass envelope        0 <= total mass <= cumulative released, 12/12
+# Dual criterion (relative 1% OR absolute 1e-6 mg/L): stent systemic levels
+# are trace (blood peak ~6e-5 mg/L), so a pure peak-relative RMSE would fail
+# a numerically identical computation — both engines already agree to ~3e-7
+# absolute (the transcendental-evaluation floor also seen in case 20).
+# 1e-6 mg/L is far below any therapeutic/assay relevance for everolimus.
+# ════════════════════════════════════════════════════════════════════════════
+echo
+echo "[pbpk28-parity] Case 21: Sounio ↔ Node everolimus PBPK28 (Xience DES)"
+
+EVR_SIO_LOG="$OUT_DIR/evr_sounio.txt"
+EVR_NODE_LOG="$OUT_DIR/evr_node.txt"
+"$SOUC_BIN" run tests/run-pass/dissertation_pbpk28_parity_ref_everolimus.sio > "$EVR_SIO_LOG" 2>&1 || {
+  echo "[pbpk28-parity:case21] FAIL: Sounio everolimus ref returned non-zero" >&2
+  tail -n 20 "$EVR_SIO_LOG" >&2; exit 1; }
+if ! grep -q '^DISSERTATION_PBPK28_EVEROLIMUS_PARITY_DONE$' "$EVR_SIO_LOG"; then
+  echo "[pbpk28-parity:case21] FAIL: Sounio everolimus ref did not emit DONE" >&2; exit 1; fi
+node "$NODE_RUNNER" --drug=everolimus > "$EVR_NODE_LOG" 2>&1 || {
+  echo "[pbpk28-parity:case21] FAIL: Node everolimus runner returned non-zero" >&2
+  tail -n 20 "$EVR_NODE_LOG" >&2; exit 1; }
+if ! grep -q '^DISSERTATION_PBPK28_EVEROLIMUS_PARITY_DONE$' "$EVR_NODE_LOG"; then
+  echo "[pbpk28-parity:case21] FAIL: Node everolimus runner did not emit DONE" >&2; exit 1; fi
+if ! grep -q '^DISSERTATION_PBPK28_EVEROLIMUS_PARITY_NODE v1$' "$EVR_NODE_LOG"; then
+  echo "[pbpk28-parity:case21] FAIL: Node everolimus runner header mismatch" >&2; exit 1; fi
+
+EVR_SIO_TSV="$OUT_DIR/evr_sounio.tsv"
+EVR_NODE_TSV="$OUT_DIR/evr_node.tsv"
+parse_to_tsv "$EVR_SIO_LOG" "$EVR_SIO_TSV"
+parse_to_tsv "$EVR_NODE_LOG" "$EVR_NODE_TSV"
+
+EVR_SIO_ROWS=$(wc -l < "$EVR_SIO_TSV")
+EVR_NODE_ROWS=$(wc -l < "$EVR_NODE_TSV")
+if [[ "$EVR_SIO_ROWS" -ne "$EXPECTED_ROWS" || "$EVR_NODE_ROWS" -ne "$EXPECTED_ROWS" ]]; then
+  echo "[pbpk28-parity:case21] FAIL: everolimus row count mismatch — Sounio=$EVR_SIO_ROWS Node=$EVR_NODE_ROWS expected=$EXPECTED_ROWS" >&2
+  exit 1
+fi
+echo "[pbpk28-parity:case21] both runs emitted $EVR_SIO_ROWS records"
+
+EVR_JOINED="$OUT_DIR/evr_joined.tsv"
+awk -F'\t' '
+  NR==FNR { S[$1"|"$2] = $5; next }
+  { print $1"\t"$2"\t"S[$1"|"$2]"\t"$5 }
+' "$EVR_SIO_TSV" "$EVR_NODE_TSV" > "$EVR_JOINED"
+
+awk -F'\t' -v THR="$RMSE_THRESHOLD_PCT" '
+  {
+    i = $2 + 0; cs = $3 + 0; cn = $4 + 0;
+    d = cs - cn; SS[i] += d * d; NN[i] += 1;
+    if (cs > PK[i]) PK[i] = cs;
+    if (cn > PK[i]) PK[i] = cn;
+  }
+  END {
+    bad = 0;
+    for (i = 0; i < 14; i++) {
+      if (NN[i] == 0) { printf "PBPK28_EVEROLIMUS_PARITY_FAIL organ %d MISSING\n", i; bad += 1; continue; }
+      rmse = sqrt(SS[i] / NN[i]); pk = PK[i] + 0;
+      if (pk == 0) { continue; }
+      pct = 100.0 * rmse / pk;
+      if (pct >= THR + 0 && rmse >= 1e-6) { printf "PBPK28_EVEROLIMUS_PARITY_FAIL organ %d pct=%.4f rmse=%.3g\n", i, pct, rmse; bad += 1; }
+    }
+    if (bad > 0) { exit 1; }
+    printf "PBPK28_EVEROLIMUS_PARITY_PASS 14/14 compartments within %s%% RMSE or 1e-6 absolute\n", THR;
+  }
+' "$EVR_JOINED"
+
+paste <(grep "^TMASS|m=" "$EVR_SIO_LOG" | sed "s/^TMASS|m=//") \
+      <(grep "^TREL|cum=" "$EVR_SIO_LOG" | sed "s/^TREL|cum=//") \
+  | awk -v FAILM="PBPK28_EVEROLIMUS_MASS_FAIL" -v PASS="PBPK28_EVEROLIMUS_MASS_PASS" '
+      { m=($1+0); r=($2+0); n++;
+        if (!(m >= 0 && m <= r)) { printf "%s sample %d: mass %.6f outside [0, %.6f]\n", FAILM, n, m, r; bad=1 } }
+      END { if (n != 12) { printf "%s row count %d != 12\n", FAILM, n; exit 1 }
+        if (bad) exit 1;
+        printf "%s 12/12 samples within [0, released]\n", PASS }'
+
+echo
+echo "[pbpk28-parity] everolimus DES canonical: stent release + systemic PK + mass envelope (7th canonical drug)"
