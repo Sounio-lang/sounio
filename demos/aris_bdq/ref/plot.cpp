@@ -46,7 +46,7 @@ void frame(FILE* f, const Ax& a, const char* title, const char* ylab) {
   std::fprintf(f, "<rect x='%g' y='%g' width='%g' height='%g' fill='none' stroke='#888'/>\n", a.x0, a.y0, a.w, a.hgt);
   std::fprintf(f, "<text x='%g' y='24' font-size='15' font-weight='600'>%s</text>\n", a.x0, title);
   std::fprintf(f, "<text x='18' y='%g' font-size='12' transform='rotate(-90 18 %g)' text-anchor='middle'>%s</text>\n", a.y0 + a.hgt / 2, a.y0 + a.hgt / 2, ylab);
-  std::fprintf(f, "<text x='%g' y='%g' font-size='12' text-anchor='middle'>Tempo (h) — semanas 0–24</text>\n", a.x0 + a.w / 2, a.y0 + a.hgt + 36);
+  std::fprintf(f, "<text x='%g' y='%g' font-size='12' text-anchor='middle'>Time (h) — weeks 0–24</text>\n", a.x0 + a.w / 2, a.y0 + a.hgt + 36);
   for (double x = 0; x <= a.xmax + 1; x += 500) {
     std::fprintf(f, "<line x1='%.1f' x2='%.1f' y1='%g' y2='%g' stroke='#eee'/>", a.X(x), a.X(x), a.y0, a.y0 + a.hgt);
     std::fprintf(f, "<text x='%.1f' y='%g' font-size='11' text-anchor='middle'>%g</text>\n", a.X(x), a.y0 + a.hgt + 16, x);
@@ -85,17 +85,17 @@ int main(int argc, char** argv) {
   if (m == "fig7") {
     Csv d = load(argv[2]); FILE* f = open(argv[3]);
     Ax a; a.xmin = 0; a.xmax = 4032; a.ymin = 0.01; a.ymax = 1000; a.logy = true;
-    frame(f, a, "Reprodução Fig. 7A — lesão celular, humano (referência C++23)", "Conc. livre (ng/mL ou ng/g)");
+    frame(f, a, "Fig. 7A reproduced — cellular lesion, human", "Unbound conc. (ng/mL or ng/g)");
     const Col& t = col(d, "t");
-    line(f, a, t, col(d, "lys_m"), "#1f4e9c", "Lisossomo", a.Y(200));
-    line(f, a, t, col(d, "cyt_m"), "#4f8fd6", "Citosol", a.Y(20));
+    line(f, a, t, col(d, "lys_m"), "#1f4e9c", "Lysosome", a.Y(200));
+    line(f, a, t, col(d, "cyt_m"), "#4f8fd6", "Cytosol", a.Y(20));
     line(f, a, t, col(d, "cp_u"), "#7aa7d9", "Plasma", a.Y(0.6));
     hline(f, a, 120, "MIC90"); hline(f, a, 60, "MIC50");
     std::fprintf(f, "</svg>\n"); std::fclose(f);
   } else if (m == "fig8") {
     Csv d = load(argv[2]); FILE* f = open(argv[3]);
     Ax a; a.xmin = 0; a.xmax = 4032; a.ymin = 0; a.ymax = 7000; a.logy = false;
-    frame(f, a, "Reprodução Fig. 8 — caseum total, humano", "Conc. total (ng/g)");
+    frame(f, a, "Fig. 8 reproduced — total caseum, human", "Total conc. (ng/g)");
     const Col& t = col(d, "t");
     const char* cs[6] = {"#0b3d91", "#1f5fae", "#3b7fc4", "#5e9bd3", "#83b5e0", "#a9cdee"};
     for (int k = 0; k < 6; ++k) {
@@ -109,17 +109,17 @@ int main(int argc, char** argv) {
   } else if (m == "band") {
     Csv b0 = load(argv[2]), b1 = load(argv[3]), d = load(argv[4]); FILE* f = open(argv[5], 900, 500);
     Ax a; a.xmin = 0; a.xmax = 4032; a.ymin = 5; a.ymax = 2000; a.logy = true;
-    frame(f, a, "Lisossomo do macrófago (livre): incerteza propagada até o humano", "Conc. livre (ng/g)");
-    auto band = [&](const Csv& b, const char* fill, const char* lab, double ly) {
+    frame(f, a, "Macrophage lysosome, unbound: uncertainty propagated to humans", "Unbound conc. (ng/g)");
+    auto band = [&](const Csv& b, const char* fill, const char* ink, const char* lab, double ly) {
       const Col& t = col(b, "t"); const Col& lo = col(b, "p025"); const Col& hi = col(b, "p975");
       std::string s = path(a, t, hi); char buf[64];
       for (size_t i = t.size(); i-- > 0;) { std::snprintf(buf, sizeof buf, "L%.1f %.1f", a.X(t[i]), a.Y(lo[i])); s += buf; }
       s += "Z";
       std::fprintf(f, "<path d='%s' fill='%s' stroke='none'/>\n", s.c_str(), fill);
-      std::fprintf(f, "<text x='%g' y='%.1f' font-size='11' fill='#333'>%s</text>\n", a.x0 + a.w + 4, ly, lab);
+      std::fprintf(f, "<text x='%g' y='%.1f' font-size='11' font-weight='600' fill='%s'>%s</text>\n", a.x0 + a.w + 4, ly, ink, lab);
     };
-    band(b1, "rgba(231,156,52,0.35)", "IC95% c/ premissas", a.Y(600));
-    band(b0, "rgba(31,78,156,0.45)", "IC95% só SEs do artigo", a.Y(300));
+    band(b1, "rgba(231,156,52,0.35)", "#b8701a", "95% CI, with assumptions", a.Y(600));
+    band(b0, "rgba(31,78,156,0.45)", "#1f4e9c", "95% CI, reported SEs only", a.Y(300));
     line(f, a, col(d, "t"), col(d, "lys_m"), "#0b2a5c", "Nominal", a.Y(90));
     hline(f, a, 120, "MIC90"); hline(f, a, 60, "MIC50");
     std::fprintf(f, "</svg>\n"); std::fclose(f);
