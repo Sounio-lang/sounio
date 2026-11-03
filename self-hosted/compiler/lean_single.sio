@@ -1431,8 +1431,12 @@ fn token_capacity() -> i64 { return 2097152 }
 
 fn note_limit_error(kind: i64) with Mut {
     if LIMIT_ERROR_KIND == 0 { LIMIT_ERROR_KIND = kind }
-    // D-20 (SIO-60): limit errors in imported functions are fatal too; see
-    // tc_mark_failed.
+    // Import-tolerant: errors in imported functions should not block ELF emission
+    if MAIN_SRC_END > 0 && CURRENT_FN >= 0 && CURRENT_FN < 65536 {
+        if (FN_EFFECTS[CURRENT_FN as usize] & 2048) != 0 {
+            return  // imported function error — don't set TYPECHECK_FAILED
+        }
+    }
     TYPECHECK_FAILED = 1
 }
 
@@ -5091,12 +5095,14 @@ fn print_src_loc_for_tok(tok: i64) with IO, Mut, Panic {
     print_int(local_line)
 }
 
-// D-20 (SIO-60): type errors in imported-module functions are fatal, exactly
-// like main-module errors (founder decision ADR-020, option (a)). Previously
-// they only bumped the counter so ELF emission could proceed with stubbed
-// functions; now they set TYPECHECK_FAILED.
+// Guard: errors in imported module functions should NOT block ELF emission.
 fn tc_mark_failed() with Mut {
     TC_FN_ERR_COUNT = TC_FN_ERR_COUNT + 1
+    if MAIN_SRC_END > 0 && CURRENT_FN >= 0 && CURRENT_FN < 65536 {
+        if (FN_EFFECTS[CURRENT_FN as usize] & 2048) != 0 {
+            return
+        }
+    }
     TYPECHECK_FAILED = 1
 }
 
@@ -5137,13 +5143,11 @@ fn tc_error(tok: i64, msg: string) -> i64 with IO, Mut, Panic {
 // Unbalanced braces in a module (#1634).
 //
 // Sets TYPECHECK_FAILED DIRECTLY rather than going through tc_mark_failed or
-// note_limit_error. (Historical note: both of those used to early-return for
-// functions carrying FN_EFFECTS & 2048 (imported), which is how an unbalanced
-// brace in an imported module used to fail the build while printing no
-// `error:` line at all -- the only symptom was a scatter of E200s hundreds of
-// tokens later, in a different file, naming a parameter that had nothing to
-// do with it. D-20 (SIO-60) removed those early-returns; the direct set stays
-// as the loud-failure idiom.)
+// note_limit_error. Both of those early-return for functions carrying
+// FN_EFFECTS & 2048 (imported), which is how an unbalanced brace in an imported
+// module used to fail the build while printing no `error:` line at all -- the
+// only symptom was a scatter of E200s hundreds of tokens later, in a different
+// file, naming a parameter that had nothing to do with it.
 fn tc_unbalanced_braces(tok: i64, d: i64) with IO, Mut, Panic {
     print("error: unbalanced braces in module (")
     if d > 0 {
@@ -5314,22 +5318,41 @@ fn tc_module_let_decl_scalar(p: i64) -> i64 with Panic, Mut {
 
 // D-20 (SIO-60): module-level `let x: i64 = true` used to bind 0 in silence,
 // in main and imported modules alike. A bool literal against a non-bool
-// scalar annotation (or a numeric literal against `bool`) is E001, reported
-// via tc_mark_failed -- fatal in every module since D-20. int<->float keeps
+// scalar annotation (or a numeric literal against `bool`) is E001. It sets
+// TYPECHECK_FAILED directly (same loud-failure idiom as
+// tc_unbalanced_braces): the tc_mark_failed path stays import-tolerant by
+// design, and this check must be fatal in every module. int<->float keeps
 // the legacy implicit conversion (unchecked here, as before).
 fn tc_module_let_bool_mismatch(decl_scalar: i64, p: i64) with IO, Mut, Panic, Div {
     if decl_scalar == 1 || decl_scalar == 2 {
         // `true`/`false` lex as TK35/TK36, never TK3.
         if TK[p as usize] == 35 || TK[p as usize] == 36 {
-            tc_decl_init_mismatch(p, decl_scalar, 0, 4, 0)
+            tc_module_let_bool_error(p, decl_scalar, 4)
         }
     } else if decl_scalar == 4 {
         if TK[p as usize] == 4 {
-            tc_decl_init_mismatch(p, 4, 0, 1, 0)
+            tc_module_let_bool_error(p, 4, 1)
         } else if TK[p as usize] == 53 {
-            tc_decl_init_mismatch(p, 4, 0, 2, 0)
+            tc_module_let_bool_error(p, 4, 2)
         }
     }
+}
+
+// E001 printer for the module-level bool/numeric mismatch above. Mirrors
+// tc_decl_init_mismatch's diagnostic text exactly, but fails the build
+// directly instead of routing through the import-tolerant tc_mark_failed.
+fn tc_module_let_bool_error(tok: i64, decl_ty: i64, expr_ty: i64) with IO, Mut, Panic, Div {
+    print("error[E001]: Type mismatch — expected ")
+    print_type_label(decl_ty, 0)
+    print(", got ")
+    print_type_label(expr_ty, 0)
+    print(" at ")
+    print_src_loc_for_tok(tok)
+    print(" (bundle line ")
+    print_int(TL[tok as usize])
+    print(")\n")
+    TC_FN_ERR_COUNT = TC_FN_ERR_COUNT + 1
+    TYPECHECK_FAILED = 1
 }
 
 // PR-3: struct-field refinement enforcement. At struct-literal compile time,
@@ -6395,10 +6418,8 @@ fn bitset_clear(bits: i64, clear_mask: i64) -> i64 {
 }
 
 fn tc_effect_violation(tok: i64, callee_eff: i64, caller_eff: i64) -> i64 with IO, Mut, Panic {
-    // D-20 (SIO-60): E035 stays import-tolerant (stdlib has ~200 genuine
-    // missing-effect annotations; fatalizing them is follow-up work). Only
-    // hard type errors (E001 path via tc_mark_failed) are import-fatal.
-    if FN_EFFECTS[CURRENT_FN as usize] & 2048 != 0 { return 0 }
+    // Skip effect violations for functions from imported modules — already validated
+    if (FN_EFFECTS[CURRENT_FN as usize] & 2048) != 0 { return 0 }
     tc_mark_failed()
     print("error[E035]: effect not declared in function signature at line ")
     print_int(TL[tok as usize])
@@ -6408,8 +6429,7 @@ fn tc_effect_violation(tok: i64, callee_eff: i64, caller_eff: i64) -> i64 with I
 
 // Call-site version — callee requires effects caller doesn't have.
 fn tc_effect_call_violation(tok: i64, callee_eff: i64, caller_eff: i64) -> i64 with IO, Mut, Panic {
-    // D-20 (SIO-60): E035 stays import-tolerant; see tc_effect_violation.
-    if FN_EFFECTS[CURRENT_FN as usize] & 2048 != 0 { return 0 }
+    if (FN_EFFECTS[CURRENT_FN as usize] & 2048) != 0 { return 0 }
     tc_mark_failed()
     print("error[E035]: effect not declared in function signature at line ")
     print_int(TL[tok as usize])
@@ -18221,13 +18241,12 @@ fn compile_primary() with IO, Mut, Panic, Div {
             } else { si = si + 1 }
             if slen >= 256 {
                 tc_error_hard(EP, "string literal exceeds maximum of 256 bytes")
-                // Belt-and-braces direct set, same idiom as tc_unbalanced_braces
-                // (#1634). (Historical: tc_mark_failed() used to early-return
-                // without setting TYPECHECK_FAILED for FN_EFFECTS & 2048
-                // (imported-module) functions, which let this fall through to
-                // a binary shipping the literal silently truncated to empty.
-                // D-20 (SIO-60) removed that early-return; the direct set is
-                // now redundant but harmless.)
+                // tc_error_hard -> tc_mark_failed() early-returns without
+                // setting TYPECHECK_FAILED for FN_EFFECTS & 2048 (imported-
+                // module) functions. Left alone, that lets this fall through
+                // to a binary shipping the literal silently truncated to
+                // empty (slen=0) instead of failing the build. Force it
+                // directly -- same idiom as tc_unbalanced_braces (#1634).
                 TYPECHECK_FAILED = 1
                 slen = 0
                 break

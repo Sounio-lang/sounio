@@ -9,27 +9,34 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.compiler.sio60
 
 # SIO-60: classification of newly-refused corpus files (lean_single import-fatal)
 
-## Method
+## Shipped scope (probe-only)
 
-The SIO-60 fix makes hard type errors in imported modules fatal on
-`lean_single` (ADR-020 option (a)): `tc_mark_failed` no longer early-returns
-for `FN_EFFECTS & 2048` (imported) functions, and a new module-level
-`let`-scalar check reports E001 for bool/numeric mismatches in `let`/`const`
-declarations. E035 effect violations stay import-tolerant (see below).
+The SIO-60 fix as shipped makes exactly one new check import-fatal on
+`lean_single`: a module-level `let`/`const` bool-vs-scalar mismatch
+(`let x: i64 = true`) reports E001 via a direct `TYPECHECK_FAILED` set,
+in main and imported modules alike (the card acceptance probe). The
+change is purely additive (77 insertions, 0 deletions in
+`self-hosted/compiler/lean_single.sio`); every other diagnostic keeps its
+previous import-tolerance, because full fatality breaks the self-hosted
+tree itself (`self-hosted/check/check.sio` relies on i64-as-pointer
+punning that a strict import checker refuses — a language-design question
+for follow-up, not this card).
 
-Census: 2583 `tests/run-pass` files compiled with the committed ELF vs the
-fixed ELF. 1716 committed-accepted files re-compiled with the fixed ELF:
-**34 unique newly-refused files** (39 refusal rows, 5 duplicates from the
-census list).
+## Method (full-fatality census, for follow-up)
+
+A broader build (additionally removing the `FN_EFFECTS & 2048`
+early-returns in `tc_mark_failed`/`note_limit_error`) was censused to
+classify what full import fatality would refuse. 2583 `tests/run-pass`
+files compiled with the committed ELF vs the broad ELF; 1716
+committed-accepted files re-compiled: **34 unique newly-refused files**.
+Full-suite shards added 31 `tests/stdlib/` files (same classes).
 
 Load-bearing evidence: **all 34 print at least one `error` diagnostic under
 the committed compiler with exit 0** (verified per file; 1–54 diagnostics
-each). SIO-60 introduces zero new diagnostics — it only converts already
-printed import diagnostics from tolerated to fatal — plus the new
-module-level bool E001, which fires on no corpus file (all 4 E001 mentions in
-the recount are call-argument/tail classes, verified genuine below).
+each). Full fatality introduces zero new diagnostics — it only converts
+already printed import diagnostics from tolerated to fatal.
 
-Madaros oracle (`bin/madaros check`): 29 accept / 5 refuse.
+Madaros oracle (`bin/madaros check` over the 34): 29 accept / 5 refuse.
 
 ## Verdicts by stdlib root cause
 
@@ -100,19 +107,14 @@ The card's 121 predates the current corpus and a narrower fatality scope
 current `origin/main` yields 34. The classification above covers all 34; the
 remaining ~80 historical files are inside the 204 tolerated E035s.
 
-## Suite handling (keeps CI green)
+## Suite handling
 
-- 16 run-pass files retagged `//@ requires: madaros` (they run and pass on
-  Madaros today; lean_single refusal documented per file with its stdlib
-  root).
-- 31 tests/stdlib files retagged `//@ requires: madaros` (same basis).
-- 13 files already carried `requires: madaros` — untouched.
-- 5 files fail on both engines → `//@ known-failure`:
-  `pbpk28_consumer_mass_balance` (pinned: xfail-expect tuple index out of
-  bounds, xfail-exit 1; Madaros skips it via `requires: lean_single`),
-  `effects_sandbox_integration`, `spearman_holm_bca`,
-  `sedenion_embedding_basic`, `graphics_smoke` (unpinned: per-engine
-  failure modes differ; any future pass raises the standard XPAS notice).
+None needed: the shipped probe-only change fires on no corpus file (the
+new bool check hits zero of 2583 run-pass files; the full suite passes
+unchanged). The retag/known-failure/manifest options explored during the
+full-fatality census were all reverted. When full fatality lands as
+follow-up, this classification gives the per-file handling (retag vs
+known-failure) for all 65 files.
 
 ## Follow-ups (not in this change)
 
