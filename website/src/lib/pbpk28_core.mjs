@@ -443,6 +443,61 @@ export const DEFAULT_PARAMS_TACROLIMUS = Object.freeze({
   releaseSourceLabel: 'Oral IR (k_a = 0.38 /h, F = 0.25)',
 });
 
+// Zyprexa immediate-release olanzapine (SIO-518): single 10 mg oral dose.
+// ka = 0.6/h, F = 0.60, tlag = 0.25 h tablet dissolution (Bergstrom 2006).
+// Plasma referenced (rb ~= 1, Callaghan 1999): CL = 25 L/h (CYP1A2 primary).
+// Kp = olanzapine tissue values (Rodgers-Rowland, Vd ~700 L) -- NOT
+// haloperidol's, despite the shared class. PS assumed flow-limited pattern,
+// SIO-550. Dual UGT1A4/CYP1A2 pathway recorded in the drug file, not equated
+// with clozapine. Single-dose PK only.
+export const MW_OLANZAPINE = 312.43;
+
+export const OLZ_KA_DEFAULT = 0.6;     // h^-1, Bergstrom 2006
+export const OLZ_F_DEFAULT = 0.60;     // Bergstrom 2006
+export const OLZ_TLAG_DEFAULT = 0.25;  // h, tablet dissolution
+export const OLZ_DOSE_DEFAULT = 10.0;  // mg, single dose
+
+export const KP_OLANZAPINE = Object.freeze([
+  1.00,  // 0 blood (definition)
+  12.0,  // 1 liver
+  5.0,   // 2 kidney
+  10.0,  // 3 brain
+  4.0,   // 4 heart
+  8.0,   // 5 lung
+  15.0,  // 6 muscle (Vd driver)
+  8.0,   // 7 adipose (Vd driver)
+  5.0,   // 8 gut
+  5.0,   // 9 skin
+  4.0,   // 10 bone
+  5.0,   // 11 spleen
+  3.5,   // 12 pancreas
+  3.5,   // 13 other
+]);
+
+export const DEFAULT_PARAMS_OLANZAPINE = Object.freeze({
+  clHep: 25.0,
+  higuchiScale: 1.0,
+  vdScale: 1.0,
+  bolusMg: 0.0,
+  stentActive: true,   // re-used as 'input active' (no stent; oral IR)
+  ps: PS_RAPAMYCIN,    // assumed flow-limited pattern, SIO-550
+  vascFrac: VASC_FRAC,
+  kp: KP_OLANZAPINE,
+  mw: MW_OLANZAPINE,
+  releaseModel: 'oral_ir',
+  releaseKa: OLZ_KA_DEFAULT,
+  releaseF: OLZ_F_DEFAULT,
+  releaseTlag: OLZ_TLAG_DEFAULT,
+  releaseDoseMg: OLZ_DOSE_DEFAULT,
+  tmddOrgans: [],
+  tmddParams: {},
+  pdOrgans: [],
+  pdParams: {},
+  cVisualMax: 3.0e-5,
+  drugLabel: 'Olanzapine (oral IR)',
+  releaseSourceLabel: 'Oral IR (k_a = 0.6 /h, F = 0.60, lag 0.25 h)',
+});
+
 /**
  * Stent release (Higuchi). Identical to pbpk14_core for cross-model parity.
  */
@@ -459,13 +514,17 @@ export function releaseRateAt(tHours, params) {
     return F * D * ka * Math.exp(-ka * Math.max(0, tHours));
   }
   if (model === 'oral_ir') {
-    // Oral IR capsule: rate = F * Dose * k_a * exp(-k_a * t)  (1st-order gut
-    // absorption; 1 - F is first-pass loss). Gut pool dosed at t = 0; the
-    // closed form is exact, so both engines evaluate the same function.
+    // Oral IR capsule: rate = 0 for t < tlag, else F * Dose * k_a *
+    // exp(-k_a * (t - tlag))  (1st-order gut absorption after tablet
+    // dissolution; 1 - F is first-pass loss). The closed form is exact,
+    // so both engines evaluate the same function.
     const ka = params.releaseKa;
     const F  = params.releaseF;
+    const tlag = params.releaseTlag ?? 0;
+    const te = tHours - tlag;
+    if (te < 0) return 0;
     const D  = params.releaseDoseMg * (params.higuchiScale ?? 1);
-    return F * D * ka * Math.exp(-ka * Math.max(0, tHours));
+    return F * D * ka * Math.exp(-ka * te);
   }
   // Higuchi (default): dQ/dt = K_H / (2·√t), clipped at t < 0.1 h
   const t = Math.max(0.1, tHours);

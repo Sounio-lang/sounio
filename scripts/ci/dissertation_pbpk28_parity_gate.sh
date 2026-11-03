@@ -1369,3 +1369,85 @@ paste <(grep "^TMASS|m=" "$TAC_SIO_LOG" | sed "s/^TMASS|m=//") \
 
 echo
 echo "[pbpk28-parity] tacrolimus oral-IR canonical: gut absorption + systemic PK + mass envelope (8th canonical drug)"
+
+# ════════════════════════════════════════════════════════════════════════════
+# Case 23: Olanzapine — ninth canonical drug, second oral-IR case in PBPK-28.
+# Zyprexa 10 mg single tablet (tlag = 0.25 h) → 1st-order gut absorption
+# (ka = 0.6/h) with first-pass loss (F = 0.60) → blood → PBPK28 CN, dt = 0.001.
+# Plasma referenced (rb ~= 1); Kp are olanzapine tissue values (NOT
+# haloperidol's); PS assumed (SIO-550); dual UGT1A4/CYP1A2 pathway recorded
+# in the drug file, not equated with clozapine. Sounio ref drives the stdlib
+# scenario itself; Node side is DEFAULT_PARAMS_OLANZAPINE.
+#   23a  organ-average cavg   Node ↔ Sounio, STRICT 1% RMSE per organ
+#   23b  mass envelope        0 <= total mass <= cumulative absorbed, 12/12
+# Strict 1% (no absolute floor needed): worst organ is 0.03%, two orders of
+# magnitude inside the bar. Blood Cmax 20.1 ng/mL sits at the TDM band edge
+# (20-80 ng/mL), as expected for a single 10 mg dose.
+# ════════════════════════════════════════════════════════════════════════════
+echo
+echo "[pbpk28-parity] Case 23: Sounio ↔ Node olanzapine PBPK28 (oral IR)"
+
+OLZ_SIO_LOG="$OUT_DIR/olz_sounio.txt"
+OLZ_NODE_LOG="$OUT_DIR/olz_node.txt"
+"$SOUC_BIN" run tests/run-pass/dissertation_pbpk28_parity_ref_olanzapine.sio > "$OLZ_SIO_LOG" 2>&1 || {
+  echo "[pbpk28-parity:case23] FAIL: Sounio olanzapine ref returned non-zero" >&2
+  tail -n 20 "$OLZ_SIO_LOG" >&2; exit 1; }
+if ! grep -q '^DISSERTATION_PBPK28_OLANZAPINE_PARITY_DONE$' "$OLZ_SIO_LOG"; then
+  echo "[pbpk28-parity:case23] FAIL: Sounio olanzapine ref did not emit DONE" >&2; exit 1; fi
+node "$NODE_RUNNER" --drug=olanzapine > "$OLZ_NODE_LOG" 2>&1 || {
+  echo "[pbpk28-parity:case23] FAIL: Node olanzapine runner returned non-zero" >&2
+  tail -n 20 "$OLZ_NODE_LOG" >&2; exit 1; }
+if ! grep -q '^DISSERTATION_PBPK28_OLANZAPINE_PARITY_NODE v1$' "$OLZ_NODE_LOG"; then
+  echo "[pbpk28-parity:case23] FAIL: Node olanzapine runner header mismatch" >&2; exit 1; fi
+
+OLZ_SIO_TSV="$OUT_DIR/olz_sounio.tsv"
+OLZ_NODE_TSV="$OUT_DIR/olz_node.tsv"
+parse_to_tsv "$OLZ_SIO_LOG" "$OLZ_SIO_TSV"
+parse_to_tsv "$OLZ_NODE_LOG" "$OLZ_NODE_TSV"
+
+OLZ_SIO_ROWS=$(wc -l < "$OLZ_SIO_TSV")
+OLZ_NODE_ROWS=$(wc -l < "$OLZ_NODE_TSV")
+if [[ "$OLZ_SIO_ROWS" -ne "$EXPECTED_ROWS" || "$OLZ_NODE_ROWS" -ne "$EXPECTED_ROWS" ]]; then
+  echo "[pbpk28-parity:case23] FAIL: olanzapine row count mismatch — Sounio=$OLZ_SIO_ROWS Node=$OLZ_NODE_ROWS expected=$EXPECTED_ROWS" >&2
+  exit 1
+fi
+echo "[pbpk28-parity:case23] both runs emitted $OLZ_SIO_ROWS records"
+
+OLZ_JOINED="$OUT_DIR/olz_joined.tsv"
+awk -F'\t' '
+  NR==FNR { S[$1"|"$2] = $5; next }
+  { print $1"\t"$2"\t"S[$1"|"$2]"\t"$5 }
+' "$OLZ_SIO_TSV" "$OLZ_NODE_TSV" > "$OLZ_JOINED"
+
+awk -F'\t' -v THR="$RMSE_THRESHOLD_PCT" '
+  {
+    i = $2 + 0; cs = $3 + 0; cn = $4 + 0;
+    d = cs - cn; SS[i] += d * d; NN[i] += 1;
+    if (cs > PK[i]) PK[i] = cs;
+    if (cn > PK[i]) PK[i] = cn;
+  }
+  END {
+    bad = 0;
+    for (i = 0; i < 14; i++) {
+      if (NN[i] == 0) { printf "PBPK28_OLANZAPINE_PARITY_FAIL organ %d MISSING\n", i; bad += 1; continue; }
+      rmse = sqrt(SS[i] / NN[i]); pk = PK[i] + 0;
+      if (pk == 0) { continue; }
+      pct = 100.0 * rmse / pk;
+      if (pct >= THR + 0) { printf "PBPK28_OLANZAPINE_PARITY_FAIL organ %d pct=%.4f rmse=%.3g\n", i, pct, rmse; bad += 1; }
+    }
+    if (bad > 0) { exit 1; }
+    printf "PBPK28_OLANZAPINE_PARITY_PASS 14/14 compartments within %s%% RMSE (strict)\n", THR;
+  }
+' "$OLZ_JOINED"
+
+paste <(grep "^TMASS|m=" "$OLZ_SIO_LOG" | sed "s/^TMASS|m=//") \
+      <(grep "^TREL|cum=" "$OLZ_SIO_LOG" | sed "s/^TREL|cum=//") \
+  | awk -v FAILM="PBPK28_OLANZAPINE_MASS_FAIL" -v PASS="PBPK28_OLANZAPINE_MASS_PASS" '
+      { m=($1+0); r=($2+0); n++;
+        if (!(m >= 0 && m <= r)) { printf "%s sample %d: mass %.6f outside [0, %.6f]\n", FAILM, n, m, r; bad=1 } }
+      END { if (n != 12) { printf "%s row count %d != 12\n", FAILM, n; exit 1 }
+        if (bad) exit 1;
+        printf "%s 12/12 samples within [0, absorbed]\n", PASS }'
+
+echo
+echo "[pbpk28-parity] olanzapine oral-IR canonical: tablet lag + gut absorption + systemic PK + mass envelope (9th canonical drug)"
