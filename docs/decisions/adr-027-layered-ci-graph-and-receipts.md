@@ -463,3 +463,22 @@ blobs remain available through Git lazy fetching. No sparse checkout is used
 for these jobs. A real Git fixture must prove historical diff/show operations
 and complete current files still work and reject a shallow-history control.
 Hosted results are required before reporting a time saving.
+
+### Native macOS compilation cache
+
+The native integration build previously compiled Madaros again for every merge,
+including source-equivalent merges. The macOS builder may reuse only a compilation
+bound to the exact self-hosted/stdlib trees, mapped-stack seed probe, build recipe,
+cache implementation/contract, workflow, signed current-source seed bytes and Apple
+OS/architecture/compiler/SDK identity. It recomputes this binding before reuse,
+checks the payload digest, and retains Mach-O/signature checks and seed/ABI execution.
+Normal standalone builds without the explicit CI cache path still compile.
+
+The transport restores only the exact key, without prefix fallback. A mismatching
+or corrupted restored entry fails rather than silently changing compiler routing.
+A miss performs the original compilation. All existing capacity, regression,
+C++23-oracle, CPU, Metal and pinned-200-corpus gates remain unconditional. The cache
+is sealed and saved only after those gates succeed and the inputs still match the
+key computed before the build. Cache availability is an optimization, never a gate
+receipt. Hosted cold/warm and merge-group results must be recorded separately;
+fixture success does not establish a measured latency reduction.
