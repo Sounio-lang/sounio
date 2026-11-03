@@ -7,20 +7,27 @@
  * Every built page must have one H1. Learn pages must carry TechArticle
  * and a BreadcrumbList taken from the visible breadcrumb. SoftwareApplication
  * stays on the home page. SoftwareSourceCode is on the home page and
- * /learn/getting-started/.
+ * /learn/getting-started/. /language/ carries one ComputerLanguage whose
+ * alternateName and sameAs reuse the former-name constants. /learn/ and
+ * /learn/getting-started/ show the research-language status line.
  */
 import assert from 'node:assert/strict';
 import { readdir, readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
+import { chdir } from 'node:process';
 import { fileURLToPath } from 'node:url';
 import { parse } from 'parse5';
 import { EFFECTS_PAGE, ENGLISH_SEARCH, SELF_HOSTED_PAGE } from '../src/lib/search-appearance.mjs';
 import { EFFECTS_FAQ } from '../src/lib/effect-system-page.mjs';
 import { rehypeDemoteH1 } from '../src/lib/rehype-demote-h1.mjs';
-import { isoDateOrNothing, CODE_REPOSITORY, FORMER_LANGUAGE_NAME, FORMER_RELEASE_URL } from '../src/lib/structured-data.mjs';
-import { barePath, localeFromPath, isRedirectPath, absoluteUrl, htmlLang, canonicalPathname } from '../src/lib/seo-locales.mjs';
+import { isoDateOrNothing, CODE_REPOSITORY, COMPUTER_LANGUAGE_ID, FORMER_LANGUAGE_NAME, FORMER_RELEASE_URL, computerLanguage } from '../src/lib/structured-data.mjs';
 
+// seo-locales resolves content from cwd. Astro and `npm --prefix website`
+// already start there. This command is also run from the repo root.
 const website = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+chdir(website);
+const { barePath, localeFromPath, isRedirectPath, absoluteUrl, htmlLang, canonicalPathname } = await import('../src/lib/seo-locales.mjs');
+
 const dist = path.join(website, 'dist');
 const TITLE_MAX = 60;
 const DESCRIPTION_MAX = 155;
@@ -83,6 +90,34 @@ function collectAlternateNames(value, found) {
 
 const FORMER_NAME_NOTE = 'Sounio (formerly Demetrios). Sounio was previously released as Demetrios, the former name of this language.';
 const FORMER_NAME_NOTE_PT = 'Sounio (anteriormente Demetrios). O Sounio foi lançado anteriormente como Demetrios, o nome anterior desta linguagem.';
+const RESEARCH_STATUS = 'Status: research language (pre-1.0). APIs may change; not recommended for production use.';
+const COMPILER_VERSION = /v0\.80|v0\.99|v0\.100|v1\.0/;
+const RESERVED_SCHEMA_IDS = new Set([
+  'https://www.souniolang.org/about/#demetrios',
+  'https://www.souniolang.org/about/#dionisio',
+  'https://www.souniolang.org/pt/about/#webpage',
+]);
+const RESEARCH_STATUS_ROUTES = new Set(['/', '/learn/', '/learn/getting-started/']);
+
+function collectTyped(value, type, found) {
+  if (!value || typeof value !== 'object') return;
+  if (Array.isArray(value)) {
+    for (const item of value) collectTyped(item, type, found);
+    return;
+  }
+  if (value['@type'] === type) found.push(value);
+  for (const child of Object.values(value)) collectTyped(child, type, found);
+}
+
+function collectIds(value, found) {
+  if (!value || typeof value !== 'object') return;
+  if (Array.isArray(value)) {
+    for (const item of value) collectIds(item, found);
+    return;
+  }
+  if (typeof value['@id'] === 'string') found.push(value['@id']);
+  for (const child of Object.values(value)) collectIds(child, found);
+}
 
 // HTML5 end tags may carry whitespace or ignored attributes before `>`,
 // as in `</script >`. A regexp that requires a bare `</script>` leaves
@@ -194,6 +229,17 @@ function selfTest() {
   const styled = '<style>SECRET_STYLE</style ><p>visible only</p>';
   assert.equal(visibleProse(styled).includes('SECRET_STYLE'), false);
   assert.equal(visibleProse(styled).includes('visible only'), true);
+
+  const languageNode = computerLanguage({ description: 'Authoritative tour of Sounio.' });
+  assert.equal(languageNode['@type'], 'ComputerLanguage');
+  assert.equal(languageNode['@id'], COMPUTER_LANGUAGE_ID);
+  assert.equal(languageNode.name, 'Sounio');
+  assert.equal(languageNode.alternateName, FORMER_LANGUAGE_NAME);
+  assert.deepEqual(languageNode.sameAs, [FORMER_RELEASE_URL]);
+  assert.equal('softwareVersion' in languageNode, false);
+  assert.equal(COMPILER_VERSION.test(JSON.stringify(languageNode)), false);
+  assert.equal(COMPILER_VERSION.test(RESEARCH_STATUS), false);
+  assert.equal(RESERVED_SCHEMA_IDS.has(COMPUTER_LANGUAGE_ID), false);
 }
 
 selfTest();
@@ -213,6 +259,16 @@ const warnings = [];
 const errors = [];
 let pages = 0;
 let englishPages = 0;
+
+const i18nDir = path.join(website, 'src/i18n');
+const i18nFiles = (await readdir(i18nDir)).filter((name) => name.endsWith('.json'));
+if (i18nFiles.length === 0) errors.push('i18n: no locale files');
+for (const file of i18nFiles) {
+  const data = JSON.parse(await readFile(path.join(i18nDir, file), 'utf8'));
+  if (data.maturity_description !== RESEARCH_STATUS) {
+    errors.push(`src/i18n/${file}: maturity_description drifted from the shared status line`);
+  }
+}
 
 for await (const file of walk(dist)) {
   if (!file.endsWith('.html')) continue;
@@ -237,7 +293,7 @@ for await (const file of walk(dist)) {
   }
   const software = blocks.filter((block) => block['@type'] === 'SoftwareApplication');
   const source = blocks.filter((block) => block['@type'] === 'SoftwareSourceCode');
-  if (bare === '/' || bare === '/about/') {
+  if (bare === '/' || bare === '/about/' || bare === '/language/') {
     const names = new Set();
     for (const block of blocks) collectAlternateNames(block, names);
     if (!names.has(FORMER_LANGUAGE_NAME)) {
@@ -248,6 +304,50 @@ for await (const file of walk(dist)) {
       errors.push(`${route}: JSON-LD missing former-release sameAs ${FORMER_RELEASE_URL}`);
     }
   }
+  if (RESEARCH_STATUS_ROUTES.has(bare)) {
+    if (!visibleProse(html).includes(RESEARCH_STATUS)) {
+      errors.push(`${route}: research-language status line is missing`);
+    }
+    if (headings.includes(RESEARCH_STATUS)) {
+      errors.push(`${route}: research-language status line is a heading`);
+    }
+  }
+  const schemaIds = [];
+  collectIds(blocks, schemaIds);
+  if (bare === '/language/') {
+    const languages = [];
+    collectTyped(blocks, 'ComputerLanguage', languages);
+    if (languages.length !== 1) {
+      errors.push(`${route}: expected one ComputerLanguage, found ${languages.length}`);
+    }
+    const language = languages[0];
+    if (language) {
+      if (language.name !== 'Sounio') errors.push(`${route}: ComputerLanguage.name`);
+      if (language.alternateName !== FORMER_LANGUAGE_NAME) {
+        errors.push(`${route}: ComputerLanguage.alternateName`);
+      }
+      const sameAs = Array.isArray(language.sameAs) ? language.sameAs : [language.sameAs];
+      if (!sameAs.includes(FORMER_RELEASE_URL)) errors.push(`${route}: ComputerLanguage.sameAs`);
+      if (language['@id'] !== COMPUTER_LANGUAGE_ID) errors.push(`${route}: ComputerLanguage.@id`);
+      if ('softwareVersion' in language) errors.push(`${route}: ComputerLanguage.softwareVersion`);
+      if (COMPILER_VERSION.test(JSON.stringify(language))) {
+        errors.push(`${route}: ComputerLanguage names a compiler version`);
+      }
+    }
+    const idCounts = new Map();
+    for (const id of schemaIds) idCounts.set(id, (idCounts.get(id) ?? 0) + 1);
+    for (const [id, count] of idCounts) {
+      if (count > 1) errors.push(`${route}: duplicate @id ${id}`);
+      if (RESERVED_SCHEMA_IDS.has(id)) errors.push(`${route}: reuses @id ${id}`);
+    }
+    const nestedSource = [];
+    collectTyped(blocks, 'SoftwareSourceCode', nestedSource);
+    if (nestedSource.length !== 0) {
+      errors.push(`${route}: ComputerLanguage must not duplicate SoftwareSourceCode`);
+    }
+  } else if (schemaIds.includes(COMPUTER_LANGUAGE_ID)) {
+    errors.push(`${route}: reuses ComputerLanguage @id ${COMPUTER_LANGUAGE_ID}`);
+  }
   if (bare === '/about/') {
     const expectedNote = locale === 'pt' ? FORMER_NAME_NOTE_PT : FORMER_NAME_NOTE;
     if (!visibleProse(html).includes(expectedNote)) {
@@ -256,6 +356,9 @@ for await (const file of walk(dist)) {
   }
   const articles = blocks.filter((block) => block['@type'] === 'TechArticle');
   const crumbs = blocks.filter((block) => block['@type'] === 'BreadcrumbList');
+  if (bare === '/language/' && crumbs.length !== 1) {
+    errors.push(`${route}: language page must keep one BreadcrumbList`);
+  }
 
   if (bare === '/') {
     if (software.length !== 1) errors.push(`${route}: home must have one SoftwareApplication`);
