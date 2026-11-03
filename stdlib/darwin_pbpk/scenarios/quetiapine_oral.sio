@@ -1,0 +1,88 @@
+// stdlib/darwin_pbpk/scenarios/quetiapine_oral.sio — scenario library (no main)
+//
+// End-to-end dissertation scenario for quetiapine (SIO-525):
+//
+//   - Single 100 mg oral IR tablet
+//     → tablet dissolution lag (tlag = 0.25 h) + first-order gut absorption
+//       (ka = 1.5/h, Tmax ~1 h) with NO first-pass loss (F = 1.00)
+//       → blood input (closed-form rate, operator-split source term)
+//         → 14-compartment PBPK28 (tsit5_pbpk28, fully-coupled CN)
+//
+// Mold: scenarios/clozapine_oral.sio (oral IR + lag + scenario-owned
+// profile). Shared infrastructure, NOT shared mechanism or parameters:
+// CYP3A4 substrate (~89% fm, ketoconazole ×5 AUC) vs clozapine's 1A2;
+// complete bioavailability vs clozapine's F = 0.55; own Kp vector.
+// The Paulzen-2018 venlafaxine DDI is explicitly out of scope: an
+// interaction claim needs its own mechanism, parameters and evaluation.
+//
+// Plasma referenced (rb ≈ 1): CL = 84 L/h (label/popPK; 600 mg/day steady
+// state ≈ 300 ng/mL, inside the debated 100–500 TDM band) acts on blood
+// directly. Distribution flow-limited (basic lipophilic amine); PS assumed
+// (rapamycin flow-limited pattern, SIO-550).
+//
+// Declared limitation: single-dose PK only. No D2 occupancy, no DDI —
+// follow-ups. No clinical-validity claim: parity only (ADR009).
+//
+// The parity ref tests/run-pass/dissertation_pbpk28_parity_ref_quetiapine.sio
+// drives this scenario itself, so a scenario change not mirrored in Node
+// breaks the gate.
+//
+// This file is a library with no `main`; it is checked, not run.
+
+use darwin_pbpk::core::pbpk28_params::*
+use darwin_pbpk::tsit5_pbpk28::*
+use darwin_pbpk::drugs::quetiapine::*
+use math::pure::{exp}
+
+// ─── Quetiapine PBPK28 profile (scenario-owned) ────────────────────────────
+// Kept here — not in core/pbpk28_params.sio — so this lane never churns the
+// website-pinned domain source. Standard 70 kg physiology. Kp = quetiapine
+// tissue values from drugs/quetiapine.sio (Vd ~700 L); PS assumed
+// (flow-limited pattern, SIO-550); CL = 84 L/h (label/popPK).
+pub fn qtp_pbpk28_params() -> PBPKParams28 {
+    PBPKParams28 {
+        v_ref:     [5.0, 1.8, 0.31, 1.45, 0.33, 1.1, 28.0, 20.0, 1.2, 3.6, 6.6, 0.18, 0.09, 3.7],
+        vasc_frac: [1.000, 0.210, 0.160, 0.037, 0.262, 0.262, 0.040, 0.050, 0.024, 0.019, 0.041, 0.282, 0.180, 0.050],
+        kp:        [1.00, 8.0, 4.0, 3.0, 3.0, 6.0, 6.0, 5.0, 4.0, 3.0, 2.0, 4.0, 3.0, 3.0],
+        ps:        [0.0, 1800.0, 1110.0, 88.0, 160.0, 10500.0, 336.0, 40.0, 660.0, 126.0, 51.0, 150.0, 96.0, 78.0],
+        q:         [350.0, 90.0, 74.0, 44.0, 16.0, 350.0, 42.0, 10.0, 55.0, 21.0, 17.0, 10.0, 8.0, 13.0],
+        cl_central: 84.0,
+    }
+}
+
+// ─── Oral IR input with dissolution lag ─────────────────────────────────────
+// rate(t) = 0 for t < tlag, else F·D·ka·exp(−ka·(t−tlag)), mg/h. D = 100 mg
+// single dose; ka = 1.5/h, F = 1.00 (complete — no first-pass loss),
+// tlag = 0.25 h.
+pub fn qtp_dose_mg() -> f64 { return quetiapine_single_dose_mg() }
+pub fn qtp_ka() -> f64      { return quetiapine_ka_per_h() }
+pub fn qtp_f() -> f64       { return quetiapine_f_oral_val() }
+pub fn qtp_tlag() -> f64    { return quetiapine_tlag_h() }
+
+pub fn qtp_release_rate_at(t: f64) -> f64 with Mut, Div {
+    var te = t - qtp_tlag()
+    if te < 0.0 { return 0.0 }
+    return qtp_f() * qtp_dose_mg() * qtp_ka() * exp(0.0 - qtp_ka() * te)
+}
+
+// ─── Composite scenario state ───────────────────────────────────────────────
+pub struct QuetiapineScenario {
+    pub pbpk: PBPKState28,
+}
+
+// Initial state: zero PBPK (drug enters via gut absorption).
+pub fn qtp_scenario_init() -> QuetiapineScenario {
+    QuetiapineScenario {
+        pbpk: pbpk28_state_zero(),
+    }
+}
+
+// One fully-coupled CN step at midpoint input rate.
+pub fn qtp_step(scen: QuetiapineScenario, p: PBPKParams28,
+                t_start: f64, dt: f64)
+    -> QuetiapineScenario with Mut, Div
+{
+    let rel_mid = qtp_release_rate_at(t_start + 0.5 * dt)
+    var out_pbpk = pbpk28_full_cn_step(scen.pbpk, p, rel_mid, dt)
+    return QuetiapineScenario { pbpk: out_pbpk }
+}
