@@ -23,10 +23,11 @@ const {
   DEFAULT_PARAMS_RAPAMYCIN, DEFAULT_PARAMS_SEMAGLUTIDE,
   DEFAULT_PARAMS_TIRZEPATIDE,
   DEFAULT_PARAMS_EVEROLIMUS,
+  DEFAULT_PARAMS_TACROLIMUS,
   degenerateParams, N,
 } = core;
 
-// CLI: --drug=rapamycin|semaglutide|tirzepatide|everolimus  --case=literature|degenerate
+// CLI: --drug=rapamycin|semaglutide|tirzepatide|everolimus|tacrolimus  --case=literature|degenerate
 const args = Object.fromEntries(
   process.argv.slice(2)
     .filter(a => a.startsWith('--'))
@@ -53,6 +54,14 @@ if (DRUG === 'tirzepatide') {
     stentActive: true,
   };
 }
+ else if (DRUG === 'tacrolimus') {
+  baseParams = {
+    ...DEFAULT_PARAMS_TACROLIMUS,
+    bolusMg: 0.0,         // no IV bolus — oral IR gut absorption only
+    stentActive: true,    // re-used as 'input active'
+  };
+}
+
  else if (DRUG === 'semaglutide') {
   baseParams = {
     ...DEFAULT_PARAMS_SEMAGLUTIDE,
@@ -83,6 +92,10 @@ if (DRUG === 'tirzepatide') {
 } else if (DRUG === 'everolimus') {
   out.push('DISSERTATION_PBPK28_EVEROLIMUS_PARITY_NODE v1');
 }
+ else if (DRUG === 'tacrolimus') {
+  out.push('DISSERTATION_PBPK28_TACROLIMUS_PARITY_NODE v1');
+}
+
  else if (DRUG === 'semaglutide') {
   out.push('DISSERTATION_PBPK28_SEMAGLUTIDE_PARITY_NODE v1');
 } else {
@@ -135,6 +148,10 @@ if (DRUG === 'tirzepatide') {
 } else if (DRUG === 'everolimus') {
   out.push('DISSERTATION_PBPK28_EVEROLIMUS_PARITY_DONE');
 }
+ else if (DRUG === 'tacrolimus') {
+  out.push('DISSERTATION_PBPK28_TACROLIMUS_PARITY_DONE');
+}
+
  else if (DRUG === 'semaglutide') {
   out.push('DISSERTATION_PBPK28_SEMAGLUTIDE_PARITY_DONE');
 } else {
