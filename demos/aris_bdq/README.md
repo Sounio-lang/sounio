@@ -43,6 +43,39 @@ Measured on 2026-11-03 with the committed Madaros ELF (`3.0.0-rc.1`, madaros 8ad
    - Giving those two inputs illustrative spreads (oracle, budget 1) moves P(> MIC50) from 0.96 to about 0.47.
    - Point 3 is what `bdq_mic_claim_overclaim.sio` turns into a compile-time refusal.
 
+4. **The fractal caseum rate survives every constant-diffusivity rival we could build.**
+   `ref/caseum_battery.cpp` fits, to the same Table S14 data and sharing the plasma, lung and
+   foamy-macrophage rim, a family of caseum transport laws. With the rim **held at the paper's
+   published Table S13 estimates**, so that only the caseum law is fitted:
+
+   | Caseum law | fitted | RSS (log) | ΔAIC |
+   |---|---|---|---|
+   | Fractal k(t) = k_cas/(t+τ)^h, 6 compartments | 2 | 8.51 | — |
+   | Same 6 compartments, constant rate (h = 0) | 1 | 54.05 | +42 |
+   | Fick, constant D, 36 cells of 50 µm | 1 | 71.82 | +49 |
+   | Fick + reversible binding, free | 3 | 54.87 | +47 |
+   | Fick + binding pinned at the measured caseum f_u | 2 | 55.78 | +45 |
+   | Fick, D_eff ≤ free water / 1e4 (equilibrium limit of the above) | 1 | 9226 | +166 |
+
+   - The exponent is nested inside the paper's own structure at h = 0, so it admits a likelihood
+     ratio test: **χ²(1) = 44.4, p = 2.7e-11**.
+   - Not a grid artefact: the same law as a continuum, D(t) = k_cas·(300 µm)²/(t+τ)^h on 36 cells,
+     gives RSS 9.56. Not a resolution failure on Fick's side either: 72 cells give 40.92 against
+     40.60 for 36, i.e. grid-converged. Spherical shells make Fick worse (49.20), not better.
+   - The binding test is anchored on a measurement, not an assumption: bedaquiline is the most
+     caseum-bound drug of the Sarathy panel, f_u(caseum) < 0.01 % (ACS Infect Dis 2016,
+     doi:10.1021/acsinfecdis.6b00051), i.e. a retardation factor ≥ 1e4. Pinned there, binding-limited
+     diffusion fails. Caveats: that f_u is rabbit caseum and a surrogate, not C3HeB/FeJ mouse, and
+     <0.01 % is the assay's resolution limit, so the least extreme reading (exactly 1e-4) was used.
+     The ceiling on a free-drug D is free-water diffusivity for MW 555, about 400 µm²/s.
+   - **The result that goes against the above**: if the rim parameters are released as well,
+     Fick + binding reaches RSS 9.37, as good as the fractal law — but with rate_fmφ and Kp_caseum
+     driven two to three orders of magnitude from Table S13, both at the edge of their bounds. The
+     caseum transport law and the rim parameters are therefore partly confounded in these data. An
+     independent estimate of either would separate them.
+   - Regression lock: the battery reproduces `ref/caseum_pde.cpp` at its published optima
+     (RSS 8.1943 and 40.6039) before fitting anything.
+
 ## What Sounio adds here — stated narrowly
 
 - **Claims carry their evidence.** `Knowledge[f64]` carries a value, ε and provenance. `with Epistemic(N)` rejects any input below N at compile time. The refusal points at the exact source spans: the pH_LYS and fu_pls declarations.
