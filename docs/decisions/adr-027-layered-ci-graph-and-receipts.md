@@ -505,3 +505,5 @@ A frozen predecessor-oracle fingerprint and real C++ orchestration fixtures
 reject skipped runtime/Metal oracles, source/compiler/digest mismatches, execution
 failures and post-verification copy corruption. Native cold/warm execution and
 merge-head receipts remain required before claiming performance or integration.
+
+The current-source f64 lane also keeps full-history metadata and a complete working tree with blob:none transport. A hosted worker exhausted disk after its unfiltered full-history checkout and before f64 tests; deferring historical payloads reduces avoidable transfer/space pressure without weakening provenance. The existing real-Git history/ref/diff/lazy-content fixture now pins this fourth checkout and rejects f64-specific shallow/unfiltered mutations. Transport and non-shallow state are recorded after checkout; tests, cache recipe, swap budget and timeouts remain unchanged.
