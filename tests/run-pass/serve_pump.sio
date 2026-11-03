@@ -44,18 +44,23 @@ fn scenario(m: &!Llama, rt: &Runtime, use_gpu: bool, pagedev: bool) -> bool with
     var pka = paged_kv_new_batch(m, 16)
     var pva = paged_kv_new_batch(m, 16)
     var sa: [SvSlot; 4] = [SvSlot { off: 0 - 1, nid: 0, cur: 0, gen: 0, maxgen: 0, last: 0 }; 4]
-    var qa = SvQueue { off: [0; 8], n: [0; 8], pmax: [0; 8], count: 0 }
+    var qa = SvQueue { off: [0; 8], n: [0; 8], pmax: [0; 8], vs: [0 - 1; 8], xl: [0; 8], vl: [0; 8], gn: [0; 8], count: 0 }
     var rslot: [i64; 16] = [0; 16]
     var rpos: [i64; 16] = [0; 16]
     var toks: [i64; 16] = [0; 16]
     var kind: [i64; 16] = [0; 16]
     var rowtok: [i64; 16] = [0; 16]
     var meta: [i64; 4] = [0; 4]
+    var aspill: [i64; 4096] = [0; 4096]
+    var avspill: [i64; 4096] = [0; 4096]
+    var ascnt: [i64; 4] = [0; 4]
+    var axlen: [i64; 4] = [0; 4]
+    var avvalid: [i64; 4] = [0; 4]
     // split-path state.
     var pkb = paged_kv_new_batch(m, 16)
     var pvb = paged_kv_new_batch(m, 16)
     var sb: [SvSlot; 4] = [SvSlot { off: 0 - 1, nid: 0, cur: 0, gen: 0, maxgen: 0, last: 0 }; 4]
-    var qb = SvQueue { off: [0; 8], n: [0; 8], pmax: [0; 8], count: 0 }
+    var qb = SvQueue { off: [0; 8], n: [0; 8], pmax: [0; 8], vs: [0 - 1; 8], xl: [0; 8], vl: [0; 8], gn: [0; 8], count: 0 }
     var fslot: [i64; 16] = [0; 16]
     var fpos: [i64; 16] = [0; 16]
     var ftoks: [i64; 16] = [0; 16]
@@ -63,6 +68,11 @@ fn scenario(m: &!Llama, rt: &Runtime, use_gpu: bool, pagedev: bool) -> bool with
     var frowtok: [i64; 16] = [0 - 1; 16]
     var fseed: [i64; 4] = [0 - 1; 4]
     var fmeta: [i64; 4] = [0; 4]
+    var fspill: [i64; 4096] = [0; 4096]
+    var fvspill: [i64; 4096] = [0; 4096]
+    var fcnt: [i64; 4] = [0; 4]
+    var fxlen: [i64; 4] = [0; 4]
+    var fvvalid: [i64; 4] = [0; 4]
     var fpdone: [i64; 4] = [0; 4]
     var egen: [i64; 4] = [0; 4]
     // seq identity per engine slot, both paths.
@@ -103,7 +113,7 @@ fn scenario(m: &!Llama, rt: &Runtime, use_gpu: bool, pagedev: bool) -> bool with
             qb.count = svb_qpush(&!qb, 7, 3, cmax)
             pushed_cb = true
         }
-        let out = svb_pump(m, &!pka, &!pva, &!sa, &bank, &!qa, rt, use_gpu, pagedev, chunk, &!rslot, &!rpos, &!toks, &!kind, &!rowtok, &!meta)
+        let out = svb_pump(m, &!pka, &!pva, &!sa, &bank, &!qa, rt, use_gpu, pagedev, chunk, &!rslot, &!rpos, &!toks, &!kind, &!rowtok, &!meta, &!aspill, &!avspill, &!ascnt, &!axlen, &!avvalid)
         qa.count = meta[1]
         var z: i64 = 0
         while z < 4 {
@@ -111,7 +121,7 @@ fn scenario(m: &!Llama, rt: &Runtime, use_gpu: bool, pagedev: bool) -> bool with
             fpdone[z as usize] = 0
             z = z + 1
         }
-        let fout = svb_pump_fwd(m, &!pkb, &!pvb, &!sb, &bank, &!qb, rt, use_gpu, pagedev, chunk, &!fslot, &!fpos, &!ftoks, &!fkind, &!frowtok, &!fseed, &!fmeta)
+        let fout = svb_pump_fwd(m, &!pkb, &!pvb, &!sb, &bank, &!qb, rt, use_gpu, pagedev, chunk, &!fslot, &!fpos, &!ftoks, &!fkind, &!frowtok, &!fseed, &!fmeta, &!fspill, &!fvspill, &!fcnt, &!fxlen, &!fvvalid)
         qb.count = fmeta[1]
         let n = meta[0]
         let fn2 = fmeta[0]
@@ -176,7 +186,7 @@ fn scenario(m: &!Llama, rt: &Runtime, use_gpu: bool, pagedev: bool) -> bool with
                 }
                 f = f + 1
             }
-            let fdn = svb_pump_adv(&!sb, &!pkb, &!pvb, &fslot, &fkind, &frowtok, &fseed, fn2, &fpdone)
+            let fdn = svb_pump_adv(&!sb, &!pkb, &!pvb, &fslot, &fkind, &frowtok, &fseed, fn2, &fpdone, &!fspill, &!fcnt)
             if fdn != meta[2] { ok = false }
             // lockstep: same rows, same sampled tokens.
             r = 0
