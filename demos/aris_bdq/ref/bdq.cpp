@@ -575,6 +575,41 @@ int main(int argc, char** argv) {
     std::printf("GUM|cas6_w24|u=%.6f\n", std::sqrt(vc));
     return 0;
   }
+  if (mode == "gumcov") {
+    // Caseum parameters with the covariance recovered by mouse_fit.cpp (refit of Table S14
+    // with the Irwin 2016 C3HeB/FeJ plasma model): log-scale SDs and correlations.
+    // Human caseum endpoints at week 24, first-order GUM: full covariance vs diagonal.
+    Params p0;
+    double Params::*m[5] = {&Params::rate_f, &Params::R_f, &Params::Kp_cas, &Params::kcas, &Params::h};
+    const char* nm[5] = {"rate_fmphi", "Kp_fmphi/(fu fni)", "Kp_caseum", "k_cas", "h"};
+    double sd[5] = {0.348, 0.381, 0.403, 0.248, 0.093};
+    double R[5][5] = {{1.000, 0.150, -0.416, -0.464, -0.270},
+                      {0.150, 1.000, -0.679, 0.316, 0.251},
+                      {-0.416, -0.679, 1.000, -0.222, 0.102},
+                      {-0.464, 0.316, -0.222, 1.000, 0.723},
+                      {-0.270, 0.251, 0.102, 0.723, 1.000}};
+    auto e0 = endpoints(simulate(p0, 0.25));
+    double g[5][NEND];
+    for (int i = 0; i < 5; ++i) {
+      Params pp = p0, pm = p0;
+      pp.*(m[i]) *= std::exp(0.01); pm.*(m[i]) *= std::exp(-0.01);
+      auto ep = endpoints(simulate(pp, 0.25)), em = endpoints(simulate(pm, 0.25));
+      for (int k = 0; k < NEND; ++k) g[i][k] = (ep[k] - em[k]) / 0.02;  // dE/dlog(theta)
+    }
+    std::printf("endpoint,nominal,u_diagonal,u_full_covariance,ratio\n");
+    for (int k : {2, 4, 5}) {
+      double vd = 0, vf = 0;
+      for (int i = 0; i < 5; ++i)
+        for (int j = 0; j < 5; ++j) {
+          double c = R[i][j] * sd[i] * sd[j] * g[i][k] * g[j][k];
+          vf += c;
+          if (i == j) vd += c;
+        }
+      std::printf("%s,%.6g,%.6g,%.6g,%.3f\n", endName[k], e0[k], std::sqrt(vd), std::sqrt(vf), std::sqrt(vf / vd));
+    }
+    (void)nm;
+    return 0;
+  }
   if (mode == "gum") return run_gum(argc > 2 ? std::atoi(argv[2]) : 0, 0.25);
   if (mode == "mc")
     return run_mc(argc > 2 ? std::atoi(argv[2]) : 0, argc > 3 ? std::atoi(argv[3]) : 1000,
