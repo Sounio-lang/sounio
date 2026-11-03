@@ -90,8 +90,9 @@ fn xxh32_round(acc: i64, lane: i64) -> i64 {
     u32(mul_u32(rotl32(u32(acc + mul_u32(lane, p2)), 13), p1))
 }
 
-// xxHash64 helpers. i64 multiplication and addition wrap modulo 2^64, so they
-// are the unsigned 64-bit operations; only the right shift needs masking.
+// xxHash64 helpers. Hash-state arithmetic uses the explicit wrapping_*
+// builtins (modulo 2^64; plain +-* trap on overflow since SIO-207); only
+// the right shift needs masking.
 fn lsr64(x: i64, r: i64) -> i64 {
     if r == 0 { return x }
     (x >> r) & ((1 << (64 - r)) - 1)
@@ -109,13 +110,13 @@ fn le64_src(src: &[u8; 4096], i: i64) -> i64 with Panic {
 fn xxh64_round(acc: i64, lane: i64) -> i64 {
     let p1: i64 = -7046029288634856825
     let p2: i64 = -4417276706812531889
-    rotl64(acc + lane * p2, 31) * p1
+    wrapping_mul(rotl64(wrapping_add(acc, wrapping_mul(lane, p2)), 31), p1)
 }
 
 fn xxh64_merge(h: i64, v: i64) -> i64 {
     let p1: i64 = -7046029288634856825
     let p4: i64 = -8796714831421723037
-    (h ^ xxh64_round(0, v)) * p1 + p4
+    wrapping_add(wrapping_mul(h ^ xxh64_round(0, v), p1), p4)
 }
 
 /// xxHash64 (seed 0) of `n` bytes at `at`, as a two's-complement i64.
@@ -129,7 +130,7 @@ fn xxh64(src: &[u8; 4096], at: i64, n: i64) -> i64 with Panic {
     let end = at + n
     var h: i64 = 0
     if n >= 32 {
-        var v1 = p1 + p2
+        var v1 = wrapping_add(p1, p2)
         var v2 = p2
         var v3: i64 = 0
         var v4 = 0 - p1
@@ -140,7 +141,7 @@ fn xxh64(src: &[u8; 4096], at: i64, n: i64) -> i64 with Panic {
             v4 = xxh64_round(v4, le64_src(src, i + 24))
             i = i + 32
         }
-        h = rotl64(v1, 1) + rotl64(v2, 7) + rotl64(v3, 12) + rotl64(v4, 18)
+        h = wrapping_add(wrapping_add(wrapping_add(rotl64(v1, 1), rotl64(v2, 7)), rotl64(v3, 12)), rotl64(v4, 18))
         h = xxh64_merge(h, v1)
         h = xxh64_merge(h, v2)
         h = xxh64_merge(h, v3)
@@ -148,26 +149,26 @@ fn xxh64(src: &[u8; 4096], at: i64, n: i64) -> i64 with Panic {
     } else {
         h = p5
     }
-    h = h + n
+    h = wrapping_add(h, n)
     while i + 8 <= end {
         h = h ^ xxh64_round(0, le64_src(src, i))
-        h = rotl64(h, 27) * p1 + p4
+        h = wrapping_add(wrapping_mul(rotl64(h, 27), p1), p4)
         i = i + 8
     }
     if i + 4 <= end {
-        h = h ^ (le32_src(src, i) * p1)
-        h = rotl64(h, 23) * p2 + p3
+        h = h ^ wrapping_mul(le32_src(src, i), p1)
+        h = wrapping_add(wrapping_mul(rotl64(h, 23), p2), p3)
         i = i + 4
     }
     while i < end {
-        h = h ^ (c_at(src, i) * p5)
-        h = rotl64(h, 11) * p1
+        h = h ^ wrapping_mul(c_at(src, i), p5)
+        h = wrapping_mul(rotl64(h, 11), p1)
         i = i + 1
     }
     h = h ^ lsr64(h, 33)
-    h = h * p2
+    h = wrapping_mul(h, p2)
     h = h ^ lsr64(h, 29)
-    h = h * p3
+    h = wrapping_mul(h, p3)
     h ^ lsr64(h, 32)
 }
 
