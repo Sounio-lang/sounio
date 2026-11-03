@@ -16,8 +16,7 @@ Network address types + TCP/UDP config (pure data structures) + FFI stubs.
 ## FFI (`net::ffi::*`)
 
 No real OS socket syscalls are wired up yet. `tcp_connect`/`udp_send` are stubs
-that always report failure, mirroring `stdlib/distributed/ffi/wrapper.sio`.
-`raw_socket_available()` reports `false`.
+that always report failure. `raw_socket_available()` reports `false`.
 
 ## Tests
 

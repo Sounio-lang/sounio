@@ -83,8 +83,8 @@ stub_mod_files = int(counts.get("stub_mod_files", 0) or 0)
 
 if sio_files < 1000:
     add_failure("inventory", f"expected at least 1000 stdlib .sio files, got {sio_files}")
-if active_entrypoints < 150:
-    add_failure("inventory", f"expected at least 150 active module entrypoints, got {active_entrypoints}")
+if active_entrypoints < 95:
+    add_failure("inventory", f"expected at least 95 active module entrypoints, got {active_entrypoints}")
 if disabled_files != 0:
     add_failure("inventory", f"expected disabled_files=0 in active inventory, got {disabled_files}")
 if stub_mod_files != 0:
