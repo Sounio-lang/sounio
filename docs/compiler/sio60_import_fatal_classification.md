@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.compiler.sio60-import-fatal-classification
+authority: repo_only
+audience: contributors
+last_validated: 2026-11-03
+validated_by: claude
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.compiler.sio60-import-fatal-classification
+-->
+
 # SIO-60: classification of newly-refused corpus files (lean_single import-fatal)
 
 ## Method
