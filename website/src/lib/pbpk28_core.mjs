@@ -302,6 +302,62 @@ export const DEFAULT_PARAMS_SEMAGLUTIDE = Object.freeze({
   releaseSourceLabel: 'Subcutaneous depot (k_a = ln 2 / 60 h, F = 0.89)',
 });
 
+// Urva 2022 (Clin Pharmacokinet) — tirzepatide popPK, T2D patients:
+//   MW = 4813 Da               (dual GIP/GLP-1 peptide)
+//   CL = 0.061 L/h             (proteolytic; no intact parent in excreta,
+//                               Martin 2024 — no renal clearance modeled)
+//   t1/2 ~= 120 h              (FDA 2022 label, 5 mg weekly maintenance)
+//   ka = 0.0164 /h, F = 0.80   (SC absorption, Urva 2022)
+// Kp/PS mirror the semaglutide peptide vector (vascular-confined, Kp < 1):
+// the 1/sqrt(MW) PS shift vs semaglutide is under 8%, inside estimation
+// noise. Tirzepatide-specific Kp refinement is SIO-550 follow-up.
+export const MW_TIRZEPATIDE = 4813.0;
+
+export const KP_TIRZEPATIDE = Object.freeze([
+  1.00,  // 0 blood (definition)
+  0.50,  // 1 liver
+  0.60,  // 2 kidney
+  0.05,  // 3 brain
+  0.40,  // 4 heart
+  0.30,  // 5 lung
+  0.20,  // 6 muscle
+  0.10,  // 7 adipose
+  0.80,  // 8 gut
+  0.30,  // 9 skin
+  0.20,  // 10 bone
+  0.40,  // 11 spleen
+  0.70,  // 12 pancreas
+  0.30,  // 13 other
+]);
+
+export const PS_TIRZEPATIDE = PS_SEMAGLUTIDE;
+
+export const TIRZ_KA_DEFAULT = 0.0164;
+export const TIRZ_F_DEFAULT  = 0.80;
+
+export const DEFAULT_PARAMS_TIRZEPATIDE = Object.freeze({
+  clHep: 0.061,
+  higuchiScale: 1.0,
+  vdScale: 1.0,
+  bolusMg: 0.0,
+  stentActive: true,
+  ps: PS_TIRZEPATIDE,
+  vascFrac: VASC_FRAC,
+  kp: KP_TIRZEPATIDE,
+  mw: MW_TIRZEPATIDE,
+  releaseModel: 'sc_depot',
+  releaseKa: TIRZ_KA_DEFAULT,
+  releaseF: TIRZ_F_DEFAULT,
+  releaseDoseMg: 5.0,
+  tmddOrgans: [],
+  tmddParams: {},
+  pdOrgans: [],
+  pdParams: {},
+  cVisualMax: 3.0e-5,
+  drugLabel: 'Tirzepatide (SC depot)',
+  releaseSourceLabel: 'Subcutaneous depot (k_a = 0.0164 /h, F = 0.80)',
+});
+
 /**
  * Stent release (Higuchi). Identical to pbpk14_core for cross-model parity.
  */
