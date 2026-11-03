@@ -104,16 +104,96 @@ sounio_require_souc
 _sounio_engine_md5() {
     if [[ -r "$1" ]]; then md5sum "$1" 2>/dev/null | cut -c1-8; else echo "absent"; fi
 }
-SOUNIO_ENGINE_KIND="madaros"
-SOUNIO_ENGINE_ELF="$ROOT_DIR/artifacts/self-hosted/madaros"
-if [[ "${SOUNIO_SOUC_ENGINE:-}" == "lean_single" ]] || [[ ! -x "$ROOT_DIR/artifacts/self-hosted/madaros" ]]; then
-    SOUNIO_ENGINE_KIND="lean_single"
-    SOUNIO_ENGINE_ELF="$ROOT_DIR/bin/souc-lean-single-x86_64"
-    [[ -x "$SOUNIO_ENGINE_ELF" ]] || SOUNIO_ENGINE_ELF="$ROOT_DIR/bin/souc-linux-x86_64"
-fi
+# Resolve the engine the way the dispatcher actually will, not by inference
+# from one path. With no override, $SOUC_BIN is bin/souc, whose default engine
+# is Madaros whenever a Madaros ELF resolves -- the committed prebuilt
+# bin/madaros-linux-x86_64 included (bin/souc auto-materializes it from the
+# tracked .gz) -- and which falls back to lean_single only when none resolves.
+# The previous heuristic reported lean_single whenever artifacts/self-hosted/
+# madaros was absent, so a run the committed Madaros prebuilt produced was
+# bannered "engine=lean_single elf=bin/souc-lean-single-x86_64", md5 of a
+# compiler that ran nothing. Measured 2026-10-29 on main 439b42c5: prebuilt
+# materialized, no env set, no artifacts build -- the banner named lean_single
+# (md5 2640b5b1) while every test executed on Madaros v0.80.0.
 if [[ -n "${SOUNIO_TEST_SOUC_BIN:-}" ]]; then
     SOUNIO_ENGINE_KIND="explicit"
     SOUNIO_ENGINE_ELF="$SOUNIO_TEST_SOUC_BIN"
+elif [[ -n "${SOUNIO_SOUC_BIN:-}" && -x "${SOUNIO_SOUC_BIN}" \
+       && "$(head -c 2 "${SOUNIO_SOUC_BIN}" 2>/dev/null)" != '#!' ]]; then
+    # bin/souc execs an explicit ELF override directly (raw lean_single CLI).
+    SOUNIO_ENGINE_KIND="explicit"
+    SOUNIO_ENGINE_ELF="$SOUNIO_SOUC_BIN"
+elif [[ "${SOUNIO_SOUC_ENGINE:-}" == "lean_single" \
+        || "${SOUNIO_SOUC_ENGINE:-}" == "lean-single" \
+        || "${SOUNIO_SOUC_ENGINE:-}" == "leansingle" ]]; then
+    # bin/souc's forced-legacy case accepts all three spellings
+    # (lean_single|lean-single|leansingle). Matching only the first here
+    # banners Madaros for a run that executes lean_single -- and bypasses the
+    # lean_single staleness refusal below.
+    SOUNIO_ENGINE_KIND="lean_single"
+    SOUNIO_ENGINE_ELF="$ROOT_DIR/bin/souc-lean-single-x86_64"
+    [[ -x "$SOUNIO_ENGINE_ELF" ]] || SOUNIO_ENGINE_ELF="$ROOT_DIR/bin/souc-linux-x86_64"
+else
+    # Mirror bin/souc's Madaros resolution order: MADAROS_RAW_BIN,
+    # SOUNIO_MADAROS_BIN, host raw, the local artifacts build, then the
+    # committed prebuilt. And, like bin/souc, attempt materialization of the
+    # committed prebuilt BEFORE selecting, not only when nothing else
+    # resolves: a checkout can refresh the tracked .gz/.sha256 while leaving
+    # an older materialized ELF beside them, and bin/souc replaces that ELF
+    # before dispatch. Selecting it here without materializing would hash the
+    # compiler that is about to be replaced, not the one that runs. (The
+    # materializer is a no-op when this tree has no compressed prebuilt.)
+    _engine_banner_madaros=""
+    source "$ROOT_DIR/scripts/lib/resolve_madaros.sh"
+    if [[ -f "$ROOT_DIR/scripts/lib/materialize_madaros_prebuilt.sh" ]]; then
+        # This script sets -uo pipefail, not -e: propagate a materialization
+        # failure explicitly. bin/souc tolerates it only when a higher-
+        # priority override resolves (that run never uses the prebuilt ELF);
+        # with none, bin/souc stops before dispatch -- it means to exit with
+        # the materializer's rc, though today the negated test in
+        # `if ! bash ...; then _mat_rc=$?` turns that into exit 0 (measured
+        # 2026-10-30). Exiting here matches that intent; continuing would
+        # select the missing path and banner engine=madaros md5=absent for a
+        # run that cannot start.
+        _engine_banner_mat_rc=0
+        bash "$ROOT_DIR/scripts/lib/materialize_madaros_prebuilt.sh" || _engine_banner_mat_rc=$?
+        if [[ "$_engine_banner_mat_rc" -ne 0 ]]; then
+            _engine_banner_override=""
+            for _engine_banner_cand in "${MADAROS_RAW_BIN:-}" "${SOUNIO_MADAROS_BIN:-}" \
+                    "$(sounio_madaros_host_raw || true)" \
+                    "$ROOT_DIR/artifacts/self-hosted/madaros"; do
+                if [[ -n "$_engine_banner_cand" && -x "$_engine_banner_cand" \
+                      && "$(head -c 2 "$_engine_banner_cand" 2>/dev/null)" != '#!' ]]; then
+                    _engine_banner_override="$_engine_banner_cand"
+                    break
+                fi
+            done
+            if [[ -z "$_engine_banner_override" ]]; then
+                echo "harness: committed Madaros prebuilt failed to materialize (rc=$_engine_banner_mat_rc)" >&2
+                echo "         and no higher-priority Madaros override resolves; bin/souc would exit the same way." >&2
+                exit "$_engine_banner_mat_rc"
+            fi
+        fi
+    fi
+    for _engine_banner_cand in "${MADAROS_RAW_BIN:-}" "${SOUNIO_MADAROS_BIN:-}" \
+            "$(sounio_madaros_host_raw || true)" \
+            "$ROOT_DIR/artifacts/self-hosted/madaros" \
+            "$ROOT_DIR/bin/madaros-linux-x86_64"; do
+        if [[ -n "$_engine_banner_cand" && -x "$_engine_banner_cand" \
+              && "$(head -c 2 "$_engine_banner_cand" 2>/dev/null)" != '#!' ]]; then
+            _engine_banner_madaros="$_engine_banner_cand"
+            break
+        fi
+    done
+    if [[ -n "$_engine_banner_madaros" ]]; then
+        SOUNIO_ENGINE_KIND="madaros"
+        SOUNIO_ENGINE_ELF="$_engine_banner_madaros"
+    else
+        SOUNIO_ENGINE_KIND="lean_single"
+        SOUNIO_ENGINE_ELF="$ROOT_DIR/bin/souc-lean-single-x86_64"
+        [[ -x "$SOUNIO_ENGINE_ELF" ]] || SOUNIO_ENGINE_ELF="$ROOT_DIR/bin/souc-linux-x86_64"
+    fi
+    unset _engine_banner_madaros _engine_banner_cand _engine_banner_mat_rc _engine_banner_override
 fi
 
 # Refuse to guess: a newer local build of the engine that is NOT the one about
