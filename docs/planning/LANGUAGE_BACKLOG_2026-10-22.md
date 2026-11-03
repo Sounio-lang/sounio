@@ -56,7 +56,7 @@ Fixed on the `lean_single` side by PR #3161 (`9cccda5fdd`, merged; witness `test
 
 ## 3. Decisions owed
 
-[`PENDING.md`](../decisions/PENDING.md) D-01 – D-34. Added today: **D-33**, the
+[`PENDING.md`](../decisions/PENDING.md) D-01 – D-34 (D-04 step C fail-closed implemented). Added today: **D-33**, the
 thirteen lexical rulings (one blocked by a measured collision: refusing an
 unclosed character literal breaks `&'static` lifetimes in the standard library),
 and **D-34**, the five decisions of the interval proposal.
