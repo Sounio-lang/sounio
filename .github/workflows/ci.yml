@@ -96,6 +96,8 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+      - name: Native macOS exact cache failure controls
+        run: node scripts/ci/macos_native_cache_contract.mjs "$GITHUB_WORKSPACE" --selftest
       - name: Canonical full suite partition contract
         run: node scripts/ci/full_suite_partition_contract.mjs "$GITHUB_WORKSPACE" --selftest
       - name: Source-bootstrap overlap and mandatory regression contract
@@ -1995,7 +1997,18 @@ jobs:
         run: |
           /usr/bin/clang++ -std=c++23 -O2 -Wall -Wextra -Werror scripts/ci/ast_expr_kind_surface.cpp -o /tmp/madaros-ast-expr-surface
           /tmp/madaros-ast-expr-surface "$PWD"
+      - name: Identify exact native macOS build inputs
+        id: native-cache-inputs
+        run: node scripts/ci/macos_native_cache.mjs key "$PWD" "$PWD/artifacts/self-hosted/souc-self-hosted-arm64-macos"
+      - name: Restore exact native macOS compilation
+        id: native-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/madaros-native-cache
+          key: ${{ steps.native-cache-inputs.outputs.key }}
       - name: Build and execute current-source native Madaros
+        env:
+          SOUNIO_MACOS_NATIVE_CACHE_RESTORE: ${{ steps.native-cache.outputs.cache-hit == 'true' && format('{0}/madaros-native-cache', runner.temp) || '' }}
         run: bash scripts/ci/build_madaros_macos_arm64.sh "$PWD/artifacts/self-hosted/souc-self-hosted-arm64-macos" /tmp/madaros-current-macos
       - name: Native Madaros ABI acceptance
         run: bash scripts/ci/madaros_macos_arm64_acceptance_gate.sh /tmp/madaros-current-macos
@@ -2017,6 +2030,17 @@ jobs:
         run: bash scripts/ci/madaros_macos_metal_ir_gate.sh "$PWD/artifacts/self-hosted/souc-self-hosted-arm64-macos" /tmp/madaros-metal-ir
       - name: Corrected pinned 200 corpus with mandatory real Metal
         run: bash scripts/ci/madaros_macos_corpus_gate.sh /tmp/madaros-current-macos /tmp/madaros-corrected-corpus
+      - name: Seal accepted native macOS compilation
+        if: steps.native-cache.outputs.cache-hit != 'true'
+        env:
+          EXPECTED_KEY: ${{ steps.native-cache-inputs.outputs.key }}
+        run: node scripts/ci/macos_native_cache.mjs seal "$PWD" "$PWD/artifacts/self-hosted/souc-self-hosted-arm64-macos" "$RUNNER_TEMP/madaros-native-cache" /tmp/madaros-current-macos "$EXPECTED_KEY"
+      - name: Save accepted native macOS compilation
+        if: steps.native-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/madaros-native-cache
+          key: ${{ steps.native-cache-inputs.outputs.key }}
       - name: Upload macOS native compiler artifact
         uses: actions/upload-artifact@v4
         with:
