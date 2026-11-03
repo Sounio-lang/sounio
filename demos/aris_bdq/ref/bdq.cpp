@@ -575,6 +575,42 @@ int main(int argc, char** argv) {
     std::printf("GUM|cas6_w24|u=%.6f\n", std::sqrt(vc));
     return 0;
   }
+  if (mode == "pbox") {
+    // Probability box for the minimum unbound lysosomal concentration (weeks 3-24).
+    // Aleatory: between-patient variability of the Svensson 2016 model (BSV, CV%):
+    //   F 28.9, CL 40.7, V 43.3, Q1 44.5 (lognormal, CL independent of the rest here).
+    // Epistemic (intervals, no distribution assumed):
+    //   fu_pls in [0.00018, 0.00144]  (range the authors themselves tested, Table S10)
+    //   pH_LYS in [4.5, 5.5]          (±0.5 around the paper's 5.0; illustrative)
+    // The endpoint is monotone in both (increasing in fu_pls, decreasing in pH_LYS), so
+    // the p-box envelope is spanned exactly by two corners of the epistemic box.
+    int N = argc > 2 ? std::atoi(argv[2]) : 500;
+    int corner = argc > 3 ? std::atoi(argv[3]) : 0;  // 0 nominal, 1 lower corner, 2 upper corner
+    std::mt19937_64 rng(1729);
+    std::normal_distribution<double> z(0.0, 1.0);
+    auto ln = [&](double cv) { double s2 = std::log(1 + cv * cv); return std::exp(std::sqrt(s2) * z(rng) - 0.5 * s2); };
+    std::vector<double> v;
+    for (int i = 0; i < N; ++i) {
+      Params p;
+      p.F *= ln(0.289); p.CL *= ln(0.407); p.V *= ln(0.433); p.Q1 *= ln(0.445);
+      if (corner == 1) { p.fu_pls = 0.00018; p.pH_LYS = 5.5; }
+      if (corner == 2) { p.fu_pls = 0.00144; p.pH_LYS = 4.5; }
+      if (corner == 3) { p.fu_pls = 0.00018; }   // fu_pls interval only, pH_LYS = 5.0
+      if (corner == 4) { p.fu_pls = 0.00144; }
+      if (corner == 5) { p.pH_LYS = 5.5; }       // pH_LYS interval only, fu_pls = 0.0005
+      if (corner == 6) { p.pH_LYS = 4.5; }
+      v.push_back(endpoints(simulate(p, 0.25))[1]);
+    }
+    std::sort(v.begin(), v.end());
+    auto q = [&](double f) { return v[static_cast<size_t>(f * (N - 1) + 0.5)]; };
+    double p60 = 0, p120 = 0;
+    for (double a : v) { p60 += a > 60; p120 += a > 120; }
+    std::printf("corner=%d N=%d p5=%.4g p50=%.4g p95=%.4g P(>60)=%.4f P(>120)=%.4f\n", corner, N, q(0.05), q(0.5),
+                q(0.95), p60 / N, p120 / N);
+    // full sorted sample for plotting the CDF envelope
+    if (argc > 4) { FILE* f = std::fopen(argv[4], "w"); for (double a : v) std::fprintf(f, "%.6g\n", a); std::fclose(f); }
+    return 0;
+  }
   if (mode == "gumcov") {
     // Caseum parameters with the covariance recovered by mouse_fit.cpp (refit of Table S14
     // with the Irwin 2016 C3HeB/FeJ plasma model): log-scale SDs and correlations.

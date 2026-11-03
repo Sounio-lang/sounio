@@ -123,6 +123,40 @@ int main(int argc, char** argv) {
     line(f, a, col(d, "t"), col(d, "lys_m"), "#0b2a5c", "Nominal", a.Y(90));
     hline(f, a, 120, "MIC90"); hline(f, a, 60, "MIC50");
     std::fprintf(f, "</svg>\n"); std::fclose(f);
+  } else if (m == "pbox") {
+    // argv: nominal lo_both hi_both lo_fu hi_fu out.svg — each a file of sorted samples
+    auto rd = [](const char* fn) { std::vector<double> v; std::ifstream in(fn); double x; while (in >> x) v.push_back(x); return v; };
+    auto v0 = rd(argv[2]), vl = rd(argv[3]), vh = rd(argv[4]), fl = rd(argv[5]), fh = rd(argv[6]);
+    FILE* f = open(argv[7], 900, 500);
+    Ax a; a.xmin = 0; a.xmax = 1; a.ymin = 0; a.ymax = 1; a.logy = false;
+    double lx0 = std::log10(2.0), lx1 = std::log10(2000.0);
+    auto X = [&](double c) { return a.x0 + (std::log10(std::max(c, 2.0)) - lx0) / (lx1 - lx0) * a.w; };
+    std::fprintf(f, "<rect x='%g' y='%g' width='%g' height='%g' fill='none' stroke='#888'/>\n", a.x0, a.y0, a.w, a.hgt);
+    std::fprintf(f, "<text x='%g' y='24' font-size='15' font-weight='600'>P-box: minimum unbound lysosomal concentration, weeks 3–24</text>\n", a.x0);
+    for (double c : {2.0, 5.0, 10.0, 20.0, 50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0}) {
+      std::fprintf(f, "<line x1='%.1f' x2='%.1f' y1='%g' y2='%g' stroke='#eee'/><text x='%.1f' y='%g' font-size='11' text-anchor='middle'>%g</text>\n", X(c), X(c), a.y0, a.y0 + a.hgt, X(c), a.y0 + a.hgt + 16, c);
+    }
+    for (double p = 0; p <= 1.0001; p += 0.25)
+      std::fprintf(f, "<line x1='%g' x2='%g' y1='%.1f' y2='%.1f' stroke='#eee'/><text x='%g' y='%.1f' font-size='11' text-anchor='end'>%.2f</text>\n", a.x0, a.x0 + a.w, a.Y(p), a.Y(p), a.x0 - 6, a.Y(p) + 4, p);
+    std::fprintf(f, "<text x='%g' y='%g' font-size='12' text-anchor='middle'>Unbound concentration (ng/g), log scale — across virtual patients</text>\n", a.x0 + a.w / 2, a.y0 + a.hgt + 36);
+    std::fprintf(f, "<text x='18' y='%g' font-size='12' transform='rotate(-90 18 %g)' text-anchor='middle'>Cumulative probability</text>\n", a.y0 + a.hgt / 2, a.y0 + a.hgt / 2);
+    auto cdf = [&](const std::vector<double>& v) {
+      std::string s; char b[64];
+      for (size_t i = 0; i < v.size(); ++i) { std::snprintf(b, sizeof b, "%c%.1f %.1f", i ? 'L' : 'M', X(v[i]), a.Y((i + 1.0) / v.size())); s += b; }
+      return s;
+    };
+    // envelope of the full epistemic box
+    std::string s = cdf(vl); char b[64];
+    for (size_t i = vh.size(); i-- > 0;) { std::snprintf(b, sizeof b, "L%.1f %.1f", X(vh[i]), a.Y((i + 1.0) / vh.size())); s += b; }
+    std::fprintf(f, "<path d='%sZ' fill='rgba(231,156,52,0.30)' stroke='none'/>\n", s.c_str());
+    std::fprintf(f, "<path d='%s' fill='none' stroke='#b8860b' stroke-width='1.5' stroke-dasharray='5 4'/>\n", cdf(fl).c_str());
+    std::fprintf(f, "<path d='%s' fill='none' stroke='#b8860b' stroke-width='1.5' stroke-dasharray='5 4'/>\n", cdf(fh).c_str());
+    std::fprintf(f, "<path d='%s' fill='none' stroke='#0b2a5c' stroke-width='2.2'/>\n", cdf(v0).c_str());
+    std::fprintf(f, "<line x1='%.1f' x2='%.1f' y1='%g' y2='%g' stroke='#c0392b' stroke-width='1.5'/><text x='%.1f' y='%g' font-size='12' fill='#c0392b'>MIC50</text>\n", X(60), X(60), a.y0, a.y0 + a.hgt, X(60) + 4, a.y0 + 14);
+    std::fprintf(f, "<text x='%g' y='%g' font-size='12' fill='#0b2a5c'>— paper’s values, IIV only</text>\n", a.x0 + a.w + 8, a.y0 + 40);
+    std::fprintf(f, "<text x='%g' y='%g' font-size='12' fill='#b8860b'>- - fu_pls interval only</text>\n", a.x0 + a.w + 8, a.y0 + 64);
+    std::fprintf(f, "<text x='%g' y='%g' font-size='12' fill='#8b6508'>▮ fu_pls × pH_LYS</text>\n", a.x0 + a.w + 8, a.y0 + 88);
+    std::fprintf(f, "</svg>\n"); std::fclose(f);
   }
   return 0;
 }
