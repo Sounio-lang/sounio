@@ -606,6 +606,77 @@ export const DEFAULT_PARAMS_QUETIAPINE = Object.freeze({
   releaseSourceLabel: 'Oral IR (k_a = 1.5 /h, F = 1.00, lag 0.25 h)',
 });
 
+// Single 300 mg lithium carbonate capsule (SIO-520): 56.4 mg Li+ (8.12 mEq).
+// ka = 1.0/h, F = 1.00 (no first-pass — nothing hepatic), tlag = 0.25 h.
+// PURELY RENAL sink: CL = 1.3 L/h (~22% of GFR, Na+ competition; Amdisen
+// 1977). Kp from ECF physiology + measured anchors (Vd ~42 L) — NEVER from
+// lipophilic-neutral predictors. PS flow-limited except brain/bone/adipose
+// (measured slow exclusion), SIO-550. No protein binding. MW is elemental.
+export const MW_LITHIUM = 6.94;
+
+export const LI_KA_DEFAULT = 1.0;      // h^-1, Tmax ~1-2 h
+export const LI_F_DEFAULT = 1.00;      // complete; renal-only fate
+export const LI_TLAG_DEFAULT = 0.25;   // h, tablet dissolution
+export const LI_DOSE_DEFAULT = 56.4;   // mg Li+ (300 mg carbonate)
+
+export const KP_LITHIUM = Object.freeze([
+  1.00,  // 0 blood (definition)
+  0.6,   // 1 liver
+  0.8,   // 2 kidney (cortical concentration)
+  0.4,   // 3 brain (measured brain:serum ~0.3-0.5, slow BBB)
+  0.6,   // 4 heart
+  0.6,   // 5 lung
+  0.8,   // 6 muscle
+  0.2,   // 7 adipose (ions excluded from fat)
+  0.6,   // 8 gut
+  0.5,   // 9 skin
+  0.5,   // 10 bone
+  0.6,   // 11 spleen
+  0.6,   // 12 pancreas
+  0.6,   // 13 other
+]);
+
+export const PS_LITHIUM = Object.freeze([
+  0.0,   // 0 blood
+  90.0,  // 1 liver (flow-limited)
+  74.0,  // 2 kidney (flow-limited)
+  5.0,   // 3 brain (slow BBB equilibration)
+  16.0,  // 4 heart (flow-limited)
+  350.0, // 5 lung (flow-limited)
+  42.0,  // 6 muscle (flow-limited)
+  4.0,   // 7 adipose (ion exclusion)
+  55.0,  // 8 gut (flow-limited)
+  21.0,  // 9 skin (flow-limited)
+  5.0,   // 10 bone (slow)
+  10.0,  // 11 spleen (flow-limited)
+  8.0,   // 12 pancreas (flow-limited)
+  13.0,  // 13 other (flow-limited)
+]);
+
+export const DEFAULT_PARAMS_LITHIUM = Object.freeze({
+  clHep: 1.3,
+  higuchiScale: 1.0,
+  vdScale: 1.0,
+  bolusMg: 0.0,
+  stentActive: true,   // re-used as 'input active' (no stent; oral IR)
+  ps: PS_LITHIUM,
+  vascFrac: VASC_FRAC,
+  kp: KP_LITHIUM,
+  mw: MW_LITHIUM,
+  releaseModel: 'oral_ir',
+  releaseKa: LI_KA_DEFAULT,
+  releaseF: LI_F_DEFAULT,
+  releaseTlag: LI_TLAG_DEFAULT,
+  releaseDoseMg: LI_DOSE_DEFAULT,
+  tmddOrgans: [],
+  tmddParams: {},
+  pdOrgans: [],
+  pdParams: {},
+  cVisualMax: 3.0e-5,
+  drugLabel: 'Lithium (oral IR)',
+  releaseSourceLabel: 'Oral IR (k_a = 1.0 /h, F = 1.00, lag 0.25 h)',
+});
+
 /**
  * Stent release (Higuchi). Identical to pbpk14_core for cross-model parity.
  */
