@@ -1,0 +1,71 @@
+// stdlib/darwin_pbpk/scenarios/tirzepatide_sc_depot.sio — scenario library (no main)
+//
+// End-to-end dissertation scenario for tirzepatide (SIO-517):
+//
+//   - PBPK28 transport (core/pbpk28_params + tsit5_pbpk28)
+//   - SC depot first-order release (5 mg weekly, F = 0.80, k_a = 0.0164 /h
+//     per Urva 2022; maintenance dose per FDA 2022 label)
+//
+// PK only: no TMDD/PD layer in this scenario. Tirzepatide is a dual
+// GIP/GLP-1R agonist; receptor compartments are SIO-517 follow-up once the
+// PK parity is gated. Elimination is proteolytic (CL = 0.061 L/h, Urva
+// 2022); per Martin 2024 no intact parent appears in excreta, so no renal
+// clearance of parent is modeled.
+//
+// The parity ref tests/run-pass/dissertation_pbpk28_parity_ref_tirzepatide.sio
+// drives this scenario itself (venlafaxine pattern), so a scenario change
+// not mirrored in Node breaks the gate.
+//
+// This file is a library with no `main`; it is checked, not run.
+
+use darwin_pbpk::core::pbpk28_params::*
+use darwin_pbpk::tsit5_pbpk28::*
+use darwin_pbpk::drugs::tirzepatide::*
+
+// ─── SC depot release ───────────────────────────────────────────────────────
+// Urva 2022 popPK — ka = 0.0164 /h, F = 0.80. Total systemic exposure over
+// t in [0, inf] equals F * Dose by construction.
+pub fn tirz_dose_mg() -> f64 { return tirzepatide_dose_mg() }
+pub fn tirz_f() -> f64       { return tirzepatide_f_sc() }
+pub fn tirz_ka() -> f64      { return tirzepatide_ka() }
+
+// rate(t) = F * Dose * k_a * exp(-k_a * t), mg/h.
+pub fn tirz_release_rate_at(t: f64) -> f64 with Mut, Div {
+    if t < 0.0 { return 0.0 }
+    let ka = tirz_ka()
+    let arg = 0.0 - ka * t
+    // Taylor series for exp (same pattern as semaglutide_sc_depot: t up to
+    // 30 h means |arg| <= 0.5, far inside the convergence radius).
+    var y = 1.0
+    var term = 1.0
+    var k: i64 = 1
+    while k < 20 {
+        term = term * arg / (k as f64)
+        y = y + term
+        k = k + 1
+    }
+    return tirz_f() * tirz_dose_mg() * ka * y
+}
+
+// ─── Composite scenario state ───────────────────────────────────────────────
+pub struct TirzepatideScenario {
+    pub pbpk: PBPKState28,
+}
+
+// Initial state: zero PBPK (drug enters via release_rate).
+pub fn tirz_scenario_init() -> TirzepatideScenario {
+    TirzepatideScenario {
+        pbpk: pbpk28_state_zero(),
+    }
+}
+
+// One fully-coupled CN step at midpoint release rate (set to 0.0 only for
+// depot-exhausted runs; the parity ref always passes the live rate).
+pub fn tirz_step(scen: TirzepatideScenario, p: PBPKParams28,
+                 t_start: f64, dt: f64)
+    -> TirzepatideScenario with Mut, Div
+{
+    let rel_mid = tirz_release_rate_at(t_start + 0.5 * dt)
+    var out_pbpk = pbpk28_full_cn_step(scen.pbpk, p, rel_mid, dt)
+    return TirzepatideScenario { pbpk: out_pbpk }
+}
