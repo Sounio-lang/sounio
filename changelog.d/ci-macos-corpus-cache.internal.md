@@ -1,0 +1,1 @@
+Reuse only exact-input native corpus compilations after verifying source/compiler/toolchain and every cached program digest. Reexecute every pinned member and all original exit/stdout/Metal oracles on each run; keep standalone fresh compilation and deliberately invalid compiler controls.
