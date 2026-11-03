@@ -21,7 +21,7 @@ Os ADRs de [`README.md`](README.md) registram decisões já tomadas; este arquiv
 | [D-02](#d-02) | Capacidades de autoridade opacas além de structs privadas | #1386 |
 | [D-03](#d-03) | Certificado de suporte de base `Q` para admitir produtos de sedenions (E251) | #2380 |
 | [D-04](#d-04) | `LibraryId` como entidade de FFI de primeira classe (passo C fail-closed implementado) | #2535 |
-| [D-05](#d-05) | Semântica de interposição de símbolos de `LibraryId` | #2536 |
+| [D-05](#d-05) | Semântica de interposição de símbolos de `LibraryId` (fechado: Opção A escopo global ELF) | #2536 |
 | [D-06](#d-06) | Repositório canônico de produção (R3): corte e remoção de fontes | #1122 |
 | [D-07](#d-07) | Linha de pesquisa epistêmica "source-fresh aliasing / associador": reaterrissar ou aposentar | #1423 |
 | [D-08](#d-08) | Hessiana do cérebro sedenion: reenquadrar a hipótese nula | #1484 |
@@ -92,8 +92,8 @@ Os ADRs de [`README.md`](README.md) registram decisões já tomadas; este arquiv
 - **Pergunta:** qual a semântica quando duas bibliotecas exportam o mesmo símbolo?
 - **Opções:** (A) só proveniência (escopo global ELF, primeira correspondência vence), documentado; (B) isolamento por `dlopen(RTLD_LOCAL)` como opt-in posterior.
 - **Recomendação:** (A) agora, documentado; (B) depois.
-- **Teste discriminante:** duas bibliotecas de teste exportando `f` com valores distintos; o programa deve imprimir o valor da primeira em `DT_NEEDED` sob (A).
-- **Causa localizada:** o escritor da seção dinâmica em `codegen_x86_linux.sio` (~14430–14560) emite `DT_NEEDED` simples e dynsyms indefinidos `STB_GLOBAL|STT_FUNC`, sem versionamento nem `DT_FLAGS`.
+- **Status / Resolução:** **Fechado sob a Opção (A)**. A ordem de escopo global ELF SysV governa a interposição de símbolos: o primeiro `DT_NEEDED` que exportar o símbolo provê o binding de resolução em tempo de carga dinâmica. Teste discriminante e gate: `tests/run-pass/d05_dynlink_symbol_interposition.sio` e `scripts/ci/madaros_kl14d_multi_needed_gate.sh`.
+- **Causa localizada:** o escritor da seção dinâmica em `codegen_x86_linux.sio` emite `DT_NEEDED` na ordem dos relocs externos e dynsyms `STB_GLOBAL|STT_FUNC`, garantindo resolução determinística da primeira biblioteca na lista.
 
 <a id="d-06"></a>
 ## D-06 — Repositório canônico de produção (R3)
