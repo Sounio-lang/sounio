@@ -1,0 +1,1 @@
+D-05 (#2536): define and verify symbol interposition semantics across DT_NEEDED shared libraries under Option (A) ELF global scope order. When multiple libraries export the same symbol, resolution adheres to the deterministic DT_NEEDED emission order, verified by `tests/run-pass/d05_dynlink_symbol_interposition.sio` and `scripts/ci/madaros_kl14d_multi_needed_gate.sh`.
