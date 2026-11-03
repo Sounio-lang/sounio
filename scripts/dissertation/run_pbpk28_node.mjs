@@ -24,10 +24,11 @@ const {
   DEFAULT_PARAMS_TIRZEPATIDE,
   DEFAULT_PARAMS_EVEROLIMUS,
   DEFAULT_PARAMS_TACROLIMUS,
+  DEFAULT_PARAMS_OLANZAPINE,
   degenerateParams, N,
 } = core;
 
-// CLI: --drug=rapamycin|semaglutide|tirzepatide|everolimus|tacrolimus  --case=literature|degenerate
+// CLI: --drug=rapamycin|semaglutide|tirzepatide|everolimus|tacrolimus|olanzapine  --case=literature|degenerate
 const args = Object.fromEntries(
   process.argv.slice(2)
     .filter(a => a.startsWith('--'))
@@ -52,6 +53,13 @@ if (DRUG === 'tirzepatide') {
     ...DEFAULT_PARAMS_EVEROLIMUS,
     bolusMg: 0.0,         // no IV bolus — Higuchi stent release only
     stentActive: true,
+  };
+}
+ else if (DRUG === 'olanzapine') {
+  baseParams = {
+    ...DEFAULT_PARAMS_OLANZAPINE,
+    bolusMg: 0.0,         // no IV bolus — oral IR gut absorption only
+    stentActive: true,    // re-used as 'input active'
   };
 }
  else if (DRUG === 'tacrolimus') {
@@ -91,6 +99,9 @@ if (DRUG === 'tirzepatide') {
   out.push('DISSERTATION_PBPK28_TIRZEPATIDE_PARITY_NODE v1');
 } else if (DRUG === 'everolimus') {
   out.push('DISSERTATION_PBPK28_EVEROLIMUS_PARITY_NODE v1');
+}
+ else if (DRUG === 'olanzapine') {
+  out.push('DISSERTATION_PBPK28_OLANZAPINE_PARITY_NODE v1');
 }
  else if (DRUG === 'tacrolimus') {
   out.push('DISSERTATION_PBPK28_TACROLIMUS_PARITY_NODE v1');
@@ -147,6 +158,9 @@ if (DRUG === 'tirzepatide') {
   out.push('DISSERTATION_PBPK28_TIRZEPATIDE_PARITY_DONE');
 } else if (DRUG === 'everolimus') {
   out.push('DISSERTATION_PBPK28_EVEROLIMUS_PARITY_DONE');
+}
+ else if (DRUG === 'olanzapine') {
+  out.push('DISSERTATION_PBPK28_OLANZAPINE_PARITY_DONE');
 }
  else if (DRUG === 'tacrolimus') {
   out.push('DISSERTATION_PBPK28_TACROLIMUS_PARITY_DONE');
