@@ -36,7 +36,7 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
 | Rung | Scope | Engine |
 |---|---|---|
 | KL-9 | seed: #1494 imported-module typecheck errors non-fatal | lean_single |
-| KL-11 | #1792 first-order / variance across user calls (pow FO + mixed Hessian closed) | madaros |
+| KL-11 | #1792 first-order / variance across user calls (pow FO + mixed Hessian closed; sub/neg closed) | madaros |
 | KL-14 | FFI: 14a–14d3 CLOSED | madaros |
 | KL-15 | `f256` surface (15a softfloat add/sub partial), `Knowledge<f128>`/GUM | madaros |
 | KL-16 | Hessian Tier-4 (16a–16f CLOSED; residual H-multi/non-H00 if/a64 atan2) | lean_single |
@@ -143,7 +143,15 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
   Witnesses: `tests/run-pass/kl11_pow_fo_hessian.sio` (`hessian_of(pow(x, 3.0), 0, 0)`
   at `x=0.5` → `3.0`) and `tests/run-pass/kl11_pow_mixed_hessian.sio`
   (`hessian_of(pow(x, y), 0, 1)` at `x=2.0, y=3.0` → `4(1 + 3 ln 2)`). Pin:
-  `scripts/ci/madaros_kl11_pow_fo_gate.sh`. FO across arbitrary user `fn` bodies
+  `scripts/ci/madaros_kl11_pow_fo_gate.sh`.
+- **User `fn` subtraction across call boundary — CLOSED (KL-11 partial, 2026-11-04).**
+  `fo_classify_expr_transfer` and `fo_ctor_classify_leaf` register `BinaryOp::OpSub`
+  (kinds 13 and 14 for `x - y` and `y - x`; kind 2 with `-1.0` scale for `0.0 - x`
+  and constant subtractions). `fo_apply_transfer_kind` emits first-order sensitivities
+  via `fo_combine_sens_addsub(..., is_sub: true)` and second-order Hessian via
+  `so_combine_hess_addsub(..., is_sub: true)`. Eliminates the silent zero variance
+  documented in `docs/audit/MADAROS_FO_CALL_BOUNDARY_DISPATCH_2026-08-18.md`.
+  Witness: `tests/run-pass/kl11_fo_sub_across_call.sio`. FO across arbitrary user `fn` bodies
   remains open.
 
 
