@@ -1,0 +1,125 @@
+//@ run-pass
+//@ expect-stdout-contains: CLOZAPINE_FLUVOXAMINE_PASS
+//@ timeout: 120
+//
+// Fluvoxamine x clozapine as a non-circular prediction, on the CYP1A2 enzyme
+// added to multidrug28 on 2026-11-04. Rationale, sources and the honest gap
+// to the clinical 5-10x are in stdlib/darwin_pbpk/ddi/clozapine_fluvoxamine.sio.
+//
+// G1  Driver vs hand formula. For every enzyme and at I = 4, 5.5, 7 uM, the
+//     driver's competitive factor md_factor_now equals 1/(1 + I/Ki) to 1e-12,
+//     and the assembled AUC ratio from the driver equals the closed form to
+//     1e-12. This validates the inhibition algebra through the new CYP1A2
+//     slot (code 4) against the independent Ki data.
+// G2  CYP1A2 is the most strongly inhibited isoform (smallest factor) at every
+//     I, matching Olesen & Linnet's "most important form" reading.
+// G3  Prediction, reported with its provenance: R(4) and R(7) bracket the
+//     fold-rise. Gated into [2.8, 3.8] (the computed 3.0-3.5 with a small
+//     margin), monotone increasing in I, and strictly below the uninhibitable
+//     ceiling 1/fm_other.
+// G4  Honest gap: the predicted rise is BELOW the clinical 5-10x. Printed, and
+//     the under-prediction is asserted (R(7) < clinical_lo), because closing
+//     it by tuning fm would reintroduce the circularity the file avoids.
+// G5  Co-drug control: with fluvoxamine present only as ext_load (no inhibitor
+//     drug registered), the victim's own Ki stays unset, so it is not its own
+//     inhibitor — md_factor_now at a victim with no co-drug equals the ext_load
+//     factor exactly.
+
+use darwin_pbpk::core::pbpk28_params::*
+use darwin_pbpk::ddi::multidrug28::*
+use darwin_pbpk::scenarios::clozapine_oral::*
+use darwin_pbpk::ddi::clozapine_fluvoxamine::*
+
+fn t_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn show(label: string, x: f64) with IO {
+    print(label)
+    println(x)
+}
+
+fn enz_name(k: i32) -> string {
+    if k == 0 { return "CYP3A4 " }
+    if k == 1 { return "CYP2D6 " }
+    if k == 2 { return "CYP2C9 " }
+    if k == 3 { return "CYP2C19" }
+    return "CYP1A2 "
+}
+
+// Driver factor check at one hepatic concentration; returns true on pass.
+fn check_at(md: &!MultiDrug28, v: i32, i_uM: f64) -> bool with IO, Mut, Div, Panic {
+    clzfvx_set_fluvoxamine(md, i_uM)
+    var ok = true
+    print("I = ")
+    print(i_uM)
+    println(" uM hepatic fluvoxamine")
+    var argmin = 0
+    var fmin = 2.0
+    var k: i32 = 0
+    while k < 5 {
+        let f_drv = md_factor_now(md, v, md_site_liver(), k)
+        let f_hand = 1.0 / (1.0 + i_uM / clzfvx_ki_uM(k))
+        print("  ")
+        print(enz_name(k))
+        print("  factor driver ")
+        print(f_drv)
+        print("  hand ")
+        print(f_hand)
+        println("")
+        if t_abs(f_drv - f_hand) > 1.0e-12 { println("  G1 FAIL factor"); ok = false }
+        if f_drv < fmin { fmin = f_drv; argmin = k }
+        k = k + 1
+    }
+    if argmin != 4 { println("  G2 FAIL: CYP1A2 is not the most-inhibited isoform"); ok = false }
+    let r_drv = clzfvx_driver_ratio(md, v)
+    let r_hand = clzfvx_predicted_ratio(i_uM)
+    show("  AUC fold-rise, driver: ", r_drv)
+    show("  AUC fold-rise, closed form: ", r_hand)
+    if t_abs(r_drv - r_hand) > 1.0e-12 { println("  G1 FAIL ratio"); ok = false }
+    return ok
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    println("CLOZAPINE_FLUVOXAMINE v1 — non-circular CYP1A2 DDI prediction")
+    var ok = true
+
+    var md = md_new(true)
+    let v = clzfvx_add_clozapine(&!md, clz_pbpk28_params())
+
+    // G5 control: before any load, no co-drug, factor must be exactly 1.
+    var k0: i32 = 0
+    while k0 < 5 {
+        if md_factor_now(&md, v, md_site_liver(), k0) != 1.0 { println("G5 FAIL baseline factor != 1"); ok = false }
+        k0 = k0 + 1
+    }
+
+    // G1, G2 at the range endpoints and the midpoint.
+    if !check_at(&!md, v, 4.0) { ok = false }
+    if !check_at(&!md, v, 5.5) { ok = false }
+    if !check_at(&!md, v, 7.0) { ok = false }
+
+    // G3 prediction band and monotonicity.
+    let r_lo = clzfvx_predicted_ratio(clzfvx_hepatic_lo_uM())
+    let r_hi = clzfvx_predicted_ratio(clzfvx_hepatic_hi_uM())
+    println("G3 prediction")
+    show("  R at 4 uM: ", r_lo)
+    show("  R at 7 uM: ", r_hi)
+    let ceiling = 1.0 / clzfvx_fm_other()
+    show("  uninhibitable ceiling 1/fm_other: ", ceiling)
+    if !(r_hi > r_lo) { println("  G3 FAIL monotonicity"); ok = false }
+    if !(r_lo > 2.8 && r_hi < 3.8) { println("  G3 FAIL band"); ok = false }
+    if !(r_hi < ceiling) { println("  G3 FAIL ceiling"); ok = false }
+
+    // G4 honest gap to the clinic.
+    println("G4 gap to the clinic")
+    show("  clinical fold-rise low: ", clzfvx_clinical_lo())
+    show("  clinical fold-rise high: ", clzfvx_clinical_hi())
+    show("  model under-predicts by (clinical_lo / R(7)): ", clzfvx_clinical_lo() / r_hi)
+    if !(r_hi < clzfvx_clinical_lo()) { println("  G4 FAIL: model did not under-predict (check for circular fm)"); ok = false }
+
+    if ok {
+        println("CLOZAPINE_FLUVOXAMINE_PASS")
+        return 0
+    }
+    println("CLOZAPINE_FLUVOXAMINE_FAIL")
+    return 1
+}
