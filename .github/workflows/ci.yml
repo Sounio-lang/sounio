@@ -96,6 +96,8 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+      - name: Native corpus compile cache and fresh execution controls
+        run: node scripts/ci/macos_corpus_cache_contract.mjs "$GITHUB_WORKSPACE" --selftest
       - name: Native macOS exact cache failure controls
         run: node scripts/ci/macos_native_cache_contract.mjs "$GITHUB_WORKSPACE" --selftest
       - name: Canonical full suite partition contract
@@ -1419,6 +1421,11 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          filter: blob:none
+      - name: Confirm filtered full-history checkout transport
+        run: |
+          test "$(git rev-parse --is-shallow-repository)" = false
+          git config --get remote.origin.partialclonefilter || true
       - name: Provision toolchain (DARWIN runner)
         if: runner.environment == 'self-hosted'
         run: |
@@ -2032,8 +2039,30 @@ jobs:
         run: bash scripts/ci/madaros_macos_corpus_ir_gate.sh "$PWD/artifacts/self-hosted/souc-self-hosted-arm64-macos"
       - name: Native Metal real-IR execution gate
         run: bash scripts/ci/madaros_macos_metal_ir_gate.sh "$PWD/artifacts/self-hosted/souc-self-hosted-arm64-macos" /tmp/madaros-metal-ir
+      - name: Identify exact native corpus compilation inputs
+        id: corpus-cache-inputs
+        run: node scripts/ci/macos_corpus_cache.mjs key "$PWD" /tmp/madaros-current-macos
+      - name: Restore exact native corpus compilations
+        id: corpus-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/madaros-corpus-cache
+          key: ${{ steps.corpus-cache-inputs.outputs.key }}
       - name: Corrected pinned 200 corpus with mandatory real Metal
+        env:
+          CORPUS_COMPILE_CACHE_RESTORE: ${{ steps.corpus-cache.outputs.cache-hit == 'true' && format('{0}/madaros-corpus-cache', runner.temp) || '' }}
         run: bash scripts/ci/madaros_macos_corpus_gate.sh /tmp/madaros-current-macos /tmp/madaros-corrected-corpus
+      - name: Seal accepted native corpus compilations
+        if: steps.corpus-cache.outputs.cache-hit != 'true'
+        env:
+          EXPECTED_KEY: ${{ steps.corpus-cache-inputs.outputs.key }}
+        run: node scripts/ci/macos_corpus_cache.mjs seal "$PWD" /tmp/madaros-current-macos "$RUNNER_TEMP/madaros-corpus-cache" /tmp/madaros-corrected-corpus/results "$EXPECTED_KEY"
+      - name: Save accepted native corpus compilations
+        if: steps.corpus-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/madaros-corpus-cache
+          key: ${{ steps.corpus-cache-inputs.outputs.key }}
       - name: Seal accepted native macOS compilation
         if: steps.native-cache.outputs.cache-hit != 'true'
         env:
@@ -2045,6 +2074,19 @@ jobs:
         with:
           path: ${{ runner.temp }}/madaros-native-cache
           key: ${{ steps.native-cache-inputs.outputs.key }}
+      - name: Upload native corpus execution receipts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-corpus-receipts-${{ github.run_attempt }}
+          path: |
+            /tmp/madaros-corrected-corpus/**/*.log
+            /tmp/madaros-corrected-corpus/**/*.txt
+            /tmp/madaros-corrected-corpus/**/*.tsv
+            /tmp/madaros-corrected-corpus/**/*.sio
+            /tmp/madaros-corrected-corpus/**/*.sha256
+            ${{ runner.temp }}/madaros-corpus-cache/receipt.json
+          retention-days: 7
       - name: Upload macOS native compiler artifact
         uses: actions/upload-artifact@v4
         with:

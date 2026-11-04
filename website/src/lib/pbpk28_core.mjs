@@ -443,6 +443,240 @@ export const DEFAULT_PARAMS_TACROLIMUS = Object.freeze({
   releaseSourceLabel: 'Oral IR (k_a = 0.38 /h, F = 0.25)',
 });
 
+// Zyprexa immediate-release olanzapine (SIO-518): single 10 mg oral dose.
+// ka = 0.6/h, F = 0.60, tlag = 0.25 h tablet dissolution (Bergstrom 2006).
+// Plasma referenced (rb ~= 1, Callaghan 1999): CL = 25 L/h (CYP1A2 primary).
+// Kp = olanzapine tissue values (Rodgers-Rowland, Vd ~700 L) -- NOT
+// haloperidol's, despite the shared class. PS assumed flow-limited pattern,
+// SIO-550. Dual UGT1A4/CYP1A2 pathway recorded in the drug file, not equated
+// with clozapine. Single-dose PK only.
+export const MW_OLANZAPINE = 312.43;
+
+export const OLZ_KA_DEFAULT = 0.6;     // h^-1, Bergstrom 2006
+export const OLZ_F_DEFAULT = 0.60;     // Bergstrom 2006
+export const OLZ_TLAG_DEFAULT = 0.25;  // h, tablet dissolution
+export const OLZ_DOSE_DEFAULT = 10.0;  // mg, single dose
+
+export const KP_OLANZAPINE = Object.freeze([
+  1.00,  // 0 blood (definition)
+  12.0,  // 1 liver
+  5.0,   // 2 kidney
+  10.0,  // 3 brain
+  4.0,   // 4 heart
+  8.0,   // 5 lung
+  15.0,  // 6 muscle (Vd driver)
+  8.0,   // 7 adipose (Vd driver)
+  5.0,   // 8 gut
+  5.0,   // 9 skin
+  4.0,   // 10 bone
+  5.0,   // 11 spleen
+  3.5,   // 12 pancreas
+  3.5,   // 13 other
+]);
+
+export const DEFAULT_PARAMS_OLANZAPINE = Object.freeze({
+  clHep: 25.0,
+  higuchiScale: 1.0,
+  vdScale: 1.0,
+  bolusMg: 0.0,
+  stentActive: true,   // re-used as 'input active' (no stent; oral IR)
+  ps: PS_RAPAMYCIN,    // assumed flow-limited pattern, SIO-550
+  vascFrac: VASC_FRAC,
+  kp: KP_OLANZAPINE,
+  mw: MW_OLANZAPINE,
+  releaseModel: 'oral_ir',
+  releaseKa: OLZ_KA_DEFAULT,
+  releaseF: OLZ_F_DEFAULT,
+  releaseTlag: OLZ_TLAG_DEFAULT,
+  releaseDoseMg: OLZ_DOSE_DEFAULT,
+  tmddOrgans: [],
+  tmddParams: {},
+  pdOrgans: [],
+  pdParams: {},
+  cVisualMax: 3.0e-5,
+  drugLabel: 'Olanzapine (oral IR)',
+  releaseSourceLabel: 'Oral IR (k_a = 0.6 /h, F = 0.60, lag 0.25 h)',
+});
+
+// Clozapine single 100 mg oral tablet (SIO-521): ka = 1.0/h (Tmax ~2 h),
+// F = 0.55, tlag = 0.25 h. CL = 20 L/h (calibrated: 400 mg/day steady state
+// ~= 460 ng/mL, inside the 350-600 TDM band). Kp = clozapine tissue values
+// (Vd ~400 L) -- high brain uptake (target organ, no P-gp restraint), NOT
+// olanzapine's. PS assumed flow-limited pattern, SIO-550. fm CYP1A2 0.70 /
+// CYP3A4 0.20 / other 0.10 recorded in the drug file; smoker split follow-up.
+export const MW_CLOZAPINE = 326.83;
+
+export const CLZ_KA_DEFAULT = 1.0;     // h^-1, Tmax ~2 h
+export const CLZ_F_DEFAULT = 0.55;     // first-pass CYP1A2
+export const CLZ_TLAG_DEFAULT = 0.25;  // h, tablet dissolution
+export const CLZ_DOSE_DEFAULT = 100.0; // mg, single dose
+
+export const KP_CLOZAPINE = Object.freeze([
+  1.00,  // 0 blood (definition)
+  10.0,  // 1 liver
+  4.0,   // 2 kidney
+  8.0,   // 3 brain (target organ, high uptake)
+  3.0,   // 4 heart
+  6.0,   // 5 lung
+  8.0,   // 6 muscle
+  6.0,   // 7 adipose (capped)
+  4.0,   // 8 gut
+  3.0,   // 9 skin
+  2.0,   // 10 bone
+  4.0,   // 11 spleen
+  3.0,   // 12 pancreas
+  3.0,   // 13 other
+]);
+
+export const DEFAULT_PARAMS_CLOZAPINE = Object.freeze({
+  clHep: 20.0,
+  higuchiScale: 1.0,
+  vdScale: 1.0,
+  bolusMg: 0.0,
+  stentActive: true,   // re-used as 'input active' (no stent; oral IR)
+  ps: PS_RAPAMYCIN,    // assumed flow-limited pattern, SIO-550
+  vascFrac: VASC_FRAC,
+  kp: KP_CLOZAPINE,
+  mw: MW_CLOZAPINE,
+  releaseModel: 'oral_ir',
+  releaseKa: CLZ_KA_DEFAULT,
+  releaseF: CLZ_F_DEFAULT,
+  releaseTlag: CLZ_TLAG_DEFAULT,
+  releaseDoseMg: CLZ_DOSE_DEFAULT,
+  tmddOrgans: [],
+  tmddParams: {},
+  pdOrgans: [],
+  pdParams: {},
+  cVisualMax: 3.0e-5,
+  drugLabel: 'Clozapine (oral IR)',
+  releaseSourceLabel: 'Oral IR (k_a = 1.0 /h, F = 0.55, lag 0.25 h)',
+});
+
+// Seroquel immediate-release quetiapine (SIO-525): single 100 mg oral dose.
+// ka = 1.5/h (Tmax ~1 h), F = 1.00 (complete — no first-pass loss),
+// tlag = 0.25 h. CL = 84 L/h (label/popPK; 600 mg/day steady state ~=
+// 300 ng/mL, inside the 100-500 TDM band). Kp = quetiapine tissue values
+// (Vd ~700 L) — own values. PS assumed flow-limited pattern, SIO-550.
+// fm CYP3A4 0.89 / other 0.11; venlafaxine DDI follow-up (own evaluation).
+export const MW_QUETIAPINE = 383.51;
+
+export const QTP_KA_DEFAULT = 1.5;      // h^-1, Tmax ~1 h
+export const QTP_F_DEFAULT = 1.00;     // complete bioavailability
+export const QTP_TLAG_DEFAULT = 0.25;  // h, tablet dissolution
+export const QTP_DOSE_DEFAULT = 100.0; // mg, single dose
+
+export const KP_QUETIAPINE = Object.freeze([
+  1.00,  // 0 blood (definition)
+  8.0,   // 1 liver
+  4.0,   // 2 kidney
+  3.0,   // 3 brain
+  3.0,   // 4 heart
+  6.0,   // 5 lung
+  6.0,   // 6 muscle
+  5.0,   // 7 adipose (capped)
+  4.0,   // 8 gut
+  3.0,   // 9 skin
+  2.0,   // 10 bone
+  4.0,   // 11 spleen
+  3.0,   // 12 pancreas
+  3.0,   // 13 other
+]);
+
+export const DEFAULT_PARAMS_QUETIAPINE = Object.freeze({
+  clHep: 84.0,
+  higuchiScale: 1.0,
+  vdScale: 1.0,
+  bolusMg: 0.0,
+  stentActive: true,   // re-used as 'input active' (no stent; oral IR)
+  ps: PS_RAPAMYCIN,    // assumed flow-limited pattern, SIO-550
+  vascFrac: VASC_FRAC,
+  kp: KP_QUETIAPINE,
+  mw: MW_QUETIAPINE,
+  releaseModel: 'oral_ir',
+  releaseKa: QTP_KA_DEFAULT,
+  releaseF: QTP_F_DEFAULT,
+  releaseTlag: QTP_TLAG_DEFAULT,
+  releaseDoseMg: QTP_DOSE_DEFAULT,
+  tmddOrgans: [],
+  tmddParams: {},
+  pdOrgans: [],
+  pdParams: {},
+  cVisualMax: 3.0e-5,
+  drugLabel: 'Quetiapine (oral IR)',
+  releaseSourceLabel: 'Oral IR (k_a = 1.5 /h, F = 1.00, lag 0.25 h)',
+});
+
+// Single 300 mg lithium carbonate capsule (SIO-520): 56.4 mg Li+ (8.12 mEq).
+// ka = 1.0/h, F = 1.00 (no first-pass — nothing hepatic), tlag = 0.25 h.
+// PURELY RENAL sink: CL = 1.3 L/h (~22% of GFR, Na+ competition; Amdisen
+// 1977). Kp from ECF physiology + measured anchors (Vd ~42 L) — NEVER from
+// lipophilic-neutral predictors. PS flow-limited except brain/bone/adipose
+// (measured slow exclusion), SIO-550. No protein binding. MW is elemental.
+export const MW_LITHIUM = 6.94;
+
+export const LI_KA_DEFAULT = 1.0;      // h^-1, Tmax ~1-2 h
+export const LI_F_DEFAULT = 1.00;      // complete; renal-only fate
+export const LI_TLAG_DEFAULT = 0.25;   // h, tablet dissolution
+export const LI_DOSE_DEFAULT = 56.4;   // mg Li+ (300 mg carbonate)
+
+export const KP_LITHIUM = Object.freeze([
+  1.00,  // 0 blood (definition)
+  0.6,   // 1 liver
+  0.8,   // 2 kidney (cortical concentration)
+  0.4,   // 3 brain (measured brain:serum ~0.3-0.5, slow BBB)
+  0.6,   // 4 heart
+  0.6,   // 5 lung
+  0.8,   // 6 muscle
+  0.2,   // 7 adipose (ions excluded from fat)
+  0.6,   // 8 gut
+  0.5,   // 9 skin
+  0.5,   // 10 bone
+  0.6,   // 11 spleen
+  0.6,   // 12 pancreas
+  0.6,   // 13 other
+]);
+
+export const PS_LITHIUM = Object.freeze([
+  0.0,   // 0 blood
+  90.0,  // 1 liver (flow-limited)
+  74.0,  // 2 kidney (flow-limited)
+  5.0,   // 3 brain (slow BBB equilibration)
+  16.0,  // 4 heart (flow-limited)
+  350.0, // 5 lung (flow-limited)
+  42.0,  // 6 muscle (flow-limited)
+  4.0,   // 7 adipose (ion exclusion)
+  55.0,  // 8 gut (flow-limited)
+  21.0,  // 9 skin (flow-limited)
+  5.0,   // 10 bone (slow)
+  10.0,  // 11 spleen (flow-limited)
+  8.0,   // 12 pancreas (flow-limited)
+  13.0,  // 13 other (flow-limited)
+]);
+
+export const DEFAULT_PARAMS_LITHIUM = Object.freeze({
+  clHep: 1.3,
+  higuchiScale: 1.0,
+  vdScale: 1.0,
+  bolusMg: 0.0,
+  stentActive: true,   // re-used as 'input active' (no stent; oral IR)
+  ps: PS_LITHIUM,
+  vascFrac: VASC_FRAC,
+  kp: KP_LITHIUM,
+  mw: MW_LITHIUM,
+  releaseModel: 'oral_ir',
+  releaseKa: LI_KA_DEFAULT,
+  releaseF: LI_F_DEFAULT,
+  releaseTlag: LI_TLAG_DEFAULT,
+  releaseDoseMg: LI_DOSE_DEFAULT,
+  tmddOrgans: [],
+  tmddParams: {},
+  pdOrgans: [],
+  pdParams: {},
+  cVisualMax: 3.0e-5,
+  drugLabel: 'Lithium (oral IR)',
+  releaseSourceLabel: 'Oral IR (k_a = 1.0 /h, F = 1.00, lag 0.25 h)',
+});
+
 /**
  * Stent release (Higuchi). Identical to pbpk14_core for cross-model parity.
  */
@@ -459,13 +693,17 @@ export function releaseRateAt(tHours, params) {
     return F * D * ka * Math.exp(-ka * Math.max(0, tHours));
   }
   if (model === 'oral_ir') {
-    // Oral IR capsule: rate = F * Dose * k_a * exp(-k_a * t)  (1st-order gut
-    // absorption; 1 - F is first-pass loss). Gut pool dosed at t = 0; the
-    // closed form is exact, so both engines evaluate the same function.
+    // Oral IR capsule: rate = 0 for t < tlag, else F * Dose * k_a *
+    // exp(-k_a * (t - tlag))  (1st-order gut absorption after tablet
+    // dissolution; 1 - F is first-pass loss). The closed form is exact,
+    // so both engines evaluate the same function.
     const ka = params.releaseKa;
     const F  = params.releaseF;
+    const tlag = params.releaseTlag ?? 0;
+    const te = tHours - tlag;
+    if (te < 0) return 0;
     const D  = params.releaseDoseMg * (params.higuchiScale ?? 1);
-    return F * D * ka * Math.exp(-ka * Math.max(0, tHours));
+    return F * D * ka * Math.exp(-ka * te);
   }
   // Higuchi (default): dQ/dt = K_H / (2·√t), clipped at t < 0.1 h
   const t = Math.max(0.1, tHours);
