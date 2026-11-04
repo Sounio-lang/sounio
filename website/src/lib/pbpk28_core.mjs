@@ -677,6 +677,73 @@ export const DEFAULT_PARAMS_LITHIUM = Object.freeze({
   releaseSourceLabel: 'Oral IR (k_a = 1.0 /h, F = 1.00, lag 0.25 h)',
 });
 
+// Single 1000 mg IV infusion over 1.0 h (SIO-519): label rate, never bolus
+// push. Zero-order input Dose/Tinf on [0, Tinf]. Predominantly renal sink:
+// CL = 5.18 L/h (Matzke 1984 at CrCl 120: 0.689*120+3.66 mL/min). Kp from
+// ECF rationale + measured poor BBB (Vd ~45 L) — never lipophilic-neutral
+// predictors. PS flow-limited except brain/adipose/bone (SIO-550). The
+// infusion path does not touch the SIO-504 clamped bolus kernel.
+export const MW_VANCOMYCIN = 1449.0;
+
+export const VNC_DOSE_DEFAULT = 1000.0;  // mg, single infusion
+export const VNC_TINF_DEFAULT = 1.0;     // h, label rate
+
+export const KP_VANCOMYCIN = Object.freeze([
+  1.00,  // 0 blood (definition)
+  0.6,   // 1 liver
+  1.0,   // 2 kidney (elimination + accumulation)
+  0.1,   // 3 brain (poor BBB — measured)
+  0.6,   // 4 heart
+  0.6,   // 5 lung
+  0.9,   // 6 muscle
+  0.2,   // 7 adipose (excluded)
+  0.6,   // 8 gut
+  0.5,   // 9 skin
+  0.3,   // 10 bone
+  0.6,   // 11 spleen
+  0.6,   // 12 pancreas
+  0.9,   // 13 other
+]);
+
+export const PS_VANCOMYCIN = Object.freeze([
+  0.0,   // 0 blood
+  90.0,  // 1 liver (flow-limited)
+  74.0,  // 2 kidney (flow-limited)
+  2.0,   // 3 brain (very poor penetration)
+  16.0,  // 4 heart (flow-limited)
+  350.0, // 5 lung (flow-limited)
+  42.0,  // 6 muscle (flow-limited)
+  5.0,   // 7 adipose (excluded)
+  55.0,  // 8 gut (flow-limited)
+  21.0,  // 9 skin (flow-limited)
+  8.0,   // 10 bone (slow)
+  10.0,  // 11 spleen (flow-limited)
+  8.0,   // 12 pancreas (flow-limited)
+  13.0,  // 13 other (flow-limited)
+]);
+
+export const DEFAULT_PARAMS_VANCOMYCIN = Object.freeze({
+  clHep: 5.18,
+  higuchiScale: 1.0,
+  vdScale: 1.0,
+  bolusMg: 0.0,
+  stentActive: true,   // re-used as 'input active' (no stent; IV infusion)
+  ps: PS_VANCOMYCIN,
+  vascFrac: VASC_FRAC,
+  kp: KP_VANCOMYCIN,
+  mw: MW_VANCOMYCIN,
+  releaseModel: 'infusion',
+  releaseDoseMg: VNC_DOSE_DEFAULT,
+  releaseTinf: VNC_TINF_DEFAULT,
+  tmddOrgans: [],
+  tmddParams: {},
+  pdOrgans: [],
+  pdParams: {},
+  cVisualMax: 3.0e-5,
+  drugLabel: 'Vancomycin (IV infusion)',
+  releaseSourceLabel: 'IV infusion 1000 mg / 1.0 h (label rate)',
+});
+
 /**
  * Stent release (Higuchi). Identical to pbpk14_core for cross-model parity.
  */
@@ -704,6 +771,18 @@ export function releaseRateAt(tHours, params) {
     if (te < 0) return 0;
     const D  = params.releaseDoseMg * (params.higuchiScale ?? 1);
     return F * D * ka * Math.exp(-ka * te);
+  }
+  if (model === 'infusion') {
+    // IV infusion (SIO-519): zero-order rate Dose/Tinf on [0, Tinf], 0
+    // after. Explicit label-rate infusion — never a bolus push, so the
+    // SIO-504 clamped-kernel audit path does not apply. Both engines
+    // evaluate the rate at the step midpoint, including the step
+    // straddling Tinf.
+    const T = params.releaseTinf ?? 0;
+    if (tHours < 0 || tHours > T) return 0;
+    if (T <= 0) return 0;
+    const D = params.releaseDoseMg * (params.higuchiScale ?? 1);
+    return D / T;
   }
   // Higuchi (default): dQ/dt = K_H / (2·√t), clipped at t < 0.1 h
   const t = Math.max(0.1, tHours);
