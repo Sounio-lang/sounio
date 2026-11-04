@@ -7,6 +7,16 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
 export SOUNIO_STDLIB_PATH="$ROOT/stdlib"
 SOUC="${SOUC:-$ROOT/bin/souc}"
+
+# SIO-207: epistemic/propagate.sio calls wrapping_add/wrapping_mul, which
+# postdate the committed Madaros prebuilt (E137 there). The Witness job
+# places the fresh build at /tmp/madaros-ci.elf; prefer it when present so
+# this gate measures the PR's compiler, like the neighbouring fresh-build
+# steps. Locally the file is absent and the default resolution stands.
+if [[ -z "${MADAROS_RAW_BIN:-}" && -x /tmp/madaros-ci.elf ]]; then
+  export MADAROS_RAW_BIN=/tmp/madaros-ci.elf
+  echo "monte_carlo_fnptr: using fresh Madaros at $MADAROS_RAW_BIN"
+fi
 PROBE="tests/epistemic_trust/madaros_propagate_monte_carlo_fnptr_probe.sio"
 OUT="$(mktemp -d)"
 trap 'rm -rf "$OUT"' EXIT
