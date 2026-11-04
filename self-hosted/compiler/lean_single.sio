@@ -928,10 +928,39 @@ fn st_find(hash: i64) -> i64 with Panic, Mut {
     return -1
 }
 
+// Raw-byte prefix checkpoints preserve the old strict-before-position rule,
+// including marker bytes inside source text. Each complete 256-byte block is
+// scanned once; queries inspect at most the remaining 255 bytes. Appending SRC
+// extends the index. Replacing existing bytes must reset it (see main and
+// strip_extern_blocks); token renaming only appends and needs no invalidation.
+// 16 MiB SRC / 256 + the terminal boundary, not an import-count limit.
+var SRC_FILE_PREFIX: [i64; 65537] = [0; 65537]
+var SRC_FILE_INDEXED: i64 = 0
+var SRC_FILE_LAST: i64 = 0
+
+fn src_file_marker_index_reset() with Mut {
+    SRC_FILE_INDEXED = 0
+    SRC_FILE_LAST = 0
+    SRC_FILE_PREFIX[0 as usize] = 0
+}
+
 fn src_file_marker_start(pos: i64) -> i64 with Panic, Mut {
-    var start: i64 = 0
-    var i: i64 = 0
-    while i < pos && i < SRC_LEN {
+    if pos <= 0 { return 0 }
+    let end = if pos < SRC_LEN { pos } else { SRC_LEN }
+    if end <= 0 { return 0 }
+    if SRC_FILE_INDEXED > SRC_LEN { src_file_marker_index_reset() }
+    let block = end >> 8
+    let boundary = block << 8
+    while SRC_FILE_INDEXED < boundary {
+        if SRC[SRC_FILE_INDEXED as usize] as i64 == 1 { SRC_FILE_LAST = SRC_FILE_INDEXED }
+        SRC_FILE_INDEXED = SRC_FILE_INDEXED + 1
+        if (SRC_FILE_INDEXED & 255) == 0 {
+            SRC_FILE_PREFIX[(SRC_FILE_INDEXED >> 8) as usize] = SRC_FILE_LAST
+        }
+    }
+    var start = SRC_FILE_PREFIX[block as usize]
+    var i = boundary
+    while i < end {
         if SRC[i as usize] as i64 == 1 { start = i }
         i = i + 1
     }
@@ -972,8 +1001,8 @@ fn st_private_access_blocked(si: i64, access_tok: i64) -> bool with Mut, Panic {
     if si < 0 { return false }
     if ST_DECL_NE[si as usize] <= ST_DECL_NS[si as usize] { return false }
     if access_tok < 0 || access_tok >= TC { return false }
-    // The field tests run BEFORE src_same_file_pos, which scans the bundle back
-    // to the file marker: for a `pub struct` most accesses touch a `pub` field
+    // The field tests run BEFORE src_same_file_pos: for a `pub struct` most
+    // accesses touch a `pub` field
     // and must stay as cheap as the old `ST_PUBLIC != 0 -> false` shortcut
     // (calling the scan first made the Madaros sources compile ~3x slower).
     if ST_PUBLIC[si as usize] != 0 {
@@ -52678,6 +52707,7 @@ fn append_extern_c_stubs() with Mut, Panic, Div {
 }
 
 fn strip_extern_blocks() with IO, Mut, Panic, Div {
+    src_file_marker_index_reset()
     EXTERN_STUB_COUNT = 0
     EXTERN_STUB_BUF_OFF = 0
     // Phase 1: Count extern fn declarations and collect signatures for stub generation.
@@ -52929,6 +52959,7 @@ fn main() -> i64 with IO, Mut, Panic, Div {
         arg_i = arg_i + 1
     }
 
+    src_file_marker_index_reset()
     let raw = read_file(src)
     let sz = file_size(src)
     var i: i64 = 0

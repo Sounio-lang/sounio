@@ -42,7 +42,7 @@ function check(w,b){
  const reuse=b.indexOf('if [[ -n "${SOUNIO_MACOS_NATIVE_CACHE_RESTORE:-}" ]]');
  assert(reuse>b.indexOf('test "$(<"$BUILD_DIR/stack.stdout.log")" = 20000'),'seed execution bypassed');
  assert(b.includes('node "$ROOT_DIR/scripts/ci/macos_native_cache.mjs" restore "$ROOT_DIR" "$SEED_BIN" "$SOUNIO_MACOS_NATIVE_CACHE_RESTORE" "$BUILD_DIR/madaros"'),'unchecked cache');
- assert(b.includes('else\n    "$SEED_BIN" self-hosted/compiler/main.sio "$BUILD_DIR/madaros" --target aarch64-macos >"$BUILD_DIR/build.log" 2>&1\nfi'),'cold build bypassed');
+ assert(b.includes('"$BUILD_DIR/profile-build" "$BUILD_DIR/profile" "$SEED_BIN" self-hosted/compiler/main.sio "$BUILD_DIR/madaros" --target aarch64-macos >"$BUILD_DIR/build.log" 2>&1\nfi'),'cold build bypassed');
  assert(b.indexOf('timeout 120 bash "$ROOT_DIR/scripts/ci/madaros_macos_arm64_acceptance_gate.sh"')>reuse,'ABI acceptance bypassed');
  assert(b.includes('codesign --verify "$BUILD_DIR/madaros"'),'signature verification missing');
 }
@@ -59,7 +59,7 @@ if(process.argv.includes('--selftest')){
  try{
   const fixture=path.join(tmp,'repo');fs.mkdirSync(fixture);
   execFileSync('git',['init','-q',fixture]);
-  for(const name of ['self-hosted/compiler/main.sio','stdlib/core.sio','tests/run-pass/a64_macos_mapped_stack.sio','scripts/ci/build_madaros_macos_arm64.sh','scripts/ci/macos_native_cache.mjs','scripts/ci/macos_native_cache_contract.mjs','.github/workflows/ci.yml']){
+  for(const name of ['self-hosted/compiler/main.sio','stdlib/core.sio','tests/run-pass/a64_macos_mapped_stack.sio','scripts/ci/build_madaros_macos_arm64.sh','scripts/ci/native_build_profile.cpp','scripts/ci/macos_native_cache.mjs','scripts/ci/macos_native_cache_contract.mjs','.github/workflows/ci.yml']){
    const p=path.join(fixture,name);fs.mkdirSync(path.dirname(p),{recursive:true});fs.writeFileSync(p,'fixture '+name+'\n');
   }
   const seed=path.join(tmp,'seed'),binary=path.join(tmp,'binary'),cache=path.join(tmp,'cache'),out=path.join(tmp,'out');
@@ -68,7 +68,7 @@ if(process.argv.includes('--selftest')){
   const expected=snapshot(fixture,seed,env);
   seal(expected,cache,binary);restore(expected,cache,out);assert.equal(fs.readFileSync(out,'utf8'),fs.readFileSync(binary,'utf8'));
   fs.appendFileSync(path.join(cache,'madaros'),'corrupt');assert.throws(()=>restore(expected,cache,out),/digest mismatch/);seal(expected,cache,binary);
-  for(const name of ['self-hosted/compiler/main.sio','stdlib/core.sio','.github/workflows/ci.yml','scripts/ci/build_madaros_macos_arm64.sh','scripts/ci/macos_native_cache.mjs','tests/run-pass/a64_macos_mapped_stack.sio']){
+  for(const name of ['self-hosted/compiler/main.sio','stdlib/core.sio','.github/workflows/ci.yml','scripts/ci/build_madaros_macos_arm64.sh','scripts/ci/native_build_profile.cpp','scripts/ci/macos_native_cache.mjs','tests/run-pass/a64_macos_mapped_stack.sio']){
    const p=path.join(fixture,name),old=fs.readFileSync(p);fs.appendFileSync(p,'changed');
    const changed=snapshot(fixture,seed,env);assert.notEqual(changed.key,expected.key);assert.throws(()=>restore(changed,cache,out),/key differs/);fs.writeFileSync(p,old);
   }
@@ -78,6 +78,17 @@ if(process.argv.includes('--selftest')){
   const extra=path.join(fixture,'self-hosted/compiler/new.sio');fs.writeFileSync(extra,'new module');assert.notEqual(snapshot(fixture,seed,env).key,expected.key);fs.unlinkSync(extra);
   const receipt=path.join(cache,'receipt.json');fs.unlinkSync(receipt);assert.throws(()=>restore(expected,cache,out));seal(expected,cache,binary);
   const r=JSON.parse(fs.readFileSync(receipt));r.inputs.environment.os='wrong';fs.writeFileSync(receipt,JSON.stringify(r));assert.throws(()=>restore(expected,cache,out),/recipe differs/);
+  const profiler=path.join(tmp,'profile-build');
+  execFileSync(process.env.CXX||'c++',['-std=c++23','-O2','-Wall','-Wextra','-Werror','-pthread',path.join(root,'scripts/ci/native_build_profile.cpp'),'-o',profiler]);
+  const logs=path.join(tmp,'profile');
+  const program=path.join(tmp,'program');
+  fs.writeFileSync(program,'#!/bin/sh\nprintf "source: test\\n"\nprintf "total source: test\\n"\nprintf "tokens: 1\\n"\nprintf "arm64_compile: test\\n"\nprintf "macho_arm64: test\\n"\nprintf "stderr preserved\\n" >&2\nexit 7\n',{mode:0o755});
+  let failure;try{execFileSync(profiler,[logs,program],{encoding:'utf8',stdio:'pipe'});}catch(e){failure=e;}
+  assert(failure);assert.equal(failure.status,7);assert(failure.stdout.includes('stderr preserved'));
+  for(const event of ['start','source_read','imports_and_prelude_done','lex_and_resolution_done','arm64_compile_done','macho_writer','exit'])assert(fs.readFileSync(path.join(logs,'events.tsv'),'utf8').includes(event+'\t'));
+  assert.throws(()=>execFileSync(profiler,[path.join(tmp,'missing'),path.join(tmp,'absent')],{stdio:'pipe'}),e=>e.status===127);
+  const success=execFileSync(profiler,[path.join(tmp,'ok'),'/bin/echo','fresh execution'],{encoding:'utf8'});assert.equal(success,'fresh execution\n');
+  console.log('NATIVE_PROFILE_REAL_EXECUTION_AND_FAILURE_PROPAGATION_PASS');
   console.log('MACOS_NATIVE_REAL_DIGEST_AND_INPUT_REFUSALS_PASS');
  }finally{fs.rmSync(tmp,{recursive:true,force:true});}
  console.log('MACOS_NATIVE_ACCEPTANCE_BYPASS_MUTATIONS_REJECTED');

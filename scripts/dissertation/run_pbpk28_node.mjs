@@ -28,10 +28,11 @@ const {
   DEFAULT_PARAMS_CLOZAPINE,
   DEFAULT_PARAMS_QUETIAPINE,
   DEFAULT_PARAMS_LITHIUM,
+  DEFAULT_PARAMS_VANCOMYCIN,
   degenerateParams, N,
 } = core;
 
-// CLI: --drug=rapamycin|semaglutide|tirzepatide|everolimus|tacrolimus|olanzapine|clozapine|quetiapine|lithium  --case=literature|degenerate
+// CLI: --drug=rapamycin|semaglutide|tirzepatide|everolimus|tacrolimus|olanzapine|clozapine|quetiapine|lithium|vancomycin  --case=literature|degenerate
 const args = Object.fromEntries(
   process.argv.slice(2)
     .filter(a => a.startsWith('--'))
@@ -62,6 +63,13 @@ if (DRUG === 'tirzepatide') {
   baseParams = {
     ...DEFAULT_PARAMS_LITHIUM,
     bolusMg: 0.0,         // no IV bolus — oral IR gut absorption only
+    stentActive: true,    // re-used as 'input active'
+  };
+}
+ else if (DRUG === 'vancomycin') {
+  baseParams = {
+    ...DEFAULT_PARAMS_VANCOMYCIN,
+    bolusMg: 0.0,         // no IV bolus — zero-order infusion only
     stentActive: true,    // re-used as 'input active'
   };
 }
@@ -126,6 +134,9 @@ if (DRUG === 'tirzepatide') {
 }
  else if (DRUG === 'lithium') {
   out.push('DISSERTATION_PBPK28_LITHIUM_PARITY_NODE v1');
+}
+ else if (DRUG === 'vancomycin') {
+  out.push('DISSERTATION_PBPK28_VANCOMYCIN_PARITY_NODE v1');
 }
  else if (DRUG === 'quetiapine') {
   out.push('DISSERTATION_PBPK28_QUETIAPINE_PARITY_NODE v1');
@@ -194,6 +205,9 @@ if (DRUG === 'tirzepatide') {
 }
  else if (DRUG === 'lithium') {
   out.push('DISSERTATION_PBPK28_LITHIUM_PARITY_DONE');
+}
+ else if (DRUG === 'vancomycin') {
+  out.push('DISSERTATION_PBPK28_VANCOMYCIN_PARITY_DONE');
 }
  else if (DRUG === 'quetiapine') {
   out.push('DISSERTATION_PBPK28_QUETIAPINE_PARITY_DONE');

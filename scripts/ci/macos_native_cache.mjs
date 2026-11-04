@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 import {execFileSync} from 'node:child_process';
 import {pathToFileURL} from 'node:url';
 const digest=data=>crypto.createHash('sha256').update(data).digest('hex');
-const scopes=['self-hosted','stdlib','tests/run-pass/a64_macos_mapped_stack.sio','scripts/ci/build_madaros_macos_arm64.sh','scripts/ci/macos_native_cache.mjs','scripts/ci/macos_native_cache_contract.mjs','.github/workflows/ci.yml'];
+const scopes=['self-hosted','stdlib','tests/run-pass/a64_macos_mapped_stack.sio','scripts/ci/build_madaros_macos_arm64.sh','scripts/ci/native_build_profile.cpp','scripts/ci/macos_native_cache.mjs','scripts/ci/macos_native_cache_contract.mjs','.github/workflows/ci.yml'];
 export function environment(){
  assert.equal(process.platform,'darwin','native cache requires Darwin');
  assert.equal(process.arch,'arm64','native cache requires arm64');
