@@ -1697,3 +1697,84 @@ paste <(grep "^TMASS|m=" "$LI_SIO_LOG" | sed "s/^TMASS|m=//") \
 
 echo
 echo "[pbpk28-parity] lithium oral-IR canonical: renal-only sink + ion Kp + mass envelope (12th canonical drug)"
+
+# ════════════════════════════════════════════════════════════════════════════
+# Case 27: Vancomycin — thirteenth canonical drug, FIRST IV infusion case
+# (zero-order input, never bolus push). Single 1000 mg IV infusion over
+# 1.0 h (label rate) → blood → PBPK28 CN, dt = 0.001. Predominantly renal
+# sink CL = 5.18 L/h (Matzke 1984 at CrCl 120). Kp from ECF rationale +
+# measured poor BBB (Vd ~45 L) — never lipophilic-neutral predictors.
+# Sounio ref drives the stdlib scenario itself; Node side is
+# DEFAULT_PARAMS_VANCOMYCIN with releaseModel 'infusion'.
+#   27a  organ-average cavg   Node ↔ Sounio, STRICT 1% RMSE per organ
+#   27b  mass envelope        0 <= total mass <= cumulative released, 12/12
+# Strict 1% (no absolute floor needed): worst organ is 0.0002%. Blood Cmax
+# 33.2 mg/L single 1000 mg infusion, C12 5.6, C30 0.9 mg/L.
+# ════════════════════════════════════════════════════════════════════════════
+echo
+echo "[pbpk28-parity] Case 27: Sounio ↔ Node vancomycin PBPK28 (IV infusion)"
+
+VNC_SIO_LOG="$OUT_DIR/vnc_sounio.txt"
+VNC_NODE_LOG="$OUT_DIR/vnc_node.txt"
+"$SOUC_BIN" run tests/run-pass/dissertation_pbpk28_parity_ref_vancomycin.sio > "$VNC_SIO_LOG" 2>&1 || {
+  echo "[pbpk28-parity:case27] FAIL: Sounio vancomycin ref returned non-zero" >&2
+  tail -n 20 "$VNC_SIO_LOG" >&2; exit 1; }
+if ! grep -q '^DISSERTATION_PBPK28_VANCOMYCIN_PARITY_DONE$' "$VNC_SIO_LOG"; then
+  echo "[pbpk28-parity:case27] FAIL: Sounio vancomycin ref did not emit DONE" >&2; exit 1; fi
+node "$NODE_RUNNER" --drug=vancomycin > "$VNC_NODE_LOG" 2>&1 || {
+  echo "[pbpk28-parity:case27] FAIL: Node vancomycin runner returned non-zero" >&2
+  tail -n 20 "$VNC_NODE_LOG" >&2; exit 1; }
+if ! grep -q '^DISSERTATION_PBPK28_VANCOMYCIN_PARITY_NODE v1$' "$VNC_NODE_LOG"; then
+  echo "[pbpk28-parity:case27] FAIL: Node vancomycin runner header mismatch" >&2; exit 1; fi
+
+VNC_SIO_TSV="$OUT_DIR/vnc_sounio.tsv"
+VNC_NODE_TSV="$OUT_DIR/vnc_node.tsv"
+parse_to_tsv "$VNC_SIO_LOG" "$VNC_SIO_TSV"
+parse_to_tsv "$VNC_NODE_LOG" "$VNC_NODE_TSV"
+
+VNC_SIO_ROWS=$(wc -l < "$VNC_SIO_TSV")
+VNC_NODE_ROWS=$(wc -l < "$VNC_NODE_TSV")
+if [[ "$VNC_SIO_ROWS" -ne "$EXPECTED_ROWS" || "$VNC_NODE_ROWS" -ne "$EXPECTED_ROWS" ]]; then
+  echo "[pbpk28-parity:case27] FAIL: vancomycin row count mismatch — Sounio=$VNC_SIO_ROWS Node=$VNC_NODE_ROWS expected=$EXPECTED_ROWS" >&2
+  exit 1
+fi
+echo "[pbpk28-parity:case27] both runs emitted $VNC_SIO_ROWS records"
+
+VNC_JOINED="$OUT_DIR/vnc_joined.tsv"
+awk -F'\t' '
+  NR==FNR { S[$1"|"$2] = $5; next }
+  { print $1"\t"$2"\t"S[$1"|"$2]"\t"$5 }
+' "$VNC_SIO_TSV" "$VNC_NODE_TSV" > "$VNC_JOINED"
+
+awk -F'\t' -v THR="$RMSE_THRESHOLD_PCT" '
+  {
+    i = $2 + 0; cs = $3 + 0; cn = $4 + 0;
+    d = cs - cn; SS[i] += d * d; NN[i] += 1;
+    if (cs > PK[i]) PK[i] = cs;
+    if (cn > PK[i]) PK[i] = cn;
+  }
+  END {
+    bad = 0;
+    for (i = 0; i < 14; i++) {
+      if (NN[i] == 0) { printf "PBPK28_VANCOMYCIN_PARITY_FAIL organ %d MISSING\n", i; bad += 1; continue; }
+      rmse = sqrt(SS[i] / NN[i]); pk = PK[i] + 0;
+      if (pk == 0) { continue; }
+      pct = 100.0 * rmse / pk;
+      if (pct >= THR + 0) { printf "PBPK28_VANCOMYCIN_PARITY_FAIL organ %d pct=%.4f rmse=%.3g\n", i, pct, rmse; bad += 1; }
+    }
+    if (bad > 0) { exit 1; }
+    printf "PBPK28_VANCOMYCIN_PARITY_PASS 14/14 compartments within %s%% RMSE (strict)\n", THR;
+  }
+' "$VNC_JOINED"
+
+paste <(grep "^TMASS|m=" "$VNC_SIO_LOG" | sed "s/^TMASS|m=//") \
+      <(grep "^TREL|cum=" "$VNC_SIO_LOG" | sed "s/^TREL|cum=//") \
+  | awk -v FAILM="PBPK28_VANCOMYCIN_MASS_FAIL" -v PASS="PBPK28_VANCOMYCIN_MASS_PASS" '
+      { m=($1+0); r=($2+0); n++;
+        if (!(m >= 0 && m <= r)) { printf "%s sample %d: mass %.6f outside [0, %.6f]\n", FAILM, n, m, r; bad=1 } }
+      END { if (n != 12) { printf "%s row count %d != 12\n", FAILM, n; exit 1 }
+        if (bad) exit 1;
+        printf "%s 12/12 samples within [0, absorbed]\n", PASS }'
+
+echo
+echo "[pbpk28-parity] vancomycin IV-infusion canonical: zero-order input + renal sink + mass envelope (13th canonical drug)"
