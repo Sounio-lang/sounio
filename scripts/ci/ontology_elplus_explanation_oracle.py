@@ -25,7 +25,12 @@ step_re = re.compile(r"^STEP (\d+) (\d+) (\d+) (\d+)$")
 def validate_trace(name: str, steps: list[tuple[int, int, int, int]]) -> None:
     seen: set[tuple[int, int, int]] = set()
     for kind, cell, rule, witness in steps:
+        assert kind in (0, 1), (name, "unknown kind", kind)
         if kind == 0:
+            if rule in (0, 1, 2):
+                # Seed witnesses identify the fact cell itself; accepting an
+                # arbitrary integer would not independently validate the DAG.
+                assert witness == cell, (name, "seed witness", cell)
             a, b = divmod(cell, MAXC)
             if rule == 0:
                 assert (a, b) in stated, (name, "bad stated leaf", cell)
@@ -132,8 +137,32 @@ def main() -> None:
     else:
         raise AssertionError("mismatched-source RtoS trace was accepted")
 
+    bad_seeds = [
+        (0, 4 * MAXC + 0, 0, 999),
+        (0, 5 * MAXC + 5, 1, 999),
+        (0, 4 * MAXC + 8, 2, 999),
+    ]
+    for bad_seed in bad_seeds:
+        try:
+            validate_trace("NEG_SEED", [bad_seed])
+        except AssertionError as exc:
+            assert exc.args[0][1] == "seed witness", exc
+        else:
+            raise AssertionError(f"corrupted seed witness was accepted: {bad_seed}")
+
+    bad_kind = [
+        (0, 4 * MAXC + 10, 0, 4 * MAXC + 10),
+        (2, (1 * MAXC + 4) * MAXC + 9, 7, 10),
+    ]
+    try:
+        validate_trace("NEG_KIND", bad_kind)
+    except AssertionError as exc:
+        assert exc.args[0][1] == "unknown kind", exc
+    else:
+        raise AssertionError("unknown proof-step kind was accepted")
+
     assert "ONTOLOGY_ELPLUS_EXPLANATION_OK" in text
-    print("ONTOLOGY_ELPLUS_PROOF_ORACLE_NEGATIVE_OK rtos_source=refused")
+    print("ONTOLOGY_ELPLUS_PROOF_ORACLE_NEGATIVE_OK rtos_source=refused seed_witnesses=refused unknown_kind=refused")
     print(f"ONTOLOGY_ELPLUS_PROOF_ORACLE_OK traces={len(traces)} steps={total_steps} rules=0..11")
 
 

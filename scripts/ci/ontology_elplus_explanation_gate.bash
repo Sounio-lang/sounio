@@ -11,15 +11,15 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
-export SOUNIO_STDLIB_PATH="${SOUNIO_STDLIB_PATH:-$ROOT_DIR/stdlib}"
 OUT="$(mktemp -d "${TMPDIR:-/tmp}/elplus-explain.XXXXXX")"
 trap 'rm -rf "$OUT"' EXIT
 
 fail() { echo "ELPLUS_EXPLAIN_GATE_FAIL: $1" >&2; exit 1; }
 
-for var in SOUC SOUC_BIN SOUNIO_SOUC_BIN SOUNIO_SOUC_ENGINE MADAROS_RAW_BIN SOUNIO_MADAROS_BIN; do
-  [[ -z "${!var:-}" ]] || fail "inherited override $var is set; engine selection belongs to this gate"
+for var in SOUC SOUC_BIN SOUNIO_SOUC_BIN SOUNIO_SOUC_ENGINE MADAROS_RAW_BIN SOUNIO_MADAROS_BIN SOUNIO_STDLIB_PATH; do
+  [[ -z "${!var:-}" ]] || fail "inherited override $var is set; this gate pins its own toolchain and stdlib"
 done
+export SOUNIO_STDLIB_PATH="$ROOT_DIR/stdlib"
 SOUC="$ROOT_DIR/bin/souc"
 [[ -x "$SOUC" ]] || fail "compiler launcher not executable: $SOUC"
 
@@ -34,8 +34,8 @@ run_leg() { # <engine-label> <engine-selector>
     || { cat "$run_log" >&2; fail "engine=$label: success marker missing"; }
   python3 scripts/ci/ontology_elplus_explanation_oracle.py <"$run_log" >"$OUT/$label.oracle.log" \
     || { cat "$OUT/$label.oracle.log" >&2; fail "engine=$label: independent proof validation failed"; }
-  grep -Fxq 'ONTOLOGY_ELPLUS_PROOF_ORACLE_NEGATIVE_OK rtos_source=refused' "$OUT/$label.oracle.log" \
-    || fail "engine=$label: oracle RtoS negative control missing"
+  grep -Fxq 'ONTOLOGY_ELPLUS_PROOF_ORACLE_NEGATIVE_OK rtos_source=refused seed_witnesses=refused unknown_kind=refused' "$OUT/$label.oracle.log" \
+    || fail "engine=$label: oracle negative controls missing"
   grep -Fq 'ONTOLOGY_ELPLUS_PROOF_ORACLE_OK traces=7 steps=31 rules=0..11' "$OUT/$label.oracle.log" \
     || { cat "$OUT/$label.oracle.log" >&2; fail "engine=$label: unexpected proof census"; }
   cat "$OUT/$label.oracle.log"
