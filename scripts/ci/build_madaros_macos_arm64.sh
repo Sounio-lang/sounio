@@ -38,6 +38,7 @@ chmod +x "$BUILD_DIR/stack-probe"
 codesign -s - -f "$BUILD_DIR/stack-probe"
 "$BUILD_DIR/stack-probe" >"$BUILD_DIR/stack.stdout.log"
 test "$(<"$BUILD_DIR/stack.stdout.log")" = 20000
+node "$ROOT_DIR/scripts/ci/source_marker_index_contract.mjs" "$ROOT_DIR" --compiler "$SEED_BIN"
 if [[ -n "${SOUNIO_MACOS_NATIVE_CACHE_RESTORE:-}" ]]; then
     node "$ROOT_DIR/scripts/ci/macos_native_cache.mjs" restore "$ROOT_DIR" "$SEED_BIN" "$SOUNIO_MACOS_NATIVE_CACHE_RESTORE" "$BUILD_DIR/madaros" >"$BUILD_DIR/build.log" 2>&1
     cat "$BUILD_DIR/build.log"

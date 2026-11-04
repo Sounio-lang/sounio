@@ -1,1 +1,1 @@
-Measure native cold compilation phases and collect Darwin sampler receipts while preserving compiler output and exit status.
+Profile native cold compilation and reuse exact source-marker prefixes while retaining strict same-file privacy checks, append/reset invalidation and clean-build qualification.
