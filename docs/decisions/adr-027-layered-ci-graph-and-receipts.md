@@ -482,3 +482,28 @@ is sealed and saved only after those gates succeed and the inputs still match th
 key computed before the build. Cache availability is an optimization, never a gate
 receipt. Hosted cold/warm and merge-group results must be recorded separately;
 fixture success does not establish a measured latency reduction.
+
+### Native corpus compilation reuse
+
+The pinned corpus already has four workers. A second exact-input cache may reuse
+only its compiled programs, never its execution status, stdout or Metal receipts.
+The binding includes the current native compiler bytes, complete source-module
+inventory (including ignored modules), pinned manifest/member contents, build and
+verification recipes, Metal runtime/conformance sources, Apple toolchain and
+relevant compiler flags. An incompatible or corrupt entry fails before use.
+
+The C++ executor verifies the complete entry before creating result receipts and
+verifies each copied program again before the original format/signature checks.
+It then executes all 200 programs with unchanged timeouts, exit/stdout checks and
+mandatory physical Metal markers. This mode is explicitly incompatible with
+execution replay. Without an explicit verified cache path, compilation remains
+fresh. The invalid-compiler diagnostic control always takes that fresh path.
+
+The entry is sealed/saved only after every member passes and the original input
+key is rechecked. Compilation mode is explicit in per-member and summary receipts.
+A frozen predecessor-oracle fingerprint and real C++ orchestration fixtures
+reject skipped runtime/Metal oracles, source/compiler/digest mismatches, execution
+failures and post-verification copy corruption. Native cold/warm execution and
+merge-head receipts remain required before claiming performance or integration.
+
+The current-source f64 lane also keeps full-history metadata and a complete working tree with blob:none transport. A hosted worker exhausted disk after its unfiltered full-history checkout and before f64 tests; deferring historical payloads reduces avoidable transfer/space pressure without weakening provenance. The existing real-Git history/ref/diff/lazy-content fixture now pins this fourth checkout and rejects f64-specific shallow/unfiltered mutations. Transport and non-shallow state are recorded after checkout; tests, cache recipe, swap budget and timeouts remain unchanged.

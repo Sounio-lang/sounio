@@ -1205,3 +1205,495 @@ paste <(grep "^TMASS|m=" "$TIRZ_SIO_LOG" | sed "s/^TMASS|m=//") \
 
 echo
 echo "[pbpk28-parity] tirzepatide incretin canonical: SC depot PK + mass envelope within ${RMSE_THRESHOLD_PCT}% RMSE (6th canonical drug)"
+
+# ════════════════════════════════════════════════════════════════════════════
+# Case 21: Everolimus — seventh canonical drug, first DES case in PBPK-28.
+# Xience stent (0.088 mg, KH fit to 80%/30d) → blood → PBPK28 CN, dt = 0.001.
+# Sounio ref drives the stdlib scenario itself; Node side is
+# DEFAULT_PARAMS_EVEROLIMUS.
+#   21a  organ-average cavg   Node ↔ Sounio, dual criterion per organ
+#   21b  mass envelope        0 <= total mass <= cumulative released, 12/12
+# Dual criterion (relative 1% OR absolute 1e-6 mg/L): stent systemic levels
+# are trace (blood peak ~6e-5 mg/L), so a pure peak-relative RMSE would fail
+# a numerically identical computation — both engines already agree to ~3e-7
+# absolute (the transcendental-evaluation floor also seen in case 20).
+# 1e-6 mg/L is far below any therapeutic/assay relevance for everolimus.
+# ════════════════════════════════════════════════════════════════════════════
+echo
+echo "[pbpk28-parity] Case 21: Sounio ↔ Node everolimus PBPK28 (Xience DES)"
+
+EVR_SIO_LOG="$OUT_DIR/evr_sounio.txt"
+EVR_NODE_LOG="$OUT_DIR/evr_node.txt"
+"$SOUC_BIN" run tests/run-pass/dissertation_pbpk28_parity_ref_everolimus.sio > "$EVR_SIO_LOG" 2>&1 || {
+  echo "[pbpk28-parity:case21] FAIL: Sounio everolimus ref returned non-zero" >&2
+  tail -n 20 "$EVR_SIO_LOG" >&2; exit 1; }
+if ! grep -q '^DISSERTATION_PBPK28_EVEROLIMUS_PARITY_DONE$' "$EVR_SIO_LOG"; then
+  echo "[pbpk28-parity:case21] FAIL: Sounio everolimus ref did not emit DONE" >&2; exit 1; fi
+node "$NODE_RUNNER" --drug=everolimus > "$EVR_NODE_LOG" 2>&1 || {
+  echo "[pbpk28-parity:case21] FAIL: Node everolimus runner returned non-zero" >&2
+  tail -n 20 "$EVR_NODE_LOG" >&2; exit 1; }
+if ! grep -q '^DISSERTATION_PBPK28_EVEROLIMUS_PARITY_DONE$' "$EVR_NODE_LOG"; then
+  echo "[pbpk28-parity:case21] FAIL: Node everolimus runner did not emit DONE" >&2; exit 1; fi
+if ! grep -q '^DISSERTATION_PBPK28_EVEROLIMUS_PARITY_NODE v1$' "$EVR_NODE_LOG"; then
+  echo "[pbpk28-parity:case21] FAIL: Node everolimus runner header mismatch" >&2; exit 1; fi
+
+EVR_SIO_TSV="$OUT_DIR/evr_sounio.tsv"
+EVR_NODE_TSV="$OUT_DIR/evr_node.tsv"
+parse_to_tsv "$EVR_SIO_LOG" "$EVR_SIO_TSV"
+parse_to_tsv "$EVR_NODE_LOG" "$EVR_NODE_TSV"
+
+EVR_SIO_ROWS=$(wc -l < "$EVR_SIO_TSV")
+EVR_NODE_ROWS=$(wc -l < "$EVR_NODE_TSV")
+if [[ "$EVR_SIO_ROWS" -ne "$EXPECTED_ROWS" || "$EVR_NODE_ROWS" -ne "$EXPECTED_ROWS" ]]; then
+  echo "[pbpk28-parity:case21] FAIL: everolimus row count mismatch — Sounio=$EVR_SIO_ROWS Node=$EVR_NODE_ROWS expected=$EXPECTED_ROWS" >&2
+  exit 1
+fi
+echo "[pbpk28-parity:case21] both runs emitted $EVR_SIO_ROWS records"
+
+EVR_JOINED="$OUT_DIR/evr_joined.tsv"
+awk -F'\t' '
+  NR==FNR { S[$1"|"$2] = $5; next }
+  { print $1"\t"$2"\t"S[$1"|"$2]"\t"$5 }
+' "$EVR_SIO_TSV" "$EVR_NODE_TSV" > "$EVR_JOINED"
+
+awk -F'\t' -v THR="$RMSE_THRESHOLD_PCT" '
+  {
+    i = $2 + 0; cs = $3 + 0; cn = $4 + 0;
+    d = cs - cn; SS[i] += d * d; NN[i] += 1;
+    if (cs > PK[i]) PK[i] = cs;
+    if (cn > PK[i]) PK[i] = cn;
+  }
+  END {
+    bad = 0;
+    for (i = 0; i < 14; i++) {
+      if (NN[i] == 0) { printf "PBPK28_EVEROLIMUS_PARITY_FAIL organ %d MISSING\n", i; bad += 1; continue; }
+      rmse = sqrt(SS[i] / NN[i]); pk = PK[i] + 0;
+      if (pk == 0) { continue; }
+      pct = 100.0 * rmse / pk;
+      if (pct >= THR + 0 && rmse >= 1e-6) { printf "PBPK28_EVEROLIMUS_PARITY_FAIL organ %d pct=%.4f rmse=%.3g\n", i, pct, rmse; bad += 1; }
+    }
+    if (bad > 0) { exit 1; }
+    printf "PBPK28_EVEROLIMUS_PARITY_PASS 14/14 compartments within %s%% RMSE or 1e-6 absolute\n", THR;
+  }
+' "$EVR_JOINED"
+
+paste <(grep "^TMASS|m=" "$EVR_SIO_LOG" | sed "s/^TMASS|m=//") \
+      <(grep "^TREL|cum=" "$EVR_SIO_LOG" | sed "s/^TREL|cum=//") \
+  | awk -v FAILM="PBPK28_EVEROLIMUS_MASS_FAIL" -v PASS="PBPK28_EVEROLIMUS_MASS_PASS" '
+      { m=($1+0); r=($2+0); n++;
+        if (!(m >= 0 && m <= r)) { printf "%s sample %d: mass %.6f outside [0, %.6f]\n", FAILM, n, m, r; bad=1 } }
+      END { if (n != 12) { printf "%s row count %d != 12\n", FAILM, n; exit 1 }
+        if (bad) exit 1;
+        printf "%s 12/12 samples within [0, released]\n", PASS }'
+
+echo
+echo "[pbpk28-parity] everolimus DES canonical: stent release + systemic PK + mass envelope (7th canonical drug)"
+
+# ════════════════════════════════════════════════════════════════════════════
+# Case 22: Tacrolimus — eighth canonical drug, first oral-IR case in PBPK-28.
+# Prograf 5 mg single dose (fasted) → 1st-order gut absorption (ka = 0.38/h)
+# with first-pass loss (F = 0.25) → blood → PBPK28 CN, dt = 0.001.
+# Whole-blood referenced (TDM matrix); Kp are tacrolimus tissue-to-blood
+# values, NOT rapamycin's; PS assumed (SIO-550). Sounio ref drives the
+# stdlib scenario itself; Node side is DEFAULT_PARAMS_TACROLIMUS.
+#   22a  organ-average cavg   Node ↔ Sounio, dual criterion per organ
+#   22b  mass envelope        0 <= total mass <= cumulative absorbed, 12/12
+# Dual criterion (relative 1% OR absolute 1e-6 mg/L): low-uptake organs sit
+# near the transcendental-evaluation floor (~1e-9 absolute, as in cases 20
+# and 21), far below any therapeutic/assay relevance for tacrolimus.
+# ════════════════════════════════════════════════════════════════════════════
+echo
+echo "[pbpk28-parity] Case 22: Sounio ↔ Node tacrolimus PBPK28 (oral IR)"
+
+TAC_SIO_LOG="$OUT_DIR/tac_sounio.txt"
+TAC_NODE_LOG="$OUT_DIR/tac_node.txt"
+"$SOUC_BIN" run tests/run-pass/dissertation_pbpk28_parity_ref_tacrolimus.sio > "$TAC_SIO_LOG" 2>&1 || {
+  echo "[pbpk28-parity:case22] FAIL: Sounio tacrolimus ref returned non-zero" >&2
+  tail -n 20 "$TAC_SIO_LOG" >&2; exit 1; }
+if ! grep -q '^DISSERTATION_PBPK28_TACROLIMUS_PARITY_DONE$' "$TAC_SIO_LOG"; then
+  echo "[pbpk28-parity:case22] FAIL: Sounio tacrolimus ref did not emit DONE" >&2; exit 1; fi
+node "$NODE_RUNNER" --drug=tacrolimus > "$TAC_NODE_LOG" 2>&1 || {
+  echo "[pbpk28-parity:case22] FAIL: Node tacrolimus runner returned non-zero" >&2
+  tail -n 20 "$TAC_NODE_LOG" >&2; exit 1; }
+if ! grep -q '^DISSERTATION_PBPK28_TACROLIMUS_PARITY_NODE v1$' "$TAC_NODE_LOG"; then
+  echo "[pbpk28-parity:case22] FAIL: Node tacrolimus runner header mismatch" >&2; exit 1; fi
+
+TAC_SIO_TSV="$OUT_DIR/tac_sounio.tsv"
+TAC_NODE_TSV="$OUT_DIR/tac_node.tsv"
+parse_to_tsv "$TAC_SIO_LOG" "$TAC_SIO_TSV"
+parse_to_tsv "$TAC_NODE_LOG" "$TAC_NODE_TSV"
+
+TAC_SIO_ROWS=$(wc -l < "$TAC_SIO_TSV")
+TAC_NODE_ROWS=$(wc -l < "$TAC_NODE_TSV")
+if [[ "$TAC_SIO_ROWS" -ne "$EXPECTED_ROWS" || "$TAC_NODE_ROWS" -ne "$EXPECTED_ROWS" ]]; then
+  echo "[pbpk28-parity:case22] FAIL: tacrolimus row count mismatch — Sounio=$TAC_SIO_ROWS Node=$TAC_NODE_ROWS expected=$EXPECTED_ROWS" >&2
+  exit 1
+fi
+echo "[pbpk28-parity:case22] both runs emitted $TAC_SIO_ROWS records"
+
+TAC_JOINED="$OUT_DIR/tac_joined.tsv"
+awk -F'\t' '
+  NR==FNR { S[$1"|"$2] = $5; next }
+  { print $1"\t"$2"\t"S[$1"|"$2]"\t"$5 }
+' "$TAC_SIO_TSV" "$TAC_NODE_TSV" > "$TAC_JOINED"
+
+awk -F'\t' -v THR="$RMSE_THRESHOLD_PCT" '
+  {
+    i = $2 + 0; cs = $3 + 0; cn = $4 + 0;
+    d = cs - cn; SS[i] += d * d; NN[i] += 1;
+    if (cs > PK[i]) PK[i] = cs;
+    if (cn > PK[i]) PK[i] = cn;
+  }
+  END {
+    bad = 0;
+    for (i = 0; i < 14; i++) {
+      if (NN[i] == 0) { printf "PBPK28_TACROLIMUS_PARITY_FAIL organ %d MISSING\n", i; bad += 1; continue; }
+      rmse = sqrt(SS[i] / NN[i]); pk = PK[i] + 0;
+      if (pk == 0) { continue; }
+      pct = 100.0 * rmse / pk;
+      if (pct >= THR + 0 && rmse >= 1e-6) { printf "PBPK28_TACROLIMUS_PARITY_FAIL organ %d pct=%.4f rmse=%.3g\n", i, pct, rmse; bad += 1; }
+    }
+    if (bad > 0) { exit 1; }
+    printf "PBPK28_TACROLIMUS_PARITY_PASS 14/14 compartments within %s%% RMSE or 1e-6 absolute\n", THR;
+  }
+' "$TAC_JOINED"
+
+paste <(grep "^TMASS|m=" "$TAC_SIO_LOG" | sed "s/^TMASS|m=//") \
+      <(grep "^TREL|cum=" "$TAC_SIO_LOG" | sed "s/^TREL|cum=//") \
+  | awk -v FAILM="PBPK28_TACROLIMUS_MASS_FAIL" -v PASS="PBPK28_TACROLIMUS_MASS_PASS" '
+      { m=($1+0); r=($2+0); n++;
+        if (!(m >= 0 && m <= r)) { printf "%s sample %d: mass %.6f outside [0, %.6f]\n", FAILM, n, m, r; bad=1 } }
+      END { if (n != 12) { printf "%s row count %d != 12\n", FAILM, n; exit 1 }
+        if (bad) exit 1;
+        printf "%s 12/12 samples within [0, absorbed]\n", PASS }'
+
+echo
+echo "[pbpk28-parity] tacrolimus oral-IR canonical: gut absorption + systemic PK + mass envelope (8th canonical drug)"
+
+# ════════════════════════════════════════════════════════════════════════════
+# Case 23: Olanzapine — ninth canonical drug, second oral-IR case in PBPK-28.
+# Zyprexa 10 mg single tablet (tlag = 0.25 h) → 1st-order gut absorption
+# (ka = 0.6/h) with first-pass loss (F = 0.60) → blood → PBPK28 CN, dt = 0.001.
+# Plasma referenced (rb ~= 1); Kp are olanzapine tissue values (NOT
+# haloperidol's); PS assumed (SIO-550); dual UGT1A4/CYP1A2 pathway recorded
+# in the drug file, not equated with clozapine. Sounio ref drives the stdlib
+# scenario itself; Node side is DEFAULT_PARAMS_OLANZAPINE.
+#   23a  organ-average cavg   Node ↔ Sounio, STRICT 1% RMSE per organ
+#   23b  mass envelope        0 <= total mass <= cumulative absorbed, 12/12
+# Strict 1% (no absolute floor needed): worst organ is 0.03%, two orders of
+# magnitude inside the bar. Blood Cmax 20.1 ng/mL sits at the TDM band edge
+# (20-80 ng/mL), as expected for a single 10 mg dose.
+# ════════════════════════════════════════════════════════════════════════════
+echo
+echo "[pbpk28-parity] Case 23: Sounio ↔ Node olanzapine PBPK28 (oral IR)"
+
+OLZ_SIO_LOG="$OUT_DIR/olz_sounio.txt"
+OLZ_NODE_LOG="$OUT_DIR/olz_node.txt"
+"$SOUC_BIN" run tests/run-pass/dissertation_pbpk28_parity_ref_olanzapine.sio > "$OLZ_SIO_LOG" 2>&1 || {
+  echo "[pbpk28-parity:case23] FAIL: Sounio olanzapine ref returned non-zero" >&2
+  tail -n 20 "$OLZ_SIO_LOG" >&2; exit 1; }
+if ! grep -q '^DISSERTATION_PBPK28_OLANZAPINE_PARITY_DONE$' "$OLZ_SIO_LOG"; then
+  echo "[pbpk28-parity:case23] FAIL: Sounio olanzapine ref did not emit DONE" >&2; exit 1; fi
+node "$NODE_RUNNER" --drug=olanzapine > "$OLZ_NODE_LOG" 2>&1 || {
+  echo "[pbpk28-parity:case23] FAIL: Node olanzapine runner returned non-zero" >&2
+  tail -n 20 "$OLZ_NODE_LOG" >&2; exit 1; }
+if ! grep -q '^DISSERTATION_PBPK28_OLANZAPINE_PARITY_NODE v1$' "$OLZ_NODE_LOG"; then
+  echo "[pbpk28-parity:case23] FAIL: Node olanzapine runner header mismatch" >&2; exit 1; fi
+
+OLZ_SIO_TSV="$OUT_DIR/olz_sounio.tsv"
+OLZ_NODE_TSV="$OUT_DIR/olz_node.tsv"
+parse_to_tsv "$OLZ_SIO_LOG" "$OLZ_SIO_TSV"
+parse_to_tsv "$OLZ_NODE_LOG" "$OLZ_NODE_TSV"
+
+OLZ_SIO_ROWS=$(wc -l < "$OLZ_SIO_TSV")
+OLZ_NODE_ROWS=$(wc -l < "$OLZ_NODE_TSV")
+if [[ "$OLZ_SIO_ROWS" -ne "$EXPECTED_ROWS" || "$OLZ_NODE_ROWS" -ne "$EXPECTED_ROWS" ]]; then
+  echo "[pbpk28-parity:case23] FAIL: olanzapine row count mismatch — Sounio=$OLZ_SIO_ROWS Node=$OLZ_NODE_ROWS expected=$EXPECTED_ROWS" >&2
+  exit 1
+fi
+echo "[pbpk28-parity:case23] both runs emitted $OLZ_SIO_ROWS records"
+
+OLZ_JOINED="$OUT_DIR/olz_joined.tsv"
+awk -F'\t' '
+  NR==FNR { S[$1"|"$2] = $5; next }
+  { print $1"\t"$2"\t"S[$1"|"$2]"\t"$5 }
+' "$OLZ_SIO_TSV" "$OLZ_NODE_TSV" > "$OLZ_JOINED"
+
+awk -F'\t' -v THR="$RMSE_THRESHOLD_PCT" '
+  {
+    i = $2 + 0; cs = $3 + 0; cn = $4 + 0;
+    d = cs - cn; SS[i] += d * d; NN[i] += 1;
+    if (cs > PK[i]) PK[i] = cs;
+    if (cn > PK[i]) PK[i] = cn;
+  }
+  END {
+    bad = 0;
+    for (i = 0; i < 14; i++) {
+      if (NN[i] == 0) { printf "PBPK28_OLANZAPINE_PARITY_FAIL organ %d MISSING\n", i; bad += 1; continue; }
+      rmse = sqrt(SS[i] / NN[i]); pk = PK[i] + 0;
+      if (pk == 0) { continue; }
+      pct = 100.0 * rmse / pk;
+      if (pct >= THR + 0) { printf "PBPK28_OLANZAPINE_PARITY_FAIL organ %d pct=%.4f rmse=%.3g\n", i, pct, rmse; bad += 1; }
+    }
+    if (bad > 0) { exit 1; }
+    printf "PBPK28_OLANZAPINE_PARITY_PASS 14/14 compartments within %s%% RMSE (strict)\n", THR;
+  }
+' "$OLZ_JOINED"
+
+paste <(grep "^TMASS|m=" "$OLZ_SIO_LOG" | sed "s/^TMASS|m=//") \
+      <(grep "^TREL|cum=" "$OLZ_SIO_LOG" | sed "s/^TREL|cum=//") \
+  | awk -v FAILM="PBPK28_OLANZAPINE_MASS_FAIL" -v PASS="PBPK28_OLANZAPINE_MASS_PASS" '
+      { m=($1+0); r=($2+0); n++;
+        if (!(m >= 0 && m <= r)) { printf "%s sample %d: mass %.6f outside [0, %.6f]\n", FAILM, n, m, r; bad=1 } }
+      END { if (n != 12) { printf "%s row count %d != 12\n", FAILM, n; exit 1 }
+        if (bad) exit 1;
+        printf "%s 12/12 samples within [0, absorbed]\n", PASS }'
+
+echo
+echo "[pbpk28-parity] olanzapine oral-IR canonical: tablet lag + gut absorption + systemic PK + mass envelope (9th canonical drug)"
+
+# ════════════════════════════════════════════════════════════════════════════
+# Case 24: Clozapine — tenth canonical drug, third oral-IR case in PBPK-28.
+# Single 100 mg tablet (tlag = 0.25 h) → 1st-order gut absorption (ka = 1.0/h)
+# with first-pass loss (F = 0.55) → blood → PBPK28 CN, dt = 0.001.
+# Plasma referenced (rb ~= 1); CL = 20 L/h calibrated to the TDM band;
+# Kp are clozapine tissue values (NOT olanzapine's); PS assumed (SIO-550);
+# fm CYP1A2 0.70 / CYP3A4 0.20 / other 0.10 in the drug file; smoker split
+# follow-up. Sounio ref drives the stdlib scenario itself; Node side is
+# DEFAULT_PARAMS_CLOZAPINE.
+#   24a  organ-average cavg   Node ↔ Sounio, STRICT 1% RMSE per organ
+#   24b  mass envelope        0 <= total mass <= cumulative absorbed, 12/12
+# Strict 1% (no absolute floor needed): worst organ is 0.002%, three orders
+# of magnitude inside the bar. Blood Cmax 292.5 ng/mL single 100 mg dose.
+# ════════════════════════════════════════════════════════════════════════════
+echo
+echo "[pbpk28-parity] Case 24: Sounio ↔ Node clozapine PBPK28 (oral IR)"
+
+CLZ_SIO_LOG="$OUT_DIR/clz_sounio.txt"
+CLZ_NODE_LOG="$OUT_DIR/clz_node.txt"
+"$SOUC_BIN" run tests/run-pass/dissertation_pbpk28_parity_ref_clozapine.sio > "$CLZ_SIO_LOG" 2>&1 || {
+  echo "[pbpk28-parity:case24] FAIL: Sounio clozapine ref returned non-zero" >&2
+  tail -n 20 "$CLZ_SIO_LOG" >&2; exit 1; }
+if ! grep -q '^DISSERTATION_PBPK28_CLOZAPINE_PARITY_DONE$' "$CLZ_SIO_LOG"; then
+  echo "[pbpk28-parity:case24] FAIL: Sounio clozapine ref did not emit DONE" >&2; exit 1; fi
+node "$NODE_RUNNER" --drug=clozapine > "$CLZ_NODE_LOG" 2>&1 || {
+  echo "[pbpk28-parity:case24] FAIL: Node clozapine runner returned non-zero" >&2
+  tail -n 20 "$CLZ_NODE_LOG" >&2; exit 1; }
+if ! grep -q '^DISSERTATION_PBPK28_CLOZAPINE_PARITY_NODE v1$' "$CLZ_NODE_LOG"; then
+  echo "[pbpk28-parity:case24] FAIL: Node clozapine runner header mismatch" >&2; exit 1; fi
+
+CLZ_SIO_TSV="$OUT_DIR/clz_sounio.tsv"
+CLZ_NODE_TSV="$OUT_DIR/clz_node.tsv"
+parse_to_tsv "$CLZ_SIO_LOG" "$CLZ_SIO_TSV"
+parse_to_tsv "$CLZ_NODE_LOG" "$CLZ_NODE_TSV"
+
+CLZ_SIO_ROWS=$(wc -l < "$CLZ_SIO_TSV")
+CLZ_NODE_ROWS=$(wc -l < "$CLZ_NODE_TSV")
+if [[ "$CLZ_SIO_ROWS" -ne "$EXPECTED_ROWS" || "$CLZ_NODE_ROWS" -ne "$EXPECTED_ROWS" ]]; then
+  echo "[pbpk28-parity:case24] FAIL: clozapine row count mismatch — Sounio=$CLZ_SIO_ROWS Node=$CLZ_NODE_ROWS expected=$EXPECTED_ROWS" >&2
+  exit 1
+fi
+echo "[pbpk28-parity:case24] both runs emitted $CLZ_SIO_ROWS records"
+
+CLZ_JOINED="$OUT_DIR/clz_joined.tsv"
+awk -F'\t' '
+  NR==FNR { S[$1"|"$2] = $5; next }
+  { print $1"\t"$2"\t"S[$1"|"$2]"\t"$5 }
+' "$CLZ_SIO_TSV" "$CLZ_NODE_TSV" > "$CLZ_JOINED"
+
+awk -F'\t' -v THR="$RMSE_THRESHOLD_PCT" '
+  {
+    i = $2 + 0; cs = $3 + 0; cn = $4 + 0;
+    d = cs - cn; SS[i] += d * d; NN[i] += 1;
+    if (cs > PK[i]) PK[i] = cs;
+    if (cn > PK[i]) PK[i] = cn;
+  }
+  END {
+    bad = 0;
+    for (i = 0; i < 14; i++) {
+      if (NN[i] == 0) { printf "PBPK28_CLOZAPINE_PARITY_FAIL organ %d MISSING\n", i; bad += 1; continue; }
+      rmse = sqrt(SS[i] / NN[i]); pk = PK[i] + 0;
+      if (pk == 0) { continue; }
+      pct = 100.0 * rmse / pk;
+      if (pct >= THR + 0) { printf "PBPK28_CLOZAPINE_PARITY_FAIL organ %d pct=%.4f rmse=%.3g\n", i, pct, rmse; bad += 1; }
+    }
+    if (bad > 0) { exit 1; }
+    printf "PBPK28_CLOZAPINE_PARITY_PASS 14/14 compartments within %s%% RMSE (strict)\n", THR;
+  }
+' "$CLZ_JOINED"
+
+paste <(grep "^TMASS|m=" "$CLZ_SIO_LOG" | sed "s/^TMASS|m=//") \
+      <(grep "^TREL|cum=" "$CLZ_SIO_LOG" | sed "s/^TREL|cum=//") \
+  | awk -v FAILM="PBPK28_CLOZAPINE_MASS_FAIL" -v PASS="PBPK28_CLOZAPINE_MASS_PASS" '
+      { m=($1+0); r=($2+0); n++;
+        if (!(m >= 0 && m <= r)) { printf "%s sample %d: mass %.6f outside [0, %.6f]\n", FAILM, n, m, r; bad=1 } }
+      END { if (n != 12) { printf "%s row count %d != 12\n", FAILM, n; exit 1 }
+        if (bad) exit 1;
+        printf "%s 12/12 samples within [0, absorbed]\n", PASS }'
+
+echo
+echo "[pbpk28-parity] clozapine oral-IR canonical: tablet lag + gut absorption + systemic PK + mass envelope (10th canonical drug)"
+
+# ════════════════════════════════════════════════════════════════════════════
+# Case 25: Quetiapine — eleventh canonical drug, fourth oral-IR case.
+# Single 100 mg tablet (tlag = 0.25 h) → 1st-order gut absorption (ka = 1.5/h,
+# Tmax ~1 h) with NO first-pass loss (F = 1.00) → blood → PBPK28 CN,
+# dt = 0.001. CL = 84 L/h (label/popPK; 600 mg/day steady state ~= 300
+# ng/mL); Kp are quetiapine tissue values (own); PS assumed (SIO-550);
+# fm CYP3A4 0.89 in the drug file; venlafaxine DDI follow-up (own
+# evaluation). Sounio ref drives the stdlib scenario itself; Node side is
+# DEFAULT_PARAMS_QUETIAPINE.
+#   25a  organ-average cavg   Node ↔ Sounio, STRICT 1% RMSE per organ
+#   25b  mass envelope        0 <= total mass <= cumulative absorbed, 12/12
+# Strict 1% (no absolute floor needed): worst organ is 0.03%. Blood Cmax
+# 505 ng/mL single 100 mg dose (fast absorption transient, pre-distribution).
+# ════════════════════════════════════════════════════════════════════════════
+echo
+echo "[pbpk28-parity] Case 25: Sounio ↔ Node quetiapine PBPK28 (oral IR)"
+
+QTP_SIO_LOG="$OUT_DIR/qtp_sounio.txt"
+QTP_NODE_LOG="$OUT_DIR/qtp_node.txt"
+"$SOUC_BIN" run tests/run-pass/dissertation_pbpk28_parity_ref_quetiapine.sio > "$QTP_SIO_LOG" 2>&1 || {
+  echo "[pbpk28-parity:case25] FAIL: Sounio quetiapine ref returned non-zero" >&2
+  tail -n 20 "$QTP_SIO_LOG" >&2; exit 1; }
+if ! grep -q '^DISSERTATION_PBPK28_QUETIAPINE_PARITY_DONE$' "$QTP_SIO_LOG"; then
+  echo "[pbpk28-parity:case25] FAIL: Sounio quetiapine ref did not emit DONE" >&2; exit 1; fi
+node "$NODE_RUNNER" --drug=quetiapine > "$QTP_NODE_LOG" 2>&1 || {
+  echo "[pbpk28-parity:case25] FAIL: Node quetiapine runner returned non-zero" >&2
+  tail -n 20 "$QTP_NODE_LOG" >&2; exit 1; }
+if ! grep -q '^DISSERTATION_PBPK28_QUETIAPINE_PARITY_NODE v1$' "$QTP_NODE_LOG"; then
+  echo "[pbpk28-parity:case25] FAIL: Node quetiapine runner header mismatch" >&2; exit 1; fi
+
+QTP_SIO_TSV="$OUT_DIR/qtp_sounio.tsv"
+QTP_NODE_TSV="$OUT_DIR/qtp_node.tsv"
+parse_to_tsv "$QTP_SIO_LOG" "$QTP_SIO_TSV"
+parse_to_tsv "$QTP_NODE_LOG" "$QTP_NODE_TSV"
+
+QTP_SIO_ROWS=$(wc -l < "$QTP_SIO_TSV")
+QTP_NODE_ROWS=$(wc -l < "$QTP_NODE_TSV")
+if [[ "$QTP_SIO_ROWS" -ne "$EXPECTED_ROWS" || "$QTP_NODE_ROWS" -ne "$EXPECTED_ROWS" ]]; then
+  echo "[pbpk28-parity:case25] FAIL: quetiapine row count mismatch — Sounio=$QTP_SIO_ROWS Node=$QTP_NODE_ROWS expected=$EXPECTED_ROWS" >&2
+  exit 1
+fi
+echo "[pbpk28-parity:case25] both runs emitted $QTP_SIO_ROWS records"
+
+QTP_JOINED="$OUT_DIR/qtp_joined.tsv"
+awk -F'\t' '
+  NR==FNR { S[$1"|"$2] = $5; next }
+  { print $1"\t"$2"\t"S[$1"|"$2]"\t"$5 }
+' "$QTP_SIO_TSV" "$QTP_NODE_TSV" > "$QTP_JOINED"
+
+awk -F'\t' -v THR="$RMSE_THRESHOLD_PCT" '
+  {
+    i = $2 + 0; cs = $3 + 0; cn = $4 + 0;
+    d = cs - cn; SS[i] += d * d; NN[i] += 1;
+    if (cs > PK[i]) PK[i] = cs;
+    if (cn > PK[i]) PK[i] = cn;
+  }
+  END {
+    bad = 0;
+    for (i = 0; i < 14; i++) {
+      if (NN[i] == 0) { printf "PBPK28_QUETIAPINE_PARITY_FAIL organ %d MISSING\n", i; bad += 1; continue; }
+      rmse = sqrt(SS[i] / NN[i]); pk = PK[i] + 0;
+      if (pk == 0) { continue; }
+      pct = 100.0 * rmse / pk;
+      if (pct >= THR + 0) { printf "PBPK28_QUETIAPINE_PARITY_FAIL organ %d pct=%.4f rmse=%.3g\n", i, pct, rmse; bad += 1; }
+    }
+    if (bad > 0) { exit 1; }
+    printf "PBPK28_QUETIAPINE_PARITY_PASS 14/14 compartments within %s%% RMSE (strict)\n", THR;
+  }
+' "$QTP_JOINED"
+
+paste <(grep "^TMASS|m=" "$QTP_SIO_LOG" | sed "s/^TMASS|m=//") \
+      <(grep "^TREL|cum=" "$QTP_SIO_LOG" | sed "s/^TREL|cum=//") \
+  | awk -v FAILM="PBPK28_QUETIAPINE_MASS_FAIL" -v PASS="PBPK28_QUETIAPINE_MASS_PASS" '
+      { m=($1+0); r=($2+0); n++;
+        if (!(m >= 0 && m <= r)) { printf "%s sample %d: mass %.6f outside [0, %.6f]\n", FAILM, n, m, r; bad=1 } }
+      END { if (n != 12) { printf "%s row count %d != 12\n", FAILM, n; exit 1 }
+        if (bad) exit 1;
+        printf "%s 12/12 samples within [0, absorbed]\n", PASS }'
+
+echo
+echo "[pbpk28-parity] quetiapine oral-IR canonical: tablet lag + gut absorption + systemic PK + mass envelope (11th canonical drug)"
+
+# ════════════════════════════════════════════════════════════════════════════
+# Case 26: Lithium — twelfth canonical drug, fifth oral-IR case, FIRST with
+# zero hepatic clearance and its OWN PS vector (ions need reduced PS in
+# brain/bone/adipose). Single 300 mg carbonate capsule (= 56.4 mg Li+,
+# 8.12 mEq; tlag = 0.25 h) → 1st-order gut absorption (ka = 1.0/h) with NO
+# first-pass loss (F = 1.00) → blood → PBPK28 CN, dt = 0.001. Purely renal
+# sink CL = 1.3 L/h (~22% of GFR). Kp from ECF physiology + measured
+# anchors (Vd ~42 L) — never lipophilic-neutral predictors. Sounio ref
+# drives the stdlib scenario itself; Node side is DEFAULT_PARAMS_LITHIUM.
+#   26a  organ-average cavg   Node ↔ Sounio, STRICT 1% RMSE per organ
+#   26b  mass envelope        0 <= total mass <= cumulative absorbed, 12/12
+# Strict 1% (no absolute floor needed): worst organ is 0.001%. Blood Cmax
+# 0.174 mEq/L single 300 mg dose (below the 0.6-1.0 TDM band, as expected).
+# ════════════════════════════════════════════════════════════════════════════
+echo
+echo "[pbpk28-parity] Case 26: Sounio ↔ Node lithium PBPK28 (oral IR)"
+
+LI_SIO_LOG="$OUT_DIR/li_sounio.txt"
+LI_NODE_LOG="$OUT_DIR/li_node.txt"
+"$SOUC_BIN" run tests/run-pass/dissertation_pbpk28_parity_ref_lithium.sio > "$LI_SIO_LOG" 2>&1 || {
+  echo "[pbpk28-parity:case26] FAIL: Sounio lithium ref returned non-zero" >&2
+  tail -n 20 "$LI_SIO_LOG" >&2; exit 1; }
+if ! grep -q '^DISSERTATION_PBPK28_LITHIUM_PARITY_DONE$' "$LI_SIO_LOG"; then
+  echo "[pbpk28-parity:case26] FAIL: Sounio lithium ref did not emit DONE" >&2; exit 1; fi
+node "$NODE_RUNNER" --drug=lithium > "$LI_NODE_LOG" 2>&1 || {
+  echo "[pbpk28-parity:case26] FAIL: Node lithium runner returned non-zero" >&2
+  tail -n 20 "$LI_NODE_LOG" >&2; exit 1; }
+if ! grep -q '^DISSERTATION_PBPK28_LITHIUM_PARITY_NODE v1$' "$LI_NODE_LOG"; then
+  echo "[pbpk28-parity:case26] FAIL: Node lithium runner header mismatch" >&2; exit 1; fi
+
+LI_SIO_TSV="$OUT_DIR/li_sounio.tsv"
+LI_NODE_TSV="$OUT_DIR/li_node.tsv"
+parse_to_tsv "$LI_SIO_LOG" "$LI_SIO_TSV"
+parse_to_tsv "$LI_NODE_LOG" "$LI_NODE_TSV"
+
+LI_SIO_ROWS=$(wc -l < "$LI_SIO_TSV")
+LI_NODE_ROWS=$(wc -l < "$LI_NODE_TSV")
+if [[ "$LI_SIO_ROWS" -ne "$EXPECTED_ROWS" || "$LI_NODE_ROWS" -ne "$EXPECTED_ROWS" ]]; then
+  echo "[pbpk28-parity:case26] FAIL: lithium row count mismatch — Sounio=$LI_SIO_ROWS Node=$LI_NODE_ROWS expected=$EXPECTED_ROWS" >&2
+  exit 1
+fi
+echo "[pbpk28-parity:case26] both runs emitted $LI_SIO_ROWS records"
+
+LI_JOINED="$OUT_DIR/li_joined.tsv"
+awk -F'\t' '
+  NR==FNR { S[$1"|"$2] = $5; next }
+  { print $1"\t"$2"\t"S[$1"|"$2]"\t"$5 }
+' "$LI_SIO_TSV" "$LI_NODE_TSV" > "$LI_JOINED"
+
+awk -F'\t' -v THR="$RMSE_THRESHOLD_PCT" '
+  {
+    i = $2 + 0; cs = $3 + 0; cn = $4 + 0;
+    d = cs - cn; SS[i] += d * d; NN[i] += 1;
+    if (cs > PK[i]) PK[i] = cs;
+    if (cn > PK[i]) PK[i] = cn;
+  }
+  END {
+    bad = 0;
+    for (i = 0; i < 14; i++) {
+      if (NN[i] == 0) { printf "PBPK28_LITHIUM_PARITY_FAIL organ %d MISSING\n", i; bad += 1; continue; }
+      rmse = sqrt(SS[i] / NN[i]); pk = PK[i] + 0;
+      if (pk == 0) { continue; }
+      pct = 100.0 * rmse / pk;
+      if (pct >= THR + 0) { printf "PBPK28_LITHIUM_PARITY_FAIL organ %d pct=%.4f rmse=%.3g\n", i, pct, rmse; bad += 1; }
+    }
+    if (bad > 0) { exit 1; }
+    printf "PBPK28_LITHIUM_PARITY_PASS 14/14 compartments within %s%% RMSE (strict)\n", THR;
+  }
+' "$LI_JOINED"
+
+paste <(grep "^TMASS|m=" "$LI_SIO_LOG" | sed "s/^TMASS|m=//") \
+      <(grep "^TREL|cum=" "$LI_SIO_LOG" | sed "s/^TREL|cum=//") \
+  | awk -v FAILM="PBPK28_LITHIUM_MASS_FAIL" -v PASS="PBPK28_LITHIUM_MASS_PASS" '
+      { m=($1+0); r=($2+0); n++;
+        if (!(m >= 0 && m <= r)) { printf "%s sample %d: mass %.6f outside [0, %.6f]\n", FAILM, n, m, r; bad=1 } }
+      END { if (n != 12) { printf "%s row count %d != 12\n", FAILM, n; exit 1 }
+        if (bad) exit 1;
+        printf "%s 12/12 samples within [0, absorbed]\n", PASS }'
+
+echo
+echo "[pbpk28-parity] lithium oral-IR canonical: renal-only sink + ion Kp + mass envelope (12th canonical drug)"

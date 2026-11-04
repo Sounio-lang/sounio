@@ -1,0 +1,87 @@
+// stdlib/darwin_pbpk/scenarios/clozapine_oral.sio — scenario library (no main)
+//
+// End-to-end dissertation scenario for clozapine (SIO-521):
+//
+//   - Single 100 mg oral tablet
+//     → tablet dissolution lag (tlag = 0.25 h) + first-order gut absorption
+//       (ka = 1.0/h, Tmax ~2 h) with first-pass loss (F = 0.55)
+//       → blood input (closed-form rate, operator-split source term)
+//         → 14-compartment PBPK28 (tsit5_pbpk28, fully-coupled CN)
+//
+// Mold: scenarios/olanzapine_oral.sio (oral IR + lag + scenario-owned
+// profile). Shared infrastructure, NOT shared mechanism or parameters:
+// Kp are clozapine's own (high brain uptake — target organ, no P-gp
+// restraint — vs olanzapine's restrained brain); fm fractions and the
+// smoking multiplier live in the drug file (card condition).
+//
+// Plasma referenced (rb ≈ 1): CL = 20 L/h (calibrated: 400 mg/day steady
+// state ≈ 460 ng/mL, inside the 350–600 TDM band) acts on blood directly.
+// Distribution flow-limited (basic lipophilic amine); PS assumed
+// (rapamycin flow-limited pattern, SIO-550).
+//
+// Declared limitation: single-dose PK only. No smoker split (×1.5 CL),
+// no D2 occupancy, no agranulocytosis PD — follow-ups. No clinical-validity
+// claim: parity only (ADR009).
+//
+// The parity ref tests/run-pass/dissertation_pbpk28_parity_ref_clozapine.sio
+// drives this scenario itself, so a scenario change not mirrored in Node
+// breaks the gate.
+//
+// This file is a library with no `main`; it is checked, not run.
+
+use darwin_pbpk::core::pbpk28_params::*
+use darwin_pbpk::tsit5_pbpk28::*
+use darwin_pbpk::drugs::clozapine::*
+use math::pure::{exp}
+
+// ─── Clozapine PBPK28 profile (scenario-owned) ─────────────────────────────
+// Kept here — not in core/pbpk28_params.sio — so this lane never churns the
+// website-pinned domain source. Standard 70 kg physiology. Kp = clozapine
+// tissue values from drugs/clozapine.sio (Vd ~400 L); PS assumed
+// (flow-limited pattern, SIO-550); CL = 20 L/h (calibrated to TDM band).
+pub fn clz_pbpk28_params() -> PBPKParams28 {
+    PBPKParams28 {
+        v_ref:     [5.0, 1.8, 0.31, 1.45, 0.33, 1.1, 28.0, 20.0, 1.2, 3.6, 6.6, 0.18, 0.09, 3.7],
+        vasc_frac: [1.000, 0.210, 0.160, 0.037, 0.262, 0.262, 0.040, 0.050, 0.024, 0.019, 0.041, 0.282, 0.180, 0.050],
+        kp:        [1.00, 10.0, 4.0, 8.0, 3.0, 6.0, 8.0, 6.0, 4.0, 3.0, 2.0, 4.0, 3.0, 3.0],
+        ps:        [0.0, 1800.0, 1110.0, 88.0, 160.0, 10500.0, 336.0, 40.0, 660.0, 126.0, 51.0, 150.0, 96.0, 78.0],
+        q:         [350.0, 90.0, 74.0, 44.0, 16.0, 350.0, 42.0, 10.0, 55.0, 21.0, 17.0, 10.0, 8.0, 13.0],
+        cl_central: 20.0,
+    }
+}
+
+// ─── Oral IR input with dissolution lag ─────────────────────────────────────
+// rate(t) = 0 for t < tlag, else F·D·ka·exp(−ka·(t−tlag)), mg/h. D = 100 mg
+// single dose; ka = 1.0/h, F = 0.55, tlag = 0.25 h.
+pub fn clz_dose_mg() -> f64 { return clozapine_single_dose_mg() }
+pub fn clz_ka() -> f64      { return clozapine_ka_per_h() }
+pub fn clz_f() -> f64       { return clozapine_f_oral_val() }
+pub fn clz_tlag() -> f64    { return clozapine_tlag_h() }
+
+pub fn clz_release_rate_at(t: f64) -> f64 with Mut, Div {
+    var te = t - clz_tlag()
+    if te < 0.0 { return 0.0 }
+    return clz_f() * clz_dose_mg() * clz_ka() * exp(0.0 - clz_ka() * te)
+}
+
+// ─── Composite scenario state ───────────────────────────────────────────────
+pub struct ClozapineScenario {
+    pub pbpk: PBPKState28,
+}
+
+// Initial state: zero PBPK (drug enters via gut absorption).
+pub fn clz_scenario_init() -> ClozapineScenario {
+    ClozapineScenario {
+        pbpk: pbpk28_state_zero(),
+    }
+}
+
+// One fully-coupled CN step at midpoint input rate.
+pub fn clz_step(scen: ClozapineScenario, p: PBPKParams28,
+                t_start: f64, dt: f64)
+    -> ClozapineScenario with Mut, Div
+{
+    let rel_mid = clz_release_rate_at(t_start + 0.5 * dt)
+    var out_pbpk = pbpk28_full_cn_step(scen.pbpk, p, rel_mid, dt)
+    return ClozapineScenario { pbpk: out_pbpk }
+}

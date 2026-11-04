@@ -5561,6 +5561,7 @@ fn checker_collect_runtime_builtins_inplace(c: *mut Checker) with Mut, Panic, Di
     checker_bind_import_unknown_inplace(c, make_name("write_file"))
     checker_bind_import_unknown_inplace(c, make_name("print"))
     checker_bind_import_unknown_inplace(c, make_name("print_int"))
+    checker_bind_import_unknown_inplace(c, make_name("print_u64"))
     checker_bind_import_unknown_inplace(c, make_name("print_char"))
     checker_bind_import_unknown_inplace(c, make_name("println"))
     // print_f64 + math intrinsics emitted by native codegen
@@ -5684,6 +5685,10 @@ fn checker_collect_runtime_builtins_inplace(c: *mut Checker) with Mut, Panic, Di
     checker_bind_import_unknown_inplace(c, make_name("seq_len"))
     checker_bind_import_unknown_inplace(c, make_name("seq_count"))
     checker_bind_import_unknown_inplace(c, make_name("acknowledge"))
+    // Async runtime builtin lowered by lean_single/native codegen. It has no
+    // source-level definition; without this prelude binding `join(h1, h2)`
+    // reaches the identifier checker as an undeclared callee (E137).
+    checker_bind_import_unknown_inplace(c, make_name("join"))
 }
 
 // *mut declaration collectors — port of the by-value collect_struct_def /
@@ -9467,12 +9472,12 @@ fn checker_finish_binary_ontology_inplace(c: *mut Checker, span: Span, op: Binar
 // Units first, then ontology on the type units produced. Two orthogonal tags
 // on the same TypeEntry: a dimension and a species. Each layer reads the
 // operand types, never the other layer's verdict.
-fn checker_finish_binary_inplace(c: *mut Checker, span: Span, op: BinaryOp, left: TypeEntry, right: TypeEntry, result: TypeEntry) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
-    let with_units = checker_finish_binary_units_inplace(c, span, op, left, right, result)
+fn checker_finish_binary_inplace(c: *mut Checker, span: Span, op: BinaryOp, left: TypeEntry, right: TypeEntry, result: TypeEntry, left_lit: bool, right_lit: bool) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    let with_units = checker_finish_binary_units_inplace(c, span, op, left, right, result, left_lit, right_lit)
     checker_finish_binary_ontology_inplace(c, span, op, left, right, with_units)
 }
 
-fn checker_finish_binary_units_inplace(c: *mut Checker, span: Span, op: BinaryOp, left: TypeEntry, right: TypeEntry, result: TypeEntry) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+fn checker_finish_binary_units_inplace(c: *mut Checker, span: Span, op: BinaryOp, left: TypeEntry, right: TypeEntry, result: TypeEntry, left_lit: bool, right_lit: bool) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     let lu = left.unit_id
     let ru = right.unit_id
     if lu < 0 && ru < 0 {
@@ -9530,12 +9535,13 @@ fn checker_finish_binary_units_inplace(c: *mut Checker, span: Span, op: BinaryOp
                 checker_brand_with_dim(c, result, d)
             }
         }
-        BinaryOp::OpEq => { if !checker_units_addable(c, lu, ru) { checker_report_unit_mismatch_inplace(c, span, lu, ru) } result }
-        BinaryOp::OpNe => { if !checker_units_addable(c, lu, ru) { checker_report_unit_mismatch_inplace(c, span, lu, ru) } result }
-        BinaryOp::OpLt => { if !checker_units_addable(c, lu, ru) { checker_report_unit_mismatch_inplace(c, span, lu, ru) } result }
-        BinaryOp::OpLe => { if !checker_units_addable(c, lu, ru) { checker_report_unit_mismatch_inplace(c, span, lu, ru) } result }
-        BinaryOp::OpGt => { if !checker_units_addable(c, lu, ru) { checker_report_unit_mismatch_inplace(c, span, lu, ru) } result }
-        BinaryOp::OpGe => { if !checker_units_addable(c, lu, ru) { checker_report_unit_mismatch_inplace(c, span, lu, ru) } result }
+        // SIO-397: a pure literal on the dimensionless side adopts the unit.
+        BinaryOp::OpEq => { if !checker_units_addable(c, lu, ru) && !checker_comparison_literal_adopts_unit(lu, ru, left_lit, right_lit) { checker_report_unit_mismatch_inplace(c, span, lu, ru) } result }
+        BinaryOp::OpNe => { if !checker_units_addable(c, lu, ru) && !checker_comparison_literal_adopts_unit(lu, ru, left_lit, right_lit) { checker_report_unit_mismatch_inplace(c, span, lu, ru) } result }
+        BinaryOp::OpLt => { if !checker_units_addable(c, lu, ru) && !checker_comparison_literal_adopts_unit(lu, ru, left_lit, right_lit) { checker_report_unit_mismatch_inplace(c, span, lu, ru) } result }
+        BinaryOp::OpLe => { if !checker_units_addable(c, lu, ru) && !checker_comparison_literal_adopts_unit(lu, ru, left_lit, right_lit) { checker_report_unit_mismatch_inplace(c, span, lu, ru) } result }
+        BinaryOp::OpGt => { if !checker_units_addable(c, lu, ru) && !checker_comparison_literal_adopts_unit(lu, ru, left_lit, right_lit) { checker_report_unit_mismatch_inplace(c, span, lu, ru) } result }
+        BinaryOp::OpGe => { if !checker_units_addable(c, lu, ru) && !checker_comparison_literal_adopts_unit(lu, ru, left_lit, right_lit) { checker_report_unit_mismatch_inplace(c, span, lu, ru) } result }
         _ => result
     }
 }
@@ -9794,7 +9800,7 @@ fn checker_finish_binary_knowledge_result_inplace(c: *mut Checker, span: Span, o
     if correlated_same_slot_add {
         knowledge_result.knowledge_epsilon = knowledge_same_slot_add_variance(left_ty)
     }
-    let final_result = checker_finish_binary_inplace(c, span, op, left_ty, right_ty, knowledge_result)
+    let final_result = checker_finish_binary_inplace(c, span, op, left_ty, right_ty, knowledge_result, false, false)
     if op == BinaryOp::OpMul && left_inner.kind == TypeKind::TyHyper && right_inner.kind == TypeKind::TyHyper {
         let final_inner = if final_result.kind == TypeKind::TyKnowledge {
             knowledge_inner(final_result)
@@ -9884,14 +9890,14 @@ fn checker_check_binary_hyper_path_inplace(c: *mut Checker, span: Span, op: Bina
     let hr = check_hyper_binary(*c, span, op, left_ty, right_ty)
     checker_store_from_value(c, hr.0)
     let typed_result = hr.1
-    let final_result = checker_finish_binary_inplace(c, span, op, left_ty, right_ty, typed_result)
+    let final_result = checker_finish_binary_inplace(c, span, op, left_ty, right_ty, typed_result, false, false)
     if op == BinaryOp::OpMul && final_result.kind == TypeKind::TyHyper {
         checker_record_hyper_expr_inplace(c, span, final_result.algebra_kind, 1, false)
     }
     final_result
 }
 
-fn checker_finish_binary_scalar_tail_inplace(c: *mut Checker, span: Span, op: BinaryOp, left_ty: TypeEntry, right_ty: TypeEntry, right_expr: Option<Box<Expr> >) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+fn checker_finish_binary_scalar_tail_inplace(c: *mut Checker, span: Span, op: BinaryOp, left_ty: TypeEntry, right_ty: TypeEntry, right_expr: Option<Box<Expr> >, left_lit: bool, right_lit: bool) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     var result = binary_result_type(op, left_ty, right_ty)
     if result.kind == TypeKind::TyError && (op == BinaryOp::OpEq || op == BinaryOp::OpNe) {
         let l_enum = left_ty.kind == TypeKind::TyNamed && enum_table_find((*c).enums, left_ty.name) >= 0
@@ -9933,7 +9939,7 @@ fn checker_finish_binary_scalar_tail_inplace(c: *mut Checker, span: Span, op: Bi
             checker_report_error_at_inplace(c, span, 57, 0, 0, 0)
         }
     }
-    checker_finish_binary_inplace(c, span, op, left_ty, right_ty, result)
+    checker_finish_binary_inplace(c, span, op, left_ty, right_ty, result, left_lit, right_lit)
 }
 
 // SIO-417 stack diet: the router below keeps the exact operand-type checks and
@@ -9954,7 +9960,8 @@ fn checker_check_binary_with_operand_types_inplace(c: *mut Checker, e: Expr, lef
     if left_ty.kind == TypeKind::TyHyper && right_ty.kind == TypeKind::TyHyper {
         return checker_check_binary_hyper_path_inplace(c, e.span, e.bin_op, left_ty, right_ty)
     }
-    checker_finish_binary_scalar_tail_inplace(c, e.span, e.bin_op, left_ty, right_ty, e.right)
+    let lits = checker_binary_comparison_lits(e)
+    checker_finish_binary_scalar_tail_inplace(c, e.span, e.bin_op, left_ty, right_ty, e.right, lits.0, lits.1)
 }
 
 fn checker_check_opt_block_inplace(c: *mut Checker, opt: Option<Box<Block> >) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
@@ -13720,6 +13727,22 @@ fn checker_check_call_bridge_forms_inplace(c: *mut Checker, e: Expr) -> (bool, T
     (false, ty_error())
 }
 
+fn checker_check_join_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    let argc = expr_list_handle_count(expr_list_handle(e.args))
+    checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
+    var effects_async: [i64; 8] = [0; 8]
+    effects_async[0] = 6  // Async (effects.sio: 6=Async)
+    checker_check_callee_effects_named_inplace(c, e.span, effects_async, 1, make_name("join"))
+    if argc != 2 {
+        checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
+        return ty_error()
+    }
+    let elems = TypeEntryList {
+        head: ty_i64(),
+        tail: Some(Box::new(TypeEntryList { head: ty_i64(), tail: None })),
+    }
+    ty_tuple(elems)
+}
 fn checker_check_call_native_forms_inplace(c: *mut Checker, e: Expr) -> (bool, TypeEntry) with Mut, Panic, Div, Alloc, IO {
     if call_expr_is_builtin_println(e.left) {
         let first_arg = expr_list_head(e.args)
@@ -13767,6 +13790,9 @@ fn checker_check_call_native_forms_inplace(c: *mut Checker, e: Expr) -> (bool, T
         effects_io[0] = 0  // IO (effects.sio: 0=IO)
         checker_check_callee_effects_inplace(c, e.span, effects_io, 1)
         return (true, ty_i64())
+    }
+    if call_expr_is_builtin_join(e.left) {
+        return (true, checker_check_join_expr_inplace(c, e))
     }
     (false, ty_error())
 }
@@ -21981,6 +22007,16 @@ fn call_expr_is_builtin_acknowledge(opt: Option<Box<Expr> >) -> bool with Mut, P
     }
 }
 
+fn call_expr_is_builtin_join(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(expr) => {
+            if (*expr).kind != ExprKind::ExprIdent { return false }
+            name_eq((*expr).name, make_name("join"))
+        }
+        None => false
+    }
+}
+
 // `Knowledge(v, e=<confidence>, prov=<provenance>)` — the constructor-CALL form of the
 // epistemic literal (the other form is the struct literal `Knowledge { .. }`). lean_single
 // accepts it; Madaros used to resolve the callee ident `Knowledge` through the ordinary
@@ -22226,6 +22262,7 @@ fn name_is_dynlink_extern(n: Name) -> bool with Mut, Panic, Div, Alloc, IO {
 
 fn name_is_native_backend_builtin(n: Name) -> bool with Mut, Panic, Div, Alloc, IO {
     if name_eq(n, make_name("print_int")) { return true }        // id 1
+    if name_eq(n, make_name("print_u64")) { return true }        // id 80 (SIO-399)
     if name_eq(n, make_name("print_char")) { return true }       // id 2
     if name_eq(n, make_name("print")) { return true }            // id 3
     if name_eq(n, make_name("get_arg_count")) { return true }    // id 4
@@ -22331,6 +22368,7 @@ fn native_backend_builtin_arity_is_valid(n: Name, argc: i64) -> bool with Mut, P
     }
     if argc == 1 {
         return name_eq(n, make_name("print_int"))
+            || name_eq(n, make_name("print_u64"))
             || name_eq(n, make_name("print_char"))
             || name_eq(n, make_name("print"))
             || name_eq(n, make_name("get_arg"))
@@ -24372,6 +24410,37 @@ fn checker_expr_is_unitless_literal_like(e: Expr) -> bool {
         return l && r
     }
     false
+}
+
+fn checker_opt_expr_is_unitless_literal_like(opt: Option<Box<Expr>>) -> bool {
+    match opt {
+        Some(inner) => checker_expr_is_unitless_literal_like(*inner),
+        None => false,
+    }
+}
+
+// SIO-397: a pure literal expression compared against a unit-bearing value
+// adopts that unit -- the comparison twin of the D-24 call-argument rule.
+// Anything else dimensionless (a variable, a cast, a computed ratio) stays
+// a mismatch, and two unit-bearing sides still need addability.
+fn checker_comparison_literal_adopts_unit(lu: i64, ru: i64, left_lit: bool, right_lit: bool) -> bool {
+    if lu >= 0 && ru >= 0 {
+        return false
+    }
+    if lu < 0 && ru < 0 {
+        return false
+    }
+    if lu < 0 {
+        return left_lit
+    }
+    right_lit
+}
+
+// Literal-likeness of both binary sides at once. Takes the whole Expr by
+// value -- the same convention as checker_is_knowledge_ident_add -- so call
+// sites keep using e.span and e.bin_op afterwards.
+fn checker_binary_comparison_lits(e: Expr) -> (bool, bool) {
+    (checker_opt_expr_is_unitless_literal_like(e.left), checker_opt_expr_is_unitless_literal_like(e.right))
 }
 
 fn checker_expr_is_float_literal_like(e: Expr) -> bool {
@@ -29490,7 +29559,8 @@ impl Checker {
             }
             // Continue with normal checking for inner type compatibility
             // The knowledge_binary_result handles epsilon propagation
-            let result_with_units = c.check_binary_units(e.span, e.bin_op, left_ty, right_ty, knowledge_result)
+            let cmp_lits = checker_binary_comparison_lits(e)
+            let result_with_units = c.check_binary_units(e.span, e.bin_op, left_ty, right_ty, knowledge_result, cmp_lits.0, cmp_lits.1)
             c = result_with_units.0
             let final_result = result_with_units.1
             if e.bin_op == BinaryOp::OpMul && left_inner.kind == TypeKind::TyHyper && right_inner.kind == TypeKind::TyHyper {
@@ -29510,7 +29580,8 @@ impl Checker {
             let hyper_result = check_hyper_binary(c, e.span, e.bin_op, left_ty, right_ty)
             c = hyper_result.0
             let typed_result = hyper_result.1
-            let result_with_units = c.check_binary_units(e.span, e.bin_op, left_ty, right_ty, typed_result)
+            let cmp_lits = checker_binary_comparison_lits(e)
+            let result_with_units = c.check_binary_units(e.span, e.bin_op, left_ty, right_ty, typed_result, cmp_lits.0, cmp_lits.1)
             c = result_with_units.0
             let final_result = result_with_units.1
             if e.bin_op == BinaryOp::OpMul && final_result.kind == TypeKind::TyHyper {
@@ -29563,7 +29634,8 @@ impl Checker {
             }
         }
         // Unit checking for arithmetic on unit-typed values
-        let result_with_units = c.check_binary_units(e.span, e.bin_op, left_ty, right_ty, result)
+        let cmp_lits = checker_binary_comparison_lits(e)
+        let result_with_units = c.check_binary_units(e.span, e.bin_op, left_ty, right_ty, result, cmp_lits.0, cmp_lits.1)
         c = result_with_units.0
         let final_result = result_with_units.1
         (c, final_result)
@@ -29642,7 +29714,7 @@ impl Checker {
         }
     }
 
-    fn check_binary_units(self, span: Span, op: BinaryOp, left: TypeEntry, right: TypeEntry, result: TypeEntry) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+    fn check_binary_units(self, span: Span, op: BinaryOp, left: TypeEntry, right: TypeEntry, result: TypeEntry, left_lit: bool, right_lit: bool) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         var c = self
         let lu = left.unit_id
         let ru = right.unit_id
@@ -29717,13 +29789,14 @@ impl Checker {
                     (c, result)
                 }
             }
-            // Comparison operators: units must match
-            BinaryOp::OpEq => { if lu != ru { c = c.report_unit_mismatch(span, lu, ru) }; (c, result) }
-            BinaryOp::OpNe => { if lu != ru { c = c.report_unit_mismatch(span, lu, ru) }; (c, result) }
-            BinaryOp::OpLt => { if lu != ru { c = c.report_unit_mismatch(span, lu, ru) }; (c, result) }
-            BinaryOp::OpLe => { if lu != ru { c = c.report_unit_mismatch(span, lu, ru) }; (c, result) }
-            BinaryOp::OpGt => { if lu != ru { c = c.report_unit_mismatch(span, lu, ru) }; (c, result) }
-            BinaryOp::OpGe => { if lu != ru { c = c.report_unit_mismatch(span, lu, ru) }; (c, result) }
+            // Comparison operators: units must match, except a pure literal
+            // adopts the other side's unit (SIO-397, mirror of D-24 call args)
+            BinaryOp::OpEq => { if lu != ru && !checker_comparison_literal_adopts_unit(lu, ru, left_lit, right_lit) { c = c.report_unit_mismatch(span, lu, ru) }; (c, result) }
+            BinaryOp::OpNe => { if lu != ru && !checker_comparison_literal_adopts_unit(lu, ru, left_lit, right_lit) { c = c.report_unit_mismatch(span, lu, ru) }; (c, result) }
+            BinaryOp::OpLt => { if lu != ru && !checker_comparison_literal_adopts_unit(lu, ru, left_lit, right_lit) { c = c.report_unit_mismatch(span, lu, ru) }; (c, result) }
+            BinaryOp::OpLe => { if lu != ru && !checker_comparison_literal_adopts_unit(lu, ru, left_lit, right_lit) { c = c.report_unit_mismatch(span, lu, ru) }; (c, result) }
+            BinaryOp::OpGt => { if lu != ru && !checker_comparison_literal_adopts_unit(lu, ru, left_lit, right_lit) { c = c.report_unit_mismatch(span, lu, ru) }; (c, result) }
+            BinaryOp::OpGe => { if lu != ru && !checker_comparison_literal_adopts_unit(lu, ru, left_lit, right_lit) { c = c.report_unit_mismatch(span, lu, ru) }; (c, result) }
             // Other operators: pass through
             _ => (c, result)
         }
