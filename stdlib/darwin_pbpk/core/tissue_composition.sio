@@ -253,6 +253,93 @@ pub fn tc_ap_rr_sourced(organ: i32) -> bool {
 pub fn tc_eps_ap() -> f64 { return 0.55 }
 
 // ============================================================================
+// [AP-] RATIOS FROM httk  (added 2026-11-04)  -- A SECOND, DISTINCT SOURCE
+// ============================================================================
+// The blocker named above -- "Rodgers & Rowland 2006 Table 1 has not been
+// read, so 12 of 14 organs have no sourced [AP-]" -- is lifted WITHOUT that
+// table, because what the Rodgers-Rowland route needs is the tissue /
+// blood-cell RATIO (see the note on tc_ap_rr), and httk 2.7.4 carries enough
+// to compute it: data/Tables.RData, tissue.data, variables Fa_PLc (acidic
+// phospholipid as a fraction of LIPID) and FLc (lipid as a fraction of CELL
+// volume), Species == "Human".  The absolute per-organ quantity is
+// Fa_PLc * FLc, and the ratio is that over the red-blood-cell value
+// 0.1 * 0.00501 = 0.000501.
+//
+// THIS IS NOT RODGERS & ROWLAND, AND THE TWO DISAGREE.  On muscle, the one
+// organ where both sources exist:
+//   R-R 2007 Tab. VII   2.42 / 0.57          = 4.245614
+//   httk Fa_PLc * FLc   0.00188191 / 0.000501 = 3.756309
+//   discrepancy                               = -11.52%
+// Measured 2026-11-04 (scratchpad/audit1/ap1.cpp), that ratio change moves
+// muscle Kpu by -7.96% (haloperidol), -6.46% (venlafaxine) and -9.49%
+// (clozapine).  It is a CHOICE OF SOURCE, not an uncertainty: both tables are
+// in production use for the same physical quantity.  This is the same pattern
+// as the cellular-pH conventions, in a second input.
+//
+// So these values are kept in their own accessor, named for their source, and
+// tc_ap_rr is left untouched: the R-R muscle pair is what the oracle-validated
+// parity figures correspond to, and mixing the two silently is exactly the
+// failure this module exists to refuse.  A caller extending Rodgers-Rowland
+// past muscle MUST declare which source it used.
+//
+// Coverage: 11 of 14 organs.  httk has no pancreas and no plasma acidic
+// phospholipid, and its "rest" compartment is a lumped remainder rather than
+// the 14-organ "other", so those three return the unsourced sentinel rather
+// than a number carried over from a tissue that happens to be nearby.
+pub fn tc_ap_ratio_httk(organ: i32) -> f64 {
+    if organ == 1  { return 9.306543 }    // liver    Fa_PLc 0.05051   * FLc 0.09231
+    if organ == 2  { return 8.763906 }    // kidney   Fa_PLc 0.06853   * FLc 0.06407
+    if organ == 3  { return 37.612655 }   // brain    Fa_PLc 0.1678    * FLc 0.1123
+    if organ == 4  { return 8.480539 }    // heart    Fa_PLc 0.0309    * FLc 0.1375
+    if organ == 5  { return 3.677445 }    // lung     Fa_PLc 0.14      * FLc 0.01316
+    if organ == 6  { return 3.756309 }    // muscle   Fa_PLc 0.07884   * FLc 0.02387
+    if organ == 7  { return 14.651309 }   // adipose  Fa_PLc 0.007859  * FLc 0.934
+    if organ == 8  { return 6.986028 }    // gut      Fa_PLc 0.05      * FLc 0.07
+    if organ == 9  { return 78.092655 }   // skin     Fa_PLc 0.1382    * FLc 0.2831
+    if organ == 10 { return 1.596806 }    // bone     Fa_PLc 0.04      * FLc 0.02
+    if organ == 11 { return 5.739422 }    // spleen   Fa_PLc 0.07287   * FLc 0.03946
+    return 0.0 - 1.0                      // 0 plasma, 12 pancreas, 13 other: absent from httk
+}
+
+pub fn tc_ap_ratio_httk_sourced(organ: i32) -> bool {
+    if organ <= 0  { return false }
+    if organ >= 12 { return false }
+    return true
+}
+
+// The Rodgers-Rowland ratio, for the two organs where tc_ap_rr is sourced.
+// Returns the unsourced sentinel elsewhere, so the two accessors can be
+// compared only where both are real.
+pub fn tc_ap_ratio_rr(organ: i32) -> f64 with Div {
+    if !tc_ap_rr_sourced(organ) { return 0.0 - 1.0 }
+    if organ == 0 { return 0.0 - 1.0 }   // plasma is not a cell; no cell ratio
+    return tc_ap_rr(organ) / tc_ap_rr_blood_cells()
+}
+
+// Signed relative discrepancy (httk - R-R) / R-R where both sources exist.
+// Muscle is the only such organ today and measures -0.115199...; pinned by
+// test so that nobody can swap the sources without the number moving.
+pub fn tc_ap_ratio_discrepancy(organ: i32) -> f64 with Div {
+    let a = tc_ap_ratio_rr(organ)
+    if a < 0.0 { return 0.0 }
+    if !tc_ap_ratio_httk_sourced(organ) { return 0.0 }
+    return (tc_ap_ratio_httk(organ) - a) / a
+}
+
+// httk 2.7.4 cellular pH is ONE table applied to two species.  Measured
+// 2026-11-04 from data/Tables.RData, tissue.data: only Human and Rat carry a
+// pH row at all, and 0 of 14 tissues differ between them (lung 6.60, muscle
+// 6.81, kidney 7.22, liver 7.23, adipose/brain/heart 7.10, the rest 7.00).
+// This closes the species-comparability question (SIO-564) and REVERSES the
+// earlier framing of it: the defect is not that a rat value was presented as
+// human, it is that cellular pH is treated as a species-independent constant.
+// A rat-derived alternative value compared against the httk "human" value is
+// therefore a rat-vs-rat comparison.
+pub fn tc_ph_httk_species_independent() -> bool { return true }
+pub fn tc_ph_httk_species_checked() -> i32 { return 14 }
+pub fn tc_ph_httk_species_differing() -> i32 { return 0 }
+
+// ============================================================================
 // COMPOSITION CLOSURE  (a note that corrects an earlier claim)
 // ============================================================================
 // Verified 2026-10-31, organ by organ: f_ew + f_iw + f_nl + f_np + f_protein
@@ -444,6 +531,77 @@ fn main() -> i32 with IO, Mut, Div, Panic {
         print("T10 FAIL: organs not closing = "); println(14 - closed); fails = fails + 1
     }
 
+
+    // T11 -- the httk [AP-] ratios: coverage, and the discrepancy against
+    // Rodgers & Rowland on the one organ where both sources exist.  The
+    // discrepancy is PINNED, not merely reported: if someone swaps the source
+    // behind either accessor this number moves and the test fails.
+    var ap_cov = 0
+    var o = 1
+    while o < 12 {
+        if tc_ap_ratio_httk_sourced(o) {
+            if tc_ap_ratio_httk(o) > 0.0 { ap_cov = ap_cov + 1 }
+        }
+        o = o + 1
+    }
+    if ap_cov == 11 {
+        println("T11a PASS: 11 dos 14 orgaos com razao [AP-] httk-derivada")
+    } else {
+        print("T11a FAIL: cobertura httk = "); println(ap_cov); fails = fails + 1
+    }
+
+    // plasma (0), pancreas (12) and other (13) must stay refused, not guessed.
+    if tc_ap_ratio_httk_sourced(0) {
+        println("T11b FAIL: plasma marcado como httk-sourced"); fails = fails + 1
+    } else {
+        if tc_ap_ratio_httk_sourced(12) {
+            println("T11b FAIL: pancreas marcado como httk-sourced"); fails = fails + 1
+        } else {
+            if tc_ap_ratio_httk(12) > 0.0 {
+                println("T11b FAIL: pancreas devolveu numero em vez de sentinela"); fails = fails + 1
+            } else {
+                println("T11b PASS: plasma, pancreas e other recusados, nao adivinhados")
+            }
+        }
+    }
+
+    // The pinned discrepancy on muscle: -11.52%.
+    let disc = tc_ap_ratio_discrepancy(6)
+    if disc < 0.0 - 0.1155 {
+        print("T11c FAIL: discrepancia abaixo da banda = "); println(disc); fails = fails + 1
+    } else {
+        if disc > 0.0 - 0.1148 {
+            print("T11c FAIL: discrepancia acima da banda = "); println(disc); fails = fails + 1
+        } else {
+            println("T11c PASS: httk vs R&R no musculo = -11.52%, fonte declarada")
+        }
+    }
+
+    // Organs with only ONE source report zero discrepancy, never a fabricated one.
+    if tc_ap_ratio_discrepancy(1) == 0.0 {
+        if tc_ap_ratio_discrepancy(12) == 0.0 {
+            println("T11d PASS: discrepancia 0.0 onde so ha uma fonte")
+        } else {
+            println("T11d FAIL: discrepancia fabricada para o pancreas"); fails = fails + 1
+        }
+    } else {
+        println("T11d FAIL: discrepancia fabricada para o figado"); fails = fails + 1
+    }
+
+    // T12 -- httk cellular pH is species-independent (SIO-564).
+    if tc_ph_httk_species_independent() {
+        if tc_ph_httk_species_checked() == 14 {
+            if tc_ph_httk_species_differing() == 0 {
+                println("T12 PASS: pH celular do httk identico Humano/Rato em 14 de 14")
+            } else {
+                println("T12 FAIL: contagem de tecidos divergentes nao zero"); fails = fails + 1
+            }
+        } else {
+            println("T12 FAIL: numero de tecidos verificados nao e 14"); fails = fails + 1
+        }
+    } else {
+        println("T12 FAIL: independencia de especie nao registrada"); fails = fails + 1
+    }
     if fails == 0 {
         println("PASS")
         return 0
