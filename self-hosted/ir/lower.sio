@@ -24216,12 +24216,43 @@ impl Lowerer {
     // Returns a print builtin only from positive operand evidence. Kind 0 is
     // not a string classification: routing its word through print's strlen
     // path turns values such as integer 1 into address 0x1 and SIGSEGVs.
+    // SIO-399: positive evidence that a print/println argument is an unsigned
+    // word (u8/u16/u32/u64/usize). Delegates to the Findings-11 helper for
+    // casts, annotated let/param idents (is_unsigned_int slot) and integer
+    // binaries, and adds the callee-return case (shr_u(top), div_u(top, 2))
+    // that helper does not cover. Only positive evidence routes to print_u64;
+    // every other integer keeps today's print_int path.
+    fn expr_result_is_unsigned_int_ref(self, e: &Expr) -> bool with Mut, Panic, Div, Alloc {
+        if self.expr_is_unsigned_int_ref(e) {
+            return true
+        }
+        if (*e).kind == ExprKind::ExprCall {
+            match (*e).left {
+                Some(callee_expr) => {
+                    let callee_name = self.expr_to_callee_name_ref(&(*callee_expr))
+                    let fn_id = lowerer_lookup_fn_id_by_name_ref(&self, callee_name)
+                    if fn_id >= 0 && fn_id < self.module.fn_count {
+                        let callee_fn = ir_fn_get(&(*self.module), fn_id)
+                        return lower_name_is_unsigned_int_type(callee_fn.return_struct_name)
+                    }
+                    return false
+                }
+                None => return false,
+            }
+        }
+        false
+    }
+
     fn println_dispatch_name(self, args: &Option<Box<ExprList>>) -> Name with Mut, Panic, Div, Alloc {
         match *args {
             Some(list) => {
                 let sk = self.expr_result_scalar_kind_ref(&(*list).head)
                 if sk == 1 {
-                    make_name("print_int")
+                    if self.expr_result_is_unsigned_int_ref(&(*list).head) {
+                        make_name("print_u64")
+                    } else {
+                        make_name("print_int")
+                    }
                 } else if sk == 2 {
                     make_name("print_f64")
                 } else if sk == 5 {

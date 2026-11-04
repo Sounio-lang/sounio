@@ -1038,6 +1038,21 @@ fn name_is_print_int(n: Name) -> bool with Mut, Panic, Div {
     true
 }
 
+// SIO-399: "print_u64" is also 9 chars; mirrors name_is_print_int above.
+fn name_is_print_u64(n: Name) -> bool with Mut, Panic, Div {
+    if n.len != 9 { return false }
+    if n.buf[0] != 112 as i8 { return false }     // 'p'
+    if n.buf[1] != 114 as i8 { return false }     // 'r'
+    if n.buf[2] != 105 as i8 { return false }     // 'i'
+    if n.buf[3] != 110 as i8 { return false }     // 'n'
+    if n.buf[4] != 116 as i8 { return false }     // 't'
+    if n.buf[5] != 95 as i8 { return false }      // '_'
+    if n.buf[6] != 117 as i8 { return false }     // 'u'
+    if n.buf[7] != 54 as i8 { return false }      // '6'
+    if n.buf[8] != 52 as i8 { return false }      // '4'
+    true
+}
+
 fn name_is_print_char(n: Name) -> bool with Mut, Panic, Div {
     if n.len != 10 { return false }
     if n.buf[0] != 112 as i8 { return false }     // 'p'
@@ -1378,6 +1393,20 @@ fn name_ref_is_print_int(n: &Name) -> bool with Mut, Panic, Div {
     true
 }
 
+fn name_ref_is_print_u64(n: &Name) -> bool with Mut, Panic, Div {
+    if (*n).len != 9 { return false }
+    if (*n).buf[0] != 112 as i8 { return false }
+    if (*n).buf[1] != 114 as i8 { return false }
+    if (*n).buf[2] != 105 as i8 { return false }
+    if (*n).buf[3] != 110 as i8 { return false }
+    if (*n).buf[4] != 116 as i8 { return false }
+    if (*n).buf[5] != 95 as i8 { return false }
+    if (*n).buf[6] != 117 as i8 { return false }
+    if (*n).buf[7] != 54 as i8 { return false }
+    if (*n).buf[8] != 52 as i8 { return false }
+    true
+}
+
 fn name_ref_is_print_char(n: &Name) -> bool with Mut, Panic, Div {
     if (*n).len != 10 { return false }
     if (*n).buf[0] != 112 as i8 { return false }
@@ -1429,6 +1458,7 @@ fn native_v2_region_builtin_id(n: Name) -> i64 with Mut, Panic, Div {
 
 fn native_v2_builtin_id_for_name_ref(name: &Name) -> i64 with Mut, Panic, Div {
     if name_ref_is_print_int(name) { return 1 }
+    if name_ref_is_print_u64(name) { return 80 }
     if name_ref_is_print_char(name) { return 2 }
     if name_ref_is_print(name) { return 3 }
     if name_is_assert(*name) { return 21 }
@@ -1476,6 +1506,20 @@ fn native_v2_func_name_is_print_int(func: &IrFunction) -> bool with Mut, Panic, 
     true
 }
 
+fn native_v2_func_name_is_print_u64(func: &IrFunction) -> bool with Mut, Panic, Div {
+    if (*func).name.len != 9 { return false }
+    if (*func).name.buf[0] != 112 as i8 { return false }
+    if (*func).name.buf[1] != 114 as i8 { return false }
+    if (*func).name.buf[2] != 105 as i8 { return false }
+    if (*func).name.buf[3] != 110 as i8 { return false }
+    if (*func).name.buf[4] != 116 as i8 { return false }
+    if (*func).name.buf[5] != 95 as i8 { return false }
+    if (*func).name.buf[6] != 117 as i8 { return false }
+    if (*func).name.buf[7] != 54 as i8 { return false }
+    if (*func).name.buf[8] != 52 as i8 { return false }
+    true
+}
+
 fn native_v2_func_name_is_print_char(func: &IrFunction) -> bool with Mut, Panic, Div {
     if (*func).name.len != 10 { return false }
     if (*func).name.buf[0] != 112 as i8 { return false }
@@ -1511,6 +1555,7 @@ fn native_v2_builtin_id_for_func_ref(func: &IrFunction) -> i64 with Mut, Panic, 
         return 0
     }
     if native_v2_func_name_is_print_int(func) { return 1 }
+    if native_v2_func_name_is_print_u64(func) { return 80 }
     if native_v2_func_name_is_print_char(func) { return 2 }
     if native_v2_func_name_is_print(func) { return 3 }
     if name_is_get_arg_count((*func).name) { return 4 }
@@ -4393,6 +4438,40 @@ fn emit_builtin_print_int(nc: NativeCompiler) -> NativeCompiler with Mut, Panic,
     c
 }
 
+// SIO-399: unsigned word printer. Byte-identical digit loop to the
+// positive path of emit_builtin_print_int (div rbx is already an unsigned
+// divide), but with no sign test and no '-' emission, so a u64 with the
+// high bit set prints as 18446744073709551615 rather than -1. The 20
+// digits of u64::MAX fit the 32-byte rbp-1 scratch region.
+fn emit_builtin_print_u64(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    c.code = emit_push_rbp(c.code)
+    c.code = emit_mov_rbp_rsp(c.code)
+    c.code = emit_sub_rsp_imm32(c.code, 32)
+    c.code = emit_mov_reg_reg(c.code, 0, 7)           // mov rax, rdi  (3)
+    c.code = emit_mov_reg_reg(c.code, 6, 5)           // mov rsi, rbp  (3)
+    c.code = emit_sub_rsi_imm8(c.code, 1)             // sub rsi, 1    (4)
+    c.code = emit_xor_rcx_rcx(c.code)                 // xor rcx, rcx  (3)
+    // digit loop: 28 bytes body + 2 bytes jnz = 30 bytes total
+    c.code = emit_xor_rdx_rdx(c.code)                 // 3
+    c.code = emit_mov_reg_imm(c.code, 3, 10)          // 7
+    c.code = emit_div_rbx(c.code)                      // 3
+    c.code = emit_add_rdx_imm8(c.code, 48)            // 4
+    c.code = emit_mov_byte_mem_rsi_dl(c.code)          // 2
+    c.code = emit_dec_rsi(c.code)                      // 3
+    c.code = emit_inc_rcx(c.code)                      // 3
+    c.code = emit_test_rax_rax(c.code)                 // 3
+    c.code = emit_jnz_rel8(c.code, -30)               // 75 e2
+    c.code = emit_inc_rsi(c.code)
+    c.code = emit_mov_reg_reg(c.code, 2, 1)           // mov rdx, rcx
+    c = emit_load_runtime_context_field_rdi(c, runtime_context_field_stdout_fd())
+    c = emit_write_syscall_for_target(c, c.target_os_id)
+    c.code = emit_mov_rsp_rbp(c.code)
+    c.code = emit_pop_rbp(c.code)
+    c.code = emit_ret(c.code)
+    c
+}
+
 fn emit_builtin_print_char(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     var c = nc
     c.code = emit_push_rdi(c.code)
@@ -4463,6 +4542,32 @@ fn emit_builtin_print_int_into(nc: &! NativeCompiler) with Mut, Panic, Div {
     nc_emit_mov_byte_mem_rsi_imm8(nc, 45)   // [rsi] = '-' (3 bytes)
     nc_emit_dec_rsi(nc)                      // dec so inc rsi below lands on '-' (3 bytes)
     nc_emit_inc_rcx(nc)                      // rcx += 1 (3 bytes) → [no_sign]
+    nc_emit_inc_rsi(nc)                      // rsi = start of buffer
+    nc_emit_mov_reg_reg(nc, 2, 1)            // rdx = rcx (length)
+    emit_stdout_write_syscall_linux_into(nc)
+    nc_emit_mov_rsp_rbp(nc)
+    nc_emit_pop_rbp(nc)
+    nc_emit_ret(nc)
+}
+
+fn emit_builtin_print_u64_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_push_rbp(nc)
+    nc_emit_mov_rbp_rsp(nc)
+    nc_emit_sub_rsp_imm32(nc, 32)
+    nc_emit_mov_reg_reg(nc, 0, 7)            // rax = rdi
+    nc_emit_mov_reg_reg(nc, 6, 5)            // rsi = rbp
+    nc_emit_sub_rsi_imm8(nc, 1)              // rsi = rbp-1
+    nc_emit_xor_rcx_rcx(nc)                  // rcx = 0
+    // [digit_loop:] same unsigned div loop as print_int, no sign handling
+    nc_emit_xor_rdx_rdx(nc)
+    nc_emit_mov_reg_imm(nc, 3, 10)           // rbx = 10
+    nc_emit_div_rbx(nc)
+    nc_emit_add_rdx_imm8(nc, 48)
+    nc_emit_mov_byte_mem_rsi_dl(nc)
+    nc_emit_dec_rsi(nc)
+    nc_emit_inc_rcx(nc)
+    nc_emit_test_rax_rax(nc)
+    nc_emit_jnz_rel8(nc, -30)
     nc_emit_inc_rsi(nc)                      // rsi = start of buffer
     nc_emit_mov_reg_reg(nc, 2, 1)            // rdx = rcx (length)
     emit_stdout_write_syscall_linux_into(nc)
@@ -9253,6 +9358,7 @@ pub fn compile_ir_function(nc: NativeCompiler, func: IrFunction, fn_index: i64) 
     if func.instr_count == 0 {
         // M3: print builtins
         if name_is_print_int(func.name) { return emit_builtin_print_int(c) }
+        if name_is_print_u64(func.name) { return emit_builtin_print_u64(c) }
         if name_is_print_char(func.name) { return emit_builtin_print_char(c) }
         if name_is_print(func.name) { return emit_builtin_print_str(c) }
         // M4: argv + string builtins
@@ -10212,6 +10318,7 @@ fn emit_builtin_ffi_system_into(nc: &! NativeCompiler) with Mut, Panic, Div {
 
 pub fn native_v2_builtin_id_for_name(name: Name) -> i64 with Mut, Panic, Div {
     if name_is_print_int(name) { return 1 }
+    if name_is_print_u64(name) { return 80 }
     if name_is_print_char(name) { return 2 }
     if name_is_print(name) { return 3 }
     if name_is_get_arg_count(name) { return 4 }
@@ -10330,6 +10437,8 @@ fn native_v2_emit_builtin_by_id_into(nc: &! NativeCompiler, builtin_id: i64) wit
     if builtin_id == 52 { emit_builtin_native_seq_get_into(nc); return }
     if builtin_id == 53 { emit_builtin_native_seq_set_into(nc); return }
     if builtin_id == 1 { emit_builtin_print_int_into(nc); return }
+    // SIO-399: unsigned word printer shares the print_int ABI (one word in rdi).
+    if builtin_id == 80 { emit_builtin_print_u64_into(nc); return }
     if builtin_id == 2 { emit_builtin_print_char_into(nc); return }
     if builtin_id == 3 {
         emit_builtin_print_str_into(nc)
@@ -10442,6 +10551,7 @@ pub fn compile_ir_function_v2(nc: NativeCompiler, func: IrFunction, machine_func
     // Empty-stub builtins only — see native_v2_builtin_id_for_func_ref.
     if func.instr_count == 0 {
         if name_is_print_int(func.name) { return emit_builtin_print_int(c) }
+        if name_is_print_u64(func.name) { return emit_builtin_print_u64(c) }
         if name_is_print_char(func.name) { return emit_builtin_print_char(c) }
         if name_is_print(func.name) { return emit_builtin_print_str(c) }
         if name_is_get_arg_count(func.name) { return emit_builtin_get_arg_count(c) }
