@@ -28,8 +28,18 @@
 # Repairing all of them is not one change, so the current crash set is pinned
 # in a baseline and this gate fails on movement in EITHER direction:
 #
-#   CRASHED and not pinned  -> a new crash, or one that was repaired and came
-#                              back. This is the regression this gate defends.
+#   not pinned and not REFUSED -> the fixture no longer earns a clean refusal.
+#                              CRASHED is the regression this gate was built
+#                              for, but the classifier distinguishes eight
+#                              outcomes and only one of them is a refusal, so
+#                              the predicate is closed over the whole set:
+#                              TIMEOUT, INFRA, ACCEPTED, SILENT_FAILURE,
+#                              REFUSED_UNDIAGNOSED and REFUSED_WITH_ARTIFACT
+#                              all fail too. Checking CRASHED membership alone
+#                              was fail-open -- a fixture that started timing
+#                              out or exiting 0 left the crashed set unchanged
+#                              and the gate passed. Found in review of the
+#                              first version of this gate.
 #   pinned and not CRASHED  -> repaired; drop it from the baseline. The pinned
 #                              set may only shrink, matching the rule in
 #                              scripts/ci/known_failure_pin_gate.sh.
@@ -81,29 +91,57 @@ while IFS= read -r f; do
     rc=$?
     set -e
     sounio_classify_compile "$rc" "$log" ""
-    printf '%s\t%s\t%s\t%s\n' "$base" "$rc" "$SOUNIO_CC_CLASS" "${SOUNIO_CC_DETAIL:-none}" \
+    # A fixture that declares its expected diagnostic must still show it: a
+    # clean refusal for an unrelated reason is not a witness for the check the
+    # fixture is about.
+    want="$(sed -n 's|^//@[[:space:]]*error-pattern:[[:space:]]*\(.*\)|\1|p' "$f" | head -1)"
+    pat_ok="n/a"
+    if [[ -n "$want" ]]; then
+        if grep -Fq -- "$want" "$log"; then pat_ok="ok"; else pat_ok="MISSING:$want"; fi
+    fi
+    printf '%s\t%s\t%s\t%s\t%s\n' "$base" "$rc" "$SOUNIO_CC_CLASS" "${SOUNIO_CC_DETAIL:-none}" "$pat_ok" \
       >> "$WORK_DIR/census.tsv"
 done < "$WORK_DIR/corpus.txt"
 
-echo "--- census (fixture / rc / class / detail) ---"
+echo "--- census (fixture / rc / class / detail / error-pattern) ---"
 cat "$WORK_DIR/census.tsv"
 
 awk -F'\t' '$3=="CRASHED"{print $1}' "$WORK_DIR/census.tsv" | LC_ALL=C sort -u > "$WORK_DIR/crashed.txt"
-new_crash="$(comm -23 "$WORK_DIR/crashed.txt" "$WORK_DIR/pinned.txt")"
+# Closed over the classifier's whole result set: exactly REFUSED is acceptable
+# for an unpinned fixture. Everything else -- CRASHED, TIMEOUT, INFRA,
+# ACCEPTED, SILENT_FAILURE, REFUSED_UNDIAGNOSED, REFUSED_WITH_ARTIFACT -- is a
+# failure, so no new outcome can slip through as a pass.
+awk -F'\t' '$3!="REFUSED"{print $1}' "$WORK_DIR/census.tsv" | LC_ALL=C sort -u > "$WORK_DIR/not_refused.txt"
+bad_unpinned="$(comm -23 "$WORK_DIR/not_refused.txt" "$WORK_DIR/pinned.txt")"
 repaired="$(comm -13 "$WORK_DIR/crashed.txt" "$WORK_DIR/pinned.txt")"
+# Scoped to unpinned rows: a pinned crasher cannot be held to its declared
+# diagnostic, and some declare a lean_single code (observe_transition_requires_plan
+# declares E200) that Madaros has no reason to emit. The pin is the statement
+# about those; the pattern is a statement about fixtures that do refuse.
+awk -F'\t' '$5 ~ /^MISSING:/{print $1}' "$WORK_DIR/census.tsv" | LC_ALL=C sort -u > "$WORK_DIR/pat_missing.txt"
+bad_pattern="$(comm -23 "$WORK_DIR/pat_missing.txt" "$WORK_DIR/pinned.txt")"
 
 n_crashed="$(wc -l < "$WORK_DIR/crashed.txt" | tr -d ' ')"
-n_new="$(printf '%s' "$new_crash" | grep -c . || true)"
+n_new="$(printf '%s' "$bad_unpinned" | grep -c . || true)"
 n_rep="$(printf '%s' "$repaired" | grep -c . || true)"
-echo "MADAROS_EPI_COMPILE_FAIL_DERIVED corpus=$n_corpus crashed=$n_crashed new_crashes=$n_new repaired_still_pinned=$n_rep"
+n_pat="$(printf '%s' "$bad_pattern" | grep -c . || true)"
+echo "MADAROS_EPI_COMPILE_FAIL_DERIVED corpus=$n_corpus crashed=$n_crashed unpinned_not_refused=$n_new repaired_still_pinned=$n_rep missing_pattern=$n_pat"
 
 fail=0
 if [[ "$n_new" -gt 0 ]]; then
-    echo "--- CRASHED and not pinned: a refusal became a crash ---" >&2
-    printf '%s\n' "$new_crash" >&2
+    echo "--- unpinned and not REFUSED: the fixture lost its clean refusal ---" >&2
     while IFS= read -r b; do
-        [[ -n "$b" ]] && { echo "=== $b (tail) ===" >&2; tail -n 12 "$WORK_DIR/$b.log" >&2; }
-    done <<< "$new_crash"
+        [[ -z "$b" ]] && continue
+        echo "$b -> $(awk -F'\t' -v k="$b" '$1==k{print $3" ("$4")"}' "$WORK_DIR/census.tsv")" >&2
+        [[ -f "$WORK_DIR/$b.log" ]] && { echo "=== $b (tail) ===" >&2; tail -n 12 "$WORK_DIR/$b.log" >&2; }
+    done <<< "$bad_unpinned"
+    fail=1
+fi
+if [[ "$n_pat" -gt 0 ]]; then
+    echo "--- refused, but not with the diagnostic the fixture declares ---" >&2
+    while IFS= read -r b; do
+        [[ -n "$b" ]] && echo "$b -> $(awk -F'\t' -v k="$b" '$1==k{print $5}' "$WORK_DIR/census.tsv")" >&2
+    done <<< "$bad_pattern"
     fail=1
 fi
 if [[ "$n_rep" -gt 0 ]]; then
@@ -113,7 +151,7 @@ if [[ "$n_rep" -gt 0 ]]; then
 fi
 
 if [[ "$fail" -ne 0 ]]; then
-    echo "MADAROS_EPI_COMPILE_FAIL_GATE=FAIL new_crashes=$n_new repaired_still_pinned=$n_rep" >&2
+    echo "MADAROS_EPI_COMPILE_FAIL_GATE=FAIL unpinned_not_refused=$n_new repaired_still_pinned=$n_rep missing_pattern=$n_pat" >&2
     exit 1
 fi
 echo "MADAROS_EPI_COMPILE_FAIL_GATE=PASS corpus=$n_corpus crashed=$n_crashed (all pinned)"
