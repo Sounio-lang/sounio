@@ -48,7 +48,7 @@ if(process.argv.includes('--selftest')){
  try{
   const fixture=path.join(tmp,'repo'),tools=path.join(tmp,'tools');fs.mkdirSync(fixture);fs.mkdirSync(tools);
   const put=(name,text,mode=0o644)=>{const p=path.join(fixture,name);fs.mkdirSync(path.dirname(p),{recursive:true});fs.writeFileSync(p,text,{mode});};
-  const files=['self-hosted/compiler/main.sio','stdlib/core.sio','tests/run-pass/a64_macos_mapped_stack.sio','scripts/ci/build_madaros_macos_arm64.sh','scripts/ci/macos_native_cache.mjs','scripts/ci/macos_native_cache_contract.mjs','.github/workflows/ci.yml',
+  const files=['self-hosted/compiler/main.sio','stdlib/core.sio','tests/run-pass/a64_macos_mapped_stack.sio','scripts/ci/build_madaros_macos_arm64.sh','scripts/ci/native_build_profile.cpp','scripts/ci/macos_native_cache.mjs','scripts/ci/macos_native_cache_contract.mjs','.github/workflows/ci.yml',
    'scripts/ci/madaros_macos_corpus.cpp','scripts/ci/madaros_macos_corpus_gate.sh','scripts/ci/madaros_macos_corpus_diagnostics_gate.sh','scripts/ci/macos_corpus_cache.mjs','scripts/ci/macos_corpus_cache_contract.mjs','scripts/ci/metal_binary64_conformance.cpp','scripts/dev/build_native_metal_runtime.sh','scripts/dev/embed_metal_softfloat.cpp','vendor/metal-softfloat/softfloat64.metal'];
   for(const f of files)put(f,'fixture recipe '+f+'\n');
   const names=['gpu_vec_add.sio',...Array.from({length:199},(_,i)=>'fixture_'+i+'.sio')];

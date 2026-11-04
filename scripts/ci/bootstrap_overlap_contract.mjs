@@ -19,7 +19,12 @@ function check(w,d) {
  assert(r.includes("    if: ${{ !cancelled() && (needs.impact.outputs.compiler == 'true' || needs.impact.outputs.full == 'true') && needs.source-bootstrap-selfhost-linux-x86_64.result == 'success' }}"),'regression selection/producer success guard changed');
  assert(m.includes('    needs: [impact, fast-checks, source-bootstrap-selfhost-linux-x86_64]\n'),'macOS must overlap regressions');
  for(const j of [p,r])assert.equal(j.split('run: bash scripts/lib/materialize_madaros_prebuilt.sh').length,2,'each job needs one materialization');
- const found=[...p.split(/(?=^      - )/m),...r.split(/(?=^      - )/m)].map(canonical);
+ assert(p.includes('--target aarch64-macos --debug-fn-map > "$MACOS_OUT.fnmap.log"'),'seed function map missing');
+ assert(p.includes('            /tmp/souc-self-hosted-arm64-macos.fnmap.log'),'seed function map artifact missing');
+ const proofCanonical=s=>canonical(s)
+  .replace(' --debug-fn-map > "$MACOS_OUT.fnmap.log"','')
+  .replace('          path: |\n            /tmp/souc-self-hosted-arm64-macos\n            /tmp/souc-self-hosted-arm64-macos.fnmap.log','          path: /tmp/souc-self-hosted-arm64-macos');
+ const found=[...p.split(/(?=^      - )/m),...r.split(/(?=^      - )/m)].map(proofCanonical);
  for(const old of baseline)assert.equal(found.filter(s=>s===canonical(old)).length,1,'omitted, altered or duplicated original proof: '+old.split('\n')[0]);
  assert(!p.includes('Source-bootstrap modular typecheck proof'),'producer still waits for modular proof');
  assert(p.includes('name: source-bootstrap-compiler-linux-x86_64')&&r.includes('name: source-bootstrap-compiler-linux-x86_64'),'same-run artifact not connected');
@@ -33,6 +38,8 @@ function check(w,d) {
 check(workflow,decision);
 if(process.argv.includes('--selftest')){
  const bad=[
+  [workflow.replace(' --debug-fn-map > "$MACOS_OUT.fnmap.log"',''),decision],
+  [workflow.replace('            /tmp/souc-self-hosted-arm64-macos.fnmap.log\n',''),decision],
   [workflow.replace('      - source-bootstrap-regressions\n',''),decision],
   [workflow,decision.replace('"source-bootstrap-regressions": truthy(impact.get("compiler")) or truthy(impact.get("full")),','"source-bootstrap-regressions": False,')],
   [workflow.replace('run: bash scripts/ci/bootstrap_generic_array_layout_gate.sh','run: true # bash scripts/ci/bootstrap_generic_array_layout_gate.sh'),decision],
