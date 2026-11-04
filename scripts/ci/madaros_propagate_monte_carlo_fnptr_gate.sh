@@ -39,12 +39,29 @@ grep -Fq 'MONTE_CARLO_FNPTR PASS' "$OUT/madaros.log" || {
     exit 1
 }
 
-export SOUNIO_SOUC_ENGINE=lean_single
+# SIO-207: the lean_single oracle must be built from this tree (stage2):
+# the committed lean seed predates wrapping_add/wrapping_mul and silently
+# miscompiles propagate's LCG, so it cannot judge this probe. Same
+# construction as the selfhost gate's stage2. Set SOUNIO_LEAN_STAGE2 to
+# reuse a prebuilt stage2 ELF.
+LEAN_STAGE2="${SOUNIO_LEAN_STAGE2:-$OUT/lean-stage2.elf}"
+if [[ ! -x "$LEAN_STAGE2" ]]; then
+  bash "$ROOT/scripts/ci/build_native_souc.sh" "$OUT/souc-host.elf" >"$OUT/lean-build.log" 2>&1 || {
+    echo "FAIL: lean stage2 host build failed"; tail -20 "$OUT/lean-build.log" || true; exit 1; }
+  chmod +x "$OUT/souc-host.elf"
+  "$OUT/souc-host.elf" self-hosted/compiler/lean_single.sio "$LEAN_STAGE2" --target x86_64-linux >>"$OUT/lean-build.log" 2>&1 || {
+    echo "FAIL: lean stage2 build failed"; tail -20 "$OUT/lean-build.log" || true; exit 1; }
+  chmod +x "$LEAN_STAGE2"
+fi
 set +e
-"$SOUC" run "$PROBE" >"$OUT/lean.log" 2>&1
+"$LEAN_STAGE2" "$PROBE" "$OUT/probe-lean.elf" --target x86_64-linux >"$OUT/lean.log" 2>&1
 LRC=$?
+if [[ "$LRC" -eq 0 ]]; then
+  chmod +x "$OUT/probe-lean.elf"
+  "$OUT/probe-lean.elf" >>"$OUT/lean.log" 2>&1
+  LRC=$?
+fi
 set -e
-unset SOUNIO_SOUC_ENGINE || true
 [[ "$LRC" -eq 0 ]] || {
     echo "FAIL: lean_single oracle rc=$LRC"
     cat "$OUT/lean.log" || true
