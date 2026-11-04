@@ -63,6 +63,7 @@ def validate_trace(name: str, steps: list[tuple[int, int, int, int]]) -> None:
             role, source = divmod(a, MAXC)
             if rule == 7:
                 assert ckind.get(witness) == 3, (name, "stoR shape", cell)
+                assert carg1[witness] == role and carg2[witness] == filler, (name, "stoR shape", cell)
                 assert carg1[witness] == role and carg2[witness] == filler, (name, "stoR target", cell)
                 assert (0, source, witness) in seen, (name, "stoR premise", cell)
             elif rule == 8:
