@@ -49,7 +49,16 @@ select_effect_tests() {
         ;;
     esac
     case "$lower" in
-      *effect*.sio|effects*.sio|fx[0-9]*.sio|handle*.sio|handler*.sio|*handler*.sio|*handle*.sio)
+      effect*.sio|effects*.sio|fx[0-9]*.sio|handle*.sio|handler*.sio|*handler*.sio|*handle*.sio)
+        selected+=("$path")
+        ;;
+      closure_effect*.sio|correlated_slot_identity_requires_effect.sio|epistemic_kernel_io_effect.sio)
+        selected+=("$path")
+        ;;
+      io_effect*.sio|kernel_*_effect.sio|missing_effect.sio|mut_effect*.sio|read_file_effect*.sio)
+        selected+=("$path")
+        ;;
+      sample_requires_sampling_effect.sio|scoped_effect*.sio|session_missing_effect.sio|user_effect*.sio)
         selected+=("$path")
         ;;
     esac
@@ -116,6 +125,10 @@ if [[ "${SOUNIO_TEST_SOUC_BIN:-}" != "$SELFTEST_MADAROS" ]]; then
 fi
 if [[ "${SOUNIO_XPAS_FATAL:-}" != "1" ]]; then
   echo "SELFTEST_FAIL bad SOUNIO_XPAS_FATAL=${SOUNIO_XPAS_FATAL:-<unset>}" >&2
+  exit 1
+fi
+if [[ "${SOUNIO_TEST_KNOWN_FAILURES_FILE:-}" != */tests/known_failures/madaros_effect_suite.txt ]]; then
+  echo "SELFTEST_FAIL bad SOUNIO_TEST_KNOWN_FAILURES_FILE=${SOUNIO_TEST_KNOWN_FAILURES_FILE:-<unset>}" >&2
   exit 1
 fi
 echo "SELFTEST_RUNNER_PASS"
@@ -201,6 +214,7 @@ sed 's/^/test=/' "$test_list"
 SOUNIO_MADAROS_AVAILABLE=1 \
 SOUNIO_SOUC_RAW_MODE=modular \
 SOUNIO_TEST_SOUC_BIN="$MADAROS_BIN" \
+SOUNIO_TEST_KNOWN_FAILURES_FILE="$ROOT_DIR/tests/known_failures/madaros_effect_suite.txt" \
 SOUNIO_XPAS_FATAL=1 \
   bash "$ROOT_DIR/scripts/run_sio_test_suite.sh" \
     --test-list "$test_list" \
