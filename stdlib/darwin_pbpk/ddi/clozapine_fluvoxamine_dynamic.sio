@@ -1,0 +1,132 @@
+// stdlib/darwin_pbpk/ddi/clozapine_fluvoxamine_dynamic.sio — the declared
+// follow-up of ddi/clozapine_fluvoxamine.sio: a DYNAMIC clozapine victim whose
+// hepatic clearance is flow/permeability-limited, so the fluvoxamine inhibition
+// is felt through the real PBPK28 transport, not as a pure intrinsic-clearance
+// ratio. Scenario library (no main).
+//
+// What this adds over the static harness
+// ---------------------------------------
+// The static file computes R = 1/(Σ fm_k·f_k + fm_other) — the fold-rise if
+// hepatic clearance were purely intrinsic (CL ∝ CLint). A real liver delivers
+// drug at a finite rate (blood flow Q and permeability-surface PS), so the
+// organ clearance is the SERIES combination of a delivery conductance and the
+// intrinsic metabolic conductance:
+//     1/CL_cyp = 1/G + 1/X,   X = intrinsic metabolic conductance (∝ CLint),
+//     G = effective delivery conductance (flow + PS).
+// When inhibition cuts X, CL_cyp falls sublinearly, so the AUC fold-rise is
+// BLUNTED relative to the static prediction. The size of the blunting is set
+// by the baseline hepatic extraction; it can only reduce the rise, never
+// amplify it. This file quantifies it for clozapine at its real clearance.
+//
+// Clearance partition (calibrated, not placeholder)
+// -------------------------------------------------
+// Total clozapine CL = 20 L/h (drugs/clozapine.sio, calibrated to the TDM
+// band). The uninhibitable remainder fm_other = 6% is a direct, non-CYP blood
+// clearance cl_nonCYP = 0.06·20 = 1.2 L/h (addresses the PR #3454 review: the
+// 6% floor is now an actual kinetic path, not an analytic-only term). The CYP
+// 94% is a hepatic interstitial sink with CLint partitioned by the independent
+// in-vitro fractions (Olesen & Linnet 2001), normalised within the CYP block.
+// The absolute CLint scale is CALIBRATED so the baseline total CL is 20 L/h.
+//
+// Steady state by constant IV infusion: at steady state Css,blood = Rate/CL,
+// so CL = Rate/Css needs no AUC quadrature. Fluvoxamine enters as the static
+// hepatic load I/Ki (ddi/clozapine_fluvoxamine.sio) — a fixed perpetrator, the
+// same assumption as the static file; what is new here is the victim's
+// flow-limited response, not the perpetrator's kinetics (its own PBPK is the
+// next layer). No clinical-validity claim (ADR009).
+
+use darwin_pbpk::core::pbpk28_params::*
+use darwin_pbpk::ddi::multidrug28::*
+use darwin_pbpk::scenarios::clozapine_oral::*
+use darwin_pbpk::ddi::clozapine_fluvoxamine::*
+
+// Target baseline total clearance (L/h) and its non-CYP share.
+pub fn clzfvx_dyn_cl_total() -> f64 { return 20.0 }
+pub fn clzfvx_dyn_cl_noncyp() -> f64 { return clzfvx_fm_other() * clzfvx_dyn_cl_total() }
+pub fn clzfvx_dyn_cl_cyp_target() -> f64 { return clzfvx_dyn_cl_total() - clzfvx_dyn_cl_noncyp() }
+
+// Within-CYP normalised weight of enzyme k (the five fm_k sum to 1 - fm_other).
+pub fn clzfvx_dyn_wcyp(k: i32) -> f64 with Div {
+    return clzfvx_fm(k) / (1.0 - clzfvx_fm_other())
+}
+
+// Inhibited fraction of the CYP intrinsic conductance at hepatic fluvoxamine
+// I (uM): φ(I) = Σ_k w_k · 1/(1 + I/Ki_k). φ(0) = 1.
+pub fn clzfvx_dyn_phi(i_uM: f64) -> f64 with Mut, Div {
+    var phi = 0.0
+    var k: i32 = 0
+    while k < 5 {
+        phi = phi + clzfvx_dyn_wcyp(k) * (1.0 / (1.0 + i_uM / clzfvx_ki_uM(k)))
+        k = k + 1
+    }
+    return phi
+}
+
+// One full steady-state simulation. Builds a fresh single-victim driver with
+// hepatic CYP CLint = w_k · clint_total_cyp and a direct non-CYP clearance
+// cl_noncyp; optionally imposes fluvoxamine at i_uM as the hepatic load; runs a
+// constant IV infusion to steady state; returns total CL = rate / Css,blood.
+pub fn clzfvx_dyn_measure_cl(
+    clint_total_cyp: f64,
+    i_uM: f64,
+    rate_mg_h: f64,
+    t_end: f64,
+    dt: f64
+) -> f64 with Mut, Div, Panic {
+    var md = md_new(true)
+    var p = clz_pbpk28_params()
+    p.cl_central = clzfvx_dyn_cl_noncyp()
+    let v = md_add_drug(&!md, p, 0.05, 0.55, 1.0)
+    var k: i32 = 0
+    while k < 5 {
+        md_set_clint(&!md, v, md_site_liver(), k, clzfvx_dyn_wcyp(k) * clint_total_cyp)
+        k = k + 1
+    }
+    if i_uM > 0.0 { clzfvx_set_fluvoxamine(&!md, i_uM) }
+    md_set_iv_rate(&!md, v, rate_mg_h)
+    md_run_to(&!md, t_end, dt)
+    let css = md_state_of(&md, v).cv[0]
+    return rate_mg_h / css
+}
+
+// Hepatic CYP clearance only (total minus the direct non-CYP path).
+pub fn clzfvx_dyn_measure_cl_cyp(
+    clint_total_cyp: f64, i_uM: f64, rate_mg_h: f64, t_end: f64, dt: f64
+) -> f64 with Mut, Div, Panic {
+    return clzfvx_dyn_measure_cl(clint_total_cyp, i_uM, rate_mg_h, t_end, dt) - clzfvx_dyn_cl_noncyp()
+}
+
+// ─── Series-resistance model, fit from two baseline points ──────────────────
+// 1/CL_cyp = 1/G + (1/beta)·(1/C), C = clint_total_cyp. Returns (inv_G, inv_beta).
+pub fn clzfvx_dyn_fit_series(
+    c1: f64, clcyp1: f64, c2: f64, clcyp2: f64
+) -> (f64, f64) with Div {
+    let inv_beta = (1.0 / clcyp2 - 1.0 / clcyp1) / (1.0 / c2 - 1.0 / c1)
+    let inv_g = 1.0 / clcyp1 - inv_beta / c1
+    return (inv_g, inv_beta)
+}
+
+// CL_cyp predicted by the fitted series model at conductance scale C.
+pub fn clzfvx_dyn_series_clcyp(inv_g: f64, inv_beta: f64, c: f64) -> f64 with Div {
+    return 1.0 / (inv_g + inv_beta / c)
+}
+
+// clint_total_cyp that makes the series model give CL_cyp = target.
+pub fn clzfvx_dyn_calibrate(inv_g: f64, inv_beta: f64, target: f64) -> f64 with Div {
+    return inv_beta / (1.0 / target - inv_g)
+}
+
+// Predicted inhibited CL_cyp at calibrated scale c_cal and hepatic fluvoxamine
+// I: the intrinsic conductance scales by φ(I), the delivery conductance G does
+// not. CL_cyp,inh = 1/(1/G + 1/(β·c_cal·φ)).
+pub fn clzfvx_dyn_predict_clcyp_inhibited(
+    inv_g: f64, inv_beta: f64, c_cal: f64, i_uM: f64
+) -> f64 with Mut, Div {
+    return 1.0 / (inv_g + inv_beta / (c_cal * clzfvx_dyn_phi(i_uM)))
+}
+
+// Dynamic fold-rise from a CL_cyp,inhibited: R = CL_base / CL_inhibited, with
+// the non-CYP path present in both.
+pub fn clzfvx_dyn_fold_rise(clcyp_inhibited: f64) -> f64 with Div {
+    return clzfvx_dyn_cl_total() / (clzfvx_dyn_cl_noncyp() + clcyp_inhibited)
+}
