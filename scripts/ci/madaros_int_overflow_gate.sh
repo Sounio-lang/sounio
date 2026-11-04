@@ -82,6 +82,26 @@ for want in "42" "-9223372036854775808" "-2" "-8"; do
   }
 done
 
+# 2b) The i64 MIN spelling is a literal, not a runtime negation of the
+# 2^63 magnitude token; it must materialise without tripping the guard.
+cat > "$OUT/min_literal.sio" <<'EOF'
+fn id(x: i64) -> i64 { x }
+fn main() with IO {
+  print_int(id(-9223372036854775808))
+  print("\n")
+}
+EOF
+if ! "$SOUC" run "$OUT/min_literal.sio" >"$OUT/min.log" 2>&1; then
+  echo "FAIL: i64 MIN literal probe did not run clean"
+  tail -10 "$OUT/min.log" || true
+  exit 1
+fi
+grep -qxF -- "-9223372036854775808" "$OUT/min.log" || {
+  echo "FAIL: i64 MIN literal did not materialise"
+  cat "$OUT/min.log" || true
+  exit 1
+}
+
 # 3) Out-of-range constant for a narrow type is a compile error (E300),
 # classified as a refusal, never a crash.
 cat > "$OUT/bad_i32.sio" <<'EOF'
