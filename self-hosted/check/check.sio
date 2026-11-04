@@ -378,13 +378,9 @@ pub struct Checker {
     pub type_depth: i64,
     pub expr_depth: i64,
     pub complexity_budget: i64,
-    pub const_int_name_bufs: [i8; 16384],
-    pub const_int_name_lens: [i64; 128],
-    pub const_int_values: [i64; 128],
-    pub const_int_known: [i64; 128], // 1=known constant int, 0=shadow/unknown
-    pub const_int_count: i64,
-    pub const_int_scope_marks: [i64; 64],
-    pub const_int_scope_depth: i64,
+    // SIO-417/d80: scoped const-int table. Heap side table (see defs.sio);
+    // only the pointer rides by-value copies (was ~19.5KB inline).
+    pub const_ints: *mut ConstIntTable,
     pub effects: EffectTable,
     pub effect_ops: EffectOpTable,
     pub handler_depth: i64,
@@ -461,15 +457,10 @@ pub struct Checker {
     // noise_sets.sio: on overflow we must lose precision, never soundness.
     pub ns_reassigned_overflow: bool,
     // SIO-417 handler backend (P3): performed-op tracking (exhaustivity),
-    // handle-frame stack, clause context for resume typing.
-    pub fx_perf_ops: [i64; 64],
-    pub fx_perf_owner: [i64; 64],
-    pub fx_perf_count: i64,
-    pub fx_frame_eff: [i64; 8],
-    pub fx_depth: i64,
-    pub fx_in_clause: i64,
-    pub fx_clause_op_ret: TypeEntry,
-    pub fx_answer_ty: TypeEntry,
+    // handle-frame stack, clause context for resume typing. Lives in the
+    // heap FxFrameTable (see defs.sio); only the pointer rides by-value
+    // copies (d80 ceiling diet: was ~1.6KB inline per Checker copy).
+    pub fx: *mut FxFrameTable,
     pub fx_op_params: *mut FxOpParamTable,
 }
 
@@ -1467,13 +1458,7 @@ pub fn checker_new() -> Checker with Mut, Panic, Div, Alloc {
         type_depth: 0,
         expr_depth: 0,
         complexity_budget: 0,
-        const_int_name_bufs: [0 as i8; 16384],
-        const_int_name_lens: [0; 128],
-        const_int_values: [0; 128],
-        const_int_known: [0; 128],
-        const_int_count: 0,
-        const_int_scope_marks: [0; 64],
-        const_int_scope_depth: 0,
+        const_ints: const_int_table_alloc(),
         effects: effect_table_new(),
         effect_ops: effect_op_table_new(),
         handler_depth: 0,
@@ -1494,14 +1479,7 @@ pub fn checker_new() -> Checker with Mut, Panic, Div, Alloc {
         ns_reassigned_names: [empty_name(); 64],
         ns_reassigned_count: 0,
         ns_reassigned_overflow: false,
-        fx_perf_ops: [0; 64],
-        fx_perf_owner: [0; 64],
-        fx_perf_count: 0,
-        fx_frame_eff: [0; 8],
-        fx_depth: 0,
-        fx_in_clause: 0,
-        fx_clause_op_ret: empty_type_entry(),
-        fx_answer_ty: empty_type_entry(),
+        fx: fx_frame_table_alloc(),
         fx_op_params: fx_op_param_table_alloc(),
     }
     let _ = setup_intrinsics(c.fn_sigs)
@@ -1601,17 +1579,7 @@ pub fn checker_init_in_place(raw: *mut Checker) with Mut, Panic, Div, Alloc {
     (*raw).type_depth = 0
     (*raw).expr_depth = 0
     (*raw).complexity_budget = 0
-    var const_name_buf_i: i64 = 0
-    while const_name_buf_i < 16384 {
-        (*raw).const_int_name_bufs[const_name_buf_i as usize] = 0 as i8
-        const_name_buf_i = const_name_buf_i + 1
-    }
-    (*raw).const_int_name_lens = [0; 128]
-    (*raw).const_int_values = [0; 128]
-    (*raw).const_int_known = [0; 128]
-    (*raw).const_int_count = 0
-    (*raw).const_int_scope_marks = [0; 64]
-    (*raw).const_int_scope_depth = 0
+    (*raw).const_ints = const_int_table_alloc()
     (*raw).effects = effect_table_new()
     (*raw).effect_ops = effect_op_table_new()
     (*raw).handler_depth = 0
@@ -1632,11 +1600,7 @@ pub fn checker_init_in_place(raw: *mut Checker) with Mut, Panic, Div, Alloc {
     (*raw).ns_reassigned_names = [empty_name(); 64]
     (*raw).ns_reassigned_count = 0
     (*raw).ns_reassigned_overflow = false
-    (*raw).fx_perf_count = 0
-    (*raw).fx_depth = 0
-    (*raw).fx_in_clause = 0
-    (*raw).fx_clause_op_ret = empty_type_entry()
-    (*raw).fx_answer_ty = empty_type_entry()
+    (*raw).fx = fx_frame_table_alloc()
     (*raw).fx_op_params = fx_op_param_table_alloc()
 }
 
@@ -1718,13 +1682,13 @@ fn checker_store_from_value(dst: *mut Checker, src: Checker) with Mut, Panic, Di
     (*dst).type_depth = src.type_depth
     (*dst).expr_depth = src.expr_depth
     (*dst).complexity_budget = src.complexity_budget
-    (*dst).const_int_name_bufs = src.const_int_name_bufs
-    (*dst).const_int_name_lens = src.const_int_name_lens
-    (*dst).const_int_values = src.const_int_values
-    (*dst).const_int_known = src.const_int_known
-    (*dst).const_int_count = src.const_int_count
-    (*dst).const_int_scope_marks = src.const_int_scope_marks
-    (*dst).const_int_scope_depth = src.const_int_scope_depth
+    (*(*dst).const_ints).name_bufs = (*src.const_ints).name_bufs
+    (*(*dst).const_ints).name_lens = (*src.const_ints).name_lens
+    (*(*dst).const_ints).values = (*src.const_ints).values
+    (*(*dst).const_ints).known = (*src.const_ints).known
+    (*(*dst).const_ints).count = (*src.const_ints).count
+    (*(*dst).const_ints).scope_marks = (*src.const_ints).scope_marks
+    (*(*dst).const_ints).scope_depth = (*src.const_ints).scope_depth
     (*dst).effects = src.effects
     (*dst).effect_ops = src.effect_ops
     (*dst).handler_depth = src.handler_depth
@@ -1745,14 +1709,14 @@ fn checker_store_from_value(dst: *mut Checker, src: Checker) with Mut, Panic, Di
     (*dst).ns_reassigned_names = src.ns_reassigned_names
     (*dst).ns_reassigned_count = src.ns_reassigned_count
     (*dst).ns_reassigned_overflow = src.ns_reassigned_overflow
-    (*dst).fx_perf_ops = src.fx_perf_ops
-    (*dst).fx_perf_owner = src.fx_perf_owner
-    (*dst).fx_perf_count = src.fx_perf_count
-    (*dst).fx_frame_eff = src.fx_frame_eff
-    (*dst).fx_depth = src.fx_depth
-    (*dst).fx_in_clause = src.fx_in_clause
-    (*dst).fx_clause_op_ret = src.fx_clause_op_ret
-    (*dst).fx_answer_ty = src.fx_answer_ty
+    (*(*dst).fx).perf_ops = (*src.fx).perf_ops
+    (*(*dst).fx).perf_owner = (*src.fx).perf_owner
+    (*(*dst).fx).perf_count = (*src.fx).perf_count
+    (*(*dst).fx).frame_eff = (*src.fx).frame_eff
+    (*(*dst).fx).depth = (*src.fx).depth
+    (*(*dst).fx).in_clause = (*src.fx).in_clause
+    (*(*dst).fx).clause_op_ret = (*src.fx).clause_op_ret
+    (*(*dst).fx).answer_ty = (*src.fx).answer_ty
     (*dst).fx_op_params = src.fx_op_params
 }
 
@@ -4317,35 +4281,35 @@ fn checker_type_is_unobserved_like(ty: TypeEntry) -> bool with Panic, Div {
 }
 
 fn checker_push_const_scope_inplace(c: *mut Checker) with Mut, Div, Panic {
-    if (*c).const_int_scope_depth < MAX_SCOPE_DEPTH {
-        (*c).const_int_scope_marks[(*c).const_int_scope_depth as usize] = (*c).const_int_count
-        (*c).const_int_scope_depth = (*c).const_int_scope_depth + 1
+    if (*(*c).const_ints).scope_depth < MAX_SCOPE_DEPTH {
+        (*(*c).const_ints).scope_marks[(*(*c).const_ints).scope_depth as usize] = (*(*c).const_ints).count
+        (*(*c).const_ints).scope_depth = (*(*c).const_ints).scope_depth + 1
     }
 }
 
 fn checker_pop_const_scope_inplace(c: *mut Checker) with Mut, Div, Panic {
-    if (*c).const_int_scope_depth > 0 {
-        (*c).const_int_scope_depth = (*c).const_int_scope_depth - 1
-        let mark = (*c).const_int_scope_marks[(*c).const_int_scope_depth as usize]
-        if mark >= 0 && mark <= (*c).const_int_count {
-            (*c).const_int_count = mark
+    if (*(*c).const_ints).scope_depth > 0 {
+        (*(*c).const_ints).scope_depth = (*(*c).const_ints).scope_depth - 1
+        let mark = (*(*c).const_ints).scope_marks[(*(*c).const_ints).scope_depth as usize]
+        if mark >= 0 && mark <= (*(*c).const_ints).count {
+            (*(*c).const_ints).count = mark
         }
     }
 }
 
 fn checker_const_int_bind_raw_inplace(c: *mut Checker, name: Name, known: i64, value: i64) with Mut, Div, Panic {
-    var idx = (*c).const_int_count
+    var idx = (*(*c).const_ints).count
     if idx >= MAX_CONST_INT_BINDINGS {
         idx = MAX_CONST_INT_BINDINGS - 1
     } else {
-        (*c).const_int_count = (*c).const_int_count + 1
+        (*(*c).const_ints).count = (*(*c).const_ints).count + 1
     }
     // Write the inline payload directly. Copying `[i8; 16384]` out to a local
     // and passing `&!` loaded word 0 (zero on a fresh heap_alloc) and the
     // ref-array store resolved handle 0 — SIGSEGV at address 0x20.
     checker_const_name_write_raw(c, idx, name)
-    (*c).const_int_known[idx as usize] = known
-    (*c).const_int_values[idx as usize] = value
+    (*(*c).const_ints).known[idx as usize] = known
+    (*(*c).const_ints).values[idx as usize] = value
 }
 
 fn checker_const_name_write_raw(c: *mut Checker, idx: i64, name: Name) with Mut, Panic, Div {
@@ -4353,14 +4317,14 @@ fn checker_const_name_write_raw(c: *mut Checker, idx: i64, name: Name) with Mut,
         return
     }
     let clamped_len = if name.len > 128 { 128 } else { name.len }
-    (*c).const_int_name_lens[idx as usize] = clamped_len
+    (*(*c).const_ints).name_lens[idx as usize] = clamped_len
     let base = idx * 128
     var j: i64 = 0
     while j < 128 {
         if j < clamped_len {
-            (*c).const_int_name_bufs[(base + j) as usize] = name.buf[j as usize]
+            (*(*c).const_ints).name_bufs[(base + j) as usize] = name.buf[j as usize]
         } else {
-            (*c).const_int_name_bufs[(base + j) as usize] = 0 as i8
+            (*(*c).const_ints).name_bufs[(base + j) as usize] = 0 as i8
         }
         j = j + 1
     }
@@ -4371,13 +4335,13 @@ fn checker_const_name_eq_raw(c: *mut Checker, idx: i64, name: Name) -> bool with
         return false
     }
     let clamped_len = if name.len > 128 { 128 } else { name.len }
-    if (*c).const_int_name_lens[idx as usize] != clamped_len {
+    if (*(*c).const_ints).name_lens[idx as usize] != clamped_len {
         return false
     }
     let base = idx * 128
     var j: i64 = 0
     while j < clamped_len {
-        if (*c).const_int_name_bufs[(base + j) as usize] != name.buf[j as usize] {
+        if (*(*c).const_ints).name_bufs[(base + j) as usize] != name.buf[j as usize] {
             return false
         }
         j = j + 1
@@ -8431,7 +8395,6 @@ fn checker_check_expr_group_b_inplace(c: *mut Checker, e: Expr) -> (bool, TypeEn
         return (true, checker_check_resume_expr_inplace(c, e))
     } else { return (false, ty_error()) }
 }
-
 fn checker_check_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     if checker_expr_depth_exceeded((*c).expr_depth) {
         checker_report_error_at_inplace(c, e.span, 61, (*c).expr_depth, MAX_EXPR_DEPTH, 0)
@@ -8561,20 +8524,20 @@ fn checker_check_perform_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry wit
         checker_report_error_at_inplace(c, e.span, 297, 0, 0, 0)
     }
     // FX-8 bookkeeping: record for the nearest enclosing frame of this effect.
-    var d = (*c).fx_depth - 1
+    var d = (*(*c).fx).depth - 1
     while d >= 0 {
-        if (*c).fx_frame_eff[d as usize] == eff_id {
-            if (*c).fx_perf_count < 64 {
+        if (*(*c).fx).frame_eff[d as usize] == eff_id {
+            if (*(*c).fx).perf_count < 64 {
                 var dup_rec = false
                 var di: i64 = 0
-                while di < (*c).fx_perf_count {
-                    if (*c).fx_perf_owner[di as usize] == d && (*c).fx_perf_ops[di as usize] == op_idx { dup_rec = true }
+                while di < (*(*c).fx).perf_count {
+                    if (*(*c).fx).perf_owner[di as usize] == d && (*(*c).fx).perf_ops[di as usize] == op_idx { dup_rec = true }
                     di = di + 1
                 }
                 if !dup_rec {
-                    (*c).fx_perf_ops[(*c).fx_perf_count as usize] = op_idx
-                    (*c).fx_perf_owner[(*c).fx_perf_count as usize] = d
-                    (*c).fx_perf_count = (*c).fx_perf_count + 1
+                    (*(*c).fx).perf_ops[(*(*c).fx).perf_count as usize] = op_idx
+                    (*(*c).fx).perf_owner[(*(*c).fx).perf_count as usize] = d
+                    (*(*c).fx).perf_count = (*(*c).fx).perf_count + 1
                 }
             } else {
                 // Fail closed: an unrecorded perform would escape FX-8.
@@ -8598,14 +8561,14 @@ fn checker_check_resume_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with
         Some(v) => { vty = checker_check_expr_inplace(c, *v) }
         None => {}
     }
-    if (*c).fx_in_clause != 1 {
+    if (*(*c).fx).in_clause != 1 {
         checker_report_error_at_inplace(c, e.span, 293, 0, 0, 0)
         return ty_error()
     }
-    if vty.kind != TypeKind::TyError && (*c).fx_clause_op_ret.kind != TypeKind::TyError && !types_equal(vty, (*c).fx_clause_op_ret) {
+    if vty.kind != TypeKind::TyError && (*(*c).fx).clause_op_ret.kind != TypeKind::TyError && !types_equal(vty, (*(*c).fx).clause_op_ret) {
         checker_report_error_at_inplace(c, e.span, 1, 0, 0, 0)
     }
-    (*c).fx_answer_ty
+    (*(*c).fx).answer_ty
 }
 
 // ---- FX-7 linearity: max resume uses on any single path (saturates at 2).
@@ -8772,19 +8735,19 @@ fn fx_check_one_clause_inplace(c: *mut Checker, cl: HandlerClause, answer_ty: Ty
     if fx_clause_uses(cl) > 1 {
         checker_report_error_at_inplace(c, cl.span, 294, 0, 0, 0)
     }
-    let saved_in_clause = (*c).fx_in_clause
-    let saved_op_ret = (*c).fx_clause_op_ret
-    let saved_answer = (*c).fx_answer_ty
-    (*c).fx_answer_ty = answer_ty
+    let saved_in_clause = (*(*c).fx).in_clause
+    let saved_op_ret = (*(*c).fx).clause_op_ret
+    let saved_answer = (*(*c).fx).answer_ty
+    (*(*c).fx).answer_ty = answer_ty
     var result = ty_unit()
     if op_idx < 0 {
         // Catch-all: resume is unavailable here (283 fires in resume check).
-        (*c).fx_in_clause = 2
-        (*c).fx_clause_op_ret = ty_error()
+        (*(*c).fx).in_clause = 2
+        (*(*c).fx).clause_op_ret = ty_error()
         result = fx_check_clause_body_inplace(c, cl)
     } else {
-        (*c).fx_in_clause = 1
-        (*c).fx_clause_op_ret = (*c).effect_ops.entries[op_idx as usize].ret_ty
+        (*(*c).fx).in_clause = 1
+        (*(*c).fx).clause_op_ret = (*c).effect_ops.entries[op_idx as usize].ret_ty
         type_env_push_scope_mut(&!(*c).env)
         var pp = cl.params
         var pi: i64 = 0
@@ -8806,9 +8769,9 @@ fn fx_check_one_clause_inplace(c: *mut Checker, cl: HandlerClause, answer_ty: Ty
         result = fx_check_clause_body_inplace(c, cl)
         type_env_pop_scope_mut(&!(*c).env)
     }
-    (*c).fx_in_clause = saved_in_clause
-    (*c).fx_clause_op_ret = saved_op_ret
-    (*c).fx_answer_ty = saved_answer
+    (*(*c).fx).in_clause = saved_in_clause
+    (*(*c).fx).clause_op_ret = saved_op_ret
+    (*(*c).fx).answer_ty = saved_answer
     if result.kind != TypeKind::TyError && answer_ty.kind != TypeKind::TyError && !types_equal(result, answer_ty) {
         checker_report_error_at_inplace(c, cl.span, 1, 0, 0, 0)
     }
@@ -8894,9 +8857,9 @@ fn fx_check_clauses_inplace(c: *mut Checker, e: Expr, eff_id: i64, slot: i64, bo
     // by later frames, so older records with the same owner are not ours.
     if slot >= 0 && !has_catchall {
         var i: i64 = base
-        while i < (*c).fx_perf_count {
-            if (*c).fx_perf_owner[i as usize] == slot {
-                let need = (*c).fx_perf_ops[i as usize]
+        while i < (*(*c).fx).perf_count {
+            if (*(*c).fx).perf_owner[i as usize] == slot {
+                let need = (*(*c).fx).perf_ops[i as usize]
                 var covered = false
                 var si2: i64 = 0
                 while si2 < seen_count {
@@ -8927,13 +8890,13 @@ fn checker_check_handle_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with
         }
     }
     var slot: i64 = 0 - 1
-    let base = (*c).fx_perf_count
+    let base = (*(*c).fx).perf_count
     let saved_sig = (*c).current_sig_id
     if eff_id >= 0 {
-        if (*c).fx_depth < 8 {
-            slot = (*c).fx_depth
-            (*c).fx_frame_eff[slot as usize] = eff_id
-            (*c).fx_depth = (*c).fx_depth + 1
+        if (*(*c).fx).depth < 8 {
+            slot = (*(*c).fx).depth
+            (*(*c).fx).frame_eff[slot as usize] = eff_id
+            (*(*c).fx).depth = (*(*c).fx).depth + 1
         } else {
             checker_report_error_at_inplace(c, e.span, 299, 0, 0, 0)
         }
@@ -8945,7 +8908,7 @@ fn checker_check_handle_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with
     (*c).current_sig_id = saved_sig
     (*c).current_effects = saved_effects
     (*c).current_effect_count = saved_count
-    if slot >= 0 { (*c).fx_depth = (*c).fx_depth - 1 }
+    if slot >= 0 { (*(*c).fx).depth = (*(*c).fx).depth - 1 }
     if eff_id < 0 { return body_ty }
     var result = body_ty
     match e.handler_clauses {
@@ -8958,8 +8921,8 @@ fn checker_check_handle_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with
             }
             if slot >= 0 {
                 var ri: i64 = base
-                while ri < (*c).fx_perf_count {
-                    if (*c).fx_perf_owner[ri as usize] == slot {
+                while ri < (*(*c).fx).perf_count {
+                    if (*(*c).fx).perf_owner[ri as usize] == slot {
                         checker_report_error_at_inplace(c, e.span, 295, 0, 0, 0)
                     }
                     ri = ri + 1
@@ -8969,15 +8932,15 @@ fn checker_check_handle_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with
     }
     var w: i64 = base
     var r: i64 = base
-    while r < (*c).fx_perf_count {
-        if (*c).fx_perf_owner[r as usize] != slot {
-            (*c).fx_perf_ops[w as usize] = (*c).fx_perf_ops[r as usize]
-            (*c).fx_perf_owner[w as usize] = (*c).fx_perf_owner[r as usize]
+    while r < (*(*c).fx).perf_count {
+        if (*(*c).fx).perf_owner[r as usize] != slot {
+            (*(*c).fx).perf_ops[w as usize] = (*(*c).fx).perf_ops[r as usize]
+            (*(*c).fx).perf_owner[w as usize] = (*(*c).fx).perf_owner[r as usize]
             w = w + 1
         }
         r = r + 1
     }
-    (*c).fx_perf_count = w
+    (*(*c).fx).perf_count = w
     result
 }
 // *mut ExprRange handler: checks both endpoints in place (returns only TypeEntry),
@@ -13569,6 +13532,7 @@ fn checker_check_call_direct_sig_inplace(c: *mut Checker, e: Expr, direct_sig_id
     ns_result
 }
 
+
 fn checker_check_call_indirect_inplace(c: *mut Checker, e: Expr, callee_is_local_fn: bool) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     // Callee via the *mut spine, matched locally so the call path does not pass
     // Option<Box<Expr>> through another *mut helper boundary.
@@ -15636,11 +15600,11 @@ fn checker_const_int_bind_value_inplace(c: *mut Checker, name: Name, value: i64)
 // *mut transcription of const_int_lookup (6390) — reads the const-int table
 // through (*c) instead of copying the whole Checker by value.
 fn checker_const_int_lookup_mut(c: *mut Checker, name: Name) -> (bool, i64) with Mut, Panic, Div {
-    var i = (*c).const_int_count - 1
+    var i = (*(*c).const_ints).count - 1
     while i >= 0 {
         if checker_const_name_eq_raw(c, i, name) {
-            if (*c).const_int_known[i as usize] == 1 {
-                return (true, (*c).const_int_values[i as usize])
+            if (*(*c).const_ints).known[i as usize] == 1 {
+                return (true, (*(*c).const_ints).values[i as usize])
             }
             return (false, 0)
         }
@@ -20612,20 +20576,22 @@ impl Checker {
 
     fn push_const_scope(self) -> Checker with Mut, Div, Panic {
         var c = self
-        if c.const_int_scope_depth < MAX_SCOPE_DEPTH {
-            c.const_int_scope_marks[c.const_int_scope_depth as usize] = c.const_int_count
-            c.const_int_scope_depth = c.const_int_scope_depth + 1
+        var t = c.const_ints
+        if (*t).scope_depth < MAX_SCOPE_DEPTH {
+            (*t).scope_marks[(*t).scope_depth as usize] = (*t).count
+            (*t).scope_depth = (*t).scope_depth + 1
         }
         c
     }
 
     fn pop_const_scope(self) -> Checker with Mut, Div, Panic {
         var c = self
-        if c.const_int_scope_depth > 0 {
-            c.const_int_scope_depth = c.const_int_scope_depth - 1
-            let mark = c.const_int_scope_marks[c.const_int_scope_depth as usize]
-            if mark >= 0 && mark <= c.const_int_count {
-                c.const_int_count = mark
+        var t = c.const_ints
+        if (*t).scope_depth > 0 {
+            (*t).scope_depth = (*t).scope_depth - 1
+            let mark = (*t).scope_marks[(*t).scope_depth as usize]
+            if mark >= 0 && mark <= (*t).count {
+                (*t).count = mark
             }
         }
         c
@@ -20633,19 +20599,19 @@ impl Checker {
 
     fn const_int_bind_raw(self, name: Name, known: i64, value: i64) -> Checker with Mut, Div, Panic {
         var c = self
-        var idx = c.const_int_count
+        var idx = (*c.const_ints).count
         if idx >= MAX_CONST_INT_BINDINGS {
             idx = MAX_CONST_INT_BINDINGS - 1
         } else {
-            c.const_int_count = c.const_int_count + 1
+            (*c.const_ints).count = (*c.const_ints).count + 1
         }
-        var bufs = c.const_int_name_bufs
-        var lens = c.const_int_name_lens
+        var bufs = (*c.const_ints).name_bufs
+        var lens = (*c.const_ints).name_lens
         checker_const_name_write(&! bufs, &! lens, idx, name)
-        c.const_int_name_bufs = bufs
-        c.const_int_name_lens = lens
-        c.const_int_known[idx as usize] = known
-        c.const_int_values[idx as usize] = value
+        (*c.const_ints).name_bufs = bufs
+        (*c.const_ints).name_lens = lens
+        (*c.const_ints).known[idx as usize] = known
+        (*c.const_ints).values[idx as usize] = value
         c
     }
 
@@ -20658,11 +20624,12 @@ impl Checker {
     }
 
     fn const_int_lookup(self, name: Name) -> (bool, i64) with Mut, Panic, Div {
-        var i = self.const_int_count - 1
+        var t = self.const_ints
+        var i = (*t).count - 1
         while i >= 0 {
-            if checker_const_name_eq(&self.const_int_name_bufs, &self.const_int_name_lens, i, name) {
-                if self.const_int_known[i as usize] == 1 {
-                    return (true, self.const_int_values[i as usize])
+            if checker_const_name_eq(&(*t).name_bufs, &(*t).name_lens, i, name) {
+                if (*t).known[i as usize] == 1 {
+                    return (true, (*t).values[i as usize])
                 }
                 return (false, 0)
             }
@@ -22113,9 +22080,9 @@ fn call_expr_is_gpu_barrier(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Di
                 return false
             }
             let n = (*expr).name
-            if name_eq(n, make_name("gpu_barrier")) { return true }
-            if name_eq(n, make_name("gpu_barrier_sync")) { return true }
-            if name_eq(n, make_name("gpu_sync_threads")) { return true }
+            if name_eq_str(&n, "gpu_barrier")) { return true }
+            if name_eq_str(&n, "gpu_barrier_sync")) { return true }
+            if name_eq_str(&n, "gpu_sync_threads")) { return true }
             false
         }
         None => false
@@ -22191,11 +22158,11 @@ pub fn checker_swap_darwin_math(enabled: bool) -> bool with Mut {
 
 fn name_is_unimplemented_native_math(n: Name) -> bool with Mut, Panic, Div, Alloc, IO {
     if CHECKER_DARWIN_MATH { return false }
-    if name_eq(n, make_name("tan")) { return true }
-    if name_eq(n, make_name("atan")) { return true }
-    if name_eq(n, make_name("tanh")) { return true }
-    if name_eq(n, make_name("asin")) { return true }
-    if name_eq(n, make_name("acos")) { return true }
+    if name_eq_str(&n, "tan")) { return true }
+    if name_eq_str(&n, "atan")) { return true }
+    if name_eq_str(&n, "tanh")) { return true }
+    if name_eq_str(&n, "asin")) { return true }
+    if name_eq_str(&n, "acos")) { return true }
     false
 }
 
@@ -22203,20 +22170,20 @@ fn name_is_unimplemented_native_math(n: Name) -> bool with Mut, Panic, Div, Allo
 // Kept out of name_is_native_backend_builtin so extern_builtin_mirror_gate
 // stays a two-list truth; E250 sites consult this separately.
 fn name_is_dynlink_extern(n: Name) -> bool with Mut, Panic, Div, Alloc, IO {
-    if name_eq(n, make_name("kl14b_add")) { return true }
-    if name_eq(n, make_name("kl14c_add")) { return true }
-    if name_eq(n, make_name("kl14c_mul")) { return true }
-    if name_eq(n, make_name("kl14c_neg")) { return true }
-    if name_eq(n, make_name("kl14d_a")) { return true }
-    if name_eq(n, make_name("kl14d_b")) { return true }
-    if name_eq(n, make_name("kl14d_align_probe")) { return true }   // #2537 witness
-    if name_eq(n, make_name("ZSTD_compress")) { return true }
-    if name_eq(n, make_name("ZSTD_decompress")) { return true }
-    if name_eq(n, make_name("ZSTD_isError")) { return true }
-    if name_eq(n, make_name("dlopen")) { return true }
-    if name_eq(n, make_name("dlsym")) { return true }
-    if name_eq(n, make_name("dlclose")) { return true }
-    if name_eq(n, make_name("dlerror")) { return true }
+    if name_eq_str(&n, "kl14b_add")) { return true }
+    if name_eq_str(&n, "kl14c_add")) { return true }
+    if name_eq_str(&n, "kl14c_mul")) { return true }
+    if name_eq_str(&n, "kl14c_neg")) { return true }
+    if name_eq_str(&n, "kl14d_a")) { return true }
+    if name_eq_str(&n, "kl14d_b")) { return true }
+    if name_eq_str(&n, "kl14d_align_probe")) { return true }   // #2537 witness
+    if name_eq_str(&n, "ZSTD_compress")) { return true }
+    if name_eq_str(&n, "ZSTD_decompress")) { return true }
+    if name_eq_str(&n, "ZSTD_isError")) { return true }
+    if name_eq_str(&n, "dlopen")) { return true }
+    if name_eq_str(&n, "dlsym")) { return true }
+    if name_eq_str(&n, "dlclose")) { return true }
+    if name_eq_str(&n, "dlerror")) { return true }
     false
 }
 
@@ -22259,30 +22226,30 @@ fn name_is_native_backend_builtin(n: Name) -> bool with Mut, Panic, Div, Alloc, 
     // codegen_x86_linux.sio (native_v2_emit_builtin_by_id_into + the two
     // name-based emit blocks) or it silently returns a fabricated 0. Per-name
     // EXECUTION witnesses gate this in CI.
-    if name_eq(n, make_name("malloc")) { return true }           // id 23 (heap_alloc)
-    if name_eq(n, make_name("free")) { return true }             // id 24 (heap_free)
-    if name_eq(n, make_name("getpid")) { return true }           // id 28
-    if name_eq(n, make_name("getppid")) { return true }          // id 29
-    if name_eq(n, make_name("exit")) { return true }             // id 30
-    if name_eq(n, make_name("abort")) { return true }            // id 31
-    if name_eq(n, make_name("system")) { return true }           // id 32
+    if name_eq_str(&n, "malloc")) { return true }           // id 23 (heap_alloc)
+    if name_eq_str(&n, "free")) { return true }             // id 24 (heap_free)
+    if name_eq_str(&n, "getpid")) { return true }           // id 28
+    if name_eq_str(&n, "getppid")) { return true }          // id 29
+    if name_eq_str(&n, "exit")) { return true }             // id 30
+    if name_eq_str(&n, "abort")) { return true }            // id 31
+    if name_eq_str(&n, "system")) { return true }           // id 32
     // Defect A: raw pointer-indexed accessor family (see check.sio's
     // checker_collect_runtime_builtins_inplace and codegen_x86_linux.sio's
     // emit_builtin_read_offset64_into / emit_builtin_write_offset64_into).
-    if name_eq(n, make_name("read_i64")) { return true }         // id 33
-    if name_eq(n, make_name("write_i64")) { return true }        // id 34
-    if name_eq(n, make_name("read_f64")) { return true }         // id 35
-    if name_eq(n, make_name("write_f64")) { return true }        // id 36
-    if name_eq(n, make_name("acknowledge")) { return true }      // id 37
-    if name_eq(n, make_name("require_confidence")) { return true } // id 38
+    if name_eq_str(&n, "read_i64")) { return true }         // id 33
+    if name_eq_str(&n, "write_i64")) { return true }        // id 34
+    if name_eq_str(&n, "read_f64")) { return true }         // id 35
+    if name_eq_str(&n, "write_f64")) { return true }        // id 36
+    if name_eq_str(&n, "acknowledge")) { return true }      // id 37
+    if name_eq_str(&n, "require_confidence")) { return true } // id 38
     // libm names this backend answers with an exact hardware instruction:
     // sqrt (id 14, already allowlisted above as a plain builtin) plus these
     // two. Both are ROUNDSD with an explicit rounding mode, correctly rounded
     // by the ISA including -0.0, the infinities and NaN, so neither carries an
     // error budget. pow and tgamma are deliberately NOT here -- they are
     // approximations and belong behind their own witnesses.
-    if name_eq(n, make_name("floor")) { return true }            // id 47
-    if name_eq(n, make_name("ceil")) { return true }             // id 48
+    if name_eq_str(&n, "floor")) { return true }            // id 47
+    if name_eq_str(&n, "ceil")) { return true }             // id 48
     // pow and tgamma. These two ARE approximations, so the paragraph above
     // deliberately excluded them; they are listed now because they finally
     // have emitters -- emit_builtin_ffi_pow / emit_builtin_ffi_tgamma in
@@ -22290,13 +22257,13 @@ fn name_is_native_backend_builtin(n: Name) -> bool with Mut, Panic, Div, Alloc, 
     // oracle measures 0.76 ulp (pow) and 3.64 ulp (tgamma), so both still
     // belong behind their own reference vectors; what changes here is only
     // that a call no longer fabricates 0.
-    if name_eq(n, make_name("pow")) { return true }              // id 49
-    if name_eq(n, make_name("tgamma")) { return true }           // id 50
-    if name_eq(n, make_name("__sounio_seq_push")) { return true } // id 51
-    if name_eq(n, make_name("__sounio_seq_get")) { return true }  // id 52
-    if name_eq(n, make_name("__sounio_seq_set")) { return true }  // id 53
-    if name_eq(n, make_name("__sounio_seq_push_scalar")) { return true } // id 70
-    if name_eq(n, make_name("array_concat")) { return true }      // id 72 (SIO-389: working emitter emit_builtin_array_concat + dispatch/persist arms)
+    if name_eq_str(&n, "pow")) { return true }              // id 49
+    if name_eq_str(&n, "tgamma")) { return true }           // id 50
+    if name_eq_str(&n, "__sounio_seq_push")) { return true } // id 51
+    if name_eq_str(&n, "__sounio_seq_get")) { return true }  // id 52
+    if name_eq_str(&n, "__sounio_seq_set")) { return true }  // id 53
+    if name_eq_str(&n, "__sounio_seq_push_scalar")) { return true } // id 70
+    if name_eq_str(&n, "array_concat")) { return true }      // id 72 (SIO-389: working emitter emit_builtin_array_concat + dispatch/persist arms)
     // read_byte/arena_mark/arena_reset/panic/untracked_counter (ids 55-59) are
     // NOT mirrored here on purpose. Each is already bound
     // checker_bind_import_unknown_inplace, arity-unchecked; adding it here too
@@ -22314,14 +22281,14 @@ fn name_is_native_backend_builtin(n: Name) -> bool with Mut, Panic, Div, Alloc, 
 // default fail-closed: adding an implicit backend builtin without declaring its
 // arity must produce E010 instead of silently dropping machine arguments.
 fn native_backend_builtin_arity_is_valid(n: Name, argc: i64) -> bool with Mut, Panic, Div, Alloc, IO {
-    if name_eq(n, make_name("str_slice")) {
+    if name_eq_str(&n, "str_slice")) {
         return argc == 2 || argc == 3
     }
     if argc == 0 {
-        return name_eq(n, make_name("get_arg_count"))
-            || name_eq(n, make_name("getpid"))
-            || name_eq(n, make_name("getppid"))
-            || name_eq(n, make_name("abort"))
+        return name_eq_str(&n, "get_arg_count"))
+            || name_eq_str(&n, "getpid"))
+            || name_eq_str(&n, "getppid"))
+            || name_eq_str(&n, "abort"))
     }
     if argc == 1 {
         return name_eq(n, make_name("print_int"))
@@ -22352,29 +22319,29 @@ fn native_backend_builtin_arity_is_valid(n: Name, argc: i64) -> bool with Mut, P
             || name_eq(n, make_name("tgamma"))
     }
     if argc == 2 {
-        return name_eq(n, make_name("str_eq"))
-            || name_eq(n, make_name("starts_with"))
-            || name_eq(n, make_name("str_concat"))
-            || name_eq(n, make_name("str_char_at"))
-            || name_eq(n, make_name("str_from_bytes"))
-            || name_eq(n, make_name("read_i64"))
-            || name_eq(n, make_name("read_f64"))
-            || name_eq(n, make_name("acknowledge"))
-            || name_eq(n, make_name("require_confidence"))
-            || name_eq(n, make_name("pow"))
-            || name_eq(n, make_name("heap_realloc"))
-            || name_eq(n, make_name("__sounio_seq_push"))
-            || name_eq(n, make_name("__sounio_seq_push_scalar"))
-            || name_eq(n, make_name("__sounio_seq_get"))
+        return name_eq_str(&n, "str_eq"))
+            || name_eq_str(&n, "starts_with"))
+            || name_eq_str(&n, "str_concat"))
+            || name_eq_str(&n, "str_char_at"))
+            || name_eq_str(&n, "str_from_bytes"))
+            || name_eq_str(&n, "read_i64"))
+            || name_eq_str(&n, "read_f64"))
+            || name_eq_str(&n, "acknowledge"))
+            || name_eq_str(&n, "require_confidence"))
+            || name_eq_str(&n, "pow"))
+            || name_eq_str(&n, "heap_realloc"))
+            || name_eq_str(&n, "__sounio_seq_push"))
+            || name_eq_str(&n, "__sounio_seq_push_scalar"))
+            || name_eq_str(&n, "__sounio_seq_get"))
     }
     if argc == 3 {
-        return name_eq(n, make_name("write_file"))
-            || name_eq(n, make_name("write_i64"))
-            || name_eq(n, make_name("write_f64"))
-            || name_eq(n, make_name("__sounio_seq_set"))
+        return name_eq_str(&n, "write_file"))
+            || name_eq_str(&n, "write_i64"))
+            || name_eq_str(&n, "write_f64"))
+            || name_eq_str(&n, "__sounio_seq_set"))
     }
     if argc == 7 {
-        return name_eq(n, make_name("syscall6"))
+        return name_eq_str(&n, "syscall6"))
     }
     false
 }
@@ -22386,18 +22353,18 @@ fn call_expr_is_gpu_builtin(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Di
                 return false
             }
             let n = (*expr).name
-            if name_eq(n, make_name("gpu_thread_id_x")) { return true }
-            if name_eq(n, make_name("gpu_thread_id_y")) { return true }
-            if name_eq(n, make_name("gpu_thread_id_z")) { return true }
-            if name_eq(n, make_name("gpu_block_id_x")) { return true }
-            if name_eq(n, make_name("gpu_block_id_y")) { return true }
-            if name_eq(n, make_name("gpu_block_id_z")) { return true }
-            if name_eq(n, make_name("gpu_block_dim_x")) { return true }
-            if name_eq(n, make_name("gpu_block_dim_y")) { return true }
-            if name_eq(n, make_name("gpu_block_dim_z")) { return true }
-            if name_eq(n, make_name("gpu_barrier")) { return true }
-            if name_eq(n, make_name("gpu_barrier_sync")) { return true }
-            if name_eq(n, make_name("gpu_sync_threads")) { return true }
+            if name_eq_str(&n, "gpu_thread_id_x")) { return true }
+            if name_eq_str(&n, "gpu_thread_id_y")) { return true }
+            if name_eq_str(&n, "gpu_thread_id_z")) { return true }
+            if name_eq_str(&n, "gpu_block_id_x")) { return true }
+            if name_eq_str(&n, "gpu_block_id_y")) { return true }
+            if name_eq_str(&n, "gpu_block_id_z")) { return true }
+            if name_eq_str(&n, "gpu_block_dim_x")) { return true }
+            if name_eq_str(&n, "gpu_block_dim_y")) { return true }
+            if name_eq_str(&n, "gpu_block_dim_z")) { return true }
+            if name_eq_str(&n, "gpu_barrier")) { return true }
+            if name_eq_str(&n, "gpu_barrier_sync")) { return true }
+            if name_eq_str(&n, "gpu_sync_threads")) { return true }
             false
         }
         None => false
