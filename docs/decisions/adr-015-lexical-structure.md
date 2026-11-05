@@ -27,7 +27,7 @@ The founder ruled on all thirteen items on 2026-10-24. Probe names refer to the 
 
 | # | item | ruling | discriminating probes |
 |---|---|---|---|
-| 1 | integer literal that does not fit its type | **Refuse**, with a location, on both engines | `int_huge`, `int_max_plus1`, `int_hex_over` refused on both |
+| 1 | integer literal that fits no 64-bit integer type | **Refuse**, with a location, on both engines | `int_huge`, `int_hex_over` refused on both; `int_max_plus1` is exactly 2^63 and stays in the width-valid `u64` band |
 | 2 | float with a leading dot (`.5`) | **Refuse now**, with a diagnostic that suggests `0.5`. Reopen as 0.5 only when both engines agree on the value | `flt_leading_dot` refused on both |
 | 3 | escape set | **Closed set**: `\n \t \r \0 \\ \" \'`, `\xHH`, `\u{…}`; anything else refused. **A string may contain NUL**: strings are bytes plus length, and Madaros must stop truncating at the first NUL | `str_escape_hex`, `str_escape_nul` (prints three bytes on both), `str_escape_unicode`, `str_escape_unknown` refused |
 | 4 | character literals and lifetimes | `'x'` is a **Unicode scalar value**. `'name` with no closing quote is a **lifetime**, so `&'static str` lexes as a lifetime, not as the character `s` followed by `tatic`. A one-character literal with no closing quote is refused | `chr_basic`, `chr_utf8` (scalar value), `chr_unknown_escape` refused, `chr_unclosed` refused; stdlib `&'static` still compiles |
@@ -43,7 +43,7 @@ The founder ruled on all thirteen items on 2026-10-24. Probe names refer to the 
 
 ## Consequences
 
-- Two silent wrong values (items 1 and 2) become refusals. Programs that relied on wrapping literals or on `.5` stop compiling, with a location.
+- Two silent wrong values (items 1 and 2) become refusals. Programs that relied on literals wider than `u64` or on `.5` stop compiling, with a location. The width-valid `(i64 MAX, u64 MAX]` band is not refused at parse time; choosing a signed or unsigned interpretation belongs to the checker.
 - `0_⊥`, the typed bottom zero of the ontology-algebra research record, can no longer be an ordinary identifier. The grammar and meaning of `⊥` and `⊤` are decided in ADR-016.
 - Item 4 removes the lifetime collision measured in D-33: refusing an unclosed character literal no longer breaks `&'static` in the standard library, because `'static` lexes as a lifetime first.
 - Item 7 makes unit literals normative before the unit grammar is fixed; until D-24 is decided, the implementation must refuse unit suffixes it cannot resolve rather than drop them.
