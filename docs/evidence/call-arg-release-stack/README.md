@@ -9,9 +9,12 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.evidence.call-
 
 # Constant-stack call-argument borrow release
 
-Status: the requested targeted stack/borrow acceptance gates PASS on the pinned
-source-built candidate. The supplementary full checker-source check also PASSED. Its following
-ordinary rebuild is running, and the full stdlib sprint remains OPEN.
+Status reconciled on 2026-11-05: the historical sprint-snapshot stack/borrow
+gates and checker-source check PASS. Its ordinary rebuild completed with the
+same a08c5660... hash. The full stdlib step was CANCELLED and remains unqualified.
+A clean-main baseline at a232a6b1d5 reproduces call64.check exit 139 at 8 MiB
+and passes that check at 16 MiB. The main-compatible source proposal is
+UNAPPLIED while the checker file is held by another lane.
 
 ## Scope and source correspondence
 
