@@ -80,3 +80,12 @@ the targeted 8 MiB acceptance result.
 The release-loop patch preserves four arguments on its requested base. The
 current main branch's separate three-argument change needs integration review.
 No merge to main or compiler installation has been performed.
+
+## Correction recovered on 2026-11-05
+
+The ordinary rebuild completed successfully and is byte-identical to the
+mapped candidate. The full stdlib step 20996.6 was cancelled when the parent
+build allocation ended; it was not still running after that event. The wrapper
+status file contains 0 despite signal cancellation and is not a valid success
+receipt. A future full suite needs its own allocation and explicit signal
+status handling. See TERMINAL_RECONCILIATION_20261105.md.

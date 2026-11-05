@@ -170,3 +170,14 @@ whole-sprint completion. No merge to main is authorized.
 
 Committed text extracts normalise trailing whitespace; raw diagnostics and
 byte-for-byte comparisons remain preserved in the worker results and archive.
+
+## Terminal reconciliation on 2026-11-05
+
+The ordinary rebuild previously recorded as running completed with status 0
+and the same a08c5660... compiler hash. Full stdlib step 20996.6 was cancelled
+(0:15); its auxiliary zero status does not establish acceptance. See
+TERMINAL_RECONCILIATION_20261105.md and the recovered accounting. Clean-main
+baseline 22425 built adb912b2... but reproduces call64.check SIGSEGV at 8 MiB;
+control 22426 passes that check at 16 MiB. The three-argument integration patch
+is prepared and dry-run checked, but remains UNAPPLIED while devpass holds
+check.sio. Historical sprint qualification above remains dated to its source.
