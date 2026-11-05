@@ -14021,47 +14021,55 @@ fn checker_check_callee_effects_inplace(c: *mut Checker, span: Span, callee_effe
 }
 
     fn checker_release_call_arg_borrows_inplace(c: *mut Checker, args: Option<Box<ExprList> >, params: Option<Box<FnParamList> >, call_start_borrows: BorrowEnv) with Mut, Panic, Div, Alloc, IO {
-        match args {
-            None => {}
-            Some(arg_list) => {
-                let arg_expr = (*arg_list).head
-                var implicit_release_kind: i64 = 0  // 0=none, 1=shared, 2=exclusive
-                var next_params: Option<Box<FnParamList> > = None
+        // Keep traversal stack usage independent of call arity.
+        // call_start_borrows remains accepted for caller compatibility.
+        var arg_cursor = args
+        var param_cursor = params
+        var done = false
+        while !done {
+            match arg_cursor {
+                None => { done = true }
+                Some(arg_list) => {
+                    let arg_expr = (*arg_list).head
+                    var implicit_release_kind: i64 = 0  // 0=none, 1=shared, 2=exclusive
+                    var next_params: Option<Box<FnParamList> > = None
 
-                match params {
-                    None => {}
-                    Some(param_list) => {
-                        let param = (*param_list).head
-                        if param.ty.kind == TypeKind::TyRef {
-                            implicit_release_kind = 1
-                        } else if param.ty.kind == TypeKind::TyRefMut {
-                            implicit_release_kind = 2
+                    match param_cursor {
+                        None => {}
+                        Some(param_list) => {
+                            let param = (*param_list).head
+                            if param.ty.kind == TypeKind::TyRef {
+                                implicit_release_kind = 1
+                            } else if param.ty.kind == TypeKind::TyRefMut {
+                                implicit_release_kind = 2
+                            }
+                            next_params = (*param_list).tail
                         }
-                        next_params = (*param_list).tail
                     }
-                }
 
-                if arg_expr.kind == ExprKind::ExprIdent && implicit_release_kind != 0 {
-                    // Release borrows unconditionally after call returns.
-                    // Previous logic used state delta (before_pair vs current_pair)
-                    // which failed when consecutive calls borrow the same variable
-                    // (the second call saw before_pair.0 == 2 from the first call's
-                    // un-released borrow, and skipped the release).
-                    if implicit_release_kind == 1 || implicit_release_kind == 2 {
-                        (*c).borrows = (*c).borrows.release_borrow(arg_expr.name)
+                    if arg_expr.kind == ExprKind::ExprIdent && implicit_release_kind != 0 {
+                        // Release borrows unconditionally after call returns.
+                        // Previous logic used state delta (before_pair vs current_pair)
+                        // which failed when consecutive calls borrow the same variable
+                        // (the second call saw before_pair.0 == 2 from the first call's
+                        // un-released borrow, and skipped the release).
+                        if implicit_release_kind == 1 || implicit_release_kind == 2 {
+                            (*c).borrows = (*c).borrows.release_borrow(arg_expr.name)
+                        }
                     }
-                }
 
-                if arg_expr.kind == ExprKind::ExprUnary &&
-                   (arg_expr.un_op == UnaryOp::OpRef || arg_expr.un_op == UnaryOp::OpRefMut) {
-                    let borrow_name = checker_borrow_place_name(c, arg_expr.left)
-                    if !name_is_empty(borrow_name) {
-                        // Unconditionally release call-site borrows after call returns
-                        (*c).borrows = (*c).borrows.release_borrow(borrow_name)
+                    if arg_expr.kind == ExprKind::ExprUnary &&
+                       (arg_expr.un_op == UnaryOp::OpRef || arg_expr.un_op == UnaryOp::OpRefMut) {
+                        let borrow_name = checker_borrow_place_name(c, arg_expr.left)
+                        if !name_is_empty(borrow_name) {
+                            // Unconditionally release call-site borrows after call returns
+                            (*c).borrows = (*c).borrows.release_borrow(borrow_name)
+                        }
                     }
-                }
 
-                checker_release_call_arg_borrows_inplace(c, (*arg_list).tail, next_params, call_start_borrows)
+                    arg_cursor = (*arg_list).tail
+                    param_cursor = next_params
+                }
             }
         }
     }
