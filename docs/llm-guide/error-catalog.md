@@ -477,7 +477,7 @@ page is not a fresh execution receipt.
 | E278 | type-checker/enums | error | enum variant pattern has the wrong number of payload sub-patterns for its declaration (KL-20) | — |
 | E279 | type-checker/enums | error | an enum whose variants carry payloads is not an integer: `==`/`!=` or an `as` integer cast on it would use its tagged cell's address (KL-20); binding such a value to an integer is an ordinary mismatch | — |
 | E280 | type-checker/enums | error | match over an enum whose variants carry payloads is not exhaustive: some variant is matched by no arm; a guarded arm or a refutable payload sub-pattern does not cover its variant (KL-20) | — |
-| E281 | lexer (Madaros) | error | unterminated or malformed character literal: a one-character literal with no closing quote, `''`, or a two-character `'ab'` | ADR-015 row 4. `'name` with no closing quote is a lifetime (no token), not a literal; `'é'` is the scalar 233. An unknown escape in a character literal is E274. |
+| E281 | lexer (Madaros, lean_single) | error | unterminated or malformed character literal: a one-character literal with no closing quote, `''`, or a two-character `'ab'` | ADR-015 row 4. `'name` with no closing quote is a lifetime (no token), not a literal; `'é'` is the scalar 233. An unknown escape in a character literal is E274. |
 | E290 | type-checker/effects | error | unknown effect in handle/perform (SIO-417) | — |
 | E291 | type-checker/effects | error | unknown operation for effect (SIO-417) | — |
 | E292 | type-checker/effects | error | perform of effect not declared or handled here (SIO-417) | — |
