@@ -83,9 +83,9 @@ def validate_trace(name: str, steps: list[tuple[int, int, int, int]]) -> None:
         seen.add((kind, cell // MAXC, cell % MAXC))
 
 
-def main() -> None:
-    text = sys.stdin.read()
+def parse_traces(text: str) -> dict[str, list[tuple[int, int, int, int]]]:
     traces: dict[str, list[tuple[int, int, int, int]]] = {}
+    current = None
     for line in text.splitlines():
         begin = re.match(r"^(TRACE_[A-Z_]+)_BEGIN$", line)
         if begin:
@@ -97,9 +97,20 @@ def main() -> None:
         if end:
             current = None
             continue
-        match = step_re.match(line)
-        if match:
+        if line.startswith("STEP"):
+            # A malformed STEP line is an invalid proof step, not noise:
+            # skipping it would leave the step census unchanged while the
+            # trace text claims a step the oracle never validated.
+            match = step_re.match(line)
+            assert match is not None, ("malformed STEP line", line)
+            assert current is not None, ("STEP line outside any trace", line)
             traces[current].append(tuple(map(int, match.groups())))
+    return traces
+
+
+def main() -> None:
+    text = sys.stdin.read()
+    traces = parse_traces(text)
 
     expected = {
         "TRACE_TRANSITIVE": (0, 4 * MAXC + 1, 3),
@@ -161,8 +172,24 @@ def main() -> None:
     else:
         raise AssertionError("unknown proof-step kind was accepted")
 
+    # Negative control for the parser: a malformed STEP line (here a negative
+    # rule field) inside an otherwise valid trace must be rejected, not
+    # silently skipped while the step census stays unchanged.
+    malformed_text = (
+        "TRACE_TRANSITIVE_BEGIN\n"
+        f"STEP 0 {4 * MAXC + 0} 0 {4 * MAXC + 0}\n"
+        "STEP 0 1 1 -1\n"
+        "TRACE_TRANSITIVE_END\n"
+    )
+    try:
+        parse_traces(malformed_text)
+    except AssertionError as exc:
+        assert exc.args[0][0] == "malformed STEP line", exc
+    else:
+        raise AssertionError("malformed STEP line was silently ignored")
+
     assert "ONTOLOGY_ELPLUS_EXPLANATION_OK" in text
-    print("ONTOLOGY_ELPLUS_PROOF_ORACLE_NEGATIVE_OK rtos_source=refused seed_witnesses=refused unknown_kind=refused")
+    print("ONTOLOGY_ELPLUS_PROOF_ORACLE_NEGATIVE_OK rtos_source=refused seed_witnesses=refused unknown_kind=refused malformed_step=refused")
     print(f"ONTOLOGY_ELPLUS_PROOF_ORACLE_OK traces={len(traces)} steps={total_steps} rules=0..11")
 
 
