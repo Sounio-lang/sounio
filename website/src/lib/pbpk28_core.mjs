@@ -2003,3 +2003,148 @@ export function runMidazolamDDIResponse(iOverKiGrid) {
     return { iOverKi: r, F, clH, aucr: (F / F0) * (clH0 / clH) };
   });
 }
+
+// Aripiprazole single oral dose (SIO-523): parent only, two parallel
+// hepatic CYP sinks (CYP3A4 constitutive + CYP2D6 phenotypic) folded into
+// one implicit liver sink — linear sinks add exactly. CL values derived
+// from label t1/2 + Vd (see drugs/aripiprazole.sio: CL_3A4 1.92,
+// CL_2D6_NM 1.81 L/h, cl_central 0). Kp assumed targeting label Vd
+// (~410 L); PS flow-limited except brain/adipose/bone (SIO-550, CNS
+// exception). Dehydro-aripiprazole explicitly out of scope (follow-up).
+// Reuses the coupled-CN machinery (vfxCnStep, merExpNeg).
+export const MW_ARIPIPRAZOLE = 448.39;
+
+export const ARP_DOSE_DEFAULT = 15.0;   // mg, single oral IR tablet
+export const ARP_F_DEFAULT = 0.87;      // label absolute bioavailability
+export const ARP_KA_DEFAULT = 1.2;      // h^-1, calibrated to Tmax ~4.1 h
+export const ARP_CL_CENTRAL = 0.0;      // hepatic only (<1% urinary unchanged)
+export const ARP_CL_3A4 = 0.23;         // L/h, constitutive (kernel-calibrated)
+export const ARP_CL_2D6_NM = 0.21;      // L/h, CYP2D6 at NM (kernel-calibrated)
+
+// CYP2D6 pathway scale by phenotype (darwin_pbpk convention 0=PM, 1=IM,
+// 2=NM, 3=UM). PM 0.0 label-derived; IM/UM CPIC activity-score logic.
+export const ARP_2D6_SCALE = Object.freeze([0.0, 0.5, 1.0, 1.5]);
+
+export const ARP_LIVER = 1;   // CYP formation/elimination site (organ 1)
+
+export const KP_ARIPIPRAZOLE = Object.freeze([
+  1.00,  // 0 blood (definition)
+  12.0,  // 1 liver
+  8.0,   // 2 kidney
+  6.0,   // 3 brain (CNS entry — D2 partial agonist)
+  5.0,   // 4 heart
+  8.0,   // 5 lung
+  8.0,   // 6 muscle
+  4.0,   // 7 adipose
+  8.0,   // 8 gut
+  3.0,   // 9 skin
+  1.5,   // 10 bone
+  8.0,   // 11 spleen
+  6.0,   // 12 pancreas
+  6.0,   // 13 other
+]);
+
+export const PS_ARIPIPRAZOLE = Object.freeze([
+  0.0,   // 0 blood
+  90.0,  // 1 liver (flow-limited)
+  74.0,  // 2 kidney (flow-limited)
+  15.0,  // 3 brain (CNS entry)
+  16.0,  // 4 heart (flow-limited)
+  350.0, // 5 lung (flow-limited)
+  42.0,  // 6 muscle (flow-limited)
+  8.0,   // 7 adipose (reduced)
+  55.0,  // 8 gut (flow-limited)
+  21.0,  // 9 skin (flow-limited)
+  8.0,   // 10 bone (slow)
+  10.0,  // 11 spleen (flow-limited)
+  8.0,   // 12 pancreas (flow-limited)
+  13.0,  // 13 other (flow-limited)
+]);
+
+// One Lie-Trotter step: lagged exact gut absorption, parent CN with the
+// summed parallel CYP sink solved implicitly on the liver. Mirrors arp_step
+// in scenarios/aripiprazole_oral.sio. Returns the step's absorbed and
+// CYP-eliminated masses for the exact mass audit.
+function arpStep(st, dt, clCyp) {
+  // Exact first-order gut absorption over the step; the gut empties a full
+  // fraction per step while only F reaches the blood — (1 - F) destroyed
+  // as first-pass loss (same convention as the oral IR lanes).
+  const fracAbs = 1.0 - merExpNeg(-ARP_KA_DEFAULT * dt);
+  const gutFrac = st.gut * fracAbs;
+  const absorbAmt = ARP_F_DEFAULT * gutFrac;
+  let gutNew = st.gut - gutFrac;
+  if (gutNew < 0) gutNew = 0;
+  const parentInput = absorbAmt / dt;
+
+  const out = vfxCnStep(st.pCv, st.pCt, KP_ARIPIPRAZOLE, PS_ARIPIPRAZOLE, ARP_CL_CENTRAL,
+                        parentInput, dt, ARP_LIVER, clCyp);
+  return { pCv: out.cv, pCt: out.ct, gut: gutNew,
+           absorbed: absorbAmt, cyp: out.removed };
+}
+
+function arpZeroState() {
+  return {
+    pCv: new Float64Array(N), pCt: new Float64Array(N),
+    gut: ARP_DOSE_DEFAULT, t: 0.0,
+    cumAbs: 0.0, cumCyp: 0.0,
+  };
+}
+
+/**
+ * Integrate the aripiprazole single-dose scenario (15 mg oral IR) at NM (or a
+ * chosen CYP2D6 phenotype) and sample parent organ-average trajectories at
+ * the given times. Returns a record per sample with {cv,ct,avg}[14],
+ * cumulative absorbed/CYP masses, body mass and the exact CN mass-identity
+ * residual. Default dt = 0.01 h matches the stdlib scenario; pheno default
+ * 2 = NM (the parity reference).
+ */
+export function runAripiprazoleScenario(sampleTimes, { dt = 0.01, pheno = 2 } = {}) {
+  if (!(Number.isFinite(dt) && dt > 0 && dt <= 1)) {
+    throw new RangeError(`dt must be a finite positive step <= 1 h, got ${dt}`);
+  }
+  if (!(Number.isInteger(pheno) && pheno >= 0 && pheno <= 3)) {
+    throw new RangeError(`pheno must be 0=PM, 1=IM, 2=NM or 3=UM, got ${pheno}`);
+  }
+  if (!(Array.isArray(sampleTimes) && sampleTimes.every(Number.isFinite))) {
+    throw new RangeError('sampleTimes must be an array of finite numbers');
+  }
+  const sampleSteps = [];
+  for (let i = 0; i < sampleTimes.length; i++) {
+    const prev = i === 0 ? 0.0 : sampleTimes[i - 1];
+    if (i === 0 ? sampleTimes[0] < 0.0 : !(sampleTimes[i] > prev)) {
+      throw new RangeError(`sampleTimes must be >= 0 and strictly increasing, got ${sampleTimes[i]} at index ${i} after ${prev}`);
+    }
+    const n = Math.round(sampleTimes[i] / dt);
+    if (!(n >= 0) || Math.abs(n * dt - sampleTimes[i]) > 1e-9) {
+      throw new RangeError(`sampleTimes must be a whole number of dt steps from 0, got ${sampleTimes[i]} at dt = ${dt}`);
+    }
+    sampleSteps.push(n);
+  }
+  const clCyp = ARP_CL_3A4 + ARP_CL_2D6_NM * ARP_2D6_SCALE[pheno];
+  let st = arpZeroState();
+  const out = [];
+  let done = 0;
+  for (let j = 0; j < sampleTimes.length; j++) {
+    const target = sampleTimes[j];
+    while (done < sampleSteps[j]) {
+      const s = arpStep(st, dt, clCyp);
+      st = {
+        pCv: s.pCv, pCt: s.pCt, gut: s.gut, t: st.t + dt,
+        cumAbs: st.cumAbs + s.absorbed, cumCyp: st.cumCyp + s.cyp,
+      };
+      done++;
+    }
+    const avg = new Float64Array(N);
+    for (let i = 0; i < N; i++) {
+      avg[i] = vfxOrganAverage(st.pCv, st.pCt, i);
+    }
+    const mass = vfxTotalMass(st.pCv, st.pCt);
+    out.push({
+      t: target,
+      pCv: Float64Array.from(st.pCv), pCt: Float64Array.from(st.pCt), avg,
+      absorbed: st.cumAbs, cyp: st.cumCyp, mass,
+      res: mass - (st.cumAbs - st.cumCyp),
+    });
+  }
+  return out;
+}
