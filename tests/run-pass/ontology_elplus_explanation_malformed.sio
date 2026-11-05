@@ -1,0 +1,91 @@
+//@ run-pass
+//@ expect-stdout: ONTOLOGY_ELPLUS_EXPLANATION_MALFORMED_OK
+// Malformed provenance regressions. Each case crafts metadata that a
+// proof-carrying reconstruction must refuse with a negative result BEFORE
+// emitting a step or dereferencing a witness-driven index; every one of
+// these shapes was previously accepted (or panicked) instead of refused.
+
+use ontology::elplus_explain::{elplus_trace_new, elplus_explanation_new, elplus_explain_subsumption, elplus_explain_edge}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var s: [bool; 4096] = [false; 4096]
+    var r: [bool; 32768] = [false; 32768]
+    var pack: [i64; 704] = [0; 704]
+    // Concept 8 is the top concept (ckind 1); concepts 9 and 16 are
+    // conjunctions (ckind 2); concept 10 is the existential ex r1.C9.
+    pack[8] = 1
+    pack[9] = 2
+    pack[64 + 9] = 2
+    pack[128 + 9] = 0
+    pack[16] = 2
+    pack[64 + 16] = 1
+    pack[128 + 16] = 0
+    pack[10] = 3
+    pack[64 + 10] = 1
+    pack[128 + 10] = 9
+    var i: i64 = 0
+    while i < 512 { pack[192 + i] = 0 - 1; i = i + 1 }
+    pack[192 + 1 * 64 + 9] = 10
+
+    // 1. Reflexive seed metadata on a non-reflexive cell: s[1] = true,
+    // srule[1] = 1, swit[1] = 1 claims S(0,1) is a reflexivity leaf even
+    // though 0 != 1. Must be refused, not emitted as a one-step proof.
+    var trace = elplus_trace_new()
+    var out = elplus_explanation_new()
+    s[1] = true
+    trace.srule[1] = 1
+    trace.swit[1] = 1
+    if elplus_explain_subsumption(&s, &r, &pack, &trace, &!out, 0, 1) != 0 - 5 { return 20 }
+    if out.count != 0 { return 21 }
+
+    // 2. Stated seed whose witness does not identify its own cell.
+    trace = elplus_trace_new()
+    s[4 * 64 + 0] = true
+    trace.srule[4 * 64 + 0] = 0
+    trace.swit[4 * 64 + 0] = 999
+    if elplus_explain_subsumption(&s, &r, &pack, &trace, &!out, 4, 0) != 0 - 5 { return 22 }
+
+    // 3. Role edges have no stated-leaf rule: r[0] = true with a freshly
+    // initialized trace (rrule[0] = 0) must be refused, not emitted as a
+    // one-step rule-0 proof with no premises.
+    trace = elplus_trace_new()
+    r[0] = true
+    if elplus_explain_edge(&s, &r, &pack, &trace, &!out, 0, 0, 0) != 0 - 5 { return 23 }
+
+    // 4. RtoS whose witness edge starts at a different concept than the
+    // conclusion's source: stated S(4,10), its edge R(1,4,9), and the
+    // invalid conclusion S(3,10). The existential target is valid, but the
+    // premise edge has source 4 rather than 3.
+    trace = elplus_trace_new()
+    trace.srule[4 * 64 + 10] = 0
+    trace.swit[4 * 64 + 10] = 4 * 64 + 10
+    s[4 * 64 + 10] = true
+    r[(1 * 64 + 4) * 64 + 9] = true
+    trace.rrule[(1 * 64 + 4) * 64 + 9] = 7
+    trace.rwit[(1 * 64 + 4) * 64 + 9] = 10
+    s[3 * 64 + 10] = true
+    trace.srule[3 * 64 + 10] = 11
+    trace.swit[3 * 64 + 10] = (1 * 64 + 4) * 64 + 9
+    if elplus_explain_subsumption(&s, &r, &pack, &trace, &!out, 3, 10) != 0 - 5 { return 24 }
+
+    // 5. Conjunction introduction whose witness names a different
+    // conjunction than the conclusion's target: S(4,16) claiming rule 6
+    // with witness 9.
+    trace = elplus_trace_new()
+    s[4 * 64 + 16] = true
+    trace.srule[4 * 64 + 16] = 6
+    trace.swit[4 * 64 + 16] = 9
+    if elplus_explain_subsumption(&s, &r, &pack, &trace, &!out, 4, 16) != 0 - 5 { return 25 }
+
+    // 6. Composition witness decoding outside trace.chains: rrule = 10 with
+    // rwit = 1536 decodes to chain index 24, beyond the eight recorded
+    // chains. Must be refused, not panic on an out-of-bounds access.
+    trace = elplus_trace_new()
+    r[(0 * 64 + 4) * 64 + 3] = true
+    trace.rrule[(0 * 64 + 4) * 64 + 3] = 10
+    trace.rwit[(0 * 64 + 4) * 64 + 3] = 1536
+    if elplus_explain_edge(&s, &r, &pack, &trace, &!out, 0, 4, 3) != 0 - 5 { return 26 }
+
+    println("ONTOLOGY_ELPLUS_EXPLANATION_MALFORMED_OK refused=6")
+    return 0
+}
