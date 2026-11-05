@@ -22,9 +22,9 @@ Os ADRs de [`README.md`](README.md) registram decisões já tomadas; este arquiv
 | [D-03](#d-03) | Certificado de suporte de base `Q` para admitir produtos de sedenions (E251) | #2380 |
 | [D-04](#d-04) | `LibraryId` como entidade de FFI de primeira classe (passo C fail-closed implementado) | #2535 |
 | [D-05](#d-05) | Semântica de interposição de símbolos de `LibraryId` (fechado: Opção A escopo global ELF) | #2536 |
-| [D-06](#d-06) | Repositório canônico de produção (R3): corte e remoção de fontes | #1122 |
+| [D-06](#d-06) | Repositório canônico de produção (R3) (fechado: Opção A respondido/corte em proposta dedicada) | #1122 |
 | [D-07](#d-07) | Linha de pesquisa epistêmica "source-fresh aliasing / associador": reaterrissar ou aposentar | #1423 |
-| [D-08](#d-08) | Hessiana do cérebro sedenion: reenquadrar a hipótese nula | #1484 |
+| [D-08](#d-08) | Hessiana do cérebro sedenion: resultado nulo (fechado: Opção A resultado negativo corroborado) | #1484 |
 | [D-09](#d-09) | EISA-H: onde mora o detector de ZD e o repositório de hardware | #839 |
 | [D-10](#d-10) | Cadeia de bootstrap `stage0 → boot4` | #725 |
 | [D-11](#d-11) | Suíte `compile-fail` neutra de engine | #2241 |
@@ -102,6 +102,7 @@ Os ADRs de [`README.md`](README.md) registram decisões já tomadas; este arquiv
 - **Pergunta:** o mapeamento está respondido (comentários de 2026-07-20); o corte e a remoção dos pacotes de `main` serão feitos?
 - **Opções:** (A) fechar como respondido e abrir decisão separada de corte; (B) cortar agora; (C) abandonar R3.
 - **Recomendação:** (A).
+- **Status / Resolução:** **Fechado sob a Opção (A)**. A issue #1122 fica fechada como respondida/concluída quanto ao mapeamento canônico de pacotes e repositórios de produção R3. A extração física dos pacotes (`packages/{epistemic-core,sounio-formats,sounio-io-primitives,sounio-units}`) de `main` é diferida para proposta e execução dedicadas de corte de repositório.
 - **Teste discriminante:** `packages/{epistemic-core,sounio-formats,sounio-io-primitives,sounio-units}` ausentes de `main` e os cinco repositórios-alvo nos mesmos heads (`3e7d49fb`, `4d6987ce`, `b991a4ea`, `229d310f`, `a22f66e0`).
 - **Causa localizada:** os quatro pacotes seguem em `main`, sem alteração desde `d834ab4e5`.
 
@@ -122,6 +123,7 @@ Os ADRs de [`README.md`](README.md) registram decisões já tomadas; este arquiv
 - **Pergunta científica:** a hipótese "ASD tem mais direções nulas que ADHD" é reenquadrada ou descartada, dado que o falso nulo foi corrigido e a Hessiana não é identicamente zero?
 - **Opções:** (A) registrar o resultado negativo corroborado entre engines e descartar a hipótese; (B) reenquadrar a hipótese com outra métrica (traço/anisotropia); (C) repetir com outra topologia.
 - **Recomendação:** (A) com (B) como seguimento.
+- **Status / Resolução:** **Fechado sob a Opção (A)**. Registrado o resultado negativo corroborado entre engines (`Null dims = 0/16` para ASD e ADHD tanto em Madaros quanto em `lean_single`, com traço e anisotropia concordando em ≥ 6 algarismos significativos), descartando formalmente a hipótese de direções nulas diferenciais como artefato do bug prévio de efeitos/aliasing. Reenquadramento por anisotropia/traço permanece como trabalho investigativo futuro.
 - **Teste discriminante:** `Null dims = 0/16` em ASD e ADHD nos dois engines; traço ASD `24.594517`, ADHD `−9.941127`, anisotropia `9.156645` (Madaros) / `9.156641` (`lean_single`), concordando em ≥ 6 algarismos significativos.
 - **Causa localizada:** sem defeito de código restante; o falso nulo vinha de efeitos (corrigido em `c63315965`, #1745) e de aliasing (#1480).
 
