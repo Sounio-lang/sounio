@@ -44,7 +44,7 @@ fn scenario(m: &!Llama, rt: &Runtime, use_gpu: bool, pagedev: bool) -> bool with
     var pka = paged_kv_new_batch(m, 16)
     var pva = paged_kv_new_batch(m, 16)
     var sa: [SvSlot; 4] = [SvSlot { off: 0 - 1, nid: 0, cur: 0, gen: 0, maxgen: 0, last: 0 }; 4]
-    var qa = SvQueue { off: [0; 8], n: [0; 8], pmax: [0; 8], vs: [0 - 1; 8], xl: [0; 8], vl: [0; 8], gn: [0; 8], count: 0 }
+    var qa = SvQueue { off: [0; 8], n: [0; 8], pmax: [0; 8], vs: [0 - 1; 8], xl: [0; 8], vl: [0; 8], gn: [0; 8], ss: [0 - 1; 8], count: 0 }
     var rslot: [i64; 16] = [0; 16]
     var rpos: [i64; 16] = [0; 16]
     var toks: [i64; 16] = [0; 16]
@@ -56,11 +56,13 @@ fn scenario(m: &!Llama, rt: &Runtime, use_gpu: bool, pagedev: bool) -> bool with
     var ascnt: [i64; 4] = [0; 4]
     var axlen: [i64; 4] = [0; 4]
     var avvalid: [i64; 4] = [0; 4]
+    var t_sos: [i64; 4] = [0 - 1; 4]
+    var t_ids: [CpuBuf; 8] = [CpuBuf { data: 0 as *mut f64, len: 0 }; 8]
     // split-path state.
     var pkb = paged_kv_new_batch(m, 16)
     var pvb = paged_kv_new_batch(m, 16)
     var sb: [SvSlot; 4] = [SvSlot { off: 0 - 1, nid: 0, cur: 0, gen: 0, maxgen: 0, last: 0 }; 4]
-    var qb = SvQueue { off: [0; 8], n: [0; 8], pmax: [0; 8], vs: [0 - 1; 8], xl: [0; 8], vl: [0; 8], gn: [0; 8], count: 0 }
+    var qb = SvQueue { off: [0; 8], n: [0; 8], pmax: [0; 8], vs: [0 - 1; 8], xl: [0; 8], vl: [0; 8], gn: [0; 8], ss: [0 - 1; 8], count: 0 }
     var fslot: [i64; 16] = [0; 16]
     var fpos: [i64; 16] = [0; 16]
     var ftoks: [i64; 16] = [0; 16]
@@ -97,23 +99,23 @@ fn scenario(m: &!Llama, rt: &Runtime, use_gpu: bool, pagedev: bool) -> bool with
     while turn < 16 {
         turn = turn + 1
         if turn == 1 {
-            qa.count = svb_qpush(&!qa, 0, 4, amax)
-            qb.count = svb_qpush(&!qb, 0, 4, amax)
+            qa.count = svb_qpush(&!qa, 0, 4, amax, 0 - 1)
+            qb.count = svb_qpush(&!qb, 0, 4, amax, 0 - 1)
         }
         if turn == 2 && !pushed_b {
-            qa.count = svb_qpush(&!qa, 4, 3, bmax)
-            qb.count = svb_qpush(&!qb, 4, 3, bmax)
+            qa.count = svb_qpush(&!qa, 4, 3, bmax, 0 - 1)
+            qb.count = svb_qpush(&!qb, 4, 3, bmax, 0 - 1)
             pushed_b = true
         }
         if pushed_b && !pushed_ca && (donea[0] == 1 || donea[1] == 1) {
-            qa.count = svb_qpush(&!qa, 7, 3, cmax)
+            qa.count = svb_qpush(&!qa, 7, 3, cmax, 0 - 1)
             pushed_ca = true
         }
         if pushed_b && !pushed_cb && (doneb[0] == 1 || doneb[1] == 1) {
-            qb.count = svb_qpush(&!qb, 7, 3, cmax)
+            qb.count = svb_qpush(&!qb, 7, 3, cmax, 0 - 1)
             pushed_cb = true
         }
-        let out = svb_pump(m, &!pka, &!pva, &!sa, &bank, &!qa, rt, use_gpu, pagedev, chunk, &!rslot, &!rpos, &!toks, &!kind, &!rowtok, &!meta, &!aspill, &!avspill, &!ascnt, &!axlen, &!avvalid)
+        let out = svb_pump(m, &!pka, &!pva, &!sa, &!bank, &!qa, rt, use_gpu, pagedev, chunk, &!rslot, &!rpos, &!toks, &!kind, &!rowtok, &!meta, &!aspill, &!avspill, &!ascnt, &!axlen, &!avvalid, &!t_sos, &t_ids)
         qa.count = meta[1]
         var z: i64 = 0
         while z < 4 {
@@ -121,7 +123,7 @@ fn scenario(m: &!Llama, rt: &Runtime, use_gpu: bool, pagedev: bool) -> bool with
             fpdone[z as usize] = 0
             z = z + 1
         }
-        let fout = svb_pump_fwd(m, &!pkb, &!pvb, &!sb, &bank, &!qb, rt, use_gpu, pagedev, chunk, &!fslot, &!fpos, &!ftoks, &!fkind, &!frowtok, &!fseed, &!fmeta, &!fspill, &!fvspill, &!fcnt, &!fxlen, &!fvvalid)
+        let fout = svb_pump_fwd(m, &!pkb, &!pvb, &!sb, &!bank, &!qb, rt, use_gpu, pagedev, chunk, &!fslot, &!fpos, &!ftoks, &!fkind, &!frowtok, &!fseed, &!fmeta, &!fspill, &!fvspill, &!fcnt, &!fxlen, &!fvvalid, &!t_sos, &t_ids)
         qb.count = fmeta[1]
         let n = meta[0]
         let fn2 = fmeta[0]
