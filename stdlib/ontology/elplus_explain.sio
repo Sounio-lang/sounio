@@ -582,11 +582,22 @@ fn elplus_explain_fact_inner(
         let cell = a * ELPLUS_MAXC + b
         if !s[cell] { return 0 - 2 }
         let rule = trace.srule[cell]
+        if rule < 0 { return 0 - 3 }
         if rule <= 2 {
-            return elplus_explain_emit(out, 0, cell, rule, trace.swit[cell])
+            // Seed metadata must reconstruct the leaf it claims: the witness
+            // identifies this cell (the fixpoint seeds swit[i] = i), and the
+            // rule's shape must match (a, b). Emitting first would turn
+            // malformed provenance into a successful one-step proof.
+            let wit = trace.swit[cell]
+            if wit != cell { return 0 - 5 }
+            if rule == 1 && a != b { return 0 - 5 }
+            if rule == 2 && (b < 0 || b >= ELPLUS_MAXC || pack[b] != 1) { return 0 - 5 }
+            if rule == 0 && (a == b || (b >= 0 && b < ELPLUS_MAXC && pack[b] == 1)) { return 0 - 5 }
+            return elplus_explain_emit(out, 0, cell, rule, wit)
         }
         if rule == 3 {
             let mid = trace.swit[cell]
+            if mid < 0 || mid >= ELPLUS_MAXC { return 0 - 5 }
             var rc = elplus_explain_fact(s, r, pack, trace, out, 0, a, mid)
             if rc < 0 { return rc }
             rc = elplus_explain_fact(s, r, pack, trace, out, 0, mid, b)
@@ -594,13 +605,24 @@ fn elplus_explain_fact_inner(
             return elplus_explain_emit(out, 0, cell, rule, mid)
         }
         if rule == 4 || rule == 5 {
+            // Conjunction elimination: the witness must name a conjunction
+            // (ckind 2) whose selected argument is exactly the conclusion's
+            // target before any premise is reconstructed.
             let d = trace.swit[cell]
+            if d < 0 || d >= ELPLUS_MAXC { return 0 - 5 }
+            if pack[d] != 2 { return 0 - 5 }
+            if rule == 4 && pack[64 + d] != b { return 0 - 5 }
+            if rule == 5 && pack[128 + d] != b { return 0 - 5 }
             let rc = elplus_explain_fact(s, r, pack, trace, out, 0, a, d)
             if rc < 0 { return rc }
             return elplus_explain_emit(out, 0, cell, rule, d)
         }
         if rule == 6 {
+            // Conjunction introduction: the witness must name the
+            // conclusion's own conjunction concept, not a different one.
             let d = trace.swit[cell]
+            if d < 0 || d >= ELPLUS_MAXC { return 0 - 5 }
+            if pack[d] != 2 || d != b { return 0 - 5 }
             var rc = elplus_explain_fact(s, r, pack, trace, out, 0, a, pack[64 + d])
             if rc < 0 { return rc }
             rc = elplus_explain_fact(s, r, pack, trace, out, 0, a, pack[128 + d])
@@ -608,8 +630,19 @@ fn elplus_explain_fact_inner(
             return elplus_explain_emit(out, 0, cell, rule, d)
         }
         if rule == 11 {
+            // RtoS: the witness edge must start at the conclusion's source
+            // and its existential must be exactly the conclusion's target;
+            // the existential target alone is insufficient. The range check
+            // keeps a malformed witness from becoming an out-of-bounds edge
+            // access in the recursive leg.
             let edge = trace.swit[cell]
-            let rc = elplus_explain_fact(s, r, pack, trace, out, 1, edge / ELPLUS_MAXC, edge % ELPLUS_MAXC)
+            if edge < 0 || edge >= 32768 { return 0 - 5 }
+            let erole = edge / (ELPLUS_MAXC * ELPLUS_MAXC)
+            let esource = (edge / ELPLUS_MAXC) % ELPLUS_MAXC
+            let efiller = edge % ELPLUS_MAXC
+            if esource != a { return 0 - 5 }
+            if pack[192 + erole * ELPLUS_MAXC + efiller] != b { return 0 - 5 }
+            let rc = elplus_explain_fact(s, r, pack, trace, out, 1, edge / ELPLUS_MAXC, efiller)
             if rc < 0 { return rc }
             return elplus_explain_emit(out, 0, cell, rule, edge)
         }
@@ -619,19 +652,30 @@ fn elplus_explain_fact_inner(
     let cell = a * ELPLUS_MAXC + b
     if !r[cell] { return 0 - 2 }
     let rule = trace.rrule[cell]
-    if rule <= 0 {
-        return elplus_explain_emit(out, 1, cell, rule, trace.rwit[cell])
-    }
+    // Role edges have no stated-leaf rule: the fixpoint requires an
+    // initially false r and records only rules 7-10 for derived edges. A
+    // claimed seed (rule 0) or any smaller id is malformed provenance, not a
+    // one-step proof.
+    if rule < 7 { return 0 - 5 }
     if rule == 7 {
+        // stoR: the witness existential must name this edge's own role and
+        // filler before the source premise is reconstructed.
         let d = trace.rwit[cell]
+        if d < 0 || d >= ELPLUS_MAXC { return 0 - 5 }
+        if pack[d] != 3 { return 0 - 5 }
+        if pack[64 + d] != a / ELPLUS_MAXC { return 0 - 5 }
+        if pack[128 + d] != b { return 0 - 5 }
         let rc = elplus_explain_fact(s, r, pack, trace, out, 0, a % ELPLUS_MAXC, d)
         if rc < 0 { return rc }
         return elplus_explain_emit(out, 1, cell, rule, d)
     }
     if rule == 8 {
+        // Rmono: the decoded new filler must be the conclusion's filler.
         let w = trace.rwit[cell]
+        if w < 0 || w >= 4096 { return 0 - 5 }
         let oldf = w / ELPLUS_MAXC
         let newf = w % ELPLUS_MAXC
+        if newf != b { return 0 - 5 }
         var rc = elplus_explain_fact(s, r, pack, trace, out, 1, a, oldf)
         if rc < 0 { return rc }
         rc = elplus_explain_fact(s, r, pack, trace, out, 0, oldf, newf)
@@ -639,17 +683,30 @@ fn elplus_explain_fact_inner(
         return elplus_explain_emit(out, 1, cell, rule, w)
     }
     if rule == 9 {
+        // roleSub: the witness sub-role must be a valid role index before it
+        // drives a recursive edge lookup. The role-hierarchy premise itself
+        // (rclos) is validated by the independent oracle.
         let oldrole = trace.rwit[cell]
+        if oldrole < 0 || oldrole >= ELPLUS_MAXC { return 0 - 5 }
         let rc = elplus_explain_fact(s, r, pack, trace, out, 1, oldrole * ELPLUS_MAXC + (a % ELPLUS_MAXC), b)
         if rc < 0 { return rc }
         return elplus_explain_emit(out, 1, cell, rule, oldrole)
     }
     if rule == 10 {
+        // roleComp: validate the witness range and the decoded chain index
+        // BEFORE dereferencing trace.chains, and require the chain's composed
+        // role to be the conclusion's role. A malformed witness otherwise
+        // reaches an out-of-bounds chains access and panics instead of
+        // returning the documented negative provenance error.
         let w = trace.rwit[cell]
+        if w < 0 || w >= 4096 { return 0 - 5 }
         let chain = w / ELPLUS_MAXC
         let mid = w % ELPLUS_MAXC
+        if chain >= ELPLUS_MAXCH { return 0 - 5 }
         let r1 = trace.chains[chain]
         let r2 = trace.chains[8 + chain]
+        if trace.chains[16 + chain] != a / ELPLUS_MAXC { return 0 - 5 }
+        if r1 < 0 || r1 >= ELPLUS_MAXC || r2 < 0 || r2 >= ELPLUS_MAXC { return 0 - 5 }
         var rc = elplus_explain_fact(s, r, pack, trace, out, 1, r1 * ELPLUS_MAXC + (a % ELPLUS_MAXC), mid)
         if rc < 0 { return rc }
         rc = elplus_explain_fact(s, r, pack, trace, out, 1, r2 * ELPLUS_MAXC + mid, b)
@@ -660,8 +717,11 @@ fn elplus_explain_fact_inner(
 }
 
 /// Reconstruct why a closed subsumption cell is true. Returns the number of
-/// proof steps, 0 if the cell is false, or a negative error for malformed
-/// provenance / an explanation exceeding ELPLUS_EXPLAIN_MAX.
+/// proof steps, 0 if the cell is false, or a negative error: -1 when the
+/// explanation exceeds ELPLUS_EXPLAIN_MAX, -2 when a claimed premise is
+/// false, -3 for an unknown rule id, -4 for cyclic provenance, and -5 for
+/// malformed seed, witness, or rule-shape metadata (validated before any
+/// step is emitted or any witness-driven index is dereferenced).
 pub fn elplus_explain_subsumption(
     s: &[bool; 4096],
     r: &[bool; 32768],
