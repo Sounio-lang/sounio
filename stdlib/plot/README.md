@@ -3,5 +3,5 @@
 Terminal visualization.
 
 ## Types
-- Canvas, color, scatter, line, bar, heatmap
-- Epistemic plots, WebGL 3D
+- Canvas, line, bar
+- Epistemic plots
