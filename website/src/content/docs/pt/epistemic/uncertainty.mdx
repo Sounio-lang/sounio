@@ -1,25 +1,95 @@
 ---
 title: "Incerteza"
-description: "Como Sounio representa e (eventualmente) propaga incerteza de medição."
+description: "Bibliotecas ou uma linguagem de pesquisa tipada: Measurements.jl, uncertainties do Python e Knowledge<T> no Sounio propagam a incerteza do GUM."
 weight: 21
 category: "epistemic"
 topic_id: "website.docs.epistemic.uncertainty"
 authority: "website_only"
 audience: "users"
-last_validated: "unvalidated"
-validated_by: "none"
+last_validated: "2026-11-06"
+validated_by: "run-pass-tests"
 source_of_truth: "docs/governance/topic-registry.v1.json#website.docs.epistemic.uncertainty"
 ---
 
-# Incerteza
+import UncertaintyStatus from '../../../../components/docs/UncertaintyStatus.astro';
+import UncertaintyFaq from '../../../../components/docs/UncertaintyFaq.astro';
 
-A incerteza continua central na história da linguagem, mas o artefato validado ainda a expõe por uma superfície menor do que o modelo completo em nível de spec.
+<UncertaintyStatus locale="pt" />
 
-## Verificado hoje
-- Fixtures compile-fail com limites de confiança fazem parte do contrato verificado.
-- `Knowledge<T>` ainda exige fronteiras de unwrap explícitas em vez de extração silenciosa.
-- Trate testes e artefatos de gate como evidência mais forte do que texto aspiracional ou nomes de diretório.
+## Bibliotecas e uma linguagem tipada
 
-## Ressalvas atuais
-- O modelo completo de incerteza e proveniência é mais rico na spec e na stdlib do que no artefato validado de hoje.
-- O comportamento depende do binário `souc` exato, não apenas dos arquivos presentes no repositório.
+Measurements.jl e a biblioteca `uncertainties` do Python embrulham um valor medido numa biblioteca. O Sounio 3.0 (pre-release) é uma linguagem de pesquisa: o valor medido é o tipo `Knowledge<T>`, e a correlação é uma chamada que você escreve. Os testes abaixo fixam as variâncias do Sounio. Não são um benchmark contra Julia ou Python. Para um pipeline de produção, fique na biblioteca que você já roda.
+
+| | Onde a incerteza mora | Em que esta página se apoia | Correlação |
+| --- | --- | --- | --- |
+| `uncertainties` do Python | um objeto de biblioteca | a documentação desse projeto | o README descreve rastreamento automático |
+| Measurements.jl | um tipo de biblioteca em Julia | a documentação desse projeto | o manual descreve correlação funcional, inclusive x − x ≈ 0 |
+| Sounio | o tipo da linguagem `Knowledge<T>` | os testes Madaros citados abaixo | `correlate` explícito; o coeficiente é um literal de compilação (E243) |
+
+As linhas das bibliotecas apontam para [o README do uncertainties](https://github.com/lmfit/uncertainties) e o [manual do Measurements.jl](https://juliaphysics.github.io/Measurements.jl/stable/). Não são medições deste repositório. mp-units e physure, com uma execução que inclui incerteza correlacionada, estão em [Sounio vs mp-units vs physure](/learn/epistemic/sounio-vs-mp-units-vs-physure/) (página em inglês).
+
+Uma comparação lado a lado de Measurements.jl, uncertainties do Python e Sounio ainda não está publicada. O caminho previsto é `/learn/epistemic/uncertainty-tools-compared/`. Até essa página existir, o índice é o [guia epistêmico](/pt/learn/epistemic/).
+
+## Incerteza como tipo de primeira classe
+
+`Knowledge<T>` é o tipo de um valor medido. `measure(value, uncertainty: u)` constrói um. `.value` é o número nominal que a aritmética vê, e `variance_of` lê a variância propagada. Uma função que os chama declara o efeito `Epistemic`. `correlate(x, y, rho)` registra um coeficiente de correlação. No Madaros, `rho` tem de ser um literal de tempo de compilação: um coeficiente em tempo de execução é o erro E243 (`tests/compile-fail/correlate_rho_must_be_literal.sio`, cabeçalho `//@ requires: madaros`).
+
+A lei em vista é a propagação de incerteza de primeira ordem do JCGM 100:2008 (GUM), com os termos de covariância. O guia está na [lista de publicações do JCGM](https://www.bipm.org/en/committees/cg/jcgm/publications).
+
+## Propagação de incerteza GUM numa linguagem compilada
+
+Este excerto é o fragmento de correlação de `tests/run-pass/madaros_gum_fo_correlate.sio`. O arquivo completo também calcula uma média de segunda ordem e um produto, e depois afirma os valores. O fragmento abaixo é o que rodou no Madaros via `bin/souc`. Ele imprime `v_ind=0.050000` e `v_cor=0.090000`.
+
+```sio
+fn main() -> i64 with IO, Mut, Div, Epistemic {
+    let kx: Knowledge<f64> = measure(1.0, uncertainty: 0.1)
+    let ky: Knowledge<f64> = measure(2.0, uncertainty: 0.2)
+    let x = kx.value
+    let y = ky.value
+
+    let v_ind = variance_of(x + y)
+
+    let _r = correlate(x, y, 1.0)
+    let v_cor = variance_of(x + y)
+
+    print("v_ind="); print_f64(v_ind); print("\n")
+    print("v_cor="); print_f64(v_cor); print("\n")
+    return 0
+}
+```
+
+Entradas independentes: variância 0,05, que é 0,1² + 0,2². Depois de `correlate(x, y, 1.0)`: variância 0,09, que é (0,1 + 0,2)². O arquivo de teste afirma os dois com tolerância 1e-9 e traz `//@ requires: madaros`. O mesmo arquivo também afirma `variance_of(x * y)` em 0,08 independente e 0,16 quando ρ = 1, e a média de segunda ordem de `(x + y)²` em 9,05 e 9,09 (tolerância 1e-6). Essas linhas extras estão no arquivo, não no excerto. Fonte: [`tests/run-pass/madaros_gum_fo_correlate.sio`](https://github.com/Sounio-lang/sounio/blob/main/tests/run-pass/madaros_gum_fo_correlate.sio).
+
+## Por que a correlação importa
+
+O mesmo nome dos dois lados é um fato diferente de duas entradas que você depois correlaciona.
+
+`tests/run-pass/gum_correlated.sio` constrói `h` com `measure(1.75, uncertainty: 0.01)` e afirma que `variance_of(h - h)` é 0, `variance_of(h * h)` é 0,001225 e `variance_of(h + h)` é 0,0004 (tolerância 1e-12). O cabeçalho do arquivo não nomeia um engine. Esta página não alega os mesmos valores impressos no `lean_single`.
+
+Coeficientes negativos são um teste Madaros à parte, `tests/run-pass/madaros_gum_correlate_negative_rho.sio` (`//@ requires: madaros`). As incertezas padrão são 0,1 e 0,3. As afirmações, tolerância 1e-12, são ρ = 1 → 0,16, ρ = −1 → 0,04, ρ = −0,5 → 0,07. O arquivo escreve os literais negativos como `0.0 - 1.0` e `0.0 - 0.5`. Um comentário nesse arquivo diz ρ = 0 → 0,10; o teste não afirma essa linha.
+
+A correlação não vaza entre funções. `tests/run-pass/madaros_gum_correlate_is_per_function.sio` (`//@ requires: madaros`) afirma 0,16 na função que chama `correlate` e 0,10 numa segunda função que nunca chama (os mesmos σ 0,1 e 0,3, tolerância 1e-12).
+
+## Limites conhecidos
+
+Leia isto antes de tratar um exemplo que passa como garantia geral. A lista está em [`docs/compiler/KNOWN_LIMITATIONS.md`](https://github.com/Sounio-lang/sounio/blob/main/docs/compiler/KNOWN_LIMITATIONS.md). O resumo público é [Honestidade](/pt/honesty/) e [estado das funcionalidades](/pt/learn/feature-status/).
+
+KL-11 foi estreitado em 2026-10-13. A variância de primeira ordem pode atravessar um auxiliar puro quando o lowering re-inlina esse auxiliar. A mesma seção diz que a propagação de primeira ordem através de corpos arbitrários de função do usuário continua aberta. Uma chamada que passa não é o caso geral.
+
+KL-15: `Knowledge<f128>` e GUM sobre `f128` não estão implementados.
+
+Monte Carlo não é o método por trás de 0,05 e 0,09. Um backend geral de Monte Carlo não é alegado. `tests/epistemic_trust/propagate_trust.sio` verifica dois kernels no estilo valor sob Madaros. `tests/known_failures/madaros_propagate_monte_carlo_fnptr_probe.sio` diz que o caminho `monte_carlo` por ponteiro de função devolve um resultado inválido no Madaros padrão.
+
+Um valor que carrega ao mesmo tempo uma unidade e uma incerteza padrão não é reverificado nesta página. A comparação que relata uma execução é [Sounio vs mp-units vs physure](/learn/epistemic/sounio-vs-mp-units-vs-physure/). O guia que põe [unidades e incerteza no mesmo programa](/pt/learn/language/units-and-uncertainty/) é a página de unidades.
+
+## Para onde seguir
+
+- [Tipos epistêmicos](/pt/learn/epistemic/)
+- [Ciência](/pt/science/)
+- [Playground](/pt/playground/)
+- [Primeiro programa](/pt/learn/getting-started/first-program/)
+- [Primeiros passos](/pt/learn/getting-started/)
+
+## Perguntas frequentes
+
+<UncertaintyFaq locale="pt" />
