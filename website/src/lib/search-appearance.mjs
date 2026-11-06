@@ -1,4 +1,5 @@
 import { FORMER_LANGUAGE_NAME } from './structured-data.mjs';
+import { UNCERTAINTY_EN } from './uncertainty-page.mjs';
 
 /**
  * English <title> and meta description for the pages that Search Console
@@ -43,6 +44,10 @@ export const ENGLISH_SEARCH = {
     title: 'Effect System in Sounio: Side Effects in the Signature',
     description:
       'Effect system in Sounio: side effects sit in the function signature. Built-in names form a closed checked list. A caller that omits one is rejected.',
+  },
+  '/learn/epistemic/uncertainty/': {
+    title: UNCERTAINTY_EN.documentTitle,
+    description: UNCERTAINTY_EN.description,
   },
 };
 
