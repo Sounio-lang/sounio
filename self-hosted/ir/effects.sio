@@ -1,0 +1,262 @@
+// self-hosted::ir::effects — Declared memory effects per IrOpcode. ONE authority.
+//
+// WHY THIS FILE EXISTS
+//
+// Before it, five passes each kept a private, hand-written "has side effect"
+// table, and the tables disagree:
+//
+//   opt_cleanup.sio   ocp_has_side_effect     (paired with ocp_has_dst whitelist)
+//   optimize.sio      instr_has_side_effects  (no IrCallExtern/IrCallIndirect/
+//                                              IrStoreGlobal/IrStorePtr)
+//   const_prop.sio    cp_has_side_effect      (own CP_OP_* codes; ALLOC counts,
+//                                              unlike opt_cleanup)
+//   dce.sio           dce_has_side_effect     (own DCE_OP_* codes)
+//   auto_vectorize    avec_has_side_effect    (CALL, RETURN, INDEX_SET only)
+//
+// Every one of them defaults to "_ => false" -- an opcode nobody remembered
+// to list is treated as effect-free. That default is the wrong way round:
+// the one opcode you forgot is exactly the one that miscompiles. The same
+// shape of bug was the first Copilot finding on triton-lang/triton#11964:
+// a volatile load modelled as a Write in the op's own effect list, but the
+// pass checked a hand-rolled predicate that never asked the op.
+//
+// The rule here is the inverse:
+//   * a pass ASKS this module what an opcode does; it never enumerates;
+//   * the default for an unclassified opcode is IR_EFF_UNKNOWN, which is
+//     treated as a full barrier (may read/write anything, never removable);
+//   * an opcode is promoted out of UNKNOWN only with a lowering witness
+//     (a line in native/lower_ir.sio or codegen_x86_linux.sio that shows
+//     what it touches), cited in the comment beside it.
+//
+// A second, related hole: IrInstr has two source fields (src1, src2), but
+// several opcodes carry a THIRD register in imm_i64 (IrIndexSet -- #1682 --
+// and the epistemic 3-register ops), IrCallSret carries a contiguous range in
+// field_idx, calls carry their arguments in the flat arg pool that
+// ir_arena_load deliberately does not rebuild, and IrVecFmaF64 READS its dst
+// (VFMADD231PD: dst = src1*src2 + dst). A scan that reads src1/src2 only is
+// therefore incomplete by construction. ir_effect_reads_reg_at is the complete
+// reader; use it instead of `x.src1 == r || x.src2 == r`.
+//
+// SCOPE (deliberately narrow, v0):
+//   * one memory resource. Heap (field/index), globals (BSS) and raw pointers
+//     are NOT distinguished yet; refining that needs alias_analysis.sio, which
+//     nothing imports today. Until then a store to a field and a load of a
+//     global are assumed to alias. Conservative, never wrong.
+//   * no volatile: Sounio has no volatile loads today. If one is added, give
+//     it IR_EFF_WRITE_MEM | IR_EFF_OBSERVABLE here and every pass inherits
+//     the right answer without being edited.
+//
+// This module has no dependencies beyond ir::ir and allocates nothing.
+
+use ir::ir::*
+
+// ---------------------------------------------------------------------------
+// Effect bits
+// ---------------------------------------------------------------------------
+
+pub let IR_EFF_PURE: i64 = 0          // register-only, no observable effect
+pub let IR_EFF_READ_MEM: i64 = 1      // may read memory
+pub let IR_EFF_WRITE_MEM: i64 = 2     // may write memory
+pub let IR_EFF_CONTROL: i64 = 4       // label / terminator / handler scope
+pub let IR_EFF_CALL: i64 = 8          // opaque callee: read+write anything
+pub let IR_EFF_ALLOC: i64 = 16        // allocates fresh memory
+pub let IR_EFF_OBSERVABLE: i64 = 32   // must not be deleted (counters, guards, admits)
+pub let IR_EFF_UNKNOWN: i64 = 64      // not classified: full barrier
+pub let IR_EFF_READS_DST: i64 = 128   // dst is also an input (FMA accumulator)
+
+// ---------------------------------------------------------------------------
+// The table. Closed match; every arm cites its witness.
+// ---------------------------------------------------------------------------
+
+pub fn ir_effects_of(op: IrOpcode) -> i64 {
+    match op {
+        // --- pure register ops (lower_ir.sio scalar arms; no memory operand) ---
+        IrOpcode::IrLoadImm      => IR_EFF_PURE,
+        IrOpcode::IrLoadFloat    => IR_EFF_PURE,
+        IrOpcode::IrLoadBool     => IR_EFF_PURE,
+        IrOpcode::IrLoadString   => IR_EFF_PURE,   // address of a rodata literal
+        IrOpcode::IrIntToFloat   => IR_EFF_PURE,
+        IrOpcode::IrFloatToInt   => IR_EFF_PURE,
+        IrOpcode::IrCopy         => IR_EFF_PURE,
+        IrOpcode::IrBinOp        => IR_EFF_PURE,
+        IrOpcode::IrUnaryOp      => IR_EFF_PURE,
+        IrOpcode::IrLoadFnRef    => IR_EFF_PURE,   // Sprint 228: address constant
+        IrOpcode::IrNop          => IR_EFF_PURE,
+
+        // --- vector FMA: VFMADD231PD dst, src1, src2 (lower_ir.sio:1388) ---
+        IrOpcode::IrVecFmaF64    => IR_EFF_READS_DST,
+
+        // --- memory reads (ir.sio constructors: base/idx/offset operands) ---
+        IrOpcode::IrFieldGet     => IR_EFF_READ_MEM,
+        IrOpcode::IrIndexGet     => IR_EFF_READ_MEM,
+        IrOpcode::IrArrayLen     => IR_EFF_READ_MEM,
+        IrOpcode::IrLoadGlobal   => IR_EFF_READ_MEM,
+
+        // --- memory writes ---
+        IrOpcode::IrFieldSet     => IR_EFF_WRITE_MEM,
+        IrOpcode::IrIndexSet     => IR_EFF_WRITE_MEM,   // value reg in imm_i64 (#1682)
+        IrOpcode::IrStoreGlobal  => IR_EFF_WRITE_MEM,
+        IrOpcode::IrStorePtr     => IR_EFF_WRITE_MEM,   // [src1] = src2, any target
+
+        // --- allocation ---
+        IrOpcode::IrAlloc        => IR_EFF_ALLOC,
+
+        // --- control ---
+        IrOpcode::IrLabel        => IR_EFF_CONTROL,
+        IrOpcode::IrJump         => IR_EFF_CONTROL,
+        IrOpcode::IrBranchTrue   => IR_EFF_CONTROL,
+        IrOpcode::IrBranchFalse  => IR_EFF_CONTROL,
+        IrOpcode::IrReturn       => IR_EFF_CONTROL,
+        IrOpcode::IrReturnSret   => IR_EFF_CONTROL,
+        IrOpcode::IrHandleBegin  => IR_EFF_CONTROL,
+        IrOpcode::IrHandleEnd    => IR_EFF_CONTROL,
+
+        // --- calls: opaque ---
+        IrOpcode::IrCall         => IR_EFF_CALL,
+        IrOpcode::IrCallSret     => IR_EFF_CALL,
+        IrOpcode::IrCallExtern   => IR_EFF_CALL,   // missing from optimize.sio's list
+        IrOpcode::IrCallIndirect => IR_EFF_CALL,   // missing from optimize.sio's list
+
+        // --- observable but memory-free (matches ocp_has_side_effect) ---
+        IrOpcode::IrProfCounter  => IR_EFF_OBSERVABLE,
+        IrOpcode::IrDebugGuard   => IR_EFF_OBSERVABLE,
+        IrOpcode::IrAdmitAction  => IR_EFF_OBSERVABLE,
+
+        // --- epistemic value ops that ocp_has_dst already treats as removable
+        //     when dead. Inherited from that whitelist, NOT from a lowering
+        //     witness: promote/demote when lower_ir.sio is audited for them. ---
+        IrOpcode::IrMeasure      => IR_EFF_PURE,
+        IrOpcode::IrContest      => IR_EFF_PURE,
+        IrOpcode::IrProveRobust  => IR_EFF_PURE,
+        IrOpcode::IrValidated    => IR_EFF_PURE,
+
+        // Everything else -- the ~100 vector / hypercomplex / exceptional-Lie /
+        // wide-integer / convolution / epistemic-planning opcodes -- is UNKNOWN
+        // until someone reads its lowering and writes the arm above.
+        _ => IR_EFF_UNKNOWN,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Derived predicates. Passes call these; they never re-derive from opcodes.
+// ---------------------------------------------------------------------------
+
+fn ir_eff_has(e: i64, bit: i64) -> bool {
+    (e & bit) != 0
+}
+
+pub fn ir_effect_may_read_mem(op: IrOpcode) -> bool {
+    let e = ir_effects_of(op)
+    ir_eff_has(e, IR_EFF_READ_MEM) || ir_eff_has(e, IR_EFF_CALL) || ir_eff_has(e, IR_EFF_UNKNOWN)
+}
+
+pub fn ir_effect_may_write_mem(op: IrOpcode) -> bool {
+    let e = ir_effects_of(op)
+    ir_eff_has(e, IR_EFF_WRITE_MEM) || ir_eff_has(e, IR_EFF_CALL) || ir_eff_has(e, IR_EFF_UNKNOWN)
+}
+
+// Nothing may be moved across a barrier, in either direction.
+pub fn ir_effect_is_barrier(op: IrOpcode) -> bool {
+    let e = ir_effects_of(op)
+    ir_eff_has(e, IR_EFF_CONTROL) || ir_eff_has(e, IR_EFF_CALL) ||
+        ir_eff_has(e, IR_EFF_UNKNOWN) || ir_eff_has(e, IR_EFF_ALLOC)
+}
+
+// May the instruction be deleted when its dst has no uses?
+// Pure ops and plain loads: yes. Writes, calls, control, observable, alloc,
+// unknown: no. (Alloc is kept: a dead allocation is still an observable
+// heap event under the epistemic provenance rules; opt_cleanup removes it,
+// const_prop keeps it -- this side is the conservative one.)
+pub fn ir_effect_removable_if_dead(op: IrOpcode) -> bool {
+    let e = ir_effects_of(op)
+    if e == IR_EFF_PURE { return true }
+    if e == IR_EFF_READ_MEM { return true }
+    if e == IR_EFF_READS_DST { return true }
+    false
+}
+
+// May two ADJACENT instructions be exchanged without changing memory
+// semantics? Register dependences are NOT checked here -- pair this with
+// ir_effect_reads_reg_at / dst comparison. Symmetric.
+pub fn ir_effect_commute(a: IrOpcode, b: IrOpcode) -> bool {
+    if ir_effect_is_barrier(a) || ir_effect_is_barrier(b) { return false }
+    let wa = ir_effect_may_write_mem(a)
+    let wb = ir_effect_may_write_mem(b)
+    let ra = ir_effect_may_read_mem(a)
+    let rb = ir_effect_may_read_mem(b)
+    if wa && (rb || wb) { return false }
+    if ra && wb { return false }
+    true
+}
+
+// ---------------------------------------------------------------------------
+// Complete use-reader for arena-resident instructions
+// ---------------------------------------------------------------------------
+
+// Opcodes whose THIRD register operand is parked in imm_i64 (ir.sio
+// constructors: ir_index_set, ir_admit_action, ir_defer_action,
+// ir_plan_acquisition, ir_plan_recourse, ir_propose_alternatives,
+// ir_commit_alternative).
+pub fn ir_effect_third_reg_in_imm(op: IrOpcode) -> bool {
+    match op {
+        IrOpcode::IrIndexSet            => true,
+        IrOpcode::IrAdmitAction         => true,
+        IrOpcode::IrDeferAction         => true,
+        IrOpcode::IrPlanAcquisition     => true,
+        IrOpcode::IrPlanRecourse        => true,
+        IrOpcode::IrProposeAlternatives => true,
+        IrOpcode::IrCommitAlternative   => true,
+        _ => false,
+    }
+}
+
+// Does the instruction in arena slot `at` READ register `r`?
+// Covers: src1, src2, the imm_i64 third register, the FMA accumulator (dst),
+// the flat call-argument pool, and the contiguous IrCallSret range.
+pub fn ir_effect_reads_reg_at(at: i64, r: i64) -> bool with Mut, Panic, Div {
+    if r < 0 { return false }
+    let ins = ir_arena_load(at)
+    if ins.src1 == r || ins.src2 == r { return true }
+    if ir_effect_third_reg_in_imm(ins.op) && ins.imm_i64 == r { return true }
+    let e = ir_effects_of(ins.op)
+    if ir_eff_has(e, IR_EFF_READS_DST) && ins.dst == r { return true }
+    if ir_eff_has(e, IR_EFF_CALL) {
+        var k: i64 = 0
+        while k < ins.arg_count {
+            if ir_arena_arg_at(at, k) == r { return true }
+            k = k + 1
+        }
+        if ins.op == IrOpcode::IrCallSret && ins.field_idx >= 0 {
+            // explicit args are contiguous vregs first_arg..first_arg+arg_count
+            if r >= ins.field_idx && r < ins.field_idx + ins.arg_count { return true }
+        }
+    }
+    false
+}
+
+// Does the instruction in arena slot `at` WRITE register `r`?
+pub fn ir_effect_writes_reg_at(at: i64, r: i64) -> bool with Mut, Panic, Div {
+    if r < 0 { return false }
+    let ins = ir_arena_load(at)
+    ins.dst == r
+}
+
+// ---------------------------------------------------------------------------
+// The one decision ocp_sink_loads needs, stated once.
+// ---------------------------------------------------------------------------
+
+// May the instruction at slot `cur` be exchanged with the one at `nxt`
+// (cur immediately before nxt)? Full check: memory commutation + register
+// dependences in both directions (RAW, WAR, WAW).
+pub fn ir_effect_swap_ok(cur: i64, nxt: i64) -> bool with Mut, Panic, Div {
+    let a = ir_arena_load(cur)
+    let b = ir_arena_load(nxt)
+    if !ir_effect_commute(a.op, b.op) { return false }
+    // RAW: b reads what a writes
+    if a.dst >= 0 && ir_effect_reads_reg_at(nxt, a.dst) { return false }
+    // WAR: a reads what b writes
+    if b.dst >= 0 && ir_effect_reads_reg_at(cur, b.dst) { return false }
+    // WAW
+    if a.dst >= 0 && a.dst == b.dst { return false }
+    true
+}
