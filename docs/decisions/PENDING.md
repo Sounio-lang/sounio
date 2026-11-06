@@ -26,7 +26,6 @@ Os ADRs de [`README.md`](README.md) registram decisões já tomadas; este arquiv
 | [D-07](#d-07) | Linha de pesquisa epistêmica "source-fresh aliasing / associador": reaterrissar ou aposentar | #1423 |
 | [D-08](#d-08) | Hessiana do cérebro sedenion: reenquadrar a hipótese nula | #1484 |
 | [D-09](#d-09) | EISA-H: onde mora o detector de ZD e o repositório de hardware | #839 |
-| [D-10](#d-10) | Cadeia de bootstrap `stage0 → boot4` | #725 |
 | [D-11](#d-11) | Suíte `compile-fail` neutra de engine | #2241 |
 | [D-12](#d-12) | Gate de regressão de corpus: baseline e fiação | #2306 |
 | [D-13](#d-13) | Os dois pipelines `-O` | #2368 |
@@ -134,16 +133,6 @@ Os ADRs de [`README.md`](README.md) registram decisões já tomadas; este arquiv
 - **Recomendação:** (A).
 - **Teste discriminante:** um gate em `scripts/ci` que lê o recibo de `sounio-hardware` (hoje `grep -rln sounio-hardware scripts/ci` não encontra nada).
 - **Causa localizada:** lado Sounio: `scripts/ci/eisa_h_zd_reference_gate.sh` e `tests/stdlib/eisa/test_eisa_h_zd.sio` existem; o head de `sounio-hardware` é `23fa553d…`, sem mudança.
-
-<a id="d-10"></a>
-## D-10 — Cadeia de bootstrap `stage0 → boot4`
-
-- **Origem:** #725.
-- **Pergunta:** a cadeia C `stage0 → boot4` deve voltar a reproduzir o ponto fixo atual, ou a documentação passa a nomear a seed commitada como raiz de proveniência?
-- **Opções:** (A, S) reescrever `bootstrap/README.md:14,35,48` para nomear a seed e `bin/souc-lean-single-x86_64.SeedReceipt.json` / `verify_lean_seed.sh SOUNIO_SEED_DDC=1` como raiz, declarando que boot4 não analisa o `lean_single.sio` atual; (B, L) elevar os tetos do boot4 e refazer a cadeia.
-- **Recomendação:** (A) agora; (B) só se a cadeia C for requisito de confiança.
-- **Teste discriminante:** `timeout 180 artifacts/bootstrap/boot4.elf self-hosted/compiler/lean_single.sio g1.elf` deve terminar com rc=0 e gerar o ELF (opção B). Hoje: rc=124 após 181 s, `BAD NODE node=262143` em laço (log de 1,33 GB); `bootstrap/boot4_a1.elf` dá rc=139.
-- **Causa localizada:** `nd_cap=262143` do boot4 contra `tokens=362541` do `lean_single.sio` atual (2.396.418 B); `Makefile:32-33` ainda usa `./bin/souc-linux-x86_64`; `bootstrap/README.md:35` ainda afirma que boot4 compila `lean_single.sio`.
 
 <a id="d-11"></a>
 ## D-11 — Suíte `compile-fail` neutra de engine

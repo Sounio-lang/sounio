@@ -110,6 +110,7 @@ The next free number is **028**.
 - [ADR-025](./adr-025-decision-flip-budget-and-attribution.md)
 - [ADR-026](./adr-026-phase-arenas.md)
 - [ADR-027](./adr-027-layered-ci-graph-and-receipts.md)
+- [ADR-028](./adr-028-bootstrap-provenance-root.md)
 - [Claim-oracle inventory schema](./claim_oracle_inventory.schema.md)
 
 ## Related Docs
