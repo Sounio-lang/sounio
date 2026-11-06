@@ -94,6 +94,89 @@ const ELPLUS_SC: i64 = 4096
 // Maximum number of stated edges per kind (sub or exsub).
 const ELPLUS_SE: i64 = 4096
 
+// ── Fail-closed capacity validation ──────────────────────────────────────
+//
+// Every dense entry point below indexes flattened matrices with the literal
+// 64 / 8 strides declared above.  An out-of-range dimension therefore writes
+// PAST the end of the caller's arrays (nc > 64 walks off `s`, nr > 8 walks
+// off `rclos`), and a NEGATIVE interned id indexes BEFORE the array base,
+// which on the current lane silently corrupts whatever object the linker
+// placed in front of it.  There was previously ZERO capacity validation
+// here: callers that overflowed their own interning tables handed the
+// closure a weaker-than-declared TBox (or a negative role id) and got a
+// confident, wrong answer back.
+//
+// `elplus_caps_ok` is the single predicate every dense entry point consults.
+// The entry points fail CLOSED — no writes, sentinel result — rather than
+// truncating silently.  Faults are additionally recorded in a module-level
+// register so a caller that ignores the sentinel can still detect the
+// refusal.  The register is a module global on purpose: the guarded
+// functions have fixed signatures importers already depend on, and mutating
+// an own-module global is the working pattern on this lane (cf. the sparse
+// workspace matrices below).
+
+/// `elplus_seed` refused to seed (bad nc / top).
+pub const ELPLUS_FAULT_SEED: i64 = 1
+/// `elplus_fixpoint` / `elplus_fixpoint_packed` refused to run.
+pub const ELPLUS_FAULT_FIXPOINT: i64 = 2
+/// `elplus_derive_conflicts` refused and fell back to all-conflict.
+pub const ELPLUS_FAULT_DERIVE: i64 = 4
+/// A composition chain named a role id outside 0..ELPLUS_MAXR and was skipped.
+pub const ELPLUS_FAULT_CHAIN: i64 = 8
+
+var ELPLUS_FAULT_BITS: i64 = 0
+
+/// Are the requested dense dimensions inside the compiled-in capacities?
+/// Every dense entry point calls this before its first indexed write.
+///
+/// # Parameters
+/// - `nc`: number of interned concepts (must be 0..=ELPLUS_MAXC).
+/// - `nb`: number of base concepts / fillers (must be 0..=ELPLUS_MAXC).
+/// - `nr`: number of roles (must be 0..=ELPLUS_MAXR).
+/// - `nchain`: number of composition chains (must be 0..=ELPLUS_MAXCH).
+///
+/// # Complexity
+/// O(1)
+pub fn elplus_caps_ok(nc: i64, nb: i64, nr: i64, nchain: i64) -> bool {
+    if nc < 0 || nc > ELPLUS_MAXC {
+        return false
+    }
+    if nb < 0 || nb > ELPLUS_MAXC {
+        return false
+    }
+    if nr < 0 || nr > ELPLUS_MAXR {
+        return false
+    }
+    if nchain < 0 || nchain > ELPLUS_MAXCH {
+        return false
+    }
+    true
+}
+
+/// Record a capacity fault in the module-level register.
+fn elplus_note_fault(bit: i64) with Mut {
+    ELPLUS_FAULT_BITS = ELPLUS_FAULT_BITS | bit
+}
+
+/// Fault register: bitwise OR of every ELPLUS_FAULT_* recorded since the
+/// last `elplus_clear_fault`.  Non-zero means at least one dense entry
+/// point refused to run and returned its sentinel.
+///
+/// # Complexity
+/// O(1)
+pub fn elplus_fault() -> i64 {
+    ELPLUS_FAULT_BITS
+}
+
+/// Reset the fault register.  Call before a run whose faults you want to
+/// attribute to that run alone.
+///
+/// # Complexity
+/// O(1)
+pub fn elplus_clear_fault() with Mut {
+    ELPLUS_FAULT_BITS = 0
+}
+
 /// Role-hierarchy closure: seed reflexivity, then transitive saturation
 /// over the stated cells of rclos.  Existing stated cells are kept.
 ///
@@ -158,6 +241,14 @@ pub fn elplus_seed(s: &![bool; 4096], nc: i64, top: i64) with Mut, Div, Panic {
         }
         a = a + 1
     }
+    // Fail closed: nc > ELPLUS_MAXC writes past the end of `s`, and a top
+    // id outside 0..ELPLUS_MAXC writes outside every row.  Leave the
+    // matrix fully cleared (an empty S entails nothing) and record the
+    // fault rather than seeding out of range.
+    if !elplus_caps_ok(nc, nc, 0, 0) || top < 0 || top >= ELPLUS_MAXC {
+        elplus_note_fault(ELPLUS_FAULT_SEED)
+        return
+    }
     var c: i64 = 0
     while c < nc {
         s[c * ELPLUS_MAXC + c] = true
@@ -213,6 +304,13 @@ pub fn elplus_fixpoint(
     nb: i64,
     nr: i64
 ) -> i64 with Mut, Div, Panic {
+    // Fail closed before the first indexed write: out-of-capacity
+    // dimensions would run the completion rules off the end of `s` / `r`.
+    // Sentinel 0 - 1 is unambiguous: a real run always takes >= 1 round.
+    if !elplus_caps_ok(nc, nb, nr, nchain) {
+        elplus_note_fault(ELPLUS_FAULT_FIXPOINT)
+        return 0 - 1
+    }
     var pack: [i64; 704] = [0; 704]
     var chains: [i64; 24] = [0; 24]
     var dims: [i64; 4] = [0; 4]
@@ -301,6 +399,13 @@ pub fn elplus_fixpoint_packed(
     var nc: i64 = dims[1]
     var nb: i64 = dims[2]
     var nr: i64 = dims[3]
+    // Fail closed: see `elplus_fixpoint`.  This is the PRIMARY home of the
+    // 8-rule loop, so importers that call it directly (e.g. the SNOMED
+    // adapter) are covered here too.
+    if !elplus_caps_ok(nc, nb, nr, nchain) {
+        elplus_note_fault(ELPLUS_FAULT_FIXPOINT)
+        return 0 - 1
+    }
     var changed = true
     var rounds: i64 = 0
     var a: i64 = 0
@@ -447,6 +552,16 @@ pub fn elplus_fixpoint_packed(
             r1 = ch1[k]
             r2 = ch2[k]
             r3 = ch3[k]
+            // MEMORY SAFETY: ch1/ch2/ch3 arrive from the caller's role
+            // interning table, which yields 0 - 1 when its role capacity is
+            // exhausted.  With r1 = 0 - 1 the guard below reads
+            // r[(0 - 1) * 64 + c) * 64 + f] = r[c * 64 + f - 4096], and with
+            // r3 = 0 - 1 the CONCLUSION writes r[idx] at a negative index —
+            // an out-of-bounds WRITE into whatever precedes the caller's
+            // cube.  Validate the chain and skip it instead.
+            if r1 < 0 || r1 >= ELPLUS_MAXR || r2 < 0 || r2 >= ELPLUS_MAXR || r3 < 0 || r3 >= ELPLUS_MAXR {
+                elplus_note_fault(ELPLUS_FAULT_CHAIN)
+            } else {
             c = 0
             while c < nc {
                 f = 0
@@ -467,6 +582,7 @@ pub fn elplus_fixpoint_packed(
                     f = f + 1
                 }
                 c = c + 1
+            }
             }
             k = k + 1
         }
@@ -575,6 +691,17 @@ pub fn elplus_edge_dense(r: &[bool; 32768], role: i64, c: i64, f: i64) -> bool w
 /// # Complexity
 /// O(nc^2)
 pub fn elplus_conflict(s: &[bool; 4096], disj: &[bool; 4096], nc: i64, a: i64, b: i64) -> bool with Div, Panic {
+    // Fail closed: an out-of-range nc, or a concept id that never interned
+    // (0 - 1), would read outside `s` / `disj`.  Report a CONFLICT — the
+    // conservative answer, since every caller uses this oracle to REJECT
+    // (ontology::evolve::guarded_add, ontology::repair) — instead of
+    // reading out of bounds and reporting a confident "no conflict".
+    if !elplus_caps_ok(nc, nc, 0, 0) {
+        return true
+    }
+    if a < 0 || a >= ELPLUS_MAXC || b < 0 || b >= ELPLUS_MAXC {
+        return true
+    }
     var hit = false
     var d1: i64 = 0
     while d1 < nc {
@@ -640,6 +767,23 @@ pub fn elplus_derive_conflicts(
     disj: &[bool; 4096],
     nc: i64
 ) with Mut, Div, Panic {
+    // Fail closed: m > ELPLUS_MAXM walks off `conf_pair`, and an
+    // out-of-range nc walks off `s` / `disj`.  Overwrite the whole
+    // writable region with "everything conflicts" so no caller can mistake
+    // a refused run for a clean one, and record the fault.
+    if m < 0 || m > ELPLUS_MAXM || !elplus_caps_ok(nc, nc, 0, 0) {
+        elplus_note_fault(ELPLUS_FAULT_DERIVE)
+        var fi: i64 = 0
+        while fi < ELPLUS_MAXM {
+            var fj: i64 = 0
+            while fj < ELPLUS_MAXM {
+                conf_pair[fi * ELPLUS_MAXM + fj] = fi != fj
+                fj = fj + 1
+            }
+            fi = fi + 1
+        }
+        return
+    }
     var i: i64 = 0
     while i < m {
         var j: i64 = 0
