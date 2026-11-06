@@ -623,9 +623,17 @@ fn elplus_explain_fact_inner(
             let d = trace.swit[cell]
             if d < 0 || d >= ELPLUS_MAXC { return 0 - 5 }
             if pack[d] != 2 || d != b { return 0 - 5 }
-            var rc = elplus_explain_fact(s, r, pack, trace, out, 0, a, pack[64 + d])
+            // The nested conjunct ids come from the concept table, not from
+            // validated provenance: a malformed table can name any integer.
+            // Range-check both before either drives a recursive lookup,
+            // whose s[a*64+id] read would otherwise index out of bounds.
+            let conj1 = pack[64 + d]
+            let conj2 = pack[128 + d]
+            if conj1 < 0 || conj1 >= ELPLUS_MAXC { return 0 - 5 }
+            if conj2 < 0 || conj2 >= ELPLUS_MAXC { return 0 - 5 }
+            var rc = elplus_explain_fact(s, r, pack, trace, out, 0, a, conj1)
             if rc < 0 { return rc }
-            rc = elplus_explain_fact(s, r, pack, trace, out, 0, a, pack[128 + d])
+            rc = elplus_explain_fact(s, r, pack, trace, out, 0, a, conj2)
             if rc < 0 { return rc }
             return elplus_explain_emit(out, 0, cell, rule, d)
         }
@@ -685,9 +693,11 @@ fn elplus_explain_fact_inner(
     if rule == 9 {
         // roleSub: the witness sub-role must be a valid role index before it
         // drives a recursive edge lookup. The role-hierarchy premise itself
-        // (rclos) is validated by the independent oracle.
+        // (rclos) is validated by the independent oracle. The bound is
+        // ELPLUS_MAXR, not ELPLUS_MAXC: the (role*64+source)*64+filler
+        // encoding keeps the edge cube in bounds only for role < 8.
         let oldrole = trace.rwit[cell]
-        if oldrole < 0 || oldrole >= ELPLUS_MAXC { return 0 - 5 }
+        if oldrole < 0 || oldrole >= ELPLUS_MAXR { return 0 - 5 }
         let rc = elplus_explain_fact(s, r, pack, trace, out, 1, oldrole * ELPLUS_MAXC + (a % ELPLUS_MAXC), b)
         if rc < 0 { return rc }
         return elplus_explain_emit(out, 1, cell, rule, oldrole)
@@ -706,7 +716,11 @@ fn elplus_explain_fact_inner(
         let r1 = trace.chains[chain]
         let r2 = trace.chains[8 + chain]
         if trace.chains[16 + chain] != a / ELPLUS_MAXC { return 0 - 5 }
-        if r1 < 0 || r1 >= ELPLUS_MAXC || r2 < 0 || r2 >= ELPLUS_MAXC { return 0 - 5 }
+        // The decoded roles are metadata, not validated provenance. The
+        // bound is ELPLUS_MAXR, not ELPLUS_MAXC: with role in [8, 64) the
+        // recursive edge lookup (role*64+source)*64+filler leaves the
+        // 32768-cell cube and reads out of bounds.
+        if r1 < 0 || r1 >= ELPLUS_MAXR || r2 < 0 || r2 >= ELPLUS_MAXR { return 0 - 5 }
         var rc = elplus_explain_fact(s, r, pack, trace, out, 1, r1 * ELPLUS_MAXC + (a % ELPLUS_MAXC), mid)
         if rc < 0 { return rc }
         rc = elplus_explain_fact(s, r, pack, trace, out, 1, r2 * ELPLUS_MAXC + mid, b)
@@ -720,8 +734,10 @@ fn elplus_explain_fact_inner(
 /// proof steps, 0 if the cell is false, or a negative error: -1 when the
 /// explanation exceeds ELPLUS_EXPLAIN_MAX, -2 when a claimed premise is
 /// false, -3 for an unknown rule id, -4 for cyclic provenance, and -5 for
-/// malformed seed, witness, or rule-shape metadata (validated before any
-/// step is emitted or any witness-driven index is dereferenced).
+/// malformed seed, witness, rule-shape, or concept-table metadata
+/// (validated before any step is emitted, any witness-driven index is
+/// dereferenced, or any table- or chain-derived concept or role id drives
+/// a recursive lookup).
 pub fn elplus_explain_subsumption(
     s: &[bool; 4096],
     r: &[bool; 32768],
@@ -790,9 +806,8 @@ pub fn elplus_r_count(r: &[bool; 32768], nr: i64, nc: i64, nb: i64) -> i64 with 
                 if r[(rr * ELPLUS_MAXC + c) * ELPLUS_MAXC + f] {
                     n = n + 1
                 }
-                f = f + 1
             }
-            c = c + 1
+            f = f + 1
         }
         rr = rr + 1
     }
@@ -842,8 +857,8 @@ pub fn elplus_conflict(s: &[bool; 4096], disj: &[bool; 4096], nc: i64, a: i64, b
                 if s[b * ELPLUS_MAXC + d2] && disj[d1 * ELPLUS_MAXC + d2] {
                     hit = true
                 }
-                d2 = d2 + 1
             }
+            d2 = d2 + 1
         }
         d1 = d1 + 1
     }
@@ -895,7 +910,7 @@ pub fn elplus_derive_conflicts(
     ent: &[i64; 256],
     cls: &[i64; 256],
     s: &[bool; 4096],
-    disj: &[bool; 4096],
+    disj: &[i64; 4096],
     nc: i64
 ) with Mut, Div, Panic {
     var i: i64 = 0
