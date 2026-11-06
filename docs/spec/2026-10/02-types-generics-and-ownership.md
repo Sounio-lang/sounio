@@ -165,7 +165,16 @@ repeat forms.
 
 `checker_expected_accepts_int_literal` admits an `i64`-born literal for any
 checker integer kind or a wide float; the helper itself performs no range test.
-This is an implementation observation, not a specified wrap/trap/range policy.
+Since SIO-207, a compile-time-known integer constant bound to a narrow integer
+annotation (`i8`/`u8`/`i32`/`u32`) is range-checked by
+`checker_check_const_int_range_inplace` and refused with E300 when it does not
+fit. Runtime signed overflow of `+`, `-`, `*` and unary negation is a trap
+(exit 1) in the Madaros native backend — never a silent two's-complement
+wrap; `wrapping_add`/`wrapping_sub`/`wrapping_mul` are the explicit opt-in
+to wrapping semantics. `OpAdd`/`OpSub`/`OpMul` are signedness-agnostic in
+the IR, so the trap fires on the signed-overflow bit pattern; exact
+unsigned semantics and dynamic narrow-width enforcement await IR
+signedness variants.
 `checker_expected_accepts_float_literal` admits an `f64`-born literal for `f32`
 only within its explicit magnitude guard, and admits a wide-float expected type
 for later lowering to resolve. An `f64` variable does not acquire `f32`

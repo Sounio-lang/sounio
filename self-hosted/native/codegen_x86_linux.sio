@@ -1130,6 +1130,18 @@ fn name_is___sounio_seq_push_scalar(n: Name) -> bool with Mut, Panic, Div {
     name_eq(n, make_name("__sounio_seq_push_scalar"))
 }
 
+fn name_is_wrapping_add(n: Name) -> bool with Mut, Panic, Div {
+    name_eq(n, make_name("wrapping_add"))
+}
+
+fn name_is_wrapping_sub(n: Name) -> bool with Mut, Panic, Div {
+    name_eq(n, make_name("wrapping_sub"))
+}
+
+fn name_is_wrapping_mul(n: Name) -> bool with Mut, Panic, Div {
+    name_eq(n, make_name("wrapping_mul"))
+}
+
 fn name_is___sounio_seq_get(n: Name) -> bool with Mut, Panic, Div {
     if n.len != 16 { return false }
     name_eq(n, make_name("__sounio_seq_get"))
@@ -1458,7 +1470,7 @@ fn native_v2_region_builtin_id(n: Name) -> i64 with Mut, Panic, Div {
 
 fn native_v2_builtin_id_for_name_ref(name: &Name) -> i64 with Mut, Panic, Div {
     if name_ref_is_print_int(name) { return 1 }
-    if name_ref_is_print_u64(name) { return 80 }
+    if name_ref_is_print_u64(name) { return 83 }
     if name_ref_is_print_char(name) { return 2 }
     if name_ref_is_print(name) { return 3 }
     if name_is_assert(*name) { return 21 }
@@ -1472,6 +1484,11 @@ fn native_v2_builtin_id_for_name_ref(name: &Name) -> i64 with Mut, Panic, Div {
     if rgn_id_n != 0 { return rgn_id_n }
     if name_is_arena_reset(*name) { return 57 }
     if name_is_panic(*name) { return 58 }
+    if name_is_wrapping_add(*name) { return 80 }
+    if name_is_wrapping_sub(*name) { return 81 }
+    if name_is_wrapping_mul(*name) { return 82 }
+    // 83 is print_u64 (SIO-399); keep builtin ids unique -- a duplicate id
+    // silently miscompiles both builtins (first match wins).
     if name_is_untracked_counter(*name) { return 59 }
     if name_is_read_byte(*name) { return 55 }
     if name_is_getpid(*name) { return 28 }
@@ -1555,7 +1572,7 @@ fn native_v2_builtin_id_for_func_ref(func: &IrFunction) -> i64 with Mut, Panic, 
         return 0
     }
     if native_v2_func_name_is_print_int(func) { return 1 }
-    if native_v2_func_name_is_print_u64(func) { return 80 }
+    if native_v2_func_name_is_print_u64(func) { return 83 }
     if native_v2_func_name_is_print_char(func) { return 2 }
     if native_v2_func_name_is_print(func) { return 3 }
     if name_is_get_arg_count((*func).name) { return 4 }
@@ -1628,6 +1645,9 @@ fn native_v2_builtin_id_for_func_ref(func: &IrFunction) -> i64 with Mut, Panic, 
     if name_is___sounio_fx_perform((*func).name) { return 77 }
     if name_is___sounio_fx_resume((*func).name) { return 78 }
     if name_is___sounio_fx_body_done((*func).name) { return 79 }
+    if name_is_wrapping_add((*func).name) { return 80 }
+    if name_is_wrapping_sub((*func).name) { return 81 }
+    if name_is_wrapping_mul((*func).name) { return 82 }
         if name_is_ffi_free((*func).name) { return 44 }
         if name_is_ffi_system((*func).name) { return 45 }
         if name_is_ffi_sqrt((*func).name) { return 46 }
@@ -2781,6 +2801,25 @@ fn nc_emit_jz_rel32(nc: &! NativeCompiler) with Mut, Panic, Div {
     nc_emit_u32_le(nc, 0)
 }
 
+fn nc_emit_jo_rel32(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x0f)
+    nc_emit_byte(nc, 0x80)
+    nc_emit_u32_le(nc, 0)
+}
+
+// SIO-207 phase 1: fail closed on signed integer overflow. Emit immediately
+// after a flags-setting add/sub/imul/neg (nothing may clobber OF in
+// between); jumps to the per-function trap stub (exit 1, same shape as
+// builtin panic) defined at fn end. OpAdd/OpSub/OpMul are
+// signedness-agnostic in the IR, so this traps the signed-overflow bit
+// pattern; exact unsigned semantics wait for IR signedness variants.
+fn nc_emit_overflow_guard(nc: &! NativeCompiler) with Mut, Panic, Div {
+    NC_V2_OVERFLOW_GUARD_USED = 1
+    let jo_pos = (*nc).code.len
+    nc_emit_jo_rel32(nc)
+    nc_add_label_patch(nc, jo_pos + 2, nc_v2_overflow_trap_label())
+}
+
 // CMP RAX, RBX  (sets flags for lhs=rax, rhs=rbx)
 fn nc_emit_cmp_rax_rbx(nc: &! NativeCompiler) with Mut, Panic, Div {
     nc_emit_byte(nc, 0x48)
@@ -2872,6 +2911,7 @@ fn nc_v2_reset_label_state() with Mut, Panic {
     }
     NC_V2_LABEL_PATCH_COUNT = 0
     NC_V2_NEXT_CMP_LABEL = 210
+    NC_V2_OVERFLOW_GUARD_USED = 0
 }
 
 
@@ -6600,6 +6640,27 @@ fn emit_builtin_panic_into(nc: &! NativeCompiler) with Mut, Panic, Div {
     nc_emit_exit_code(nc, 1)
 }
 
+// SIO-207: explicit two's-complement wrapping arithmetic (the opt-in escape
+// from the default overflow trap). Bit-identical to the pre-trap +,-,* so
+// hash/RNG state evolution is unchanged. Args rdi, rsi -> rax.
+fn emit_builtin_wrapping_add_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x89); nc_emit_byte(nc, 0xf8)  // mov rax, rdi
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x01); nc_emit_byte(nc, 0xf0)  // add rax, rsi
+    nc_emit_ret(nc)
+}
+
+fn emit_builtin_wrapping_sub_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x89); nc_emit_byte(nc, 0xf8)  // mov rax, rdi
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x29); nc_emit_byte(nc, 0xf0)  // sub rax, rsi
+    nc_emit_ret(nc)
+}
+
+fn emit_builtin_wrapping_mul_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x89); nc_emit_byte(nc, 0xf8)  // mov rax, rdi
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x0f); nc_emit_byte(nc, 0xaf); nc_emit_byte(nc, 0xc6)  // imul rax, rsi
+    nc_emit_ret(nc)
+}
+
 // A counter this runtime does not keep answers -1, not 0.
 //
 // Zero is a claim: no refills happened, no bytes were unmapped, no mmap was
@@ -10318,7 +10379,7 @@ fn emit_builtin_ffi_system_into(nc: &! NativeCompiler) with Mut, Panic, Div {
 
 pub fn native_v2_builtin_id_for_name(name: Name) -> i64 with Mut, Panic, Div {
     if name_is_print_int(name) { return 1 }
-    if name_is_print_u64(name) { return 80 }
+    if name_is_print_u64(name) { return 83 }
     if name_is_print_char(name) { return 2 }
     if name_is_print(name) { return 3 }
     if name_is_get_arg_count(name) { return 4 }
@@ -10349,6 +10410,9 @@ pub fn native_v2_builtin_id_for_name(name: Name) -> i64 with Mut, Panic, Div {
     if name_is___sounio_seq_push_scalar(name) { return 70 }
     if name_is___sounio_seq_get(name) { return 52 }
     if name_is___sounio_seq_set(name) { return 53 }
+    if name_is_wrapping_add(name) { return 80 }
+    if name_is_wrapping_sub(name) { return 81 }
+    if name_is_wrapping_mul(name) { return 82 }
     if name_is_syscall6(name) { return 27 }
     // P0-F allowlisted POSIX externs. malloc/free alias the heap ids so they
     // reuse the mmap emitters; getpid/getppid/exit/abort/system get 28-32.
@@ -10438,7 +10502,7 @@ fn native_v2_emit_builtin_by_id_into(nc: &! NativeCompiler, builtin_id: i64) wit
     if builtin_id == 53 { emit_builtin_native_seq_set_into(nc); return }
     if builtin_id == 1 { emit_builtin_print_int_into(nc); return }
     // SIO-399: unsigned word printer shares the print_int ABI (one word in rdi).
-    if builtin_id == 80 { emit_builtin_print_u64_into(nc); return }
+    if builtin_id == 83 { emit_builtin_print_u64_into(nc); return }
     if builtin_id == 2 { emit_builtin_print_char_into(nc); return }
     if builtin_id == 3 {
         emit_builtin_print_str_into(nc)
@@ -10491,6 +10555,9 @@ fn native_v2_emit_builtin_by_id_into(nc: &! NativeCompiler, builtin_id: i64) wit
     if builtin_id == 69 { emit_builtin_rgn_mark_all_into(nc); return }
     if builtin_id == 57 { emit_builtin_arena_reset_into(nc); return }
     if builtin_id == 58 { emit_builtin_panic_into(nc); return }
+    if builtin_id == 80 { emit_builtin_wrapping_add_into(nc); return }
+    if builtin_id == 81 { emit_builtin_wrapping_sub_into(nc); return }
+    if builtin_id == 82 { emit_builtin_wrapping_mul_into(nc); return }
     if builtin_id == 59 { emit_builtin_untracked_counter_into(nc); return }
     if builtin_id == 55 { emit_builtin_read_byte_into(nc); return }
     if builtin_id == 28 { emit_builtin_getpid_into(nc); return }
@@ -11371,6 +11438,7 @@ fn nc_emit_core_binop(nc: &! NativeCompiler, func: &IrFunction, instr_index: i64
         nc_core_load_temp_to_rax(nc, rhs)
         nc_emit_pop_rbx(nc)
         nc_emit_add_rax_rbx(nc)
+        nc_emit_overflow_guard(nc)
         nc_core_store_rax_to_temp(nc, dst)
         nc_core_mark_int_reg(nc, dst)
         return true
@@ -11381,6 +11449,7 @@ fn nc_emit_core_binop(nc: &! NativeCompiler, func: &IrFunction, instr_index: i64
         nc_core_load_temp_to_rax(nc, lhs)
         nc_emit_pop_rbx(nc)
         nc_emit_sub_rax_rbx(nc)
+        nc_emit_overflow_guard(nc)
         nc_core_store_rax_to_temp(nc, dst)
         nc_core_mark_int_reg(nc, dst)
         return true
@@ -11391,6 +11460,7 @@ fn nc_emit_core_binop(nc: &! NativeCompiler, func: &IrFunction, instr_index: i64
         nc_core_load_temp_to_rax(nc, rhs)
         nc_emit_pop_rbx(nc)
         nc_emit_imul_rax_rbx(nc)
+        nc_emit_overflow_guard(nc)
         nc_core_store_rax_to_temp(nc, dst)
         nc_core_mark_int_reg(nc, dst)
         return true
@@ -12647,6 +12717,7 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
                 } else {
                     nc_core_load_temp_to_rax(nc, src1)
                     nc_emit_neg_rax(nc)
+                    nc_emit_overflow_guard(nc)
                     nc_core_store_rax_to_temp(nc, IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize])
                     nc_core_mark_int_reg(nc, IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize])
                 }
@@ -13039,6 +13110,15 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
         nc_emit_ret(nc)
     }
 
+    // SIO-207: shared signed-overflow trap for this function (exit 1, the
+    // builtin-panic shape). Emitted only when a guard referenced it; the
+    // synthetic epilogue above ends in ret, so this is unreachable except
+    // through the guards' jo.
+    if NC_V2_OVERFLOW_GUARD_USED != 0 {
+        nc_define_label(nc, nc_v2_overflow_trap_label())
+        nc_emit_exit_code(nc, 1)
+    }
+
     patch_label_forwards_mut(nc)
     if native_v2_capacity_trace_enabled() {
         print("nv2cap fn=")
@@ -13107,6 +13187,7 @@ pub fn native_v2_core_emit_binop_code_into(nc: &! NativeCompiler, dst: i64, lhs:
         nc_core_load_temp_to_rax(nc, rhs)
         nc_emit_pop_rbx(nc)
         nc_emit_add_rax_rbx(nc)
+        nc_emit_overflow_guard(nc)
         nc_core_store_rax_to_temp(nc, dst)
         return true
     }
@@ -13116,6 +13197,7 @@ pub fn native_v2_core_emit_binop_code_into(nc: &! NativeCompiler, dst: i64, lhs:
         nc_core_load_temp_to_rax(nc, lhs)
         nc_emit_pop_rbx(nc)
         nc_emit_sub_rax_rbx(nc)
+        nc_emit_overflow_guard(nc)
         nc_core_store_rax_to_temp(nc, dst)
         return true
     }
@@ -13125,6 +13207,7 @@ pub fn native_v2_core_emit_binop_code_into(nc: &! NativeCompiler, dst: i64, lhs:
         nc_core_load_temp_to_rax(nc, rhs)
         nc_emit_pop_rbx(nc)
         nc_emit_imul_rax_rbx(nc)
+        nc_emit_overflow_guard(nc)
         nc_core_store_rax_to_temp(nc, dst)
         return true
     }
@@ -14037,6 +14120,7 @@ pub fn native_v2_core_emit_any_binop_into(nc: &! NativeCompiler, dst: i64, lhs: 
         nc_core_load_temp_to_rax(nc, rhs)
         nc_emit_pop_rbx(nc)
         nc_emit_add_rax_rbx(nc)
+        nc_emit_overflow_guard(nc)
         nc_core_store_rax_to_temp(nc, dst)
         return true
     }
@@ -14046,6 +14130,7 @@ pub fn native_v2_core_emit_any_binop_into(nc: &! NativeCompiler, dst: i64, lhs: 
         nc_core_load_temp_to_rax(nc, lhs)
         nc_emit_pop_rbx(nc)
         nc_emit_sub_rax_rbx(nc)
+        nc_emit_overflow_guard(nc)
         nc_core_store_rax_to_temp(nc, dst)
         return true
     }
@@ -14055,6 +14140,7 @@ pub fn native_v2_core_emit_any_binop_into(nc: &! NativeCompiler, dst: i64, lhs: 
         nc_core_load_temp_to_rax(nc, rhs)
         nc_emit_pop_rbx(nc)
         nc_emit_imul_rax_rbx(nc)
+        nc_emit_overflow_guard(nc)
         nc_core_store_rax_to_temp(nc, dst)
         return true
     }
@@ -14108,6 +14194,11 @@ pub fn native_v2_core_emit_branch_false_to_label_into(nc: &! NativeCompiler, con
 }
 
 pub fn native_v2_core_patch_labels_into(nc: &! NativeCompiler) with IO, Mut, Panic, Div {
+    // SIO-207: overflow trap stub for the driver path (mirrors the core_ir fn end).
+    if NC_V2_OVERFLOW_GUARD_USED != 0 {
+        nc_define_label(nc, nc_v2_overflow_trap_label())
+        nc_emit_exit_code(nc, 1)
+    }
     patch_label_forwards_mut(nc)
 }
 
