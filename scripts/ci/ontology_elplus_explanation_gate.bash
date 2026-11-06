@@ -110,7 +110,7 @@ run_leg() { # <engine-label> <engine-selector>
   local malformed_log="$OUT/$label.malformed.log"
   env SOUNIO_SOUC_ENGINE="$engine" "$SOUC" run tests/run-pass/ontology_elplus_explanation_malformed.sio >"$malformed_log" 2>&1 \
     || { cat "$malformed_log" >&2; fail "engine=$label: malformed provenance was not rejected"; }
-  grep -Fxq 'ONTOLOGY_ELPLUS_EXPLANATION_MALFORMED_OK refused=6' "$malformed_log" \
+  grep -Fxq 'ONTOLOGY_ELPLUS_EXPLANATION_MALFORMED_OK refused=9' "$malformed_log" \
     || { cat "$malformed_log" >&2; fail "engine=$label: malformed-provenance marker missing"; }
 
   grep -E '^(TRACE_|STEP |ONTOLOGY_ELPLUS_EXPLANATION_OK)' "$run_log" >"$OUT/$label.normalized"
