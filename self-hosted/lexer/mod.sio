@@ -182,6 +182,35 @@ fn lexer_mark_lex_error(kind: i64, line: i64, col: i64, byte_val: i64) with Mut 
     }
 }
 
+var LEXER_UTF8_LEN: i64 = 0
+
+// Scalar value of the UTF-8 sequence that starts at pos, or -1 if it is malformed
+// (bad lead or continuation byte, truncated, overlong, a surrogate, or above U+10FFFF).
+// On success LEXER_UTF8_LEN is its length in bytes.
+fn lexer_utf8_scalar(pos: i64, n: i64) -> i64 with Mut, Panic {
+    let b0 = (CURSOR_SOURCE[pos as usize] as i64) & 255
+    var need: i64 = 0
+    var v: i64 = 0
+    var minv: i64 = 0
+    if b0 >= 194 && b0 <= 223 { need = 1  v = b0 & 31  minv = 128 }
+    else if b0 >= 224 && b0 <= 239 { need = 2  v = b0 & 15  minv = 2048 }
+    else if b0 >= 240 && b0 <= 244 { need = 3  v = b0 & 7  minv = 65536 }
+    else { return 0 - 1 }
+    if pos + need >= n { return 0 - 1 }
+    var i: i64 = 1
+    while i <= need {
+        let b = (CURSOR_SOURCE[(pos + i) as usize] as i64) & 255
+        if b < 128 || b > 191 { return 0 - 1 }
+        v = v * 64 + (b & 63)
+        i = i + 1
+    }
+    if v < minv { return 0 - 1 }
+    if v >= 55296 && v <= 57343 { return 0 - 1 }
+    if v > 1114111 { return 0 - 1 }
+    LEXER_UTF8_LEN = need + 1
+    return v
+}
+
 // A string escape the lowering decodes (ir_normalize_string_literal_name):
 // \n \t \r \0 \\ \" and \xHH. This is the union of what the two engines decode
 // today; lean_single refuses every other escape, and so does this lexer now.
@@ -234,6 +263,11 @@ pub fn lexer_report_lex_error_if_any(path: string) -> bool with IO, Mut {
         print("  = note: the digits were previously wrapped into the value, so\n")
         print("          `99999999999999999999` compiled as 7766279631452241919\n")
         print("  = help: write it as a float (`...e0`) or keep it within 2^64-1\n")
+    } else if LEXER_LEX_ERROR_KIND == 7 {
+        print("error[E281]: unterminated or malformed character literal")
+        lexer_print_location(path)
+        print("  = note: a character literal is one Unicode scalar value between quotes, `'a'` or `'\\n'`;\n")
+        print("          `'name` with no closing quote is a lifetime, but a single character without one is refused\n")
     } else {
         let in_char = LEXER_LEX_ERROR_KIND == 5
         print("error[E274]: invalid escape sequence `\\")
@@ -1168,11 +1202,17 @@ pub fn lex_source_to_globals(source_len: i64) -> i64 with Mut, Div, Panic {
         // Without this arm `'='` is an error token plus Eq, and lowering
         // refuses the resulting assignment (trailing_equals_banner_comment).
         if ch == 39 as i8 {
+            // ADR-015 row 4. `'x'` is a Unicode scalar value (UTF-8 decoded). `'name` with no
+            // closing quote is a lifetime and yields no token (as in lean_single), so
+            // `&'static str` still reads as `& str`. Anything else without a closing quote,
+            // or `''`, is refused (E281).
             let start = pos
             let start_col = col
             pos = pos + 1
             col = col + 1
             var value: i64 = 0
+            var lifetime: i64 = 0
+            var bad: i64 = 0
             if pos < n {
                 let c0 = CURSOR_SOURCE[pos as usize]
                 if c0 == 92 as i8 && pos + 1 < n {
@@ -1191,16 +1231,48 @@ pub fn lex_source_to_globals(source_len: i64) -> i64 with Mut, Div, Panic {
                     }
                     pos = pos + 2
                     col = col + 2
+                } else if ((c0 as i64) & 255) >= 128 {
+                    let sv = lexer_utf8_scalar(pos, n)
+                    if sv < 0 {
+                        lexer_mark_lex_error(1, line, col, (c0 as i64) & 255)
+                        pos = pos + 1
+                    } else {
+                        value = sv
+                        pos = pos + LEXER_UTF8_LEN
+                    }
+                    col = col + 1
+                } else if is_ident_start(c0) && pos + 1 < n && is_ident_continue(CURSOR_SOURCE[(pos + 1) as usize]) {
+                    lifetime = 1
+                    while pos < n && is_ident_continue(CURSOR_SOURCE[pos as usize]) {
+                        pos = pos + 1
+                        col = col + 1
+                    }
+                } else if c0 == 39 as i8 {
+                    bad = 1
                 } else {
                     value = c0 as i64
                     pos = pos + 1
                     col = col + 1
                 }
+            } else {
+                bad = 1
+            }
+            if lifetime == 1 {
+                // `'ab'` is a two-character literal, not a lifetime followed by a quote.
+                if pos < n && CURSOR_SOURCE[pos as usize] == 39 as i8 {
+                    lexer_mark_lex_error(7, line, start_col, 0)
+                    pos = pos + 1
+                    col = col + 1
+                }
+                continue
             }
             if pos < n && CURSOR_SOURCE[pos as usize] == 39 as i8 {
                 pos = pos + 1
                 col = col + 1
+            } else {
+                bad = 1
             }
+            if bad == 1 { lexer_mark_lex_error(7, line, start_col, 0) }
             tc = lexer_push_flat(tc, 127, start, pos, line, start_col, value)
             if tc < 0 { break }
             continue
