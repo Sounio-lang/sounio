@@ -311,6 +311,7 @@ pub fn sv_parse_params(buf: *mut u8, n: i64, boff: i64, out: &!CpuBuf) -> i64 wi
     ck_set(out, 2, 12345.0)
     ck_set(out, 3, 16.0)
     ck_set(out, 4, 0.0)
+    ck_set(out, 5, 0.0)
     let tp = sv_find(buf, n, boff, "\"temperature\"")
     if tp >= 0 {
         let fv = sv_float(buf, n, tp + 13)
@@ -341,6 +342,11 @@ pub fn sv_parse_params(buf: *mut u8, n: i64, boff: i64, out: &!CpuBuf) -> i64 wi
     let st = sv_find(buf, n, boff, "\"stream\"")
     if st >= 0 {
         if sv_find(buf, n, st, "true") == st + 10 { ck_set(out, 4, 1.0) }
+    }
+    let pr = sv_find(buf, n, boff, "priority")
+    if pr >= 0 {
+        let iv = sv_int(buf, n, pr + 10)
+        if iv[2] == 1 { ck_set(out, 5, iv[0] as f64) }
     }
     0
 }
@@ -775,6 +781,7 @@ pub fn llm_serve(m: &!Llama, bp: &Bpe, port: i64, model_name: string, rt: &Runti
     var pxlen: [i64; 4] = [0; 4]
     var pvvalid: [i64; 4] = [0; 4]
     var sos: [i64; 4] = [0 - 1; 4]
+    var sprio: [i64; 8] = [0; 8]
     var req: i64 = 0
     var probe: [i64; 8] = [0 - 1; 8]
     while 1 == 1 {
@@ -798,7 +805,7 @@ pub fn llm_serve(m: &!Llama, bp: &Bpe, port: i64, model_name: string, rt: &Runti
                     rlen[slot as usize] = 0
                     rbuf[slot as usize] = heap_alloc(262144)
                     ids[slot as usize] = ck_alloc(4096)
-                    prm[slot as usize] = ck_alloc(5)
+                    prm[slot as usize] = ck_alloc(6)
                     seed[slot as usize] = ck_alloc(1)
                     logi[slot as usize] = ck_alloc(m.cfg.vocab)
                     text[slot as usize] = heap_alloc(65536)
@@ -836,6 +843,7 @@ pub fn llm_serve(m: &!Llama, bp: &Bpe, port: i64, model_name: string, rt: &Runti
                                 } else if SV_PUMP == 1 {
                                     st[s as usize] = ns
                                     pq.count = svb_qpush(&!pq, 0 - 1, nids[s as usize], ck_get(&prm[s as usize], 3) as i64, s)
+                                    sprio[s as usize] = ck_get(&prm[s as usize], 5) as i64
                                     if pq.count < 0 {
                                         pq.count = 0
                                         let ebody = heap_alloc(69632)
@@ -876,7 +884,7 @@ pub fn llm_serve(m: &!Llama, bp: &Bpe, port: i64, model_name: string, rt: &Runti
         }
         if SV_PUMP == 1 {
             if bn > 0 || pq.count > 0 {
-                sv_pump_turn(&lib, m, bp, rt, use_gpu, pagedev, model_name, &!fd, &!st, &reqid, &prm, &!seed, &text, &!tlen, &!gen, &!ttfb, &!t0, &nids, &blist, bn, &chats, &chtols, &!psl, &!pkk, &!pkv, &!bank, &!pq, &!pspill, &!pvspill, &!pscnt, &!pxlen, &!pvvalid, &!sos, &ids)
+                sv_pump_turn(&lib, m, bp, rt, use_gpu, pagedev, model_name, &!fd, &!st, &reqid, &prm, &!seed, &text, &!tlen, &!gen, &!ttfb, &!t0, &nids, &blist, bn, &chats, &chtols, &!psl, &!pkk, &!pkv, &!bank, &!pq, &!pspill, &!pvspill, &!pscnt, &!pxlen, &!pvvalid, &!sos, &ids, &sprio)
             }
         } else if bn == 1 {
             let s0 = blist[0]
@@ -1066,7 +1074,7 @@ fn sv_pump_turn(
     psl: &![SvSlot; 4], pkk: &![PagedKv; 256], pkv: &![PagedKv; 256],
     bank: &![i64; 16384], q: &!SvQueue,
     spill: &![i64; 4096], vspill: &![i64; 4096], scnt: &![i64; 4], xlen: &![i64; 4], vvalid: &![i64; 4],
-    sos: &![i64; 4], ids: &[CpuBuf; 8]
+    sos: &![i64; 4], ids: &[CpuBuf; 8], sprio: &[i64; 8]
 ) with Alloc, Mut, Panic, Div, IO {
     var rslot: [i64; 16] = [0; 16]
     var rpos: [i64; 16] = [0; 16]
@@ -1077,7 +1085,7 @@ fn sv_pump_turn(
     var meta: [i64; 4] = [0; 4]
     var pdone: [i64; 4] = [0; 4]
     let vocab = m.cfg.vocab
-    let out = svb_pump_fwd(m, pkk, pkv, psl, bank, q, rt, use_gpu, pagedev, SVB_CHUNK, &!rslot, &!rpos, &!toks, &!kind, &!rowtok, &!seedrow, &!meta, spill, vspill, scnt, xlen, vvalid, sos, ids)
+    let out = svb_pump_fwd(m, pkk, pkv, psl, bank, q, rt, use_gpu, pagedev, SVB_CHUNK, &!rslot, &!rpos, &!toks, &!kind, &!rowtok, &!seedrow, &!meta, spill, vspill, scnt, xlen, vvalid, sos, ids, sprio)
     let rn = meta[0]
     if meta[3] / 256 > 0 {
         print("svd preempt mask=")
@@ -1482,57 +1490,12 @@ fn svb_qpurge(q: &!SvQueue, vvalid: &![i64; 4], sess: i64) -> i64 with Mut {
     q.count
 }
 
-// M10: bring the first staged victim (vs >= 0) to the queue front so a
-// restore always admits before queued fresh arrivals. A fresh live admit
-// rewrites the free slot bank lane; admitting one ahead of a staged victim
-// would clobber the victim saved prompt lane, and the victim would replay
-// another session prompt. Plain (ss < 0) entries never take this path.
-fn svb_qvictim_first(q: &!SvQueue) -> i64 with Mut {
-    if q.count <= 1 { return q.count }
-    if q.vs[0] >= 0 { return q.count }
-    if q.ss[0] < 0 { return q.count }
-    var h: i64 = 1
-    var fh: i64 = 0 - 1
-    while h < q.count {
-        if fh < 0 && q.vs[h as usize] >= 0 { fh = h }
-        h = h + 1
-    }
-    if fh < 0 { return q.count }
-    while fh > 0 {
-        var t: i64 = q.off[fh as usize]
-        q.off[fh as usize] = q.off[(fh - 1) as usize]
-        q.off[(fh - 1) as usize] = t
-        t = q.n[fh as usize]
-        q.n[fh as usize] = q.n[(fh - 1) as usize]
-        q.n[(fh - 1) as usize] = t
-        t = q.pmax[fh as usize]
-        q.pmax[fh as usize] = q.pmax[(fh - 1) as usize]
-        q.pmax[(fh - 1) as usize] = t
-        t = q.vs[fh as usize]
-        q.vs[fh as usize] = q.vs[(fh - 1) as usize]
-        q.vs[(fh - 1) as usize] = t
-        t = q.xl[fh as usize]
-        q.xl[fh as usize] = q.xl[(fh - 1) as usize]
-        q.xl[(fh - 1) as usize] = t
-        t = q.vl[fh as usize]
-        q.vl[fh as usize] = q.vl[(fh - 1) as usize]
-        q.vl[(fh - 1) as usize] = t
-        t = q.gn[fh as usize]
-        q.gn[fh as usize] = q.gn[(fh - 1) as usize]
-        q.gn[(fh - 1) as usize] = t
-        t = q.ss[fh as usize]
-        q.ss[fh as usize] = q.ss[(fh - 1) as usize]
-        q.ss[(fh - 1) as usize] = t
-        fh = fh - 1
-    }
-    q.count
-}
-
+// M11: restore re-copies its bank lane (see admit), so no
+// queue rotation is needed here.
 // admit queued arrivals onto free slots; returns new queue count.
-fn svb_admit_all(slots: &![SvSlot; 4], q: &!SvQueue, pks_k: &![PagedKv; 256], pks_v: &![PagedKv; 256], bank: &![i64; 16384], ids: &[CpuBuf; 8], spill: &![i64; 4096], vspill: &![i64; 4096], scnt: &![i64; 4], xlen: &![i64; 4], vvalid: &![i64; 4], sos: &![i64; 4], meta: &![i64; 4]) -> i64 with Mut {
+fn svb_admit_all(slots: &![SvSlot; 4], q: &!SvQueue, pks_k: &![PagedKv; 256], pks_v: &![PagedKv; 256], bank: &![i64; 16384], ids: &[CpuBuf; 8], spill: &![i64; 4096], vspill: &![i64; 4096], scnt: &![i64; 4], xlen: &![i64; 4], vvalid: &![i64; 4], sos: &![i64; 4], sprio: &[i64; 8], meta: &![i64; 4]) -> i64 with Mut {
     var preempted: i64 = 0
     while q.count > 0 {
-        svb_qvictim_first(q)
         var s: i64 = 0 - 1
         var i: i64 = 0
         while i < SVB_NSLOT {
@@ -1542,15 +1505,26 @@ fn svb_admit_all(slots: &![SvSlot; 4], q: &!SvQueue, pks_k: &![PagedKv; 256], pk
         if s < 0 {
             if preempted != 0 { return q.count }
             var v: i64 = 0 - 1
+            var vp: i64 = 0
             var vg: i64 = 0
             i = 0
             while i < SVB_NSLOT {
                 if slots[i as usize].off >= 0 && vvalid[i as usize] == 0 && slots[i as usize].gen > 0 {
-                    if v < 0 || slots[i as usize].gen < vg { v = i; vg = slots[i as usize].gen }
+                    // M11: victim is lowest (priority, gen); plain reads 0.
+                    var ip: i64 = 0
+                    let ise = sos[i as usize]
+                    if ise >= 0 { ip = sprio[ise as usize] }
+                    if v < 0 || ip < vp || (ip == vp && slots[i as usize].gen < vg) { v = i; vp = ip; vg = slots[i as usize].gen }
                 }
                 i = i + 1
             }
             if v < 0 { return q.count }
+            // M11: head that does not outrank the victim waits.
+            if q.vs[0] < 0 {
+                var hp: i64 = 0
+                if q.ss[0] >= 0 { hp = sprio[q.ss[0] as usize] }
+                if hp < vp { return q.count }
+            }
             if q.count >= SVB_QCAP { return q.count }
             var w: i64 = 0
             while w < 1024 {
@@ -1577,7 +1551,6 @@ fn svb_admit_all(slots: &![SvSlot; 4], q: &!SvQueue, pks_k: &![PagedKv; 256], pk
             meta[3] = meta[3] | (1 << (v + 8))
             preempted = 1
             s = v
-            svb_qvictim_first(q)
         }
         let vs = q.vs[0]
         if vs >= 0 {
@@ -1589,6 +1562,20 @@ fn svb_admit_all(slots: &![SvSlot; 4], q: &!SvQueue, pks_k: &![PagedKv; 256], pk
             vvalid[vs as usize] = 0
             sos[s as usize] = q.ss[0]
             slots[s as usize].off = q.off[0]
+            // M11: restore re-establishes its bank lane from the
+            // session prompt into the lane it occupies now. A fresh
+            // admit may have reused the old lane since staging, so
+            // replaying from q.off would read another prompt. This
+            // replaces the M10 restore-first rotation, which starved
+            // fresh arrivals while the table stayed full.
+            if q.ss[0] >= 0 {
+                var e: i64 = 0
+                while e < q.n[0] {
+                    bank[(s * SVB_LANE + e) as usize] = ck_get(&ids[q.ss[0] as usize], e) as i64
+                    e = e + 1
+                }
+                slots[s as usize].off = s * SVB_LANE
+            }
             slots[s as usize].nid = q.n[0]
             slots[s as usize].cur = 0
             slots[s as usize].gen = q.gn[0]
@@ -1749,10 +1736,10 @@ fn svb_sample_rows(out: &CpuBuf, rslot: &[i64; 16], kind: &[i64; 16], rowtok: &!
 // (meta[0] row count, meta[1] queue count). The caller samples the
 // emitting rows (seed rows plus decode rows) and applies them with
 // svb_pump_adv. Returns stacked row logits.
-pub fn svb_pump_fwd(m: &!Llama, pks_k: &![PagedKv; 256], pks_v: &![PagedKv; 256], slots: &![SvSlot; 4], bank: &![i64; 16384], q: &!SvQueue, rt: &Runtime, use_gpu: bool, pagedev: bool, chunk: i64, rslot: &![i64; 16], rpos: &![i64; 16], toks: &![i64; 16], kind: &![i64; 16], rowtok: &![i64; 16], seedrow: &![i64; 4], meta: &![i64; 4], spill: &![i64; 4096], vspill: &![i64; 4096], scnt: &![i64; 4], xlen: &![i64; 4], vvalid: &![i64; 4], sos: &![i64; 4], ids: &[CpuBuf; 8]) -> CpuBuf with Alloc, Mut, Panic, Div, IO {
+pub fn svb_pump_fwd(m: &!Llama, pks_k: &![PagedKv; 256], pks_v: &![PagedKv; 256], slots: &![SvSlot; 4], bank: &![i64; 16384], q: &!SvQueue, rt: &Runtime, use_gpu: bool, pagedev: bool, chunk: i64, rslot: &![i64; 16], rpos: &![i64; 16], toks: &![i64; 16], kind: &![i64; 16], rowtok: &![i64; 16], seedrow: &![i64; 4], meta: &![i64; 4], spill: &![i64; 4096], vspill: &![i64; 4096], scnt: &![i64; 4], xlen: &![i64; 4], vvalid: &![i64; 4], sos: &![i64; 4], ids: &[CpuBuf; 8], sprio: &[i64; 8]) -> CpuBuf with Alloc, Mut, Panic, Div, IO {
     let cap = 64 * pks_k[0].b
     meta[3] = 0
-    svb_admit_all(slots, q, pks_k, pks_v, bank, ids, spill, vspill, scnt, xlen, vvalid, sos, meta)
+    svb_admit_all(slots, q, pks_k, pks_v, bank, ids, spill, vspill, scnt, xlen, vvalid, sos, sprio, meta)
     let n = svb_build_rows(slots, bank, spill, xlen, cap, chunk, rslot, rpos, toks, kind, rowtok, seedrow, meta)
     meta[0] = n
     meta[1] = q.count
@@ -1816,9 +1803,9 @@ pub fn svb_pump_adv(slots: &![SvSlot; 4], pks_k: &![PagedKv; 256], pks_v: &![Pag
 // token per row (rowtok, -1 when a prefill row seeds nothing) and
 // meta (meta[0] row count, meta[1] queue count, meta[2] finished).
 // Returns stacked row logits.
-pub fn svb_pump(m: &!Llama, pks_k: &![PagedKv; 256], pks_v: &![PagedKv; 256], slots: &![SvSlot; 4], bank: &![i64; 16384], q: &!SvQueue, rt: &Runtime, use_gpu: bool, pagedev: bool, chunk: i64, rslot: &![i64; 16], rpos: &![i64; 16], toks: &![i64; 16], kind: &![i64; 16], rowtok: &![i64; 16], meta: &![i64; 4], spill: &![i64; 4096], vspill: &![i64; 4096], scnt: &![i64; 4], xlen: &![i64; 4], vvalid: &![i64; 4], sos: &![i64; 4], ids: &[CpuBuf; 8]) -> CpuBuf with Alloc, Mut, Panic, Div, IO {
+pub fn svb_pump(m: &!Llama, pks_k: &![PagedKv; 256], pks_v: &![PagedKv; 256], slots: &![SvSlot; 4], bank: &![i64; 16384], q: &!SvQueue, rt: &Runtime, use_gpu: bool, pagedev: bool, chunk: i64, rslot: &![i64; 16], rpos: &![i64; 16], toks: &![i64; 16], kind: &![i64; 16], rowtok: &![i64; 16], meta: &![i64; 4], spill: &![i64; 4096], vspill: &![i64; 4096], scnt: &![i64; 4], xlen: &![i64; 4], vvalid: &![i64; 4], sos: &![i64; 4], ids: &[CpuBuf; 8], sprio: &[i64; 8]) -> CpuBuf with Alloc, Mut, Panic, Div, IO {
     var seedrow: [i64; 4] = [0 - 1; 4]
-    let out = svb_pump_fwd(m, pks_k, pks_v, slots, bank, q, rt, use_gpu, pagedev, chunk, rslot, rpos, toks, kind, rowtok, &!seedrow, meta, spill, vspill, scnt, xlen, vvalid, sos, ids)
+    let out = svb_pump_fwd(m, pks_k, pks_v, slots, bank, q, rt, use_gpu, pagedev, chunk, rslot, rpos, toks, kind, rowtok, &!seedrow, meta, spill, vspill, scnt, xlen, vvalid, sos, ids, sprio)
     let n = meta[0]
     if n <= 0 {
         return out
