@@ -38,7 +38,9 @@ build() { # case -> sets RC, OUT, LOG
     OUT="$TMP_DIR/$1.ptx"
     LOG="$TMP_DIR/$1.log"
     RC=0
-    timeout 60 "$SOUC" build "$CASES/$1.sio" --backend gpu -o "$OUT" >"$LOG" 2>&1 || RC=$?
+    # These literal goldens describe sm50; default sm80 selection is exercised
+    # separately by scripts/dev/public_kernel_vec_add_gate.sh.
+    timeout 60 "$SOUC" build "$CASES/$1.sio" --backend gpu --gpu-target cuda-sm50 -o "$OUT" >"$LOG" 2>&1 || RC=$?
 }
 
 # lowered <case> <egrep pattern that must match> [<egrep pattern that must not match>]
