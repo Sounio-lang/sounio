@@ -32,7 +32,7 @@ const {
   degenerateParams, N,
 } = core;
 
-// CLI: --drug=rapamycin|semaglutide|tirzepatide|everolimus|tacrolimus|olanzapine|clozapine|quetiapine|lithium|vancomycin  --case=literature|degenerate
+// CLI: --drug=rapamycin|semaglutide|tirzepatide|everolimus|tacrolimus|olanzapine|clozapine|clozapine-smoker|quetiapine|lithium|vancomycin  --case=literature|degenerate
 const args = Object.fromEntries(
   process.argv.slice(2)
     .filter(a => a.startsWith('--'))
@@ -87,7 +87,15 @@ if (DRUG === 'tirzepatide') {
     stentActive: true,    // re-used as 'input active'
   };
 }
- else if (DRUG === 'olanzapine') {
+
+ else if (DRUG === 'clozapine-smoker') {
+  baseParams = {
+    ...DEFAULT_PARAMS_CLOZAPINE,
+    clHep: 30.0,
+    bolusMg: 0.0,
+    stentActive: true,
+  };
+} else if (DRUG === 'olanzapine') {
   baseParams = {
     ...DEFAULT_PARAMS_OLANZAPINE,
     bolusMg: 0.0,         // no IV bolus — oral IR gut absorption only
@@ -143,6 +151,9 @@ if (DRUG === 'tirzepatide') {
 }
  else if (DRUG === 'clozapine') {
   out.push('DISSERTATION_PBPK28_CLOZAPINE_PARITY_NODE v1');
+}
+ else if (DRUG === 'clozapine-smoker') {
+  out.push('DISSERTATION_PBPK28_CLOZAPINE_SMOKER_PARITY_NODE v1');
 }
  else if (DRUG === 'olanzapine') {
   out.push('DISSERTATION_PBPK28_OLANZAPINE_PARITY_NODE v1');
@@ -214,6 +225,9 @@ if (DRUG === 'tirzepatide') {
 }
  else if (DRUG === 'clozapine') {
   out.push('DISSERTATION_PBPK28_CLOZAPINE_PARITY_DONE');
+}
+ else if (DRUG === 'clozapine-smoker') {
+  out.push('DISSERTATION_PBPK28_CLOZAPINE_SMOKER_PARITY_DONE');
 }
  else if (DRUG === 'olanzapine') {
   out.push('DISSERTATION_PBPK28_OLANZAPINE_PARITY_DONE');
