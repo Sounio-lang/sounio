@@ -1533,6 +1533,75 @@ paste <(grep "^TMASS|m=" "$CLZ_SIO_LOG" | sed "s/^TMASS|m=//") \
 
 echo
 echo "[pbpk28-parity] clozapine oral-IR canonical: tablet lag + gut absorption + systemic PK + mass envelope (10th canonical drug)"
+echo
+echo "[pbpk28-parity] Case 24s: Sounio <-> Node clozapine-smoker PBPK28 (CYP1A2 induction x1.5)"
+
+CLZS_SIO_LOG="$OUT_DIR/clzs_sounio.txt"
+CLZS_NODE_LOG="$OUT_DIR/clzs_node.txt"
+
+"$SOUC_BIN" run tests/run-pass/dissertation_pbpk28_parity_ref_clozapine_smoker.sio > "$CLZS_SIO_LOG" 2>&1 || {
+  echo "[pbpk28-parity:case24s] FAIL: Sounio clozapine-smoker ref returned non-zero" >&2
+  tail -n 20 "$CLZS_SIO_LOG" >&2; exit 1; }
+if ! grep -q "^DISSERTATION_PBPK28_CLOZAPINE_SMOKER_PARITY_DONE$" "$CLZS_SIO_LOG"; then
+  echo "[pbpk28-parity:case24s] FAIL: Sounio clozapine-smoker ref did not emit DONE" >&2; exit 1; fi
+node "$NODE_RUNNER" --drug=clozapine-smoker > "$CLZS_NODE_LOG" 2>&1 || {
+  echo "[pbpk28-parity:case24s] FAIL: Node clozapine-smoker runner returned non-zero" >&2
+  tail -n 20 "$CLZS_NODE_LOG" >&2; exit 1; }
+if ! grep -q "^DISSERTATION_PBPK28_CLOZAPINE_SMOKER_PARITY_NODE v1$" "$CLZS_NODE_LOG"; then
+  echo "[pbpk28-parity:case24s] FAIL: Node clozapine-smoker runner header mismatch" >&2; exit 1; fi
+
+CLZS_SIO_TSV="$OUT_DIR/clzs_sounio.tsv"
+CLZS_NODE_TSV="$OUT_DIR/clzs_node.tsv"
+parse_to_tsv "$CLZS_SIO_LOG" "$CLZS_SIO_TSV"
+parse_to_tsv "$CLZS_NODE_LOG" "$CLZS_NODE_TSV"
+
+CLZS_SIO_ROWS=$(wc -l < "$CLZS_SIO_TSV")
+CLZS_NODE_ROWS=$(wc -l < "$CLZS_NODE_TSV")
+if [[ "$CLZS_SIO_ROWS" -ne "$EXPECTED_ROWS" || "$CLZS_NODE_ROWS" -ne "$EXPECTED_ROWS" ]]; then
+  echo "[pbpk28-parity:case24s] FAIL: clozapine-smoker row count mismatch" >&2
+  exit 1
+fi
+echo "[pbpk28-parity:case24s] both runs emitted $CLZS_SIO_ROWS records"
+
+CLZS_JOINED="$OUT_DIR/clzs_joined.tsv"
+awk -F"\t" "
+  NR==FNR { S[\$1\"|\"\$2] = \$5; next }
+  { print \$1\"\t\"\$2\"\t\"S[\$1\"|\"\$2]\"\t\"\$5 }
+" "$CLZS_SIO_TSV" "$CLZS_NODE_TSV" > "$CLZS_JOINED"
+
+awk -F"\t" -v THR="$RMSE_THRESHOLD_PCT" "
+  {
+    i = \$2 + 0; cs = \$3 + 0; cn = \$4 + 0;
+    d = cs - cn; SS[i] += d * d; NN[i] += 1;
+    if (cs > PK[i]) PK[i] = cs;
+    if (cn > PK[i]) PK[i] = cn;
+  }
+  END {
+    bad = 0;
+    for (i = 0; i < 14; i++) {
+      if (NN[i] == 0) { printf \"PBPK28_CLOZAPINE_SMOKER_PARITY_FAIL organ %d MISSING\n\", i; bad += 1; continue; }
+      rmse = sqrt(SS[i] / NN[i]); pk = PK[i] + 0;
+      if (pk == 0) { continue; }
+      pct = 100.0 * rmse / pk;
+      if (pct >= THR + 0) { printf \"PBPK28_CLOZAPINE_SMOKER_PARITY_FAIL organ %d pct=%.4f rmse=%.3g\n\", i, pct, rmse; bad += 1; }
+    }
+    if (bad > 0) { exit 1; }
+    printf \"PBPK28_CLOZAPINE_SMOKER_PARITY_PASS 14/14 compartments within %s%% RMSE (strict)\n\", THR;
+  }
+" "$CLZS_JOINED"
+
+paste <(grep "^TMASS|m=" "$CLZS_SIO_LOG" | sed "s/^TMASS|m=//") \
+      <(grep "^TREL|cum=" "$CLZS_SIO_LOG" | sed "s/^TREL|cum=//") \
+  | awk -v FAILM="PBPK28_CLOZAPINE_SMOKER_MASS_FAIL" -v PASS="PBPK28_CLOZAPINE_SMOKER_MASS_PASS" "
+      { m=(\$1+0); r=(\$2+0); n++;
+        if (!(m >= 0 && m <= r)) { printf \"%s sample %d: mass %.6f outside [0, %.6f]\n\", FAILM, n, m, r; bad=1 } }
+      END { if (n != 12) { printf \"%s row count %d != 12\n\", FAILM, n; exit 1 }
+        if (bad) exit 1;
+        printf \"%s 12/12 samples within [0, absorbed]\n\", PASS }"
+
+echo
+echo "[pbpk28-parity] clozapine-smoker CYP1A2 induction: same tablet and input, CL 30 L/h, parity + mass envelope (case 24s)"
+
 
 # ════════════════════════════════════════════════════════════════════════════
 # Case 25: Quetiapine — eleventh canonical drug, fourth oral-IR case.
