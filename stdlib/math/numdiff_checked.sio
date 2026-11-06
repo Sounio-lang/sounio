@@ -1,0 +1,323 @@
+// Checked finite differences. Library _into bodies allocate no heap payloads.
+// Caller callbacks retain their own declared effects and numerical limitations.
+use math::pure::{is_finite}
+use collections::numeric_buffer::{NumericBuffer,numeric_buffer_status,numeric_buffer_len,numeric_buffer_at,numeric_buffer_set}
+
+pub struct DiffControls {pub atol:f64,pub rtol:f64,pub max_callbacks:i64}
+pub struct DiffResult {
+    pub status:i64,pub estimate:f64,pub error_estimate:f64,pub step:f64,
+    pub left_step:f64,pub right_step:f64,pub callback_count:i64,
+    pub error_available:bool,pub converged:bool,
+}
+pub struct DiffSummary {pub status:i64,pub callback_count:i64,pub callback_status:i64,pub converged:bool}
+pub fn diff_controls(atol:f64,rtol:f64,max_callbacks:i64)->DiffControls {DiffControls{atol:atol,rtol:rtol,max_callbacks:max_callbacks}}
+pub fn diff_result()->DiffResult {DiffResult{status:1,estimate:0.0,error_estimate:0.0,step:0.0,left_step:0.0,right_step:0.0,callback_count:0,error_available:false,converged:false}}
+pub fn diff_summary()->DiffSummary {DiffSummary{status:1,callback_count:0,callback_status:0,converged:false}}
+fn dc_abs(x:f64)->f64 {if x<0.0 {0.0-x} else {x}}
+fn dc_nan()->f64 with Mut,Div {var z:f64=0.0;z/z}
+fn dc_options(c:&DiffControls)->bool {is_finite(c.atol) && is_finite(c.rtol) && c.atol>=0.0 && c.rtol>=0.0}
+fn dc_points(x:f64,h:f64)->bool {
+    if !is_finite(x) || !is_finite(h) || h<=0.0 {return false}
+    let a=x-h
+    let b=x+h
+    if !is_finite(a) || !is_finite(b) || a>=x || b<=x {return false}
+    let hm=x-a
+    let hp=b-x
+    is_finite(hm) && is_finite(hp) && hm>0.0 && hp>0.0
+}
+// Quadratic three-node formula, expressed as weighted local secant slopes.
+// Normalized spacings avoid overflow in hm+hp and preserve actual node geometry.
+fn dc_first(fm:f64,f0:f64,fp:f64,hm:f64,hp:f64)->f64 with Div {
+    let scale=if hm>hp {hm} else {hp}
+    let a=hm/scale
+    let b=hp/scale
+    let left=(f0-fm)/hm
+    let right=(fp-f0)/hp
+    (b/(a+b))*left+(a/(a+b))*right
+}
+fn dc_second(fm:f64,f0:f64,fp:f64,hm:f64,hp:f64)->f64 with Div {
+    let scale=if hm>hp {hm} else {hp}
+    let a=hm/scale
+    let b=hp/scale
+    let left=(f0-fm)/hm
+    let right=(fp-f0)/hp
+    ((right-left)/scale)*(2.0/(a+b))
+}
+fn dc_tolerance(value:f64,error:f64,c:&DiffControls)->i64 {
+    if !is_finite(value) || !is_finite(error) {return 6}
+    let bound=c.atol+c.rtol*dc_abs(value)
+    if !is_finite(bound) {return 6}
+    if error<=bound {0} else {7}
+}
+fn dc_scalar_reset(r:&!DiffResult) with Mut {
+    r.status=1;r.estimate=0.0;r.error_estimate=0.0;r.step=0.0
+    r.left_step=0.0;r.right_step=0.0;r.callback_count=0
+    r.error_available=false;r.converged=false
+}
+fn dc_scalar_fail(r:&!DiffResult,status:i64)->i64 with Mut {
+    r.status=status;r.estimate=0.0;r.error_estimate=0.0;r.step=0.0
+    r.left_step=0.0;r.right_step=0.0;r.error_available=false;r.converged=false
+    status
+}
+fn dc_scalar_eval(f:fn(f64,&!NumericBuffer)->f64 with Mut,Div,Panic,x:f64,ctx:&!NumericBuffer,c:&DiffControls,r:&!DiffResult)->f64 with Mut,Div,Panic {
+    if r.callback_count>=c.max_callbacks {r.status=3;return dc_nan()}
+    r.callback_count=r.callback_count+1
+    let value=f(x,ctx)
+    if !is_finite(value) {r.status=5}
+    value
+}
+// 0available,1invalid request,2storage,3budget,4unrepresentable nodes,
+// 5callback/nonfinite callback output,6arithmetic,7tolerance not reached.
+// Counts include failed callbacks. Context mutations are not rolled back.
+pub fn derivative_into(f:fn(f64,&!NumericBuffer)->f64 with Mut,Div,Panic,x:f64,h:f64,max_levels:i64,c:&DiffControls,ctx:&!NumericBuffer,r:&!DiffResult)->i64 with Mut,Div,Panic {
+    dc_scalar_reset(r)
+    if !dc_options(c) || !is_finite(x) || !is_finite(h) || h<=0.0 || max_levels<2 {return dc_scalar_fail(r,1)}
+    if c.max_callbacks<5 {return dc_scalar_fail(r,3)}
+    if numeric_buffer_status(ctx)!=0 {return dc_scalar_fail(r,2)}
+    if !dc_points(x,h) || !dc_points(x,h*0.5) {return dc_scalar_fail(r,4)}
+    r.status=0
+    let center=dc_scalar_eval(f,x,ctx,c,r)
+    if r.status!=0 {let code:i64=r.status;return dc_scalar_fail(r,code)}
+    var width=h
+    var previous:f64=0.0
+    var level:i64=0
+    while level<max_levels {
+        if !dc_points(x,width) {return dc_scalar_fail(r,4)}
+        let xm=x-width
+        let xp=x+width
+        let fm=dc_scalar_eval(f,xm,ctx,c,r)
+        if r.status!=0 {let code:i64=r.status;return dc_scalar_fail(r,code)}
+        let fp=dc_scalar_eval(f,xp,ctx,c,r)
+        if r.status!=0 {let code:i64=r.status;return dc_scalar_fail(r,code)}
+        let hm=x-xm
+        let hp=xp-x
+        let value=dc_first(fm,center,fp,hm,hp)
+        if !is_finite(value) {return dc_scalar_fail(r,6)}
+        if level>0 {
+            let error=dc_abs(value-previous)
+            let code=dc_tolerance(value,error,c)
+            if code==6 {return dc_scalar_fail(r,6)}
+            if code==0 {
+                r.status=0;r.estimate=value;r.error_estimate=error
+                r.step=if hm>hp {hm} else {hp}
+                r.left_step=hm;r.right_step=hp
+                r.error_available=true;r.converged=true
+                return 0
+            }
+        }
+        previous=value
+        width=width*0.5
+        level=level+1
+    }
+    dc_scalar_fail(r,7)
+}
+fn dc_reset(r:&!DiffSummary) with Mut {r.status=1;r.callback_count=0;r.callback_status=0;r.converged=false}
+fn dc_fail(r:&!DiffSummary,status:i64)->i64 with Mut {r.status=status;r.converged=false;status}
+fn dc_eval(f:fn(&NumericBuffer,i64,&!NumericBuffer,i64,&!NumericBuffer)->i64 with Mut,Div,Panic,sample:&NumericBuffer,n:i64,m:i64,values:&!NumericBuffer,ctx:&!NumericBuffer,c:&DiffControls,r:&!DiffSummary)->i64 with Mut,Div,Panic {
+    if r.callback_count>=c.max_callbacks {return dc_fail(r,3)}
+    let poison=dc_nan()
+    var k:i64=0
+    while k<m {numeric_buffer_set(values,k,poison);k=k+1}
+    r.callback_count=r.callback_count+1
+    let code=f(sample,n,values,m,ctx)
+    if code!=0 {r.callback_status=code;return dc_fail(r,5)}
+    k=0
+    while k<m {
+        if !is_finite(numeric_buffer_at(values,k)) {return dc_fail(r,5)}
+        k=k+1
+    }
+    0
+}
+fn dc_buffers(x:&NumericBuffer,steps:&NumericBuffer,n:i64,m:i64,sample:&NumericBuffer,values:&NumericBuffer,work:&NumericBuffer,out:&NumericBuffer,errors:&NumericBuffer,ctx:&NumericBuffer,hessian:bool)->i64 with Mut,Div,Panic {
+    if n<1 || m<1 {return 1}
+    var required:i64=0
+    var cells:i64=0
+    if hessian {
+        if n>(9223372036854775807-9)/2/n {return 2}
+        cells=n*n
+        required=9+2*cells
+    } else {
+        if m>2305843009213693951 {return 2}
+        if n>(9223372036854775807-4*m)/2/m {return 2}
+        cells=n*m
+        required=4*m+2*cells
+    }
+    if numeric_buffer_status(x)!=0 || numeric_buffer_status(steps)!=0 || numeric_buffer_status(sample)!=0 || numeric_buffer_status(values)!=0 || numeric_buffer_status(work)!=0 || numeric_buffer_status(out)!=0 || numeric_buffer_status(errors)!=0 || numeric_buffer_status(ctx)!=0 {return 2}
+    if numeric_buffer_len(x)<n || numeric_buffer_len(steps)<n || numeric_buffer_len(sample)<n || numeric_buffer_len(values)<m || numeric_buffer_len(work)<required || numeric_buffer_len(out)<cells || numeric_buffer_len(errors)<cells {return 2}
+    var i:i64=0
+    while i<n {
+        let at=numeric_buffer_at(x,i)
+        let h=numeric_buffer_at(steps,i)
+        if !is_finite(at) || !is_finite(h) || h<=0.0 {return 1}
+        if !dc_points(at,h) || !dc_points(at,h*0.5) {return 4}
+        i=i+1
+    }
+    0
+}
+// Paired h/h2 central Jacobian; row-major output[m,n]. Scratch4m+2nm.
+pub fn jacobian_into(f:fn(&NumericBuffer,i64,&!NumericBuffer,i64,&!NumericBuffer)->i64 with Mut,Div,Panic,x:&NumericBuffer,steps:&NumericBuffer,n:i64,m:i64,c:&DiffControls,sample:&!NumericBuffer,values:&!NumericBuffer,work:&!NumericBuffer,out:&!NumericBuffer,errors:&!NumericBuffer,ctx:&!NumericBuffer,r:&!DiffSummary)->i64 with Mut,Div,Panic {
+    dc_reset(r)
+    if !dc_options(c) {return dc_fail(r,1)}
+    let shape=dc_buffers(x,steps,n,m,sample,values,work,out,errors,ctx,false)
+    if shape!=0 {return dc_fail(r,shape)}
+    if c.max_callbacks<1 {return dc_fail(r,3)}
+    if n>(c.max_callbacks-1)/4 {return dc_fail(r,3)}
+    let cells=n*m
+    var i:i64=0
+    while i<n {numeric_buffer_set(sample,i,numeric_buffer_at(x,i));i=i+1}
+    let initial=dc_eval(f,sample,n,m,values,ctx,c,r)
+    if initial!=0 {return dc_fail(r,initial)}
+    var row:i64=0
+    while row<m {numeric_buffer_set(work,row,numeric_buffer_at(values,row));row=row+1}
+    i=0
+    while i<n {
+        let at=numeric_buffer_at(x,i)
+        var h=numeric_buffer_at(steps,i)
+        var level:i64=0
+        while level<2 {
+            let xp=at+h
+            let xm=at-h
+            numeric_buffer_set(sample,i,xp)
+            let pc=dc_eval(f,sample,n,m,values,ctx,c,r)
+            if pc!=0 {return dc_fail(r,pc)}
+            row=0
+            while row<m {numeric_buffer_set(work,2*m+row,numeric_buffer_at(values,row));row=row+1}
+            numeric_buffer_set(sample,i,xm)
+            let mc=dc_eval(f,sample,n,m,values,ctx,c,r)
+            if mc!=0 {return dc_fail(r,mc)}
+            row=0
+            while row<m {
+                let value=dc_first(numeric_buffer_at(values,row),numeric_buffer_at(work,row),numeric_buffer_at(work,2*m+row),at-xm,xp-at)
+                if !is_finite(value) {return dc_fail(r,6)}
+                if level==0 {numeric_buffer_set(work,m+row,value)} else {
+                    let error=dc_abs(value-numeric_buffer_at(work,m+row))
+                    let code=dc_tolerance(value,error,c)
+                    if code!=0 {return dc_fail(r,code)}
+                    let index=row*n+i
+                    numeric_buffer_set(work,4*m+index,value)
+                    numeric_buffer_set(work,4*m+cells+index,error)
+                }
+                row=row+1
+            }
+            numeric_buffer_set(sample,i,at)
+            h=h*0.5
+            level=level+1
+        }
+        i=i+1
+    }
+    i=0
+    while i<cells {
+        numeric_buffer_set(out,i,numeric_buffer_at(work,4*m+i))
+        numeric_buffer_set(errors,i,numeric_buffer_at(work,4*m+cells+i))
+        i=i+1
+    }
+    r.status=0;r.converged=true
+    0
+}
+pub fn gradient_into(f:fn(&NumericBuffer,i64,&!NumericBuffer,i64,&!NumericBuffer)->i64 with Mut,Div,Panic,x:&NumericBuffer,steps:&NumericBuffer,n:i64,c:&DiffControls,sample:&!NumericBuffer,values:&!NumericBuffer,work:&!NumericBuffer,out:&!NumericBuffer,errors:&!NumericBuffer,ctx:&!NumericBuffer,r:&!DiffSummary)->i64 with Mut,Div,Panic {
+    jacobian_into(f,x,steps,n,1,c,sample,values,work,out,errors,ctx,r)
+}
+// Evaluate a scalar-vector callback at an explicit pair of coordinates.
+fn dc_hvalue(f:fn(&NumericBuffer,i64,&!NumericBuffer,i64,&!NumericBuffer)->i64 with Mut,Div,Panic,n:i64,i:i64,j:i64,xi:f64,xj:f64,index:i64,sample:&!NumericBuffer,values:&!NumericBuffer,work:&!NumericBuffer,ctx:&!NumericBuffer,c:&DiffControls,r:&!DiffSummary)->i64 with Mut,Div,Panic {
+    numeric_buffer_set(sample,i,xi)
+    numeric_buffer_set(sample,j,xj)
+    let code=dc_eval(f,sample,n,1,values,ctx,c,r)
+    if code!=0 {return code}
+    numeric_buffer_set(work,index,numeric_buffer_at(values,0))
+    0
+}
+// Paired quadratic tensor stencils; symmetric row-major output[n,n].
+// Scratch9+2n², sampleN, callback-values1. No fixed dimension cap.
+pub fn hessian_into(f:fn(&NumericBuffer,i64,&!NumericBuffer,i64,&!NumericBuffer)->i64 with Mut,Div,Panic,x:&NumericBuffer,steps:&NumericBuffer,n:i64,c:&DiffControls,sample:&!NumericBuffer,values:&!NumericBuffer,work:&!NumericBuffer,out:&!NumericBuffer,errors:&!NumericBuffer,ctx:&!NumericBuffer,r:&!DiffSummary)->i64 with Mut,Div,Panic {
+    dc_reset(r)
+    if !dc_options(c) {return dc_fail(r,1)}
+    let shape=dc_buffers(x,steps,n,1,sample,values,work,out,errors,ctx,true)
+    if shape!=0 {return dc_fail(r,shape)}
+    if c.max_callbacks<1 {return dc_fail(r,3)}
+    var remaining=c.max_callbacks-1
+    if n>remaining/4 {return dc_fail(r,3)}
+    remaining=remaining-4*n
+    let pairs=n*(n-1)/2
+    if pairs>remaining/16 {return dc_fail(r,3)}
+    let cells=n*n
+    var i:i64=0
+    while i<n {numeric_buffer_set(sample,i,numeric_buffer_at(x,i));i=i+1}
+    let initial=dc_eval(f,sample,n,1,values,ctx,c,r)
+    if initial!=0 {return dc_fail(r,initial)}
+    numeric_buffer_set(work,0,numeric_buffer_at(values,0))
+    i=0
+    while i<n {
+        var j=i
+        while j<n {
+            let xi=numeric_buffer_at(x,i)
+            let xj=numeric_buffer_at(x,j)
+            var hi=numeric_buffer_at(steps,i)
+            var hj=numeric_buffer_at(steps,j)
+            var previous:f64=0.0
+            var level:i64=0
+            while level<2 {
+                let ip=xi+hi
+                let im=xi-hi
+                let jp=xj+hj
+                let jm=xj-hj
+                var value:f64=0.0
+                if i==j {
+                    numeric_buffer_set(sample,i,ip)
+                    let pc=dc_eval(f,sample,n,1,values,ctx,c,r)
+                    if pc!=0 {return dc_fail(r,pc)}
+                    let fp=numeric_buffer_at(values,0)
+                    numeric_buffer_set(sample,i,im)
+                    let mc=dc_eval(f,sample,n,1,values,ctx,c,r)
+                    if mc!=0 {return dc_fail(r,mc)}
+                    value=dc_second(numeric_buffer_at(values,0),numeric_buffer_at(work,0),fp,xi-im,ip-xi)
+                } else {
+                    var code=dc_hvalue(f,n,i,j,ip,jp,1,sample,values,work,ctx,c,r)
+                    if code!=0 {return dc_fail(r,code)}
+                    code=dc_hvalue(f,n,i,j,ip,jm,2,sample,values,work,ctx,c,r)
+                    if code!=0 {return dc_fail(r,code)}
+                    code=dc_hvalue(f,n,i,j,ip,xj,3,sample,values,work,ctx,c,r)
+                    if code!=0 {return dc_fail(r,code)}
+                    code=dc_hvalue(f,n,i,j,im,jp,4,sample,values,work,ctx,c,r)
+                    if code!=0 {return dc_fail(r,code)}
+                    code=dc_hvalue(f,n,i,j,im,jm,5,sample,values,work,ctx,c,r)
+                    if code!=0 {return dc_fail(r,code)}
+                    code=dc_hvalue(f,n,i,j,im,xj,6,sample,values,work,ctx,c,r)
+                    if code!=0 {return dc_fail(r,code)}
+                    code=dc_hvalue(f,n,i,j,xi,jp,7,sample,values,work,ctx,c,r)
+                    if code!=0 {return dc_fail(r,code)}
+                    code=dc_hvalue(f,n,i,j,xi,jm,8,sample,values,work,ctx,c,r)
+                    if code!=0 {return dc_fail(r,code)}
+                    let dp=dc_first(numeric_buffer_at(work,2),numeric_buffer_at(work,3),numeric_buffer_at(work,1),xj-jm,jp-xj)
+                    let dm=dc_first(numeric_buffer_at(work,5),numeric_buffer_at(work,6),numeric_buffer_at(work,4),xj-jm,jp-xj)
+                    let d0=dc_first(numeric_buffer_at(work,8),numeric_buffer_at(work,0),numeric_buffer_at(work,7),xj-jm,jp-xj)
+                    value=dc_first(dm,d0,dp,xi-im,ip-xi)
+                }
+                numeric_buffer_set(sample,i,xi)
+                numeric_buffer_set(sample,j,xj)
+                if !is_finite(value) {return dc_fail(r,6)}
+                if level==0 {previous=value} else {
+                    let error=dc_abs(value-previous)
+                    let code=dc_tolerance(value,error,c)
+                    if code!=0 {return dc_fail(r,code)}
+                    let index=i*n+j
+                    let symmetric=j*n+i
+                    numeric_buffer_set(work,9+index,value)
+                    numeric_buffer_set(work,9+symmetric,value)
+                    numeric_buffer_set(work,9+cells+index,error)
+                    let written=numeric_buffer_set(work,9+cells+symmetric,error)
+                }
+                hi=hi*0.5;hj=hj*0.5;level=level+1
+            }
+            j=j+1
+        }
+        i=i+1
+    }
+    i=0
+    while i<cells {
+        numeric_buffer_set(out,i,numeric_buffer_at(work,9+i))
+        numeric_buffer_set(errors,i,numeric_buffer_at(work,9+cells+i))
+        i=i+1
+    }
+    r.status=0;r.converged=true
+    0
+}
