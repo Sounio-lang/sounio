@@ -15,7 +15,7 @@ use lexer::numparse::*
 use lexer::tables::*
 use lexer::token::{TokenKind}
 use parser::ast::*
-use parser::parser::{parser_set_token_at, parser_set_token_flat, parser_set_token_int_value, parser_set_token_scalar, parser_set_last_errors, parser_span_int_literal_overflow}
+use parser::parser::{parser_set_token_at, parser_set_token_flat, parser_set_token_int_value, parser_set_token_scalar, parser_set_last_errors, parser_span_int_literal_overflow, parser_pt_start, parser_pt_end, parser_pt_line}
 use parser::mod::{parse_items_preloaded}
 
 // Maximum tokens per file (2097152) — use literal not constant: boot4 leaves let globals at 0.
@@ -926,7 +926,93 @@ fn lex_flat_sep_before_hex_digit(pos: i64, n: i64) -> bool with Mut, Panic {
 // via parser_set_token_at() only — no LexerState or token array allocation.
 // CURSOR_SOURCE must be populated before calling (e.g. by lex_file_to_globals).
 // Returns the total number of tokens emitted (including the EOF token).
+// ADR-015 row 12: documentation comments are recorded in a side table, in source order,
+// each with the index of the token that follows it (the item it documents). The token
+// stream the parser reads is unchanged, so a `///` in any position cannot break a parse.
+// DOC_KIND: 1 outer line (`///`), 2 inner line (`//!`), 3 outer block (`/** */`),
+// 4 inner block (`/*! */`). DOC_TEXT_* is the byte range after the marker.
+var DOC_COUNT: i64 = 0
+var DOC_OVERFLOW: i64 = 0
+var DOC_KIND: [i64; 65536] = [0; 65536]
+var DOC_TEXT_START: [i64; 65536] = [0; 65536]
+var DOC_TEXT_END: [i64; 65536] = [0; 65536]
+var DOC_LINE: [i64; 65536] = [0; 65536]
+var DOC_NEXT_TOK: [i64; 65536] = [0; 65536]
+
+fn lexer_doc_begin(kind: i64, text_start: i64, line: i64, next_tok: i64) -> i64 with Mut, Panic {
+    if DOC_COUNT >= 65536 {
+        DOC_OVERFLOW = 1
+        return 0 - 1
+    }
+    let i = DOC_COUNT
+    DOC_KIND[i as usize] = kind
+    DOC_TEXT_START[i as usize] = text_start
+    DOC_TEXT_END[i as usize] = text_start
+    DOC_LINE[i as usize] = line
+    DOC_NEXT_TOK[i as usize] = next_tok
+    DOC_COUNT = i + 1
+    return i
+}
+
+fn lexer_doc_set_end(i: i64, end: i64) with Mut, Panic {
+    if i >= 0 && i < 65536 { DOC_TEXT_END[i as usize] = end }
+}
+
+pub fn lexer_doc_count() -> i64 { DOC_COUNT }
+
+pub fn lexer_doc_overflowed() -> bool { DOC_OVERFLOW == 1 }
+
+fn lexer_doc_print_range(from: i64, to: i64, max: i64) with IO, Mut, Panic {
+    var i: i64 = from
+    var printed: i64 = 0
+    while i < to && printed < max {
+        let c = CURSOR_SOURCE[i as usize]
+        if c == 10 as i8 {
+            print("\\n")
+        } else if c != 13 as i8 {
+            print_char(c)
+        }
+        printed = printed + 1
+        i = i + 1
+    }
+}
+
+// One line per documentation comment:
+//   DOC <kind> line=<L> next_line=<NL> next=<first token of the item> text=<text>
+// `\n` in the text is written as the two characters backslash-n. tc is the token count.
+pub fn lexer_print_docs(tc: i64) with IO, Mut, Panic {
+    var i: i64 = 0
+    while i < DOC_COUNT {
+        let k = DOC_KIND[i as usize]
+        print("DOC ")
+        if k == 1 { print("outer-line") }
+        else if k == 2 { print("inner-line") }
+        else if k == 3 { print("outer-block") }
+        else { print("inner-block") }
+        print(" line=")
+        print_int(DOC_LINE[i as usize])
+        let nt = DOC_NEXT_TOK[i as usize]
+        print(" next_line=")
+        if nt < tc { print_int(parser_pt_line(nt)) } else { print_int(0) }
+        print(" next=")
+        if nt < tc && parser_pt_end(nt) > parser_pt_start(nt) {
+            lexer_doc_print_range(parser_pt_start(nt), parser_pt_end(nt), 40)
+        } else {
+            print("<eof>")
+        }
+        print(" text=")
+        lexer_doc_print_range(DOC_TEXT_START[i as usize], DOC_TEXT_END[i as usize], 4096)
+        print("\n")
+        i = i + 1
+    }
+    if DOC_OVERFLOW == 1 {
+        print("DOC-OVERFLOW the table holds 65536 documentation comments; the rest are not listed\n")
+    }
+}
+
 pub fn lex_source_to_globals(source_len: i64) -> i64 with Mut, Div, Panic {
+    DOC_COUNT = 0
+    DOC_OVERFLOW = 0
     lexer_reset_token_overflow()
     lexer_reset_lex_error()
     var n: i64 = source_len
@@ -969,15 +1055,30 @@ pub fn lex_source_to_globals(source_len: i64) -> i64 with Mut, Div, Panic {
         if ch == 47 as i8 && pos + 1 < n {
             let next = CURSOR_SOURCE[(pos + 1) as usize]
             if next == 47 as i8 {
+                var doc_idx: i64 = 0 - 1
+                if pos + 2 < n {
+                    let d2 = CURSOR_SOURCE[(pos + 2) as usize]
+                    let d3 = if pos + 3 < n { CURSOR_SOURCE[(pos + 3) as usize] } else { 0 as i8 }
+                    if d2 == 47 as i8 && d3 != 47 as i8 { doc_idx = lexer_doc_begin(1, pos + 3, line, tc) }
+                    else if d2 == 33 as i8 { doc_idx = lexer_doc_begin(2, pos + 3, line, tc) }
+                }
                 while pos < n && CURSOR_SOURCE[pos as usize] != 10 as i8 {
                     pos = pos + 1
                     col = col + 1
                 }
+                if doc_idx >= 0 { lexer_doc_set_end(doc_idx, pos) }
                 continue
             }
             if next == 42 as i8 {
                 let comment_line = line
                 let comment_col = col
+                var bdoc_idx: i64 = 0 - 1
+                if pos + 2 < n {
+                    let b2 = CURSOR_SOURCE[(pos + 2) as usize]
+                    let b3 = if pos + 3 < n { CURSOR_SOURCE[(pos + 3) as usize] } else { 0 as i8 }
+                    if b2 == 42 as i8 && b3 != 42 as i8 && b3 != 47 as i8 { bdoc_idx = lexer_doc_begin(3, pos + 3, line, tc) }
+                    else if b2 == 33 as i8 { bdoc_idx = lexer_doc_begin(4, pos + 3, line, tc) }
+                }
                 pos = pos + 2
                 col = col + 2
                 var depth: i64 = 1
@@ -1005,6 +1106,7 @@ pub fn lex_source_to_globals(source_len: i64) -> i64 with Mut, Div, Panic {
                 if depth > 0 {
                     lexer_mark_lex_error(2, comment_line, comment_col, 0)
                 }
+                if bdoc_idx >= 0 { if depth == 0 { lexer_doc_set_end(bdoc_idx, pos - 2) } else { lexer_doc_set_end(bdoc_idx, n) } }
                 continue
             }
         }
