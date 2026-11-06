@@ -32,7 +32,7 @@ const {
   degenerateParams, N,
 } = core;
 
-// CLI: --drug=rapamycin|semaglutide|tirzepatide|everolimus|tacrolimus|olanzapine|clozapine|quetiapine|lithium|vancomycin  --case=literature|degenerate
+// CLI: --drug=rapamycin|semaglutide|tirzepatide|everolimus|tacrolimus|olanzapine|clozapine|quetiapine|quetiapine-ketoconazole|lithium|vancomycin  --case=literature|degenerate
 const args = Object.fromEntries(
   process.argv.slice(2)
     .filter(a => a.startsWith('--'))
@@ -78,6 +78,14 @@ if (DRUG === 'tirzepatide') {
     ...DEFAULT_PARAMS_QUETIAPINE,
     bolusMg: 0.0,         // no IV bolus — oral IR gut absorption only
     stentActive: true,    // re-used as 'input active'
+  };
+}
+ else if (DRUG === 'quetiapine-ketoconazole') {
+  baseParams = {
+    ...DEFAULT_PARAMS_QUETIAPINE,
+    clHep: 16.8,
+    bolusMg: 0.0,
+    stentActive: true,
   };
 }
  else if (DRUG === 'clozapine') {
@@ -140,6 +148,9 @@ if (DRUG === 'tirzepatide') {
 }
  else if (DRUG === 'quetiapine') {
   out.push('DISSERTATION_PBPK28_QUETIAPINE_PARITY_NODE v1');
+}
+ else if (DRUG === 'quetiapine-ketoconazole') {
+  out.push('DISSERTATION_PBPK28_QUETIAPINE_KETO_PARITY_NODE v1');
 }
  else if (DRUG === 'clozapine') {
   out.push('DISSERTATION_PBPK28_CLOZAPINE_PARITY_NODE v1');
@@ -211,6 +222,9 @@ if (DRUG === 'tirzepatide') {
 }
  else if (DRUG === 'quetiapine') {
   out.push('DISSERTATION_PBPK28_QUETIAPINE_PARITY_DONE');
+}
+ else if (DRUG === 'quetiapine-ketoconazole') {
+  out.push('DISSERTATION_PBPK28_QUETIAPINE_KETO_PARITY_DONE');
 }
  else if (DRUG === 'clozapine') {
   out.push('DISSERTATION_PBPK28_CLOZAPINE_PARITY_DONE');
