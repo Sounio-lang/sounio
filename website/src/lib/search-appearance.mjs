@@ -43,7 +43,7 @@ export const ENGLISH_SEARCH = {
   '/learn/effects/': {
     title: 'Effect System in Sounio: Side Effects in the Signature',
     description:
-      "How Sounio's effect system works: with IO, Mut, Div and Panic in every signature, custom effects, and what handlers do today. Code from real tests.",
+      'Effect system in Sounio: side effects sit in the function signature. Built-in names form a closed checked list. A caller that omits one is rejected.',
   },
   '/learn/epistemic/uncertainty/': {
     title: UNCERTAINTY_EN.documentTitle,
@@ -72,7 +72,7 @@ export const SELF_HOSTED_PAGE = {
 /** Approved copy for the English effect-system hub. The search title stays in ENGLISH_SEARCH. */
 export const EFFECTS_PAGE = {
   h1: 'Effect system: side effects in the function signature',
-  lede: "An effect system tracks what a function may do besides returning a value (I/O, mutation, panics, division) in its type. In Sounio, effects are written in the signature with `with`, and a caller that does not declare a callee's effect is rejected at compile time.",
+  lede: 'An effect system tracks what a function may do besides returning a value and records that in its type. This page is that contract for learners of Sounio: effects are written in the signature, and a caller that omits a callee effect is rejected at compile time. Compiler internals are a separate source map.',
   author: {
     '@type': 'Person',
     name: 'Demetrios Chiuratto Agourakis',
@@ -93,7 +93,7 @@ export const EFFECTS_PAGE = {
   },
   proficiencyLevel: 'Intermediate',
   dependencies: [],
-  dateModified: '2026-10-29',
+  dateModified: '2026-11-06',
 };
 
 export function englishSearchFor(barePath, locale) {

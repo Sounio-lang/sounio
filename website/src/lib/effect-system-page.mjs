@@ -8,14 +8,19 @@ export const EFFECTS_FAQ = [
     answer: "An effect system tracks a function's side effects in its type so the compiler can check them.",
   },
   {
+    question: 'Is the compiler internals page the effect system?',
+    answer:
+      'No. This page is the effect system for learners. The effect checker internals page, at /learn/compiler/effect-system/, is the source map of the checker.',
+  },
+  {
     question: 'Does Sounio have algebraic effects?',
     answer:
-      'Effects in the signature are checked for a closed built-in set; user-declared effects and handlers are parsed but not implemented yet.',
+      'A declared effect is checked in the signature when the name is not held. Madaros handlers are deep and linear one-shot, with the limits named on this page. Multi-shot handlers are not a goal.',
   },
   {
     question: 'Which effects are checked?',
     answer:
-      'A closed list of 30 built-in names (ids 0-29). IO, Mut, Div and Panic are the common ones. User-declared effects are parsed but not implemented.',
+      'A closed list of 30 built-in names (ids 0-29). IO, Mut, Div and Panic are the common ones. A declared effect outside that list is checked too, unless the name is held.',
   },
   {
     question: 'Is it row-polymorphic like Koka?',
@@ -35,12 +40,12 @@ export const EFFECTS_FAQ = [
   {
     question: 'Do handlers resume (one-shot / multi-shot)?',
     answer:
-      'Handlers are parsed, not implemented. Resumption is not specified (SOUNIO-SPEC-07 status is "undefined").',
+      'On Madaros, handlers are deep and a continuation is linear one-shot. Resume at most once on each path. Zero uses are allowed. Twice is a compile error. Multi-shot continuations are not a goal.',
   },
   {
     question: 'Where is the implementation?',
     answer:
-      'The call check is effects_subset in self-hosted/check/effects.sio, called from self-hosted/check/check.sio. self-hosted/effects/ has no use effects:: importer under self-hosted/.',
+      'The call check is effects_subset in self-hosted/check/effects.sio. Declared effects are registered by checker_collect_effect_def_inplace in self-hosted/check/check.sio. The source map is /learn/compiler/effect-system/.',
   },
 ];
 
