@@ -330,6 +330,37 @@ fn kpm_dow(pow_v: f64, f_n: f64) -> f64 {
 // [2.62, 2.80]) and pKa 9.4; ODV logP 2.45 and basic pKa 8.86 (Luecht et al.
 // 2025, 10.3390/pharmaceutics17020179).  The ranking survives the correction.
 //   clozapine    0.860  0.6010  +30.1%
+//
+// DRUG INPUTS ARE THEMSELVES MULTI-SOURCED  (recorded 2026-11-08).
+// Compared against httk 2.7.4 chem.physical_and_invitro.data:
+//   venlafaxine  logP 2.62-2.80 (Luecht 2025; DDDT 2025) vs 3.129 OPERA
+//                (predicted); pKa 9.4 (both 2025 papers) vs 8.91 ChemAxon
+//                (predicted); fu 0.73 agreed; B:P NA in every source.
+//   ODV          logP 2.45 vs 2.461; basic pKa 8.86 vs 8.87; fu 0.70; B:P NA.
+//   haloperidol  logP 4.30 vs 4.288; pKa 8.66 (repo) vs 8.05 ChemAxon;
+//                fu 0.10 (repo) vs 0.1784 (Wetmore 2015); B:P NA (repo
+//                1.08 is unsourced); log MA 3.723 (Pearce 2017) agreed.
+//   clozapine    logP 3.23 agreed; pKa 7.6 (repo) vs 7.35 ChemAxon;
+//                fu 0.05 (Obach 1999); B:P 0.86 (repo) vs 0.87 MEASURED
+//                (Sternbeck 2012).
+//   midazolam    logP 3.00 (repo) vs 2.444 OPERA; pKa 6.01 vs 6.19; fu 0.032
+//                (repo) vs 0.05 (Obach 1999); B:P 1.00 (repo) vs 0.67
+//                MEASURED (Sternbeck 2012).  No figure moves: midazolam is a
+//                weak base and no member reads rb on that route (T12c).
+// The oracle-validated parity inputs are left as they are: they certify the
+// IMPLEMENTATION against httk at identical inputs, not the inputs.
+//
+// WHICH INPUT DOMINATES DEPENDS ON LIPOPHILICITY (cross.cpp, cross2.cpp).
+// On ln Kp for a strong base, with the composition ranges of the
+// three-source comparison, the cellular-pH convention leads at low logP
+// and the neutral-lipid source disagreement leads at high logP.  Crossover:
+// logP 4.06 at venlafaxine's fu/pKa/rb, 4.56 at haloperidol's repository
+// inputs, 3.74 at haloperidol's httk inputs.  Above a further ceiling the
+// B:P consistency refusal fires (red-cell lipid term exceeds the red-cell
+// Kpu implied by rb): logP 4.29, 4.98 and 4.15 respectively.  Venlafaxine
+// (2.71), ODV (2.45) and clozapine (3.23) sit deep in the pH regime;
+// haloperidol (4.294) sits in it under the repository inputs (pH 79.6%,
+// lipid 14.5%) and ABOVE THE CEILING under httk's -- see T25.
 // The drug this dissertation is about has the smallest margin to a silent
 // failure, and the input that sets that margin -- rb -- is the one that was
 // never measured for it (rb = 1.00 is an assumption, see SIO-545).  Sweeping
@@ -1823,6 +1854,58 @@ fn main() -> i32 with IO, Mut, Div, Panic {
         }
     } else {
         print("T23 FAIL: c_pH Sounio = "); println(c_ph); fails = fails + 1
+    }
+
+    // T24 -- WHY THE pH CONVENTION DOMINATES: pKa CANCELS, CELL pH DOES NOT.
+    // In the strong-base route Ka is back-calculated from red cells at pH
+    // 7.22, so for a strongly ionised base the tissue acidic-phospholipid term
+    // scales as x/z = 10^(7.22 - pH_cell): pKa drops out, cell pH stays in.
+    // Measured in robust.cpp for all four strong bases of the set: c_pKa =
+    // -0.0076 (venlafaxine), -0.0141 (ODV), +0.0079 (haloperidol), -0.0047
+    // (clozapine), against c_pH ~ -2.2.  Consequence: the sourced pKa
+    // disagreement for venlafaxine (9.4 literature vs 8.91 ChemAxon) moves the
+    // budget by 0.4 points, and the cellular-pH share stays above 93% under
+    // rectangular, triangular and discrete {6.81, 6.97, 7.00} distributions.
+    // The MAGNITUDE of u_c is distribution-dependent (sd 0.087 to 0.182); the
+    // DOMINANCE is not.  This test recomputes the cancellation in Sounio.
+    let t24_p = KpInputs { log_p: 2.71, log_ma: 0.0, has_ma: false, pka: 9.4001, is_base: true, fu_p: 0.73, rb: 1.00, mw: 277.40 }
+    let t24_m = KpInputs { log_p: 2.71, log_ma: 0.0, has_ma: false, pka: 9.3999, is_base: true, fu_p: 0.73, rb: 1.00, mw: 277.40 }
+    let c_pka = (ln(kpm_rr_kpu_full(t24_p, 7.0, 1.0, 1.0, 1.0)) - ln(kpm_rr_kpu_full(t24_m, 7.0, 1.0, 1.0, 1.0))) / 0.0002
+    let a_pka = if c_pka < 0.0 { 0.0 - c_pka } else { c_pka }
+    if a_pka < 0.05 {
+        if a_pka * 40.0 < 2.2 {
+            println("T24 PASS: pKa se cancela (|c_pKa| < 0.05) enquanto c_pH ~ -2.2 -- origem dos 97%")
+        } else {
+            println("T24 FAIL: c_pKa nao e pequeno frente a c_pH"); fails = fails + 1
+        }
+    } else {
+        print("T24 FAIL: c_pKa = "); println(c_pka); fails = fails + 1
+    }
+
+    // T25 -- ONE DRUG, TWO SOURCE SETS, TWO VERDICTS.  Haloperidol with the
+    // repository's inputs (fu 0.10, pKa 8.66) is B:P-consistent, Ka +10.511.
+    // With httk 2.7.4's own inputs for the same drug (fu 0.1784, Wetmore 2015;
+    // pKa 8.05, ChemAxon) and the same assumed rb 1.08 -- which no source in
+    // hand measures -- the critical rb is 1.2547 and Ka = -3.087: REFUSED.
+    // Before the 2026-11-02 fix this would have been clamped to Ka = 0 and
+    // returned as a number.  Whether haloperidol has a Rodgers-Rowland
+    // prediction at all depends on a choice between two published fu values,
+    // two pKa values, and an unmeasured rb.
+    let hal_repo = KpInputs { log_p: 4.294, log_ma: 3.723, has_ma: true, pka: 8.66, is_base: true, fu_p: 0.10,   rb: 1.08, mw: 375.86 }
+    let hal_httk = KpInputs { log_p: 4.294, log_ma: 3.723, has_ma: true, pka: 8.05, is_base: true, fu_p: 0.1784, rb: 1.08, mw: 375.86 }
+    if kpm_rr_bp_consistent(hal_repo) {
+        if kpm_rr_bp_consistent(hal_httk) {
+            println("T25 FAIL: haloperidol com insumos httk aceito como consistente"); fails = fails + 1
+        } else {
+            let e_h = kpm_ensemble(hal_httk, false)
+            if kpm_ens_refusal(e_h) == 4 {
+                println("T25 PASS: haloperidol -- fontes do repo admitem, fontes do httk recusam (codigo 4)")
+            } else {
+                print("T25 FAIL: codigo de recusa = "); println(kpm_ens_refusal(e_h)); fails = fails + 1
+            }
+        }
+    } else {
+        println("T25 FAIL: haloperidol com insumos do repo recusado"); fails = fails + 1
     }
     if fails == 0 {
         println("PASS")
