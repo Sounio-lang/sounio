@@ -7247,23 +7247,51 @@ fn lowerer_mark_local_global_mut(
     }
 }
 
-fn lowerer_fresh_reg_mut(lo: &! Lowerer) -> i64 with Mut, Panic, Div {
+fn lowerer_fresh_reg_mut(lo: &! Lowerer) -> i64 with Mut, Panic, Div, IO {
     if (*lo).current_fn < 0 || (*lo).current_fn >= (*(*lo).module).fn_count {
-        lowerer_mark_error(lo)
+        if (*lo).probe_mode {
+            print("lower_probe: fresh_reg_invalid current_fn=")
+            print_int((*lo).current_fn)
+            print(" fn_count=")
+            print_int((*(*lo).module).fn_count)
+            print("\n")
+        }
+        (*lo).error_count = (*lo).error_count + 1
+        (*lo).had_error = true
+        lower_note_error(8959, (*(*lo).current_func).name)
         return 0
     }
     var current_func_box = (*lo).current_func
     let reg = (*current_func_box).reg_count
     if !ir_reg_count_can_grow(reg, 1) {
-        lowerer_mark_hard_error(lo)
-        IR_LOWER_HARD_ERROR_REASON = 5
-        IR_LOWER_HARD_ERROR_LIMIT = IR_MAX_VREGS
-        IR_LOWER_HARD_ERROR_NEEDED = reg + 1
+        IR_LOWER_HARD_ERROR = 1
+        if IR_LOWER_HARD_ERROR_REASON == 0 {
+            IR_LOWER_HARD_ERROR_REASON = 5
+            IR_LOWER_HARD_ERROR_LIMIT = IR_MAX_VREGS
+            IR_LOWER_HARD_ERROR_NEEDED = reg + 1
+            ir_copy_name_to_flat(&(*current_func_box).name, &! IR_LOWER_HARD_ERROR_FN_BUF, &! IR_LOWER_HARD_ERROR_FN_LEN)
+        }
         return 0
     }
     (*current_func_box).reg_count = reg + 1
     (*lo).current_func = current_func_box
     reg
+}
+
+// SIO-3020: allocate labels without copying the Lowerer through a tuple.
+// Keep the same invalid-function diagnostic and counter as fresh_label.
+fn lowerer_fresh_label_mut(lo: &! Lowerer) -> i64 with Mut, Panic, Div {
+    if (*lo).current_fn < 0 || (*lo).current_fn >= (*(*lo).module).fn_count {
+        (*lo).error_count = (*lo).error_count + 1
+        (*lo).had_error = true
+        lower_note_error(9036, (*(*lo).current_func).name)
+        return 0
+    }
+    var current_func_box = (*lo).current_func
+    let label = (*current_func_box).label_count
+    (*current_func_box).label_count = label + 1
+    (*lo).current_func = current_func_box
+    label
 }
 
 fn lowerer_emit_mut(lo: &! Lowerer, instr: IrInstr) with Mut, Panic, Div, IO {
@@ -7302,6 +7330,13 @@ fn lowerer_emit_mut(lo: &! Lowerer, instr: IrInstr) with Mut, Panic, Div, IO {
         (*lo).had_error = true
         lower_note_error(9093, (*current_func_box).name)
     }
+}
+
+// SIO-3020: const/unit emission for callers that already hold &!Lowerer.
+fn lowerer_emit_i64_const_mut(lo: &! Lowerer, value: i64) -> i64 with Mut, Panic, Div, IO {
+    let reg = lowerer_fresh_reg_mut(lo)
+    lowerer_emit_mut(lo, ir_load_imm(reg, value))
+    reg
 }
 
 // `self` reaches lowering UNTYPED. parser/items.sio:1741 gives the receiver a
@@ -7629,11 +7664,11 @@ fn lowerer_try_canonical_hello_block_mut(lo: &! Lowerer, blk: &Block) -> i64 wit
                                                             (*lo).scope_depth = (*lo).scope_depth + 1
                                                             let print_pair = (*lo).lower_println_string_literal_ref((*args).head.name)
                                                             (*lo) = print_pair.0
-                                                            let ret_pair = (*lo).emit_i64_const(0)
-                                                            (*lo) = ret_pair.0.emit(ir_return(ret_pair.1))
+                                                            let ret_reg = lowerer_emit_i64_const_mut(lo, 0)
+                                                            lowerer_emit_mut(lo, ir_return(ret_reg))
                                                             if (*lo).scope_depth > 0 { (*lo).scope_depth = (*lo).scope_depth - 1 }
                                                             (*(*lo).locals).count = saved_local_count
-                                                            return ret_pair.1
+                                                            return ret_reg
                                                         }
                                                         None => { return IR_INVALID_REG }
                                                     }
@@ -7707,21 +7742,16 @@ fn lowerer_rgn_emit_exit_mut(lo: &! Lowerer, kind: i64, type_name: Name) with Mu
     let tok = LOWER_RGN_TOK_REG
     let ret = LOWER_RGN_RET_REG
     lowerer_emit_mut(lo, ir_label(LOWER_RGN_EXIT_LABEL))
-    let plain_pair = (*lo).fresh_label()
-    (*lo) = plain_pair.0
-    let plain_label = plain_pair.1
+    let plain_label = lowerer_fresh_label_mut(lo)
     lowerer_emit_mut(lo, ir_branch_false(tok, plain_label))
     if kind == 3 {
         (*lo) = (*lo).rgn_emit_result_escape_scan(ret, type_name, 0)
         let esc_pair = (*lo).rgn_call("__rgn_escaped", tok, 0, 0, 1)
         (*lo) = esc_pair.0
-        let zero_pair = (*lo).emit_i64_const(0)
-        (*lo) = zero_pair.0
+        let zero_reg = lowerer_emit_i64_const_mut(lo, 0)
         let clean_reg = lowerer_fresh_reg_mut(lo)
-        lowerer_emit_mut(lo, ir_binop(clean_reg, esc_pair.1, BinaryOp::OpEq, zero_pair.1))
-        let lv_pair = (*lo).fresh_label()
-        (*lo) = lv_pair.0
-        let leave_v_label = lv_pair.1
+        lowerer_emit_mut(lo, ir_binop(clean_reg, esc_pair.1, BinaryOp::OpEq, zero_reg))
+        let leave_v_label = lowerer_fresh_label_mut(lo)
         lowerer_emit_mut(lo, ir_branch_false(clean_reg, leave_v_label))
         let sc_pair = (*lo).rgn_call("__rgn_count", 0, 0, 0, 0)
         (*lo) = sc_pair.0
@@ -7731,9 +7761,7 @@ fn lowerer_rgn_emit_exit_mut(lo: &! Lowerer, kind: i64, type_name: Name) with Mu
         (*lo) = first_pair.0
         let ok_pair = (*lo).rgn_call("__rgn_reset_fits", tok, sh_pair.1, sc_pair.1, 3)
         (*lo) = ok_pair.0
-        let lt_pair = (*lo).fresh_label()
-        (*lo) = lt_pair.0
-        let leave_t_label = lt_pair.1
+        let leave_t_label = lowerer_fresh_label_mut(lo)
         lowerer_emit_mut(lo, ir_branch_false(ok_pair.1, leave_t_label))
         let second_pair = (*lo).rgn_emit_young_copy(tok, first_pair.1, type_name, 0)
         (*lo) = second_pair.0
@@ -8121,20 +8149,14 @@ fn lowerer_lower_fn_item_mut(
         if kernel_extent_idx >= 0 {
             let kernel_extent_reg = kernel_param_reg_base + kernel_extent_idx
             kernel_tid_reg = lowerer_fresh_reg_mut(lo)
-            (*lo) = (*lo).emit(ir_load_imm(kernel_tid_reg, 0))
-            let ktop_pair = (*lo).fresh_label()
-            (*lo) = ktop_pair.0
-            kernel_top_label = ktop_pair.1
-            let kend_pair = (*lo).fresh_label()
-            (*lo) = kend_pair.0
-            kernel_end_label = kend_pair.1
-            let kcont_pair = (*lo).fresh_label()
-            (*lo) = kcont_pair.0
-            kernel_cont_label = kcont_pair.1
-            (*lo) = (*lo).emit(ir_label(kernel_top_label))
+            lowerer_emit_mut(lo, ir_load_imm(kernel_tid_reg, 0))
+            kernel_top_label = lowerer_fresh_label_mut(lo)
+            kernel_end_label = lowerer_fresh_label_mut(lo)
+            kernel_cont_label = lowerer_fresh_label_mut(lo)
+            lowerer_emit_mut(lo, ir_label(kernel_top_label))
             let kcond_reg = lowerer_fresh_reg_mut(lo)
-            (*lo) = (*lo).emit(ir_binop(kcond_reg, kernel_tid_reg, BinaryOp::OpLt, kernel_extent_reg))
-            (*lo) = (*lo).emit(ir_branch_false(kcond_reg, kernel_end_label))
+            lowerer_emit_mut(lo, ir_binop(kcond_reg, kernel_tid_reg, BinaryOp::OpLt, kernel_extent_reg))
+            lowerer_emit_mut(lo, ir_branch_false(kcond_reg, kernel_end_label))
             LOWER_KERNEL_TID_REG = kernel_tid_reg
             LOWER_KERNEL_CONT_LABEL = kernel_cont_label
         }
@@ -8176,13 +8198,12 @@ lower_rss_mark("before_block")
             rgn_tok = enter_pair.1
             let ret_reg = lowerer_fresh_reg_mut(lo)
             if rgn_kind == 2 {
-                (*lo) = (*lo).emit(ir_mark_float_reg(ret_reg))
+                lowerer_emit_mut(lo, ir_mark_float_reg(ret_reg))
             }
-            let exit_pair = (*lo).fresh_label()
-            (*lo) = exit_pair.0
+            let exit_label = lowerer_fresh_label_mut(lo)
             LOWER_RGN_TOK_REG = rgn_tok
             LOWER_RGN_RET_REG = ret_reg
-            LOWER_RGN_EXIT_LABEL = exit_pair.1
+            LOWER_RGN_EXIT_LABEL = exit_label
             LOWER_RGN_FN_ID = (*lo).current_fn
         }
         // V0-E.5.10: the body block of an `-> f128` fn owns its literal tail.
@@ -8198,15 +8219,13 @@ lower_rss_mark("before_block")
         LOWER_KERNEL_CONT_LABEL = 0 - 1
         // Lane-continue target: `return` inside the body jumps here, so it ends
         // the lane and the next one still runs.
-        (*lo) = (*lo).emit(ir_label(kernel_cont_label))
-        let kone_pair = (*lo).emit_i64_const(1)
-        (*lo) = kone_pair.0
-        let kone_reg = kone_pair.1
+        lowerer_emit_mut(lo, ir_label(kernel_cont_label))
+        let kone_reg = lowerer_emit_i64_const_mut(lo, 1)
         let knext_reg = lowerer_fresh_reg_mut(lo)
-        (*lo) = (*lo).emit(ir_binop(knext_reg, kernel_tid_reg, BinaryOp::OpAdd, kone_reg))
-        (*lo) = (*lo).emit(ir_copy(kernel_tid_reg, knext_reg))
-        (*lo) = (*lo).emit(ir_jump(kernel_top_label))
-        (*lo) = (*lo).emit(ir_label(kernel_end_label))
+        lowerer_emit_mut(lo, ir_binop(knext_reg, kernel_tid_reg, BinaryOp::OpAdd, kone_reg))
+        lowerer_emit_mut(lo, ir_copy(kernel_tid_reg, knext_reg))
+        lowerer_emit_mut(lo, ir_jump(kernel_top_label))
+        lowerer_emit_mut(lo, ir_label(kernel_end_label))
     }
     lower_rss_mark("after_block")
     // ---- end kernel CPU lane loop ----
@@ -8226,11 +8245,10 @@ lower_rss_mark("before_block")
         // The tail value falls through into the exit block; explicit returns
         // jump there (lower_return_expr_ref).
         if lower_opt_type_is_unit_or_implicit(&fd.return_type) {
-            let unit_pair = (*lo).emit_unit()
-            (*lo) = unit_pair.0
-            (*lo) = (*lo).emit(ir_copy(LOWER_RGN_RET_REG, unit_pair.1))
+            let unit_reg = lowerer_emit_i64_const_mut(lo, 0)
+            lowerer_emit_mut(lo, ir_copy(LOWER_RGN_RET_REG, unit_reg))
         } else {
-            (*lo) = (*lo).emit(ir_copy(LOWER_RGN_RET_REG, result_reg))
+            lowerer_emit_mut(lo, ir_copy(LOWER_RGN_RET_REG, result_reg))
         }
         let body_end_idx = (*(*lo).current_func).instr_count
         var epilogue_cost: i64 = 64
@@ -8239,8 +8257,8 @@ lower_rss_mark("before_block")
         if body_end_idx + epilogue_cost > IR_MAX_INSTRS - 256 {
             // The copies would push a body already near the cap over it: close
             // the function without a region rather than fail to compile it.
-            (*lo) = (*lo).emit(ir_label(LOWER_RGN_EXIT_LABEL))
-            (*lo) = (*lo).emit(ir_return(LOWER_RGN_RET_REG))
+            lowerer_emit_mut(lo, ir_label(LOWER_RGN_EXIT_LABEL))
+            lowerer_emit_mut(lo, ir_return(LOWER_RGN_RET_REG))
             let _st0 = ir_region_set(&(*(*lo).current_func).region, rgn_enter_idx, ir_load_imm(rgn_tok, 0))
         } else {
             lowerer_rgn_emit_exit_mut(lo, rgn_kind, rgn_type)
@@ -8250,11 +8268,10 @@ lower_rss_mark("before_block")
         }
     } else if !(*lo).fn_ends_with_return() {
         if lower_opt_type_is_unit_or_implicit(&fd.return_type) {
-            let unit_pair = (*lo).emit_unit()
-            (*lo) = unit_pair.0
-            (*lo) = (*lo).emit(ir_return(unit_pair.1))
+            let unit_reg = lowerer_emit_i64_const_mut(lo, 0)
+            lowerer_emit_mut(lo, ir_return(unit_reg))
         } else {
-            (*lo) = (*lo).emit(ir_return(result_reg))
+            lowerer_emit_mut(lo, ir_return(result_reg))
         }
     }
     LOWER_RGN_TOK_REG = saved_rgn_tok
@@ -24569,7 +24586,7 @@ impl Lowerer {
         }
         var current_func_box = lo.current_func
         let reg = (*current_func_box).reg_count
-        if reg >= IR_MAX_VREGS {
+        if !ir_reg_count_can_grow(reg, 1) {
             IR_LOWER_HARD_ERROR = 1
             if IR_LOWER_HARD_ERROR_REASON == 0 {
                 IR_LOWER_HARD_ERROR_REASON = 5
@@ -38446,23 +38463,31 @@ impl Lowerer {
                                 hyper_kind = ir_fn_get(&(*self.module), gfn as usize).hyper_algebra_kind
                                 local_g_kind = lower_global_type_table_lookup(&(*self.global_types), gfn)
                             }
+                            bss_off = self.lookup_local_global_bss_offset((*operand).name)
                             if lower_bss_slot_is_aggregate(gsize, hyper_kind) || lower_global_kind_is_array_base(local_g_kind) {
-                                bss_off = self.lookup_local_global_bss_offset((*operand).name)
                                 is_agg = true
                             }
-                        } else {
+                        } else if self.lookup_local((*operand).name) < 0 {
                             let fn_id = lowerer_lookup_fn_id_by_name_ref(&self, (*operand).name)
                             if fn_id >= 0 && fn_id < self.module.fn_count {
                                 if ir_fn_get(&(*self.module), fn_id as usize).compile_strategy == IR_STRATEGY_BSS_GLOBAL {
                                     let gsize = ir_fn_get(&(*self.module), fn_id as usize).bss_size
                                     let hyper_kind = ir_fn_get(&(*self.module), fn_id as usize).hyper_algebra_kind
                                     let global_elem_kind = lower_global_type_table_lookup(&(*self.global_types), fn_id)
+                                    bss_off = ir_fn_get(&(*self.module), fn_id as usize).param_count
                                     if lower_bss_slot_is_aggregate(gsize, hyper_kind) || lower_global_kind_is_array_base(global_elem_kind) {
-                                        bss_off = ir_fn_get(&(*self.module), fn_id as usize).param_count
                                         is_agg = true
                                     }
                                 }
                             }
+                        }
+                        // Scalar references point at the BSS word itself. The generic
+                        // OpRef path would take the address of a loaded stack copy.
+                        if !is_agg && bss_off >= 0 {
+                            let pair = self.fresh_reg()
+                            let lo = pair.0
+                            let dst = pair.1
+                            return (lo.emit(ir_load_bss_address(dst, BSS_BASE_LINUX + bss_off)), dst)
                         }
                         if is_agg && bss_off >= 0 {
                             let adjusted = BSS_BASE_LINUX + bss_off - IR_NATIVE_V2_OBJECT_HEADER_SIZE
