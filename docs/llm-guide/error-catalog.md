@@ -477,3 +477,13 @@ page is not a fresh execution receipt.
 | E278 | type-checker/enums | error | enum variant pattern has the wrong number of payload sub-patterns for its declaration (KL-20) | — |
 | E279 | type-checker/enums | error | an enum whose variants carry payloads is not an integer: `==`/`!=` or an `as` integer cast on it would use its tagged cell's address (KL-20); binding such a value to an integer is an ordinary mismatch | — |
 | E280 | type-checker/enums | error | match over an enum whose variants carry payloads is not exhaustive: some variant is matched by no arm; a guarded arm or a refutable payload sub-pattern does not cover its variant (KL-20) | — |
+| E290 | type-checker/effects | error | unknown effect in handle/perform (SIO-417) | — |
+| E291 | type-checker/effects | error | unknown operation for effect (SIO-417) | — |
+| E292 | type-checker/effects | error | perform of effect not declared or handled here (SIO-417) | — |
+| E293 | type-checker/effects | error | resume outside an on-clause (or in a catch-all clause) (SIO-417) | — |
+| E294 | type-checker/effects | error | resume capability used more than once on some path (continuations are linear) (SIO-417) | — |
+| E295 | type-checker/effects | error | handle is missing a clause for a performed operation (exhaustivity) (SIO-417) | — |
+| E296 | type-checker/effects | error | duplicate clause for operation (SIO-417) | — |
+| E297 | type-checker/effects | error | operation argument count mismatch (SIO-417) | — |
+| E298 | type-checker/effects | error | perform with live linear bindings (a non-resuming handler would drop them) (SIO-417) | — |
+| E299 | type-checker/effects | error | handler backend v1 limit exceeded (results and operation values are i64 words; handler nesting depth at most 8) (SIO-417) | — |

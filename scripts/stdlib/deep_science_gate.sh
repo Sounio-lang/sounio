@@ -1,9 +1,14 @@
 #!/usr/bin/env bash
-# Native Linux worker only. MADAROS_RAW_BIN must identify a source-built compiler.
+# Linux workers. Native groups require a source-built MADAROS_RAW_BIN; reference controls are C++ only.
 set -uo pipefail
+group="${STDLIB_DEEP_GROUP:-all}"
+case "$group" in all|core|integration|reference-controls) ;; *) echo "invalid STDLIB_DEEP_GROUP" >&2; exit 64 ;; esac
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 out=${STDLIB_DEEP_OUT:?set STDLIB_DEEP_OUT to a dedicated artifact directory}
-[[ "$out" == /* && -f "${MADAROS_RAW_BIN:?set MADAROS_RAW_BIN}" ]] || exit 64
+[[ "$out" == /* ]] || exit 64
+if [[ "$group" != reference-controls ]]; then
+    [[ -f "${MADAROS_RAW_BIN:?set MADAROS_RAW_BIN}" ]] || exit 64
+fi
 mkdir -p "$out" || exit 65
 [[ -z "$(find "$out" -mindepth 1 -maxdepth 1 -print -quit)" ]] || { echo "refusing nonempty output directory" >&2; exit 65; }
 cd "$repo" || exit 65
@@ -12,7 +17,10 @@ export SOUNIO_MADAROS_NOCACHE=1 SOUNIO_MADAROS_CACHE_READONLY=1
 ulimit -s 524288
 printf 'kind\tsource\texit_status\n' > "$out/RESULTS.tsv"
 mkdir -p "$out/result-rows" || exit 65
-sha256sum "$MADAROS_RAW_BIN" > "$out/COMPILER.sha256" || exit 65
+git rev-parse HEAD > "$out/SOURCE_GIT_SHA" || exit 65
+if [[ "$group" != reference-controls ]]; then
+    sha256sum "$MADAROS_RAW_BIN" > "$out/COMPILER.sha256" || exit 65
+fi
 find stdlib tests -type f -print0 | sort -z | xargs -0 sha256sum > "$out/INPUTS.sha256" || exit 65
 g++ --version > "$out/CXX_TOOLCHAIN.txt" || exit 65
 fail=0
@@ -71,7 +79,8 @@ resolve_jobs() {
     [[ "$memory_bytes" =~ ^[1-9][0-9]*$ ]] || memory_bytes=$((4 * 1024 * 1024 * 1024))
     memory_jobs=$((memory_bytes / (4 * 1024 * 1024 * 1024)))
     (( memory_jobs > 0 )) || memory_jobs=1
-    jobs=2
+    # Use available CPUs within the existing four-GiB-per-worker budget.
+    jobs="$cpus"
     (( jobs > cpus )) && jobs="$cpus"
     (( jobs > memory_jobs )) && jobs="$memory_jobs"
     printf '%s\n' "$jobs"
@@ -99,6 +108,70 @@ native() {
         record stdout-marker "$src" "$marker_rc"
     fi
 }
+compile_cpp() {
+    local src="$1" stem="$2" extra="$3" rc=0
+    timeout 180 g++ -std=c++23 -O2 -Wall -Wextra "$src" ${extra:+$extra} \
+        -o "$out/$stem" > "$out/$stem.cpp.txt" 2>&1 || rc=$?
+    record cpp-compile "$src" "$rc"
+}
+
+oracle_tail_case() {
+    local stem="$1" rc=0 lr_data=tests/reference/data/count_profile_lr_20261024 rejected=0
+    fail=0
+    case "$stem" in
+      count_dispersion_increment_reference)
+        timeout 600 "$out/$stem" > "$out/$stem.concordance.stdout" 2> "$out/$stem.concordance.stderr" || rc=$?
+        record concordance "$stem" "$rc"
+        rc=0
+        timeout 180 "$out/$stem" --mutant-sign > "$out/$stem.mutant.stdout" 2> "$out/$stem.mutant.stderr" || rc=$?
+        rejected=1; [[ "$rc" != 2 ]] || rejected=0
+        record mutant-rejection "$stem:orientation:expected=2:actual=$rc" "$rejected"
+        ;;
+      count_profile_lr_fixed_reference)
+        timeout 180 "$out/$stem" "$lr_data/case-3.stdout" "$lr_data/case-11.stdout" "$lr_data/case-13.stdout" > "$out/$stem.concordance.stdout" 2> "$out/$stem.concordance.stderr" || rc=$?
+        record concordance "$stem" "$rc"
+        rc=0
+        timeout 180 "$out/$stem" --mutant-sign "$lr_data/case-3.stdout" "$lr_data/case-11.stdout" "$lr_data/case-13.stdout" > "$out/$stem.mutant.stdout" 2> "$out/$stem.mutant.stderr" || rc=$?
+        rejected=1; [[ "$rc" != 2 ]] || rejected=0
+        record mutant-rejection "$stem:orientation:expected=2:actual=$rc" "$rejected"
+        ;;
+      count_profile_lr_v10_reference)
+        timeout 180 "$out/$stem" "$lr_data/v10.stdout" > "$out/$stem.concordance.stdout" 2> "$out/$stem.concordance.stderr" || rc=$?
+        record concordance "$stem" "$rc"
+        ;;
+      count_likelihood_difference_reference)
+        timeout 180 "$out/$stem" --native "$out/stdlib_scale_count_likelihood_difference.stdout" "$lr_data/case-3.stdout" "$lr_data/case-11.stdout" "$lr_data/case-13.stdout" > "$out/$stem.concordance.stdout" 2> "$out/$stem.concordance.stderr" || rc=$?
+        record concordance "$stem" "$rc"
+        ;;
+      display_font_orientation_reference)
+        timeout 180 "$out/$stem" --canonical tests/reference/data/font8x8_basic.h "$out/display_font_orientation.stdout" > "$out/$stem.concordance.stdout" 2> "$out/$stem.concordance.stderr" || rc=$?
+        record concordance font-canonical "$rc"
+        ;;
+      normalization_into_reference)
+        compare "$stem" stdlib_scale_normalization_into
+        ;;
+    esac
+    return "$fail"
+}
+
+include_core_reference() {
+    # Standalone all retains the entire inventory. CI core has a required peer job.
+    [[ "$group" != core || "$1" != count_dispersion_increment_reference ]]
+}
+run_reference_controls() {
+    local stem=count_dispersion_increment_reference rc=0
+    compile_cpp "tests/reference/$stem.cpp" "$stem" "-lquadmath"
+    if [[ "$fail" != 0 ]]; then
+        record oracle-worker "tail:$stem" 1
+        return
+    fi
+    (cd "$out" && sha256sum "$stem" > REFERENCE.sha256) || { record reference-hash "$stem" 1; return; }
+    oracle_tail_case "$stem" || rc=$?
+    (cd "$out" && sha256sum -c REFERENCE.sha256 > REFERENCE.verify.txt 2>&1) || record reference-hash "$stem" 1
+    record oracle-worker "tail:$stem" "$rc"
+}
+
+run_core() {
 NATIVE_SOURCES=()
 NATIVE_NAMES=()
 queue_native() {
@@ -184,23 +257,67 @@ emit() {
         || record emit "$stem$suffix:missing-native-fixture" 1
 }
 
-compile_cpp() {
-    local src="$1" stem="$2" extra="$3" rc=0
-    timeout 180 g++ -std=c++23 -O2 -Wall -Wextra "$src" ${extra:+$extra} \
-        -o "$out/$stem" > "$out/$stem.cpp.txt" 2>&1 || rc=$?
-    record cpp-compile "$src" "$rc"
+
+# CPP_POOL_BEGIN: orchestration-only selftest extracts this bounded queue.
+CPP_SOURCES=()
+CPP_NAMES=()
+CPP_EXTRAS=()
+queue_cpp() {
+    CPP_SOURCES+=("$1")
+    CPP_NAMES+=("$2")
+    CPP_EXTRAS+=("$3")
 }
+cpp_worker() {
+    local src="$1" name="$2" extra="$3" idx="$4" rc=0 tmp
+    fail=0
+    compile_cpp "$src" "$name" "$extra" || rc=$?
+    [[ "$fail" == 0 ]] || rc=1
+    tmp="$(mktemp "$out/.cpp-status.XXXXXX")" || exit 65
+    printf '%s\n' "$rc" > "$tmp" || exit 65
+    mv -- "$tmp" "$out/cpp.$idx.status" || exit 65
+    return "$rc"
+}
+run_cpp_batch() {
+    local active=0 idx worker_rc
+    printf '[deep-science] cpp workers=%s references=%s\n' "$jobs" "${#CPP_SOURCES[@]}"
+    for ((idx=0; idx<${#CPP_SOURCES[@]}; idx++)); do
+        cpp_worker "${CPP_SOURCES[$idx]}" "${CPP_NAMES[$idx]}" "${CPP_EXTRAS[$idx]}" "$idx" &
+        active=$((active + 1))
+        if (( active >= jobs )); then
+            wait -n || true
+            active=$((active - 1))
+        fi
+    done
+    while (( active > 0 )); do
+        wait -n || true
+        active=$((active - 1))
+    done
+    for ((idx=0; idx<${#CPP_SOURCES[@]}; idx++)); do
+        worker_rc=""
+        if [[ -f "$out/cpp.$idx.status" ]]; then
+            IFS= read -r worker_rc < "$out/cpp.$idx.status" || worker_rc=""
+        fi
+        if [[ "$worker_rc" != 0 ]]; then
+            # A child can lose shell globals or exit before recording a row.
+            # Missing/malformed status must therefore fail in the parent too.
+            record cpp-worker "${CPP_SOURCES[$idx]}:failed-or-missing-status" 1
+        fi
+    done
+}
+# CPP_POOL_END
 
 # Build every independent oracle before starting native fixture work or comparisons.
 for src in tests/reference/deep_*.cpp; do
-    compile_cpp "$src" "$(basename "$src" .cpp)" "-lquadmath"
+    queue_cpp "$src" "$(basename "$src" .cpp)" "-lquadmath"
 done
 for stem in count_dispersion_increment_reference count_profile_lr_fixed_reference \
     count_profile_lr_v10_reference count_likelihood_difference_reference; do
-    compile_cpp "tests/reference/$stem.cpp" "$stem" "-lquadmath"
+    include_core_reference "$stem" || continue
+    queue_cpp "tests/reference/$stem.cpp" "$stem" "-lquadmath"
 done
-compile_cpp tests/reference/display_font_orientation_reference.cpp display_font_orientation_reference ""
-compile_cpp tests/reference/normalization_into_reference.cpp normalization_into_reference ""
+queue_cpp tests/reference/display_font_orientation_reference.cpp display_font_orientation_reference ""
+queue_cpp tests/reference/normalization_into_reference.cpp normalization_into_reference ""
+run_cpp_batch
 for src in tests/compile-fail/stdlib_deep_*.sio; do
     name=$(basename "$src" .sio); rc=0
     timeout 120 bin/souc check "$src" > "$out/$name.check.txt" 2>&1 || rc=$?
@@ -328,44 +445,6 @@ oracle_deep_case() {
     esac
     return "$fail"
 }
-oracle_tail_case() {
-    local stem="$1" rc=0 lr_data=tests/reference/data/count_profile_lr_20261024 rejected=0
-    fail=0
-    case "$stem" in
-      count_dispersion_increment_reference)
-        timeout 600 "$out/$stem" > "$out/$stem.concordance.stdout" 2> "$out/$stem.concordance.stderr" || rc=$?
-        record concordance "$stem" "$rc"
-        rc=0
-        timeout 180 "$out/$stem" --mutant-sign > "$out/$stem.mutant.stdout" 2> "$out/$stem.mutant.stderr" || rc=$?
-        rejected=1; [[ "$rc" != 2 ]] || rejected=0
-        record mutant-rejection "$stem:orientation:expected=2:actual=$rc" "$rejected"
-        ;;
-      count_profile_lr_fixed_reference)
-        timeout 180 "$out/$stem" "$lr_data/case-3.stdout" "$lr_data/case-11.stdout" "$lr_data/case-13.stdout" > "$out/$stem.concordance.stdout" 2> "$out/$stem.concordance.stderr" || rc=$?
-        record concordance "$stem" "$rc"
-        rc=0
-        timeout 180 "$out/$stem" --mutant-sign "$lr_data/case-3.stdout" "$lr_data/case-11.stdout" "$lr_data/case-13.stdout" > "$out/$stem.mutant.stdout" 2> "$out/$stem.mutant.stderr" || rc=$?
-        rejected=1; [[ "$rc" != 2 ]] || rejected=0
-        record mutant-rejection "$stem:orientation:expected=2:actual=$rc" "$rejected"
-        ;;
-      count_profile_lr_v10_reference)
-        timeout 180 "$out/$stem" "$lr_data/v10.stdout" > "$out/$stem.concordance.stdout" 2> "$out/$stem.concordance.stderr" || rc=$?
-        record concordance "$stem" "$rc"
-        ;;
-      count_likelihood_difference_reference)
-        timeout 180 "$out/$stem" --native "$out/stdlib_scale_count_likelihood_difference.stdout" "$lr_data/case-3.stdout" "$lr_data/case-11.stdout" "$lr_data/case-13.stdout" > "$out/$stem.concordance.stdout" 2> "$out/$stem.concordance.stderr" || rc=$?
-        record concordance "$stem" "$rc"
-        ;;
-      display_font_orientation_reference)
-        timeout 180 "$out/$stem" --canonical tests/reference/data/font8x8_basic.h "$out/display_font_orientation.stdout" > "$out/$stem.concordance.stdout" 2> "$out/$stem.concordance.stderr" || rc=$?
-        record concordance font-canonical "$rc"
-        ;;
-      normalization_into_reference)
-        compare "$stem" stdlib_scale_normalization_into
-        ;;
-    esac
-    return "$fail"
-}
 
 ORACLE_KINDS=()
 ORACLE_STEMS=()
@@ -379,6 +458,7 @@ done
 for stem in count_dispersion_increment_reference count_profile_lr_fixed_reference \
     count_profile_lr_v10_reference count_likelihood_difference_reference \
     display_font_orientation_reference normalization_into_reference; do
+    include_core_reference "$stem" || continue
     queue_oracle tail "$stem"
 done
 oracle_worker() {
@@ -424,7 +504,9 @@ run_oracle_batch() {
     done
 }
 run_oracle_batch
+}
 
+run_integration() {
 # Arrow IPC is Madaros-only (lean_single has no bits_to_f64). The full suite
 # skips these fixtures via //@ requires: madaros. This job already holds the
 # fresh Madaros ELF. PyArrow 26.0.0 and NumPy 2.5.4 are installed into a
@@ -475,13 +557,22 @@ rc=0
 # normalization_into_reference through the oracle queue above.)
 LN_BOUNDARY_OUT="$out/math-pure-ln-boundary" bash scripts/stdlib/math_pure_ln_boundary_gate.sh > "$out/math-pure-ln-boundary.log" 2>&1 || rc=$?
 record concordance math-pure-ln-boundary "$rc"
+}
+
+# Both partitions remain mandatory in CI; standalone all preserves the original order.
+if [[ "$group" == all || "$group" == core ]]; then run_core; fi
+if [[ "$group" == all || "$group" == integration ]]; then run_integration; fi
+if [[ "$group" == reference-controls ]]; then run_reference_controls; fi
+printf '%s\n' "$group" > "$out/GROUP"
 
 rc=0
 sha256sum -c "$out/INPUTS.sha256" > "$out/INPUTS.verify.txt" 2>&1 || rc=$?
 record input-hashes unchanged "$rc"
-rc=0
-sha256sum -c "$out/COMPILER.sha256" > "$out/COMPILER.verify.txt" 2>&1 || rc=$?
-record compiler-hash unchanged "$rc"
+if [[ "$group" != reference-controls ]]; then
+    rc=0
+    sha256sum -c "$out/COMPILER.sha256" > "$out/COMPILER.verify.txt" 2>&1 || rc=$?
+    record compiler-hash unchanged "$rc"
+fi
 
 results_tmp="$out/RESULTS.tsv.tmp"
 {

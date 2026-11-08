@@ -1,10 +1,10 @@
+use math::pure::{sqrt,is_finite}
 // stdlib/math/numdiff.sio — Numerical differentiation
 //
 // Pure Sounio implementations:
 //   Finite differences (forward, backward, central, 4th order)
 //   Second derivative via central differences
 //   Richardson extrapolation (Ridders' method) with error estimate
-//   Complex-step derivative (machine precision without cancellation)
 //   Gradient, Jacobian, Hessian for multivariate functions
 //
 // References:
@@ -22,27 +22,46 @@ fn nd_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
 fn nd_max(a: f64, b: f64) -> f64 { if a > b { a } else { b } }
 fn nd_min(a: f64, b: f64) -> f64 { if a < b { a } else { b } }
 
-fn nd_sqrt(x: f64) -> f64 with Mut, Div, Panic {
-    if x <= 0.0 { return 0.0 }
-    var y = x
-    var i = 0
-    while i < 20 { y = 0.5 * (y + x / y); i = i + 1 }
-    y
+fn nd_sqrt(x:f64)->f64 with Mut,Div,Panic {
+    assert(is_finite(x) && x>=0.0)
+    sqrt(x)
 }
-
-fn nd_cbrt(x: f64) -> f64 with Mut, Div, Panic {
-    if x == 0.0 { return 0.0 }
-    let neg = x < 0.0
-    var ax = nd_abs(x)
-    var y = ax
-    if ax > 1.0 { y = ax / 3.0 } else { y = 1.0 }
-    var i = 0
-    while i < 30 { y = (2.0 * y + ax / (y * y)) / 3.0; i = i + 1 }
-    if neg { 0.0 - y } else { y }
+// Range-reduce finite magnitudes to [1,8) before bounded Newton steps.
+fn nd_cbrt(x:f64)->f64 with Mut,Div,Panic {
+    assert(is_finite(x))
+    if x==0.0 {return 0.0}
+    var v=nd_abs(x)
+    var scale:f64=1.0
+    while v<1.0 {v=v*8.0;scale=scale*0.5}
+    while v>=8.0 {v=v*0.125;scale=scale*2.0}
+    var y=v
+    var k:i64=0
+    while k<12 {y=(2.0*y+v/(y*y))/3.0;k=k+1}
+    let answer=y*scale
+    if x<0.0 {0.0-answer} else {answer}
 }
-
+fn nd_point_valid(x:f64,h:f64,direction:f64)->bool {
+    if !is_finite(x) || !is_finite(h) || h<=0.0 {return false}
+    let point=x+direction*h
+    if !is_finite(point) {return false}
+    if direction>0.0 {point>x} else {point<x}
+}
 // Machine epsilon
 fn nd_eps() -> f64 { 2.2204460492503131e-16 }
+
+fn nd_vector_valid(x:&[f64;64],n:i32)->bool with Mut,Div,Panic {
+    if n<0 || n>64 {return false}
+    var i:i32=0
+    while i<n {
+        if !is_finite(x[i]) {return false}
+        let h=nd_cbrt(nd_eps())*nd_max(nd_abs(x[i]),1.0)
+        if !nd_point_valid(x[i],h,1.0) || !nd_point_valid(x[i],h,0.0-1.0) {return false}
+        i=i+1
+    }
+    true
+}
+
+
 
 // =============================================================================
 // Basic finite differences
@@ -51,17 +70,21 @@ fn nd_eps() -> f64 { 2.2204460492503131e-16 }
 // Forward difference: f'(x) ≈ (f(x+h) - f(x)) / h.
 // Error: O(h). Optimal h ≈ sqrt(eps) * |x| for smooth f.
 fn diff_forward(f: fn(f64) -> f64 with Mut, Div, Panic, x: f64, h: f64) -> f64 with Mut, Div, Panic {
+    assert(nd_point_valid(x,h,1.0))
     (f(x + h) - f(x)) / h
 }
 
 // Backward difference: f'(x) ≈ (f(x) - f(x-h)) / h.
 fn diff_backward(f: fn(f64) -> f64 with Mut, Div, Panic, x: f64, h: f64) -> f64 with Mut, Div, Panic {
+    assert(nd_point_valid(x,h,0.0-1.0))
     (f(x) - f(x - h)) / h
 }
 
 // Central difference: f'(x) ≈ (f(x+h) - f(x-h)) / (2h).
 // Error: O(h^2). Optimal h ≈ eps^{1/3} * |x|.
 fn diff_central(f: fn(f64) -> f64 with Mut, Div, Panic, x: f64, h: f64) -> f64 with Mut, Div, Panic {
+    assert(nd_point_valid(x,h,1.0) && nd_point_valid(x,h,0.0-1.0))
+    assert(is_finite(2.0*h))
     (f(x + h) - f(x - h)) / (2.0 * h)
 }
 
@@ -69,6 +92,9 @@ fn diff_central(f: fn(f64) -> f64 with Mut, Div, Panic, x: f64, h: f64) -> f64 w
 // f'(x) ≈ (-f(x+2h) + 8f(x+h) - 8f(x-h) + f(x-2h)) / (12h).
 // Error: O(h^4). Optimal h ≈ eps^{1/5} * |x|.
 fn diff_central_4th(f: fn(f64) -> f64 with Mut, Div, Panic, x: f64, h: f64) -> f64 with Mut, Div, Panic {
+    assert(nd_point_valid(x,h,2.0) && nd_point_valid(x,h,0.0-2.0))
+    assert(nd_point_valid(x,h,1.0) && nd_point_valid(x,h,0.0-1.0))
+    assert(is_finite(12.0*h))
     let fm2 = f(x - 2.0 * h)
     let fm1 = f(x - h)
     let fp1 = f(x + h)
@@ -79,12 +105,17 @@ fn diff_central_4th(f: fn(f64) -> f64 with Mut, Div, Panic, x: f64, h: f64) -> f
 // Second derivative: f''(x) ≈ (f(x+h) - 2f(x) + f(x-h)) / h^2.
 // Error: O(h^2).
 fn diff_second(f: fn(f64) -> f64 with Mut, Div, Panic, x: f64, h: f64) -> f64 with Mut, Div, Panic {
+    assert(nd_point_valid(x,h,1.0) && nd_point_valid(x,h,0.0-1.0))
+    assert(is_finite(h*h) && h*h>0.0)
     (f(x + h) - 2.0 * f(x) + f(x - h)) / (h * h)
 }
 
 // 4th-order second derivative:
 // f''(x) ≈ (-f(x+2h) + 16f(x+h) - 30f(x) + 16f(x-h) - f(x-2h)) / (12h^2).
 fn diff_second_4th(f: fn(f64) -> f64 with Mut, Div, Panic, x: f64, h: f64) -> f64 with Mut, Div, Panic {
+    assert(nd_point_valid(x,h,2.0) && nd_point_valid(x,h,0.0-2.0))
+    assert(nd_point_valid(x,h,1.0) && nd_point_valid(x,h,0.0-1.0))
+    assert(is_finite(12.0*h*h) && 12.0*h*h>0.0)
     let fm2 = f(x - 2.0 * h)
     let fm1 = f(x - h)
     let f0 = f(x)
@@ -99,7 +130,7 @@ fn diff_second_4th(f: fn(f64) -> f64 with Mut, Div, Panic, x: f64, h: f64) -> f6
 
 // Ridders' method for f'(x) with automatic step size selection.
 // Builds a Neville tableau of finite-difference estimates at decreasing step sizes.
-// Returns the best estimate and an error bound.
+// Returns the best estimate and an estimated discrepancy, not an error bound.
 // Result: out[0] = derivative, out[1] = error estimate.
 fn diff_richardson(f: fn(f64) -> f64 with Mut, Div, Panic, x: f64, out: &![f64; 2]) with Mut, Div, Panic {
     let ntab: i32 = 10
@@ -113,6 +144,7 @@ fn diff_richardson(f: fn(f64) -> f64 with Mut, Div, Panic, x: f64, out: &![f64; 
     // Tableau: a[i][j] stored as a[i * ntab + j] in flat array
     var a: [f64; 100] = [0.0; 100]
 
+    assert(nd_point_valid(x,h,1.0) && nd_point_valid(x,h,0.0-1.0))
     // First estimate
     a[0] = (f(x + h) - f(x - h)) / (2.0 * h)
     var err = 1.0e30
@@ -123,6 +155,7 @@ fn diff_richardson(f: fn(f64) -> f64 with Mut, Div, Panic, x: f64, out: &![f64; 
     while i < ntab {
         h = h / con
 
+        assert(nd_point_valid(x,h,1.0) && nd_point_valid(x,h,0.0-1.0))
         // Current central difference at step h
         a[i * ntab] = (f(x + h) - f(x - h)) / (2.0 * h)
 
@@ -176,6 +209,9 @@ fn optimal_h_forward(x: f64) -> f64 with Mut, Div, Panic {
 fn gradient(f: fn(&[f64; 64], i32) -> f64 with Mut, Div, Panic,
             x: &[f64; 64], n: i32,
             out: &![f64; 64]) with Mut, Div, Panic {
+    assert(nd_vector_valid(x,n))
+    if n==0 {return}
+
     var xp: [f64; 64] = [0.0; 64]
     var xm: [f64; 64] = [0.0; 64]
 
@@ -208,6 +244,10 @@ fn gradient(f: fn(&[f64; 64], i32) -> f64 with Mut, Div, Panic,
 fn jacobian(f: fn(&[f64; 64], i32, &![f64; 64], i32) with Mut, Div, Panic,
             x: &[f64; 64], n_in: i32, n_out: i32,
             jac: &![f64; 4096]) with Mut, Div, Panic {
+    assert(n_out>=0 && n_out<=64)
+    assert(nd_vector_valid(x,n_in))
+    if n_in==0 || n_out==0 {return}
+
     var fp: [f64; 64] = [0.0; 64]
     var fm: [f64; 64] = [0.0; 64]
     var xp: [f64; 64] = [0.0; 64]
@@ -249,6 +289,9 @@ fn jacobian(f: fn(&[f64; 64], i32, &![f64; 64], i32) with Mut, Div, Panic,
 fn hessian(f: fn(&[f64; 64], i32) -> f64 with Mut, Div, Panic,
            x: &[f64; 64], n: i32,
            hess: &![f64; 4096]) with Mut, Div, Panic {
+    assert(nd_vector_valid(x,n))
+    if n==0 {return}
+
     var xpp: [f64; 64] = [0.0; 64]
     let f0 = f(x, n)
 
@@ -308,6 +351,9 @@ fn hessian(f: fn(&[f64; 64], i32) -> f64 with Mut, Div, Panic,
 // Laplacian of f: R^n -> R = trace(Hessian) = sum d^2f/dx_i^2.
 fn laplacian(f: fn(&[f64; 64], i32) -> f64 with Mut, Div, Panic,
              x: &[f64; 64], n: i32) -> f64 with Mut, Div, Panic {
+    assert(nd_vector_valid(x,n))
+    if n==0 {return 0.0}
+
     let f0 = f(x, n)
     var xp: [f64; 64] = [0.0; 64]
     var sum = 0.0

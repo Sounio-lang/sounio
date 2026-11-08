@@ -1,0 +1,1 @@
+Fixes the SIO-569 slot confusion: `let neg = x as i64` snapshotted the source register instead of aliasing it, so a later store to `x` no longer shows through `neg` (the borrow-derived repro prints -495, the plain form 507).

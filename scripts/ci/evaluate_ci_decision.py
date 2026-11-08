@@ -28,16 +28,37 @@ def main() -> int:
     impact = needs.get("impact", {}).get("outputs", {})
     failures: list[str] = []
 
+    event = os.environ.get("GITHUB_EVENT_NAME", "")
     required = {
+        # ADR-027 §1: the consolidated cheap gates run on every event.
+        "fast-checks": True,
         "contracts": True,
         "native-selfhost-linux-x86_64": any(
             truthy(impact.get(key)) for key in ("compiler", "runtime", "stdlib", "tests", "full")
         ),
-        "source-bootstrap-selfhost-linux-x86_64": truthy(impact.get("compiler")) or truthy(impact.get("full")),
-        "madaros-current-source-deref-f64": any(
-            truthy(impact.get(key)) for key in ("compiler", "tests", "full")
+        "native-linux-regressions": any(
+            truthy(impact.get(key)) for key in ("compiler", "runtime", "stdlib", "tests", "full")
         ),
-        "native-selfhost-macos-arm64": truthy(impact.get("compiler")) or truthy(impact.get("full")),
+        "source-bootstrap-selfhost-linux-x86_64": truthy(impact.get("compiler")) or truthy(impact.get("full")),
+        "source-bootstrap-regressions": truthy(impact.get("compiler")) or truthy(impact.get("full")),
+        "scientific-reference-controls": any(
+            truthy(impact.get(key)) for key in ("compiler", "runtime", "stdlib", "tests", "full")
+        ),
+        "current-source-madaros": any(
+            truthy(impact.get(key)) for key in ("compiler", "runtime", "stdlib", "tests", "full")
+        ),
+        "sco-current-source": any(
+            truthy(impact.get(key)) for key in ("compiler", "stdlib", "tests", "full")
+        ),
+        "madaros-current-source-deref-f64": any(
+            truthy(impact.get(key)) for key in ("compiler", "stdlib", "tests", "full")
+        ),
+        # ADR-027 §3: macOS arm64 is selected by the EVENT as well as by
+        # impact. It is skipped on a pull request and required in the merge
+        # group, on main and on dispatch, so `skipped` is the correct outcome
+        # on a PR and a failure everywhere else.
+        "native-selfhost-macos-arm64": event != "pull_request"
+        and (truthy(impact.get("compiler")) or truthy(impact.get("full"))),
         "full-test-suite": any(truthy(impact.get(key)) for key in ("compiler", "runtime", "stdlib", "tests", "full")),
         "madaros-witness-gate": any(
             truthy(impact.get(key)) for key in ("compiler", "runtime", "stdlib", "tests", "full")

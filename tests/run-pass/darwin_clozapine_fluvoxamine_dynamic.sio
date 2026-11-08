@@ -1,0 +1,147 @@
+//@ run-pass
+//@ expect-stdout-contains: CLZFVX_DYNAMIC_PASS
+//@ timeout: 600
+//
+// Dynamic (flow-limited) follow-up to the static fluvoxamine x clozapine
+// prediction. Rationale and the clearance partition are in
+// stdlib/darwin_pbpk/ddi/clozapine_fluvoxamine_dynamic.sio. Steady state is
+// reached by constant IV infusion (CL = rate / Css,blood), t_end = 360 h,
+// dt = 0.1 h (Css converged to < 0.01% by 360 h; clozapine t1/2 ~ 14 h).
+//
+// The explicit predictor is the series-resistance model 1/CL_cyp = 1/G + 1/X,
+// G the delivery (flow+PS) conductance, X the intrinsic metabolic conductance
+// (proportional to CLint). It is fit from two baseline simulations (C = 300,
+// 900) and then PREDICTS, with no further fitting:
+//   G1  its own delivery ceiling: fit G vs CL_cyp at CLint -> inf, within 1%.
+//   G2  a held-out baseline point (C = 600): predicted vs simulated CL_cyp
+//       within 1%.
+//   G3  the calibration: the CLint scale the model says gives CL_cyp = 18.8
+//       (so total CL = 20 with the 1.2 L/h non-CYP path) reproduces total
+//       CL = 20 in a fresh simulation within 1%.
+//   G4  the INHIBITED hepatic clearance at hepatic fluvoxamine I = 4, 5.5,
+//       7 uM: predicted from the baseline fit scaled by phi(I) vs simulated
+//       with fluvoxamine as the hepatic load, within 1.5%.
+// G5  Flow limitation blunts the SYSTEMIC-clearance rise: R_CL = CL_base/CL_inh
+//     (at fixed oral F) is strictly below the static 1/(Σ fm_k f_k + fm_other)
+//     at every I, and above 1. The blunting is ~13-14% for clozapine (baseline
+//     extraction ~0.22).
+// G5b The oral-AUC ratio carries the first-pass term R_CL omits. The same
+//     inhibition raises F_H = 1 - CL_cyp/G, so R_oral = (F_inh/F_base)·R_CL is
+//     strictly ABOVE R_CL: the first-pass term and the flow-limitation term act
+//     in opposite directions on oral AUC. This is the discriminating contract —
+//     R_CL alone does NOT equal the oral DDI unless F_inh = F_base is assumed.
+// G6  NEITHER the systemic ratio NOR the first-pass-carried oral ratio reaches
+//     the clinical 5-10x at this model's in-vitro CYP1A2 fraction: the gap is
+//     not an artefact of ignoring first-pass. It is left to the next layers
+//     (in-vivo CYP1A2 fraction above the 5 uM HLM partition, metabolite
+//     inhibition, the perpetrator's own kinetics) -- documented, not tuned away.
+//
+// R_oral here is a MODEL-CONSISTENT first-pass correction (F_H from the fitted
+// delivery conductance G), not a validated oral bioavailability. No
+// clinical-validity claim (ADR009).
+
+use darwin_pbpk::ddi::multidrug28::*
+use darwin_pbpk::ddi::clozapine_fluvoxamine::*
+use darwin_pbpk::ddi::clozapine_fluvoxamine_dynamic::*
+
+fn t_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn rel(a: f64, b: f64) -> f64 with Div { return t_abs(a - b) / t_abs(b) }
+fn show(l: string, x: f64) with IO { print(l) println(x) }
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    println("CLZFVX_DYNAMIC v1 — flow-limited fluvoxamine x clozapine")
+    var ok = true
+    let rate = 10.0
+    let te = 360.0
+    let dt = 0.1
+
+    // Baseline fit (no fluvoxamine) from two CLint scales.
+    let clcyp300 = clzfvx_dyn_measure_cl_cyp(300.0, 0.0, rate, te, dt)
+    let clcyp900 = clzfvx_dyn_measure_cl_cyp(900.0, 0.0, rate, te, dt)
+    let fit = clzfvx_dyn_fit_series(300.0, clcyp300, 900.0, clcyp900)
+    let inv_g = fit.0
+    let inv_beta = fit.1
+    let g_fit = 1.0 / inv_g
+    show("CL_cyp(C=300): ", clcyp300)
+    show("CL_cyp(C=900): ", clcyp900)
+    show("series G (fit): ", g_fit)
+
+    // G1 delivery ceiling.
+    println("G1 delivery ceiling")
+    let g_ceiling = clzfvx_dyn_measure_cl_cyp(1000000.0, 0.0, rate, te, dt)
+    show("  CL_cyp(CLint->inf) measured: ", g_ceiling)
+    show("  relative vs fit G: ", rel(g_fit, g_ceiling))
+    if rel(g_fit, g_ceiling) > 0.01 { println("  G1 FAIL"); ok = false }
+
+    // G2 held-out baseline point.
+    println("G2 held-out baseline C=600")
+    let c600_sim = clzfvx_dyn_measure_cl_cyp(600.0, 0.0, rate, te, dt)
+    let c600_pred = clzfvx_dyn_series_clcyp(inv_g, inv_beta, 600.0)
+    show("  sim: ", c600_sim)
+    show("  predicted: ", c600_pred)
+    show("  relative: ", rel(c600_pred, c600_sim))
+    if rel(c600_pred, c600_sim) > 0.01 { println("  G2 FAIL"); ok = false }
+
+    // G3 calibration to total CL = 20.
+    println("G3 calibration")
+    let c_cal = clzfvx_dyn_calibrate(inv_g, inv_beta, clzfvx_dyn_cl_cyp_target())
+    show("  calibrated CLint scale: ", c_cal)
+    let base_cl = clzfvx_dyn_measure_cl(c_cal, 0.0, rate, te, dt)
+    show("  baseline total CL (want 20): ", base_cl)
+    show("  relative: ", rel(base_cl, clzfvx_dyn_cl_total()))
+    if rel(base_cl, clzfvx_dyn_cl_total()) > 0.01 { println("  G3 FAIL"); ok = false }
+
+    // Baseline hepatic CYP clearance at the calibrated scale (fluvoxamine off),
+    // for the first-pass availability F_base = 1 - CL_cyp,base / G.
+    let clcyp_base = clzfvx_dyn_measure_cl_cyp(c_cal, 0.0, rate, te, dt)
+    show("CL_cyp,base (no fluvoxamine): ", clcyp_base)
+    show("F_H baseline (1 - CL_cyp,base/G): ", clzfvx_dyn_hepatic_availability(clcyp_base, g_fit))
+
+    // G4/G5/G5b over the hepatic fluvoxamine range.
+    var iarr = [4.0, 5.5, 7.0]
+    var j = 0
+    while j < 3 {
+        let i = iarr[j]
+        println("I (uM hepatic fluvoxamine):")
+        println(i)
+        let clcyp_pred = clzfvx_dyn_predict_clcyp_inhibited(inv_g, inv_beta, c_cal, i)
+        let clcyp_sim = clzfvx_dyn_measure_cl_cyp(c_cal, i, rate, te, dt)
+        show("  G4 CL_cyp,inh predicted: ", clcyp_pred)
+        show("  G4 CL_cyp,inh simulated: ", clcyp_sim)
+        show("  G4 relative: ", rel(clcyp_pred, clcyp_sim))
+        if rel(clcyp_pred, clcyp_sim) > 0.015 { println("  G4 FAIL"); ok = false }
+
+        let r_cl = clzfvx_dyn_fold_rise(clcyp_sim)
+        let r_static = clzfvx_predicted_ratio(i)
+        show("  G5 R_CL (systemic, fixed F): ", r_cl)
+        show("  G5 R_static:  ", r_static)
+        show("  G5 blunting (1 - R_CL/R_static): ", 1.0 - r_cl / r_static)
+        if !(r_cl < r_static && r_cl > 1.0) { println("  G5 FAIL"); ok = false }
+
+        // G5b first-pass carried: R_oral = (F_inh/F_base)·R_CL, strictly > R_CL.
+        let r_oral = clzfvx_dyn_oral_ratio(clcyp_base, clcyp_sim, g_fit)
+        show("  G5b F_H inhibited: ", clzfvx_dyn_hepatic_availability(clcyp_sim, g_fit))
+        show("  G5b R_oral (first-pass carried): ", r_oral)
+        if !(r_oral > r_cl) { println("  G5b FAIL"); ok = false }
+        j = j + 1
+    }
+
+    // G6 at 7 uM NEITHER the systemic ratio NOR the oral ratio reaches the clinic.
+    println("G6 gap to the clinic")
+    let clcyp_hi = clzfvx_dyn_measure_cl_cyp(c_cal, clzfvx_hepatic_hi_uM(), rate, te, dt)
+    let r_cl_hi = clzfvx_dyn_fold_rise(clcyp_hi)
+    let r_oral_hi = clzfvx_dyn_oral_ratio(clcyp_base, clcyp_hi, g_fit)
+    show("  R_CL at 7 uM:   ", r_cl_hi)
+    show("  R_oral at 7 uM: ", r_oral_hi)
+    show("  clinical low: ", clzfvx_clinical_lo())
+    if !(r_cl_hi < clzfvx_clinical_lo()) { println("  G6 FAIL (R_CL)"); ok = false }
+    if !(r_oral_hi < clzfvx_clinical_lo()) { println("  G6 FAIL (R_oral)"); ok = false }
+    println("  neither systemic CL nor first-pass-carried oral AUC reaches the clinical 5-10x")
+
+    if ok {
+        println("CLZFVX_DYNAMIC_PASS")
+        return 0
+    }
+    println("CLZFVX_DYNAMIC_FAIL")
+    return 1
+}

@@ -1,0 +1,98 @@
+// stdlib/darwin_pbpk/scenarios/tacrolimus_oral.sio — scenario library (no main)
+//
+// End-to-end dissertation scenario for tacrolimus (SIO-516):
+//
+//   - Prograf immediate-release capsule, single 5 mg oral dose (fasted)
+//     → first-order gut absorption (ka = 0.38/h, Bekersky 1999) with
+//       first-pass loss (F = 0.25, Kershner 1996)
+//       → blood input (closed-form rate, operator-split source term)
+//         → 14-compartment PBPK28 (tsit5_pbpk28, fully-coupled CN)
+//
+// Mold: scenarios/venlafaxine_xr.sio (oral route, gut absorption) and
+// scenarios/everolimus_des.sio (scenario-owned profile + parity-ref shape).
+// Unlike venlafaxine (numerical matrix + explicit gut pool), the IR capsule
+// input has a closed form, so both engines evaluate the same rate function
+// (tirzepatide pattern): rate(t) = F·D·ka·exp(−ka·t) at the step midpoint.
+// The (1 − F) fraction is first-pass loss — it leaves the system, so the
+// mass envelope caps body mass by cumulative ABSORPED, not by dose.
+//
+// Whole-blood referenced throughout (TDM matrix; target trough 5–15 ng/mL).
+// Tacrolimus RBC sequestration (rb = 15, Beysens 1991) and plasma binding
+// (fu = 0.01, Staatz 2004) are folded into the blood-referenced convention:
+// Kp are tissue-to-blood partition coefficients (tacrolimus's OWN values
+// from drugs/tacrolimus.sio — NOT rapamycin's), and cl_central = CL_wb =
+// 28 L/h (Jusko 1995) acts on blood directly, as the PBPK28 kernel applies
+// clearance on Cb. Distribution is flow-limited (small lipophilic molecule);
+// PS mirrors the rapamycin PBPK28 pattern — ASSUMED, pending SIO-550.
+// Adipose Kp stays capped (5.0) per the drug file's 24–48 h window note;
+// the steady-state-fitted variant is follow-up.
+//
+// Declared limitation: single-dose PK only. No CYP3A5-genotype split, no
+// steady-state trough readout — follow-up. No clinical-validity claim:
+// parity only (ADR009).
+//
+// The parity ref tests/run-pass/dissertation_pbpk28_parity_ref_tacrolimus.sio
+// drives this scenario itself, so a scenario change not mirrored in Node
+// breaks the gate.
+//
+// This file is a library with no `main`; it is checked, not run.
+
+use darwin_pbpk::core::pbpk28_params::*
+use darwin_pbpk::tsit5_pbpk28::*
+use darwin_pbpk::drugs::tacrolimus::*
+use math::pure::{exp}
+
+// ─── Tacrolimus PBPK28 profile (scenario-owned) ─────────────────────────────
+// Kept here — not in core/pbpk28_params.sio — so this lane never churns the
+// website-pinned domain source. Standard 70 kg physiology. Kp = tacrolimus
+// tissue-to-blood values (Iwasaki 2007 liver, Saitoh 2006 brain, Staatz 2004
+// review for the rest) with adipose capped per the drug file; PS assumed
+// (rapamycin flow-limited pattern, SIO-550); CL_wb = 28 L/h (Jusko 1995).
+pub fn tac_pbpk28_params() -> PBPKParams28 {
+    PBPKParams28 {
+        v_ref:     [5.0, 1.8, 0.31, 1.45, 0.33, 1.1, 28.0, 20.0, 1.2, 3.6, 6.6, 0.18, 0.09, 3.7],
+        vasc_frac: [1.000, 0.210, 0.160, 0.037, 0.262, 0.262, 0.040, 0.050, 0.024, 0.019, 0.041, 0.282, 0.180, 0.050],
+        kp:        [1.00, 20.0, 6.0, 0.10, 4.0, 8.0, 3.0, 5.0, 6.0, 2.0, 1.5, 8.0, 4.0, 2.0],
+        ps:        [0.0, 1800.0, 1110.0, 88.0, 160.0, 10500.0, 336.0, 40.0, 660.0, 126.0, 51.0, 150.0, 96.0, 78.0],
+        q:         [350.0, 90.0, 74.0, 44.0, 16.0, 350.0, 42.0, 10.0, 55.0, 21.0, 17.0, 10.0, 8.0, 13.0],
+        cl_central: 28.0,
+    }
+}
+
+// ─── Oral IR input ──────────────────────────────────────────────────────────
+// rate(t) = F·D·ka·exp(−ka·t), mg/h (gut pool dosed at t = 0, first-pass loss
+// leaves the system). D = 5 mg single dose (Prograf label 0.1–0.2 mg/kg/day
+// in two divided doses → 3.5–7 mg per dose at 70 kg; 5 mg fasted is the
+// Bekersky 1999 design). ka = 0.38/h (Bekersky 1999, fasted), F = 0.25
+// (Kershner 1996, CV ~50%).
+pub fn tac_dose_mg() -> f64 { return tacrolimus_single_dose_mg() }
+pub fn tac_ka() -> f64       { return tacrolimus_ka_per_h() }
+pub fn tac_f() -> f64        { return tacrolimus_f_oral_val() }
+
+pub fn tac_release_rate_at(t: f64) -> f64 with Mut, Div {
+    var tc = t
+    if tc < 0.0 { tc = 0.0 }
+    return tac_f() * tac_dose_mg() * tac_ka() * exp(0.0 - tac_ka() * tc)
+}
+
+// ─── Composite scenario state ───────────────────────────────────────────────
+pub struct TacrolimusScenario {
+    pub pbpk: PBPKState28,
+}
+
+// Initial state: zero PBPK (drug enters via gut absorption).
+pub fn tac_scenario_init() -> TacrolimusScenario {
+    TacrolimusScenario {
+        pbpk: pbpk28_state_zero(),
+    }
+}
+
+// One fully-coupled CN step at midpoint input rate.
+pub fn tac_step(scen: TacrolimusScenario, p: PBPKParams28,
+                t_start: f64, dt: f64)
+    -> TacrolimusScenario with Mut, Div
+{
+    let rel_mid = tac_release_rate_at(t_start + 0.5 * dt)
+    var out_pbpk = pbpk28_full_cn_step(scen.pbpk, p, rel_mid, dt)
+    return TacrolimusScenario { pbpk: out_pbpk }
+}

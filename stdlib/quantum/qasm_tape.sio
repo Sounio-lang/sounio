@@ -10,6 +10,8 @@
 // This is not the VQE Circuit. That one has no measurement and its own
 // statevector, capped at 4 qubits.
 
+use math::pure::{is_finite}
+
 use quantum::linear::{
     quantum_state_new,
     qubit_alloc,
@@ -339,40 +341,96 @@ fn qir_gate(kind: i32, a: i32, b: i32, angle: f64) -> string with Mut, Panic, Di
     ""
 }
 
+// Empty means this conservative base-profile order is supported. The returned
+// message allows callers to diagnose rejected inputs even on runtimes whose
+// panic handler does not display its argument.
+pub fn tape_qir_base_error(t: Tape) -> string with Mut, Panic, Div {
+    if t.n_qubits < 0 { return "tape_qir: invalid qubit count" }
+    if t.n_ops < 0 || t.n_ops > 64 { return "tape_qir: invalid operation count" }
+    var i: i32 = 0
+    var saw: i32 = 0
+    var measures: i32 = 0
+    while i < t.n_ops {
+        let kind = t.kind[i]
+        if kind != 1 && kind != 9 && kind != 10 && kind != 11 && kind != 15 {
+            return "tape_qir: unsupported opcode"
+        }
+        if (kind == 9 || kind == 10) && !is_finite(t.angle[i]) {
+            return "tape_qir: non-finite rotation angle"
+        }
+        if wire_ok(t, t.q0[i]) == 0 { return "tape_qir: invalid qubit index" }
+        if kind == 11 {
+            if wire_ok(t, t.q1[i]) == 0 { return "tape_qir: invalid qubit index" }
+            if t.q0[i] == t.q1[i] { return "tape_qir: CNOT requires distinct qubits" }
+        }
+        if kind == 15 {
+            var previous: i32 = 0
+            while previous < i {
+                if t.kind[previous] == 15 && t.q0[previous] == t.q0[i] {
+                    return "tape_qir: qubit measured more than once"
+                }
+                previous = previous + 1
+            }
+            measures = measures + 1
+            saw = 1
+        } else {
+            if saw == 1 {
+                return "tape_qir: gate after measurement is not supported by base profile"
+            }
+        }
+        i = i + 1
+    }
+    if measures != t.n_meas { return "tape_qir: measurement count mismatch" }
+    ""
+}
+
 // QSOIR v0 is the five tape opcodes. This prints the human-readable LLVM IR
 // of a QIR v2 base-profile program: static qubit ids, gates before measures.
+// It conservatively rejects any gate after the first measurement and any
+// repeated measurement of a qubit, rather than silently changing tape order.
 // It is not the SOIR binary opcode table, and it is not bitcode.
 pub fn tape_qir(t: Tape) -> string with Mut, Panic, Div {
+    let order_error = tape_qir_base_error(t)
+    if str_len(order_error) != 0 {
+        panic(order_error)
+        return ""
+    }
     var body = ""
     var meas = ""
     var rec = ""
+    var labels = "@qir_tuple_label = private constant [2 x i8] c\"t\\00\"\n"
     var i: i32 = 0
     var m: i32 = 0
-    var saw: i32 = 0
-    var late: i32 = 0
     while i < t.n_ops {
         let kind = t.kind[i]
         if kind == 15 {
-            saw = 1
             var line = str_concat("  call void @__quantum__qis__mz__body(", qir_ptr(t.q0[i]))
             line = str_concat(line, ", ptr writeonly ")
             line = str_concat(line, qir_val(m))
             line = str_concat(line, ")\n")
             meas = str_concat(meas, line)
             var out = str_concat("  call void @__quantum__rt__result_record_output(", qir_ptr(m))
-            out = str_concat(out, ", ptr null)\n")
+            let number = tape_i64(m as i64)
+            out = str_concat(out, ", ptr @qir_result_label_")
+            out = str_concat(out, number)
+            out = str_concat(out, ")\n")
+            var label = str_concat("@qir_result_label_", number)
+            label = str_concat(label, " = private constant [")
+            label = str_concat(label, tape_i64((str_len(number) as i64) + 2))
+            label = str_concat(label, " x i8] c\"r")
+            label = str_concat(label, number)
+            label = str_concat(label, "\\00\"\n")
+            labels = str_concat(labels, label)
+
             rec = str_concat(rec, out)
             m = m + 1
         } else {
-            if saw == 1 { late = 1 }
             body = str_concat(body, qir_gate(kind, t.q0[i], t.q1[i], t.angle[i]))
         }
         i = i + 1
     }
     var s = "; QSOIR v0 -> QIR base profile\n"
-    if late == 1 {
-        s = str_concat(s, "; qsoir: gate after measure\n")
-    }
+    s = str_concat(s, labels)
     s = str_concat(s, "define i64 @qsoir() #0 {\nentry:\n")
     s = str_concat(s, "  call void @__quantum__rt__initialize(ptr null)\n  br label %body\nbody:\n")
     s = str_concat(s, body)
@@ -381,14 +439,14 @@ pub fn tape_qir(t: Tape) -> string with Mut, Panic, Div {
     s = str_concat(s, "  br label %output\noutput:\n")
     s = str_concat(s, "  call void @__quantum__rt__tuple_record_output(i64 ")
     s = str_concat(s, tape_i64(t.n_meas as i64))
-    s = str_concat(s, ", ptr null)\n")
+    s = str_concat(s, ", ptr @qir_tuple_label)\n")
     s = str_concat(s, rec)
     s = str_concat(s, "  ret i64 0\n}\n")
     s = str_concat(s, "declare void @__quantum__qis__h__body(ptr)\n")
     s = str_concat(s, "declare void @__quantum__qis__ry__body(double, ptr)\n")
     s = str_concat(s, "declare void @__quantum__qis__rz__body(double, ptr)\n")
     s = str_concat(s, "declare void @__quantum__qis__cnot__body(ptr, ptr)\n")
-    s = str_concat(s, "declare void @__quantum__qis__mz__body(ptr, ptr writeonly)\n")
+    s = str_concat(s, "declare void @__quantum__qis__mz__body(ptr, ptr writeonly) #1\n")
     s = str_concat(s, "declare void @__quantum__rt__initialize(ptr)\n")
     s = str_concat(s, "declare void @__quantum__rt__tuple_record_output(i64, ptr)\n")
     s = str_concat(s, "declare void @__quantum__rt__result_record_output(ptr, ptr)\n")
@@ -397,6 +455,12 @@ pub fn tape_qir(t: Tape) -> string with Mut, Panic, Div {
     s = str_concat(s, "\" \"required_num_results\"=\"")
     s = str_concat(s, tape_i64(t.n_meas as i64))
     s = str_concat(s, "\" }\n")
+    s = str_concat(s, "attributes #1 = { \"irreversible\" }\n")
+    s = str_concat(s, "!llvm.module.flags = !{!0, !1, !2, !3}\n")
+    s = str_concat(s, "!0 = !{i32 1, !\"qir_major_version\", i32 2}\n")
+    s = str_concat(s, "!1 = !{i32 7, !\"qir_minor_version\", i32 0}\n")
+    s = str_concat(s, "!2 = !{i32 1, !\"dynamic_qubit_management\", i1 false}\n")
+    s = str_concat(s, "!3 = !{i32 1, !\"dynamic_result_management\", i1 false}\n")
     s
 }
 
