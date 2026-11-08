@@ -1,0 +1,311 @@
+// Opt-in annotated dense EL+; Boolean ontology::elplus is unchanged.
+// Capacities: 64 concepts, 8 roles, 8 chains. Triplets are (signed,
+// inferred,assumed), -1 = infinity; finite costs are nonnegative i64.
+// Every completion rule, including role transitivity, costs (-1,1,1).
+// Structural reflexivity/top/role identity have (0,0,0). Only direct
+// sources can introduce finite signed evidence. Componentwise minima may
+// improve an existing Boolean fact, so every strict cost improvement counts.
+// control=[status,rounds,updates,candidates]: 0 complete,1 invalid,
+// 2 arithmetic/counter overflow,3 round budget. On 2/3 state is partial
+// and queries unavailable. No Lean implementation proof/tractability claim.
+use ontology::trust_semiring::{TrustAnn,trust_ann,trust_unavailable}
+
+fn te_le(a:i64,b:i64)->bool { b == -1 || (a >= 0 && a <= b) }
+fn te_wf(s:i64,i:i64,a:i64)->bool {
+    s >= -1 && i >= -1 && a >= -1 && te_le(i,s) && te_le(a,i)
+}
+fn te_min(a:i64,b:i64)->i64 {
+    if a == -1 { return b }
+    if b == -1 { return a }
+    if a < b { a } else { b }
+}
+fn te_add(a:i64,b:i64)->i64 {
+    if a == -1 || b == -1 { return -1 }
+    if a > 9223372036854775807 - b { return -2 }
+    a+b
+}
+
+// All operands loaded before target writes: safe when target aliases a premise.
+// p2/p3=-1 denote multiplicative identity, not a missing premise.
+// Returns without counting if any actual premise is semiring zero.
+fn te_apply(state:&![i64;110808],control:&![i64;4],dst:i64,p1:i64,p2:i64,p3:i64)->i64 with Mut,Div,Panic {
+    if state[p1*3+2] == -1 { return 0 }
+    if p2 >= 0 { if state[p2*3+2] == -1 { return 0 } }
+    if p3 >= 0 { if state[p3*3+2] == -1 { return 0 } }
+    if control[3] == 9223372036854775807 { control[0]=2 return 2 }
+    control[3]=control[3]+1
+    // Rule cost makes the signed coordinate infinity; no finite signed sum
+    // is needed (and no spurious signed overflow is raised).
+    var i=state[p1*3+1]
+    var a=state[p1*3+2]
+    if p2 >= 0 {
+        i=te_add(i,state[p2*3+1])
+        a=te_add(a,state[p2*3+2])
+        if i == -2 || a == -2 { control[0]=2 return 2 }
+    }
+    if p3 >= 0 {
+        i=te_add(i,state[p3*3+1])
+        a=te_add(a,state[p3*3+2])
+        if i == -2 || a == -2 { control[0]=2 return 2 }
+    }
+    i=te_add(i,1)
+    a=te_add(a,1)
+    if i == -2 || a == -2 { control[0]=2 return 2 }
+    let ni=te_min(state[dst*3+1],i)
+    let na=te_min(state[dst*3+2],a)
+    if ni != state[dst*3+1] || na != state[dst*3+2] {
+        if control[2] == 9223372036854775807 { control[0]=2 return 2 }
+        state[dst*3+1]=ni
+        state[dst*3+2]=na
+        control[2]=control[2]+1
+    }
+    0
+}
+
+pub fn trust_elplus_seed(state:&![i64;110808],slot:i64,s:i64,i:i64,a:i64)->i64 with Mut,Div,Panic {
+    if slot < 0 || slot >= 36936 { return 1 }
+    if !te_wf(s,i,a) { return 1 }
+    // Validate current target too; failed seeds cannot repair malformed state.
+    if !te_wf(state[slot*3],state[slot*3+1],state[slot*3+2]) { return 1 }
+    let ns=te_min(state[slot*3],s)
+    let ni=te_min(state[slot*3+1],i)
+    let na=te_min(state[slot*3+2],a)
+    state[slot*3]=ns
+    state[slot*3+1]=ni
+    state[slot*3+2]=na
+    0
+}
+
+pub fn trust_elplus_init(state:&![i64;110808],nc:i64,top:i64,nr:i64)->i64 with Mut,Div,Panic {
+    if nc < 1 || nc > 64 || top < 0 || top >= nc || nr < 0 || nr > 8 { return 1 }
+    var j:i64=0
+    while j < 110808 { state[j]=-1 j=j+1 }
+    var c:i64=0
+    while c < nc {
+        var t:i64=0
+        while t < 3 {
+            state[(c*64+c)*3+t]=0
+            state[(c*64+top)*3+t]=0
+            t=t+1
+        }
+        c=c+1
+    }
+    var r:i64=0
+    while r < nr {
+        var t:i64=0
+        while t < 3 { state[(36864+r*8+r)*3+t]=0 t=t+1 }
+        r=r+1
+    }
+    0
+}
+
+fn te_preflight(state:&[i64;110808],pack:&[i64;704],chains:&[i64;24],dims:&[i64;4],max_rounds:i64)->bool with Div,Panic {
+    let nchain=dims[0]
+    let nc=dims[1]
+    let nb=dims[2]
+    let nr=dims[3]
+    if nchain < 0 || nchain > 8 || nc < 1 || nc > 64 || nb < 0 || nb > nc || nr < 0 || nr > 8 || max_rounds < 0 { return false }
+    var j:i64=0
+    while j < 36936 {
+        if !te_wf(state[j*3],state[j*3+1],state[j*3+2]) { return false }
+        j=j+1
+    }
+    j=0
+    while j < nc {
+        let kind=pack[j]
+        let a=pack[64+j]
+        let b=pack[128+j]
+        if kind < 0 || kind > 3 { return false }
+        if kind == 0 { if a < 0 { return false } }
+        if kind == 2 { if a < 0 || a >= nc || b < 0 || b >= nc { return false } }
+        if kind == 3 {
+            if a < 0 || a >= nr || b < 0 || b >= nb { return false }
+            if pack[192+a*64+b] != j { return false }
+        }
+        j=j+1
+    }
+    var r:i64=0
+    while r < nr {
+        var f:i64=0
+        while f < nb {
+            let e=pack[192+r*64+f]
+            if e < -1 || e >= nc { return false }
+            if e >= 0 {
+                if pack[e] != 3 || pack[64+e] != r || pack[128+e] != f { return false }
+            }
+            f=f+1
+        }
+        r=r+1
+    }
+    j=0
+    while j < nchain {
+        if chains[j] < 0 || chains[j] >= nr || chains[8+j] < 0 || chains[8+j] >= nr || chains[16+j] < 0 || chains[16+j] >= nr { return false }
+        j=j+1
+    }
+    true
+}
+
+pub fn trust_elplus_fixpoint(state:&![i64;110808],pack:&[i64;704],chains:&[i64;24],dims:&[i64;4],control:&![i64;4],max_rounds:i64)->i64 with Mut,Div,Panic {
+    control[0]=1
+    control[1]=0
+    control[2]=0
+    control[3]=0
+    if !te_preflight(state,pack,chains,dims,max_rounds) { return 1 }
+    control[0]=0
+    let nchain=dims[0]
+    let nc=dims[1]
+    let nb=dims[2]
+    let nr=dims[3]
+    var changed=true
+    while changed {
+        if control[1] == max_rounds { control[0]=3 return 3 }
+        control[1]=control[1]+1
+        let before=control[2]
+        // Role hierarchy transitivity, weighted premises and rule cost.
+        var r:i64=0
+        while r < nr {
+            var q:i64=0
+            while q < nr {
+                var t:i64=0
+                while t < nr {
+                    if te_apply(state,control,36864+r*8+t,36864+r*8+q,36864+q*8+t,-1) != 0 { return 2 }
+                    t=t+1
+                }
+                q=q+1
+            }
+            r=r+1
+        }
+        // T: subsumption transitivity.
+        var c:i64=0
+        while c < nc {
+            var k:i64=0
+            while k < nc {
+                var d:i64=0
+                while d < nc {
+                    if te_apply(state,control,c*64+d,c*64+k,k*64+d,-1) != 0 { return 2 }
+                    d=d+1
+                }
+                k=k+1
+            }
+            c=c+1
+        }
+        // CE/CI: the concept descriptor is structural, not a source fact.
+        c=0
+        while c < nc {
+            var d:i64=0
+            while d < nc {
+                if pack[d] == 2 {
+                    let a=pack[64+d]
+                    let b=pack[128+d]
+                    if te_apply(state,control,c*64+a,c*64+d,-1,-1) != 0 { return 2 }
+                    if te_apply(state,control,c*64+b,c*64+d,-1,-1) != 0 { return 2 }
+                    if te_apply(state,control,c*64+d,c*64+a,c*64+b,-1) != 0 { return 2 }
+                }
+                d=d+1
+            }
+            c=c+1
+        }
+        // S2R: existential subsumption to role edge.
+        c=0
+        while c < nc {
+            var d:i64=0
+            while d < nc {
+                if pack[d] == 3 {
+                    let rr=pack[64+d]
+                    let f=pack[128+d]
+                    if te_apply(state,control,4096+(rr*64+c)*64+f,c*64+d,-1,-1) != 0 { return 2 }
+                }
+                d=d+1
+            }
+            c=c+1
+        }
+        // RM: filler monotonicity, restricted to interned existentials.
+        r=0
+        while r < nr {
+            c=0
+            while c < nc {
+                var f:i64=0
+                while f < nb {
+                    var g:i64=0
+                    while g < nb {
+                        if pack[192+r*64+g] >= 0 {
+                            if te_apply(state,control,4096+(r*64+c)*64+g,4096+(r*64+c)*64+f,f*64+g,-1) != 0 { return 2 }
+                        }
+                        g=g+1
+                    }
+                    f=f+1
+                }
+                c=c+1
+            }
+            r=r+1
+        }
+        // RS: include the weighted role hierarchy premise.
+        r=0
+        while r < nr {
+            var q:i64=0
+            while q < nr {
+                c=0
+                while c < nc {
+                    var f:i64=0
+                    while f < nb {
+                        if pack[192+q*64+f] >= 0 {
+                            if te_apply(state,control,4096+(q*64+c)*64+f,4096+(r*64+c)*64+f,36864+r*8+q,-1) != 0 { return 2 }
+                        }
+                        f=f+1
+                    }
+                    c=c+1
+                }
+                q=q+1
+            }
+            r=r+1
+        }
+        // RC: include both edges AND chain annotation (three premises).
+        var k:i64=0
+        while k < nchain {
+            let r1=chains[k]
+            let r2=chains[8+k]
+            let r3=chains[16+k]
+            c=0
+            while c < nc {
+                var f:i64=0
+                while f < nb {
+                    var g:i64=0
+                    while g < nb {
+                        if pack[192+r3*64+g] >= 0 {
+                            if te_apply(state,control,4096+(r3*64+c)*64+g,4096+(r1*64+c)*64+f,4096+(r2*64+f)*64+g,36928+k) != 0 { return 2 }
+                        }
+                        g=g+1
+                    }
+                    f=f+1
+                }
+                c=c+1
+            }
+            k=k+1
+        }
+        // R2S: role edge back to interned existential subsumption.
+        r=0
+        while r < nr {
+            c=0
+            while c < nc {
+                var f:i64=0
+                while f < nb {
+                    let e=pack[192+r*64+f]
+                    if e >= 0 {
+                        if te_apply(state,control,c*64+e,4096+(r*64+c)*64+f,-1,-1) != 0 { return 2 }
+                    }
+                    f=f+1
+                }
+                c=c+1
+            }
+            r=r+1
+        }
+        changed=control[2] != before
+    }
+    0
+}
+
+pub fn trust_elplus_get(state:&[i64;110808],control:&[i64;4],slot:i64)->TrustAnn with Div,Panic {
+    if control[0] != 0 { return trust_unavailable(control[0]) }
+    if slot < 0 || slot >= 36936 { return trust_unavailable(1) }
+    trust_ann(state[slot*3],state[slot*3+1],state[slot*3+2])
+}
