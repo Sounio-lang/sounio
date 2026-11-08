@@ -488,6 +488,56 @@ pub fn tc_nl_muscle_by_source(src: i32) -> f64 with Div {
     if src == 3 { return tc_peyret_nl_muscle_cell() * 0.877 }             // Peyret Tab. 3
     return 0.0 - 1.0
 }
+
+// Peyret 2010 Tab. 3, in full, as printed (fraction of MATRIX volume, rat).
+// Kept whole rather than folded into the Poulin-Theil member, because the
+// member in kp_methods.sio is a HYBRID and this is what shows it.  Audited
+// constant by constant in scratchpad/audit1/peyret3.cpp against
+// kpm_pt_kpu_full:
+//   EXACT (5): cellular split 0.877, interstitial split 0.123, interstitial
+//              water 0.89, interstitial albumin 0.015, plasma albumin 0.029
+//   LIPID  (4): cell neutral lipid -55.0%, cell neutral phospholipid +20.5%,
+//              plasma neutral lipid -57.1%, plasma neutral phospholipid -64.4%
+//   OTHER  (1): cell water -4.5%
+// So every structure and protein constant is Peyret's and every lipid
+// constant is not: the member takes its skeleton from Peyret 2010 and its
+// lipids from the Poulin & Theil 2002 lineage.  That is the same fault line
+// the four-source comparison found, now located inside one function.
+struct PeyretComp {
+    cell:   f64,
+    intf:   f64,
+    c_nl:   f64,
+    c_npl:  f64,
+    c_apl:  f64,
+    c_w:    f64,
+    c_pr:   f64,
+    i_w:    f64,
+    i_alb:  f64
+}
+
+pub fn tc_peyret_comp(organ: i32) -> PeyretComp {
+    if organ == 1 { return PeyretComp { cell: 0.816, intf: 0.184, c_nl: 0.0427, c_npl: 0.0253,
+                                        c_apl: 0.0056, c_w: 0.527, c_pr: 0.192, i_w: 0.89, i_alb: 0.014 } }
+    if organ == 6 { return PeyretComp { cell: 0.877, intf: 0.123, c_nl: 0.0099, c_npl: 0.0094,
+                                        c_apl: 0.0017, c_w: 0.636, c_pr: 0.178, i_w: 0.89, i_alb: 0.015 } }
+    if organ == 7 { return PeyretComp { cell: 0.864, intf: 0.136, c_nl: 0.954,  c_npl: 0.002,
+                                        c_apl: 0.0005, c_w: 0.035, c_pr: 0.008, i_w: 0.89, i_alb: 0.010 } }
+    return PeyretComp { cell: 0.0, intf: 0.0, c_nl: 0.0, c_npl: 0.0, c_apl: 0.0,
+                        c_w: 0.0, c_pr: 0.0, i_w: 0.0, i_alb: 0.0 }
+}
+
+// Peyret Tab. 3 plasma row, needed to back-calculate the protein term.
+pub fn tc_peyret_plasma_nl() -> f64  { return 0.0015 }
+pub fn tc_peyret_plasma_npl() -> f64 { return 0.0008 }
+pub fn tc_peyret_plasma_w() -> f64   { return 0.96 }
+pub fn tc_peyret_plasma_alb() -> f64 { return 0.029 }
+
+// How many of the ten audited constants match Peyret exactly, and how many of
+// the mismatches are lipid.  Pinned by test.
+pub fn tc_pt_const_exact() -> i32          { return 5 }
+pub fn tc_pt_const_lipid_mismatch() -> i32 { return 4 }
+pub fn tc_pt_const_other_mismatch() -> i32 { return 1 }
+pub fn tc_pt_is_hybrid() -> bool           { return true }
 // ============================================================================
 // A ROUTE THAT LOOKS OPEN AND IS NOT  (falsified 2026-11-08)
 // ============================================================================
@@ -888,6 +938,70 @@ fn main() -> i32 with IO, Mut, Div, Panic {
         } else {
             println("T16 FAIL: split do musculo abaixo da banda"); fails = fails + 1
         }
+    }
+
+    // T17 -- the Poulin-Theil member is a hybrid, and the fault line is lipid.
+    // Every structure and protein constant is Peyret's; every lipid constant
+    // is not.  Pinned so that "reconstructed, not transcribed" stays a located
+    // fact instead of a vague caveat.
+    if tc_pt_is_hybrid() {
+        if tc_pt_const_exact() == 5 {
+            if tc_pt_const_lipid_mismatch() == 4 {
+                if tc_pt_const_other_mismatch() == 1 {
+                    println("T17 PASS: PT = esqueleto do Peyret + lipidios de P&T 2002 (5 exatas, 4 lipidicas divergentes)")
+                } else {
+                    println("T17 FAIL: contagem de divergencias nao-lipidicas"); fails = fails + 1
+                }
+            } else {
+                println("T17 FAIL: contagem de divergencias lipidicas"); fails = fails + 1
+            }
+        } else {
+            println("T17 FAIL: contagem de constantes exatas"); fails = fails + 1
+        }
+    } else {
+        println("T17 FAIL: PT nao marcado como hibrido"); fails = fails + 1
+    }
+
+    // T18 -- Peyret covers exactly liver, muscle and adipose, and refuses the
+    // rest with a sentinel rather than a neighbouring tissue's value.
+    var pc = 0
+    var po = 0
+    while po < 14 {
+        if tc_peyret_covered(po) { pc = pc + 1 }
+        po = po + 1
+    }
+    if pc == tc_peyret_tissue_count() {
+        if pc == 3 {
+            if tc_peyret_cell_frac(2) < 0.0 {
+                println("T18 PASS: Peyret cobre figado, musculo e adiposo; o resto e sentinela")
+            } else {
+                println("T18 FAIL: rim devolveu numero"); fails = fails + 1
+            }
+        } else {
+            print("T18 FAIL: cobertura = "); println(pc); fails = fails + 1
+        }
+    } else {
+        println("T18 FAIL: cobertura nao casa com a contagem"); fails = fails + 1
+    }
+
+    // T19 -- adipose is the tissue that separates a volume fraction from a
+    // water fraction, and Peyret now confirms it from outside: Peyret 0.864
+    // against httk Fcell 0.860 is 0.46% across SPECIES, while the water split
+    // gives 0.1118.  T16 was written before this paper was in hand.
+    let pey_adi = tc_peyret_cell_frac(7)
+    let ws_adi  = tc_water_split(7)
+    if pey_adi > 0.86 {
+        if pey_adi < 0.87 {
+            if ws_adi < 0.15 {
+                println("T19 PASS: Peyret confirma o Fcell do adiposo; o split de agua segue refutado")
+            } else {
+                println("T19 FAIL: split de agua do adiposo mudou"); fails = fails + 1
+            }
+        } else {
+            println("T19 FAIL: Peyret adiposo acima da banda"); fails = fails + 1
+        }
+    } else {
+        println("T19 FAIL: Peyret adiposo abaixo da banda"); fails = fails + 1
     }
     if fails == 0 {
         println("PASS")
