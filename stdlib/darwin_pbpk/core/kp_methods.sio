@@ -1,6 +1,8 @@
 //@ run-pass
 //@ expect-stdout: PASS
 
+use darwin_pbpk::core::tissue_composition::{tc_pey_cell, tc_pey_intf, tc_pey_cnl, tc_pey_cnpl, tc_pey_cw, tc_pey_iw, tc_pey_ialb, tc_pey_pt_supported, tc_pey_pt_count, tc_peyret_plasma_nl, tc_peyret_plasma_npl, tc_peyret_plasma_alb}
+
 // stdlib/darwin_pbpk/core/kp_methods.sio
 // ----------------------------------------------------------------------------
 // PBPK28 core module: the three published tissue:plasma partition (Kp)
@@ -908,6 +910,55 @@ pub fn kpm_drug_peptide() -> KpInputs {
 // dispersion into a standard uncertainty; it bounds what a dispersion registers.
 
 
+// ============================================================================
+// MEMBER 3b -- Poulin-Theil on PEYRET'S OWN NUMBERS  (added 2026-11-08)
+// ============================================================================
+// Same equation form as kpm_pt_kpu_full -- Poulin-Theil, so no acidic
+// phospholipid term -- with every composition constant taken from Peyret 2010
+// Tab. 2 and Tab. 3 instead of the Poulin & Theil 2002 lipid values the
+// hybrid member uses.  The point is a controlled comparison: ONE equation,
+// TWO tables, so whatever separates the two members is source and not form.
+//
+// The hybrid member (kpm_poulin_theil) is kept untouched.  It is what the
+// existing figures correspond to, and it is not oracle-validated either way
+// (kpm_pt_oracle_validated() is false), so neither member is certified and
+// silently replacing one with the other would hide that.
+//
+// COVERAGE IS TWO ORGANS, NOT THREE.  Peyret carries adipose, but the
+// Poulin-Theil form needs a VEGETABLE OIL:water partition coefficient there
+// rather than n-octanol:water, and no sourced correlation for it exists in
+// this repository -- the note at the top of this file mentions one and does
+// not implement it.  Supplying it from memory is precisely what this module
+// refuses to do, so adipose is out until that correlation is read.
+fn kpm_pt_peyret_core(d: KpInputs, organ: i32, ph_c: f64) -> f64 with Mut, Div, Panic {
+    let pow_v = kpm_pow10(d.log_p)
+    let im = if d.is_base { kpm_pow10(d.pka - ph_c) } else { 0.0 }
+    let iw = if d.is_base { kpm_pow10(d.pka - kpm_ph_plasma()) } else { 0.0 }
+
+    // Cells: Fwm = water + 0.70*neutral phospholipid,
+    //        Fnlm = neutral lipid + 0.30*neutral phospholipid  (Peyret Eq. 2)
+    let fwm  = tc_pey_cw(organ)  + 0.70 * tc_pey_cnpl(organ)
+    let fnlm = tc_pey_cnl(organ) + 0.30 * tc_pey_cnpl(organ)
+    let pcw = ((1.0 + im) * fwm + pow_v * fnlm) / (1.0 + iw)
+
+    // Interstitium: water plus albumin, the protein term back-calculated from
+    // fu_p against Peyret's own plasma row rather than the hybrid's.
+    let fnlp = tc_peyret_plasma_nl() + 0.30 * tc_peyret_plasma_npl()
+    var pprw = (1.0 / d.fu_p - 1.0 - pow_v * fnlp / (1.0 + iw)) / tc_peyret_plasma_alb()
+    if pprw < 0.0 { pprw = 0.0 }
+    let piw = tc_pey_iw(organ) + pprw * tc_pey_ialb(organ)
+
+    return pcw * tc_pey_cell(organ) + piw * tc_pey_intf(organ)
+}
+
+// in_domain carries BOTH gates: Poulin-Theil's own declared domain (which
+// already refuses strong bases at pKa >= 7.0) and the two-organ coverage.
+pub fn kpm_pt_peyret_organ(d: KpInputs, organ: i32) -> KpMember with Mut, Div, Panic {
+    let ok = if tc_pey_pt_supported(organ) { kpm_pt_in_domain(d) } else { false }
+    return KpMember { kpu: kpm_pt_peyret_core(d, organ, kpm_ph_cell_pt()),
+                      in_domain: ok, calibrated: false, code: 3 }
+}
+
 // Ensemble over an organ.  Only Schmitt has sourced per-organ composition
 // today, and its two members sit in DIFFERENT calibration classes, so each
 // homogeneous sub-ensemble is a singleton and this refuses with code 2 for
@@ -930,6 +981,11 @@ pub fn kpm_ensemble_organ(d: KpInputs, organ: i32, want_calibrated: bool) -> KpE
     }
     let m1 = kpm_schmitt_raw_organ(d, organ)
     let m2 = kpm_schmitt_pearce_organ(d, organ)
+    // Member 3b closes the singleton: Schmitt raw and Poulin-Theil-on-Peyret
+    // are both UNCALIBRATED, so the uncalibrated sub-ensemble reaches two
+    // members wherever Peyret covers the organ and the drug is inside
+    // Poulin-Theil's domain.  Today that is liver and muscle.
+    let m3 = kpm_pt_peyret_organ(d, organ)
 
     var n = 0
     var s = 0.0
@@ -939,6 +995,14 @@ pub fn kpm_ensemble_organ(d: KpInputs, organ: i32, want_calibrated: bool) -> KpE
     }
     if m2.calibrated == want_calibrated {
         if m2.in_domain { n = n + 1; s = s + ln(m2.kpu) } else { any_out = true }
+    }
+    // An organ Peyret does not cover is not an out-of-domain MODELLING error
+    // for the ensemble as a whole -- it is simply a member that does not
+    // exist there -- so it is skipped rather than counted as any_out.
+    if m3.calibrated == want_calibrated {
+        if tc_pey_pt_supported(organ) {
+            if m3.in_domain { n = n + 1; s = s + ln(m3.kpu) } else { any_out = true }
+        }
     }
     if any_out {
         return KpEnsemble { dispersion: 0.0, n_admitted: n, valid: false, refusal: 1 }
@@ -950,6 +1014,9 @@ pub fn kpm_ensemble_organ(d: KpInputs, organ: i32, want_calibrated: bool) -> KpE
     var ss = 0.0
     if m1.calibrated == want_calibrated { if m1.in_domain { let e = ln(m1.kpu) - mu; ss = ss + e * e } }
     if m2.calibrated == want_calibrated { if m2.in_domain { let e = ln(m2.kpu) - mu; ss = ss + e * e } }
+    if m3.calibrated == want_calibrated {
+        if tc_pey_pt_supported(organ) { if m3.in_domain { let e = ln(m3.kpu) - mu; ss = ss + e * e } }
+    }
     let u = kpm_sqrt(ss / ((n - 1) as f64))
     return KpEnsemble { dispersion: u, n_admitted: n, valid: true, refusal: 0 }
 }
@@ -1505,10 +1572,13 @@ fn main() -> i32 with IO, Mut, Div, Panic {
         print("T16 FAIL: orgaos verificados = "); println(checked); fails = fails + 1
     }
 
-    // T17 -- the ensemble refuses in all ten organs, with code 2, and the
-    // refusal is NOT a zero dispersion.  This is the measured state of the
-    // extension: ten organs of sourced composition, zero usable ensembles,
-    // because only one method has per-organ composition.
+    // T17 -- UPDATED 2026-11-08.  Until member 3b existed this asserted ten
+    // organs and ten refusals, because only Schmitt had per-organ
+    // composition and its two members sit in different calibration classes.
+    // Poulin-Theil-on-Peyret closes the singleton in the two organs Peyret
+    // covers, so the count is now eight refusals and two valid.  The old
+    // assertion failed the moment the member was wired in, which is the test
+    // doing its job rather than a regression.
     var refused = 0
     var wrong_code = 0
     var ok_organs = 0
@@ -1526,11 +1596,11 @@ fn main() -> i32 with IO, Mut, Div, Panic {
         ok = ok + 1
     }
     if ok_organs == 10 {
-        if refused == 10 {
-            if wrong_code == 0 {
-                println("T17 PASS: 10 orgaos, 10 recusas codigo 2 -- so o Schmitt tem composicao por orgao")
+        if refused == 8 {
+            if wrong_code == 2 {
+                println("T17 PASS: 8 recusas codigo 2 e 2 validos -- PT-Peyret fechou o singleton")
             } else {
-                println("T17 FAIL: codigo de recusa inesperado"); fails = fails + 1
+                print("T17 FAIL: validos = "); println(wrong_code); fails = fails + 1
             }
         } else {
             print("T17 FAIL: recusas = "); println(refused); fails = fails + 1
@@ -1552,6 +1622,84 @@ fn main() -> i32 with IO, Mut, Div, Panic {
         }
     } else {
         println("T18 FAIL: osso com codigo errado"); fails = fails + 1
+    }
+
+    // T19 -- PT-on-Peyret: coverage is two organs, and adipose is refused for
+    // the vegetable-oil:water correlation rather than for missing composition.
+    // Peyret HAS adipose; the repository has no sourced Pvo:w.
+    var pn = 0
+    var pq = 0
+    while pq < 14 {
+        if tc_pey_pt_supported(pq) { pn = pn + 1 }
+        pq = pq + 1
+    }
+    if pn == tc_pey_pt_count() {
+        if pn == 2 {
+            if tc_pey_pt_supported(7) {
+                println("T19 FAIL: adiposo admitido sem correlacao oleo vegetal:agua"); fails = fails + 1
+            } else {
+                println("T19 PASS: PT-Peyret cobre figado e musculo; adiposo recusado por falta de Pvo:w")
+            }
+        } else {
+            print("T19 FAIL: cobertura PT-Peyret = "); println(pn); fails = fails + 1
+        }
+    } else {
+        println("T19 FAIL: contagem PT-Peyret inconsistente"); fails = fails + 1
+    }
+
+    // T20 -- ONE equation, TWO tables.  The hybrid and the pure-Peyret member
+    // differ on muscle, and the difference is source, not form: the equation
+    // is identical and only the composition constants change.  Peyret's cell
+    // neutral lipid is 55% lower, so for a lipophilic base the Peyret member
+    // must come out BELOW the hybrid.
+    let t20_mid = KpInputs { log_p: 3.00, log_ma: 2.9, has_ma: true, pka: 6.01,
+                             is_base: true, fu_p: 0.032, rb: 1.00, mw: 325.77 }
+    let hyb = kpm_poulin_theil(t20_mid)
+    let pey = kpm_pt_peyret_organ(t20_mid, 6)
+    if kpm_member_in_domain(hyb) {
+        if kpm_member_in_domain(pey) {
+            if kpm_member_kpu(pey) < kpm_member_kpu(hyb) {
+                println("T20 PASS: mesma equacao, duas tabelas -- Peyret abaixo do hibrido no musculo")
+            } else {
+                println("T20 FAIL: Peyret nao ficou abaixo do hibrido"); fails = fails + 1
+            }
+        } else {
+            println("T20 FAIL: membro Peyret fora de dominio no musculo"); fails = fails + 1
+        }
+    } else {
+        println("T20 FAIL: membro hibrido fora de dominio"); fails = fails + 1
+    }
+
+    // T21 -- THE ENSEMBLE FINALLY VALIDATES, and only where it should.  With
+    // Schmitt raw and PT-on-Peyret both uncalibrated, the uncalibrated
+    // sub-ensemble reaches two members in liver and muscle.  Everywhere else
+    // it still refuses with code 2.  This is the first configuration in this
+    // module whose dispersion measures model form rather than source
+    // disagreement: both members read one composition table each, and neither
+    // is a hybrid.
+    let e_liv = kpm_ensemble_organ(t20_mid, 1, false)
+    let e_mus = kpm_ensemble_organ(t20_mid, 6, false)
+    let e_kid = kpm_ensemble_organ(t20_mid, 2, false)
+    if kpm_ens_valid(e_liv) {
+        if kpm_ens_valid(e_mus) {
+            if kpm_ens_n(e_mus) == 2 {
+                if kpm_ens_valid(e_kid) {
+                    println("T21 FAIL: rim validou sem membro Peyret"); fails = fails + 1
+                } else {
+                    if kpm_ens_refusal(e_kid) == 2 {
+                        println("T21 PASS: ensemble valido em figado e musculo (n=2); recusa 2 nos demais")
+                    } else {
+                        println("T21 FAIL: codigo de recusa errado no rim"); fails = fails + 1
+                    }
+                }
+            } else {
+                print("T21 FAIL: n no musculo = "); println(kpm_ens_n(e_mus)); fails = fails + 1
+            }
+        } else {
+            println("T21 FAIL: musculo nao validou"); fails = fails + 1
+        }
+    } else {
+        println("T21 FAIL: figado nao validou"); fails = fails + 1
     }
     if fails == 0 {
         println("PASS")
