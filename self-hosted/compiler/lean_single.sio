@@ -8665,6 +8665,81 @@ fn mono_infer_from_nth_arg(gi: i64, call_arg_start: i64) -> i64 with Panic, Mut 
 }
 
 // ─── Lexer ───
+// ADR-015 row 12: documentation comments are recorded in a side table, in source order,
+// with the index of the token that follows each one. Only the main file counts (imports and
+// the native prelude follow it in SRC). The token stream is unchanged. DOC_KIND: 1 outer line
+// (`///`), 2 inner line (`//!`), 3 outer block (`/** */`), 4 inner block (`/*! */`).
+var DOC_COUNT: i64 = 0
+var DOC_OVERFLOW: i64 = 0
+var DOC_KIND: [i64; 65536] = [0; 65536]
+var DOC_TEXT_START: [i64; 65536] = [0; 65536]
+var DOC_TEXT_END: [i64; 65536] = [0; 65536]
+var DOC_LINE: [i64; 65536] = [0; 65536]
+var DOC_NEXT_TOK: [i64; 65536] = [0; 65536]
+var CLI_EMIT_DOCS: i64 = 0
+
+fn lex_doc_begin(kind: i64, text_start: i64, line: i64) -> i64 with Mut, Panic {
+    if DOC_COUNT >= 65536 {
+        DOC_OVERFLOW = 1
+        return 0 - 1
+    }
+    let i = DOC_COUNT
+    DOC_KIND[i as usize] = kind
+    DOC_TEXT_START[i as usize] = text_start
+    DOC_TEXT_END[i as usize] = text_start
+    DOC_LINE[i as usize] = line
+    DOC_NEXT_TOK[i as usize] = TC
+    DOC_COUNT = i + 1
+    return i
+}
+
+fn lex_doc_print_range(from: i64, to: i64, max: i64) with IO, Mut, Panic {
+    var i: i64 = from
+    var printed: i64 = 0
+    while i < to && printed < max {
+        let c = sb(i)
+        if c == 10 {
+            print("\\n")
+        } else if c != 13 {
+            print_char(c)
+        }
+        printed = printed + 1
+        i = i + 1
+    }
+}
+
+// One line per documentation comment, the same format as `madaros --emit-docs`:
+//   DOC <kind> line=<L> next_line=<NL> next=<first token of the item> text=<text>
+fn lex_print_docs() with IO, Mut, Panic {
+    var eof_line: i64 = 1
+    var q: i64 = 0
+    while q < MAIN_SRC_END { if sb(q) == 10 { eof_line = eof_line + 1 }  q = q + 1 }
+    var i: i64 = 0
+    while i < DOC_COUNT {
+        let k = DOC_KIND[i as usize]
+        print("DOC ")
+        if k == 1 { print("outer-line") }
+        else if k == 2 { print("inner-line") }
+        else if k == 3 { print("outer-block") }
+        else { print("inner-block") }
+        print(" line=")
+        print_int(DOC_LINE[i as usize])
+        let nt = DOC_NEXT_TOK[i as usize]
+        let has_next = nt < TC && TS[nt as usize] < MAIN_SRC_END && TE[nt as usize] > TS[nt as usize]
+        print(" next_line=")
+        if has_next { print_int(TL[nt as usize]) } else { print_int(eof_line) }
+        print(" next=")
+        if has_next { lex_doc_print_range(TS[nt as usize], TE[nt as usize], 40) } else { print("<eof>") }
+        print(" text=")
+        lex_doc_print_range(DOC_TEXT_START[i as usize], DOC_TEXT_END[i as usize], 4096)
+        print("\n")
+        i = i + 1
+    }
+    if DOC_OVERFLOW == 1 {
+        print("DOC-OVERFLOW the table holds 65536 documentation comments; the rest are not listed\n")
+    }
+}
+
 var LEX_UTF8_LEN: i64 = 0
 
 // Scalar value of the UTF-8 sequence at pos, or -1 when it is malformed (bad lead or
@@ -8696,6 +8771,8 @@ fn lex_utf8_scalar(pos: i64) -> i64 with Mut, Panic {
 
 fn lex_all() with IO, Mut, Panic, Div {
     TC = 0
+    DOC_COUNT = 0
+    DOC_OVERFLOW = 0
     LEX_ERROR_LINE = 0
     LEX_ERROR_KIND = 0
     LEX_ERROR_COL = 0
@@ -8715,9 +8792,48 @@ fn lex_all() with IO, Mut, Panic, Div {
             continue
         }
         if c == 2 || c == 32 || c == 9 || c == 13 || c == 10 { if c == 10 { cur_line = cur_line + 1 }; p = p + 1; continue }
-        // Line comment
+        // Line comment (`///` not `////`, and `//!`, are documentation comments)
         if c == 47 && p + 1 < SRC_LEN && sb(p + 1) == 47 {
-            p = p + 2; while p < SRC_LEN && sb(p) != 10 { p = p + 1 }; continue
+            var ldoc: i64 = 0 - 1
+            if p < MAIN_SRC_END && p + 2 < SRC_LEN {
+                let l2 = sb(p + 2)
+                let l3 = if p + 3 < SRC_LEN { sb(p + 3) } else { 0 }
+                if l2 == 47 && l3 != 47 { ldoc = lex_doc_begin(1, p + 3, cur_line) }
+                else if l2 == 33 { ldoc = lex_doc_begin(2, p + 3, cur_line) }
+            }
+            p = p + 2; while p < SRC_LEN && sb(p) != 10 { p = p + 1 }
+            if ldoc >= 0 { DOC_TEXT_END[ldoc as usize] = p }
+            continue
+        }
+        // Block comment, nestable (as in Madaros). `/**` (not `/**/`, `/***`) and `/*!` are
+        // documentation comments. An unterminated one is refused (E272).
+        if c == 47 && p + 1 < SRC_LEN && sb(p + 1) == 42 {
+            let bc_line = cur_line
+            var bdoc: i64 = 0 - 1
+            if p < MAIN_SRC_END && p + 2 < SRC_LEN {
+                let b2 = sb(p + 2)
+                let b3 = if p + 3 < SRC_LEN { sb(p + 3) } else { 0 }
+                if b2 == 42 && b3 != 42 && b3 != 47 { bdoc = lex_doc_begin(3, p + 3, cur_line) }
+                else if b2 == 33 { bdoc = lex_doc_begin(4, p + 3, cur_line) }
+            }
+            p = p + 2
+            var bdepth: i64 = 1
+            while p < SRC_LEN && bdepth > 0 && sb(p) != 1 {
+                let b0 = sb(p)
+                let b1 = if p + 1 < SRC_LEN { sb(p + 1) } else { 0 }
+                if b0 == 47 && b1 == 42 { bdepth = bdepth + 1  p = p + 2 }
+                else if b0 == 42 && b1 == 47 { bdepth = bdepth - 1  p = p + 2 }
+                else {
+                    if b0 == 10 { cur_line = cur_line + 1 }
+                    p = p + 1
+                }
+            }
+            if bdoc >= 0 { if bdepth == 0 { DOC_TEXT_END[bdoc as usize] = p - 2 } else { DOC_TEXT_END[bdoc as usize] = p } }
+            if bdepth > 0 && LEX_ERROR_LINE == 0 {
+                LEX_ERROR_LINE = bc_line
+                LEX_ERROR_KIND = 8
+            }
+            continue
         }
         // String literal
         if c == 34 {
@@ -52964,12 +53080,14 @@ fn main() -> i64 with IO, Mut, Panic, Div {
     CLI_EMIT_ECONF = 0
     CLI_LOAD_ECONF = 0
     CLI_EMIT_PROOFS = 0
+    CLI_EMIT_DOCS = 0
     PROOF_BUF_LEN = 0
     ECONF_RAW_LEN = 0
     ECONF_APPLIED = 0
     var arg_i: i64 = 2
     while arg_i < argc {
         let flag = get_arg(arg_i)
+        if cli_arg_eq(flag, "--emit-docs") { CLI_EMIT_DOCS = 1 }
         if cli_arg_eq(flag, "--show-ast") {
             CLI_SHOW_AST = 1
         } else {
@@ -53075,6 +53193,13 @@ fn main() -> i64 with IO, Mut, Panic, Div {
             print("\n")
             return 1
         }
+        if LEX_ERROR_KIND == 8 {
+            // Same code and wording as Madaros E272.
+            print("error[E272]: unterminated block comment at line ")
+            print_int(LEX_ERROR_LINE)
+            print("\n")
+            return 1
+        }
         if LEX_ERROR_KIND == 7 {
             print("error[E274]: invalid escape sequence in character literal at line ")
             print_int(LEX_ERROR_LINE)
@@ -53096,6 +53221,10 @@ fn main() -> i64 with IO, Mut, Panic, Div {
             print("Unexpected character\n")
         }
         return 1
+    }
+    if CLI_EMIT_DOCS == 1 {
+        lex_print_docs()
+        return 0
     }
     // Collect `causal graph` blocks and remove them from the token stream before
     // any pass runs, so an independence claim can be discharged regardless of
