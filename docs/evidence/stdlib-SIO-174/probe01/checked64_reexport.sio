@@ -1,0 +1,228 @@
+// Transitional bounded generic ODE kernels; see CHECKED_SOLVERS.md.
+use math::pure::{is_finite,ln_checked,exp}
+use ode::solver::{ODEOptions}
+pub use ode::checked_dp54::{Ode64Result}
+pub struct Verlet64Result {
+ pub status:i64,pub n:i64,pub t_final:f64,pub steps:i64,pub nfeval:i64,
+ pub position:[f64;64],pub velocity:[f64;64],
+}
+fn od_abs(x:f64)->f64 {if x<0.0 {-x} else {x}}
+fn od_min(a:f64,b:f64)->f64 {if a<b {a} else {b}}
+fn od_max(a:f64,b:f64)->f64 {if a>b {a} else {b}}
+fn od_finite(a:&[f64;64],n:i64)->bool with Panic {
+ var i:i64=0
+ while i<n {if !is_finite(a[i as usize]) {return false};i=i+1}
+ true
+}
+fn od_poison(a:&![f64;64],n:i64) with Mut,Div,Panic {
+ var i:i64=0
+ while i<n {a[i as usize]=0.0/0.0;i=i+1}
+}
+fn od_empty(n:i64)->Ode64Result {
+ Ode64Result{status:3,n:n,t_final:0.0,steps:0,attempts:0,nfeval:0,nreject:0,state:[0.0;64]}
+}
+fn od_options(o:ODEOptions)->bool {
+ is_finite(o.rtol) && o.rtol>=0.0 && is_finite(o.atol) && o.atol>0.0 &&
+ is_finite(o.dt_init) && o.dt_init>=0.0 && is_finite(o.dt_min) && o.dt_min>0.0 &&
+ is_finite(o.dt_max) && o.dt_max>=o.dt_min && o.max_steps>=1 && o.max_steps<=1000000 &&
+ is_finite(o.safety) && o.safety>0.0 && o.safety<1.0 &&
+ is_finite(o.min_shrink) && o.min_shrink>0.0 && o.min_shrink<1.0 &&
+ is_finite(o.max_growth) && o.max_growth>=1.0
+}
+// Standard Dormand-Prince 5(4), max weighted component error, no dense output.
+// All active callback destinations are poisoned first: incomplete writes fail4.
+pub fn solve_dp54_64(
+ rhs:fn(f64,&[f64;64],&![f64;64])->() with Mut,Div,Panic,
+ y0:&[f64;64],n:i64,t0:f64,t_end:f64,opts:ODEOptions
+)->Ode64Result with Mut,Div,Panic {
+ var out=od_empty(n)
+ if n<1 || n>64 || !is_finite(t0) || !is_finite(t_end) || !od_options(opts) {return out}
+ if !od_finite(y0,n) {return out}
+ out.t_final=t0
+ var i:i64=0
+ while i<n {out.state[i as usize]=y0[i as usize];i=i+1}
+ if t0==t_end {out.status=0;return out}
+ let span=t_end-t0
+ if !is_finite(span) {out.status=4;return out}
+ let direction=if span>0.0 {1.0} else {-1.0}
+ var step=opts.dt_init
+ if step==0.0 {step=od_abs(span)*0.01}
+ step=od_max(opts.dt_min,od_min(opts.dt_max,step))
+ var k1:[f64;64]=[0.0;64]
+ var k2:[f64;64]=[0.0;64]
+ var k3:[f64;64]=[0.0;64]
+ var k4:[f64;64]=[0.0;64]
+ var k5:[f64;64]=[0.0;64]
+ var k6:[f64;64]=[0.0;64]
+ var k7:[f64;64]=[0.0;64]
+ var trial:[f64;64]=[0.0;64]
+ while out.t_final!=t_end && out.attempts<opts.max_steps {
+  let remaining=od_abs(t_end-out.t_final)
+  let magnitude=od_min(step,remaining)
+  let h=direction*magnitude
+  let next=if magnitude==remaining {t_end} else {out.t_final+h}
+  if !is_finite(next) || !is_finite(h) {out.status=4;return out}
+  if (direction>0.0 && next<=out.t_final) || (direction<0.0 && next>=out.t_final) {out.status=2;return out}
+  out.attempts=out.attempts+1
+  od_poison(&!k1,n)
+  rhs(out.t_final,&out.state,&!k1)
+  out.nfeval=out.nfeval+1
+  if !od_finite(&k1,n) {out.status=4;return out}
+  i=0
+  while i<n {
+   trial[i as usize]=out.state[i as usize]+h*((1.0/5.0)*k1[i as usize])
+   i=i+1
+  }
+  let time_k2=if 1.0/5.0==1.0 {next} else {out.t_final+(1.0/5.0)*h}
+  if !is_finite(time_k2) || !od_finite(&trial,n) {out.status=4;return out}
+  od_poison(&!k2,n)
+  rhs(time_k2,&trial,&!k2)
+  out.nfeval=out.nfeval+1
+  if !od_finite(&k2,n) {out.status=4;return out}
+  i=0
+  while i<n {
+   trial[i as usize]=out.state[i as usize]+h*((3.0/40.0)*k1[i as usize]+(9.0/40.0)*k2[i as usize])
+   i=i+1
+  }
+  let time_k3=if 3.0/10.0==1.0 {next} else {out.t_final+(3.0/10.0)*h}
+  if !is_finite(time_k3) || !od_finite(&trial,n) {out.status=4;return out}
+  od_poison(&!k3,n)
+  rhs(time_k3,&trial,&!k3)
+  out.nfeval=out.nfeval+1
+  if !od_finite(&k3,n) {out.status=4;return out}
+  i=0
+  while i<n {
+   trial[i as usize]=out.state[i as usize]+h*((44.0/45.0)*k1[i as usize]+(-56.0/15.0)*k2[i as usize]+(32.0/9.0)*k3[i as usize])
+   i=i+1
+  }
+  let time_k4=if 4.0/5.0==1.0 {next} else {out.t_final+(4.0/5.0)*h}
+  if !is_finite(time_k4) || !od_finite(&trial,n) {out.status=4;return out}
+  od_poison(&!k4,n)
+  rhs(time_k4,&trial,&!k4)
+  out.nfeval=out.nfeval+1
+  if !od_finite(&k4,n) {out.status=4;return out}
+  i=0
+  while i<n {
+   trial[i as usize]=out.state[i as usize]+h*((19372.0/6561.0)*k1[i as usize]+(-25360.0/2187.0)*k2[i as usize]+(64448.0/6561.0)*k3[i as usize]+(-212.0/729.0)*k4[i as usize])
+   i=i+1
+  }
+  let time_k5=if 8.0/9.0==1.0 {next} else {out.t_final+(8.0/9.0)*h}
+  if !is_finite(time_k5) || !od_finite(&trial,n) {out.status=4;return out}
+  od_poison(&!k5,n)
+  rhs(time_k5,&trial,&!k5)
+  out.nfeval=out.nfeval+1
+  if !od_finite(&k5,n) {out.status=4;return out}
+  i=0
+  while i<n {
+   trial[i as usize]=out.state[i as usize]+h*((9017.0/3168.0)*k1[i as usize]+(-355.0/33.0)*k2[i as usize]+(46732.0/5247.0)*k3[i as usize]+(49.0/176.0)*k4[i as usize]+(-5103.0/18656.0)*k5[i as usize])
+   i=i+1
+  }
+  let time_k6=if 1.0==1.0 {next} else {out.t_final+(1.0)*h}
+  if !is_finite(time_k6) || !od_finite(&trial,n) {out.status=4;return out}
+  od_poison(&!k6,n)
+  rhs(time_k6,&trial,&!k6)
+  out.nfeval=out.nfeval+1
+  if !od_finite(&k6,n) {out.status=4;return out}
+  i=0
+  while i<n {
+   trial[i as usize]=out.state[i as usize]+h*((35.0/384.0)*k1[i as usize]+(500.0/1113.0)*k3[i as usize]+(125.0/192.0)*k4[i as usize]+(-2187.0/6784.0)*k5[i as usize]+(11.0/84.0)*k6[i as usize])
+   i=i+1
+  }
+  let time_k7=if 1.0==1.0 {next} else {out.t_final+(1.0)*h}
+  if !is_finite(time_k7) || !od_finite(&trial,n) {out.status=4;return out}
+  od_poison(&!k7,n)
+  rhs(time_k7,&trial,&!k7)
+  out.nfeval=out.nfeval+1
+  if !od_finite(&k7,n) {out.status=4;return out}
+  var error:f64=0.0
+  i=0
+  while i<n {
+   let defect=h*((71.0/57600.0)*k1[i as usize]-(71.0/16695.0)*k3[i as usize]+
+    (71.0/1920.0)*k4[i as usize]-(17253.0/339200.0)*k5[i as usize]+
+    (22.0/525.0)*k6[i as usize]-(1.0/40.0)*k7[i as usize])
+   let denominator=opts.atol+opts.rtol*od_max(od_abs(out.state[i as usize]),od_abs(trial[i as usize]))
+   if !is_finite(defect) || !is_finite(denominator) || denominator<=0.0 {out.status=4;return out}
+   let normalized=od_abs(defect)/denominator
+   if !is_finite(normalized) {out.status=4;return out}
+   if normalized>error {error=normalized}
+   i=i+1
+  }
+  var factor=opts.max_growth
+  if error>0.0 {
+   let logged=ln_checked(error)
+   if logged.status!=0 {out.status=4;return out}
+   factor=opts.safety*exp(-0.2*logged.value)
+  }
+  if !is_finite(factor) || factor<=0.0 {out.status=4;return out}
+  factor=od_max(opts.min_shrink,od_min(opts.max_growth,factor))
+  if error<=1.0 {
+   i=0
+   while i<n {out.state[i as usize]=trial[i as usize];i=i+1}
+   out.t_final=next;out.steps=out.steps+1
+  } else {
+   out.nreject=out.nreject+1
+   factor=od_min(0.9,factor)
+   if magnitude<=opts.dt_min {out.status=2;return out}
+  }
+  let scaled=magnitude*factor
+  if !is_finite(scaled) {step=opts.dt_max} else {step=od_max(opts.dt_min,od_min(opts.dt_max,scaled))}
+  if error>1.0 && step>=magnitude {out.status=2;return out}
+ }
+ if out.t_final!=t_end {out.status=1;return out}
+ out.status=0
+ out
+}
+// Velocity Verlet for q''=acceleration(t,q). Velocity-dependent forces excluded.
+pub fn solve_verlet64(
+ acceleration:fn(f64,&[f64;64],&![f64;64])->() with Mut,Div,Panic,
+ q0:&[f64;64],v0:&[f64;64],n:i64,t0:f64,t_end:f64,n_steps:i64
+)->Verlet64Result with Mut,Div,Panic {
+ var out=Verlet64Result{status:3,n:n,t_final:0.0,steps:0,nfeval:0,position:[0.0;64],velocity:[0.0;64]}
+ if n<1 || n>64 || n_steps<1 || n_steps>1000000 || !is_finite(t0) || !is_finite(t_end) {return out}
+ if !od_finite(q0,n) || !od_finite(v0,n) {return out}
+ out.t_final=t0
+ var i:i64=0
+ while i<n {out.position[i as usize]=q0[i as usize];out.velocity[i as usize]=v0[i as usize];i=i+1}
+ if t0==t_end {out.status=0;return out}
+ let span=t_end-t0
+ if !is_finite(span) {out.status=4;return out}
+ var a0:[f64;64]=[0.0;64]
+ var a1:[f64;64]=[0.0;64]
+ var trial_q:[f64;64]=[0.0;64]
+ var half_v:[f64;64]=[0.0;64]
+ var trial_v:[f64;64]=[0.0;64]
+ od_poison(&!a0,n)
+ acceleration(t0,&out.position,&!a0)
+ out.nfeval=1
+ if !od_finite(&a0,n) {out.status=4;return out}
+ while out.steps<n_steps {
+  let next=if out.steps+1==n_steps {t_end} else {t0+span*(((out.steps+1) as f64)/(n_steps as f64))}
+  let h=next-out.t_final
+  if !is_finite(next) || !is_finite(h) {out.status=4;return out}
+  if (span>0.0 && next<=out.t_final) || (span<0.0 && next>=out.t_final) {out.status=2;return out}
+  i=0
+  while i<n {
+   half_v[i as usize]=out.velocity[i as usize]+(0.5*h)*a0[i as usize]
+   trial_q[i as usize]=out.position[i as usize]+h*half_v[i as usize]
+   i=i+1
+  }
+  if !od_finite(&half_v,n) || !od_finite(&trial_q,n) {out.status=4;return out}
+  od_poison(&!a1,n)
+  acceleration(next,&trial_q,&!a1)
+  out.nfeval=out.nfeval+1
+  if !od_finite(&a1,n) {out.status=4;return out}
+  i=0
+  while i<n {trial_v[i as usize]=half_v[i as usize]+(0.5*h)*a1[i as usize];i=i+1}
+  if !od_finite(&trial_v,n) {out.status=4;return out}
+  i=0
+  while i<n {
+   out.position[i as usize]=trial_q[i as usize]
+   out.velocity[i as usize]=trial_v[i as usize]
+   a0[i as usize]=a1[i as usize]
+   i=i+1
+  }
+  out.t_final=next;out.steps=out.steps+1
+ }
+ out.status=0
+ out
+}
