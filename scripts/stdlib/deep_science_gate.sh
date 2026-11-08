@@ -557,6 +557,11 @@ rc=0
 # normalization_into_reference through the oracle queue above.)
 LN_BOUNDARY_OUT="$out/math-pure-ln-boundary" bash scripts/stdlib/math_pure_ln_boundary_gate.sh > "$out/math-pure-ln-boundary.log" 2>&1 || rc=$?
 record concordance math-pure-ln-boundary "$rc"
+
+# Canonical palette primary data, actual Canvas/SVG colors and strict controls.
+rc=0
+MADAROS_RAW_BIN="$MADAROS_RAW_BIN" bash scripts/stdlib/canonical_palette_gate.sh "$out/canonical-palettes" > "$out/canonical-palettes.gate.stdout" 2> "$out/canonical-palettes.gate.stderr" || rc=$?
+record focused-gate canonical-palettes "$rc"
 }
 
 # Both partitions remain mandatory in CI; standalone all preserves the original order.
