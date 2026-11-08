@@ -1,7 +1,7 @@
 //@ run-pass
 //@ expect-stdout: PASS
 
-use darwin_pbpk::core::tissue_composition::{tc_pey_cell, tc_pey_intf, tc_pey_cnl, tc_pey_cnpl, tc_pey_cw, tc_pey_iw, tc_pey_ialb, tc_pey_pt_supported, tc_pey_pt_count, tc_peyret_plasma_nl, tc_peyret_plasma_npl, tc_peyret_plasma_alb}
+use darwin_pbpk::core::tissue_composition::{tc_pey_cell, tc_pey_intf, tc_pey_cnl, tc_pey_cnpl, tc_pey_cw, tc_pey_iw, tc_pey_ialb, tc_pey_pt_supported, tc_pey_pt_count, tc_peyret_plasma_nl, tc_peyret_plasma_npl, tc_peyret_plasma_alb, tc_log_vow, tc_vow_afe}
 
 // stdlib/darwin_pbpk/core/kp_methods.sio
 // ----------------------------------------------------------------------------
@@ -924,14 +924,24 @@ pub fn kpm_drug_peptide() -> KpInputs {
 // (kpm_pt_oracle_validated() is false), so neither member is certified and
 // silently replacing one with the other would hide that.
 //
-// COVERAGE IS TWO ORGANS, NOT THREE.  Peyret carries adipose, but the
-// Poulin-Theil form needs a VEGETABLE OIL:water partition coefficient there
-// rather than n-octanol:water, and no sourced correlation for it exists in
-// this repository -- the note at the top of this file mentions one and does
-// not implement it.  Supplying it from memory is precisely what this module
-// refuses to do, so adipose is out until that correlation is read.
+// COVERAGE IS THREE ORGANS -- liver, muscle, adipose.  Adipose was refused
+// until the vegetable oil:water correlation was RECOVERED by least squares
+// from 47 drug pairs printed in Peyret Tab. 8-9 (tissue_composition.sio,
+// tc_log_vow; R^2 0.99996).  It is admitted with its known accuracy carried as
+// data: Korzekwa & Nagar 2016 report an average fold error of 5.1 for this
+// correlation against measured adipose partitioning (tc_vow_afe).
+//
+// DOMAIN STILL BITES, AND THAT IS THE LARGER CONSEQUENCE.  Poulin-Theil
+// refuses strong bases at pKa >= 7, so for a strong base this member is out
+// of domain in every organ and the uncalibrated ensemble cannot validate
+// anywhere.  The dissertation drug set is mostly strong bases.  See T22.
 fn kpm_pt_peyret_core(d: KpInputs, organ: i32, ph_c: f64) -> f64 with Mut, Div, Panic {
-    let pow_v = kpm_pow10(d.log_p)
+    // Adipose takes the vegetable oil:water PC, recovered from Peyret Tab. 8-9
+    // (tc_log_vow); every other organ takes n-octanol:water.  Peyret applies
+    // the tissue's own Pow throughout that tissue's computation, including the
+    // plasma back-calculation below, and so does this.
+    let log_pw = if organ == 7 { tc_log_vow(d.log_p) } else { d.log_p }
+    let pow_v = kpm_pow10(log_pw)
     let im = if d.is_base { kpm_pow10(d.pka - ph_c) } else { 0.0 }
     let iw = if d.is_base { kpm_pow10(d.pka - kpm_ph_plasma()) } else { 0.0 }
 
@@ -1572,15 +1582,18 @@ fn main() -> i32 with IO, Mut, Div, Panic {
         print("T16 FAIL: orgaos verificados = "); println(checked); fails = fails + 1
     }
 
-    // T17 -- UPDATED 2026-11-08.  Until member 3b existed this asserted ten
-    // organs and ten refusals, because only Schmitt had per-organ
-    // composition and its two members sit in different calibration classes.
-    // Poulin-Theil-on-Peyret closes the singleton in the two organs Peyret
-    // covers, so the count is now eight refusals and two valid.  The old
-    // assertion failed the moment the member was wired in, which is the test
-    // doing its job rather than a regression.
-    var refused = 0
-    var wrong_code = 0
+    // T17 -- CORRECTED 2026-11-08.  The previous version counted valid results
+    // and refusal-1 results in ONE bucket and printed "2 validos".  This test
+    // uses haloperidol, a strong base, which Poulin-Theil refuses at
+    // pKa >= 7 -- so those two were DOMAIN REFUSALS (code 1), never valid.
+    // The count was right and the label was wrong.  The three outcomes are now
+    // counted apart.  With adipose admitted, haloperidol gives: no organ
+    // valid, three domain refusals (liver, muscle, adipose -- the organs where
+    // the Peyret member exists and refuses), seven singleton refusals.
+    var n_valid = 0
+    var n_r1 = 0
+    var n_r2 = 0
+    var n_other = 0
     var ok_organs = 0
     var ok = 1
     while ok < 12 {
@@ -1588,22 +1601,31 @@ fn main() -> i32 with IO, Mut, Div, Panic {
             ok_organs = ok_organs + 1
             let e = kpm_ensemble_organ(t13_hal, ok, false)
             if kpm_ens_valid(e) {
-                wrong_code = wrong_code + 1
+                n_valid = n_valid + 1
             } else {
-                if kpm_ens_refusal(e) == 2 { refused = refused + 1 } else { wrong_code = wrong_code + 1 }
+                let rc = kpm_ens_refusal(e)
+                if rc == 1 { n_r1 = n_r1 + 1 } else { if rc == 2 { n_r2 = n_r2 + 1 } else { n_other = n_other + 1 } }
             }
         }
         ok = ok + 1
     }
     if ok_organs == 10 {
-        if refused == 8 {
-            if wrong_code == 2 {
-                println("T17 PASS: 8 recusas codigo 2 e 2 validos -- PT-Peyret fechou o singleton")
+        if n_valid == 0 {
+            if n_r1 == 3 {
+                if n_r2 == 7 {
+                    if n_other == 0 {
+                        println("T17 PASS: haloperidol -- 0 validos, 3 recusas de dominio, 7 singletons")
+                    } else {
+                        println("T17 FAIL: codigo de recusa inesperado"); fails = fails + 1
+                    }
+                } else {
+                    print("T17 FAIL: singletons = "); println(n_r2); fails = fails + 1
+                }
             } else {
-                print("T17 FAIL: validos = "); println(wrong_code); fails = fails + 1
+                print("T17 FAIL: recusas de dominio = "); println(n_r1); fails = fails + 1
             }
         } else {
-            print("T17 FAIL: recusas = "); println(refused); fails = fails + 1
+            print("T17 FAIL: validos para base forte = "); println(n_valid); fails = fails + 1
         }
     } else {
         println("T17 FAIL: contagem de orgaos"); fails = fails + 1
@@ -1634,11 +1656,15 @@ fn main() -> i32 with IO, Mut, Div, Panic {
         pq = pq + 1
     }
     if pn == tc_pey_pt_count() {
-        if pn == 2 {
+        if pn == 3 {
             if tc_pey_pt_supported(7) {
-                println("T19 FAIL: adiposo admitido sem correlacao oleo vegetal:agua"); fails = fails + 1
+                if tc_vow_afe() > 5.0 {
+                    println("T19 PASS: PT-Peyret cobre 3 orgaos; adiposo admitido com AFE 5.1 carregado")
+                } else {
+                    println("T19 FAIL: AFE do Pvo:w nao carregado"); fails = fails + 1
+                }
             } else {
-                println("T19 PASS: PT-Peyret cobre figado e musculo; adiposo recusado por falta de Pvo:w")
+                println("T19 FAIL: adiposo nao admitido"); fails = fails + 1
             }
         } else {
             print("T19 FAIL: cobertura PT-Peyret = "); println(pn); fails = fails + 1
@@ -1700,6 +1726,54 @@ fn main() -> i32 with IO, Mut, Div, Panic {
         }
     } else {
         println("T21 FAIL: figado nao validou"); fails = fails + 1
+    }
+
+    // T21b -- adipose now joins liver and muscle for a weak base.
+    let e_adi = kpm_ensemble_organ(t20_mid, 7, false)
+    if kpm_ens_valid(e_adi) {
+        if kpm_ens_n(e_adi) == 2 {
+            println("T21b PASS: midazolam valida tambem no adiposo (n=2) -- 3 orgaos validos")
+        } else {
+            print("T21b FAIL: n no adiposo = "); println(kpm_ens_n(e_adi)); fails = fails + 1
+        }
+    } else {
+        print("T21b FAIL: adiposo nao validou, recusa "); println(kpm_ens_refusal(e_adi)); fails = fails + 1
+    }
+
+    // T22 -- THE QUESTION THAT MATTERS FOR THIS DISSERTATION.  The ensemble
+    // now validates -- but for WHICH drugs?  Poulin-Theil refuses strong bases
+    // at pKa >= 7, so for a strong base the Peyret member is out of domain in
+    // every organ it covers, and the uncalibrated sub-ensemble can never reach
+    // two members.  Measured across the drugs of this repository: venlafaxine
+    // (pKa 9.4), O-desmethylvenlafaxine (9.5), haloperidol (8.66) and
+    // clozapine (7.6) validate in ZERO organs.  Midazolam (6.01, a weak base)
+    // validates in three.  The model-form ensemble exists for the one drug in
+    // the set that is not the subject of the dissertation.
+    let sb_vfx = KpInputs { log_p: 3.20, log_ma: 0.0,   has_ma: false, pka: 9.40, is_base: true, fu_p: 0.73,  rb: 1.00, mw: 277.40 }
+    let sb_odv = KpInputs { log_p: 2.70, log_ma: 0.0,   has_ma: false, pka: 9.50, is_base: true, fu_p: 0.70,  rb: 1.00, mw: 263.38 }
+    let sb_hal = KpInputs { log_p: 4.30, log_ma: 3.723, has_ma: true,  pka: 8.66, is_base: true, fu_p: 0.10,  rb: 1.08, mw: 375.86 }
+    let sb_clz = KpInputs { log_p: 3.23, log_ma: 2.954, has_ma: true,  pka: 7.60, is_base: true, fu_p: 0.05,  rb: 0.86, mw: 326.82 }
+    var sb_valid = 0
+    var mid_valid = 0
+    var so = 1
+    while so < 12 {
+        if kpm_organ_supported(so) {
+            if kpm_ens_valid(kpm_ensemble_organ(sb_vfx, so, false)) { sb_valid = sb_valid + 1 }
+            if kpm_ens_valid(kpm_ensemble_organ(sb_odv, so, false)) { sb_valid = sb_valid + 1 }
+            if kpm_ens_valid(kpm_ensemble_organ(sb_hal, so, false)) { sb_valid = sb_valid + 1 }
+            if kpm_ens_valid(kpm_ensemble_organ(sb_clz, so, false)) { sb_valid = sb_valid + 1 }
+            if kpm_ens_valid(kpm_ensemble_organ(t20_mid, so, false)) { mid_valid = mid_valid + 1 }
+        }
+        so = so + 1
+    }
+    if sb_valid == 0 {
+        if mid_valid == 3 {
+            println("T22 PASS: 4 bases fortes, 0 orgaos validos; midazolam (base fraca) valida em 3")
+        } else {
+            print("T22 FAIL: midazolam valido em "); println(mid_valid); fails = fails + 1
+        }
+    } else {
+        print("T22 FAIL: base forte validou em "); println(sb_valid); fails = fails + 1
     }
     if fails == 0 {
         println("PASS")

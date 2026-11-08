@@ -561,9 +561,81 @@ pub fn tc_pey_ialb(organ: i32) -> f64 { return tc_peyret_comp(organ).i_alb }
 pub fn tc_pey_pt_supported(organ: i32) -> bool {
     if organ == 1 { return true }    // liver
     if organ == 6 { return true }    // muscle
-    return false                      // adipose (7) needs vegetable oil:water
+    if organ == 7 { return true }    // adipose: Pvo:w now recovered from Peyret Tab. 8-9
+    return false
 }
-pub fn tc_pey_pt_count() -> i32 { return 2 }
+pub fn tc_pey_pt_count() -> i32 { return 3 }
+
+// ============================================================================
+// VEGETABLE OIL:WATER FOR ADIPOSE -- RECOVERED FROM PEYRET'S DATA (2026-11-08)
+// ============================================================================
+// Poulin-Theil uses a vegetable oil:water partition coefficient for adipose
+// instead of n-octanol:water.  Peyret 2010 does NOT print a correlation for
+// it: it prints the oil:water value per drug, with n-octanol:water beside it
+// in brackets (Tab. 8, strong bases; Tab. 9, neutrals, acids, weak bases and
+// zwitterions).  Those pairs repeat exactly -- n-octanol 631 maps to oil 59.2
+// for diazepam, valproate and the hexyl barbiturate alike -- which is the
+// signature of a deterministic transform rather than of measurements.
+//
+// So the correlation is RECOVERED by least squares from 47 unique pairs as
+// printed, not supplied from memory (scratchpad/audit1/vow1.cpp):
+//     log10 Pvo:w = 1.1132 * log10 Po:w - 1.3478
+//     R^2 = 0.999960, maximum residual 0.0735 log10 (printed-value rounding)
+// Check on a drug of this dissertation: midazolam is in Tab. 9 with a printed
+// Pvo:w of 128; the recovered correlation gives 127.0.
+//
+// KNOWN ACCURACY, CARRIED AS DATA.  Korzekwa & Nagar 2016
+// (10.1007/s11095-016-2089-8, quoted at the top of kp_methods.sio) report
+// that this vegetable oil:water correlation has an average fold error of 5.1
+// over n = 32 drugs against measured adipose partitioning.  The correlation is
+// now SOURCED; it is not therefore ACCURATE.  An adipose member built on it is
+// admitted, because this module gates on domain and provenance and not on
+// accuracy, but its known error is recorded beside it rather than left in a
+// literature note.  Gating on accuracy would be a new policy, and it is not
+// adopted silently here.
+pub fn tc_vow_slope() -> f64     { return 1.1132 }
+pub fn tc_vow_intercept() -> f64 { return 0.0 - 1.3478 }
+pub fn tc_vow_r2() -> f64        { return 0.999960 }
+pub fn tc_vow_n() -> i32         { return 47 }
+pub fn tc_vow_afe() -> f64       { return 5.1 }   // Korzekwa & Nagar 2016, n = 32
+pub fn tc_vow_afe_n() -> i32     { return 32 }
+
+// log10 of the vegetable oil:water PC from log10 of n-octanol:water.
+pub fn tc_log_vow(log_pow: f64) -> f64 { return tc_vow_slope() * log_pow + tc_vow_intercept() }
+
+// ============================================================================
+// PRIOR ART ON pH SENSITIVITY, MISSED BY THE NOVELTY SWEEP  (2026-11-08)
+// ============================================================================
+// Peyret 2010 Tab. 10 is a one-at-a-time sensitivity analysis (sensitivity
+// ratio SR = (dY/Y0)/(dX/X0), each parameter reduced by 10%).  For
+// phencyclidine, a strong base, the most sensitive parameter of the muscle
+// partition coefficient is the MUSCLE CELL pH, SR -34.2 -- an order of
+// magnitude above the next (plasma and interstitial pH, 5.68).  For the fat
+// partition coefficient the leading term is pKa, SR -31.46, which enters the
+// same ionisation factor.  For tenoxicam, an acid, plasma and interstitial pH
+// lead the fat coefficient at SR -6.12.
+//
+// So "intracellular pH is a dominant input for strong bases" is ESTABLISHED,
+// and the novelty sweep recorded elsewhere in this file -- which found Yau 2020
+// not naming pH and Farahat 2026 holding it fixed -- missed this.  Both of
+// those readings stand; the conclusion drawn from them did not.
+//
+// What Peyret does NOT do, and what therefore remains unclaimed: Peyret uses a
+// single cellular pH of 7.0 throughout (after Rodgers et al. 2005) and so
+// cannot see that different methods carry DIFFERENT cellular pH values for the
+// same tissue.  The convention conflict -- four muscle values coexisting, and
+// the convention alone accounting for 1.51x of the R&R/Schmitt gap -- is a
+// different finding from the sensitivity, and it is the one still open.
+//
+// One further caution on reading SR -34.2: a 10% reduction in pH is 0.7 pH
+// units, which for a base with pKa 9.4 multiplies the ionisation factor by
+// about 10^0.7 = 5.  The SR is large partly because a 10% step in pH is
+// physiologically enormous; it is evidence of sensitivity, not a calibrated
+// elasticity.
+pub fn tc_peyret_ph_sr_strong_base() -> f64 { return 0.0 - 34.2 }   // phencyclidine, muscle cell pH
+pub fn tc_peyret_ph_sr_next() -> f64        { return 5.68 }          // plasma/interstitial pH
+pub fn tc_ph_sensitivity_is_novel() -> bool { return false }
+pub fn tc_ph_convention_conflict_is_novel() -> bool { return true }   // pending a dedicated sweep
 // ============================================================================
 // A ROUTE THAT LOOKS OPEN AND IS NOT  (falsified 2026-11-08)
 // ============================================================================
@@ -1028,6 +1100,44 @@ fn main() -> i32 with IO, Mut, Div, Panic {
         }
     } else {
         println("T19 FAIL: Peyret adiposo abaixo da banda"); fails = fails + 1
+    }
+
+    // T20 -- the recovered vegetable oil:water correlation, and the novelty
+    // correction it came with.  Midazolam's printed Pvo:w is 128; the
+    // correlation recovered from Peyret Tab. 8-9 must land within 2%.
+    let lv = tc_log_vow(3.1003705451)      // log10(1260), midazolam n-octanol:water
+    let pv = exp(lv * 2.302585092994046)
+    if pv > 125.4 {
+        if pv < 130.6 {
+            if tc_vow_n() == 47 {
+                println("T20 PASS: Pvo:w recuperado de 47 pares do Peyret reproduz midazolam (128) em 2%")
+            } else {
+                println("T20 FAIL: n da correlacao"); fails = fails + 1
+            }
+        } else {
+            println("T20 FAIL: Pvo:w do midazolam acima da banda"); fails = fails + 1
+        }
+    } else {
+        println("T20 FAIL: Pvo:w do midazolam abaixo da banda"); fails = fails + 1
+    }
+
+    // T21 -- PRIOR ART, PINNED.  pH sensitivity for strong bases is NOT novel:
+    // Peyret 2010 Tab. 10 gives muscle-cell pH an SR of -34.2 for
+    // phencyclidine.  The cross-method pH CONVENTION conflict is a separate
+    // claim and is not settled by that table.  If anyone flips the first flag
+    // to make the dissertation sound newer, this fails.
+    if tc_ph_sensitivity_is_novel() {
+        println("T21 FAIL: sensibilidade ao pH marcada como inedita contra Peyret 2010 Tab. 10"); fails = fails + 1
+    } else {
+        if tc_peyret_ph_sr_strong_base() < 0.0 - 30.0 {
+            if tc_ph_convention_conflict_is_novel() {
+                println("T21 PASS: sensibilidade ao pH e prior art (Peyret SR -34.2); conflito de convencao segue aberto")
+            } else {
+                println("T21 FAIL: conflito de convencao marcado como nao-inedito sem varredura"); fails = fails + 1
+            }
+        } else {
+            println("T21 FAIL: SR do Peyret fora da banda"); fails = fails + 1
+        }
     }
     if fails == 0 {
         println("PASS")
