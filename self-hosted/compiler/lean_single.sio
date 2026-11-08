@@ -9067,12 +9067,68 @@ fn lex_all() with IO, Mut, Panic, Div {
     }
     TK[TC as usize] = 0; TL[TC as usize] = cur_line; TC = TC + 1
     lex_enum_variant_names()
+    lex_contextual_names()
+    lex_reserved_binding_names()
 }
 
 // A variant of a user enum may be called None, Some, Ok or Err. The lexer makes
 // those words keywords (TK 57-60), so `enum Act { None, Neg }` declared no
 // variant named None and `Act::None` (made an identifier in lex_all) named
 // nothing. Inside an enum body, a keyword in variant position is a name.
+// ADR-015 row 10: `linear`, `affine` and `study` (TK 62, 73, 71) are keywords only where a
+// declaration or a type qualifier uses them. Anywhere else they are ordinary names, as in
+// Madaros: after `let`, `var`, `.` or `::`, or when the next token cannot follow a qualifier.
+// A qualifier (`x: linear File`, `linear fn f`, `study Name {`) is followed by a name, a
+// keyword, `&`, `(` or `[`, so those stay keywords. Runs once, after lexing.
+fn lex_contextual_names() with Mut, Panic {
+    var i: i64 = 0
+    while i < TC {
+        let k = TK[i as usize]
+        if k == 62 || k == 71 || k == 73 {
+            var as_name: i64 = 0
+            if i > 0 {
+                let pk = TK[(i - 1) as usize]
+                if pk == 11 || pk == 12 || pk == 50 || pk == 51 { as_name = 1 }
+            }
+            if i + 1 >= TC { as_name = 1 }
+            else {
+                let nk = TK[(i + 1) as usize]
+                var qualifier: i64 = 0
+                if nk == 3 || nk == 1 || nk == 6 || nk == 41 || nk == 44 || nk == 46 || nk == 47 || nk == 49 { qualifier = 1 }
+                if nk == 61 || nk == 62 || nk == 70 || nk == 71 || nk == 72 || nk == 73 || nk == 75 || nk == 76 { qualifier = 1 }
+                if qualifier == 0 { as_name = 1 }
+            }
+            if as_name == 1 { TK[i as usize] = 3 }
+        }
+        i = i + 1
+    }
+}
+
+// ADR-015 row 10: `async await spawn crate super perform resume` stay reserved. Madaros refuses
+// them as names; lean_single used to accept them. A binding (`let`/`var`) named after one is
+// refused here, so the two engines agree on the probes `kw_let_<word>`. Declaration names
+// (`fn spawn(..)`) and member names (`x.spawn`) stay valid, as in Madaros.
+fn lex_reserved_binding_names() with Mut, Panic {
+    var i: i64 = 1
+    while i < TC {
+        let pk = TK[(i - 1) as usize]
+        if (pk == 11 || pk == 12) && TK[i as usize] == 3 {
+            let s = TS[i as usize]
+            let l = TE[i as usize] - s
+            var reserved: i64 = 0
+            if src_match(s, l, "async") || src_match(s, l, "await") || src_match(s, l, "spawn") { reserved = 1 }
+            if src_match(s, l, "crate") || src_match(s, l, "super") { reserved = 1 }
+            if src_match(s, l, "perform") || src_match(s, l, "resume") { reserved = 1 }
+            if reserved == 1 && LEX_ERROR_LINE == 0 {
+                LEX_ERROR_LINE = TL[i as usize]
+                LEX_ERROR_KIND = 9
+                LEX_ERROR_TOK = i
+            }
+        }
+        i = i + 1
+    }
+}
+
 fn lex_enum_variant_names() with Mut, Panic {
     var i: i64 = 0
     while i + 2 < TC {
@@ -52999,6 +53055,15 @@ fn main() -> i64 with IO, Mut, Panic, Div {
             print_src_loc_for_tok(LEX_ERROR_TOK)
             print(":")
             print_int(LEX_ERROR_COL)
+            print("\n")
+            return 1
+        }
+        if LEX_ERROR_KIND == 9 {
+            print("error: `")
+            var rq: i64 = TS[LEX_ERROR_TOK as usize]
+            while rq < TE[LEX_ERROR_TOK as usize] { print_char(sb(rq))  rq = rq + 1 }
+            print("` is a reserved word and cannot name a binding at line ")
+            print_int(LEX_ERROR_LINE)
             print("\n")
             return 1
         }
