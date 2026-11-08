@@ -8665,6 +8665,20 @@ fn mono_infer_from_nth_arg(gi: i64, call_arg_start: i64) -> i64 with Panic, Mut 
 }
 
 // ─── Lexer ───
+// ADR-015 row 11, first slice: besides ASCII letters, digits and `_`, an identifier may contain
+// `ε` (CE B5), `∂` (E2 88 82), `∇` (E2 88 87) and `∞` (E2 88 9E). Returns the byte length of
+// that character at p, or 0. (The rest of UAX #31 and NFC are later slices.)
+fn lex_ident_mb_len(p: i64) -> i64 with Mut, Panic {
+    let b0 = sb(p)
+    let b1 = sb(p + 1)
+    if b0 == 206 && b1 == 181 { return 2 }
+    if b0 == 226 && b1 == 136 {
+        let b2 = sb(p + 2)
+        if b2 == 130 || b2 == 135 || b2 == 158 { return 3 }
+    }
+    return 0
+}
+
 fn lex_all() with IO, Mut, Panic, Div {
     TC = 0
     LEX_ERROR_LINE = 0
@@ -8858,15 +8872,6 @@ fn lex_all() with IO, Mut, Panic, Div {
             TU[TC as usize] = lit_unit_hash
             TL[TC as usize] = cur_line; TC = TC + 1; continue
         }
-        if c == 206 && p + 1 < SRC_LEN && sb(p + 1) == 181 {
-            TK[TC as usize] = 3
-            TS[TC as usize] = p
-            TE[TC as usize] = p + 2
-            TL[TC as usize] = cur_line
-            TC = TC + 1
-            p = p + 2
-            continue
-        }
         if c == 226 && p + 2 < SRC_LEN && sb(p + 1) == 138 && sb(p + 2) == 165 {
             TK[TC as usize] = 3
             TS[TC as usize] = p
@@ -8877,10 +8882,24 @@ fn lex_all() with IO, Mut, Panic, Div {
             continue
         }
         // Identifier / keyword
-        if (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c == 95 {
+        if (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c == 95 || lex_ident_mb_len(p) > 0 {
             let s = p
-            while p < SRC_LEN && ((sb(p) >= 65 && sb(p) <= 90) || (sb(p) >= 97 && sb(p) <= 122) || (sb(p) >= 48 && sb(p) <= 57) || sb(p) == 95) { p = p + 1 }
+            var idgo: i64 = 1
+            while p < SRC_LEN && idgo == 1 {
+                let ic = sb(p)
+                if (ic >= 65 && ic <= 90) || (ic >= 97 && ic <= 122) || (ic >= 48 && ic <= 57) || ic == 95 {
+                    p = p + 1
+                } else {
+                    let mbl = lex_ident_mb_len(p)
+                    if mbl > 0 { p = p + mbl } else { idgo = 0 }
+                }
+            }
             let l = p - s
+            // ADR-015 row 11: an identifier longer than 256 bytes is refused (E282).
+            if l > 256 && LEX_ERROR_LINE == 0 {
+                LEX_ERROR_LINE = cur_line
+                LEX_ERROR_KIND = 10
+            }
             var k: i64 = 3
             if src_match(s, l, "fn") { k = 1 }
             if src_match(s, l, "return") { k = 2 }
@@ -52999,6 +53018,13 @@ fn main() -> i64 with IO, Mut, Panic, Div {
             print_src_loc_for_tok(LEX_ERROR_TOK)
             print(":")
             print_int(LEX_ERROR_COL)
+            print("\n")
+            return 1
+        }
+        if LEX_ERROR_KIND == 10 {
+            // Same code and wording as Madaros E282.
+            print("error[E282]: identifier too long at line ")
+            print_int(LEX_ERROR_LINE)
             print("\n")
             return 1
         }

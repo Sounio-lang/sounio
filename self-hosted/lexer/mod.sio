@@ -182,6 +182,22 @@ fn lexer_mark_lex_error(kind: i64, line: i64, col: i64, byte_val: i64) with Mut 
     }
 }
 
+// ADR-015 row 11, first slice: besides ASCII letters, digits and `_`, an identifier may contain
+// `ε` (CE B5), `∂` (E2 88 82), `∇` (E2 88 87) and `∞` (E2 88 9E). Returns the byte length of
+// that character at pos, or 0. (The rest of UAX #31 and NFC are later slices.)
+fn lexer_ident_mb_len(pos: i64, n: i64) -> i64 with Mut, Panic {
+    if pos + 1 < n {
+        let b0 = (CURSOR_SOURCE[pos as usize] as i64) & 255
+        let b1 = (CURSOR_SOURCE[(pos + 1) as usize] as i64) & 255
+        if b0 == 206 && b1 == 181 { return 2 }
+        if pos + 2 < n && b0 == 226 && b1 == 136 {
+            let b2 = (CURSOR_SOURCE[(pos + 2) as usize] as i64) & 255
+            if b2 == 130 || b2 == 135 || b2 == 158 { return 3 }
+        }
+    }
+    return 0
+}
+
 // A string escape the lowering decodes (ir_normalize_string_literal_name):
 // \n \t \r \0 \\ \" and \xHH. This is the union of what the two engines decode
 // today; lean_single refuses every other escape, and so does this lexer now.
@@ -234,6 +250,11 @@ pub fn lexer_report_lex_error_if_any(path: string) -> bool with IO, Mut {
         print("  = note: the digits were previously wrapped into the value, so\n")
         print("          `99999999999999999999` compiled as 7766279631452241919\n")
         print("  = help: write it as a float (`...e0`) or keep it within 2^64-1\n")
+    } else if LEXER_LEX_ERROR_KIND == 8 {
+        print("error[E282]: identifier too long")
+        lexer_print_location(path)
+        print("  = note: an identifier holds at most 256 bytes; it used to be cut at 256 and the rest\n")
+        print("          was read as a second name\n")
     } else {
         let in_char = LEXER_LEX_ERROR_KIND == 5
         print("error[E274]: invalid escape sequence `\\")
@@ -975,17 +996,38 @@ pub fn lex_source_to_globals(source_len: i64) -> i64 with Mut, Div, Panic {
             }
         }
 
-        if is_ident_start(ch) {
+        if is_ident_start(ch) || lexer_ident_mb_len(pos, n) > 0 {
             let start = pos
             let start_col = col
             var text: [i8; 256] = [0; 256]
             var text_idx: i64 = 0
-            while pos < n && is_ident_continue(CURSOR_SOURCE[pos as usize]) && text_idx < 256 {
-                text[text_idx as usize] = CURSOR_SOURCE[pos as usize]
-                text_idx = text_idx + 1
-                pos = pos + 1
-                col = col + 1
+            // ADR-015 row 11: an identifier longer than 256 bytes is refused (E282). It used to be
+            // cut at 256 and the rest read as a second name.
+            var id_bytes: i64 = 0
+            var id_go: i64 = 1
+            var id_mb: i64 = 0
+            while pos < n && id_go == 1 {
+                let cc = CURSOR_SOURCE[pos as usize]
+                var step: i64 = 0
+                if is_ident_continue(cc) { step = 1 } else { step = lexer_ident_mb_len(pos, n) }
+                if step == 0 {
+                    id_go = 0
+                } else {
+                    if step > 1 { id_mb = 1 }
+                    var bi: i64 = 0
+                    while bi < step {
+                        if text_idx < 256 {
+                            text[text_idx as usize] = CURSOR_SOURCE[(pos + bi) as usize]
+                            text_idx = text_idx + 1
+                        }
+                        bi = bi + 1
+                    }
+                    id_bytes = id_bytes + step
+                    pos = pos + step
+                    col = col + step
+                }
             }
+            if id_bytes > 256 { lexer_mark_lex_error(8, line, start_col, 0) }
             // main moved the identifier slot to the scalar setter (TokenKind
             // directly) so a new keyword needs no arm in parser_set_token_flat's
             // dispatch. Keep that, and keep this PR's fail-closed guard: the
@@ -993,6 +1035,14 @@ pub fn lex_source_to_globals(source_len: i64) -> i64 with Mut, Div, Panic {
             if tc >= 2097152 {
                 lexer_mark_token_overflow(line, start_col, start, 1)
                 break
+            }
+            // A name with a multi-byte character is never a keyword. Flat code 123 is the identifier
+            // code that pt_read_kind turns into Ident without looking at the first byte (it is
+            // negative as an i8 here, which the keyword path indexes by).
+            if id_mb == 1 {
+                tc = lexer_push_flat(tc, 123, start, pos, line, start_col, 0)
+                if tc < 0 { break }
+                continue
             }
             parser_set_token_scalar(tc, keyword_lookup(text, text_idx), start, pos, line, start_col)
             tc = tc + 1

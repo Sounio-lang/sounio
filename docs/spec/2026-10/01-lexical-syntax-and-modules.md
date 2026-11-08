@@ -77,6 +77,13 @@ length, overflow diagnostics, and the public status of internal Box renaming
 remain unresolved; do not specify silent splitting or truncation as intended
 name semantics.
 
+**Update (ADR-015 row 11, first slice, 2026-11-08):** the lexer now refuses an identifier
+longer than 256 bytes with E282 and its location instead of splitting it, on both
+engines (probes `id_long300` refused, `id_long256` accepted). 256 is the cap the loop
+already had, not a ruled limit: the 128-byte clamps in `parser_name_at` and the export
+pool are unchanged. `ε` `∂` `∇` `∞` are identifier characters, alone or inside a name
+(`let ε = 3`, `∂x`, `a∞`); the rest of UAX #31 and NFC are later slices.
+
 `LEX-004` (**source-observed**, whitespace and comments). Space, horizontal tab,
 CR, and LF separate tokens. CR is whitespace, not a line increment; CRLF
 therefore has one line increment, whereas a lone CR does not. `//` consumes
