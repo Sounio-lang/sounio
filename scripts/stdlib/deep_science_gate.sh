@@ -557,6 +557,11 @@ rc=0
 # normalization_into_reference through the oracle queue above.)
 LN_BOUNDARY_OUT="$out/math-pure-ln-boundary" bash scripts/stdlib/math_pure_ln_boundary_gate.sh > "$out/math-pure-ln-boundary.log" 2>&1 || rc=$?
 record concordance math-pure-ln-boundary "$rc"
+
+# Prepared viewport-bound contour geometry and independent native pixel/oracle controls.
+rc=0
+timeout 900 env MADAROS_RAW_BIN="$MADAROS_RAW_BIN" bash scripts/stdlib/prepared_contour_gate.sh "$out/prepared-contour" > "$out/prepared-contour.gate.stdout" 2> "$out/prepared-contour.gate.stderr" || rc=$?
+record focused-gate prepared-contour "$rc"
 }
 
 # Both partitions remain mandatory in CI; standalone all preserves the original order.
