@@ -1684,6 +1684,75 @@ paste <(grep "^TMASS|m=" "$QTP_SIO_LOG" | sed "s/^TMASS|m=//") \
 
 echo
 echo "[pbpk28-parity] quetiapine oral-IR canonical: tablet lag + gut absorption + systemic PK + mass envelope (11th canonical drug)"
+echo
+echo "[pbpk28-parity] Case 25s: Sounio <-> Node quetiapine-ketoconazole PBPK28 (static CYP3A4 inhibition)"
+
+QK_SIO_LOG="$OUT_DIR/qk_sounio.txt"
+QK_NODE_LOG="$OUT_DIR/qk_node.txt"
+
+"$SOUC_BIN" run tests/run-pass/dissertation_pbpk28_parity_ref_quetiapine_ketoconazole.sio > "$QK_SIO_LOG" 2>&1 || {
+  echo "[pbpk28-parity:case25s] FAIL: Sounio quetiapine-ketoconazole ref returned non-zero" >&2
+  tail -n 20 "$QK_SIO_LOG" >&2; exit 1; }
+if ! grep -q "^DISSERTATION_PBPK28_QUETIAPINE_KETO_PARITY_DONE$" "$QK_SIO_LOG"; then
+  echo "[pbpk28-parity:case25s] FAIL: Sounio quetiapine-ketoconazole ref did not emit DONE" >&2; exit 1; fi
+node "$NODE_RUNNER" --drug=quetiapine-ketoconazole > "$QK_NODE_LOG" 2>&1 || {
+  echo "[pbpk28-parity:case25s] FAIL: Node quetiapine-ketoconazole runner returned non-zero" >&2
+  tail -n 20 "$QK_NODE_LOG" >&2; exit 1; }
+if ! grep -q "^DISSERTATION_PBPK28_QUETIAPINE_KETO_PARITY_NODE v1$" "$QK_NODE_LOG"; then
+  echo "[pbpk28-parity:case25s] FAIL: Node quetiapine-ketoconazole runner header mismatch" >&2; exit 1; fi
+
+QK_SIO_TSV="$OUT_DIR/qk_sounio.tsv"
+QK_NODE_TSV="$OUT_DIR/qk_node.tsv"
+parse_to_tsv "$QK_SIO_LOG" "$QK_SIO_TSV"
+parse_to_tsv "$QK_NODE_LOG" "$QK_NODE_TSV"
+
+QK_SIO_ROWS=$(wc -l < "$QK_SIO_TSV")
+QK_NODE_ROWS=$(wc -l < "$QK_NODE_TSV")
+if [[ "$QK_SIO_ROWS" -ne "$EXPECTED_ROWS" || "$QK_NODE_ROWS" -ne "$EXPECTED_ROWS" ]]; then
+  echo "[pbpk28-parity:case25s] FAIL: quetiapine-ketoconazole row count mismatch" >&2
+  exit 1
+fi
+echo "[pbpk28-parity:case25s] both runs emitted $QK_SIO_ROWS records"
+
+QK_JOINED="$OUT_DIR/qk_joined.tsv"
+awk -F"\t" "
+  NR==FNR { S[\$1\"|\"\$2] = \$5; next }
+  { print \$1\"\t\"\$2\"\t\"S[\$1\"|\"\$2]\"\t\"\$5 }
+" "$QK_SIO_TSV" "$QK_NODE_TSV" > "$QK_JOINED"
+
+awk -F"\t" -v THR="$RMSE_THRESHOLD_PCT" "
+  {
+    i = \$2 + 0; cs = \$3 + 0; cn = \$4 + 0;
+    d = cs - cn; SS[i] += d * d; NN[i] += 1;
+    if (cs > PK[i]) PK[i] = cs;
+    if (cn > PK[i]) PK[i] = cn;
+  }
+  END {
+    bad = 0;
+    for (i = 0; i < 14; i++) {
+      if (NN[i] == 0) { printf \"PBPK28_QUETIAPINE_KETO_PARITY_FAIL organ %d MISSING\n\", i; bad += 1; continue; }
+      rmse = sqrt(SS[i] / NN[i]); pk = PK[i] + 0;
+      if (pk == 0) { continue; }
+      pct = 100.0 * rmse / pk;
+      if (pct >= THR + 0) { printf \"PBPK28_QUETIAPINE_KETO_PARITY_FAIL organ %d pct=%.4f rmse=%.3g\n\", i, pct, rmse; bad += 1; }
+    }
+    if (bad > 0) { exit 1; }
+    printf \"PBPK28_QUETIAPINE_KETO_PARITY_PASS 14/14 compartments within %s%% RMSE (strict)\n\", THR;
+  }
+" "$QK_JOINED"
+
+paste <(grep "^TMASS|m=" "$QK_SIO_LOG" | sed "s/^TMASS|m=//") \
+      <(grep "^TREL|cum=" "$QK_SIO_LOG" | sed "s/^TREL|cum=//") \
+  | awk -v FAILM="PBPK28_QUETIAPINE_KETO_MASS_FAIL" -v PASS="PBPK28_QUETIAPINE_KETO_MASS_PASS" "
+      { m=(\$1+0); r=(\$2+0); n++;
+        if (!(m >= 0 && m <= r)) { printf \"%s sample %d: mass %.6f outside [0, %.6f]\n\", FAILM, n, m, r; bad=1 } }
+      END { if (n != 12) { printf \"%s row count %d != 12\n\", FAILM, n; exit 1 }
+        if (bad) exit 1;
+        printf \"%s 12/12 samples within [0, absorbed]\n\", PASS }"
+
+echo
+echo "[pbpk28-parity] quetiapine-ketoconazole static CYP3A4 inhibition: same tablet and input, CL 16.8 L/h, parity + mass envelope (case 25s)"
+
 
 # ════════════════════════════════════════════════════════════════════════════
 # Case 26: Lithium — twelfth canonical drug, fifth oral-IR case, FIRST with
