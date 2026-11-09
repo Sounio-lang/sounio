@@ -59,7 +59,7 @@ fn total(head: &Option<Box<Node>>) -> i64 with Mut, Panic, Div {
 fn main() -> i32 with IO, Mut, Panic, Div, Alloc {
     var head: Option<Box<Node>> = None
     var i: i64 = 0
-    while i < 4500000 {
+    while i < 3000000 {
         head = Some(Box::new(Node { v: i, w: 0, next: head }))
         i = i + 1
     }
@@ -88,9 +88,12 @@ set +e
 "$WORK/big.elf" >"$WORK/big.out" 2>&1
 rc_big=$?
 set -e
-# sum 0 .. 4499999
-[[ "$rc_big" -eq 0 && "$(cat "$WORK/big.out")" == "10124997750000" ]] \
-  || fail "SOUNIO_NV2_HANDLE_LOG2=23 build should print 10124997750000, got rc=$rc_big: $(head -n 2 "$WORK/big.out")"
+# sum 0 .. 2999999. Each node takes two handles, the Box and the Node it
+# owns (main's force_managed Box path), so 3,000,000 nodes need ~6.0M:
+# past 2^22, inside 2^23. Measured 2026-11-09: 2,000,000 nodes fit the
+# default table, 2,200,000 do not.
+[[ "$rc_big" -eq 0 && "$(cat "$WORK/big.out")" == "4499998500000" ]] \
+  || fail "SOUNIO_NV2_HANDLE_LOG2=23 build should print 4499998500000, got rc=$rc_big: $(head -n 2 "$WORK/big.out")"
 entry="$(od -An -tx8 -j24 -N8 "$WORK/big.elf" | tr -d ' ')"
 (( 16#$entry >= 16#800000 && 16#$entry < 16#1000000 )) \
   || fail "SOUNIO_NV2_HANDLE_LOG2=23 build should load at 0x800000, entry is 0x$entry"
@@ -101,4 +104,4 @@ cmp -s "$WORK/default.elf" "$WORK/log22.elf" || fail "SOUNIO_NV2_HANDLE_LOG2=22 
 ( ulimit -s 1572864 2>/dev/null || true; SOUNIO_NV2_HANDLE_LOG2=30 "$MADAROS" build "$WORK/witness.sio" "$WORK/bad.elf" ) >"$WORK/bad.log" 2>&1 || true
 grep -q 'SOUNIO_NV2_HANDLE_LOG2=30 is not one of' "$WORK/bad.log" || fail "an unsupported SOUNIO_NV2_HANDLE_LOG2 value was not reported"
 
-echo "[madaros-handle-capacity] PASS: default stops at handles full (182); SOUNIO_NV2_HANDLE_LOG2=23 keeps 4.5M nodes live, loads at 0x800000 and sums to 10124997750000; LOG2=22 is byte-identical; a bad value is reported"
+echo "[madaros-handle-capacity] PASS: default stops at handles full (182); SOUNIO_NV2_HANDLE_LOG2=23 keeps 3M nodes (6M handles) live, loads at 0x800000 and sums to 4499998500000; LOG2=22 is byte-identical; a bad value is reported"
