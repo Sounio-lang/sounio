@@ -762,6 +762,22 @@ pub fn lower_note_error(site: i64, n: Name) with Mut {
         ir_copy_name_to_flat(&n, &! IR_LOWER_ERROR_FIRST_FN_BUF, &! IR_LOWER_ERROR_FIRST_FN_LEN)
     }
 }
+// ADR-026 amendment (2026-11-09), RFC-0001 Stage 0: a field is resolved by the
+// type that owns it, never by a hash of its name. The old `name[0] % 64`
+// fallback invented slot 51 for `.span` and slot 37 for `epsilon` (#1499),
+// writing and reading memory nothing else used. Return 0 as a placeholder
+// index and raise the hard error, which refuses to publish the binary. A free
+// function, not a `self` method: a by-value `self` copies the whole Lowerer.
+fn lower_refuse_untyped_field_hash(field_name: Name) -> i64 with Mut {
+    IR_LOWER_HARD_ERROR = 1
+    if IR_LOWER_HARD_ERROR_REASON == 0 {
+        IR_LOWER_HARD_ERROR_REASON = 10
+    }
+    ir_copy_name_to_flat(&field_name, &! IR_LOWER_HARD_ERROR_FN_BUF, &! IR_LOWER_HARD_ERROR_FN_LEN)
+    lower_note_error(2966, field_name)
+    0
+}
+
 var IR_LOWER_HARD_ERROR_LIMIT: i64 = 0
 
 pub fn lower_hard_error_pending() -> bool { (IR_LOWER_COMPILE_ERROR_SCOPE_ACTIVE && IR_LOWER_COMPILE_ERROR_LATCH) || IR_LOWER_HARD_ERROR != 0 || LOWER_USE_MODULE_OVERFLOWED || LOWER_IMPL_METHOD_OVERFLOWED || LOWER_UNIT_FLOAT_OVERFLOWED || ast_named_item_terminal_overflowed() || spec_item_module_overflowed() || ast_path_range_name_overflowed() }
@@ -907,6 +923,12 @@ pub fn lower_hard_error_report() with IO, Mut, Panic, Div {
         ir_print_flat_name(&IR_LOWER_HARD_ERROR_FN_BUF, IR_LOWER_HARD_ERROR_FN_LEN)
         print("` passes a capturing closure where its captured values cannot be\n")
         print("         supplied; the capture would read as 0, so it is refused (#1542).\n")
+    } else if IR_LOWER_HARD_ERROR_REASON == 10 {
+        print("  cause: field `")
+        ir_print_flat_name(&IR_LOWER_HARD_ERROR_FN_BUF, IR_LOWER_HARD_ERROR_FN_LEN)
+        print("` has no index in the layout table, so lowering cannot place it.\n")
+        print("         Resolving it by a hash of its name is refused (ADR-026 amendment,\n")
+        print("         2026-11-09); declare the type before the field access.\n")
     } else if IR_LOWER_HARD_ERROR_REASON == 6 {
         print("  cause: function `")
         ir_print_flat_name(&IR_LOWER_HARD_ERROR_FN_BUF, IR_LOWER_HARD_ERROR_FN_LEN)
@@ -24884,16 +24906,16 @@ impl Lowerer {
                 }
                 // Named layout is present but this field is not on it. Do not
                 // consult other structs: a majority of `.end` is Span.end = 2,
-                // which is also Expr.int_val. Hash only.
+                // which is also Expr.int_val. Refuse.
                 if field_name.len <= 0 {
                     return 0
                 }
-                return (field_name.buf[0] as i64) % 64
+                return lower_refuse_untyped_field_hash(field_name)
             }
             si = si + 1
         }
         // Struct not in layout table — same untyped consensus as the miss path,
-        // then the legacy first-byte hash.
+        // then refuse.
         let consensual = lower_field_idx_untyped(&(*self.struct_layouts), field_name)
         if consensual >= 0 {
             return consensual
@@ -24901,7 +24923,7 @@ impl Lowerer {
         if field_name.len <= 0 {
             0
         } else {
-            (field_name.buf[0] as i64) % 64
+            lower_refuse_untyped_field_hash(field_name)
         }
     }
 
@@ -24936,11 +24958,11 @@ impl Lowerer {
         if consensual >= 0 {
             return consensual
         }
-        // Last-resort legacy compatibility for unregistered dynamic/foreign shapes.
+        // ADR-026 amendment: an unregistered shape is refused, not hashed.
         if n.len <= 0 {
             0
         } else {
-            (n.buf[0] as i64) % 64
+            lower_refuse_untyped_field_hash(n)
         }
     }
 
