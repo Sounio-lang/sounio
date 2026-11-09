@@ -1,0 +1,88 @@
+//@ run-pass
+//@ expect-stdout: RAW_STRUCT_WHOLE_COPY_OK
+// A struct with a fixed-array field lives inline in heap_alloc memory (raw
+// layout) and as an object with an array handle elsewhere. `(*p).method()`
+// (the check.sio bridges, e.g. `(*c).check_expr(e)`) must copy the raw
+// payload into an object, and `*p = v` must copy an object back into it;
+// both used to read or write single words (#2966). A Box node with a byte
+// array is updated through the Box (private_fn_identity's last-segment
+// rename), never through a raw pointer.
+struct Ck { a: i64, arr: [i64; 6], x: i64, y: i64 }
+struct Seg { buf: [i8; 16], len: i64, tail: Option<Box<Seg>> }
+
+impl Ck {
+    fn get_x(self) -> i64 with Mut, Panic, Div { self.x * 10 + self.y + self.arr[2] * 100 }
+    fn bump(self) -> Ck with Mut, Panic, Div {
+        var c = self
+        c.x = c.x + 1
+        c.arr[2] = c.arr[2] + 4
+        c
+    }
+}
+
+fn via(p: *mut Ck) -> i64 with Mut, Panic, Div {
+    (*p).get_x()
+}
+
+fn set_last(first: Option<Box<Seg>>, b: [i8; 16], n: i64) with Mut, Panic, Div, Alloc {
+    var cur = first
+    var going = true
+    while going {
+        match cur {
+            Some(s) => {
+                match (*s).tail {
+                    Some(t) => { cur = Some(t) }
+                    None => {
+                        (*s).buf = b
+                        (*s).len = n
+                        going = false
+                    }
+                }
+            }
+            None => { going = false }
+        }
+    }
+}
+
+fn last_len(first: Option<Box<Seg>>) -> i64 with Mut, Panic, Div, Alloc {
+    var cur = first
+    var out: i64 = 0 - 1
+    while true {
+        match cur {
+            Some(s) => {
+                out = (*s).len * 1000 + (*s).buf[1] as i64
+                cur = (*s).tail
+            }
+            None => break
+        }
+    }
+    out
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div, Alloc {
+    let p = heap_alloc(4096) as *mut Ck
+    (*p).a = 1
+    (*p).x = 4
+    (*p).y = 2
+    (*p).arr = [0, 0, 3, 0, 0, 0]
+    let first = via(p)
+    *p = (*p).bump()
+    let second = via(p)
+    let y_kept = (*p).y
+    var nb: [i8; 16] = [0; 16]
+    nb[1] = 9 as i8
+    let s3 = Seg { buf: [0; 16], len: 3, tail: None }
+    let s2 = Seg { buf: [0; 16], len: 2, tail: Some(Box::new(s3)) }
+    let segs: Option<Box<Seg>> = Some(Box::new(Seg { buf: [0; 16], len: 1, tail: Some(Box::new(s2)) }))
+    set_last(segs, nb, 7)
+    let renamed = last_len(segs)
+    if first == 342 && second == 752 && y_kept == 2 && renamed == 7009 {
+        println("RAW_STRUCT_WHOLE_COPY_OK")
+    } else {
+        println(first)
+        println(second)
+        println(y_kept)
+        println(renamed)
+    }
+    return 0
+}
