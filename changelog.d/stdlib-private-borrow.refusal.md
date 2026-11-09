@@ -1,0 +1,1 @@
+Borrowing a private field from an imported struct now refuses with E259 on the x86-64 and ARM64 bootstrap paths, including direct, shared and dereferenced borrows. Free functions whose first parameter names a struct no longer receive its impl visibility privilege; actual impl methods, owner-module access and public fields retain their existing access.
