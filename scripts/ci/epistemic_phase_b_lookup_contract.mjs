@@ -50,6 +50,7 @@ const cpp=String.raw`
 #include <string>
 #include <vector>
 #include <stdexcept>
+#include <utility>
 struct Entry{std::string name;std::int64_t type,conf,method;};
 std::uint64_t hash(const std::string&s){std::uint64_t h=2166136261;for(unsigned char c:s)h=((h^c)*16777619)&0x1FFFFFFFFFULL;return h;}
 int main(int argc,char**argv){
