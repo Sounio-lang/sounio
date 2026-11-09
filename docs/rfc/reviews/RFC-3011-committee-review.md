@@ -22,7 +22,7 @@ The RFC proposes a synthesis of Quantitative Type Theory (QTT), effect-based reg
 
 - **Core system (Stages 0-4)**: No individual component is novel. The synthesis is new but incremental.
 - **Moonshot proposals (A-E)**: Three claims have no known precedent; two are bold applications of existing techniques.
-- **Soundness risks**: Four critical gaps identified (multi-shot continuations, region escape edge cases, decidability of bounds, Lean formalization scope).
+- **Soundness risks**: Four critical gaps identified (multi-shot continuations, region escape edge cases, decidability of bounds, Lean formalization scope), plus three carried from the novelty review #3014 (region polymorphism, bound composition, grades of exclusive references; §II-b).
 - **Citation accuracy**: All citations verified against real papers. No fabrications found.
 - **Verdict**: The work is defensible as a doctoral contribution **if** the claimed novelty is narrowed to synthesis and the soundness gaps are addressed.
 
@@ -476,6 +476,47 @@ This is honest: you prove the kernel, not the entire language.
 
 ---
 
+## II-b. Soundness Risks Carried from the Novelty Review (#3014)
+
+The hostile novelty review (#3014, `docs/rfc/REVIEW-3011-novelty.md`) raised four soundness issues. Its Issue 1 (multi-shot handlers vs linearity) is Risk 1 above. The other three were not covered by this review and are carried here so that #3014 can close without losing them. Their required revisions are Revisions 8-10 in §IV.
+
+### Risk 5: Region Polymorphism vs Escape
+
+If `Alloc<R>` admits region polymorphism (`fn f<R>(x: T) with Alloc<R>`), polymorphic instantiation can return a value allocated in `R` out of the handler that bounds `R`:
+
+```sio
+fn allocate_in_region<R>(n: i64) -> Vec<i64> with Alloc<R> {
+    let v = Vec::with_capacity(n)
+    return v
+}
+
+fn caller() {
+    handle Alloc<Function> {
+        let v = allocate_in_region::<Function>(10)
+        return v  // escapes the region whose handler is exiting
+    }
+}
+```
+
+The RFC's Theorem 1 (region soundness) is stated for ground regions; with polymorphism it does not cover this program. Prior art closes the gap with scoped type variables (Koka `mask<h>`, Leijen POPL 2017) or region subtyping (Tofte-Talpin 1997).
+
+### Risk 6: Effect Composition vs Bound Additivity
+
+Layer 3's loop rule (`loop ⊢ Alloc ≤ n * B`) does not say how a callee's bound composes when the callee is called in the loop body, across mutual recursion, or through a higher-order argument:
+
+```sio
+fn g() with Alloc<R> ≤ 16 { ... }
+fn f(n: i64) with Alloc<R> ≤ ??? { for i in 0..n { g() } }
+```
+
+RAML (Hoffmann et al. 2010) makes bounds compositional through the potential method. The RFC's rules are sketches until composition is a stated rule of the type-and-effect system.
+
+### Risk 7: Grades of Exclusive References
+
+The RFC gives `&!T` grade-1 access to the borrowed value but does not grade the reference itself, so it is unspecified whether `let r2 = r1` copies or moves an exclusive reference. ADR-028 D-31 (2026-11-09) already fixes part of this on the language side: a reborrow `&(*p)` / `&!(*p)` counts as a borrow of `p`'s underlying place on both engines. The grade system must agree with that rule.
+
+---
+
 ## III. Top 5 Committee Objections
 
 ### Objection 1: "Most of this is combining existing techniques, not inventing new ones."
@@ -696,6 +737,18 @@ To make the RFC defensible as a doctoral contribution, revise as follows:
 
 ---
 
+### Revision 8: Restrict or Scope Region Polymorphism (Risk 5)
+
+Either restrict `Alloc<R>` to ground regions in the MVP and say so in Layer 2, or add scoped region variables (Koka-style) and extend Theorem 1 to cover polymorphic instantiation. The example in Risk 5 must be a refused program.
+
+### Revision 9: State the Composition Rule for Bounds (Risk 6)
+
+Add explicit rules for calls, loops over calls, mutual recursion and higher-order arguments to Layer 3, and make them part of the Lean core calculus of Revision 5. Where a bound cannot be composed, inference reports it as unknown rather than guessing.
+
+### Revision 10: Grade the Exclusive Reference (Risk 7)
+
+State that `&!T` is grade-1 (moved, never copied), with reborrowing as the only way to obtain a second exclusive path, consistent with ADR-028 D-31.
+
 ## V. Final Verdict
 
 ### Pass/Fail Determination
@@ -722,6 +775,7 @@ To make the RFC defensible as a doctoral contribution, revise as follows:
 4. ✅ Scope Lean proofs to core calculus; document TCB (Revision 5).
 5. ✅ Reframe self-certifying bootstrap as hybrid formal-empirical (Revision 6).
 6. ✅ Add epistemic bounds validation plan (Revision 7).
+7. ✅ Restrict or scope region polymorphism; state bound composition; grade exclusive references (Revisions 8-10).
 
 ### Recommended Revisions (Strengthen Contribution)
 
@@ -732,7 +786,7 @@ To make the RFC defensible as a doctoral contribution, revise as follows:
 ### Conditions for Acceptance
 
 ✅ **Accept as doctoral thesis** if:
-1. Revisions 1-7 are implemented.
+1. Revisions 1-10 are implemented.
 2. One case study (epistemic provenance or static plans) is added.
 3. Lean proofs for SounioCore (region soundness, bound correctness, grade preservation) are **attempted** (may admit axioms but must show formalization is feasible).
 
@@ -789,7 +843,7 @@ All RFC citations checked against real papers:
 
 ## VIII. Recommended Next Steps
 
-1. **Implement Revisions 1-7** (see §IV).
+1. **Implement Revisions 1-10** (see §IV).
 2. **Write SounioCore formalization** (`formal/sounio_core/syntax.lean`, `semantics.lean`, `soundness.lean`). Even if axioms admitted, show formalization is feasible.
 3. **Add one case study**: Either epistemic provenance (clinical PK) or static memory plans (benchmark compiler).
 4. **Resubmit RFC** with "Major Revision" tag; notify reviewers.
