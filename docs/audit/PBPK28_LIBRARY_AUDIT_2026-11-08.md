@@ -108,16 +108,31 @@ Observations, all measured:
 | Tier | Establishes | Drugs today |
 |---|---|---|
 | P, parity | the Sounio scenario equals the website engine (`pbpk28_core.mjs`), RMSE < 1 % per compartment on cavg, `dissertation_pbpk28_parity_gate.sh` | the 13 pre-existing drugs (one case each) |
-| A, analytic | a value fixed by hand before the run: runtime clearance identity, MRT = V_ss/CL and AUC = Dose/CL on a converged grid, mass identity | morphine, fentanyl (and the clozapine x fluvoxamine dynamic layer) |
+| A, analytic | a value fixed by hand before the run: runtime clearance identity, MRT = V_ss/CL and AUC = Dose/CL on a converged grid, mass identity | 14 of 15: morphine and fentanyl (own tests); clozapine, olanzapine, quetiapine, lithium, tacrolimus, everolimus, vancomycin, tirzepatide, risperidone (parent and 9-OH), rapamycin, venlafaxine (parent and ODV), semaglutide (`darwin_pbpk28_library_moments.sio`, added 2026-11-09); also the clozapine x fluvoxamine dynamic layer |
 | L, literature | a PubMed-verified published value, deviation reported | morphine (V_ss vs Bouwmeester 2004), fentanyl (terminal t1/2 vs McClain & Hug 1980, [10.1038/clpt.1980.138](https://doi.org/10.1038/clpt.1980.138)) |
 
 Parity proves two implementations agree; it does not show that either is
 pharmacologically right. Under the criterion that a result counts as done only
-when an explicit model predicted it, **2 of 15 drugs are at tier A today**. The
-moment-theory harness in `darwin_fentanyl_pbpk28.sio` is parametric in
-`PBPKParams28`, so extending tier A to the other sets with `cl_central > 0`
-(13 sets) is a bounded piece of work; slow-clearance sets (tirzepatide MRT
-354 h, semaglutide 280 h) need a longer graded grid.
+when an explicit model predicted it, 2 of 15 drugs were at tier A when this
+audit was written.
+
+**Update 2026-11-09.** `tests/run-pass/darwin_pbpk28_library_moments.sio` applies
+the tier-A gates to the 14 remaining sets that carry elimination in `cl_central`,
+against the V_ss/CL column of section 3, fixed before the run. All 14 pass on
+Madaros (19 s) and lean_single (74 s), with identical numbers: runtime clearance
+equal to `cl_central` to six digits, MRT within 0.24 % (largest: quetiapine,
+3.8754 against 3.8846 h), AUC within 0.24 %, quadrature converged (< 0.2 %), tail
+< 1e-13 and mass residual ~1e-13 (lean_single prints them unrounded). The AUC
+excess is trapezoid error, not model error: it falls with the step at second
+order. The step grows geometrically late (0.5 % of t) and the horizon is
+80 x MRT, so the slow peptide sets (tirzepatide 354 h, semaglutide 280 h) cost
+no more than the fast ones. **14 of 15 drugs are now at tier A.** Aripiprazole is
+the exception: its elimination is two CYP sinks on the liver with
+`cl_central = 0`, so V_ss/CL has no closed form from the parameter set alone.
+
+Tier A here means internal consistency of each parameter set with the PBPK28
+transport. It is not tier L: no V_ss or CL of the 13 older drugs is checked
+against a verified published value yet.
 
 ## 5. Venlafaxine ODV
 
