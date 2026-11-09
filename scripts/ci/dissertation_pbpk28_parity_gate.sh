@@ -1451,6 +1451,75 @@ paste <(grep "^TMASS|m=" "$OLZ_SIO_LOG" | sed "s/^TMASS|m=//") \
 
 echo
 echo "[pbpk28-parity] olanzapine oral-IR canonical: tablet lag + gut absorption + systemic PK + mass envelope (9th canonical drug)"
+echo
+echo "[pbpk28-parity] Case 23s: Sounio <-> Node olanzapine-smoker PBPK28 (CYP1A2 induction x2)"
+
+OLZS_SIO_LOG="$OUT_DIR/olzs_sounio.txt"
+OLZS_NODE_LOG="$OUT_DIR/olzs_node.txt"
+
+"$SOUC_BIN" run tests/run-pass/dissertation_pbpk28_parity_ref_olanzapine_smoker.sio > "$OLZS_SIO_LOG" 2>&1 || {
+  echo "[pbpk28-parity:case23s] FAIL: Sounio olanzapine-smoker ref returned non-zero" >&2
+  tail -n 20 "$OLZS_SIO_LOG" >&2; exit 1; }
+if ! grep -q "^DISSERTATION_PBPK28_OLANZAPINE_SMOKER_PARITY_DONE$" "$OLZS_SIO_LOG"; then
+  echo "[pbpk28-parity:case23s] FAIL: Sounio olanzapine-smoker ref did not emit DONE" >&2; exit 1; fi
+node "$NODE_RUNNER" --drug=olanzapine-smoker > "$OLZS_NODE_LOG" 2>&1 || {
+  echo "[pbpk28-parity:case23s] FAIL: Node olanzapine-smoker runner returned non-zero" >&2
+  tail -n 20 "$OLZS_NODE_LOG" >&2; exit 1; }
+if ! grep -q "^DISSERTATION_PBPK28_OLANZAPINE_SMOKER_PARITY_NODE v1$" "$OLZS_NODE_LOG"; then
+  echo "[pbpk28-parity:case23s] FAIL: Node olanzapine-smoker runner header mismatch" >&2; exit 1; fi
+
+OLZS_SIO_TSV="$OUT_DIR/olzs_sounio.tsv"
+OLZS_NODE_TSV="$OUT_DIR/olzs_node.tsv"
+parse_to_tsv "$OLZS_SIO_LOG" "$OLZS_SIO_TSV"
+parse_to_tsv "$OLZS_NODE_LOG" "$OLZS_NODE_TSV"
+
+OLZS_SIO_ROWS=$(wc -l < "$OLZS_SIO_TSV")
+OLZS_NODE_ROWS=$(wc -l < "$OLZS_NODE_TSV")
+if [[ "$OLZS_SIO_ROWS" -ne "$EXPECTED_ROWS" || "$OLZS_NODE_ROWS" -ne "$EXPECTED_ROWS" ]]; then
+  echo "[pbpk28-parity:case23s] FAIL: olanzapine-smoker row count mismatch" >&2
+  exit 1
+fi
+echo "[pbpk28-parity:case23s] both runs emitted $OLZS_SIO_ROWS records"
+
+OLZS_JOINED="$OUT_DIR/olzs_joined.tsv"
+awk -F"\t" "
+  NR==FNR { S[\$1\"|\"\$2] = \$5; next }
+  { print \$1\"\t\"\$2\"\t\"S[\$1\"|\"\$2]\"\t\"\$5 }
+" "$OLZS_SIO_TSV" "$OLZS_NODE_TSV" > "$OLZS_JOINED"
+
+awk -F"\t" -v THR="$RMSE_THRESHOLD_PCT" "
+  {
+    i = \$2 + 0; cs = \$3 + 0; cn = \$4 + 0;
+    d = cs - cn; SS[i] += d * d; NN[i] += 1;
+    if (cs > PK[i]) PK[i] = cs;
+    if (cn > PK[i]) PK[i] = cn;
+  }
+  END {
+    bad = 0;
+    for (i = 0; i < 14; i++) {
+      if (NN[i] == 0) { printf \"PBPK28_OLANZAPINE_SMOKER_PARITY_FAIL organ %d MISSING\n\", i; bad += 1; continue; }
+      rmse = sqrt(SS[i] / NN[i]); pk = PK[i] + 0;
+      if (pk == 0) { continue; }
+      pct = 100.0 * rmse / pk;
+      if (pct >= THR + 0) { printf \"PBPK28_OLANZAPINE_SMOKER_PARITY_FAIL organ %d pct=%.4f rmse=%.3g\n\", i, pct, rmse; bad += 1; }
+    }
+    if (bad > 0) { exit 1; }
+    printf \"PBPK28_OLANZAPINE_SMOKER_PARITY_PASS 14/14 compartments within %s%% RMSE (strict)\n\", THR;
+  }
+" "$OLZS_JOINED"
+
+paste <(grep "^TMASS|m=" "$OLZS_SIO_LOG" | sed "s/^TMASS|m=//") \
+      <(grep "^TREL|cum=" "$OLZS_SIO_LOG" | sed "s/^TREL|cum=//") \
+  | awk -v FAILM="PBPK28_OLANZAPINE_SMOKER_MASS_FAIL" -v PASS="PBPK28_OLANZAPINE_SMOKER_MASS_PASS" "
+      { m=(\$1+0); r=(\$2+0); n++;
+        if (!(m >= 0 && m <= r)) { printf \"%s sample %d: mass %.6f outside [0, %.6f]\n\", FAILM, n, m, r; bad=1 } }
+      END { if (n != 12) { printf \"%s row count %d != 12\n\", FAILM, n; exit 1 }
+        if (bad) exit 1;
+        printf \"%s 12/12 samples within [0, absorbed]\n\", PASS }"
+
+echo
+echo "[pbpk28-parity] olanzapine-smoker CYP1A2 induction: same tablet and input, CL 50 L/h, parity + mass envelope (case 23s)"
+
 
 # ════════════════════════════════════════════════════════════════════════════
 # Case 24: Clozapine — tenth canonical drug, third oral-IR case in PBPK-28.
