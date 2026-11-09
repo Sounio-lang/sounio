@@ -7266,6 +7266,44 @@ fn lowerer_fresh_reg_mut(lo: &! Lowerer) -> i64 with Mut, Panic, Div {
     reg
 }
 
+fn lowerer_emit_mut(lo: &! Lowerer, instr: IrInstr) with Mut, Panic, Div, IO {
+    if (*lo).current_fn < 0 || (*lo).current_fn >= (*(*lo).module).fn_count {
+        if (*lo).probe_mode {
+            print("lower_probe: emit_invalid current_fn=")
+            print_int((*lo).current_fn)
+            print(" fn_count=")
+            print_int((*(*lo).module).fn_count)
+            print("\n")
+        }
+        (*lo).error_count = (*lo).error_count + 1
+        (*lo).had_error = true
+        lower_note_error(9056, (*(*lo).current_func).name)
+        return
+    }
+    var current_func_box = (*lo).current_func
+    if instr.imm_flags == IR_FLOAT_REG_MARKER_FLAG && instr.dst >= 0 {
+        let _fb = ir_float_bits_set(&! (*current_func_box), instr.dst)
+    }
+    let instr_count = (*current_func_box).instr_count
+    if instr_count < IR_MAX_INSTRS {
+        ir_arena_store(ir_region_slot_w((*current_func_box).region, (instr_count)), instr)
+        (*current_func_box).instr_count = instr_count + 1
+        (*lo).current_func = current_func_box
+    } else {
+        if !(*lo).probe_mode {
+            IR_LOWER_HARD_ERROR = 1
+            IR_LOWER_HARD_ERROR_REASON = 1
+            ir_copy_name_to_flat(&(*current_func_box).name, &! IR_LOWER_HARD_ERROR_FN_BUF, &! IR_LOWER_HARD_ERROR_FN_LEN)
+            IR_LOWER_HARD_ERROR_LIMIT = IR_MAX_INSTRS
+            IR_LOWER_HARD_ERROR_NEEDED = IR_MAX_INSTRS + IR_INSTR_OVERFLOW_COUNT + 1
+        }
+        IR_INSTR_OVERFLOW_COUNT = IR_INSTR_OVERFLOW_COUNT + 1
+        (*lo).error_count = (*lo).error_count + 1
+        (*lo).had_error = true
+        lower_note_error(9093, (*current_func_box).name)
+    }
+}
+
 // `self` reaches lowering UNTYPED. parser/items.sio:1741 gives the receiver a
 // dummy_type_expr() unless the source wrote `self: T`, so lower_param_struct_type_name
 // answers empty, struct_types[self] stays empty, and every `self.a.b` loses its base
@@ -7668,11 +7706,11 @@ fn lowerer_rgn_return_kind_mut(lo: &! Lowerer, rt: &Option<Box<TypeExpr>>) -> i6
 fn lowerer_rgn_emit_exit_mut(lo: &! Lowerer, kind: i64, type_name: Name) with Mut, Panic, Div, Alloc, IO {
     let tok = LOWER_RGN_TOK_REG
     let ret = LOWER_RGN_RET_REG
-    (*lo) = (*lo).emit(ir_label(LOWER_RGN_EXIT_LABEL))
+    lowerer_emit_mut(lo, ir_label(LOWER_RGN_EXIT_LABEL))
     let plain_pair = (*lo).fresh_label()
     (*lo) = plain_pair.0
     let plain_label = plain_pair.1
-    (*lo) = (*lo).emit(ir_branch_false(tok, plain_label))
+    lowerer_emit_mut(lo, ir_branch_false(tok, plain_label))
     if kind == 3 {
         (*lo) = (*lo).rgn_emit_result_escape_scan(ret, type_name, 0)
         let esc_pair = (*lo).rgn_call("__rgn_escaped", tok, 0, 0, 1)
@@ -7680,11 +7718,11 @@ fn lowerer_rgn_emit_exit_mut(lo: &! Lowerer, kind: i64, type_name: Name) with Mu
         let zero_pair = (*lo).emit_i64_const(0)
         (*lo) = zero_pair.0
         let clean_reg = lowerer_fresh_reg_mut(lo)
-        (*lo) = (*lo).emit(ir_binop(clean_reg, esc_pair.1, BinaryOp::OpEq, zero_pair.1))
+        lowerer_emit_mut(lo, ir_binop(clean_reg, esc_pair.1, BinaryOp::OpEq, zero_pair.1))
         let lv_pair = (*lo).fresh_label()
         (*lo) = lv_pair.0
         let leave_v_label = lv_pair.1
-        (*lo) = (*lo).emit(ir_branch_false(clean_reg, leave_v_label))
+        lowerer_emit_mut(lo, ir_branch_false(clean_reg, leave_v_label))
         let sc_pair = (*lo).rgn_call("__rgn_count", 0, 0, 0, 0)
         (*lo) = sc_pair.0
         let sh_pair = (*lo).rgn_call("__rgn_cursor", 0, 0, 0, 0)
@@ -7696,17 +7734,17 @@ fn lowerer_rgn_emit_exit_mut(lo: &! Lowerer, kind: i64, type_name: Name) with Mu
         let lt_pair = (*lo).fresh_label()
         (*lo) = lt_pair.0
         let leave_t_label = lt_pair.1
-        (*lo) = (*lo).emit(ir_branch_false(ok_pair.1, leave_t_label))
+        lowerer_emit_mut(lo, ir_branch_false(ok_pair.1, leave_t_label))
         let second_pair = (*lo).rgn_emit_young_copy(tok, first_pair.1, type_name, 0)
         (*lo) = second_pair.0
         let leave1 = (*lo).rgn_call("__rgn_leave", tok, 0, 0, 1)
         (*lo) = leave1.0
-        (*lo) = (*lo).emit(ir_return(second_pair.1))
-        (*lo) = (*lo).emit(ir_label(leave_t_label))
+        lowerer_emit_mut(lo, ir_return(second_pair.1))
+        lowerer_emit_mut(lo, ir_label(leave_t_label))
         let leave2 = (*lo).rgn_call("__rgn_leave", tok, 0, 0, 1)
         (*lo) = leave2.0
-        (*lo) = (*lo).emit(ir_return(first_pair.1))
-        (*lo) = (*lo).emit(ir_label(leave_v_label))
+        lowerer_emit_mut(lo, ir_return(first_pair.1))
+        lowerer_emit_mut(lo, ir_label(leave_v_label))
         let leave3 = (*lo).rgn_call("__rgn_leave", tok, 0, 0, 1)
         (*lo) = leave3.0
     } else {
@@ -7715,8 +7753,8 @@ fn lowerer_rgn_emit_exit_mut(lo: &! Lowerer, kind: i64, type_name: Name) with Mu
         let exit_pair = (*lo).rgn_call("__rgn_exit_scalar", tok, ret, 0, 2)
         (*lo) = exit_pair.0
     }
-    (*lo) = (*lo).emit(ir_label(plain_label))
-    (*lo) = (*lo).emit(ir_return(ret))
+    lowerer_emit_mut(lo, ir_label(plain_label))
+    lowerer_emit_mut(lo, ir_return(ret))
 }
 
 // Whether the body lowered in [first, end) can allocate enough for a region to
@@ -7778,7 +7816,7 @@ fn lowerer_emit_deferred_global_inits_mut(lo: &! Lowerer) with Mut, Panic, Div, 
                 if p != (0 as *mut Expr) {
                     let pair = (*lo).lower_expr_ref(&(*p))
                     (*lo) = pair.0
-                    (*lo) = (*lo).emit(ir_store_global(pair.1, slot.param_count, slot.name))
+                    lowerer_emit_mut(lo, ir_store_global(pair.1, slot.param_count, slot.name))
                 }
             } else if slot.returns_float != 1 {
                 // `var G: S` with no initializer: give it a zeroed struct, as
@@ -7788,11 +7826,11 @@ fn lowerer_emit_deferred_global_inits_mut(lo: &! Lowerer) with Mut, Panic, Div, 
                     let slots = (*lo).struct_layout_slot_count(st)
                     if slots > 0 {
                         let dst = lowerer_fresh_reg_mut(lo)
-                        (*lo) = (*lo).emit(ir_alloc(dst, (*lo).aggregate_storage_bytes(slots)))
+                        lowerer_emit_mut(lo, ir_alloc(dst, (*lo).aggregate_storage_bytes(slots)))
                         // Array and nested-struct fields are handles: give them
                         // storage too, exactly as the local `var s: S` path does.
                         (*lo) = (*lo).emit_uninit_struct_array_fields(dst, st, slots)
-                        (*lo) = (*lo).emit(ir_store_global(dst, slot.param_count, slot.name))
+                        lowerer_emit_mut(lo, ir_store_global(dst, slot.param_count, slot.name))
                     }
                 }
             }

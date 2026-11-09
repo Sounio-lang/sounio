@@ -1,0 +1,1 @@
+Lowering now has a small `&!Lowerer` instruction-emission helper used by region-exit and deferred-global-init paths. This starts the SIO-3020 Lowerer stack-use migration by removing a few value-threaded `Lowerer::emit` copies in already-mutable code without changing IR limits, arena sizes, stack limits or lowering semantics.

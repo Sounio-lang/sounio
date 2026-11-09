@@ -19,6 +19,7 @@ import { fileURLToPath } from 'node:url';
 import { parse } from 'parse5';
 import { EFFECTS_PAGE, ENGLISH_SEARCH, SELF_HOSTED_PAGE } from '../src/lib/search-appearance.mjs';
 import { EFFECTS_FAQ } from '../src/lib/effect-system-page.mjs';
+import { UNCERTAINTY_EN, UNCERTAINTY_PT } from '../src/lib/uncertainty-page.mjs';
 import { rehypeDemoteH1 } from '../src/lib/rehype-demote-h1.mjs';
 import { isoDateOrNothing, CODE_REPOSITORY, COMPUTER_LANGUAGE_ID, FORMER_LANGUAGE_NAME, FORMER_RELEASE_URL, computerLanguage } from '../src/lib/structured-data.mjs';
 
@@ -149,9 +150,11 @@ function titleOf(html) {
 }
 
 function descriptionOf(html) {
-  const match = html.match(/<meta\b[^>]*name="description"[^>]*>/i);
-  if (!match) return '';
-  const quoted = match[0].match(/content="([^"]*)"/);
+  // Quoted attributes may contain `>` (Knowledge<T>). A scan that stops at
+  // the first `>` would cut the description in the middle of the type.
+  const start = html.search(/<meta\b[^>]*\bname="description"/i);
+  if (start < 0) return '';
+  const quoted = html.slice(start, start + 4000).match(/\bcontent="([^"]*)"/);
   return quoted ? decode(quoted[1]) : '';
 }
 
@@ -239,7 +242,94 @@ function selfTest() {
   assert.equal('softwareVersion' in languageNode, false);
   assert.equal(COMPILER_VERSION.test(JSON.stringify(languageNode)), false);
   assert.equal(COMPILER_VERSION.test(RESEARCH_STATUS), false);
+  assert.equal(descriptionOf('<meta name="description" content="Knowledge&lt;T&gt; stays quoted.">'), 'Knowledge<T> stays quoted.');
+  assert.equal(descriptionOf('<meta name="description" content="Knowledge<T> stays quoted.">'), 'Knowledge<T> stays quoted.');
   assert.equal(RESERVED_SCHEMA_IDS.has(COMPUTER_LANGUAGE_ID), false);
+}
+
+function uncertaintyAppearanceErrors(route, html, blocks, page) {
+  const found = [];
+  const headings = h1Texts(html);
+  if (headings[0] !== page.h1) {
+    found.push(`${route}: H1 is ${JSON.stringify(headings[0])}, expected ${JSON.stringify(page.h1)}`);
+  }
+  if (titleOf(html) !== page.documentTitle) {
+    found.push(`${route}: title is ${JSON.stringify(titleOf(html))}`);
+  }
+  if (descriptionOf(html) !== page.description) {
+    found.push(`${route}: description does not match the uncertainty copy`);
+  }
+  const lede = firstParagraphAfterH1(html);
+  if (lede !== page.lede) found.push(`${route}: first paragraph after H1 does not match the answer`);
+  for (const token of ['Measurements.jl', 'uncertainties', 'Knowledge']) {
+    if (!lede.includes(token)) found.push(`${route}: answer-first paragraph missing ${token}`);
+  }
+  const visible = visibleProse(html);
+  if (!visible.includes(page.statusLine)) found.push(`${route}: research-language status line is missing`);
+  if (visible.includes('(eventually)') || visible.includes('eventually propagates')) {
+    found.push(`${route}: stale "(eventually) propagates" wording is still visible`);
+  }
+  const versionHit = html.match(/v0\.80|v0\.99|v0\.100|v1\.0/);
+  if (versionHit) found.push(`${route}: compiler version ${versionHit[0]} appears in the HTML`);
+  if (/\bphysician\b|\bPhD\b|\bDr\.|\bMD\b|honorificPrefix/.test(html)) {
+    found.push(`${route}: forbidden credential or honorificPrefix in the HTML`);
+  }
+  if (/faster than|more accurate than/i.test(visible)) {
+    found.push(`${route}: performance or accuracy comparison is present`);
+  }
+  if (!html.includes('v_ind=0.050000') || !html.includes('v_cor=0.090000')) {
+    found.push(`${route}: Madaros excerpt output is missing`);
+  }
+  const article = blocks.find((block) => block['@type'] === 'TechArticle');
+  if (article?.headline !== page.h1) found.push(`${route}: TechArticle headline`);
+  if (article?.description !== page.description) found.push(`${route}: TechArticle description`);
+  if (article?.dateModified !== page.dateModified) found.push(`${route}: TechArticle dateModified`);
+  if ('softwareVersion' in (article ?? {})) found.push(`${route}: softwareVersion on TechArticle`);
+  if (JSON.stringify(article?.author) !== JSON.stringify(page.author)) {
+    found.push(`${route}: TechArticle author ${JSON.stringify(article?.author)}`);
+  }
+  if (article?.author && ('honorificPrefix' in article.author || 'honorificSuffix' in article.author)) {
+    found.push(`${route}: TechArticle author carries an honorific`);
+  }
+  if (JSON.stringify(article?.about) !== JSON.stringify(page.about)) {
+    found.push(`${route}: TechArticle about ${JSON.stringify(article?.about)}`);
+  }
+  if (JSON.stringify(article?.isPartOf) !== JSON.stringify(page.isPartOf)) {
+    found.push(`${route}: TechArticle isPartOf`);
+  }
+  if (article?.proficiencyLevel !== page.proficiencyLevel) found.push(`${route}: TechArticle proficiencyLevel`);
+  if (JSON.stringify(article?.dependencies) !== '[]') found.push(`${route}: TechArticle dependencies`);
+  if (JSON.stringify(article?.citation) !== JSON.stringify(page.citation)) {
+    found.push(`${route}: TechArticle citation ${JSON.stringify(article?.citation)}`);
+  }
+  const faq = blocks.find((block) => block['@type'] === 'FAQPage');
+  if (!faq) found.push(`${route}: FAQPage missing`);
+  const entities = faq?.mainEntity ?? [];
+  if (entities.length !== page.faq.length) found.push(`${route}: FAQPage has ${entities.length} questions`);
+  page.faq.forEach((item, index) => {
+    const entity = entities[index];
+    if (entity?.name !== item.question || entity?.acceptedAnswer?.text !== item.answer) {
+      found.push(`${route}: FAQPage item ${index} does not match the source strings`);
+    }
+    if (!visible.includes(item.question) || !visible.includes(item.answer)) {
+      found.push(`${route}: FAQ item ${index} is not visible`);
+    }
+  });
+  const names = blocks.find((block) => block['@type'] === 'BreadcrumbList')?.itemListElement?.map((item) => item.name) ?? [];
+  if (names.join('\n') !== page.crumbs.join('\n')) {
+    found.push(`${route}: BreadcrumbList is ${names.join(' / ')}`);
+  }
+  for (const rel of [
+    'tests/run-pass/madaros_gum_fo_correlate.sio',
+    'tests/run-pass/gum_correlated.sio',
+    'tests/run-pass/madaros_gum_correlate_negative_rho.sio',
+    'tests/run-pass/madaros_gum_correlate_is_per_function.sio',
+    'tests/compile-fail/correlate_rho_must_be_literal.sio',
+    'docs/compiler/KNOWN_LIMITATIONS.md',
+  ]) {
+    if (!html.includes(rel)) found.push(`${route}: missing source path ${rel}`);
+  }
+  return found;
 }
 
 selfTest();
@@ -420,7 +510,12 @@ for await (const file of walk(dist)) {
     }
   }
 
-  if (locale !== 'en') continue;
+  if (locale !== 'en') {
+    if (bare === '/learn/epistemic/uncertainty/' && locale === 'pt') {
+      for (const error of uncertaintyAppearanceErrors(route, html, blocks, UNCERTAINTY_PT)) errors.push(error);
+    }
+    continue;
+  }
   englishPages += 1;
   const title = titleOf(html);
   const description = descriptionOf(html);
@@ -434,27 +529,34 @@ for await (const file of walk(dist)) {
   if (headings.length === 1 && headings[0] === expected.title) {
     errors.push(`${route}: the visible H1 was replaced by the search title`);
   }
-  const article = articles[0];
-  if (article) {
-    const isSelfHostedPage = bare === '/learn/compiler/self-hosted/';
-    const isEffectsPage = bare === '/learn/effects/';
-    const headline = isSelfHostedPage
-      ? SELF_HOSTED_PAGE.h1
-      : isEffectsPage
-        ? EFFECTS_PAGE.h1
-        : expected.title;
-    if (article.headline !== headline) errors.push(`${route}: TechArticle headline does not match ${JSON.stringify(headline)}`);
-    if (article.description !== expected.description) errors.push(`${route}: TechArticle description does not match the meta description`);
-    if (article.inLanguage !== 'en') errors.push(`${route}: TechArticle inLanguage`);
-    if (article.url !== absoluteUrl(bare)) errors.push(`${route}: TechArticle url ${article.url}`);
-    if (isEffectsPage) {
-      if (article.dateModified !== EFFECTS_PAGE.dateModified) {
-        errors.push(`${route}: dateModified is ${JSON.stringify(article.dateModified)}`);
+    const article = articles[0];
+    if (article) {
+      const isSelfHostedPage = bare === '/learn/compiler/self-hosted/';
+      const isEffectsPage = bare === '/learn/effects/';
+      const isUncertaintyPage = bare === '/learn/epistemic/uncertainty/';
+      const headline = isSelfHostedPage
+        ? SELF_HOSTED_PAGE.h1
+        : isEffectsPage
+          ? EFFECTS_PAGE.h1
+          : isUncertaintyPage
+            ? UNCERTAINTY_EN.h1
+            : expected.title;
+      if (article.headline !== headline) errors.push(`${route}: TechArticle headline does not match ${JSON.stringify(headline)}`);
+      if (article.description !== expected.description) errors.push(`${route}: TechArticle description does not match the meta description`);
+      if (article.inLanguage !== 'en') errors.push(`${route}: TechArticle inLanguage`);
+      if (article.url !== absoluteUrl(bare)) errors.push(`${route}: TechArticle url ${article.url}`);
+      if (isEffectsPage) {
+        if (article.dateModified !== EFFECTS_PAGE.dateModified) {
+          errors.push(`${route}: dateModified is ${JSON.stringify(article.dateModified)}`);
+        }
+      } else if (isUncertaintyPage) {
+        if (article.dateModified !== UNCERTAINTY_EN.dateModified) {
+          errors.push(`${route}: dateModified is ${JSON.stringify(article.dateModified)}`);
+        }
+      } else if ('dateModified' in article) {
+        errors.push(`${route}: dateModified was emitted without a calendar date in the source`);
       }
-    } else if ('dateModified' in article) {
-      errors.push(`${route}: dateModified was emitted without a calendar date in the source`);
     }
-  }
   if (bare === '/learn/compiler/self-hosted/') {
     if (headings[0] !== SELF_HOSTED_PAGE.h1) {
       errors.push(`${route}: H1 is ${JSON.stringify(headings[0])}, expected ${JSON.stringify(SELF_HOSTED_PAGE.h1)}`);
@@ -542,6 +644,9 @@ for await (const file of walk(dist)) {
     ]) {
       if (!html.includes(rel)) errors.push(`${route}: missing test path ${rel}`);
     }
+  }
+  if (bare === '/learn/epistemic/uncertainty/') {
+    for (const error of uncertaintyAppearanceErrors(route, html, blocks, UNCERTAINTY_EN)) errors.push(error);
   }
   if (bare === '/') {
     const app = software[0];
