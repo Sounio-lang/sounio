@@ -81,6 +81,17 @@ jobs:
           IMPACT_RUNTIME: ${{ steps.classify.outputs.runtime }}
           IMPACT_STDLIB: ${{ steps.classify.outputs.stdlib }}
         run: bash scripts/ci/changelog_fragment_gate.sh
+      # The lean_single fallback dispatch had no committed coverage: every
+      # existing gate either forces the engine or pins SOUNIO_TEST_SOUC_BIN,
+      # so the verb-translation regression merged green. This gate drives the
+      # automatic fallback in a Madaros-less tree, both directions, so a guard
+      # that refused everything would fail too (PR #3400 review). It lives
+      # here, not beside the compiler override gate: contracts-core steps must
+      # select exactly one matrix shard registered in contracts_partition.tsv
+      # (contracts_parallel_contract.mjs), and this branch predates that
+      # registry — a matrix step here would fail the merge-group contract.
+      - name: lean_single fallback dispatches verbs honestly
+        run: python3 scripts/ci/souc_lean_fallback_dispatch_gate.py
 
   # ADR-027 §1: the cheap gates run first, in one job, with no dependency on
   # Impact, so a PR that breaks one of them is red in minutes rather than
@@ -143,6 +154,8 @@ jobs:
           EFFECT_NAME_CLOSED_LIST_ARTIFACT: artifacts/audit/effect_name_closed_list/status.json
           EFFECT_NAME_CLOSED_LIST_OUT: artifacts/audit/effect_name_closed_list
         run: bash scripts/ci/effect_name_closed_list_gate.sh
+      - name: Entry trampolines take heap_limit from the mapping, not the reservation bound (ADR-028)
+        run: bash scripts/ci/heap_limit_source_gate.sh
       - name: EISA origin — R7 origin acceptance
         run: bash scripts/ci/eisa_origin_gate.sh
       - name: EISA origin — negative control (RSS-only eadd must fail the gate)
@@ -919,6 +932,11 @@ jobs:
           chmod +x /tmp/lean_b.elf
           SOUNIO_LEAN_SINGLE_BIN=/tmp/lean_b.elf JOBS=4 TIMEOUT_SECS=120 \
             bash scripts/ci/a64_compile_fail_parity_gate.sh
+      - name: checker_init_in_place assigns every Checker field (#2966)
+        if: matrix.shard == 'core-c'
+        run: |
+          bash scripts/ci/checker_init_in_place_fields_gate.sh --selftest
+          bash scripts/ci/checker_init_in_place_fields_gate.sh
       # The shipped lean_single ELF must BE the byte-identical fixed point of
       # current lean_single.sio. This gate existed, passed, and was wired to no
       # workflow — so the one thing that would notice the shipped binary drifting
@@ -2363,6 +2381,19 @@ jobs:
         env:
           MADAROS_RAW_BIN: /tmp/madaros-ci.elf
         run: bash scripts/ci/madaros_ref_alias_bind_as_ref_gate.sh
+      # An epistemic-builtin compile-fail fixture must be REFUSED, not CRASHED.
+      # Measured 2026-11-04: 39 of the 42 such fixtures print their diagnostic
+      # and then segfault on a Madaros built from self-hosted/, which every
+      # gate reading `rc != 0` as "refused" scored as a passing refusal.
+      # MUST run against the fresh build: the COMMITTED prebuilt (0ff69d86,
+      # built 2026-10-31 from 0ed977ce) still refuses all 42 cleanly with rc 1,
+      # so against it this gate would report the whole baseline as repaired and
+      # fail for the wrong reason. That gap between the shipped prebuilt and
+      # the current source IS the regression this gate pins.
+      - name: Epistemic compile-fail fixtures refuse, never crash
+        env:
+          MADAROS_RAW_BIN: /tmp/madaros-ci.elf
+        run: bash scripts/ci/madaros_epistemic_compile_fail_no_crash_gate.sh
       # E230 noise-set anti-garbling (Paper A wire, N1-N4): the same-source-built
       # sabotage witness -- E230 refuses x+x / x+top / ident(x)+x, vanishes under
       # SOUNIO_NS_DISABLE=1, and an unrelated refusal (E245) survives the knob.

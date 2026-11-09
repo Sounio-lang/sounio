@@ -133,6 +133,24 @@ Declaration acceptance therefore does not imply that a name is usable in every
 expression. The contextual-keyword fixture still has an older comment excluding
 `audit`; `tk_is_contextual_ident` now includes it. The source is authoritative.
 
+`LEX-006a` (**specified-contract**, reserved words, ADR-015 row 10, measured 2026-11-08
+with the probes `kw_let_<word>`: 50 spellings and 4 controls). A word is reserved only
+where the grammar needs it in name position. Both engines now agree on all 54 probes:
+
+- **Valid as ordinary names** outside their syntax: `effect handler policy`
+  `acquisition_policy recourse_policy transition_policy transition_protocol`
+  `monitoring_policy alternative_policy alternative_frontier decision_policy`
+  `deferral_policy models validation audit on level scope is study affine linear`
+  (plus `unit kernel close var Knowledge` in Madaros expression dispatch). `affine` and
+  `linear` are keywords only where an item starts (`linear struct`, `affine fn`) or as a
+  type qualifier (`x: linear File`); `study` only before a study block. Reading one of
+  them as `0` is a defect.
+- **Reserved**, refused as binding names by both engines: `async await spawn crate super
+  perform resume`. Declaration names (`fn spawn(..)`) and member names (`x.spawn`) stay
+  valid. Madaros refuses their use in expression position; `lean_single` refuses a `let`
+  or `var` binding named after one, and still accepts them as parameter or field names.
+  That residual difference is not covered by the probes.
+
 `LEX-007` (**source-observed**, punctuators and maximal munch). The active
 operator branch tests three-byte spellings before two-byte spellings before
 one-byte spellings:

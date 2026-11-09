@@ -33,7 +33,7 @@ export const ENGLISH_SEARCH = {
   '/learn/compiler/self-hosted/': {
     title: 'Sounio self-hosted compiler: x86-64 ELF without LLVM',
     description:
-      "Sounio's compiler is written in Sounio: it type-checks, optimizes and emits static Linux x86-64 ELF binaries directly, with no LLVM or Cranelift.",
+      'The Sounio compiler runs 12 named -O passes and emits a Linux x86-64 ELF, static unless external relocations exist, with no LLVM and no Cranelift.',
   },
   '/about/roadmap/': {
     title: 'Sounio roadmap: language, runtime, and what is open',
@@ -54,7 +54,7 @@ export const ENGLISH_SEARCH = {
 /** Approved S1 copy for the English self-hosted compiler page. */
 export const SELF_HOSTED_PAGE = {
   h1: 'Sounio self-hosted compiler',
-  lede: 'The Sounio compiler is written in Sounio (.sio). It parses, type-checks, lowers to an IR, runs its optimization passes and emits a static Linux x86-64 ELF binary directly, with no LLVM or Cranelift on that path. Linux x86-64 is the default shipped target.',
+  lede: 'The Sounio compiler is written in Sounio (.sio). It parses, type-checks, lowers to IR, runs the 12 named passes of the -O cleanup listed on this page, and emits a Linux x86-64 ELF that is static unless the program has external relocations, with no LLVM and no Cranelift on that path. Linux x86-64 is the default shipped target.',
   crumbs: ['Learn', 'Compiler', 'Self-hosted compiler'],
   author: {
     '@type': 'Person',
