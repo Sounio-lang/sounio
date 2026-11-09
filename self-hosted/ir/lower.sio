@@ -17383,6 +17383,24 @@ impl Lowerer {
         lo
     }
 
+    // Undo bind_local_raw_ptr for a local whose value is a borrow handle.
+    fn unbind_local_raw_ptr(self, name: Name) -> Lowerer with Mut, Alloc, Panic, Div {
+        var lo = self
+        var stk = lo.locals
+        var i = (*stk).count - 1
+        while i >= 0 {
+            if (*(*stk).depths).values[i as usize] <= lo.scope_depth && ir_name_eq((*(*stk).names).values[i as usize], name) {
+                if (*(*stk).is_ref).values[i as usize] == 2 {
+                    (*(*stk).is_ref).values[i as usize] = 0
+                    lo.locals = stk
+                }
+                return lo
+            }
+            i = i - 1
+        }
+        lo
+    }
+
     fn lookup_local_is_raw_ptr(self, name: Name) -> bool with Mut, Panic, Div, Alloc {
         var i = (*self.locals).count - 1
         while i >= 0 {
@@ -31675,6 +31693,11 @@ impl Lowerer {
         }
         if rhs_is_borrow_handle {
             lo = lo.bind_local_borrow_handle(s.name)
+            // `let p = hh as *mut W` with hh = &!w: the cast names a raw
+            // pointee, so p was bound raw above, but its value is the address
+            // of a slot holding W's handle, not W's payload. Raw derefs of p
+            // must take the handle-resolving path (SIO-582).
+            lo = lo.unbind_local_raw_ptr(s.name)
         }
         if lower_opt_type_is_dynamic_array(&s.ty) {
             // SIO-311: an annotated `[T]` stays dynamic even when its
