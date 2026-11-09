@@ -57,3 +57,34 @@ one extra parallel-array param on admit/fwd/pump/turn.
 Starvation bounds / aging, priority inheritance across
 restore, more than one preempt per fwd call, cross-node
 spill, non-pump path behavior.
+
+## Receipts 2026-11-08/09 — live r770/L4 (M11 priority classes)
+
+Build: source 39519a5448 (origin/pbpk-28-gpu-parity tip, SHA-OK), m11e.elf
+via committed bin/madaros-linux-x86_64 (md5 8ad309f6),
+elf sha256 8bfb7d5e8f925968ea2148c25cb16ca5c3a2740370f9e4c345c3545e5c80a5b1.
+Model SmolLM2-135M (orangefs), max_tokens 8 burst / 64 occupants,
+greedy defaults (temp 0, seed 12345). Single-allocation srun choreography:
+4 occupants fill 4 slots, 1.5 s later 4 burst arrivals; solos sequential first.
+
+| lane | occ prio | burst prio | burst-vs-solo | occ done | svd preempt lines |
+| prio_up_pd1 | 0 | 1 | 4/4 | 4/4 | 17 |
+| prio_down_pd1 | 1 | 0 | 4/4 | 4/4 | 1 (same-prio fill churn; burst waited ~480 s, zero inversion preempts) |
+| prio_up_pd0 | 0 | 1 | 4/4 | 4/4 | 22 |
+| prio_down_pd0 | 1 | 0 | 4/4 | 4/4 | 0 (burst waited ~460-469 s for drain) |
+
+Interpretation: trigger guard holds live — prio-1 burst evicts prio-0
+decoders (17/22 preempt lines, every row recomputed bit-exact 4/4);
+prio-0 burst never evicts prio-1 decoders (0 inversion lines), all 4
+served after drain 4/4.
+
+Deviations from spec: (1) lane is r770/L4, not 5860 (5860 drained,
+Reason=Kill, needs host admin); (2) 4+4 choreography instead of a 5-way
+burst: SV_MAX_SESS=8 caps concurrent sessions, so 4 occ + 4 burst = 8;
+(3) comparison on raw text-payload bytes: the server emits raw control
+chars/newlines inside JSON strings when the model emits them, which breaks
+strict client-side json.loads; payload byte-compare remains exact.
+
+Follow-up (not M11, no server change made): completions containing raw
+control chars produce invalid JSON on the wire; harness worked around it
+with tolerant field extraction.
