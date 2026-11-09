@@ -928,10 +928,39 @@ fn st_find(hash: i64) -> i64 with Panic, Mut {
     return -1
 }
 
+// Raw-byte prefix checkpoints preserve the old strict-before-position rule,
+// including marker bytes inside source text. Each complete 256-byte block is
+// scanned once; queries inspect at most the remaining 255 bytes. Appending SRC
+// extends the index. Replacing existing bytes must reset it (see main and
+// strip_extern_blocks); token renaming only appends and needs no invalidation.
+// 16 MiB SRC / 256 + the terminal boundary, not an import-count limit.
+var SRC_FILE_PREFIX: [i64; 65537] = [0; 65537]
+var SRC_FILE_INDEXED: i64 = 0
+var SRC_FILE_LAST: i64 = 0
+
+fn src_file_marker_index_reset() with Mut {
+    SRC_FILE_INDEXED = 0
+    SRC_FILE_LAST = 0
+    SRC_FILE_PREFIX[0 as usize] = 0
+}
+
 fn src_file_marker_start(pos: i64) -> i64 with Panic, Mut {
-    var start: i64 = 0
-    var i: i64 = 0
-    while i < pos && i < SRC_LEN {
+    if pos <= 0 { return 0 }
+    let end = if pos < SRC_LEN { pos } else { SRC_LEN }
+    if end <= 0 { return 0 }
+    if SRC_FILE_INDEXED > SRC_LEN { src_file_marker_index_reset() }
+    let block = end >> 8
+    let boundary = block << 8
+    while SRC_FILE_INDEXED < boundary {
+        if SRC[SRC_FILE_INDEXED as usize] as i64 == 1 { SRC_FILE_LAST = SRC_FILE_INDEXED }
+        SRC_FILE_INDEXED = SRC_FILE_INDEXED + 1
+        if (SRC_FILE_INDEXED & 255) == 0 {
+            SRC_FILE_PREFIX[(SRC_FILE_INDEXED >> 8) as usize] = SRC_FILE_LAST
+        }
+    }
+    var start = SRC_FILE_PREFIX[block as usize]
+    var i = boundary
+    while i < end {
         if SRC[i as usize] as i64 == 1 { start = i }
         i = i + 1
     }
@@ -972,8 +1001,8 @@ fn st_private_access_blocked(si: i64, access_tok: i64) -> bool with Mut, Panic {
     if si < 0 { return false }
     if ST_DECL_NE[si as usize] <= ST_DECL_NS[si as usize] { return false }
     if access_tok < 0 || access_tok >= TC { return false }
-    // The field tests run BEFORE src_same_file_pos, which scans the bundle back
-    // to the file marker: for a `pub struct` most accesses touch a `pub` field
+    // The field tests run BEFORE src_same_file_pos: for a `pub struct` most
+    // accesses touch a `pub` field
     // and must stay as cheap as the old `ST_PUBLIC != 0 -> false` shortcut
     // (calling the scan first made the Madaros sources compile ~3x slower).
     if ST_PUBLIC[si as usize] != 0 {
@@ -10297,11 +10326,62 @@ fn release_call_arg_borrows(from_n: i64) with Mut {
 }
 
 // ─── Function lookup ───
-fn fn_find(ns: i64, ne: i64) -> i64 with Panic, Mut {
+// Derived from append-only FN_NS/FN_NE spans; no name/receiver semantics are
+// cached. Forward bucket chains retain registration order. Hash collisions
+// still require the original byte comparator. FN_IN_IMPL is read at lookup
+// time because the signature pass updates it after registering all names.
+// Replacing source/name spans must reset the index (compile_all does so).
+var FN_LOOKUP_HEAD: [i64; 65536] = [0; 65536]
+var FN_LOOKUP_TAIL: [i64; 65536] = [0; 65536]
+var FN_LOOKUP_NEXT: [i64; 65536] = [0; 65536]
+var FN_LOOKUP_HASH: [i64; 65536] = [0; 65536]
+var FN_LOOKUP_INDEXED: i64 = 0
+
+fn fn_lookup_index_reset() with Mut, Panic {
+    var i: i64 = 0
+    while i < 65536 { FN_LOOKUP_HEAD[i as usize] = 0; i = i + 1 }
+    FN_LOOKUP_INDEXED = 0
+}
+
+fn fn_lookup_index_sync() with Mut, Panic {
+    if FN_LOOKUP_INDEXED > FN_COUNT { fn_lookup_index_reset() }
+    while FN_LOOKUP_INDEXED < FN_COUNT {
+        let i = FN_LOOKUP_INDEXED
+        let h = gl_name_hash(FN_NS[i as usize], FN_NE[i as usize])
+        let bucket = h & 65535
+        let entry = i + 1
+        FN_LOOKUP_HASH[i as usize] = h
+        FN_LOOKUP_NEXT[i as usize] = 0
+        if FN_LOOKUP_HEAD[bucket as usize] == 0 {
+            FN_LOOKUP_HEAD[bucket as usize] = entry
+        } else {
+            let tail = FN_LOOKUP_TAIL[bucket as usize] - 1
+            FN_LOOKUP_NEXT[tail as usize] = entry
+        }
+        FN_LOOKUP_TAIL[bucket as usize] = entry
+        FN_LOOKUP_INDEXED = FN_LOOKUP_INDEXED + 1
+    }
+}
+
+// Keep the original linear lookup as an executable reference until the indexed
+// route has been qualified; ordinary compiler calls use fn_find below.
+fn fn_find_linear(ns: i64, ne: i64) -> i64 with Panic, Mut {
     var i: i64 = 0
     while i < FN_COUNT {
         if name_eq(FN_NS[i as usize], FN_NE[i as usize], ns, ne) { return i }
         i = i + 1
+    }
+    return -1
+}
+
+fn fn_find(ns: i64, ne: i64) -> i64 with Panic, Mut {
+    fn_lookup_index_sync()
+    let h = gl_name_hash(ns, ne)
+    var entry = FN_LOOKUP_HEAD[(h & 65535) as usize]
+    while entry != 0 {
+        let i = entry - 1
+        if FN_LOOKUP_HASH[i as usize] == h && name_eq(FN_NS[i as usize], FN_NE[i as usize], ns, ne) { return i }
+        entry = FN_LOOKUP_NEXT[i as usize]
     }
     return -1
 }
@@ -10312,13 +10392,29 @@ fn fn_find(ns: i64, ne: i64) -> i64 with Panic, Mut {
 // captured every plain `helper()` call (prints 7 where Madaros prints 42).
 // Methods are reached through `x.m()` (fn_find_method) or `S::m()`; a bare
 // name that only exists as a method still resolves to it, as before.
-fn fn_find_free(ns: i64, ne: i64) -> i64 with Panic, Mut {
+fn fn_find_free_linear(ns: i64, ne: i64) -> i64 with Panic, Mut {
     var i: i64 = 0
     while i < FN_COUNT {
         if FN_IN_IMPL[i as usize] == 0 && name_eq(FN_NS[i as usize], FN_NE[i as usize], ns, ne) { return i }
         i = i + 1
     }
-    return fn_find(ns, ne)
+    return fn_find_linear(ns, ne)
+}
+
+fn fn_find_free(ns: i64, ne: i64) -> i64 with Panic, Mut {
+    fn_lookup_index_sync()
+    let h = gl_name_hash(ns, ne)
+    var entry = FN_LOOKUP_HEAD[(h & 65535) as usize]
+    var first: i64 = -1
+    while entry != 0 {
+        let i = entry - 1
+        if FN_LOOKUP_HASH[i as usize] == h && name_eq(FN_NS[i as usize], FN_NE[i as usize], ns, ne) {
+            if FN_IN_IMPL[i as usize] == 0 { return i }
+            if first < 0 { first = i }
+        }
+        entry = FN_LOOKUP_NEXT[i as usize]
+    }
+    return first
 }
 
 fn fn_find_method(ns: i64, ne: i64, recv_hash: i64) -> i64 with Panic, Mut {
@@ -35653,15 +35749,12 @@ fn epistemic_infer_pass() with IO, Mut, Panic, Div {
                             refine_changed = refine_changed + 1
                         } else {
                             if !(p + 1 < TC && TK[(p + 1) as usize] == 6) {
-                                var rfj: i64 = 0
-                                while rfj < FN_COUNT {
-                                    if name_eq(FN_NS[rfj as usize], FN_NE[rfj as usize], rns, rne) {
-                                        EXPR_ETY[p as usize] = ety_from_tnk(FN_RET_TY[rfj as usize])
-                                        EXPR_CONF[p as usize] = FN_EFF_CONF[rfj as usize]  // Gen 16 Track A: propagate actual effect conf
-                                        refine_changed = refine_changed + 1
-                                        break
-                                    }
-                                    rfj = rfj + 1
+                                // First exact-name match, including methods, as in the original scan.
+                                let rfj = fn_find(rns, rne)
+                                if rfj >= 0 {
+                                    EXPR_ETY[p as usize] = ety_from_tnk(FN_RET_TY[rfj as usize])
+                                    EXPR_CONF[p as usize] = FN_EFF_CONF[rfj as usize]  // Gen 16 Track A: propagate actual effect conf
+                                    refine_changed = refine_changed + 1
                                 }
                             }
                             // Try struct name table
@@ -37105,6 +37198,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
     CL = 0
     POOL_ALLOC_ROUTINE_CL = 0 - 1
     FN_COUNT = 0
+    fn_lookup_index_reset()
     PATCH_COUNT = 0
     FNSIG_COUNT = 1
     GL_COUNT = 0
@@ -52618,6 +52712,7 @@ fn append_extern_c_stubs() with Mut, Panic, Div {
 }
 
 fn strip_extern_blocks() with IO, Mut, Panic, Div {
+    src_file_marker_index_reset()
     EXTERN_STUB_COUNT = 0
     EXTERN_STUB_BUF_OFF = 0
     // Phase 1: Count extern fn declarations and collect signatures for stub generation.
@@ -52869,6 +52964,7 @@ fn main() -> i64 with IO, Mut, Panic, Div {
         arg_i = arg_i + 1
     }
 
+    src_file_marker_index_reset()
     let raw = read_file(src)
     let sz = file_size(src)
     var i: i64 = 0

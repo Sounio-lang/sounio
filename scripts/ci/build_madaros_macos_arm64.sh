@@ -26,6 +26,8 @@ persist_madaros_build_log() {
     if [[ -n "$gate_dir" && -f "$BUILD_DIR/build.log" ]]; then
         mkdir -p "$gate_dir/logs"
         cp -f "$BUILD_DIR/build.log" "$gate_dir/logs/madaros-build.log" || true
+        if [[ -d "$BUILD_DIR/profile" ]]; then cp -R "$BUILD_DIR/profile" "$gate_dir/logs/native-build-profile"; fi
+        if [[ -f /tmp/source-bootstrap-macos/souc-self-hosted-arm64-macos.fnmap.log ]]; then cp /tmp/source-bootstrap-macos/souc-self-hosted-arm64-macos.fnmap.log "$gate_dir/logs/seed.fnmap.log"; fi
     fi
 }
 trap persist_madaros_build_log EXIT
@@ -36,11 +38,15 @@ chmod +x "$BUILD_DIR/stack-probe"
 codesign -s - -f "$BUILD_DIR/stack-probe"
 "$BUILD_DIR/stack-probe" >"$BUILD_DIR/stack.stdout.log"
 test "$(<"$BUILD_DIR/stack.stdout.log")" = 20000
+node "$ROOT_DIR/scripts/ci/source_marker_index_contract.mjs" "$ROOT_DIR" --compiler "$SEED_BIN"
+node "$ROOT_DIR/scripts/ci/function_lookup_index_contract.mjs" "$ROOT_DIR" --compiler "$SEED_BIN"
+node "$ROOT_DIR/scripts/ci/epistemic_pass_profile_contract.mjs" "$ROOT_DIR" --compiler "$SEED_BIN"
 if [[ -n "${SOUNIO_MACOS_NATIVE_CACHE_RESTORE:-}" ]]; then
     node "$ROOT_DIR/scripts/ci/macos_native_cache.mjs" restore "$ROOT_DIR" "$SEED_BIN" "$SOUNIO_MACOS_NATIVE_CACHE_RESTORE" "$BUILD_DIR/madaros" >"$BUILD_DIR/build.log" 2>&1
     cat "$BUILD_DIR/build.log"
 else
-    "$SEED_BIN" self-hosted/compiler/main.sio "$BUILD_DIR/madaros" --target aarch64-macos >"$BUILD_DIR/build.log" 2>&1
+    /usr/bin/clang++ -std=c++23 -O2 -Wall -Wextra -Werror -pthread "$ROOT_DIR/scripts/ci/native_build_profile.cpp" -o "$BUILD_DIR/profile-build"
+    "$BUILD_DIR/profile-build" "$BUILD_DIR/profile" "$SEED_BIN" self-hosted/compiler/main.sio "$BUILD_DIR/madaros" --target aarch64-macos >"$BUILD_DIR/build.log" 2>&1
 fi
 test -s "$BUILD_DIR/madaros"
 file "$BUILD_DIR/madaros" | grep -Eq 'Mach-O 64-bit.*arm64'

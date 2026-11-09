@@ -1,0 +1,217 @@
+//@ run-pass
+//@ expect-stdout-contains: MORPHINE_PBPK28_PASS
+//@ timeout: 600
+//
+// Gates for stdlib/darwin_pbpk/drugs/morphine.sio: morphine on PBPK28 with the
+// UGT2B7 x OCT1 ontogeny. Every model gate compares the PBPK28 simulation (or
+// the closed form) against a value derived independently BEFORE the run, not a
+// band picked by eye.
+//
+// G1  Maturation limit: at 10 years postnatal, 70 kg, the ontogeny-scaled
+//     clearance recovers the adult 84 L/h to 0.5 % (cascade -> 1).
+// G2  Pediatric clearance, derived by hand from the Hill curves and the
+//     well-stirred model before running:
+//       neonate 7 d, 3.5 kg   CL/kg = 0.3991 L/h/kg  (0.5 %)
+//       infant 120 d, 6.5 kg  CL/kg = 1.113  L/h/kg  (0.5 %)
+//     The neonate lies in the envelope 0.12-0.48 L/h/kg and the infant is
+//     >= 80 % of the adult per-kg value (1.2 L/h/kg). Both ranges are taken from
+//     the source module's header (it cites Bouwmeester 2004, Lynn 1998 and
+//     Mazoit 2007). Checked against PubMed here: Bouwmeester 2004 exists
+//     (Br J Anaesth 92:208, doi 10.1093/bja/aeh042) and reports total morphine
+//     clearance at 80 % of adult by 6 months; the infant here (4 months) is
+//     already at 93 %, i.e. this ontogeny matures faster than that cohort.
+//     Lynn 1998 and Mazoit 2007 were not located in PubMed and the 0.12-0.48
+//     band could not be confirmed from the abstracts. The source module's header
+//     quotes 0.369 / 1.084: those predate the separate GFR maturation curve and
+//     are stale; they are the same model WITHOUT it (renal tied to the cascade).
+// G3  Mechanism: hepatic extraction E_h = CL_h/Q_liver is 0.84 in the adult
+//     (flow-limited, 1e-9) and below half of that in the neonate
+//     (uptake/metabolism-limited); CL/kg rises monotonically over 7, 30, 120,
+//     365 days.
+// G4  PBPK28 runtime clearance: a constant IV infusion to steady state gives
+//     CL = rate / Css,blood equal to cl_central to 0.5 % (adult and neonate).
+// G5  Moment theory: for an IV bolus the model must satisfy
+//         MRT = AUMC/AUC = V_ss / CL   and   AUC = Dose / CL
+//     with V_ss from the model's own Kp, vascular fractions and reachable
+//     tissue layers (morphine_vss_of). Trapezoid moments over 300 h from the
+//     TR-BDF2 run on a graded grid (0.002 h early, 0.25 h late); the blood
+//     turns over in 0.014 h, so a uniform 0.05 h grid overestimates the AUC by
+//     ~24 % (first run of this gate; the model identity itself was exact).
+//     Quadrature convergence is gated: halving every step changes AUC and AUMC
+//     by < 0.2 %. The residual tail C(T)/C(0) is printed and must be < 1e-6.
+//     Gates: MRT to 1 %, AUC to 1 % (adult and neonate).
+// G6  Mass identity of the bolus run: |body + eliminated - dose| / dose < 1e-6.
+// G7  Distribution volume (declared limitation, NOT corrected): V_ss is printed
+//     with its per-kg value and its deviation from two literature values: 231 L
+//     (3.3 L/kg, Mazoit 2007 as cited by the module; not verified here) and
+//     136 L per 70 kg (one-compartment V, Bouwmeester 2004, verified). The
+//     literature itself spans 136-231 L. Gate: inside the 1-6 L/kg band the
+//     module declares; the deviations are reported, not corrected.
+//
+// Decision-support parity card (ADR009); no clinical-validity claim.
+
+use darwin_pbpk::core::pbpk28_params::*
+use darwin_pbpk::ddi::multidrug28::*
+use darwin_pbpk::drugs::morphine::*
+
+fn t_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn rel(a: f64, b: f64) -> f64 with Div { return t_abs(a - b) / t_abs(b) }
+fn show(l: string, x: f64) with IO { print(l) println(x) }
+
+// CL = rate / Css,blood from a constant IV infusion run to steady state.
+fn infusion_cl(p: PBPKParams28, rate: f64, t_end: f64, dt: f64) -> f64 with Mut, Div, Panic {
+    var md = md_new(true)
+    let v = md_add_drug(&!md, p, 0.70, 1.0, 1.0)
+    md_set_iv_rate(&!md, v, rate)
+    md_run_to(&!md, t_end, dt)
+    let css = md_state_of(&md, v).cv[0]
+    return rate / css
+}
+
+// Graded time step for the bolus moments: the blood turns over in
+// V_b/Q_co = 5/350 = 0.014 h, so the distribution phase is far shorter than the
+// 0.05 h step a plain trapezoid would use; a uniform 0.05 h grid overestimates
+// the AUC of this convex curve by ~24 %. The grid is fine early and coarse late.
+fn grid_dt(t: f64, scale: f64) -> f64 {
+    if t < 0.5 { return 0.002 * scale }
+    if t < 4.0 { return 0.01 * scale }
+    if t < 40.0 { return 0.05 * scale }
+    return 0.25 * scale
+}
+
+struct Moments { auc: f64, aumc: f64, tail: f64, mres: f64 }
+
+// IV bolus moments on the graded grid: AUC, AUMC, C(T)/C(0), mass residual.
+fn bolus_moments(p: PBPKParams28, dose: f64, t_end: f64, scale: f64) -> Moments with Mut, Div, Panic {
+    var md = md_new(true)
+    let v = md_add_drug(&!md, p, 0.70, 1.0, 1.0)
+    md_dose_iv_bolus(&!md, v, dose)
+    let c0 = md_state_of(&md, v).cv[0]
+    var t = 0.0
+    var c_prev = c0
+    var auc = 0.0
+    var aumc = 0.0
+    while t < t_end {
+        let dt = grid_dt(t, scale)
+        md_step(&!md, dt)
+        let t_new = t + dt
+        let c = md_state_of(&md, v).cv[0]
+        auc = auc + 0.5 * (c_prev + c) * dt
+        aumc = aumc + 0.5 * (t * c_prev + t_new * c) * dt
+        t = t_new
+        c_prev = c
+    }
+    return Moments { auc: auc, aumc: aumc, tail: c_prev / c0, mres: md_mass_residual(&md, v) }
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    println("MORPHINE_PBPK28 v1 — adult anchor + UGT2B7 x OCT1 ontogeny")
+    var ok = true
+
+    // G1 maturation limit.
+    println("G1 maturation limit (3650 d, 70 kg)")
+    let cl_mature = morphine_cl_eff_lh(3650.0, 70.0)
+    show("  CL_eff: ", cl_mature)
+    show("  relative to 84: ", rel(cl_mature, morphine_cl_total_adult()))
+    if rel(cl_mature, morphine_cl_total_adult()) > 0.005 { println("  G1 FAIL"); ok = false }
+
+    // G2 pediatric clearance vs the independent hand derivation.
+    println("G2 pediatric clearance")
+    let neo_kg = morphine_cl_eff_lh(7.0, 3.5) / 3.5
+    let inf_kg = morphine_cl_eff_lh(120.0, 6.5) / 6.5
+    let adult_kg = morphine_cl_total_adult() / 70.0
+    show("  neonate 7 d CL/kg (hand 0.3991): ", neo_kg)
+    show("  infant 120 d CL/kg (hand 1.113): ", inf_kg)
+    show("  infant as fraction of adult/kg: ", inf_kg / adult_kg)
+    if rel(neo_kg, 0.3991) > 0.005 { println("  G2 FAIL neonate vs hand value"); ok = false }
+    if rel(inf_kg, 1.113) > 0.005 { println("  G2 FAIL infant vs hand value"); ok = false }
+    if !(neo_kg >= 0.12 && neo_kg <= 0.48) { println("  G2 FAIL neonate outside 0.12-0.48"); ok = false }
+    if !(inf_kg / adult_kg >= 0.80) { println("  G2 FAIL infant below 80 % of adult/kg"); ok = false }
+
+    // G3 mechanism: extraction and monotone maturation.
+    println("G3 mechanism")
+    let e_adult = morphine_extraction(3650.0, 70.0)
+    let e_adult_exact = morphine_cl_hepatic_adult() / morphine_q_liver_adult()
+    let e_neo = morphine_extraction(7.0, 3.5)
+    show("  E_h adult (mature): ", e_adult)
+    show("  E_h adult exact 75.6/90: ", e_adult_exact)
+    show("  E_h neonate 7 d: ", e_neo)
+    if t_abs(morphine_cl_hepatic_lh(100000.0, 70.0) / morphine_q_liver_adult() - e_adult_exact) > 1.0e-3 {
+        println("  G3 FAIL adult extraction"); ok = false
+    }
+    if !(e_neo < 0.5 * e_adult_exact) { println("  G3 FAIL neonate not uptake-limited"); ok = false }
+    let c7 = morphine_cl_eff_lh(7.0, 3.5) / 3.5
+    let c30 = morphine_cl_eff_lh(30.0, 4.5) / 4.5
+    let c120 = morphine_cl_eff_lh(120.0, 6.5) / 6.5
+    let c365 = morphine_cl_eff_lh(365.0, 9.5) / 9.5
+    show("  CL/kg 7 d: ", c7)
+    show("  CL/kg 30 d: ", c30)
+    show("  CL/kg 120 d: ", c120)
+    show("  CL/kg 365 d: ", c365)
+    if !(c7 < c30 && c30 < c120 && c120 < c365) { println("  G3 FAIL not monotone"); ok = false }
+
+    // G4 PBPK28 runtime clearance identity.
+    println("G4 PBPK28 runtime clearance")
+    let p_ad = pbpk28_params_morphine()
+    let p_ne = pbpk28_params_morphine_ped(7.0, 3.5)
+    let cl_ad = infusion_cl(p_ad, 84.0, 200.0, 0.1)
+    let cl_ne = infusion_cl(p_ne, morphine_cl_eff_lh(7.0, 3.5) * 2.0, 200.0, 0.1)
+    show("  adult CL sim / stored: ", cl_ad / p_ad.cl_central)
+    show("  neonate CL sim / stored: ", cl_ne / p_ne.cl_central)
+    if rel(cl_ad, p_ad.cl_central) > 0.005 { println("  G4 FAIL adult"); ok = false }
+    if rel(cl_ne, p_ne.cl_central) > 0.005 { println("  G4 FAIL neonate"); ok = false }
+
+    // G5/G6 moment theory on an IV bolus.
+    println("G5/G6 bolus moments")
+    let vss_ad = morphine_vss_of(p_ad)
+    let vss_ne = morphine_vss_of(p_ne)
+    let m_ad = bolus_moments(p_ad, 10.0, 300.0, 1.0)
+    let m_ad2 = bolus_moments(p_ad, 10.0, 300.0, 0.5)
+    let m_ne = bolus_moments(p_ne, 0.5, 300.0, 1.0)
+    let m_ne2 = bolus_moments(p_ne, 0.5, 300.0, 0.5)
+    let mrt_ad = m_ad.aumc / m_ad.auc
+    let mrt_ne = m_ne.aumc / m_ne.auc
+    let mrt_ad_pred = vss_ad / p_ad.cl_central
+    let mrt_ne_pred = vss_ne / p_ne.cl_central
+    let auc_ad_pred = 10.0 / p_ad.cl_central
+    let auc_ne_pred = 0.5 / p_ne.cl_central
+    show("  adult  MRT sim: ", mrt_ad)
+    show("  adult  MRT pred Vss/CL: ", mrt_ad_pred)
+    show("  adult  AUC sim: ", m_ad.auc)
+    show("  adult  AUC pred Dose/CL: ", auc_ad_pred)
+    show("  adult  tail C(T)/C(0): ", m_ad.tail)
+    show("  adult  mass residual: ", m_ad.mres)
+    show("  neonate MRT sim: ", mrt_ne)
+    show("  neonate MRT pred Vss/CL: ", mrt_ne_pred)
+    show("  neonate AUC sim: ", m_ne.auc)
+    show("  neonate AUC pred Dose/CL: ", auc_ne_pred)
+    show("  neonate tail C(T)/C(0): ", m_ne.tail)
+    show("  neonate mass residual: ", m_ne.mres)
+    show("  adult  AUC grid-refinement change: ", rel(m_ad.auc, m_ad2.auc))
+    show("  adult  AUMC grid-refinement change: ", rel(m_ad.aumc, m_ad2.aumc))
+    show("  neonate AUC grid-refinement change: ", rel(m_ne.auc, m_ne2.auc))
+    show("  neonate AUMC grid-refinement change: ", rel(m_ne.aumc, m_ne2.aumc))
+    if rel(m_ad.auc, m_ad2.auc) > 0.002 || rel(m_ad.aumc, m_ad2.aumc) > 0.002 { println("  G5 FAIL adult quadrature not converged"); ok = false }
+    if rel(m_ne.auc, m_ne2.auc) > 0.002 || rel(m_ne.aumc, m_ne2.aumc) > 0.002 { println("  G5 FAIL neonate quadrature not converged"); ok = false }
+    if rel(mrt_ad, mrt_ad_pred) > 0.01 { println("  G5 FAIL adult MRT"); ok = false }
+    if rel(mrt_ne, mrt_ne_pred) > 0.01 { println("  G5 FAIL neonate MRT"); ok = false }
+    if rel(m_ad.auc, auc_ad_pred) > 0.01 { println("  G5 FAIL adult AUC"); ok = false }
+    if rel(m_ne.auc, auc_ne_pred) > 0.01 { println("  G5 FAIL neonate AUC"); ok = false }
+    if !(m_ad.tail < 1.0e-6 && m_ne.tail < 1.0e-6) { println("  G5 FAIL residual tail"); ok = false }
+    if !(m_ad.mres < 1.0e-6 && m_ne.mres < 1.0e-6) { println("  G6 FAIL mass identity"); ok = false }
+
+    // G7 declared distribution-volume tension.
+    println("G7 distribution volume (declared limitation, not corrected)")
+    show("  V_ss adult (L): ", vss_ad)
+    show("  V_ss adult (L/kg): ", vss_ad / 70.0)
+    show("  vs 231 L (Mazoit 2007, as cited): ", vss_ad / 231.0 - 1.0)
+    show("  vs 136 L (Bouwmeester 2004, one-compartment): ", vss_ad / 136.0 - 1.0)
+    if !(vss_ad / 70.0 >= 1.0 && vss_ad / 70.0 <= 6.0) { println("  G7 FAIL outside 1-6 L/kg"); ok = false }
+
+    if ok {
+        println("MORPHINE_PBPK28_PASS")
+        return 0
+    }
+    println("MORPHINE_PBPK28_FAIL")
+    return 1
+}

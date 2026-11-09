@@ -26,7 +26,7 @@ it is a fixed point of its own compilation function.
 
 ## Decision
 
-> Amended by [ADR-028](./adr-028-bootstrap-provenance-root.md): the chain starts at the committed
+> Amended by [ADR-029](./adr-029-bootstrap-provenance-root.md): the chain starts at the committed
 > seed, not at `artifacts/bootstrap/boot4.elf`.
 
 The gen2==gen3 fixed-point check is the **trust anchor** for compiler changes.

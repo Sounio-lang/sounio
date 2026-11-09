@@ -88,6 +88,7 @@ export function techArticle({
   isPartOf,
   proficiencyLevel,
   dependencies,
+  citation,
 }) {
   const article = {
     '@context': 'https://schema.org',
@@ -106,6 +107,7 @@ export function techArticle({
     article.proficiencyLevel = proficiencyLevel;
   }
   if (dependencies !== undefined) article.dependencies = dependencies;
+  if (citation) article.citation = citation;
   return article;
 }
 
@@ -139,6 +141,7 @@ export function buildPageSchemas({
   isPartOf,
   proficiencyLevel,
   dependencies,
+  citation,
   omitSoftwareApplication,
 }) {
   const schemas = [];
@@ -156,6 +159,7 @@ export function buildPageSchemas({
       isPartOf,
       proficiencyLevel,
       dependencies,
+      citation,
     }));
   }
   if (Array.isArray(breadcrumbs) && breadcrumbs.length > 0) {

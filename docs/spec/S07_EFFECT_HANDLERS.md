@@ -12,7 +12,12 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.spec.s07-effec
 Spec-Section: `SOUNIO-SPEC-07`
 Frame: `docs/spec/E2E_SPECIFICATION_FRAME.md`
 
-Status: **ruled 2026-10-31** (founder): Implemented, deep handlers, linear one-shot continuations. Backend landing on PR #3371 (phases P0-P5); until P5 closes, do not describe handlers as shipping.
+Status: **implemented in Madaros**, following the founder ruling of 2026-10-31:
+deep handlers with linear one-shot continuations. PR #3371 merged into `main`
+as `4a49fe25c4` on 2026-11-02. See the [current implementation status](#status-2026-11-06-sio-417-p5-merged)
+for the supported subset and limits. Sections 7.1–7.3 preserve earlier dated
+measurements; their descriptions of missing registration and execution no
+longer describe current source.
 
 ## 7.1 `handle` reaches the type checker and stops there
 
@@ -252,9 +257,10 @@ segment per handler (OCaml-5 style), proven by probe; copying the body
 stack in place is excluded. Each FX rule above has at least one derived
 test in phase P5 (`tests/run-pass/fxN_*.sio`).
 
-## Status (2026-11-01, SIO-417 P5)
+## Status (2026-11-06, SIO-417 P5 merged)
 
-The section 7.4 semantics are implemented in Madaros and landing on PR #3371:
+The section 7.4 semantics are implemented in Madaros. PR #3371 merged into
+`main` on 2026-11-02 (`4a49fe25c4`), including:
 parser/AST (`ExprPerform`/`ExprResume`, `on`/`return` clauses), checker
 (op resolution FX-8, linear resume FX-7, diagnostics 290-298), lowering
 (synthetic clause functions, handler frame), and the native backend

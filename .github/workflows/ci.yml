@@ -96,6 +96,12 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+      - name: Source marker index ownership and invalidation contract
+        run: node scripts/ci/source_marker_index_contract.mjs "$GITHUB_WORKSPACE" --selftest
+      - name: Function lookup index contract
+        run: node scripts/ci/function_lookup_index_contract.mjs "$GITHUB_WORKSPACE" --selftest
+      - name: Epistemic refinement lookup bypass controls
+        run: node scripts/ci/epistemic_pass_profile_contract.mjs "$GITHUB_WORKSPACE" --selftest
       - name: Native corpus compile cache and fresh execution controls
         run: node scripts/ci/macos_corpus_cache_contract.mjs "$GITHUB_WORKSPACE" --selftest
       - name: Native macOS exact cache failure controls
@@ -1209,7 +1215,7 @@ jobs:
         run: |
           SOUC_STAGE2=/tmp/sounio-source-bootstrap-selfhost-linux-x86_64/artifacts/souc-stage2
           MACOS_OUT=/tmp/souc-self-hosted-arm64-macos
-          "$SOUC_STAGE2" self-hosted/compiler/lean_single.sio "$MACOS_OUT" --target aarch64-macos
+          "$SOUC_STAGE2" self-hosted/compiler/lean_single.sio "$MACOS_OUT" --target aarch64-macos --debug-fn-map > "$MACOS_OUT.fnmap.log"
           chmod +x "$MACOS_OUT"
           file "$MACOS_OUT" | grep -E "Mach-O 64-bit.*arm64.*executable|Mach-O 64-bit.*executable.*arm64"
       - name: Bind the source-bootstrap stage2 to this checkout
@@ -1230,7 +1236,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: source-bootstrap-native-compiler-macos-arm64
-          path: /tmp/souc-self-hosted-arm64-macos
+          path: |
+            /tmp/souc-self-hosted-arm64-macos
+            /tmp/souc-self-hosted-arm64-macos.fnmap.log
           retention-days: 1
       - name: Upload source-bootstrap self-host gate artifacts
         if: always()
@@ -1265,6 +1273,12 @@ jobs:
           test "$(cat "$ARTIFACT/SOURCE_GIT_SHA")" = "$(git rev-parse HEAD)"
           (cd "$ARTIFACT" && sha256sum -c souc-stage2.sha256)
           chmod +x "$ARTIFACT/souc-stage2"
+      - name: Source marker index versus original C++23 byte oracle
+        run: node scripts/ci/source_marker_index_contract.mjs "$PWD" --compiler /tmp/sounio-source-bootstrap-selfhost-linux-x86_64/artifacts/souc-stage2
+      - name: Actual function lookup helper versus C++23 oracle and mutants
+        run: node scripts/ci/function_lookup_index_contract.mjs "$PWD" --compiler /tmp/sounio-source-bootstrap-selfhost-linux-x86_64/artifacts/souc-stage2
+      - name: Actual epistemic refinement lookup state oracle
+        run: node scripts/ci/epistemic_pass_profile_contract.mjs "$PWD" --compiler /tmp/sounio-source-bootstrap-selfhost-linux-x86_64/artifacts/souc-stage2
       - name: Execute x86 generic and imported aggregate ABI regressions
         run: bash scripts/ci/bootstrap_generic_array_layout_gate.sh /tmp/sounio-source-bootstrap-selfhost-linux-x86_64/artifacts/souc-stage2
       - name: Cross-compile ARM64 nested-store witness
@@ -1321,6 +1335,33 @@ jobs:
       - name: Materialize the committed Madaros prebuilt
         run: bash scripts/lib/materialize_madaros_prebuilt.sh
       - uses: ./.github/actions/current-source-madaros
+      - name: Lowerer diagnostic oracle and scalar-global reference integration
+        timeout-minutes: 10
+        env:
+          MADAROS_RAW_BIN: ${{ runner.temp }}/stdlib-deep-compiler/madaros.elf
+          SOUNIO_SOUC_ENGINE: madaros
+          CXX: g++
+          LOWERER_GATE_DIR: ${{ runner.temp }}/lowerer-current-source
+        run: |
+          set -euo pipefail
+          mkdir -p "$LOWERER_GATE_DIR"
+          bash scripts/ci/stdlib_deep_compiler_receipt.sh verify "$GITHUB_WORKSPACE" "$RUNNER_TEMP/stdlib-deep-compiler" "$GITHUB_SHA" | tee "$LOWERER_GATE_DIR/compiler-receipt.log"
+          sha256sum "$MADAROS_RAW_BIN" self-hosted/ir/lower.sio scripts/ci/lowerer_fresh_reg_parity_probe.cpp | tee "$LOWERER_GATE_DIR/compiler-inputs.sha256"
+          g++ --version | tee "$LOWERER_GATE_DIR/cxx-version.log"
+          bash scripts/ci/lowerer_fresh_reg_parity_gate.sh "$LOWERER_GATE_DIR/parity" | tee "$LOWERER_GATE_DIR/parity.log"
+          ./bin/souc check tests/run-pass/scalar_global_reference.sio > "$LOWERER_GATE_DIR/scalar-check.log" 2>&1
+          ./bin/souc compile tests/run-pass/scalar_global_reference.sio -o "$LOWERER_GATE_DIR/scalar-reference" > "$LOWERER_GATE_DIR/scalar-build.log" 2>&1
+          chmod +x "$LOWERER_GATE_DIR/scalar-reference"
+          timeout 60 "$LOWERER_GATE_DIR/scalar-reference" > "$LOWERER_GATE_DIR/scalar-stdout.log" 2> "$LOWERER_GATE_DIR/scalar-stderr.log"
+          grep -Fxq 'scalar_global_reference PASS' "$LOWERER_GATE_DIR/scalar-stdout.log"
+          cat "$LOWERER_GATE_DIR/scalar-stdout.log"
+      - name: Upload Lowerer diagnostic and integration receipts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lowerer-current-source-${{ github.run_id }}-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/lowerer-current-source
+          retention-days: 1
       # SCO gates require a compiler from this exact source, not the shipping prebuilt.
       - name: Validate the SCO compiler stack contract
         run: bash scripts/ci/sco_stack_contract.sh
@@ -1861,6 +1902,11 @@ jobs:
           CI_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
           SOUNIO_TEST_JOBS: 4
         run: bash scripts/ci/madaros_changed_tests_gate.sh
+      - name: Madaros effect suite and handler regressions
+        env:
+          SOUNIO_MADAROS_EFFECT_SUITE_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
+          SOUNIO_TEST_JOBS: 4
+        run: bash scripts/ci/madaros_effect_suite_gate.sh
       - name: Verify committed Fano kernel binary
         run: python3 scripts/ci/fano_bin_gate.py
       - name: Epistemic e-graph reassociation gate

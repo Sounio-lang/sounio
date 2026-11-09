@@ -1,0 +1,217 @@
+//@ run-pass
+//@ expect-stdout-contains: FENTANYL_PBPK28_PASS
+//@ timeout: 900
+//
+// Gates for stdlib/darwin_pbpk/drugs/fentanyl.sio: fentanyl on PBPK28, adult
+// anchor and weight-scaled pediatric variant with an explicit hepatic multiplier
+// f_cl. Every model gate compares the PBPK28 simulation (or the closed form)
+// against a value derived independently BEFORE the run (python, from the module's
+// own arrays), not a band picked by eye.
+//
+// Predictions fixed before running:
+//   V_ss adult      = 510.1837 L   (7.2883 L/kg; sum V_i*(fv+(1-fv)Kp), all ps > 0)
+//   MRT adult       = V_ss/CL = 510.1837/55 = 9.2761 h
+//   adult  CL(70,1) = 55;  CL(3.5,1) = 2.75;  CL(10,0.5) = 0.1428571*(51.15*0.5+3.85) = 4.20357
+//   V_ss(3.5 kg)    = 25.5092 L;  V_ss(10 kg) = 72.8834 L   (linear in w/70)
+//   MRT(3.5 kg, f=1)   = 9.2761 h   (V and CL scale together: MRT unchanged)
+//   MRT(10 kg, f=0.5)  = 72.8834/4.20357 = 17.339 h = 9.2761 / 0.535 (f_cl acts on
+//                         the 93 % hepatic part only: 0.93*0.5 + 0.07 = 0.535)
+//
+// G1  Clearance closed form: CL(70,1) = 55 (1e-9), CL(3.5,1) = 2.75 (1e-9),
+//     CL(10,0.5) = 4.20357 (1e-6); hepatic + renal = total.
+// G2  Distribution volume closed form vs the predicted 510.1837 L (1e-6) and the
+//     pediatric linear scaling (3.5 kg, 10 kg) to 1e-9.
+// G3  PBPK28 runtime clearance: a constant IV infusion to steady state gives
+//     CL = rate/Css,blood equal to cl_central to 0.5 % (adult, 3.5 kg, 10 kg f=0.5).
+// G4  Moment theory for an IV bolus: MRT = AUMC/AUC = V_ss/CL and AUC = Dose/CL
+//     to 1 %, graded grid to 600 h, quadrature convergence gated (halving every
+//     step changes AUC and AUMC by < 0.2 %), residual tail C(T)/C(0) < 1e-6.
+//     Cases: adult, 3.5 kg f=1, 10 kg f=0.5.
+// G5  Mass identity of every bolus run: |body + eliminated - dose|/dose < 1e-6.
+// G6  Discriminating pediatric contract: MRT(3.5 kg, f=1) = MRT(adult) to 1 %
+//     (volumes and clearance scale together), and MRT(10 kg, f=0.5)/MRT(adult)
+//     = 1/0.535 = 1.8692 to 1 % (f_cl lengthens residence time).
+// G7  Declared tensions (printed, NOT corrected): V_ss per kg inside the 1-10
+//     L/kg plausibility band (a sanity bound, not a literature value); the simulated terminal half-life (slope of
+//     C between 150 h and 250 h) against 219 min (McClain & Hug 1980, verified in
+//     PubMed, doi 10.1038/clpt.1980.138).
+//
+// Decision-support parity card (ADR009); no clinical-validity claim.
+
+use darwin_pbpk::core::pbpk28_params::*
+use darwin_pbpk::ddi::multidrug28::*
+use darwin_pbpk::drugs::fentanyl::*
+use math::pure::ln
+
+fn t_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn rel(a: f64, b: f64) -> f64 with Div { return t_abs(a - b) / t_abs(b) }
+fn show(l: string, x: f64) with IO { print(l) println(x) }
+
+// CL = rate / Css,blood from a constant IV infusion run to steady state.
+fn infusion_cl(p: PBPKParams28, rate: f64, t_end: f64, dt: f64) -> f64 with Mut, Div, Panic {
+    var md = md_new(true)
+    let v = md_add_drug(&!md, p, fentanyl_fu(), 1.0, 1.0)
+    md_set_iv_rate(&!md, v, rate)
+    md_run_to(&!md, t_end, dt)
+    let css = md_state_of(&md, v).cv[0]
+    return rate / css
+}
+
+// Graded step: blood turns over in V_b/Q_co = 0.014 h, so the grid is fine early
+// and coarse late (a uniform grid overestimates the AUC of this convex curve).
+fn grid_dt(t: f64, scale: f64) -> f64 {
+    if t < 0.5 { return 0.002 * scale }
+    if t < 4.0 { return 0.01 * scale }
+    if t < 40.0 { return 0.05 * scale }
+    return 0.25 * scale
+}
+
+struct Moments { auc: f64, aumc: f64, tail: f64, mres: f64, c150: f64, c250: f64 }
+
+// IV bolus moments on the graded grid, plus C at 150 h and 250 h (late grid
+// points are exact multiples of 0.25 h, so the crossing lands on the time).
+fn bolus_moments(p: PBPKParams28, dose: f64, t_end: f64, scale: f64) -> Moments with Mut, Div, Panic {
+    var md = md_new(true)
+    let v = md_add_drug(&!md, p, fentanyl_fu(), 1.0, 1.0)
+    md_dose_iv_bolus(&!md, v, dose)
+    let c0 = md_state_of(&md, v).cv[0]
+    var t = 0.0
+    var c_prev = c0
+    var auc = 0.0
+    var aumc = 0.0
+    var c150 = 0.0
+    var c250 = 0.0
+    while t < t_end {
+        let dt = grid_dt(t, scale)
+        md_step(&!md, dt)
+        let t_new = t + dt
+        let c = md_state_of(&md, v).cv[0]
+        auc = auc + 0.5 * (c_prev + c) * dt
+        aumc = aumc + 0.5 * (t * c_prev + t_new * c) * dt
+        if t < 150.0 && t_new >= 150.0 { c150 = c }
+        if t < 250.0 && t_new >= 250.0 { c250 = c }
+        t = t_new
+        c_prev = c
+    }
+    return Moments { auc: auc, aumc: aumc, tail: c_prev / c0, mres: md_mass_residual(&md, v), c150: c150, c250: c250 }
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    println("FENTANYL_PBPK28 v1 — adult anchor + weight-scaled pediatric variant")
+    var ok = true
+
+    // G1 clearance closed form.
+    println("G1 clearance closed form")
+    let cl70 = fentanyl_cl_eff_lh(70.0, 1.0)
+    let cl35 = fentanyl_cl_eff_lh(3.5, 1.0)
+    let cl10h = fentanyl_cl_eff_lh(10.0, 0.5)
+    show("  CL(70, 1): ", cl70)
+    show("  CL(3.5, 1) (hand 2.75): ", cl35)
+    show("  CL(10, 0.5) (hand 4.20357): ", cl10h)
+    if rel(cl70, 55.0) > 1.0e-9 { println("  G1 FAIL adult"); ok = false }
+    if rel(cl35, 2.75) > 1.0e-9 { println("  G1 FAIL 3.5 kg"); ok = false }
+    if rel(cl10h, 4.20357) > 1.0e-6 { println("  G1 FAIL 10 kg f=0.5"); ok = false }
+    if rel(fentanyl_cl_hepatic_adult() + fentanyl_cl_renal_adult(), fentanyl_cl_total_adult()) > 1.0e-12 {
+        println("  G1 FAIL hepatic+renal"); ok = false
+    }
+
+    // G2 distribution volume closed form and linear scaling.
+    println("G2 distribution volume")
+    let p_ad = pbpk28_params_fentanyl()
+    let p_ne = pbpk28_params_fentanyl_ped(3.5, 1.0)
+    let p_ch = pbpk28_params_fentanyl_ped(10.0, 0.5)
+    let vss_ad = fentanyl_vss_of(p_ad)
+    let vss_ne = fentanyl_vss_of(p_ne)
+    let vss_ch = fentanyl_vss_of(p_ch)
+    show("  V_ss adult (hand 510.1837): ", vss_ad)
+    show("  V_ss 3.5 kg (hand 25.5092): ", vss_ne)
+    show("  V_ss 10 kg (hand 72.8834): ", vss_ch)
+    if rel(vss_ad, 510.1837) > 1.0e-6 { println("  G2 FAIL adult V_ss"); ok = false }
+    if rel(vss_ne, vss_ad * 3.5 / 70.0) > 1.0e-9 { println("  G2 FAIL 3.5 kg scaling"); ok = false }
+    if rel(vss_ch, vss_ad * 10.0 / 70.0) > 1.0e-9 { println("  G2 FAIL 10 kg scaling"); ok = false }
+
+    // G3 PBPK28 runtime clearance identity.
+    println("G3 PBPK28 runtime clearance")
+    let cs_ad = infusion_cl(p_ad, 110.0, 800.0, 0.2)
+    let cs_ne = infusion_cl(p_ne, 5.5, 800.0, 0.2)
+    let cs_ch = infusion_cl(p_ch, 8.4, 800.0, 0.2)
+    show("  adult sim / stored: ", cs_ad / p_ad.cl_central)
+    show("  3.5 kg sim / stored: ", cs_ne / p_ne.cl_central)
+    show("  10 kg f=0.5 sim / stored: ", cs_ch / p_ch.cl_central)
+    if rel(cs_ad, p_ad.cl_central) > 0.005 { println("  G3 FAIL adult"); ok = false }
+    if rel(cs_ne, p_ne.cl_central) > 0.005 { println("  G3 FAIL 3.5 kg"); ok = false }
+    if rel(cs_ch, p_ch.cl_central) > 0.005 { println("  G3 FAIL 10 kg"); ok = false }
+
+    // G4/G5 moment theory on an IV bolus.
+    println("G4/G5 bolus moments")
+    let m_ad = bolus_moments(p_ad, 10.0, 600.0, 1.0)
+    let m_ad2 = bolus_moments(p_ad, 10.0, 600.0, 0.5)
+    let m_ne = bolus_moments(p_ne, 0.5, 600.0, 1.0)
+    let m_ne2 = bolus_moments(p_ne, 0.5, 600.0, 0.5)
+    let m_ch = bolus_moments(p_ch, 1.0, 600.0, 1.0)
+    let m_ch2 = bolus_moments(p_ch, 1.0, 600.0, 0.5)
+    let mrt_ad = m_ad.aumc / m_ad.auc
+    let mrt_ne = m_ne.aumc / m_ne.auc
+    let mrt_ch = m_ch.aumc / m_ch.auc
+    let mrt_ad_pred = vss_ad / p_ad.cl_central
+    let mrt_ne_pred = vss_ne / p_ne.cl_central
+    let mrt_ch_pred = vss_ch / p_ch.cl_central
+    show("  adult MRT sim: ", mrt_ad)
+    show("  adult MRT pred (hand 9.2761): ", mrt_ad_pred)
+    show("  adult AUC sim: ", m_ad.auc)
+    show("  adult AUC pred Dose/CL: ", 10.0 / p_ad.cl_central)
+    show("  adult tail C(T)/C(0): ", m_ad.tail)
+    show("  adult mass residual: ", m_ad.mres)
+    show("  3.5 kg MRT sim: ", mrt_ne)
+    show("  3.5 kg MRT pred: ", mrt_ne_pred)
+    show("  3.5 kg AUC sim: ", m_ne.auc)
+    show("  3.5 kg AUC pred: ", 0.5 / p_ne.cl_central)
+    show("  3.5 kg tail: ", m_ne.tail)
+    show("  3.5 kg mass residual: ", m_ne.mres)
+    show("  10 kg f=0.5 MRT sim: ", mrt_ch)
+    show("  10 kg f=0.5 MRT pred (hand 17.339): ", mrt_ch_pred)
+    show("  10 kg f=0.5 AUC sim: ", m_ch.auc)
+    show("  10 kg f=0.5 AUC pred: ", 1.0 / p_ch.cl_central)
+    show("  10 kg f=0.5 tail: ", m_ch.tail)
+    show("  10 kg f=0.5 mass residual: ", m_ch.mres)
+    show("  grid-refinement change AUC adult/3.5/10: ", rel(m_ad.auc, m_ad2.auc))
+    show("    ", rel(m_ne.auc, m_ne2.auc))
+    show("    ", rel(m_ch.auc, m_ch2.auc))
+    show("  grid-refinement change AUMC adult/3.5/10: ", rel(m_ad.aumc, m_ad2.aumc))
+    show("    ", rel(m_ne.aumc, m_ne2.aumc))
+    show("    ", rel(m_ch.aumc, m_ch2.aumc))
+    if rel(m_ad.auc, m_ad2.auc) > 0.002 || rel(m_ad.aumc, m_ad2.aumc) > 0.002 { println("  G4 FAIL adult quadrature"); ok = false }
+    if rel(m_ne.auc, m_ne2.auc) > 0.002 || rel(m_ne.aumc, m_ne2.aumc) > 0.002 { println("  G4 FAIL 3.5 kg quadrature"); ok = false }
+    if rel(m_ch.auc, m_ch2.auc) > 0.002 || rel(m_ch.aumc, m_ch2.aumc) > 0.002 { println("  G4 FAIL 10 kg quadrature"); ok = false }
+    if rel(mrt_ad, mrt_ad_pred) > 0.01 { println("  G4 FAIL adult MRT"); ok = false }
+    if rel(mrt_ne, mrt_ne_pred) > 0.01 { println("  G4 FAIL 3.5 kg MRT"); ok = false }
+    if rel(mrt_ch, mrt_ch_pred) > 0.01 { println("  G4 FAIL 10 kg MRT"); ok = false }
+    if rel(m_ad.auc, 10.0 / p_ad.cl_central) > 0.01 { println("  G4 FAIL adult AUC"); ok = false }
+    if rel(m_ne.auc, 0.5 / p_ne.cl_central) > 0.01 { println("  G4 FAIL 3.5 kg AUC"); ok = false }
+    if rel(m_ch.auc, 1.0 / p_ch.cl_central) > 0.01 { println("  G4 FAIL 10 kg AUC"); ok = false }
+    if !(m_ad.tail < 1.0e-6 && m_ne.tail < 1.0e-6 && m_ch.tail < 1.0e-6) { println("  G4 FAIL residual tail"); ok = false }
+    if !(m_ad.mres < 1.0e-6 && m_ne.mres < 1.0e-6 && m_ch.mres < 1.0e-6) { println("  G5 FAIL mass identity"); ok = false }
+
+    // G6 discriminating pediatric contract.
+    println("G6 pediatric residence time")
+    show("  MRT(3.5 kg, f=1) / MRT(adult) (want 1): ", mrt_ne / mrt_ad)
+    show("  MRT(10 kg, f=0.5) / MRT(adult) (hand 1/0.535 = 1.8692): ", mrt_ch / mrt_ad)
+    if rel(mrt_ne / mrt_ad, 1.0) > 0.01 { println("  G6 FAIL 3.5 kg MRT ratio"); ok = false }
+    if rel(mrt_ch / mrt_ad, 1.0 / 0.535) > 0.01 { println("  G6 FAIL f_cl MRT ratio"); ok = false }
+
+    // G7 declared tensions (printed, not corrected).
+    println("G7 declared tensions (not corrected)")
+    show("  V_ss adult (L/kg): ", vss_ad / 70.0)
+    let th_h = 100.0 * 0.6931471805599453 / ln(m_ad.c150 / m_ad.c250)
+    show("  terminal half-life sim 150-250 h (h): ", th_h)
+    show("  McClain & Hug 1980 t1/2 beta = 219 min (h): ", 219.0 / 60.0)
+    show("  sim / literature: ", th_h / (219.0 / 60.0))
+    if !(vss_ad / 70.0 >= 1.0 && vss_ad / 70.0 <= 10.0) { println("  G7 FAIL outside 1-10 L/kg"); ok = false }
+
+    if ok {
+        println("FENTANYL_PBPK28_PASS")
+        return 0
+    }
+    println("FENTANYL_PBPK28_FAIL")
+    return 1
+}

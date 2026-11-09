@@ -1778,3 +1778,182 @@ paste <(grep "^TMASS|m=" "$VNC_SIO_LOG" | sed "s/^TMASS|m=//") \
 
 echo
 echo "[pbpk28-parity] vancomycin IV-infusion canonical: zero-order input + renal sink + mass envelope (13th canonical drug)"
+
+# ════════════════════════════════════════════════════════════════════════════
+# Case 28: Risperidone + 9-OH — fourteenth canonical drug, FIRST
+# mother+metabolite oral case (CYP2D6 formation, molar convention). Single
+# 2 mg oral IR tablet → gut pool + 1st-order absorption (ka = 2.0/h,
+# F = 0.70, (1-F) first-pass loss) → parent PBPK28 CN with the CYP2D6
+# formation sink solved implicitly on the liver → 9-OH PBPK28 CN fed the
+# formed mass x MW ratio (426.48/410.49, moles conserved). NM phenotype
+# (2) is the parity reference. CL values derived from label t1/2 + Vd
+# (parent CL_other 3.6, CL_form_NM 20.7, 9-OH CL 14.7 L/h); Kp assumed
+# targeting label Vd (parent ~115 L, 9-OH ~480 L).
+#   28a  parent cavg     Node ↔ Sounio, STRICT 1% RMSE per organ
+#   28b  9-OH cavg       Node ↔ Sounio, STRICT 1% RMSE per organ
+#   28c  mass envelopes  parent 0 <= m <= absorbed; 9-OH 0 <= m <= formed x
+#                        MW-ratio; two-sided CN residuals printed (RRES) as
+#                        measured evidence (~1e-13 mg)
+# Strict 1% (no absolute floor needed): worst organ 0.0% both compounds.
+# Active-moiety behaviour: parent Cmax 11.7 ng/mL, 9-OH dominates by 24 h.
+# ════════════════════════════════════════════════════════════════════════════
+echo
+echo "[pbpk28-parity] Case 28: Sounio ↔ Node risperidone + 9-OH PBPK28 (oral IR)"
+
+RSP_SIO_LOG="$OUT_DIR/rsp_sounio.txt"
+RSP_NODE_LOG="$OUT_DIR/rsp_node.txt"
+"$SOUC_BIN" run tests/run-pass/dissertation_pbpk28_parity_ref_risperidone.sio > "$RSP_SIO_LOG" 2>&1 || {
+  echo "[pbpk28-parity:case28] FAIL: Sounio risperidone ref returned non-zero" >&2
+  tail -n 20 "$RSP_SIO_LOG" >&2; exit 1; }
+if ! grep -q '^DISSERTATION_PBPK28_RISPERIDONE_PARITY_DONE$' "$RSP_SIO_LOG"; then
+  echo "[pbpk28-parity:case28] FAIL: Sounio risperidone ref did not emit DONE" >&2; exit 1; fi
+node "$ROOT_DIR/scripts/dissertation/run_risperidone_node.mjs" > "$RSP_NODE_LOG" 2>&1 || {
+  echo "[pbpk28-parity:case28] FAIL: Node risperidone runner returned non-zero" >&2
+  tail -n 20 "$RSP_NODE_LOG" >&2; exit 1; }
+if ! grep -q '^DISSERTATION_PBPK28_RISPERIDONE_PARITY_NODE v1$' "$RSP_NODE_LOG"; then
+  echo "[pbpk28-parity:case28] FAIL: Node risperidone runner header mismatch" >&2; exit 1; fi
+
+EXPECTED_RSP=$((12 * 14))
+RSP_SIO_P=$(vfx_parse_cavg RISP "$RSP_SIO_LOG" | wc -l)
+RSP_NODE_P=$(vfx_parse_cavg RISP "$RSP_NODE_LOG" | wc -l)
+RSP_SIO_O=$(vfx_parse_cavg R9OH "$RSP_SIO_LOG" | wc -l)
+RSP_NODE_O=$(vfx_parse_cavg R9OH "$RSP_NODE_LOG" | wc -l)
+if [[ "$RSP_SIO_P" -ne "$EXPECTED_RSP" || "$RSP_NODE_P" -ne "$EXPECTED_RSP" || "$RSP_SIO_O" -ne "$EXPECTED_RSP" || "$RSP_NODE_O" -ne "$EXPECTED_RSP" ]]; then
+  echo "[pbpk28-parity:case28] FAIL: risperidone record mismatch — parent Sounio=$RSP_SIO_P Node=$RSP_NODE_P 9-OH Sounio=$RSP_SIO_O Node=$RSP_NODE_O expected=$EXPECTED_RSP" >&2
+  exit 1
+fi
+echo "[pbpk28-parity:case28] both runs emitted $RSP_SIO_P parent + $RSP_SIO_O 9-OH records"
+
+# Self-contained RMSE per compound (same math as vfx_rmse, explicit logs).
+rsp_rmse() {  # $1=prefix $2=pass-marker $3=fail-marker
+  join -t"$(printf '\t')" -1 1 -2 1 \
+    <(vfx_parse_cavg "$1" "$RSP_SIO_LOG"  | awk -F'\t' '{print $1"|"$2"\t"$3}' | sort) \
+    <(vfx_parse_cavg "$1" "$RSP_NODE_LOG" | awk -F'\t' '{print $1"|"$2"\t"$3}' | sort) \
+  | awk -F'\t' -v THR="$RMSE_THRESHOLD_PCT" -v PASS="$2" -v FAILM="$3" '
+      {split($1,a,"|"); i=a[2]+0; d=($2+0)-($3+0); SS[i]+=d*d; NN[i]++;
+       cs=($2+0); cn=($3+0); if(cs>PK[i])PK[i]=cs; if(cn>PK[i])PK[i]=cn}
+      END{bad=0;
+        for(i=0;i<14;i++){ if(NN[i]==0){printf "%s organ %d MISSING\n",FAILM,i; bad++; continue}
+          rmse=sqrt(SS[i]/NN[i]); pk=PK[i]+0;
+          if(pk==0){ continue }
+          pct=100*rmse/pk;
+          if(pct>=THR+0){ printf "%s organ %d pct=%.4f rmse=%.3g\n",FAILM,i,pct,rmse; bad++ } }
+        if(bad>0){ exit 1 }
+        printf "%s 14/14 compartments within %s%% RMSE (strict)\n",PASS,THR }'
+}
+
+echo "[pbpk28-parity:case28a] risperidone PARENT PBPK28 (14 organs)"
+rsp_rmse RISP "RISPERIDONE_PARENT_PARITY_PASS" "RISPERIDONE_PARENT_PARITY_FAIL"
+
+echo "[pbpk28-parity:case28b] risperidone 9-OH PBPK28 (14 organs)"
+rsp_rmse R9OH "RISPERIDONE_OH9_PARITY_PASS" "RISPERIDONE_OH9_PARITY_FAIL"
+
+echo "[pbpk28-parity:case28c] risperidone mass envelopes (parent + 9-OH)"
+paste <(grep "^RMASS|p=" "$RSP_SIO_LOG" | sed "s/^RMASS|p=//") \
+      <(grep "^RREL|abs=" "$RSP_SIO_LOG" | sed "s/^RREL|abs=//") \
+  | awk -v FAILM="RISPERIDONE_PARENT_MASS_FAIL" -v PASS="RISPERIDONE_PARENT_MASS_PASS" '
+      { m=($1+0); r=($2+0); n++;
+        if (!(m >= 0 && m <= r)) { printf "%s sample %d: mass %.6f outside [0, %.6f]\n", FAILM, n, m, r; bad=1 } }
+      END { if (n != 12) { printf "%s row count %d != 12\n", FAILM, n; exit 1 }
+        if (bad) exit 1;
+        printf "%s 12/12 samples within [0, absorbed]\n", PASS }'
+paste <(grep "^RMASS|o=" "$RSP_SIO_LOG" | sed "s/^RMASS|o=//") \
+      <(grep "^RREL|form=" "$RSP_SIO_LOG" | sed "s/^RREL|form=//") \
+  | awk -v RATIO="1.038947" -v FAILM="RISPERIDONE_OH9_MASS_FAIL" -v PASS="RISPERIDONE_OH9_MASS_PASS" '
+      { m=($1+0); r=($2+0)*RATIO; n++;
+        if (!(m >= 0 && m <= r)) { printf "%s sample %d: mass %.6f outside [0, %.6f]\n", FAILM, n, m, r; bad=1 } }
+      END { if (n != 12) { printf "%s row count %d != 12\n", FAILM, n; exit 1 }
+        if (bad) exit 1;
+        printf "%s 12/12 samples within [0, formed x MW-ratio]\n", PASS }'
+
+echo "[pbpk28-parity:case28d] risperidone two-sided CN residuals (measured evidence)"
+echo "--- Sounio residuals (mg) ---"
+grep -e "^RRES|p=" -e "^RRES|o=" "$RSP_SIO_LOG"
+echo "--- Node residuals (mg) ---"
+grep -e "^RRES|p=" -e "^RRES|o=" "$RSP_NODE_LOG"
+
+echo
+echo "[pbpk28-parity] risperidone + 9-OH canonical: CYP2D6 mother+metabolite + molar formation + mass envelopes (14th canonical drug)"
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# Case 29: Aripiprazole — fifteenth canonical drug, FIRST dual-pathway
+# oral case (parallel CYP3A4 + CYP2D6) on an extended 336 h horizon.
+# Single 15 mg oral IR tablet → gut pool + 1st-order absorption (ka =
+# 1.2/h, F = 0.87, (1-F) first-pass loss) → parent PBPK28 CN with the
+# summed parallel CYP sink solved implicitly on the liver. NM phenotype
+# (2) is the parity reference. Kernel CYP sink calibrated to the label
+# half-lives (CL_3A4 0.23, CL_2D6 0.21 L/h, cl_central 0; emergent NM
+# t1/2 75.0 h, PM cross-check 132 h vs label 146 h); Kp assumed targeting
+# label Vd (~410 L); dehydro-aripiprazole explicitly out of scope.
+#   29a  parent cavg     Node ↔ Sounio, STRICT 1% RMSE per organ
+#   29b  mass envelope   0 <= m <= absorbed, 12/12
+#   29c  CN residual     printed as measured evidence (~1e-12 mg)
+# Strict 1% (no absolute floor needed): worst organ 0.0%.
+# ════════════════════════════════════════════════════════════════════════════
+echo
+echo "[pbpk28-parity] Case 29: Sounio ↔ Node aripiprazole PBPK28 (oral IR, dual CYP)"
+
+ARP_SIO_LOG="$OUT_DIR/arp_sounio.txt"
+ARP_NODE_LOG="$OUT_DIR/arp_node.txt"
+"$SOUC_BIN" run tests/run-pass/dissertation_pbpk28_parity_ref_aripiprazole.sio > "$ARP_SIO_LOG" 2>&1 || {
+  echo "[pbpk28-parity:case29] FAIL: Sounio aripiprazole ref returned non-zero" >&2
+  tail -n 20 "$ARP_SIO_LOG" >&2; exit 1; }
+if ! grep -q '^DISSERTATION_PBPK28_ARIPIPRAZOLE_PARITY_DONE$' "$ARP_SIO_LOG"; then
+  echo "[pbpk28-parity:case29] FAIL: Sounio aripiprazole ref did not emit DONE" >&2; exit 1; fi
+node "$ROOT_DIR/scripts/dissertation/run_aripiprazole_node.mjs" > "$ARP_NODE_LOG" 2>&1 || {
+  echo "[pbpk28-parity:case29] FAIL: Node aripiprazole runner returned non-zero" >&2
+  tail -n 20 "$ARP_NODE_LOG" >&2; exit 1; }
+if ! grep -q '^DISSERTATION_PBPK28_ARIPIPRAZOLE_PARITY_NODE v1$' "$ARP_NODE_LOG"; then
+  echo "[pbpk28-parity:case29] FAIL: Node aripiprazole runner header mismatch" >&2; exit 1; fi
+
+EXPECTED_ARP=$((12 * 14))
+ARP_SIO_ROWS=$(vfx_parse_cavg ARIP "$ARP_SIO_LOG" | wc -l)
+ARP_NODE_ROWS=$(vfx_parse_cavg ARIP "$ARP_NODE_LOG" | wc -l)
+if [[ "$ARP_SIO_ROWS" -ne "$EXPECTED_ARP" || "$ARP_NODE_ROWS" -ne "$EXPECTED_ARP" ]]; then
+  echo "[pbpk28-parity:case29] FAIL: aripiprazole record mismatch — Sounio=$ARP_SIO_ROWS Node=$ARP_NODE_ROWS expected=$EXPECTED_ARP" >&2
+  exit 1
+fi
+echo "[pbpk28-parity:case29] both runs emitted $ARP_SIO_ROWS records"
+
+join -t"$(printf '\t')" -1 1 -2 1 \
+  <(vfx_parse_cavg ARIP "$ARP_SIO_LOG"  | awk -F'\t' '{print $1"|"$2"\t"$3}' | sort) \
+  <(vfx_parse_cavg ARIP "$ARP_NODE_LOG" | awk -F'\t' '{print $1"|"$2"\t"$3}' | sort) \
+| awk -F'\t' -v THR="$RMSE_THRESHOLD_PCT" '
+    {
+      split($1, a, "|"); i = a[2] + 0; cs = $2 + 0; cn = $3 + 0;
+      d = cs - cn; SS[i] += d * d; NN[i] += 1;
+      if (cs > PK[i]) PK[i] = cs;
+      if (cn > PK[i]) PK[i] = cn;
+    }
+    END {
+      bad = 0;
+      for (i = 0; i < 14; i++) {
+        if (NN[i] == 0) { printf "PBPK28_ARIPIPRAZOLE_PARITY_FAIL organ %d MISSING\n", i; bad += 1; continue; }
+        rmse = sqrt(SS[i] / NN[i]); pk = PK[i] + 0;
+        if (pk == 0) { continue; }
+        pct = 100.0 * rmse / pk;
+        if (pct >= THR + 0) { printf "PBPK28_ARIPIPRAZOLE_PARITY_FAIL organ %d pct=%.4f rmse=%.3g\n", i, pct, rmse; bad += 1; }
+      }
+      if (bad > 0) { exit 1; }
+      printf "PBPK28_ARIPIPRAZOLE_PARITY_PASS 14/14 compartments within %s%% RMSE (strict)\n", THR;
+    }
+'
+
+paste <(grep "^AMASS|m=" "$ARP_SIO_LOG" | sed "s/^AMASS|m=//") \
+      <(grep "^AREL|abs=" "$ARP_SIO_LOG" | sed "s/^AREL|abs=//") \
+  | awk -v FAILM="PBPK28_ARIPIPRAZOLE_MASS_FAIL" -v PASS="PBPK28_ARIPIPRAZOLE_MASS_PASS" '
+      { m=($1+0); r=($2+0); n++;
+        if (!(m >= 0 && m <= r)) { printf "%s sample %d: mass %.6f outside [0, %.6f]\n", FAILM, n, m, r; bad=1 } }
+      END { if (n != 12) { printf "%s row count %d != 12\n", FAILM, n; exit 1 }
+        if (bad) exit 1;
+        printf "%s 12/12 samples within [0, absorbed]\n", PASS }'
+
+echo "[pbpk28-parity:case29c] aripiprazole CN residual (measured evidence)"
+echo "--- Sounio residual (mg) ---"
+grep -e "^ARES|m=" "$ARP_SIO_LOG"
+echo "--- Node residual (mg) ---"
+grep -e "^ARES|m=" "$ARP_NODE_LOG"
+
+echo
+echo "[pbpk28-parity] aripiprazole canonical: dual CYP3A4+2D6 sink + extended 336 h horizon + mass envelope (15th canonical drug)"

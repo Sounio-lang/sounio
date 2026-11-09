@@ -1,13 +1,13 @@
 <!-- docs:meta
-topic_id: repo.docs.decisions.adr-028-bootstrap-provenance-root
+topic_id: repo.docs.decisions.adr-029-bootstrap-provenance-root
 authority: repo_only
 audience: users
 last_validated: 2026-11-04
-validated_by: docs/decisions/PENDING.md (section D-10, as measured there) and the measurements in this ADR
-source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.decisions.adr-028-bootstrap-provenance-root
+validated_by: docs/decisions/adr-028-rulings-2026-11-09.md (section D-10) and the measurements in this ADR
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.decisions.adr-029-bootstrap-provenance-root
 -->
 
-# ADR-028: The committed seed is the provenance root of the bootstrap
+# ADR-029: The committed seed is the provenance root of the bootstrap
 
 ## Context
 
@@ -62,6 +62,8 @@ analyse the current `lean_single.sio`.
   source (see Context). The chain starts at the committed seed instead.
 - **ADR-027 §4.1 (diverse double-compiling)** already records the seed SHA in
   `bootstrap-receipt.json`. This ADR is consistent with it.
+- **ADR-028 (Rulings from 2026-11-09 decision session)** rules on D-10 and formally
+  approves this decision.
 - **Madaros bit-identical requirement (board epic SIO-2).** The requirement that the
   sha256 of Madaros `gen2` through `gen7` be identical applies to Madaros, whose chain
   starts from this seed (`make build-madaros`). The C chain is not part of it. The founder

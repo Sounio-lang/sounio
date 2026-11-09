@@ -8,7 +8,7 @@ The root of the current compiler is the **committed seed**
 `bin/souc-lean-single-x86_64`, with its receipt
 `bin/souc-lean-single-x86_64.SeedReceipt.json`. It is checked by
 `scripts/ci/verify_lean_seed.sh`; add `SOUNIO_SEED_DDC=1` for the diverse
-double-compilation leg. See [ADR-028](../docs/decisions/adr-028-bootstrap-provenance-root.md).
+double-compilation leg. See [ADR-029](../docs/decisions/adr-029-bootstrap-provenance-root.md).
 
 The C chain below (`stage0.c` → … → `boot4`) is kept as the historical minimal
 bootstrap. **`boot4` does not analyse the current `self-hosted/compiler/lean_single.sio`**
