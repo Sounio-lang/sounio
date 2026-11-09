@@ -10412,6 +10412,22 @@ fn lower_field_idx_untyped(table: &StructLayoutTable, field_name: Name) -> i64 w
     0 - 1
 }
 
+// The index of `.n` when it is known without a receiver type: a tuple slot
+// name, or the untyped consensus. -1 when unknown. This is a QUERY: it never
+// refuses and never invents an index. First-order variance and constructor
+// bookkeeping key side tables by field index; for them an unknown index means
+// "no entry", not an access to place in memory. Only a real field load or
+// store goes through field_idx_from_name_simple, which refuses (ADR-026
+// amendment, 2026-11-09). The old shared path hashed `codec` to a key for
+// `let r = a.codec`, and the refusal fired on that key lookup instead.
+fn lower_field_idx_simple_query(table: &StructLayoutTable, n: Name) -> i64 with Mut, Panic, Div {
+    let tuple_idx = lower_name_tuple_index(n)
+    if tuple_idx >= 0 {
+        return tuple_idx
+    }
+    lower_field_idx_untyped(table, n)
+}
+
 // Read the side table WITHOUT copying the Lowerer. Bisected: writing this slot at param-bind time
 // is harmless (a written-but-never-read array changes nothing), while every earlier attempt read it
 // back through a by-value `self` method — which copies the whole ~struct Lowerer — at the
@@ -18637,16 +18653,16 @@ impl Lowerer {
                         if sname.len > 0 {
                             leaf_f0 = lo.field_idx_from_struct_literal_name(sname, fname, field_idx)
                         } else {
-                            leaf_f0 = lo.field_idx_from_name_simple(fname)
+                            leaf_f0 = lower_field_idx_simple_query(&(*lo.struct_layouts), fname)
                         }
                     } else if depth == 1 && outer_idx >= 0 && outer_idx < 128 {
-                        let leaf = lo.field_idx_from_name_simple(fname)
+                        let leaf = lower_field_idx_simple_query(&(*lo.struct_layouts), fname)
                         if leaf >= 0 && leaf < 128 {
                             leaf_f0 = 0 - (2 + outer_idx * 128 + leaf)
                         }
                     }
                     if (*init).kind == ExprKind::ExprStructLit {
-                        let child_outer = if depth == 0 { lo.field_idx_from_name_simple(fname) } else { 0 - 1 }
+                        let child_outer = if depth == 0 { lower_field_idx_simple_query(&(*lo.struct_layouts), fname) } else { 0 - 1 }
                         lo = lo.fo_ctor_walk_literal(fn_hash, sub, blk, init, p0, p1, nparams, depth + 1, ir_path_first_name((*init).path), child_outer)
                     } else {
                         lo = lo.fo_ctor_classify_leaf(fn_hash, sub, leaf_f0, blk, init, p0, p1, nparams, 0)
@@ -20739,7 +20755,10 @@ impl Lowerer {
             if inner.1 < 0 {
                 return (lo, -1)
             }
-            let idx = lo.field_idx_from_name_simple((*base).name)
+            let idx = lower_field_idx_simple_query(&(*lo.struct_layouts), (*base).name)
+            if idx < 0 {
+                return (lo, -1)
+            }
             return (lo, lo.lookup_variance_for_field_base(inner.1, idx))
         }
         // #1706: a chain rooted at a CALL carrying an identity FO transfer.
@@ -23923,9 +23942,9 @@ impl Lowerer {
             // lowered. Before this, every one of these fell to the `-1` below and
             // variance_of read a silent 0.0.
             let fbase = self.variance_field_chain_base(e)
-            if fbase.1 >= 0 {
-                var lo_f = fbase.0
-                let idx = lo_f.field_idx_from_name_simple((*e).name)
+            var lo_f = fbase.0
+            let idx = lower_field_idx_simple_query(&(*lo_f.struct_layouts), (*e).name)
+            if fbase.1 >= 0 && idx >= 0 {
                 let live = lo_f.fo_live_var_from_field_key(fbase.1, idx)
                 if live.1 >= 0 {
                     return live
@@ -34583,8 +34602,9 @@ impl Lowerer {
             }
             let fbase = inl.0.variance_field_chain_base(e)
             var lo = fbase.0
-            if fbase.1 >= 0 {
-                let idx = lo.field_idx_from_name_simple((*e).name)
+            let fidx = lower_field_idx_simple_query(&(*lo.struct_layouts), (*e).name)
+            if fbase.1 >= 0 && fidx >= 0 {
+                let idx = fidx
                 let key = lo.variance_field_key(fbase.1, idx)
                 let slot = lo.fo_field_sens_slot(key)
                 if slot >= 0 {
