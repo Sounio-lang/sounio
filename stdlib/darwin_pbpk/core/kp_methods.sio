@@ -137,6 +137,7 @@ use darwin_pbpk::core::tissue_composition::{tc_pey_cell, tc_pey_intf, tc_pey_cnl
 // Author: Demetrios Chiuratto Agourakis
 
 use math::pure::{exp, ln, log10}
+use epistemic::budget64::{Budget64, budget64_new, budget64_add_type_b, budget64_finalize, budget64_percent, budget64_dominant_idx}
 
 // ============================================================================
 // Shared drug inputs
@@ -509,6 +510,103 @@ fn kpm_rr_kpu_full(d: KpInputs, ph_c: f64, s_nl: f64, s_np: f64, s_ap: f64) -> f
     var ka_pr = 1.0 / d.fu_p - 1.0 - lip_pl / (1.0 + y)
     if ka_pr < 0.0 { ka_pr = 0.0 }
     return iw_term + ka_pr * 0.064 + lip_mus / (1.0 + y)
+}
+
+// ============================================================================
+// THE STRONG-BASE ROUTE WITH EVERY CONTESTED INPUT EXPOSED  (2026-11-09)
+// ============================================================================
+// Same arithmetic as kpm_rr_kpu_full on the strong-base route, but the muscle
+// composition is passed as values instead of as scales on fixed constants, so
+// that the [AP-] RATIO (tissue over red cell) and cell water can be varied --
+// which kpm_rr_kpu_full cannot do, because its s_ap scales tissue and red
+// cell together and therefore cancels (T5).  Red-cell composition stays at
+// R-R Tab. VII.  Strong-base route only: callers must be strong bases.
+// T26 pins bit-identity with kpm_rr_kpu_full at the native constants.
+fn kpm_rr_kpu_exposed(d: KpInputs, ph_c: f64, nl: f64, np: f64, ap_mus: f64, w: f64) -> f64 with Mut, Div, Panic {
+    let p  = kpm_pow10(d.log_p)
+    let ht = kpm_hematocrit()
+    let x = kpm_pow10(d.pka - ph_c)
+    let y = kpm_pow10(d.pka - kpm_ph_plasma())
+    let z = kpm_pow10(d.pka - kpm_ph_rbc())
+    let lip_mus = p * nl + (0.3 * p + 0.7) * np
+    let lip_bc  = p * (0.0012 * 1.0) + (0.3 * p + 0.7) * (0.0033 * 1.0)
+    let ap_bc   = 0.57 * 1.0
+    let iw_term = (1.0 + x) / (1.0 + y) * w + 0.079
+    let kpu_bc = (d.rb - (1.0 - ht)) / (ht * d.fu_p)
+    var ka = (kpu_bc - (1.0 + z) / (1.0 + y) * 0.63 - lip_bc / (1.0 + y)) * ((1.0 + y) / (ap_bc * z))
+    if ka < 0.0 { ka = 0.0 }
+    return iw_term + ka * ap_mus * x / (1.0 + y) + lip_mus / (1.0 + y)
+}
+
+// ============================================================================
+// THE INPUT-UNCERTAINTY BUDGET, COMPUTED BY SOUNIO  (2026-11-09)
+// ============================================================================
+// GUM law of propagation, first order, on ln Kpu of the strong-base route,
+// with each contested input carried as a Type B entry in epistemic::budget64.
+// The RANGE of each input is the measured spread between production sources,
+// and that spread is the only uncertainty claimed -- nothing is assumed
+// beyond what the sources disagree on:
+//   entry 0  logP            [caller-supplied]   per-drug literature spread
+//   entry 1  [AP-] ratio     [3.7563, 4.2456]    httk vs R-R Tab. VII
+//   entry 2  neutral lipid   [0.00868, 0.02200]  Peyret Tab.3, httk, R-R/P&T
+//   entry 3  neutral PL      [0.00780, 0.00934]  R-R, Peyret, httk
+//   entry 4  cell pH         [6.81, 7.00]        Schmitt, table, R-R/PT
+//   entry 5  cell water      [0.666, 0.679]      R-R vs httk
+// Each range is read as rectangular, u = half-width / sqrt(3) (GUM 4.3.7);
+// the robustness tests showed the DOMINANT entry does not change under
+// triangular or discrete readings, though u_c does.
+//
+// Sensitivities are computed here by central differences on
+// kpm_rr_kpu_exposed rather than carried by Knowledge<f64>, and that is a
+// limitation of the language, not a preference: first-order channels cross
+// a user call only for pure helpers (KL-11, #1792), and the strong-base route
+// branches and clamps, so it does not qualify.  When KL-11 closes this should
+// become a Knowledge<f64> propagation and the budget should not move.
+//
+// Valid only for a strong base (pKa >= 7) inside the B:P-consistent domain;
+// the result is the caller's to gate with kpm_rr_bp_consistent.
+fn kpm_lnk_exp(d: KpInputs, ph: f64, nl: f64, np: f64, apr: f64, w: f64) -> f64 with Mut, Div, Panic {
+    return ln(kpm_rr_kpu_exposed(d, ph, nl, np, apr * 0.57, w))
+}
+
+fn kpm_with_logp(d: KpInputs, lp: f64) -> KpInputs {
+    return KpInputs { log_p: lp, log_ma: d.log_ma, has_ma: d.has_ma, pka: d.pka,
+                      is_base: d.is_base, fu_p: d.fu_p, rb: d.rb, mw: d.mw }
+}
+
+pub fn kpm_rr_source_budget(d: KpInputs, logp_lo: f64, logp_hi: f64) -> Budget64 with Mut, Div, Panic {
+    let r3 = kpm_sqrt(3.0)
+    let lp  = 0.5 * (logp_lo + logp_hi)
+    let apr = 0.5 * (3.7563 + 4.2456)
+    let nl  = 0.5 * (0.00868 + 0.02200)
+    let np  = 0.5 * (0.00780 + 0.00934)
+    let ph  = 0.5 * (6.81 + 7.00)
+    let w   = 0.5 * (0.666 + 0.679)
+    let b0 = kpm_with_logp(d, lp)
+
+    let h_lp = 0.000001 * lp
+    let c_lp = (kpm_lnk_exp(kpm_with_logp(d, lp + h_lp), ph, nl, np, apr, w)
+              - kpm_lnk_exp(kpm_with_logp(d, lp - h_lp), ph, nl, np, apr, w)) / (2.0 * h_lp)
+    let h_ap = 0.000001 * apr
+    let c_ap = (kpm_lnk_exp(b0, ph, nl, np, apr + h_ap, w) - kpm_lnk_exp(b0, ph, nl, np, apr - h_ap, w)) / (2.0 * h_ap)
+    let h_nl = 0.000001
+    let c_nl = (kpm_lnk_exp(b0, ph, nl + h_nl, np, apr, w) - kpm_lnk_exp(b0, ph, nl - h_nl, np, apr, w)) / (2.0 * h_nl)
+    let h_np = 0.000001
+    let c_np = (kpm_lnk_exp(b0, ph, nl, np + h_np, apr, w) - kpm_lnk_exp(b0, ph, nl, np - h_np, apr, w)) / (2.0 * h_np)
+    let h_ph = 0.000001 * ph
+    let c_ph = (kpm_lnk_exp(b0, ph + h_ph, nl, np, apr, w) - kpm_lnk_exp(b0, ph - h_ph, nl, np, apr, w)) / (2.0 * h_ph)
+    let h_w = 0.000001
+    let c_w = (kpm_lnk_exp(b0, ph, nl, np, apr, w + h_w) - kpm_lnk_exp(b0, ph, nl, np, apr, w - h_w)) / (2.0 * h_w)
+
+    var b = budget64_new(kpm_lnk_exp(b0, ph, nl, np, apr, w), 0.95)
+    budget64_add_type_b(&!b, 0, lp,  (logp_hi - logp_lo) * 0.5 / r3, c_lp)
+    budget64_add_type_b(&!b, 1, apr, (4.2456 - 3.7563)   * 0.5 / r3, c_ap)
+    budget64_add_type_b(&!b, 2, nl,  (0.02200 - 0.00868) * 0.5 / r3, c_nl)
+    budget64_add_type_b(&!b, 3, np,  (0.00934 - 0.00780) * 0.5 / r3, c_np)
+    budget64_add_type_b(&!b, 4, ph,  (7.00 - 6.81)       * 0.5 / r3, c_ph)
+    budget64_add_type_b(&!b, 5, w,   (0.679 - 0.666)     * 0.5 / r3, c_w)
+    budget64_finalize(&!b)
+    return b
 }
 
 // Declared domain: Rodgers-Rowland was derived and validated for small
@@ -1907,6 +2005,56 @@ fn main() -> i32 with IO, Mut, Div, Panic {
     } else {
         println("T25 FAIL: haloperidol com insumos do repo recusado"); fails = fails + 1
     }
+
+    // T26 -- the exposed-input route IS the strong-base route: at the native
+    // constants it reproduces kpm_rr_kpu_full bit for bit, for two strong bases.
+    let t26_v = KpInputs { log_p: 2.71, log_ma: 0.0, has_ma: false, pka: 9.40, is_base: true, fu_p: 0.73, rb: 1.00, mw: 277.40 }
+    let t26_h = KpInputs { log_p: 4.30, log_ma: 3.723, has_ma: true, pka: 8.66, is_base: true, fu_p: 0.10, rb: 1.08, mw: 375.86 }
+    let e_v = kpm_rr_kpu_exposed(t26_v, 7.0, 0.022, 0.0078, 2.42, 0.666)
+    let f_v = kpm_rr_kpu_full(t26_v, 7.0, 1.0, 1.0, 1.0)
+    let e_h = kpm_rr_kpu_exposed(t26_h, 7.0, 0.022, 0.0078, 2.42, 0.666)
+    let f_h = kpm_rr_kpu_full(t26_h, 7.0, 1.0, 1.0, 1.0)
+    if e_v == f_v {
+        if e_h == f_h {
+            println("T26 PASS: rota exposta reproduz kpm_rr_kpu_full bit a bit (venlafaxina, haloperidol)")
+        } else {
+            println("T26 FAIL: haloperidol divergiu"); fails = fails + 1
+        }
+    } else {
+        println("T26 FAIL: venlafaxina divergiu"); fails = fails + 1
+    }
+
+    // T27 -- THE BUDGET, COMPUTED BY THE LANGUAGE.  epistemic::budget64 fed with
+    // Sounio sensitivities must reproduce the independent C++23 budget
+    // (vfx_budget.cpp, printed to 9 digits): u_c(ln Kpu) 0.124212417, cell pH
+    // 96.994797%, [AP-] 2.899491%.  Bands are +/-2e-5 and +/-2e-4, because
+    // the three computations agree to every printed digit and a wide band
+    // would let a real regression through.  The
+    // dominant entry must be the cell-pH convention (entry 4).
+    let bv = kpm_rr_source_budget(t26_v, 2.62, 2.80)
+    let uc = bv.combined_std_uncert
+    let pph = budget64_percent(&bv, 4)
+    let pap = budget64_percent(&bv, 1)
+    print("  u_c(ln Kpu) = "); println(uc)
+    print("  parcela pH celular % = "); println(pph)
+    print("  parcela razao [AP-] % = "); println(pap)
+    if uc > 0.124192 {
+        if uc < 0.124232 {
+            if pph > 96.9946 {
+                if pph < 96.9950 {
+                    if pap > 2.8993 {
+                        if pap < 2.8997 {
+                            if budget64_dominant_idx(&bv) == 4 {
+                                println("T27 PASS: budget64 do Sounio reproduz o orcamento C++ -- pH celular dominante")
+                            } else {
+                                println("T27 FAIL: entrada dominante nao e o pH"); fails = fails + 1
+                            }
+                        } else { println("T27 FAIL: [AP-] acima da banda"); fails = fails + 1 }
+                    } else { println("T27 FAIL: [AP-] abaixo da banda"); fails = fails + 1 }
+                } else { println("T27 FAIL: pH acima da banda"); fails = fails + 1 }
+            } else { println("T27 FAIL: pH abaixo da banda"); fails = fails + 1 }
+        } else { println("T27 FAIL: u_c acima da banda"); fails = fails + 1 }
+    } else { println("T27 FAIL: u_c abaixo da banda"); fails = fails + 1 }
     if fails == 0 {
         println("PASS")
         return 0
