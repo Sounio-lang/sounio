@@ -284,14 +284,15 @@ def main():
         if re.search(r"\b%d\b" % base_addr, stripped):
             occ.append(stripped)
     allowed = re.compile(r"^(?:var NC_HANDLE_CAPACITY: i64 = %d|NC_HANDLE_CAPACITY = %d|"
-                         r"if str_eq\(v, \"22\"\) \{ cap = %d \})$"
-                         % (base_addr, base_addr, base_addr))
+                         r"if str_eq\(v, \"22\"\) \{ cap = %d \}|"
+                         r"fn nc_a64_preview_elf_base_addr\(\) -> i64 \{ %d \})$"
+                         % (base_addr, base_addr, base_addr, base_addr))
     for line in occ:
         if re.search(r"[<>]=?\s*%d\b" % base_addr, line):
             fail("elf_base_addr_used_as_bound")
         if not allowed.search(line):
             fail("elf_base_addr_unexpected_form")
-    if len(occ) != 3:
+    if len(occ) != 4:
         fail("elf_base_addr_occurrence_count_%d" % len(occ))
     if not re.search(r"^fn nc_elf_base_addr\(\) -> i64 with Mut \{ NC_HANDLE_CAPACITY \}$", cgx, re.MULTILINE):
         fail("nc_elf_base_addr_accessor_missing")

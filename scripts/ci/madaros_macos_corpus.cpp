@@ -57,6 +57,10 @@ int main(int argc,char** argv) {
         std::cerr<<"empty corpus or incorrect required 200-member denominator\n"; return 2;
     }
     const bool replay=std::getenv("CORPUS_REPLAY")!=nullptr;
+    const char* cache_env=std::getenv("CORPUS_COMPILE_CACHE_RESTORE");
+    const bool cached=cache_env && *cache_env;
+    const fs::path compile_cache=cached?fs::absolute(cache_env):fs::path();
+    if(cached && replay) { std::cerr<<"compiled cache cannot replay execution receipts\n"; return 2; }
     if(!replay && fs::exists(out/"results.tsv")) {
         std::cerr<<"result directory already contains receipts; use a fresh directory\n"; return 2;
     }
@@ -83,7 +87,27 @@ int main(int argc,char** argv) {
             std::cerr<<"compiler/manifest identity changed; cannot replay receipts\n"; return 2;
         }
     } else if(cmd(identity_command+" >"+q((out/"identity.txt").string()))) return 2;
-    std::ofstream results(out/"results.tsv"); results<<"test\tstatus\tcompile_rc\trun_rc\toracle\n";
+    std::map<std::string,std::string> cached_hashes;
+    if(cached) {
+        const auto verification=out/"compile-cache-verification.log";
+        if(cmd("node scripts/ci/macos_corpus_cache.mjs verify "+q(fs::current_path().string())+" "+q(compiler)+" "+q(compile_cache.string())+" >"+q(verification.string())+" 2>&1")) {
+            std::cerr<<"compiled corpus cache verification failed\n"<<read(verification); return 2;
+        }
+        std::istringstream receipt(read(verification));
+        for(std::string line;std::getline(receipt,line);) {
+            std::istringstream row(line); std::string tag,name,sha;
+            if(row>>tag>>name>>sha && tag=="MACOS_CORPUS_PROGRAM") {
+                if(sha.size()!=64 || sha.find_first_not_of("0123456789abcdef")!=std::string::npos || !cached_hashes.emplace(name,sha).second) {
+                    std::cerr<<"invalid verified program digest receipt\n"; return 2;
+                }
+            }
+        }
+        if(cached_hashes.size()!=names.size()) { std::cerr<<"incomplete verified corpus digests\n"; return 2; }
+        for(const auto& name:names) if(!cached_hashes.contains(name)) { std::cerr<<"missing verified corpus digest\n"; return 2; }
+        std::cout<<"MACOS_CORPUS_VERIFIED_COMPILE_INPUTS members="<<cached_hashes.size()<<std::endl;
+    }
+    std::ofstream results(out/"results.tsv"); results<<"test\tstatus\tcompile_rc\trun_rc\toracle\tcompile_mode\n";
+    std::map<std::string,int> compile_modes;
     std::mutex lock; std::atomic_size_t next=0; std::map<std::string,int> totals;
     const int jobs=std::stoi(argv[4]); const auto timeout=std::to_string(std::stoi(argv[5]));
     std::vector<std::thread> workers;
@@ -104,9 +128,20 @@ int main(int argc,char** argv) {
             }
             std::ofstream(dir/"expected.stdout")<<expected;
             auto redir=[&](std::string s){return " >"+q((dir/(s+".log")).string())+" 2>&1";};
-            int cr=replay?prior.at(name).first:cmd("timeout "+timeout+" "+q(compiler)+" build "+q(src.string())+" --target aarch64-macos -o "+q(bin)+redir("build"));
+            int cr=0; bool cache_bad=false;
+            if(cached) {
+                std::error_code ec;
+                fs::copy_file(compile_cache/name/"program",bin,fs::copy_options::overwrite_existing,ec);
+                cache_bad=static_cast<bool>(ec);
+                // Freeze expected digests from the verified receipt before workers run.
+                std::ofstream(dir/"cache-expected.sha256")<<cached_hashes.at(name)<<"  program\n";
+                if(!cache_bad) cache_bad=cmd("(cd "+q(dir.string())+" && shasum -a 256 -c "+q((dir/"cache-expected.sha256").string())+")"+redir("cache-verify"))!=0;
+                std::ofstream(dir/"build.log")<<"compile_mode=verified-cache\n";
+                cr=cache_bad?125:0;
+            } else cr=replay?prior.at(name).first:cmd("timeout "+timeout+" "+q(compiler)+" build "+q(src.string())+" --target aarch64-macos -o "+q(bin)+redir("build"));
             int rr=-1; std::string status;
-            if(cr) status=cr==124?"compile_timeout":"compile_failed";
+            if(cache_bad) status="compile_cache_invalid";
+            else if(cr) status=cr==124?"compile_timeout":"compile_failed";
             else if(cmd("file "+q(bin)+" | grep -Eq 'Mach-O 64-bit.*arm64'")) status="wrong_format";
             else if(cmd((replay?std::string():"chmod +x "+q(bin)+" && codesign -s - -f "+q(bin)+" && ")+"codesign --verify "+q(bin)+redir(replay?"sign-replay":"sign"))) status="sign_failed";
             else if(!replay && cmd("shasum -a 256 "+q(bin)+" >"+q((dir/"program.sha256").string()))) status="identity_failed";
@@ -128,8 +163,9 @@ int main(int argc,char** argv) {
                    read(dir/"stderr.log").find("SOUNIO_METAL_EXECUTED device=")==std::string::npos)
                     status="metal_not_executed";
             }
-            std::lock_guard guard(lock); totals[status]++;
-            results<<name<<'\t'<<status<<'\t'<<cr<<'\t'<<rr<<'\t'<<(contains.empty()?"exit-only":"contains")<<'\n'; results.flush();
+            const std::string mode=cached?"verified-cache":replay?"replay":"fresh";
+            std::lock_guard guard(lock); totals[status]++; compile_modes[mode]++;
+            results<<name<<'\t'<<status<<'\t'<<cr<<'\t'<<rr<<'\t'<<(contains.empty()?"exit-only":"contains")<<'\t'<<mode<<'\n'; results.flush();
             std::cout<<i+1<<'/'<<names.size()<<' '<<name<<' '<<status<<std::endl;
             if(status!="pass") {
                 std::cerr<<"FAIL "<<name<<" status="<<status<<" compile_rc="<<cr<<" run_rc="<<rr<<'\n';
@@ -140,7 +176,8 @@ int main(int argc,char** argv) {
             }
         }
     });
-    for(auto& t:workers)t.join(); std::ofstream summary(out/"summary.txt");
+    for(auto& t:workers) { t.join(); }
+    std::ofstream summary(out/"summary.txt");
     for(auto [s,n]:totals) { std::cout<<s<<'='<<n<<'\n'; summary<<s<<'='<<n<<'\n'; }
     std::map<std::string,int> causes;
     for(const auto& name:names) { std::string cause; std::istringstream log(read(out/name/"build.log"));
@@ -152,5 +189,6 @@ int main(int argc,char** argv) {
         if(!cause.empty()) causes[cause]++;
     }
     std::ofstream causes_file(out/"causes.tsv"); for(auto [c,n]:causes) causes_file<<c<<'\t'<<n<<'\n';
+    for(const auto& [mode,n]:compile_modes) { std::cout<<"compile_"<<mode<<'='<<n<<'\n'; summary<<"compile_"<<mode<<'='<<n<<'\n'; }
     summary<<"total="<<names.size()<<'\n'; return totals["pass"]==static_cast<int>(names.size())?0:1;
 }

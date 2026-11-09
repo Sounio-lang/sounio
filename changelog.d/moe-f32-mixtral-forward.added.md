@@ -1,0 +1,1 @@
+Multi-layer MoE in the Llama forward path (`ntok>1`), Q4_K/Q5_K dispatch in `llama_moe_ffn_block`, and `llama_load_moe` with Mixtral-shaped safetensors plus Q4_K sidecar packs. Synthetic multi-layer and Mixtral-shaped fixture demos on L4.

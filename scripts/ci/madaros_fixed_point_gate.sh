@@ -73,19 +73,13 @@ set -uo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
-# gen2 and gen3 are Madaros-compiled programs, and their runtime arena is
-# whatever the compile asked for (SOUNIO_NV2_ARENA_GIB, default 2 GiB). With
-# 2 GiB, gen2 ran out of arena about 3 s into compiling main.sio, while still
-# parsing it (#2966; scripts/ci/madaros_arena_size_gate.sh). Both rungs are
-# compiled under the same value, so gen2 and gen3 stay comparable. The mapping
-# is MAP_NORESERVE: only the pages the compile touches are committed.
-# 64 GiB stopped gen3 at arena full (rc 181) after 116 of 130 modules on
-# 7d462afa8 (proof 40947411774), with cross-module DCE working (11,375
-# functions). gen2 is a Madaros-built compiler and measures ~11% more peak RSS
-# than the gen2 of 67e20eadf on the same input (stats_inference_forest: 3.66 vs
-# 3.31 GB) while the lean_single-built gen1s match (3.69 vs 3.68 GB). The
-# workflow provides 72 GiB of swap for it.
-export SOUNIO_NV2_ARENA_GIB="${SOUNIO_NV2_ARENA_GIB:-128}"
+# gen2 and gen3 are Madaros-compiled programs. Their runtime heap is one
+# MAP_NORESERVE reservation sized at start up to min(1 TiB, RAM + swap), so
+# the arena wall is what the runner can back, not a compile-time knob (ADR-028;
+# scripts/ci/madaros_heap_reserve_gate.sh). With the old fixed 2 GiB, gen2 ran
+# out of arena about 3 s into compiling main.sio (#2966); 64 GiB stopped gen3
+# at rc 181 after 116 of 130 modules (proof 40947411774). The workflow
+# provides 72 GiB of swap for it.
 # Likewise the handle table: 4,194,304 handles ran out in gen3 after it had
 # parsed about 3 MB of its own source (#2966). The load base is the handle
 # capacity, and native_v2_write_min_elf64_to_file refuses (rc 29) when
@@ -101,8 +95,8 @@ export SOUNIO_NV2_ARENA_GIB="${SOUNIO_NV2_ARENA_GIB:-128}"
 # (proof 40898142044, rc 182 after 39 of 130 modules). BSS_BASE_LINUX moved to
 # 0x20000000 so 28 is a legal load: base 0x10000000 + ~163 MB of image ends
 # below the BSS window. The handle table is bump-allocated and demand-paged, so
-# only touched entries cost memory; 2^28 x 48 B x 4 fits the 64 GiB arena
-# (nc_configure_handles_from_env). Both rungs use the same value.
+# only touched entries cost memory; the reservation's minimum and floor scale
+# with the 12 GiB table (nc_heap_reserve_min / _floor). Both rungs use the same value.
 export SOUNIO_NV2_HANDLE_LOG2="${SOUNIO_NV2_HANDLE_LOG2:-28}"
 
 # ── receipt reuse ─────────────────────────────────────────────────────────────

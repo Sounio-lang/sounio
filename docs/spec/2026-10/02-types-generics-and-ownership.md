@@ -218,20 +218,23 @@ pointer aliases to that field are analyzed.
 ### TYPE-009 — Enums, payloads, and special optional values (target-contract)
 
 `EnumInfo` records variants and their field lists, and parsed declarations can
-retain tuple or struct payloads. Current Madaros CPU lowering generally models
-user enums as discriminants. The checker refuses unsupported payload construction
-and payload patterns with E264; allowing a payload declaration alone does not
-implement values carrying that payload. The unit variants of such a declaration
-can still be used. The legacy seed has separate failure behavior and is not
-covered by that modular refusal.
+retain tuple or struct payloads. Madaros CPU lowering models an enum without
+payload variants as a discriminant and an enum with at least one payload variant
+as a tagged cell (discriminant word, then one word per payload field, sized for
+the largest variant; `docs/compiler/ENUM_PAYLOAD_LAYOUT.md`). The checker types
+payload pattern bindings with the declared field types, checks constructor and
+pattern arity (E277, E278), refuses `==` and integer casts on payload enums
+(E279) and non-exhaustive matches over them (E280); E264 remains for payload
+fields that are not one word. Generic enum declarations do not parse. The legacy
+seed has separate failure behavior.
 
 `Option<T>`/`Some`/`None` have dedicated checker and lowerer treatment and cannot
 serve as proof that arbitrary user payload enums are operational. In particular,
 the source has a `Some(0)` witness because absence must not simply mean a zero
-payload. Pattern-bound payload types, exhaustiveness, representation, equality,
-and destruction for general payload enums require a coordinated implementation.
-The current checker's enum-to-numeric binding/return allowances are descriptive
-compatibility accommodations, not an approved universal enum conversion design.
+payload. Generic payload enums, structural equality and destruction of payload
+enums remain unimplemented. The current checker's enum-to-numeric binding/return
+allowances apply to fieldless enums only; they are descriptive compatibility
+accommodations, not an approved universal enum conversion design.
 
 ### TYPE-010 — Arrays and element selection (source-observed)
 
@@ -785,7 +788,7 @@ fixture's intended role, never a result obtained in this research pass.
 | Names and aliases | `self-hosted/check/check.sio::checker_lower_named_type_mut`; `self-hosted/check/env.sio::TypeEnv`; `self-hosted/compiler/private_fn_identity.sio::module_struct_identity_check` | `tests/run-pass/unit_builtin_global_and_generic_shadow_2874.sio`; `tests/run-pass/madaros_module_same_struct_identical_copies.sio` | `tests/compile-fail/madaros_module_same_struct_differs.sio` |
 | Literal context | `self-hosted/check/check.sio::checker_contextual_expr_compatible`, `checker_expected_accepts_int_literal`, `checker_expected_accepts_float_literal` | `tests/witness_matrix/cases/w11_float_literal_f32.sio`; `tests/witness_matrix/cases/w1_literal_coercion.sio` | `tests/compile-fail/f32_nonliteral_coerce_must_reject.sio`; integer range policy remains open |
 | Struct fields and layouts | `self-hosted/check/check.sio::checker_collect_struct_def_inplace`, `checker_check_field_access_inplace`; `self-hosted/check/defs.sio::StructInfo` | `tests/run-pass/generic_struct_compound_field_inference.sio`; `examples/native/struct_basic.sio` | `tests/ui/type/struct_missing_field.sio`; `tests/compile-fail/recursive_struct_e216.sio`; `tests/selfhost/native_typecheck/struct_shorthand_type_mismatch.sio` |
-| Enum representation | `self-hosted/check/check.sio::checker_collect_enum_def_inplace`, `checker_check_call_expr_inplace`; `self-hosted/ir/lower.sio::lower_match_arm_ref` | `tests/selfhost/native_runtime/enum_payload_then_plain_match_42.sio`; `tests/run-pass/option_scalar_match_issue2787.sio` | `tests/compile-fail/enum_payload_tuple_variant_refused.sio`; `tests/compile-fail/enum_payload_struct_variant_refused.sio`; `tests/compile-fail/enum_payload_pattern_refused.sio` |
+| Enum representation | `self-hosted/check/check.sio::checker_collect_enum_def_inplace`, `checker_check_call_expr_inplace`; `self-hosted/ir/lower.sio::lower_match_arm_ref` | `tests/selfhost/native_runtime/enum_payload_then_plain_match_42.sio`; `tests/run-pass/option_scalar_match_issue2787.sio` | `tests/run-pass/enum_payload_scalar.sio`; `tests/compile-fail/enum_payload_match_not_exhaustive.sio`; `tests/compile-fail/enum_payload_tuple_field_refused.sio` |
 | Arrays and tuples | `self-hosted/check/check.sio::checker_check_array_lit_inplace`, `checker_check_tuple_elems_inplace`, `checker_check_index_inplace` | `tests/typekind/array/pass.sio`; `tests/run-pass/tuple_element_borrow.sio` | `tests/selfhost/native_typecheck/array_return_length_mismatch.sio`; `tests/compile-fail/tuple_destructure_arity_mismatch.sio`; `tests/ui/type/tuple_index_oob.sio` |
 | Slices and raw pointers | `self-hosted/check/check.sio::slice_param_accepts_array_ref`; `self-hosted/check/compat.sio::types_compatible` | `tests/typekind/slice_mut/pass.sio`; `tests/typekind/raw_ptr/pass.sio`; `scripts/ci/madaros_d3_openslice_len_gate.sh` | `tests/typekind/slice_mut/refuse.sio`; `tests/compile-fail/kl1_raw_ptr_const_to_mut.sio` |
 | Function value type/effect boundary | `self-hosted/check/check.sio::checker_fn_sig_effects_compatible`, `checker_fn_types_structurally_compatible_table` | `tests/run-pass/madaros_generic_hof_scalar_inference.sio`; `tests/run-pass/closure_generic_hof.sio` | `tests/compile-fail/madaros_generic_hof_inference_mismatch.sio`; `tests/compile-fail/closure_effect_escape.sio` |

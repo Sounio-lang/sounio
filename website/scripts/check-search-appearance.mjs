@@ -7,20 +7,28 @@
  * Every built page must have one H1. Learn pages must carry TechArticle
  * and a BreadcrumbList taken from the visible breadcrumb. SoftwareApplication
  * stays on the home page. SoftwareSourceCode is on the home page and
- * /learn/getting-started/.
+ * /learn/getting-started/. /language/ carries one ComputerLanguage whose
+ * alternateName and sameAs reuse the former-name constants. /learn/ and
+ * /learn/getting-started/ show the research-language status line.
  */
 import assert from 'node:assert/strict';
 import { readdir, readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
+import { chdir } from 'node:process';
 import { fileURLToPath } from 'node:url';
 import { parse } from 'parse5';
 import { EFFECTS_PAGE, ENGLISH_SEARCH, SELF_HOSTED_PAGE } from '../src/lib/search-appearance.mjs';
 import { EFFECTS_FAQ } from '../src/lib/effect-system-page.mjs';
+import { UNCERTAINTY_EN, UNCERTAINTY_PT } from '../src/lib/uncertainty-page.mjs';
 import { rehypeDemoteH1 } from '../src/lib/rehype-demote-h1.mjs';
-import { isoDateOrNothing, CODE_REPOSITORY, FORMER_LANGUAGE_NAME, FORMER_RELEASE_URL } from '../src/lib/structured-data.mjs';
-import { barePath, localeFromPath, isRedirectPath, absoluteUrl, htmlLang, canonicalPathname } from '../src/lib/seo-locales.mjs';
+import { isoDateOrNothing, CODE_REPOSITORY, COMPUTER_LANGUAGE_ID, FORMER_LANGUAGE_NAME, FORMER_RELEASE_URL, computerLanguage } from '../src/lib/structured-data.mjs';
 
+// seo-locales resolves content from cwd. Astro and `npm --prefix website`
+// already start there. This command is also run from the repo root.
 const website = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+chdir(website);
+const { barePath, localeFromPath, isRedirectPath, absoluteUrl, htmlLang, canonicalPathname } = await import('../src/lib/seo-locales.mjs');
+
 const dist = path.join(website, 'dist');
 const TITLE_MAX = 60;
 const DESCRIPTION_MAX = 155;
@@ -83,6 +91,34 @@ function collectAlternateNames(value, found) {
 
 const FORMER_NAME_NOTE = 'Sounio (formerly Demetrios). Sounio was previously released as Demetrios, the former name of this language.';
 const FORMER_NAME_NOTE_PT = 'Sounio (anteriormente Demetrios). O Sounio foi lançado anteriormente como Demetrios, o nome anterior desta linguagem.';
+const RESEARCH_STATUS = 'Status: research language (pre-1.0). APIs may change; not recommended for production use.';
+const COMPILER_VERSION = /v0\.80|v0\.99|v0\.100|v1\.0/;
+const RESERVED_SCHEMA_IDS = new Set([
+  'https://www.souniolang.org/about/#demetrios',
+  'https://www.souniolang.org/about/#dionisio',
+  'https://www.souniolang.org/pt/about/#webpage',
+]);
+const RESEARCH_STATUS_ROUTES = new Set(['/', '/learn/', '/learn/getting-started/']);
+
+function collectTyped(value, type, found) {
+  if (!value || typeof value !== 'object') return;
+  if (Array.isArray(value)) {
+    for (const item of value) collectTyped(item, type, found);
+    return;
+  }
+  if (value['@type'] === type) found.push(value);
+  for (const child of Object.values(value)) collectTyped(child, type, found);
+}
+
+function collectIds(value, found) {
+  if (!value || typeof value !== 'object') return;
+  if (Array.isArray(value)) {
+    for (const item of value) collectIds(item, found);
+    return;
+  }
+  if (typeof value['@id'] === 'string') found.push(value['@id']);
+  for (const child of Object.values(value)) collectIds(child, found);
+}
 
 // HTML5 end tags may carry whitespace or ignored attributes before `>`,
 // as in `</script >`. A regexp that requires a bare `</script>` leaves
@@ -114,9 +150,11 @@ function titleOf(html) {
 }
 
 function descriptionOf(html) {
-  const match = html.match(/<meta\b[^>]*name="description"[^>]*>/i);
-  if (!match) return '';
-  const quoted = match[0].match(/content="([^"]*)"/);
+  // Quoted attributes may contain `>` (Knowledge<T>). A scan that stops at
+  // the first `>` would cut the description in the middle of the type.
+  const start = html.search(/<meta\b[^>]*\bname="description"/i);
+  if (start < 0) return '';
+  const quoted = html.slice(start, start + 4000).match(/\bcontent="([^"]*)"/);
   return quoted ? decode(quoted[1]) : '';
 }
 
@@ -194,6 +232,104 @@ function selfTest() {
   const styled = '<style>SECRET_STYLE</style ><p>visible only</p>';
   assert.equal(visibleProse(styled).includes('SECRET_STYLE'), false);
   assert.equal(visibleProse(styled).includes('visible only'), true);
+
+  const languageNode = computerLanguage({ description: 'Authoritative tour of Sounio.' });
+  assert.equal(languageNode['@type'], 'ComputerLanguage');
+  assert.equal(languageNode['@id'], COMPUTER_LANGUAGE_ID);
+  assert.equal(languageNode.name, 'Sounio');
+  assert.equal(languageNode.alternateName, FORMER_LANGUAGE_NAME);
+  assert.deepEqual(languageNode.sameAs, [FORMER_RELEASE_URL]);
+  assert.equal('softwareVersion' in languageNode, false);
+  assert.equal(COMPILER_VERSION.test(JSON.stringify(languageNode)), false);
+  assert.equal(COMPILER_VERSION.test(RESEARCH_STATUS), false);
+  assert.equal(descriptionOf('<meta name="description" content="Knowledge&lt;T&gt; stays quoted.">'), 'Knowledge<T> stays quoted.');
+  assert.equal(descriptionOf('<meta name="description" content="Knowledge<T> stays quoted.">'), 'Knowledge<T> stays quoted.');
+  assert.equal(RESERVED_SCHEMA_IDS.has(COMPUTER_LANGUAGE_ID), false);
+}
+
+function uncertaintyAppearanceErrors(route, html, blocks, page) {
+  const found = [];
+  const headings = h1Texts(html);
+  if (headings[0] !== page.h1) {
+    found.push(`${route}: H1 is ${JSON.stringify(headings[0])}, expected ${JSON.stringify(page.h1)}`);
+  }
+  if (titleOf(html) !== page.documentTitle) {
+    found.push(`${route}: title is ${JSON.stringify(titleOf(html))}`);
+  }
+  if (descriptionOf(html) !== page.description) {
+    found.push(`${route}: description does not match the uncertainty copy`);
+  }
+  const lede = firstParagraphAfterH1(html);
+  if (lede !== page.lede) found.push(`${route}: first paragraph after H1 does not match the answer`);
+  for (const token of ['Measurements.jl', 'uncertainties', 'Knowledge']) {
+    if (!lede.includes(token)) found.push(`${route}: answer-first paragraph missing ${token}`);
+  }
+  const visible = visibleProse(html);
+  if (!visible.includes(page.statusLine)) found.push(`${route}: research-language status line is missing`);
+  if (visible.includes('(eventually)') || visible.includes('eventually propagates')) {
+    found.push(`${route}: stale "(eventually) propagates" wording is still visible`);
+  }
+  const versionHit = html.match(/v0\.80|v0\.99|v0\.100|v1\.0/);
+  if (versionHit) found.push(`${route}: compiler version ${versionHit[0]} appears in the HTML`);
+  if (/\bphysician\b|\bPhD\b|\bDr\.|\bMD\b|honorificPrefix/.test(html)) {
+    found.push(`${route}: forbidden credential or honorificPrefix in the HTML`);
+  }
+  if (/faster than|more accurate than/i.test(visible)) {
+    found.push(`${route}: performance or accuracy comparison is present`);
+  }
+  if (!html.includes('v_ind=0.050000') || !html.includes('v_cor=0.090000')) {
+    found.push(`${route}: Madaros excerpt output is missing`);
+  }
+  const article = blocks.find((block) => block['@type'] === 'TechArticle');
+  if (article?.headline !== page.h1) found.push(`${route}: TechArticle headline`);
+  if (article?.description !== page.description) found.push(`${route}: TechArticle description`);
+  if (article?.dateModified !== page.dateModified) found.push(`${route}: TechArticle dateModified`);
+  if ('softwareVersion' in (article ?? {})) found.push(`${route}: softwareVersion on TechArticle`);
+  if (JSON.stringify(article?.author) !== JSON.stringify(page.author)) {
+    found.push(`${route}: TechArticle author ${JSON.stringify(article?.author)}`);
+  }
+  if (article?.author && ('honorificPrefix' in article.author || 'honorificSuffix' in article.author)) {
+    found.push(`${route}: TechArticle author carries an honorific`);
+  }
+  if (JSON.stringify(article?.about) !== JSON.stringify(page.about)) {
+    found.push(`${route}: TechArticle about ${JSON.stringify(article?.about)}`);
+  }
+  if (JSON.stringify(article?.isPartOf) !== JSON.stringify(page.isPartOf)) {
+    found.push(`${route}: TechArticle isPartOf`);
+  }
+  if (article?.proficiencyLevel !== page.proficiencyLevel) found.push(`${route}: TechArticle proficiencyLevel`);
+  if (JSON.stringify(article?.dependencies) !== '[]') found.push(`${route}: TechArticle dependencies`);
+  if (JSON.stringify(article?.citation) !== JSON.stringify(page.citation)) {
+    found.push(`${route}: TechArticle citation ${JSON.stringify(article?.citation)}`);
+  }
+  const faq = blocks.find((block) => block['@type'] === 'FAQPage');
+  if (!faq) found.push(`${route}: FAQPage missing`);
+  const entities = faq?.mainEntity ?? [];
+  if (entities.length !== page.faq.length) found.push(`${route}: FAQPage has ${entities.length} questions`);
+  page.faq.forEach((item, index) => {
+    const entity = entities[index];
+    if (entity?.name !== item.question || entity?.acceptedAnswer?.text !== item.answer) {
+      found.push(`${route}: FAQPage item ${index} does not match the source strings`);
+    }
+    if (!visible.includes(item.question) || !visible.includes(item.answer)) {
+      found.push(`${route}: FAQ item ${index} is not visible`);
+    }
+  });
+  const names = blocks.find((block) => block['@type'] === 'BreadcrumbList')?.itemListElement?.map((item) => item.name) ?? [];
+  if (names.join('\n') !== page.crumbs.join('\n')) {
+    found.push(`${route}: BreadcrumbList is ${names.join(' / ')}`);
+  }
+  for (const rel of [
+    'tests/run-pass/madaros_gum_fo_correlate.sio',
+    'tests/run-pass/gum_correlated.sio',
+    'tests/run-pass/madaros_gum_correlate_negative_rho.sio',
+    'tests/run-pass/madaros_gum_correlate_is_per_function.sio',
+    'tests/compile-fail/correlate_rho_must_be_literal.sio',
+    'docs/compiler/KNOWN_LIMITATIONS.md',
+  ]) {
+    if (!html.includes(rel)) found.push(`${route}: missing source path ${rel}`);
+  }
+  return found;
 }
 
 selfTest();
@@ -213,6 +349,16 @@ const warnings = [];
 const errors = [];
 let pages = 0;
 let englishPages = 0;
+
+const i18nDir = path.join(website, 'src/i18n');
+const i18nFiles = (await readdir(i18nDir)).filter((name) => name.endsWith('.json'));
+if (i18nFiles.length === 0) errors.push('i18n: no locale files');
+for (const file of i18nFiles) {
+  const data = JSON.parse(await readFile(path.join(i18nDir, file), 'utf8'));
+  if (data.maturity_description !== RESEARCH_STATUS) {
+    errors.push(`src/i18n/${file}: maturity_description drifted from the shared status line`);
+  }
+}
 
 for await (const file of walk(dist)) {
   if (!file.endsWith('.html')) continue;
@@ -237,7 +383,7 @@ for await (const file of walk(dist)) {
   }
   const software = blocks.filter((block) => block['@type'] === 'SoftwareApplication');
   const source = blocks.filter((block) => block['@type'] === 'SoftwareSourceCode');
-  if (bare === '/' || bare === '/about/') {
+  if (bare === '/' || bare === '/about/' || bare === '/language/') {
     const names = new Set();
     for (const block of blocks) collectAlternateNames(block, names);
     if (!names.has(FORMER_LANGUAGE_NAME)) {
@@ -248,6 +394,50 @@ for await (const file of walk(dist)) {
       errors.push(`${route}: JSON-LD missing former-release sameAs ${FORMER_RELEASE_URL}`);
     }
   }
+  if (RESEARCH_STATUS_ROUTES.has(bare)) {
+    if (!visibleProse(html).includes(RESEARCH_STATUS)) {
+      errors.push(`${route}: research-language status line is missing`);
+    }
+    if (headings.includes(RESEARCH_STATUS)) {
+      errors.push(`${route}: research-language status line is a heading`);
+    }
+  }
+  const schemaIds = [];
+  collectIds(blocks, schemaIds);
+  if (bare === '/language/') {
+    const languages = [];
+    collectTyped(blocks, 'ComputerLanguage', languages);
+    if (languages.length !== 1) {
+      errors.push(`${route}: expected one ComputerLanguage, found ${languages.length}`);
+    }
+    const language = languages[0];
+    if (language) {
+      if (language.name !== 'Sounio') errors.push(`${route}: ComputerLanguage.name`);
+      if (language.alternateName !== FORMER_LANGUAGE_NAME) {
+        errors.push(`${route}: ComputerLanguage.alternateName`);
+      }
+      const sameAs = Array.isArray(language.sameAs) ? language.sameAs : [language.sameAs];
+      if (!sameAs.includes(FORMER_RELEASE_URL)) errors.push(`${route}: ComputerLanguage.sameAs`);
+      if (language['@id'] !== COMPUTER_LANGUAGE_ID) errors.push(`${route}: ComputerLanguage.@id`);
+      if ('softwareVersion' in language) errors.push(`${route}: ComputerLanguage.softwareVersion`);
+      if (COMPILER_VERSION.test(JSON.stringify(language))) {
+        errors.push(`${route}: ComputerLanguage names a compiler version`);
+      }
+    }
+    const idCounts = new Map();
+    for (const id of schemaIds) idCounts.set(id, (idCounts.get(id) ?? 0) + 1);
+    for (const [id, count] of idCounts) {
+      if (count > 1) errors.push(`${route}: duplicate @id ${id}`);
+      if (RESERVED_SCHEMA_IDS.has(id)) errors.push(`${route}: reuses @id ${id}`);
+    }
+    const nestedSource = [];
+    collectTyped(blocks, 'SoftwareSourceCode', nestedSource);
+    if (nestedSource.length !== 0) {
+      errors.push(`${route}: ComputerLanguage must not duplicate SoftwareSourceCode`);
+    }
+  } else if (schemaIds.includes(COMPUTER_LANGUAGE_ID)) {
+    errors.push(`${route}: reuses ComputerLanguage @id ${COMPUTER_LANGUAGE_ID}`);
+  }
   if (bare === '/about/') {
     const expectedNote = locale === 'pt' ? FORMER_NAME_NOTE_PT : FORMER_NAME_NOTE;
     if (!visibleProse(html).includes(expectedNote)) {
@@ -256,6 +446,9 @@ for await (const file of walk(dist)) {
   }
   const articles = blocks.filter((block) => block['@type'] === 'TechArticle');
   const crumbs = blocks.filter((block) => block['@type'] === 'BreadcrumbList');
+  if (bare === '/language/' && crumbs.length !== 1) {
+    errors.push(`${route}: language page must keep one BreadcrumbList`);
+  }
 
   if (bare === '/') {
     if (software.length !== 1) errors.push(`${route}: home must have one SoftwareApplication`);
@@ -317,7 +510,12 @@ for await (const file of walk(dist)) {
     }
   }
 
-  if (locale !== 'en') continue;
+  if (locale !== 'en') {
+    if (bare === '/learn/epistemic/uncertainty/' && locale === 'pt') {
+      for (const error of uncertaintyAppearanceErrors(route, html, blocks, UNCERTAINTY_PT)) errors.push(error);
+    }
+    continue;
+  }
   englishPages += 1;
   const title = titleOf(html);
   const description = descriptionOf(html);
@@ -331,27 +529,34 @@ for await (const file of walk(dist)) {
   if (headings.length === 1 && headings[0] === expected.title) {
     errors.push(`${route}: the visible H1 was replaced by the search title`);
   }
-  const article = articles[0];
-  if (article) {
-    const isSelfHostedPage = bare === '/learn/compiler/self-hosted/';
-    const isEffectsPage = bare === '/learn/effects/';
-    const headline = isSelfHostedPage
-      ? SELF_HOSTED_PAGE.h1
-      : isEffectsPage
-        ? EFFECTS_PAGE.h1
-        : expected.title;
-    if (article.headline !== headline) errors.push(`${route}: TechArticle headline does not match ${JSON.stringify(headline)}`);
-    if (article.description !== expected.description) errors.push(`${route}: TechArticle description does not match the meta description`);
-    if (article.inLanguage !== 'en') errors.push(`${route}: TechArticle inLanguage`);
-    if (article.url !== absoluteUrl(bare)) errors.push(`${route}: TechArticle url ${article.url}`);
-    if (isEffectsPage) {
-      if (article.dateModified !== EFFECTS_PAGE.dateModified) {
-        errors.push(`${route}: dateModified is ${JSON.stringify(article.dateModified)}`);
+    const article = articles[0];
+    if (article) {
+      const isSelfHostedPage = bare === '/learn/compiler/self-hosted/';
+      const isEffectsPage = bare === '/learn/effects/';
+      const isUncertaintyPage = bare === '/learn/epistemic/uncertainty/';
+      const headline = isSelfHostedPage
+        ? SELF_HOSTED_PAGE.h1
+        : isEffectsPage
+          ? EFFECTS_PAGE.h1
+          : isUncertaintyPage
+            ? UNCERTAINTY_EN.h1
+            : expected.title;
+      if (article.headline !== headline) errors.push(`${route}: TechArticle headline does not match ${JSON.stringify(headline)}`);
+      if (article.description !== expected.description) errors.push(`${route}: TechArticle description does not match the meta description`);
+      if (article.inLanguage !== 'en') errors.push(`${route}: TechArticle inLanguage`);
+      if (article.url !== absoluteUrl(bare)) errors.push(`${route}: TechArticle url ${article.url}`);
+      if (isEffectsPage) {
+        if (article.dateModified !== EFFECTS_PAGE.dateModified) {
+          errors.push(`${route}: dateModified is ${JSON.stringify(article.dateModified)}`);
+        }
+      } else if (isUncertaintyPage) {
+        if (article.dateModified !== UNCERTAINTY_EN.dateModified) {
+          errors.push(`${route}: dateModified is ${JSON.stringify(article.dateModified)}`);
+        }
+      } else if ('dateModified' in article) {
+        errors.push(`${route}: dateModified was emitted without a calendar date in the source`);
       }
-    } else if ('dateModified' in article) {
-      errors.push(`${route}: dateModified was emitted without a calendar date in the source`);
     }
-  }
   if (bare === '/learn/compiler/self-hosted/') {
     if (headings[0] !== SELF_HOSTED_PAGE.h1) {
       errors.push(`${route}: H1 is ${JSON.stringify(headings[0])}, expected ${JSON.stringify(SELF_HOSTED_PAGE.h1)}`);
@@ -439,6 +644,9 @@ for await (const file of walk(dist)) {
     ]) {
       if (!html.includes(rel)) errors.push(`${route}: missing test path ${rel}`);
     }
+  }
+  if (bare === '/learn/epistemic/uncertainty/') {
+    for (const error of uncertaintyAppearanceErrors(route, html, blocks, UNCERTAINTY_EN)) errors.push(error);
   }
   if (bare === '/') {
     const app = software[0];

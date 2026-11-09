@@ -56,7 +56,7 @@ fn main() -> i32 with IO, Mut, Panic, Div {
 }
 EOF
 
-( ulimit -s 1572864 2>/dev/null || true; env SOUNIO_NV2_ARENA_GIB= "$MADAROS" build "$WORK/witness.sio" "$WORK/w.elf" ) >"$WORK/build.log" 2>&1 \
+( ulimit -s 1572864 2>/dev/null || true; "$MADAROS" build "$WORK/witness.sio" "$WORK/w.elf" ) >"$WORK/build.log" 2>&1 \
   || { tail -n 20 "$WORK/build.log" >&2; fail "build failed"; }
 chmod +x "$WORK/w.elf"
 set +e

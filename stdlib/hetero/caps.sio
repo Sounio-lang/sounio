@@ -1,0 +1,108 @@
+// stdlib::hetero::caps - Pool of measured devices.
+//
+// A DevicePool is the planner's whole view of the user's hardware: whatever
+// the probe found on this machine, from one CPU to a mixed GPU pool.
+// Fixed capacity (16 devices) with explicit bounds checks per ADR-004:
+// adding past capacity stops instead of corrupting adjacent state.
+
+use hetero::types::{DeviceCaps, device_throughput, op_matmul, dtype_bf16}
+
+pub fn pool_capacity() -> i32 { 16 }
+
+pub struct DevicePool {
+    pub devices: [DeviceCaps; 16],
+    pub n_devices: i32,
+}
+
+pub fn pool_new() -> DevicePool {
+    let empty = DeviceCaps {
+        backend: 0,
+        arch_class: 0,
+        vram_bytes: 0,
+        unified_memory: false,
+        measured: false,
+        tput_matmul_bf16: 0.0,
+        tput_matmul_f32: 0.0,
+        tput_attention_bf16: 0.0,
+        tput_elementwise_f32: 0.0,
+    }
+    DevicePool { devices: [empty; 16], n_devices: 0 }
+}
+
+/// Append a device to the pool. No-op when the pool is full (ADR-004).
+///
+/// # Parameters
+/// - `pool`: pool being built, mutated in place.
+/// - `caps`: measured capabilities of the device to add.
+///
+/// # Return
+/// Nothing. Check `pool_size` if the add must be confirmed.
+///
+/// # Complexity
+/// O(1)
+pub fn pool_add(pool: &!DevicePool, caps: DeviceCaps) with Mut {
+    if pool.n_devices < pool_capacity() {
+        pool.devices[pool.n_devices as usize] = caps
+        pool.n_devices = pool.n_devices + 1
+    }
+}
+
+pub fn pool_size(pool: &DevicePool) -> i32 { pool.n_devices }
+
+pub fn pool_get(pool: &DevicePool, idx: i32) -> DeviceCaps {
+    pool.devices[idx as usize]
+}
+
+/// Sum of measured throughputs of the pool for one (op, dtype).
+///
+/// # Parameters
+/// - `pool`: device pool.
+/// - `op`: op code. - `dtype`: dtype code.
+///
+/// # Return
+/// Total GFLOP/s across measured devices; unmeasured devices contribute 0.
+///
+/// # Complexity
+/// O(n_devices)
+pub fn pool_total_throughput(pool: &DevicePool, op: i32, dtype: i32) -> f64 with Mut {
+    var total = 0.0
+    var i = 0
+    while i < pool.n_devices {
+        total = total + device_throughput(pool.devices[i as usize], op, dtype)
+        i = i + 1
+    }
+    total
+}
+
+/// Whether every measured device performs within `tol_frac` of the fastest.
+///
+/// This is the homogeneity test that lets the planner degenerate to the
+/// classic equal-split path: equal measured capability, not equal name.
+///
+/// # Parameters
+/// - `pool`: device pool.
+/// - `tol_frac`: allowed fractional spread (0.05 means fastest/slowest <= 1.05).
+///
+/// # Return
+/// True when the pool has <= 1 measured device or the spread is within tol.
+///
+/// # Complexity
+/// O(n_devices)
+pub fn pool_is_homogeneous(pool: &DevicePool, tol_frac: f64) -> bool with Mut {
+    var fastest = 0.0
+    var slowest = 0.0
+    var seen = false
+    var i = 0
+    while i < pool.n_devices {
+        let t = device_throughput(pool.devices[i as usize], op_matmul(), dtype_bf16())
+        if t > 0.0 {
+            if !seen { fastest = t; slowest = t; seen = true }
+            if t > fastest { fastest = t }
+            if t < slowest { slowest = t }
+        }
+        i = i + 1
+    }
+    if !seen { return true }
+    if slowest <= 0.0 { return false }
+    fastest / slowest <= 1.0 + tol_frac
+}

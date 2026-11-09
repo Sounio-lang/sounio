@@ -1,0 +1,94 @@
+// stdlib/darwin_pbpk/scenarios/olanzapine_oral.sio — scenario library (no main)
+//
+// End-to-end dissertation scenario for olanzapine (SIO-518):
+//
+//   - Zyprexa immediate-release tablet, single 10 mg oral dose
+//     → tablet dissolution lag (tlag = 0.25 h) + first-order gut absorption
+//       (ka = 0.6/h, Bergstrom 2006) with first-pass loss (F = 0.60)
+//       → blood input (closed-form rate, operator-split source term)
+//         → 14-compartment PBPK28 (tsit5_pbpk28, fully-coupled CN)
+//
+// Mold: scenarios/tacrolimus_oral.sio (oral IR closed form + scenario-owned
+// profile). The input rate is F·D·ka·exp(−ka·(t−tlag)) for t ≥ tlag, 0
+// before; the (1 − F) fraction is first-pass loss (dual UGT1A4 direct
+// glucuronidation + CYP1A2 oxidation, Sun 2019 — recorded separately, NOT
+// equated with the clozapine model). Mass envelope caps body mass by
+// cumulative ABSORBED, not by dose.
+//
+// Plasma-referenced (rb = 0.96 ≈ 1, Callaghan 1999 — blood ≈ plasma, so no
+// folding convention needed): CL = 25 L/h (Bergstrom 2006) acts on blood
+// directly, as the PBPK28 kernel applies clearance on Cb. Distribution is
+// flow-limited (moderately lipophilic base, LogP 3.0); Kp are olanzapine
+// tissue values from the drug file (Rodgers-Rowland, Vd ~700 L) — NOT
+// haloperidol's, despite the shared antipsychotic class. PS assumed
+// (rapamycin flow-limited pattern, SIO-550).
+//
+// Declared limitation: single-dose PK only. No CYP1A2-smoking split (the
+// ×2 CL smoker variant lives in the PBPK14 drug file), no D2 occupancy,
+// no mTOR-collision PD — follow-ups. No clinical-validity claim: parity
+// only (ADR009).
+//
+// The parity ref tests/run-pass/dissertation_pbpk28_parity_ref_olanzapine.sio
+// drives this scenario itself, so a scenario change not mirrored in Node
+// breaks the gate.
+//
+// This file is a library with no `main`; it is checked, not run.
+
+use darwin_pbpk::core::pbpk28_params::*
+use darwin_pbpk::tsit5_pbpk28::*
+use darwin_pbpk::drugs::olanzapine::*
+use math::pure::{exp}
+
+// ─── Olanzapine PBPK28 profile (scenario-owned) ────────────────────────────
+// Kept here — not in core/pbpk28_params.sio — so this lane never churns the
+// website-pinned domain source. Standard 70 kg physiology. Kp = olanzapine
+// tissue values (drug file, Rodgers-Rowland for a basic pKa 7.48 / LogP 3.0
+// molecule, Vd ~700 L); PS assumed (flow-limited pattern, SIO-550);
+// CL = 25 L/h (Bergstrom 2006, CYP1A2 primary).
+pub fn olz_pbpk28_params() -> PBPKParams28 {
+    PBPKParams28 {
+        v_ref:     [5.0, 1.8, 0.31, 1.45, 0.33, 1.1, 28.0, 20.0, 1.2, 3.6, 6.6, 0.18, 0.09, 3.7],
+        vasc_frac: [1.000, 0.210, 0.160, 0.037, 0.262, 0.262, 0.040, 0.050, 0.024, 0.019, 0.041, 0.282, 0.180, 0.050],
+        kp:        [1.00, 12.0, 5.0, 10.0, 4.0, 8.0, 15.0, 8.0, 5.0, 5.0, 4.0, 5.0, 3.5, 3.5],
+        ps:        [0.0, 1800.0, 1110.0, 88.0, 160.0, 10500.0, 336.0, 40.0, 660.0, 126.0, 51.0, 150.0, 96.0, 78.0],
+        q:         [350.0, 90.0, 74.0, 44.0, 16.0, 350.0, 42.0, 10.0, 55.0, 21.0, 17.0, 10.0, 8.0, 13.0],
+        cl_central: 25.0,
+    }
+}
+
+// ─── Oral IR input with dissolution lag ─────────────────────────────────────
+// rate(t) = 0 for t < tlag, else F·D·ka·exp(−ka·(t−tlag)), mg/h. D = 10 mg
+// single dose (Zyprexa label 5–10 mg start; Bergstrom 2006 design);
+// ka = 0.6/h, F = 0.60, tlag = 0.25 h (tablet dissolution).
+pub fn olz_dose_mg() -> f64 { return olanzapine_single_dose_mg() }
+pub fn olz_ka() -> f64      { return olanzapine_ka_per_h() }
+pub fn olz_f() -> f64       { return olanzapine_f_oral_val() }
+pub fn olz_tlag() -> f64    { return olanzapine_tlag_h() }
+
+pub fn olz_release_rate_at(t: f64) -> f64 with Mut, Div {
+    var te = t - olz_tlag()
+    if te < 0.0 { return 0.0 }
+    return olz_f() * olz_dose_mg() * olz_ka() * exp(0.0 - olz_ka() * te)
+}
+
+// ─── Composite scenario state ───────────────────────────────────────────────
+pub struct OlanzapineScenario {
+    pub pbpk: PBPKState28,
+}
+
+// Initial state: zero PBPK (drug enters via gut absorption).
+pub fn olz_scenario_init() -> OlanzapineScenario {
+    OlanzapineScenario {
+        pbpk: pbpk28_state_zero(),
+    }
+}
+
+// One fully-coupled CN step at midpoint input rate.
+pub fn olz_step(scen: OlanzapineScenario, p: PBPKParams28,
+                t_start: f64, dt: f64)
+    -> OlanzapineScenario with Mut, Div
+{
+    let rel_mid = olz_release_rate_at(t_start + 0.5 * dt)
+    var out_pbpk = pbpk28_full_cn_step(scen.pbpk, p, rel_mid, dt)
+    return OlanzapineScenario { pbpk: out_pbpk }
+}

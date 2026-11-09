@@ -1,0 +1,1 @@
+`var x: T` with no initializer now gives every nested struct field of `T` its own zeroed storage (recursively, with that struct's array fields), so writing `x.inner.f`, directly or through `&!x`, no longer traps with SIGILL on a null handle; an uninitialized module global `var G: S` now gets the same array and nested-struct field storage that locals already had.

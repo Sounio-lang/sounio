@@ -12,7 +12,18 @@ source_digest() {
 }
 receipt="$MADAROS.sco-source.sha256"
 before="$(source_digest)"
-if [[ "${SCO_SKIP_REBUILD:-0}" != 1 ]]; then
+if [[ -n "${SCO_COMPILER_ARTIFACT:-}" ]]; then
+  # Verify the producer's source and ELF before creating the SCO-specific receipt.
+  # An invalid supplied artifact is an error, never a request to rebuild silently.
+  bash scripts/ci/stdlib_deep_compiler_receipt.sh verify \
+    "$ROOT" "$SCO_COMPILER_ARTIFACT" "$(git rev-parse HEAD)"
+  mkdir -p "$(dirname "$MADAROS")"
+  cp "$SCO_COMPILER_ARTIFACT/madaros.elf" "$MADAROS"
+  chmod 755 "$MADAROS"
+  [[ "$(source_digest)" == "$before" ]] || { echo 'FAIL: sources changed during artifact binding'; exit 1; }
+  printf 'source_sha256=%s\nelf_sha256=%s\n' "$before" \
+    "$(sha256sum "$MADAROS" | cut -d' ' -f1)" >"$receipt"
+elif [[ "${SCO_SKIP_REBUILD:-0}" != 1 ]]; then
   # This script is executed on CI/Foundry workers, never as a workspace compile.
   # build_modular_madaros.sh owns its build lock; do not wrap that lock twice.
   bash scripts/ci/build_modular_madaros.sh "$MADAROS" >"$OUT/build.log" 2>&1

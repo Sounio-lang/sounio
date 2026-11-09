@@ -1,0 +1,1 @@
+Locks the SIO-147 acceptance: builtin float results cast to integers WITHOUT the `sqrt(..) * 1.0` workaround. The v0.80.0 raw-bits leak (`as i64` reinterpreting IEEE bits instead of converting) no longer reproduces on current main; this test guards the direct, let-bound, psis-shaped and compound cast forms against regression.
