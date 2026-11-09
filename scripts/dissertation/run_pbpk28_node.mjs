@@ -32,7 +32,7 @@ const {
   degenerateParams, N,
 } = core;
 
-// CLI: --drug=rapamycin|semaglutide|tirzepatide|everolimus|tacrolimus|olanzapine|clozapine|quetiapine|quetiapine-ketoconazole|lithium|vancomycin  --case=literature|degenerate
+// CLI: --drug=rapamycin|semaglutide|tirzepatide|everolimus|tacrolimus|olanzapine|olanzapine-smoker|clozapine|quetiapine|quetiapine-ketoconazole|lithium|vancomycin  --case=literature|degenerate
 const args = Object.fromEntries(
   process.argv.slice(2)
     .filter(a => a.startsWith('--'))
@@ -102,6 +102,14 @@ if (DRUG === 'tirzepatide') {
     stentActive: true,    // re-used as 'input active'
   };
 }
+ else if (DRUG === 'olanzapine-smoker') {
+  baseParams = {
+    ...DEFAULT_PARAMS_OLANZAPINE,
+    clHep: 50.0,
+    bolusMg: 0.0,
+    stentActive: true,
+  };
+}
  else if (DRUG === 'tacrolimus') {
   baseParams = {
     ...DEFAULT_PARAMS_TACROLIMUS,
@@ -157,6 +165,9 @@ if (DRUG === 'tirzepatide') {
 }
  else if (DRUG === 'olanzapine') {
   out.push('DISSERTATION_PBPK28_OLANZAPINE_PARITY_NODE v1');
+}
+ else if (DRUG === 'olanzapine-smoker') {
+  out.push('DISSERTATION_PBPK28_OLANZAPINE_SMOKER_PARITY_NODE v1');
 }
  else if (DRUG === 'tacrolimus') {
   out.push('DISSERTATION_PBPK28_TACROLIMUS_PARITY_NODE v1');
@@ -231,6 +242,9 @@ if (DRUG === 'tirzepatide') {
 }
  else if (DRUG === 'olanzapine') {
   out.push('DISSERTATION_PBPK28_OLANZAPINE_PARITY_DONE');
+}
+ else if (DRUG === 'olanzapine-smoker') {
+  out.push('DISSERTATION_PBPK28_OLANZAPINE_SMOKER_PARITY_DONE');
 }
  else if (DRUG === 'tacrolimus') {
   out.push('DISSERTATION_PBPK28_TACROLIMUS_PARITY_DONE');
