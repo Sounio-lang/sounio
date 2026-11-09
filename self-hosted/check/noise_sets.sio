@@ -185,19 +185,19 @@ fn ns_bit_in_word(src: i64) -> i64 {
 // Word `w` of a handle's positive-coefficient vector. unknown/top is not
 // representable as a mask; callers must special-case unknown BEFORE calling.
 // empty -> 0. interned -> pos[(handle-1)*W + w].
-fn ns_pos_word(table: &NoiseSetTable, handle: i64, w: i64) -> i64 {
+fn ns_pos_word(table: *mut NoiseSetTable, handle: i64, w: i64) -> i64 with Mut, Panic, Div {
     if handle <= 0 { 0 }
     else {
         let idx = handle - 1
-        if idx < table.count { table.pos[(idx * 4 + w) as usize] } else { 0 }
+        if idx < (*table).count { (*table).pos[(idx * 4 + w) as usize] } else { 0 }
     }
 }
 
-fn ns_neg_word(table: &NoiseSetTable, handle: i64, w: i64) -> i64 {
+fn ns_neg_word(table: *mut NoiseSetTable, handle: i64, w: i64) -> i64 with Mut, Panic, Div {
     if handle <= 0 { 0 }
     else {
         let idx = handle - 1
-        if idx < table.count { table.neg[(idx * 4 + w) as usize] } else { 0 }
+        if idx < (*table).count { (*table).neg[(idx * 4 + w) as usize] } else { 0 }
     }
 }
 
@@ -210,7 +210,7 @@ fn ns_neg_word(table: &NoiseSetTable, handle: i64, w: i64) -> i64 {
 // Table full -> unknown, and the sticky overflow flag is raised so the checker
 // can say so out loud (conservative: we lose the identity, so we must not claim
 // disjointness later, and the user must be told we stopped being able to).
-fn ns_intern_scratch(table: &!NoiseSetTable) -> i64 with Mut, Panic, Div {
+fn ns_intern_scratch(table: *mut NoiseSetTable) -> i64 with Mut, Panic, Div {
     var is_empty = true
     var w: i64 = 0
     while w < 4 {
@@ -220,45 +220,45 @@ fn ns_intern_scratch(table: &!NoiseSetTable) -> i64 with Mut, Panic, Div {
     }
     if is_empty { return 0 }
     var i: i64 = 0
-    while i < table.count {
+    while i < (*table).count {
         var same = true
         var k: i64 = 0
         while k < 4 {
-            if table.pos[(i * 4 + k) as usize] != NS_SCRATCH_POS[k as usize] { same = false }
-            if table.neg[(i * 4 + k) as usize] != NS_SCRATCH_NEG[k as usize] { same = false }
+            if (*table).pos[(i * 4 + k) as usize] != NS_SCRATCH_POS[k as usize] { same = false }
+            if (*table).neg[(i * 4 + k) as usize] != NS_SCRATCH_NEG[k as usize] { same = false }
             k = k + 1
         }
         if same { return i + 1 }
         i = i + 1
     }
-    if table.count >= ns_cap() {
-        table.overflow = 1
+    if (*table).count >= ns_cap() {
+        (*table).overflow = 1
         return ns_unknown()
     }
-    let idx = table.count
+    let idx = (*table).count
     var j: i64 = 0
     while j < 4 {
-        table.pos[(idx * 4 + j) as usize] = NS_SCRATCH_POS[j as usize]
-        table.neg[(idx * 4 + j) as usize] = NS_SCRATCH_NEG[j as usize]
+        (*table).pos[(idx * 4 + j) as usize] = NS_SCRATCH_POS[j as usize]
+        (*table).neg[(idx * 4 + j) as usize] = NS_SCRATCH_NEG[j as usize]
         j = j + 1
     }
-    table.count = idx + 1
+    (*table).count = idx + 1
     idx + 1
 }
 
 // Drain the sticky interning-table overflow flag. Returns true exactly once per
 // overflow event, so the checker reports E179 without repeating it at every
 // subsequent operation.
-pub fn ns_table_overflow_take(table: &!NoiseSetTable) -> bool with Mut {
-    if table.overflow == 0 { return false }
-    table.overflow = 0
+pub fn ns_table_overflow_take(table: *mut NoiseSetTable) -> bool with Mut, Panic, Div {
+    if (*table).overflow == 0 { return false }
+    (*table).overflow = 0
     true
 }
 
 // A freshly measured source becomes a singleton set with coefficient +1.
 // Out-of-range source -> unknown (we cannot represent it, so stay conservative;
 // the checker reports E178 at the same site so the loss is not silent).
-pub fn ns_singleton(table: &!NoiseSetTable, src: i64) -> i64 with Mut, Panic, Div {
+pub fn ns_singleton(table: *mut NoiseSetTable, src: i64) -> i64 with Mut, Panic, Div {
     if src < 0 { return ns_unknown() }
     if src >= ns_source_cap() { return ns_unknown() }
     let bit = ns_bit_in_word(src)
@@ -280,8 +280,8 @@ pub fn ns_singleton(table: &!NoiseSetTable, src: i64) -> i64 with Mut, Panic, Di
 // [1, count]. Negative (unknown/top) is NOT "valid interned" — callers handle it
 // explicitly (top) before this check. An out-of-range positive handle is invalid
 // and must NEVER be treated as a real (deref-able) set: fail closed.
-fn ns_handle_valid(table: &NoiseSetTable, h: i64) -> bool {
-    (h == 0) || (h > 0 && h <= table.count)
+fn ns_handle_valid(table: *mut NoiseSetTable, h: i64) -> bool with Mut, Panic, Div {
+    (h == 0) || (h > 0 && h <= (*table).count)
 }
 
 // ============================================================
@@ -296,11 +296,11 @@ fn ns_handle_valid(table: &NoiseSetTable, h: i64) -> bool {
 //
 // Signs OR together per source, so a source that is + in one operand and - in
 // the other becomes sign-unknown (pos & neg) -- the join of the sign lattice.
-pub fn ns_union(table: &!NoiseSetTable, a: i64, b: i64) -> i64 with Mut, Panic, Div {
+pub fn ns_union(table: *mut NoiseSetTable, a: i64, b: i64) -> i64 with Mut, Panic, Div {
     if a < 0 { return ns_unknown() }
     if b < 0 { return ns_unknown() }
-    if a > table.count { return ns_unknown() }   // invalid positive -> top
-    if b > table.count { return ns_unknown() }
+    if a > (*table).count { return ns_unknown() }   // invalid positive -> top
+    if b > (*table).count { return ns_unknown() }
     var w: i64 = 0
     while w < 4 {
         NS_SCRATCH_POS[w as usize] = ns_pos_word(table, a, w) | ns_pos_word(table, b, w)
@@ -315,11 +315,11 @@ pub fn ns_union(table: &!NoiseSetTable, a: i64, b: i64) -> i64 with Mut, Panic, 
 // vice versa. This is what lets `(p - a) - a` be seen as an OPPOSITE-sign reuse
 // of `a` (Cov < 0, so the independence-assuming variance UNDERSTATES) while
 // `x - x` stays a same-sign reuse (Cov > 0, which OVERSTATES and is safe).
-pub fn ns_union_sub(table: &!NoiseSetTable, a: i64, b: i64) -> i64 with Mut, Panic, Div {
+pub fn ns_union_sub(table: *mut NoiseSetTable, a: i64, b: i64) -> i64 with Mut, Panic, Div {
     if a < 0 { return ns_unknown() }
     if b < 0 { return ns_unknown() }
-    if a > table.count { return ns_unknown() }
-    if b > table.count { return ns_unknown() }
+    if a > (*table).count { return ns_unknown() }
+    if b > (*table).count { return ns_unknown() }
     var w: i64 = 0
     while w < 4 {
         NS_SCRATCH_POS[w as usize] = ns_pos_word(table, a, w) | ns_neg_word(table, b, w)
@@ -335,11 +335,11 @@ pub fn ns_union_sub(table: &!NoiseSetTable, a: i64, b: i64) -> i64 with Mut, Pan
 // with the additive signs this domain tracks. Every source of the result is
 // therefore marked sign-unknown (pos & neg both set), which makes every later
 // sign query over it fail closed.
-pub fn ns_union_opaque(table: &!NoiseSetTable, a: i64, b: i64) -> i64 with Mut, Panic, Div {
+pub fn ns_union_opaque(table: *mut NoiseSetTable, a: i64, b: i64) -> i64 with Mut, Panic, Div {
     if a < 0 { return ns_unknown() }
     if b < 0 { return ns_unknown() }
-    if a > table.count { return ns_unknown() }
-    if b > table.count { return ns_unknown() }
+    if a > (*table).count { return ns_unknown() }
+    if b > (*table).count { return ns_unknown() }
     var w: i64 = 0
     while w < 4 {
         let m = ns_pos_word(table, a, w) | ns_neg_word(table, a, w)
@@ -362,7 +362,7 @@ pub fn ns_union_opaque(table: &!NoiseSetTable, a: i64, b: i64) -> i64 with Mut, 
 // values carry no shared uncertainty. Unknown and invalid handles fail closed
 // before the empty shortcuts and before any deref. Signs are irrelevant here:
 // membership alone decides.
-pub fn ns_disjoint(table: &NoiseSetTable, a: i64, b: i64) -> bool with Mut {
+pub fn ns_disjoint(table: *mut NoiseSetTable, a: i64, b: i64) -> bool with Mut, Panic, Div {
     if a < 0 { return false }
     if b < 0 { return false }
     if !ns_handle_valid(table, a) { return false }   // invalid positive -> not disjoint
@@ -395,7 +395,7 @@ pub fn ns_disjoint(table: &NoiseSetTable, a: i64, b: i64) -> bool with Mut {
 // about the sign of the operands' VALUES -- which is why it is sound for `-`
 // (where the dropped term is -2Cov) and NOT used for `/` (where the dropped
 // term is -2Cov/(xy) and the sign of xy is not tracked by this domain).
-pub fn ns_cov_nonneg(table: &NoiseSetTable, a: i64, b: i64) -> bool with Mut {
+pub fn ns_cov_nonneg(table: *mut NoiseSetTable, a: i64, b: i64) -> bool with Mut, Panic, Div {
     if a < 0 { return false }
     if b < 0 { return false }
     if !ns_handle_valid(table, a) { return false }

@@ -1451,6 +1451,75 @@ paste <(grep "^TMASS|m=" "$OLZ_SIO_LOG" | sed "s/^TMASS|m=//") \
 
 echo
 echo "[pbpk28-parity] olanzapine oral-IR canonical: tablet lag + gut absorption + systemic PK + mass envelope (9th canonical drug)"
+echo
+echo "[pbpk28-parity] Case 23s: Sounio <-> Node olanzapine-smoker PBPK28 (CYP1A2 induction x2)"
+
+OLZS_SIO_LOG="$OUT_DIR/olzs_sounio.txt"
+OLZS_NODE_LOG="$OUT_DIR/olzs_node.txt"
+
+"$SOUC_BIN" run tests/run-pass/dissertation_pbpk28_parity_ref_olanzapine_smoker.sio > "$OLZS_SIO_LOG" 2>&1 || {
+  echo "[pbpk28-parity:case23s] FAIL: Sounio olanzapine-smoker ref returned non-zero" >&2
+  tail -n 20 "$OLZS_SIO_LOG" >&2; exit 1; }
+if ! grep -q "^DISSERTATION_PBPK28_OLANZAPINE_SMOKER_PARITY_DONE$" "$OLZS_SIO_LOG"; then
+  echo "[pbpk28-parity:case23s] FAIL: Sounio olanzapine-smoker ref did not emit DONE" >&2; exit 1; fi
+node "$NODE_RUNNER" --drug=olanzapine-smoker > "$OLZS_NODE_LOG" 2>&1 || {
+  echo "[pbpk28-parity:case23s] FAIL: Node olanzapine-smoker runner returned non-zero" >&2
+  tail -n 20 "$OLZS_NODE_LOG" >&2; exit 1; }
+if ! grep -q "^DISSERTATION_PBPK28_OLANZAPINE_SMOKER_PARITY_NODE v1$" "$OLZS_NODE_LOG"; then
+  echo "[pbpk28-parity:case23s] FAIL: Node olanzapine-smoker runner header mismatch" >&2; exit 1; fi
+
+OLZS_SIO_TSV="$OUT_DIR/olzs_sounio.tsv"
+OLZS_NODE_TSV="$OUT_DIR/olzs_node.tsv"
+parse_to_tsv "$OLZS_SIO_LOG" "$OLZS_SIO_TSV"
+parse_to_tsv "$OLZS_NODE_LOG" "$OLZS_NODE_TSV"
+
+OLZS_SIO_ROWS=$(wc -l < "$OLZS_SIO_TSV")
+OLZS_NODE_ROWS=$(wc -l < "$OLZS_NODE_TSV")
+if [[ "$OLZS_SIO_ROWS" -ne "$EXPECTED_ROWS" || "$OLZS_NODE_ROWS" -ne "$EXPECTED_ROWS" ]]; then
+  echo "[pbpk28-parity:case23s] FAIL: olanzapine-smoker row count mismatch" >&2
+  exit 1
+fi
+echo "[pbpk28-parity:case23s] both runs emitted $OLZS_SIO_ROWS records"
+
+OLZS_JOINED="$OUT_DIR/olzs_joined.tsv"
+awk -F"\t" "
+  NR==FNR { S[\$1\"|\"\$2] = \$5; next }
+  { print \$1\"\t\"\$2\"\t\"S[\$1\"|\"\$2]\"\t\"\$5 }
+" "$OLZS_SIO_TSV" "$OLZS_NODE_TSV" > "$OLZS_JOINED"
+
+awk -F"\t" -v THR="$RMSE_THRESHOLD_PCT" "
+  {
+    i = \$2 + 0; cs = \$3 + 0; cn = \$4 + 0;
+    d = cs - cn; SS[i] += d * d; NN[i] += 1;
+    if (cs > PK[i]) PK[i] = cs;
+    if (cn > PK[i]) PK[i] = cn;
+  }
+  END {
+    bad = 0;
+    for (i = 0; i < 14; i++) {
+      if (NN[i] == 0) { printf \"PBPK28_OLANZAPINE_SMOKER_PARITY_FAIL organ %d MISSING\n\", i; bad += 1; continue; }
+      rmse = sqrt(SS[i] / NN[i]); pk = PK[i] + 0;
+      if (pk == 0) { continue; }
+      pct = 100.0 * rmse / pk;
+      if (pct >= THR + 0) { printf \"PBPK28_OLANZAPINE_SMOKER_PARITY_FAIL organ %d pct=%.4f rmse=%.3g\n\", i, pct, rmse; bad += 1; }
+    }
+    if (bad > 0) { exit 1; }
+    printf \"PBPK28_OLANZAPINE_SMOKER_PARITY_PASS 14/14 compartments within %s%% RMSE (strict)\n\", THR;
+  }
+" "$OLZS_JOINED"
+
+paste <(grep "^TMASS|m=" "$OLZS_SIO_LOG" | sed "s/^TMASS|m=//") \
+      <(grep "^TREL|cum=" "$OLZS_SIO_LOG" | sed "s/^TREL|cum=//") \
+  | awk -v FAILM="PBPK28_OLANZAPINE_SMOKER_MASS_FAIL" -v PASS="PBPK28_OLANZAPINE_SMOKER_MASS_PASS" "
+      { m=(\$1+0); r=(\$2+0); n++;
+        if (!(m >= 0 && m <= r)) { printf \"%s sample %d: mass %.6f outside [0, %.6f]\n\", FAILM, n, m, r; bad=1 } }
+      END { if (n != 12) { printf \"%s row count %d != 12\n\", FAILM, n; exit 1 }
+        if (bad) exit 1;
+        printf \"%s 12/12 samples within [0, absorbed]\n\", PASS }"
+
+echo
+echo "[pbpk28-parity] olanzapine-smoker CYP1A2 induction: same tablet and input, CL 50 L/h, parity + mass envelope (case 23s)"
+
 
 # ════════════════════════════════════════════════════════════════════════════
 # Case 24: Clozapine — tenth canonical drug, third oral-IR case in PBPK-28.
@@ -1615,6 +1684,75 @@ paste <(grep "^TMASS|m=" "$QTP_SIO_LOG" | sed "s/^TMASS|m=//") \
 
 echo
 echo "[pbpk28-parity] quetiapine oral-IR canonical: tablet lag + gut absorption + systemic PK + mass envelope (11th canonical drug)"
+echo
+echo "[pbpk28-parity] Case 25s: Sounio <-> Node quetiapine-ketoconazole PBPK28 (static CYP3A4 inhibition)"
+
+QK_SIO_LOG="$OUT_DIR/qk_sounio.txt"
+QK_NODE_LOG="$OUT_DIR/qk_node.txt"
+
+"$SOUC_BIN" run tests/run-pass/dissertation_pbpk28_parity_ref_quetiapine_ketoconazole.sio > "$QK_SIO_LOG" 2>&1 || {
+  echo "[pbpk28-parity:case25s] FAIL: Sounio quetiapine-ketoconazole ref returned non-zero" >&2
+  tail -n 20 "$QK_SIO_LOG" >&2; exit 1; }
+if ! grep -q "^DISSERTATION_PBPK28_QUETIAPINE_KETO_PARITY_DONE$" "$QK_SIO_LOG"; then
+  echo "[pbpk28-parity:case25s] FAIL: Sounio quetiapine-ketoconazole ref did not emit DONE" >&2; exit 1; fi
+node "$NODE_RUNNER" --drug=quetiapine-ketoconazole > "$QK_NODE_LOG" 2>&1 || {
+  echo "[pbpk28-parity:case25s] FAIL: Node quetiapine-ketoconazole runner returned non-zero" >&2
+  tail -n 20 "$QK_NODE_LOG" >&2; exit 1; }
+if ! grep -q "^DISSERTATION_PBPK28_QUETIAPINE_KETO_PARITY_NODE v1$" "$QK_NODE_LOG"; then
+  echo "[pbpk28-parity:case25s] FAIL: Node quetiapine-ketoconazole runner header mismatch" >&2; exit 1; fi
+
+QK_SIO_TSV="$OUT_DIR/qk_sounio.tsv"
+QK_NODE_TSV="$OUT_DIR/qk_node.tsv"
+parse_to_tsv "$QK_SIO_LOG" "$QK_SIO_TSV"
+parse_to_tsv "$QK_NODE_LOG" "$QK_NODE_TSV"
+
+QK_SIO_ROWS=$(wc -l < "$QK_SIO_TSV")
+QK_NODE_ROWS=$(wc -l < "$QK_NODE_TSV")
+if [[ "$QK_SIO_ROWS" -ne "$EXPECTED_ROWS" || "$QK_NODE_ROWS" -ne "$EXPECTED_ROWS" ]]; then
+  echo "[pbpk28-parity:case25s] FAIL: quetiapine-ketoconazole row count mismatch" >&2
+  exit 1
+fi
+echo "[pbpk28-parity:case25s] both runs emitted $QK_SIO_ROWS records"
+
+QK_JOINED="$OUT_DIR/qk_joined.tsv"
+awk -F"\t" "
+  NR==FNR { S[\$1\"|\"\$2] = \$5; next }
+  { print \$1\"\t\"\$2\"\t\"S[\$1\"|\"\$2]\"\t\"\$5 }
+" "$QK_SIO_TSV" "$QK_NODE_TSV" > "$QK_JOINED"
+
+awk -F"\t" -v THR="$RMSE_THRESHOLD_PCT" "
+  {
+    i = \$2 + 0; cs = \$3 + 0; cn = \$4 + 0;
+    d = cs - cn; SS[i] += d * d; NN[i] += 1;
+    if (cs > PK[i]) PK[i] = cs;
+    if (cn > PK[i]) PK[i] = cn;
+  }
+  END {
+    bad = 0;
+    for (i = 0; i < 14; i++) {
+      if (NN[i] == 0) { printf \"PBPK28_QUETIAPINE_KETO_PARITY_FAIL organ %d MISSING\n\", i; bad += 1; continue; }
+      rmse = sqrt(SS[i] / NN[i]); pk = PK[i] + 0;
+      if (pk == 0) { continue; }
+      pct = 100.0 * rmse / pk;
+      if (pct >= THR + 0) { printf \"PBPK28_QUETIAPINE_KETO_PARITY_FAIL organ %d pct=%.4f rmse=%.3g\n\", i, pct, rmse; bad += 1; }
+    }
+    if (bad > 0) { exit 1; }
+    printf \"PBPK28_QUETIAPINE_KETO_PARITY_PASS 14/14 compartments within %s%% RMSE (strict)\n\", THR;
+  }
+" "$QK_JOINED"
+
+paste <(grep "^TMASS|m=" "$QK_SIO_LOG" | sed "s/^TMASS|m=//") \
+      <(grep "^TREL|cum=" "$QK_SIO_LOG" | sed "s/^TREL|cum=//") \
+  | awk -v FAILM="PBPK28_QUETIAPINE_KETO_MASS_FAIL" -v PASS="PBPK28_QUETIAPINE_KETO_MASS_PASS" "
+      { m=(\$1+0); r=(\$2+0); n++;
+        if (!(m >= 0 && m <= r)) { printf \"%s sample %d: mass %.6f outside [0, %.6f]\n\", FAILM, n, m, r; bad=1 } }
+      END { if (n != 12) { printf \"%s row count %d != 12\n\", FAILM, n; exit 1 }
+        if (bad) exit 1;
+        printf \"%s 12/12 samples within [0, absorbed]\n\", PASS }"
+
+echo
+echo "[pbpk28-parity] quetiapine-ketoconazole static CYP3A4 inhibition: same tablet and input, CL 16.8 L/h, parity + mass envelope (case 25s)"
+
 
 # ════════════════════════════════════════════════════════════════════════════
 # Case 26: Lithium — twelfth canonical drug, fifth oral-IR case, FIRST with
@@ -1874,3 +2012,86 @@ grep -e "^RRES|p=" -e "^RRES|o=" "$RSP_NODE_LOG"
 
 echo
 echo "[pbpk28-parity] risperidone + 9-OH canonical: CYP2D6 mother+metabolite + molar formation + mass envelopes (14th canonical drug)"
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# Case 29: Aripiprazole — fifteenth canonical drug, FIRST dual-pathway
+# oral case (parallel CYP3A4 + CYP2D6) on an extended 336 h horizon.
+# Single 15 mg oral IR tablet → gut pool + 1st-order absorption (ka =
+# 1.2/h, F = 0.87, (1-F) first-pass loss) → parent PBPK28 CN with the
+# summed parallel CYP sink solved implicitly on the liver. NM phenotype
+# (2) is the parity reference. Kernel CYP sink calibrated to the label
+# half-lives (CL_3A4 0.23, CL_2D6 0.21 L/h, cl_central 0; emergent NM
+# t1/2 75.0 h, PM cross-check 132 h vs label 146 h); Kp assumed targeting
+# label Vd (~410 L); dehydro-aripiprazole explicitly out of scope.
+#   29a  parent cavg     Node ↔ Sounio, STRICT 1% RMSE per organ
+#   29b  mass envelope   0 <= m <= absorbed, 12/12
+#   29c  CN residual     printed as measured evidence (~1e-12 mg)
+# Strict 1% (no absolute floor needed): worst organ 0.0%.
+# ════════════════════════════════════════════════════════════════════════════
+echo
+echo "[pbpk28-parity] Case 29: Sounio ↔ Node aripiprazole PBPK28 (oral IR, dual CYP)"
+
+ARP_SIO_LOG="$OUT_DIR/arp_sounio.txt"
+ARP_NODE_LOG="$OUT_DIR/arp_node.txt"
+"$SOUC_BIN" run tests/run-pass/dissertation_pbpk28_parity_ref_aripiprazole.sio > "$ARP_SIO_LOG" 2>&1 || {
+  echo "[pbpk28-parity:case29] FAIL: Sounio aripiprazole ref returned non-zero" >&2
+  tail -n 20 "$ARP_SIO_LOG" >&2; exit 1; }
+if ! grep -q '^DISSERTATION_PBPK28_ARIPIPRAZOLE_PARITY_DONE$' "$ARP_SIO_LOG"; then
+  echo "[pbpk28-parity:case29] FAIL: Sounio aripiprazole ref did not emit DONE" >&2; exit 1; fi
+node "$ROOT_DIR/scripts/dissertation/run_aripiprazole_node.mjs" > "$ARP_NODE_LOG" 2>&1 || {
+  echo "[pbpk28-parity:case29] FAIL: Node aripiprazole runner returned non-zero" >&2
+  tail -n 20 "$ARP_NODE_LOG" >&2; exit 1; }
+if ! grep -q '^DISSERTATION_PBPK28_ARIPIPRAZOLE_PARITY_NODE v1$' "$ARP_NODE_LOG"; then
+  echo "[pbpk28-parity:case29] FAIL: Node aripiprazole runner header mismatch" >&2; exit 1; fi
+
+EXPECTED_ARP=$((12 * 14))
+ARP_SIO_ROWS=$(vfx_parse_cavg ARIP "$ARP_SIO_LOG" | wc -l)
+ARP_NODE_ROWS=$(vfx_parse_cavg ARIP "$ARP_NODE_LOG" | wc -l)
+if [[ "$ARP_SIO_ROWS" -ne "$EXPECTED_ARP" || "$ARP_NODE_ROWS" -ne "$EXPECTED_ARP" ]]; then
+  echo "[pbpk28-parity:case29] FAIL: aripiprazole record mismatch — Sounio=$ARP_SIO_ROWS Node=$ARP_NODE_ROWS expected=$EXPECTED_ARP" >&2
+  exit 1
+fi
+echo "[pbpk28-parity:case29] both runs emitted $ARP_SIO_ROWS records"
+
+join -t"$(printf '\t')" -1 1 -2 1 \
+  <(vfx_parse_cavg ARIP "$ARP_SIO_LOG"  | awk -F'\t' '{print $1"|"$2"\t"$3}' | sort) \
+  <(vfx_parse_cavg ARIP "$ARP_NODE_LOG" | awk -F'\t' '{print $1"|"$2"\t"$3}' | sort) \
+| awk -F'\t' -v THR="$RMSE_THRESHOLD_PCT" '
+    {
+      split($1, a, "|"); i = a[2] + 0; cs = $2 + 0; cn = $3 + 0;
+      d = cs - cn; SS[i] += d * d; NN[i] += 1;
+      if (cs > PK[i]) PK[i] = cs;
+      if (cn > PK[i]) PK[i] = cn;
+    }
+    END {
+      bad = 0;
+      for (i = 0; i < 14; i++) {
+        if (NN[i] == 0) { printf "PBPK28_ARIPIPRAZOLE_PARITY_FAIL organ %d MISSING\n", i; bad += 1; continue; }
+        rmse = sqrt(SS[i] / NN[i]); pk = PK[i] + 0;
+        if (pk == 0) { continue; }
+        pct = 100.0 * rmse / pk;
+        if (pct >= THR + 0) { printf "PBPK28_ARIPIPRAZOLE_PARITY_FAIL organ %d pct=%.4f rmse=%.3g\n", i, pct, rmse; bad += 1; }
+      }
+      if (bad > 0) { exit 1; }
+      printf "PBPK28_ARIPIPRAZOLE_PARITY_PASS 14/14 compartments within %s%% RMSE (strict)\n", THR;
+    }
+'
+
+paste <(grep "^AMASS|m=" "$ARP_SIO_LOG" | sed "s/^AMASS|m=//") \
+      <(grep "^AREL|abs=" "$ARP_SIO_LOG" | sed "s/^AREL|abs=//") \
+  | awk -v FAILM="PBPK28_ARIPIPRAZOLE_MASS_FAIL" -v PASS="PBPK28_ARIPIPRAZOLE_MASS_PASS" '
+      { m=($1+0); r=($2+0); n++;
+        if (!(m >= 0 && m <= r)) { printf "%s sample %d: mass %.6f outside [0, %.6f]\n", FAILM, n, m, r; bad=1 } }
+      END { if (n != 12) { printf "%s row count %d != 12\n", FAILM, n; exit 1 }
+        if (bad) exit 1;
+        printf "%s 12/12 samples within [0, absorbed]\n", PASS }'
+
+echo "[pbpk28-parity:case29c] aripiprazole CN residual (measured evidence)"
+echo "--- Sounio residual (mg) ---"
+grep -e "^ARES|m=" "$ARP_SIO_LOG"
+echo "--- Node residual (mg) ---"
+grep -e "^ARES|m=" "$ARP_NODE_LOG"
+
+echo
+echo "[pbpk28-parity] aripiprazole canonical: dual CYP3A4+2D6 sink + extended 336 h horizon + mass envelope (15th canonical drug)"

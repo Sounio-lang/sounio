@@ -1,44 +1,95 @@
 ---
 title: "Uncertainty"
-description: "How Sounio represents and (eventually) propagates measurement uncertainty."
+description: "Libraries vs a typed research language: how Measurements.jl, Python uncertainties and Sounio Knowledge<T> propagate GUM uncertainty."
 weight: 21
 category: "epistemic"
 topic_id: "website.docs.epistemic.uncertainty"
 authority: "website_only"
 audience: "users"
-last_validated: "unvalidated"
-validated_by: "none"
+last_validated: "2026-11-06"
+validated_by: "run-pass-tests"
 source_of_truth: "docs/governance/topic-registry.v1.json#website.docs.epistemic.uncertainty"
 ---
 
-# Uncertainty
+import UncertaintyStatus from '../../../../components/docs/UncertaintyStatus.astro';
+import UncertaintyFaq from '../../../../components/docs/UncertaintyFaq.astro';
 
-Uncertainty is central to the Sounio story, but good docs need to separate the mathematical model from the exact surface the current artifact enforces. This page does both: it documents what the model is trying to express and what you can prove with the current fixtures.
+<UncertaintyStatus locale="en" />
 
-## What is verified now
+## Libraries and a typed research language
 
-- Confidence-sensitive refusal is not hypothetical; it is exercised by current compile-fail fixtures.
-- The checked contract already demonstrates that weak evidence and low-confidence states can block a program before runtime.
-- The richer propagation model remains visible in research and reference docs even when a particular artifact exposes only part of it.
+Measurements.jl and Python's `uncertainties` wrap a measured value in a library. Sounio 3.0 (pre-release) is a research language: the measured value is the type `Knowledge<T>`, and correlation is a call you write. The tests below fix Sounio's variances. They are not a benchmark against Julia or Python. For a production pipeline, stay on the library you already run.
 
-## Model-level propagation rules worth knowing
+| | Uncertainty lives in | What this page relies on | Correlation |
+| --- | --- | --- | --- |
+| Python `uncertainties` | a library object | that project's documentation | its README describes automatic tracking |
+| Measurements.jl | a Julia library type | that project's documentation | its manual describes functional correlation, including x − x ≈ 0 |
+| Sounio | the language type `Knowledge<T>` | the Madaros tests cited below | explicit `correlate`; the coefficient is a compile-time literal (E243) |
 
-- For independent addition and subtraction, standard uncertainty is typically combined in quadrature.
-- For multiplication and division, relative uncertainty propagation is the more useful mental model.
-- Confidence and provenance are part of the decision boundary, not just the numeric payload.
+Library rows point at [the uncertainties README](https://github.com/lmfit/uncertainties) and the [Measurements.jl manual](https://juliaphysics.github.io/Measurements.jl/stable/). They are not measurements from this repository. mp-units and physure, including a run with correlated uncertainty, are on [Sounio vs mp-units vs physure](/learn/epistemic/sounio-vs-mp-units-vs-physure/).
 
-## Where to prove behavior in this repo
+Measurements.jl, Python's `uncertainties` and Sounio are set side by side on [Sounio vs Python uncertainties vs Measurements.jl](/learn/epistemic/uncertainty-tools-compared/). The section index remains the [epistemic guide](/learn/epistemic/).
 
-- `tests/run-pass/vancomycin_propagation.sio` is the easiest current propagation example to validate with `souc check`.
-- `tests/compile-fail/vancomycin_low_conf.sio` proves the refusal path remains live.
-- `docs/research/vancomycin-uncertainty.md` explains the clinical case study behind these fixtures.
+## Uncertainty as a first-class type
 
-## Validation commands
+`Knowledge<T>` is the type of a measured value. `measure(value, uncertainty: u)` builds one. `.value` is the nominal number the arithmetic sees, and `variance_of` reads the propagated variance. A function that calls them declares the `Epistemic` effect. `correlate(x, y, rho)` records a correlation coefficient. On Madaros, `rho` has to be a compile-time literal: a runtime coefficient is error E243 (`tests/compile-fail/correlate_rho_must_be_literal.sio`, header `//@ requires: madaros`).
 
-```bash
-export SOUC_BIN="$(pwd)/bin/souc"
-export SOUNIO_STDLIB_PATH="$(pwd)/stdlib"
+The law in view is the first-order propagation of uncertainty in JCGM 100:2008 (GUM), covariance terms included. The guide is the [JCGM publications list](https://www.bipm.org/en/committees/cg/jcgm/publications).
 
-"$SOUC_BIN" check tests/run-pass/vancomycin_propagation.sio
-"$SOUC_BIN" check tests/compile-fail/vancomycin_low_conf.sio
+## GUM uncertainty propagation in a compiled language
+
+This excerpt is the correlate fragment of `tests/run-pass/madaros_gum_fo_correlate.sio`. The full file also computes a second-order mean and a product, then asserts. The fragment below is what was run on Madaros through `bin/souc`. It prints `v_ind=0.050000` and `v_cor=0.090000`.
+
+```sio
+fn main() -> i64 with IO, Mut, Div, Epistemic {
+    let kx: Knowledge<f64> = measure(1.0, uncertainty: 0.1)
+    let ky: Knowledge<f64> = measure(2.0, uncertainty: 0.2)
+    let x = kx.value
+    let y = ky.value
+
+    let v_ind = variance_of(x + y)
+
+    let _r = correlate(x, y, 1.0)
+    let v_cor = variance_of(x + y)
+
+    print("v_ind="); print_f64(v_ind); print("\n")
+    print("v_cor="); print_f64(v_cor); print("\n")
+    return 0
+}
 ```
+
+Independent inputs: variance 0.05, which is 0.1² + 0.2². After `correlate(x, y, 1.0)`: variance 0.09, which is (0.1 + 0.2)². The test file asserts both to 1e-9 and carries `//@ requires: madaros`. The same file also asserts `variance_of(x * y)` at 0.08 independent and 0.16 when ρ = 1, and the second-order mean of `(x + y)²` at 9.05 and 9.09 (tolerance 1e-6). Those extra lines are in the file, not in the excerpt. Source: [`tests/run-pass/madaros_gum_fo_correlate.sio`](https://github.com/Sounio-lang/sounio/blob/main/tests/run-pass/madaros_gum_fo_correlate.sio).
+
+## Why correlation matters
+
+The same name on both sides is a different fact from two inputs you then correlate.
+
+`tests/run-pass/gum_correlated.sio` builds `h` as `measure(1.75, uncertainty: 0.01)` and asserts `variance_of(h - h)` is 0, `variance_of(h * h)` is 0.001225, and `variance_of(h + h)` is 0.0004 (tolerance 1e-12). The file header does not name an engine. This page does not claim the same printed values on `lean_single`.
+
+Negative coefficients are a separate Madaros test, `tests/run-pass/madaros_gum_correlate_negative_rho.sio` (`//@ requires: madaros`). Standard uncertainties are 0.1 and 0.3. The asserts, tolerance 1e-12, are ρ = 1 → 0.16, ρ = −1 → 0.04, ρ = −0.5 → 0.07. The file writes the negative literals as `0.0 - 1.0` and `0.0 - 0.5`. A comment in that file states ρ = 0 → 0.10; the test does not assert that row.
+
+Correlation does not leak across functions. `tests/run-pass/madaros_gum_correlate_is_per_function.sio` (`//@ requires: madaros`) asserts 0.16 in the function that calls `correlate` and 0.10 in a second function that never does (same sigmas 0.1 and 0.3, tolerance 1e-12).
+
+## Known limits
+
+Read these before treating a passing example as a general warranty. The list lives in [`docs/compiler/KNOWN_LIMITATIONS.md`](https://github.com/Sounio-lang/sounio/blob/main/docs/compiler/KNOWN_LIMITATIONS.md), and the public summary is [Honesty](/honesty/) and [feature status](/learn/feature-status/).
+
+KL-11 was narrowed on 2026-10-13. First-order variance can cross a pure helper when the lowering re-inlines that helper. The same section says first-order propagation across arbitrary user function bodies remains open. A passing call is not the general case.
+
+KL-15: `Knowledge<f128>` and GUM over `f128` are not implemented.
+
+Monte Carlo is not the method behind 0.05 and 0.09. A general Monte Carlo backend is not claimed. `tests/epistemic_trust/propagate_trust.sio` checks two value-style kernels under Madaros. `tests/known_failures/madaros_propagate_monte_carlo_fnptr_probe.sio` says the function-pointer `monte_carlo` path returns an invalid result under default Madaros.
+
+A value that carries both a unit and a standard uncertainty is not re-checked on this page. The comparison that reports a run is [Sounio vs mp-units vs physure](/learn/epistemic/sounio-vs-mp-units-vs-physure/). The guide that puts [units and uncertainty in one program](/learn/language/units-and-uncertainty/) is the units page.
+
+## Where to go next
+
+- [Epistemic types](/learn/epistemic/)
+- [Science](/science/)
+- [Playground](/playground/)
+- [First program](/learn/getting-started/first-program/)
+- [Getting started](/learn/getting-started/)
+
+## FAQ
+
+<UncertaintyFaq locale="en" />
