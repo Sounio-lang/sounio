@@ -574,7 +574,40 @@ fn kpm_with_logp(d: KpInputs, lp: f64) -> KpInputs {
                       is_base: d.is_base, fu_p: d.fu_p, rb: d.rb, mw: d.mw }
 }
 
-pub fn kpm_rr_source_budget(d: KpInputs, logp_lo: f64, logp_hi: f64) -> Budget64 with Mut, Div, Panic {
+// The budget is FAIL-CLOSED.  An empty Budget64 has combined_std_uncert 0.0,
+// which would read as "no uncertainty" -- precisely the misreading this module
+// exists to refuse -- so the budget travels inside KpBudget with a validity flag
+// and a refusal code, and its figures are unavailable when valid is false.
+//   refusal 0  valid
+//   refusal 1  not a strong base: the strong-base route does not apply
+//   refusal 4  B:P-inconsistent somewhere in the logP range: no non-negative
+//              Ka exists, same meaning as ensemble code 4
+// Ka depends on logP, pKa, fu and rb but not on tissue composition, so B:P
+// consistency is checked at both ends and the centre of the logP range.
+struct KpBudget {
+    budget:  Budget64,
+    valid:   bool,
+    refusal: i32
+}
+
+pub fn kpm_kb_valid(k: KpBudget) -> bool { return k.valid }
+pub fn kpm_kb_refusal(k: KpBudget) -> i32 { return k.refusal }
+pub fn kpm_kb_uc(k: KpBudget) -> f64 { return k.budget.combined_std_uncert }
+pub fn kpm_kb_percent(k: KpBudget, idx: i64) -> f64 { return budget64_percent(&k.budget, idx) }
+pub fn kpm_kb_dominant(k: KpBudget) -> i64 { return budget64_dominant_idx(&k.budget) }
+
+pub fn kpm_rr_source_budget(d: KpInputs, logp_lo: f64, logp_hi: f64) -> KpBudget with Mut, Div, Panic {
+    let strong = if d.is_base { d.pka >= 7.0 } else { false }
+    if !strong {
+        return KpBudget { budget: budget64_new(0.0, 0.95), valid: false, refusal: 1 }
+    }
+    let lp_mid = 0.5 * (logp_lo + logp_hi)
+    var bp_ok = kpm_rr_bp_consistent(kpm_with_logp(d, logp_lo))
+    if bp_ok { bp_ok = kpm_rr_bp_consistent(kpm_with_logp(d, logp_hi)) }
+    if bp_ok { bp_ok = kpm_rr_bp_consistent(kpm_with_logp(d, lp_mid)) }
+    if !bp_ok {
+        return KpBudget { budget: budget64_new(0.0, 0.95), valid: false, refusal: 4 }
+    }
     let r3 = kpm_sqrt(3.0)
     let lp  = 0.5 * (logp_lo + logp_hi)
     let apr = 0.5 * (3.7563 + 4.2456)
@@ -606,7 +639,7 @@ pub fn kpm_rr_source_budget(d: KpInputs, logp_lo: f64, logp_hi: f64) -> Budget64
     budget64_add_type_b(&!b, 4, ph,  (7.00 - 6.81)       * 0.5 / r3, c_ph)
     budget64_add_type_b(&!b, 5, w,   (0.679 - 0.666)     * 0.5 / r3, c_w)
     budget64_finalize(&!b)
-    return b
+    return KpBudget { budget: b, valid: true, refusal: 0 }
 }
 
 // Declared domain: Rodgers-Rowland was derived and validated for small
@@ -2032,9 +2065,9 @@ fn main() -> i32 with IO, Mut, Div, Panic {
     // would let a real regression through.  The
     // dominant entry must be the cell-pH convention (entry 4).
     let bv = kpm_rr_source_budget(t26_v, 2.62, 2.80)
-    let uc = bv.combined_std_uncert
-    let pph = budget64_percent(&bv, 4)
-    let pap = budget64_percent(&bv, 1)
+    let uc = kpm_kb_uc(bv)
+    let pph = kpm_kb_percent(bv, 4)
+    let pap = kpm_kb_percent(bv, 1)
     print("  u_c(ln Kpu) = "); println(uc)
     print("  parcela pH celular % = "); println(pph)
     print("  parcela razao [AP-] % = "); println(pap)
@@ -2044,7 +2077,7 @@ fn main() -> i32 with IO, Mut, Div, Panic {
                 if pph < 96.9950 {
                     if pap > 2.8993 {
                         if pap < 2.8997 {
-                            if budget64_dominant_idx(&bv) == 4 {
+                            if kpm_kb_dominant(bv) == 4 {
                                 println("T27 PASS: budget64 do Sounio reproduz o orcamento C++ -- pH celular dominante")
                             } else {
                                 println("T27 FAIL: entrada dominante nao e o pH"); fails = fails + 1
@@ -2055,6 +2088,50 @@ fn main() -> i32 with IO, Mut, Div, Panic {
             } else { println("T27 FAIL: pH abaixo da banda"); fails = fails + 1 }
         } else { println("T27 FAIL: u_c acima da banda"); fails = fails + 1 }
     } else { println("T27 FAIL: u_c abaixo da banda"); fails = fails + 1 }
+
+    // T28 -- THE NATIVE BUDGET FOR EVERY STRONG BASE IN THE SET, AND ITS
+    // REFUSAL.  References from an independent implementation (budget_ref.cpp,
+    // same six entries, same midpoints, pKa/fu/rb fixed per drug):
+    //   ODV                u_c 0.122842514   pH 96.513199%
+    //   clozapine          u_c 0.119023562   pH 89.594110%   (rb 0.87, Sternbeck 2012)
+    //   haloperidol, repo  u_c 0.112997004   pH 79.565861%
+    //   haloperidol, httk  REFUSED, Ka at centre -3.0872
+    // The cellular-pH convention is the dominant entry for all four admissible
+    // configurations; only its share falls as lipophilicity and binding change.
+    // For haloperidol with httk's own fu and pKa the budget does not exist, and
+    // the test requires that it SAY so: an empty budget would print 0.0 and
+    // read as "no uncertainty".
+    let b_odv = kpm_rr_source_budget(KpInputs { log_p: 2.455, log_ma: 0.0, has_ma: false, pka: 8.86, is_base: true, fu_p: 0.70, rb: 1.00, mw: 263.38 }, 2.45, 2.461)
+    let b_clz = kpm_rr_source_budget(KpInputs { log_p: 3.23, log_ma: 2.954, has_ma: true, pka: 7.60, is_base: true, fu_p: 0.05, rb: 0.87, mw: 326.82 }, 3.23, 3.23)
+    let b_hr  = kpm_rr_source_budget(KpInputs { log_p: 4.294, log_ma: 3.723, has_ma: true, pka: 8.66, is_base: true, fu_p: 0.10, rb: 1.08, mw: 375.86 }, 4.288, 4.30)
+    let b_hh  = kpm_rr_source_budget(KpInputs { log_p: 4.294, log_ma: 3.723, has_ma: true, pka: 8.05, is_base: true, fu_p: 0.1784, rb: 1.08, mw: 375.86 }, 4.288, 4.30)
+    var t28 = 0
+    // ODV
+    if kpm_kb_valid(b_odv) { if kpm_kb_uc(b_odv) > 0.122822 { if kpm_kb_uc(b_odv) < 0.122862 {
+        if kpm_kb_percent(b_odv, 4) > 96.5130 { if kpm_kb_percent(b_odv, 4) < 96.5134 { if kpm_kb_dominant(b_odv) == 4 { t28 = t28 + 1 } } } } } }
+    // clozapine
+    if kpm_kb_valid(b_clz) { if kpm_kb_uc(b_clz) > 0.119003 { if kpm_kb_uc(b_clz) < 0.119043 {
+        if kpm_kb_percent(b_clz, 4) > 89.5939 { if kpm_kb_percent(b_clz, 4) < 89.5943 { if kpm_kb_dominant(b_clz) == 4 { t28 = t28 + 1 } } } } } }
+    // haloperidol, repository inputs
+    if kpm_kb_valid(b_hr) { if kpm_kb_uc(b_hr) > 0.112977 { if kpm_kb_uc(b_hr) < 0.113017 {
+        if kpm_kb_percent(b_hr, 4) > 79.5657 { if kpm_kb_percent(b_hr, 4) < 79.5661 { if kpm_kb_dominant(b_hr) == 4 { t28 = t28 + 1 } } } } } }
+    print("  ODV u_c = "); println(kpm_kb_uc(b_odv))
+    print("  clozapina u_c = "); println(kpm_kb_uc(b_clz))
+    print("  haloperidol (repo) u_c = "); println(kpm_kb_uc(b_hr))
+    print("  haloperidol (repo) pH % = "); println(kpm_kb_percent(b_hr, 4))
+    if t28 == 3 {
+        if kpm_kb_valid(b_hh) {
+            println("T28 FAIL: haloperidol com insumos httk produziu orcamento"); fails = fails + 1
+        } else {
+            if kpm_kb_refusal(b_hh) == 4 {
+                println("T28 PASS: ODV, clozapina e haloperidol(repo) batem com o C++; haloperidol(httk) recusado, codigo 4")
+            } else {
+                print("T28 FAIL: codigo de recusa = "); println(kpm_kb_refusal(b_hh)); fails = fails + 1
+            }
+        }
+    } else {
+        print("T28 FAIL: orcamentos que bateram com a referencia = "); println(t28); fails = fails + 1
+    }
     if fails == 0 {
         println("PASS")
         return 0
