@@ -1,0 +1,78 @@
+//@ run-pass
+//@ timeout: 180
+//@ expect-stdout: OLZ_SMOKER_DISCRIMINANT_PASS
+// ============================================================================
+// DISSERTATION - OLANZAPINE SMOKER VARIANT (CYP1A2 induction follow-up)
+// ============================================================================
+// The smoker profile is a full constant literal with CL 50.0 L/h (NM 25.0 x
+// the documented 2.0 multiplier, drugs/olanzapine.sio) and nothing else
+// changed. This test runs NM and smoker side by side and requires:
+// (a) smoker CL is exactly 50.0 L/h; (b) smoker plasma AUC is below NM AUC
+// (ratio in [0.35, 0.65]); (c) total mass stays within [0, absorbed] for
+// both arms (conservation).
+// ============================================================================
+
+use darwin_pbpk::scenarios::olanzapine_oral::*
+
+fn run_olz_arm(p: PBPKParams28, dt: f64, horizon: f64) -> f64 with Mut, Div {
+    var scen = olz_scenario_init()
+    var t = 0.0
+    var auc = 0.0
+    while t + dt * 0.5 < horizon {
+        scen = olz_step(scen, p, t, dt)
+        auc = auc + scen.pbpk.cv[0] * dt
+        t = t + dt
+    }
+    return auc
+}
+
+fn main() -> i32 with IO, Mut, Div {
+    let p_nm = olz_pbpk28_params()
+    let p_sm = olz_pbpk28_params_smoker()
+    print("OLZ|cl_nm=")
+    println(p_nm.cl_central)
+    print("OLZ|cl_smoker=")
+    println(p_sm.cl_central)
+    if p_sm.cl_central != 50.0 {
+        println("OLZ_SMOKER_DISCRIMINANT_FAIL")
+        return 1
+    }
+    let dt = 0.01
+    let horizon = 24.0
+    let auc_nm = run_olz_arm(p_nm, dt, horizon)
+    let auc_sm = run_olz_arm(p_sm, dt, horizon)
+    var scen_nm = olz_scenario_init()
+    var scen_sm = olz_scenario_init()
+    var t = 0.0
+    var cum = 0.0
+    while t + dt * 0.5 < horizon {
+        cum = cum + olz_release_rate_at(t + 0.5 * dt) * dt
+        scen_nm = olz_step(scen_nm, p_nm, t, dt)
+        scen_sm = olz_step(scen_sm, p_sm, t, dt)
+        t = t + dt
+    }
+    let m_nm = pbpk28_total_mass(scen_nm.pbpk, p_nm)
+    let m_sm = pbpk28_total_mass(scen_sm.pbpk, p_sm)
+    print("OLZ|auc_nm=")
+    println(auc_nm)
+    print("OLZ|auc_smoker=")
+    println(auc_sm)
+    print("OLZ|mass_nm=")
+    println(m_nm)
+    print("OLZ|mass_smoker=")
+    println(m_sm)
+    let ratio = auc_sm / auc_nm
+    var ok = 1
+    if ratio < 0.35 { ok = 0 }
+    if ratio > 0.65 { ok = 0 }
+    if m_nm < 0.0 { ok = 0 }
+    if m_sm < 0.0 { ok = 0 }
+    if m_nm > cum * 1.000001 + 0.000001 { ok = 0 }
+    if m_sm > cum * 1.000001 + 0.000001 { ok = 0 }
+    if ok == 1 {
+        println("OLZ_SMOKER_DISCRIMINANT_PASS")
+        return 0
+    }
+    println("OLZ_SMOKER_DISCRIMINANT_FAIL")
+    return 1
+}

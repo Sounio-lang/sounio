@@ -1,0 +1,7 @@
+Fixed (ADR-015 row 10): `affine`, `linear` and `study` are ordinary names outside keyword position on both engines, and `async await spawn crate super perform resume` are refused as binding names on both. The 54 probes `kw_let_<word>` (50 spellings and 4 controls) now agree: 47 words work as names, 7 are refused by both.
+
+Before: Madaros refused `affine` and `linear` in expression position (`let affine = 1; println(affine)` was a parse error) and `lean_single` refused all three (`study`, `affine`, `linear`) in expression position, while accepting `async await spawn crate super perform resume`, which Madaros refuses. In an older build `lean_single` read such a name as `0`.
+
+Madaros: `affine` and `linear` join `study` in `tk_is_contextual_ident`. `lean_single`: a post-lex pass turns `linear`, `affine` and `study` into names unless they sit where a qualifier or item keyword does (`linear fn`, `x: linear File`, `study Name {`), and a `let`/`var` binding named after one of the seven reserved words is refused. The reserved list is published in chapter 01 (LEX-006a). `tests/compile-fail/keyword_name_not_read_as_zero.sio`, which pinned the earlier refusal, is now `tests/run-pass/keyword_name_reads_its_value.sio`.
+
+Residual: `lean_single` still accepts the seven reserved words as parameter and field names, and a call to a function named `linear` or `affine` still reads as a qualifier there. Pins: `keyword_names_contextual_{madaros,lean_single}`, `reserved_word_binding_{madaros,lean_single}`.
