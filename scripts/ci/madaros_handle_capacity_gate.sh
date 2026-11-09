@@ -26,6 +26,14 @@ WORK="$(mktemp -d /tmp/sounio-handle-capacity.XXXXXX)"
 trap 'rm -rf "$WORK"' EXIT
 fail() { echo "[madaros-handle-capacity] FAIL: $*" >&2; exit 1; }
 
+# Every handle/raw-pointer split in the x86 Linux backend compares against the
+# configured capacity (nc_handle_capacity), never the 2^22 default: with
+# LOG2=23 a default-threshold site treats handle ids >= 4,194,304 as raw
+# pointers (rc 139 in the witness below).
+if grep -n 'native_v2_handle_raw_ptr_threshold()' "$ROOT_DIR/self-hosted/native/codegen_x86_linux.sio"; then
+  fail "codegen_x86_linux.sio splits handles from raw pointers at the default capacity"
+fi
+
 cat >"$WORK/witness.sio" <<'SIO'
 struct Node {
     v: i64,
