@@ -56,10 +56,7 @@ Fixed on the `lean_single` side by PR #3161 (`9cccda5fdd`, merged; witness `test
 
 ## 3. Decisions owed
 
-[`PENDING.md`](../decisions/PENDING.md) D-01 – D-34 (D-04 step C fail-closed implemented; D-05 closed under Option A ELF global scope order). Added today: **D-33**, the
-thirteen lexical rulings (one blocked by a measured collision: refusing an
-unclosed character literal breaks `&'static` lifetimes in the standard library),
-and **D-34**, the five decisions of the interval proposal.
+[`PENDING.md`](../decisions/PENDING.md) D-01 – D-35 ruled in [ADR-028](../decisions/adr-028-rulings-2026-11-09.md). Implementation tracking under EPIC · Decisions owed. D-33 lexical rulings tracked under ADR-015; D-34 certified intervals under ADR-019.
 
 ## 4. Self-hosting and memory
 
