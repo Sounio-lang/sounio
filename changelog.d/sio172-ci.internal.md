@@ -1,0 +1,1 @@
+Qualify the existing phonon status fixture on the committed seed using typed arithmetic NaN/+Inf with actual binary64 class assertions, preserve all refusal cases, use the recognized private-field diagnostic annotation, and remove the obsolete SI parity known-failure baseline entry after the production parity test became a run-pass.

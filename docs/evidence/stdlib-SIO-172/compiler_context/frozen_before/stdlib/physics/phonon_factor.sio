@@ -1,0 +1,362 @@
+// Checked SI transport and first-order joint state/parameter sensitivities.
+// The state owns actual-size buffers. Parameter factor rows remain constant;
+// no process noise, marginal reset, covariance projection, or concentration clamp.
+use collections::numeric_buffer::{NumericBuffer,numeric_buffer_len,numeric_buffer_status,numeric_buffer_at,numeric_buffer_set,numeric_buffer_close}
+use math::pure::{is_finite,sqrt,sin,cos}
+pub struct PhononParams {
+ pub d_eff:f64,pub dx:f64,pub k_release:f64,pub cl_site:f64,pub fu:f64,pub kp:f64,
+ pub c_portal:f64,pub c_ha:f64,pub f_heart:f64,pub a_portal:f64,pub a_ha:f64,
+ pub phi_ha:f64,pub c_tissue:f64,pub v_blood:f64,pub zonation:f64,
+}
+pub linear struct PhononState {values:NumericBuffer,factor:NumericBuffer,params:PhononParams,n:i64,k:i64,t:f64,status:i64}
+pub struct PhononShape {pub status:i64,pub n:i64,pub k:i64,pub factor_len:i64,pub scratch_len:i64,pub payload_bytes:i64}
+pub struct PhononValue {pub status:i64,pub value:f64}
+pub struct PhononResult {pub status:i64,pub t_final:f64,pub steps:i64,pub nfeval:i64,pub uncertainty_model:i64,pub first_order:bool}
+struct PhononBoundary {status:i64,value:f64,gradient:[f64;6]}
+struct PhononSite {status:i64,rhs:f64,lower:f64,diagonal:f64,upper:f64,gradient:[f64;15]}
+fn ph_abs(x:f64)->f64 {if x<0.0 {-x}else{x}}
+fn ph_min(a:f64,b:f64)->f64 {if a<b {a}else{b}}
+fn ph_value_unavailable(status:i64)->PhononValue {PhononValue{status:status,value:0.0}}
+pub fn phonon_workspace(n:i64,k:i64)->PhononShape with Mut,Div {
+ var r=PhononShape{status:3,n:n,k:k,factor_len:0,scratch_len:0,payload_bytes:0}
+ // Validate caps before sums/products, including hostile integer inputs.
+ if n<1 || n>64 || k<0 || k>79 {return r}
+ if k>n+15 {return r}
+ r.factor_len=(n+15)*k;r.scratch_len=5*n*(k+1)
+ r.payload_bytes=(n+r.factor_len+r.scratch_len)*8;r.status=0;r
+}
+pub fn phonon_default_si_params()->PhononParams {
+ PhononParams{d_eff:1e-9,dx:3.9e-6,k_release:0.1,cl_site:0.003,fu:0.075,kp:5.0,c_portal:1e-5,c_ha:8e-6,f_heart:1.2,a_portal:0.05,a_ha:0.30,phi_ha:0.785,c_tissue:2e-6,v_blood:3e-4,zonation:1.0}
+}
+pub fn phonon_params_status(p:&PhononParams)->i64 {
+ if !is_finite(p.d_eff)||!is_finite(p.dx)||!is_finite(p.k_release)||!is_finite(p.cl_site)||!is_finite(p.fu)||!is_finite(p.kp)||!is_finite(p.c_portal)||!is_finite(p.c_ha)||!is_finite(p.f_heart)||!is_finite(p.a_portal)||!is_finite(p.a_ha)||!is_finite(p.phi_ha)||!is_finite(p.c_tissue)||!is_finite(p.v_blood)||!is_finite(p.zonation) {return 1}
+ if p.d_eff<0.0||p.dx<=0.0||p.k_release<0.0||p.cl_site<0.0||p.fu<0.0||p.fu>1.0||p.kp<=0.0||p.c_portal<0.0||p.c_ha<0.0||p.f_heart<0.0||ph_abs(p.a_portal)>1.0||ph_abs(p.a_ha)>1.0||p.c_tissue<0.0||p.v_blood<0.0||p.zonation<=0.0 {return 2}
+ 0
+}
+// Factor rows0..n-1: initial concentrations. Rowsn..n+14: the15 parameters
+// in PhononParams declaration order. Columns0..k-1: shared latent sources.
+fn ph_initial_status(values:&NumericBuffer,factor:&NumericBuffer,params:&PhononParams,k:i64,t0:f64)->i64 with Mut,Div,Panic {
+ let n=numeric_buffer_len(values)
+ let shape=phonon_workspace(n,k)
+ var status=shape.status
+ if status==0 && (numeric_buffer_status(values)!=0||numeric_buffer_status(factor)!=0||numeric_buffer_len(factor)!=shape.factor_len) {status=3}
+ if status==0 {status=phonon_params_status(params)}
+ if status==0 && !is_finite(t0) {status=1}
+ var i:i64=0
+ if status==0 {while i<n {let x=numeric_buffer_at(values,i);if !is_finite(x) {status=1}else{if x<0.0 {status=2}};i=i+1}}
+ i=0
+ if status==0 {while i<shape.factor_len {if !is_finite(numeric_buffer_at(factor,i)) {status=1};i=i+1}}
+ status
+}
+pub fn phonon_from_factor(values:NumericBuffer,factor:NumericBuffer,params:PhononParams,k:i64,t0:f64)->PhononState with Mut,Div,Panic {
+ let n=numeric_buffer_len(&values)
+ let status=ph_initial_status(&values,&factor,&params,k,t0)
+ PhononState{values:values,factor:factor,params:params,n:n,k:k,t:t0,status:status}
+}
+// This constructor explicitly declares independent INITIAL states and exact
+// parameters. General parameter uncertainty/cross-correlation uses from_factor.
+pub fn phonon_from_independent_initial(values:NumericBuffer,variances:&NumericBuffer,factor:NumericBuffer,params:PhononParams,t0:f64)->PhononState with Mut,Div,Panic {
+ let n=numeric_buffer_len(&values)
+ let shape=phonon_workspace(n,n)
+ var destination=factor
+ var code=shape.status
+ if code==0 && (numeric_buffer_status(variances)!=0||numeric_buffer_len(variances)!=n||numeric_buffer_status(&destination)!=0||numeric_buffer_len(&destination)!=shape.factor_len) {code=3}
+ var i:i64=0
+ if code==0 {while i<n {let x=numeric_buffer_at(variances,i);if !is_finite(x) {code=1}else{if x<0.0 {code=2}};i=i+1}}
+ if code==0 {
+  i=0;while i<shape.factor_len {numeric_buffer_set(&!destination,i,0.0);i=i+1}
+  i=0;while i<n {numeric_buffer_set(&!destination,i*n+i,sqrt(numeric_buffer_at(variances,i)));i=i+1}
+  code=ph_initial_status(&values,&destination,&params,n,t0)
+ }
+ PhononState{values:values,factor:destination,params:params,n:n,k:n,t:t0,status:code}
+}
+pub fn phonon_state_status(s:&PhononState)->i64 {s.status}
+pub fn phonon_state_n(s:&PhononState)->i64 {s.n}
+pub fn phonon_state_rank(s:&PhononState)->i64 {s.k}
+pub fn phonon_state_time(s:&PhononState)->f64 {s.t}
+pub fn phonon_concentration(s:&PhononState,i:i64)->PhononValue with Panic {
+ if s.status!=0 {return ph_value_unavailable(s.status)}
+ if i<0||i>=s.n {return ph_value_unavailable(3)}
+ PhononValue{status:0,value:numeric_buffer_at(&s.values,i)}
+}
+pub fn phonon_factor_entry(s:&PhononState,row:i64,col:i64)->PhononValue with Panic {
+ if s.status!=0 {return ph_value_unavailable(s.status)}
+ if row<0||row>=s.n+15||col<0||col>=s.k {return ph_value_unavailable(3)}
+ PhononValue{status:0,value:numeric_buffer_at(&s.factor,row*s.k+col)}
+}
+pub fn phonon_close(s:PhononState) with Alloc {
+ let PhononState{values,factor,params,n,k,t,status}=s
+ numeric_buffer_close(values);numeric_buffer_close(factor)
+}
+// Bounded constant-cost reduction before calling the canonical pure sin/cos.
+// This is a numerical phase-range contract, not a change to compiler trig.
+fn ph_wrap(x:f64)->f64 {
+ let turns=(x/6.283185307179586) as i64
+ (x-(turns as f64)*6.283185307179586)-(turns as f64)*2.4492935982947064e-16
+}
+fn ph_boundary(p:&PhononParams,t:f64)->PhononBoundary with Mut,Div,Panic {
+ let x=6.283185307179586*p.f_heart*t
+ let y=x+p.phi_ha
+ if !is_finite(x)||!is_finite(y)||ph_abs(x)>1e6||ph_abs(y)>1e6 {return PhononBoundary{status:4,value:0.0,gradient:[0.0;6]}}
+ let sx=sin(ph_wrap(x));let sy=sin(ph_wrap(y))
+ let cx=cos(ph_wrap(x));let cy=cos(ph_wrap(y))
+ let portal=0.75*(1.0+p.a_portal*sx)
+ let artery=0.25*(1.0+p.a_ha*sy)
+ let grad_f=6.283185307179586*t*(0.75*p.c_portal*p.a_portal*cx+0.25*p.c_ha*p.a_ha*cy)
+ let value=p.c_portal*portal+p.c_ha*artery
+ let gradient=[portal,artery,grad_f,0.75*p.c_portal*sx,0.25*p.c_ha*sy,0.25*p.c_ha*p.a_ha*cy]
+ var i:i64=0
+ while i<6 {if !is_finite(gradient[i]) {return PhononBoundary{status:4,value:0.0,gradient:[0.0;6]}};i=i+1}
+ if !is_finite(value)||value<0.0 {return PhononBoundary{status:4,value:0.0,gradient:[0.0;6]}}
+ PhononBoundary{status:0,value:value,gradient:gradient}
+}
+fn ph_mean(s:&PhononState,w:&NumericBuffer,i:i64,trial:bool)->f64 with Panic {
+ if trial {return numeric_buffer_at(w,4*s.n*(s.k+1)+i*(s.k+1))}
+ numeric_buffer_at(&s.values,i)
+}
+fn ph_sensitivity(s:&PhononState,w:&NumericBuffer,i:i64,col:i64,trial:bool)->f64 with Panic {
+ if trial {return numeric_buffer_at(w,4*s.n*(s.k+1)+i*(s.k+1)+col+1)}
+ numeric_buffer_at(&s.factor,i*s.k+col)
+}
+fn ph_site(s:&PhononState,w:&NumericBuffer,i:i64,trial:bool,b:&PhononBoundary)->PhononSite with Mut,Div,Panic {
+ let p=s.params
+ let here=ph_mean(s,w,i,trial)
+ let left=if i==0 {b.value}else{ph_mean(s,w,i-1,trial)}
+ let right=if i+1<s.n {ph_mean(s,w,i+1,trial)}else{here}
+ let lap=left-2.0*here+right
+ let difference=left-here
+ let diff=(p.d_eff/p.dx)/p.dx
+ let adv=p.v_blood/p.dx
+ let xi=if s.n==1 {0.5}else{(i as f64)/((s.n-1) as f64)}
+ let zone=if s.n==1 {1.0}else{2.0*(1.0+(p.zonation-1.0)*xi)/(p.zonation+1.0)}
+ let dz=if s.n==1 {0.0}else{2.0*(2.0*xi-1.0)/((p.zonation+1.0)*(p.zonation+1.0))}
+ let release=p.k_release*(p.c_tissue/p.kp-here)
+ let metabolism=0.0-p.cl_site*zone*p.fu*here
+ let boundary_weight=if i==0 {adv+diff}else{0.0}
+ let rhs=adv*difference+diff*lap+release+metabolism
+ let diagonal=0.0-adv-(if i+1<s.n {2.0*diff}else{diff})-p.k_release-p.cl_site*zone*p.fu
+ let lower=if i>0 {adv+diff}else{0.0}
+ let upper=if i+1<s.n {diff}else{0.0}
+ var gradient:[f64;15]=[0.0;15]
+ gradient[0]=(lap/p.dx)/p.dx
+ gradient[1]=(0.0-adv*difference-2.0*diff*lap)/p.dx
+ gradient[2]=p.c_tissue/p.kp-here
+ gradient[3]=0.0-zone*p.fu*here
+ gradient[4]=0.0-p.cl_site*zone*here
+ gradient[5]=0.0-p.k_release*p.c_tissue/(p.kp*p.kp)
+ var q:i64=0
+ while q<6 {gradient[6+q]=boundary_weight*b.gradient[q];q=q+1}
+ gradient[12]=p.k_release/p.kp
+ gradient[13]=difference/p.dx
+ gradient[14]=0.0-p.cl_site*p.fu*here*dz
+ q=0
+ while q<15 {if !is_finite(gradient[q]) {return PhononSite{status:4,rhs:0.0,lower:0.0,diagonal:0.0,upper:0.0,gradient:[0.0;15]}};q=q+1}
+ if !is_finite(rhs)||!is_finite(lower)||!is_finite(diagonal)||!is_finite(upper) {return PhononSite{status:4,rhs:0.0,lower:0.0,diagonal:0.0,upper:0.0,gradient:[0.0;15]}}
+ PhononSite{status:0,rhs:rhs,lower:lower,diagonal:diagonal,upper:upper,gradient:gradient}
+}
+// Public actual-size Jacobian control: n RHS values and n*15 parameter entries.
+pub fn phonon_rhs_jacobian_checked(s:&PhononState,t:f64,rhs:&!NumericBuffer,jac:&!NumericBuffer)->i64 with Mut,Div,Panic {
+ if s.status!=0 {return s.status}
+ if !is_finite(t) {return 1}
+ if numeric_buffer_status(rhs)!=0||numeric_buffer_status(jac)!=0||numeric_buffer_len(rhs)!=s.n||numeric_buffer_len(jac)!=s.n*15 {return 3}
+ let b=ph_boundary(&s.params,t)
+ if b.status!=0 {return b.status}
+ var i:i64=0
+ while i<s.n {
+  let point=ph_site(s,&s.values,i,false,&b)
+  if point.status!=0 {return point.status}
+  numeric_buffer_set(rhs,i,point.rhs)
+  var q:i64=0
+  while q<15 {numeric_buffer_set(jac,i*15+q,point.gradient[q]);q=q+1}
+  i=i+1
+ }
+ 0
+}
+
+fn ph_limit(s:&PhononState)->PhononValue with Mut,Div,Panic {
+ let p=s.params
+ let diff=(p.d_eff/p.dx)/p.dx
+ let adv=p.v_blood/p.dx
+ let zone=if s.n==1 {1.0}else{if p.zonation>=1.0 {2.0*(p.zonation/(p.zonation+1.0))}else{2.0/(p.zonation+1.0)}}
+ let rate=adv+(if s.n==1 {diff}else{2.0*diff})+p.k_release+p.cl_site*p.fu*zone
+ if !is_finite(rate)||rate<0.0 {return ph_value_unavailable(4)}
+ if rate==0.0 {return PhononValue{status:0,value:1.7976931348623157e308}}
+ PhononValue{status:0,value:0.5/rate}
+}
+fn ph_rhs_stage(s:&PhononState,w:&!NumericBuffer,t:f64,row:i64,trial:bool)->i64 with Mut,Div,Panic {
+ let b=ph_boundary(&s.params,t)
+ if b.status!=0 {return b.status}
+ let width=s.k+1
+ let offset=row*s.n*width
+ var i:i64=0
+ while i<s.n {
+  let point=ph_site(s,w,i,trial,&b)
+  if point.status!=0 {return point.status}
+  numeric_buffer_set(w,offset+i*width,point.rhs)
+  var col:i64=0
+  while col<s.k {
+   var value=point.diagonal*ph_sensitivity(s,w,i,col,trial)
+   if i>0 {value=value+point.lower*ph_sensitivity(s,w,i-1,col,trial)}
+   if i+1<s.n {value=value+point.upper*ph_sensitivity(s,w,i+1,col,trial)}
+   // Parameter rows are constant in the same latent basis as state rows.
+   var correction:f64=0.0
+   var p:i64=0
+   while p<15 {
+    let term=point.gradient[p]*numeric_buffer_at(&s.factor,(s.n+p)*s.k+col)
+    let adjusted=term-correction
+    let next=value+adjusted
+    correction=(next-value)-adjusted;value=next;p=p+1
+   }
+   if !is_finite(value) {return 4}
+   numeric_buffer_set(w,offset+i*width+col+1,value)
+   col=col+1
+  }
+  i=i+1
+ }
+ 0
+}
+// mode0/1/2 creates stages2/3/4; mode3 creates the final candidate.
+fn ph_trial(s:&PhononState,w:&!NumericBuffer,h:f64,mode:i64)->i64 with Mut,Div,Panic {
+ let width=s.k+1
+ let length=s.n*width
+ var i:i64=0
+ while i<s.n {
+  var col:i64=0
+  while col<width {
+   let index=i*width+col
+   let base=if col==0 {numeric_buffer_at(&s.values,i)}else{numeric_buffer_at(&s.factor,i*s.k+col-1)}
+   var value=base
+   if mode<3 {
+    let weight=if mode==2 {1.0}else{0.5}
+    value=base+(h*numeric_buffer_at(w,mode*length+index))*weight
+   }else{
+    var stage:i64=0
+    var correction:f64=0.0
+    while stage<4 {
+     let weight=if stage==0||stage==3 {1.0/6.0}else{1.0/3.0}
+     let term=(h*numeric_buffer_at(w,stage*length+index))*weight
+     let adjusted=term-correction
+     let next=value+adjusted
+     correction=(next-value)-adjusted;value=next;stage=stage+1
+    }
+   }
+   if !is_finite(value) {return 4}
+   if mode==3 && col==0 && value<0.0 {return 2}
+   numeric_buffer_set(w,4*length+index,value)
+   col=col+1
+  }
+  i=i+1
+ }
+ 0
+}
+fn ph_result(s:&PhononState,status:i64)->PhononResult {
+ PhononResult{status:status,t_final:if is_finite(s.t) {s.t}else{0.0},steps:0,nfeval:0,uncertainty_model:2,first_order:true}
+}
+pub fn phonon_step_checked(s:&!PhononState,scratch:&!NumericBuffer,h:f64)->PhononResult with Mut,Div,Panic {
+ var out=ph_result(s,s.status)
+ if s.status!=0 {return out}
+ if !is_finite(h) {out.status=1;return out}
+ if h<=0.0 {out.status=2;return out}
+ let shape=phonon_workspace(s.n,s.k)
+ if numeric_buffer_status(scratch)!=0||numeric_buffer_len(scratch)<shape.scratch_len {out.status=3;return out}
+ let next=s.t+h
+ if !is_finite(next) {out.status=4;return out}
+ if next<=s.t {out.status=6;return out}
+ let limit=ph_limit(s)
+ if limit.status!=0 {out.status=limit.status;return out}
+ if h>limit.value {out.status=2;return out}
+ var code=ph_rhs_stage(s,scratch,s.t,0,false)
+ out.nfeval=1
+ if code!=0 {out.status=code;return out}
+ code=ph_trial(s,scratch,h,0)
+ if code!=0 {out.status=code;return out}
+ code=ph_rhs_stage(s,scratch,s.t+0.5*h,1,true)
+ out.nfeval=2
+ if code!=0 {out.status=code;return out}
+ code=ph_trial(s,scratch,h,1)
+ if code!=0 {out.status=code;return out}
+ code=ph_rhs_stage(s,scratch,s.t+0.5*h,2,true)
+ out.nfeval=3
+ if code!=0 {out.status=code;return out}
+ code=ph_trial(s,scratch,h,2)
+ if code!=0 {out.status=code;return out}
+ code=ph_rhs_stage(s,scratch,next,3,true)
+ out.nfeval=4
+ if code!=0 {out.status=code;return out}
+ code=ph_trial(s,scratch,h,3)
+ if code!=0 {out.status=code;return out}
+ // Commit only after the entire candidate is finite and concentrations >=0.
+ let width=s.k+1
+ let offset=4*s.n*width
+ var i:i64=0
+ while i<s.n {
+  numeric_buffer_set(&!s.values,i,numeric_buffer_at(scratch,offset+i*width))
+  var col:i64=0
+  while col<s.k {numeric_buffer_set(&!s.factor,i*s.k+col,numeric_buffer_at(scratch,offset+i*width+col+1));col=col+1}
+  i=i+1
+ }
+ s.t=next;out.status=0;out.t_final=next;out.steps=1;out
+}
+// process_noise_mode0 is deterministic forcing/constant uncertain parameters.
+// Any nonzero Q mode is explicitly unsupported and refuses before mutation.
+pub fn phonon_simulate_checked(s:&!PhononState,scratch:&!NumericBuffer,t_end:f64,dt:f64,max_steps:i64,process_noise_mode:i64)->PhononResult with Mut,Div,Panic {
+ var out=ph_result(s,s.status)
+ if process_noise_mode!=0 {out.status=7;return out}
+ if s.status!=0 {return out}
+ if !is_finite(t_end)||!is_finite(dt) {out.status=1;return out}
+ if t_end<s.t||dt<=0.0||max_steps<1||max_steps>1000000 {out.status=2;return out}
+ let shape=phonon_workspace(s.n,s.k)
+ if numeric_buffer_status(scratch)!=0||numeric_buffer_len(scratch)<shape.scratch_len {out.status=3;return out}
+ if t_end==s.t {out.status=0;return out}
+ let span=t_end-s.t
+ if !is_finite(span) {out.status=4;return out}
+ let limit=ph_limit(s)
+ if limit.status!=0 {out.status=limit.status;return out}
+ while s.t<t_end && out.steps<max_steps {
+  let remaining=t_end-s.t
+  let h=ph_min(remaining,ph_min(dt,limit.value))
+  let next=if h==remaining {t_end}else{s.t+h}
+  if next<=s.t {out.status=6;return out}
+  let result=phonon_step_checked(s,scratch,h)
+  out.nfeval=out.nfeval+result.nfeval
+  out.t_final=s.t
+  if result.status!=0 {out.status=result.status;return out}
+  if h==remaining {s.t=t_end;out.t_final=t_end}
+  out.steps=out.steps+1
+ }
+ if s.t<t_end {out.status=5}else{out.status=0}
+ out
+}
+pub fn phonon_covariance(s:&PhononState,i:i64,j:i64)->PhononValue with Mut,Div,Panic {
+ if s.status!=0 {return ph_value_unavailable(s.status)}
+ if i<0||i>=s.n||j<0||j>=s.n {return ph_value_unavailable(3)}
+ var total:f64=0.0
+ var correction:f64=0.0
+ var col:i64=0
+ while col<s.k {
+  let a=numeric_buffer_at(&s.factor,i*s.k+col)
+  let b=numeric_buffer_at(&s.factor,j*s.k+col)
+  let term=a*b
+  if !is_finite(term)||(a!=0.0&&b!=0.0&&term==0.0) {return ph_value_unavailable(4)}
+  let adjusted=term-correction
+  let next=total+adjusted
+  correction=(next-total)-adjusted;total=next;col=col+1
+ }
+ if !is_finite(total) {return ph_value_unavailable(4)}
+ PhononValue{status:0,value:total}
+}
+pub fn phonon_standard_uncertainty(s:&PhononState,i:i64)->PhononValue with Mut,Div,Panic {
+ if s.status!=0 {return ph_value_unavailable(s.status)}
+ if i<0||i>=s.n {return ph_value_unavailable(3)}
+ var scale:f64=0.0
+ var sum:f64=1.0
+ var col:i64=0
+ while col<s.k {
+  let x=ph_abs(numeric_buffer_at(&s.factor,i*s.k+col))
+  if x>0.0 {if scale<x {let r=scale/x;sum=1.0+sum*r*r;scale=x}else{let r=x/scale;sum=sum+r*r}}
+  col=col+1
+ }
+ let u=scale*sqrt(sum)
+ if !is_finite(u) {return ph_value_unavailable(4)}
+ PhononValue{status:0,value:u}
+}

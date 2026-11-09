@@ -1,0 +1,93 @@
+// Checked SI transport and first-order joint state/parameter sensitivities.
+// The state owns actual-size buffers. Parameter factor rows remain constant;
+// no process noise, marginal reset, covariance projection, or concentration clamp.
+use collections::numeric_buffer::{NumericBuffer,numeric_buffer_new,numeric_buffer_len,numeric_buffer_status,numeric_buffer_at,numeric_buffer_set,numeric_buffer_close}
+use math::pure::{is_finite,sqrt,sin,cos}
+pub struct PhononParams {
+ pub d_eff:f64,pub dx:f64,pub k_release:f64,pub cl_site:f64,pub fu:f64,pub kp:f64,
+ pub c_portal:f64,pub c_ha:f64,pub f_heart:f64,pub a_portal:f64,pub a_ha:f64,
+ pub phi_ha:f64,pub c_tissue:f64,pub v_blood:f64,pub zonation:f64,
+}
+pub linear struct PhononState {values:NumericBuffer,factor:NumericBuffer,params:PhononParams,n:i64,k:i64,t:f64,status:i64}
+pub struct PhononShape {pub status:i64,pub n:i64,pub k:i64,pub factor_len:i64,pub scratch_len:i64,pub payload_bytes:i64}
+pub struct PhononValue {pub status:i64,pub value:f64}
+pub struct PhononResult {pub status:i64,pub t_final:f64,pub steps:i64,pub nfeval:i64,pub uncertainty_model:i64,pub first_order:bool}
+pub fn phonon_workspace(n:i64,k:i64)->PhononShape with Mut,Div {
+ var r=PhononShape{status:3,n:n,k:k,factor_len:0,scratch_len:0,payload_bytes:0}
+ // Validate caps before sums/products, including hostile integer inputs.
+ if n<1 || n>64 || k<0 || k>79 {return r}
+ if k>n+15 {return r}
+ r.factor_len=(n+15)*k;r.scratch_len=5*n*(k+1)
+ r.payload_bytes=(n+r.factor_len+r.scratch_len)*8;r.status=0;r
+}
+pub fn phonon_default_si_params()->PhononParams {
+ PhononParams{d_eff:1e-9,dx:3.9e-6,k_release:0.1,cl_site:0.003,fu:0.075,kp:5.0,c_portal:1e-5,c_ha:8e-6,f_heart:1.2,a_portal:0.05,a_ha:0.30,phi_ha:0.785,c_tissue:2e-6,v_blood:3e-4,zonation:1.0}
+}
+fn ph_result(s:&PhononState,status:i64)->PhononResult {
+ PhononResult{status:status,t_final:if is_finite(s.t) {s.t}else{0.0},steps:0,nfeval:0,uncertainty_model:2,first_order:true}
+}
+pub fn phonon_close(s:PhononState) with Alloc {
+ let PhononState{values,factor,params,n,k,t,status}=s
+ numeric_buffer_close(values);numeric_buffer_close(factor)
+}
+fn ph_limit(s:&PhononState)->PhononValue {PhononValue{status:0,value:0.5}}
+fn ph_rhs_stage(s:&PhononState,w:&!NumericBuffer,t:f64,row:i64,trial:bool)->i64 {0}
+fn ph_trial(s:&PhononState,w:&!NumericBuffer,h:f64,mode:i64)->i64 with Mut,Panic {
+ if mode==3 {numeric_buffer_set(w,8,0.5);numeric_buffer_set(w,9,0.1)};0
+}
+pub fn phonon_step_checked(s:&!PhononState,scratch:&!NumericBuffer,h:f64)->PhononResult with Mut,Div,Panic {
+ var out=ph_result(s,s.status)
+ if s.status!=0 {return out}
+ if !is_finite(h) {out.status=1;return out}
+ if h<=0.0 {out.status=2;return out}
+ let shape=phonon_workspace(s.n,s.k)
+ if numeric_buffer_status(scratch)!=0||numeric_buffer_len(scratch)<shape.scratch_len {out.status=3;return out}
+ let next=s.t+h
+ if !is_finite(next) {out.status=4;return out}
+ if next<=s.t {out.status=6;return out}
+ let limit=ph_limit(s)
+ if limit.status!=0 {out.status=limit.status;return out}
+ if h>limit.value {out.status=2;return out}
+ var code=ph_rhs_stage(s,scratch,s.t,0,false)
+ out.nfeval=1
+ if code!=0 {out.status=code;return out}
+ code=ph_trial(s,scratch,h,0)
+ if code!=0 {out.status=code;return out}
+ code=ph_rhs_stage(s,scratch,s.t+0.5*h,1,true)
+ out.nfeval=2
+ if code!=0 {out.status=code;return out}
+ code=ph_trial(s,scratch,h,1)
+ if code!=0 {out.status=code;return out}
+ code=ph_rhs_stage(s,scratch,s.t+0.5*h,2,true)
+ out.nfeval=3
+ if code!=0 {out.status=code;return out}
+ code=ph_trial(s,scratch,h,2)
+ if code!=0 {out.status=code;return out}
+ code=ph_rhs_stage(s,scratch,next,3,true)
+ out.nfeval=4
+ if code!=0 {out.status=code;return out}
+ code=ph_trial(s,scratch,h,3)
+ if code!=0 {out.status=code;return out}
+ // Commit only after the entire candidate is finite and concentrations >=0.
+ let width=s.k+1
+ let offset=4*s.n*width
+ var i:i64=0
+ while i<s.n {
+  numeric_buffer_set(&!s.values,i,numeric_buffer_at(scratch,offset+i*width))
+  var col:i64=0
+  while col<s.k {numeric_buffer_set(&!s.factor,i*s.k+col,numeric_buffer_at(scratch,offset+i*width+col+1));col=col+1}
+  i=i+1
+ }
+ s.t=next;out.status=0;out.t_final=next;out.steps=1;out
+}
+fn zeros(n:i64)->NumericBuffer with Alloc,Mut,Div,Panic {var b=numeric_buffer_new(n,n*8);var i:i64=0;while i<n {numeric_buffer_set(&!b,i,0.0);i=i+1};b}
+fn reduced_value(s:&PhononState)->f64 with Panic {numeric_buffer_at(&s.values,0)}
+fn main()->i32 with Alloc,Mut,Div,Panic,IO {
+ let values=zeros(1);let factor=zeros(16);var w=zeros(10)
+ var s=PhononState{values:values,factor:factor,params:phonon_default_si_params(),n:1,k:1,t:0.0,status:0}
+ println("REDUCED_BEFORE_STEP");let r=phonon_step_checked(&!s,&!w,0.1)
+ print("REDUCED_STATUS ");print_int(r.status);println("")
+ print("REDUCED_VALUE ");print_int(f64_to_bits(reduced_value(&s)));println("")
+ assert(r.status==0);assert(reduced_value(&s)==0.5)
+ phonon_close(s);numeric_buffer_close(w);println("REDUCED_PASS");0
+}
