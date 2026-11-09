@@ -1,0 +1,163 @@
+//@ run-pass
+//@ expect-stdout-contains: PBPK28_LIBRARY_MOMENTS_PASS
+//@ timeout: 900
+//
+// Analytic (tier A) gates for every PBPK28 parameter set that carries its
+// elimination in cl_central, beyond morphine and fentanyl (which have their own
+// tests). Each set is run AS STORED through the multidrug28 driver, and the
+// simulation is compared against values fixed BEFORE the run by the closed form
+// of the set's own arrays (the V_ss / MRT column of
+// docs/audit/PBPK28_LIBRARY_AUDIT_2026-11-08.md, merged before this test):
+//
+//   M1  Runtime clearance: constant IV infusion to steady state,
+//       CL = rate / Css,blood equals cl_central to 0.5 %.
+//   M2  Moment theory on a 1 mg IV bolus: MRT = AUMC/AUC = V_ss/CL to 1 %,
+//       AUC = Dose/CL to 1 %.
+//   M3  Quadrature convergence: halving every step changes AUC and AUMC by
+//       < 0.2 %; residual tail C(T)/C(0) < 1e-6.
+//   M4  Mass identity of the bolus run: |body + eliminated - dose|/dose < 1e-6.
+//
+// Predicted MRT = V_ss/CL (h), from the audit: clozapine 20.4446, olanzapine
+// 26.6253, quetiapine 3.8846, lithium 33.8592, tacrolimus 9.0639, everolimus
+// 5.5308, vancomycin 8.9048, tirzepatide 353.604, risperidone parent 31.2908,
+// risperidone 9-OH 30.7551, rapamycin 3.9251, venlafaxine parent 1.8914,
+// venlafaxine ODV 3.0869, semaglutide 280.128.
+//
+// Grid. The blood turns over in V_b/Q_co = 0.014 h while the slowest sets have
+// MRT ~ 350 h, so a fixed grid cannot serve all of them: the step is fine early
+// (0.002 h) and grows geometrically late (0.5 % of t), and the horizon is
+// T = 80 * MRT_pred so the residual tail is negligible for every set. M3 checks
+// that this grid has converged rather than assuming it.
+//
+// Excluded, with reason: aripiprazole (cl_central = 0 by design; elimination is
+// two CYP sinks on the liver, so V_ss/CL has no closed form from the set alone);
+// the semaglutide drug-module copy (arrays identical to the core set, pinned by
+// semaglutide_drugs_consistency); morphine and fentanyl (own tier-A tests).
+//
+// These gates test that each parameter set is internally consistent with the
+// PBPK28 transport. They do not test it against published pharmacokinetics; that
+// is tier L. Decision-support parity card (ADR009); no clinical-validity claim.
+
+use darwin_pbpk::core::pbpk28_params::*
+use darwin_pbpk::ddi::multidrug28::*
+use darwin_pbpk::drugs::semaglutide::*
+use darwin_pbpk::scenarios::clozapine_oral::*
+use darwin_pbpk::scenarios::olanzapine_oral::*
+use darwin_pbpk::scenarios::quetiapine_oral::*
+use darwin_pbpk::scenarios::lithium_oral::*
+use darwin_pbpk::scenarios::tacrolimus_oral::*
+use darwin_pbpk::scenarios::everolimus_des::*
+use darwin_pbpk::scenarios::vancomycin_iv::*
+use darwin_pbpk::scenarios::tirzepatide_sc_depot::*
+use darwin_pbpk::scenarios::risperidone_oral::*
+
+fn t_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn rel(a: f64, b: f64) -> f64 with Div { return t_abs(a - b) / t_abs(b) }
+fn show(l: string, x: f64) with IO { print(l) println(x) }
+
+fn vss_of(p: PBPKParams28) -> f64 with Mut {
+    var vss = p.v_ref[0]
+    var i: i32 = 1
+    while i < 14 {
+        let fv = p.vasc_frac[i]
+        if p.ps[i] > 0.0 { vss = vss + p.v_ref[i] * (fv + (1.0 - fv) * p.kp[i]) } else { vss = vss + p.v_ref[i] * fv }
+        i = i + 1
+    }
+    return vss
+}
+
+fn infusion_cl(p: PBPKParams28, rate: f64, t_end: f64, dt: f64) -> f64 with Mut, Div, Panic {
+    var md = md_new(true)
+    let v = md_add_drug(&!md, p, 1.0, 1.0, 1.0)
+    md_set_iv_rate(&!md, v, rate)
+    md_run_to(&!md, t_end, dt)
+    let css = md_state_of(&md, v).cv[0]
+    return rate / css
+}
+
+fn grid_dt(t: f64, scale: f64) -> f64 {
+    if t < 0.5 { return 0.002 * scale }
+    if t < 4.0 { return 0.01 * scale }
+    if t < 40.0 { return 0.05 * scale }
+    return 0.005 * t * scale
+}
+
+struct Moments { auc: f64, aumc: f64, tail: f64, mres: f64 }
+
+fn bolus_moments(p: PBPKParams28, dose: f64, t_end: f64, scale: f64) -> Moments with Mut, Div, Panic {
+    var md = md_new(true)
+    let v = md_add_drug(&!md, p, 1.0, 1.0, 1.0)
+    md_dose_iv_bolus(&!md, v, dose)
+    let c0 = md_state_of(&md, v).cv[0]
+    var t = 0.0
+    var c_prev = c0
+    var auc = 0.0
+    var aumc = 0.0
+    while t < t_end {
+        let dt = grid_dt(t, scale)
+        md_step(&!md, dt)
+        let t_new = t + dt
+        let c = md_state_of(&md, v).cv[0]
+        auc = auc + 0.5 * (c_prev + c) * dt
+        aumc = aumc + 0.5 * (t * c_prev + t_new * c) * dt
+        t = t_new
+        c_prev = c
+    }
+    return Moments { auc: auc, aumc: aumc, tail: c_prev / c0, mres: md_mass_residual(&md, v) }
+}
+
+// All four gates for one set; prints one MOM line and any failure.
+fn gate(name: string, p: PBPKParams28) -> bool with IO, Mut, Div, Panic {
+    var good = true
+    let cl = p.cl_central
+    let vss = vss_of(p)
+    let mrt_pred = vss / cl
+    let t_end = 80.0 * mrt_pred
+    let cl_inf = infusion_cl(p, cl, t_end, t_end / 2000.0)
+    let m = bolus_moments(p, 1.0, t_end, 1.0)
+    let m2 = bolus_moments(p, 1.0, t_end, 0.5)
+    let mrt = m.aumc / m.auc
+    let auc_pred = 1.0 / cl
+    print("MOM|") print(name)
+    print("|CLsim/CL=") print(cl_inf / cl)
+    print("|MRTsim=") print(mrt)
+    print("|MRTpred=") print(mrt_pred)
+    print("|AUCsim/pred=") print(m.auc / auc_pred)
+    print("|dAUC=") print(rel(m.auc, m2.auc))
+    print("|dAUMC=") print(rel(m.aumc, m2.aumc))
+    print("|tail=") print(m.tail)
+    print("|mres=") println(m.mres)
+    if rel(cl_inf, cl) > 0.005 { println("  M1 FAIL runtime clearance") good = false }
+    if rel(mrt, mrt_pred) > 0.01 { println("  M2 FAIL MRT") good = false }
+    if rel(m.auc, auc_pred) > 0.01 { println("  M2 FAIL AUC") good = false }
+    if rel(m.auc, m2.auc) > 0.002 || rel(m.aumc, m2.aumc) > 0.002 { println("  M3 FAIL quadrature not converged") good = false }
+    if !(m.tail < 1.0e-6) { println("  M3 FAIL residual tail") good = false }
+    if !(m.mres < 1.0e-6) { println("  M4 FAIL mass identity") good = false }
+    if !good { print("  FAILED SET: ") println(name) }
+    return good
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    println("PBPK28_LIBRARY_MOMENTS v1")
+    var ok = true
+    if !gate("clozapine", clz_pbpk28_params()) { ok = false }
+    if !gate("olanzapine", olz_pbpk28_params()) { ok = false }
+    if !gate("quetiapine", qtp_pbpk28_params()) { ok = false }
+    if !gate("lithium", li_pbpk28_params()) { ok = false }
+    if !gate("tacrolimus", tac_pbpk28_params()) { ok = false }
+    if !gate("everolimus", evr_pbpk28_params()) { ok = false }
+    if !gate("vancomycin", vnc_pbpk28_params()) { ok = false }
+    if !gate("tirzepatide", tirz_pbpk28_params()) { ok = false }
+    if !gate("risperidone_parent", rsp_parent_params()) { ok = false }
+    if !gate("risperidone_9OH", rsp_oh9_params()) { ok = false }
+    if !gate("rapamycin", pbpk28_params_rapamycin()) { ok = false }
+    if !gate("venlafaxine_parent", pbpk28_params_venlafaxine_parent()) { ok = false }
+    if !gate("venlafaxine_ODV", pbpk28_params_venlafaxine_odv()) { ok = false }
+    if !gate("semaglutide", pbpk28_params_semaglutide()) { ok = false }
+    if ok {
+        println("PBPK28_LIBRARY_MOMENTS_PASS")
+        return 0
+    }
+    println("PBPK28_LIBRARY_MOMENTS_FAIL")
+    return 1
+}
