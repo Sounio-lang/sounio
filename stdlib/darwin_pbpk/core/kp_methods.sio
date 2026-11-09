@@ -596,7 +596,7 @@ pub fn kpm_kb_uc(k: KpBudget) -> f64 { return k.budget.combined_std_uncert }
 pub fn kpm_kb_percent(k: KpBudget, idx: i64) -> f64 { return budget64_percent(&k.budget, idx) }
 pub fn kpm_kb_dominant(k: KpBudget) -> i64 { return budget64_dominant_idx(&k.budget) }
 
-pub fn kpm_rr_source_budget(d: KpInputs, logp_lo: f64, logp_hi: f64) -> KpBudget with Mut, Div, Panic {
+pub fn kpm_rr_budget_ph(d: KpInputs, logp_lo: f64, logp_hi: f64, ph_lo: f64, ph_hi: f64) -> KpBudget with Mut, Div, Panic {
     let strong = if d.is_base { d.pka >= 7.0 } else { false }
     if !strong {
         return KpBudget { budget: budget64_new(0.0, 0.95), valid: false, refusal: 1 }
@@ -613,7 +613,7 @@ pub fn kpm_rr_source_budget(d: KpInputs, logp_lo: f64, logp_hi: f64) -> KpBudget
     let apr = 0.5 * (3.7563 + 4.2456)
     let nl  = 0.5 * (0.00868 + 0.02200)
     let np  = 0.5 * (0.00780 + 0.00934)
-    let ph  = 0.5 * (6.81 + 7.00)
+    let ph  = 0.5 * (ph_lo + ph_hi)
     let w   = 0.5 * (0.666 + 0.679)
     let b0 = kpm_with_logp(d, lp)
 
@@ -636,10 +636,53 @@ pub fn kpm_rr_source_budget(d: KpInputs, logp_lo: f64, logp_hi: f64) -> KpBudget
     budget64_add_type_b(&!b, 1, apr, (4.2456 - 3.7563)   * 0.5 / r3, c_ap)
     budget64_add_type_b(&!b, 2, nl,  (0.02200 - 0.00868) * 0.5 / r3, c_nl)
     budget64_add_type_b(&!b, 3, np,  (0.00934 - 0.00780) * 0.5 / r3, c_np)
-    budget64_add_type_b(&!b, 4, ph,  (7.00 - 6.81)       * 0.5 / r3, c_ph)
+    budget64_add_type_b(&!b, 4, ph,  (ph_hi - ph_lo)     * 0.5 / r3, c_ph)
     budget64_add_type_b(&!b, 5, w,   (0.679 - 0.666)     * 0.5 / r3, c_w)
     budget64_finalize(&!b)
     return KpBudget { budget: b, valid: true, refusal: 0 }
+}
+
+// The source budget: the cellular pH spans the three published conventions
+// (Schmitt 6.81, httk 6.97, Rodgers-Rowland 7.00).
+pub fn kpm_rr_source_budget(d: KpInputs, logp_lo: f64, logp_hi: f64) -> KpBudget with Mut, Div, Panic {
+    return kpm_rr_budget_ph(d, logp_lo, logp_hi, 6.81, 7.00)
+}
+
+// THE CONVENTIONS VERSUS THE MEASUREMENT.  Human resting skeletal-muscle
+// intracellular pH is measured in vivo by 31P-MRS (inorganic-phosphate shift):
+//   Zochodne et al. 1988, Magn Reson Med 7:373, 10.1002/mrm.1910070402
+//       healthy controls, forearm flexor          7.05 +/- 0.04 (SD)
+//   Jeneson 2004, FASEB J, 10.1096/fj.03-0762fje  7.08
+//   Evans et al. 1997, AJRCCM 155:615, 10.1164/ajrccm.155.2.9032203
+//       healthy volunteers, quadriceps, n = 8     7.12 +/- 0.01
+// Measured range [7.05, 7.12] lies ENTIRELY above the convention range
+// [6.81, 7.00].  The conventions are therefore not only a spread but a
+// displacement.  measured_ph.cpp, predictions written first
+// (PREDICTIONS_measured_ph.txt):
+//                     d ln Kpu   Kpu x   |d|/u_c   u_c meas   pH share meas
+//   venlafaxine       -0.3985    0.671   3.21      0.0493     80.9%
+//   ODV               -0.3919    0.676   3.19      0.0494     77.5%
+//   clozapine         -0.3605    0.697   3.03      0.0588     44.7%
+//   haloperidol repo  -0.3158    0.729   2.80      0.0724     21.6%
+// The displacement is about three times the whole sourced u_c for every drug.
+// With the measured range in place, pH keeps a majority for venlafaxine and
+// ODV; for clozapine it is still the largest entry but no longer a majority
+// (pH 44.7, neutral lipid 30.2, [AP-] 25.1%); for haloperidol neutral lipid
+// takes over (66.6%, pH 21.6%).
+//
+// WHAT THIS DOES NOT SAY.  It does not say the measured pH is the right input
+// for Rodgers-Rowland.  The model's pH 7.0 was the value under which its
+// equations were tested against rat Kp; replacing it is a change of model, not
+// a correction of a datum, and whether it improves prediction is an empirical
+// question about observed human muscle Kp.  31P-MRS pH also carries a
+// calibration systematic (the Pi chemical-shift equation) of a few hundredths
+// of a unit, which these figures exclude.
+pub fn kpm_rr_ph_shift(d: KpInputs, ph_from: f64, ph_to: f64) -> f64 with Mut, Div, Panic {
+    let apr = 0.5 * (3.7563 + 4.2456)
+    let nl  = 0.5 * (0.00868 + 0.02200)
+    let np  = 0.5 * (0.00780 + 0.00934)
+    let w   = 0.5 * (0.666 + 0.679)
+    return kpm_lnk_exp(d, ph_to, nl, np, apr, w) - kpm_lnk_exp(d, ph_from, nl, np, apr, w)
 }
 
 // Declared domain: Rodgers-Rowland was derived and validated for small
@@ -2131,6 +2174,42 @@ fn main() -> i32 with IO, Mut, Div, Panic {
         }
     } else {
         print("T28 FAIL: orcamentos que bateram com a referencia = "); println(t28); fails = fails + 1
+    }
+
+    // T29 -- THE CONVENTIONS ARE DISPLACED, NOT ONLY SPREAD.  Measured human
+    // muscle pHi [7.05, 7.12] (31P-MRS) replaces the convention range [6.81,
+    // 7.00].  References from measured_ph.cpp:
+    //   venlafaxine  d ln Kpu -0.398486  u_c meas 0.049320  pH 80.8813%
+    //   clozapine    d ln Kpu -0.360513  u_c meas 0.058808  pH 44.7205%
+    //   haloperidol  neutral lipid dominant, 66.559610%
+    // Venlafaxine keeps a pH majority; clozapine keeps pH as the largest entry
+    // without a majority; haloperidol passes dominance to neutral lipid.
+    let t29_v = KpInputs { log_p: 2.71, log_ma: 0.0, has_ma: false, pka: 9.40, is_base: true, fu_p: 0.73, rb: 1.00, mw: 277.40 }
+    let t29_c = KpInputs { log_p: 3.23, log_ma: 2.954, has_ma: true, pka: 7.60, is_base: true, fu_p: 0.05, rb: 0.87, mw: 326.82 }
+    let mv = kpm_rr_budget_ph(t29_v, 2.62, 2.80, 7.05, 7.12)
+    let mc = kpm_rr_budget_ph(t29_c, 3.23, 3.23, 7.05, 7.12)
+    let sv = kpm_rr_ph_shift(t29_v, 6.905, 7.085)
+    let sc = kpm_rr_ph_shift(t29_c, 6.905, 7.085)
+    let mh = kpm_rr_budget_ph(KpInputs { log_p: 4.294, log_ma: 3.723, has_ma: true, pka: 8.66, is_base: true, fu_p: 0.10, rb: 1.08, mw: 375.86 }, 4.288, 4.30, 7.05, 7.12)
+    print("  venlafaxina d lnKpu = "); println(sv)
+    print("  venlafaxina u_c medido = "); println(kpm_kb_uc(mv))
+    print("  clozapina pH % medido = "); println(kpm_kb_percent(mc, 4))
+    var t29 = 0
+    if sv > -0.398506 { if sv < -0.398466 { t29 = t29 + 1 } }
+    if sc > -0.360533 { if sc < -0.360493 { t29 = t29 + 1 } }
+    if kpm_kb_valid(mv) { if kpm_kb_uc(mv) > 0.049300 { if kpm_kb_uc(mv) < 0.049340 {
+        if kpm_kb_percent(mv, 4) > 80.8811 { if kpm_kb_percent(mv, 4) < 80.8815 { if kpm_kb_dominant(mv) == 4 { t29 = t29 + 1 } } } } } }
+    if kpm_kb_valid(mc) { if kpm_kb_percent(mc, 4) > 44.7203 { if kpm_kb_percent(mc, 4) < 44.7207 { if kpm_kb_dominant(mc) == 4 { t29 = t29 + 1 } } } }
+    if kpm_kb_valid(mh) { if kpm_kb_dominant(mh) == 2 { if kpm_kb_percent(mh, 2) > 66.5594 { if kpm_kb_percent(mh, 2) < 66.5598 { t29 = t29 + 1 } } } }
+    let vconv = kpm_rr_source_budget(t29_v, 2.62, 2.80)
+    var shift_big = false
+    if 0.0 - sv > kpm_kb_uc(vconv) { shift_big = true }
+    if t29 == 5 {
+        if shift_big {
+            println("T29 PASS: pH medido desloca ln Kpu ~3x o u_c da convencao; lipidio neutro passa a dominar no haloperidol")
+        } else { println("T29 FAIL: deslocamento menor que u_c"); fails = fails + 1 }
+    } else {
+        print("T29 FAIL: verificacoes que bateram = "); println(t29); fails = fails + 1
     }
     if fails == 0 {
         println("PASS")
