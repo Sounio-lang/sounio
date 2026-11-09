@@ -1459,6 +1459,12 @@ fn nc_heap_arena_bytes() -> i64 {
     nc_heap_reserve_max() - runtime_context_size() - native_v2_handle_table_bytes() - native_v2_region_stack_bytes()
 }
 
+// Windows and macOS keep their fixed 2 GiB reservation; their heap_limit is
+// heap_base plus this, never the Linux upper bound above.
+fn nc_heap_arena_bytes_fixed_2gib() -> i64 {
+    2147483648 - runtime_context_size() - native_v2_handle_table_bytes() - native_v2_region_stack_bytes()
+}
+
 // The Box pool keeps its own fixed-size lazy mapping (unchanged).
 fn nc_box_heap_arena_bytes() -> i64 {
     2147483648 - runtime_context_size() - native_v2_handle_table_bytes() - native_v2_region_stack_bytes()
@@ -15257,14 +15263,9 @@ pub fn emit_entry_trampoline_into(nc: &! NativeCompiler, main_fn_index: i64) wit
 
     (*nc).code = emit_mov_r14_rsp((*nc).code)
 
-    (*nc).code = emit_mov_rax_imm((*nc).code, 9)
-    (*nc).code = emit_mov_rdi_imm((*nc).code, 0)
-    (*nc).code = emit_mov_reg_imm((*nc).code, 6, 2147483648)
-    (*nc).code = emit_mov_reg_imm((*nc).code, 2, 3)
-    (*nc).code = emit_mov_r10_imm32((*nc).code, 34)
-    (*nc).code = emit_mov_r8_imm32((*nc).code, -1)
-    (*nc).code = emit_mov_r9_imm32((*nc).code, 0)
-    (*nc).code = emit_syscall((*nc).code)
+    // Same reserve-then-commit mapping as emit_entry_trampoline_mmap_into;
+    // it also writes heap_limit from the length actually mapped.
+    emit_entry_heap_reserve_into(nc)
 
     let ctx_slot_disp = (*nc).code.len + 3
     (*nc).code = emit_mov_rip_disp32_rax((*nc).code, 0)
@@ -15287,10 +15288,7 @@ pub fn emit_entry_trampoline_into(nc: &! NativeCompiler, main_fn_index: i64) wit
     emit_store_rax_runtime_context_field_into(nc, runtime_context_field_heap_base())
     emit_store_rax_runtime_context_field_into(nc, runtime_context_field_heap_cursor())
 
-    emit_load_runtime_context_field_rax_into(nc, runtime_context_field_heap_base())
-    (*nc).code = emit_mov_reg_imm((*nc).code, 1, nc_heap_arena_bytes())
-    (*nc).code = emit_add_reg_reg((*nc).code, 0, 1)
-    emit_store_rax_runtime_context_field_into(nc, runtime_context_field_heap_limit())
+    // heap_limit: written by emit_entry_heap_reserve_into.
 
     (*nc).code = emit_mov_rax_mem_r14((*nc).code)
     (*nc).code = emit_sub_rax_imm8((*nc).code, 1)
@@ -15436,7 +15434,7 @@ fn emit_entry_trampoline_windows_x86(nc: NativeCompiler, main_fn_index: i64) -> 
 
     // heap_limit = heap_base + (alloc_size - runtime_context_size - handle_table_bytes)
     c = emit_load_runtime_context_field_rax(c, runtime_context_field_heap_base())
-    c.code = emit_mov_reg_imm(c.code, 1, nc_heap_arena_bytes())
+    c.code = emit_mov_reg_imm(c.code, 1, nc_heap_arena_bytes_fixed_2gib())
     c.code = emit_add_reg_reg(c.code, 0, 1)
     c = emit_store_rax_runtime_context_field(c, runtime_context_field_heap_limit())
 
@@ -15556,7 +15554,7 @@ fn emit_entry_trampoline_macos_x86(nc: NativeCompiler, main_fn_index: i64) -> Na
     c = emit_store_rax_runtime_context_field(c, runtime_context_field_heap_base())
     c = emit_store_rax_runtime_context_field(c, runtime_context_field_heap_cursor())
     c = emit_load_runtime_context_field_rax(c, runtime_context_field_heap_base())
-    c.code = emit_mov_reg_imm(c.code, 1, nc_heap_arena_bytes())
+    c.code = emit_mov_reg_imm(c.code, 1, nc_heap_arena_bytes_fixed_2gib())
     c.code = emit_add_reg_reg(c.code, 0, 1)
     c = emit_store_rax_runtime_context_field(c, runtime_context_field_heap_limit())
     c.code = emit_mov_rax_mem_r14(c.code)
