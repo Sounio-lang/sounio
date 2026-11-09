@@ -1432,10 +1432,35 @@ fn name_ref_is_print(n: &Name) -> bool with Mut, Panic, Div {
     true
 }
 
-// Bytes the bump heap may use: the 2 GiB mapping minus the runtime context,
-// the handle table, and the region record stack carved off its top
-// (native/gc.sio, "Region reclamation").
+// Runtime heap mapping (Linux): reserve, then let the kernel commit on touch.
+//
+// The entry trampoline maps [runtime context | handle table | bump heap |
+// region record stack] as ONE anonymous MAP_NORESERVE mapping. Its length is
+// decided at program start, not at compile time:
+//   want  = min(NC_HEAP_RESERVE_MAX, (totalram + totalswap) * mem_unit)   (sysinfo)
+//   want  = max(want, NC_HEAP_RESERVE_MIN)
+//   then mmap(want); on refusal (RLIMIT_AS, strict overcommit) halve and retry
+//   down to NC_HEAP_RESERVE_FLOOR; below that, exit 184.
+// Physical pages are committed only when the bump cursor touches them, so a
+// large reservation costs no RSS. The arena is full when the program has used
+// what this machine can back (RAM + swap), not at an arbitrary 2 GiB, and no
+// environment variable sizes it (ADR-028 / ADR-026: size belongs to the
+// runtime and to phases, not to a process knob). heap_limit is written from
+// the length actually mapped. The prior art is the reserve/commit split of
+// V8's virtual-memory cages, Go's heap arenas and .NET GC regions.
+fn nc_heap_reserve_max() -> i64 { 1099511627776 }      // 1 TiB of address space
+fn nc_heap_reserve_min() -> i64 { 2147483648 }         // never below the old 2 GiB
+fn nc_heap_reserve_floor() -> i64 { 268435456 }        // 256 MiB: give up below this
+
+// Upper bound on bump-heap bytes (largest possible mapping minus the fixed
+// carve-outs). Used only to reject impossible single allocations at compile
+// time; the runtime check against heap_limit decides the real wall.
 fn nc_heap_arena_bytes() -> i64 {
+    nc_heap_reserve_max() - runtime_context_size() - native_v2_handle_table_bytes() - native_v2_region_stack_bytes()
+}
+
+// The Box pool keeps its own fixed-size lazy mapping (unchanged).
+fn nc_box_heap_arena_bytes() -> i64 {
     2147483648 - runtime_context_size() - native_v2_handle_table_bytes() - native_v2_region_stack_bytes()
 }
 
@@ -5257,7 +5282,8 @@ fn nc_core_intern_alloc_fail_explain_into(nc: &! NativeCompiler, fail_code: i64)
             return
         }
         let off = native_v2_rodata_len_into(nc)
-        nc_alloc_diag_append_ascii_into(nc, "  the generated program's runtime heap is one fixed ~2 GiB bump arena that is\n")
+        nc_alloc_diag_append_ascii_into(nc, "  the generated program's runtime heap is one bump arena, reserved at start up\n")
+        nc_alloc_diag_append_ascii_into(nc, "  to this machine's RAM + swap (never below 2 GiB), whose space is\n")
         nc_alloc_diag_append_ascii_into(nc, "  never reclaimed: every aggregate value created or copied by value (struct\n")
         nc_alloc_diag_append_ascii_into(nc, "  literal, by-value array/struct argument or return, x = matnm_set(x, ...))\n")
         nc_alloc_diag_append_ascii_into(nc, "  takes fresh arena space for the life of the process. A loop that does so\n")
@@ -11225,7 +11251,7 @@ fn nc_core_emit_box_alloc_into(nc: &! NativeCompiler, dst: i64, type_tag: i64, e
     nc_emit_jnz_rel32(nc)
     nc_emit_mov_rax_imm(nc, 9)
     nc_emit_mov_rdi_imm(nc, 0)
-    nc_emit_mov_reg_imm(nc, 6, nc_heap_arena_bytes())
+    nc_emit_mov_reg_imm(nc, 6, nc_box_heap_arena_bytes())
     nc_emit_mov_reg_imm(nc, 2, 3)
     nc_emit_mov_r10_imm32(nc, 34)
     nc_emit_mov_r8_imm32(nc, -1)
@@ -11242,7 +11268,7 @@ fn nc_core_emit_box_alloc_into(nc: &! NativeCompiler, dst: i64, type_tag: i64, e
     nc_emit_mov_reg_reg(nc, 0, 2)
     emit_store_rax_runtime_context_field_into(nc, runtime_context_field_box_heap_base())
     emit_store_rax_runtime_context_field_into(nc, runtime_context_field_box_heap_cursor())
-    nc_emit_mov_reg_imm(nc, 1, nc_heap_arena_bytes())
+    nc_emit_mov_reg_imm(nc, 1, nc_box_heap_arena_bytes())
     nc_emit_add_reg_reg(nc, 0, 1)
     emit_store_rax_runtime_context_field_into(nc, runtime_context_field_box_heap_limit())
     nc_patch_u32_le(nc, initialized + 2, (*nc).code.len - (initialized + 6))
@@ -14879,18 +14905,115 @@ fn emit_entry_trampoline_mmap_into(nc: &! NativeCompiler) with Mut, Panic, Div {
     (*nc).entry_offset = (*nc).code.len
 
     nc_emit_mov_r14_rsp(nc)
-    nc_emit_mov_rax_imm(nc, 9)
-    nc_emit_mov_rdi_imm(nc, 0)
-    nc_emit_mov_reg_imm(nc, 6, 2147483648)
-    nc_emit_mov_reg_imm(nc, 2, 3)
-    nc_emit_mov_r10_imm32(nc, 34)
-    nc_emit_mov_r8_imm32(nc, -1)
-    nc_emit_mov_r9_imm32(nc, 0)
-    nc_emit_syscall(nc)
+    emit_entry_heap_reserve_into(nc)
 
     let ctx_slot_disp = (*nc).code.len + 3
     nc_emit_mov_rip_disp32_rax(nc, 0)
     nc_add_data_section_reloc(nc, ctx_slot_disp, (*nc).runtime_context_slot_offset)
+}
+
+// See nc_heap_reserve_max. On exit: rax = mapping base (runtime context),
+// rsi = mapping length, and heap_limit is already stored in the context.
+// Clobbers rcx, rdx, rdi, r8, r9, r10, r11.
+fn emit_entry_heap_reserve_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    // sysinfo(&buf) into a 128-byte stack buffer.
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x81)
+    nc_emit_byte(nc, 0xec)
+    nc_emit_u32_le(nc, 128)                                                         // sub rsp, 128 (no probe: rbp is not a frame yet)
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x89)
+    nc_emit_byte(nc, 0xe7)  // mov rdi, rsp
+    nc_emit_mov_rax_imm(nc, 99)
+    nc_emit_syscall(nc)
+    // rsi = (totalram + totalswap) * mem_unit
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x8b)
+    nc_emit_byte(nc, 0x74)
+    nc_emit_byte(nc, 0x24)
+    nc_emit_byte(nc, 0x20)  // mov rsi, [rsp+32]
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x03)
+    nc_emit_byte(nc, 0x74)
+    nc_emit_byte(nc, 0x24)
+    nc_emit_byte(nc, 0x40)  // add rsi, [rsp+64]
+    nc_emit_byte(nc, 0x8b)
+    nc_emit_byte(nc, 0x4c)
+    nc_emit_byte(nc, 0x24)
+    nc_emit_byte(nc, 0x68)  // mov ecx, [rsp+104]
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x0f)
+    nc_emit_byte(nc, 0xaf)
+    nc_emit_byte(nc, 0xf1)  // imul rsi, rcx
+    nc_emit_add_rsp_imm32(nc, 128)
+    // rsi = min(rsi, MAX); rsi = max(rsi, MIN)
+    nc_emit_mov_reg_imm(nc, 2, nc_heap_reserve_max())
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x39)
+    nc_emit_byte(nc, 0xd6)  // cmp rsi, rdx
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x0f)
+    nc_emit_byte(nc, 0x47)
+    nc_emit_byte(nc, 0xf2)  // cmova rsi, rdx
+    nc_emit_mov_reg_imm(nc, 2, nc_heap_reserve_min())
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x39)
+    nc_emit_byte(nc, 0xd6)  // cmp rsi, rdx
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x0f)
+    nc_emit_byte(nc, 0x42)
+    nc_emit_byte(nc, 0xf2)  // cmovb rsi, rdx
+
+    // mmap(0, rsi, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE, -1, 0)
+    let retry = (*nc).code.len
+    nc_emit_mov_rax_imm(nc, 9)
+    nc_emit_mov_rdi_imm(nc, 0)
+    nc_emit_mov_reg_imm(nc, 2, 3)
+    nc_emit_mov_r10_imm32(nc, 16418)
+    nc_emit_mov_r8_imm32(nc, -1)
+    nc_emit_mov_r9_imm32(nc, 0)
+    nc_emit_syscall(nc)
+    // cmp rax, -4095 ; jb mapped (unsigned: success)
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x3d)
+    nc_emit_u32_le(nc, -4095)
+    let jb_mapped = (*nc).code.len
+    nc_emit_byte(nc, 0x0f)
+    nc_emit_byte(nc, 0x82)
+    nc_emit_u32_le(nc, 0)
+    // refused: halve and retry while rsi >= FLOOR
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0xd1)
+    nc_emit_byte(nc, 0xee)  // shr rsi, 1
+    nc_emit_mov_reg_imm(nc, 2, nc_heap_reserve_floor())
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x39)
+    nc_emit_byte(nc, 0xd6)  // cmp rsi, rdx
+    let jae_retry = (*nc).code.len
+    nc_emit_byte(nc, 0x0f)
+    nc_emit_byte(nc, 0x83)
+    nc_emit_u32_le(nc, 0)
+    nc_patch_u32_le(nc, jae_retry + 2, retry - (jae_retry + 6))
+    // no mapping at all: exit(184)
+    nc_emit_mov_rax_imm(nc, 60)
+    nc_emit_mov_rdi_imm(nc, 184)
+    nc_emit_syscall(nc)
+    nc_emit_ud2(nc)
+
+    nc_patch_u32_le(nc, jb_mapped + 2, (*nc).code.len - (jb_mapped + 6))
+    // heap_limit = base + length - region_stack_bytes, stored at [rax + heap_limit]
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x8d)
+    nc_emit_byte(nc, 0x0c)
+    nc_emit_byte(nc, 0x30)  // lea rcx, [rax + rsi]
+    nc_emit_mov_reg_imm(nc, 2, native_v2_region_stack_bytes())
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x29)
+    nc_emit_byte(nc, 0xd1)  // sub rcx, rdx
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x89)
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, runtime_context_field_heap_limit())  // mov [rax + disp8], rcx
 }
 
 fn emit_entry_trampoline_context_into(nc: &! NativeCompiler) with Mut, Panic, Div {
@@ -14913,11 +15036,8 @@ fn emit_entry_trampoline_context_into(nc: &! NativeCompiler) with Mut, Panic, Di
 }
 
 fn emit_entry_trampoline_heap_args_into(nc: &! NativeCompiler) with Mut, Panic, Div {
-    emit_load_runtime_context_field_rax_into(nc, runtime_context_field_heap_base())
-    nc_emit_mov_reg_imm(nc, 1, nc_heap_arena_bytes())
-    nc_emit_add_reg_reg(nc, 0, 1)
-    emit_store_rax_runtime_context_field_into(nc, runtime_context_field_heap_limit())
-
+    // heap_limit was written by emit_entry_heap_reserve_into from the length
+    // actually mapped.
     nc_emit_mov_rax_mem_r14(nc)
     nc_emit_sub_rax_imm8(nc, 1)
     emit_store_rax_runtime_context_field_into(nc, runtime_context_field_argc())
