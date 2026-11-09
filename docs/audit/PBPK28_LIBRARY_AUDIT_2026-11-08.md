@@ -36,12 +36,22 @@ are left as they are here.
 
 `tests/run-pass/darwin_pbpk28_library_invariants.sio` gates, for all 18 sets:
 v_ref > 0, q > 0 and ps > 0 for every exchanging organ, kp > 0, vasc_frac in
-[0, 1], and V_ss finite and above V_b. **All 18 pass on Madaros and lean_single.**
-The class of defect found in the sedation-weaning morphine template (lung
-PS = 0, an unreachable tissue layer) does not occur anywhere in the library. The
-gate discriminates: injecting `ps[lung] = 0` into the morphine set fails I2 and
-moves V_ss from 157.515 to 151.833 L, exactly the figure the morphine header
-documents for that defect.
+[0, 1], V_ss above V_b, and **finiteness of every checked value and of V_ss**
+(`math::pure::is_finite`, which rejects NaN and +-Inf; the sign and range tests
+alone do not, because NaN compares false against every bound and +Inf passes any
+`> 0`). **All 18 pass on Madaros and lean_single.** The class of defect found in
+the sedation-weaning morphine template (lung PS = 0, an unreachable tissue layer)
+does not occur anywhere in the library.
+
+The gate carries its own negative controls, so discrimination does not depend on
+a manual mutant: lung PS = 0, NaN in kp / ps / q / vasc_frac / v_ref / cl_central,
+and +Inf in kp and v_ref, each injected into the finite morphine set, must be
+rejected, and the finite baseline must still pass (9 rejections, both engines).
+The first version of the gate lacked the finiteness checks and printed
+`PBPK28_LIBRARY_INVARIANTS_PASS` for ps[lung] = NaN, kp[adipose] = +Inf
+(V_ss = inf) and q[liver] = NaN. That is what the review of this PR found, and the
+controls above are its regression test. The lung PS = 0 control moves V_ss from
+157.515 to 151.833 L, the figure the morphine header documents for that defect.
 
 ## 3. Distribution volume against the target each module declares
 
@@ -49,26 +59,36 @@ V_ss = V_b + sum V_i (f_v + (1 - f_v) Kp) over reachable layers. "Declared
 target" is the number in the module's own header, **as cited by the repository,
 not verified here**.
 
-| Set | V_ss (L) | Declared target (L) | Deviation | Status |
-|---|---|---|---|---|
-| clozapine | 408.89 | ~400 | +2.2 % | within 10 % |
-| olanzapine | 665.63 | ~700 | -4.9 % | within 10 % |
-| aripiprazole | 386.90 | 404 (label) | -4.2 % | within 10 % |
-| lithium | 44.02 | 45 | -2.2 % | within 10 % |
-| vancomycin | 46.13 | 49 (Vc 0.40 + Vp 0.30 L/kg) | -5.9 % | within 10 % |
-| risperidone parent | 112.65 | ~115 | -2.0 % | within 10 % |
-| risperidone 9-OH | 452.10 | 487 (paliperidone label) | -7.2 % | within 10 % |
-| quetiapine | 326.31 | ~700 | -53.4 % | declared: adipose capped, full-Vd variant is follow-up |
-| everolimus | 48.67 | 110 (label) | -55.8 % | declared: Kp copied from rapamycin, pending SIO-550 |
-| tacrolimus | 253.79 | ~1300 (Staatz 2004, as cited) | -80.5 % | declared: `tacrolimus_fullvd_params` exists |
-| rapamycin | 48.67 | 840 (12 L/kg, Kahan 2001, as cited) | -94.2 % | declared: full-Vd parameters exist |
-| venlafaxine parent | 107.81 | none declared | n/a | **no target in the repository** |
-| semaglutide / tirzepatide | 21.57 / 21.57 | none declared | n/a | **no target; identical arrays** |
+| # | Set | V_ss (L) | Declared target (L) | Deviation | Status |
+|---|---|---|---|---|---|
+| 1 | clozapine | 408.89 | ~400 | +2.2 % | within 10 % |
+| 2 | olanzapine | 665.63 | ~700 | -4.9 % | within 10 % |
+| 3 | quetiapine | 326.31 | ~700 | -53.4 % | declared: adipose capped, full-Vd variant is follow-up |
+| 4 | aripiprazole | 386.90 | 404 (label) | -4.2 % | within 10 % |
+| 5 | lithium | 44.02 | 45 | -2.2 % | within 10 % |
+| 6 | tacrolimus | 253.79 | ~1300 (Staatz 2004, as cited) | -80.5 % | declared: `tacrolimus_fullvd_params` exists |
+| 7 | everolimus | 48.67 | 110 (label) | -55.8 % | declared: Kp copied from rapamycin, pending SIO-550 |
+| 8 | vancomycin | 46.13 | 49 (Vc 0.40 + Vp 0.30 L/kg) | -5.9 % | within 10 % |
+| 9 | tirzepatide | 21.57 | none declared | n/a | no V_ss target; Kp copied from semaglutide |
+| 10 | risperidone parent | 112.65 | ~115 | -2.0 % | within 10 % |
+| 11 | risperidone 9-OH | 452.10 | 487 (paliperidone label) | -7.2 % | within 10 % |
+| 12 | rapamycin | 48.67 | 840 (12 L/kg, Kahan 2001, as cited) | -94.2 % | declared: full-Vd parameters exist |
+| 13 | venlafaxine parent | 107.81 | none declared | n/a | no V_ss target in the repository |
+| 14 | venlafaxine ODV | 86.43 | none declared | n/a | no V_ss target in the repository |
+| 15 | semaglutide (core) | 21.57 | none declared | n/a | no V_ss target |
+| 16 | semaglutide (drug module) | 21.57 | none declared | n/a | identical to row 15 (`semaglutide_drugs_consistency`) |
+| 17 | morphine | 157.52 | 231 (Mazoit 2007, as cited by the module, unverified); 136 (Bouwmeester 2004, verified) | -31.8 % / +15.8 % | declared tension (morphine header, limitation 1) |
+| 18 | fentanyl | 510.18 | none declared for V_ss | n/a | declared tension is the terminal t1/2: 21.0 h simulated against 219 min (McClain & Hug 1980, verified) |
+
+Totals reconcile with the 18 sets the gate enumerates: **7 within 10 %** (rows
+1, 2, 4, 5, 8, 10, 11), **5 far from a declared target, with the tension declared**
+(rows 3, 6, 7, 12, 17), **6 without a V_ss target** (rows 9, 13, 14, 15, 16, 18);
+7 + 5 + 6 = 18.
 
 Observations, all measured:
 
-- Seven sets sit within 10 % of the target their own header declares; four are
-  far from it and say so in the header; three have no target at all.
+- Seven sets sit within 10 % of the target their own header declares; five are
+  far from it and say so in their headers; six have no V_ss target at all.
 - Rapamycin and everolimus have the same V_ss to six digits (48.671031 L) and
   semaglutide and tirzepatide the same (21.569860 L): the Kp vectors are copies, and
   the copies are declared in the module headers ("Kp/PS mirror the rapamycin
