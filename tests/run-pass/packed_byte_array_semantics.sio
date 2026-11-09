@@ -1,0 +1,109 @@
+//@ run-pass
+//@ expect-stdout: PACKED_BYTES_OK
+// [i8; N] and [u8; N] arrays declared through a struct field or an annotated
+// `let` keep their element semantics on every path: index read and write,
+// signed and unsigned extension, copies, by-value and by-reference passing,
+// mutation through &! and str_from_bytes. Madaros allocates these
+// arrays with one byte per element (IR_ALLOC_PACKED_I8 / _U8, #2966); this file
+// pins that the layout change is invisible to the program. lean_single runs it
+// with its own layout.
+
+struct Nm {
+    buf: [i8; 384],
+    len: i64,
+}
+
+struct Px {
+    raw: [u8; 16],
+    tag: i64,
+}
+
+fn nm_from(s: string) -> Nm with Mut, Panic, Div {
+    let n = str_len(s)
+    var out = Nm { buf: [0; 384], len: n }
+    var i: i64 = 0
+    while i < n && i < 384 {
+        out.buf[i as usize] = str_char_at(s, i) as i8
+        i = i + 1
+    }
+    out
+}
+
+fn nm_sum(n: Nm) -> i64 with Mut, Panic, Div {
+    var acc: i64 = 0
+    var i: i64 = 0
+    while i < n.len {
+        acc = acc + n.buf[i as usize] as i64
+        i = i + 1
+    }
+    acc
+}
+
+fn nm_bump(n: &!Nm) with Mut, Panic, Div {
+    (*n).buf[0] = (*n).buf[0] + 1 as i8
+}
+
+fn bytes_sum(b: &[i8; 256], n: i64) -> i64 with Mut, Panic, Div {
+    var acc: i64 = 0
+    var i: i64 = 0
+    while i < n {
+        acc = acc + (*b)[i as usize] as i64
+        i = i + 1
+    }
+    acc
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div, Alloc {
+    var bad: i64 = 0
+
+    // 1. struct-field [i8; 384]: write, read, str_from_bytes
+    let a = nm_from("Sfakia")
+    if str_from_bytes(a.buf, a.len) != "Sfakia" { bad = bad + 1 }
+    if a.buf[0] as i64 != 83 { bad = bad + 2 }
+    if a.buf[383] as i64 != 0 { bad = bad + 4 }
+
+    // 2. signed values: -1 and -128 read back negative
+    var b = Nm { buf: [0; 384], len: 3 }
+    b.buf[0] = 0 - 1 as i8
+    b.buf[1] = 0 - 128 as i8
+    b.buf[2] = 127 as i8
+    if b.buf[0] as i64 != 0 - 1 { bad = bad + 8 }
+    if b.buf[1] as i64 != 0 - 128 { bad = bad + 16 }
+    if nm_sum(b) != 0 - 1 - 128 + 127 { bad = bad + 32 }
+
+    // 3. unsigned field [u8; 16]: 255 reads back as 255
+    var p = Px { raw: [0; 16], tag: 9 }
+    p.raw[15] = 255 as u8
+    p.raw[0] = 1 as u8
+    if p.raw[15] as i64 != 255 { bad = bad + 64 }
+    if p.raw[0] as i64 + p.raw[15] as i64 != 256 { bad = bad + 128 }
+
+    // 4. copy semantics: mutating the original leaves the copy alone
+    var c = nm_from("ab")
+    let d = c
+    c.buf[0] = 120 as i8
+    if d.buf[0] as i64 != 97 { bad = bad + 256 }
+    if c.buf[0] as i64 != 120 { bad = bad + 512 }
+
+    // 5. mutation through &!
+    var e = nm_from("A")
+    nm_bump(&!e)
+    if e.buf[0] as i64 != 66 { bad = bad + 1024 }
+
+    // 6. annotated local [i8; 256], passed by reference
+    var t: [i8; 256] = [0; 256]
+    var i: i64 = 0
+    while i < 10 {
+        t[i as usize] = (i * 3) as i8
+        i = i + 1
+    }
+    if bytes_sum(&t, 10) != 135 { bad = bad + 2048 }
+    if t[255] as i64 != 0 { bad = bad + 4096 }
+
+    if bad != 0 {
+        println(bad)
+        return 1
+    }
+    println("PACKED_BYTES_OK")
+    return 0
+}
