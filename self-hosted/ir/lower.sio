@@ -4131,10 +4131,7 @@ fn lowerer_seed_metadata_from_summary(lo_in: Lowerer, summary: &IrProgramSummary
 fn lowerer_new_from_program_summary(summary: &IrProgramSummary, epistemic: &IrEpistemicSection) -> Lowerer with Alloc, Mut, Panic, Div, IO {
     lower_hard_error_reset()
     // Sequential peels for large clones (same rationale as lowerer_new).
-    var module_box: Box<IrModule> = lowerer_box_clone_module(&(*(*summary).module))
-    // Match seed/owned body path: rebuild string table during body lower.
-    (*module_box).string_count = 0
-    (*module_box).epistemic = (*epistemic)
+    let module_box: Box<IrModule> = lowerer_box_clone_module(&(*(*summary).module))
     let epistemic_contests = lowerer_box_empty_epistemic_contests()
     let current_func = lowerer_box_empty_function()
     let locals = lowerer_box_empty_locals()
@@ -4183,6 +4180,11 @@ fn lowerer_new_from_program_summary(summary: &IrProgramSummary, epistemic: &IrEp
         fo_xfer_kind: [0; 64],
         fo_xfer_lit: [0.0; 64],
     }
+    // Match seed/owned body path: rebuild string table during body lower.
+    // Through lo.module (a typed Lowerer field): the store through the bare
+    // module_box local missed the layout table (Stage 0 reason 10).
+    (*lo.module).string_count = 0
+    (*lo.module).epistemic = (*epistemic)
     lo.epistemic_contests = lower_epistemic_contest_index_from_ref(epistemic)
     if lower_live_diag_enabled() {
         print("CONTEST_IR_INDEX_BIND constructor=summary_densify contest_count=")
@@ -31781,6 +31783,18 @@ impl Lowerer {
         }
         if rhs_is_borrow_handle {
             lo = lo.bind_local_borrow_handle(s.name)
+        }
+        match s.ty {
+            Some(bx_ty) => {
+                if lower_type_expr_is_box(&(*bx_ty)) {
+                    let bx_inner = lower_struct_layout_index_of(&(*lo.struct_layouts), lower_box_or_option_inner_type_name(&(*bx_ty)))
+                    if bx_inner >= 0 {
+                        lo = lo.bind_local_struct_type(s.name, make_name("Box"), false)
+                        lo = lo.bind_local_box_inner_layout(s.name, bx_inner)
+                    }
+                }
+            }
+            None => {}
         }
         if lower_opt_type_is_dynamic_array(&s.ty) {
             // SIO-311: an annotated `[T]` stays dynamic even when its
