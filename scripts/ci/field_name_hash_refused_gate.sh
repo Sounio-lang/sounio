@@ -30,11 +30,11 @@ check_source() {
   if has_live_hash "$f"; then
     return 1
   fi
-  grep -q '^fn lower_refuse_untyped_field_hash(field_name: Name) -> i64' "$f" || return 2
+  grep -q '^fn lower_refuse_untyped_field_hash(fn_name: Name, field_name: Name) -> i64' "$f" || return 2
   grep -q 'IR_LOWER_HARD_ERROR_REASON = 10' "$f" || return 3
   grep -q 'IR_LOWER_HARD_ERROR_REASON == 10' "$f" || return 4
-  grep -q 'return lower_refuse_untyped_field_hash(field_name)' "$f" || return 5
-  grep -q 'lower_refuse_untyped_field_hash(n)' "$f" || return 6
+  grep -qF 'return lower_refuse_untyped_field_hash((*self.current_func).name, field_name)' "$f" || return 5
+  grep -qF 'lower_refuse_untyped_field_hash((*self.current_func).name, n)' "$f" || return 6
   return 0
 }
 
@@ -55,7 +55,7 @@ esac
 
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/field-hash-gate.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
-sed 's/            lower_refuse_untyped_field_hash(n)/            (n.buf[0] as i64) % 64/' "$LOWER" > "$TMP/lower.sio"
+sed 's/            lower_refuse_untyped_field_hash((\*self.current_func).name, n)/            (n.buf[0] as i64) % 64/' "$LOWER" > "$TMP/lower.sio"
 set +e
 check_source "$TMP/lower.sio"
 neg=$?

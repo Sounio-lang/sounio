@@ -768,14 +768,48 @@ pub fn lower_note_error(site: i64, n: Name) with Mut {
 // writing and reading memory nothing else used. Return 0 as a placeholder
 // index and raise the hard error, which refuses to publish the binary. A free
 // function, not a `self` method: a by-value `self` copies the whole Lowerer.
-fn lower_refuse_untyped_field_hash(field_name: Name) -> i64 with Mut {
+// The first eight refusals keep (function, field) so the report names every
+// site instead of only the first.
+var IR_LOWER_FIELD_REFUSAL_COUNT: i64 = 0
+var IR_LOWER_FIELD_REFUSAL_FN: [i8; 1024]
+var IR_LOWER_FIELD_REFUSAL_FN_LEN: [i64; 8]
+var IR_LOWER_FIELD_REFUSAL_FIELD: [i8; 1024]
+var IR_LOWER_FIELD_REFUSAL_FIELD_LEN: [i64; 8]
+
+fn lower_field_refusal_store(n: Name, buf: &! [i8; 1024], lens: &! [i64; 8], slot: i64) with Mut {
+    var len = n.len
+    if len > 128 {
+        len = 128
+    }
+    var i: i64 = 0
+    while i < len {
+        (*buf)[(slot * 128 + i) as usize] = n.buf[i as usize]
+        i = i + 1
+    }
+    (*lens)[slot as usize] = len
+}
+
+fn lower_refuse_untyped_field_hash(fn_name: Name, field_name: Name) -> i64 with Mut {
     IR_LOWER_HARD_ERROR = 1
     if IR_LOWER_HARD_ERROR_REASON == 0 {
         IR_LOWER_HARD_ERROR_REASON = 10
+        ir_copy_name_to_flat(&fn_name, &! IR_LOWER_HARD_ERROR_FN_BUF, &! IR_LOWER_HARD_ERROR_FN_LEN)
     }
-    ir_copy_name_to_flat(&field_name, &! IR_LOWER_HARD_ERROR_FN_BUF, &! IR_LOWER_HARD_ERROR_FN_LEN)
-    lower_note_error(2966, field_name)
+    if IR_LOWER_FIELD_REFUSAL_COUNT < 8 {
+        lower_field_refusal_store(fn_name, &! IR_LOWER_FIELD_REFUSAL_FN, &! IR_LOWER_FIELD_REFUSAL_FN_LEN, IR_LOWER_FIELD_REFUSAL_COUNT)
+        lower_field_refusal_store(field_name, &! IR_LOWER_FIELD_REFUSAL_FIELD, &! IR_LOWER_FIELD_REFUSAL_FIELD_LEN, IR_LOWER_FIELD_REFUSAL_COUNT)
+    }
+    IR_LOWER_FIELD_REFUSAL_COUNT = IR_LOWER_FIELD_REFUSAL_COUNT + 1
+    lower_note_error(2966, fn_name)
     0
+}
+
+fn lower_print_field_refusal_part(buf: &[i8; 1024], len: i64, slot: i64) with IO, Mut, Panic, Div {
+    var i: i64 = 0
+    while i < len {
+        print_char((*buf)[(slot * 128 + i) as usize] as i64)
+        i = i + 1
+    }
 }
 
 var IR_LOWER_HARD_ERROR_LIMIT: i64 = 0
@@ -924,11 +958,20 @@ pub fn lower_hard_error_report() with IO, Mut, Panic, Div {
         print("` passes a capturing closure where its captured values cannot be\n")
         print("         supplied; the capture would read as 0, so it is refused (#1542).\n")
     } else if IR_LOWER_HARD_ERROR_REASON == 10 {
-        print("  cause: field `")
-        ir_print_flat_name(&IR_LOWER_HARD_ERROR_FN_BUF, IR_LOWER_HARD_ERROR_FN_LEN)
-        print("` has no index in the layout table, so lowering cannot place it.\n")
-        print("         Resolving it by a hash of its name is refused (ADR-026 amendment,\n")
-        print("         2026-11-09); declare the type before the field access.\n")
+        print("  cause: ")
+        print_int(IR_LOWER_FIELD_REFUSAL_COUNT)
+        print(" field access(es) whose index is not in the layout table; resolving them\n")
+        print("         by a hash of the field name is refused (ADR-026 amendment, 2026-11-09).\n")
+        print("         Give the receiver a known struct type.\n")
+        var ri: i64 = 0
+        while ri < IR_LOWER_FIELD_REFUSAL_COUNT && ri < 8 {
+            print("         - `.")
+            lower_print_field_refusal_part(&IR_LOWER_FIELD_REFUSAL_FIELD, IR_LOWER_FIELD_REFUSAL_FIELD_LEN[ri as usize], ri)
+            print("` in function `")
+            lower_print_field_refusal_part(&IR_LOWER_FIELD_REFUSAL_FN, IR_LOWER_FIELD_REFUSAL_FN_LEN[ri as usize], ri)
+            print("`\n")
+            ri = ri + 1
+        }
     } else if IR_LOWER_HARD_ERROR_REASON == 6 {
         print("  cause: function `")
         ir_print_flat_name(&IR_LOWER_HARD_ERROR_FN_BUF, IR_LOWER_HARD_ERROR_FN_LEN)
@@ -24910,7 +24953,7 @@ impl Lowerer {
                 if field_name.len <= 0 {
                     return 0
                 }
-                return lower_refuse_untyped_field_hash(field_name)
+                return lower_refuse_untyped_field_hash((*self.current_func).name, field_name)
             }
             si = si + 1
         }
@@ -24923,7 +24966,7 @@ impl Lowerer {
         if field_name.len <= 0 {
             0
         } else {
-            lower_refuse_untyped_field_hash(field_name)
+            lower_refuse_untyped_field_hash((*self.current_func).name, field_name)
         }
     }
 
@@ -24962,7 +25005,7 @@ impl Lowerer {
         if n.len <= 0 {
             0
         } else {
-            lower_refuse_untyped_field_hash(n)
+            lower_refuse_untyped_field_hash((*self.current_func).name, n)
         }
     }
 
