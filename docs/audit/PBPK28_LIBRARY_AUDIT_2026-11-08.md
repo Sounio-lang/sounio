@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.audit.pbpk28-library-audit-2026-11-08
+authority: repo_only
+audience: users
+last_validated: 2026-11-08
+validated_by: none
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.pbpk28-library-audit-2026-11-08
+-->
+
 # PBPK28 library audit — 2026-11-08
 
 Scope: every drug the library carries on the 28-compartment model (14 organs x
