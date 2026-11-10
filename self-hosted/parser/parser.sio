@@ -431,12 +431,96 @@ pub fn parser_span_int_literal_overflow(start: i64, end: i64) -> bool with Mut, 
     if acc != 23372036854775808 { return false }
     false
 }
+
+// SIO-428, the checker half of ADR-015 row 1: true when the span is a DECIMAL
+// integer literal whose true value lies in (2^63, 2^64-1]. The width-valid band
+// is deliberately not refused at parse time (see above); this classifier is how
+// the checker recognises the band when the literal meets a signed type. Only the
+// decimal spelling counts — 0x/0b/0o spellings are type-independent bit patterns
+// and never true here. Exactly 2^63 stays false: decimal 2^63 is the documented
+// width-valid edge and keeps its wrapped value (tests/run-pass/
+// int_literal_decimal_2_63_print). Wider-than-u64 spans cannot reach here (E276
+// refuses them at the token), but returning true for them is harmless. The
+// classifier is only invoked on ExprIntLit spans, which never carry a prefix
+// minus — the lexer keeps `-` as its own token (parser_prefix_minus_before
+// exists for exactly that reason) — and the checker enforcement sites classify
+// only bare IntLit exprs, so `-9223372036854775808` (i64 MIN) and the unary-neg
+// forms are naturally out of scope here.
+pub fn parser_span_int_literal_u64_band(start: i64, end: i64) -> bool with Mut, Panic {
+    if end <= start + 1 { return false }
+    let b0 = cursor_source_byte(start)
+    let b1 = cursor_source_byte(start + 1)
+    if b0 == (48 as i8) {
+        if b1 == (120 as i8) || b1 == (88 as i8) { return false }
+        else if b1 == (98 as i8) || b1 == (66 as i8) { return false }
+        else if b1 == (111 as i8) || b1 == (79 as i8) { return false }
+    }
+    // Significant digits only: separators and leading zeros carry no width. Same
+    // walk as parser_span_int_literal_overflow — 18-digit accumulations stay
+    // below 2^63 and exact, so nothing here can wrap and change the answer.
+    var seen = false
+    var count: i64 = 0
+    var first_sig = start
+    var i = start
+    while i < end {
+        let c = cursor_source_byte(i)
+        if c == (95 as i8) {
+            i = i + 1
+            continue
+        }
+        if c < (48 as i8) || c > (57 as i8) { break }
+        if !seen {
+            if c == (48 as i8) {
+                i = i + 1
+                continue
+            }
+            seen = true
+            first_sig = i
+        }
+        count = count + 1
+        i = i + 1
+    }
+    if !seen { return false }
+    if count < 19 { return false }
+    if count > 20 { return true }
+    // 19 or 20 significant digits. Value = lead2 * 10^(count-2) + acc, split as
+    // in parser_span_int_literal_overflow so no accumulation can overflow.
+    let d0 = cursor_source_byte(first_sig)
+    var i2 = first_sig + 1
+    var d1 = d0
+    var skip = true
+    while i2 < end && skip {
+        let c1 = cursor_source_byte(i2)
+        if c1 == (95 as i8) { i2 = i2 + 1; continue }
+        d1 = c1
+        skip = false
+    }
+    i2 = i2 + 1
+    var acc: i64 = 0
+    var got: i64 = 0
+    while i2 < end && got < 18 {
+        let cc = cursor_source_byte(i2)
+        if cc == (95 as i8) { i2 = i2 + 1; continue }
+        if cc < (48 as i8) || cc > (57 as i8) { break }
+        acc = acc * 10 + ((cc - (48 as i8)) as i64)
+        got = got + 1
+        i2 = i2 + 1
+    }
+    let lead2 = ((d0 - (48 as i8)) as i64) * 10 + ((d1 - (48 as i8)) as i64)
+    if count == 20 { return true }
+    // 19 digits: 2^63 = 92 * 10^17 + 23372036854775808. Above it (or wider
+    // leading digits) is the band; exactly 2^63 is the excluded edge.
+    if lead2 > 92 { return true }
+    if lead2 < 92 { return false }
+    if acc > 23372036854775808 { return true }
+    false
+}
 // Is the byte before `start` a minus acting as a prefix operator on this
 // literal? A `-` is binary subtraction when the token before it can already end
 // a value (`x - 1`, `f() - 1`, `a[0] - 1`), and prefix otherwise (`-1`, `f(-1)`,
 // `(-1)`, `x == -1`). Read from the source rather than from a token-kind list so
 // the test cannot go stale when the lexer's kind numbers move.
-fn parser_prefix_minus_before(start: i64) -> bool with Mut, Panic {
+pub fn parser_prefix_minus_before(start: i64) -> bool with Mut, Panic {
     var i = start - 1
     while i >= 0 {
         let c = cursor_source_byte(i)

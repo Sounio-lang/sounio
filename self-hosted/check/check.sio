@@ -37,6 +37,7 @@ use check::ontology_side_table_cache::{
 }
 use check::mod::{check_policy_requirements_to_ir}
 use parser::ast::*
+use parser::parser::parser_span_int_literal_u64_band
 use ir::ir::*
 
 // ============================================================
@@ -12579,6 +12580,15 @@ fn checker_check_call_args_inplace(c: *mut Checker, args: ExprListHandle, params
 // calls this helper, so the loop frame no longer keeps its temporaries live
 // across the nested call -- it can release them before recursing.
 fn checker_check_call_arg_post_inplace(c: *mut Checker, call_span: Span, arg_expr: Expr, arg_ty: TypeEntry, param_ty: TypeEntry, has_param_info: bool, primitive_exact: bool, implicit_borrow: bool) with Mut, Panic, Div, Alloc, IO {
+    // SIO-428: refuse a decimal literal whose true value exceeds i64 MAX when
+    // it is passed to a signed parameter — it would silently run as the wrapped
+    // negative (the print_int(9223372036854775809) repro). Checked before every
+    // fast path in this helper; a u64 parameter is not signed and keeps
+    // accepting the bit pattern. An unknown-import parameter (TyUnknown) is
+    // refused too: the callee reads the born-i64 word and declares no u64.
+    if has_param_info && checker_expr_is_decimal_band_literal(arg_expr) && checker_is_signed_or_unknown_int_target(param_ty) {
+        checker_report_error_at_inplace(c, arg_expr.span, 282, 0, 0, 0)
+    }
     if has_param_info && !primitive_exact {
         if !checker_call_arg_types_compatible_inplace(c, arg_expr, arg_ty, param_ty) {
             checker_report_mismatch_inplace(c, call_span, 9, param_ty, arg_ty)
@@ -13133,6 +13143,18 @@ fn checker_check_print_i64_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry w
         Some(_) => checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
         None => {}
     }
+    // SIO-428: print_int/print_char read the argument as an i64 word. A decimal
+    // literal whose true value exceeds i64 MAX has no i64 value and would
+    // silently print the wrapped negative (the card repro). Refuse; spell the
+    // bit pattern in hex or bind it u64 and print_u64 it.
+    match first_arg {
+        Some(arg) => {
+            if checker_expr_is_decimal_band_literal(*arg) {
+                checker_report_error_at_inplace(c, (*arg).span, 282, 0, 0, 0)
+            }
+        }
+        None => {}
+    }
     let arg_ty = checker_check_opt_expr_inplace(c, first_arg)
     if checker_type_is_unobserved_like(arg_ty) {
         if !has_effect_id((*c).current_effects, (*c).current_effect_count, 13) {
@@ -13496,6 +13518,12 @@ fn checker_check_call_shadow_forms_inplace(c: *mut Checker, e: Expr, direct_sig_
         Some(shadow_callee) => {
             if (*shadow_callee).kind == ExprKind::ExprIdent && checker_invisible_native_builtin_sig(c, (*shadow_callee).name) {
                 checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
+                // SIO-428: these builtins read their arguments as raw i64 words.
+                // A decimal literal whose true value exceeds i64 MAX has no i64
+                // value — it would silently print/run as the wrapped negative —
+                // and this arm declares no u64 to adopt the bit pattern. Refuse;
+                // the accepted spellings are hex or a declared u64.
+                checker_refuse_decimal_band_args_inplace(c, e.args)
                 return (true, checker_shadowed_builtin_result((*shadow_callee).name))
             }
         }
@@ -13702,6 +13730,12 @@ fn checker_check_call_indirect_inplace(c: *mut Checker, e: Expr, callee_is_local
     } else if is_error_or_unknown(callee_ty) {
         checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
         checker_release_call_arg_borrows_inplace(c, e.args, None)
+        // SIO-428: an unknown callee (print_int and friends are bound
+        // import-unknown, so this is their path) reads its arguments as raw
+        // i64 words and declares no u64 to adopt a band literal. Refuse a
+        // decimal literal whose true value exceeds i64 MAX here; the accepted
+        // spellings for the u64 bit pattern are hex or a declared u64.
+        checker_refuse_decimal_band_args_inplace(c, e.args)
         // The runtime `read_file` is bound import-unknown, so its result reached
         // method calls with an unknown type (`read_file(p).as_bytes()`, `.len()`
         // were E011). It returns the file's contents as a string; a user
@@ -16197,6 +16231,17 @@ fn checker_check_let_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with Mu
         if !init_context_ok && !int_lit_narrow && !enum_int_ok {
             checker_report_mismatch_inplace(c, s.span, 1, ann_ty, init_ty)
         }
+        // SIO-428: a signed annotation on a decimal band literal is the silent
+        // wrap itself (9223372036854775809 as i64 runs as -9223372036854775807).
+        // u64 annotations are unsigned and keep the bit pattern; they skip this.
+        match s.expr {
+            Some(init_expr) => {
+                if checker_expr_is_decimal_band_literal(*init_expr) && checker_is_signed_narrow_int_type(ann_ty) {
+                    checker_report_error_at_inplace(c, (*init_expr).span, 282, 0, 0, 0)
+                }
+            }
+            None => {}
+        }
         if ann_ty.kind == init_ty.kind
             && (((ann_ty.kind == TypeKind::TyContest) && ann_ty.epistemic_meta_id >= 0)
                 || ((ann_ty.kind == TypeKind::TyRobust) && ann_ty.robustness_level_id >= 0 && ann_ty.robustness_scope_id >= 0)
@@ -16225,6 +16270,20 @@ fn checker_check_let_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with Mu
             if ann_ty.kind == TypeKind::TyKnowledge && init_ty.kind == TypeKind::TyKnowledge {
                 bind_ty.noise_set_id = init_ty.noise_set_id
             }
+        }
+    }
+    // SIO-428: with no annotation the binding is born i64, so a decimal band
+    // literal here is the silent wrap with nothing to adopt it. Refuse; the
+    // accepted spellings are hex, an explicit u64 annotation, or a value that
+    // fits i64 (same rule as checker_check_var_stmt_inplace).
+    if ann_ty.kind == TypeKind::TyUnknown {
+        match s.expr {
+            Some(init_expr) => {
+                if checker_expr_is_decimal_band_literal(*init_expr) {
+                    checker_report_error_at_inplace(c, (*init_expr).span, 282, 0, 0, 0)
+                }
+            }
+            None => {}
         }
     }
     // Validate refinement predicate on literal initializers
@@ -16293,6 +16352,17 @@ fn checker_check_var_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with Mu
         if !init_context_ok && !int_lit_narrow {
             checker_report_mismatch_inplace(c, s.span, 1, ann_ty, init_ty)
         }
+        // SIO-428: a signed annotation on a decimal band literal is the silent
+        // wrap itself. u64 annotations are unsigned and keep the bit pattern;
+        // they skip this (same rule as checker_check_let_stmt_inplace).
+        match s.expr {
+            Some(init_expr) => {
+                if checker_expr_is_decimal_band_literal(*init_expr) && checker_is_signed_narrow_int_type(ann_ty) {
+                    checker_report_error_at_inplace(c, (*init_expr).span, 282, 0, 0, 0)
+                }
+            }
+            None => {}
+        }
         if ann_ty.kind == init_ty.kind
             && (((ann_ty.kind == TypeKind::TyContest) && ann_ty.epistemic_meta_id >= 0)
                 || ((ann_ty.kind == TypeKind::TyRobust) && ann_ty.robustness_level_id >= 0 && ann_ty.robustness_scope_id >= 0)
@@ -16315,6 +16385,20 @@ fn checker_check_var_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with Mu
             if ann_ty.kind == TypeKind::TyKnowledge && init_ty.kind == TypeKind::TyKnowledge {
                 bind_ty.noise_set_id = init_ty.noise_set_id
             }
+        }
+    }
+    // SIO-428: with no annotation the binding is born i64, so a decimal band
+    // literal here is the silent wrap with nothing to adopt it. Refuse; the
+    // accepted spellings are hex, an explicit u64 annotation, or a value that
+    // fits i64.
+    if ann_ty.kind == TypeKind::TyUnknown {
+        match s.expr {
+            Some(init_expr) => {
+                if checker_expr_is_decimal_band_literal(*init_expr) {
+                    checker_report_error_at_inplace(c, (*init_expr).span, 282, 0, 0, 0)
+                }
+            }
+            None => {}
         }
     }
     checker_check_refinement_literal_inplace(c, s.span, bind_ty)
@@ -21217,6 +21301,7 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 269 { print("a `where` refinement on Knowledge<T> is not enforced by this compiler yet: the predicate would be silently ignored, so it is refused") }
     else if code == 270 { print("`as string` does not convert a number, bool or char to text: no engine formats the value, so the cast is refused") }
     else if code == 263 { print("qualified call is ambiguous: this qualifier names a module you `use`d, but also collides with an unrelated struct/enum method of the same name, and the compiler cannot yet guarantee which one runs") }
+    else if code == 282 { print("decimal integer literal does not fit a signed 64-bit type: its true value is a u64 bit pattern and would silently wrap negative as i64") }
     else { print("unknown error") }
 }
 
@@ -21602,6 +21687,9 @@ fn print_error_help(code: i64) with IO, Mut, Panic, Div {
     else if code == 263 {
         print("   |\n   = help: rename the struct/enum, the method, or the module import so the qualifier is no longer ambiguous\n")
     }
+    else if code == 282 {
+        print("   |\n   = help: spell the bit pattern in hex (0x8000000000000001), give the binding or parameter a u64 type, or use a value that fits i64\n")
+    }
     else {
         // No help available for unknown errors
     }
@@ -21934,6 +22022,9 @@ fn print_error_note(code: i64) with IO, Mut, Panic, Div {
     }
     else if code == 245 {
         print("   = note: the checker types this as Knowledge<T>, but lower_binary_expr_ref has no Knowledge arm, so both operands would lower as scalars and the result handle would be arithmetic on two pointers\n")
+    }
+    else if code == 282 {
+        print("   = note: ADR-015 row 1 leaves the (i64 MAX, u64 MAX] band to the checker; read as i64 the literal would silently wrap negative (SIO-428). Decimal 2^63 itself keeps its documented wrapped value; -9223372036854775808 stays the i64 MIN idiom; a u64 annotation keeps adopting the bit pattern\n")
     }
     else {
         // No note available for unknown errors
@@ -24620,6 +24711,76 @@ fn checker_expr_is_int_literal_like(e: Expr) -> bool {
     }
 }
 
+// SIO-428: the literal's true (unsigned) value lies in (2^63, 2^64-1], the band
+// ADR-015 row 1 leaves to the checker. As an i64 value it silently wraps
+// negative (9223372036854775809 prints as -9223372036854775807, rc 0); it is
+// only meaningful as a u64 bit pattern (hex spelling, or a u64 annotation —
+// the six annotated corpus sites). Spelling-based, like the parser's width
+// test: the accumulated int_val has already wrapped by the time the AST exists.
+fn checker_expr_is_decimal_band_literal(e: Expr) -> bool {
+    if e.kind != ExprKind::ExprIntLit { return false }
+    parser_span_int_literal_u64_band(e.span.start, e.span.end)
+}
+
+// Signed narrow machine integers: the targets into which a decimal band literal
+// would silently wrap. u64/u32/u8 are NOT here — a band literal adopted by an
+// unsigned annotation keeps its bit pattern and is the accepted spelling.
+fn checker_is_signed_narrow_int_type(t: TypeEntry) -> bool {
+    t.kind == TypeKind::TyI64 || t.kind == TypeKind::TyI32 || t.kind == TypeKind::TyI8
+}
+
+// A target whose runtime read of the argument is the born-i64 interpretation:
+// a signed narrow type, or no type at all — an unknown-import callee (print_int
+// and friends are bound without a signature) reads the raw i64 word, which is
+// exactly the wrapped negative for a band literal. The ADR-015-accepted
+// spellings for a u64 bit pattern are hex or a DECLARED u64; an unknown import
+// declares nothing, so the band decimal is refused there too.
+fn checker_is_signed_or_unknown_int_target(t: TypeEntry) -> bool {
+    checker_is_signed_narrow_int_type(t) || t.kind == TypeKind::TyUnknown
+}
+
+// SIO-428: report E282 for every bare decimal band literal in an argument list
+// whose callee reads raw i64 words (the invisible-native-builtin shadow forms).
+// The accepted spellings for the bit pattern are hex or a declared u64.
+fn checker_refuse_decimal_band_args_inplace(c: *mut Checker, opt: Option<Box<ExprList> >) with Mut, Panic, Div, Alloc, IO {
+    var cur = opt
+    var done = false
+    while !done {
+        match cur {
+            Some(list) => {
+                if checker_expr_is_decimal_band_literal((*list).head) {
+                    checker_report_error_at_inplace(c, (*list).head.span, 282, 0, 0, 0)
+                }
+                cur = (*list).tail
+            }
+            None => {
+                done = true
+            }
+        }
+    }
+}
+
+// By-value spine twin of checker_refuse_decimal_band_args_inplace.
+fn checker_refuse_decimal_band_args(self: Checker, opt: Option<Box<ExprList> >) -> Checker with Mut, Panic, Div, Alloc, IO {
+    var c = self
+    var cur = opt
+    var done = false
+    while !done {
+        match cur {
+            Some(list) => {
+                if checker_expr_is_decimal_band_literal((*list).head) {
+                    c = c.report_error_at((*list).head.span, 282, 0, 0, 0)
+                }
+                cur = (*list).tail
+            }
+            None => {
+                done = true
+            }
+        }
+    }
+    c
+}
+
 fn checker_expr_list_all_int_literals(opt: Option<Box<ExprList> >) -> bool with Mut {
     var cur = opt
     var done = false
@@ -24997,6 +25158,13 @@ fn checker_expr_list_all_float_literals_accepted(opt: Option<Box<ExprList> >, ac
 }
 
 fn checker_contextual_expr_compatible(expr: Expr, actual_ty: TypeEntry, expected_ty: TypeEntry) -> bool with Mut, Panic, Div, Alloc {
+    // SIO-428: a decimal literal whose true value exceeds i64 MAX has no defined
+    // signed value — it would silently run as the wrapped negative. Refuse it
+    // for signed targets up front; unsigned targets (u64 annotations) and hex
+    // spellings fall through to the normal rules below.
+    if checker_expr_is_decimal_band_literal(expr) && checker_is_signed_narrow_int_type(expected_ty) {
+        return false
+    }
     if types_compatible(actual_ty, expected_ty) {
         return true
     }
@@ -29280,6 +29448,17 @@ impl Checker {
             if !init_ok && !int_lit_narrow {
                 c = c.report_mismatch(s.span, 1, ann_ty, init_ty)
             }
+            // SIO-428: a signed annotation on a decimal band literal is the
+            // silent wrap itself. u64 annotations are unsigned and keep the
+            // bit pattern; they skip this (mirrors the *mut spine).
+            match s.expr {
+                Some(init_expr) => {
+                    if checker_expr_is_decimal_band_literal(*init_expr) && checker_is_signed_narrow_int_type(ann_ty) {
+                        c = c.report_error_at((*init_expr).span, 282, 0, 0, 0)
+                    }
+                }
+                None => {}
+            }
             if ann_ty.kind == init_ty.kind
                 && (((ann_ty.kind == TypeKind::TyContest) && ann_ty.epistemic_meta_id >= 0)
                     || ((ann_ty.kind == TypeKind::TyRobust) && ann_ty.robustness_level_id >= 0 && ann_ty.robustness_scope_id >= 0)
@@ -29302,6 +29481,19 @@ impl Checker {
                 if ann_ty.kind == TypeKind::TyKnowledge && init_ty.kind == TypeKind::TyKnowledge {
                     bind_ty.noise_set_id = init_ty.noise_set_id
                 }
+            }
+        }
+        // SIO-428: with no annotation the binding is born i64, so a decimal band
+        // literal here is the silent wrap with nothing to adopt it (same rule as
+        // the *mut spine).
+        if ann_ty.kind == TypeKind::TyUnknown {
+            match s.expr {
+                Some(init_expr) => {
+                    if checker_expr_is_decimal_band_literal(*init_expr) {
+                        c = c.report_error_at((*init_expr).span, 282, 0, 0, 0)
+                    }
+                }
+                None => {}
             }
         }
         // Validate refinement predicate on literal initializers
@@ -29351,6 +29543,17 @@ impl Checker {
             if !init_ok && !int_lit_narrow {
                 c = c.report_mismatch(s.span, 1, ann_ty, init_ty)
             }
+            // SIO-428: a signed annotation on a decimal band literal is the
+            // silent wrap itself. u64 annotations are unsigned and keep the
+            // bit pattern; they skip this (mirrors the *mut spine).
+            match s.expr {
+                Some(init_expr) => {
+                    if checker_expr_is_decimal_band_literal(*init_expr) && checker_is_signed_narrow_int_type(ann_ty) {
+                        c = c.report_error_at((*init_expr).span, 282, 0, 0, 0)
+                    }
+                }
+                None => {}
+            }
             if ann_ty.kind == init_ty.kind
                 && (((ann_ty.kind == TypeKind::TyContest) && ann_ty.epistemic_meta_id >= 0)
                     || ((ann_ty.kind == TypeKind::TyRobust) && ann_ty.robustness_level_id >= 0 && ann_ty.robustness_scope_id >= 0)
@@ -29373,6 +29576,19 @@ impl Checker {
                 if ann_ty.kind == TypeKind::TyKnowledge && init_ty.kind == TypeKind::TyKnowledge {
                     bind_ty.noise_set_id = init_ty.noise_set_id
                 }
+            }
+        }
+        // SIO-428: with no annotation the binding is born i64, so a decimal band
+        // literal here is the silent wrap with nothing to adopt it (same rule as
+        // the *mut spine).
+        if ann_ty.kind == TypeKind::TyUnknown {
+            match s.expr {
+                Some(init_expr) => {
+                    if checker_expr_is_decimal_band_literal(*init_expr) {
+                        c = c.report_error_at((*init_expr).span, 282, 0, 0, 0)
+                    }
+                }
+                None => {}
             }
         }
         // Validate refinement predicate on literal initializers
@@ -31154,6 +31370,9 @@ impl Checker {
             let call_start_borrows = c.borrows
             c = c.check_expr_list_no_type_no_linear_consume(e.args)
             c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
+            // SIO-428: an unknown callee reads raw i64 words and declares no
+            // u64; refuse a decimal band literal here (mirrors the *mut spine).
+            c = checker_refuse_decimal_band_args(c, e.args)
             (c, callee_ty)
         } else {
             c = c.report_error_at(e.span, 17, 0, 0, 0)
@@ -33564,6 +33783,14 @@ impl Checker {
 
                 // Check against parameter type and boundary contracts
                 let has_param_info = !name_is_empty(param_info.name) || param_info.ty.kind != TypeKind::TyError
+                // SIO-428: a decimal band literal to a signed parameter is the
+                // silent wrap; refuse with the targeted diagnostic (mirrors the
+                // *mut spine's checker_check_call_arg_post_inplace). An
+                // unknown-import parameter (TyUnknown) is refused too — the
+                // callee reads the born-i64 word and declares no u64.
+                if has_param_info && checker_expr_is_decimal_band_literal(arg_expr) && checker_is_signed_or_unknown_int_target(param_info.ty) {
+                    c = c.report_error_at(arg_expr.span, 282, 0, 0, 0)
+                }
                 if has_param_info {
                     if !c.call_arg_types_compatible_structural(arg_expr, arg_ty, param_info.ty) {
                         c = c.report_mismatch(call_span, 9, param_info.ty, arg_ty)
