@@ -4,7 +4,7 @@ authority: repo_only
 audience: users
 last_validated: 2026-11-09
 validated_by: SIO-563
-source_of_truth: stdlib/darwin_pbpk/core/rodgers_rowland.sio
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.dissertation.dossiers.kp-kpu-reconciliation-sio563
 -->
 
 # Kp, Kpu and Kp,uu reconciliation (SIO-563)
