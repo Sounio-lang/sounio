@@ -9,11 +9,14 @@
 # `////`, `/**/` and `/***` are ordinary comments and must not be listed.
 #
 # Usage: bash scripts/ci/doc_comment_tokens_gate.sh [path/to/madaros]
-#   Default binary: bin/madaros (set SOUNIO_MADAROS_BIN to pin a build).
+#   Default binary: $MADAROS_RAW_BIN (CI: the fresh current-source build), else bin/madaros
+#   (set SOUNIO_MADAROS_BIN to pin a build).
 set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
-BIN="${1:-bin/madaros}"
+BIN="${1:-${MADAROS_RAW_BIN:-bin/madaros}}"
+# A raw Madaros ELF needs the large stack the wrapper gives it.
+ulimit -s 1048576 2>/dev/null || ulimit -s unlimited 2>/dev/null || true
 FIXTURE="tests/doc_comments/basic.sio"
 EXPECTED="tests/doc_comments/basic.expected"
 GOT="$(mktemp)"
