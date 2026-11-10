@@ -51,6 +51,8 @@
 use darwin_pbpk::core::pbpk28_params::*
 use darwin_pbpk::tsit5_pbpk28::*
 use darwin_pbpk::theta_pbpk28::*
+use darwin_pbpk::release::matrix_er::*
+use math::pure::{exp}
 // FULL PBPK28 chemical + enzymatic ontology complete (ChEBI every compound + GO/Rhea for CYP)
 // See drugs/rapamycin.sio + chemistry/ontology.sio + super_chemical_showcase for implementation.
 
@@ -717,6 +719,456 @@ pub fn ep28_semaglutide_priors() -> EpPrior28 with Mut {
     kn[4] = Knowledge { value: m[4], variance: v[4], epsilon: c[4], provenance: "Kapitza2015_CV25" }
     kn[5] = Knowledge { value: m[5], variance: v[5], epsilon: c[5], provenance: "kp_kidney_CV25" }
     kn[6] = Knowledge { value: m[6], variance: v[6], epsilon: c[6], provenance: "kp_adipose_CV40" }
+
+    EpPrior28 { kn: kn, n: 7 }
+}
+
+// ============================================================================
+// VENLAFAXINE XR — ORAL INPUT PATH + CYP2D6 FORMATION PRIORS
+// ============================================================================
+// ep28_simulate covers IV bolus only (dose preloaded into blood, rel = 0).
+// Venlafaxine XR is oral: Gohel 2008 Korsmeyer-Peppas matrix (n = 0.65,
+// canonical witness venlafaxine_xr_matrix_gohel2008) → gut pool → first-order
+// absorption (ka = 0.63 /h, F = 0.45, Wang 2022 joint PPK) with CYP2D6
+// formation to ODV solved implicitly as a liver sink (Lessard 1999: 43 L/h
+// at NM). Transfer-for-transfer mirror of scenarios/venlafaxine_xr.sio
+// (matrix_step_amount → gut → F-scaled absorb_amt/dt as rel_mid), parent-only:
+// ODV states are out of scope and the sink mass is booked by the ledger, so
+// the books close exactly: residual = ledger_residual + gut + unreleased
+// matrix. Dim 0 therefore perturbs the formation sink (not cl_central) and
+// dim 2 scales by venlafaxine's own fu reference (0.27, Wyeth label), via
+// the oral-only perturb path below; dims 1, 3-6 reuse the shared taxonomy.
+// NM scope: phenotype-resolved formation (pgx/cyp2d6_venlafaxine.sio scales)
+// is future work.
+pub struct OralInputs28 {
+    pub f_abs: f64,
+    pub ka: f64,
+    pub cl_form: f64,
+}
+
+fn ep28_oral_clform(oi: OralInputs28, delta: f64) -> OralInputs28 with Mut {
+    OralInputs28 { f_abs: oi.f_abs, ka: oi.ka, cl_form: oi.cl_form + delta }
+}
+
+fn ep28_simulate_oral(prm: PBPKParams28, dose_mg: f64, t_end: f64, oi: OralInputs28, rel: MatrixReleaseModel, gut0: f64) -> PBPK28Metrics with Mut, Div, Panic {
+    ep28_simulate_oral_dt(0.05, prm, dose_mg, t_end, oi, rel, gut0)
+}
+
+fn ep28_simulate_oral_dt(dt: f64, prm: PBPKParams28, dose_mg: f64, t_end: f64, oi: OralInputs28, rel: MatrixReleaseModel, gut0: f64) -> PBPK28Metrics with Mut, Div, Panic {
+    if !(dt > 0.0) || !ep28_finite(dt) { return ep28_metrics_empty() }
+    if !(t_end > 0.0) || !ep28_finite(t_end) { return ep28_metrics_empty() }
+    if t_end / dt > ep28_max_steps() as f64 { return ep28_metrics_empty() }
+    var st = pbpk28_state_zero()
+    var led = pbpk28_ledger_zero()
+    let n_start = pbpk28_rannacher_startup_steps()
+    // Formation site: liver organ index (scenarios/venlafaxine_xr.sio vfx_liver_organ).
+    let liv = 1
+    // gut0 seeds immediate-release dosing (midazolam); XR starts at 0 with
+    // the matrix holding the dose.
+    var gut = gut0
+    var t = 0.0
+    var k: i32 = 0
+    var c_brain_24h = 0.0
+    var found_24h = false
+    while t < t_end {
+        let dt_use = if t + dt > t_end { t_end - t } else { dt }
+        if !(t + dt_use > t) || k >= ep28_max_steps() { return ep28_metrics_empty() }
+        // 1. Matrix dissolution into the gut pool (mg over the step).
+        gut = gut + matrix_step_amount(rel, t, dt_use)
+        // 2. First-order absorption with F on the absorbed fraction.
+        let frac_abs = 1.0 - exp(0.0 - oi.ka * dt_use)
+        let absorb_amt = oi.f_abs * gut * frac_abs
+        gut = gut - absorb_amt
+        if gut < 0.0 { gut = 0.0 }
+        pbpk28_rannacher_step_sink_mut(&!st, prm, absorb_amt / dt_use, dt_use, k < n_start, liv, oi.cl_form, &!led)
+        if !ep28_finite(st.cv[0]) { return ep28_metrics_empty() }
+        t = t + dt_use
+        k = k + 1
+        if found_24h == false && t >= 24.0 - 0.5 * dt_use {
+            c_brain_24h = pbpk28_organ_average(st, prm, 3)
+            found_24h = true
+        }
+    }
+    if led.neg_mass > pbpk28_neg_mass_bound_mg() { return ep28_metrics_empty() }
+    // Unreleased matrix = dose − gut seed − cumulative release (IR: gut0 =
+    // dose and the empty model releases nothing, so this is 0).
+    let matrix_rem = dose_mg - gut0 - matrix_cumulative(rel, t)
+    let resid = pbpk28_ledger_residual(led, st, prm, dose_mg) + gut + matrix_rem
+    PBPK28Metrics {
+        auc_blood:     led.auc[0],
+        c_brain_24h:   c_brain_24h,
+        auc_liver:     led.auc[1],
+        auc_kidney:    led.auc[2],
+        mass_final:    pbpk28_total_mass(st, prm),
+        mass_residual: resid,
+        neg_mass:      led.neg_mass,
+        steps:         led.steps,
+        success:       true,
+    }
+}
+
+fn ep28_jacobian_fill_oral(
+    base_prm: PBPKParams28,
+    priors:   EpPrior28,
+    dose_mg:  f64,
+    t_end:    f64,
+    base_oi:  OralInputs28,
+    rel:      MatrixReleaseModel,
+    fu_ref:   f64,
+    gut0:     f64,
+) -> EpJac28 with Mut, Div, Panic, Epistemic {
+    let n = priors.n
+
+    // Central-difference Jacobian (oral input path)
+    var d_auc_b:  [f64; 8] = [0.0; 8]
+    var d_cb24:   [f64; 8] = [0.0; 8]
+    var d_auc_l:  [f64; 8] = [0.0; 8]
+    var d_auc_k:  [f64; 8] = [0.0; 8]
+
+    var i: i32 = 0
+    while i < n {
+        let pk_i = priors.kn[i]
+        let h = ep28_fdiff_h(pk_i.value, pk_i.variance)
+        if h > 0.0 {
+            // idx 0 perturbs the CYP2D6 formation sink (OralInputs28).
+            if i == 0 {
+                let m_p = ep28_simulate_oral(base_prm, dose_mg, t_end, ep28_oral_clform(base_oi, h), rel, gut0)
+                let m_n = ep28_simulate_oral(base_prm, dose_mg, t_end, ep28_oral_clform(base_oi, 0.0 - h), rel, gut0)
+                if !m_p.success || !m_n.success { return EpJac28 { d_auc_b: [0.0; 8], d_cb24: [0.0; 8], d_auc_l: [0.0; 8], d_auc_k: [0.0; 8], ok: false } }
+                let inv2h = 1.0 / (2.0 * h)
+                d_auc_b[i] = (m_p.auc_blood   - m_n.auc_blood)   * inv2h
+                d_cb24[i]  = (m_p.c_brain_24h - m_n.c_brain_24h) * inv2h
+                d_auc_l[i] = (m_p.auc_liver   - m_n.auc_liver)   * inv2h
+                d_auc_k[i] = (m_p.auc_kidney  - m_n.auc_kidney)  * inv2h
+            }
+            // idx 2 scales cl_central by the drug's own fu reference.
+            if i == 2 {
+                var pp = base_prm
+                var pn = base_prm
+                if fu_ref > 0.0 {
+                    pp.cl_central = base_prm.cl_central * (fu_ref + h) / fu_ref
+                    pn.cl_central = base_prm.cl_central * (fu_ref - h) / fu_ref
+                }
+                let m_p = ep28_simulate_oral(pp, dose_mg, t_end, base_oi, rel, gut0)
+                let m_n = ep28_simulate_oral(pn, dose_mg, t_end, base_oi, rel, gut0)
+                if !m_p.success || !m_n.success { return EpJac28 { d_auc_b: [0.0; 8], d_cb24: [0.0; 8], d_auc_l: [0.0; 8], d_auc_k: [0.0; 8], ok: false } }
+                let inv2h = 1.0 / (2.0 * h)
+                d_auc_b[i] = (m_p.auc_blood   - m_n.auc_blood)   * inv2h
+                d_cb24[i]  = (m_p.c_brain_24h - m_n.c_brain_24h) * inv2h
+                d_auc_l[i] = (m_p.auc_liver   - m_n.auc_liver)   * inv2h
+                d_auc_k[i] = (m_p.auc_kidney  - m_n.auc_kidney)  * inv2h
+            }
+            // Remaining dims reuse the shared IV perturbation taxonomy.
+            if i != 0 && i != 2 {
+                let prm_p = ep28_perturb(base_prm, i, h)
+                let prm_n = ep28_perturb(base_prm, i, 0.0 - h)
+                let m_p = ep28_simulate_oral(prm_p, dose_mg, t_end, base_oi, rel, gut0)
+                let m_n = ep28_simulate_oral(prm_n, dose_mg, t_end, base_oi, rel, gut0)
+                if !m_p.success || !m_n.success { return EpJac28 { d_auc_b: [0.0; 8], d_cb24: [0.0; 8], d_auc_l: [0.0; 8], d_auc_k: [0.0; 8], ok: false } }
+                let inv2h = 1.0 / (2.0 * h)
+                d_auc_b[i] = (m_p.auc_blood   - m_n.auc_blood)   * inv2h
+                d_cb24[i]  = (m_p.c_brain_24h - m_n.c_brain_24h) * inv2h
+                d_auc_l[i] = (m_p.auc_liver   - m_n.auc_liver)   * inv2h
+                d_auc_k[i] = (m_p.auc_kidney  - m_n.auc_kidney)  * inv2h
+            }
+        }
+        i = i + 1
+    }
+    return EpJac28 { d_auc_b: d_auc_b, d_cb24: d_cb24, d_auc_l: d_auc_l, d_auc_k: d_auc_k, ok: true }
+}
+
+pub fn ep28_jacobian_columns_oral(
+    prm: PBPKParams28, priors: EpPrior28, dose_mg: f64, t_end: f64,
+    oi: OralInputs28, rel: MatrixReleaseModel, fu_ref: f64, gut0: f64,
+) -> EpJac28 with Mut, Div, Panic, Epistemic {
+    ep28_jacobian_fill_oral(prm, priors, dose_mg, t_end, oi, rel, fu_ref, gut0)
+}
+
+pub fn ep28_run_oral(
+    prm: PBPKParams28, priors: EpPrior28, dose_mg: f64, t_end: f64,
+    oi: OralInputs28, rel: MatrixReleaseModel, fu_ref: f64, gut0: f64,
+) -> EpResult28 with Mut, Div, Panic, Epistemic {
+    let n = priors.n
+
+    let ref_m = ep28_simulate_oral(prm, dose_mg, t_end, oi, rel, gut0)
+    if ref_m.success == false {
+        return ep28_result_empty()
+    }
+
+    let auc_b_ref  = ref_m.auc_blood
+    let cb24_ref   = ref_m.c_brain_24h
+    let auc_l_ref  = ref_m.auc_liver
+    let auc_k_ref  = ref_m.auc_kidney
+
+    let fill = ep28_jacobian_fill_oral(prm, priors, dose_mg, t_end, oi, rel, fu_ref, gut0)
+    if !fill.ok { return ep28_result_empty() }
+    let d_auc_b = fill.d_auc_b
+    let d_cb24 = fill.d_cb24
+    let d_auc_l = fill.d_auc_l
+    let d_auc_k = fill.d_auc_k
+    // GUM variance
+    var var_auc_b:  f64 = 0.0
+    var var_cb24:   f64 = 0.0
+    var var_auc_l:  f64 = 0.0
+    var var_auc_k:  f64 = 0.0
+    var sensitivity: [f64; 8] = [0.0; 8]
+
+    var j: i32 = 0
+    while j < n {
+        let pk_j = priors.kn[j]
+        let vi = pk_j.variance
+        let contrib = d_auc_b[j] * d_auc_b[j] * vi
+        var_auc_b = var_auc_b + contrib
+        var_cb24  = var_cb24  + d_cb24[j]  * d_cb24[j]  * vi
+        var_auc_l = var_auc_l + d_auc_l[j] * d_auc_l[j] * vi
+        var_auc_k = var_auc_k + d_auc_k[j] * d_auc_k[j] * vi
+        sensitivity[j] = contrib
+        j = j + 1
+    }
+
+    // Normalize sensitivity to fractions
+    var k: i32 = 0
+    while k < n {
+        if var_auc_b > 1.0e-30 {
+            sensitivity[k] = sensitivity[k] / var_auc_b
+        }
+        k = k + 1
+    }
+
+    // Each organ Kp's share of its own organ endpoint's variance. AUC_blood
+    // over 0..t_end is (Dose − M(t_end))/CL under the exact mass identity, so
+    // the Kp columns carry almost nothing there; these endpoints are where a
+    // lost Kp Jacobian column (issue #1497) still shows as an exact 0.0.
+    let kp_share_brain  = if var_cb24  > 1.0e-300 { d_cb24[3]  * d_cb24[3]  * priors.kn[3].variance / var_cb24 }  else { 0.0 }
+    let kp_share_liver  = if var_auc_l > 1.0e-300 { d_auc_l[4] * d_auc_l[4] * priors.kn[4].variance / var_auc_l } else { 0.0 }
+    let kp_share_kidney = if var_auc_k > 1.0e-300 { d_auc_k[5] * d_auc_k[5] * priors.kn[5].variance / var_auc_k } else { 0.0 }
+
+    // Evidence-weighted confidence
+    var conf_auc = 0.0
+    var c: i32 = 0
+    while c < n {
+        let pk_c = priors.kn[c]
+        conf_auc = conf_auc + pk_c.confidence * sensitivity[c]
+        c = c + 1
+    }
+
+    EpResult28 {
+        auc_blood_mean:  auc_b_ref,
+        auc_blood_var:   var_auc_b,
+        auc_blood_conf:  conf_auc,
+        c_brain_mean:    cb24_ref,
+        c_brain_var:     var_cb24,
+        auc_liver_mean:  auc_l_ref,
+        auc_liver_var:   var_auc_l,
+        auc_kidney_mean: auc_k_ref,
+        auc_kidney_var:  var_auc_k,
+        sensitivity:     sensitivity,
+        kp_share_brain:  kp_share_brain,
+        kp_share_liver:  kp_share_liver,
+        kp_share_kidney: kp_share_kidney,
+        mass_init:       dose_mg,
+        mass_final:      ref_m.mass_final,
+        mass_residual:   ref_m.mass_residual,
+        neg_mass:        ref_m.neg_mass,
+        steps:           ref_m.steps,
+        success:         true,
+    }
+}
+
+pub fn ep28_gum_parity_check_oral(
+    prm: PBPKParams28, priors: EpPrior28, dose_mg: f64, t_end: f64,
+    oi: OralInputs28, rel: MatrixReleaseModel, fu_ref: f64, gut0: f64,
+    got_main: [f64; 8], got_sensitivity: [f64; 8],
+) -> i64 with Mut, Div, Panic, Epistemic {
+    let ref = ep28_run_oral(prm, priors, dose_mg, t_end, oi, rel, fu_ref, gut0)
+    var fails: i64 = 0
+    if !ref.success { return 1 }
+    if got_main[0] != ref.auc_blood_var { fails = fails + 1 }
+    if got_main[1] != ref.c_brain_var { fails = fails + 1 }
+    if got_main[2] != ref.auc_liver_var { fails = fails + 1 }
+    if got_main[3] != ref.auc_kidney_var { fails = fails + 1 }
+    if got_main[4] != ref.auc_blood_conf { fails = fails + 1 }
+    if got_main[5] != ref.kp_share_brain { fails = fails + 1 }
+    if got_main[6] != ref.kp_share_liver { fails = fails + 1 }
+    if got_main[7] != ref.kp_share_kidney { fails = fails + 1 }
+    var k: i32 = 0
+    while k < 8 {
+        if got_sensitivity[k] != ref.sensitivity[k] { fails = fails + 1 }
+        k = k + 1
+    }
+    fails
+}
+
+pub fn ep28_venlafaxine_chebi_id() -> i64 { return 9943 }
+pub fn ep28_venlafaxine_cyp_process_id() -> i64 { return 6805 }
+
+// Numeric IRI stubs (rapamycin precedent): IRI wrapper calls stay out to
+// avoid unknown-identifier resolution errors on direct load; the CHEBI:9943
+// tag rides in Knowledge provenance and prints.
+pub fn ep28_venlafaxine_chebi() -> IRI { 9943 as IRI }
+pub fn ep28_venlafaxine_hcl_chebi() -> IRI { 9944 as IRI }
+pub fn ep28_venlafaxine_cyp_process() -> IRI { 6805 as IRI }
+
+pub fn ep28_venlafaxine_params() -> PBPKParams28 {
+    // Venlafaxine (CHEBI:9943; HCl salt CHEBI:9944 — the 75 mg XR dose is on
+    // the salt basis, Gohel 2008); CYP2D6 formation: GO xenobiotic metabolic
+    // process (same GO term as the CYP3A4 precedent).
+    // source: EBI ChEBI (CHEBI:9943 venlafaxine; CHEBI:9944 venlafaxine HCl) + GO:0006805
+    pbpk28_params_venlafaxine_parent()
+}
+
+pub fn ep28_venlafaxine_priors() -> EpPrior28 with Mut {
+    // 8-dim taxonomy shared with rapamycin/semaglutide, venlafaxine-mapped:
+    // dim 0 = CYP2D6 formation CL (perturbs the liver sink, NOT cl_central).
+    var m: [f64; 8] = [0.0; 8]
+    var v: [f64; 8] = [0.0; 8]
+    var c: [f64; 8] = [0.0; 8]
+
+    // 0: CYP2D6 formation CL, NM = 43 L/h oral/apparent (Lessard 1999; CV=40% estimated)
+    m[0] = 43.0;    v[0] = 295.84;   c[0] = 0.45
+
+    // 1: no separate renal term (folded into the central nominal)
+    m[1] = 0.0;     v[1] = 0.0;      c[1] = 0.50
+
+    // 2: fu_plasma = 0.27 (Wyeth Effexor XR label; CV=25% estimated)
+    m[2] = 0.27;    v[2] = 0.00455625; c[2] = 0.55
+
+    // 3: kp_brain = 1.20 (Rodgers-Rowland profile; CV=25%)
+    m[3] = 1.20;    v[3] = 0.09;     c[3] = 0.50
+
+    // 4: kp_liver = 4.20 (Rodgers-Rowland profile; CV=25%)
+    m[4] = 4.20;    v[4] = 1.1025;   c[4] = 0.50
+
+    // 5: kp_kidney = 3.50 (Rodgers-Rowland profile; CV=25%)
+    m[5] = 3.50;    v[5] = 0.765625; c[5] = 0.50
+
+    // 6: kp_adipose = 1.20 (capped model; CV=40%)
+    m[6] = 1.20;    v[6] = 0.2304;   c[6] = 0.40
+
+    // Knowledge<f64> declarations (value+variance+ε+provenance) — see ep28_rapamycin_priors.
+    var kn: [Knowledge[f64]; 8] = [Knowledge(0.0, ε=1.0, prov="unused"); 8]
+    kn[0] = Knowledge { value: m[0], variance: v[0], epsilon: c[0], provenance: "Lessard1999_EM_formation_CV40|CHEBI:9943" }
+    kn[1] = Knowledge { value: m[1], variance: v[1], epsilon: c[1], provenance: "no_separate_renal_term" }
+    kn[2] = Knowledge { value: m[2], variance: v[2], epsilon: c[2], provenance: "WyethEffexorXR_fu27_CV25" }
+    kn[3] = Knowledge { value: m[3], variance: v[3], epsilon: c[3], provenance: "RodgersRowland_kp_brain_CV25" }
+    kn[4] = Knowledge { value: m[4], variance: v[4], epsilon: c[4], provenance: "RodgersRowland_kp_liver_CV25" }
+    kn[5] = Knowledge { value: m[5], variance: v[5], epsilon: c[5], provenance: "RodgersRowland_kp_kidney_CV25" }
+    kn[6] = Knowledge { value: m[6], variance: v[6], epsilon: c[6], provenance: "kp_adipose_CV40" }
+
+    EpPrior28 { kn: kn, n: 7 }
+}
+
+pub fn ep28_midazolam_chebi_id() -> i64 { return 6931 }
+pub fn ep28_midazolam_cyp_process_id() -> i64 { return 6805 }
+
+// Numeric IRI stubs (rapamycin precedent): midazolam CHEBI:6931.
+pub fn ep28_midazolam_chebi() -> IRI { 6931 as IRI }
+pub fn ep28_midazolam_cyp_process() -> IRI { 6805 as IRI }
+
+pub fn ep28_midazolam_params() -> PBPKParams28 {
+    // Midazolam (CHEBI:6931); CYP3A hepatic clearance: GO xenobiotic
+    // metabolic process (same GO:0006805 term as the CYP3A4 precedent).
+    // source: EBI ChEBI (CHEBI:6931 midazolam) + GO:0006805
+    pbpk28_params_midazolam()
+}
+
+pub fn ep28_midazolam_priors() -> EpPrior28 with Mut {
+    // 8-dim taxonomy, midazolam-mapped (same layout as venlafaxine):
+    // dim 0 = CYP3A hepatic CL (perturbs the liver sink, NOT cl_central).
+    var m: [f64; 8] = [0.0; 8]
+    var v: [f64; 8] = [0.0; 8]
+    var c: [f64; 8] = [0.0; 8]
+
+    // 0: CYP3A hepatic CL, NM = 23.985330 L/h probe-measured
+    // (cyp3a_clh at NM, Thummel 1996 gut+hepatic mechanism; CV=40% estimated)
+    m[0] = 23.985330; v[0] = 92.047369; c[0] = 0.45
+
+    // 1: no separate renal term (unchanged renal <1%, folded into nominal)
+    m[1] = 0.0;     v[1] = 0.0;      c[1] = 0.50
+
+    // 2: fu_plasma = 0.03 (Smith 1981 equilibrium dialysis; CV=25% estimated)
+    m[2] = 0.03;    v[2] = 0.00005625; c[2] = 0.55
+
+    // 3: kp_brain = 1.50 (nominal midazolam-plausible; CV=25%)
+    m[3] = 1.50;    v[3] = 0.140625; c[3] = 0.50
+
+    // 4: kp_liver = 2.00 (nominal midazolam-plausible; CV=25%)
+    m[4] = 2.00;    v[4] = 0.25;     c[4] = 0.50
+
+    // 5: kp_kidney = 1.50 (nominal midazolam-plausible; CV=25%)
+    m[5] = 1.50;    v[5] = 0.140625; c[5] = 0.50
+
+    // 6: kp_adipose = 2.00 (nominal midazolam-plausible; CV=40%)
+    m[6] = 2.00;    v[6] = 0.64;     c[6] = 0.40
+
+    // Knowledge<f64> declarations (value+variance+ε+provenance).
+    var kn: [Knowledge[f64]; 8] = [Knowledge(0.0, ε=1.0, prov="unused"); 8]
+    kn[0] = Knowledge { value: m[0], variance: v[0], epsilon: c[0], provenance: "cyp3a_mechanism_CLh_CV40|CHEBI:6931" }
+    kn[1] = Knowledge { value: m[1], variance: v[1], epsilon: c[1], provenance: "negligible_unchanged_renal" }
+    kn[2] = Knowledge { value: m[2], variance: v[2], epsilon: c[2], provenance: "Smith1981_fu03_CV25" }
+    kn[3] = Knowledge { value: m[3], variance: v[3], epsilon: c[3], provenance: "nominal_kp_brain_CV25|CHEBI:6931" }
+    kn[4] = Knowledge { value: m[4], variance: v[4], epsilon: c[4], provenance: "nominal_kp_liver_CV25|CHEBI:6931" }
+    kn[5] = Knowledge { value: m[5], variance: v[5], epsilon: c[5], provenance: "nominal_kp_kidney_CV25|CHEBI:6931" }
+    kn[6] = Knowledge { value: m[6], variance: v[6], epsilon: c[6], provenance: "nominal_kp_adipose_CV40|CHEBI:6931" }
+
+    EpPrior28 { kn: kn, n: 7 }
+}
+
+pub fn ep28_haloperidol_chebi_id() -> i64 { return 5613 }
+pub fn ep28_haloperidol_cyp_process_id() -> i64 { return 6805 }
+
+// Numeric IRI stubs (rapamycin precedent): haloperidol CHEBI:5613.
+pub fn ep28_haloperidol_chebi() -> IRI { 5613 as IRI }
+pub fn ep28_haloperidol_cyp_process() -> IRI { 6805 as IRI }
+
+pub fn ep28_haloperidol_params() -> PBPKParams28 {
+    // Haloperidol (CHEBI:5613); CYP3A4/2D6 hepatic metabolism: GO xenobiotic
+    // metabolic process (same GO:0006805 term as the CYP precedents).
+    // source: EBI ChEBI (CHEBI:5613 haloperidol) + GO:0006805
+    pbpk28_params_haloperidol()
+}
+
+pub fn ep28_haloperidol_priors() -> EpPrior28 with Mut {
+    // 8-dim taxonomy, haloperidol-mapped (same layout as venlafaxine):
+    // dim 0 = CYP3A4/2D6 hepatic CL (perturbs the liver sink, NOT cl_central).
+    var m: [f64; 8] = [0.0; 8]
+    var v: [f64; 8] = [0.0; 8]
+    var c: [f64; 8] = [0.0; 8]
+
+    // 0: hepatic metabolic CL, NM = 40 L/h plasma (Forsman 1977 CYP3A4/2D6;
+    // CV=40% estimated)
+    m[0] = 40.0;    v[0] = 256.0;    c[0] = 0.45
+
+    // 1: no separate renal term (0.5 L/h folded into the nominal)
+    m[1] = 0.0;     v[1] = 0.0;      c[1] = 0.50
+
+    // 2: fu_plasma = 0.08 (Haase 1981 equilibrium dialysis; mold CV=25%).
+    // The BBB module grades this higher (CV15%, c = 0.82); the mold keeps
+    // its conservative convention.
+    m[2] = 0.08;    v[2] = 0.0004;   c[2] = 0.55
+
+    // 3: kp_brain = 15.00 (PBPK14 Rodgers-Rowland, lysosomal accumulation;
+    // CV=25%)
+    m[3] = 15.00;   v[3] = 14.0625;  c[3] = 0.50
+
+    // 4: kp_liver = 18.00 (PBPK14 first-pass site; CV=25%)
+    m[4] = 18.00;   v[4] = 20.25;    c[4] = 0.50
+
+    // 5: kp_kidney = 8.00 (PBPK14; CV=25%)
+    m[5] = 8.00;    v[5] = 4.0;      c[5] = 0.50
+
+    // 6: kp_adipose = 12.00 (PBPK14 deep-Vd contributor; CV=40%)
+    m[6] = 12.00;   v[6] = 23.04;    c[6] = 0.40
+
+    // Knowledge<f64> declarations (value+variance+ε+provenance).
+    var kn: [Knowledge[f64]; 8] = [Knowledge(0.0, ε=1.0, prov="unused"); 8]
+    kn[0] = Knowledge { value: m[0], variance: v[0], epsilon: c[0], provenance: "Forsman1977_hepatic_CV40|CHEBI:5613" }
+    kn[1] = Knowledge { value: m[1], variance: v[1], epsilon: c[1], provenance: "renal_0.5_folded_into_nominal" }
+    kn[2] = Knowledge { value: m[2], variance: v[2], epsilon: c[2], provenance: "Haase1981_fu08_moldCV25" }
+    kn[3] = Knowledge { value: m[3], variance: v[3], epsilon: c[3], provenance: "PBPK14_kp_brain15_CV25|CHEBI:5613" }
+    kn[4] = Knowledge { value: m[4], variance: v[4], epsilon: c[4], provenance: "PBPK14_kp_liver18_CV25|CHEBI:5613" }
+    kn[5] = Knowledge { value: m[5], variance: v[5], epsilon: c[5], provenance: "PBPK14_kp_kidney8_CV25|CHEBI:5613" }
+    kn[6] = Knowledge { value: m[6], variance: v[6], epsilon: c[6], provenance: "PBPK14_kp_adipose12_CV40|CHEBI:5613" }
 
     EpPrior28 { kn: kn, n: 7 }
 }

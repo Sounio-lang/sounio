@@ -706,8 +706,8 @@ fn sv_turn(
     0
 }
 // Serve forever over one select pump. 0 exit ok, negative on setup.
-fn sv_sess_drop(psl: &![SvSlot; 4], pkk: &![PagedKv; 256], pkv: &![PagedKv; 256], q: &!SvQueue, pvvalid: &![i64; 4], sos: &![i64; 4], s: i64) -> i64 with Mut {
-    q.count = svb_qpurge(q, pvvalid, s)
+fn sv_sess_drop(psl: &![SvSlot; 4], pkk: &![PagedKv; 256], pkv: &![PagedKv; 256], q: &!SvQueue, pvvalid: &![i64; 4], sos: &![i64; 4], swait: &![i64; 8], s: i64) -> i64 with Mut {
+    q.count = svb_qpurge(q, pvvalid, swait, s)
     var fs: i64 = 0
     while fs < 4 {
         if sos[fs as usize] == s {
@@ -782,6 +782,7 @@ pub fn llm_serve(m: &!Llama, bp: &Bpe, port: i64, model_name: string, rt: &Runti
     var pvvalid: [i64; 4] = [0; 4]
     var sos: [i64; 4] = [0 - 1; 4]
     var sprio: [i64; 8] = [0; 8]
+    var swait: [i64; 8] = [0; 8]
     var req: i64 = 0
     var probe: [i64; 8] = [0 - 1; 8]
     while 1 == 1 {
@@ -827,7 +828,7 @@ pub fn llm_serve(m: &!Llama, bp: &Bpe, port: i64, model_name: string, rt: &Runti
                     if sv_select(&lib, &probe, 1, 0) > 0 {
                         let got = sv_recv_some(&lib, fd[s as usize], (rbuf[s as usize] as i64 + rlen[s as usize]) as *mut u8, 262144 - rlen[s as usize])
                         if got <= 0 {
-                            sv_sess_drop(&!psl, &!pkk, &!pkv, &!pq, &!pvvalid, &!sos, s)
+                            sv_sess_drop(&!psl, &!pkk, &!pkv, &!pq, &!pvvalid, &!sos, &!swait, s)
                             nw_close(&lib, fd[s as usize])
                             fd[s as usize] = 0 - 1
                             st[s as usize] = 0
@@ -844,6 +845,7 @@ pub fn llm_serve(m: &!Llama, bp: &Bpe, port: i64, model_name: string, rt: &Runti
                                     st[s as usize] = ns
                                     pq.count = svb_qpush(&!pq, 0 - 1, nids[s as usize], ck_get(&prm[s as usize], 3) as i64, s)
                                     sprio[s as usize] = ck_get(&prm[s as usize], 5) as i64
+                                    swait[s as usize] = 0
                                     if pq.count < 0 {
                                         pq.count = 0
                                         let ebody = heap_alloc(69632)
@@ -857,7 +859,7 @@ pub fn llm_serve(m: &!Llama, bp: &Bpe, port: i64, model_name: string, rt: &Runti
                                 }
                             }
                             if rlen[s as usize] >= 262144 {
-                                sv_sess_drop(&!psl, &!pkk, &!pkv, &!pq, &!pvvalid, &!sos, s)
+                                sv_sess_drop(&!psl, &!pkk, &!pkv, &!pq, &!pvvalid, &!sos, &!swait, s)
                                 nw_close(&lib, fd[s as usize])
                                 fd[s as usize] = 0 - 1
                                 st[s as usize] = 0
@@ -884,7 +886,7 @@ pub fn llm_serve(m: &!Llama, bp: &Bpe, port: i64, model_name: string, rt: &Runti
         }
         if SV_PUMP == 1 {
             if bn > 0 || pq.count > 0 {
-                sv_pump_turn(&lib, m, bp, rt, use_gpu, pagedev, model_name, &!fd, &!st, &reqid, &prm, &!seed, &text, &!tlen, &!gen, &!ttfb, &!t0, &nids, &blist, bn, &chats, &chtols, &!psl, &!pkk, &!pkv, &!bank, &!pq, &!pspill, &!pvspill, &!pscnt, &!pxlen, &!pvvalid, &!sos, &ids, &sprio)
+                sv_pump_turn(&lib, m, bp, rt, use_gpu, pagedev, model_name, &!fd, &!st, &reqid, &prm, &!seed, &text, &!tlen, &!gen, &!ttfb, &!t0, &nids, &blist, bn, &chats, &chtols, &!psl, &!pkk, &!pkv, &!bank, &!pq, &!pspill, &!pvspill, &!pscnt, &!pxlen, &!pvvalid, &!sos, &ids, &sprio, &!swait)
             }
         } else if bn == 1 {
             let s0 = blist[0]
@@ -1074,7 +1076,7 @@ fn sv_pump_turn(
     psl: &![SvSlot; 4], pkk: &![PagedKv; 256], pkv: &![PagedKv; 256],
     bank: &![i64; 16384], q: &!SvQueue,
     spill: &![i64; 4096], vspill: &![i64; 4096], scnt: &![i64; 4], xlen: &![i64; 4], vvalid: &![i64; 4],
-    sos: &![i64; 4], ids: &[CpuBuf; 8], sprio: &[i64; 8]
+    sos: &![i64; 4], ids: &[CpuBuf; 8], sprio: &[i64; 8], swait: &![i64; 8]
 ) with Alloc, Mut, Panic, Div, IO {
     var rslot: [i64; 16] = [0; 16]
     var rpos: [i64; 16] = [0; 16]
@@ -1085,7 +1087,7 @@ fn sv_pump_turn(
     var meta: [i64; 4] = [0; 4]
     var pdone: [i64; 4] = [0; 4]
     let vocab = m.cfg.vocab
-    let out = svb_pump_fwd(m, pkk, pkv, psl, bank, q, rt, use_gpu, pagedev, SVB_CHUNK, &!rslot, &!rpos, &!toks, &!kind, &!rowtok, &!seedrow, &!meta, spill, vspill, scnt, xlen, vvalid, sos, ids, sprio)
+    let out = svb_pump_fwd(m, pkk, pkv, psl, bank, q, rt, use_gpu, pagedev, SVB_CHUNK, &!rslot, &!rpos, &!toks, &!kind, &!rowtok, &!seedrow, &!meta, spill, vspill, scnt, xlen, vvalid, sos, ids, sprio, swait)
     let rn = meta[0]
     if meta[3] / 256 > 0 {
         print("svd preempt mask=")
@@ -1400,6 +1402,11 @@ pub const SVB_LANE: i64 = 4096
 pub const SVB_BANK: i64 = 16384
 // M3 serve chunk: prefill rows per slot per pump turn.
 pub const SVB_CHUNK: i64 = 64
+// M12 anti-starvation: a queued head held SVB_MAX_HOLD passes
+// preempts regardless of class; wait saturates at SVB_AGE_MAX
+// (2^20, no overflow).
+pub const SVB_MAX_HOLD: i64 = 32
+pub const SVB_AGE_MAX: i64 = 1048576
 
 // Slot states live in slots (off -1 free, else bank offset of the
 // prompt). Prompt tokens live in the caller-owned bank. Struct
@@ -1463,7 +1470,7 @@ pub fn svb_qshift(q: &!SvQueue) -> i64 with Mut {
 
 // drop every queue entry owned by sess (disconnect reap). A
 // staged victim entry also releases its vspill region.
-fn svb_qpurge(q: &!SvQueue, vvalid: &![i64; 4], sess: i64) -> i64 with Mut {
+fn svb_qpurge(q: &!SvQueue, vvalid: &![i64; 4], swait: &![i64; 8], sess: i64) -> i64 with Mut {
     var i: i64 = 0
     while i < q.count {
         if q.ss[i as usize] == sess {
@@ -1487,14 +1494,31 @@ fn svb_qpurge(q: &!SvQueue, vvalid: &![i64; 4], sess: i64) -> i64 with Mut {
             i = i + 1
         }
     }
+    // M12: a reaped session keeps no wait; a later push starts at 0.
+    if sess >= 0 { swait[sess as usize] = 0 }
     q.count
 }
 
 // M11: restore re-copies its bank lane (see admit), so no
 // queue rotation is needed here.
 // admit queued arrivals onto free slots; returns new queue count.
-fn svb_admit_all(slots: &![SvSlot; 4], q: &!SvQueue, pks_k: &![PagedKv; 256], pks_v: &![PagedKv; 256], bank: &![i64; 16384], ids: &[CpuBuf; 8], spill: &![i64; 4096], vspill: &![i64; 4096], scnt: &![i64; 4], xlen: &![i64; 4], vvalid: &![i64; 4], sos: &![i64; 4], sprio: &[i64; 8], meta: &![i64; 4]) -> i64 with Mut {
+fn svb_admit_all(slots: &![SvSlot; 4], q: &!SvQueue, pks_k: &![PagedKv; 256], pks_v: &![PagedKv; 256], bank: &![i64; 16384], ids: &[CpuBuf; 8], spill: &![i64; 4096], vspill: &![i64; 4096], scnt: &![i64; 4], xlen: &![i64; 4], vvalid: &![i64; 4], sos: &![i64; 4], sprio: &[i64; 8], swait: &![i64; 8], meta: &![i64; 4]) -> i64 with Mut {
     var preempted: i64 = 0
+    // M12: age every session holding a queued entry once per pass.
+    // Entry-side: admitted heads reset below, so the net effect
+    // equals aging only the passes a session stays queued, and each
+    // session counts once per pass however many entries it holds.
+    var ag: i64 = 0
+    while ag < 8 {
+        var aj: i64 = 0
+        var afound = false
+        while aj < q.count {
+            if q.ss[aj as usize] == ag { afound = true }
+            aj = aj + 1
+        }
+        if afound && swait[ag as usize] < SVB_AGE_MAX { swait[ag as usize] = swait[ag as usize] + 1 }
+        ag = ag + 1
+    }
     while q.count > 0 {
         var s: i64 = 0 - 1
         var i: i64 = 0
@@ -1519,11 +1543,18 @@ fn svb_admit_all(slots: &![SvSlot; 4], q: &!SvQueue, pks_k: &![PagedKv; 256], pk
                 i = i + 1
             }
             if v < 0 { return q.count }
-            // M11: head that does not outrank the victim waits.
+            // M12: head that does not outrank the victim waits,
+            // unless it already waited SVB_MAX_HOLD passes: no
+            // waiter starves past the bound. Plain heads (ss < 0)
+            // keep the M10 wait path.
             if q.vs[0] < 0 {
                 var hp: i64 = 0
                 if q.ss[0] >= 0 { hp = sprio[q.ss[0] as usize] }
-                if hp < vp { return q.count }
+                if hp < vp {
+                    var hw: i64 = 0
+                    if q.ss[0] >= 0 { hw = swait[q.ss[0] as usize] }
+                    if hw < SVB_MAX_HOLD { return q.count }
+                }
             }
             if q.count >= SVB_QCAP { return q.count }
             var w: i64 = 0
@@ -1613,6 +1644,8 @@ fn svb_admit_all(slots: &![SvSlot; 4], q: &!SvQueue, pks_k: &![PagedKv; 256], pk
             scnt[s as usize] = 0
             sos[s as usize] = 0 - 1
         }
+        // M12: the admitted head stops waiting.
+        if q.ss[0] >= 0 { swait[q.ss[0] as usize] = 0 }
         q.count = svb_qshift(q)
     }
     q.count
@@ -1736,10 +1769,10 @@ fn svb_sample_rows(out: &CpuBuf, rslot: &[i64; 16], kind: &[i64; 16], rowtok: &!
 // (meta[0] row count, meta[1] queue count). The caller samples the
 // emitting rows (seed rows plus decode rows) and applies them with
 // svb_pump_adv. Returns stacked row logits.
-pub fn svb_pump_fwd(m: &!Llama, pks_k: &![PagedKv; 256], pks_v: &![PagedKv; 256], slots: &![SvSlot; 4], bank: &![i64; 16384], q: &!SvQueue, rt: &Runtime, use_gpu: bool, pagedev: bool, chunk: i64, rslot: &![i64; 16], rpos: &![i64; 16], toks: &![i64; 16], kind: &![i64; 16], rowtok: &![i64; 16], seedrow: &![i64; 4], meta: &![i64; 4], spill: &![i64; 4096], vspill: &![i64; 4096], scnt: &![i64; 4], xlen: &![i64; 4], vvalid: &![i64; 4], sos: &![i64; 4], ids: &[CpuBuf; 8], sprio: &[i64; 8]) -> CpuBuf with Alloc, Mut, Panic, Div, IO {
+pub fn svb_pump_fwd(m: &!Llama, pks_k: &![PagedKv; 256], pks_v: &![PagedKv; 256], slots: &![SvSlot; 4], bank: &![i64; 16384], q: &!SvQueue, rt: &Runtime, use_gpu: bool, pagedev: bool, chunk: i64, rslot: &![i64; 16], rpos: &![i64; 16], toks: &![i64; 16], kind: &![i64; 16], rowtok: &![i64; 16], seedrow: &![i64; 4], meta: &![i64; 4], spill: &![i64; 4096], vspill: &![i64; 4096], scnt: &![i64; 4], xlen: &![i64; 4], vvalid: &![i64; 4], sos: &![i64; 4], ids: &[CpuBuf; 8], sprio: &[i64; 8], swait: &![i64; 8]) -> CpuBuf with Alloc, Mut, Panic, Div, IO {
     let cap = 64 * pks_k[0].b
     meta[3] = 0
-    svb_admit_all(slots, q, pks_k, pks_v, bank, ids, spill, vspill, scnt, xlen, vvalid, sos, sprio, meta)
+    svb_admit_all(slots, q, pks_k, pks_v, bank, ids, spill, vspill, scnt, xlen, vvalid, sos, sprio, swait, meta)
     let n = svb_build_rows(slots, bank, spill, xlen, cap, chunk, rslot, rpos, toks, kind, rowtok, seedrow, meta)
     meta[0] = n
     meta[1] = q.count
@@ -1803,9 +1836,9 @@ pub fn svb_pump_adv(slots: &![SvSlot; 4], pks_k: &![PagedKv; 256], pks_v: &![Pag
 // token per row (rowtok, -1 when a prefill row seeds nothing) and
 // meta (meta[0] row count, meta[1] queue count, meta[2] finished).
 // Returns stacked row logits.
-pub fn svb_pump(m: &!Llama, pks_k: &![PagedKv; 256], pks_v: &![PagedKv; 256], slots: &![SvSlot; 4], bank: &![i64; 16384], q: &!SvQueue, rt: &Runtime, use_gpu: bool, pagedev: bool, chunk: i64, rslot: &![i64; 16], rpos: &![i64; 16], toks: &![i64; 16], kind: &![i64; 16], rowtok: &![i64; 16], meta: &![i64; 4], spill: &![i64; 4096], vspill: &![i64; 4096], scnt: &![i64; 4], xlen: &![i64; 4], vvalid: &![i64; 4], sos: &![i64; 4], ids: &[CpuBuf; 8], sprio: &[i64; 8]) -> CpuBuf with Alloc, Mut, Panic, Div, IO {
+pub fn svb_pump(m: &!Llama, pks_k: &![PagedKv; 256], pks_v: &![PagedKv; 256], slots: &![SvSlot; 4], bank: &![i64; 16384], q: &!SvQueue, rt: &Runtime, use_gpu: bool, pagedev: bool, chunk: i64, rslot: &![i64; 16], rpos: &![i64; 16], toks: &![i64; 16], kind: &![i64; 16], rowtok: &![i64; 16], meta: &![i64; 4], spill: &![i64; 4096], vspill: &![i64; 4096], scnt: &![i64; 4], xlen: &![i64; 4], vvalid: &![i64; 4], sos: &![i64; 4], ids: &[CpuBuf; 8], sprio: &[i64; 8], swait: &![i64; 8]) -> CpuBuf with Alloc, Mut, Panic, Div, IO {
     var seedrow: [i64; 4] = [0 - 1; 4]
-    let out = svb_pump_fwd(m, pks_k, pks_v, slots, bank, q, rt, use_gpu, pagedev, chunk, rslot, rpos, toks, kind, rowtok, &!seedrow, meta, spill, vspill, scnt, xlen, vvalid, sos, ids, sprio)
+    let out = svb_pump_fwd(m, pks_k, pks_v, slots, bank, q, rt, use_gpu, pagedev, chunk, rslot, rpos, toks, kind, rowtok, &!seedrow, meta, spill, vspill, scnt, xlen, vvalid, sos, ids, sprio, swait)
     let n = meta[0]
     if n <= 0 {
         return out

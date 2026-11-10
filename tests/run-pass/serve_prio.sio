@@ -5,6 +5,12 @@
 // and its rows are recomputed bit-exact against sequential single
 // forwards. Asserts a preempt bit was observed, every row replayed
 // token-for-token, and all five finish with the queue drained.
+// M12 hold bound (mode 3): 4 long priority-2 decoders fill the
+// table and a priority-0 waiter arrives at turn 1; held past
+// SVB_MAX_HOLD passes it preempts regardless of class. Asserts
+// the waiter first appears in a slot in the same turn that
+// slot's preempt bit fires (free-slot admission sets no bit,
+// so pre-M12 code fails this mode).
 use llm::attn_gpu::llama_sample_greedy
 use llm::llama::{Llama, llama_forward, llama_load, paged_kv_new_batch}
 use llm::serve::{svb_pump, svb_qpush, SvQueue, SvSlot}
@@ -42,7 +48,7 @@ fn scenario(m: &!Llama, rt: &Runtime, use_gpu: bool, pagedev: bool, mode: i64) -
     bank[13] = 1
     bank[14] = 903
     bank[15] = 904
-    let rmax: [i64; 5] = [6, 6, 6, 6, 5]
+    var rmax: [i64; 5] = [6, 6, 6, 6, 5]
     // reference: main cache per sequence keeps FULL history and is
     // never reset; scratch cache replays recompute passes. Decode rows
     // always compare against full history, so a lossy recompute fails.
@@ -79,6 +85,7 @@ fn scenario(m: &!Llama, rt: &Runtime, use_gpu: bool, pagedev: bool, mode: i64) -
     var vvalid: [i64; 4] = [0; 4]
     var t_sos: [i64; 4] = [0 - 1; 4]
     var t_sprio: [i64; 8] = [0; 8]
+    var t_swait: [i64; 8] = [0; 8]
     if mode == 0 {
         t_sprio[0] = 5
         t_sprio[4] = 9
@@ -88,6 +95,18 @@ fn scenario(m: &!Llama, rt: &Runtime, use_gpu: bool, pagedev: bool, mode: i64) -
         t_sprio[1] = 1
         t_sprio[2] = 1
         t_sprio[3] = 1
+    }
+    if mode == 3 {
+        t_sprio[1] = 2
+        t_sprio[2] = 2
+        t_sprio[3] = 2
+        t_sprio[4] = 2
+        // M12: long decoders hold the table past the hold bound
+        // (probe: no early EOS in 240 decode steps on this model).
+        rmax[1] = 60
+        rmax[2] = 60
+        rmax[3] = 60
+        rmax[4] = 60
     }
     var t_ids: [CpuBuf; 8] = [CpuBuf { data: 0 as *mut f64, len: 0 }; 8]
     var fe: i64 = 0
@@ -111,12 +130,22 @@ fn scenario(m: &!Llama, rt: &Runtime, use_gpu: bool, pagedev: bool, mode: i64) -
     var aslot: i64 = 0 - 1
     var a_safe = true
     var preempted = false
+    // M12: waiter (session 0) first sighting and whether it arrived
+    // through a preemption: free-slot admission sets no preempt bit,
+    // so pre-M12 code leaves wpreempt false deterministically.
+    var wfirst = false
+    var wpreempt = false
     var ok = true
     var turn: i64 = 0
     if mode == 0 {
         q.count = svb_qpush(&!q, 4, 3, rmax[1], 1)
         q.count = svb_qpush(&!q, 7, 3, rmax[2], 2)
         q.count = svb_qpush(&!q, 10, 3, rmax[3], 3)
+    } else if mode == 3 {
+        q.count = svb_qpush(&!q, 4, 3, rmax[1], 1)
+        q.count = svb_qpush(&!q, 7, 3, rmax[2], 2)
+        q.count = svb_qpush(&!q, 10, 3, rmax[3], 3)
+        q.count = svb_qpush(&!q, 13, 3, rmax[4], 4)
     } else {
         q.count = svb_qpush(&!q, 0, 4, rmax[0], 0)
         q.count = svb_qpush(&!q, 4, 3, rmax[1], 1)
@@ -127,7 +156,10 @@ fn scenario(m: &!Llama, rt: &Runtime, use_gpu: bool, pagedev: bool, mode: i64) -
         if mode == 0 && turn == 2 {
             q.count = svb_qpush(&!q, 0, 4, rmax[0], 0)
         }
-        if turn == 6 && !pushed_e {
+        if mode == 3 && turn == 1 {
+            q.count = svb_qpush(&!q, 0, 4, rmax[0], 0)
+        }
+        if turn == 6 && !pushed_e && mode != 3 {
             q.count = svb_qpush(&!q, 13, 3, rmax[4], 4)
             pushed_e = true
         }
@@ -136,7 +168,7 @@ fn scenario(m: &!Llama, rt: &Runtime, use_gpu: bool, pagedev: bool, mode: i64) -
             rowtok[zi as usize] = 0 - 1
             zi = zi + 1
         }
-        let out = svb_pump(m, &!pkk, &!pkv, &!slots, &!bank, &!q, rt, use_gpu, pagedev, chunk, &!rslot, &!rpos, &!toks, &!kind, &!rowtok, &!meta, &!spill, &!vspill, &!scnt, &!xlen, &!vvalid, &!t_sos, &t_ids, &t_sprio)
+        let out = svb_pump(m, &!pkk, &!pkv, &!slots, &!bank, &!q, rt, use_gpu, pagedev, chunk, &!rslot, &!rpos, &!toks, &!kind, &!rowtok, &!meta, &!spill, &!vspill, &!scnt, &!xlen, &!vvalid, &!t_sos, &t_ids, &t_sprio, &!t_swait)
         q.count = meta[1]
         if meta[3] / 256 > 0 { preempted = true }
         let n = meta[0]
@@ -174,6 +206,10 @@ fn scenario(m: &!Llama, rt: &Runtime, use_gpu: bool, pagedev: bool, mode: i64) -
                 let si = rslot[r as usize]
                 let sq = slotseq[si as usize]
                 if sq < 0 { ok = false }
+                if mode == 3 && sq == 0 && !wfirst {
+                    wfirst = true
+                    if (meta[3] / (1 << (si + 8))) % 2 == 1 { wpreempt = true }
+                }
                 var oo = ck_alloc(1)
                 var rr = ck_alloc(1)
                 // replay rows (rpos behind main) go to scratch; fresh
@@ -259,6 +295,7 @@ fn scenario(m: &!Llama, rt: &Runtime, use_gpu: bool, pagedev: bool, mode: i64) -
     } else {
         if !preempted { ok = false }
     }
+    if mode == 3 && !wpreempt { ok = false }
     if mode == 0 && !a_safe { ok = false }
     if rdone[0] != 1 || rdone[1] != 1 || rdone[2] != 1 || rdone[3] != 1 || rdone[4] != 1 { ok = false }
     ok
@@ -271,6 +308,7 @@ fn main() with IO, Mut, Panic, Div, Alloc {
     var ok = scenario(&!m, &rt, false, false, 0)
     if !scenario(&!m, &rt, false, false, 1) { ok = false }
     if !scenario(&!m, &rt, false, false, 2) { ok = false }
+    if !scenario(&!m, &rt, false, false, 3) { ok = false }
     if rt.ready {
         var m2 = llama_load("tests/fixtures/tiny-random-Llama")
         if !m2.loaded { ok = false }
