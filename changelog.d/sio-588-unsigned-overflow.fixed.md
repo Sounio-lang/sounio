@@ -13,5 +13,8 @@ the `i64` trap, the `wrapping_*` builtins, and the `E300` refusal of
 out-of-range narrow constants. On pre-207 trees the gate runs the SIO-588
 sections only (4-5) and reports the 207 sections (1-3, 6) as loud skips.
 
-Pinned by `scripts/ci/madaros_int_overflow_gate.sh` sections 4-5 and
-`tests/run-pass/u64_wrap_arith.sio`, `tests/run-pass/i32_dynamic_wrap.sio`.
+Pinned by `tests/run-pass/u64_wrap_arith.sio` and
+`tests/run-pass/i32_dynamic_wrap.sio` (both run in the Full Test Suite).
+The full six-section gate (with SIO-207 sections) lives on card SIO-588
+as a workspace receipt; it stays out of `scripts/ci/` per the
+`gate_workflow_reference_ratchet` freeze on unwired gates.
