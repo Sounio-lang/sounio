@@ -25,15 +25,15 @@ order decision.
 
 Raw material and attestation:
 [`docs/audit/S01_SYN_PROBES_2026-11-10/`](../../audit/S01_SYN_PROBES_2026-11-10/README.md).
-The canonical run is `20261110-0d619ed0-canonical`, Slurm job `22691`, on a
-clean tree at `0d619ed0e8f23f630de01fd0af356e29cd70c687`.
+The canonical run is `20261110-27aa1274-canonical`, Slurm job `22715`, on a
+clean tree at `27aa127441c58f62a9035ff640b7b076bbfec07c`.
 
 ## Engine identity
 
 | engine | executable evidence |
 |---|---|
-| current-source Madaros | Built immediately before the matrix by `scripts/ci/build_modular_madaros.sh`; SHA-256 `6bb517501e2ea416d62f7c9ba423be3731784061c4d735543ed531821a18fd27`; `bin/madaros info` attests the exact raw path. |
-| `lean_single` | `bin/souc-lean-single-x86_64`; SHA-256 `5a1ab6f9650d35d1efe368a61175ef0e016d7113a90f00fd8406cb1538ffe292`; `canonical_compiler_gate.sh` passed and an execution trace attests the wrapper route. |
+| current-source Madaros | Built immediately before the matrix by `scripts/ci/build_modular_madaros.sh`; SHA-256 `5ffed8429a4da0490308cfee924aa69092d75e56eae0b8cc9e493655d4ae7ddf`; `bin/madaros info` attests the exact raw path. |
+| `lean_single` | `bin/souc-lean-single-x86_64`; SHA-256 `1432a42b6463d57dcbf2c7a1c9b5677ec2469bc44579a2e6feed82cb9876ad81`; `canonical_compiler_gate.sh` passed and an execution trace attests the wrapper route. |
 
 The manifest also records the source files, build script, public wrappers,
 resolver scripts, timeout binary, kernel/architecture, hostname, compiler build

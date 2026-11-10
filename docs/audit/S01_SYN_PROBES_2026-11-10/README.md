@@ -50,7 +50,7 @@ was confirmed. A nonzero harness status does not erase the receipt; it means
 one or more positive witnesses failed and must be represented by a tracked task
 before the work card can close.
 
-Canonical source-bound run: [`runs/20261110-0d619ed0-canonical/`](runs/20261110-0d619ed0-canonical/)
-on Slurm job `22691`. Native artifacts are intentionally not committed; their
+Canonical source-bound run: [`runs/20261110-27aa1274-canonical/`](runs/20261110-27aa1274-canonical/)
+on Slurm job `22715`. Native artifacts are intentionally not committed; their
 SHA-256 values remain in `results.tsv`, while the manifest, build attestation,
 raw front-end/native logs, and exact expected stdout files are retained.
