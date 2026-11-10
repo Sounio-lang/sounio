@@ -60,6 +60,12 @@ struct LowerLocalStack {
     // wide_signed only fires for bits>64, so this field is the separate
     // per-slot tracker for the standard 8/16/32/64-bit unsigned widths.
     is_unsigned_int: Box<LowerLocalI64Slots>,
+    // SIO-588: 32 when the local/param was bound with an i32/u32 annotation
+    // (else 0). Signedness still comes from is_unsigned_int (u32 sets both).
+    // Drives 32-bit result narrowing in lower_binary_expr_ref: a 64-bit word
+    // slot otherwise keeps the full 64-bit result of `a + 1` on i32/u32
+    // operands. 8/16-bit widths are not stamped narrow here (residual gap).
+    narrow32: Box<LowerLocalI64Slots>,
     global_bss_offsets: Box<LowerLocalI64Slots>,
     global_bss_sizes: Box<LowerLocalI64Slots>,
     is_global: Box<LowerLocalI64Slots>,
@@ -339,6 +345,8 @@ fn empty_lower_local_stack() -> LowerLocalStack with Alloc, Mut {
         wide_signed: lowerer_box_local_i64_slots(0),
         // Findings 11 (#2084): see the is_unsigned_int field comment above.
         is_unsigned_int: lowerer_box_local_i64_slots(0),
+        // SIO-588: see the narrow32 field comment above.
+        narrow32: lowerer_box_local_i64_slots(0),
         global_bss_offsets: lowerer_box_local_i64_slots(0),
         global_bss_sizes: lowerer_box_local_i64_slots(0),
         is_global: lowerer_box_local_i64_slots(0),
@@ -7279,6 +7287,8 @@ fn lowerer_bind_local_mut(
         (*(*locals_box).wide_signed).values[idx as usize] = 0
         // Findings 11 (#2084): zero-init the per-slot unsigned-int flag.
         (*(*locals_box).is_unsigned_int).values[idx as usize] = 0
+        // SIO-588: zero-init the per-slot 32-bit-narrow flag.
+        (*(*locals_box).narrow32).values[idx as usize] = 0
         (*(*locals_box).global_bss_offsets).values[idx as usize] = 0
         (*(*locals_box).global_bss_sizes).values[idx as usize] = 0
         (*(*locals_box).is_global).values[idx as usize] = 0
@@ -7492,6 +7502,22 @@ fn lowerer_mark_local_unsigned_int_mut(lo: &! Lowerer, name: Name) with Mut, All
     while i >= 0 {
         if (*(*locals_box).depths).values[i as usize] <= (*lo).scope_depth && ir_name_eq((*(*locals_box).names).values[i as usize], name) {
             (*(*locals_box).is_unsigned_int).values[i as usize] = 1
+            (*lo).locals = locals_box
+            return
+        }
+        i = i - 1
+    }
+}
+
+// SIO-588: *mut analogue of bind_local_narrow32 for the
+// lowerer_bind_local_mut parameter path (which zeroes the slot). Called
+// next to lowerer_mark_local_unsigned_int_mut with the param's own type.
+fn lowerer_mark_local_narrow32_mut(lo: &! Lowerer, name: Name) with Mut, Alloc, Panic, Div {
+    var locals_box = (*lo).locals
+    var i = (*locals_box).count - 1
+    while i >= 0 {
+        if (*(*locals_box).depths).values[i as usize] <= (*lo).scope_depth && ir_name_eq((*(*locals_box).names).values[i as usize], name) {
+            (*(*locals_box).narrow32).values[i as usize] = 1
             (*lo).locals = locals_box
             return
         }
@@ -7934,6 +7960,10 @@ fn lowerer_lower_fn_params_mut(
                 lowerer_bind_local_mut(lo, (*list).head.name, param_value_reg, (*list).head.is_self_mut)
                 if lower_type_expr_is_unsigned_int(&(*list).head.ty) {
                     lowerer_mark_local_unsigned_int_mut(lo, (*list).head.name)
+                }
+                // SIO-588: stamp narrow32 on i32/u32 params on this binder path.
+                if lower_type_expr_is_narrow32(&(*list).head.ty) {
+                    lowerer_mark_local_narrow32_mut(lo, (*list).head.name)
                 }
                 // An array-of-tuples param (`&[(f64, f64)]`) carries its ELEMENT
                 // tuple's float mask: see lower_type_array_elem_tuple_float_mask.
@@ -9754,6 +9784,77 @@ fn lower_cast_narrow_unsigned_mask(ct: &Option<Box<TypeExpr>>) -> i64 with Mut, 
                 if n.buf[1] == 51 as i8 && n.buf[2] == 50 as i8 { return 4294967295 }
             }
             0
+        },
+        None => 0,
+    }
+}
+
+// SIO-588: 32-bit narrow integer annotation test. Selects i32/u32 only;
+// u8/u16/i8/i16 dynamic narrowing is a residual gap (their casts already
+// mask on the unsigned side via lower_cast_narrow_unsigned_mask).
+fn lower_name_is_narrow32_type(n: Name) -> bool with Div {
+    if n.len == 3 && n.buf[1] == 51 as i8 && n.buf[2] == 50 as i8 {
+        return n.buf[0] == 105 as i8 || n.buf[0] == 117 as i8
+    }
+    false
+}
+
+fn lower_type_expr_is_narrow32(te: &TypeExpr) -> bool with Mut, Panic, Div {
+    if (*te).kind != TypeExprKind::TypeNamed { return false }
+    lower_name_is_narrow32_type(ir_path_first_name((*te).path))
+}
+
+fn lower_opt_type_is_narrow32(opt: &Option<Box<TypeExpr>>) -> bool with Mut, Panic, Div {
+    match *opt {
+        Some(te) => lower_type_expr_is_narrow32(&(*te)),
+        None => false,
+    }
+}
+
+// SIO-588: narrow-32 kind of a type name: 0 = not i32/u32, 1 = i32
+// (sign-extend the low 32 bits), 2 = u32 (mask the low 32 bits).
+fn lower_name_narrow32_kind(n: Name) -> i64 with Div {
+    if n.len == 3 && n.buf[1] == 51 as i8 && n.buf[2] == 50 as i8 {
+        if n.buf[0] == 105 as i8 { return 1 }
+        if n.buf[0] == 117 as i8 { return 2 }
+    }
+    0
+}
+
+// SIO-588: wrap a 64-bit integer result back to 32 bits after an i32/u32
+// binop (or unary negation). kind 1 (i32) sign-extends the low 32 bits via
+// (x << 32) >> 32 with the arithmetic shr; kind 2 (u32) masks with
+// 0xFFFFFFFF. kind 0 returns the register unchanged. Pure IR built from the
+// existing OpShl/OpShr/OpBitAnd, so every backend lowers it with no new
+// opcodes and no overflow guard (wrapping is the defined narrow result);
+// const-prop only folds all-constant inputs, never runtime registers.
+fn lower_narrow32_wrap_reg(lo: Lowerer, reg: i64, kind: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+    if kind == 2 {
+        let mp = lo.emit_i64_const(4294967295)
+        var lo2 = mp.0
+        let np = lo2.fresh_reg()
+        lo2 = np.0
+        return (lo2.emit(ir_binop(np.1, reg, BinaryOp::OpBitAnd, mp.1)), np.1)
+    }
+    if kind == 1 {
+        let cp = lo.emit_i64_const(32)
+        var lo2 = cp.0
+        let tp = lo2.fresh_reg()
+        lo2 = tp.0
+        lo2 = lo2.emit(ir_binop(tp.1, reg, BinaryOp::OpShl, cp.1))
+        let np = lo2.fresh_reg()
+        lo2 = np.0
+        return (lo2.emit(ir_binop(np.1, tp.1, BinaryOp::OpShr, cp.1)), np.1)
+    }
+    (lo, reg)
+}
+
+// SIO-588: narrow-32 kind of a cast target (see lower_name_narrow32_kind).
+fn lower_cast_narrow32_kind(ct: &Option<Box<TypeExpr>>) -> i64 with Mut, Panic, Div {
+    match *ct {
+        Some(te) => {
+            if (*te).kind != TypeExprKind::TypeNamed { return 0 }
+            lower_name_narrow32_kind(ir_path_first_name((*te).path))
         },
         None => 0,
     }
@@ -16672,6 +16773,8 @@ impl Lowerer {
                 (*(*stk).wide_signed).values[idx as usize] = 0
                 // Findings 11 (#2084): zero-init the per-slot unsigned-int flag.
                 (*(*stk).is_unsigned_int).values[idx as usize] = 0
+                // SIO-588: zero-init the per-slot 32-bit-narrow flag.
+                (*(*stk).narrow32).values[idx as usize] = 0
                 (*(*stk).is_ref).values[idx as usize] = 0
                 (*(*stk).is_borrow_handle).values[idx as usize] = 0
                 // Explicit 0: slot may be reused after scope-pop restores count.
@@ -17352,6 +17455,38 @@ impl Lowerer {
         while i >= 0 {
             if (*(*stk).depths).values[i as usize] <= lo.scope_depth && ir_name_eq((*(*stk).names).values[i as usize], name) {
                 (*(*stk).is_unsigned_int).values[i as usize] = 1
+                lo.locals = stk
+                return lo
+            }
+            i = i - 1
+        }
+        lo
+    }
+
+    // SIO-588: look up the per-slot 32-bit-narrow flag set when the
+    // local/param was bound with an i32/u32 annotation. 1 means narrow;
+    // signedness still comes from lookup_local_is_unsigned_int. Default 0
+    // (word-width or unknown), so i64-style locals keep today's 64-bit path.
+    fn lookup_local_narrow32(self, name: Name) -> i64 with Mut, Panic, Div, Alloc {
+        var i = (*self.locals).count - 1
+        while i >= 0 {
+            if (*(*self.locals).depths).values[i as usize] <= self.scope_depth && ir_name_eq((*(*self.locals).names).values[i as usize], name) {
+                return (*(*self.locals).narrow32).values[i as usize]
+            }
+            i = i - 1
+        }
+        0
+    }
+
+    // SIO-588: stamp narrow32=1 on the local whose type annotation is
+    // i32/u32. Same top-down shadowing walk as bind_local_is_unsigned_int.
+    fn bind_local_narrow32(self, name: Name) -> Lowerer with Mut, Alloc, Panic, Div {
+        var lo = self
+        var stk = lo.locals
+        var i = (*stk).count - 1
+        while i >= 0 {
+            if (*(*stk).depths).values[i as usize] <= lo.scope_depth && ir_name_eq((*(*stk).names).values[i as usize], name) {
+                (*(*stk).narrow32).values[i as usize] = 1
                 lo.locals = stk
                 return lo
             }
@@ -27286,6 +27421,10 @@ impl Lowerer {
     //   - ExprCast with cast_type = u8/u16/u32/u64/usize → true
     //   - ExprIdent whose local was bound with such a type        → true
     //   - ExprBinary                                            → propagate from left
+    //   - ExprCall whose callee returns u8/u16/u32/u64/usize     → true
+    //     (SIO-588: without this, a direct call result such as
+    //     `id(0) - 1` misses the unsigned flip and silently stays
+    //     signed — same shape as the narrow-32 call arm below)
     //   - everything else (IntLit, FloatLit, BoolLit, StringLit) → false
     //
     // A boolean-literal, integer-literal, or float-literal CANNOT carry
@@ -27322,6 +27461,122 @@ impl Lowerer {
             // the literal binding via let-typed locals; a nested let n: u64 =
             // foo() + bar() will be re-tagged when the inner if-let lands).
             return self.opt_expr_is_unsigned_int_ref(&(*e).left)
+        }
+        if (*e).kind == ExprKind::ExprCall {
+            // SIO-588: a direct call result carries its callee's return
+            // type — resolve it the same way the narrow-32/int-compatible
+            // arms below do, so `id(0) - 1` flips to OpUSub instead of
+            // silently staying signed.
+            match (*e).left {
+                Some(callee_expr) => {
+                    let callee_name = self.expr_to_callee_name_ref(&(*callee_expr))
+                    let fn_id = lowerer_lookup_fn_id_by_name_ref(&self, callee_name)
+                    if fn_id >= 0 && fn_id < self.module.fn_count {
+                        let callee_fn = ir_fn_get(&(*self.module), fn_id)
+                        return lower_name_is_unsigned_int_type(callee_fn.return_struct_name)
+                    }
+                    return false
+                },
+                None => return false,
+            }
+        }
+        false
+    }
+
+    // SIO-588: `opt_expr_narrow32_kind_ref` walks an expression to determine
+    // whether it is an i32-typed (returns 1) or u32-typed (returns 2) result,
+    // 0 otherwise. Coverage mirrors opt_expr_is_unsigned_int_ref:
+    //   - ExprCast with cast_type = i32 → 1, u32 → 2
+    //   - ExprIdent whose local was bound with such a type (narrow32 slot
+    //     set; signedness from the is_unsigned_int slot) → 1 or 2
+    //   - ExprBinary → propagate from left (the checker types arithmetic
+    //     results as the LEFT operand: check/compat.sio binary_result_type)
+    //   - ExprCall whose callee returns i32/u32 → 1 or 2
+    //   - everything else (literals, other types) → 0. A bare integer
+    //     literal is untyped at this level; the binary-op call site pairs it
+    //     contextually with a typed sibling, as with unsigned.
+    fn opt_expr_narrow32_kind_ref(self, opt: &Option<Box<Expr>>) -> i64 with Mut, Panic, Div, Alloc {
+        match *opt {
+            Some(expr) => self.expr_narrow32_kind_ref(&(*expr)),
+            None => 0,
+        }
+    }
+
+    fn expr_narrow32_kind_ref(self, e: &Expr) -> i64 with Mut, Panic, Div, Alloc {
+        if (*e).kind == ExprKind::ExprCast {
+            return lower_cast_narrow32_kind(&(*e).cast_type)
+        }
+        if (*e).kind == ExprKind::ExprIdent {
+            if self.lookup_local_narrow32((*e).name) == 1 {
+                if self.lookup_local_is_unsigned_int((*e).name) == 1 {
+                    return 2
+                }
+                return 1
+            }
+            return 0
+        }
+        if (*e).kind == ExprKind::ExprBinary {
+            return self.opt_expr_narrow32_kind_ref(&(*e).left)
+        }
+        if (*e).kind == ExprKind::ExprCall {
+            match (*e).left {
+                Some(callee_expr) => {
+                    let callee_name = self.expr_to_callee_name_ref(&(*callee_expr))
+                    let fn_id = lowerer_lookup_fn_id_by_name_ref(&self, callee_name)
+                    if fn_id >= 0 && fn_id < self.module.fn_count {
+                        let callee_fn = ir_fn_get(&(*self.module), fn_id)
+                        return lower_name_narrow32_kind(callee_fn.return_struct_name)
+                    }
+                    return 0
+                },
+                None => return 0,
+            }
+        }
+        0
+    }
+
+    // SIO-588: is this expression a plausible integer operand for a
+    // narrow-32 binary (anything whose 64-bit word value the checker would
+    // accept next to an i32/u32)? Int literals, integer casts, scalar-kind-1
+    // idents (int/bool words), integer binaries (from the left), integer
+    // calls and `.len()`/`.count()` (i64). Floats, strings and unknowns
+    // return false so narrowing never touches a float or string `+`.
+    fn opt_expr_is_int_compatible_ref(self, opt: &Option<Box<Expr>>) -> bool with Mut, Panic, Div, Alloc {
+        match *opt {
+            Some(expr) => self.expr_is_int_compatible_ref(&(*expr)),
+            None => false,
+        }
+    }
+
+    fn expr_is_int_compatible_ref(self, e: &Expr) -> bool with Mut, Panic, Div, Alloc {
+        if (*e).kind == ExprKind::ExprIntLit {
+            return true
+        }
+        if (*e).kind == ExprKind::ExprCast {
+            return lower_cast_type_is_integer(&(*e).cast_type)
+        }
+        if (*e).kind == ExprKind::ExprIdent {
+            return self.lookup_local_scalar_kind((*e).name) == 1
+        }
+        if (*e).kind == ExprKind::ExprBinary {
+            return self.opt_expr_is_int_compatible_ref(&(*e).left)
+        }
+        if (*e).kind == ExprKind::ExprCall {
+            match (*e).left {
+                Some(callee_expr) => {
+                    let callee_name = self.expr_to_callee_name_ref(&(*callee_expr))
+                    let fn_id = lowerer_lookup_fn_id_by_name_ref(&self, callee_name)
+                    if fn_id >= 0 && fn_id < self.module.fn_count {
+                        let callee_fn = ir_fn_get(&(*self.module), fn_id)
+                        return lower_name_is_integer_type(callee_fn.return_struct_name)
+                    }
+                    return false
+                },
+                None => false,
+            }
+        }
+        if (*e).kind == ExprKind::ExprMethodCall {
+            return ir_name_eq((*e).name, make_name("len")) || ir_name_eq((*e).name, make_name("count"))
         }
         false
     }
@@ -29486,6 +29741,8 @@ impl Lowerer {
                         (*(*locals).wide_signed).values[idx as usize] = 0
                         // Findings 11 (#2084): stamp is_unsigned_int=1 when the param is u8/u16/u32/u64/usize.
                         (*(*locals).is_unsigned_int).values[idx as usize] = if lower_type_expr_is_unsigned_int(&(*list).head.ty) { 1 } else { 0 }
+                        // SIO-588: stamp narrow32=1 when the param is i32/u32.
+                        (*(*locals).narrow32).values[idx as usize] = if lower_type_expr_is_narrow32(&(*list).head.ty) { 1 } else { 0 }
                         (*(*locals).is_ref).values[idx as usize] = if lower_type_expr_is_ref_like(&(*list).head.ty) { 1 } else if (*list).head.ty.kind == TypeExprKind::TypeRawPtr { 2 } else { 0 }
                         // Copilot review (PR #2516): a tuple-typed PARAMETER (e.g.
                         // fn f(t: (f64, [f64; 8]))) needs the same per-slot masks a
@@ -32293,6 +32550,17 @@ impl Lowerer {
             Some(ann_ty_unsigned) => {
                 if lower_type_expr_is_unsigned_int(&(*ann_ty_unsigned)) {
                     lo = lo.bind_local_is_unsigned_int(s.name)
+                }
+            }
+            _ => {}
+        }
+        // SIO-588: if the let type annotation is i32/u32, stamp narrow32 so
+        // lower_binary_expr_ref can wrap the 64-bit binop result back to 32
+        // bits. Signedness still comes from the is_unsigned_int stamp above.
+        match s.ty {
+            Some(ann_ty_narrow) => {
+                if lower_type_expr_is_narrow32(&(*ann_ty_narrow)) {
+                    lo = lo.bind_local_narrow32(s.name)
                 }
             }
             _ => {}
@@ -38561,6 +38829,20 @@ impl Lowerer {
                 final_op = BinaryOp::OpURem
             } else if e.bin_op == BinaryOp::OpShr {
                 final_op = BinaryOp::OpUShr
+            } else if e.bin_op == BinaryOp::OpAdd {
+                // SIO-588: unsigned +,-,* wrap by definition, so they take
+                // the unsigned variant with NO overflow trap. The emitted
+                // add/sub/imul bit patterns are identical to the signed
+                // ones (only the OF vs CF condition differs); SIO-207 arms
+                // its `jo` trap after the signed variants only, so the
+                // U-variants are exactly "same bits, no trap". Same guard
+                // shape as Div/Rem/Shr above: mixed signedness stays signed
+                // (trapping), per the #2286 review.
+                final_op = BinaryOp::OpUAdd
+            } else if e.bin_op == BinaryOp::OpSub {
+                final_op = BinaryOp::OpUSub
+            } else if e.bin_op == BinaryOp::OpMul {
+                final_op = BinaryOp::OpUMul
             }
             // #2830: unsigned < <= > >=. BinaryOp has no unsigned compares and every
             // backend emits setl/setg (signed), so `a > 1` was false for a u64 with
@@ -38588,6 +38870,30 @@ impl Lowerer {
             }
         }
         let lo4 = lo3.emit(ir_binop_typed(dst, lhs, final_op, rhs, lhs_expr_is_float, rhs_expr_is_float))
+        // SIO-588: dynamic narrow-32 enforcement. The checker types an
+        // arithmetic result as the LEFT operand (binary_result_type), so a
+        // 64-bit word slot holding an i32/u32 result must be wrapped back to
+        // 32 bits: i32 sign-extends, u32 masks. Gate: left is i32/u32-typed,
+        // both sides non-float, right is integer-compatible (literal,
+        // integer cast/ident/call, .len()/.count()) — the same contextual
+        // literal pairing as the unsigned flip, extended to any integer
+        // right side, since a checker-accepted program only pairs numerics
+        // here. `1 + a32` keeps the 64-bit result (its type IS i64: left
+        // rules), as does any op the gate cannot positively type.
+        if e.bin_op == BinaryOp::OpAdd || e.bin_op == BinaryOp::OpSub || e.bin_op == BinaryOp::OpMul {
+            if !lhs_expr_is_float && !rhs_expr_is_float {
+                let narrow_kind = lo4.opt_expr_narrow32_kind_ref(&e.left)
+                if narrow_kind != 0 {
+                    let rhs_int_p = match e.right {
+                        Some(nrbox) => rhs_is_intlit_p || lo4.expr_is_int_compatible_ref(&(*nrbox)),
+                        None => false,
+                    }
+                    if rhs_int_p {
+                        return lower_narrow32_wrap_reg(lo4, dst, narrow_kind)
+                    }
+                }
+            }
+        }
         (lo4, dst)
     }
 
@@ -40163,6 +40469,17 @@ impl Lowerer {
         }
         if src_is_float || deref_yields_float {
             lo3 = lo3.emit(ir_mark_float_reg(dst))
+        }
+        // SIO-588: dynamic narrow-32 enforcement for unary negation. `-a`
+        // on an i32/u32 operand negates in 64 bits (the SIO-207 `jo` guard
+        // cannot fire on a 32-bit-range value, so the trap story is
+        // unchanged) and the result wraps back to 32 bits, exactly as the
+        // binary Add/Sub/Mul narrowing above. Float negation is untouched.
+        if e.un_op == UnaryOp::OpNeg && !src_is_float {
+            let neg_narrow_kind = lo3.opt_expr_narrow32_kind_ref(&e.left)
+            if neg_narrow_kind != 0 {
+                return lower_narrow32_wrap_reg(lo3, dst, neg_narrow_kind)
+            }
         }
         (lo3, dst)
     }

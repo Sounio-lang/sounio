@@ -11718,6 +11718,42 @@ fn nc_emit_core_binop(nc: &! NativeCompiler, func: &IrFunction, instr_index: i64
         nc_core_mark_int_reg(nc, dst)
         return true
     }
+    // SIO-588: unsigned add/sub/mul. Same bit-producing instructions as the
+    // signed arms above (x86 add/sub/imul are signedness-agnostic), but with
+    // NO overflow guard: unsigned arithmetic wraps by definition, so the
+    // SIO-207 `jo` trap must not fire here. The lowerer only emits these
+    // for u8/u16/u32/u64/usize-typed operands (or literals paired with
+    // one); 32-bit results are already narrowed to width by the lowerer.
+    if op == BinaryOp::OpUAdd {
+        nc_core_load_temp_to_rax(nc, lhs)
+        nc_emit_push_rax(nc)
+        nc_core_load_temp_to_rax(nc, rhs)
+        nc_emit_pop_rbx(nc)
+        nc_emit_add_rax_rbx(nc)
+        nc_core_store_rax_to_temp(nc, dst)
+        nc_core_mark_int_reg(nc, dst)
+        return true
+    }
+    if op == BinaryOp::OpUSub {
+        nc_core_load_temp_to_rax(nc, rhs)
+        nc_emit_push_rax(nc)
+        nc_core_load_temp_to_rax(nc, lhs)
+        nc_emit_pop_rbx(nc)
+        nc_emit_sub_rax_rbx(nc)
+        nc_core_store_rax_to_temp(nc, dst)
+        nc_core_mark_int_reg(nc, dst)
+        return true
+    }
+    if op == BinaryOp::OpUMul {
+        nc_core_load_temp_to_rax(nc, lhs)
+        nc_emit_push_rax(nc)
+        nc_core_load_temp_to_rax(nc, rhs)
+        nc_emit_pop_rbx(nc)
+        nc_emit_imul_rax_rbx(nc)
+        nc_core_store_rax_to_temp(nc, dst)
+        nc_core_mark_int_reg(nc, dst)
+        return true
+    }
     if op == BinaryOp::OpDiv {
         nc_core_load_temp_to_rax(nc, rhs)
         nc_emit_mov_reg_reg(nc, 1, 0)
@@ -16202,6 +16238,10 @@ fn a64_preview_binop_name(op: BinaryOp) -> string {
     if op == BinaryOp::OpAdd { return "add" }
     if op == BinaryOp::OpSub { return "sub" }
     if op == BinaryOp::OpMul { return "mul" }
+    // SIO-588: unsigned add/sub/mul names for aarch64 refusal diagnostics.
+    if op == BinaryOp::OpUAdd { return "uadd" }
+    if op == BinaryOp::OpUSub { return "usub" }
+    if op == BinaryOp::OpUMul { return "umul" }
     if op == BinaryOp::OpDiv { return "div" }
     if op == BinaryOp::OpRem { return "rem" }
     if op == BinaryOp::OpEq { return "eq" }
@@ -16427,9 +16467,18 @@ fn a64_preview_emit_machine_instr(c: A64PreviewCompiler, instr: MachineInstr) ->
         out.code = a64_preview_emit_load_slot(out.code, A64_X10, instr.src1.value)
         if instr.bin_op == BinaryOp::OpAdd {
             out.code = a64_emit_add(out.code, A64_X9, A64_X9, A64_X10)
+        } else if instr.bin_op == BinaryOp::OpUAdd {
+            // SIO-588: unsigned add is the same instruction (no trap exists
+            // in this preview backend); the U-variant only suppresses the
+            // x86 overflow guard, which has no aarch64 counterpart.
+            out.code = a64_emit_add(out.code, A64_X9, A64_X9, A64_X10)
         } else if instr.bin_op == BinaryOp::OpSub {
             out.code = a64_emit_sub(out.code, A64_X9, A64_X9, A64_X10)
+        } else if instr.bin_op == BinaryOp::OpUSub {
+            out.code = a64_emit_sub(out.code, A64_X9, A64_X9, A64_X10)
         } else if instr.bin_op == BinaryOp::OpMul {
+            out.code = a64_emit_mul(out.code, A64_X9, A64_X9, A64_X10)
+        } else if instr.bin_op == BinaryOp::OpUMul {
             out.code = a64_emit_mul(out.code, A64_X9, A64_X9, A64_X10)
         } else if instr.bin_op == BinaryOp::OpDiv {
             out.code = a64_emit_sdiv(out.code, A64_X9, A64_X9, A64_X10)
