@@ -25,7 +25,7 @@ Measured in CI, from the last passing run on main (run 42641866996, commit 37fde
 
 Since 2026-11-09 19:24 UTC, 13 consecutive runs on main have failed in the job that contains the rung step. The step has no conclusion and the job has no log. The runner reports that it lost communication with the server. Two merges lie between the last pass and the first failure: #3046 (`fix/2966-gen3-arena-checker-init`) and #3494 (documentation text). Not known: whether the runner pod was killed for memory, whether #3046 made gen3 compile, and how much memory a generation needs now.
 
-One memory figure exists. On 2026-11-10 the kernel log of a build host recorded a `madaros` process killed by its memory cgroup inside a Slurm job, at 66,956,480 kB of anonymous resident memory (about 64 GiB). That is not the CI runner pod, whose own kernel log has not been read yet, but it shows a Madaros compile on current source exceeding the 48Gi that a runner pod is allowed.
+One memory figure exists. On 2026-11-10 a Slurm job that was building the compiler from a branch off current main requested 64G and ended OUT_OF_MEMORY after 36 minutes 53 seconds, with a recorded MaxRSS of 67,106,840K (about 64 GiB); the kernel log shows the killed process was `madaros`. In the last passing run on main, one day earlier, the same kind of compile finished in about 71 minutes inside a runner pod limited to 48Gi. So the memory a Madaros compile of the compiler needs rose from under 48 GiB to over 64 GiB between those two points, and the true peak is still unmeasured because the process was killed. The kernel log of the CI runner node itself has not been read.
 
 ADR-006 names the gen2 == gen3 check as the trust anchor for compiler changes. ADR-029 names the committed seed `bin/souc-lean-single-x86_64` as the provenance root, and states that the requirement that the sha256 of Madaros gen2 through gen7 be identical applies to Madaros, whose chain starts from that seed. Every Madaros build today begins by compiling `lean_single.sio`, so Madaros is built by lean_single on every build.
 
@@ -65,7 +65,7 @@ A prerequisite. gen2 must compile `self-hosted/compiler/main.sio` and produce ge
 
 Each generation has one receipt, and a receipt is written even when the generation fails. Fields: generation number; sha256 of the produced binary; sha256 of the compiler that produced it; source commit; sha256 of the source closure; host; wall time; peak memory; exit status.
 
-Peak memory is the field with one data point today (a process killed at about 64 GiB) and no completed measurement.
+Peak memory is the field with one data point today (a compile killed at 64 GiB after 37 minutes) and no completed measurement.
 
 ### Where it runs
 
@@ -86,7 +86,7 @@ Nightly or on manual dispatch, not as a pull request check. On current evidence 
 
 ## Open questions
 
-1. The cause of the 13 consecutive failed runs on main is not known.
+1. The cause of the 13 consecutive failed runs on main is not established. The memory figure above makes exhaustion of the 48Gi runner pod the leading explanation, and #3046 the leading candidate for the rise, but neither has been measured directly. Measuring peak memory of the compile at the commit before #3046 and at the commit after it would settle both.
 2. Memory per generation is not measured. One process was killed at about 64 GiB, so the true peak is higher than that and above the 48Gi runner limit. It is the first measurement required.
 3. The second route for layer 2 is not chosen. Candidates: an older committed Madaros prebuilt (varies the starting state only), and the cross route through `lean_single.sio`.
 4. The granularity for layer 3 is not defined: which units, and how a function is matched across builds.
