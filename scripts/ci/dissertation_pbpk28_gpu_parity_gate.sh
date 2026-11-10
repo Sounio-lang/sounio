@@ -6,6 +6,14 @@
 # Cases tracked (device/host bitwise unless noted):
 #   gpu-gum-rapamycin .... kernel J-Sigma-JT combine == live ep28_run (5 mg IV, 168 h)
 #   gpu-gum-semaglutide .. same, semaglutide 1 mg / 168 h
+#   gpu-gum-venlafaxine .. same, venlafaxine XR 75 mg oral / 168 h (NM; oral
+#     matrix→gut→blood path + CYP2D6 formation sink, parent-only)
+#   gpu-gum-midazolam .... same, midazolam IR 5 mg oral / 168 h (NM; oral
+#     gut→blood path dosed via gut0 + CYP3A hepatic sink, parent-only)
+#   gpu-gum-haloperidol .. same, haloperidol IR 5 mg oral / 72 h (NM; oral
+#     gut→blood path dosed via gut0 + CYP3A4/2D6 hepatic sink, parent-only;
+#     BBB/D2 resolved: Kp_brain 15 carries accumulation, D2 occupancy wired
+#     as receipt via the Kpuu 3.0 bridge off the parity-checked AUC)
 #   gpu-gum-emitter ...... K-AXI asm text + PTX f64 transpile asserts
 #   gpu-gum-failclosed ... NaN / negative-variance / zero-variance guards
 #   gpu-gum-sabotage .... corrupted combine output MUST be detected (negative control)
@@ -18,10 +26,12 @@
 #   gpu-mc-memfed-emitter  one-cubin N-thread advance: get_tid + mem addressing text asserts
 #   gpu-mc-memfed-sim .... mem-fed advance == CPU next_u01, tid 0 slice + tid 1 stride
 #
-# PENDING (not failures): venlafaxine / haloperidol / midazolam have no
-# ep28 (PBPK28 + 8-dim priors) model support yet — their PK parity lives in
-# dissertation_pbpk28_parity_gate.sh cases 12-19. GPU GUM arms for those drugs
-# unlock when their ep28 priors land; this gate must not fabricate them.
+# All PENDING drug arms have landed. History: venlafaxine unlocked with the
+# oral input path (PK parity in pbpk28-parity cases 10-13); midazolam with
+# the oral IR gut0 path and probe-measured CYP3A CL_h (cases 17-19);
+# haloperidol with the same IR path, Kp_brain 15 accumulation and the D2
+# occupancy receipt via the Kpuu 3.0 bridge (PK parity in cases 14-16).
+# This gate never fabricated priors: each arm unlocked on landed ep28 priors.
 #
 # Sabotage philosophy follows witness_declares_its_sabotage_gate.sh: a check
 # that cannot die under mutilation measures nothing. The sabotage arms live
@@ -51,7 +61,7 @@ timeout 900 "$SOUC_BIN" run tests/run-pass/gpu_pbpk28_gum_parity.sio > "$GUM_LOG
   tail -n 20 "$GUM_LOG" >&2
   exit 1
 }
-for marker in "gpu_gum rapamycin OK" "gpu_gum semaglutide OK" "gpu_gum emitter OK" "gpu_gum failclosed OK" "gpu_gum sabotage OK" "gpu_gum batched emitter OK" "PASS gpu_pbpk28_gum_parity"; do
+for marker in "gpu_gum rapamycin OK" "gpu_gum semaglutide OK" "gpu_gum venlafaxine OK" "gpu_gum midazolam OK" "gpu_gum haloperidol OK" "gpu_gum emitter OK" "gpu_gum failclosed OK" "gpu_gum sabotage OK" "gpu_gum batched emitter OK" "PASS gpu_pbpk28_gum_parity"; do
   if ! grep -qF "$marker" "$GUM_LOG"; then
     echo "[pbpk28-gpu-parity] FAIL: GUM log missing marker: $marker" >&2
     tail -n 20 "$GUM_LOG" >&2
@@ -75,8 +85,4 @@ for marker in "gpu_mc substreams OK" "gpu_mc draws OK" "gpu_mc emitter OK" "gpu_
   echo "[pbpk28-gpu-parity] case OK: $marker"
 done
 
-echo "[pbpk28-gpu-parity] PEND venlafaxine GPU-GUM (no ep28 priors yet; PK parity in pbpk28-parity cases 12-13)"
-echo "[pbpk28-gpu-parity] PEND haloperidol GPU-GUM (no ep28 priors yet; PK parity in pbpk28-parity cases 14-16)"
-echo "[pbpk28-gpu-parity] PEND midazolam GPU-GUM (no ep28 priors yet; PK parity in pbpk28-parity cases 17-19)"
-
-gate_pass "13/13 GPU parity cases (2 drugs GUM + MC + fail-closed + sabotage + mem-fed MC + batched GUM emitter); 3 drug arms PENDING ep28 priors"
+gate_pass "16/16 GPU parity cases (5 drugs GUM + MC + fail-closed + sabotage + mem-fed MC + batched GUM emitter); all drug arms landed"

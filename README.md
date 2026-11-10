@@ -141,4 +141,4 @@ Checked on 24 October 2026: Warp connected to Notion MCP 1.2.0 over Streamable H
 
 Start with a reproducible issue, a focused example or a documented compiler limit. See [CONTRIBUTING.md](https://github.com/Sounio-lang/sounio/blob/main/CONTRIBUTING.md) for contribution guidance.
 
-Created by **Demetrios Chiuratto Agourakis**. See the [project credits](https://www.souniolang.org/credits) for attribution and AI disclosure. For research citation, see [CITATION.cff](CITATION.cff). Licensed under [Apache-2.0](https://github.com/Sounio-lang/sounio/blob/main/LICENSE).
+Created by **Demetrios Chiuratto Agourakis**. See the [project credits](https://www.souniolang.org/credits) for attribution and AI disclosure. For research citation, see [CITATION.cff](CITATION.cff) ([all-versions DOI](https://doi.org/10.5281/zenodo.18190065)). Licensed under [Apache-2.0](https://github.com/Sounio-lang/sounio/blob/main/LICENSE).

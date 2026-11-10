@@ -1,0 +1,99 @@
+//@ run-pass
+//@ requires: madaros
+//
+// M4 fault matrix: isolate which PTX form faults under ce_sync.
+// K1 proof-only, K2 +cvt.rn.f64.u32, K3 +setp.eq.f64, K4 full fusion.
+// Returns: 0 impossible here; k1-k3 must return 0; k4 returns 1 (ON)
+// or 2 (OFF); errors return base+stage (110+ k1, 120+ k2, 130+ k3,
+// 140+ k4); exit 200 = FUSION-ON, 201 = FUSION-OFF.
+use hetero::runtime::{Runtime, rt_open}
+use hetero::cuda_exec::{ce_alloc, ce_arg, ce_d2h, ce_h2d, ce_function, ce_launch_2d_shmem, ce_module_log, ce_sync}
+use hetero::probe_cuda::{pb_cstr}
+use tensor2::cpu_kernel::{CpuBuf, ck_alloc, ck_get, ck_set}
+
+fn runk(rt: &Runtime, path: string, entry: string, base: i64, want: f64, mode: i64) -> i64 with Alloc, Mut, Panic, Div, IO {
+    let src = read_file(path)
+    if str_len(src) == 0 { print(" NOFILE\n"); return base }
+    let mod = ce_module_log(&rt.exec, pb_cstr(src))
+    if mod == 0 { print(" NOMOD\n"); return base + 1 }
+    let f = ce_function(&rt.exec, mod, entry)
+    if f == 0 { print(" NOFUNC\n"); return base + 2 }
+    let dout = ce_alloc(&rt.exec, 32)
+    let dproof = ce_alloc(&rt.exec, 8)
+    let dc = ce_alloc(&rt.exec, 64)
+    if dout == 0 || dproof == 0 || dc == 0 { print(" NOALLOC\n"); return base + 3 }
+    var cb = ck_alloc(8)
+    ck_set(&!cb, 0, 0.1)
+    ck_set(&!cb, 1, 0.11)
+    ck_set(&!cb, 2, 0.3)
+    ck_set(&!cb, 3, 0.38999999999999996)
+    ck_set(&!cb, 4, 10.1)
+    ck_set(&!cb, 5, 112.11)
+    ck_set(&!cb, 6, 1.0)
+    ck_set(&!cb, 7, 2.0)
+    if ce_h2d(&rt.exec, dc, cb.data as *mut u8, 64) != 0 { print(" NOH2D\n"); return base + 4 }
+    let proof_h = heap_alloc(8)
+    write_i64(proof_h as *mut i64, 0, 0)
+    if ce_h2d(&rt.exec, dproof, proof_h, 8) != 0 { print(" NOH2D2\n"); return base + 4 }
+    let params = heap_alloc(8 * 15)
+    write_i64(params as *mut i64, 0, ce_arg(dout) as i64)
+    write_i64(params as *mut i64, 1, ce_arg(dproof) as i64)
+    write_i64(params as *mut i64, 2, ce_arg(dc) as i64)
+    var i: i64 = 3
+    while i < 15 {
+        write_i64(params as *mut i64, i, ce_arg(0) as i64)
+        i = i + 1
+    }
+    if ce_launch_2d_shmem(&rt.exec, f, 1, 1, 1, 0, params) != 0 { print(" NOLAUNCH\n"); return base + 5 }
+    if ce_sync(&rt.exec) != 0 { print(" NOSYNC\n"); return base + 6 }
+    if ce_d2h(&rt.exec, proof_h, dproof, 8) != 0 { print(" NOD2H\n"); return base + 7 }
+    if read_i64(proof_h as *mut i64, 0) != 1 { print(" BADPROOF\n"); return base + 7 }
+    if mode == 0 { print(" OK\n"); return 0 }
+    var ob = ck_alloc(4)
+    if ce_d2h(&rt.exec, ob.data as *mut u8, dout, 32) != 0 { print(" NOD2H\n"); return base + 7 }
+    if mode == 1 {
+        if ck_get(&ob, 0) != want { print(" BADVAL\n"); return base + 8 }
+        print(" OK\n")
+        return 0
+    }
+    if ck_get(&ob, 3) != 1.0 { print(" BADCTL\n"); return base + 8 }
+    if ck_get(&ob, 0) == 1.0 && ck_get(&ob, 1) == 1.0 && ck_get(&ob, 2) == 1.0 {
+        print(" FUSION-ON\n")
+        return 1
+    }
+    print(" FUSION-OFF\n")
+    return 2
+}
+
+fn main() with IO, Mut, Panic, Div, Alloc {
+    let rt = rt_open("stdlib/hetero/kernels/gemm_tiled_f32.ptx", "gemm_tiled_f32")
+    if !rt.ready {
+        var ok = true
+        if 0.1 * 0.1 + 0.1 == 0.11 { ok = false }
+        if 0.3 * 0.3 + 0.3 == 0.38999999999999996 { ok = false }
+        if 10.1 * 10.1 + 10.1 == 112.11 { ok = false }
+        if 1.0 * 1.0 + 1.0 != 2.0 { ok = false }
+        if !ok { print("MATRIX CPU-DESIGN-FAIL\n"); exit(1) }
+        print("MATRIX CPU-DESIGN-OK\n")
+        exit(0)
+    }
+    print("K1")
+    var rc = runk(&rt, "stdlib/llm/kernels/matrix_k1.ptx", "k1", 110, 0.0, 0)
+    if rc != 0 { exit(rc) }
+    print("K2")
+    rc = runk(&rt, "stdlib/llm/kernels/matrix_k2.ptx", "k2", 120, 7.0, 1)
+    if rc != 0 { exit(rc) }
+    print("K3")
+    rc = runk(&rt, "stdlib/llm/kernels/matrix_k3.ptx", "k3", 130, 1.0, 1)
+    if rc != 0 { exit(rc) }
+    print("K5")
+    rc = runk(&rt, "stdlib/llm/kernels/matrix_k5.ptx", "k5", 150, 0.0, 0)
+    if rc != 0 { exit(rc) }
+    print("K4")
+    rc = runk(&rt, "stdlib/llm/kernels/fusion.ptx", "fusion", 140, 0.0, 2)
+    if rc == 1 { print("MATRIX FUSION-ON\n") }
+    if rc == 2 { print("MATRIX FUSION-OFF\n") }
+    if rc != 1 && rc != 2 { exit(rc) }
+    print("MATRIX DONE\n")
+    exit(0)
+}
