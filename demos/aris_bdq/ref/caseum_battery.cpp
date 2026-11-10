@@ -229,7 +229,7 @@ std::vector<double> predict(const Model& m, const Lung& L, const std::vector<dou
         int b = obs[i].what - 2; double num = 0, den = 0;
         for (int c = 0; c < g.per_bin; ++c) {
           int k = b * g.per_bin + c;
-          double tot = x[k * sb] + (m.binding ? x[k * sb + 1] : 0.0);  // LCM measures total
+          double tot = x[static_cast<std::size_t>(k) * sb] + (m.binding ? x[static_cast<std::size_t>(k) * sb + 1] : 0.0);  // LCM measures total
           num += tot * g.V[k]; den += g.V[k];
         }
         out[i] = num / den;
@@ -246,7 +246,7 @@ std::vector<double> predict(const Model& m, const Lung& L, const std::vector<dou
       return r;
     };
     auto lhs = [&](const System& S, double c) {
-      std::vector<double> M(n * ld, 0.0);
+      std::vector<double> M(static_cast<std::size_t>(n) * ld, 0.0);
       for (int i = 0; i < n; ++i) for (int j = std::max(0, i - S.w); j <= std::min(n - 1, i + S.w); ++j)
         M[i * ld + (j - i + S.w)] = (i == j) - c * S.B[i * ld + (j - i + S.w)];
       return M;
