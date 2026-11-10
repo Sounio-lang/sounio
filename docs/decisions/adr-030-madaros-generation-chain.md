@@ -25,7 +25,7 @@ Measured in CI, from the last passing run on main (run 42641866996, commit 37fde
 
 Since 2026-11-09 19:24 UTC, 13 consecutive runs on main have failed in the job that contains the rung step. The step has no conclusion and the job has no log. The runner reports that it lost communication with the server. Two merges lie between the last pass and the first failure: #3046 (`fix/2966-gen3-arena-checker-init`) and #3494 (documentation text). Not known: whether the runner pod was killed for memory, whether #3046 made gen3 compile, and how much memory a generation needs now.
 
-One memory figure exists. On 2026-11-10 a Slurm job that was building the compiler from a branch off current main requested 64G and ended OUT_OF_MEMORY after 36 minutes 53 seconds, with a recorded MaxRSS of 67,106,840K (about 64 GiB); the kernel log shows the killed process was `madaros`. In the last passing run on main, one day earlier, the same kind of compile finished in about 71 minutes inside a runner pod limited to 48Gi. So the memory a Madaros compile of the compiler needs rose from under 48 GiB to over 64 GiB between those two points, and the true peak is still unmeasured because the process was killed. The kernel log of the CI runner node itself has not been read.
+Two memory observations exist, from different runs. In the last passing run on main, the rung step finished in about 71 minutes inside a runner pod limited to 48Gi. On 2026-11-10 a Slurm job that was building the compiler from a branch off current main requested 64G and ended OUT_OF_MEMORY after 36 minutes 53 seconds, with a recorded MaxRSS of 67,106,840K (about 64 GiB); the kernel log shows the killed process was `madaros`. These are resource bounds observed in different builds on different hosts, not a controlled before-and-after comparison. They are consistent with the memory needed by a Madaros compile of the compiler having risen, and they do not establish it. The kernel log of the CI runner node itself has not been read.
 
 ADR-006 names the gen2 == gen3 check as the trust anchor for compiler changes. ADR-029 names the committed seed `bin/souc-lean-single-x86_64` as the provenance root, and states that the requirement that the sha256 of Madaros gen2 through gen7 be identical applies to Madaros, whose chain starts from that seed. Every Madaros build today begins by compiling `lean_single.sio`, so Madaros is built by lean_single on every build.
 
@@ -45,6 +45,7 @@ A prerequisite. gen2 must compile `self-hosted/compiler/main.sio` and produce ge
 - **Compared**: each generation with gen2, byte for byte, with the sha256 recorded in its receipt.
 - **A pass shows**: for a deterministic compiler, gen N == gen N+1 once already implies that every later generation is equal. Five further equal generations are therefore evidence about determinism: no hidden state (uninitialised memory, hash order, address-dependent output) reaches the output.
 - **It does not show**: a fixed point stronger than gen2 == gen3. A fixed point reached from one seed inherits whatever that seed contains.
+- **Reading a failure**: three outcomes must be kept apart. (1) A generation is not produced at all: a generation failure, which is layer 0. (2) gen2 differs from gen3 reproducibly: failure to reach the fixed point. Both compilers can be perfectly deterministic and still disagree, because two different compiler binaries compiled the same source; this is non-convergence and points at code generation, not at hidden state. (3) Output varies between builds with identical source, compiler binary, flags and environment, or a generation differs after a fixed point was already demonstrated: only this is evidence of nondeterminism.
 
 ### Layer 2: attractor
 
@@ -81,12 +82,12 @@ Nightly or on manual dispatch, not as a pull request check. On current evidence 
 
 - Layer 0 blocks every later layer. Until gen3 compiles in CI, nothing past it can be measured.
 - Each generation leaves a receipt with recorded hashes, so each claim can be checked against files.
-- A failure is a result. A layer 1 failure indicates nondeterminism. A layer 2 divergence points at the starting binary only after layer 1 has passed. Layer 3 locates it.
+- A failure is a result, and which result depends on its kind. A gen2/gen3 mismatch establishes failure to reach the proposed fixed point; it does not, by itself, diagnose nondeterminism. Repeated builds with identical input, toolchain and environment receipts, or a divergence after a demonstrated fixed point, are what investigate nondeterminism. A layer 2 divergence points at the starting binary only after layer 1 has passed. Layer 3 locates it.
 - The runner pool gives each pod 48Gi (request 24Gi), and the swap step used on GitHub-hosted runners is skipped on that pool. Peak memory per generation decides whether a generation fits.
 
 ## Open questions
 
-1. The cause of the 13 consecutive failed runs on main is not established. The memory figure above makes exhaustion of the 48Gi runner pod the leading explanation, and #3046 the leading candidate for the rise, but neither has been measured directly. Measuring peak memory of the compile at the commit before #3046 and at the commit after it would settle both.
-2. Memory per generation is not measured. One process was killed at about 64 GiB, so the true peak is higher than that and above the 48Gi runner limit. It is the first measurement required.
+1. The cause of the 13 consecutive failed runs on main is not established. Exhaustion of the 48Gi runner pod is a hypothesis, and #3046 a candidate for a rise in memory, on the strength of two observations from different runs. Measuring peak memory of the same compile, on the same host, at the commit before #3046 and at the commit after it would settle both.
+2. Memory per generation is not measured. One compile was killed at about 64 GiB, so that compile needed more than that. It is the first measurement required.
 3. The second route for layer 2 is not chosen. Candidates: an older committed Madaros prebuilt (varies the starting state only), and the cross route through `lean_single.sio`.
 4. The granularity for layer 3 is not defined: which units, and how a function is matched across builds.
