@@ -192,7 +192,9 @@ and does not start a unit suffix (`500_mg`, a letter follows) is refused with E2
 engines. `lean_single` now follows the Madaros rule for decimal and hex integers and for the
 integer part, fraction and exponent of a float (`1_000`, `0xFF_FF`, `1_000.000_5`, `1_0e1_0`);
 it used to read `1_000_000` as `1` and a name `_000_000`. A separated decimal literal is checked
-against 2^64-1 by an overflow flag instead of by its digit count. (**source-observed**, decimal floating syntax). After a decimal run,
+against 2^64-1 by an overflow flag instead of by its digit count.
+
+`LEX-010` (**source-observed**, decimal floating syntax). After a decimal run,
 `.` joins the token only when followed by an ASCII digit. A decimal exponent
 `e` or `E`, an optional sign, and at least one digit joins the same token;
 underscores before digits are admitted within its digit runs. `1.0`, `1e3`,
