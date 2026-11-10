@@ -42,6 +42,12 @@ hashes. Compiler invocation and native execution use scrubbed environments and
 separate return codes. Complete stdout is compared byte for byte; a marker
 substring is not sufficient.
 
+Madaros is invoked with `--science-boundary off` for this matrix. These probes
+measure syntax/check/codegen witnesses and carry no science manifest or claim
+contract, so science-boundary attestation is outside their declared scope. The
+mode and scope are explicit manifest fields; the canonical `lean_single` route
+is not given this Madaros-only option.
+
 ## Rule-by-rule matrix
 
 | rule | Madaros | `lean_single` | measured witness and limit |

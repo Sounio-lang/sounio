@@ -113,6 +113,8 @@ resolve_madaros_sha256	$(sha256_file "$ROOT/scripts/lib/resolve_madaros.sh")
 madaros_path	$MADAROS_RAW_BIN
 madaros_sha256	$MADAROS_SHA
 madaros_build_log_sha256	$(sha256_file "$OUT_DIR/attestation/madaros-build.log")
+madaros_science_boundary_mode	off
+madaros_science_boundary_scope	syntax-probe-only-no-claim-contract
 lean_single_path	$LEAN_BIN
 lean_single_sha256	$LEAN_SHA
 hostname	$(hostname)
@@ -180,26 +182,32 @@ while IFS=$'\t' read -r rule_id case_id mode fixture expected_stdout coverage no
             home_dir="$OUT_DIR/home-madaros"
             tmp_dir="$OUT_DIR/tmp-madaros"
             engine_env=(SOUNIO_SOUC_ENGINE=madaros MADAROS_RAW_BIN="$MADAROS_RAW_BIN")
+            compiler_driver="$ROOT/bin/madaros"
+            compiler_driver_args=(--science-boundary off)
         else
             compiler_path="$LEAN_BIN"
             compiler_sha="$LEAN_SHA"
             home_dir="$OUT_DIR/home-lean"
             tmp_dir="$OUT_DIR/tmp-lean"
             engine_env=(SOUNIO_SOUC_ENGINE=lean_single)
+            compiler_driver="$ROOT/bin/souc"
+            compiler_driver_args=()
         fi
 
         set +e
         if [[ "$mode" == "check" ]]; then
             env -i PATH=/usr/local/bin:/usr/bin:/bin LC_ALL=C HOME="$home_dir" \
                 TMPDIR="$tmp_dir" SOUNIO_STDLIB_PATH="$ROOT/stdlib" \
-                "${engine_env[@]}" "$TIMEOUT_BIN" 180 "$ROOT/bin/souc" \
+                "${engine_env[@]}" "$TIMEOUT_BIN" 180 "$compiler_driver" \
+                "${compiler_driver_args[@]}" \
                 check "$source_file" >"$front_stdout" 2>"$front_stderr"
             front_rc=$?
             execution_rc="-"
         else
             env -i PATH=/usr/local/bin:/usr/bin:/bin LC_ALL=C HOME="$home_dir" \
                 TMPDIR="$tmp_dir" SOUNIO_STDLIB_PATH="$ROOT/stdlib" \
-                "${engine_env[@]}" "$TIMEOUT_BIN" 180 "$ROOT/bin/souc" \
+                "${engine_env[@]}" "$TIMEOUT_BIN" 180 "$compiler_driver" \
+                "${compiler_driver_args[@]}" \
                 compile "$source_file" -o "$artifact" >"$front_stdout" 2>"$front_stderr"
             front_rc=$?
             execution_rc="-"

@@ -21,6 +21,9 @@ case under a current-source Madaros ELF and the actual `lean_single` public
 route. It:
 
 - scrubs inherited compiler-routing variables with `env -i`;
+- invokes Madaros with `--science-boundary off` because these are syntax-only
+  witness probes with no science manifest or claim contract; the manifest records
+  this exclusion, while `lean_single` remains on its unmodified public route;
 - records the full SHA-256 of both compiler ELFs, source revision, fixture,
   routing scripts, build log, and clean/dirty patch state;
 - keeps front-end and native execution exit statuses separate;
