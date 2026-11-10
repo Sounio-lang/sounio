@@ -263,7 +263,7 @@ fn sv_fd_zero(set: *mut u8) with Mut {
     }
 }
 
-fn sv_fd_set(fd: i64) with Mut {
+fn sv_fd_set(set: *mut u8, fd: i64) with Mut {
     if fd < 0 || fd >= 1024 { return }
     let w = fd / 64
     let b = fd % 64
@@ -276,7 +276,7 @@ fn sv_fd_isset(set: *mut u8, fd: i64) -> bool with Mut {
     let b = fd % 64
     (read_i64(set as *mut i64, w) & (1 << b)) != 0
 }
-// select() readable wait over fds[0..nfds). ready count, 0 when
+// select() readable wait over fds[0..nfds). ready count, 0 on
 // timeout, -1 when select is unavailable.
 fn sv_select(lib: &NwLib, fds: &[i64; 8], nfds: i64, timeout_us: i64) -> i64 with Alloc, Mut {
     let raw = dlsym(lib.libc, pb_cstr("select"))
@@ -288,7 +288,7 @@ fn sv_select(lib: &NwLib, fds: &[i64; 8], nfds: i64, timeout_us: i64) -> i64 wit
     var i: i64 = 0
     while i < nfds {
         if fds[i as usize] >= 0 {
-            sv_fd_set(&lib, fds[i as usize])
+            sv_fd_set(set, fds[i as usize])
             if fds[i as usize] > mx { mx = fds[i as usize] }
         }
         i = i + 1
@@ -303,8 +303,8 @@ fn sv_select(lib: &NwLib, fds: &[i64; 8], nfds: i64, timeout_us: i64) -> i64 wit
 fn sv_recv_some(lib: &NwLib, fd: i64, buf: *mut u8, cap: i64) -> i64 with Alloc, Mut {
     let raw = dlsym(lib.libc, pb_cstr("recv"))
     if (raw as i64) == 0 { return 0 - 1 }
-    let f = raw as fn(i64, *mut u8, *mut u8, i32, *mut u8, i32) -> i64
-    f(fd, buf, cap, 0 as *mut u8, 0)
+    let f = raw as fn(i64, *mut u8, *mut u8, i32) -> i64
+    f(fd, buf, cap, 0)
 }
 // params from a completions JSON body. out len 5: temp, top_p, seed,
 // max_tokens, stream. 0 ok; 1 bad temperature; 2 bad top_p.
@@ -1065,7 +1065,7 @@ fn sv_pump_turn(
             if temp <= 0.0 {
                 tok = llama_sample_greedy(&row)
             } else {
-                tok = llama_sample_temp_top_p(logi, temp, ck_get(&prms[si as usize], 1), &!seeds[si as usize])
+                tok = llama_sample_temp_top_p(&row, temp, ck_get(&prms[si as usize], 1), &!seeds[si as usize])
             }
             if tok == 0 {
                 pdone[si as usize] = 1
@@ -1402,7 +1402,6 @@ fn svb_admit_all(slots: &![SvSlot; 4], q: &!SvQueue) -> i64 with Mut {
         if s < 0 { return q.count }
         slots[s as usize].off = q.off[0]
         slots[s as usize].nid = q.n[0]
-        slots[s as usize].pmax = q.pmax[0]
         slots[s as usize].maxgen = q.pmax[0]
         slots[s as usize].last = 0
         q.count = svb_qshift(q)
