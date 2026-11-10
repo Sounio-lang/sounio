@@ -213,11 +213,7 @@ rather than immediately producing an invalid-exponent diagnostic. A leading
 minus is an expression operator, not part of a numeric token.
 
 `LEX-011` (**source-observed**, extended numeric spellings and conversion).
-The live scalar loop has no binary/octal-prefix or ordinary numeric-suffix
-consumer: `0b101`, `0o17`, and `12i64` split into numeric and word tokens. The
-older `scan_number`/`skip_numeric_suffix` and `parse_numeric` helpers support
-more forms but are not reached by that loop. A blanket claim that all of their
-literal grammar is implemented would be false.
+Numeric type suffixes (`u8`, `u16`, `u32`, `u64`, `i8`, `i16`, `i32`, `i64`, `f32`, `f64`, `f128`, `f256`) are accepted on numeric literals (`5u8`, `7i32`, `2.5f64`, `0xFFu8`), with range checking applied to the suffixed type (refusing out-of-range literals such as `300u8` with error E276 on both engines, ADR-015 row 6). Trailing letters not forming a valid suffix without boundary continuation remain distinct tokens (`7q` splits into `7` and identifier `q`). Binary (`0b`) and octal (`0o`) prefix forms remain part of ADR-015 row 5.
 
 C99-style hexadecimal floats are reconstructed by
 `parser_hex_float_tail_ahead` and `parse_c99_hex_float_literal` from several
