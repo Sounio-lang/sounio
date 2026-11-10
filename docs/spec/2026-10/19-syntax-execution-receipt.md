@@ -25,8 +25,8 @@ order decision.
 
 Raw material and attestation:
 [`docs/audit/S01_SYN_PROBES_2026-11-10/`](../../audit/S01_SYN_PROBES_2026-11-10/README.md).
-The canonical run is `20261110-27aa1274-canonical`, Slurm job `22715`, on a
-clean tree at `27aa127441c58f62a9035ff640b7b076bbfec07c`.
+The canonical run is `20261110-c3b410df-canonical`, Slurm job `22727`, on a
+clean tree at `c3b410dfe86fa53b23acca5e18fba5db04d0d7eb`.
 
 ## Engine identity
 
