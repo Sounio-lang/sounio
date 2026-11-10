@@ -161,6 +161,15 @@ expression production consumes it. Unknown bytes emit Error tokens and advance
 one byte, rather than becoming identifier characters. A single quote currently
 has no scalar character-literal branch.
 
+**Update (ADR-015 row 9, 2026-11-08).** Corpus measurement over the 9,019 `.sio` files under
+`stdlib/`, `tests/`, `examples/` and `self-hosted/`, with strings and `//` comments removed:
+`<-` 1 occurrence in 1 file (inside the causal-graph `<->`), `+-` 2 occurrences in 2 files
+(`1.0 +- 0.1` in two compile-fail tests), `&!` 30,810 occurrences in 1,636 files (the mutable
+borrow `&!T`, always after a space, `(`, `,` or `:`). So: `<-` is no longer a token of its own,
+only the `<-` of `<->` is kept, and `x<-1` reads as `x < -1` on both engines. `+-` is the
+uncertainty operator only with a space on each side; `a+-2` is refused (E283). `a&!b`, where an
+operand ends right before `&!`, is refused (E283); `&!T` after a space, `(`, `,` or `:` is
+unchanged. Both refusals hint at adding a space.
 `LEX-008` (**specified-contract**, capacity refusals). The file-input route
 refuses source larger than 16,777,216 bytes and a token stream that cannot fit
 its EOF token in the 2,097,152-entry table. `lexer_push_flat`,
