@@ -382,6 +382,10 @@ oracle_deep_case() {
         rc=0
         timeout 180 "$out/$stem" --conversion-selftest > "$out/$stem.conversion-selftest.stdout" 2> "$out/$stem.conversion-selftest.stderr" || rc=$?
         record cpp-controls "$stem:conversion-selftest" "$rc" ;;
+      deep_schmitt_phospholipid_reference)
+        rc=0
+        timeout 180 "$out/$stem" --self-test > "$out/$stem.self-test.stdout" 2> "$out/$stem.self-test.stderr" || rc=$?
+        record cpp-controls "$stem:self-test" "$rc" ;;
       deep_poisson_zero_likelihood_reference) compare "$stem" stdlib_deep_poisson_zero_likelihood ;;
       deep_stats_count_profile_bootstrap_reference)
         compare "$stem" stdlib_deep_stats_count_profile_bootstrap
