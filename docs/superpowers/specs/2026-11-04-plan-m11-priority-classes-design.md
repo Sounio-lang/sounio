@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.superpowers.specs.2026-11-04-plan-m11-priority-classes-design
+authority: repo_only
+audience: users
+last_validated: unvalidated
+validated_by: none
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.superpowers.specs.2026-11-04-plan-m11-priority-classes-design
+-->
+
 # M11: priority classes for preemption
 
 ## Direction
