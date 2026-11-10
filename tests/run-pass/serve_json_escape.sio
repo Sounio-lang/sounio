@@ -1,0 +1,109 @@
+//@ run-pass
+//@ requires: madaros
+//
+// #3484 regression: the llm_serve JSON escape helper appended a Sounio
+// "\n" / "\t" literal for those input bytes, but a Sounio string literal
+// decodes \n and \t to the raw control bytes (LEX-012), so the wire body
+// held a raw 0x0A / 0x09 inside "text" and strict JSON parsers refused
+// the completion. Both surfaces that route completion bytes through
+// sv_app_escaped are checked: the non-stream completion body and the
+// SSE token frame. Assertions compare raw bytes, not string literals,
+// so they do not depend on literal escape decoding. No model needed.
+use llm::serve::{sv_completion_body, sv_sse_token}
+use llm::safetensors::{st_byte_at}
+fn putb(buf: *mut u8, i: i64, v: i64) {
+    let w = read_i64(buf as *mut i64, i / 8)
+    let sh = (i % 8) * 8
+    let cleared = w & ((0 - 1) - (255 << sh))
+    write_i64(buf as *mut i64, i / 8, cleared | ((v & 255) << sh))
+}
+fn has_bytes(hay: *mut u8, hlen: i64, needle: *mut u8, nlen: i64) -> bool with Mut {
+    var i: i64 = 0
+    while i + nlen <= hlen {
+        var k: i64 = 0
+        while k < nlen {
+            if st_byte_at(hay, i + k) != st_byte_at(needle, k) { break }
+            k = k + 1
+        }
+        if k == nlen { return true }
+        i = i + 1
+    }
+    false
+}
+fn main() with IO, Mut, Panic, Div, Alloc {
+    var ok = true
+    // completion bytes: A LF B TAB C CR " D \ E SOH(1) F
+    let tx = heap_alloc(64)
+    putb(tx, 0, 65)
+    putb(tx, 1, 10)
+    putb(tx, 2, 66)
+    putb(tx, 3, 9)
+    putb(tx, 4, 67)
+    putb(tx, 5, 13)
+    putb(tx, 6, 34)
+    putb(tx, 7, 68)
+    putb(tx, 8, 92)
+    putb(tx, 9, 69)
+    putb(tx, 10, 1)
+    putb(tx, 11, 70)
+    // expected escaped wire region, byte-exact:
+    // "text":" A backslash-n B backslash-t C backslash-r backslash-quote
+    // D backslash-backslash E backslash-u0001 F "
+    let want = heap_alloc(128)
+    putb(want, 0, 34)
+    putb(want, 1, 116)
+    putb(want, 2, 101)
+    putb(want, 3, 120)
+    putb(want, 4, 116)
+    putb(want, 5, 34)
+    putb(want, 6, 58)
+    putb(want, 7, 34)
+    putb(want, 8, 65)
+    putb(want, 9, 92)
+    putb(want, 10, 110)
+    putb(want, 11, 66)
+    putb(want, 12, 92)
+    putb(want, 13, 116)
+    putb(want, 14, 67)
+    putb(want, 15, 92)
+    putb(want, 16, 114)
+    putb(want, 17, 92)
+    putb(want, 18, 34)
+    putb(want, 19, 68)
+    putb(want, 20, 92)
+    putb(want, 21, 92)
+    putb(want, 22, 69)
+    putb(want, 23, 92)
+    putb(want, 24, 117)
+    putb(want, 25, 48)
+    putb(want, 26, 48)
+    putb(want, 27, 48)
+    putb(want, 28, 49)
+    putb(want, 29, 70)
+    putb(want, 30, 34)
+    let body = heap_alloc(4096)
+    let blen = sv_completion_body(body, 7, "smol", tx, 12, "length", 12, 5)
+    if !has_bytes(body, blen, want, 31) { ok = false }
+    // no raw control byte may remain anywhere in the JSON body
+    var i: i64 = 0
+    while i < blen {
+        if st_byte_at(body, i) < 32 { ok = false }
+        i = i + 1
+    }
+    // SSE token frame: same escaped region; the only raw newline bytes are
+    // the two frame-terminating ones
+    let fr = heap_alloc(4096)
+    let flen = sv_sse_token(fr, 0, 7, "smol", tx, 12)
+    if !has_bytes(fr, flen, want, 31) { ok = false }
+    var j: i64 = 0
+    while j < flen - 2 {
+        if st_byte_at(fr, j) == 10 { ok = false }
+        j = j + 1
+    }
+    if st_byte_at(fr, flen - 2) != 10 { ok = false }
+    if st_byte_at(fr, flen - 1) != 10 { ok = false }
+    if ok { print("SERVEJSONESC PASS") } else { print("SERVEJSONESC FAIL") }
+    print("\n")
+    if !ok { exit(1) }
+    exit(0)
+}

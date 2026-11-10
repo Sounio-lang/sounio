@@ -77,11 +77,14 @@ fn sv_app_escaped(out: *mut u8, pos: i64, src: *mut u8, off: i64, len: i64) -> i
     var i: i64 = 0
     while i < len {
         let c = sv_byte(src, off + i)
+        // JSON escapes are emitted byte-wise: a Sounio "\n" / "\t" literal
+        // decodes to the raw control byte (LEX-012), which is exactly what
+        // must not reach the wire (#3484).
         if c == 34 { p = sv_app_str(out, p, "\\\"") }
         else if c == 92 { p = sv_app_str(out, p, "\\\\") }
-        else if c == 10 { p = sv_app_str(out, p, "\n") }
+        else if c == 10 { sv_putb(out, p, 92); p = p + 1; sv_putb(out, p, 110); p = p + 1 }
         else if c == 13 { sv_putb(out, p, 92); p = p + 1; sv_putb(out, p, 114); p = p + 1 }
-        else if c == 9 { p = sv_app_str(out, p, "\t") }
+        else if c == 9 { sv_putb(out, p, 92); p = p + 1; sv_putb(out, p, 116); p = p + 1 }
         else if c < 32 {
             sv_putb(out, p, 92); p = p + 1
             p = sv_app_str(out, p, "u00")
@@ -117,7 +120,7 @@ fn sv_find(data: *mut u8, len: i64, from: i64, pat: string) -> i64 with Mut {
 fn sv_starts(data: *mut u8, len: i64, off: i64, pat: string) -> bool with Mut {
     if off + str_len(pat) > len { return false }
     var j: i64 = 0
-    while j < str_len(pat) {
+    while j < plen {
         if sv_byte(data, off + j) != (str_char_at(pat, j) & 255) { return false }
         j = j + 1
     }
@@ -150,7 +153,7 @@ fn sv_float(data: *mut u8, len: i64, from: i64) -> [f64; 2] with Mut, Div, Panic
     if i < len && sv_byte(data, i) == 45 { neg = 0.0 - 1.0; i = i + 1 }
     var v = 0.0
     while i < len && sv_byte(data, i) >= 48 && sv_byte(data, i) <= 57 {
-        v = v * 10.0 + ((sv_byte(data, i) - 48) as f64)
+        v = v + ((sv_byte(data, i) - 48) as f64)
         i = i + 1
     }
     if i < len && sv_byte(data, i) == 46 {
@@ -260,7 +263,7 @@ fn sv_fd_zero(set: *mut u8) with Mut {
     }
 }
 
-fn sv_fd_set(set: *mut u8, fd: i64) with Mut {
+fn sv_fd_set(fd: i64) with Mut {
     if fd < 0 || fd >= 1024 { return }
     let w = fd / 64
     let b = fd % 64
@@ -273,7 +276,7 @@ fn sv_fd_isset(set: *mut u8, fd: i64) -> bool with Mut {
     let b = fd % 64
     (read_i64(set as *mut i64, w) & (1 << b)) != 0
 }
-// select() readable wait over fds[0..nfds). ready count, 0 on
+// select() readable wait over fds[0..nfds). ready count, 0 when
 // timeout, -1 when select is unavailable.
 fn sv_select(lib: &NwLib, fds: &[i64; 8], nfds: i64, timeout_us: i64) -> i64 with Alloc, Mut {
     let raw = dlsym(lib.libc, pb_cstr("select"))
@@ -285,7 +288,7 @@ fn sv_select(lib: &NwLib, fds: &[i64; 8], nfds: i64, timeout_us: i64) -> i64 wit
     var i: i64 = 0
     while i < nfds {
         if fds[i as usize] >= 0 {
-            sv_fd_set(set, fds[i as usize])
+            sv_fd_set(&lib, fds[i as usize])
             if fds[i as usize] > mx { mx = fds[i as usize] }
         }
         i = i + 1
@@ -300,8 +303,8 @@ fn sv_select(lib: &NwLib, fds: &[i64; 8], nfds: i64, timeout_us: i64) -> i64 wit
 fn sv_recv_some(lib: &NwLib, fd: i64, buf: *mut u8, cap: i64) -> i64 with Alloc, Mut {
     let raw = dlsym(lib.libc, pb_cstr("recv"))
     if (raw as i64) == 0 { return 0 - 1 }
-    let f = raw as fn(i64, *mut u8, i64, i32) -> i64
-    f(fd, buf, cap, 0)
+    let f = raw as fn(i64, *mut u8, *mut u8, i32, *mut u8, i32) -> i64
+    f(fd, buf, cap, 0 as *mut u8, 0)
 }
 // params from a completions JSON body. out len 5: temp, top_p, seed,
 // max_tokens, stream. 0 ok; 1 bad temperature; 2 bad top_p.
@@ -854,7 +857,7 @@ pub fn llm_serve(m: &!Llama, bp: &Bpe, port: i64, model_name: string, rt: &Runti
             }
         } else if bn == 1 {
             let s0 = blist[0]
-            let tr = sv_turn(&lib, m, bp, rt, use_gpu, model_name, fd[s0 as usize], reqid[s0 as usize], &!logi[s0 as usize], &!kvs, &!seed[s0 as usize], &!prm[s0 as usize], text[s0 as usize], &!tlen, &!gen, &!ttfb, &!t0, &!nids, s0, chats[s0 as usize], chtols[s0 as usize])
+            let tr = sv_turn(&lib, m, bp, rt, use_gpu, model_name, fd[s0 as usize], reqid[s0 as usize], &!logi[s0 as usize], &!kvs[s0 as usize], &!seed[s0 as usize], &!prm[s0 as usize], text[s0 as usize], &!tlen, &!gen, &!ttfb, &!t0, &!nids, s0, chats[s0 as usize], chtols[s0 as usize])
             if tr <= 0 {
                 nw_close(&lib, fd[s0 as usize])
                 fd[s0 as usize] = 0 - 1
@@ -894,7 +897,7 @@ fn sv_turn_batch(
         if temp <= 0.0 {
             tok = llama_sample_greedy(&!logis[si as usize])
         } else {
-            tok = llama_sample_temp_top_p(&!logis[si as usize], temp, ck_get(&prms[si as usize], 1), &!seeds[si as usize])
+            tok = llama_sample_temp_top_p(logi, temp, ck_get(&prms[si as usize], 1), &!seeds[si as usize])
         }
         cur[b as usize] = tok
         if tok == 0 { fcode[b as usize] = 1; done[b as usize] = 1 }
@@ -1030,7 +1033,7 @@ fn sv_pump_turn(
     model: string, fds: &![i64; 4], sts: &![i64; 4],
     reqids: &[i64; 4], prms: &[CpuBuf; 4], seeds: &![CpuBuf; 4],
     texts: &[*mut u8; 4], tlens: &![i64; 4], gens: &![i64; 4],
-    ttfbs: &![i64; 4], t0s: &![i64; 4], nids: &[i64; 4],
+    ttfbs: &![i64; 4], t0s: &![i64; 4], nids: &![i64; 4],
     slots: &[i64; 4], n: i64, chats: &[i64; 4], chtols: &[i64; 4],
     psl: &![SvSlot; 4], pkk: &![PagedKv; 256], pkv: &![PagedKv; 256],
     bank: &[i64; 16384], q: &!SvQueue
@@ -1062,7 +1065,7 @@ fn sv_pump_turn(
             if temp <= 0.0 {
                 tok = llama_sample_greedy(&row)
             } else {
-                tok = llama_sample_temp_top_p(&row, temp, ck_get(&prms[si as usize], 1), &!seeds[si as usize])
+                tok = llama_sample_temp_top_p(logi, temp, ck_get(&prms[si as usize], 1), &!seeds[si as usize])
             }
             if tok == 0 {
                 pdone[si as usize] = 1
@@ -1344,6 +1347,7 @@ pub const SVB_CHUNK: i64 = 64
 // Slot states live in slots (off -1 free, else bank offset of the
 // prompt). Prompt tokens live in the caller-owned bank. Struct
 // arrays cross many-param fns directly (f2i frontend fix, SIO-559).
+// unreliable, so the engine never takes struct arrays).
 pub struct SvSlot {
     pub off: i64,
     pub nid: i64,
@@ -1398,8 +1402,7 @@ fn svb_admit_all(slots: &![SvSlot; 4], q: &!SvQueue) -> i64 with Mut {
         if s < 0 { return q.count }
         slots[s as usize].off = q.off[0]
         slots[s as usize].nid = q.n[0]
-        slots[s as usize].cur = 0
-        slots[s as usize].gen = 0
+        slots[s as usize].pmax = q.pmax[0]
         slots[s as usize].maxgen = q.pmax[0]
         slots[s as usize].last = 0
         q.count = svb_qshift(q)
@@ -1446,7 +1449,7 @@ fn svb_build_rows(slots: &![SvSlot; 4], bank: &[i64; 16384], chunk: i64, rslot: 
 
 // sample every row, advance cursors, close finished slots
 // (truncate tables, free slot). returns finished count.
-fn svb_sample_rows(out: &CpuBuf, rslot: &[i64; 16], kind: &[i64; 16], rowtok: &![i64; 16], seedrow: &[i64; 4], n: i64, slots: &![SvSlot; 4], pks_k: &![PagedKv; 256], pks_v: &![PagedKv; 256], vocab: i64) -> i64 with Alloc, Mut, Panic, Div {
+fn svb_sample_rows(out: &CpuBuf, rslot: &[i64; 16], kind: &[i64; 16], rowtok: &![i64; 16], seedrow: &![i64; 4], n: i64, slots: &![SvSlot; 4], pks_k: &![PagedKv; 256], pks_v: &![PagedKv; 256], vocab: i64) -> i64 with Alloc, Mut, Panic, Div {
     var done_n: i64 = 0
     var r: i64 = 0
     while r < n {
@@ -1490,9 +1493,9 @@ fn svb_sample_rows(out: &CpuBuf, rslot: &[i64; 16], kind: &[i64; 16], rowtok: &!
 // (meta[0] row count, meta[1] queue count). The caller samples the
 // emitting rows (seed rows plus decode rows) and applies them with
 // svb_pump_adv. Returns stacked row logits.
-pub fn svb_pump_fwd(m: &!Llama, pks_k: &![PagedKv; 256], pks_v: &![PagedKv; 256], slots: &![SvSlot; 4], bank: &[i64; 16384], q: &!SvQueue, rt: &Runtime, use_gpu: bool, chunk: i64, rslot: &![i64; 16], rpos: &![i64; 16], toks: &![i64; 16], kind: &![i64; 16], rowtok: &![i64; 16], seedrow: &![i64; 4], meta: &![i64; 4]) -> CpuBuf with Alloc, Mut, Panic, Div {
+pub fn svb_pump_fwd(m: &!Llama, pks_k: &![PagedKv; 256], pks_v: &![PagedKv; 256], slots: &![SvSlot; 4], bank: &[i64; 16384], q: &!SvQueue, rt: &Runtime, use_gpu: bool, chunk: i64, rslot: &![i64; 16], rpos: &![i64; 16], toks: &![i64; 16], kind: &![i64; 16], rowtok: &![i64; 16], meta: &![i64; 4]) -> CpuBuf with Alloc, Mut, Panic, Div {
     svb_admit_all(slots, q)
-    let n = svb_build_rows(slots, bank, chunk, rslot, rpos, toks, kind, rowtok, seedrow)
+    let n = svb_build_rows(slots, bank, chunk, rslot, rpos, toks, kind, rowtok)
     meta[0] = n
     meta[1] = q.count
     meta[2] = 0
@@ -1514,7 +1517,7 @@ pub fn svb_pump_fwd(m: &!Llama, pks_k: &![PagedKv; 256], pks_v: &![PagedKv; 256]
 // 2 length, negative transport error). Non-seed prefill rows carry
 // -1 and are skipped. Slots with nonzero pdone truncate their table
 // rows and free. Returns finished count.
-pub fn svb_pump_adv(slots: &![SvSlot; 4], pks_k: &![PagedKv; 256], pks_v: &![PagedKv; 256], rslot: &[i64; 16], kind: &[i64; 16], rowtok: &[i64; 16], seedrow: &[i64; 4], n: i64, pdone: &[i64; 4]) -> i64 with Mut {
+pub fn svb_pump_adv(slots: &![SvSlot; 4], pks_k: &![PagedKv; 256], pks_v: &![PagedKv; 256], rslot: &[i64; 16], kind: &[i64; 16], rowtok: &![i64; 16], seedrow: &![i64; 4], n: i64, pdone: &![i64; 4]) -> i64 with Mut {
     var done_n: i64 = 0
     var r: i64 = 0
     while r < n {
