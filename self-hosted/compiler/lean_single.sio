@@ -8679,8 +8679,118 @@ fn lex_ident_mb_len(p: i64) -> i64 with Mut, Panic {
     return 0
 }
 
+// ADR-015 row 12: documentation comments are recorded in a side table, in source order,
+// with the index of the token that follows each one. Only the main file counts (imports and
+// the native prelude follow it in SRC). The token stream is unchanged. DOC_KIND: 1 outer line
+// (`///`), 2 inner line (`//!`), 3 outer block (`/** */`), 4 inner block (`/*! */`).
+var DOC_COUNT: i64 = 0
+var DOC_OVERFLOW: i64 = 0
+var DOC_KIND: [i64; 65536] = [0; 65536]
+var DOC_TEXT_START: [i64; 65536] = [0; 65536]
+var DOC_TEXT_END: [i64; 65536] = [0; 65536]
+var DOC_LINE: [i64; 65536] = [0; 65536]
+var DOC_NEXT_TOK: [i64; 65536] = [0; 65536]
+var CLI_EMIT_DOCS: i64 = 0
+
+fn lex_doc_begin(kind: i64, text_start: i64, line: i64) -> i64 with Mut, Panic {
+    if DOC_COUNT >= 65536 {
+        DOC_OVERFLOW = 1
+        return 0 - 1
+    }
+    let i = DOC_COUNT
+    DOC_KIND[i as usize] = kind
+    DOC_TEXT_START[i as usize] = text_start
+    DOC_TEXT_END[i as usize] = text_start
+    DOC_LINE[i as usize] = line
+    DOC_NEXT_TOK[i as usize] = TC
+    DOC_COUNT = i + 1
+    return i
+}
+
+fn lex_doc_print_range(from: i64, to: i64, max: i64) with IO, Mut, Panic {
+    var i: i64 = from
+    var printed: i64 = 0
+    while i < to && printed < max {
+        let c = sb(i)
+        if c == 10 {
+            print("\\n")
+        } else if c != 13 {
+            print_char(c)
+        }
+        printed = printed + 1
+        i = i + 1
+    }
+}
+
+// One line per documentation comment, the same format as `madaros --emit-docs`:
+//   DOC <kind> line=<L> next_line=<NL> next=<first token of the item> text=<text>
+fn lex_print_docs() with IO, Mut, Panic {
+    var eof_line: i64 = 1
+    var q: i64 = 0
+    while q < MAIN_SRC_END { if sb(q) == 10 { eof_line = eof_line + 1 }  q = q + 1 }
+    var i: i64 = 0
+    while i < DOC_COUNT {
+        let k = DOC_KIND[i as usize]
+        print("DOC ")
+        if k == 1 { print("outer-line") }
+        else if k == 2 { print("inner-line") }
+        else if k == 3 { print("outer-block") }
+        else { print("inner-block") }
+        print(" line=")
+        print_int(DOC_LINE[i as usize])
+        let nt = DOC_NEXT_TOK[i as usize]
+        let has_next = nt < TC && TS[nt as usize] < MAIN_SRC_END && TE[nt as usize] > TS[nt as usize]
+        print(" next_line=")
+        if has_next { print_int(TL[nt as usize]) } else { print_int(eof_line) }
+        print(" next=")
+        if has_next { lex_doc_print_range(TS[nt as usize], TE[nt as usize], 40) } else { print("<eof>") }
+        print(" text=")
+        lex_doc_print_range(DOC_TEXT_START[i as usize], DOC_TEXT_END[i as usize], 4096)
+        print("\n")
+        i = i + 1
+    }
+    if DOC_OVERFLOW == 1 {
+        print("DOC-OVERFLOW the table holds 65536 documentation comments; the rest are not listed\n")
+    }
+}
+
+var LEX_UTF8_LEN: i64 = 0
+
+// Scalar value of the UTF-8 sequence at pos, or -1 when it is malformed (bad lead or
+// continuation byte, truncated, overlong, a surrogate, above U+10FFFF). On success
+// LEX_UTF8_LEN is its length in bytes.
+fn lex_utf8_scalar(pos: i64) -> i64 with Mut, Panic {
+    let b0 = sb(pos)
+    var need: i64 = 0
+    var v: i64 = 0
+    var minv: i64 = 0
+    if b0 >= 194 && b0 <= 223 { need = 1  v = b0 & 31  minv = 128 }
+    else if b0 >= 224 && b0 <= 239 { need = 2  v = b0 & 15  minv = 2048 }
+    else if b0 >= 240 && b0 <= 244 { need = 3  v = b0 & 7  minv = 65536 }
+    else { return 0 - 1 }
+    if pos + need >= SRC_LEN { return 0 - 1 }
+    var i: i64 = 1
+    while i <= need {
+        let b = sb(pos + i)
+        if b < 128 || b > 191 { return 0 - 1 }
+        v = v * 64 + (b & 63)
+        i = i + 1
+    }
+    if v < minv { return 0 - 1 }
+    if v >= 55296 && v <= 57343 { return 0 - 1 }
+    if v > 1114111 { return 0 - 1 }
+    LEX_UTF8_LEN = need + 1
+    return v
+}
+
+fn lex_is_hexdig(c: i64) -> bool {
+    return (c >= 48 && c <= 57) || (c >= 97 && c <= 102) || (c >= 65 && c <= 70)
+}
+
 fn lex_all() with IO, Mut, Panic, Div {
     TC = 0
+    DOC_COUNT = 0
+    DOC_OVERFLOW = 0
     LEX_ERROR_LINE = 0
     LEX_ERROR_KIND = 0
     LEX_ERROR_COL = 0
@@ -8700,9 +8810,48 @@ fn lex_all() with IO, Mut, Panic, Div {
             continue
         }
         if c == 2 || c == 32 || c == 9 || c == 13 || c == 10 { if c == 10 { cur_line = cur_line + 1 }; p = p + 1; continue }
-        // Line comment
+        // Line comment (`///` not `////`, and `//!`, are documentation comments)
         if c == 47 && p + 1 < SRC_LEN && sb(p + 1) == 47 {
-            p = p + 2; while p < SRC_LEN && sb(p) != 10 { p = p + 1 }; continue
+            var ldoc: i64 = 0 - 1
+            if p < MAIN_SRC_END && p + 2 < SRC_LEN {
+                let l2 = sb(p + 2)
+                let l3 = if p + 3 < SRC_LEN { sb(p + 3) } else { 0 }
+                if l2 == 47 && l3 != 47 { ldoc = lex_doc_begin(1, p + 3, cur_line) }
+                else if l2 == 33 { ldoc = lex_doc_begin(2, p + 3, cur_line) }
+            }
+            p = p + 2; while p < SRC_LEN && sb(p) != 10 { p = p + 1 }
+            if ldoc >= 0 { DOC_TEXT_END[ldoc as usize] = p }
+            continue
+        }
+        // Block comment, nestable (as in Madaros). `/**` (not `/**/`, `/***`) and `/*!` are
+        // documentation comments. An unterminated one is refused (E272).
+        if c == 47 && p + 1 < SRC_LEN && sb(p + 1) == 42 {
+            let bc_line = cur_line
+            var bdoc: i64 = 0 - 1
+            if p < MAIN_SRC_END && p + 2 < SRC_LEN {
+                let b2 = sb(p + 2)
+                let b3 = if p + 3 < SRC_LEN { sb(p + 3) } else { 0 }
+                if b2 == 42 && b3 != 42 && b3 != 47 { bdoc = lex_doc_begin(3, p + 3, cur_line) }
+                else if b2 == 33 { bdoc = lex_doc_begin(4, p + 3, cur_line) }
+            }
+            p = p + 2
+            var bdepth: i64 = 1
+            while p < SRC_LEN && bdepth > 0 && sb(p) != 1 {
+                let b0 = sb(p)
+                let b1 = if p + 1 < SRC_LEN { sb(p + 1) } else { 0 }
+                if b0 == 47 && b1 == 42 { bdepth = bdepth + 1  p = p + 2 }
+                else if b0 == 42 && b1 == 47 { bdepth = bdepth - 1  p = p + 2 }
+                else {
+                    if b0 == 10 { cur_line = cur_line + 1 }
+                    p = p + 1
+                }
+            }
+            if bdoc >= 0 { if bdepth == 0 { DOC_TEXT_END[bdoc as usize] = p - 2 } else { DOC_TEXT_END[bdoc as usize] = p } }
+            if bdepth > 0 && LEX_ERROR_LINE == 0 {
+                LEX_ERROR_LINE = bc_line
+                LEX_ERROR_KIND = 8
+            }
+            continue
         }
         // String literal
         if c == 34 {
@@ -8772,23 +8921,51 @@ fn lex_all() with IO, Mut, Panic, Div {
             if c == 48 && p + 1 < SRC_LEN && (sb(p + 1) == 120 || sb(p + 1) == 88) {
                 p = p + 2
                 var hx: i64 = 1
+                // ADR-015 row 8: `_` is a digit separator only between two digits (the Madaros rule).
+                var hsep: i64 = 0
+                var hsig: i64 = 0
+                var hstarted: i64 = 0
                 while p < SRC_LEN && hx == 1 {
                     let h = sb(p)
-                    if h >= 48 && h <= 57 { v = v * 16 + h - 48; p = p + 1 }
-                    else if h >= 97 && h <= 102 { v = v * 16 + h - 87; p = p + 1 }
-                    else if h >= 65 && h <= 70 { v = v * 16 + h - 55; p = p + 1 }
-                    else { hx = 0 }
+                    var dv: i64 = 0 - 1
+                    if h >= 48 && h <= 57 { dv = h - 48 }
+                    else if h >= 97 && h <= 102 { dv = h - 87 }
+                    else if h >= 65 && h <= 70 { dv = h - 55 }
+                    if dv >= 0 {
+                        v = v * 16 + dv
+                        p = p + 1
+                        if hstarted == 0 && dv != 0 { hstarted = 1 }
+                        if hstarted == 1 { hsig = hsig + 1 }
+                    } else if h == 95 && lex_is_hexdig(sb(p + 1)) {
+                        hsep = 1
+                        p = p + 1
+                    } else { hx = 0 }
                 }
                 // ADR-015 row 1: refuse a hex literal wider than 64 bits before
                 // the wrapped value reaches the token table. A trailing `p` makes
                 // it a C99 hex-float (`0x1…p-80`), whose mantissa is not an
                 // integer at all — the shared parser guards the same case with
                 // parser_hex_float_tail_ahead before calling parse_int_literal.
-                if !lit_is_float_tail(s, p) && lit_int_width_class(s, p) == 1 {
+                if hsep == 1 {
+                    if !lit_is_float_tail(s, p) && hsig > 16 {
+                        tc_error_hard(TC, "E276: integer literal does not fit any 64-bit integer type")
+                    }
+                } else if !lit_is_float_tail(s, p) && lit_int_width_class(s, p) == 1 {
                     tc_error_hard(TC, "E276: integer literal does not fit any 64-bit integer type")
                 }
             } else {
-                while p < SRC_LEN && sb(p) >= 48 && sb(p) <= 57 { v = v * 10 + sb(p) - 48; p = p + 1 }
+                var dsep: i64 = 0
+                var dovf: i64 = 0
+                while p < SRC_LEN && ((sb(p) >= 48 && sb(p) <= 57) || (sb(p) == 95 && p + 1 < SRC_LEN && sb(p + 1) >= 48 && sb(p + 1) <= 57)) {
+                    if sb(p) == 95 {
+                        dsep = 1
+                    } else {
+                        let dd = sb(p) - 48
+                        if v > 1844674407370955161 || (v == 1844674407370955161 && dd > 5) { dovf = 1 }
+                        v = v * 10 + dd
+                    }
+                    p = p + 1
+                }
                 // ADR-015 row 1: same refusal for the decimal spelling. Class 2
                 // (exactly 2^63) is refused only when the minus before it is not
                 // a prefix operator, because `-9223372036854775808` is how the
@@ -8798,9 +8975,14 @@ fn lex_all() with IO, Mut, Panic, Div {
                 // parser does not need this test because the lexer has already
                 // decided the token kind by then).
                 if !lit_is_float_tail(s, p) {
-                    let width_class = lit_int_width_class(s, p)
-                    if width_class == 1 || (width_class == 2 && !lit_prefix_minus_is_unary()) {
-                        tc_error_hard(TC, "E276: integer literal does not fit any 64-bit integer type")
+                    if dsep == 1 {
+                        // With separators the digit run is not contiguous: use the overflow flag (past 2^64-1).
+                        if dovf == 1 { tc_error_hard(TC, "E276: integer literal does not fit any 64-bit integer type") }
+                    } else {
+                        let width_class = lit_int_width_class(s, p)
+                        if width_class == 1 || (width_class == 2 && !lit_prefix_minus_is_unary()) {
+                            tc_error_hard(TC, "E276: integer literal does not fit any 64-bit integer type")
+                        }
                     }
                 }
             }
@@ -8817,7 +8999,8 @@ fn lex_all() with IO, Mut, Panic, Div {
                 FL_FRAC_DIGITS = 0
                 let int_zero: i64 = if v == 0 { 1 } else { 0 }
                 var seen_nonzero: i64 = 0
-                while p < SRC_LEN && sb(p) >= 48 && sb(p) <= 57 {
+                while p < SRC_LEN && ((sb(p) >= 48 && sb(p) <= 57) || (sb(p) == 95 && p + 1 < SRC_LEN && sb(p + 1) >= 48 && sb(p + 1) <= 57)) {
+                    if sb(p) == 95 { p = p + 1  continue }
                     let d = sb(p) - 48
                     if int_zero == 1 && seen_nonzero == 0 && d == 0 {
                         lit_leading_zeros = lit_leading_zeros + 1
@@ -8842,10 +9025,19 @@ fn lex_all() with IO, Mut, Panic, Div {
                     is_float = 1
                     exp_sign = esign
                     p = ep
-                    while p < SRC_LEN && sb(p) >= 48 && sb(p) <= 57 {
-                        exp_val = exp_val * 10 + sb(p) - 48
+                    while p < SRC_LEN && ((sb(p) >= 48 && sb(p) <= 57) || (sb(p) == 95 && p + 1 < SRC_LEN && sb(p + 1) >= 48 && sb(p + 1) <= 57)) {
+                        if sb(p) != 95 { exp_val = exp_val * 10 + sb(p) - 48 }
                         p = p + 1
                     }
+                }
+            }
+            // ADR-015 row 8: a `_` that is not between two digits and does not start a unit suffix
+            // (`1__0`, `10_`) is refused (E284).
+            if p < SRC_LEN && sb(p) == 95 && LEX_ERROR_LINE == 0 {
+                let sf = if p + 1 < SRC_LEN { sb(p + 1) } else { 0 }
+                if !((sf >= 65 && sf <= 90) || (sf >= 97 && sf <= 122)) {
+                    LEX_ERROR_LINE = cur_line
+                    LEX_ERROR_KIND = 12
                 }
             }
             // Gen 19: _suffix unit annotation on numeric literals (e.g. 500_mg, 9.8_m)
@@ -8948,6 +9140,29 @@ fn lex_all() with IO, Mut, Panic, Div {
             TK[TC as usize] = k; TS[TC as usize] = s; TE[TC as usize] = p; TL[TC as usize] = cur_line; TC = TC + 1; continue
         }
         // Two-char operators
+        // ADR-015 row 9: `+-` and `&!` written without the space that tells the readings apart are
+        // refused (E283). `a+-2` could be `a + -2` or the uncertainty operator; `a&!b` could be
+        // `a & !b` or a mutable borrow. `<-` has no use of its own, so `x<-1` stays `x < -1`.
+        if c == 43 && p + 1 < SRC_LEN && sb(p + 1) == 45 && LEX_ERROR_LINE == 0 {
+            let pvb = if p > 0 { sb(p - 1) } else { 32 }
+            let nxb = if p + 2 < SRC_LEN { sb(p + 2) } else { 32 }
+            let pv_ws = pvb == 32 || pvb == 9 || pvb == 10 || pvb == 13 || pvb == 2
+            let nx_ws = nxb == 32 || nxb == 9 || nxb == 10 || nxb == 13
+            if !(pv_ws && nx_ws) {
+                LEX_ERROR_LINE = cur_line
+                LEX_ERROR_KIND = 11
+                LEX_ERROR_BYTE = 43
+            }
+        }
+        if c == 38 && p > 0 && p + 1 < SRC_LEN && sb(p + 1) == 33 && LEX_ERROR_LINE == 0 {
+            let pvb = sb(p - 1)
+            let operand_end = (pvb >= 65 && pvb <= 90) || (pvb >= 97 && pvb <= 122) || (pvb >= 48 && pvb <= 57) || pvb == 95 || pvb == 41 || pvb == 93
+            if operand_end {
+                LEX_ERROR_LINE = cur_line
+                LEX_ERROR_KIND = 11
+                LEX_ERROR_BYTE = 33
+            }
+        }
         if c == 45 && p + 1 < SRC_LEN && sb(p + 1) == 62 { TK[TC as usize] = 10; TS[TC as usize] = p; TE[TC as usize] = p + 2; TL[TC as usize] = cur_line; TC = TC + 1; p = p + 2; continue }
         if c == 61 && p + 1 < SRC_LEN && sb(p + 1) == 61 { TK[TC as usize] = 21; TS[TC as usize] = p; TE[TC as usize] = p + 2; TL[TC as usize] = cur_line; TC = TC + 1; p = p + 2; continue }
         if c == 33 && p + 1 < SRC_LEN && sb(p + 1) == 61 { TK[TC as usize] = 22; TS[TC as usize] = p; TE[TC as usize] = p + 2; TL[TC as usize] = cur_line; TC = TC + 1; p = p + 2; continue }
@@ -9041,40 +9256,77 @@ fn lex_all() with IO, Mut, Panic, Div {
         // An ASCII byte that no rule above consumes. It used to be skipped,
         // which changed the program instead of refusing it: `1 $ 2` printed
         // 1, and a character literal vanished, so `[' '; 120]` filled with 0
-        // and `let c = 'b'` read the identifier `b`. lean_single has no
-        // character literals (Madaros does; its source uses none), so they
-        // are refused. `'` before an identifier with no closing quote is a
+        // and `let c = 'b'` read the identifier `b`. Character literals are
+        // now lexed above (ADR-015 row 4); a stray quote is refused. `'` before
+        // an identifier of two or more characters with no closing quote is a
         // lifetime (`&'static`) and is still skipped. So is `@`, the unit
         // annotation of a type (`v: f64@L`, stdlib/darwin_pbpk): lean_single
         // has no units and drops the annotation, which loses a check but not
         // a value.
         if c > 32 && c < 128 && c != 64 && LEX_ERROR_LINE == 0 {
             if c == 39 {
-                var is_char_lit: i64 = 0
-                if p + 2 < SRC_LEN && sb(p + 1) != 92 && sb(p + 2) == 39 { is_char_lit = 1 }
-                if p + 1 < SRC_LEN && sb(p + 1) == 92 {
-                    var q: i64 = p + 2
-                    while q < SRC_LEN && q < p + 6 && sb(q) != 39 && sb(q) != 10 { q = q + 1 }
-                    if q < SRC_LEN && sb(q) == 39 { is_char_lit = 1 }
+                // ADR-015 row 4. `'x'` is a Unicode scalar value (an integer literal, UTF-8
+                // decoded) and `'\n'` etc. are the escapes. `'name` (two or more identifier
+                // characters, no closing quote) is a lifetime: only the quote is skipped.
+                // A one-character literal with no closing quote, `''`, `'ab'` and any other
+                // stray quote are refused (E281); an unknown escape is E274.
+                let c1 = if p + 1 < SRC_LEN { sb(p + 1) } else { 0 }
+                var cv: i64 = 0
+                var clen: i64 = 0
+                var cbad: i64 = 0
+                var clife: i64 = 0
+                if c1 == 92 {
+                    let ce = if p + 2 < SRC_LEN { sb(p + 2) } else { 0 }
+                    if ce == 110 { cv = 10 }
+                    else if ce == 116 { cv = 9 }
+                    else if ce == 114 { cv = 13 }
+                    else if ce == 48 { cv = 0 }
+                    else if ce == 92 { cv = 92 }
+                    else if ce == 39 { cv = 39 }
+                    else if ce == 34 { cv = 34 }
+                    else { cbad = 2 }
+                    if cbad == 0 {
+                        if p + 3 < SRC_LEN && sb(p + 3) == 39 { clen = 4 } else { cbad = 1 }
+                    }
+                } else if c1 >= 128 {
+                    let sv = lex_utf8_scalar(p + 1)
+                    if sv < 0 { cbad = 3 }
+                    else if p + 1 + LEX_UTF8_LEN < SRC_LEN && sb(p + 1 + LEX_UTF8_LEN) == 39 { cv = sv  clen = LEX_UTF8_LEN + 2 }
+                    else { cbad = 1 }
+                } else if c1 == 0 || c1 == 10 || c1 == 39 {
+                    cbad = 1
+                } else if p + 2 < SRC_LEN && sb(p + 2) == 39 {
+                    cv = c1
+                    clen = 3
+                } else {
+                    let lt_start = (c1 >= 65 && c1 <= 90) || (c1 >= 97 && c1 <= 122) || c1 == 95
+                    let c2 = if p + 2 < SRC_LEN { sb(p + 2) } else { 0 }
+                    let lt_more = (c2 >= 65 && c2 <= 90) || (c2 >= 97 && c2 <= 122) || c2 == 95 || (c2 >= 48 && c2 <= 57)
+                    if lt_start && lt_more {
+                        var lt_end: i64 = p + 2
+                        while lt_end < SRC_LEN && ((sb(lt_end) >= 65 && sb(lt_end) <= 90) || (sb(lt_end) >= 97 && sb(lt_end) <= 122) || (sb(lt_end) >= 48 && sb(lt_end) <= 57) || sb(lt_end) == 95) { lt_end = lt_end + 1 }
+                        if lt_end < SRC_LEN && sb(lt_end) == 39 { cbad = 1 } else { clife = 1 }
+                    } else {
+                        cbad = 1
+                    }
                 }
-                // A lifetime is `'` and an identifier with no quote after it.
-                // Anything else is refused: a quoted run such as `'ab'` used to
-                // drop both quotes and read the identifier `ab`, and a `'` before
-                // no identifier (`''`, `'12'`, the close of `'a b'`) vanished.
-                var lt_end: i64 = p + 1
-                let lt_c0 = if p + 1 < SRC_LEN { sb(p + 1) } else { 0 }
-                let lt_start = (lt_c0 >= 65 && lt_c0 <= 90) || (lt_c0 >= 97 && lt_c0 <= 122) || lt_c0 == 95
-                if lt_start {
-                    while lt_end < SRC_LEN && ((sb(lt_end) >= 65 && sb(lt_end) <= 90) || (sb(lt_end) >= 97 && sb(lt_end) <= 122) || (sb(lt_end) >= 48 && sb(lt_end) <= 57) || sb(lt_end) == 95) { lt_end = lt_end + 1 }
-                    if lt_end < SRC_LEN && sb(lt_end) == 39 { is_char_lit = 1 }
+                if cbad == 0 && clife == 0 {
+                    TK[TC as usize] = 4; TS[TC as usize] = p; TE[TC as usize] = p + clen; TV[TC as usize] = cv
+                    TU[TC as usize] = 0
+                    TL[TC as usize] = cur_line; TC = TC + 1
+                    p = p + clen
+                    continue
                 }
-                if is_char_lit == 1 {
+                if cbad == 1 {
                     LEX_ERROR_LINE = cur_line
-                    LEX_ERROR_KIND = 3
-                } else if !lt_start {
+                    LEX_ERROR_KIND = 6
+                } else if cbad == 2 {
+                    LEX_ERROR_LINE = cur_line
+                    LEX_ERROR_KIND = 7
+                } else if cbad == 3 {
                     LEX_ERROR_LINE = cur_line
                     LEX_ERROR_KIND = 4
-                    LEX_ERROR_BYTE = c
+                    LEX_ERROR_BYTE = c1
                 }
             } else {
                 LEX_ERROR_LINE = cur_line
@@ -11082,10 +11334,12 @@ fn flc_tok_bits(tok: i64) -> i64 with Mut, Panic, Div {
     var i = s
     var v: i64 = 0
     var any_digits: i64 = 0
-    while i < e && sb(i) >= 48 && sb(i) <= 57 {
-        v = v * 10 + (sb(i) - 48)
+    while i < e && ((sb(i) >= 48 && sb(i) <= 57) || (sb(i) == 95 && i + 1 < e && sb(i + 1) >= 48 && sb(i + 1) <= 57)) {
+        if sb(i) != 95 {
+            v = v * 10 + (sb(i) - 48)
+            any_digits = 1
+        }
         i = i + 1
-        any_digits = 1
     }
     if any_digits == 0 { return 0 }
     var frac: i64 = 0
@@ -11098,7 +11352,8 @@ fn flc_tok_bits(tok: i64) -> i64 with Mut, Panic, Div {
         var fd: i64 = 0
         var seen_nz: i64 = 0
         if v != 0 { seen_nz = 1 }
-        while i < e && sb(i) >= 48 && sb(i) <= 57 {
+        while i < e && ((sb(i) >= 48 && sb(i) <= 57) || (sb(i) == 95 && i + 1 < e && sb(i + 1) >= 48 && sb(i + 1) <= 57)) {
+            if sb(i) == 95 { i = i + 1  continue }
             let d = sb(i) - 48
             if seen_nz == 0 && d == 0 {
                 // absorbed leading zero: not part of frac/denom
@@ -11115,8 +11370,8 @@ fn flc_tok_bits(tok: i64) -> i64 with Mut, Panic, Div {
         i = i + 1
         if i < e && sb(i) == 45 { neg = 1  i = i + 1 }
         if i < e && sb(i) == 43 { i = i + 1 }
-        while i < e && sb(i) >= 48 && sb(i) <= 57 {
-            ev = ev * 10 + (sb(i) - 48)
+        while i < e && ((sb(i) >= 48 && sb(i) <= 57) || (sb(i) == 95 && i + 1 < e && sb(i + 1) >= 48 && sb(i + 1) <= 57)) {
+            if sb(i) != 95 { ev = ev * 10 + (sb(i) - 48) }
             i = i + 1
         }
     }
@@ -11138,6 +11393,7 @@ fn flc_tok_bits(tok: i64) -> i64 with Mut, Panic, Div {
                     if cc != 48 { tail_nonzero = 1 }
                     if seen_dot == 0 { dexp = dexp + 1 }
                 }
+            } else if cc == 95 && i + 1 < e && sb(i + 1) >= 48 && sb(i + 1) <= 57 {
             } else { stop = 1 }
         }
         if stop == 1 { i = e } else { i = i + 1 }
@@ -52970,12 +53226,14 @@ fn main() -> i64 with IO, Mut, Panic, Div {
     CLI_EMIT_ECONF = 0
     CLI_LOAD_ECONF = 0
     CLI_EMIT_PROOFS = 0
+    CLI_EMIT_DOCS = 0
     PROOF_BUF_LEN = 0
     ECONF_RAW_LEN = 0
     ECONF_APPLIED = 0
     var arg_i: i64 = 2
     while arg_i < argc {
         let flag = get_arg(arg_i)
+        if cli_arg_eq(flag, "--emit-docs") { CLI_EMIT_DOCS = 1 }
         if cli_arg_eq(flag, "--show-ast") {
             CLI_SHOW_AST = 1
         } else {
@@ -53074,6 +53332,26 @@ fn main() -> i64 with IO, Mut, Panic, Div {
             print("\n")
             return 1
         }
+        if LEX_ERROR_KIND == 6 {
+            // ADR-015 row 4: same code and wording as Madaros E281.
+            print("error[E281]: unterminated or malformed character literal at line ")
+            print_int(LEX_ERROR_LINE)
+            print("\n")
+            return 1
+        }
+        if LEX_ERROR_KIND == 8 {
+            // Same code and wording as Madaros E272.
+            print("error[E272]: unterminated block comment at line ")
+            print_int(LEX_ERROR_LINE)
+            print("\n")
+            return 1
+        }
+        if LEX_ERROR_KIND == 7 {
+            print("error[E274]: invalid escape sequence in character literal at line ")
+            print_int(LEX_ERROR_LINE)
+            print("\n")
+            return 1
+        }
         if LEX_ERROR_KIND == 9 {
             print("error: `")
             var rq: i64 = TS[LEX_ERROR_TOK as usize]
@@ -53090,13 +53368,27 @@ fn main() -> i64 with IO, Mut, Panic, Div {
             print("\n")
             return 1
         }
+        if LEX_ERROR_KIND == 12 {
+            // Same code and wording as Madaros E284.
+            print("error[E284]: digit separator `_` must sit between two digits at line ")
+            print_int(LEX_ERROR_LINE)
+            print("\n")
+            return 1
+        }
+        if LEX_ERROR_KIND == 11 {
+            // Same code and wording as Madaros E283.
+            print("error[E283]: ambiguous operator spelling `")
+            if LEX_ERROR_BYTE == 33 { print("&!") } else { print("+-") }
+            print("` at line ")
+            print_int(LEX_ERROR_LINE)
+            print(": add a space\n")
+            return 1
+        }
         print("lex error line ")
         print_int(LEX_ERROR_LINE)
         print(": ")
         if LEX_ERROR_KIND == 2 {
             print("invalid escape sequence\n")
-        } else if LEX_ERROR_KIND == 3 {
-            print("character literals are not supported by lean_single; write the byte value, e.g. `32 as u8` for ' '\n")
         } else if LEX_ERROR_KIND == 4 {
             print("Unexpected character `")
             print_char(LEX_ERROR_BYTE)
@@ -53107,6 +53399,10 @@ fn main() -> i64 with IO, Mut, Panic, Div {
             print("Unexpected character\n")
         }
         return 1
+    }
+    if CLI_EMIT_DOCS == 1 {
+        lex_print_docs()
+        return 0
     }
     // Collect `causal graph` blocks and remove them from the token stream before
     // any pass runs, so an independence claim can be discharged regardless of

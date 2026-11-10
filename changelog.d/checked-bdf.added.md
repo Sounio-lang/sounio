@@ -1,0 +1,1 @@
+Add caller-buffer checked BDF1 integration with analytic Jacobian, adaptive step doubling, explicit failure status and actual evaluation/factorization counters. Accepted state survives rejected steps; error estimates are local rather than certified bounds.

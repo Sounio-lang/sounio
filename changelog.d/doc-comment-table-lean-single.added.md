@@ -1,0 +1,5 @@
+Added (lean_single half of ADR-015 row 12): `lean_single` records documentation comments in a side table, the same as Madaros. `///` (not `////`), `//!`, `/** */` (not `/**/` or `/***`) and `/*! */` are listed with the token that follows them; only the main file counts, not imports or the native prelude. The token stream is unchanged. `lean_single SRC OUT --emit-docs` lists them in the format of `madaros --emit-docs`, and on `tests/doc_comments/basic.sio` the two engines print the same 9 lines.
+
+Prerequisite fixed on the way: `lean_single` did not treat `/* */` as a comment at all (it read the words inside as identifiers, E200). Block comments now nest as in Madaros, and one that is never closed is refused (E272). Of the 114 `.sio` files under `stdlib/`, `tests/` and `examples/` that contain `/*`, none that compiled before fails now except `tests/ui/lexer/unterminated_block_comment.sio`, which is meant to be refused.
+
+Pins: `scripts/ci/doc_comment_tokens_lean_single_gate.sh` (fails on the previous seed), `tests/run-pass/block_comment_nested_lean_single.sio`, `tests/compile-fail/block_comment_unterminated_lean_single.sio`. The gate is not wired into CI yet.

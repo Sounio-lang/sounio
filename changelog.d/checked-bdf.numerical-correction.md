@@ -1,0 +1,1 @@
+Repair bounded legacy BDF singular-system refusal, Newton convergence, incomplete callback detection, tiny endpoints, final trace retention and tolerance scaling; refuse unsupported coupled diagonal uncertainty. C++23 binary128 concordance and native controls are receipted in docs/evidence/stdlib-SIO-166/README.md (Slurm17203 and17205).

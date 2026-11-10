@@ -7,20 +7,23 @@ validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.competitive-position-2026
 -->
 
-# Sounio Competitive Position — April 2026
+# Sounio Competitive Position — November 2026
 
-> *Evidence-based analysis of where Sounio stands relative to Julia 1.12, Python/SciPy 2026,
-> Mojo v26.2, and Numbat v1.23. Sources cited inline.*
+> *Evidence-based analysis of where Sounio stands. The November 2026 refresh compares
+> Sounio against its four real neighbours — GTC (MSL New Zealand), METAS UncLib,
+> Uncertain\<T> (ASPLOS 2014) and Signaloid — with links opened on 2026-11-10.
+> The April 2026 sections on Julia, Python/SciPy, Mojo and Numbat follow unchanged.*
 
 ---
 
 ## Executive Summary
 
-Sounio occupies a **unique and uncontested niche** in 2026: it is, to our knowledge, the only
-systems programming language whose type system natively encodes epistemic trust. No competitor
-provides compile-time confidence gates, GUM-compliant uncertainty propagation, or ISO 1788
-interval arithmetic *in the standard library*. The three closest challengers each miss at least
-two of these axes:
+Sounio occupies a **distinctive but contested niche** in 2026: it is, to our knowledge, the only
+systems programming language whose type system natively encodes epistemic trust. No single
+competitor provides compile-time confidence gates, GUM-compliant uncertainty propagation,
+*and* ISO 1788 interval arithmetic *in one standard library* — but each axis has a real
+neighbour that beats Sounio on its home ground (see "The real neighbours" below). The older
+challengers each miss at least two of these axes:
 
 | Feature | Sounio | Julia 1.12 | Python/SciPy | Mojo v26.2 | Numbat v1.23 |
 |---|:---:|:---:|:---:|:---:|:---:|
@@ -47,6 +50,53 @@ two of these axes:
 9. Mojo has borrow checker but no true linear types
 
 ---
+
+## The real neighbours (November 2026)
+
+Links below were opened on 2026-11-10. For each neighbour: what it is, and what it does
+better than Sounio today.
+
+### GTC — GUM Tree Calculator (MSL New Zealand)
+https://github.com/MSLNZ/GTC
+Python package (Hall; Hall and Borbely) implementing *uncertain numbers*: automatic GUM
+propagation with correlations, real and complex quantities, and persistence of full
+measurement models. Used for over a decade inside MSL, including international key
+comparisons (e.g. CCT-K7.2021 thermal metrology analysis accounting for correlations),
+with a tutorial paper and a Metrology journal article, and versioned releases with DOI.
+**Better than Sounio today**: institutional metrological scrutiny no language project can
+claim — real key-comparison pedigree, a decade of scrutiny by metrologists, and proven
+correlation bookkeeping in production analyses. Sounio's propagation has no such pedigree.
+
+### METAS UncLib (Swiss Federal Institute of Metrology)
+https://www.callabmag.com/metas-unclib/ (the official METAS UncLib page returns 404 as of 2026-11-10)
+C#/.NET library (Wollensack, VNA Tools II programme): multivariate uncertainties, complex
+values, correlations, vector and matrix algebra, MATLAB wrapper, storage of results.
+Propagation is GUM-Tree-based (Hall's concept) with linear *and higher-order* terms.
+**Better than Sounio today**: higher-order (nonlinear) propagation, full-covariance
+multivariate algebra, and RF/VNA domain pedigree. Sounio propagates first-order variance
+only and has no complex-quantity story at this level.
+
+### Uncertain\<T> (ASPLOS 2014, Bornholt / Mytkowicz / McKinley)
+https://www.microsoft.com/en-us/research/wp-content/uploads/2016/02/asplos077-bornholtA.pdf
+A first-order type for uncertain data with *sampling-based* runtime semantics:
+distributions as values, conditional execution over uncertain predicates, hypothesis
+tests, and an explicit static-vs-dynamic cost model, evaluated on real sensors and GPS
+traces. The closest intellectual ancestor of `Knowledge<T>`.
+**Better than Sounio today**: a published semantics for conditionals over uncertain
+values (Sounio has none), dynamic sampling with accuracy budgets, and a peer-reviewed
+evaluation. Sounio's static GUM typing is stricter at compile time but says nothing
+about branching on uncertain data.
+
+### Signaloid (C0 processor)
+https://signaloid.com/
+Hardware and cloud platform that tracks full probability distributions through
+computation: a RISC-V-based C0 core (FPGA C0-microSD modules, Cloud Compute Engine)
+executing deterministic operations on distributions, with reference-quality
+Monte-Carlo-parity cores and three-orders-of-magnitude speedups on stochastic workloads
+(finance VaR, particle filters, Bayesian inference).
+**Better than Sounio today**: distribution tracking at hardware speed with real-time
+edge deployment. Sounio is software-only on CPU; it cannot touch C0's throughput or
+its Monte-Carlo-parity execution model. Sounio's answer is static guarantees, not speed.
 
 ## Gap Analysis vs. Competitors (SOTA April 2026)
 
@@ -266,7 +316,11 @@ No other language in 2026 provides this guarantee at compile time.
 | Numbat v1.23 | github.com/sharkdp/numbat | Feb 2026 |
 | Julia vs Python/R gaps | arxiv:2410.10908 "State of Julia for Scientific ML" | Oct 2024 |
 | Julia ecosystem gaps 2026 | r-statistics.co/R-vs-Julia.html | 2026 |
-| IntervalArithmetic.jl status | github.com/JuliaIntervals/IntervalArithmetic.jl/issues/747 | Apr 2026 |
+| IntervalArithmetic.jl / validated numerics survey (Baratchart et al., SN Computer Science 2023) | https://link.springer.com/article/10.1007/s42979-023-01776-8 | April 2026 |
+| GTC (MSL NZ) | https://github.com/MSLNZ/GTC | Nov 2026 (opened 2026-11-10) |
+| METAS UncLib | https://www.callabmag.com/metas-unclib/ (official METAS page 404 on 2026-11-10) | Nov 2026 (opened 2026-11-10) |
+| Uncertain\<T> ASPLOS 2014 | https://www.microsoft.com/en-us/research/wp-content/uploads/2016/02/asplos077-bornholtA.pdf | Nov 2026 (opened 2026-11-10) |
+| Signaloid C0 | https://signaloid.com/ | Nov 2026 (opened 2026-11-10) |
 | Property-based testing gaps | arxiv:2410.10908 §4 | Oct 2024 |
 | IEEE 1788-2015 Java request | bugs.openjdk.org JDK-8377622 | 2026 |
-| Sounio GitHub | github.com/sounio-lang/sounio | Apr 2026 |
+| Sounio GitHub | github.com/Sounio-lang/sounio | Apr 2026 |
