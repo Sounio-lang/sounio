@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.recognition.pldb.validation
+authority: repo_only
+audience: users
+last_validated: unvalidated
+validated_by: none
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.recognition.pldb.validation
+-->
+
 # Package validation receipt
 
 Validated on 2026-11-10 (UTC), in an isolated Linux workspace checkout.
