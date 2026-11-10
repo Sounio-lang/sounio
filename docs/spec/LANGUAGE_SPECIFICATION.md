@@ -52,6 +52,11 @@ The [lexical execution receipt](2026-10/18-lexical-execution-receipt.md) runs
 125 probe programs against chapter 01's `LEX` rules on both engines and on a
 Madaros built from source (2026-10-22). It records which rules execution
 confirms or contradicts and does not change any rule's standing.
+The [syntax execution receipt](2026-10/19-syntax-execution-receipt.md) runs one
+partial witness for each `SYN-001`–`SYN-016` rule on both engines from a clean,
+source-bound build (2026-11-10). It preserves two front-end divergences as
+tracked work and does not promote partial witness success to whole-rule
+conformance.
 
 Navigation has two numbering systems: files `00` through `10` are the book's
 subject chapters; the central thematic sections 1 through 17 retain the
