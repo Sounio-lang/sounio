@@ -1,0 +1,1 @@
+Restrict direct BSS borrows to declared integer and float globals so explicit references to handle-backed struct globals retain their cell representation. Preserve the existing path for bool, char, pointers, and unclassified types; cover f32/f64 numeric-global reference persistence alongside the integer witness.

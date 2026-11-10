@@ -70,9 +70,10 @@ Grounded in: commit, artifact, or empirical result
 | 023 | Checked indexing, path-conditioned obligations and proof-erased `Panic` | accepted | 2026-10-28 |
 | 024 | Metrological index obligations and graded `Panic ≤ ε` | accepted | 2026-10-28 |
 | 025 | Epistemic decisions: flip budgets, attribution and the value of remeasuring | accepted | 2026-10-28 |
-| 026 | Phase arenas for Madaros self-compilation | experimental | 2026-10-31 |
-
+| 026 | Phase arenas for Madaros self-compilation (amended 2026-11-09: field resolution) | experimental | 2026-10-31 |
 | 027 | Layered CI, graph-directed test selection and receipts | phase 1 accepted; compiler fan-out implemented; later phases proposed | 2026-11-01 |
+| 028 | Rulings from the 2026-11-09 decision session (all of `PENDING.md`, plus D-35) | accepted | 2026-11-09 |
+| 029 | The committed seed is the provenance root of the bootstrap (D-10) | accepted | 2026-11-04 |
 
 Reserved by open pull requests (not yet on `main`):
 
@@ -81,7 +82,7 @@ Reserved by open pull requests (not yet on `main`):
 | 017 | Single authority for IR memory effects (`ir::effects`) | #2686 (renumbered from a colliding 013) |
 | 019 | Certified intervals | #3101 |
 
-The next free number is **028**.
+The next free number is **030**.
 
 ## Files
 
@@ -110,6 +111,8 @@ The next free number is **028**.
 - [ADR-025](./adr-025-decision-flip-budget-and-attribution.md)
 - [ADR-026](./adr-026-phase-arenas.md)
 - [ADR-027](./adr-027-layered-ci-graph-and-receipts.md)
+- [ADR-028](./adr-028-rulings-2026-11-09.md)
+- [ADR-029](./adr-029-bootstrap-provenance-root.md)
 - [Claim-oracle inventory schema](./claim_oracle_inventory.schema.md)
 
 ## Related Docs

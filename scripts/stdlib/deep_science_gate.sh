@@ -562,6 +562,11 @@ record concordance math-pure-ln-boundary "$rc"
 rc=0
 timeout 300 bash scripts/stdlib/ode_bdf_checked_gate.sh "$out/checked-bdf" > "$out/checked-bdf.gate.stdout" 2> "$out/checked-bdf.gate.stderr" || rc=$?
 record focused-gate checked-bdf "$rc"
+
+# GUM Type-A sample-mean uncertainty: public consumer + C++23 concordance.
+rc=0
+bash tests/stdlib/metrology/type_a_gate.sh "$out/metrology-type-a" > "$out/metrology-type-a.stdout" 2> "$out/metrology-type-a.stderr" || rc=$?
+record focused-gate metrology-type-a "$rc"
 }
 
 # Both partitions remain mandatory in CI; standalone all preserves the original order.
