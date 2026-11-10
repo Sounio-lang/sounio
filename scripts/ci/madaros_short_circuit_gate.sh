@@ -17,7 +17,7 @@ WORK="$(mktemp -d /tmp/sounio-short-circuit.XXXXXX)"
 trap 'rm -rf "$WORK"' EXIT
 fail() { echo "[madaros-short-circuit] FAIL: $*" >&2; exit 1; }
 SRC="$ROOT_DIR/tests/run-pass/logical_ops_short_circuit.sio"
-( ulimit -s 1572864 2>/dev/null || true; "$MADAROS" build "$SRC" "$WORK/w.elf" ) >"$WORK/build.log" 2>&1 \
+( ulimit -s 1572864 2>/dev/null || true; "$MADAROS" build "$SRC" -o "$WORK/w.elf" ) >"$WORK/build.log" 2>&1 \
   || { tail -n 20 "$WORK/build.log" >&2; fail "build failed"; }
 chmod +x "$WORK/w.elf"
 set +e

@@ -1,0 +1,200 @@
+// stdlib::hetero::probe_cuda - Measured NVIDIA device enumeration.
+//
+// The native backend has no dynamic linker for arbitrary externs, but its
+// dynlink tier knows dlopen/dlsym (self-hosted/native/codegen_x86_linux.sio),
+// and dlsym results are callable through fn-pointer casts
+// (tests/run-pass/kl14d_dlopen.sio). This module uses exactly that path:
+// dlopen("libcuda.so.1") -> dlsym(cu*) -> call-through. No link-time CUDA
+// dependency, no CUDA C++: a pure Sounio binary that measures the machine it
+// runs on, which is what DeviceCaps requires (measured, never declared).
+
+extern "C" {
+    fn dlopen(filename: *mut u8, flags: i32) -> *mut u8
+    fn dlsym(handle: *mut u8, symbol: *mut u8) -> *mut u8
+    fn dlclose(handle: *mut u8) -> i32
+}
+
+fn pb_read_byte(data: *mut u8, off: i64) -> i64 {
+    (read_i64(data as *mut i64, off / 8) >> ((off % 8) * 8)) & 255
+}
+
+fn pb_write_byte(data: *mut u8, off: i64, v: i64) with Mut {
+    let shift = (off % 8) * 8
+    let mask = (0 - 1) - (255 << shift)
+    let word = (read_i64(data as *mut i64, off / 8) & mask) | ((v & 255) << shift)
+    write_i64(data as *mut i64, off / 8, word)
+}
+
+/// Allocate a NUL-terminated C string from a Sounio string.
+///
+/// # Parameters
+/// - `s`: source string.
+///
+/// # Return
+/// Heap buffer with s bytes + NUL; caller owns it (probe lifetime: process).
+///
+/// # Complexity
+/// O(len)
+pub fn pb_cstr(s: string) -> *mut u8 with Alloc, Mut {
+    let n = str_len(s)
+    let buf = heap_alloc(n + 8)
+    var i: i64 = 0
+    while i < n {
+        pb_write_byte(buf, i, str_char_at(s, i))
+        i = i + 1
+    }
+    pb_write_byte(buf, n, 0)
+    buf
+}
+
+pub struct CudaProbe {
+    pub handle: *mut u8,
+    pub available: bool,
+    pub device_count: i32,
+}
+
+fn pb_sym(handle: *mut u8, name: string) -> *mut u8 with Alloc, Mut {
+    dlsym(handle, pb_cstr(name))
+}
+
+/// Open libcuda and initialize the driver. available=false when absent.
+///
+/// # Return
+/// Probe handle; `cuda_probe_count` is valid only when available.
+///
+/// # Complexity
+/// O(1) driver calls.
+pub fn cuda_probe_open() -> CudaProbe with Alloc, Mut, Panic {
+    var h = dlopen(pb_cstr("libcuda.so.1"), 1)
+    if (h as i64) == 0 {
+        h = dlopen(pb_cstr("libcuda.so"), 1)
+    }
+    if (h as i64) == 0 {
+        return CudaProbe { handle: 0 as *mut u8, available: false, device_count: 0 }
+    }
+    let raw_init = pb_sym(h, "cuInit")
+    if (raw_init as i64) == 0 {
+        let _c = dlclose(h)
+        return CudaProbe { handle: 0 as *mut u8, available: false, device_count: 0 }
+    }
+    let cu_init = raw_init as fn(i32) -> i32
+    if cu_init(0) != 0 {
+        let _c = dlclose(h)
+        return CudaProbe { handle: 0 as *mut u8, available: false, device_count: 0 }
+    }
+    var count = 0
+    let raw_count = pb_sym(h, "cuDeviceGetCount")
+    if (raw_count as i64) != 0 {
+        let buf = heap_alloc(8)
+        write_i64(buf as *mut i64, 0, 0)
+        let cu_count = raw_count as fn(*mut u8) -> i32
+        if cu_count(buf) == 0 {
+            count = (read_i64(buf as *mut i64, 0) & 4294967295) as i32
+            if count > 2147483647 { count = 0 }
+        }
+    }
+    CudaProbe { handle: h, available: true, device_count: count }
+}
+
+/// Total device memory in bytes for device `ordinal` (cuDeviceTotalMem_v2,
+/// falling back is unnecessary: v2 exists since CUDA 3.2-era drivers).
+///
+/// # Parameters
+/// - `probe`: open probe. - `ordinal`: device index.
+///
+/// # Return
+/// Bytes, or 0 on any driver error.
+///
+/// # Complexity
+/// O(1)
+pub fn cuda_probe_total_mem(probe: &CudaProbe, ordinal: i32) -> i64 with Alloc, Mut, Panic {
+    let raw_dev = pb_sym(probe.handle, "cuDeviceGet")
+    if (raw_dev as i64) == 0 { return 0 }
+    let devbuf = heap_alloc(8)
+    write_i64(devbuf as *mut i64, 0, 0)
+    let cu_dev = raw_dev as fn(*mut u8, i32) -> i32
+    if cu_dev(devbuf, ordinal) != 0 { return 0 }
+    let dev = (read_i64(devbuf as *mut i64, 0) & 4294967295) as i32
+    let raw_mem = pb_sym(probe.handle, "cuDeviceTotalMem_v2")
+    if (raw_mem as i64) == 0 { return 0 }
+    let membuf = heap_alloc(8)
+    write_i64(membuf as *mut i64, 0, 0)
+    let cu_mem = raw_mem as fn(*mut u8, i32) -> i32
+    if cu_mem(membuf, dev) != 0 { return 0 }
+    read_i64(membuf as *mut i64, 0)
+}
+
+/// Compute capability as SM number (major*10 + minor), e.g. 89, 90, 121.
+///
+/// # Parameters
+/// - `probe`: open probe. - `ordinal`: device index.
+///
+/// # Return
+/// SM number, or 0 on any driver error.
+///
+/// # Complexity
+/// O(1)
+pub fn cuda_probe_sm(probe: &CudaProbe, ordinal: i32) -> i32 with Alloc, Mut, Panic {
+    let raw_dev = pb_sym(probe.handle, "cuDeviceGet")
+    if (raw_dev as i64) == 0 { return 0 }
+    let devbuf = heap_alloc(8)
+    write_i64(devbuf as *mut i64, 0, 0)
+    let cu_dev = raw_dev as fn(*mut u8, i32) -> i32
+    if cu_dev(devbuf, ordinal) != 0 { return 0 }
+    let dev = (read_i64(devbuf as *mut i64, 0) & 4294967295) as i32
+    let raw_attr = pb_sym(probe.handle, "cuDeviceGetAttribute")
+    if (raw_attr as i64) == 0 { return 0 }
+    let cu_attr = raw_attr as fn(*mut u8, i32, i32) -> i32
+    let majorbuf = heap_alloc(8)
+    let minorbuf = heap_alloc(8)
+    write_i64(majorbuf as *mut i64, 0, 0)
+    write_i64(minorbuf as *mut i64, 0, 0)
+    // CUdevice_attribute: COMPUTE_CAPABILITY_MAJOR=75, MINOR=76.
+    if cu_attr(majorbuf, 75, dev) != 0 { return 0 }
+    if cu_attr(minorbuf, 76, dev) != 0 { return 0 }
+    let major = (read_i64(majorbuf as *mut i64, 0) & 4294967295) as i32
+    let minor = (read_i64(minorbuf as *mut i64, 0) & 4294967295) as i32
+    major * 10 + minor
+}
+
+/// Print the device name (cuDeviceGetName) to stdout.
+///
+/// # Parameters
+/// - `probe`: open probe. - `ordinal`: device index.
+///
+/// # Return
+/// Nothing; prints "unknown" on driver error.
+///
+/// # Complexity
+/// O(name length)
+pub fn cuda_probe_print_name(probe: &CudaProbe, ordinal: i32) with Alloc, Mut, Panic, IO {
+    let raw_dev = pb_sym(probe.handle, "cuDeviceGet")
+    if (raw_dev as i64) == 0 { print("unknown"); return }
+    let devbuf = heap_alloc(8)
+    write_i64(devbuf as *mut i64, 0, 0)
+    let cu_dev = raw_dev as fn(*mut u8, i32) -> i32
+    if cu_dev(devbuf, ordinal) != 0 { print("unknown"); return }
+    let dev = (read_i64(devbuf as *mut i64, 0) & 4294967295) as i32
+    let raw_name = pb_sym(probe.handle, "cuDeviceGetName")
+    if (raw_name as i64) == 0 { print("unknown"); return }
+    let namebuf = heap_alloc(256)
+    var i: i64 = 0
+    while i < 256 { pb_write_byte(namebuf, i, 0); i = i + 1 }
+    let cu_name = raw_name as fn(*mut u8, i32, i32) -> i32
+    if cu_name(namebuf, 256, dev) != 0 { print("unknown"); return }
+    i = 0
+    while i < 256 {
+        let c = pb_read_byte(namebuf, i)
+        if c == 0 { return }
+        print_char(c)
+        i = i + 1
+    }
+}
+
+pub fn cuda_probe_close(probe: &CudaProbe) with Mut {
+    // Intentionally no dlclose: unloading libcuda after cuInit can hang the
+    // process at exit (observed: Slurm job 16072 printed all output, then
+    // TIMEOUT with "Kill task failed" and the node drained). The handle is
+    // leaked on purpose; the OS reclaims it at process exit.
+    let _keep = probe.handle
+}

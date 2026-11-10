@@ -1,0 +1,317 @@
+// stdlib::hetero::cublas_bench - Measured GEMM through the registered
+// bootstrap oracle (cuBLAS via dlopen/dlsym call-through).
+//
+// Design doc docs/design/heterogeneous-gpu-framework.md section 4: cuBLAS is
+// a bootstrap/oracle with an exit date, never a silent dependency. Its role
+// here is (a) prove the execution substrate (context, device memory,
+// transfers, launch, events) from a pure Sounio binary, and (b) MEASURE
+// matmul throughput so DeviceCaps contains numbers from the user's machine.
+// The native WMMA GEMM replaces this path when PTX load/store lowering lands.
+
+extern "C" {
+    fn dlopen(filename: *mut u8, flags: i32) -> *mut u8
+    fn dlsym(handle: *mut u8, symbol: *mut u8) -> *mut u8
+    fn dlclose(handle: *mut u8) -> i32
+}
+
+use hetero::probe_cuda::{pb_cstr}
+use tensor2::convert::{f32_bits_to_f64, f64_to_f32_bits}
+
+fn gb_read_byte(data: *mut u8, off: i64) -> i64 {
+    (read_i64(data as *mut i64, off / 8) >> ((off % 8) * 8)) & 255
+}
+
+fn gb_write_byte(data: *mut u8, off: i64, v: i64) with Mut {
+    let shift = (off % 8) * 8
+    let mask = (0 - 1) - (255 << shift)
+    let word = (read_i64(data as *mut i64, off / 8) & mask) | ((v & 255) << shift)
+    write_i64(data as *mut i64, off / 8, word)
+}
+
+fn gb_write_f32(data: *mut u8, idx: i64, v: f64) with Mut {
+    let bits = f64_to_f32_bits(v)
+    var b = 0
+    while b < 4 {
+        gb_write_byte(data, idx * 4 + b, (bits >> (b * 8)) & 255)
+        b = b + 1
+    }
+}
+
+fn gb_read_f32(data: *mut u8, idx: i64) -> f64 with Mut {
+    var bits: i64 = 0
+    var b = 0
+    while b < 4 {
+        bits = bits | (gb_read_byte(data, idx * 4 + b) << (b * 8))
+        b = b + 1
+    }
+    f32_bits_to_f64(bits)
+}
+
+pub struct GpuExec {
+    pub cuda: *mut u8,
+    pub cublas: *mut u8,
+    pub ctx_ok: bool,
+    pub handle_ok: bool,
+}
+
+fn gb_sym(lib: *mut u8, name: string) -> *mut u8 with Alloc, Mut {
+    dlsym(lib, pb_cstr(name))
+}
+
+pub fn gb_call1(lib: *mut u8, name: string, a: i64) -> i32 with Alloc, Mut, Panic {
+    let raw = gb_sym(lib, name)
+    if (raw as i64) == 0 { return -1 }
+    let f = raw as fn(i64) -> i32
+    f(a)
+}
+
+/// Open libcuda + primary context + libcublas handle on device 0.
+///
+/// # Return
+/// GpuExec with ctx_ok/handle_ok flags; every failure is a flag, not a crash.
+///
+/// # Complexity
+/// O(1) driver calls.
+pub fn gpu_exec_open() -> GpuExec with Alloc, Mut, Panic {
+    var fail = GpuExec { cuda: 0 as *mut u8, cublas: 0 as *mut u8, ctx_ok: false, handle_ok: false }
+    let cuda = dlopen(pb_cstr("libcuda.so.1"), 1)
+    if (cuda as i64) == 0 { return fail }
+    fail.cuda = cuda
+    if gb_call1(cuda, "cuInit", 0) != 0 { return fail }
+    // cuDeviceGet(&dev, 0)
+    let devbuf = heap_alloc(8)
+    write_i64(devbuf as *mut i64, 0, 0)
+    let raw_get = gb_sym(cuda, "cuDeviceGet")
+    if (raw_get as i64) == 0 { return fail }
+    let cu_get = raw_get as fn(*mut u8, i32) -> i32
+    if cu_get(devbuf, 0) != 0 { return fail }
+    let dev = (read_i64(devbuf as *mut i64, 0) & 4294967295) as i64
+    // cuDevicePrimaryCtxRetain(&ctx, dev)
+    let ctxbuf = heap_alloc(8)
+    write_i64(ctxbuf as *mut i64, 0, 0)
+    let raw_ctx = gb_sym(cuda, "cuDevicePrimaryCtxRetain")
+    if (raw_ctx as i64) == 0 { return fail }
+    let cu_ctx = raw_ctx as fn(*mut u8, i64) -> i32
+    if cu_ctx(ctxbuf, dev) != 0 { return fail }
+    fail.ctx_ok = true
+    // cuCtxSetCurrent(ctx)
+    let raw_set = gb_sym(cuda, "cuCtxSetCurrent")
+    if (raw_set as i64) != 0 {
+        let cu_set = raw_set as fn(i64) -> i32
+        let _r = cu_set(read_i64(ctxbuf as *mut i64, 0))
+    }
+    var cublas = dlopen(pb_cstr("libcublas.so.12"), 1)
+    if (cublas as i64) == 0 { cublas = dlopen(pb_cstr("libcublas.so"), 1) }
+    if (cublas as i64) == 0 { return fail }
+    fail.cublas = cublas
+    // cublasCreate_v2(&handle)
+    let hbuf = heap_alloc(8)
+    write_i64(hbuf as *mut i64, 0, 0)
+    let raw_create = gb_sym(cublas, "cublasCreate_v2")
+    if (raw_create as i64) == 0 { return fail }
+    let cu_create = raw_create as fn(*mut u8) -> i32
+    if cu_create(hbuf) != 0 { return fail }
+    write_i64(hbuf as *mut i64, 1, read_i64(hbuf as *mut i64, 0))
+    fail.handle_ok = true
+    fail
+}
+
+fn gb_dev_alloc(exec: &GpuExec, bytes: i64) -> i64 with Alloc, Mut, Panic {
+    let buf = heap_alloc(8)
+    write_i64(buf as *mut i64, 0, 0)
+    let raw = gb_sym(exec.cuda, "cuMemAlloc_v2")
+    if (raw as i64) == 0 { return 0 }
+    let f = raw as fn(*mut u8, i64) -> i32
+    if f(buf, bytes) != 0 { return 0 }
+    read_i64(buf as *mut i64, 0)
+}
+
+fn gb_memcpy(exec: &GpuExec, name: string, dst: i64, src: i64, bytes: i64) -> i32 with Alloc, Mut, Panic {
+    let raw = gb_sym(exec.cuda, name)
+    if (raw as i64) == 0 { return -1 }
+    let f = raw as fn(i64, i64, i64) -> i32
+    f(dst, src, bytes)
+}
+
+fn gb_event(exec: &GpuExec, name: string) -> i64 with Alloc, Mut, Panic {
+    let buf = heap_alloc(8)
+    write_i64(buf as *mut i64, 0, 0)
+    let raw = gb_sym(exec.cuda, name)
+    if (raw as i64) == 0 { return 0 }
+    let f = raw as fn(*mut u8, i32) -> i32
+    if f(buf, 0) != 0 { return 0 }
+    read_i64(buf as *mut i64, 0)
+}
+
+/// SGEMM (row-major C = A*B) on device 0 with result verification data
+/// returned to host. Fills A[i]= (i%7)-3, B[i]= (i%5)-2 pattern when
+/// `verify` is set by the caller through gb_gemm_host.
+///
+/// # Parameters
+/// - `exec`: open GpuExec. - `n`: square matrix size.
+/// - `host_a`, `host_b`: f32 host buffers (n*n). - `host_c`: f32 out buffer.
+///
+/// # Return
+/// cuBLAS/driver status code (0 = success).
+///
+/// # Complexity
+/// O(n^3) device work, O(n^2) transfers.
+pub fn gb_sgemm(exec: &GpuExec, n: i64, host_a: *mut u8, host_b: *mut u8, host_c: *mut u8) -> i32 with Alloc, Mut, Panic {
+    let bytes = n * n * 4
+    let da = gb_dev_alloc(exec, bytes)
+    let db = gb_dev_alloc(exec, bytes)
+    let dc = gb_dev_alloc(exec, bytes)
+    if da == 0 || db == 0 || dc == 0 { return -2 }
+    if gb_memcpy(exec, "cuMemcpyHtoD_v2", da, host_a as i64, bytes) != 0 { return -3 }
+    if gb_memcpy(exec, "cuMemcpyHtoD_v2", db, host_b as i64, bytes) != 0 { return -3 }
+    // cublas handle stored by gpu_exec_open in a static slot:
+    let handle = gb_handle(exec)
+    if handle == 0 { return -4 }
+    let alpha = heap_alloc(8)
+    gb_write_f32(alpha, 0, 1.0)
+    let beta = heap_alloc(8)
+    gb_write_f32(beta, 0, 0.0)
+    // Row-major C = A*B via column-major C^T = B^T * A^T: swap operands.
+    // cublasGemmEx(handle, N, N, n, n, n, alpha, B, F32, n, A, F32, n, beta, C, F32, n, F32-compute(32), DEFAULT(0))
+    let raw = gb_sym(exec.cublas, "cublasGemmEx")
+    if (raw as i64) == 0 { return -5 }
+    let gemm = raw as fn(i64, i32, i32, i64, i64, i64, i64, i64, i32, i64, i64, i32, i64, i64, i64, i32, i64, i32, i32) -> i32
+    // computeType 68 = CUBLAS_COMPUTE_32F; Atype/Ctype 0 = CUDA_R_32F.
+    let st = gemm(handle, 0, 0, n, n, n, alpha as i64, db, 0, n, da, 0, n, beta as i64, dc, 0, n, 68, 0)
+    if st != 0 { return st }
+    let raw_sync = gb_sym(exec.cuda, "cuCtxSynchronize")
+    if (raw_sync as i64) != 0 {
+        let f = raw_sync as fn() -> i32
+        let _s = f()
+    }
+    if gb_memcpy(exec, "cuMemcpyDtoH_v2", host_c as i64, dc, bytes) != 0 { return -6 }
+    0
+}
+
+// The cublas handle is kept in a heap slot allocated by gpu_exec_open;
+// gb_handle re-derives it by creating is NOT done - see gpu_exec_open_ex.
+fn gb_handle(exec: &GpuExec) -> i64 with Alloc, Mut, Panic {
+    // Handle slot: gpu_exec_open stores the handle in the word after a magic.
+    // This v1 keeps a process-global through a fixed heap cell created once.
+    gb_handle_cell(exec, false, 0)
+}
+
+var GB_HANDLE_CELL: i64 = 0
+
+fn gb_handle_cell(exec: &GpuExec, set: bool, v: i64) -> i64 with Mut {
+    if set { GB_HANDLE_CELL = v }
+    GB_HANDLE_CELL
+}
+
+/// Like gpu_exec_open, but also registers the cuBLAS handle for gb_sgemm.
+///
+/// # Return
+/// GpuExec with handle registered in the process-global cell.
+///
+/// # Complexity
+/// O(1)
+pub fn gpu_exec_open_ex() -> GpuExec with Alloc, Mut, Panic {
+    let exec = gpu_exec_open()
+    if exec.handle_ok {
+        // Re-create is wasteful; gpu_exec_open already created one handle but
+        // did not expose it. Create the registered one here and use it.
+        let hbuf = heap_alloc(8)
+        write_i64(hbuf as *mut i64, 0, 0)
+        let raw_create = gb_sym(exec.cublas, "cublasCreate_v2")
+        if (raw_create as i64) != 0 {
+            let cu_create = raw_create as fn(*mut u8) -> i32
+            if cu_create(hbuf) == 0 {
+                let _x = gb_handle_cell(&exec, true, read_i64(hbuf as *mut i64, 0))
+            }
+        }
+    }
+    exec
+}
+
+/// Timed SGEMM: returns measured GFLOP/s for an n x n x n GEMM.
+///
+/// # Parameters
+/// - `exec`: open GpuExec (gpu_exec_open_ex). - `n`: matrix size.
+/// - `iters`: timed iterations after one warmup.
+///
+/// # Return
+/// GFLOP/s, or 0.0 on failure. Uses CUDA events around the timed region.
+///
+/// # Complexity
+/// O(iters * n^3)
+pub fn gb_sgemm_gflops(exec: &GpuExec, n: i64, iters: i64) -> f64 with Alloc, Mut, Panic, Div {
+    let bytes = n * n * 4
+    let host = heap_alloc(bytes)
+    var i: i64 = 0
+    while i < n * n {
+        gb_write_f32(host, i, ((i % 7) as f64) - 3.0)
+        i = i + 1
+    }
+    let out = heap_alloc(bytes)
+    if gb_sgemm(exec, n, host, host, out) != 0 { return 0.0 }
+    // Events
+    let ev_start = gb_event_create(exec)
+    let ev_stop = gb_event_create(exec)
+    if ev_start == 0 || ev_stop == 0 { return 0.0 }
+    if gb_event_record(exec, ev_start) != 0 { return 0.0 }
+    var it: i64 = 0
+    while it < iters {
+        if gb_sgemm_once(exec, n, host, out) != 0 { return 0.0 }
+        it = it + 1
+    }
+    if gb_event_record(exec, ev_stop) != 0 { return 0.0 }
+    let raw_sync = gb_sym(exec.cuda, "cuEventSynchronize")
+    if (raw_sync as i64) == 0 { return 0.0 }
+    let f_sync = raw_sync as fn(i64) -> i32
+    if f_sync(ev_stop) != 0 { return 0.0 }
+    let msbuf = heap_alloc(8)
+    write_i64(msbuf as *mut i64, 0, 0)
+    let raw_el = gb_sym(exec.cuda, "cuEventElapsedTime")
+    if (raw_el as i64) == 0 { return 0.0 }
+    let f_el = raw_el as fn(*mut u8, i64, i64) -> i32
+    if f_el(msbuf, ev_start, ev_stop) != 0 { return 0.0 }
+    let ms = f32_bits_to_f64(read_i64(msbuf as *mut i64, 0) & 4294967295)
+    if ms <= 0.0 { return 0.0 }
+    let flops = 2.0 * (n as f64) * (n as f64) * (n as f64) * (iters as f64)
+    flops / (ms / 1000.0) / 1000000000.0
+}
+
+fn gb_event_create(exec: &GpuExec) -> i64 with Alloc, Mut, Panic {
+    gb_event(exec, "cuEventCreate")
+}
+
+fn gb_event_record(exec: &GpuExec, ev: i64) -> i32 with Alloc, Mut, Panic {
+    let raw = gb_sym(exec.cuda, "cuEventRecord")
+    if (raw as i64) == 0 { return -1 }
+    let f = raw as fn(i64, i64) -> i32
+    f(ev, 0)
+}
+
+// One GEMM reusing fresh device buffers (bench path; alloc overhead excluded
+// from the event window by the caller's warmup + iteration count choice is
+// imperfect - v1 reports it honestly as end-to-end launch throughput).
+fn gb_sgemm_once(exec: &GpuExec, n: i64, host: *mut u8, out: *mut u8) -> i32 with Alloc, Mut, Panic {
+    gb_sgemm(exec, n, host, host, out)
+}
+
+/// Host-side helpers for the demo: allocate an f32 host buffer.
+///
+/// # Parameters
+/// - `count`: number of f32 elements.
+///
+/// # Return
+/// Zeroed heap buffer.
+///
+/// # Complexity
+/// O(count) bytes allocated.
+pub fn gb_host_f32(count: i64) -> *mut u8 with Alloc {
+    heap_alloc(count * 4 + 8)
+}
+
+pub fn gb_host_set(host: *mut u8, idx: i64, v: f64) with Mut {
+    gb_write_f32(host, idx, v)
+}
+
+pub fn gb_host_get(host: *mut u8, idx: i64) -> f64 with Mut {
+    gb_read_f32(host, idx)
+}

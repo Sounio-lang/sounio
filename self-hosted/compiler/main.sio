@@ -396,7 +396,7 @@ fn run_probe_monolithic_public_lower_call(args: ArgList, flag_index: i64) with I
         if func.compile_strategy == IR_STRATEGY_BSS_GLOBAL {
             bss_globals = bss_globals + 1
         }
-        if ir_name_eq(func.name, make_name("main")) {
+        if ir_name_eq_lit(func.name, "main") {
             main_fn = fi
         }
         fi = fi + 1
@@ -1745,6 +1745,28 @@ fn lobl_append(buf: [i8; 65536], pos: i64, s: string) -> ([i8; 65536], i64) with
     (out, p)
 }
 
+// ADR-015 row 12: list the documentation comments of a file with the token each one
+// documents. One `DOC ...` line per comment (see lexer_print_docs).
+fn run_emit_docs_mode(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
+    if flag_index + 1 >= args.len {
+        print("usage: --emit-docs <src.sio>\n")
+        return
+    }
+    let src = arg_list_get(args, flag_index + 1)
+    if !file_exists(src) {
+        print("--emit-docs: cannot read ")
+        print(src)
+        print("\n")
+        return
+    }
+    let tc = lex_file_to_globals(src)
+    if tc < 0 {
+        print("--emit-docs: the file could not be lexed\n")
+        return
+    }
+    lexer_print_docs(tc)
+}
+
 fn run_emit_lean_obligations(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
     if flag_index + 2 >= args.len {
         print("usage: emit-lean-obligations <src.sio> <out.lean>\n")
@@ -1805,6 +1827,7 @@ fn compiler_visibility_preflight(source_path: string) -> bool with IO, Mut, Pani
         edge_dependencies: [""; 512],
         unresolved_callers: [""; 256],
         unresolved_imports: [""; 256],
+        unresolved_paths: [""; 256],
         node_count: 0,
         edge_count: 0,
         unresolved_count: 0,
@@ -1837,6 +1860,18 @@ fn compiler_visibility_preflight(source_path: string) -> bool with IO, Mut, Pani
         print(" parse_failed=")
         if closure.parse_failed { print("true") } else { print("false") }
         print("\n")
+        var unresolved_i: i64 = 0
+        while unresolved_i < closure.unresolved_count {
+            print("run_check_mode: missing module not found: ")
+            print(closure.unresolved_imports[unresolved_i])
+            print(" imported from ")
+            print(closure.unresolved_callers[unresolved_i])
+            print("\n")
+            print("  tried path: ")
+            print(closure.unresolved_paths[unresolved_i])
+            print("\n")
+            unresolved_i = unresolved_i + 1
+        }
         return false
     }
 
@@ -1984,6 +2019,7 @@ fn run_science_boundary_closure_report(
         edge_dependencies: [""; 512],
         unresolved_callers: [""; 256],
         unresolved_imports: [""; 256],
+        unresolved_paths: [""; 256],
         node_count: 0,
         edge_count: 0,
         unresolved_count: 0,
@@ -2027,7 +2063,9 @@ fn run_science_boundary_closure_report(
         print("unresolved\t")
         print(closure.unresolved_callers[i])
         print("\t")
-        println(closure.unresolved_imports[i])
+        print(closure.unresolved_imports[i])
+        print("\t")
+        println(closure.unresolved_paths[i])
         i = i + 1
     }
 }
@@ -12921,22 +12959,22 @@ fn compiler_main_test_knowledge_layout_registered() -> bool with Mut, Panic, Div
     let table = ir_register_knowledge_layout(empty_struct_layout_table())
     if table.count != 1 { return false }
     let entry = table.entries[0]
-    if !ir_name_eq(entry.type_name, make_name("Knowledge")) { return false }
+    if !ir_name_eq_lit(entry.type_name, "Knowledge") { return false }
     if entry.field_count != 5 { return false }
-    if !ir_name_eq(ir_name_at(entry.fields[0].name_id), make_name("value")) { return false }
+    if !ir_name_eq_lit(ir_name_at(entry.fields[0].name_id), "value") { return false }
     if entry.fields[0].index != 0 { return false }
-    if !ir_name_eq(ir_name_at(entry.fields[1].name_id), make_name("variance")) { return false }
+    if !ir_name_eq_lit(ir_name_at(entry.fields[1].name_id), "variance") { return false }
     if entry.fields[1].index != 1 { return false }
-    if !ir_name_eq(ir_name_at(entry.fields[2].name_id), make_name("confidence")) { return false }
+    if !ir_name_eq_lit(ir_name_at(entry.fields[2].name_id), "confidence") { return false }
     if entry.fields[2].index != 2 { return false }
     // `epsilon` names the SAME slot as `confidence`, so it must carry index 2 --
     // a distinct index here would be a fourth field, not an alias.
-    if !ir_name_eq(ir_name_at(entry.fields[3].name_id), make_name("epsilon")) { return false }
+    if !ir_name_eq_lit(ir_name_at(entry.fields[3].name_id), "epsilon") { return false }
     if entry.fields[3].index != 2 { return false }
     // `provenance` is the one entry that is NOT an alias: its own slot, so that a
     // struct literal naming it stops overwriting whichever field sits at its
     // positional index.
-    if !ir_name_eq(ir_name_at(entry.fields[4].name_id), make_name("provenance")) { return false }
+    if !ir_name_eq_lit(ir_name_at(entry.fields[4].name_id), "provenance") { return false }
     if entry.fields[4].index != 3 { return false }
     true
 }
@@ -12950,7 +12988,7 @@ fn compiler_main_test_knowledge_field_idx_lookup() -> bool with Mut, Panic, Div 
     while si < table.count {
         var fi: i64 = 0
         while fi < table.entries[si].field_count {
-            if ir_name_eq(ir_name_at(table.entries[si].fields[fi].name_id), make_name("value")) {
+            if ir_name_eq_lit(ir_name_at(table.entries[si].fields[fi].name_id), "value") {
                 found_value = table.entries[si].fields[fi].index
             }
             fi = fi + 1
@@ -12964,7 +13002,7 @@ fn compiler_main_test_knowledge_field_idx_lookup() -> bool with Mut, Panic, Div 
     while si < table.count {
         var fi2: i64 = 0
         while fi2 < table.entries[si].field_count {
-            if ir_name_eq(ir_name_at(table.entries[si].fields[fi2].name_id), make_name("variance")) {
+            if ir_name_eq_lit(ir_name_at(table.entries[si].fields[fi2].name_id), "variance") {
                 found_var = table.entries[si].fields[fi2].index
             }
             fi2 = fi2 + 1
@@ -12978,7 +13016,7 @@ fn compiler_main_test_knowledge_field_idx_lookup() -> bool with Mut, Panic, Div 
     while si < table.count {
         var fi3: i64 = 0
         while fi3 < table.entries[si].field_count {
-            if ir_name_eq(ir_name_at(table.entries[si].fields[fi3].name_id), make_name("confidence")) {
+            if ir_name_eq_lit(ir_name_at(table.entries[si].fields[fi3].name_id), "confidence") {
                 found_conf = table.entries[si].fields[fi3].index
             }
             fi3 = fi3 + 1
@@ -30200,7 +30238,7 @@ fn run_gpu_compile_pipeline(
                 return 1
             }
         } else {
-            print(kaxi_asm_to_string(kaxi))
+            print(kaxi_asm_to_string(&kaxi))
         }
         return 0
     }
@@ -30319,7 +30357,7 @@ fn run_gpu_compile_pipeline(
                       else if str_eq(gpu_binary_format, "f32-gum") { 5 }
                       else if str_eq(gpu_binary_format, "f32") { 2 }
                       else { 0 }
-        let kaxi_ptx = kaxi_transpile_to_ptx_unified(kaxi, mode_id)
+        let kaxi_ptx = kaxi_transpile_to_ptx_unified(&kaxi, mode_id)
         var kpb = ptx_buf_new()
         kpb = ptx_push_str(kpb, kaxi_ptx)
         if str_len(output_path) > 0 {
@@ -30438,7 +30476,33 @@ fn run_gpu_compile_pipeline(
 // MAIN
 // ============================================================================
 
+var MADAROS_STACK_RLIM: [i64; 2] = [0; 2]
+
+// SIO-568: the raw compiler ELF self-elevates its stack address-space limit
+// on Linux. The check/lower paths recurse deeply enough that the default
+// 8 MiB shell stack SIGSEGVs (rc=139) on small programs (a BinOp evaluated
+// under two nested calls needs ~10 MiB); bin/madaros and the suite wrapper
+// already reserve 512 MiB via MADAROS_STACK_KB, but a direct ELF invocation
+// ran with whatever the caller had. Best-effort and silent: any unexpected
+// value aborts the elevation, never the compilation. Non-Linux hosts skip
+// entirely (Linux rlimit numbers); the launcher reports SOUNIO_HOST_OS.
+fn compiler_self_elevate_stack() with IO, Mut, Panic, Div, Alloc {
+    if !str_eq(read_env("SOUNIO_HOST_OS"), "Linux") { return }
+    if syscall6(97, 3, &!MADAROS_STACK_RLIM, 0, 0, 0, 0) != 0 { return }
+    let cur = MADAROS_STACK_RLIM[0]
+    let mx = MADAROS_STACK_RLIM[1]
+    if cur < 0 { return }
+    if mx >= 0 && cur > mx { return }
+    if cur == mx { return }
+    var want = mx
+    if want < 0 || want > 536870912 { want = 536870912 }
+    if want <= cur { return }
+    MADAROS_STACK_RLIM[0] = want
+    syscall6(160, 3, &!MADAROS_STACK_RLIM, 0, 0, 0, 0)
+}
+
 fn main() with IO, Mut, Panic, Div, Alloc {
+    compiler_self_elevate_stack()
     // Madaros compiles through native/codegen_x86_linux.sio, the only backend
     // that implements the region-reclamation runtime (ir/lower.sio).
     lower_rgn_backend_opt_in()
@@ -30481,6 +30545,9 @@ fn main() with IO, Mut, Panic, Div, Alloc {
             return
         } else if mode == "emit-lean-obligations" || mode == "--emit-lean-obligations" {
             run_emit_lean_obligations(args, arg_idx)
+            return
+        } else if mode == "--emit-docs" {
+            run_emit_docs_mode(args, arg_idx)
             return
         } else if mode == "build" {
             run_native_v2_compile_mode(args, arg_idx)

@@ -15,7 +15,7 @@ use lexer::numparse::*
 use lexer::tables::*
 use lexer::token::{TokenKind}
 use parser::ast::*
-use parser::parser::{parser_set_token_at, parser_set_token_flat, parser_set_token_int_value, parser_set_token_scalar, parser_set_last_errors, parser_span_int_literal_overflow}
+use parser::parser::{parser_set_token_at, parser_set_token_flat, parser_set_token_int_value, parser_set_token_scalar, parser_set_last_errors, parser_span_int_literal_overflow, parser_pt_start, parser_pt_end, parser_pt_line}
 use parser::mod::{parse_items_preloaded}
 
 // Maximum tokens per file (2097152) — use literal not constant: boot4 leaves let globals at 0.
@@ -182,6 +182,61 @@ fn lexer_mark_lex_error(kind: i64, line: i64, col: i64, byte_val: i64) with Mut 
     }
 }
 
+var LEXER_UTF8_LEN: i64 = 0
+
+// Scalar value of the UTF-8 sequence that starts at pos, or -1 if it is malformed
+// (bad lead or continuation byte, truncated, overlong, a surrogate, or above U+10FFFF).
+// On success LEXER_UTF8_LEN is its length in bytes.
+fn lexer_utf8_scalar(pos: i64, n: i64) -> i64 with Mut, Panic {
+    let b0 = (CURSOR_SOURCE[pos as usize] as i64) & 255
+    var need: i64 = 0
+    var v: i64 = 0
+    var minv: i64 = 0
+    if b0 >= 194 && b0 <= 223 { need = 1  v = b0 & 31  minv = 128 }
+    else if b0 >= 224 && b0 <= 239 { need = 2  v = b0 & 15  minv = 2048 }
+    else if b0 >= 240 && b0 <= 244 { need = 3  v = b0 & 7  minv = 65536 }
+    else { return 0 - 1 }
+    if pos + need >= n { return 0 - 1 }
+    var i: i64 = 1
+    while i <= need {
+        let b = (CURSOR_SOURCE[(pos + i) as usize] as i64) & 255
+        if b < 128 || b > 191 { return 0 - 1 }
+        v = v * 64 + (b & 63)
+        i = i + 1
+    }
+    if v < minv { return 0 - 1 }
+    if v >= 55296 && v <= 57343 { return 0 - 1 }
+    if v > 1114111 { return 0 - 1 }
+    LEXER_UTF8_LEN = need + 1
+    return v
+}
+
+// ADR-015 row 11, first slice: besides ASCII letters, digits and `_`, an identifier may contain
+// `ε` (CE B5), `∂` (E2 88 82), `∇` (E2 88 87) and `∞` (E2 88 9E). Returns the byte length of
+// that character at pos, or 0. (The rest of UAX #31 and NFC are later slices.)
+fn lexer_ident_mb_len(pos: i64, n: i64) -> i64 with Mut, Panic {
+    if pos + 1 < n {
+        let b0 = (CURSOR_SOURCE[pos as usize] as i64) & 255
+        let b1 = (CURSOR_SOURCE[(pos + 1) as usize] as i64) & 255
+        if b0 == 206 && b1 == 181 { return 2 }
+        if pos + 2 < n && b0 == 226 && b1 == 136 {
+            let b2 = (CURSOR_SOURCE[(pos + 2) as usize] as i64) & 255
+            if b2 == 130 || b2 == 135 || b2 == 158 { return 3 }
+        }
+    }
+    return 0
+}
+
+// ADR-015 row 8: a `_` right after a numeric literal that is not between two digits (the number
+// scan already consumed those) and does not start a unit suffix (`500_mg`) is a stray separator.
+fn lexer_number_stray_underscore(pos: i64, n: i64) -> bool with Mut, Panic {
+    if pos < n && CURSOR_SOURCE[pos as usize] == 95 as i8 {
+        if pos + 1 < n && is_alpha(CURSOR_SOURCE[(pos + 1) as usize]) { return false }
+        return true
+    }
+    return false
+}
+
 // A string escape the lowering decodes (ir_normalize_string_literal_name):
 // \n \t \r \0 \\ \" and \xHH. This is the union of what the two engines decode
 // today; lean_single refuses every other escape, and so does this lexer now.
@@ -234,6 +289,33 @@ pub fn lexer_report_lex_error_if_any(path: string) -> bool with IO, Mut {
         print("  = note: the digits were previously wrapped into the value, so\n")
         print("          `99999999999999999999` compiled as 7766279631452241919\n")
         print("  = help: write it as a float (`...e0`) or keep it within 2^64-1\n")
+    } else if LEXER_LEX_ERROR_KIND == 7 {
+        print("error[E281]: unterminated or malformed character literal")
+        lexer_print_location(path)
+        print("  = note: a character literal is one Unicode scalar value between quotes, `'a'` or `'\\n'`;\n")
+        print("          `'name` with no closing quote is a lifetime, but a single character without one is refused\n")
+    } else if LEXER_LEX_ERROR_KIND == 8 {
+        print("error[E282]: identifier too long")
+        lexer_print_location(path)
+        print("  = note: an identifier holds at most 256 bytes; it used to be cut at 256 and the rest\n")
+        print("          was read as a second name\n")
+    } else if LEXER_LEX_ERROR_KIND == 10 {
+        print("error[E284]: digit separator `_` must sit between two digits")
+        lexer_print_location(path)
+        print("  = note: `1_000` is a number; `1__0` and `10_` are not. A `_` right after a number is a unit suffix\n")
+        print("          only when a letter follows it (`500_mg`)\n")
+    } else if LEXER_LEX_ERROR_KIND == 9 {
+        print("error[E283]: ambiguous operator spelling `")
+        if LEXER_LEX_ERROR_BYTE == 33 { print("&!") } else { print("+-") }
+        print("`")
+        lexer_print_location(path)
+        if LEXER_LEX_ERROR_BYTE == 33 {
+            print("  = help: `a&!b` could read as `a & !b` or as a mutable borrow; add a space: `a & !b` for the first,\n")
+            print("          `a &!b` for the borrow\n")
+        } else {
+            print("  = help: `a+-b` could read as `a + -b` or as the uncertainty operator `a +- b`; add a space on each side of `+-`\n")
+            print("          for the operator, or write `a + -b`\n")
+        }
     } else {
         let in_char = LEXER_LEX_ERROR_KIND == 5
         print("error[E274]: invalid escape sequence `\\")
@@ -892,7 +974,93 @@ fn lex_flat_sep_before_hex_digit(pos: i64, n: i64) -> bool with Mut, Panic {
 // via parser_set_token_at() only — no LexerState or token array allocation.
 // CURSOR_SOURCE must be populated before calling (e.g. by lex_file_to_globals).
 // Returns the total number of tokens emitted (including the EOF token).
+// ADR-015 row 12: documentation comments are recorded in a side table, in source order,
+// each with the index of the token that follows it (the item it documents). The token
+// stream the parser reads is unchanged, so a `///` in any position cannot break a parse.
+// DOC_KIND: 1 outer line (`///`), 2 inner line (`//!`), 3 outer block (`/** */`),
+// 4 inner block (`/*! */`). DOC_TEXT_* is the byte range after the marker.
+var DOC_COUNT: i64 = 0
+var DOC_OVERFLOW: i64 = 0
+var DOC_KIND: [i64; 65536] = [0; 65536]
+var DOC_TEXT_START: [i64; 65536] = [0; 65536]
+var DOC_TEXT_END: [i64; 65536] = [0; 65536]
+var DOC_LINE: [i64; 65536] = [0; 65536]
+var DOC_NEXT_TOK: [i64; 65536] = [0; 65536]
+
+fn lexer_doc_begin(kind: i64, text_start: i64, line: i64, next_tok: i64) -> i64 with Mut, Panic {
+    if DOC_COUNT >= 65536 {
+        DOC_OVERFLOW = 1
+        return 0 - 1
+    }
+    let i = DOC_COUNT
+    DOC_KIND[i as usize] = kind
+    DOC_TEXT_START[i as usize] = text_start
+    DOC_TEXT_END[i as usize] = text_start
+    DOC_LINE[i as usize] = line
+    DOC_NEXT_TOK[i as usize] = next_tok
+    DOC_COUNT = i + 1
+    return i
+}
+
+fn lexer_doc_set_end(i: i64, end: i64) with Mut, Panic {
+    if i >= 0 && i < 65536 { DOC_TEXT_END[i as usize] = end }
+}
+
+pub fn lexer_doc_count() -> i64 { DOC_COUNT }
+
+pub fn lexer_doc_overflowed() -> bool { DOC_OVERFLOW == 1 }
+
+fn lexer_doc_print_range(from: i64, to: i64, max: i64) with IO, Mut, Panic {
+    var i: i64 = from
+    var printed: i64 = 0
+    while i < to && printed < max {
+        let c = CURSOR_SOURCE[i as usize]
+        if c == 10 as i8 {
+            print("\\n")
+        } else if c != 13 as i8 {
+            print_char(c)
+        }
+        printed = printed + 1
+        i = i + 1
+    }
+}
+
+// One line per documentation comment:
+//   DOC <kind> line=<L> next_line=<NL> next=<first token of the item> text=<text>
+// `\n` in the text is written as the two characters backslash-n. tc is the token count.
+pub fn lexer_print_docs(tc: i64) with IO, Mut, Panic {
+    var i: i64 = 0
+    while i < DOC_COUNT {
+        let k = DOC_KIND[i as usize]
+        print("DOC ")
+        if k == 1 { print("outer-line") }
+        else if k == 2 { print("inner-line") }
+        else if k == 3 { print("outer-block") }
+        else { print("inner-block") }
+        print(" line=")
+        print_int(DOC_LINE[i as usize])
+        let nt = DOC_NEXT_TOK[i as usize]
+        print(" next_line=")
+        if nt < tc { print_int(parser_pt_line(nt)) } else { print_int(0) }
+        print(" next=")
+        if nt < tc && parser_pt_end(nt) > parser_pt_start(nt) {
+            lexer_doc_print_range(parser_pt_start(nt), parser_pt_end(nt), 40)
+        } else {
+            print("<eof>")
+        }
+        print(" text=")
+        lexer_doc_print_range(DOC_TEXT_START[i as usize], DOC_TEXT_END[i as usize], 4096)
+        print("\n")
+        i = i + 1
+    }
+    if DOC_OVERFLOW == 1 {
+        print("DOC-OVERFLOW the table holds 65536 documentation comments; the rest are not listed\n")
+    }
+}
+
 pub fn lex_source_to_globals(source_len: i64) -> i64 with Mut, Div, Panic {
+    DOC_COUNT = 0
+    DOC_OVERFLOW = 0
     lexer_reset_token_overflow()
     lexer_reset_lex_error()
     var n: i64 = source_len
@@ -935,15 +1103,30 @@ pub fn lex_source_to_globals(source_len: i64) -> i64 with Mut, Div, Panic {
         if ch == 47 as i8 && pos + 1 < n {
             let next = CURSOR_SOURCE[(pos + 1) as usize]
             if next == 47 as i8 {
+                var doc_idx: i64 = 0 - 1
+                if pos + 2 < n {
+                    let d2 = CURSOR_SOURCE[(pos + 2) as usize]
+                    let d3 = if pos + 3 < n { CURSOR_SOURCE[(pos + 3) as usize] } else { 0 as i8 }
+                    if d2 == 47 as i8 && d3 != 47 as i8 { doc_idx = lexer_doc_begin(1, pos + 3, line, tc) }
+                    else if d2 == 33 as i8 { doc_idx = lexer_doc_begin(2, pos + 3, line, tc) }
+                }
                 while pos < n && CURSOR_SOURCE[pos as usize] != 10 as i8 {
                     pos = pos + 1
                     col = col + 1
                 }
+                if doc_idx >= 0 { lexer_doc_set_end(doc_idx, pos) }
                 continue
             }
             if next == 42 as i8 {
                 let comment_line = line
                 let comment_col = col
+                var bdoc_idx: i64 = 0 - 1
+                if pos + 2 < n {
+                    let b2 = CURSOR_SOURCE[(pos + 2) as usize]
+                    let b3 = if pos + 3 < n { CURSOR_SOURCE[(pos + 3) as usize] } else { 0 as i8 }
+                    if b2 == 42 as i8 && b3 != 42 as i8 && b3 != 47 as i8 { bdoc_idx = lexer_doc_begin(3, pos + 3, line, tc) }
+                    else if b2 == 33 as i8 { bdoc_idx = lexer_doc_begin(4, pos + 3, line, tc) }
+                }
                 pos = pos + 2
                 col = col + 2
                 var depth: i64 = 1
@@ -971,21 +1154,43 @@ pub fn lex_source_to_globals(source_len: i64) -> i64 with Mut, Div, Panic {
                 if depth > 0 {
                     lexer_mark_lex_error(2, comment_line, comment_col, 0)
                 }
+                if bdoc_idx >= 0 { if depth == 0 { lexer_doc_set_end(bdoc_idx, pos - 2) } else { lexer_doc_set_end(bdoc_idx, n) } }
                 continue
             }
         }
 
-        if is_ident_start(ch) {
+        if is_ident_start(ch) || lexer_ident_mb_len(pos, n) > 0 {
             let start = pos
             let start_col = col
             var text: [i8; 256] = [0; 256]
             var text_idx: i64 = 0
-            while pos < n && is_ident_continue(CURSOR_SOURCE[pos as usize]) && text_idx < 256 {
-                text[text_idx as usize] = CURSOR_SOURCE[pos as usize]
-                text_idx = text_idx + 1
-                pos = pos + 1
-                col = col + 1
+            // ADR-015 row 11: an identifier longer than 256 bytes is refused (E282). It used to be
+            // cut at 256 and the rest read as a second name.
+            var id_bytes: i64 = 0
+            var id_go: i64 = 1
+            var id_mb: i64 = 0
+            while pos < n && id_go == 1 {
+                let cc = CURSOR_SOURCE[pos as usize]
+                var step: i64 = 0
+                if is_ident_continue(cc) { step = 1 } else { step = lexer_ident_mb_len(pos, n) }
+                if step == 0 {
+                    id_go = 0
+                } else {
+                    if step > 1 { id_mb = 1 }
+                    var bi: i64 = 0
+                    while bi < step {
+                        if text_idx < 256 {
+                            text[text_idx as usize] = CURSOR_SOURCE[(pos + bi) as usize]
+                            text_idx = text_idx + 1
+                        }
+                        bi = bi + 1
+                    }
+                    id_bytes = id_bytes + step
+                    pos = pos + step
+                    col = col + step
+                }
             }
+            if id_bytes > 256 { lexer_mark_lex_error(8, line, start_col, 0) }
             // main moved the identifier slot to the scalar setter (TokenKind
             // directly) so a new keyword needs no arm in parser_set_token_flat's
             // dispatch. Keep that, and keep this PR's fail-closed guard: the
@@ -993,6 +1198,14 @@ pub fn lex_source_to_globals(source_len: i64) -> i64 with Mut, Div, Panic {
             if tc >= 2097152 {
                 lexer_mark_token_overflow(line, start_col, start, 1)
                 break
+            }
+            // A name with a multi-byte character is never a keyword. Flat code 123 is the identifier
+            // code that pt_read_kind turns into Ident without looking at the first byte (it is
+            // negative as an i8 here, which the keyword path indexes by).
+            if id_mb == 1 {
+                tc = lexer_push_flat(tc, 123, start, pos, line, start_col, 0)
+                if tc < 0 { break }
+                continue
             }
             parser_set_token_scalar(tc, keyword_lookup(text, text_idx), start, pos, line, start_col)
             tc = tc + 1
@@ -1035,6 +1248,7 @@ pub fn lex_source_to_globals(source_len: i64) -> i64 with Mut, Div, Panic {
                 // hex-float (`0x1p0`, `0x1.8p+0`), whose long mantissa is not an
                 // integer: the shared parser decides that later
                 // (parser_hex_float_tail_ahead), so the emit must not refuse it.
+                if lexer_number_stray_underscore(pos, n) { lexer_mark_lex_error(10, line, start_col, 0) }
                 let hex_nx = cursor_source_byte(pos)
                 if hex_nx != (112 as i8) && hex_nx != (80 as i8) && hex_nx != (46 as i8) {
                     if parser_span_int_literal_overflow(start, pos) {
@@ -1087,6 +1301,7 @@ pub fn lex_source_to_globals(source_len: i64) -> i64 with Mut, Div, Panic {
                     is_float_token = true
                 }
             }
+            if lexer_number_stray_underscore(pos, n) { lexer_mark_lex_error(10, line, start_col, 0) }
             if is_float_token {
                 tc = lexer_push_flat(tc, 125, start, pos, line, start_col, 0)
             } else {
@@ -1168,11 +1383,17 @@ pub fn lex_source_to_globals(source_len: i64) -> i64 with Mut, Div, Panic {
         // Without this arm `'='` is an error token plus Eq, and lowering
         // refuses the resulting assignment (trailing_equals_banner_comment).
         if ch == 39 as i8 {
+            // ADR-015 row 4. `'x'` is a Unicode scalar value (UTF-8 decoded). `'name` with no
+            // closing quote is a lifetime and yields no token (as in lean_single), so
+            // `&'static str` still reads as `& str`. Anything else without a closing quote,
+            // or `''`, is refused (E281).
             let start = pos
             let start_col = col
             pos = pos + 1
             col = col + 1
             var value: i64 = 0
+            var lifetime: i64 = 0
+            var bad: i64 = 0
             if pos < n {
                 let c0 = CURSOR_SOURCE[pos as usize]
                 if c0 == 92 as i8 && pos + 1 < n {
@@ -1191,16 +1412,48 @@ pub fn lex_source_to_globals(source_len: i64) -> i64 with Mut, Div, Panic {
                     }
                     pos = pos + 2
                     col = col + 2
+                } else if ((c0 as i64) & 255) >= 128 {
+                    let sv = lexer_utf8_scalar(pos, n)
+                    if sv < 0 {
+                        lexer_mark_lex_error(1, line, col, (c0 as i64) & 255)
+                        pos = pos + 1
+                    } else {
+                        value = sv
+                        pos = pos + LEXER_UTF8_LEN
+                    }
+                    col = col + 1
+                } else if is_ident_start(c0) && pos + 1 < n && is_ident_continue(CURSOR_SOURCE[(pos + 1) as usize]) {
+                    lifetime = 1
+                    while pos < n && is_ident_continue(CURSOR_SOURCE[pos as usize]) {
+                        pos = pos + 1
+                        col = col + 1
+                    }
+                } else if c0 == 39 as i8 {
+                    bad = 1
                 } else {
                     value = c0 as i64
                     pos = pos + 1
                     col = col + 1
                 }
+            } else {
+                bad = 1
+            }
+            if lifetime == 1 {
+                // `'ab'` is a two-character literal, not a lifetime followed by a quote.
+                if pos < n && CURSOR_SOURCE[pos as usize] == 39 as i8 {
+                    lexer_mark_lex_error(7, line, start_col, 0)
+                    pos = pos + 1
+                    col = col + 1
+                }
+                continue
             }
             if pos < n && CURSOR_SOURCE[pos as usize] == 39 as i8 {
                 pos = pos + 1
                 col = col + 1
+            } else {
+                bad = 1
             }
+            if bad == 1 { lexer_mark_lex_error(7, line, start_col, 0) }
             tc = lexer_push_flat(tc, 127, start, pos, line, start_col, value)
             if tc < 0 { break }
             continue
@@ -1235,12 +1488,29 @@ pub fn lex_source_to_globals(source_len: i64) -> i64 with Mut, Div, Panic {
         else if ch == 94 as i8 && c2 == 61 as i8 { kind_code = 169; width = 2 }
         else if ch == 45 as i8 && c2 == 62 as i8 { kind_code = 158; width = 2 }
         else if ch == 61 as i8 && c2 == 62 as i8 { kind_code = 159; width = 2 }
-        else if ch == 60 as i8 && c2 == 45 as i8 { kind_code = 171; width = 2 }
-        else if ch == 38 as i8 && c2 == 33 as i8 { kind_code = 163; width = 2 }
+        // ADR-015 row 9: `<-` has no use of its own (0 standalone uses in the corpus), so `x<-1` is
+        // `x < -1`. The causal-graph `<->` keeps its `<-` token followed by `>`.
+        else if ch == 60 as i8 && c2 == 45 as i8 && c3 == 62 as i8 { kind_code = 171; width = 2 }
+        else if ch == 38 as i8 && c2 == 33 as i8 {
+            kind_code = 163
+            width = 2
+            // `a&!b` with an operand just before `&!` is ambiguous: refuse it (E283).
+            if pos > 0 {
+                let pv = CURSOR_SOURCE[(pos - 1) as usize]
+                if is_ident_continue(pv) || pv == 41 as i8 || pv == 93 as i8 { lexer_mark_lex_error(9, line, start_col, 33) }
+            }
+        }
         else if ch == 58 as i8 && c2 == 58 as i8 { kind_code = 162; width = 2 }
         else if ch == 46 as i8 && c2 == 46 as i8 { kind_code = 160; width = 2 }
         else if ch == 43 as i8 && c2 == 43 as i8 { kind_code = 164; width = 2 }
-        else if ch == 43 as i8 && c2 == 45 as i8 { kind_code = 173; width = 2 }
+        else if ch == 43 as i8 && c2 == 45 as i8 {
+            kind_code = 173
+            width = 2
+            // `+-` is the uncertainty operator only with a space on each side; `a+-2` is ambiguous (E283).
+            let pvb = if pos > 0 { CURSOR_SOURCE[(pos - 1) as usize] } else { 32 as i8 }
+            if !(pvb == 32 as i8 || pvb == 9 as i8 || pvb == 10 as i8 || pvb == 13 as i8) { lexer_mark_lex_error(9, line, start_col, 45) }
+            else if !(c3 == 32 as i8 || c3 == 9 as i8 || c3 == 10 as i8 || c3 == 13 as i8) { lexer_mark_lex_error(9, line, start_col, 45) }
+        }
         else if ch == 43 as i8 { kind_code = 132 }
         else if ch == 45 as i8 { kind_code = 133 }
         else if ch == 42 as i8 { kind_code = 134 }

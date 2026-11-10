@@ -99,6 +99,7 @@ not universal meanings across engines.
 | `E213`, `E216` | Tuple destructuring arity mismatch or an infinitely recursive type. | Match the tuple shape; for recursion, inspect permitted representation/indirection. Do not invent a supported heap abstraction. |
 | `E263` | A qualified call's module name collides with an unrelated method identity. | Inspect imports and declarations; use an existing unambiguous API or report the boundary. More qualification is not an automatic fix. |
 | `E264` | The selected native representation cannot preserve a payload-bearing enum use. | Preserve data and meaning. Change representation only through an authorized review, or report an unsupported-profile result. |
+| `E277`–`E280` | Payload-enum constructor or pattern arity, `==` on a payload enum, or a match over one that misses a variant. | Match the variant declaration (docs/compiler/ENUM_PAYLOAD_LAYOUT.md); compare with `match`; add the missing arms or a final `_`. |
 | `E270` | `as string` is being used as numeric/bool/char formatting. | Use a real formatting or typed-printing API after inspecting its implementation/profile support. Do not reinterpret a scalar as a string pointer. |
 
 Existing negative witnesses include
@@ -459,7 +460,7 @@ page is not a fresh execution receipt.
 | E261 | type-checker/ontology | error | ontology classes are disjoint and cannot be combined by this operator (e.g. an amount of H2 added to an amount of CO2) | — |
 | E262 | type-checker/ontology | error | ontology classes are unrelated: no subsumption between them, so the operator cannot say what the result is an amount of | — |
 | E263 | type-checker/modules | error | qualified call is ambiguous: the qualifier names a `use`d module but also collides with an unrelated struct/enum method of the same name, and the compiler cannot yet guarantee which one runs | — |
-| E264 | type-checker/enums | error | enum variant with a payload is not supported by this compiler: the native lowering represents an enum value as a bare discriminant, so the payload would be dropped (construction, payload sub-pattern, or struct pattern over a user enum) | — |
+| E264 | type-checker/enums | error | enum variant payload field of this type is not supported by this compiler (since KL-20 the refusal covers only a field the one-word cell slot cannot hold: a tuple, f128/f256 or Knowledge<T>; docs/compiler/ENUM_PAYLOAD_LAYOUT.md) | — |
 | E265 | type-checker/epistemic | error | Temporal validity window mismatch: the provided value's validity window cannot satisfy the required type's validity constraint | [E265.md](explanations/E265.md) |
 | E266 | type-checker/modules | error | qualified call resolves to no definition: the qualifier is unresolved or the target function is undefined (formerly warning W044; the call compiled to a body-less stub that trapped at run time, #1568) | — |
 | E267 | type-checker/ownership | error | cannot assign through a shared reference: the place is reached through `&T` (explicit `*p` or the auto-deref of `p.f` / `p[i]`), which is read-only; take `&!T` (#888) | — |
@@ -472,3 +473,21 @@ page is not a fresh execution receipt.
 | E274 | lexer (Madaros) | error | invalid escape sequence in a string literal: only `\n` `\t` `\r` `\0` `\\` `\"` and `\xHH` (two hex digits) are escapes; any other backslash pair used to compile as the bare character | — |
 | E275 | type-checker/ownership | error | borrow checker capacity exceeded: a linear or affine binding was not registered | — |
 | E276 | lexer (Madaros) | error | integer literal does not fit any 64-bit integer type | ADR-015 row 1. `99999999999999999999` used to wrap to `7766279631452241919` and `0x1FFFFFFFFFFFFFFFF` to `-1`, both with rc=0; now refused at the token's line and column. `-9223372036854775808` (i64 MIN) stays accepted — the minus is a prefix operator, so the literal itself fits — and the `(i64 MAX, u64 MAX]` band stays accepted: 51 bit patterns in the codegen emitters and 6 annotated `u64` literals live there, and choosing within it needs the declared type (the checker's half of row 1) |
+| E277 | type-checker/enums | error | enum variant constructor has the wrong number of payload values for its declaration (KL-20) | — |
+| E278 | type-checker/enums | error | enum variant pattern has the wrong number of payload sub-patterns for its declaration (KL-20) | — |
+| E279 | type-checker/enums | error | an enum whose variants carry payloads is not an integer: `==`/`!=` or an `as` integer cast on it would use its tagged cell's address (KL-20); binding such a value to an integer is an ordinary mismatch | — |
+| E280 | type-checker/enums | error | match over an enum whose variants carry payloads is not exhaustive: some variant is matched by no arm; a guarded arm or a refutable payload sub-pattern does not cover its variant (KL-20) | — |
+| E281 | lexer (Madaros, lean_single) | error | unterminated or malformed character literal: a one-character literal with no closing quote, `''`, or a two-character `'ab'` | ADR-015 row 4. `'name` with no closing quote is a lifetime (no token), not a literal; `'é'` is the scalar 233. An unknown escape in a character literal is E274. |
+| E282 | lexer (Madaros, lean_single) | error | identifier too long: an identifier holds at most 256 bytes and is refused with its location instead of being split | ADR-015 row 11 (first slice). `id_long300` is refused, `id_long256` is accepted. The 128-byte clamps further down (`parser_name_at`, the export pool) are unchanged. |
+| E283 | lexer (Madaros, lean_single) | error | ambiguous operator spelling: `a+-2` (plus a negative, or the uncertainty operator) and `a&!b` (and-not, or a mutable borrow) are refused with a hint to add a space | ADR-015 row 9. `x<-1` is no longer ambiguous: it reads as `x < -1`. `1.0 +- 0.1` and `&!T` after a space, `(`, `,` or `:` are unchanged. |
+| E284 | lexer (Madaros, lean_single) | error | digit separator `_` must sit between two digits: `1__0` and `10_` are refused; `1_000` is a number and `500_mg` keeps its unit suffix | ADR-015 row 8. `lean_single` now accepts `_` between digits like Madaros (`1_000_000`, `0xFF_FF`, `1_000.000_5`). |
+| E290 | type-checker/effects | error | unknown effect in handle/perform (SIO-417) | — |
+| E291 | type-checker/effects | error | unknown operation for effect (SIO-417) | — |
+| E292 | type-checker/effects | error | perform of effect not declared or handled here (SIO-417) | — |
+| E293 | type-checker/effects | error | resume outside an on-clause (or in a catch-all clause) (SIO-417) | — |
+| E294 | type-checker/effects | error | resume capability used more than once on some path (continuations are linear) (SIO-417) | — |
+| E295 | type-checker/effects | error | handle is missing a clause for a performed operation (exhaustivity) (SIO-417) | — |
+| E296 | type-checker/effects | error | duplicate clause for operation (SIO-417) | — |
+| E297 | type-checker/effects | error | operation argument count mismatch (SIO-417) | — |
+| E298 | type-checker/effects | error | perform with live linear bindings (a non-resuming handler would drop them) (SIO-417) | — |
+| E299 | type-checker/effects | error | handler backend v1 limit exceeded (results and operation values are i64 words; handler nesting depth at most 8) (SIO-417) | — |

@@ -2,7 +2,7 @@
 // Factor outputs are scaled; completed_pivots is NOT a rank estimate.
 // status0available,1shape/options/permutation,2nonfiniteinput,3pivotthreshold,
 // 4arithmetic,5nonsymmetric,6nonpositivecomputedCholeskypivot.
-use collections::numeric_buffer::{NumericBuffer,NumericMatrix,numeric_buffer_status,numeric_buffer_len,numeric_buffer_at,numeric_buffer_set,numeric_matrix_status,numeric_matrix_rows,numeric_matrix_cols,numeric_matrix_get}
+use collections::numeric_buffer::{NumericBuffer,NumericMatrix,numeric_buffer_status,numeric_buffer_len,numeric_buffer_at,numeric_buffer_set,numeric_matrix_status,numeric_matrix_rows,numeric_matrix_cols,numeric_matrix_fits,numeric_matrix_at,numeric_matrix_get}
 use collections::integer_buffer::{IntegerBuffer,integer_buffer_status,integer_buffer_len,integer_buffer_at,integer_buffer_set}
 use math::pure::{is_finite,sqrt}
 use linalg::least_squares_scale::{least_squares_restore}
@@ -45,6 +45,9 @@ fn df_shape(a:&NumericBuffer,layout:&NumericMatrix,factor:&NumericBuffer,work:&N
 fn df_copy(a:&NumericBuffer,layout:&NumericMatrix,work:&!NumericBuffer,n:i64,method:i64,rcond:f64)->DynamicFactorResult with Mut,Div,Panic {
  var out=df_empty(n,method)
  if !is_finite(rcond) || rcond<0.0 || rcond>=1.0 {return out}
+ // Preserve recoverable layout refusal before using scalar checked reads.
+ // Avoid a NumericValue aggregate snapshot at every active matrix cell.
+ if !numeric_matrix_fits(a,layout) {return out}
  out.relative_threshold=if rcond==0.0 {(n as f64)*2.2204460492503131e-16} else {rcond}
  if out.relative_threshold>=1.0 {return out}
  var scale:f64=0.0
@@ -52,10 +55,9 @@ fn df_copy(a:&NumericBuffer,layout:&NumericMatrix,work:&!NumericBuffer,n:i64,met
  while i<n {
   var j:i64=0
   while j<n {
-   let entry=numeric_matrix_get(a,layout,i,j)
-   if entry.status!=0 {return out}
-   if !is_finite(entry.value) {out.status=2;return out}
-   let value=df_abs(entry.value)
+   let entry=numeric_matrix_at(a,layout,i,j)
+   if !is_finite(entry) {out.status=2;return out}
+   let value=df_abs(entry)
    if value>scale {scale=value}
    j=j+1
   }
@@ -67,11 +69,10 @@ fn df_copy(a:&NumericBuffer,layout:&NumericMatrix,work:&!NumericBuffer,n:i64,met
  while i<n {
   var j:i64=0
   while j<n {
-   let entry=numeric_matrix_get(a,layout,i,j)
-   if entry.status!=0 {return out}
-   let value=entry.value/scale
+   let entry=numeric_matrix_at(a,layout,i,j)
+   let value=entry/scale
    if !is_finite(value) {out.status=4;return out}
-   if entry.value!=0.0 {if value==0.0 {out.status=4;return out}}
+   if entry!=0.0 {if value==0.0 {out.status=4;return out}}
    numeric_buffer_set(work,i*n+j,value)
    j=j+1
   }

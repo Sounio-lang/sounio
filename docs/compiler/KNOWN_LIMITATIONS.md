@@ -40,7 +40,7 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
 | KL-14 | FFI: 14a–14d3 CLOSED | madaros |
 | KL-15 | `f256` surface (15a softfloat add/sub partial), `Knowledge<f128>`/GUM | madaros |
 | KL-16 | Hessian Tier-4 (16a–16f CLOSED; residual H-multi/non-H00 if/a64 atan2) | lean_single |
-| KL-20 | enum variants with payloads (`Circle(f64)`, `Rect { w: f64 }`): no runtime representation | both |
+| KL-20 | enum variants with payloads: Madaros CLOSED for non-generic enums (tagged cells, 2026-10-30); generic enums do not parse; lean_single unchanged | lean_single (+ generic enums) |
 | KL-21 | user fns named like compiler builtins: `pub` residual on Madaros; seed hijacks or rejects | both |
 | KL-18 | `Hyper<…>` CPU values: Madaros fail-closed; lean_single prints a wrong value (seed) | both |
 | KL-17 | #2773 same-named items across modules: fns resolved per module on both engines; differing same-named structs refused instead of kept apart | both (types) |
@@ -136,13 +136,15 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
 - Locus: `ir/lower.sio` Knowledge layout / `variance_*_regs` / `pending_variance_reg`.
   Audit: `docs/audit/EPISTEMIC_FABRICATION_DETECT_2026-08-17.md`,
   `docs/audit/MADAROS_FO_CALL_BOUNDARY_DISPATCH_2026-08-18.md`.
-- **`pow` FO / Hessian transfer — CLOSED (KL-11 partial, 2026-09-12).**
+- **`pow` FO / Hessian transfer — CLOSED (KL-11 partial, 2026-09-12; mixed exponent 2026-10-31).**
   `fo_xfer_seed_transcendentals` registers `pow` as kind 9; `fo_apply_transfer_kind`
-  emits `∂/∂x`, `∂²/∂x²`, and first-order `∂/∂y` when the exponent carries
-  sensitivity. Witness: `tests/run-pass/kl11_pow_fo_hessian.sio`
-  (`hessian_of(pow(x, 3.0), 0, 0)` at `x=0.5` → `3.0`). Pin:
-  `scripts/ci/madaros_kl11_pow_fo_gate.sh`. Mixed Hessian in the exponent, and
-  FO across arbitrary user `fn` bodies, remain open.
+  emits `∂/∂x`, `∂²/∂x²`, first-order `∂/∂y`, `∂²/∂y²`, and the mixed `∂²/∂x∂y`.
+  Witnesses: `tests/run-pass/kl11_pow_fo_hessian.sio`
+  (`hessian_of(pow(x, 3.0), 0, 0)` at `x=0.5` → `3.0`) and
+  `tests/run-pass/kl11_pow_mixed_hessian.sio` (at `x=2`, `y=3`:
+  `Hxx=12`, `Hxy=x^(y-1)*(1+y*ln x)`, `Hyy=x^y*(ln x)^2`). Pin:
+  `scripts/ci/madaros_kl11_pow_fo_gate.sh`. FO across arbitrary user `fn`
+  bodies remains open.
 
 
 ### KL-13 — derived units and unit loss (#2388) — CLOSED
@@ -278,6 +280,26 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
   see the history snapshot for the KAS-1 rationale.
 
 ### KL-20 — enum payload variants (P1.3)
+
+- **Madaros: CLOSED for non-generic enums (2026-10-30, `fix/kl20-20261030`).**
+  A payload enum value is a tagged cell `[tag, payload words..]` sized for the
+  largest variant; layout and the alternatives not taken are in
+  [ENUM_PAYLOAD_LAYOUT.md](ENUM_PAYLOAD_LAYOUT.md). Construction (call and
+  struct-literal form), unit variants, `match` with payload binding (by value
+  and through `&`), nested variant / literal / `Some(..)` sub-patterns,
+  or-patterns, guards, struct and array and `Box<Self>` payloads, passing,
+  returning and methods all lower. The checker types each payload binding with
+  its declared field type, checks constructor arity (E277) and argument types
+  (E009), pattern arity (E278), refuses `==` on a payload enum (E279) and a
+  match that misses a variant (E280). E264 now only refuses a payload field that
+  is not one word (tuple, f128/f256, Knowledge<T>). Pins:
+  `tests/run-pass/enum_payload_{scalar,aggregate,nested}.sio`,
+  `tests/compile-fail/enum_payload_*.sio`. The repro below prints `12`.
+- **Still open:** generic enums (`enum Opt<T> { S(T), N }` is a parse error on
+  Madaros: the enum header takes no type parameters); builtin `Result<T, E>`
+  (`Ok(..)`/`Err(..)` are untyped in the checker and lower to a trapping stub);
+  lean_single (seed) has no payload representation. History of the refusal
+  follows.
 
 - Engine: `both`. Repro (measured 2026-10-06, `origin/main` `fa695abaa`):
 

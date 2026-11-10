@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-This file is the entry point for Claude Code (claude.ai/code) and other AI assistants that write Sounio code or work in the Sounio repository. It covers how to build and run the compiler, the syntax that differs from Rust, the agent tooling that ships with the repository, and the known limitations. `AGENTS.md` carries the same guidance for agents that read that file instead.
+Daily instructions for agents working in Sounio. `AGENTS.md` points here for language and compiler guidance. Details and dated measurements: [agent reference](docs/guide/AGENT_REFERENCE_DETAILS.md).
 
 Section numbers are stable on purpose: other documents and CI gates cite them. Sections that described how the project itself is developed with agents are not part of this guide.
 
@@ -18,13 +18,7 @@ Section numbers are stable on purpose: other documents and CI gates cite them. S
 
 ## 2. Project identity
 
-**Sounio** — a self-hosted systems + scientific programming language for epistemic computing, uncertainty propagation, and algebraic effects. Linux x86-64 only. Not a Rust or Julia dialect; own syntax, semantics, philosophy.
-
-Two things are simultaneously true about this repository:
-
-1. **It is a language.** A self-hosted compiler in `self-hosted/`, a bootstrap chain `bootstrap/stage0` (C, ~103 KB) → `boot4` → `gen1` → `gen2` → `gen3` (fixed-point verification: gen2 = gen3 bit-identical).
-
-2. **It is a scientific computing platform.** First-class `Knowledge[T]` with GUM uncertainty propagation, Caputo fractional derivatives, autograd, PINN training, refinement types, algebraic effects (`IO`, `Mut`, `Div`, `Panic`, `Alloc`, `Async`, `GPU`, `Prob`, `Observe`), units, linear types.
+Sounio is a self-hosted systems and scientific language for epistemic computing, uncertainty propagation and algebraic effects. It has its own syntax and semantics. Compiler execution targets Linux x86-64. Intent: [`FOUNDER_INTENT.md`](FOUNDER_INTENT.md).
 
 ---
 
@@ -36,43 +30,24 @@ Two things are simultaneously true about this repository:
 
 ## 4. Build & run
 
-The compiler is self-hosted (written in Sounio, not Rust). **`bin/souc` is the default compiler entrypoint and now routes to Madaros** — the self-hosted *modular* compiler (`artifacts/self-hosted/madaros`, built via `make build-madaros`). The legacy single-file `lean_single` engine that `bin/souc` used to be is preserved as `bin/souc-lean-single-x86_64`; force it with `SOUNIO_SOUC_ENGINE=lean_single`. lean_single remains the **bootstrap seed** (`make build`, `make build-madaros`) and the canonical fixed-point ELF — it is no longer the default *user-facing* compiler. If Madaros has not been built yet, `bin/souc` falls back to lean_single with a notice on stderr.
-
-> **Naming (canonical): the compiler is spelled `Madaros`** — matching `make build-madaros`, `bin/madaros`, and `docs/MADAROS_STATUS.md`. The source string was fixed on 2026-07-11 (`self-hosted/compiler/main.sio`) **and the shipped ELF `bin/madaros-linux-x86_64` was rebuilt to match**, so `./bin/souc --version` now prints `Madaros v0.80.0`. (A freshly-cloned checkout that has *not* re-run `make build-madaros` locally will still show whatever the committed binary carries; on `main` that is now `Madaros`.) Current version: **v0.80.0**.
+`./bin/souc` is the public entrypoint; default engine: **Madaros**, the modular self-hosted compiler. `make build-madaros` builds it. The legacy `lean_single` engine remains the bootstrap seed (`make build`) and fallback when Madaros is unavailable; force it with `SOUNIO_SOUC_ENGINE=lean_single`. Use the canonical resolvers in `scripts/lib/resolve_souc.sh` and `scripts/lib/resolve_madaros.sh`. Check [`docs/MADAROS_STATUS.md`](docs/MADAROS_STATUS.md) before interpreting stale binaries.
 
 ```bash
-SOUC=./bin/souc
-export SOUNIO_STDLIB_PATH=$(pwd)/stdlib   # required when outside repo root
-
-$SOUC --version                           # verify toolchain
-$SOUC check file.sio                      # type-check only
-$SOUC run file.sio                        # compile + execute + clean up
-$SOUC compile file.sio -o output.elf      # emit named ELF binary
-$SOUC info                                # compiler status (Madaros only -- SOUNIO_SOUC_ENGINE=lean_single has no `info` subcommand)
+./bin/souc --version
+./bin/souc check file.sio
+./bin/souc run file.sio
+./bin/souc compile file.sio -o output.elf
+./bin/souc info  # Madaros only
+# Outside repo root: export SOUNIO_STDLIB_PATH=/absolute/path/to/stdlib
 ```
 
-For lint, harness annotations and the test directory layout, see [`docs/guide/SOUNIO_DEFINITIVE_GUIDE.md`](docs/guide/SOUNIO_DEFINITIVE_GUIDE.md) and [`docs/guide/CHECK_SOUNIO_GUIDE.md`](docs/guide/CHECK_SOUNIO_GUIDE.md).
+Lint and test harness: [`docs/guide/CHECK_SOUNIO_GUIDE.md`](docs/guide/CHECK_SOUNIO_GUIDE.md).
 
 ---
 
 ## 5. AI-native tooling
 
-This checkout ships two local agent surfaces:
-
-- [`tools/lsp/README.md`](tools/lsp/README.md) — Sounio LSP: diagnostics, hover, completions, go-to-definition, references, rename over stdio
-- [`tools/mcp/README.md`](tools/mcp/README.md) — Sounio MCP server exposing compiler `check`, `compile`, `run`, `test`, stdlib docs, and compiler-error resources over local stdio
-
-Run the MCP server with Claude Code:
-
-```bash
-pip install -e tools/mcp
-python -m sounio_mcp.server --transport stdio
-claude --mcp-server sounio=python:-m:sounio_mcp.server
-```
-
-Use `sounio_check` as the first repair-loop step for `.sio` edits. The tool returns the same diagnostic wire family as `souc check --json` and `tools/shared/diagnostic_schema.json`, with MCP-friendly `line`/`column`/`span` fields. For compiler errors, read `sounio://errors/{code}`; for stdlib context, read `sounio://stdlib/{module}`.
-
-See [`tools/mcp/examples/claude_code_usage.md`](tools/mcp/examples/claude_code_usage.md) for the error → fix loop recipe.
+Use `sounio_check` first in the `.sio` repair loop; after every edit run `./bin/souc check <file>`. Compiler errors: `sounio://errors/{code}`; stdlib: `sounio://stdlib/{module}`. Setup and usage: [`tools/mcp/README.md`](tools/mcp/README.md), [`tools/lsp/README.md`](tools/lsp/README.md), [repair-loop example](tools/mcp/examples/claude_code_usage.md).
 
 ---
 
@@ -104,79 +79,27 @@ enforced.
 
 Helpers must be defined before callers — no forward references.
 
-Quick reference:
-
-```sounio
-let x = 5                              // immutable
-var y = 10                             // mutable
-var buf: [i64; 8] = [0; 8]             // fixed-size array
-&T / &!T                               // shared / exclusive ref
-fn f(x: i32) -> i32 with IO { }        // effects declaration
-linear struct Handle { fd: i32 }       // linear types
-let dose: mg = 500.0                   // NOT on default Madaros: `let d: m = 100.0` is E001 (#2752). lean_single demo only.
-let arr2 = a ++ b                      // array concatenation
-type Pos = { x: i32 | x > 0 }          // refinement type
-let m: Knowledge<f64> = measure(10.0, uncertainty: 0.1)  // demo_incerteza.sio; not Knowledge<mg>
-fn observe(x: Unobserved<f64>) -> bool with Observe { x > 0.0 }
-
-// Effects: IO, Mut, Div, Panic, Alloc, Async, GPU, Prob, Observe
-
-impl MyStruct {
-    fn get(self: &MyStruct) -> i64 { self.val }
-    fn set(self: &!MyStruct, v: i64) with Mut { self.val = v }
-}
-
-for i in 0..10 { }      // exclusive range
-for i in 0..=10 { }     // inclusive range
-if x > 0 { "pos" } else { "neg" }   // if is an expression
-```
-
-Full reference: [`docs/guide/LLM_PROGRAMMING_GUIDE.md`](docs/guide/LLM_PROGRAMMING_GUIDE.md).
+Dated measurements and extended examples: [reference details](docs/guide/AGENT_REFERENCE_DETAILS.md#7-sounio-syntax-not-rust). Full syntax: [`docs/guide/LLM_PROGRAMMING_GUIDE.md`](docs/guide/LLM_PROGRAMMING_GUIDE.md).
 
 ---
 
 ## 8. Architecture
 
-Pipeline: Source → Lexer → Parser → AST → Check → HIR → SIR → HLIR (SSA) → Codegen (x86-64 ELF).
-
-| Directory | Purpose |
-|---|---|
-| `self-hosted/lexer/`, `parser/` | Frontend (tokenizer, recursive descent) |
-| `self-hosted/check/`, `types/` | Bidirectional type inference + algebraic effects |
-| `self-hosted/ir/` | IR lowering, e-graph optimization (1000+ rewrite rules) |
-| `self-hosted/native/` | x86-64 ELF emission |
-| `self-hosted/compiler/` | Codegen drivers (lean, IR, GPU) |
-| `self-hosted/gpu/` | PTX/GPU codegen; end-to-end CLI path exists under default Madaros (`souc build --backend gpu`, see §13) -- no GPU CLI surface under `SOUNIO_SOUC_ENGINE=lean_single`, which rejects the invocation outright |
-| `stdlib/epistemic/` | `Knowledge<T>`, uncertainty (GUM), provenance |
-| `stdlib/units/` | Dimensional analysis |
-| `bootstrap/` | stage0 (C) → boot2g → boot3 → boot4 → self-hosted |
-| `formal/` | Lean 4 proofs (epistemic type invariants) |
+Pipeline: lexer → parser → AST/check → HIR → SIR → HLIR (SSA) → codegen. Sources: `self-hosted/{lexer,parser,check,types,ir,native,compiler,gpu}/`; scientific libraries: `stdlib/{epistemic,units}/`; bootstrap: `bootstrap/`; Lean proofs: `formal/`. [Detailed directory map](docs/guide/AGENT_REFERENCE_DETAILS.md#8-architecture).
 
 ---
 
 ## 13. Known limitations
 
-Headline limitations (full list in [`docs/compiler/KNOWN_LIMITATIONS.md`](docs/compiler/KNOWN_LIMITATIONS.md)):
+Consult [`docs/compiler/KNOWN_LIMITATIONS.md`](docs/compiler/KNOWN_LIMITATIONS.md) before promising support. Important boundaries:
 
-- **Imported-module native path — partial closeout.** Residuals remain: multi-module memory-wall / exclusive-ref fragile chains, named-import/`print_f64` papercuts. Finite-dof `gum_k95` is **trustworthy** under default Madaros.
-- `Knowledge<T>` supports struct-level generics (`f64`, `bool`, struct types)
-- `--show-ast` / `--show-types` on `compile` or `build` are rejected by default Madaros (`error: madaros build: unsupported option`, exit 2). Measured 2026-10-15: `check --show-ast` and `check --show-types` are **ignored** and still print `check: OK`. `SOUNIO_SOUC_ENGINE=lean_single souc check --show-ast` prints compiler stats, not a source AST. A REPL does exist (`souc repl` -> `tools/repl.sh`) -- it's a file-based compile-and-run loop over whichever engine `bin/souc` currently resolves to, not a true interactive evaluator.
-- `&![T; N]` bare array mutation broken in JIT — use struct wrapper or `(*arr)[i]`
-- GPU: two records, not re-run on 2026-10-15. `TOUR.md` §6 (2026-10-04) measured `souc build --backend gpu` as PTX for empty kernel bodies only. An older note in this section said `examples/kernel_vec_add.sio` emitted valid PTX under Madaros, and that `lean_single` has no GPU CLI (verified 2026-08-17). The root README (2026-10-11) records scoped Spark evidence for GPU/Pireus and says the generic GPU CLI needs its own status. Do not teach a general kernel launch from this bullet.
-- **Dual-engine divergence.** `f128` is a working binary128 type on **both** engines, but they cover different surfaces. Both give 113 halvings to `1 + eps == 1` (binary64 gives 53) and print `1/3` as `3.33333333333333333333333333333333317e-0001` via `math::softfloat_f128_fmt::print_f128`.
-  - **Madaros** computes `+ - * / %`, unary minus and IEEE compares, and supports params/returns, struct fields, methods, fixed arrays, exact 36-digit printing and exact literals. Measured: `7.5 % 2.0 = 1.5`; `2/3` through a struct field and an array element is correct to the last digit. It refuses, fail-closed:
-    - `as` casts between `f128` and `f64` (**E248**, "wide-float casts fail closed");
-    - values that flow through an `f128` global or a `type` alias over `f128` (V0-E.4.1 lowering refusal). The declarations alone build: an unused `let G: f128` or `type Wide = f128` compiles;
-    - mixing an `f128` with an untyped literal or an `f256` (**E004**). Write typed constants, e.g. `let three: f128 = 3.0; x / three`, not `x / 3.0`.
-  - **lean_single** (#2387/#2426) computes binary128 through libgcc for locals, direct-call params/returns, IEEE compares, and `as` casts in both directions. It refuses, fail-closed: struct fields, arrays, reading an `f128` global (an unused one builds; a `type` alias over `f128` works), tuples, methods, fn values, `println` of an `f128` (the stdlib `print_f128` works), and `%` ("modulo requires integer operands").
-  - **Literal exactness differs by engine.** Measured 2026-09-26:
-    - **Madaros** parses an f128 literal straight to binary128 (V0-E.5.9) and accepts the literals its parser can prove exact in binary128. Decimal digits accumulate in 128 bits (`self-hosted/parser/f128_literal.sio`), so a very long decimal is refused even when its value is exact, such as the full expansion of 2^200. `0.1` fails. `1e23` prints exactly, and so does the hex-float `0x1.0000000000000001p+0` (1 + 2⁻⁶⁴). The hex-float exponent sign is optional, as in C99: `…p0` and `…p+0` are the same literal (the unsigned form was refused with E012/E137 until the parser fix in `docs/audit/MADAROS_HEX_FLOAT_UNSIGNED_EXPONENT_DISPATCH_2026-09-26.md`).
-    - **lean_single** widens through binary64 and refuses any literal not exact in binary64 (`f128_widen_refuses_inexact_literal` in `lean_single.sio`), so it also rejects `1e23` and that hex-float.
-    - Portable constants: small dyadic decimals that are exact in binary64 (`0.25`, `3.0`), `f128_from_limbs(lo, hi)` (works on both), or computation (`one / ten`).
-  - **Not implemented anywhere:** `Knowledge<f128>` and GUM over `f128` (KL-15).
-  - **`f256`** on Madaros: declarations and some operators typecheck (an unused f256 enum field or global builds), but executable f256 value lowering is refused fail-closed (V0-E.4.1), never lowered as f64. lean_single refuses `f256` outright (KL-9). Only `stdlib/math/softfloat_f256.sio` add/sub over `F256Bits` computes f256 values (KL-15a); there is no f256 mul, div, fields, arrays or printing.
-- **Cross-call first-order variance (KL-11) is narrowed, not closed.** Pure helpers carry first-order channels (ledger, 2026-10-13). A general user call still does not: `tests/run-pass/gum_fo_across_call.sio` and `tests/run-pass/fo_call_boundary_arity3.sio` keep `//@ known-failure`. Do not treat every call as variance-preserving.
+- Imported-module native compilation still has fragile multi-module/exclusive-reference chains and named-import/`print_f64` issues.
+- `Knowledge<T>` supports struct generics; `Knowledge<f128>`/GUM over `f128` remains unsupported (KL-15). `f128` capabilities differ by engine; `f256` lacks executable lowering. See [engine table](docs/compiler/F128_ENGINE_DIVERGENCE.md).
+- `--show-ast` / `--show-types` are rejected on Madaros build/compile and may be ignored on check. The REPL is a file-based compile/run loop.
+- JIT bare-array mutation via `&![T; N]`: use a struct wrapper or `(*arr)[i]`.
+- GPU CLI evidence is scoped and dated; do not infer general kernel launches from PTX emission or another backend's success.
+- First-order variance across general user calls remains incomplete (KL-11); preserve known-failure tests.
+
+[Dated evidence and qualifications](docs/guide/AGENT_REFERENCE_DETAILS.md#13-known-limitations).
 
 ---
-
-*This file is the entry point for AI assistants using Sounio. `AGENTS.md` carries the same guidance for agents that read it instead.*

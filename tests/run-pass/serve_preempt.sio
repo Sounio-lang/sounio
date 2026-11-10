@@ -1,0 +1,235 @@
+//@ run-pass
+//@ requires: madaros
+// M9 preemption + recompute: 5 sequences over 4 slots force one
+// victim spill; the victim is requeued, its spill log re-admitted,
+// and its rows are recomputed bit-exact against sequential single
+// forwards. Asserts a preempt bit was observed, every row replayed
+// token-for-token, and all five finish with the queue drained.
+use llm::attn_gpu::llama_sample_greedy
+use llm::llama::{Llama, llama_forward, llama_load, paged_kv_new_batch}
+use llm::serve::{svb_pump, svb_qpush, SvQueue, SvSlot}
+use hetero::runtime::{Runtime, rt_open}
+use tensor2::cpu_kernel::{CpuBuf, ck_alloc, ck_get, ck_set}
+
+fn cmp_rows(a: &CpuBuf, b: &CpuBuf, n: i64) -> bool with Mut, Panic {
+    var i: i64 = 0
+    while i < n {
+        if ck_get(a, i) != ck_get(b, i) { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn scenario(m: &!Llama, rt: &Runtime, use_gpu: bool, pagedev: bool) -> bool with Alloc, Mut, Panic, Div, IO {
+    let vocab = m.cfg.vocab
+    let chunk: i64 = 2
+    // prompt bank: A=[1,150,2700,13] @0, B=[1,500,9000] @4,
+    // C=[1,777,888] @7, D=[1,901,902] @10, E=[1,903,904] @13.
+    var bank: [i64; 16384] = [0; 16384]
+    bank[0] = 1
+    bank[1] = 150
+    bank[2] = 2700
+    bank[3] = 13
+    bank[4] = 1
+    bank[5] = 500
+    bank[6] = 9000
+    bank[7] = 1
+    bank[8] = 777
+    bank[9] = 888
+    bank[10] = 1
+    bank[11] = 901
+    bank[12] = 902
+    bank[13] = 1
+    bank[14] = 903
+    bank[15] = 904
+    let rmax: [i64; 5] = [6, 6, 6, 6, 5]
+    // reference: main cache per sequence keeps FULL history and is
+    // never reset; scratch cache replays recompute passes. Decode rows
+    // always compare against full history, so a lossy recompute fails.
+    var rk0 = kv_new(m, 64)
+    var rk1 = kv_new(m, 64)
+    var rk2 = kv_new(m, 64)
+    var rk3 = kv_new(m, 64)
+    var rk4 = kv_new(m, 64)
+    var sk0 = kv_new(m, 64)
+    var sk1 = kv_new(m, 64)
+    var sk2 = kv_new(m, 64)
+    var sk3 = kv_new(m, 64)
+    var sk4 = kv_new(m, 64)
+    var rlast: [i64; 5] = [0; 5]
+    var rgen: [i64; 5] = [0; 5]
+    var fedm: [i64; 5] = [0; 5]
+    var feds: [i64; 5] = [0; 5]
+    var rdone: [i64; 5] = [0; 5]
+    // engine state.
+    var pkk = paged_kv_new_batch(m, 16)
+    var pkv = paged_kv_new_batch(m, 16)
+    var slots: [SvSlot; 4] = [SvSlot { off: 0 - 1, nid: 0, cur: 0, gen: 0, maxgen: 0, last: 0 }; 4]
+    var q = SvQueue { off: [0; 8], n: [0; 8], pmax: [0; 8], vs: [0 - 1; 8], xl: [0; 8], vl: [0; 8], gn: [0; 8], ss: [0 - 1; 8], count: 0 }
+    var rslot: [i64; 16] = [0; 16]
+    var rpos: [i64; 16] = [0; 16]
+    var toks: [i64; 16] = [0; 16]
+    var kind: [i64; 16] = [0; 16]
+    var rowtok: [i64; 16] = [0 - 1; 16]
+    var meta: [i64; 4] = [0; 4]
+    var spill: [i64; 4096] = [0; 4096]
+    var vspill: [i64; 4096] = [0; 4096]
+    var scnt: [i64; 4] = [0; 4]
+    var xlen: [i64; 4] = [0; 4]
+    var vvalid: [i64; 4] = [0; 4]
+    var t_sos: [i64; 4] = [0 - 1; 4]
+    var t_sprio: [i64; 8] = [0; 8]
+    var t_swait: [i64; 8] = [0; 8]
+    var t_ids: [CpuBuf; 8] = [CpuBuf { data: 0 as *mut f64, len: 0 }; 8]
+    var slotseq: [i64; 4] = [0 - 1; 4]
+    var sloth: [i64; 4] = [0 - 1; 4]
+    var pushed_e = false
+    var preempted = false
+    var ok = true
+    var turn: i64 = 0
+    q.count = svb_qpush(&!q, 0, 4, rmax[0], 0 - 1)
+    q.count = svb_qpush(&!q, 4, 3, rmax[1], 0 - 1)
+    q.count = svb_qpush(&!q, 7, 3, rmax[2], 0 - 1)
+    q.count = svb_qpush(&!q, 10, 3, rmax[3], 0 - 1)
+    while turn < 200 {
+        if turn == 6 && !pushed_e {
+            q.count = svb_qpush(&!q, 13, 3, rmax[4], 0 - 1)
+            pushed_e = true
+        }
+        var zi: i64 = 0
+        while zi < 16 {
+            rowtok[zi as usize] = 0 - 1
+            zi = zi + 1
+        }
+        let out = svb_pump(m, &!pkk, &!pkv, &!slots, &!bank, &!q, rt, use_gpu, pagedev, chunk, &!rslot, &!rpos, &!toks, &!kind, &!rowtok, &!meta, &!spill, &!vspill, &!scnt, &!xlen, &!vvalid, &!t_sos, &t_ids, &t_sprio, &!t_swait)
+        q.count = meta[1]
+        if meta[3] / 256 > 0 { preempted = true }
+        let n = meta[0]
+        if n <= 0 {
+            if rdone[0] == 1 && rdone[1] == 1 && rdone[2] == 1 && rdone[3] == 1 && rdone[4] == 1 { turn = 100000 }
+        } else {
+            var s: i64 = 0
+            while s < 4 {
+                if slots[s as usize].off >= 0 {
+                    let h1 = bank[(slots[s as usize].off + 1) as usize]
+                    if sloth[s as usize] != h1 {
+                        sloth[s as usize] = h1
+                        slotseq[s as usize] = 0 - 1
+                    }
+                    if slotseq[s as usize] < 0 {
+                        if h1 == 150 { slotseq[s as usize] = 0 }
+                        if h1 == 500 { slotseq[s as usize] = 1 }
+                        if h1 == 777 { slotseq[s as usize] = 2 }
+                        if h1 == 901 { slotseq[s as usize] = 3 }
+                        if h1 == 903 { slotseq[s as usize] = 4 }
+                    }
+                }
+                s = s + 1
+            }
+            var r: i64 = 0
+            while r < n {
+                let si = rslot[r as usize]
+                let sq = slotseq[si as usize]
+                if sq < 0 { ok = false }
+                var oo = ck_alloc(1)
+                var rr = ck_alloc(1)
+                // replay rows (rpos behind main) go to scratch; fresh
+                // prefill and decode rows go to the full-history main.
+                var isrep = false
+                if kind[r as usize] == 0 && rpos[r as usize] < fedm[sq as usize] { isrep = true }
+                if isrep {
+                    if rpos[r as usize] == 0 {
+                        if sq == 0 { sk0 = kv_new(m, 64) }
+                        if sq == 1 { sk1 = kv_new(m, 64) }
+                        if sq == 2 { sk2 = kv_new(m, 64) }
+                        if sq == 3 { sk3 = kv_new(m, 64) }
+                        if sq == 4 { sk4 = kv_new(m, 64) }
+                        feds[sq as usize] = 0
+                    }
+                    ck_set(&!oo, 0, toks[r as usize] as f64)
+                    if sq == 0 { rr = llama_forward(m, &!sk0, &oo, 1) }
+                    if sq == 1 { rr = llama_forward(m, &!sk1, &oo, 1) }
+                    if sq == 2 { rr = llama_forward(m, &!sk2, &oo, 1) }
+                    if sq == 3 { rr = llama_forward(m, &!sk3, &oo, 1) }
+                    if sq == 4 { rr = llama_forward(m, &!sk4, &oo, 1) }
+                    feds[sq as usize] = feds[sq as usize] + 1
+                } else if kind[r as usize] == 0 {
+                    ck_set(&!oo, 0, toks[r as usize] as f64)
+                    if sq == 0 { rr = llama_forward(m, &!rk0, &oo, 1) }
+                    if sq == 1 { rr = llama_forward(m, &!rk1, &oo, 1) }
+                    if sq == 2 { rr = llama_forward(m, &!rk2, &oo, 1) }
+                    if sq == 3 { rr = llama_forward(m, &!rk3, &oo, 1) }
+                    if sq == 4 { rr = llama_forward(m, &!rk4, &oo, 1) }
+                    fedm[sq as usize] = fedm[sq as usize] + 1
+                } else {
+                    ck_set(&!oo, 0, rlast[sq as usize] as f64)
+                    if sq == 0 { rr = llama_forward(m, &!rk0, &oo, 1) }
+                    if sq == 1 { rr = llama_forward(m, &!rk1, &oo, 1) }
+                    if sq == 2 { rr = llama_forward(m, &!rk2, &oo, 1) }
+                    if sq == 3 { rr = llama_forward(m, &!rk3, &oo, 1) }
+                    if sq == 4 { rr = llama_forward(m, &!rk4, &oo, 1) }
+                    fedm[sq as usize] = fedm[sq as usize] + 1
+                }
+                var row = ck_alloc(vocab)
+                var v: i64 = 0
+                while v < vocab {
+                    ck_set(&!row, v, ck_get(&out, r * vocab + v))
+                    v = v + 1
+                }
+                if !cmp_rows(&rr, &row, vocab) { ok = false }
+                let rt2 = llama_sample_greedy(&rr)
+                if kind[r as usize] == 0 {
+                    // only the seed row emits a token. The seed token
+                    // sits at table position nid, so count it: fedm must
+                    // equal nid + scnt at any preempt for exact replay.
+                    if rowtok[r as usize] >= 0 {
+                        if rt2 != rowtok[r as usize] { ok = false }
+                        rlast[sq as usize] = rt2
+                        fedm[sq as usize] = fedm[sq as usize] + 1
+                    }
+                } else {
+                    if rt2 != rowtok[r as usize] { ok = false }
+                    rlast[sq as usize] = rt2
+                    rgen[sq as usize] = rgen[sq as usize] + 1
+                    if rt2 == 0 || rgen[sq as usize] >= rmax[sq as usize] {
+                        rdone[sq as usize] = 1
+                        if slots[si as usize].off >= 0 { ok = false }
+                        slotseq[si as usize] = 0 - 1
+                    }
+                }
+                r = r + 1
+            }
+        }
+        if rdone[0] == 1 && rdone[1] == 1 && rdone[2] == 1 && rdone[3] == 1 && rdone[4] == 1 && q.count == 0 {
+            var allfree = true
+            var s2: i64 = 0
+            while s2 < 4 {
+                if slots[s2 as usize].off >= 0 { allfree = false }
+                s2 = s2 + 1
+            }
+            if allfree { turn = 100000 }
+        }
+        turn = turn + 1
+    }
+    if !preempted { ok = false }
+    if rdone[0] != 1 || rdone[1] != 1 || rdone[2] != 1 || rdone[3] != 1 || rdone[4] != 1 { ok = false }
+    ok
+}
+
+fn main() with IO, Mut, Panic, Div, Alloc {
+    var m = llama_load("tests/fixtures/tiny-random-Llama")
+    if !m.loaded { print("SERVEPREEMPT FAIL\n") exit(1) }
+    let rt = rt_open("stdlib/hetero/kernels/gemm_tiled_f32.ptx", "gemm_tiled_f32")
+    var ok = scenario(&!m, &rt, false, false)
+    if rt.ready {
+        var m2 = llama_load("tests/fixtures/tiny-random-Llama")
+        if !m2.loaded { ok = false }
+        if !scenario(&!m2, &rt, true, false) { ok = false }
+        var m3 = llama_load("tests/fixtures/tiny-random-Llama")
+        if !m3.loaded { ok = false }
+        if !scenario(&!m3, &rt, true, true) { ok = false }
+    }
+    if ok { print("SERVEPREEMPT PASS\n") } else { print("SERVEPREEMPT FAIL\n") }
+    if !ok { exit(1) }
+    exit(0)
+}

@@ -77,6 +77,13 @@ length, overflow diagnostics, and the public status of internal Box renaming
 remain unresolved; do not specify silent splitting or truncation as intended
 name semantics.
 
+**Update (ADR-015 row 11, first slice, 2026-11-08):** the lexer now refuses an identifier
+longer than 256 bytes with E282 and its location instead of splitting it, on both
+engines (probes `id_long300` refused, `id_long256` accepted). 256 is the cap the loop
+already had, not a ruled limit: the 128-byte clamps in `parser_name_at` and the export
+pool are unchanged. `ε` `∂` `∇` `∞` are identifier characters, alone or inside a name
+(`let ε = 3`, `∂x`, `a∞`); the rest of UAX #31 and NFC are later slices.
+
 `LEX-004` (**source-observed**, whitespace and comments). Space, horizontal tab,
 CR, and LF separate tokens. CR is whitespace, not a line increment; CRLF
 therefore has one line increment, whereas a lone CR does not. `//` consumes
@@ -126,6 +133,24 @@ Declaration acceptance therefore does not imply that a name is usable in every
 expression. The contextual-keyword fixture still has an older comment excluding
 `audit`; `tk_is_contextual_ident` now includes it. The source is authoritative.
 
+`LEX-006a` (**specified-contract**, reserved words, ADR-015 row 10, measured 2026-11-08
+with the probes `kw_let_<word>`: 50 spellings and 4 controls). A word is reserved only
+where the grammar needs it in name position. Both engines now agree on all 54 probes:
+
+- **Valid as ordinary names** outside their syntax: `effect handler policy`
+  `acquisition_policy recourse_policy transition_policy transition_protocol`
+  `monitoring_policy alternative_policy alternative_frontier decision_policy`
+  `deferral_policy models validation audit on level scope is study affine linear`
+  (plus `unit kernel close var Knowledge` in Madaros expression dispatch). `affine` and
+  `linear` are keywords only where an item starts (`linear struct`, `affine fn`) or as a
+  type qualifier (`x: linear File`); `study` only before a study block. Reading one of
+  them as `0` is a defect.
+- **Reserved**, refused as binding names by both engines: `async await spawn crate super
+  perform resume`. Declaration names (`fn spawn(..)`) and member names (`x.spawn`) stay
+  valid. Madaros refuses their use in expression position; `lean_single` refuses a `let`
+  or `var` binding named after one, and still accepts them as parameter or field names.
+  That residual difference is not covered by the probes.
+
 `LEX-007` (**source-observed**, punctuators and maximal munch). The active
 operator branch tests three-byte spellings before two-byte spellings before
 one-byte spellings:
@@ -143,6 +168,15 @@ expression production consumes it. Unknown bytes emit Error tokens and advance
 one byte, rather than becoming identifier characters. A single quote currently
 has no scalar character-literal branch.
 
+**Update (ADR-015 row 9, 2026-11-08).** Corpus measurement over the 9,019 `.sio` files under
+`stdlib/`, `tests/`, `examples/` and `self-hosted/`, with strings and `//` comments removed:
+`<-` 1 occurrence in 1 file (inside the causal-graph `<->`), `+-` 2 occurrences in 2 files
+(`1.0 +- 0.1` in two compile-fail tests), `&!` 30,810 occurrences in 1,636 files (the mutable
+borrow `&!T`, always after a space, `(`, `,` or `:`). So: `<-` is no longer a token of its own,
+only the `<-` of `<->` is kept, and `x<-1` reads as `x < -1` on both engines. `+-` is the
+uncertainty operator only with a space on each side; `a+-2` is refused (E283). `a&!b`, where an
+operand ends right before `&!`, is refused (E283); `&!T` after a space, `(`, `,` or `:` is
+unchanged. Both refusals hint at adding a space.
 `LEX-008` (**specified-contract**, capacity refusals). The file-input route
 refuses source larger than 16,777,216 bytes and a token stream that cannot fit
 its EOF token in the 2,097,152-entry table. `lexer_push_flat`,
@@ -167,6 +201,14 @@ validation requires at least one hexadecimal digit after `0x`. No explicit
 integer overflow check is present in this accumulator. Empty base prefixes and
 oversized literals are defects/coverage gaps, not specified values or a promise
 of modular arithmetic.
+
+**Update (ADR-015 row 8, 2026-11-09):** `1__0` and `10_` are no longer left to fail later as
+a number plus a stray name: a `_` right after a numeric literal that is not between two digits
+and does not start a unit suffix (`500_mg`, a letter follows) is refused with E284 on both
+engines. `lean_single` now follows the Madaros rule for decimal and hex integers and for the
+integer part, fraction and exponent of a float (`1_000`, `0xFF_FF`, `1_000.000_5`, `1_0e1_0`);
+it used to read `1_000_000` as `1` and a name `_000_000`. A separated decimal literal is checked
+against 2^64-1 by an overflow flag instead of by its digit count.
 
 `LEX-010` (**source-observed**, decimal floating syntax). After a decimal run,
 `.` joins the token only when followed by an ASCII digit. A decimal exponent

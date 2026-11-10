@@ -1,0 +1,1 @@
+`CLAUDE.md` drops two stale syntax rows and moves the per-engine `f128`/`f256` limitation text to `docs/compiler/F128_ENGINE_DIVERGENCE.md`, leaving a summary and a link. No compiler behaviour changes.

@@ -21,10 +21,18 @@ const core = await import(CORE_PATH);
 const {
   initialState, makeScratch, stepStrang, organAverage,
   DEFAULT_PARAMS_RAPAMYCIN, DEFAULT_PARAMS_SEMAGLUTIDE,
+  DEFAULT_PARAMS_TIRZEPATIDE,
+  DEFAULT_PARAMS_EVEROLIMUS,
+  DEFAULT_PARAMS_TACROLIMUS,
+  DEFAULT_PARAMS_OLANZAPINE,
+  DEFAULT_PARAMS_CLOZAPINE,
+  DEFAULT_PARAMS_QUETIAPINE,
+  DEFAULT_PARAMS_LITHIUM,
+  DEFAULT_PARAMS_VANCOMYCIN,
   degenerateParams, N,
 } = core;
 
-// CLI: --drug=rapamycin|semaglutide  --case=literature|degenerate
+// CLI: --drug=rapamycin|semaglutide|tirzepatide|everolimus|tacrolimus|olanzapine|olanzapine-smoker|clozapine|quetiapine|quetiapine-ketoconazole|lithium|vancomycin  --case=literature|degenerate
 const args = Object.fromEntries(
   process.argv.slice(2)
     .filter(a => a.startsWith('--'))
@@ -38,7 +46,79 @@ const DT = 0.001;
 const SAMPLES = [0.1, 0.5, 1.0, 2.0, 4.0, 6.0, 8.0, 12.0, 16.0, 20.0, 24.0, 30.0];
 
 let baseParams;
-if (DRUG === 'semaglutide') {
+if (DRUG === 'tirzepatide') {
+  baseParams = {
+    ...DEFAULT_PARAMS_TIRZEPATIDE,
+    bolusMg: 0.0,         // no IV bolus — SC depot release only
+    stentActive: true,    // re-used as 'depot active'
+  };
+} else if (DRUG === 'everolimus') {
+  baseParams = {
+    ...DEFAULT_PARAMS_EVEROLIMUS,
+    bolusMg: 0.0,         // no IV bolus — Higuchi stent release only
+    stentActive: true,
+  };
+}
+ else if (DRUG === 'lithium') {
+  baseParams = {
+    ...DEFAULT_PARAMS_LITHIUM,
+    bolusMg: 0.0,         // no IV bolus — oral IR gut absorption only
+    stentActive: true,    // re-used as 'input active'
+  };
+}
+ else if (DRUG === 'vancomycin') {
+  baseParams = {
+    ...DEFAULT_PARAMS_VANCOMYCIN,
+    bolusMg: 0.0,         // no IV bolus — zero-order infusion only
+    stentActive: true,    // re-used as 'input active'
+  };
+}
+ else if (DRUG === 'quetiapine') {
+  baseParams = {
+    ...DEFAULT_PARAMS_QUETIAPINE,
+    bolusMg: 0.0,         // no IV bolus — oral IR gut absorption only
+    stentActive: true,    // re-used as 'input active'
+  };
+}
+ else if (DRUG === 'quetiapine-ketoconazole') {
+  baseParams = {
+    ...DEFAULT_PARAMS_QUETIAPINE,
+    clHep: 16.8,
+    bolusMg: 0.0,
+    stentActive: true,
+  };
+}
+ else if (DRUG === 'clozapine') {
+  baseParams = {
+    ...DEFAULT_PARAMS_CLOZAPINE,
+    bolusMg: 0.0,         // no IV bolus — oral IR gut absorption only
+    stentActive: true,    // re-used as 'input active'
+  };
+}
+ else if (DRUG === 'olanzapine') {
+  baseParams = {
+    ...DEFAULT_PARAMS_OLANZAPINE,
+    bolusMg: 0.0,         // no IV bolus — oral IR gut absorption only
+    stentActive: true,    // re-used as 'input active'
+  };
+}
+ else if (DRUG === 'olanzapine-smoker') {
+  baseParams = {
+    ...DEFAULT_PARAMS_OLANZAPINE,
+    clHep: 50.0,
+    bolusMg: 0.0,
+    stentActive: true,
+  };
+}
+ else if (DRUG === 'tacrolimus') {
+  baseParams = {
+    ...DEFAULT_PARAMS_TACROLIMUS,
+    bolusMg: 0.0,         // no IV bolus — oral IR gut absorption only
+    stentActive: true,    // re-used as 'input active'
+  };
+}
+
+ else if (DRUG === 'semaglutide') {
   baseParams = {
     ...DEFAULT_PARAMS_SEMAGLUTIDE,
     bolusMg: 0.0,         // no IV bolus — SC depot release only
@@ -63,7 +143,37 @@ const scratch = makeScratch();
 let t = 0;
 
 const out = [];
-if (DRUG === 'semaglutide') {
+if (DRUG === 'tirzepatide') {
+  out.push('DISSERTATION_PBPK28_TIRZEPATIDE_PARITY_NODE v1');
+} else if (DRUG === 'everolimus') {
+  out.push('DISSERTATION_PBPK28_EVEROLIMUS_PARITY_NODE v1');
+}
+ else if (DRUG === 'lithium') {
+  out.push('DISSERTATION_PBPK28_LITHIUM_PARITY_NODE v1');
+}
+ else if (DRUG === 'vancomycin') {
+  out.push('DISSERTATION_PBPK28_VANCOMYCIN_PARITY_NODE v1');
+}
+ else if (DRUG === 'quetiapine') {
+  out.push('DISSERTATION_PBPK28_QUETIAPINE_PARITY_NODE v1');
+}
+ else if (DRUG === 'quetiapine-ketoconazole') {
+  out.push('DISSERTATION_PBPK28_QUETIAPINE_KETO_PARITY_NODE v1');
+}
+ else if (DRUG === 'clozapine') {
+  out.push('DISSERTATION_PBPK28_CLOZAPINE_PARITY_NODE v1');
+}
+ else if (DRUG === 'olanzapine') {
+  out.push('DISSERTATION_PBPK28_OLANZAPINE_PARITY_NODE v1');
+}
+ else if (DRUG === 'olanzapine-smoker') {
+  out.push('DISSERTATION_PBPK28_OLANZAPINE_SMOKER_PARITY_NODE v1');
+}
+ else if (DRUG === 'tacrolimus') {
+  out.push('DISSERTATION_PBPK28_TACROLIMUS_PARITY_NODE v1');
+}
+
+ else if (DRUG === 'semaglutide') {
   out.push('DISSERTATION_PBPK28_SEMAGLUTIDE_PARITY_NODE v1');
 } else {
   out.push('DISSERTATION_PBPK28_PARITY_NODE v1');
@@ -110,7 +220,37 @@ for (const target of SAMPLES) {
     }
   }
 }
-if (DRUG === 'semaglutide') {
+if (DRUG === 'tirzepatide') {
+  out.push('DISSERTATION_PBPK28_TIRZEPATIDE_PARITY_DONE');
+} else if (DRUG === 'everolimus') {
+  out.push('DISSERTATION_PBPK28_EVEROLIMUS_PARITY_DONE');
+}
+ else if (DRUG === 'lithium') {
+  out.push('DISSERTATION_PBPK28_LITHIUM_PARITY_DONE');
+}
+ else if (DRUG === 'vancomycin') {
+  out.push('DISSERTATION_PBPK28_VANCOMYCIN_PARITY_DONE');
+}
+ else if (DRUG === 'quetiapine') {
+  out.push('DISSERTATION_PBPK28_QUETIAPINE_PARITY_DONE');
+}
+ else if (DRUG === 'quetiapine-ketoconazole') {
+  out.push('DISSERTATION_PBPK28_QUETIAPINE_KETO_PARITY_DONE');
+}
+ else if (DRUG === 'clozapine') {
+  out.push('DISSERTATION_PBPK28_CLOZAPINE_PARITY_DONE');
+}
+ else if (DRUG === 'olanzapine') {
+  out.push('DISSERTATION_PBPK28_OLANZAPINE_PARITY_DONE');
+}
+ else if (DRUG === 'olanzapine-smoker') {
+  out.push('DISSERTATION_PBPK28_OLANZAPINE_SMOKER_PARITY_DONE');
+}
+ else if (DRUG === 'tacrolimus') {
+  out.push('DISSERTATION_PBPK28_TACROLIMUS_PARITY_DONE');
+}
+
+ else if (DRUG === 'semaglutide') {
   out.push('DISSERTATION_PBPK28_SEMAGLUTIDE_PARITY_DONE');
 } else {
   out.push('DISSERTATION_PBPK28_PARITY_DONE');

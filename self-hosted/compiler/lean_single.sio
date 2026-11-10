@@ -928,10 +928,39 @@ fn st_find(hash: i64) -> i64 with Panic, Mut {
     return -1
 }
 
+// Raw-byte prefix checkpoints preserve the old strict-before-position rule,
+// including marker bytes inside source text. Each complete 256-byte block is
+// scanned once; queries inspect at most the remaining 255 bytes. Appending SRC
+// extends the index. Replacing existing bytes must reset it (see main and
+// strip_extern_blocks); token renaming only appends and needs no invalidation.
+// 16 MiB SRC / 256 + the terminal boundary, not an import-count limit.
+var SRC_FILE_PREFIX: [i64; 65537] = [0; 65537]
+var SRC_FILE_INDEXED: i64 = 0
+var SRC_FILE_LAST: i64 = 0
+
+fn src_file_marker_index_reset() with Mut {
+    SRC_FILE_INDEXED = 0
+    SRC_FILE_LAST = 0
+    SRC_FILE_PREFIX[0 as usize] = 0
+}
+
 fn src_file_marker_start(pos: i64) -> i64 with Panic, Mut {
-    var start: i64 = 0
-    var i: i64 = 0
-    while i < pos && i < SRC_LEN {
+    if pos <= 0 { return 0 }
+    let end = if pos < SRC_LEN { pos } else { SRC_LEN }
+    if end <= 0 { return 0 }
+    if SRC_FILE_INDEXED > SRC_LEN { src_file_marker_index_reset() }
+    let block = end >> 8
+    let boundary = block << 8
+    while SRC_FILE_INDEXED < boundary {
+        if SRC[SRC_FILE_INDEXED as usize] as i64 == 1 { SRC_FILE_LAST = SRC_FILE_INDEXED }
+        SRC_FILE_INDEXED = SRC_FILE_INDEXED + 1
+        if (SRC_FILE_INDEXED & 255) == 0 {
+            SRC_FILE_PREFIX[(SRC_FILE_INDEXED >> 8) as usize] = SRC_FILE_LAST
+        }
+    }
+    var start = SRC_FILE_PREFIX[block as usize]
+    var i = boundary
+    while i < end {
         if SRC[i as usize] as i64 == 1 { start = i }
         i = i + 1
     }
@@ -972,8 +1001,8 @@ fn st_private_access_blocked(si: i64, access_tok: i64) -> bool with Mut, Panic {
     if si < 0 { return false }
     if ST_DECL_NE[si as usize] <= ST_DECL_NS[si as usize] { return false }
     if access_tok < 0 || access_tok >= TC { return false }
-    // The field tests run BEFORE src_same_file_pos, which scans the bundle back
-    // to the file marker: for a `pub struct` most accesses touch a `pub` field
+    // The field tests run BEFORE src_same_file_pos: for a `pub struct` most
+    // accesses touch a `pub` field
     // and must stay as cheap as the old `ST_PUBLIC != 0 -> false` shortcut
     // (calling the scan first made the Madaros sources compile ~3x slower).
     if ST_PUBLIC[si as usize] != 0 {
@@ -5304,6 +5333,57 @@ fn tc_decl_init_mismatch(tok: i64, decl_ty: i64, decl_hash: i64, expr_ty: i64, e
     return 0
 }
 
+// D-20 (SIO-60): scalar-kind classifier for a module-level `let`/`const`
+// annotation at token p (just past `:`). Returns 1 (int), 2 (float) or 4
+// (bool) for a single-token scalar annotation, else 0 (unchecked, as
+// before). Multi-token types (`[i64; 4]`, `Option<i64>`) stay unchecked.
+fn tc_module_let_decl_scalar(p: i64) -> i64 with Panic, Mut {
+    if TK[p as usize] == 3 && TK[(p + 1) as usize] == 16 {
+        let k = type_name_kind(TS[p as usize], TE[p as usize])
+        if k == 1 || k == 2 || k == 4 { return k }
+    }
+    return 0
+}
+
+// D-20 (SIO-60): module-level `let x: i64 = true` used to bind 0 in silence,
+// in main and imported modules alike. A bool literal against a non-bool
+// scalar annotation (or a numeric literal against `bool`) is E001. It sets
+// TYPECHECK_FAILED directly (same loud-failure idiom as
+// tc_unbalanced_braces): the tc_mark_failed path stays import-tolerant by
+// design, and this check must be fatal in every module. int<->float keeps
+// the legacy implicit conversion (unchecked here, as before).
+fn tc_module_let_bool_mismatch(decl_scalar: i64, p: i64) with IO, Mut, Panic, Div {
+    if decl_scalar == 1 || decl_scalar == 2 {
+        // `true`/`false` lex as TK35/TK36, never TK3.
+        if TK[p as usize] == 35 || TK[p as usize] == 36 {
+            tc_module_let_bool_error(p, decl_scalar, 4)
+        }
+    } else if decl_scalar == 4 {
+        if TK[p as usize] == 4 {
+            tc_module_let_bool_error(p, 4, 1)
+        } else if TK[p as usize] == 53 {
+            tc_module_let_bool_error(p, 4, 2)
+        }
+    }
+}
+
+// E001 printer for the module-level bool/numeric mismatch above. Mirrors
+// tc_decl_init_mismatch's diagnostic text exactly, but fails the build
+// directly instead of routing through the import-tolerant tc_mark_failed.
+fn tc_module_let_bool_error(tok: i64, decl_ty: i64, expr_ty: i64) with IO, Mut, Panic, Div {
+    print("error[E001]: Type mismatch — expected ")
+    print_type_label(decl_ty, 0)
+    print(", got ")
+    print_type_label(expr_ty, 0)
+    print(" at ")
+    print_src_loc_for_tok(tok)
+    print(" (bundle line ")
+    print_int(TL[tok as usize])
+    print(")\n")
+    TC_FN_ERR_COUNT = TC_FN_ERR_COUNT + 1
+    TYPECHECK_FAILED = 1
+}
+
 // PR-3: struct-field refinement enforcement. At struct-literal compile time,
 // look up the field's stored type hash against the registered refinement-type
 // aliases; if it matches an alias with an integer predicate and the just-compiled
@@ -8585,8 +8665,132 @@ fn mono_infer_from_nth_arg(gi: i64, call_arg_start: i64) -> i64 with Panic, Mut 
 }
 
 // ─── Lexer ───
+// ADR-015 row 11, first slice: besides ASCII letters, digits and `_`, an identifier may contain
+// `ε` (CE B5), `∂` (E2 88 82), `∇` (E2 88 87) and `∞` (E2 88 9E). Returns the byte length of
+// that character at p, or 0. (The rest of UAX #31 and NFC are later slices.)
+fn lex_ident_mb_len(p: i64) -> i64 with Mut, Panic {
+    let b0 = sb(p)
+    let b1 = sb(p + 1)
+    if b0 == 206 && b1 == 181 { return 2 }
+    if b0 == 226 && b1 == 136 {
+        let b2 = sb(p + 2)
+        if b2 == 130 || b2 == 135 || b2 == 158 { return 3 }
+    }
+    return 0
+}
+
+// ADR-015 row 12: documentation comments are recorded in a side table, in source order,
+// with the index of the token that follows each one. Only the main file counts (imports and
+// the native prelude follow it in SRC). The token stream is unchanged. DOC_KIND: 1 outer line
+// (`///`), 2 inner line (`//!`), 3 outer block (`/** */`), 4 inner block (`/*! */`).
+var DOC_COUNT: i64 = 0
+var DOC_OVERFLOW: i64 = 0
+var DOC_KIND: [i64; 65536] = [0; 65536]
+var DOC_TEXT_START: [i64; 65536] = [0; 65536]
+var DOC_TEXT_END: [i64; 65536] = [0; 65536]
+var DOC_LINE: [i64; 65536] = [0; 65536]
+var DOC_NEXT_TOK: [i64; 65536] = [0; 65536]
+var CLI_EMIT_DOCS: i64 = 0
+
+fn lex_doc_begin(kind: i64, text_start: i64, line: i64) -> i64 with Mut, Panic {
+    if DOC_COUNT >= 65536 {
+        DOC_OVERFLOW = 1
+        return 0 - 1
+    }
+    let i = DOC_COUNT
+    DOC_KIND[i as usize] = kind
+    DOC_TEXT_START[i as usize] = text_start
+    DOC_TEXT_END[i as usize] = text_start
+    DOC_LINE[i as usize] = line
+    DOC_NEXT_TOK[i as usize] = TC
+    DOC_COUNT = i + 1
+    return i
+}
+
+fn lex_doc_print_range(from: i64, to: i64, max: i64) with IO, Mut, Panic {
+    var i: i64 = from
+    var printed: i64 = 0
+    while i < to && printed < max {
+        let c = sb(i)
+        if c == 10 {
+            print("\\n")
+        } else if c != 13 {
+            print_char(c)
+        }
+        printed = printed + 1
+        i = i + 1
+    }
+}
+
+// One line per documentation comment, the same format as `madaros --emit-docs`:
+//   DOC <kind> line=<L> next_line=<NL> next=<first token of the item> text=<text>
+fn lex_print_docs() with IO, Mut, Panic {
+    var eof_line: i64 = 1
+    var q: i64 = 0
+    while q < MAIN_SRC_END { if sb(q) == 10 { eof_line = eof_line + 1 }  q = q + 1 }
+    var i: i64 = 0
+    while i < DOC_COUNT {
+        let k = DOC_KIND[i as usize]
+        print("DOC ")
+        if k == 1 { print("outer-line") }
+        else if k == 2 { print("inner-line") }
+        else if k == 3 { print("outer-block") }
+        else { print("inner-block") }
+        print(" line=")
+        print_int(DOC_LINE[i as usize])
+        let nt = DOC_NEXT_TOK[i as usize]
+        let has_next = nt < TC && TS[nt as usize] < MAIN_SRC_END && TE[nt as usize] > TS[nt as usize]
+        print(" next_line=")
+        if has_next { print_int(TL[nt as usize]) } else { print_int(eof_line) }
+        print(" next=")
+        if has_next { lex_doc_print_range(TS[nt as usize], TE[nt as usize], 40) } else { print("<eof>") }
+        print(" text=")
+        lex_doc_print_range(DOC_TEXT_START[i as usize], DOC_TEXT_END[i as usize], 4096)
+        print("\n")
+        i = i + 1
+    }
+    if DOC_OVERFLOW == 1 {
+        print("DOC-OVERFLOW the table holds 65536 documentation comments; the rest are not listed\n")
+    }
+}
+
+var LEX_UTF8_LEN: i64 = 0
+
+// Scalar value of the UTF-8 sequence at pos, or -1 when it is malformed (bad lead or
+// continuation byte, truncated, overlong, a surrogate, above U+10FFFF). On success
+// LEX_UTF8_LEN is its length in bytes.
+fn lex_utf8_scalar(pos: i64) -> i64 with Mut, Panic {
+    let b0 = sb(pos)
+    var need: i64 = 0
+    var v: i64 = 0
+    var minv: i64 = 0
+    if b0 >= 194 && b0 <= 223 { need = 1  v = b0 & 31  minv = 128 }
+    else if b0 >= 224 && b0 <= 239 { need = 2  v = b0 & 15  minv = 2048 }
+    else if b0 >= 240 && b0 <= 244 { need = 3  v = b0 & 7  minv = 65536 }
+    else { return 0 - 1 }
+    if pos + need >= SRC_LEN { return 0 - 1 }
+    var i: i64 = 1
+    while i <= need {
+        let b = sb(pos + i)
+        if b < 128 || b > 191 { return 0 - 1 }
+        v = v * 64 + (b & 63)
+        i = i + 1
+    }
+    if v < minv { return 0 - 1 }
+    if v >= 55296 && v <= 57343 { return 0 - 1 }
+    if v > 1114111 { return 0 - 1 }
+    LEX_UTF8_LEN = need + 1
+    return v
+}
+
+fn lex_is_hexdig(c: i64) -> bool {
+    return (c >= 48 && c <= 57) || (c >= 97 && c <= 102) || (c >= 65 && c <= 70)
+}
+
 fn lex_all() with IO, Mut, Panic, Div {
     TC = 0
+    DOC_COUNT = 0
+    DOC_OVERFLOW = 0
     LEX_ERROR_LINE = 0
     LEX_ERROR_KIND = 0
     LEX_ERROR_COL = 0
@@ -8606,9 +8810,48 @@ fn lex_all() with IO, Mut, Panic, Div {
             continue
         }
         if c == 2 || c == 32 || c == 9 || c == 13 || c == 10 { if c == 10 { cur_line = cur_line + 1 }; p = p + 1; continue }
-        // Line comment
+        // Line comment (`///` not `////`, and `//!`, are documentation comments)
         if c == 47 && p + 1 < SRC_LEN && sb(p + 1) == 47 {
-            p = p + 2; while p < SRC_LEN && sb(p) != 10 { p = p + 1 }; continue
+            var ldoc: i64 = 0 - 1
+            if p < MAIN_SRC_END && p + 2 < SRC_LEN {
+                let l2 = sb(p + 2)
+                let l3 = if p + 3 < SRC_LEN { sb(p + 3) } else { 0 }
+                if l2 == 47 && l3 != 47 { ldoc = lex_doc_begin(1, p + 3, cur_line) }
+                else if l2 == 33 { ldoc = lex_doc_begin(2, p + 3, cur_line) }
+            }
+            p = p + 2; while p < SRC_LEN && sb(p) != 10 { p = p + 1 }
+            if ldoc >= 0 { DOC_TEXT_END[ldoc as usize] = p }
+            continue
+        }
+        // Block comment, nestable (as in Madaros). `/**` (not `/**/`, `/***`) and `/*!` are
+        // documentation comments. An unterminated one is refused (E272).
+        if c == 47 && p + 1 < SRC_LEN && sb(p + 1) == 42 {
+            let bc_line = cur_line
+            var bdoc: i64 = 0 - 1
+            if p < MAIN_SRC_END && p + 2 < SRC_LEN {
+                let b2 = sb(p + 2)
+                let b3 = if p + 3 < SRC_LEN { sb(p + 3) } else { 0 }
+                if b2 == 42 && b3 != 42 && b3 != 47 { bdoc = lex_doc_begin(3, p + 3, cur_line) }
+                else if b2 == 33 { bdoc = lex_doc_begin(4, p + 3, cur_line) }
+            }
+            p = p + 2
+            var bdepth: i64 = 1
+            while p < SRC_LEN && bdepth > 0 && sb(p) != 1 {
+                let b0 = sb(p)
+                let b1 = if p + 1 < SRC_LEN { sb(p + 1) } else { 0 }
+                if b0 == 47 && b1 == 42 { bdepth = bdepth + 1  p = p + 2 }
+                else if b0 == 42 && b1 == 47 { bdepth = bdepth - 1  p = p + 2 }
+                else {
+                    if b0 == 10 { cur_line = cur_line + 1 }
+                    p = p + 1
+                }
+            }
+            if bdoc >= 0 { if bdepth == 0 { DOC_TEXT_END[bdoc as usize] = p - 2 } else { DOC_TEXT_END[bdoc as usize] = p } }
+            if bdepth > 0 && LEX_ERROR_LINE == 0 {
+                LEX_ERROR_LINE = bc_line
+                LEX_ERROR_KIND = 8
+            }
+            continue
         }
         // String literal
         if c == 34 {
@@ -8678,23 +8921,51 @@ fn lex_all() with IO, Mut, Panic, Div {
             if c == 48 && p + 1 < SRC_LEN && (sb(p + 1) == 120 || sb(p + 1) == 88) {
                 p = p + 2
                 var hx: i64 = 1
+                // ADR-015 row 8: `_` is a digit separator only between two digits (the Madaros rule).
+                var hsep: i64 = 0
+                var hsig: i64 = 0
+                var hstarted: i64 = 0
                 while p < SRC_LEN && hx == 1 {
                     let h = sb(p)
-                    if h >= 48 && h <= 57 { v = v * 16 + h - 48; p = p + 1 }
-                    else if h >= 97 && h <= 102 { v = v * 16 + h - 87; p = p + 1 }
-                    else if h >= 65 && h <= 70 { v = v * 16 + h - 55; p = p + 1 }
-                    else { hx = 0 }
+                    var dv: i64 = 0 - 1
+                    if h >= 48 && h <= 57 { dv = h - 48 }
+                    else if h >= 97 && h <= 102 { dv = h - 87 }
+                    else if h >= 65 && h <= 70 { dv = h - 55 }
+                    if dv >= 0 {
+                        v = v * 16 + dv
+                        p = p + 1
+                        if hstarted == 0 && dv != 0 { hstarted = 1 }
+                        if hstarted == 1 { hsig = hsig + 1 }
+                    } else if h == 95 && lex_is_hexdig(sb(p + 1)) {
+                        hsep = 1
+                        p = p + 1
+                    } else { hx = 0 }
                 }
                 // ADR-015 row 1: refuse a hex literal wider than 64 bits before
                 // the wrapped value reaches the token table. A trailing `p` makes
                 // it a C99 hex-float (`0x1…p-80`), whose mantissa is not an
                 // integer at all — the shared parser guards the same case with
                 // parser_hex_float_tail_ahead before calling parse_int_literal.
-                if !lit_is_float_tail(s, p) && lit_int_width_class(s, p) == 1 {
+                if hsep == 1 {
+                    if !lit_is_float_tail(s, p) && hsig > 16 {
+                        tc_error_hard(TC, "E276: integer literal does not fit any 64-bit integer type")
+                    }
+                } else if !lit_is_float_tail(s, p) && lit_int_width_class(s, p) == 1 {
                     tc_error_hard(TC, "E276: integer literal does not fit any 64-bit integer type")
                 }
             } else {
-                while p < SRC_LEN && sb(p) >= 48 && sb(p) <= 57 { v = v * 10 + sb(p) - 48; p = p + 1 }
+                var dsep: i64 = 0
+                var dovf: i64 = 0
+                while p < SRC_LEN && ((sb(p) >= 48 && sb(p) <= 57) || (sb(p) == 95 && p + 1 < SRC_LEN && sb(p + 1) >= 48 && sb(p + 1) <= 57)) {
+                    if sb(p) == 95 {
+                        dsep = 1
+                    } else {
+                        let dd = sb(p) - 48
+                        if v > 1844674407370955161 || (v == 1844674407370955161 && dd > 5) { dovf = 1 }
+                        v = v * 10 + dd
+                    }
+                    p = p + 1
+                }
                 // ADR-015 row 1: same refusal for the decimal spelling. Class 2
                 // (exactly 2^63) is refused only when the minus before it is not
                 // a prefix operator, because `-9223372036854775808` is how the
@@ -8704,9 +8975,14 @@ fn lex_all() with IO, Mut, Panic, Div {
                 // parser does not need this test because the lexer has already
                 // decided the token kind by then).
                 if !lit_is_float_tail(s, p) {
-                    let width_class = lit_int_width_class(s, p)
-                    if width_class == 1 || (width_class == 2 && !lit_prefix_minus_is_unary()) {
-                        tc_error_hard(TC, "E276: integer literal does not fit any 64-bit integer type")
+                    if dsep == 1 {
+                        // With separators the digit run is not contiguous: use the overflow flag (past 2^64-1).
+                        if dovf == 1 { tc_error_hard(TC, "E276: integer literal does not fit any 64-bit integer type") }
+                    } else {
+                        let width_class = lit_int_width_class(s, p)
+                        if width_class == 1 || (width_class == 2 && !lit_prefix_minus_is_unary()) {
+                            tc_error_hard(TC, "E276: integer literal does not fit any 64-bit integer type")
+                        }
                     }
                 }
             }
@@ -8723,7 +8999,8 @@ fn lex_all() with IO, Mut, Panic, Div {
                 FL_FRAC_DIGITS = 0
                 let int_zero: i64 = if v == 0 { 1 } else { 0 }
                 var seen_nonzero: i64 = 0
-                while p < SRC_LEN && sb(p) >= 48 && sb(p) <= 57 {
+                while p < SRC_LEN && ((sb(p) >= 48 && sb(p) <= 57) || (sb(p) == 95 && p + 1 < SRC_LEN && sb(p + 1) >= 48 && sb(p + 1) <= 57)) {
+                    if sb(p) == 95 { p = p + 1  continue }
                     let d = sb(p) - 48
                     if int_zero == 1 && seen_nonzero == 0 && d == 0 {
                         lit_leading_zeros = lit_leading_zeros + 1
@@ -8748,10 +9025,19 @@ fn lex_all() with IO, Mut, Panic, Div {
                     is_float = 1
                     exp_sign = esign
                     p = ep
-                    while p < SRC_LEN && sb(p) >= 48 && sb(p) <= 57 {
-                        exp_val = exp_val * 10 + sb(p) - 48
+                    while p < SRC_LEN && ((sb(p) >= 48 && sb(p) <= 57) || (sb(p) == 95 && p + 1 < SRC_LEN && sb(p + 1) >= 48 && sb(p + 1) <= 57)) {
+                        if sb(p) != 95 { exp_val = exp_val * 10 + sb(p) - 48 }
                         p = p + 1
                     }
+                }
+            }
+            // ADR-015 row 8: a `_` that is not between two digits and does not start a unit suffix
+            // (`1__0`, `10_`) is refused (E284).
+            if p < SRC_LEN && sb(p) == 95 && LEX_ERROR_LINE == 0 {
+                let sf = if p + 1 < SRC_LEN { sb(p + 1) } else { 0 }
+                if !((sf >= 65 && sf <= 90) || (sf >= 97 && sf <= 122)) {
+                    LEX_ERROR_LINE = cur_line
+                    LEX_ERROR_KIND = 12
                 }
             }
             // Gen 19: _suffix unit annotation on numeric literals (e.g. 500_mg, 9.8_m)
@@ -8778,15 +9064,6 @@ fn lex_all() with IO, Mut, Panic, Div {
             TU[TC as usize] = lit_unit_hash
             TL[TC as usize] = cur_line; TC = TC + 1; continue
         }
-        if c == 206 && p + 1 < SRC_LEN && sb(p + 1) == 181 {
-            TK[TC as usize] = 3
-            TS[TC as usize] = p
-            TE[TC as usize] = p + 2
-            TL[TC as usize] = cur_line
-            TC = TC + 1
-            p = p + 2
-            continue
-        }
         if c == 226 && p + 2 < SRC_LEN && sb(p + 1) == 138 && sb(p + 2) == 165 {
             TK[TC as usize] = 3
             TS[TC as usize] = p
@@ -8797,10 +9074,24 @@ fn lex_all() with IO, Mut, Panic, Div {
             continue
         }
         // Identifier / keyword
-        if (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c == 95 {
+        if (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c == 95 || lex_ident_mb_len(p) > 0 {
             let s = p
-            while p < SRC_LEN && ((sb(p) >= 65 && sb(p) <= 90) || (sb(p) >= 97 && sb(p) <= 122) || (sb(p) >= 48 && sb(p) <= 57) || sb(p) == 95) { p = p + 1 }
+            var idgo: i64 = 1
+            while p < SRC_LEN && idgo == 1 {
+                let ic = sb(p)
+                if (ic >= 65 && ic <= 90) || (ic >= 97 && ic <= 122) || (ic >= 48 && ic <= 57) || ic == 95 {
+                    p = p + 1
+                } else {
+                    let mbl = lex_ident_mb_len(p)
+                    if mbl > 0 { p = p + mbl } else { idgo = 0 }
+                }
+            }
             let l = p - s
+            // ADR-015 row 11: an identifier longer than 256 bytes is refused (E282).
+            if l > 256 && LEX_ERROR_LINE == 0 {
+                LEX_ERROR_LINE = cur_line
+                LEX_ERROR_KIND = 10
+            }
             var k: i64 = 3
             if src_match(s, l, "fn") { k = 1 }
             if src_match(s, l, "return") { k = 2 }
@@ -8849,6 +9140,29 @@ fn lex_all() with IO, Mut, Panic, Div {
             TK[TC as usize] = k; TS[TC as usize] = s; TE[TC as usize] = p; TL[TC as usize] = cur_line; TC = TC + 1; continue
         }
         // Two-char operators
+        // ADR-015 row 9: `+-` and `&!` written without the space that tells the readings apart are
+        // refused (E283). `a+-2` could be `a + -2` or the uncertainty operator; `a&!b` could be
+        // `a & !b` or a mutable borrow. `<-` has no use of its own, so `x<-1` stays `x < -1`.
+        if c == 43 && p + 1 < SRC_LEN && sb(p + 1) == 45 && LEX_ERROR_LINE == 0 {
+            let pvb = if p > 0 { sb(p - 1) } else { 32 }
+            let nxb = if p + 2 < SRC_LEN { sb(p + 2) } else { 32 }
+            let pv_ws = pvb == 32 || pvb == 9 || pvb == 10 || pvb == 13 || pvb == 2
+            let nx_ws = nxb == 32 || nxb == 9 || nxb == 10 || nxb == 13
+            if !(pv_ws && nx_ws) {
+                LEX_ERROR_LINE = cur_line
+                LEX_ERROR_KIND = 11
+                LEX_ERROR_BYTE = 43
+            }
+        }
+        if c == 38 && p > 0 && p + 1 < SRC_LEN && sb(p + 1) == 33 && LEX_ERROR_LINE == 0 {
+            let pvb = sb(p - 1)
+            let operand_end = (pvb >= 65 && pvb <= 90) || (pvb >= 97 && pvb <= 122) || (pvb >= 48 && pvb <= 57) || pvb == 95 || pvb == 41 || pvb == 93
+            if operand_end {
+                LEX_ERROR_LINE = cur_line
+                LEX_ERROR_KIND = 11
+                LEX_ERROR_BYTE = 33
+            }
+        }
         if c == 45 && p + 1 < SRC_LEN && sb(p + 1) == 62 { TK[TC as usize] = 10; TS[TC as usize] = p; TE[TC as usize] = p + 2; TL[TC as usize] = cur_line; TC = TC + 1; p = p + 2; continue }
         if c == 61 && p + 1 < SRC_LEN && sb(p + 1) == 61 { TK[TC as usize] = 21; TS[TC as usize] = p; TE[TC as usize] = p + 2; TL[TC as usize] = cur_line; TC = TC + 1; p = p + 2; continue }
         if c == 33 && p + 1 < SRC_LEN && sb(p + 1) == 61 { TK[TC as usize] = 22; TS[TC as usize] = p; TE[TC as usize] = p + 2; TL[TC as usize] = cur_line; TC = TC + 1; p = p + 2; continue }
@@ -8942,40 +9256,77 @@ fn lex_all() with IO, Mut, Panic, Div {
         // An ASCII byte that no rule above consumes. It used to be skipped,
         // which changed the program instead of refusing it: `1 $ 2` printed
         // 1, and a character literal vanished, so `[' '; 120]` filled with 0
-        // and `let c = 'b'` read the identifier `b`. lean_single has no
-        // character literals (Madaros does; its source uses none), so they
-        // are refused. `'` before an identifier with no closing quote is a
+        // and `let c = 'b'` read the identifier `b`. Character literals are
+        // now lexed above (ADR-015 row 4); a stray quote is refused. `'` before
+        // an identifier of two or more characters with no closing quote is a
         // lifetime (`&'static`) and is still skipped. So is `@`, the unit
         // annotation of a type (`v: f64@L`, stdlib/darwin_pbpk): lean_single
         // has no units and drops the annotation, which loses a check but not
         // a value.
         if c > 32 && c < 128 && c != 64 && LEX_ERROR_LINE == 0 {
             if c == 39 {
-                var is_char_lit: i64 = 0
-                if p + 2 < SRC_LEN && sb(p + 1) != 92 && sb(p + 2) == 39 { is_char_lit = 1 }
-                if p + 1 < SRC_LEN && sb(p + 1) == 92 {
-                    var q: i64 = p + 2
-                    while q < SRC_LEN && q < p + 6 && sb(q) != 39 && sb(q) != 10 { q = q + 1 }
-                    if q < SRC_LEN && sb(q) == 39 { is_char_lit = 1 }
+                // ADR-015 row 4. `'x'` is a Unicode scalar value (an integer literal, UTF-8
+                // decoded) and `'\n'` etc. are the escapes. `'name` (two or more identifier
+                // characters, no closing quote) is a lifetime: only the quote is skipped.
+                // A one-character literal with no closing quote, `''`, `'ab'` and any other
+                // stray quote are refused (E281); an unknown escape is E274.
+                let c1 = if p + 1 < SRC_LEN { sb(p + 1) } else { 0 }
+                var cv: i64 = 0
+                var clen: i64 = 0
+                var cbad: i64 = 0
+                var clife: i64 = 0
+                if c1 == 92 {
+                    let ce = if p + 2 < SRC_LEN { sb(p + 2) } else { 0 }
+                    if ce == 110 { cv = 10 }
+                    else if ce == 116 { cv = 9 }
+                    else if ce == 114 { cv = 13 }
+                    else if ce == 48 { cv = 0 }
+                    else if ce == 92 { cv = 92 }
+                    else if ce == 39 { cv = 39 }
+                    else if ce == 34 { cv = 34 }
+                    else { cbad = 2 }
+                    if cbad == 0 {
+                        if p + 3 < SRC_LEN && sb(p + 3) == 39 { clen = 4 } else { cbad = 1 }
+                    }
+                } else if c1 >= 128 {
+                    let sv = lex_utf8_scalar(p + 1)
+                    if sv < 0 { cbad = 3 }
+                    else if p + 1 + LEX_UTF8_LEN < SRC_LEN && sb(p + 1 + LEX_UTF8_LEN) == 39 { cv = sv  clen = LEX_UTF8_LEN + 2 }
+                    else { cbad = 1 }
+                } else if c1 == 0 || c1 == 10 || c1 == 39 {
+                    cbad = 1
+                } else if p + 2 < SRC_LEN && sb(p + 2) == 39 {
+                    cv = c1
+                    clen = 3
+                } else {
+                    let lt_start = (c1 >= 65 && c1 <= 90) || (c1 >= 97 && c1 <= 122) || c1 == 95
+                    let c2 = if p + 2 < SRC_LEN { sb(p + 2) } else { 0 }
+                    let lt_more = (c2 >= 65 && c2 <= 90) || (c2 >= 97 && c2 <= 122) || c2 == 95 || (c2 >= 48 && c2 <= 57)
+                    if lt_start && lt_more {
+                        var lt_end: i64 = p + 2
+                        while lt_end < SRC_LEN && ((sb(lt_end) >= 65 && sb(lt_end) <= 90) || (sb(lt_end) >= 97 && sb(lt_end) <= 122) || (sb(lt_end) >= 48 && sb(lt_end) <= 57) || sb(lt_end) == 95) { lt_end = lt_end + 1 }
+                        if lt_end < SRC_LEN && sb(lt_end) == 39 { cbad = 1 } else { clife = 1 }
+                    } else {
+                        cbad = 1
+                    }
                 }
-                // A lifetime is `'` and an identifier with no quote after it.
-                // Anything else is refused: a quoted run such as `'ab'` used to
-                // drop both quotes and read the identifier `ab`, and a `'` before
-                // no identifier (`''`, `'12'`, the close of `'a b'`) vanished.
-                var lt_end: i64 = p + 1
-                let lt_c0 = if p + 1 < SRC_LEN { sb(p + 1) } else { 0 }
-                let lt_start = (lt_c0 >= 65 && lt_c0 <= 90) || (lt_c0 >= 97 && lt_c0 <= 122) || lt_c0 == 95
-                if lt_start {
-                    while lt_end < SRC_LEN && ((sb(lt_end) >= 65 && sb(lt_end) <= 90) || (sb(lt_end) >= 97 && sb(lt_end) <= 122) || (sb(lt_end) >= 48 && sb(lt_end) <= 57) || sb(lt_end) == 95) { lt_end = lt_end + 1 }
-                    if lt_end < SRC_LEN && sb(lt_end) == 39 { is_char_lit = 1 }
+                if cbad == 0 && clife == 0 {
+                    TK[TC as usize] = 4; TS[TC as usize] = p; TE[TC as usize] = p + clen; TV[TC as usize] = cv
+                    TU[TC as usize] = 0
+                    TL[TC as usize] = cur_line; TC = TC + 1
+                    p = p + clen
+                    continue
                 }
-                if is_char_lit == 1 {
+                if cbad == 1 {
                     LEX_ERROR_LINE = cur_line
-                    LEX_ERROR_KIND = 3
-                } else if !lt_start {
+                    LEX_ERROR_KIND = 6
+                } else if cbad == 2 {
+                    LEX_ERROR_LINE = cur_line
+                    LEX_ERROR_KIND = 7
+                } else if cbad == 3 {
                     LEX_ERROR_LINE = cur_line
                     LEX_ERROR_KIND = 4
-                    LEX_ERROR_BYTE = c
+                    LEX_ERROR_BYTE = c1
                 }
             } else {
                 LEX_ERROR_LINE = cur_line
@@ -8987,12 +9338,68 @@ fn lex_all() with IO, Mut, Panic, Div {
     }
     TK[TC as usize] = 0; TL[TC as usize] = cur_line; TC = TC + 1
     lex_enum_variant_names()
+    lex_contextual_names()
+    lex_reserved_binding_names()
 }
 
 // A variant of a user enum may be called None, Some, Ok or Err. The lexer makes
 // those words keywords (TK 57-60), so `enum Act { None, Neg }` declared no
 // variant named None and `Act::None` (made an identifier in lex_all) named
 // nothing. Inside an enum body, a keyword in variant position is a name.
+// ADR-015 row 10: `linear`, `affine` and `study` (TK 62, 73, 71) are keywords only where a
+// declaration or a type qualifier uses them. Anywhere else they are ordinary names, as in
+// Madaros: after `let`, `var`, `.` or `::`, or when the next token cannot follow a qualifier.
+// A qualifier (`x: linear File`, `linear fn f`, `study Name {`) is followed by a name, a
+// keyword, `&`, `(` or `[`, so those stay keywords. Runs once, after lexing.
+fn lex_contextual_names() with Mut, Panic {
+    var i: i64 = 0
+    while i < TC {
+        let k = TK[i as usize]
+        if k == 62 || k == 71 || k == 73 {
+            var as_name: i64 = 0
+            if i > 0 {
+                let pk = TK[(i - 1) as usize]
+                if pk == 11 || pk == 12 || pk == 50 || pk == 51 { as_name = 1 }
+            }
+            if i + 1 >= TC { as_name = 1 }
+            else {
+                let nk = TK[(i + 1) as usize]
+                var qualifier: i64 = 0
+                if nk == 3 || nk == 1 || nk == 6 || nk == 41 || nk == 44 || nk == 46 || nk == 47 || nk == 49 { qualifier = 1 }
+                if nk == 61 || nk == 62 || nk == 70 || nk == 71 || nk == 72 || nk == 73 || nk == 75 || nk == 76 { qualifier = 1 }
+                if qualifier == 0 { as_name = 1 }
+            }
+            if as_name == 1 { TK[i as usize] = 3 }
+        }
+        i = i + 1
+    }
+}
+
+// ADR-015 row 10: `async await spawn crate super perform resume` stay reserved. Madaros refuses
+// them as names; lean_single used to accept them. A binding (`let`/`var`) named after one is
+// refused here, so the two engines agree on the probes `kw_let_<word>`. Declaration names
+// (`fn spawn(..)`) and member names (`x.spawn`) stay valid, as in Madaros.
+fn lex_reserved_binding_names() with Mut, Panic {
+    var i: i64 = 1
+    while i < TC {
+        let pk = TK[(i - 1) as usize]
+        if (pk == 11 || pk == 12) && TK[i as usize] == 3 {
+            let s = TS[i as usize]
+            let l = TE[i as usize] - s
+            var reserved: i64 = 0
+            if src_match(s, l, "async") || src_match(s, l, "await") || src_match(s, l, "spawn") { reserved = 1 }
+            if src_match(s, l, "crate") || src_match(s, l, "super") { reserved = 1 }
+            if src_match(s, l, "perform") || src_match(s, l, "resume") { reserved = 1 }
+            if reserved == 1 && LEX_ERROR_LINE == 0 {
+                LEX_ERROR_LINE = TL[i as usize]
+                LEX_ERROR_KIND = 9
+                LEX_ERROR_TOK = i
+            }
+        }
+        i = i + 1
+    }
+}
+
 fn lex_enum_variant_names() with Mut, Panic {
     var i: i64 = 0
     while i + 2 < TC {
@@ -9159,6 +9566,13 @@ fn scan_all_consts() with IO, Panic, Mut, Div {
             cn_ns = TS[p as usize]; cn_ne = TE[p as usize]; p = p + 1
             var cty: i64 = 1
             var ctok: i64 = -1
+            var decl_scalar: i64 = 0
+            // D-20 (SIO-60): `:` lexes as TK43 (the `== 15` below never
+            // matches an annotation). Capture a scalar annotation for the
+            // bool-literal mismatch check after `=`.
+            if TK[p as usize] == 43 {
+                decl_scalar = tc_module_let_decl_scalar(p + 1)
+            }
             if TK[p as usize] == 15 {
                 p = p + 1
                 if TK[p as usize] == 3 && src_match(TS[p as usize], TE[p as usize] - TS[p as usize], "f64") {
@@ -9169,6 +9583,7 @@ fn scan_all_consts() with IO, Panic, Mut, Div {
                 while p < TC && TK[p as usize] != 16 && TK[p as usize] != 0 { p = p + 1 }
             }
             if TK[p as usize] == 16 { p = p + 1 }
+            tc_module_let_bool_mismatch(decl_scalar, p)
             // Constant EXPRESSION initializer (`0 - 1`, `1 << 3`, `(A + 1) * 2`): fold it.
             // Before this, only `[-]LITERAL` was read and the rest of the expression was
             // silently dropped -- `let EG_INVALID: i64 = 0 - 1` became 0 in every source
@@ -9231,6 +9646,11 @@ fn scan_all_consts() with IO, Panic, Mut, Div {
             cn_ns = TS[p as usize]; cn_ne = TE[p as usize]; p = p + 1
             var cty2: i64 = 1
             var ctok2: i64 = -1
+            var decl_scalar2: i64 = 0
+            // D-20 (SIO-60): `:` lexes as TK43; see the `let` arm.
+            if TK[p as usize] == 43 {
+                decl_scalar2 = tc_module_let_decl_scalar(p + 1)
+            }
             if TK[p as usize] == 15 {
                 p = p + 1
                 if TK[p as usize] == 3 && src_match(TS[p as usize], TE[p as usize] - TS[p as usize], "f64") {
@@ -9241,6 +9661,7 @@ fn scan_all_consts() with IO, Panic, Mut, Div {
                 while p < TC && TK[p as usize] != 16 && TK[p as usize] != 0 { p = p + 1 }
             }
             if TK[p as usize] == 16 { p = p + 1 }
+            tc_module_let_bool_mismatch(decl_scalar2, p)
             // Constant EXPRESSION initializer (`0 - 1`, `1 << 3`, `(A + 1) * 2`): fold it.
             // Before this, only `[-]LITERAL` was read and the rest of the expression was
             // silently dropped -- `let EG_INVALID: i64 = 0 - 1` became 0 in every source
@@ -9286,6 +9707,11 @@ fn scan_all_consts() with IO, Panic, Mut, Div {
             cn_ns = TS[p as usize]; cn_ne = TE[p as usize]; p = p + 1
             var cty4: i64 = 1
             var ctok4: i64 = -1
+            var decl_scalar4: i64 = 0
+            // D-20 (SIO-60): `:` lexes as TK43; see the `let` arm.
+            if TK[p as usize] == 43 {
+                decl_scalar4 = tc_module_let_decl_scalar(p + 1)
+            }
             if TK[p as usize] == 15 {
                 p = p + 1
                 if TK[p as usize] == 3 && src_match(TS[p as usize], TE[p as usize] - TS[p as usize], "f64") {
@@ -9296,6 +9722,7 @@ fn scan_all_consts() with IO, Panic, Mut, Div {
                 while p < TC && TK[p as usize] != 16 && TK[p as usize] != 0 { p = p + 1 }
             }
             if TK[p as usize] == 16 { p = p + 1 }
+            tc_module_let_bool_mismatch(decl_scalar4, p)
             // Constant EXPRESSION initializer (`0 - 1`, `1 << 3`, `(A + 1) * 2`): fold it.
             // Before this, only `[-]LITERAL` was read and the rest of the expression was
             // silently dropped -- `let EG_INVALID: i64 = 0 - 1` became 0 in every source
@@ -9337,6 +9764,11 @@ fn scan_all_consts() with IO, Panic, Mut, Div {
         cn_ns = TS[p as usize]; cn_ne = TE[p as usize]; p = p + 1
         var cty3: i64 = 1
         var ctok3: i64 = -1
+        var decl_scalar3: i64 = 0
+        // D-20 (SIO-60): `:` lexes as TK43; see the `let` arm.
+        if TK[p as usize] == 43 {
+            decl_scalar3 = tc_module_let_decl_scalar(p + 1)
+        }
         if TK[p as usize] == 15 {
             p = p + 1
             if TK[p as usize] == 3 && src_match(TS[p as usize], TE[p as usize] - TS[p as usize], "f64") {
@@ -9347,6 +9779,7 @@ fn scan_all_consts() with IO, Panic, Mut, Div {
             while p < TC && TK[p as usize] != 16 && TK[p as usize] != 0 { p = p + 1 }
         }
         if TK[p as usize] == 16 { p = p + 1 }
+        tc_module_let_bool_mismatch(decl_scalar3, p)
         cv = 0; neg_c = 0
         if TK[p as usize] == 18 { neg_c = 1; p = p + 1 }
         if TK[p as usize] == 4 { cv = TV[p as usize]; p = p + 1 }
@@ -10220,11 +10653,62 @@ fn release_call_arg_borrows(from_n: i64) with Mut {
 }
 
 // ─── Function lookup ───
-fn fn_find(ns: i64, ne: i64) -> i64 with Panic, Mut {
+// Derived from append-only FN_NS/FN_NE spans; no name/receiver semantics are
+// cached. Forward bucket chains retain registration order. Hash collisions
+// still require the original byte comparator. FN_IN_IMPL is read at lookup
+// time because the signature pass updates it after registering all names.
+// Replacing source/name spans must reset the index (compile_all does so).
+var FN_LOOKUP_HEAD: [i64; 65536] = [0; 65536]
+var FN_LOOKUP_TAIL: [i64; 65536] = [0; 65536]
+var FN_LOOKUP_NEXT: [i64; 65536] = [0; 65536]
+var FN_LOOKUP_HASH: [i64; 65536] = [0; 65536]
+var FN_LOOKUP_INDEXED: i64 = 0
+
+fn fn_lookup_index_reset() with Mut, Panic {
+    var i: i64 = 0
+    while i < 65536 { FN_LOOKUP_HEAD[i as usize] = 0; i = i + 1 }
+    FN_LOOKUP_INDEXED = 0
+}
+
+fn fn_lookup_index_sync() with Mut, Panic {
+    if FN_LOOKUP_INDEXED > FN_COUNT { fn_lookup_index_reset() }
+    while FN_LOOKUP_INDEXED < FN_COUNT {
+        let i = FN_LOOKUP_INDEXED
+        let h = gl_name_hash(FN_NS[i as usize], FN_NE[i as usize])
+        let bucket = h & 65535
+        let entry = i + 1
+        FN_LOOKUP_HASH[i as usize] = h
+        FN_LOOKUP_NEXT[i as usize] = 0
+        if FN_LOOKUP_HEAD[bucket as usize] == 0 {
+            FN_LOOKUP_HEAD[bucket as usize] = entry
+        } else {
+            let tail = FN_LOOKUP_TAIL[bucket as usize] - 1
+            FN_LOOKUP_NEXT[tail as usize] = entry
+        }
+        FN_LOOKUP_TAIL[bucket as usize] = entry
+        FN_LOOKUP_INDEXED = FN_LOOKUP_INDEXED + 1
+    }
+}
+
+// Keep the original linear lookup as an executable reference until the indexed
+// route has been qualified; ordinary compiler calls use fn_find below.
+fn fn_find_linear(ns: i64, ne: i64) -> i64 with Panic, Mut {
     var i: i64 = 0
     while i < FN_COUNT {
         if name_eq(FN_NS[i as usize], FN_NE[i as usize], ns, ne) { return i }
         i = i + 1
+    }
+    return -1
+}
+
+fn fn_find(ns: i64, ne: i64) -> i64 with Panic, Mut {
+    fn_lookup_index_sync()
+    let h = gl_name_hash(ns, ne)
+    var entry = FN_LOOKUP_HEAD[(h & 65535) as usize]
+    while entry != 0 {
+        let i = entry - 1
+        if FN_LOOKUP_HASH[i as usize] == h && name_eq(FN_NS[i as usize], FN_NE[i as usize], ns, ne) { return i }
+        entry = FN_LOOKUP_NEXT[i as usize]
     }
     return -1
 }
@@ -10235,13 +10719,29 @@ fn fn_find(ns: i64, ne: i64) -> i64 with Panic, Mut {
 // captured every plain `helper()` call (prints 7 where Madaros prints 42).
 // Methods are reached through `x.m()` (fn_find_method) or `S::m()`; a bare
 // name that only exists as a method still resolves to it, as before.
-fn fn_find_free(ns: i64, ne: i64) -> i64 with Panic, Mut {
+fn fn_find_free_linear(ns: i64, ne: i64) -> i64 with Panic, Mut {
     var i: i64 = 0
     while i < FN_COUNT {
         if FN_IN_IMPL[i as usize] == 0 && name_eq(FN_NS[i as usize], FN_NE[i as usize], ns, ne) { return i }
         i = i + 1
     }
-    return fn_find(ns, ne)
+    return fn_find_linear(ns, ne)
+}
+
+fn fn_find_free(ns: i64, ne: i64) -> i64 with Panic, Mut {
+    fn_lookup_index_sync()
+    let h = gl_name_hash(ns, ne)
+    var entry = FN_LOOKUP_HEAD[(h & 65535) as usize]
+    var first: i64 = -1
+    while entry != 0 {
+        let i = entry - 1
+        if FN_LOOKUP_HASH[i as usize] == h && name_eq(FN_NS[i as usize], FN_NE[i as usize], ns, ne) {
+            if FN_IN_IMPL[i as usize] == 0 { return i }
+            if first < 0 { first = i }
+        }
+        entry = FN_LOOKUP_NEXT[i as usize]
+    }
+    return first
 }
 
 fn fn_find_method(ns: i64, ne: i64, recv_hash: i64) -> i64 with Panic, Mut {
@@ -10834,10 +11334,12 @@ fn flc_tok_bits(tok: i64) -> i64 with Mut, Panic, Div {
     var i = s
     var v: i64 = 0
     var any_digits: i64 = 0
-    while i < e && sb(i) >= 48 && sb(i) <= 57 {
-        v = v * 10 + (sb(i) - 48)
+    while i < e && ((sb(i) >= 48 && sb(i) <= 57) || (sb(i) == 95 && i + 1 < e && sb(i + 1) >= 48 && sb(i + 1) <= 57)) {
+        if sb(i) != 95 {
+            v = v * 10 + (sb(i) - 48)
+            any_digits = 1
+        }
         i = i + 1
-        any_digits = 1
     }
     if any_digits == 0 { return 0 }
     var frac: i64 = 0
@@ -10850,7 +11352,8 @@ fn flc_tok_bits(tok: i64) -> i64 with Mut, Panic, Div {
         var fd: i64 = 0
         var seen_nz: i64 = 0
         if v != 0 { seen_nz = 1 }
-        while i < e && sb(i) >= 48 && sb(i) <= 57 {
+        while i < e && ((sb(i) >= 48 && sb(i) <= 57) || (sb(i) == 95 && i + 1 < e && sb(i + 1) >= 48 && sb(i + 1) <= 57)) {
+            if sb(i) == 95 { i = i + 1  continue }
             let d = sb(i) - 48
             if seen_nz == 0 && d == 0 {
                 // absorbed leading zero: not part of frac/denom
@@ -10867,8 +11370,8 @@ fn flc_tok_bits(tok: i64) -> i64 with Mut, Panic, Div {
         i = i + 1
         if i < e && sb(i) == 45 { neg = 1  i = i + 1 }
         if i < e && sb(i) == 43 { i = i + 1 }
-        while i < e && sb(i) >= 48 && sb(i) <= 57 {
-            ev = ev * 10 + (sb(i) - 48)
+        while i < e && ((sb(i) >= 48 && sb(i) <= 57) || (sb(i) == 95 && i + 1 < e && sb(i + 1) >= 48 && sb(i + 1) <= 57)) {
+            if sb(i) != 95 { ev = ev * 10 + (sb(i) - 48) }
             i = i + 1
         }
     }
@@ -10890,6 +11393,7 @@ fn flc_tok_bits(tok: i64) -> i64 with Mut, Panic, Div {
                     if cc != 48 { tail_nonzero = 1 }
                     if seen_dot == 0 { dexp = dexp + 1 }
                 }
+            } else if cc == 95 && i + 1 < e && sb(i + 1) >= 48 && sb(i + 1) <= 57 {
             } else { stop = 1 }
         }
         if stop == 1 { i = e } else { i = i + 1 }
@@ -35576,15 +36080,12 @@ fn epistemic_infer_pass() with IO, Mut, Panic, Div {
                             refine_changed = refine_changed + 1
                         } else {
                             if !(p + 1 < TC && TK[(p + 1) as usize] == 6) {
-                                var rfj: i64 = 0
-                                while rfj < FN_COUNT {
-                                    if name_eq(FN_NS[rfj as usize], FN_NE[rfj as usize], rns, rne) {
-                                        EXPR_ETY[p as usize] = ety_from_tnk(FN_RET_TY[rfj as usize])
-                                        EXPR_CONF[p as usize] = FN_EFF_CONF[rfj as usize]  // Gen 16 Track A: propagate actual effect conf
-                                        refine_changed = refine_changed + 1
-                                        break
-                                    }
-                                    rfj = rfj + 1
+                                // First exact-name match, including methods, as in the original scan.
+                                let rfj = fn_find(rns, rne)
+                                if rfj >= 0 {
+                                    EXPR_ETY[p as usize] = ety_from_tnk(FN_RET_TY[rfj as usize])
+                                    EXPR_CONF[p as usize] = FN_EFF_CONF[rfj as usize]  // Gen 16 Track A: propagate actual effect conf
+                                    refine_changed = refine_changed + 1
                                 }
                             }
                             // Try struct name table
@@ -37028,6 +37529,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
     CL = 0
     POOL_ALLOC_ROUTINE_CL = 0 - 1
     FN_COUNT = 0
+    fn_lookup_index_reset()
     PATCH_COUNT = 0
     FNSIG_COUNT = 1
     GL_COUNT = 0
@@ -52541,6 +53043,7 @@ fn append_extern_c_stubs() with Mut, Panic, Div {
 }
 
 fn strip_extern_blocks() with IO, Mut, Panic, Div {
+    src_file_marker_index_reset()
     EXTERN_STUB_COUNT = 0
     EXTERN_STUB_BUF_OFF = 0
     // Phase 1: Count extern fn declarations and collect signatures for stub generation.
@@ -52723,12 +53226,14 @@ fn main() -> i64 with IO, Mut, Panic, Div {
     CLI_EMIT_ECONF = 0
     CLI_LOAD_ECONF = 0
     CLI_EMIT_PROOFS = 0
+    CLI_EMIT_DOCS = 0
     PROOF_BUF_LEN = 0
     ECONF_RAW_LEN = 0
     ECONF_APPLIED = 0
     var arg_i: i64 = 2
     while arg_i < argc {
         let flag = get_arg(arg_i)
+        if cli_arg_eq(flag, "--emit-docs") { CLI_EMIT_DOCS = 1 }
         if cli_arg_eq(flag, "--show-ast") {
             CLI_SHOW_AST = 1
         } else {
@@ -52792,6 +53297,7 @@ fn main() -> i64 with IO, Mut, Panic, Div {
         arg_i = arg_i + 1
     }
 
+    src_file_marker_index_reset()
     let raw = read_file(src)
     let sz = file_size(src)
     var i: i64 = 0
@@ -52826,13 +53332,63 @@ fn main() -> i64 with IO, Mut, Panic, Div {
             print("\n")
             return 1
         }
+        if LEX_ERROR_KIND == 6 {
+            // ADR-015 row 4: same code and wording as Madaros E281.
+            print("error[E281]: unterminated or malformed character literal at line ")
+            print_int(LEX_ERROR_LINE)
+            print("\n")
+            return 1
+        }
+        if LEX_ERROR_KIND == 8 {
+            // Same code and wording as Madaros E272.
+            print("error[E272]: unterminated block comment at line ")
+            print_int(LEX_ERROR_LINE)
+            print("\n")
+            return 1
+        }
+        if LEX_ERROR_KIND == 7 {
+            print("error[E274]: invalid escape sequence in character literal at line ")
+            print_int(LEX_ERROR_LINE)
+            print("\n")
+            return 1
+        }
+        if LEX_ERROR_KIND == 9 {
+            print("error: `")
+            var rq: i64 = TS[LEX_ERROR_TOK as usize]
+            while rq < TE[LEX_ERROR_TOK as usize] { print_char(sb(rq))  rq = rq + 1 }
+            print("` is a reserved word and cannot name a binding at line ")
+            print_int(LEX_ERROR_LINE)
+            print("\n")
+            return 1
+        }
+        if LEX_ERROR_KIND == 10 {
+            // Same code and wording as Madaros E282.
+            print("error[E282]: identifier too long at line ")
+            print_int(LEX_ERROR_LINE)
+            print("\n")
+            return 1
+        }
+        if LEX_ERROR_KIND == 12 {
+            // Same code and wording as Madaros E284.
+            print("error[E284]: digit separator `_` must sit between two digits at line ")
+            print_int(LEX_ERROR_LINE)
+            print("\n")
+            return 1
+        }
+        if LEX_ERROR_KIND == 11 {
+            // Same code and wording as Madaros E283.
+            print("error[E283]: ambiguous operator spelling `")
+            if LEX_ERROR_BYTE == 33 { print("&!") } else { print("+-") }
+            print("` at line ")
+            print_int(LEX_ERROR_LINE)
+            print(": add a space\n")
+            return 1
+        }
         print("lex error line ")
         print_int(LEX_ERROR_LINE)
         print(": ")
         if LEX_ERROR_KIND == 2 {
             print("invalid escape sequence\n")
-        } else if LEX_ERROR_KIND == 3 {
-            print("character literals are not supported by lean_single; write the byte value, e.g. `32 as u8` for ' '\n")
         } else if LEX_ERROR_KIND == 4 {
             print("Unexpected character `")
             print_char(LEX_ERROR_BYTE)
@@ -52843,6 +53399,10 @@ fn main() -> i64 with IO, Mut, Panic, Div {
             print("Unexpected character\n")
         }
         return 1
+    }
+    if CLI_EMIT_DOCS == 1 {
+        lex_print_docs()
+        return 0
     }
     // Collect `causal graph` blocks and remove them from the token stream before
     // any pass runs, so an independence claim can be discharged regardless of

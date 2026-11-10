@@ -407,7 +407,14 @@ fn impure_function() -> string with IO {
 }
 ```
 
-Effects compose and propagate through the call graph automatically.
+Effects are declared, not inferred. A named function must list in its `with`
+clause every effect that its body, or any function it calls, performs;
+otherwise the checker reports E035 ("effect not declared in function
+signature"). Two narrow exceptions: a closure's effects are taken from its body
+(the enclosing function must still declare them), and `main` may call the
+printing builtins without `with IO` (but not a user function marked `with IO`).
+Inference across function boundaries exists only as an opt-in experiment
+(`SOUNIO_EFFECT_INFER=1`), off by default.
 
 ### What's the type inference algorithm?
 
@@ -418,19 +425,23 @@ Effects compose and propagate through the call graph automatically.
 
 ### Can I write custom effects?
 
-Yes (advanced feature):
-```sio
-effect State<S> {
-    fn get() -> S
-    fn put(s: S) -> ()
-}
+Yes, within Madaros's current handler limits. Declare operations with
+`effect Name { fn op() -> i64 }`, invoke them with `perform Name.op()`, and
+handle them with `handle<Name> { ... } with { on op() -> resume(value) }`.
+Madaros implements deep handlers with linear one-shot continuations; a clause
+may also return without resuming. See the existing executable examples
+[`fx2b_op_args.sio`](../tests/run-pass/fx2b_op_args.sio) and
+[`fx5_zero_resume.sio`](../tests/run-pass/fx5_zero_resume.sio).
 
-fn stateful_computation() -> i32 with State<i32> {
-    let x = do State.get()
-    do State.put(x + 1)
-    x
-}
-```
+The first implementation supports scalar `i64` operations and handler answers,
+with no captured locals in clauses and no `perform` across a function boundary.
+Generic declarations such as `effect State<S>` are not supported. The
+[handler specification](spec/S07_EFFECT_HANDLERS.md#status-2026-11-06-sio-417-p5-merged)
+records the argument, clause and nesting limits and their diagnostics.
+Undeclared effect names and a ninth distinct effect in a function signature
+produce E246. Names on the temporary hold list (`effect_name_is_held` in
+`self-hosted/check/effects.sio`) remain an exception: acceptance alone does not
+prove that such a name denotes a working effect.
 
 ### Are refinement types fully supported?
 

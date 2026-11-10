@@ -1,0 +1,5 @@
+Fixed (lean_single half of ADR-015 row 4): `lean_single` lexes character literals as Unicode scalar values, the same as Madaros. `'a'` is 97, `'\n'` is 10, `'é'` is 233, `'€'` is 8364, `'😀'` is 128512 (UTF-8 decoded, malformed sequences refused). A one-character literal with no closing quote, `''`, `'ab'` and any other stray quote are refused (E281); an unknown escape is E274; `'name` of two or more characters with no closing quote stays a lifetime.
+
+Before this change `lean_single` refused every character literal ("write the byte value, e.g. `32 as u8`"), so `[' ' as i64; 3]` and `'='` only compiled on Madaros. The literal is an integer token; no `char` type is introduced. `lean_single.sio` itself still compiles to a fixed point (gen2 == gen3 with the current stage 0).
+
+Pins: `tests/compile-fail/chr_{unclosed,unknown_escape}_lean_single.sio`, `tests/run-pass/chr_scalar_value_lean_single.sio`, `tests/run-pass/lifetime_static_still_lexes_lean_single.sio`; `lean_single_quoted_identifier_refused` and `lean_single_stray_quote_refused` now pin E281, and `lean_single_char_literal_refused` is removed (the program it pinned is now valid).

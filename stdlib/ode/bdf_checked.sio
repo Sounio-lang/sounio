@@ -1,0 +1,210 @@
+// Checked BDF1 (implicit Euler), adaptive step doubling and analytic Jacobian.
+// Caller-owned buffers, canonical checked LU, no allocation in solve/step.
+// Higher-order variable-step BDF is intentionally not represented by this API.
+use collections::numeric_buffer::{NumericBuffer,numeric_buffer_status,numeric_buffer_len,numeric_buffer_at,numeric_buffer_set,numeric_matrix}
+use collections::integer_buffer::{IntegerBuffer,integer_buffer_status,integer_buffer_len}
+use linalg::dynamic_factorize::{dynamic_factor_workspace,dynamic_lu,dynamic_lu_solve}
+use math::pure::{is_finite,sqrt}
+pub struct BDFOptions {
+ pub atol:f64,pub rtol:f64,pub newton_tol:f64,pub rcond:f64,
+ pub dt_init:f64,pub dt_min:f64,pub dt_max:f64,
+ pub max_attempts:i64,pub max_newton:i64,
+}
+pub struct BDFWorkspace {
+ pub status:i64,pub n:i64,pub vector_len:i64,pub matrix_len:i64,
+ pub factor_len:i64,pub factor_work_len:i64,pub pivot_len:i64,pub payload_bytes:i64,
+}
+pub struct BDFResult {
+ pub status:i64,pub n:i64,pub t_final:f64,pub target:f64,pub next_step:f64,
+ pub accepted:i64,pub rejected:i64,pub attempts:i64,pub nfeval:i64,pub njeval:i64,
+ pub nfactorizations:i64,pub nlinear:i64,pub newton_updates:i64,
+ pub callback_status:i64,pub callback_kind:i64,pub linear_status:i64,
+ pub last_residual:f64,pub last_error:f64,
+}
+fn bc_abs(x:f64)->f64 {if x<0.0 {-x} else {x}}
+fn bc_max(a:f64,b:f64)->f64 {if a>b {a} else {b}}
+fn bc_min(a:f64,b:f64)->f64 {if a<b {a} else {b}}
+pub fn bdf_workspace(n:i64)->BDFWorkspace with Mut,Div,Panic {
+ var out=BDFWorkspace{status:1,n:n,vector_len:0,matrix_len:0,factor_len:0,factor_work_len:0,pivot_len:0,payload_bytes:0}
+ let base=dynamic_factor_workspace(n)
+ if base.status!=0 {return out}
+ let work=if base.factor_len>base.lu_solve_work {base.factor_len} else {base.lu_solve_work}
+ let limit=9223372036854771704/8
+ if n>limit/9 {return out}
+ if base.factor_len>(limit-9*n)/2 {return out}
+ if work>limit-9*n-2*base.factor_len {return out}
+ out.vector_len=n;out.matrix_len=n*n;out.factor_len=n*n;out.factor_work_len=work;out.pivot_len=n
+ // Seven numeric vector owners (state,coarse,half,trial,f,residual,delta),
+ // matrix/factor/work and two integer pivot owners, eight bytes per entry.
+ out.payload_bytes=(9*n+2*n*n+work)*8;out.status=0
+ out
+}
+fn bc_empty(n:i64,t:f64,end:f64)->BDFResult {
+ BDFResult{status:1,n:n,t_final:t,target:end,next_step:0.0,accepted:0,rejected:0,attempts:0,nfeval:0,njeval:0,nfactorizations:0,nlinear:0,newton_updates:0,callback_status:0,callback_kind:0,linear_status:0,last_residual:0.0,last_error:0.0}
+}
+fn bc_finite(b:&NumericBuffer,n:i64)->bool with Mut,Div,Panic {
+ var i:i64=0
+ while i<n {if !is_finite(numeric_buffer_at(b,i)) {return false};i=i+1}
+ true
+}
+fn bc_poison(b:&!NumericBuffer,n:i64) with Mut,Div,Panic {
+ var i:i64=0
+ while i<n {numeric_buffer_set(b,i,(0.0/0.0));i=i+1}
+}
+fn bc_copy(a:&NumericBuffer,b:&!NumericBuffer,n:i64) with Mut,Div,Panic {
+ var i:i64=0
+ while i<n {numeric_buffer_set(b,i,numeric_buffer_at(a,i));i=i+1}
+}
+fn bc_vector(b:&NumericBuffer,n:i64)->bool {numeric_buffer_status(b)==0 && numeric_buffer_len(b)==n}
+fn bc_options(o:&BDFOptions)->bool {
+ is_finite(o.atol) && o.atol>0.0 && is_finite(o.rtol) && o.rtol>=0.0 &&
+ is_finite(o.newton_tol) && o.newton_tol>0.0 && o.newton_tol<=0.1 &&
+ is_finite(o.rcond) && o.rcond>=0.0 && o.rcond<1.0 &&
+ is_finite(o.dt_init) && o.dt_init>0.0 && is_finite(o.dt_min) && o.dt_min>0.0 &&
+ is_finite(o.dt_max) && o.dt_max>=o.dt_min && o.dt_init>=o.dt_min && o.dt_init<=o.dt_max &&
+ o.max_attempts>=1 && o.max_attempts<=1000000 && o.max_newton>=1 && o.max_newton<=1000
+}
+// Returns 0 converged,4 arithmetic,6 callback,7 Newton budget,8 linear refusal.
+// Counters are updated at the actual call/update, including failed attempts.
+fn bc_newton(
+ rhs:fn(f64,&NumericBuffer,&!NumericBuffer)->i64 with Mut,Div,Panic,
+ jacobian:fn(f64,&NumericBuffer,&!NumericBuffer)->i64 with Mut,Div,Panic,
+ base:&NumericBuffer,trial:&!NumericBuffer,f:&!NumericBuffer,residual:&!NumericBuffer,delta:&!NumericBuffer,
+ matrix:&!NumericBuffer,factor:&!NumericBuffer,work:&!NumericBuffer,pivots:&!IntegerBuffer,pivotwork:&!IntegerBuffer,
+ next:f64,h:f64,o:&BDFOptions,r:&!BDFResult)->i64 with Mut,Div,Panic {
+ let n=r.n
+ bc_copy(base,trial,n)
+ var iter:i64=0
+ while iter<=o.max_newton {
+  bc_poison(f,n)
+  let callback=rhs(next,trial,f)
+  r.nfeval=r.nfeval+1
+  if callback!=0 {r.callback_status=callback;r.callback_kind=1;return 6}
+  if !bc_finite(f,n) {return 4}
+  var norm:f64=0.0
+  var i:i64=0
+  while i<n {
+   let old=numeric_buffer_at(base,i)
+   let value=numeric_buffer_at(trial,i)
+   let product=h*numeric_buffer_at(f,i)
+   let g=(old-value)+product
+   let scale=o.atol+o.rtol*bc_max(bc_abs(old),bc_abs(value))
+   if !is_finite(product) || !is_finite(g) || !is_finite(scale) || scale<=0.0 {return 4}
+   let scaled=bc_abs(g)/scale
+   if !is_finite(scaled) {return 4}
+   norm=bc_max(norm,scaled)
+   numeric_buffer_set(residual,i,g)
+   i=i+1
+  }
+  r.last_residual=norm
+  if norm<=o.newton_tol {return 0}
+  if iter==o.max_newton {return 7}
+  bc_poison(matrix,n*n)
+  let jac_code=jacobian(next,trial,matrix)
+  r.njeval=r.njeval+1
+  if jac_code!=0 {r.callback_status=jac_code;r.callback_kind=2;return 6}
+  if !bc_finite(matrix,n*n) {return 4}
+  i=0
+  while i<n {
+   var j:i64=0
+   while j<n {
+    let product=h*numeric_buffer_at(matrix,i*n+j)
+    let value=if i==j {1.0-product} else {-product}
+    if !is_finite(product) || !is_finite(value) {return 4}
+    numeric_buffer_set(matrix,i*n+j,value);j=j+1
+   }
+   i=i+1
+  }
+  let layout=numeric_matrix(n*n,n,n,n,1,0)
+  r.nfactorizations=r.nfactorizations+1
+  let fit=dynamic_lu(matrix,&layout,factor,pivots,work,pivotwork,o.rcond)
+  if fit.status!=0 {r.linear_status=fit.status;return 8}
+  r.nlinear=r.nlinear+1
+  let solve=dynamic_lu_solve(factor,pivots,&fit,residual,delta,work)
+  if solve.status!=0 {r.linear_status=solve.status;return 8}
+  i=0
+  while i<n {
+   let value=numeric_buffer_at(trial,i)+numeric_buffer_at(delta,i)
+   if !is_finite(value) {return 4}
+   numeric_buffer_set(trial,i,value);i=i+1
+  }
+  r.newton_updates=r.newton_updates+1
+  iter=iter+1
+ }
+ 7
+}
+// status0 endpoint reached;1 options/layout/domain;2 time progress;
+// 3 attempt budget;4 arithmetic/nonfinite callback output;5 step floor;
+// 6 callback status;7 Newton budget;8 checked linear algebra refusal.
+// Accepted state is two half BDF1 steps. Error is their difference from one
+// full step, a local estimate, not a certified/global error bound.
+// On rejection scratch changes, state/t_final retain the last accepted pair.
+pub fn solve_bdf1_checked(
+ rhs:fn(f64,&NumericBuffer,&!NumericBuffer)->i64 with Mut,Div,Panic,
+ jacobian:fn(f64,&NumericBuffer,&!NumericBuffer)->i64 with Mut,Div,Panic,
+ state:&!NumericBuffer,coarse:&!NumericBuffer,half:&!NumericBuffer,trial:&!NumericBuffer,
+ f:&!NumericBuffer,residual:&!NumericBuffer,delta:&!NumericBuffer,
+ matrix:&!NumericBuffer,factor:&!NumericBuffer,work:&!NumericBuffer,pivots:&!IntegerBuffer,pivotwork:&!IntegerBuffer,
+ start:f64,target:f64,o:&BDFOptions)->BDFResult with Mut,Div,Panic {
+ let n=numeric_buffer_len(state)
+ var r=bc_empty(n,start,target)
+ let shape=bdf_workspace(n)
+ if shape.status!=0 || !bc_options(o) || !is_finite(start) || !is_finite(target) || target<start {return r}
+ if !bc_vector(state,n) || !bc_vector(coarse,n) || !bc_vector(half,n) || !bc_vector(trial,n) || !bc_vector(f,n) || !bc_vector(residual,n) || !bc_vector(delta,n) {return r}
+ if numeric_buffer_status(matrix)!=0 || numeric_buffer_len(matrix)!=shape.matrix_len || numeric_buffer_status(factor)!=0 || numeric_buffer_len(factor)<shape.factor_len || numeric_buffer_status(work)!=0 || numeric_buffer_len(work)<shape.factor_work_len {return r}
+ if integer_buffer_status(pivots)!=0 || integer_buffer_status(pivotwork)!=0 || integer_buffer_len(pivots)<n || integer_buffer_len(pivotwork)<n {return r}
+ if !bc_finite(state,n) {r.status=4;return r}
+ if start==target {r.status=0;return r}
+ var h=bc_min(o.dt_init,o.dt_max)
+ while r.t_final<target && r.attempts<o.max_attempts {
+  let remaining=target-r.t_final
+  if !is_finite(remaining) || remaining<=0.0 {r.status=4;return r}
+  h=bc_min(h,remaining)
+  let next=r.t_final+h
+  let middle=r.t_final+0.5*h
+  r.next_step=h
+  if !is_finite(next) || next<=r.t_final || next>target || middle<=r.t_final || middle>=next {r.status=2;return r}
+  // Represented substeps need not be equal near a floating-point time ULP.
+  // BDF1 two-substep LTE / full-vs-substep difference has this leading factor.
+  let first_h=middle-r.t_final
+  let second_h=next-middle
+  let geometry=0.5*(first_h/second_h+second_h/first_h)
+  if !is_finite(geometry) {r.status=4;return r}
+  r.attempts=r.attempts+1
+  var code=bc_newton(rhs,jacobian,state,coarse,f,residual,delta,matrix,factor,work,pivots,pivotwork,next,next-r.t_final,o,&!r)
+  if code==0 {code=bc_newton(rhs,jacobian,state,half,f,residual,delta,matrix,factor,work,pivots,pivotwork,middle,middle-r.t_final,o,&!r)}
+  if code==0 {code=bc_newton(rhs,jacobian,half,trial,f,residual,delta,matrix,factor,work,pivots,pivotwork,next,next-middle,o,&!r)}
+  if code==4 || code==6 {r.rejected=r.rejected+1;r.status=code;return r}
+  var error:f64=0.0
+  if code==0 {
+   var i:i64=0
+   while i<n {
+    let value=numeric_buffer_at(trial,i)
+    let scale=o.atol+o.rtol*bc_max(bc_abs(numeric_buffer_at(state,i)),bc_abs(value))
+    let difference=value-numeric_buffer_at(coarse,i)
+    if !is_finite(difference) || !is_finite(scale) || scale<=0.0 {r.rejected=r.rejected+1;r.status=4;return r}
+    let e=(bc_abs(difference)/scale)*geometry
+    if !is_finite(e) {r.rejected=r.rejected+1;r.status=4;return r}
+    error=bc_max(error,e);i=i+1
+   }
+  }
+  r.last_error=error
+  if code==0 && error<=1.0 {
+   bc_copy(trial,state,n)
+   r.t_final=next;r.accepted=r.accepted+1
+   r.linear_status=0
+   let growth=if error>0.0 {bc_min(2.0,bc_max(0.2,0.9/sqrt(error)))} else {2.0}
+   h=bc_min(o.dt_max,bc_max(o.dt_min,h*growth))
+  } else {
+   r.rejected=r.rejected+1
+   let shrink=if code!=0 {0.25} else {bc_max(0.1,bc_min(0.5,0.9/sqrt(error)))}
+   let smaller=h*shrink
+   if !is_finite(smaller) || smaller<=0.0 || smaller>=h {r.status=2;return r}
+   if smaller<o.dt_min {r.status=if code!=0 {code} else {5};return r}
+   h=smaller
+  }
+ }
+ r.next_step=h
+ r.status=if r.t_final==target {0} else {3}
+ r
+}
