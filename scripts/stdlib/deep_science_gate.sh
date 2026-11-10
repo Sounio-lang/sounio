@@ -558,6 +558,11 @@ rc=0
 LN_BOUNDARY_OUT="$out/math-pure-ln-boundary" bash scripts/stdlib/math_pure_ln_boundary_gate.sh > "$out/math-pure-ln-boundary.log" 2>&1 || rc=$?
 record concordance math-pure-ln-boundary "$rc"
 
+# Checked BDF1 numerical concordance and refusal controls use actual native rows.
+rc=0
+timeout 300 bash scripts/stdlib/ode_bdf_checked_gate.sh "$out/checked-bdf" > "$out/checked-bdf.gate.stdout" 2> "$out/checked-bdf.gate.stderr" || rc=$?
+record focused-gate checked-bdf "$rc"
+
 # GUM Type-A sample-mean uncertainty: public consumer + C++23 concordance.
 rc=0
 bash tests/stdlib/metrology/type_a_gate.sh "$out/metrology-type-a" > "$out/metrology-type-a.stdout" 2> "$out/metrology-type-a.stderr" || rc=$?

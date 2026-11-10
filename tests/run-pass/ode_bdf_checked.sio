@@ -1,0 +1,111 @@
+//@ run-pass
+//@ expect-stdout: BDF_CHECKED_PASS
+//@ timeout: 180
+use collections::numeric_buffer::{NumericBuffer,numeric_buffer_new,numeric_buffer_at,numeric_buffer_set,numeric_buffer_close}
+use collections::integer_buffer::{integer_buffer_new,integer_buffer_close}
+use ode::bdf_checked::{BDFOptions,bdf_workspace,solve_bdf1_checked}
+fn decay(t:f64,y:&NumericBuffer,out:&!NumericBuffer)->i64 with Mut,Div,Panic {numeric_buffer_set(out,0,-10.0*numeric_buffer_at(y,0));0}
+fn decay_jac(t:f64,y:&NumericBuffer,out:&!NumericBuffer)->i64 with Mut,Div,Panic {numeric_buffer_set(out,0,-10.0);0}
+fn fast_decay(t:f64,y:&NumericBuffer,out:&!NumericBuffer)->i64 with Mut,Div,Panic {numeric_buffer_set(out,0,-100000000000000.0*numeric_buffer_at(y,0));0}
+fn fast_decay_jac(t:f64,y:&NumericBuffer,out:&!NumericBuffer)->i64 with Mut,Div,Panic {numeric_buffer_set(out,0,-100000000000000.0);0}
+fn zero(t:f64,y:&NumericBuffer,out:&!NumericBuffer)->i64 with Mut,Div,Panic {numeric_buffer_set(out,0,0.0);0}
+fn zero_jac(t:f64,y:&NumericBuffer,out:&!NumericBuffer)->i64 with Mut,Div,Panic {numeric_buffer_set(out,0,0.0);0}
+fn bad_rhs(t:f64,y:&NumericBuffer,out:&!NumericBuffer)->i64 with Mut,Div,Panic {17}
+fn partial_rhs(t:f64,y:&NumericBuffer,out:&!NumericBuffer)->i64 with Mut,Div,Panic {numeric_buffer_set(out,0,0.0);0}
+fn bad_jac(t:f64,y:&NumericBuffer,out:&!NumericBuffer)->i64 with Mut,Div,Panic {numeric_buffer_set(out,0,(0.0/0.0));0}
+fn positive(t:f64,y:&NumericBuffer,out:&!NumericBuffer)->i64 with Mut,Div,Panic {numeric_buffer_set(out,0,numeric_buffer_at(y,0)+1.0);0}
+fn positive_jac(t:f64,y:&NumericBuffer,out:&!NumericBuffer)->i64 with Mut,Div,Panic {numeric_buffer_set(out,0,1.0);0}
+fn coupled(t:f64,y:&NumericBuffer,out:&!NumericBuffer)->i64 with Mut,Div,Panic {
+ let a=numeric_buffer_at(y,0);let b=numeric_buffer_at(y,1)
+ numeric_buffer_set(out,0,-1000.0*a+999.0*b);numeric_buffer_set(out,1,-b);0
+}
+fn coupled_jac(t:f64,y:&NumericBuffer,out:&!NumericBuffer)->i64 with Mut,Div,Panic {
+ numeric_buffer_set(out,0,-1000.0);numeric_buffer_set(out,1,999.0);numeric_buffer_set(out,2,0.0);numeric_buffer_set(out,3,-1.0);0
+}
+fn robertson(t:f64,y:&NumericBuffer,out:&!NumericBuffer)->i64 with Mut,Div,Panic {
+ let a=numeric_buffer_at(y,0);let b=numeric_buffer_at(y,1);let c=numeric_buffer_at(y,2)
+ let x=0.04*a;let z=10000.0*b*c;let q=30000000.0*b*b
+ numeric_buffer_set(out,0,-x+z);numeric_buffer_set(out,1,x-z-q);numeric_buffer_set(out,2,q);0
+}
+fn robertson_jac(t:f64,y:&NumericBuffer,out:&!NumericBuffer)->i64 with Mut,Div,Panic {
+ let b=numeric_buffer_at(y,1);let c=numeric_buffer_at(y,2)
+ numeric_buffer_set(out,0,-0.04);numeric_buffer_set(out,1,10000.0*c);numeric_buffer_set(out,2,10000.0*b)
+ numeric_buffer_set(out,3,0.04);numeric_buffer_set(out,4,-10000.0*c-60000000.0*b);numeric_buffer_set(out,5,-10000.0*b)
+ numeric_buffer_set(out,6,0.0);numeric_buffer_set(out,7,60000000.0*b);numeric_buffer_set(out,8,0.0);0
+}
+fn run_case(id:i64,n:i64,rhs:fn(f64,&NumericBuffer,&!NumericBuffer)->i64 with Mut,Div,Panic,jac:fn(f64,&NumericBuffer,&!NumericBuffer)->i64 with Mut,Div,Panic,start:f64,target:f64,options:&BDFOptions,initial:&[f64;3],expected:i64) with IO,Alloc,Mut,Div,Panic {
+ let shape=bdf_workspace(n)
+ assert(shape.status==0)
+ var state=numeric_buffer_new(n,n*8)
+ let coarse_n=if id==13 {0} else {n}
+ var coarse=numeric_buffer_new(coarse_n,coarse_n*8)
+ var half=numeric_buffer_new(n,n*8)
+ var trial=numeric_buffer_new(n,n*8)
+ var f=numeric_buffer_new(n,n*8)
+ var residual=numeric_buffer_new(n,n*8)
+ var delta=numeric_buffer_new(n,n*8)
+ var matrix=numeric_buffer_new(n*n,n*n*8)
+ var factor=numeric_buffer_new(n*n,n*n*8)
+ var work=numeric_buffer_new(shape.factor_work_len,shape.factor_work_len*8)
+ var pivots=integer_buffer_new(n,n*8)
+ var pivotwork=integer_buffer_new(n,n*8)
+ var i:i64=0
+ while i<n {numeric_buffer_set(&!state,i,initial[i]);i=i+1}
+ let r=solve_bdf1_checked(rhs,jac,&!state,&!coarse,&!half,&!trial,&!f,&!residual,&!delta,&!matrix,&!factor,&!work,&!pivots,&!pivotwork,start,target,options)
+ let status:i64=r.status
+ let tb:i64=f64_to_bits(r.t_final)
+ let x:i64=f64_to_bits(numeric_buffer_at(&state,0))
+ let y:i64=if n>1 {f64_to_bits(numeric_buffer_at(&state,1))} else {0}
+ let z:i64=if n>2 {f64_to_bits(numeric_buffer_at(&state,2))} else {0}
+ let accepted:i64=r.accepted;let rejected:i64=r.rejected;let attempts:i64=r.attempts
+ let nfe:i64=r.nfeval;let nje:i64=r.njeval;let nf:i64=r.nfactorizations;let nl:i64=r.nlinear
+ let updates:i64=r.newton_updates;let cb:i64=r.callback_status;let kind:i64=r.callback_kind;let linear_code:i64=r.linear_status
+ let residual_bits:i64=f64_to_bits(r.last_residual);let error_bits:i64=f64_to_bits(r.last_error)
+ println("BDF {} {} {} {} {} {} {}",id,n,status,tb,x,y,z)
+ println("WORK {} {} {} {} {} {} {} {} {} {} {} {} {} {}",id,accepted,rejected,attempts,nfe,nje,nf,nl,updates,cb,kind,linear_code,residual_bits,error_bits)
+ assert(status==expected)
+ if id==14 {assert(x==f64_to_bits(initial[0]))}
+ numeric_buffer_close(state);numeric_buffer_close(coarse);numeric_buffer_close(half);numeric_buffer_close(trial)
+ numeric_buffer_close(f);numeric_buffer_close(residual);numeric_buffer_close(delta);numeric_buffer_close(matrix);numeric_buffer_close(factor);numeric_buffer_close(work)
+ integer_buffer_close(pivots);integer_buffer_close(pivotwork)
+}
+fn main()->i32 with IO,Alloc,Mut,Div,Panic {
+ let initial:[f64;3]=[1.0,0.0,0.0]
+ var o=BDFOptions{atol:1.0e-7,rtol:1.0e-7,newton_tol:0.01,rcond:0.0,dt_init:0.001,dt_min:1.0e-16,dt_max:0.01,max_attempts:100000,max_newton:8}
+ run_case(0,1,decay,decay_jac,0.0,0.1,&o,&initial,0)
+ run_case(1,1,zero,zero_jac,0.0,0.0,&o,&initial,0)
+ o.dt_init=1.0e-20;o.dt_min=1.0e-30;o.dt_max=1.0e-16
+ run_case(2,1,zero,zero_jac,0.0,1.0e-16,&o,&initial,0)
+ o.dt_init=0.001;o.dt_min=1.0e-16;o.dt_max=0.01
+ let adjacent:f64=1.0000000000000002
+ run_case(3,1,zero,zero_jac,1.0,adjacent,&o,&initial,2)
+ run_case(4,1,bad_rhs,decay_jac,0.0,0.1,&o,&initial,6)
+ run_case(5,2,partial_rhs,coupled_jac,0.0,0.1,&o,&initial,4)
+ run_case(6,1,decay,bad_jac,0.0,0.1,&o,&initial,4)
+ o.max_attempts=1
+ run_case(7,1,decay,decay_jac,0.0,0.1,&o,&initial,3)
+ o.max_attempts=100000;o.max_newton=1;o.dt_init=0.1;o.dt_min=0.1;o.dt_max=0.1
+ run_case(8,1,decay,zero_jac,0.0,0.1,&o,&initial,7)
+ o.max_newton=8;o.dt_init=1.0;o.dt_min=1.0;o.dt_max=1.0
+ run_case(9,1,positive,positive_jac,0.0,1.0,&o,&initial,8)
+ o.dt_init=0.001;o.dt_min=1.0e-16;o.dt_max=0.01
+ let pair:[f64;3]=[2.0,1.0,0.0]
+ run_case(10,2,coupled,coupled_jac,0.0,0.01,&o,&pair,0)
+ o.atol=1.0e-10;o.rtol=1.0e-7;o.dt_init=1.0e-5;o.dt_min=1.0e-18;o.dt_max=1.0e-3
+ run_case(11,3,robertson,robertson_jac,0.0,0.01,&o,&initial,0)
+ o.dt_init=0.0
+ run_case(12,1,decay,decay_jac,0.0,0.1,&o,&initial,1)
+ o.dt_init=0.001
+ run_case(13,1,decay,decay_jac,0.0,0.1,&o,&initial,1)
+ let nonfinite:[f64;3]=[0.0/0.0,0.0,0.0]
+ run_case(14,1,decay,decay_jac,0.0,0.1,&o,&nonfinite,4)
+ o.atol=0.0
+ run_case(15,1,decay,decay_jac,0.0,0.1,&o,&initial,1)
+ let zero_shape=bdf_workspace(0)
+ let overflow_shape=bdf_workspace(9223372036854775807)
+ assert(zero_shape.status==1 && overflow_shape.status==1)
+ o.atol=0.001;o.rtol=0.001;o.dt_init=1.0e-15;o.dt_min=1.0e-18;o.dt_max=1.0e-15
+ run_case(16,1,fast_decay,fast_decay_jac,1.0,1.0000000000000007,&o,&initial,0)
+ println("BDF_CHECKED_PASS")
+ 0
+}
