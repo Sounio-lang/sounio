@@ -211,6 +211,16 @@ fn lexer_utf8_scalar(pos: i64, n: i64) -> i64 with Mut, Panic {
     return v
 }
 
+// ADR-015 row 8: a `_` right after a numeric literal that is not between two digits (the number
+// scan already consumed those) and does not start a unit suffix (`500_mg`) is a stray separator.
+fn lexer_number_stray_underscore(pos: i64, n: i64) -> bool with Mut, Panic {
+    if pos < n && CURSOR_SOURCE[pos as usize] == 95 as i8 {
+        if pos + 1 < n && is_alpha(CURSOR_SOURCE[(pos + 1) as usize]) { return false }
+        return true
+    }
+    return false
+}
+
 // A string escape the lowering decodes (ir_normalize_string_literal_name):
 // \n \t \r \0 \\ \" and \xHH. This is the union of what the two engines decode
 // today; lean_single refuses every other escape, and so does this lexer now.
@@ -268,6 +278,11 @@ pub fn lexer_report_lex_error_if_any(path: string) -> bool with IO, Mut {
         lexer_print_location(path)
         print("  = note: a character literal is one Unicode scalar value between quotes, `'a'` or `'\\n'`;\n")
         print("          `'name` with no closing quote is a lifetime, but a single character without one is refused\n")
+    } else if LEXER_LEX_ERROR_KIND == 10 {
+        print("error[E284]: digit separator `_` must sit between two digits")
+        lexer_print_location(path)
+        print("  = note: `1_000` is a number; `1__0` and `10_` are not. A `_` right after a number is a unit suffix\n")
+        print("          only when a letter follows it (`500_mg`)\n")
     } else {
         let in_char = LEXER_LEX_ERROR_KIND == 5
         print("error[E274]: invalid escape sequence `\\")
@@ -1171,6 +1186,7 @@ pub fn lex_source_to_globals(source_len: i64) -> i64 with Mut, Div, Panic {
                 // hex-float (`0x1p0`, `0x1.8p+0`), whose long mantissa is not an
                 // integer: the shared parser decides that later
                 // (parser_hex_float_tail_ahead), so the emit must not refuse it.
+                if lexer_number_stray_underscore(pos, n) { lexer_mark_lex_error(10, line, start_col, 0) }
                 let hex_nx = cursor_source_byte(pos)
                 if hex_nx != (112 as i8) && hex_nx != (80 as i8) && hex_nx != (46 as i8) {
                     if parser_span_int_literal_overflow(start, pos) {
@@ -1223,6 +1239,7 @@ pub fn lex_source_to_globals(source_len: i64) -> i64 with Mut, Div, Panic {
                     is_float_token = true
                 }
             }
+            if lexer_number_stray_underscore(pos, n) { lexer_mark_lex_error(10, line, start_col, 0) }
             if is_float_token {
                 tc = lexer_push_flat(tc, 125, start, pos, line, start_col, 0)
             } else {

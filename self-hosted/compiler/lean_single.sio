@@ -8769,6 +8769,10 @@ fn lex_utf8_scalar(pos: i64) -> i64 with Mut, Panic {
     return v
 }
 
+fn lex_is_hexdig(c: i64) -> bool {
+    return (c >= 48 && c <= 57) || (c >= 97 && c <= 102) || (c >= 65 && c <= 70)
+}
+
 fn lex_all() with IO, Mut, Panic, Div {
     TC = 0
     DOC_COUNT = 0
@@ -8903,23 +8907,51 @@ fn lex_all() with IO, Mut, Panic, Div {
             if c == 48 && p + 1 < SRC_LEN && (sb(p + 1) == 120 || sb(p + 1) == 88) {
                 p = p + 2
                 var hx: i64 = 1
+                // ADR-015 row 8: `_` is a digit separator only between two digits (the Madaros rule).
+                var hsep: i64 = 0
+                var hsig: i64 = 0
+                var hstarted: i64 = 0
                 while p < SRC_LEN && hx == 1 {
                     let h = sb(p)
-                    if h >= 48 && h <= 57 { v = v * 16 + h - 48; p = p + 1 }
-                    else if h >= 97 && h <= 102 { v = v * 16 + h - 87; p = p + 1 }
-                    else if h >= 65 && h <= 70 { v = v * 16 + h - 55; p = p + 1 }
-                    else { hx = 0 }
+                    var dv: i64 = 0 - 1
+                    if h >= 48 && h <= 57 { dv = h - 48 }
+                    else if h >= 97 && h <= 102 { dv = h - 87 }
+                    else if h >= 65 && h <= 70 { dv = h - 55 }
+                    if dv >= 0 {
+                        v = v * 16 + dv
+                        p = p + 1
+                        if hstarted == 0 && dv != 0 { hstarted = 1 }
+                        if hstarted == 1 { hsig = hsig + 1 }
+                    } else if h == 95 && lex_is_hexdig(sb(p + 1)) {
+                        hsep = 1
+                        p = p + 1
+                    } else { hx = 0 }
                 }
                 // ADR-015 row 1: refuse a hex literal wider than 64 bits before
                 // the wrapped value reaches the token table. A trailing `p` makes
                 // it a C99 hex-float (`0x1…p-80`), whose mantissa is not an
                 // integer at all — the shared parser guards the same case with
                 // parser_hex_float_tail_ahead before calling parse_int_literal.
-                if !lit_is_float_tail(s, p) && lit_int_width_class(s, p) == 1 {
+                if hsep == 1 {
+                    if !lit_is_float_tail(s, p) && hsig > 16 {
+                        tc_error_hard(TC, "E276: integer literal does not fit any 64-bit integer type")
+                    }
+                } else if !lit_is_float_tail(s, p) && lit_int_width_class(s, p) == 1 {
                     tc_error_hard(TC, "E276: integer literal does not fit any 64-bit integer type")
                 }
             } else {
-                while p < SRC_LEN && sb(p) >= 48 && sb(p) <= 57 { v = v * 10 + sb(p) - 48; p = p + 1 }
+                var dsep: i64 = 0
+                var dovf: i64 = 0
+                while p < SRC_LEN && ((sb(p) >= 48 && sb(p) <= 57) || (sb(p) == 95 && p + 1 < SRC_LEN && sb(p + 1) >= 48 && sb(p + 1) <= 57)) {
+                    if sb(p) == 95 {
+                        dsep = 1
+                    } else {
+                        let dd = sb(p) - 48
+                        if v > 1844674407370955161 || (v == 1844674407370955161 && dd > 5) { dovf = 1 }
+                        v = v * 10 + dd
+                    }
+                    p = p + 1
+                }
                 // ADR-015 row 1: same refusal for the decimal spelling. Class 2
                 // (exactly 2^63) is refused only when the minus before it is not
                 // a prefix operator, because `-9223372036854775808` is how the
@@ -8929,9 +8961,14 @@ fn lex_all() with IO, Mut, Panic, Div {
                 // parser does not need this test because the lexer has already
                 // decided the token kind by then).
                 if !lit_is_float_tail(s, p) {
-                    let width_class = lit_int_width_class(s, p)
-                    if width_class == 1 || (width_class == 2 && !lit_prefix_minus_is_unary()) {
-                        tc_error_hard(TC, "E276: integer literal does not fit any 64-bit integer type")
+                    if dsep == 1 {
+                        // With separators the digit run is not contiguous: use the overflow flag (past 2^64-1).
+                        if dovf == 1 { tc_error_hard(TC, "E276: integer literal does not fit any 64-bit integer type") }
+                    } else {
+                        let width_class = lit_int_width_class(s, p)
+                        if width_class == 1 || (width_class == 2 && !lit_prefix_minus_is_unary()) {
+                            tc_error_hard(TC, "E276: integer literal does not fit any 64-bit integer type")
+                        }
                     }
                 }
             }
@@ -8948,7 +8985,8 @@ fn lex_all() with IO, Mut, Panic, Div {
                 FL_FRAC_DIGITS = 0
                 let int_zero: i64 = if v == 0 { 1 } else { 0 }
                 var seen_nonzero: i64 = 0
-                while p < SRC_LEN && sb(p) >= 48 && sb(p) <= 57 {
+                while p < SRC_LEN && ((sb(p) >= 48 && sb(p) <= 57) || (sb(p) == 95 && p + 1 < SRC_LEN && sb(p + 1) >= 48 && sb(p + 1) <= 57)) {
+                    if sb(p) == 95 { p = p + 1  continue }
                     let d = sb(p) - 48
                     if int_zero == 1 && seen_nonzero == 0 && d == 0 {
                         lit_leading_zeros = lit_leading_zeros + 1
@@ -8973,10 +9011,19 @@ fn lex_all() with IO, Mut, Panic, Div {
                     is_float = 1
                     exp_sign = esign
                     p = ep
-                    while p < SRC_LEN && sb(p) >= 48 && sb(p) <= 57 {
-                        exp_val = exp_val * 10 + sb(p) - 48
+                    while p < SRC_LEN && ((sb(p) >= 48 && sb(p) <= 57) || (sb(p) == 95 && p + 1 < SRC_LEN && sb(p + 1) >= 48 && sb(p + 1) <= 57)) {
+                        if sb(p) != 95 { exp_val = exp_val * 10 + sb(p) - 48 }
                         p = p + 1
                     }
+                }
+            }
+            // ADR-015 row 8: a `_` that is not between two digits and does not start a unit suffix
+            // (`1__0`, `10_`) is refused (E284).
+            if p < SRC_LEN && sb(p) == 95 && LEX_ERROR_LINE == 0 {
+                let sf = if p + 1 < SRC_LEN { sb(p + 1) } else { 0 }
+                if !((sf >= 65 && sf <= 90) || (sf >= 97 && sf <= 122)) {
+                    LEX_ERROR_LINE = cur_line
+                    LEX_ERROR_KIND = 12
                 }
             }
             // Gen 19: _suffix unit annotation on numeric literals (e.g. 500_mg, 9.8_m)
@@ -11245,10 +11292,12 @@ fn flc_tok_bits(tok: i64) -> i64 with Mut, Panic, Div {
     var i = s
     var v: i64 = 0
     var any_digits: i64 = 0
-    while i < e && sb(i) >= 48 && sb(i) <= 57 {
-        v = v * 10 + (sb(i) - 48)
+    while i < e && ((sb(i) >= 48 && sb(i) <= 57) || (sb(i) == 95 && i + 1 < e && sb(i + 1) >= 48 && sb(i + 1) <= 57)) {
+        if sb(i) != 95 {
+            v = v * 10 + (sb(i) - 48)
+            any_digits = 1
+        }
         i = i + 1
-        any_digits = 1
     }
     if any_digits == 0 { return 0 }
     var frac: i64 = 0
@@ -11261,7 +11310,8 @@ fn flc_tok_bits(tok: i64) -> i64 with Mut, Panic, Div {
         var fd: i64 = 0
         var seen_nz: i64 = 0
         if v != 0 { seen_nz = 1 }
-        while i < e && sb(i) >= 48 && sb(i) <= 57 {
+        while i < e && ((sb(i) >= 48 && sb(i) <= 57) || (sb(i) == 95 && i + 1 < e && sb(i + 1) >= 48 && sb(i + 1) <= 57)) {
+            if sb(i) == 95 { i = i + 1  continue }
             let d = sb(i) - 48
             if seen_nz == 0 && d == 0 {
                 // absorbed leading zero: not part of frac/denom
@@ -11278,8 +11328,8 @@ fn flc_tok_bits(tok: i64) -> i64 with Mut, Panic, Div {
         i = i + 1
         if i < e && sb(i) == 45 { neg = 1  i = i + 1 }
         if i < e && sb(i) == 43 { i = i + 1 }
-        while i < e && sb(i) >= 48 && sb(i) <= 57 {
-            ev = ev * 10 + (sb(i) - 48)
+        while i < e && ((sb(i) >= 48 && sb(i) <= 57) || (sb(i) == 95 && i + 1 < e && sb(i + 1) >= 48 && sb(i + 1) <= 57)) {
+            if sb(i) != 95 { ev = ev * 10 + (sb(i) - 48) }
             i = i + 1
         }
     }
@@ -11301,6 +11351,7 @@ fn flc_tok_bits(tok: i64) -> i64 with Mut, Panic, Div {
                     if cc != 48 { tail_nonzero = 1 }
                     if seen_dot == 0 { dexp = dexp + 1 }
                 }
+            } else if cc == 95 && i + 1 < e && sb(i + 1) >= 48 && sb(i + 1) <= 57 {
             } else { stop = 1 }
         }
         if stop == 1 { i = e } else { i = i + 1 }
@@ -53264,6 +53315,13 @@ fn main() -> i64 with IO, Mut, Panic, Div {
             var rq: i64 = TS[LEX_ERROR_TOK as usize]
             while rq < TE[LEX_ERROR_TOK as usize] { print_char(sb(rq))  rq = rq + 1 }
             print("` is a reserved word and cannot name a binding at line ")
+            print_int(LEX_ERROR_LINE)
+            print("\n")
+            return 1
+        }
+        if LEX_ERROR_KIND == 12 {
+            // Same code and wording as Madaros E284.
+            print("error[E284]: digit separator `_` must sit between two digits at line ")
             print_int(LEX_ERROR_LINE)
             print("\n")
             return 1
