@@ -4,6 +4,8 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck source=../lib/classify_compile.sh
+source "$ROOT_DIR/scripts/lib/classify_compile.sh"
 EXPLICIT_SOUC="${SOUNIO_REBRACKET_COMPILER_BIN:-}"
 SOUC="${EXPLICIT_SOUC:-$ROOT_DIR/bin/souc}"
 EXPECTED_COMPILER_SHA256="${SOUNIO_REBRACKET_EXPECTED_COMPILER_SHA256:-}"
@@ -186,7 +188,7 @@ operand_slice="$(awk '
 ' "$OPT")"
 for forbidden_opcode in IrLoadFloat IrIntToFloat IrFloatToInt IrCall IrCallExtern IrCallIndirect IrCallSret IrPhi IrJump IrBranchTrue IrBranchFalse IrLabel IrReturn IrReturnSret; do
   [[ "$operand_slice" != *"IrOpcode::$forbidden_opcode => true"* ]] ||
-    fail "canonical scalar slice must refuse $forbidden_opcode"
+    fail "canonical scalar slice must refuse $forbidden_opcode"  # refusal-classifier-exempt: source-text check on the optimizer, no compiler run
 done
 
 control_slice="$(awk '
@@ -209,22 +211,25 @@ for admitted_control in IrJump IrBranchTrue IrBranchFalse IrReturn IrReturnSret;
 done
 for forbidden_control in IrCall IrCallExtern IrCallIndirect IrCallSret IrPhi; do
   [[ "$control_slice$terminator_slice" != *"IrOpcode::$forbidden_control"* ]] ||
-    fail "explicit control-use model must refuse $forbidden_control"
+    fail "explicit control-use model must refuse $forbidden_control"  # refusal-classifier-exempt: source-text check on the optimizer, no compiler run
 done
 
-pass_a1_slice="$(awk '
-  /^fn ocp_const_fold_pass_a1\(/ { inside=1 }
-  /^fn ocp_const_fold_pass_a2\(/ { exit }
+# #1680: the const-fold blocks run in one scan again (ocp_const_fold_scan); the
+# former pass_a1/pass_a2/pass_b split never shared tracker state between them.
+scan_slice="$(awk '
+  /^fn ocp_const_fold_scan\(/ { inside=1 }
   inside { print }
+  inside && /^}/ { exit }
 ' "$OPT")"
-[[ "$pass_a1_slice" == *'former direct'* || "$pass_a1_slice" == *'former Block BG direct'* ]] ||
-  fail "pass A1 must declare its authority-owned rebracketing handoff"
-[[ "$pass_a1_slice" != *'Block AE: And-mask chain fold'* ]] ||
-  fail "pass A1 must not retain the pre-authority AND-chain mutation"
-[[ "$pass_a1_slice" != *'Block BG: OR constant-chain fold'* ]] ||
-  fail "pass A1 must not retain the pre-authority OR-chain mutation"
-[[ "$pass_a1_slice" != *'Block BM: XOR constant-chain fold'* ]] ||
-  fail "pass A1 must not retain the pre-authority XOR-chain mutation"
+[[ -n "$scan_slice" ]] || fail "ocp_const_fold_scan is missing"
+[[ "$scan_slice" == *'former direct'* || "$scan_slice" == *'former Block BG direct'* ]] ||
+  fail "the const-fold scan must declare its authority-owned rebracketing handoff"
+[[ "$scan_slice" != *'Block AE: And-mask chain fold'* ]] ||
+  fail "the const-fold scan must not retain the pre-authority AND-chain mutation"
+[[ "$scan_slice" != *'Block BG: OR constant-chain fold'* ]] ||
+  fail "the const-fold scan must not retain the pre-authority OR-chain mutation"
+[[ "$scan_slice" != *'Block BM: XOR constant-chain fold'* ]] ||
+  fail "the const-fold scan must not retain the pre-authority XOR-chain mutation"
 
 kernel_log="$WORK/kernel.log"
 if ! "$SOUC" run "$KERNEL" >"$kernel_log" 2>&1; then
@@ -254,6 +259,8 @@ expect_private_rejection() {
     cat "$log" >&2
     fail "$label must reject with rc=1, got rc=$rc"
   }
+  # rc alone is not a refusal: a crash, timeout or OOM kill is not one (#2425).
+  sounio_expect_failed_exit "$rc" "$log" || { cat "$log" >&2; fail "$label: not a clean refusal: $(sounio_refusal_reason)"; }
   [[ "$(rg -c 'error\[E' "$log")" -eq 1 ]] || {
     cat "$log" >&2
     fail "$label must emit exactly one diagnostic"

@@ -1,0 +1,241 @@
+// Stable bounded simple OLS and case-deletion influence diagnostics.
+// Canonical numerical core for stats::regression::linear.
+use math::pure::{sqrt, is_finite}
+pub const OLS_OK: i64 = 0
+pub const OLS_INVALID_SAMPLE: i64 = 1
+pub const OLS_NONFINITE: i64 = 2
+pub const OLS_RANK_DEFICIENT: i64 = 3
+pub const OLS_ZERO_RESIDUAL: i64 = 4
+pub const OLS_NUMERIC_FAILURE: i64 = 5
+pub const OLS_PARTIAL: i64 = 6
+pub const OLS_LEVERAGE_ONE: i64 = 7
+pub const OLS_DELETED_ZERO_RESIDUAL: i64 = 8
+
+pub struct SimpleOlsFit {
+    pub status: i64, pub inference_status: i64, pub n: i64, pub df: i64,
+    pub intercept: f64, pub slope: f64,
+    pub intercept_se: f64, pub slope_se: f64, pub residual_se: f64,
+    pub r_squared: f64, pub r_squared_defined: bool,
+    pub x_mean: f64, pub y_mean: f64,
+    pub residuals: [f64; 100], pub fitted: [f64; 100], pub leverage: [f64; 100],
+}
+pub struct OlsInfluence {
+    pub status: i64, pub n: i64,
+    pub valid_count: i64, pub cooks_valid_count: i64, pub flagged_count: i64,
+    pub screening_cutoff: f64, pub fit: SimpleOlsFit,
+    pub dffits: [f64; 100], pub studentized_deleted: [f64; 100],
+    pub deleted_sigma: [f64; 100], pub cooks_distance: [f64; 100],
+    pub dffits_status: [i64; 100], pub cooks_status: [i64; 100],
+}
+fn ols_abs(x: f64) -> f64 { if x < 0.0 { 0.0-x } else { x } }
+fn ols_fit_empty() -> SimpleOlsFit {
+    SimpleOlsFit { status: OLS_INVALID_SAMPLE, inference_status: OLS_INVALID_SAMPLE,
+        n: 0, df: 0, intercept: 0.0, slope: 0.0, intercept_se: 0.0,
+        slope_se: 0.0, residual_se: 0.0, r_squared: 0.0, r_squared_defined: false,
+        x_mean: 0.0, y_mean: 0.0,
+        residuals: [0.0;100], fitted: [0.0;100], leverage: [0.0;100] }
+}
+fn ols_hypot(a: f64, b: f64) -> f64 with Mut, Div, Panic {
+    let aa = ols_abs(a)
+    let bb = ols_abs(b)
+    let scale = if aa > bb { aa } else { bb }
+    if scale == 0.0 { return 0.0 }
+    let x: f64 = aa/scale
+    let y: f64 = bb/scale
+    scale * sqrt(x*x+y*y)
+}
+
+// O(n) centered/scaled two-column least squares; no normal-equation determinant.
+// omit=-1 means full fit, otherwise a real case deletion. Residual/hat arrays
+// retain original row indices; n is the number of included observations.
+fn ols_fit_skip(x: &[f64;100], y: &[f64;100], n: i64, omit: i64) -> SimpleOlsFit with Mut, Div, Panic {
+    var out = ols_fit_empty()
+    if n < 3 || n > 100 || omit < -1 || omit >= n { return out }
+    let count: i64 = if omit >= 0 { n-1 } else { n }
+    if count < 3 { return out }
+    out.n = count; out.df = count-2
+    let anchor: usize = if omit == 0 { 1 } else { 0 }
+    let xa: f64 = x[anchor]
+    let ya: f64 = y[anchor]
+    var xs: f64 = 0.0
+    var ys: f64 = 0.0
+    var i: i64 = 0
+    while i < n {
+        if i != omit {
+            let xi: f64 = x[i as usize]
+            let yi: f64 = y[i as usize]
+            if !is_finite(xi) || !is_finite(yi) {
+                out.status=OLS_NONFINITE; out.inference_status=OLS_NONFINITE; return out
+            }
+            let dx: f64 = xi-xa
+            let dy: f64 = yi-ya
+            if !is_finite(dx) || !is_finite(dy) {
+                out.status=OLS_NUMERIC_FAILURE; out.inference_status=OLS_NUMERIC_FAILURE; return out
+            }
+            if ols_abs(dx) > xs { xs=ols_abs(dx) }
+            if ols_abs(dy) > ys { ys=ols_abs(dy) }
+        }
+        i=i+1
+    }
+    if xs == 0.0 { out.status=OLS_RANK_DEFICIENT; out.inference_status=OLS_RANK_DEFICIENT; return out }
+    if ys == 0.0 { ys=1.0 }
+    var sx: f64=0.0; var sy: f64=0.0
+    var cx: f64=0.0; var cy: f64=0.0
+    i=0
+    while i < n {
+        if i != omit {
+            let vx: f64=(x[i as usize]-xa)/xs-cx
+            let vy: f64=(y[i as usize]-ya)/ys-cy
+            let tx: f64=sx+vx; let ty: f64=sy+vy
+            cx=(tx-sx)-vx; cy=(ty-sy)-vy
+            sx=tx; sy=ty
+        }
+        i=i+1
+    }
+    let mx: f64=sx/(count as f64)
+    let my: f64=sy/(count as f64)
+    var sxx: f64=0.0; var sxy: f64=0.0; var syy: f64=0.0
+    var cxx: f64=0.0; var cxy: f64=0.0; var cyy: f64=0.0
+    i=0
+    while i < n {
+        if i != omit {
+            let dx: f64=(x[i as usize]-xa)/xs-mx
+            let dy: f64=(y[i as usize]-ya)/ys-my
+            let vx: f64=dx*dx-cxx; let vy: f64=dx*dy-cxy; let vz: f64=dy*dy-cyy
+            let tx: f64=sxx+vx; let ty: f64=sxy+vy; let tz: f64=syy+vz
+            cxx=(tx-sxx)-vx; cxy=(ty-sxy)-vy; cyy=(tz-syy)-vz
+            sxx=tx; sxy=ty; syy=tz
+        }
+        i=i+1
+    }
+    if sxx <= 0.0 { out.status=OLS_RANK_DEFICIENT; out.inference_status=OLS_RANK_DEFICIENT; return out }
+    let b: f64=sxy/sxx
+    var slope: f64=(b*ys)/xs
+    if !is_finite(slope) || (slope == 0.0 && b != 0.0) { slope=(b/xs)*ys }
+    if !is_finite(slope) || (slope == 0.0 && b != 0.0) { slope=b*(ys/xs) }
+    let intercept: f64=(ya-slope*xa)+ys*(my-b*mx)
+    if !is_finite(slope) || !is_finite(intercept) || (slope == 0.0 && b != 0.0) {
+        out.status=OLS_NUMERIC_FAILURE; out.inference_status=OLS_NUMERIC_FAILURE; return out
+    }
+    out.slope=slope; out.intercept=intercept
+    out.x_mean=xa+xs*mx; out.y_mean=ya+ys*my
+    // Scaled sum of squared residuals (LASSQ form), avoiding squared raw units.
+    var scale: f64=0.0
+    var ssq: f64=1.0
+    i=0
+    while i < n {
+        if i != omit {
+            let dx: f64=(x[i as usize]-xa)/xs-mx
+            let dy: f64=(y[i as usize]-ya)/ys-my
+            let e: f64=dy-b*dx
+            let raw: f64=e*ys
+            if !is_finite(raw) || (e != 0.0 && raw == 0.0) {
+                out.status=OLS_NUMERIC_FAILURE; out.inference_status=OLS_NUMERIC_FAILURE; return out
+            }
+            out.residuals[i as usize]=raw
+            out.fitted[i as usize]=y[i as usize]-raw
+            var h: f64=1.0/(count as f64)+(dx*dx)/sxx
+            if h > 1.0 && h <= 1.0+7.105427357601002e-15 { h=1.0 }
+            if h <= 0.0 || h > 1.0 {
+                out.status=OLS_NUMERIC_FAILURE; out.inference_status=OLS_NUMERIC_FAILURE; return out
+            }
+            out.leverage[i as usize]=h
+            let a=ols_abs(e)
+            if a > 0.0 {
+                if a > scale {
+                    let ratio: f64=scale/a
+                    ssq=1.0+ssq*ratio*ratio; scale=a
+                } else {
+                    let ratio: f64=a/scale
+                    ssq=ssq+ratio*ratio
+                }
+            }
+        }
+        i=i+1
+    }
+    let sigma: f64=(scale*sqrt(ssq/((count-2) as f64)))*ys
+    if !is_finite(sigma) || (scale != 0.0 && sigma == 0.0) {
+        out.status=OLS_NUMERIC_FAILURE; out.inference_status=OLS_NUMERIC_FAILURE; return out
+    }
+    out.residual_se=sigma
+    let slope_se: f64=(sigma/sqrt(sxx))/xs
+    let intercept_se: f64=ols_hypot(sigma/sqrt(count as f64),slope_se*out.x_mean)
+    if !is_finite(slope_se) || !is_finite(intercept_se) || (sigma > 0.0 && (slope_se == 0.0 || intercept_se == 0.0)) {
+        out.status=OLS_NUMERIC_FAILURE; out.inference_status=OLS_NUMERIC_FAILURE; return out
+    }
+    out.slope_se=slope_se; out.intercept_se=intercept_se
+    if syy > 0.0 {
+        let ratio: f64=scale/sqrt(syy)
+        out.r_squared=1.0-ratio*ratio*ssq
+        out.r_squared_defined=true
+    }
+    out.status=OLS_OK
+    out.inference_status=if sigma == 0.0 { OLS_ZERO_RESIDUAL } else { OLS_OK }
+    out
+}
+pub fn ols_fit_simple(x: &[f64;100], y: &[f64;100], n: i64) -> SimpleOlsFit with Mut, Div, Panic {
+    ols_fit_skip(x,y,n,-1)
+}
+
+// Prevalidated scalar path. Deleted sigma comes from a real refit, not a
+// subtraction of near-equal residual sums of squares.
+fn ols_dffits(e: f64, h: f64, deleted_sigma: f64) -> f64 with Mut, Div, Panic {
+    let numerator: f64=e/deleted_sigma
+    let root_h: f64=sqrt(h)
+    numerator*root_h/(1.0-h)
+}
+pub fn ols_influence_simple(x: &[f64;100], y: &[f64;100], n: i64) -> OlsInfluence with Mut, Div, Panic {
+    let full=ols_fit_simple(x,y,n)
+    var out=OlsInfluence { status: OLS_INVALID_SAMPLE, n: full.n,
+        valid_count:0, cooks_valid_count:0, flagged_count:0, screening_cutoff:0.0, fit:full,
+        dffits:[0.0;100], studentized_deleted:[0.0;100], deleted_sigma:[0.0;100],
+        cooks_distance:[0.0;100], dffits_status:[OLS_INVALID_SAMPLE;100],
+        cooks_status:[OLS_INVALID_SAMPLE;100] }
+    var i:i64=0
+    var error:i64=OLS_OK
+    if full.status != OLS_OK { error=full.status }
+    else if n < 4 { error=OLS_INVALID_SAMPLE }
+    else if full.residual_se == 0.0 { error=OLS_ZERO_RESIDUAL }
+    if error != OLS_OK {
+        out.status=error
+        while i < out.n { out.dffits_status[i as usize]=error;out.cooks_status[i as usize]=error;i=i+1 }
+        return out
+    }
+    out.screening_cutoff=2.0*sqrt(2.0/(n as f64))
+    while i < n {
+        let h:f64=full.leverage[i as usize]
+        let e:f64=full.residuals[i as usize]
+        if h >= 1.0 {
+            out.dffits_status[i as usize]=OLS_LEVERAGE_ONE
+            out.cooks_status[i as usize]=OLS_LEVERAGE_ONE
+        } else {
+            let internal:f64=ols_dffits(e,h,full.residual_se)
+            let cook:f64=(internal*internal)*0.5
+            if is_finite(cook) {
+                out.cooks_distance[i as usize]=cook
+                out.cooks_status[i as usize]=OLS_OK
+                out.cooks_valid_count=out.cooks_valid_count+1
+            } else { out.cooks_status[i as usize]=OLS_NUMERIC_FAILURE }
+            let deleted=ols_fit_skip(x,y,n,i)
+            if deleted.status != OLS_OK { out.dffits_status[i as usize]=deleted.status }
+            else if deleted.residual_se == 0.0 { out.dffits_status[i as usize]=OLS_DELETED_ZERO_RESIDUAL }
+            else {
+                let sigma:f64=deleted.residual_se
+                let value:f64=ols_dffits(e,h,sigma)
+                let student:f64=(e/sigma)/sqrt(1.0-h)
+                if !is_finite(value) || !is_finite(student) { out.dffits_status[i as usize]=OLS_NUMERIC_FAILURE }
+                else {
+                    out.dffits[i as usize]=value
+                    out.studentized_deleted[i as usize]=student
+                    out.deleted_sigma[i as usize]=sigma
+                    out.dffits_status[i as usize]=OLS_OK
+                    out.valid_count=out.valid_count+1
+                    if ols_abs(value) > out.screening_cutoff { out.flagged_count=out.flagged_count+1 }
+                }
+            }
+        }
+        i=i+1
+    }
+    out.status=if out.valid_count == n && out.cooks_valid_count == n { OLS_OK } else { OLS_PARTIAL }
+    out
+}

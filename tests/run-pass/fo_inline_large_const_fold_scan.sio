@@ -1,0 +1,75 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: FO_INLINE_LARGE_CONST_FOLD_SCAN_OK
+// Discriminator for the gen2 wall on ocp_const_fold_scan:
+// a large integer scan with many tracking slots, plus nested runtime-if
+// f64 helpers used as `let` RHSs. Integer lets must not re-walk the RHS
+// for FO (that walk needed 30741 IR). Failed FO must not keep pasted IR.
+// Value path is the call, not FO.
+
+fn boundary_eps(norm: f64, radius: f64) -> f64 {
+    let lower = 0.8 * radius
+    if norm < lower {
+        0.0
+    } else if norm > radius {
+        0.0
+    } else {
+        1.0
+    }
+}
+
+fn zd_eps(proximity: f64) -> f64 {
+    if proximity > 0.1 { 0.0 } else { 1.0 }
+}
+
+fn combined_eps(boundary: f64, zd: f64) -> f64 with Mut, Div {
+    let combined_sq = boundary * boundary + zd * zd
+    if combined_sq <= 0.0 { return 0.0 }
+    var y = combined_sq
+    y = 0.5 * (y + combined_sq / y)
+    if y > 1.0 { 1.0 } else { y }
+}
+
+fn is_const_imm(op: i64) -> bool {
+    op == 1
+}
+
+fn scan_like(n: i64) -> i64 with Mut, Div, Panic {
+    var is_const: [bool; 64] = [false; 64]
+    var const_val: [i64; 64] = [0; 64]
+    var mul_valid: [bool; 64] = [false; 64]
+    var mul_src: [i64; 64] = [0 - 1; 64]
+    var add_valid: [bool; 64] = [false; 64]
+    var add_src: [i64; 64] = [0 - 1; 64]
+    var xor_valid: [bool; 64] = [false; 64]
+    var xor_src: [i64; 64] = [0 - 1; 64]
+    var acc: i64 = 0
+    var i: i64 = 0
+    while i < n && i < 64 {
+        is_const[i as usize] = is_const_imm(1)
+        const_val[i as usize] = i
+        mul_valid[i as usize] = i > 0
+        mul_src[i as usize] = i - 1
+        add_valid[i as usize] = !mul_valid[i as usize]
+        add_src[i as usize] = i
+        xor_valid[i as usize] = false
+        xor_src[i as usize] = 0 - 1
+        let e0 = combined_eps(boundary_eps(i as f64, 8.0), zd_eps(1.0))
+        let e1 = combined_eps(boundary_eps((i + 1) as f64, 8.0), zd_eps(0.0))
+        if e0 > 0.01 { acc = acc + 1 }
+        if e1 > 0.01 { acc = acc + 1 }
+        if is_const[i as usize] { acc = acc + const_val[i as usize] }
+        i = i + 1
+    }
+    acc
+}
+
+fn main() -> i64 with IO, Mut, Div, Panic {
+    let got = scan_like(8)
+    if got > 0 {
+        print("FO_INLINE_LARGE_CONST_FOLD_SCAN_OK\n")
+        return 0
+    }
+    print("FO_INLINE_LARGE_CONST_FOLD_SCAN_FAIL\n")
+    1
+}

@@ -24,6 +24,20 @@ expect "$docs" docs true
 expect "$docs" compiler false
 expect "$docs" lean false
 
+# llms.txt is model context, the same class as the README. Leaving it
+# unrecognized used to mark `full`, and the changelog gate then demanded a
+# fragment for a docs-only edit.
+llms_only="$(classify_pr llms.txt)"
+expect "$llms_only" docs true
+expect "$llms_only" website false
+expect "$llms_only" compiler false
+expect "$llms_only" full false
+llms_with_site="$(classify_pr llms.txt README.md .github/copilot-instructions.md website/src/pages/about/index.astro)"
+expect "$llms_with_site" docs true
+expect "$llms_with_site" website true
+expect "$llms_with_site" compiler false
+expect "$llms_with_site" full false
+
 lean="$(classify_pr formal/lean4/SounioGradedModal.lean)"
 expect "$lean" lean true
 expect "$lean" math true
@@ -52,6 +66,13 @@ expect "$mq_sco" tests true
 expect "$mq_sco" full false
 
 unknown="$(classify_pr newly-introduced/build.graph)"
+
+for manifest_path in eeg_temporal_manifest.tsv artifacts/research/eeg_hessian/eeg_temporal_manifest.tsv chaos_sensitivity_manifest.tsv artifacts/research/chaos/chaos_sensitivity_manifest.tsv; do
+  manifest="$(classify_pr "$manifest_path")"
+  expect "$manifest" full true
+  expect "$manifest" compiler true
+done
+
 expect "$unknown" full true
 expect "$unknown" compiler true
 expect "$unknown" lean true
@@ -140,7 +161,7 @@ json_sub() {
   printf '%s' "$out"
 }
 
-good_needs='{"impact":{"outputs":{"compiler":"false","runtime":"false","stdlib":"false","tests":"false","sio":"false","lean":"false","website":"false","full":"false"}},"contracts":{"result":"success"},"native-selfhost-linux-x86_64":{"result":"skipped"},"source-bootstrap-selfhost-linux-x86_64":{"result":"skipped"},"madaros-current-source-deref-f64":{"result":"skipped"},"native-selfhost-macos-arm64":{"result":"skipped"},"full-test-suite":{"result":"skipped"},"madaros-witness-gate":{"result":"skipped"},"gate-wave-0":{"result":"skipped"},"sounio-lint":{"result":"skipped"},"lean-proofs":{"result":"skipped"},"website":{"result":"skipped"},"r6-corpus-sweep":{"result":"skipped"},"slow-lane":{"result":"skipped"}}'
+good_needs='{"impact":{"outputs":{"compiler":"false","runtime":"false","stdlib":"false","tests":"false","sio":"false","lean":"false","website":"false","full":"false"}},"contracts":{"result":"success"},"fast-checks":{"result":"success"},"native-selfhost-linux-x86_64":{"result":"skipped"},"native-linux-regressions":{"result":"skipped"},"source-bootstrap-selfhost-linux-x86_64":{"result":"skipped"},"source-bootstrap-regressions":{"result":"skipped"},"scientific-reference-controls":{"result":"skipped"},"current-source-madaros":{"result":"skipped"},"sco-current-source":{"result":"skipped"},"madaros-current-source-deref-f64":{"result":"skipped"},"native-selfhost-macos-arm64":{"result":"skipped"},"full-test-suite":{"result":"skipped"},"madaros-witness-gate":{"result":"skipped"},"gate-wave-0":{"result":"skipped"},"sounio-lint":{"result":"skipped"},"lean-proofs":{"result":"skipped"},"website":{"result":"skipped"},"r6-corpus-sweep":{"result":"skipped"},"slow-lane":{"result":"skipped"}}'
 # Both nightly signals pinned, like every other check below: a skipped
 # r6-corpus-sweep is only correct off the nightly cadence, and
 # is_nightly() (evaluate_ci_decision.py) treats GITHUB_EVENT_NAME=schedule and
@@ -160,7 +181,7 @@ if NEEDS_JSON="$bad_needs" python3 "$DECISION" >/dev/null 2>&1; then
   exit 1
 fi
 
-compiler_needs='{"impact":{"outputs":{"compiler":"true","runtime":"false","stdlib":"false","tests":"false","sio":"true","lean":"false","website":"false","full":"false"}},"contracts":{"result":"success"},"native-selfhost-linux-x86_64":{"result":"success"},"source-bootstrap-selfhost-linux-x86_64":{"result":"success"},"madaros-current-source-deref-f64":{"result":"failure"},"native-selfhost-macos-arm64":{"result":"success"},"full-test-suite":{"result":"success"},"madaros-witness-gate":{"result":"success"},"gate-wave-0":{"result":"success"},"sounio-lint":{"result":"success"},"lean-proofs":{"result":"skipped"},"website":{"result":"skipped"},"r6-corpus-sweep":{"result":"skipped"},"slow-lane":{"result":"skipped"}}'
+compiler_needs='{"impact":{"outputs":{"compiler":"true","runtime":"false","stdlib":"false","tests":"false","sio":"true","lean":"false","website":"false","full":"false"}},"contracts":{"result":"success"},"fast-checks":{"result":"success"},"native-selfhost-linux-x86_64":{"result":"success"},"native-linux-regressions":{"result":"success"},"source-bootstrap-selfhost-linux-x86_64":{"result":"success"},"source-bootstrap-regressions":{"result":"success"},"scientific-reference-controls":{"result":"success"},"current-source-madaros":{"result":"success"},"sco-current-source":{"result":"success"},"madaros-current-source-deref-f64":{"result":"failure"},"native-selfhost-macos-arm64":{"result":"success"},"full-test-suite":{"result":"success"},"madaros-witness-gate":{"result":"success"},"gate-wave-0":{"result":"success"},"sounio-lint":{"result":"success"},"lean-proofs":{"result":"skipped"},"website":{"result":"skipped"},"r6-corpus-sweep":{"result":"skipped"},"slow-lane":{"result":"skipped"}}'
 if NEEDS_JSON="$compiler_needs" python3 "$DECISION" >/dev/null 2>&1; then
   echo "impact-ci-selftest: decision accepted failed current-source Madaros gate" >&2
   exit 1
@@ -169,6 +190,23 @@ compiler_green_needs="${compiler_needs/\"failure\"/\"success\"}"
 # Same unpinned-event hazard as good_needs above (r6-corpus-sweep is skipped
 # here too) -- both nightly signals pinned, not just GITHUB_EVENT_NAME.
 NEEDS_JSON="$compiler_green_needs" GITHUB_EVENT_NAME=push NIGHTLY_INPUT=false python3 "$DECISION" | grep -Fq CI_DECISION_PASS
+# ADR-027 §1: fast-checks is selected on every event; a red one fails the verdict.
+fast_failed_needs="$(json_sub "$good_needs" '"fast-checks":{"result":"success"}' '"fast-checks":{"result":"failure"}')"
+if NEEDS_JSON="$fast_failed_needs" GITHUB_EVENT_NAME=push NIGHTLY_INPUT=false python3 "$DECISION" >/dev/null 2>&1; then
+  echo "impact-ci-selftest: decision accepted failed fast-checks" >&2
+  exit 1
+fi
+# ADR-027 §3: macOS arm64 is event-selected. On a pull request `skipped` is
+# the correct outcome even when the compiler changed; in the merge group and
+# on main the same `skipped` is a failure, because the lane was selected.
+mac_skipped_needs="$(json_sub "$compiler_green_needs" '"native-selfhost-macos-arm64":{"result":"success"}' '"native-selfhost-macos-arm64":{"result":"skipped"}')"
+NEEDS_JSON="$mac_skipped_needs" GITHUB_EVENT_NAME=pull_request NIGHTLY_INPUT=false python3 "$DECISION" | grep -Fq CI_DECISION_PASS
+for mac_event in merge_group push; do
+  if NEEDS_JSON="$mac_skipped_needs" GITHUB_EVENT_NAME="$mac_event" NIGHTLY_INPUT=false python3 "$DECISION" >/dev/null 2>&1; then
+    echo "impact-ci-selftest: decision accepted skipped macOS arm64 lane on $mac_event" >&2
+    exit 1
+  fi
+done
 witness_failed_needs="$(json_sub "$compiler_green_needs" '"madaros-witness-gate":{"result":"success"}' '"madaros-witness-gate":{"result":"failure"}')"
 if NEEDS_JSON="$witness_failed_needs" python3 "$DECISION" >/dev/null 2>&1; then
   echo "impact-ci-selftest: decision accepted failed selected Madaros witness gate" >&2
@@ -250,74 +288,37 @@ fi
 NEEDS_JSON="$slow_skipped" GITHUB_EVENT_NAME=workflow_dispatch NIGHTLY_INPUT=false \
   python3 "$DECISION" | grep -Fq CI_DECISION_PASS
 
-python3 - "$ROOT_DIR" <<'PY'
-import ast
-import pathlib
-import sys
+node "$ROOT_DIR/scripts/ci/ci_decision_contract.mjs" "$ROOT_DIR" --selftest
 
-root = pathlib.Path(sys.argv[1])
-workflow = (root / ".github/workflows/ci.yml").read_text(encoding="utf-8")
-decision = (root / "scripts/ci/evaluate_ci_decision.py").read_text(encoding="utf-8")
-
-lines = workflow.splitlines()
-workflow_needs = set()
-in_ci_decision = False
-in_needs = False
-for line in lines:
-    if line == "  ci-decision:":
-        in_ci_decision = True
-        continue
-    if in_ci_decision and line.startswith("  ") and not line.startswith("    ") and line != "  ci-decision:":
-        break
-    if not in_ci_decision:
-        continue
-    if line == "    needs:":
-        in_needs = True
-        continue
-    if in_needs:
-        if line.startswith("      - "):
-            workflow_needs.add(line.split("-", 1)[1].strip())
-            continue
-        # Comments and blank lines inside the list used to end the scan, which
-        # silently produced a SHORTER needs set -- and a short set still
-        # compares equal to an evaluator that is missing the same job, so the
-        # consistency check below would have reported agreement it had not
-        # verified. Skip them instead of truncating.
-        if not line.strip() or line.strip().startswith("#"):
-            continue
-        break
-if not workflow_needs:
-    raise SystemExit("impact-ci-selftest: could not parse ci-decision needs")
-workflow_needs.discard("impact")
-
-module = ast.parse(decision)
-required_keys = None
-for node in ast.walk(module):
-    if isinstance(node, ast.Assign):
-        if any(isinstance(target, ast.Name) and target.id == "required" for target in node.targets):
-            if isinstance(node.value, ast.Dict):
-                required_keys = {
-                    key.value
-                    for key in node.value.keys
-                    if isinstance(key, ast.Constant) and isinstance(key.value, str)
-                }
-                break
-if required_keys is None:
-    raise SystemExit("impact-ci-selftest: could not parse evaluator required map")
-
-if workflow_needs != required_keys:
-    missing = sorted(workflow_needs - required_keys)
-    extra = sorted(required_keys - workflow_needs)
-    raise SystemExit(
-        "impact-ci-selftest: ci-decision needs/evaluator mismatch "
-        f"missing_in_evaluator={missing} extra_in_evaluator={extra}"
-    )
-PY
-
-stdlib_needs='{"impact":{"outputs":{"compiler":"false","runtime":"false","stdlib":"true","tests":"false","sio":"true","lean":"false","website":"false","full":"false"}},"contracts":{"result":"success"},"native-selfhost-linux-x86_64":{"result":"skipped"},"source-bootstrap-selfhost-linux-x86_64":{"result":"skipped"},"madaros-current-source-deref-f64":{"result":"skipped"},"native-selfhost-macos-arm64":{"result":"skipped"},"full-test-suite":{"result":"skipped"},"madaros-witness-gate":{"result":"success"},"sounio-lint":{"result":"success"},"lean-proofs":{"result":"skipped"},"website":{"result":"skipped"},"r6-corpus-sweep":{"result":"skipped"},"slow-lane":{"result":"skipped"}}'
+stdlib_needs='{"impact":{"outputs":{"compiler":"false","runtime":"false","stdlib":"true","tests":"false","sio":"true","lean":"false","website":"false","full":"false"}},"contracts":{"result":"success"},"fast-checks":{"result":"success"},"native-selfhost-linux-x86_64":{"result":"skipped"},"native-linux-regressions":{"result":"skipped"},"source-bootstrap-selfhost-linux-x86_64":{"result":"skipped"},"source-bootstrap-regressions":{"result":"skipped"},"scientific-reference-controls":{"result":"skipped"},"current-source-madaros":{"result":"skipped"},"sco-current-source":{"result":"skipped"},"madaros-current-source-deref-f64":{"result":"skipped"},"native-selfhost-macos-arm64":{"result":"skipped"},"full-test-suite":{"result":"skipped"},"madaros-witness-gate":{"result":"success"},"sounio-lint":{"result":"success"},"lean-proofs":{"result":"skipped"},"website":{"result":"skipped"},"r6-corpus-sweep":{"result":"skipped"},"slow-lane":{"result":"skipped"}}'
 if NEEDS_JSON="$stdlib_needs" python3 "$DECISION" >/dev/null 2>&1; then
   echo "impact-ci-selftest: decision accepted stdlib suite without native compiler/full suite" >&2
   exit 1
 fi
 
 echo 'IMPACT_CI_SELFTEST_PASS'
+
+# Newly selected producer and SCO controls must fail closed independently.
+for new_job in current-source-madaros sco-current-source scientific-reference-controls native-linux-regressions source-bootstrap-regressions; do
+  for state in failure cancelled skipped missing; do
+    bad=$(jq --arg job "$new_job" --arg state "$state" '.[$job].result=$state' <<< "$compiler_needs")
+    # Clear the original f64 negative so only the new job can cause rejection.
+    bad=$(jq '.["madaros-current-source-deref-f64"].result="success"' <<< "$bad")
+    if NEEDS_JSON="$bad" GITHUB_EVENT_NAME=push NIGHTLY_INPUT=false python3 "$DECISION" >/dev/null 2>&1; then
+      echo "decision accepted selected $new_job as $state" >&2; exit 1
+    fi
+  done
+done
+node "$ROOT_DIR/scripts/ci/current_source_ci_contract.mjs" "$ROOT_DIR" --selftest
+
+# Positive stdlib-only control prevents unrelated missing jobs masking a failure.
+stdlib_green=$(jq '.impact.outputs.compiler="false"|.impact.outputs.stdlib="true"' <<< "$compiler_green_needs")
+NEEDS_JSON="$stdlib_green" GITHUB_EVENT_NAME=push NIGHTLY_INPUT=false python3 "$DECISION" | grep -Fq CI_DECISION_PASS
+for job in current-source-madaros sco-current-source madaros-current-source-deref-f64; do
+  bad=$(jq --arg job "$job" '.[$job].result="skipped"' <<< "$stdlib_green")
+  if NEEDS_JSON="$bad" GITHUB_EVENT_NAME=push NIGHTLY_INPUT=false python3 "$DECISION" >/dev/null 2>&1; then
+    echo "decision accepted skipped stdlib-selected $job" >&2; exit 1
+  fi
+done
+
+node "$ROOT_DIR/scripts/ci/deep_science_partition_contract.mjs" "$ROOT_DIR" --selftest

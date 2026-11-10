@@ -1,0 +1,41 @@
+//@ run-pass
+//@ description: #2658 -- &t.0 of a returned tuple (one-field and wide struct), stable across an intervening call
+//@ expect-stdout-contains: 7 7 9 9
+//@ expect-stdout-contains: TUPLE_RETURNED_BORROW_2658_OK
+
+use compiler::effects::sandbox::*
+
+struct One { n: i64 }
+struct Big { a: i64, b: i64, c: [i64; 8] }
+fn one_n(b: &One) -> i64 { b.n }
+fn big_b(b: &Big) -> i64 { b.b }
+fn mk_one(v: i64) -> (One, i64) { (One { n: v }, 2) }
+fn mk_big(v: i64) -> (Big, i64) { (Big { a: 1, b: v, c: [0; 8] }, 3) }
+fn noise(a: i64) -> i64 { a * 3 }
+
+fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
+    let t = mk_one(7)
+    let a1: i64 = one_n(&t.0)
+    let z = noise(5)
+    let a2: i64 = one_n(&t.0)
+    let u = mk_big(9)
+    let b1: i64 = big_b(&u.0)
+    let z2 = noise(6)
+    let b2: i64 = big_b(&u.0)
+    print_int(a1); print(" "); print_int(a2); print(" "); print_int(b1); print(" "); print_int(b2); print("\n")
+
+    // The issue's own shape: borrow element 0 of the tuple sandbox_execute returns.
+    var bc = bytecode_new()
+    bc = add_const_i64(bc, 42)
+    bc = emit_op_i32(bc, OP_PUSH_I64(), 0)
+    bc = emit_op(bc, OP_HALT())
+    let pure = sandbox_policy_pure()
+    let exec_pure = sandbox_execute(bc, pure)
+    let sandbox_ok = !effect_vm_has_error(&exec_pure.0) && exec_pure.1 == 2
+    if a1 == 7 && a2 == 7 && b1 == 9 && b2 == 9 && sandbox_ok && z + z2 == 33 {
+        println("TUPLE_RETURNED_BORROW_2658_OK")
+    } else {
+        println("TUPLE_RETURNED_BORROW_2658_FAIL")
+    }
+    0
+}

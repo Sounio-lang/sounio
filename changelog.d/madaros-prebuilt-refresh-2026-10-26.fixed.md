@@ -1,0 +1,1 @@
+The checked-in Madaros prebuilt (`bin/madaros-linux-x86_64`) is rebuilt from main; it had been built from 9c64b2d6 (2026-10-11), so `bin/souc` ran without two weeks of Madaros fixes, among them #2820 (`let r = &o.field` read the field at another struct's offset when an imported struct had a field of the same name).

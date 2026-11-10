@@ -1,0 +1,63 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: STDLIB_DEEP_ODE_DYNAMIC_STATUS_PASS
+use collections::numeric_buffer::{NumericBuffer,numeric_buffer_new,numeric_buffer_status,numeric_buffer_len,numeric_buffer_at,numeric_buffer_set,numeric_buffer_close}
+use ode::solver::{default_options}
+use ode::checked_dynamic::{solve_dp54_dynamic,solve_verlet_dynamic}
+fn constant_rhs(t:f64,y:&NumericBuffer,dy:&!NumericBuffer)->i64 with Mut,Div,Panic {
+ var i:i64=0
+ let n=numeric_buffer_len(dy)
+ while i<n {if numeric_buffer_set(dy,i,1.0)!=0 {return 1};i=i+1}
+ 0
+}
+fn zero_acc(t:f64,y:&NumericBuffer,dy:&!NumericBuffer)->i64 with Mut,Div,Panic {
+ var i:i64=0
+ while i<numeric_buffer_len(dy) {numeric_buffer_set(dy,i,0.0);i=i+1}
+ 0
+}
+fn incomplete(t:f64,y:&NumericBuffer,dy:&!NumericBuffer)->i64 with Mut,Div,Panic {
+ numeric_buffer_set(dy,0,1.0)
+ 0
+}
+fn reject_callback(t:f64,y:&NumericBuffer,dy:&!NumericBuffer)->i64 with Mut,Div,Panic {42}
+fn main()->i32 with IO,Mut,Div,Panic,Alloc {
+ var state=numeric_buffer_new(128,1024)
+ var velocity=numeric_buffer_new(128,1024)
+ var trial=numeric_buffer_new(128,1024)
+ var derivative=numeric_buffer_new(128,1024)
+ var work=numeric_buffer_new(896,7168)
+ var short_work=numeric_buffer_new(1,8)
+ assert(numeric_buffer_status(&state)==0 && numeric_buffer_status(&velocity)==0 && numeric_buffer_status(&trial)==0 && numeric_buffer_status(&derivative)==0 && numeric_buffer_status(&work)==0 && numeric_buffer_status(&short_work)==0)
+ var i:i64=0
+ while i<128 {numeric_buffer_set(&!state,i,0.0);numeric_buffer_set(&!velocity,i,2.0);i=i+1}
+ var opts=default_options()
+ let wrong=solve_dp54_dynamic(constant_rhs,&!state,&!trial,&!derivative,&!short_work,0.0,1.0,opts)
+ assert(wrong.status==3 && wrong.nfeval==0 && numeric_buffer_at(&state,0)==0.0)
+ let missing=solve_dp54_dynamic(incomplete,&!state,&!trial,&!derivative,&!work,0.0,1.0,opts)
+ assert(missing.status==4 && missing.steps==0 && missing.nfeval==1 && numeric_buffer_at(&state,0)==0.0)
+ let refused=solve_dp54_dynamic(reject_callback,&!state,&!trial,&!derivative,&!work,0.0,1.0,opts)
+ assert(refused.status==6 && refused.callback_status==42 && refused.steps==0)
+ let complete=solve_dp54_dynamic(constant_rhs,&!state,&!trial,&!derivative,&!work,0.0,1.0,opts)
+ assert(complete.status==0 && complete.n==128 && complete.t_final==1.0)
+ i=0
+ while i<128 {let value=numeric_buffer_at(&state,i);assert(value>0.999999999 && value<1.000000001);i=i+1}
+ let back=solve_dp54_dynamic(constant_rhs,&!state,&!trial,&!derivative,&!work,1.0,0.0,opts)
+ assert(back.status==0 && back.t_final==0.0)
+ i=0
+ while i<128 {numeric_buffer_set(&!state,i,1.0);i=i+1}
+ let linear_motion=solve_verlet_dynamic(zero_acc,&!state,&!velocity,&!trial,&!derivative,&!work,0.0,1.0,4)
+ assert(linear_motion.status==0 && linear_motion.steps==4 && linear_motion.nfeval==5)
+ i=0
+ while i<128 {assert(numeric_buffer_at(&state,i)==3.0 && numeric_buffer_at(&velocity,i)==2.0);i=i+1}
+ opts.max_steps=1;opts.dt_init=0.01
+ let budget=solve_dp54_dynamic(constant_rhs,&!state,&!trial,&!derivative,&!work,0.0,1.0,opts)
+ assert(budget.status==1 && budget.attempts==1)
+ numeric_buffer_close(state)
+ numeric_buffer_close(velocity)
+ numeric_buffer_close(trial)
+ numeric_buffer_close(derivative)
+ numeric_buffer_close(work)
+ numeric_buffer_close(short_work)
+ println("STDLIB_DEEP_ODE_DYNAMIC_STATUS_PASS")
+ 0
+}

@@ -2,8 +2,8 @@
 topic_id: repo.docs.archived.integracao-modelos-cientificos
 authority: archived
 audience: maintainers
-last_validated: 2026-03-07
-validated_by: A7
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.archived.integracao-modelos-cientificos
 -->
 
@@ -523,4 +523,4 @@ Esta integração posiciona o Sounio na vanguarda da computação científica ep
 **Status**: ✅ **Implementação Completa**  
 **Documentação**: ✅ **Finalizada**  
 **Testes**: ✅ **Validada**  
-**Integração**: ✅ **Production Ready**
+**Integração**: nota histórica deste arquivo; não é o status atual do projeto.

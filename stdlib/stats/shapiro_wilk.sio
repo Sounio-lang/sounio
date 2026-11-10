@@ -1,303 +1,191 @@
-//@ run-pass
-//@ expect-stdout: ALL PASS
-
-// stdlib/stats/shapiro_wilk.sio — Public Shapiro–Wilk W and p
-//
-// Returns classical W and a two-sided normality p-value for fixed sample sizes
-// n ∈ [5, 10] (bounded API). Half-coefficients a₁..a⌊n/2⌋ are the published
-// Shapiro & Wilk (1965) Table-5 values (4 d.p.). p for n ≥ 7 uses Royston
-// (1992) Biometrika log-transform + normal tail (documented approximation;
-// not the full AS R94 table for 3 ≤ n ≤ 11).
-//
-//   shapiro_wilk(x, n) -> ShapiroResult { w, p, n }
-//
-// W = b² / Σ(xᵢ − x̄)²,  b = Σ_{i=1}^{k} aᵢ (x_{(n−i+1)} − x_{(i)})
-// with x_{(·)} the order statistics.
-//
-// Claims NOT made: full scipy.stats.shapiro n-range; AS R94 poly for all n.
-//
-// References:
-//   Shapiro & Wilk (1965) Biometrika 52:591–611.
-//   Royston (1992) "Approximating the Shapiro–Wilk W-test" Stat. Comput. 2:117–119.
-
-module stats::shapiro_wilk
-
+// Shapiro-Wilk with Royston AS R94 coefficient/calibration approximations.
+// Mathematical coefficients: Royston (1995), JRSS C 44(4),547-551.
+// Independently organized implementation: normalized projection residual norm,
+// compensated moments, shared bounded quantiles and direct normal survival.
+// Complete uncensored samples only; 3 <= n <= 100.
+use math::pure::{sqrt,atan,exp,ln_checked,is_finite}
+use stats::bca_normal::{bca_normal_quantile}
+use stats::order::{sort100}
+use special::igamma::{igamma_upper}
 pub struct ShapiroResult {
-    pub w: f64,   // Shapiro–Wilk statistic in (0, 1]
-    pub p: f64,   // normality p-value; -1.0 if n < 7 (p not claimed)
-    pub n: i64,   // sample size used
+ pub status:i64, pub n:i64, pub w:f64, pub one_minus_w:f64, pub p:f64,
+ // calibration 0 analytic n=3, 1 Royston n=4..11, 2 Royston n=12..100.
+ pub calibration:i64, pub p_approximate:bool, pub has_ties:bool,
 }
-
-fn sw_abs(x: f64) -> f64 {
-    if x < 0.0 { return 0.0 - x }
-    return x
-}
-
-fn sw_sqrt(x: f64) -> f64 with Mut, Div, Panic {
-    if x <= 0.0 { return 0.0 }
-    var y = x
-    var i = 0
-    while i < 30 {
-        y = 0.5 * (y + x / y)
-        i = i + 1
-    }
-    return y
-}
-
+fn sw_abs(x:f64)->f64 {if x<0.0{return -x} return x}
 fn sw_exp(x: f64) -> f64 with Mut, Div, Panic {
-    // series e^x for moderate x; clamp extremes
-    if x > 80.0 { return 1.0e30 }
-    if x < 0.0 - 80.0 { return 0.0 }
-    var sum = 1.0
-    var term = 1.0
-    var n = 1
-    while n < 40 {
-        term = term * x / (n as f64)
-        sum = sum + term
-        n = n + 1
-    }
-    return sum
+    // Delegate to the shared full-range exp; a local series is not the contract.
+    exp(x)
 }
-
-fn sw_ln(x: f64) -> f64 with Mut, Div, Panic {
-    // ln via atanh series on (x-1)/(x+1) for x > 0
-    if x <= 0.0 { return 0.0 - 1.0e300 }
-    // range reduce: x = m * 2^e, m in [1,2)
-    var v = x
-    var e = 0.0
-    while v >= 2.0 { v = v * 0.5; e = e + 1.0 }
-    while v < 1.0 { v = v * 2.0; e = e - 1.0 }
-    let y = (v - 1.0) / (v + 1.0)
-    var y2 = y * y
-    var sum = 0.0
-    var term = y
-    var k = 0
-    while k < 40 {
-        sum = sum + term / (2.0 * (k as f64) + 1.0)
-        term = term * y2
-        k = k + 1
-    }
-    // ln(v) = 2*sum; ln(x) = ln(v) + e*ln2
-    return 2.0 * sum + e * 0.6931471805599453
+fn sw_empty(s:i64,n:i64)->ShapiroResult {
+ return ShapiroResult{status:s,n:n,w:0.0,one_minus_w:0.0,p:0.0,
+ calibration:if n==3 {0} else if n<=11 {1} else {2},
+ p_approximate:n!=3,has_ties:false}
 }
-
-// Φ(z) ≈ 0.5 + 0.5·erf(z/√2); erf via series / Abramowitz 7.1.26 rational
-fn sw_normal_cdf(z: f64) -> f64 with Mut, Div, Panic {
-    // Abramowitz & Stegun 7.1.26
-    let ax = sw_abs(z) / 1.4142135623730951  // |z|/√2
-    let t = 1.0 / (1.0 + 0.3275911 * ax)
-    let a1 = 0.254829592
-    let a2 = 0.0 - 0.284496736
-    let a3 = 1.421413741
-    let a4 = 0.0 - 1.453152027
-    let a5 = 1.061405429
-    let poly = ((((a5 * t + a4) * t + a3) * t + a2) * t + a1) * t
-    let erf = 1.0 - poly * sw_exp(0.0 - ax * ax)
-    let cdf_pos = 0.5 * (1.0 + erf)
-    if z >= 0.0 { return cdf_pos }
-    return 1.0 - cdf_pos
+// Polynomial corrections to the two most extreme normal-order weights.
+fn sw_c1(t:f64)->f64 {
+ return t*(0.221157+t*(-0.147981+t*(-2.07119+t*(4.434685-2.706056*t))))
 }
-
-// Load half-coefficients a₁..a_k for n in 5..10 (Shapiro & Wilk 1965).
-// out[0] = a1 (largest order-statistic weight), etc. Returns k = n/2.
-fn sw_load_a(n: i32, out: &![f64; 8]) -> i32 with Mut {
-    var i = 0
-    while i < 8 { out[i as usize] = 0.0; i = i + 1 }
-    if n == 5 {
-        out[0] = 0.6646; out[1] = 0.2413
-        return 2
-    }
-    if n == 6 {
-        out[0] = 0.6431; out[1] = 0.2806; out[2] = 0.0875
-        return 3
-    }
-    if n == 7 {
-        out[0] = 0.6233; out[1] = 0.3031; out[2] = 0.1401
-        return 3
-    }
-    if n == 8 {
-        out[0] = 0.6052; out[1] = 0.3164; out[2] = 0.1743; out[3] = 0.0561
-        return 4
-    }
-    if n == 9 {
-        out[0] = 0.5888; out[1] = 0.3244; out[2] = 0.1976; out[3] = 0.0947
-        return 4
-    }
-    if n == 10 {
-        out[0] = 0.5739; out[1] = 0.3291; out[2] = 0.2141; out[3] = 0.1224; out[4] = 0.0399
-        return 5
-    }
-    return 0
+fn sw_c2(t:f64)->f64 {
+ return t*(0.042981+t*(-0.293762+t*(-1.752461+t*(5.682633-3.582633*t))))
 }
-
-fn sw_sort(data: &![f64; 256], n: i32) with Mut {
-    var i = 0
-    while i < n {
-        var j = i + 1
-        while j < n {
-            if data[j as usize] < data[i as usize] {
-                let t = data[i as usize]
-                data[i as usize] = data[j as usize]
-                data[j as usize] = t
-            }
-            j = j + 1
-        }
-        i = i + 1
-    }
-}
-
-/// Shapiro–Wilk W and (when n ≥ 7) Royston-1992 p-value.
-///
-/// Parâmetros: x — sample; n — size in {5..10}.
-/// Retorno: ShapiroResult; w=0,p=-1 on unsupported n.
-pub fn shapiro_wilk(x: &[f64; 256], n: i32) -> ShapiroResult with Mut, Div, Panic {
-    if n < 5 || n > 10 {
-        return ShapiroResult { w: 0.0, p: 0.0 - 1.0, n: n as i64 }
-    }
-    var a: [f64; 8] = [0.0; 8]
-    let k = sw_load_a(n, &!a)
-    if k <= 0 {
-        return ShapiroResult { w: 0.0, p: 0.0 - 1.0, n: n as i64 }
-    }
-
-    // copy + sort order statistics
-    var ord: [f64; 256] = [0.0; 256]
-    var i = 0
-    while i < n {
-        ord[i as usize] = x[i as usize]
-        i = i + 1
-    }
-    sw_sort(&!ord, n)
-
-    // mean and SS from original (order does not change mean/SS)
-    var sum = 0.0
-    i = 0
-    while i < n {
-        sum = sum + ord[i as usize]
-        i = i + 1
-    }
-    let mean = sum / (n as f64)
-    var ss = 0.0
-    i = 0
-    while i < n {
-        let d = ord[i as usize] - mean
-        ss = ss + d * d
-        i = i + 1
-    }
-    if ss <= 1.0e-300 {
-        return ShapiroResult { w: 1.0, p: 1.0, n: n as i64 }
-    }
-
-    // b = Σ aᵢ (x_(n−i+1) − x_(i))
-    var b = 0.0
-    i = 0
-    while i < k {
-        let hi = ord[(n - 1 - i) as usize]
-        let lo = ord[i as usize]
-        b = b + a[i as usize] * (hi - lo)
-        i = i + 1
-    }
-    let w = (b * b) / ss
-
-    // p via Royston (1992) for n ≥ 7; n=5,6 leave p = -1 (not claimed)
-    var p = 0.0 - 1.0
-    if n >= 7 {
-        if w >= 1.0 {
-            p = 1.0
-        } else {
-            if w <= 0.0 {
-                p = 0.0
-            } else {
-                let y = sw_ln(1.0 - w)
-                let ln = sw_ln(n as f64)
-                let mu = 0.0 - 1.5861 - 0.31082 * ln - 0.083751 * ln * ln + 0.0038915 * ln * ln * ln
-                let lns = 0.0 - 0.4803 - 0.082676 * ln + 0.0030302 * ln * ln
-                let sigma = sw_exp(lns)
-                let z = (y - mu) / sigma
-                // large z (small W) ⇒ evidence of non-normality ⇒ small p
-                p = 1.0 - sw_normal_cdf(z)
-            }
-        }
-    }
-
-    return ShapiroResult { w: w, p: p, n: n as i64 }
-}
-
-fn approx(a: f64, b: f64, tol: f64) -> bool {
-    let d = a - b
-    let ad = if d < 0.0 { 0.0 - d } else { d }
-    return ad <= tol
-}
-
-fn check(name: i64, ok: bool) -> bool with IO {
-    if ok { return true }
-    print("FAIL case ")
-    print(name)
-    print("\n")
-    return false
-}
-
-// n=5 arithmetic progression: W from published a₁=0.6646,a₂=0.2413
-// sorted 1..5; mean=3; SS=10; b=0.6646*4+0.2413*2=3.141; W=b²/10=0.9865881
-fn test_w_n5() -> bool with IO, Mut, Div, Panic {
-    var x: [f64; 256] = [0.0; 256]
-    x[0] = 1.0; x[1] = 2.0; x[2] = 3.0; x[3] = 4.0; x[4] = 5.0
-    let r = shapiro_wilk(&x, 5)
-    var ok = true
-    ok = check(1, approx(r.w, 0.9865881, 1.0e-7)) && ok
-    ok = check(2, r.n == 5) && ok
-    ok = check(3, r.p < 0.0) && ok  // p not claimed for n=5
-    return ok
-}
-
-// n=10 near-linear: W ≈ 0.970158460121212 (published aᵢ)
-fn test_w_n10() -> bool with IO, Mut, Div, Panic {
-    var x: [f64; 256] = [0.0; 256]
-    var i = 0
-    while i < 10 {
-        x[i as usize] = 2.0 + (i as f64)
-        i = i + 1
-    }
-    let r = shapiro_wilk(&x, 10)
-    var ok = true
-    ok = check(10, approx(r.w, 0.970158460121212, 1.0e-9)) && ok
-    ok = check(11, r.p > 0.5) && ok  // high W ⇒ do not reject normality
-    return ok
-}
-
-// n=10 strongly skewed: W ≈ 0.738023544970166; p small
-fn test_w_skew() -> bool with IO, Mut, Div, Panic {
-    var x: [f64; 256] = [0.0; 256]
-    x[0] = 1.0; x[1] = 1.1; x[2] = 1.2; x[3] = 1.3; x[4] = 1.5
-    x[5] = 2.0; x[6] = 3.0; x[7] = 5.0; x[8] = 8.0; x[9] = 13.0
-    let r = shapiro_wilk(&x, 10)
-    var ok = true
-    ok = check(20, approx(r.w, 0.738023544970166, 1.0e-9)) && ok
-    ok = check(21, r.p < 0.05) && ok
-    return ok
-}
-
-// unsupported n
-fn test_bounds() -> bool with IO, Mut, Div, Panic {
-    var x: [f64; 256] = [0.0; 256]
-    x[0] = 1.0; x[1] = 2.0; x[2] = 3.0
-    let r = shapiro_wilk(&x, 3)
-    return check(30, r.p < 0.0 && r.w == 0.0)
-}
-
-pub fn run_tests() -> bool with IO, Mut, Div, Panic {
-    var ok = true
-    ok = test_w_n5() && ok
-    ok = test_w_n10() && ok
-    ok = test_w_skew() && ok
-    ok = test_bounds() && ok
-    return ok
-}
-
-fn main() with IO, Mut, Div, Panic {
-    if run_tests() {
-        print("ALL PASS\n")
-    } else {
-        print("SOME FAILED\n")
-    }
+// status0 available;1 size;2 nonfinite;3 constant;4 arithmetic;
+// 5 calibration unavailable (W and 1-W remain available).
+pub fn shapiro_wilk(x:&[f64;100],n:i64)->ShapiroResult with Mut,Div,Panic {
+ var out=sw_empty(1,n)
+ if n<3 || n>100 {return out}
+ var ordered:[f64;100]=[0.0;100]
+ var a:[f64;50]=[0.0;50]
+ var scale=0.0
+ var i:i64=0
+ while i<n {
+  let v=x[i as usize]
+  if !is_finite(v) {return sw_empty(2,n)}
+  ordered[i as usize]=v
+  if sw_abs(v)>scale {scale=sw_abs(v)}
+  i=i+1
+ }
+ if !sort100(&!ordered,n) {return sw_empty(4,n)}
+ let anchor=ordered[0]
+ let range=ordered[(n-1) as usize]-anchor
+ if range==0.0 {return sw_empty(3,n)}
+ i=1
+ while i<n {
+  if ordered[i as usize]==ordered[(i-1) as usize] {out.has_ties=true}
+  i=i+1
+ }
+ var sum=0.0
+ var c=0.0
+ i=0
+ while i<n {
+  var v=0.0
+  if is_finite(range) {v=(ordered[i as usize]-anchor)/range}
+  else {v=ordered[i as usize]/scale-anchor/scale}
+  ordered[i as usize]=v
+  let y=v-c
+  let t=sum+y
+  c=(t-sum)-y
+  sum=t
+  i=i+1
+ }
+ let nf=n as f64
+ let mean=sum/nf
+ let half=n/2
+ if n==3 {a[0]=sqrt(0.5)}
+ else {
+  var qsum=0.0
+  var qc=0.0
+  i=0
+  while i<half {
+   let probability=((i as f64)+0.625)/(nf+0.25)
+   let q=bca_normal_quantile(probability)
+   if q.status!=0 {return sw_empty(4,n)}
+   a[i as usize]=q.value
+   let y=q.value*q.value-qc
+   let t=qsum+y
+   qc=(t-qsum)-y
+   qsum=t
+   i=i+1
+  }
+  let norm2=2.0*qsum
+  let root=sqrt(norm2)
+  let t=1.0/sqrt(nf)
+  let first=sw_c1(t)-a[0]/root
+  var removed=2.0*a[0]*a[0]
+  var remaining=1.0-2.0*first*first
+  var begin:i64=1
+  if n>5 {
+   let second=sw_c2(t)-a[1]/root
+   removed=removed+2.0*a[1]*a[1]
+   remaining=remaining-2.0*second*second
+   a[1]=second
+   begin=2
+  }
+  if remaining<=0.0 || norm2<=removed {return sw_empty(4,n)}
+  let factor=sqrt((norm2-removed)/remaining)
+  a[0]=first
+  i=begin
+  while i<half {a[i as usize]=-a[i as usize]/factor;i=i+1}
+ }
+ // Antisymmetric weights have exactly zero algebraic mean.
+ var dot=0.0
+ var dotc=0.0
+ var anorm=0.0
+ var ac=0.0
+ i=0
+ while i<half {
+  let weight=a[i as usize]
+  let y=weight*(ordered[(n-1-i) as usize]-ordered[i as usize])-dotc
+  let t=dot+y
+  dotc=(t-dot)-y
+  dot=t
+  let v=2.0*weight*weight-ac
+  let u=anorm+v
+  ac=(u-anorm)-v
+  anorm=u
+  i=i+1
+ }
+ if anorm<=0.0 || !is_finite(anorm) {return sw_empty(4,n)}
+ let projection=dot/anorm
+ var total=0.0
+ var tc=0.0
+ var residual=0.0
+ var rc=0.0
+ i=0
+ while i<n {
+  var weight=0.0
+  if i<half {weight=-a[i as usize]}
+  else if i>=n-half {weight=a[(n-1-i) as usize]}
+  let d=ordered[i as usize]-mean
+  let e=d-projection*weight
+  let v=d*d-tc
+  let t=total+v
+  tc=(t-total)-v
+  total=t
+  let r=e*e-rc
+  let u=residual+r
+  rc=(u-residual)-r
+  residual=u
+  i=i+1
+ }
+ if total<=0.0 {return sw_empty(4,n)}
+ let w1=residual/total
+ if !is_finite(w1) || w1<0.0 || w1>1.0 {return sw_empty(4,n)}
+ out.w=1.0-w1
+ out.one_minus_w=w1
+ out.status=0
+ if n==3 {
+  let p=1.0-1.9098593171027440292*atan(sqrt(w1/out.w))
+  if p< -1.4210854715202004e-14 || p>1.0 {return sw_empty(4,n)}
+  out.p=if p<0.0 {0.0} else {p}
+  return out
+ }
+ if w1==0.0 {out.p=1.0;return out}
+ let ly=ln_checked(w1)
+ if ly.status!=0 {out.status=5;return out}
+ var y=ly.value
+ var location=0.0
+ var sd=0.0
+ if n<=11 {
+  let gamma=-2.273+0.459*nf
+  if y>=gamma {out.status=5;return out}
+  let transform=ln_checked(gamma-y)
+  if transform.status!=0 {out.status=5;return out}
+  y=-transform.value
+  location=0.544+nf*(-0.39978+nf*(0.025054-0.0006714*nf))
+  sd=sw_exp(1.3822+nf*(-0.77857+nf*(0.062767-0.0020322*nf)))
+ } else {
+  let size=ln_checked(nf)
+  if size.status!=0 {out.status=5;return out}
+  let t=size.value
+  location=-1.5861+t*(-0.31082+t*(-0.083751+0.0038915*t))
+  sd=sw_exp(-0.4803+t*(-0.082676+0.0030302*t))
+ }
+ let z=(y-location)/sd
+ if !is_finite(z) || sd<=0.0 {out.status=5;return out}
+ let tail=0.5*igamma_upper(0.5,0.5*z*z)
+ let p=if z>=0.0 {tail} else {1.0-tail}
+ if !is_finite(p) || p<0.0 || p>1.0 {out.status=5;return out}
+ out.p=p
+ return out
 }

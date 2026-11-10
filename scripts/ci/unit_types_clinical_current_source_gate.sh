@@ -2,6 +2,8 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck source=../lib/classify_compile.sh
+source "$ROOT_DIR/scripts/lib/classify_compile.sh"
 cd "$ROOT_DIR"
 
 TMP_DIR="$(mktemp -d)"
@@ -32,11 +34,15 @@ else
 fi
 
 NEGATIVE_LOG="$TMP_DIR/unit-literal-clinical-reject.log"
-if SOUNIO_SOUC_BIN="$CURRENT_SOUC" bin/souc check "$NEGATIVE" >"$NEGATIVE_LOG" 2>&1; then
+__refusal_rc=0
+SOUNIO_SOUC_BIN="$CURRENT_SOUC" bin/souc check "$NEGATIVE" >"$NEGATIVE_LOG" 2>&1 || __refusal_rc=$?
+if [[ "$__refusal_rc" -eq 0 ]]; then
   printf 'FAIL  %s unexpectedly accepted mass concentration where amount concentration was required\n' "$NEGATIVE" >&2
   cat "$NEGATIVE_LOG" >&2
   exit 1
 fi
+# rc != 0 is not yet a refusal: a crash, timeout or OOM kill is not (#2425).
+sounio_expect_failed_exit "$__refusal_rc" "$NEGATIVE_LOG" || { printf 'FAIL  %s: not a clean refusal: %s\n' "$NEGATIVE_LOG" "$(sounio_refusal_reason)" >&2; cat "$NEGATIVE_LOG" >&2; exit 1; }
 if grep -q 'unit mismatch in call argument' "$NEGATIVE_LOG"; then
   printf 'PASS  %s rejected incompatible internal label dimension\n' "$NEGATIVE"
 else

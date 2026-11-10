@@ -1,0 +1,444 @@
+// Checked dynamic OLS HC3 and single-way clustered CR0/CR1S covariance.
+// Borrowed owners, no normal equations, no finite-sample inference claim.
+use collections::numeric_buffer::{NumericBuffer,NumericMatrix,numeric_buffer_status,numeric_buffer_len,numeric_buffer_at,numeric_buffer_set,numeric_matrix_status,numeric_matrix_rows,numeric_matrix_cols,numeric_matrix_at}
+use collections::integer_buffer::{IntegerBuffer,integer_buffer_status,integer_buffer_len,integer_buffer_at,integer_buffer_set}
+use linalg::dynamic_least_squares::{DynamicLeastSquares,dynamic_qr_workspace,dynamic_qr_workspace_layout,dynamic_qr_least_squares}
+use linalg::least_squares_scale::{least_squares_scaled_product}
+use math::pure::{is_finite,sqrt}
+pub struct DynamicRobustWorkspace {pub status:i64,pub numeric_elements:i64,pub integer_elements:i64,pub payload_bytes:i64}
+pub struct DynamicRobustResult {
+ pub fit:DynamicLeastSquares,pub covariance_status:i64,pub method:i64,pub clusters:i64,
+ pub correction_factor:f64,pub assumptions_assessed:bool,pub finite_sample_calibrated:bool,
+ pub workspace_payload_bytes:i64,
+}
+pub fn dynamic_robust_workspace(n:i64,p:i64)->DynamicRobustWorkspace with Div {
+ let bad=DynamicRobustWorkspace{status:1,numeric_elements:0,integer_elements:0,payload_bytes:0}
+ if p<1 || n<=p {return bad}
+ let limit=9223372036854771704/8
+ let qr=dynamic_qr_workspace(n,p)
+ if qr<0 || qr>limit {return bad}
+ var total=qr
+ if n>(limit-total)/p {return bad}
+ total=total+n*p
+ if n>(limit-total)/p {return bad}
+ total=total+n*p
+ if p>(limit-total)/p {return bad}
+ total=total+p*p
+ if p>(limit-total)/3 {return bad}
+ total=total+3*p
+ if n>(limit-total)/2 {return bad}
+ total=total+2*n
+ DynamicRobustWorkspace{status:0,numeric_elements:total-n,integer_elements:n,payload_bytes:8*total}
+}
+fn dr_abs(x:f64)->f64 {if x<0.0 {-x}else{x}}
+fn dr_valid(b:&NumericBuffer,n:i64)->bool {numeric_buffer_status(b)==0 && numeric_buffer_len(b)==n}
+fn dr_swap(order:&!IntegerBuffer,a:i64,b:i64) with Mut,Panic {
+ let t=integer_buffer_at(order,a)
+ let other=integer_buffer_at(order,b)
+ integer_buffer_set(order,a,other)
+ integer_buffer_set(order,b,t)
+}
+fn dr_sift(ids:&IntegerBuffer,order:&!IntegerBuffer,first:i64,end:i64) with Mut,Div,Panic {
+ var parent=first
+ while parent<end/2 {
+  var child=2*parent+1
+  if child+1<end {
+   if integer_buffer_at(ids,integer_buffer_at(order,child))<integer_buffer_at(ids,integer_buffer_at(order,child+1)) {child=child+1}
+  }
+  if integer_buffer_at(ids,integer_buffer_at(order,parent))>=integer_buffer_at(ids,integer_buffer_at(order,child)) {return}
+  dr_swap(order,parent,child)
+  parent=child
+ }
+}
+fn dr_sort(ids:&IntegerBuffer,order:&!IntegerBuffer,n:i64) with Mut,Div,Panic {
+ var i:i64=0
+ while i<n {integer_buffer_set(order,i,i);i=i+1}
+ i=n/2
+ while i>0 {i=i-1;dr_sift(ids,order,i,n)}
+ i=n
+ while i>1 {i=i-1;dr_swap(order,0,i);dr_sift(ids,order,0,i)}
+}
+// Group starts are -(original_row+1), other entries are original_row.
+// Encoded indices stay within the checked row range; arbitrary IDs never subtract.
+fn dr_cluster_order(ids:&IntegerBuffer,order:&!IntegerBuffer,n:i64)->bool with Mut,Div,Panic {
+ if integer_buffer_status(ids)!=0 || integer_buffer_len(ids)!=n ||
+ integer_buffer_status(order)!=0 || integer_buffer_len(order)!=n {return false}
+ dr_sort(ids,order,n)
+ var i:i64=0
+ var previous:i64=0
+ while i<n {
+  let index=integer_buffer_at(order,i)
+  let label=integer_buffer_at(ids,index)
+  if i==0 || label!=previous {integer_buffer_set(order,i,-index-1)}
+  previous=label
+  i=i+1
+ }
+ true
+}
+fn dr_gram(w:&!NumericBuffer,base:i64,stride:i64,m:i64,p:i64,cov:i64,se:i64)->bool with Mut,Div,Panic {
+ var j:i64=0
+ while j<p {
+  var scale=0.0
+  var ssq=1.0
+  var i:i64=0
+  while i<m {
+   let a=dr_abs(numeric_buffer_at(w,base+j*stride+i))
+   if a>0.0 {
+    if a>scale {let r=scale/a;ssq=1.0+ssq*r*r;scale=a}
+    else {let r=a/scale;ssq=ssq+r*r}
+   }
+   i=i+1
+  }
+  let norm=least_squares_scaled_product(scale,sqrt(ssq),1.0,1.0,1.0,1.0)
+  if norm.status!=0 {return false}
+  numeric_buffer_set(w,se+j,norm.value)
+  j=j+1
+ }
+ var k:i64=0
+ while k<p {
+  j=k
+  while j<p {
+   let left=numeric_buffer_at(w,se+k)
+   let right=numeric_buffer_at(w,se+j)
+   var value=0.0
+   if left>0.0 && right>0.0 {
+    var sum=0.0
+    var correction=0.0
+    var i:i64=0
+    while i<m {
+     let raw_a=numeric_buffer_at(w,base+k*stride+i)
+     let raw_b=numeric_buffer_at(w,base+j*stride+i)
+     let a=raw_a/left
+     let b=raw_b/right
+     if raw_a!=0.0 && a==0.0 {return false}
+     if raw_b!=0.0 && b==0.0 {return false}
+     let product=a*b
+     if a!=0.0 && b!=0.0 && product==0.0 {return false}
+     let adjusted=product-correction
+     let next=sum+adjusted
+     correction=(next-sum)-adjusted
+     sum=next
+     if !is_finite(sum) || !is_finite(correction) {return false}
+     i=i+1
+    }
+    let restored=least_squares_scaled_product(sum,left,right,1.0,1.0,1.0)
+    if restored.status!=0 {return false}
+    if sum!=0.0 && restored.value==0.0 {return false}
+    if j==k && restored.value<=0.0 {return false}
+    value=restored.value
+   }
+   numeric_buffer_set(w,cov+k*p+j,value)
+   numeric_buffer_set(w,cov+j*p+k,value)
+   j=j+1
+  }
+  k=k+1
+ }
+ true
+}
+// method 0 HC3, 1 CR0, 2 CR1S. Public covariance/SE/leverage commit together.
+fn dr_fit(a:&NumericBuffer,layout:&NumericMatrix,y:&NumericBuffer,
+ method:i64,clusters_valid:bool,rcond:f64,beta:&!NumericBuffer,covariance:&!NumericBuffer,se:&!NumericBuffer,
+ leverage:&!NumericBuffer,w:&!NumericBuffer,order:&!IntegerBuffer)->DynamicRobustResult with Mut,Div,Panic {
+ let n=numeric_matrix_rows(layout)
+ let p=numeric_matrix_cols(layout)
+ let query=dynamic_robust_workspace(n,p)
+ let bad_fit=DynamicLeastSquares{status:1,rows:n,columns:p,rank:0,df:0,residual_norm:0.0,r_diagonal_ratio:0.0,workspace_elements:0}
+ var out=DynamicRobustResult{fit:bad_fit,covariance_status:2,method:method,clusters:0,correction_factor:0.0,assumptions_assessed:false,finite_sample_calibrated:false,workspace_payload_bytes:query.payload_bytes}
+ if query.status!=0 || numeric_matrix_status(layout)!=0 {return out}
+ if numeric_buffer_status(w)!=0 || numeric_buffer_len(w)<query.numeric_elements {return out}
+ if integer_buffer_status(order)!=0 || integer_buffer_len(order)!=n {return out}
+ if method<0 || method>2 {out.covariance_status=5;return out}
+ let fitted=dynamic_qr_least_squares(a,layout,y,beta,w,rcond)
+ out.fit=fitted
+ if fitted.status!=0 {out.covariance_status=1;return out}
+ if !dr_valid(covariance,p*p) || !dr_valid(se,p) || !dr_valid(leverage,n) {return out}
+ if method!=0 {if !clusters_valid {return out}}
+ let qr=dynamic_qr_workspace(n,p)
+ let factor_layout=dynamic_qr_workspace_layout(n,p)
+ let rbase=factor_layout.factor_offset
+ let scales=factor_layout.scale_offset
+ let pivots=factor_layout.permutation_offset
+ let qbase=qr
+ let vbase=qbase+p
+ let influences=vbase+p
+ let clustered=influences+n*p
+ let cov=clustered+n*p
+ let sestage=cov+p*p
+ let hstage=sestage+p
+ var row:i64=0
+ out.covariance_status=4
+ while row<n {
+  var fitted_value=0.0
+  var fitted_correction=0.0
+  var j:i64=0
+  while j<p {
+   let raw=numeric_matrix_at(a,layout,row,j)
+   let coefficient=numeric_buffer_at(beta,j)
+   let product=raw*coefficient
+   if !is_finite(product) {return out}
+   if raw!=0.0 && coefficient!=0.0 && product==0.0 {return out}
+   let adjusted=product-fitted_correction
+   let next=fitted_value+adjusted
+   fitted_correction=(next-fitted_value)-adjusted
+   fitted_value=next
+   if !is_finite(fitted_value) || !is_finite(fitted_correction) {return out}
+   j=j+1
+  }
+  let residual=numeric_buffer_at(y,row)-fitted_value
+  if !is_finite(residual) {return out}
+  j=0
+  var h=0.0
+  var hc=0.0
+  while j<p {
+   let original=numeric_buffer_at(w,pivots+j) as i64
+   if original<0 || original>=p {return out}
+   let scale=numeric_buffer_at(w,scales+original)
+   if !is_finite(scale) || scale<=0.0 {return out}
+   let raw=numeric_matrix_at(a,layout,row,original)
+   let normalized=raw/scale
+   if raw!=0.0 && normalized==0.0 {return out}
+   var sum=0.0
+   var correction=0.0
+   var k:i64=0
+   while k<j {
+    let x=numeric_buffer_at(w,rbase+k*p+j)
+    let z=numeric_buffer_at(w,qbase+k)
+    let product=x*z
+    if !is_finite(product) {return out}
+    if x!=0.0 && z!=0.0 && product==0.0 {return out}
+    let adjusted=product-correction
+    let next=sum+adjusted
+    correction=(next-sum)-adjusted
+    sum=next
+    k=k+1
+   }
+   let numerator=normalized-sum
+   let q=numerator/numeric_buffer_at(w,rbase+j*p+j)
+   if !is_finite(q) {return out}
+   if numerator!=0.0 && q==0.0 {return out}
+   numeric_buffer_set(w,qbase+j,q)
+   let square=q*q
+   if !is_finite(square) {return out}
+   if q!=0.0 && square==0.0 {return out}
+   let adjusted=square-hc
+   let next=h+adjusted
+   hc=(next-h)-adjusted
+   h=next
+   j=j+1
+  }
+  if !is_finite(h) || h<0.0 {return out}
+  if method==0 {if h>=1.0 {out.covariance_status=3;return out}}
+  numeric_buffer_set(w,hstage+row,h)
+  j=p
+  while j>0 {
+   j=j-1
+   var sum=0.0
+   var correction=0.0
+   var k=j+1
+   while k<p {
+    let x=numeric_buffer_at(w,rbase+j*p+k)
+    let z=numeric_buffer_at(w,vbase+k)
+    let product=x*z
+    if !is_finite(product) {return out}
+    if x!=0.0 && z!=0.0 && product==0.0 {return out}
+    let adjusted=product-correction
+    let next=sum+adjusted
+    correction=(next-sum)-adjusted
+    sum=next
+    k=k+1
+   }
+   let numerator=numeric_buffer_at(w,qbase+j)-sum
+   let v=numerator/numeric_buffer_at(w,rbase+j*p+j)
+   if !is_finite(v) {return out}
+   if numerator!=0.0 && v==0.0 {return out}
+   numeric_buffer_set(w,vbase+j,v)
+  }
+  j=0
+  while j<p {
+   let original=numeric_buffer_at(w,pivots+j) as i64
+   let v=numeric_buffer_at(w,vbase+j)
+   let denominator=if method==0 {1.0-h}else{1.0}
+   let influence=least_squares_scaled_product(v,dr_abs(residual),1.0,numeric_buffer_at(w,scales+original),denominator,1.0)
+   if influence.status!=0 {return out}
+   if v!=0.0 && residual!=0.0 && influence.value==0.0 {return out}
+   let signed=if residual<0.0 {-influence.value}else{influence.value}
+   numeric_buffer_set(w,influences+original*n+row,signed)
+   j=j+1
+  }
+  row=row+1
+ }
+ var base=influences
+ var items=n
+ var factor=1.0
+ if method!=0 {
+  var groups:i64=0
+  var first:i64=0
+  while first<n {
+   var end=first+1
+   var same=true
+   while end<n && same {
+    if integer_buffer_at(order,end)>=0 {end=end+1}else{same=false}
+   }
+   var j:i64=0
+   while j<p {
+    var sum=0.0
+    var correction=0.0
+    var index=first
+    while index<end {
+     let encoded=integer_buffer_at(order,index)
+     let original_row=if encoded<0 {-encoded-1}else{encoded}
+     let value=numeric_buffer_at(w,influences+j*n+original_row)
+     let adjusted=value-correction
+     let next=sum+adjusted
+     correction=(next-sum)-adjusted
+     sum=next
+     if !is_finite(sum) || !is_finite(correction) {return out}
+     index=index+1
+    }
+    numeric_buffer_set(w,clustered+j*n+groups,sum)
+    j=j+1
+   }
+   groups=groups+1
+   first=end
+  }
+  out.clusters=groups
+  if groups<2 {out.covariance_status=3;return out}
+  if method==2 {
+   factor=((groups as f64)/((groups-1) as f64))*(((n-1) as f64)/((n-p) as f64))
+   if !is_finite(factor) || factor<=0.0 {return out}
+   let root=sqrt(factor)
+   var j:i64=0
+   while j<p {
+    var group:i64=0
+    while group<groups {
+     let value=numeric_buffer_at(w,clustered+j*n+group)
+     let corrected=least_squares_scaled_product(value,root,1.0,1.0,1.0,1.0)
+     if corrected.status!=0 {return out}
+     if value!=0.0 && corrected.value==0.0 {return out}
+     numeric_buffer_set(w,clustered+j*n+group,corrected.value)
+     group=group+1
+    }
+    j=j+1
+   }
+  }
+  base=clustered
+  items=groups
+ }
+ if !dr_gram(w,base,n,items,p,cov,sestage) {return out}
+ var j:i64=0
+ while j<p*p {numeric_buffer_set(covariance,j,numeric_buffer_at(w,cov+j));j=j+1}
+ j=0
+ while j<p {numeric_buffer_set(se,j,numeric_buffer_at(w,sestage+j));j=j+1}
+ row=0
+ while row<n {numeric_buffer_set(leverage,row,numeric_buffer_at(w,hstage+row));row=row+1}
+ out.covariance_status=0
+ out.correction_factor=factor
+ out
+}
+pub fn dynamic_linear_hc3(a:&NumericBuffer,layout:&NumericMatrix,y:&NumericBuffer,rcond:f64,
+ beta:&!NumericBuffer,covariance:&!NumericBuffer,se:&!NumericBuffer,leverage:&!NumericBuffer,
+ work:&!NumericBuffer,order:&!IntegerBuffer)->DynamicRobustResult with Mut,Div,Panic {
+ dr_fit(a,layout,y,0,true,rcond,beta,covariance,se,leverage,work,order)
+}
+pub fn dynamic_linear_cluster(a:&NumericBuffer,layout:&NumericMatrix,y:&NumericBuffer,ids:&IntegerBuffer,method:i64,rcond:f64,
+ beta:&!NumericBuffer,covariance:&!NumericBuffer,se:&!NumericBuffer,leverage:&!NumericBuffer,
+ work:&!NumericBuffer,order:&!IntegerBuffer)->DynamicRobustResult with Mut,Div,Panic {
+ // Public method0 CR0, method1 CR1S. Invalid method never starts a fit.
+ let translated=if method==0 {1}else{if method==1 {2}else{3}}
+ var valid=false
+ if translated<3 {valid=dr_cluster_order(ids,order,numeric_matrix_rows(layout))}
+ dr_fit(a,layout,y,translated,valid,rcond,beta,covariance,se,leverage,work,order)
+}
+
+// Computational contrast from the retained influence rows of the last success.
+// This metadata is NOT an authenticated capability; see caller association contract.
+pub struct DynamicRobustContrast {
+ pub status:i64,pub estimate:f64,pub standard_error:f64,pub variance:f64,
+ pub variance_status:i64,pub method:i64,pub assumptions_assessed:bool,
+ pub finite_sample_calibrated:bool,
+}
+fn drc_empty(status:i64,method:i64)->DynamicRobustContrast {
+ DynamicRobustContrast{status:status,estimate:0.0,standard_error:0.0,variance:0.0,
+ variance_status:2,method:method,assumptions_assessed:false,finite_sample_calibrated:false}
+}
+pub fn dynamic_robust_contrast(result:&DynamicRobustResult,contrast:&NumericBuffer,
+ beta:&NumericBuffer,work:&NumericBuffer)->DynamicRobustContrast with Mut,Div,Panic {
+ if result.fit.status!=0 || result.covariance_status!=0 {return drc_empty(1,result.method)}
+ let n=result.fit.rows
+ let p=result.fit.columns
+ let query=dynamic_robust_workspace(n,p)
+ if query.status!=0 || result.fit.rank!=p || result.method<0 || result.method>2 {return drc_empty(2,result.method)}
+ if !dr_valid(contrast,p) || !dr_valid(beta,p) || numeric_buffer_status(work)!=0 {return drc_empty(2,result.method)}
+ if numeric_buffer_len(work)<query.numeric_elements {return drc_empty(2,result.method)}
+ var items=n
+ let qr=dynamic_qr_workspace(n,p)
+ var base=qr+2*p
+ if result.method!=0 {
+  if result.clusters<2 || result.clusters>n {return drc_empty(2,result.method)}
+  items=result.clusters
+  base=base+n*p
+ }
+ if !is_finite(result.correction_factor) || result.correction_factor<=0.0 {return drc_empty(2,result.method)}
+ var j:i64=0
+ // Validate all public coordinates before producing either estimate or SE.
+ while j<p {
+  if !is_finite(numeric_buffer_at(contrast,j)) || !is_finite(numeric_buffer_at(beta,j)) {return drc_empty(3,result.method)}
+  j=j+1
+ }
+ var estimate=0.0
+ var estimate_correction=0.0
+ j=0
+ while j<p {
+  let c=numeric_buffer_at(contrast,j)
+  let coefficient=numeric_buffer_at(beta,j)
+  let product=c*coefficient
+  if !is_finite(product) {return drc_empty(4,result.method)}
+  if c!=0.0 && coefficient!=0.0 && product==0.0 {return drc_empty(4,result.method)}
+  let adjusted=product-estimate_correction
+  let next=estimate+adjusted
+  estimate_correction=(next-estimate)-adjusted
+  estimate=next
+  if !is_finite(estimate) || !is_finite(estimate_correction) {return drc_empty(4,result.method)}
+  j=j+1
+ }
+ var scale=0.0
+ var ssq=1.0
+ var row:i64=0
+ while row<items {
+  var sum=0.0
+  var correction=0.0
+  j=0
+  while j<p {
+   let c=numeric_buffer_at(contrast,j)
+   let influence=numeric_buffer_at(work,base+j*n+row)
+   if !is_finite(influence) {return drc_empty(4,result.method)}
+   let product=c*influence
+   if !is_finite(product) {return drc_empty(4,result.method)}
+   if c!=0.0 && influence!=0.0 && product==0.0 {return drc_empty(4,result.method)}
+   let adjusted=product-correction
+   let next=sum+adjusted
+   correction=(next-sum)-adjusted
+   sum=next
+   if !is_finite(sum) || !is_finite(correction) {return drc_empty(4,result.method)}
+   j=j+1
+  }
+  let magnitude=dr_abs(sum)
+  if magnitude>0.0 {
+   if magnitude>scale {let ratio=scale/magnitude;ssq=1.0+ssq*ratio*ratio;scale=magnitude}
+   else {let ratio=magnitude/scale;ssq=ssq+ratio*ratio}
+  }
+  row=row+1
+ }
+ let norm=least_squares_scaled_product(scale,sqrt(ssq),1.0,1.0,1.0,1.0)
+ if norm.status!=0 {return drc_empty(4,result.method)}
+ if scale>0.0 && norm.value==0.0 {return drc_empty(4,result.method)}
+ let square=least_squares_scaled_product(norm.value,norm.value,1.0,1.0,1.0,1.0)
+ var variance=0.0
+ var variance_status:i64=1
+ if square.status==0 {
+  if norm.value==0.0 || square.value>0.0 {variance=square.value;variance_status=0}
+ }
+ DynamicRobustContrast{status:0,estimate:estimate,standard_error:norm.value,
+ variance:variance,variance_status:variance_status,method:result.method,
+ assumptions_assessed:false,finite_sample_calibrated:false}
+}

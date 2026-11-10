@@ -108,6 +108,27 @@ done
 [[ ${#PROGRAMS[@]} -gt 0 ]] || fail "no programs found under tests/run-pass"
 echo "[madaros-corpus] programs: ${#PROGRAMS[@]} (skipped $skipped: //@ ignore or no fn main)"
 
+# Dynlink run-pass programs compile, then the dynamic loader exits 127 unless
+# the probe libraries and libzstd are on LD_LIBRARY_PATH. The dedicated dynlink
+# gate builds them; this gate has to as well, or those programs fail for a
+# missing file rather than a compiler defect.
+DYNLIB="$WORK/dynlib"
+mkdir -p "$DYNLIB"
+if [[ -f tests/fixtures/kl14b/kl14b_probe.c ]]; then
+  gcc -shared -fPIC -O0 -o "$DYNLIB/libkl14b_probe.so" tests/fixtures/kl14b/kl14b_probe.c
+  gcc -shared -fPIC -O0 -o "$DYNLIB/libkl14c_probe.so" tests/fixtures/kl14c/kl14c_probe.c
+  gcc -shared -fPIC -O0 -o "$DYNLIB/libkl14d_a.so" tests/fixtures/kl14d/lib_a.c
+  gcc -shared -fPIC -O0 -o "$DYNLIB/libkl14d_b.so" tests/fixtures/kl14d/lib_b.c
+  if ! ldconfig -p 2>/dev/null | grep -q 'libzstd.so.1 '; then
+    ZSTD_SO="$(find /usr/lib /lib /usr/lib64 -name 'libzstd.so.1*' 2>/dev/null | head -1 || true)"
+    if [[ -n "$ZSTD_SO" ]]; then
+      cp -Lf "$ZSTD_SO" "$DYNLIB/libzstd.so.1"
+    fi
+  fi
+  export LD_LIBRARY_PATH="$DYNLIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+  echo "[madaros-corpus] dynlink libs: $DYNLIB"
+fi
+
 cat > "$WORK/run_one.sh" <<'INNER'
 #!/usr/bin/env bash
 src="$1"
@@ -120,7 +141,7 @@ printf '%s\n' "$name" >> "$WORK/ran.txt"
 elf="$WORK/${name%.sio}.elf"
 
 # A test declaring an environment feature we are not providing is not a failure.
-if grep -qE '^//@ requires: (gpu|llvm)' "$src" 2>/dev/null; then exit 0; fi
+if grep -qE '^//@ requires: (gpu|llvm|lean_single)' "$src" 2>/dev/null; then exit 0; fi
 # Tests the repo already declares as known failures are not regressions.
 if grep -qE '^//@ known-failure' "$src" 2>/dev/null; then exit 0; fi
 

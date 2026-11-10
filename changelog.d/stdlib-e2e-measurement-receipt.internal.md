@@ -1,0 +1,1 @@
+Each `Stdlib Reliability` run uploads `stdlib_e2e_receipt.v1.json` with the runner exit code, the SHA, the run id and `measurement: valid` or `unavailable`. E2E totals count as measured only when a fresh output file with the expected schema exists; the committed snapshot never stands in for a measurement.

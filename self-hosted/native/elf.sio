@@ -58,30 +58,44 @@ pub fn string_table_new() -> StringTable {
     out
 }
 
+// #1646: StringTable (.rodata/.data byte tables) capacity. The appenders used
+// to stop writing at the cap but keep advancing (data_section_add_f64) or
+// silently truncate (string_table_add), handing callers offsets into bytes
+// that were never written. They now set ELF_STRTAB_OVERFLOW instead, and the
+// native writers refuse the ELF (rc 28) when it is set.
+pub fn elf_strtab_capacity_bytes() -> i64 { 8192 }
+pub var ELF_STRTAB_OVERFLOW: i64 = 0
+
 // Add a string to the table; offset stored in .last_offset.
 // s_bytes width matches Name.buf (384). A narrower param silently rejected
 // longer string literals at the type boundary after Name capacity was raised.
 pub fn string_table_add(st: StringTable, s_bytes: [i8; 384], s_len: i64) -> StringTable with Mut, Panic, Div {
     var t = st
     t.last_offset = t.len
+    if s_len < 0 || t.len + s_len + 1 > elf_strtab_capacity_bytes() {
+        ELF_STRTAB_OVERFLOW = 1
+        return t
+    }
     var i = 0
-    while i < s_len && t.len < 8192 {
+    while i < s_len {
         t.bytes[t.len as usize] = s_bytes[i as usize]
         t.len = t.len + 1
         i = i + 1
     }
     // Add null terminator
-    if t.len < 8192 {
-        t.bytes[t.len as usize] = 0
-        t.len = t.len + 1
-    }
+    t.bytes[t.len as usize] = 0
+    t.len = t.len + 1
     t
 }
 
 // Align data section to given boundary (pad with zero bytes)
 pub fn data_section_align(st: StringTable, alignment: i64) -> StringTable with Mut, Panic, Div {
     var t = st
-    while (t.len % alignment) != 0 && t.len < 8192 {
+    while (t.len % alignment) != 0 {
+        if t.len >= elf_strtab_capacity_bytes() {
+            ELF_STRTAB_OVERFLOW = 1
+            return t
+        }
         t.bytes[t.len as usize] = 0
         t.len = t.len + 1
     }
@@ -93,8 +107,12 @@ pub fn data_section_align(st: StringTable, alignment: i64) -> StringTable with M
 pub fn data_section_add_f64(st: StringTable, bits: i64) -> StringTable with Mut, Panic, Div {
     var t = data_section_align(st, 8)
     t.last_offset = t.len
+    if t.len + 8 > elf_strtab_capacity_bytes() {
+        ELF_STRTAB_OVERFLOW = 1
+        return t
+    }
     var i: i64 = 0
-    while i < 8 && (t.len + i) < 8192 {
+    while i < 8 {
         t.bytes[(t.len + i) as usize] = ((bits >> (i * 8)) & 0xFF) as i8
         i = i + 1
     }

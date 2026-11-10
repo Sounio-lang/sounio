@@ -2,6 +2,8 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck source=../lib/classify_compile.sh
+source "$ROOT_DIR/scripts/lib/classify_compile.sh"
 cd "$ROOT_DIR"
 
 STRUCTURAL_ONLY=0
@@ -226,11 +228,15 @@ assert_compile_reserved() {
   local label="$2"
   local out="$TMP_DIR/$label.elf"
   local log="$TMP_DIR/$label.compile.log"
-  if run_compiler compile "$source" -o "$out" >"$log" 2>&1; then
+  __refusal_rc=0
+  run_compiler compile "$source" -o "$out" >"$log" 2>&1 || __refusal_rc=$?
+  if [[ "$__refusal_rc" -eq 0 ]]; then
     echo "FAIL $label unexpectedly compiled" >&2
     cat "$log" >&2
     exit 1
   fi
+  # rc != 0 is not yet a refusal: a crash, timeout or OOM kill is not (#2425).
+  sounio_expect_refusal "$__refusal_rc" "$log" "$out" "" || { printf 'FAIL  %s: not a clean refusal: %s\n' "$log" "$(sounio_refusal_reason)" >&2; cat "$log" >&2; exit 1; }
   if ! grep -Fq 'error[E249' "$log" || ! grep -Fq "$RESERVED_MESSAGE" "$log"; then
     echo "FAIL $label compilation did not stop at E249" >&2
     cat "$log" >&2

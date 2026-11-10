@@ -1,0 +1,1 @@
+The Arrow device feed stages one float32 matrix of up to 8 MiB. Eight features at that size are 262144 rows, and `arrow_feed_rows_for_payload` returns that count. Each IPC record batch is still at most 16 rows; the feed writes one batch per 16 rows and assembles them into the single device copy. Nulls and float64 features are refused.

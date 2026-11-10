@@ -307,7 +307,7 @@ const status = {
     core: {
       label: "Lexer / Parser / Type Checker",
       level: "verified",
-      reason: "Production-grade per KNOWN_LIMITATIONS.md; no active known bugs",
+      reason: "Verified (gate pass); pre-1.0",
       artifact: "docs/compiler/KNOWN_LIMITATIONS.md",
     },
     nativeBackend: {

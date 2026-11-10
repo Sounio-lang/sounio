@@ -1,0 +1,1 @@
+The K-AXI PTX golden gate compares each fresh emission with the versioned `.ptx` byte for byte. The one-line `.sha256` sidecars that repeated those bytes are gone, except the PBPK and rapamycin patterns, which are unchanged.

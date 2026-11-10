@@ -1,3 +1,6 @@
+use viz::uncertainty::{uncertainty_prefix,uncertainty_domain,uncertainty_strip,uncertainty_segment,uncertainty_raster_segment}
+use viz::scatter::{scatter_geometry}
+use display::canvas_ext::{PixelScissor,canvas_draw_line_aa_scissored}
 // stdlib/viz/epiviz.sio — Epistemic uncertainty visualization
 //
 // Renders Epistemic data (val ± σ, confidence) directly from
@@ -10,6 +13,7 @@ use display::font::{font_draw_string}
 use viz::coord::{CoordSystem, coord_map_x, coord_map_y}
 use viz::colormap::{viridis_r, viridis_g, viridis_b}
 use epistemic::knowledge::{Epistemic}
+use math::pure::{exp}
 
 // ============================================================
 // Internal
@@ -51,41 +55,54 @@ fn epiviz_draw_band_row(c: &!Canvas, x: i64, y: i64, w: i64, r: i64, g: i64, b: 
 // Band is rendered as a translucent region between val-σ and val+σ.
 
 pub fn epiviz_band(
-    cs: &CoordSystem,
-    xs: &[f64; 1024],
-    vals: &[f64; 1024],
-    vars: &[f64; 1024],
-    n: i64,
-    c: &!Canvas,
-    r: i64, g: i64, b: i64,
-) with Mut, Div {
-    if n == 0 { return }
-    // First pass: draw the ±1σ band
-    var i: i64 = 0
-    while i < n {
-        let sx   = coord_map_x(cs, xs[i as usize])
-        let sigma = epiviz_sqrt(vars[i as usize])
-        let y_lo = coord_map_y(cs, vals[i as usize] - sigma)
-        let y_hi = coord_map_y(cs, vals[i as usize] + sigma)
-        let band_top    = if y_hi < y_lo { y_hi } else { y_lo }
-        let band_bottom = if y_hi > y_lo { y_hi } else { y_lo }
-        var py = band_top
-        while py <= band_bottom {
-            epiviz_draw_band_row(c, sx - 1, py, 3, r / 2, g / 2, b)
-            py = py + 1
-        }
-        i = i + 1
+ cs:&CoordSystem,xs:&[f64;1024],vals:&[f64;1024],vars:&[f64;1024],
+ n:i64,c:&!Canvas,r:i64,g:i64,b:i64,
+) with Mut,Div,Panic {
+ // Validate the entire prefix before the first pixel is painted.
+ if !uncertainty_prefix(xs,vals,vars,n) || n==0 {return}
+ let xmin:f64=cs.data_x_min
+ let xmax:f64=cs.data_x_max
+ let ymin:f64=cs.data_y_min
+ let ymax:f64=cs.data_y_max
+ let x:i64=cs.screen_x
+ let y:i64=cs.screen_y
+ let w:i64=cs.screen_w
+ let h:i64=cs.screen_h
+ if !uncertainty_domain(xmin,xmax,ymin,ymax) || !scatter_geometry(x,y,w,h) {return}
+ let left=if x<0 {0} else {x}
+ let top=if y<0 {0} else {y}
+ let right=if x+w>=c.width {c.width-1} else {x+w}
+ let bottom=if y+h>=c.height {c.height-1} else {y+h}
+ if left>right || top>bottom {return}
+ var i:i64=0
+ while i<n {
+  let strip=uncertainty_strip(xs[i as usize],vals[i as usize],vars[i as usize],xmin,xmax,ymin,ymax,x,y,w,h)
+  if strip.status==0 {
+   let sx=if strip.x<left {left} else {strip.x}
+   let ex=if strip.x+strip.w-1>right {right} else {strip.x+strip.w-1}
+   var py=if strip.y<top {top} else {strip.y}
+   let ey=if strip.y+strip.h-1>bottom {bottom} else {strip.y+strip.h-1}
+   while py<=ey {
+    var px=sx
+    while px<=ex {
+     if (px+py)%2==0 {canvas_fill_rect(c,px,py,1,1,r/2,g/2,b)}
+     px=px+1
     }
-    // Second pass: center line (solid, antialiased)
-    var j: i64 = 0
-    while j < n - 1 {
-        let sx0 = coord_map_x(cs, xs[j as usize])
-        let sy0 = coord_map_y(cs, vals[j as usize])
-        let sx1 = coord_map_x(cs, xs[(j + 1) as usize])
-        let sy1 = coord_map_y(cs, vals[(j + 1) as usize])
-        canvas_draw_line_aa(c, sx0, sy0, sx1, sy1, r, g, b)
-        j = j + 1
-    }
+    py=py+1
+   }
+  }
+  i=i+1
+ }
+ let sc=PixelScissor{left:left,top:top,right:right,bottom:bottom}
+ var j:i64=0
+ while j+1<n {
+  let seg=uncertainty_segment(xs[j as usize],vals[j as usize],xs[(j+1) as usize],vals[(j+1) as usize],xmin,xmax,ymin,ymax,x,y,w,h)
+  if seg.status==0 {
+   let raster=uncertainty_raster_segment(seg.x0,seg.y0,seg.x1,seg.y1,left,top,right,bottom)
+   if raster.status==0 {canvas_draw_line_aa_scissored(c,&sc,raster.x0,raster.y0,raster.x1,raster.y1,r,g,b)}
+  }
+  j=j+1
+ }
 }
 
 // ============================================================
@@ -99,7 +116,8 @@ pub fn epiviz_knowledge_series(
     n: i64,
     c: &!Canvas,
     r: i64, g: i64, b: i64,
-) with Mut, Div {
+) with Mut, Div, Panic {
+    if n < 0 || n > 1024 { return }
     // Unpack vals + vars into local arrays
     var vals: [f64; 1024] = [0.0; 1024]
     var vars: [f64; 1024] = [0.0; 1024]
@@ -687,17 +705,8 @@ fn epiviz_ln(x: f64) -> f64 with Mut, Div {
 
 // exp(x) via Taylor series — private; clamp |x| <= 20.
 fn epiviz_exp(x: f64) -> f64 with Mut, Div {
-    if x < 0.0 - 20.0 { return 0.0 }
-    if x > 20.0 { return 485165195.0 }
-    var r: f64 = 1.0
-    var term: f64 = 1.0
-    var k: i64 = 1
-    while k <= 20 {
-        term = term * x / (k as f64)
-        r = r + term
-        k = k + 1
-    }
-    r
+    // #846: delegate to the shared, full-range math::pure::exp.
+    exp(x)
 }
 
 // C^n for integer n via binary exponentiation — private.

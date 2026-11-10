@@ -1,0 +1,368 @@
+// Checked PCG-backed count samplers. See CHECKED_COUNT_SAMPLING.md.
+use random::pcg64_core::{PcgState,pcg_step,pcg_next_f64_into,pcg_u128_add}
+use math::pure::{is_finite,sqrt,cos,exp,ln}
+use math::logarithmic::{log1p_checked,log1pmx_checked}
+use stats::regression::nb2_likelihood::{Nb2LikelihoodSlot,nb2_likelihood_slot,nb2_log_probability_into,nb2_likelihood_slot_log_probability}
+
+pub struct CountDraw {
+    pub status:i64,
+    pub count:i64,
+    pub rng:PcgState,
+    pub uniforms:i64,
+    pub proposals:i64,
+    pub resolution_limited:bool,
+    pub rate_underflow:bool,
+}
+pub struct GammaDraw {
+    pub status:i64,
+    pub value:f64,
+    pub log_value:f64,
+    pub value_available:bool,
+    pub log_available:bool,
+    pub rounded_underflow:bool,
+    pub rng:PcgState,
+    pub uniforms:i64,
+    pub proposals:i64,
+}
+pub struct CountCursor {
+    likelihood:Nb2LikelihoodSlot,
+    rng:PcgState,
+    status:i64,
+    uniforms:i64,
+    proposals:i64,
+    max_uniforms:i64,
+    max_proposals:i64,
+    resolution_limited:bool,
+    rate_underflow:bool,
+    gamma_log_value:f64,
+    gamma_log_available:bool,
+}
+pub struct CountDrawValue {
+    pub status:i64,pub count:i64,pub uniforms:i64,pub proposals:i64,
+    pub resolution_limited:bool,pub rate_underflow:bool,
+}
+pub struct GammaDrawValue {
+    pub status:i64,pub value:f64,pub log_value:f64,
+    pub value_available:bool,pub log_available:bool,pub rounded_underflow:bool,
+    pub uniforms:i64,pub proposals:i64,
+}
+
+pub fn count_rng(seed:i64)->PcgState {
+    let start=PcgState{state_hi:0,state_lo:0,inc_hi:6364136223846793005,inc_lo:1442695040888963407}
+    let first=pcg_step(start)
+    let add=pcg_u128_add(first.0.state_hi,first.0.state_lo,0,seed)
+    let seeded=PcgState{state_hi:add.hi,state_lo:add.lo,inc_hi:start.inc_hi,inc_lo:start.inc_lo}
+    let second=pcg_step(seeded)
+    return second.0
+}
+// Construct once outside repeated-draw loops. No seed/stream change.
+pub fn count_cursor_new(rng:PcgState)->CountCursor {
+    // Native records can share handles: detach before a borrowed RNG mutation.
+    let hi:i64=rng.state_hi;let lo:i64=rng.state_lo
+    let inc_hi:i64=rng.inc_hi;let inc_lo:i64=rng.inc_lo
+    let owned=PcgState{state_hi:hi,state_lo:lo,inc_hi:inc_hi,inc_lo:inc_lo}
+    return CountCursor{likelihood:nb2_likelihood_slot(),rng:owned,status:0,uniforms:0,proposals:0,
+        max_uniforms:0,max_proposals:0,resolution_limited:false,rate_underflow:false,
+        gamma_log_value:0.0,gamma_log_available:false}
+}
+// Explicit checkpoint copy; avoid this getter inside a hot draw loop.
+pub fn count_cursor_rng(s:&CountCursor)->PcgState {
+    let hi:i64=s.rng.state_hi;let lo:i64=s.rng.state_lo
+    let inc_hi:i64=s.rng.inc_hi;let inc_lo:i64=s.rng.inc_lo
+    return PcgState{state_hi:hi,state_lo:lo,inc_hi:inc_hi,inc_lo:inc_lo}
+}
+pub fn count_draw_value()->CountDrawValue {
+    CountDrawValue{status:1,count:0,uniforms:0,proposals:0,resolution_limited:false,rate_underflow:false}
+}
+pub fn gamma_draw_value()->GammaDrawValue {
+    GammaDrawValue{status:1,value:0.0,log_value:0.0,value_available:false,
+        log_available:false,rounded_underflow:false,uniforms:0,proposals:0}
+}
+fn cs_begin(s:&!CountCursor,max_uniforms:i64,max_proposals:i64) with Mut {
+    s.status=0;s.uniforms=0;s.proposals=0;s.max_uniforms=max_uniforms;s.max_proposals=max_proposals
+    s.resolution_limited=false;s.rate_underflow=false
+    s.gamma_log_value=0.0;s.gamma_log_available=false
+    if max_uniforms<0 || max_proposals<0 {s.status=1}
+    if (s.rng.inc_lo & 1)==0 {s.status=1}
+}
+fn cs_finish_count(s:&!CountCursor,count:i64,out:&!CountDrawValue) with Mut {
+    out.status=s.status;out.count=if s.status==0 {count}else{0}
+    out.uniforms=s.uniforms;out.proposals=s.proposals
+    out.resolution_limited=s.resolution_limited;out.rate_underflow=s.rate_underflow
+    s.gamma_log_value=0.0;s.gamma_log_available=false
+}
+fn cs_count_result(s:&CountCursor,count:i64)->CountDraw {
+    let value:i64=if s.status==0 {count} else {0}
+    return CountDraw{status:s.status,count:value,rng:s.rng,uniforms:s.uniforms,proposals:s.proposals,resolution_limited:s.resolution_limited,rate_underflow:s.rate_underflow}
+}
+// Every canonical draw, including a rejected zero, consumes one uniform.
+fn cs_open(s:&!CountCursor)->f64 with Mut,Div {
+    if s.status!=0 { return 0.0 }
+    while s.uniforms<s.max_uniforms {
+        let uniform=pcg_next_f64_into(&!s.rng)
+        s.uniforms=s.uniforms+1
+        if !is_finite(uniform) { s.status=4 return 0.0 }
+        if uniform<0.0 || uniform>=1.0 { s.status=4 return 0.0 }
+        if uniform>0.0 { return uniform }
+    }
+    s.status=3
+    return 0.0
+}
+fn cs_proposal(s:&!CountCursor)->bool with Mut {
+    if s.status!=0 { return false }
+    if s.proposals>=s.max_proposals { s.status=3 return false }
+    s.proposals=s.proposals+1
+    return true
+}
+fn cs_log(s:&!CountCursor,x:f64)->f64 with Mut,Div,Panic {
+    if s.status!=0 {return 0.0}
+    // ln and ln_checked share ln_core. Reject before the legacy sentinel path.
+    if !is_finite(x) || x<=0.0 {s.status=4;return 0.0}
+    let value=ln(x)
+    if !is_finite(value) {s.status=4;return 0.0}
+    return value
+}
+fn cs_abs(x:f64)->f64 { if x<0.0 {-x} else {x} }
+
+fn cs_poisson(s:&!CountCursor,mean:f64)->i64 with Mut,Div,Panic {
+    if s.status!=0 { return 0 }
+    if mean==0.0 { return 0 }
+    if mean<0.00000000000000011102230246251565 { s.resolution_limited=true }
+    if mean<30.0 {
+        var sum:f64=0.0
+        var correction:f64=0.0
+        var count:i64=0
+        while true {
+            if !cs_proposal(s) { return 0 }
+            let u=cs_open(s)
+            if s.status!=0 { return 0 }
+            let term=cs_log(s,u)
+            if s.status!=0 { return 0 }
+            let adjusted=term-correction
+            let next=sum+adjusted
+            correction=(next-sum)-adjusted
+            sum=next
+            if !is_finite(sum) { s.status=4 return 0 }
+            if sum<=-mean { return count }
+            if count>=9007199254740992 { s.status=4 return 0 }
+            count=count+1
+        }
+    }
+    let root=sqrt(mean)
+    let b=0.931+2.53*root
+    let a=-0.059+0.02483*b
+    let inverse_alpha=1.1239+1.1328/(b-3.4)
+    let squeeze=0.9277-3.6224/(b-2.0)
+    let whole=mean as i64
+    let fraction=mean-(whole as f64)
+    while true {
+        if !cs_proposal(s) { return 0 }
+        let first=cs_open(s)
+        if s.status!=0 { return 0 }
+        let second=cs_open(s)
+        if s.status!=0 { return 0 }
+        let u=first-0.5
+        let us=0.5-cs_abs(u)
+        if us<=0.0 { s.status=4 return 0 }
+        let offset=(2.0*a/us+b)*u+fraction+0.43
+        if !is_finite(offset) { s.status=4 return 0 }
+        // Bound before casting; both this interval and final integer sum are exact i64.
+        if offset< -9007199254740992.0 || offset>9007199254740992.0 {
+            s.status=4 return 0
+        }
+        var floor_offset=offset as i64
+        if (floor_offset as f64)>offset { floor_offset=floor_offset-1 }
+        let k=whole+floor_offset
+        if k>9007199254740992 { s.status=4 return 0 }
+        if k>=0 {
+            if us>=0.07 {
+                if second<=squeeze { return k }
+            }
+            var reject=false
+            if us<0.013 {
+                if second>us { reject=true }
+            }
+            if !reject {
+                let log_v=cs_log(s,second)
+                let log_alpha=cs_log(s,inverse_alpha)
+                let log_denominator=cs_log(s,a/(us*us)+b)
+                if s.status!=0 { return 0 }
+                let lhs=log_v+log_alpha-log_denominator
+                let pmf_status=nb2_log_probability_into(k,mean,0.0,&!s.likelihood)
+                if pmf_status!=0 || !is_finite(lhs) { s.status=4 return 0 }
+                if lhs<=nb2_likelihood_slot_log_probability(&s.likelihood) { return k }
+            }
+        }
+    }
+    s.status=4
+    return 0
+}
+// Factored residual of the cancelled quadratic terms in MT's log acceptance.
+// 32 terms k=0..31, |t|<=1/8. This is a finite-precision approximation.
+fn cs_gamma_accept(x:f64,t:f64,d:f64)->f64 with Mut,Div {
+    if cs_abs(t)<=0.125 {
+        var sum:f64=0.0
+        var correction:f64=0.0
+        var power:f64=1.0
+        var k:i64=0
+        while k<32 {
+            let term=power/((k+4) as f64)
+            let adjusted=term-correction
+            let next=sum+adjusted
+            correction=(next-sum)-adjusted
+            sum=next
+            power=power*(-t)
+            k=k+1
+        }
+        let square=x*x
+        return -(square*square/(27.0*d))*sum
+    }
+    let lm=log1pmx_checked(t)
+    if lm.status!=0 { return 1.0 }
+    return 0.5*x*x+d*(3.0*lm.value-t*t*(3.0+t))
+}
+fn cs_gamma(s:&!CountCursor,shape:f64) with Mut,Div,Panic {
+    s.gamma_log_value=0.0;s.gamma_log_available=false
+    var adjusted=shape
+    let boost=shape<1.0
+    if boost { adjusted=shape+1.0 }
+    let d=adjusted-0.3333333333333333333333333333333333
+    let c=(1.0/3.0)/sqrt(d)
+    while true {
+        if !cs_proposal(s) { return }
+        let u1=cs_open(s)
+        if s.status!=0 { return }
+        let u2=cs_open(s)
+        if s.status!=0 { return }
+        let log_u1=cs_log(s,u1)
+        if s.status!=0 { return }
+        let x=sqrt(-2.0*log_u1)*cos(6.283185307179586476925286766559*u2)
+        let t=c*x
+        if !is_finite(x) || !is_finite(t) { s.status=4 return }
+        if t> -1.0 {
+            let u=cs_open(s)
+            if s.status!=0 { return }
+            let square=x*x
+            var accepted=u<1.0-0.0331*square*square
+            if !accepted {
+                let bound=cs_gamma_accept(x,t,d)
+                if !is_finite(bound) || bound>0.0 { s.status=4 return }
+                let log_u=cs_log(s,u)
+                if s.status!=0 { return }
+                accepted=log_u<bound
+            }
+            if accepted {
+                let log_d=cs_log(s,d)
+                let lp=log1p_checked(t)
+                if s.status!=0 || lp.status!=0 { s.status=4 return }
+                var result=log_d+3.0*lp.value
+                if boost {
+                    let extra=cs_open(s)
+                    if s.status!=0 { return }
+                    let log_extra=cs_log(s,extra)
+                    if s.status!=0 { return }
+                    let adjustment=log_extra/shape
+                    if !is_finite(adjustment) {
+                        // Negative overflow is explicit log-unavailable underflow, not a floor.
+                        return
+                    }
+                    result=result+adjustment
+                }
+                if !is_finite(result) { s.status=4 return }
+                s.gamma_log_value=result;s.gamma_log_available=true
+                return
+            }
+        }
+    }
+    s.status=4
+    return
+}
+fn cs_mean(s:&!CountCursor,mean:f64) with Mut {
+    if s.status!=0 { return }
+    if !is_finite(mean) { s.status=2 return }
+    if mean<0.0 { s.status=1 return }
+    if mean>4503599627370496.0 { s.status=5 }
+}
+// Reusable output slots contain no RNG. Status/counters are per draw.
+pub fn poisson_count_draw_into(s:&!CountCursor,mean:f64,max_uniforms:i64,max_proposals:i64,out:&!CountDrawValue)->i64 with Mut,Div,Panic {
+    cs_begin(s,max_uniforms,max_proposals)
+    out.status=1;out.count=0;out.uniforms=0;out.proposals=0;out.resolution_limited=false;out.rate_underflow=false
+    cs_mean(s,mean)
+    let count=cs_poisson(s,mean)
+    cs_finish_count(s,count,out)
+    return out.status
+}
+pub fn gamma_unit_draw_into(s:&!CountCursor,shape:f64,max_uniforms:i64,max_proposals:i64,out:&!GammaDrawValue)->i64 with Mut,Div,Panic {
+    cs_begin(s,max_uniforms,max_proposals)
+    out.status=1;out.value=0.0;out.log_value=0.0;out.value_available=false;out.log_available=false
+    out.rounded_underflow=false;out.uniforms=0;out.proposals=0
+    if s.status==0 {
+        if !is_finite(shape) {s.status=2}
+        else {if shape<=0.0 {s.status=1}else{if shape>9007199254740992.0 {s.status=5}}}
+    }
+    if s.status==0 {
+        cs_gamma(s,shape)
+        if s.status==0 {
+            out.log_available=s.gamma_log_available
+            out.log_value=s.gamma_log_value
+            if s.gamma_log_available {
+                let value=exp(s.gamma_log_value)
+                if is_finite(value) {
+                    out.value=value;out.value_available=true;out.rounded_underflow=value==0.0
+                }
+            }else{out.value_available=true;out.rounded_underflow=true}
+        }
+    }
+    out.status=s.status;out.uniforms=s.uniforms;out.proposals=s.proposals
+    s.gamma_log_value=0.0;s.gamma_log_available=false
+    return out.status
+}
+fn cs_nb2_count(s:&!CountCursor,mean:f64,alpha:f64)->i64 with Mut,Div,Panic {
+    cs_mean(s,mean)
+    if s.status==0 {
+        if !is_finite(alpha) {s.status=2}else{if alpha<0.0 {s.status=1}}
+    }
+    if s.status!=0 {return 0}
+    if mean==0.0 {return 0}
+    if alpha==0.0 {return cs_poisson(s,mean)}
+    let shape=1.0/alpha
+    if !is_finite(shape) || shape>9007199254740992.0 || shape<=0.0 {s.status=5;return 0}
+    cs_gamma(s,shape)
+    if s.status!=0 {return 0}
+    if !s.gamma_log_available {s.rate_underflow=true;return 0}
+    let log_mean=cs_log(s,mean)
+    let log_alpha=cs_log(s,alpha)
+    if s.status!=0 {return 0}
+    let log_rate=(s.gamma_log_value+log_alpha)+log_mean
+    if !is_finite(log_rate) {s.status=4;return 0}
+    let rate=exp(log_rate)
+    if !is_finite(rate) {s.status=4;return 0}
+    if rate==0.0 {s.rate_underflow=true;return 0}
+    if rate>4503599627370496.0 {s.status=5;return 0}
+    return cs_poisson(s,rate)
+}
+pub fn nb2_count_draw_into(s:&!CountCursor,mean:f64,alpha:f64,max_uniforms:i64,max_proposals:i64,out:&!CountDrawValue)->i64 with Mut,Div,Panic {
+    cs_begin(s,max_uniforms,max_proposals)
+    out.status=1;out.count=0;out.uniforms=0;out.proposals=0;out.resolution_limited=false;out.rate_underflow=false
+    let count=cs_nb2_count(s,mean,alpha)
+    cs_finish_count(s,count,out)
+    return out.status
+}
+// Legacy by-value adapters: retain their public result/RNG shape for small calls.
+pub fn poisson_count_draw(rng:PcgState,mean:f64,max_uniforms:i64,max_proposals:i64)->CountDraw with Mut,Div,Panic {
+    var s=count_cursor_new(rng);var out=count_draw_value()
+    let ignored=poisson_count_draw_into(&!s,mean,max_uniforms,max_proposals,&!out)
+    return cs_count_result(&s,out.count)
+}
+pub fn gamma_unit_draw(rng:PcgState,shape:f64,max_uniforms:i64,max_proposals:i64)->GammaDraw with Mut,Div,Panic {
+    var s=count_cursor_new(rng);var out=gamma_draw_value()
+    let ignored=gamma_unit_draw_into(&!s,shape,max_uniforms,max_proposals,&!out)
+    return GammaDraw{status:out.status,value:out.value,log_value:out.log_value,
+        value_available:out.value_available,log_available:out.log_available,
+        rounded_underflow:out.rounded_underflow,rng:s.rng,uniforms:out.uniforms,proposals:out.proposals}
+}
+pub fn nb2_count_draw(rng:PcgState,mean:f64,alpha:f64,max_uniforms:i64,max_proposals:i64)->CountDraw with Mut,Div,Panic {
+    var s=count_cursor_new(rng);var out=count_draw_value()
+    let ignored=nb2_count_draw_into(&!s,mean,alpha,max_uniforms,max_proposals,&!out)
+    return cs_count_result(&s,out.count)
+}

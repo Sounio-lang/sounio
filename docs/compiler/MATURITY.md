@@ -2,8 +2,8 @@
 topic_id: repo.docs.compiler.maturity
 authority: repo_only
 audience: contributors
-last_validated: 2026-03-07
-validated_by: A4
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.compiler.maturity
 -->
 
@@ -21,7 +21,9 @@ The token contracts checked by `scripts/ci/sounio_stdlib_surface_support_gate.sh
 `scripts/ci/sounio_direct_driver_support_gate.sh` and
 `scripts/ci/sounio_package_support_gate.sh` read this file.
 
-Tiers below mirror the public-claim registry's `claim_level`/`closure_status` columns. "Production" is reserved for rows the registry calls `stable / closed`. Anything the registry marks `prototype` or `stale_conflicting` is tiered accordingly here — even if the feature works on small fixtures.
+**Status: research language (pre-1.0).** APIs may change; not recommended for production use. This file does not name a compiler version.
+
+Tiers below mirror the public-claim registry's `claim_level`/`closure_status` columns. "Production" in the table is only the name of the registry tier for a row marked `stable / closed`. It does not mean the language is recommended for production use. Anything the registry marks `prototype` or `stale_conflicting` is tiered accordingly here — even if the feature works on small fixtures.
 
 ### Production (registry: stable / closed)
 
@@ -75,7 +77,7 @@ Editor-tooling details:
 
 | Component | Registry row | Honest status |
 |-----------|--------------|---------------|
-| **Standard library support surface** | `stdlib.surface = validated_research` | Claim only the bounded support contract checked by `scripts/ci/sounio_stdlib_surface_support_gate.sh`: current inventory has 1615 `.sio` files, 0 disabled files, 0 stub-only `mod.sio` files, and 178 active module entrypoints; package-backed epistemic/GUM, units, formats, io-primitives, canonical PETAB, and PBPK/GUM workflows pass through `scripts/ci/package_pbpk_gum_gate.sh`. **NOT PROVED:** broad all-file stdlib callability, `scripts/ci/stdlib_evolution_gate.sh`, hyper native lanes, fMRI/PBPK science pipeline, external runtime dependencies, cryptographic security, clinical/regulatory validity, or API stability beyond the checked gate. |
+| **Standard library support surface** | `stdlib.surface = validated_research` | Claim only the bounded support contract checked by `scripts/ci/sounio_stdlib_surface_support_gate.sh`: current inventory has 1643 `.sio` files, 0 disabled files, 0 stub-only `mod.sio` files, and 165 active module entrypoints; package-backed epistemic/GUM, units, formats, io-primitives, canonical PETAB, and PBPK/GUM workflows pass through `scripts/ci/package_pbpk_gum_gate.sh`. **NOT PROVED:** broad all-file stdlib callability, `scripts/ci/stdlib_evolution_gate.sh`, hyper native lanes, fMRI/PBPK science pipeline, external runtime dependencies, cryptographic security, clinical/regulatory validity, or API stability beyond the checked gate. |
 | **Package manager / registry** | `tooling.package = validated_research` | Local `~/.sounio/registry/` only. No public registry. Local package manifests, local package imports, and `tools/sounio-pkg/sounio-pkg` build/check/test smoke are covered by `scripts/ci/sounio_package_support_gate.sh`. |
 | **Generic structs/functions/traits** | `generics.* = prototype` | Multi-type-param generic functions work (incl. 3+ params, verified); do not claim a mature trait ecosystem. Trait bounds are parsed but not enforced at call sites. No trait objects. |
 | **Closures** | `closures.lambdas = stale_conflicting` | Non-capturing/direct/HOF forms and some captured forms have passing fixtures, but the registry is deliberately downgraded. Captured closures used as first-class values and cross-engine parity remain unresolved; `closure_linear.sio` is still ignored. Do not promote this row until the registry and native gates are reconciled. |
@@ -110,13 +112,11 @@ not a completeness or security proof:
 ### Recently Activated Modules
 
 - `stdlib/text/format.sio` - `format_int(i64) → string`, `format_f64(f64) → string` (4 decimal places); uses str_concat+str_slice, no heap. Smoke test: `tests/run-pass/stdlib_time_basic.sio`.
-- `stdlib/text/case.sio` - char/string case conversion (uppercase, lowercase, titlecase, snake_case, camelCase, PascalCase, kebab-case); pure Sounio, no FFI.
-- `stdlib/text/unicode.sio` - Unicode character classification (alphabetic, numeric, whitespace, punctuation, control, ASCII variants); pure Sounio.
 - `stdlib/time/duration.sio` - `Duration` struct with nanosecond precision; arithmetic: dur_add, dur_sub, dur_from_millis, dur_to_millis; pure Sounio, no FFI.
 - `stdlib/time/datetime.sio` - `DateTime` struct with full calendar arithmetic (leap year, days-in-month, unix epoch roundtrip, year rollover); pure Sounio, no FFI. Smoke test: `tests/run-pass/stdlib_time_basic.sio`.
 - `stdlib/time/instant.sio` - Monotonic clock via `clock_gettime` syscall; uses integer FFI (now working).
 - `stdlib/os/process.sio` - getpid/getppid/exit/abort via extern "C" stubs (integer FFI now works)
-- `stdlib/mem/` - heap_alloc/heap_free (malloc/free stubs), arena bump allocator, box/rc/arc wrappers — all active
+- `stdlib/mem/` - heap_alloc/heap_free (malloc/free stubs), arena bump allocator, and box wrappers — all active
 - `stdlib/sync/mutex.sio` - pthread_mutex_{init,lock,trylock,unlock,destroy} via extern "C" stubs
 - `stdlib/prob/` - Beta, Normal, MCMC, random distributions (4 modules activated)
 - `stdlib/onn/` - Octonion neural network: activation, attention, conv, linear, loss, normalization, optimizer, training (8 modules)

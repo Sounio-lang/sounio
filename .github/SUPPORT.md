@@ -42,10 +42,10 @@ Sounio is an active research platform, and we welcome extensions to the type sys
 
 ## 4. Documentation
 
-Our comprehensive documentation guides are fully synchronized and authoritative:
+Start with the guide for your task and inspect its source/profile boundaries:
 
 - 📖 **Official Website Docs**: [Sounio Docs & Manuals](https://www.souniolang.org/docs/)
-- 🐍 **LLM Programming Guide**: [Sounio LLM Guide](https://github.com/Sounio-lang/sounio/blob/main/docs/guide/LLM_PROGRAMMING_GUIDE.md) — The complete language specification written specifically for code tools and developers.
+- **LLM Programming Guide**: [English](../docs/guide/LLM_PROGRAMMING_GUIDE.md) · [Português](../docs/guide/LLM_PROGRAMMING_GUIDE_PT.md) — Practical generation and repair workflows with source-bound examples. See the separate [language specification](../docs/spec/LANGUAGE_SPECIFICATION.md) for semantic detail.
 
 ---
 

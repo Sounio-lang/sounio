@@ -87,9 +87,16 @@ SYNC = "scripts/docs/sync_governance_metadata.mjs"
 META_RE = re.compile(r"^<!-- docs:meta\n([\s\S]*?)\n-->", re.M)
 FIELD_RE = re.compile(r"^last_validated:\s*(.+)$", re.M)
 VB_FIELD_RE = re.compile(r"^validated_by:\s*(.*)$", re.M)
-SITE_RE = re.compile(r"^\s*'?last_validated'?\s*:\s*'?([0-9]{4}-[0-9]{2}-[0-9]{2})'?",
-                     re.M)
+# The fallback sites. Until #1240 (2026-10-12) they stamped the literal date
+# 2026-03-07; they now stamp the explicit no-record marker through the
+# UNVALIDATED_DATE constant, so a site is either a date literal or that
+# constant.
+SITE_RE = re.compile(r"^\s*[`']?last_validated'?\s*:\s*(?:'?([0-9]{4}-[0-9]{2}-[0-9]{2})'?"
+                     r"|`?\$?\{?(UNVALIDATED_DATE)\}?`?)", re.M)
+MARKER_RE = re.compile(r"^export const UNVALIDATED_DATE = '([a-z]+)';", re.M)
+MARKER_BY_RE = re.compile(r"^export const UNVALIDATED_BY = '([a-z]+)';", re.M)
 ISO_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+LEGACY_PLACEHOLDER = "2026-03-07"
 
 
 def git(*args: str) -> str:
@@ -118,11 +125,13 @@ def clause_v1() -> tuple[bool, str]:
     """The default literal exists (fallback for headerless docs) and is
     bypassed whenever the document carries a well-formed record."""
     src = GENERATOR.read_text()
+    marker = MARKER_RE.search(src)
+    marker_value = marker.group(1) if marker else ""
     sites = []
     for n, line in enumerate(src.splitlines(), start=1):
         m = SITE_RE.match(line)
         if m:
-            sites.append((n, m.group(1)))
+            sites.append((n, m.group(1) or marker_value))
     print("V1 the default (fallback) sites that stamp a headerless doc:")
     for n, value in sites:
         print(f"    governance_registry.mjs:{n}  -> {value!r}  (default)")
@@ -148,8 +157,10 @@ def clause_v1() -> tuple[bool, str]:
         "  const withRecord = m.metadataFieldsForTopic(t,"
         "    {last_validated: '2026-08-16', validated_by: 'cursor-agent'});"
         "  const withoutRecord = m.metadataFieldsForTopic(t);"
+        "  const legacy = m.preservedProvenance("
+        "    {last_validated: '2026-03-07', validated_by: 'A1'});"
         "  console.log(JSON.stringify({"
-        "    good, badDate, noValidator, withRecord, withoutRecord,"
+        "    good, badDate, noValidator, withRecord, withoutRecord, legacy,"
         "    topic: t.topic_id, defaultDate: withoutRecord.last_validated,"
         "    defaultValidator: withoutRecord.validated_by}));"
         "});"
@@ -162,6 +173,8 @@ def clause_v1() -> tuple[bool, str]:
     print(f"    preservedProvenance(good record)      -> {seen['good']}")
     print(f"    preservedProvenance(malformed date)   -> {seen['badDate']}")
     print(f"    preservedProvenance(no validator)     -> {seen['noValidator']}")
+    print(f"    preservedProvenance(legacy {LEGACY_PLACEHOLDER}) -> {seen['legacy']}"
+          "  (shape-valid; the generator no longer writes it, #1240)")
     print(f"    topic {seen['topic']}")
     print(f"      with its own record: last_validated="
           f"{seen['withRecord']['last_validated']!r} "
@@ -174,12 +187,18 @@ def clause_v1() -> tuple[bool, str]:
         and seen["good"] == {"last_validated": "2026-08-16",
                              "validated_by": "cursor-agent"}
         and seen["badDate"] == {}
+        and seen["legacy"] == {}
         and seen["noValidator"] == {"last_validated": "2026-08-16"}
         and seen["withRecord"]["last_validated"] == "2026-08-16"
         and seen["withRecord"]["validated_by"] == "cursor-agent"
         and seen["withoutRecord"]["last_validated"] == seen["defaultDate"]
         and seen["withoutRecord"]["validated_by"] == seen["defaultValidator"]
         and seen["withRecord"]["last_validated"] != seen["defaultDate"]
+        # #1240: the default is the explicit no-record marker, not a date, and
+        # the retired placeholder date is never preserved as a record.
+        and marker_value != ""
+        and seen["defaultDate"] == marker_value
+        and not ISO_RE.match(seen["defaultDate"])
     )
     print("    The field has an input now: the document's own record, when"
           " well-formed; the literal only when there is none.")
@@ -194,9 +213,16 @@ def clause_v2() -> bool:
     registry = json.loads(REGISTRY.read_text())
     docs = [t["repo_doc_path"] for t in registry["topics"]
             if t.get("repo_doc_path")]
+    src = GENERATOR.read_text()
+    marker = MARKER_RE.search(src)
+    marker_by = MARKER_BY_RE.search(src)
+    marker_value = marker.group(1) if marker else "<no marker>"
+    marker_by_value = marker_by.group(1) if marker_by else "<no marker>"
     dates: dict[str, int] = {}
     validators: dict[str, int] = {}
     unreadable = 0
+    unvalidated = 0
+    legacy = 0
     malformed: list[tuple[str, str, str]] = []
     for rel in docs:
         path = ROOT / rel
@@ -207,6 +233,13 @@ def clause_v2() -> bool:
         validator = declared_field(path, VB_FIELD_RE)
         dates[date] = dates.get(date, 0) + 1
         validators[validator] = validators.get(validator, 0) + 1
+        if date == marker_value:
+            unvalidated += 1
+            if validator != marker_by_value:
+                malformed.append((rel, date, validator))
+            continue
+        if date == LEGACY_PLACEHOLDER:
+            legacy += 1
         if not ISO_RE.match(date) or not validator:
             malformed.append((rel, date, validator))
     print(f"V2 shape census over {len(docs)} governed repo docs "
@@ -219,8 +252,13 @@ def clause_v2() -> bool:
         print(f"    malformed: {rel}: last_validated={date!r} "
               f"validated_by={validator!r}")
     ok = unreadable == 0 and not malformed and len(docs) > 0
-    print("    Every declared record is a real date and a non-empty validator."
-          " Uniformity is no longer required — that was the defect.")
+    print(f"    {unvalidated} carry the explicit no-record marker "
+          f"({marker_value!r}/{marker_by_value!r}); {legacy} still carry the "
+          f"retired {LEGACY_PLACEHOLDER} placeholder (the generated authority "
+          "matrix, restamped at its next snapshot refresh).")
+    print("    Every declared record is a real date and a non-empty validator,"
+          " or says it has none. Uniformity is no longer required — that was"
+          " the defect.")
     print(f"V2_CORPUS_PAIR_IS_WELL_FORMED {'PASS' if ok else 'FAIL'}")
     print()
     return ok

@@ -1,0 +1,143 @@
+// Dynamic adjusted p-values. Full declared family is retained.
+// Unavailable hypotheses are effective p=1 and have output=1, never dropped.
+// These outputs are adjusted p-values, not estimated local FDR or Storey q-values.
+use collections::numeric_buffer::{NumericBuffer,numeric_buffer_status,numeric_buffer_len,numeric_buffer_at,numeric_buffer_set}
+use collections::integer_buffer::{IntegerBuffer,integer_buffer_status,integer_buffer_len,integer_buffer_at,integer_buffer_set}
+use math::pure::{is_finite}
+pub struct DynamicAdjustment {
+ pub status:i64, pub family_size:i64, pub available_count:i64,
+ pub method:i64, pub harmonic_factor:f64,
+ pub dependence_requirement:i64, pub assumptions_assessed:bool,
+}
+fn mt_empty(status:i64,n:i64,method:i64)->DynamicAdjustment {
+ DynamicAdjustment{status:status,family_size:n,available_count:0,method:method,
+ harmonic_factor:0.0,dependence_requirement:if method==1 {1}else{0},
+ assumptions_assessed:false}
+}
+fn mt_effective(p:&NumericBuffer,available:&IntegerBuffer,index:i64)->f64 with Panic {
+ if integer_buffer_at(available,index)==0 {return 1.0}
+ numeric_buffer_at(p,index)
+}
+// A strict total order uses original index to break exact p ties.
+fn mt_later(p:&NumericBuffer,available:&IntegerBuffer,left:i64,right:i64)->bool with Panic {
+ let a=mt_effective(p,available,left)
+ let b=mt_effective(p,available,right)
+ if a>b {return true}
+ if a<b {return false}
+ left>right
+}
+fn mt_swap(indices:&!IntegerBuffer,left:i64,right:i64) with Mut,Panic {
+ let a=integer_buffer_at(indices,left)
+ let b=integer_buffer_at(indices,right)
+ integer_buffer_set(indices,left,b)
+ integer_buffer_set(indices,right,a)
+}
+fn mt_sift(p:&NumericBuffer,available:&IntegerBuffer,indices:&!IntegerBuffer,root:i64,n:i64) with Mut,Div,Panic {
+ var at=root
+ while n>1 && at<=(n-2)/2 {
+  var child=at*2+1
+  // Explicit control flow: logical operators do not guard indexed access.
+  if child+1<n {
+   let right_index=integer_buffer_at(indices,child+1)
+   let left_index=integer_buffer_at(indices,child)
+   if mt_later(p,available,right_index,left_index) {child=child+1}
+  }
+  let child_index=integer_buffer_at(indices,child)
+  let parent_index=integer_buffer_at(indices,at)
+  if !mt_later(p,available,child_index,parent_index) {break}
+  mt_swap(indices,at,child)
+  at=child
+ }
+}
+// method0 Bonferroni;1 BH (independence/PRDS requirement);2 BY (arbitrary dependence).
+// status0 adjusted;1 shape/buffer/family;2 availability flag;3 nonfinite available p;
+// 4 available p outside [0,1];5 method;6 arithmetic.
+// Errors do not mutate output. Workspaces may be changed after input validation.
+pub fn dynamic_adjust_pvalues(p:&NumericBuffer,available:&IntegerBuffer,
+ family_size:i64,method:i64,output:&!NumericBuffer,indices:&!IntegerBuffer,
+ stage:&!NumericBuffer)->DynamicAdjustment with Mut,Div,Panic {
+ let n=family_size
+ if n<0 || n>9007199254740992 || numeric_buffer_status(p)!=0 ||
+ integer_buffer_status(available)!=0 || numeric_buffer_status(output)!=0 ||
+ integer_buffer_status(indices)!=0 || numeric_buffer_status(stage)!=0 ||
+ numeric_buffer_len(p)!=n || integer_buffer_len(available)!=n ||
+ numeric_buffer_len(output)!=n || integer_buffer_len(indices)<n ||
+ numeric_buffer_len(stage)<n {return mt_empty(1,n,method)}
+ if method<0 || method>2 {return mt_empty(5,n,method)}
+ var count:i64=0
+ var i:i64=0
+ while i<n {
+  let flag=integer_buffer_at(available,i)
+  if flag!=0 && flag!=1 {return mt_empty(2,n,method)}
+  count=count+flag
+  i=i+1
+ }
+ i=0
+ while i<n {
+  if integer_buffer_at(available,i)==1 && !is_finite(numeric_buffer_at(p,i)) {return mt_empty(3,n,method)}
+  i=i+1
+ }
+ i=0
+ while i<n {
+  if integer_buffer_at(available,i)==1 {
+   let value=numeric_buffer_at(p,i)
+   if value<0.0 || value>1.0 {return mt_empty(4,n,method)}
+  }
+  i=i+1
+ }
+ var harmonic:f64=1.0
+ if method==2 && n>0 {
+  harmonic=0.0
+  var correction:f64=0.0
+  i=1
+  while i<=n {
+   let term=1.0/(i as f64)-correction
+   let next=harmonic+term
+   correction=(next-harmonic)-term
+   harmonic=next
+   i=i+1
+  }
+ }
+ if !is_finite(harmonic) || harmonic<1.0 {return mt_empty(6,n,method)}
+ i=0
+ while i<n {integer_buffer_set(indices,i,i) i=i+1}
+ i=n/2
+ while i>0 {i=i-1;mt_sift(p,available,indices,i,n)}
+ var end=n
+ while end>1 {
+  end=end-1
+  mt_swap(indices,0,end)
+  mt_sift(p,available,indices,0,end)
+ }
+ var running:f64=1.0
+ i=n
+ while i>0 {
+  i=i-1
+  let original=integer_buffer_at(indices,i)
+  let value=mt_effective(p,available,original)
+  var candidate:f64=0.0
+  if method==0 {candidate=value*(n as f64)} else {
+   candidate=value*(((n as f64)*harmonic)/((i+1) as f64))
+  }
+  if !is_finite(candidate) || candidate<0.0 {return mt_empty(6,n,method)}
+  if candidate>1.0 {candidate=1.0}
+  if method!=0 {
+   if candidate<running {running=candidate}
+   candidate=running
+  }
+  if integer_buffer_at(available,original)==0 {candidate=1.0}
+  // Normalize signed zero; no positive epsilon repair or floor.
+  if candidate==0.0 {candidate=0.0}
+  numeric_buffer_set(stage,original,candidate)
+ }
+ i=0
+ while i<n {numeric_buffer_set(output,i,numeric_buffer_at(stage,i)) i=i+1}
+ DynamicAdjustment{status:0,family_size:n,available_count:count,method:method,
+ harmonic_factor:harmonic,dependence_requirement:if method==1 {1}else{0},
+ assumptions_assessed:false}
+}
+pub fn dynamic_adjust_by(p:&NumericBuffer,available:&IntegerBuffer,
+ family_size:i64,output:&!NumericBuffer,indices:&!IntegerBuffer,
+ stage:&!NumericBuffer)->DynamicAdjustment with Mut,Div,Panic {
+ dynamic_adjust_pvalues(p,available,family_size,2,output,indices,stage)
+}

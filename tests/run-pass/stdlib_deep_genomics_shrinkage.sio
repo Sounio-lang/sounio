@@ -1,0 +1,131 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: DEEP DISPERSION PASS
+use collections::numeric_buffer::{numeric_buffer_new,numeric_buffer_set,numeric_buffer_at,numeric_buffer_close}
+use genomics::dispersion_shrinkage::{dispersion_shrinkage_workspace,dispersion_shrinkage_fit}
+use math::pure::{ln_checked,is_finite}
+use io::sci_print::{println_f64_sci}
+fn ds_close(a:f64,b:f64,tol:f64)->bool {let d=if a>b {a-b}else{b-a} d<=tol}
+fn large_exact_case()->bool with Alloc,Mut,Div,Panic {
+ let n:i64=513
+ let plan=dispersion_shrinkage_workspace(n)
+ assert(plan.status==0)
+ var means=numeric_buffer_new(n,n*8)
+ var estimates=numeric_buffer_new(n,n*8)
+ var sampling=numeric_buffer_new(n,n*8)
+ var output=numeric_buffer_new(n,n*8)
+ var variance=numeric_buffer_new(n,n*8)
+ var flags=numeric_buffer_new(n,n*8)
+ var jac=numeric_buffer_new(plan.jacobian_elements,plan.jacobian_elements*8)
+ var rhs=numeric_buffer_new(n,n*8)
+ var step=numeric_buffer_new(2,16)
+ var qr=numeric_buffer_new(plan.qr_elements,plan.qr_elements*8)
+ var stage=numeric_buffer_new(plan.stage_elements,plan.stage_elements*8)
+ var i:i64=0
+ while i<n {
+  let mu=(i+1) as f64
+  numeric_buffer_set(&!means,i,mu)
+  numeric_buffer_set(&!estimates,i,2.0+3.0/mu)
+  numeric_buffer_set(&!sampling,i,0.01)
+  i=i+1
+ }
+ let result=dispersion_shrinkage_fit(&means,&estimates,&sampling,2.0,3.0,0.0,100,1e-9,2.0,
+ &!output,&!variance,&!flags,&!jac,&!rhs,&!step,&!qr,&!stage)
+ assert(result.status==0 && result.genes==513 && result.rank==2)
+ assert(result.prior_boundary && result.prior_log_variance==0.0)
+ assert(!result.calibration_assessed && result.outliers==0)
+ assert(ds_close(result.a0,2.0,1e-8) && ds_close(result.a1,3.0,1e-8))
+ i=0
+ while i<n {
+  let expected=ln_checked(numeric_buffer_at(&estimates,i))
+  assert(expected.status==0)
+  assert(ds_close(numeric_buffer_at(&output,i),expected.value,1e-8))
+  assert(numeric_buffer_at(&variance,i)==0.0 && numeric_buffer_at(&flags,i)==0.0)
+  i=i+1
+ }
+ numeric_buffer_close(means);numeric_buffer_close(estimates);numeric_buffer_close(sampling)
+ numeric_buffer_close(output);numeric_buffer_close(variance);numeric_buffer_close(flags)
+ numeric_buffer_close(jac);numeric_buffer_close(rhs);numeric_buffer_close(step)
+ numeric_buffer_close(qr);numeric_buffer_close(stage)
+ true
+}
+fn main()->i32 with Alloc,IO,Mut,Div,Panic {
+ assert(large_exact_case())
+ let n:i64=8
+ let plan=dispersion_shrinkage_workspace(n)
+ var means=numeric_buffer_new(n,64)
+ var estimates=numeric_buffer_new(n,64)
+ var sampling=numeric_buffer_new(n,64)
+ var output=numeric_buffer_new(n,64)
+ var variance=numeric_buffer_new(n,64)
+ var flags=numeric_buffer_new(n,64)
+ var jac=numeric_buffer_new(plan.jacobian_elements,plan.jacobian_elements*8)
+ var rhs=numeric_buffer_new(n,64)
+ var step=numeric_buffer_new(2,16)
+ var qr=numeric_buffer_new(plan.qr_elements,plan.qr_elements*8)
+ var stage=numeric_buffer_new(plan.stage_elements,plan.stage_elements*8)
+ let data:[f64;8]=[80.0,70.0,15.0,20.0,4.0,5.0,1.0,4.0]
+ var mu:f64=1.0
+ var i:i64=0
+ while i<n {
+  numeric_buffer_set(&!means,i,mu)
+  numeric_buffer_set(&!estimates,i,data[i as usize])
+  numeric_buffer_set(&!sampling,i,0.01)
+  numeric_buffer_set(&!output,i,-777.0)
+  numeric_buffer_set(&!variance,i,-777.0)
+  numeric_buffer_set(&!flags,i,-777.0)
+  mu=mu*2.0
+  i=i+1
+ }
+ let controls=dispersion_shrinkage_fit(&means,&estimates,&sampling,0.0,100.0,0.0,100,1e-9,1.0,
+ &!output,&!variance,&!flags,&!jac,&!rhs,&!step,&!qr,&!stage)
+ assert(controls.status==5)
+ assert(numeric_buffer_at(&output,0)== -777.0 && numeric_buffer_at(&variance,0)== -777.0)
+ numeric_buffer_set(&!estimates,7,0.0)
+ let domain=dispersion_shrinkage_fit(&means,&estimates,&sampling,0.1,100.0,0.0,100,1e-9,1.0,
+ &!output,&!variance,&!flags,&!jac,&!rhs,&!step,&!qr,&!stage)
+ assert(domain.status==3)
+ assert(numeric_buffer_at(&output,0)== -777.0 && numeric_buffer_at(&flags,7)== -777.0)
+ numeric_buffer_set(&!estimates,7,4.0)
+ let fit=dispersion_shrinkage_fit(&means,&estimates,&sampling,0.1,100.0,0.0,100,1e-8,1.0,
+ &!output,&!variance,&!flags,&!jac,&!rhs,&!step,&!qr,&!stage)
+ print("trend status: ");println(fit.status)
+ assert(fit.status==0 && !fit.calibration_assessed)
+ assert(fit.a0>0.0 && fit.a1>0.0)
+ print("a0: ");println_f64_sci(fit.a0,15)
+ print("a1: ");println_f64_sci(fit.a1,15)
+ print("prior variance: ");println_f64_sci(fit.prior_log_variance,15)
+ var observed_outliers:i64=0
+ i=0
+ while i<n {
+  let value=numeric_buffer_at(&output,i)
+  let v=numeric_buffer_at(&variance,i)
+  let flag=numeric_buffer_at(&flags,i)
+  assert(is_finite(value) && is_finite(v) && v>=0.0)
+  assert(flag==0.0 || flag==1.0)
+  if flag==1.0 {
+   observed_outliers=observed_outliers+1
+   let original=ln_checked(data[i as usize])
+   assert(ds_close(value,original.value,1e-12))
+   assert(v==0.01)
+  } else {
+   assert(v<0.01)
+  }
+  print("mapped log dispersion: ");println_f64_sci(value,15)
+  i=i+1
+ }
+ assert(observed_outliers==fit.outliers)
+ assert(fit.prior_log_variance>0.0 && fit.outliers>0)
+ // Equal means make the two-parameter trend unidentifiable.
+ i=0
+ while i<n {numeric_buffer_set(&!means,i,1.0) i=i+1}
+ let rank=dispersion_shrinkage_fit(&means,&estimates,&sampling,0.1,100.0,0.0,100,1e-8,1.0,
+ &!output,&!variance,&!flags,&!jac,&!rhs,&!step,&!qr,&!stage)
+ assert(rank.status==6)
+ numeric_buffer_close(means);numeric_buffer_close(estimates);numeric_buffer_close(sampling)
+ numeric_buffer_close(output);numeric_buffer_close(variance);numeric_buffer_close(flags)
+ numeric_buffer_close(jac);numeric_buffer_close(rhs);numeric_buffer_close(step)
+ numeric_buffer_close(qr);numeric_buffer_close(stage)
+ println("DEEP DISPERSION PASS")
+ 0
+}

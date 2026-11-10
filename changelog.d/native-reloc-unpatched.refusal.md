@@ -1,0 +1,1 @@
+A recorded native relocation that the x86-64 backend cannot patch is now refused (rc=29) instead of shipping an ELF whose `[rip+0]` site reads or calls the next instruction. Unknown kinds still refuse as rc=20. rc=29 is distinct from malformed IR and dynlink symbol-cap overflow, which already use 25.

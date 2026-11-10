@@ -1,0 +1,97 @@
+//@ run-pass
+//@ requires: madaros
+//@ timeout: 120
+//@ expect-stdout: DEEP DYNAMIC ROBUST CONTRAST PASS
+use collections::numeric_buffer::{numeric_buffer_new,numeric_buffer_at,numeric_buffer_set,numeric_buffer_close,numeric_matrix}
+use collections::integer_buffer::{integer_buffer_new,integer_buffer_set,integer_buffer_close}
+use stats::regression::dynamic_robust_covariance::{dynamic_robust_workspace,dynamic_linear_hc3,dynamic_linear_cluster,dynamic_robust_contrast}
+use io::sci_print::{println_f64_sci}
+fn robust_contrast_case(kind:i64) with Alloc,IO,Mut,Div,Panic {
+ let n:i64=516
+ let p:i64=12
+ let query=dynamic_robust_workspace(n,p)
+ assert(query.status==0)
+ let stride:i64=if kind==8 {p+3}else{p}
+ let offset:i64=if kind==8 {1}else{0}
+ let elements:i64=offset+n*stride
+ var a=numeric_buffer_new(elements,elements*8)
+ var y=numeric_buffer_new(n,n*8)
+ var ids=integer_buffer_new(n,n*8)
+ var beta=numeric_buffer_new(p,p*8)
+ let covariance_elements:i64=if kind==6 {0}else{p*p}
+ var covariance=numeric_buffer_new(covariance_elements,covariance_elements*8)
+ let contrast_elements:i64=if kind==4 {p-1}else{p}
+ var contrast=numeric_buffer_new(contrast_elements,contrast_elements*8)
+ var se=numeric_buffer_new(p,p*8)
+ var leverage=numeric_buffer_new(n,n*8)
+ var work=numeric_buffer_new(query.numeric_elements,query.numeric_elements*8)
+ var order=integer_buffer_new(query.integer_elements,query.integer_elements*8)
+ let layout=numeric_matrix(elements,n,p,stride,1,offset)
+ var i:i64=0
+ while i<n {
+  let original=if kind==5 {n-1-i}else{i}
+  let group=original/43
+  let within=original%43
+  let column=if kind==4 {p-1-group}else{group}
+  let scale:f64=if kind==3 {if group%2==0 {1e75}else{1e-75}}else{1.0}
+  numeric_buffer_set(&!a,offset+i*stride+column,1.0)
+  if kind==5 {if group==1 {numeric_buffer_set(&!a,offset+i*stride+column,0.0);numeric_buffer_set(&!a,offset+i*stride,1.0)}}
+  let response:f64=if kind==7 {0.25}else{((group+1)*10+(within%5)-2) as f64+((within%3) as f64)*0.25}
+  numeric_buffer_set(&!y,i,response)
+  let label:i64=if kind==6 {original}else{(within%7)*1000000007-3000000021}
+  integer_buffer_set(&!ids,i,label)
+  i=i+1
+ }
+ if kind!=2 {
+  numeric_buffer_set(&!contrast,0,if kind==3 {1e200}else{1.0})
+  if kind!=3 {numeric_buffer_set(&!contrast,1, -0.5)}
+ }
+ if kind==7 {
+  let quantum:f64=2.2250738585072014e-308/4503599627370496.0
+  var j:i64=0
+  while j<4 {numeric_buffer_set(&!contrast,j,quantum);j=j+1}
+ }
+ let result=if kind==1 {
+  dynamic_linear_cluster(&a,&layout,&y,&ids,0,0.0,&!beta,&!covariance,&!se,&!leverage,&!work,&!order)
+ }else{
+  dynamic_linear_hc3(&a,&layout,&y,0.0,&!beta,&!covariance,&!se,&!leverage,&!work,&!order)
+ }
+ let value=dynamic_robust_contrast(&result,&contrast,&beta,&work)
+ let status:i64=value.status
+ let estimate:f64=value.estimate
+ let standard_error:f64=value.standard_error
+ let variance:f64=value.variance
+ let variance_status:i64=value.variance_status
+ print("dynamic robust contrast case: ");println(kind)
+ print("dynamic robust contrast status: ");println(status)
+ if kind<4 {
+  assert(status==0)
+  if kind==3 {assert(variance_status==1 && variance==0.0 && standard_error>0.0)}else{assert(variance_status==0)}
+ }else{
+  if kind==4 {assert(status==2)}
+  if kind==5 || kind==6 {assert(status==1)}
+  if kind==7 {assert(status==4)}
+  assert(estimate==0.0 && standard_error==0.0 && variance==0.0 && variance_status==2)
+ }
+ assert(!value.assumptions_assessed && !value.finite_sample_calibrated)
+ print("dynamic robust contrast estimate: ");println_f64_sci(estimate,15)
+ print("dynamic robust contrast se: ");println_f64_sci(standard_error,15)
+ print("dynamic robust contrast variance: ");println_f64_sci(variance,15)
+ print("dynamic robust contrast variance status: ");println(variance_status)
+ numeric_buffer_close(contrast)
+ numeric_buffer_close(a)
+ numeric_buffer_close(y)
+ integer_buffer_close(ids)
+ numeric_buffer_close(beta)
+ numeric_buffer_close(covariance)
+ numeric_buffer_close(se)
+ numeric_buffer_close(leverage)
+ numeric_buffer_close(work)
+ integer_buffer_close(order)
+}
+fn main()->i32 with Alloc,IO,Mut,Div,Panic {
+ var kind:i64=0
+ while kind<8 {robust_contrast_case(kind);kind=kind+1}
+ println("DEEP DYNAMIC ROBUST CONTRAST PASS")
+ 0
+}

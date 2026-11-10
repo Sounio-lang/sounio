@@ -22,24 +22,27 @@ const requiredRoutes = [
 ];
 
 const redirectContracts = [
-  { file: 'src/pages/docs/index.astro', needle: '/learn' },
-  { file: 'src/pages/docs/[...slug].astro', needle: '/learn/' },
   { file: 'src/pages/showcases/[slug].astro', needle: '/science/' },
-  { file: 'src/pages/registry/index.astro', needle: '/packages' },
+  { file: 'src/pages/registry/index.astro', needle: '/packages/' },
   { file: 'src/pages/registry/[name].astro', needle: '/packages/' },
-  { file: 'src/pages/blog/index.astro', needle: '/insights' },
-  { file: 'src/pages/manifesto.astro', needle: '/about/vision' },
-  { file: 'src/pages/roadmap.astro', needle: '/about/roadmap' },
-  { file: 'src/pages/changelog.astro', needle: '/releases' },
-  { file: 'src/pages/[lang]/docs/index.astro', needle: '/learn' },
-  { file: 'src/pages/[lang]/docs/[...slug].astro', needle: '/learn/' },
+  { file: 'src/pages/blog/index.astro', needle: '/insights/' },
+  { file: 'src/pages/manifesto.astro', needle: '/about/vision/' },
+  { file: 'src/pages/roadmap.astro', needle: '/about/roadmap/' },
+  { file: 'src/pages/changelog.astro', needle: '/releases/' },
   { file: 'src/pages/[lang]/showcases/[slug].astro', needle: '/science/' },
-  { file: 'src/pages/[lang]/registry/index.astro', needle: '/packages' },
+  { file: 'src/pages/[lang]/registry/index.astro', needle: '/packages/' },
   { file: 'src/pages/[lang]/registry/[name].astro', needle: '/packages/' },
-  { file: 'src/pages/[lang]/blog/index.astro', needle: '/insights' },
-  { file: 'src/pages/[lang]/manifesto.astro', needle: '/about/vision' },
-  { file: 'src/pages/[lang]/roadmap.astro', needle: '/about/roadmap' },
-  { file: 'src/pages/[lang]/changelog.astro', needle: '/releases' },
+  { file: 'src/pages/[lang]/blog/index.astro', needle: '/insights/' },
+  { file: 'src/pages/[lang]/manifesto.astro', needle: '/about/vision/' },
+  { file: 'src/pages/[lang]/roadmap.astro', needle: '/about/roadmap/' },
+  { file: 'src/pages/[lang]/changelog.astro', needle: '/releases/' },
+];
+
+const removedMetaRefresh = [
+  'src/pages/docs/index.astro',
+  'src/pages/docs/[...slug].astro',
+  'src/pages/[lang]/docs/index.astro',
+  'src/pages/[lang]/docs/[...slug].astro',
 ];
 
 async function exists(rel) {
@@ -57,6 +60,12 @@ async function run() {
   for (const route of requiredRoutes) {
     if (!(await exists(route))) {
       errors.push(`Missing required V2 route file: ${route}`);
+    }
+  }
+
+  for (const file of removedMetaRefresh) {
+    if (await exists(file)) {
+      errors.push(`Docs meta-refresh page must stay deleted (use vercel.json routes): ${file}`);
     }
   }
 

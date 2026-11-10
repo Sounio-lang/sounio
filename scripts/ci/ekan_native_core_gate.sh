@@ -20,16 +20,7 @@ grep -q "ALL PASS" "$legacy_out"
 ./scripts/ci/ekan_native_frontier_matrix.sh >"$native_out"
 grep -q "EKAN_NATIVE_FRONTIER_MATRIX_PASS" "$native_out"
 
-./scripts/ci/ekan_native_blocker_probe.sh >"$native_out"
-grep -q "EKAN_NATIVE_BLOCKER_PROBE_PASS" "$native_out"
-
-./scripts/ci/ekan_native_readout_probe.sh >"$native_out"
-grep -q "EKAN_NATIVE_READOUT_PROBE_PASS" "$native_out"
-
-./scripts/ci/ekan_native_width_probe.sh >"$native_out"
-grep -q "EKAN_NATIVE_WIDTH_PROBE_PASS" "$native_out"
-
-./scripts/ci/ekan_native_input_width_probe.sh >"$native_out"
-grep -q "EKAN_NATIVE_INPUT_WIDTH_PROBE_PASS" "$native_out"
+# The four ekan_native_*_probe.sh filters only re-grepped this matrix.
+# They were removed with the other measured-dead gates.
 
 echo "EKAN_NATIVE_CORE_GATE_PASS"

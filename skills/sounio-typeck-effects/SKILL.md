@@ -1,6 +1,6 @@
 ---
 name: sounio-typeck-effects
-description: "Work on Sounio type checking and effect system (bidirectional inference, effect inference/enforcement, and type rules); use when editing `compiler/src/typeck/`, `compiler/src/types/`, `compiler/src/check/`, or `compiler/src/effects/`."
+description: "Work on Sounio type checking and effect system (bidirectional inference, effect inference/enforcement, and type rules); use when editing `self-hosted/check/` or `self-hosted/effects/`."
 ---
 
 # Sounio Typeck + Effects
@@ -19,9 +19,9 @@ Make changes to the type system and effect checker without drifting toward Rust 
 
 ### 2) Identify what layer you’re changing
 
-- Parser/AST shape: `compiler/src/parser/`, `compiler/src/ast/`
-- Type rules / inference: `compiler/src/check/`, `compiler/src/typeck/`, `compiler/src/types/`
-- Effects enforcement + inference: `compiler/src/effects/` and `compiler/src/types/effects.rs`
+- Parser shape: `self-hosted/parser/`
+- Type rules / inference: `self-hosted/check/`
+- Effects enforcement + inference: `self-hosted/effects/`
 
 ### 3) Protect effect soundness
 
@@ -30,7 +30,6 @@ Make changes to the type system and effect checker without drifting toward Rust 
 
 ### 4) Add high-signal tests
 
-- Rust integration: `compiler/tests/` (e.g. semantic types and effects)
 - Diagnostics expectations: `tests/ui/`
 - Language harness: `tests/run-pass/`, `tests/compile-fail/`
 
@@ -38,5 +37,3 @@ Make changes to the type system and effect checker without drifting toward Rust 
 
 - Typeck map: `references/typeck-navigation.md`
 - Effects map: `references/effects-navigation.md`
-- Claude command reference: `.claude/commands/sounio-effects.md`
-

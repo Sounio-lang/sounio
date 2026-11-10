@@ -1,0 +1,509 @@
+//@ run-pass
+//@ expect-stdout: VIZ_WEIGHTED_CALIBRATION_PASS
+//@ expect-stdout: scatter n=8
+//@ expect-stdout: Relative objective weights; variance model unassessed
+//@ expect-stdout: No standard errors, p-values or confidence intervals
+use stats::regression::multiple::{multiple_linear_fit,weighted_multiple_linear_fit}
+use viz::axis::{axis_label}
+use viz::ir::{viz_scene_new,viz_add_scatter_chart,viz_add_line_chart,
+ viz_line_set_viewport,viz_add_axis,viz_node_set_label,viz_add_label,
+ viz_add_series_legend,viz_layout_rect,viz_style_rgb}
+use viz::viz_canvas::{viz_canvas_render_scene}
+use viz::viz_html::{viz_html_emit_scene}
+use display::canvas::{Canvas,canvas_clear}
+fn main() with IO,Mut,Div,Alloc,Panic {
+ var a:[f64;2048]=[0.0;2048]
+ var b:[f64;256]=[0.0;256]
+ var w:[f64;256]=[0.0;256]
+ var response:[f64;8]=[1.2,2.7,5.4,6.6,9.6,10.4,13.5,14.5]
+ var i:i64=0
+ while i<8 {
+  a[(8*i) as usize]=1.0
+  a[(8*i+1) as usize]=i as f64
+  b[i as usize]=response[i as usize]
+  w[i as usize]=if i%2==0 {1.0} else {4.0}
+  i=i+1
+ }
+ let ordinary=multiple_linear_fit(&a,&b,8,2,1e-12)
+ let weighted=weighted_multiple_linear_fit(&a,&b,&w,8,2,1e-12)
+ assert(ordinary.status==0 && weighted.status==0)
+ assert(ordinary.rank==2 && weighted.rank==2 && ordinary.df==6 && weighted.df==6)
+ assert(!weighted.variance_model_assessed && weighted.weight_scale==4.0)
+ var xs:[f64;1024]=[0.0;1024]
+ var observed:[f64;1024]=[0.0;1024]
+ var ols_fitted:[f64;1024]=[0.0;1024]
+ var wls_fitted:[f64;1024]=[0.0;1024]
+ var order:[f64;1024]=[0.0;1024]
+ var ols_residual:[f64;1024]=[0.0;1024]
+ var wls_residual:[f64;1024]=[0.0;1024]
+ var ols_objective=0.0
+ var wls_objective=0.0
+ i=0
+ while i<8 {
+  xs[i as usize]=i as f64
+  observed[i as usize]=b[i as usize]
+  ols_fitted[i as usize]=ordinary.fitted[i as usize]
+  wls_fitted[i as usize]=weighted.fitted[i as usize]
+  order[i as usize]=(i+1) as f64
+  ols_residual[i as usize]=ordinary.residuals[i as usize]
+  wls_residual[i as usize]=weighted.residuals[i as usize]
+  let error=b[i as usize]-weighted.fitted[i as usize]-weighted.residuals[i as usize]
+  assert(error> -1e-12 && error<1e-12)
+  assert(ordinary.fitted[i as usize]>=0.0 && ordinary.fitted[i as usize]<=18.0)
+  assert(weighted.fitted[i as usize]>=0.0 && weighted.fitted[i as usize]<=18.0)
+  assert(ordinary.residuals[i as usize]> -2.0 && ordinary.residuals[i as usize]<2.0)
+  assert(weighted.residuals[i as usize]> -2.0 && weighted.residuals[i as usize]<2.0)
+  let weight=w[i as usize]/weighted.weight_scale
+  ols_objective=ols_objective+weight*ordinary.residuals[i as usize]*ordinary.residuals[i as usize]
+  wls_objective=wls_objective+weight*weighted.residuals[i as usize]*weighted.residuals[i as usize]
+  i=i+1
+ }
+ assert(wls_objective>0.0 && wls_objective<ols_objective)
+ let norm_error=weighted.normalized_weighted_residual_norm*weighted.normalized_weighted_residual_norm-wls_objective
+ assert(norm_error> -1e-10 && norm_error<1e-10)
+ var scene=viz_scene_new()
+ let points=viz_add_scatter_chart(&!scene,&xs,&observed,8,viz_layout_rect(140,150,480,240),viz_style_rgb(70,180,235))
+ assert(points==0)
+ scene.series[0].x_min=0.0;scene.series[0].x_max=8.0
+ scene.series[0].y_min=0.0;scene.series[0].y_max=18.0
+ let ols=viz_add_line_chart(&!scene,&xs,&ols_fitted,8,viz_layout_rect(140,150,480,240),viz_style_rgb(220,135,225))
+ let wls=viz_add_line_chart(&!scene,&xs,&wls_fitted,8,viz_layout_rect(140,150,480,240),viz_style_rgb(245,170,65))
+ assert(viz_line_set_viewport(&!scene,ols,0.0,8.0,0.0,18.0))
+ assert(viz_line_set_viewport(&!scene,wls,0.0,8.0,0.0,18.0))
+ let ordinary_errors=viz_add_scatter_chart(&!scene,&order,&ols_residual,8,viz_layout_rect(800,150,480,240),viz_style_rgb(220,135,225))
+ let weighted_errors=viz_add_scatter_chart(&!scene,&order,&wls_residual,8,viz_layout_rect(800,150,480,240),viz_style_rgb(245,170,65))
+ let ordinary_slot:i64=scene.nodes[ordinary_errors as usize].data_slot
+ let weighted_slot:i64=scene.nodes[weighted_errors as usize].data_slot
+ scene.series[ordinary_slot as usize].x_min=0.0;scene.series[ordinary_slot as usize].x_max=8.0
+ scene.series[ordinary_slot as usize].y_min= -2.0;scene.series[ordinary_slot as usize].y_max=2.0
+ scene.series[weighted_slot as usize].x_min=0.0;scene.series[weighted_slot as usize].x_max=8.0
+ scene.series[weighted_slot as usize].y_min= -2.0;scene.series[weighted_slot as usize].y_max=2.0
+ var zx:[f64;1024]=[0.0;1024]
+ var zy:[f64;1024]=[0.0;1024]
+ zx[1]=8.0
+ let zero=viz_add_line_chart(&!scene,&zx,&zy,2,viz_layout_rect(800,150,480,240),viz_style_rgb(180,185,195))
+ assert(viz_line_set_viewport(&!scene,zero,0.0,8.0,-2.0,2.0))
+ let xa=viz_add_axis(&!scene,0.0,8.0,4,false,viz_layout_rect(140,408,480,1),viz_style_rgb(190,200,215))
+ let ya=viz_add_axis(&!scene,0.0,18.0,3,true,viz_layout_rect(120,150,1,240),viz_style_rgb(190,200,215))
+ let xb=viz_add_axis(&!scene,0.0,8.0,4,false,viz_layout_rect(800,408,480,1),viz_style_rgb(190,200,215))
+ let yb=viz_add_axis(&!scene,-2.0,2.0,4,true,viz_layout_rect(780,150,1,240),viz_style_rgb(190,200,215))
+ var title:[i8;64]=[0;64]
+ title[0]=87
+ title[1]=101
+ title[2]=105
+ title[3]=103
+ title[4]=104
+ title[5]=116
+ title[6]=101
+ title[7]=100
+ title[8]=32
+ title[9]=97
+ title[10]=110
+ title[11]=100
+ title[12]=32
+ title[13]=117
+ title[14]=110
+ title[15]=119
+ title[16]=101
+ title[17]=105
+ title[18]=103
+ title[19]=104
+ title[20]=116
+ title[21]=101
+ title[22]=100
+ title[23]=32
+ title[24]=81
+ title[25]=82
+ title[26]=32
+ title[27]=99
+ title[28]=97
+ title[29]=108
+ title[30]=105
+ title[31]=98
+ title[32]=114
+ title[33]=97
+ title[34]=116
+ title[35]=105
+ title[36]=111
+ title[37]=110
+ var subtitle:[i8;64]=[0;64]
+ subtitle[0]=82
+ subtitle[1]=101
+ subtitle[2]=108
+ subtitle[3]=97
+ subtitle[4]=116
+ subtitle[5]=105
+ subtitle[6]=118
+ subtitle[7]=101
+ subtitle[8]=32
+ subtitle[9]=111
+ subtitle[10]=98
+ subtitle[11]=106
+ subtitle[12]=101
+ subtitle[13]=99
+ subtitle[14]=116
+ subtitle[15]=105
+ subtitle[16]=118
+ subtitle[17]=101
+ subtitle[18]=32
+ subtitle[19]=119
+ subtitle[20]=101
+ subtitle[21]=105
+ subtitle[22]=103
+ subtitle[23]=104
+ subtitle[24]=116
+ subtitle[25]=115
+ subtitle[26]=59
+ subtitle[27]=32
+ subtitle[28]=118
+ subtitle[29]=97
+ subtitle[30]=114
+ subtitle[31]=105
+ subtitle[32]=97
+ subtitle[33]=110
+ subtitle[34]=99
+ subtitle[35]=101
+ subtitle[36]=32
+ subtitle[37]=109
+ subtitle[38]=111
+ subtitle[39]=100
+ subtitle[40]=101
+ subtitle[41]=108
+ subtitle[42]=32
+ subtitle[43]=117
+ subtitle[44]=110
+ subtitle[45]=97
+ subtitle[46]=115
+ subtitle[47]=115
+ subtitle[48]=101
+ subtitle[49]=115
+ subtitle[50]=115
+ subtitle[51]=101
+ subtitle[52]=100
+ var xn:[i8;64]=[0;64]
+ xn[0]=100
+ xn[1]=105
+ xn[2]=109
+ xn[3]=101
+ xn[4]=110
+ xn[5]=115
+ xn[6]=105
+ xn[7]=111
+ xn[8]=110
+ xn[9]=108
+ xn[10]=101
+ xn[11]=115
+ xn[12]=115
+ xn[13]=32
+ xn[14]=115
+ xn[15]=101
+ xn[16]=110
+ xn[17]=115
+ xn[18]=111
+ xn[19]=114
+ xn[20]=32
+ xn[21]=115
+ xn[22]=105
+ xn[23]=103
+ xn[24]=110
+ xn[25]=97
+ xn[26]=108
+ var yn:[i8;64]=[0;64]
+ yn[0]=114
+ yn[1]=101
+ yn[2]=115
+ yn[3]=112
+ yn[4]=111
+ yn[5]=110
+ yn[6]=115
+ yn[7]=101
+ yn[8]=32
+ yn[9]=40
+ yn[10]=109
+ yn[11]=86
+ yn[12]=41
+ var on:[i8;64]=[0;64]
+ on[0]=111
+ on[1]=98
+ on[2]=115
+ on[3]=101
+ on[4]=114
+ on[5]=118
+ on[6]=97
+ on[7]=116
+ on[8]=105
+ on[9]=111
+ on[10]=110
+ on[11]=32
+ on[12]=105
+ on[13]=110
+ on[14]=100
+ on[15]=101
+ on[16]=120
+ var rn:[i8;64]=[0;64]
+ rn[0]=114
+ rn[1]=101
+ rn[2]=115
+ rn[3]=105
+ rn[4]=100
+ rn[5]=117
+ rn[6]=97
+ rn[7]=108
+ rn[8]=32
+ rn[9]=40
+ rn[10]=109
+ rn[11]=86
+ rn[12]=41
+ var obs:[i8;64]=[0;64]
+ obs[0]=79
+ obs[1]=98
+ obs[2]=115
+ obs[3]=101
+ obs[4]=114
+ obs[5]=118
+ obs[6]=101
+ obs[7]=100
+ obs[8]=32
+ obs[9]=114
+ obs[10]=101
+ obs[11]=115
+ obs[12]=112
+ obs[13]=111
+ obs[14]=110
+ obs[15]=115
+ obs[16]=101
+ var ordinary_name:[i8;64]=[0;64]
+ ordinary_name[0]=85
+ ordinary_name[1]=110
+ ordinary_name[2]=105
+ ordinary_name[3]=116
+ ordinary_name[4]=45
+ ordinary_name[5]=119
+ ordinary_name[6]=101
+ ordinary_name[7]=105
+ ordinary_name[8]=103
+ ordinary_name[9]=104
+ ordinary_name[10]=116
+ ordinary_name[11]=32
+ ordinary_name[12]=102
+ ordinary_name[13]=105
+ ordinary_name[14]=116
+ ordinary_name[15]=32
+ ordinary_name[16]=47
+ ordinary_name[17]=32
+ ordinary_name[18]=114
+ ordinary_name[19]=101
+ ordinary_name[20]=115
+ ordinary_name[21]=105
+ ordinary_name[22]=100
+ ordinary_name[23]=117
+ ordinary_name[24]=97
+ ordinary_name[25]=108
+ var weighted_name:[i8;64]=[0;64]
+ weighted_name[0]=82
+ weighted_name[1]=101
+ weighted_name[2]=108
+ weighted_name[3]=97
+ weighted_name[4]=116
+ weighted_name[5]=105
+ weighted_name[6]=118
+ weighted_name[7]=101
+ weighted_name[8]=45
+ weighted_name[9]=119
+ weighted_name[10]=101
+ weighted_name[11]=105
+ weighted_name[12]=103
+ weighted_name[13]=104
+ weighted_name[14]=116
+ weighted_name[15]=32
+ weighted_name[16]=102
+ weighted_name[17]=105
+ weighted_name[18]=116
+ weighted_name[19]=32
+ weighted_name[20]=47
+ weighted_name[21]=32
+ weighted_name[22]=114
+ weighted_name[23]=101
+ weighted_name[24]=115
+ weighted_name[25]=105
+ weighted_name[26]=100
+ weighted_name[27]=117
+ weighted_name[28]=97
+ weighted_name[29]=108
+ var foot:[i8;64]=[0;64]
+ foot[0]=83
+ foot[1]=121
+ foot[2]=110
+ foot[3]=116
+ foot[4]=104
+ foot[5]=101
+ foot[6]=116
+ foot[7]=105
+ foot[8]=99
+ foot[9]=32
+ foot[10]=109
+ foot[11]=86
+ foot[12]=32
+ foot[13]=114
+ foot[14]=101
+ foot[15]=115
+ foot[16]=112
+ foot[17]=111
+ foot[18]=110
+ foot[19]=115
+ foot[20]=101
+ foot[21]=59
+ foot[22]=32
+ foot[23]=97
+ foot[24]=108
+ foot[25]=116
+ foot[26]=101
+ foot[27]=114
+ foot[28]=110
+ foot[29]=97
+ foot[30]=116
+ foot[31]=105
+ foot[32]=110
+ foot[33]=103
+ foot[34]=32
+ foot[35]=111
+ foot[36]=98
+ foot[37]=106
+ foot[38]=101
+ foot[39]=99
+ foot[40]=116
+ foot[41]=105
+ foot[42]=118
+ foot[43]=101
+ foot[44]=32
+ foot[45]=119
+ foot[46]=101
+ foot[47]=105
+ foot[48]=103
+ foot[49]=104
+ foot[50]=116
+ foot[51]=115
+ foot[52]=32
+ foot[53]=49
+ foot[54]=32
+ foot[55]=97
+ foot[56]=110
+ foot[57]=100
+ foot[58]=32
+ foot[59]=52
+ var note:[i8;64]=[0;64]
+ note[0]=78
+ note[1]=111
+ note[2]=32
+ note[3]=115
+ note[4]=116
+ note[5]=97
+ note[6]=110
+ note[7]=100
+ note[8]=97
+ note[9]=114
+ note[10]=100
+ note[11]=32
+ note[12]=101
+ note[13]=114
+ note[14]=114
+ note[15]=111
+ note[16]=114
+ note[17]=115
+ note[18]=44
+ note[19]=32
+ note[20]=112
+ note[21]=45
+ note[22]=118
+ note[23]=97
+ note[24]=108
+ note[25]=117
+ note[26]=101
+ note[27]=115
+ note[28]=32
+ note[29]=111
+ note[30]=114
+ note[31]=32
+ note[32]=99
+ note[33]=111
+ note[34]=110
+ note[35]=102
+ note[36]=105
+ note[37]=100
+ note[38]=101
+ note[39]=110
+ note[40]=99
+ note[41]=101
+ note[42]=32
+ note[43]=105
+ note[44]=110
+ note[45]=116
+ note[46]=101
+ note[47]=114
+ note[48]=118
+ note[49]=97
+ note[50]=108
+ note[51]=115
+ viz_node_set_label(&!scene,xa,&xn,27)
+ viz_node_set_label(&!scene,ya,&yn,13)
+ viz_node_set_label(&!scene,xb,&on,17)
+ viz_node_set_label(&!scene,yb,&rn,13)
+ assert(viz_add_label(&!scene,&title,38,viz_layout_rect(140,20,1140,20),viz_style_rgb(230,235,245))>=0)
+ assert(viz_add_label(&!scene,&subtitle,53,viz_layout_rect(140,52,1140,20),viz_style_rgb(190,200,215))>=0)
+ assert(viz_add_series_legend(&!scene,points,&obs,17,viz_layout_rect(140,470,300,22))>=0)
+ assert(viz_add_series_legend(&!scene,ols,&ordinary_name,26,viz_layout_rect(500,470,340,22))>=0)
+ assert(viz_add_series_legend(&!scene,wls,&weighted_name,30,viz_layout_rect(900,470,380,22))>=0)
+ assert(viz_add_label(&!scene,&foot,60,viz_layout_rect(140,550,1140,14),viz_style_rgb(190,200,215))>=0)
+ assert(viz_add_label(&!scene,&note,52,viz_layout_rect(140,580,1140,14),viz_style_rgb(190,200,215))>=0)
+ let value0=axis_label(weighted.coefficients[0])
+ var text0:[i8;64]=[0;64]
+ text0[0]=87
+ text0[1]=76
+ text0[2]=83
+ text0[3]=32
+ text0[4]=98
+ text0[5]=101
+ text0[6]=116
+ text0[7]=97
+ text0[8]=48
+ text0[9]=32
+ text0[10]=40
+ text0[11]=109
+ text0[12]=86
+ text0[13]=41
+ text0[14]=61
+ i=0
+ while i<value0.n {text0[(i+15) as usize]=value0.text[i as usize];i=i+1}
+ assert(viz_add_label(&!scene,&text0,value0.n+15,viz_layout_rect(140,92,480,20),viz_style_rgb(230,235,245))>=0)
+ let value1=axis_label(weighted.coefficients[1])
+ var text1:[i8;64]=[0;64]
+ text1[0]=87
+ text1[1]=76
+ text1[2]=83
+ text1[3]=32
+ text1[4]=98
+ text1[5]=101
+ text1[6]=116
+ text1[7]=97
+ text1[8]=49
+ text1[9]=32
+ text1[10]=40
+ text1[11]=109
+ text1[12]=86
+ text1[13]=41
+ text1[14]=61
+ i=0
+ while i<value1.n {text1[(i+15) as usize]=value1.text[i as usize];i=i+1}
+ assert(viz_add_label(&!scene,&text1,value1.n+15,viz_layout_rect(800,92,480,20),viz_style_rgb(230,235,245))>=0)
+ assert(scene.node_count==19 && scene.series_count==6)
+ assert(scene.series[ordinary_slot as usize].n==8 && scene.series[weighted_slot as usize].n==8)
+ let pixels=heap_alloc(1440*620*8) as *mut i64
+ var canvas=Canvas{pixels:pixels,width:1440,height:620}
+ canvas_clear(&!canvas,0,0,0)
+ viz_canvas_render_scene(&scene,&!canvas)
+ assert(read_i64(canvas.pixels,390*1440+118)==190*65536+200*256+215)
+ assert(read_i64(canvas.pixels,390*1440+778)==190*65536+200*256+215)
+ viz_html_emit_scene(&scene,1440,620)
+ println("VIZ_WEIGHTED_CALIBRATION_PASS")
+ 0
+}

@@ -20,7 +20,7 @@
 #   //@ xfail-exit: N         — the known failure's souc exit code must be N
 #                               (124 = timeout); mismatch is a fresh FAIL
 #   //@ skip-if: CONDITION    — conditional skip (e.g., skip-if: no-gpu)
-#   //@ requires: FEATURE     — feature dependency (gpu|llvm|madaros|lean_single|slow)
+#   //@ requires: FEATURE     — feature dependency (gpu|llvm|madaros|lean_single|slow|vendor-material)
 #   //@ flaky                 — known flaky test
 #   //@ timeout: SECONDS      — override default timeout
 #
@@ -104,16 +104,96 @@ sounio_require_souc
 _sounio_engine_md5() {
     if [[ -r "$1" ]]; then md5sum "$1" 2>/dev/null | cut -c1-8; else echo "absent"; fi
 }
-SOUNIO_ENGINE_KIND="madaros"
-SOUNIO_ENGINE_ELF="$ROOT_DIR/artifacts/self-hosted/madaros"
-if [[ "${SOUNIO_SOUC_ENGINE:-}" == "lean_single" ]] || [[ ! -x "$ROOT_DIR/artifacts/self-hosted/madaros" ]]; then
-    SOUNIO_ENGINE_KIND="lean_single"
-    SOUNIO_ENGINE_ELF="$ROOT_DIR/bin/souc-lean-single-x86_64"
-    [[ -x "$SOUNIO_ENGINE_ELF" ]] || SOUNIO_ENGINE_ELF="$ROOT_DIR/bin/souc-linux-x86_64"
-fi
+# Resolve the engine the way the dispatcher actually will, not by inference
+# from one path. With no override, $SOUC_BIN is bin/souc, whose default engine
+# is Madaros whenever a Madaros ELF resolves -- the committed prebuilt
+# bin/madaros-linux-x86_64 included (bin/souc auto-materializes it from the
+# tracked .gz) -- and which falls back to lean_single only when none resolves.
+# The previous heuristic reported lean_single whenever artifacts/self-hosted/
+# madaros was absent, so a run the committed Madaros prebuilt produced was
+# bannered "engine=lean_single elf=bin/souc-lean-single-x86_64", md5 of a
+# compiler that ran nothing. Measured 2026-10-29 on main 439b42c5: prebuilt
+# materialized, no env set, no artifacts build -- the banner named lean_single
+# (md5 2640b5b1) while every test executed on Madaros v0.80.0.
 if [[ -n "${SOUNIO_TEST_SOUC_BIN:-}" ]]; then
     SOUNIO_ENGINE_KIND="explicit"
     SOUNIO_ENGINE_ELF="$SOUNIO_TEST_SOUC_BIN"
+elif [[ -n "${SOUNIO_SOUC_BIN:-}" && -x "${SOUNIO_SOUC_BIN}" \
+       && "$(head -c 2 "${SOUNIO_SOUC_BIN}" 2>/dev/null)" != '#!' ]]; then
+    # bin/souc execs an explicit ELF override directly (raw lean_single CLI).
+    SOUNIO_ENGINE_KIND="explicit"
+    SOUNIO_ENGINE_ELF="$SOUNIO_SOUC_BIN"
+elif [[ "${SOUNIO_SOUC_ENGINE:-}" == "lean_single" \
+        || "${SOUNIO_SOUC_ENGINE:-}" == "lean-single" \
+        || "${SOUNIO_SOUC_ENGINE:-}" == "leansingle" ]]; then
+    # bin/souc's forced-legacy case accepts all three spellings
+    # (lean_single|lean-single|leansingle). Matching only the first here
+    # banners Madaros for a run that executes lean_single -- and bypasses the
+    # lean_single staleness refusal below.
+    SOUNIO_ENGINE_KIND="lean_single"
+    SOUNIO_ENGINE_ELF="$ROOT_DIR/bin/souc-lean-single-x86_64"
+    [[ -x "$SOUNIO_ENGINE_ELF" ]] || SOUNIO_ENGINE_ELF="$ROOT_DIR/bin/souc-linux-x86_64"
+else
+    # Mirror bin/souc's Madaros resolution order: MADAROS_RAW_BIN,
+    # SOUNIO_MADAROS_BIN, host raw, the local artifacts build, then the
+    # committed prebuilt. And, like bin/souc, attempt materialization of the
+    # committed prebuilt BEFORE selecting, not only when nothing else
+    # resolves: a checkout can refresh the tracked .gz/.sha256 while leaving
+    # an older materialized ELF beside them, and bin/souc replaces that ELF
+    # before dispatch. Selecting it here without materializing would hash the
+    # compiler that is about to be replaced, not the one that runs. (The
+    # materializer is a no-op when this tree has no compressed prebuilt.)
+    _engine_banner_madaros=""
+    source "$ROOT_DIR/scripts/lib/resolve_madaros.sh"
+    if [[ -f "$ROOT_DIR/scripts/lib/materialize_madaros_prebuilt.sh" ]]; then
+        # This script sets -uo pipefail, not -e: propagate a materialization
+        # failure explicitly. bin/souc tolerates it only when a higher-
+        # priority override resolves (that run never uses the prebuilt ELF);
+        # with none, bin/souc stops before dispatch -- it means to exit with
+        # the materializer's rc, though today the negated test in
+        # `if ! bash ...; then _mat_rc=$?` turns that into exit 0 (measured
+        # 2026-10-30). Exiting here matches that intent; continuing would
+        # select the missing path and banner engine=madaros md5=absent for a
+        # run that cannot start.
+        _engine_banner_mat_rc=0
+        bash "$ROOT_DIR/scripts/lib/materialize_madaros_prebuilt.sh" || _engine_banner_mat_rc=$?
+        if [[ "$_engine_banner_mat_rc" -ne 0 ]]; then
+            _engine_banner_override=""
+            for _engine_banner_cand in "${MADAROS_RAW_BIN:-}" "${SOUNIO_MADAROS_BIN:-}" \
+                    "$(sounio_madaros_host_raw || true)" \
+                    "$ROOT_DIR/artifacts/self-hosted/madaros"; do
+                if [[ -n "$_engine_banner_cand" && -x "$_engine_banner_cand" \
+                      && "$(head -c 2 "$_engine_banner_cand" 2>/dev/null)" != '#!' ]]; then
+                    _engine_banner_override="$_engine_banner_cand"
+                    break
+                fi
+            done
+            if [[ -z "$_engine_banner_override" ]]; then
+                echo "harness: committed Madaros prebuilt failed to materialize (rc=$_engine_banner_mat_rc)" >&2
+                echo "         and no higher-priority Madaros override resolves; bin/souc would exit the same way." >&2
+                exit "$_engine_banner_mat_rc"
+            fi
+        fi
+    fi
+    for _engine_banner_cand in "${MADAROS_RAW_BIN:-}" "${SOUNIO_MADAROS_BIN:-}" \
+            "$(sounio_madaros_host_raw || true)" \
+            "$ROOT_DIR/artifacts/self-hosted/madaros" \
+            "$ROOT_DIR/bin/madaros-linux-x86_64"; do
+        if [[ -n "$_engine_banner_cand" && -x "$_engine_banner_cand" \
+              && "$(head -c 2 "$_engine_banner_cand" 2>/dev/null)" != '#!' ]]; then
+            _engine_banner_madaros="$_engine_banner_cand"
+            break
+        fi
+    done
+    if [[ -n "$_engine_banner_madaros" ]]; then
+        SOUNIO_ENGINE_KIND="madaros"
+        SOUNIO_ENGINE_ELF="$_engine_banner_madaros"
+    else
+        SOUNIO_ENGINE_KIND="lean_single"
+        SOUNIO_ENGINE_ELF="$ROOT_DIR/bin/souc-lean-single-x86_64"
+        [[ -x "$SOUNIO_ENGINE_ELF" ]] || SOUNIO_ENGINE_ELF="$ROOT_DIR/bin/souc-linux-x86_64"
+    fi
+    unset _engine_banner_madaros _engine_banner_cand _engine_banner_mat_rc _engine_banner_override
 fi
 
 # Refuse to guess: a newer local build of the engine that is NOT the one about
@@ -163,6 +243,7 @@ FILTER_MODE="contains"
 VERBOSE=""
 FORMAT="text"
 JOBS="${SOUNIO_TEST_JOBS:-$(nproc 2>/dev/null || echo 4)}"
+JOBS_CLI_SET=0
 LIST_TESTS=0
 TEST_LIST_FILE=""
 
@@ -193,6 +274,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         --jobs)
             JOBS="$2"
+            JOBS_CLI_SET=1
             shift 2
             ;;
         --list-tests)
@@ -210,6 +292,83 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+available_cpus() {
+    if [[ -n "${SOUNIO_TEST_CPU_COUNT:-}" ]]; then
+        printf '%s\n' "$SOUNIO_TEST_CPU_COUNT"
+    else
+        nproc 2>/dev/null || echo 4
+    fi
+}
+
+available_memory_bytes() {
+    if [[ -n "${SOUNIO_TEST_MEMORY_BYTES:-}" ]]; then
+        printf '%s\n' "$SOUNIO_TEST_MEMORY_BYTES"
+    elif [[ -r /sys/fs/cgroup/memory.max ]]; then
+        local limit current
+        read -r limit < /sys/fs/cgroup/memory.max
+        if [[ "$limit" =~ ^[0-9]+$ ]]; then
+            current=0
+            if [[ -r /sys/fs/cgroup/memory.current ]]; then
+                read -r current < /sys/fs/cgroup/memory.current
+            fi
+            [[ "$current" =~ ^[0-9]+$ ]] || current=0
+            (( current < limit )) && printf '%s\n' "$((limit - current))" || printf '1\n'
+        else
+            awk '/^MemAvailable:/ { printf "%.0f\n", $2 * 1024; exit }' /proc/meminfo
+        fi
+    elif [[ -r /sys/fs/cgroup/memory/memory.limit_in_bytes ]]; then
+        local limit current host_memory
+        read -r limit < /sys/fs/cgroup/memory/memory.limit_in_bytes
+        current=0
+        [[ ! -r /sys/fs/cgroup/memory/memory.usage_in_bytes ]] \
+            || read -r current < /sys/fs/cgroup/memory/memory.usage_in_bytes
+        if [[ "$limit" =~ ^[0-9]+$ && "$current" =~ ^[0-9]+$ && "$current" -lt "$limit" ]]; then
+            host_memory="$(awk '/^MemAvailable:/ { printf "%.0f\n", $2 * 1024; exit }' /proc/meminfo)"
+            if [[ "$host_memory" =~ ^[1-9][0-9]*$ ]]; then
+                local remaining=$((limit - current))
+                if (( remaining > host_memory )); then
+                    remaining="$host_memory"
+                fi
+                printf '%s\n' "$remaining"
+            else
+                printf '1\n'
+            fi
+        else
+            printf '1\n'
+        fi
+    else
+        awk '/^MemAvailable:/ { printf "%.0f\n", $2 * 1024; exit }' /proc/meminfo
+    fi
+}
+
+if [[ ! "$JOBS" =~ ^[1-9][0-9]*$ ]]; then
+    echo "error: --jobs must be a positive integer" >&2
+    exit 2
+fi
+
+if [[ -n "${CI:-}" && "${SOUNIO_TEST_JOBS_DYNAMIC:-1}" != "0" ]]; then
+    JOBS_CAP="${SOUNIO_TEST_JOBS_CAP:-8}"
+    if [[ ! "$JOBS_CAP" =~ ^[1-9][0-9]*$ ]]; then
+        echo "error: SOUNIO_TEST_JOBS_CAP must be a positive integer" >&2
+        exit 2
+    fi
+    CPU_COUNT="$(available_cpus)"
+    MEMORY_BYTES="$(available_memory_bytes)"
+    if [[ ! "$CPU_COUNT" =~ ^[1-9][0-9]*$ || ! "$MEMORY_BYTES" =~ ^[1-9][0-9]*$ ]]; then
+        echo "error: could not determine positive CPU and memory limits for dynamic test jobs" >&2
+        exit 2
+    fi
+    MEMORY_JOBS=$((MEMORY_BYTES / (2 * 1024 * 1024 * 1024)))
+    (( MEMORY_JOBS > 0 )) || MEMORY_JOBS=1
+    SCALED_JOBS=$((2 * CPU_COUNT))
+    (( SCALED_JOBS > MEMORY_JOBS )) && SCALED_JOBS="$MEMORY_JOBS"
+    (( SCALED_JOBS > JOBS_CAP )) && SCALED_JOBS="$JOBS_CAP"
+    if (( JOBS_CLI_SET == 1 && JOBS > SCALED_JOBS )); then
+        SCALED_JOBS="$JOBS"
+    fi
+    JOBS="$SCALED_JOBS"
+fi
 
 # Test counters
 PASS=0
@@ -316,7 +475,7 @@ test_matches_filter() {
 }
 
 # Function to run a single test
-run_test() {
+_run_test_case() {
     local file="$1"
     local idx="$2"
     local output_file="$TEST_TMP/result_$idx.json"
@@ -530,13 +689,37 @@ run_test() {
             # is set; the nightly slow-lane job sets it, with a much larger
             # job timeout budget.
             slow) [[ -z "${SOUNIO_SLOW_TESTS_AVAILABLE:-}" ]] && { echo "{\"status\":\"skip\",\"reason\":\"requires:slow\",\"name\":\"$basename\",\"idx\":$idx}" > "$output_file"; return; } ;;
+            # `requires: vendor-material` — the test reads third-party material
+            # (vendor PDFs, datafiles) that the repository cannot carry, named one
+            # path per line in its `.args` sidecar (repo-relative or absolute).
+            # Skipped, naming the first missing path, unless every path exists;
+            # then the header's mode (check-only) applies, and
+            # scripts/ci/pireus_argv_tests_gate.sh runs it with that argv. A
+            # missing sidecar is a test-authoring error, not a skip (#2820).
+            vendor-material)
+                local vm_args="${file}.args"
+                if [[ ! -f "$vm_args" ]]; then
+                    echo "{\"status\":\"fail\",\"category\":\"fail\",\"name\":\"$basename\",\"output\":\"requires: vendor-material but no .args sidecar names the material\",\"idx\":$idx}" > "$output_file"
+                    return
+                fi
+                local vm_missing="" vm_line vm_path
+                while IFS= read -r vm_line || [[ -n "$vm_line" ]]; do
+                    [[ -z "$vm_line" ]] && continue
+                    vm_path="$vm_line"; [[ "$vm_path" == /* ]] || vm_path="$ROOT_DIR/$vm_path"
+                    if [[ ! -e "$vm_path" ]]; then vm_missing="$vm_line"; break; fi
+                done < "$vm_args"
+                if [[ -n "$vm_missing" ]]; then
+                    echo "{\"status\":\"skip\",\"reason\":\"requires:vendor-material (missing $vm_missing)\",\"name\":\"$basename\",\"idx\":$idx}" > "$output_file"
+                    return
+                fi
+                ;;
             # An unrecognized requires value must not fall through silently: a typo
             # (e.g. `requires: madros`) would otherwise run the test against
             # whatever engine is present instead of being gated as intended, with
             # the annotation asserting nothing -- indistinguishable from the
             # vacuous-match defect this PR exists to remove.
             *)
-                echo "{\"status\":\"fail\",\"category\":\"fail\",\"name\":\"$basename\",\"output\":\"unknown requires: $requires (expected: gpu|llvm|madaros|lean_single|slow)\",\"idx\":$idx}" > "$output_file"
+                echo "{\"status\":\"fail\",\"category\":\"fail\",\"name\":\"$basename\",\"output\":\"unknown requires: $requires (expected: gpu|llvm|madaros|lean_single|slow|vendor-material)\",\"idx\":$idx}" > "$output_file"
                 return
                 ;;
         esac
@@ -829,9 +1012,12 @@ run_test() {
     json="$json}"
     echo "$json" > "$output_file"
     if [[ -n "${SOUNIO_TEST_RESULTS_DIR:-}" ]]; then
+        printf '%s\n' "$output" > "$SOUNIO_TEST_RESULTS_DIR/result_$idx.log"
         cp "$output_file" "$SOUNIO_TEST_RESULTS_DIR/"
     fi
 }
+
+source "$ROOT_DIR/scripts/dev/sio_test_case.sh"
 
 # Collect all test files
 TEST_FILES=()
@@ -867,7 +1053,7 @@ else
     for f in "$ROOT_DIR"/tests/compile-fail/*.sio; do
         [[ -f "$f" ]] && TEST_FILES+=("$f")
     done
-    for f in "$ROOT_DIR"/tests/ui/type/*.sio "$ROOT_DIR"/tests/ui/effect/*.sio "$ROOT_DIR"/tests/ui/ownership/*.sio "$ROOT_DIR"/tests/ui/resolve/*.sio "$ROOT_DIR"/tests/ui/pattern/*.sio; do
+    for f in "$ROOT_DIR"/tests/ui/type/*.sio "$ROOT_DIR"/tests/ui/effect/*.sio "$ROOT_DIR"/tests/ui/ownership/*.sio "$ROOT_DIR"/tests/ui/resolve/*.sio "$ROOT_DIR"/tests/ui/module/*.sio "$ROOT_DIR"/tests/ui/pattern/*.sio; do
         [[ -f "$f" ]] && TEST_FILES+=("$f")
     done
     for f in "$ROOT_DIR"/tests/stdlib/*/test_*.sio; do

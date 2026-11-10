@@ -1,0 +1,88 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: which 3
+//@ expect-stdout: READING_BAND_OK
+// exp(L) and exp(L/2)*exp(L/2). The band is the overlap of the two
+// mean ± sqrt(var) intervals the compiler returns. The lognormal
+// interval contains the Taylor interval, so the overlap is the Taylor
+// one. Both means sit in it. No centre is chosen.
+
+use epistemic::claim_meet::reading_band
+
+var R_GAS: f64 = 8.314462618
+var T_HOT: f64 = 353.15
+var DH: f64 = 30800.0
+var DS: f64 = 108.0
+var U_DH: f64 = 1500.0
+var U_DS: f64 = 2.0
+
+fn ln_p(dh: f64, ds: f64) -> f64 {
+    ds / R_GAS - dh / (R_GAS * T_HOT)
+}
+
+fn p_one(dh: f64, ds: f64) -> f64 {
+    exp(ln_p(dh, ds))
+}
+
+fn half(dh: f64, ds: f64) -> f64 {
+    exp(ln_p(dh, ds) / 2.0)
+}
+
+fn s_ln2() -> f64 {
+    let a = U_DS / R_GAS
+    let b = U_DH / (R_GAS * T_HOT)
+    a * a + b * b
+}
+
+fn claim_sqrt(x: f64) -> f64 with Mut, Div {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 40 {
+        y = 0.5 * (y + x / y)
+        i = i + 1
+    }
+    y
+}
+
+fn near(actual: f64, expected: f64, tol: f64) -> bool {
+    let d = actual - expected
+    if d < 0.0 { return (0.0 - d) < tol }
+    d < tol
+}
+
+fn main() -> i64 with IO, Mut, Div, Epistemic {
+    let dh0: f64 = DH
+    let ds0: f64 = DS
+    let hk: Knowledge<f64> = measure(dh0, uncertainty: U_DH)
+    let sk: Knowledge<f64> = measure(ds0, uncertainty: U_DS)
+    let dh = hk.value
+    let ds = sk.value
+    let one = p_one(dh, ds)
+    let sq = half(dh, ds) * half(dh, ds)
+    let mone = second_order_mean(one)
+    let msq = second_order_mean(sq)
+    let vone = variance_of(one)
+    let vsq = variance_of(sq)
+    let band = reading_band(mone, vone, msq, vsq)
+    let p0 = p_one(DH, DS)
+    let sl2 = s_ln2()
+    let mean_taylor = p0 * (1.0 + 0.5 * sl2)
+    let var_lin = p0 * p0 * sl2
+    let sd = claim_sqrt(var_lin)
+    print("which ")
+    print_int(band.which)
+    println("")
+    print("lo ")
+    print_f64(band.lo)
+    println("")
+    print("hi ")
+    print_f64(band.hi)
+    println("")
+    if band.open && band.which == 3 && near(band.lo, mean_taylor - sd, 0.000001) && near(band.hi, mean_taylor + sd, 0.000001) && band.lo <= mone && mone <= band.hi && band.lo <= msq && msq <= band.hi {
+        println("READING_BAND_OK")
+        return 0
+    }
+    println("READING_BAND_FAIL")
+    1
+}

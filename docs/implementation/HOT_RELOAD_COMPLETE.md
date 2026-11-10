@@ -2,8 +2,8 @@
 topic_id: repo.docs.implementation.hot-reload-complete
 authority: historical
 audience: maintainers
-last_validated: 2026-03-07
-validated_by: A7
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.implementation.hot-reload-complete
 -->
 
@@ -288,7 +288,7 @@ println("Server v2 - NOW WITH EMOJI! 🚀")
 
 ## Next Steps
 
-To make this production-ready:
+Still open before any production use:
 
 1. **Integrate with `souc`** - Call the real compiler
 2. **Native runtime** - Port to Rust for performance

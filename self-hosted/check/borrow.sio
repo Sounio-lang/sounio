@@ -27,6 +27,7 @@ pub struct BorrowEntry {
     pub shared_count: i64,   // Number of active shared borrows
     pub is_linear: bool,     // Whether this is a linear type variable
     pub consumed: bool,      // Whether a linear variable has been consumed
+    pub is_affine: bool,     // #1263: affine -- consumed at most once, never required
     pub scope_depth: i64,    // Scope where this entry was created
     pub provenance: i64,     // escape provenance: 0=first-class (param/global/safe), 1=local (frame-bound ref)
 }
@@ -38,6 +39,7 @@ fn empty_borrow_entry() -> BorrowEntry {
         shared_count: 0,
         is_linear: false,
         consumed: false,
+        is_affine: false,
         scope_depth: 0,
         provenance: 0,
     }
@@ -150,8 +152,13 @@ impl BorrowEnv {
         env
     }
 
-    // Register a variable for borrow tracking
-    fn track(self, name: Name, is_linear: bool) -> BorrowEnv with Mut, Panic, Div {
+    // Register a variable for borrow tracking.
+    // Returns (env, 0) when the binding is recorded, or when a non-linear name
+    // is dropped because the table is full (pre-existing borrow-precision limit).
+    // A linear or affine binding that does not fit returns E275: the 128-entry
+    // table is not enlarged (it sits on the checker frame), and silently
+    // dropping the name lets a later use skip E268 / E039.
+    fn track(self, name: Name, is_linear: bool) -> (BorrowEnv, i64) with Mut, Panic, Div {
         var env = self
         if env.count < 128 {
             env.entries[env.count] = BorrowEntry {
@@ -160,10 +167,32 @@ impl BorrowEnv {
                 shared_count: 0,
                 is_linear: is_linear,
                 consumed: false,
+                is_affine: false,
                 scope_depth: env.scope_depth,
                 provenance: 0,
             }
             env.count = env.count + 1
+            return (env, 0)
+        }
+        if is_linear {
+            return (env, 275)
+        }
+        (env, 0)
+    }
+
+    // #1263: mark the most recent binding of `name` as affine. Affine values are
+    // tracked like linear ones for the second-use check (E268 if affine, E039
+    // if linear) but are exempt from the must-consume check (E040). The if-join ORs
+    // their consumed flag (see checker_merge_if_branches_inplace): disagreement
+    // between arms is legal, a later use on the arm that spent the value is not.
+    // Callers must not call this when track returned E275 — find would otherwise
+    // stamp an outer binding of the same name.
+    fn mark_affine(self, name: Name) -> BorrowEnv with Mut, Panic, Div {
+        var env = self
+        let idx = env.find(name)
+        if idx >= 0 {
+            env.entries[idx].is_linear = true
+            env.entries[idx].is_affine = true
         }
         env
     }
@@ -216,6 +245,8 @@ impl BorrowEnv {
             return (env, 0)
         }
         let entry = env.entries[idx]
+        // Borrowing a moved linear owner must remain a use-after-move error.
+        if entry.is_linear && entry.consumed { return (env, 39) }
         if entry.state == 2 {
             // Cannot take shared borrow while exclusive borrow is active
             return (env, 37)
@@ -235,6 +266,8 @@ impl BorrowEnv {
             return (env, 0)
         }
         let entry = env.entries[idx]
+        // Borrowing a moved linear owner must remain a use-after-move error.
+        if entry.is_linear && entry.consumed { return (env, 39) }
         if entry.state != 0 {
             // Cannot take exclusive borrow while any borrow is active
             return (env, 38)
@@ -256,7 +289,8 @@ impl BorrowEnv {
             return (env, 0)
         }
         if entry.consumed {
-            // Double consumption of linear value
+            // Double consumption: E039 for linear, E268 for affine (#1263)
+            if entry.is_affine { return (env, 268) }
             return (env, 39)
         }
         env.entries[idx].consumed = true
@@ -275,7 +309,7 @@ impl BorrowEnv {
         }
         var i = scope_start
         while i < env.count {
-            if env.entries[i].is_linear && !env.entries[i].consumed {
+            if env.entries[i].is_linear && !env.entries[i].is_affine && !env.entries[i].consumed {
                 unconsumed = unconsumed + 1
             }
             i = i + 1
@@ -327,5 +361,238 @@ impl BorrowEnv {
             i = i + 1
         }
         env
+    }
+}
+// ============================================================
+// Frame-diet twins (SIO-378). The by-value BorrowEnv methods above copy the
+// whole ~59KB env into the caller's union frame on every call; nested call
+// checking stacked those frames until 8MB stacks burst at depth 4-5. These
+// mutate through &! / read through & and return only scalars, so call sites
+// carry pointer traffic instead of a 59KB aggregate. The by-value originals
+// stay for the by-value (method) checker tree, whose copies are already paid.
+// ============================================================
+
+pub fn borrow_push_scope_mut(env: &!BorrowEnv) with Mut, Panic, Div {
+    if env.scope_depth < 64 {
+        env.scope_starts[env.scope_depth] = env.count
+        env.scope_depth = env.scope_depth + 1
+    }
+}
+
+pub fn borrow_pop_scope_mut(env: &!BorrowEnv) with Mut, Panic, Div {
+    if env.scope_depth > 0 {
+        env.scope_depth = env.scope_depth - 1
+        let scope_start = env.scope_starts[env.scope_depth]
+        var i = scope_start
+        while i < env.count {
+            env.entries[i].state = 0
+            env.entries[i].shared_count = 0
+            i = i + 1
+        }
+        env.count = scope_start
+    }
+}
+
+pub fn borrow_find_idx(env: &BorrowEnv, name: Name) -> i64 with Mut, Panic, Div {
+    var i = env.count - 1
+    while i >= 0 {
+        if name_eq(env.entries[i].name, name) {
+            return i
+        }
+        i = i - 1
+    }
+    -1
+}
+
+pub fn borrow_track_mut(env: &!BorrowEnv, name: Name, is_linear: bool) -> i64 with Mut, Panic, Div {
+    if env.count < 128 {
+        env.entries[env.count] = BorrowEntry {
+            name: name,
+            state: 0,
+            shared_count: 0,
+            is_linear: is_linear,
+            consumed: false,
+            is_affine: false,
+            scope_depth: env.scope_depth,
+            provenance: 0,
+        }
+        env.count = env.count + 1
+        return 0
+    }
+    if is_linear {
+        return 275
+    }
+    0
+}
+
+pub fn borrow_mark_affine_mut(env: &!BorrowEnv, name: Name) with Mut, Panic, Div {
+    var i = env.count - 1
+    var idx: i64 = -1
+    while i >= 0 {
+        if name_eq(env.entries[i].name, name) {
+            idx = i
+            i = -1
+        }
+        i = i - 1
+    }
+    if idx >= 0 {
+        env.entries[idx].is_linear = true
+        env.entries[idx].is_affine = true
+    }
+}
+
+pub fn borrow_scope_depth_of(env: &BorrowEnv, name: Name) -> i64 with Mut, Panic, Div {
+    let idx = borrow_find_idx(env, name)
+    if idx < 0 { return -1 }
+    env.entries[idx].scope_depth
+}
+
+pub fn borrow_provenance_of(env: &BorrowEnv, name: Name) -> i64 with Mut, Panic, Div {
+    let idx = borrow_find_idx(env, name)
+    if idx < 0 { return 0 }
+    env.entries[idx].provenance
+}
+
+pub fn borrow_set_provenance_mut(env: &!BorrowEnv, name: Name, prov: i64) with Mut, Panic, Div {
+    var i = env.count - 1
+    var idx: i64 = -1
+    while i >= 0 {
+        if name_eq(env.entries[i].name, name) {
+            idx = i
+            i = -1
+        }
+        i = i - 1
+    }
+    if idx >= 0 {
+        env.entries[idx].provenance = prov
+    }
+}
+
+pub fn borrow_try_shared_borrow_mut(env: &!BorrowEnv, name: Name) -> i64 with Mut, Panic, Div {
+    var i = env.count - 1
+    var idx: i64 = -1
+    while i >= 0 {
+        if name_eq(env.entries[i].name, name) {
+            idx = i
+            i = -1
+        }
+        i = i - 1
+    }
+    if idx < 0 {
+        return 0
+    }
+    let entry = env.entries[idx]
+    if entry.is_linear && entry.consumed { return 39 }
+    if entry.state == 2 {
+        return 37
+    }
+    env.entries[idx].state = 1
+    env.entries[idx].shared_count = entry.shared_count + 1
+    0
+}
+
+pub fn borrow_try_exclusive_borrow_mut(env: &!BorrowEnv, name: Name) -> i64 with Mut, Panic, Div {
+    var i = env.count - 1
+    var idx: i64 = -1
+    while i >= 0 {
+        if name_eq(env.entries[i].name, name) {
+            idx = i
+            i = -1
+        }
+        i = i - 1
+    }
+    if idx < 0 {
+        return 0
+    }
+    let entry = env.entries[idx]
+    if entry.is_linear && entry.consumed { return 39 }
+    if entry.state != 0 {
+        return 38
+    }
+    env.entries[idx].state = 2
+    0
+}
+
+pub fn borrow_consume_linear_mut(env: &!BorrowEnv, name: Name) -> i64 with Mut, Panic, Div {
+    var i = env.count - 1
+    var idx: i64 = -1
+    while i >= 0 {
+        if name_eq(env.entries[i].name, name) {
+            idx = i
+            i = -1
+        }
+        i = i - 1
+    }
+    if idx < 0 {
+        return 0
+    }
+    let entry = env.entries[idx]
+    if !entry.is_linear {
+        return 0
+    }
+    if entry.consumed {
+        if entry.is_affine { return 268 }
+        return 39
+    }
+    env.entries[idx].consumed = true
+    0
+}
+
+pub fn borrow_check_linear_consumed(env: &BorrowEnv) -> i64 with Mut, Panic, Div {
+    var unconsumed: i64 = 0
+    let scope_start = if env.scope_depth > 0 {
+        env.scope_starts[env.scope_depth - 1]
+    } else {
+        0
+    }
+    var i = scope_start
+    while i < env.count {
+        if env.entries[i].is_linear && !env.entries[i].is_affine && !env.entries[i].consumed {
+            unconsumed = unconsumed + 1
+        }
+        i = i + 1
+    }
+    unconsumed
+}
+
+pub fn borrow_is_borrowed(env: &BorrowEnv, name: Name) -> bool with Mut, Panic, Div {
+    let idx = borrow_find_idx(env, name)
+    if idx < 0 {
+        return false
+    }
+    let entry = env.entries[idx]
+    entry.state != 0
+}
+
+pub fn borrow_release_borrow_mut(env: &!BorrowEnv, name: Name) with Mut, Panic, Div {
+    var i = env.count - 1
+    var idx: i64 = -1
+    while i >= 0 {
+        if name_eq(env.entries[i].name, name) {
+            idx = i
+            i = -1
+        }
+        i = i - 1
+    }
+    if idx >= 0 {
+        if env.entries[idx].state == 2 {
+            env.entries[idx].state = 0
+        } else if env.entries[idx].state == 1 {
+            env.entries[idx].shared_count = env.entries[idx].shared_count - 1
+            if env.entries[idx].shared_count <= 0 {
+                env.entries[idx].state = 0
+                env.entries[idx].shared_count = 0
+            }
+        }
+    }
+}
+
+pub fn borrow_release_exclusive_borrows_mut(env: &!BorrowEnv) with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < env.count {
+        if env.entries[i].state == 2 {
+            env.entries[i].state = 0
+        }
+        i = i + 1
     }
 }

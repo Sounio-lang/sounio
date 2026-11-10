@@ -2,6 +2,8 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck source=../lib/classify_compile.sh
+source "$ROOT_DIR/scripts/lib/classify_compile.sh"
 cd "$ROOT_DIR"
 
 TMP_DIR="$(mktemp -d)"
@@ -55,11 +57,15 @@ else
 fi
 
 MISMATCH_ADD_LOG="$TMP_DIR/unit-mismatch-add.log"
-if bin/souc check "$UNIT_MISMATCH_ADD" >"$MISMATCH_ADD_LOG" 2>&1; then
+__refusal_rc=0
+bin/souc check "$UNIT_MISMATCH_ADD" >"$MISMATCH_ADD_LOG" 2>&1 || __refusal_rc=$?
+if [[ "$__refusal_rc" -eq 0 ]]; then
   printf 'FAIL  %s unexpectedly accepted incompatible unit addition\n' "$UNIT_MISMATCH_ADD" >&2
   cat "$MISMATCH_ADD_LOG" >&2
   exit 1
 fi
+# rc != 0 is not yet a refusal: a crash, timeout or OOM kill is not (#2425).
+sounio_expect_refusal "$__refusal_rc" "$MISMATCH_ADD_LOG" "" "" || { printf 'FAIL  %s: not a clean refusal: %s\n' "$MISMATCH_ADD_LOG" "$(sounio_refusal_reason)" >&2; cat "$MISMATCH_ADD_LOG" >&2; exit 1; }
 if grep -q 'unit dimension mismatch' "$MISMATCH_ADD_LOG" ||
    grep -q 'unit mismatch' "$MISMATCH_ADD_LOG"; then
   printf 'PASS  %s rejected incompatible unit addition\n' "$UNIT_MISMATCH_ADD"
@@ -70,11 +76,15 @@ else
 fi
 
 MISMATCH_CALL_LOG="$TMP_DIR/unit-mismatch-call.log"
-if bin/souc check "$UNIT_MISMATCH_CALL" >"$MISMATCH_CALL_LOG" 2>&1; then
+__refusal_rc=0
+bin/souc check "$UNIT_MISMATCH_CALL" >"$MISMATCH_CALL_LOG" 2>&1 || __refusal_rc=$?
+if [[ "$__refusal_rc" -eq 0 ]]; then
   printf 'FAIL  %s unexpectedly accepted incompatible unit call argument\n' "$UNIT_MISMATCH_CALL" >&2
   cat "$MISMATCH_CALL_LOG" >&2
   exit 1
 fi
+# rc != 0 is not yet a refusal: a crash, timeout or OOM kill is not (#2425).
+sounio_expect_refusal "$__refusal_rc" "$MISMATCH_CALL_LOG" "" "" || { printf 'FAIL  %s: not a clean refusal: %s\n' "$MISMATCH_CALL_LOG" "$(sounio_refusal_reason)" >&2; cat "$MISMATCH_CALL_LOG" >&2; exit 1; }
 if grep -q 'unit mismatch in call argument' "$MISMATCH_CALL_LOG"; then
   printf 'PASS  %s rejected incompatible unit call argument\n' "$UNIT_MISMATCH_CALL"
 else
@@ -84,11 +94,15 @@ else
 fi
 
 CAST_INCOMPAT_LOG="$TMP_DIR/unit-cast-incompatible.log"
-if bin/souc check "$UNIT_CAST_INCOMPAT" >"$CAST_INCOMPAT_LOG" 2>&1; then
+__refusal_rc=0
+bin/souc check "$UNIT_CAST_INCOMPAT" >"$CAST_INCOMPAT_LOG" 2>&1 || __refusal_rc=$?
+if [[ "$__refusal_rc" -eq 0 ]]; then
   printf 'FAIL  %s unexpectedly accepted incompatible unit cast\n' "$UNIT_CAST_INCOMPAT" >&2
   cat "$CAST_INCOMPAT_LOG" >&2
   exit 1
 fi
+# rc != 0 is not yet a refusal: a crash, timeout or OOM kill is not (#2425).
+sounio_expect_refusal "$__refusal_rc" "$CAST_INCOMPAT_LOG" "" "" || { printf 'FAIL  %s: not a clean refusal: %s\n' "$CAST_INCOMPAT_LOG" "$(sounio_refusal_reason)" >&2; cat "$CAST_INCOMPAT_LOG" >&2; exit 1; }
 if grep -q 'incompatible unit dimensions' "$CAST_INCOMPAT_LOG"; then
   printf 'PASS  %s rejected incompatible unit cast\n' "$UNIT_CAST_INCOMPAT"
 else

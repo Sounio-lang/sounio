@@ -2,8 +2,8 @@
 topic_id: repo.docs.faq
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
-validated_by: A2
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.faq
 -->
 
@@ -23,9 +23,10 @@ Common questions about Sounio and epistemic computing.
 > canonical `epistemic::knowledge` API. `mul_epistemic` and `fuse_measurements`
 > are part of `epistemic::lib` but are not exercised by that test
 > (`fuse_measurements` is private; `mul_epistemic` is public but untested).
-> `with_confidence` operators and
-> units-as-type-parameters are aspirational in source and absent from the
-> checked public surface — see `docs/compiler/KNOWN_LIMITATIONS.md`.
+> `with_confidence` operators are not the checked public surface.
+> Units are a prototype. KL-13 closed derived annotations; default Madaros
+> still rejects `let d: m = 100.0` (#2752). They do not yet prevent every
+> dimensional error.
 
 ## Table of Contents
 
@@ -50,22 +51,23 @@ Sounio is a systems programming language designed for **epistemic computing**—
 Existing languages treat uncertainty as an afterthought (manual error propagation, separate libraries). Sounio makes epistemic integrity **foundational**:
 - `Epistemic` (stdlib `epistemic::knowledge`) tracks point estimate, variance, and integer confidence 0–1000; free-fn arithmetic (`ep_add`, `ep_mul`, ...) propagates variance via GUM delta method
 - Effect system tracks computational side effects
-- Units of measure prevent dimensional errors
+- Units of measure are a prototype. They reject some mismatches and still accept others (#2751, #2752)
 - First-class support for scientific workflows
 
-### Is Sounio production-ready?
+### What is the maturity status?
 
-**Current checked-artifact status (`souc 1.0.0-beta.4`)**: suitable for
-research, evaluation, and artifact-backed workflows, but still not "everything
-in the source tree is equally public".
-- ✅ Core language and science lanes are artifact-backed
-- ✅ Checked GPU compiler profile exists
-- 🚧 No JIT tier — Cranelift is not compiled in any checked artifact (measured 2026-08-27)
-- ✅ The repo-wide checkpoint now includes self-hosted render/bootstrap proofs and the skills/dispatch wave
-- 🚧 Advanced or alternate-build features such as LLVM, SMT, and LSP remain profile-dependent
-- 📋 Public docs should still track the exact artifact and gate behind each claim
+**Status: research language (pre-1.0).** APIs may change; not recommended for production use.
 
-See [Current State](../README.md#current-state) for details.
+That is the only public maturity line. It does not name a compiler version. Earlier answers to this question did, and those version strings are not restated here. Native execution of the committed prebuilt is Linux x86-64; other targets have their own notes. Feature evidence is route-specific.
+
+- Core language and science lanes are artifact-backed where a named test says so
+- GPU: not re-run on 2026-10-15. `TOUR.md` §6 measured an empty-body PTX skeleton. The root README records scoped Spark evidence only.
+- No JIT tier — Cranelift is not compiled in any checked artifact (measured 2026-08-27)
+- The repo-wide checkpoint includes self-hosted render/bootstrap proofs and the skills/dispatch wave
+- Advanced or alternate-build features such as LLVM, SMT, and LSP remain profile-dependent
+- Public docs should still track the exact artifact and gate behind each claim
+
+See [Honest Status](../README.md#honest-status) for route-specific evidence. That section is not a second maturity line.
 
 ### How does Sounio compare to Rust?
 
@@ -115,13 +117,7 @@ Not yet. Planned for post-1.0. Design goals:
 
 ### Can I use async/await?
 
-Yes! Async is part of the effect system:
-```sio
-fn fetch_data(url: string) -> Result<Data> with Async {
-    let response = http.get(url).await
-    parse(response)
-}
-```
+Not as a checked user surface. `http.get(url).await` and payload `Result<Data>` are not backed by a `run-pass` test. Do not copy them. The checked effects are `IO`, `Mut`, `Div`, and `Panic`.
 
 ### Does Sounio have a package manager?
 
@@ -411,7 +407,14 @@ fn impure_function() -> string with IO {
 }
 ```
 
-Effects compose and propagate through the call graph automatically.
+Effects are declared, not inferred. A named function must list in its `with`
+clause every effect that its body, or any function it calls, performs;
+otherwise the checker reports E035 ("effect not declared in function
+signature"). Two narrow exceptions: a closure's effects are taken from its body
+(the enclosing function must still declare them), and `main` may call the
+printing builtins without `with IO` (but not a user function marked `with IO`).
+Inference across function boundaries exists only as an opt-in experiment
+(`SOUNIO_EFFECT_INFER=1`), off by default.
 
 ### What's the type inference algorithm?
 
@@ -422,19 +425,23 @@ Effects compose and propagate through the call graph automatically.
 
 ### Can I write custom effects?
 
-Yes (advanced feature):
-```sio
-effect State<S> {
-    fn get() -> S
-    fn put(s: S) -> ()
-}
+Yes, within Madaros's current handler limits. Declare operations with
+`effect Name { fn op() -> i64 }`, invoke them with `perform Name.op()`, and
+handle them with `handle<Name> { ... } with { on op() -> resume(value) }`.
+Madaros implements deep handlers with linear one-shot continuations; a clause
+may also return without resuming. See the existing executable examples
+[`fx2b_op_args.sio`](../tests/run-pass/fx2b_op_args.sio) and
+[`fx5_zero_resume.sio`](../tests/run-pass/fx5_zero_resume.sio).
 
-fn stateful_computation() -> i32 with State<i32> {
-    let x = do State.get()
-    do State.put(x + 1)
-    x
-}
-```
+The first implementation supports scalar `i64` operations and handler answers,
+with no captured locals in clauses and no `perform` across a function boundary.
+Generic declarations such as `effect State<S>` are not supported. The
+[handler specification](spec/S07_EFFECT_HANDLERS.md#status-2026-11-06-sio-417-p5-merged)
+records the argument, clause and nesting limits and their diagnostics.
+Undeclared effect names and a ninth distinct effect in a function signature
+produce E246. Names on the temporary hold list (`effect_name_is_held` in
+`self-hosted/check/effects.sio`) remain an exception: acceptance alone does not
+prove that such a name denotes a working effect.
 
 ### Are refinement types fully supported?
 

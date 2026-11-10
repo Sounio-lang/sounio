@@ -1,0 +1,82 @@
+//@ run-pass
+//@ requires: madaros
+//@ description: #1706 — first-order variance crosses pure f64 helpers with any number of parameters, matching the analytic GUM values (oracle: tests/oracles/gum_fo_inline_helper_1706.cpp)
+//@ expect-stdout: euler_var=4.106142
+//@ expect-stdout: chain_var=0.000183
+//@ expect-stdout: add3_var=14.000000
+//@ expect-stdout: GUM_FO_INLINE_HELPER_1706_OK
+//
+// Before the fix Madaros printed euler_var=4.000000 (the decay through the
+// helper call carried no sensitivity, so var(y) never left var(y0)),
+// chain_var=0.000100 and add3_var=0.000000: first-order sensitivities did not
+// cross a user call unless the helper matched a narrow transfer pattern with at
+// most two parameters (KL-11). lean_single (committed seed) prints
+// 4.095549 / 0.875382 / 0.875382, hence `requires: madaros` (#2776).
+
+fn close(a: f64, b: f64, tol: f64) -> bool {
+    let d = a - b
+    d < tol && d > 0.0 - tol
+}
+
+// dy/dt = -k y, explicit Euler, h = 0.1, 10 steps: y10 = y0 (1 - h k)^10.
+fn rhs(y: f64, k: f64) -> f64 with Mut {
+    let dy = 0.0 - k * y
+    return dy
+}
+
+fn stage(x: f64, dx: f64) -> f64 {
+    x + dx
+}
+
+fn step_chain(v: f64, dx: f64) -> f64 with Mut, Div, Epistemic {
+    let a1 = stage(v, dx)
+    let a2 = stage(a1, dx)
+    let a3 = a2 * 1.001
+    let a4 = a3 - dx
+    let a5 = a4 + v
+    let a6 = a5 * 0.999
+    a6 - v
+}
+
+fn add3(x: f64, y: f64, z: f64) -> f64 {
+    x + y + z
+}
+
+fn main() -> i64 with IO, Mut, Div, Epistemic {
+    var fails: i64 = 0
+
+    let ky: Knowledge<f64> = measure(100.0, uncertainty: 2.0)
+    let kk: Knowledge<f64> = measure(0.1, uncertainty: 0.01)
+    var y = ky.value
+    let k = kk.value
+    var step: i64 = 0
+    while step < 10 {
+        let dy = rhs(y, k)
+        y = y + 0.1 * dy
+        step = step + 1
+    }
+    let ve = variance_of(y)
+    print("euler_var="); print_f64(ve); print("\n")
+    if !close(ve, 4.106142, 1.0e-5) { fails = fails + 1 }
+
+    let kc: Knowledge<f64> = measure(1.0, uncertainty: 0.01)
+    var acc = kc.value
+    var i: i64 = 0
+    while i < 40 {
+        acc = step_chain(acc, kc.value * 0.01)
+        i = i + 1
+    }
+    let vc = variance_of(acc)
+    print("chain_var="); print_f64(vc); print("\n")
+    if !close(vc, 0.000183, 1.0e-6) { fails = fails + 1 }
+
+    let k1: Knowledge<f64> = measure(100.0, uncertainty: 2.0)
+    let k2: Knowledge<f64> = measure(50.0, uncertainty: 1.0)
+    let k3: Knowledge<f64> = measure(10.0, uncertainty: 3.0)
+    let v3 = variance_of(add3(k1.value, k2.value, k3.value))
+    print("add3_var="); print_f64(v3); print("\n")
+    if !close(v3, 14.0, 1.0e-9) { fails = fails + 1 }
+
+    if fails == 0 { println("GUM_FO_INLINE_HELPER_1706_OK") } else { println("GUM_FO_INLINE_HELPER_1706_FAIL") }
+    fails
+}

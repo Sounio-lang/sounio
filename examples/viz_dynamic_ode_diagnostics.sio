@@ -1,0 +1,109 @@
+//@ expect-stdout-contains: <svg xmlns=
+//@ expect-stdout-contains: ODE_DIAGNOSTICS_COMPLETE
+// Synthetic A->B transfer. Monitor sampled total A+B and event A-0.5.
+use collections::numeric_buffer::{NumericBuffer,numeric_buffer_new,numeric_buffer_set,numeric_buffer_at,numeric_buffer_close}
+use collections::integer_buffer::{IntegerBuffer,integer_buffer_new,integer_buffer_set,integer_buffer_close}
+use ode::rosenbrock_dynamic::{ros4_workspace,solve_rosenbrock4_observed}
+use ode::solver::{default_options}
+use ode::diagnostic_observer::{diagnostic_observer_workspace,diagnostic_observer_init,diagnostic_observer_push,diagnostic_observer_get_into,diagnostic_observer_info}
+use viz::scientific_document::{ScientificDocumentText,scientific_two_panel_plan,scientific_document_validate,scientific_document_svg}
+use io::sci_print::{print_f64_sci}
+fn transfer_rhs(t:f64,y:&NumericBuffer,dy:&!NumericBuffer)->i64 with Mut,Div,Panic {
+ let value=2.0*numeric_buffer_at(y,0)
+ numeric_buffer_set(dy,0,-value);numeric_buffer_set(dy,1,value)
+ return 0
+}
+fn transfer_jac(t:f64,y:&NumericBuffer,j:&!NumericBuffer,dfdt:&!NumericBuffer)->i64 with Mut,Div,Panic {
+ numeric_buffer_set(j,0,-2.0);numeric_buffer_set(j,1,0.0)
+ numeric_buffer_set(j,2,2.0);numeric_buffer_set(j,3,0.0)
+ numeric_buffer_set(dfdt,0,0.0);numeric_buffer_set(dfdt,1,0.0)
+ return 0
+}
+fn transfer_observe(t:f64,y:&NumericBuffer,c:&!NumericBuffer)->i64 with IO,Mut,Div,Panic {
+ let a=numeric_buffer_at(y,0)
+ let total=a+numeric_buffer_at(y,1)
+ let code=diagnostic_observer_push(c,t,total,a-0.5)
+ if code!=0 {return -1}
+ return 0
+}
+fn ode_label(bytes:&!IntegerBuffer,start:i64,text:string)->i64 with Mut,Panic {
+ var i:i64=0
+ while i<str_len(text) {integer_buffer_set(bytes,start+i,str_char_at(text,i) as i64);i=i+1}
+ return start+i
+}
+fn main()->i32 with IO,Alloc,Mut,Div,Panic {
+ let q=ros4_workspace(2)
+ let need=diagnostic_observer_workspace(4096)
+ if q.status!=0 || need<0 {return 1}
+ var state=numeric_buffer_new(2,16)
+ var trial=numeric_buffer_new(2,16)
+ var error=numeric_buffer_new(2,16)
+ var derivative=numeric_buffer_new(2,16)
+ var stages=numeric_buffer_new(q.stages_len,q.stages_len*8)
+ var matrix=numeric_buffer_new(q.matrix_len,q.matrix_len*8)
+ var factor=numeric_buffer_new(q.factor_len,q.factor_len*8)
+ var factorwork=numeric_buffer_new(q.factor_work_len,q.factor_work_len*8)
+ var pivots=integer_buffer_new(2,16)
+ var pivotwork=integer_buffer_new(2,16)
+ var context=numeric_buffer_new(need,need*8)
+ var slot=numeric_buffer_new(6,48)
+ numeric_buffer_set(&!state,0,1.0);numeric_buffer_set(&!state,1,0.0)
+ let initialized=diagnostic_observer_init(&!context,4096,4096,0)
+ var opts=default_options()
+ opts.dt_init=0.01;opts.dt_max=0.05;opts.rtol=1e-7;opts.atol=1e-9;opts.max_steps=10000
+ let solved=solve_rosenbrock4_observed(transfer_rhs,transfer_jac,transfer_observe,&!state,&!trial,&!error,&!derivative,&!stages,&!matrix,&!factor,&!factorwork,&!pivots,&!pivotwork,&!context,0.0,1.0,opts,0.0)
+ let info=diagnostic_observer_info(&context)
+ var code:i64=0
+ if initialized!=0 || solved.status!=0 || info.status!=0 || info.used<2 {code=2}
+ if info.first_kind!=2 || info.events!=1 {code=3}
+ let n=info.used
+ var x0=numeric_buffer_new(n,n*8)
+ var y0=numeric_buffer_new(n,n*8)
+ var x1=numeric_buffer_new(n,n*8)
+ var y1=numeric_buffer_new(n,n*8)
+ var mask0=integer_buffer_new(n,n*8)
+ var mask1=integer_buffer_new(n,n*8)
+ var labels=integer_buffer_new(512,4096)
+ var i:i64=0
+ if code==0 {
+  while i<n {
+   if diagnostic_observer_get_into(&context,i,&!slot)!=0 {code=4}
+   let t=numeric_buffer_at(&slot,0)
+   let event=numeric_buffer_at(&slot,2)
+   let absolute=numeric_buffer_at(&slot,3)
+   let flags=numeric_buffer_at(&slot,5) as i64
+   numeric_buffer_set(&!x0,i,t);numeric_buffer_set(&!y0,i,event);integer_buffer_set(&!mask0,i,1)
+   numeric_buffer_set(&!x1,i,t);numeric_buffer_set(&!y1,i,absolute)
+   if flags%2==1 {integer_buffer_set(&!mask1,i,1)}
+   i=i+1
+  }
+ }
+ if code==0 {
+  var at:i64=0
+  let t0=at;at=ode_label(&!labels,at,"A to B: accepted-state event and invariant diagnostics")
+  let t1=at;at=ode_label(&!labels,at,"x time (s); y event A minus 0.5 (1)")
+  let t2=at;at=ode_label(&!labels,at,"x time (s); y absolute drift of A+B (1)")
+  let t3=at;at=ode_label(&!labels,at,"Sampled bracket only; no dense output, exact event time or conservation proof. ODE_DIAGNOSTICS_COMPLETE")
+  let text=ScientificDocumentText{title_start:t0,title_len:t1-t0,left_start:t1,left_len:t2-t1,right_start:t2,right_len:t3-t2,footer_start:t3,footer_len:at-t3}
+  var document=scientific_two_panel_plan(1380,620,0.0,1.0,-0.5,0.5,0.0,1.0,0.0,1e-12)
+  document.zero_right=true
+  let valid=scientific_document_validate(&document,&text,&labels,&x0,&y0,&mask0,&x1,&y1,&mask1)
+  if valid!=0 {code=5} else {
+   print("<!-- ODE_BRACKET ");print_f64_sci(info.first_left,15);print(" ");print_f64_sci(info.first_right,15);print(" ");print(info.first_kind);print(" ");print(info.used);println(" -->")
+   i=0
+   while i<n {
+    diagnostic_observer_get_into(&context,i,&!slot)
+    print("<!-- ODE_RECORD ");print(i)
+    var j:i64=0
+    while j<6 {print(" ");print_f64_sci(numeric_buffer_at(&slot,j),15);j=j+1}
+    println(" -->")
+    i=i+1
+   }
+   let rendered=scientific_document_svg(&document,&text,&labels,&x0,&y0,&mask0,&x1,&y1,&mask1)
+   if rendered.status!=0 {code=6} else {println("<!-- ODE_DIAGNOSTICS_COMPLETE -->")}
+  }
+ }
+ numeric_buffer_close(state);numeric_buffer_close(trial);numeric_buffer_close(error);numeric_buffer_close(derivative);numeric_buffer_close(stages);numeric_buffer_close(matrix);numeric_buffer_close(factor);numeric_buffer_close(factorwork);integer_buffer_close(pivots);integer_buffer_close(pivotwork);numeric_buffer_close(context);numeric_buffer_close(slot)
+ numeric_buffer_close(x0);numeric_buffer_close(y0);numeric_buffer_close(x1);numeric_buffer_close(y1);integer_buffer_close(mask0);integer_buffer_close(mask1);integer_buffer_close(labels)
+ return code as i32
+}

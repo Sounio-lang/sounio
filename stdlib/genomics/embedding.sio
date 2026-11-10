@@ -8,15 +8,16 @@
 // high-entropy columns contribute less information, increasing score
 // uncertainty.
 //
-// SOTA: Nucleotide Transformer v3 (2026): single-base tokenization, 1Mb context
-//       BMFM-DNA (2025): SNP-aware DNA foundation model
-//       METAGENE-1 (2025): 7B params, 1.5T bp metagenomic pretraining
+// Checked k-mer counting/profile distance only; see KMER.md.
+// PWM, motif scores and hashed embedding uncertainty remain uncalibrated.
 //
 // References:
 //   - Stormo (2000): "DNA binding sites: representation and discovery"
 //   - Altschul+ (2009): "PSI-BLAST position-specific scoring matrices"
 //   - Lin (1991): "Divergence measures based on Shannon entropy"
 
+use genomics::kmer::{kmer_new,kmer_push_chunk}
+use math::pure::{sqrt,ln_checked,is_finite}
 // =============================================================================
 // Math Helpers
 // =============================================================================
@@ -58,88 +59,123 @@ fn emb_log2(x: f64) -> f64 with Mut, Div, Panic {
 // A k-mer profile counts all subsequences of length k in a DNA sequence.
 // For k=1: 4 bins (A,C,G,T). For k=2: 16 bins. k=3: 64. k=4: 256.
 
-struct KmerProfile {
-    counts: [f64; 256],     // max 4^4 = 256 k-mers
-    n_kmers: i32,           // 4^k
-    k: i32,
-    total: f64,
+pub struct KmerProfile {
+ pub counts:[f64;256], pub n_kmers:i32, pub k:i32, pub total:f64,
+ pub status:i64, pub normalized:bool,
 }
-
-// Compute k-mer index from a subsequence of bases (each 0-3)
-fn kmer_index(seq: &[i32; 4096], start: i32, k: i32) -> i32 with Mut, Div, Panic {
-    var idx: i64 = 0
-    var i = 0
-    while i < k {
-        idx = idx * 4 + (seq[start + i]) as i64
-        i = i + 1
-    }
-    idx as i32
+pub struct KmerDistance {pub status:i64,pub value:f64}
+fn profile_bins(k:i32)->i32 {
+ if k==1{return 4} if k==2{return 16} if k==3{return 64} if k==4{return 256} return 0
 }
-
-fn kmer_count(seq: &[i32; 4096], seq_len: i32, k: i32) -> KmerProfile with Mut, Div, Panic {
-    var n_kmers: i64 = 1
-    var i = 0
-    while i < k { n_kmers = n_kmers * 4; i = i + 1 }
-
-    var profile = KmerProfile {
-        counts: [0.0; 256],
-        n_kmers: n_kmers as i32,
-        k: k,
-        total: 0.0,
-    }
-
-    var pos = 0
-    while pos <= seq_len - k {
-        let idx = kmer_index(seq, pos, k)
-        if idx >= 0 {
-            if idx < 256 {
-                profile.counts[idx] = profile.counts[idx] + 1.0
-                profile.total = profile.total + 1.0
-            }
-        }
-        pos = pos + 1
-    }
-
-    profile
+fn profile_empty(k:i32,status:i64)->KmerProfile {
+ return KmerProfile{counts:[0.0;256],n_kmers:0,k:k,total:0.0,status:status,normalized:false}
 }
-
-fn kmer_normalize(profile: &!KmerProfile) with Mut, Div, Panic {
-    if profile.total <= 0.0 { return }
-    var i = 0
-    while i < profile.n_kmers {
-        profile.counts[i] = profile.counts[i] / profile.total
-        i = i + 1
-    }
+// Count through the shared rolling stream; chunk boundaries preserve windows.
+pub fn kmer_count(seq:&[i32;4096],seq_len:i32,k:i32)->KmerProfile with Mut,Div,Panic {
+ var state=kmer_new(k as i64)
+ if state.status!=0 {return profile_empty(k,state.status)}
+ if seq_len<0 || seq_len>4096 {return profile_empty(k,2)}
+ var chunk:[i32;256]=[0;256]
+ var start:i32=0
+ while start<seq_len {
+  let n:i32=if seq_len-start>256 {256} else {seq_len-start}
+  var j:i32=0
+  while j<n {chunk[j as usize]=seq[(start+j) as usize];j=j+1}
+  if !kmer_push_chunk(&!state,&chunk,n as i64) {return profile_empty(k,state.status)}
+  start=start+n
+ }
+ var out=profile_empty(k,0)
+ out.n_kmers=state.n_bins as i32
+ out.total=state.total_windows as f64
+ var i:i32=0
+ while i<out.n_kmers {out.counts[i as usize]=state.counts[i as usize] as f64;i=i+1}
+ return out
 }
-
-// =============================================================================
-// k-mer Distance (Jensen-Shannon Divergence)
-// =============================================================================
-// JSD(P||Q) = 0.5 * KLD(P||M) + 0.5 * KLD(Q||M), where M = 0.5*(P+Q)
-// Returns sqrt(JSD) which is a proper metric.
-
-fn kmer_distance(a: &KmerProfile, b: &KmerProfile) -> f64 with Mut, Div, Panic {
-    if a.k != b.k { return 0.0 - 1.0 }  // incompatible
-
-    var jsd = 0.0
-    var i = 0
-    while i < a.n_kmers {
-        let p = a.counts[i]
-        let q = b.counts[i]
-        let m = 0.5 * (p + q)
-
-        if m > 1.0e-15 {
-            if p > 1.0e-15 {
-                jsd = jsd + 0.5 * p * emb_log2(p / m)
-            }
-            if q > 1.0e-15 {
-                jsd = jsd + 0.5 * q * emb_log2(q / m)
-            }
-        }
-        i = i + 1
-    }
-
-    emb_sqrt(if jsd > 0.0 { jsd } else { 0.0 })
+// Complete bounded profile validation before exposing frequencies or distances.
+fn profile_valid(p:&KmerProfile)->bool with Mut,Div,Panic {
+ if p.status!=0 || p.n_kmers!=profile_bins(p.k) || p.n_kmers==0 {return false}
+ if !is_finite(p.total) || p.total<0.0 || p.total>4096.0 {return false}
+ if p.normalized && p.total==0.0 {return false}
+ let expected=if p.normalized {1.0} else {p.total}
+ var sum=0.0
+ var c=0.0
+ var i:i32=0
+ while i<p.n_kmers {
+  let v=p.counts[i as usize]
+  if !is_finite(v) || v<0.0 || v>expected {return false}
+  let y=v-c
+  let t=sum+y
+  c=(t-sum)-y
+  sum=t
+  i=i+1
+ }
+ return emb_abs(sum-expected)<=1.0e-12*(1.0+expected)
+}
+pub fn kmer_normalize(p:&!KmerProfile)->bool with Mut,Div,Panic {
+ if p.status!=0 {return false}
+ if !profile_valid(p) {p.status=3;return false}
+ if p.total==0.0 {return false}
+ if p.normalized {return true}
+ var i:i32=0
+ while i<p.n_kmers {p.counts[i as usize]=p.counts[i as usize]/p.total;i=i+1}
+ p.normalized=true
+ return true
+}
+// Positive symmetric JSD contribution in bits. Avoid cancellation near equality.
+fn profile_js_term(p:f64,q:f64)->f64 with Mut,Div,Panic {
+ let sum=p+q
+ if sum==0.0 {return 0.0}
+ let m=0.5*sum
+ let r=emb_abs(p-q)/sum
+ if r==1.0 {return m}
+ var g=0.0
+ if r<=0.5 {
+  let r2=r*r
+  var power=r2
+  var j:i32=1
+  while j<=24 {
+   let jf=j as f64
+   g=g+power/((2.0*jf)*(2.0*jf-1.0))
+   power=power*r2
+   j=j+1
+  }
+ } else {
+  let plus=ln_checked(1.0+r)
+  let minus=ln_checked(1.0-r)
+  if plus.status!=0 || minus.status!=0 {return -1.0}
+  g=0.5*((1.0+r)*plus.value+(1.0-r)*minus.value)
+ }
+ return m*g/0.69314718055994530942
+}
+pub fn kmer_distance_checked(a:&KmerProfile,b:&KmerProfile)->KmerDistance with Mut,Div,Panic {
+ var out=KmerDistance{status:1,value:0.0}
+ if !profile_valid(a) || !profile_valid(b) {return out}
+ if a.k!=b.k {out.status=2;return out}
+ if a.total==0.0 || b.total==0.0 {out.status=3;return out}
+ var sum=0.0
+ var c=0.0
+ var i:i32=0
+ while i<a.n_kmers {
+  let p=if a.normalized {a.counts[i as usize]} else {a.counts[i as usize]/a.total}
+  let q=if b.normalized {b.counts[i as usize]} else {b.counts[i as usize]/b.total}
+  let term=profile_js_term(p,q)
+  if !is_finite(term) || term<0.0 {out.status=4;return out}
+  let y=term-c
+  let t=sum+y
+  c=(t-sum)-y
+  sum=t
+  i=i+1
+ }
+ if !is_finite(sum) || sum<0.0 || sum>1.0+1.0e-12 {out.status=4;return out}
+ out.status=0
+ out.value=sqrt(sum)
+ return out
+}
+// Compatibility scalar: -1 means unavailable. Prefer the typed result.
+pub fn kmer_distance(a:&KmerProfile,b:&KmerProfile)->f64 with Mut,Div,Panic {
+ let result=kmer_distance_checked(a,b)
+ if result.status!=0 {return -1.0}
+ return result.value
 }
 
 // =============================================================================
@@ -326,6 +362,7 @@ struct SeqEmbedding {
     vector: [f64; 64],
     u_vector: [f64; 64],    // uncertainty per dimension
     dim: i32,
+    status: i64,
 }
 
 fn seq_embed_kmer(
@@ -337,10 +374,14 @@ fn seq_embed_kmer(
         vector: [0.0; 64],
         u_vector: [0.0; 64],
         dim: dim,
+        status: 0,
     }
+    if dim<1 || dim>64 {emb.status=1;emb.dim=0;return emb}
 
     // Use k=3 (64 trimers) projected into dim dimensions
     let profile = kmer_count(seq, seq_len, 3)
+    if profile.status!=0 {emb.status=2;emb.dim=0;return emb}
+    if profile.total==0.0 {emb.status=3;emb.dim=0;return emb}
 
     // Hash-based projection: kmer_idx mod dim determines target dimension
     // Sign: kmer_idx / dim determines +/-
@@ -365,7 +406,7 @@ fn seq_embed_kmer(
         var k = 0
         while k < dim {
             emb.vector[k] = emb.vector[k] / norm
-            // Uncertainty from counting: sqrt(count) / total
+            // Legacy heuristic magnitude, not calibrated standard uncertainty
             emb.u_vector[k] = 1.0 / emb_sqrt(profile.total + 1.0)
             k = k + 1
         }

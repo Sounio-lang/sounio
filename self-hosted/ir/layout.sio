@@ -133,13 +133,37 @@ fn layout_build_remap(scores: &[LayoutScore; 1024], count: i64) -> [i64; 1024] w
 // Reorder: physically rearrange (*module.functions)[]
 // ============================================================================
 
+// #1680: `module.functions` is a pointer to a shared chunk table, so `result`
+// and `module` are the same storage. Copying slot by slot (new[i] = old[p[i]])
+// read slots that an earlier iteration had already overwritten: hot-first on
+// [alpha, beta, gamma] produced [beta, gamma, beta]. Apply the permutation one
+// cycle at a time instead, holding only the cycle's first function aside.
 fn layout_reorder_functions(module: IrModule, scores: &[LayoutScore; 1024]) -> IrModule with Alloc, Mut, Panic, Div {
     var result = module
-    var i: i64 = 0
-    while i < module.fn_count {
-        let old_idx = scores[i as usize].func_idx
-        ir_fn_set(&! result, i as usize, ir_fn_get(&module, old_idx as usize))
-        i = i + 1
+    var n = module.fn_count
+    if n > LAYOUT_MAX_FUNCS { n = LAYOUT_MAX_FUNCS }
+    var done: [bool; 1024] = [false; 1024]
+    var s: i64 = 0
+    while s < n {
+        if !done[s as usize] {
+            let first = ir_fn_get(&result, s as usize)
+            var j = s
+            var open = true
+            while open {
+                done[j as usize] = true
+                let k = scores[j as usize].func_idx
+                if k == s || k < 0 || k >= n {
+                    ir_fn_set(&! result, j as usize, first)
+                    open = false
+                } else {
+                    // #2958: hoist the read; `&! result` and `&result` in one argument list is E037.
+                    let moved = ir_fn_get(&result, k as usize)
+                    ir_fn_set(&! result, j as usize, moved)
+                    j = k
+                }
+            }
+        }
+        s = s + 1
     }
     result
 }

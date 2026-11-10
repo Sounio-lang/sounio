@@ -3,6 +3,8 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck source=../lib/classify_compile.sh
+source "$ROOT_DIR/scripts/lib/classify_compile.sh"
 SOUC="${SOUNIO_LOOM_OBLIGATION_SOUC:-$ROOT_DIR/bin/souc}"
 ENGINE="${SOUNIO_LOOM_OBLIGATION_ENGINE:-lean_single}"
 STDLIB="$ROOT_DIR/stdlib"
@@ -36,6 +38,8 @@ expect_rejection() {
   rc=$?
   set -e
   [[ "$rc" -eq 1 ]] || { cat "$log" >&2; fail "$label rc=$rc"; }
+  # rc alone is not a refusal: a crash, timeout or OOM kill is not one (#2425).
+  sounio_expect_failed_exit "$rc" "$log" || { cat "$log" >&2; fail "$label: not a clean refusal: $(sounio_refusal_reason)"; }
   rg -q "error\[$code" "$log" || { cat "$log" >&2; fail "$label omitted $code"; }
 }
 

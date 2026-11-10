@@ -1,0 +1,39 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: parser_set_tokens_by_ref: PASS
+//@ description: #1156 the parser's 2,097,152-token load path takes the token array by reference
+// parser_set_tokens and parse_program took `[Token; 2097152]` by value. A Token
+// carries a 256-byte text buffer, so one argument is ~688 MB. Measured on main
+// deede5c87: Madaros compiled this call and the program died with SIGSEGV
+// (rc=139) at the call; lean_single refused it (E001). By reference, both
+// engines load the tokens and the parser's scalar mirror reads them back.
+// requires: madaros -- the token array is a global, and lean_single reads
+// garbage back from ANY global array of structs (measured 2026-10-13:
+// `var G: [S; 4]; G[1] = S { a: 1, b: 7 }; print_int(G[1].b)` prints an
+// address on lean_single, 7 on Madaros), independently of this change. A
+// local 688 MB array would not fit the default stack of the suite.
+use lexer::token::*
+use parser::parser::{parser_set_tokens, pt_read_kind_code, pt_read_start, pt_read_int_value}
+
+var TOKS: [Token; 2097152] = [Token::new(); 2097152]
+
+fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
+    var lit = Token::with_kind(TokenKind::IntLit, 4, 6, 1, 5)
+    lit.int_value = 42
+    TOKS[0] = lit
+    TOKS[1] = Token::with_kind(TokenKind::Ident, 7, 9, 1, 8)
+    TOKS[2] = Token::eof(10, 1, 11)
+    parser_set_tokens(&TOKS, 3)
+    var fails: i64 = 0
+    if pt_read_int_value(0) != 42 { fails = fails + 1 }
+    if pt_read_start(0) != 4 { fails = fails + 1 }
+    if pt_read_start(1) != 7 { fails = fails + 1 }
+    if pt_read_kind_code(1) != TokenKind::Ident as i64 { fails = fails + 1 }
+    if pt_read_kind_code(2) != TokenKind::Eof as i64 { fails = fails + 1 }
+    if fails == 0 {
+        print("parser_set_tokens_by_ref: PASS\n")
+        return 0
+    }
+    print("parser_set_tokens_by_ref: FAIL\n")
+    1
+}

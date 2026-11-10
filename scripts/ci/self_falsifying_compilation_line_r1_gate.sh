@@ -28,6 +28,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+# shellcheck source=../lib/classify_compile.sh
+source "$REPO_ROOT/scripts/lib/classify_compile.sh"
 cd "$REPO_ROOT"
 
 CONTRACT="scripts/research/self_falsifying_compilation_line_r1_contract.py"
@@ -105,6 +107,9 @@ C2_OUT="$("$RAW" run "$TMP_DIR/red.sio" -o "$TMP_DIR/red.elf" --verify-claims 2>
 C2_RC=$?
 set -e
 [[ $C2_RC -ne 0 ]] || { echo "$C2_OUT" >&2; fail "C2: red gate did not block compilation"; }
+# rc alone is not a refusal: a crash, timeout or OOM kill is not one (#2425).
+printf '%s\n' "$C2_OUT" >"$TMP_DIR/c2.log"
+sounio_expect_failed_exit "$C2_RC" "$TMP_DIR/c2.log" || { echo "$C2_OUT" >&2; fail "C2: blocked, but not a clean refusal: $(sounio_refusal_reason)"; }
 grep -q "VERIFY_CLAIMS_FALSIFIED" <<<"$C2_OUT" || fail "C2: expected VERIFY_CLAIMS_FALSIFIED"
 [[ ! -f "$TMP_DIR/red.elf" ]] || fail "C2: ELF emitted despite a falsified claim"
 echo "C2_RED_GATE_BLOCKS PASS — falsified claim aborts before codegen, no ELF"

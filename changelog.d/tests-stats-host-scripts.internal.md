@@ -1,0 +1,1 @@
+The Python and R scripts under `tests/stats/` that recomputed SciPy and R against hardcoded ranges, and never invoked the compiler, are removed. The SciPy-class vertical remains `scripts/stats_scipy_e2e_gate.sh`.

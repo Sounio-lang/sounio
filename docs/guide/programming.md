@@ -2,49 +2,46 @@
 topic_id: repo.docs.guide.programming
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
-validated_by: A5
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.guide.programming
 -->
 
 # Sounio Programming Guide for LLMs
 
-This comprehensive guide enables LLMs to correctly generate Sounio code. Sounio is a novel L0 systems + scientific programming language - it is NOT a dialect of Rust, Julia, Python, or any other language.
+This guide is a long reference for generating Sounio. It is not a dialect of Rust, Julia, or Python.
+
+> **Contract.** A section without a cited test, gate, or `TOUR.md` row is not the contract. Later sections still mix aspirational snippets, including `d` code fences and Rust-shaped receivers. Copy the status table and the Core Syntax blocks below, then `docs/guide/getting-started.md` and `docs/guide/tutorial.md`. Do not promote a later section just because it is in this file.
 
 ## Implementation Status (Read First)
 
-> **WARNING**: This document mixes **implemented** and **aspirational** features.
-> Sections marked with ⚠️ are NOT YET IMPLEMENTED.
-
-### What Actually Works (Madaros v0.80.0)
+Aligned to `docs/serious-language/public-claim-registry.v1.tsv`, `TOUR.md` (measured 2026-10-04), and `docs/compiler/KNOWN_LIMITATIONS.md` (ledger validated 2026-10-06; KL-11 narrowed 2026-10-13). The committed prebuilt runs on Linux x86-64; the separate Apple Silicon route and its limits are listed below. This table is not a new measurement.
 
 | Feature | Status |
 |---------|--------|
-| Core syntax (variables, functions, control flow) | ✅ Implemented |
-| Type system (generics, structs, enums, traits) | ✅ Implemented |
-| Effects system (type-level tracking) | ✅ Implemented |
-| Units of measure | ✅ Implemented |
-| Epistemic types (`Knowledge<T>`) | ✅ Interpreter only |
-| GPU kernels (codegen) | ✅ Implemented in the checked GPU artifact |
-| GPU kernel launch surface | ✅ Checkable syntax; runtime proof is gate-backed |
-| Basic async (spawn, await, channels) | ✅ Implemented |
-| Async join/select | ⚠️ Not implemented |
-| Refinement types (parsing) | ✅ Implemented |
-| Refinement types (SMT verification) | ⚠️ Runtime checks only |
-| ODE/PDE DSL | ⚠️ Not implemented |
-| Probabilistic programming | ⚠️ Effect stub only |
-| Causal models | ⚠️ Not implemented |
-| AD jacobian/hessian (CPU) | ⚠️ Stub only |
-| Package manager | ⚠️ Feature flag stub |
+| Small-program syntax, execution, structs | Stable. `let` / `var`, `fn`, `if` / `while` / ranges, struct literals. Registry: `core.syntax`, `core.execution`, `core.structs`. |
+| Effects `IO`, `Mut`, `Div`, `Panic` | Stable for the checked positive and diagnostic cases. Registry: `effects`. |
+| Custom `effect` / `handle` blocks | Not the checked user surface. Do not emit them. |
+| Generics and traits | Prototype. Do not claim a mature trait ecosystem. Registry: `generics.*`. |
+| Enum variants with payloads | Default Madaros: non-generic payload enums work (KL-20 closed there; `tests/run-pass/enum_payload_*.sio`). Generic enums (`enum Opt<T>`) do not parse. lean_single has no payload representation. |
+| Closures | Not a safe user surface. Registry: `closures.lambdas = stale_conflicting`. |
+| Units of measure | Prototype, and the engines disagree. KL-13 closed derived annotations (`f64<m/s>`, `mol/cm3`). Default Madaros still rejects `let d: m = 100.0` (#2752). lean_single runs `demos/intro/demo_unidades.sio` but still accepts a multiply into a derived unit (#2751). |
+| `Knowledge<T>` / GUM | Validated research, not interpreter-only. Tour witness: `demos/intro/demo_incerteza.sio` on Madaros. Library surface: `epistemic::knowledge`. Pure helpers carry first-order variance (KL-11, 2026-10-13). A general user call does not. |
+| `where` refinements | Not enforced by `souc run` (#2753). The working path is `scripts/ontology/expand_knowledge_runtime_guards.sh`. |
+| GPU PTX | Named gate only (`gpu.ptx`). `TOUR.md` §6 (2026-10-04) measured empty-body emission, not a general kernel backend. Do not copy later GPU snippets as working code. |
+| Async `spawn` / `await` / channels | Not part of the checked user contract in this guide. |
+| Package manager | Local registry only. Registry: `tooling.package = validated_research`. No public registry. |
+| macOS execution | The committed prebuilt is Linux x86-64. A separate current-source native ARM64 build and real Metal route is integrated in [#2978](https://github.com/Sounio-lang/sounio/pull/2978); follow the [macOS ARM64 guide](../compiler/MADAROS_MACOS_ARM64.md) for setup and limits. Do not infer Linux parity or self-hosting from this route. |
 
 ### Canonical References
 
-For what the compiler accepts today:
-- `docs/guide/MINIMUM_VIABLE_SOUNIO.md` — What actually works
-- `docs/compiler/KNOWN_LIMITATIONS.md` — What is not implemented
-- `tests/run-pass/` — Compilable syntax patterns
+- `TOUR.md` — measured claims and the table of what does not work
+- `docs/compiler/KNOWN_LIMITATIONS.md` — open ledger
+- `docs/serious-language/public-claim-registry.v1.tsv` — claim level for each public row
+- `docs/guide/getting-started.md` and `docs/guide/tutorial.md` — the user surface this file must not contradict
+- `tests/run-pass/` — compilable patterns, when a section cites a file
 
-If you are generating `.sio` code, prefer the working subset above.
+`docs/guide/MINIMUM_VIABLE_SOUNIO.md` still carries an April 22 snapshot. Do not prefer it over the October measurements when they disagree.
 
 ## Table of Contents
 
@@ -62,7 +59,6 @@ If you are generating `.sio` code, prefer the working subset above.
     - [JSON Module](#json-module-stdjson)
     - [String Module](#string-module-stdstr)
     - [Collections](#collections)
-    - [Octonion Neural Networks](#octonion-neural-networks-stdonn)
 11. [Package Manager](#package-manager)
 12. [What is NOT Supported](#what-is-not-supported)
 13. [Idiomatic Patterns](#idiomatic-patterns)
@@ -74,148 +70,95 @@ If you are generating `.sio` code, prefer the working subset above.
 
 ### Hello World
 
-```d
-fn main() -> i32 {
+Same program as `examples/hello.sio`. The following command uses the committed Linux x86-64 prebuilt; for Apple Silicon, see the [native ARM64 guide](../compiler/MADAROS_MACOS_ARM64.md).
+
+```sounio
+fn main() -> i32 with IO {
+    println("Hello, Sounio")
     return 0
 }
 ```
 
 ### Variables
 
-```d
+```sounio
 // Immutable binding (preferred)
 let x = 5
 let y: i32 = 10
 
-// Mutable binding
+// Mutable binding. `var`, not `let mut`.
 var count = 0
 count = count + 1
-
-// Constants (compile-time)
-const PI: f64 = 3.14159265359
 ```
 
 ### Functions
 
-```d
-// Basic function
+```sounio
 fn add(a: i32, b: i32) -> i32 {
     return a + b
 }
 
-// Function with effects (see Effects section)
-fn read_config(path: string) -> string with IO {
-    // IO operations here
+fn greet() -> i32 with IO {
+    println("Hello, Sounio")
+    return 0
 }
 
-// Generic function
-fn identity<T>(x: T) -> T {
-    return x
-}
-
-// Method syntax (on structs)
 impl Point {
-    fn distance(&self, other: &Point) -> f64 {
-        let dx = self.x - other.x
-        let dy = self.y - other.y
-        return sqrt(dx*dx + dy*dy)
+    fn get_x(self: &Point) -> f64 {
+        return self.x
     }
 }
 ```
 
+The receiver is `self: &Point`, not `&self`. Exclusive methods take `self: &!Point`. Generics are prototype; do not copy an `identity<T>` from an older draft of this section as a stable feature. There is no checked `string` type or `fs` module in this block.
+
 ### Control Flow
 
-```d
-// If-else
-if condition {
-    // code
-} else if other_condition {
-    // code
-} else {
-    // code
+Ranges and `if` / `while` are the checked small-program forms. Do not emit `match` on a payload variant, and do not iterate `for item in vec` from this block.
+
+```sounio
+let max = if x > y { x } else { y }
+
+var i = 0
+while i < 10 {
+    i = i + 1
 }
 
-// Match (pattern matching)
-match value {
-    0 => println("zero"),
-    1 | 2 => println("one or two"),
-    n if n > 10 => println("big"),
-    _ => println("other"),
-}
-
-// For-in loops (range iteration)
-for i in 0..10 {        // exclusive: 0, 1, ..., 9
-    println(i)
-}
-
-for i in 0..=10 {       // inclusive: 0, 1, ..., 10
-    println(i)
-}
-
-// For-in loops (collection iteration)
-for item in array {     // iterate over array elements
-    process(item)
-}
-
-for item in vec {       // iterate over Vec elements
-    process(item)
-}
-
-// While loops
-while condition {
-    // code
-}
-
-// Loop (infinite, use break to exit)
-loop {
-    if done {
-        break
-    }
-}
+for i in 0..10 { }
+for i in 0..=10 { }
 ```
 
 ### Data Structures
 
-```d
-// Structs
+```sounio
 struct Point {
     x: f64,
     y: f64,
 }
 
-// Create struct instance
 let p = Point { x: 1.0, y: 2.0 }
 
-// Linear structs (must be used exactly once)
-linear struct FileHandle {
-    fd: i32,
-}
-
-// Enums
 enum Color {
     Red,
     Green,
     Blue,
-    Rgb(u8, u8, u8),
 }
-
-// Type aliases
-type Sequence = [u8]
-type Matrix = [[f64]]
 ```
+
+A payload variant such as `Rgb(u8, u8, u8)` runs on default Madaros (a tagged cell, [ENUM_PAYLOAD_LAYOUT.md](../compiler/ENUM_PAYLOAD_LAYOUT.md)); `match` over such an enum must cover every variant (E280), and `==` on it is refused (E279). lean_single has no payload representation. `linear struct` is a checked keyword (`tests/run-pass/linear_struct_field_access.sio`); a `FileHandle` that calls `os.close` is not in this block.
 
 ### References
 
 **IMPORTANT: Sounio uses `&!` for exclusive/mutable references, NOT `&mut`**
 
-```d
+```sounio
 // Shared reference (read-only)
 fn read_value(x: &i32) -> i32 {
     return *x
 }
 
 // Exclusive reference (mutable) - uses &! NOT &mut
-fn increment(x: &!i32) {
+fn increment(x: &!i32) with Mut {
     *x = *x + 1
 }
 
@@ -248,6 +191,8 @@ let combined = arr1 ++ arr2
 ```
 
 ### Closures
+
+Not a safe user surface (`closures.lambdas = stale_conflicting`). Do not emit the snippets below.
 
 ```d
 // Basic closure
@@ -617,7 +562,9 @@ fn safe_divide(a: i32, b: i32) -> Option<i32> {
 
 ## Async Programming
 
-Sounio has first-class async/await support with structured concurrency.
+> **Not the checked user contract.** The blocks from here through the end of this file were not re-run on 2026-10-15. Do not copy them. Async `spawn` / `await` / channels, custom `effect` / `handle` blocks, payload `Result`, closures, and `format()` are not the surface measured on Madaros v0.80.0. The status table at the top is the contract.
+
+Sounio source contains async syntax. That is not evidence that the snippets below run.
 
 ### Async Functions
 
@@ -782,20 +729,7 @@ async fn pure_async() -> i32 with Async {
 
 ## Units of Measure
 
-Sounio has built-in dimensional analysis for scientific computing.
-
-### Defining Units
-
-```d
-// Literals with units (underscore prefix)
-let mass = 500_mg
-let volume = 10_mL
-let time = 24_h
-
-// Angle brackets syntax (also works)
-let dose: mg = 500.0<mg>
-let conc: mg/L = 50.0<mg/L>
-```
+Units are a fixture-backed prototype. Default Madaros rejects `let distance: m = 100.0` with `error[E001]` (#2752). `lean_single` runs `demos/intro/demo_unidades.sio` and still accepts a multiply into a derived unit (#2751). Do not copy the underscore-literal or `500.0<mg>` forms below as the current contract.
 
 ### Unit Arithmetic
 
@@ -1414,352 +1348,6 @@ deque.push_front(0);
 let front = deque.pop_front();
 ```
 
-### Octonion Neural Networks (`std.onn`)
-
-**Sounio is the first language with a complete Octonion Neural Network (ONN) framework.** Octonions are 8-dimensional hypercomplex numbers that enable neural networks with **8x parameter compression** while preserving expressiveness through non-associative algebra.
-
-#### Core Concepts
-
-**Octonion Type:**
-```sio
-struct Octonion {
-    w: f32,  // scalar (real) part
-    x: f32,  // i component
-    y: f32,  // j component
-    z: f32,  // k component
-    t: f32,  // l component
-    u: f32,  // il component
-    v: f32,  // jl component
-    s: f32,  // kl component
-}
-```
-
-**Use ONN when:**
-- Building rotation-heavy networks (3D, robotics, computer vision)
-- Memory/parameter budget is critical (mobile, edge devices)
-- You need group-theoretic structure (SO(3) preservation)
-- Model compression is more important than raw speed
-
-#### Basic Operations
-
-```sio
-use std::onn
-
-fn main() {
-    // Create octonions
-    let o1 = Octonion { w: 1.0, x: 0.0, y: 0.0, z: 0.0, t: 0.0, u: 0.0, v: 0.0, s: 0.0 }
-
-    // Core operations (via GPU intrinsics)
-    let conj = oct_conj(o1)           // Conjugate
-    let norm_sq = oct_norm_sq(o1)     // Squared norm
-    let normalized = oct_normalize(o1) // Unit normalization
-    let inv = oct_inv(o1)             // Multiplicative inverse
-
-    // Composition (Cayley-Dickson, 120 FLOPs)
-    let o2 = Octonion { w: 0.5, x: 0.5, y: 0.5, z: 0.5, t: 0.5, u: 0.5, v: 0.5, s: 0.5 }
-    let product = oct_mul(o1, o2)
-
-    // Dot product (inner product of 8D vectors)
-    let dot = oct_dot(o1, o2)
-}
-```
-
-#### Linear Layers
-
-```sio
-use std::onn::{Octonion, OctLinearLayer}
-use std::onn::linear::{oct_linear_forward, oct_xavier_init}
-
-fn main() {
-    // Create layer (8D → 16D semantic, = 8 octonions → 2 octonions)
-    let layer = OctLinearLayer { input_features: 8, output_features: 2 }
-
-    // Xavier initialization
-    let weights = oct_xavier_init(8, 2, seed: 42)  // 16 octonion parameters
-    let bias = oct_zero_init(2)                     // 2 octonions
-
-    // Forward pass
-    let input: [Octonion] = [o1, o2, o3, o4, o5, o6, o7, o8]
-    let output = oct_linear_forward(layer, weights, input, bias)  // [Octonion; 2]
-}
-```
-
-#### Convolutional Layers
-
-```sio
-use std::onn::conv::{oct_conv2d_forward, oct_conv2d_backward, oct_conv_xavier_init}
-
-fn main() {
-    // 3×3 Conv2d: 3 octonion channels → 16 octonion channels
-    let layer = OctConv2dLayer {
-        in_channels: 3,
-        out_channels: 16,
-        kernel_h: 3,
-        kernel_w: 3,
-        stride: 1,
-        padding: 1,
-    }
-
-    // Initialize kernels with Xavier
-    let kernels = oct_conv_xavier_init(3, 16, 3, 3, seed: 42)
-    let bias = oct_zero_init(16)
-
-    // Forward pass
-    let output = oct_conv2d_forward(layer, kernels, input, bias)
-
-    // Backward pass (returns grad_input, grad_kernel, grad_bias)
-    let (grad_input, grad_kernel, grad_bias) = oct_conv2d_backward(
-        layer, kernels, input, grad_output
-    )
-}
-```
-
-#### Activations
-
-```sio
-use std::onn::activation::{oct_relu, oct_gelu, oct_sigmoid, oct_tanh}
-use std::onn::g2_activation::{oct_gelu_g2, oct_leaky_relu_g2}
-
-fn forward_pass(x: [Octonion]) -> [Octonion] {
-    // Component-wise activations (apply to each of 8 components)
-    let after_relu = oct_relu(x)
-    let after_gelu = oct_gelu(x)       // GELU: x * sigmoid(1.702 * x)
-    let after_sigmoid = oct_sigmoid(x)
-
-    // G2-equivariant activations (preserve rotation structure)
-    // Only apply to norm, preserves direction
-    let g2_gelu = oct_gelu_g2(x)
-    let g2_leaky = oct_leaky_relu_g2(x, alpha: 0.1)
-
-    after_gelu
-}
-```
-
-#### Loss Functions
-
-```sio
-use std::onn::loss::{oct_mse_loss, oct_mae_loss, oct_cross_entropy_loss}
-
-fn compute_loss(predictions: [Octonion], targets: [Octonion]) -> f32 {
-    // MSE loss: (1/n) * sum |pred - target|^2
-    let mse = oct_mse_loss(predictions, targets)
-
-    // MAE loss: (1/n) * sum ||pred - target||
-    let mae = oct_mae_loss(predictions, targets)
-
-    // Cross-entropy (for classification with octonion logits)
-    let ce = oct_cross_entropy_loss(predictions, targets, num_classes: 10)
-
-    mse
-}
-```
-
-#### Optimizers
-
-```sio
-use std::onn::optimizer::{
-    SgdOptimizer, AdamOptimizer, RmspropOptimizer,
-    create_sgd_optimizer, create_adam_optimizer, create_rmsprop_optimizer,
-    sgd_step, adam_step, rmsprop_step
-}
-
-fn train_step(parameters: &![Octonion], gradients: &[Octonion]) {
-    // SGD with momentum
-    var sgd_opt = create_sgd_optimizer(
-        num_params: 16,
-        learning_rate: 0.01,
-        momentum: 0.9,
-        weight_decay: 0.0001
-    )
-    sgd_step(sgd_opt, parameters, gradients)
-
-    // Adam optimizer
-    var adam_opt = create_adam_optimizer(
-        num_params: 16,
-        learning_rate: 0.001,
-        beta1: 0.9,
-        beta2: 0.999,
-        epsilon: 1e-8,
-        weight_decay: 0.0
-    )
-    adam_step(adam_opt, parameters, gradients)
-
-    // RMSprop
-    var rmsprop_opt = create_rmsprop_optimizer(
-        num_params: 16,
-        learning_rate: 0.01,
-        alpha: 0.99,
-        epsilon: 1e-8,
-        weight_decay: 0.0
-    )
-    rmsprop_step(rmsprop_opt, parameters, gradients)
-}
-```
-
-#### Normalization Layers
-
-```sio
-use std::onn::normalization::{
-    oct_bn_fwd, oct_bn_bwd,
-    oct_layer_norm_fwd, oct_layer_norm_bwd,
-    oct_group_norm_fwd, oct_group_norm_bwd,
-    oct_instance_norm_fwd, oct_instance_norm_bwd
-}
-
-fn normalization_forward(x: [Octonion], gamma: [Octonion], beta: [Octonion]) {
-    // Batch normalization (forward pass)
-    let (normalized, mean, rstd) = oct_bn_fwd(x, batch_size: 32, num_features: 16)
-
-    // Batch normalization backward
-    let (grad_x, grad_gamma, grad_beta) = oct_bn_bwd(
-        x, mean, rstd, grad_output, batch_size: 32, num_features: 16
-    )
-
-    // Layer normalization
-    let ln_out = oct_layer_norm_fwd(x, gamma, beta, normalized_shape: 16, epsilon: 1e-5)
-
-    // Group normalization (8 octonions × 4 groups)
-    let gn_out = oct_group_norm_fwd(x, gamma, beta, num_groups: 4, epsilon: 1e-5)
-
-    // Instance normalization (useful for style transfer)
-    let in_out = oct_instance_norm_fwd(x, gamma, beta, epsilon: 1e-5)
-}
-```
-
-#### Multi-Head Attention
-
-```sio
-use std::onn::attention::{OctAttention, create_attention, oct_attention_forward}
-
-fn attention_layer() {
-    let attn = create_attention(
-        dim: 64,          // 8 octonions (8 components each = 64 F32 dims)
-        num_heads: 4,
-        dropout_p: 0.1,
-        seed: 42
-    )
-
-    // Input: batch of 8 octonion sequences
-    let query: [Octonion] = [...]
-    let key: [Octonion] = [...]
-    let value: [Octonion] = [...]
-
-    // Causal mask for autoregressive models
-    let mask: [f32] = [...]  // 0 for masked positions, 1 for valid
-
-    let output = oct_attention_forward(
-        attention_state, attn,
-        query, key, value,
-        mask
-    )
-}
-```
-
-#### Training Loop
-
-```sio
-use std::onn::training::{
-    TrainingState, LrScheduler, DataLoader,
-    create_training_state, create_lr_scheduler, create_dataloader,
-    update_training_metrics, reset_epoch_metrics, get_learning_rate, step_scheduler
-}
-
-fn training_loop() {
-    var state = create_training_state()
-    var scheduler = create_lr_scheduler(
-        initial_lr: 0.001,
-        schedule_type: 1,  // 0=const, 1=linear decay, 2=exp, 3=cosine
-        total_steps: 1000,
-        decay_rate: 0.1
-    )
-
-    for epoch in 0..100 {
-        reset_epoch_metrics(state)
-
-        let loader = create_dataloader(num_samples: 10000, batch_size: 32, shuffle: true)
-
-        for batch in 0..get_num_batches(loader) {
-            let indices = get_batch_indices(loader)
-
-            // Get current learning rate
-            let lr = get_learning_rate(scheduler)
-
-            // Forward pass
-            let predictions = forward(batch_data)
-            let loss = compute_loss(predictions, batch_labels)
-
-            // Backward pass
-            let gradients = backward(loss)
-
-            // Optimizer step
-            adam_step(optimizer, parameters, gradients)
-
-            // Update metrics
-            update_training_metrics(state, loss)
-            step_scheduler(scheduler)
-        }
-
-        let epoch_loss = get_epoch_loss(state)
-        print("Epoch " ++ epoch ++ ": " ++ epoch_loss)
-    }
-}
-```
-
-#### GPU Acceleration
-
-The repo contains substantial GPU backend work, but contributor docs should tie
-execution claims back to the checked GPU artifact and Omega GPU artifacts:
-
-```sio
-"$SOUC_GPU_BIN" build examples/kernel_matmul.sio --backend gpu -o /tmp/kernel_matmul.ptx
-```
-
-Use `docs/features/GPU_RUNTIME.md` for the current artifact-backed GPU contract
-before claiming automatic runtime execution behavior.
-
-#### Important Notes
-
-1. **Non-Associativity**: Octonion multiplication is not associative: `(a*b)*c ≠ a*(b*c)`. All operations preserve left-to-right evaluation order.
-
-2. **Moufang Identities**: While not fully associative, octonions satisfy Moufang identities: `a*(b*(a*c)) = (a*b*a)*c`. This ensures algebraic stability.
-
-3. **Component-wise vs G2-equivariant**:
-   - Component-wise: Apply activation to each of 8 components independently
-   - G2-equivariant: Apply to norm only, preserve direction (rotation-aware)
-
-4. **Parameter Counting**: A single octonion has semantic expressiveness of ~8 float32 parameters through 8D structure.
-
-5. **Expected Performance**:
-   - CPU: 2.5-3.5x slower than float32 (Cayley-Dickson overhead)
-   - GPU: Parity to 1.2x faster (with fused kernels)
-   - Model size: 8-10x smaller (8 components per parameter)
-
-#### Example: 3D Rotation Prediction Network
-
-```sio
-use std::onn
-
-fn rotation_network(input_poses: [Octonion]) -> [Octonion] {
-    // Input: batch of 3D rotations as octonions
-
-    // Layer 1: 8 octonions → 16 octonions
-    let w1 = oct_xavier_init(8, 16, seed: 1)
-    let b1 = oct_zero_init(16)
-    let h1 = oct_linear_forward(layer1, w1, input_poses, b1)
-    let h1_act = oct_gelu_g2(h1)  // G2-equivariant (preserves rotations)
-
-    // Layer 2: 16 octonions → 4 octonions (output = rotation)
-    let w2 = oct_xavier_init(16, 4, seed: 2)
-    let b2 = oct_zero_init(4)
-    let output = oct_linear_forward(layer2, w2, h1_act, b2)
-    let output_norm = oct_normalize(output)  // Ensure unit rotation
-
-    output_norm
-}
-```
-
-For comprehensive benchmarks and performance analysis, see [docs/research/ONN_BENCHMARK_ANALYSIS.md](../research/ONN_BENCHMARK_ANALYSIS.md).
-
 ---
 
 ## Package Manager
@@ -2208,7 +1796,7 @@ fn drug_concentration(
     return (dose * bioavailability) / volume
 }
 
-// GPU launch syntax accepted by the checked artifact
+// NOT re-run 2026-10-15. TOUR.md §6 measured empty-body PTX emission, not this launch.
 fn parallel_process(n: i64) with GPU, IO {
     let grid = ((n + 255) / 256, 1, 1)
     let block = (256, 1, 1)
@@ -2293,10 +1881,9 @@ let y = point.y
 // WRONG
 println!("x = {}, y = {}", x, y)
 
-// CORRECT
-println("x = " + x.to_string() + ", y = " + y.to_string())
-// OR
-println(format("x = {}, y = {}", x, y))  // if format() is available
+// CORRECT: one argument. print_f64 / print_int for numbers.
+println("x")
+// NOT available: println(format("x = {}", x)). Measured class: error[E010] for multi-arg print.
 ```
 
 ### 7. Generic Bounds Syntax
@@ -2380,20 +1967,13 @@ Result<T, E>                   // Result
 
 ## Version Information
 
-This guide is for **Sounio L0** (low-level systems syntax).
-
-For questions about specific features, check the compiler source at `compiler/src/` or run:
+This guide is for **Sounio L0** (low-level systems syntax). The compiler source is `self-hosted/`, not `compiler/src/`.
 
 ```bash
-# Check a Sounio file
-souc check your_file.sio --show-ast --show-types
-
-# Run a Sounio program
-souc run your_file.sio
-
-# Start the REPL
-souc repl
-
-# Package manager
-sou pkg --help
+souc check your_file.sio
+souc run your_file.sio          # committed prebuilt: Linux x86-64 ELF
+souc info
+souc --version                  # Madaros v0.80.0 on the committed binary
 ```
+
+Do not pass `--show-ast` or `--show-types` to `check`. Measured 2026-10-15: `check` ignores them and still prints `check: OK`. `compile` and `build` reject them with `error: madaros build: unsupported option`. There is no `sou` binary; the local package tool is `tools/sounio-pkg/sounio-pkg`, and it is not a public registry.

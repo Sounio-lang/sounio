@@ -302,6 +302,642 @@ export const DEFAULT_PARAMS_SEMAGLUTIDE = Object.freeze({
   releaseSourceLabel: 'Subcutaneous depot (k_a = ln 2 / 60 h, F = 0.89)',
 });
 
+// Urva 2022 (Clin Pharmacokinet) — tirzepatide popPK, T2D patients:
+//   MW = 4813 Da               (dual GIP/GLP-1 peptide)
+//   CL = 0.061 L/h             (proteolytic; no intact parent in excreta,
+//                               Martin 2024 — no renal clearance modeled)
+//   t1/2 ~= 120 h              (FDA 2022 label, 5 mg weekly maintenance)
+//   ka = 0.0164 /h, F = 0.80   (SC absorption, Urva 2022)
+// Kp/PS mirror the semaglutide peptide vector (vascular-confined, Kp < 1):
+// the 1/sqrt(MW) PS shift vs semaglutide is under 8%, inside estimation
+// noise. Tirzepatide-specific Kp refinement is SIO-550 follow-up.
+export const MW_TIRZEPATIDE = 4813.0;
+
+export const KP_TIRZEPATIDE = Object.freeze([
+  1.00,  // 0 blood (definition)
+  0.50,  // 1 liver
+  0.60,  // 2 kidney
+  0.05,  // 3 brain
+  0.40,  // 4 heart
+  0.30,  // 5 lung
+  0.20,  // 6 muscle
+  0.10,  // 7 adipose
+  0.80,  // 8 gut
+  0.30,  // 9 skin
+  0.20,  // 10 bone
+  0.40,  // 11 spleen
+  0.70,  // 12 pancreas
+  0.30,  // 13 other
+]);
+
+export const PS_TIRZEPATIDE = PS_SEMAGLUTIDE;
+
+export const TIRZ_KA_DEFAULT = 0.0164;
+export const TIRZ_F_DEFAULT  = 0.80;
+
+export const DEFAULT_PARAMS_TIRZEPATIDE = Object.freeze({
+  clHep: 0.061,
+  higuchiScale: 1.0,
+  vdScale: 1.0,
+  bolusMg: 0.0,
+  stentActive: true,
+  ps: PS_TIRZEPATIDE,
+  vascFrac: VASC_FRAC,
+  kp: KP_TIRZEPATIDE,
+  mw: MW_TIRZEPATIDE,
+  releaseModel: 'sc_depot',
+  releaseKa: TIRZ_KA_DEFAULT,
+  releaseF: TIRZ_F_DEFAULT,
+  releaseDoseMg: 5.0,
+  tmddOrgans: [],
+  tmddParams: {},
+  pdOrgans: [],
+  pdParams: {},
+  cVisualMax: 3.0e-5,
+  drugLabel: 'Tirzepatide (SC depot)',
+  releaseSourceLabel: 'Subcutaneous depot (k_a = 0.0164 /h, F = 0.80)',
+});
+
+// Xience V everolimus-eluting stent (SIO-524): CoCr platform, durable
+// fluoropolymer, 100 ug/cm^2, canonical 3.0 x 18 mm device = 0.088 mg.
+// ~80% eluted by 30 days, remainder by ~4 months (SPIRIT FIRST; TAXCO).
+// Systemic sink: CL = 8.8 L/h (transplant popPK, FDA Zortress label).
+// Kp/PS mirror the rapamycin vector (same mTOR class, MW 958 vs 914 Da),
+// assumed pending SIO-550. Arterial-wall fate is NOT modeled (limitation).
+export const MW_EVEROLIMUS = 958.22;
+
+export const EVR_KH_DEFAULT = 0.00262;   // mg/h^1/2: 80% of 0.088 mg at 720 h
+
+export const DEFAULT_PARAMS_EVEROLIMUS = Object.freeze({
+  clHep: 8.8,
+  higuchiScale: 1.0,
+  vdScale: 1.0,
+  bolusMg: 0.0,
+  stentActive: true,
+  ps: PS_RAPAMYCIN,
+  vascFrac: VASC_FRAC,
+  kp: KP,
+  mw: MW_EVEROLIMUS,
+  releaseModel: 'higuchi',
+  releaseKH: EVR_KH_DEFAULT,
+  releaseDoseMg: 0.088,
+  tmddOrgans: [],
+  tmddParams: {},
+  pdOrgans: [],
+  pdParams: {},
+  cVisualMax: 3.0e-5,
+  drugLabel: 'Everolimus (Xience DES)',
+  releaseSourceLabel: 'Xience stent Higuchi (KH fit to 80%/30d)',
+});
+
+// Prograf immediate-release tacrolimus (SIO-516): single 5 mg oral dose,
+// fasted. ka = 0.38/h (Bekersky 1999), F = 0.25 (Kershner 1996, first-pass
+// loss leaves the system). Whole-blood referenced (TDM matrix): CL_wb =
+// 28 L/h (Jusko 1995). Kp = tacrolimus tissue-to-blood values (Iwasaki 2007
+// liver, Saitoh 2006 brain, Staatz 2004 review; adipose capped per the
+// 24-48 h window note) -- NOT rapamycin's. PS mirrors the rapamycin
+// flow-limited pattern, ASSUMED pending SIO-550. Single-dose PK only.
+export const MW_TACROLIMUS = 804.02;
+
+export const TAC_KA_DEFAULT = 0.38;    // h^-1, Bekersky 1999 fasted
+export const TAC_F_DEFAULT = 0.25;     // Kershner 1996
+export const TAC_DOSE_DEFAULT = 5.0;   // mg, single dose
+
+export const KP_TACROLIMUS = Object.freeze([
+  1.00,  // 0 blood (definition)
+  20.0,  // 1 liver (Iwasaki 2007, CYP3A4 site)
+  6.0,   // 2 kidney
+  0.10,  // 3 brain (Saitoh 2006, P-gp restrained)
+  4.0,   // 4 heart
+  8.0,   // 5 lung
+  3.0,   // 6 muscle
+  5.0,   // 7 adipose (capped; 24-48 h window)
+  6.0,   // 8 gut (enterocyte CYP3A4 + P-gp)
+  2.0,   // 9 skin
+  1.5,   // 10 bone
+  8.0,   // 11 spleen (lymphocyte FKBP12)
+  4.0,   // 12 pancreas
+  2.0,   // 13 other
+]);
+
+export const DEFAULT_PARAMS_TACROLIMUS = Object.freeze({
+  clHep: 28.0,
+  higuchiScale: 1.0,
+  vdScale: 1.0,
+  bolusMg: 0.0,
+  stentActive: true,   // re-used as 'input active' (no stent; oral IR)
+  ps: PS_RAPAMYCIN,    // assumed flow-limited pattern, SIO-550
+  vascFrac: VASC_FRAC,
+  kp: KP_TACROLIMUS,
+  mw: MW_TACROLIMUS,
+  releaseModel: 'oral_ir',
+  releaseKa: TAC_KA_DEFAULT,
+  releaseF: TAC_F_DEFAULT,
+  releaseDoseMg: TAC_DOSE_DEFAULT,
+  tmddOrgans: [],
+  tmddParams: {},
+  pdOrgans: [],
+  pdParams: {},
+  cVisualMax: 3.0e-5,
+  drugLabel: 'Tacrolimus (oral IR)',
+  releaseSourceLabel: 'Oral IR (k_a = 0.38 /h, F = 0.25)',
+});
+
+// Zyprexa immediate-release olanzapine (SIO-518): single 10 mg oral dose.
+// ka = 0.6/h, F = 0.60, tlag = 0.25 h tablet dissolution (Bergstrom 2006).
+// Plasma referenced (rb ~= 1, Callaghan 1999): CL = 25 L/h (CYP1A2 primary).
+// Kp = olanzapine tissue values (Rodgers-Rowland, Vd ~700 L) -- NOT
+// haloperidol's, despite the shared class. PS assumed flow-limited pattern,
+// SIO-550. Dual UGT1A4/CYP1A2 pathway recorded in the drug file, not equated
+// with clozapine. Single-dose PK only.
+export const MW_OLANZAPINE = 312.43;
+
+export const OLZ_KA_DEFAULT = 0.6;     // h^-1, Bergstrom 2006
+export const OLZ_F_DEFAULT = 0.60;     // Bergstrom 2006
+export const OLZ_TLAG_DEFAULT = 0.25;  // h, tablet dissolution
+export const OLZ_DOSE_DEFAULT = 10.0;  // mg, single dose
+
+export const KP_OLANZAPINE = Object.freeze([
+  1.00,  // 0 blood (definition)
+  12.0,  // 1 liver
+  5.0,   // 2 kidney
+  10.0,  // 3 brain
+  4.0,   // 4 heart
+  8.0,   // 5 lung
+  15.0,  // 6 muscle (Vd driver)
+  8.0,   // 7 adipose (Vd driver)
+  5.0,   // 8 gut
+  5.0,   // 9 skin
+  4.0,   // 10 bone
+  5.0,   // 11 spleen
+  3.5,   // 12 pancreas
+  3.5,   // 13 other
+]);
+
+export const DEFAULT_PARAMS_OLANZAPINE = Object.freeze({
+  clHep: 25.0,
+  higuchiScale: 1.0,
+  vdScale: 1.0,
+  bolusMg: 0.0,
+  stentActive: true,   // re-used as 'input active' (no stent; oral IR)
+  ps: PS_RAPAMYCIN,    // assumed flow-limited pattern, SIO-550
+  vascFrac: VASC_FRAC,
+  kp: KP_OLANZAPINE,
+  mw: MW_OLANZAPINE,
+  releaseModel: 'oral_ir',
+  releaseKa: OLZ_KA_DEFAULT,
+  releaseF: OLZ_F_DEFAULT,
+  releaseTlag: OLZ_TLAG_DEFAULT,
+  releaseDoseMg: OLZ_DOSE_DEFAULT,
+  tmddOrgans: [],
+  tmddParams: {},
+  pdOrgans: [],
+  pdParams: {},
+  cVisualMax: 3.0e-5,
+  drugLabel: 'Olanzapine (oral IR)',
+  releaseSourceLabel: 'Oral IR (k_a = 0.6 /h, F = 0.60, lag 0.25 h)',
+});
+
+// Clozapine single 100 mg oral tablet (SIO-521): ka = 1.0/h (Tmax ~2 h),
+// F = 0.55, tlag = 0.25 h. CL = 20 L/h (calibrated: 400 mg/day steady state
+// ~= 460 ng/mL, inside the 350-600 TDM band). Kp = clozapine tissue values
+// (Vd ~400 L) -- high brain uptake (target organ, no P-gp restraint), NOT
+// olanzapine's. PS assumed flow-limited pattern, SIO-550. fm CYP1A2 0.70 /
+// CYP3A4 0.20 / other 0.10 recorded in the drug file; smoker split follow-up.
+export const MW_CLOZAPINE = 326.83;
+
+export const CLZ_KA_DEFAULT = 1.0;     // h^-1, Tmax ~2 h
+export const CLZ_F_DEFAULT = 0.55;     // first-pass CYP1A2
+export const CLZ_TLAG_DEFAULT = 0.25;  // h, tablet dissolution
+export const CLZ_DOSE_DEFAULT = 100.0; // mg, single dose
+
+export const KP_CLOZAPINE = Object.freeze([
+  1.00,  // 0 blood (definition)
+  10.0,  // 1 liver
+  4.0,   // 2 kidney
+  8.0,   // 3 brain (target organ, high uptake)
+  3.0,   // 4 heart
+  6.0,   // 5 lung
+  8.0,   // 6 muscle
+  6.0,   // 7 adipose (capped)
+  4.0,   // 8 gut
+  3.0,   // 9 skin
+  2.0,   // 10 bone
+  4.0,   // 11 spleen
+  3.0,   // 12 pancreas
+  3.0,   // 13 other
+]);
+
+export const DEFAULT_PARAMS_CLOZAPINE = Object.freeze({
+  clHep: 20.0,
+  higuchiScale: 1.0,
+  vdScale: 1.0,
+  bolusMg: 0.0,
+  stentActive: true,   // re-used as 'input active' (no stent; oral IR)
+  ps: PS_RAPAMYCIN,    // assumed flow-limited pattern, SIO-550
+  vascFrac: VASC_FRAC,
+  kp: KP_CLOZAPINE,
+  mw: MW_CLOZAPINE,
+  releaseModel: 'oral_ir',
+  releaseKa: CLZ_KA_DEFAULT,
+  releaseF: CLZ_F_DEFAULT,
+  releaseTlag: CLZ_TLAG_DEFAULT,
+  releaseDoseMg: CLZ_DOSE_DEFAULT,
+  tmddOrgans: [],
+  tmddParams: {},
+  pdOrgans: [],
+  pdParams: {},
+  cVisualMax: 3.0e-5,
+  drugLabel: 'Clozapine (oral IR)',
+  releaseSourceLabel: 'Oral IR (k_a = 1.0 /h, F = 0.55, lag 0.25 h)',
+});
+
+// Seroquel immediate-release quetiapine (SIO-525): single 100 mg oral dose.
+// ka = 1.5/h (Tmax ~1 h), F = 1.00 (complete — no first-pass loss),
+// tlag = 0.25 h. CL = 84 L/h (label/popPK; 600 mg/day steady state ~=
+// 300 ng/mL, inside the 100-500 TDM band). Kp = quetiapine tissue values
+// (Vd ~700 L) — own values. PS assumed flow-limited pattern, SIO-550.
+// fm CYP3A4 0.89 / other 0.11; venlafaxine DDI follow-up (own evaluation).
+export const MW_QUETIAPINE = 383.51;
+
+export const QTP_KA_DEFAULT = 1.5;      // h^-1, Tmax ~1 h
+export const QTP_F_DEFAULT = 1.00;     // complete bioavailability
+export const QTP_TLAG_DEFAULT = 0.25;  // h, tablet dissolution
+export const QTP_DOSE_DEFAULT = 100.0; // mg, single dose
+
+export const KP_QUETIAPINE = Object.freeze([
+  1.00,  // 0 blood (definition)
+  8.0,   // 1 liver
+  4.0,   // 2 kidney
+  3.0,   // 3 brain
+  3.0,   // 4 heart
+  6.0,   // 5 lung
+  6.0,   // 6 muscle
+  5.0,   // 7 adipose (capped)
+  4.0,   // 8 gut
+  3.0,   // 9 skin
+  2.0,   // 10 bone
+  4.0,   // 11 spleen
+  3.0,   // 12 pancreas
+  3.0,   // 13 other
+]);
+
+export const DEFAULT_PARAMS_QUETIAPINE = Object.freeze({
+  clHep: 84.0,
+  higuchiScale: 1.0,
+  vdScale: 1.0,
+  bolusMg: 0.0,
+  stentActive: true,   // re-used as 'input active' (no stent; oral IR)
+  ps: PS_RAPAMYCIN,    // assumed flow-limited pattern, SIO-550
+  vascFrac: VASC_FRAC,
+  kp: KP_QUETIAPINE,
+  mw: MW_QUETIAPINE,
+  releaseModel: 'oral_ir',
+  releaseKa: QTP_KA_DEFAULT,
+  releaseF: QTP_F_DEFAULT,
+  releaseTlag: QTP_TLAG_DEFAULT,
+  releaseDoseMg: QTP_DOSE_DEFAULT,
+  tmddOrgans: [],
+  tmddParams: {},
+  pdOrgans: [],
+  pdParams: {},
+  cVisualMax: 3.0e-5,
+  drugLabel: 'Quetiapine (oral IR)',
+  releaseSourceLabel: 'Oral IR (k_a = 1.5 /h, F = 1.00, lag 0.25 h)',
+});
+
+// Single 300 mg lithium carbonate capsule (SIO-520): 56.4 mg Li+ (8.12 mEq).
+// ka = 1.0/h, F = 1.00 (no first-pass — nothing hepatic), tlag = 0.25 h.
+// PURELY RENAL sink: CL = 1.3 L/h (~22% of GFR, Na+ competition; Amdisen
+// 1977). Kp from ECF physiology + measured anchors (Vd ~42 L) — NEVER from
+// lipophilic-neutral predictors. PS flow-limited except brain/bone/adipose
+// (measured slow exclusion), SIO-550. No protein binding. MW is elemental.
+export const MW_LITHIUM = 6.94;
+
+export const LI_KA_DEFAULT = 1.0;      // h^-1, Tmax ~1-2 h
+export const LI_F_DEFAULT = 1.00;      // complete; renal-only fate
+export const LI_TLAG_DEFAULT = 0.25;   // h, tablet dissolution
+export const LI_DOSE_DEFAULT = 56.4;   // mg Li+ (300 mg carbonate)
+
+export const KP_LITHIUM = Object.freeze([
+  1.00,  // 0 blood (definition)
+  0.6,   // 1 liver
+  0.8,   // 2 kidney (cortical concentration)
+  0.4,   // 3 brain (measured brain:serum ~0.3-0.5, slow BBB)
+  0.6,   // 4 heart
+  0.6,   // 5 lung
+  0.8,   // 6 muscle
+  0.2,   // 7 adipose (ions excluded from fat)
+  0.6,   // 8 gut
+  0.5,   // 9 skin
+  0.5,   // 10 bone
+  0.6,   // 11 spleen
+  0.6,   // 12 pancreas
+  0.6,   // 13 other
+]);
+
+export const PS_LITHIUM = Object.freeze([
+  0.0,   // 0 blood
+  90.0,  // 1 liver (flow-limited)
+  74.0,  // 2 kidney (flow-limited)
+  5.0,   // 3 brain (slow BBB equilibration)
+  16.0,  // 4 heart (flow-limited)
+  350.0, // 5 lung (flow-limited)
+  42.0,  // 6 muscle (flow-limited)
+  4.0,   // 7 adipose (ion exclusion)
+  55.0,  // 8 gut (flow-limited)
+  21.0,  // 9 skin (flow-limited)
+  5.0,   // 10 bone (slow)
+  10.0,  // 11 spleen (flow-limited)
+  8.0,   // 12 pancreas (flow-limited)
+  13.0,  // 13 other (flow-limited)
+]);
+
+export const DEFAULT_PARAMS_LITHIUM = Object.freeze({
+  clHep: 1.3,
+  higuchiScale: 1.0,
+  vdScale: 1.0,
+  bolusMg: 0.0,
+  stentActive: true,   // re-used as 'input active' (no stent; oral IR)
+  ps: PS_LITHIUM,
+  vascFrac: VASC_FRAC,
+  kp: KP_LITHIUM,
+  mw: MW_LITHIUM,
+  releaseModel: 'oral_ir',
+  releaseKa: LI_KA_DEFAULT,
+  releaseF: LI_F_DEFAULT,
+  releaseTlag: LI_TLAG_DEFAULT,
+  releaseDoseMg: LI_DOSE_DEFAULT,
+  tmddOrgans: [],
+  tmddParams: {},
+  pdOrgans: [],
+  pdParams: {},
+  cVisualMax: 3.0e-5,
+  drugLabel: 'Lithium (oral IR)',
+  releaseSourceLabel: 'Oral IR (k_a = 1.0 /h, F = 1.00, lag 0.25 h)',
+});
+
+// Single 1000 mg IV infusion over 1.0 h (SIO-519): label rate, never bolus
+// push. Zero-order input Dose/Tinf on [0, Tinf]. Predominantly renal sink:
+// CL = 5.18 L/h (Matzke 1984 at CrCl 120: 0.689*120+3.66 mL/min). Kp from
+// ECF rationale + measured poor BBB (Vd ~45 L) — never lipophilic-neutral
+// predictors. PS flow-limited except brain/adipose/bone (SIO-550). The
+// infusion path does not touch the SIO-504 clamped bolus kernel.
+export const MW_VANCOMYCIN = 1449.0;
+
+export const VNC_DOSE_DEFAULT = 1000.0;  // mg, single infusion
+export const VNC_TINF_DEFAULT = 1.0;     // h, label rate
+
+export const KP_VANCOMYCIN = Object.freeze([
+  1.00,  // 0 blood (definition)
+  0.6,   // 1 liver
+  1.0,   // 2 kidney (elimination + accumulation)
+  0.1,   // 3 brain (poor BBB — measured)
+  0.6,   // 4 heart
+  0.6,   // 5 lung
+  0.9,   // 6 muscle
+  0.2,   // 7 adipose (excluded)
+  0.6,   // 8 gut
+  0.5,   // 9 skin
+  0.3,   // 10 bone
+  0.6,   // 11 spleen
+  0.6,   // 12 pancreas
+  0.9,   // 13 other
+]);
+
+export const PS_VANCOMYCIN = Object.freeze([
+  0.0,   // 0 blood
+  90.0,  // 1 liver (flow-limited)
+  74.0,  // 2 kidney (flow-limited)
+  2.0,   // 3 brain (very poor penetration)
+  16.0,  // 4 heart (flow-limited)
+  350.0, // 5 lung (flow-limited)
+  42.0,  // 6 muscle (flow-limited)
+  5.0,   // 7 adipose (excluded)
+  55.0,  // 8 gut (flow-limited)
+  21.0,  // 9 skin (flow-limited)
+  8.0,   // 10 bone (slow)
+  10.0,  // 11 spleen (flow-limited)
+  8.0,   // 12 pancreas (flow-limited)
+  13.0,  // 13 other (flow-limited)
+]);
+
+export const DEFAULT_PARAMS_VANCOMYCIN = Object.freeze({
+  clHep: 5.18,
+  higuchiScale: 1.0,
+  vdScale: 1.0,
+  bolusMg: 0.0,
+  stentActive: true,   // re-used as 'input active' (no stent; IV infusion)
+  ps: PS_VANCOMYCIN,
+  vascFrac: VASC_FRAC,
+  kp: KP_VANCOMYCIN,
+  mw: MW_VANCOMYCIN,
+  releaseModel: 'infusion',
+  releaseDoseMg: VNC_DOSE_DEFAULT,
+  releaseTinf: VNC_TINF_DEFAULT,
+  tmddOrgans: [],
+  tmddParams: {},
+  pdOrgans: [],
+  pdParams: {},
+  cVisualMax: 3.0e-5,
+  drugLabel: 'Vancomycin (IV infusion)',
+  releaseSourceLabel: 'IV infusion 1000 mg / 1.0 h (label rate)',
+});
+
+// Risperidone + 9-OH single oral dose (SIO-522): parent + equipotent active
+// metabolite coupled by CYP2D6 formation, NM reference (pheno 2). Molar
+// convention: formed parent mass x MW_OH9/MW_PARENT feeds the 9-OH blood
+// input. CL values derived from label t1/2 + Vd (see drugs/risperidone.sio:
+// parent CL_other 3.6, CL_form_NM 20.7, 9-OH CL 14.7 L/h). Kp assumed
+// patterns targeting label Vd (parent ~115 L, 9-OH ~480 L); PS
+// flow-limited except brain/adipose/bone (SIO-550, CNS exception noted).
+// Reuses the venlafaxine coupled-CN machinery (vfxCnStep, merExpNeg).
+export const MW_RSP_PARENT = 410.49;
+export const MW_RSP_OH9 = 426.48;
+export const RSP_MW_RATIO = 426.48 / 410.49;
+
+export const RSP_DOSE_DEFAULT = 2.0;   // mg, single oral IR tablet
+export const RSP_F_DEFAULT = 0.70;     // label absolute bioavailability
+export const RSP_KA_DEFAULT = 2.0;     // h^-1, calibrated to Tmax ~1 h
+export const RSP_CL_OTHER = 3.6;       // L/h, non-formation (PM t1/2 derived)
+export const RSP_CL_FORM_NM = 20.7;    // L/h, CYP2D6 formation at NM
+export const RSP_CL_OH9 = 14.7;        // L/h, 9-OH central (label derived)
+
+// CYP2D6 formation scale by phenotype (darwin_pbpk convention 0=PM, 1=IM,
+// 2=NM, 3=UM). PM 0.0 label-derived; IM/UM CPIC activity-score logic.
+export const RSP_FORM_SCALE = Object.freeze([0.0, 0.5, 1.0, 1.5]);
+
+export const RSP_LIVER = 1;   // CYP2D6 formation site (organ 1)
+
+export const KP_RSP_PARENT = Object.freeze([
+  1.00,  // 0 blood (definition)
+  4.0,   // 1 liver
+  3.0,   // 2 kidney
+  3.0,   // 3 brain (CNS entry — antipsychotic)
+  2.0,   // 4 heart
+  3.0,   // 5 lung
+  2.0,   // 6 muscle
+  1.0,   // 7 adipose
+  3.0,   // 8 gut
+  1.0,   // 9 skin
+  0.5,   // 10 bone
+  2.5,   // 11 spleen
+  2.0,   // 12 pancreas
+  2.0,   // 13 other
+]);
+
+export const PS_RSP_PARENT = Object.freeze([
+  0.0,   // 0 blood
+  90.0,  // 1 liver (flow-limited)
+  74.0,  // 2 kidney (flow-limited)
+  10.0,  // 3 brain (CNS entry)
+  16.0,  // 4 heart (flow-limited)
+  350.0, // 5 lung (flow-limited)
+  42.0,  // 6 muscle (flow-limited)
+  5.0,   // 7 adipose (reduced)
+  55.0,  // 8 gut (flow-limited)
+  21.0,  // 9 skin (flow-limited)
+  8.0,   // 10 bone (slow)
+  10.0,  // 11 spleen (flow-limited)
+  8.0,   // 12 pancreas (flow-limited)
+  13.0,  // 13 other (flow-limited)
+]);
+
+export const KP_RSP_OH9 = Object.freeze([
+  1.00,  // 0 blood (definition)
+  15.0,  // 1 liver
+  10.0,  // 2 kidney
+  1.0,   // 3 brain (measured brain/plasma 0.8-1.2)
+  6.0,   // 4 heart
+  12.0,  // 5 lung
+  10.0,  // 6 muscle
+  4.0,   // 7 adipose
+  10.0,  // 8 gut
+  4.0,   // 9 skin
+  1.0,   // 10 bone
+  10.0,  // 11 spleen
+  8.0,   // 12 pancreas
+  8.0,   // 13 other
+]);
+
+export const PS_RSP_OH9 = Object.freeze([
+  0.0,   // 0 blood
+  90.0,  // 1 liver (flow-limited)
+  74.0,  // 2 kidney (flow-limited)
+  8.0,   // 3 brain
+  16.0,  // 4 heart (flow-limited)
+  350.0, // 5 lung (flow-limited)
+  42.0,  // 6 muscle (flow-limited)
+  8.0,   // 7 adipose (reduced)
+  55.0,  // 8 gut (flow-limited)
+  21.0,  // 9 skin (flow-limited)
+  8.0,   // 10 bone (slow)
+  10.0,  // 11 spleen (flow-limited)
+  8.0,   // 12 pancreas (flow-limited)
+  13.0,  // 13 other (flow-limited)
+]);
+
+// One Lie-Trotter step: exact gut absorption, parent CN with the CYP2D6
+// formation sink solved implicitly on the liver, 9-OH CN fed the formed
+// mass (molar convention). Mirrors rsp_step in scenarios/risperidone_oral.sio.
+// Also returns the step's absorbed/formed masses and the midpoint-Cb
+// elimination audit masses for the two-sided residual.
+function rspStep(st, dt, clForm) {
+  const gut = st.gut;
+  const fracAbs = 1.0 - merExpNeg(-RSP_KA_DEFAULT * dt);
+  const gutFrac = gut * fracAbs;
+  const absorbAmt = RSP_F_DEFAULT * gutFrac;
+  let gutNew = gut - gutFrac;
+  if (gutNew < 0) gutNew = 0;
+  const parentInput = absorbAmt / dt;
+
+  const outP = vfxCnStep(st.pCv, st.pCt, KP_RSP_PARENT, PS_RSP_PARENT, RSP_CL_OTHER,
+                         parentInput, dt, RSP_LIVER, clForm);
+  const formMg = outP.removed;
+  const oh9Input = formMg * RSP_MW_RATIO / dt;
+  const outO = vfxCnStep(st.oCv, st.oCt, KP_RSP_OH9, PS_RSP_OH9, RSP_CL_OH9,
+                         oh9Input, dt, 0, 0.0);
+
+  const elimP = RSP_CL_OTHER * 0.5 * (st.pCv[0] + outP.cv[0]) * dt;
+  const elimO = RSP_CL_OH9 * 0.5 * (st.oCv[0] + outO.cv[0]) * dt;
+
+  return { pCv: outP.cv, pCt: outP.ct, oCv: outO.cv, oCt: outO.ct, gut: gutNew,
+           absorbed: absorbAmt, formed: formMg, elimP, elimO };
+}
+
+function rspZeroState() {
+  return {
+    pCv: new Float64Array(N), pCt: new Float64Array(N),
+    oCv: new Float64Array(N), oCt: new Float64Array(N),
+    gut: RSP_DOSE_DEFAULT,
+    cumAbs: 0.0, cumForm: 0.0, cumElimP: 0.0, cumElimO: 0.0,
+  };
+}
+
+/**
+ * Integrate the risperidone single-dose scenario (2 mg oral IR) at NM (or a
+ * chosen CYP2D6 phenotype) and sample parent + 9-OH organ-average trajectories
+ * at the given times. Returns a record per sample with parent/9-OH
+ * {cv,ct,avg}[14], cumulative absorbed/formed masses, body masses and the
+ * two-sided CN mass-identity residuals. Default dt = 0.01 h matches the
+ * stdlib scenario; pheno default 2 = NM (the parity reference).
+ */
+export function runRisperidoneScenario(sampleTimes, { dt = 0.01, pheno = 2 } = {}) {
+  if (!(Number.isFinite(dt) && dt > 0 && dt <= 1)) {
+    throw new RangeError(`dt must be a finite positive step <= 1 h, got ${dt}`);
+  }
+  if (!(Number.isInteger(pheno) && pheno >= 0 && pheno <= 3)) {
+    throw new RangeError(`pheno must be 0=PM, 1=IM, 2=NM or 3=UM, got ${pheno}`);
+  }
+  if (!(Array.isArray(sampleTimes) && sampleTimes.every(Number.isFinite))) {
+    throw new RangeError('sampleTimes must be an array of finite numbers');
+  }
+  const sampleSteps = [];
+  for (let i = 0; i < sampleTimes.length; i++) {
+    const prev = i === 0 ? 0.0 : sampleTimes[i - 1];
+    if (i === 0 ? sampleTimes[0] < 0.0 : !(sampleTimes[i] > prev)) {
+      throw new RangeError(`sampleTimes must be >= 0 and strictly increasing, got ${sampleTimes[i]} at index ${i} after ${prev}`);
+    }
+    const n = Math.round(sampleTimes[i] / dt);
+    if (!(n >= 0) || Math.abs(n * dt - sampleTimes[i]) > 1e-9) {
+      throw new RangeError(`sampleTimes must be a whole number of dt steps from 0, got ${sampleTimes[i]} at dt = ${dt}`);
+    }
+    sampleSteps.push(n);
+  }
+  const clForm = RSP_CL_FORM_NM * RSP_FORM_SCALE[pheno];
+  let st = rspZeroState();
+  const out = [];
+  let done = 0;
+  for (let j = 0; j < sampleTimes.length; j++) {
+    const target = sampleTimes[j];
+    while (done < sampleSteps[j]) {
+      const s = rspStep(st, dt, clForm);
+      st = {
+        pCv: s.pCv, pCt: s.pCt, oCv: s.oCv, oCt: s.oCt, gut: s.gut,
+        cumAbs: st.cumAbs + s.absorbed, cumForm: st.cumForm + s.formed,
+        cumElimP: st.cumElimP + s.elimP, cumElimO: st.cumElimO + s.elimO,
+      };
+      done++;
+    }
+    const pAvg = new Float64Array(N), oAvg = new Float64Array(N);
+    for (let i = 0; i < N; i++) {
+      pAvg[i] = vfxOrganAverage(st.pCv, st.pCt, i);
+      oAvg[i] = vfxOrganAverage(st.oCv, st.oCt, i);
+    }
+    const pMass = vfxTotalMass(st.pCv, st.pCt);
+    const oMass = vfxTotalMass(st.oCv, st.oCt);
+    out.push({
+      t: target,
+      pCv: Float64Array.from(st.pCv), pCt: Float64Array.from(st.pCt), pAvg,
+      oCv: Float64Array.from(st.oCv), oCt: Float64Array.from(st.oCt), oAvg,
+      absorbed: st.cumAbs, formed: st.cumForm, pMass, oMass,
+      resP: pMass - (st.cumAbs - st.cumElimP - st.cumForm),
+      resO: oMass - (st.cumForm * RSP_MW_RATIO - st.cumElimO),
+    });
+  }
+  return out;
+}
+
 /**
  * Stent release (Higuchi). Identical to pbpk14_core for cross-model parity.
  */
@@ -316,6 +952,31 @@ export function releaseRateAt(tHours, params) {
     const F  = params.releaseF;
     const D  = params.releaseDoseMg * (params.higuchiScale ?? 1);
     return F * D * ka * Math.exp(-ka * Math.max(0, tHours));
+  }
+  if (model === 'oral_ir') {
+    // Oral IR capsule: rate = 0 for t < tlag, else F * Dose * k_a *
+    // exp(-k_a * (t - tlag))  (1st-order gut absorption after tablet
+    // dissolution; 1 - F is first-pass loss). The closed form is exact,
+    // so both engines evaluate the same function.
+    const ka = params.releaseKa;
+    const F  = params.releaseF;
+    const tlag = params.releaseTlag ?? 0;
+    const te = tHours - tlag;
+    if (te < 0) return 0;
+    const D  = params.releaseDoseMg * (params.higuchiScale ?? 1);
+    return F * D * ka * Math.exp(-ka * te);
+  }
+  if (model === 'infusion') {
+    // IV infusion (SIO-519): zero-order rate Dose/Tinf on [0, Tinf], 0
+    // after. Explicit label-rate infusion — never a bolus push, so the
+    // SIO-504 clamped-kernel audit path does not apply. Both engines
+    // evaluate the rate at the step midpoint, including the step
+    // straddling Tinf.
+    const T = params.releaseTinf ?? 0;
+    if (tHours < 0 || tHours > T) return 0;
+    if (T <= 0) return 0;
+    const D = params.releaseDoseMg * (params.higuchiScale ?? 1);
+    return D / T;
   }
   // Higuchi (default): dQ/dt = K_H / (2·√t), clipped at t < 0.1 h
   const t = Math.max(0.1, tHours);
@@ -1059,6 +1720,7 @@ export function runVenlafaxineSteadyState({ dt = 0.5, pheno = 2, nDoses = 10, ta
   return {
     aucParent: aucP, aucOdv: aucO, ratio: aucO / aucP,
     errAucParent: errP, errAucOdv: errO,
+    residualMgParent: resP, residualMgOdv: resO,
     ratioLo: vfxSsRatioLo(aucP, aucO, errP, errO),
     ratioHi: vfxSsRatioHi(aucP, aucO, errP, errO),
     bounded: aucP > errP,
@@ -1340,4 +2002,149 @@ export function runMidazolamDDIResponse(iOverKiGrid) {
     const F = mdzF(I), clH = mdzCLh(I);
     return { iOverKi: r, F, clH, aucr: (F / F0) * (clH0 / clH) };
   });
+}
+
+// Aripiprazole single oral dose (SIO-523): parent only, two parallel
+// hepatic CYP sinks (CYP3A4 constitutive + CYP2D6 phenotypic) folded into
+// one implicit liver sink — linear sinks add exactly. CL values derived
+// from label t1/2 + Vd (see drugs/aripiprazole.sio: CL_3A4 1.92,
+// CL_2D6_NM 1.81 L/h, cl_central 0). Kp assumed targeting label Vd
+// (~410 L); PS flow-limited except brain/adipose/bone (SIO-550, CNS
+// exception). Dehydro-aripiprazole explicitly out of scope (follow-up).
+// Reuses the coupled-CN machinery (vfxCnStep, merExpNeg).
+export const MW_ARIPIPRAZOLE = 448.39;
+
+export const ARP_DOSE_DEFAULT = 15.0;   // mg, single oral IR tablet
+export const ARP_F_DEFAULT = 0.87;      // label absolute bioavailability
+export const ARP_KA_DEFAULT = 1.2;      // h^-1, calibrated to Tmax ~4.1 h
+export const ARP_CL_CENTRAL = 0.0;      // hepatic only (<1% urinary unchanged)
+export const ARP_CL_3A4 = 0.23;         // L/h, constitutive (kernel-calibrated)
+export const ARP_CL_2D6_NM = 0.21;      // L/h, CYP2D6 at NM (kernel-calibrated)
+
+// CYP2D6 pathway scale by phenotype (darwin_pbpk convention 0=PM, 1=IM,
+// 2=NM, 3=UM). PM 0.0 label-derived; IM/UM CPIC activity-score logic.
+export const ARP_2D6_SCALE = Object.freeze([0.0, 0.5, 1.0, 1.5]);
+
+export const ARP_LIVER = 1;   // CYP formation/elimination site (organ 1)
+
+export const KP_ARIPIPRAZOLE = Object.freeze([
+  1.00,  // 0 blood (definition)
+  12.0,  // 1 liver
+  8.0,   // 2 kidney
+  6.0,   // 3 brain (CNS entry — D2 partial agonist)
+  5.0,   // 4 heart
+  8.0,   // 5 lung
+  8.0,   // 6 muscle
+  4.0,   // 7 adipose
+  8.0,   // 8 gut
+  3.0,   // 9 skin
+  1.5,   // 10 bone
+  8.0,   // 11 spleen
+  6.0,   // 12 pancreas
+  6.0,   // 13 other
+]);
+
+export const PS_ARIPIPRAZOLE = Object.freeze([
+  0.0,   // 0 blood
+  90.0,  // 1 liver (flow-limited)
+  74.0,  // 2 kidney (flow-limited)
+  15.0,  // 3 brain (CNS entry)
+  16.0,  // 4 heart (flow-limited)
+  350.0, // 5 lung (flow-limited)
+  42.0,  // 6 muscle (flow-limited)
+  8.0,   // 7 adipose (reduced)
+  55.0,  // 8 gut (flow-limited)
+  21.0,  // 9 skin (flow-limited)
+  8.0,   // 10 bone (slow)
+  10.0,  // 11 spleen (flow-limited)
+  8.0,   // 12 pancreas (flow-limited)
+  13.0,  // 13 other (flow-limited)
+]);
+
+// One Lie-Trotter step: lagged exact gut absorption, parent CN with the
+// summed parallel CYP sink solved implicitly on the liver. Mirrors arp_step
+// in scenarios/aripiprazole_oral.sio. Returns the step's absorbed and
+// CYP-eliminated masses for the exact mass audit.
+function arpStep(st, dt, clCyp) {
+  // Exact first-order gut absorption over the step; the gut empties a full
+  // fraction per step while only F reaches the blood — (1 - F) destroyed
+  // as first-pass loss (same convention as the oral IR lanes).
+  const fracAbs = 1.0 - merExpNeg(-ARP_KA_DEFAULT * dt);
+  const gutFrac = st.gut * fracAbs;
+  const absorbAmt = ARP_F_DEFAULT * gutFrac;
+  let gutNew = st.gut - gutFrac;
+  if (gutNew < 0) gutNew = 0;
+  const parentInput = absorbAmt / dt;
+
+  const out = vfxCnStep(st.pCv, st.pCt, KP_ARIPIPRAZOLE, PS_ARIPIPRAZOLE, ARP_CL_CENTRAL,
+                        parentInput, dt, ARP_LIVER, clCyp);
+  return { pCv: out.cv, pCt: out.ct, gut: gutNew,
+           absorbed: absorbAmt, cyp: out.removed };
+}
+
+function arpZeroState() {
+  return {
+    pCv: new Float64Array(N), pCt: new Float64Array(N),
+    gut: ARP_DOSE_DEFAULT, t: 0.0,
+    cumAbs: 0.0, cumCyp: 0.0,
+  };
+}
+
+/**
+ * Integrate the aripiprazole single-dose scenario (15 mg oral IR) at NM (or a
+ * chosen CYP2D6 phenotype) and sample parent organ-average trajectories at
+ * the given times. Returns a record per sample with {cv,ct,avg}[14],
+ * cumulative absorbed/CYP masses, body mass and the exact CN mass-identity
+ * residual. Default dt = 0.01 h matches the stdlib scenario; pheno default
+ * 2 = NM (the parity reference).
+ */
+export function runAripiprazoleScenario(sampleTimes, { dt = 0.01, pheno = 2 } = {}) {
+  if (!(Number.isFinite(dt) && dt > 0 && dt <= 1)) {
+    throw new RangeError(`dt must be a finite positive step <= 1 h, got ${dt}`);
+  }
+  if (!(Number.isInteger(pheno) && pheno >= 0 && pheno <= 3)) {
+    throw new RangeError(`pheno must be 0=PM, 1=IM, 2=NM or 3=UM, got ${pheno}`);
+  }
+  if (!(Array.isArray(sampleTimes) && sampleTimes.every(Number.isFinite))) {
+    throw new RangeError('sampleTimes must be an array of finite numbers');
+  }
+  const sampleSteps = [];
+  for (let i = 0; i < sampleTimes.length; i++) {
+    const prev = i === 0 ? 0.0 : sampleTimes[i - 1];
+    if (i === 0 ? sampleTimes[0] < 0.0 : !(sampleTimes[i] > prev)) {
+      throw new RangeError(`sampleTimes must be >= 0 and strictly increasing, got ${sampleTimes[i]} at index ${i} after ${prev}`);
+    }
+    const n = Math.round(sampleTimes[i] / dt);
+    if (!(n >= 0) || Math.abs(n * dt - sampleTimes[i]) > 1e-9) {
+      throw new RangeError(`sampleTimes must be a whole number of dt steps from 0, got ${sampleTimes[i]} at dt = ${dt}`);
+    }
+    sampleSteps.push(n);
+  }
+  const clCyp = ARP_CL_3A4 + ARP_CL_2D6_NM * ARP_2D6_SCALE[pheno];
+  let st = arpZeroState();
+  const out = [];
+  let done = 0;
+  for (let j = 0; j < sampleTimes.length; j++) {
+    const target = sampleTimes[j];
+    while (done < sampleSteps[j]) {
+      const s = arpStep(st, dt, clCyp);
+      st = {
+        pCv: s.pCv, pCt: s.pCt, gut: s.gut, t: st.t + dt,
+        cumAbs: st.cumAbs + s.absorbed, cumCyp: st.cumCyp + s.cyp,
+      };
+      done++;
+    }
+    const avg = new Float64Array(N);
+    for (let i = 0; i < N; i++) {
+      avg[i] = vfxOrganAverage(st.pCv, st.pCt, i);
+    }
+    const mass = vfxTotalMass(st.pCv, st.pCt);
+    out.push({
+      t: target,
+      pCv: Float64Array.from(st.pCv), pCt: Float64Array.from(st.pCt), avg,
+      absorbed: st.cumAbs, cyp: st.cumCyp, mass,
+      res: mass - (st.cumAbs - st.cumCyp),
+    });
+  }
+  return out;
 }

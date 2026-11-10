@@ -2,8 +2,8 @@
 topic_id: repo.docs.decisions.adr-006-fixed-point-trust-anchor
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
-validated_by: A2
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.decisions.adr-006-fixed-point-trust-anchor
 -->
 
@@ -25,6 +25,9 @@ This is the strongest available proof that the compiler is self-consistent:
 it is a fixed point of its own compilation function.
 
 ## Decision
+
+> Amended by [ADR-029](./adr-029-bootstrap-provenance-root.md): the chain starts at the committed
+> seed, not at `artifacts/bootstrap/boot4.elf`.
 
 The gen2==gen3 fixed-point check is the **trust anchor** for compiler changes.
 

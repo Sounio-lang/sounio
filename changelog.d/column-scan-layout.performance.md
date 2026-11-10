@@ -1,0 +1,1 @@
+Column reductions on a `CsvTable` walk a contiguous run of values. Graph spectral kernels and scientific matrix reads no longer copy the whole numeric buffer on each call. Results of those reads are unchanged.

@@ -2,9 +2,22 @@ import { useState, useEffect } from 'react';
 
 type Theme = 'light' | 'dark' | 'system';
 
-export default function ThemeToggle() {
+interface Props {
+  strings?: { toggle: string; light: string; dark: string; system: string };
+}
+
+export default function ThemeToggle({ strings = { toggle: 'Toggle theme', light: 'Light', dark: 'Dark', system: 'System' } }: Props = {}) {
   const [theme, setTheme] = useState<Theme>('dark');
   const [mounted, setMounted] = useState(false);
+
+  useEffect(() => {
+    const synchronize = (event: Event) => {
+      const value = (event as CustomEvent<Theme>).detail;
+      if (value === 'dark' || value === 'light' || value === 'system') setTheme(value);
+    };
+    window.addEventListener('sounio-theme-change', synchronize);
+    return () => window.removeEventListener('sounio-theme-change', synchronize);
+  }, []);
 
   useEffect(() => {
     setMounted(true);
@@ -50,6 +63,7 @@ export default function ThemeToggle() {
     const currentIndex = themes.indexOf(theme);
     const nextTheme = themes[(currentIndex + 1) % themes.length];
     setTheme(nextTheme);
+    window.dispatchEvent(new CustomEvent('sounio-theme-change', { detail: nextTheme }));
   };
 
   if (!mounted) {
@@ -57,7 +71,8 @@ export default function ThemeToggle() {
       <button
         type="button"
         className="theme-toggle-btn"
-        aria-label="Toggle theme"
+        aria-label={strings.toggle}
+        disabled
       >
         <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path
@@ -76,8 +91,8 @@ export default function ThemeToggle() {
       type="button"
       onClick={cycleTheme}
       className="theme-toggle-btn"
-      aria-label={`Current theme: ${theme}. Click to change.`}
-      title={`Theme: ${theme}`}
+      aria-label={`${strings.toggle}: ${strings[theme]}`}
+      title={strings[theme]}
     >
       {theme === 'light' && (
         <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">

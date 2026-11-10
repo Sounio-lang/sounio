@@ -1,0 +1,1 @@
+`f64` values returned by `match`, or by `if` blocks ending in a locally bound value, retain their floating-point classification instead of being treated as integer payloads by later arithmetic. The discriminating native regression and exact binary-fraction C++23 oracle are recorded in `tests/reference/f64_expression_class_receipt.md`.

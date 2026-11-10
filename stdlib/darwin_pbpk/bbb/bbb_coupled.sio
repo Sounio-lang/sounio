@@ -24,7 +24,8 @@ use darwin_pbpk::tsit5_pbpk14::*
 
 pub struct BBBCoupledTrace {
     times_h:  [f64; 32],
-    pub plasma:   [f64; 32],
+    pub plasma:   [f64; 32],   // plasma = blood / rb_ratio (#2816)
+    pub blood:    [f64; 32],   // whole blood (PBPKState14.blood)
     pub isf:      [f64; 32],
     pub icf:      [f64; 32],
     pub isf_u:    [f64; 32],
@@ -41,6 +42,7 @@ fn bbb_trace_zero() -> BBBCoupledTrace {
     BBBCoupledTrace {
         times_h:  [0.0; 32],
         plasma:   [0.0; 32],
+        blood:    [0.0; 32],
         isf:      [0.0; 32],
         icf:      [0.0; 32],
         isf_u:    [0.0; 32],
@@ -91,25 +93,29 @@ pub fn bbb_coupled_run(
     sys_st.blood = c0
 
     var bbb_st = bbb_state_zero()
+    // PBPKState14.blood is whole blood; the BBB driver and the plasma series
+    // are plasma, C_plasma = C_blood / rb_ratio (#2816).
+    let rb = systemic_prm.rb_ratio
 
     var t = 0.0
     var dt_sys = cfg.dt_init
 
     // Record t = 0 checkpoint.
     trace.times_h[0]   = 0.0
-    trace.plasma[0]    = sys_st.blood
+    trace.plasma[0]    = sys_st.blood / rb
+    trace.blood[0]     = sys_st.blood
     trace.isf[0]       = bbb_st.c_isf
     trace.icf[0]       = bbb_st.c_icf
     trace.isf_u[0]     = bbb_prm.fu_isf * bbb_st.c_isf
     trace.icf_u[0]     = bbb_prm.fu_icf * bbb_st.c_icf
-    let c_plasma_u_0   = bbb_prm.fu_plasma * sys_st.blood
+    let c_plasma_u_0   = bbb_prm.fu_plasma * trace.plasma[0]
     trace.kpuu_obs[0]  = if c_plasma_u_0 > 0.0 { (bbb_prm.fu_isf * bbb_st.c_isf) / c_plasma_u_0 } else { 0.0 }
 
     var point_i: i32 = 1
     while point_i < n_points {
         let idx = point_i as usize
         let target = checkpoints[idx]
-        let c_plasma_prev = sys_st.blood
+        let c_plasma_prev = sys_st.blood / rb
         let t_prev = t
 
         // ----- Advance systemic PBPK to target -----
@@ -133,7 +139,7 @@ pub fn bbb_coupled_run(
             if nreject > 10000 { return trace }
         }
 
-        let c_plasma_now = sys_st.blood
+        let c_plasma_now = sys_st.blood / rb
 
         // ----- Step BBB sub-model over [t_prev, target] with piecewise-linear plasma -----
         var t_bbb = t_prev
@@ -150,6 +156,7 @@ pub fn bbb_coupled_run(
         let c_icf_u_i    = bbb_prm.fu_icf * bbb_st.c_icf
         trace.times_h[idx]   = target
         trace.plasma[idx]    = c_plasma_now
+        trace.blood[idx]     = sys_st.blood
         trace.isf[idx]       = bbb_st.c_isf
         trace.icf[idx]       = bbb_st.c_icf
         trace.isf_u[idx]     = c_isf_u_i

@@ -2,8 +2,8 @@
 topic_id: repo.docs.audit.madaros-production-readiness-plan-2026-06-21
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
-validated_by: A2
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.madaros-production-readiness-plan-2026-06-21
 -->
 
@@ -92,9 +92,11 @@ The required BSS closure evidence is:
 - `scripts/ci/madaros_source_to_elf_gate.sh` remains green.
 - `main` CI and the relevant Madaros remote build path remain green after merge.
 
-## Production-Ready Definition
+## Gate definition
 
-Madaros is production-ready only when all of these are true:
+**Status: research language (pre-1.0).** APIs may change; not recommended for production use. Passing the checklist below is not that status.
+
+The Madaros gate in this plan passes only when all of these are true:
 
 1. `origin/main` is the only production baseline.
 2. The primary checkout is no longer treated as source truth while it is stale

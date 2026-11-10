@@ -2,7 +2,6 @@
 
 Search algorithms.
 
-## Types
-- Basic: linear, binary search
-- Pattern: KMP
-- Monte Carlo tree search (MCTS)
+## Modules
+- `algorithms.sio`
+- Monte Carlo tree search (`mcts/`)

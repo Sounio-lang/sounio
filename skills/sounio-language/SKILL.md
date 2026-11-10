@@ -21,7 +21,7 @@ Write correct Sounio and keep language-facing materials aligned with what the co
 - For real, compilable syntax patterns, mirror `tests/run-pass/` and `stdlib/` (not blog-like examples).
 - When unsure about a construct, search for it in:
   - `docs/guide/LLM_PROGRAMMING_GUIDE.md`
-  - `compiler/src/parser/tests/`
+  - `tests/run-pass/`
 
 ### 3) Enforce Sounio-native syntax (no Rust drift)
 
@@ -32,7 +32,7 @@ Write correct Sounio and keep language-facing materials aligned with what the co
 
 ### 4) Validate quickly
 
-- Prefer `cd compiler && cargo run -- check <file.sio>` for a single-file sanity check.
+- Prefer `./bin/souc check <file.sio>` for a single-file sanity check.
 - Add/adjust a focused test in `tests/` when fixing language-facing behavior.
 
 ## References
@@ -42,4 +42,4 @@ Write correct Sounio and keep language-facing materials aligned with what the co
 
 ## Scripts
 
-- `scripts/scan_syntax_drift.py` scans `docs/`, `examples/`, `tests/`, `stdlib/` for Rust-like constructs and doc drift.
+- `skills/sounio-language/scripts/scan_syntax_drift.py` scans `docs/`, `examples/`, `tests/`, `stdlib/` for Rust-like constructs and doc drift. `scripts/dev/fast_gate.sh` runs that script.

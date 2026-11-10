@@ -1,0 +1,337 @@
+// Conditional expected-Fisher covariance for fixed supplied-alpha count fits.
+// Computational covariance/contrasts only; no p-value or confidence interval.
+use collections::numeric_buffer::{NumericBuffer,NumericMatrix,numeric_buffer_status,numeric_buffer_len,numeric_buffer_at,numeric_buffer_set,numeric_matrix,numeric_matrix_get}
+use collections::integer_buffer::{IntegerBuffer,integer_buffer_status,integer_buffer_len,integer_buffer_at}
+use stats::regression::dynamic_count_glm::{DynamicCountFit,dynamic_count_workspace,dynamic_count_fit}
+use linalg::dynamic_least_squares::{dynamic_qr_factorize}
+use linalg::least_squares_scale::{least_squares_scaled_product}
+use math::pure::{is_finite,sqrt}
+pub struct DynamicCountFisherWorkspace {
+ pub status:i64,pub count_design_elements:i64,pub response_elements:i64,
+ pub step_elements:i64,pub qr_elements:i64,pub count_stage_elements:i64,
+ pub square_elements:i64,pub numeric_elements:i64,pub integer_elements:i64,
+ pub payload_bytes:i64,
+}
+pub fn dynamic_count_fisher_workspace(n:i64,p:i64)->DynamicCountFisherWorkspace with Div {
+ let bad=DynamicCountFisherWorkspace{status:1,count_design_elements:0,response_elements:0,
+ step_elements:0,qr_elements:0,count_stage_elements:0,square_elements:0,
+ numeric_elements:0,integer_elements:0,payload_bytes:0}
+ let base=dynamic_count_workspace(n,p)
+ if base.status!=0 {return bad}
+ let limit=9223372036854771704/8
+ if p>9223372036854775807/p {return bad}
+ let square=p*p
+ var total=base.total_elements
+ if square>(limit-total)/3 {return bad}
+ total=total+square*3
+ if p>(limit-total)/4 {return bad}
+ total=total+p*4
+ DynamicCountFisherWorkspace{status:0,count_design_elements:base.design_elements,
+ response_elements:n,step_elements:p,qr_elements:base.qr_elements,
+ count_stage_elements:base.stage_elements,square_elements:square,
+ numeric_elements:total-p,integer_elements:p,payload_bytes:total*8}
+}
+pub struct DynamicCountFisher {
+ pub fit:DynamicCountFit,pub covariance_status:i64,pub factor_status:i64,
+ pub max_weight:f64,pub alpha_fixed:bool,pub alpha_plug_in:bool,
+ pub model_declared:bool,pub independence_declared:bool,
+ pub assumptions_assessed:bool,pub finite_sample_calibrated:bool,
+}
+struct CFNumber {status:i64,value:f64}
+fn cf_abs(x:f64)->f64 {if x<0.0 {-x}else{x}}
+fn cf_number_bad()->CFNumber {CFNumber{status:4,value:0.0}}
+fn cf_weight(mu:f64,alpha:f64)->CFNumber with Div {
+ var value=mu
+ if alpha>0.0 {
+  if mu>=1.0 {value=1.0/(alpha+1.0/mu)}
+  else {value=mu/(1.0+alpha*mu)}
+ }
+ if !is_finite(value) || value<=0.0 {return cf_number_bad()}
+ CFNumber{status:0,value:value}
+}
+fn cf_norm(values:&NumericBuffer,start:i64,stride:i64,n:i64)->CFNumber with Mut,Div,Panic {
+ var scale:f64=0.0
+ var i:i64=0
+ while i<n {
+  let value=numeric_buffer_at(values,start+i*stride)
+  if !is_finite(value) {return cf_number_bad()}
+  if cf_abs(value)>scale {scale=cf_abs(value)}
+  i=i+1
+ }
+ if scale==0.0 {return CFNumber{status:0,value:0.0}}
+ var sum:f64=0.0
+ var correction:f64=0.0
+ i=0
+ while i<n {
+  let value=numeric_buffer_at(values,start+i*stride)
+  let ratio=value/scale
+  if value!=0.0 {if ratio==0.0 {return cf_number_bad()}}
+  let square=ratio*ratio
+  if ratio!=0.0 {if square==0.0 {return cf_number_bad()}}
+  let term=square-correction
+  let next=sum+term
+  correction=(next-sum)-term
+  sum=next
+  i=i+1
+ }
+ let norm=scale*sqrt(sum)
+ if !is_finite(norm) || norm<=0.0 {return cf_number_bad()}
+ CFNumber{status:0,value:norm}
+}
+// Public coefficient/mean/eta outputs follow CountGLM's transactional fit contract.
+// Covariance and SE outputs remain unchanged unless covariance_status==0.
+// All other numeric/integer owners below are scratch, invalidated by each call.
+pub fn dynamic_count_fit_fisher(a:&NumericBuffer,layout:&NumericMatrix,
+ counts:&IntegerBuffer,offsets:&NumericBuffer,initial:&NumericBuffer,
+ alpha:f64,alpha_plug_in:bool,model_declared:bool,independence_declared:bool,
+ rcond:f64,max_iterations:i64,tolerance:f64,
+ coefficients:&!NumericBuffer,means:&!NumericBuffer,eta:&!NumericBuffer,
+ covariance:&!NumericBuffer,standard_errors:&!NumericBuffer,
+ weighted:&!NumericBuffer,response:&!NumericBuffer,step:&!NumericBuffer,
+ qr_work:&!NumericBuffer,count_stage:&!NumericBuffer,r:&!NumericBuffer,
+ scales:&!NumericBuffer,permutation:&!IntegerBuffer,outer_scales:&!NumericBuffer,
+ solve:&!NumericBuffer,influences:&!NumericBuffer,covariance_stage:&!NumericBuffer
+ )->DynamicCountFisher with Mut,Div,Panic {
+ let fitted=dynamic_count_fit(a,layout,counts,offsets,initial,alpha,rcond,max_iterations,
+ tolerance,coefficients,means,eta,weighted,response,step,qr_work,count_stage)
+ var out=DynamicCountFisher{fit:fitted,covariance_status:1,factor_status: -1,max_weight:0.0,
+ alpha_fixed: !alpha_plug_in,alpha_plug_in:alpha_plug_in,model_declared:model_declared,
+ independence_declared:independence_declared,assumptions_assessed:false,finite_sample_calibrated:false}
+ if fitted.status!=0 {return out}
+ let n=fitted.rows
+ let p=fitted.columns
+ let plan=dynamic_count_fisher_workspace(n,p)
+ out.covariance_status=2
+ if plan.status!=0 || numeric_buffer_status(covariance)!=0 ||
+ numeric_buffer_status(standard_errors)!=0 || numeric_buffer_status(r)!=0 ||
+ numeric_buffer_status(scales)!=0 || integer_buffer_status(permutation)!=0 ||
+ numeric_buffer_status(outer_scales)!=0 || numeric_buffer_status(solve)!=0 ||
+ numeric_buffer_status(influences)!=0 || numeric_buffer_status(covariance_stage)!=0 {return out}
+ if numeric_buffer_len(covariance)!=plan.square_elements || numeric_buffer_len(standard_errors)!=p ||
+ numeric_buffer_len(r)!=plan.square_elements || numeric_buffer_len(scales)!=p ||
+ integer_buffer_len(permutation)!=p || numeric_buffer_len(outer_scales)!=p ||
+ numeric_buffer_len(solve)!=p || numeric_buffer_len(influences)!=plan.square_elements ||
+ numeric_buffer_len(covariance_stage)!=plan.square_elements {return out}
+ out.covariance_status=4
+ var max_weight:f64=0.0
+ var i:i64=0
+ while i<n {
+  let weight=cf_weight(numeric_buffer_at(means,i),alpha)
+  if weight.status!=0 {return out}
+  if weight.value>max_weight {max_weight=weight.value}
+  i=i+1
+ }
+ let root_weight=sqrt(max_weight)
+ if !is_finite(root_weight) || root_weight<=0.0 {return out}
+ var j:i64=0
+ while j<p {
+  var outer:f64=0.0
+  i=0
+  while i<n {
+   let entry=numeric_matrix_get(a,layout,i,j)
+   if entry.status!=0 {return out}
+   if cf_abs(entry.value)>outer {outer=cf_abs(entry.value)}
+   i=i+1
+  }
+  if !is_finite(outer) || outer<=0.0 {return out}
+  numeric_buffer_set(outer_scales,j,outer)
+  i=0
+  while i<n {
+   let entry=numeric_matrix_get(a,layout,i,j)
+   let coordinate=entry.value/outer
+   if entry.value!=0.0 {if coordinate==0.0 {return out}}
+   let weight=cf_weight(numeric_buffer_at(means,i),alpha)
+   if weight.status!=0 {return out}
+   let factor=sqrt(weight.value)/root_weight
+   if !is_finite(factor) || factor<=0.0 || factor>1.0 {return out}
+   let value=coordinate*factor
+   if coordinate!=0.0 {if value==0.0 {return out}}
+   numeric_buffer_set(weighted,i*p+j,value)
+   i=i+1
+  }
+  j=j+1
+ }
+ let b_layout=numeric_matrix(n*p,n,p,p,1,0)
+ let factor=dynamic_qr_factorize(weighted,&b_layout,response,qr_work,r,scales,permutation,rcond)
+ out.factor_status=factor.status
+ if factor.status!=0 {out.covariance_status=3;return out}
+ // Independently solve every column of R^{-1}; restore each original-coordinate
+ // row before forming a compensated Gram covariance. No residual scale.
+ var column:i64=0
+ while column<p {
+  var row=p-1
+  while row>=0 {
+   var sum:f64=0.0
+   var correction:f64=0.0
+   var k=row+1
+   while k<p {
+    let left=numeric_buffer_at(r,row*p+k)
+    let right=numeric_buffer_at(solve,k)
+    let term=left*right
+    if !is_finite(term) {return out}
+    if left!=0.0 {if right!=0.0 {if term==0.0 {return out}}}
+    let adjusted=term-correction
+    let next=sum+adjusted
+    correction=(next-sum)-adjusted
+    sum=next
+    k=k+1
+   }
+   let rhs=(if row==column {1.0}else{0.0})-sum
+   let diagonal=numeric_buffer_at(r,row*p+row)
+   if !is_finite(rhs) || !is_finite(diagonal) || diagonal==0.0 {return out}
+   let value=rhs/diagonal
+   if !is_finite(value) {return out}
+   if rhs!=0.0 {if value==0.0 {return out}}
+   numeric_buffer_set(solve,row,value)
+   let original=integer_buffer_at(permutation,row)
+   if original<0 || original>=p {return out}
+   let restored=least_squares_scaled_product(value,1.0,1.0,root_weight,
+    numeric_buffer_at(scales,original),numeric_buffer_at(outer_scales,original))
+   if restored.status!=0 {return out}
+   if value!=0.0 {if restored.value==0.0 {return out}}
+   numeric_buffer_set(influences,original*p+column,restored.value)
+   row=row-1
+  }
+  column=column+1
+ }
+ i=0
+ while i<p {
+  let se=cf_norm(influences,i*p,1,p)
+  if se.status!=0 {return out}
+  numeric_buffer_set(step,i,se.value)
+  j=0
+  while j<=i {
+   var covariance_value:f64=0.0
+   if i==j {
+    covariance_value=se.value*se.value
+    if !is_finite(covariance_value) || covariance_value<=0.0 {return out}
+   } else {
+    var correction:f64=0.0
+    var k:i64=0
+    while k<p {
+     let left=numeric_buffer_at(influences,i*p+k)
+     let right=numeric_buffer_at(influences,j*p+k)
+     let term=left*right
+     if !is_finite(term) {return out}
+     if left!=0.0 {if right!=0.0 {if term==0.0 {return out}}}
+     let adjusted=term-correction
+     let next=covariance_value+adjusted
+     correction=(next-covariance_value)-adjusted
+     covariance_value=next
+     k=k+1
+    }
+    if !is_finite(covariance_value) {return out}
+   }
+   numeric_buffer_set(covariance_stage,i*p+j,covariance_value)
+   numeric_buffer_set(covariance_stage,j*p+i,covariance_value)
+   j=j+1
+  }
+  i=i+1
+ }
+ i=0
+ while i<p*p {let value=numeric_buffer_at(covariance_stage,i);numeric_buffer_set(covariance,i,value);i=i+1}
+ i=0
+ while i<p {let value=numeric_buffer_at(step,i);numeric_buffer_set(standard_errors,i,value);i=i+1}
+ out.covariance_status=0
+ out.max_weight=max_weight
+ out
+}
+pub struct DynamicCountContrast {
+ pub status:i64,pub estimate:f64,pub standard_error:f64,pub variance:f64,
+ pub variance_status:i64,pub alpha_fixed:bool,pub alpha_plug_in:bool,
+ pub model_declared:bool,pub independence_declared:bool,
+ pub assumptions_assessed:bool,pub finite_sample_calibrated:bool,
+}
+fn cf_contrast_empty(status:i64,fisher:&DynamicCountFisher)->DynamicCountContrast {
+ DynamicCountContrast{status:status,estimate:0.0,standard_error:0.0,variance:0.0,
+ variance_status:2,alpha_fixed:fisher.alpha_fixed,alpha_plug_in:fisher.alpha_plug_in,
+ model_declared:fisher.model_declared,independence_declared:fisher.independence_declared,
+ assumptions_assessed:false,finite_sample_calibrated:false}
+}
+// Consume only the latest successful result with its unchanged corresponding
+// coefficient/factor/scale/permutation buffers; the result is not a capability.
+pub fn dynamic_count_fisher_contrast(fisher:&DynamicCountFisher,coefficients:&NumericBuffer,
+ contrast:&NumericBuffer,r:&NumericBuffer,scales:&NumericBuffer,
+ permutation:&IntegerBuffer,outer_scales:&NumericBuffer,solve:&!NumericBuffer
+ )->DynamicCountContrast with Mut,Div,Panic {
+ if fisher.fit.status!=0 || fisher.covariance_status!=0 {return cf_contrast_empty(1,fisher)}
+ let p=fisher.fit.columns
+ if p<1 {return cf_contrast_empty(2,fisher)}
+ if p>9223372036854775807/p {return cf_contrast_empty(2,fisher)}
+ if numeric_buffer_status(coefficients)!=0 || numeric_buffer_status(contrast)!=0 ||
+ numeric_buffer_status(r)!=0 || numeric_buffer_status(scales)!=0 ||
+ integer_buffer_status(permutation)!=0 || numeric_buffer_status(outer_scales)!=0 ||
+ numeric_buffer_status(solve)!=0 {return cf_contrast_empty(2,fisher)}
+ if numeric_buffer_len(coefficients)!=p || numeric_buffer_len(contrast)!=p ||
+ numeric_buffer_len(r)!=p*p || numeric_buffer_len(scales)!=p ||
+ integer_buffer_len(permutation)!=p || numeric_buffer_len(outer_scales)!=p ||
+ numeric_buffer_len(solve)!=p {return cf_contrast_empty(2,fisher)}
+ if !is_finite(fisher.max_weight) || fisher.max_weight<=0.0 {return cf_contrast_empty(4,fisher)}
+ let root_weight=sqrt(fisher.max_weight)
+ if !is_finite(root_weight) || root_weight<=0.0 {return cf_contrast_empty(4,fisher)}
+ var estimate:f64=0.0
+ var correction:f64=0.0
+ var i:i64=0
+ while i<p {
+  let c=numeric_buffer_at(contrast,i)
+  let beta=numeric_buffer_at(coefficients,i)
+  if !is_finite(c) || !is_finite(beta) {return cf_contrast_empty(3,fisher)}
+  let term=c*beta
+  if !is_finite(term) {return cf_contrast_empty(4,fisher)}
+  if c!=0.0 {if beta!=0.0 {if term==0.0 {return cf_contrast_empty(4,fisher)}}}
+  let adjusted=term-correction
+  let next=estimate+adjusted
+  correction=(next-estimate)-adjusted
+  estimate=next
+  i=i+1
+ }
+ if !is_finite(estimate) {return cf_contrast_empty(4,fisher)}
+ i=0
+ while i<p {
+  let original=integer_buffer_at(permutation,i)
+  if original<0 || original>=p {return cf_contrast_empty(3,fisher)}
+  var k:i64=0
+  while k<i {
+   if integer_buffer_at(permutation,k)==original {return cf_contrast_empty(3,fisher)}
+   k=k+1
+  }
+  let coordinate=least_squares_scaled_product(numeric_buffer_at(contrast,original),1.0,1.0,
+   root_weight,numeric_buffer_at(scales,original),numeric_buffer_at(outer_scales,original))
+  if coordinate.status!=0 {return cf_contrast_empty(4,fisher)}
+  if numeric_buffer_at(contrast,original)!=0.0 {if coordinate.value==0.0 {return cf_contrast_empty(4,fisher)}}
+  var sum:f64=0.0
+  correction=0.0
+  k=0
+  while k<i {
+   let left=numeric_buffer_at(r,k*p+i)
+   let right=numeric_buffer_at(solve,k)
+   let term=left*right
+   if !is_finite(term) {return cf_contrast_empty(4,fisher)}
+   if left!=0.0 {if right!=0.0 {if term==0.0 {return cf_contrast_empty(4,fisher)}}}
+   let adjusted=term-correction
+   let next=sum+adjusted
+   correction=(next-sum)-adjusted
+   sum=next
+   k=k+1
+  }
+  let rhs=coordinate.value-sum
+  let diagonal=numeric_buffer_at(r,i*p+i)
+  if !is_finite(rhs) || !is_finite(diagonal) || diagonal==0.0 {return cf_contrast_empty(4,fisher)}
+  let value=rhs/diagonal
+  if !is_finite(value) {return cf_contrast_empty(4,fisher)}
+  if rhs!=0.0 {if value==0.0 {return cf_contrast_empty(4,fisher)}}
+  numeric_buffer_set(solve,i,value)
+  i=i+1
+ }
+ let norm=cf_norm(solve,0,1,p)
+ if norm.status!=0 {return cf_contrast_empty(4,fisher)}
+ var variance=norm.value*norm.value
+ var variance_status:i64=0
+ if !is_finite(variance) || (norm.value!=0.0 && variance==0.0) {
+  variance=0.0;variance_status=1
+ }
+ DynamicCountContrast{status:0,estimate:estimate,standard_error:norm.value,variance:variance,
+ variance_status:variance_status,alpha_fixed:fisher.alpha_fixed,alpha_plug_in:fisher.alpha_plug_in,
+ model_declared:fisher.model_declared,independence_declared:fisher.independence_declared,
+ assumptions_assessed:false,finite_sample_calibrated:false}
+}

@@ -102,8 +102,9 @@ _reject_science_without_madaros() {
 # Resolve the Madaros raw ELF, mirroring bin/madaros's resolution order.
 _resolve_madaros() {
   local cand
+  source "$ROOT_DIR/scripts/lib/resolve_madaros.sh"
   for cand in "${MADAROS_RAW_BIN:-}" "${SOUNIO_MADAROS_BIN:-}" \
-              "$ROOT_DIR/artifacts/self-hosted/madaros" "$ROOT_DIR/bin/madaros-linux-x86_64"; do
+              "$(sounio_madaros_host_raw || true)" "$ROOT_DIR/artifacts/self-hosted/madaros" "$ROOT_DIR/bin/madaros-linux-x86_64"; do
     if _is_elf "$cand"; then echo "$cand"; return 0; fi
   done
   return 1
@@ -277,6 +278,174 @@ if [[ $# -ge 2 && "${1:-}" == *.sio ]]; then
   exit 127
 fi
 
+# lean_single uses raw `SRC OUT` CLI, not the verb-based `run|check|compile`
+# form (`build` is the compile alias). Translate verb invocations so callers
+# using `souc run|check|compile|build
+# <file>` work correctly. Shared by the forced-legacy branch below AND the
+# no-Madaros fallback at the end of this script: the fallback used to exec the
+# raw ELF with untranslated verb arguments, so `souc run file.sio` compiled a
+# source literally named `run` and wrote the output ELF over `file.sio` when
+# such a file existed in the working directory (measured 2026-11-01: exit 0,
+# the user's source replaced by a binary). Passing verbs through untranslated
+# is the silent-success class this wrapper exists to refuse; see
+# docs/audit/SOUC_WRAPPER_BARE_DASH_O_SWALLOW_DISPATCH_2026-08-18.md.
+_lean_single_verb_dispatch() {
+case "${1:-}" in
+  run)
+    _ls_src="${2:-}"
+    _ls_tmp="$(mktemp /tmp/souc-lean-run-XXXXXX)"
+    _ls_log="$(mktemp /tmp/souc-lean-run-log-XXXXXX)"
+    # The compile chatter (source:/tokens:/epistemic: lines) stays quiet on
+    # success, but a failed compile must say why: this used to discard both
+    # streams and exec whatever was left, so 123 of 359 swept programs
+    # exited 1 with zero bytes of output (P0.6, 2026-10-05).
+    # `|| _ls_rc=$?`, not a bare call: under `set -e` a failed compile
+    # would end this script before the diagnostics below are printed.
+    _ls_rc=0
+    "$LEAN_SINGLE" "$_ls_src" "$_ls_tmp" >"$_ls_log" 2>&1 || _ls_rc=$?
+    if [[ $_ls_rc -ne 0 || ! -s "$_ls_tmp" ]]; then
+      if grep -qE '^(error|warning)' "$_ls_log"; then
+        grep -E -A4 '^(error|warning)' "$_ls_log" >&2
+      else
+        tail -n 40 "$_ls_log" >&2
+      fi
+      echo "souc: lean_single failed to compile $_ls_src (rc=$_ls_rc); nothing was run" >&2
+      rm -f "$_ls_tmp" "$_ls_log"
+      exit $(( _ls_rc == 0 ? 1 : _ls_rc ))
+    fi
+    rm -f "$_ls_log"
+    chmod +x "$_ls_tmp"
+    exec "$_ls_tmp" "${@:3}"
+    ;;
+  check)
+    _ls_tmp2="$(mktemp /tmp/souc-lean-check-XXXXXX)"
+    "$LEAN_SINGLE" "${2:-}" "$_ls_tmp2" 2>&1
+    _ls_rc=$?
+    rm -f "$_ls_tmp2"
+    exit $_ls_rc
+    ;;
+  compile|build)
+    # souc compile|build <src> -o <out> → lean_single <src> <out>
+    #
+    # lean_single emits a native x86-64 ELF and nothing else, while the public
+    # `souc --help` contract advertises `souc build <file.sio> --backend gpu -o
+    # OUT` as a GPU (PTX) artifact — a Madaros capability. This branch used to
+    # parse only -o and silently drop every other option, so both lean
+    # configurations (forced legacy and the no-Madaros fallback) exited 0 with
+    # a native ELF written where the caller asked for PTX — the wrong artifact
+    # type reporting success (PR #3400 review, 2026-11-01). Refuse any backend
+    # lean_single cannot honestly emit, before anything is written; accept
+    # `--backend native` because native is exactly what lean_single emits.
+    # Target selectors get the same honesty (PR #3400 review, 2026-11-02): the
+    # loop's `*) shift` arm silently dropped `--target`/`--target=...`/`-t`, so
+    # `souc build --target wasm32 file.sio` (docs/FAQ.md) or the FPGA flow's
+    # `souc compile ... -t fpga-u250 -o OUT.cpp` exited 0 with a native x86-64
+    # ELF under the requested output. lean_single's own raw CLI
+    # is no oracle here — it accepts even a bogus target and still emits a
+    # native ELF — so the wrapper refuses every target it cannot honor rather
+    # than passing the selector through. Only the native `x86_64-linux` target
+    # is accepted, because that is exactly the artifact this path emits.
+    _ls_compile_src="${2:-}"
+    _ls_compile_out=""
+    _ls_backend_seen=""
+    _ls_backend=""
+    _ls_target_seen=""
+    _ls_target=""
+    shift 2
+    while [[ $# -gt 0 ]]; do
+      case "${1:-}" in
+        -o)
+          _ls_compile_out="${2:-}"
+          shift 2
+          ;;
+        --backend)
+          if [[ $# -lt 2 ]]; then
+            echo "error[E-SRB-BACKEND-001]: --backend requires a value" >&2
+            exit 2
+          fi
+          _ls_backend_seen=1
+          _ls_backend="$2"
+          shift 2
+          ;;
+        --backend=*)
+          _ls_backend_seen=1
+          _ls_backend="${1#--backend=}"
+          shift
+          ;;
+        --gpu-target|--gpu-target=*)
+          echo "error[E-SRB-BACKEND-001]: --gpu-target selects GPU codegen, which the legacy lean_single engine does not provide (it emits a native x86-64 ELF only)" >&2
+          echo "souc: refusing to continue — any output would be a native ELF, not a GPU artifact" >&2
+          echo "souc: run without the legacy engine override, or build Madaros ('make build-madaros'), for GPU backends" >&2
+          exit 1
+          ;;
+        --target)
+          if [[ $# -lt 2 ]]; then
+            echo "error[E-SRB-BACKEND-001]: --target requires a value" >&2
+            exit 2
+          fi
+          _ls_target_seen=1
+          _ls_target="$2"
+          shift 2
+          ;;
+        -t)
+          if [[ $# -lt 2 ]]; then
+            echo "error[E-SRB-BACKEND-001]: -t requires a value" >&2
+            exit 2
+          fi
+          _ls_target_seen=1
+          _ls_target="$2"
+          shift 2
+          ;;
+        --target=*)
+          _ls_target_seen=1
+          _ls_target="${1#--target=}"
+          shift
+          ;;
+        *)
+          shift
+          ;;
+      esac
+    done
+    if [[ -n "$_ls_backend_seen" ]]; then
+      case "$_ls_backend" in
+        native)
+          ;; # truthful: lean_single emits a native ELF
+        "")
+          echo "error[E-SRB-BACKEND-001]: --backend requires a non-empty value" >&2
+          exit 2
+          ;;
+        *)
+          echo "error[E-SRB-BACKEND-001]: --backend $_ls_backend is not supported by the legacy lean_single engine (it emits a native x86-64 ELF only)" >&2
+          echo "souc: refusing to write ${_ls_compile_out:-an output artifact} — it would be a native ELF, not the requested $_ls_backend artifact" >&2
+          echo "souc: run without the legacy engine override, or build Madaros ('make build-madaros'), for --backend $_ls_backend" >&2
+          exit 1
+          ;;
+      esac
+    fi
+    if [[ -n "$_ls_target_seen" ]]; then
+      case "$_ls_target" in
+        x86_64-linux)
+          ;; # truthful: this path emits exactly a native x86_64-linux ELF
+        "")
+          echo "error[E-SRB-BACKEND-001]: --target requires a non-empty value" >&2
+          exit 2
+          ;;
+        *)
+          echo "error[E-SRB-BACKEND-001]: --target $_ls_target is not supported by the legacy lean_single engine path (it emits a native x86_64-linux ELF only)" >&2
+          echo "souc: refusing to write ${_ls_compile_out:-an output artifact} — it would be a native x86-64 ELF, not the requested $_ls_target artifact" >&2
+          echo "souc: omit --target for a native build, or run without the legacy engine override (Madaros) for other targets" >&2
+          exit 1
+          ;;
+      esac
+    fi
+    exec "$LEAN_SINGLE" "$_ls_compile_src" "${_ls_compile_out:-/dev/null}"
+    ;;
+  *)
+    exec "$LEAN_SINGLE" "$@"
+    ;;
+esac
+}
+
 # 2) Forced legacy engine.
 case "${SOUNIO_SOUC_ENGINE:-madaros}" in
   lean_single|lean-single|leansingle)
@@ -287,56 +456,7 @@ case "${SOUNIO_SOUC_ENGINE:-madaros}" in
       echo "souc: SOUNIO_SOUC_ENGINE=lean_single but no lean_single ELF found at $LEAN_SINGLE" >&2
       exit 127
     fi
-    # lean_single uses raw `SRC OUT` CLI, not the verb-based `run|check|compile` form.
-    # Translate verb invocations so gate scripts using `souc run <file>` work correctly.
-    case "${1:-}" in
-      run)
-        _ls_src="${2:-}"
-        _ls_tmp="$(mktemp /tmp/souc-lean-run-XXXXXX)"
-        _ls_log="$(mktemp /tmp/souc-lean-run-log-XXXXXX)"
-        # The compile chatter (source:/tokens:/epistemic: lines) stays quiet on
-        # success, but a failed compile must say why: this used to discard both
-        # streams and exec whatever was left, so 123 of 359 swept programs
-        # exited 1 with zero bytes of output (P0.6, 2026-10-05).
-        # `|| _ls_rc=$?`, not a bare call: under `set -e` a failed compile
-        # would end this script before the diagnostics below are printed.
-        _ls_rc=0
-        "$LEAN_SINGLE" "$_ls_src" "$_ls_tmp" >"$_ls_log" 2>&1 || _ls_rc=$?
-        if [[ $_ls_rc -ne 0 || ! -s "$_ls_tmp" ]]; then
-          if grep -qE '^(error|warning)' "$_ls_log"; then
-            grep -E -A4 '^(error|warning)' "$_ls_log" >&2
-          else
-            tail -n 40 "$_ls_log" >&2
-          fi
-          echo "souc: lean_single failed to compile $_ls_src (rc=$_ls_rc); nothing was run" >&2
-          rm -f "$_ls_tmp" "$_ls_log"
-          exit $(( _ls_rc == 0 ? 1 : _ls_rc ))
-        fi
-        rm -f "$_ls_log"
-        chmod +x "$_ls_tmp"
-        exec "$_ls_tmp" "${@:3}"
-        ;;
-      check)
-        _ls_tmp2="$(mktemp /tmp/souc-lean-check-XXXXXX)"
-        "$LEAN_SINGLE" "${2:-}" "$_ls_tmp2" 2>&1
-        _ls_rc=$?
-        rm -f "$_ls_tmp2"
-        exit $_ls_rc
-        ;;
-      compile)
-        # souc compile <src> -o <out> → lean_single <src> <out>
-        _ls_compile_src="${2:-}"
-        _ls_compile_out=""
-        shift 2
-        while [[ $# -gt 0 ]]; do
-          if [[ "${1:-}" == "-o" ]]; then _ls_compile_out="${2:-}"; shift 2; else shift; fi
-        done
-        exec "$LEAN_SINGLE" "$_ls_compile_src" "${_ls_compile_out:-/dev/null}"
-        ;;
-      *)
-        exec "$LEAN_SINGLE" "$@"
-        ;;
-    esac
+    _lean_single_verb_dispatch "$@"
     ;;
 esac
 
@@ -354,15 +474,25 @@ esac
 # resolution just proceeds without a committed comparison file.
 _madaros_higher_priority_override_present() {
   local cand
-  for cand in "${MADAROS_RAW_BIN:-}" "${SOUNIO_MADAROS_BIN:-}" "$ROOT_DIR/artifacts/self-hosted/madaros"; do
+  source "$ROOT_DIR/scripts/lib/resolve_madaros.sh"
+  for cand in "${MADAROS_RAW_BIN:-}" "${SOUNIO_MADAROS_BIN:-}" "$(sounio_madaros_host_raw || true)" "$ROOT_DIR/artifacts/self-hosted/madaros"; do
     _is_elf "$cand" && return 0
   done
   return 1
 }
 if [[ -f "$ROOT_DIR/scripts/lib/materialize_madaros_prebuilt.sh" ]]; then
-  if ! bash "$ROOT_DIR/scripts/lib/materialize_madaros_prebuilt.sh"; then
-    _mat_rc=$?
-    _madaros_higher_priority_override_present || exit "$_mat_rc"
+  # `|| _mat_rc=$?`, never `if ! ...; then _mat_rc=$?`: inside the `!`-negated
+  # branch `$?` is the negation's own status (0 on failure), not the
+  # materializer's -- a corrupt/missing prebuilt used to `exit 0` here, a
+  # failed materialization reporting success. Same idiom as the lean_single
+  # run path above.
+  _mat_rc=0
+  bash "$ROOT_DIR/scripts/lib/materialize_madaros_prebuilt.sh" || _mat_rc=$?
+  if [[ $_mat_rc -ne 0 ]]; then
+    if ! _madaros_higher_priority_override_present; then
+      echo "souc: committed Madaros prebuilt failed to materialize (rc=$_mat_rc) and no higher-priority override resolves" >&2
+      exit "$_mat_rc"
+    fi
   fi
 fi
 
@@ -414,6 +544,20 @@ if MADAROS_ELF="$(_resolve_madaros)"; then
       printf 'provenance: set SOUNIO_REQUIRE_COMMITTED_MADAROS=1 to refuse local builds; a claim about the committed compiler must not be measured on this one.\n' >&2
     fi
     printf 'provenance: for a claim about compiler behaviour, build from source.\n' >&2
+    # ADR-018 section 1: the toolchain carries one SemVer number and
+    # `souc --version` reports it, with the engine build identifier after
+    # it -- `3.0.0-rc.1 (madaros 4f1c2e9a)` -- never the engine banner
+    # ("Madaros v0.80.0") in its place. The toolchain version of this tree
+    # is the newest CHANGELOG section; CITATION.cff remains the authority
+    # for the last stable release and the parity gate
+    # (scripts/ci/citation_version_gate.sh) fails a stable tag whose
+    # CITATION version differs from what --version reports.
+    _toolchain_version="$(sed -n 's/^## \[\(.*\)\].*/\1/p' "$ROOT_DIR/CHANGELOG.md" 2>/dev/null | head -n 1)"
+    if [[ -z "$_toolchain_version" ]]; then
+      _toolchain_version="$(sed -n 's/^version: //p' "$ROOT_DIR/CITATION.cff" 2>/dev/null | head -n 1)"
+    fi
+    printf '%s (madaros %s)\n' "${_toolchain_version:-unknown}" "$_prov_sum"
+    exit 0
   fi
   exec env MADAROS_RAW_BIN="$MADAROS_ELF" "$ROOT_DIR/bin/madaros" "$@"
 fi
@@ -425,7 +569,7 @@ if [[ -x "$LEAN_SINGLE" ]]; then
   fi
   echo "souc: Madaros raw ELF not found (run 'make build-madaros') — falling back to the" >&2
   echo "souc: legacy lean_single engine. Set SOUNIO_SOUC_ENGINE=lean_single to silence this." >&2
-  exec "$LEAN_SINGLE" "$@"
+  _lean_single_verb_dispatch "$@"
 fi
 
 echo "souc: no compiler engine available — build Madaros ('make build-madaros') or provide" >&2

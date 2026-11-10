@@ -2,14 +2,24 @@
 topic_id: repo.docs.audit.darwin-pbpk-blood-as-plasma-bbb-driver-2026-09-26
 authority: repo_only
 audience: users
-last_validated: 2026-09-26
+last_validated: 2026-10-12
 validated_by: claude
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.darwin-pbpk-blood-as-plasma-bbb-driver-2026-09-26
 -->
 
 # Dispatch: darwin_pbpk drives the BBB and reports "plasma" with whole-blood concentration (2026-09-26)
 
-**Status:** OPEN. Investigation only; no code changed. The fix changes
+**Status:** FIXED for #2816 (2026-10-12). The operator decided to convert.
+Every coupling now drives the BBB with, and reports as plasma,
+`C_plasma = C_blood / rb_ratio`; the unbound plasma AUC is
+`fu_plasma * AUC(blood) / rb_ratio`. The traces also keep the whole-blood
+series (`blood`, `c_blood`, `auc_blood`, and `c_max_blood_per_dose` /
+`auc_tau_blood_per_dose` in the steady-state report) for clinical
+whole-blood comparisons. Guard: `tests/run-pass/darwin_pbpk_plasma_is_blood_over_rb.sio`.
+Q1 below (were BBB/PD parameters fitted against a blood driver?) was not
+re-examined by that change. The original investigation follows.
+
+Original status: OPEN. Investigation only; no code changed. The fix changes
 absolute concentrations, brain exposures and PD endpoints, so it needs an
 operator decision and a math review (`CLAUDE.md` §10) first. Raised in a
 math review and a code review of PR #2698. The sign correction for

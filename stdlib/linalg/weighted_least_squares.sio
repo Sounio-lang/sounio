@@ -1,0 +1,207 @@
+// Positive-weight least squares with explicit normalized criterion.
+// See WEIGHTED_LEAST_SQUARES.md; no variance model is inferred.
+use linalg::least_squares::{qr_least_squares,qr_least_squares_factor}
+use linalg::least_squares_scale::{least_squares_restore}
+use math::pure::{is_finite, sqrt}
+pub struct WeightedLeastSquaresResult {
+    pub status: i64,
+    pub m: i64,
+    pub p: i64,
+    pub rank: i64,
+    pub df: i64,
+    pub coefficients: [f64;8],
+    pub fitted: [f64;256],
+    pub residuals: [f64;256],
+    pub residual_norm: f64,
+    pub normalized_weighted_residual_norm: f64,
+    pub weight_scale: f64,
+    pub rcond_used: f64,
+    pub r_diagonal_ratio: f64,
+    pub pivot: [i64;8],
+    pub variance_model_assessed: bool,
+}
+fn wls_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn wls_index(row: i64, column: i64) -> usize { (row * 8 + column) as usize }
+fn wls_empty(status: i64, m: i64, p: i64) -> WeightedLeastSquaresResult {
+    WeightedLeastSquaresResult {
+        status: status, m: m, p: p, rank: 0, df: 0,
+        coefficients: [0.0;8], fitted: [0.0;256], residuals: [0.0;256],
+        residual_norm: 0.0, normalized_weighted_residual_norm: 0.0,
+        weight_scale: 0.0, rcond_used: 0.0, r_diagonal_ratio: 0.0,
+        pivot: [0;8], variance_model_assessed: false,
+    }
+}
+fn wls_engine(a: &[f64;2048], b: &[f64;256],
+    weights: &[f64;256], m: i64, p: i64, rcond: f64, want_factor: bool,
+    r_out: &![f64;64], outer_scales_out: &![f64;8],
+    inner_scales_out: &![f64;8]) -> WeightedLeastSquaresResult with Mut, Div, Panic {
+    if m < 1 || m > 256 || p < 1 || p > 8 || m < p { return wls_empty(1,m,p) }
+    if !is_finite(rcond) || rcond < 0.0 || rcond >= 1.0 { return wls_empty(5,m,p) }
+    var row: i64 = 0
+    while row < m {
+        if !is_finite(b[row as usize]) { return wls_empty(2,m,p) }
+        var column: i64 = 0
+        while column < p {
+            if !is_finite(a[wls_index(row,column)]) { return wls_empty(2,m,p) }
+            column = column + 1
+        }
+        row = row + 1
+    }
+    var weight_scale: f64 = 0.0
+    row = 0
+    while row < m {
+        let weight: f64 = weights[row as usize]
+        if !is_finite(weight) || weight <= 0.0 { return wls_empty(6,m,p) }
+        if weight > weight_scale { weight_scale = weight }
+        row = row + 1
+    }
+    var column_scale: [f64;8] = [0.0;8]
+    var response_scale: f64 = 0.0
+    row = 0
+    while row < m {
+        let magnitude = wls_abs(b[row as usize])
+        if magnitude > response_scale { response_scale = magnitude }
+        var column: i64 = 0
+        while column < p {
+            let magnitude = wls_abs(a[wls_index(row,column)])
+            if magnitude > column_scale[column as usize] { column_scale[column as usize] = magnitude }
+            column = column + 1
+        }
+        row = row + 1
+    }
+    if response_scale == 0.0 { response_scale = 1.0 }
+    let root_weight_scale = sqrt(weight_scale)
+    if !is_finite(root_weight_scale) || root_weight_scale <= 0.0 { return wls_empty(4,m,p) }
+    var transformed: [f64;2048] = [0.0;2048]
+    var rhs: [f64;256] = [0.0;256]
+    row = 0
+    while row < m {
+        // Do not form weights[row]/weight_scale before taking its square root.
+        let factor = sqrt(weights[row as usize]) / root_weight_scale
+        if !is_finite(factor) || factor <= 0.0 || factor > 1.0 { return wls_empty(4,m,p) }
+        let coordinate = b[row as usize] / response_scale
+        if b[row as usize] != 0.0 && coordinate == 0.0 { return wls_empty(4,m,p) }
+        rhs[row as usize] = coordinate * factor
+        if coordinate != 0.0 && rhs[row as usize] == 0.0 { return wls_empty(4,m,p) }
+        var column: i64 = 0
+        while column < p {
+            let raw: f64 = a[wls_index(row,column)]
+            let scale: f64 = column_scale[column as usize]
+            if scale > 0.0 {
+                let coordinate = raw / scale
+                if raw != 0.0 && coordinate == 0.0 { return wls_empty(4,m,p) }
+                let value = coordinate * factor
+                if coordinate != 0.0 && value == 0.0 { return wls_empty(4,m,p) }
+                transformed[wls_index(row,column)] = value
+            }
+            column = column + 1
+        }
+        row = row + 1
+    }
+    let solved = if want_factor {
+        qr_least_squares_factor(&transformed,&rhs,m,p,rcond,r_out,inner_scales_out)
+    } else {
+        qr_least_squares(&transformed,&rhs,m,p,rcond)
+    }
+    if solved.status != 0 && solved.status != 3 { return wls_empty(4,m,p) }
+    var result = wls_empty(solved.status,m,p)
+    result.rank = solved.rank
+    result.weight_scale = weight_scale
+    result.rcond_used = solved.rcond_used
+    result.r_diagonal_ratio = solved.r_diagonal_ratio
+    var column: i64 = 0
+    while column < p {
+        result.pivot[column as usize] = solved.pivot[column as usize]
+        column = column + 1
+    }
+    if solved.status == 3 { return result }
+    column = 0
+    while column < p {
+        let scale: f64 = column_scale[column as usize]
+        if scale <= 0.0 { return wls_empty(4,m,p) }
+        let coefficient = least_squares_restore(solved.coefficients[column as usize],response_scale,scale)
+        if coefficient.status != 0 { return wls_empty(4,m,p) }
+        result.coefficients[column as usize] = coefficient.value
+        column = column + 1
+    }
+    var residual_scale: f64 = 0.0
+    var residual_ssq: f64 = 1.0
+    var weighted_scale: f64 = 0.0
+    var weighted_ssq: f64 = 1.0
+    row = 0
+    while row < m {
+        var fitted: f64 = 0.0
+        var correction: f64 = 0.0
+        column = 0
+        while column < p {
+            let coordinate = a[wls_index(row,column)] / column_scale[column as usize]
+            let term = coordinate * solved.coefficients[column as usize] - correction
+            let next = fitted + term
+            correction = (next - fitted) - term
+            fitted = next
+            column = column + 1
+        }
+        if !is_finite(fitted) { return wls_empty(4,m,p) }
+        let raw_fitted = fitted * response_scale
+        if !is_finite(raw_fitted) { return wls_empty(4,m,p) }
+        let residual = b[row as usize] - raw_fitted
+        if !is_finite(residual) { return wls_empty(4,m,p) }
+        result.fitted[row as usize] = raw_fitted
+        result.residuals[row as usize] = residual
+        let magnitude = wls_abs(residual)
+        if magnitude > 0.0 {
+            if magnitude > residual_scale {
+                let ratio = residual_scale / magnitude
+                residual_ssq = 1.0 + residual_ssq * ratio * ratio
+                residual_scale = magnitude
+            } else {
+                let ratio = magnitude / residual_scale
+                residual_ssq = residual_ssq + ratio * ratio
+            }
+            let factor = sqrt(weights[row as usize]) / root_weight_scale
+            let weighted = magnitude * factor
+            if !is_finite(weighted) || weighted == 0.0 { return wls_empty(4,m,p) }
+            if weighted > weighted_scale {
+                let ratio = weighted_scale / weighted
+                weighted_ssq = 1.0 + weighted_ssq * ratio * ratio
+                weighted_scale = weighted
+            } else {
+                let ratio = weighted / weighted_scale
+                weighted_ssq = weighted_ssq + ratio * ratio
+            }
+        }
+        row = row + 1
+    }
+    let raw_norm = least_squares_restore(residual_scale,1.0,1.0 / sqrt(residual_ssq))
+    if raw_norm.status != 0 { return wls_empty(4,m,p) }
+    result.residual_norm = raw_norm.value
+    let weighted_norm = least_squares_restore(weighted_scale,1.0,1.0 / sqrt(weighted_ssq))
+    if weighted_norm.status != 0 { return wls_empty(4,m,p) }
+    result.normalized_weighted_residual_norm = weighted_norm.value
+    result.df = m - p
+    if want_factor {
+        var clear: i64 = 0
+        while clear < 8 { outer_scales_out[clear as usize] = 0.0; clear = clear + 1 }
+        var factor_column: i64 = 0
+        while factor_column < p {
+            outer_scales_out[factor_column as usize] = column_scale[factor_column as usize]
+            factor_column = factor_column + 1
+        }
+    }
+    result
+}
+
+pub fn weighted_qr_least_squares(a: &[f64;2048], b: &[f64;256],
+    weights: &[f64;256], m: i64, p: i64, rcond: f64) -> WeightedLeastSquaresResult with Mut, Div, Panic {
+    var r_unused: [f64;64] = [0.0;64]
+    var outer_unused: [f64;8] = [0.0;8]
+    var inner_unused: [f64;8] = [0.0;8]
+    wls_engine(a,b,weights,m,p,rcond,false,&!r_unused,&!outer_unused,&!inner_unused)
+}
+// All factor/scaling buffers are available only on a successful final WLS fit.
+pub fn weighted_qr_least_squares_factor(a: &[f64;2048], b: &[f64;256],
+    weights: &[f64;256], m: i64, p: i64, rcond: f64,
+    r_out: &![f64;64], outer_scales_out: &![f64;8],
+    inner_scales_out: &![f64;8]) -> WeightedLeastSquaresResult with Mut, Div, Panic {
+    wls_engine(a,b,weights,m,p,rcond,true,r_out,outer_scales_out,inner_scales_out)
+}

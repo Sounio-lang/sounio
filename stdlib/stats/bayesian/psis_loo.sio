@@ -1,0 +1,329 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/bayesian/psis_loo.sio — Pareto-smoothed importance-sampling leave-one-out cross-validation
+//
+//   psis_loo_i(ll, s, out)  -> pointwise PSIS-LOO for one observation
+//   psis_gpdfit(x, n, out)  -> generalised Pareto fit (Zhang & Stephens 2009)
+//   psis_lse / psis_log1p / psis_expm1 / psis_sort  -> numerical helpers
+//
+// Given the S pointwise log-likelihood draws ll[0..S) of one observation y_i,
+// the importance ratios for leaving y_i out are r_s = 1 / p(y_i | theta_s).
+// With the log ratios shifted so that max = 0, the M = min(ceil(0.2 S), ceil(3 sqrt S))
+// largest are replaced by the expected order statistics of a generalised Pareto
+// distribution fitted to their exceedances over the next-largest value (Zhang &
+// Stephens 2009 empirical-Bayes estimate with the weakly informative adjustment
+// k <- (n k + 10 * 0.5) / (n + 10)); smoothed log weights are truncated at the
+// largest raw one; then
+//   elpd_loo_i = log sum_s w_s p(y_i | theta_s) / sum_s w_s.
+// Diagnostic: the Pareto shape k_i; the estimate is reliable for
+// k_i < min(1 - 1/log10 S, 0.7).
+//
+// Follows the reference implementation of the R package loo (psis, gpdfit,
+// n_pareto_tail, ps_khat_threshold). Capacity: S <= 16384 draws per observation
+// (one observation at a time; the caller loops over observations and sums elpd).
+//
+// Output layout of psis_loo_i: out[0] = elpd_loo_i, out[1] = lpd_i (log mean
+// likelihood), out[2] = Pareto k_i (1.0e300 when not estimable: fewer than 5
+// tail draws or a degenerate tail), out[3] = reliability threshold.
+//
+// Compiler notes (Madaros): a value taken straight from sqrt/exp/log keeps a
+// raw-bits type, so `x as i64` reinterprets the bits instead of converting; the
+// module writes `sqrt(..) * 1.0` before casting. A call nested in a compound
+// argument of exp/log/sqrt is evaluated twice, so calls are kept out of those
+// arguments.
+//
+// References:
+//   Vehtari, Gelman & Gabry (2017), "Practical Bayesian model evaluation using
+//     leave-one-out cross-validation and WAIC", Stat Comput 27:1413.
+//   Vehtari, Simpson, Gelman, Yao & Gabry (2024), "Pareto smoothed importance
+//     sampling", JMLR 25(72):1-58.
+//   Zhang & Stephens (2009), "A new and efficient estimation method for the
+//     generalized Pareto distribution", Technometrics 51:316.
+
+module stats::bayesian::psis_loo
+
+fn psis_abs(x: f64) -> f64 { if x < 0.0 { return 0.0 - x }; x }
+
+// log(1 + x) and exp(x) - 1 without cancellation near 0 (Goldberg 1991 / Higham 2002, sec. 1.14.1)
+pub fn psis_log1p(x: f64) -> f64 with Mut, Div {
+    let u = 1.0 + x
+    if u == 1.0 { return x }
+    log(u) * x / (u - 1.0)
+}
+pub fn psis_expm1(x: f64) -> f64 with Mut, Div {
+    if psis_abs(x) < 1.0e-5 { return x + 0.5 * x * x + x * x * x / 6.0 }
+    let u = exp(x)
+    if u == 1.0 { return x }
+    let um = u - 1.0
+    if um == -1.0 { return -1.0 }
+    um * x / log(u)
+}
+
+// ascending heap sort of v[0..n), carrying the index array ix along
+fn psis_sift(v: &![f64; 16384], ix: &![i64; 16384], start: i64, end: i64) with Mut, Panic {
+    var root = start
+    var go = true
+    while go {
+        let child = 2 * root + 1
+        if child > end { go = false } else {
+            var sw = root
+            if v[sw] < v[child] { sw = child }
+            if child + 1 <= end && v[sw] < v[child + 1] { sw = child + 1 }
+            if sw == root { go = false } else {
+                let tv = v[root]; v[root] = v[sw]; v[sw] = tv
+                let ti = ix[root]; ix[root] = ix[sw]; ix[sw] = ti
+                root = sw
+            }
+        }
+    }
+}
+pub fn psis_sort(v: &![f64; 16384], ix: &![i64; 16384], n: i64) with Mut, Div, Panic {
+    var start = (n - 2) / 2
+    while start >= 0 { psis_sift(v, ix, start, n - 1); start = start - 1 }
+    var end = n - 1
+    while end > 0 {
+        let tv = v[end]; v[end] = v[0]; v[0] = tv
+        let ti = ix[end]; ix[end] = ix[0]; ix[0] = ti
+        end = end - 1
+        psis_sift(v, ix, 0, end)
+    }
+}
+pub fn psis_lse(v: &[f64; 16384], n: i64) -> f64 with Mut, Div, Panic {
+    var mx = v[0]
+    var i: i64 = 1
+    while i < n { if v[i] > mx { mx = v[i] }; i = i + 1 }
+    var s = 0.0
+    i = 0
+    while i < n { s = s + exp(v[i] - mx); i = i + 1 }
+    mx + log(s)
+}
+
+// generalised Pareto fit to exceedances x[0..n) (sorted ascending, all >= 0): out[0] = k (adjusted), out[1] = sigma,
+// out[2] = 1 when k is finite
+pub fn psis_gpdfit(x: &[f64; 16384], n: i64, out: &![f64; 4]) with Mut, Div, Panic {
+    let prior = 3.0
+    // (Madaros: a value taken straight from sqrt/exp/log keeps a raw-bits type, so `as i64` reinterprets the bits instead of
+    // converting; multiplying by 1.0 first makes it an ordinary f64)
+    let sqn = sqrt(n as f64) * 1.0
+    let mg = 30 + (sqn as i64)
+    let qi = ((n as f64) / 4.0 + 0.5) as i64
+    let xstar = x[qi - 1]
+    var th: [f64; 256] = [0.0; 256]
+    var lt: [f64; 256] = [0.0; 256]
+    var j: i64 = 0
+    while j < mg {
+        th[j] = 1.0 / x[n - 1] + (1.0 - sqrt((mg as f64) / ((j + 1) as f64 - 0.5))) / prior / xstar
+        // profile log-likelihood: n (log(a / kk) - kk - 1), a = -theta, kk = mean log1p(a x)
+        let a = 0.0 - th[j]
+        var kk = 0.0
+        var i: i64 = 0
+        while i < n { kk = kk + psis_log1p(a * x[i]); i = i + 1 }
+        kk = kk / (n as f64)
+        lt[j] = (n as f64) * (log(a / kk) - kk - 1.0)
+        j = j + 1
+    }
+    var mx = lt[0]
+    j = 1
+    while j < mg { if lt[j] > mx { mx = lt[j] }; j = j + 1 }
+    var sw = 0.0
+    j = 0
+    while j < mg { sw = sw + exp(lt[j] - mx); j = j + 1 }
+    var thh = 0.0
+    j = 0
+    while j < mg { thh = thh + th[j] * exp(lt[j] - mx) / sw; j = j + 1 }
+    var k = 0.0
+    var i: i64 = 0
+    while i < n { k = k + psis_log1p((0.0 - thh) * x[i]); i = i + 1 }
+    k = k / (n as f64)
+    let sigma = (0.0 - k) / thh
+    let nn = n as f64
+    k = k * nn / (nn + 10.0) + 10.0 * 0.5 / (nn + 10.0)
+    out[0] = k
+    out[1] = sigma
+    out[2] = 1.0
+    if !(k == k) { out[2] = 0.0 }
+}
+
+// PSIS-LOO for one observation from its S pointwise log-likelihood draws ll[0..S):
+// out[0] = elpd_loo_i, out[1] = lpd_i (log mean likelihood), out[2] = Pareto k_i (1.0e300 when not estimable),
+// out[3] = the reliability threshold min(1 - 1/log10 S, 0.7)
+pub fn psis_loo_i(ll: &[f64; 16384], s: i64, out: &![f64; 4]) with Mut, Div, Panic {
+    var lw: [f64; 16384] = [0.0; 16384]
+    var srt: [f64; 16384] = [0.0; 16384]
+    var ix: [i64; 16384] = [0; 16384]
+    var tl: [f64; 16384] = [0.0; 16384]
+    var g: [f64; 4] = [0.0; 4]
+    var mx = 0.0 - ll[0]
+    var i: i64 = 0
+    while i < s { lw[i] = 0.0 - ll[i]; if lw[i] > mx { mx = lw[i] }; i = i + 1 }
+    i = 0
+    while i < s { lw[i] = lw[i] - mx; srt[i] = lw[i]; ix[i] = i; i = i + 1 }
+    let sf = s as f64
+    var m1 = (0.2 * sf) as i64
+    if (m1 as f64) < 0.2 * sf { m1 = m1 + 1 }
+    let r3 = 3.0 * sqrt(sf)
+    var m2 = r3 as i64
+    if (m2 as f64) < r3 { m2 = m2 + 1 }
+    var m = m1
+    if m2 < m { m = m2 }
+    var khat = 1.0e300
+    if m >= 5 {
+        psis_sort(&!srt, &!ix, s)
+        let t0 = s - m
+        if psis_abs(srt[s - 1] - srt[t0]) >= 2.220446049250313e-16 / 100.0 {
+            let cutoff = srt[t0 - 1]
+            let ec = exp(cutoff)
+            var j: i64 = 0
+            while j < m { tl[j] = exp(srt[t0 + j]) - ec; j = j + 1 }
+            psis_gpdfit(&tl, m, &!g)
+            if g[2] == 1.0 {
+                let k = g[0]
+                let sg = g[1]
+                j = 0
+                while j < m {
+                    let p = ((j + 1) as f64 - 0.5) / (m as f64)
+                    let qq = sg * psis_expm1((0.0 - k) * psis_log1p(0.0 - p)) / k + ec
+                    lw[ix[t0 + j]] = log(qq)
+                    j = j + 1
+                }
+            }
+            khat = g[0]
+            if g[2] == 0.0 { khat = 1.0e300 }
+        }
+    }
+    // truncation at the largest raw weight (0 after the shift); the shift back cancels in the normalisation
+    i = 0
+    while i < s { if lw[i] > 0.0 { lw[i] = 0.0 }; i = i + 1 }
+    let lz = psis_lse(&lw, s)
+    i = 0
+    while i < s { tl[i] = ll[i] + lw[i] - lz; i = i + 1 }
+    out[0] = psis_lse(&tl, s)
+    out[1] = psis_lse(ll, s) - log(sf)
+    out[2] = khat
+    var thr = 1.0 - 1.0 / (log(sf) / log(10.0))
+    if thr > 0.7 { thr = 0.7 }
+    out[3] = thr
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+// Known answers come from an independent C++23 transcription of the R package
+// loo (psis / gpdfit / n_pareto_tail). Test inputs are Pareto importance ratios,
+// ll_s = k log u_s, with u_s from the LCG state <- (1103515245 state + 12345) mod 2^31,
+// u = (state + 1) / (2^31 + 1); the ratios 1 / p are exactly Pareto(k).
+
+fn rel_close(a: f64, b: f64, tol: f64) -> bool {
+    let d = psis_abs(a - b)
+    let m = psis_abs(b)
+    if m < 1.0 { return d <= tol }
+    return d <= tol * m
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+fn fill_pareto(ll: &![f64; 16384], s: i64, k: f64, seed: i64) with Mut, Div, Panic {
+    var st = seed
+    var i: i64 = 0
+    while i < s {
+        st = (st * 1103515245 + 12345) % 2147483648
+        let u = ((st as f64) + 1.0) / 2147483649.0
+        let lu = log(u)
+        ll[i] = k * lu
+        i = i + 1
+    }
+}
+
+// log1p / expm1 / log-sum-exp sanity values
+fn test_helpers() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = check(1, rel_close(psis_log1p(1.0e-10), 9.999999999500001e-11, 1.0e-12)) && ok
+    ok = check(2, rel_close(psis_expm1(1.0e-10), 1.000000000050000e-10, 1.0e-12)) && ok
+    ok = check(3, rel_close(psis_log1p(0.5), 4.054651081081644e-01, 1.0e-12)) && ok
+    ok = check(4, rel_close(psis_expm1(2.0), 6.389056098930650e+00, 1.0e-12)) && ok
+    ok = check(5, rel_close(psis_expm1(0.0 - 3.0e-6), 0.0 - 2.999995500004500e-06, 1.0e-12)) && ok
+    var v: [f64; 16384] = [0.0; 16384]
+    v[0] = 0.0 - 1000.0; v[1] = 0.0 - 1001.0; v[2] = 0.0 - 1002.0
+    ok = check(6, rel_close(psis_lse(&v, 3), 0.0 - 9.995923940355556e+02, 1.0e-12)) && ok
+    return ok
+}
+
+// heap sort ascending with the index array carried along
+fn test_sort() -> bool with IO, Mut, Div, Panic {
+    var v: [f64; 16384] = [0.0; 16384]
+    var ix: [i64; 16384] = [0; 16384]
+    v[0] = 3.0; v[1] = 0.0 - 1.0; v[2] = 2.0; v[3] = 0.5; v[4] = 0.0 - 7.0
+    var i: i64 = 0
+    while i < 5 { ix[i] = i; i = i + 1 }
+    psis_sort(&!v, &!ix, 5)
+    var ok = true
+    ok = check(10, v[0] == 0.0 - 7.0 && v[1] == 0.0 - 1.0 && v[2] == 0.5 && v[3] == 2.0 && v[4] == 3.0) && ok
+    ok = check(11, ix[0] == 4 && ix[1] == 1 && ix[2] == 3 && ix[3] == 2 && ix[4] == 0) && ok
+    return ok
+}
+
+// Pareto(0.5), S = 200 (M = 40 tail draws)
+fn test_pareto_05() -> bool with IO, Mut, Div, Panic {
+    var ll: [f64; 16384] = [0.0; 16384]
+    var out: [f64; 4] = [0.0; 4]
+    fill_pareto(&!ll, 200, 0.5, 12345)
+    psis_loo_i(&ll, 200, &!out)
+    var ok = true
+    ok = check(20, rel_close(out[0], 0.0 - 6.842888120261739e-01, 1.0e-8)) && ok
+    ok = check(21, rel_close(out[1], 0.0 - 4.067631054713043e-01, 1.0e-8)) && ok
+    ok = check(22, rel_close(out[2], 4.229431166990898e-01, 1.0e-8)) && ok
+    ok = check(23, out[2] < out[3]) && ok
+    ok = check(24, rel_close(out[3], 5.654120103239064e-01, 1.0e-12)) && ok
+    return ok
+}
+
+// Pareto(1.2), S = 400 (M = 60): heavy tail, k above the reliability threshold
+fn test_pareto_12() -> bool with IO, Mut, Div, Panic {
+    var ll: [f64; 16384] = [0.0; 16384]
+    var out: [f64; 4] = [0.0; 4]
+    fill_pareto(&!ll, 400, 1.2, 777)
+    psis_loo_i(&ll, 400, &!out)
+    var ok = true
+    ok = check(30, rel_close(out[0], 0.0 - 2.011580990715172e+00, 1.0e-8)) && ok
+    ok = check(31, rel_close(out[1], 0.0 - 8.026662917544973e-01, 1.0e-8)) && ok
+    ok = check(32, rel_close(out[2], 7.108871881525658e-01, 1.0e-8)) && ok
+    ok = check(33, out[2] > out[3]) && ok
+    ok = check(34, rel_close(out[3], 6.156891065798796e-01, 1.0e-12)) && ok
+    return ok
+}
+
+// S = 16 (M = 4 < 5): no smoothing, k not estimable, plain self-normalised IS
+fn test_no_smoothing() -> bool with IO, Mut, Div, Panic {
+    var ll: [f64; 16384] = [0.0; 16384]
+    var out: [f64; 4] = [0.0; 4]
+    fill_pareto(&!ll, 16, 0.5, 99)
+    psis_loo_i(&ll, 16, &!out)
+    var ok = true
+    ok = check(40, rel_close(out[0], 0.0 - 4.227668683437882e-01, 1.0e-8)) && ok
+    ok = check(41, rel_close(out[1], 0.0 - 3.665033202296368e-01, 1.0e-8)) && ok
+    ok = check(42, out[2] > 1.0e299) && ok
+    return ok
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_helpers() && ok
+    ok = test_sort() && ok
+    ok = test_pareto_05() && ok
+    ok = test_pareto_12() && ok
+    ok = test_no_smoothing() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

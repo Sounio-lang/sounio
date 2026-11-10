@@ -1,0 +1,93 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: GUM_FO_IF_LET_ABS_2966_OK
+// #2966: inline FO variance of a helper whose else-arm binds
+// `let abs_dist = if dist < 0.0 { 0.0 - dist } else { dist }` and then uses
+// that name. The walk treated the if as a call, skipped the binding, and the
+// tail died at site 15349 (orbit_boundary_epsilon, inlined from
+// orbit_is_contested). A call inside the same shape must still run once.
+//
+// radius = 2.0, lower = 0.5 * radius = 1.0, upper = 2.0, mid = 1.5,
+// half_width = 0.5. result = 1 - |x - mid| / half_width inside the band,
+// so |d(result)/dx| = 2. uncertainty 0.25 is exact, var(x) = 0.0625,
+// var(result) = 0.25 on either side of the midpoint. Outside the band the
+// result is the constant 0.
+
+var CNT: i64 = 0
+
+fn tick(x: f64) -> f64 with Mut {
+    CNT = CNT + 1
+    x
+}
+
+fn band_eps(x: f64, radius: f64) -> f64 {
+    let lower = 0.5 * radius
+    let upper = radius
+    if x < lower {
+        0.0
+    } else if x > upper {
+        0.0
+    } else {
+        let mid = 0.5 * (lower + upper)
+        let half_width = 0.5 * (upper - lower)
+        if half_width < 1e-30 { return 1.0 }
+        let dist_from_mid = x - mid
+        let abs_dist = if dist_from_mid < 0.0 { 0.0 - dist_from_mid } else { dist_from_mid }
+        1.0 - abs_dist / half_width
+    }
+}
+
+fn called_band(x: f64, radius: f64) -> f64 {
+    let e = band_eps(x, radius)
+    e
+}
+
+fn impure_band(x: f64) -> f64 with Mut {
+    let lower = 0.5 * x
+    let upper = x
+    if x < lower {
+        0.0
+    } else {
+        let abs_dist = if x < 0.0 { 0.0 - x } else { tick(x) }
+        abs_dist
+    }
+}
+
+fn close(got: f64, want: f64) -> bool {
+    let d = got - want
+    d <= 1.0e-9 && d >= 0.0 - 1.0e-9
+}
+
+fn main() -> i64 with IO, Mut, Div, Epistemic {
+    let kx: Knowledge<f64> = measure(1.25, uncertainty: 0.25)
+    let ky: Knowledge<f64> = measure(1.75, uncertainty: 0.25)
+    let kz: Knowledge<f64> = measure(0.0, uncertainty: 0.25)
+    let x_lo = kx.value
+    let x_hi = ky.value
+    let x_out = kz.value
+
+    let v_lo = variance_of(band_eps(x_lo, 2.0))
+    let v_hi = variance_of(band_eps(x_hi, 2.0))
+    let v_out = variance_of(band_eps(x_out, 2.0))
+    let v_call = variance_of(called_band(x_lo, 2.0))
+
+    CNT = 0
+    let impure = impure_band(1.0)
+    let v_impure = variance_of(impure)
+    let once = CNT == 1 && impure == 1.0 && v_impure >= 0.0
+
+    print("v_lo="); print_f64(v_lo); print(" analytic=0.250000\n")
+    print("v_hi="); print_f64(v_hi); print(" analytic=0.250000\n")
+    print("v_out="); print_f64(v_out); print(" analytic=0.000000\n")
+    print("v_call="); print_f64(v_call); print(" analytic=0.250000\n")
+    print("cnt="); print_int(CNT); print("\n")
+
+    let ok = close(v_lo, 0.25) && close(v_hi, 0.25) && close(v_out, 0.0)
+        && close(v_call, 0.25) && once
+    if ok {
+        print("GUM_FO_IF_LET_ABS_2966_OK\n")
+        return 0
+    }
+    print("GUM_FO_IF_LET_ABS_2966_FAIL\n")
+    1
+}

@@ -1,0 +1,1 @@
+Removed uncalled scripts and tools: two one-shot website rewriters, a stdlib doc extractor whose path does not exist, a third bash API extractor, two LoRA pair generators, and the loopback QPU stand-in with its client. `make docs-gen` still runs `scripts/build/gen_stdlib_api_md.sh`. `tools/souniodoc/docgen.sio` stays.

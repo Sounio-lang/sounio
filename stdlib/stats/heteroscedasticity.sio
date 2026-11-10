@@ -1,0 +1,105 @@
+// Checked studentized Koenker/Breusch-Pagan, one variance predictor + intercept.
+// LM=n*R^2; asymptotic chi-square(1), not the Gaussian original BP score.
+// O(n) scalar passes, no squared-residual or auxiliary-fit arrays.
+use math::pure::{is_finite,sqrt}
+use special::igamma::{igamma_upper}
+pub struct KoenkerResult {
+ pub status:i64, pub n:i64, pub df:i64,
+ pub lm:f64, pub p:f64, pub r_squared:f64,
+ pub residual_scale:f64, pub asymptotic:bool,
+}
+fn kb_abs(x:f64)->f64 {if x<0.0{return -x} return x}
+fn kb_empty(s:i64,n:i64)->KoenkerResult {
+ return KoenkerResult{status:s,n:n,df:1,lm:0.0,p:0.0,r_squared:0.0,
+ residual_scale:0.0,asymptotic:true}
+}
+// Status:0 available,1 invalid n,2 nonfinite,3 constant predictor,
+// 4 constant squared residuals,5 arithmetic failure.
+pub fn koenker_bp_simple(e:&[f64;100],x:&[f64;100],n:i64)->KoenkerResult with Mut,Div,Panic {
+ if n<3 || n>100 {return kb_empty(1,n)}
+ let xa=x[0]
+ let ea=kb_abs(e[0])
+ var es=0.0
+ var xs=0.0
+ var ds=0.0
+ var direct=true
+ var i:i64=0
+ while i<n {
+  let xi=x[i as usize]
+  let ei=e[i as usize]
+  if !is_finite(xi) || !is_finite(ei) {return kb_empty(2,n)}
+  if kb_abs(xi)>xs {xs=kb_abs(xi)}
+  if kb_abs(ei)>es {es=kb_abs(ei)}
+  let dx=xi-xa
+  if !is_finite(dx) {direct=false}
+  if kb_abs(dx)>ds {ds=kb_abs(dx)}
+  i=i+1
+ }
+ if xs==0.0 || (direct && ds==0.0) {return kb_empty(3,n)}
+ if es==0.0 {return kb_empty(4,n)}
+ var sx=0.0
+ var sy=0.0
+ var cx=0.0
+ var cy=0.0
+ i=0
+ while i<n {
+  var u=0.0
+  if direct {u=(x[i as usize]-xa)/ds}
+  else {u=x[i as usize]/xs-xa/xs}
+  let a=kb_abs(e[i as usize])
+  // Factored difference of squares preserves adjacent magnitudes near ea.
+  let v=((a-ea)/es)*(a/es+ea/es)
+  let vx=u-cx
+  let vy=v-cy
+  let tx=sx+vx
+  let ty=sy+vy
+  cx=(tx-sx)-vx
+  cy=(ty-sy)-vy
+  sx=tx
+  sy=ty
+  i=i+1
+ }
+ let mx=sx/(n as f64)
+ let my=sy/(n as f64)
+ var xx=0.0
+ var xy=0.0
+ var yy=0.0
+ var cxx=0.0
+ var cxy=0.0
+ var cyy=0.0
+ i=0
+ while i<n {
+  var u=0.0
+  if direct {u=(x[i as usize]-xa)/ds}
+  else {u=x[i as usize]/xs-xa/xs}
+  let a=kb_abs(e[i as usize])
+  let dx=u-mx
+  let dy=((a-ea)/es)*(a/es+ea/es)-my
+  let vx=dx*dx-cxx
+  let vy=dx*dy-cxy
+  let vz=dy*dy-cyy
+  let tx=xx+vx
+  let ty=xy+vy
+  let tz=yy+vz
+  cxx=(tx-xx)-vx
+  cxy=(ty-xy)-vy
+  cyy=(tz-yy)-vz
+  xx=tx
+  xy=ty
+  yy=tz
+  i=i+1
+ }
+ if xx<=0.0 {return kb_empty(3,n)}
+ if yy==0.0 {return kb_empty(4,n)}
+ if yy<0.0 {return kb_empty(5,n)}
+ let correlation=(xy/sqrt(xx))/sqrt(yy)
+ var r2=correlation*correlation
+ if r2>1.0 && r2<=1.0+1.4210854715202004e-14 {r2=1.0}
+ if !is_finite(r2) || r2<0.0 || r2>1.0 {return kb_empty(5,n)}
+ let lm=(n as f64)*r2
+ // Upper incomplete gamma directly retains small upper tails.
+ let p=igamma_upper(0.5,lm*0.5)
+ if !is_finite(p) || p<0.0 || p>1.0 {return kb_empty(5,n)}
+ return KoenkerResult{status:0,n:n,df:1,lm:lm,p:p,r_squared:r2,
+ residual_scale:es,asymptotic:true}
+}

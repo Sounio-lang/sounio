@@ -1,0 +1,155 @@
+// Two-sided labelled correlation permutations. See CORRELATION_PERMUTATION.md.
+use stats::correlation_core::{correlation_prepare_indexed}
+use math::pure::{is_finite, sqrt}
+pub struct CorrelationPermutationResult {
+    pub status: i64,
+    pub statistic: i64,
+    pub method: i64,
+    pub n: i64,
+    pub coefficient: f64,
+    pub p_value: f64,
+    pub hits: i64,
+    pub draws: i64,
+    pub seed_used: i64,
+    pub mc_available: bool,
+    pub mc_se: f64,
+    pub mc_lo: f64,
+    pub mc_hi: f64,
+    pub exchangeability_assessed: bool,
+}
+fn correlation_permutation_empty(status: i64, n: i64, statistic: i64) -> CorrelationPermutationResult {
+    CorrelationPermutationResult {
+        status: status, statistic: statistic, method: 0, n: n,
+        coefficient: 0.0, p_value: 0.0, hits: 0, draws: 0, seed_used: 0,
+        mc_available: false, mc_se: 0.0, mc_lo: 0.0, mc_hi: 0.0,
+        exchangeability_assessed: false,
+    }
+}
+fn correlation_permutation_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn correlation_permutation_dot(a: &[f64;256], b: &[f64;256], indices: &[i64;256], n: i64) -> f64 with Mut, Div, Panic {
+    var sum: f64 = 0.0
+    var correction: f64 = 0.0
+    var i: i64 = 0
+    while i < n {
+        let term: f64 = a[i as usize] * b[indices[i as usize] as usize]
+        let adjusted = term - correction
+        let next = sum + adjusted
+        correction = (next - sum) - adjusted
+        sum = next
+        i = i + 1
+    }
+    sum
+}
+fn correlation_permutation_reverse(indices: &![i64;256], left: i64, right: i64) with Mut, Div, Panic {
+    var lo = left
+    var hi = right
+    while lo < hi {
+        let saved: i64 = indices[lo as usize]
+        indices[lo as usize] = indices[hi as usize]
+        indices[hi as usize] = saved
+        lo = lo + 1
+        hi = hi - 1
+    }
+}
+// Next lexicographic permutation of labels, retaining duplicate observations.
+fn correlation_permutation_next(indices: &![i64;256], n: i64) -> bool with Mut, Div, Panic {
+    var pivot = n - 2
+    while pivot >= 0 && indices[pivot as usize] >= indices[(pivot + 1) as usize] { pivot = pivot - 1 }
+    if pivot < 0 { return false }
+    var successor = n - 1
+    while indices[successor as usize] <= indices[pivot as usize] { successor = successor - 1 }
+    let saved: i64 = indices[pivot as usize]
+    indices[pivot as usize] = indices[successor as usize]
+    indices[successor as usize] = saved
+    correlation_permutation_reverse(indices, pivot + 1, n - 1)
+    true
+}
+pub fn correlation_permutation(x: &[f64;256], y: &[f64;256], n: i64,
+    statistic: i64, draws: i64, seed: i64, exact: bool) -> CorrelationPermutationResult with Mut, Div, Panic {
+    if statistic != 1 && statistic != 2 { return correlation_permutation_empty(7, n, statistic) }
+    if n < 2 || n > 256 { return correlation_permutation_empty(1, n, statistic) }
+    if exact {
+        if n > 8 { return correlation_permutation_empty(6, n, statistic) }
+    } else {
+        if draws < 1 || draws > 100000 { return correlation_permutation_empty(5, n, statistic) }
+    }
+    var a: [f64;256] = [0.0;256]
+    var b: [f64;256] = [0.0;256]
+    var indices: [i64;256] = [0;256]
+    let prepared = correlation_prepare_indexed(x, y, n, statistic == 2, &!a, &!b, &!indices)
+    if prepared.status != 0 { return correlation_permutation_empty(prepared.status, n, statistic) }
+    var i: i64 = 0
+    while i < n { indices[i as usize] = i; i = i + 1 }
+    let observed = correlation_permutation_abs(correlation_permutation_dot(&a, &b, &indices, n))
+    if !is_finite(observed) { return correlation_permutation_empty(4, n, statistic) }
+    let threshold = if statistic == 1 { observed * (1.0 - 1.4210854715202004e-14) } else { observed }
+    var hits: i64 = 0
+    var completed: i64 = 0
+    var state = seed % 2147483647
+    if state <= 0 { state = state + 2147483646 }
+    // Repair the legacy negative congruence class that otherwise maps to zero.
+    if state <= 0 { state = 2147483646 }
+    let initial = state
+    var active: bool = true
+    while active {
+        if !exact {
+            i = 0
+            while i < n { indices[i as usize] = i; i = i + 1 }
+            var j = n - 1
+            while j >= 1 {
+                let width = j + 1
+                let limit = (2147483646 / width) * width
+                state = (16807 * state) % 2147483647
+                var draw = state - 1
+                while draw >= limit {
+                    state = (16807 * state) % 2147483647
+                    draw = state - 1
+                }
+                let chosen = draw % width
+                let saved: i64 = indices[j as usize]
+                indices[j as usize] = indices[chosen as usize]
+                indices[chosen as usize] = saved
+                j = j - 1
+            }
+        }
+        let value = correlation_permutation_abs(correlation_permutation_dot(&a, &b, &indices, n))
+        if !is_finite(value) { return correlation_permutation_empty(4, n, statistic) }
+        if value >= threshold { hits = hits + 1 }
+        completed = completed + 1
+        if exact { active = correlation_permutation_next(&!indices, n) }
+        else { active = completed < draws }
+    }
+    var result = correlation_permutation_empty(0, n, statistic)
+    result.coefficient = prepared.coefficient
+    result.hits = hits
+    result.draws = completed
+    if exact {
+        result.method = 2
+        result.p_value = (hits as f64) / (completed as f64)
+        return result
+    }
+    result.method = 1
+    result.seed_used = initial
+    result.p_value = ((hits + 1) as f64) / ((completed + 1) as f64)
+    let count = completed as f64
+    let fraction = (hits as f64) / count
+    let z = 1.959963984540054
+    let square = z * z
+    let denominator = 1.0 + square / count
+    let center = (fraction + square / (2.0 * count)) / denominator
+    let half_width = (z / denominator) * sqrt((fraction * (1.0 - fraction) + square / (4.0 * count)) / count)
+    var lower = center - half_width
+    var upper = center + half_width
+    if lower < 0.0 { lower = 0.0 }
+    if upper > 1.0 { upper = 1.0 }
+    let se = sqrt(fraction * (1.0 - fraction) / count)
+    if !is_finite(center) || !is_finite(half_width) || !is_finite(se) ||
+       lower < 0.0 || upper > 1.0 || lower > upper {
+        return correlation_permutation_empty(4, n, statistic)
+    }
+    result.mc_available = true
+    result.mc_se = se
+    result.mc_lo = lower
+    result.mc_hi = upper
+    result
+}

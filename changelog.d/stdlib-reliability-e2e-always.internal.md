@@ -1,0 +1,1 @@
+The `Stdlib Reliability` workflow measures the full stdlib E2E on every run, even when an earlier sub-gate fails, and uploads it as `stdlib_e2e_measured.v1.json`. Before this, a red hyper lane stopped the gate and the uploaded E2E file was the stale committed one.

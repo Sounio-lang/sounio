@@ -1,0 +1,90 @@
+//@ run-pass
+//@ expect-stdout: GUM_FO_STRUCT_HELPERS_1706_OK
+//@ requires: madaros
+//@ note: lean_single passes every row from the #2776 part 2 lean_single PR on (field shadows, by-reference struct arguments); the seed on main reads 0 for most rows. Drop this line once both have landed.
+// #1706: first-order (GUM) variance through helpers whose uncertain inputs
+// arrive in STRUCT fields -- a struct parameter by value or by reference, a
+// method with no f64 parameter, a method mixing `self` fields with an f64
+// argument, and a struct local built by a constructor helper. Every expected
+// value is the analytic first-order GUM value, printed next to the result;
+// they come from tests/oracles/gum_fo_struct_helpers_1706.cpp (C++23).
+// x = 5 +- 0.3, v = 50 +- 2, s = 2 +- 0.1.
+//
+// Before (Madaros of #2933): every row read 0 -- the inliner admitted only
+// f64/integer/bool parameters and needed at least one f64 parameter, so a
+// helper or method fed through struct fields was never re-lowered.
+
+struct Pk {
+    cl0: f64
+    v0: f64
+}
+
+impl Pk {
+    fn first(self: &Pk) -> f64 {
+        self.cl0
+    }
+    fn prod(self: &Pk) -> f64 {
+        self.cl0 * self.v0
+    }
+    fn scaled(self: &Pk, s: f64) -> f64 {
+        self.cl0 * s
+    }
+}
+
+fn twice(p: Pk) -> f64 {
+    2.0 * p.cl0
+}
+
+fn twice_ref(p: &Pk) -> f64 {
+    2.0 * p.cl0
+}
+
+fn sum_cl(a: &Pk, b: &Pk) -> f64 {
+    a.cl0 + b.cl0
+}
+
+fn mk(x: f64, v: f64) -> Pk {
+    Pk { cl0: x, v0: v }
+}
+
+fn abs_f(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    x
+}
+
+fn show(label: string, got: f64, want: f64) -> i64 with IO, Mut, Div {
+    print(label); print("="); print_f64(got); print(" analytic="); print_f64(want)
+    if abs_f(got - want) <= 1.0e-12 + 1.0e-9 * abs_f(want) {
+        print("\n")
+        return 0
+    }
+    print(" MISMATCH\n")
+    1
+}
+
+fn main() -> i64 with IO, Mut, Div, Panic, Alloc, Epistemic {
+    let kx: Knowledge<f64> = measure(5.0, uncertainty: 0.3)
+    let kv: Knowledge<f64> = measure(50.0, uncertainty: 2.0)
+    let ks: Knowledge<f64> = measure(2.0, uncertainty: 0.1)
+    let x = kx.value
+    let v = kv.value
+    let s = ks.value
+    let p = Pk { cl0: x, v0: v }
+    let q = Pk { cl0: v, v0: x }
+    let m = mk(x, v)
+    var fails: i64 = 0
+    fails = fails + show("param_value", variance_of(twice(p)), 0.36)
+    fails = fails + show("param_ref", variance_of(twice_ref(&p)), 0.36)
+    fails = fails + show("param_two", variance_of(sum_cl(&p, &q)), 4.09)
+    fails = fails + show("method_first", variance_of(p.first()), 0.09)
+    fails = fails + show("method_prod", variance_of(p.prod()), 325.0)
+    fails = fails + show("method_cancel", variance_of(p.first() - x), 0.0)
+    fails = fails + show("method_arg", variance_of(p.scaled(s)), 0.61)
+    fails = fails + show("ctor_local_method", variance_of(m.prod()), 325.0)
+    if fails == 0 {
+        print("GUM_FO_STRUCT_HELPERS_1706_OK\n")
+        return 0
+    }
+    print("GUM_FO_STRUCT_HELPERS_1706_FAIL\n")
+    1
+}

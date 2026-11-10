@@ -1,8 +1,23 @@
+export interface DocsNavLink {
+  title: string;
+  href: string;
+}
+
 export interface DocsNavSection {
   titleKey: string;
   heroSlug: string;
   slugs: string[];
   icon: string;
+  /** English-only shell pages. Not part of the doc linear order. */
+  extra?: DocsNavLink[];
+}
+
+/** Insert shell links after the uncertainty guide, before later epistemic pages. */
+export function withEpistemicExtras(items: DocsNavLink[], extra: DocsNavLink[] | undefined): DocsNavLink[] {
+  if (!extra || extra.length === 0) return items;
+  const index = items.findIndex((item) => item.href.endsWith('/epistemic/uncertainty/'));
+  if (index === -1) return [...items, ...extra];
+  return [...items.slice(0, index + 1), ...extra, ...items.slice(index + 1)];
 }
 
 export const docsNavSections: DocsNavSection[] = [
@@ -15,7 +30,7 @@ export const docsNavSections: DocsNavSection[] = [
   {
     titleKey: 'docs_sidebar_language',
     heroSlug: 'language',
-    slugs: ['language', 'language/variables', 'language/functions', 'language/control-flow'],
+    slugs: ['language', 'language/variables', 'language/functions', 'language/control-flow', 'language/units-and-uncertainty'],
     icon: 'language',
   },
   {
@@ -23,6 +38,12 @@ export const docsNavSections: DocsNavSection[] = [
     heroSlug: 'epistemic',
     slugs: ['epistemic', 'epistemic/knowledge', 'epistemic/uncertainty', 'epistemic/provenance'],
     icon: 'epistemic',
+    extra: [
+      {
+        title: 'Uncertainty tools compared',
+        href: '/learn/epistemic/uncertainty-tools-compared/',
+      },
+    ],
   },
   {
     titleKey: 'docs_sidebar_effects',

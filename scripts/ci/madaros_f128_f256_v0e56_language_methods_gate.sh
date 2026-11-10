@@ -59,10 +59,13 @@ NATIVE_EXPECT=(
 )
 
 LOWER=self-hosted/ir/lower.sio
+# #2820: the method-call site passes the shifted f128 mask to
+# lower_expr_args_masked_borrow_ref (which also borrows struct values for `&S`
+# params); either spelling carries the mask.
 if grep -Fq 'fn lower_method_call_fn_id_ref' "$LOWER" \
   && grep -Fq 'fn lower_method_call_returns_f128_ref' "$LOWER" \
   && grep -Fq 'method call in f128 position does not return f128 (V0-E.5.6)' "$LOWER" \
-  && grep -Fq 'lower_expr_args_masked_ref(&e.args, f128_arg_mask_m)' "$LOWER"; then
+  && grep -Eq 'lower_expr_args_masked(_borrow)?_ref\(&e\.args, f128_arg_mask_m[,)]' "$LOWER"; then
   note_pass "lower_f128_method_markers"
 else
   note_fail "lower_f128_method_markers_missing"

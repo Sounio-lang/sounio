@@ -1,5 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
+import { htmlLang } from '../src/lib/seo-locales.mjs';
 
 const root = path.resolve(process.cwd());
 
@@ -35,7 +36,7 @@ async function run() {
       if (en.html.includes(fallbackNoticeMarker)) {
         errors.push(`Unexpected translation notice on English route ${en.rel}`);
       }
-      if (!en.html.includes('lang="en"')) {
+      if (!en.html.includes('<html lang="en"')) {
         errors.push(`Missing lang="en" on ${en.rel}`);
       }
     } catch {
@@ -50,8 +51,8 @@ async function run() {
         if (localized.html.includes(fallbackNoticeMarker)) {
           errors.push(`Unexpected translation notice on shell route ${localized.rel} (policy: banner only on /learn and /tutorials)`);
         }
-        if (!localized.html.includes(`lang="${locale}"`)) {
-          errors.push(`Missing lang="${locale}" on ${localized.rel}`);
+        if (!localized.html.includes(`<html lang="${htmlLang(locale)}"`)) {
+          errors.push(`Missing lang="${htmlLang(locale)}" on ${localized.rel}`);
         }
       } catch {
         errors.push(`Missing localized route output: ${routeToDistFile(route, locale)}`);
@@ -67,7 +68,7 @@ async function run() {
       if (en.html.includes(fallbackNoticeMarker)) {
         errors.push(`Unexpected translation notice on English docs route ${en.rel}`);
       }
-      if (!en.html.includes('lang="en"')) {
+      if (!en.html.includes('<html lang="en"')) {
         errors.push(`Missing lang="en" on ${en.rel}`);
       }
     } catch {
@@ -82,8 +83,8 @@ async function run() {
         if (!localized.html.includes(fallbackNoticeMarker)) {
           errors.push(`Missing translation notice on localized docs route ${localized.rel}`);
         }
-        if (!localized.html.includes(`lang="${locale}"`)) {
-          errors.push(`Missing lang="${locale}" on ${localized.rel}`);
+        if (!localized.html.includes(`<html lang="${htmlLang(locale)}"`)) {
+          errors.push(`Missing lang="${htmlLang(locale)}" on ${localized.rel}`);
         }
       } catch {
         errors.push(`Missing localized docs route output: ${routeToDistFile(route, locale)}`);

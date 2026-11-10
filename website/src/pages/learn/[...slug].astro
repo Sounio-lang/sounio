@@ -2,8 +2,11 @@
 import { getCollection, render } from 'astro:content';
 import DocsLayout from '../../layouts/DocsLayout.astro';
 import { getLocalizedPath, getLocaleFromUrl, loadTranslations, type Locale } from '../../lib/i18n';
-import { docsNavSections, docsLinearOrder } from '../../lib/docs-navigation';
+import { docsNavSections, docsLinearOrder, withEpistemicExtras } from '../../lib/docs-navigation';
 import { contentIdsMatch } from '../../lib/content-ids';
+import { EFFECTS_PAGE, SELF_HOSTED_PAGE } from '../../lib/search-appearance.mjs';
+import { effectsFaqPage } from '../../lib/effect-system-page.mjs';
+import { uncertaintyFaqPage, uncertaintyPageFor } from '../../lib/uncertainty-page.mjs';
 
 const DEFAULT_LOCALE: Locale = 'en';
 
@@ -66,10 +69,10 @@ const layoutHeadings = headings.map((h) => ({
 function resolveDocTitle(slug: string): string | undefined {
   const found =
     candidateDocIds(locale, slug)
-      .map((id) => allDocs.find((d) => d.id === id))
+      .map((id) => allDocs.find((d) => contentIdsMatch(d.id, id)))
       .find(Boolean) ??
     candidateDocIds(DEFAULT_LOCALE, slug)
-      .map((id) => allDocs.find((d) => d.id === id))
+      .map((id) => allDocs.find((d) => contentIdsMatch(d.id, id)))
       .find(Boolean);
   return found?.data.title;
 }
@@ -81,18 +84,33 @@ function hrefFor(slug: string) {
 const sidebarBlueprint = docsNavSections.map((section) => ({
   title: t[section.titleKey as keyof typeof t] as string,
   slugs: section.slugs,
+  extra: section.extra,
 }));
+
+const isSelfHosted = requestedSlug === 'compiler/self-hosted';
+const isEffects = requestedSlug === 'effects';
+const uncertainty = requestedSlug === 'epistemic/uncertainty' ? uncertaintyPageFor(locale) : null;
+const stripSpecVersion = isSelfHosted || isEffects || requestedSlug === 'epistemic/uncertainty';
 
 const sidebar = sidebarBlueprint
   .map((section) => ({
     title: section.title,
-    items: section.slugs
-      .map((slug) => {
-        const title = resolveDocTitle(slug);
-        if (!title) return null;
-        return { title, href: hrefFor(slug) };
-      })
-      .filter((item): item is { title: string; href: string } => item !== null),
+    items: withEpistemicExtras(
+      section.slugs
+        .map((slug) => {
+          const title = resolveDocTitle(slug);
+          if (!title) return null;
+          // S1: this page's HTML must not contain a compiler version string.
+          // The language-spec nav label is "Language Spec (v1.0.0)" on every
+          // other learn page; here the parenthetical is dropped.
+          const label = stripSpecVersion
+            ? title.replace(/\s*\((?:v0\.80|v0\.99|v0\.100|v1\.0)[^)]*\)/g, '').trim()
+            : title;
+          return { title: label, href: hrefFor(slug) };
+        })
+        .filter((item): item is { title: string; href: string } => item !== null),
+      section.extra,
+    ),
   }))
   .filter((section) => section.items.length > 0);
 
@@ -106,17 +124,44 @@ const prev = prevSlug
 const next = nextSlug
   ? { title: resolveDocTitle(nextSlug) ?? nextSlug, href: hrefFor(nextSlug) }
   : undefined;
+
+const selfHostedCrumbs = [
+  { name: SELF_HOSTED_PAGE.crumbs[0], href: getLocalizedPath('/learn', locale) },
+  { name: SELF_HOSTED_PAGE.crumbs[1], href: getLocalizedPath('/learn/compiler', locale) },
+  { name: SELF_HOSTED_PAGE.crumbs[2], href: Astro.url.pathname },
+];
+const uncertaintyCrumbs = uncertainty
+  ? [
+      { name: uncertainty.crumbs[0], href: getLocalizedPath('/learn', locale) },
+      { name: uncertainty.crumbs[1], href: getLocalizedPath('/learn/epistemic', locale) },
+      { name: uncertainty.crumbs[2], href: Astro.url.pathname },
+    ]
+  : undefined;
+const uncertaintyTitle = uncertainty && locale === 'pt' ? uncertainty.documentTitle : doc.data.title;
 ---
 
 <DocsLayout
-  title={doc.data.title}
+  title={isSelfHosted ? SELF_HOSTED_PAGE.h1 : uncertaintyTitle}
+  heading={uncertainty ? uncertainty.h1 : isEffects ? EFFECTS_PAGE.h1 : undefined}
   description={doc.data.description}
+  lede={uncertainty ? uncertainty.lede : isSelfHosted ? SELF_HOSTED_PAGE.lede : isEffects ? EFFECTS_PAGE.lede : undefined}
+  breadcrumbs={uncertainty ? uncertaintyCrumbs : isSelfHosted ? selfHostedCrumbs : undefined}
+  articleHeadline={uncertainty ? uncertainty.h1 : isSelfHosted ? SELF_HOSTED_PAGE.h1 : isEffects ? EFFECTS_PAGE.h1 : undefined}
+  articleAbout={uncertainty ? uncertainty.about : isSelfHosted ? SELF_HOSTED_PAGE.about : isEffects ? EFFECTS_PAGE.about : undefined}
+  articleAuthor={uncertainty ? uncertainty.author : isSelfHosted ? SELF_HOSTED_PAGE.author : isEffects ? EFFECTS_PAGE.author : undefined}
+  articleIsPartOf={uncertainty ? uncertainty.isPartOf : isEffects ? EFFECTS_PAGE.isPartOf : undefined}
+  articleProficiencyLevel={uncertainty ? uncertainty.proficiencyLevel : isEffects ? EFFECTS_PAGE.proficiencyLevel : undefined}
+  articleDependencies={uncertainty ? uncertainty.dependencies : isEffects ? EFFECTS_PAGE.dependencies : undefined}
+  articleCitation={uncertainty ? uncertainty.citation : undefined}
+  schema={uncertainty ? uncertaintyFaqPage(uncertainty.faq) : isEffects ? effectsFaqPage() : undefined}
   headings={layoutHeadings}
   sidebar={sidebar}
   prev={prev}
   next={next}
   docsBasePath="/learn"
-  docsBaseLabel="Learn"
+  docsBaseLabel={t.nav_learn}
+  dateModified={doc.data.last_validated}
+  showResearchStatus={requestedSlug === 'getting-started'}
 >
   <Content />
 </DocsLayout>

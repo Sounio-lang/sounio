@@ -1,3 +1,10 @@
+use viz::axis_layout::{axis_fit_labels}
+use viz::scale::{ScaleSpec}
+use viz::forest::{forest_layout,forest_page_plan,forest_domain}
+use viz::uncertainty::{uncertainty_prefix,uncertainty_bounds,uncertainty_domain}
+use viz::scatter::{scatter_finite,scatter_geometry}
+use viz::legend::{legend_layout}
+use viz::axis::{axis_ticks}
 // stdlib/viz/ir.sio — Sounio-owned Visual IR
 //
 // Fixed-capacity scene graph for native visual frontends. Scientific meaning
@@ -28,6 +35,11 @@ pub const VIZ_NODE_WATERFALL: i64 = 16
 pub const VIZ_NODE_VECTOR_FIELD: i64 = 17
 pub const VIZ_NODE_TRAJECTORY: i64 = 18
 pub const VIZ_NODE_SPECTRUM: i64 = 19
+pub const VIZ_INTERVAL_NONE: i64 = 0
+pub const VIZ_INTERVAL_CONFIDENCE: i64 = 1
+pub const VIZ_INTERVAL_PREDICTION: i64 = 2
+pub const VIZ_INTERVAL_CREDIBLE: i64 = 3
+pub const VIZ_INTERVAL_STANDARD_UNCERTAINTY: i64 = 4
 
 pub const VIZ_CONTROL_BUTTON: i64 = 1
 pub const VIZ_CONTROL_SLIDER: i64 = 2
@@ -85,6 +97,10 @@ pub struct VizSeriesData {
     pub xs: [f64; 1024],
     pub ys: [f64; 1024],
     pub vars: [f64; 1024],
+    pub lower: [f64; 1024],
+    pub upper: [f64; 1024],
+    pub interval_kind: i64,
+    pub interval_level: f64,
     pub n: i64,
     pub x_min: f64,
     pub x_max: f64,
@@ -199,7 +215,9 @@ pub fn viz_node_empty() -> VizNode {
 
 pub fn viz_series_empty() -> VizSeriesData {
     VizSeriesData {
-        xs: [0.0; 1024], ys: [0.0; 1024], vars: [0.0; 1024], n: 0,
+        xs: [0.0; 1024], ys: [0.0; 1024], vars: [0.0; 1024],
+        lower: [0.0; 1024], upper: [0.0; 1024],
+        interval_kind: VIZ_INTERVAL_NONE, interval_level: 0.0, n: 0,
         x_min: 0.0, x_max: 1.0, y_min: 0.0, y_max: 1.0,
     }
 }
@@ -327,6 +345,7 @@ pub fn viz_scene_set_parent(scene: &!VizScene, node_idx: i64, parent_idx: i64) w
 
 pub fn viz_scene_add_series(scene: &!VizScene, xs: &[f64; 1024], ys: &[f64; 1024], vars: &[f64; 1024], n: i64) -> i64 with Mut {
     if scene.series_count >= 8 { return 0 - 1 }
+    if n < 0 || n > 1024 { return 0 - 1 }
     let slot = scene.series_count
     var d = viz_series_empty()
     d.n = n
@@ -469,40 +488,192 @@ pub fn viz_scene_add_mesh_data(scene: &!VizScene, tris: &[Tri3D; 128], n: i64) -
 }
 
 pub fn viz_add_line_chart(scene: &!VizScene, xs: &[f64; 1024], ys: &[f64; 1024], n: i64, layout: VizLayout, style: VizStyle) -> i64 with Mut {
+    if n < 0 || n > 1024 || scene.series_count >= 8 || scene.node_count >= 64 { return 0 - 1 }
     let vars: [f64; 1024] = [0.0; 1024]
     let slot = viz_scene_add_series(scene, xs, ys, &vars, n)
     viz_scene_add_node(scene, VIZ_NODE_CHART_LINE, layout, style, slot)
 }
 
 pub fn viz_add_scatter_chart(scene: &!VizScene, xs: &[f64; 1024], ys: &[f64; 1024], n: i64, layout: VizLayout, style: VizStyle) -> i64 with Mut {
+    if n < 0 || n > 1024 || scene.series_count >= 8 || scene.node_count >= 64 { return 0 - 1 }
+    var found = false
+    var xmin:f64 = 0.0; var xmax:f64 = 0.0
+    var ymin:f64 = 0.0; var ymax:f64 = 0.0
+    var i:i64 = 0
+    while i < n {
+        let vx = xs[i as usize]; let vy = ys[i as usize]
+        if scatter_finite(vx) && scatter_finite(vy) {
+            if !found { xmin=vx; xmax=vx; ymin=vy; ymax=vy; found=true }
+            else {
+                if vx < xmin { xmin=vx }; if vx > xmax { xmax=vx }
+                if vy < ymin { ymin=vy }; if vy > ymax { ymax=vy }
+            }
+        }
+        i=i+1
+    }
+    if n > 0 && !found { return -1 }
     let vars: [f64; 1024] = [0.0; 1024]
     let slot = viz_scene_add_series(scene, xs, ys, &vars, n)
+    scene.series[slot as usize].x_min=xmin; scene.series[slot as usize].x_max=xmax
+    scene.series[slot as usize].y_min=ymin; scene.series[slot as usize].y_max=ymax
     viz_scene_add_node(scene, VIZ_NODE_CHART_SCATTER, layout, style, slot)
 }
 
 pub fn viz_add_bar_chart(scene: &!VizScene, xs: &[f64; 1024], ys: &[f64; 1024], n: i64, layout: VizLayout, style: VizStyle) -> i64 with Mut {
+    if n < 0 || n > 1024 || scene.series_count >= 8 || scene.node_count >= 64 { return 0 - 1 }
+    var found=false
+    var xmin:f64=0.0; var xmax:f64=0.0
+    var ymin:f64=0.0; var ymax:f64=0.0
+    var i:i64=0
+    while i < n {
+        let vx=xs[i as usize]; let vy=ys[i as usize]
+        if scatter_finite(vx) && scatter_finite(vy) {
+            if !found { xmin=vx; xmax=vx; found=true }
+            else { if vx < xmin { xmin=vx }; if vx > xmax { xmax=vx } }
+            if vy < ymin { ymin=vy }; if vy > ymax { ymax=vy }
+        }
+        i=i+1
+    }
+    if n > 0 && !found { return -1 }
     let vars: [f64; 1024] = [0.0; 1024]
     let slot = viz_scene_add_series(scene, xs, ys, &vars, n)
+    scene.series[slot as usize].x_min=xmin; scene.series[slot as usize].x_max=xmax
+    scene.series[slot as usize].y_min=ymin; scene.series[slot as usize].y_max=ymax
     viz_scene_add_node(scene, VIZ_NODE_CHART_BAR, layout, style, slot)
 }
 
-pub fn viz_add_uncertainty_band(scene: &!VizScene, xs: &[f64; 1024], ys: &[f64; 1024], vars: &[f64; 1024], n: i64, layout: VizLayout, style: VizStyle) -> i64 with Mut {
-    let slot = viz_scene_add_series(scene, xs, ys, vars, n)
-    viz_scene_add_node(scene, VIZ_NODE_UNCERTAINTY_BAND, layout, style, slot)
+// Sampled +/-one-sigma spans; not confidence intervals. Transactional validation.
+pub fn viz_add_uncertainty_band(scene:&!VizScene,xs:&[f64;1024],ys:&[f64;1024],vars:&[f64;1024],
+ n:i64,layout:VizLayout,style:VizStyle)->i64 with Mut,Div,Panic {
+ if n<0 || n>1024 || scene.series_count>=8 || scene.node_count>=64 {return -1}
+ if !scatter_geometry(layout.x,layout.y,layout.w,layout.h) || !uncertainty_prefix(xs,ys,vars,n) {return -1}
+ var xmin:f64=0.0
+ var xmax:f64=1.0
+ var ymin:f64=0.0
+ var ymax:f64=1.0
+ if n>0 {
+  let first=uncertainty_bounds(ys[0],vars[0])
+  xmin=xs[0]
+  xmax=xs[0]
+  ymin=first.lower
+  ymax=first.upper
+ }
+ var i:i64=1
+ while i<n {
+  let bounds=uncertainty_bounds(ys[i as usize],vars[i as usize])
+  if xs[i as usize]<xmin {xmin=xs[i as usize]}
+  if xs[i as usize]>xmax {xmax=xs[i as usize]}
+  if bounds.lower<ymin {ymin=bounds.lower}
+  if bounds.upper>ymax {ymax=bounds.upper}
+  i=i+1
+ }
+ if !uncertainty_domain(xmin,xmax,ymin,ymax) {return -1}
+ let slot=viz_scene_add_series(scene,xs,ys,vars,n)
+ scene.series[slot as usize].x_min=xmin
+ scene.series[slot as usize].x_max=xmax
+ scene.series[slot as usize].y_min=ymin
+ scene.series[slot as usize].y_max=ymax
+ scene.series[slot as usize].interval_kind=VIZ_INTERVAL_STANDARD_UNCERTAINTY
+ scene.series[slot as usize].interval_level=0.0
+ viz_scene_add_node(scene,VIZ_NODE_UNCERTAINTY_BAND,layout,style,slot)
 }
 
-pub fn viz_add_forest_plot(scene: &!VizScene, estimates: &[f64; 1024], variances: &[f64; 1024], n: i64, layout: VizLayout, style: VizStyle) -> i64 with Mut {
-    var rows: [f64; 1024] = [0.0; 1024]
-    var i: i64 = 0
-    while i < n && i < 1024 {
-        rows[i as usize] = i as f64
-        i = i + 1
-    }
-    let slot = viz_scene_add_series(scene, estimates, &rows, variances, n)
-    viz_scene_add_node(scene, VIZ_NODE_FOREST, layout, style, slot)
+// Legacy variance means +/-one sigma, never a confidence interval.
+pub fn viz_add_forest_plot(scene:&!VizScene,estimates:&[f64;1024],variances:&[f64;1024],n:i64,
+ layout:VizLayout,style:VizStyle)->i64 with Mut,Div,Panic {
+ if scene.series_count>=8 || scene.node_count>=64 {return -1}
+ let rows=forest_layout(n,layout.x,layout.y,layout.w,layout.h)
+ if rows.status!=0 {return -1}
+ var xmin:f64=0.0;var xmax:f64=1.0
+ var i:i64=0
+ while i<n {
+  let bounds=uncertainty_bounds(estimates[i as usize],variances[i as usize])
+  if bounds.status!=0 {return -1}
+  if i==0 {xmin=bounds.lower;xmax=bounds.upper}
+  else {if bounds.lower<xmin {xmin=bounds.lower};if bounds.upper>xmax {xmax=bounds.upper}}
+  i=i+1
+ }
+ if !forest_domain(xmin,xmax) {return -1}
+ let slot=scene.series_count
+ scene.series[slot as usize]=viz_series_empty()
+ scene.series[slot as usize].n=n
+ scene.series[slot as usize].x_min=xmin;scene.series[slot as usize].x_max=xmax
+ scene.series[slot as usize].y_min=0.0;scene.series[slot as usize].y_max=if n==0 {0.0} else {(n-1) as f64}
+ i=0
+ while i<n {
+  scene.series[slot as usize].xs[i as usize]=estimates[i as usize]
+  scene.series[slot as usize].ys[i as usize]=i as f64
+  scene.series[slot as usize].vars[i as usize]=variances[i as usize]
+  i=i+1
+ }
+ scene.series_count=scene.series_count+1
+ let node=viz_scene_add_node(scene,VIZ_NODE_FOREST,layout,style,slot)
+ scene.nodes[node as usize].min_value=0.0;scene.nodes[node as usize].max_value=n as f64
+ node
+}
+
+fn viz_interval_finite(x: f64) -> bool {
+    if x != x { return false }
+    if x == 0.0 && x == 1.0 { return false }
+    let ax = if x < 0.0 { 0.0 - x } else { x }
+    ax <= 1.7976931348623157e308
+}
+
+pub struct ForestPageResult {
+ pub status:i64,pub chart:i64,pub first:i64,pub count:i64,pub next:i64,pub total:i64,pub has_more:bool,
+}
+// Explicit pages preserve one global X envelope across the full validated source.
+pub fn viz_add_forest_interval_page(scene:&!VizScene,estimates:&[f64;1024],lower:&[f64;1024],upper:&[f64;1024],
+ total:i64,first:i64,kind:i64,level:f64,layout:VizLayout,style:VizStyle)->ForestPageResult with Mut,Div {
+ var out=ForestPageResult{status:1,chart:-1,first:first,count:0,next:first,total:total,has_more:false}
+ let page=forest_page_plan(total,first,layout.x,layout.y,layout.w,layout.h)
+ if page.status!=0 {out.status=if page.status==2 {4} else {3};return out}
+ if kind<VIZ_INTERVAL_CONFIDENCE || kind>VIZ_INTERVAL_CREDIBLE ||
+    !viz_interval_finite(level) || level<=0.0 || level>=1.0 {out.status=2;return out}
+ if scene.series_count>=8 || scene.node_count>=64 {out.status=5;return out}
+ var xmin:f64=0.0;var xmax:f64=0.0
+ var i:i64=0
+ while i<total {
+  let e=estimates[i as usize];let lo=lower[i as usize];let hi=upper[i as usize]
+  if !viz_interval_finite(e) || !viz_interval_finite(lo) || !viz_interval_finite(hi) || lo>e || e>hi {out.status=2;return out}
+  if i==0 {xmin=lo;xmax=hi}
+  else {if lo<xmin {xmin=lo};if hi>xmax {xmax=hi}}
+  i=i+1
+ }
+ if !forest_domain(xmin,xmax) {out.status=2;return out}
+ let slot=scene.series_count
+ scene.series[slot as usize]=viz_series_empty()
+ scene.series[slot as usize].n=page.count
+ scene.series[slot as usize].x_min=xmin;scene.series[slot as usize].x_max=xmax
+ scene.series[slot as usize].y_min=0.0;scene.series[slot as usize].y_max=(page.count-1) as f64
+ i=0
+ while i<page.count {
+  let source=(first+i) as usize
+  scene.series[slot as usize].xs[i as usize]=estimates[source]
+  scene.series[slot as usize].ys[i as usize]=i as f64
+  scene.series[slot as usize].lower[i as usize]=lower[source]
+  scene.series[slot as usize].upper[i as usize]=upper[source]
+  i=i+1
+ }
+ scene.series[slot as usize].interval_kind=kind;scene.series[slot as usize].interval_level=level
+ scene.series_count=scene.series_count+1
+ let node=viz_scene_add_node(scene,VIZ_NODE_FOREST,layout,style,slot)
+ scene.nodes[node as usize].min_value=first as f64;scene.nodes[node as usize].max_value=total as f64
+ out.status=0;out.chart=node;out.count=page.count;out.next=page.next;out.has_more=page.has_more
+ out
+}
+/// Whole-source convenience: insufficient row capacity rejects atomically.
+pub fn viz_add_forest_interval_plot(scene:&!VizScene,estimates:&[f64;1024],lower:&[f64;1024],upper:&[f64;1024],
+ n:i64,kind:i64,level:f64,layout:VizLayout,style:VizStyle)->i64 with Mut,Div {
+ if n<1 || n>1024 {return -1}
+ let rows=forest_layout(n,layout.x,layout.y,layout.w,layout.h)
+ if rows.status!=0 {return -1}
+ let result=viz_add_forest_interval_page(scene,estimates,lower,upper,n,0,kind,level,layout,style)
+ result.chart
 }
 
 pub fn viz_add_waterfall(scene: &!VizScene, values: &[f64; 1024], n: i64, layout: VizLayout, style: VizStyle) -> i64 with Mut {
+    if n < 0 || n > 1024 || scene.series_count >= 8 || scene.node_count >= 64 { return 0 - 1 }
     var xs: [f64; 1024] = [0.0; 1024]
     var vars: [f64; 1024] = [0.0; 1024]
     var i: i64 = 0
@@ -578,19 +749,17 @@ pub fn viz_node_set_label(scene: &!VizScene, node_idx: i64, text: &[i8; 64], len
     var n = len
     if n < 0 { n = 0 }
     if n > 64 { n = 64 }
-    var node = scene.nodes[node_idx as usize]
-    node.label_len = n
+    scene.nodes[node_idx as usize].label_len = n
     var i: i64 = 0
     while i < 64 {
-        node.label[i as usize] = 0
+        scene.nodes[node_idx as usize].label[i as usize] = 0
         i = i + 1
     }
     i = 0
     while i < n {
-        node.label[i as usize] = text[i as usize]
+        scene.nodes[node_idx as usize].label[i as usize] = text[i as usize]
         i = i + 1
     }
-    scene.nodes[node_idx as usize] = node
 }
 
 pub fn viz_add_label(scene: &!VizScene, text: &[i8; 64], len: i64, layout: VizLayout, style: VizStyle) -> i64 with Mut {
@@ -661,19 +830,19 @@ pub fn viz_scene_set_time(scene: &!VizScene, t: f64) with Mut {
     scene.time = t
 }
 
-fn viz_node_is_focusable_kind(node: VizNode) -> bool {
-    if node.kind != VIZ_NODE_CONTROL { return false }
-    if node.data_slot == VIZ_CONTROL_BUTTON { return true }
-    if node.data_slot == VIZ_CONTROL_SLIDER { return true }
-    if node.data_slot == VIZ_CONTROL_TOGGLE { return true }
-    if node.data_slot == VIZ_CONTROL_TABS { return true }
-    if node.data_slot == VIZ_CONTROL_VIEWPORT { return true }
+fn viz_node_is_focusable_kind(kind: i64, data_slot: i64) -> bool {
+    if kind != VIZ_NODE_CONTROL { return false }
+    if data_slot == VIZ_CONTROL_BUTTON { return true }
+    if data_slot == VIZ_CONTROL_SLIDER { return true }
+    if data_slot == VIZ_CONTROL_TOGGLE { return true }
+    if data_slot == VIZ_CONTROL_TABS { return true }
+    if data_slot == VIZ_CONTROL_VIEWPORT { return true }
     return false
 }
 
 fn viz_scene_is_focusable_node(scene: &VizScene, node_idx: i64) -> bool {
     if node_idx < 0 || node_idx >= scene.node_count { return false }
-    return viz_node_is_focusable_kind(scene.nodes[node_idx as usize])
+    return viz_node_is_focusable_kind(scene.nodes[node_idx as usize].kind, scene.nodes[node_idx as usize].data_slot)
 }
 
 fn viz_scene_focus_set(scene: &!VizScene, node_idx: i64) with Mut {
@@ -728,17 +897,18 @@ pub fn viz_scene_focus_prev(scene: &!VizScene) -> i64 with Mut {
 pub fn viz_scene_activate_focused(scene: &!VizScene) -> bool with Mut, Div {
     let idx = scene.focused_node
     if idx < 0 || idx >= scene.node_count { return false }
-    let node = scene.nodes[idx as usize]
-    if !viz_node_is_focusable_kind(node) { return false }
+    let kind = scene.nodes[idx as usize].kind
+    let slot = scene.nodes[idx as usize].data_slot
+    if !viz_node_is_focusable_kind(kind, slot) { return false }
     scene.selected_node = idx
     var i: i64 = 0
     while i < scene.node_count {
         scene.nodes[i as usize].selected = i == idx
         i = i + 1
     }
-    if node.data_slot == VIZ_CONTROL_TOGGLE {
+    if slot == VIZ_CONTROL_TOGGLE {
         viz_scene_toggle(scene, idx)
-    } else if node.data_slot == VIZ_CONTROL_TABS {
+    } else if slot == VIZ_CONTROL_TABS {
         viz_scene_step_tab_key(scene, idx, 1)
     }
     return true
@@ -773,15 +943,16 @@ fn viz_print_i64(n: i64) with IO, Mut, Div {
 }
 
 fn viz_dump_node(scene: &VizScene, idx: i64) with IO, Mut, Div {
-    let n = scene.nodes[idx as usize]
     print("node idx="); viz_print_i64(idx)
-    print(" id="); viz_print_i64(n.id)
-    print(" parent_id="); viz_print_i64(n.parent_id)
-    print(" tag="); viz_print_i64(n.tag)
-    print(" kind="); viz_print_i64(n.kind)
-    print(" slot="); viz_print_i64(n.data_slot)
-    print(" rect="); viz_print_i64(n.layout.x); print(","); viz_print_i64(n.layout.y)
-    print(","); viz_print_i64(n.layout.w); print(","); viz_print_i64(n.layout.h)
+    print(" id="); viz_print_i64(scene.nodes[idx as usize].id)
+    print(" parent_id="); viz_print_i64(scene.nodes[idx as usize].parent_id)
+    print(" tag="); viz_print_i64(scene.nodes[idx as usize].tag)
+    print(" kind="); viz_print_i64(scene.nodes[idx as usize].kind)
+    print(" slot="); viz_print_i64(scene.nodes[idx as usize].data_slot)
+    print(" rect="); viz_print_i64(scene.nodes[idx as usize].layout.x)
+    print(","); viz_print_i64(scene.nodes[idx as usize].layout.y)
+    print(","); viz_print_i64(scene.nodes[idx as usize].layout.w)
+    print(","); viz_print_i64(scene.nodes[idx as usize].layout.h)
     println("")
 }
 
@@ -821,9 +992,7 @@ pub fn viz_scene_apply_layout_range(scene: &!VizScene, first_idx: i64, count: i6
         var i: i64 = 0
         while i < n {
             let idx = first_idx + i
-            var node = scene.nodes[idx as usize]
-            node.layout = viz_layout_rect(layout.x + i * (cell_w + layout.gap), layout.y, cell_w, layout.h)
-            scene.nodes[idx as usize] = node
+            scene.nodes[idx as usize].layout = viz_layout_rect(layout.x + i * (cell_w + layout.gap), layout.y, cell_w, layout.h)
             i = i + 1
         }
     } else if layout.layout_kind == VIZ_LAYOUT_COLUMN {
@@ -832,9 +1001,7 @@ pub fn viz_scene_apply_layout_range(scene: &!VizScene, first_idx: i64, count: i6
         var i: i64 = 0
         while i < n {
             let idx = first_idx + i
-            var node = scene.nodes[idx as usize]
-            node.layout = viz_layout_rect(layout.x, layout.y + i * (cell_h + layout.gap), layout.w, cell_h)
-            scene.nodes[idx as usize] = node
+            scene.nodes[idx as usize].layout = viz_layout_rect(layout.x, layout.y + i * (cell_h + layout.gap), layout.w, cell_h)
             i = i + 1
         }
     }
@@ -842,53 +1009,47 @@ pub fn viz_scene_apply_layout_range(scene: &!VizScene, first_idx: i64, count: i6
 
 pub fn viz_scene_set_slider(scene: &!VizScene, node_idx: i64, value: f64) with Mut {
     if node_idx < 0 || node_idx >= scene.node_count { return }
-    var node = scene.nodes[node_idx as usize]
+    let min_v = scene.nodes[node_idx as usize].min_value
+    let max_v = scene.nodes[node_idx as usize].max_value
     var v = value
-    if v < node.min_value { v = node.min_value }
-    if v > node.max_value { v = node.max_value }
-    node.value = v
-    scene.nodes[node_idx as usize] = node
+    if v < min_v { v = min_v }
+    if v > max_v { v = max_v }
+    scene.nodes[node_idx as usize].value = v
 }
 
 pub fn viz_scene_set_time_from_slider(scene: &!VizScene, node_idx: i64, value: f64) with Mut {
     viz_scene_set_slider(scene, node_idx, value)
     if node_idx < 0 || node_idx >= scene.node_count { return }
-    let node = scene.nodes[node_idx as usize]
-    if node.kind == VIZ_NODE_CONTROL && node.data_slot == VIZ_CONTROL_SLIDER {
-        scene.time = node.value
+    if scene.nodes[node_idx as usize].kind == VIZ_NODE_CONTROL && scene.nodes[node_idx as usize].data_slot == VIZ_CONTROL_SLIDER {
+        scene.time = scene.nodes[node_idx as usize].value
     }
 }
 
 pub fn viz_scene_set_toggle(scene: &!VizScene, node_idx: i64, enabled: bool) with Mut {
     if node_idx < 0 || node_idx >= scene.node_count { return }
-    var node = scene.nodes[node_idx as usize]
-    if node.kind == VIZ_NODE_CONTROL && node.data_slot == VIZ_CONTROL_TOGGLE {
-        node.value = if enabled { 1.0 } else { 0.0 }
-        node.selected = enabled
-        scene.nodes[node_idx as usize] = node
+    if scene.nodes[node_idx as usize].kind == VIZ_NODE_CONTROL && scene.nodes[node_idx as usize].data_slot == VIZ_CONTROL_TOGGLE {
+        scene.nodes[node_idx as usize].value = if enabled { 1.0 } else { 0.0 }
+        scene.nodes[node_idx as usize].selected = enabled
     }
 }
 
 pub fn viz_scene_toggle(scene: &!VizScene, node_idx: i64) with Mut {
     if node_idx < 0 || node_idx >= scene.node_count { return }
-    let node = scene.nodes[node_idx as usize]
-    if node.kind == VIZ_NODE_CONTROL && node.data_slot == VIZ_CONTROL_TOGGLE {
-        viz_scene_set_toggle(scene, node_idx, node.value <= 0.0)
+    if scene.nodes[node_idx as usize].kind == VIZ_NODE_CONTROL && scene.nodes[node_idx as usize].data_slot == VIZ_CONTROL_TOGGLE {
+        viz_scene_set_toggle(scene, node_idx, scene.nodes[node_idx as usize].value <= 0.0)
     }
 }
 
 pub fn viz_scene_set_tab(scene: &!VizScene, node_idx: i64, tab_idx: i64) with Mut {
     if node_idx < 0 || node_idx >= scene.node_count { return }
-    var node = scene.nodes[node_idx as usize]
-    if node.kind == VIZ_NODE_CONTROL && node.data_slot == VIZ_CONTROL_TABS {
+    if scene.nodes[node_idx as usize].kind == VIZ_NODE_CONTROL && scene.nodes[node_idx as usize].data_slot == VIZ_CONTROL_TABS {
         var idx = tab_idx
-        let min_i = node.min_value as i64
-        let max_i = node.max_value as i64
+        let min_i = scene.nodes[node_idx as usize].min_value as i64
+        let max_i = scene.nodes[node_idx as usize].max_value as i64
         if idx < min_i { idx = min_i }
         if idx > max_i { idx = max_i }
-        node.value = idx as f64
+        scene.nodes[node_idx as usize].value = idx as f64
         scene.active_tab = idx
-        scene.nodes[node_idx as usize] = node
     }
 }
 
@@ -909,12 +1070,27 @@ fn viz_scene_tab_from_pointer(node: &VizNode, px: i64) -> i64 with Mut, Div {
 
 pub fn viz_scene_activate_control(scene: &!VizScene, node_idx: i64, px: i64, py: i64) -> i64 with Mut, Div {
     if node_idx < 0 || node_idx >= scene.node_count { return node_idx }
-    let node = scene.nodes[node_idx as usize]
-    if node.kind == VIZ_NODE_CONTROL && node.data_slot == VIZ_CONTROL_TOGGLE {
+    let kind = scene.nodes[node_idx as usize].kind
+    let slot = scene.nodes[node_idx as usize].data_slot
+    if kind == VIZ_NODE_CONTROL && slot == VIZ_CONTROL_TOGGLE {
         viz_scene_toggle(scene, node_idx)
-    } else if node.kind == VIZ_NODE_CONTROL && node.data_slot == VIZ_CONTROL_TABS {
-        let tab = viz_scene_tab_from_pointer(&node, px)
-        viz_scene_set_tab(scene, node_idx, tab)
+    } else if kind == VIZ_NODE_CONTROL && slot == VIZ_CONTROL_TABS {
+        let min_v = scene.nodes[node_idx as usize].min_value
+        let max_v = scene.nodes[node_idx as usize].max_value
+        let lx = scene.nodes[node_idx as usize].layout.x
+        let lw = scene.nodes[node_idx as usize].layout.w
+        let min_i = min_v as i64
+        let max_i = max_v as i64
+        var count = max_i - min_i + 1
+        if count <= 0 { count = 1 }
+        let denom = if lw <= 0 { 1 } else { lw }
+        var rel = px - lx
+        if rel < 0 { rel = 0 }
+        if rel >= denom { rel = denom - 1 }
+        let tab_w = if denom / count <= 0 { 1 } else { denom / count }
+        var idx = min_i + rel / tab_w
+        if idx > max_i { idx = max_i }
+        viz_scene_set_tab(scene, node_idx, idx)
     }
     node_idx
 }
@@ -923,8 +1099,11 @@ pub fn viz_scene_hit_test(scene: &VizScene, px: i64, py: i64) -> i64 with Mut {
     var found: i64 = 0 - 1
     var i: i64 = 0
     while i < scene.node_count {
-        let n = scene.nodes[i as usize]
-        if px >= n.layout.x && px < n.layout.x + n.layout.w && py >= n.layout.y && py < n.layout.y + n.layout.h {
+        let x = scene.nodes[i as usize].layout.x
+        let y = scene.nodes[i as usize].layout.y
+        let w = scene.nodes[i as usize].layout.w
+        let h = scene.nodes[i as usize].layout.h
+        if px >= x && px < x + w && py >= y && py < y + h {
             found = i
         }
         i = i + 1
@@ -972,36 +1151,38 @@ pub fn viz_scene_pointer_update(scene: &!VizScene, px: i64, py: i64) -> i64 with
         scene.selected_node = idx
     }
     if idx < 0 || idx >= scene.node_count { return idx }
-    var node = scene.nodes[idx as usize]
-    if node.kind == VIZ_NODE_CONTROL && node.data_slot == VIZ_CONTROL_SLIDER {
-        let denom = if node.layout.w <= 0 { 1 } else { node.layout.w }
-        var rel = px - node.layout.x
+    let kind = scene.nodes[idx as usize].kind
+    let slot = scene.nodes[idx as usize].data_slot
+    if kind == VIZ_NODE_CONTROL && slot == VIZ_CONTROL_SLIDER {
+        let lw = scene.nodes[idx as usize].layout.w
+        let lx = scene.nodes[idx as usize].layout.x
+        let min_v = scene.nodes[idx as usize].min_value
+        let max_v = scene.nodes[idx as usize].max_value
+        let denom = if lw <= 0 { 1 } else { lw }
+        var rel = px - lx
         if rel < 0 { rel = 0 }
         if rel > denom { rel = denom }
         let frac = (rel as f64) / (denom as f64)
-        let value = node.min_value + frac * (node.max_value - node.min_value)
+        let value = min_v + frac * (max_v - min_v)
         viz_scene_set_time_from_slider(scene, idx, value)
-        node = scene.nodes[idx as usize]
-    } else if node.kind == VIZ_NODE_CONTROL && node.data_slot == VIZ_CONTROL_TABS {
-        let tab = viz_scene_tab_from_pointer(&node, px)
-        viz_scene_set_tab(scene, idx, tab)
-        node = scene.nodes[idx as usize]
+    } else if kind == VIZ_NODE_CONTROL && slot == VIZ_CONTROL_TABS {
+        viz_scene_activate_control(scene, idx, px, py)
     }
-    scene.nodes[idx as usize] = node
     idx
 }
 
 fn viz_scene_step_slider_key(scene: &!VizScene, node_idx: i64, direction: i64) with Mut {
     if node_idx < 0 || node_idx >= scene.node_count { return }
-    let node = scene.nodes[node_idx as usize]
-    let step = (node.max_value - node.min_value) / 10.0
-    viz_scene_set_time_from_slider(scene, node_idx, node.value + step * (direction as f64))
+    let min_v = scene.nodes[node_idx as usize].min_value
+    let max_v = scene.nodes[node_idx as usize].max_value
+    let cur = scene.nodes[node_idx as usize].value
+    let step = (max_v - min_v) / 10.0
+    viz_scene_set_time_from_slider(scene, node_idx, cur + step * (direction as f64))
 }
 
 fn viz_scene_step_tab_key(scene: &!VizScene, node_idx: i64, direction: i64) with Mut {
     if node_idx < 0 || node_idx >= scene.node_count { return }
-    let node = scene.nodes[node_idx as usize]
-    let tab = (node.value as i64) + direction
+    let tab = (scene.nodes[node_idx as usize].value as i64) + direction
     viz_scene_set_tab(scene, node_idx, tab)
 }
 
@@ -1019,8 +1200,9 @@ pub fn viz_scene_key_press(scene: &!VizScene, key: i64) -> bool with Mut {
     if idx < 0 || idx >= scene.node_count {
         return false
     }
-    let node = scene.nodes[idx as usize]
-    if node.kind == VIZ_NODE_CONTROL && node.data_slot == VIZ_CONTROL_SLIDER {
+    let kind = scene.nodes[idx as usize].kind
+    let slot = scene.nodes[idx as usize].data_slot
+    if kind == VIZ_NODE_CONTROL && slot == VIZ_CONTROL_SLIDER {
         if key == KEY_LEFT {
             viz_scene_step_slider_key(scene, idx, 0 - 1)
             return true
@@ -1029,7 +1211,7 @@ pub fn viz_scene_key_press(scene: &!VizScene, key: i64) -> bool with Mut {
             viz_scene_step_slider_key(scene, idx, 1)
             return true
         }
-    } else if node.kind == VIZ_NODE_CONTROL && node.data_slot == VIZ_CONTROL_TABS {
+    } else if kind == VIZ_NODE_CONTROL && slot == VIZ_CONTROL_TABS {
         if key == KEY_LEFT {
             viz_scene_step_tab_key(scene, idx, 0 - 1)
             return true
@@ -1038,7 +1220,7 @@ pub fn viz_scene_key_press(scene: &!VizScene, key: i64) -> bool with Mut {
             viz_scene_step_tab_key(scene, idx, 1)
             return true
         }
-    } else if node.kind == VIZ_NODE_CONTROL && node.data_slot == VIZ_CONTROL_TOGGLE {
+    } else if kind == VIZ_NODE_CONTROL && slot == VIZ_CONTROL_TOGGLE {
         if key == KEY_SPACE || key == KEY_RETURN {
             viz_scene_toggle(scene, idx)
             return true
@@ -1068,4 +1250,187 @@ pub fn viz_scene_handle_event(scene: &!VizScene, ev: Event) -> bool with Mut, Di
         return viz_scene_key_press(scene, ev.key)
     }
     false
+}
+
+// A scientific axis occupies no series slot. flags: 0=horizontal, 1=vertical;
+// data_slot stores the requested interval count. Label is a short ASCII unit/title.
+// Returns -1 without scene mutation for invalid/unreadable plans or geometry.
+// Caller reserves margins for endpoint labels and title.
+pub const VIZ_NODE_AXIS: i64 = 20
+
+pub fn viz_add_axis(scene: &!VizScene, lo: f64, hi: f64, intervals: i64,
+    vertical: bool, layout: VizLayout, style: VizStyle) -> i64 with Mut, Div {
+    let ticks = axis_ticks(lo, hi, intervals)
+    if ticks.status != 0 { return 0 - 1 }
+    if layout.x < 0 - 1000000 || layout.x > 1000000 { return 0 - 1 }
+    if layout.y < 0 - 1000000 || layout.y > 1000000 { return 0 - 1 }
+    if layout.w < 1 || layout.w > 1000000 || layout.h < 1 || layout.h > 1000000 { return 0 - 1 }
+    // Longest label is 13 glyphs; 112 px leaves one glyph of separation.
+    if !vertical && layout.w < intervals * 112 { return 0 - 1 }
+    if vertical && layout.h < intervals * 12 { return 0 - 1 }
+    let idx = viz_scene_add_node(scene, VIZ_NODE_AXIS, layout, style, intervals)
+    if idx < 0 { return idx }
+    scene.nodes[idx as usize].min_value = lo
+    scene.nodes[idx as usize].max_value = hi
+    scene.nodes[idx as usize].flags = if vertical { 1 } else { 0 }
+    idx
+}
+
+// Opt-in actual canonical-cell label fitting; legacy viz_add_axis unchanged.
+pub const VIZ_FLAG_FITTED_AXIS:i64=65536
+pub struct FittedAxisResult {
+ pub status:i64,pub node:i64,pub intervals:i64,
+ pub required_left:i64,pub required_right:i64,pub required_top:i64,pub required_bottom:i64,
+}
+pub fn viz_add_fitted_axis(scene:&!VizScene,lo:f64,hi:f64,max_intervals:i64,
+ vertical:bool,layout:VizLayout,document_w:i64,document_h:i64,spec:&ScaleSpec,
+ style:VizStyle)->FittedAxisResult with Mut,Div {
+ var out=FittedAxisResult{status:1,node:-1,intervals:0,
+ required_left:0,required_right:0,required_top:0,required_bottom:0}
+ if !scatter_geometry(layout.x,layout.y,layout.w,layout.h) ||
+    style.stroke_width!=1 || style.alpha!=255 ||
+    style.r<0 || style.r>255 || style.g<0 || style.g>255 || style.b<0 || style.b>255 {return out}
+ if scene.node_count<0 || scene.node_count>=64 {out.status=4;return out}
+ let extent=if vertical {layout.h} else {layout.w}
+ let plan=axis_fit_labels(lo,hi,max_intervals,vertical,layout.x,layout.y,extent,document_w,document_h,spec)
+ out.status=plan.status
+ out.required_left=plan.required_left;out.required_right=plan.required_right
+ out.required_top=plan.required_top;out.required_bottom=plan.required_bottom
+ if plan.status!=0 {return out}
+ let node=viz_scene_add_node(scene,VIZ_NODE_AXIS,layout,style,plan.intervals)
+ scene.nodes[node as usize].min_value=lo;scene.nodes[node as usize].max_value=hi
+ scene.nodes[node as usize].value=spec.constant
+ scene.nodes[node as usize].flags=VIZ_FLAG_FITTED_AXIS+spec.mode*2+(if vertical {1}else{0})
+ out.node=node;out.intervals=plan.intervals
+ out
+}
+
+// Opt-in clipping for linear polylines. Domain belongs to the shared series.
+pub const VIZ_FLAG_CLIP_PLOT: i64 = 256
+pub fn viz_line_set_viewport(scene: &!VizScene, node_idx: i64,
+    xmin: f64, xmax: f64, ymin: f64, ymax: f64) -> bool with Mut {
+    if node_idx < 0 || node_idx >= scene.node_count { return false }
+    let kind: i64 = scene.nodes[node_idx as usize].kind
+    let stroke: i64 = scene.nodes[node_idx as usize].style.stroke_width
+    let data_slot: i64 = scene.nodes[node_idx as usize].data_slot
+    let flags: i64 = scene.nodes[node_idx as usize].flags
+    if (flags & 7680) != 0 { return false }
+    let layout: VizLayout = scene.nodes[node_idx as usize].layout
+    if kind != VIZ_NODE_CHART_LINE || stroke != 1 { return false }
+    if data_slot < 0 || data_slot >= scene.series_count { return false }
+    if layout.x < -1000000 || layout.y < -1000000 { return false }
+    if layout.w < 1 || layout.h < 1 || layout.w > 1000000 || layout.h > 1000000 { return false }
+    if layout.x > 1000000 - layout.w || layout.y > 1000000 - layout.h { return false }
+    if !viz_interval_finite(xmin) || !viz_interval_finite(xmax) || !viz_interval_finite(ymin) || !viz_interval_finite(ymax) { return false }
+    let dx: f64 = xmax - xmin
+    let dy: f64 = ymax - ymin
+    if dx <= 0.0 || dy <= 0.0 || !viz_interval_finite(dx) || !viz_interval_finite(dy) { return false }
+    let slot = data_slot as usize
+    scene.series[slot].x_min = xmin; scene.series[slot].x_max = xmax
+    scene.series[slot].y_min = ymin; scene.series[slot].y_max = ymax
+    scene.nodes[node_idx as usize].flags = flags | VIZ_FLAG_CLIP_PLOT
+    true
+}
+
+// Snapshot the chart style, so the legend sample represents the same series.
+// Visible text is bounded by the shared 8px-cell layout; full label stays in IR.
+pub fn viz_add_series_legend(scene: &!VizScene, chart_idx: i64, text: &[i8; 64],
+    len: i64, layout: VizLayout) -> i64 with Mut, Div {
+    if chart_idx < 0 || chart_idx >= scene.node_count || len < 1 || len > 64 { return 0 - 1 }
+    let kind: i64 = scene.nodes[chart_idx as usize].kind
+    let style: VizStyle = scene.nodes[chart_idx as usize].style
+    if kind != VIZ_NODE_CHART_LINE && kind != VIZ_NODE_CHART_SCATTER &&
+       kind != VIZ_NODE_CHART_BAR && kind != VIZ_NODE_FOREST { return 0 - 1 }
+    var k: i64 = 0
+    while k < len {
+        let ch = text[k as usize] as i64
+        if ch < 32 || ch > 126 { return 0 - 1 }
+        k = k + 1
+    }
+    let plan = legend_layout(layout.x, layout.y, layout.w, layout.h, len)
+    if plan.status != 0 || plan.visible_len < 1 { return 0 - 1 }
+    viz_add_legend(scene, text, len, layout, style)
+}
+
+// Typed vertical standard-uncertainty bar on a raw linear two-point series.
+// Bounds must already equal center +/- u. Level0 means no coverage probability.
+// All validation precedes mutation; existing interval labels cannot be replaced.
+pub fn viz_line_set_standard_uncertainty(scene:&!VizScene,node_idx:i64,
+ center:f64,u:f64)->bool with Mut,Div,Panic {
+ if node_idx<0 || node_idx>=scene.node_count {return false}
+ let kind:i64=scene.nodes[node_idx as usize].kind
+ let slot:i64=scene.nodes[node_idx as usize].data_slot
+ let flags:i64=scene.nodes[node_idx as usize].flags
+ if kind!=VIZ_NODE_CHART_LINE || slot<0 || slot>=scene.series_count {return false}
+ if (flags & 7680)!=0 {return false}
+ let count:i64=scene.series[slot as usize].n
+ let previous:i64=scene.series[slot as usize].interval_kind
+ if count!=2 || (previous!=VIZ_INTERVAL_NONE && previous!=VIZ_INTERVAL_STANDARD_UNCERTAINTY) {return false}
+ if !viz_interval_finite(center) || !viz_interval_finite(u) || u<0.0 {return false}
+ let lower=center-u
+ let upper=center+u
+ if !viz_interval_finite(lower) || !viz_interval_finite(upper) {return false}
+ let x0:f64=scene.series[slot as usize].xs[0]
+ let x1:f64=scene.series[slot as usize].xs[1]
+ let y0:f64=scene.series[slot as usize].ys[0]
+ let y1:f64=scene.series[slot as usize].ys[1]
+ if !viz_interval_finite(x0) || x0!=x1 || y0!=lower || y1!=upper {return false}
+ scene.series[slot as usize].lower[0]=lower
+ scene.series[slot as usize].lower[1]=lower
+ scene.series[slot as usize].upper[0]=upper
+ scene.series[slot as usize].upper[1]=upper
+ scene.series[slot as usize].interval_level=0.0
+ scene.series[slot as usize].interval_kind=VIZ_INTERVAL_STANDARD_UNCERTAINTY
+ return true
+}
+
+// Checked raw-linear scatter viewport. Validate completely before mutation.
+pub fn viz_scatter_set_viewport(scene:&!VizScene,node_idx:i64,
+    xmin:f64,xmax:f64,ymin:f64,ymax:f64)->bool with Mut {
+    if node_idx < 0 || node_idx >= scene.node_count { return false }
+    let slot:i64=scene.nodes[node_idx as usize].data_slot
+    if scene.nodes[node_idx as usize].kind != VIZ_NODE_CHART_SCATTER ||
+       slot < 0 || slot >= scene.series_count { return false }
+    let flags:i64=scene.nodes[node_idx as usize].flags
+    if (flags & 7680) != 0 { return false }
+    let layout:VizLayout=scene.nodes[node_idx as usize].layout
+    if !scatter_geometry(layout.x,layout.y,layout.w,layout.h) { return false }
+    let style:VizStyle=scene.nodes[node_idx as usize].style
+    if style.stroke_width != 1 || style.alpha != 255 ||
+       style.r < 0 || style.r > 255 || style.g < 0 || style.g > 255 ||
+       style.b < 0 || style.b > 255 { return false }
+    if !scatter_finite(xmin) || !scatter_finite(xmax) ||
+       !scatter_finite(ymin) || !scatter_finite(ymax) { return false }
+    let dx=xmax-xmin; let dy=ymax-ymin
+    if dx <= 0.0 || dy <= 0.0 || !scatter_finite(dx) || !scatter_finite(dy) { return false }
+    scene.series[slot as usize].x_min=xmin; scene.series[slot as usize].x_max=xmax
+    scene.series[slot as usize].y_min=ymin; scene.series[slot as usize].y_max=ymax
+    scene.nodes[node_idx as usize].flags=flags | VIZ_FLAG_CLIP_PLOT
+    true
+}
+
+
+// Raw-linear bars may be cropped to a window excluding zero.
+pub fn viz_bar_set_viewport(scene:&!VizScene,node_idx:i64,
+    xmin:f64,xmax:f64,ymin:f64,ymax:f64)->bool with Mut {
+    if node_idx < 0 || node_idx >= scene.node_count { return false }
+    let slot:i64=scene.nodes[node_idx as usize].data_slot
+    if scene.nodes[node_idx as usize].kind != VIZ_NODE_CHART_BAR ||
+       slot < 0 || slot >= scene.series_count { return false }
+    let flags:i64=scene.nodes[node_idx as usize].flags
+    if (flags & 7680) != 0 { return false }
+    let layout:VizLayout=scene.nodes[node_idx as usize].layout
+    if !scatter_geometry(layout.x,layout.y,layout.w,layout.h) { return false }
+    let style:VizStyle=scene.nodes[node_idx as usize].style
+    if style.stroke_width != 1 || style.alpha != 255 ||
+       style.r < 0 || style.r > 255 || style.g < 0 || style.g > 255 ||
+       style.b < 0 || style.b > 255 { return false }
+    if !scatter_finite(xmin) || !scatter_finite(xmax) ||
+       !scatter_finite(ymin) || !scatter_finite(ymax) { return false }
+    let dx=xmax-xmin; let dy=ymax-ymin
+    if dx <= 0.0 || dy <= 0.0 || !scatter_finite(dx) || !scatter_finite(dy) { return false }
+    scene.series[slot as usize].x_min=xmin; scene.series[slot as usize].x_max=xmax
+    scene.series[slot as usize].y_min=ymin; scene.series[slot as usize].y_max=ymax
+    scene.nodes[node_idx as usize].flags=flags | VIZ_FLAG_CLIP_PLOT
+    true
 }

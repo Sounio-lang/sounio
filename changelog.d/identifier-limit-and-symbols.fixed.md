@@ -1,0 +1,5 @@
+Fixed (ADR-015 row 11, first slice, both engines): an identifier longer than 256 bytes is refused with its location (E282) instead of being cut at 256 with the rest read as a second name (Madaros) or accepted (`lean_single`). `ε`, `∂`, `∇` and `∞` are identifier characters, alone or inside a longer name: `let ε = 3`, `∂x`, `a∞`, `εε`. Madaros could not lex `ε` as a name at all (it became error tokens consumed by the Knowledge bound syntax), and `lean_single` took `ε` only as a single-character name.
+
+Probes: `id_long300` refused, `id_long256` accepted, `id_epsilon` accepted on both. The limit 256 is the cap the lexer loop already had, not a ruled value; the 128-byte clamps downstream are unchanged. Not in this slice: the UAX #31 alphabet (`id_nonascii` with `σ`/`κ`/`é` still fails), NFC, and `⊥`/`⊤` as tokens of their own (they still go through the Knowledge-bound syntax as before).
+
+Pins: `tests/run-pass/ident_greek_symbols_{madaros,lean_single}.sio`, `tests/compile-fail/ident_too_long_{madaros,lean_single}.sio`.

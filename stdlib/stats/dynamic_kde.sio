@@ -1,0 +1,149 @@
+// Fixed-bandwidth Gaussian KDE with explicit masks and availability flags.
+// Caller-owned staging, no Alloc in the kernel. See DYNAMIC_KDE.md.
+use collections::numeric_buffer::{NumericBuffer,numeric_buffer_status,numeric_buffer_len,numeric_buffer_at,numeric_buffer_set}
+use collections::integer_buffer::{IntegerBuffer,integer_buffer_status,integer_buffer_len,integer_buffer_at,integer_buffer_set}
+use math::pure::{is_finite,ln_checked,exp}
+use linalg::least_squares_scale::{least_squares_scaled_product}
+pub struct DynamicKdeResult {
+ pub status:i64,pub observations:i64,pub selected:i64,pub grid_size:i64,
+ pub pairs:i64,pub linear_available:i64,pub log_available:i64,
+}
+struct KdeKernel {status:i64,value:f64}
+fn kde_empty(n:i64,g:i64)->DynamicKdeResult {
+ DynamicKdeResult{status:1,observations:n,selected:0,grid_size:g,pairs:0,linear_available:0,log_available:0}
+}
+// A nonrepresentable standardized distance or log kernel is unavailable.
+// The public flags do not claim a finite log from an infinite intermediate.
+fn kde_kernel(sample:f64,point:f64,h:f64)->KdeKernel with Mut,Div,Panic {
+ let difference=sample-point
+ var value:f64=0.0
+ if is_finite(difference) {
+  // One final IEEE division; a rounded-zero distance has a center-valued
+  // Gaussian factor and must not erase an otherwise representable density.
+  value=difference/h
+  if !is_finite(value) {return KdeKernel{status:1,value:0.0}}
+ } else {
+  // Overflow implies opposite, large finite endpoints: halving loses no
+  // subnormal contribution in this branch and the balanced restore avoids 2*half.
+  let half=sample*0.5-point*0.5
+  if !is_finite(half) {return KdeKernel{status:1,value:0.0}}
+  let ratio=least_squares_scaled_product(half,2.0,1.0,h,1.0,1.0)
+  if ratio.status!=0 {return KdeKernel{status:1,value:0.0}}
+  value=ratio.value
+ }
+ let logarithm=-(value*0.5)*value
+ if !is_finite(logarithm) {return KdeKernel{status:1,value:0.0}}
+ return KdeKernel{status:0,value:logarithm}
+}
+pub fn gaussian_kde_dynamic(
+ observations:&NumericBuffer,mask:&IntegerBuffer,grid:&NumericBuffer,
+ h:f64,max_pairs:i64,density:&!NumericBuffer,log_density:&!NumericBuffer,
+ flags:&!IntegerBuffer,work:&!NumericBuffer,flag_work:&!IntegerBuffer
+)->DynamicKdeResult with Mut,Div,Panic {
+ let n=numeric_buffer_len(observations)
+ let g=numeric_buffer_len(grid)
+ var out=kde_empty(n,g)
+ if numeric_buffer_status(observations)!=0 || integer_buffer_status(mask)!=0 ||
+ numeric_buffer_status(grid)!=0 || numeric_buffer_status(density)!=0 ||
+ numeric_buffer_status(log_density)!=0 || integer_buffer_status(flags)!=0 ||
+ numeric_buffer_status(work)!=0 || integer_buffer_status(flag_work)!=0 {return out}
+ if n<0 || g<0 || max_pairs<0 {return out}
+ if integer_buffer_len(mask)!=n {return out}
+ if g>9223372036854775807/2 {return out}
+ if numeric_buffer_len(density)<g || numeric_buffer_len(log_density)<g ||
+ integer_buffer_len(flags)<g || numeric_buffer_len(work)<2*g || integer_buffer_len(flag_work)<g {return out}
+ if !is_finite(h) {out.status=2;return out}
+ if h<=0.0 {return out}
+ // Full input preflight before scratch or outputs; invalid mask is explicit.
+ var selected:i64=0
+ var i:i64=0
+ while i<n {
+  let active=integer_buffer_at(mask,i)
+  if active!=0 && active!=1 {out.status=6;return out}
+  if active==1 {
+   if !is_finite(numeric_buffer_at(observations,i)) {out.status=2;return out}
+   selected=selected+1
+  }
+  i=i+1
+ }
+ i=0
+ while i<g {if !is_finite(numeric_buffer_at(grid,i)) {out.status=2;return out};i=i+1}
+ if selected==0 {out.status=3;return out}
+ if g>0 {
+  if selected>max_pairs/g {out.status=5;return out}
+ }
+ // Multiplication is now bounded by max_pairs<=i64MAX, including g=0.
+ let pairs=selected*g
+ let log_n=ln_checked(selected as f64)
+ let log_h=ln_checked(h)
+ if log_n.status!=0 || log_h.status!=0 {out.status=4;return out}
+ var point_index:i64=0
+ var n_linear:i64=0
+ var n_log:i64=0
+ while point_index<g {
+  let point=numeric_buffer_at(grid,point_index)
+  var have_kernel=false
+  var maximum:f64=0.0
+  i=0
+  while i<n {
+   if integer_buffer_at(mask,i)==1 {
+    let kernel=kde_kernel(numeric_buffer_at(observations,i),point,h)
+    if kernel.status==0 {
+     if !have_kernel {maximum=kernel.value;have_kernel=true}
+     else {if kernel.value>maximum {maximum=kernel.value}}
+    }
+   }
+   i=i+1
+  }
+  var pdf:f64=0.0
+  var log_pdf:f64=0.0
+  var available:i64=0
+  if have_kernel {
+   var sum:f64=0.0
+   var correction:f64=0.0
+   i=0
+   while i<n {
+    if integer_buffer_at(mask,i)==1 {
+     let kernel=kde_kernel(numeric_buffer_at(observations,i),point,h)
+     if kernel.status==0 {
+      let term=exp(kernel.value-maximum)
+      if !is_finite(term) || term<0.0 {out.status=4;return out}
+      let adjusted=term-correction
+      let next=sum+adjusted;correction=(next-sum)-adjusted;sum=next
+     }
+    }
+    i=i+1
+   }
+   if !is_finite(sum) || sum<=0.0 {out.status=4;return out}
+   let log_sum=ln_checked(sum)
+   if log_sum.status!=0 {out.status=4;return out}
+   let normalization=log_sum.value-log_n.value-log_h.value-0.91893853320467274178032973640562
+   let candidate=maximum+normalization
+   if is_finite(candidate) {
+    log_pdf=candidate;available=2;n_log=n_log+1
+    let pdf_candidate=exp(candidate)
+    if is_finite(pdf_candidate) {
+     if pdf_candidate>0.0 {pdf=pdf_candidate;available=3;n_linear=n_linear+1}
+    }
+   }
+  }
+  numeric_buffer_set(work,point_index,pdf)
+  numeric_buffer_set(work,g+point_index,log_pdf)
+  integer_buffer_set(flag_work,point_index,available)
+  point_index=point_index+1
+ }
+ // Single public commit after every grid point succeeds.
+ i=0
+ while i<g {
+  let pdf=numeric_buffer_at(work,i)
+  let log_pdf=numeric_buffer_at(work,g+i)
+  let available=integer_buffer_at(flag_work,i)
+  numeric_buffer_set(density,i,pdf)
+  numeric_buffer_set(log_density,i,log_pdf)
+  integer_buffer_set(flags,i,available)
+  i=i+1
+ }
+ out.status=0;out.selected=selected;out.pairs=pairs
+ out.linear_available=n_linear;out.log_available=n_log
+ out
+}

@@ -2,8 +2,8 @@
 topic_id: repo.docs.internal.garden.seeds.2026-05-09-above-the-stars
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
-validated_by: A2
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.garden.seeds.2026-05-09-above-the-stars
 -->
 

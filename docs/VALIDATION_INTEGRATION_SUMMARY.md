@@ -2,8 +2,8 @@
 topic_id: repo.docs.validation-integration-summary
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
-validated_by: A2
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.validation-integration-summary
 -->
 
@@ -233,6 +233,5 @@ bash scripts/ci/sounio_validation.sh validate 2>&1 | tee debug.log
 
 ---
 
-**Status**: ✅ Complete and ready for use
-**Last Updated**: $(date -u +'%Y-%m-%d')
-**Integration Level**: Production-ready
+**Status: research language (pre-1.0).** APIs may change; not recommended for production use.
+**Note label:** the checklist above is a historical integration note, not the current project status.

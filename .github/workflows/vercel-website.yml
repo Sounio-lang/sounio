@@ -17,6 +17,9 @@ on:
 
 permissions:
   contents: read
+  # The IndexNow snapshot is an Actions artifact from the previous production
+  # run. Listing and uploading it needs actions: write. Contents stay read-only.
+  actions: write
 
 concurrency:
   group: vercel-website-${{ github.event_name == 'workflow_dispatch' && inputs.target || 'production' }}
@@ -133,3 +136,26 @@ jobs:
           else
             echo "Deployed production: ${{ steps.deploy_production.outputs.url }}"
           fi
+
+      # Only after Deploy production succeeds. A non-200/202 from IndexNow is
+      # logged and does not fail the job. The snapshot is uploaded only when
+      # the submission is accepted, so the next run retries the same diff.
+      # With no previous artifact, every www URL in the sitemap is submitted.
+      - name: Submit changed URLs to IndexNow
+        id: indexnow
+        if: (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.target == 'production')) && steps.deploy_production.outcome == 'success'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node website/scripts/indexnow-ping.mjs --ci || true
+
+      - name: Save IndexNow sitemap snapshot
+        if: (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.target == 'production')) && steps.deploy_production.outcome == 'success' && steps.indexnow.outputs.saved == 'true'
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: indexnow-sitemap
+          path: website/indexnow-snapshot/sitemap-0.xml
+          retention-days: 90
+          if-no-files-found: ignore

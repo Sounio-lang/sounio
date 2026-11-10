@@ -35,6 +35,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 cd "$REPO_ROOT"
+# shellcheck source=../lib/classify_compile.sh
+source "$REPO_ROOT/scripts/lib/classify_compile.sh"
 
 CONTRACT="scripts/research/self_falsifying_compilation_line_r2_contract.py"
 SPEC="docs/research/self_falsifying_compilation_line_r2_2026-07-26.md"
@@ -51,6 +53,48 @@ fail() {
 [[ -f "$SPEC" ]] || fail "spec doc missing: $SPEC"
 [[ -f "$CONTRACT" ]] || fail "contract missing: $CONTRACT"
 
+TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/sfcl_r2.XXXXXX")"
+trap 'rm -rf "$TMP_DIR"' EXIT
+
+claim_refusal() {
+    local rc="$1" log="$2" marker="$3"
+    # The verdict marker can be printed before a crash or timeout. Only an
+    # ordinary non-zero exit carrying that marker witnesses a refusal (#2425).
+    sounio_expect_failed_exit "$rc" "$log" "$marker"
+}
+
+refusal_classifier_self_test() {
+    local marker="CLAIM_TOKEN_MISMATCH sfc_token_drifts"
+    local valid="$TMP_DIR/self-test-valid.log"
+    local crash="$TMP_DIR/self-test-crash.log"
+
+    printf '%s\n' "$marker" >"$valid"
+    claim_refusal 1 "$valid" "$marker" \
+        || fail "refusal_self_test_valid: $(sounio_refusal_reason)"
+
+    cp "$valid" "$crash"
+    printf '%s\n' 'Segmentation fault (core dumped)' >>"$crash"
+    if claim_refusal 139 "$crash" "$marker"; then
+        fail "refusal_self_test_crash_accepted"
+    fi
+    if claim_refusal 124 "$valid" "$marker"; then
+        fail "refusal_self_test_timeout_accepted"
+    fi
+    if claim_refusal 1 "$crash" "$marker"; then
+        fail "refusal_self_test_fatal_text_accepted"
+    fi
+    if claim_refusal 0 "$valid" "$marker"; then
+        fail "refusal_self_test_rc0_accepted"
+    fi
+
+    echo "SELF_FALSIFYING_R2_REFUSAL_SELFTEST_OK valid=1 crash=1 fatal_text=1 timeout=1 rc0=1"
+}
+
+refusal_classifier_self_test
+if [[ "${SOUNIO_SFCL_R2_SELF_TEST_ONLY:-0}" == "1" ]]; then
+    exit 0
+fi
+
 # ---------------------------------------------------------------- compile arm
 
 if [[ "${SFCL_R2_RUN_COMPILE:-0}" == "1" ]]; then
@@ -60,27 +104,26 @@ if [[ "${SFCL_R2_RUN_COMPILE:-0}" == "1" ]]; then
 
     ulimit -s unlimited 2>/dev/null || true
     export SOUNIO_STDLIB_PATH="${SOUNIO_STDLIB_PATH:-$REPO_ROOT/stdlib}"
-    TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/sfcl_r2.XXXXXX")"
-    trap 'rm -rf "$TMP_DIR"' EXIT
 
     # run_probe <name> <source> <expect_rc:zero|nonzero> <marker> <elf:yes|no>
     run_probe() {
         local name="$1" src="$2" expect_rc="$3" marker="$4" want_elf="$5"
         local elf="$TMP_DIR/${name}.elf"
+        local log="$TMP_DIR/${name}.log"
+        local rc=0
         rm -f "$elf"
-        set +e
-        local out rc
-        out="$("$RAW" run "$src" -o "$elf" --verify-claims 2>&1)"
-        rc=$?
-        set -e
+        sounio_capture_rc rc "$log" -- "$RAW" run "$src" -o "$elf" --verify-claims
         if [[ "$expect_rc" == "zero" && $rc -ne 0 ]]; then
-            echo "$out" | tail -20 >&2; fail "$name: expected exit 0, got $rc"
+            tail -20 "$log" >&2; fail "$name: expected exit 0, got $rc"
         fi
-        if [[ "$expect_rc" == "nonzero" && $rc -eq 0 ]]; then
-            echo "$out" | tail -20 >&2; fail "$name: expected non-zero exit, got 0"
+        if [[ "$expect_rc" == "nonzero" ]]; then
+            claim_refusal "$rc" "$log" "$marker" || {
+                tail -20 "$log" >&2
+                fail "$name: not a clean refusal: $(sounio_refusal_reason)"
+            }
         fi
-        grep -q "$marker" <<<"$out" \
-            || { echo "$out" | tail -20 >&2; fail "$name: expected marker '$marker'"; }
+        grep -q "$marker" "$log" \
+            || { tail -20 "$log" >&2; fail "$name: expected marker '$marker'"; }
         if [[ "$want_elf" == "yes" && ! -f "$elf" ]]; then
             fail "$name: expected an ELF, none emitted"
         fi

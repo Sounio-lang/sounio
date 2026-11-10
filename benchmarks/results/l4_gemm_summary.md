@@ -80,10 +80,4 @@ Source: `l4_scale_stability_report.v1.txt`
 
 ## Reproduction
 
-```bash
-# Requires SSH access to gpu-appliance-l4
-GPU_HOST=gpu-appliance-l4 GEMM_M=4096 GEMM_N=4096 GEMM_K=4096 \
-  bash scripts/archive/gpu_test_runner.sh
-```
-
-See `scripts/archive/gpu_test_runner.sh` for full configuration options.
+The runner that produced this table was removed with `scripts/archive/`. Git history holds `gpu_test_runner.sh`. The numbers above are the recorded L4 result.

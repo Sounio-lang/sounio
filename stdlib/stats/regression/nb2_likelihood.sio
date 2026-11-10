@@ -1,0 +1,460 @@
+// Full scalar NB2/Poisson log PMF via an alpha-dependent saturated normalizer.
+// Reusable private workspaces preserve legacy formulas and staged availability.
+use math::pure::{CheckedLog,is_finite,ln_checked_into}
+use math::logarithmic::{log1p_checked_into}
+use special::gamma::{lgamma}
+use collections::numeric_buffer::{NumericBuffer,numeric_buffer_status,numeric_buffer_len,numeric_buffer_at}
+use collections::integer_buffer::{IntegerBuffer,integer_buffer_status,integer_buffer_len,integer_buffer_at}
+use linalg::least_squares_scale::{LeastSquaresNumber}
+use stats::regression::nb2_log_increment::{nb2_same_alpha_increment_into,nb2_dispersion_increment_into}
+use stats::regression::nb2_deviance::{Nb2DevianceSlot,nb2_deviance_slot,nb2_deviance_slot_reset,nb2_deviance_into,nb2_deviance_slot_status,nb2_deviance_slot_deviance_status,nb2_deviance_slot_deviance,nb2_deviance_slot_residual}
+pub struct Nb2Normalizer {
+ pub status:i64, pub count:i64, pub value:f64, pub poisson_limit:bool,
+ pub stirling_used:bool, pub remainder_estimate:f64,
+ pub remainder_estimate_available:bool,
+}
+pub struct Nb2Likelihood {
+ pub status:i64, pub count:i64, pub log_probability:f64,
+ pub normalizer_status:i64, pub saturated_log_probability:f64,
+ pub residual_status:i64, pub residual:f64,
+ pub deviance_status:i64, pub deviance:f64, pub poisson_limit:bool,
+ pub stirling_used:bool, pub normalizer_remainder_estimate:f64,
+ pub remainder_estimate_available:bool, pub assumptions_assessed:bool,
+}
+pub struct Nb2LikelihoodSlot {
+ result:Nb2Likelihood, normalizer:Nb2Normalizer, poisson:Nb2Normalizer,
+ unit:Nb2DevianceSlot, correction_estimates:[f64;3], correction_available:[bool;3],
+ number_status:i64, number_value:f64, log_work:CheckedLog,
+}
+pub fn nb2_likelihood_slot()->Nb2LikelihoodSlot {
+ Nb2LikelihoodSlot{
+ result:Nb2Likelihood{status:5,count:0,log_probability:0.0,normalizer_status:2,
+ saturated_log_probability:0.0,residual_status:2,residual:0.0,deviance_status:2,
+ deviance:0.0,poisson_limit:false,stirling_used:false,normalizer_remainder_estimate:0.0,
+ remainder_estimate_available:false,assumptions_assessed:false},
+ normalizer:Nb2Normalizer{status:5,count:0,value:0.0,poisson_limit:false,stirling_used:false,remainder_estimate:0.0,remainder_estimate_available:false},
+ poisson:Nb2Normalizer{status:5,count:0,value:0.0,poisson_limit:false,stirling_used:false,remainder_estimate:0.0,remainder_estimate_available:false},
+ unit:nb2_deviance_slot(),correction_estimates:[0.0;3],correction_available:[false;3],
+ number_status:5,number_value:0.0,log_work:CheckedLog{status:2,value:0.0}}
+}
+fn nl_normalizer_reset(count:i64,s:&!Nb2LikelihoodSlot) with Mut {
+ s.normalizer.status=5;s.normalizer.count=count;s.normalizer.value=0.0
+ s.normalizer.poisson_limit=false;s.normalizer.stirling_used=false
+ s.normalizer.remainder_estimate=0.0;s.normalizer.remainder_estimate_available=false
+}
+fn nl_poisson_reset(count:i64,s:&!Nb2LikelihoodSlot) with Mut {
+ s.poisson.status=5;s.poisson.count=count;s.poisson.value=0.0
+ s.poisson.poisson_limit=false;s.poisson.stirling_used=false
+ s.poisson.remainder_estimate=0.0;s.poisson.remainder_estimate_available=false
+}
+pub fn nb2_likelihood_slot_reset(s:&!Nb2LikelihoodSlot) with Mut,Panic {
+ s.number_status=5;s.number_value=0.0;s.log_work.status=2;s.log_work.value=0.0
+ s.result.status=5;s.result.count=0;s.result.log_probability=0.0
+ s.result.normalizer_status=2;s.result.saturated_log_probability=0.0
+ s.result.residual_status=2;s.result.residual=0.0;s.result.deviance_status=2
+ s.result.deviance=0.0;s.result.poisson_limit=false;s.result.stirling_used=false
+ s.result.normalizer_remainder_estimate=0.0;s.result.remainder_estimate_available=false
+ s.result.assumptions_assessed=false
+ nl_normalizer_reset(0,s);nl_poisson_reset(0,s);nb2_deviance_slot_reset(&!s.unit)
+ var i:i64=0
+ while i<3 {s.correction_estimates[i as usize]=0.0;s.correction_available[i as usize]=false;i=i+1}
+}
+fn nl_normalizer_fail(status:i64,count:i64,s:&!Nb2LikelihoodSlot)->i64 with Mut {
+ nl_normalizer_reset(count,s);s.normalizer.status=status;status
+}
+fn nl_likelihood_fail(status:i64,count:i64,s:&!Nb2LikelihoodSlot)->i64 with Mut,Panic {
+ nb2_likelihood_slot_reset(s);s.result.status=status;s.result.count=count;status
+}
+fn nl_copy_poisson(s:&!Nb2LikelihoodSlot) with Mut {
+ s.normalizer.status=s.poisson.status;s.normalizer.count=s.poisson.count
+ s.normalizer.value=s.poisson.value;s.normalizer.poisson_limit=s.poisson.poisson_limit
+ s.normalizer.stirling_used=s.poisson.stirling_used
+ s.normalizer.remainder_estimate=s.poisson.remainder_estimate
+ s.normalizer.remainder_estimate_available=s.poisson.remainder_estimate_available
+}
+pub fn nb2_likelihood_slot_status(s:&Nb2LikelihoodSlot)->i64 {s.result.status}
+pub fn nb2_likelihood_slot_count(s:&Nb2LikelihoodSlot)->i64 {s.result.count}
+pub fn nb2_likelihood_slot_log_probability(s:&Nb2LikelihoodSlot)->f64 {s.result.log_probability}
+pub fn nb2_likelihood_slot_normalizer_status(s:&Nb2LikelihoodSlot)->i64 {s.result.normalizer_status}
+pub fn nb2_likelihood_slot_saturated_log_probability(s:&Nb2LikelihoodSlot)->f64 {s.result.saturated_log_probability}
+pub fn nb2_likelihood_slot_residual_status(s:&Nb2LikelihoodSlot)->i64 {s.result.residual_status}
+pub fn nb2_likelihood_slot_residual(s:&Nb2LikelihoodSlot)->f64 {s.result.residual}
+pub fn nb2_likelihood_slot_deviance_status(s:&Nb2LikelihoodSlot)->i64 {s.result.deviance_status}
+pub fn nb2_likelihood_slot_deviance(s:&Nb2LikelihoodSlot)->f64 {s.result.deviance}
+pub fn nb2_likelihood_slot_poisson_limit(s:&Nb2LikelihoodSlot)->bool {s.result.poisson_limit}
+pub fn nb2_likelihood_slot_stirling_used(s:&Nb2LikelihoodSlot)->bool {s.result.stirling_used}
+pub fn nb2_likelihood_slot_remainder_estimate(s:&Nb2LikelihoodSlot)->f64 {s.result.normalizer_remainder_estimate}
+pub fn nb2_likelihood_slot_remainder_estimate_available(s:&Nb2LikelihoodSlot)->bool {s.result.remainder_estimate_available}
+pub fn nb2_likelihood_slot_assumptions_assessed(s:&Nb2LikelihoodSlot)->bool {s.result.assumptions_assessed}
+// Corr(z) = sum B_(2k)/(2k(2k-1)z^(2k-1)), k=1..9, z>=8.
+// Next-term magnitude is an evaluated truncation estimate, NOT a rounded bound.
+// Private numeric scratch and child checked-log are reused, never reconstructed.
+fn nl_number_reset(s:&!Nb2LikelihoodSlot) with Mut {
+ s.number_status=5;s.number_value=0.0
+}
+fn nl_corr9_into(z:f64,s:&!Nb2LikelihoodSlot,index:i64)->i64 with Mut,Div,Panic {
+ nl_number_reset(s)
+ if index<0 || index>=3 {return 5}
+ s.correction_estimates[index as usize]=0.0;s.correction_available[index as usize]=false
+ if !is_finite(z) || z<8.0 {return 5}
+ let u=1.0/z
+ let v=u*u
+ var poly:f64=43867.0/244188.0
+ poly= -3617.0/122400.0+v*poly
+ poly=1.0/156.0+v*poly
+ poly= -691.0/360360.0+v*poly
+ poly=1.0/1188.0+v*poly
+ poly= -1.0/1680.0+v*poly
+ poly=1.0/1260.0+v*poly
+ poly= -1.0/360.0+v*poly
+ poly=1.0/12.0+v*poly
+ let value=u*poly
+ var power=u
+ var k:i64=0
+ while k<9 {power=power*v k=k+1}
+ let estimate=(174611.0/125400.0)*power
+ if !is_finite(value) || value<=0.0 || !is_finite(estimate) || estimate<0.0 {return 5}
+ s.correction_estimates[index as usize]=estimate;s.correction_available[index as usize]=estimate>0.0
+ s.number_status=0;s.number_value=value
+ return 0
+}
+fn nl_log1p_ratio_into(numerator:f64,denominator:f64,s:&!Nb2LikelihoodSlot)->i64 with Mut,Div,Panic {
+ nl_number_reset(s)
+ let ratio=numerator/denominator
+ if is_finite(ratio) {
+  let status=log1p_checked_into(ratio,&!s.log_work)
+  let value:f64=s.log_work.value
+  if status!=0 {return 5}
+  s.number_status=0;s.number_value=value
+  return 0
+ }
+ // Overflowing positive ratio. Preserve the existing checked-log difference.
+ let a_status=ln_checked_into(numerator,&!s.log_work)
+ let a_value:f64=s.log_work.value
+ let b_status=ln_checked_into(denominator,&!s.log_work)
+ let b_value:f64=s.log_work.value
+ if a_status!=0 || b_status!=0 {return 5}
+ let value=a_value-b_value
+ if !is_finite(value) || value<=0.0 {return 5}
+ s.number_status=0;s.number_value=value
+ return 0
+}
+fn nl_log_factorial_small_into(count:i64,s:&!Nb2LikelihoodSlot)->i64 with Mut,Div,Panic {
+ nl_number_reset(s)
+ var sum:f64=0.0
+ var correction:f64=0.0
+ var k:i64=1
+ while k<=count {
+  let status=ln_checked_into(k as f64,&!s.log_work)
+  let logged_value:f64=s.log_work.value
+  if status!=0 {return 5}
+  let adjusted=logged_value-correction
+  let next=sum+adjusted
+  correction=(next-sum)-adjusted
+  sum=next
+  k=k+1
+ }
+ s.number_status=0;s.number_value=sum
+ return 0
+}
+fn nl_poisson_saturated_into(count:i64,s:&!Nb2LikelihoodSlot)->i64 with Mut,Div,Panic {
+ nl_poisson_reset(count,s)
+ s.poisson.poisson_limit=true
+ if count==0 {
+  s.poisson.status=0
+  s.poisson.remainder_estimate_available=true
+  return s.poisson.status
+ }
+ let y=count as f64
+ let ly_status=ln_checked_into(y,&!s.log_work)
+ let ly_value:f64=s.log_work.value
+ if ly_status!=0 {return s.poisson.status}
+ if count<8 {
+  let factorial_status=nl_log_factorial_small_into(count,s)
+  let factorial_value:f64=s.number_value
+  if factorial_status!=0 {return s.poisson.status}
+  let value=(y*ly_value-y)-factorial_value
+  if !is_finite(value) || value>0.0 {return s.poisson.status}
+  s.poisson.status=0
+  s.poisson.value=value
+  s.poisson.remainder_estimate_available=true
+  return s.poisson.status
+ }
+ let corr_status=nl_corr9_into(y,s,0)
+ let corr_value:f64=s.number_value
+ if corr_status!=0 {return s.poisson.status}
+ let value= -0.5*(1.83787706640934548356+ly_value)-corr_value
+ if !is_finite(value) || value>0.0 {return s.poisson.status}
+ s.poisson.status=0
+ s.poisson.value=value
+ s.poisson.stirling_used=true
+ s.poisson.remainder_estimate=s.correction_estimates[0]
+ s.poisson.remainder_estimate_available=s.correction_available[0]
+ return s.poisson.status
+}
+// status1 negative count;3 invalid alpha;4 count>2^53;5 arithmetic.
+// value=log P(y|mean=y,alpha), with count0 normalizer exactly0.
+fn nl_saturated_into(count:i64,alpha:f64,s:&!Nb2LikelihoodSlot)->i64 with Mut,Div,Panic {
+ if count<0 {return nl_normalizer_fail(1,count,s)}
+ if !is_finite(alpha) || alpha<0.0 {return nl_normalizer_fail(3,count,s)}
+ if count>9007199254740992 {return nl_normalizer_fail(4,count,s)}
+ if alpha==0.0 {let ignored=nl_poisson_saturated_into(count,s);nl_copy_poisson(s);return s.normalizer.status}
+ nl_normalizer_reset(count,s)
+ if count==0 {
+  s.normalizer.status=0
+  s.normalizer.remainder_estimate_available=true
+  return s.normalizer.status
+ }
+ let r=1.0/alpha
+ if !is_finite(r) || r<=0.0 {return s.normalizer.status}
+ let y=count as f64
+ let ly_status=ln_checked_into(y,&!s.log_work)
+ let ly_value:f64=s.log_work.value
+ let lr_status=ln_checked_into(r,&!s.log_work)
+ let lr_value:f64=s.log_work.value
+ if ly_status!=0 || lr_status!=0 {return s.normalizer.status}
+ let sum=r+y
+ if !is_finite(sum) || sum<=0.0 {return s.normalizer.status}
+ if r>=8.0 {
+  let poisson_status=nl_poisson_saturated_into(count,s)
+  let large_status=nl_corr9_into(sum,s,1)
+  let large_value:f64=s.number_value
+  let small_status=nl_corr9_into(r,s,2)
+  let small_value:f64=s.number_value
+  let ratio_status=nl_log1p_ratio_into(y,r,s)
+  let ratio_value:f64=s.number_value
+  if poisson_status!=0 || large_status!=0 || small_status!=0 || ratio_status!=0 {return s.normalizer.status}
+  let value=(s.poisson.value-0.5*ratio_value)+(large_value-small_value)
+  if !is_finite(value) || value>0.0 {return s.normalizer.status}
+  s.normalizer.status=0
+  s.normalizer.value=value
+  s.normalizer.stirling_used=true
+  s.normalizer.remainder_estimate_available=s.poisson.remainder_estimate_available && s.correction_available[1] && s.correction_available[2]
+  if s.normalizer.remainder_estimate_available {
+   s.normalizer.remainder_estimate=(s.poisson.remainder_estimate+s.correction_estimates[1])+s.correction_estimates[2]
+  }
+  return s.normalizer.status
+ }
+ if count>=8 {
+  // Gamma(r) is evaluated through r+1, avoiding reflection at tiny positive r.
+  let gamma_shift=lgamma(r+1.0)
+  let gamma_r=gamma_shift-lr_value
+  let logged_sum_status=ln_checked_into(sum,&!s.log_work)
+  let logged_sum_value:f64=s.log_work.value
+  let large_status=nl_corr9_into(sum,s,1)
+  let large_value:f64=s.number_value
+  let small_status=nl_corr9_into(y,s,2)
+  let small_value:f64=s.number_value
+  if !is_finite(gamma_r) || logged_sum_status!=0 || large_status!=0 || small_status!=0 {return s.normalizer.status}
+  let value=((-0.5*(logged_sum_value+ly_value)-r)+r*lr_value-gamma_r)+(large_value-small_value)
+  if !is_finite(value) || value>0.0 {return s.normalizer.status}
+  s.normalizer.status=0
+  s.normalizer.value=value
+  s.normalizer.stirling_used=true
+  s.normalizer.remainder_estimate_available=s.correction_available[1] && s.correction_available[2]
+  if s.normalizer.remainder_estimate_available {s.normalizer.remainder_estimate=s.correction_estimates[1]+s.correction_estimates[2]}
+  return s.normalizer.status
+ }
+ let factorial_status=nl_log_factorial_small_into(count,s)
+ let factorial_value:f64=s.number_value
+ let ratio_status=nl_log1p_ratio_into(y,r,s)
+ let ratio_value:f64=s.number_value
+ if factorial_status!=0 || ratio_status!=0 {return s.normalizer.status}
+ var finite_sum:f64=0.0
+ var correction:f64=0.0
+ var k:i64=1
+ while k<count {
+  let term_status=nl_log1p_ratio_into(k as f64,r,s)
+  let term_value:f64=s.number_value
+  if term_status!=0 {return s.normalizer.status}
+  let adjusted=term_value-correction
+  let next=finite_sum+adjusted
+  correction=(next-finite_sum)-adjusted
+  finite_sum=next
+  k=k+1
+ }
+ let value=((finite_sum+y*ly_value)-factorial_value)-sum*ratio_value
+ if !is_finite(value) || value>0.0 {return s.normalizer.status}
+ s.normalizer.status=0
+ s.normalizer.value=value
+ s.normalizer.remainder_estimate_available=true
+ return s.normalizer.status
+}
+// Main status:0 log PMF available;1 negative count;2 invalid mean;3 invalidalpha;
+// 4 count>2^53;5 arithmetic. Normalizer/residual/deviance availability separate.
+// A positive nonzero alpha whose reciprocal overflows is conservatively unavailable
+// for positive-count normalizers; it is never silently replaced by alpha0.
+pub fn nb2_log_probability_into(count:i64,mean:f64,alpha:f64,s:&!Nb2LikelihoodSlot)->i64 with Mut,Div,Panic {
+ nb2_likelihood_slot_reset(s)
+ s.result.count=count
+ if count<0 {return nl_likelihood_fail(1,count,s)}
+ if !is_finite(mean) || mean<=0.0 {return nl_likelihood_fail(2,count,s)}
+ if !is_finite(alpha) || alpha<0.0 {return nl_likelihood_fail(3,count,s)}
+ if count>9007199254740992 {return nl_likelihood_fail(4,count,s)}
+ s.result.poisson_limit=alpha==0.0
+ let normalizer_status=nl_saturated_into(count,alpha,s)
+ s.result.normalizer_status=normalizer_status
+ if normalizer_status==0 {
+  s.result.saturated_log_probability=s.normalizer.value
+  s.result.stirling_used=s.normalizer.stirling_used
+  s.result.normalizer_remainder_estimate=s.normalizer.remainder_estimate
+  s.result.remainder_estimate_available=s.normalizer.remainder_estimate_available
+ }
+ let unit_status=nb2_deviance_into(count,mean,alpha,&!s.unit)
+ let unit_deviance_status=nb2_deviance_slot_deviance_status(&s.unit)
+ let unit_residual=nb2_deviance_slot_residual(&s.unit)
+ let unit_deviance=nb2_deviance_slot_deviance(&s.unit)
+ s.result.residual_status=unit_status
+ s.result.deviance_status=unit_deviance_status
+ if unit_status==0 {s.result.residual=unit_residual}
+ if unit_deviance_status==0 {s.result.deviance=unit_deviance}
+ if normalizer_status!=0 || unit_status!=0 {return s.result.status}
+ // Exact Poisson boundary identity; retain independently computed unit metadata.
+ if count==0 {
+  if alpha==0.0 {s.result.status=0;s.result.log_probability= -mean;return 0}
+ }
+ let root=if unit_residual<0.0 {-unit_residual}else{unit_residual}
+ let half=(root*0.5)*root
+ if !is_finite(half) || half<0.0 {return s.result.status}
+ if s.normalizer.value==0.0 {
+  if root!=0.0 {if half==0.0 {return s.result.status}}
+ }
+ let value=s.normalizer.value-half
+ if !is_finite(value) || value>0.0 {return s.result.status}
+ s.result.status=0
+ s.result.log_probability=if value==0.0 {0.0}else{value}
+ s.result.status
+}
+
+pub fn nb2_likelihood_snapshot(s:&Nb2LikelihoodSlot)->Nb2Likelihood {
+ Nb2Likelihood{status:s.result.status,count:s.result.count,log_probability:s.result.log_probability,
+ normalizer_status:s.result.normalizer_status,saturated_log_probability:s.result.saturated_log_probability,
+ residual_status:s.result.residual_status,residual:s.result.residual,deviance_status:s.result.deviance_status,
+ deviance:s.result.deviance,poisson_limit:s.result.poisson_limit,stirling_used:s.result.stirling_used,
+ normalizer_remainder_estimate:s.result.normalizer_remainder_estimate,
+ remainder_estimate_available:s.result.remainder_estimate_available,assumptions_assessed:s.result.assumptions_assessed}
+}
+pub fn nb2_saturated_log_probability(count:i64,alpha:f64)->Nb2Normalizer with Mut,Div,Panic {
+ var slot=nb2_likelihood_slot()
+ let ignored=nl_saturated_into(count,alpha,&!slot)
+ Nb2Normalizer{status:slot.normalizer.status,count:slot.normalizer.count,value:slot.normalizer.value,
+ poisson_limit:slot.normalizer.poisson_limit,stirling_used:slot.normalizer.stirling_used,
+ remainder_estimate:slot.normalizer.remainder_estimate,remainder_estimate_available:slot.normalizer.remainder_estimate_available}
+}
+pub fn nb2_log_probability(count:i64,mean:f64,alpha:f64)->Nb2Likelihood with Mut,Div,Panic {
+ var slot=nb2_likelihood_slot()
+ let ignored=nb2_log_probability_into(count,mean,alpha,&!slot)
+ nb2_likelihood_snapshot(&slot)
+}
+
+// Paired full-log-PMF difference: second minus first. Local same-alpha increments
+// avoid cancellation before aggregation; unequal-alpha routes retain BOTH full
+// normalizers. Availability of individual PMFs is reported independently.
+pub struct Nb2LikelihoodDifference {
+ pub status:i64,pub value:f64,pub first_status:i64,pub second_status:i64,
+ pub local_increment:bool,
+}
+pub struct Nb2LikelihoodDifferenceSlot {
+ first:Nb2LikelihoodSlot,second:Nb2LikelihoodSlot,product:LeastSquaresNumber,log_work:CheckedLog,
+ status:i64,value:f64,first_status:i64,second_status:i64,local_increment:bool,
+}
+pub fn nb2_likelihood_difference_slot()->Nb2LikelihoodDifferenceSlot {
+ Nb2LikelihoodDifferenceSlot{first:nb2_likelihood_slot(),second:nb2_likelihood_slot(),
+ product:LeastSquaresNumber{status:4,value:0.0},log_work:CheckedLog{status:2,value:0.0},status:5,value:0.0,
+ first_status:2,second_status:2,local_increment:false}
+}
+pub fn nb2_likelihood_difference_status(s:&Nb2LikelihoodDifferenceSlot)->i64 {s.status}
+pub fn nb2_likelihood_difference_value(s:&Nb2LikelihoodDifferenceSlot)->f64 {s.value}
+pub fn nb2_likelihood_difference_first_status(s:&Nb2LikelihoodDifferenceSlot)->i64 {s.first_status}
+pub fn nb2_likelihood_difference_second_status(s:&Nb2LikelihoodDifferenceSlot)->i64 {s.second_status}
+pub fn nb2_likelihood_difference_snapshot(s:&Nb2LikelihoodDifferenceSlot)->Nb2LikelihoodDifference {
+ Nb2LikelihoodDifference{status:s.status,value:s.value,first_status:s.first_status,
+ second_status:s.second_status,local_increment:s.local_increment}
+}
+pub fn nb2_log_probability_difference_into(count:i64,first_mean:f64,first_alpha:f64,
+ second_mean:f64,second_alpha:f64,s:&!Nb2LikelihoodDifferenceSlot)->i64 with Mut,Div,Panic {
+ s.status=5;s.value=0.0;s.first_status=2;s.second_status=2;s.local_increment=false
+ let first_status=nb2_log_probability_into(count,first_mean,first_alpha,&!s.first)
+ let first_value:f64=s.first.result.log_probability
+ let second_status=nb2_log_probability_into(count,second_mean,second_alpha,&!s.second)
+ let second_value:f64=s.second.result.log_probability
+ s.first_status=first_status;s.second_status=second_status
+ if first_status!=0 {if first_status!=5 {s.status=first_status;return s.status}}
+ if second_status!=0 {if second_status!=5 {s.status=second_status;return s.status}}
+ if first_alpha==second_alpha {
+  let local_status=nb2_same_alpha_increment_into(count,first_mean,second_mean,first_alpha,&!s.product)
+  let local_value:f64=s.product.value
+  if local_status==0 {
+   s.status=0;s.value=local_value;s.local_increment=true;return 0
+  }
+  if local_status!=6 {return s.status}
+ }
+ if first_alpha!=second_alpha {
+  // Total change = mean change at second alpha + dispersion change at first mean.
+  let mean_status=nb2_same_alpha_increment_into(count,first_mean,second_mean,second_alpha,&!s.product)
+  let mean_value:f64=s.product.value
+  if mean_status==0 {
+   let alpha_status=nb2_dispersion_increment_into(count,first_mean,first_alpha,second_alpha,&!s.product,&!s.log_work)
+   let alpha_value:f64=s.product.value
+   if alpha_status==0 {
+    let value=mean_value+alpha_value
+    if !is_finite(value) || value==0.0 {return s.status}
+    s.status=0;s.value=value;s.local_increment=true;return 0
+   }
+   if alpha_status!=6 {return s.status}
+  } else {if mean_status!=6 {return s.status}}
+ }
+ if first_status!=0 || second_status!=0 {return s.status}
+ let value=second_value-first_value
+ if !is_finite(value) {return s.status}
+ // A rounded far-path tie is not an authenticated equal likelihood.
+ if value==0.0 {return s.status}
+ s.status=0;s.value=value
+ return 0
+}
+
+pub fn nb2_log_probability_mean_difference_into(counts:&IntegerBuffer,first:&NumericBuffer,first_alpha:f64,
+ second:&NumericBuffer,second_alpha:f64,n:i64,work:&!Nb2LikelihoodDifferenceSlot)->i64 with Mut,Div,Panic {
+ work.status=5;work.value=0.0;work.first_status=2;work.second_status=2;work.local_increment=false
+ if n<1 {work.status=1;return 1}
+ if integer_buffer_status(counts)!=0 || numeric_buffer_status(first)!=0 || numeric_buffer_status(second)!=0 {work.status=1;return 1}
+ if integer_buffer_len(counts)!=n || numeric_buffer_len(first)!=n || numeric_buffer_len(second)!=n {work.status=1;return 1}
+ var scale:f64=0.0
+ var sum:f64=0.0
+ var correction:f64=0.0
+ var all_local=true
+ var first_status:i64=0
+ var second_status:i64=0
+ var i:i64=0
+ while i<n {
+  let status=nb2_log_probability_difference_into(integer_buffer_at(counts,i),numeric_buffer_at(first,i),first_alpha,numeric_buffer_at(second,i),second_alpha,work)
+  let value:f64=nb2_likelihood_difference_value(work)
+  if !work.local_increment {all_local=false}
+  if work.first_status!=0 {first_status=work.first_status}
+  if work.second_status!=0 {second_status=work.second_status}
+  if status!=0 {work.status=status;work.value=0.0;work.local_increment=false;return status}
+  let magnitude=if value<0.0 {-value}else{value}
+  if magnitude>scale {
+   let ratio=if scale==0.0 {0.0}else{scale/magnitude}
+   sum=sum*ratio;correction=correction*ratio;scale=magnitude
+  }
+  if magnitude>0.0 {
+   let scaled=value/scale
+   if scaled==0.0 {work.status=5;work.value=0.0;work.local_increment=false;return 5}
+   let adjusted=scaled-correction
+   let next=sum+adjusted
+   correction=(next-sum)-adjusted;sum=next
+   if !is_finite(sum) || !is_finite(correction) {work.status=5;work.value=0.0;work.local_increment=false;return 5}
+  }
+  i=i+1
+ }
+ var value:f64=0.0
+ if scale>0.0 {
+  value=scale*(sum/(n as f64))
+  if !is_finite(value) {work.status=5;work.value=0.0;work.local_increment=false;return 5}
+  if sum!=0.0 {if value==0.0 {work.status=5;work.value=0.0;work.local_increment=false;return 5}}
+ }
+ work.status=0;work.value=value;work.local_increment=all_local
+ work.first_status=first_status;work.second_status=second_status
+ return 0
+}

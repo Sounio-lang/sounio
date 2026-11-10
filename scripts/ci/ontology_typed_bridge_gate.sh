@@ -7,6 +7,8 @@
 # x86-64 Linux only.
 set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"; cd "$ROOT_DIR"
+# shellcheck source=../lib/classify_compile.sh
+source "$ROOT_DIR/scripts/lib/classify_compile.sh"
 case "$(uname -s)/$(uname -m)" in Linux/x86_64|Linux/amd64) ;; *) echo "[ontology-typed-bridge] SKIP: x86-64 Linux only"; exit 0;; esac
 source "$ROOT_DIR/scripts/lib/resolve_souc.sh"; sounio_require_souc
 TMP="$(mktemp -d)"
@@ -36,9 +38,13 @@ if [ "$OUT" != "$EXPECT" ]; then
 fi
 
 # 2. compile-fail: must be rejected (E152 subsumption).
-if compile_to "$FAIL_SRC" "$TMP/rej" >"$TMP/rej.log" 2>&1; then
+__refusal_rc=0
+compile_to "$FAIL_SRC" "$TMP/rej" >"$TMP/rej.log" 2>&1 || __refusal_rc=$?
+if [[ "$__refusal_rc" -eq 0 ]]; then
   echo "[ontology-typed-bridge] FAIL: bad-subsumption test compiled clean (should reject)"; exit 1
 fi
+# rc != 0 is not yet a refusal: a crash, timeout or OOM kill is not (#2425).
+sounio_expect_failed_exit "$__refusal_rc" "$TMP/rej.log" || { printf 'FAIL  %s: not a clean refusal: %s\n' "$TMP/rej.log" "$(sounio_refusal_reason)" >&2; cat "$TMP/rej.log" >&2; exit 1; }
 if ! grep -q "E152" "$TMP/rej.log"; then
   echo "[ontology-typed-bridge] FAIL: rejected but not with E152"; tail -10 "$TMP/rej.log"; exit 1
 fi

@@ -1,0 +1,115 @@
+use math::pure::{is_finite}
+use collections::numeric_buffer::{NumericBuffer,numeric_buffer_status,numeric_buffer_len,numeric_buffer_at}
+use collections::integer_buffer::{IntegerBuffer,integer_buffer_status,integer_buffer_len,integer_buffer_at,integer_buffer_set}
+
+// Original-index selection only; never use reduced data for statistical fitting.
+pub struct LineReduction { pub status:i64, pub input_count:i64, pub required:i64, pub written:i64, pub buckets:i64 }
+struct ReductionCursor { count:i64, last:i64 }
+struct ReductionBucket { open:bool, key:i64, first:i64, low:i64, high:i64, last:i64, ymin:f64, ymax:f64 }
+
+fn reduction_emit(cursor:&!ReductionCursor,out:&!IntegerBuffer,index:i64,commit:bool) with Mut {
+    if index>cursor.last {
+        if commit { let ignored=integer_buffer_set(out,cursor.count,index) }
+        cursor.count=cursor.count+1
+        cursor.last=index
+    }
+}
+fn reduction_flush(bucket:&!ReductionBucket,cursor:&!ReductionCursor,out:&!IntegerBuffer,commit:bool,nb:i64) with Mut,Panic {
+    if !bucket.open { return }
+    var candidates:[i64;4]=[bucket.first,bucket.low,bucket.high,bucket.last]
+    // Outside the viewport only first/last are necessary. These also retain
+    // segment endpoints and the closest exterior neighbour on each side.
+    if bucket.key<0 || bucket.key==nb { candidates[1]=bucket.first; candidates[2]=bucket.last }
+    var i:i64=1
+    while i<4 {
+        let value=candidates[i as usize]
+        var j=i
+        while j>0 {
+            if candidates[(j-1) as usize]<=value { break }
+            candidates[j as usize]=candidates[(j-1) as usize]
+            j=j-1
+        }
+        candidates[j as usize]=value
+        i=i+1
+    }
+    i=0
+    while i<4 { reduction_emit(cursor,out,candidates[i as usize],commit); i=i+1 }
+    bucket.open=false
+}
+fn reduction_key(value:f64,xmin:f64,xmax:f64,buckets:i64)->i64 with Div {
+    if value<xmin { return -1 }
+    if value>xmax { return buckets }
+    if value==xmax { return buckets-1 }
+    let scaled=((value-xmin)/(xmax-xmin))*(buckets as f64)
+    var key=scaled as i64
+    if key>=buckets { key=buckets-1 }
+    return key
+}
+fn reduction_select(x:&NumericBuffer,y:&NumericBuffer,available:&IntegerBuffer,xmin:f64,xmax:f64,buckets:i64,out:&!IntegerBuffer,commit:bool)->i64 with Mut,Div,Panic {
+    var cursor=ReductionCursor{count:0,last:-1}
+    var bucket=ReductionBucket{open:false,key:0,first:0,low:0,high:0,last:0,ymin:0.0,ymax:0.0}
+    var gap=false
+    var i:i64=0
+    let n=numeric_buffer_len(x)
+    while i<n {
+        if integer_buffer_at(available,i)==0 {
+            reduction_flush(&!bucket,&!cursor,out,commit,buckets)
+            if !gap { reduction_emit(&!cursor,out,i,commit) }
+            gap=true
+        } else {
+            gap=false
+            let key=reduction_key(numeric_buffer_at(x,i),xmin,xmax,buckets)
+            let value=numeric_buffer_at(y,i)
+            if bucket.open && bucket.key!=key { reduction_flush(&!bucket,&!cursor,out,commit,buckets) }
+            if !bucket.open {
+                bucket=ReductionBucket{open:true,key:key,first:i,low:i,high:i,last:i,ymin:value,ymax:value}
+            } else {
+                bucket.last=i
+                if value<bucket.ymin { bucket.ymin=value; bucket.low=i }
+                if value>bucket.ymax { bucket.ymax=value; bucket.high=i }
+            }
+        }
+        i=i+1
+    }
+    reduction_flush(&!bucket,&!cursor,out,commit,buckets)
+    return cursor.count
+}
+
+// Status: 0 available; 1 owner/shape; 2 viewport/buckets; 3 availability or
+// nonfinite active sample; 4 decreasing active X; 6 insufficient output length.
+// All failures leave every output element unchanged. No allocation or resize.
+pub fn dynamic_line_reduce(x:&NumericBuffer,y:&NumericBuffer,available:&IntegerBuffer,xmin:f64,xmax:f64,buckets:i64,indices:&!IntegerBuffer)->LineReduction with Mut,Div,Panic {
+    let n=numeric_buffer_len(x)
+    var result=LineReduction{status:1,input_count:n,required:0,written:0,buckets:buckets}
+    if numeric_buffer_status(x)!=0 || numeric_buffer_status(y)!=0 || integer_buffer_status(available)!=0 || integer_buffer_status(indices)!=0 { return result }
+    if numeric_buffer_len(y)!=n || integer_buffer_len(available)!=n { return result }
+    result.status=2
+    if !is_finite(xmin) || !is_finite(xmax) || xmin>=xmax || buckets<1 || buckets>9007199254740992 { return result }
+    let span=xmax-xmin
+    if !is_finite(span) || span<=0.0 { return result }
+    var previous:f64=0.0
+    var seen=false
+    var i:i64=0
+    while i<n {
+        let flag=integer_buffer_at(available,i)
+        result.status=3
+        if flag!=0 && flag!=1 { return result }
+        if flag==1 {
+            let vx=numeric_buffer_at(x,i)
+            let vy=numeric_buffer_at(y,i)
+            if !is_finite(vx) || !is_finite(vy) { return result }
+            result.status=4
+            if seen && vx<previous { return result }
+            previous=vx
+            seen=true
+        }
+        i=i+1
+    }
+    let required=reduction_select(x,y,available,xmin,xmax,buckets,indices,false)
+    result.required=required
+    result.status=6
+    if integer_buffer_len(indices)<required { return result }
+    result.written=reduction_select(x,y,available,xmin,xmax,buckets,indices,true)
+    result.status=0
+    return result
+}

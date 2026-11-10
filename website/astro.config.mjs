@@ -8,6 +8,8 @@ import sitemap from '@astrojs/sitemap';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import githubDarkTheme from '@shikijs/themes/github-dark';
+import { HREFLANG, isIndexableSitemapUrl, sitemapLinks } from './src/lib/seo-locales.mjs';
+import { rehypeDemoteH1 } from './src/lib/rehype-demote-h1.mjs';
 
 // Real Shiki grammar for Sounio (`sio` code fences). Previously ```sio blocks
 // were relabeled as ```rust before highlighting (see git history of
@@ -52,21 +54,23 @@ const sounioSiteTheme = {
 // https://astro.build/config
 export default defineConfig({
   site: 'https://www.souniolang.org',
+  // Directory URLs are the indexable form. Vercel mirrors this in vercel.json
+  // (docs redirects first, then /sitemap.xml → /sitemap-index.xml, then the
+  // same trailing-slash routes `trailingSlash: true` would emit). A bare
+  // `trailingSlash: true` runs before user redirects and would turn /docs
+  // into /docs/ instead of /learn/.
+  trailingSlash: 'always',
 
   integrations: [
     react(),
     sitemap({
+      filter: (page) => isIndexableSitemapUrl(page),
+      serialize(item) {
+        return { ...item, links: sitemapLinks(item.url) };
+      },
       i18n: {
         defaultLocale: 'en',
-        locales: {
-          en: 'en',
-          pt: 'pt-BR',
-          el: 'el',
-          zh: 'zh-CN',
-          ja: 'ja',
-          es: 'es',
-          'zh-hk': 'zh-HK',
-        },
+        locales: HREFLANG,
       },
     }),
     mdx({
@@ -75,6 +79,7 @@ export default defineConfig({
         theme: sounioSiteTheme,
         langs: [sounioGrammar],
       },
+      rehypePlugins: [rehypeDemoteH1],
     }),
   ],
 
@@ -84,6 +89,7 @@ export default defineConfig({
       theme: sounioSiteTheme,
       langs: [sounioGrammar],
     },
+    rehypePlugins: [rehypeDemoteH1],
   },
 
   vite: {
@@ -105,12 +111,12 @@ export default defineConfig({
   // Hash fragments are client-side only; the 308 targets /language.
   // The stub page at platform.astro adds the #compiler fragment via JS.
   redirects: {
-    '/platform': { status: 308, destination: '/language' },
-    '/pt/platform': { status: 308, destination: '/pt/language' },
-    '/el/platform': { status: 308, destination: '/el/language' },
-    '/zh/platform': { status: 308, destination: '/zh/language' },
-    '/ja/platform': { status: 308, destination: '/ja/language' },
-    '/es/platform': { status: 308, destination: '/es/language' },
-    '/zh-hk/platform': { status: 308, destination: '/zh-hk/language' },
+    '/platform/': { status: 308, destination: '/language/' },
+    '/pt/platform/': { status: 308, destination: '/pt/language/' },
+    '/el/platform/': { status: 308, destination: '/el/language/' },
+    '/zh/platform/': { status: 308, destination: '/zh/language/' },
+    '/ja/platform/': { status: 308, destination: '/ja/language/' },
+    '/es/platform/': { status: 308, destination: '/es/language/' },
+    '/zh-hk/platform/': { status: 308, destination: '/zh-hk/language/' },
   },
 });

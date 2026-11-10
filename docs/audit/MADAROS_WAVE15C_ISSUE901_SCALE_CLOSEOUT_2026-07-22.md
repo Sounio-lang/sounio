@@ -2,8 +2,8 @@
 topic_id: repo.docs.audit.madaros-wave15c-issue901-scale-closeout-2026-07-22
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
-validated_by: A2
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.madaros-wave15c-issue901-scale-closeout-2026-07-22
 -->
 
@@ -126,7 +126,7 @@ bash scripts/madaros_thinlink_921_residual_gate.sh    # MADAROS_THINLINK_921_RES
 ## What this does **not** claim
 
 - All multi-module stdlib verticals (stats OLS, scipy e2e still red for other reasons).
-- Compact imported-simple-IR is production-ready (opt-in residual remains).
+- Compact imported-simple-IR as a general capability (opt-in residual remains).
 - Exclusive-ref / memory-wall fragile chains beyond the measured corpus.
 - Layout-catalog / nested-field #901 sublane (`codex/issue901-*`) — separate acceptance.
 

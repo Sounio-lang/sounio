@@ -1,0 +1,73 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: STDLIB_DEEP_DYNAMIC_COUNT_TSV_STATUS_PASS
+use collections::integer_buffer::{integer_buffer_new,integer_buffer_set,integer_buffer_at,integer_buffer_close}
+use genomics::io::dynamic_count_tsv::{dynamic_count_tsv_new,dynamic_count_tsv_info,dynamic_count_tsv_feed,dynamic_count_tsv_ack_row,dynamic_count_tsv_finish,dynamic_count_tsv_append_row}
+fn main()->i32 with IO,Alloc,Mut,Div,Panic {
+ var row=integer_buffer_new(2,16)
+ var bytes=integer_buffer_new(8,64)
+ var table=integer_buffer_new(4,32)
+ integer_buffer_set(&!bytes,0,49);integer_buffer_set(&!bytes,1,9)
+ integer_buffer_set(&!bytes,2,50);integer_buffer_set(&!bytes,3,13)
+ integer_buffer_set(&!bytes,4,10);integer_buffer_set(&!bytes,5,51)
+ integer_buffer_set(&!bytes,6,9);integer_buffer_set(&!bytes,7,52)
+ var state=dynamic_count_tsv_new(2,9223372036854775807)
+ let partial=dynamic_count_tsv_feed(&!state,&!row,&bytes,0,4)
+ assert(partial.status==0 && partial.consumed==4 && !partial.row_ready)
+ let complete=dynamic_count_tsv_feed(&!state,&!row,&bytes,4,4)
+ assert(complete.status==0 && complete.consumed==1 && complete.row_ready && complete.position==5)
+ assert(integer_buffer_at(&row,0)==1 && integer_buffer_at(&row,1)==2)
+ let paused=dynamic_count_tsv_feed(&!state,&!row,&bytes,5,3)
+ assert(paused.consumed==0 && paused.row_ready)
+ let premature_eof=dynamic_count_tsv_finish(&!state,&!row)
+ assert(premature_eof.row_ready && !premature_eof.finished)
+ let first=dynamic_count_tsv_append_row(&state,&row,&!table,0)
+ assert(first.status==0 && first.rows==1)
+ assert(dynamic_count_tsv_ack_row(&!state,&!row))
+ let last=dynamic_count_tsv_feed(&!state,&!row,&bytes,5,3)
+ assert(last.status==0 && last.consumed==3 && !last.row_ready)
+ let eof=dynamic_count_tsv_finish(&!state,&!row)
+ assert(eof.status==0 && eof.row_ready && eof.finished && eof.position==8)
+ assert(integer_buffer_at(&row,0)==3 && integer_buffer_at(&row,1)==4)
+ let second=dynamic_count_tsv_append_row(&state,&row,&!table,1)
+ assert(second.status==0 && second.rows==2)
+ let capacity=dynamic_count_tsv_append_row(&state,&row,&!table,2)
+ assert(capacity.status==8 && capacity.rows==2 && integer_buffer_at(&table,3)==4)
+ integer_buffer_set(&!row,1,-1)
+ let invalidrow=dynamic_count_tsv_append_row(&state,&row,&!table,0)
+ assert(invalidrow.status==5 && integer_buffer_at(&table,0)==1 && integer_buffer_at(&table,1)==2)
+ assert(dynamic_count_tsv_ack_row(&!state,&!row))
+ let after=dynamic_count_tsv_feed(&!state,&!row,&bytes,0,1)
+ assert(after.status==6 && after.consumed==0 && after.error_position==8)
+ var bounds=dynamic_count_tsv_new(2,10)
+ let badrange=dynamic_count_tsv_feed(&!bounds,&!row,&bytes,7,2)
+ assert(badrange.status==2 && badrange.consumed==0 && badrange.position==0)
+ var shortrow=integer_buffer_new(1,8)
+ var wrongshape=dynamic_count_tsv_new(2,10)
+ let badrow=dynamic_count_tsv_feed(&!wrongshape,&!shortrow,&bytes,0,1)
+ assert(badrow.status==1 && badrow.consumed==0)
+ var invalid=dynamic_count_tsv_new(0,10)
+ let invalidinfo=dynamic_count_tsv_info(&invalid)
+ assert(invalidinfo.status==1)
+ var badlimit=dynamic_count_tsv_new(2,-1)
+ let limitinfo=dynamic_count_tsv_info(&badlimit)
+ assert(limitinfo.status==1)
+ // No ceiling8: twelve columns are accepted through the same API.
+ var wide=integer_buffer_new(12,96)
+ var chunk=integer_buffer_new(24,192)
+ var i:i64=0
+ while i<12 {
+  integer_buffer_set(&!chunk,2*i,48+(i%10))
+  integer_buffer_set(&!chunk,2*i+1,if i==11 {10} else {9})
+  i=i+1
+ }
+ var many=dynamic_count_tsv_new(12,9)
+ let twelve=dynamic_count_tsv_feed(&!many,&!wide,&chunk,0,24)
+ assert(twelve.status==0 && twelve.row_ready && twelve.consumed==24)
+ i=0
+ while i<12 {assert(integer_buffer_at(&wide,i)==i%10);i=i+1}
+ integer_buffer_close(row);integer_buffer_close(bytes);integer_buffer_close(table)
+ integer_buffer_close(shortrow);integer_buffer_close(wide);integer_buffer_close(chunk)
+ println("STDLIB_DEEP_DYNAMIC_COUNT_TSV_STATUS_PASS")
+ 0
+}

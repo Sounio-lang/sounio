@@ -1,0 +1,1 @@
+Checker frame diet with no user-visible change: short-lived temporaries in the fx clause walk, the const-int bind cache and name comparisons now live out of the hot checker frames, so nested calls check on smaller frames with identical results.

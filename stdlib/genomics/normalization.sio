@@ -1,0 +1,131 @@
+// Checked count normalization. Physical row stride8; see NORMALIZATION.md.
+use math::pure::{is_finite,ln_checked,exp}
+use math::logarithmic::{log1p_checked}
+use stats::order::{sort256}
+pub struct SizeFactorResult {
+ pub status:i64,
+ pub genes:i64,
+ pub samples:i64,
+ pub genes_used:i64,
+ pub genes_excluded:i64,
+ pub factors:[f64;8],
+ pub log_factors:[f64;8],
+ pub composition_assumptions_assessed:bool,
+}
+pub struct NormalizedCountResult { pub status:i64, pub value:f64 }
+struct SizeFactorLog { status:i64, value:f64 }
+fn sf_log_ratio(count:i64,anchor:i64)->SizeFactorLog with Mut,Div,Panic {
+ let difference=count-anchor
+ let d=(difference as f64)/(anchor as f64)
+ let magnitude=if d<0.0 { 0.0-d } else { d }
+ if magnitude<=0.5 {
+  let logged=log1p_checked(d)
+  if logged.status!=0 { return SizeFactorLog{status:4,value:0.0} }
+  return SizeFactorLog{status:0,value:logged.value}
+ }
+ let a=ln_checked(count as f64)
+ let b=ln_checked(anchor as f64)
+ if a.status!=0 || b.status!=0 { return SizeFactorLog{status:4,value:0.0} }
+ SizeFactorLog{status:0,value:a.value-b.value}
+}
+fn sf_empty(status:i64,genes:i64,samples:i64)->SizeFactorResult {
+ SizeFactorResult{status:status,genes:genes,samples:samples,genes_used:0,genes_excluded:0,factors:[0.0;8],log_factors:[0.0;8],composition_assumptions_assessed:false}
+}
+pub fn median_ratio_size_factors(counts:&[i64;2048],genes:i64,samples:i64)->SizeFactorResult with Mut,Div,Panic {
+ if genes<1 || genes>256 || samples<1 || samples>8 { return sf_empty(1,genes,samples) }
+ var g:i64=0
+ while g<genes {
+  var s:i64=0
+  while s<samples {
+   if counts[(g*8+s) as usize]<0 { return sf_empty(2,genes,samples) }
+   s=s+1
+  }
+  g=g+1
+ }
+ // Eligible relative log means have magnitude below44;1e300 marks exclusion.
+ var means:[f64;256]=[0.0;256]
+ var used:i64=0
+ g=0
+ while g<genes {
+  var eligible=true
+  var s:i64=0
+  while s<samples {
+   if counts[(g*8+s) as usize]==0 { eligible=false }
+   s=s+1
+  }
+  if eligible {
+   var sum:f64=0.0
+   var correction:f64=0.0
+   s=0
+   while s<samples {
+    let logged=sf_log_ratio(counts[(g*8+s) as usize],counts[(g*8) as usize])
+    if logged.status!=0 { return sf_empty(4,genes,samples) }
+    let adjusted=logged.value-correction
+    let next=sum+adjusted
+    correction=(next-sum)-adjusted
+    sum=next
+    s=s+1
+   }
+   means[g as usize]=sum/(samples as f64)
+   used=used+1
+  } else { means[g as usize]=1.0e300 }
+  g=g+1
+ }
+ if used==0 { return sf_empty(3,genes,samples) }
+ var out=sf_empty(0,genes,samples)
+ var ratios:[f64;256]=[0.0;256]
+ var s:i64=0
+ while s<samples {
+  var j:i64=0
+  g=0
+  while g<genes {
+   if means[g as usize]<1.0e299 {
+    let logged=sf_log_ratio(counts[(g*8+s) as usize],counts[(g*8) as usize])
+    if logged.status!=0 { return sf_empty(4,genes,samples) }
+    ratios[j as usize]=logged.value-means[g as usize]
+    j=j+1
+   }
+   g=g+1
+  }
+  if !sort256(&!ratios,used) { return sf_empty(4,genes,samples) }
+  let middle=used/2
+  out.log_factors[s as usize]=if used%2==1 { ratios[middle as usize] } else { ratios[(middle-1) as usize]*0.5+ratios[middle as usize]*0.5 }
+  s=s+1
+ }
+ var sum:f64=0.0
+ var correction:f64=0.0
+ s=0
+ while s<samples {
+  let adjusted=out.log_factors[s as usize]-correction
+  let next=sum+adjusted
+  correction=(next-sum)-adjusted
+  sum=next
+  s=s+1
+ }
+ let center=sum/(samples as f64)
+ s=0
+ while s<samples {
+  let logged=out.log_factors[s as usize]-center
+  let factor=exp(logged)
+  if !is_finite(logged) || !is_finite(factor) || factor<=0.0 { return sf_empty(4,genes,samples) }
+  out.log_factors[s as usize]=logged
+  out.factors[s as usize]=factor
+  s=s+1
+ }
+ out.genes_used=used
+ out.genes_excluded=genes-used
+ out
+}
+pub fn size_factor_normalized_count(count:i64,factors:&SizeFactorResult,sample:i64)->NormalizedCountResult with Mut,Div,Panic {
+ var out=NormalizedCountResult{status:1,value:0.0}
+ if factors.status!=0 || factors.genes<1 || factors.genes>256 || factors.samples<1 || factors.samples>8 || factors.genes_used<1 || factors.genes_used>factors.genes || factors.genes_excluded!=factors.genes-factors.genes_used { return out }
+ if sample<0 || sample>=factors.samples { out.status=2 return out }
+ if count<0 { out.status=3 return out }
+ let factor=factors.factors[sample as usize]
+ if !is_finite(factor) || factor<=0.0 { out.status=4 return out }
+ let value=(count as f64)/factor
+ if !is_finite(value) || (count>0 && value==0.0) { out.status=4 return out }
+ out.status=0
+ out.value=value
+ out
+}

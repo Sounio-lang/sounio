@@ -8,7 +8,7 @@ module native::frame
 
 use native::encode::*
 use native::reloc::{RelocationTable, reloc_table_new, patch_u32_le, ExternRelocTable, extern_reloc_table_new}
-use native::elf::{StringTable, string_table_new, SymbolData, symbol_data_new}
+use native::elf::{StringTable, string_table_new, SymbolData, symbol_data_new, ELF_STRTAB_OVERFLOW}
 use native::runtime_context::{runtime_context_global_slot_size}
 use native::target_policy::{native_target_policy_x86_allocatable_mask_for_reg}
 
@@ -214,9 +214,9 @@ pub fn empty_label_patch() -> LabelPatch {
 // #1586/#1570/#1577, and it is why the documented workaround in all three ("move
 // the code into a helper function") worked: nc_v2_reset_label_state runs per
 // function, so a helper gets a fresh 256.
-pub var NC_V2_LABEL_OFFSETS: [i64; 16384] = [0; 16384]
-pub var NC_V2_LABEL_PATCH_OFFSETS: [i64; 16384] = [0; 16384]
-pub var NC_V2_LABEL_PATCH_IDS: [i64; 16384] = [0; 16384]
+pub var NC_V2_LABEL_OFFSETS: [i64; 65536] = [0; 65536]
+pub var NC_V2_LABEL_PATCH_OFFSETS: [i64; 65536] = [0; 65536]
+pub var NC_V2_LABEL_PATCH_IDS: [i64; 65536] = [0; 65536]
 pub var NC_V2_LABEL_PATCH_COUNT: i64 = 0
 pub var NC_V2_NEXT_CMP_LABEL: i64 = 210
 // Which function tripped the capacity FIRST, so the rc=22 message can name it.
@@ -261,7 +261,13 @@ pub var NC_V2_LABEL_OVERFLOW_FN: i64 = -1
 // job rather than a new defect. The full reset now costs ~4x what the note above
 // measured; still immaterial, and still below the 65536 line where a dirty-length
 // cursor becomes worth it.
-pub fn nc_v2_label_capacity() -> i64 { 16384 }
+//
+// Raised 16384 -> 65536 on 2026-10-30 with IR_MAX_INSTRS, for the same reason
+// (tests/stdlib/data/test_bigframe_ops_stdlib.sio: one `main` of 37526 IR
+// instructions). The reset stays FULL: 65536 is the line the note above draws,
+// not past it, and a full reset is ~65536 stores per function (~0.4e9 on a
+// ~6000-function self-compile). Past 65536 the gate requires a dirty cursor.
+pub fn nc_v2_label_capacity() -> i64 { 65536 }
 
 // Off-stack flat relocation table for the native_v2 x86 Linux path. This is
 // module-WIDE (accumulates across ALL functions of a compile, reset via
@@ -274,10 +280,18 @@ pub fn nc_v2_label_capacity() -> i64 { 16384 }
 // so they live off-stack here (BSS, demand-paged). flat_reloc_count stays a scalar
 // in NativeCompiler and indexes these. Accessed INLINE only (never a returning
 // helper — that miscompiles under the seed).
-pub var NC_FLAT_RELOC_OFFSETS: [i64; 2097152] = [0; 2097152]
-pub var NC_FLAT_RELOC_KIND_CODES: [i64; 2097152] = [0; 2097152]
-pub var NC_FLAT_RELOC_IS_FUNCTIONS: [i64; 2097152] = [0; 2097152]
-pub var NC_FLAT_RELOC_TARGET_INDICES: [i64; 2097152] = [0; 2097152]
+// 2,097,152 -> 2,621,440 (#2966). gen1 compiling main.sio on a98f002e4
+// (proof 40879158756) passed the 192 MiB code tier and stopped at
+// relocs_needed=2,111,673 against this table (rc=20). The packed-byte tag
+// dispatch adds call and RIP sites; 2,621,440 leaves 509,767 entries, the
+// same ~24% headroom as the 192 MiB code tier over its measured 162,617,633
+// bytes. Four i64 arrays: 64 MiB to 80 MiB of BSS, FileSiz 0, not on the
+// stack and not in the ELF image, so the load-base window below
+// BSS_BASE_LINUX is unchanged. Overflow stays fail-closed (rc=20).
+pub var NC_FLAT_RELOC_OFFSETS: [i64; 2621440] = [0; 2621440]
+pub var NC_FLAT_RELOC_KIND_CODES: [i64; 2621440] = [0; 2621440]
+pub var NC_FLAT_RELOC_IS_FUNCTIONS: [i64; 2621440] = [0; 2621440]
+pub var NC_FLAT_RELOC_TARGET_INDICES: [i64; 2621440] = [0; 2621440]
 
 // Single source of truth for the NC_FLAT_RELOC_* bound. The four DECLARATIONS
 // above must stay literals (Sounio array sizes are not expressions); every bound
@@ -286,7 +300,7 @@ pub var NC_FLAT_RELOC_TARGET_INDICES: [i64; 2097152] = [0; 2097152]
 // NativeCompiler.reloc_overflow and compile_native_v2_preview_to_file returns
 // rc=20 (distinct from the code-buffer rc=19). Pinned by
 // scripts/ci/native_capacity_tiers_gate.sh.
-pub fn nc_flat_reloc_capacity() -> i64 { 2097152 }
+pub fn nc_flat_reloc_capacity() -> i64 { 2621440 }
 
 // A relocation whose kind_code apply_relocations_into does not know (anything
 // but 1 call, 2 rodata, 3 data, 4 fn-address) used to fall through the kind
@@ -356,11 +370,36 @@ pub var NC_FN_OFFSETS: [i64; 16384] = [0; 16384]
 // large struct offsets SIGSEGV in the seed compiler (the label_offsets
 // loop in compiler_new was enough). BSS, one live compile. compiler_new
 // resets them. Not safe for two simultaneously live NativeCompilers.
-pub var NC_RETURN_JUMPS: [i64; 16] = [0; 16]
+// Return-jump tier (#1646): one entry per `ret` the MIR emitter lowers to a
+// `jmp rel32` to the shared epilogue. It used to be [i64; 16] with no else, so
+// the 17th return's jump kept a 0 displacement and fell through. Every entry
+// comes from one machine instruction of one function, so a tier at least as
+// large as IR_MAX_INSTRS cannot overflow; the else-branches still raise
+// label_overflow (writer rc 22) rather than drop a jump.
+pub var NC_RETURN_JUMPS: [i64; 65536] = [0; 65536]
+pub fn nc_return_jump_capacity() -> i64 { 65536 }
 pub var NC_LABEL_OFFSETS: [i64; 256] = [0; 256]
 pub var NC_LABEL_PATCH_CODE_OFFSETS: [i64; 256] = [0; 256]
 pub var NC_LABEL_PATCH_LABEL_IDS: [i64; 256] = [0; 256]
-pub var NC_IS_FLOAT_REG: [i64; 2048] = [0; 2048]
+// Float typing (#1646): 1 float, 2 int, per vreg. It was [i64; 2048] (NC_MAX_VREGS)
+// while the lowerer accepts IR_MAX_VREGS (65536) vregs, so every mark past 2048
+// was dropped and every read there answered "unknown": a float copy, a float
+// field or a float array base above vreg 2048 lost its typing. Sized to
+// NC_VREG_LIMIT (== IR_MAX_VREGS); the lowerer refuses anything larger
+// (NATIVE_REFUSAL kind=ir_vreg_limit), so no vreg the backend sees is untyped.
+pub var NC_IS_FLOAT_REG: [i64; 65536] = [0; 65536]
+// 1 when the vreg holds a unit-enum discriminant (a raw integer tag), not a
+// handle id. Tags and handle ids share [0, 2^22), so the resolver must not
+// guess from the magnitude. Cleared per function; only entries below
+// NC_RAW_TAG_HIGH are live.
+pub var NC_RAW_TAG_REG: [i64; 65536] = [0; 65536]
+pub var NC_RAW_TAG_HIGH: i64 = 0
+// IrFieldGet label_id: the load's result is a raw integer tag. The parent is
+// still a handle. A later field-get of this vreg must not resolve.
+pub fn nc_raw_tag_label_id() -> i64 { 5 }
+// KL-20: a field load whose result is a payload-enum cell handle (never a raw tag,
+// whatever the field is called).
+pub fn nc_cell_handle_label_id() -> i64 { 6 }
 pub var NC_REG_TYPE: [i64; 2048] = [0; 2048]
 pub var NC_FIELD_FLOAT_BASE_REGS: [i64; 256] = [0; 256]
 pub var NC_FIELD_FLOAT_INDICES: [i64; 256] = [0; 256]
@@ -427,6 +466,19 @@ pub struct NativeCompiler {
     // computes the wrong answer at rc=0. Checked beside the other two before the
     // ELF is written; the offending function index is in NC_V2_LABEL_OVERFLOW_FN.
     pub label_overflow: bool,
+    // Relocations that apply_relocations_into was handed and did NOT patch: the
+    // bytes before the patch offset do not decode as an instruction whose last
+    // field is the disp32/rel32 it knows how to fill, or the target is out of
+    // range, or the kind is unknown. The site keeps its placeholder 0, so a
+    // `mov rcx,[rip+0]` reads the next instruction's bytes and a `call +0`
+    // calls the next instruction -- rc=0, wrong answer. The ELF writers refuse
+    // (rc=29) while this count is non-zero; the first offender is kept for the
+    // diagnostic. reason: 1 = shape, 2 = target out of range, 3 = unknown kind.
+    // 29, not 25: 25 is already malformed-IR and dynlink symbol-cap overflow.
+    pub reloc_unpatched_count: i64,
+    pub reloc_unpatched_offset: i64,
+    pub reloc_unpatched_kind: i64,
+    pub reloc_unpatched_reason: i64,
     pub relocs: RelocationTable,
     // flat_reloc storage moved off-stack to module globals NC_FLAT_RELOC_* (above);
     // only the count remains here (module-wide, indexes the globals).
@@ -576,18 +628,24 @@ pub var NC_ALLOC_FAIL_SEQ_LINE_LEN: i64 = 0
 // One class per vreg id, up to the lowerer's ceiling.
 // 0 unknown, 1 float, 2 int, 3 conflict.
 // NC_VREG_LIMIT must equal IR_MAX_VREGS in ir/ir.sio.
-// BSS on purpose: a [i64; 16384] local, or the same array as a field of
+// BSS on purpose: a [i64; 65536] local, or the same array as a field of
 // NativeCompiler, is the compiler_new frame cliff. The 2048-slot
 // is_float_reg and reg_type fields stay for the readers that already index
 // them. OpNeg reads this table, plus the flag the lowerer stamps on a
 // float unary op. There is no second ceiling past 2048.
-pub let NC_VREG_LIMIT: i64 = 16384
-pub var NC_REG_CLASS: [i64; 16384] = [0; 16384]
+pub let NC_VREG_LIMIT: i64 = 65536
+pub var NC_REG_CLASS: [i64; 65536] = [0; 65536]
 pub var NC_REG_CLASS_DROPPED: i64 = 0
 // Exclusive upper bound of entries touched since the previous reset. Tiny
-// functions should not pay an unconditional 16,384-entry clear.
+// functions should not pay an unconditional 65,536-entry clear.
 pub var NC_REG_CLASS_HIGH_WATER: i64 = 0
-pub var NC_HIGH_SEEN: [i64; 512] = [0; 512]
+// One bit per vreg in [0, NC_VREG_LIMIT), 32 bits per word. It was [i64; 512],
+// i.e. 16384 bits, so once NC_VREG_LIMIT rose past 16384 nc_high_float_note
+// returned early for every vreg >= 16384 and the float mark was dropped:
+// the same silent untyped-float shape #1646 closed for NC_IS_FLOAT_REG.
+// Sized NC_VREG_LIMIT / 32; nc_high_seen_words() is the single bound.
+pub var NC_HIGH_SEEN: [i64; 2048] = [0; 2048]
+pub fn nc_high_seen_words() -> i64 { 2048 }
 
 fn nc_reg_bit_mask(bit: i64) -> i64 {
     var m: i64 = 1
@@ -599,6 +657,41 @@ fn nc_reg_bit_mask(bit: i64) -> i64 {
     m
 }
 
+pub fn nc_is_float_reg_clear() with Mut {
+    var i: i64 = 0
+    while i < NC_VREG_LIMIT {
+        NC_IS_FLOAT_REG[i as usize] = 0
+        i = i + 1
+    }
+}
+
+pub fn nc_raw_tag_reset() with Mut {
+    var i: i64 = 0
+    while i < NC_RAW_TAG_HIGH {
+        NC_RAW_TAG_REG[i as usize] = 0
+        i = i + 1
+    }
+    NC_RAW_TAG_HIGH = 0
+}
+
+pub fn nc_raw_tag_get(reg: i64) -> bool with Mut, Panic, Div {
+    if reg < 0 || reg >= NC_VREG_LIMIT { return false }
+    NC_RAW_TAG_REG[reg as usize] == 1
+}
+
+pub fn nc_raw_tag_set(reg: i64) with Mut, Panic, Div {
+    if reg < 0 || reg >= NC_VREG_LIMIT { return }
+    NC_RAW_TAG_REG[reg as usize] = 1
+    if reg + 1 > NC_RAW_TAG_HIGH {
+        NC_RAW_TAG_HIGH = reg + 1
+    }
+}
+
+pub fn nc_raw_tag_clear(reg: i64) with Mut, Panic, Div {
+    if reg < 0 || reg >= NC_VREG_LIMIT { return }
+    NC_RAW_TAG_REG[reg as usize] = 0
+}
+
 pub fn nc_reg_class_reset() with Mut {
     var i: i64 = 0
     while i < NC_REG_CLASS_HIGH_WATER {
@@ -607,7 +700,7 @@ pub fn nc_reg_class_reset() with Mut {
     }
     NC_REG_CLASS_HIGH_WATER = 0
     i = 0
-    while i < 512 {
+    while i < nc_high_seen_words() {
         NC_HIGH_SEEN[i as usize] = 0
         i = i + 1
     }
@@ -637,7 +730,7 @@ pub fn nc_high_float_note(reg: i64) with Mut, Panic, Div {
     if reg < NC_MAX_VREGS || reg >= NC_VREG_LIMIT { return }
     let word = reg / 32
     let bit = reg % 32
-    if word < 0 || word >= 512 { return }
+    if word < 0 || word >= nc_high_seen_words() { return }
     let mask = nc_reg_bit_mask(bit)
     let w = NC_HIGH_SEEN[word as usize]
     if (w / mask) % 2 == 1 { return }
@@ -662,6 +755,11 @@ pub fn compiler_new() -> NativeCompiler with Mut {
     NC_RELOC_UNKNOWN_KIND_FIRST = 0
     out.label_overflow = false
     NC_V2_LABEL_OVERFLOW_FN = -1
+    ELF_STRTAB_OVERFLOW = 0
+    out.reloc_unpatched_count = 0
+    out.reloc_unpatched_offset = -1
+    out.reloc_unpatched_kind = 0
+    out.reloc_unpatched_reason = 0
     out.relocs = reloc_table_new()
     out.flat_reloc_count = 0
     out.flat_rodata_len = 0
@@ -719,9 +817,6 @@ pub fn compiler_new() -> NativeCompiler with Mut {
         NC_LABEL_PATCH_LABEL_IDS[i as usize] = -1
         NC_FIELD_FLOAT_BASE_REGS[i as usize] = -1
         NC_FIELD_FLOAT_INDICES[i as usize] = -1
-        if i < 16 {
-            NC_RETURN_JUMPS[i as usize] = 0
-        }
         i = i + 1
     }
     i = 0
@@ -733,10 +828,11 @@ pub fn compiler_new() -> NativeCompiler with Mut {
     while i < NC_MAX_VREGS {
         NC_VREG_TO_PREG[i as usize] = -2
         NC_VREG_SPILL_SLOTS[i as usize] = -1
-        NC_IS_FLOAT_REG[i as usize] = 0
         NC_REG_TYPE[i as usize] = 0
         i = i + 1
     }
+    nc_is_float_reg_clear()
+    nc_raw_tag_reset()
     nc_reg_class_reset()
     out
 }
@@ -752,19 +848,17 @@ pub fn reset_function_state_mut(nc: &! NativeCompiler) with Mut, Panic, Div {
         NC_LABEL_OFFSETS[i as usize] = -1
         NC_LABEL_PATCH_CODE_OFFSETS[i as usize] = 0
         NC_LABEL_PATCH_LABEL_IDS[i as usize] = -1
-        if i < 16 {
-            NC_RETURN_JUMPS[i as usize] = 0
-        }
         i = i + 1
     }
     (*nc).label_patch_count = 0
     (*nc).current_frame_size = 0
     var j = 0
     while j < NC_MAX_VREGS {
-        NC_IS_FLOAT_REG[j as usize] = 0
         NC_REG_TYPE[j as usize] = 0
         j = j + 1
     }
+    nc_is_float_reg_clear()
+    nc_raw_tag_reset()
     nc_reg_class_reset()
     (*nc).field_float_count = 0
     var fj = 0
@@ -833,9 +927,11 @@ pub fn record_return_jump(nc: NativeCompiler) -> NativeCompiler with Mut, Panic,
 pub fn record_return_jump_mut(nc: &! NativeCompiler) with Mut, Panic, Div {
     let jmp_pos = (*nc).code.len
     (*nc).code = emit_jmp_rel32((*nc).code)
-    if (*nc).return_jump_count < 16 {
+    if (*nc).return_jump_count < nc_return_jump_capacity() {
         NC_RETURN_JUMPS[(*nc).return_jump_count as usize] = jmp_pos + 1
         (*nc).return_jump_count = (*nc).return_jump_count + 1
+    } else {
+        (*nc).label_overflow = true
     }
 }
 
@@ -847,7 +943,7 @@ pub fn patch_return_jumps(nc: NativeCompiler, epilogue_offset: i64) -> NativeCom
 
 pub fn patch_return_jumps_mut(nc: &! NativeCompiler, epilogue_offset: i64) with Mut, Panic, Div {
     var i = 0
-    while i < (*nc).return_jump_count && i < 16 {
+    while i < (*nc).return_jump_count && i < nc_return_jump_capacity() {
         let imm_offset = NC_RETURN_JUMPS[i as usize]
         if imm_offset > 0 && imm_offset + 4 <= (*nc).code.len
             && NC_BIG_CODE[(imm_offset - 1) as usize] == (0xe9 as i8) {

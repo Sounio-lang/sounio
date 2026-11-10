@@ -1,0 +1,1 @@
+lean_single now refuses an unterminated string literal with `error[E273]: unterminated string literal` at the opening quote (line:column), matching Madaros. It previously swallowed the rest of the module and reported only `unbalanced braces in module`. Witness: `tests/compile-fail/unterminated_string_lean_single.sio` (SIO-266).

@@ -1,0 +1,1 @@
+Removed analyzer scripts, Codex smokes, dev probes, FAERS fetchers, and the unused stdlib doc generator that nothing in the build or CI calls. The live docs generator and the source-bootstrap host gate are unchanged.

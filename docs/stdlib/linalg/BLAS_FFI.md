@@ -245,7 +245,6 @@ The small overhead in those targets is projected to come from FFI call overhead 
 | File | Description |
 |------|-------------|
 | [`blas_ffi.sio`](../../../stdlib/linalg/blas_ffi.sio) | Pure-Sounio BLAS-shaped API (BLAS/LAPACK FFI planned) |
-| [`blas_fallback.sio`](../../../stdlib/linalg/blas_fallback.sio) | Pure-Sounio fallback implementations |
 | [`epistemic_matrix.sio`](../../../stdlib/linalg/epistemic_matrix.sio) | EpistemicMatrix with pure-Sounio GUM-only matmul (no BLAS dispatch yet) |
 | [`blas_ffi_test.sio`](../../../tests/stdlib/linalg/blas_ffi_test.sio) | Integration tests |
 | [`blas_benchmark.sio`](../../../tests/stdlib/linalg/blas_benchmark.sio) | Performance benchmarks |

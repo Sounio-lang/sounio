@@ -1,0 +1,55 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: dynlink_all_symbols_dynstr: PASS
+// #2533/#2534: every dynlink symbol the native emitter knows (13 symbols from
+// 6 libraries). Before the fix the build was refused at the old 8-symbol cap
+// with an rc that collided with the label-overflow refusal, and .dynstr was a
+// fixed 256-byte reservation with no bounds check on the writes into it. Now
+// .dynstr is sized from its contents; the gate checks DT_STRSZ against the
+// names readelf reports.
+// Needs the probe libraries, libzstd.so.1 and libdl.so.2 on the loader path.
+// Gate: scripts/ci/madaros_dynlink_caps_gate.sh
+
+extern "C" {
+    fn kl14b_add(a: i64, b: i64) -> i64
+    fn kl14c_add(a: i64, b: i64) -> i64
+    fn kl14c_mul(a: i64, b: i64) -> i64
+    fn kl14c_neg(a: i64) -> i64
+    fn kl14d_a(x: i64) -> i64
+    fn kl14d_b(x: i64) -> i64
+    fn ZSTD_compress(dst: i64, cap: i64, src: i64, src_len: i64, level: i64) -> i64
+    fn ZSTD_decompress(dst: i64, cap: i64, src: i64, src_len: i64) -> i64
+    fn ZSTD_isError(code: i64) -> i64
+    fn dlopen(filename: *mut u8, flags: i32) -> *mut u8
+    fn dlsym(handle: *mut u8, symbol: *mut u8) -> *mut u8
+    fn dlclose(handle: *mut u8) -> i32
+    fn dlerror() -> *mut u8
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    let a = kl14b_add(1, 2)          // 3
+    let b = kl14c_add(10, 5)         // 15
+    let c = kl14c_mul(3, 4)          // 12
+    let d = kl14c_neg(7)             // -7
+    let e = kl14d_a(10)              // 11
+    let f = kl14d_b(4)               // 12
+    let z = ZSTD_isError(0)          // 0
+    // dlopen(NULL) is the main program; dlerror() is NULL when nothing failed.
+    let h = dlopen(0 as *mut u8, 1)
+    let err = dlerror()
+    // Keep the remaining symbols referenced without calling them with bad data.
+    if a + b + c + d + e + f == 99999 {
+        let t = ZSTD_compress(0, 0, 0, 0, 0)
+        let u = ZSTD_decompress(0, 0, 0, 0)
+        let s = dlsym(h, 0 as *mut u8)
+        if t + u + (s as i64) == 88888 { println("unreachable") }
+    }
+    let rc = dlclose(h)
+    if a == 3 && b == 15 && c == 12 && d == 0 - 7 && e == 11 && f == 12 && z == 0
+        && (h as i64) != 0 && (err as i64) == 0 && rc == 0 {
+        println("dynlink_all_symbols_dynstr: PASS")
+        return 0
+    }
+    println("dynlink_all_symbols_dynstr: FAIL")
+    1
+}

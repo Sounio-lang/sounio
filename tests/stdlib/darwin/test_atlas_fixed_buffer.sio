@@ -1,0 +1,76 @@
+//@ run-pass
+//@ expect-stdout: DARWIN_ATLAS_FIXED_BUFFER_PASS
+// stdlib/darwin/atlas.sio on fixed-capacity DnaSeq buffers: symmetry
+// statistics, d_min, the Dic_n double cover, and the fail-closed capacity of
+// dna_seq_try_push. Expected values: tests/oracles/darwin_atlas.cpp.
+use darwin::atlas::*
+
+fn seq4(a: u8, b: u8, c: u8, d: u8) -> DnaSeq with Mut, Panic {
+    var s = dna_seq_empty()
+    dna_seq_push(&!s, a)
+    dna_seq_push(&!s, b)
+    dna_seq_push(&!s, c)
+    dna_seq_push(&!s, d)
+    s
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var fails: i64 = 0
+
+    // ACGTACGT: period 4, not reflective, orbit 8 of 16, reverse-complement fixed.
+    let s = sample_sequence()
+    let st = compute_symmetry_stats(&s)
+    if st.length != 8 { println("FAIL length"); fails = fails + 1 }
+    if st.rotational_period != 4 { println("FAIL period"); fails = fails + 1 }
+    if rotational_symmetries(&s) != 2 { println("FAIL rotsym"); fails = fails + 1 }
+    if has_reflective_symmetry(&s) { println("FAIL reflective"); fails = fails + 1 }
+    if st.orbit_size != 8 { println("FAIL orbit"); fails = fails + 1 }
+    if st.orbit_ratio != 0.5 { println("FAIL orbit ratio"); fails = fails + 1 }
+    if st.is_palindrome { println("FAIL palindrome"); fails = fails + 1 }
+    if !st.is_rc_fixed { println("FAIL rc fixed"); fails = fails + 1 }
+    let nt = nearest_transform(&s, true)
+    if nt.distance != 0 || nt.kind != TRANSFORM_SHIFT() || nt.k != 4 { println("FAIL nearest ACGTACGT"); fails = fails + 1 }
+
+    // AAGC: aperiodic, d_min 2 reached first by a reversed shift (k = 1).
+    let q = seq4(BASE_A, BASE_A, BASE_G, BASE_C)
+    if orbit_size(&q) != 8 { println("FAIL orbit AAGC"); fails = fails + 1 }
+    let nq = nearest_transform(&q, true)
+    if nq.distance != 2 || nq.kind != TRANSFORM_REVERSE_SHIFT() || nq.k != 1 { println("FAIL nearest AAGC"); fails = fails + 1 }
+    if dmin_normalized(&q, false) != 0.5 { println("FAIL dmin_normalized"); fails = fails + 1 }
+
+    // Operators keep the length and act base by base.
+    let rc = sequence_reverse_complement(&q)
+    if dna_seq_len(&rc) != 4 || dna_seq_get(&rc, 0) != BASE_G || dna_seq_get(&rc, 3) != BASE_T { println("FAIL rc"); fails = fails + 1 }
+    let sh = sequence_shift(&q, 0 - 1)
+    if dna_seq_get(&sh, 0) != BASE_C { println("FAIL negative shift"); fails = fails + 1 }
+
+    // Dic_n double cover and the whole pipeline.
+    let m = run_atlas_metrics(&s, true, 6)
+    if !m.double_cover_ok { println("FAIL double cover"); fails = fails + 1 }
+    if !pipeline_ok(&m) { println("FAIL pipeline"); fails = fails + 1 }
+    let g = dicyclic_group_new(5)
+    let e = dicyclic_element(&g, 3, true)
+    let img = project_to_dihedral(&e, &g)
+    if img.k != 3 || !img.is_reflection { println("FAIL reflection projection"); fails = fails + 1 }
+
+    // Capacity: ATLAS_MAX_LEN bases fit, the next one is refused and nothing changes.
+    var full = dna_seq_empty()
+    var i: i64 = 0
+    var all_ok = true
+    while i < ATLAS_MAX_LEN {
+        if !dna_seq_try_push(&!full, BASE_C) { all_ok = false }
+        i = i + 1
+    }
+    if !all_ok || dna_seq_len(&full) != ATLAS_MAX_LEN { println("FAIL fill"); fails = fails + 1 }
+    if dna_seq_try_push(&!full, BASE_A) { println("FAIL overflow accepted"); fails = fails + 1 }
+    if dna_seq_len(&full) != ATLAS_MAX_LEN { println("FAIL overflow changed length"); fails = fails + 1 }
+    var bad = dna_seq_empty()
+    if dna_seq_try_push(&!bad, 4 as u8) || dna_seq_len(&bad) != 0 { println("FAIL bad code accepted"); fails = fails + 1 }
+
+    if fails != 0 {
+        println("DARWIN_ATLAS_FIXED_BUFFER_FAIL")
+        return 1
+    }
+    println("DARWIN_ATLAS_FIXED_BUFFER_PASS")
+    0
+}

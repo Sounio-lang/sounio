@@ -30,7 +30,7 @@ REQUIRED=(
     "bin/souc-native"
     "artifacts/self-hosted/souc-self-hosted-x86_64"
     "examples/seizure_hessian_ossm.sio"
-    "seizure_hessian_manifest.tsv"
+    "artifacts/research/eeg_hessian/seizure_hessian_manifest.tsv"
     "scripts/research/hessian_seed_sweep/run_sweep.py"
     "scripts/research/hessian_seed_sweep/aggregate.py"
     "stdlib/math/octonion.sio"
@@ -62,7 +62,7 @@ kubectl -n "${NS}" exec "${LOGIN_POD}" -- bash -lc "mkdir -p '${STAGE_ROOT}/repo
     artifacts/self-hosted/souc-self-hosted-x86_64 \
     stdlib \
     examples/seizure_hessian_ossm.sio \
-    seizure_hessian_manifest.tsv \
+    artifacts/research/eeg_hessian/seizure_hessian_manifest.tsv \
     scripts/research/hessian_seed_sweep \
 ) | kubectl -n "${NS}" exec -i "${LOGIN_POD}" -- bash -c "tar xf - -C '${STAGE_ROOT}/repo'"
 kubectl -n "${NS}" exec "${LOGIN_POD}" -- bash -lc "chmod +x '${STAGE_ROOT}/repo/bin/souc' '${STAGE_ROOT}/repo/bin/souc-native' '${STAGE_ROOT}/repo/artifacts/self-hosted/souc-self-hosted-x86_64'"

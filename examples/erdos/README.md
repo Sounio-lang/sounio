@@ -2,8 +2,8 @@
 topic_id: repo.examples.erdos.readme
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
-validated_by: A5
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.examples.erdos.readme
 -->
 
@@ -227,7 +227,9 @@ de Grey graph data.
 Two blockers from the previous section are now cleared:
 
 1. **The graph data is in the repo** (`data/degrey/`, acquired from the public
-   de Grey 2018 dataset — *not* fabricated). `degrey_chi5_fast.sio` reads the 1581
+   de Grey 2018 dataset — *not* fabricated). The edge table is stored once in
+   `degrey_graph_data.sio`; `degrey_chi5.sio` and `degrey_chi5_fast.sio` both import it.
+   `degrey_chi5_fast.sio` reads the 1581
    vertices / 7877 edges and **verifies the unit-distance property exactly** with
    `i64` fixed-point arithmetic (scale 10⁷, integer squared distance vs `10¹⁴` within
    tolerance): **7877 / 7877 edges confirmed unit-distance**, no floating point.

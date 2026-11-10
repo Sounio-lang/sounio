@@ -1,0 +1,64 @@
+//@ run-pass
+//@ description: #2776 (content from #1535): first-order GUM variance of correlated expressions, of quotients, of expression-bodied callees, and arithmetic on a variance_of(call) result. Every expected value is analytic (GUM §5.1/5.2 first order).
+//@ expect-stdout: GUM_FO_CORRELATION_2776_PASS
+
+fn abs_f(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn near(got: f64, want: f64) -> bool {
+    abs_f(got - want) < 1.0e-9
+}
+
+// Expression-bodied callees: no `return`, so the return variance must be
+// stored on the tail-expression path too.
+fn scale2(x: f64) -> f64 { 2.0 * x }
+fn wmul(w: f64, x: f64) -> f64 { w * x }
+
+fn main() -> i64 with IO, Mut, Div, Epistemic {
+    var bad: i64 = 0
+    // var(a) = 1.24^2 = 1.5376
+    let k: Knowledge<f64> = measure(12.4, uncertainty: 1.24)
+    let a = k.value
+    if !near(variance_of(a - a), 0.0) { print("FAIL a-a\n"); bad = bad + 1 }
+    if !near(variance_of(a / a), 0.0) { print("FAIL a/a\n"); bad = bad + 1 }
+    if !near(variance_of(a + a), 6.1504) { print("FAIL a+a\n"); bad = bad + 1 }
+    if !near(variance_of(a + a + a), 13.8384) { print("FAIL a+a+a\n"); bad = bad + 1 }
+    if !near(variance_of(2.0 * a), 6.1504) { print("FAIL 2a\n"); bad = bad + 1 }
+    // 20-step accumulator: x = 1.2 + 20*0.1*a, var = 2^2 * var(a)
+    var x: f64 = 1.2
+    var i: i64 = 0
+    while i < 20 { x = x + 0.1 * a; i = i + 1 }
+    if !near(variance_of(x), 6.1504) { print("FAIL loop\n"); bad = bad + 1 }
+    let s = a + a
+    if !near(variance_of(s), 6.1504) { print("FAIL let a+a\n"); bad = bad + 1 }
+    // y = p*q + 2p, p = 3 +- 0.5, q = 5 +- 0.2: var = (q+2)^2*0.25 + p^2*0.04 = 12.61
+    let kp: Knowledge<f64> = measure(3.0, uncertainty: 0.5)
+    let kq: Knowledge<f64> = measure(5.0, uncertainty: 0.2)
+    let p = kp.value
+    let q = kq.value
+    if !near(variance_of(p * q + 2.0 * p), 12.61) { print("FAIL pq+2p\n"); bad = bad + 1 }
+    // h*h: 4 h^2 var(h) = 4 * 3.0625 * 0.0001
+    let kh: Knowledge<f64> = measure(1.75, uncertainty: 0.01)
+    let h = kh.value
+    if !near(variance_of(h * h), 0.001225) { print("FAIL h*h\n"); bad = bad + 1 }
+    // quotient: p/q, var = 0.25/25 + (3/25)^2 * 0.04 = 0.01 + 0.000576
+    if !near(variance_of(p / q), 0.010576) { print("FAIL p/q\n"); bad = bad + 1 }
+    // callees, var(c) = 0.05^2 = 0.0025
+    let kc: Knowledge<f64> = measure(2.0, uncertainty: 0.05)
+    let c = kc.value
+    if !near(variance_of(scale2(c)), 0.01) { print("FAIL scale2\n"); bad = bad + 1 }
+    if !near(variance_of(wmul(3.0, c)), 0.0225) { print("FAIL wmul\n"); bad = bad + 1 }
+    // arithmetic on a variance_of(<call result>) value
+    let t = scale2(c)
+    let vt = variance_of(t)
+    if !near(vt + 1.0, 1.01) { print("FAIL vt+1\n"); bad = bad + 1 }
+    if !near(vt * 2.0, 0.02) { print("FAIL vt*2\n"); bad = bad + 1 }
+    if bad == 0 {
+        print("GUM_FO_CORRELATION_2776_PASS\n")
+        return 0
+    }
+    print("GUM_FO_CORRELATION_2776_FAIL\n")
+    return 1
+}

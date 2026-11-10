@@ -1,6 +1,6 @@
 ---
 name: sounio-epistemic-types
-description: "Work on Sounio epistemic computing: `Knowledge`/uncertainty/confidence/provenance, ontology bindings, and dependent epistemic subtyping/proofs; use when editing `compiler/src/epistemic/`, `compiler/src/dependent/`, or `stdlib/epistemic/`."
+description: "Work on Sounio epistemic computing: `Knowledge`/uncertainty/confidence/provenance, ontology bindings, and dependent epistemic subtyping/proofs; use when editing `stdlib/epistemic/`."
 ---
 
 # Sounio Epistemic Types
@@ -18,9 +18,6 @@ Make changes to Sounio’s epistemic system without breaking its invariants or c
 
 ### 2) Locate the implementation layer you’re editing
 
-- Frontend surface syntax / parsing: `compiler/src/ast/mod.rs`, `compiler/src/parser/`, `compiler/src/parser/tests/epistemic.rs`
-- Core compiler epistemic structures: `compiler/src/epistemic/` (e.g., `knowledge.rs`, `promotion.rs`, `kec.rs`)
-- Dependent epistemic typing + subtyping proofs: `compiler/src/dependent/` (e.g., `types.rs`, `subtyping.rs`)
 - Stdlib semantics + user-facing APIs: `stdlib/epistemic/`
 
 ### 3) Define purity/effects explicitly

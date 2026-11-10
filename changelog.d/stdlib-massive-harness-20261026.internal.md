@@ -1,0 +1,1 @@
+Stdlib validation now inventories every source file, retains raw native diagnostics and source identities, and reconciles complete test selections. Metadata producers use Node and numerical hyper comparisons use a checked C++23 oracle; failures remain visible across independent producers.

@@ -1,0 +1,180 @@
+// stdlib/physics/pbpk_phonon_q.sio
+//
+// Coupling of the Quantity-typed sinusoid lattice (physics::phonon_quantity)
+// to a well-stirred PBPK liver compartment. The SI counterpart of
+// stdlib/physics/pbpk_phonon.sio.
+//
+// At each PBPK evaluation of the liver:
+//   1. the lattice inlet is set from the PBPK portal and arterial
+//      concentrations, and the tissue side from the liver concentration;
+//   2. the lattice runs for one cardiac cycle T = 1/f_heart (0.833 s if
+//      f_heart <= 0), at cfl_dt_q, with the pulsatile phase starting at t = 0;
+//   3. the outlet concentration is averaged over the cycle.
+//
+// The cycle average is the time average (1/T) sum_k h_k C_out(t_k + h_k) over
+// the RK4 steps (right-endpoint rule, so a shortened last step weighs only
+// its length). pbpk_phonon.sio takes the plain mean of the per-step samples;
+// with a uniform step the two differ only through the last partial step.
+//
+// Uncertainty: the cycle average is linear in the lattice sensitivities, so
+// its first-order GUM uncertainty is built from the cycle-averaged outlet
+// sensitivities (physics::phonon_quantity header), with u(c_portal),
+// u(c_arterial) and u(c_tissue) uncorrelated. Averaging the per-step outlet
+// variances instead, as pbpk_phonon.sio does, would treat the samples of one
+// cycle as independent although they are the same trajectory.
+//
+// All concentrations are mass concentrations in kg/m^3.
+
+module physics::pbpk_phonon_q
+
+use units::lib::*
+use math::pure::{sqrt}
+use physics::phonon_quantity::*
+
+// Cycle average of the outlet concentration and of its four sensitivities.
+struct PqCycle {
+    mean: f64,
+    s0: f64,       // initial-state row (already in kg/m^3)
+    s_portal: f64, // per unit c_portal
+    s_ha: f64,     // per unit c_ha
+    s_tissue: f64, // per unit c_tissue
+}
+
+fn pq_require_conc(q: &Quantity, what: string) with Panic {
+    if !dim_eq(q.dim, dim_concentration()) {
+        panic(what)
+    }
+}
+
+fn pq_cycle_params(base: &PhononParams, c_portal: Quantity, c_arterial: Quantity, c_tissue: Quantity) -> PhononParams {
+    PhononParams {
+        d_eff:     base.d_eff,
+        dx:        base.dx,
+        k_release: base.k_release,
+        cl_site:   base.cl_site,
+        fu:        base.fu,
+        kp:        base.kp,
+        c_portal:  c_portal,
+        c_ha:      c_arterial,
+        f_heart:   base.f_heart,
+        a_portal:  base.a_portal,
+        a_ha:      base.a_ha,
+        phi_ha:    base.phi_ha,
+        c_tissue:  c_tissue,
+        v_blood:   base.v_blood,
+        zonation:  base.zonation,
+    }
+}
+
+fn pq_run_cycle(p: &PhononParams, lattice: &!Lattice64) -> PqCycle with Mut, Div, Panic {
+    let f = p.f_heart.value
+    let t_cycle = if f > 0.0 { 1.0 / f } else { 0.833 }
+    // Scalar CFL inputs (see phonon_simulate_q for why not cfl_dt_q(p) here).
+    let dx = p.dx.value
+    let d = p.d_eff.value
+    let v = p.v_blood.value
+    let dt_diff = if d > 0.0 { 0.4 * dx * dx / d } else { 1.0e-4 }
+    let dt_adv = if v > 0.0 { 0.8 * dx / v } else { 1.0e-4 }
+    let dt_cfl = if dt_diff < dt_adv { dt_diff } else { dt_adv }
+    let dt = if dt_cfl < 1.0e-4 { dt_cfl } else { 1.0e-4 }
+
+    var acc = PqCycle { mean: 0.0, s0: 0.0, s_portal: 0.0, s_ha: 0.0, s_tissue: 0.0 }
+    var t: f64 = 0.0
+    while t < t_cycle {
+        let h = if t + dt > t_cycle { t_cycle - t } else { dt }
+        phonon_rk4_step_q(t, lattice, p, h)
+        let last = lattice.n - 1
+        acc.mean = acc.mean + h * lattice.values[last]
+        acc.s0 = acc.s0 + h * lattice.sens[last]
+        acc.s_portal = acc.s_portal + h * lattice.sens[64 + last]
+        acc.s_ha = acc.s_ha + h * lattice.sens[128 + last]
+        acc.s_tissue = acc.s_tissue + h * lattice.sens[192 + last]
+        t = t + h
+    }
+    acc.mean = acc.mean / t_cycle
+    acc.s0 = acc.s0 / t_cycle
+    acc.s_portal = acc.s_portal / t_cycle
+    acc.s_ha = acc.s_ha / t_cycle
+    acc.s_tissue = acc.s_tissue / t_cycle
+    acc
+}
+
+// Cycle-averaged venous (outlet) concentration of the sinusoid for the given
+// portal, arterial and tissue concentrations (kg/m^3). The lattice carries
+// over between calls, as the sinusoid does between cardiac cycles.
+pub fn phonon_liver_cycle_q(
+    c_portal: Quantity,
+    c_arterial: Quantity,
+    c_tissue: Quantity,
+    base: &PhononParams,
+    lattice: &!Lattice64
+) -> Quantity with Mut, Div, Panic {
+    pq_require_conc(&c_portal, "phonon_liver_cycle_q: c_portal must be kg/m^3")
+    pq_require_conc(&c_arterial, "phonon_liver_cycle_q: c_arterial must be kg/m^3")
+    pq_require_conc(&c_tissue, "phonon_liver_cycle_q: c_tissue must be kg/m^3")
+    let p = pq_cycle_params(base, c_portal, c_arterial, c_tissue)
+    let cyc = pq_run_cycle(&p, lattice)
+    let a = cyc.s0
+    let b = cyc.s_portal * c_portal.uncertainty
+    let c = cyc.s_ha * c_arterial.uncertainty
+    let e = cyc.s_tissue * c_tissue.uncertainty
+    quantity_new(cyc.mean, sqrt(a * a + b * b + c * c + e * e), dim_concentration())
+}
+
+// Microcirculation correction to the well-stirred liver:
+//   correction = C_out,phonon - C_liver / Kp
+// with the lattice tissue side at C_liver (the well-stirred estimate). C_liver
+// enters both terms, so its sensitivity is d C_out / d c_tissue - 1 / Kp; Kp
+// enters only the well-stirred term, with sensitivity C_liver / Kp^2.
+pub fn phonon_correction_q(
+    c_liver_wellstirred: Quantity,
+    kp_liver: Quantity,
+    c_portal: Quantity,
+    c_arterial: Quantity,
+    base: &PhononParams,
+    lattice: &!Lattice64
+) -> Quantity with Mut, Div, Panic {
+    pq_require_conc(&c_liver_wellstirred, "phonon_correction_q: c_liver must be kg/m^3")
+    pq_require_conc(&c_portal, "phonon_correction_q: c_portal must be kg/m^3")
+    pq_require_conc(&c_arterial, "phonon_correction_q: c_arterial must be kg/m^3")
+    if !dim_eq(kp_liver.dim, dim_dimensionless()) {
+        panic("phonon_correction_q: kp must be dimensionless")
+    }
+    if kp_liver.value <= 0.0 {
+        panic("phonon_correction_q: kp must be positive")
+    }
+    let kp = kp_liver.value
+    let c_liver = c_liver_wellstirred.value
+    let p = pq_cycle_params(base, c_portal, c_arterial, c_liver_wellstirred)
+    let cyc = pq_run_cycle(&p, lattice)
+    let value = cyc.mean - c_liver / kp
+    let a = cyc.s0
+    let b = cyc.s_portal * c_portal.uncertainty
+    let c = cyc.s_ha * c_arterial.uncertainty
+    let e = (cyc.s_tissue - 1.0 / kp) * c_liver_wellstirred.uncertainty
+    let g = c_liver / (kp * kp) * kp_liver.uncertainty
+    quantity_new(value, sqrt(a * a + b * b + c * c + e * e + g * g), dim_concentration())
+}
+
+// Reset a lattice to a uniform concentration c (kg/m^3) whose common value is
+// known to variance var, as a lattice that has not stepped.
+pub fn phonon_init_uniform_q(s: &!Lattice64, c: f64, var: f64) with Mut {
+    var i: i64 = 0
+    while i < 64 {
+        s.values[i] = c
+        s.variances[i] = var
+        i = i + 1
+    }
+    var k: i64 = 0
+    while k < 256 {
+        s.sens[k] = 0.0
+        k = k + 1
+    }
+    var r: i64 = 0
+    while r < 4 {
+        s.live[r] = 0
+        r = r + 1
+    }
+    s.n = 64
+    s.seeded = false
+}

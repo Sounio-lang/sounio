@@ -4,13 +4,12 @@ Sounio is designed for safety-critical environments (including clinical dosing a
 
 ## Supported Versions
 
-Security patches are actively backported to all stable and pre-release milestones:
+`souc --version` reports `3.0.0-rc.1`. Security patches apply to that toolchain series:
 
 | Major Version Series | Supported |
 | -------------------- | ------------------ |
-| 2.x.x (Current Self-Hosted) | :white_check_mark: |
-| 1.0.x-beta (WASM / Legacy) | :white_check_mark: |
-| < 1.0.0 (Prerelease prototypes) | :x: |
+| 3.0.x (`3.0.0-rc.1`, as reported by `souc --version`) | :white_check_mark: |
+| < 3.0 | :x: |
 
 ---
 
@@ -21,6 +20,8 @@ Security patches are actively backported to all stable and pre-release milestone
 If you discover a security vulnerability (e.g., compile-time bypass of epistemic confidence limits, buffer overflows in PTX emission, or privilege escalation in sandboxed compilation), please report it privately by emailing:
 
 📧 **security@sounio.dev**
+
+The project's lead maintainer, Demetrios Chiuratto Agourakis, can also be reached at **demetrios@agourakis.med.br**. This is the contact registered for automated vulnerability reports (Anthropic OSS Scanner).
 
 Please include the following details in your report to help our engineers evaluate and triage the issue quickly:
 

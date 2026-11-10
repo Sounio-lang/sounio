@@ -28,10 +28,7 @@ DEFAULT_SPEC_PATH = REPO_ROOT / "scripts" / "r2" / "parity-spec.toml"
 
 
 def default_souc_bin() -> Path:
-    target_dir = os.environ.get("CARGO_TARGET_DIR")
-    if target_dir:
-        return Path(target_dir).resolve() / "debug" / "souc"
-    return REPO_ROOT / "target" / "debug" / "souc"
+    return REPO_ROOT / "bin" / "souc"
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:

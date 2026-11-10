@@ -1,0 +1,356 @@
+//@ run-pass
+//@ expect-stdout: SCIENTIFIC_CLIP_PASS
+//@ expect-stdout: stroke-linecap="round"
+//@ expect-stdout: x="39.500000" y="29.500000" width="201" height="81"
+//@ expect-stdout: clip-path="url(#plot-clip-0)"
+//@ expect-stdout: clipped-line visible=2 outside=0 invalid=0
+//@ expect-stdout: clipped-line visible=0 outside=0 invalid=2
+//@ expect-stdout: theta (rad)
+//@ expect-stdout: shift (pm)
+use viz::clip::{clip_unit_segment, clip_series_segment}
+use physics::scattering::{electron_compton_shift}
+use display::canvas::{Canvas, canvas_clear}
+use display::canvas_ext::{PixelScissor, canvas_draw_line_aa_scissored}
+use viz::ir::{viz_scene_new, viz_add_line_chart, viz_line_set_viewport, viz_add_axis,
+    viz_add_series_legend, viz_node_set_label, viz_layout_rect, viz_style_rgb}
+use viz::viz_canvas::{viz_canvas_render_scene}
+use viz::viz_html::{viz_html_emit_scene}
+fn close(a:f64,b:f64) -> bool {
+    let delta = if a>b {a-b} else {b-a}
+    delta <= 1.0e-9
+}
+fn main() with IO, Mut, Div, Alloc, Panic {
+    reference_clip()
+    var huge = 1.0e308
+    let inf = huge * 10.0
+    let nan = inf-inf
+    assert(clip_unit_segment(nan,0.0,1.0,1.0).status == 2)
+    assert(clip_unit_segment(0.0,0.0,inf,1.0).status == 2)
+    assert(clip_unit_segment(-1000001.0,0.0,1.0,1.0).status == 2)
+    let scaled = clip_series_segment(0.0,0.5,3.0e300,0.5,1.0e300,2.0e300,0.0,1.0)
+    assert(scaled.status == 0 && close(scaled.x0,0.0) && close(scaled.x1,1.0))
+    let invalid = clip_series_segment(0.0,0.5,1.0,0.5,1.0,1.0,0.0,1.0)
+    assert(invalid.status == 2)
+    var xs:[f64;1024]=[0.0;1024]
+    var ys:[f64;1024]=[0.0;1024]
+    xs[0]=-1.0;xs[1]=0.5;xs[2]=2.0
+    ys[0]=0.5;ys[1]=0.5;ys[2]=0.5
+    var scene=viz_scene_new()
+    let node=viz_add_line_chart(&!scene,&xs,&ys,3,viz_layout_rect(40,30,200,80),viz_style_rgb(255,0,0))
+    assert(node == 0)
+    let rejected=viz_line_set_viewport(&!scene,node,1.0,1.0,0.0,1.0)
+    assert(!rejected && scene.series[0].x_min == -1.0 && scene.nodes[0].flags == 0)
+    let enabled=viz_line_set_viewport(&!scene,node,0.0,1.0,0.0,1.0)
+    assert(enabled)
+    let pixels=heap_alloc(800*320*8) as *mut i64
+    var canvas=Canvas {pixels:pixels,width:320,height:160}
+    canvas_clear(&!canvas,0,0,0)
+    viz_canvas_render_scene(&scene,&!canvas)
+    assert(read_i64(canvas.pixels,70*320+40) == 16711680)
+    assert(read_i64(canvas.pixels,70*320+140) == 16711680)
+    assert(read_i64(canvas.pixels,70*320+240) == 16711680)
+    check_scissor(&canvas)
+    viz_html_emit_scene(&scene,320,160)
+    canvas_clear(&!canvas,0,0,0)
+    let sc=PixelScissor {left:40,top:30,right:240,bottom:110}
+    canvas_draw_line_aa_scissored(&!canvas,&sc,40,30,240,110,255,0,0)
+    reference_aa(&canvas)
+    check_scissor(&canvas)
+    canvas_clear(&!canvas,0,0,0)
+    canvas_draw_line_aa_scissored(&!canvas,&sc,40,30,80,110,255,0,0)
+    reference_aa_y(&canvas)
+    check_scissor(&canvas)
+    canvas_draw_line_aa_scissored(&!canvas,&sc,80,30,40,110,255,0,0)
+    canvas_clear(&!canvas,0,0,0)
+    canvas_draw_line_aa_scissored(&!canvas,&sc,40,110,240,30,255,0,0)
+    reference_aa_negative(&canvas)
+    canvas_draw_line_aa_scissored(&!canvas,&sc,40,30,240,30,255,0,0)
+    canvas_draw_line_aa_scissored(&!canvas,&sc,240,30,240,110,255,0,0)
+    canvas_draw_line_aa_scissored(&!canvas,&sc,40,110,40,110,255,0,0)
+    check_scissor(&canvas)
+    // NaN is a gap: neither adjacent segment may connect across it.
+    ys[1]=nan
+    scene.node_count=0;scene.series_count=0
+    let gap=viz_add_line_chart(&!scene,&xs,&ys,3,viz_layout_rect(40,30,200,80),viz_style_rgb(255,0,0))
+    assert(viz_line_set_viewport(&!scene,gap,0.0,1.0,0.0,1.0))
+    canvas_clear(&!canvas,0,0,0)
+    viz_canvas_render_scene(&scene,&!canvas)
+    assert(read_i64(canvas.pixels,70*320+140) == 0)
+    viz_html_emit_scene(&scene,320,160)
+    // A clipped segment can be a single point: preserve it in both backends.
+    xs[0]=0.5;xs[1]=0.5;ys[0]=0.5;ys[1]=0.5
+    scene.node_count=0;scene.series_count=0
+    let point=viz_add_line_chart(&!scene,&xs,&ys,2,viz_layout_rect(40,30,200,80),viz_style_rgb(255,0,0))
+    let point_view=viz_line_set_viewport(&!scene,point,0.0,1.0,0.0,1.0)
+    assert(point_view)
+    canvas_clear(&!canvas,0,0,0)
+    viz_canvas_render_scene(&scene,&!canvas)
+    assert(read_i64(canvas.pixels,70*320+140) == 16711680)
+    check_scissor(&canvas)
+    viz_html_emit_scene(&scene,320,160)
+    // Physical consumer: nominal electron Compton shift (pm) versus angle (rad).
+    var i:i64=0
+    while i < 13 {
+        let theta:f64=((i as f64)/12.0)*3.141592653589793
+        let shift=electron_compton_shift(theta,0.0)
+        assert(shift.status == 0)
+        xs[i as usize]=theta
+        ys[i as usize]=shift.shift_m*1.0e12
+        i=i+1
+    }
+    scene.node_count=0;scene.series_count=0
+    let curve=viz_add_line_chart(&!scene,&xs,&ys,13,viz_layout_rect(130,35,560,180),viz_style_rgb(80,180,240))
+    assert(viz_line_set_viewport(&!scene,curve,0.5,2.5,1.0,4.0))
+    let xa=viz_add_axis(&!scene,0.5,2.5,4,false,viz_layout_rect(130,230,560,1),viz_style_rgb(180,190,210))
+    let ya=viz_add_axis(&!scene,1.0,4.0,4,true,viz_layout_rect(110,35,1,180),viz_style_rgb(180,190,210))
+    assert(xa == 1 && ya == 2)
+    var text:[i8;64]=[0;64]
+    text[0]=116
+    text[1]=104
+    text[2]=101
+    text[3]=116
+    text[4]=97
+    text[5]=32
+    text[6]=40
+    text[7]=114
+    text[8]=97
+    text[9]=100
+    text[10]=41
+    viz_node_set_label(&!scene,xa,&text,11)
+    text[0]=115
+    text[1]=104
+    text[2]=105
+    text[3]=102
+    text[4]=116
+    text[5]=32
+    text[6]=40
+    text[7]=112
+    text[8]=109
+    text[9]=41
+    viz_node_set_label(&!scene,ya,&text,10)
+    text[0]=67;text[1]=111;text[2]=109;text[3]=112;text[4]=116;text[5]=111;text[6]=110
+    text[7]=32;text[8]=115;text[9]=104;text[10]=105;text[11]=102;text[12]=116
+    let legend=viz_add_series_legend(&!scene,curve,&text,13,viz_layout_rect(130,275,200,22))
+    assert(legend == 3)
+    canvas.width=800;canvas.height=320
+    canvas_clear(&!canvas,0,0,0)
+    viz_canvas_render_scene(&scene,&!canvas)
+    viz_html_emit_scene(&scene,800,320)
+    println("SCIENTIFIC_CLIP_PASS")
+    0
+}
+fn check_scissor(canvas: &Canvas) with Mut, Panic {
+    var y:i64=0
+    while y < 160 {
+        var x:i64=0
+        while x < 320 {
+            if x < 40 || x > 240 || y < 30 || y > 110 {
+                assert(read_i64(canvas.pixels,y*320+x) == 0)
+            }
+            x=x+1
+        }
+        y=y+1
+    }
+}
+fn reference_clip() with IO, Mut, Div, Panic {
+ { println("CLIP_CASE_0")
+ let result=clip_unit_segment(1.00000000000000006e-01,2.00000000000000011e-01,9.00000000000000022e-01,8.00000000000000044e-01)
+ assert(result.status == 0)
+ assert(close(result.x0,1.00000000000000006e-01))
+ assert(close(result.y0,2.00000000000000011e-01))
+ assert(close(result.x1,9.00000000000000022e-01))
+ assert(close(result.y1,8.00000000000000044e-01))
+ }
+ { println("CLIP_CASE_1")
+ let result=clip_unit_segment(-1.00000000000000000e+00,5.00000000000000000e-01,2.00000000000000000e+00,5.00000000000000000e-01)
+ assert(result.status == 0)
+ assert(close(result.x0,0.00000000000000000e+00))
+ assert(close(result.y0,5.00000000000000000e-01))
+ assert(close(result.x1,1.00000000000000000e+00))
+ assert(close(result.y1,5.00000000000000000e-01))
+ assert(result.x0 == 0.0)
+ assert(result.x1 == 1.0)
+ }
+ { println("CLIP_CASE_2")
+ let result=clip_unit_segment(2.00000000000000000e+00,5.00000000000000000e-01,-1.00000000000000000e+00,5.00000000000000000e-01)
+ assert(result.status == 0)
+ assert(close(result.x0,1.00000000000000000e+00))
+ assert(close(result.y0,5.00000000000000000e-01))
+ assert(close(result.x1,0.00000000000000000e+00))
+ assert(close(result.y1,5.00000000000000000e-01))
+ assert(result.x0 == 1.0)
+ assert(result.x1 == 0.0)
+ }
+ { println("CLIP_CASE_3")
+ let result=clip_unit_segment(5.00000000000000000e-01,-2.00000000000000000e+00,5.00000000000000000e-01,3.00000000000000000e+00)
+ assert(result.status == 0)
+ assert(close(result.x0,5.00000000000000000e-01))
+ assert(close(result.y0,0.00000000000000000e+00))
+ assert(close(result.x1,5.00000000000000000e-01))
+ assert(close(result.y1,1.00000000000000000e+00))
+ assert(result.y0 == 0.0)
+ assert(result.y1 == 1.0)
+ }
+ { println("CLIP_CASE_4")
+ let result=clip_unit_segment(5.00000000000000000e-01,3.00000000000000000e+00,5.00000000000000000e-01,-2.00000000000000000e+00)
+ assert(result.status == 0)
+ assert(close(result.x0,5.00000000000000000e-01))
+ assert(close(result.y0,1.00000000000000000e+00))
+ assert(close(result.x1,5.00000000000000000e-01))
+ assert(close(result.y1,0.00000000000000000e+00))
+ assert(result.y0 == 1.0)
+ assert(result.y1 == 0.0)
+ }
+ { println("CLIP_CASE_5")
+ let result=clip_unit_segment(-2.00000000000000000e+00,1.00000000000000006e-01,-1.00000000000000000e+00,8.00000000000000044e-01)
+ assert(result.status == 1)
+ }
+ { println("CLIP_CASE_6")
+ let result=clip_unit_segment(1.00000000000000006e-01,2.00000000000000000e+00,8.00000000000000044e-01,3.00000000000000000e+00)
+ assert(result.status == 1)
+ }
+ { println("CLIP_CASE_7")
+ let result=clip_unit_segment(-1.00000000000000000e+00,0.00000000000000000e+00,2.00000000000000000e+00,0.00000000000000000e+00)
+ assert(result.status == 0)
+ assert(close(result.x0,0.00000000000000000e+00))
+ assert(close(result.y0,0.00000000000000000e+00))
+ assert(close(result.x1,1.00000000000000000e+00))
+ assert(close(result.y1,0.00000000000000000e+00))
+ assert(result.x0 == 0.0)
+ assert(result.y0 == 0.0)
+ assert(result.x1 == 1.0)
+ assert(result.y1 == 0.0)
+ }
+ { println("CLIP_CASE_8")
+ let result=clip_unit_segment(0.00000000000000000e+00,2.00000000000000000e+00,0.00000000000000000e+00,-1.00000000000000000e+00)
+ assert(result.status == 0)
+ assert(close(result.x0,0.00000000000000000e+00))
+ assert(close(result.y0,1.00000000000000000e+00))
+ assert(close(result.x1,0.00000000000000000e+00))
+ assert(close(result.y1,0.00000000000000000e+00))
+ assert(result.x0 == 0.0)
+ assert(result.y0 == 1.0)
+ assert(result.x1 == 0.0)
+ assert(result.y1 == 0.0)
+ }
+ { println("CLIP_CASE_9")
+ let result=clip_unit_segment(5.00000000000000000e-01,5.00000000000000000e-01,5.00000000000000000e-01,5.00000000000000000e-01)
+ assert(result.status == 0)
+ assert(close(result.x0,5.00000000000000000e-01))
+ assert(close(result.y0,5.00000000000000000e-01))
+ assert(close(result.x1,5.00000000000000000e-01))
+ assert(close(result.y1,5.00000000000000000e-01))
+ }
+ { println("CLIP_CASE_10")
+ let result=clip_unit_segment(-1.00000000000000000e+00,-1.00000000000000000e+00,-1.00000000000000000e+00,-1.00000000000000000e+00)
+ assert(result.status == 1)
+ }
+ { println("CLIP_CASE_11")
+ let result=clip_unit_segment(-1.00000000000000000e+00,-1.00000000000000000e+00,0.00000000000000000e+00,0.00000000000000000e+00)
+ assert(result.status == 0)
+ assert(close(result.x0,0.00000000000000000e+00))
+ assert(close(result.y0,0.00000000000000000e+00))
+ assert(close(result.x1,0.00000000000000000e+00))
+ assert(close(result.y1,0.00000000000000000e+00))
+ assert(result.x0 == 0.0)
+ assert(result.y0 == 0.0)
+ assert(result.x1 == 0.0)
+ assert(result.y1 == 0.0)
+ }
+ { println("CLIP_CASE_12")
+ let result=clip_unit_segment(-1.00000000000000000e+00,1.00000000000000000e+00,1.00000000000000000e+00,-1.00000000000000000e+00)
+ assert(result.status == 0)
+ assert(close(result.x0,0.00000000000000000e+00))
+ assert(close(result.y0,0.00000000000000000e+00))
+ assert(close(result.x1,0.00000000000000000e+00))
+ assert(close(result.y1,0.00000000000000000e+00))
+ assert(result.x0 == 0.0)
+ assert(result.y0 == 0.0)
+ assert(result.x1 == 0.0)
+ assert(result.y1 == 0.0)
+ }
+ { println("CLIP_CASE_13")
+ let result=clip_unit_segment(-1.00000000000000000e+00,2.00000000000000000e+00,2.00000000000000000e+00,-1.00000000000000000e+00)
+ assert(result.status == 0)
+ assert(close(result.x0,0.00000000000000000e+00))
+ assert(close(result.y0,1.00000000000000000e+00))
+ assert(close(result.x1,1.00000000000000000e+00))
+ assert(close(result.y1,0.00000000000000000e+00))
+ assert(result.x0 == 0.0)
+ assert(result.y0 == 1.0)
+ assert(result.x1 == 1.0)
+ assert(result.y1 == 0.0)
+ }
+ { println("CLIP_CASE_14")
+ let result=clip_unit_segment(-1.00000000000000000e+00,1.01000000000000001e+00,1.00000000000000002e-02,2.00000000000000000e+00)
+ assert(result.status == 1)
+ }
+ { println("CLIP_CASE_15")
+ let result=clip_unit_segment(-2.50000000000000000e-01,7.50000000000000000e-01,1.25000000000000000e+00,2.50000000000000000e-01)
+ assert(result.status == 0)
+ assert(close(result.x0,0.00000000000000000e+00))
+ assert(close(result.y0,6.66666666666666630e-01))
+ assert(close(result.x1,1.00000000000000000e+00))
+ assert(close(result.y1,3.33333333333333315e-01))
+ assert(result.x0 == 0.0)
+ assert(result.x1 == 1.0)
+ }
+ { println("CLIP_CASE_16")
+ let result=clip_unit_segment(1.00000000000000000e+00,1.00000000000000000e+00,1.00000000000000000e+00,1.00000000000000000e+00)
+ assert(result.status == 0)
+ assert(close(result.x0,1.00000000000000000e+00))
+ assert(close(result.y0,1.00000000000000000e+00))
+ assert(close(result.x1,1.00000000000000000e+00))
+ assert(close(result.y1,1.00000000000000000e+00))
+ assert(result.x0 == 1.0)
+ assert(result.y0 == 1.0)
+ assert(result.x1 == 1.0)
+ assert(result.y1 == 1.0)
+ }
+ { println("CLIP_CASE_17")
+ let result=clip_unit_segment(0.00000000000000000e+00,0.00000000000000000e+00,1.00000000000000000e+00,1.00000000000000000e+00)
+ assert(result.status == 0)
+ assert(close(result.x0,0.00000000000000000e+00))
+ assert(close(result.y0,0.00000000000000000e+00))
+ assert(close(result.x1,1.00000000000000000e+00))
+ assert(close(result.y1,1.00000000000000000e+00))
+ assert(result.x0 == 0.0)
+ assert(result.y0 == 0.0)
+ assert(result.x1 == 1.0)
+ assert(result.y1 == 1.0)
+ }
+ { println("CLIP_CASE_18")
+ let result=clip_unit_segment(1.00000000000000000e+00,0.00000000000000000e+00,0.00000000000000000e+00,1.00000000000000000e+00)
+ assert(result.status == 0)
+ assert(close(result.x0,1.00000000000000000e+00))
+ assert(close(result.y0,0.00000000000000000e+00))
+ assert(close(result.x1,0.00000000000000000e+00))
+ assert(close(result.y1,1.00000000000000000e+00))
+ assert(result.x0 == 1.0)
+ assert(result.y0 == 0.0)
+ assert(result.x1 == 0.0)
+ assert(result.y1 == 1.0)
+ }
+ { println("CLIP_CASE_19")
+ let result=clip_unit_segment(-1.00000000000000000e+06,5.00000000000000000e-01,1.00000000000000000e+06,5.00000000000000000e-01)
+ assert(result.status == 0)
+ assert(close(result.x0,0.00000000000000000e+00))
+ assert(close(result.y0,5.00000000000000000e-01))
+ assert(close(result.x1,1.00000000000000000e+00))
+ assert(close(result.y1,5.00000000000000000e-01))
+ assert(result.x0 == 0.0)
+ assert(result.x1 == 1.0)
+ }
+}
+fn reference_aa_y(canvas: &Canvas) with Panic {
+ assert(read_i64(canvas.pixels,31*320+40) == 8388608)
+ assert(read_i64(canvas.pixels,31*320+41) == 8323072)
+}
+fn reference_aa_negative(canvas: &Canvas) with Panic {
+ assert(read_i64(canvas.pixels,109*320+41) == 6684672)
+ assert(read_i64(canvas.pixels,110*320+41) == 10027008)
+}
+fn reference_aa(canvas: &Canvas) with Panic {
+ assert(read_i64(canvas.pixels,30*320+41) == 10027008)
+ assert(read_i64(canvas.pixels,31*320+41) == 6684672)
+}

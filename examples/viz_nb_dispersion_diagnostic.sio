@@ -1,0 +1,154 @@
+// Scientific diagnostic example; execution evidence is tracked in the sprint receipt.
+// Synthetic counts; known exposures; descriptive moment dispersion only.
+use stats::regression::poisson::{poisson_fit_offset}
+use stats::regression::nb_dispersion::{nb2_moment_dispersion}
+use stats::regression::nb2_diagnostics::{nb2_count_diagnostic}
+use math::pure::{ln_checked,is_finite}
+use viz::ir::{viz_scene_new,viz_add_scatter_chart,viz_scatter_set_viewport,
+ viz_add_line_chart,viz_line_set_viewport,viz_add_axis,viz_node_set_label,
+ viz_add_label,viz_add_series_legend,viz_layout_rect,viz_style_rgb}
+use viz::viz_canvas::{viz_canvas_render_scene}
+use viz::viz_html::{viz_html_emit_scene}
+use display::canvas::{Canvas,canvas_clear}
+
+fn main() -> i32 with IO,Mut,Div,Alloc,Panic {
+ var design:[f64;2048]=[0.0;2048]
+ var counts:[i64;256]=[0;256]
+ var offsets:[f64;256]=[0.0;256]
+ var exposure:[f64;8]=[1.0,2.0,4.0,8.0,1.0,2.0,4.0,8.0]
+ var events:[i64;8]=[0,1,2,20,1,3,4,28]
+ var i:i64=0
+ while i<8 {
+  design[(8*i) as usize]=1.0
+  design[(8*i+1) as usize]=if i<4 {0.0} else {1.0}
+  counts[i as usize]=events[i as usize]
+  let offset=ln_checked(exposure[i as usize])
+  if offset.status!=0 {println("EXAMPLE_UNAVAILABLE: invalid exposure");return 1}
+  offsets[i as usize]=offset.value
+  i=i+1
+ }
+ let fit=poisson_fit_offset(&design,&counts,&offsets,8,2,0.0,100,1e-10)
+ print("Poisson fit status: ");println(fit.status)
+ if fit.status!=0 {println("EXAMPLE_UNAVAILABLE: mean fit");return 1}
+ // Declare the two fitted mean parameters to the moment adjustment.
+ let dispersion=nb2_moment_dispersion(&counts,&fit.means,8,2)
+ print("NB2 moment status: ");println(dispersion.status)
+ if dispersion.status!=0 {println("EXAMPLE_UNAVAILABLE: dispersion");return 1}
+ print("Moment alpha signed: ");println(dispersion.alpha_signed)
+ print("Moment alpha projected nonnegative: ");println(dispersion.alpha_nonnegative)
+ print("Projection truncated: ");println(dispersion.truncated)
+ print("Poisson Pearson X2 (descriptive): ");println(dispersion.pearson_x2)
+ print("Declared mean parameters: ");println(dispersion.parameters_declared)
+ print("Residual df used for moment adjustment: ");println(dispersion.residual_df)
+ print("Poisson assumptions assessed: ");println(fit.poisson_assumptions_assessed)
+ print("NB assumptions assessed: ");println(dispersion.nb_assumptions_assessed)
+ println("Moment diagnostic only; not an NB likelihood fit, test, CI or dispersion shrinkage.")
+ println("NB2 Pearson scaling uses projected moment alpha estimated from these same observations.")
+ // Bounds pass uses scalars; builders copy each active scratch prefix.
+ var order:[f64;1024]=[0.0;1024]
+ var y:[f64;1024]=[0.0;1024]
+ var rate_max:f64=1.0
+ var residual_max:f64=1.0
+ i=0
+ while i<8 {
+  let mu=fit.means[i as usize]
+  if !is_finite(mu) || mu<=0.0 {println("EXAMPLE_UNAVAILABLE: mean");return 1}
+  let observed=(counts[i as usize] as f64)/exposure[i as usize]
+  let fitted=mu/exposure[i as usize]
+  let diagnostic=nb2_count_diagnostic(counts[i as usize],mu,dispersion.alpha_nonnegative)
+  if diagnostic.status!=0 {println("EXAMPLE_UNAVAILABLE: residual bounds");return 1}
+  let pearson=diagnostic.poisson_pearson_residual
+  let nb2=diagnostic.nb2_pearson_residual
+  if observed>rate_max {rate_max=observed}
+  if fitted>rate_max {rate_max=fitted}
+  let magnitude=if pearson<0.0 {-pearson} else {pearson}
+  if magnitude>residual_max {residual_max=magnitude}
+  let nb_magnitude=if nb2<0.0 {-nb2} else {nb2}
+  if nb_magnitude>residual_max {residual_max=nb_magnitude}
+  i=i+1
+ }
+ rate_max=rate_max*1.2
+ residual_max=residual_max*1.2
+ var scene=viz_scene_new()
+ i=0
+ while i<8 {
+  order[i as usize]=(i+1) as f64
+  y[i as usize]=(counts[i as usize] as f64)/exposure[i as usize]
+  i=i+1
+ }
+ let observed_node=viz_add_scatter_chart(&!scene,&order,&y,8,viz_layout_rect(180,150,400,240),viz_style_rgb(70,180,235))
+ i=0
+ while i<8 {
+  y[i as usize]=fit.means[i as usize]/exposure[i as usize]
+  i=i+1
+ }
+ let fitted_node=viz_add_scatter_chart(&!scene,&order,&y,8,viz_layout_rect(180,150,400,240),viz_style_rgb(245,170,65))
+ i=0
+ while i<8 {
+  let mu=fit.means[i as usize]
+  let diagnostic=nb2_count_diagnostic(counts[i as usize],mu,dispersion.alpha_nonnegative)
+  if diagnostic.status!=0 {println("EXAMPLE_UNAVAILABLE: Poisson residual");return 1}
+  y[i as usize]=diagnostic.poisson_pearson_residual
+  i=i+1
+ }
+ let residual_node=viz_add_scatter_chart(&!scene,&order,&y,8,viz_layout_rect(820,150,400,240),viz_style_rgb(220,135,225))
+ i=0
+ while i<8 {
+  let mu=fit.means[i as usize]
+  let diagnostic=nb2_count_diagnostic(counts[i as usize],mu,dispersion.alpha_nonnegative)
+  if diagnostic.status!=0 {println("EXAMPLE_UNAVAILABLE: NB2 residual");return 1}
+  y[i as usize]=diagnostic.nb2_pearson_residual
+  i=i+1
+ }
+ let nb2_node=viz_add_scatter_chart(&!scene,&order,&y,8,viz_layout_rect(820,150,400,240),viz_style_rgb(100,215,150))
+ if observed_node<0 || fitted_node<0 || residual_node<0 || nb2_node<0 {println("EXAMPLE_UNAVAILABLE: scene capacity");return 1}
+ if !viz_scatter_set_viewport(&!scene,observed_node,0.0,9.0,0.0,rate_max) {println("EXAMPLE_UNAVAILABLE: rate viewport");return 1}
+ if !viz_scatter_set_viewport(&!scene,fitted_node,0.0,9.0,0.0,rate_max) {println("EXAMPLE_UNAVAILABLE: rate viewport");return 1}
+ if !viz_scatter_set_viewport(&!scene,residual_node,0.0,9.0,-residual_max,residual_max) {println("EXAMPLE_UNAVAILABLE: Poisson viewport");return 1}
+ if !viz_scatter_set_viewport(&!scene,nb2_node,0.0,9.0,-residual_max,residual_max) {println("EXAMPLE_UNAVAILABLE: NB2 viewport");return 1}
+ order[0]=0.0
+ order[1]=9.0
+ y[0]=0.0
+ y[1]=0.0
+ let zero=viz_add_line_chart(&!scene,&order,&y,2,viz_layout_rect(820,150,400,240),viz_style_rgb(180,185,195))
+ if zero<0 {println("EXAMPLE_UNAVAILABLE: zero reference");return 1}
+ if !viz_line_set_viewport(&!scene,zero,0.0,9.0,-residual_max,residual_max) {println("EXAMPLE_UNAVAILABLE: reference viewport");return 1}
+ let xa=viz_add_axis(&!scene,0.0,9.0,3,false,viz_layout_rect(180,408,400,1),viz_style_rgb(190,200,215))
+ let ya=viz_add_axis(&!scene,0.0,rate_max,4,true,viz_layout_rect(160,150,1,240),viz_style_rgb(190,200,215))
+ let xb=viz_add_axis(&!scene,0.0,9.0,3,false,viz_layout_rect(820,408,400,1),viz_style_rgb(190,200,215))
+ let yb=viz_add_axis(&!scene,-residual_max,residual_max,4,true,viz_layout_rect(800,150,1,240),viz_style_rgb(190,200,215))
+ var title:[i8;64]=[83,121,110,116,104,101,116,105,99,32,99,111,117,110,116,115,58,32,80,111,105,115,115,111,110,32,97,110,100,32,112,108,117,103,45,105,110,32,78,66,50,32,100,105,97,103,110,111,115,116,105,99,115,0,0,0,0,0,0,0,0,0,0,0]
+ var subtitle:[i8;64]=[75,110,111,119,110,32,101,120,112,111,115,117,114,101,115,59,32,116,119,111,32,109,101,97,110,32,112,97,114,97,109,101,116,101,114,115,59,32,97,108,112,104,97,32,114,101,112,111,114,116,101,100,32,105,110,32,115,116,100,111,117,116,0,0]
+ var obs:[i8;64]=[79,98,115,101,114,118,101,100,32,114,97,116,101,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
+ var fitname:[i8;64]=[80,111,105,115,115,111,110,32,102,105,116,116,101,100,32,114,97,116,101,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
+ var resname:[i8;64]=[80,111,105,115,115,111,110,32,80,101,97,114,115,111,110,32,114,101,115,105,100,117,97,108,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
+ var nbname:[i8;64]=[78,66,50,32,80,101,97,114,115,111,110,32,40,112,108,117,103,45,105,110,32,97,108,112,104,97,41,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
+ var xn:[i8;64]=[79,98,115,101,114,118,97,116,105,111,110,32,40,65,58,32,49,45,52,59,32,66,58,32,53,45,56,41,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
+ var rate:[i8;64]=[82,97,116,101,32,40,101,118,101,110,116,115,47,115,41,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
+ var resid:[i8;64]=[80,101,97,114,115,111,110,32,114,101,115,105,100,117,97,108,32,40,100,105,109,101,110,115,105,111,110,108,101,115,115,41,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
+ var foot:[i8;64]=[80,108,117,103,45,105,110,32,97,108,112,104,97,32,102,114,111,109,32,115,97,109,101,32,111,98,115,101,114,118,97,116,105,111,110,115,59,32,110,111,32,78,66,32,102,105,116,32,111,114,32,105,110,102,101,114,101,110,99,101,46,0,0,0]
+ var note:[i8;64]=[78,111,32,67,73,47,116,101,115,116,59,32,105,110,100,101,112,101,110,100,101,110,99,101,44,32,109,101,97,110,47,101,120,112,111,115,117,114,101,32,97,115,115,117,109,112,116,105,111,110,115,32,117,110,97,115,115,101,115,115,101,100,46,0]
+ if xa<0 || ya<0 || xb<0 || yb<0 {println("EXAMPLE_UNAVAILABLE: axes");return 1}
+ viz_node_set_label(&!scene,xa,&xn,28)
+ viz_node_set_label(&!scene,xb,&xn,28)
+ viz_node_set_label(&!scene,ya,&rate,15)
+ viz_node_set_label(&!scene,yb,&resid,32)
+ let heading=viz_add_label(&!scene,&title,53,viz_layout_rect(180,20,1040,20),viz_style_rgb(230,235,245))
+ let subheading=viz_add_label(&!scene,&subtitle,62,viz_layout_rect(180,52,1040,20),viz_style_rgb(190,200,215))
+ let legend0=viz_add_series_legend(&!scene,observed_node,&obs,13,viz_layout_rect(180,470,220,22))
+ let legend1=viz_add_series_legend(&!scene,fitted_node,&fitname,19,viz_layout_rect(420,470,300,22))
+ let legend2=viz_add_series_legend(&!scene,residual_node,&resname,24,viz_layout_rect(820,470,400,22))
+ let legend3=viz_add_series_legend(&!scene,nb2_node,&nbname,27,viz_layout_rect(820,500,400,22))
+ let footer=viz_add_label(&!scene,&foot,61,viz_layout_rect(180,550,1040,14),viz_style_rgb(190,200,215))
+ let caveat=viz_add_label(&!scene,&note,63,viz_layout_rect(180,580,1040,14),viz_style_rgb(190,200,215))
+ if xa<0 || ya<0 || xb<0 || yb<0 || heading<0 || subheading<0 || legend0<0 || legend1<0 || legend2<0 || legend3<0 || footer<0 || caveat<0 {println("EXAMPLE_UNAVAILABLE: labels");return 1}
+ let pixels=heap_alloc(1380*620*8) as *mut i64
+ if pixels as i64==0 {println("EXAMPLE_UNAVAILABLE: Canvas allocation");return 1}
+ var canvas=Canvas{pixels:pixels,width:1380,height:620}
+ canvas_clear(&!canvas,0,0,0)
+ viz_canvas_render_scene(&scene,&!canvas)
+ // Canvas is rendered in memory; stdout carries the report and SVG/HTML.
+ viz_html_emit_scene(&scene,1380,620)
+ heap_free(canvas.pixels as *mut i8)
+ 0
+}

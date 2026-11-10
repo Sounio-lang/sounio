@@ -1,0 +1,119 @@
+// Two-group median-centered Levene / Brown-Forsythe.
+// ANOVA on absolute deviations, common-unit scaling and direct F survival.
+use math::pure::{is_finite}
+use stats::order::{sort100}
+use stats::fisher_f::{f_sf}
+pub struct BrownForsytheResult {
+ pub status:i64, pub n_a:i64, pub n_b:i64, pub df1:i64, pub df2:i64,
+ pub f_stat:f64, pub p:f64, pub reference_approximate:bool,
+ // Means below are in units of deviation_scale, not raw variances or CIs.
+ pub deviation_scale:f64, pub mean_abs_a_scaled:f64, pub mean_abs_b_scaled:f64,
+}
+fn bf_abs(x:f64)->f64 {if x<0.0{return -x} return x}
+fn bf_empty(s:i64,na:i64,nb:i64)->BrownForsytheResult {
+ return BrownForsytheResult{status:s,n_a:na,n_b:nb,df1:1,df2:0,
+ f_stat:0.0,p:0.0,reference_approximate:true,deviation_scale:0.0,
+ mean_abs_a_scaled:0.0,mean_abs_b_scaled:0.0}
+}
+struct BfGroup { status:i64, scale:f64 }
+fn bf_median(sorted:&[f64;100],n:i64)->f64 with Mut,Div,Panic {
+ if n%2==1 {return sorted[(n/2) as usize]}
+ let lower=sorted[(n/2-1) as usize]
+ let upper=sorted[(n/2) as usize]
+ return lower+0.5*(upper-lower)
+}
+// Scratch is reused: raw observations -> anchored coordinates -> deviations.
+fn bf_group(x:&[f64;100],n:i64,scratch:&![f64;100])->BfGroup with Mut,Div,Panic {
+ var scale=0.0
+ var i:i64=0
+ while i<n {
+  let v=x[i as usize]
+  if !is_finite(v) {return BfGroup{status:2,scale:0.0}}
+  scratch[i as usize]=v
+  if bf_abs(v)>scale {scale=bf_abs(v)}
+  i=i+1
+ }
+ if !sort100(scratch,n) {return BfGroup{status:4,scale:0.0}}
+ let anchor=scratch[0]
+ let range=scratch[(n-1) as usize]-anchor
+ if range==0.0 {
+  i=0
+  while i<n {scratch[i as usize]=0.0;i=i+1}
+  return BfGroup{status:0,scale:0.0}
+ }
+ let direct=is_finite(range)
+ let units=if direct {range} else {scale}
+ i=0
+ while i<n {
+  if direct {scratch[i as usize]=(scratch[i as usize]-anchor)/units}
+  else {scratch[i as usize]=scratch[i as usize]/units-anchor/units}
+  i=i+1
+ }
+ let center=bf_median(scratch,n)
+ i=0
+ while i<n {scratch[i as usize]=bf_abs(scratch[i as usize]-center);i=i+1}
+ return BfGroup{status:0,scale:units}
+}
+fn bf_mean(a:&![f64;100],n:i64,factor:f64)->f64 with Mut,Div,Panic {
+ var sum=0.0
+ var c=0.0
+ var i:i64=0
+ while i<n {
+  let value=a[i as usize]*factor
+  a[i as usize]=value
+  let y=value-c
+  let t=sum+y
+  c=(t-sum)-y
+  sum=t
+  i=i+1
+ }
+ return sum/(n as f64)
+}
+// Status0 available;1 invalid n;2 nonfinite;3 zero within-deviation variation;
+// 4 arithmetic failure. No invented variance floor or p-to-Beta conversion.
+pub fn brown_forsythe(a:&[f64;100],na:i64,b:&[f64;100],nb:i64)->BrownForsytheResult with Mut,Div,Panic {
+ if na<2 || na>100 || nb<2 || nb>100 {return bf_empty(1,na,nb)}
+ var da:[f64;100]=[0.0;100]
+ var db:[f64;100]=[0.0;100]
+ let ga=bf_group(a,na,&!da)
+ if ga.status!=0 {return bf_empty(ga.status,na,nb)}
+ let gb=bf_group(b,nb,&!db)
+ if gb.status!=0 {return bf_empty(gb.status,na,nb)}
+ let scale=if ga.scale>gb.scale {ga.scale} else {gb.scale}
+ if scale==0.0 {return bf_empty(3,na,nb)}
+ let ma=bf_mean(&!da,na,ga.scale/scale)
+ let mb=bf_mean(&!db,nb,gb.scale/scale)
+ var within=0.0
+ var c=0.0
+ var i:i64=0
+ while i<na {
+  let d=da[i as usize]-ma
+  let y=d*d-c
+  let t=within+y
+  c=(t-within)-y
+  within=t
+  i=i+1
+ }
+ i=0
+ while i<nb {
+  let d=db[i as usize]-mb
+  let y=d*d-c
+  let t=within+y
+  c=(t-within)-y
+  within=t
+  i=i+1
+ }
+ if within==0.0 {return bf_empty(3,na,nb)}
+ if within<0.0 || !is_finite(within) {return bf_empty(4,na,nb)}
+ let total=na+nb
+ let df2=total-2
+ let contrast=ma-mb
+ let between=((na as f64)/(total as f64))*(nb as f64)*contrast*contrast
+ let f=(between*(df2 as f64))/within
+ if !is_finite(f) || f<0.0 {return bf_empty(4,na,nb)}
+ let p=f_sf(f,1.0,df2 as f64)
+ if !is_finite(p) || p<0.0 || p>1.0 {return bf_empty(4,na,nb)}
+ return BrownForsytheResult{status:0,n_a:na,n_b:nb,df1:1,df2:df2,
+ f_stat:f,p:p,reference_approximate:true,deviation_scale:scale,
+ mean_abs_a_scaled:ma,mean_abs_b_scaled:mb}
+}

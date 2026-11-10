@@ -2,8 +2,8 @@
 topic_id: repo.docs.architecture.llvm-codegen
 authority: historical
 audience: users
-last_validated: 2026-03-07
-validated_by: A2
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.architecture.llvm-codegen
 -->
 
@@ -408,7 +408,7 @@ Ensure all HLIR type variants are handled in:
 
 ## Related Documentation
 
-- [Installation Guide](../INSTALL.md) - LLVM setup
+- [Installation Guide](../guide/installation.md) - LLVM setup
 - [Feature Flags](../FEATURE_FLAGS.md) - Build configuration
 - [Epistemic API](../reference/EPISTEMIC_API.md) - Knowledge<T> usage
 - [GPU Runtime](../features/GPU_RUNTIME.md) - GPU backend

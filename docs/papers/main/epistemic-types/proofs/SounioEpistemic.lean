@@ -1,1 +1,1 @@
-/home/demetrios/work/sounio/formal/lean4/SounioEpistemic.lean
+../../../../../formal/lean4/SounioEpistemic.lean

@@ -1,0 +1,241 @@
+// Target-scoped AST -> MSL bridge for actual native Metal launches.
+// Source f64 is an eight-byte software-binary64 value, never a float32 cast.
+use parser::ast::*
+
+var NM_ACTIVE: bool = false
+var NM_COUNT: i64 = 0
+var NM_ERROR: bool = false
+var NM_NAMES: [string; 64] = [""; 64]
+var NM_SOURCES: [string; 64] = [""; 64]
+var NM_COUNTS: [i64; 64] = [0; 64]
+var NM_KINDS: [i64; 2048] = [0; 2048]
+
+pub fn native_metal_begin(active: bool) with Mut {
+    NM_ACTIVE = active
+    NM_COUNT = 0
+    NM_ERROR = false
+}
+pub fn native_metal_failed() -> bool { NM_ERROR }
+pub fn native_metal_find(name: string) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < NM_COUNT {
+        if NM_NAMES[i as usize] == name { return i }
+        i = i + 1
+    }
+    -1
+}
+pub fn native_metal_source(id: i64) -> string with Mut, Panic { NM_SOURCES[id as usize] }
+pub fn native_metal_arg_count(id: i64) -> i64 with Mut, Panic { NM_COUNTS[id as usize] }
+pub fn native_metal_arg_kind(id: i64, arg: i64) -> i64 with Mut, Panic { NM_KINDS[(id * 32 + arg) as usize] }
+fn nm_name(name: Name) -> string with Mut, Panic, Div, Alloc { str_from_bytes(name.buf, name.len) }
+fn nm_decimal(n: i64) -> string with Mut, Panic, Div, Alloc {
+    if n < 0 { return "-" + nm_decimal(0 - n) }
+    if n == 0 { return "0" }
+    var buf: [i8; 32] = [0; 32]
+    var size: i64 = 0
+    var value = n
+    while value > 0 { buf[size as usize] = (48 + value % 10) as i8; size = size + 1; value = value / 10 }
+    var out: [i8; 32] = [0; 32]
+    var i: i64 = 0
+    while i < size { out[i as usize] = buf[(size - i - 1) as usize]; i = i + 1 }
+    str_from_bytes(out, size)
+}
+fn nm_hex(n: i64) -> string with Mut, Panic, Div, Alloc {
+    var out: [i8; 16] = [0; 16]
+    var i: i64 = 0
+    while i < 16 {
+        let digit = (n >> ((15 - i) * 4)) & 15
+        out[i as usize] = (if digit < 10 { 48 + digit } else { 87 + digit }) as i8
+        i = i + 1
+    }
+    str_from_bytes(out, 16)
+}
+fn nm_operator(op: BinaryOp) -> string with Mut {
+    if op == BinaryOp::OpAdd { return "+" }
+    if op == BinaryOp::OpSub { return "-" }
+    if op == BinaryOp::OpMul { return "*" }
+    if op == BinaryOp::OpDiv { return "/" }
+    if op == BinaryOp::OpRem { return "%" }
+    if op == BinaryOp::OpEq { return "==" }
+    if op == BinaryOp::OpNe { return "!=" }
+    if op == BinaryOp::OpLt { return "<" }
+    if op == BinaryOp::OpLe { return "<=" }
+    if op == BinaryOp::OpGt { return ">" }
+    if op == BinaryOp::OpGe { return ">=" }
+    if op == BinaryOp::OpAnd { return "&&" }
+    if op == BinaryOp::OpOr { return "||" }
+    NM_ERROR = true
+    "?"
+}
+fn nm_opt_expr(opt: &Option<Box<Expr>>) -> string with Mut, Panic, Div, Alloc {
+    match *opt {
+        Some(e) => nm_expr(&(*e)),
+        None => { NM_ERROR = true; "<missing>" }
+    }
+}
+fn nm_expr(e: &Expr) -> string with Mut, Panic, Div, Alloc {
+    if (*e).kind == ExprKind::ExprIdent { return "s_" + nm_name((*e).name) }
+    if (*e).kind == ExprKind::ExprIntLit { return "long(" + nm_decimal((*e).int_val) + ")" }
+    if (*e).kind == ExprKind::ExprFloatLit { return "sf64_bits(0x" + nm_hex(f64_to_bits((*e).float_val)) + "ul)" }
+    if (*e).kind == ExprKind::ExprBinary {
+        return "(" + nm_opt_expr(&(*e).left) + nm_operator((*e).bin_op) + nm_opt_expr(&(*e).right) + ")"
+    }
+    if (*e).kind == ExprKind::ExprIndex { return nm_opt_expr(&(*e).left) + "[" + nm_opt_expr(&(*e).right) + "]" }
+    if (*e).kind == ExprKind::ExprCast {
+        match (*e).cast_type {
+            Some(ty) => {
+                let name = str_from_bytes((*ty).path.segments.head_buf, (*ty).path.segments.head_len)
+                if name == "f64" { return "sf64_from_i64(long(" + nm_opt_expr(&(*e).left) + "))" }
+                if name == "usize" || name == "u64" { return "ulong(" + nm_opt_expr(&(*e).left) + ")" }
+                if name == "i64" { return "long(" + nm_opt_expr(&(*e).left) + ")" }
+            }
+            None => {}
+        }
+    }
+    if (*e).kind == ExprKind::ExprUnary {
+        if (*e).un_op == UnaryOp::OpNeg { return "(-" + nm_opt_expr(&(*e).left) + ")" }
+        if (*e).un_op == UnaryOp::OpNot { return "(!" + nm_opt_expr(&(*e).left) + ")" }
+    }
+    if (*e).kind == ExprKind::ExprCall {
+        match (*e).left {
+            Some(callee) => {
+                if nm_name((*callee).name) == "gpu_thread_id_x" { return "long(sounio_tid)" }
+            }
+            None => {}
+        }
+    }
+    NM_ERROR = true
+    "<unsupported-expression>"
+}
+fn nm_opt_block(opt: &Option<Box<Block>>) -> string with Mut, Panic, Div, Alloc {
+    match *opt {
+        Some(b) => nm_block(&(*b)),
+        None => { NM_ERROR = true; "{}" }
+    }
+}
+fn nm_statement_expr(e: &Expr) -> string with Mut, Panic, Div, Alloc {
+    if (*e).kind == ExprKind::ExprIf {
+        var result = "if(" + nm_opt_expr(&(*e).left) + ")" + nm_opt_block(&(*e).block)
+        match (*e).else_expr {
+            Some(other) => { result = result + "else " + nm_statement_expr(&(*other)) }
+            None => {}
+        }
+        return result
+    }
+    if (*e).kind == ExprKind::ExprBlock { return nm_opt_block(&(*e).block) }
+    if (*e).kind == ExprKind::ExprWhile { return "while(" + nm_opt_expr(&(*e).left) + ")" + nm_opt_block(&(*e).block) }
+    if (*e).kind == ExprKind::ExprReturn {
+        match (*e).left { Some(value) => { NM_ERROR = true } None => {} }
+        return "return;\n"
+    }
+    nm_expr(e) + ";\n"
+}
+fn nm_block(b: &Block) -> string with Mut, Panic, Div, Alloc {
+    var result = "{\n"
+    var current = &(*b).stmts
+    while true {
+        match *current {
+            Some(node) => {
+                let s = &(*node).head
+                if (*s).kind == StmtKind::StmtLet || (*s).kind == StmtKind::StmtVar {
+                    result = result + "auto s_" + nm_name((*s).name) + "=" + nm_opt_expr(&(*s).expr) + ";\n"
+                } else if (*s).kind == StmtKind::StmtAssign {
+                    let target = nm_opt_expr(&(*s).target)
+                    var rhs = nm_opt_expr(&(*s).expr)
+                    if (*s).assign_op != AssignOp::AssignEq {
+                        var op = "+"
+                        if (*s).assign_op == AssignOp::AssignSub { op = "-" }
+                        if (*s).assign_op == AssignOp::AssignMul { op = "*" }
+                        if (*s).assign_op == AssignOp::AssignDiv { op = "/" }
+                        if (*s).assign_op == AssignOp::AssignRem { op = "%" }
+                        rhs = "(" + target + op + rhs + ")"
+                    }
+                    result = result + target + "=" + rhs + ";\n"
+                } else {
+                    match (*s).expr {
+                        Some(e) => { result = result + nm_statement_expr(&(*e)) }
+                        None => { NM_ERROR = true }
+                    }
+                }
+                current = &(*node).tail
+            }
+            None => break
+        }
+    }
+    result + "}\n"
+}
+fn nm_type_kind(ty: &TypeExpr) -> i64 with Mut, Panic, Div, Alloc {
+    if (*ty).kind == TypeExprKind::TypeReference || (*ty).kind == TypeExprKind::TypeRefMut {
+        match (*ty).inner {
+            Some(inner) => {
+                match (*inner).inner {
+                    Some(elem) => {
+                        let scalar = nm_type_kind(&(*elem))
+                        if scalar == 0 || scalar == 1 {
+                            let base = if scalar == 1 { 2 } else { 4 }
+                            return base + (if (*ty).kind == TypeExprKind::TypeRefMut { 1 } else { 0 })
+                        }
+                    }
+                    None => {}
+                }
+            }
+            None => {}
+        }
+        return -1
+    }
+    if (*ty).kind != TypeExprKind::TypeNamed { return -1 }
+    let name = str_from_bytes((*ty).path.segments.head_buf, (*ty).path.segments.head_len)
+    if name == "f64" { return 1 }
+    if name == "i64" { return 0 }
+    -1
+}
+pub fn native_metal_collect_program(program: &Program) with Mut, Panic, Div, Alloc {
+    if !NM_ACTIVE { return }
+    var current = &(*program).items
+    while true {
+        match *current {
+            Some(node) => {
+                match (*node).head.fn_def {
+                    Some(fd) => {
+                        if (*fd).is_kernel {
+                            let name = nm_name((*fd).name)
+                            if native_metal_find(name) >= 0 || NM_COUNT >= 64 { NM_ERROR = true; return }
+                            let id = NM_COUNT
+                            NM_COUNT = NM_COUNT + 1
+                            NM_NAMES[id as usize] = name
+                            var source = "\nusing namespace metal;\nkernel void sounio_kernel_" + name + "("
+                            var params = &(*fd).params
+                            var count: i64 = 0
+                            while true {
+                                match *params {
+                                    Some(p) => {
+                                        if count >= 31 { NM_ERROR = true; return }
+                                        let kind = nm_type_kind(&(*p).head.ty)
+                                        if kind < 0 || (count == 0 && kind != 0) { NM_ERROR = true; return }
+                                        NM_KINDS[(id * 32 + count) as usize] = kind
+                                        if count > 0 { source = source + "," }
+                                        let scalar = if kind == 1 || kind == 2 || kind == 3 { "sf64" } else { "long" }
+                                        if kind < 2 { source = source + "constant " + scalar + "& " }
+                                        else if kind == 2 || kind == 4 { source = source + "device const " + scalar + "* " }
+                                        else { source = source + "device " + scalar + "* " }
+                                        source = source + "s_" + nm_name((*p).head.name) + " [[buffer(" + nm_decimal(count) + ")]]"
+                                        count = count + 1
+                                        params = &(*p).tail
+                                    }
+                                    None => break
+                                }
+                            }
+                            if count == 0 { NM_ERROR = true; return }
+                            NM_COUNTS[id as usize] = count
+                            source = source + ",uint sounio_tid [[thread_position_in_grid]])" + nm_block(&(*fd).body)
+                            NM_SOURCES[id as usize] = source
+                        }
+                    }
+                    None => {}
+                }
+                current = &(*node).tail
+            }
+            None => break
+        }
+    }
+}
