@@ -796,10 +796,19 @@ fn kpm_schmitt_core_organ(d: KpInputs, organ: i32, ph_c: f64,
 // organ gate as well as the measured-log-MA requirement: an unsupported organ
 // is a refusal, not a number.
 pub fn kpm_schmitt_raw_organ(d: KpInputs, organ: i32) -> KpMember with Mut, Div, Panic {
+    // Refuse BEFORE any arithmetic.  An unsupported organ has a zero-filled
+    // composition (f_cell + f_int = 0), and fu_p <= 0 makes 1/fu_p singular;
+    // either would hand back a non-finite Kpu.  The sentinel is negative so it
+    // cannot be mistaken for a prediction.
+    if !kpm_organ_supported(organ) {
+        return KpMember { kpu: 0.0 - 1.0, in_domain: false, calibrated: false, code: 1 }
+    }
+    if d.fu_p <= 0.0 {
+        return KpMember { kpu: 0.0 - 1.0, in_domain: false, calibrated: false, code: 1 }
+    }
     let c = kpm_organ_comp(organ)
-    let ok = if kpm_organ_supported(organ) { d.has_ma } else { false }
     return KpMember { kpu: kpm_schmitt_core_organ(d, organ, c.ph_c, 1.0, 1.0, 1.0),
-                      in_domain: ok, calibrated: false, code: 1 }
+                      in_domain: kpm_schmitt_in_domain(d), calibrated: false, code: 1 }
 }
 
 // Schmitt with the Pearce 2017 per-tissue regression, which httk applies by
@@ -807,15 +816,22 @@ pub fn kpm_schmitt_raw_organ(d: KpInputs, organ: i32) -> KpMember with Mut, Div,
 // organ's own adj.fup.intercept and adj.fup.slope.  b < 1 in all ten organs,
 // so the correction always shrinks a large prediction toward the data.
 pub fn kpm_schmitt_pearce_organ(d: KpInputs, organ: i32) -> KpMember with Mut, Div, Panic {
+    // Same refusals, in the same order, as kpm_schmitt_raw_organ: the Pearce
+    // transform also divides by fu_p and takes ln(raw * fu_p).
+    if !kpm_organ_supported(organ) {
+        return KpMember { kpu: 0.0 - 1.0, in_domain: false, calibrated: true, code: 2 }
+    }
+    if d.fu_p <= 0.0 {
+        return KpMember { kpu: 0.0 - 1.0, in_domain: false, calibrated: true, code: 2 }
+    }
     let c = kpm_organ_comp(organ)
-    let ok = if kpm_organ_supported(organ) { d.has_ma } else { false }
     let raw = kpm_schmitt_core_organ(d, organ, c.ph_c, 1.0, 1.0, 1.0)
     let arg = raw * d.fu_p
     if arg <= 0.0 {
         return KpMember { kpu: raw, in_domain: false, calibrated: true, code: 2 }
     }
     let corr = kpm_pow10(c.pe_i + c.pe_s * (ln(arg) / 2.302585092994046)) / d.fu_p
-    return KpMember { kpu: corr, in_domain: ok, calibrated: true, code: 2 }
+    return KpMember { kpu: corr, in_domain: kpm_schmitt_in_domain(d), calibrated: true, code: 2 }
 }
 
 // Declared domain: Schmitt covers every charge class, but its distinctive
@@ -2210,6 +2226,40 @@ fn main() -> i32 with IO, Mut, Div, Panic {
         } else { println("T29 FAIL: deslocamento menor que u_c"); fails = fails + 1 }
     } else {
         print("T29 FAIL: verificacoes que bateram = "); println(t29); fails = fails + 1
+    }
+
+    // T30 -- the per-organ Schmitt members refuse before unsafe arithmetic.
+    // fu_p <= 0 makes 1/fu_p singular and an unsupported organ has a
+    // zero-filled composition; in both cases in_domain must be false and the
+    // returned Kpu must be the negative sentinel, never a non-finite number.
+    // A positive fu_p on a supported organ must stay in domain (control).
+    let t30_zero = KpInputs { log_p: 4.30, log_ma: 3.723, has_ma: true, pka: 8.66,
+                              is_base: true, fu_p: 0.0, rb: 1.08, mw: 375.86 }
+    let t30_neg  = KpInputs { log_p: 4.30, log_ma: 3.723, has_ma: true, pka: 8.66,
+                              is_base: true, fu_p: 0.0 - 0.10, rb: 1.08, mw: 375.86 }
+    let t30_ok   = KpInputs { log_p: 4.30, log_ma: 3.723, has_ma: true, pka: 8.66,
+                              is_base: true, fu_p: 0.10, rb: 1.08, mw: 375.86 }
+    var t30 = 0
+    let t30_a = kpm_schmitt_raw_organ(t30_zero, 6)
+    if !kpm_member_in_domain(t30_a) { if kpm_member_kpu(t30_a) < 0.0 { t30 = t30 + 1 } }
+    let t30_b = kpm_schmitt_pearce_organ(t30_zero, 6)
+    if !kpm_member_in_domain(t30_b) { if kpm_member_kpu(t30_b) < 0.0 { t30 = t30 + 1 } }
+    let t30_c = kpm_schmitt_raw_organ(t30_neg, 6)
+    if !kpm_member_in_domain(t30_c) { if kpm_member_kpu(t30_c) < 0.0 { t30 = t30 + 1 } }
+    let t30_d = kpm_schmitt_pearce_organ(t30_neg, 6)
+    if !kpm_member_in_domain(t30_d) { if kpm_member_kpu(t30_d) < 0.0 { t30 = t30 + 1 } }
+    let t30_e = kpm_schmitt_raw_organ(t30_ok, 10)
+    if !kpm_member_in_domain(t30_e) { if kpm_member_kpu(t30_e) < 0.0 { t30 = t30 + 1 } }
+    let t30_f = kpm_schmitt_pearce_organ(t30_ok, 10)
+    if !kpm_member_in_domain(t30_f) { if kpm_member_kpu(t30_f) < 0.0 { t30 = t30 + 1 } }
+    let t30_g = kpm_schmitt_raw_organ(t30_ok, 6)
+    if kpm_member_in_domain(t30_g) { if kpm_member_kpu(t30_g) > 0.0 { t30 = t30 + 1 } }
+    let t30_h = kpm_schmitt_pearce_organ(t30_ok, 6)
+    if kpm_member_in_domain(t30_h) { if kpm_member_kpu(t30_h) > 0.0 { t30 = t30 + 1 } }
+    if t30 == 8 {
+        println("T30 PASS: Schmitt per-organ members refuse fu_p <= 0 and unsupported organs before arithmetic")
+    } else {
+        print("T30 FAIL: checks that held = "); println(t30); fails = fails + 1
     }
     if fails == 0 {
         println("PASS")
