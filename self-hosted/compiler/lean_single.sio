@@ -51969,13 +51969,9 @@ fn append_native_prelude() with Mut, Panic, Div {
     append_src_lit("    }\n")
     append_src_lit("}\n\n")
 
-    // Range-aware f64 printer: switches to scientific notation when the
-    // value is too large for the i64 mantissa cast (≥ 1e15) or too small
-    // for the requested fixed-decimal precision (rounds to all zeros).
-    // Without these guards, very large values saturate via cvttsd2si to
-    // the i64-MIN bit pattern (printing "9223372036854775808" for any
-    // 1e24-scale input) and very small values silently print as
-    // "0.000000".
+    // f64 printer: fixed decimal at every magnitude (ADR-031 R4). Below 2^63
+    // the integer part goes through i64; at or above it the exact decimal is
+    // built in limbs (see the guard below), so cvttsd2si never saturates.
     append_src_lit("fn __native_print_f64_n(x: f64, decimals: i64) with IO, Mut, Panic, Div {\n")
     append_src_lit("    if x != x { print(\"nan\"); return }\n")
     append_src_lit("    if x * 0.0 != 0.0 {\n")
@@ -51997,47 +51993,60 @@ fn append_native_prelude() with Mut, Panic, Div {
     append_src_lit("        scale_i = scale_i + 1\n")
     append_src_lit("    }\n")
     append_src_lit("    let scale = scale_int as f64\n")
-    // OVERFLOW guard: |y| ≥ 1e15 → scientific. The threshold is below the
-    // i64 saturation point (~9.2e18) and above the f64-exact integer bound
-    // (2^53 ≈ 9e15) where the fixed-decimal path starts losing precision.
-    append_src_lit("    if y >= 1000000000000000.0 {\n")
-    append_src_lit("        var exp_e: i64 = 0\n")
-    append_src_lit("        while y >= 10.0 {\n")
-    append_src_lit("            y = y / 10.0\n")
-    append_src_lit("            exp_e = exp_e + 1\n")
+    // ADR-031 R4: the text of a finite f64 is the exact decimal with
+    // `decimals` fraction digits, the digits of C++23 printf("%.6f") for the
+    // default 6, at every magnitude (Madaros prints the same, #3506). This
+    // printer used to switch to scientific notation at |y| >= 1e15 and for
+    // values that round to zero, which printf never does.
+    //
+    // |y| >= 2^63 does not fit the i64 used by the fixed path. Such a value is
+    // an integer, mantissa * 2^k with k >= 11, so its exact decimal is built
+    // in base-1e9 limbs (35 suffice for DBL_MAX) by doubling 30 bits at a
+    // time, and every fraction digit is 0. Each step stays below 2^61.
+    append_src_lit("    if y >= 9223372036854775808.0 {\n")
+    append_src_lit("        let bits = f64_to_bits(y)\n")
+    append_src_lit("        let biased = (bits / 4503599627370496) % 2048\n")
+    append_src_lit("        let m = (bits % 4503599627370496) + 4503599627370496\n")
+    append_src_lit("        var k = biased - 1075\n")
+    append_src_lit("        var limbs: [i64; 40] = [0; 40]\n")
+    append_src_lit("        limbs[0] = m % 1000000000\n")
+    append_src_lit("        limbs[1] = (m / 1000000000) % 1000000000\n")
+    append_src_lit("        limbs[2] = m / 1000000000000000000\n")
+    append_src_lit("        var n: i64 = 3\n")
+    append_src_lit("        while k > 0 {\n")
+    append_src_lit("            var sh = k\n")
+    append_src_lit("            if sh > 30 { sh = 30 }\n")
+    append_src_lit("            var mul: i64 = 1\n")
+    append_src_lit("            var si: i64 = 0\n")
+    append_src_lit("            while si < sh {\n")
+    append_src_lit("                mul = mul * 2\n")
+    append_src_lit("                si = si + 1\n")
+    append_src_lit("            }\n")
+    append_src_lit("            var carry: i64 = 0\n")
+    append_src_lit("            var li: i64 = 0\n")
+    append_src_lit("            while li < n {\n")
+    append_src_lit("                let t = limbs[li] * mul + carry\n")
+    append_src_lit("                limbs[li] = t % 1000000000\n")
+    append_src_lit("                carry = t / 1000000000\n")
+    append_src_lit("                li = li + 1\n")
+    append_src_lit("            }\n")
+    append_src_lit("            if carry > 0 {\n")
+    append_src_lit("                limbs[n] = carry\n")
+    append_src_lit("                n = n + 1\n")
+    append_src_lit("            }\n")
+    append_src_lit("            k = k - sh\n")
     append_src_lit("        }\n")
-    append_src_lit("        let whole_e = y as i64\n")
-    append_src_lit("        __native_print_u64_no_nl(whole_e)\n")
+    append_src_lit("        while n > 1 && limbs[n - 1] == 0 { n = n - 1 }\n")
+    append_src_lit("        __native_print_u64_no_nl(limbs[n - 1])\n")
+    append_src_lit("        var li2 = n - 2\n")
+    append_src_lit("        while li2 >= 0 {\n")
+    append_src_lit("            __native_print_fixed_digits(limbs[li2], 9)\n")
+    append_src_lit("            li2 = li2 - 1\n")
+    append_src_lit("        }\n")
     append_src_lit("        if d > 0 {\n")
     append_src_lit("            print_char(46)\n")
-    append_src_lit("            var fe = ((y - (whole_e as f64)) * scale + 0.5) as i64\n")
-    append_src_lit("            if fe >= scale_int { fe = scale_int - 1 }\n")
-    append_src_lit("            __native_print_fixed_digits(fe, d)\n")
+    append_src_lit("            __native_print_fixed_digits(0, d)\n")
     append_src_lit("        }\n")
-    append_src_lit("        print_char(101)\n")
-    append_src_lit("        __native_print_u64_no_nl(exp_e)\n")
-    append_src_lit("        return\n")
-    append_src_lit("    }\n")
-    // UNDERFLOW guard: 0 < y < 0.5 / scale_int → fixed path rounds to all
-    // zeros. Switch to scientific so callers can see the magnitude.
-    append_src_lit("    let tiny_thresh = 0.5 / scale\n")
-    append_src_lit("    if y > 0.0 && y < tiny_thresh {\n")
-    append_src_lit("        var exp_e: i64 = 0\n")
-    append_src_lit("        while y < 1.0 {\n")
-    append_src_lit("            y = y * 10.0\n")
-    append_src_lit("            exp_e = exp_e + 1\n")
-    append_src_lit("        }\n")
-    append_src_lit("        let whole_e = y as i64\n")
-    append_src_lit("        __native_print_u64_no_nl(whole_e)\n")
-    append_src_lit("        if d > 0 {\n")
-    append_src_lit("            print_char(46)\n")
-    append_src_lit("            var fe = ((y - (whole_e as f64)) * scale + 0.5) as i64\n")
-    append_src_lit("            if fe >= scale_int { fe = scale_int - 1 }\n")
-    append_src_lit("            __native_print_fixed_digits(fe, d)\n")
-    append_src_lit("        }\n")
-    append_src_lit("        print_char(101)\n")
-    append_src_lit("        print_char(45)\n")
-    append_src_lit("        __native_print_u64_no_nl(exp_e)\n")
     append_src_lit("        return\n")
     append_src_lit("    }\n")
     // FIXED-DECIMAL path for in-range values.

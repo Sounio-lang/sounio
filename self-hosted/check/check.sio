@@ -9915,7 +9915,7 @@ fn checker_check_binary_hyper_path_inplace(c: *mut Checker, span: Span, op: Bina
     final_result
 }
 
-fn checker_finish_binary_scalar_tail_inplace(c: *mut Checker, span: Span, op: BinaryOp, left_ty: TypeEntry, right_ty: TypeEntry, right_expr: Option<Box<Expr> >, left_lit: bool, right_lit: bool) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+fn checker_finish_binary_scalar_tail_inplace(c: *mut Checker, span: Span, op: BinaryOp, left_ty: TypeEntry, right_ty: TypeEntry, left_expr: Option<Box<Expr> >, right_expr: Option<Box<Expr> >, left_lit: bool, right_lit: bool) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     var result = binary_result_type(op, left_ty, right_ty)
     if result.kind == TypeKind::TyError && (op == BinaryOp::OpEq || op == BinaryOp::OpNe) {
         let l_enum = left_ty.kind == TypeKind::TyNamed && enum_table_find((*c).enums, left_ty.name) >= 0
@@ -9957,6 +9957,18 @@ fn checker_finish_binary_scalar_tail_inplace(c: *mut Checker, span: Span, op: Bi
             checker_report_error_at_inplace(c, span, 57, 0, 0, 0)
         }
     }
+    // ADR-031 R1: an i64 constant expression that does not fit i64 is
+    // refused at compile time (E300), not folded or left to the run-time
+    // trap. Signed i64 + - * only: right_expr is consumed by the / and %
+    // checks above, and MIN / -1 is left to the R2 run-time guard.
+    if (op == BinaryOp::OpAdd || op == BinaryOp::OpSub || op == BinaryOp::OpMul)
+        && result.kind == TypeKind::TyI64 && left_ty.kind == TypeKind::TyI64 && right_ty.kind == TypeKind::TyI64 {
+        let lc = checker_eval_const_int_opt_expr_mut(c, left_expr)
+        let rc = checker_eval_const_int_opt_expr_mut(c, right_expr)
+        if lc.0 != 0 && rc.0 != 0 && rc.1 != 0 && !checker_const_int_op_fits(op, lc.1, rc.1) {
+            checker_report_error_at_inplace(c, span, 300, 0, 0, 0)
+        }
+    }
     checker_finish_binary_inplace(c, span, op, left_ty, right_ty, result, left_lit, right_lit)
 }
 
@@ -9986,7 +9998,7 @@ fn checker_check_binary_with_operand_types_inplace(c: *mut Checker, e: Expr, lef
         return checker_check_binary_hyper_path_inplace(c, e.span, e.bin_op, left_ty, right_ty)
     }
     let lits = checker_binary_comparison_lits(e)
-    checker_finish_binary_scalar_tail_inplace(c, e.span, e.bin_op, left_ty, right_ty, e.right, lits.0, lits.1)
+    checker_finish_binary_scalar_tail_inplace(c, e.span, e.bin_op, left_ty, right_ty, e.left, e.right, lits.0, lits.1)
 }
 
 fn checker_check_opt_block_inplace(c: *mut Checker, opt: Option<Box<Block> >) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
@@ -30073,6 +30085,19 @@ impl Checker {
             let denom_pair = eval_const_int_opt_expr(c, e.right)
             if denom_pair.0 != 0 && denom_pair.1 == 0 {
                 c = c.report_error_at(e.span, 57, 0, 0, 0)
+            }
+        }
+        // ADR-031 R1: a constant i64 expression whose value does not fit i64
+        // (MAX + 1, MIN - 1, MIN * 2) is refused here, at compile time,
+        // instead of being left to the run-time trap. Signed i64 only: an
+        // unsigned or narrower result has its own range (E300 on the
+        // annotation, the unsigned guard at run time).
+        if (e.bin_op == BinaryOp::OpAdd || e.bin_op == BinaryOp::OpSub || e.bin_op == BinaryOp::OpMul)
+            && result.kind == TypeKind::TyI64 && left_ty.kind == TypeKind::TyI64 && right_ty.kind == TypeKind::TyI64 {
+            let lc = eval_const_int_opt_expr(c, e.left)
+            let rc = eval_const_int_opt_expr(c, e.right)
+            if lc.0 != 0 && rc.0 != 0 && rc.1 != 0 && !checker_const_int_op_fits(e.bin_op, lc.1, rc.1) {
+                c = c.report_error_at(e.span, 300, 0, 0, 0)
             }
         }
         // Unit checking for arithmetic on unit-typed values
