@@ -8,6 +8,9 @@
 //
 // Stdlib-internal: not part of the user-facing module surface. Callers
 // import explicitly via `use stdlib::random::pcg64_core::{...}`.
+//
+// SIO-207: u64/u128 state arithmetic uses the explicit wrapping_*
+// builtins (plain +-* trap on signed overflow); bit patterns unchanged.
 
 pub struct PcgU128 {
     pub hi: i64,
@@ -27,7 +30,7 @@ pub fn pcg_lshr(x: i64, n: i64) -> i64 {
     if n >= 64 { return 0 }
     let raw = x >> n
     let one: i64 = 1
-    let mask = (one << (64 - n)) - 1
+    let mask = wrapping_sub(one << (64 - n), 1)
     return raw & mask
 }
 
@@ -38,26 +41,26 @@ pub fn pcg_umul64_high(a: i64, b: i64) -> i64 {
     let ah = pcg_lshr(a, 32)
     let bl = b & mask32
     let bh = pcg_lshr(b, 32)
-    let ll = al * bl
-    let lh = al * bh
-    let hl = ah * bl
-    let hh = ah * bh
+    let ll = wrapping_mul(al, bl)
+    let lh = wrapping_mul(al, bh)
+    let hl = wrapping_mul(ah, bl)
+    let hh = wrapping_mul(ah, bh)
     let t = pcg_lshr(ll, 32) + (lh & mask32) + (hl & mask32)
-    return pcg_lshr(t, 32) + pcg_lshr(lh, 32) + pcg_lshr(hl, 32) + hh
+    return wrapping_add(wrapping_add(wrapping_add(pcg_lshr(t, 32), pcg_lshr(lh, 32)), pcg_lshr(hl, 32)), hh)
 }
 
 // 128-bit add mod 2^128.
 pub fn pcg_u128_add(a_hi: i64, a_lo: i64, b_hi: i64, b_lo: i64) -> PcgU128 {
-    let res_lo = a_lo + b_lo
+    let res_lo = wrapping_add(a_lo, b_lo)
     let carry: i64 = if pcg_u_lt(res_lo, a_lo) { 1 } else { 0 }
-    let res_hi = a_hi + b_hi + carry
+    let res_hi = wrapping_add(wrapping_add(a_hi, b_hi), carry)
     return PcgU128 { hi: res_hi, lo: res_lo }
 }
 
 // 128-bit multiply mod 2^128.
 pub fn pcg_u128_mul(a_hi: i64, a_lo: i64, b_hi: i64, b_lo: i64) -> PcgU128 {
-    let res_lo = a_lo * b_lo
-    let res_hi = pcg_umul64_high(a_lo, b_lo) + a_hi * b_lo + a_lo * b_hi
+    let res_lo = wrapping_mul(a_lo, b_lo)
+    let res_hi = wrapping_add(wrapping_add(pcg_umul64_high(a_lo, b_lo), wrapping_mul(a_hi, b_lo)), wrapping_mul(a_lo, b_hi))
     return PcgU128 { hi: res_hi, lo: res_lo }
 }
 
@@ -148,12 +151,11 @@ pub fn pcg_umod(x: i64, n: i64) -> i64 {
 pub fn pcg_step_into(rng:&!PcgState)->i64 with Mut {
     let previous_hi:i64=rng.state_hi
     let previous_lo:i64=rng.state_lo
-    let low_product=previous_lo*4865540595714422341
-    let low=low_product+rng.inc_lo
+    let low_product=wrapping_mul(previous_lo,4865540595714422341)
+    let low=wrapping_add(low_product,rng.inc_lo)
     let carry:i64=if pcg_u_lt(low,low_product) {1}else{0}
-    let high_product=pcg_umul64_high(previous_lo,4865540595714422341)
-        +previous_hi*4865540595714422341+previous_lo*2549297995355413924
-    let high=high_product+rng.inc_hi+carry
+    let high_product=wrapping_add(wrapping_add(pcg_umul64_high(previous_lo,4865540595714422341),wrapping_mul(previous_hi,4865540595714422341)),wrapping_mul(previous_lo,2549297995355413924))
+    let high=wrapping_add(wrapping_add(high_product,rng.inc_hi),carry)
     rng.state_hi=high
     rng.state_lo=low
     let rotation=pcg_lshr(high,58) & 63
