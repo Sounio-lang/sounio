@@ -15949,6 +15949,38 @@ fn checker_const_int_lookup_mut(c: *mut Checker, name: Name) -> (bool, i64) with
     (false, 0)
 }
 
+// ADR-031 R1: does `lv op rv` stay inside i64? Written so that the test
+// itself cannot overflow: the checker runs under the same overflow trap it
+// enforces, so an overflowing constant in a user program must not stop the
+// compiler. A constant expression that overflows is left unevaluated (the
+// run-time guard, or the E300 refusal of an annotated constant, applies).
+fn checker_const_int_op_fits(op: BinaryOp, lv: i64, rv: i64) -> bool with Div {
+    let imax: i64 = 9223372036854775807
+    let imin: i64 = (0 - imax) - 1
+    if op == BinaryOp::OpAdd {
+        if rv > 0 && lv > imax - rv { return false }
+        if rv < 0 && lv < imin - rv { return false }
+        return true
+    }
+    if op == BinaryOp::OpSub {
+        if rv < 0 && lv > imax + rv { return false }
+        if rv > 0 && lv < imin + rv { return false }
+        return true
+    }
+    if op == BinaryOp::OpMul {
+        if lv == 0 || rv == 0 { return true }
+        if lv == imin || rv == imin { return false }
+        let alv = if lv < 0 { 0 - lv } else { lv }
+        let arv = if rv < 0 { 0 - rv } else { rv }
+        return alv <= imax / arv
+    }
+    if op == BinaryOp::OpDiv || op == BinaryOp::OpRem {
+        if rv == 0 { return false }
+        return !(lv == imin && rv == 0 - 1)
+    }
+    true
+}
+
 // *mut transcription of eval_const_int_opt_expr (8400) — faithful to the
 // original (binop arms inlined; field is e.bin_op), avoiding the by-value
 // Checker parameter (an 8MB frame hazard).
@@ -15968,7 +16000,7 @@ fn checker_eval_const_int_opt_expr_mut(c: *mut Checker, opt: Option<Box<Expr> >)
             }
             if e.kind == ExprKind::ExprUnary && e.un_op == UnaryOp::OpNeg {
                 let inner_pair = checker_eval_const_int_opt_expr_mut(c, e.left)
-                if inner_pair.0 != 0 {
+                if inner_pair.0 != 0 && inner_pair.1 != (0 - 9223372036854775807) - 1 {
                     return (1, 0 - inner_pair.1)
                 }
                 return (0, 0)
@@ -15981,6 +16013,9 @@ fn checker_eval_const_int_opt_expr_mut(c: *mut Checker, opt: Option<Box<Expr> >)
                 }
                 let lv = left_pair.1
                 let rv = right_pair.1
+                if !checker_const_int_op_fits(e.bin_op, lv, rv) {
+                    return (0, 0)
+                }
                 if e.bin_op == BinaryOp::OpAdd {
                     return (1, lv + rv)
                 } else if e.bin_op == BinaryOp::OpSub {
@@ -24619,7 +24654,7 @@ fn eval_const_int_opt_expr(c: Checker, opt: Option<Box<Expr> >) -> (i64, i64) wi
             }
             if e.kind == ExprKind::ExprUnary && e.un_op == UnaryOp::OpNeg {
                 let inner_pair = eval_const_int_opt_expr(c, e.left)
-                if inner_pair.0 != 0 {
+                if inner_pair.0 != 0 && inner_pair.1 != (0 - 9223372036854775807) - 1 {
                     return (1, 0 - inner_pair.1)
                 }
                 return (0, 0)
@@ -24632,6 +24667,9 @@ fn eval_const_int_opt_expr(c: Checker, opt: Option<Box<Expr> >) -> (i64, i64) wi
                 }
                 let lv = left_pair.1
                 let rv = right_pair.1
+                if !checker_const_int_op_fits(e.bin_op, lv, rv) {
+                    return (0, 0)
+                }
                 if e.bin_op == BinaryOp::OpAdd {
                     return (1, lv + rv)
                 } else if e.bin_op == BinaryOp::OpSub {
