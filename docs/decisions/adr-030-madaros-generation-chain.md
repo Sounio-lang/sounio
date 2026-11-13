@@ -36,6 +36,22 @@ The observations above are kept as the state on 2026-11-10. Since then:
 - **What this is.** One measurement of gen2 == gen3 in CI and one on a Slurm node, from different commits. Layer 0 below is met. It is not a measurement of gen4 to gen7, of repeated builds with identical input, of a second route, or of peak memory on the CI nodes themselves.
 - **The 13 failed runs.** The same-host measurement puts the gate above both limits that applied (55.0 GiB against a 48Gi pod, 3 h against a 110-minute job), and the first run with both limits raised passed. Memory exhaustion of the pod is therefore the likely cause; it remains inferred, because the runner node's kernel log was not read. A run of the earlier merge that executed concurrently, still under the 110-minute limit, ended after 66 minutes with the same lost-communication report (run 43202925631); its cause is not established.
 
+### Update, 2026-11-13: layer 1 measured once
+
+- **Measurement.** Slurm job 22789, one node, main commit 21e2606a, one seed. gen1 was built by `scripts/ci/build_modular_madaros.sh` with cache reads bypassed (`SOUNIO_MADAROS_NOCACHE=1`). Each of gen2 to gen7 was compiled from the same source by the previous generation, through `scripts/lib/souc_invoke.sh` and the gate's own `SOUNIO_NV2_HANDLE_LOG2`.
+- **Result.** gen2 through gen7 are the same binary: sha256 prefix `bc0950de1601`, 111,964,616 bytes. No symbol-map difference was recorded between consecutive generations.
+- **Cost of each step.**
+
+  | Step | Wall time | Peak RSS |
+  |---|---|---|
+  | gen1, built by the seed lineage | 1 min 12 s | 0.9 GB |
+  | gen2, compiled by gen1 | 50 min | 22.7 GB |
+  | Each of gen3 to gen7, compiled by the previous generation | 2 h 06 min | 56.4 GB |
+
+  The whole chain took 11 h 23 min.
+- **What this is.** Layer 1 met once, with the environment held fixed, so it is evidence of determinism under identical input, toolchain and environment. It does not show that the output is unchanged when the environment varies: build path, time, locale, umask, CPU count, ASLR. Nor does it show that a second route reaches the same binary (layer 2).
+- **Environment variation is a separate measurement.** It varies one factor at a time, reprotest-style. It was submitted as Slurm job 22792 and has no result yet.
+
 ADR-006 names the gen2 == gen3 check as the trust anchor for compiler changes. ADR-029 names the committed seed `bin/souc-lean-single-x86_64` as the provenance root, and states that the requirement that the sha256 of Madaros gen2 through gen7 be identical applies to Madaros, whose chain starts from that seed. Every Madaros build today begins by compiling `lean_single.sio`, so Madaros is built by lean_single on every build.
 
 The owner wants a chain that is bit-identical from gen2 to gen7, described as a fractal fixed point. He has not decided whether to retire `lean_single.sio` and wants measurements first.
@@ -89,7 +105,7 @@ Nightly or on manual dispatch, not as a pull request check. On the measurements 
 
 ## Consequences
 
-- Layer 0 blocks every later layer. It was met on 2026-11-12 (gen3 produced and equal to gen2, once in CI and once on a Slurm node); layer 1 can now be measured.
+- Layer 0 blocks every later layer. It was met on 2026-11-12 (gen3 produced and equal to gen2, once in CI and once on a Slurm node); layer 1 can now be measured. Layer 1 was met once on 2026-11-13, with the environment held fixed (Slurm job 22789, gen2 to gen7 identical).
 - Each generation leaves a receipt with recorded hashes, so each claim can be checked against files.
 - A failure is a result, and which result depends on its kind. A gen2/gen3 mismatch establishes failure to reach the proposed fixed point; it does not, by itself, diagnose nondeterminism. Repeated builds with identical input, toolchain and environment receipts, or a divergence after a demonstrated fixed point, are what investigate nondeterminism. A layer 2 divergence points at the starting binary only after layer 1 has passed. Layer 3 locates it.
 - The runner pool gives each pod 72Gi since #3518 (request 24Gi; 48Gi before), and the swap step used on GitHub-hosted runners is skipped on that pool. Peak memory per generation decides whether a generation fits, and two rungs running at once on one node may not.
