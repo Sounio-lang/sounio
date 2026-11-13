@@ -91,7 +91,7 @@ A prerequisite. gen2 must compile `self-hosted/compiler/main.sio` and produce ge
 
 Each generation has one receipt, and a receipt is written even when the generation fails. Fields: generation number; sha256 of the produced binary; sha256 of the compiler that produced it; source commit; sha256 of the source closure; host; wall time; peak memory; exit status.
 
-Peak memory has two completed measurements on one Slurm node (19.6 GiB and 55.0 GiB, update of 2026-11-12) and none on the CI nodes.
+Peak memory is measured on Slurm nodes only, never on the CI nodes: 19.6 GiB and 55.0 GiB for whole gates (Slurm job 22773, update of 2026-11-12), and per generation for gen1 to gen7 (Slurm job 22789, update of 2026-11-13). The job 22789 values are recorded as Slurm step names, which carry a 12-hex-digit sha256 prefix, wall time and peak RSS, and Slurm accounting records each compile step as COMPLETED with exit code 0; the full sha256 of each generation and of the binary that produced it were not exported from the node. They are author-reported and not yet published as a receipt file in the format above.
 
 ### Where it runs
 
@@ -113,6 +113,6 @@ Nightly or on manual dispatch, not as a pull request check. On the measurements 
 ## Open questions
 
 1. Whether two rungs running at the same time on one runner node exceed the node's memory. The concurrent run that ended after 66 minutes (update of 2026-11-12) is the only observation, and its cause is not established.
-2. Peak memory per generation on the CI nodes is not measured; the 55.0 GiB figure is from a Slurm node. Generations after gen3 are not measured anywhere.
+2. Peak memory per generation on the CI nodes is not measured. On one Slurm node, gen3 to gen7 each peak at about 56.4 GB (job 22789); whether the CI nodes behave the same is open.
 3. The second route for layer 2 is not chosen. Candidates: an older committed Madaros prebuilt (varies the starting state only), and the cross route through `lean_single.sio`.
 4. The granularity for layer 3 is not defined: which units, and how a function is matched across builds.
