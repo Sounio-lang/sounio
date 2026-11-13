@@ -22,14 +22,16 @@ struct CryptoRng {
 
 // Rotate left 64-bit
 fn crng_rotl64(x: i64, k: i32) -> i64 {
-    return (x << k) | ((x >> (64 - k)) & ((1 << k) - 1))
+    return (x << k) | ((x >> (64 - k)) & wrapping_sub(1 << k, 1))
 }
 
-// SplitMix64 for seed expansion (Vigna, 2015)
+// SplitMix64 for seed expansion (Vigna, 2015). State evolution wraps by
+// design (SIO-207): plain operators trap on signed overflow, so the mixing
+// steps use the explicit wrapping builtins — bit-identical output.
 fn crng_splitmix64(z: i64) -> i64 {
-    var x = z + (-7046029254386353131)
-    x = (x ^ (x >> 30)) * (-4658895280553007687)
-    x = (x ^ (x >> 27)) * (-7723592293110705685)
+    var x = wrapping_add(z, -7046029254386353131)
+    x = wrapping_mul(x ^ (x >> 30), -4658895280553007687)
+    x = wrapping_mul(x ^ (x >> 27), -7723592293110705685)
     return x ^ (x >> 31)
 }
 
@@ -41,11 +43,11 @@ fn crypto_rng_new(seed: i64) -> CryptoRng {
     // Expand single seed into 4 state words via SplitMix64
     let z0 = seed
     let s0 = crng_splitmix64(z0)
-    let z1 = z0 + (-7046029254386353131)
+    let z1 = wrapping_add(z0, -7046029254386353131)
     let s1 = crng_splitmix64(z1)
-    let z2 = z1 + (-7046029254386353131)
+    let z2 = wrapping_add(z1, -7046029254386353131)
     let s2 = crng_splitmix64(z2)
-    let z3 = z2 + (-7046029254386353131)
+    let z3 = wrapping_add(z2, -7046029254386353131)
     let s3 = crng_splitmix64(z3)
 
     let st: [i64; 4] = [s0, s1, s2, s3]
@@ -80,7 +82,7 @@ fn crypto_rng_next(rng: CryptoRng) -> CryptoRng {
 // Extract the current output value (xoshiro256** scrambler)
 fn crypto_rng_value(rng: CryptoRng) -> i64 {
     let s1 = rng.state[1]
-    let result_star = crng_rotl64(s1 * 5, 7) * 9
+    let result_star = wrapping_mul(crng_rotl64(wrapping_mul(s1, 5), 7), 9)
     return result_star
 }
 
@@ -108,7 +110,9 @@ fn crypto_rng_uniform(rng: CryptoRng) -> f64 with Mut, Div, Panic {
     // Use upper 53 bits for double precision mantissa
     // Mask to positive 53-bit integer, then divide by 2^53
     var raw = val
-    if raw < 0 { raw = 0 - raw }
+    // SIO-207: wrapping_sub so INT64_MIN negates to itself (then clamped
+    // below) instead of hitting the overflow trap.
+    if raw < 0 { raw = wrapping_sub(0, raw) }
     if raw < 0 { raw = 1 }
     // Mask to 53 bits: (1 << 53) - 1 = 9007199254740991
     let bits = raw & 9007199254740991

@@ -5660,6 +5660,9 @@ fn checker_collect_runtime_builtins_inplace(c: *mut Checker) with Mut, Panic, Di
     // resolves these; the imported all-modules typecheck must register them too or they
     // surface as E137 undeclared (heap_free, f64_to_bits, ...).
     checker_bind_import_unknown_inplace(c, make_name("heap_alloc"))
+    checker_bind_import_unknown_inplace(c, make_name("wrapping_add"))
+    checker_bind_import_unknown_inplace(c, make_name("wrapping_sub"))
+    checker_bind_import_unknown_inplace(c, make_name("wrapping_mul"))
     checker_bind_import_unknown_inplace(c, make_name("heap_free"))
     // heap_realloc is a native-backend builtin since #874 (id 71, mremap over
     // the 16-byte heap header; before it compiled to a ud2 stub). It also has
@@ -15970,6 +15973,38 @@ fn checker_const_int_lookup_mut(c: *mut Checker, name: Name) -> (bool, i64) with
     (false, 0)
 }
 
+// ADR-031 R1: does `lv op rv` stay inside i64? Written so that the test
+// itself cannot overflow: the checker runs under the same overflow trap it
+// enforces, so an overflowing constant in a user program must not stop the
+// compiler. A constant expression that overflows is left unevaluated (the
+// run-time guard, or the E300 refusal of an annotated constant, applies).
+fn checker_const_int_op_fits(op: BinaryOp, lv: i64, rv: i64) -> bool with Div {
+    let imax: i64 = 9223372036854775807
+    let imin: i64 = (0 - imax) - 1
+    if op == BinaryOp::OpAdd {
+        if rv > 0 && lv > imax - rv { return false }
+        if rv < 0 && lv < imin - rv { return false }
+        return true
+    }
+    if op == BinaryOp::OpSub {
+        if rv < 0 && lv > imax + rv { return false }
+        if rv > 0 && lv < imin + rv { return false }
+        return true
+    }
+    if op == BinaryOp::OpMul {
+        if lv == 0 || rv == 0 { return true }
+        if lv == imin || rv == imin { return false }
+        let alv = if lv < 0 { 0 - lv } else { lv }
+        let arv = if rv < 0 { 0 - rv } else { rv }
+        return alv <= imax / arv
+    }
+    if op == BinaryOp::OpDiv || op == BinaryOp::OpRem {
+        if rv == 0 { return false }
+        return !(lv == imin && rv == 0 - 1)
+    }
+    true
+}
+
 // *mut transcription of eval_const_int_opt_expr (8400) — faithful to the
 // original (binop arms inlined; field is e.bin_op), avoiding the by-value
 // Checker parameter (an 8MB frame hazard).
@@ -15989,7 +16024,7 @@ fn checker_eval_const_int_opt_expr_mut(c: *mut Checker, opt: Option<Box<Expr> >)
             }
             if e.kind == ExprKind::ExprUnary && e.un_op == UnaryOp::OpNeg {
                 let inner_pair = checker_eval_const_int_opt_expr_mut(c, e.left)
-                if inner_pair.0 != 0 {
+                if inner_pair.0 != 0 && inner_pair.1 != (0 - 9223372036854775807) - 1 {
                     return (1, 0 - inner_pair.1)
                 }
                 return (0, 0)
@@ -16002,6 +16037,9 @@ fn checker_eval_const_int_opt_expr_mut(c: *mut Checker, opt: Option<Box<Expr> >)
                 }
                 let lv = left_pair.1
                 let rv = right_pair.1
+                if !checker_const_int_op_fits(e.bin_op, lv, rv) {
+                    return (0, 0)
+                }
                 if e.bin_op == BinaryOp::OpAdd {
                     return (1, lv + rv)
                 } else if e.bin_op == BinaryOp::OpSub {
@@ -16089,6 +16127,36 @@ fn checker_check_refinement_literal_inplace(c: *mut Checker, span: Span, ty: Typ
         }
     }
     (*c).last_literal_kind = 0
+}
+
+// SIO-207 (phase 1): a compile-time-known integer constant must fit the
+// annotated narrow integer type. Out-of-range constants were accepted
+// silently (let c: i32 = 2147483648 stored 2^31 in an i32 and printed it
+// back). i64/u64 are not range-checked here; literal lexing limits are
+// SIO-13. Value comes from checker_eval_const_int_opt_expr_mut, so unary
+// minus is already folded (-2147483648 is in range for i32).
+fn checker_check_const_int_range_inplace(c: *mut Checker, span: Span, value: i64, ty: TypeEntry) with Mut, Panic, Div, IO, Alloc {
+    var lo: i64 = 0
+    var hi: i64 = 0
+    var narrow = true
+    if ty.kind == TypeKind::TyI8 {
+        lo = 0 - 128
+        hi = 127
+    } else if ty.kind == TypeKind::TyU8 {
+        lo = 0
+        hi = 255
+    } else if ty.kind == TypeKind::TyI32 {
+        lo = 0 - 2147483648
+        hi = 2147483647
+    } else if ty.kind == TypeKind::TyU32 {
+        lo = 0
+        hi = 4294967295
+    } else {
+        narrow = false
+    }
+    if narrow && (value < lo || value > hi) {
+        checker_report_error_at_inplace(c, span, 300, 0, 0, 0)
+    }
 }
 
 // Predicate: does this binding-init expr need the epistemic special handling in
@@ -16254,6 +16322,9 @@ fn checker_check_let_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with Mu
     // Validate refinement predicate on literal initializers
     checker_check_refinement_literal_inplace(c, s.span, bind_ty)
     let const_pair = checker_eval_const_int_opt_expr_mut(c, s.expr)
+    if const_pair.0 != 0 {
+        checker_check_const_int_range_inplace(c, s.span, const_pair.1, bind_ty)
+    }
     type_env_bind_mut(&!(*c).env, s.name, bind_ty, false)
     if const_pair.0 != 0 {
         checker_const_int_bind_value_inplace(c, s.name, const_pair.1)
@@ -16343,6 +16414,9 @@ fn checker_check_var_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with Mu
     }
     checker_check_refinement_literal_inplace(c, s.span, bind_ty)
     let const_pair = checker_eval_const_int_opt_expr_mut(c, s.expr)
+    if const_pair.0 != 0 {
+        checker_check_const_int_range_inplace(c, s.span, const_pair.1, bind_ty)
+    }
     type_env_bind_mut(&!(*c).env, s.name, bind_ty, true)
     if const_pair.0 != 0 {
         checker_const_int_bind_value_inplace(c, s.name, const_pair.1)
@@ -21238,6 +21312,7 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 297 { print("operation argument count mismatch") }
     else if code == 298 { print("perform with live linear bindings (a non-resuming handler would drop them)") }
     else if code == 299 { print("handler backend v1 limit exceeded (results and operation values are i64 words; handler nesting depth at most 8)") }
+    else if code == 300 { print("integer constant is out of range for the annotated type") }
     else if code == 269 { print("a `where` refinement on Knowledge<T> is not enforced by this compiler yet: the predicate would be silently ignored, so it is refused") }
     else if code == 270 { print("`as string` does not convert a number, bool or char to text: no engine formats the value, so the cast is refused") }
     else if code == 263 { print("qualified call is ambiguous: this qualifier names a module you `use`d, but also collides with an unrelated struct/enum method of the same name, and the compiler cannot yet guarantee which one runs") }
@@ -22558,7 +22633,7 @@ fn name_is_dynlink_extern(n: Name) -> bool with Mut, Panic, Div, Alloc, IO {
 
 fn name_is_native_backend_builtin(n: Name) -> bool with Mut, Panic, Div, Alloc, IO {
     if name_eq_lit(n, "print_int") { return true }        // id 1
-    if name_eq_lit(n, "print_u64") { return true }        // id 80 (SIO-399)
+    if name_eq_lit(n, "print_u64") { return true }        // id 83 (SIO-399; 80-82 are SIO-207 wrapping_add/sub/mul)
     if name_eq_lit(n, "print_char") { return true }       // id 2
     if name_eq_lit(n, "print") { return true }            // id 3
     if name_eq_lit(n, "get_arg_count") { return true }    // id 4
@@ -22587,6 +22662,9 @@ fn name_is_native_backend_builtin(n: Name) -> bool with Mut, Panic, Div, Alloc, 
     if name_eq_lit(n, "__sounio_fx_perform") { return true }  // id 77 (SIO-417)
     if name_eq_lit(n, "__sounio_fx_resume") { return true }   // id 78 (SIO-417)
     if name_eq_lit(n, "__sounio_fx_body_done") { return true } // id 79 (SIO-417)
+    if name_eq_lit(n, "wrapping_add") { return true }      // id 80 (SIO-207)
+    if name_eq_lit(n, "wrapping_sub") { return true }      // id 81 (SIO-207)
+    if name_eq_lit(n, "wrapping_mul") { return true }      // id 82 (SIO-207)
     if name_eq_lit(n, "f64_to_bits") { return true }      // id 25
     if name_eq_lit(n, "bits_to_f64") { return true }      // id 26
     if name_eq_lit(n, "syscall6") { return true }         // id 27
@@ -22702,6 +22780,9 @@ fn native_backend_builtin_arity_is_valid(n: Name, argc: i64) -> bool with Mut, P
             || name_eq_lit(n, "__sounio_seq_push")
             || name_eq_lit(n, "__sounio_seq_push_scalar")
             || name_eq_lit(n, "__sounio_seq_get")
+            || name_eq_lit(n, "wrapping_add")
+            || name_eq_lit(n, "wrapping_sub")
+            || name_eq_lit(n, "wrapping_mul")
     }
     if argc == 3 {
         return name_eq_lit(n, "write_file")
@@ -24597,7 +24678,7 @@ fn eval_const_int_opt_expr(c: Checker, opt: Option<Box<Expr> >) -> (i64, i64) wi
             }
             if e.kind == ExprKind::ExprUnary && e.un_op == UnaryOp::OpNeg {
                 let inner_pair = eval_const_int_opt_expr(c, e.left)
-                if inner_pair.0 != 0 {
+                if inner_pair.0 != 0 && inner_pair.1 != (0 - 9223372036854775807) - 1 {
                     return (1, 0 - inner_pair.1)
                 }
                 return (0, 0)
@@ -24610,6 +24691,9 @@ fn eval_const_int_opt_expr(c: Checker, opt: Option<Box<Expr> >) -> (i64, i64) wi
                 }
                 let lv = left_pair.1
                 let rv = right_pair.1
+                if !checker_const_int_op_fits(e.bin_op, lv, rv) {
+                    return (0, 0)
+                }
                 if e.bin_op == BinaryOp::OpAdd {
                     return (1, lv + rv)
                 } else if e.bin_op == BinaryOp::OpSub {

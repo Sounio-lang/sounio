@@ -1294,10 +1294,10 @@ fn fo_name_hash(n: Name) -> i64 with Mut, Panic, Div {
     var i: i64 = 0
     while i < n.len && i < 384 {
         let b = (n.buf[i as usize] as i64) & 255
-        h = h * 33 + b
+        h = wrapping_add(wrapping_mul(h, 33), b)
         i = i + 1
     }
-    h + n.len
+    wrapping_add(h, n.len)
 }
 
 // Module names that appear in a `use` declaration of any loaded module.
@@ -2659,7 +2659,7 @@ pub fn lower_fn_tuple_f64_arrays_collect_one_named(items: &Option<Box<ItemList>>
 
 
 fn fo_ctor_path_fold(acc: i64, name_hash: i64) -> i64 with Mut, Panic, Div {
-    acc * 33 + name_hash
+    wrapping_add(wrapping_mul(acc, 33), name_hash)
 }
 
 fn fo_ctor_global_set(fn_hash: i64, path_hash: i64, kind: i64, lit: f64, field0: i64) with Mut, Panic, Div {
@@ -14610,7 +14610,7 @@ fn fx_hash_name(n: Name) -> i64 with Mut, Panic, Div {
     var h: i64 = 5381
     var i: i64 = 0
     while i < n.len {
-        h = h * 33 + (n.buf[i as usize] as i64)
+        h = wrapping_add(wrapping_mul(h, 33), n.buf[i as usize] as i64)
         i = i + 1
     }
     h
@@ -18218,6 +18218,25 @@ impl Lowerer {
         lo = lo.emit(ir_binop_typed(d.1, acc, BinaryOp::OpSub, x, true, true))
         lo = lo.emit(ir_mark_float_reg(d.1))
         (lo, d.1)
+    }
+
+    // The first- and second-order rules below are f64 arithmetic: b*b and
+    // b*b*b are emitted as float ops, but when an operand is an integer
+    // expression its value register is an integer, and the multiply came out
+    // as imul. 2^32 * 2^32 then overflowed (ADR-031 R1 trap) inside a
+    // non-epistemic function that only carried stale sensitivities
+    // (drv_emit_u64_le, knowledge-runtime threshold driver). Convert such an
+    // operand to f64 first, so the rules compute what they claim.
+    fn so_value_as_f64(self, v: i64, is_float: bool) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        if v < 0 || is_float {
+            return (lo, v)
+        }
+        let f = lo.fresh_reg()
+        lo = f.0
+        lo = lo.emit(ir_int_to_float(f.1, v))
+        lo = lo.emit(ir_mark_float_reg(f.1))
+        (lo, f.1)
     }
 
     fn so_div_or_none(self, a: i64, b: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
@@ -24935,10 +24954,14 @@ impl Lowerer {
                     // Need operand values for the product rule.
                     let lhs_val_pair = lo.lower_opt_expr_ref(&(*e).left)
                     lo = lhs_val_pair.0
-                    let lhs_v = lhs_val_pair.1
+                    let lhs_fp = lo.so_value_as_f64(lhs_val_pair.1, lo.opt_expr_result_is_float_ref(&(*e).left))
+                    lo = lhs_fp.0
+                    let lhs_v = lhs_fp.1
                     let rhs_val_pair = lo.lower_opt_expr_ref(&(*e).right)
                     lo = rhs_val_pair.0
-                    let rhs_v = rhs_val_pair.1
+                    let rhs_fp = lo.so_value_as_f64(rhs_val_pair.1, lo.opt_expr_result_is_float_ref(&(*e).right))
+                    lo = rhs_fp.0
+                    let rhs_v = rhs_fp.1
                     if lo.so_enabled {
                         lo = lo.so_combine_hess_mul(hL, hR, sL, sR, lhs_v, rhs_v)
                     }
@@ -24948,10 +24971,14 @@ impl Lowerer {
                 if (*e).bin_op == BinaryOp::OpDiv {
                     let lhs_val_pair = lo.lower_opt_expr_ref(&(*e).left)
                     lo = lhs_val_pair.0
-                    let lhs_v = lhs_val_pair.1
+                    let lhs_fp = lo.so_value_as_f64(lhs_val_pair.1, lo.opt_expr_result_is_float_ref(&(*e).left))
+                    lo = lhs_fp.0
+                    let lhs_v = lhs_fp.1
                     let rhs_val_pair = lo.lower_opt_expr_ref(&(*e).right)
                     lo = rhs_val_pair.0
-                    let rhs_v = rhs_val_pair.1
+                    let rhs_fp = lo.so_value_as_f64(rhs_val_pair.1, lo.opt_expr_result_is_float_ref(&(*e).right))
+                    lo = rhs_fp.0
+                    let rhs_v = rhs_fp.1
                     if lo.so_enabled {
                         lo = lo.so_combine_hess_div(hL, hR, sL, sR, lhs_v, rhs_v)
                     } else {
@@ -24983,7 +25010,9 @@ impl Lowerer {
                     lo = four_v_pair.0
                     let x_pair = lo.lower_opt_expr_ref(&(*e).left)
                     lo = x_pair.0
-                    return lo.emit_variance_scale(four_v_pair.1, x_pair.1)
+                    let x_fp = lo.so_value_as_f64(x_pair.1, lo.opt_expr_result_is_float_ref(&(*e).left))
+                    lo = x_fp.0
+                    return lo.emit_variance_scale(four_v_pair.1, x_fp.1)
                 }
                 match (*e).left {
                     Some(le) => {
@@ -25022,10 +25051,14 @@ impl Lowerer {
                 }
                 let lhs_val_pair = lo.lower_opt_expr_ref(&(*e).left)
                 lo = lhs_val_pair.0
-                let lhs_v = lhs_val_pair.1
+                let lhs_fp = lo.so_value_as_f64(lhs_val_pair.1, lo.opt_expr_result_is_float_ref(&(*e).left))
+                lo = lhs_fp.0
+                let lhs_v = lhs_fp.1
                 let rhs_val_pair = lo.lower_opt_expr_ref(&(*e).right)
                 lo = rhs_val_pair.0
-                let rhs_v = rhs_val_pair.1
+                let rhs_fp = lo.so_value_as_f64(rhs_val_pair.1, lo.opt_expr_result_is_float_ref(&(*e).right))
+                lo = rhs_fp.0
+                let rhs_v = rhs_fp.1
                 let lv_cap = lv
                 let rv_cap = rv
                 return lo.emit_variance_independent_product(lhs_v, rhs_v, lv_cap, rv_cap)
@@ -25047,10 +25080,14 @@ impl Lowerer {
                 }
                 let lhs_val_pair = lo.lower_opt_expr_ref(&(*e).left)
                 lo = lhs_val_pair.0
-                let lhs_v = lhs_val_pair.1
+                let lhs_fp = lo.so_value_as_f64(lhs_val_pair.1, lo.opt_expr_result_is_float_ref(&(*e).left))
+                lo = lhs_fp.0
+                let lhs_v = lhs_fp.1
                 let rhs_val_pair = lo.lower_opt_expr_ref(&(*e).right)
                 lo = rhs_val_pair.0
-                let rhs_v = rhs_val_pair.1
+                let rhs_fp = lo.so_value_as_f64(rhs_val_pair.1, lo.opt_expr_result_is_float_ref(&(*e).right))
+                lo = rhs_fp.0
+                let rhs_v = rhs_fp.1
                 return lo.emit_variance_independent_div(lhs_v, rhs_v, lv, rv)
             }
             return (lo, -1)
@@ -39892,6 +39929,23 @@ impl Lowerer {
     }
 
     fn lower_unary_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        // SIO-207: `-9223372036854775808` is the spelling of i64 MIN. The
+        // magnitude token carries the 2^63 bit pattern in int_val, so emitting
+        // a runtime negation would negate MIN itself and trip the overflow
+        // guard. Materialise that bit pattern directly.
+        if e.un_op == UnaryOp::OpNeg {
+            match e.left {
+                Some(operand) => {
+                    if (*operand).kind == ExprKind::ExprIntLit && (*operand).int_val == (1 << 63) {
+                        let pair = self.fresh_reg()
+                        let lo = pair.0
+                        let reg = pair.1
+                        return (lo.emit(ir_load_imm(reg, (*operand).int_val)), reg)
+                    }
+                }
+                None => {}
+            }
+        }
         if e.un_op == UnaryOp::OpRef || e.un_op == UnaryOp::OpRefMut {
             match e.left {
                 Some(rb_index) => {

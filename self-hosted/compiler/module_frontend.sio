@@ -2010,14 +2010,101 @@ fn ir_merge_prepare_function_with_remap(
     )
 }
 
-// Resolve a merged-module fn_id by symbol name. Prefer a lowered body (instr_count>0)
-// over import stubs so dependency functions keep calling real implementations.
-fn ir_merge_find_function_name_index(module: &IrModule, name: Name) -> i64 with Mut, Div, Panic {
+// Stage B of docs/audit/MADAROS_SELF_COMPILE_PROFILE_DISPATCH_2026-09-27.md, merge
+// lookups only. ir_merge_find_function_name_index scans every fn_id per call
+// target; inside ir_module_finalize_merged_calls that is O(call_sites x fn_count)
+// (518 s of the 54-minute self-compile in that profile).
+//
+// The index is a chain per hash bucket, holding EVERY fn_id whose name hashes
+// there, in ascending fn_id order. A lookup runs the unchanged selection loop
+// (full in-place name compare, live instr_count) over that chain instead of over
+// 0..fn_count. Every id with the looked-up name is in the chain and in the same
+// order, and other names are rejected by the full compare, so the result equals
+// the linear scan by construction: last id with a body, else first stub.
+//
+// Scope: built at the start of the call-rebinding passes of
+// ir_module_finalize_merged_calls and dropped at their end. Those passes rewrite
+// only IR_A_FN_ID entries of existing functions; no name, slot or fn_count
+// changes there. A lookup on a module whose fn_count differs from the stamp, or
+// outside that scope, takes the linear scan.
+//
+// SOUNIO_IR_FN_INDEX_VERIFY=1 runs both lookups side by side and uses the linear
+// answer. A divergence is counted; ir_module_finalize_merged_calls prints the
+// first one and refuses (returns false). The lookup itself stays free of IO, so
+// none of its callers changes its effect row.
+var MERGE_FN_INDEX_HEAD: [i64; 16384] = [0; 16384]
+var MERGE_FN_INDEX_TAIL: [i64; 16384] = [0; 16384]
+var MERGE_FN_INDEX_NEXT: [i64; 16384] = [0; 16384]
+var MERGE_FN_INDEX_ON: i64 = 0
+var MERGE_FN_INDEX_STAMP: i64 = 0 - 1
+var MERGE_FN_INDEX_DIVERGED: i64 = 0
+var MERGE_FN_INDEX_FIRST_FAST: i64 = 0
+var MERGE_FN_INDEX_FIRST_SLOW: i64 = 0
+var MERGE_FN_INDEX_VERIFY: i64 = 0
+var MERGE_FN_INDEX_VERIFY_ON: i64 = 0
+var MERGE_FN_INDEX_VERIFY_CHECKED: i64 = 0
+
+fn merge_fn_index_verify_enabled() -> bool with IO, Mut, Panic, Div {
+    if MERGE_FN_INDEX_VERIFY_CHECKED == 0 {
+        MERGE_FN_INDEX_VERIFY_CHECKED = 1
+        if str_eq(read_env("SOUNIO_IR_FN_INDEX_VERIFY"), "1") {
+            MERGE_FN_INDEX_VERIFY_ON = 1
+        }
+    }
+    MERGE_FN_INDEX_VERIFY_ON == 1
+}
+
+// Bucket of a name. Bounded arithmetic (no reliance on overflow wrapping); bytes
+// are shifted by 128 so a negative i8 cannot make the sum negative.
+fn merge_fn_index_bucket(name: &Name) -> i64 with Mut, Panic, Div {
+    var h: i64 = 5381
+    var k: i64 = 0
+    while k < (*name).len && k < 384 {
+        h = (h * 33 + ((*name).buf[k] as i64) + 128) % 2147483647
+        k = k + 1
+    }
+    h % 16384
+}
+
+fn merge_fn_index_build(module: &IrModule) with Mut, Panic, Div {
+    MERGE_FN_INDEX_ON = 0
+    MERGE_FN_INDEX_STAMP = 0 - 1
+    let n = (*module).fn_count
+    if n < 0 || n > 16384 { return }
+    var b: i64 = 0
+    while b < 16384 {
+        MERGE_FN_INDEX_HEAD[b as usize] = 0
+        MERGE_FN_INDEX_TAIL[b as usize] = 0
+        b = b + 1
+    }
+    var fi: i64 = 0
+    while fi < n {
+        var nm = ir_function_name_at(module, fi as usize)
+        let bk = merge_fn_index_bucket(&nm)
+        MERGE_FN_INDEX_NEXT[fi as usize] = 0
+        if MERGE_FN_INDEX_HEAD[bk as usize] == 0 {
+            MERGE_FN_INDEX_HEAD[bk as usize] = fi + 1
+        } else {
+            MERGE_FN_INDEX_NEXT[(MERGE_FN_INDEX_TAIL[bk as usize] - 1) as usize] = fi + 1
+        }
+        MERGE_FN_INDEX_TAIL[bk as usize] = fi + 1
+        fi = fi + 1
+    }
+    MERGE_FN_INDEX_STAMP = n
+    MERGE_FN_INDEX_ON = 1
+}
+
+fn merge_fn_index_drop() with Mut, Panic, Div {
+    MERGE_FN_INDEX_ON = 0
+    MERGE_FN_INDEX_STAMP = 0 - 1
+}
+
+fn ir_merge_find_function_name_index_linear(module: &IrModule, name: &Name) -> i64 with Mut, Div, Panic {
     var fi: i64 = 0
     var found: i64 = 0 - 1
     var found_stub: i64 = 0 - 1
     while fi < (*module).fn_count {
-        if ir_fn_name_eq_at(module, fi, &name) {
+        if ir_fn_name_eq_at(module, fi, name) {
             if ir_fn_instr_count(module, fi as usize) > 0 {
                 found = fi
             } else if found_stub < 0 {
@@ -2027,6 +2114,45 @@ fn ir_merge_find_function_name_index(module: &IrModule, name: Name) -> i64 with 
         fi = fi + 1
     }
     if found >= 0 { found } else { found_stub }
+}
+
+fn ir_merge_find_function_name_index_indexed(module: &IrModule, name: &Name) -> i64 with Mut, Div, Panic {
+    var found: i64 = 0 - 1
+    var found_stub: i64 = 0 - 1
+    var cur = MERGE_FN_INDEX_HEAD[merge_fn_index_bucket(name) as usize]
+    while cur > 0 {
+        let fi = cur - 1
+        if ir_fn_name_eq_at(module, fi, name) {
+            if ir_fn_instr_count(module, fi as usize) > 0 {
+                found = fi
+            } else if found_stub < 0 {
+                found_stub = fi
+            }
+        }
+        cur = MERGE_FN_INDEX_NEXT[fi as usize]
+    }
+    if found >= 0 { found } else { found_stub }
+}
+
+// Resolve a merged-module fn_id by symbol name. Prefer a lowered body (instr_count>0)
+// over import stubs so dependency functions keep calling real implementations.
+fn ir_merge_find_function_name_index(module: &IrModule, name: Name) -> i64 with Mut, Div, Panic {
+    if MERGE_FN_INDEX_ON == 1 && (*module).fn_count == MERGE_FN_INDEX_STAMP {
+        let fast = ir_merge_find_function_name_index_indexed(module, &name)
+        if MERGE_FN_INDEX_VERIFY == 1 {
+            let slow = ir_merge_find_function_name_index_linear(module, &name)
+            if slow != fast {
+                if MERGE_FN_INDEX_DIVERGED == 0 {
+                    MERGE_FN_INDEX_FIRST_FAST = fast
+                    MERGE_FN_INDEX_FIRST_SLOW = slow
+                }
+                MERGE_FN_INDEX_DIVERGED = MERGE_FN_INDEX_DIVERGED + 1
+                return slow
+            }
+        }
+        return fast
+    }
+    ir_merge_find_function_name_index_linear(module, &name)
 }
 
 // After stub replacement, remap in-function IrCall/IrCallSret targets from the
@@ -2978,6 +3104,10 @@ fn ir_module_finalize_merged_calls(module: &! IrModule) -> bool with Mut, Div, P
     if !ir_module_promote_canonical_into_stub_slots(module) { return false }
     // Two passes after promotion: duplicate import stubs (ic=0) can alias lowered
     // bodies under the same name at higher fn_id; promotion fills stub slots first.
+    MERGE_FN_INDEX_DIVERGED = 0
+    MERGE_FN_INDEX_VERIFY = 0
+    if merge_fn_index_verify_enabled() { MERGE_FN_INDEX_VERIFY = 1 }
+    merge_fn_index_build(&(*module))
     var pass: i64 = 0
     while pass < 2 {
         var fi: i64 = 0
@@ -3006,6 +3136,17 @@ fn ir_module_finalize_merged_calls(module: &! IrModule) -> bool with Mut, Div, P
             fi = fi + 1
         }
         pass = pass + 1
+    }
+    merge_fn_index_drop()
+    if MERGE_FN_INDEX_DIVERGED != 0 {
+        print("error: SOUNIO_IR_FN_INDEX_VERIFY: the merge fn index disagreed with the linear scan on ")
+        print_int(MERGE_FN_INDEX_DIVERGED)
+        print(" lookup(s); first: index ")
+        print_int(MERGE_FN_INDEX_FIRST_FAST)
+        print(", linear ")
+        print_int(MERGE_FN_INDEX_FIRST_SLOW)
+        print("\n")
+        return false
     }
     ir_module_ensure_builtin_call_targets(module)
     true
@@ -7966,7 +8107,7 @@ fn module_frontend_source_name_hash_at(data: string, start: i64, size: i64) -> i
            ch == (10 as i8) || ch == (13 as i8) {
             return hash
         }
-        hash = (hash * 33) + (ch as i64)
+        hash = wrapping_add(wrapping_mul(hash, 33), ch as i64)
         i = i + 1
     }
     hash
@@ -7976,7 +8117,7 @@ fn module_frontend_name_hash(name: Name) -> i64 {
     var hash: i64 = 5381
     var i: i64 = 0
     while i < name.len {
-        hash = (hash * 33) + (name.buf[i as usize] as i64)
+        hash = wrapping_add(wrapping_mul(hash, 33), name.buf[i as usize] as i64)
         i = i + 1
     }
     hash
