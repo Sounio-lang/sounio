@@ -252,6 +252,21 @@ fn lexer_escape_ok(pos: i64, n: i64) -> bool with Mut, Panic {
     false
 }
 
+fn lexer_print_suffix_name(code: i64) with IO {
+    if code == 1 { print("u8") }
+    else if code == 2 { print("u16") }
+    else if code == 3 { print("u32") }
+    else if code == 4 { print("u64") }
+    else if code == 5 { print("i8") }
+    else if code == 6 { print("i16") }
+    else if code == 7 { print("i32") }
+    else if code == 8 { print("i64") }
+    else if code == 9 { print("f32") }
+    else if code == 10 { print("f64") }
+    else if code == 11 { print("f128") }
+    else if code == 12 { print("f256") }
+}
+
 fn lexer_print_location(path: string) with IO {
     print("\n  --> ")
     print(path)
@@ -316,6 +331,12 @@ pub fn lexer_report_lex_error_if_any(path: string) -> bool with IO, Mut {
             print("  = help: `a+-b` could read as `a + -b` or as the uncertainty operator `a +- b`; add a space on each side of `+-`\n")
             print("          for the operator, or write `a + -b`\n")
         }
+    } else if LEXER_LEX_ERROR_KIND == 13 {
+        print("error[E276]: integer literal does not fit type `")
+        lexer_print_suffix_name(LEXER_LEX_ERROR_BYTE)
+        print("`")
+        lexer_print_location(path)
+        print("  = note: the value is outside the representable range for this type\n")
     } else {
         let in_char = LEXER_LEX_ERROR_KIND == 5
         print("error[E274]: invalid escape sequence `\\")
@@ -970,6 +991,51 @@ fn lex_flat_sep_before_hex_digit(pos: i64, n: i64) -> bool with Mut, Panic {
     CURSOR_SOURCE[pos as usize] == 95 as i8 && pos + 1 < n && is_hex_digit(CURSOR_SOURCE[(pos + 1) as usize])
 }
 
+// ADR-015 row 6: numeric type suffix scanner.
+// Returns (length, suffix_kind_code) where suffix_kind_code:
+// 1=u8, 2=u16, 3=u32, 4=u64, 5=i8, 6=i16, 7=i32, 8=i64,
+// 9=f32, 10=f64, 11=f128, 12=f256.
+// Suffix boundary: character after the suffix must NOT be an identifier continue char.
+fn lex_scan_numeric_suffix_kind(pos: i64, n: i64) -> (i64, i64) with Mut, Panic {
+    if pos >= n { return (0, 0) }
+    let ch = CURSOR_SOURCE[pos as usize]
+    var n1: i8 = 0 as i8
+    var n2: i8 = 0 as i8
+    var n3: i8 = 0 as i8
+    if pos + 1 < n { n1 = CURSOR_SOURCE[(pos + 1) as usize] }
+    if pos + 2 < n { n2 = CURSOR_SOURCE[(pos + 2) as usize] }
+    if pos + 3 < n { n3 = CURSOR_SOURCE[(pos + 3) as usize] }
+
+    var len: i64 = 0
+    var code: i64 = 0
+
+    if ch == 117 as i8 {  // 'u'
+        if n1 == 56 as i8 { len = 2; code = 1 }                                  // "u8"
+        else if n1 == 49 as i8 && n2 == 54 as i8 { len = 3; code = 2 }          // "u16"
+        else if n1 == 51 as i8 && n2 == 50 as i8 { len = 3; code = 3 }          // "u32"
+        else if n1 == 54 as i8 && n2 == 52 as i8 { len = 3; code = 4 }          // "u64"
+    } else if ch == 105 as i8 {  // 'i'
+        if n1 == 56 as i8 { len = 2; code = 5 }                                  // "i8"
+        else if n1 == 49 as i8 && n2 == 54 as i8 { len = 3; code = 6 }          // "i16"
+        else if n1 == 51 as i8 && n2 == 50 as i8 { len = 3; code = 7 }          // "i32"
+        else if n1 == 54 as i8 && n2 == 52 as i8 { len = 3; code = 8 }          // "i64"
+    } else if ch == 102 as i8 {  // 'f'
+        if n1 == 51 as i8 && n2 == 50 as i8 { len = 3; code = 9 }               // "f32"
+        else if n1 == 54 as i8 && n2 == 52 as i8 { len = 3; code = 10 }         // "f64"
+        else if n1 == 49 as i8 && n2 == 50 as i8 && n3 == 56 as i8 { len = 4; code = 11 } // "f128"
+        else if n1 == 50 as i8 && n2 == 53 as i8 && n3 == 54 as i8 { len = 4; code = 12 } // "f256"
+    }
+
+    if len > 0 {
+        if pos + len < n {
+            let trail = CURSOR_SOURCE[(pos + len) as usize]
+            if is_ident_continue(trail) { return (0, 0) }
+        }
+        return (len, code)
+    }
+    (0, 0)
+}
+
 // Runs the full lexer over CURSOR_SOURCE[0..source_len], emitting all tokens
 // via parser_set_token_at() only — no LexerState or token array allocation.
 // CURSOR_SOURCE must be populated before calling (e.g. by lex_file_to_globals).
@@ -1249,11 +1315,60 @@ pub fn lex_source_to_globals(source_len: i64) -> i64 with Mut, Div, Panic {
                 // integer: the shared parser decides that later
                 // (parser_hex_float_tail_ahead), so the emit must not refuse it.
                 if lexer_number_stray_underscore(pos, n) { lexer_mark_lex_error(10, line, start_col, 0) }
-                let hex_nx = cursor_source_byte(pos)
-                if hex_nx != (112 as i8) && hex_nx != (80 as i8) && hex_nx != (46 as i8) {
-                    if parser_span_int_literal_overflow(start, pos) {
-                        lexer_mark_lex_error(6, line, start_col, start)
-                        break
+                let hex_suf = lex_scan_numeric_suffix_kind(pos, n)
+                let hex_suf_len = hex_suf.0
+                let hex_suf_code = hex_suf.1
+                if hex_suf_len > 0 {
+                    if hex_suf_code == 1 {
+                        if value > 255 || value < 0 || parser_span_int_literal_overflow(start, pos) {
+                            lexer_mark_lex_error(13, line, start_col, hex_suf_code)
+                            break
+                        }
+                    } else if hex_suf_code == 2 {
+                        if value > 65535 || value < 0 || parser_span_int_literal_overflow(start, pos) {
+                            lexer_mark_lex_error(13, line, start_col, hex_suf_code)
+                            break
+                        }
+                    } else if hex_suf_code == 3 {
+                        if value > 4294967295 || value < 0 || parser_span_int_literal_overflow(start, pos) {
+                            lexer_mark_lex_error(13, line, start_col, hex_suf_code)
+                            break
+                        }
+                    } else if hex_suf_code == 4 {
+                        if parser_span_int_literal_overflow(start, pos) {
+                            lexer_mark_lex_error(13, line, start_col, hex_suf_code)
+                            break
+                        }
+                    } else if hex_suf_code == 5 {
+                        if value > 128 || value < 0 || parser_span_int_literal_overflow(start, pos) {
+                            lexer_mark_lex_error(13, line, start_col, hex_suf_code)
+                            break
+                        }
+                    } else if hex_suf_code == 6 {
+                        if value > 32768 || value < 0 || parser_span_int_literal_overflow(start, pos) {
+                            lexer_mark_lex_error(13, line, start_col, hex_suf_code)
+                            break
+                        }
+                    } else if hex_suf_code == 7 {
+                        if value > 2147483648 || value < 0 || parser_span_int_literal_overflow(start, pos) {
+                            lexer_mark_lex_error(13, line, start_col, hex_suf_code)
+                            break
+                        }
+                    } else if hex_suf_code == 8 {
+                        if parser_span_int_literal_overflow(start, pos) {
+                            lexer_mark_lex_error(13, line, start_col, hex_suf_code)
+                            break
+                        }
+                    }
+                    pos = pos + hex_suf_len
+                    col = col + hex_suf_len
+                } else {
+                    let hex_nx = cursor_source_byte(pos)
+                    if hex_nx != (112 as i8) && hex_nx != (80 as i8) && hex_nx != (46 as i8) {
+                        if parser_span_int_literal_overflow(start, pos) {
+                            lexer_mark_lex_error(6, line, start_col, start)
+                            break
+                        }
                     }
                 }
                 tc = lexer_push_flat(tc, 129, start, pos, line, start_col, value)
@@ -1302,32 +1417,68 @@ pub fn lex_source_to_globals(source_len: i64) -> i64 with Mut, Div, Panic {
                 }
             }
             if lexer_number_stray_underscore(pos, n) { lexer_mark_lex_error(10, line, start_col, 0) }
-            if is_float_token {
-                tc = lexer_push_flat(tc, 125, start, pos, line, start_col, 0)
-            } else {
-                // Same refusal as the hex path above, and only on the integer
-                // branch: is_float_token is already set when a `.digit` or an
-                // exponent was consumed, so `3.14159265358979323846` — how stdlib
-                // writes pi, in ~370 places — never reaches this test.
-                //
-                // The remaining hole is a C99 hex float with a fraction:
-                // `0x1.0000000000000800000000000000000000001p+0` ends its hex
-                // token at the `.`, so the 37 fraction digits arrive here as a
-                // separate decimal token and look like a huge integer. The sign
-                // that says otherwise is the `p`/`P` exponent right after them:
-                // no integer literal is followed by that, and `x.field` digits are
-                // not preceded by a radix point that follows a hex literal.
-                // Same refusal as the hex path, on the integer branch only.
-                // is_float_token already excludes `3.14…` and `1e30`; the case it
-                // cannot exclude is the digit run that *follows* a dot when that
-                // run is itself long (`3.<40 digits>`), because the lexer splits a
-                // float's fraction into its own token before deciding.
+            let dec_suf = lex_scan_numeric_suffix_kind(pos, n)
+            let dec_suf_len = dec_suf.0
+            let dec_suf_code = dec_suf.1
+            if dec_suf_len > 0 {
+                if dec_suf_code >= 9 && dec_suf_code <= 12 {
+                    is_float_token = true
+                } else if !is_float_token {
+                    if dec_suf_code == 1 {
+                        if value > 255 || value < 0 || parser_span_int_literal_overflow(start, pos) {
+                            lexer_mark_lex_error(13, line, start_col, dec_suf_code)
+                            break
+                        }
+                    } else if dec_suf_code == 2 {
+                        if value > 65535 || value < 0 || parser_span_int_literal_overflow(start, pos) {
+                            lexer_mark_lex_error(13, line, start_col, dec_suf_code)
+                            break
+                        }
+                    } else if dec_suf_code == 3 {
+                        if value > 4294967295 || value < 0 || parser_span_int_literal_overflow(start, pos) {
+                            lexer_mark_lex_error(13, line, start_col, dec_suf_code)
+                            break
+                        }
+                    } else if dec_suf_code == 4 {
+                        if parser_span_int_literal_overflow(start, pos) {
+                            lexer_mark_lex_error(13, line, start_col, dec_suf_code)
+                            break
+                        }
+                    } else if dec_suf_code == 5 {
+                        if value > 128 || value < 0 || parser_span_int_literal_overflow(start, pos) {
+                            lexer_mark_lex_error(13, line, start_col, dec_suf_code)
+                            break
+                        }
+                    } else if dec_suf_code == 6 {
+                        if value > 32768 || value < 0 || parser_span_int_literal_overflow(start, pos) {
+                            lexer_mark_lex_error(13, line, start_col, dec_suf_code)
+                            break
+                        }
+                    } else if dec_suf_code == 7 {
+                        if value > 2147483648 || value < 0 || parser_span_int_literal_overflow(start, pos) {
+                            lexer_mark_lex_error(13, line, start_col, dec_suf_code)
+                            break
+                        }
+                    } else if dec_suf_code == 8 {
+                        if parser_span_int_literal_overflow(start, pos) {
+                            lexer_mark_lex_error(13, line, start_col, dec_suf_code)
+                            break
+                        }
+                    }
+                }
+                pos = pos + dec_suf_len
+                col = col + dec_suf_len
+            } else if !is_float_token {
                 if !parser_float_fraction_tail(start, pos) {
                     if parser_span_int_literal_overflow(start, pos) {
                         lexer_mark_lex_error(6, line, start_col, start)
                         break
                     }
                 }
+            }
+            if is_float_token {
+                tc = lexer_push_flat(tc, 125, start, pos, line, start_col, 0)
+            } else {
                 tc = lexer_push_flat(tc, 124, start, pos, line, start_col, value)
             }
             if tc < 0 { break }
