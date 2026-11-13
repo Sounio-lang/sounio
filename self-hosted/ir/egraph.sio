@@ -1310,8 +1310,19 @@ pub struct EgSmallContext {
     pub uf_size:    i64,
     pub costs:      [i64; 64],
     pub best:       [i64; 64],
+    // Standard uncertainty u per node index (nanounits, 1e9 = 1.0), floor(sqrt(unc_var)).
+    // Reported value only: decisions compare unc_var, which is exact.
     pub unc_lo:     [i64; 64],
-    pub unc_hi:     [i64; 64],
+    // Exact variance u^2 per node index (nanounits^2). Valid iff unc_known.
+    // For a sum of independent observations the variance is the integer sum of the
+    // leaf variances, so every bracketing of the same leaves carries the same value:
+    // measurement uncertainty is invariant under exact rewrites (JCGM 100:2008, 5.1.2).
+    // A per-node floor(sqrt) composed along the tree is not, and must not decide.
+    pub unc_var:    [i64; 64],
+    // Observation identity: bit k set <=> the node depends on leaf e-class k.
+    // -1 = unknown. Operands that share a leaf are correlated, so independent-input
+    // propagation does not apply to them and the result is left unknown.
+    pub leaf_mask:  [i64; 64],
     // Explicit annotation validity: an absent annotation is not zero uncertainty.
     pub unc_known:  [bool; 64],
     // Q certificate — basis support per node index (the second certificate of the
@@ -1335,8 +1346,10 @@ pub struct EgSmallContext {
     //   cross-stage determinism. IEEE-754 addition and multiplication are commutative
     //   but NOT associative, independent of the value algebra.
     // true: the producing context has explicitly opted in to inexact reassociation
-    //   (the GUM-guided precision-preserving pass, which deliberately trades bits for a
-    //   lower-uncertainty evaluation order). Only that path may set this.
+    //   (the GUM-guided precision-preserving pass, which enumerates bracketings so that
+    //   extraction can compare their uncertainty; exact variances tie, so it keeps the
+    //   source order unless a member truly depends on less uncertain observations).
+    //   Only that path may set this.
     pub allow_inexact_reassoc: bool,
     // A-layer-2 (Lyapunov/chaos axis). true: this context optimizes a function that
     // integrates a vector field tagged `chaotic` (largest Lyapunov exponent λ > 0,
@@ -1371,7 +1384,8 @@ pub fn eg_small_init() -> EgSmallContext {
         costs:      [999999; 64],
         best:       [EG_INVALID; 64],
         unc_lo:     [0; 64],
-        unc_hi:     [0; 64],
+        unc_var:    [0; 64],
+        leaf_mask:  [0 - 1; 64],
         unc_known:  [false; 64],
         q_mask:     [0 - 1; 64],
     }
@@ -1401,7 +1415,8 @@ fn eg_small_init_algebra(strategy: i64, cd_bits_in: i64) -> EgSmallContext {
         costs:      [999999; 64],
         best:       [EG_INVALID; 64],
         unc_lo:     [0; 64],
-        unc_hi:     [0; 64],
+        unc_var:    [0; 64],
+        leaf_mask:  [0 - 1; 64],
         unc_known:  [false; 64],
         q_mask:     [0 - 1; 64],
     }
@@ -1600,6 +1615,9 @@ pub fn eg_small_add_var_with_unc(ctx: &! EgSmallContext, var_id: i64, unc: i64) 
     if node_idx >= 0 && node_idx < 64 {
         ctx.unc_lo[node_idx as usize] = unc
         ctx.unc_known[node_idx as usize] = unc >= 0 && unc <= 2000000000
+        // Exact variance (u <= 2e9 => u^2 <= 4e18 < 2^63) and the leaf's own identity bit.
+        ctx.unc_var[node_idx as usize] = if ctx.unc_known[node_idx as usize] { unc * unc } else { 0 }
+        ctx.leaf_mask[node_idx as usize] = if node_idx < 62 { 1 << node_idx } else { 0 - 1 }
         // Q certificate: this feed carries scalar f64 registers (the epistemic pass works
         // on Knowledge<f64> values), i.e. real numbers — basis support {e_0}. The real line
         // associates inside every Cayley-Dickson algebra (real_assoc), which is exactly
@@ -1622,24 +1640,37 @@ pub fn eg_small_add_basis_var(ctx: &! EgSmallContext, var_id: i64, basis_k: i64)
 }
 
 // Add binary op node with propagated uncertainty for epistemic pass
-// Bounded independent-input RSS metadata for additive ops only; no mul/div model.
+// Independent-input propagation for additive ops only; no mul/div model.
+//   u(x +- y)^2 = u(x)^2 + u(y)^2   when x and y share no observation.
+// The variance is accumulated exactly in integers, so the value of a node depends
+// only on the multiset of its leaves, never on how they are bracketed. Operands
+// that share a leaf (e.g. (a+b)+a) are correlated: the formula above does not hold,
+// and the node is left unknown instead of being assigned a wrong uncertainty.
 // lhs_class/rhs_class are node indices (same as e-class IDs for leaf nodes) into unc_lo.
 pub fn eg_small_add_binop_with_unc(ctx: &! EgSmallContext, op: i64, lhs_class: i64, rhs_class: i64) -> i64 with Mut, Div, Panic {
     if lhs_class < 0 || lhs_class >= ctx.node_count || rhs_class < 0 || rhs_class >= ctx.node_count { return EG_INVALID }
     let node_idx = eg_small_add_binop(ctx, op, lhs_class, rhs_class)
     if node_idx < 0 || node_idx >= 64 { return node_idx }
     ctx.unc_known[node_idx as usize] = false
+    ctx.leaf_mask[node_idx as usize] = 0 - 1
     if op != EG_OP_ADD && op != EG_OP_SUB && op != EG_OP_FADD && op != EG_OP_FSUB { return node_idx }
     if lhs_class < 0 || lhs_class >= 64 || rhs_class < 0 || rhs_class >= 64 { return node_idx }
     if !ctx.unc_known[lhs_class as usize] || !ctx.unc_known[rhs_class as usize] { return node_idx }
-    let l = ctx.unc_lo[lhs_class as usize]
-    let r = ctx.unc_lo[rhs_class as usize]
-    // The bounded domain prevents overflow of both squares AND their sum.
+    let ml = ctx.leaf_mask[lhs_class as usize]
+    let mr = ctx.leaf_mask[rhs_class as usize]
+    // Observation identity: unknown support or a shared leaf => refuse.
+    if ml < 0 || mr < 0 || (ml & mr) != 0 { return node_idx }
+    let vl = ctx.unc_var[lhs_class as usize]
+    let vr = ctx.unc_var[rhs_class as usize]
+    // Known variances are bounded by 4e18 (u <= 2e9), so vl + vr < 2^63.
     // Refuse rather than silently clamp an unknown/out-of-domain uncertainty.
-    if l < 0 || r < 0 || l > 2000000000 || r > 2000000000 { return node_idx }
-    let combined_unc = eg_isqrt(l * l + r * r)
-    ctx.unc_lo[node_idx as usize] = combined_unc
-    ctx.unc_known[node_idx as usize] = combined_unc <= 2000000000
+    if vl < 0 || vr < 0 || vl > 4000000000000000000 || vr > 4000000000000000000 { return node_idx }
+    let v = vl + vr
+    ctx.leaf_mask[node_idx as usize] = ml | mr
+    if v > 4000000000000000000 { return node_idx }
+    ctx.unc_var[node_idx as usize] = v
+    ctx.unc_lo[node_idx as usize] = eg_isqrt(v)
+    ctx.unc_known[node_idx as usize] = true
     node_idx
 }
 
@@ -1767,7 +1798,12 @@ pub fn eg_small_extract(ctx: &! EgSmallContext, class_id: i64) -> EgNode with Mu
 }
 
 // Uncertainty-guided extraction (Sprint 225 epistemic pass)
-// Extracts the equivalent node with minimum uncertainty (GUM cost model)
+// Extracts the equivalent node with minimum measurement variance, then minimum cost,
+// then the earliest node (the expression as written). Members of one e-class compute
+// the same function of the same observations, so under exact propagation they carry
+// the same variance: for those the order of the source is kept. A member can only win
+// on uncertainty when it genuinely depends on fewer or less uncertain observations.
+// Rounding error is not modelled here, so it can never justify a reassociation.
 pub fn eg_small_extract_epistemic(ctx: &! EgSmallContext, class_id: i64) -> EgNode with Mut, Div, Panic {
     if class_id < 0 || class_id >= ctx.uf_size { return eg_node_new() }
     let canonical  = eg_small_find(ctx, class_id)
@@ -1781,7 +1817,7 @@ pub fn eg_small_extract_epistemic(ctx: &! EgSmallContext, class_id: i64) -> EgNo
         if node.eclass_id >= 0 {
             let node_cls = eg_small_find(ctx, node.eclass_id)
             if node_cls == canonical && i < 64 && ctx.unc_known[i as usize] {
-                let node_unc = ctx.unc_lo[i as usize]
+                let node_unc = ctx.unc_var[i as usize]
                 let cost = eg_small_cost_by_op(node.op)
                 // First valid candidate avoids an artificial numeric ceiling.
                 if !found || node_unc < best_unc || (node_unc == best_unc && cost < best_cost) {
@@ -1939,8 +1975,9 @@ pub fn eg_q_triple_associative(bits: i64, qa: i64, qb: i64, qc: i64) -> bool wit
 //    algebra (it is a property of the floating-point REPRESENTATION, not of ℝ or
 //    the Cayley-Dickson tower). So ALL float reassociation here — FADD/FSUB AND
 //    FMUL — is FORBIDDEN unless the producing context has explicitly opted in.
-//    Only the GUM-guided precision-preserving pass opts in (it deliberately trades
-//    bits for a lower-uncertainty evaluation order). Default contexts never do.
+//    Only the GUM-guided precision-preserving pass opts in (it enumerates the
+//    bracketings for extraction to compare; see eg_small_extract_epistemic).
+//    Default contexts never do.
 //
 // 2. VALUE-ALGEBRA (reassoc_strategy): even when inexact reassociation is permitted,
 //    FMUL must additionally respect the carrier's non-associativity:
@@ -3057,6 +3094,56 @@ pub fn test_eg_small_epistemic_sum_overflow_refused() -> bool with Mut, Div, Pan
     let b = eg_small_add_var_with_unc(&! ctx, 2, 3000000000)
     let root = eg_small_add_binop_with_unc(&! ctx, EG_OP_FADD, a, b)
     !ctx.unc_known[root as usize]
+}
+
+// Measurement uncertainty is invariant across the bracketings of one e-class:
+// every member of the class of (a+b)+c carries variance 9 + 9 + 25 = 43
+// (u = 3, 3, 5), and extraction returns the expression as written. With a
+// per-node floor(sqrt) the two bracketings were 6 and 5 and extraction reordered.
+fn test_eg_small_epistemic_bracketing_invariant_inner(ctx: &! EgSmallContext) -> bool with Mut, Div, Panic {
+    ctx.allow_inexact_reassoc = true
+    let a = eg_small_add_var_with_unc(ctx, 1, 3)
+    let b = eg_small_add_var_with_unc(ctx, 2, 3)
+    let c = eg_small_add_var_with_unc(ctx, 3, 5)
+    let ab = eg_small_add_binop_with_unc(ctx, EG_OP_FADD, a, b)
+    let root = eg_small_add_binop_with_unc(ctx, EG_OP_FADD, ab, c)
+    let _ = eg_small_saturate_float(ctx)
+    let canonical = eg_small_find(ctx, root)
+    var members: i64 = 0
+    var i: i64 = 0
+    while i < ctx.node_count {
+        let node = ctx.nodes[i as usize]
+        if node.op == EG_OP_FADD && eg_small_find(ctx, node.eclass_id) == canonical {
+            if !ctx.unc_known[i as usize] || ctx.unc_var[i as usize] != 43 { return false }
+            members = members + 1
+        }
+        i = i + 1
+    }
+    let extracted = eg_small_extract_epistemic(ctx, root)
+    members >= 2 && extracted.op == EG_OP_FADD
+        && extracted.children[0] == ab && extracted.children[1] == c
+}
+pub fn test_eg_small_epistemic_bracketing_invariant() -> bool with Mut, Div, Panic {
+    var ctx = eg_small_init()
+    return test_eg_small_epistemic_bracketing_invariant_inner(&! ctx)
+}
+
+// Observation identity: in (a+b)+a the operands share the observation a, so the
+// independent-input formula does not apply (true u^2 = 4u_a^2 + u_b^2, not
+// 2u_a^2 + u_b^2). The node is left unknown and nothing is extracted on it.
+fn test_eg_small_epistemic_shared_leaf_refused_inner(ctx: &! EgSmallContext) -> bool with Mut, Div, Panic {
+    let a = eg_small_add_var_with_unc(ctx, 1, 3)
+    let b = eg_small_add_var_with_unc(ctx, 2, 4)
+    let ab = eg_small_add_binop_with_unc(ctx, EG_OP_FADD, a, b)
+    let root = eg_small_add_binop_with_unc(ctx, EG_OP_FADD, ab, a)
+    let extracted = eg_small_extract_epistemic(ctx, root)
+    ctx.unc_known[ab as usize] && ctx.unc_var[ab as usize] == 25
+        && !ctx.unc_known[root as usize]
+        && extracted.eclass_id == EG_INVALID
+}
+pub fn test_eg_small_epistemic_shared_leaf_refused() -> bool with Mut, Div, Panic {
+    var ctx = eg_small_init()
+    return test_eg_small_epistemic_shared_leaf_refused_inner(&! ctx)
 }
 
 fn test_eg_quantize_unc_zero() -> bool {
