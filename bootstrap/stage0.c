@@ -2271,10 +2271,11 @@ static void write_elf(const char *path) {
     FILE *f = fopen(path, "wb");
     if (!f) { fprintf(stderr, "stage0: cannot open %s\n", path); exit(1); }
     fwrite(out, 1, (size_t)fsz, f);
+    /* chmod +x through the open descriptor, not the path, so it applies to
+     * the file just written. */
+    fchmod(fileno(f), 0755);
     fclose(f);
     free(out);
-    /* chmod +x */
-    chmod(path, 0755);
 
     fprintf(stderr, "stage0: ok written=%s size=%lld entry=0x%llx\n", path, (long long)fsz, (long long)entry_va);
 }
