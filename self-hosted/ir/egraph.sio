@@ -3096,6 +3096,56 @@ pub fn test_eg_small_epistemic_sum_overflow_refused() -> bool with Mut, Div, Pan
     !ctx.unc_known[root as usize]
 }
 
+// Measurement uncertainty is invariant across the bracketings of one e-class:
+// every member of the class of (a+b)+c carries variance 9 + 9 + 25 = 43
+// (u = 3, 3, 5), and extraction returns the expression as written. With a
+// per-node floor(sqrt) the two bracketings were 6 and 5 and extraction reordered.
+fn test_eg_small_epistemic_bracketing_invariant_inner(ctx: &! EgSmallContext) -> bool with Mut, Div, Panic {
+    ctx.allow_inexact_reassoc = true
+    let a = eg_small_add_var_with_unc(ctx, 1, 3)
+    let b = eg_small_add_var_with_unc(ctx, 2, 3)
+    let c = eg_small_add_var_with_unc(ctx, 3, 5)
+    let ab = eg_small_add_binop_with_unc(ctx, EG_OP_FADD, a, b)
+    let root = eg_small_add_binop_with_unc(ctx, EG_OP_FADD, ab, c)
+    let _ = eg_small_saturate_float(ctx)
+    let canonical = eg_small_find(ctx, root)
+    var members: i64 = 0
+    var i: i64 = 0
+    while i < ctx.node_count {
+        let node = ctx.nodes[i as usize]
+        if node.op == EG_OP_FADD && eg_small_find(ctx, node.eclass_id) == canonical {
+            if !ctx.unc_known[i as usize] || ctx.unc_var[i as usize] != 43 { return false }
+            members = members + 1
+        }
+        i = i + 1
+    }
+    let extracted = eg_small_extract_epistemic(ctx, root)
+    members >= 2 && extracted.op == EG_OP_FADD
+        && extracted.children[0] == ab && extracted.children[1] == c
+}
+pub fn test_eg_small_epistemic_bracketing_invariant() -> bool with Mut, Div, Panic {
+    var ctx = eg_small_init()
+    return test_eg_small_epistemic_bracketing_invariant_inner(&! ctx)
+}
+
+// Observation identity: in (a+b)+a the operands share the observation a, so the
+// independent-input formula does not apply (true u^2 = 4u_a^2 + u_b^2, not
+// 2u_a^2 + u_b^2). The node is left unknown and nothing is extracted on it.
+fn test_eg_small_epistemic_shared_leaf_refused_inner(ctx: &! EgSmallContext) -> bool with Mut, Div, Panic {
+    let a = eg_small_add_var_with_unc(ctx, 1, 3)
+    let b = eg_small_add_var_with_unc(ctx, 2, 4)
+    let ab = eg_small_add_binop_with_unc(ctx, EG_OP_FADD, a, b)
+    let root = eg_small_add_binop_with_unc(ctx, EG_OP_FADD, ab, a)
+    let extracted = eg_small_extract_epistemic(ctx, root)
+    ctx.unc_known[ab as usize] && ctx.unc_var[ab as usize] == 25
+        && !ctx.unc_known[root as usize]
+        && extracted.eclass_id == EG_INVALID
+}
+pub fn test_eg_small_epistemic_shared_leaf_refused() -> bool with Mut, Div, Panic {
+    var ctx = eg_small_init()
+    return test_eg_small_epistemic_shared_leaf_refused_inner(&! ctx)
+}
+
 fn test_eg_quantize_unc_zero() -> bool {
     let result = eg_quantize_unc(0.0)
     result == 0
