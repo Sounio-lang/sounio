@@ -9849,6 +9849,33 @@ fn lower_narrow32_wrap_reg(lo: Lowerer, reg: i64, kind: i64) -> (Lowerer, i64) w
     (lo, reg)
 }
 
+// ADR-031 R1: an i32/u32 arithmetic result that does not fit 32 bits fails;
+// it is not sign-extended or masked. The 64-bit result is compared with its
+// 32-bit narrowing (lower_narrow32_wrap_reg); if they differ the program
+// panics through the `panic` builtin (exit 1, the shape of the SIO-207
+// overflow trap). The value is returned unchanged when it fits, so no
+// 64-bit value leaks through a 32-bit-typed operation either way. Used only
+// at arithmetic sites (Add/Sub/Mul, unary negation); `as i32`/`as u32` casts
+// are explicit conversions and are not routed here.
+fn lower_narrow32_check_reg(lo: Lowerer, reg: i64, kind: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+    if kind == 0 { return (lo, reg) }
+    let wp = lower_narrow32_wrap_reg(lo, reg, kind)
+    var lo2 = wp.0
+    let narrowed = wp.1
+    let eqp = lo2.fresh_reg()
+    lo2 = eqp.0
+    lo2 = lo2.emit(ir_binop(eqp.1, narrowed, BinaryOp::OpEq, reg))
+    let okp = lo2.fresh_label()
+    lo2 = okp.0
+    lo2 = lo2.emit(ir_branch_true(eqp.1, okp.1))
+    let panic_fn = lowerer_find_or_add_fn_id_mut(&! lo2, make_name("panic"))
+    let pdst = lo2.fresh_reg()
+    lo2 = pdst.0
+    lo2 = lo2.emit(ir_call(pdst.1, panic_fn, make_name("panic"), None, 0))
+    lo2 = lo2.emit(ir_label(okp.1))
+    (lo2, reg)
+}
+
 // SIO-588: narrow-32 kind of a cast target (see lower_name_narrow32_kind).
 fn lower_cast_narrow32_kind(ct: &Option<Box<TypeExpr>>) -> i64 with Mut, Panic, Div {
     match *ct {
@@ -38870,10 +38897,10 @@ impl Lowerer {
             }
         }
         let lo4 = lo3.emit(ir_binop_typed(dst, lhs, final_op, rhs, lhs_expr_is_float, rhs_expr_is_float))
-        // SIO-588: dynamic narrow-32 enforcement. The checker types an
-        // arithmetic result as the LEFT operand (binary_result_type), so a
-        // 64-bit word slot holding an i32/u32 result must be wrapped back to
-        // 32 bits: i32 sign-extends, u32 masks. Gate: left is i32/u32-typed,
+        // SIO-588 + ADR-031 R1: dynamic narrow-32 enforcement. The checker
+        // types an arithmetic result as the LEFT operand (binary_result_type),
+        // so a 64-bit word slot holding an i32/u32 result must be range-checked
+        // against 32 bits (lower_narrow32_check_reg): out of range panics. Gate: left is i32/u32-typed,
         // both sides non-float, right is integer-compatible (literal,
         // integer cast/ident/call, .len()/.count()) — the same contextual
         // literal pairing as the unsigned flip, extended to any integer
@@ -38889,7 +38916,7 @@ impl Lowerer {
                         None => false,
                     }
                     if rhs_int_p {
-                        return lower_narrow32_wrap_reg(lo4, dst, narrow_kind)
+                        return lower_narrow32_check_reg(lo4, dst, narrow_kind)
                     }
                 }
             }
@@ -40487,15 +40514,16 @@ impl Lowerer {
         if src_is_float || deref_yields_float {
             lo3 = lo3.emit(ir_mark_float_reg(dst))
         }
-        // SIO-588: dynamic narrow-32 enforcement for unary negation. `-a`
-        // on an i32/u32 operand negates in 64 bits (the SIO-207 `jo` guard
-        // cannot fire on a 32-bit-range value, so the trap story is
-        // unchanged) and the result wraps back to 32 bits, exactly as the
-        // binary Add/Sub/Mul narrowing above. Float negation is untouched.
+        // SIO-588 + ADR-031 R1: dynamic narrow-32 enforcement for unary
+        // negation. `-a` on an i32/u32 operand negates in 64 bits (the
+        // SIO-207 `jo` guard cannot fire on a 32-bit-range value) and the
+        // result is range-checked against 32 bits, exactly as the binary
+        // Add/Sub/Mul check above: `-i32::MIN` panics. Float negation is
+        // untouched.
         if e.un_op == UnaryOp::OpNeg && !src_is_float {
             let neg_narrow_kind = lo3.opt_expr_narrow32_kind_ref(&e.left)
             if neg_narrow_kind != 0 {
-                return lower_narrow32_wrap_reg(lo3, dst, neg_narrow_kind)
+                return lower_narrow32_check_reg(lo3, dst, neg_narrow_kind)
             }
         }
         (lo3, dst)

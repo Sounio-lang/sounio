@@ -1,20 +1,21 @@
-Unsigned integer overflow is now exact on the Madaros native backend (SIO-588).
+Unsigned and 32-bit integer overflow now fail on the Madaros native backend
+(SIO-588, ADR-031 R1). Release class: `semantics`.
 
 Unsigned operands (`u8`/`u16`/`u32`/`u64`/`usize`, or a bare literal paired
-with one) lower to the new `OpUAdd`/`OpUSub`/`OpUMul` IR variants, which
-emit the same bit-producing `add`/`sub`/`imul` with no overflow guard:
-`u64::MAX + 1` wraps to `0`. Dynamic `i32` results sign-extend the low 32
-bits and dynamic `u32` results mask them, so a runtime `a + 1` on an `i32`
-wraps to `i32::MIN` and no 64-bit value leaks through a 32-bit-typed
-operation.
+with one) lower to the new `OpUAdd`/`OpUSub`/`OpUMul` IR variants. These
+are guarded on the unsigned condition: `add`/`sub` are followed by `jc`, and
+multiplication uses `mul` (CF set iff the high half is nonzero) followed by
+`jc`. `u64::MAX + 1`, `0u64 - 1` and `u64::MAX * 2` panic; a result that
+fits `u64` but not `i64` (`2^63`) does not.
 
-Requires SIO-207 (card 207, PR #3435) for the signed half of the story:
-the `i64` trap, the `wrapping_*` builtins, and the `E300` refusal of
-out-of-range narrow constants. On pre-207 trees the gate runs the SIO-588
-sections only (4-5) and reports the 207 sections (1-3, 6) as loud skips.
+Dynamic `i32` and `u32` results of `+`, `-`, `*` and unary `-` are
+range-checked against 32 bits and panic when they do not fit, instead of
+being sign-extended or masked. In-range results are unchanged.
 
-Pinned by `tests/run-pass/u64_wrap_arith.sio` and
-`tests/run-pass/i32_dynamic_wrap.sio` (both run in the Full Test Suite).
-The full six-section gate (with SIO-207 sections) lives on card SIO-588
-as a workspace receipt; it stays out of `scripts/ci/` per the
-`gate_workflow_reference_ratchet` freeze on unwired gates.
+Programs that relied on modular arithmetic write it with `wrapping_add`,
+`wrapping_sub` or `wrapping_mul` (SIO-207).
+
+Pinned by `tests/run-pass/u64_unsigned_arith_in_range.sio` and
+`tests/run-pass/i32_u32_dynamic_in_range.sio` (no false trap at the bounds)
+and by section 4 of `scripts/ci/madaros_int_overflow_gate.sh` (eight
+overflow probes, each must fail closed).

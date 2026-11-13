@@ -2926,6 +2926,31 @@ fn nc_emit_overflow_guard(nc: &! NativeCompiler) with Mut, Panic, Div {
     nc_add_label_patch(nc, jo_pos + 2, nc_v2_overflow_trap_label())
 }
 
+// JC rel32 (0F 82): taken when CF is set.
+fn nc_emit_jc_rel32(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x0f)
+    nc_emit_byte(nc, 0x82)
+    nc_emit_u32_le(nc, 0)
+}
+
+// ADR-031 R1, unsigned half: fail closed on unsigned overflow. Emit
+// immediately after the flags-setting add/sub/mul (nothing may clobber CF in
+// between); jumps to the same per-function trap stub as the signed guard.
+fn nc_emit_carry_guard(nc: &! NativeCompiler) with Mut, Panic, Div {
+    NC_V2_OVERFLOW_GUARD_USED = 1
+    let jc_pos = (*nc).code.len
+    nc_emit_jc_rel32(nc)
+    nc_add_label_patch(nc, jc_pos + 2, nc_v2_overflow_trap_label())
+}
+
+// MUL RBX (REX.W F7 /4): rdx:rax = rax * rbx, unsigned. CF = OF = 1 iff
+// rdx != 0, i.e. iff the product does not fit 64 bits.
+fn nc_emit_mul_rbx(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0xf7)
+    nc_emit_byte(nc, 0xe3)
+}
+
 // CMP RAX, RBX  (sets flags for lhs=rax, rhs=rbx)
 fn nc_emit_cmp_rax_rbx(nc: &! NativeCompiler) with Mut, Panic, Div {
     nc_emit_byte(nc, 0x48)
@@ -11788,18 +11813,23 @@ fn nc_emit_core_binop(nc: &! NativeCompiler, func: &IrFunction, instr_index: i64
         nc_core_mark_int_reg(nc, dst)
         return true
     }
-    // SIO-588: unsigned add/sub/mul. Same bit-producing instructions as the
-    // signed arms above (x86 add/sub/imul are signedness-agnostic), but with
-    // NO overflow guard: unsigned arithmetic wraps by definition, so the
-    // SIO-207 `jo` trap must not fire here. The lowerer only emits these
-    // for u8/u16/u32/u64/usize-typed operands (or literals paired with
-    // one); 32-bit results are already narrowed to width by the lowerer.
+    // SIO-588 / ADR-031 R1: unsigned add/sub/mul fail on overflow, like the
+    // signed arms above, but on the unsigned condition. add and sub set CF on
+    // carry out of bit 63 and on borrow; unsigned multiply uses MUL (rdx:rax =
+    // rax * rbx), which sets CF (and OF) exactly when the high half is
+    // nonzero, i.e. when the product does not fit 64 bits. IMUL's flags
+    // describe signed overflow and would be wrong here. The `jc` goes to the
+    // same per-function trap stub as the SIO-207 `jo`. rdx is scratch in this
+    // emitter (OpDiv clobbers it with cqo/idiv). The lowerer emits these only
+    // for u8/u16/u32/u64/usize-typed operands (or literals paired with one);
+    // a narrower result is range-checked by the lowerer, not masked.
     if op == BinaryOp::OpUAdd {
         nc_core_load_temp_to_rax(nc, lhs)
         nc_emit_push_rax(nc)
         nc_core_load_temp_to_rax(nc, rhs)
         nc_emit_pop_rbx(nc)
         nc_emit_add_rax_rbx(nc)
+        nc_emit_carry_guard(nc)
         nc_core_store_rax_to_temp(nc, dst)
         nc_core_mark_int_reg(nc, dst)
         return true
@@ -11810,6 +11840,7 @@ fn nc_emit_core_binop(nc: &! NativeCompiler, func: &IrFunction, instr_index: i64
         nc_core_load_temp_to_rax(nc, lhs)
         nc_emit_pop_rbx(nc)
         nc_emit_sub_rax_rbx(nc)
+        nc_emit_carry_guard(nc)
         nc_core_store_rax_to_temp(nc, dst)
         nc_core_mark_int_reg(nc, dst)
         return true
@@ -11819,7 +11850,8 @@ fn nc_emit_core_binop(nc: &! NativeCompiler, func: &IrFunction, instr_index: i64
         nc_emit_push_rax(nc)
         nc_core_load_temp_to_rax(nc, rhs)
         nc_emit_pop_rbx(nc)
-        nc_emit_imul_rax_rbx(nc)
+        nc_emit_mul_rbx(nc)
+        nc_emit_carry_guard(nc)
         nc_core_store_rax_to_temp(nc, dst)
         nc_core_mark_int_reg(nc, dst)
         return true
