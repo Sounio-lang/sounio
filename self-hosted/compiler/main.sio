@@ -20905,10 +20905,10 @@ fn compiler_main_test_ey_no_fold_and_outer() -> bool with Mut, Div, Panic {
         && IR_A_SRC1[(ir_region_slot_r(opt.region, (2))) as usize] == 3
 }
 
-// Sprint 247: GUM-guided epistemic e-graph rewriting (T1148-T1157)
+// Sprint 247: GUM-guided epistemic e-graph rewriting (T1148-T1157c)
 // ocp_egraph_epistemic_pass guard/activation tests.
-// Scientific novelty: first analytically GUM-guided FP rewriting in any compiler.
-// SOTA: Panchekha et al. PLDI 2015 (Herbie/sampling); Sounio uses GUM §5.1.2 analytically.
+// Propagation is exact (integer variances, observation identity), so equivalent
+// bracketings carry the same measurement uncertainty and are never reordered on it.
 
 fn compiler_main_test_ge_standard_passthrough() -> bool with Mut, Div, Panic {
     // Guard: IR_STRATEGY_STANDARD → epistemic pass returns function unchanged
@@ -21094,15 +21094,68 @@ fn compiler_main_test_ge_observed_reassoc_chain() -> bool with Mut, Div, Panic {
     var func = cp_make_test_func(instrs, 30)
     func.compile_strategy = IR_STRATEGY_PRECISION_PRESERVING
     let opt = ocp_egraph_epistemic_pass(func)
-    opt.instr_count == 31
+    // u = 3, 3, 5 nanounits. Both bracketings have variance 9 + 9 + 25 = 43, so
+    // neither has a lower measurement uncertainty and the f64 sum keeps its order.
+    // (Before exact propagation, per-node floor(sqrt) gave (a+b)+c = 6 and
+    // a+(b+c) = 5, and the pass reassociated on that rounding artefact alone.)
+    opt.instr_count == 30
+        && (IR_A_OP[(ir_region_slot_r(opt.region, (27))) as usize] as IrOpcode) == IrOpcode::IrBinOp
+        && IR_A_DST[(ir_region_slot_r(opt.region, (27))) as usize] == 18
+        && IR_A_SRC1[(ir_region_slot_r(opt.region, (27))) as usize] == 5
+        && IR_A_SRC2[(ir_region_slot_r(opt.region, (27))) as usize] == 11
         && (IR_A_OP[(ir_region_slot_r(opt.region, (28))) as usize] as IrOpcode) == IrOpcode::IrBinOp
-        && IR_A_DST[(ir_region_slot_r(opt.region, (28))) as usize] == 40
-        && IR_A_SRC1[(ir_region_slot_r(opt.region, (28))) as usize] == 11
+        && IR_A_DST[(ir_region_slot_r(opt.region, (28))) as usize] == 19
+        && IR_A_SRC1[(ir_region_slot_r(opt.region, (28))) as usize] == 18
         && IR_A_SRC2[(ir_region_slot_r(opt.region, (28))) as usize] == 17
-        && (IR_A_OP[(ir_region_slot_r(opt.region, (29))) as usize] as IrOpcode) == IrOpcode::IrBinOp
-        && IR_A_DST[(ir_region_slot_r(opt.region, (29))) as usize] == 19
-        && IR_A_SRC1[(ir_region_slot_r(opt.region, (29))) as usize] == 5
-        && IR_A_SRC2[(ir_region_slot_r(opt.region, (29))) as usize] == 40
+}
+
+// Measurement uncertainty is invariant across the bracketings of one e-class:
+// every member of the class of (a+b)+c carries variance 43 (u = 3, 3, 5), and
+// extraction returns the expression as written.
+fn compiler_main_test_ge_bracketing_invariant_inner(ctx: &! EgSmallContext) -> bool with Mut, Div, Panic {
+    ctx.allow_inexact_reassoc = true
+    let a = eg_small_add_var_with_unc(ctx, 1, 3)
+    let b = eg_small_add_var_with_unc(ctx, 2, 3)
+    let c = eg_small_add_var_with_unc(ctx, 3, 5)
+    let ab = eg_small_add_binop_with_unc(ctx, EG_OP_FADD, a, b)
+    let root = eg_small_add_binop_with_unc(ctx, EG_OP_FADD, ab, c)
+    let _ = eg_small_saturate_float(ctx)
+    let canonical = eg_small_find(ctx, root)
+    var members: i64 = 0
+    var i: i64 = 0
+    while i < ctx.node_count {
+        let node = ctx.nodes[i as usize]
+        if node.op == EG_OP_FADD && eg_small_find(ctx, node.eclass_id) == canonical {
+            if !ctx.unc_known[i as usize] || ctx.unc_var[i as usize] != 43 { return false }
+            members = members + 1
+        }
+        i = i + 1
+    }
+    let extracted = eg_small_extract_epistemic(ctx, root)
+    members >= 2 && extracted.op == EG_OP_FADD
+        && extracted.children[0] == ab && extracted.children[1] == c
+}
+fn compiler_main_test_ge_bracketing_invariant() -> bool with Mut, Div, Panic {
+    var ctx = eg_small_init()
+    return compiler_main_test_ge_bracketing_invariant_inner(&! ctx)
+}
+
+// Observation identity: in (a+b)+a the operands share the observation a, so the
+// independent-input formula does not apply (the true u is sqrt(4u_a^2 + u_b^2),
+// not sqrt(2u_a^2 + u_b^2)). The node is left unknown, and nothing is extracted on it.
+fn compiler_main_test_ge_shared_leaf_refused_inner(ctx: &! EgSmallContext) -> bool with Mut, Div, Panic {
+    let a = eg_small_add_var_with_unc(ctx, 1, 3)
+    let b = eg_small_add_var_with_unc(ctx, 2, 4)
+    let ab = eg_small_add_binop_with_unc(ctx, EG_OP_FADD, a, b)
+    let root = eg_small_add_binop_with_unc(ctx, EG_OP_FADD, ab, a)
+    let extracted = eg_small_extract_epistemic(ctx, root)
+    ctx.unc_known[ab as usize] && ctx.unc_var[ab as usize] == 25
+        && !ctx.unc_known[root as usize]
+        && extracted.eclass_id == EG_INVALID
+}
+fn compiler_main_test_ge_shared_leaf_refused() -> bool with Mut, Div, Panic {
+    var ctx = eg_small_init()
+    return compiler_main_test_ge_shared_leaf_refused_inner(&! ctx)
 }
 
 // Sprint 246 Block FD: XOR decomposition fold — (~x&y)^(x&~y) → x^y (T1142-T1147)
@@ -28936,8 +28989,16 @@ fn compiler_main_self_tests_part_09(passed_in: i64) -> i64 with IO, Mut, Panic, 
     } else { compiler_main_selftest_fail("  FAIL: T1156") }
     if compiler_main_test_ge_observed_reassoc_chain() {
         passed = passed + 1
-        println("  T1157 OK: Sprint 247 GUM egraph: observed add chain is reassociated via synthesized temp")
+        println("  T1157 OK: Sprint 247 GUM egraph: observed add chain keeps its order (variance 43 in both bracketings)")
     } else { compiler_main_selftest_fail("  FAIL: T1157") }
+    if compiler_main_test_ge_bracketing_invariant() {
+        passed = passed + 1
+        println("  T1157b OK: GUM egraph: exact variance is invariant across the bracketings of one e-class")
+    } else { compiler_main_selftest_fail("  FAIL: T1157b") }
+    if compiler_main_test_ge_shared_leaf_refused() {
+        passed = passed + 1
+        println("  T1157c OK: GUM egraph: operands sharing an observation are refused, not given independent RSS")
+    } else { compiler_main_selftest_fail("  FAIL: T1157c") }
 
     // Sprint 246 Block FD: XOR decomposition fold (T1142-T1147)
     if compiler_main_test_fd_xor_decomp_basic() {
