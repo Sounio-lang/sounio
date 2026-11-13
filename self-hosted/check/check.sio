@@ -9266,6 +9266,25 @@ fn checker_units_addable(c: *mut Checker, lu: i64, ru: i64) -> bool with Mut, Pa
     ld.scale_num == rd.scale_num && ld.scale_den == rd.scale_den
 }
 
+fn checker_knowledge_unit_scale_mismatch(c: *mut Checker, op: BinaryOp, left: TypeEntry, right: TypeEntry) -> bool with Mut, Panic, Div, Alloc {
+    if op != BinaryOp::OpAdd && op != BinaryOp::OpSub { return false }
+    if !is_knowledge_type(left) || !is_knowledge_type(right) { return false }
+    let lu = knowledge_inner(left).unit_id
+    let ru = knowledge_inner(right).unit_id
+    if lu < 0 && ru < 0 { return false }
+    !checker_units_addable(c, lu, ru)
+}
+
+fn checker_record_unit_cast_inplace(c: *mut Checker, span: Span, src: UnitDim, tgt: UnitDim) with Mut, Panic, Div, IO {
+    let scale = ((src.scale_num as f64) / (src.scale_den as f64))
+        / ((tgt.scale_num as f64) / (tgt.scale_den as f64))
+    if !unit_cast_record((*c).current_module_id, span.start, span.end, scale) {
+        print("error: unit cast metadata capacity exceeded\n")
+        (*c).had_error = true
+        (*c).error_count = (*c).error_count + 1
+    }
+}
+
 fn checker_brand_with_dim(c: *mut Checker, result: TypeEntry, d: UnitDim) -> TypeEntry with Mut, Panic, Div, Alloc {
     if unit_dim_is_dimensionless(d) {
         return ty_with_unit(result, 0 - 1)
@@ -9921,6 +9940,13 @@ fn checker_finish_binary_scalar_tail_inplace(c: *mut Checker, span: Span, op: Bi
 // diagnostic order above, but each branch now owns its temporaries in a
 // separate helper frame instead of sharing one 4.86 MB function frame.
 fn checker_check_binary_with_operand_types_inplace(c: *mut Checker, e: Expr, left_ty: TypeEntry, right_ty: TypeEntry) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    // Knowledge's inner-unit identity failure is not a confidence failure.
+    // Scaling its value and variance together is not implemented here.
+    if checker_knowledge_unit_scale_mismatch(c, e.bin_op, left_ty, right_ty) {
+        checker_report_unit_mismatch_inplace(c, e.span, knowledge_inner(left_ty).unit_id, knowledge_inner(right_ty).unit_id)
+        print("  note: Knowledge unit conversion is not supported; operands must have matching dimensions and scales\n")
+        return ty_error()
+    }
     let correlated_same_slot_add = checker_check_correlated_on_binary_inplace(c, e, left_ty, right_ty)
     let knowledge_ident_add = checker_is_knowledge_ident_add(e, left_ty, right_ty)
     if left_ty.kind == TypeKind::TyUnobserved || right_ty.kind == TypeKind::TyUnobserved {
@@ -15547,6 +15573,8 @@ fn checker_check_cast_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
                 let tgt_dim = (*c).units.get_dim(target_ty.unit_id)
                 if !unit_dim_compatible(src_dim, tgt_dim) {
                     checker_report_error_at_inplace(c, e.span, 43, 0, 0, 0)
+                } else {
+                    checker_record_unit_cast_inplace(c, e.span, src_dim, tgt_dim)
                 }
             }
             target_ty
@@ -29861,6 +29889,12 @@ impl Checker {
     fn check_binary_with_operand_types(self, e: Expr, left_ty: TypeEntry, right_ty: TypeEntry) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         var c = self
 
+        if checker_knowledge_unit_scale_mismatch(&!c as *mut Checker, e.bin_op, left_ty, right_ty) {
+            c = c.report_unit_mismatch(e.span, knowledge_inner(left_ty).unit_id, knowledge_inner(right_ty).unit_id)
+            print("  note: Knowledge unit conversion is not supported; operands must have matching dimensions and scales\n")
+            return (c, ty_error())
+        }
+
         // R6: Correlated effect on Knowledge slot-identity arithmetic
         let corr_pair = c.check_correlated_on_binary(e, left_ty, right_ty)
         c = corr_pair.0
@@ -34506,6 +34540,8 @@ impl Checker {
                     let tgt_dim = c.units.get_dim(target_ty.unit_id)
                     if !unit_dim_compatible(src_dim, tgt_dim) {
                         c = c.report_error_at(e.span, 43, 0, 0, 0)
+                    } else {
+                        checker_record_unit_cast_inplace(&!c as *mut Checker, e.span, src_dim, tgt_dim)
                     }
                 }
                 (c, target_ty)

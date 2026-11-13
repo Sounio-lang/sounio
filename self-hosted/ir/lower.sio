@@ -4,6 +4,7 @@ module ir::lower
 
 use parser::ast::*
 use ir::ir::*
+use check::units::{unit_cast_scale}
 use ir::numeric_payload::{ir_wide_compile_pool_reset, ir_wide_compile_pool_intern_low}
 use check::specializer::{spec_dce_filter_with_global_marks, spec_dce_global_marks_ready, spec_item_module_lookup, spec_item_module_populated, spec_item_module_overflowed}
 use io::trace::*
@@ -1405,7 +1406,7 @@ fn lower_builtin_unit_name(n: Name) -> bool with Mut, Panic, Div {
     if n.len <= 0 || n.len > 6 { return false }
     ir_name_eq_lit(n, "mg") || ir_name_eq_lit(n, "g") || ir_name_eq_lit(n, "kg")
         || ir_name_eq_lit(n, "m") || ir_name_eq_lit(n, "km") || ir_name_eq_lit(n, "cm")
-        || ir_name_eq_lit(n, "mm") || ir_name_eq_lit(n, "s") || ir_name_eq_lit(n, "ms")
+        || ir_name_eq_lit(n, "mm") || ir_name_eq_lit(n, "ft") || ir_name_eq_lit(n, "s") || ir_name_eq_lit(n, "ms")
         || ir_name_eq_lit(n, "min") || ir_name_eq_lit(n, "h") || ir_name_eq_lit(n, "K")
         || ir_name_eq_lit(n, "mol") || ir_name_eq_lit(n, "cm3") || ir_name_eq_lit(n, "cal")
         || ir_name_eq_lit(n, "mg_dL") || ir_name_eq_lit(n, "mmol_L") || ir_name_eq_lit(n, "U_L")
@@ -9114,7 +9115,8 @@ fn lower_cast_type_is_f64(ct: &Option<Box<TypeExpr>>) -> bool with Mut, Panic, D
     // Accepts f32 as well -- see lower_type_expr_is_f64. `as f32` matched neither
     // this nor the integer classifier, so a float source fell through to the
     // float_to_int arm of lower_cast_expr_ref and (1.5 as f32) became 1.0.
-    // A known unit is the same f64 word (branding, not a scale multiply).
+    // A known unit uses an f64 word too; lower_cast_expr_ref applies the
+    // checked source/target scale ratio after converting the representation.
     // Without this, `7.25 as kg` took float_to_int and the integer 7, read
     // back as f64, printed 0.000000.
     match *ct {
@@ -39868,13 +39870,18 @@ impl Lowerer {
             }
             (lo2, dst)
         } else if lower_cast_type_is_f64(&e.cast_type) {
-            if source_is_float {
-                return (lo1, src_reg)
+            var value_reg = src_reg
+            if !source_is_float {
+                let p = lo1.fresh_reg()
+                lo1 = p.0
+                value_reg = p.1
+                lo1 = lo1.emit(ir_int_to_float(value_reg, src_reg))
             }
-            let p = lo1.fresh_reg()
-            let lo2 = p.0
-            let dst = p.1
-            (lo2.emit(ir_int_to_float(dst, src_reg)), dst)
+            let scale = unit_cast_scale(lower_effective_current_module_id(), e.span.start, e.span.end)
+            if scale == 1.0 { return (lo1, value_reg) }
+            let factor = lo1.emit_f64_const(scale)
+            let dst = factor.0.fresh_reg()
+            (dst.0.emit(ir_binop_typed(dst.1, value_reg, BinaryOp::OpMul, factor.1, true, true)), dst.1)
         } else if source_is_float || lower_opt_expr_has_float_source(&e.left) {
             let p = lo1.fresh_reg()
             let lo2 = p.0
