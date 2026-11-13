@@ -1,0 +1,1 @@
+Unused self-hosted modules with zero `use` importers were deleted; live twins (`check/borrow.sio`, `check/specializer.sio`, `ir/dce.sio`, `ir/const_prop.sio`, `resolve/scope.sio`) stay. No user-visible compiler behaviour change.
