@@ -402,6 +402,14 @@ fn a64m_read_file() with Mut, Panic, Div {
     a64m_word(0xF9400BE0)
     a64m_word(0x910103FF)
 }
+// ADR-031 R1/R2 on arm64: integer overflow and the unrepresentable quotient
+// fail with the panic shape (exit 1) the x86 emitter uses, instead of
+// wrapping. Three fixed words, so the guards skip them with b.cond +16.
+fn a64m_overflow_trap() with Mut, Panic {
+    a64m_word(0xD2800020) // mov x0, #1
+    a64m_word(0xD2800030) // mov x16, #1 (SYS_exit)
+    a64m_word(0xD4001001) // svc #0x80
+}
 fn a64m_binary(op: BinaryOp) -> bool with Mut, Panic {
     if op == BinaryOp::OpDiv || op == BinaryOp::OpUDiv || op == BinaryOp::OpRem || op == BinaryOp::OpURem {
         // ARM SDIV/UDIV returns zero for a zero divisor. Preserve the checked
@@ -410,9 +418,36 @@ fn a64m_binary(op: BinaryOp) -> bool with Mut, Panic {
         a64m_word(0x54000041)
         a64m_word(0xD4200000)
     }
-    if op == BinaryOp::OpAdd { a64m_word(0x8B0A0129) }
-    else if op == BinaryOp::OpSub { a64m_word(0xCB0A0129) }
-    else if op == BinaryOp::OpMul { a64m_word(0x9B0A7D29) }
+    if op == BinaryOp::OpDiv || op == BinaryOp::OpRem {
+        // SDIV returns MIN for MIN / -1 (and MSUB then gives 0 for the
+        // remainder) without any flag. When the divisor is -1, negating the
+        // dividend overflows exactly for MIN.
+        a64m_word(0xB100055F) // cmn x10, #1
+        a64m_word(0x540000C1) // b.ne +24 (past negs, b.vc and the three-word trap)
+        a64m_word(0xEB0903FF) // negs xzr, x9
+        a64m_word(0x54000087) // b.vc +16
+        a64m_overflow_trap()
+    }
+    if op == BinaryOp::OpAdd {
+        a64m_word(0xAB0A0129) // adds x9, x9, x10
+        a64m_word(0x54000087) // b.vc +16
+        a64m_overflow_trap()
+    }
+    else if op == BinaryOp::OpSub {
+        a64m_word(0xEB0A0129) // subs x9, x9, x10
+        a64m_word(0x54000087) // b.vc +16
+        a64m_overflow_trap()
+    }
+    else if op == BinaryOp::OpMul {
+        // The 128-bit product fits 64 bits iff its high half is the sign
+        // extension of the low half.
+        a64m_word(0x9B0A7D2B) // mul x11, x9, x10
+        a64m_word(0x9B4A7D2C) // smulh x12, x9, x10
+        a64m_word(0xEB8BFD9F) // cmp x12, x11, asr #63
+        a64m_word(0x54000080) // b.eq +16
+        a64m_overflow_trap()
+        a64m_word(0xAA0B03E9) // mov x9, x11
+    }
     else if op == BinaryOp::OpDiv { a64m_word(0x9ACA0D29) }
     else if op == BinaryOp::OpUDiv { a64m_word(0x9ACA0929) }
     else if op == BinaryOp::OpRem || op == BinaryOp::OpURem {
@@ -931,7 +966,11 @@ fn a64m_emit_instr(module: &IrModule, func: &IrFunction, ii: i64) -> bool with I
                     a64m_word(0x1E614000) // fneg d0,d0
                     a64m_word(0x9E660009)
                     A64M_FLOAT[instr.dst as usize] = true
-                } else { a64m_word(0xCB0903E9) }
+                } else {
+                    a64m_word(0xEB0903E9) // negs x9, x9
+                    a64m_word(0x54000087) // b.vc +16 (-MIN does not fit)
+                    a64m_overflow_trap()
+                }
             }
             else if instr.un_op == UnaryOp::OpNot {
                 a64m_word(0xF100013F)

@@ -25,6 +25,7 @@ echo 'PASS negative: missing timeout refused before compiler build'
     scripts/ci/knowledge_measure_variance_oracle.cpp -o "$WORK/variance-oracle"
 "$WORK/variance-oracle" > "$WORK/variance-oracle.log"
 for test in a64_tuple_call_snapshot a64_box_large_field_table \
+    a64_int_overflow_in_range \
     a64_array_element_borrow madaros_nested_float_array_rank \
     madaros_generic_hof_scalar_inference madaros_generic_bool_literal_inference \
     madaros_flat_arg_dep_reset \
@@ -85,4 +86,33 @@ test "$overflow_status" = 1
 test ! -s "$WORK/capture-overflow"
 grep -Fq 'closure capture capacity exceeded' "$WORK/capture-overflow.build.log"
 echo 'PASS negative: closure capture capacity refuses without output'
+# ADR-031 R1/R2: each dynamic overflow (and MIN / -1) must exit 1, the
+# panic shape, before the next statement. id() keeps the operands out of
+# constant folding, so the guard under test is the emitted one.
+for probe in add sub mul neg div rem; do
+    case "$probe" in
+        add) expr='id(9223372036854775807) + id(1)' ;;
+        sub) expr='id(-9223372036854775808) - id(1)' ;;
+        mul) expr='id(4611686018427387904) * id(2)' ;;
+        neg) expr='-id(-9223372036854775808)' ;;
+        div) expr='id(-9223372036854775808) / id(0 - 1)' ;;
+        rem) expr='id(-9223372036854775808) % id(0 - 1)' ;;
+    esac
+    printf 'fn id(x: i64) -> i64 { x }\nfn main() with IO {\n    print_int(%s)\n    print("NOT_TRAPPED\\n")\n}\n' \
+        "$expr" > "$WORK/a64_trap_$probe.sio"
+    timeout 90 "$COMPILER" build "$WORK/a64_trap_$probe.sio" --target aarch64-macos \
+        -o "$WORK/a64_trap_$probe" > "$WORK/a64_trap_$probe.build.log" 2>&1
+    chmod +x "$WORK/a64_trap_$probe"
+    codesign -s - -f "$WORK/a64_trap_$probe"
+    set +e
+    timeout 30 "$WORK/a64_trap_$probe" > "$WORK/a64_trap_$probe.stdout.log" 2>&1
+    trap_status=$?
+    set -e
+    if [[ "$trap_status" != 1 ]] || grep -Fq NOT_TRAPPED "$WORK/a64_trap_$probe.stdout.log"; then
+        echo "FAIL: arm64 $probe overflow did not fail closed (rc=$trap_status)" >&2
+        cat "$WORK/a64_trap_$probe.stdout.log" >&2 || true
+        exit 1
+    fi
+    echo "PASS negative: arm64 $probe overflow exits 1"
+done
 echo "PASS: native port extra positive/negative discriminators; artifacts=$WORK"
