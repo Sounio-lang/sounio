@@ -13005,6 +13005,42 @@ fn emit_assert_fail() with Mut {
     em(0x0f); em(0x05)
 }
 
+// ADR-031 R1/R2 parity with Madaros: an integer operation whose result does
+// not fit fails instead of wrapping. Emitted right after the flags-setting
+// instruction: `skip_op` is the rel8 jump taken when it fits (0x71 jno,
+// 0x73 jnc). On Linux the failing path writes "sounio: <what>\n" to stderr
+// (the same line Madaros prints) and exits 1; on other targets it exits 1 like
+// emit_assert_fail. The message travels inline: `call` over it pushes its
+// address, so there is no data-section entry and no relocation.
+fn emit_int_trap_x86(skip_op: i64, what: string) with Mut, Panic, Div {
+    if TARGET_OS != 0 {
+        em(skip_op); em(12)
+        emit_assert_fail()
+        return
+    }
+    let n = 8 + str_len(what) + 1
+    em(skip_op); em(n + 35)
+    em(0xe8); em32(n)                     // call over the message
+    em(115); em(111); em(117); em(110); em(105); em(111); em(58); em(32)   // "sounio: "
+    var i: i64 = 0
+    while i < str_len(what) { em(str_char_at(what, i) as i64); i = i + 1 }
+    em(10)
+    em(0x5e)                              // pop rsi (message address)
+    em(0xba); em32(n)                     // mov edx, n
+    em(0xbf); em32(2)                     // mov edi, 2 (stderr)
+    em(0xb8); em32(1)                     // mov eax, 1 (write)
+    em(0x0f); em(0x05)                    // syscall
+    emit_assert_fail()                    // exit(1)
+}
+
+// Bytes emit_int_trap_x86 emits for `what`, so a guard placed before it can
+// jump over it.
+fn int_trap_len_x86(what: string) -> i64 with Panic, Div {
+    if TARGET_OS != 0 { return 14 }
+    let n = 8 + str_len(what) + 1
+    n + 37
+}
+
 fn emit_sqrt_builtin_x86() with Mut {
     em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc0)
     em(0xf2); em(0x0f); em(0x51); em(0xc0)
@@ -18652,8 +18688,12 @@ fn compile_primary() with IO, Mut, Panic, Div {
             if neg_of_lit { LAST_F64_LIT_CL = CL }  // `-lit` is still that literal for exactness
         } else {
             em(0x48); em(0xf7); em(0xd8)  // neg rax
+            // ADR-031 R1: -MIN does not fit. A literal operand is exempt: the
+            // MIN spelling -9223372036854775808 is the negation of the 2^63
+            // token and must materialise.
+            if LAST_IS_LITERAL == 0 { emit_int_trap_x86(0x71, "integer overflow (i64 unary -)") }
             // Track negation in literal value so compile-time refinement checks use -N not N
-            if LAST_IS_LITERAL != 0 { LAST_LITERAL_VAL = 0 - LAST_LITERAL_VAL }
+            if LAST_IS_LITERAL != 0 { LAST_LITERAL_VAL = wrapping_sub(0, LAST_LITERAL_VAL) }
         }
         return
     }
@@ -26005,7 +26045,33 @@ fn compile_multiplicative() with IO, Mut, Panic, Div {
             EXPR_TY = 2
         } else {
             em(0x48); em(0x87); em(0xc1)  // xchg rax, rcx — rax=lhs, rcx=rhs
-            if op == 19 { em(0x48); em(0x0f); em(0xaf); em(0xc1) }  // imul rax, rcx
+            if op == 19 {
+                if mul_unsigned == 1 {
+                    // mul rcx: rdx:rax = rax * rcx; CF set iff the high half is nonzero
+                    em(0x48); em(0xf7); em(0xe1)
+                    emit_int_trap_x86(0x73, "integer overflow (u64 *)")
+                } else {
+                    em(0x48); em(0x0f); em(0xaf); em(0xc1)  // imul rax, rcx
+                    emit_int_trap_x86(0x71, "integer overflow (i64 *)")
+                }
+            }
+            if op == 20 || op == 29 {
+                // ADR-031 R2: a zero divisor fails (it used to raise SIGFPE).
+                let zero_what = if op == 20 { "division by zero" } else { "remainder by zero" }
+                em(0x48); em(0x85); em(0xc9)          // test rcx, rcx
+                emit_int_trap_x86(0x75, zero_what)    // jnz skips the trap
+                if mul_unsigned == 0 {
+                    // ...and so does MIN / -1, whose quotient does not fit
+                    // (idiv would raise SIGFPE). Negating the dividend
+                    // overflows exactly for MIN.
+                    let min_what = if op == 20 { "integer overflow (i64 /)" } else { "integer overflow (i64 %)" }
+                    em(0x48); em(0x83); em(0xf9); em(0xff)  // cmp rcx, -1
+                    em(0x75); em(6 + int_trap_len_x86(min_what))  // jne past the check
+                    em(0x48); em(0x89); em(0xc2)            // mov rdx, rax
+                    em(0x48); em(0xf7); em(0xda)            // neg rdx
+                    emit_int_trap_x86(0x71, min_what)
+                }
+            }
             if mul_unsigned == 1 {
                 if op == 20 { em(0x48); em(0x31); em(0xd2); em(0x48); em(0xf7); em(0xf1) }  // xor rdx, rdx; div rcx
                 if op == 29 { em(0x48); em(0x31); em(0xd2); em(0x48); em(0xf7); em(0xf1); em(0x48); em(0x89); em(0xd0) }  // xor rdx, rdx; div rcx; mov rax, rdx
@@ -28041,10 +28107,19 @@ fn compile_additive() with IO, Mut, Panic, Div {
                 } else {
                     if op == 17 { em(0x48); em(0x01); em(0xc8) }  // add rax, rcx (commutative: rcx+rax = ok)
                     if op == 18 { em(0x48); em(0x87); em(0xc1); em(0x48); em(0x29); em(0xc8) }  // xchg; sub rax, rcx
-                    // PR-8: constant fold if both operands are known literals; otherwise clear
+                    // ADR-031 R1: unsigned (left operand u64) fails on carry,
+                    // signed on overflow.
+                    if add_left_uns == 1 {
+                        if op == 17 { emit_int_trap_x86(0x73, "integer overflow (u64 +)") } else { emit_int_trap_x86(0x73, "integer overflow (u64 -)") }
+                    } else {
+                        if op == 17 { emit_int_trap_x86(0x71, "integer overflow (i64 +)") } else { emit_int_trap_x86(0x71, "integer overflow (i64 -)") }
+                    }
+                    // PR-8: constant fold if both operands are known literals; otherwise clear.
+                    // The fold only feeds refinement checks; it wraps so the
+                    // compiler itself never traps on it.
                     if left_is_literal == 1 && LAST_IS_LITERAL == 1 {
-                        if op == 17 { LAST_LITERAL_VAL = left_literal_val + LAST_LITERAL_VAL }
-                        if op == 18 { LAST_LITERAL_VAL = left_literal_val - LAST_LITERAL_VAL }
+                        if op == 17 { LAST_LITERAL_VAL = wrapping_add(left_literal_val, LAST_LITERAL_VAL) }
+                        if op == 18 { LAST_LITERAL_VAL = wrapping_sub(left_literal_val, LAST_LITERAL_VAL) }
                     } else { LAST_IS_LITERAL = 0 }
                     EXPR_TY = 1
                     EXPR_VSHADOW = -1
