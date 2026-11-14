@@ -3632,12 +3632,36 @@ fn checker_deferral_reason_from_deferred_mut(c: *mut Checker, deferred_ty: TypeE
     ty_named(deferral_reason_type_name())
 }
 
+fn checker_int_literal_type(e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc {
+    if e.name.len > 0 {
+        if name_eq(e.name, make_name("u8")) { return ty_u8() }
+        if name_eq(e.name, make_name("u16")) { return ty_named(e.name) }
+        if name_eq(e.name, make_name("u32")) { return ty_u32() }
+        if name_eq(e.name, make_name("u64")) { return ty_u64() }
+        if name_eq(e.name, make_name("i8")) { return ty_i8() }
+        if name_eq(e.name, make_name("i16")) { return ty_named(e.name) }
+        if name_eq(e.name, make_name("i32")) { return ty_i32() }
+        if name_eq(e.name, make_name("i64")) { return ty_i64() }
+    }
+    ty_i64()
+}
+
+fn checker_float_literal_type(e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc {
+    if e.name.len > 0 {
+        if name_eq(e.name, make_name("f32")) { return ty_f32() }
+        if name_eq(e.name, make_name("f64")) { return ty_f64() }
+        if name_eq(e.name, make_name("f128")) { return ty_f128() }
+        if name_eq(e.name, make_name("f256")) { return ty_f256() }
+    }
+    ty_f64()
+}
+
 fn checker_transition_step_value_ty_mut(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc {
     if e.kind == ExprKind::ExprIntLit {
-        return ty_i64()
+        return checker_int_literal_type(e)
     }
     if e.kind == ExprKind::ExprFloatLit {
-        return ty_f64()
+        return checker_float_literal_type(e)
     }
     if e.kind == ExprKind::ExprIdent || e.kind == ExprKind::ExprPath {
         return type_env_lookup(&(*c).env, contest_model_name(e))
@@ -8330,7 +8354,7 @@ fn checker_check_expr_group_a_inplace(c: *mut Checker, e: Expr) -> (bool, TypeEn
     if e.kind == ExprKind::ExprIntLit {
         (*c).last_literal_int = e.int_val
         (*c).last_literal_kind = 1
-        return (true, ty_i64())
+        return (true, checker_int_literal_type(e))
     } else if e.kind == ExprKind::ExprDsepProof {
         // The one producer of this type: see parser/exprs.sio's rewrite of
         // `d_separated(A, B | Z)`. Claim validity (does the declared graph
@@ -8342,7 +8366,7 @@ fn checker_check_expr_group_a_inplace(c: *mut Checker, e: Expr) -> (bool, TypeEn
     } else if e.kind == ExprKind::ExprFloatLit {
         (*c).last_literal_float = e.float_val
         (*c).last_literal_kind = 2
-        return (true, ty_f64())
+        return (true, checker_float_literal_type(e))
     } else if e.kind == ExprKind::ExprBoolTrue {
         return (true, ty_bool())
     } else if e.kind == ExprKind::ExprBoolFalse {
@@ -9872,7 +9896,7 @@ fn checker_check_binary_hyper_path_inplace(c: *mut Checker, span: Span, op: Bina
     final_result
 }
 
-fn checker_finish_binary_scalar_tail_inplace(c: *mut Checker, span: Span, op: BinaryOp, left_ty: TypeEntry, right_ty: TypeEntry, right_expr: Option<Box<Expr> >, left_lit: bool, right_lit: bool) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+fn checker_finish_binary_scalar_tail_inplace(c: *mut Checker, span: Span, op: BinaryOp, left_ty: TypeEntry, right_ty: TypeEntry, left_expr: Option<Box<Expr> >, right_expr: Option<Box<Expr> >, left_lit: bool, right_lit: bool) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     var result = binary_result_type(op, left_ty, right_ty)
     if result.kind == TypeKind::TyError && (op == BinaryOp::OpEq || op == BinaryOp::OpNe) {
         let l_enum = left_ty.kind == TypeKind::TyNamed && enum_table_find((*c).enums, left_ty.name) >= 0
@@ -9914,6 +9938,18 @@ fn checker_finish_binary_scalar_tail_inplace(c: *mut Checker, span: Span, op: Bi
             checker_report_error_at_inplace(c, span, 57, 0, 0, 0)
         }
     }
+    // ADR-031 R1: an i64 constant expression that does not fit i64 is
+    // refused at compile time (E300), not folded or left to the run-time
+    // trap. Signed i64 + - * only: right_expr is consumed by the / and %
+    // checks above, and MIN / -1 is left to the R2 run-time guard.
+    if (op == BinaryOp::OpAdd || op == BinaryOp::OpSub || op == BinaryOp::OpMul)
+        && result.kind == TypeKind::TyI64 && left_ty.kind == TypeKind::TyI64 && right_ty.kind == TypeKind::TyI64 {
+        let lc = checker_eval_const_int_opt_expr_mut(c, left_expr)
+        let rc = checker_eval_const_int_opt_expr_mut(c, right_expr)
+        if lc.0 != 0 && rc.0 != 0 && rc.1 != 0 && !checker_const_int_op_fits(op, lc.1, rc.1) {
+            checker_report_error_at_inplace(c, span, 300, 0, 0, 0)
+        }
+    }
     checker_finish_binary_inplace(c, span, op, left_ty, right_ty, result, left_lit, right_lit)
 }
 
@@ -9936,7 +9972,7 @@ fn checker_check_binary_with_operand_types_inplace(c: *mut Checker, e: Expr, lef
         return checker_check_binary_hyper_path_inplace(c, e.span, e.bin_op, left_ty, right_ty)
     }
     let lits = checker_binary_comparison_lits(e)
-    checker_finish_binary_scalar_tail_inplace(c, e.span, e.bin_op, left_ty, right_ty, e.right, lits.0, lits.1)
+    checker_finish_binary_scalar_tail_inplace(c, e.span, e.bin_op, left_ty, right_ty, e.left, e.right, lits.0, lits.1)
 }
 
 fn checker_check_opt_block_inplace(c: *mut Checker, opt: Option<Box<Block> >) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
@@ -29678,12 +29714,12 @@ impl Checker {
             ExprKind::ExprIntLit => {
                 c.last_literal_int = e.int_val
                 c.last_literal_kind = 1
-                (c, ty_i64())
+                (c, checker_int_literal_type(e))
             }
             ExprKind::ExprFloatLit => {
                 c.last_literal_float = e.float_val
                 c.last_literal_kind = 2
-                (c, ty_f64())
+                (c, checker_float_literal_type(e))
             }
             ExprKind::ExprBoolTrue => (c, ty_bool())
             ExprKind::ExprBoolFalse => (c, ty_bool())
@@ -30015,6 +30051,19 @@ impl Checker {
             let denom_pair = eval_const_int_opt_expr(c, e.right)
             if denom_pair.0 != 0 && denom_pair.1 == 0 {
                 c = c.report_error_at(e.span, 57, 0, 0, 0)
+            }
+        }
+        // ADR-031 R1: a constant i64 expression whose value does not fit i64
+        // (MAX + 1, MIN - 1, MIN * 2) is refused here, at compile time,
+        // instead of being left to the run-time trap. Signed i64 only: an
+        // unsigned or narrower result has its own range (E300 on the
+        // annotation, the unsigned guard at run time).
+        if (e.bin_op == BinaryOp::OpAdd || e.bin_op == BinaryOp::OpSub || e.bin_op == BinaryOp::OpMul)
+            && result.kind == TypeKind::TyI64 && left_ty.kind == TypeKind::TyI64 && right_ty.kind == TypeKind::TyI64 {
+            let lc = eval_const_int_opt_expr(c, e.left)
+            let rc = eval_const_int_opt_expr(c, e.right)
+            if lc.0 != 0 && rc.0 != 0 && rc.1 != 0 && !checker_const_int_op_fits(e.bin_op, lc.1, rc.1) {
+                c = c.report_error_at(e.span, 300, 0, 0, 0)
             }
         }
         // Unit checking for arithmetic on unit-typed values

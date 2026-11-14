@@ -74,6 +74,7 @@ Grounded in: commit, artifact, or empirical result
 | 027 | Layered CI, graph-directed test selection and receipts | phase 1 accepted; compiler fan-out implemented; later phases proposed | 2026-11-01 |
 | 028 | Rulings from the 2026-11-09 decision session (all of `PENDING.md`, plus D-35) | accepted | 2026-11-09 |
 | 029 | The committed seed is the provenance root of the bootstrap (D-10) | accepted | 2026-11-04 |
+| 030 | The Madaros generation chain (gen2 to gen7) and what each layer shows | proposed | 2026-11-10 |
 
 Reserved by open pull requests (not yet on `main`):
 
@@ -113,6 +114,7 @@ The next free number is **030**.
 - [ADR-027](./adr-027-layered-ci-graph-and-receipts.md)
 - [ADR-028](./adr-028-rulings-2026-11-09.md)
 - [ADR-029](./adr-029-bootstrap-provenance-root.md)
+- [ADR-030](./adr-030-madaros-generation-chain.md)
 - [Claim-oracle inventory schema](./claim_oracle_inventory.schema.md)
 
 ## Related Docs
