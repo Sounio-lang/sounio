@@ -1,0 +1,1 @@
+Madaros rejects dimensioned arguments to transcendental builtins with E281 ("transcendental function argument must be dimensionless"), including `Knowledge<m>` and measured `.value` arguments. Dimensionless scalars, unit ratios, and dimensionless brands remain accepted; `sqrt` is unchanged. Fixes #3549.
