@@ -1,279 +1,228 @@
-// stdlib/physics/sr.sio — Special relativity legacy interfaces
-//
-// Kinematic formulas (uncertainty approximations require per-method review):
-// - Time dilation t = gamma t0
-// - Length contraction L = L0 / gamma
-// - Relativistic energy E = gamma m c^2
-// - Relativistic momentum p = gamma m v
-// - Velocity addition u = (u+v)/(1 + uv/c^2)
-// - E^2 = p^2 c^2 + m^2 c^4
-//
-// c = 299792458 m/s exact
-// Compton delegates to the validated scattering kernel; other methods have
-// independent numerical contracts and validation requirements.
-
+// Special relativity in SI. Independent first-order GUM propagation.
+// Input standard uncertainties are nonnegative; c is exact. Checked APIs return
+// explicit availability. Legacy tuple APIs assert availability and retain layout.
+// A successful status does not certify independence or the local linearization.
 module physics::sr
-
-use units::lib::*;
-use constants::physical::*;
-use epistemic::knowledge::*;
-use physics::scattering::{electron_compton_shift, COMPTON_OK};
-
-let C: f64 = speed_of_light_approx();
-let H_PLANCK: f64 = 6.62607015e-34;
-let M_ELECTRON: f64 = 9.1093837015e-31;
-
-fn abs_f64(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
-fn check_near(a: f64, b: f64, tol: f64) -> bool { abs_f64(a - b) < tol }
-
-fn sr_sqrt(x: f64) -> f64 {
-    if x <= 0.0 { return 0.0 }
-    var y = x;
-    var i: i64 = 0;
-    while i < 30 {
-        y = 0.5 * (y + x / y);
-        i = i + 1;
-    }
-    y
+use units::lib::*
+use constants::physical::*
+use epistemic::knowledge::*
+use math::pure::{is_finite,sqrt}
+use physics::scattering::{electron_compton_shift,COMPTON_OK}
+use physics::lorentz::{lorentz_force_scalar_independent}
+use physics::uncertainty::*
+let C:f64=299792458.0
+pub struct FourMomentum {pub e_over_c:f64,pub p:f64,pub ue_over_c:f64,pub up:f64}
+fn sr_inputs(a:f64,ua:f64,b:f64,ub:f64)->i64 {physics_input4(a,ua,b,ub)}
+fn sr_mass_inputs(m:f64,um:f64,v:f64,uv:f64)->i64 {
+ let status=sr_inputs(m,um,v,uv)
+ if status!=0 {return status}
+ if m<0.0 || physics_abs(v)>=C {return 2}
+ 0
+}
+pub fn gamma_checked(v:f64,uv:f64)->PhysicsScalarResult with Mut,Div,Panic {physics_gamma_checked(v,uv)}
+pub fn time_dilation_checked(t0:f64,ut0:f64,v:f64,uv:f64)->PhysicsScalarResult with Mut,Div,Panic {
+ let status=sr_inputs(t0,ut0,v,uv)
+ if status!=0 {return physics_scalar_unavailable(status)}
+ let g=gamma_checked(v,uv)
+ if g.status!=0 {return g}
+ let value=physics_product3(g.value,t0,1.0,false)
+ let ht=physics_product3(g.value,ut0,1.0,true)
+ let hv=physics_product3(t0,g.standard_uncertainty,1.0,true)
+ if value.status!=0 || ht.status!=0 || hv.status!=0 {return physics_scalar_unavailable(4)}
+ physics_scalar(value.value,ht.value,hv.value,0.0,0.0)
+}
+pub fn length_contraction_checked(l0:f64,ul0:f64,v:f64,uv:f64)->PhysicsScalarResult with Mut,Div,Panic {
+ let status=sr_inputs(l0,ul0,v,uv)
+ if status!=0 {return physics_scalar_unavailable(status)}
+ let g=gamma_checked(v,uv)
+ if g.status!=0 {return g}
+ let hl=physics_product3(ul0,1.0/g.value,1.0,true)
+ let hv=physics_product3(l0,g.standard_uncertainty,1.0/(g.value*g.value),true)
+ if hl.status!=0 || hv.status!=0 {return physics_scalar_unavailable(4)}
+ physics_scalar(l0/g.value,hl.value,hv.value,0.0,0.0)
+}
+pub fn relativistic_energy_checked(m:f64,um:f64,v:f64,uv:f64)->PhysicsScalarResult with Mut,Div,Panic {
+ let status=sr_mass_inputs(m,um,v,uv)
+ if status!=0 {return physics_scalar_unavailable(status)}
+ let g=gamma_checked(v,0.0)
+ if g.status!=0 {return g}
+ let value=physics_product3(g.value,m,C*C,false)
+ let hm=physics_product3(g.value,um,C*C,true)
+ let hv=physics_product3(g.value*g.value*g.value*v,m,uv,true)
+ if value.status!=0 || hm.status!=0 || hv.status!=0 {return physics_scalar_unavailable(4)}
+ physics_scalar(value.value,hm.value,hv.value,0.0,0.0)
+}
+pub fn relativistic_momentum_checked(m:f64,um:f64,v:f64,uv:f64)->PhysicsScalarResult with Mut,Div,Panic {
+ let status=sr_mass_inputs(m,um,v,uv)
+ if status!=0 {return physics_scalar_unavailable(status)}
+ let g=gamma_checked(v,0.0)
+ if g.status!=0 {return g}
+ let value=physics_product3(g.value,m,v,false)
+ let hm=physics_product3(g.value,v,um,true)
+ let hv=physics_product3(m,g.value*g.value*g.value,uv,true)
+ if value.status!=0 || hm.status!=0 || hv.status!=0 {return physics_scalar_unavailable(4)}
+ physics_scalar(value.value,hm.value,hv.value,0.0,0.0)
+}
+pub fn velocity_addition_checked(u:f64,uu:f64,v:f64,uv:f64)->PhysicsScalarResult with Mut,Div,Panic {
+ let status=sr_inputs(u,uu,v,uv)
+ if status!=0 {return physics_scalar_unavailable(status)}
+ if physics_abs(u)>=C || physics_abs(v)>=C {return physics_scalar_unavailable(2)}
+ // Positive factored sum preserves the denominator for opposite near-c inputs.
+ let den=0.5*(((C+u)/C)*((C+v)/C)+((C-u)/C)*((C-v)/C))
+ let du=((C-v)/C)*((C+v)/C)/(den*den)
+ let dv=((C-u)/C)*((C+u)/C)/(den*den)
+ let hu=physics_product3(du,uu,1.0,true)
+ let hv=physics_product3(dv,uv,1.0,true)
+ if hu.status!=0 || hv.status!=0 {return physics_scalar_unavailable(4)}
+ physics_scalar((u+v)/den,hu.value,hv.value,0.0,0.0)
+}
+// A timelike future-directed 1D four-momentum is required. At the light cone
+// the mass derivative is singular; status2 explicitly declines first-order GUM.
+fn sr_mass_scaled(z:f64,uz:f64,p:f64,up:f64)->PhysicsScalarResult with Mut,Div,Panic {
+ let status=sr_inputs(z,uz,p,up)
+ if status!=0 {return physics_scalar_unavailable(status)}
+ let ap=physics_abs(p)
+ if z<=ap {return physics_scalar_unavailable(2)}
+ // Normalize the two positive factors before taking roots: z+|p| may
+ // overflow even when the mass and its derivatives are representable.
+ let lo=sqrt((z-ap)/z)
+ let hi=sqrt(1.0+ap/z)
+ let root=physics_product3(z,lo,hi,false)
+ let value=physics_product3(z,lo,hi/C,false)
+ if root.status!=0 || value.status!=0 || root.value==0.0 || value.value==0.0 {return physics_scalar_unavailable(4)}
+ let hz=physics_product3(z/root.value,uz,1.0/C,true)
+ let hp=physics_product3(p/root.value,up,1.0/C,true)
+ if hz.status!=0 || hp.status!=0 {return physics_scalar_unavailable(4)}
+ physics_scalar(value.value,hz.value,hp.value,0.0,0.0)
+}
+pub fn invariant_mass_checked(e:f64,ue:f64,p:f64,up:f64)->PhysicsScalarResult with Mut,Div,Panic {
+ let status=sr_inputs(e,ue,p,up)
+ if status!=0 {return physics_scalar_unavailable(status)}
+ let z=e/C
+ let uz=ue/C
+ if (e!=0.0 && z==0.0)||(ue!=0.0 && uz==0.0) {return physics_scalar_unavailable(4)}
+ sr_mass_scaled(z,uz,p,up)
+}
+pub fn invariant_mass_from_4p_checked(fm:&FourMomentum)->PhysicsScalarResult with Mut,Div,Panic {sr_mass_scaled(fm.e_over_c,fm.ue_over_c,fm.p,fm.up)}
+pub fn four_momentum_checked(e:f64,ue:f64,p:f64,up:f64)->PhysicsPairResult with Mut,Div,Panic {
+ let status=sr_inputs(e,ue,p,up)
+ if status!=0 {return physics_pair_unavailable(status)}
+ if e<0.0 {return physics_pair_unavailable(2)}
+ let z=e/C
+ let uz=ue/C
+ if (e!=0.0 && z==0.0)||(ue!=0.0 && uz==0.0) {return physics_pair_unavailable(4)}
+ let values=[z,p]
+ let h=[uz,0.0,0.0,0.0,0.0,up,0.0,0.0]
+ physics_pair(&values,&h)
+}
+pub fn boost_e_p_checked(e:f64,ue:f64,p:f64,up:f64,v:f64,uv:f64)->PhysicsPairResult with Mut,Div,Panic {
+ let status=sr_inputs(e,ue,p,up)
+ let vs=sr_inputs(v,uv,0.0,0.0)
+ if status==1 || vs==1 {return physics_pair_unavailable(1)}
+ if status!=0 || vs!=0 {return physics_pair_unavailable(3)}
+ let g=gamma_checked(v,0.0)
+ if g.status!=0 {return physics_pair_unavailable(g.status)}
+ let scaled=e/(C*C)
+ if e!=0.0 && scaled==0.0 {return physics_pair_unavailable(4)}
+ let er=lorentz_force_scalar_independent(g.value,0.0,e,0.0,-v,0.0,p,0.0)
+ let pr=lorentz_force_scalar_independent(g.value,0.0,p,0.0,-v,0.0,scaled,0.0)
+ if er.status!=0 || pr.status!=0 {return physics_pair_unavailable(4)}
+ let he=physics_product3(g.value,ue,1.0,true)
+ let hep=physics_product3(-g.value,v,up,true)
+ let hev=physics_product3(-g.value*g.value,pr.force,uv,true)
+ let hpe=physics_product3(-g.value*v,ue,1.0/(C*C),true)
+ let hp=physics_product3(g.value,up,1.0,true)
+ let hpv=physics_product3(-g.value*g.value/(C*C),er.force,uv,true)
+ if he.status!=0 || hep.status!=0 || hev.status!=0 || hpe.status!=0 || hp.status!=0 || hpv.status!=0 {return physics_pair_unavailable(4)}
+ let values=[er.force,pr.force]
+ let h=[he.value,hep.value,hev.value,0.0,hpe.value,hp.value,hpv.value,0.0]
+ physics_pair(&values,&h)
+}
+// Declared factor rows are (E,p,v), in SI. Signed L describes Sigma=L L^T.
+pub fn boost_e_p_factor_checked(e:f64,p:f64,v:f64,factor:&[f64;9])->PhysicsPairResult with Mut,Div,Panic {
+ let nominal=boost_e_p_checked(e,0.0,p,0.0,v,0.0)
+ if nominal.status!=0 {return physics_factor_pair_unavailable(nominal.status)}
+ let g=gamma_checked(v,0.0)
+ if g.status!=0 {return physics_factor_pair_unavailable(g.status)}
+ let values=[nominal.values[0],nominal.values[1]]
+ let jac=[g.value,1.0,-g.value,v,-g.value*g.value,nominal.values[1],-g.value*v,1.0/(C*C),g.value,1.0,-g.value*g.value/(C*C),nominal.values[0]]
+ physics_factor_pair(&values,&jac,factor)
 }
 
-fn sin_approx(x: f64) -> f64 {
-    x - (x*x*x)/6.0
+pub fn two_particle_total_e_p_checked(m1:f64,um1:f64,v1:f64,uv1:f64,m2:f64,um2:f64,v2:f64,uv2:f64)->PhysicsPairResult with Mut,Div,Panic {
+ let s1=sr_mass_inputs(m1,um1,v1,uv1)
+ let s2=sr_mass_inputs(m2,um2,v2,uv2)
+ if s1==1 || s2==1 {return physics_pair_unavailable(1)}
+ if s1!=0 {return physics_pair_unavailable(s1)}
+ if s2!=0 {return physics_pair_unavailable(s2)}
+ let g1=gamma_checked(v1,0.0)
+ let g2=gamma_checked(v2,0.0)
+ if g1.status!=0 || g2.status!=0 {return physics_pair_unavailable(4)}
+ let e1=relativistic_energy_checked(m1,um1,v1,uv1)
+ let e2=relativistic_energy_checked(m2,um2,v2,uv2)
+ let p1=relativistic_momentum_checked(m1,um1,v1,uv1)
+ let p2=relativistic_momentum_checked(m2,um2,v2,uv2)
+ if e1.status!=0 || e2.status!=0 || p1.status!=0 || p2.status!=0 {return physics_pair_unavailable(4)}
+ let ev=physics_sum3(e1.value,e2.value,0.0)
+ let pv=physics_sum3(p1.value,p2.value,0.0)
+ let h0=physics_product3(g1.value,um1,C*C,true)
+ let h1=physics_product3(g1.value*g1.value*g1.value*v1,m1,uv1,true)
+ let h2=physics_product3(g2.value,um2,C*C,true)
+ let h3=physics_product3(g2.value*g2.value*g2.value*v2,m2,uv2,true)
+ let h4=physics_product3(g1.value,v1,um1,true)
+ let h5=physics_product3(m1,g1.value*g1.value*g1.value,uv1,true)
+ let h6=physics_product3(g2.value,v2,um2,true)
+ let h7=physics_product3(m2,g2.value*g2.value*g2.value,uv2,true)
+ if ev.status!=0 || pv.status!=0 || h0.status!=0 || h1.status!=0 || h2.status!=0 || h3.status!=0 || h4.status!=0 || h5.status!=0 || h6.status!=0 || h7.status!=0 {return physics_pair_unavailable(4)}
+ let values=[ev.value,pv.value]
+ let h=[h0.value,h1.value,h2.value,h3.value,h4.value,h5.value,h6.value,h7.value]
+ physics_pair(&values,&h)
 }
-
-// gamma = 1 / sqrt(1 - v^2/c^2)
-pub fn gamma(v: f64, uv: f64) -> (f64, f64) {
-    let beta = v / C;
-    let ubeta = if C != 0.0 { uv / C } else { 0.0 };
-    if beta*beta >= 1.0 { return (0.0, 0.0); }
-    let g_val = 1.0 / sr_sqrt(1.0 - beta * beta);
-    // d gamma / d beta ~ gamma^3 * beta
-    let dg_dbeta = g_val * g_val * g_val * beta;
-    let ug = dg_dbeta * ubeta;
-    (g_val, ug)
+pub fn four_force_checked(m:f64,um:f64,a:f64,ua:f64,v:f64,uv:f64)->PhysicsScalarResult with Mut,Div,Panic {
+ let status=sr_mass_inputs(m,um,v,uv)
+ let ast=sr_inputs(a,ua,0.0,0.0)
+ if status==1 || ast==1 {return physics_scalar_unavailable(1)}
+ if status!=0 {return physics_scalar_unavailable(status)}
+ if ast!=0 {return physics_scalar_unavailable(ast)}
+ let g=gamma_checked(v,0.0)
+ if g.status!=0 {return g}
+ let cube=g.value*g.value*g.value
+ let value=physics_product3(m,a,cube,false)
+ let hm=physics_product3(cube,a,um,true)
+ let ha=physics_product3(cube,m,ua,true)
+ let coefficient=3.0*g.value*g.value*v/(C*C)
+ if (value.value==0.0 || coefficient==0.0) && m!=0.0 && a!=0.0 && v!=0.0 && uv!=0.0 {return physics_scalar_unavailable(4)}
+ let hv=physics_product3(coefficient,value.value,uv,true)
+ if value.status!=0 || hm.status!=0 || ha.status!=0 || hv.status!=0 {return physics_scalar_unavailable(4)}
+ physics_scalar(value.value,hm.value,ha.value,hv.value,0.0)
 }
-
-// Time dilation: Delta t = gamma Delta t0
-pub fn time_dilation(t0: f64, ut0: f64, v: f64, uv: f64) -> (f64, f64) {
-    let (g, ug) = gamma(v, uv);
-    let t_val = g * t0;
-    let ut = g * ut0 + t0 * ug;  // real prop
-    (t_val, ut)
-}
-
-// Length contraction L = L0 / gamma
-pub fn length_contraction(l0: f64, ul0: f64, v: f64, uv: f64) -> (f64, f64) {
-    let (g, ug) = gamma(v, uv);
-    if g <= 0.0 { return (0.0, 0.0); }
-    let l_val = l0 / g;
-    let ul = (l0 / (g*g)) * ug + ul0 / g;
-    (l_val, ul)
-}
-
-// Relativistic energy E = gamma m c^2
-pub fn relativistic_energy(m: f64, um: f64, v: f64, uv: f64) -> (f64, f64) {
-    let (g, ug) = gamma(v, uv);
-    let e_val = g * m * C * C;
-    let ue = g * um * C*C + m * C*C * ug;
-    (e_val, ue)
-}
-
-// DEEPER: Epistemic direct for energy (E2E)
-pub fn relativistic_energy_ep(m: &Epistemic, v: f64, uv: f64) -> Quantity with Mut, Div, Panic {
-    let (e, ue) = relativistic_energy(ep_val(m), ep_std(m), v, uv);
-    quantity_new(e, ue, dim_energy())
-}
-
-// Rel p = gamma m v
-pub fn relativistic_momentum(m: f64, um: f64, v: f64, uv: f64) -> (f64, f64) {
-    let (g, ug) = gamma(v, uv);
-    let p_val = g * m * v;
-    let up = g*m*uv + g*v*um + m*v*ug;
-    (p_val, up)
-}
-
-// Velocity addition
-pub fn velocity_addition(u: f64, uu: f64, v: f64, uv: f64) -> (f64, f64) {
-    let uv_val = (u + v) / (1.0 + u*v/(C*C));
-    // prop rough
-    let duv = (uu + uv) / (1.0 + u*v/(C*C)) ; // approx
-    (uv_val, duv)
-}
-
-// E2E tests real
-pub fn test_gamma() -> bool {
-    let (g, ug) = gamma(0.6*C, 0.001*C);
-    check_near(g, 1.25, 0.01) && ug > 0.0
-}
-
-pub fn test_time_dil() -> bool {
-    let (t, ut) = time_dilation(1.0, 0.0, 0.6*C, 0.0);
-    check_near(t, 1.25, 0.01)
-}
-
-pub fn test_energy() -> bool {
-    let (e, ue) = relativistic_energy(1.0, 0.0, 0.0, 0.0);
-    // at rest E = m c^2 ~ 1 * 9e16 huge
-    check_near(e, C*C, 1e10)  // real value
-}
-
-pub fn test_vel_add() -> bool {
-    let (w, uw) = velocity_addition(0.5*C, 0.0, 0.5*C, 0.0);
-    check_near(w, 0.8*C, 0.01*C)
-}
-
-// DEEPER: 4-momentum invariant: E^2 - p^2 c^2 = m^2 c^4 (rest mass) full GUM
-pub fn invariant_mass(E: f64, uE: f64, p: f64, up: f64) -> (f64, f64) {
-    let e2mc4 = E*E - p*p * C*C;
-    if e2mc4 <= 0.0 { return (0.0, 0.0); }
-    let mc2_val = sr_sqrt(e2mc4);
-    let m_val = mc2_val / (C*C);
-    let de_term = if mc2_val > 0.0 { E * uE / mc2_val } else {0.0};
-    let dp_term = if mc2_val > 0.0 { p * C * C * up / mc2_val } else {0.0};
-    let umc2 = sr_sqrt(de_term * de_term + dp_term * dp_term);
-    let um = umc2 / (C * C);
-    (m_val, um)
-}
-
-// DEEPER: Relativistic collision: two particles, compute total E, p after
-pub fn two_particle_total_e_p(m1: f64, um1: f64, v1: f64, uv1: f64, m2: f64, um2: f64, v2: f64, uv2: f64) -> ((f64,f64), (f64,f64)) {
-    let (E1, uE1) = relativistic_energy(m1, um1, v1, uv1);
-    let (p1, up1) = relativistic_momentum(m1, um1, v1, uv1);
-    let (E2, uE2) = relativistic_energy(m2, um2, v2, uv2);
-    let (p2, up2) = relativistic_momentum(m2, um2, v2, uv2);
-    let Etot = E1 + E2;
-    let uEt = sr_sqrt(uE1 * uE1 + uE2 * uE2);
-    let ptot = p1 + p2; // 1D assume same dir
-    let upt = up1 + up2;
-    ((Etot, uEt), (ptot, upt))
-}
-
-// DEEPER: Simple 4-momentum (E/c, p) with invariant mass + unc for full GUM
-pub struct FourMomentum {
-    pub e_over_c: f64,
-    pub p: f64,
-    pub ue_over_c: f64,
-    pub up: f64,
-}
-
-pub fn four_momentum(e: f64, ue: f64, p: f64, up: f64) -> FourMomentum {
-    FourMomentum { e_over_c: e / C, p: p, ue_over_c: ue / C, up: up }
-}
-
-pub fn invariant_mass_from_4p(fm: &FourMomentum) -> (f64, f64) {
-    let e = fm.e_over_c * C;
-    let ue = fm.ue_over_c * C;
-    let p = fm.p;
-    let up = fm.up;
-    let m2 = e*e - p*p * C*C;
-    if m2 <= 0.0 { return (0.0, 0.0); }
-    let m_val = sr_sqrt(m2) / C;
-    // real GUM delta method: dm = |e de - p c^2 dp| / (m c^2 ) adjusted
-    let de_term = if m_val > 0.0 { (e * ue) / (m_val * C * C) } else { 0.0 };
-    let dp_term = if m_val > 0.0 { (p * C * up) / (m_val * C * C) } else { 0.0 };
-    let um2 = de_term*de_term + dp_term*dp_term;
-    let um = if um2 <= 0.0 { 0.0 } else {
-        var y = um2; var i=0; while i<20 { y = 0.5*(y + um2 / y); i=i+1; } y
-    };
-    (m_val, um)
-}
-
-// DEEPER: Lorentz factor and boost for velocity
-pub fn test_invariant() -> bool {
-    let (m, um) = invariant_mass(1.0e9, 1e3, 0.0, 0.0); // at rest approx
-    check_near(m, 1.0 / (C*C) * 1e9 , 1e-10) // rough
-}
-
-pub fn test_collision() -> bool {
-    let (e1, _) = relativistic_energy(1.0, 0.0, 0.0, 0.0);
-    let (e2, _) = relativistic_energy(1.0, 0.0, 0.0, 0.0);
-    check_near(e1 + e2, 2.0 * C * C, 1e10)
-}
-
-pub fn test_four_momentum() -> bool {
-    let fm = four_momentum(1.0e9, 1e3, 0.0, 0.0);
-    let (m, um) = invariant_mass_from_4p(&fm);
-    check_near(m * C * C, 1.0e9, 1e5) && um >= 0.0
-}
-
-pub fn test_energy_ep() -> bool with Mut, Div, Panic {
-    let m = Epistemic::measured(1.0, 0.0);
-    let q = relativistic_energy_ep(&m, 0.0, 0.0);
-    check_near(q.value, C * C, 1e10)
-}
-
-// DEEPER: 4-force (real relativistic, parallel case F^3 = gamma^3 m a)
-pub fn four_force(m: f64, um: f64, a: f64, ua: f64, v: f64, uv: f64) -> (f64, f64) {
-    let (g, ug) = gamma(v, uv);
-    let f_val = m * g * g * g * a;
-    let uf = g*g*g * um * a + 3.0 * g*g * (ug * m * a) + g*g*g * m * ua; // real GUM
-    (f_val, uf)
-}
-
-pub fn test_four_force() -> bool {
-    let (f, uf) = four_force(1.0, 0.0, 1.0, 0.0, 0.0, 0.0);
-    check_near(f, 1.0, 0.1)
-}
-
-// DEEPER: 4-force longitudinal (real relativistic)
-pub fn four_force_long(m: f64, um: f64, a: f64, ua: f64, v: f64, uv: f64) -> (f64, f64) {
-    let (g, ug) = gamma(v, uv);
-    let f3 = g * g * g * m * a;
-    let uf = g*g*g * um * a + 3.0 * g*g * (ug * m * a) + g*g*g * m * ua; // full real GUM
-    (f3, uf)
-}
-
-pub fn test_four_force_long() -> bool {
-    let (f, uf) = four_force_long(1.0, 0.0, 1.0, 0.0, 0.6*C, 0.0);
-    check_near(f, 1.0 * (1.25*1.25*1.25), 0.1)
-}
-
-// DEEPER: Compton scattering delta lambda = lambda_c (1-cos theta), with epistemic
-// Use h, m_e from constants, real prop
-
-pub fn compton_shift(theta: f64, utheta: f64) -> (f64, f64) with Mut, Div, Panic {
-    let r = electron_compton_shift(theta, utheta)
-    assert(r.status == COMPTON_OK)
-    (r.shift_m, r.angular_standard_uncertainty_m)
-}
-
-pub fn test_compton() -> bool with Mut, Div, Panic {
-    let (d, ud) = compton_shift(3.14159265358979323846, 0.0)
-    let expected = 2.0 * planck_constant_approx() / (electron_mass_approx() * speed_of_light_approx())
-    check_near(d / expected, 1.0, 1e-12) && ud == 0.0
-}
-
-// DEEPER: Simple 1D Lorentz boost for energy and p (along z, real transform)
-pub fn boost_e_p(e: f64, ue: f64, p: f64, up: f64, v: f64, uv: f64) -> ((f64,f64), (f64,f64)) {
-    let (g, ug) = gamma(v, uv);
-    let beta = v / C;
-    let e_prime = g * (e - beta * C * p);  // for c=1 units adjust but keep
-    // simplified prop
-    let uep = g * ue + g * beta * C * up; // rough
-    let p_prime = g * (p - beta * e / C);
-    let upp = g * up + g * beta * ue / C;
-    ((e_prime, uep), (p_prime, upp))
-}
-
-pub fn test_boost() -> bool {
-    let (e1, _) = relativistic_energy(1.0, 0.0, 0.6 * C, 0.0);
-    check_near(e1, 1.25 * C * C, 1e7)
-}
-
-fn main() -> i32 with Mut, Div, Panic, IO {
-    var p: i32 = 0; var f: i32 = 0;
-    if test_gamma() { p = p + 1 } else { f = f + 1; println("FAIL gamma") }
-    if test_time_dil() { p = p + 1 } else { f = f + 1; println("FAIL timedil") }
-    if test_energy() { p = p + 1 } else { f = f + 1; println("FAIL energy") }
-    if test_vel_add() { p = p + 1 } else { f = f + 1; println("FAIL veladd") }
-    if test_invariant() { p = p + 1 } else { f = f + 1; println("FAIL invariant") }
-    if test_collision() { p = p + 1 } else { f = f + 1; println("FAIL collision") }
-    if test_four_momentum() { p = p + 1 } else { f = f + 1; println("FAIL four_momentum") }
-    if test_boost() { p = p + 1 } else { f = f + 1; println("FAIL boost") }
-    if test_energy_ep() { p = p + 1 } else { f = f + 1; println("FAIL energy_ep") }
-    if test_compton() { p = p + 1 } else { f = f + 1; println("FAIL compton") }
-    if test_four_force() { p = p + 1 } else { f = f + 1; println("FAIL four_force") }
-    if test_four_force_long() { p = p + 1 } else { f = f + 1; println("FAIL four_force_long") }
-    if f == 0 { println("SR E2E REAL ALL PASS (deeper)") } else { println("SR E2E FAILS") }
-    return f
-}
+pub fn four_force_long_checked(m:f64,um:f64,a:f64,ua:f64,v:f64,uv:f64)->PhysicsScalarResult with Mut,Div,Panic {four_force_checked(m,um,a,ua,v,uv)}
+pub fn gamma(v:f64,uv:f64)->(f64,f64) with Mut,Div,Panic {let r=gamma_checked(v,uv); assert(r.status==0); (r.value,r.standard_uncertainty)}
+pub fn time_dilation(t:f64,ut:f64,v:f64,uv:f64)->(f64,f64) with Mut,Div,Panic {let r=time_dilation_checked(t,ut,v,uv); assert(r.status==0); (r.value,r.standard_uncertainty)}
+pub fn length_contraction(l:f64,ul:f64,v:f64,uv:f64)->(f64,f64) with Mut,Div,Panic {let r=length_contraction_checked(l,ul,v,uv); assert(r.status==0); (r.value,r.standard_uncertainty)}
+pub fn relativistic_energy(m:f64,um:f64,v:f64,uv:f64)->(f64,f64) with Mut,Div,Panic {let r=relativistic_energy_checked(m,um,v,uv); assert(r.status==0); (r.value,r.standard_uncertainty)}
+pub fn relativistic_energy_ep(m:&Epistemic,v:f64,uv:f64)->Quantity with Mut,Div,Panic {let r=relativistic_energy_checked(ep_val(m),ep_std(m),v,uv); assert(r.status==0); quantity_new(r.value,r.standard_uncertainty,dim_energy())}
+pub fn relativistic_momentum(m:f64,um:f64,v:f64,uv:f64)->(f64,f64) with Mut,Div,Panic {let r=relativistic_momentum_checked(m,um,v,uv); assert(r.status==0); (r.value,r.standard_uncertainty)}
+pub fn velocity_addition(u:f64,uu:f64,v:f64,uv:f64)->(f64,f64) with Mut,Div,Panic {let r=velocity_addition_checked(u,uu,v,uv); assert(r.status==0); (r.value,r.standard_uncertainty)}
+pub fn invariant_mass(e:f64,ue:f64,p:f64,up:f64)->(f64,f64) with Mut,Div,Panic {let r=invariant_mass_checked(e,ue,p,up); assert(r.status==0); (r.value,r.standard_uncertainty)}
+pub fn invariant_mass_from_4p(fm:&FourMomentum)->(f64,f64) with Mut,Div,Panic {let r=invariant_mass_from_4p_checked(fm); assert(r.status==0); (r.value,r.standard_uncertainty)}
+pub fn four_momentum(e:f64,ue:f64,p:f64,up:f64)->FourMomentum with Mut,Div,Panic {let r=four_momentum_checked(e,ue,p,up); assert(r.status==0); FourMomentum{e_over_c:r.values[0],p:r.values[1],ue_over_c:r.standard_uncertainties[0],up:r.standard_uncertainties[1]}}
+pub fn two_particle_total_e_p(m1:f64,um1:f64,v1:f64,uv1:f64,m2:f64,um2:f64,v2:f64,uv2:f64)->((f64,f64),(f64,f64)) with Mut,Div,Panic {let r=two_particle_total_e_p_checked(m1,um1,v1,uv1,m2,um2,v2,uv2); assert(r.status==0); let energy:(f64,f64)=(r.values[0],r.standard_uncertainties[0]); let momentum:(f64,f64)=(r.values[1],r.standard_uncertainties[1]); let result:((f64,f64),(f64,f64))=(energy,momentum); result}
+pub fn four_force(m:f64,um:f64,a:f64,ua:f64,v:f64,uv:f64)->(f64,f64) with Mut,Div,Panic {let r=four_force_checked(m,um,a,ua,v,uv); assert(r.status==0); (r.value,r.standard_uncertainty)}
+pub fn four_force_long(m:f64,um:f64,a:f64,ua:f64,v:f64,uv:f64)->(f64,f64) with Mut,Div,Panic {four_force(m,um,a,ua,v,uv)}
+pub fn boost_e_p(e:f64,ue:f64,p:f64,up:f64,v:f64,uv:f64)->((f64,f64),(f64,f64)) with Mut,Div,Panic {let r=boost_e_p_checked(e,ue,p,up,v,uv); assert(r.status==0); let energy:(f64,f64)=(r.values[0],r.standard_uncertainties[0]); let momentum:(f64,f64)=(r.values[1],r.standard_uncertainties[1]); let result:((f64,f64),(f64,f64))=(energy,momentum); result}
+pub fn compton_shift(theta:f64,utheta:f64)->(f64,f64) with Mut,Div,Panic {let r=electron_compton_shift(theta,utheta); assert(r.status==COMPTON_OK); (r.shift_m,r.angular_standard_uncertainty_m)}
+fn sr_near(a:f64,b:f64,t:f64)->bool {physics_abs(a-b)<=t}
+pub fn test_gamma()->bool with Mut,Div,Panic {let (x,u)=gamma(-0.6*C,0.001*C); sr_near(x,1.25,1e-14)&&u>0.0}
+pub fn test_time_dil()->bool with Mut,Div,Panic {let (x,u)=time_dilation(1.0,0.0,0.6*C,0.0); sr_near(x,1.25,1e-14)&&u==0.0}
+pub fn test_energy()->bool with Mut,Div,Panic {let (x,u)=relativistic_energy(1.0,0.0,0.0,0.0); sr_near(x,C*C,32.0)&&u==0.0}
+pub fn test_vel_add()->bool with Mut,Div,Panic {let (x,u)=velocity_addition(0.5*C,0.0,0.5*C,0.0); sr_near(x,0.8*C,1e-6)&&u==0.0}
+pub fn test_invariant()->bool with Mut,Div,Panic {let (x,u)=invariant_mass(C*C,0.0,0.0,0.0); sr_near(x,1.0,1e-14)&&u==0.0}
+pub fn test_collision()->bool with Mut,Div,Panic {let total:((f64,f64),(f64,f64))=two_particle_total_e_p(1.0,0.0,0.0,0.0,1.0,0.0,0.0,0.0); let ep:(f64,f64)=total.0; let pp:(f64,f64)=total.1; sr_near(ep.0,2.0*C*C,64.0)&&pp.0==0.0}
+pub fn test_four_momentum()->bool with Mut,Div,Panic {let fm=four_momentum(C*C,1.0,0.0,0.0); let (x,u)=invariant_mass_from_4p(&fm); sr_near(x,1.0,1e-14)&&u>=0.0}
+pub fn test_energy_ep()->bool with Mut,Div,Panic {let m=Epistemic::measured(1.0,0.0); let x=relativistic_energy_ep(&m,0.0,0.0); sr_near(x.value,C*C,32.0)}
+pub fn test_four_force()->bool with Mut,Div,Panic {let (x,u)=four_force(1.0,0.0,1.0,0.0,0.0,0.0); sr_near(x,1.0,1e-14)&&u==0.0}
+pub fn test_four_force_long()->bool with Mut,Div,Panic {let (x,u)=four_force_long(1.0,0.0,1.0,0.0,0.6*C,0.0); sr_near(x,1.953125,1e-14)&&u==0.0}
+pub fn test_compton()->bool with Mut,Div,Panic {let (x,u)=compton_shift(3.14159265358979323846,0.0); let expected=2.0*planck_constant_approx()/(electron_mass_approx()*C); sr_near(x/expected,1.0,1e-12)&&u==0.0}
+pub fn test_boost()->bool with Mut,Div,Panic {let total:((f64,f64),(f64,f64))=boost_e_p(C*C,0.0,0.0,0.0,0.0,0.0); let ep:(f64,f64)=total.0; let pp:(f64,f64)=total.1; sr_near(ep.0,C*C,32.0)&&pp.0==0.0}
+fn main()->i32 with Mut,Div,Panic,IO {assert(test_gamma());assert(test_time_dil());assert(test_energy());assert(test_vel_add());assert(test_invariant());assert(test_collision());assert(test_four_momentum());assert(test_energy_ep());assert(test_four_force());assert(test_four_force_long());assert(test_compton());assert(test_boost());println("SR CHECKED ALL PASS");0}
