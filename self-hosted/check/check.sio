@@ -3228,11 +3228,8 @@ fn checker_ty_from_unit_dim(c: *mut Checker, dim: UnitDim) -> TypeEntry with Mut
     if pair.1 >= 0 {
         return ty_with_unit(ty_f64(), pair.1)
     }
-    let found = (*c).units.find_by_dim(dim)
-    if found >= 0 {
-        return ty_with_unit(ty_f64(), found)
-    }
-    ty_f64()
+    // The sticky registry overflow is diagnosed by the item capacity guard.
+    ty_error()
 }
 
 fn checker_lower_unit_or_ref_type_mut(c: *mut Checker, te: TypeExpr, is_mut_ref: bool) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
@@ -3253,7 +3250,17 @@ fn checker_lower_unit_or_ref_type_mut(c: *mut Checker, te: TypeExpr, is_mut_ref:
     }
 }
 
-fn checker_type_env_capacity_ok_inplace(c: *mut Checker) -> bool with Mut, Panic, Div, IO {
+fn checker_type_env_capacity_ok_inplace(c: *mut Checker) -> bool with Mut, Panic, Div, Alloc, IO {
+    // Both registries must retain every brand/binding, including those created
+    // while collecting signatures or checking a function body (#3548).
+    if (*c).units.overflowed {
+        (*c).had_error = true
+        if !(*c).units.overflow_reported {
+            (*c).units.overflow_reported = true
+            checker_report_error_at_inplace(c, Span { file_id: 0, start: 0, end: 0 }, 301, 0, 0, 0)
+        }
+        return false
+    }
     if !(*c).env.overflowed { return true }
     (*c).had_error = true
     if !(*c).env.overflow_reported {
@@ -9296,6 +9303,7 @@ fn checker_brand_with_dim(c: *mut Checker, result: TypeEntry, d: UnitDim) -> Typ
     }
     let pair = unit_registry_intern_dim((*c).units, d)
     (*c).units = pair.0
+    if pair.1 < 0 { return ty_error() }
     ty_with_unit(result, pair.1)
 }
 
@@ -12446,6 +12454,49 @@ fn checker_check_expr_list_no_type_no_linear_consume_inplace(c: *mut Checker, op
     }
 }
 
+// #3549: implicit math builtins have no FnSig, so their argument walk must
+// enforce dimensions itself. Keep this in leaf helpers on the in-place spine:
+// growing the by-value Checker call checker breaks the gen2 lowering budget.
+fn checker_name_requires_dimensionless_arg(n: Name) -> bool with Mut, Panic, Div {
+    name_eq_lit(n, "exp") || name_eq_lit(n, "log")
+        || name_eq_lit(n, "sin") || name_eq_lit(n, "cos")
+        || name_eq_lit(n, "tan") || name_eq_lit(n, "atan")
+        || name_eq_lit(n, "tanh") || name_eq_lit(n, "asin")
+        || name_eq_lit(n, "acos")
+}
+
+fn checker_check_transcendental_arg_unit_inplace(c: *mut Checker, span: Span, arg_ty: TypeEntry) with Mut, Panic, Div, Alloc, IO {
+    let scalar_ty = if arg_ty.kind == TypeKind::TyKnowledge { knowledge_inner(arg_ty) } else { arg_ty }
+    if scalar_ty.unit_id >= 0 {
+        // Inspect the seven exponents, not the brand or rational scale:
+        // a dimensionless brand and m/km are legitimate scalar arguments.
+        if !unit_dim_is_dimensionless(checker_unit_dim_at(c, scalar_ty.unit_id)) {
+            checker_report_error_at_inplace(c, span, 285, 0, 0, 0)
+        }
+    }
+}
+
+fn checker_check_implicit_call_args_inplace(c: *mut Checker, e: Expr) with Mut, Panic, Div, Alloc, IO {
+    let needs_scalar = match e.left {
+        Some(callee) => (*callee).kind == ExprKind::ExprIdent && checker_name_requires_dimensionless_arg((*callee).name),
+        None => false
+    }
+    if !needs_scalar {
+        checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
+        return
+    }
+    (*c).suppress_linear_consume_depth = (*c).suppress_linear_consume_depth + 1
+    var args = expr_list_handle(e.args)
+    while args.ptr != 0 as *mut ExprList {
+        let arg_ty = checker_check_expr_inplace(c, (*args.ptr).head)
+        checker_check_transcendental_arg_unit_inplace(c, (*args.ptr).head.span, arg_ty)
+        args = expr_list_handle_next(args)
+    }
+    if (*c).suppress_linear_consume_depth > 0 {
+        (*c).suppress_linear_consume_depth = (*c).suppress_linear_consume_depth - 1
+    }
+}
+
 fn checker_check_one_call_arg_inplace(c: *mut Checker, arg_expr: Expr, param_info: FnParamInfo, call_span: Span) with Mut, Panic, Div, Alloc, IO {
     let implicit_borrow =
         arg_expr.kind == ExprKind::ExprIdent &&
@@ -13534,7 +13585,7 @@ fn checker_check_call_shadow_forms_inplace(c: *mut Checker, e: Expr, direct_sig_
     match e.left {
         Some(shadow_callee) => {
             if (*shadow_callee).kind == ExprKind::ExprIdent && checker_invisible_native_builtin_sig(c, (*shadow_callee).name) {
-                checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
+                checker_check_implicit_call_args_inplace(c, e)
                 return (true, checker_shadowed_builtin_result((*shadow_callee).name))
             }
         }
@@ -13739,7 +13790,7 @@ fn checker_check_call_indirect_inplace(c: *mut Checker, e: Expr, callee_is_local
             ns_result
         }
     } else if is_error_or_unknown(callee_ty) {
-        checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
+        checker_check_implicit_call_args_inplace(c, e)
         checker_release_call_arg_borrows_inplace(c, e.args, None)
         // The runtime `read_file` is bound import-unknown, so its result reached
         // method calls with an unknown type (`read_file(p).as_bytes()`, `.len()`
@@ -21149,6 +21200,8 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 41 { print("ontology subsumption could not be verified") }
     else if code == 42 { print("value does not satisfy the refinement predicate") }
     else if code == 43 { print("incompatible unit dimensions in conversion") }
+    // Units: transcendental builtin arguments (#3549).
+    else if code == 285 { print("transcendental function argument must be dimensionless") }
     // Phase A additions (44-51)
     else if code == 44 { print("`break` can only be used inside a loop") }
     else if code == 45 { print("`continue` can only be used inside a loop") }
@@ -21325,6 +21378,7 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 298 { print("perform with live linear bindings (a non-resuming handler would drop them)") }
     else if code == 299 { print("handler backend v1 limit exceeded (results and operation values are i64 words; handler nesting depth at most 8)") }
     else if code == 300 { print("integer constant is out of range for the annotated type") }
+    else if code == 301 { print("unit registry capacity exceeded; refusing to discard a unit dimension") }
     else if code == 269 { print("a `where` refinement on Knowledge<T> is not enforced by this compiler yet: the predicate would be silently ignored, so it is refused") }
     else if code == 270 { print("`as string` does not convert a number, bool or char to text: no engine formats the value, so the cast is refused") }
     else if code == 263 { print("qualified call is ambiguous: this qualifier names a module you `use`d, but also collides with an unrelated struct/enum method of the same name, and the compiler cannot yet guarantee which one runs") }
@@ -29014,8 +29068,16 @@ impl Checker {
     // By-value twin of checker_type_env_capacity_ok_inplace. `(&!c) as *mut
     // Checker` handed that function the object, and its error_count/had_error
     // writes landed at raw-layout offsets past Checker's first array (#2966).
-    fn type_env_capacity_ok(self) -> (Checker, bool) with Mut, Panic, Div, IO {
+    fn type_env_capacity_ok(self) -> (Checker, bool) with Mut, Panic, Div, Alloc, IO {
         var c = self
+        if c.units.overflowed {
+            c.had_error = true
+            if !c.units.overflow_reported {
+                c.units.overflow_reported = true
+                c = c.report_error_at(Span { file_id: 0, start: 0, end: 0 }, 301, 0, 0, 0)
+            }
+            return (c, false)
+        }
         if !c.env.overflowed { return (c, true) }
         c.had_error = true
         if !c.env.overflow_reported {
