@@ -742,6 +742,11 @@ var IR_LOWER_ERROR_TOTAL: i64 = 0
 // Lowerer resets and is cleared only at top-level compile entry.
 var IR_LOWER_COMPILE_ERROR_LATCH: bool = false
 var IR_LOWER_COMPILE_ERROR_SCOPE_ACTIVE: bool = false
+// Numeric lowering also creates zero-variance bookkeeping channels. Overflow
+// matters only when this compilation actually constructs/observes uncertainty.
+// Keep both facts across module resets so either discovery order fails closed.
+var FO_CAPACITY_OVERFLOWED: bool = false
+var FO_UNCERTAINTY_USED: bool = false
 // WHICH PRESEED STAGE first turned had_error true, and for the two that loop,
 // on which module index. The counters above proved the flag goes true without
 // any `had_error = true` in this file firing, so the write happens inside one
@@ -1007,6 +1012,8 @@ pub fn lower_hard_error_report() with IO, Mut, Panic, Div {
 pub fn lower_compile_error_scope_begin() with Mut {
     IR_LOWER_COMPILE_ERROR_LATCH = false
     IR_LOWER_COMPILE_ERROR_SCOPE_ACTIVE = true
+    FO_CAPACITY_OVERFLOWED = false
+    FO_UNCERTAINTY_USED = false
 }
 
 pub fn lower_compile_error_scope_end() with Mut {
@@ -1046,6 +1053,10 @@ fn lower_ok_without_hard(v: bool) -> bool { !lower_had_error_with_hard(v) }
 // that the checker's measure() source counter cannot count. The compile-scope
 // latch survives discarded Lowerer values and per-module hard-error resets.
 fn fo_refuse_capacity(correlation: bool) with Mut, IO {
+    if !correlation {
+        FO_CAPACITY_OVERFLOWED = true
+        if !FO_UNCERTAINTY_USED { return }
+    }
     if correlation {
         print("error[E178]: GUM correlation channel capacity exceeded: correlate() supports only channels 0 through 7; refusing to drop covariance (#3545)\n")
     } else {
@@ -1058,6 +1069,11 @@ fn fo_refuse_capacity(correlation: bool) with Mut, IO {
     if IR_LOWER_HARD_ERROR_REASON == 0 {
         IR_LOWER_HARD_ERROR_REASON = 10
     }
+}
+
+fn fo_require_uncertainty_tracking() with Mut, IO {
+    FO_UNCERTAINTY_USED = true
+    if FO_CAPACITY_OVERFLOWED { fo_refuse_capacity(false) }
 }
 var FO_XFER_COUNT: i64 = 0
 var FO_XFER_KIND: [i64; 64] = [0; 64]
@@ -36016,6 +36032,7 @@ impl Lowerer {
     }
 
     fn lower_measure_call_ref(self, _span: Span, args: &Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        fo_require_uncertainty_tracking()
         // Extract first argument: value
         let value_pair = self.lower_measure_value_arg_ref(args)
         let lo1 = value_pair.0
@@ -36071,6 +36088,7 @@ impl Lowerer {
     // separate pre-existing lowering gap, unchanged here.) Named call arguments lower to
     // their value expression, so arg0 is the value and arg1 is the epsilon expression.
     fn lower_knowledge_ctor_call_ref(self, _span: Span, args: &Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        fo_require_uncertainty_tracking()
         let value_pair = self.lower_measure_value_arg_ref(args)
         let lo1 = value_pair.0
         let value_reg = value_pair.1
@@ -36170,6 +36188,7 @@ impl Lowerer {
     }
 
     fn lower_covariance_of_call_ref(self, args: &Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        fo_require_uncertainty_tracking()
         match *args {
             Some(list) => {
                 match (*list).tail {
@@ -36198,6 +36217,7 @@ impl Lowerer {
     }
 
     fn lower_variance_of_call_ref(self, args: &Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        fo_require_uncertainty_tracking()
         match *args {
             Some(list) => {
                 let saved_loops = FO_INLINE_ALLOW_LOOPS
@@ -36231,6 +36251,7 @@ impl Lowerer {
     // are compile-time slots assigned by measure(). A channel with no recorded
     // partial is a genuine zero: x does not depend on input k.
     fn lower_sensitivity_of_call_ref(self, args: &Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        fo_require_uncertainty_tracking()
         match *args {
             Some(list) => {
                 let saved_loops = FO_INLINE_ALLOW_LOOPS
@@ -36279,6 +36300,7 @@ impl Lowerer {
     // register's runtime contents, which would be a wrong number dressed as a
     // right one. An empty slot is a genuine zero: x is linear in that pair.
     fn lower_hessian_of_call_ref(self, args: &Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        fo_require_uncertainty_tracking()
         match *args {
             Some(list) => {
                 let saved_loops = FO_INLINE_ALLOW_LOOPS
@@ -36342,6 +36364,7 @@ impl Lowerer {
     // register and read by the variance, covariance and second-order consumers.
     // A missing rho is 0, which is independence, and the checker already rejects it.
     fn lower_correlate_call_ref(self, args: &Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        fo_require_uncertainty_tracking()
         match *args {
             Some(l0) => {
                 let saved_loops = FO_INLINE_ALLOW_LOOPS
@@ -36413,6 +36436,7 @@ impl Lowerer {
     }
 
     fn lower_second_order_mean_call_ref(self, args: &Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        fo_require_uncertainty_tracking()
         FO_LOGN_ACTIVE = 0
         match *args {
             Some(list) => {
@@ -36545,6 +36569,7 @@ impl Lowerer {
 
     // lift_knowledge(k: Knowledge<T>) → IrLiftKnowledge (zero-cost copy; epistemic bridge H5.4)
     fn lower_lift_knowledge_call(self, span: Span, args: Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        fo_require_uncertainty_tracking()
         let knowledge_expr = match args {
             Some(list) => Some(Box::new((*list).head))
             None => None
@@ -42325,6 +42350,7 @@ impl Lowerer {
 
 
     fn lower_knowledge_literal_variance(self, dst: i64, fields: &Option<Box<StructFieldList>>) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        fo_require_uncertainty_tracking()
         var current = fields
         while true {
             match *current {
