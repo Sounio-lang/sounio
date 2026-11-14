@@ -988,6 +988,8 @@ pub fn lower_hard_error_report() with IO, Mut, Panic, Div {
         print("` uses a dereference whose pointee type Madaros cannot determine as an\n")
         print("         operand next to an f64; lowering it would compute on the IEEE-754 bit\n")
         print("         pattern as an integer, so it is refused (bind `let v: f64 = *expr` first).\n")
+    } else if IR_LOWER_HARD_ERROR_REASON == 10 {
+        print("  cause: GUM channel capacity exceeded; see E178 above (#3545).\n")
     } else if IR_LOWER_HARD_ERROR_NEEDED > 0 {
         print("  cause: function `")
         ir_print_flat_name(&IR_LOWER_HARD_ERROR_FN_BUF, IR_LOWER_HARD_ERROR_FN_LEN)
@@ -1039,6 +1041,24 @@ pub fn lower_hard_error_reset() with Mut {
 // separate pending flag directly.
 pub fn lower_had_error_with_hard(v: bool) -> bool { v || (IR_LOWER_COMPILE_ERROR_SCOPE_ACTIVE && IR_LOWER_COMPILE_ERROR_LATCH) || IR_LOWER_HARD_ERROR != 0 || LOWER_USE_MODULE_OVERFLOWED || LOWER_IMPL_METHOD_OVERFLOWED || LOWER_UNIT_FLOAT_OVERFLOWED || ast_named_item_terminal_overflowed() || spec_item_module_overflowed() || ast_path_range_name_overflowed() }
 fn lower_ok_without_hard(v: bool) -> bool { !lower_had_error_with_hard(v) }
+
+// #3545: fail at the actual allocation, including synthetic residual channels
+// that the checker's measure() source counter cannot count. The compile-scope
+// latch survives discarded Lowerer values and per-module hard-error resets.
+fn fo_refuse_capacity(correlation: bool) with Mut, IO {
+    if correlation {
+        print("error[E178]: GUM correlation channel capacity exceeded: correlate() supports only channels 0 through 7; refusing to drop covariance (#3545)\n")
+    } else {
+        print("error[E178]: GUM channel capacity exceeded: first-order lowering supports at most 32 channels per function; refusing to drop uncertainty sources (#3545)\n")
+    }
+    IR_LOWER_HARD_ERROR = 1
+    if IR_LOWER_COMPILE_ERROR_SCOPE_ACTIVE {
+        IR_LOWER_COMPILE_ERROR_LATCH = true
+    }
+    if IR_LOWER_HARD_ERROR_REASON == 0 {
+        IR_LOWER_HARD_ERROR_REASON = 10
+    }
+}
 var FO_XFER_COUNT: i64 = 0
 var FO_XFER_KIND: [i64; 64] = [0; 64]
 // f64 globals whose initializer is a float word. A scale transfer folds them.
@@ -1073,9 +1093,9 @@ var FO_CTOR_FIELD0: [i64; 256] = [0; 256]
 //
 // 8x8 to match so_hess_idx's domain: the off-diagonal Hessian is the second
 // consumer of this, and a covariance the Hessian cannot index is a covariance
-// nothing can use. Variance walks 32 channels, so a pair above 7 is silently
-// uncorrelated -- fo_cov_rho_set refuses it rather than wrapping into another
-// pair's slot.
+// nothing can use. Variance walks 32 channels, so a pair above 7 must refuse
+// compilation rather than silently becoming uncorrelated or wrapping into
+// another pair's slot (#3545).
 // sigma per channel, as a register index -- not sigma squared, and not a
 // struct field.
 //
@@ -1112,6 +1132,7 @@ fn fo_cov_rho_idx(i: i64, j: i64) -> i64 with Div {
 
 fn fo_cov_rho_set(i: i64, j: i64, rho: f64) with Mut, Panic, Div, IO {
     if i < 0 || j < 0 || i >= 8 || j >= 8 {
+        if i >= 8 || j >= 8 { fo_refuse_capacity(true) }
         return
     }
     if i == j {
@@ -1137,6 +1158,7 @@ fn fo_cov_rho_get(i: i64, j: i64) -> f64 with Mut, Panic, Div {
 
 fn fo_cov_rho_reg_set(i: i64, j: i64, reg: i64) with Mut, Panic, Div, IO {
     if i < 0 || j < 0 || i >= 8 || j >= 8 {
+        if i >= 8 || j >= 8 { fo_refuse_capacity(true) }
         return
     }
     if i == j {
@@ -3053,7 +3075,7 @@ struct Lowerer {
     allow_direct_capturing_closure_literal: bool,
     pending_variance_reg: i64,
     // β-Madaros multi-channel FO GUM (lean_single β¹⁰/β¹¹ parity target).
-    // Var(y) = Σ_k (∂y/∂x_k)² · σ²_k with up to 8 Knowledge seeds per function.
+    // Var(y) = Σ_k (∂y/∂x_k)² · σ²_k with up to 32 channels per function.
     // Enables partial-correlation products ((a*b)*a) and p1−p2 cancel.
     // 32 channels: headroom for multi-seed polys after other live seeds in main.
     fo_nchan: i64,
@@ -17901,6 +17923,7 @@ impl Lowerer {
         }
         if ch < 0 {
             if lo.fo_nchan >= 32 {
+                fo_refuse_capacity(false)
                 return lo
             }
             ch = lo.fo_nchan
@@ -18603,7 +18626,8 @@ impl Lowerer {
             k = k + 1
         }
         if lo.fo_nchan >= 32 {
-            // Channel table full — leave sens empty (caller falls back to scalar Var).
+            // Clear temporary state only after latching a compile-time refusal.
+            fo_refuse_capacity(false)
             return lo.fo_clear_expr_sens()
         }
         let ch = lo.fo_nchan
@@ -18632,6 +18656,7 @@ impl Lowerer {
         var k: i64 = 0
         while k < lo.fo_nchan && k < 32 {
             if lo.fo_sigma2[k as usize] == slot && lo.fo_expr_sens[k as usize] >= 0 {
+                if lo.fo_nchan >= 32 { fo_refuse_capacity(false) }
                 if lo.so_enabled || lo.fo_nchan >= 32 {
                     return lo.fo_clear_expr_sens().so_clear_expr_hess()
                 }
@@ -24496,6 +24521,7 @@ impl Lowerer {
             }
             k = k + 1
         }
+        if (t_trunc != 0 || e_trunc != 0) && nch_e >= 32 { fo_refuse_capacity(false) }
         let poison = (t_trunc != 0 || e_trunc != 0) && nch_e < 32
         var mpsig: i64 = 0 - 1
         var mpsens: i64 = 0 - 1
@@ -24707,6 +24733,7 @@ impl Lowerer {
                     }
                     k = k + 1
                 }
+                if (t_trunc != 0 || e_trunc != 0) && nch_e >= 32 { fo_refuse_capacity(false) }
                 let poison = (t_trunc != 0 || e_trunc != 0) && nch_e < 32
                 var mpsig: i64 = 0 - 1
                 var mpsens: i64 = 0 - 1
