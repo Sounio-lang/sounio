@@ -1,0 +1,106 @@
+// Explicit exact count-row aggregation by validated byte-exact feature groups.
+// Association between identity rows and source CSR rows is declared by caller.
+use collections::integer_buffer::{IntegerBuffer,integer_buffer_status,integer_buffer_len,integer_buffer_at,integer_buffer_set}
+use genomics::count_identities::{CountIdentities,count_identities_status,count_identities_count,count_identities_unique,count_identities_sorted_original,count_identities_group_of_original}
+use genomics::count_csr::{CountCSR,count_csr_build,count_csr_close,count_csr_status,count_csr_rows,count_csr_samples,count_csr_row_start,count_csr_column,count_csr_stored_value}
+pub linear struct CountCoalesced {counts:CountCSR,status:i64,required_nnz:i64,required_known:bool,point_work:i64}
+struct CoalesceState {status:i64,required:i64,known:bool,work:i64,limit:i64}
+fn cic_charge(state:&!CoalesceState)->bool with Mut {
+ if state.work>=state.limit {state.status=3;return false}
+ state.work=state.work+1;true
+}
+// Charged units: reset one sample accumulator, visit one original row,
+// accumulate one stored count, inspect one sample for emitted nonzero.
+// No allocation/record construction in either pass or per row/entry.
+fn cic_pass(ids:&CountIdentities,source:&CountCSR,sums:&!IntegerBuffer,
+ offsets:&!IntegerBuffer,columns:&!IntegerBuffer,values:&!IntegerBuffer,
+ emit:bool,state:&!CoalesceState)->i64 with Mut,Panic {
+ let groups=count_identities_unique(ids);let n=count_identities_count(ids)
+ let samples=count_csr_samples(source)
+ var group:i64=0;var position:i64=0;var written:i64=0
+ while group<groups {
+  var sample:i64=0
+  while sample<samples {if !cic_charge(state) {return state.status};integer_buffer_set(sums,sample,0);sample=sample+1}
+  if emit {integer_buffer_set(offsets,group,written)}
+  while position<n {
+   let row=count_identities_sorted_original(ids,position)
+   if count_identities_group_of_original(ids,row)!=group {break}
+   if !cic_charge(state) {return state.status}
+   var index=count_csr_row_start(source,row);let end=count_csr_row_start(source,row+1)
+   while index<end {
+    if !cic_charge(state) {return state.status}
+    let column=count_csr_column(source,index);let value=count_csr_stored_value(source,index)
+    let prior=integer_buffer_at(sums,column)
+    if value>9223372036854775807-prior {state.status=4;return 4}
+    integer_buffer_set(sums,column,prior+value);index=index+1
+   }
+   position=position+1
+  }
+  sample=0
+  while sample<samples {
+   if !cic_charge(state) {return state.status}
+   let value=integer_buffer_at(sums,sample)
+   if value>0 {
+    if written==9223372036854775807 {state.status=4;return 4}
+    if emit {
+     if written>=integer_buffer_len(columns) || written>=integer_buffer_len(values) {state.status=5;return 5}
+     integer_buffer_set(columns,written,sample);integer_buffer_set(values,written,value)
+    }
+    written=written+1
+   }
+   sample=sample+1
+  }
+  group=group+1
+ }
+ if emit {let ignored:i64=integer_buffer_set(offsets,groups,written)}
+ else {state.required=written;state.known=true}
+ 0
+}
+fn cic_prepare(ids:&CountIdentities,source:&CountCSR,sums:&!IntegerBuffer,
+ offsets:&!IntegerBuffer,columns:&!IntegerBuffer,values:&!IntegerBuffer,state:&!CoalesceState)->i64 with Mut,Panic {
+ if state.limit<0 {return state.status}
+ if count_identities_status(ids)!=0 || count_csr_status(source)!=0 {state.status=2;return 2}
+ if count_identities_count(ids)!=count_csr_rows(source) {state.status=2;return 2}
+ let samples=count_csr_samples(source);let groups=count_identities_unique(ids)
+ if integer_buffer_status(sums)!=0 || integer_buffer_status(offsets)!=0 || integer_buffer_status(columns)!=0 || integer_buffer_status(values)!=0 {return state.status}
+ if integer_buffer_len(sums)<samples || integer_buffer_len(offsets)!=groups+1 {return state.status}
+ state.status=0
+ let first=cic_pass(ids,source,sums,offsets,columns,values,false,state)
+ if first!=0 {return first}
+ if integer_buffer_len(columns)<state.required || integer_buffer_len(values)<state.required {state.status=5;return 5}
+ // Exact same immutable data/passes: no wrapped 2*work and no fictional charge.
+ // A refusal here reports only the first pass actually executed.
+ if state.work>state.limit-state.work {state.status=3;return 3}
+ cic_pass(ids,source,sums,offsets,columns,values,true,state)
+}
+// Output buffers move into the returned closeable owner once on every path.
+// Status0available,1layout/options,2input association/status,3point-work budget,
+// 4exact-i64 sum overflow,5output capacity,6CSR final validation.
+// Required nnz is known only after the first pass completed; it remains known
+// on later budget/capacity refusal. Scratch may change; no invalid partial CSR
+// is advertised as available. Fixed metadata/factory validation is not point work.
+pub fn count_identity_coalesce_build(ids:&CountIdentities,source:&CountCSR,sums:&!IntegerBuffer,
+ offsets:IntegerBuffer,columns:IntegerBuffer,values:IntegerBuffer,max_point_work:i64)->CountCoalesced with Mut,Div,Panic {
+ var offset_owner=offsets;var column_owner=columns;var value_owner=values
+ var state=CoalesceState{status:1,required:0,known:false,work:0,limit:max_point_work}
+ let ignored:i64=cic_prepare(ids,source,sums,&!offset_owner,&!column_owner,&!value_owner,&!state)
+ let rows=if state.status==0 {count_identities_unique(ids)}else{-1}
+ let samples=count_csr_samples(source)
+ let counts=count_csr_build(rows,samples,state.required,offset_owner,column_owner,value_owner,0)
+ if state.status==0 {if count_csr_status(&counts)!=0 {state.status=6}}
+ CountCoalesced{counts:counts,status:state.status,required_nnz:state.required,required_known:state.known,point_work:state.work}
+}
+pub fn count_coalesced_status(out:&CountCoalesced)->i64 {out.status}
+pub fn count_coalesced_required_nnz(out:&CountCoalesced)->i64 {if out.required_known {out.required_nnz}else{0}}
+pub fn count_coalesced_required_known(out:&CountCoalesced)->bool {out.required_known}
+pub fn count_coalesced_point_work(out:&CountCoalesced)->i64 {out.point_work}
+// Read the detailed wrapper status before take. A failed take yields an
+// unavailable (status1) CSR, never a valid prefix; counts must still close once.
+pub fn count_coalesced_take(out:CountCoalesced)->CountCSR {
+ let CountCoalesced{counts,status,required_nnz,required_known,point_work}=out
+ counts
+}
+pub fn count_coalesced_close(out:CountCoalesced) with Alloc {
+ let CountCoalesced{counts,status,required_nnz,required_known,point_work}=out
+ count_csr_close(counts)
+}

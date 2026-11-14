@@ -1,0 +1,185 @@
+// Packed opaque identity index. No implicit decoding, trimming or case folding.
+// Four caller payload owners are consumed once, including on refusal; close once.
+use collections::integer_buffer::{IntegerBuffer,integer_buffer_status,integer_buffer_len,integer_buffer_at,integer_buffer_set,integer_buffer_close}
+pub struct IdPayload {pub status:i64,pub bytes:i64,pub offsets:i64,pub indices:i64,pub groups:i64,pub payload_bytes:i64}
+pub fn count_identities_payload(byte_count:i64,n:i64)->IdPayload with Mut,Div {
+ var out=IdPayload{status:1,bytes:0,offsets:0,indices:0,groups:0,payload_bytes:0}
+ let limit=9223372036854771704/8
+ if byte_count<0 || n<0 || byte_count>limit {return out}
+ if byte_count==limit {return out}
+ if n>(limit-byte_count-1)/3 {return out}
+ if n==0 && byte_count!=0 {return out}
+ out.status=0;out.bytes=byte_count;out.offsets=n+1;out.indices=n;out.groups=n
+ out.payload_bytes=8*(byte_count+3*n+1);out
+}
+pub linear struct CountIdentities {
+ bytes:IntegerBuffer,offsets:IntegerBuffer,order:IntegerBuffer,groups:IntegerBuffer,
+ status:i64,n:i64,unique:i64,comparisons:i64,limit:i64,policy:i64
+}
+fn ci_byte_valid(b:i64)->bool {b>=1 && b<=255 && b!=9 && b!=10 && b!=13}
+// All callers first validate the owner, offsets and original indices.
+// One unit means comparing a pair of bytes. Length-only decisions cost no unit.
+fn ci_compare(ids:&!CountIdentities,a:i64,b:i64)->i64 with Mut,Panic {
+ if a==b {return 0}
+ let sa=integer_buffer_at(&ids.offsets,a);let sb=integer_buffer_at(&ids.offsets,b)
+ let la=integer_buffer_at(&ids.offsets,a+1)-sa;let lb=integer_buffer_at(&ids.offsets,b+1)-sb
+ let common=if la<lb {la}else{lb}
+ var k:i64=0
+ while k<common {
+  if ids.comparisons>=ids.limit {ids.status=4;return 0}
+  ids.comparisons=ids.comparisons+1
+  let va=integer_buffer_at(&ids.bytes,sa+k);let vb=integer_buffer_at(&ids.bytes,sb+k)
+  if va<vb {return -1};if va>vb {return 1};k=k+1
+ }
+ if la<lb {return -1};if la>lb {return 1};0
+}
+fn ci_greater(ids:&!CountIdentities,a:i64,b:i64)->bool with Mut,Panic {
+ let compared=ci_compare(ids,a,b)
+ if ids.status!=0 {return false}
+ if compared==0 {return a>b};compared>0
+}
+fn ci_sift(ids:&!CountIdentities,start:i64,end:i64) with Mut,Div,Panic {
+ var root=start
+ // root<end/2 is valid for both even and odd exclusive heap sizes.
+ while root<end/2 {
+  var child=2*root+1
+  if child+1<end {
+   let a=integer_buffer_at(&ids.order,child+1);let b=integer_buffer_at(&ids.order,child)
+   let greater=ci_greater(ids,a,b);if ids.status!=0 {return}
+   if greater {child=child+1}
+  }
+  let a=integer_buffer_at(&ids.order,child);let b=integer_buffer_at(&ids.order,root)
+  let greater=ci_greater(ids,a,b);if ids.status!=0 {return}
+  if !greater {return}
+  integer_buffer_set(&!ids.order,root,a);integer_buffer_set(&!ids.order,child,b)
+  root=child
+ }
+}
+// Status0available,1layout/options,2invalid packed ID,3duplicate refusal,
+// 4byte-comparison budget. Failed owner stays unavailable; retained buffers close.
+// Index/group scratch may be partially changed on computational refusal.
+fn ci_build_validate(out:&!CountIdentities)->i64 with Mut,Div,Panic {
+ if out.policy<0 || out.policy>1 || out.limit<0 {return out.status}
+ if integer_buffer_status(&out.bytes)!=0 || integer_buffer_status(&out.offsets)!=0 || integer_buffer_status(&out.order)!=0 || integer_buffer_status(&out.groups)!=0 {return out.status}
+ let noff=integer_buffer_len(&out.offsets)
+ if noff<1 {return out.status}
+ let n=noff-1;let nb=integer_buffer_len(&out.bytes)
+ if count_identities_payload(nb,n).status!=0 || integer_buffer_len(&out.order)<n || integer_buffer_len(&out.groups)<n {return out.status}
+ out.n=n;out.status=2
+ if integer_buffer_at(&out.offsets,0)!=0 || integer_buffer_at(&out.offsets,n)!=nb {return out.status}
+ var i:i64=0
+ while i<n {
+  let a=integer_buffer_at(&out.offsets,i);let b=integer_buffer_at(&out.offsets,i+1)
+  if a<0 || a>=b || b>nb {return out.status};i=i+1
+ }
+ i=0
+ while i<nb {if !ci_byte_valid(integer_buffer_at(&out.bytes,i)) {return out.status};i=i+1}
+ out.status=0
+ i=0
+ while i<n {integer_buffer_set(&!out.order,i,i);i=i+1}
+ var start=n/2
+ while start>0 {start=start-1;ci_sift(out,start,n);if out.status!=0 {return out.status}}
+ var end=n
+ while end>1 {
+  end=end-1
+  let a=integer_buffer_at(&out.order,0);let b=integer_buffer_at(&out.order,end)
+  integer_buffer_set(&!out.order,0,b);integer_buffer_set(&!out.order,end,a)
+  ci_sift(out,0,end);if out.status!=0 {return out.status}
+ }
+ var group:i64=-1;i=0
+ while i<n {
+  let original=integer_buffer_at(&out.order,i)
+  var same=false
+  if i>0 {
+   let previous=integer_buffer_at(&out.order,i-1)
+   let compared=ci_compare(out,previous,original);if out.status!=0 {return out.status}
+   same=compared==0
+  }
+  if same {if out.policy==0 {out.status=3;return out.status}}
+  else {group=group+1}
+  integer_buffer_set(&!out.groups,original,group);i=i+1
+ }
+ out.unique=group+1;out.status
+}
+pub fn count_identities_build(bytes:IntegerBuffer,offsets:IntegerBuffer,order:IntegerBuffer,groups:IntegerBuffer,
+ duplicate_policy:i64,max_byte_comparisons:i64)->CountIdentities with Alloc,Mut,Div,Panic {
+ var out=CountIdentities{bytes:bytes,offsets:offsets,order:order,groups:groups,status:1,n:0,unique:0,comparisons:0,limit:max_byte_comparisons,policy:duplicate_policy}
+ let ignored:i64=ci_build_validate(&!out)
+ out
+}
+pub fn count_identities_status(ids:&CountIdentities)->i64 {ids.status}
+pub fn count_identities_count(ids:&CountIdentities)->i64 {if ids.status==0 {ids.n}else{0}}
+pub fn count_identities_unique(ids:&CountIdentities)->i64 {if ids.status==0 {ids.unique}else{0}}
+pub fn count_identities_comparisons(ids:&CountIdentities)->i64 {ids.comparisons}
+pub fn count_identities_policy(ids:&CountIdentities)->i64 {ids.policy}
+pub fn count_identities_group_of_original(ids:&CountIdentities,index:i64)->i64 with Panic {
+ if ids.status!=0 || index<0 || index>=ids.n {return -1}
+ integer_buffer_at(&ids.groups,index)
+}
+pub fn count_identities_sorted_original(ids:&CountIdentities,index:i64)->i64 with Panic {
+ if ids.status!=0 || index<0 || index>=ids.n {return -1}
+ integer_buffer_at(&ids.order,index)
+}
+pub fn count_identities_id_length(ids:&CountIdentities,index:i64)->i64 with Panic {
+ if ids.status!=0 || index<0 || index>=ids.n {return -1}
+ integer_buffer_at(&ids.offsets,index+1)-integer_buffer_at(&ids.offsets,index)
+}
+pub fn count_identities_id_byte(ids:&CountIdentities,index:i64,position:i64)->i64 with Panic {
+ if ids.status!=0 || index<0 || index>=ids.n || position<0 {return -1}
+ let start=integer_buffer_at(&ids.offsets,index)
+ let length=integer_buffer_at(&ids.offsets,index+1)-start
+ if position>=length {return -1}
+ integer_buffer_at(&ids.bytes,start+position)
+}
+pub fn count_identities_close(ids:CountIdentities) with Alloc {
+ let CountIdentities{bytes,offsets,order,groups,status,n,unique,comparisons,limit,policy}=ids
+ integer_buffer_close(bytes);integer_buffer_close(offsets);integer_buffer_close(order);integer_buffer_close(groups)
+}
+pub struct IdJoinResult {pub status:i64,pub matched:i64,pub missing:i64,pub comparisons:i64}
+fn ci_cross_compare(left:&CountIdentities,a:i64,right:&CountIdentities,b:i64,limit:i64,result:&!IdJoinResult)->i64 with Mut,Panic {
+ let sa=integer_buffer_at(&left.offsets,a);let sb=integer_buffer_at(&right.offsets,b)
+ let la=integer_buffer_at(&left.offsets,a+1)-sa;let lb=integer_buffer_at(&right.offsets,b+1)-sb
+ let common=if la<lb {la}else{lb};var k:i64=0
+ while k<common {
+  if result.comparisons>=limit {result.status=4;return 0}
+  result.comparisons=result.comparisons+1
+  let va=integer_buffer_at(&left.bytes,sa+k);let vb=integer_buffer_at(&right.bytes,sb+k)
+  if va<vb {return -1};if va>vb {return 1};k=k+1
+ }
+ if la<lb {return -1};if la>lb {return 1};0
+}
+// Original-left -> original-right, never lexicographic ordinals. No hash matching.
+// Status0committed,1layout/options,2unavailable owner,4byte budget,
+// 5ambiguous duplicate index,6missing under policy0. Scratch may change on failure;
+// public out changes only after the entire join succeeds. No payload allocation.
+pub fn count_identities_join_into(left:&CountIdentities,right:&CountIdentities,missing_policy:i64,max_byte_comparisons:i64,
+ scratch:&!IntegerBuffer,out:&!IntegerBuffer)->IdJoinResult with Mut,Panic {
+ var result=IdJoinResult{status:1,matched:0,missing:0,comparisons:0}
+ if missing_policy<0 || missing_policy>1 || max_byte_comparisons<0 {return result}
+ if left.status!=0 || right.status!=0 {result.status=2;return result}
+ if left.unique!=left.n || right.unique!=right.n {result.status=5;return result}
+ if integer_buffer_status(scratch)!=0 || integer_buffer_status(out)!=0 || integer_buffer_len(scratch)<left.n || integer_buffer_len(out)<left.n {return result}
+ result.status=0;var i:i64=0;var j:i64=0
+ while i<left.n {
+  let original=integer_buffer_at(&left.order,i)
+  var found=false
+  while j<right.n {
+   let candidate=integer_buffer_at(&right.order,j)
+   let compared=ci_cross_compare(left,original,right,candidate,max_byte_comparisons,&!result)
+   if result.status!=0 {return result}
+   if compared==0 {integer_buffer_set(scratch,original,candidate);found=true;j=j+1;break}
+   if compared<0 {break}
+   j=j+1
+  }
+  if found {result.matched=result.matched+1}
+  else {
+   result.missing=result.missing+1
+   if missing_policy==0 {result.status=6;return result}
+   let ignored:i64=integer_buffer_set(scratch,original,-1)
+  }
+  i=i+1
+ }
+ i=0
+ while i<left.n {integer_buffer_set(out,i,integer_buffer_at(scratch,i));i=i+1}
+ result
+}
