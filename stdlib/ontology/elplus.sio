@@ -36,9 +36,8 @@
 //!   (`elplus_sparse_seed_edges`), in-place expansion
 //!   (`elplus_sparse_expand`).  Capacities: 4096 classes (incl. the top
 //!   slot), 4096 stated edges per kind; the two workspace matrices
-//!   (`elplus_clos`, `elplus_emat`, 4096-stride) are module-level because
-//!   module-level arrays passed through `&!` parameters miscompile on the
-//!   current lane (see the sparse section header).  TBoxes
+//!   (`elplus_clos`, `elplus_emat`, 4096-stride) are module-level (see the
+//!   sparse section header).  TBoxes
 //!   with conjunctions, role hierarchies or composition must use the
 //!   dense variant (or a future stratified sparse variant); the round-9
 //!   python mirror (scale/gen_elplus_data.py) runs the GENERAL 8-rule
@@ -58,24 +57,21 @@
 //!   (r1,C,D) and (r2,D,E) with chain r1 o r2 <= r3 give (r3,C,E));
 //!   RtoS (edge (r,C,D) gives C <= ex r.D).
 //!
-//! NOTE (compiler limitations, see
-//! artifacts/ontology-frontiers/compiler-repros/REPORT.md): arrays of
-//! structs and arrays without splat initialization segfault at runtime,
-//! and `where` refinement clauses do not parse, so everything is modelled
-//! with parallel primitive arrays with splat init and runtime checks.
-//!
-//! NOTE: use NAMED imports (`use ontology::elplus::{...}`). The qualified
-//! form (`use ontology::elplus; elplus::f(...)`) miscompiles on the
-//! current Madaros imported-module native lane (see
-//! docs/compiler/KNOWN_LIMITATIONS.md).
+//! Data layout: parallel primitive arrays with runtime checks. The
+//! compiler limits this layout was first chosen around (arrays of structs,
+//! arrays without splat initialisation, module arrays through `&!`, the
+//! qualified import form, imported calls with more than 8 parameters) no
+//! longer reproduce (re-measured 2026-11-14; witnesses
+//! tests/run-pass/{array_struct_literal,module_array_mut_ref,
+//! elplus_qualified_import,elplus_fixpoint14_from_helper}.sio). `where`
+//! refinement clauses are ADR-028 D-19.
 //!
 //! Repair integration (round 10): `elplus_derive_conflicts` derives the
 //! mapping-pair conflict relation from a closed dense EL+ matrix (same
 //! 256-stride output shape as ontology::closure::derive_conflicts, so
 //! ontology::repair plugs in unchanged), and `elplus_subsumes_sparse` /
 //! `elplus_edge_sparse` are O(1) read-only accessors over the sparse
-//! workspace matrices so repair drivers can query the role-aware closure
-//! without crossing a `&!` boundary with the module-level arrays.
+//! workspace matrices so repair drivers can query the role-aware closure.
 //! `elplus_subsumes_dense` / `elplus_edge_dense` are the O(1) dense
 //! counterparts over the `elplus_fixpoint` output matrices, used by the
 //! SNOMED mini-closure adapter (ontology::biomedical::snomed).
@@ -244,14 +240,11 @@ pub fn elplus_fixpoint(
 
 /// Cross-module packaging of `elplus_fixpoint` and the PRIMARY home of
 /// the 8-rule loop: identical semantics, but 6 parameters instead of
-/// 14.  Imported calls with more than 8 parameters fail native codegen
-/// on the current Madaros lane (thin-link produces no ELF for
-/// 9+-parameter callees unless the caller is the main module's `main`;
-/// probe 2026-08), so the public 14-parameter `elplus_fixpoint` above
-/// is now a thin pack-and-delegate wrapper around this function, and
-/// importers that run the dense fixpoint outside their own `main`
-/// (e.g. the SNOMED adapter in ontology::biomedical::snomed) call this
-/// wrapper directly.
+/// 14; the public 14-parameter `elplus_fixpoint` above packs and
+/// delegates here. (The packing was introduced when imported calls with
+/// more than 8 parameters produced no ELF outside `main`, probe 2026-08;
+/// that no longer reproduces: tests/run-pass/
+/// elplus_fixpoint14_from_helper.sio.)
 ///
 /// # Parameters
 /// - `s`, `r`: as in `elplus_fixpoint` (mutated in place).
@@ -661,14 +654,12 @@ pub fn elplus_derive_conflicts(
 // ── Sparse variant (scale; Anatomy profile: no conjunctions, single
 //    active role, no role hierarchy/composition) ────────────────────────
 //
-// The two workspace matrices are module-level ON PURPOSE: passing a
-// module-level array through a `&!` parameter miscompiles on the current
-// Madaros lane (mutations land in a linker stub; large index spreads
-// segfault — probe: round 9 bisect).  Functions here mutate their OWN
-// module globals, which is the pattern the generated data modules
-// already rely on (init_chunk_* functions).  Importers therefore pay
-// ~33MB of BSS; only the scale driver should import this module with the
-// sparse functions in scope.
+// The two workspace matrices are module-level: functions here mutate
+// their own module globals, the pattern the generated data modules rely
+// on (init_chunk_* functions). (This was first forced by a `&!`
+// miscompile of module arrays, round 9 bisect; that no longer reproduces,
+// 16M-word arrays across a module boundary included:
+// tests/run-pass/module_array_mut_ref.sio.)
 //
 // elplus_emat plays a double role: it is seeded with the stated-filler
 // unions (e[c] |= clos[f] for each stated edge (c, f)) and then expanded
@@ -865,9 +856,7 @@ pub fn elplus_sparse_expand(h: i64, w: i64) with Mut, Div, Panic {
 
 /// Sparse closure query: does class `c` subsume to `d` (columns
 /// 0..w-1 of the workspace closure matrix; column w-1 is the top slot)?
-/// Read-only accessor so importers never pass the module-level matrices
-/// through a `&!` boundary (see the sparse section header); repair
-/// drivers use this in place of direct closure-matrix indexing.
+/// Read-only accessor; repair drivers use this in place of direct closure-matrix indexing.
 ///
 /// # Complexity
 /// O(1)

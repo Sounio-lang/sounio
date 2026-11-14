@@ -839,7 +839,7 @@ pub fn lower_note_error(site: i64, n: Name) with Mut {
 }
 var IR_LOWER_HARD_ERROR_LIMIT: i64 = 0
 
-pub fn lower_hard_error_pending() -> bool { (IR_LOWER_COMPILE_ERROR_SCOPE_ACTIVE && IR_LOWER_COMPILE_ERROR_LATCH) || IR_LOWER_HARD_ERROR != 0 || LOWER_USE_MODULE_OVERFLOWED || LOWER_IMPL_METHOD_OVERFLOWED || LOWER_UNIT_FLOAT_OVERFLOWED || ast_named_item_terminal_overflowed() || spec_item_module_overflowed() || ast_path_range_name_overflowed() }
+pub fn lower_hard_error_pending() -> bool { (IR_LOWER_COMPILE_ERROR_SCOPE_ACTIVE && IR_LOWER_COMPILE_ERROR_LATCH) || IR_LOWER_HARD_ERROR != 0 || LOWER_USE_MODULE_OVERFLOWED || LOWER_MERGE_FN_OVERFLOWED || LOWER_IMPL_METHOD_OVERFLOWED || LOWER_UNIT_FLOAT_OVERFLOWED || ast_named_item_terminal_overflowed() || spec_item_module_overflowed() || ast_path_range_name_overflowed() }
 
 // Print what the flag knows, or say plainly that it knows nothing — never
 // silence. Called by the consumers that used to print a bare "ir_summary_failed".
@@ -907,6 +907,13 @@ pub fn lower_hard_error_report() with IO, Mut, Panic, Div {
         print("\n")
     }
     if IR_LOWER_COMPILE_ERROR_SCOPE_ACTIVE && IR_LOWER_COMPILE_ERROR_LATCH { print("  cause: lowering reported an error in this compilation; refusing binary publication ") }
+    if LOWER_MERGE_FN_OVERFLOWED {
+        print("  cause: merging the separately lowered modules needs ")
+        print_int(LOWER_MERGE_FN_NEEDED)
+        print(" function-table slots but IR_MAX_FUNCS is ")
+        print_int(LOWER_MERGE_FN_LIMIT)
+        print(";\n         the merge would have dropped the rest of the program, so it is refused.\n")
+    }
     if LOWER_USE_MODULE_OVERFLOWED {
         print("  cause: more than 4096 module-scoped lowercase `use` path suffixes in this\n")
         print("         compilation; the module-qualified-call registry (LOWER_USE_MODULE_HASH)\n")
@@ -1010,6 +1017,56 @@ pub fn lower_compile_error_scope_begin() with Mut {
 pub fn lower_compile_error_scope_end() with Mut {
     IR_LOWER_COMPILE_ERROR_SCOPE_ACTIVE = false
 }
+var LOWER_MERGE_FN_OVERFLOWED: bool = false
+var LOWER_MERGE_FN_NEEDED: i64 = 0
+var LOWER_MERGE_FN_LIMIT: i64 = 0
+// A merge of separately lowered modules (compiler/module_frontend.sio:
+// ir_merge_modules_into, the place+remap dependency lane, and the legacy
+// copies in module_loader.sio) whose function tables do not fit in one:
+// refuse the program. The merges used to stop at IR_MAX_FUNCS and drop the
+// rest silently. Durable per compile, like the registry overflows, because
+// lowerer_new() clears IR_LOWER_HARD_ERROR for each module lowered after the
+// merge that overflowed.
+pub fn lower_note_merge_fn_overflow(needed: i64, limit: i64) with Mut {
+    if !LOWER_MERGE_FN_OVERFLOWED {
+        LOWER_MERGE_FN_NEEDED = needed
+        LOWER_MERGE_FN_LIMIT = limit
+    }
+    LOWER_MERGE_FN_OVERFLOWED = true
+}
+
+pub fn lower_merge_fn_overflowed() -> bool with Mut { LOWER_MERGE_FN_OVERFLOWED }
+
+// Once per compile (module_frontend_global_init_compile_begin), never per
+// module: lowerer_new() resets the transient hard-error state for every
+// module, and the merges run between those lowerings.
+pub fn lower_merge_state_reset() with Mut {
+    LOWER_MERGE_FN_OVERFLOWED = false
+    LOWER_MERGE_FN_NEEDED = 0
+    LOWER_MERGE_FN_LIMIT = 0
+    LOWER_RGN_MERGE_VETO = false
+}
+
+// Region reclamation across a multi-module merge. Within one function table
+// the cast hook is complete (rgn_copy_cost, numeric provenance). Modules are
+// lowered with separate tables and then merged, and a module whose table had
+// no room for __rgn_barrier lowered its casts without the hook; once merged,
+// its functions can run inside another module's region and publish a young
+// reference as a plain number. Such a module is recognisable exactly: it
+// has no __rgn_barrier slot AND more than IR_MAX_FUNCS -
+// lower_rgn_fn_headroom() functions. (A module without the slot at or below
+// that bound never skipped a hook: its first unproven cast would have added
+// the slot.) When one takes part in a merge, every region of the merged
+// program is vetoed: each __rgn_enter call becomes the token 0, which every
+// region path treats as "no region" (function exits jump to the plain return,
+// loop resets and settles do nothing). Reclamation is lost for that program;
+// nothing it holds can be reclaimed while still reachable.
+var LOWER_RGN_MERGE_VETO: bool = false
+// SOUNIO_RGN_FORCE_MERGE_VETO=1 (gate only): veto at every merge, so the
+// gate can show that a vetoed program really runs without regions.
+var LOWER_RGN_FORCE_MERGE_VETO: bool = false
+
+
 pub fn lower_hard_error_reset() with Mut {
     IR_LOWER_HARD_ERROR = 0
     IR_LOWER_HARD_ERROR_NEEDED = 0
@@ -1037,7 +1094,7 @@ pub fn lower_hard_error_reset() with Mut {
 // successful IR by any of the many IrLowerResult/IrLowerBoxResult
 // construction sites that gate on THIS helper rather than polling the
 // separate pending flag directly.
-pub fn lower_had_error_with_hard(v: bool) -> bool { v || (IR_LOWER_COMPILE_ERROR_SCOPE_ACTIVE && IR_LOWER_COMPILE_ERROR_LATCH) || IR_LOWER_HARD_ERROR != 0 || LOWER_USE_MODULE_OVERFLOWED || LOWER_IMPL_METHOD_OVERFLOWED || LOWER_UNIT_FLOAT_OVERFLOWED || ast_named_item_terminal_overflowed() || spec_item_module_overflowed() || ast_path_range_name_overflowed() }
+pub fn lower_had_error_with_hard(v: bool) -> bool { v || (IR_LOWER_COMPILE_ERROR_SCOPE_ACTIVE && IR_LOWER_COMPILE_ERROR_LATCH) || IR_LOWER_HARD_ERROR != 0 || LOWER_USE_MODULE_OVERFLOWED || LOWER_MERGE_FN_OVERFLOWED || LOWER_IMPL_METHOD_OVERFLOWED || LOWER_UNIT_FLOAT_OVERFLOWED || ast_named_item_terminal_overflowed() || spec_item_module_overflowed() || ast_path_range_name_overflowed() }
 fn lower_ok_without_hard(v: bool) -> bool { !lower_had_error_with_hard(v) }
 var FO_XFER_COUNT: i64 = 0
 var FO_XFER_KIND: [i64; 64] = [0; 64]
@@ -3187,6 +3244,80 @@ var LOWER_RGN_RET_REG: i64 = 0 - 1
 var LOWER_RGN_EXIT_LABEL: i64 = 0 - 1
 var LOWER_RGN_FN_ID: i64 = 0 - 1
 
+// Loop-iteration regions. A function region hands its garbage back only when
+// the function returns, so a loop that runs N iterations inside ONE call kept
+// every >16 B aggregate it made -- a tuple result, an Epistemic -- for the
+// whole loop, and a long Monte Carlo loop in `main` (which never had a region)
+// died with `madaros: handles full` after 2^22 of them. Each iteration of an
+// eligible while / loop / for now opens its own region and resets it at the
+// back edge, with the same runtime (__rgn_enter / __rgn_exit_scalar /
+// __rgn_leave) and the same escape protocol as a function region: heap stores
+// run the store barrier, casts run the cast hook, extern calls mark all.
+//
+// What a function region gets for free and an iteration region must check is
+// the one root the barrier does not see: a plain write of a young value into a
+// register that outlives the iteration. lowerer_loop_rgn_check_body_mut
+// collects every register the body writes (W) and refuses the region when one
+// of them is an outer local that is not proven numeric, or was written before
+// the loop; lowerer_loop_rgn_finalize_mut refuses it, once the whole function
+// is lowered, when a W register is read anywhere outside the loop. Float
+// registers and proven-numeric locals never hold a reference (a reference only
+// becomes a number through a cast, which already ran the hook). A refused
+// region is patched back to nothing: enter -> `tok = 0`, exit and leave ->
+// nop.
+var LOWER_LOOP_RGN_FN_OK: i64 = 0
+var LOWER_LOOP_RGN_FN_ID: i64 = 0 - 1
+var LOWER_LOOP_RGN_DEPTH: i64 = 0
+var LOWER_LOOP_RGN_TOKS: [i64; 256] = [0; 256]
+var LOWER_LOOP_REC_COUNT: i64 = 0
+var LOWER_LOOP_REC_BASE: i64 = 0
+var LOWER_LOOP_REC_TOK: [i64; 4096] = [0; 4096]
+var LOWER_LOOP_REC_ENTER: [i64; 4096] = [0; 4096]
+var LOWER_LOOP_REC_EXIT: [i64; 4096] = [0; 4096]
+var LOWER_LOOP_REC_LEAVE: [i64; 4096] = [0; 4096]
+var LOWER_LOOP_REC_START: [i64; 4096] = [0; 4096]
+var LOWER_LOOP_REC_BODY: [i64; 4096] = [0; 4096]
+var LOWER_LOOP_REC_END: [i64; 4096] = [0; 4096]
+var LOWER_LOOP_REC_OK: [i64; 4096] = [0; 4096]
+var LOWER_LOOP_REC_ITER: [i64; 4096] = [0; 4096]
+var LOWER_LOOP_REC_BRK: [i64; 4096] = [0; 4096]
+var LOWER_LOOP_REC_WBASE: [i64; 4096] = [0; 4096]
+var LOWER_LOOP_REC_WLEN: [i64; 4096] = [0; 4096]
+var LOWER_LOOP_W_LEN: i64 = 0
+var LOWER_LOOP_W: [i64; 262144] = [0; 262144]
+var LOWER_LOOP_EPOCH: i64 = 0
+var LOWER_LOOP_W_STAMP: [i64; 262144] = [0; 262144]
+var LOWER_LOOP_F_STAMP: [i64; 262144] = [0; 262144]
+// Why a region was refused (SOUNIO_LOOP_RGN_DIAG=1 prints each loop's verdict,
+// =2 also dumps its IR; diagnostics only, never read by lowering): 1 not worth it,
+// 2 non-numeric outer local written, 3 W register written before the loop,
+// 4 W register read outside the loop, 5 capacity, 6 never closed.
+var LOWER_LOOP_REC_WHY: [i64; 4096] = [0; 4096]
+// Loop-carried aggregates: outer struct / word-scalar-array locals the body
+// writes. Instead of refusing the region, the iteration end lifts their young
+// parts out of it exactly as a function exit lifts its result
+// (loop_rgn_emit_carried_exit). Per record: first entry and count in
+// LOWER_LOOP_CARRY_SLOT (locals-stack slot of each carried local).
+var LOWER_LOOP_REC_CBASE: [i64; 4096] = [0; 4096]
+var LOWER_LOOP_REC_CLEN: [i64; 4096] = [0; 4096]
+var LOWER_LOOP_CARRY_LEN: i64 = 0
+// 1 when the record's iteration end was emitted as a carried exit; its
+// region calls then all take `tok`, so a refusal only has to zero `tok`.
+var LOWER_LOOP_REC_CARRIED: [i64; 4096] = [0; 4096]
+// A register the analysis ignores: the element variable of `for v in arr`.
+var LOWER_LOOP_REC_SKIPREG: [i64; 4096] = [0; 4096]
+var LOWER_LOOP_CARRY_SLOT: [i64; 16384] = [0; 16384]
+fn lower_loop_carry_max_per_loop() -> i64 { 16 }
+var LOWER_LOOP_REC_WHAT: [i64; 4096] = [0; 4096]
+var LOWER_LOOP_DIAG: i64 = 0 - 1
+// SOUNIO_LOOP_RGN_SABOTAGE (gate only). 1 keeps every region the escape
+// analysis refuses (why 2, 3, 4); 2 makes `break` and `return` reset the
+// iteration region instead of popping it unreset; 3 does both; 4 resets a
+// loop that carries aggregates as if it carried none. scripts/ci/
+// madaros_loop_region_gate.sh shows each witness fails without its rule.
+var LOWER_LOOP_SABOTAGE: i64 = 0
+fn lower_loop_reg_cap() -> i64 { 262144 }
+
 // Region reclamation's cast escape hook. A cast from a non-numeric value (a
 // struct handle, a reference, a Seq, a string, ...) to a numeric type turns a
 // reference into a plain number that the store barrier and the exit
@@ -3243,6 +3374,62 @@ var LOWER_RAW_ARR_PACKED_BYTE: [i64; 4096] = [0; 4096]
 // native/codegen.sio used by module_loader's thin linker and the standalone
 // render/wide drivers) never opts in, so its IR carries no region calls and no
 // __rgn_* stubs. compiler/main.sio (Madaros) opts in at startup.
+// Function-table slots the region runtime reserves (__rgn_enter .. the last
+// name in the summary-lane reservation lists below). Every region opening, the
+// cast hook and both reservation lists test fn_count against
+// IR_MAX_FUNCS - lower_rgn_fn_headroom(): keeping that one bound shared is what
+// lets numeric provenance (rgn_copy_cost) argue that no region opens after an
+// unhooked cast. Add a runtime entry point -> add it to both lists and bump this.
+fn lower_rgn_fn_headroom() -> i64 { 13 }
+
+pub fn lower_rgn_module_may_skip_hooks(m: &IrModule) -> bool with Mut, Panic, Div {
+    if (*m).fn_count <= IR_MAX_FUNCS - lower_rgn_fn_headroom() { return false }
+    var fi: i64 = 0
+    while fi < (*m).fn_count {
+        if ir_name_eq_lit(ir_fn_get(m, fi as usize).name, "__rgn_barrier") { return false }
+        fi = fi + 1
+    }
+    true
+}
+
+// Record whether either side of a merge may hold unhooked casts; true when
+// this compile's merged program must have its regions vetoed.
+pub fn lower_rgn_merge_check(dst: &IrModule, src: &IrModule) -> bool with Mut, Panic, Div {
+    if lower_rgn_module_may_skip_hooks(dst) || lower_rgn_module_may_skip_hooks(src) || LOWER_RGN_FORCE_MERGE_VETO {
+        LOWER_RGN_MERGE_VETO = true
+    }
+    LOWER_RGN_MERGE_VETO
+}
+
+pub fn lower_rgn_merge_vetoed() -> bool with Mut { LOWER_RGN_MERGE_VETO }
+
+// Turn every call to a function named __rgn_enter into `dst = 0`; returns
+// how many it rewrote.
+pub fn lower_rgn_veto_regions(m: &IrModule) -> i64 with Mut, Panic, Div {
+    var rewritten: i64 = 0
+    let call_op = IrOpcode::IrCall as i64
+    var fi: i64 = 0
+    while fi < (*m).fn_count {
+        let func = ir_fn_get(m, fi as usize)
+        var ii: i64 = 0
+        while ii < func.instr_count {
+            let s = ir_region_slot_r(func.region, ii) as usize
+            if IR_A_OP[s] == call_op {
+                let target = IR_A_FN_ID[s]
+                let by_target = target >= 0 && target < (*m).fn_count
+                    && ir_name_eq_lit(ir_fn_get(m, target as usize).name, "__rgn_enter")
+                if by_target || ir_name_eq_lit(ir_name_at(IR_A_NAME_ID[s]), "__rgn_enter") {
+                    ir_arena_store(ir_region_slot_w(func.region, ii), ir_load_imm(IR_A_DST[s], 0))
+                    rewritten = rewritten + 1
+                }
+            }
+            ii = ii + 1
+        }
+        fi = fi + 1
+    }
+    rewritten
+}
+
 pub fn lower_rgn_backend_opt_in() with Mut {
     LOWER_RGN_BACKEND_OK = 1
 }
@@ -3926,9 +4113,9 @@ fn ir_program_summary_from_lowerer(lo: Lowerer) -> IrProgramSummary with Alloc, 
     // consumers freeze this summary's function-id table before then. Reserve
     // every runtime entry point now so body lowering and codegen agree on ids.
     // At the imported-function ceiling the language promises the full table to
-    // user code. Do not consume ten hidden slots there: body lowering applies
+    // user code. Do not consume the hidden slots (lower_rgn_fn_headroom) there: body lowering applies
     // the matching headroom guard and simply leaves reclamation disabled.
-    if lower_rgn_enabled() && (*module_box).fn_count <= IR_MAX_FUNCS - 10 {
+    if lower_rgn_enabled() && (*module_box).fn_count <= IR_MAX_FUNCS - lower_rgn_fn_headroom() {
         let _r0 = ir_fast_summary_find_or_add_fn_id(&! (*module_box), make_name("__rgn_enter"))
         let _r1 = ir_fast_summary_find_or_add_fn_id(&! (*module_box), make_name("__rgn_leave"))
         let _r2 = ir_fast_summary_find_or_add_fn_id(&! (*module_box), make_name("__rgn_escaped"))
@@ -3939,6 +4126,9 @@ fn ir_program_summary_from_lowerer(lo: Lowerer) -> IrProgramSummary with Alloc, 
         let _r7 = ir_fast_summary_find_or_add_fn_id(&! (*module_box), make_name("__rgn_exit_scalar"))
         let _r8 = ir_fast_summary_find_or_add_fn_id(&! (*module_box), make_name("__rgn_barrier"))
         let _r9 = ir_fast_summary_find_or_add_fn_id(&! (*module_box), make_name("__rgn_mark_all"))
+        let _r10 = ir_fast_summary_find_or_add_fn_id(&! (*module_box), make_name("__rgn_reset"))
+        let _r11 = ir_fast_summary_find_or_add_fn_id(&! (*module_box), make_name("__rgn_settle"))
+        let _r12 = ir_fast_summary_find_or_add_fn_id(&! (*module_box), make_name("__rgn_copy_payload"))
     }
     IrProgramSummary {
         module: module_box,
@@ -7239,7 +7429,7 @@ pub fn lower_program_to_ir_summary_flat_owned_with_epistemic_ref(
     }
     // Keep the owned flat-summary lane id-compatible with the boxed summary
     // lane above. These stubs are bodyless here and emitted by native codegen.
-    if lower_rgn_enabled() && module.fn_count <= IR_MAX_FUNCS - 10 {
+    if lower_rgn_enabled() && module.fn_count <= IR_MAX_FUNCS - lower_rgn_fn_headroom() {
         let _r0 = ir_fast_summary_find_or_add_fn_id(&! module, make_name("__rgn_enter"))
         let _r1 = ir_fast_summary_find_or_add_fn_id(&! module, make_name("__rgn_leave"))
         let _r2 = ir_fast_summary_find_or_add_fn_id(&! module, make_name("__rgn_escaped"))
@@ -7250,6 +7440,9 @@ pub fn lower_program_to_ir_summary_flat_owned_with_epistemic_ref(
         let _r7 = ir_fast_summary_find_or_add_fn_id(&! module, make_name("__rgn_exit_scalar"))
         let _r8 = ir_fast_summary_find_or_add_fn_id(&! module, make_name("__rgn_barrier"))
         let _r9 = ir_fast_summary_find_or_add_fn_id(&! module, make_name("__rgn_mark_all"))
+        let _r10 = ir_fast_summary_find_or_add_fn_id(&! module, make_name("__rgn_reset"))
+        let _r11 = ir_fast_summary_find_or_add_fn_id(&! module, make_name("__rgn_settle"))
+        let _r12 = ir_fast_summary_find_or_add_fn_id(&! module, make_name("__rgn_copy_payload"))
     }
     IrProgramSummaryFlatResult {
         summary: IrProgramSummaryFlat {
@@ -8183,9 +8376,8 @@ fn lowerer_rgn_return_kind_mut(lo: &! Lowerer, rt: &Option<Box<TypeExpr>>) -> i6
 //
 //   exit:  if tok == 0 goto plain            // no region was opened
 //   scalar kinds:
-//          __rgn_exit_scalar(tok, v)         // reset unless escaped, then pop
+//          __rgn_exit_scalar(tok, ret)       // reset unless escaped (ret not classified), pop
 //   struct kind:
-//          scan_scalar_words(v)             // encoded references escape too
 //          if __rgn_escaped(tok) goto leave_v
 //          sc, sh = __rgn_count(), __rgn_cursor()
 //          t  = young_copy(v)                // above the dead region
@@ -8202,7 +8394,8 @@ fn lowerer_rgn_emit_exit_mut(lo: &! Lowerer, kind: i64, type_name: Name) with Mu
     let plain_label = lowerer_fresh_label_mut(lo)
     lowerer_emit_mut(lo, ir_branch_false(tok, plain_label))
     if kind == 3 {
-        (*lo) = (*lo).rgn_emit_result_escape_scan(ret, type_name, 0)
+        // No word scan of the result: every slot rgn_copy_cost accepts has a
+        // declared numeric type (numeric provenance, see rgn_copy_cost).
         let esc_pair = (*lo).rgn_call("__rgn_escaped", tok, 0, 0, 1)
         (*lo) = esc_pair.0
         let zero_reg = lowerer_emit_i64_const_mut(lo, 0)
@@ -8233,8 +8426,14 @@ fn lowerer_rgn_emit_exit_mut(lo: &! Lowerer, kind: i64, type_name: Name) with Mu
         let leave3 = (*lo).rgn_call("__rgn_leave", tok, 0, 0, 1)
         (*lo) = leave3.0
     } else {
-        // Internal calls pass f64 as raw words too; bits_to_f64 can encode a
-        // handle or arena address, so classify the actual return value.
+        // Scalar kinds (lowerer_rgn_return_kind_mut) are unit, a declared
+        // integer / bool / f64, or a payload-free enum tag: none can carry a
+        // young reference that its region does not already know about
+        // (numeric provenance, see rgn_copy_cost; bits_to_f64 takes an integer,
+        // which carries an address only through a hooked conversion). The
+        // result is still passed, because this exact epilogue is read by
+        // opt_cleanup ocp_center_frame and the HOF-transparency probe, but the
+        // runtime no longer classifies it (codegen emit_builtin_rgn_exit_scalar_into).
         let exit_pair = (*lo).rgn_call("__rgn_exit_scalar", tok, ret, 0, 2)
         (*lo) = exit_pair.0
     }
@@ -8261,6 +8460,403 @@ fn lowerer_rgn_body_worth_region(lo: &! Lowerer, first: i64, end: i64) -> bool w
         i = i + 1
     }
     allocs >= 2 || (allocs >= 1 && jumps >= 1)
+}
+
+// Loop-iteration regions (LOWER_LOOP_RGN_*): is register `r` a local on the
+// locals stack? 1 = yes and proven numeric, 2 = yes and not proven, 0 = no.
+fn lowerer_loop_rgn_local_kind(lo: &! Lowerer, r: i64) -> i64 with Mut, Panic, Div {
+    let locals_box = (*lo).locals
+    var i = (*locals_box).count - 1
+    while i >= 0 {
+        if (*(*locals_box).regs).values[i as usize] == r {
+            if i < 4096 && LOWER_RGN_NUM_SLOT_EPOCH[i as usize] == LOWER_RGN_NUM_EPOCH
+                && LOWER_RGN_NUM_SLOT_REG[i as usize] == r {
+                return 1
+            }
+            return 2
+        }
+        i = i - 1
+    }
+    0
+}
+
+// Locals-stack slot holding register `r`, or -1.
+fn lowerer_loop_rgn_local_slot(lo: &! Lowerer, r: i64) -> i64 with Mut, Panic, Div {
+    let locals_box = (*lo).locals
+    var i = (*locals_box).count - 1
+    while i >= 0 {
+        if (*(*locals_box).regs).values[i as usize] == r { return i }
+        i = i - 1
+    }
+    0 - 1
+}
+
+
+// Register `r` is known not to hold an f64 array. The per-function table
+// (bind_reg_array_elem_float) stops recording at 512 entries; past that
+// nothing is known and the answer is false.
+fn lowerer_loop_rgn_reg_not_float_array(lo: &! Lowerer, r: i64) -> bool with Mut, Panic, Div {
+    if (*lo).array_elem_float_reg_count >= 512 { return false }
+    !(*lo).lookup_reg_array_elem_float(r)
+}
+
+// Whether the local held in register `r` is a plain one-word scalar: no
+// array, struct, array-element record or reference, and `r` is not bound as
+// an f64-array register. Only such a local may skip the loop carry decision
+// on the strength of a float marker.
+fn lowerer_loop_rgn_local_is_plain_scalar(lo: &! Lowerer, r: i64) -> bool with Mut, Panic, Div {
+    let slot = lowerer_loop_rgn_local_slot(lo, r)
+    if slot < 0 { return false }
+    let locals_box = (*lo).locals
+    let si = slot as usize
+    if (*(*locals_box).array_lens).values[si] != 0 { return false }
+    if (*(*locals_box).struct_types).values[si].len > 0 { return false }
+    if (*(*locals_box).struct_type_is_array_elem).values[si] != 0 { return false }
+    if (*(*locals_box).is_ref).values[si] != 0 { return false }
+    lowerer_loop_rgn_reg_not_float_array(lo, r)
+}
+
+// Copy-out cost of carrying the local in `slot` across an iteration reset,
+// or -1 when it cannot be carried: a struct rgn_copy_cost accepts, or a fixed
+// array of one-word scalars. References, globals and array-element type
+// records are never carried.
+fn lowerer_loop_rgn_carry_cost(lo: &! Lowerer, slot: i64) -> i64 with Mut, Panic, Div, Alloc {
+    if slot < 0 { return 0 - 1 }
+    let locals_box = (*lo).locals
+    let si = slot as usize
+    if (*(*locals_box).is_ref).values[si] != 0 { return 0 - 1 }
+    if (*(*locals_box).is_global).values[si] != 0 { return 0 - 1 }
+    let alen = (*(*locals_box).array_lens).values[si]
+    if alen > 0 {
+        if (*(*locals_box).array_copy_word_scalar).values[si] != 1 { return 0 - 1 }
+        return 26
+    }
+    if (*(*locals_box).struct_type_is_array_elem).values[si] != 0 { return 0 - 1 }
+    let tname = (*(*locals_box).struct_types).values[si]
+    if tname.len <= 0 { return 0 - 1 }
+    let cost = (*lo).rgn_copy_cost(tname, 0)
+    if cost < 0 || cost > lower_rgn_max_copy_cost() { return 0 - 1 }
+    cost
+}
+
+fn lowerer_loop_rgn_slot(lo: &! Lowerer, i: i64) -> usize with Mut, Panic, Div {
+    ir_region_slot_r((*(*lo).current_func).region, i) as usize
+}
+
+// At the end of a loop body, collect W -- the registers the body writes that
+// are not float, not a proven-numeric local and not the function-region return
+// register -- and refuse the region when one of them is a non-numeric outer
+// local or was already written before the loop.
+fn lowerer_loop_rgn_check_body_mut(lo: &! Lowerer, rec: i64, body_end: i64) with Mut, Panic, Div, Alloc {
+    let regcap = lower_loop_reg_cap()
+    if (*(*lo).current_func).reg_count >= regcap {
+        LOWER_LOOP_REC_OK[rec as usize] = 0
+        LOWER_LOOP_REC_WHY[rec as usize] = 5
+        return
+    }
+    LOWER_LOOP_EPOCH = LOWER_LOOP_EPOCH + 1
+    let ep = LOWER_LOOP_EPOCH
+    let nop_op = IrOpcode::IrNop as i64
+    let label_op = IrOpcode::IrLabel as i64
+    let sret_op = IrOpcode::IrCallSret as i64
+    var i: i64 = 0
+    while i < body_end {
+        let s = lowerer_loop_rgn_slot(lo, i)
+        if IR_A_OP[s] == nop_op && IR_A_IMM_FLAGS[s] == IR_FLOAT_REG_MARKER_FLAG {
+            let d = IR_A_DST[s]
+            if d >= 0 && d < regcap { LOWER_LOOP_F_STAMP[d as usize] = ep }
+        }
+        i = i + 1
+    }
+    let skip_ret = LOWER_RGN_TOK_REG >= 0 && (*lo).current_fn == LOWER_RGN_FN_ID
+    let wbase = LOWER_LOOP_W_LEN
+    var wlen: i64 = 0
+    LOWER_LOOP_REC_CBASE[rec as usize] = LOWER_LOOP_CARRY_LEN
+    LOWER_LOOP_REC_CLEN[rec as usize] = 0
+    var carry_cost: i64 = 0
+    i = LOWER_LOOP_REC_BODY[rec as usize]
+    while i < body_end {
+        let s = lowerer_loop_rgn_slot(lo, i)
+        let op = IR_A_OP[s]
+        if op != nop_op && op != label_op {
+            var k: i64 = 0
+            while k < 2 {
+                var d = IR_A_DST[s]
+                if k == 1 {
+                    if op == sret_op { d = IR_A_SRC1[s] } else { d = 0 - 1 }
+                }
+                var lk: i64 = 0 - 1
+                if d >= 0 && d < regcap && LOWER_LOOP_W_STAMP[d as usize] != ep {
+                    lk = lowerer_loop_rgn_local_kind(lo, d)
+                    // The float marker (IR_FLOAT_REG_MARKER_FLAG) is also put on
+                    // the handle register of an f64 ARRAY (emit_array_alloc_like_source,
+                    // so every `var w = a` of an f64 array). Read as "float scalar" it
+                    // let such a local skip the carry decision: the iteration reset
+                    // then reclaimed the array (linalg_factorize: L and U came back
+                    // zero). A marked register is skipped only when it is provably a
+                    // float scalar: a plain scalar local, or a temporary that is not
+                    // bound as an f64-array register. Temporaries keep the exemption
+                    // because a float constant materialised in the body is reused
+                    // after the loop (one register for one constant per function).
+                    if LOWER_LOOP_F_STAMP[d as usize] == ep {
+                        if lk == 2 && lowerer_loop_rgn_local_is_plain_scalar(lo, d) {
+                            lk = 0 - 1
+                        } else if lk == 0 && lowerer_loop_rgn_reg_not_float_array(lo, d) {
+                            lk = 0 - 1
+                        }
+                    }
+                }
+                if lk >= 0 && !(skip_ret && d == LOWER_RGN_RET_REG)
+                    && d != LOWER_LOOP_REC_SKIPREG[rec as usize] {
+                    LOWER_LOOP_W_STAMP[d as usize] = ep
+                    if lk == 2 {
+                        let cslot = lowerer_loop_rgn_local_slot(lo, d)
+                        let cc = lowerer_loop_rgn_carry_cost(lo, cslot)
+                        if cc < 0 || LOWER_LOOP_REC_CLEN[rec as usize] >= lower_loop_carry_max_per_loop()
+                            || LOWER_LOOP_CARRY_LEN >= 16384 {
+                            LOWER_LOOP_REC_OK[rec as usize] = 0
+                            LOWER_LOOP_REC_WHY[rec as usize] = 2
+                            LOWER_LOOP_REC_WHAT[rec as usize] = d
+                            return
+                        }
+                        carry_cost = carry_cost + cc
+                        LOWER_LOOP_CARRY_SLOT[LOWER_LOOP_CARRY_LEN as usize] = cslot
+                        LOWER_LOOP_CARRY_LEN = LOWER_LOOP_CARRY_LEN + 1
+                        LOWER_LOOP_REC_CLEN[rec as usize] = LOWER_LOOP_REC_CLEN[rec as usize] + 1
+                    }
+                    if lk == 0 {
+                        if LOWER_LOOP_W_LEN >= regcap {
+                            LOWER_LOOP_REC_OK[rec as usize] = 0
+                            LOWER_LOOP_REC_WHY[rec as usize] = 5
+                            return
+                        }
+                        LOWER_LOOP_W[LOWER_LOOP_W_LEN as usize] = d
+                        LOWER_LOOP_W_LEN = LOWER_LOOP_W_LEN + 1
+                        wlen = wlen + 1
+                    }
+                }
+                k = k + 1
+            }
+        }
+        i = i + 1
+    }
+    LOWER_LOOP_REC_WBASE[rec as usize] = wbase
+    LOWER_LOOP_REC_WLEN[rec as usize] = wlen
+    // Two copies of every carried value must fit.
+    if body_end + 64 + 3 * carry_cost > IR_MAX_INSTRS - 256 {
+        LOWER_LOOP_REC_OK[rec as usize] = 0
+        LOWER_LOOP_REC_WHY[rec as usize] = 5
+        return
+    }
+    // A W register already written before the loop carries a value from one
+    // iteration into the next (or from before the loop into it).
+    i = 0
+    while i < LOWER_LOOP_REC_START[rec as usize] {
+        let s = lowerer_loop_rgn_slot(lo, i)
+        let op = IR_A_OP[s]
+        if op != nop_op && op != label_op {
+            let d = IR_A_DST[s]
+            // Locals are settled above: numeric ones need nothing, the rest
+            // are carried. Only a non-local W register may not be pre-written.
+            if d >= 0 && d < regcap && LOWER_LOOP_W_STAMP[d as usize] == ep
+                && LOWER_LOOP_F_STAMP[d as usize] != ep && lowerer_loop_rgn_local_kind(lo, d) == 0 {
+                LOWER_LOOP_REC_OK[rec as usize] = 0
+                LOWER_LOOP_REC_WHY[rec as usize] = 3
+                LOWER_LOOP_REC_WHAT[rec as usize] = d
+                return
+            }
+        }
+        i = i + 1
+    }
+}
+
+// Whether instruction slot `s` reads a register stamped `ep` in
+// LOWER_LOOP_W_STAMP: src1, src2, the stored value of an index store (kept in
+// imm_i64 -- the only opcode whose imm_i64 is a register, per the core
+// emitter and dce_extract_uses), call arguments, and explicit sret arguments.
+fn lowerer_loop_rgn_reads_stamped(s: usize, ep: i64) -> bool with Mut, Panic, Div {
+    let regcap = lower_loop_reg_cap()
+    let op = IR_A_OP[s]
+    if op == IrOpcode::IrNop as i64 || op == IrOpcode::IrLabel as i64 { return false }
+    let a = IR_A_SRC1[s]
+    if a >= 0 && a < regcap && LOWER_LOOP_W_STAMP[a as usize] == ep { return true }
+    let b = IR_A_SRC2[s]
+    if b >= 0 && b < regcap && LOWER_LOOP_W_STAMP[b as usize] == ep { return true }
+    if op == IrOpcode::IrIndexSet as i64 {
+        let c = IR_A_IMM_I64[s]
+        if c >= 0 && c < regcap && LOWER_LOOP_W_STAMP[c as usize] == ep { return true }
+    }
+    let n = IR_A_ARG_COUNT[s]
+    if op == IrOpcode::IrCallSret as i64 {
+        // Explicit sret arguments are the contiguous vregs first_arg .. +n.
+        let first = IR_A_FIELD_IDX[s]
+        var q: i64 = 0
+        while q < n {
+            let r = first + q
+            if r >= 0 && r < regcap && LOWER_LOOP_W_STAMP[r as usize] == ep { return true }
+            q = q + 1
+        }
+        return false
+    }
+    let base = IR_A_ARG_BASE[s]
+    if n > 0 && base >= 0 && base + n <= IR_ARG_POOL_LEN {
+        var k: i64 = 0
+        while k < n {
+            let r = IR_ARG_POOL[(base + k) as usize]
+            if r >= 0 && r < regcap && LOWER_LOOP_W_STAMP[r as usize] == ep { return true }
+            k = k + 1
+        }
+    }
+    false
+}
+
+// Index of the region call `name` whose destination (enter) or first source
+// (exit, leave) is `tok`, starting the search at `hint`; -1 when absent.
+fn lowerer_loop_rgn_find_call(lo: &! Lowerer, hint: i64, tok: i64, want_dst: bool) -> i64 with Mut, Panic, Div {
+    let count = (*(*lo).current_func).instr_count
+    let call_op = IrOpcode::IrCall as i64
+    if hint >= 0 && hint < count {
+        let s = lowerer_loop_rgn_slot(lo, hint)
+        if IR_A_OP[s] == call_op && ((want_dst && IR_A_DST[s] == tok) || (!want_dst && IR_A_SRC1[s] == tok)) {
+            return hint
+        }
+    }
+    var i: i64 = 0
+    while i < count {
+        let s = lowerer_loop_rgn_slot(lo, i)
+        if IR_A_OP[s] == call_op && ((want_dst && IR_A_DST[s] == tok) || (!want_dst && IR_A_SRC1[s] == tok)) {
+            return i
+        }
+        i = i + 1
+    }
+    0 - 1
+}
+
+// After the whole function is lowered: refuse every loop region whose W is
+// read outside the loop, then patch the refused ones back to nothing.
+fn lower_loop_rgn_env_init() with Mut, Panic, Div, IO {
+    if LOWER_LOOP_DIAG < 0 {
+        LOWER_LOOP_DIAG = 0
+        if str_eq(read_env("SOUNIO_LOOP_RGN_DIAG"), "1") { LOWER_LOOP_DIAG = 1 }
+        if str_eq(read_env("SOUNIO_LOOP_RGN_DIAG"), "2") { LOWER_LOOP_DIAG = 2 }
+        if str_eq(read_env("SOUNIO_LOOP_RGN_SABOTAGE"), "1") { LOWER_LOOP_SABOTAGE = 1 }
+        if str_eq(read_env("SOUNIO_LOOP_RGN_SABOTAGE"), "2") { LOWER_LOOP_SABOTAGE = 2 }
+        if str_eq(read_env("SOUNIO_LOOP_RGN_SABOTAGE"), "3") { LOWER_LOOP_SABOTAGE = 3 }
+        if str_eq(read_env("SOUNIO_LOOP_RGN_SABOTAGE"), "4") { LOWER_LOOP_SABOTAGE = 4 }
+        if str_eq(read_env("SOUNIO_RGN_FORCE_MERGE_VETO"), "1") { LOWER_RGN_FORCE_MERGE_VETO = true }
+    }
+}
+
+fn lowerer_loop_rgn_finalize_mut(lo: &! Lowerer) with Mut, Panic, Div, IO {
+    var rec = LOWER_LOOP_REC_BASE
+    while rec < LOWER_LOOP_REC_COUNT {
+        let ri = rec as usize
+        let count = (*(*lo).current_func).instr_count
+        if LOWER_LOOP_REC_OK[ri] == 1 && LOWER_LOOP_REC_EXIT[ri] >= 0 && LOWER_LOOP_REC_LEAVE[ri] >= 0 {
+            LOWER_LOOP_EPOCH = LOWER_LOOP_EPOCH + 1
+            let ep = LOWER_LOOP_EPOCH
+            var k: i64 = 0
+            while k < LOWER_LOOP_REC_WLEN[ri] {
+                let r = LOWER_LOOP_W[(LOWER_LOOP_REC_WBASE[ri] + k) as usize]
+                LOWER_LOOP_W_STAMP[r as usize] = ep
+                k = k + 1
+            }
+            var i: i64 = 0
+            while i < count && LOWER_LOOP_REC_OK[ri] == 1 {
+                if i == LOWER_LOOP_REC_START[ri] { i = LOWER_LOOP_REC_END[ri] }
+                if i < count && lowerer_loop_rgn_reads_stamped(lowerer_loop_rgn_slot(lo, i), ep) {
+                    LOWER_LOOP_REC_OK[ri] = 0
+                    LOWER_LOOP_REC_WHY[ri] = 4
+                    LOWER_LOOP_REC_WHAT[ri] = i
+                }
+                i = i + 1
+            }
+        } else {
+            if LOWER_LOOP_REC_OK[ri] == 1 { LOWER_LOOP_REC_WHY[ri] = 6 }
+            LOWER_LOOP_REC_OK[ri] = 0
+        }
+        if LOWER_LOOP_DIAG == 2 {
+            var di = LOWER_LOOP_REC_START[ri]
+            var dend = LOWER_LOOP_REC_END[ri]
+            if dend < 0 { dend = count }
+            while di < dend {
+                let ds = lowerer_loop_rgn_slot(lo, di)
+                print("  ir ")
+                print_int(di)
+                print(" op=")
+                print_int(IR_A_OP[ds])
+                print(" d=")
+                print_int(IR_A_DST[ds])
+                print(" s1=")
+                print_int(IR_A_SRC1[ds])
+                print(" s2=")
+                print_int(IR_A_SRC2[ds])
+                print(" imm=")
+                print_int(IR_A_IMM_I64[ds])
+                print(" fi=")
+                print_int(IR_A_FIELD_IDX[ds])
+                print(" lab=")
+                print_int(IR_A_LABEL_ID[ds])
+                print(" fn=")
+                print_int(IR_A_FN_ID[ds])
+                print("\n")
+                di = di + 1
+            }
+        }
+        if LOWER_LOOP_DIAG >= 1 {
+            print("loop_rgn: fn=")
+            print_int((*lo).current_fn)
+            print(" rec=")
+            print_int(rec - LOWER_LOOP_REC_BASE)
+            if LOWER_LOOP_REC_OK[ri] == 1 { print(" OPEN\n") } else {
+                print(" refused why=")
+                print_int(LOWER_LOOP_REC_WHY[ri])
+                print(" what=")
+                print_int(LOWER_LOOP_REC_WHAT[ri])
+                if LOWER_LOOP_REC_WHY[ri] == 4 {
+                    let ds = lowerer_loop_rgn_slot(lo, LOWER_LOOP_REC_WHAT[ri])
+                    print(" op=")
+                    print_int(IR_A_OP[ds])
+                    print(" dst=")
+                    print_int(IR_A_DST[ds])
+                    print(" s1=")
+                    print_int(IR_A_SRC1[ds])
+                    print(" s2=")
+                    print_int(IR_A_SRC2[ds])
+                    print(" imm=")
+                    print_int(IR_A_IMM_I64[ds])
+                    print(" argc=")
+                    print_int(IR_A_ARG_COUNT[ds])
+                    print(" start=")
+                    print_int(LOWER_LOOP_REC_START[ri])
+                    print(" end=")
+                    print_int(LOWER_LOOP_REC_END[ri])
+                }
+                print("\n")
+            }
+        }
+        if (LOWER_LOOP_SABOTAGE == 1 || LOWER_LOOP_SABOTAGE == 3) && LOWER_LOOP_REC_OK[ri] != 1
+            && (LOWER_LOOP_REC_WHY[ri] == 2 || LOWER_LOOP_REC_WHY[ri] == 3 || LOWER_LOOP_REC_WHY[ri] == 4) {
+            LOWER_LOOP_REC_OK[ri] = 1
+        }
+        if LOWER_LOOP_REC_OK[ri] != 1 {
+            let tok = LOWER_LOOP_REC_TOK[ri]
+            let e = lowerer_loop_rgn_find_call(lo, LOWER_LOOP_REC_ENTER[ri], tok, true)
+            if e >= 0 { let _a = ir_region_set(&(*(*lo).current_func).region, e, ir_load_imm(tok, 0)) }
+            if LOWER_LOOP_REC_CARRIED[ri] != 1 {
+                // The in-place reset of a refused region answers "reset" (1) without
+                // a call, so the restart path is never taken.
+                let x = lowerer_loop_rgn_find_call(lo, LOWER_LOOP_REC_EXIT[ri], tok, false)
+                if x >= 0 {
+                    let xd = IR_A_DST[lowerer_loop_rgn_slot(lo, x)]
+                    let _b = ir_region_set(&(*(*lo).current_func).region, x, ir_load_imm(xd, 1))
+                }
+            }
+            let l = lowerer_loop_rgn_find_call(lo, LOWER_LOOP_REC_LEAVE[ri], tok, false)
+            if l >= 0 { let _c = ir_region_set(&(*(*lo).current_func).region, l, ir_nop()) }
+        }
+        rec = rec + 1
+    }
 }
 
 // #2355: evaluate, at `main`'s entry, every closed module-level initializer
@@ -8626,7 +9222,24 @@ lower_rss_mark("before_block")
     let saved_rgn_ret = LOWER_RGN_RET_REG
     let saved_rgn_exit = LOWER_RGN_EXIT_LABEL
     let saved_rgn_fn = LOWER_RGN_FN_ID
+    let saved_loop_ok = LOWER_LOOP_RGN_FN_OK
+    let saved_loop_fn = LOWER_LOOP_RGN_FN_ID
+    let saved_loop_depth = LOWER_LOOP_RGN_DEPTH
+    let saved_loop_base = LOWER_LOOP_REC_BASE
+    let saved_loop_wlen = LOWER_LOOP_W_LEN
+    let saved_loop_clen = LOWER_LOOP_CARRY_LEN
     LOWER_RGN_TOK_REG = 0 - 1
+    LOWER_LOOP_RGN_FN_OK = 0
+    if lower_rgn_enabled() && (*(*lo).module).fn_count <= IR_MAX_FUNCS - lower_rgn_fn_headroom()
+        && !fd.is_kernel && !fd.is_extern && !(*lo).probe_mode
+        && !(*lo).ir_effect_list_has_name_ref(&fd.effects, "GPU")
+        && !(*lo).ir_effect_list_has_name_ref(&fd.effects, "Async") {
+        LOWER_LOOP_RGN_FN_OK = 1
+    }
+    LOWER_LOOP_RGN_FN_ID = (*lo).current_fn
+    LOWER_LOOP_RGN_DEPTH = 0
+    lower_loop_rgn_env_init()
+    LOWER_LOOP_REC_BASE = LOWER_LOOP_REC_COUNT
     var rgn_kind: i64 = 0
     var rgn_type = ir_empty_name()
     var rgn_enter_idx: i64 = 0 - 1
@@ -8636,7 +9249,7 @@ lower_rss_mark("before_block")
     }
     var result_reg = lowerer_try_canonical_hello_block_mut(lo, &fd.body)
     if result_reg == IR_INVALID_REG {
-        if lower_rgn_enabled() && (*(*lo).module).fn_count <= IR_MAX_FUNCS - 10
+        if lower_rgn_enabled() && (*(*lo).module).fn_count <= IR_MAX_FUNCS - lower_rgn_fn_headroom()
             && !fd.is_kernel && !fd.is_extern && !(*lo).probe_mode
             && !ir_name_eq_lit(name, "main")
             && !(*lo).ir_effect_list_has_name_ref(&fd.effects, "GPU")
@@ -8731,6 +9344,14 @@ lower_rss_mark("before_block")
             lowerer_emit_mut(lo, ir_return(result_reg))
         }
     }
+    lowerer_loop_rgn_finalize_mut(lo)
+    LOWER_LOOP_REC_COUNT = LOWER_LOOP_REC_BASE
+    LOWER_LOOP_W_LEN = saved_loop_wlen
+    LOWER_LOOP_CARRY_LEN = saved_loop_clen
+    LOWER_LOOP_RGN_FN_OK = saved_loop_ok
+    LOWER_LOOP_RGN_FN_ID = saved_loop_fn
+    LOWER_LOOP_RGN_DEPTH = saved_loop_depth
+    LOWER_LOOP_REC_BASE = saved_loop_base
     LOWER_RGN_TOK_REG = saved_rgn_tok
     LOWER_RGN_RET_REG = saved_rgn_ret
     LOWER_RGN_EXIT_LABEL = saved_rgn_exit
@@ -15160,11 +15781,12 @@ impl Lowerer {
         if elem_count <= 0 { 8 } else { elem_count * 8 }
     }
 
-    fn emit_fixed_array_value_copy(self, src_reg: i64, elem_count: i64, elem_is_float: bool) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+    // A fresh array with the layout of the one in `src_reg` (a packed byte
+    // array gets a packed one), its elements still zero.
+    fn emit_array_alloc_like_source(self, src_reg: i64, elem_count: i64, elem_is_float: bool) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         let pair_dst = self.fresh_reg()
         var lo = pair_dst.0
         let dst_reg = pair_dst.1
-        // Same layout as the source: a packed byte array copies to a packed one.
         var copy_alloc = ir_alloc_array(dst_reg, lo.aggregate_storage_bytes(elem_count), elem_count)
         copy_alloc.label_id = IR_ALLOC_LIKE_SOURCE
         copy_alloc.src1 = src_reg
@@ -15173,6 +15795,13 @@ impl Lowerer {
             lo = lo.emit(ir_mark_float_reg(dst_reg))
             lo = lo.bind_reg_array_elem_float(dst_reg)
         }
+        (lo, dst_reg)
+    }
+
+    fn emit_fixed_array_value_copy(self, src_reg: i64, elem_count: i64, elem_is_float: bool) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        let alloc_pair = self.emit_array_alloc_like_source(src_reg, elem_count, elem_is_float)
+        var lo = alloc_pair.0
+        let dst_reg = alloc_pair.1
         if elem_count <= 0 {
             return (lo, dst_reg)
         }
@@ -41615,6 +42244,238 @@ impl Lowerer {
         (lo, res)
     }
 
+    // Open a loop region (LOWER_LOOP_RGN_*). Called right before the loop's
+    // top label: the region spans the whole loop and is reset in place at
+    // every iteration end (loop_rgn_end_iter), so values carried from one
+    // iteration to the next live INSIDE it and are relocated to its start
+    // instead of piling up below it. Returns the record, or -1 when this
+    // function or this loop cannot have one.
+    fn loop_rgn_begin(self) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        if LOWER_LOOP_RGN_FN_OK != 1 || lo.current_fn != LOWER_LOOP_RGN_FN_ID { return (lo, 0 - 1) }
+        if LOWER_LOOP_REC_COUNT >= 4096 || LOWER_LOOP_RGN_DEPTH >= 256 { return (lo, 0 - 1) }
+        if (*lo.current_func).instr_count > IR_MAX_INSTRS - 1024 { return (lo, 0 - 1) }
+        let _barrier_id = lowerer_find_or_add_fn_id_mut(&! lo, make_name("__rgn_barrier"))
+        let _mark_id = lowerer_find_or_add_fn_id_mut(&! lo, make_name("__rgn_mark_all"))
+        let rec = LOWER_LOOP_REC_COUNT
+        let ri = rec as usize
+        LOWER_LOOP_REC_COUNT = rec + 1
+        LOWER_LOOP_REC_START[ri] = (*lo.current_func).instr_count
+        LOWER_LOOP_REC_ENTER[ri] = (*lo.current_func).instr_count
+        let enter_pair = lo.rgn_call("__rgn_enter", 0, 0, 0, 0)
+        lo = enter_pair.0
+        LOWER_LOOP_REC_TOK[ri] = enter_pair.1
+        LOWER_LOOP_REC_BODY[ri] = (*lo.current_func).instr_count
+        let pi = lo.fresh_label()
+        lo = pi.0
+        LOWER_LOOP_REC_ITER[ri] = pi.1
+        let pb = lo.fresh_label()
+        lo = pb.0
+        LOWER_LOOP_REC_BRK[ri] = pb.1
+        LOWER_LOOP_REC_OK[ri] = 1
+        LOWER_LOOP_REC_WHY[ri] = 0
+        LOWER_LOOP_REC_WHAT[ri] = 0
+        LOWER_LOOP_REC_EXIT[ri] = 0 - 1
+        LOWER_LOOP_REC_LEAVE[ri] = 0 - 1
+        LOWER_LOOP_REC_END[ri] = 0 - 1
+        LOWER_LOOP_REC_WLEN[ri] = 0
+        LOWER_LOOP_REC_CLEN[ri] = 0
+        LOWER_LOOP_REC_CARRIED[ri] = 0
+        LOWER_LOOP_REC_SKIPREG[ri] = 0 - 1
+        LOWER_LOOP_RGN_TOKS[LOWER_LOOP_RGN_DEPTH as usize] = enter_pair.1
+        LOWER_LOOP_RGN_DEPTH = LOWER_LOOP_RGN_DEPTH + 1
+        (lo, rec)
+    }
+
+    // Close the loop region at `tok` and open a fresh one in the same token
+    // register: what the closed region holds is kept (it merges into the
+    // enclosing region) and the following iterations start a new region at
+    // the cursor. Used when an iteration cannot reset because something
+    // escaped it. A tok of 0 (no region, or a refused one) stays 0.
+    fn loop_rgn_emit_restart(self, tok: i64) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        let zp = lo.emit_i64_const(0)
+        lo = zp.0
+        let is_none = lo.fresh_reg()
+        lo = is_none.0
+        lo = lo.emit(ir_binop(is_none.1, tok, BinaryOp::OpEq, zp.1))
+        let sk = lo.fresh_label()
+        lo = sk.0
+        lo = lo.emit(ir_branch_true(is_none.1, sk.1))
+        let leave_pair = lo.rgn_call("__rgn_leave", tok, 0, 0, 1)
+        lo = leave_pair.0
+        let enter_pair = lo.rgn_call("__rgn_enter", 0, 0, 0, 0)
+        lo = enter_pair.0
+        lo = lo.emit(ir_copy(tok, enter_pair.1))
+        lo.emit(ir_label(sk.1))
+    }
+
+    // End of an iteration (and the `continue` target). The caller emits the
+    // back edge right after. With no carried aggregate the region is reset in
+    // place; with carried ones their young parts are lifted out and laid back
+    // down at the region start (loop_rgn_emit_carried_exit). An escaped
+    // region restarts instead.
+    fn loop_rgn_end_iter(self, rec: i64) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        let ri = rec as usize
+        if LOWER_LOOP_RGN_DEPTH > 0 { LOWER_LOOP_RGN_DEPTH = LOWER_LOOP_RGN_DEPTH - 1 }
+        let body_end = (*lo.current_func).instr_count
+        lo = lo.emit(ir_label(LOWER_LOOP_REC_ITER[ri]))
+        LOWER_LOOP_REC_CARRIED[ri] = 0
+        LOWER_LOOP_REC_CLEN[ri] = 0
+        if !lowerer_rgn_body_worth_region(&! lo, LOWER_LOOP_REC_BODY[ri], body_end) {
+            LOWER_LOOP_REC_OK[ri] = 0
+            LOWER_LOOP_REC_WHY[ri] = 1
+        } else {
+            lowerer_loop_rgn_check_body_mut(&! lo, rec, body_end)
+        }
+        let tok = LOWER_LOOP_REC_TOK[ri]
+        if LOWER_LOOP_REC_OK[ri] == 1 && LOWER_LOOP_REC_CLEN[ri] > 0 && LOWER_LOOP_SABOTAGE != 4 {
+            lo = lo.loop_rgn_emit_carried_exit(rec)
+            LOWER_LOOP_REC_CARRIED[ri] = 1
+        } else {
+            LOWER_LOOP_REC_EXIT[ri] = (*lo.current_func).instr_count
+            let reset_pair = lo.rgn_call("__rgn_reset", tok, 0, 0, 1)
+            lo = reset_pair.0
+            let dn = lo.fresh_label()
+            lo = dn.0
+            lo = lo.emit(ir_branch_true(reset_pair.1, dn.1))
+            lo = lo.loop_rgn_emit_restart(tok)
+            lo = lo.emit(ir_label(dn.1))
+        }
+        lo
+    }
+
+    // Iteration end of a loop region whose body writes outer aggregate
+    // locals: the function-exit protocol (lowerer_rgn_emit_exit_mut, struct
+    // kind) applied to every carried local at once, except that the region
+    // stays open (__rgn_settle in place of __rgn_leave).
+    //
+    //   if __rgn_escaped(tok) goto restart
+    //   sc, sh = __rgn_count(), __rgn_cursor()
+    //   t_k = young_copy(v_k)                  // above the dead iteration
+    //   if !__rgn_reset_fits(tok, sh, sc) goto keep_t
+    //   v_k = young_copy(t_k)                  // back down at the region start
+    //   __rgn_settle(tok); goto done
+    //   keep_t:  v_k = t_k                     // nothing was reset
+    //   restart: close and reopen the region (loop_rgn_emit_restart)
+    //   done:
+    //
+    // With tok = 0 (a refused region) __rgn_escaped answers 1 and the restart
+    // is skipped.
+    fn loop_rgn_emit_carried_exit(self, rec: i64) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        let ri = rec as usize
+        let tok = LOWER_LOOP_REC_TOK[ri]
+        let base = LOWER_LOOP_REC_CBASE[ri]
+        let n = LOWER_LOOP_REC_CLEN[ri]
+        // Carried locals are declared word-scalar arrays or structs that
+        // rgn_copy_cost accepts (lowerer_loop_rgn_carry_cost): no word scan
+        // (numeric provenance, see rgn_copy_cost).
+        var k: i64 = 0
+        LOWER_LOOP_REC_EXIT[ri] = (*lo.current_func).instr_count
+        let esc_pair = lo.rgn_call("__rgn_escaped", tok, 0, 0, 1)
+        lo = esc_pair.0
+        let rs = lo.fresh_label()
+        lo = rs.0
+        let restart_label = rs.1
+        lo = lo.emit(ir_branch_true(esc_pair.1, restart_label))
+        let sc_pair = lo.rgn_call("__rgn_count", 0, 0, 0, 0)
+        lo = sc_pair.0
+        let sh_pair = lo.rgn_call("__rgn_cursor", 0, 0, 0, 0)
+        lo = sh_pair.0
+        // First copies, one register per carried local.
+        var firsts: [i64; 16] = [0; 16]
+        k = 0
+        while k < n {
+            let slot = LOWER_LOOP_CARRY_SLOT[(base + k) as usize] as usize
+            let v = (*(*lo.locals).regs).values[slot]
+            let alen = (*(*lo.locals).array_lens).values[slot]
+            if alen > 0 {
+                let fl = (*(*lo.locals).array_elem_float).values[slot] != 0
+                let cp = lo.rgn_emit_young_array_copy(tok, v, alen, fl)
+                lo = cp.0
+                firsts[k as usize] = cp.1
+            } else {
+                let cp = lo.rgn_emit_young_copy(tok, v, (*(*lo.locals).struct_types).values[slot], 0)
+                lo = cp.0
+                firsts[k as usize] = cp.1
+            }
+            k = k + 1
+        }
+        let ok_pair = lo.rgn_call("__rgn_reset_fits", tok, sh_pair.1, sc_pair.1, 3)
+        lo = ok_pair.0
+        let kt = lo.fresh_label()
+        lo = kt.0
+        let keep_t_label = kt.1
+        lo = lo.emit(ir_branch_false(ok_pair.1, keep_t_label))
+        // Second copies, laid down at the region start.
+        var seconds: [i64; 16] = [0; 16]
+        k = 0
+        while k < n {
+            let slot = LOWER_LOOP_CARRY_SLOT[(base + k) as usize] as usize
+            let alen = (*(*lo.locals).array_lens).values[slot]
+            if alen > 0 {
+                let fl = (*(*lo.locals).array_elem_float).values[slot] != 0
+                let cp = lo.rgn_emit_young_array_copy(tok, firsts[k as usize], alen, fl)
+                lo = cp.0
+                seconds[k as usize] = cp.1
+            } else {
+                let cp = lo.rgn_emit_young_copy(tok, firsts[k as usize], (*(*lo.locals).struct_types).values[slot], 0)
+                lo = cp.0
+                seconds[k as usize] = cp.1
+            }
+            k = k + 1
+        }
+        let settle = lo.rgn_call("__rgn_settle", tok, 0, 0, 1)
+        lo = settle.0
+        k = 0
+        while k < n {
+            let slot = LOWER_LOOP_CARRY_SLOT[(base + k) as usize] as usize
+            lo = lo.emit(ir_copy((*(*lo.locals).regs).values[slot], seconds[k as usize]))
+            k = k + 1
+        }
+        let dn = lo.fresh_label()
+        lo = dn.0
+        let done_label = dn.1
+        lo = lo.emit(ir_jump(done_label))
+        // The copies did not fit below the first ones: nothing was reset, the
+        // region keeps everything, and the carried values are the first
+        // copies. The region is restarted so the next iterations reclaim again.
+        lo = lo.emit(ir_label(keep_t_label))
+        k = 0
+        while k < n {
+            let slot = LOWER_LOOP_CARRY_SLOT[(base + k) as usize] as usize
+            lo = lo.emit(ir_copy((*(*lo.locals).regs).values[slot], firsts[k as usize]))
+            k = k + 1
+        }
+        lo = lo.emit(ir_label(restart_label))
+        lo = lo.loop_rgn_emit_restart(tok)
+        lo.emit(ir_label(done_label))
+    }
+
+    // Loop exit: the condition's false branch and every `break` land here.
+    // Close the loop region without resetting it (what it holds then belongs
+    // to the enclosing region), then fall into the loop's end label, which
+    // the caller emits next.
+    fn loop_rgn_end_break(self, rec: i64) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        let ri = rec as usize
+        lo = lo.emit(ir_label(LOWER_LOOP_REC_BRK[ri]))
+        if LOWER_LOOP_SABOTAGE == 2 || LOWER_LOOP_SABOTAGE == 3 {
+            let zs = lowerer_emit_i64_const_mut(&! lo, 0)
+            LOWER_LOOP_REC_LEAVE[ri] = (*lo.current_func).instr_count
+            let sab_pair = lo.rgn_call("__rgn_exit_scalar", LOWER_LOOP_REC_TOK[ri], zs, 0, 2)
+            lo = sab_pair.0
+        } else {
+            LOWER_LOOP_REC_LEAVE[ri] = (*lo.current_func).instr_count
+            let leave_pair = lo.rgn_call("__rgn_leave", LOWER_LOOP_REC_TOK[ri], 0, 0, 1)
+            lo = leave_pair.0
+        }
+        LOWER_LOOP_REC_END[ri] = (*lo.current_func).instr_count
+        lo
+    }
+
     fn lower_while_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         let pair_l_top = self.fresh_label()
         let lo1 = pair_l_top.0
@@ -41623,12 +42484,22 @@ impl Lowerer {
         let lo2 = pair_l_end.0
         let l_end = pair_l_end.1
 
-        var lo = lo2.fo_extend_rows_for_loop().emit(ir_label(l_top))
+        var lo = lo2.fo_extend_rows_for_loop()
+        let rgn_pair = lo.loop_rgn_begin()
+        lo = rgn_pair.0
+        let rec = rgn_pair.1
+        var exit_label = l_end
+        if rec >= 0 { exit_label = LOWER_LOOP_REC_BRK[rec as usize] }
+        lo = lo.emit(ir_label(l_top))
         let pair_cond = lo.lower_opt_expr_ref(&e.left)
         lo = pair_cond.0
         let cond = pair_cond.1
-        lo = lo.emit(ir_branch_false(cond, l_end))
-        lo = lo.push_loop_labels(l_top, l_end)
+        lo = lo.emit(ir_branch_false(cond, exit_label))
+        if rec >= 0 {
+            lo = lo.push_loop_labels(LOWER_LOOP_REC_ITER[rec as usize], exit_label)
+        } else {
+            lo = lo.push_loop_labels(l_top, l_end)
+        }
         let while_block_opt: Option<Box<Block>> = e.block
         match while_block_opt {
             Some(blk) => {
@@ -41638,7 +42509,9 @@ impl Lowerer {
             None => {}
         }
         lo = lo.pop_loop_labels()
+        if rec >= 0 { lo = lo.loop_rgn_end_iter(rec) }
         lo = lo.emit(ir_jump(l_top))
+        if rec >= 0 { lo = lo.loop_rgn_end_break(rec) }
         lo = lo.emit(ir_label(l_end))
         lo.emit_unit()
     }
@@ -41651,8 +42524,16 @@ impl Lowerer {
         let lo2 = pair_l_end.0
         let l_end = pair_l_end.1
 
-        var lo = lo2.fo_extend_rows_for_loop().emit(ir_label(l_top))
-        lo = lo.push_loop_labels(l_top, l_end)
+        var lo = lo2.fo_extend_rows_for_loop()
+        let rgn_pair = lo.loop_rgn_begin()
+        lo = rgn_pair.0
+        let rec = rgn_pair.1
+        lo = lo.emit(ir_label(l_top))
+        if rec >= 0 {
+            lo = lo.push_loop_labels(LOWER_LOOP_REC_ITER[rec as usize], LOWER_LOOP_REC_BRK[rec as usize])
+        } else {
+            lo = lo.push_loop_labels(l_top, l_end)
+        }
         let loop_block_opt: Option<Box<Block>> = e.block
         match loop_block_opt {
             Some(blk) => {
@@ -41662,7 +42543,9 @@ impl Lowerer {
             None => {}
         }
         lo = lo.pop_loop_labels()
+        if rec >= 0 { lo = lo.loop_rgn_end_iter(rec) }
         lo = lo.emit(ir_jump(l_top))
+        if rec >= 0 { lo = lo.loop_rgn_end_break(rec) }
         lo = lo.emit(ir_label(l_end))
         lo.emit_unit()
     }
@@ -41721,15 +42604,25 @@ impl Lowerer {
                 lo = pair_end_lbl.0
                 let l_end = pair_end_lbl.1
 
-                lo = lo.fo_extend_rows_for_loop().emit(ir_label(l_top))
+                lo = lo.fo_extend_rows_for_loop()
+                let rgn_pair = lo.loop_rgn_begin()
+                lo = rgn_pair.0
+                let rec = rgn_pair.1
+                var exit_label = l_end
+                if rec >= 0 { exit_label = LOWER_LOOP_REC_BRK[rec as usize] }
+                lo = lo.emit(ir_label(l_top))
                 let cmp_op = if (*iter_box).bin_op == BinaryOp::OpRangeInclusive { BinaryOp::OpLe } else { BinaryOp::OpLt }
                 let pair_cond = lo.fresh_reg()
                 lo = pair_cond.0
                 let cond = pair_cond.1
                 lo = lo.emit(ir_binop(cond, iv, cmp_op, end_reg))
-                lo = lo.emit(ir_branch_false(cond, l_end))
+                lo = lo.emit(ir_branch_false(cond, exit_label))
 
-                lo = lo.push_loop_labels(l_cont, l_end)
+                if rec >= 0 {
+                    lo = lo.push_loop_labels(LOWER_LOOP_REC_ITER[rec as usize], LOWER_LOOP_REC_BRK[rec as usize])
+                } else {
+                    lo = lo.push_loop_labels(l_cont, l_end)
+                }
                 let for_block_opt: Option<Box<Block>> = e.block
                 match for_block_opt {
                     Some(blk) => {
@@ -41739,6 +42632,7 @@ impl Lowerer {
                     None => {}
                 }
                 lo = lo.pop_loop_labels()
+                if rec >= 0 { lo = lo.loop_rgn_end_iter(rec) }
 
                 lo = lo.emit(ir_label(l_cont))
                 let pair_one = lo.fresh_reg()
@@ -41751,6 +42645,7 @@ impl Lowerer {
                 lo = lo.emit(ir_binop(next_reg, iv, BinaryOp::OpAdd, one_reg))
                 lo = lo.emit(ir_copy(iv, next_reg))
                 lo = lo.emit(ir_jump(l_top))
+                if rec >= 0 { lo = lo.loop_rgn_end_break(rec) }
                 lo = lo.emit(ir_label(l_end))
                 lo.emit_unit()
             }
@@ -41806,12 +42701,18 @@ impl Lowerer {
         lo = pair_end_lbl.0
         let l_end = pair_end_lbl.1
 
-        lo = lo.fo_extend_rows_for_loop().emit(ir_label(l_top))
+        lo = lo.fo_extend_rows_for_loop()
+        let rgn_pair = lo.loop_rgn_begin()
+        lo = rgn_pair.0
+        let rec = rgn_pair.1
+        var exit_label = l_end
+        if rec >= 0 { exit_label = LOWER_LOOP_REC_BRK[rec as usize] }
+        lo = lo.emit(ir_label(l_top))
         let pair_cond = lo.fresh_reg()
         lo = pair_cond.0
         let cond = pair_cond.1
         lo = lo.emit(ir_binop(cond, iv, BinaryOp::OpLt, len_reg))
-        lo = lo.emit(ir_branch_false(cond, l_end))
+        lo = lo.emit(ir_branch_false(cond, exit_label))
 
         // v = arr[iv]
         let pair_v = lo.fresh_reg()
@@ -41826,8 +42727,17 @@ impl Lowerer {
         } else {
             lo = lo.bind_local_scalar_kind(e.name, 1)
         }
+        // The element variable is rebound from `arr` at the top of every
+        // iteration, so it never carries a value from one iteration into the
+        // next; an element born in an earlier iteration can only be in `arr`
+        // through a barriered store (escaped) or a carried `arr`.
+        if rec >= 0 { LOWER_LOOP_REC_SKIPREG[rec as usize] = v_reg }
 
-        lo = lo.push_loop_labels(l_cont, l_end)
+        if rec >= 0 {
+            lo = lo.push_loop_labels(LOWER_LOOP_REC_ITER[rec as usize], LOWER_LOOP_REC_BRK[rec as usize])
+        } else {
+            lo = lo.push_loop_labels(l_cont, l_end)
+        }
         let for_block_opt: Option<Box<Block>> = e.block
         match for_block_opt {
             Some(blk) => {
@@ -41837,6 +42747,7 @@ impl Lowerer {
             None => {}
         }
         lo = lo.pop_loop_labels()
+        if rec >= 0 { lo = lo.loop_rgn_end_iter(rec) }
 
         // iv = iv + 1
         lo = lo.emit(ir_label(l_cont))
@@ -41850,6 +42761,7 @@ impl Lowerer {
         lo = lo.emit(ir_binop(next_reg, iv, BinaryOp::OpAdd, one_reg))
         lo = lo.emit(ir_copy(iv, next_reg))
         lo = lo.emit(ir_jump(l_top))
+        if rec >= 0 { lo = lo.loop_rgn_end_break(rec) }
         lo = lo.emit(ir_label(l_end))
         lo.emit_unit()
     }
@@ -41993,7 +42905,7 @@ impl Lowerer {
             return (lo, cached)
         }
         var found = lowerer_lookup_fn_id_by_name_ref(&lo, make_name("__rgn_barrier"))
-        if found < 0 && (*lo.module).fn_count <= IR_MAX_FUNCS - 10 {
+        if found < 0 && (*lo.module).fn_count <= IR_MAX_FUNCS - lower_rgn_fn_headroom() {
             found = lowerer_find_or_add_fn_id_mut(&! lo, make_name("__rgn_barrier"))
         }
         LOWER_RGN_CAST_BARRIER_ID = found
@@ -42012,16 +42924,34 @@ impl Lowerer {
         lo.emit(ir_call(dst_pair.1, barrier_id, make_name("__rgn_barrier"), args, 2))
     }
 
-    // Projected IR bound for one young-copy or escape scan of a `type_name`
-    // value, or -1 for an unsupported shape. Declarations classify storage;
-    // the exit scan still checks scalar bits for encoded references before
-    // resetting. Supported slots are non-integer word scalars, their arrays,
-    // or structs that are themselves copyable. A slot wrongly taken for a scalar would
-    // keep a reference into memory the reset hands back, so anything else --
-    // a string, Option, &T, an array of structs, an unregistered or
-    // literal-seeded layout -- makes the whole type ineligible. Box and
-    // Knowledge are excluded as in the value-copy paths (reference semantics;
-    // variance riding alongside the slots).
+    // Projected IR bound for one young copy of a `type_name` value, or -1 for
+    // an unsupported shape. Supported slots are DECLARED word scalars (f64,
+    // integers, bool), fixed arrays of them, and structs that are themselves
+    // copyable; anything else -- a string, Option, &T, an array of structs, an
+    // unregistered or literal-seeded layout -- makes the whole type
+    // ineligible. Box and Knowledge are excluded as in the value-copy paths
+    // (reference semantics; variance riding alongside the slots).
+    //
+    // Numeric provenance (why an accepted type needs no word scan). A word in
+    // a slot whose declared type is numeric can carry a reference's bits only
+    // through a conversion that keeps the word: a numeric-target `as`
+    // (lower_cast_type_is_rgn_numeric_target), `__ptr_of_ref`, or an
+    // extern/syscall argument. Every one of them passes the referent through
+    // __rgn_barrier(v, 0) (rgn_emit_cast_escape and the codegen store
+    // barriers), which marks the referent's region escaped, and that region
+    // then never resets. The hook is module-wide, not per function: it is
+    // installed whenever fn_count <= IR_MAX_FUNCS - lower_rgn_fn_headroom(),
+    // the same bound every region opening requires, and fn_count only grows,
+    // so no region can open after a conversion that went unhooked. The hook
+    // carries this alone: removing its calls (SOUNIO_RGN_BARRIER_SABOTAGE=call,
+    // scripts/ci/madaros_region_reclaim_gate.sh) breaks every encoded-reference
+    // witness. Scanning numeric words for "encoded references" adds no safety
+    // on top of it -- an exit classifier is beaten by any reversible
+    // arithmetic on the word (madaros_region_reclaim_cast_xor.sio) -- and it is
+    // wrong in the other direction: handle ids are the integers 1..handle_count, so any
+    // counter, index or tag that walks into that range reads as a live young
+    // reference and keeps the region forever (a 4M-iteration loop over
+    // `struct { a: f64, n: i64, c: f64 }` held 400 MB until this was fixed).
     fn rgn_copy_cost(self, type_name: Name, depth: i64) -> i64 with Mut, Panic, Div, Alloc {
         if depth > 4 { return 0 - 1 }
         if type_name.len <= 0 { return 0 - 1 }
@@ -42035,14 +42965,11 @@ impl Lowerer {
             let pos = self.struct_layout_field_pos(type_name, i)
             if pos < 0 { return 0 - 1 }
             if self.struct_layout_pos_array_len(pos) > 0 {
-                // Keep the existing conservative integer-array exclusion.
-                // Expanding eligibility needs its own result-relocation tests.
-                if lower_name_is_integer_type(self.rgn_pos_elem_type_name(pos)) { return 0 - 1 }
+                // Declared word-scalar array (word_scalar_array_len is set only
+                // from the field's declared type): numeric provenance above.
                 total = total + 26
             } else if self.rgn_pos_decl_word_scalar(pos) == 1 {
-                // Retain the existing integer-bearing aggregate exclusion;
-                // declaration types alone cannot exclude references.
-                if lower_name_is_integer_type(self.struct_layout_pos_named_type(pos)) { return 0 - 1 }
+                // Declared f64 / integer / bool: numeric provenance above.
                 total = total + 2
             } else {
                 let sub = self.rgn_copy_cost(self.struct_layout_pos_named_type(pos), depth + 1)
@@ -42082,84 +43009,16 @@ impl Lowerer {
         (lo, dst)
     }
 
-    // Returning scalar bits publishes them to the caller, an older target.
-    // Load raw words (no float conversion) and reuse the store classifier.
-    fn rgn_emit_result_array_escape_scan(self, src_reg: i64, elem_count: i64, target_reg: i64) -> Lowerer with Mut, Panic, Div, Alloc, IO {
-        var lo = self
-        let end_pair = lo.fresh_label()
-        lo = end_pair.0
-        let end_label = end_pair.1
-        lo = lo.emit(ir_branch_false(src_reg, end_label))
-        let idx_pair = lo.emit_i64_const(0)
-        lo = idx_pair.0
-        let idx_reg = idx_pair.1
-        let limit_pair = lo.emit_i64_const(elem_count)
-        lo = limit_pair.0
-        let limit_reg = limit_pair.1
-        let one_pair = lo.emit_i64_const(1)
-        lo = one_pair.0
-        let one_reg = one_pair.1
-        let top_pair = lo.fresh_label()
-        lo = top_pair.0
-        let top_label = top_pair.1
-        lo = lo.emit(ir_label(top_label))
-        let cond_pair = lo.fresh_reg()
-        lo = cond_pair.0
-        lo = lo.emit(ir_binop(cond_pair.1, idx_reg, BinaryOp::OpLt, limit_reg))
-        lo = lo.emit(ir_branch_false(cond_pair.1, end_label))
-        let elem_pair = lo.fresh_reg()
-        lo = elem_pair.0
-        lo = lo.emit(ir_index_get(elem_pair.1, src_reg, idx_reg))
-        let barrier_pair = lo.rgn_call("__rgn_barrier", elem_pair.1, target_reg, 0, 2)
-        lo = barrier_pair.0
-        let next_pair = lo.fresh_reg()
-        lo = next_pair.0
-        lo = lo.emit(ir_binop(next_pair.1, idx_reg, BinaryOp::OpAdd, one_reg))
-        lo = lo.emit(ir_copy(idx_reg, next_pair.1))
-        lo = lo.emit(ir_jump(top_label))
-        lo.emit(ir_label(end_label))
-    }
-
-    fn rgn_emit_result_escape_scan(self, src_reg: i64, type_name: Name, depth: i64) -> Lowerer with Mut, Panic, Div, Alloc, IO {
-        var lo = self
-        if depth > 4 {
-            let escaped = lo.rgn_call("__rgn_mark_all", 0, 0, 0, 0)
-            return escaped.0
-        }
-        let done_pair = lo.fresh_label()
-        lo = done_pair.0
-        let done_label = done_pair.1
-        lo = lo.emit(ir_branch_false(src_reg, done_label))
-        let target_pair = lo.emit_i64_const(0)
-        lo = target_pair.0
-        let target_reg = target_pair.1
-        let slots = lo.struct_layout_slot_count(type_name)
-        var i: i64 = 0
-        while i < slots {
-            let pos = lo.struct_layout_field_pos(type_name, i)
-            let fname = lo.struct_layout_pos_field_name(pos)
-            let arr_len = lo.struct_layout_pos_array_len(pos)
-            let is_scalar = lo.rgn_pos_decl_word_scalar(pos) == 1
-            let nested_name = lo.struct_layout_pos_named_type(pos)
-            let slot_pair = lo.fresh_reg()
-            lo = slot_pair.0
-            let slot_reg = slot_pair.1
-            lo = lo.emit(ir_field_get(slot_reg, src_reg, i, fname))
-            if arr_len > 0 {
-                lo = lo.rgn_emit_result_array_escape_scan(slot_reg, arr_len, target_reg)
-            } else if is_scalar {
-                let barrier_pair = lo.rgn_call("__rgn_barrier", slot_reg, target_reg, 0, 2)
-                lo = barrier_pair.0
-            } else {
-                lo = lo.rgn_emit_result_escape_scan(slot_reg, nested_name, depth + 1)
-            }
-            i = i + 1
-        }
-        lo.emit(ir_label(done_label))
-    }
-
     // Copy of a word-scalar array handle when it was born inside the region at
-    // `tok_reg`; the handle itself otherwise.
+    // `tok_reg`; the handle itself otherwise. The copy is one block move of
+    // the payload (__rgn_copy_payload), not an element loop: the region
+    // protocol copies every carried or returned array twice per exit, and per
+    // element each IrIndexGet/IrIndexSet pair pays two handle resolves, two
+    // bounds checks and a store barrier -- a 4096-element carried array made
+    // an iteration ~50x slower than the work inside it. The barrier is not
+    // needed: the destination is the youngest object in existence, so no store
+    // into it can make an older object point at a younger one. Reached only
+    // with tok != 0, i.e. on the x86-64 runtime; the arm64 stub is fail-closed.
     fn rgn_emit_young_array_copy(self, tok_reg: i64, src_reg: i64, elem_count: i64, elem_is_float: bool) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         let pair_dst = self.fresh_reg()
         var lo = pair_dst.0
@@ -42171,9 +43030,11 @@ impl Lowerer {
         lo = pair_done.0
         let done_label = pair_done.1
         lo = lo.emit(ir_branch_false(young_pair.1, done_label))
-        let copy_pair = lo.emit_fixed_array_value_copy(src_reg, elem_count, elem_is_float)
-        lo = copy_pair.0
-        lo = lo.emit(ir_copy(dst_reg, copy_pair.1))
+        let alloc_pair = lo.emit_array_alloc_like_source(src_reg, elem_count, elem_is_float)
+        lo = alloc_pair.0
+        let move_pair = lo.rgn_call("__rgn_copy_payload", alloc_pair.1, src_reg, 0, 2)
+        lo = move_pair.0
+        lo = lo.emit(ir_copy(dst_reg, alloc_pair.1))
         lo = lo.emit(ir_label(done_label))
         (lo, dst_reg)
     }
@@ -42249,8 +43110,25 @@ impl Lowerer {
         } else {
             self.lower_opt_expr_ref(&e.left)
         }
-        let lo = pair.0
+        var lo = pair.0
         let reg = pair.1
+        // Leaving the function from inside loops: pop their iteration regions,
+        // innermost first, without resetting them -- what they made, the
+        // returned value included, then belongs to the enclosing region.
+        if LOWER_LOOP_RGN_DEPTH > 0 && lo.current_fn == LOWER_LOOP_RGN_FN_ID && LOWER_KERNEL_CONT_LABEL < 0 {
+            var d = LOWER_LOOP_RGN_DEPTH - 1
+            while d >= 0 {
+                if LOWER_LOOP_SABOTAGE == 2 || LOWER_LOOP_SABOTAGE == 3 {
+                    let zs = lowerer_emit_i64_const_mut(&! lo, 0)
+                    let sab_pair = lo.rgn_call("__rgn_exit_scalar", LOWER_LOOP_RGN_TOKS[d as usize], zs, 0, 2)
+                    lo = sab_pair.0
+                } else {
+                    let leave_pair = lo.rgn_call("__rgn_leave", LOWER_LOOP_RGN_TOKS[d as usize], 0, 0, 1)
+                    lo = leave_pair.0
+                }
+                d = d - 1
+            }
+        }
         // Inside a kernel lane loop, `return` ends the lane, not the launch.
         // Emitting IrReturn here would abandon every remaining lane — the shape
         // `if (early_out) return` is common enough in kernels that getting this
