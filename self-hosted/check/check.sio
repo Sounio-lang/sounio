@@ -3228,11 +3228,8 @@ fn checker_ty_from_unit_dim(c: *mut Checker, dim: UnitDim) -> TypeEntry with Mut
     if pair.1 >= 0 {
         return ty_with_unit(ty_f64(), pair.1)
     }
-    let found = (*c).units.find_by_dim(dim)
-    if found >= 0 {
-        return ty_with_unit(ty_f64(), found)
-    }
-    ty_f64()
+    // The sticky registry overflow is diagnosed by the item capacity guard.
+    ty_error()
 }
 
 fn checker_lower_unit_or_ref_type_mut(c: *mut Checker, te: TypeExpr, is_mut_ref: bool) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
@@ -3254,6 +3251,19 @@ fn checker_lower_unit_or_ref_type_mut(c: *mut Checker, te: TypeExpr, is_mut_ref:
 }
 
 fn checker_type_env_capacity_ok_inplace(c: *mut Checker) -> bool with Mut, Panic, Div, IO {
+    // Both registries must retain every brand/binding, including those created
+    // while collecting signatures or checking a function body (#3548).
+    if (*c).units.overflowed {
+        (*c).had_error = true
+        if !(*c).units.overflow_reported {
+            (*c).units.overflow_reported = true
+            (*c).error_count = (*c).error_count + 1
+            print("error[E301]: ")
+            print_error_message(301)
+            print("\n")
+        }
+        return false
+    }
     if !(*c).env.overflowed { return true }
     (*c).had_error = true
     if !(*c).env.overflow_reported {
@@ -9296,6 +9306,7 @@ fn checker_brand_with_dim(c: *mut Checker, result: TypeEntry, d: UnitDim) -> Typ
     }
     let pair = unit_registry_intern_dim((*c).units, d)
     (*c).units = pair.0
+    if pair.1 < 0 { return ty_error() }
     ty_with_unit(result, pair.1)
 }
 
@@ -21325,6 +21336,7 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 298 { print("perform with live linear bindings (a non-resuming handler would drop them)") }
     else if code == 299 { print("handler backend v1 limit exceeded (results and operation values are i64 words; handler nesting depth at most 8)") }
     else if code == 300 { print("integer constant is out of range for the annotated type") }
+    else if code == 301 { print("unit registry capacity exceeded; refusing to discard a unit dimension") }
     else if code == 269 { print("a `where` refinement on Knowledge<T> is not enforced by this compiler yet: the predicate would be silently ignored, so it is refused") }
     else if code == 270 { print("`as string` does not convert a number, bool or char to text: no engine formats the value, so the cast is refused") }
     else if code == 263 { print("qualified call is ambiguous: this qualifier names a module you `use`d, but also collides with an unrelated struct/enum method of the same name, and the compiler cannot yet guarantee which one runs") }
@@ -29016,6 +29028,17 @@ impl Checker {
     // writes landed at raw-layout offsets past Checker's first array (#2966).
     fn type_env_capacity_ok(self) -> (Checker, bool) with Mut, Panic, Div, IO {
         var c = self
+        if c.units.overflowed {
+            c.had_error = true
+            if !c.units.overflow_reported {
+                c.units.overflow_reported = true
+                c.error_count = c.error_count + 1
+                print("error[E301]: ")
+                print_error_message(301)
+                print("\n")
+            }
+            return (c, false)
+        }
         if !c.env.overflowed { return (c, true) }
         c.had_error = true
         if !c.env.overflow_reported {
