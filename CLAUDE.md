@@ -70,7 +70,7 @@ enforced.
 |---|---|
 | `let x = 5;` | `let x = 5` — **style, not a compile error.** Measured 2026-08-20: the trailing `;` is accepted and the program runs. Prefer the semicolon-free form; do not expect the compiler to enforce it. |
 | `let mut y = 10` | `var y = 10` — ✓ enforced, `error[E040]` |
-| `&mut T` | `&!T` — ✓ enforced: Madaros `error[E286]`; legacy `lean_single` `error[E041]` |
+| `&mut T` | `&!T` — ✓ enforced: Madaros `error[E287]`; legacy `lean_single` `error[E041]` |
 | `assert!(cond)` | `assert(cond)` — ✓ enforced as of the ELF this repo ships, `error[E043]` (*Sounio does not use Rust macros*). **The old "DANGEROUS, checks clean and is inert" reading was true of the committed binary, not of the source**: measured 2026-08-29, `assert!(1 == 2)` is refused by a Madaros built from `self-hosted/`, and accepted-then-inert by the ELF that was committed before it. The one-character footgun is closed the moment the shipped ELF is refreshed. |
 | `println!("hi")` | `println("hi")` — ✓ enforced, `error[E043]`, same measurement and same caveat as the row above. The *"check clean and SIGSEGV at run time (`rc=139`)"* behaviour recorded in `docs/audit/RUST_MACRO_ACCEPTANCE_2026-08-20.md` is what the **committed** ELF still does; source refuses. |
 | `#[test]`, `#[derive()]` | No attributes — ✓ enforced, fails to parse |

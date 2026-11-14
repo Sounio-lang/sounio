@@ -173,7 +173,7 @@ for i, line in enumerate(lines):
         break
 
 # Registry constructors are another emission mechanism: diag_use_after_move
-# builds a Diagnostic with diag_error(E287), rather than printing a literal tag.
+# builds a Diagnostic with diag_error(E288), rather than printing a literal tag.
 # Include registry-only identities without replacing the live checker's message.
 registry = open('self-hosted/diagnostics/mod.sio').read()
 for m in re.finditer(r'\bdiag_error\(E(\d+)\)', registry):

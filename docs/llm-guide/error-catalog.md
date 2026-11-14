@@ -239,7 +239,7 @@ presenting them as current requirements. Do not demote a precision-sensitive
 task to `f64` to bypass a refusal.
 
 For ontology/causal failures, inspect the actual graph/class and rule.
-Modular `E285`, `E150`–`E152`, `E261`/`E262` name ontology obligations
+Modular `E286`, `E150`–`E152`, `E261`/`E262` name ontology obligations
 on relevant paths; `E067`/`E068` and `E254`–`E257` concern causal-query
 or independence boundaries where wired. A fabricated node or weakened graph
 does not repair the original model. A compiler check is not empirical causality.
@@ -247,6 +247,8 @@ does not repair the original model. A compiler check is not empirical causality.
 Madaros reserves `E041` for **unit mismatch**. The scoped registry entries in
 [`diagnostics/mod.sio`](../../self-hosted/diagnostics/mod.sio) and the explanations
 below agree with its checker and parser. `W041` is a separate warning code.
+The audit reserves `E285` for #3549 (dimensionless transcendental arguments)
+and `E301` for #3548 (unit-registry exhaustion); this remap uses `E286`–`E288`.
 The legacy engine selected by `SOUNIO_SOUC_ENGINE=lean_single` retains `E041`
 for Rust `&mut` syntax and `E001` for a unit mismatch in a `let` binding; it
 does not implement the same ontology validation. Aligning that engine requires
@@ -263,7 +265,7 @@ or rename codes.
 | `E035` | Modular and seed effect reporters exist. The MCP resource titles it “Recursive type rejected,” which does not describe the current effect reporter. |
 | `E036` | Seed observation-boundary identity versus modular confidence bound. |
 | `E040` | Parser/seed `let mut` refusal versus modular linear-consumption checks. |
-| `E041` | Madaros: unit mismatch. Legacy `lean_single`: `&mut` syntax refusal (unit mismatch in a `let` uses `E001`). Madaros uses `E285` for ontology weakening and `E286` for `&mut`; the registry uses `E287` for use-after-move. |
+| `E041` | Madaros: unit mismatch. Legacy `lean_single`: `&mut` syntax refusal (unit mismatch in a `let` uses `E001`). Madaros uses `E286` for ontology weakening and `E287` for `&mut`; the registry uses `E288` for use-after-move. |
 | `E042`, `E043` | Parser/seed attribute or macro refusal versus modular refinement or unit-conversion identity. |
 | `E070`, `E072` | Historical kernel explanations coexist with other checker identities. Current modular kernel return refusal is `E253`; modular `E072` names a malformed conditional-independence claim. |
 | `E200`, `E221` | Seed undefined identifier / missing main versus modular `Forgettable` effect obligation / missing native math implementation. |
@@ -489,9 +491,9 @@ page is not a fresh execution receipt.
 | E282 | lexer (Madaros, lean_single) | error | identifier too long: an identifier holds at most 256 bytes and is refused with its location instead of being split | ADR-015 row 11 (first slice). `id_long300` is refused, `id_long256` is accepted. The 128-byte clamps further down (`parser_name_at`, the export pool) are unchanged. |
 | E283 | lexer (Madaros, lean_single) | error | ambiguous operator spelling: `a+-2` (plus a negative, or the uncertainty operator) and `a&!b` (and-not, or a mutable borrow) are refused with a hint to add a space | ADR-015 row 9. `x<-1` is no longer ambiguous: it reads as `x < -1`. `1.0 +- 0.1` and `&!T` after a space, `(`, `,` or `:` are unchanged. |
 | E284 | lexer (Madaros, lean_single) | error | digit separator `_` must sit between two digits: `1__0` and `10_` are refused; `1_000` is a number and `500_mg` keeps its unit suffix | ADR-015 row 8. `lean_single` now accepts `_` between digits like Madaros (`1_000_000`, `0xFF_FF`, `1_000.000_5`). |
-| E285 | type-checker/ontology | error | ontology subsumption could not be verified | [E285.md](explanations/E285.md) |
-| E286 | parser/compat | error | Sounio uses `&!T` for exclusive references, not `&mut T` | [E286.md](explanations/E286.md) |
-| E287 | diagnostics/ownership | error | use after move (registry constructor) | [E287.md](explanations/E287.md) |
+| E286 | type-checker/ontology | error | ontology subsumption could not be verified | [E286.md](explanations/E286.md) |
+| E287 | parser/compat | error | Sounio uses `&!T` for exclusive references, not `&mut T` | [E287.md](explanations/E287.md) |
+| E288 | diagnostics/ownership | error | use after move (registry constructor) | [E288.md](explanations/E288.md) |
 | E290 | type-checker/effects | error | unknown effect in handle/perform (SIO-417) | — |
 | E291 | type-checker/effects | error | unknown operation for effect (SIO-417) | — |
 | E292 | type-checker/effects | error | perform of effect not declared or handled here (SIO-417) | — |
