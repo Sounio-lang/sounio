@@ -21,35 +21,42 @@ owning document records it closed with a receipt.
 
 ## 1. Silent wrong values (the program runs and the number is wrong)
 
+### Open items
+
 | item | engine | owner |
 |---|---|---|
-| `.5` evaluates to 0 | lean_single | [receipt](../spec/2026-10/18-lexical-execution-receipt.md) §6, refused by PR #3019 (unmerged at the time of writing); ruling [ADR-015](../decisions/adr-015-lexical-structure.md) item 2: refused now, 0.5 only once both engines agree |
-| `affine`, `linear`, `study` accepted as names, read as 0 | lean_single | receipt §6; refused by [PR #3019](https://github.com/Sounio-lang/sounio/pull/3019), unmerged at the time of writing; the seed's misreading of a local `study` had reached Madaros (`check.sio`, `active_study_has_hypothesis_outcome`) |
-| any token that starts no expression loads 0: `let var = 5; println(var)` prints 0, `println()` prints 0, `+a` is 0; reached by 166 files that compile today, including `stdlib/epistemic/knightian.sio:309` (p-box variance 0 under the seed) | lean_single | receipt §6, [`seed_fallback_sweep.tsv`](../audit/S01_LEXICAL_PROBES_2026-10-22/seed_fallback_sweep.tsv) |
-| integer literals that do not fit wrap (`99999999999999999999` → `7766279631452241919`) | both | receipt; D-33.1 |
-| unknown ASCII byte skipped, changing the expression (`1 $ 2` prints `1`) | lean_single | receipt |
-| no f64 literal is correctly rounded at the midpoint probe | both | receipt; [D-27, decided: ADR-020](../decisions/adr-020-rulings-2026-10-25.md) |
-| cross-call first-order variance not carried for general user calls (KL-11) | Madaros | [`KNOWN_LIMITATIONS.md`](../compiler/KNOWN_LIMITATIONS.md) |
+| cross-call first-order variance not carried for general user calls (KL-11) | Madaros | [`KNOWN_LIMITATIONS.md`](../compiler/KNOWN_LIMITATIONS.md) (`pow` FO + mixed Hessian closed; sub/neg call boundary closed) |
 | `Knowledge` propagation carries no rounding term at all | both | [interval proposal](../proposals/CERTIFIED_INTERVAL_PRIMITIVE_2026-10-22.md) §1 |
 
-Fixed on the Madaros side by [PR #3016](https://github.com/Sounio-lang/sounio/pull/3016), **unmerged at the time of writing** (receipt §4): `\0` read as the digit
+### Closed items (with receipts)
+
+| item | engine | resolution / receipt |
+|---|---|---|
+| `.5` evaluates to 0 | lean_single | **CLOSED**: Refused with diagnostic (suggests `0.5`) in `b44bf83fe7` (PR #3019); ruled in [ADR-015](../decisions/adr-015-lexical-structure.md) item 2. |
+| `affine`, `linear`, `study` accepted as names, read as 0 | lean_single | **CLOSED**: Refused on `lean_single` in `b44bf83fe7` (PR #3019); contextual names on Madaros. |
+| any token that starts no expression loads 0: `let var = 5; println(var)` prints 0, `println()` prints 0, `+a` is 0 | lean_single | **CLOSED**: `primary_fallback_refuses()` eliminated in `b44bf83fe7`; reports syntax error with location. |
+| unknown ASCII byte skipped, changing the expression (`1 $ 2` prints `1`) | both | **CLOSED**: Madaros side fixed in PR #3016 (`16477b9517`); `lean_single` reports `LEX_ERROR_KIND = 1` with location. |
+| integer literals that do not fit wrap (`99999999999999999999` → `7766279631452241919`) | both | **CLOSED**: Ruled in [ADR-015](../decisions/adr-015-lexical-structure.md) item 1 (D-33.1, E276). Implemented via `parser_span_int_literal_overflow` on Madaros and `lit_int_width_class` on `lean_single`; decimal $2^{63}$ in $u64$ band in SIO-3343. |
+| no f64 literal is correctly rounded at the midpoint probe | both | **CLOSED**: Ruled in [ADR-020](../decisions/adr-020-rulings-2026-10-25.md) item D-27. Implemented on both engines via Algorithm M in PR #3259 (`918e7e1824`, `3562427052`) and verified by `tests/run-pass/float_literal_long_decimal_midpoint_2826.sio`; probe goldens refreshed in `5d6f3d3271`; `benchmarks/chemistry/RESULTS.md` §7.7 re-derived. |
+
+Fixed on the Madaros side by [PR #3016](https://github.com/Sounio-lang/sounio/pull/3016) (`16477b9517`, merged; receipt §4): `\0` read as the digit
 `0`, `\x41` read as `x41`, `\q` read as `q`, `'\q'` read as 113, an unterminated
 `/*` swallowing the rest of the file.
 
 ## 2. Refusals without a location
 
-Fixed on the Madaros side by PR #3016, unmerged at the time of writing (receipt §4): unknown character,
+### Closed items (with receipts)
+
+Fixed on the Madaros side by PR #3016 (`16477b9517`, merged; receipt §4): unknown character,
 unterminated comment and string, invalid escape, line number after a multi-line
 string, parse diagnostics printing two token numberings, `let x = @y` failing
-with no message. Open: lean_single's misleading messages for an unterminated
-string (`unbalanced braces`).
+with no message.
+
+Fixed on the `lean_single` side by PR #3161 (`9cccda5fdd`, merged; witness `tests/compile-fail/unterminated_string_lean_single.sio`, SIO-266): unterminated string refuses with E273 at opening quote instead of falling through to `unbalanced braces`.
 
 ## 3. Decisions owed
 
-[`PENDING.md`](../decisions/PENDING.md) D-01 – D-34. Added today: **D-33**, the
-thirteen lexical rulings (one blocked by a measured collision: refusing an
-unclosed character literal breaks `&'static` lifetimes in the standard library),
-and **D-34**, the five decisions of the interval proposal.
+[`PENDING.md`](../decisions/PENDING.md) D-01 – D-35 ruled in [ADR-028](../decisions/adr-028-rulings-2026-11-09.md). Implementation tracking under EPIC · Decisions owed. D-33 lexical rulings tracked under ADR-015; D-34 certified intervals under ADR-019.
 
 ## 4. Self-hosting and memory
 
@@ -61,7 +68,7 @@ and **D-34**, the five decisions of the interval proposal.
 | `Lowerer` (~4.5 MB) passed by value in 618 methods of `ir/lower.sio` | PR #3015; refactor to `&!Lowerer` sized at weeks | memory audit §2.2 (likely carrier of the unexplained BSS) |
 | 3.8 GB static reservation; 1.23 GB explained by module arrays; seed gives every ≥1 MiB by-value aggregate a fresh block per site (reproduced) | measured | memory audit §2 |
 | committed Madaros touches 1.25 GB to compile one line; source-built 230 MB | measured | memory audit §1.2 |
-| phase arenas that never point upward; `munmap` per phase; `u32` indices | design | memory audit §4; complements [ADR-010](../decisions/adr-010-madaros-region-reclamation.md) |
+| phase arenas that never point upward; `munmap` per phase; `u32` indices | [ADR-026](../decisions/adr-026-phase-arenas.md) | complements [ADR-010](../decisions/adr-010-madaros-region-reclamation.md); memory audit §4 |
 
 ## 5. Specification
 
