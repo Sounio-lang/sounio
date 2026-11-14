@@ -1,0 +1,1 @@
+`variance_of` now preserves measurement sensitivities when straight-line mutable totals interleave `measure()` declarations and updates. Independent three- and ten-source totals with standard uncertainty 0.1 now produce variances 0.03 and 0.10, while repeated uses of a source retain their covariance (#3547). The 32-channel limit is unchanged.
