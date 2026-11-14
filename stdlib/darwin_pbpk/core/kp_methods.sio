@@ -1,0 +1,2270 @@
+//@ run-pass
+//@ expect-stdout: PASS
+
+use darwin_pbpk::core::tissue_composition::{tc_pey_cell, tc_pey_intf, tc_pey_cnl, tc_pey_cnpl, tc_pey_cw, tc_pey_iw, tc_pey_ialb, tc_pey_pt_supported, tc_pey_pt_count, tc_peyret_plasma_nl, tc_peyret_plasma_npl, tc_peyret_plasma_alb, tc_log_vow, tc_vow_afe}
+
+// stdlib/darwin_pbpk/core/kp_methods.sio
+// ----------------------------------------------------------------------------
+// PBPK28 core module: the three published tissue:plasma partition (Kp)
+// predictors, each carrying its own DECLARED APPLICABILITY DOMAIN and its own
+// CALIBRATION STATUS, plus the ensemble rule that refuses -- fail-closed -- to
+// form a model-form dispersion term when those two properties are not uniform
+// across the admitted members.
+//
+// WHY THE DOMAIN AND CALIBRATION FLAGS ARE PART OF THE DATA, NOT A COMMENT
+// ------------------------------------------------------------------------
+// Measured 2026-10-31, muscle, unbound tissue:plasma partition Kpu:
+//
+//   drug                    R-R      Schmitt(raw)   Poulin-Theil    spread
+//   haloperidol (strong B)  80.90        796.29           8.69       91.7x
+//   midazolam (weak base)   35.16         32.10          31.00        1.1x
+//   neutral, logP 3         25.42         16.30          22.35        1.6x
+//
+// In domain the three agree to 1.1x.  That spread is NOT by itself a Type B
+// standard uncertainty: the members read the same composition table and the
+// same drug inputs, so they are correlated and their spread can UNDERSTATE the
+// uncertainty; turning it into a u needs a stated distribution, weights and
+// dependence model, which this module does not supply.  Out of domain they span
+// ~92x, and that number is not an uncertainty either -- it is the distance to
+// the members that do not apply.  Poulin-
+// Theil has no acidic-phospholipid term at all; predicting a strong base with
+// it was the stated motivation for Rodgers-Rowland.  So a dispersion computed
+// over a non-uniform ensemble reports a domain error as an uncertainty.
+//
+// The second, independent trap is calibration.  The Schmitt method AS SHIPPED
+// in the reference tool (httk) applies, by default, a fitted per-tissue log-log
+// shrinkage -- Pearce et al. 2017 -- on top of the mechanistic core:
+//
+//   Kpu_corr = 10^(a + b*log10(Kpu_raw * fu_p)) / fu_p ,   b < 1 everywhere
+//
+// For haloperidol this moves predicted Vss from 21350 L to 2258 L against
+// 1216 L observed (17.6x -> 1.86x); in adipose, brain and skin the mechanistic
+// part supplies the ORDERING and the regression supplies the LEVEL (factor
+// 0.03-0.04x).  Pearce was fitted to in vivo partition data, so a dispersion
+// taken between an uncalibrated member and a calibrated one MAY share data with
+// whatever it is later evaluated against -- the calibration / discrepancy
+// confounding of Brynjarsdottir & O'Hagan.  Whether Pearce 2017's calibration
+// set actually includes the drugs evaluated here has NOT been checked, and a
+// calibrated model is not unusable by that fact alone.  kp_ensemble admits only
+// members of one calibration status as a conservative default, not because the
+// mixing has been shown to be invalid in this case.
+//
+// ORACLE VALIDATION.  The Schmitt predictors here reproduce
+// httk::predict_partitioning_schmitt (httk 2.7.4) to 1.000x on 10 of 11
+// tissues in both modes; the one 0.4% deviation was gut, and it is explained:
+// httk normalises Fcell and Fint by their sum, and gut is the only tissue whose
+// sum is not 1.000 (0.900 + 0.096 = 0.996).  That normalisation is applied
+// below.  Poulin-Theil has NO executable oracle -- httk implements only Schmitt
+// -- so it is faithful to the primary source on the dominant terms but its
+// interstitial term is a reconstruction.  See kpm_pt_oracle_validated().
+//
+// SCOPE OF THIS MODULE.  Muscle only.  Muscle is 33.89 L of the 66.6 L of
+// tissue in the Rodgers-Rowland Table VI human volumes and dominates Vss, so
+// it is the right single-tissue witness.  Extending to all 14 organs requires
+// an acidic-phospholipid field [AP-] in core/tissue_composition.sio, which that
+// table does not yet carry.  Composition constants are therefore inline and
+// each is attributed below, rather than read from a table that cannot yet
+// express the Rodgers-Rowland parameterisation.
+//
+// Per dissertation convention this stdlib module stays PLAIN f64; the epistemic
+// wrapping (Knowledge<f64, eps>) is demonstrated in the witness tests.
+//
+// References:
+//   Rodgers T & Rowland M (2007) Pharm Res 24:918-933 -- Eqs. 1-6, Tables II/VII
+//   Schmitt W (2008) Toxicol In Vitro 22:457-467 (+ corrigendum) -- Eqs. 1-19
+//   Pearce RG et al. (2017) J Pharmacokinet Pharmacodyn 44:549-565 -- regression
+//   Peyret T, Poulin P & Krishnan K (2010) Toxicol Appl Pharmacol 249:197-207
+//   Poulin P & Theil F-P (2002) J Pharm Sci 91:129-156
+//   Brynjarsdottir J & O'Hagan A (2014) Inverse Problems 30:114007
+//
+// PRIOR ART -- what this module does NOT claim
+// --------------------------------------------
+// The critique encoded in the domain and calibration gates is NOT original to
+// this work, and the gates are built on it rather than asserting it:
+//
+//   Korzekwa K & Nagar S (2016) Pharm Res 34:529-534,
+//   doi 10.1007/s11095-016-2089-8 -- argue current PBPK models are
+//   "mechanistic but a posteriori and semi-empirical". They state that
+//   back-calculating Ka_AP from the blood:plasma ratio is CIRCULAR ("K_aAP is
+//   calculated from erythrocyte partitioning, which is itself highly
+//   correlated with tissue partitioning, and K_aAP is then used to calculate
+//   tissue partitioning"); that errors in fu_p "will largely cancel" as a
+//   consequence; that the neutral-phospholipid 70%-water / 30%-lipid split
+//   rests on a single HLB value for lecithin whose reported range is 3-9; and
+//   that the vegetable-oil:water correlation used for adipose has an average
+//   fold error of 5.1 over n=32 drugs. They also note that tuning parameters
+//   to recover an observed Vss makes the model empirical and destroys the
+//   tissue-specific information.
+//
+//   Yau E, Olivares-Morales A & Parrott NJ (2020) AAPS J 22:41,
+//   doi 10.1208/s12248-020-0418-7 -- global sensitivity analysis of the
+//   Rodgers-Rowland model. The local sensitivities quoted in this module are a
+//   special case of that published analysis.
+//
+//   Berry LM et al. (2011) Drug Metab Dispos, doi 10.1124/dmd.111.040766 --
+//   Rodgers-Rowland overpredicts Vss by more than fourfold for logP > 3.5,
+//   with some compounds near 100-fold.
+//
+//   Coutinho AL, Cristofoletti R & Wu F (2024) Pharm Res 41:1121-1138,
+//   doi 10.1007/s11095-024-03703-4 -- six Vss methods under logP uncertainty;
+//   the Rodgers-Rowland variants are the most logP-sensitive and overpredict.
+//
+//   Lautz LS, Dorne JLCM & Punt A (2024) Toxicol Lett 398:140-149,
+//   doi 10.1016/j.toxlet.2024.06.012 -- partition-coefficient methods compared
+//   across species, stratified by ionisation state.
+//
+//   Farahat M, Flaherty DT & Fox Z (2026) npj Syst Biol Appl 12(1),
+//   doi 10.1038/s41540-026-00739-7 -- four PBPK models validated against 1854
+//   datapoints, then perturbed; they report model disagreement concentrated in
+//   "lipophilic, protonated molecules" and identify the property and parameter
+//   interactions driving it. That is the same localisation this module's
+//   domain gate enforces, measured at far larger scale.
+//
+//   Hartung N & Huisinga W, PAGE 32 (2024) Abstr. 11096 -- unify the two
+//   Rodgers routes and question interpolation across the pKa 7.0 jump that
+//   this module still reproduces (see the note in kpm_rodgers_rowland).
+//
+// WHAT THIS MODULE DOES, AND ITS LIMITS.  It implements a refusal: kpm_ensemble
+// declines to form a dispersion statistic when an admitted member is outside
+// its declared domain or calibration status is not uniform.  Three limits:
+//   - it is a RUNTIME check over flags declared by the caller, not a static
+//     guarantee of the type system;
+//   - it cannot authenticate those flags -- a caller who sets has_ma = true on
+//     an imputed membrane affinity is admitted (witnessed by T8 below);
+//   - whether existing tools (PK-Sim, Simcyp, GastroPlus) already gate on
+//     applicability domain has not been checked, so no novelty is claimed.
+//
+// Author: Demetrios Chiuratto Agourakis
+
+use math::pure::{exp, ln, log10}
+use epistemic::budget64::{Budget64, budget64_new, budget64_add_type_b, budget64_finalize, budget64_percent, budget64_dominant_idx}
+
+// ============================================================================
+// Shared drug inputs
+// ============================================================================
+// One input record feeds every member, so that any residual disagreement is
+// attributable to the methods and not to each paper's own input curation.
+// Note that this does NOT make the members comparable by itself: measured
+// membrane affinity (log_ma) is read only by Schmitt and has no Rodgers-Rowland
+// analogue.  Measured 2026-10-31 at muscle, haloperidol.  These are
+// SEMI-ELASTICITIES of Kpu, d(ln Kpu)/d(x) per unit of x -- not elasticities,
+// and not of Kp:
+//     logP    R-R  0.49   Schmitt  0.03
+//     pKa     R-R -0.47   Schmitt -0.05
+//     fu_p    R-R -3.95   Schmitt -0.001
+//     R / MA  R-R  1.72   Schmitt  2.26
+// For the quantity that enters Vss the picture changes: the ELASTICITY of Kp
+// (= fu_p * Kpu) to fu_p is about -0.03 for Rodgers-Rowland, because the
+// blood:plasma back-calculation cancels fu_p (Korzekwa & Nagar 2016), and about
+// +1.00 for Schmitt.  The members depend on different inputs; that alone does
+// NOT show that they estimate different quantities.
+
+struct KpInputs {
+    log_p:   f64,   // n-octanol:water log P of the NEUTRAL species
+    log_ma:  f64,   // log membrane affinity; read only when has_ma is true
+    has_ma:  bool,  // true only when log_ma is MEASURED, never imputed from logP
+    pka:     f64,   // monoprotic basic pKa (0.0 for a neutral compound)
+    is_base: bool,
+    fu_p:    f64,   // fraction unbound in plasma
+    rb:      f64,   // blood:plasma ratio
+    mw:      f64    // g/mol
+}
+
+// A single member's verdict.  Carrying in_domain and calibrated alongside the
+// number is the whole point: a bare f64 cannot be audited.
+struct KpMember {
+    kpu:        f64,
+    in_domain:  bool,
+    calibrated: bool,   // output passed through a correction fitted to data
+    code:       i32     // 0 = R-R, 1 = Schmitt raw, 2 = Schmitt+Pearce, 3 = Poulin-Theil
+}
+
+// ============================================================================
+// Physiological constants (muscle + blood), each attributed
+// ============================================================================
+pub fn kpm_ph_plasma() -> f64 { return 7.40 }
+pub fn kpm_ph_rbc()    -> f64 { return 7.22 }   // R-R 2007 Tab. VII
+pub fn kpm_hematocrit()-> f64 { return 0.45 }
+// Schmitt / httk tissue.data, muscle intracellular pH.  Flagged: this 6.81 is
+// biased acid relative to modern in vivo 31P-MRS (7.08); see the pH card.
+pub fn kpm_ph_cell_schmitt() -> f64 { return 6.81 }
+// Rodgers-Rowland intracellular pH (their Tab. VII convention).
+pub fn kpm_ph_cell_rr() -> f64 { return 7.00 }
+// Peyret 2010 cell pH for the Poulin-Theil algorithm.
+pub fn kpm_ph_cell_pt() -> f64 { return 7.00 }
+// ion-permeability ratio alpha (Schmitt): charged species membrane access
+pub fn kpm_alpha() -> f64 { return 0.001 }
+
+// ============================================================================
+// PER-ORGAN COMPOSITION  (added 2026-11-08) -- ONE SOURCE, httk 2.7.4
+// ============================================================================
+// Every field below is read from httk 2.7.4 data/Tables.RData, tissue.data,
+// Species == "Human", plus the per-tissue Pearce regression coefficients from
+// pearce2017regression (adj.fup.intercept / adj.fup.slope).  Nothing here is
+// interpolated, averaged or carried over from a neighbouring tissue.
+//
+// Using ONE composition source across all members is deliberate and it is a
+// change of meaning, not just of coverage: on muscle the ensemble mixed R-R
+// Tab. VII with httk (the -11.52% [AP-] discrepancy recorded in
+// tissue_composition.sio), so part of its dispersion was source disagreement
+// rather than model form.  With a single source the dispersion is closer to
+// model form alone -- and, by the same token, composition perturbations should
+// become MORE blind, because every member now reads the same numbers.  That is
+// a prediction, pinned by test, not a hope.
+//
+// TWO ORGANS DO NOT CLOSE, and both are declared rather than smoothed:
+//  - bone: FWc 0.26 + FLc 0.02 + FPc 0.21 = 0.49, a 51% shortfall.  The
+//    missing volume is mineral, for which the Schmitt cell-fraction scheme has
+//    no category (density 1.976 g/cm^3 against ~1.0 for soft tissue confirms
+//    it).  Bone is therefore REFUSED, not modelled: coverage is 10 of 14, not
+//    11.  Pinned by test.
+//  - gut: Fcell 0.900 + Fint 0.096 = 0.996.  httk normalises the pair by its
+//    sum, which is the documented origin of the one 0.4% deviation in the
+//    oracle validation.  The normalisation is reproduced here rather than
+//    corrected, so the oracle comparison stays meaningful.
+struct SchmittComp {
+    f_cell: f64,
+    f_int:  f64,
+    f_wc:   f64,
+    f_lc:   f64,
+    f_pc:   f64,
+    fn_lc:  f64,
+    fn_plc: f64,
+    fa_plc: f64,
+    ph_c:   f64,
+    pe_i:   f64,   // Pearce adj.fup.intercept
+    pe_s:   f64    // Pearce adj.fup.slope
+}
+
+// 14-organ index, matching tissue_composition.sio:
+//   0=blood, 1=liver, 2=kidney, 3=brain, 4=heart, 5=lung, 6=muscle,
+//   7=adipose, 8=gut, 9=skin, 10=bone, 11=spleen, 12=pancreas, 13=other
+// Supported: 1-9 and 11.  Refused: 0 (plasma is not a cell), 10 (bone does
+// not close), 12 and 13 (absent from httk).
+pub fn kpm_organ_supported(organ: i32) -> bool {
+    if organ <= 0  { return false }
+    if organ == 10 { return false }
+    if organ >= 12 { return false }
+    return true
+}
+
+pub fn kpm_organ_count() -> i32 { return 10 }
+
+// Why organ 10 is refused, as a datum rather than a comment.
+pub fn kpm_organ_bone_closure() -> f64 { return 0.49 }
+
+fn kpm_organ_comp(organ: i32) -> SchmittComp {
+    if organ == 1  { return SchmittComp { f_cell: 0.77000, f_int: 0.23000, f_wc: 0.72440, f_lc: 0.092310, f_pc: 0.18330, fn_lc: 0.724400, fn_plc: 0.225100, fa_plc: 0.050510, ph_c: 7.23, pe_i: 0.475, pe_s: 0.621 } }
+    if organ == 2  { return SchmittComp { f_cell: 0.83500, f_int: 0.16500, f_wc: 0.76610, f_lc: 0.064070, f_pc: 0.16980, fn_lc: 0.637500, fn_plc: 0.294000, fa_plc: 0.068530, ph_c: 7.22, pe_i: 0.452, pe_s: 0.673 } }
+    if organ == 3  { return SchmittComp { f_cell: 0.99500, f_int: 0.00500, f_wc: 0.80430, f_lc: 0.112300, f_pc: 0.08341, fn_lc: 0.373400, fn_plc: 0.458800, fa_plc: 0.167800, ph_c: 7.10, pe_i: 0.0 - 0.167, pe_s: 0.543 } }
+    if organ == 4  { return SchmittComp { f_cell: 0.75000, f_int: 0.25000, f_wc: 0.69570, f_lc: 0.137500, f_pc: 0.16680, fn_lc: 0.890100, fn_plc: 0.079010, fa_plc: 0.030900, ph_c: 7.10, pe_i: 0.116, pe_s: 0.683 } }
+    if organ == 5  { return SchmittComp { f_cell: 0.80000, f_int: 0.20000, f_wc: 0.80380, f_lc: 0.013160, f_pc: 0.18300, fn_lc: 0.300000, fn_plc: 0.560000, fa_plc: 0.140000, ph_c: 6.60, pe_i: 0.087, pe_s: 0.866 } }
+    if organ == 6  { return SchmittComp { f_cell: 0.85000, f_int: 0.15000, f_wc: 0.79910, f_lc: 0.023870, f_pc: 0.17700, fn_lc: 0.539400, fn_plc: 0.381700, fa_plc: 0.078840, ph_c: 6.81, pe_i: 0.0 - 0.022, pe_s: 0.658 } }
+    if organ == 7  { return SchmittComp { f_cell: 0.86000, f_int: 0.14000, f_wc: 0.02002, f_lc: 0.934000, f_pc: 0.04601, fn_lc: 0.936100, fn_plc: 0.056070, fa_plc: 0.007859, ph_c: 7.10, pe_i: 0.0 - 0.325, pe_s: 0.574 } }
+    if organ == 8  { return SchmittComp { f_cell: 0.90000, f_int: 0.09600, f_wc: 0.78000, f_lc: 0.070000, f_pc: 0.15000, fn_lc: 0.690000, fn_plc: 0.260000, fa_plc: 0.050000, ph_c: 7.00, pe_i: 0.143, pe_s: 0.764 } }
+    if organ == 9  { return SchmittComp { f_cell: 0.40000, f_int: 0.60000, f_wc: 0.42700, f_lc: 0.283100, f_pc: 0.28980, fn_lc: 0.359900, fn_plc: 0.501900, fa_plc: 0.138200, ph_c: 7.00, pe_i: 0.0 - 0.090, pe_s: 0.566 } }
+    if organ == 11 { return SchmittComp { f_cell: 0.74500, f_int: 0.25500, f_wc: 0.76990, f_lc: 0.039460, f_pc: 0.19070, fn_lc: 0.534100, fn_plc: 0.393000, fa_plc: 0.072870, ph_c: 7.00, pe_i: 0.034, pe_s: 0.765 } }
+    // Refused organs: a zeroed record, never reached by a supported caller.
+    return SchmittComp { f_cell: 0.0, f_int: 0.0, f_wc: 0.0, f_lc: 0.0, f_pc: 0.0,
+                         fn_lc: 0.0, fn_plc: 0.0, fa_plc: 0.0, ph_c: 0.0, pe_i: 0.0, pe_s: 0.0 }
+}
+
+fn kpm_pow10(x: f64) -> f64 with Mut, Div, Panic { exp(x * 2.302585092994046) }
+
+fn kpm_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn kpm_sqrt(x: f64) -> f64 with Mut, Div {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 14 { y = (y + x / y) * 0.5; i = i + 1 }
+    y
+}
+
+// Neutral fraction of a monoprotic base at pH (Henderson-Hasselbalch).
+fn kpm_f_neutral(pka: f64, ph: f64, is_base: bool) -> f64 with Mut, Div, Panic {
+    if !is_base { return 1.0 }
+    1.0 / (1.0 + kpm_pow10(pka - ph))
+}
+
+// Schmitt D_ow: octanol:water distribution with charged-species access alpha.
+// Generalises Schmitt Eqs. 13/14 -- D = P*(f_n*(1-alpha) + alpha).
+fn kpm_dow(pow_v: f64, f_n: f64) -> f64 {
+    pow_v * (f_n * (1.0 - kpm_alpha()) + kpm_alpha())
+}
+
+// ============================================================================
+// B:P CONSISTENCY OF THE STRONG-BASE ROUTE  (audit 2026-11-02)
+// ============================================================================
+// The strong-base route does not fit Ka: it SOLVES for it from the measured
+// blood:plasma ratio, via the blood-cell Kpu that rb implies
+//   Kpu_bc = (rb - (1 - Ht)) / (Ht * fu_p)
+// and then inverts R-R Eq. 1 over blood-cell composition.  That inversion has
+// a non-negative solution only when rb is large enough to leave room for a
+// phospholipid term after the water and lipid terms are paid for.  Below that
+// threshold the algebra returns Ka < 0, which is not a small numerical
+// nuisance: it says the measured rb is INCONSISTENT with the blood-cell
+// composition table, so no R-R Eq. 1 blood cell can reproduce it.
+//
+// The previous code clamped Ka to 0.0 and returned a number anyway.  Measured
+// 2026-11-02 (scratchpad/audit1/bp1.cpp, bp2.cpp): where the clamp fires the
+// model's own predicted B:P stops matching its input.  For a strong base with
+// logP 3.2, pKa 9.4, fu_p 0.73 and rb = 0.56, the clamped model implies
+// rb = 0.873483 -- an error of +0.3135, i.e. +56%, returned silently with
+// in_domain still true.  That is the same defect class Hartung & Huisinga
+// (PAGE 32, 2024, Abstr. 11096) found in the Lukacova variant: predicted B:P
+// differs from input B:P.  There it is structural; here it was conditional and
+// fail-OPEN, which is worse in a module whose whole claim is fail-closed.
+//
+// Above the threshold the round-trip is exact.  Measured round-trip error on
+// the dissertation set: haloperidol 0.0, venlafaxine -1.11e-16, ODV 0.0,
+// clozapine +1.11e-16.  So the back-calculation itself is sound; only the
+// clamp was not.
+//
+// MARGINS MEASURED (rb, critical rb, margin):
+//   haloperidol  1.080  0.6946  +35.7%
+//   venlafaxine  1.000  0.8658  +13.4%   <- thinnest in the set
+//   ODV          1.000  0.8535  +14.7%
+// CORRECTED 2026-11-08: venlafaxine was first computed with logP 3.20 and
+// ODV with logP 2.70 / pKa 9.50, none of them sourced (0.8735, +12.7%;
+// 0.8523, +14.8%).  Sourced inputs: venlafaxine logP 2.71 (midpoint of
+// [2.62, 2.80]) and pKa 9.4; ODV logP 2.45 and basic pKa 8.86 (Luecht et al.
+// 2025, 10.3390/pharmaceutics17020179).  The ranking survives the correction.
+//   clozapine    0.860  0.6010  +30.1%
+//
+// DRUG INPUTS ARE THEMSELVES MULTI-SOURCED  (recorded 2026-11-08).
+// Compared against httk 2.7.4 chem.physical_and_invitro.data:
+//   venlafaxine  logP 2.62-2.80 (Luecht 2025; DDDT 2025) vs 3.129 OPERA
+//                (predicted); pKa 9.4 (both 2025 papers) vs 8.91 ChemAxon
+//                (predicted); fu 0.73 agreed; B:P NA in every source.
+//   ODV          logP 2.45 vs 2.461; basic pKa 8.86 vs 8.87; fu 0.70; B:P NA.
+//   haloperidol  logP 4.30 vs 4.288; pKa 8.66 (repo) vs 8.05 ChemAxon;
+//                fu 0.10 (repo) vs 0.1784 (Wetmore 2015); B:P NA (repo
+//                1.08 is unsourced); log MA 3.723 (Pearce 2017) agreed.
+//   clozapine    logP 3.23 agreed; pKa 7.6 (repo) vs 7.35 ChemAxon;
+//                fu 0.05 (Obach 1999); B:P 0.86 (repo) vs 0.87 MEASURED
+//                (Sternbeck 2012).
+//   midazolam    logP 3.00 (repo) vs 2.444 OPERA; pKa 6.01 vs 6.19; fu 0.032
+//                (repo) vs 0.05 (Obach 1999); B:P 1.00 (repo) vs 0.67
+//                MEASURED (Sternbeck 2012).  No figure moves: midazolam is a
+//                weak base and no member reads rb on that route (T12c).
+// The oracle-validated parity inputs are left as they are: they certify the
+// IMPLEMENTATION against httk at identical inputs, not the inputs.
+//
+// WHICH INPUT DOMINATES DEPENDS ON LIPOPHILICITY (cross.cpp, cross2.cpp).
+// On ln Kp for a strong base, with the composition ranges of the
+// three-source comparison, the cellular-pH convention leads at low logP
+// and the neutral-lipid source disagreement leads at high logP.  Crossover:
+// logP 4.06 at venlafaxine's fu/pKa/rb, 4.56 at haloperidol's repository
+// inputs, 3.74 at haloperidol's httk inputs.  Above a further ceiling the
+// B:P consistency refusal fires (red-cell lipid term exceeds the red-cell
+// Kpu implied by rb): logP 4.29, 4.98 and 4.15 respectively.  Venlafaxine
+// (2.71), ODV (2.45) and clozapine (3.23) sit deep in the pH regime;
+// haloperidol (4.294) sits in it under the repository inputs (pH 79.6%,
+// lipid 14.5%) and ABOVE THE CEILING under httk's -- see T25.
+// The drug this dissertation is about has the smallest margin to a silent
+// failure, and the input that sets that margin -- rb -- is the one that was
+// never measured for it (rb = 1.00 is an assumption, see SIO-545).  Sweeping
+// fu_p from 0.70 to 0.95 never crosses the threshold at rb = 1.00, so fu_p is
+// not the lever: rb is.  If venlafaxine's true rb is below 0.8735 the old code
+// would have returned a Kpu built on Ka = 0 -- no phospholipid binding at all
+// for a strong base -- with no signal.
+//
+// Returns the signed margin rb - rb_critical.  Positive means a non-negative
+// Ka exists.  The weak-base/acid route never reads rb, so it is reported as
+// trivially consistent with a margin of 0.0 rather than a false number.
+pub fn kpm_rr_bp_margin(d: KpInputs) -> f64 with Mut, Div, Panic {
+    let strong = if d.is_base { d.pka >= 7.0 } else { false }
+    if !strong { return 0.0 }
+    if d.fu_p <= 0.0 { return 0.0 }
+    let p  = kpm_pow10(d.log_p)
+    let ht = kpm_hematocrit()
+    let y  = kpm_pow10(d.pka - kpm_ph_plasma())
+    let z  = kpm_pow10(d.pka - kpm_ph_rbc())
+    let lip_bc = p * 0.0012 + (0.3 * p + 0.7) * 0.0033
+    let kpu_crit = (1.0 + z) / (1.0 + y) * 0.63 + lip_bc / (1.0 + y)
+    let rb_crit = ht * d.fu_p * kpu_crit + (1.0 - ht)
+    return d.rb - rb_crit
+}
+
+// True when the strong-base route can solve for a non-negative Ka from the
+// declared rb.  False is a REFUSAL, not a warning: the ensemble reports it as
+// refusal code 4 so that it is distinguishable from a structural domain miss.
+pub fn kpm_rr_bp_consistent(d: KpInputs) -> bool with Mut, Div, Panic {
+    let strong = if d.is_base { d.pka >= 7.0 } else { false }
+    if !strong { return true }
+    return kpm_rr_bp_margin(d) >= 0.0
+}
+
+// ============================================================================
+// MEMBER 0 -- Rodgers & Rowland 2007, strong-base route (Eqs. 1 + 3), muscle
+// ============================================================================
+// Composition: R-R 2007 Tab. VII, human muscle and blood cells.
+//   muscle  extracellular water 0.079, intracellular water 0.666,
+//           neutral lipid 0.022, neutral phospholipid 0.0078, [AP-] 2.42 mg/g
+//   blood cells  water 0.63, neutral lipid 0.0012, phospholipid 0.0033,
+//                [AP-] 0.57 mg/g
+//
+// The acidic-phospholipid association constant Ka is NOT a free parameter: it
+// is back-calculated from the blood-cell partition implied by the measured
+// blood:plasma ratio.  A uniform error in [AP-] therefore CANCELS EXACTLY
+// between that calibration and the tissue prediction (Ka scales as 1/AP_rbc
+// while the tissue term scales as Ka*AP_tissue).  Verified numerically:
+// perturbing both [AP-] values by +10% moves ln Kpu by 0.0000.  So Rodgers-
+// Rowland depends on [AP-] only through the tissue / blood-cell RATIO.  That is
+// an invariance of the parameterisation, not evidence of a hidden error.  Its
+// practical consequence: a uniform error in [AP-] leaves Kpu unchanged, only a
+// DIFFERENTIAL error between blood cells and tissue moves it, and extending to
+// more organs needs sourced RATIOS rather than sourced absolutes.
+// in_domain is the CONJUNCTION of two independent conditions, and the caller
+// can tell them apart through kpm_rr_in_domain / kpm_rr_bp_consistent:
+//   - structural domain (small molecule, MW < 700, fu_p > 0);
+//   - B:P consistency, i.e. the strong-base route can solve a non-negative Ka
+//     from the declared rb.  Before 2026-11-02 this second condition was not
+//     checked and a negative Ka was clamped to 0.0, so the member stayed
+//     in_domain while the model's own B:P no longer matched its input.
+pub fn kpm_rodgers_rowland(d: KpInputs) -> KpMember with Mut, Div, Panic {
+    let ok = if kpm_rr_in_domain(d) { kpm_rr_bp_consistent(d) } else { false }
+    return KpMember { kpu: kpm_rr_kpu_ph(d, kpm_ph_cell_rr()),
+                      in_domain: ok, calibrated: false, code: 0 }
+}
+
+// The Kpu body with the intracellular pH passed in, so that kpm_blindness can
+// perturb a SHARED input across every member.  kpm_rodgers_rowland calls it
+// with this method's native pH, so the oracle-validated numbers are unchanged.
+fn kpm_rr_kpu_ph(d: KpInputs, ph_c: f64) -> f64 with Mut, Div, Panic {
+    kpm_rr_kpu_full(d, ph_c, 1.0, 1.0, 1.0)
+}
+
+// s_nl, s_np, s_ap are RELATIVE multipliers on the neutral-lipid,
+// neutral-phospholipid and acidic-phospholipid content, applied to BOTH the
+// tissue and the blood-cell figures so that a "shared" composition error can be
+// perturbed the way kpm_blindness needs. All three are 1.0 on the normal path.
+fn kpm_rr_kpu_full(d: KpInputs, ph_c: f64, s_nl: f64, s_np: f64, s_ap: f64) -> f64 with Mut, Div, Panic {
+    let p  = kpm_pow10(d.log_p)
+    let ht = kpm_hematocrit()
+
+    // ionisation ratios X (cell), Y (plasma), Z (blood cell)
+    let x = kpm_pow10(d.pka - ph_c)
+    let y = kpm_pow10(d.pka - kpm_ph_plasma())
+    let z = kpm_pow10(d.pka - kpm_ph_rbc())
+
+    // lipid term P*f_nl + (0.3P + 0.7)*f_np   (R-R 2007 Eq. 1 lipid group)
+    let lip_mus = p * (0.022 * s_nl)   + (0.3 * p + 0.7) * (0.0078 * s_np)
+    let lip_bc  = p * (0.0012 * s_nl)  + (0.3 * p + 0.7) * (0.0033 * s_np)
+    let ap_mus  = 2.42 * s_ap
+    let ap_bc   = 0.57 * s_ap
+
+    // ROUTE SELECTION.  Rodgers-Rowland use two different mechanisms and the
+    // choice is theirs, not a tuning knob: Eq. 1 (association with acidic
+    // phospholipid, Ka back-calculated from blood cells) for STRONG bases,
+    // pKa >= 7; Eq. 2 (association with albumin, tissue:plasma protein ratio
+    // 0.064 for muscle) for acids, neutrals, weak bases and zwitterions.
+    // Applying the strong-base route to a weak base inflates Kpu, because the
+    // cation-phospholipid term is then driven by an ionised fraction that does
+    // not exist at intracellular pH.
+    // KNOWN LIMITATION -- the pKa 7.0 route switch is a DISCONTINUITY, and it
+    // has a published fix that is not applied here.
+    //
+    // Hartung N & Huisinga W, PAGE 32 (2024) Abstr. 11096, "A unified Rodgers
+    // et al. model for predicting tissue partitioning reveals the need for a
+    // theoretical derivation of the Lukacova et al. (Simulations Plus) model",
+    // unify the two routes into a single model in which the drug dissolves in
+    // extra- and intracellular water, binds interstitial proteins in its
+    // neutral and anionic forms, and binds cellular acidic phospholipids in its
+    // cationic form. Their unified form gives a SMOOTH dependence of Kpu on pKa
+    // and reproduces the input B:P consistently; they question the validity of
+    // interpolating across the pKa 7.0 jump that the two-route formulation
+    // creates.
+    //
+    // This matters for the dissertation's own drug set, which straddles the
+    // boundary: venlafaxine pKa 9.4 and ODV 9.5 take the strong-base route
+    // while midazolam at 6.01 takes the weak-base one. Worse, kpm_pt_in_domain
+    // gates Poulin-Theil at the SAME pKa 7.0, so two separate decisions sit on
+    // one arbitrary threshold and neither is smooth in pKa.
+    //
+    // The two-route form is kept for now because it is what Rodgers & Rowland
+    // published and what the oracle-validated reference values correspond to;
+    // replacing it with the unified model would move every parity figure and
+    // belongs in its own change, against the primary source rather than an
+    // abstract. Until then, treat any Kpu for a drug with pKa near 7 as
+    // carrying an undeclared discontinuity, not as a smooth prediction.
+    let strong = if d.is_base { d.pka >= 7.0 } else { false }
+
+    let iw_term = (1.0 + x) / (1.0 + y) * 0.666 + 0.079
+
+    if strong {
+        // Kpu of blood cells implied by the measured blood:plasma ratio
+        let kpu_bc = (d.rb - (1.0 - ht)) / (ht * d.fu_p)
+        var ka = (kpu_bc - (1.0 + z) / (1.0 + y) * 0.63 - lip_bc / (1.0 + y)) * ((1.0 + y) / (ap_bc * z))
+        if ka < 0.0 { ka = 0.0 }
+        return iw_term + ka * ap_mus * x / (1.0 + y) + lip_mus / (1.0 + y)
+    }
+
+    // Eq. 2 -- albumin route.  The albumin association term is itself
+    // back-calculated from the measured plasma unbound fraction, so like Ka it
+    // is not fitted: KaPR*[PR]_p = 1/fu - 1 - P*f_nl_plasma/(1+Y).
+    // Plasma neutral lipid 0.0032 and phospholipid 0.0021 (R-R 2007 Tab. VII);
+    // muscle:plasma albumin ratio 0.064.
+    let lip_pl = p * (0.0032 * s_nl) + (0.3 * p + 0.7) * (0.0021 * s_np)
+    var ka_pr = 1.0 / d.fu_p - 1.0 - lip_pl / (1.0 + y)
+    if ka_pr < 0.0 { ka_pr = 0.0 }
+    return iw_term + ka_pr * 0.064 + lip_mus / (1.0 + y)
+}
+
+// ============================================================================
+// THE STRONG-BASE ROUTE WITH EVERY CONTESTED INPUT EXPOSED  (2026-11-09)
+// ============================================================================
+// Same arithmetic as kpm_rr_kpu_full on the strong-base route, but the muscle
+// composition is passed as values instead of as scales on fixed constants, so
+// that the [AP-] RATIO (tissue over red cell) and cell water can be varied --
+// which kpm_rr_kpu_full cannot do, because its s_ap scales tissue and red
+// cell together and therefore cancels (T5).  Red-cell composition stays at
+// R-R Tab. VII.  Strong-base route only: callers must be strong bases.
+// T26 pins bit-identity with kpm_rr_kpu_full at the native constants.
+fn kpm_rr_kpu_exposed(d: KpInputs, ph_c: f64, nl: f64, np: f64, ap_mus: f64, w: f64) -> f64 with Mut, Div, Panic {
+    let p  = kpm_pow10(d.log_p)
+    let ht = kpm_hematocrit()
+    let x = kpm_pow10(d.pka - ph_c)
+    let y = kpm_pow10(d.pka - kpm_ph_plasma())
+    let z = kpm_pow10(d.pka - kpm_ph_rbc())
+    let lip_mus = p * nl + (0.3 * p + 0.7) * np
+    let lip_bc  = p * (0.0012 * 1.0) + (0.3 * p + 0.7) * (0.0033 * 1.0)
+    let ap_bc   = 0.57 * 1.0
+    let iw_term = (1.0 + x) / (1.0 + y) * w + 0.079
+    let kpu_bc = (d.rb - (1.0 - ht)) / (ht * d.fu_p)
+    var ka = (kpu_bc - (1.0 + z) / (1.0 + y) * 0.63 - lip_bc / (1.0 + y)) * ((1.0 + y) / (ap_bc * z))
+    if ka < 0.0 { ka = 0.0 }
+    return iw_term + ka * ap_mus * x / (1.0 + y) + lip_mus / (1.0 + y)
+}
+
+// ============================================================================
+// THE INPUT-UNCERTAINTY BUDGET, COMPUTED BY SOUNIO  (2026-11-09)
+// ============================================================================
+// GUM law of propagation, first order, on ln Kpu of the strong-base route,
+// with each contested input carried as a Type B entry in epistemic::budget64.
+// The RANGE of each input is the measured spread between production sources,
+// and that spread is the only uncertainty claimed -- nothing is assumed
+// beyond what the sources disagree on:
+//   entry 0  logP            [caller-supplied]   per-drug literature spread
+//   entry 1  [AP-] ratio     [3.7563, 4.2456]    httk vs R-R Tab. VII
+//   entry 2  neutral lipid   [0.00868, 0.02200]  Peyret Tab.3, httk, R-R/P&T
+//   entry 3  neutral PL      [0.00780, 0.00934]  R-R, Peyret, httk
+//   entry 4  cell pH         [6.81, 7.00]        Schmitt, table, R-R/PT
+//   entry 5  cell water      [0.666, 0.679]      R-R vs httk
+// Each range is read as rectangular, u = half-width / sqrt(3) (GUM 4.3.7);
+// the robustness tests showed the DOMINANT entry does not change under
+// triangular or discrete readings, though u_c does.
+//
+// Sensitivities are computed here by central differences on
+// kpm_rr_kpu_exposed rather than carried by Knowledge<f64>, and that is a
+// limitation of the language, not a preference: first-order channels cross
+// a user call only for pure helpers (KL-11, #1792), and the strong-base route
+// branches and clamps, so it does not qualify.  When KL-11 closes this should
+// become a Knowledge<f64> propagation and the budget should not move.
+//
+// Valid only for a strong base (pKa >= 7) inside the B:P-consistent domain;
+// the result is the caller's to gate with kpm_rr_bp_consistent.
+fn kpm_lnk_exp(d: KpInputs, ph: f64, nl: f64, np: f64, apr: f64, w: f64) -> f64 with Mut, Div, Panic {
+    return ln(kpm_rr_kpu_exposed(d, ph, nl, np, apr * 0.57, w))
+}
+
+fn kpm_with_logp(d: KpInputs, lp: f64) -> KpInputs {
+    return KpInputs { log_p: lp, log_ma: d.log_ma, has_ma: d.has_ma, pka: d.pka,
+                      is_base: d.is_base, fu_p: d.fu_p, rb: d.rb, mw: d.mw }
+}
+
+// The budget is FAIL-CLOSED.  An empty Budget64 has combined_std_uncert 0.0,
+// which would read as "no uncertainty" -- precisely the misreading this module
+// exists to refuse -- so the budget travels inside KpBudget with a validity flag
+// and a refusal code, and its figures are unavailable when valid is false.
+//   refusal 0  valid
+//   refusal 1  not a strong base: the strong-base route does not apply
+//   refusal 4  B:P-inconsistent somewhere in the logP range: no non-negative
+//              Ka exists, same meaning as ensemble code 4
+// Ka depends on logP, pKa, fu and rb but not on tissue composition, so B:P
+// consistency is checked at both ends and the centre of the logP range.
+struct KpBudget {
+    budget:  Budget64,
+    valid:   bool,
+    refusal: i32
+}
+
+pub fn kpm_kb_valid(k: KpBudget) -> bool { return k.valid }
+pub fn kpm_kb_refusal(k: KpBudget) -> i32 { return k.refusal }
+pub fn kpm_kb_uc(k: KpBudget) -> f64 { return k.budget.combined_std_uncert }
+pub fn kpm_kb_percent(k: KpBudget, idx: i64) -> f64 { return budget64_percent(&k.budget, idx) }
+pub fn kpm_kb_dominant(k: KpBudget) -> i64 { return budget64_dominant_idx(&k.budget) }
+
+pub fn kpm_rr_budget_ph(d: KpInputs, logp_lo: f64, logp_hi: f64, ph_lo: f64, ph_hi: f64) -> KpBudget with Mut, Div, Panic {
+    let strong = if d.is_base { d.pka >= 7.0 } else { false }
+    if !strong {
+        return KpBudget { budget: budget64_new(0.0, 0.95), valid: false, refusal: 1 }
+    }
+    let lp_mid = 0.5 * (logp_lo + logp_hi)
+    var bp_ok = kpm_rr_bp_consistent(kpm_with_logp(d, logp_lo))
+    if bp_ok { bp_ok = kpm_rr_bp_consistent(kpm_with_logp(d, logp_hi)) }
+    if bp_ok { bp_ok = kpm_rr_bp_consistent(kpm_with_logp(d, lp_mid)) }
+    if !bp_ok {
+        return KpBudget { budget: budget64_new(0.0, 0.95), valid: false, refusal: 4 }
+    }
+    let r3 = kpm_sqrt(3.0)
+    let lp  = 0.5 * (logp_lo + logp_hi)
+    let apr = 0.5 * (3.7563 + 4.2456)
+    let nl  = 0.5 * (0.00868 + 0.02200)
+    let np  = 0.5 * (0.00780 + 0.00934)
+    let ph  = 0.5 * (ph_lo + ph_hi)
+    let w   = 0.5 * (0.666 + 0.679)
+    let b0 = kpm_with_logp(d, lp)
+
+    let h_lp = 0.000001 * lp
+    let c_lp = (kpm_lnk_exp(kpm_with_logp(d, lp + h_lp), ph, nl, np, apr, w)
+              - kpm_lnk_exp(kpm_with_logp(d, lp - h_lp), ph, nl, np, apr, w)) / (2.0 * h_lp)
+    let h_ap = 0.000001 * apr
+    let c_ap = (kpm_lnk_exp(b0, ph, nl, np, apr + h_ap, w) - kpm_lnk_exp(b0, ph, nl, np, apr - h_ap, w)) / (2.0 * h_ap)
+    let h_nl = 0.000001
+    let c_nl = (kpm_lnk_exp(b0, ph, nl + h_nl, np, apr, w) - kpm_lnk_exp(b0, ph, nl - h_nl, np, apr, w)) / (2.0 * h_nl)
+    let h_np = 0.000001
+    let c_np = (kpm_lnk_exp(b0, ph, nl, np + h_np, apr, w) - kpm_lnk_exp(b0, ph, nl, np - h_np, apr, w)) / (2.0 * h_np)
+    let h_ph = 0.000001 * ph
+    let c_ph = (kpm_lnk_exp(b0, ph + h_ph, nl, np, apr, w) - kpm_lnk_exp(b0, ph - h_ph, nl, np, apr, w)) / (2.0 * h_ph)
+    let h_w = 0.000001
+    let c_w = (kpm_lnk_exp(b0, ph, nl, np, apr, w + h_w) - kpm_lnk_exp(b0, ph, nl, np, apr, w - h_w)) / (2.0 * h_w)
+
+    var b = budget64_new(kpm_lnk_exp(b0, ph, nl, np, apr, w), 0.95)
+    budget64_add_type_b(&!b, 0, lp,  (logp_hi - logp_lo) * 0.5 / r3, c_lp)
+    budget64_add_type_b(&!b, 1, apr, (4.2456 - 3.7563)   * 0.5 / r3, c_ap)
+    budget64_add_type_b(&!b, 2, nl,  (0.02200 - 0.00868) * 0.5 / r3, c_nl)
+    budget64_add_type_b(&!b, 3, np,  (0.00934 - 0.00780) * 0.5 / r3, c_np)
+    budget64_add_type_b(&!b, 4, ph,  (ph_hi - ph_lo)     * 0.5 / r3, c_ph)
+    budget64_add_type_b(&!b, 5, w,   (0.679 - 0.666)     * 0.5 / r3, c_w)
+    budget64_finalize(&!b)
+    return KpBudget { budget: b, valid: true, refusal: 0 }
+}
+
+// The source budget: the cellular pH spans the three published conventions
+// (Schmitt 6.81, httk 6.97, Rodgers-Rowland 7.00).
+pub fn kpm_rr_source_budget(d: KpInputs, logp_lo: f64, logp_hi: f64) -> KpBudget with Mut, Div, Panic {
+    return kpm_rr_budget_ph(d, logp_lo, logp_hi, 6.81, 7.00)
+}
+
+// THE CONVENTIONS VERSUS THE MEASUREMENT.  Human resting skeletal-muscle
+// intracellular pH is measured in vivo by 31P-MRS (inorganic-phosphate shift):
+//   Zochodne et al. 1988, Magn Reson Med 7:373, 10.1002/mrm.1910070402
+//       healthy controls, forearm flexor          7.05 +/- 0.04 (SD)
+//   Jeneson 2004, FASEB J, 10.1096/fj.03-0762fje  7.08
+//   Evans et al. 1997, AJRCCM 155:615, 10.1164/ajrccm.155.2.9032203
+//       healthy volunteers, quadriceps, n = 8     7.12 +/- 0.01
+// Measured range [7.05, 7.12] lies ENTIRELY above the convention range
+// [6.81, 7.00].  The conventions are therefore not only a spread but a
+// displacement.  measured_ph.cpp, predictions written first
+// (PREDICTIONS_measured_ph.txt):
+//                     d ln Kpu   Kpu x   |d|/u_c   u_c meas   pH share meas
+//   venlafaxine       -0.3985    0.671   3.21      0.0493     80.9%
+//   ODV               -0.3919    0.676   3.19      0.0494     77.5%
+//   clozapine         -0.3605    0.697   3.03      0.0588     44.7%
+//   haloperidol repo  -0.3158    0.729   2.80      0.0724     21.6%
+// The displacement is about three times the whole sourced u_c for every drug.
+// With the measured range in place, pH keeps a majority for venlafaxine and
+// ODV; for clozapine it is still the largest entry but no longer a majority
+// (pH 44.7, neutral lipid 30.2, [AP-] 25.1%); for haloperidol neutral lipid
+// takes over (66.6%, pH 21.6%).
+//
+// WHAT THIS DOES NOT SAY.  It does not say the measured pH is the right input
+// for Rodgers-Rowland.  The model's pH 7.0 was the value under which its
+// equations were tested against rat Kp; replacing it is a change of model, not
+// a correction of a datum, and whether it improves prediction is an empirical
+// question about observed human muscle Kp.  31P-MRS pH also carries a
+// calibration systematic (the Pi chemical-shift equation) of a few hundredths
+// of a unit, which these figures exclude.
+pub fn kpm_rr_ph_shift(d: KpInputs, ph_from: f64, ph_to: f64) -> f64 with Mut, Div, Panic {
+    let apr = 0.5 * (3.7563 + 4.2456)
+    let nl  = 0.5 * (0.00868 + 0.02200)
+    let np  = 0.5 * (0.00780 + 0.00934)
+    let w   = 0.5 * (0.666 + 0.679)
+    return kpm_lnk_exp(d, ph_to, nl, np, apr, w) - kpm_lnk_exp(d, ph_from, nl, np, apr, w)
+}
+
+// Declared domain: Rodgers-Rowland was derived and validated for small
+// molecules -- the 2005/2006/2007 series covers strong bases, acids, neutrals
+// and zwitterions -- with MW below roughly 700 g/mol.  Peptides, glycopeptides
+// and inorganic ions fall outside it.
+pub fn kpm_rr_in_domain(d: KpInputs) -> bool {
+    if d.mw > 700.0 { return false }
+    if d.fu_p <= 0.0 { return false }
+    return true
+}
+
+// ============================================================================
+// MEMBER 1 -- Schmitt 2008, mechanistic core only (no fitted correction)
+// ============================================================================
+// Composition: httk 2.7.4 tissue.data, human muscle.  Verified tissue by
+// tissue that FWc + FLc + FPc = 1 (fractions of CELL volume) and that
+// Fn_Lc + Fn_PLc + Fa_PLc = 1 (fractions of LIPID), so the phospholipid
+// fractions are multiplied by the total lipid fraction FLc:
+//   Fcell 0.850  Fint 0.150
+//   FWc 0.79910  FLc 0.02387  FPc 0.17700
+//   Fn_Lc 0.5394  Fn_PLc 0.38170  Fa_PLc 0.078840
+//
+// Eq. 19 gives the protein:water partition KP = 0.163 + 0.0221*Kn_PL.
+// Eqs. 17/18 are published with their LABELS SWAPPED -- the equation printed
+// for neutral phospholipid is the acidic one and vice versa -- and the swap is
+// not in the corrigendum.  The physically coherent form is used here; copying
+// the printed labels costs 3.0x in muscle and 5.6x in brain for haloperidol.
+pub fn kpm_schmitt_raw(d: KpInputs) -> KpMember with Mut, Div, Panic {
+    let in_dom = kpm_schmitt_in_domain(d)
+    let kpu = kpm_schmitt_core(d)
+    return KpMember { kpu: kpu, in_domain: in_dom, calibrated: false, code: 1 }
+}
+
+fn kpm_schmitt_core(d: KpInputs) -> f64 with Mut, Div, Panic {
+    kpm_schmitt_core_ph(d, kpm_ph_cell_schmitt())
+}
+
+fn kpm_schmitt_core_ph(d: KpInputs, ph_c: f64) -> f64 with Mut, Div, Panic {
+    kpm_schmitt_core_full(d, ph_c, 1.0, 1.0, 1.0)
+}
+
+fn kpm_schmitt_core_full(d: KpInputs, ph_c: f64, s_nl: f64, s_np: f64, s_ap: f64) -> f64 with Mut, Div, Panic {
+    let pow_v = kpm_pow10(d.log_p)
+    let kn_pl = kpm_pow10(d.log_ma)
+
+    let f_n = kpm_f_neutral(d.pka, ph_c, d.is_base)
+    let f_c = 1.0 - f_n
+    let kn_l  = kpm_dow(pow_v, f_n)
+    let ka_pl = kn_pl * (f_n + 20.0 * f_c)      // cation affinity for acidic PL
+    let kp_pr = 0.163 + 0.0221 * kn_pl          // Eq. 19
+
+    // cellular inverse-unbound-fraction (Eq. 7)
+    let inv_cell = 0.79910
+                   + kn_l  * 0.02387 * 0.5394   * s_nl
+                   + kn_pl * 0.02387 * 0.38170  * s_np
+                   + ka_pl * 0.02387 * 0.078840 * s_ap
+                   + kp_pr * 0.17700
+    // interstitial (Eq. 4)
+    let inv_int = 0.94 + 0.37 * (1.0 / d.fu_p - 0.945)
+
+    // pH-gradient factor kappa (Eq. 10/11 generalised)
+    let f_n_p = kpm_f_neutral(d.pka, kpm_ph_plasma(), d.is_base)
+    let num_k = f_n_p + kpm_alpha() * (1.0 - f_n_p)
+    let den_k = f_n   + kpm_alpha() * (1.0 - f_n)
+    let kappa = num_k / den_k
+
+    // httk normalises Fcell and Fint by their sum; for muscle the sum is 1.000
+    let f_total = 0.850 + 0.150
+    let f_cell = 0.850 / f_total
+    let f_int  = 0.150 / f_total
+    return f_int * inv_int + kappa * f_cell * inv_cell
+}
+
+// The Schmitt core generalised over the 14-organ index.  Structurally
+// identical to kpm_schmitt_core_full; the muscle constants are replaced by a
+// lookup.  Test T13 pins that organ 6 through this path reproduces
+// kpm_schmitt_core_full bit for bit, which is what certifies the table.
+fn kpm_schmitt_core_organ(d: KpInputs, organ: i32, ph_c: f64,
+                          s_nl: f64, s_np: f64, s_ap: f64) -> f64 with Mut, Div, Panic {
+    let c = kpm_organ_comp(organ)
+    let pow_v = kpm_pow10(d.log_p)
+    let kn_pl = kpm_pow10(d.log_ma)
+
+    let f_n = kpm_f_neutral(d.pka, ph_c, d.is_base)
+    let f_c = 1.0 - f_n
+    let kn_l  = kpm_dow(pow_v, f_n)
+    let ka_pl = kn_pl * (f_n + 20.0 * f_c)
+    let kp_pr = 0.163 + 0.0221 * kn_pl
+
+    let inv_cell = c.f_wc
+                   + kn_l  * c.f_lc * c.fn_lc  * s_nl
+                   + kn_pl * c.f_lc * c.fn_plc * s_np
+                   + ka_pl * c.f_lc * c.fa_plc * s_ap
+                   + kp_pr * c.f_pc
+    let inv_int = 0.94 + 0.37 * (1.0 / d.fu_p - 0.945)
+
+    let f_n_p = kpm_f_neutral(d.pka, kpm_ph_plasma(), d.is_base)
+    let num_k = f_n_p + kpm_alpha() * (1.0 - f_n_p)
+    let den_k = f_n   + kpm_alpha() * (1.0 - f_n)
+    let kappa = num_k / den_k
+
+    // httk normalises the pair by its sum; for gut the sum is 0.996, not 1.0.
+    let f_total = c.f_cell + c.f_int
+    let f_cell = c.f_cell / f_total
+    let f_int  = c.f_int  / f_total
+    return f_int * inv_int + kappa * f_cell * inv_cell
+}
+
+// Schmitt, uncalibrated, at an organ's own cellular pH.  in_domain carries the
+// organ gate as well as the measured-log-MA requirement: an unsupported organ
+// is a refusal, not a number.
+pub fn kpm_schmitt_raw_organ(d: KpInputs, organ: i32) -> KpMember with Mut, Div, Panic {
+    // Refuse BEFORE any arithmetic.  An unsupported organ has a zero-filled
+    // composition (f_cell + f_int = 0), and fu_p <= 0 makes 1/fu_p singular;
+    // either would hand back a non-finite Kpu.  The sentinel is negative so it
+    // cannot be mistaken for a prediction.
+    if !kpm_organ_supported(organ) {
+        return KpMember { kpu: 0.0 - 1.0, in_domain: false, calibrated: false, code: 1 }
+    }
+    if d.fu_p <= 0.0 {
+        return KpMember { kpu: 0.0 - 1.0, in_domain: false, calibrated: false, code: 1 }
+    }
+    let c = kpm_organ_comp(organ)
+    return KpMember { kpu: kpm_schmitt_core_organ(d, organ, c.ph_c, 1.0, 1.0, 1.0),
+                      in_domain: kpm_schmitt_in_domain(d), calibrated: false, code: 1 }
+}
+
+// Schmitt with the Pearce 2017 per-tissue regression, which httk applies by
+// default: Kpu_corr = 10^(a + b*log10(Kpu_raw*fu_p)) / fu_p, with (a, b) the
+// organ's own adj.fup.intercept and adj.fup.slope.  b < 1 in all ten organs,
+// so the correction always shrinks a large prediction toward the data.
+pub fn kpm_schmitt_pearce_organ(d: KpInputs, organ: i32) -> KpMember with Mut, Div, Panic {
+    // Same refusals, in the same order, as kpm_schmitt_raw_organ: the Pearce
+    // transform also divides by fu_p and takes ln(raw * fu_p).
+    if !kpm_organ_supported(organ) {
+        return KpMember { kpu: 0.0 - 1.0, in_domain: false, calibrated: true, code: 2 }
+    }
+    if d.fu_p <= 0.0 {
+        return KpMember { kpu: 0.0 - 1.0, in_domain: false, calibrated: true, code: 2 }
+    }
+    let c = kpm_organ_comp(organ)
+    let raw = kpm_schmitt_core_organ(d, organ, c.ph_c, 1.0, 1.0, 1.0)
+    let arg = raw * d.fu_p
+    if arg <= 0.0 {
+        return KpMember { kpu: raw, in_domain: false, calibrated: true, code: 2 }
+    }
+    let corr = kpm_pow10(c.pe_i + c.pe_s * (ln(arg) / 2.302585092994046)) / d.fu_p
+    return KpMember { kpu: corr, in_domain: kpm_schmitt_in_domain(d), calibrated: true, code: 2 }
+}
+
+// Declared domain: Schmitt covers every charge class, but its distinctive
+// input is a MEASURED membrane affinity.  Imputing log MA from logP makes that
+// input a function of one the other members already read, so an imputed MA is
+// treated as OUT OF DOMAIN.  That is a conservative choice, not a demonstrated
+// necessity -- and the gate cannot tell an imputed value from a measured one
+// unless the caller says so truthfully (see T8).
+// Measured 2026-10-31 against httk chem.physical_and_invitro.data (18476
+// compounds): of the dissertation's 15 drugs only haloperidol (3.723),
+// midazolam (2.9) and clozapine (2.954) carry a measured log MA.
+pub fn kpm_schmitt_in_domain(d: KpInputs) -> bool {
+    if !d.has_ma { return false }
+    if d.fu_p <= 0.0 { return false }
+    return true
+}
+
+// ============================================================================
+// MEMBER 2 -- Schmitt + Pearce 2017 regression (the httk default)
+// ============================================================================
+// Kpu_corr = 10^(a + b*log10(Kpu_raw * fu_p)) / fu_p, muscle coefficients from
+// httk::pearce2017regression, column adj.fup (the default path, i.e.
+// adjusted.Funbound.plasma = TRUE): a = -0.022, b = 0.658.
+// b < 1 is shrinkage, not an offset: it compresses the dynamic range, so the
+// correction is largest exactly where the mechanistic prediction is largest.
+// This member is CALIBRATED and must never share an ensemble with an
+// uncalibrated one.
+pub fn kpm_pearce_a_muscle() -> f64 { return 0.0 - 0.022 }
+pub fn kpm_pearce_b_muscle() -> f64 { return 0.658 }
+
+pub fn kpm_schmitt_pearce(d: KpInputs) -> KpMember with Mut, Div, Panic {
+    let in_dom = kpm_schmitt_in_domain(d)
+    let raw = kpm_schmitt_core(d)
+    let kp_raw = raw * d.fu_p
+    let corr = kpm_pow10(kpm_pearce_a_muscle() + kpm_pearce_b_muscle() * log10(kp_raw)) / d.fu_p
+    return KpMember { kpu: corr, in_domain: in_dom, calibrated: true, code: 2 }
+}
+
+// ============================================================================
+// MEMBER 3 -- Poulin & Theil, via the unified algorithm of Peyret 2010 (Eq. 9)
+// ============================================================================
+//   Pcw = [ (1 + Im)*Fwm + Pow*Fnlm ] / (1 + Iw)
+//   Fwm  = water + 0.70 * neutral phospholipid
+//   Fnlm = neutral lipid + 0.30 * neutral phospholipid
+// The 0.3 / 0.7 split of neutral phospholipid between the lipid-like and
+// water-like phases IS the core of Poulin-Theil.  There is no acidic-
+// phospholipid term and no intracellular protein term (Peyret: "Pprw cellular
+// = 0 for all compounds"), which is precisely why the method cannot represent
+// a strong base.
+//
+// Peyret is explicit that the VEGETABLE-OIL:water partition is used for
+// ADIPOSE and the n-octanol:water partition for every other tissue.  Applying
+// the olive-oil correlation to muscle understates the dominant lipid term by
+// 7.2x; that error is not made here.
+pub fn kpm_poulin_theil(d: KpInputs) -> KpMember with Mut, Div, Panic {
+    return KpMember { kpu: kpm_pt_kpu_ph(d, kpm_ph_cell_pt()),
+                      in_domain: kpm_pt_in_domain(d), calibrated: false, code: 3 }
+}
+
+fn kpm_pt_kpu_ph(d: KpInputs, ph_c: f64) -> f64 with Mut, Div, Panic {
+    kpm_pt_kpu_full(d, ph_c, 1.0, 1.0)
+}
+
+// Poulin-Theil takes no acidic-phospholipid multiplier because it has no such
+// term: that absence is why a shared [AP-] perturbation moves only Schmitt.
+fn kpm_pt_kpu_full(d: KpInputs, ph_c: f64, s_nl: f64, s_np: f64) -> f64 with Mut, Div, Panic {
+    let pow_v = kpm_pow10(d.log_p)       // n-octanol:water, muscle
+
+    let im = if d.is_base { kpm_pow10(d.pka - ph_c) } else { 0.0 }
+    let iw = if d.is_base { kpm_pow10(d.pka - kpm_ph_plasma()) } else { 0.0 }
+
+    let fwm  = 0.666 + 0.70 * (0.0078 * s_np)
+    let fnlm = 0.022 * s_nl + 0.30 * (0.0078 * s_np)
+    let pcw = ((1.0 + im) * fwm + pow_v * fnlm) / (1.0 + iw)
+
+    // interstitium: water plus albumin binding (Peyret Eq. 10).  RECONSTRUCTED,
+    // not transcribed -- see kpm_pt_oracle_validated().
+    let fnlp = 0.0035 * s_nl + 0.30 * (0.00225 * s_np)
+    var pprw = (1.0 / d.fu_p - 1.0 - pow_v * fnlp / (1.0 + iw)) / 0.029
+    if pprw < 0.0 { pprw = 0.0 }
+    let piw = ((1.0 + iw) * 0.89) / (1.0 + iw) + pprw * 0.015
+
+    // Peyret Tab. 2 cellular / interstitial split for muscle
+    return pcw * 0.877 + piw * 0.123
+}
+
+// Declared domain: neutrals and WEAK bases.  Poulin-Theil has no acidic-
+// phospholipid term, so a base that is substantially ionised at intracellular
+// pH is outside it; pKa >= 7.0 is the gate.  Of the dissertation's 15 drugs
+// this excludes haloperidol, venlafaxine, ODV, olanzapine, clozapine,
+// risperidone, 9-OH-risperidone, aripiprazole and quetiapine.
+pub fn kpm_pt_in_domain(d: KpInputs) -> bool {
+    if d.mw > 700.0 { return false }
+    if d.fu_p <= 0.0 { return false }
+    if d.is_base {
+        if d.pka >= 7.0 { return false }
+    }
+    return true
+}
+
+// Honest provenance flag.  Rodgers-Rowland and both Schmitt members reproduce
+// an executable reference; Poulin-Theil does not, because httk implements only
+// Schmitt.  Peyret 2010 reproduces each published algorithm at ratio 1 +- 0
+// (their Fig. 2), so the equations are source-verified, but the interstitial
+// term above is a reconstruction and the cellular / interstitial split uses
+// Peyret's rat values over human composition.
+pub fn kpm_pt_oracle_validated() -> bool { return false }
+pub fn kpm_schmitt_oracle_validated() -> bool { return true }
+
+// ============================================================================
+// ENSEMBLE -- fail-closed model-form dispersion
+// ============================================================================
+// Refusal codes:
+//   0  valid
+//   1  at least one requested member is out of its declared domain
+//   2  fewer than two admitted members -- a dispersion needs two
+//   3  calibration status not uniform across the admitted members
+//
+// dispersion is the sample standard deviation of ln Kpu over the admitted
+// members.  It is a DESCRIPTIVE STATISTIC, not a standard uncertainty: the
+// members share inputs and composition data, so they are not independent
+// draws, and no distribution or dependence model has been stated.  It is 0.0
+// whenever the ensemble refuses.  A refusal is not a zero uncertainty: it means
+// the statistic is UNAVAILABLE.
+struct KpEnsemble {
+    dispersion: f64,
+    n_admitted:   i32,
+    valid:        bool,
+    refusal:      i32
+}
+
+// want_calibrated selects which homogeneous sub-ensemble to form.  Mixing an
+// uncalibrated member with a calibrated one would make the dispersion report
+// the calibration rather than the model form, so it is refused rather than
+// averaged.
+pub fn kpm_ensemble(d: KpInputs, want_calibrated: bool) -> KpEnsemble with Mut, Div, Panic {
+    let m0 = kpm_rodgers_rowland(d)
+    let m1 = kpm_schmitt_raw(d)
+    let m2 = kpm_schmitt_pearce(d)
+    let m3 = kpm_poulin_theil(d)
+
+    var n = 0
+    var s = 0.0
+    var any_out = false
+
+    // member 0
+    if m0.calibrated == want_calibrated {
+        if m0.in_domain { n = n + 1; s = s + ln(m0.kpu) } else { any_out = true }
+    }
+    if m1.calibrated == want_calibrated {
+        if m1.in_domain { n = n + 1; s = s + ln(m1.kpu) } else { any_out = true }
+    }
+    if m2.calibrated == want_calibrated {
+        if m2.in_domain { n = n + 1; s = s + ln(m2.kpu) } else { any_out = true }
+    }
+    if m3.calibrated == want_calibrated {
+        if m3.in_domain { n = n + 1; s = s + ln(m3.kpu) } else { any_out = true }
+    }
+
+    // Fail-closed, B:P inconsistency first: it is a sharper statement than a
+    // generic domain miss, because it names WHICH input contradicts WHICH
+    // table -- the declared rb against R-R Tab. VII blood-cell composition --
+    // so it gets its own code rather than being folded into code 1.  Reported
+    // only when R-R would otherwise have been admitted; a compound already
+    // outside the structural domain is a code 1, not a code 4.
+    if m0.calibrated == want_calibrated {
+        if kpm_rr_in_domain(d) {
+            if !kpm_rr_bp_consistent(d) {
+                return KpEnsemble { dispersion: 0.0, n_admitted: n, valid: false, refusal: 4 }
+            }
+        }
+    }
+
+    // Fail-closed, domain first: an out-of-domain member is a modelling error,
+    // not a wide uncertainty, so it is reported even when enough members remain.
+    if any_out {
+        return KpEnsemble { dispersion: 0.0, n_admitted: n, valid: false, refusal: 1 }
+    }
+    if n < 2 {
+        return KpEnsemble { dispersion: 0.0, n_admitted: n, valid: false, refusal: 2 }
+    }
+
+    let mu = s / (n as f64)
+    var ss = 0.0
+    if m0.calibrated == want_calibrated { if m0.in_domain { let e = ln(m0.kpu) - mu; ss = ss + e * e } }
+    if m1.calibrated == want_calibrated { if m1.in_domain { let e = ln(m1.kpu) - mu; ss = ss + e * e } }
+    if m2.calibrated == want_calibrated { if m2.in_domain { let e = ln(m2.kpu) - mu; ss = ss + e * e } }
+    if m3.calibrated == want_calibrated { if m3.in_domain { let e = ln(m3.kpu) - mu; ss = ss + e * e } }
+
+    let u = kpm_sqrt(ss / ((n - 1) as f64))
+    return KpEnsemble { dispersion: u, n_admitted: n, valid: true, refusal: 0 }
+}
+
+// ============================================================================
+// Reference drug inputs (the three measured witnesses)
+// ============================================================================
+// haloperidol: logP / pKa / R from R-R 2007 Tab. II; log MA from Schmitt 2008
+// Tab. 1 (3.72, matching httk 3.723).  fu_p = 0.10 is the R-R Tab. II value.
+// NOTE the open measurand question: haloperidol has FOUR published fu values
+// from four measurement bases -- 0.08 (Haase 1981, clinical), 0.10 (R-R 2007),
+// 0.1784 (Wetmore 2015, in vitro, via httk) and 0.23 (Schmitt 2008) -- a 2.9x
+// range on an input to which Rodgers-Rowland has sensitivity -3.95.  Choosing
+// one is a measurand decision, not an estimate; 0.10 is used here because it is
+// the value its own method was validated with.
+pub fn kpm_drug_haloperidol() -> KpInputs {
+    return KpInputs { log_p: 3.61, log_ma: 3.72, has_ma: true, pka: 8.48,
+                      is_base: true, fu_p: 0.10, rb: 1.08, mw: 375.86 }
+}
+
+// midazolam: logP / pKa / fu from R-R 2007 Tab. III; log MA 2.90 from
+// Schmitt 2008 Tab. 1 (matching httk 2.9).  pKa 6.01 < 7, so a weak base and
+// inside Poulin-Theil's domain -- this is the in-domain witness.
+pub fn kpm_drug_midazolam() -> KpInputs {
+    return KpInputs { log_p: 3.15, log_ma: 2.90, has_ma: true, pka: 6.01,
+                      is_base: true, fu_p: 0.037, rb: 1.00, mw: 325.77 }
+}
+
+// A synthetic neutral at logP 3, to exercise the neutral route with no
+// ionisation anywhere.  Not a real drug.  Its log MA is a guess from the
+// Schmitt neutral-compound range, so has_ma is FALSE -- an earlier version set
+// it true "so the member is admitted", which is exactly the kind of untruthful
+// metadata the gate cannot detect.
+pub fn kpm_drug_neutral_logp3() -> KpInputs {
+    return KpInputs { log_p: 3.00, log_ma: 2.50, has_ma: false, pka: 0.0,
+                      is_base: false, fu_p: 0.10, rb: 1.00, mw: 300.0 }
+}
+
+// A peptide, to exercise the MW gate: outside Rodgers-Rowland and Poulin-Theil
+// by mass and outside Schmitt for want of a measured membrane affinity.
+pub fn kpm_drug_peptide() -> KpInputs {
+    return KpInputs { log_p: 0.0 - 2.0, log_ma: 0.0, has_ma: false, pka: 0.0,
+                      is_base: false, fu_p: 0.01, rb: 1.00, mw: 4813.0 }
+}
+
+// ============================================================================
+// WHAT THE DISPERSION CAN AND CANNOT SEE
+// ============================================================================
+// The dispersion statistic is computed over members that read OVERLAPPING
+// inputs: the same tissue composition, and -- hidden until measured -- a cell
+// pH that each method carries internally (Schmitt 6.81, Rodgers-Rowland and
+// Poulin-Theil 7.00, while tissue_composition.sio carries 6.97 for muscle).
+// Measured at muscle, haloperidol: that convention alone accounts for 1.51x of
+// the Rodgers-Rowland / Schmitt gap, which falls from 9.84x to 6.50x when
+// Schmitt is evaluated at Rodgers-Rowland's pH. So the claim that one shared
+// input record makes any residual disagreement attributable to the methods is
+// FALSE for pH, and the earlier three-member factorial was really a
+// four-factor one.
+//
+// THE METRIC.  Perturb an input, collect the response of every admitted member
+// as a vector D of changes in ln Kpu, and ask how much of D lies OUTSIDE the
+// direction in which all members move together:
+//
+//     blindness = || D - mean(D) * 1 || / || D ||
+//
+// Both extremes are closed forms, which is what makes this a scale:
+//   - a perturbation that moves exactly ONE of n members gives
+//     sqrt((n-1)/n)  -- 0.707107 for n = 2, 0.816497 for n = 3;
+//   - a perturbation that moves every member by the SAME amount in ln Kpu
+//     gives 0, because the response is purely uniform.
+// Low values mean the dispersion registers little of the input's effect even
+// though the predictions themselves move.
+//
+// A FIRST ATTEMPT AT THIS WAS WRONG AND IS RECORDED SO IT IS NOT REPEATED.  The
+// version committed in 5748a2719 used |d sd| / |d mean| instead. That ratio is
+// exactly sqrt(2) for a one-member perturbation when n = 2, which looked like a
+// clean calibration, but it holds ONLY for n = 2: in general the first-order
+// value is n*e_k / ((n-1)*sd), which depends on where the perturbed member sits
+// relative to the centroid. For n = 3 the perturbed member crosses the centroid
+// as delta grows, so the index is non-monotone and does not converge -- measured
+// 1.165857, 0.007324, 0.351425 at delta = 0.30, 0.05, 0.01 on the same input.
+// The projection form above is delta-independent to six decimals.
+//
+// MEASURED 2026-11-02, muscle.
+//   haloperidol -- the gate admits TWO members (Poulin-Theil is refused):
+//     log MA +0.30 / +0.05 / +0.01   0.707107 each   = the one-member reference
+//     cell pH +0.40 / +0.10 / +0.02  0.054718 / 0.029139 / 0.023047
+//   midazolam -- the gate admits THREE members:
+//     log MA +0.30 / +0.05 / +0.01   0.816497 each   = the one-member reference
+//     cell pH +0.40 / +0.10 / +0.02  0.807665 / 0.807352 / 0.807227
+//
+// THE RESULT IS NOT WHAT IT FIRST LOOKED LIKE.  With two members the shared pH
+// is nearly invisible to the dispersion; with three it is almost fully visible,
+// at 0.807 against a one-member reference of 0.816. So blindness is NOT a
+// property of an input being shared. It is a property of the admitted members
+// having PROPORTIONAL sensitivities to that input. Rodgers-Rowland and Schmitt
+// happen to share the pH response almost exactly -- over 6.60 to 7.40 their
+// predictions move 5.19x and 5.72x -- because in both the cation / acidic-
+// phospholipid term dominates and scales the same way with pH. Poulin-Theil has
+// no such term at all and moves only 1.12x, so adding it makes the response
+// non-uniform and the dispersion sees pH again.
+//
+// AND THAT CUTS AGAINST THE GATE.  By refusing Poulin-Theil for a strong base,
+// the domain gate removes the member that would have made pH visible. For a
+// strong base it therefore buys robustness against an out-of-domain member --
+// the admitted span moves 1.10x over 0.80 pH units, against 4.19x with
+// Poulin-Theil admitted -- at the price of blinding the dispersion to the input
+// whose provenance is weakest in the composition table (tc_eps_ph = 0.40). The
+// gate trades one failure mode for another, and this has to be reported per
+// input and per admitted set, not asserted once for the ensemble.
+//
+// LIMITS.  Two drugs, one tissue, two inputs. Nothing here converts a
+// dispersion into a standard uncertainty; it bounds what a dispersion registers.
+
+
+// ============================================================================
+// MEMBER 3b -- Poulin-Theil on PEYRET'S OWN NUMBERS  (added 2026-11-08)
+// ============================================================================
+// Same equation form as kpm_pt_kpu_full -- Poulin-Theil, so no acidic
+// phospholipid term -- with every composition constant taken from Peyret 2010
+// Tab. 2 and Tab. 3 instead of the Poulin & Theil 2002 lipid values the
+// hybrid member uses.  The point is a controlled comparison: ONE equation,
+// TWO tables, so whatever separates the two members is source and not form.
+//
+// The hybrid member (kpm_poulin_theil) is kept untouched.  It is what the
+// existing figures correspond to, and it is not oracle-validated either way
+// (kpm_pt_oracle_validated() is false), so neither member is certified and
+// silently replacing one with the other would hide that.
+//
+// COVERAGE IS THREE ORGANS -- liver, muscle, adipose.  Adipose was refused
+// until the vegetable oil:water correlation was RECOVERED by least squares
+// from 47 drug pairs printed in Peyret Tab. 8-9 (tissue_composition.sio,
+// tc_log_vow; R^2 0.99996).  It is admitted with its known accuracy carried as
+// data: Korzekwa & Nagar 2016 report an average fold error of 5.1 for this
+// correlation against measured adipose partitioning (tc_vow_afe).
+//
+// DOMAIN STILL BITES, AND THAT IS THE LARGER CONSEQUENCE.  Poulin-Theil
+// refuses strong bases at pKa >= 7, so for a strong base this member is out
+// of domain in every organ and the uncalibrated ensemble cannot validate
+// anywhere.  The dissertation drug set is mostly strong bases.  See T22.
+fn kpm_pt_peyret_core(d: KpInputs, organ: i32, ph_c: f64) -> f64 with Mut, Div, Panic {
+    // Adipose takes the vegetable oil:water PC, recovered from Peyret Tab. 8-9
+    // (tc_log_vow); every other organ takes n-octanol:water.  Peyret applies
+    // the tissue's own Pow throughout that tissue's computation, including the
+    // plasma back-calculation below, and so does this.
+    let log_pw = if organ == 7 { tc_log_vow(d.log_p) } else { d.log_p }
+    let pow_v = kpm_pow10(log_pw)
+    let im = if d.is_base { kpm_pow10(d.pka - ph_c) } else { 0.0 }
+    let iw = if d.is_base { kpm_pow10(d.pka - kpm_ph_plasma()) } else { 0.0 }
+
+    // Cells: Fwm = water + 0.70*neutral phospholipid,
+    //        Fnlm = neutral lipid + 0.30*neutral phospholipid  (Peyret Eq. 2)
+    let fwm  = tc_pey_cw(organ)  + 0.70 * tc_pey_cnpl(organ)
+    let fnlm = tc_pey_cnl(organ) + 0.30 * tc_pey_cnpl(organ)
+    let pcw = ((1.0 + im) * fwm + pow_v * fnlm) / (1.0 + iw)
+
+    // Interstitium: water plus albumin, the protein term back-calculated from
+    // fu_p against Peyret's own plasma row rather than the hybrid's.
+    let fnlp = tc_peyret_plasma_nl() + 0.30 * tc_peyret_plasma_npl()
+    var pprw = (1.0 / d.fu_p - 1.0 - pow_v * fnlp / (1.0 + iw)) / tc_peyret_plasma_alb()
+    if pprw < 0.0 { pprw = 0.0 }
+    let piw = tc_pey_iw(organ) + pprw * tc_pey_ialb(organ)
+
+    return pcw * tc_pey_cell(organ) + piw * tc_pey_intf(organ)
+}
+
+// in_domain carries BOTH gates: Poulin-Theil's own declared domain (which
+// already refuses strong bases at pKa >= 7.0) and the two-organ coverage.
+pub fn kpm_pt_peyret_organ(d: KpInputs, organ: i32) -> KpMember with Mut, Div, Panic {
+    let ok = if tc_pey_pt_supported(organ) { kpm_pt_in_domain(d) } else { false }
+    return KpMember { kpu: kpm_pt_peyret_core(d, organ, kpm_ph_cell_pt()),
+                      in_domain: ok, calibrated: false, code: 3 }
+}
+
+// Ensemble over an organ.  Only Schmitt has sourced per-organ composition
+// today, and its two members sit in DIFFERENT calibration classes, so each
+// homogeneous sub-ensemble is a singleton and this refuses with code 2 for
+// every supported organ.  That refusal is the honest state of the extension,
+// and T17 pins it: extending the composition table to ten organs did NOT
+// produce a usable ensemble, and the reason is named rather than averaged
+// away.
+//
+// WHAT IS MISSING, PRECISELY.  Rodgers-Rowland needs per-organ composition in
+// its own parameterisation (R-R Tab. VII gives muscle and blood cells only;
+// tc_ap_ratio_httk supplies the [AP-] ratio for ten organs but not the water
+// and lipid terms), and Poulin-Theil needs the Peyret Tab. 2 cellular /
+// interstitial split per organ.  Neither is in hand.  Evaluating either
+// equation form on httk composition would be a third source mixed into a
+// comparison whose point is that sources disagree -- the -11.52% already
+// measured on [AP-] is the warning -- so it is refused instead of improvised.
+pub fn kpm_ensemble_organ(d: KpInputs, organ: i32, want_calibrated: bool) -> KpEnsemble with Mut, Div, Panic {
+    if !kpm_organ_supported(organ) {
+        return KpEnsemble { dispersion: 0.0, n_admitted: 0, valid: false, refusal: 1 }
+    }
+    let m1 = kpm_schmitt_raw_organ(d, organ)
+    let m2 = kpm_schmitt_pearce_organ(d, organ)
+    // Member 3b closes the singleton: Schmitt raw and Poulin-Theil-on-Peyret
+    // are both UNCALIBRATED, so the uncalibrated sub-ensemble reaches two
+    // members wherever Peyret covers the organ and the drug is inside
+    // Poulin-Theil's domain.  Today that is liver and muscle.
+    let m3 = kpm_pt_peyret_organ(d, organ)
+
+    var n = 0
+    var s = 0.0
+    var any_out = false
+    if m1.calibrated == want_calibrated {
+        if m1.in_domain { n = n + 1; s = s + ln(m1.kpu) } else { any_out = true }
+    }
+    if m2.calibrated == want_calibrated {
+        if m2.in_domain { n = n + 1; s = s + ln(m2.kpu) } else { any_out = true }
+    }
+    // An organ Peyret does not cover is not an out-of-domain MODELLING error
+    // for the ensemble as a whole -- it is simply a member that does not
+    // exist there -- so it is skipped rather than counted as any_out.
+    if m3.calibrated == want_calibrated {
+        if tc_pey_pt_supported(organ) {
+            if m3.in_domain { n = n + 1; s = s + ln(m3.kpu) } else { any_out = true }
+        }
+    }
+    if any_out {
+        return KpEnsemble { dispersion: 0.0, n_admitted: n, valid: false, refusal: 1 }
+    }
+    if n < 2 {
+        return KpEnsemble { dispersion: 0.0, n_admitted: n, valid: false, refusal: 2 }
+    }
+    let mu = s / (n as f64)
+    var ss = 0.0
+    if m1.calibrated == want_calibrated { if m1.in_domain { let e = ln(m1.kpu) - mu; ss = ss + e * e } }
+    if m2.calibrated == want_calibrated { if m2.in_domain { let e = ln(m2.kpu) - mu; ss = ss + e * e } }
+    if m3.calibrated == want_calibrated {
+        if tc_pey_pt_supported(organ) { if m3.in_domain { let e = ln(m3.kpu) - mu; ss = ss + e * e } }
+    }
+    let u = kpm_sqrt(ss / ((n - 1) as f64))
+    return KpEnsemble { dispersion: u, n_admitted: n, valid: true, refusal: 0 }
+}
+// Perturbation codes for kpm_blindness.
+//   0  cell pH      -- SHARED: added to each member's own native pH
+//   1  log P        -- SHARED
+//   2  pKa          -- SHARED
+//   3  fu_p         -- SHARED
+//   4  log MA       -- read only by Schmitt (the one-member reference case)
+//   5  neutral lipid        -- SHARED, relative multiplier
+//   6  neutral phospholipid -- SHARED, relative multiplier
+//   7  acidic phospholipid  -- SHARED, but Poulin-Theil has no such term and
+//                             Rodgers-Rowland depends on it only through the
+//                             tissue / blood-cell ratio, so a uniform change
+//                             moves ONLY Schmitt
+pub fn kpm_pert_ph() -> i32    { return 0 }
+pub fn kpm_pert_logp() -> i32  { return 1 }
+pub fn kpm_pert_pka() -> i32   { return 2 }
+pub fn kpm_pert_fu() -> i32    { return 3 }
+pub fn kpm_pert_ma() -> i32    { return 4 }
+pub fn kpm_pert_nl() -> i32    { return 5 }
+pub fn kpm_pert_np() -> i32    { return 6 }
+pub fn kpm_pert_ap() -> i32    { return 7 }
+
+// Closed form for a perturbation only ONE of n admitted members reads:
+// the response is delta*e_k, whose uniform component has norm delta/sqrt(n),
+// leaving sqrt(1 - 1/n) = sqrt((n-1)/n) outside it.
+pub fn kpm_blindness_reference(n: i32) -> f64 with Mut, Div {
+    if n < 2 { return 0.0 }
+    return kpm_sqrt(((n - 1) as f64) / (n as f64))
+}
+
+// Shifted input record for the codes that live in KpInputs.
+fn kpm_shift(d: KpInputs, code: i32, delta: f64) -> KpInputs {
+    if code == 1 { return KpInputs { log_p: d.log_p + delta, log_ma: d.log_ma, has_ma: d.has_ma,
+                                     pka: d.pka, is_base: d.is_base, fu_p: d.fu_p, rb: d.rb, mw: d.mw } }
+    if code == 2 { return KpInputs { log_p: d.log_p, log_ma: d.log_ma, has_ma: d.has_ma,
+                                     pka: d.pka + delta, is_base: d.is_base, fu_p: d.fu_p, rb: d.rb, mw: d.mw } }
+    if code == 3 { return KpInputs { log_p: d.log_p, log_ma: d.log_ma, has_ma: d.has_ma,
+                                     pka: d.pka, is_base: d.is_base, fu_p: d.fu_p + delta, rb: d.rb, mw: d.mw } }
+    if code == 4 { return KpInputs { log_p: d.log_p, log_ma: d.log_ma + delta, has_ma: d.has_ma,
+                                     pka: d.pka, is_base: d.is_base, fu_p: d.fu_p, rb: d.rb, mw: d.mw } }
+    return d
+}
+
+// How many members the measurement is taken over: admitted and uncalibrated.
+pub fn kpm_blindness_n(d: KpInputs) -> i32 with Mut {
+    var n = 0
+    if kpm_rr_in_domain(d)      { n = n + 1 }
+    if kpm_schmitt_in_domain(d) { n = n + 1 }
+    if kpm_pt_in_domain(d)      { n = n + 1 }
+    return n
+}
+
+// One member's response in ln Kpu to the perturbation, or 0.0 when that member
+// is not admitted. Domain is judged on the UNPERTURBED record, so a
+// perturbation cannot silently change which members are admitted.
+fn kpm_response(d: KpInputs, which: i32, code: i32, delta: f64) -> f64 with Mut, Div, Panic {
+    let dp  = kpm_shift(d, code, delta)
+    let dph = if code == 0 { delta } else { 0.0 }
+    // composition codes are RELATIVE multipliers, so 1.0 + delta
+    let s_nl = if code == 5 { 1.0 + delta } else { 1.0 }
+    let s_np = if code == 6 { 1.0 + delta } else { 1.0 }
+    let s_ap = if code == 7 { 1.0 + delta } else { 1.0 }
+    if which == 0 {
+        if !kpm_rr_in_domain(d) { return 0.0 }
+        return ln(kpm_rr_kpu_full(dp, kpm_ph_cell_rr() + dph, s_nl, s_np, s_ap))
+             - ln(kpm_rr_kpu_full(d, kpm_ph_cell_rr(), 1.0, 1.0, 1.0))
+    }
+    if which == 1 {
+        if !kpm_schmitt_in_domain(d) { return 0.0 }
+        return ln(kpm_schmitt_core_full(dp, kpm_ph_cell_schmitt() + dph, s_nl, s_np, s_ap))
+             - ln(kpm_schmitt_core_full(d, kpm_ph_cell_schmitt(), 1.0, 1.0, 1.0))
+    }
+    if !kpm_pt_in_domain(d) { return 0.0 }
+    return ln(kpm_pt_kpu_full(dp, kpm_ph_cell_pt() + dph, s_nl, s_np))
+         - ln(kpm_pt_kpu_full(d, kpm_ph_cell_pt(), 1.0, 1.0))
+}
+
+// The fraction of the response that lies outside the all-members-together
+// direction. Negative sentinel when fewer than two members are admitted, or
+// when the perturbation moves nothing at all.
+pub fn kpm_blindness(d: KpInputs, code: i32, delta: f64) -> f64 with Mut, Div, Panic {
+    let n = kpm_blindness_n(d)
+    if n < 2 { return 0.0 - 1.0 }
+    let r0 = kpm_response(d, 0, code, delta)
+    let r1 = kpm_response(d, 1, code, delta)
+    let r2 = kpm_response(d, 2, code, delta)
+    let total = r0 * r0 + r1 * r1 + r2 * r2
+    if total < 1.0e-24 { return 0.0 - 1.0 }
+    // the mean is taken over ADMITTED members only; a non-admitted member
+    // contributes 0.0 to both sums and must not dilute the mean
+    let mu = (r0 + r1 + r2) / (n as f64)
+    var perp = 0.0
+    if kpm_rr_in_domain(d)      { let e = r0 - mu; perp = perp + e * e }
+    if kpm_schmitt_in_domain(d) { let e = r1 - mu; perp = perp + e * e }
+    if kpm_pt_in_domain(d)      { let e = r2 - mu; perp = perp + e * e }
+    return kpm_sqrt(perp) / kpm_sqrt(total)
+}
+
+// ============================================================================
+// Accessors
+// ============================================================================
+// Struct fields do not cross a module boundary in Madaros (error[E259]), so the
+// records above are read through these.  Exposing in_domain and calibrated as
+// first-class accessors is deliberate: a consumer that wants only the number
+// has to walk past the two flags that say whether the number means anything.
+
+pub fn kpm_member_kpu(m: KpMember) -> f64 { return m.kpu }
+pub fn kpm_member_in_domain(m: KpMember) -> bool { return m.in_domain }
+pub fn kpm_member_calibrated(m: KpMember) -> bool { return m.calibrated }
+pub fn kpm_member_code(m: KpMember) -> i32 { return m.code }
+
+pub fn kpm_ens_dispersion(e: KpEnsemble) -> f64 { return e.dispersion }
+pub fn kpm_ens_n(e: KpEnsemble) -> i32 { return e.n_admitted }
+pub fn kpm_ens_valid(e: KpEnsemble) -> bool { return e.valid }
+pub fn kpm_ens_refusal(e: KpEnsemble) -> i32 { return e.refusal }
+
+// Constructor, so callers outside this module can assemble inputs without
+// touching private fields.
+pub fn kpm_inputs(log_p: f64, log_ma: f64, has_ma: bool, pka: f64,
+                  is_base: bool, fu_p: f64, rb: f64, mw: f64) -> KpInputs {
+    return KpInputs { log_p: log_p, log_ma: log_ma, has_ma: has_ma, pka: pka,
+                      is_base: is_base, fu_p: fu_p, rb: rb, mw: mw }
+}
+
+// Same inputs with the acidic-phospholipid concentrations scaled by a common
+// factor, used to witness the exact cancellation documented on
+// kpm_rodgers_rowland.  Kept as a separate entry point rather than a field so
+// that production callers cannot perturb the table by accident.
+pub fn kpm_rr_with_ap_scale(d: KpInputs, s: f64) -> f64 with Mut, Div, Panic {
+    kpm_rr_kpu_full(d, kpm_ph_cell_rr(), 1.0, 1.0, s)
+}
+
+// ============================================================================
+// Module self-test
+// ============================================================================
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var fails = 0
+
+    // T1 -- the three uncalibrated members agree closely IN DOMAIN (midazolam).
+    // Measured in C++ at muscle: 35.16 / 32.10 / 31.00, spread 1.1x.
+    let mdz = kpm_drug_midazolam()
+    let e_mdz = kpm_ensemble(mdz, false)
+    if e_mdz.valid {
+        if e_mdz.n_admitted == 3 {
+            if e_mdz.dispersion < 0.20 {
+                println("T1 PASS: in-domain ensemble valid, 3 members, dispersion < 0.20 on ln Kpu")
+            } else {
+                println("T1 FAIL: in-domain dispersion unexpectedly wide"); fails = fails + 1
+            }
+        } else {
+            println("T1 FAIL: expected 3 admitted members in domain"); fails = fails + 1
+        }
+    } else {
+        println("T1 FAIL: in-domain ensemble refused"); fails = fails + 1
+    }
+
+    // T2 -- a STRONG base must be refused, because Poulin-Theil cannot
+    // represent it.  The refusal must be the domain code, not a wide number.
+    let hal = kpm_drug_haloperidol()
+    let e_hal = kpm_ensemble(hal, false)
+    if !e_hal.valid {
+        if e_hal.refusal == 1 {
+            if e_hal.dispersion == 0.0 {
+                println("T2 PASS: strong base refused fail-closed on domain, dispersion unavailable")
+            } else {
+                println("T2 FAIL: refused but returned a non-zero u"); fails = fails + 1
+            }
+        } else {
+            println("T2 FAIL: refused for the wrong reason"); fails = fails + 1
+        }
+    } else {
+        println("T2 FAIL: strong base admitted -- domain gate not holding"); fails = fails + 1
+    }
+
+    // T3 -- the CALIBRATED sub-ensemble has exactly one member, so no
+    // dispersion term exists for it.  This is the honest consequence of
+    // refusing to mix calibration statuses.
+    let e_cal = kpm_ensemble(mdz, true)
+    if !e_cal.valid {
+        if e_cal.refusal == 2 {
+            println("T3 PASS: calibrated sub-ensemble is a singleton, no term defined")
+        } else {
+            println("T3 FAIL: calibrated sub-ensemble refused for the wrong reason"); fails = fails + 1
+        }
+    } else {
+        println("T3 FAIL: singleton ensemble produced a dispersion term"); fails = fails + 1
+    }
+
+    // T4 -- the Pearce regression SHRINKS a large mechanistic prediction.
+    // b = 0.658 < 1, so the calibrated member must sit below the raw one for a
+    // drug whose raw Kpu is large.  Haloperidol raw Kpu at muscle is ~800.
+    let raw = kpm_schmitt_raw(hal)
+    let cal = kpm_schmitt_pearce(hal)
+    if cal.kpu < raw.kpu {
+        if cal.calibrated {
+            if !raw.calibrated {
+                println("T4 PASS: Pearce member shrinks the raw one and is flagged calibrated")
+            } else {
+                println("T4 FAIL: raw member flagged calibrated"); fails = fails + 1
+            }
+        } else {
+            println("T4 FAIL: Pearce member not flagged calibrated"); fails = fails + 1
+        }
+    } else {
+        println("T4 FAIL: regression did not shrink a large prediction"); fails = fails + 1
+    }
+
+    // T5 -- a UNIFORM error in [AP-] cancels EXACTLY in Rodgers-Rowland.
+    // Ka is back-calculated from blood cells using the same table, so Ka
+    // carries 1/AP_rbc while the tissue term carries Ka*AP_tissue: a common
+    // multiplier cancels algebraically, and only the tissue/blood RATIO
+    // (2.42 / 0.57 = 4.25) ever enters.  Asserted numerically, not structurally:
+    // scaling both concentrations by 1.10 must leave Kpu bit-identical.
+    // Consequence: measuring [AP-] better does NOT improve the prediction if
+    // the error is uniform across tissues; only a DIFFERENTIAL error between
+    // blood cells and tissue is detectable by this method.
+    let ap_base = kpm_rr_with_ap_scale(hal, 1.0)
+    let ap_up   = kpm_rr_with_ap_scale(hal, 1.10)
+    let ap_dn   = kpm_rr_with_ap_scale(hal, 0.50)
+    if kpm_abs(ap_up - ap_base) < 1.0e-12 {
+        if kpm_abs(ap_dn - ap_base) < 1.0e-12 {
+            if ap_base > 0.0 {
+                println("T5 PASS: R-R reads [AP-] only via the tissue/blood-cell ratio (invariance)")
+            } else {
+                println("T5 FAIL: R-R Kpu non-positive"); fails = fails + 1
+            }
+        } else {
+            println("T5 FAIL: halving [AP-] moved Kpu -- cancellation not exact"); fails = fails + 1
+        }
+    } else {
+        println("T5 FAIL: scaling [AP-] by 1.10 moved Kpu"); fails = fails + 1
+    }
+
+    // T6 -- a peptide is outside every member; the ensemble must refuse and
+    // must not silently fall back to a single admitted member.
+    let pep = kpm_drug_peptide()
+    let e_pep = kpm_ensemble(pep, false)
+    if !e_pep.valid {
+        println("T6 PASS: peptide refused by every member")
+    } else {
+        println("T6 FAIL: peptide admitted"); fails = fails + 1
+    }
+
+    // T7 -- provenance flags are honest: Schmitt has an executable oracle,
+    // Poulin-Theil does not.
+    if kpm_schmitt_oracle_validated() {
+        if !kpm_pt_oracle_validated() {
+            println("T7 PASS: oracle-validation flags reflect what was actually checked")
+        } else {
+            println("T7 FAIL: Poulin-Theil claims oracle validation it does not have"); fails = fails + 1
+        }
+    } else {
+        println("T7 FAIL: Schmitt oracle flag lost"); fails = fails + 1
+    }
+
+    // T8 -- the gate TRUSTS declared metadata; it does not authenticate it.
+    // Same midazolam inputs, has_ma flipped: with has_ma = true the Schmitt
+    // member is admitted and the ensemble is valid; with has_ma = false it is
+    // out of domain and the ensemble refuses. Nothing in the numbers tells the
+    // two apart, so the refusal is only as truthful as the caller's flag. This
+    // is a stated LIMIT of the contract, pinned so it is not forgotten.
+    let mdz_imp = KpInputs { log_p: 3.15, log_ma: 2.90, has_ma: false, pka: 6.01,
+                             is_base: true, fu_p: 0.037, rb: 1.00, mw: 325.77 }
+    let e_true  = kpm_ensemble(mdz, false)
+    let e_false = kpm_ensemble(mdz_imp, false)
+    if e_true.valid {
+        if !e_false.valid {
+            if e_false.refusal == 1 {
+                println("T8 PASS: admission follows the declared has_ma flag alone (limit of the gate)")
+            } else {
+                println("T8 FAIL: wrong refusal code when has_ma is false"); fails = fails + 1
+            }
+        } else {
+            println("T8 FAIL: ensemble admitted an undeclared membrane affinity"); fails = fails + 1
+        }
+    } else {
+        println("T8 FAIL: declared-measured midazolam refused"); fails = fails + 1
+    }
+
+    // T9 -- the blindness metric against BOTH of its closed forms, at two
+    // member counts, and the side effect the domain gate has on it.
+    //
+    // (a) log MA is read only by Schmitt, so it is the one-member case and must
+    //     return sqrt((n-1)/n) exactly: 0.707107 at n = 2, 0.816497 at n = 3.
+    //     Matching the closed form at two different n is what licenses the
+    //     metric as a scale rather than a number.
+    // (b) cell pH is read by every member, but that is NOT sufficient for
+    //     blindness. With the two members the gate admits for a strong base the
+    //     dispersion registers almost none of it; with the three admitted for a
+    //     weak base it registers nearly all of it, because Poulin-Theil has no
+    //     cation / acidic-phospholipid term and so does not follow the others.
+    //     Blindness tracks PROPORTIONAL sensitivity, not shared inputs.
+    // (c) The consequence, asserted here so it cannot be quietly dropped: for a
+    //     strong base the gate removes the member that made pH visible.
+    let hal_b = kpm_drug_haloperidol()
+    let mdz_b = kpm_drug_midazolam()
+    let n2 = kpm_blindness_n(hal_b)
+    let n3 = kpm_blindness_n(mdz_b)
+    let ma2 = kpm_blindness(hal_b, kpm_pert_ma(), 0.30)
+    let ma3 = kpm_blindness(mdz_b, kpm_pert_ma(), 0.30)
+    let ph2 = kpm_blindness(hal_b, kpm_pert_ph(), 0.40)
+    let ph3 = kpm_blindness(mdz_b, kpm_pert_ph(), 0.40)
+    println("n (strong base, weak base):")
+    println(n2)
+    println(n3)
+    println("one-member input (log MA): measured, then closed form, at n=2 then n=3:")
+    println(ma2)
+    println(kpm_blindness_reference(2))
+    println(ma3)
+    println(kpm_blindness_reference(3))
+    println("shared input (cell pH): n=2 then n=3:")
+    println(ph2)
+    println(ph3)
+    if n2 == 2 {
+        if n3 == 3 {
+            if kpm_abs(ma2 - kpm_blindness_reference(2)) < 1.0e-6 {
+                if kpm_abs(ma3 - kpm_blindness_reference(3)) < 1.0e-6 {
+                    if ph2 < 0.10 {
+                        if ph3 > 0.70 {
+                            println("T9 PASS: both closed forms matched; shared pH blind at n=2, visible at n=3")
+                        } else {
+                            println("T9 FAIL: shared pH not visible at n=3 -- the gate side effect is unproven"); fails = fails + 1
+                        }
+                    } else {
+                        println("T9 FAIL: shared pH not blind at n=2"); fails = fails + 1
+                    }
+                } else {
+                    println("T9 FAIL: one-member case misses the closed form at n=3"); fails = fails + 1
+                }
+            } else {
+                println("T9 FAIL: one-member case misses the closed form at n=2"); fails = fails + 1
+            }
+        } else {
+            println("T9 FAIL: weak base did not admit three members"); fails = fails + 1
+        }
+    } else {
+        println("T9 FAIL: strong base did not admit exactly two members"); fails = fails + 1
+    }
+
+    // T10 -- the index refuses rather than returning a misleading number when
+    // there is no dispersion to measure. A peptide is out of every domain.
+    if kpm_blindness(kpm_drug_peptide(), kpm_pert_ph(), 0.40) < 0.0 {
+        println("T10 PASS: blindness refuses when fewer than two members are admitted")
+    } else {
+        println("T10 FAIL: blindness returned a value with no admitted ensemble"); fails = fails + 1
+    }
+
+    // T11 -- the same metric on the TISSUE COMPOSITION, which refutes the
+    // tempting generalisation that a dispersion is blind to shared inputs.
+    //
+    // Measured at muscle, both engines, delta-independent to six decimals:
+    //                      haloperidol (n=2)   midazolam (n=3)
+    //   cell pH                 0.054718            0.807665
+    //   neutral lipid           0.645984            0.235045
+    //   neutral phospholipid    0.773990            0.409417
+    //   acidic phospholipid     0.707107            0.816497
+    //
+    // Only cell pH is invisible, and only at n = 2. The composition fractions
+    // are all registered. So blindness is NOT a property of sharing an input:
+    // pH is special because both methods route it through the same
+    // Henderson-Hasselbalch factor on the dominant term, giving near-identical
+    // log-responses, while the composition fractions enter with method-specific
+    // weights (Rodgers-Rowland f_nl 0.022 against Schmitt 0.02387 * 0.5394 =
+    // 0.01288) and so move the members by different amounts.
+    //
+    // That sharpens the pH result rather than weakening it: the one shared
+    // input a two-member dispersion cannot see is also the one carrying the
+    // lowest evidence weight in the composition table (tc_eps_ph = 0.40).
+    //
+    // The acidic-phospholipid row is a CLOSED-FORM PREDICTION, and it is the
+    // reason this test is worth having. A uniform [AP-] change moves only
+    // Schmitt -- Rodgers-Rowland depends on it through the tissue / blood-cell
+    // ratio alone (T5), and Poulin-Theil has no acidic-phospholipid term at all
+    // -- so it must land exactly on the one-member reference at BOTH member
+    // counts, by two different mechanisms: cancellation in the strong-base
+    // route, absence in the weak-base route and in Poulin-Theil. The metric
+    // therefore rediscovers T5's invariance from the outside.
+    let ap2 = kpm_blindness(hal_b, kpm_pert_ap(), 0.10)
+    let ap3 = kpm_blindness(mdz_b, kpm_pert_ap(), 0.10)
+    let nl2 = kpm_blindness(hal_b, kpm_pert_nl(), 0.10)
+    let np2 = kpm_blindness(hal_b, kpm_pert_np(), 0.10)
+    println("composition, n=2: [AP-] / neutral lipid / neutral phospholipid:")
+    println(ap2)
+    println(nl2)
+    println(np2)
+    println("[AP-] at n=3 (expect the n=3 one-member reference):")
+    println(ap3)
+    if kpm_abs(ap2 - kpm_blindness_reference(2)) < 1.0e-6 {
+        if kpm_abs(ap3 - kpm_blindness_reference(3)) < 1.0e-6 {
+            if nl2 > 0.30 {
+                if np2 > 0.30 {
+                    println("T11 PASS: [AP-] hits both one-member forms; composition is NOT blind")
+                } else {
+                    println("T11 FAIL: neutral phospholipid unexpectedly blind at n=2"); fails = fails + 1
+                }
+            } else {
+                println("T11 FAIL: neutral lipid unexpectedly blind at n=2"); fails = fails + 1
+            }
+        } else {
+            println("T11 FAIL: [AP-] misses the one-member form at n=3"); fails = fails + 1
+        }
+    } else {
+        println("T11 FAIL: [AP-] misses the one-member form at n=2"); fails = fails + 1
+    }
+
+
+    // T12 -- B:P CONSISTENCY OF THE STRONG-BASE ROUTE (audit 2026-11-02).
+    // Three claims, each measured in scratchpad/audit1/bp1.cpp and bp2.cpp:
+    //  (a) the dissertation set is B:P-consistent, venlafaxine by the thinnest
+    //      margin in the set (+0.1342 on rb, i.e. +13.4%, at the sourced
+    //      logP 2.71; +0.1265 was computed with an unsourced logP 3.20);
+    //  (b) an rb below the critical value is REFUSED, with the dedicated code
+    //      4, instead of being clamped to Ka = 0 and returned silently;
+    //  (c) the weak-base route never reads rb, so it is reported as trivially
+    //      consistent rather than carrying a fabricated margin.
+    // Before the fix (b) failed: in_domain stayed true and the ensemble
+    // returned a dispersion computed from a Kpu whose implied B:P was 0.873
+    // against an input of 0.56.
+    let t12_vfx = KpInputs { log_p: 2.71, log_ma: 0.0, has_ma: false, pka: 9.40,
+                             is_base: true, fu_p: 0.73, rb: 1.00, mw: 277.40 }
+    let t12_bad = KpInputs { log_p: 2.71, log_ma: 0.0, has_ma: false, pka: 9.40,
+                             is_base: true, fu_p: 0.73, rb: 0.56, mw: 277.40 }
+    let t12_weak = KpInputs { log_p: 3.00, log_ma: 0.0, has_ma: false, pka: 6.01,
+                              is_base: true, fu_p: 0.032, rb: 1.00, mw: 325.77 }
+
+    let mg_vfx = kpm_rr_bp_margin(t12_vfx)
+    let mg_bad = kpm_rr_bp_margin(t12_bad)
+
+    // (a) venlafaxine consistent, and the margin is the measured one.
+    if kpm_rr_bp_consistent(t12_vfx) {
+        if mg_vfx > 0.133 {
+            if mg_vfx < 0.135 {
+                println("T12a PASS: venlafaxina consistente, margem medida em rb")
+            } else {
+                println("T12a FAIL: margem da venlafaxina acima de 0.135"); fails = fails + 1
+            }
+        } else {
+            println("T12a FAIL: margem da venlafaxina abaixo de 0.133"); fails = fails + 1
+        }
+    } else {
+        println("T12a FAIL: venlafaxina marcada inconsistente"); fails = fails + 1
+    }
+
+    // (b) low rb is refused as code 4, and the member is out of domain.
+    if mg_bad < 0.0 {
+        if kpm_rr_bp_consistent(t12_bad) {
+            println("T12b FAIL: rb abaixo do critico aceito como consistente"); fails = fails + 1
+        } else {
+            let m_bad = kpm_rodgers_rowland(t12_bad)
+            if kpm_member_in_domain(m_bad) {
+                println("T12b FAIL: membro R-R ficou in_domain com B:P inconsistente"); fails = fails + 1
+            } else {
+                let e_bad = kpm_ensemble(t12_bad, false)
+                if kpm_ens_valid(e_bad) {
+                    println("T12b FAIL: ensemble valido com B:P inconsistente"); fails = fails + 1
+                } else {
+                    if kpm_ens_refusal(e_bad) == 4 {
+                        println("T12b PASS: rb sub-critico recusado com codigo 4, nao clampado")
+                    } else {
+                        println("T12b FAIL: codigo de recusa errado para B:P inconsistente"); fails = fails + 1
+                    }
+                }
+            }
+        }
+    } else {
+        println("T12b FAIL: rb 0.56 nao produziu margem negativa"); fails = fails + 1
+    }
+
+    // (c) the weak-base route does not read rb.
+    if kpm_rr_bp_consistent(t12_weak) {
+        if kpm_rr_bp_margin(t12_weak) == 0.0 {
+            println("T12c PASS: rota de base fraca nao le rb; margem reportada como 0.0")
+        } else {
+            println("T12c FAIL: margem fabricada para a rota de base fraca"); fails = fails + 1
+        }
+    } else {
+        println("T12c FAIL: base fraca marcada inconsistente"); fails = fails + 1
+    }
+
+    // T13 -- CERTIFICATION OF THE PER-ORGAN TABLE.  Organ 6 through the
+    // generalised path must reproduce the muscle-only path bit for bit.  If
+    // the table were mistranscribed this is what catches it, and nothing else
+    // downstream would be trustworthy.
+    let t13_hal = KpInputs { log_p: 4.30, log_ma: 3.723, has_ma: true, pka: 8.66,
+                             is_base: true, fu_p: 0.10, rb: 1.08, mw: 375.86 }
+    let old_mus = kpm_schmitt_core_full(t13_hal, kpm_ph_cell_schmitt(), 1.0, 1.0, 1.0)
+    let new_mus = kpm_schmitt_core_organ(t13_hal, 6, kpm_ph_cell_schmitt(), 1.0, 1.0, 1.0)
+    if old_mus == new_mus {
+        println("T13 PASS: organo 6 pela tabela reproduz o caminho hardcoded bit a bit")
+    } else {
+        println("T13 FAIL: tabela do musculo divergiu do caminho hardcoded")
+        print("  hardcoded = "); println(old_mus)
+        print("  tabela    = "); println(new_mus)
+        fails = fails + 1
+    }
+
+    // T14 -- bone is refused, and the reason is a datum.
+    if kpm_organ_supported(10) {
+        println("T14 FAIL: osso admitido apesar de nao fechar"); fails = fails + 1
+    } else {
+        let m_bone = kpm_schmitt_raw_organ(t13_hal, 10)
+        if kpm_member_in_domain(m_bone) {
+            println("T14 FAIL: membro do osso ficou in_domain"); fails = fails + 1
+        } else {
+            if kpm_organ_bone_closure() < 0.50 {
+                println("T14 PASS: osso recusado, fechamento 0.49 registrado como dado")
+            } else {
+                println("T14 FAIL: fechamento do osso nao registrado"); fails = fails + 1
+            }
+        }
+    }
+
+    // T15 -- coverage: exactly ten organs supported, and the refused ones are
+    // plasma (0), bone (10), pancreas (12) and other (13).
+    var sup = 0
+    var oi = 0
+    while oi < 14 {
+        if kpm_organ_supported(oi) { sup = sup + 1 }
+        oi = oi + 1
+    }
+    if sup == kpm_organ_count() {
+        if sup == 10 {
+            println("T15 PASS: 10 orgaos suportados; plasma, osso, pancreas e other recusados")
+        } else {
+            print("T15 FAIL: contagem inesperada = "); println(sup); fails = fails + 1
+        }
+    } else {
+        println("T15 FAIL: kpm_organ_count nao casa com o gate"); fails = fails + 1
+    }
+
+    // T16 -- Pearce shrinks in every supported organ (b < 1 everywhere), so a
+    // large raw prediction must come down in all ten, not just in muscle.
+    var shrunk = 0
+    var checked = 0
+    var oj = 1
+    while oj < 12 {
+        if kpm_organ_supported(oj) {
+            checked = checked + 1
+            let mr = kpm_schmitt_raw_organ(t13_hal, oj)
+            let mp = kpm_schmitt_pearce_organ(t13_hal, oj)
+            if kpm_member_kpu(mp) < kpm_member_kpu(mr) { shrunk = shrunk + 1 }
+        }
+        oj = oj + 1
+    }
+    if checked == 10 {
+        if shrunk == 10 {
+            println("T16 PASS: Pearce encolhe a predicao bruta nos 10 orgaos")
+        } else {
+            print("T16 FAIL: encolheu em apenas "); println(shrunk); fails = fails + 1
+        }
+    } else {
+        print("T16 FAIL: orgaos verificados = "); println(checked); fails = fails + 1
+    }
+
+    // T17 -- CORRECTED 2026-11-08.  The previous version counted valid results
+    // and refusal-1 results in ONE bucket and printed "2 validos".  This test
+    // uses haloperidol, a strong base, which Poulin-Theil refuses at
+    // pKa >= 7 -- so those two were DOMAIN REFUSALS (code 1), never valid.
+    // The count was right and the label was wrong.  The three outcomes are now
+    // counted apart.  With adipose admitted, haloperidol gives: no organ
+    // valid, three domain refusals (liver, muscle, adipose -- the organs where
+    // the Peyret member exists and refuses), seven singleton refusals.
+    var n_valid = 0
+    var n_r1 = 0
+    var n_r2 = 0
+    var n_other = 0
+    var ok_organs = 0
+    var ok = 1
+    while ok < 12 {
+        if kpm_organ_supported(ok) {
+            ok_organs = ok_organs + 1
+            let e = kpm_ensemble_organ(t13_hal, ok, false)
+            if kpm_ens_valid(e) {
+                n_valid = n_valid + 1
+            } else {
+                let rc = kpm_ens_refusal(e)
+                if rc == 1 { n_r1 = n_r1 + 1 } else { if rc == 2 { n_r2 = n_r2 + 1 } else { n_other = n_other + 1 } }
+            }
+        }
+        ok = ok + 1
+    }
+    if ok_organs == 10 {
+        if n_valid == 0 {
+            if n_r1 == 3 {
+                if n_r2 == 7 {
+                    if n_other == 0 {
+                        println("T17 PASS: haloperidol -- 0 validos, 3 recusas de dominio, 7 singletons")
+                    } else {
+                        println("T17 FAIL: codigo de recusa inesperado"); fails = fails + 1
+                    }
+                } else {
+                    print("T17 FAIL: singletons = "); println(n_r2); fails = fails + 1
+                }
+            } else {
+                print("T17 FAIL: recusas de dominio = "); println(n_r1); fails = fails + 1
+            }
+        } else {
+            print("T17 FAIL: validos para base forte = "); println(n_valid); fails = fails + 1
+        }
+    } else {
+        println("T17 FAIL: contagem de orgaos"); fails = fails + 1
+    }
+
+    // T18 -- an unsupported organ refuses on DOMAIN (code 1), distinguishable
+    // from the singleton refusal above.  Bone and pancreas must not look the
+    // same as "not enough members".
+    let e_bone = kpm_ensemble_organ(t13_hal, 10, false)
+    let e_panc = kpm_ensemble_organ(t13_hal, 12, false)
+    if kpm_ens_refusal(e_bone) == 1 {
+        if kpm_ens_refusal(e_panc) == 1 {
+            println("T18 PASS: orgao nao suportado recusa por dominio (1), nao por contagem (2)")
+        } else {
+            println("T18 FAIL: pancreas com codigo errado"); fails = fails + 1
+        }
+    } else {
+        println("T18 FAIL: osso com codigo errado"); fails = fails + 1
+    }
+
+    // T19 -- PT-on-Peyret: coverage is two organs, and adipose is refused for
+    // the vegetable-oil:water correlation rather than for missing composition.
+    // Peyret HAS adipose; the repository has no sourced Pvo:w.
+    var pn = 0
+    var pq = 0
+    while pq < 14 {
+        if tc_pey_pt_supported(pq) { pn = pn + 1 }
+        pq = pq + 1
+    }
+    if pn == tc_pey_pt_count() {
+        if pn == 3 {
+            if tc_pey_pt_supported(7) {
+                if tc_vow_afe() > 5.0 {
+                    println("T19 PASS: PT-Peyret cobre 3 orgaos; adiposo admitido com AFE 5.1 carregado")
+                } else {
+                    println("T19 FAIL: AFE do Pvo:w nao carregado"); fails = fails + 1
+                }
+            } else {
+                println("T19 FAIL: adiposo nao admitido"); fails = fails + 1
+            }
+        } else {
+            print("T19 FAIL: cobertura PT-Peyret = "); println(pn); fails = fails + 1
+        }
+    } else {
+        println("T19 FAIL: contagem PT-Peyret inconsistente"); fails = fails + 1
+    }
+
+    // T20 -- ONE equation, TWO tables.  The hybrid and the pure-Peyret member
+    // differ on muscle, and the difference is source, not form: the equation
+    // is identical and only the composition constants change.  Peyret's cell
+    // neutral lipid is 55% lower, so for a lipophilic base the Peyret member
+    // must come out BELOW the hybrid.
+    let t20_mid = KpInputs { log_p: 3.00, log_ma: 2.9, has_ma: true, pka: 6.01,
+                             is_base: true, fu_p: 0.032, rb: 1.00, mw: 325.77 }
+    let hyb = kpm_poulin_theil(t20_mid)
+    let pey = kpm_pt_peyret_organ(t20_mid, 6)
+    if kpm_member_in_domain(hyb) {
+        if kpm_member_in_domain(pey) {
+            if kpm_member_kpu(pey) < kpm_member_kpu(hyb) {
+                println("T20 PASS: mesma equacao, duas tabelas -- Peyret abaixo do hibrido no musculo")
+            } else {
+                println("T20 FAIL: Peyret nao ficou abaixo do hibrido"); fails = fails + 1
+            }
+        } else {
+            println("T20 FAIL: membro Peyret fora de dominio no musculo"); fails = fails + 1
+        }
+    } else {
+        println("T20 FAIL: membro hibrido fora de dominio"); fails = fails + 1
+    }
+
+    // T21 -- THE ENSEMBLE FINALLY VALIDATES, and only where it should.  With
+    // Schmitt raw and PT-on-Peyret both uncalibrated, the uncalibrated
+    // sub-ensemble reaches two members in liver and muscle.  Everywhere else
+    // it still refuses with code 2.  This is the first configuration in this
+    // module whose dispersion measures model form rather than source
+    // disagreement: both members read one composition table each, and neither
+    // is a hybrid.
+    let e_liv = kpm_ensemble_organ(t20_mid, 1, false)
+    let e_mus = kpm_ensemble_organ(t20_mid, 6, false)
+    let e_kid = kpm_ensemble_organ(t20_mid, 2, false)
+    if kpm_ens_valid(e_liv) {
+        if kpm_ens_valid(e_mus) {
+            if kpm_ens_n(e_mus) == 2 {
+                if kpm_ens_valid(e_kid) {
+                    println("T21 FAIL: rim validou sem membro Peyret"); fails = fails + 1
+                } else {
+                    if kpm_ens_refusal(e_kid) == 2 {
+                        println("T21 PASS: ensemble valido em figado e musculo (n=2); recusa 2 nos demais")
+                    } else {
+                        println("T21 FAIL: codigo de recusa errado no rim"); fails = fails + 1
+                    }
+                }
+            } else {
+                print("T21 FAIL: n no musculo = "); println(kpm_ens_n(e_mus)); fails = fails + 1
+            }
+        } else {
+            println("T21 FAIL: musculo nao validou"); fails = fails + 1
+        }
+    } else {
+        println("T21 FAIL: figado nao validou"); fails = fails + 1
+    }
+
+    // T21b -- adipose now joins liver and muscle for a weak base.
+    let e_adi = kpm_ensemble_organ(t20_mid, 7, false)
+    if kpm_ens_valid(e_adi) {
+        if kpm_ens_n(e_adi) == 2 {
+            println("T21b PASS: midazolam valida tambem no adiposo (n=2) -- 3 orgaos validos")
+        } else {
+            print("T21b FAIL: n no adiposo = "); println(kpm_ens_n(e_adi)); fails = fails + 1
+        }
+    } else {
+        print("T21b FAIL: adiposo nao validou, recusa "); println(kpm_ens_refusal(e_adi)); fails = fails + 1
+    }
+
+    // T22 -- THE QUESTION THAT MATTERS FOR THIS DISSERTATION.  The ensemble
+    // now validates -- but for WHICH drugs?  Poulin-Theil refuses strong bases
+    // at pKa >= 7, so for a strong base the Peyret member is out of domain in
+    // every organ it covers, and the uncalibrated sub-ensemble can never reach
+    // two members.  Measured across the drugs of this repository: venlafaxine
+    // (pKa 9.4), O-desmethylvenlafaxine (basic pKa 8.86), haloperidol (8.66) and
+    // clozapine (7.6) validate in ZERO organs.  Midazolam (6.01, a weak base)
+    // validates in three.  The model-form ensemble exists for the one drug in
+    // the set that is not the subject of the dissertation.
+    let sb_vfx = KpInputs { log_p: 2.71, log_ma: 0.0,   has_ma: false, pka: 9.40, is_base: true, fu_p: 0.73,  rb: 1.00, mw: 277.40 }
+    let sb_odv = KpInputs { log_p: 2.45, log_ma: 0.0,   has_ma: false, pka: 8.86, is_base: true, fu_p: 0.70,  rb: 1.00, mw: 263.38 }
+    let sb_hal = KpInputs { log_p: 4.30, log_ma: 3.723, has_ma: true,  pka: 8.66, is_base: true, fu_p: 0.10,  rb: 1.08, mw: 375.86 }
+    let sb_clz = KpInputs { log_p: 3.23, log_ma: 2.954, has_ma: true,  pka: 7.60, is_base: true, fu_p: 0.05,  rb: 0.86, mw: 326.82 }
+    var sb_valid = 0
+    var mid_valid = 0
+    var so = 1
+    while so < 12 {
+        if kpm_organ_supported(so) {
+            if kpm_ens_valid(kpm_ensemble_organ(sb_vfx, so, false)) { sb_valid = sb_valid + 1 }
+            if kpm_ens_valid(kpm_ensemble_organ(sb_odv, so, false)) { sb_valid = sb_valid + 1 }
+            if kpm_ens_valid(kpm_ensemble_organ(sb_hal, so, false)) { sb_valid = sb_valid + 1 }
+            if kpm_ens_valid(kpm_ensemble_organ(sb_clz, so, false)) { sb_valid = sb_valid + 1 }
+            if kpm_ens_valid(kpm_ensemble_organ(t20_mid, so, false)) { mid_valid = mid_valid + 1 }
+        }
+        so = so + 1
+    }
+    if sb_valid == 0 {
+        if mid_valid == 3 {
+            println("T22 PASS: 4 bases fortes, 0 orgaos validos; midazolam (base fraca) valida em 3")
+        } else {
+            print("T22 FAIL: midazolam valido em "); println(mid_valid); fails = fails + 1
+        }
+    } else {
+        print("T22 FAIL: base forte validou em "); println(sb_valid); fails = fails + 1
+    }
+
+    // T23 -- THE UNCERTAINTY BUDGET FOR VENLAFAXINE, AND A CROSS-ENGINE CHECK.
+    // Predictions were written before the computation
+    // (scratchpad/audit1/PREDICTIONS_vfx_budget.txt) and resolved by
+    // vfx_budget.cpp: GUM first order over six inputs whose ranges are the
+    // measured spread between sources, confirmed by a 1e6-sample GUM-S1 Monte
+    // Carlo (sd 0.1242 against linear 0.1242).  Shares of var(ln Kpu):
+    //   cell pH 97.0%   [AP-] ratio 2.9%   neutral lipid 0.1%   rest ~0
+    // u_c(ln Kpu) = 0.1242 (factor 1.13).  The prediction that the [AP-] ratio
+    // would lead was FALSIFIED; the cellular-pH CONVENTION range [6.81, 7.00]
+    // carries almost all of it.  rb has no sourced range; the u(rb) at which
+    // rb alone equals all the rest is 0.0278, a rectangular half-width of
+    // 0.048 about 1.00.
+    //
+    // What this test pins is the part Sounio can check itself: the two
+    // sensitivity coefficients that drive the budget, computed here by
+    // central differences on kpm_rr_kpu_full and compared with the
+    // independent C++23 implementation (vfx_native.cpp, at the module's
+    // native constants): c_pH = -2.201005, c_rb = 4.522201.
+    let t23 = KpInputs { log_p: 2.71, log_ma: 0.0, has_ma: false, pka: 9.40,
+                         is_base: true, fu_p: 0.73, rb: 1.00, mw: 277.40 }
+    let t23_hi = KpInputs { log_p: 2.71, log_ma: 0.0, has_ma: false, pka: 9.40,
+                            is_base: true, fu_p: 0.73, rb: 1.0001, mw: 277.40 }
+    let t23_lo = KpInputs { log_p: 2.71, log_ma: 0.0, has_ma: false, pka: 9.40,
+                            is_base: true, fu_p: 0.73, rb: 0.9999, mw: 277.40 }
+    let hph = 0.0001
+    let c_ph = (ln(kpm_rr_kpu_full(t23, 7.0 + hph, 1.0, 1.0, 1.0))
+              - ln(kpm_rr_kpu_full(t23, 7.0 - hph, 1.0, 1.0, 1.0))) / (2.0 * hph)
+    let c_rb = (ln(kpm_rr_kpu_full(t23_hi, 7.0, 1.0, 1.0, 1.0))
+              - ln(kpm_rr_kpu_full(t23_lo, 7.0, 1.0, 1.0, 1.0))) / 0.0002
+    let d_ph = c_ph - (0.0 - 2.201005)
+    let d_rb = c_rb - 4.522201
+    let a_ph = if d_ph < 0.0 { 0.0 - d_ph } else { d_ph }
+    let a_rb = if d_rb < 0.0 { 0.0 - d_rb } else { d_rb }
+    if a_ph < 0.0001 {
+        if a_rb < 0.0001 {
+            println("T23 PASS: c_pH e c_rb concordam com a implementacao C++23 independente em 1e-4")
+        } else {
+            print("T23 FAIL: c_rb Sounio = "); println(c_rb); fails = fails + 1
+        }
+    } else {
+        print("T23 FAIL: c_pH Sounio = "); println(c_ph); fails = fails + 1
+    }
+
+    // T24 -- WHY THE pH CONVENTION DOMINATES: pKa CANCELS, CELL pH DOES NOT.
+    // In the strong-base route Ka is back-calculated from red cells at pH
+    // 7.22, so for a strongly ionised base the tissue acidic-phospholipid term
+    // scales as x/z = 10^(7.22 - pH_cell): pKa drops out, cell pH stays in.
+    // Measured in robust.cpp for all four strong bases of the set: c_pKa =
+    // -0.0076 (venlafaxine), -0.0141 (ODV), +0.0079 (haloperidol), -0.0047
+    // (clozapine), against c_pH ~ -2.2.  Consequence: the sourced pKa
+    // disagreement for venlafaxine (9.4 literature vs 8.91 ChemAxon) moves the
+    // budget by 0.4 points, and the cellular-pH share stays above 93% under
+    // rectangular, triangular and discrete {6.81, 6.97, 7.00} distributions.
+    // The MAGNITUDE of u_c is distribution-dependent (sd 0.087 to 0.182); the
+    // DOMINANCE is not.  This test recomputes the cancellation in Sounio.
+    let t24_p = KpInputs { log_p: 2.71, log_ma: 0.0, has_ma: false, pka: 9.4001, is_base: true, fu_p: 0.73, rb: 1.00, mw: 277.40 }
+    let t24_m = KpInputs { log_p: 2.71, log_ma: 0.0, has_ma: false, pka: 9.3999, is_base: true, fu_p: 0.73, rb: 1.00, mw: 277.40 }
+    let c_pka = (ln(kpm_rr_kpu_full(t24_p, 7.0, 1.0, 1.0, 1.0)) - ln(kpm_rr_kpu_full(t24_m, 7.0, 1.0, 1.0, 1.0))) / 0.0002
+    let a_pka = if c_pka < 0.0 { 0.0 - c_pka } else { c_pka }
+    if a_pka < 0.05 {
+        if a_pka * 40.0 < 2.2 {
+            println("T24 PASS: pKa se cancela (|c_pKa| < 0.05) enquanto c_pH ~ -2.2 -- origem dos 97%")
+        } else {
+            println("T24 FAIL: c_pKa nao e pequeno frente a c_pH"); fails = fails + 1
+        }
+    } else {
+        print("T24 FAIL: c_pKa = "); println(c_pka); fails = fails + 1
+    }
+
+    // T25 -- ONE DRUG, TWO SOURCE SETS, TWO VERDICTS.  Haloperidol with the
+    // repository's inputs (fu 0.10, pKa 8.66) is B:P-consistent, Ka +10.511.
+    // With httk 2.7.4's own inputs for the same drug (fu 0.1784, Wetmore 2015;
+    // pKa 8.05, ChemAxon) and the same assumed rb 1.08 -- which no source in
+    // hand measures -- the critical rb is 1.2547 and Ka = -3.087: REFUSED.
+    // Before the 2026-11-02 fix this would have been clamped to Ka = 0 and
+    // returned as a number.  Whether haloperidol has a Rodgers-Rowland
+    // prediction at all depends on a choice between two published fu values,
+    // two pKa values, and an unmeasured rb.
+    let hal_repo = KpInputs { log_p: 4.294, log_ma: 3.723, has_ma: true, pka: 8.66, is_base: true, fu_p: 0.10,   rb: 1.08, mw: 375.86 }
+    let hal_httk = KpInputs { log_p: 4.294, log_ma: 3.723, has_ma: true, pka: 8.05, is_base: true, fu_p: 0.1784, rb: 1.08, mw: 375.86 }
+    if kpm_rr_bp_consistent(hal_repo) {
+        if kpm_rr_bp_consistent(hal_httk) {
+            println("T25 FAIL: haloperidol com insumos httk aceito como consistente"); fails = fails + 1
+        } else {
+            let e_h = kpm_ensemble(hal_httk, false)
+            if kpm_ens_refusal(e_h) == 4 {
+                println("T25 PASS: haloperidol -- fontes do repo admitem, fontes do httk recusam (codigo 4)")
+            } else {
+                print("T25 FAIL: codigo de recusa = "); println(kpm_ens_refusal(e_h)); fails = fails + 1
+            }
+        }
+    } else {
+        println("T25 FAIL: haloperidol com insumos do repo recusado"); fails = fails + 1
+    }
+
+    // T26 -- the exposed-input route IS the strong-base route: at the native
+    // constants it reproduces kpm_rr_kpu_full bit for bit, for two strong bases.
+    let t26_v = KpInputs { log_p: 2.71, log_ma: 0.0, has_ma: false, pka: 9.40, is_base: true, fu_p: 0.73, rb: 1.00, mw: 277.40 }
+    let t26_h = KpInputs { log_p: 4.30, log_ma: 3.723, has_ma: true, pka: 8.66, is_base: true, fu_p: 0.10, rb: 1.08, mw: 375.86 }
+    let e_v = kpm_rr_kpu_exposed(t26_v, 7.0, 0.022, 0.0078, 2.42, 0.666)
+    let f_v = kpm_rr_kpu_full(t26_v, 7.0, 1.0, 1.0, 1.0)
+    let e_h = kpm_rr_kpu_exposed(t26_h, 7.0, 0.022, 0.0078, 2.42, 0.666)
+    let f_h = kpm_rr_kpu_full(t26_h, 7.0, 1.0, 1.0, 1.0)
+    if e_v == f_v {
+        if e_h == f_h {
+            println("T26 PASS: rota exposta reproduz kpm_rr_kpu_full bit a bit (venlafaxina, haloperidol)")
+        } else {
+            println("T26 FAIL: haloperidol divergiu"); fails = fails + 1
+        }
+    } else {
+        println("T26 FAIL: venlafaxina divergiu"); fails = fails + 1
+    }
+
+    // T27 -- THE BUDGET, COMPUTED BY THE LANGUAGE.  epistemic::budget64 fed with
+    // Sounio sensitivities must reproduce the independent C++23 budget
+    // (vfx_budget.cpp, printed to 9 digits): u_c(ln Kpu) 0.124212417, cell pH
+    // 96.994797%, [AP-] 2.899491%.  Bands are +/-2e-5 and +/-2e-4, because
+    // the three computations agree to every printed digit and a wide band
+    // would let a real regression through.  The
+    // dominant entry must be the cell-pH convention (entry 4).
+    let bv = kpm_rr_source_budget(t26_v, 2.62, 2.80)
+    let uc = kpm_kb_uc(bv)
+    let pph = kpm_kb_percent(bv, 4)
+    let pap = kpm_kb_percent(bv, 1)
+    print("  u_c(ln Kpu) = "); println(uc)
+    print("  parcela pH celular % = "); println(pph)
+    print("  parcela razao [AP-] % = "); println(pap)
+    if uc > 0.124192 {
+        if uc < 0.124232 {
+            if pph > 96.9946 {
+                if pph < 96.9950 {
+                    if pap > 2.8993 {
+                        if pap < 2.8997 {
+                            if kpm_kb_dominant(bv) == 4 {
+                                println("T27 PASS: budget64 do Sounio reproduz o orcamento C++ -- pH celular dominante")
+                            } else {
+                                println("T27 FAIL: entrada dominante nao e o pH"); fails = fails + 1
+                            }
+                        } else { println("T27 FAIL: [AP-] acima da banda"); fails = fails + 1 }
+                    } else { println("T27 FAIL: [AP-] abaixo da banda"); fails = fails + 1 }
+                } else { println("T27 FAIL: pH acima da banda"); fails = fails + 1 }
+            } else { println("T27 FAIL: pH abaixo da banda"); fails = fails + 1 }
+        } else { println("T27 FAIL: u_c acima da banda"); fails = fails + 1 }
+    } else { println("T27 FAIL: u_c abaixo da banda"); fails = fails + 1 }
+
+    // T28 -- THE NATIVE BUDGET FOR EVERY STRONG BASE IN THE SET, AND ITS
+    // REFUSAL.  References from an independent implementation (budget_ref.cpp,
+    // same six entries, same midpoints, pKa/fu/rb fixed per drug):
+    //   ODV                u_c 0.122842514   pH 96.513199%
+    //   clozapine          u_c 0.119023562   pH 89.594110%   (rb 0.87, Sternbeck 2012)
+    //   haloperidol, repo  u_c 0.112997004   pH 79.565861%
+    //   haloperidol, httk  REFUSED, Ka at centre -3.0872
+    // The cellular-pH convention is the dominant entry for all four admissible
+    // configurations; only its share falls as lipophilicity and binding change.
+    // For haloperidol with httk's own fu and pKa the budget does not exist, and
+    // the test requires that it SAY so: an empty budget would print 0.0 and
+    // read as "no uncertainty".
+    let b_odv = kpm_rr_source_budget(KpInputs { log_p: 2.455, log_ma: 0.0, has_ma: false, pka: 8.86, is_base: true, fu_p: 0.70, rb: 1.00, mw: 263.38 }, 2.45, 2.461)
+    let b_clz = kpm_rr_source_budget(KpInputs { log_p: 3.23, log_ma: 2.954, has_ma: true, pka: 7.60, is_base: true, fu_p: 0.05, rb: 0.87, mw: 326.82 }, 3.23, 3.23)
+    let b_hr  = kpm_rr_source_budget(KpInputs { log_p: 4.294, log_ma: 3.723, has_ma: true, pka: 8.66, is_base: true, fu_p: 0.10, rb: 1.08, mw: 375.86 }, 4.288, 4.30)
+    let b_hh  = kpm_rr_source_budget(KpInputs { log_p: 4.294, log_ma: 3.723, has_ma: true, pka: 8.05, is_base: true, fu_p: 0.1784, rb: 1.08, mw: 375.86 }, 4.288, 4.30)
+    var t28 = 0
+    // ODV
+    if kpm_kb_valid(b_odv) { if kpm_kb_uc(b_odv) > 0.122822 { if kpm_kb_uc(b_odv) < 0.122862 {
+        if kpm_kb_percent(b_odv, 4) > 96.5130 { if kpm_kb_percent(b_odv, 4) < 96.5134 { if kpm_kb_dominant(b_odv) == 4 { t28 = t28 + 1 } } } } } }
+    // clozapine
+    if kpm_kb_valid(b_clz) { if kpm_kb_uc(b_clz) > 0.119003 { if kpm_kb_uc(b_clz) < 0.119043 {
+        if kpm_kb_percent(b_clz, 4) > 89.5939 { if kpm_kb_percent(b_clz, 4) < 89.5943 { if kpm_kb_dominant(b_clz) == 4 { t28 = t28 + 1 } } } } } }
+    // haloperidol, repository inputs
+    if kpm_kb_valid(b_hr) { if kpm_kb_uc(b_hr) > 0.112977 { if kpm_kb_uc(b_hr) < 0.113017 {
+        if kpm_kb_percent(b_hr, 4) > 79.5657 { if kpm_kb_percent(b_hr, 4) < 79.5661 { if kpm_kb_dominant(b_hr) == 4 { t28 = t28 + 1 } } } } } }
+    print("  ODV u_c = "); println(kpm_kb_uc(b_odv))
+    print("  clozapina u_c = "); println(kpm_kb_uc(b_clz))
+    print("  haloperidol (repo) u_c = "); println(kpm_kb_uc(b_hr))
+    print("  haloperidol (repo) pH % = "); println(kpm_kb_percent(b_hr, 4))
+    if t28 == 3 {
+        if kpm_kb_valid(b_hh) {
+            println("T28 FAIL: haloperidol com insumos httk produziu orcamento"); fails = fails + 1
+        } else {
+            if kpm_kb_refusal(b_hh) == 4 {
+                println("T28 PASS: ODV, clozapina e haloperidol(repo) batem com o C++; haloperidol(httk) recusado, codigo 4")
+            } else {
+                print("T28 FAIL: codigo de recusa = "); println(kpm_kb_refusal(b_hh)); fails = fails + 1
+            }
+        }
+    } else {
+        print("T28 FAIL: orcamentos que bateram com a referencia = "); println(t28); fails = fails + 1
+    }
+
+    // T29 -- THE CONVENTIONS ARE DISPLACED, NOT ONLY SPREAD.  Measured human
+    // muscle pHi [7.05, 7.12] (31P-MRS) replaces the convention range [6.81,
+    // 7.00].  References from measured_ph.cpp:
+    //   venlafaxine  d ln Kpu -0.398486  u_c meas 0.049320  pH 80.8813%
+    //   clozapine    d ln Kpu -0.360513  u_c meas 0.058808  pH 44.7205%
+    //   haloperidol  neutral lipid dominant, 66.559610%
+    // Venlafaxine keeps a pH majority; clozapine keeps pH as the largest entry
+    // without a majority; haloperidol passes dominance to neutral lipid.
+    let t29_v = KpInputs { log_p: 2.71, log_ma: 0.0, has_ma: false, pka: 9.40, is_base: true, fu_p: 0.73, rb: 1.00, mw: 277.40 }
+    let t29_c = KpInputs { log_p: 3.23, log_ma: 2.954, has_ma: true, pka: 7.60, is_base: true, fu_p: 0.05, rb: 0.87, mw: 326.82 }
+    let mv = kpm_rr_budget_ph(t29_v, 2.62, 2.80, 7.05, 7.12)
+    let mc = kpm_rr_budget_ph(t29_c, 3.23, 3.23, 7.05, 7.12)
+    let sv = kpm_rr_ph_shift(t29_v, 6.905, 7.085)
+    let sc = kpm_rr_ph_shift(t29_c, 6.905, 7.085)
+    let mh = kpm_rr_budget_ph(KpInputs { log_p: 4.294, log_ma: 3.723, has_ma: true, pka: 8.66, is_base: true, fu_p: 0.10, rb: 1.08, mw: 375.86 }, 4.288, 4.30, 7.05, 7.12)
+    print("  venlafaxina d lnKpu = "); println(sv)
+    print("  venlafaxina u_c medido = "); println(kpm_kb_uc(mv))
+    print("  clozapina pH % medido = "); println(kpm_kb_percent(mc, 4))
+    var t29 = 0
+    if sv > -0.398506 { if sv < -0.398466 { t29 = t29 + 1 } }
+    if sc > -0.360533 { if sc < -0.360493 { t29 = t29 + 1 } }
+    if kpm_kb_valid(mv) { if kpm_kb_uc(mv) > 0.049300 { if kpm_kb_uc(mv) < 0.049340 {
+        if kpm_kb_percent(mv, 4) > 80.8811 { if kpm_kb_percent(mv, 4) < 80.8815 { if kpm_kb_dominant(mv) == 4 { t29 = t29 + 1 } } } } } }
+    if kpm_kb_valid(mc) { if kpm_kb_percent(mc, 4) > 44.7203 { if kpm_kb_percent(mc, 4) < 44.7207 { if kpm_kb_dominant(mc) == 4 { t29 = t29 + 1 } } } }
+    if kpm_kb_valid(mh) { if kpm_kb_dominant(mh) == 2 { if kpm_kb_percent(mh, 2) > 66.5594 { if kpm_kb_percent(mh, 2) < 66.5598 { t29 = t29 + 1 } } } }
+    let vconv = kpm_rr_source_budget(t29_v, 2.62, 2.80)
+    var shift_big = false
+    if 0.0 - sv > kpm_kb_uc(vconv) { shift_big = true }
+    if t29 == 5 {
+        if shift_big {
+            println("T29 PASS: pH medido desloca ln Kpu ~3x o u_c da convencao; lipidio neutro passa a dominar no haloperidol")
+        } else { println("T29 FAIL: deslocamento menor que u_c"); fails = fails + 1 }
+    } else {
+        print("T29 FAIL: verificacoes que bateram = "); println(t29); fails = fails + 1
+    }
+
+    // T30 -- the per-organ Schmitt members refuse before unsafe arithmetic.
+    // fu_p <= 0 makes 1/fu_p singular and an unsupported organ has a
+    // zero-filled composition; in both cases in_domain must be false and the
+    // returned Kpu must be the negative sentinel, never a non-finite number.
+    // A positive fu_p on a supported organ must stay in domain (control).
+    let t30_zero = KpInputs { log_p: 4.30, log_ma: 3.723, has_ma: true, pka: 8.66,
+                              is_base: true, fu_p: 0.0, rb: 1.08, mw: 375.86 }
+    let t30_neg  = KpInputs { log_p: 4.30, log_ma: 3.723, has_ma: true, pka: 8.66,
+                              is_base: true, fu_p: 0.0 - 0.10, rb: 1.08, mw: 375.86 }
+    let t30_ok   = KpInputs { log_p: 4.30, log_ma: 3.723, has_ma: true, pka: 8.66,
+                              is_base: true, fu_p: 0.10, rb: 1.08, mw: 375.86 }
+    var t30 = 0
+    let t30_a = kpm_schmitt_raw_organ(t30_zero, 6)
+    if !kpm_member_in_domain(t30_a) { if kpm_member_kpu(t30_a) < 0.0 { t30 = t30 + 1 } }
+    let t30_b = kpm_schmitt_pearce_organ(t30_zero, 6)
+    if !kpm_member_in_domain(t30_b) { if kpm_member_kpu(t30_b) < 0.0 { t30 = t30 + 1 } }
+    let t30_c = kpm_schmitt_raw_organ(t30_neg, 6)
+    if !kpm_member_in_domain(t30_c) { if kpm_member_kpu(t30_c) < 0.0 { t30 = t30 + 1 } }
+    let t30_d = kpm_schmitt_pearce_organ(t30_neg, 6)
+    if !kpm_member_in_domain(t30_d) { if kpm_member_kpu(t30_d) < 0.0 { t30 = t30 + 1 } }
+    let t30_e = kpm_schmitt_raw_organ(t30_ok, 10)
+    if !kpm_member_in_domain(t30_e) { if kpm_member_kpu(t30_e) < 0.0 { t30 = t30 + 1 } }
+    let t30_f = kpm_schmitt_pearce_organ(t30_ok, 10)
+    if !kpm_member_in_domain(t30_f) { if kpm_member_kpu(t30_f) < 0.0 { t30 = t30 + 1 } }
+    let t30_g = kpm_schmitt_raw_organ(t30_ok, 6)
+    if kpm_member_in_domain(t30_g) { if kpm_member_kpu(t30_g) > 0.0 { t30 = t30 + 1 } }
+    let t30_h = kpm_schmitt_pearce_organ(t30_ok, 6)
+    if kpm_member_in_domain(t30_h) { if kpm_member_kpu(t30_h) > 0.0 { t30 = t30 + 1 } }
+    if t30 == 8 {
+        println("T30 PASS: Schmitt per-organ members refuse fu_p <= 0 and unsupported organs before arithmetic")
+    } else {
+        print("T30 FAIL: checks that held = "); println(t30); fails = fails + 1
+    }
+    if fails == 0 {
+        println("PASS")
+        return 0
+    }
+    println("FAIL")
+    return 1
+}
