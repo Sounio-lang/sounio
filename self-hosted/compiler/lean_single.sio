@@ -2537,6 +2537,36 @@ fn expr_set_unit_from_type(ty: i64, ty_hash: i64) with Panic, Mut, Div {
 
 // Compute gl_name_hash from raw byte values (for init_unit_table without src buffer)
 // hash = len * 1000003 + sum(byte[i] * (i+1) * 31)
+// Two's-complement wrapping without the wrapping_* builtins. lean_single
+// must stay compilable by the older bootstrap ELF (bin/souc-linux-x86_64),
+// which does not know them, and under the ADR-031 guards a plain + or *
+// that wraps fails. Shifts and bitwise ops never trap, so these build the
+// wrap from them. Only the overflowing slow paths call them.
+fn ls_wadd(a: i64, b: i64) -> i64 with Mut {
+    var x = a
+    var y = b
+    var n: i64 = 0
+    while y != 0 && n < 65 {
+        let c = x & y
+        x = x ^ y
+        y = c << 1
+        n = n + 1
+    }
+    return x
+}
+fn ls_wsub(a: i64, b: i64) -> i64 with Mut { return ls_wadd(a, ls_wadd(b ^ (0 - 1), 1)) }
+fn ls_wmul(a: i64, b: i64) -> i64 with Mut {
+    var r: i64 = 0
+    var x = a
+    var i: i64 = 0
+    while i < 64 {
+        if ((b >> i) & 1) != 0 { r = ls_wadd(r, x) }
+        x = x << 1
+        i = i + 1
+    }
+    return r
+}
+
 fn hash_1(b0: i64) -> i64                        { return 1000003 + b0 * 31 }
 fn hash_2(b0: i64, b1: i64) -> i64               { return 2000006 + b0 * 31 + b1 * 62 }
 fn hash_3(b0: i64, b1: i64, b2: i64) -> i64      { return 3000009 + b0 * 31 + b1 * 62 + b2 * 93 }
@@ -8932,8 +8962,8 @@ fn lex_all() with IO, Mut, Panic, Div {
                     else if h >= 97 && h <= 102 { dv = h - 87 }
                     else if h >= 65 && h <= 70 { dv = h - 55 }
                     if dv >= 0 {
-                        // wraps by design: the width is refused below (E276)
-                        v = wrapping_add(wrapping_mul(v, 16), dv)
+                        // wraps by design: the width is refused below (E276); slow path only past 2^59
+                        if v >= 0 && v <= 576460752303423487 { v = v * 16 + dv } else { v = ls_wadd(ls_wmul(v, 16), dv) }
                         p = p + 1
                         if hstarted == 0 && dv != 0 { hstarted = 1 }
                         if hstarted == 1 { hsig = hsig + 1 }
@@ -8964,7 +8994,7 @@ fn lex_all() with IO, Mut, Panic, Div {
                         let dd = sb(p) - 48
                         if v > 1844674407370955161 || (v == 1844674407370955161 && dd > 5) { dovf = 1 }
                         // wraps by design: dovf / the width class refuse it (E276)
-                        v = wrapping_add(wrapping_mul(v, 10), dd)
+                        if v >= 0 && v <= 922337203685477579 { v = v * 10 + dd } else { v = ls_wadd(ls_wmul(v, 10), dd) }
                     }
                     p = p + 1
                 }
@@ -11395,7 +11425,7 @@ fn flc_tok_bits(tok: i64) -> i64 with Mut, Panic, Div {
     var any_digits: i64 = 0
     while i < e && ((sb(i) >= 48 && sb(i) <= 57) || (sb(i) == 95 && i + 1 < e && sb(i + 1) >= 48 && sb(i + 1) <= 57)) {
         if sb(i) != 95 {
-            v = wrapping_add(wrapping_mul(v, 10), sb(i) - 48)
+            if v >= 0 && v <= 922337203685477579 { v = v * 10 + (sb(i) - 48) } else { v = ls_wadd(ls_wmul(v, 10), sb(i) - 48) }
             any_digits = 1
         }
         i = i + 1
@@ -18697,7 +18727,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
             // reliable here: an identifier operand leaves it stale.)
             if operand_is_int_literal(neg_operand_start, EP) == 0 { emit_int_trap_x86(0x71, "integer overflow (i64 unary -)") }
             // Track negation in literal value so compile-time refinement checks use -N not N
-            if LAST_IS_LITERAL != 0 { LAST_LITERAL_VAL = wrapping_sub(0, LAST_LITERAL_VAL) }
+            if LAST_IS_LITERAL != 0 { LAST_LITERAL_VAL = ls_wsub(0, LAST_LITERAL_VAL) }
         }
         return
     }
@@ -28122,8 +28152,8 @@ fn compile_additive() with IO, Mut, Panic, Div {
                     // The fold only feeds refinement checks; it wraps so the
                     // compiler itself never traps on it.
                     if left_is_literal == 1 && LAST_IS_LITERAL == 1 {
-                        if op == 17 { LAST_LITERAL_VAL = wrapping_add(left_literal_val, LAST_LITERAL_VAL) }
-                        if op == 18 { LAST_LITERAL_VAL = wrapping_sub(left_literal_val, LAST_LITERAL_VAL) }
+                        if op == 17 { LAST_LITERAL_VAL = ls_wadd(left_literal_val, LAST_LITERAL_VAL) }
+                        if op == 18 { LAST_LITERAL_VAL = ls_wsub(left_literal_val, LAST_LITERAL_VAL) }
                     } else { LAST_IS_LITERAL = 0 }
                     EXPR_TY = 1
                     EXPR_VSHADOW = -1
@@ -43464,7 +43494,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
             em32(0xCB0003E0)  // neg x0, x0
             // Track negation in the literal value so compile-time refinement
             // checks see -N, not N.
-            if LAST_IS_LITERAL != 0 { LAST_LITERAL_VAL = wrapping_sub(0, LAST_LITERAL_VAL) }
+            if LAST_IS_LITERAL != 0 { LAST_LITERAL_VAL = ls_wsub(0, LAST_LITERAL_VAL) }
         }
         return
     }
@@ -47700,8 +47730,8 @@ fn compile_additive_a64() with IO, Mut, Panic, Div {
             // PR-8: constant fold if both operands are known literals; otherwise
             // clear (mirror of compile_additive).
             if left_is_literal_a == 1 && LAST_IS_LITERAL == 1 {
-                if op == 17 { LAST_LITERAL_VAL = wrapping_add(left_literal_val_a, LAST_LITERAL_VAL) }
-                if op == 18 { LAST_LITERAL_VAL = wrapping_sub(left_literal_val_a, LAST_LITERAL_VAL) }
+                if op == 17 { LAST_LITERAL_VAL = ls_wadd(left_literal_val_a, LAST_LITERAL_VAL) }
+                if op == 18 { LAST_LITERAL_VAL = ls_wsub(left_literal_val_a, LAST_LITERAL_VAL) }
             } else { LAST_IS_LITERAL = 0 }
             EXPR_VSHADOW = -1; EXPR_SSHADOW = -1; EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1; sx_clear()
         }
