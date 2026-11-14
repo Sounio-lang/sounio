@@ -138,13 +138,15 @@ expect_trap() {
     exit 1
   fi
   # ADR-031 R1: the panic names the type and the operation and, for the
-  # 64-bit guards, where it is: the probe's operation is on line 3.
+  # 64-bit guards, where it is: the overflowing operation is on the probe's
+  # last body line, two above the closing brace.
   if [[ -n "$msg" ]]; then
+    local opline=$(( $(wc -l < "$OUT/$name.sio") - 2 ))
     local esc; esc=$(printf '%s' "$msg" | sed 's/[][\\.*^$+?(){}|/]/\\&/g')
     local want="^sounio: integer overflow \\($esc\\)"
     case "$msg" in
-      i64*|u64*) want="$want at .*$name\\.sio:3:[0-9]+\$" ;;
-      *) want="$want( at .*$name\\.sio:3:[0-9]+)?\$" ;;
+      i64*|u64*) want="$want at .*$name\\.sio:$opline:[0-9]+\$" ;;
+      *) want="$want( at .*$name\\.sio:$opline:[0-9]+)?\$" ;;
     esac
     if ! grep -qE -- "$want" "$OUT/$name.log"; then
       echo "FAIL: $what: panic line does not match /$want/"
