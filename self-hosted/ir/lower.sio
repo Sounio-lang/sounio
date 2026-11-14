@@ -837,6 +837,62 @@ pub fn lower_note_error(site: i64, n: Name) with Mut {
         ir_copy_name_to_flat(&n, &! IR_LOWER_ERROR_FIRST_FN_BUF, &! IR_LOWER_ERROR_FIRST_FN_LEN)
     }
 }
+// ADR-026 amendment (2026-11-09), RFC-0001 Stage 0: a field is resolved by the
+// type that owns it, never by a hash of its name. The old `name[0] % 64`
+// fallback invented slot 51 for `.span` and slot 37 for `epsilon` (#1499),
+// writing and reading memory nothing else used. Return 0 as a placeholder
+// index and raise the hard error, which refuses to publish the binary. A free
+// function, not a `self` method: a by-value `self` copies the whole Lowerer.
+// The first eight refusals keep (function, field) so the report names every
+// site instead of only the first.
+var IR_LOWER_FIELD_REFUSAL_COUNT: i64 = 0
+var IR_LOWER_FIELD_REFUSAL_FN: [i8; 1024]
+var IR_LOWER_FIELD_REFUSAL_FN_LEN: [i64; 8]
+var IR_LOWER_FIELD_REFUSAL_FIELD: [i8; 1024]
+var IR_LOWER_FIELD_REFUSAL_FIELD_LEN: [i64; 8]
+
+fn lower_field_refusal_store(n: Name, buf: &! [i8; 1024], lens: &! [i64; 8], slot: i64) with Mut {
+    var len = n.len
+    if len > 128 {
+        len = 128
+    }
+    var i: i64 = 0
+    while i < len {
+        (*buf)[(slot * 128 + i) as usize] = n.buf[i as usize]
+        i = i + 1
+    }
+    (*lens)[slot as usize] = len
+}
+
+fn lower_refuse_untyped_field_hash(fn_name: Name, field_name: Name) -> i64 with Mut {
+    IR_LOWER_HARD_ERROR = 1
+    // After a name-id pool overflow the miss is the pool's, not the receiver's;
+    // lower_hard_error_report names the pool instead of listing this site.
+    if ir_name_pool_overflowed() {
+        lower_note_error(2966, fn_name)
+        return 0
+    }
+    if IR_LOWER_HARD_ERROR_REASON == 0 {
+        IR_LOWER_HARD_ERROR_REASON = 10
+        ir_copy_name_to_flat(&fn_name, &! IR_LOWER_HARD_ERROR_FN_BUF, &! IR_LOWER_HARD_ERROR_FN_LEN)
+    }
+    if IR_LOWER_FIELD_REFUSAL_COUNT < 8 {
+        lower_field_refusal_store(fn_name, &! IR_LOWER_FIELD_REFUSAL_FN, &! IR_LOWER_FIELD_REFUSAL_FN_LEN, IR_LOWER_FIELD_REFUSAL_COUNT)
+        lower_field_refusal_store(field_name, &! IR_LOWER_FIELD_REFUSAL_FIELD, &! IR_LOWER_FIELD_REFUSAL_FIELD_LEN, IR_LOWER_FIELD_REFUSAL_COUNT)
+    }
+    IR_LOWER_FIELD_REFUSAL_COUNT = IR_LOWER_FIELD_REFUSAL_COUNT + 1
+    lower_note_error(2966, fn_name)
+    0
+}
+
+fn lower_print_field_refusal_part(buf: &[i8; 1024], len: i64, slot: i64) with IO, Mut, Panic, Div {
+    var i: i64 = 0
+    while i < len {
+        print_char((*buf)[(slot * 128 + i) as usize] as i64)
+        i = i + 1
+    }
+}
+
 var IR_LOWER_HARD_ERROR_LIMIT: i64 = 0
 
 pub fn lower_hard_error_pending() -> bool { (IR_LOWER_COMPILE_ERROR_SCOPE_ACTIVE && IR_LOWER_COMPILE_ERROR_LATCH) || IR_LOWER_HARD_ERROR != 0 || LOWER_USE_MODULE_OVERFLOWED || LOWER_IMPL_METHOD_OVERFLOWED || LOWER_UNIT_FLOAT_OVERFLOWED || ast_named_item_terminal_overflowed() || spec_item_module_overflowed() || ast_path_range_name_overflowed() }
@@ -844,6 +900,13 @@ pub fn lower_hard_error_pending() -> bool { (IR_LOWER_COMPILE_ERROR_SCOPE_ACTIVE
 // Print what the flag knows, or say plainly that it knows nothing — never
 // silence. Called by the consumers that used to print a bare "ir_summary_failed".
 pub fn lower_hard_error_report() with IO, Mut, Panic, Div {
+    // A full name-id pool blanks field ids, so every later field access misses
+    // the layout table and would be reported as an untyped receiver (reason 10).
+    // The pool is the cause: say so first (ir_arena_report_violation is the
+    // diagnostic every other route prints).
+    if ir_name_pool_overflowed() {
+        let _pool = ir_arena_report_violation()
+    }
     // ALWAYS SAYS SOMETHING. The first version of this printed nothing when both
     // counters were zero, which made two very different situations look
     // identical: "the reporter never ran" and "the reporter ran and nothing had
@@ -982,6 +1045,21 @@ pub fn lower_hard_error_report() with IO, Mut, Panic, Div {
         ir_print_flat_name(&IR_LOWER_HARD_ERROR_FN_BUF, IR_LOWER_HARD_ERROR_FN_LEN)
         print("` passes a capturing closure where its captured values cannot be\n")
         print("         supplied; the capture would read as 0, so it is refused (#1542).\n")
+    } else if IR_LOWER_HARD_ERROR_REASON == 10 {
+        print("  cause: ")
+        print_int(IR_LOWER_FIELD_REFUSAL_COUNT)
+        print(" field access(es) whose index is not in the layout table; resolving them\n")
+        print("         by a hash of the field name is refused (ADR-026 amendment, 2026-11-09).\n")
+        print("         Give the receiver a known struct type.\n")
+        var ri: i64 = 0
+        while ri < IR_LOWER_FIELD_REFUSAL_COUNT && ri < 8 {
+            print("         - `.")
+            lower_print_field_refusal_part(&IR_LOWER_FIELD_REFUSAL_FIELD, IR_LOWER_FIELD_REFUSAL_FIELD_LEN[ri as usize], ri)
+            print("` in function `")
+            lower_print_field_refusal_part(&IR_LOWER_FIELD_REFUSAL_FN, IR_LOWER_FIELD_REFUSAL_FN_LEN[ri as usize], ri)
+            print("`\n")
+            ri = ri + 1
+        }
     } else if IR_LOWER_HARD_ERROR_REASON == 6 {
         print("  cause: function `")
         ir_print_flat_name(&IR_LOWER_HARD_ERROR_FN_BUF, IR_LOWER_HARD_ERROR_FN_LEN)
@@ -4052,10 +4130,7 @@ fn lowerer_seed_metadata_from_summary(lo_in: Lowerer, summary: &IrProgramSummary
 fn lowerer_new_from_program_summary(summary: &IrProgramSummary, epistemic: &IrEpistemicSection) -> Lowerer with Alloc, Mut, Panic, Div, IO {
     lower_hard_error_reset()
     // Sequential peels for large clones (same rationale as lowerer_new).
-    var module_box = lowerer_box_clone_module(&(*(*summary).module))
-    // Match seed/owned body path: rebuild string table during body lower.
-    (*module_box).string_count = 0
-    (*module_box).epistemic = (*epistemic)
+    let module_box: Box<IrModule> = lowerer_box_clone_module(&(*(*summary).module))
     let epistemic_contests = lowerer_box_empty_epistemic_contests()
     let current_func = lowerer_box_empty_function()
     let locals = lowerer_box_empty_locals()
@@ -4104,6 +4179,11 @@ fn lowerer_new_from_program_summary(summary: &IrProgramSummary, epistemic: &IrEp
         fo_xfer_kind: [0; 64],
         fo_xfer_lit: [0.0; 64],
     }
+    // Match seed/owned body path: rebuild string table during body lower.
+    // Through lo.module (a typed Lowerer field): the store through the bare
+    // module_box local missed the layout table (Stage 0 reason 10).
+    (*lo.module).string_count = 0
+    (*lo.module).epistemic = (*epistemic)
     lo.epistemic_contests = lower_epistemic_contest_index_from_ref(epistemic)
     if lower_live_diag_enabled() {
         print("CONTEST_IR_INDEX_BIND constructor=summary_densify contest_count=")
@@ -11197,6 +11277,22 @@ fn lower_field_idx_untyped(table: &StructLayoutTable, field_name: Name) -> i64 w
         return 1
     }
     0 - 1
+}
+
+// The index of `.n` when it is known without a receiver type: a tuple slot
+// name, or the untyped consensus. -1 when unknown. This is a QUERY: it never
+// refuses and never invents an index. First-order variance and constructor
+// bookkeeping key side tables by field index; for them an unknown index means
+// "no entry", not an access to place in memory. Only a real field load or
+// store goes through field_idx_from_name_simple, which refuses (ADR-026
+// amendment, 2026-11-09). The old shared path hashed `codec` to a key for
+// `let r = a.codec`, and the refusal fired on that key lookup instead.
+fn lower_field_idx_simple_query(table: &StructLayoutTable, n: Name) -> i64 with Mut, Panic, Div {
+    let tuple_idx = lower_name_tuple_index(n)
+    if tuple_idx >= 0 {
+        return tuple_idx
+    }
+    lower_field_idx_untyped(table, n)
 }
 
 // Read the side table WITHOUT copying the Lowerer. Bisected: writing this slot at param-bind time
@@ -19667,16 +19763,16 @@ impl Lowerer {
                         if sname.len > 0 {
                             leaf_f0 = lo.field_idx_from_struct_literal_name(sname, fname, field_idx)
                         } else {
-                            leaf_f0 = lo.field_idx_from_name_simple(fname)
+                            leaf_f0 = lower_field_idx_simple_query(&(*lo.struct_layouts), fname)
                         }
                     } else if depth == 1 && outer_idx >= 0 && outer_idx < 128 {
-                        let leaf = lo.field_idx_from_name_simple(fname)
+                        let leaf = lower_field_idx_simple_query(&(*lo.struct_layouts), fname)
                         if leaf >= 0 && leaf < 128 {
                             leaf_f0 = 0 - (2 + outer_idx * 128 + leaf)
                         }
                     }
                     if (*init).kind == ExprKind::ExprStructLit {
-                        let child_outer = if depth == 0 { lo.field_idx_from_name_simple(fname) } else { 0 - 1 }
+                        let child_outer = if depth == 0 { lower_field_idx_simple_query(&(*lo.struct_layouts), fname) } else { 0 - 1 }
                         lo = lo.fo_ctor_walk_literal(fn_hash, sub, blk, init, p0, p1, nparams, depth + 1, ir_path_first_name((*init).path), child_outer)
                     } else {
                         lo = lo.fo_ctor_classify_leaf(fn_hash, sub, leaf_f0, blk, init, p0, p1, nparams, 0)
@@ -21769,7 +21865,10 @@ impl Lowerer {
             if inner.1 < 0 {
                 return (lo, -1)
             }
-            let idx = lo.field_idx_from_name_simple((*base).name)
+            let idx = lower_field_idx_simple_query(&(*lo.struct_layouts), (*base).name)
+            if idx < 0 {
+                return (lo, -1)
+            }
             return (lo, lo.lookup_variance_for_field_base(inner.1, idx))
         }
         // #1706: a chain rooted at a CALL carrying an identity FO transfer.
@@ -24956,9 +25055,9 @@ impl Lowerer {
             // lowered. Before this, every one of these fell to the `-1` below and
             // variance_of read a silent 0.0.
             let fbase = self.variance_field_chain_base(e)
-            if fbase.1 >= 0 {
-                var lo_f = fbase.0
-                let idx = lo_f.field_idx_from_name_simple((*e).name)
+            var lo_f = fbase.0
+            let idx = lower_field_idx_simple_query(&(*lo_f.struct_layouts), (*e).name)
+            if fbase.1 >= 0 && idx >= 0 {
                 let live = lo_f.fo_live_var_from_field_key(fbase.1, idx)
                 if live.1 >= 0 {
                     return live
@@ -25999,16 +26098,16 @@ impl Lowerer {
                 }
                 // Named layout is present but this field is not on it. Do not
                 // consult other structs: a majority of `.end` is Span.end = 2,
-                // which is also Expr.int_val. Hash only.
+                // which is also Expr.int_val. Refuse.
                 if field_name.len <= 0 {
                     return 0
                 }
-                return (field_name.buf[0] as i64) % 64
+                return lower_refuse_untyped_field_hash((*self.current_func).name, field_name)
             }
             si = si + 1
         }
         // Struct not in layout table — same untyped consensus as the miss path,
-        // then the legacy first-byte hash.
+        // then refuse.
         let consensual = lower_field_idx_untyped(&(*self.struct_layouts), field_name)
         if LOWER_UNTYPED_TRACE_ON != 0 {
             lower_untyped_field_trace_note(&(*self.struct_layouts), self.current_fn_name_for_trace(), field_name, consensual)
@@ -26019,7 +26118,7 @@ impl Lowerer {
         if field_name.len <= 0 {
             0
         } else {
-            (field_name.buf[0] as i64) % 64
+            lower_refuse_untyped_field_hash((*self.current_func).name, field_name)
         }
     }
 
@@ -26057,11 +26156,11 @@ impl Lowerer {
         if consensual >= 0 {
             return consensual
         }
-        // Last-resort legacy compatibility for unregistered dynamic/foreign shapes.
+        // ADR-026 amendment: an unregistered shape is refused, not hashed.
         if n.len <= 0 {
             0
         } else {
-            (n.buf[0] as i64) % 64
+            lower_refuse_untyped_field_hash((*self.current_func).name, n)
         }
     }
 
@@ -32025,6 +32124,22 @@ impl Lowerer {
             // must take the handle-resolving path (SIO-582).
             lo = lo.unbind_local_raw_ptr(s.name)
         }
+        // `var b: Box<T> = f()`: the annotation types the local exactly as a
+        // `b: Box<T>` parameter is typed (bind_pe_local). Without it `(*b).f`
+        // missed the layout table whenever the initializer was not
+        // `Box::new(..)` (ADR-026 amendment: refused, reason 10).
+        match s.ty {
+            Some(bx_ty) => {
+                if lower_type_expr_is_box(&(*bx_ty)) {
+                    let bx_inner = lower_struct_layout_index_of(&(*lo.struct_layouts), lower_box_or_option_inner_type_name(&(*bx_ty)))
+                    if bx_inner >= 0 {
+                        lo = lo.bind_local_struct_type(s.name, make_name("Box"), false)
+                        lo = lo.bind_local_box_inner_layout(s.name, bx_inner)
+                    }
+                }
+            }
+            None => {}
+        }
         if lower_opt_type_is_dynamic_array(&s.ty) {
             // SIO-311: an annotated `[T]` stays dynamic even when its
             // initializer is a literal of known length; recording that
@@ -36123,8 +36238,9 @@ impl Lowerer {
             }
             let fbase = inl.0.variance_field_chain_base(e)
             var lo = fbase.0
-            if fbase.1 >= 0 {
-                let idx = lo.field_idx_from_name_simple((*e).name)
+            let fidx = lower_field_idx_simple_query(&(*lo.struct_layouts), (*e).name)
+            if fbase.1 >= 0 && fidx >= 0 {
+                let idx = fidx
                 let key = lo.variance_field_key(fbase.1, idx)
                 let slot = lo.fo_field_sens_slot(key)
                 if slot >= 0 {
@@ -37899,8 +38015,25 @@ impl Lowerer {
     // never by declaration position. Positional 0/1 with a 16-byte alloc read
     // heap garbage as `hi` (Current-Source: got_1+1=…:0000fffe43847880, exit 11)
     // and wrote limbs past a 64-byte object.
+    //
+    // ADR-026 amendment (2026-11-09): with no F128Bits layout registered there
+    // is no hash fallback any more. That happens only when the softfloat
+    // stdlib could not be imported, and then the f128 desugar targets have no
+    // body either: module_frontend_bodyless_f128_targets refuses the binary
+    // with the V0-E.5.10 diagnostic, which names the real cause
+    // (madaros_f128_f256_v0e510_surface_closure_gate.sh,
+    // no_stdlib_f128_program_refused_not_sigill). Placeholder slots 0/1 keep
+    // lowering going to that barrier instead of a field-index refusal that
+    // would hide it; no binary is written either way.
     fn lower_f128_bits_field_idx(self, field: string) -> i64 with Mut, Panic, Div {
-        self.field_idx_from_name(make_name("F128Bits"), make_name(field))
+        var si: i64 = 0
+        while si < (*self.struct_layouts).count {
+            if ir_name_eq((*self.struct_layouts).entries[si as usize].type_name, make_name("F128Bits")) {
+                return self.field_idx_from_name(make_name("F128Bits"), make_name(field))
+            }
+            si = si + 1
+        }
+        if ir_name_eq(make_name(field), make_name("hi")) { 1 } else { 0 }
     }
 
     fn lower_f128_materialize_bits(self, lo_reg: i64, hi_reg: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
