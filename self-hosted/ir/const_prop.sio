@@ -147,6 +147,9 @@ pub struct CpInstr {
     pub imm_float: f64,
     pub imm_bool: bool,
     pub binop_tag: i64,
+    // 1 when the folded op is OpUAdd/OpUSub/OpUMul: the overflow test that
+    // decides whether it may fold is the unsigned one (ADR-031 R1).
+    pub binop_unsigned: i64,
     pub label_id: i64,
     pub block_id: i64,
     pub phi_inputs: [i64; 8],
@@ -349,6 +352,7 @@ fn cp_instr_new() -> CpInstr {
         imm_float: 0.0,
         imm_bool: false,
         binop_tag: 0,
+        binop_unsigned: 0,
         label_id: CP_INVALID,
         block_id: CP_INVALID,
         phi_inputs: [CP_INVALID, CP_INVALID, CP_INVALID, CP_INVALID,
@@ -515,6 +519,14 @@ fn cp_classify_binop(op: BinaryOp) -> i64 {
     if op == BinaryOp::OpAdd { return CP_BINOP_ADD }
     if op == BinaryOp::OpSub { return CP_BINOP_SUB }
     if op == BinaryOp::OpMul { return CP_BINOP_MUL }
+    // SIO-588: unsigned add/sub/mul fold with the SIGNED tags. The emitted
+    // x86 add/sub/imul bit patterns are signedness-agnostic (only the OF vs
+    // CF overflow condition differs, and folding computes the wrapped value
+    // either way), so unlike UDiv/URem/UShr these need no distinct fold
+    // semantics: wrapping is the exact unsigned result.
+    if op == BinaryOp::OpUAdd { return CP_BINOP_ADD }
+    if op == BinaryOp::OpUSub { return CP_BINOP_SUB }
+    if op == BinaryOp::OpUMul { return CP_BINOP_MUL }
     if op == BinaryOp::OpDiv { return CP_BINOP_DIV }
     if op == BinaryOp::OpUDiv { return CP_BINOP_UDIV }
     if op == BinaryOp::OpRem { return CP_BINOP_MOD }
@@ -672,6 +684,47 @@ fn cp_ctx_worklist_pop(ctx: &! CpContext) -> i64 with Mut, Div, Panic {
 // ============================================================================
 // Section 8: Constant Folding -- Binary Operations
 // ============================================================================
+
+// ADR-031 R1: may `a op b` be folded? Not when the operation overflows its
+// type: the run-time guard must fire instead (fold to BOTTOM, keep the
+// instruction). Also not when the fold's own i64 arithmetic would overflow,
+// because a compiler built with the R1 guards would then trap on itself.
+// Every test below is written so that it cannot overflow. Multiplication is
+// checked conservatively (both factors within +-3037000499, whose square
+// fits i64); a product outside that box is left to run time. Unsigned
+// operands are compared through the sign-bit flip (x <u y iff
+// (x ^ MIN) < (y ^ MIN)).
+fn cp_fold_int_is_exact(op: i64, is_unsigned: i64, a: i64, b: i64) -> bool with Div, Panic {
+    let imin: i64 = (0 - 9223372036854775807) - 1
+    let imax: i64 = 9223372036854775807
+    if op == CP_BINOP_ADD {
+        if b > 0 && a > imax - b { return false }
+        if b < 0 && a < imin - b { return false }
+        if is_unsigned != 0 {
+            // carry iff ua > UMAX - ub, and UMAX - ub is the bitwise not of b
+            let nb = (0 - 1) - b
+            if (a ^ imin) > (nb ^ imin) { return false }
+        }
+        return true
+    }
+    if op == CP_BINOP_SUB {
+        if b < 0 && a > imax + b { return false }
+        if b > 0 && a < imin + b { return false }
+        if is_unsigned != 0 {
+            // borrow iff ua < ub
+            if (a ^ imin) < (b ^ imin) { return false }
+        }
+        return true
+    }
+    if op == CP_BINOP_MUL {
+        if a == 0 || b == 0 { return true }
+        let lim: i64 = 3037000499
+        if a > lim || a < 0 - lim || b > lim || b < 0 - lim { return false }
+        if is_unsigned != 0 && (a < 0 || b < 0) { return false }
+        return true
+    }
+    true
+}
 
 // Fold a binary operation on two known integer constants.
 // Returns a CpLattice: CONST with the result, or BOTTOM if cannot fold.
@@ -1006,6 +1059,11 @@ fn cp_eval_instr(ctx: &CpContext, ci: CpInstr) -> CpLattice with Mut, Div, Panic
 
         // Both CONST: fold
         if cp_is_const_int(lat1) && cp_is_const_int(lat2) {
+            if !cp_fold_int_is_exact(ci.binop_tag, ci.binop_unsigned, lat1.int_val, lat2.int_val) {
+                // ADR-031 R1: the operation overflows its type, so it must
+                // fail at run time; folding it would print the wrapped value.
+                return cp_lattice_bottom()
+            }
             return cp_fold_binop_int(ci.binop_tag, lat1.int_val, lat2.int_val)
         }
         if cp_is_const_float(lat1) && cp_is_const_float(lat2) {
@@ -1080,6 +1138,9 @@ fn cp_extract_instr(instr: IrInstr, idx: i64) -> CpInstr with Mut, Div, Panic {
     // Classify binary op
     if ci.opcode == CP_OP_BINOP {
         ci.binop_tag = cp_classify_binop(instr.bin_op)
+        if instr.bin_op == BinaryOp::OpUAdd || instr.bin_op == BinaryOp::OpUSub || instr.bin_op == BinaryOp::OpUMul {
+            ci.binop_unsigned = 1
+        }
     }
 
     // For phi nodes, inputs are stored in src1 and src2
@@ -1989,6 +2050,35 @@ fn test_cp_fold_mul() -> bool with Div, Panic {
     result.int_val == 42
 }
 
+// SIO-588: unsigned add/sub/mul classify to the signed fold tags (the x86
+// bit patterns are signedness-agnostic). Whether they may fold at all is
+// decided separately by cp_fold_int_is_exact (ADR-031 R1).
+fn test_cp_fold_refuses_overflow() -> bool with Div, Panic {
+    let imax: i64 = 9223372036854775807
+    let imin: i64 = (0 - imax) - 1
+    let s_add = !cp_fold_int_is_exact(CP_BINOP_ADD, 0, imax, 1)
+    let s_sub = !cp_fold_int_is_exact(CP_BINOP_SUB, 0, imin, 1)
+    let s_mul = !cp_fold_int_is_exact(CP_BINOP_MUL, 0, imax, 2)
+    let u_add = !cp_fold_int_is_exact(CP_BINOP_ADD, 1, 0 - 1, 1)
+    let u_sub = !cp_fold_int_is_exact(CP_BINOP_SUB, 1, 0, 1)
+    let ok_add = cp_fold_int_is_exact(CP_BINOP_ADD, 0, 40, 2)
+    let ok_usub = cp_fold_int_is_exact(CP_BINOP_SUB, 1, 5, 3)
+    let ok_mul = cp_fold_int_is_exact(CP_BINOP_MUL, 0, 0 - 7, 6)
+    s_add && s_sub && s_mul && u_add && u_sub && ok_add && ok_usub && ok_mul
+}
+
+fn test_cp_classify_uadd() -> bool with Div, Panic {
+    cp_classify_binop(BinaryOp::OpUAdd) == CP_BINOP_ADD
+}
+
+fn test_cp_classify_usub() -> bool with Div, Panic {
+    cp_classify_binop(BinaryOp::OpUSub) == CP_BINOP_SUB
+}
+
+fn test_cp_classify_umul() -> bool with Div, Panic {
+    cp_classify_binop(BinaryOp::OpUMul) == CP_BINOP_MUL
+}
+
 // T14: Fold division 20 / 4 = 5
 fn test_cp_fold_div() -> bool with Div, Panic {
     let result = cp_fold_binop_int(CP_BINOP_DIV, 20, 4)
@@ -2877,6 +2967,11 @@ fn test_cp_run_all() -> i32 with Mut, Div, Panic, IO {
     if test_cp_fold_xor() { passed = passed + 1 } else { failed = failed + 1 }
     if test_cp_fold_shl() { passed = passed + 1 } else { failed = failed + 1 }
     if test_cp_fold_shr() { passed = passed + 1 } else { failed = failed + 1 }
+    // SIO-588: unsigned add/sub/mul classification.
+    if test_cp_classify_uadd() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_cp_classify_usub() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_cp_classify_umul() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_cp_fold_refuses_overflow() { passed = passed + 1 } else { failed = failed + 1 }
 
     // Strength reduction tests (T30-T39)
     if test_cp_strength_mul_zero() { passed = passed + 1 } else { failed = failed + 1 }
