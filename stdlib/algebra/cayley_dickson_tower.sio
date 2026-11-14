@@ -1,0 +1,98 @@
+use algebra::cayley_dickson::*
+
+// ============================================================================
+// TOWER OPERATIONS — embeddings and the recursive doubling presentation
+// ============================================================================
+
+/// Componentwise equality. This is intentionally exact: it is primarily useful
+/// for integral/rational coefficients and algebraic identities, not approximate
+/// numerical comparison.
+pub fn cd_eq(a: CDElement, b: CDElement) -> bool with Mut, Panic {
+    if cd_level(&a) != cd_level(&b) { return false }
+    let n = 1 << cd_level(&a)
+    var i: i32 = 0
+    while i < n {
+        if a.c[i as usize] != b.c[i as usize] { return false }
+        i = i + 1
+    }
+    true
+}
+
+/// The two halves of a Cayley-Dickson element. If x has level k > 0, both
+/// halves have level k-1 and x = cd_join(low, high, k).
+pub struct CDHalves {
+    pub low: CDElement,
+    pub high: CDElement,
+}
+
+/// Canonical embedding A_k -> A_{k+1} (and iterated embeddings to any higher
+/// level). Coefficients are unchanged and the new upper half is zero. This is
+/// an algebra homomorphism; in particular, embedding commutes with cd_mul.
+/// Shrinking an algebra is not a homomorphism and is therefore refused.
+pub fn cd_embed(a: CDElement, bits: i32) -> CDElement with Mut, Panic, Div {
+    if bits < cd_level(&a) { panic("cd_embed: target level is below source level") }
+    if bits > 11 { panic("cd_embed: maximum level is 11") }
+    let n = 1 << cd_level(&a)
+    var r = cd_zero(bits)
+    var i: i32 = 0
+    while i < n {
+        r.c[i as usize] = a.c[i as usize]
+        i = i + 1
+    }
+    r
+}
+
+/// Split x = (low, high) at the current doubling seam. Level zero has no seam.
+pub fn cd_split(a: CDElement) -> CDHalves with Mut, Panic, Div {
+    if cd_level(&a) <= 0 { panic("cd_split: level zero has no doubling seam") }
+    let half = 1 << (cd_level(&a) - 1)
+    var low = cd_zero(cd_level(&a) - 1)
+    var high = cd_zero(cd_level(&a) - 1)
+    var i: i32 = 0
+    while i < half {
+        low.c[i as usize] = a.c[i as usize]
+        high.c[i as usize] = a.c[(half + i) as usize]
+        i = i + 1
+    }
+    CDHalves { low: low, high: high }
+}
+
+/// Recombine two halves at level bits-1 into an element at level bits.
+pub fn cd_join(low: CDElement, high: CDElement, bits: i32) -> CDElement with Mut, Panic, Div {
+    if bits <= 0 || bits > 11 { panic("cd_join: level must be in [1,11]") }
+    if cd_level(&low) != bits - 1 || cd_level(&high) != bits - 1 {
+        panic("cd_join: half levels must equal target level minus one")
+    }
+    let half = 1 << (bits - 1)
+    var r = cd_zero(bits)
+    var i: i32 = 0
+    while i < half {
+        r.c[i as usize] = low.c[i as usize]
+        r.c[(half + i) as usize] = high.c[i as usize]
+        i = i + 1
+    }
+    r
+}
+
+/// Independent recursive-doubling presentation of multiplication:
+///
+///   (a,b)(c,d) = (ac - conj(d)b, da + b conj(c)).
+///
+/// This is deliberately separate from cd_mul's XOR/sign convolution. The two
+/// routes are cross-validated through level 6 (64 dimensions) by
+/// tests/run-pass/cayley_dickson_tower.sio and an independent integer oracle.
+pub fn cd_mul_doubling(a: CDElement, b: CDElement) -> CDElement with Mut, Panic, Div {
+    if cd_level(&a) != cd_level(&b) { panic("cd_mul_doubling: level mismatch") }
+    if cd_level(&a) <= 0 { panic("cd_mul_doubling: level zero has no doubling seam") }
+    let ah = cd_split(a)
+    let bh = cd_split(b)
+    let bits = cd_level(&a) - 1
+    let ac = cd_mul(ah.low, bh.low)
+    let db = cd_mul(cd_conj(bh.high), ah.high)
+    let da = cd_mul(bh.high, ah.low)
+    let bc = cd_mul(ah.high, cd_conj(bh.low))
+    let low = cd_sub(ac, db)
+    let high = cd_add(da, bc)
+    cd_join(low, high, bits + 1)
+}
+
