@@ -17804,6 +17804,21 @@ fn primary_fallback_report(tok: i64) with IO, Mut, Panic {
     tc_mark_failed()
 }
 
+// #3551: use the same derivative as the sensitivity chain rule for GUM variance.
+// The caller saves/restores the primal result around shadow emission.
+fn emit_math_variance_x86(input: i64, derivative: i64) with Mut {
+    EXPR_VSHADOW = -1
+    if input < 0 { return }
+    let out = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+    emit_load_var(derivative); em(0x50)
+    emit_load_var(derivative)
+    em(0x59); emit_f64_mul_from_rcx_rax_x86()
+    em(0x50); emit_load_var(input)
+    em(0x59); emit_f64_mul_from_rcx_rax_x86()
+    emit_store_var(out)
+    EXPR_VSHADOW = out
+}
+
 fn compile_primary() with IO, Mut, Panic, Div {
     if tc_reject_rust_macro_at(EP) { }
     LAST_EXPR_IS_CLOSURE = 0
@@ -21940,6 +21955,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                         while TK[EP as usize] != 7 && TK[EP as usize] != 0 { EP = EP + 1 }
                     }
                     // β⁶/β⁷: chain rule AD for transcendentals — capture arg shadows before call
+                    let math_v = EXPR_VSHADOW
                     let math_s0 = EXPR_SSHADOW
                     let math_s1 = EXPR_SSHADOW_1
                     let math_s2 = EXPR_SSHADOW_2
@@ -21962,7 +21978,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                     let math_h55 = EXPR_HSHADOW_55; let math_h56 = EXPR_HSHADOW_56; let math_h57 = EXPR_HSHADOW_57
                     let math_h66 = EXPR_HSHADOW_66; let math_h67 = EXPR_HSHADOW_67; let math_h77 = EXPR_HSHADOW_77
                     var math_arg_slot: i64 = -1
-                    if sx_any_at(math_sx) || math_s0 >= 0 || math_s1 >= 0 || math_s2 >= 0 || math_s3 >= 0 || math_s4 >= 0 || math_s5 >= 0 || math_s6 >= 0 || math_s7 >= 0 || math_h00 >= 0 || math_h01 >= 0 || math_h11 >= 0 || math_h22 >= 0 || math_h33 >= 0 || math_h44 >= 0 || math_h55 >= 0 || math_h66 >= 0 || math_h77 >= 0 {
+                    if math_v >= 0 || sx_any_at(math_sx) || math_s0 >= 0 || math_s1 >= 0 || math_s2 >= 0 || math_s3 >= 0 || math_s4 >= 0 || math_s5 >= 0 || math_s6 >= 0 || math_s7 >= 0 || math_h00 >= 0 || math_h01 >= 0 || math_h11 >= 0 || math_h22 >= 0 || math_h33 >= 0 || math_h44 >= 0 || math_h55 >= 0 || math_h66 >= 0 || math_h77 >= 0 {
                         math_arg_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
                         emit_store_var(math_arg_slot)
                     }
@@ -21996,7 +22012,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
     EXPR_HSHADOW_55 = -1; EXPR_HSHADOW_56 = -1; EXPR_HSHADOW_57 = -1
     EXPR_HSHADOW_66 = -1; EXPR_HSHADOW_67 = -1
     EXPR_HSHADOW_77 = -1
-                    if sx_any_at(math_sx) || math_s0 >= 0 || math_s1 >= 0 || math_s2 >= 0 || math_s3 >= 0 || math_s4 >= 0 || math_s5 >= 0 || math_s6 >= 0 || math_s7 >= 0 || math_h00 >= 0 || math_h01 >= 0 || math_h11 >= 0 || math_h22 >= 0 || math_h33 >= 0 || math_h44 >= 0 || math_h55 >= 0 || math_h66 >= 0 || math_h77 >= 0 {
+                    if math_v >= 0 || sx_any_at(math_sx) || math_s0 >= 0 || math_s1 >= 0 || math_s2 >= 0 || math_s3 >= 0 || math_s4 >= 0 || math_s5 >= 0 || math_s6 >= 0 || math_s7 >= 0 || math_h00 >= 0 || math_h01 >= 0 || math_h11 >= 0 || math_h22 >= 0 || math_h33 >= 0 || math_h44 >= 0 || math_h55 >= 0 || math_h66 >= 0 || math_h77 >= 0 {
                         var math_res_slot: i64 = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
                         emit_store_var(math_res_slot)
                         // Compute f'(arg) into math_deriv_slot
@@ -22086,6 +22102,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                             emit_imm64(0)  // unknown: zero derivative
                         }
                         emit_store_var(math_deriv_slot)
+                        emit_math_variance_x86(math_v, math_deriv_slot)
                         // Propagate: sens_k(f(x)) = f'(arg) · sens_k(x)
                         if math_s0 >= 0 {
                             let msr0 = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
@@ -24618,6 +24635,7 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                     EP = EP + 1  // skip (
                     EP = EP + 1  // skip )
                     // β⁶/β⁷: capture receiver's shadow state before call
+                    let mm_v = EXPR_VSHADOW
                     let mm_s0 = EXPR_SSHADOW; let mm_s1 = EXPR_SSHADOW_1
                     let mm_s2 = EXPR_SSHADOW_2; let mm_s3 = EXPR_SSHADOW_3
                     let mm_h00 = EXPR_HSHADOW_00; let mm_h01 = EXPR_HSHADOW_01
@@ -24627,7 +24645,7 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                     let mm_h23 = EXPR_HSHADOW_23; let mm_h33 = EXPR_HSHADOW_33
                     var mm_arg_slot: i64 = -1
                     var mm_any_shadow: i64 = 0
-                    if mm_s0 >= 0 || mm_s1 >= 0 || mm_s2 >= 0 || mm_s3 >= 0 || mm_h00 >= 0 || mm_h01 >= 0 || mm_h11 >= 0 || mm_h22 >= 0 || mm_h33 >= 0 {
+                    if mm_v >= 0 || mm_s0 >= 0 || mm_s1 >= 0 || mm_s2 >= 0 || mm_s3 >= 0 || mm_h00 >= 0 || mm_h01 >= 0 || mm_h11 >= 0 || mm_h22 >= 0 || mm_h33 >= 0 {
                         mm_any_shadow = 1
                         mm_arg_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
                         emit_store_var(mm_arg_slot)
@@ -24731,6 +24749,9 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                             emit_imm64(0)
                         }
                         emit_store_var(mm_deriv_slot)
+                        if !src_match(fns, fne - fns, "abs") && !src_match(fns, fne - fns, "floor") {
+                            emit_math_variance_x86(mm_v, mm_deriv_slot)
+                        }
                         if mm_s0 >= 0 {
                             let mmr0 = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
                             emit_load_var(mm_deriv_slot); em(0x50); emit_load_var(mm_s0)
