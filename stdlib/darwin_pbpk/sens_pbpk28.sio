@@ -43,9 +43,22 @@
 //     ∂M(T)/∂θ_j + CL·∂AUC_blood/∂θ_j + (∂CL/∂θ_j)·AUC_blood = 0
 // to rounding.
 //
-// Scope: IV bolus into blood, no organ sink, no release input — the path of
-// ep28_run. The oral / organ-sink paths keep the central-difference Jacobian
-// until their tangent is added here.
+// Two paths, mirroring epistemic_pbpk28.sio:
+//   ep28_tangent_run       IV bolus into blood, no sink (ep28_run);
+//   ep28_tangent_run_oral  matrix release → gut → first-order absorption into
+//                          blood, with a first-order liver sink cl_form
+//                          (ep28_run_oral: venlafaxine XR, midazolam,
+//                          haloperidol).
+// On the oral path parameter 0 is the liver sink cl_form (rate k_s = cl_form /
+// V_liver on both liver rows, so ∂A is −1/V_liver on each) and parameter 2
+// scales cl_central by the drug's own fu reference. The absorbed input does
+// not depend on any of the seven parameters, so it adds no tangent forcing.
+// The differentiated identity gains the sink terms:
+//     ∂M/∂θ_j + CL·∂AUC_b/∂θ_j + (∂CL/∂θ_j)·AUC_b
+//             + cl_form·∂AUC_liver/∂θ_j + (∂cl_form/∂θ_j)·AUC_liver = 0
+//
+// The tangent of cl_form is the two-sided analytic derivative also at
+// cl_form = 0 (midazolam, haloperidol), where the step itself takes no sink.
 //
 // Layout: the 8 tangent states are stored flat (j·14 + i) in one struct, and
 // the Schur pass is done twice without local [f64; 14] arrays (the Madaros
@@ -55,7 +68,9 @@
 
 use darwin_pbpk::core::pbpk28_params::*
 use darwin_pbpk::theta_pbpk28::*
-use darwin_pbpk::epistemic_pbpk28::{EpPrior28, EpJac28, ep28_fu_ref}
+use darwin_pbpk::release::matrix_er::*
+use math::pure::{exp}
+use darwin_pbpk::epistemic_pbpk28::{EpPrior28, EpJac28, OralInputs28, ep28_fu_ref}
 
 // Tangent states and their running integrals for up to 8 parameters.
 pub struct Tan28 {
@@ -99,11 +114,12 @@ struct S28Blk {
 
 // Schur coefficients of organ i for one θ-step: C_v,new = av + bv·C_b,new and
 // C_t,new = at + bt·C_b,new. Same algebra and the same degenerate-volume
-// floor as pbpk28_theta_step_routed_sink_mut (no sink, no routed input), with
-// the tangent forcing f_v / f_t added to the organ's right-hand sides.
+// floor as pbpk28_theta_step_routed_sink_mut (organ sink rate ks on both
+// rows, no routed input), with the tangent forcing f_v / f_t added to the
+// organ's right-hand sides.
 fn s28_block(
     p: PBPKParams28, i: i32, hi: f64, he: f64,
-    cb_old: f64, cv_old: f64, ct_old: f64, f_v: f64, f_t: f64
+    cb_old: f64, cv_old: f64, ct_old: f64, f_v: f64, f_t: f64, ks: f64
 ) -> S28Blk with Div {
     let vb = p.v_ref[0]
     let vi = p.v_ref[i]
@@ -122,14 +138,14 @@ fn s28_block(
     let kt  = ps / (vt * kp)
 
     let gamma_i = hi * qi / vv
-    let pp  = 1.0 + hi * kv
+    let pp  = 1.0 + hi * (kv + ks)
     let qq  = hi * kvt
     let rr  = hi * ktv
-    let sb  = 1.0 + hi * kt
+    let sb  = 1.0 + hi * (kt + ks)
     let det = pp * sb - qq * rr
 
-    let rhs_v = (he * qi / vv) * cb_old + (1.0 - he * kv) * cv_old + (he * kvt) * ct_old + f_v
-    let rhs_t = (he * ktv) * cv_old + (1.0 - he * kt) * ct_old + f_t
+    let rhs_v = (he * qi / vv) * cb_old + (1.0 - he * (kv + ks)) * cv_old + (he * kvt) * ct_old + f_v
+    let rhs_t = (he * ktv) * cv_old + (1.0 - he * (kt + ks)) * ct_old + f_t
 
     S28Blk {
         av: (sb * rhs_v + qq * rhs_t) / det,
@@ -148,15 +164,18 @@ fn s28_avg(p: PBPKParams28, i: i32, cv: f64, ct: f64) -> f64 with Div {
 }
 
 // One θ-step of tangent j with forcing f_b on the blood row and (f_v, f_t) on
-// organ `org`'s vascular / tissue rows (org outside 1..13: no organ forcing).
+// organ `org`'s vascular / tissue rows (org outside 1..13: no organ forcing),
+// under the model's organ sink (sink_organ, cl_sink).
 // The forcings are already integrated over the step (concentration units).
 // Books the step into tan.auc with the θ-method's own quadrature.
 pub fn tan28_forced_step_mut(
     tan: &!Tan28, j: i32, p: PBPKParams28,
     f_b: f64, org: i32, f_v: f64, f_t: f64,
-    dt: f64, theta: f64
+    dt: f64, theta: f64, sink_organ: i32, cl_sink: f64
 ) with Mut, Div {
     let off = j * 14
+    // Same activation rule as the model step.
+    let has_sink = sink_organ >= 1 && sink_organ < 14 && cl_sink > 0.0
     let hi = theta * dt
     let he = (1.0 - theta) * dt
     let vb = p.v_ref[0]
@@ -183,7 +202,8 @@ pub fn tan28_forced_step_mut(
         let ct_old = (*tan).ct[off + i]
         let fv = if i == org { f_v } else { 0.0 }
         let ft = if i == org { f_t } else { 0.0 }
-        let blk = s28_block(p, i, hi, he, cb_old, cv_old, ct_old, fv, ft)
+        let ks = if has_sink && i == sink_organ { cl_sink / p.v_ref[i] } else { 0.0 }
+        let blk = s28_block(p, i, hi, he, cb_old, cv_old, ct_old, fv, ft, ks)
         rhs0 = rhs0 + (he * p.q[i] / vb) * cv_old
         sum_beta_a = sum_beta_a + blk.beta * blk.av
         sum_beta_b = sum_beta_b + blk.beta * blk.bv
@@ -201,7 +221,8 @@ pub fn tan28_forced_step_mut(
         let ct_old = (*tan).ct[off + i]
         let fv = if i == org { f_v } else { 0.0 }
         let ft = if i == org { f_t } else { 0.0 }
-        let blk = s28_block(p, i, hi, he, cb_old, cv_old, ct_old, fv, ft)
+        let ks = if has_sink && i == sink_organ { cl_sink / p.v_ref[i] } else { 0.0 }
+        let blk = s28_block(p, i, hi, he, cb_old, cv_old, ct_old, fv, ft, ks)
         let cv_new = blk.av + blk.bv * cb_new
         let ct_new = blk.at + blk.bt * cb_new
         (*tan).cv[off + i] = cv_new
@@ -213,20 +234,57 @@ pub fn tan28_forced_step_mut(
     (*tan).auc[off] = (*tan).auc[off] + hi * cb_new
 }
 
-// Tangent forcing of parameter j for one θ-step, from the model state before
-// (x0) and after (x1) that step, then the tangent step itself.
+// What one θ-step of the model hands to the tangents: the states that enter
+// any ∂A·x product, before (0) and after (1) the step.
+struct S28Pair {
+    cb0: f64, cb1: f64,       // blood
+    lv0: f64, lv1: f64,       // liver vascular (sink organ)
+    t10: f64, t11: f64,       // tissue of organs 1, 2, 3, 7 (the Kp organs)
+    t20: f64, t21: f64,
+    t30: f64, t31: f64,
+    t70: f64, t71: f64,
+}
+
+// Path description shared by the two drivers.
+struct S28Path {
+    oral: bool,       // true: parameter 0 is the liver sink, fu uses fu_ref
+    sink_organ: i32,
+    cl_sink: f64,
+    fu_ref: f64,      // oral path only
+}
+
+// ∂cl_central/∂θ_j on the given path.
+fn s28_dcl_path(prm: PBPKParams28, j: i32, path: S28Path) -> f64 with Div {
+    if !path.oral { return s28_dcl(prm, j) }
+    if j == 1 { return 1.0 }
+    if j == 2 {
+        if path.fu_ref > 0.0 { return prm.cl_central / path.fu_ref }
+        return 0.0
+    }
+    return 0.0
+}
+
+// ∂cl_sink/∂θ_j on the given path.
+fn s28_dsink_path(j: i32, path: S28Path) -> f64 {
+    if path.oral && j == 0 { return 1.0 }
+    return 0.0
+}
+
+// Tangent forcing of parameter j for one θ-step, then the tangent step.
 fn s28_advance_tangent(
-    tan: &!Tan28, j: i32, p: PBPKParams28,
-    cb0: f64, cb1: f64, ct0: f64, ct1: f64,
+    tan: &!Tan28, j: i32, p: PBPKParams28, x: S28Pair, path: S28Path,
     dt: f64, theta: f64
 ) with Mut, Div {
     let hi = theta * dt
     let he = (1.0 - theta) * dt
     let org = s28_kp_organ(j)
-    if org == 0 {
-        let f_b = 0.0 - s28_dcl(p, j) * (he * cb0 + hi * cb1) / p.v_ref[0]
-        tan28_forced_step_mut(tan, j, p, f_b, 0, 0.0, 0.0, dt, theta)
-    } else {
+    if org != 0 {
+        var c0 = 0.0
+        var c1 = 0.0
+        if org == 1 { c0 = x.t10; c1 = x.t11 }
+        if org == 2 { c0 = x.t20; c1 = x.t21 }
+        if org == 3 { c0 = x.t30; c1 = x.t31 }
+        if org == 7 { c0 = x.t70; c1 = x.t71 }
         let vi = p.v_ref[org]
         let vf = p.vasc_frac[org]
         let vv_raw = vi * vf
@@ -234,35 +292,49 @@ fn s28_advance_tangent(
         let vv = if vv_raw < 1.0e-30 { 1.0e-30 } else { vv_raw }
         let vt = if vt_raw < 1.0e-30 { 1.0e-30 } else { vt_raw }
         let kp = p.kp[org]
-        let w = he * ct0 + hi * ct1
+        let w = he * c0 + hi * c1
         let f_v = 0.0 - (p.ps[org] / (vv * kp * kp)) * w
         let f_t = (p.ps[org] / (vt * kp * kp)) * w
-        tan28_forced_step_mut(tan, j, p, 0.0, org, f_v, f_t, dt, theta)
+        tan28_forced_step_mut(tan, j, p, 0.0, org, f_v, f_t, dt, theta, path.sink_organ, path.cl_sink)
+        return
     }
+    let dsink = s28_dsink_path(j, path)
+    if dsink != 0.0 {
+        // k_s = cl_sink / V_k multiplies C_v,k and C_t,k on their own rows.
+        let vk = p.v_ref[path.sink_organ]
+        let f_v = 0.0 - dsink * (he * x.lv0 + hi * x.lv1) / vk
+        let f_t = 0.0 - dsink * (he * x.t10 + hi * x.t11) / vk
+        tan28_forced_step_mut(tan, j, p, 0.0, path.sink_organ, f_v, f_t, dt, theta, path.sink_organ, path.cl_sink)
+        return
+    }
+    let f_b = 0.0 - s28_dcl_path(p, j, path) * (he * x.cb0 + hi * x.cb1) / p.v_ref[0]
+    tan28_forced_step_mut(tan, j, p, f_b, 0, 0.0, 0.0, dt, theta, path.sink_organ, path.cl_sink)
 }
 
-// One model θ-step followed by the n tangent θ-steps that depend on it.
+// One model θ-step (input rel_mid into blood, the path's sink) followed by
+// the n tangent θ-steps that depend on it.
 fn s28_substep(
-    st: &!PBPKState28, tan: &!Tan28, n: i32, p: PBPKParams28,
-    dt: f64, theta: f64, led: &!PBPK28Ledger
+    st: &!PBPKState28, tan: &!Tan28, n: i32, p: PBPKParams28, path: S28Path,
+    rel_mid: f64, dt: f64, theta: f64, led: &!PBPK28Ledger
 ) with Mut, Div {
     let cb0 = (*st).cv[0]
-    let t1o = (*st).ct[1]
-    let t2o = (*st).ct[2]
-    let t3o = (*st).ct[3]
-    let t7o = (*st).ct[7]
-    pbpk28_theta_step_mut(st, p, 0.0, dt, theta, led)
-    let cb1 = (*st).cv[0]
+    let lv0 = (*st).cv[1]
+    let t10 = (*st).ct[1]
+    let t20 = (*st).ct[2]
+    let t30 = (*st).ct[3]
+    let t70 = (*st).ct[7]
+    let _sink = pbpk28_theta_step_sink_mut(st, p, rel_mid, dt, theta, path.sink_organ, path.cl_sink, led)
+    let x = S28Pair {
+        cb0: cb0, cb1: (*st).cv[0],
+        lv0: lv0, lv1: (*st).cv[1],
+        t10: t10, t11: (*st).ct[1],
+        t20: t20, t21: (*st).ct[2],
+        t30: t30, t31: (*st).ct[3],
+        t70: t70, t71: (*st).ct[7],
+    }
     var j: i32 = 0
     while j < n {
-        let org = s28_kp_organ(j)
-        var c0 = 0.0
-        var c1 = 0.0
-        if org == 1 { c0 = t1o; c1 = (*st).ct[1] }
-        if org == 2 { c0 = t2o; c1 = (*st).ct[2] }
-        if org == 3 { c0 = t3o; c1 = (*st).ct[3] }
-        if org == 7 { c0 = t7o; c1 = (*st).ct[7] }
-        s28_advance_tangent(tan, j, p, cb0, cb1, c0, c1, dt, theta)
+        s28_advance_tangent(tan, j, p, x, path, dt, theta)
         j = j + 1
     }
 }
@@ -313,13 +385,15 @@ fn s28_fail() -> EpTangent28 {
     }
 }
 
-// IV-bolus PBPK28 run at step dt with the n tangents carried through the
-// integrator: Rannacher start-up (two backward-Euler half steps on each of
-// the first pbpk28_rannacher_startup_steps() steps), then clamp-free CN —
-// the same marching as ep28_simulate_dt, so the tangent is the derivative of
-// exactly the trajectory the GUM budget is reported for.
-pub fn ep28_tangent_run_dt(
-    dt: f64, base_prm: PBPKParams28, priors: EpPrior28, dose_mg: f64, t_end: f64
+// PBPK28 run at step dt with the n tangents carried through the integrator:
+// Rannacher start-up (two backward-Euler half steps on each of the first
+// pbpk28_rannacher_startup_steps() steps), then clamp-free CN — the same
+// marching, input and sink as ep28_simulate_dt (IV) / ep28_simulate_oral_dt
+// (oral), so the tangent is the derivative of exactly the trajectory the GUM
+// budget is reported for.
+fn s28_run(
+    dt: f64, base_prm: PBPKParams28, priors: EpPrior28, dose_mg: f64, t_end: f64,
+    path: S28Path, f_abs: f64, ka: f64, rel: MatrixReleaseModel, gut0: f64
 ) -> EpTangent28 with Mut, Div, Panic, Epistemic {
     if !(dt > 0.0) || !s28_finite(dt) { return s28_fail() }
     if !(t_end > 0.0) || !s28_finite(t_end) { return s28_fail() }
@@ -328,10 +402,11 @@ pub fn ep28_tangent_run_dt(
     if n < 0 || n > 8 { return s28_fail() }
 
     var st = pbpk28_state_zero()
-    st.cv[0] = dose_mg / base_prm.v_ref[0]
+    if !path.oral { st.cv[0] = dose_mg / base_prm.v_ref[0] }
     var led = pbpk28_ledger_zero()
     var tan = tan28_zero()
     let n_start = pbpk28_rannacher_startup_steps()
+    var gut = gut0
 
     var d_cb24: [f64; 8] = [0.0; 8]
     var ct:  [f64; 64] = [0.0; 64]
@@ -350,12 +425,21 @@ pub fn ep28_tangent_run_dt(
     while t < t_end {
         let dt_use = if t + dt > t_end { t_end - t } else { dt }
         if !(t + dt_use > t) || k >= 1000000 { return s28_fail() }
+        var rel_mid = 0.0
+        if path.oral {
+            gut = gut + matrix_step_amount(rel, t, dt_use)
+            let frac_abs = 1.0 - exp(0.0 - ka * dt_use)
+            let absorb_amt = f_abs * gut * frac_abs
+            gut = gut - absorb_amt
+            if gut < 0.0 { gut = 0.0 }
+            rel_mid = absorb_amt / dt_use
+        }
         if k < n_start {
             let half = 0.5 * dt_use
-            s28_substep(&!st, &!tan, n, base_prm, half, 1.0, &!led)
-            s28_substep(&!st, &!tan, n, base_prm, half, 1.0, &!led)
+            s28_substep(&!st, &!tan, n, base_prm, path, rel_mid, half, 1.0, &!led)
+            s28_substep(&!st, &!tan, n, base_prm, path, rel_mid, half, 1.0, &!led)
         } else {
-            s28_substep(&!st, &!tan, n, base_prm, dt_use, 0.5, &!led)
+            s28_substep(&!st, &!tan, n, base_prm, path, rel_mid, dt_use, 0.5, &!led)
         }
         if !s28_finite(st.cv[0]) { return s28_fail() }
         t = t + dt_use
@@ -392,6 +476,8 @@ pub fn ep28_tangent_run_dt(
     }
     if led.neg_mass > pbpk28_neg_mass_bound_mg() { return s28_fail() }
 
+    let has_sink = path.sink_organ >= 1 && path.sink_organ < 14 && path.cl_sink > 0.0
+    let cl_sink_eff = if has_sink { path.cl_sink } else { 0.0 }
     var d_auc_b: [f64; 8] = [0.0; 8]
     var d_auc_l: [f64; 8] = [0.0; 8]
     var d_auc_k: [f64; 8] = [0.0; 8]
@@ -412,7 +498,11 @@ pub fn ep28_tangent_run_dt(
             i = i + 1
         }
         mass_tan[j3] = m
-        ident[j3] = m + base_prm.cl_central * tan.auc[off] + s28_dcl(base_prm, j3) * led.auc[0]
+        var id = m + base_prm.cl_central * tan.auc[off] + s28_dcl_path(base_prm, j3, path) * led.auc[0]
+        if path.oral {
+            id = id + cl_sink_eff * tan.auc[off + path.sink_organ] + s28_dsink_path(j3, path) * led.auc[path.sink_organ]
+        }
+        ident[j3] = id
         j3 = j3 + 1
     }
 
@@ -423,9 +513,39 @@ pub fn ep28_tangent_run_dt(
     }
 }
 
+fn s28_no_release() -> MatrixReleaseModel {
+    matrix_korsmeyer_peppas(0.0, 0.199, 0.65)
+}
+
+// IV bolus (the ep28_run path) at step dt.
+pub fn ep28_tangent_run_dt(
+    dt: f64, base_prm: PBPKParams28, priors: EpPrior28, dose_mg: f64, t_end: f64
+) -> EpTangent28 with Mut, Div, Panic, Epistemic {
+    let path = S28Path { oral: false, sink_organ: 0, cl_sink: 0.0, fu_ref: 0.0 }
+    s28_run(dt, base_prm, priors, dose_mg, t_end, path, 0.0, 0.0, s28_no_release(), 0.0)
+}
+
 // Production step of ep28_run (dt = 0.05 h).
 pub fn ep28_tangent_run(
     base_prm: PBPKParams28, priors: EpPrior28, dose_mg: f64, t_end: f64
 ) -> EpTangent28 with Mut, Div, Panic, Epistemic {
     ep28_tangent_run_dt(0.05, base_prm, priors, dose_mg, t_end)
+}
+
+// Oral input + liver sink (the ep28_run_oral path) at step dt. Arguments as
+// ep28_run_oral.
+pub fn ep28_tangent_run_oral_dt(
+    dt: f64, prm: PBPKParams28, priors: EpPrior28, dose_mg: f64, t_end: f64,
+    oi: OralInputs28, rel: MatrixReleaseModel, fu_ref: f64, gut0: f64
+) -> EpTangent28 with Mut, Div, Panic, Epistemic {
+    let path = S28Path { oral: true, sink_organ: 1, cl_sink: oi.cl_form, fu_ref: fu_ref }
+    s28_run(dt, prm, priors, dose_mg, t_end, path, oi.f_abs, oi.ka, rel, gut0)
+}
+
+// Production step of ep28_run_oral (dt = 0.05 h).
+pub fn ep28_tangent_run_oral(
+    prm: PBPKParams28, priors: EpPrior28, dose_mg: f64, t_end: f64,
+    oi: OralInputs28, rel: MatrixReleaseModel, fu_ref: f64, gut0: f64
+) -> EpTangent28 with Mut, Div, Panic, Epistemic {
+    ep28_tangent_run_oral_dt(0.05, prm, priors, dose_mg, t_end, oi, rel, fu_ref, gut0)
 }

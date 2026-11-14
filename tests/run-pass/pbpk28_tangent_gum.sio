@@ -12,16 +12,33 @@
 //      ∂M(T)/∂θ_j + CL·∂AUC_b/∂θ_j + (∂CL/∂θ_j)·AUC_b = 0 for every parameter.
 //
 // The tangent is the exact derivative of the discrete scheme, so (1) must
-// agree to the finite difference's own error and (2) to rounding. A wrong
+// agree to the finite difference's own error and (2) to rounding. (1) is
+// also what found that the oral finite difference halved the cl_form column
+// when cl_form = 0 (the "minus" run took no sink): midazolam −0.007708
+// against −0.015557, haloperidol −0.013463 against −0.028800. A wrong
 // sign, a missing start-up half step, or a forcing built from the wrong
 // state shows up in at least one of the two.
 //
-// Cases: rapamycin 5 mg IV, 168 h and semaglutide 0.5 mg IV, 168 h, both at
-// the production dt = 0.05 h of ep28_run.
+// Cases, all at the production dt = 0.05 h:
+//   IV bolus (ep28_run):       rapamycin 5 mg, semaglutide 0.5 mg, 168 h
+//   oral + liver sink (ep28_run_oral):
+//     venlafaxine XR 75 mg, 168 h  (matrix release, CYP2D6 formation sink)
+//     midazolam IR 5 mg, 168 h     (cl_form = 0)
+//     haloperidol IR 5 mg, 72 h    (cl_form = 0)
+// The oral set-ups mirror tests/run-pass/gpu_pbpk28_gum_parity.sio.
+//
+// For the oral path the identity is
+//   dM/dθ + CL·dAUC_b/dθ + (dCL/dθ)·AUC_b + cl_form·dAUC_liver/dθ
+//         + (dcl_form/dθ)·AUC_liver = 0.
 
 use darwin_pbpk::core::pbpk28_params::*
-use darwin_pbpk::epistemic_pbpk28::{EpPrior28, EpJac28, ep28_rapamycin_params, ep28_rapamycin_priors, ep28_semaglutide_params, ep28_semaglutide_priors, ep28_jacobian_columns}
-use darwin_pbpk::sens_pbpk28::{EpTangent28, ep28_tangent_run}
+use darwin_pbpk::epistemic_pbpk28::*
+use darwin_pbpk::drugs::venlafaxine::*
+use darwin_pbpk::drugs::midazolam::*
+use darwin_pbpk::ddi::cyp3a_competitive::*
+use darwin_pbpk::pgx::cyp2d6_venlafaxine::*
+use darwin_pbpk::release::matrix_er::*
+use darwin_pbpk::sens_pbpk28::{EpTangent28, ep28_tangent_run, ep28_tangent_run_oral}
 
 fn tg_abs(x: f64) -> f64 {
     if x < 0.0 { return 0.0 - x }
@@ -72,11 +89,8 @@ fn tg_var(d: [f64; 8], priors: EpPrior28) -> f64 with Mut, Div, Panic, Epistemic
     return v
 }
 
-fn tg_case(tag: string, prm: PBPKParams28, priors: EpPrior28, dose_mg: f64) -> i32 with IO, Mut, Div, Panic, Epistemic {
+fn tg_compare(tag: string, fd: EpJac28, tg: EpTangent28, priors: EpPrior28, dose_mg: f64, tol_col: f64) -> i32 with IO, Mut, Div, Panic, Epistemic {
     var fails: i32 = 0
-    let t_end = 168.0
-    let fd = ep28_jacobian_columns(prm, priors, dose_mg, t_end)
-    let tg = ep28_tangent_run(prm, priors, dose_mg, t_end)
     println(tag)
     if !fd.ok || !tg.jac.ok {
         println("  [FAIL] a run was rejected")
@@ -93,7 +107,7 @@ fn tg_case(tag: string, prm: PBPKParams28, priors: EpPrior28, dose_mg: f64) -> i
     print("  max rel column diff x 1e6  C_brain24: "); println(r_c * 1.0e6)
     print("  max rel column diff x 1e6  AUC_liver: "); println(r_l * 1.0e6)
     print("  max rel column diff x 1e6  AUC_kidney: "); println(r_k * 1.0e6)
-    let tol_col = 1.0e-3
+    print("  d AUC_blood / d theta_0   tangent: "); print_f64(tg.jac.d_auc_b[0]); print("   finite difference: "); print_f64(fd.d_auc_b[0]); println("")
     if r_b > tol_col || r_c > tol_col || r_l > tol_col || r_k > tol_col {
         println("  [FAIL] tangent and central-difference columns disagree")
         fails = fails + 1
@@ -151,10 +165,45 @@ fn tg_case(tag: string, prm: PBPKParams28, priors: EpPrior28, dose_mg: f64) -> i
     return fails
 }
 
+fn tg_case_iv(tag: string, prm: PBPKParams28, priors: EpPrior28, dose_mg: f64) -> i32 with IO, Mut, Div, Panic, Epistemic {
+    let fd = ep28_jacobian_columns(prm, priors, dose_mg, 168.0)
+    let tg = ep28_tangent_run(prm, priors, dose_mg, 168.0)
+    return tg_compare(tag, fd, tg, priors, dose_mg, 1.0e-3)
+}
+
+fn tg_case_oral(
+    tag: string, prm: PBPKParams28, priors: EpPrior28, dose_mg: f64, t_end: f64,
+    oi: OralInputs28, rel: MatrixReleaseModel, fu_ref: f64, gut0: f64, tol_col: f64
+) -> i32 with IO, Mut, Div, Panic, Epistemic {
+    let fd = ep28_jacobian_columns_oral(prm, priors, dose_mg, t_end, oi, rel, fu_ref, gut0)
+    let tg = ep28_tangent_run_oral(prm, priors, dose_mg, t_end, oi, rel, fu_ref, gut0)
+    return tg_compare(tag, fd, tg, priors, dose_mg, tol_col)
+}
+
 fn main() -> i32 with IO, Mut, Div, Panic, Epistemic {
     var fails: i32 = 0
-    fails = fails + tg_case("rapamycin 5 mg IV, 168 h", ep28_rapamycin_params(), ep28_rapamycin_priors(), 5.0)
-    fails = fails + tg_case("semaglutide 0.5 mg IV, 168 h", ep28_semaglutide_params(), ep28_semaglutide_priors(), 0.5)
+    fails = fails + tg_case_iv("rapamycin 5 mg IV, 168 h", ep28_rapamycin_params(), ep28_rapamycin_priors(), 5.0)
+    fails = fails + tg_case_iv("semaglutide 0.5 mg IV, 168 h", ep28_semaglutide_params(), ep28_semaglutide_priors(), 0.5)
+
+    let no_rel = matrix_korsmeyer_peppas(0.0, 0.199, 0.65)
+    let oi_v = OralInputs28 { f_abs: venlafaxine_f_oral_xr(), ka: venlafaxine_ka_abs(), cl_form: vfx_cl_form_odv_nm() }
+    fails = fails + tg_case_oral("venlafaxine XR 75 mg oral, 168 h", ep28_venlafaxine_params(), ep28_venlafaxine_priors(), 75.0, 168.0,
+        oi_v, venlafaxine_xr_matrix_gohel2008(), venlafaxine_fu_parent(), 0.0, 1.0e-3)
+
+    let sub = midazolam_cyp3a_substrate()
+    let oi_m = OralInputs28 { f_abs: cyp3a_f_oral(sub, 1.0), ka: midazolam_absorption_params().ka, cl_form: 0.0 }
+    fails = fails + tg_case_oral("midazolam IR 5 mg oral, 168 h", ep28_midazolam_params(), ep28_midazolam_priors(), 5.0, 168.0,
+        oi_m, no_rel, 0.03, 5.0, 1.0e-3)
+
+    // Haloperidol's cl_form column is taken at cl_form = 0 with the one-sided
+    // second-order formula at h = 0.01·sigma = 0.16 L/h, whose truncation
+    // error is 0.8% here: halving h gives −28.575, −28.738, −28.784, −28.796
+    // (×1e-3, error ratio 4) against the tangent's −28.800 (measured
+    // 2026-11-14). The column tolerance for this case covers that error; the
+    // differentiated identity still pins the tangent to rounding.
+    let oi_h = OralInputs28 { f_abs: 0.65, ka: 0.9, cl_form: 0.0 }
+    fails = fails + tg_case_oral("haloperidol IR 5 mg oral, 72 h", ep28_haloperidol_params(), ep28_haloperidol_priors(), 5.0, 72.0,
+        oi_h, no_rel, 0.08, 5.0, 2.0e-2)
     if fails == 0 {
         println("PBPK28_TANGENT_GUM_PASS")
         return 0
