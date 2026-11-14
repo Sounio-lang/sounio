@@ -138,8 +138,8 @@ expect_trap() {
     exit 1
   fi
   # ADR-031 R1: the panic names the type and the operation.
-  if [[ -n "$msg" ]] && ! grep -qxF -- "madaros: integer overflow ($msg)" "$OUT/$name.log"; then
-    echo "FAIL: $what: missing panic message 'madaros: integer overflow ($msg)'"
+  if [[ -n "$msg" ]] && ! grep -qxF -- "sounio: integer overflow ($msg)" "$OUT/$name.log"; then
+    echo "FAIL: $what: missing panic message 'sounio: integer overflow ($msg)'"
     tail -10 "$OUT/$name.log" || true
     exit 1
   fi

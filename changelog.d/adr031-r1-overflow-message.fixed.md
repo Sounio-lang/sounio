@@ -1,6 +1,6 @@
 An integer overflow panic now says what overflowed (ADR-031 R1). The program
-still exits 1, and stderr carries one line such as
-`madaros: integer overflow (i64 +)` or `madaros: integer overflow (u32 *)`.
+still exits 1, and stderr carries one engine-neutral line such as
+`sounio: integer overflow (i64 +)` or `sounio: integer overflow (u32 *)`.
 Before, the trap exited 1 without a word.
 
 The 64-bit guards (`jo`/`jc`) jump to per-function, per-kind stubs (at most
