@@ -1,1 +1,0 @@
-Scientific CI dependency setup now uses the official HTTPS Ubuntu archive instead of a regional Azure mirror, bounds package-manager execution, and fails on incomplete index updates. Workflow fixtures cover successful installation and propagation of update/install failures; all scientific tests and required-job decisions remain required (#3547).
