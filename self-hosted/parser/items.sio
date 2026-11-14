@@ -1107,6 +1107,108 @@ fn items_opt_expr_is_closed(opt: &Option<Box<Expr>>) -> bool with Mut, Panic, Di
     }
 }
 
+// ADR-031 R1 (E300 on module-level initializers). Evaluates a constant i64
+// tree of integer literals, unary minus and binary + - *, and notes the span of
+// the first operation whose exact result does not fit i64. Anything else
+// (names, calls, casts, other operators) makes the tree non-constant and is
+// left to the run-time guard, as the checker does for locals.
+var ITEMS_GINIT_OVF_FOUND: i64 = 0
+var ITEMS_GINIT_OVF_START: i64 = 0
+var ITEMS_GINIT_OVF_END: i64 = 0
+
+fn items_ginit_op_fits(op: BinaryOp, lv: i64, rv: i64) -> bool with Div {
+    let imax: i64 = 9223372036854775807
+    let imin: i64 = (0 - imax) - 1
+    if op == BinaryOp::OpAdd {
+        if rv > 0 && lv > imax - rv { return false }
+        if rv < 0 && lv < imin - rv { return false }
+        return true
+    }
+    if op == BinaryOp::OpSub {
+        if rv < 0 && lv > imax + rv { return false }
+        if rv > 0 && lv < imin + rv { return false }
+        return true
+    }
+    if lv == 0 || rv == 0 { return true }
+    if lv == imin || rv == imin { return false }
+    let alv = if lv < 0 { 0 - lv } else { lv }
+    let arv = if rv < 0 { 0 - rv } else { rv }
+    alv <= imax / arv
+}
+
+fn items_ginit_i64_eval(e: &Expr) -> (bool, i64) with Mut, Div {
+    let k = (*e).kind
+    if k == ExprKind::ExprIntLit {
+        return (true, (*e).int_val)
+    }
+    if k == ExprKind::ExprUnary && (*e).un_op == UnaryOp::OpNeg {
+        match (*e).left {
+            Some(x) => {
+                let v = items_ginit_i64_eval(&(*x))
+                if v.0 && v.1 != (0 - 9223372036854775807) - 1 {
+                    return (true, 0 - v.1)
+                }
+            }
+            _ => {}
+        }
+        return (false, 0)
+    }
+    if k == ExprKind::ExprBinary {
+        let op = (*e).bin_op
+        if op != BinaryOp::OpAdd && op != BinaryOp::OpSub && op != BinaryOp::OpMul {
+            return (false, 0)
+        }
+        var lp: (bool, i64) = (false, 0)
+        var rp: (bool, i64) = (false, 0)
+        match (*e).left {
+            Some(l) => { lp = items_ginit_i64_eval(&(*l)) }
+            _ => {}
+        }
+        if ITEMS_GINIT_OVF_FOUND != 0 { return (false, 0) }
+        match (*e).right {
+            Some(r) => { rp = items_ginit_i64_eval(&(*r)) }
+            _ => {}
+        }
+        if ITEMS_GINIT_OVF_FOUND != 0 { return (false, 0) }
+        if !lp.0 || !rp.0 { return (false, 0) }
+        if !items_ginit_op_fits(op, lp.1, rp.1) {
+            ITEMS_GINIT_OVF_FOUND = 1
+            ITEMS_GINIT_OVF_START = (*e).span.start
+            ITEMS_GINIT_OVF_END = (*e).span.end
+            return (false, 0)
+        }
+        if op == BinaryOp::OpAdd { return (true, lp.1 + rp.1) }
+        if op == BinaryOp::OpSub { return (true, lp.1 - rp.1) }
+        return (true, lp.1 * rp.1)
+    }
+    (false, 0)
+}
+
+// True when the declared type makes the initializer an i64: `i64`, or no
+// annotation (an integer literal defaults to i64).
+fn items_global_ty_is_i64(ty: &Option<Box<TypeExpr>>) -> bool with Mut, Panic, Div {
+    match *ty {
+        Some(t) => {
+            if (*t).kind != TypeExprKind::TypeNamed { return false }
+            name_eq_lit(ast_path_prefix_name((*t).path, 0), "i64")
+        }
+        None => true,
+    }
+}
+
+// Scans the initializer; on overflow returns (true, site_start, site_end).
+fn items_global_init_overflow_site(init: &Expr, ty: &Option<Box<TypeExpr>>) -> (bool, i64, i64) with Mut, Panic, Div {
+    if !items_global_ty_is_i64(ty) { return (false, 0, 0) }
+    ITEMS_GINIT_OVF_FOUND = 0
+    ITEMS_GINIT_OVF_START = 0
+    ITEMS_GINIT_OVF_END = 0
+    let ignored = items_ginit_i64_eval(init)
+    if ITEMS_GINIT_OVF_FOUND != 0 {
+        return (true, ITEMS_GINIT_OVF_START, ITEMS_GINIT_OVF_END)
+    }
+    (false, 0, 0)
+}
+
 fn items_record_global_init_or_defer(name: Name, init: Box<Expr>, deferrable: bool) with Mut, Panic, Div {
     let before = ast_gvi_count_in(name, GLOBAL_VAR_INIT_CUR_MOD)
     items_record_global_int_init(name, &(*init))
@@ -1668,6 +1770,7 @@ impl Parser {
         p = p.expect(TokenKind::Eq)
         p = p.parse_expr()
         let init_let_box = parser_take_expr_box()
+        let let_ovf = items_global_init_overflow_site(&(*init_let_box), &global_ty)
         items_record_global_init_or_defer(name, init_let_box, items_global_init_deferrable(&global_ty))
         ast_record_global_const_name(name)
         if parser_peek(p) == TokenKind::Semi {
@@ -1675,6 +1778,9 @@ impl Parser {
         }
 
         let span = p.span_from(start)
+        if let_ovf.0 {
+            ast_record_global_init_overflow(name, span, let_ovf.1, let_ovf.2)
+        }
         (p, Item {
             kind: ItemKind::ItemFn,
             span: span,
@@ -1723,10 +1829,12 @@ impl Parser {
         let global_ty: Option<Box<TypeExpr>> = ty_pair.1
         ast_record_global_decl_type(name, &global_ty)
 
+        var var_ovf: (bool, i64, i64) = (false, 0, 0)
         if parser_peek(p) == TokenKind::Eq {
             p = p.advance()
             p = p.parse_expr()
             let init_var_box = parser_take_expr_box()
+            var_ovf = items_global_init_overflow_site(&(*init_var_box), &global_ty)
             items_record_global_init_or_defer(name, init_var_box, items_global_init_deferrable(&global_ty))
         }
         if parser_peek(p) == TokenKind::Semi {
@@ -1734,6 +1842,9 @@ impl Parser {
         }
 
         let span = p.span_from(start)
+        if var_ovf.0 {
+            ast_record_global_init_overflow(name, span, var_ovf.1, var_ovf.2)
+        }
         (p, Item {
             kind: ItemKind::ItemFn,
             span: span,
