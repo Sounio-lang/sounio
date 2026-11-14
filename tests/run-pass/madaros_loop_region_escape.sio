@@ -1,0 +1,236 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: LOOP_REGION_ESCAPE_OK
+//@ description: a value made inside a loop iteration that outlives it must survive the iteration reset
+// Each case makes a >16 B struct inside an iteration and lets it outlive the
+// iteration by one route, then lets later iterations churn (allocate and
+// discard structs full of 99s) so that a wrongly reset iteration region would
+// hand the escaped object's memory and handle to the churn. Every check runs
+// INSIDE the function, right after its loop and before the function's own
+// region can reset at return, so only the iteration region is under test.
+//
+// Three kinds of route. Heap stores run the store barrier, which marks the
+// iteration region escaped (cases 1-3); scripts/ci/madaros_loop_region_gate.sh
+// removes each barrier in turn and requires exactly its case to fail. Writes to
+// a local that outlives the iteration are not barriered. When the local is
+// copyable (cases 4, 6, 7) the iteration end carries it out of the region
+// (loop_rgn_emit_carried_exit; SOUNIO_LOOP_RGN_SABOTAGE=4 drops that and must
+// break 4 and 7 -- 6 leaves by `break`, which pops unreset); `return` and
+// `break` pop the region without resetting it (case 5, 6; sabotage 2). When it
+// is not copyable (case 8, an array of structs) lowering must refuse the
+// region (lowerer_loop_rgn_check_body_mut, why 2); sabotage 1 keeps refused
+// regions and must break exactly case 8. Case 9 is carried like 4 and 7.
+struct P { a: f64, b: f64, c: f64 }
+struct H { p: P, n: i64 }
+
+fn mk(x: f64) -> P { P { a: x, b: x + 1.0, c: x + 2.0 } }
+
+fn junk(k: i64) -> f64 with Mut {
+    let q = P { a: 99.0, b: 99.0, c: 99.0 }
+    q.a + (k as f64) * 0.0
+}
+
+fn good(p: P, x: f64) -> bool { p.a == x && p.b == x + 1.0 && p.c == x + 2.0 }
+
+// 1. field store through &! into an object born before the loop
+fn case_field(h: &!H) -> i64 with Mut {
+    var i: i64 = 0
+    var s = 0.0
+    while i < 200 {
+        if i == 41 { (*h).p = mk(41.0) }
+        s = s + junk(i)
+        i = i + 1
+    }
+    if !good((*h).p, 41.0) { return 1 }
+    0
+}
+
+// 2. index store through &! into an array born before the loop
+fn case_index(arr: &![P; 4]) -> i64 with Mut, Panic {
+    var i: i64 = 0
+    var s = 0.0
+    while i < 200 {
+        if i == 17 { (*arr)[2] = mk(17.0) }
+        s = s + junk(i)
+        i = i + 1
+    }
+    if !good((*arr)[2], 17.0) { return 2 }
+    0
+}
+
+// 3. store through a plain &! pointer to a struct born before the loop
+fn case_ptr(slot: &!P) -> i64 with Mut {
+    var i: i64 = 0
+    var s = 0.0
+    while i < 200 {
+        if i == 29 { *slot = mk(29.0) }
+        s = s + junk(i)
+        i = i + 1
+    }
+    if !good(*slot, 29.0) { return 3 }
+    0
+}
+
+// 4. plain write to an outer local of struct type
+fn case_outer_local() -> i64 with Mut {
+    var keep = mk(0.0)
+    var i: i64 = 0
+    var s = 0.0
+    while i < 200 {
+        let p = mk(i as f64)
+        if i == 23 { keep = p }
+        s = s + junk(i)
+        i = i + 1
+    }
+    if !good(keep, 23.0) { return 4 }
+    0
+}
+
+// 5. returned from inside a loop, by a function with no region of its own
+// (a tuple return is not region-eligible)
+fn find(n: i64) -> (P, i64) with Mut {
+    var i: i64 = 0
+    var s = 0.0
+    while i < n {
+        let p = mk(i as f64)
+        if i == 7 { return (p, i) }
+        s = s + junk(i)
+        i = i + 1
+    }
+    (mk(0.0), 0)
+}
+
+fn case_return() -> i64 with Mut {
+    let (q, at) = find(200)
+    // churn in the caller too: a leaked iteration region would be reset here
+    var i: i64 = 0
+    var s = 0.0
+    while i < 200 {
+        s = s + junk(i)
+        i = i + 1
+    }
+    if at != 7 || !good(q, 7.0) { return 5 }
+    0
+}
+
+// 6. break out with the value in an outer local
+fn case_break() -> i64 with Mut {
+    var last = mk(0.0)
+    var j: i64 = 0
+    var s = 0.0
+    loop {
+        last = mk(j as f64)
+        if j == 31 { break }
+        s = s + junk(j)
+        j = j + 1
+    }
+    var i: i64 = 0
+    while i < 200 {
+        s = s + junk(i)
+        i = i + 1
+    }
+    if !good(last, 31.0) { return 6 }
+    0
+}
+
+// 7. nested loops: the inner loop's value is kept in a local of the outer
+// iteration and read after the inner loop
+fn case_nested() -> i64 with Mut {
+    var total = 0.0
+    var o: i64 = 0
+    while o < 30 {
+        var held = mk(0.0)
+        var k: i64 = 0
+        var s = 0.0
+        while k < 40 {
+            let p = mk((o * 100 + k) as f64)
+            if k == 9 { held = p }
+            s = s + junk(k)
+            k = k + 1
+        }
+        if !good(held, (o * 100 + 9) as f64) { return 7 }
+        total = total + held.a
+        o = o + 1
+    }
+    // sum over o < 30 of (100 o + 9) = 100 * 435 + 270
+    if total != 43770.0 { return 7 }
+    0
+}
+
+// 8. plain write to an outer local whose type no copy-out supports: an array
+// of structs holds handles, so lowering must refuse the region
+fn case_uncopyable_local() -> i64 with Mut, Panic {
+    var keep: [P; 2] = [mk(0.0), mk(0.0)]
+    var i: i64 = 0
+    var s = 0.0
+    while i < 200 {
+        if i == 13 { keep = [mk(13.0), mk(14.0)] }
+        s = s + junk(i)
+        i = i + 1
+    }
+    if !good(keep[0], 13.0) || !good(keep[1], 14.0) { return 8 }
+    0
+}
+
+// 9. an f64 array local copied from a by-value parameter and carried by a
+// loop in a helper (the shape of an LU factorisation working on a copy of
+// its matrix). The copy marks the array register as float, which the loop
+// analysis once read as a float scalar: the array skipped the carry decision
+// and every iteration reset reclaimed it.
+fn bump8(a: [f64; 8], k: i64) -> [f64; 8] with Mut, Panic {
+    var r = a
+    r[k as usize] = r[k as usize] + 1.0
+    r
+}
+
+fn carry_param(w0: [f64; 8]) -> f64 with Mut, Panic {
+    var w = w0
+    var k: i64 = 0
+    var s = 0.0
+    while k < 200 {
+        w = bump8(w, k - (k / 8) * 8)
+        s = s + junk(k)
+        k = k + 1
+    }
+    var t = 0.0
+    var q: usize = 0
+    while q < 8 {
+        t = t + w[q]
+        q = q + 1
+    }
+    t
+}
+
+fn case_carried_param_copy() -> i64 with Mut, Panic {
+    let z: [f64; 8] = [0.0; 8]
+    if carry_param(z) != 200.0 { return 9 }
+    0
+}
+
+// The set of cases that lost their value, one bit per case (case k -> bit
+// k-1), is printed as LOOP_REGION_ESCAPE_MASK=<n>, so each sabotage can be
+// checked against exactly the cases it must break. Not the exit status: with
+// nine cases the mask passes 255 and an exit status keeps only its low 8
+// bits, so a lost case 9 alone (256) would exit 0. The exit status is 1 when
+// any case failed.
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var failed: i64 = 0
+    var h = H { p: mk(0.0), n: 0 }
+    if case_field(&!h) != 0 { failed = failed + 1 }
+    var arr: [P; 4] = [mk(0.0), mk(0.0), mk(0.0), mk(0.0)]
+    if case_index(&!arr) != 0 { failed = failed + 2 }
+    var slot = mk(0.0)
+    if case_ptr(&!slot) != 0 { failed = failed + 4 }
+    if case_outer_local() != 0 { failed = failed + 8 }
+    if case_return() != 0 { failed = failed + 16 }
+    if case_break() != 0 { failed = failed + 32 }
+    if case_nested() != 0 { failed = failed + 64 }
+    if case_uncopyable_local() != 0 { failed = failed + 128 }
+    if case_carried_param_copy() != 0 { failed = failed + 256 }
+    print("LOOP_REGION_ESCAPE_MASK=")
+    print_int(failed)
+    print("\n")
+    if failed != 0 { return 1 }
+    println("LOOP_REGION_ESCAPE_OK")
+    0
+}
