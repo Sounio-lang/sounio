@@ -14748,6 +14748,23 @@ fn fx_op_key(eff: Name, op: Name) -> i64 with Mut, Panic, Div {
     fx_hash_name(eff) * 1000003 + fx_hash_name(op)
 }
 
+// #3547: a literal initializer's zero variance is not an independent source.
+// Keep loop-carried slots dynamic: their next iteration may see an assignment
+// that has not been lowered yet. Outside loops, inspect the latest definition
+// and accept only an actual zero constant, never a copy or computed variance.
+fn fo_variance_is_static_zero(lo: &Lowerer, reg: i64) -> bool with Mut, Panic, Div {
+    if reg < 0 || lo.loop_depth > 0 { return false }
+    var i = (*lo.current_func).instr_count - 1
+    while i >= 0 {
+        let instr = ir_arena_load(ir_region_slot_r((*lo.current_func).region, i))
+        if instr.dst == reg && instr.op != IrOpcode::IrNop {
+            return instr.op == IrOpcode::IrLoadImm && instr.imm_i64 == 0
+        }
+        i = i - 1
+    }
+    false
+}
+
 impl Lowerer {
     fn current_fn_compile_strategy(self) -> i64 with Mut, Panic, Div {
         if self.current_fn < 0 || self.current_fn >= self.module.fn_count {
@@ -24891,7 +24908,10 @@ impl Lowerer {
                 // Prefer bound multi-channel sens; else seed a channel from σ².
                 var lo = self.fo_load_local_sens((*e).name).so_load_local_hess((*e).name)
                 if !lo.fo_expr_has_sens() {
-                    lo = lo.so_clear_expr_hess().fo_seed_from_variance(local_v, 0 - 1)
+                    lo = lo.so_clear_expr_hess()
+                    if !fo_variance_is_static_zero(&lo, local_v) {
+                        lo = lo.fo_seed_from_variance(local_v, 0 - 1)
+                    }
                 } else {
                     // #2827: rows cover only the channels that existed at the
                     // declaration; the rest of the variance is the residual.
