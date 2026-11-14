@@ -89,7 +89,8 @@ echo 'PASS negative: closure capture capacity refuses without output'
 # ADR-031 R1/R2: each dynamic overflow (and MIN / -1) must exit 1, the
 # panic shape, before the next statement. id() keeps the operands out of
 # constant folding, so the guard under test is the emitted one.
-for probe in add sub mul neg div rem; do
+for probe in add sub mul neg div rem uadd usub umul; do
+    ty=i64
     case "$probe" in
         add) expr='id(9223372036854775807) + id(1)' ;;
         sub) expr='id(-9223372036854775808) - id(1)' ;;
@@ -97,9 +98,12 @@ for probe in add sub mul neg div rem; do
         neg) expr='-id(-9223372036854775808)' ;;
         div) expr='id(-9223372036854775808) / id(0 - 1)' ;;
         rem) expr='id(-9223372036854775808) % id(0 - 1)' ;;
+        uadd) ty=u64; expr='id(18446744073709551615) + id(1)' ;;
+        usub) ty=u64; expr='id(0) - id(1)' ;;
+        umul) ty=u64; expr='id(18446744073709551615) * id(2)' ;;
     esac
-    printf 'fn id(x: i64) -> i64 { x }\nfn main() with IO {\n    print_int(%s)\n    print("NOT_TRAPPED\\n")\n}\n' \
-        "$expr" > "$WORK/a64_trap_$probe.sio"
+    printf 'fn id(x: %s) -> %s { x }\nfn main() with IO {\n    println(%s)\n    print("NOT_TRAPPED\\n")\n}\n' \
+        "$ty" "$ty" "$expr" > "$WORK/a64_trap_$probe.sio"
     timeout 90 "$COMPILER" build "$WORK/a64_trap_$probe.sio" --target aarch64-macos \
         -o "$WORK/a64_trap_$probe" > "$WORK/a64_trap_$probe.build.log" 2>&1
     chmod +x "$WORK/a64_trap_$probe"
