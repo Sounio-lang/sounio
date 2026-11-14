@@ -55,7 +55,7 @@ region, both bumps are reset to (H0, C0), and it is copied back down
 (`rgn_emit_young_copy`, `__rgn_reset_fits`); reclaimed bytes are zeroed
 because lowering assumes fresh heap bytes are zero. A scalar result is
 closed by `__rgn_exit_scalar`, which resets the region unless it escaped
-(since 2026-11-14 it is handed 0, not the result: section 5).
+(since 2026-11-14 the result it is handed is not classified: section 5).
 
 Eligible: not `main`, not a kernel, extern, GPU or Async function, a return
 type that is unit, an integer, bool, f64, a payload-free enum, or a struct
@@ -225,7 +225,11 @@ marks the referent's region escaped at the conversion. The hook is
 module-wide and bound to the same function-table headroom as every region
 opening, so no region opens after an unhooked cast in its module. Region
 exits and carried copies therefore scan nothing (`rgn_emit_result_escape_scan`
-is gone), and `__rgn_exit_scalar` is handed 0. The cast hook now carries
+is gone), and `__rgn_exit_scalar` no longer classifies the result it is
+handed. (It is still handed the result: opt_cleanup `ocp_center_frame` and
+the HOF-transparency probe in lower.sio read that exact epilogue. The first
+version passed a constant 0 instead, which silently disabled the exact
+integral-center pass; `sco_exact_integral_center_gate.sh` caught it.) The cast hook now carries
 encoded references alone, and the gate proves it: removing its calls
 (`SOUNIO_RGN_BARRIER_SABOTAGE=call`) breaks `cast_xor` (1),
 `encoded_aggregate` (3) and `encoded_scalar` (2, its Seq case still held by
