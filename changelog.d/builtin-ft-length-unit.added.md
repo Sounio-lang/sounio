@@ -1,0 +1,1 @@
+`ft` is a built-in length unit equal to the international foot, 0.3048 m (scale 381/1250). A bare `unit ft;` is no longer dimensionless, so `1 m + (1 ft as m)` is 1.3048. Witness: `tests/run-pass/unit_foot_builtin_scale.sio`.
