@@ -1,0 +1,431 @@
+// stdlib/darwin_pbpk/sens_pbpk28.sio — forward (tangent-linear) sensitivities
+// of the PBPK28 θ-step, integrated together with the model
+//
+// Why this module exists
+// ----------------------
+// epistemic_pbpk28.sio builds the GUM Jacobian by central differences: two
+// complete simulations per epistemic parameter, and only for four end-point
+// metrics (AUC_blood, AUC_liver, AUC_kidney, C_brain(24 h)). That is a layer
+// around the solver. This module carries the sensitivities THROUGH the
+// integrator instead: one extra linear solve per parameter per sub-step, with
+// the same Schur elimination as the model step, yielding
+//     s_j(t) = ∂x(t)/∂θ_j     for every state and every step,
+// hence the combined standard uncertainty u_c(t) of any concentration at any
+// time (JCGM 100:2008 §5.1.2, sensitivity coefficients c_j = ∂f/∂x_j).
+//
+// Derivation (discrete tangent of the θ-method)
+// ----------------------------------------------
+// One θ-step of ẋ = A(θ)·x is  L·x₁ = E·x₀  with  L = I − h_i·A,
+// E = I + h_e·A,  h_i = θ·dt,  h_e = (1−θ)·dt. Differentiating with respect
+// to a parameter θ_j (∂L = −h_i·∂A, ∂E = h_e·∂A):
+//     L·s₁ = E·s₀ + ∂A·(h_e·x₀ + h_i·x₁)
+// The tangent step is therefore the SAME linear step applied to s, plus a
+// forcing built from the model states before and after the step. It is the
+// exact derivative of the discrete scheme (not of the continuous ODE), so it
+// agrees with a finite difference of the same scheme up to the finite
+// difference's own truncation and rounding error, at every dt.
+//
+// Parameters covered (the ep28 taxonomy, epistemic_pbpk28.sio):
+//   0 cl_hepatic, 1 cl_renal : ∂cl_central/∂θ = 1
+//   2 fu_plasma              : ∂cl_central/∂θ = cl_central / fu_ref
+//   3 kp_brain (organ 3), 4 kp_liver (organ 1), 5 kp_kidney (organ 2),
+//   6 kp_adipose (organ 7)
+// ∂A for cl_central touches the blood row only: −C_b / V_b.
+// ∂A for kp_o touches organ o's 2×2 block:  ∂k_vt = −k_vt/kp on the vascular
+// row, ∂k_t = −k_t/kp on the tissue row (so the tissue row gains
+// +(k_t/kp)·C_t). Under the volume weights the two forcings cancel exactly:
+// V_v·(−k_vt/kp) + V_t·(k_t/kp) = −PS/kp² + PS/kp² = 0 (a Kp change moves
+// mass between the two spaces of one organ, it does not create any).
+//
+// Exact check carried by the consumer test
+// (tests/run-pass/pbpk28_tangent_gum.sio): differentiating the ledger
+// identity M(T) + CL·AUC_blood = Dose gives, for every parameter,
+//     ∂M(T)/∂θ_j + CL·∂AUC_blood/∂θ_j + (∂CL/∂θ_j)·AUC_blood = 0
+// to rounding.
+//
+// Scope: IV bolus into blood, no organ sink, no release input — the path of
+// ep28_run. The oral / organ-sink paths keep the central-difference Jacobian
+// until their tangent is added here.
+//
+// Layout: the 8 tangent states are stored flat (j·14 + i) in one struct, and
+// the Schur pass is done twice without local [f64; 14] arrays (the Madaros
+// multimodule workaround documented in theta_pbpk28.sio).
+//
+// Author: Demetrios Chiuratto Agourakis
+
+use darwin_pbpk::core::pbpk28_params::*
+use darwin_pbpk::theta_pbpk28::*
+use darwin_pbpk::epistemic_pbpk28::{EpPrior28, EpJac28, ep28_fu_ref}
+
+// Tangent states and their running integrals for up to 8 parameters.
+pub struct Tan28 {
+    pub cv:  [f64; 112],   // ∂C_v,i/∂θ_j at j·14 + i
+    pub ct:  [f64; 112],   // ∂C_t,i/∂θ_j
+    pub auc: [f64; 112],   // ∂(∫C_avg,i dt)/∂θ_j, method quadrature
+}
+
+pub fn tan28_zero() -> Tan28 {
+    Tan28 { cv: [0.0; 112], ct: [0.0; 112], auc: [0.0; 112] }
+}
+
+// Organ whose Kp parameter j perturbs; 0 for the clearance parameters.
+pub fn s28_kp_organ(j: i32) -> i32 {
+    if j == 3 { return 3 }
+    if j == 4 { return 1 }
+    if j == 5 { return 2 }
+    if j == 6 { return 7 }
+    return 0
+}
+
+// ∂cl_central/∂θ_j (0 for the Kp parameters). Mirrors ep28_perturb.
+pub fn s28_dcl(prm: PBPKParams28, j: i32) -> f64 with Div {
+    if j == 0 { return 1.0 }
+    if j == 1 { return 1.0 }
+    if j == 2 {
+        let fu_ref = ep28_fu_ref()
+        if fu_ref > 0.0 { return prm.cl_central / fu_ref }
+        return 0.0
+    }
+    return 0.0
+}
+
+struct S28Blk {
+    av: f64,
+    bv: f64,
+    at: f64,
+    bt: f64,
+    beta: f64,
+}
+
+// Schur coefficients of organ i for one θ-step: C_v,new = av + bv·C_b,new and
+// C_t,new = at + bt·C_b,new. Same algebra and the same degenerate-volume
+// floor as pbpk28_theta_step_routed_sink_mut (no sink, no routed input), with
+// the tangent forcing f_v / f_t added to the organ's right-hand sides.
+fn s28_block(
+    p: PBPKParams28, i: i32, hi: f64, he: f64,
+    cb_old: f64, cv_old: f64, ct_old: f64, f_v: f64, f_t: f64
+) -> S28Blk with Div {
+    let vb = p.v_ref[0]
+    let vi = p.v_ref[i]
+    let vf = p.vasc_frac[i]
+    let vv_raw = vi * vf
+    let vt_raw = vi * (1.0 - vf)
+    let vv = if vv_raw < 1.0e-30 { 1.0e-30 } else { vv_raw }
+    let vt = if vt_raw < 1.0e-30 { 1.0e-30 } else { vt_raw }
+    let kp = p.kp[i]
+    let ps = p.ps[i]
+    let qi = p.q[i]
+
+    let kv  = (qi + ps) / vv
+    let kvt = ps / (vv * kp)
+    let ktv = ps / vt
+    let kt  = ps / (vt * kp)
+
+    let gamma_i = hi * qi / vv
+    let pp  = 1.0 + hi * kv
+    let qq  = hi * kvt
+    let rr  = hi * ktv
+    let sb  = 1.0 + hi * kt
+    let det = pp * sb - qq * rr
+
+    let rhs_v = (he * qi / vv) * cb_old + (1.0 - he * kv) * cv_old + (he * kvt) * ct_old + f_v
+    let rhs_t = (he * ktv) * cv_old + (1.0 - he * kt) * ct_old + f_t
+
+    S28Blk {
+        av: (sb * rhs_v + qq * rhs_t) / det,
+        bv: (sb * gamma_i) / det,
+        at: (rr * rhs_v + pp * rhs_t) / det,
+        bt: (rr * gamma_i) / det,
+        beta: hi * qi / vb,
+    }
+}
+
+fn s28_avg(p: PBPKParams28, i: i32, cv: f64, ct: f64) -> f64 with Div {
+    if i == 0 { return cv }
+    let vi = p.v_ref[i]
+    let vf = p.vasc_frac[i]
+    return (vi * vf * cv + vi * (1.0 - vf) * ct) / vi
+}
+
+// One θ-step of tangent j with forcing f_b on the blood row and (f_v, f_t) on
+// organ `org`'s vascular / tissue rows (org outside 1..13: no organ forcing).
+// The forcings are already integrated over the step (concentration units).
+// Books the step into tan.auc with the θ-method's own quadrature.
+pub fn tan28_forced_step_mut(
+    tan: &!Tan28, j: i32, p: PBPKParams28,
+    f_b: f64, org: i32, f_v: f64, f_t: f64,
+    dt: f64, theta: f64
+) with Mut, Div {
+    let off = j * 14
+    let hi = theta * dt
+    let he = (1.0 - theta) * dt
+    let vb = p.v_ref[0]
+
+    var sum_q = 0.0
+    var i: i32 = 1
+    while i < 14 {
+        sum_q = sum_q + p.q[i]
+        i = i + 1
+    }
+    let k0 = (sum_q + p.cl_central) / vb
+    let big_s = hi * k0
+
+    let cb_old = (*tan).cv[off]
+    var rhs0 = (1.0 - he * k0) * cb_old + f_b
+    var sum_beta_a = 0.0
+    var sum_beta_b = 0.0
+
+    // Pass 1: blood-row reduction; book the explicit half of the quadrature.
+    (*tan).auc[off] = (*tan).auc[off] + he * cb_old
+    i = 1
+    while i < 14 {
+        let cv_old = (*tan).cv[off + i]
+        let ct_old = (*tan).ct[off + i]
+        let fv = if i == org { f_v } else { 0.0 }
+        let ft = if i == org { f_t } else { 0.0 }
+        let blk = s28_block(p, i, hi, he, cb_old, cv_old, ct_old, fv, ft)
+        rhs0 = rhs0 + (he * p.q[i] / vb) * cv_old
+        sum_beta_a = sum_beta_a + blk.beta * blk.av
+        sum_beta_b = sum_beta_b + blk.beta * blk.bv
+        (*tan).auc[off + i] = (*tan).auc[off + i] + he * s28_avg(p, i, cv_old, ct_old)
+        i = i + 1
+    }
+
+    let cb_new = (rhs0 + sum_beta_a) / ((1.0 + big_s) - sum_beta_b)
+
+    // Pass 2: back-substitution (each organ reads its own old values before
+    // overwriting them); book the implicit half of the quadrature.
+    i = 1
+    while i < 14 {
+        let cv_old = (*tan).cv[off + i]
+        let ct_old = (*tan).ct[off + i]
+        let fv = if i == org { f_v } else { 0.0 }
+        let ft = if i == org { f_t } else { 0.0 }
+        let blk = s28_block(p, i, hi, he, cb_old, cv_old, ct_old, fv, ft)
+        let cv_new = blk.av + blk.bv * cb_new
+        let ct_new = blk.at + blk.bt * cb_new
+        (*tan).cv[off + i] = cv_new
+        (*tan).ct[off + i] = ct_new
+        (*tan).auc[off + i] = (*tan).auc[off + i] + hi * s28_avg(p, i, cv_new, ct_new)
+        i = i + 1
+    }
+    (*tan).cv[off] = cb_new
+    (*tan).auc[off] = (*tan).auc[off] + hi * cb_new
+}
+
+// Tangent forcing of parameter j for one θ-step, from the model state before
+// (x0) and after (x1) that step, then the tangent step itself.
+fn s28_advance_tangent(
+    tan: &!Tan28, j: i32, p: PBPKParams28,
+    cb0: f64, cb1: f64, ct0: f64, ct1: f64,
+    dt: f64, theta: f64
+) with Mut, Div {
+    let hi = theta * dt
+    let he = (1.0 - theta) * dt
+    let org = s28_kp_organ(j)
+    if org == 0 {
+        let f_b = 0.0 - s28_dcl(p, j) * (he * cb0 + hi * cb1) / p.v_ref[0]
+        tan28_forced_step_mut(tan, j, p, f_b, 0, 0.0, 0.0, dt, theta)
+    } else {
+        let vi = p.v_ref[org]
+        let vf = p.vasc_frac[org]
+        let vv_raw = vi * vf
+        let vt_raw = vi * (1.0 - vf)
+        let vv = if vv_raw < 1.0e-30 { 1.0e-30 } else { vv_raw }
+        let vt = if vt_raw < 1.0e-30 { 1.0e-30 } else { vt_raw }
+        let kp = p.kp[org]
+        let w = he * ct0 + hi * ct1
+        let f_v = 0.0 - (p.ps[org] / (vv * kp * kp)) * w
+        let f_t = (p.ps[org] / (vt * kp * kp)) * w
+        tan28_forced_step_mut(tan, j, p, 0.0, org, f_v, f_t, dt, theta)
+    }
+}
+
+// One model θ-step followed by the n tangent θ-steps that depend on it.
+fn s28_substep(
+    st: &!PBPKState28, tan: &!Tan28, n: i32, p: PBPKParams28,
+    dt: f64, theta: f64, led: &!PBPK28Ledger
+) with Mut, Div {
+    let cb0 = (*st).cv[0]
+    let t1o = (*st).ct[1]
+    let t2o = (*st).ct[2]
+    let t3o = (*st).ct[3]
+    let t7o = (*st).ct[7]
+    pbpk28_theta_step_mut(st, p, 0.0, dt, theta, led)
+    let cb1 = (*st).cv[0]
+    var j: i32 = 0
+    while j < n {
+        let org = s28_kp_organ(j)
+        var c0 = 0.0
+        var c1 = 0.0
+        if org == 1 { c0 = t1o; c1 = (*st).ct[1] }
+        if org == 2 { c0 = t2o; c1 = (*st).ct[2] }
+        if org == 3 { c0 = t3o; c1 = (*st).ct[3] }
+        if org == 7 { c0 = t7o; c1 = (*st).ct[7] }
+        s28_advance_tangent(tan, j, p, cb0, cb1, c0, c1, dt, theta)
+        j = j + 1
+    }
+}
+
+// Time-resolved combined standard uncertainty (the "uncertainty cone"):
+// up to 64 samples of C(t) and u_c(t) for blood and for the brain organ
+// average, u_c²(t) = Σ_j s_j(t)² · Var(θ_j)  (uncorrelated inputs).
+pub struct EpCone28 {
+    pub n:       i32,
+    pub t:       [f64; 64],
+    pub c_blood: [f64; 64],
+    pub u_blood: [f64; 64],
+    pub c_brain: [f64; 64],
+    pub u_brain: [f64; 64],
+}
+
+pub struct EpTangent28 {
+    pub jac:        EpJac28,
+    pub cone:       EpCone28,
+    pub auc_blood:  f64,        // reference AUC_blood (mg·h/L)
+    pub mass_tan:   [f64; 8],   // ∂M(T)/∂θ_j (mg per parameter unit)
+    pub ident:      [f64; 8],   // ∂M/∂θ_j + CL·∂AUC_b/∂θ_j + (∂CL/∂θ_j)·AUC_b
+    pub steps:      i32,
+}
+
+fn s28_sqrt(x: f64) -> f64 with Mut, Div {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i: i32 = 0
+    while i < 60 {
+        y = 0.5 * (y + x / y)
+        i = i + 1
+    }
+    return y
+}
+
+fn s28_finite(x: f64) -> bool {
+    if x != x { return false }
+    let a = if x < 0.0 { 0.0 - x } else { x }
+    return a < 1.0e12
+}
+
+fn s28_fail() -> EpTangent28 {
+    EpTangent28 {
+        jac: EpJac28 { d_auc_b: [0.0; 8], d_cb24: [0.0; 8], d_auc_l: [0.0; 8], d_auc_k: [0.0; 8], ok: false },
+        cone: EpCone28 { n: 0, t: [0.0; 64], c_blood: [0.0; 64], u_blood: [0.0; 64], c_brain: [0.0; 64], u_brain: [0.0; 64] },
+        auc_blood: 0.0, mass_tan: [0.0; 8], ident: [0.0; 8], steps: 0,
+    }
+}
+
+// IV-bolus PBPK28 run at step dt with the n tangents carried through the
+// integrator: Rannacher start-up (two backward-Euler half steps on each of
+// the first pbpk28_rannacher_startup_steps() steps), then clamp-free CN —
+// the same marching as ep28_simulate_dt, so the tangent is the derivative of
+// exactly the trajectory the GUM budget is reported for.
+pub fn ep28_tangent_run_dt(
+    dt: f64, base_prm: PBPKParams28, priors: EpPrior28, dose_mg: f64, t_end: f64
+) -> EpTangent28 with Mut, Div, Panic, Epistemic {
+    if !(dt > 0.0) || !s28_finite(dt) { return s28_fail() }
+    if !(t_end > 0.0) || !s28_finite(t_end) { return s28_fail() }
+    if t_end / dt > 1000000.0 { return s28_fail() }
+    let n = priors.n
+    if n < 0 || n > 8 { return s28_fail() }
+
+    var st = pbpk28_state_zero()
+    st.cv[0] = dose_mg / base_prm.v_ref[0]
+    var led = pbpk28_ledger_zero()
+    var tan = tan28_zero()
+    let n_start = pbpk28_rannacher_startup_steps()
+
+    var d_cb24: [f64; 8] = [0.0; 8]
+    var ct:  [f64; 64] = [0.0; 64]
+    var cb:  [f64; 64] = [0.0; 64]
+    var ub:  [f64; 64] = [0.0; 64]
+    var cbr: [f64; 64] = [0.0; 64]
+    var ubr: [f64; 64] = [0.0; 64]
+    var n_s: i32 = 0
+    let total = t_end / dt
+    var stride: i32 = (total / 64.0) as i32
+    stride = stride + 1
+
+    var t = 0.0
+    var k: i32 = 0
+    var found_24h = false
+    while t < t_end {
+        let dt_use = if t + dt > t_end { t_end - t } else { dt }
+        if !(t + dt_use > t) || k >= 1000000 { return s28_fail() }
+        if k < n_start {
+            let half = 0.5 * dt_use
+            s28_substep(&!st, &!tan, n, base_prm, half, 1.0, &!led)
+            s28_substep(&!st, &!tan, n, base_prm, half, 1.0, &!led)
+        } else {
+            s28_substep(&!st, &!tan, n, base_prm, dt_use, 0.5, &!led)
+        }
+        if !s28_finite(st.cv[0]) { return s28_fail() }
+        t = t + dt_use
+        k = k + 1
+
+        if found_24h == false && t >= 24.0 - 0.5 * dt_use {
+            var j: i32 = 0
+            while j < n {
+                d_cb24[j] = s28_avg(base_prm, 3, tan.cv[j * 14 + 3], tan.ct[j * 14 + 3])
+                j = j + 1
+            }
+            found_24h = true
+        }
+
+        if k % stride == 0 && n_s < 64 {
+            var vb2 = 0.0
+            var vr2 = 0.0
+            var j2: i32 = 0
+            while j2 < n {
+                let vj = priors.kn[j2].variance
+                let sb = tan.cv[j2 * 14]
+                let sr = s28_avg(base_prm, 3, tan.cv[j2 * 14 + 3], tan.ct[j2 * 14 + 3])
+                vb2 = vb2 + sb * sb * vj
+                vr2 = vr2 + sr * sr * vj
+                j2 = j2 + 1
+            }
+            ct[n_s]  = t
+            cb[n_s]  = st.cv[0]
+            ub[n_s]  = s28_sqrt(vb2)
+            cbr[n_s] = s28_avg(base_prm, 3, st.cv[3], st.ct[3])
+            ubr[n_s] = s28_sqrt(vr2)
+            n_s = n_s + 1
+        }
+    }
+    if led.neg_mass > pbpk28_neg_mass_bound_mg() { return s28_fail() }
+
+    var d_auc_b: [f64; 8] = [0.0; 8]
+    var d_auc_l: [f64; 8] = [0.0; 8]
+    var d_auc_k: [f64; 8] = [0.0; 8]
+    var mass_tan: [f64; 8] = [0.0; 8]
+    var ident: [f64; 8] = [0.0; 8]
+    var j3: i32 = 0
+    while j3 < n {
+        let off = j3 * 14
+        d_auc_b[j3] = tan.auc[off]
+        d_auc_l[j3] = tan.auc[off + 1]
+        d_auc_k[j3] = tan.auc[off + 2]
+        var m = base_prm.v_ref[0] * tan.cv[off]
+        var i: i32 = 1
+        while i < 14 {
+            let vi = base_prm.v_ref[i]
+            let vf = base_prm.vasc_frac[i]
+            m = m + vi * vf * tan.cv[off + i] + vi * (1.0 - vf) * tan.ct[off + i]
+            i = i + 1
+        }
+        mass_tan[j3] = m
+        ident[j3] = m + base_prm.cl_central * tan.auc[off] + s28_dcl(base_prm, j3) * led.auc[0]
+        j3 = j3 + 1
+    }
+
+    EpTangent28 {
+        jac: EpJac28 { d_auc_b: d_auc_b, d_cb24: d_cb24, d_auc_l: d_auc_l, d_auc_k: d_auc_k, ok: true },
+        cone: EpCone28 { n: n_s, t: ct, c_blood: cb, u_blood: ub, c_brain: cbr, u_brain: ubr },
+        auc_blood: led.auc[0], mass_tan: mass_tan, ident: ident, steps: led.steps,
+    }
+}
+
+// Production step of ep28_run (dt = 0.05 h).
+pub fn ep28_tangent_run(
+    base_prm: PBPKParams28, priors: EpPrior28, dose_mg: f64, t_end: f64
+) -> EpTangent28 with Mut, Div, Panic, Epistemic {
+    ep28_tangent_run_dt(0.05, base_prm, priors, dose_mg, t_end)
+}
