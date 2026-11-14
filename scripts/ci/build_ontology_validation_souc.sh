@@ -54,7 +54,7 @@ BOOTSTRAP_LOG="$WORK_DIR/bootstrap.log"
 # previously pinned the oracle to the lean_single fixed-point ELF for two reasons,
 # both now CLOSED:
 #   1. Madaros silently accepted ontology axiom violations — fixed: it enforces
-#      E041 property weakening (PR #439) and E009 subclass subsumption (PR #475).
+#      E285 property weakening (PR #439) and E009 subclass subsumption (PR #475).
 #   2. Madaros native codegen segfaulted on field/index access through reference
 #      params to heap aggregates (&P, &[T;N]), crashing ontology_subsumption at
 #      runtime — fixed in PR #505 (ref-param deref before handle resolution),

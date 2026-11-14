@@ -98,9 +98,11 @@ ERROR_CATALOG: dict[str, ErrorEntry] = {
     ),
     "E041": ErrorEntry(
         "Unit mismatch",
-        "Dimensional units are incompatible in arithmetic or a function call.",
+        "Madaros found incompatible units in arithmetic, comparison or a function call. "
+        "The legacy lean_single engine instead uses E041 for Rust &mut syntax; "
+        "a unit mismatch in a legacy let binding uses E001.",
         ("Convert units explicitly.", "Keep API annotations in the same unit family."),
-        ("self-hosted/check/check.sio:10721", "self-hosted/check/check.sio:10742"),
+        ("tests/compile-fail/diagnostic_e041_unit_meaning.sio", "docs/llm-guide/explanations/E041.md"),
     ),
     "E042": ErrorEntry(
         "Refinement violation",
@@ -239,6 +241,25 @@ ERROR_CATALOG: dict[str, ErrorEntry] = {
         "`Interpretable<T>` parameters require the `ZD` effect.",
         ("Declare `with ZD`.", "Move interpretable capability work to a ZD-aware function."),
         ("self-hosted/compiler/lean_single.sio:23336",),
+    ),
+    "E285": ErrorEntry(
+        "Ontology subsumption could not be verified",
+        "A Madaros subclass property constraint does not imply its parent constraint.",
+        ("Strengthen the child property so it implies the parent constraint.",),
+        ("tests/compile-fail/diagnostic_e285_ontology_meaning.sio",),
+    ),
+    "E286": ErrorEntry(
+        "Rust &mut reference syntax",
+        "Madaros uses &!T for exclusive references, not &mut T. The legacy lean_single engine uses E041 here.",
+        ("Write &!T for the reference type and &!value at the call site.",),
+        ("tests/compile-fail/diagnostic_e286_mut_ref.sio",),
+    ),
+    "E287": ErrorEntry(
+        "Use after move",
+        "The diagnostic registry's diag_use_after_move constructor reports E287. "
+        "The checker retains its separate E039 linear-use diagnostic.",
+        ("Avoid reusing a value after transferring it.",),
+        ("self-hosted/diagnostics/mod.sio",),
     ),
 }
 
