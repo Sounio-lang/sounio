@@ -29,7 +29,7 @@ Tiers below mirror the public-claim registry's `claim_level`/`closure_status` co
 
 | Component | Status | Notes |
 |-----------|--------|-------|
-| Lexer/Parser/AST | Production | logos-based, error recovery, comprehensive |
+| Lexer/Parser/AST | Production | Hand-written Sounio lexer (`self-hosted/lexer/`), parser and AST (`self-hosted/parser/`); byte cursor, keyword/operator tables and located lexical diagnostics |
 | Type Checker (core) | Production | Bidirectional inference, generic monomorphization (1–2 params), unification |
 | Effects System | Production | 9+ effects (IO, Mut, Panic, Div, Alloc, Session, Observe, Audit, Hypothesis; +GPU, Deterministic). Strict E035 subset check at call sites. |
 | HIR + HLIR | Production | SSA generation, async transform |
