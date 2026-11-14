@@ -2943,6 +2943,45 @@ fn nc_emit_carry_guard(nc: &! NativeCompiler) with Mut, Panic, Div {
     nc_add_label_patch(nc, jc_pos + 2, nc_v2_overflow_trap_label())
 }
 
+// ADR-031 R2: integer division and remainder fail on a zero divisor and,
+// for signed operands, on the one quotient that does not fit (MIN / -1).
+// Emit with the divisor in rcx and the dividend in rax, before cqo or
+// `xor rdx, rdx` (the MIN check uses rdx as scratch). Both failures jump to
+// the same per-function trap stub as the SIO-207 overflow guard, so they
+// exit through the panic shape instead of the CPU's #DE (SIGFPE).
+//   test rcx, rcx        48 85 C9
+//   jz   trap            0F 84 rel32
+// signed only:
+//   cmp  rcx, -1         48 83 F9 FF
+//   jne  +12             75 0C          (skips the next 12 bytes)
+//   mov  rdx, rax        48 89 C2
+//   neg  rdx             48 F7 DA       (OF set iff rax == i64::MIN)
+//   jo   trap            0F 80 rel32
+fn nc_emit_div_guard(nc: &! NativeCompiler, is_signed: bool) with Mut, Panic, Div {
+    NC_V2_OVERFLOW_GUARD_USED = 1
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x85)
+    nc_emit_byte(nc, 0xc9)
+    let jz_pos = (*nc).code.len
+    nc_emit_jz_rel32(nc)
+    nc_add_label_patch(nc, jz_pos + 2, nc_v2_overflow_trap_label())
+    if is_signed {
+        nc_emit_byte(nc, 0x48)
+        nc_emit_byte(nc, 0x83)
+        nc_emit_byte(nc, 0xf9)
+        nc_emit_byte(nc, 0xff)
+        nc_emit_byte(nc, 0x75)
+        nc_emit_byte(nc, 0x0c)
+        nc_emit_byte(nc, 0x48)
+        nc_emit_byte(nc, 0x89)
+        nc_emit_byte(nc, 0xc2)
+        nc_emit_byte(nc, 0x48)
+        nc_emit_byte(nc, 0xf7)
+        nc_emit_byte(nc, 0xda)
+        nc_emit_overflow_guard(nc)
+    }
+}
+
 // CMP RAX, RBX  (sets flags for lhs=rax, rhs=rbx)
 fn nc_emit_cmp_rax_rbx(nc: &! NativeCompiler) with Mut, Panic, Div {
     nc_emit_byte(nc, 0x48)
@@ -11853,6 +11892,7 @@ fn nc_emit_core_binop(nc: &! NativeCompiler, func: &IrFunction, instr_index: i64
         nc_core_load_temp_to_rax(nc, rhs)
         nc_emit_mov_reg_reg(nc, 1, 0)
         nc_core_load_temp_to_rax(nc, lhs)
+        nc_emit_div_guard(nc, true)
         nc_emit_cqo(nc)
         nc_emit_idiv_rcx(nc)
         nc_core_store_rax_to_temp(nc, dst)
@@ -11866,6 +11906,7 @@ fn nc_emit_core_binop(nc: &! NativeCompiler, func: &IrFunction, instr_index: i64
         nc_core_load_temp_to_rax(nc, rhs)
         nc_emit_mov_reg_reg(nc, 1, 0)
         nc_core_load_temp_to_rax(nc, lhs)
+        nc_emit_div_guard(nc, false)
         nc_emit_xor_rdx_rdx(nc)   // rdx = 0
         nc_emit_div_rcx(nc)                 // div rcx: rax = quotient, rdx = remainder
         nc_core_store_rax_to_temp(nc, dst)
@@ -11876,6 +11917,7 @@ fn nc_emit_core_binop(nc: &! NativeCompiler, func: &IrFunction, instr_index: i64
         nc_core_load_temp_to_rax(nc, rhs)
         nc_emit_mov_reg_reg(nc, 1, 0)
         nc_core_load_temp_to_rax(nc, lhs)
+        nc_emit_div_guard(nc, true)
         nc_emit_cqo(nc)
         nc_emit_idiv_rcx(nc)
         nc_emit_mov_rax_rdx(nc)
@@ -11891,6 +11933,7 @@ fn nc_emit_core_binop(nc: &! NativeCompiler, func: &IrFunction, instr_index: i64
         nc_core_load_temp_to_rax(nc, rhs)
         nc_emit_mov_reg_reg(nc, 1, 0)
         nc_core_load_temp_to_rax(nc, lhs)
+        nc_emit_div_guard(nc, false)
         nc_emit_xor_rdx_rdx(nc)   // rdx = 0
         nc_emit_div_rcx(nc)                 // rdx = lhs % rhs (unsigned)
         nc_emit_mov_rax_rdx(nc)
@@ -13606,6 +13649,7 @@ pub fn native_v2_core_emit_binop_code_into(nc: &! NativeCompiler, dst: i64, lhs:
         nc_core_load_temp_to_rax(nc, rhs)
         nc_emit_mov_reg_reg(nc, 1, 0)
         nc_core_load_temp_to_rax(nc, lhs)
+        nc_emit_div_guard(nc, true)
         nc_emit_cqo(nc)
         nc_emit_idiv_rcx(nc)
         nc_core_store_rax_to_temp(nc, dst)
@@ -14539,6 +14583,7 @@ pub fn native_v2_core_emit_any_binop_into(nc: &! NativeCompiler, dst: i64, lhs: 
         nc_core_load_temp_to_rax(nc, rhs)
         nc_emit_mov_reg_reg(nc, 1, 0)
         nc_core_load_temp_to_rax(nc, lhs)
+        nc_emit_div_guard(nc, true)
         nc_emit_cqo(nc)
         nc_emit_idiv_rcx(nc)
         nc_core_store_rax_to_temp(nc, dst)
