@@ -7,7 +7,8 @@
 module native::codegen_x86_linux
 
 use parser::ast::{Name}
-use ir::ir::{IrModule, IrFunction, IrInstr, IrOpcode, IR_MAX_FUNCS, IR_MAX_STRINGS, IR_MAX_VREGS, IR_FLOAT_REG_MARKER_FLAG, IR_BOX_ALLOC_FLAG, IR_ALLOC_PACKED_I8, IR_ALLOC_PACKED_U8, IR_ALLOC_LIKE_SOURCE, IR_XOR_TWIST_CAYLEY_DICKSON_SIGN, IR_XOR_CANDIDATE_AUTO, ir_reg_count_is_valid, ir_function_regs_are_valid, ir_xor_convolution_s, ir_name_eq, BSS_BASE_LINUX, IR_STRATEGY_BSS_GLOBAL, BSS_INIT_STRING_MAGIC, ir_bss_packed_header_needed, IR_VALIDATE_FAIL_DST, IR_VALIDATE_FAIL_INSTR, IR_VALIDATE_FAIL_OP, IR_VALIDATE_FAIL_SRC1, IR_VALIDATE_FAIL_SRC2}
+use lexer::span::{srcmap_line, srcmap_col, srcmap_path_len, srcmap_path_byte}
+use ir::ir::{IrModule, IrFunction, IrInstr, IrOpcode, IR_A_SRC_SITE, IR_MAX_FUNCS, IR_MAX_STRINGS, IR_MAX_VREGS, IR_FLOAT_REG_MARKER_FLAG, IR_BOX_ALLOC_FLAG, IR_ALLOC_PACKED_I8, IR_ALLOC_PACKED_U8, IR_ALLOC_LIKE_SOURCE, IR_XOR_TWIST_CAYLEY_DICKSON_SIGN, IR_XOR_CANDIDATE_AUTO, ir_reg_count_is_valid, ir_function_regs_are_valid, ir_xor_convolution_s, ir_name_eq, BSS_BASE_LINUX, IR_STRATEGY_BSS_GLOBAL, BSS_INIT_STRING_MAGIC, ir_bss_packed_header_needed, IR_VALIDATE_FAIL_DST, IR_VALIDATE_FAIL_INSTR, IR_VALIDATE_FAIL_OP, IR_VALIDATE_FAIL_SRC1, IR_VALIDATE_FAIL_SRC2}
 use native::encode::*
 use native::elf::*
 use native::aarch64::*
@@ -2939,8 +2940,11 @@ fn nc_record_overflow_site(nc: &! NativeCompiler, patch_pos: i64, kind: i64) wit
     if kind >= 0 && kind < NC_OVF_KIND_COUNT && NC_OVF_PATCH_N < NC_OVF_PATCH_CAP {
         NC_OVF_PATCH_POS[NC_OVF_PATCH_N as usize] = patch_pos
         NC_OVF_PATCH_KIND[NC_OVF_PATCH_N as usize] = kind
+        NC_OVF_PATCH_SITE[NC_OVF_PATCH_N as usize] = NC_CUR_SRC_SITE
         NC_OVF_PATCH_N = NC_OVF_PATCH_N + 1
+        NC_CUR_SRC_SITE = 0
     } else {
+        NC_CUR_SRC_SITE = 0
         NC_V2_OVERFLOW_GUARD_USED = 1
         nc_add_label_patch(nc, patch_pos, nc_v2_overflow_trap_label())
     }
@@ -2970,12 +2974,92 @@ fn nc_intern_overflow_message(nc: &! NativeCompiler, kind: i64) with Mut, Panic,
 // Emit this function's overflow stubs and patch every recorded guard to its
 // stub. Unreachable except through a guard: callers place it after the
 // function's final ret.
+fn nc_emit_ascii_inline(nc: &! NativeCompiler, text: string) with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < str_len(text) { nc_emit_byte(nc, str_char_at(text, i) as i64)  i = i + 1 }
+}
+
+fn nc_emit_decimal_inline(nc: &! NativeCompiler, v: i64) with Mut, Panic, Div {
+    if v <= 0 { nc_emit_byte(nc, 48)  return }
+    var div: i64 = 1
+    while div <= v / 10 { div = div * 10 }
+    while div > 0 { nc_emit_byte(nc, 48 + (v / div) % 10)  div = div / 10 }
+}
+
+fn nc_decimal_len(v: i64) -> i64 with Div {
+    if v <= 0 { return 1 }
+    var n: i64 = 0
+    var x = v
+    while x > 0 { n = n + 1  x = x / 10 }
+    n
+}
+
+// One stub for a located guard: the whole line, including "at path:line:col",
+// travels inline behind a `call` that pushes its address, so a site costs code
+// bytes but no rodata (the flat rodata is 2 MiB and the self-compile has tens
+// of thousands of guards). Returns false when the site cannot be resolved; the
+// caller then uses the per-kind stub without a location.
+fn nc_emit_located_overflow_stub(nc: &! NativeCompiler, kind: i64, site: i64) -> bool with Mut, Panic, Div {
+    let fid = site >> 32
+    let off = site & 4294967295
+    let line = srcmap_line(fid, off)
+    let col = srcmap_col(fid, off)
+    let plen = srcmap_path_len(fid)
+    if line <= 0 || col <= 0 || plen <= 0 { return false }
+    let kind_text = nc_overflow_kind_text(kind)
+    let n = 26 + str_len(kind_text) + 5 + plen + 1 + nc_decimal_len(line) + 1 + nc_decimal_len(col) + 1
+    nc_emit_byte(nc, 0xe8)
+    nc_emit_u32_le(nc, n)                     // call over the message
+    nc_emit_ascii_inline(nc, "sounio: integer overflow (")
+    nc_emit_ascii_inline(nc, kind_text)
+    nc_emit_ascii_inline(nc, ") at ")
+    var pi: i64 = 0
+    while pi < plen { nc_emit_byte(nc, srcmap_path_byte(fid, pi))  pi = pi + 1 }
+    nc_emit_byte(nc, 58)
+    nc_emit_decimal_inline(nc, line)
+    nc_emit_byte(nc, 58)
+    nc_emit_decimal_inline(nc, col)
+    nc_emit_byte(nc, 10)
+    nc_emit_byte(nc, 0x5e)                    // pop rsi
+    nc_emit_mov_reg_imm(nc, 2, n)             // rdx = n
+    nc_emit_mov_rdi_imm(nc, 2)                // stderr
+    nc_emit_mov_rax_imm(nc, 1)                // write
+    nc_emit_syscall(nc)
+    nc_emit_exit_code(nc, 1)
+    true
+}
+
 fn nc_emit_overflow_stubs(nc: &! NativeCompiler) with Mut, Panic, Div {
     if NC_OVF_PATCH_N == 0 { return }
     var stub_at: [i64; 8] = [-1; 8]
     var i: i64 = 0
     while i < NC_OVF_PATCH_N {
         let kind = NC_OVF_PATCH_KIND[i as usize]
+        let site = NC_OVF_PATCH_SITE[i as usize]
+        if site != 0 {
+            // Same (kind, site) earlier in this function shares its stub.
+            var j: i64 = i - 1
+            var shared: i64 = 0 - 1
+            while j >= 0 && shared < 0 {
+                if NC_OVF_PATCH_SITE[j as usize] == site && NC_OVF_PATCH_KIND[j as usize] == kind && NC_OVF_STUB_OFF[j as usize] >= 0 {
+                    shared = NC_OVF_STUB_OFF[j as usize]
+                }
+                j = j - 1
+            }
+            if shared < 0 {
+                let here = (*nc).code.len
+                if nc_emit_located_overflow_stub(nc, kind, site) { shared = here }
+            }
+            NC_OVF_STUB_OFF[i as usize] = shared
+            if shared >= 0 {
+                let lpos = NC_OVF_PATCH_POS[i as usize]
+                nc_patch_u32_le(nc, lpos, shared - (lpos + 4))
+                i = i + 1
+                continue
+            }
+        } else {
+            NC_OVF_STUB_OFF[i as usize] = 0 - 1
+        }
         if stub_at[kind as usize] < 0 {
             nc_intern_overflow_message(nc, kind)
             stub_at[kind as usize] = (*nc).code.len
@@ -11808,6 +11892,7 @@ fn nc_rodata_add_name_value(nc: &! NativeCompiler, name: Name) -> i64 with Mut, 
 }
 
 fn nc_emit_core_binop(nc: &! NativeCompiler, func: &IrFunction, instr_index: i64) -> bool with Mut, Panic, Div {
+    NC_CUR_SRC_SITE = IR_A_SRC_SITE[(ir_region_slot_r((*func).region, (instr_index))) as usize]
     let lhs = IR_A_SRC1[(ir_region_slot_r((*func).region, (instr_index))) as usize]
     let rhs = IR_A_SRC2[(ir_region_slot_r((*func).region, (instr_index))) as usize]
     let dst = IR_A_DST[(ir_region_slot_r((*func).region, (instr_index))) as usize]
@@ -13196,6 +13281,7 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
                 } else {
                     nc_core_load_temp_to_rax(nc, src1)
                     nc_emit_neg_rax(nc)
+                    NC_CUR_SRC_SITE = IR_A_SRC_SITE[(ir_region_slot_r((*func).region, (i))) as usize]
                     nc_emit_overflow_guard(nc, 3)
                     nc_core_store_rax_to_temp(nc, IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize])
                     nc_core_mark_int_reg(nc, IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize])
@@ -13921,7 +14007,7 @@ fn native_v2_ir_alloc(dst: i64, type_id: i64) -> IrInstr {
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name_id: base.name_id,
+        name_id: base.name_id, src_site: base.src_site,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -13942,7 +14028,7 @@ fn native_v2_ir_field_get(dst: i64, base_reg: i64, field_idx: i64, field_name: N
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name_id: ir_intern_name(field_name),
+        name_id: ir_intern_name(field_name), src_site: 0,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -13963,7 +14049,7 @@ fn native_v2_ir_field_set(base_reg: i64, field_idx: i64, src: i64, field_name: N
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name_id: ir_intern_name(field_name),
+        name_id: ir_intern_name(field_name), src_site: 0,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -13984,7 +14070,7 @@ fn native_v2_ir_return_sret(src: i64) -> IrInstr {
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name_id: base.name_id,
+        name_id: base.name_id, src_site: base.src_site,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -14005,7 +14091,7 @@ fn native_v2_ir_call_sret(dst: i64, dest_reg: i64, fn_name: Name, fn_id: i64, ar
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name_id: ir_intern_name(fn_name),
+        name_id: ir_intern_name(fn_name), src_site: 0,
         call_args: base.call_args,
         arg_count: explicit_arg_count,
     }

@@ -734,6 +734,9 @@ pub struct IrInstr {
     pub name_id: i64,
     pub call_args: Option<Box<IrRegList>>,
     pub arg_count: i64,
+    // ADR-031 R1: source site of an arithmetic op, (span.file_id << 32) |
+    // span.start; 0 = unknown. Only the overflow-panic message reads it.
+    pub src_site: i64,
 }
 
 // ============================================================================
@@ -874,6 +877,7 @@ pub var IR_A_UN_OP: [i64; 4194304] = [0; 4194304]
 // overflow, and 0 means "unnamed", so once the pool filled every load produced a
 // nameless instruction.
 pub var IR_A_NAME_ID: [i64; 4194304] = [0; 4194304]
+pub var IR_A_SRC_SITE: [i64; 4194304] = [0; 4194304]
 pub var IR_A_ARG_COUNT: [i64; 4194304] = [0; 4194304]
 pub var IR_A_NAME_OFF: [i64; 4194304] = [0; 4194304]
 pub var IR_A_NAME_LEN: [i64; 4194304] = [0; 4194304]
@@ -927,6 +931,7 @@ pub fn ir_arena_copy_slot(dst: i64, src: i64) with Mut, Panic, Div {
     IR_A_NAME_OFF[dst as usize] = IR_A_NAME_OFF[src as usize]
     IR_A_NAME_LEN[dst as usize] = IR_A_NAME_LEN[src as usize]
     IR_A_NAME_ID[dst as usize] = IR_A_NAME_ID[src as usize]
+    IR_A_SRC_SITE[dst as usize] = IR_A_SRC_SITE[src as usize]
     IR_A_ARG_BASE[dst as usize] = IR_A_ARG_BASE[src as usize]
 }
 
@@ -988,6 +993,7 @@ pub fn ir_arena_swap_slots(a: i64, b: i64) with Mut, Panic, Div {
     let t_no = IR_A_NAME_OFF[a as usize]          IR_A_NAME_OFF[a as usize] = IR_A_NAME_OFF[b as usize]    IR_A_NAME_OFF[b as usize] = t_no
     let t_nl = IR_A_NAME_LEN[a as usize]          IR_A_NAME_LEN[a as usize] = IR_A_NAME_LEN[b as usize]    IR_A_NAME_LEN[b as usize] = t_nl
     let t_ni = IR_A_NAME_ID[a as usize]           IR_A_NAME_ID[a as usize] = IR_A_NAME_ID[b as usize]     IR_A_NAME_ID[b as usize] = t_ni
+    let t_ss = IR_A_SRC_SITE[a as usize]          IR_A_SRC_SITE[a as usize] = IR_A_SRC_SITE[b as usize]   IR_A_SRC_SITE[b as usize] = t_ss
     let t_ab = IR_A_ARG_BASE[a as usize]          IR_A_ARG_BASE[a as usize] = IR_A_ARG_BASE[b as usize]    IR_A_ARG_BASE[b as usize] = t_ab
     let t_ac = IR_A_ARG_COUNT[a as usize]         IR_A_ARG_COUNT[a as usize] = IR_A_ARG_COUNT[b as usize]  IR_A_ARG_COUNT[b as usize] = t_ac
 }
@@ -996,6 +1002,7 @@ pub fn ir_arena_swap_slots(a: i64, b: i64) with Mut, Panic, Div {
 fn ir_arena_store_scalars(at: i64, instr: IrInstr) with Mut, Panic, Div {
     IR_A_NAME_ID[at as usize] = instr.name_id
     if at < 0 || at >= ir_instr_arena_capacity() { return }
+    IR_A_SRC_SITE[at as usize] = instr.src_site
     IR_A_OP[at as usize] = instr.op as i64
     IR_A_DST[at as usize] = instr.dst
     IR_A_SRC1[at as usize] = instr.src1
@@ -1191,6 +1198,7 @@ pub fn ir_arena_load(at: i64) -> IrInstr with Mut, Panic, Div {
     out.arg_count = IR_A_ARG_COUNT[at as usize]
     // Carried, NOT re-derived: interning on this read path broke arity >= 5.
     out.name_id = IR_A_NAME_ID[at as usize]
+    out.src_site = IR_A_SRC_SITE[at as usize]
     out
 }
 pub fn ir_instr_arena_capacity() -> i64 { 4194304 }
@@ -4240,7 +4248,7 @@ pub fn ir_instr_new(op: IrOpcode) -> IrInstr {
         imm_flags: 0,
         bin_op: BinaryOp::OpAdd,
         un_op: UnaryOp::OpNeg,
-        name_id: 0,
+        name_id: 0, src_site: 0,
         call_args: ir_empty_reg_list(),
         arg_count: 0,
     }
@@ -4265,7 +4273,7 @@ pub fn ir_mark_float_reg(reg: i64) -> IrInstr {
         imm_flags: IR_FLOAT_REG_MARKER_FLAG,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name_id: base.name_id,
+        name_id: base.name_id, src_site: base.src_site,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -4290,7 +4298,7 @@ pub fn ir_label(label_id: i64) -> IrInstr {
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name_id: base.name_id,
+        name_id: base.name_id, src_site: base.src_site,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -4311,7 +4319,7 @@ pub fn ir_jump(label_id: i64) -> IrInstr {
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name_id: base.name_id,
+        name_id: base.name_id, src_site: base.src_site,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -4332,7 +4340,7 @@ pub fn ir_branch_true(cond: i64, label_id: i64) -> IrInstr {
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name_id: base.name_id,
+        name_id: base.name_id, src_site: base.src_site,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -4353,7 +4361,7 @@ pub fn ir_branch_false(cond: i64, label_id: i64) -> IrInstr {
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name_id: base.name_id,
+        name_id: base.name_id, src_site: base.src_site,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -4374,7 +4382,7 @@ pub fn ir_load_imm(dst: i64, value: i64) -> IrInstr {
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name_id: base.name_id,
+        name_id: base.name_id, src_site: base.src_site,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -4395,7 +4403,7 @@ pub fn ir_load_float(dst: i64, value: f64) -> IrInstr {
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name_id: base.name_id,
+        name_id: base.name_id, src_site: base.src_site,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -4416,7 +4424,7 @@ pub fn ir_int_to_float(dst: i64, src: i64) -> IrInstr {
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name_id: base.name_id,
+        name_id: base.name_id, src_site: base.src_site,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -4437,7 +4445,7 @@ pub fn ir_float_to_int(dst: i64, src: i64) -> IrInstr {
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name_id: base.name_id,
+        name_id: base.name_id, src_site: base.src_site,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -4458,7 +4466,7 @@ pub fn ir_load_bool(dst: i64, value: bool) -> IrInstr {
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name_id: base.name_id,
+        name_id: base.name_id, src_site: base.src_site,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -4479,7 +4487,7 @@ pub fn ir_load_string(dst: i64, string_idx: i64, n: Name) -> IrInstr with Div, M
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name_id: ir_intern_name(n),
+        name_id: ir_intern_name(n), src_site: 0,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -4500,7 +4508,7 @@ pub fn ir_copy(dst: i64, src: i64) -> IrInstr {
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name_id: base.name_id,
+        name_id: base.name_id, src_site: base.src_site,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -4523,7 +4531,7 @@ pub fn ir_contest(dst: i64, subject: i64, model_count: i64, contest_id: i64) -> 
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name_id: base.name_id,
+        name_id: base.name_id, src_site: base.src_site,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -4546,7 +4554,7 @@ pub fn ir_prove_robust(dst: i64, contest_reg: i64, policy_reg: i64, proof_id: i6
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name_id: base.name_id,
+        name_id: base.name_id, src_site: base.src_site,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -4581,7 +4589,7 @@ pub fn ir_validated(dst: i64, robust_reg: i64, validation_reg: i64, manifest_id:
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name_id: base.name_id,
+        name_id: base.name_id, src_site: base.src_site,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -4602,7 +4610,7 @@ pub fn ir_admit_action(dst: i64, value_reg: i64, robust_reg: i64, decision_polic
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name_id: base.name_id,
+        name_id: base.name_id, src_site: base.src_site,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -4623,7 +4631,7 @@ pub fn ir_defer_action(dst: i64, value_reg: i64, evidence_reg: i64, deferral_pol
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name_id: base.name_id,
+        name_id: base.name_id, src_site: base.src_site,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -4644,7 +4652,7 @@ pub fn ir_plan_acquisition(dst: i64, value_reg: i64, deferred_reg: i64, acquisit
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name_id: base.name_id,
+        name_id: base.name_id, src_site: base.src_site,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -4665,7 +4673,7 @@ pub fn ir_plan_recourse(dst: i64, value_reg: i64, deferred_reg: i64, recourse_po
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name_id: base.name_id,
+        name_id: base.name_id, src_site: base.src_site,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -4686,7 +4694,7 @@ pub fn ir_propose_alternatives(dst: i64, value_reg: i64, evidence_reg: i64, fron
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name_id: base.name_id,
+        name_id: base.name_id, src_site: base.src_site,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -4707,7 +4715,7 @@ pub fn ir_commit_alternative(dst: i64, value_reg: i64, option_reg: i64, protocol
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name_id: base.name_id,
+        name_id: base.name_id, src_site: base.src_site,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -4920,7 +4928,7 @@ pub fn ir_lift_knowledge(dst: i64, knowledge_reg: i64, contest_id: i64) -> IrIns
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name_id: base.name_id,
+        name_id: base.name_id, src_site: base.src_site,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -4957,7 +4965,7 @@ fn ir_measure(dst: i64, value_reg: i64, knowledge_meta_id: i64) -> IrInstr {
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name_id: base.name_id,
+        name_id: base.name_id, src_site: base.src_site,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -4979,7 +4987,7 @@ pub fn ir_debug_guard(metric_reg: i64, threshold: f64, cmp_op: i64, req_idx: i64
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name_id: ir_intern_name(policy_name),
+        name_id: ir_intern_name(policy_name), src_site: 0,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -5001,7 +5009,7 @@ pub fn ir_prof_counter(counter_id: i64) -> IrInstr {
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name_id: base.name_id,
+        name_id: base.name_id, src_site: base.src_site,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -5042,7 +5050,7 @@ pub fn ir_binop(dst: i64, lhs: i64, op: BinaryOp, rhs: i64) -> IrInstr {
         imm_flags: base.imm_flags,
         bin_op: op,
         un_op: base.un_op,
-        name_id: base.name_id,
+        name_id: base.name_id, src_site: base.src_site,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -5074,7 +5082,7 @@ pub fn ir_hyper_mul_o(dst: i64, lhs: i64, rhs: i64) -> IrInstr {
         imm_flags: 0,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name_id: base.name_id,
+        name_id: base.name_id, src_site: base.src_site,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -5095,7 +5103,7 @@ fn ir_hyper_mul_s(dst: i64, lhs: i64, rhs: i64) -> IrInstr {
         imm_flags: 0,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name_id: base.name_id,
+        name_id: base.name_id, src_site: base.src_site,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -5120,7 +5128,7 @@ pub fn ir_xor_convolution_s(dst: i64, lhs: i64, rhs: i64, xor_ctrl_base: i64, br
             | (IR_XOR_CANDIDATE_TWO_ZMM_INDEXED_PERMUTE << 8),
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name_id: base.name_id,
+        name_id: base.name_id, src_site: base.src_site,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -5146,7 +5154,7 @@ pub fn ir_xor_convolution_s_virtual(dst: i64, lhs: i64, rhs: i64) -> IrInstr {
             | (IR_XOR_CANDIDATE_AUTO << 8),
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name_id: base.name_id,
+        name_id: base.name_id, src_site: base.src_site,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -5170,7 +5178,7 @@ pub fn ir_xor_convolution_s_virtual_ptr3(dst_ptr: i64, lhs_ptr: i64, rhs_ptr: i6
         imm_flags: out.imm_flags,
         bin_op: out.bin_op,
         un_op: out.un_op,
-        name_id: out.name_id,
+        name_id: out.name_id, src_site: out.src_site,
         call_args: out.call_args,
         arg_count: out.arg_count,
     }
@@ -5191,7 +5199,7 @@ pub fn ir_unaryop(dst: i64, op: UnaryOp, src: i64) -> IrInstr {
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: op,
-        name_id: base.name_id,
+        name_id: base.name_id, src_site: base.src_site,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -5206,7 +5214,7 @@ pub fn ir_wide_add(dst: i64, src1: i64, src2: i64, limb_count: i64) -> IrInstr {
         op: base.op, dst: dst, src1: src1, src2: src2,
         imm_i64: limb_count, imm_f64: base.imm_f64, label_id: base.label_id,
         fn_id: base.fn_id, field_idx: base.field_idx, imm_flags: base.imm_flags,
-        bin_op: base.bin_op, un_op: base.un_op, name_id: base.name_id,
+        bin_op: base.bin_op, un_op: base.un_op, name_id: base.name_id, src_site: base.src_site,
         call_args: base.call_args, arg_count: base.arg_count,
     }
 }
@@ -5216,7 +5224,7 @@ pub fn ir_wide_sub(dst: i64, src1: i64, src2: i64, limb_count: i64) -> IrInstr {
         op: base.op, dst: dst, src1: src1, src2: src2,
         imm_i64: limb_count, imm_f64: base.imm_f64, label_id: base.label_id,
         fn_id: base.fn_id, field_idx: base.field_idx, imm_flags: base.imm_flags,
-        bin_op: base.bin_op, un_op: base.un_op, name_id: base.name_id,
+        bin_op: base.bin_op, un_op: base.un_op, name_id: base.name_id, src_site: base.src_site,
         call_args: base.call_args, arg_count: base.arg_count,
     }
 }
@@ -5226,7 +5234,7 @@ pub fn ir_wide_mul(dst: i64, src1: i64, src2: i64, limb_count: i64) -> IrInstr {
         op: base.op, dst: dst, src1: src1, src2: src2,
         imm_i64: limb_count, imm_f64: base.imm_f64, label_id: base.label_id,
         fn_id: base.fn_id, field_idx: base.field_idx, imm_flags: base.imm_flags,
-        bin_op: base.bin_op, un_op: base.un_op, name_id: base.name_id,
+        bin_op: base.bin_op, un_op: base.un_op, name_id: base.name_id, src_site: base.src_site,
         call_args: base.call_args, arg_count: base.arg_count,
     }
 }
@@ -5236,7 +5244,7 @@ pub fn ir_wide_div(dst: i64, src1: i64, src2: i64, limb_count: i64) -> IrInstr {
         op: base.op, dst: dst, src1: src1, src2: src2,
         imm_i64: limb_count, imm_f64: base.imm_f64, label_id: base.label_id,
         fn_id: base.fn_id, field_idx: base.field_idx, imm_flags: base.imm_flags,
-        bin_op: base.bin_op, un_op: base.un_op, name_id: base.name_id,
+        bin_op: base.bin_op, un_op: base.un_op, name_id: base.name_id, src_site: base.src_site,
         call_args: base.call_args, arg_count: base.arg_count,
     }
 }
@@ -5246,7 +5254,7 @@ pub fn ir_wide_shr_limb(dst: i64, src: i64, limb_count: i64, shift_limbs: i64) -
         op: base.op, dst: dst, src1: src, src2: shift_limbs,
         imm_i64: limb_count, imm_f64: base.imm_f64, label_id: base.label_id,
         fn_id: base.fn_id, field_idx: base.field_idx, imm_flags: base.imm_flags,
-        bin_op: base.bin_op, un_op: base.un_op, name_id: base.name_id,
+        bin_op: base.bin_op, un_op: base.un_op, name_id: base.name_id, src_site: base.src_site,
         call_args: base.call_args, arg_count: base.arg_count,
     }
 }
@@ -5256,7 +5264,7 @@ pub fn ir_wide_mod(dst: i64, src1: i64, src2: i64, limb_count: i64) -> IrInstr {
         op: base.op, dst: dst, src1: src1, src2: src2,
         imm_i64: limb_count, imm_f64: base.imm_f64, label_id: base.label_id,
         fn_id: base.fn_id, field_idx: base.field_idx, imm_flags: base.imm_flags,
-        bin_op: base.bin_op, un_op: base.un_op, name_id: base.name_id,
+        bin_op: base.bin_op, un_op: base.un_op, name_id: base.name_id, src_site: base.src_site,
         call_args: base.call_args, arg_count: base.arg_count,
     }
 }
@@ -5266,7 +5274,7 @@ pub fn ir_wide_cmp(dst: i64, src1: i64, src2: i64, limb_count: i64, cmp_op: i64)
         op: base.op, dst: dst, src1: src1, src2: src2,
         imm_i64: limb_count, imm_f64: base.imm_f64, label_id: base.label_id,
         fn_id: base.fn_id, field_idx: cmp_op, imm_flags: base.imm_flags,
-        bin_op: base.bin_op, un_op: base.un_op, name_id: base.name_id,
+        bin_op: base.bin_op, un_op: base.un_op, name_id: base.name_id, src_site: base.src_site,
         call_args: base.call_args, arg_count: base.arg_count,
     }
 }
@@ -5276,7 +5284,7 @@ pub fn ir_wide_shr(dst: i64, src: i64, limb_count: i64, shift_bits: i64) -> IrIn
         op: base.op, dst: dst, src1: src, src2: shift_bits,
         imm_i64: limb_count, imm_f64: base.imm_f64, label_id: base.label_id,
         fn_id: base.fn_id, field_idx: base.field_idx, imm_flags: base.imm_flags,
-        bin_op: base.bin_op, un_op: base.un_op, name_id: base.name_id,
+        bin_op: base.bin_op, un_op: base.un_op, name_id: base.name_id, src_site: base.src_site,
         call_args: base.call_args, arg_count: base.arg_count,
     }
 }
@@ -5286,7 +5294,7 @@ pub fn ir_wide_div_full(dst: i64, src1: i64, src2: i64, limb_count: i64) -> IrIn
         op: base.op, dst: dst, src1: src1, src2: src2,
         imm_i64: limb_count, imm_f64: base.imm_f64, label_id: base.label_id,
         fn_id: base.fn_id, field_idx: base.field_idx, imm_flags: base.imm_flags,
-        bin_op: base.bin_op, un_op: base.un_op, name_id: base.name_id,
+        bin_op: base.bin_op, un_op: base.un_op, name_id: base.name_id, src_site: base.src_site,
         call_args: base.call_args, arg_count: base.arg_count,
     }
 }
@@ -5296,7 +5304,7 @@ pub fn ir_wide_mod_full(dst: i64, src1: i64, src2: i64, limb_count: i64) -> IrIn
         op: base.op, dst: dst, src1: src1, src2: src2,
         imm_i64: limb_count, imm_f64: base.imm_f64, label_id: base.label_id,
         fn_id: base.fn_id, field_idx: base.field_idx, imm_flags: base.imm_flags,
-        bin_op: base.bin_op, un_op: base.un_op, name_id: base.name_id,
+        bin_op: base.bin_op, un_op: base.un_op, name_id: base.name_id, src_site: base.src_site,
         call_args: base.call_args, arg_count: base.arg_count,
     }
 }
@@ -5306,7 +5314,7 @@ pub fn ir_wide_reject(dst: i64) -> IrInstr {
         op: base.op, dst: dst, src1: base.src1, src2: base.src2,
         imm_i64: base.imm_i64, imm_f64: base.imm_f64, label_id: base.label_id,
         fn_id: base.fn_id, field_idx: base.field_idx, imm_flags: base.imm_flags,
-        bin_op: base.bin_op, un_op: base.un_op, name_id: base.name_id,
+        bin_op: base.bin_op, un_op: base.un_op, name_id: base.name_id, src_site: base.src_site,
         call_args: base.call_args, arg_count: base.arg_count,
     }
 }
@@ -5329,7 +5337,7 @@ pub fn ir_call(dst: i64, fn_id: i64, fn_name: Name, args: Option<Box<IrRegList>>
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name_id: ir_intern_name(fn_name),
+        name_id: ir_intern_name(fn_name), src_site: 0,
         // Keep the full argument list. src1/src2 cache the first two for compatibility.
         call_args: args,
         arg_count: arg_count,
@@ -5354,7 +5362,7 @@ pub fn ir_call_sret(dst: i64, fn_id: i64, fn_name: Name, dest_reg: i64, first_ar
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name_id: ir_intern_name(fn_name),
+        name_id: ir_intern_name(fn_name), src_site: 0,
         call_args: base.call_args,
         arg_count: arg_count,
     }
@@ -5377,7 +5385,7 @@ pub fn ir_return_sret(src: i64) -> IrInstr {
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name_id: base.name_id,
+        name_id: base.name_id, src_site: base.src_site,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -5411,7 +5419,7 @@ pub fn ir_return(src: i64) -> IrInstr {
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name_id: base.name_id,
+        name_id: base.name_id, src_site: base.src_site,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -5434,7 +5442,7 @@ pub fn ir_wide_add(dst: i64, src1: i64, src2: i64, limb_count: i64) -> IrInstr {
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name_id: base.name_id,
+        name_id: base.name_id, src_site: base.src_site,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -5455,7 +5463,7 @@ pub fn ir_field_get(dst: i64, base_reg: i64, field_idx: i64, field_name: Name) -
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name_id: ir_intern_name(field_name),
+        name_id: ir_intern_name(field_name), src_site: 0,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -5476,7 +5484,7 @@ pub fn ir_field_set(base_reg: i64, field_idx: i64, src: i64, field_name: Name) -
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name_id: ir_intern_name(field_name),
+        name_id: ir_intern_name(field_name), src_site: 0,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -5497,7 +5505,7 @@ pub fn ir_index_get(dst: i64, base_reg: i64, idx_reg: i64) -> IrInstr {
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name_id: base.name_id,
+        name_id: base.name_id, src_site: base.src_site,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -5518,7 +5526,7 @@ pub fn ir_index_set(base_reg: i64, idx_reg: i64, src_reg: i64) -> IrInstr {
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name_id: base.name_id,
+        name_id: base.name_id, src_site: base.src_site,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -5545,7 +5553,7 @@ pub fn ir_array_len(dst: i64, base_reg: i64) -> IrInstr {
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name_id: base.name_id,
+        name_id: base.name_id, src_site: base.src_site,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -5566,7 +5574,7 @@ pub fn ir_alloc(dst: i64, type_id: i64) -> IrInstr {
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name_id: base.name_id,
+        name_id: base.name_id, src_site: base.src_site,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -5609,7 +5617,7 @@ pub fn ir_alloc_array(dst: i64, type_id: i64, elem_count: i64) -> IrInstr {
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name_id: base.name_id,
+        name_id: base.name_id, src_site: base.src_site,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -5630,7 +5638,7 @@ pub fn ir_phi(dst: i64) -> IrInstr {
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name_id: base.name_id,
+        name_id: base.name_id, src_site: base.src_site,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }

@@ -259,6 +259,28 @@ var FO_INLINE_DEPTH: i64 = 0
 // with a diagnostic instead of crashing. Globals match the FO_INLINE_DEPTH
 // precedent: a Lowerer field would not survive the per-call rebuilds.
 var LOWER_EXPR_DEPTH: i64 = 0
+// ADR-031 R1: source site of the arithmetic expression being lowered,
+// (span.file_id << 32) | span.start, 0 = none. Lowerer.emit stamps it on the
+// checked arithmetic it emits (IrInstr.src_site), so the overflow panic can
+// name the source location. Set and restored around each binary/unary node.
+var LOWER_CUR_SITE: i64 = 0
+
+fn lower_site_of_span(sp: Span) -> i64 {
+    if sp.file_id <= 0 || sp.start < 0 || sp.start >= 4294967296 { return 0 }
+    ((sp.file_id as i64) << 32) | sp.start
+}
+
+// The arithmetic the native backends guard (ADR-031 R1/R2).
+fn lower_instr_is_checked_arith(i: &IrInstr) -> bool {
+    if (*i).op == IrOpcode::IrBinOp {
+        let b = (*i).bin_op
+        return b == BinaryOp::OpAdd || b == BinaryOp::OpSub || b == BinaryOp::OpMul
+            || b == BinaryOp::OpUAdd || b == BinaryOp::OpUSub || b == BinaryOp::OpUMul
+            || b == BinaryOp::OpDiv || b == BinaryOp::OpRem || b == BinaryOp::OpUDiv || b == BinaryOp::OpURem
+    }
+    if (*i).op == IrOpcode::IrUnaryOp { return (*i).un_op == UnaryOp::OpNeg }
+    false
+}
 var LOWER_EXPR_BUDGET: i64 = 0 - 1
 // Global, like the FO_XFER_* table: a Lowerer is rebuilt per function, so a
 // Lowerer field would not survive from the helper's lowering to its caller's.
@@ -25812,7 +25834,11 @@ impl Lowerer {
         (self, label)
     }
 
-    fn emit(self, instr: IrInstr) -> Lowerer with Mut, Panic, Div, IO {
+    fn emit(self, instr_in: IrInstr) -> Lowerer with Mut, Panic, Div, IO {
+        var instr = instr_in
+        if instr.src_site == 0 && LOWER_CUR_SITE != 0 && lower_instr_is_checked_arith(&instr) {
+            instr.src_site = LOWER_CUR_SITE
+        }
         if self.current_fn < 0 || self.current_fn >= self.module.fn_count {
             if self.probe_mode {
                 print("lower_probe: emit_invalid current_fn=")
@@ -38493,6 +38519,14 @@ impl Lowerer {
     }
 
     fn lower_binary_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        let saved_site = LOWER_CUR_SITE
+        LOWER_CUR_SITE = lower_site_of_span((*e).span)
+        let r = self.lower_binary_expr_ref_inner(e)
+        LOWER_CUR_SITE = saved_site
+        r
+    }
+
+    fn lower_binary_expr_ref_inner(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         if e.bin_op == BinaryOp::OpAnd || e.bin_op == BinaryOp::OpOr {
             return self.lower_short_circuit_ref(e)
         }
@@ -40268,6 +40302,14 @@ impl Lowerer {
     }
 
     fn lower_unary_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        let saved_site = LOWER_CUR_SITE
+        LOWER_CUR_SITE = lower_site_of_span((*e).span)
+        let r = self.lower_unary_expr_ref_inner(e)
+        LOWER_CUR_SITE = saved_site
+        r
+    }
+
+    fn lower_unary_expr_ref_inner(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         // SIO-207: `-9223372036854775808` is the spelling of i64 MIN. The
         // magnitude token carries the 2^63 bit pattern in int_val, so emitting
         // a runtime negation would negate MIN itself and trip the overflow

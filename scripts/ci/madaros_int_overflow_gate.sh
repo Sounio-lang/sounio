@@ -137,11 +137,22 @@ expect_trap() {
     tail -10 "$OUT/$name.log" || true
     exit 1
   fi
-  # ADR-031 R1: the panic names the type and the operation.
-  if [[ -n "$msg" ]] && ! grep -qxF -- "sounio: integer overflow ($msg)" "$OUT/$name.log"; then
-    echo "FAIL: $what: missing panic message 'sounio: integer overflow ($msg)'"
-    tail -10 "$OUT/$name.log" || true
-    exit 1
+  # ADR-031 R1: the panic names the type and the operation and, for the
+  # 64-bit guards, where it is: the overflowing operation is on the probe's
+  # last body line, two above the closing brace.
+  if [[ -n "$msg" ]]; then
+    local opline=$(( $(wc -l < "$OUT/$name.sio") - 2 ))
+    local esc; esc=$(printf '%s' "$msg" | sed 's/[][\\.*^$+?(){}|/]/\\&/g')
+    local want="^sounio: integer overflow \\($esc\\)"
+    case "$msg" in
+      i64*|u64*) want="$want at .*$name\\.sio:$opline:[0-9]+\$" ;;
+      *) want="$want( at .*$name\\.sio:$opline:[0-9]+)?\$" ;;
+    esac
+    if ! grep -qE -- "$want" "$OUT/$name.log"; then
+      echo "FAIL: $what: panic line does not match /$want/"
+      tail -10 "$OUT/$name.log" || true
+      exit 1
+    fi
   fi
 }
 probe() {
