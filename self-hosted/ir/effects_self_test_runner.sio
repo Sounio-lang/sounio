@@ -1,0 +1,191 @@
+// self-hosted::ir::effects_self_test_runner — self-tests for ir::effects.
+//
+// Run:  ulimit -s unlimited; ./bin/madaros-linux-x86_64 run self-hosted/ir/effects_self_test_runner.sio
+//
+// T01  table: the opcodes every pass touches are classified (not UNKNOWN),
+//      and the two calls that optimize.sio's DCE list forgets are CALL.
+// T02  reads_reg_at sees the IrIndexSet value register parked in imm_i64
+//      (#1682 class) -- the hole ocp_sink_loads' src1/src2 guard has.
+// T03  reads_reg_at sees a call argument that lives only in the flat pool
+//      (IrCallExtern caches nothing in src1/src2).
+// T04  reads_reg_at sees the FMA accumulator (dst is an input).
+// T05  commute: load/store pairs refuse, pure/store pairs allow, calls refuse.
+// T06  swap_ok: [r5 = imm 7 ; a[i] = r5] must NOT be exchanged.
+// T07  swap_ok: [r5 = imm 7 ; r6 = r1 + r2] MAY be exchanged (no dependence).
+// T08  swap_ok: [r5 = field r1.0 ; r1.1 = r2] must NOT be exchanged (RAW-mem).
+// T09  witness: ocp_sink_loads as shipped DOES exchange the T06 pair.
+//      This test documents the latent defect; it is expected to print
+//      "defect reproduced" until ocp_sink_loads is switched to ir_effect_swap_ok.
+//      (Latent, not live: the -O path runs opt_cleanup_function_mfi, which
+//      does not call ocp_sink_loads. Only the by-value opt_cleanup_function
+//      used by probes reaches it.)
+
+use ir::ir::*
+use ir::effects::*
+use ir::opt_cleanup::*
+
+fn eff_make_func(instrs: [IrInstr; 16], count: i64) -> IrFunction with Mut, Panic, Div {
+    var f = ir_empty_function()
+    var i: i64 = 0
+    while i < count {
+        ir_arena_store(ir_region_slot_w(f.region, (i)), instrs[i as usize])
+        i = i + 1
+    }
+    f.instr_count = count
+    f.reg_count = 32
+    f
+}
+
+fn eff_empty_instrs() -> [IrInstr; 16] {
+    [ir_nop(); 16]
+}
+
+fn eff_report(name: string, ok: bool) -> i64 with IO {
+    if ok {
+        print("[effects] PASS ")
+    } else {
+        print("[effects] FAIL ")
+    }
+    print(name)
+    print("\n")
+    if ok { 0 } else { 1 }
+}
+
+fn t01_table() -> bool {
+    var ok = true
+    if ir_effects_of(IrOpcode::IrLoadImm) != IR_EFF_PURE { ok = false }
+    if ir_effects_of(IrOpcode::IrFieldGet) != IR_EFF_READ_MEM { ok = false }
+    if ir_effects_of(IrOpcode::IrIndexSet) != IR_EFF_WRITE_MEM { ok = false }
+    if ir_effects_of(IrOpcode::IrStorePtr) != IR_EFF_WRITE_MEM { ok = false }
+    if ir_effects_of(IrOpcode::IrJump) != IR_EFF_CONTROL { ok = false }
+    if ir_effects_of(IrOpcode::IrCallExtern) != IR_EFF_CALL { ok = false }
+    if ir_effects_of(IrOpcode::IrCallIndirect) != IR_EFF_CALL { ok = false }
+    if ir_effects_of(IrOpcode::IrVecFmaF64) != IR_EFF_READS_DST { ok = false }
+    // an opcode deliberately left unclassified is a barrier and not removable
+    if ir_effects_of(IrOpcode::IrHyperMulO) != IR_EFF_UNKNOWN { ok = false }
+    if !ir_effect_is_barrier(IrOpcode::IrHyperMulO) { ok = false }
+    if ir_effect_removable_if_dead(IrOpcode::IrHyperMulO) { ok = false }
+    // removability agrees with the intent of ocp_has_dst \ ocp_has_side_effect
+    if !ir_effect_removable_if_dead(IrOpcode::IrLoadImm) { ok = false }
+    if !ir_effect_removable_if_dead(IrOpcode::IrIndexGet) { ok = false }
+    if ir_effect_removable_if_dead(IrOpcode::IrIndexSet) { ok = false }
+    if ir_effect_removable_if_dead(IrOpcode::IrCallExtern) { ok = false }
+    if ir_effect_removable_if_dead(IrOpcode::IrProfCounter) { ok = false }
+    ok
+}
+
+fn t02_index_set_imm() -> bool with Mut, Panic, Div {
+    var ins = eff_empty_instrs()
+    ins[0] = ir_index_set(1, 2, 5)          // a[r2] = r5, base r1
+    let f = eff_make_func(ins, 1)
+    let at = ir_region_slot_r(f.region, (0))
+    ir_effect_reads_reg_at(at, 5) && ir_effect_reads_reg_at(at, 1) &&
+        ir_effect_reads_reg_at(at, 2) && !ir_effect_reads_reg_at(at, 9)
+}
+
+fn t03_extern_call_pool() -> bool with Mut, Panic, Div {
+    // The pool is written directly: storing a call with a Box'd IrRegList from a
+    // standalone program segfaults in the prebuilt Madaros v0.80.0
+    // (see effects_t03_probe.sio). What this test checks is the READ side --
+    // that the reader consults the pool at all -- so the pool is set by hand,
+    // exactly as ir_arena_put_args would leave it.
+    var ins = eff_empty_instrs()
+    ins[0] = ir_call_extern(3, ir_empty_name(), ir_empty_reg_list(), 0)
+    let f = eff_make_func(ins, 1)
+    let at = ir_region_slot_r(f.region, (0))
+    let base = IR_ARG_POOL_LEN
+    IR_ARG_POOL[base as usize] = 7
+    IR_ARG_POOL_LEN = base + 1
+    IR_A_ARG_BASE[at as usize] = base
+    IR_A_ARG_COUNT[at as usize] = 1
+    // src1/src2 are IR_INVALID_REG for an extern call; only the pool knows r7
+    let loaded = ir_arena_load(at)
+    loaded.src1 < 0 && ir_effect_reads_reg_at(at, 7) && !ir_effect_reads_reg_at(at, 3)
+}
+
+fn t04_fma_reads_dst() -> bool with Mut, Panic, Div {
+    var ins = eff_empty_instrs()
+    var fma = ir_instr_new(IrOpcode::IrVecFmaF64)
+    fma.dst = 3
+    fma.src1 = 1
+    fma.src2 = 2
+    ins[0] = fma
+    let f = eff_make_func(ins, 1)
+    let at = ir_region_slot_r(f.region, (0))
+    ir_effect_reads_reg_at(at, 3) && ir_effect_reads_reg_at(at, 1)
+}
+
+fn t05_commute() -> bool {
+    var ok = true
+    if ir_effect_commute(IrOpcode::IrFieldGet, IrOpcode::IrFieldSet) { ok = false }
+    if ir_effect_commute(IrOpcode::IrFieldSet, IrOpcode::IrFieldGet) { ok = false }
+    if ir_effect_commute(IrOpcode::IrIndexSet, IrOpcode::IrStoreGlobal) { ok = false }
+    if !ir_effect_commute(IrOpcode::IrFieldGet, IrOpcode::IrLoadGlobal) { ok = false }  // two reads
+    if !ir_effect_commute(IrOpcode::IrLoadImm, IrOpcode::IrFieldSet) { ok = false }
+    if !ir_effect_commute(IrOpcode::IrBinOp, IrOpcode::IrIndexGet) { ok = false }
+    if ir_effect_commute(IrOpcode::IrLoadImm, IrOpcode::IrCallExtern) { ok = false }
+    if ir_effect_commute(IrOpcode::IrLoadImm, IrOpcode::IrLabel) { ok = false }
+    if ir_effect_commute(IrOpcode::IrLoadImm, IrOpcode::IrHyperMulO) { ok = false }  // unknown = barrier
+    ok
+}
+
+fn t06_swap_refused_imm_dep() -> bool with Mut, Panic, Div {
+    var ins = eff_empty_instrs()
+    ins[0] = ir_load_imm(5, 7)
+    ins[1] = ir_index_set(1, 2, 5)
+    let f = eff_make_func(ins, 2)
+    !ir_effect_swap_ok(ir_region_slot_r(f.region, (0)), ir_region_slot_r(f.region, (1)))
+}
+
+fn t07_swap_allowed_independent() -> bool with Mut, Panic, Div {
+    var ins = eff_empty_instrs()
+    ins[0] = ir_load_imm(5, 7)
+    ins[1] = ir_binop(6, 1, BinaryOp::OpAdd, 2)
+    let f = eff_make_func(ins, 2)
+    ir_effect_swap_ok(ir_region_slot_r(f.region, (0)), ir_region_slot_r(f.region, (1)))
+}
+
+fn t08_swap_refused_mem() -> bool with Mut, Panic, Div {
+    var ins = eff_empty_instrs()
+    ins[0] = ir_field_get(5, 1, 0, ir_empty_name())
+    ins[1] = ir_field_set(1, 1, 2, ir_empty_name())
+    let f = eff_make_func(ins, 2)
+    !ir_effect_swap_ok(ir_region_slot_r(f.region, (0)), ir_region_slot_r(f.region, (1)))
+}
+
+// Returns true when the shipped pass reproduces the defect (exchanges the pair).
+fn t09_witness_ocp_sink_loads() -> bool with Mut, Panic, Div {
+    var ins = eff_empty_instrs()
+    ins[0] = ir_load_imm(5, 7)
+    ins[1] = ir_index_set(1, 2, 5)
+    let f = eff_make_func(ins, 2)
+    let out = ocp_sink_loads(f)
+    let first = ir_arena_load(ir_region_slot_r(out.region, (0)))
+    first.op == IrOpcode::IrIndexSet
+}
+
+fn main() -> i64 with IO, Mut, Panic, Div {
+    var failures: i64 = 0
+    failures = failures + eff_report("T01 table", t01_table())
+    failures = failures + eff_report("T02 index_set value in imm_i64", t02_index_set_imm())
+    failures = failures + eff_report("T03 extern call arg pool", t03_extern_call_pool())
+    failures = failures + eff_report("T04 fma reads dst", t04_fma_reads_dst())
+    failures = failures + eff_report("T05 commute", t05_commute())
+    failures = failures + eff_report("T06 swap refused (imm_i64 RAW)", t06_swap_refused_imm_dep())
+    failures = failures + eff_report("T07 swap allowed (independent)", t07_swap_allowed_independent())
+    failures = failures + eff_report("T08 swap refused (mem RAW)", t08_swap_refused_mem())
+    if t09_witness_ocp_sink_loads() {
+        print("[effects] T09 witness: ocp_sink_loads defect reproduced (loadimm sunk past index_set that reads it)\n")
+    } else {
+        print("[effects] T09 witness: ocp_sink_loads did not exchange the pair (defect not reproduced)\n")
+    }
+    if failures == 0 {
+        print("[effects] ALL PASS\n")
+        0
+    } else {
+        print("[effects] FAIL failures=")
+        print_int(failures)
+        print("\n")
+        1
+    }
+}
