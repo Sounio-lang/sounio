@@ -12446,6 +12446,49 @@ fn checker_check_expr_list_no_type_no_linear_consume_inplace(c: *mut Checker, op
     }
 }
 
+// #3549: implicit math builtins have no FnSig, so their argument walk must
+// enforce dimensions itself. Keep this in leaf helpers on the in-place spine:
+// growing the by-value Checker call checker breaks the gen2 lowering budget.
+fn checker_name_requires_dimensionless_arg(n: Name) -> bool with Mut, Panic, Div {
+    name_eq_lit(n, "exp") || name_eq_lit(n, "log")
+        || name_eq_lit(n, "sin") || name_eq_lit(n, "cos")
+        || name_eq_lit(n, "tan") || name_eq_lit(n, "atan")
+        || name_eq_lit(n, "tanh") || name_eq_lit(n, "asin")
+        || name_eq_lit(n, "acos")
+}
+
+fn checker_check_transcendental_arg_unit_inplace(c: *mut Checker, span: Span, arg_ty: TypeEntry) with Mut, Panic, Div, Alloc, IO {
+    let scalar_ty = if arg_ty.kind == TypeKind::TyKnowledge { knowledge_inner(arg_ty) } else { arg_ty }
+    if scalar_ty.unit_id >= 0 {
+        // Inspect the seven exponents, not the brand or rational scale:
+        // a dimensionless brand and m/km are legitimate scalar arguments.
+        if !unit_dim_is_dimensionless(checker_unit_dim_at(c, scalar_ty.unit_id)) {
+            checker_report_error_at_inplace(c, span, 285, 0, 0, 0)
+        }
+    }
+}
+
+fn checker_check_implicit_call_args_inplace(c: *mut Checker, e: Expr) with Mut, Panic, Div, Alloc, IO {
+    let needs_scalar = match e.left {
+        Some(callee) => (*callee).kind == ExprKind::ExprIdent && checker_name_requires_dimensionless_arg((*callee).name),
+        None => false
+    }
+    if !needs_scalar {
+        checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
+        return
+    }
+    (*c).suppress_linear_consume_depth = (*c).suppress_linear_consume_depth + 1
+    var args = expr_list_handle(e.args)
+    while args.ptr != 0 as *mut ExprList {
+        let arg_ty = checker_check_expr_inplace(c, (*args.ptr).head)
+        checker_check_transcendental_arg_unit_inplace(c, (*args.ptr).head.span, arg_ty)
+        args = expr_list_handle_next(args)
+    }
+    if (*c).suppress_linear_consume_depth > 0 {
+        (*c).suppress_linear_consume_depth = (*c).suppress_linear_consume_depth - 1
+    }
+}
+
 fn checker_check_one_call_arg_inplace(c: *mut Checker, arg_expr: Expr, param_info: FnParamInfo, call_span: Span) with Mut, Panic, Div, Alloc, IO {
     let implicit_borrow =
         arg_expr.kind == ExprKind::ExprIdent &&
@@ -13534,7 +13577,7 @@ fn checker_check_call_shadow_forms_inplace(c: *mut Checker, e: Expr, direct_sig_
     match e.left {
         Some(shadow_callee) => {
             if (*shadow_callee).kind == ExprKind::ExprIdent && checker_invisible_native_builtin_sig(c, (*shadow_callee).name) {
-                checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
+                checker_check_implicit_call_args_inplace(c, e)
                 return (true, checker_shadowed_builtin_result((*shadow_callee).name))
             }
         }
@@ -13739,7 +13782,7 @@ fn checker_check_call_indirect_inplace(c: *mut Checker, e: Expr, callee_is_local
             ns_result
         }
     } else if is_error_or_unknown(callee_ty) {
-        checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
+        checker_check_implicit_call_args_inplace(c, e)
         checker_release_call_arg_borrows_inplace(c, e.args, None)
         // The runtime `read_file` is bound import-unknown, so its result reached
         // method calls with an unknown type (`read_file(p).as_bytes()`, `.len()`
@@ -21149,6 +21192,8 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 41 { print("ontology subsumption could not be verified") }
     else if code == 42 { print("value does not satisfy the refinement predicate") }
     else if code == 43 { print("incompatible unit dimensions in conversion") }
+    // Units: transcendental builtin arguments (#3549).
+    else if code == 285 { print("transcendental function argument must be dimensionless") }
     // Phase A additions (44-51)
     else if code == 44 { print("`break` can only be used inside a loop") }
     else if code == 45 { print("`continue` can only be used inside a loop") }

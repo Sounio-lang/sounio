@@ -481,6 +481,7 @@ page is not a fresh execution receipt.
 | E282 | lexer (Madaros, lean_single) | error | identifier too long: an identifier holds at most 256 bytes and is refused with its location instead of being split | ADR-015 row 11 (first slice). `id_long300` is refused, `id_long256` is accepted. The 128-byte clamps further down (`parser_name_at`, the export pool) are unchanged. |
 | E283 | lexer (Madaros, lean_single) | error | ambiguous operator spelling: `a+-2` (plus a negative, or the uncertainty operator) and `a&!b` (and-not, or a mutable borrow) are refused with a hint to add a space | ADR-015 row 9. `x<-1` is no longer ambiguous: it reads as `x < -1`. `1.0 +- 0.1` and `&!T` after a space, `(`, `,` or `:` are unchanged. |
 | E284 | lexer (Madaros, lean_single) | error | digit separator `_` must sit between two digits: `1__0` and `10_` are refused; `1_000` is a number and `500_mg` keeps its unit suffix | ADR-015 row 8. `lean_single` now accepts `_` between digits like Madaros (`1_000_000`, `0xFF_FF`, `1_000.000_5`). |
+| E285 | type-checker/units | error | transcendental function argument must be dimensionless | #3549. Normalize by a compatible reference quantity before calling the builtin; `Knowledge<T>` checks the inner type. `sqrt` is unchanged. |
 | E290 | type-checker/effects | error | unknown effect in handle/perform (SIO-417) | — |
 | E291 | type-checker/effects | error | unknown operation for effect (SIO-417) | — |
 | E292 | type-checker/effects | error | perform of effect not declared or handled here (SIO-417) | — |
