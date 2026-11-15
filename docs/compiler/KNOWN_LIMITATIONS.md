@@ -36,7 +36,7 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
 | Rung | Scope | Engine |
 |---|---|---|
 | KL-9 | seed: #1494 imported-module typecheck errors non-fatal | lean_single |
-| KL-11 | #1792 first-order / variance across user calls (pow FO closed) | madaros |
+| KL-11 | #1792 first-order / variance across user calls (pow FO closed; f64-returning helpers with any body closed by tangent clones, 2026-11-15) | madaros |
 | KL-14 | FFI: 14a–14d3 CLOSED | madaros |
 | KL-15 | `f256` surface (15a softfloat add/sub partial), `Knowledge<f128>`/GUM | madaros |
 | KL-16 | Hessian Tier-4 (16a–16f CLOSED; residual H-multi/non-H00 if/a64 atan2) | lean_single |
@@ -73,6 +73,22 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
 
 ### KL-11 — #1792: first-order channels do not cross user calls
 
+- **Closed for `f64`-returning helpers with any body (tangent clones,
+  2026-11-15).** A function with an `f64` return and `f64`, `Knowledge`,
+  integer or bool parameters (at most 15, no receiver, no epistemic query in
+  its body) is called from an `Epistemic` function through a clone,
+  `<name>__fotan`. The clone writes the run-time Jacobian row `∂f/∂p_k`, plus
+  the variance of measurements made inside the call, to a hidden caller-owned
+  out-array. The caller applies the chain rule on its own channels
+  (`TgNode`, `tg_lower_call`, `tg_call_variance` in `self-hosted/ir/lower.sio`).
+  `var` reassignment, loops, early `return`, recursion, nested helper calls,
+  measurements inside the call and imported callees all carry the channel,
+  and correlation with the caller's other uses of the same input is kept.
+  Pin: `tests/run-pass/gum_fo_tangent_clone_calls.sio`, which checks nine
+  values against `tests/oracles/gum_fo_tangent_clone_calls.cpp` at 1e-12.
+  What this leaves to the re-lowering below: struct parameters and struct
+  returns, methods, helpers whose body asks `variance_of` and friends, and
+  any function with second order on (a clone carries no Hessian row).
 - **Narrowed (#1706, 2026-10-13).** A call to a *pure helper* (an `f64`
   return, or a struct return when a field of the call is read; `f64`, integer
   or bool parameters, struct parameters by value or by reference whose
