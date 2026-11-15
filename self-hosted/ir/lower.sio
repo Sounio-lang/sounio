@@ -271,6 +271,28 @@ var FO_INLINE_DEPTH: i64 = 0
 // with a diagnostic instead of crashing. Globals match the FO_INLINE_DEPTH
 // precedent: a Lowerer field would not survive the per-call rebuilds.
 var LOWER_EXPR_DEPTH: i64 = 0
+// ADR-031 R1: source site of the arithmetic expression being lowered,
+// (span.file_id << 32) | span.start, 0 = none. Lowerer.emit stamps it on the
+// checked arithmetic it emits (IrInstr.src_site), so the overflow panic can
+// name the source location. Set and restored around each binary/unary node.
+var LOWER_CUR_SITE: i64 = 0
+
+fn lower_site_of_span(sp: Span) -> i64 {
+    if sp.file_id <= 0 || sp.start < 0 || sp.start >= 4294967296 { return 0 }
+    ((sp.file_id as i64) << 32) | sp.start
+}
+
+// The arithmetic the native backends guard (ADR-031 R1/R2).
+fn lower_instr_is_checked_arith(i: &IrInstr) -> bool {
+    if (*i).op == IrOpcode::IrBinOp {
+        let b = (*i).bin_op
+        return b == BinaryOp::OpAdd || b == BinaryOp::OpSub || b == BinaryOp::OpMul
+            || b == BinaryOp::OpUAdd || b == BinaryOp::OpUSub || b == BinaryOp::OpUMul
+            || b == BinaryOp::OpDiv || b == BinaryOp::OpRem || b == BinaryOp::OpUDiv || b == BinaryOp::OpURem
+    }
+    if (*i).op == IrOpcode::IrUnaryOp { return (*i).un_op == UnaryOp::OpNeg }
+    false
+}
 var LOWER_EXPR_BUDGET: i64 = 0 - 1
 // Global, like the FO_XFER_* table: a Lowerer is rebuilt per function, so a
 // Lowerer field would not survive from the helper's lowering to its caller's.
@@ -2260,6 +2282,10 @@ pub fn lower_hard_error_report() with IO, Mut, Panic, Div {
         ir_print_flat_name(&IR_LOWER_HARD_ERROR_FN_BUF, IR_LOWER_HARD_ERROR_FN_LEN)
         print("` passes a capturing closure where its captured values cannot be\n")
         print("         supplied; the capture would read as 0, so it is refused (#1542).\n")
+    } else if IR_LOWER_HARD_ERROR_REASON == 10 {
+        print("  cause: GUM_UNTRACKED_CONTAINER in function `")
+        ir_print_flat_name(&IR_LOWER_HARD_ERROR_FN_BUF, IR_LOWER_HARD_ERROR_FN_LEN)
+        print("`: container operation cannot preserve Knowledge uncertainty (#3546)\n")
     } else if IR_LOWER_HARD_ERROR_REASON == 6 {
         print("  cause: function `")
         ir_print_flat_name(&IR_LOWER_HARD_ERROR_FN_BUF, IR_LOWER_HARD_ERROR_FN_LEN)
@@ -2515,6 +2541,24 @@ var FO_FIELD_SENS: [i64; 2048] = [-1; 2048]
 var FO_FIELD_HESS: [i64; 33792] = [-1; 33792]
 var FO_FIELD_HESS_SET: [i64; 64] = [0; 64]
 
+// #3546: straight-line f64 array element sensitivities, keyed by the actual
+// local array register and literal index. Snapshot registers at stores: a
+// mutable scalar's sensitivity slots must not alias an earlier array value.
+var FO_ARRAY_COUNT: i64 = 0
+var FO_ARRAY_BASE: [i64; 64] = [-1; 64]
+var FO_ARRAY_INDEX: [i64; 64] = [-1; 64]
+var FO_ARRAY_SENS: [i64; 2048] = [-1; 2048]
+var FO_CONTAINER_KNOWLEDGE_SEEN: bool = false
+
+fn fo_array_base_tracked(base: i64) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < FO_ARRAY_COUNT {
+        if FO_ARRAY_BASE[i as usize] == base { return true }
+        i = i + 1
+    }
+    false
+}
+
 // A `let r = &p` (or `let s = r`) names the same struct local for field
 // variance. Without this, variance_of(r.cl0) keys the reference's own
 // register and reads 0 while variance_of(p.cl0) is live.
@@ -2555,6 +2599,8 @@ fn fo_ref_alias_base(name: Name) -> i64 with Mut, Panic, Div {
 
 fn fo_field_sens_reset() with Mut {
     FO_FIELD_SENS_COUNT = 0
+    FO_ARRAY_COUNT = 0
+    FO_CONTAINER_KNOWLEDGE_SEEN = false
     fo_ref_alias_reset()
     FO_CL_HEAD = None
     FO_LETCALL_HEAD = None
@@ -6331,6 +6377,16 @@ fn lowerer_mark_hard_error(lo: &! Lowerer) with Mut {
     }
 }
 
+fn lowerer_fo_container_error_mut(lo: &! Lowerer) with Mut, Panic, Div, IO {
+    print("error[GUM_UNTRACKED_CONTAINER]: cannot preserve Knowledge uncertainty through this container operation\n")
+    print("  help: use a straight-line local f64 array with literal indices, or keep the measured scalar outside the container\n")
+    if IR_LOWER_HARD_ERROR_REASON == 0 {
+        IR_LOWER_HARD_ERROR_REASON = 10
+        ir_copy_name_to_flat(&(*(*lo).current_func).name, &! IR_LOWER_HARD_ERROR_FN_BUF, &! IR_LOWER_HARD_ERROR_FN_LEN)
+    }
+    lowerer_mark_hard_error(lo)
+}
+
 fn lowerer_effect_list_has_name_ref(effects: &Option<Box<EffectList>>, target: string) -> bool with Mut, Panic, Div {
     var current = effects
     while true {
@@ -7808,6 +7864,18 @@ fn lower_type_expr_array_elem_name(te: &TypeExpr) -> Name with Mut, Panic, Div {
             if (*elem).kind == TypeExprKind::TypeNamed {
                 return ir_path_first_name((*elem).path)
             }
+            // `[Knowledge[T]; N]`: the element is the builtin Knowledge layout
+            // (ir_register_knowledge_layout). Left unnamed, `s.kn[i].value`
+            // had no receiver type and resolved `.value` by field name across
+            // every registered struct (field_idx_from_name_simple), where any
+            // non-Knowledge struct with a field called `value` outranks
+            // Knowledge: with math::pure's CheckedLog { status, value } in the
+            // program, `.value` read slot 1 as an integer and printed 0.0
+            // while `.variance` and `.confidence` stayed correct (measured
+            // 2026-11-14 on darwin_pbpk::epistemic_pbpk28's EpPrior28.kn).
+            if (*elem).kind == TypeExprKind::TypeKnowledge {
+                return make_name("Knowledge")
+            }
             ir_empty_name()
         }
         _ => ir_empty_name()
@@ -9275,6 +9343,10 @@ fn lowerer_fresh_label_mut(lo: &! Lowerer) -> i64 with Mut, Panic, Div {
 }
 
 fn lowerer_emit_mut(lo: &! Lowerer, instr: IrInstr) with Mut, Panic, Div, IO {
+    if (instr.op == IrOpcode::IrReturn || instr.op == IrOpcode::IrCopy) && fo_array_base_tracked(instr.src1) {
+        lowerer_fo_container_error_mut(lo)
+        return
+    }
     if (*lo).current_fn < 0 || (*lo).current_fn >= (*(*lo).module).fn_count {
         if (*lo).probe_mode {
             print("lower_probe: emit_invalid current_fn=")
@@ -9519,7 +9591,7 @@ fn lowerer_lower_fn_params_mut(
                     // (`fn id(x: i32) -> i32 { x }` returned 9999999999).
                     if !param_is_ref {
                         let nk = lower_name_narrow32_kind(ir_path_first_name((*list).head.ty.path))
-                        let ncheck = lower_narrow32_check_reg((*lo), param_value_reg, nk)
+                        let ncheck = lower_narrow32_check_reg((*lo), param_value_reg, nk, 4)
                         (*lo) = ncheck.0
                     }
                 }
@@ -11947,7 +12019,11 @@ fn lower_narrow32_wrap_reg(lo: Lowerer, reg: i64, kind: i64) -> (Lowerer, i64) w
 // 64-bit value leaks through a 32-bit-typed operation either way. Used only
 // at arithmetic sites (Add/Sub/Mul, unary negation); `as i32`/`as u32` casts
 // are explicit conversions and are not routed here.
-fn lower_narrow32_check_reg(lo: Lowerer, reg: i64, kind: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+// The failing branch calls the `__int_overflow` builtin with a code naming
+// the type and the operation (narrow kind * 8 + op: 0 +, 1 -, 2 *, 3 unary -,
+// 4 an i64 argument outside 32 bits reaching an i32/u32 param),
+// so the panic message says what overflowed; see emit_builtin_int_overflow_into.
+fn lower_narrow32_check_reg(lo: Lowerer, reg: i64, kind: i64, opk: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
     if kind == 0 { return (lo, reg) }
     let wp = lower_narrow32_wrap_reg(lo, reg, kind)
     var lo2 = wp.0
@@ -11958,10 +12034,14 @@ fn lower_narrow32_check_reg(lo: Lowerer, reg: i64, kind: i64) -> (Lowerer, i64) 
     let okp = lo2.fresh_label()
     lo2 = okp.0
     lo2 = lo2.emit(ir_branch_true(eqp.1, okp.1))
-    let panic_fn = lowerer_find_or_add_fn_id_mut(&! lo2, make_name("panic"))
+    let ovf_fn = lowerer_find_or_add_fn_id_mut(&! lo2, make_name("__int_overflow"))
+    let codep = lo2.fresh_reg()
+    lo2 = codep.0
+    lo2 = lo2.emit(ir_load_imm(codep.1, kind * 8 + opk))
+    let ovf_args: Option<Box<IrRegList>> = Some(Box::new(ir_reg_list_single(codep.1)))
     let pdst = lo2.fresh_reg()
     lo2 = pdst.0
-    lo2 = lo2.emit(ir_call(pdst.1, panic_fn, make_name("panic"), None, 0))
+    lo2 = lo2.emit(ir_call(pdst.1, ovf_fn, make_name("__int_overflow"), ovf_args, 1))
     lo2 = lo2.emit(ir_label(okp.1))
     (lo2, reg)
 }
@@ -19605,6 +19685,9 @@ impl Lowerer {
     }
 
     fn emit_fixed_array_value_copy(self, src_reg: i64, elem_count: i64, elem_is_float: bool) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        if self.fo_array_has_base(src_reg) {
+            return (self.fo_container_refuse(), src_reg)
+        }
         let alloc_pair = self.emit_array_alloc_like_source(src_reg, elem_count, elem_is_float)
         var lo = alloc_pair.0
         let dst_reg = alloc_pair.1
@@ -20748,7 +20831,7 @@ impl Lowerer {
                 } else {
                     let zero_fill = lo.expr_is_zero_fill_value(*value_expr)
                     let pair_value = lo.lower_expr_ref(&(*value_expr))
-                    lo = pair_value.0
+                    lo = pair_value.0.fo_refuse_measured_initializer(&(*value_expr))
                     let value_reg = pair_value.1
                     if !zero_fill {
                         lo = lo.lower_array_repeat_fill(dst, value_reg, repeat_count)
@@ -23670,6 +23753,188 @@ impl Lowerer {
             ci = ci + 1
         }
         (lo, acc)
+    }
+
+    // No new checker state or by-value Lowerer fields. Unsupported provenance
+    // is refused at its first lossy operation, including before a later query.
+    fn fo_container_refuse(self) -> Lowerer with Mut, Panic, Div, IO {
+        var lo = self
+        lowerer_fo_container_error_mut(&! lo)
+        lo
+    }
+
+    fn fo_array_has_base(self, base: i64) -> bool with Mut, Panic, Div {
+        fo_array_base_tracked(base)
+    }
+
+    fn fo_array_literal_index(self, e: &Expr) -> i64 with Mut, Panic, Div {
+        match (*e).right {
+            Some(idx) => {
+                if (*idx).kind == ExprKind::ExprIntLit { return (*idx).int_val }
+            }
+            None => {}
+        }
+        -1
+    }
+
+    fn fo_array_local_base(self, e: &Expr) -> i64 with Mut, Panic, Div, Alloc {
+        match (*e).left {
+            Some(base) => {
+                if (*base).kind == ExprKind::ExprIdent
+                    && self.lookup_local_fixed_array_len((*base).name) >= 0
+                    && !self.lookup_local_is_ref((*base).name)
+                    && self.lookup_local_array_elem_float((*base).name) {
+                    return self.lookup_local((*base).name)
+                }
+            }
+            None => {}
+        }
+        -1
+    }
+
+    // Pure scalar locals can have synthetic FO channels with literal-zero
+    // variance. They must not make a deterministic array look measured.
+    fn fo_container_zero_reg(self, reg: i64) -> bool with Mut, Panic, Div {
+        var defs: i64 = 0
+        var zero = false
+        var i: i64 = 0
+        while i < (*self.current_func).instr_count {
+            let at = ir_region_slot_r((*self.current_func).region, i) as usize
+            let op = IR_A_OP[at] as IrOpcode
+            if IR_A_DST[at] == reg && op != IrOpcode::IrNop {
+                defs = defs + 1
+                zero = op == IrOpcode::IrLoadImm && IR_A_IMM_I64[at] == 0
+            }
+            i = i + 1
+        }
+        defs == 1 && zero
+    }
+
+    fn fo_container_has_sens(self) -> bool with Mut, Panic, Div {
+        var k: i64 = 0
+        while k < self.fo_nchan {
+            if self.fo_expr_sens[k as usize] >= 0
+                && !self.fo_container_zero_reg(self.fo_sigma2[k as usize]) { return true }
+            k = k + 1
+        }
+        false
+    }
+
+    // A .value field and a variance shadow also occur on deterministic status
+    // structs (NumericValue, SVD/GLM work records). Only the actual Knowledge
+    // receiver is evidence for enabling the measured-container refusal.
+    fn fo_container_note_projection(self, name: Name) with Mut, Panic, Div, Alloc {
+        if ir_name_eq_lit(self.lookup_local_struct_type(name), "Knowledge") {
+            FO_CONTAINER_KNOWLEDGE_SEEN = true
+        }
+    }
+
+    fn fo_container_store(self, target: &Expr) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        if !FO_CONTAINER_KNOWLEDGE_SEEN { return self }
+        let measured = self.fo_container_has_sens()
+        if (*target).kind != ExprKind::ExprIndex {
+            if (*target).kind == ExprKind::ExprIdent
+                && self.fo_array_has_base(self.lookup_local((*target).name)) {
+                return self.fo_container_refuse()
+            }
+            if measured && (*target).kind != ExprKind::ExprIdent {
+                return self.fo_container_refuse()
+            }
+            return self
+        }
+        let base = self.fo_array_local_base(target)
+        let tracked = self.fo_array_has_base(base)
+        if base < 0 && FO_ARRAY_COUNT > 0 { return self.fo_container_refuse() }
+        if !measured && !tracked { return self }
+        var alias: i64 = 0
+        while alias < FO_REF_ALIAS_COUNT {
+            if FO_REF_ALIAS_BASE[alias as usize] == base { return self.fo_container_refuse() }
+            alias = alias + 1
+        }
+        let idx = self.fo_array_literal_index(target)
+        // No merge or back-edge representation is claimed here. Even an exact
+        // overwrite of a measured slot in a branch must refuse, not erase it.
+        if base < 0 || idx < 0 || self.scope_depth > 2 || self.loop_depth > 0
+            || FO_INLINE_DEPTH > 0 || self.so_enabled {
+            return self.fo_container_refuse()
+        }
+        var slot: i64 = -1
+        var i: i64 = 0
+        while i < FO_ARRAY_COUNT {
+            if FO_ARRAY_BASE[i as usize] == base && FO_ARRAY_INDEX[i as usize] == idx { slot = i }
+            i = i + 1
+        }
+        var lo = self
+        if slot < 0 {
+            if !measured { return lo }
+            if FO_ARRAY_COUNT >= 64 { return lo.fo_container_refuse() }
+            slot = FO_ARRAY_COUNT
+            FO_ARRAY_BASE[slot as usize] = base
+            FO_ARRAY_INDEX[slot as usize] = idx
+            FO_ARRAY_COUNT = slot + 1
+        }
+        var k: i64 = 0
+        while k < 32 {
+            var snap: i64 = -1
+            let sens = lo.fo_expr_sens[k as usize]
+            if sens >= 0 {
+                let cp = lo.fresh_reg()
+                lo = cp.0.emit(ir_copy(cp.1, sens)).emit(ir_mark_float_reg(cp.1))
+                snap = cp.1
+            }
+            FO_ARRAY_SENS[(slot * 32 + k) as usize] = snap
+            k = k + 1
+        }
+        lo
+    }
+
+    fn fo_array_variance(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        let base = self.fo_array_local_base(e)
+        if !self.fo_array_has_base(base) {
+            // A nonlocal/aliased array cannot be matched to a tracked register.
+            if base < 0 && FO_ARRAY_COUNT > 0 {
+                return (self.fo_container_refuse().fo_clear_expr_sens().so_clear_expr_hess(), -1)
+            }
+            return (self.fo_clear_expr_sens().so_clear_expr_hess(), -1)
+        }
+        let idx = self.fo_array_literal_index(e)
+        if idx < 0 || self.so_enabled {
+            return (self.fo_container_refuse().fo_clear_expr_sens().so_clear_expr_hess(), -1)
+        }
+        var lo = self.fo_clear_expr_sens().so_clear_expr_hess()
+        var i: i64 = 0
+        while i < FO_ARRAY_COUNT {
+            if FO_ARRAY_BASE[i as usize] == base && FO_ARRAY_INDEX[i as usize] == idx {
+                var k: i64 = 0
+                while k < 32 {
+                    lo.fo_expr_sens[k as usize] = FO_ARRAY_SENS[(i * 32 + k) as usize]
+                    k = k + 1
+                }
+                return lo.fo_emit_var_from_sens()
+            }
+            i = i + 1
+        }
+        lo.emit_zero_variance()
+    }
+
+    fn fo_array_escapes(self, e: &Expr) -> bool with Mut, Panic, Div, Alloc {
+        if FO_ARRAY_COUNT == 0 || (*e).kind == ExprKind::ExprIndex { return false }
+        if (*e).kind == ExprKind::ExprIdent {
+            return self.fo_array_has_base(self.lookup_local((*e).name))
+        }
+        match (*e).left {
+            Some(inner) => { if self.fo_array_escapes(&(*inner)) { return true } }
+            None => {}
+        }
+        false
+    }
+
+    fn fo_refuse_measured_initializer(self, e: &Expr) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        if !FO_CONTAINER_KNOWLEDGE_SEEN { return self }
+        if self.fo_array_escapes(e) { return self.fo_container_refuse() }
+        let vp = self.lower_expr_variance_ref(e)
+        if vp.0.fo_container_has_sens() { return vp.0.fo_container_refuse() }
+        vp.0
     }
 
     // Remember the channel vector just applied to a field. Overwrites a
@@ -29768,6 +30033,9 @@ impl Lowerer {
             }
             return (self.fo_clear_expr_sens().so_clear_expr_hess(), -1)
         }
+        if (*e).kind == ExprKind::ExprIndex {
+            return self.fo_array_variance(e)
+        }
         if (*e).kind == ExprKind::ExprFloatLit || (*e).kind == ExprKind::ExprIntLit {
             let z = self.fo_clear_expr_sens().so_clear_expr_hess().emit_zero_variance()
             return z
@@ -30733,7 +31001,14 @@ impl Lowerer {
         (self, label)
     }
 
-    fn emit(self, instr: IrInstr) -> Lowerer with Mut, Panic, Div, IO {
+    fn emit(self, instr_in: IrInstr) -> Lowerer with Mut, Panic, Div, IO {
+        if (instr_in.op == IrOpcode::IrReturn || instr_in.op == IrOpcode::IrCopy) && fo_array_base_tracked(instr_in.src1) {
+            return self.fo_container_refuse()
+        }
+        var instr = instr_in
+        if instr.src_site == 0 && LOWER_CUR_SITE != 0 && lower_instr_is_checked_arith(&instr) {
+            instr.src_site = LOWER_CUR_SITE
+        }
         if self.current_fn < 0 || self.current_fn >= self.module.fn_count {
             if self.probe_mode {
                 print("lower_probe: emit_invalid current_fn=")
@@ -34718,7 +34993,7 @@ impl Lowerer {
                     if !ref_param_is_ref && lower_type_expr_is_narrow32(&(*list).head.ty) {
                         lo.current_func = current_func
                         let nk_b = lower_name_narrow32_kind(ir_path_first_name((*list).head.ty.path))
-                        let ncheck_b = lower_narrow32_check_reg(lo, param_value_reg, nk_b)
+                        let ncheck_b = lower_narrow32_check_reg(lo, param_value_reg, nk_b, 4)
                         lo = ncheck_b.0
                         current_func = lo.current_func
                     }
@@ -36752,8 +37027,8 @@ impl Lowerer {
                                     && !lo.lookup_local_is_ref((*alias_tgt).name) {
                                     let tgt_base = lo.lookup_local((*alias_tgt).name)
                                     let tgt_ty = lo.lookup_local_struct_type((*alias_tgt).name)
-                                    if tgt_base >= 0 && tgt_ty.len > 0
-                                        && lower_struct_layout_index_of(&(*lo.struct_layouts), tgt_ty) >= 0 {
+                                    if tgt_base >= 0 && (lo.lookup_local_fixed_array_len((*alias_tgt).name) >= 0
+                                        || (tgt_ty.len > 0 && lower_struct_layout_index_of(&(*lo.struct_layouts), tgt_ty) >= 0)) {
                                         fo_ref_alias_note(s.name, tgt_base)
                                     }
                                 }
@@ -38467,6 +38742,13 @@ impl Lowerer {
             }
             _ => {}
         }
+        match s.target {
+            Some(gum_target) => { lo = lo.fo_container_store(&(*gum_target)) }
+            None => {}
+        }
+        // RHS projection metadata belongs to this assignment, never the next let.
+        lo.pending_variance_reg = -1
+        lo = lo.fo_clear_pending_sens()
         let target_opt: Option<Box<Expr>> = s.target
 
         match target_opt {
@@ -39886,6 +40168,7 @@ impl Lowerer {
                     }
                     lo = pair.0
                     let vreg = pair.1
+                    if lo.fo_array_escapes(&(*list).head.value) { lo = lo.fo_container_refuse() }
                     lo = lo.emit(ir_field_set(base_reg, named_field_idx, vreg, (*list).head.name))
                     // #1706: record this field's uncertainty so `variance_of(a.x)` can
                     // find it later. The initialiser expression is the only place the
@@ -39932,6 +40215,7 @@ impl Lowerer {
                     let pair_v = lo.lower_expr_ref(&(*list).head)
                     lo = pair_v.0
                     let vreg = pair_v.1
+                    lo = lo.fo_refuse_measured_initializer(&(*list).head)
                     let pair_i = lo.fresh_reg()
                     lo = pair_i.0
                     let ireg = pair_i.1
@@ -41149,6 +41433,7 @@ impl Lowerer {
     }
 
     fn lower_measure_call_ref(self, _span: Span, args: &Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        FO_CONTAINER_KNOWLEDGE_SEEN = true
         // Extract first argument: value
         let value_pair = self.lower_measure_value_arg_ref(args)
         let lo1 = value_pair.0
@@ -41204,6 +41489,7 @@ impl Lowerer {
     // separate pre-existing lowering gap, unchanged here.) Named call arguments lower to
     // their value expression, so arg0 is the value and arg1 is the epsilon expression.
     fn lower_knowledge_ctor_call_ref(self, _span: Span, args: &Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        FO_CONTAINER_KNOWLEDGE_SEEN = true
         let value_pair = self.lower_measure_value_arg_ref(args)
         let lo1 = value_pair.0
         let value_reg = value_pair.1
@@ -43710,6 +43996,14 @@ impl Lowerer {
     }
 
     fn lower_binary_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        let saved_site = LOWER_CUR_SITE
+        LOWER_CUR_SITE = lower_site_of_span((*e).span)
+        let r = self.lower_binary_expr_ref_inner(e)
+        LOWER_CUR_SITE = saved_site
+        r
+    }
+
+    fn lower_binary_expr_ref_inner(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         if e.bin_op == BinaryOp::OpAnd || e.bin_op == BinaryOp::OpOr {
             return self.lower_short_circuit_ref(e)
         }
@@ -44191,7 +44485,8 @@ impl Lowerer {
                         None => false,
                     }
                     if rhs_int_p {
-                        return lower_narrow32_check_reg(lo4, dst, narrow_kind)
+                        let narrow_opk = if e.bin_op == BinaryOp::OpAdd { 0 } else if e.bin_op == BinaryOp::OpSub { 1 } else { 2 }
+                        return lower_narrow32_check_reg(lo4, dst, narrow_kind, narrow_opk)
                     }
                 }
             }
@@ -44201,6 +44496,16 @@ impl Lowerer {
 
     fn lower_call_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         var lo = self
+        var gum_args = &e.args
+        while true {
+            match *gum_args {
+                Some(arg) => {
+                    if lo.fo_array_escapes(&(*arg).head) { lo = lo.fo_container_refuse() }
+                    gum_args = &(*arg).tail
+                }
+                None => break,
+            }
+        }
         if FO_STEP_CARRY == 1 && fo_recur_call_is_this(e) {
             let c = lo.fresh_reg()
             lo = c.0
@@ -45097,6 +45402,7 @@ impl Lowerer {
                         let vpair = lo3.lower_knowledge_variance_for_ident((*base_expr).name)
                         lo3 = vpair.0
                         if vpair.1 >= 0 {
+                            lo3.fo_container_note_projection((*base_expr).name)
                             lo3.pending_variance_reg = vpair.1
                             lo3 = lo3.fo_seed_from_variance(vpair.1, 0 - 1)
                             var pk: i64 = 0
@@ -45486,6 +45792,17 @@ impl Lowerer {
     }
 
     fn lower_unary_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        let saved_site = LOWER_CUR_SITE
+        LOWER_CUR_SITE = lower_site_of_span((*e).span)
+        let r = self.lower_unary_expr_ref_inner(e)
+        LOWER_CUR_SITE = saved_site
+        r
+    }
+
+    fn lower_unary_expr_ref_inner(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        if (e.un_op == UnaryOp::OpRef || e.un_op == UnaryOp::OpRefMut) && self.fo_array_escapes(e) {
+            return (self.fo_container_refuse(), 0)
+        }
         // SIO-207: `-9223372036854775808` is the spelling of i64 MIN. The
         // magnitude token carries the 2^63 bit pattern in int_val, so emitting
         // a runtime negation would negate MIN itself and trip the overflow
@@ -45798,7 +46115,7 @@ impl Lowerer {
         if e.un_op == UnaryOp::OpNeg && !src_is_float {
             let neg_narrow_kind = lo3.opt_expr_narrow32_kind_ref(&e.left)
             if neg_narrow_kind != 0 {
-                return lower_narrow32_check_reg(lo3, dst, neg_narrow_kind)
+                return lower_narrow32_check_reg(lo3, dst, neg_narrow_kind, 3)
             }
         }
         (lo3, dst)
@@ -46246,6 +46563,10 @@ impl Lowerer {
     }
 
     fn lower_method_call_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        // Array methods and argument passing do not carry this local table.
+        if self.fo_array_escapes(e) && !ir_name_eq_lit(e.name, "len") {
+            return (self.fo_container_refuse(), 0)
+        }
         if self.expr_is_gpu_sync_call_ref(e) {
             // Unit. A plain integer zero -- emit_f64_const would mark the
             // register as float for a value that is never read.
@@ -47293,6 +47614,7 @@ impl Lowerer {
     }
 
     fn lower_for_in_array_ref(self, e: &Expr, iter: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        if self.fo_array_escapes(iter) { return (self.fo_container_refuse(), 0) }
         // Desugar `for v in arr { body }` over a bare LOCAL array into the working
         // while-loop IR, using a runtime element count read from the object header
         // (IrArrayLen) — NO LowerLocalStack growth, NO per-local length column:
@@ -47731,6 +48053,7 @@ impl Lowerer {
     }
 
     fn lower_return_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        if self.fo_array_escapes(e) { return (self.fo_container_refuse(), 0) }
         // V0-E.5.10: `return 1.5` in an `-> f128` fn is a literal in f128
         // position — exact limbs or fail-closed, never binary64 bits in an
         // F128Bits slot (check accepted this spelling since V0-B).
@@ -47838,6 +48161,17 @@ impl Lowerer {
             match *current {
                 Some(list) => {
                     if ir_name_eq_lit((*list).head.name, "value") {
+                        // A constant `value:` has no epistemic inputs: its
+                        // derived variance is a literal 0.0, and writing that
+                        // into field 1 erased the literal's own `variance:`
+                        // field (`Knowledge { value: 0.077, variance: 0.5, .. }`
+                        // read back variance 0.0; lean_single reads 0.5).
+                        // lower_struct_fields_ref has already stored the
+                        // declared variance, so leave it.
+                        if lower_expr_is_float_literal_like_ref(&(*list).head.value)
+                            || (*list).head.value.kind == ExprKind::ExprIntLit {
+                            return self
+                        }
                         let fv = self.lower_expr_variance_ref(&(*list).head.value)
                         var lo = fv.0
                         if fv.1 >= 0 {

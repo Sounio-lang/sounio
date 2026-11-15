@@ -1,0 +1,1 @@
+On macOS arm64, a module-level i64 initializer that overflows (`var G = 9223372036854775807 + 1`, `let K: i64 = MAX + 1`) is refused with E300 again. The parser's constant fold read the right operand in place of the left one in the Madaros compiled by the lean_single seed, so `MAX + 1` was checked as `1 + 1`. A new macOS CI step requires E300 on the module-level overflow tests.
