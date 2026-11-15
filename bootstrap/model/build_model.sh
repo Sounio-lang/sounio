@@ -17,6 +17,6 @@ if ! cmp -s "$fresh" "$root/formal/Bootstrap/SeedData.lean"; then
 fi
 
 cd "$root/formal"
-for m in X86Min SeedData; do
+for m in X86Min SeedData Formats Refine Loop; do
   LEAN_PATH="$out" "$lean" "Bootstrap/$m.lean" -o "$out/Bootstrap/$m.olean"
 done
