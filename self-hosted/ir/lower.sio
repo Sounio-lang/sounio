@@ -6533,6 +6533,18 @@ fn lower_type_expr_array_elem_name(te: &TypeExpr) -> Name with Mut, Panic, Div {
             if (*elem).kind == TypeExprKind::TypeNamed {
                 return ir_path_first_name((*elem).path)
             }
+            // `[Knowledge[T]; N]`: the element is the builtin Knowledge layout
+            // (ir_register_knowledge_layout). Left unnamed, `s.kn[i].value`
+            // had no receiver type and resolved `.value` by field name across
+            // every registered struct (field_idx_from_name_simple), where any
+            // non-Knowledge struct with a field called `value` outranks
+            // Knowledge: with math::pure's CheckedLog { status, value } in the
+            // program, `.value` read slot 1 as an integer and printed 0.0
+            // while `.variance` and `.confidence` stayed correct (measured
+            // 2026-11-14 on darwin_pbpk::epistemic_pbpk28's EpPrior28.kn).
+            if (*elem).kind == TypeExprKind::TypeKnowledge {
+                return make_name("Knowledge")
+            }
             ir_empty_name()
         }
         _ => ir_empty_name()
@@ -43742,6 +43754,17 @@ impl Lowerer {
             match *current {
                 Some(list) => {
                     if ir_name_eq_lit((*list).head.name, "value") {
+                        // A constant `value:` has no epistemic inputs: its
+                        // derived variance is a literal 0.0, and writing that
+                        // into field 1 erased the literal's own `variance:`
+                        // field (`Knowledge { value: 0.077, variance: 0.5, .. }`
+                        // read back variance 0.0; lean_single reads 0.5).
+                        // lower_struct_fields_ref has already stored the
+                        // declared variance, so leave it.
+                        if lower_expr_is_float_literal_like_ref(&(*list).head.value)
+                            || (*list).head.value.kind == ExprKind::ExprIntLit {
+                            return self
+                        }
                         let fv = self.lower_expr_variance_ref(&(*list).head.value)
                         var lo = fv.0
                         if fv.1 >= 0 {
