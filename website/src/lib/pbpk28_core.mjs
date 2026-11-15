@@ -404,23 +404,23 @@ export const TAC_F_DEFAULT = 0.18;     // Prograf label, healthy volunteers
 export const TAC_TLAG_DEFAULT = 0.39;  // h, Jusko 1995
 export const TAC_DOSE_DEFAULT = 5.0;   // mg, single dose
 
-// Drug-file tissue-to-blood pattern scaled by 0.484518 so that
+// Drug-file tissue-to-blood pattern scaled by 0.510225 so that the kinetic
 // V_ss = 133.7 L (label, healthy volunteers, 1.91 L/kg at 70 kg).
 export const KP_TACROLIMUS = Object.freeze([
   1.00,    // 0 blood (definition)
-  9.6904,  // 1 liver
-  2.9071,  // 2 kidney
-  0.0485,  // 3 brain
-  1.9381,  // 4 heart
-  3.8761,  // 5 lung
-  1.4536,  // 6 muscle
-  2.4226,  // 7 adipose
-  2.9071,  // 8 gut
-  0.9690,  // 9 skin
-  0.7268,  // 10 bone
-  3.8761,  // 11 spleen
-  1.9381,  // 12 pancreas
-  0.9690,  // 13 other
+  10.2045,  // 1 liver
+  3.0614,  // 2 kidney
+  0.0510,  // 3 brain
+  2.0409,  // 4 heart
+  4.0818,  // 5 lung
+  1.5307,  // 6 muscle
+  2.5511,  // 7 adipose
+  3.0614,  // 8 gut
+  1.0205,  // 9 skin
+  0.7653,  // 10 bone
+  4.0818,  // 11 spleen
+  2.0409,  // 12 pancreas
+  1.0205,  // 13 other
 ]);
 
 export const DEFAULT_PARAMS_TACROLIMUS = Object.freeze({
