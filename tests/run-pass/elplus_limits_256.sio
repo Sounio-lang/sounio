@@ -715,6 +715,133 @@ fn scenario_g() -> i64 with IO, Mut, Div, Panic {
     return fails
 }
 
+// (h) validation against the ACTIVE dimensions (reviewer finding, PR #3582):
+// ids that fit the physical capacity but lie outside nc / nr / nb must be
+// refused before any write. Expectations (hand-derived from the validator
+// order: dims, tables, rclos, S, R):
+//   h1 reviewer witness nc=3 nb=2 nr=1 nchain=0, concept 2 = ex role0.concept0,
+//      exid[0][0] = 3 (>= nc)                       -> -7
+//   h2 same TBox, exid[0][0] = -1, existential role 1 (>= nr)  -> -6
+//   h3 same, chain 1 o 0 <= 0 with nr = 1            -> -8
+//   h4 existential filler 2 with nb = 2 (< nc = 3)   -> -6
+//   h5 conjunction argument 3 with nc = 3            -> -5
+//   h6 nb = 3 > nc = 2                               -> -9
+//   h7 rclos cell (0,1) set with nr = 1              -> -10
+//   h8 S seeded cell (0,5) with nc = 3               -> -11
+//   h9 R edge (role 1, 0, 0) with nr = 1             -> -12
+//   h0 control: exid[0][0] = 2 (inside) is accepted: status >= 1 and the
+//      derived cell s[2][3] stays false (nothing outside the universe).
+// After every refusal S and R equal the sentinel pattern written beforehand
+// (S: every 7th cell, R: every 5th cell; h8 only S, h9 only R), cell by cell.
+fn fillpat(s: &![bool; 65536], r: &![bool; 1048576], sp: bool, rp: bool) with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < 65536 {
+        s[i] = sp && i % 7 == 0
+        i = i + 1
+    }
+    i = 0
+    while i < 1048576 {
+        r[i] = rp && i % 5 == 0
+        i = i + 1
+    }
+}
+
+fn cmppat(s: &[bool; 65536], r: &[bool; 1048576], sp: bool, rp: bool) -> i64 with Mut, Div, Panic {
+    var bad: i64 = 0
+    var i: i64 = 0
+    while i < 65536 {
+        let want = sp && i % 7 == 0
+        if s[i] != want { bad = bad + 1 }
+        i = i + 1
+    }
+    i = 0
+    while i < 1048576 {
+        let want = rp && i % 5 == 0
+        if r[i] != want { bad = bad + 1 }
+        i = i + 1
+    }
+    return bad
+}
+
+fn hrun(label: string, s: &![bool; 65536], r: &![bool; 1048576], pk: &[i64; 4864], rc: &[bool; 256], ch: &[i64; 96], dm: &![i64; 4], nchain: i64, nc: i64, nb: i64, nr: i64, want: i64, sp: bool, rp: bool) -> i64 with IO, Mut, Div, Panic {
+    fillpat(s, r, sp, rp)
+    let st = run(s, r, pk, rc, ch, dm, nchain, nc, nb, nr)
+    var f: i64 = chk(label, st, want)
+    f = f + chk(label, cmppat(s, r, sp, rp), 0)
+    return f
+}
+
+fn scenario_h() -> i64 with IO, Mut, Div, Panic {
+    var fails: i64 = 0
+    var T_S: [bool; 65536] = [false; 65536]
+    var T_R: [bool; 1048576] = [false; 1048576]
+    var T_D: [bool; 65536] = [false; 65536]
+    var T_CP: [bool; 65536] = [false; 65536]
+    var T_PK: [i64; 4864] = [0; 4864]
+    var T_CH: [i64; 96] = [0; 96]
+    var T_RC: [bool; 256] = [false; 256]
+    var T_DM: [i64; 4] = [0; 4]
+    // h1
+    rst(&! T_S, &! T_R, &! T_D, &! T_CP, &! T_PK, &! T_CH, &! T_RC)
+    T_PK[2] = 3
+    T_PK[256 + 2] = 0
+    T_PK[512 + 2] = 0
+    T_PK[768 + 0] = 3
+    fails = fails + hrun("h1.exid outside nc", &! T_S, &! T_R, &T_PK, &T_RC, &T_CH, &! T_DM, 0, 3, 2, 1, 0 - 7, true, true)
+    // h2
+    T_PK[768 + 0] = 0 - 1
+    T_PK[256 + 2] = 1
+    T_PK[768 + 256 + 0] = 2
+    fails = fails + hrun("h2.existential role outside nr", &! T_S, &! T_R, &T_PK, &T_RC, &T_CH, &! T_DM, 0, 3, 2, 1, 0 - 6, true, true)
+    // h3
+    rst(&! T_S, &! T_R, &! T_D, &! T_CP, &! T_PK, &! T_CH, &! T_RC)
+    T_CH[0] = 1
+    T_CH[32] = 0
+    T_CH[64] = 0
+    fails = fails + hrun("h3.chain role outside nr", &! T_S, &! T_R, &T_PK, &T_RC, &T_CH, &! T_DM, 1, 3, 2, 1, 0 - 8, true, true)
+    // h4
+    rst(&! T_S, &! T_R, &! T_D, &! T_CP, &! T_PK, &! T_CH, &! T_RC)
+    T_PK[2] = 3
+    T_PK[256 + 2] = 0
+    T_PK[512 + 2] = 2
+    fails = fails + hrun("h4.filler outside nb", &! T_S, &! T_R, &T_PK, &T_RC, &T_CH, &! T_DM, 0, 3, 2, 1, 0 - 6, true, true)
+    // h5
+    rst(&! T_S, &! T_R, &! T_D, &! T_CP, &! T_PK, &! T_CH, &! T_RC)
+    T_PK[2] = 2
+    T_PK[256 + 2] = 3
+    T_PK[512 + 2] = 0
+    fails = fails + hrun("h5.conjunct outside nc", &! T_S, &! T_R, &T_PK, &T_RC, &T_CH, &! T_DM, 0, 3, 2, 1, 0 - 5, true, true)
+    // h6
+    rst(&! T_S, &! T_R, &! T_D, &! T_CP, &! T_PK, &! T_CH, &! T_RC)
+    fails = fails + hrun("h6.nb above nc", &! T_S, &! T_R, &T_PK, &T_RC, &T_CH, &! T_DM, 0, 2, 3, 1, 0 - 9, true, true)
+    // h7
+    T_RC[0 * 16 + 1] = true
+    fails = fails + hrun("h7.rclos outside nr", &! T_S, &! T_R, &T_PK, &T_RC, &T_CH, &! T_DM, 0, 3, 2, 1, 0 - 10, true, true)
+    // h8
+    rst(&! T_S, &! T_R, &! T_D, &! T_CP, &! T_PK, &! T_CH, &! T_RC)
+    fails = fails + hrun("h8.S outside nc", &! T_S, &! T_R, &T_PK, &T_RC, &T_CH, &! T_DM, 0, 3, 2, 1, 0 - 11, true, false)
+    // h9
+    fails = fails + hrun("h9.R outside active", &! T_S, &! T_R, &T_PK, &T_RC, &T_CH, &! T_DM, 0, 3, 2, 1, 0 - 12, false, true)
+    // h0 control: the witness with the id inside the universe is accepted
+    rst(&! T_S, &! T_R, &! T_D, &! T_CP, &! T_PK, &! T_CH, &! T_RC)
+    seed(&! T_S, 3, 1)
+    T_PK[2] = 3
+    T_PK[256 + 2] = 0
+    T_PK[512 + 2] = 0
+    T_PK[768 + 0] = 2
+    let st0 = run(&! T_S, &! T_R, &T_PK, &T_RC, &T_CH, &! T_DM, 0, 3, 2, 1)
+    fails = fails + chk("h0.control accepted", if st0 >= 1 { 1 } else { 0 }, 1)
+    fails = fails + chkb("h0.control s[2][3] stays false", T_S[2 * 256 + 3], false)
+    // helpers refuse ids outside capacity
+    fails = fails + chk("h.set_exid id 256", elplus_wide_set_exid(&! T_PK, 0, 0, 256), 1)
+    fails = fails + chk("h.set_exid id -2", elplus_wide_set_exid(&! T_PK, 0, 0, 0 - 2), 1)
+    fails = fails + chk("h.set_concept kind 4", elplus_wide_set_concept(&! T_PK, 0, 4, 0, 0), 1)
+    fails = fails + chk("h.set_concept ex role 16", elplus_wide_set_concept(&! T_PK, 0, 3, 16, 0), 1)
+    fails = fails + chk("h.set_chain role 16", elplus_wide_set_chain(&! T_CH, 0, 0, 16, 0), 1)
+    fails = fails + chk("h.seed top >= nc", elplus_wide_seed(&! T_S, 3, 3), 2)
+    return fails
+}
+
 fn main() -> i32 with IO, Mut, Div, Panic {
     var fails: i64 = 0
     fails = fails + scenario_a()
@@ -723,6 +850,7 @@ fn main() -> i32 with IO, Mut, Div, Panic {
     fails = fails + scenario_d()
     fails = fails + scenario_e()
     fails = fails + scenario_g()
+    fails = fails + scenario_h()
     if fails == 0 {
         println("ELPLUS_LIMITS_256_PASS")
         return 0

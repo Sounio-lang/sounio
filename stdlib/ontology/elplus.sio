@@ -146,11 +146,15 @@ pub const ELPLUS_WIDE_MAXR: i64 = 16
 pub const ELPLUS_WIDE_MAXCH: i64 = 32
 
 /// Validate dims and the used part of the tables of a wide-layout pack
-/// against the capacities `cc` concepts, `cr` roles, `ch` chains.  Returns
-/// 0 when valid, otherwise the positive form of the status documented above.
-/// Only entries that the rules can read are examined: conjunction / existential
-/// arguments of concepts c < nc, exid[r][f] for r < nr, f < nb, and the
-/// chains k < nchain.
+/// against the capacities (`cc` concepts, `cr` roles, `ch` chains) for the
+/// dims, and against the ACTIVE dimensions dims = [nchain, nc, nb, nr] for
+/// every id: concept ids (conjunct arguments, exid entries) must lie in
+/// 0..nc (exid: -1 is the only absence sentinel), existential roles and chain
+/// endpoints in 0..nr, existential fillers in 0..nb, and nb <= nc. Returns 0
+/// when valid, otherwise the positive form of the status documented above
+/// (9 nb > nc). Only entries that the rules can read are examined:
+/// conjunction / existential arguments of concepts c < nc, exid[r][f] for
+/// r < nr, f < nb, and the chains k < nchain.
 fn elplus_wide_check(pack: &[i64; 4864], chains: &[i64; 96], dims: &[i64; 4], cc: i64, cr: i64, ch: i64) -> i64 with Div, Panic {
     let nchain = dims[0]
     let nc = dims[1]
@@ -160,16 +164,17 @@ fn elplus_wide_check(pack: &[i64; 4864], chains: &[i64; 96], dims: &[i64; 4], cc
     if nc < 0 || nc > cc { return 2 }
     if nb < 0 || nb > cc { return 3 }
     if nr < 0 || nr > cr { return 4 }
+    if nb > nc { return 9 }
     var c: i64 = 0
     while c < nc {
         let kind = pack[c]
         let a1 = pack[256 + c]
         let a2 = pack[512 + c]
         if kind == 2 {
-            if a1 < 0 || a1 >= cc || a2 < 0 || a2 >= cc { return 5 }
+            if a1 < 0 || a1 >= nc || a2 < 0 || a2 >= nc { return 5 }
         }
         if kind == 3 {
-            if a1 < 0 || a1 >= cr || a2 < 0 || a2 >= cc { return 6 }
+            if a1 < 0 || a1 >= nr || a2 < 0 || a2 >= nb { return 6 }
         }
         c = c + 1
     }
@@ -177,7 +182,8 @@ fn elplus_wide_check(pack: &[i64; 4864], chains: &[i64; 96], dims: &[i64; 4], cc
     while r < nr {
         var f: i64 = 0
         while f < nb {
-            if pack[768 + r * 256 + f] >= cc { return 7 }
+            let x = pack[768 + r * 256 + f]
+            if x < 0 - 1 || x >= nc { return 7 }
             f = f + 1
         }
         r = r + 1
@@ -187,8 +193,56 @@ fn elplus_wide_check(pack: &[i64; 4864], chains: &[i64; 96], dims: &[i64; 4], cc
         let x1 = chains[k]
         let x2 = chains[32 + k]
         let x3 = chains[64 + k]
-        if x1 < 0 || x1 >= cr || x2 < 0 || x2 >= cr || x3 < 0 || x3 >= cr { return 8 }
+        if x1 < 0 || x1 >= nr || x2 < 0 || x2 >= nr || x3 < 0 || x3 >= nr { return 8 }
         k = k + 1
+    }
+    return 0
+}
+
+/// Validate the INPUT state of the matrices against the active dimensions,
+/// before anything is written: a set `rclos` cell outside nr x nr (10), a set
+/// `s` cell outside nc x nc (11), a set `r` cell outside nr x nc x nb (12).
+/// Returns 0 or the positive status.
+fn elplus_wide_check_state(s: &[bool; 65536], r: &[bool; 1048576], rclos: &[bool; 256], dims: &[i64; 4]) -> i64 with Div, Panic {
+    let nc = dims[1]
+    let nb = dims[2]
+    let nr = dims[3]
+    var a: i64 = 0
+    while a < 16 {
+        var b: i64 = 0
+        while b < 16 {
+            if rclos[a * 16 + b] {
+                if a >= nr || b >= nr { return 10 }
+            }
+            b = b + 1
+        }
+        a = a + 1
+    }
+    a = 0
+    while a < 256 {
+        var b: i64 = 0
+        while b < 256 {
+            if s[a * 256 + b] {
+                if a >= nc || b >= nc { return 11 }
+            }
+            b = b + 1
+        }
+        a = a + 1
+    }
+    var rr: i64 = 0
+    while rr < 16 {
+        var c: i64 = 0
+        while c < 256 {
+            var f: i64 = 0
+            while f < 256 {
+                if r[(rr * 256 + c) * 256 + f] {
+                    if rr >= nr || c >= nc || f >= nb { return 12 }
+                }
+                f = f + 1
+            }
+            c = c + 1
+        }
+        rr = rr + 1
     }
     return 0
 }
@@ -238,7 +292,7 @@ pub fn elplus_wide_role_closure(rclos: &![bool; 256], nr: i64) -> i64 with Mut, 
 
 /// Wide subsumption seed: every cell of the 256 x 256 matrix false, then
 /// reflexivity and the top axiom for every concept c < nc.  Returns 0, or
-/// 1 (nc outside 0..=256) / 2 (top outside 0..256 while nc > 0); on a
+/// 1 (nc outside 0..=256) / 2 (top outside 0..nc while nc > 0); on a
 /// refusal NOTHING is written.
 ///
 /// # Complexity
@@ -246,7 +300,7 @@ pub fn elplus_wide_role_closure(rclos: &![bool; 256], nr: i64) -> i64 with Mut, 
 pub fn elplus_wide_seed(s: &![bool; 65536], nc: i64, top: i64) -> i64 with Mut, Div, Panic {
     if nc < 0 || nc > 256 { return 1 }
     if nc > 0 {
-        if top < 0 || top >= 256 { return 2 }
+        if top < 0 || top >= nc { return 2 }
     }
     var a: i64 = 0
     while a < 256 {
@@ -268,9 +322,17 @@ pub fn elplus_wide_seed(s: &![bool; 65536], nc: i64, top: i64) -> i64 with Mut, 
 
 /// Pack helper: concept `c` of kind `kind` (0 atom, 1 top, 2 conjunction,
 /// 3 existential) with arguments `a1`, `a2` (see the module header).
-/// Returns 0, or 1 when c is outside 0..256 (nothing written).
+/// Returns 0, or 1 when c is outside 0..256, kind outside 0..=3, or an argument
+/// is outside its capacity (nothing written).
 pub fn elplus_wide_set_concept(pack: &![i64; 4864], c: i64, kind: i64, a1: i64, a2: i64) -> i64 with Mut, Div, Panic {
     if c < 0 || c >= 256 { return 1 }
+    if kind < 0 || kind > 3 { return 1 }
+    if kind == 2 {
+        if a1 < 0 || a1 >= 256 || a2 < 0 || a2 >= 256 { return 1 }
+    }
+    if kind == 3 {
+        if a1 < 0 || a1 >= 16 || a2 < 0 || a2 >= 256 { return 1 }
+    }
     pack[c] = kind
     pack[256 + c] = a1
     pack[512 + c] = a2
@@ -278,9 +340,11 @@ pub fn elplus_wide_set_concept(pack: &![i64; 4864], c: i64, kind: i64, a1: i64, 
 }
 
 /// Pack helper: exid[r][f] = id of the interned `exists r.f` (or -1).
-/// Returns 0, or 1 when r or f is out of range (nothing written).
+/// Returns 0, or 1 when r, f or id (-1 or 0..256) is out of range (nothing
+/// written).
 pub fn elplus_wide_set_exid(pack: &![i64; 4864], r: i64, f: i64, id: i64) -> i64 with Mut, Div, Panic {
     if r < 0 || r >= 16 || f < 0 || f >= 256 { return 1 }
+    if id < 0 - 1 || id >= 256 { return 1 }
     pack[768 + r * 256 + f] = id
     return 0
 }
@@ -289,6 +353,7 @@ pub fn elplus_wide_set_exid(pack: &![i64; 4864], r: i64, f: i64, id: i64) -> i64
 /// range (nothing written).
 pub fn elplus_wide_set_chain(chains: &![i64; 96], k: i64, r1: i64, r2: i64, r3: i64) -> i64 with Mut, Div, Panic {
     if k < 0 || k >= 32 { return 1 }
+    if r1 < 0 || r1 >= 16 || r2 < 0 || r2 >= 16 || r3 < 0 || r3 >= 16 { return 1 }
     chains[k] = r1
     chains[32 + k] = r2
     chains[64 + k] = r3
@@ -324,6 +389,8 @@ pub fn elplus_wide_fixpoint_packed(
 ) -> i64 with Mut, Div, Panic {
     let status = elplus_wide_check(pack, chains, dims, 256, 16, 32)
     if status != 0 { return 0 - status }
+    let status2 = elplus_wide_check_state(s, r, rclos, dims)
+    if status2 != 0 { return 0 - status2 }
     var nchain: i64 = dims[0]
     var nc: i64 = dims[1]
     var nb: i64 = dims[2]
