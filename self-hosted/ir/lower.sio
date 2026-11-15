@@ -871,6 +871,59 @@ fn tg_chain_expr(base: Name, sp: Span, depth: i64, id0: i64, id1: i64, id2: i64)
     cur
 }
 
+// ---- Refusing an uncertainty query that a call would silently zero ----
+//
+// When the variance of a call cannot be formed (no tangent clone, no
+// transfer, no re-lowering) while an argument carries uncertainty, the
+// walk used to return "no variance" and the query read 0.0. TG_DROP marks
+// that during the walk (with the callee in TG_DROP_NAME); a local bound
+// from such a walk is TG_TAINT, so the mark follows it into later queries.
+// An epistemic query that ends with TG_DROP set is refused at compile time.
+var TG_DROP: i64 = 0
+var TG_DROP_NAME: Name = ir_empty_name()
+var TG_TAINT_N: i64 = 0
+var TG_TAINT: [i64; 128] = [0; 128]
+var TG_TAINT_CALLEE: [i64; 128] = [0; 128]
+// `let f = add2` in this function: local name id -> function name id.
+var TG_FNALIAS_N: i64 = 0
+var TG_FNALIAS_LOCAL: [i64; 32] = [0; 32]
+var TG_FNALIAS_FN: [i64; 32] = [0; 32]
+
+fn tg_mark_drop(callee: Name) with Mut, Panic, Div {
+    if TG_DROP == 0 { TG_DROP_NAME = callee }
+    TG_DROP = 1
+}
+
+fn tg_tainted(n: Name) -> bool with Mut, Panic, Div {
+    if TG_TAINT_N <= 0 { return false }
+    let id = ir_intern_name(n)
+    var i: i64 = 0
+    while i < TG_TAINT_N {
+        if TG_TAINT[i as usize] == id { return true }
+        i = i + 1
+    }
+    false
+}
+
+// The callee whose dropped walk tainted `n`.
+fn tg_taint_callee(n: Name) -> Name with Mut, Panic, Div {
+    let id = ir_intern_name(n)
+    var i: i64 = 0
+    while i < TG_TAINT_N {
+        if TG_TAINT[i as usize] == id { return ir_name_at(TG_TAINT_CALLEE[i as usize]) }
+        i = i + 1
+    }
+    ir_empty_name()
+}
+
+fn tg_taint(n: Name) with Mut, Panic, Div {
+    if tg_tainted(n) { return }
+    if TG_TAINT_N >= 128 { return }
+    TG_TAINT[TG_TAINT_N as usize] = ir_intern_name(n)
+    TG_TAINT_CALLEE[TG_TAINT_N as usize] = ir_intern_name(TG_DROP_NAME)
+    TG_TAINT_N = TG_TAINT_N + 1
+}
+
 fn tg_site_find(sp: Span) -> i64 with Mut, Panic, Div {
     var i = TG_SITE_N - 1
     while i >= 0 {
@@ -9729,6 +9782,9 @@ fn lowerer_lower_fn_item_mut(
     TG_OUT_REG = 0 - 1
     TG_NPCH = 0
     TG_BODY_PENDING = false
+    TG_TAINT_N = 0
+    TG_DROP = 0
+    TG_FNALIAS_N = 0
     if TG_ACTIVE >= 0 && ir_name_eq(name, tg_clone_name_ord(TG_NAME[TG_ACTIVE as usize], TG_ACTIVE_ORD)) {
         TG_CLONE_FN = fn_id
         // The hyper-dual clone carries the Hessian rows of its body.
@@ -17216,6 +17272,205 @@ impl Lowerer {
             j = j + 1
         }
         lo
+    }
+
+    // Whether `e` can carry uncertainty, decided without emitting anything:
+    // it reads a measured or tainted local (or a field of one with a
+    // recorded variance), calls measure, or combines such operands.
+    fn tg_expr_maybe_uncertain(self, e: &Expr, depth: i64) -> bool with Mut, Panic, Div, Alloc {
+        if depth > 32 { return true }
+        let k = (*e).kind
+        if k == ExprKind::ExprIntLit || k == ExprKind::ExprFloatLit || k == ExprKind::ExprBoolTrue || k == ExprKind::ExprBoolFalse {
+            return false
+        }
+        if k == ExprKind::ExprIdent {
+            let nm = (*e).name
+            if tg_tainted(nm) { return true }
+            let v = self.lookup_local_variance_reg(nm)
+            if v >= 0 && !fo_variance_is_static_zero(&self, v) { return true }
+            let r = self.lookup_local(nm)
+            if r < 0 { return false }
+            let st = self.lookup_local_struct_type(nm)
+            if ir_name_eq_lit(st, "Knowledge") { return true }
+            if st.len > 0 {
+                let ns = self.struct_layout_slot_count(st)
+                var i: i64 = 0
+                while i < ns && i < 128 {
+                    let fv = self.lookup_variance_for_field(r, i)
+                    if fv >= 0 && !fo_variance_is_static_zero(&self, fv) { return true }
+                    i = i + 1
+                }
+            }
+            return false
+        }
+        if k == ExprKind::ExprCall {
+            match (*e).left {
+                Some(c) => {
+                    if (*c).kind == ExprKind::ExprIdent && (ir_name_is_measure((*c).name) || ir_name_is_knowledge_ctor((*c).name)) { return true }
+                }
+                None => {}
+            }
+        }
+        match (*e).left {
+            Some(x) => { if self.tg_expr_maybe_uncertain(&(*x), depth + 1) { return true } }
+            None => {}
+        }
+        match (*e).right {
+            Some(x) => { if self.tg_expr_maybe_uncertain(&(*x), depth + 1) { return true } }
+            None => {}
+        }
+        match (*e).else_expr {
+            Some(x) => { if self.tg_expr_maybe_uncertain(&(*x), depth + 1) { return true } }
+            None => {}
+        }
+        var ac = &(*e).args
+        while true {
+            match *ac {
+                Some(al) => {
+                    if self.tg_expr_maybe_uncertain(&(*al).head, depth + 1) { return true }
+                    ac = &(*al).tail
+                }
+                None => break
+            }
+        }
+        false
+    }
+
+    // `let r = f(...)` where f returns a struct: when an argument carries
+    // uncertainty, no tangent clone handled the call, and no field of r got a
+    // variance, r is tainted with f, so a later query on r.x is refused.
+    fn tg_note_struct_let(self, name: Name, rhs: &Option<Box<Expr> >) with Mut, Panic, Div, Alloc {
+        match *rhs {
+            Some(re) => {
+                let k = (*re).kind
+                if k != ExprKind::ExprCall && k != ExprKind::ExprMethodCall { return }
+                if self.expr_result_is_float_ref(&(*re)) { return }
+                let st = self.lookup_local_struct_type(name)
+                if st.len <= 0 || ir_name_eq_lit(st, "Knowledge") { return }
+                if tg_site_find((*re).span) >= 0 { return }
+                var cn = (*re).name
+                if k == ExprKind::ExprCall {
+                    match (*re).left {
+                        Some(c) => {
+                            if (*c).kind != ExprKind::ExprIdent { return }
+                            cn = (*c).name
+                            if ir_name_is_measure(cn) || ir_name_is_knowledge_ctor(cn) { return }
+                        }
+                        None => { return }
+                    }
+                }
+                if !self.tg_call_args_uncertain(&(*re)) { return }
+                let r = self.lookup_local(name)
+                if r < 0 { return }
+                let ns = self.struct_layout_slot_count(st)
+                var i: i64 = 0
+                while i < ns && i < 128 {
+                    if self.lookup_variance_for_field(r, i) >= 0 { return }
+                    i = i + 1
+                }
+                let saved = TG_DROP_NAME
+                TG_DROP_NAME = cn
+                tg_taint(name)
+                TG_DROP_NAME = saved
+            }
+            None => {}
+        }
+    }
+
+    fn tg_dispatch_query(self, kind: i64, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        if kind == 0 { return self.lower_variance_of_call_ref(&e.args) }
+        if kind == 1 { return self.lower_covariance_of_call_ref(&e.args) }
+        if kind == 2 { return self.lower_uncertainty_of_call_ref(&e.args) }
+        if kind == 3 { return self.lower_sensitivity_of_call_ref(&e.args) }
+        if kind == 4 { return self.lower_hessian_of_call_ref(&e.args) }
+        self.lower_second_order_mean_call_ref(&e.args)
+    }
+
+    // An epistemic query whose argument's uncertainty would be dropped by a
+    // call the compiler cannot differentiate is refused, never answered 0.
+    fn tg_checked_query(self, kind: i64, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        let saved = TG_DROP
+        TG_DROP = 0
+        let r = self.tg_dispatch_query(kind, e)
+        var lo = r.0
+        if TG_DROP == 1 && !lo.probe_mode {
+            print("error: ")
+            if kind == 0 { print("variance_of") }
+            if kind == 1 { print("covariance_of") }
+            if kind == 2 { print("uncertainty_of") }
+            if kind == 3 { print("sensitivity_of") }
+            if kind == 4 { print("hessian_of") }
+            if kind == 5 { print("second_order_mean") }
+            print(" in `")
+            print(str_from_bytes((*lo.current_func).name.buf, (*lo.current_func).name.len))
+            print("` depends on the call to `")
+            print(str_from_bytes(TG_DROP_NAME.buf, TG_DROP_NAME.len))
+            print("`, whose uncertainty the compiler cannot propagate; refused instead of reading 0 (KL-11)\n")
+            lo = lo.report_error_at(10840)
+        }
+        TG_DROP = saved
+        (lo, r.1)
+    }
+
+    // `let f = g` with g a named function (not a local): remember the alias
+    // for tg_resolve_callee.
+    fn tg_note_fn_alias(self, name: Name, rhs: &Option<Box<Expr> >) with Mut, Panic, Div, Alloc {
+        match *rhs {
+            Some(re) => {
+                if (*re).kind != ExprKind::ExprIdent { return }
+                if self.lookup_local((*re).name) >= 0 && !ir_name_eq((*re).name, name) { return }
+                if lowerer_lookup_fn_id_by_name_ref(&self, (*re).name) < 0 { return }
+                if !(fo_inline_known((*re).name) || tg_find(ir_intern_name((*re).name)) >= 0) { return }
+                if TG_FNALIAS_N >= 32 { return }
+                TG_FNALIAS_LOCAL[TG_FNALIAS_N as usize] = ir_intern_name(name)
+                TG_FNALIAS_FN[TG_FNALIAS_N as usize] = ir_intern_name((*re).name)
+                TG_FNALIAS_N = TG_FNALIAS_N + 1
+            }
+            None => {}
+        }
+    }
+
+    // The callee of a call in the variance walk. A local bound to a named
+    // function (`let f = add2; f(x, y)`) is that function, so the transfer,
+    // re-lowering and clone paths see through the indirection.
+    fn tg_resolve_callee(self, ce: &Expr) -> Name with Mut, Panic, Div, Alloc {
+        let raw = self.expr_to_callee_name_ref(ce)
+        if (*ce).kind == ExprKind::ExprIdent && self.lookup_local((*ce).name) >= 0 {
+            let cfid = self.lookup_local_closure_fn_id((*ce).name)
+            if cfid >= 0 && cfid < (*self.module).fn_count {
+                let nm = ir_fn_get(&(*self.module), cfid as usize).name
+                if fo_inline_known(nm) || tg_find(ir_intern_name(nm)) >= 0 { return nm }
+            }
+            let lid = ir_intern_name((*ce).name)
+            var ai = TG_FNALIAS_N - 1
+            while ai >= 0 {
+                if TG_FNALIAS_LOCAL[ai as usize] == lid { return ir_name_at(TG_FNALIAS_FN[ai as usize]) }
+                ai = ai - 1
+            }
+        }
+        raw
+    }
+
+    // The call `e` (named or method) has an argument or receiver that can
+    // carry uncertainty.
+    fn tg_call_args_uncertain(self, e: &Expr) -> bool with Mut, Panic, Div, Alloc {
+        if (*e).kind == ExprKind::ExprMethodCall {
+            match (*e).left {
+                Some(r) => { if self.tg_expr_maybe_uncertain(&(*r), 0) { return true } }
+                None => {}
+            }
+        }
+        var ac = &(*e).args
+        while true {
+            match *ac {
+                Some(al) => {
+                    if self.tg_expr_maybe_uncertain(&(*al).head, 0) { return true }
+                    ac = &(*al).tail
+                }
+                None => break
+            }
+        }
+        false
     }
 
     // A struct argument must name a local (`p`, `&p`, `&!p`): the caller
@@ -27625,7 +27880,7 @@ impl Lowerer {
         }
         match (*e).left {
             Some(callee_expr) => {
-                let callee_name = self.expr_to_callee_name_ref(&(*callee_expr))
+                let callee_name = self.tg_resolve_callee(&(*callee_expr))
                 if ir_name_is_measure(callee_name) {
                     let unc_pair = self.lower_measure_uncertainty_arg_ref(&(*e).args)
                     var lo = unc_pair.0
@@ -27655,10 +27910,16 @@ impl Lowerer {
                     return lo_x.fo_emit_var_from_sens()
                 }
                 // #1706: not in the transfer table -- re-lower a pure helper inline.
+                // The re-lowering is speculative: a mark raised inside a paste
+                // that is then refused belongs to code that never runs.
+                let drop_before = TG_DROP
+                TG_DROP = 0
                 let inl0 = lo_x.fo_inline_call_variance(callee_name, &(*e).args)
                 if inl0.1 >= 0 {
+                    if drop_before == 1 { TG_DROP = 1 }
                     return inl0
                 }
+                TG_DROP = drop_before
                 // Second order on and the body refused: the clone's first-order row.
                 let inl = inl0.0.tg_call_variance(e, true)
                 if inl.1 >= 0 {
@@ -27669,8 +27930,10 @@ impl Lowerer {
                     if cv.1 >= 0 {
                         return cv
                     }
+                    if FO_INLINE_TRUNCATED == 0 && cv.0.expr_result_is_float_ref(e) && cv.0.tg_call_args_uncertain(e) { tg_mark_drop(callee_name) }
                     return (cv.0.fo_clear_expr_sens().so_clear_expr_hess(), -1)
                 }
+                if FO_INLINE_TRUNCATED == 0 && inl.0.expr_result_is_float_ref(e) && inl.0.tg_call_args_uncertain(e) { tg_mark_drop(callee_name) }
                 return (inl.0.fo_clear_expr_sens().so_clear_expr_hess(), -1)
             }
             _ => {}
@@ -27681,6 +27944,19 @@ impl Lowerer {
     fn lower_expr_variance_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         if (*e).kind == ExprKind::ExprCall {
             return self.lower_call_expr_variance_ref(e)
+        }
+        if TG_TAINT_N > 0 {
+            // A local bound from a dropped walk carries the mark into this one.
+            if (*e).kind == ExprKind::ExprIdent && tg_tainted((*e).name) {
+                tg_mark_drop(tg_taint_callee((*e).name))
+            } else if (*e).kind == ExprKind::ExprFieldAccess {
+                match (*e).left {
+                    Some(fb) => {
+                        if (*fb).kind == ExprKind::ExprIdent && tg_tainted((*fb).name) { tg_mark_drop(tg_taint_callee((*fb).name)) }
+                    }
+                    None => {}
+                }
+            }
         }
         if (*e).kind == ExprKind::ExprMethodCall && TG_SITE_N > 0 {
             // A method call that went through its tangent clone.
@@ -27708,7 +27984,7 @@ impl Lowerer {
         if (*e).kind == ExprKind::ExprCall {
             match (*e).left {
                 Some(callee_expr) => {
-                    let callee_name = self.expr_to_callee_name_ref(&(*callee_expr))
+                    let callee_name = self.tg_resolve_callee(&(*callee_expr))
                     if ir_name_is_measure(callee_name) {
                         let unc_pair = self.lower_measure_uncertainty_arg_ref(&(*e).args)
                         var lo = unc_pair.0
@@ -27737,10 +28013,15 @@ impl Lowerer {
                     if lo_x.fo_expr_has_sens() {
                         return lo_x.fo_emit_var_from_sens()
                     }
+                    // Speculative re-lowering: see lower_call_expr_variance_ref.
+                    let drop_before = TG_DROP
+                    TG_DROP = 0
                     let inl0 = lo_x.fo_inline_call_variance(callee_name, &(*e).args)
                     if inl0.1 >= 0 {
+                        if drop_before == 1 { TG_DROP = 1 }
                         return inl0
                     }
+                    TG_DROP = drop_before
                     // Second order on and the body refused: the clone's first-order row.
                     let inl = inl0.0.tg_call_variance(e, true)
                     if inl.1 >= 0 {
@@ -27751,8 +28032,10 @@ impl Lowerer {
                         if cv.1 >= 0 {
                             return cv
                         }
+                        if FO_INLINE_TRUNCATED == 0 && cv.0.expr_result_is_float_ref(e) && cv.0.tg_call_args_uncertain(e) { tg_mark_drop(callee_name) }
                         return (cv.0.fo_clear_expr_sens().so_clear_expr_hess(), -1)
                     }
+                    if FO_INLINE_TRUNCATED == 0 && inl.0.expr_result_is_float_ref(e) && inl.0.tg_call_args_uncertain(e) { tg_mark_drop(callee_name) }
                     return (inl.0.fo_clear_expr_sens().so_clear_expr_hess(), -1)
                 }
                 _ => {}
@@ -27797,10 +28080,15 @@ impl Lowerer {
             return z
         }
         if (*e).kind == ExprKind::ExprFieldAccess {
+            // Speculative re-lowering: marks raised in a refused paste do not count.
+            let fdrop_inl_let = TG_DROP
+            TG_DROP = 0
             let inl_let = self.fo_inline_field_chain(e)
             if inl_let.1 >= 0 {
+                if fdrop_inl_let == 1 { TG_DROP = 1 }
                 return inl_let
             }
+            TG_DROP = fdrop_inl_let
             if ir_name_eq_lit((*e).name, "value") {
                 match (*e).left {
                     Some(base_expr) => {
@@ -27853,13 +28141,36 @@ impl Lowerer {
             // #1706: the chain may be rooted at a call rather than a local. A
             // registered struct-returning helper is re-lowered inline and the
             // field projected out of its tail literal; otherwise the ctor table.
+            // Speculative re-lowering: marks raised in a refused paste do not count.
+            let fdrop_cinl = TG_DROP
+            TG_DROP = 0
             let cinl = self.fo_inline_field_chain(e)
             if cinl.1 >= 0 {
+                if fdrop_cinl == 1 { TG_DROP = 1 }
                 return cinl
             }
+            TG_DROP = fdrop_cinl
             let cpair = cinl.0.fo_ctor_chain_apply(e)
             if cpair.1 >= 0 {
                 return cpair
+            }
+            // A field of a call result whose uncertainty nothing above could
+            // carry (a struct return the clones do not cover yet).
+            var froot: &Expr = e
+            var fdepth: i64 = 0
+            while (*froot).kind == ExprKind::ExprFieldAccess && fdepth < 16 {
+                match (*froot).left {
+                    Some(fb) => { froot = &(*fb) }
+                    None => { fdepth = 16 }
+                }
+                fdepth = fdepth + 1
+            }
+            if ((*froot).kind == ExprKind::ExprCall || (*froot).kind == ExprKind::ExprMethodCall) && self.tg_call_args_uncertain(froot) {
+                tg_mark_drop((*froot).name)
+                match (*froot).left {
+                    Some(fc) => { if (*froot).kind == ExprKind::ExprCall && (*fc).kind == ExprKind::ExprIdent { TG_DROP_NAME = (*fc).name } }
+                    None => {}
+                }
             }
             return (self.fo_clear_expr_sens().so_clear_expr_hess(), -1)
         }
@@ -27873,21 +28184,28 @@ impl Lowerer {
                         if tname.len > 0 {
                             let mangled = ir_mangle_method_name(tname, (*e).name)
                             let no_path: [Name; 8] = [ir_empty_name(); 8]
+                            let mdrop_before = TG_DROP
+                            TG_DROP = 0
                             let minl = self.fo_inline_call_variance_ex(mangled, &(*e).args, (*recv).name, true, no_path, 0)
                             if minl.1 >= 0 {
+                                if mdrop_before == 1 { TG_DROP = 1 }
                                 return minl
                             }
+                            TG_DROP = mdrop_before
                             // Second order on and the body refused: the clone's first-order row.
                             let mtg = minl.0.tg_call_variance(e, true)
                             if mtg.1 >= 0 {
                                 return mtg
                             }
+                            if FO_INLINE_TRUNCATED == 0 && mtg.0.expr_result_is_float_ref(e) && mtg.0.tg_call_args_uncertain(e) { tg_mark_drop(mangled) }
                             return (mtg.0.fo_clear_expr_sens().so_clear_expr_hess(), -1)
                         }
                     }
                 }
                 _ => {}
             }
+            if self.expr_result_is_float_ref(e) && self.tg_call_args_uncertain(e) { tg_mark_drop((*e).name) }
+            return (self.fo_clear_expr_sens().so_clear_expr_hess(), -1)
         }
         if (*e).kind == ExprKind::ExprMatch {
             return self.lower_match_variance_ref(e)
@@ -35198,7 +35516,11 @@ impl Lowerer {
             match s.expr {
                 Some(rhs_v) => {
                     if lo.expr_result_is_float_ref(&(*rhs_v)) {
+                        let tgd_let = TG_DROP
+                        TG_DROP = 0
                         let vpair2 = lo.lower_expr_variance_ref(&(*rhs_v))
+                        if TG_DROP == 1 { tg_taint(s.name) }
+                        TG_DROP = tgd_let
                         lo = vpair2.0
                         if vpair2.1 >= 0 {
                             lo = lo.bind_local_variance_reg(s.name, vpair2.1)
@@ -35213,6 +35535,8 @@ impl Lowerer {
                 _ => {}
             }
         }
+        lo.tg_note_struct_let(s.name, &s.expr)
+        lo.tg_note_fn_alias(s.name, &s.expr)
         if FO_LOGN_ACTIVE != 0 {
             fo_logn_note(s.name, FO_LOGN_U, FO_LOGN_V)
             FO_LOGN_ACTIVE = 0
@@ -35587,7 +35911,11 @@ impl Lowerer {
                         lo = lo.bind_local_scalar_kind(s.name, 2)
                     }
                 } else {
+                    let tgd_var = TG_DROP
+                    TG_DROP = 0
                     let var_pair = lo.lower_expr_variance_ref(&(*expr_box_var))
+                    if TG_DROP == 1 { tg_taint(s.name) }
+                    TG_DROP = tgd_var
                     lo = var_pair.0
                     if var_pair.1 >= 0 {
                         lo = lo.bind_local_variance_reg(s.name, var_pair.1)
@@ -36404,7 +36732,16 @@ impl Lowerer {
         var rhs_is_float: bool = false
         match s.expr {
             Some(rhs_expr_var) => {
+                let tgd_asg = TG_DROP
+                TG_DROP = 0
                 let rhs_var_pair = lo.lower_expr_variance_ref(&(*rhs_expr_var))
+                if TG_DROP == 1 {
+                    match s.target {
+                        Some(tg_tgt) => { if (*tg_tgt).kind == ExprKind::ExprIdent { tg_taint((*tg_tgt).name) } }
+                        _ => {}
+                    }
+                }
+                TG_DROP = tgd_asg
                 lo = rhs_var_pair.0
                 rhs_variance = rhs_var_pair.1
                 // An f128 slot never flips to f64 kind, whatever the RHS looks like.
@@ -40753,29 +41090,29 @@ impl Lowerer {
             return self.lower_knowledge_ctor_call_ref(e.span, &e.args)
         }
         if self.name_is_variance_of(callee_name) {
-            return self.lower_variance_of_call_ref(&e.args)
+            return self.tg_checked_query(0, e)
         }
         // sign(a, b) lowers the shared-interval contest. sign(x) is a normal call.
         if self.name_is_sign(callee_name) && count_expr_list_ref(&e.args) == 2 {
             return self.lower_sign_call_ref(&e.args)
         }
         if self.name_is_covariance_of(callee_name) {
-            return self.lower_covariance_of_call_ref(&e.args)
+            return self.tg_checked_query(1, e)
         }
         if self.name_is_uncertainty_of(callee_name) {
-            return self.lower_uncertainty_of_call_ref(&e.args)
+            return self.tg_checked_query(2, e)
         }
         if self.name_is_sensitivity_of(callee_name) {
-            return self.lower_sensitivity_of_call_ref(&e.args)
+            return self.tg_checked_query(3, e)
         }
         if self.name_is_hessian_of(callee_name) {
-            return self.lower_hessian_of_call_ref(&e.args)
+            return self.tg_checked_query(4, e)
         }
         if self.name_is_correlate(callee_name) {
             return self.lower_correlate_call_ref(&e.args)
         }
         if self.name_is_second_order_mean(callee_name) {
-            return self.lower_second_order_mean_call_ref(&e.args)
+            return self.tg_checked_query(5, e)
         }
         if self.contest_witness_kind_from_callee(callee_name) >= 0 {
             return self.lower_contest_witness_call(e.span, callee_name)
