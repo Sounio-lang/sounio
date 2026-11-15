@@ -2969,14 +2969,23 @@ fn nc_overflow_kind_text(kind: i64) -> string {
     else if kind == 5 { "u64 -" }
     else if kind == 6 { "u64 *" }
     else if kind == 7 { "i64 /" }
-    else { "i64 %" }
+    else if kind == 8 { "i64 %" }
+    else if kind == 9 { "i64 /" }
+    else if kind == 10 { "i64 %" }
+    else if kind == 11 { "u64 /" }
+    else { "u64 %" }
+}
+
+// Kinds 0-8 are overflows; 9-12 are a zero divisor (ADR-031 R2).
+fn nc_overflow_prefix(kind: i64) -> string {
+    if kind >= 9 { "sounio: division by zero (" } else { "sounio: integer overflow (" }
 }
 
 // The message for one kind, interned once per compile in the flat rodata.
 fn nc_intern_overflow_message(nc: &! NativeCompiler, kind: i64) with Mut, Panic, Div {
     if NC_OVF_MSG_OFF[kind as usize] >= 0 { return }
     let off = native_v2_rodata_len_into(nc)
-    nc_alloc_diag_append_ascii_into(nc, "sounio: integer overflow (")
+    nc_alloc_diag_append_ascii_into(nc, nc_overflow_prefix(kind))
     nc_alloc_diag_append_ascii_into(nc, nc_overflow_kind_text(kind))
     nc_alloc_diag_append_ascii_into(nc, ")\n")
     NC_OVF_MSG_OFF[kind as usize] = off
@@ -3019,10 +3028,11 @@ fn nc_emit_located_overflow_stub(nc: &! NativeCompiler, kind: i64, site: i64) ->
     let plen = srcmap_path_len(fid)
     if line <= 0 || col <= 0 || plen <= 0 { return false }
     let kind_text = nc_overflow_kind_text(kind)
-    let n = 26 + str_len(kind_text) + 5 + plen + 1 + nc_decimal_len(line) + 1 + nc_decimal_len(col) + 1
+    let prefix = nc_overflow_prefix(kind)
+    let n = str_len(prefix) + str_len(kind_text) + 5 + plen + 1 + nc_decimal_len(line) + 1 + nc_decimal_len(col) + 1
     nc_emit_byte(nc, 0xe8)
     nc_emit_u32_le(nc, n)                     // call over the message
-    nc_emit_ascii_inline(nc, "sounio: integer overflow (")
+    nc_emit_ascii_inline(nc, prefix)
     nc_emit_ascii_inline(nc, kind_text)
     nc_emit_ascii_inline(nc, ") at ")
     var pi: i64 = 0
@@ -3116,13 +3126,18 @@ fn nc_emit_carry_guard(nc: &! NativeCompiler, kind: i64) with Mut, Panic, Div {
 //   neg  rdx             48 F7 DA       (OF set iff rax == i64::MIN)
 //   jo   trap            0F 80 rel32
 fn nc_emit_div_guard(nc: &! NativeCompiler, is_signed: bool, kind: i64) with Mut, Panic, Div {
-    NC_V2_OVERFLOW_GUARD_USED = 1
+    // kind: 7 i64 /, 8 i64 %, 11 u64 /, 12 u64 %. A zero divisor reports as
+    // kind 9-12 ("division by zero"), MIN / -1 as kind 7 or 8 ("integer
+    // overflow"); both guards share the operation's source location.
+    let site = NC_CUR_SRC_SITE
+    let zero_kind = if is_signed { kind + 2 } else { kind }
     nc_emit_byte(nc, 0x48)
     nc_emit_byte(nc, 0x85)
     nc_emit_byte(nc, 0xc9)
     let jz_pos = (*nc).code.len
     nc_emit_jz_rel32(nc)
-    nc_add_label_patch(nc, jz_pos + 2, nc_v2_overflow_trap_label())
+    nc_record_overflow_site(nc, jz_pos + 2, zero_kind)
+    NC_CUR_SRC_SITE = site
     if is_signed {
         nc_emit_byte(nc, 0x48)
         nc_emit_byte(nc, 0x83)
@@ -12194,7 +12209,7 @@ fn nc_emit_core_binop(nc: &! NativeCompiler, func: &IrFunction, instr_index: i64
         nc_core_load_temp_to_rax(nc, rhs)
         nc_emit_mov_reg_reg(nc, 1, 0)
         nc_core_load_temp_to_rax(nc, lhs)
-        nc_emit_div_guard(nc, false, 0 - 1)
+        nc_emit_div_guard(nc, false, 11)
         nc_emit_xor_rdx_rdx(nc)   // rdx = 0
         nc_emit_div_rcx(nc)                 // div rcx: rax = quotient, rdx = remainder
         nc_core_store_rax_to_temp(nc, dst)
@@ -12221,7 +12236,7 @@ fn nc_emit_core_binop(nc: &! NativeCompiler, func: &IrFunction, instr_index: i64
         nc_core_load_temp_to_rax(nc, rhs)
         nc_emit_mov_reg_reg(nc, 1, 0)
         nc_core_load_temp_to_rax(nc, lhs)
-        nc_emit_div_guard(nc, false, 0 - 1)
+        nc_emit_div_guard(nc, false, 12)
         nc_emit_xor_rdx_rdx(nc)   // rdx = 0
         nc_emit_div_rcx(nc)                 // rdx = lhs % rhs (unsigned)
         nc_emit_mov_rax_rdx(nc)

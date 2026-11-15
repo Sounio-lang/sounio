@@ -143,7 +143,11 @@ expect_trap() {
   if [[ -n "$msg" ]]; then
     local opline=$(( $(wc -l < "$OUT/$name.sio") - 2 ))
     local esc; esc=$(printf '%s' "$msg" | sed 's/[][\\.*^$+?(){}|/]/\\&/g')
-    local want="^sounio: integer overflow \\($esc\\)"
+    local prefix="integer overflow"
+    case "$msg" in
+      zero\ *) prefix="division by zero"; msg="${msg#zero }"; esc=$(printf '%s' "$msg" | sed 's/[][\\.*^$+?(){}|/]/\\&/g') ;;
+    esac
+    local want="^sounio: $prefix \\($esc\\)"
     case "$msg" in
       i64*|u64*) want="$want at .*$name\\.sio:$opline:[0-9]+\$" ;;
       *) want="$want( at .*$name\\.sio:$opline:[0-9]+)?\$" ;;
@@ -214,10 +218,10 @@ expect_trap i64_neg_min "-i64::MIN" "i64 unary -"
 # (E056/E057) nor constant propagation sees them.
 probe div_zero_i64 i64 'let z: i64 = id(0)
   println(id(7) / z)'
-expect_trap div_zero_i64 "7 / 0 (i64)"
+expect_trap div_zero_i64 "7 / 0 (i64)" "zero i64 /"
 probe rem_zero_i64 i64 'let z: i64 = id(0)
   println(id(7) % z)'
-expect_trap rem_zero_i64 "7 % 0 (i64)"
+expect_trap rem_zero_i64 "7 % 0 (i64)" "zero i64 %"
 probe div_min_i64 i64 'let m: i64 = id(-9223372036854775807) - 1
   println(m / id(-1))'
 expect_trap div_min_i64 "i64::MIN / -1" "i64 /"
@@ -226,7 +230,7 @@ probe rem_min_i64 i64 'let m: i64 = id(-9223372036854775807) - 1
 expect_trap rem_min_i64 "i64::MIN % -1" "i64 %"
 probe div_zero_u64 u64 'let z: u64 = id(0)
   println(id(7) / z)'
-expect_trap div_zero_u64 "7 / 0 (u64)"
+expect_trap div_zero_u64 "7 / 0 (u64)" "zero u64 /"
 probe div_min_i32 i32 'let m: i32 = id(-2147483647) - 1
   println(m / id(-1))'
 expect_trap div_min_i32 "i32::MIN / -1"
