@@ -31,7 +31,8 @@
 // blood concentration divided by the blood-to-plasma ratio, hepatic clearance
 // is an intrinsic clearance acting in liver tissue, renal clearance acts on
 // the arterial plasma reaching the kidney, and oral drug enters gut tissue so
-// that first-pass extraction is produced by the portal route.
+// that first-pass extraction, in the gut wall and in the liver, is produced by
+// the portal route.
 //
 // Equations (C blood concentrations, T tissue concentrations, bp blood to
 // plasma ratio, kp tissue to plasma partition, ps permeability-surface
@@ -47,7 +48,7 @@
 //   liver       V_v dC/dt = Q_ha C_art + sum_portal Q_j C_j - Q_h C - exchange
 //   tissue i    V_t dT/dt = exchange
 //               liver: - (clint + clform) fu T / kp
-//               gut:   + oral(t)
+//               gut:   + oral(t) - clint_gut fu T / kp
 //
 // with Q_h = Q_ha + Q_gut + Q_spleen + Q_pancreas and CO the sum of the
 // arterial flows (q[1] is the hepatic artery; q[5] is not read).
@@ -81,6 +82,7 @@ pub struct Circ28Params {
     pub fu: f64,             // unbound fraction in plasma
     pub clint: f64,          // L/h, hepatic intrinsic clearance of unbound drug
     pub clform: f64,         // L/h, hepatic intrinsic clearance forming a tracked metabolite
+    pub clint_gut: f64,      // L/h, gut-wall intrinsic clearance of unbound drug
     pub cl_renal: f64,       // L/h, renal clearance referred to plasma
     pub cl_plasma: f64,      // L/h, clearance from venous plasma (e.g. proteolysis)
 }
@@ -96,6 +98,7 @@ pub struct Circ28Elim {
     pub formed: f64,
     pub renal: f64,
     pub plasma: f64,
+    pub gut: f64,
     pub auc_ven: f64,
     pub auc_art: f64,
 }
@@ -109,6 +112,7 @@ pub struct Circ28Sys {
     pub k_form: f64,
     pub k_ren: f64,          // mass rate = k_ren * C_art
     pub k_pla: f64,          // mass rate = k_pla * C_ven
+    pub k_gut: f64,          // mass rate = k_gut * T_gut
 }
 
 pub fn circ28_state_zero() -> Circ28State {
@@ -116,7 +120,7 @@ pub fn circ28_state_zero() -> Circ28State {
 }
 
 pub fn circ28_elim_zero() -> Circ28Elim {
-    Circ28Elim { hepatic: 0.0, formed: 0.0, renal: 0.0, plasma: 0.0, auc_ven: 0.0, auc_art: 0.0 }
+    Circ28Elim { hepatic: 0.0, formed: 0.0, renal: 0.0, plasma: 0.0, gut: 0.0, auc_ven: 0.0, auc_art: 0.0 }
 }
 
 pub fn circ28_iv(i: i32) -> i32 { return 2 + 2 * (i - 1) }
@@ -203,6 +207,40 @@ pub fn circ28_hepatic_extraction(p: Circ28Params) -> f64 with Div {
     return cl_eff / (qh + cl_eff)
 }
 
+// Gut wall. Drug in gut tissue is metabolised at clint_gut * fu * T_gut / kp_gut,
+// the same unbound driving concentration as in the liver. From the gut
+// balance with no drug arriving by the artery, the fraction of an oral dose
+// that leaves the gut wall unchanged is
+//   Fg = Qg / (Qg + clint_gut fu),  Qg = Q_gut bp ps_gut / (ps_gut + Q_gut bp),
+// the form of the Qgut model (Yang et al. 2007) with the villous flow played
+// by Q_gut bp and the permeability clearance by ps_gut. (That model is
+// usually written with an unbound fraction of 1 in the enterocyte; the same
+// value of Fg is obtained here by supplying clint_gut / fu.)
+pub fn circ28_gut_availability(p: Circ28Params) -> f64 with Div {
+    let cg = p.clint_gut * p.fu
+    if !(cg > 0.0) { return 1.0 }
+    let qb = p.q[8] * p.bp
+    let qg = qb * p.ps[8] / (p.ps[8] + qb)
+    return qg / (qg + cg)
+}
+
+// Extraction ratio of the gut wall for drug arriving by the artery.
+pub fn circ28_gut_extraction(p: Circ28Params) -> f64 with Div {
+    let cg = p.clint_gut * p.fu
+    if !(cg > 0.0) { return 0.0 }
+    let cl_eff = (p.ps[8] * cg / (p.ps[8] + cg)) / p.bp
+    return cl_eff / (p.q[8] + cl_eff)
+}
+
+// Blood clearance (L/h) of the gut wall and the liver in series for drug in
+// arterial blood: the gut removes Q_gut Eg, and the liver removes Eh of what
+// reaches it, Q_h - Q_gut Eg.
+pub fn circ28_splanchnic_clearance(p: Circ28Params) -> f64 with Div {
+    let eg = circ28_gut_extraction(p)
+    let eh = circ28_hepatic_extraction(p)
+    return p.q[8] * eg + eh * (circ28_q_hepatic(p) - p.q[8] * eg)
+}
+
 // Adds a to entry (r, c) of a 28 x 28 row-major matrix.
 fn circ28_add(m: &![f64; 784], r: i32, c: i32, a: f64) with Mut {
     (*m)[r * 28 + c] = (*m)[r * 28 + c] + a
@@ -262,6 +300,10 @@ fn circ28_fill_rate_matrix(p: Circ28Params, a: &![f64; 784]) with Mut, Div {
             } else {
                 circ28_add(a, ven, iv, qi / p.v_ven)
             }
+            if i == 8 {
+                // gut-wall metabolism on unbound tissue concentration
+                circ28_add(a, it, it, 0.0 - p.clint_gut * p.fu / (kp * vt))
+            }
             if i == 2 {
                 // renal clearance removes drug from the arterial plasma inflow
                 circ28_add(a, iv, art, 0.0 - (p.cl_renal / p.bp) / vv)
@@ -313,10 +355,11 @@ pub fn circ28_prepare(p: Circ28Params, dt: f64, sys: &!Circ28Sys) with Mut, Div 
     (*sys).k_form = p.clform * p.fu / p.kp[1]
     (*sys).k_ren = p.cl_renal / p.bp
     (*sys).k_pla = p.cl_plasma / p.bp
+    (*sys).k_gut = p.clint_gut * p.fu / p.kp[8]
 }
 
 pub fn circ28_sys_zero() -> Circ28Sys {
-    Circ28Sys { lu: [0.0; 784], a: [0.0; 784], dt: 0.0, k_hep: 0.0, k_form: 0.0, k_ren: 0.0, k_pla: 0.0 }
+    Circ28Sys { lu: [0.0; 784], a: [0.0; 784], dt: 0.0, k_hep: 0.0, k_form: 0.0, k_ren: 0.0, k_pla: 0.0, k_gut: 0.0 }
 }
 
 // k <- (I - gamma dt A)^-1 (A y + u), in place in k; u has two entries.
@@ -400,6 +443,7 @@ pub fn circ28_step(
     let x1_ven = (*s).x[0] + g * dt * k1[0]
     let x1_art = (*s).x[1] + g * dt * k1[1]
     let x1_tl = (*s).x[3] + g * dt * k1[3]
+    let x1_tg = (*s).x[17] + g * dt * k1[17]
     r = 0
     while r < 28 {
         (*s).x[r] = (*s).x[r] + w1 * k1[r] + w2 * k2[r]
@@ -408,12 +452,14 @@ pub fn circ28_step(
     let q_ven = w1 * x1_ven + w2 * (*s).x[0]
     let q_art = w1 * x1_art + w2 * (*s).x[1]
     let q_tl = w1 * x1_tl + w2 * (*s).x[3]
+    let q_tg = w1 * x1_tg + w2 * (*s).x[17]
     (*el).auc_ven = (*el).auc_ven + q_ven
     (*el).auc_art = (*el).auc_art + q_art
     (*el).hepatic = (*el).hepatic + (*sys).k_hep * q_tl
     (*el).formed = (*el).formed + (*sys).k_form * q_tl
     (*el).renal = (*el).renal + (*sys).k_ren * q_art
     (*el).plasma = (*el).plasma + (*sys).k_pla * q_ven
+    (*el).gut = (*el).gut + (*sys).k_gut * q_tg
 }
 
 // Reference adult male (ICRP Publication 89, 2002: 73 kg, cardiac output
@@ -456,6 +502,7 @@ pub fn circ28_physiology() -> Circ28Params {
         fu: 1.0,
         clint: 0.0,
         clform: 0.0,
+        clint_gut: 0.0,
         cl_renal: 0.0,
         cl_plasma: 0.0,
     }
