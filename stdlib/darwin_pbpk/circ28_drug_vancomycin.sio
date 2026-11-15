@@ -106,6 +106,35 @@
 //   4.7-11.2 h; Matzke 1984 CL = 3.66 + 0.689 CLcr; Rodvold 1988 total clearance by renal
 //   function group. Criteria and expectations are in tests/run-pass/circ28_drug_vancomycin.sio.
 
+//
+// ROUND 3 (kernel unchanged): FAST = vascular + interstitial, DEEP = the remainder of V_ss.
+// Read from circ28.sio: vascular state volume v_i vf_i (blood concentration C_i), tissue state volume
+// v_i (1 - vf_i) (T_i), exchange ps_i (C_i/bp - T_i/kp_i), circ28_blood_volume = pools + sum v_i vf_i,
+// circ28_vss_plasma = bp x blood_volume + sum v_i (1 - vf_i) kp_i. Per organ, with vas_i the kernel's
+// ICRP vascular fraction, int_i = share_i (1 - vas_i) the interstitial fraction of the organ volume and r
+// the interstitial:plasma total concentration ratio at equilibrium:
+//   flow-limited state: content at plasma concentration Cp is v_i (vas_i bp + int_i r) Cp = v_i vf'_i bp Cp
+//     => vf'_i = vas_i + int_i r / bp. Plasma-referred fast volume = bp (pools + sum v_i vf'_i)
+//     = bp x 5.3 + r sum v_i int_i = 11.01 L (the term circ28_vss_plasma calls bp x blood volume).
+//   permeability-limited state: bookkeeping volume v_i (1 - vf'_i), kp_i = kd int_i / (1 - vf'_i), capacity
+//     kd v_i int_i; kd = (V_ss - fast volume) / sum v_i int_i = 4.663 (closed form; deep capacity 48.12 L,
+//     distributed like the interstitium, as in rounds 1-2). ps_i = 20 pssc Q_i, pssc refitted to the pooled
+//     terminal half-life: 0.02515.
+//   Mass balance, V_ss, CL = cl_renal + cl_plasma and AUC = dose/CL do not depend on the split (asserted).
+//  r       0.784      0.12    2       r = fu + (1 - fu) K, fu 0.70 (owner), K = 0.28 whole-body interstitial:
+//                                     plasma albumin ratio (Levitt 2003 BMC Clin Pharmacol 3:3, PMID 12890292,
+//                                     full text; fitted there to six beta-lactams, alpha = 1.1). ASSUMPTION for
+//                                     vancomycin (binds IgA as well; 1449 Da may see an excluded volume); u is
+//                                     judgment covering fu 0.45-0.72 and that exclusion
+//  int_i   pattern    11.8 %  2       interstitial share of extravascular volume, swarm physiology_primary.md s4
+//                                     (PK-Sim 11.2 database fractions, secondary; Kawai 1994 PMID 7791036 and
+//                                     Shah & Betts 2012 PMID 22143261 not opened). Sum on circ28 volumes 10.32 L;
+//                                     Levitt 2003 (human, full text, tables not in the extraction): extracellular
+//                                     17.45 L incl. plasma water (read so), i.e. about 14.5 L interstitial. One
+//                                     scale factor (nominal 1), u = (14.535/10.32 - 1)/sqrt(12) = 0.118
+// OUTCOME: the reinterpretation changes the profile after 0.25 h by under 1 % (see the test header): the
+// distribution failure of rounds 1-2 is not caused by the single well-mixed tissue space.
+
 use darwin_pbpk::circ28::*
 use darwin_pbpk::circ28_kp::*
 use darwin_pbpk::circ28_drug::*
@@ -190,7 +219,10 @@ pub fn va_w_alo() -> f64 { return 0.25 }
 pub fn va_w_ahi() -> f64 { return 3.0 }
 
 // Stored result of the offline bisection (re-checked by the test)
-pub fn va_pssc_fit() -> f64 { return 0.033943124420225 }
+// Round 2 value (single well-mixed tissue space), kept for the record
+pub fn va_pssc_round2() -> f64 { return 0.033943124420225 }
+// Round 3 (fast + deep space): offline bisection on the pooled terminal half-life
+pub fn va_pssc_fit() -> f64 { return 0.02515336218953 }
 
 // ---- the interstitial pattern ------------------------------------------------
 // int/(1 - vas) of physiology_primary.md s4, organs in circ28 order 1..13
@@ -210,15 +242,55 @@ pub fn va_int_share(i: i32) -> f64 {
     return 0.164
 }
 
-pub fn va_pattern(out: &![f64; 14]) with Mut {
+// ---- ROUND 3: fast (vascular + interstitial) space and deep space ----------------------------
+// Unbound fraction and whole-body interstitial:plasma albumin ratio used ONLY for r.
+pub fn va_fu_bind() -> f64 { return 0.70 }
+pub fn va_k_alb() -> f64 { return 0.28 }
+// r: interstitial:plasma total concentration ratio at equilibrium, r = fu + (1 - fu) K
+pub fn va_r_int() -> f64 { return va_fu_bind() + (1.0 - va_fu_bind()) * va_k_alb() }
+pub fn va_u_r() -> f64 { return 0.12 }
+// Scale of the interstitial volumes (1 = the PK-Sim-derived pattern). u: the pattern sums to
+// about 10 L, a human primary analysis (Levitt 2003) gives about 14 L: range/sqrt(12) relative
+// to the pattern, computed by va_u_isc from the pattern's own sum.
+pub fn va_isc_nom() -> f64 { return 1.0 }
+pub fn va_levitt_ecf() -> f64 { return 17.45 }
+pub fn va_plasma_water() -> f64 { return 5.3 * 0.55 }
+// interstitial fraction of the whole organ volume: share x (1 - vas), vas = kernel vf (ICRP)
+pub fn va_int_frac(i: i32, vas: f64) -> f64 { return va_int_share(i) * (1.0 - vas) }
+// sum of v_i int_i (L) on the circ28 reference volumes
+pub fn va_int_volume() -> f64 with Mut, Div {
+    let p = circ28_physiology()
+    var s = 0.0
     var i: i32 = 1
     while i < 14 {
-        (*out)[i] = va_int_share(i)
+        s = s + p.v[i] * va_int_frac(i, p.vf[i])
+        i = i + 1
+    }
+    return s
+}
+pub fn va_u_isc() -> f64 with Mut, Div {
+    let vi = va_int_volume()
+    let hi = (va_levitt_ecf() - va_plasma_water()) / vi
+    return (hi - 1.0) / 3.4641016151377544
+}
+
+// Applies the round-3 reinterpretation to p (bp, ps and clearances already set): vf_i becomes
+// vas_i + isc int_i r / bp and kp_i = kd int_i isc / (1 - vf_i), so that the deep capacity is
+// kd x isc x v_i int_i. pat receives int_i isc / (1 - vf_i) (the pattern kd multiplies).
+pub fn va_apply3(p: &!Circ28Params, kd: f64, r: f64, isc: f64, pat: &![f64; 14]) with Mut, Div {
+    var i: i32 = 1
+    while i < 14 {
+        let vas = (*p).vf[i]
+        let fi = isc * va_int_frac(i, vas)
+        let vfe = vas + fi * r / (*p).bp
+        (*p).vf[i] = vfe
+        (*pat)[i] = fi / (1.0 - vfe)
+        (*p).kp[i] = kd * fi / (1.0 - vfe)
         i = i + 1
     }
 }
 
-pub fn va_params(th: &[f64; 18]) -> Circ28Params with Mut, Div, Panic {
+pub fn va_params3(th: &[f64; 18], r: f64, isc: f64) -> Circ28Params with Mut, Div, Panic {
     var t2: [f64; 18] = [0.0; 18]
     var k: i32 = 0
     while k < 18 {
@@ -227,21 +299,34 @@ pub fn va_params(th: &[f64; 18]) -> Circ28Params with Mut, Div, Panic {
     }
     var p = circ28_drug_params_theta(t2)
     var pat: [f64; 14] = [0.0; 14]
-    va_pattern(&!pat)
-    var i: i32 = 1
-    while i < 14 {
-        p.kp[i] = (*th)[CD_KPSC] * pat[i]
-        i = i + 1
-    }
+    va_apply3(&!p, (*th)[CD_KPSC], r, isc, &!pat)
     return p
 }
 
-pub fn va_kpsc_for(bp: f64, vss: f64) -> f64 with Mut, Div, Panic {
+pub fn va_params(th: &[f64; 18]) -> Circ28Params with Mut, Div, Panic {
+    return va_params3(th, va_r_int(), va_isc_nom())
+}
+
+// plasma-referred volume of the fast space (L): bp x (pools + sum v_i vf'_i)
+pub fn va_fast_volume(bp: f64, r: f64, isc: f64) -> f64 with Mut, Div {
     var p = circ28_physiology()
     p.bp = bp
     var pat: [f64; 14] = [0.0; 14]
-    va_pattern(&!pat)
+    va_apply3(&!p, 1.0, r, isc, &!pat)
+    return bp * circ28_blood_volume(p)
+}
+
+// kd in closed form: (V_ss - fast volume) / sum v_i int_i isc
+pub fn va_kpsc_for3(bp: f64, vss: f64, r: f64, isc: f64) -> f64 with Mut, Div, Panic {
+    var p = circ28_physiology()
+    p.bp = bp
+    var pat: [f64; 14] = [0.0; 14]
+    va_apply3(&!p, 1.0, r, isc, &!pat)
     return circ28_kp_scale_for_vss(p, pat, vss)
+}
+
+pub fn va_kpsc_for(bp: f64, vss: f64) -> f64 with Mut, Div, Panic {
+    return va_kpsc_for3(bp, vss, va_r_int(), va_isc_nom())
 }
 
 // ---- profiles ---------------------------------------------------------------------
@@ -334,13 +419,18 @@ pub fn va_fit_kpsc_record(d: &!Circ28Drug) with Mut, Div, Panic, Epistemic {
     let bp = circ28_drug_value(d, CD_BP)
     let u_bp = cd_sqrt(circ28_drug_variance(d, CD_BP))
     let vss = va_obs_vss()
-    let k0 = va_kpsc_for(bp, vss)
+    let r = va_r_int()
+    let k0 = va_kpsc_for3(bp, vss, r, 1.0)
     let hb = 1.0e-3 * bp
     let hv = 1.0e-4 * vss
-    let dk_dbp = (va_kpsc_for(bp + hb, vss) - va_kpsc_for(bp - hb, vss)) / (2.0 * hb)
-    let dk_dv = (va_kpsc_for(bp, vss + hv) - va_kpsc_for(bp, vss - hv)) / (2.0 * hv)
-    let u = cd_sqrt(dk_dbp * dk_dbp * u_bp * u_bp + dk_dv * dk_dv * va_u_vss() * va_u_vss())
-    circ28_drug_set(d, CD_KPSC, k0, u, CD_STATUS_FITTED, "fitted to Vss 59.13 L (Matzke1984 midpoint) on the interstitial pattern; u from u(Vss), u(bp)")
+    let hr = 1.0e-3 * r
+    let hs = 1.0e-3
+    let dk_dbp = (va_kpsc_for3(bp + hb, vss, r, 1.0) - va_kpsc_for3(bp - hb, vss, r, 1.0)) / (2.0 * hb)
+    let dk_dv = (va_kpsc_for3(bp, vss + hv, r, 1.0) - va_kpsc_for3(bp, vss - hv, r, 1.0)) / (2.0 * hv)
+    let dk_dr = (va_kpsc_for3(bp, vss, r + hr, 1.0) - va_kpsc_for3(bp, vss, r - hr, 1.0)) / (2.0 * hr)
+    let dk_ds = (va_kpsc_for3(bp, vss, r, 1.0 + hs) - va_kpsc_for3(bp, vss, r, 1.0 - hs)) / (2.0 * hs)
+    let u = cd_sqrt(dk_dbp * dk_dbp * u_bp * u_bp + dk_dv * dk_dv * va_u_vss() * va_u_vss() + dk_dr * dk_dr * va_u_r() * va_u_r() + dk_ds * dk_ds * va_u_isc() * va_u_isc())
+    circ28_drug_set(d, CD_KPSC, k0, u, CD_STATUS_FITTED, "ROUND 3 deep-space scalar kd: fitted to Vss 59.13 L (Matzke1984 midpoint) after the fast space bp x blood + r x interstitium; u from u(Vss), u(bp), u(r), u(interstitial scale)")
 }
 
 pub fn va_v1_at(d: &Circ28Drug, pssc: f64) -> f64 with Mut, Div, Panic, Epistemic {
@@ -376,7 +466,7 @@ pub fn va_pssc_record(d: &!Circ28Drug) with Mut, Div, Panic, Epistemic {
     let slope = (va_t12_at(d, x + h) - va_t12_at(d, x - h)) / (2.0 * h)
     var sa = slope
     if sa < 0.0 { sa = 0.0 - sa }
-    circ28_drug_set(d, CD_PSSC, x, va_u_t12() / sa, CD_STATUS_FITTED, "ROUND 2: fitted to the pooled terminal half-life 7.69 h (Healy1987, Krogstad1980, Matzke1984 group I, Rotschafer1982); u from u(t1/2)/|dt1/2/dpssc|")
+    circ28_drug_set(d, CD_PSSC, x, va_u_t12() / sa, CD_STATUS_FITTED, "ROUND 3 refit to the pooled terminal half-life 7.69 h (Healy1987, Krogstad1980, Matzke1984 group I, Rotschafer1982); u from u(t1/2)/|dt1/2/dpssc|")
 }
 
 pub fn va_drug_into(d: &!Circ28Drug) with Mut, Div, Panic, Epistemic {
@@ -386,42 +476,40 @@ pub fn va_drug_into(d: &!Circ28Drug) with Mut, Div, Panic, Epistemic {
 }
 
 // ---- uncertainty budget with refit ------------------------------------------------------
-// Five inputs: 0 bp, 1 cl_ren (mL/min), 2 cl_nonrenal (mL/min), 3 V_ss obs (L), 4 terminal t1/2 obs (h).
-// Each evaluation rebuilds the record, refits kpsc in closed form and pssc by two chord corrections
-// on the terminal half-life (slope_v1 is now dt1/2/dpssc) (slope taken once at the nominal values), then runs 1000 mg over 1 h. Outputs: out[0]
-// AUC_inf (mg h/L), out[1] steady-state trough of 1 g over 1 h q12h (mg/L).
-pub fn va_u_inputs(u: &![f64; 5]) with Mut, Div {
+// Seven inputs: 0 bp, 1 cl_ren (mL/min), 2 cl_nonrenal (mL/min), 3 V_ss obs (L), 4 terminal t1/2 obs (h),
+// 5 r (interstitial:plasma ratio), 6 interstitial volume scale. Each evaluation rebuilds the parameters,
+// refits kd in closed form and pssc by two chord corrections on the terminal half-life (slope taken once
+// at the nominal values), then runs 1000 mg over 1 h. Outputs: out[0] AUC_inf (mg h/L), out[1] steady-
+// state trough of 1 g over 1 h q12h (mg/L).
+pub fn va_u_inputs(u: &![f64; 7]) with Mut, Div {
     (*u)[0] = va_u_bp()
     (*u)[1] = va_u_cl_ren_mlmin()
     (*u)[2] = va_u_cl_nr_mlmin()
     (*u)[3] = va_u_vss()
     (*u)[4] = va_u_t12()
+    (*u)[5] = va_u_r()
+    (*u)[6] = va_u_isc()
 }
-pub fn va_z_nominal(z: &![f64; 5]) with Mut, Div {
+pub fn va_z_nominal(z: &![f64; 7]) with Mut, Div {
     (*z)[0] = va_bp()
     (*z)[1] = va_cl_ren_mlmin()
     (*z)[2] = va_cl_nr_mlmin()
     (*z)[3] = va_obs_vss()
     (*z)[4] = va_obs_t12()
+    (*z)[5] = va_r_int()
+    (*z)[6] = va_isc_nom()
 }
 
-pub fn va_eval(z: &[f64; 5], th0: &[f64; 18], slope_v1: f64, out: &![f64; 2]) with Mut, Div, Panic {
-    var t: [f64; 18] = [0.0; 18]
-    var k: i32 = 0
-    while k < 18 {
-        t[k] = (*th0)[k]
-        k = k + 1
-    }
-    t[CD_BP] = (*z)[0]
-    t[CD_CLREN] = (*z)[1] * 0.06
-    t[CD_CLPLA] = (*z)[2] * 0.06
-    t[CD_KPSC] = va_kpsc_for(t[CD_BP], (*z)[3])
-    var o: [f64; 4] = [0.0; 4]
-    va_peeled(&t, &!o)
-    t[CD_PSSC] = t[CD_PSSC] + ((*z)[4] - o[2]) / slope_v1
-    va_peeled(&t, &!o)
-    t[CD_PSSC] = t[CD_PSSC] + ((*z)[4] - o[2]) / slope_v1
-    let p = va_params(&t)
+// Peel at given r and interstitial scale (kept in its own frame: lean_single gave a different budget
+// when the parameter structs of the two chord steps lived in va_eval's frame).
+pub fn va_peeled3(th: &[f64; 18], r: f64, isc: f64, out: &![f64; 4]) with Mut, Div, Panic {
+    let p = va_params3(th, r, isc)
+    va_peeled_p(p, out)
+}
+
+// Final run of an evaluation in its own frame: out[0] AUC_inf, out[1] steady-state trough.
+pub fn va_run3(th: &[f64; 18], r: f64, isc: f64, out: &![f64; 2]) with Mut, Div, Panic {
+    let p = va_params3(th, r, isc)
     var cs: [f64; 1300] = [0.0; 1300]
     var tail: [f64; 2] = [0.0; 2]
     let a = va_profile(p, 1000.0, 1.0, &!cs, &!tail)
@@ -433,12 +521,33 @@ pub fn va_eval(z: &[f64; 5], th0: &[f64; 18], slope_v1: f64, out: &![f64; 2]) wi
     (*out)[1] = ss[0]
 }
 
-// b: [0] AUC0, [1] trough0, [2..6] variance contributions to AUC, [7..11] to trough,
-// [12..16] AUC sensitivities, [17..21] trough sensitivities, [22..26] u_i, [27] var_AUC, [28] var_trough
+pub fn va_eval(z: &[f64; 7], th0: &[f64; 18], slope_v1: f64, out: &![f64; 2]) with Mut, Div, Panic {
+    var t: [f64; 18] = [0.0; 18]
+    var k: i32 = 0
+    while k < 18 {
+        t[k] = (*th0)[k]
+        k = k + 1
+    }
+    let r = (*z)[5]
+    let isc = (*z)[6]
+    t[CD_BP] = (*z)[0]
+    t[CD_CLREN] = (*z)[1] * 0.06
+    t[CD_CLPLA] = (*z)[2] * 0.06
+    t[CD_KPSC] = va_kpsc_for3(t[CD_BP], (*z)[3], r, isc)
+    var o: [f64; 4] = [0.0; 4]
+    va_peeled3(&t, r, isc, &!o)
+    t[CD_PSSC] = t[CD_PSSC] + ((*z)[4] - o[2]) / slope_v1
+    va_peeled3(&t, r, isc, &!o)
+    t[CD_PSSC] = t[CD_PSSC] + ((*z)[4] - o[2]) / slope_v1
+    va_run3(&t, r, isc, out)
+}
+
+// b: [0] AUC0, [1] trough0, [2..8] variance contributions to AUC, [9..15] to trough,
+// [16..22] AUC sensitivities, [23..29] trough sensitivities, [30..36] u_i, [37] var_AUC, [38] var_trough
 pub fn va_budget(th0: &[f64; 18], slope_v1: f64, b: &![f64; 40]) with Mut, Div, Panic {
-    var z0: [f64; 5] = [0.0; 5]
+    var z0: [f64; 7] = [0.0; 7]
     va_z_nominal(&!z0)
-    var u: [f64; 5] = [0.0; 5]
+    var u: [f64; 7] = [0.0; 7]
     va_u_inputs(&!u)
     var o0: [f64; 2] = [0.0; 2]
     va_eval(&z0, th0, slope_v1, &!o0)
@@ -447,11 +556,11 @@ pub fn va_budget(th0: &[f64; 18], slope_v1: f64, b: &![f64; 40]) with Mut, Div, 
     var va = 0.0
     var vt = 0.0
     var i: i32 = 0
-    while i < 5 {
-        var zp: [f64; 5] = [0.0; 5]
-        var zm: [f64; 5] = [0.0; 5]
+    while i < 7 {
+        var zp: [f64; 7] = [0.0; 7]
+        var zm: [f64; 7] = [0.0; 7]
         var j: i32 = 0
-        while j < 5 {
+        while j < 7 {
             zp[j] = z0[j]
             zm[j] = z0[j]
             j = j + 1
@@ -465,15 +574,82 @@ pub fn va_budget(th0: &[f64; 18], slope_v1: f64, b: &![f64; 40]) with Mut, Div, 
         va_eval(&zm, th0, slope_v1, &!om)
         let sa = (op[0] - om[0]) / (2.0 * h)
         let st = (op[1] - om[1]) / (2.0 * h)
-        (*b)[12 + i] = sa
-        (*b)[17 + i] = st
-        (*b)[22 + i] = u[i]
+        (*b)[16 + i] = sa
+        (*b)[23 + i] = st
+        (*b)[30 + i] = u[i]
         (*b)[2 + i] = sa * sa * u[i] * u[i]
-        (*b)[7 + i] = st * st * u[i] * u[i]
+        (*b)[9 + i] = st * st * u[i] * u[i]
         va = va + sa * sa * u[i] * u[i]
         vt = vt + st * st * u[i] * u[i]
         i = i + 1
     }
-    (*b)[27] = va
-    (*b)[28] = vt
+    (*b)[37] = va
+    (*b)[38] = vt
+}
+
+// ---- pi phase (round 3) ---------------------------------------------------------------------
+// Fine-grid bolus: 1 mg over 0.01 h, dt 0.01 h, 50 steps. fine[k] = venous plasma concentration at
+// 0.01 k h. Then the SECOND residual c - B exp(-lz t) - A exp(-alpha t) (pe from li_peel of the coarse
+// bolus profile) is fitted log-linearly on [0.03, 0.15] h (window fixed a priori). out[0] pi half-life
+// (h), out[1] intercept P (1/L), out[2] number of positive residual points used.
+pub fn va_pi_phase(p: Circ28Params, pe: &[f64; 4], out: &![f64; 3]) with Mut, Div, Panic {
+    var sys = circ28_sys_zero()
+    var s = circ28_state_zero()
+    var el = circ28_elim_zero()
+    circ28_prepare(p, 0.01, &!sys)
+    var sw = 0.0
+    var st = 0.0
+    var sy = 0.0
+    var stt = 0.0
+    var sty = 0.0
+    var j: i32 = 1
+    while j <= 50 {
+        var iv = 0.0
+        if j == 1 { iv = 100.0 }
+        circ28_step(&!s, p, &sys, iv, 0.0, &!el)
+        let t = 0.01 * (j as f64)
+        let c = s.x[0] / p.bp
+        if j >= 3 && j <= 15 {
+            let r = c - (*pe)[1] * exp(0.0 - (*pe)[0] * t) - (*pe)[3] * exp(0.0 - (*pe)[2] * t)
+            if r > 0.0 {
+                let y = ln(r)
+                sw = sw + 1.0
+                st = st + t
+                sy = sy + y
+                stt = stt + t * t
+                sty = sty + t * y
+            }
+        }
+        j = j + 1
+    }
+    (*out)[2] = sw
+    if sw < 3.0 {
+        (*out)[0] = 0.0
+        (*out)[1] = 0.0
+        return
+    }
+    let den = sw * stt - st * st
+    let slope = (sw * sty - st * sy) / den
+    let icpt = (sy - slope * st) / sw
+    (*out)[0] = 0.6931471805599453 / (0.0 - slope)
+    (*out)[1] = exp(icpt)
+}
+
+// Bolus peel plus pi phase in one callee. KNOWN ENGINE DIVERGENCE, unresolved: lean_single returns A 0.00896,
+// B 0.01328, pi 0.0715 h here against 0.00930, 0.01321, 0.0747 h on both Madaros builds (whose A + B agrees
+// with va_peeled; lean_single does not agree with its own va_peeled). Moving the frame, copying the peel
+// array and rebuilding the parameters did not change it. pe: li_peel output of the
+// coarse bolus (1 mg over 0.05 h); o: va_pi_phase output.
+pub fn va_pi_of(th: &[f64; 18], pe: &![f64; 4], o: &![f64; 3]) with Mut, Div, Panic {
+    let p = va_params(th)
+    var cs: [f64; 1300] = [0.0; 1300]
+    var tail: [f64; 2] = [0.0; 2]
+    let a = va_profile(p, 1.0, 0.05, &!cs, &!tail)
+    var pl: [f64; 4] = [0.0; 4]
+    li_peel(&cs, va_w_tlo(), va_w_thi(), va_w_alo(), va_w_ahi(), &!pl)
+    (*pe)[0] = pl[0]
+    (*pe)[1] = pl[1]
+    (*pe)[2] = pl[2]
+    (*pe)[3] = pl[3]
+    va_pi_phase(p, &pl, o)
 }
