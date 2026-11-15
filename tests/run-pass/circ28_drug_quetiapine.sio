@@ -1,0 +1,661 @@
+//@ run-pass
+//@ timeout: 180
+//@ expect-stdout-contains: CIRC28_DRUG_QUETIAPINE_PASS
+//
+// Quetiapine, immediate-release oral tablet, on the circ28 drug record
+// (stdlib/darwin_pbpk/circ28_drug_quetiapine.sio: parameter table, sources, access levels, pools).
+//
+// NO HUMAN IV DATA: V and CL are apparent. STRATEGY (decided before any run, see the module header):
+//   hepatic clint <- pooled CL/F (closed form);  Kp scalar <- pooled terminal half-life;
+//   ka <- pooled Tmax;  gut-wall clint <- ketoconazole Cmax ratio 3.35 with the gut wall taken as
+//   fully inhibited under ketoconazole; the ketoconazole AUC ratio 6.2 sets the hepatic CYP3A activity
+//   left under ketoconazole. F is an OUTPUT of the model (Fg (1 - Eh) with the kernel's hepatic flow).
+// FITTED, so NOT validations: pooled CL/F (every AUC row below comes from a pool member: consistency
+//   only), pooled t1/2, pooled Tmax, both ketoconazole ratios.
+// VALIDATIONS (not used in any fit): every Cmax, the Cmax/AUC shape, steady-state Cmax and troughs,
+//   the erythromycin and carbamazepine interactions, the midazolam-scaled gut prior, the Rodgers-Rowland
+//   volume, the tertiary F of 9%.
+//
+// CRITERIA. A row with an inter-individual SD: |z| <= 2. A row without SD (abstract gives a mean
+// only) and every interaction ratio: within fold 2. A distribution row (several study means): within
+// 2 between-study SD of their n-weighted mean. A failed row is asserted in a band and diagnosed.
+//
+// WRITTEN BEFORE THE FIRST RUN OF THIS TEST. Seen before writing: the pools, the closed forms and the
+// offline fit (kpsc 0.116453, ka 0.467594 /h, clint_gut 40.309786, clint 243.75; Fg 0.549, Eh 0.367,
+// F 0.347, CL 28.07 L/h, V_ss 116.3 L; ketoconazole: CYP3A left 0.232, F 0.843), the midazolam-derived
+// erythromycin factors (liver 0.272, gut 0.361) and the carbamazepine folds (3.01 unbound, 5.01
+// total). NOT seen: any Cmax, trough, steady-state or interaction result, any budget.
+// My earlier prediction of the Kp scalar (0.4, range 0.25-0.7) MISSED (0.116); Rodgers-Rowland V_ss
+// is 970 L against 116 L fitted.
+//
+//  row                                       predicted        observed (source, access)                     expected
+//  A1 Cmax 25 mg (ng/mL)                     ~49 (37-68)      45, n 12, no SD (Grimm 2006, AB)              pass, fold 2
+//  A2 Cmax 25 mg                             ~49              73.6 +/- 33.5, n 19 (Zubiaur 2021, FT)        pass (z ~ -0.7)
+//  A3 Cmax 50 mg                             ~99              144.7 +/- 65.5, n 30 (Zubiaur 2021, FT)       pass (z ~ -0.7)
+//  A4 Cmax 200 mg                            ~396             811 +/- 323, n 24 (Mahatthanatrakul 2008, AB) pass (z ~ -1.3)
+//  A5 Cmax/AUC (1/h), 4 studies              ~0.16            0.291, 0.258, 0.215, 0.248                    FAIL (z ~ -2.9)
+//  A6-A9 AUC 25, 50, 200 mg [pool members]   309, 619, 2475   253 +/- 111, 561 +/- 304, 3769 +/- 1297; 181  pass (consistency)
+//  B1 200 mg b.i.d. Cmax,ss                  ~450             678 +/- 325, n 21 (Li 2004, AB)               pass
+//  B2 200 mg b.i.d. trough                   ~70              51 +/- 68 (Li 2004)                           pass
+//  B3 200 mg b.i.d. AUC0-12 [pool member]    2475             3538 +/- 1728 (Li 2004)                       pass (consistency)
+//  B4 300 mg b.i.d. Cmax,ss                  ~675             1042, n 18, no SD (Grimm 2006, AB)            pass, fold 2 (ratio ~0.65)
+//  B5 150 mg b.i.d. Cmax,ss                  ~340             568.1 (Figueroa 2009, AB, n not given)        pass, fold 2 (borderline)
+//  B6 150 mg b.i.d. trough                   ~52              96.5 (Figueroa 2009)                          borderline, fold 2
+//  B7 300 mg once daily Cmax                 ~600             709 +/- 314, n 10 healthy (Nord 2011, FT)     pass
+//  B8 300 mg once daily, 24 h trough         ~19.5            7.8 +/- 3.0 (Nord 2011, FT)                   FAIL (z ~ +3.9)
+//  D1 erythromycin AUC ratio                 ~4.0             2.29, n 19 (Li 2005, AB)                      pass fold 2 (ratio ~1.7), over-predicted
+//  D2 erythromycin Cmax,ss ratio             ~2.6             1.68 (Li 2005)                                pass fold 2
+//  D3 erythromycin t1/2 ratio                ~1.9             1.92 (Li 2005)                                pass
+//  D4 carbamazepine CL/F ratio, unbound EC50 5.3              7.5, 90% CI 6.04-9.28, n 18 (Grimm 2006, AB)  pass fold 2, outside the CI
+//  D5 carbamazepine CL/F ratio, total conc.  12.8             7.5                                           pass fold 2, outside the CI
+//  D6 carbamazepine Cmax,ss ratio (unbound)  ~0.22            0.20, 90% CI 0.14-0.28 (Grimm 2006)           pass
+//  P1 gut clint vs midazolam-scaled prior    40.3 fitted      51.5 (kernel convention), 16.8 (fu,gut = 1)   fitted value between the two, nearer the first
+//  P2 Rodgers-Rowland volume                 Kp scalar 0.116  1 expected within fold 3                      FAIL (RR 8.3 times too large)
+//  P3 implied F                              0.347            0.09, tertiary (Martindale via Narala 2013)   FAIL fold 2 (ratio 3.9)
+//  Budget (25 mg, refit at every perturbation): AUC 309 +/- 51 (16.5%), 100% from the pooled CL/F;
+//  Cmax: estimate +/- 25-35%, carried by CL/F and the half-life; F +/- 0.06-0.08, carried by the
+//  ketoconazole Cmax ratio and CL/F.
+// Not predicted (no physiology for it in the kernel): elderly oral clearance -40% (label, n 9 vs 12);
+// food (Cmax +25%, AUC +15%, label) is a note only. Dose linearity is an identity of the linear model;
+// the observed dose-normalised AUC at 200 mg is 1.75 times that at 25-50 mg in other subjects (printed).
+//
+// OUTCOME OF THE FIRST RUN (added after it; the table above is unchanged; the bands in the rows were
+// then set around the measured values).
+//   Hit: A1-A4 (Cmax 25 mg 47.3; z -0.79, -0.77, -1.34), A5 fails as predicted (Cmax/AUC 0.153 against
+//   0.252, z -3.18), B1 425, B2 57.8, B4 ratio 0.61, B5 ratio 0.56, B7 580 (z -0.41), B8 fails as predicted
+//   but less (15.4 against 7.8 ng/mL, z 2.53, predicted ~3.9), D1 3.79 (ratio 1.66), D4 4.94, D5 11.4,
+//   D6 0.244, P1-P3, AUC budget 16.5%, all from CL/F.
+//   Missed: B6 (150 mg b.i.d. trough 43 against 96.5, ratio 0.45: FAIL, I had it borderline at 0.54);
+//   D2 2.89 (predicted ~2.6); D3 t1/2 ratio 1.48 (predicted ~1.9: the terminal phase is adipose washout and
+//   moves less than CL); Cmax budget 19.6% (predicted 25-35%), carried by CL/F 47%, Tmax 23%, the ketoconazole
+//   Cmax ratio 17%, ps_gut 10% (I had named the half-life: 0.7%); u(F) 0.109 (predicted 0.06-0.08).
+//   FAILURES KEPT (asserted in bands, not tuned): A5, B6, B8, P2, P3. Cause of A5 and of the low Cmax rows:
+//   the Rodgers-Rowland pattern puts 60% of V_ss in adipose (kp 4.6 after scaling, perfusion time constant
+//   5.1 h); the single Kp scalar fitted to the half-life shrinks every other tissue with it (muscle kp 0.59),
+//   the terminal phase is adipose washout, and ka has to fall to 0.47 /h to keep Tmax (the population
+//   estimate is 1.46 /h, Zhou 2015). B8: healthy young men (t1/2 about 5 h, CL/F about 124 L/h) against a
+//   pool dominated by patients. B6: patients (CL/F 65) against the pooled 80.8, and the same shape error.
+//   P3: the smallest F the model can have at the pooled CL/F is 0.094 (all clearance in the gut wall, none
+//   in the liver), so the tertiary 9% is at the floor of what the oral clearance allows.
+//
+// Engine notes: on Madaros a section that built the kernel parameters from the RECORD at the end of a main
+// holding the record and many arrays segfaulted (S6 now uses the value array); on lean_single the unused
+// slots of the record read back as value 1 with a neighbour's variance until every slot was written
+// (the module now writes all 18; a guard compares the record with the value array). Every kernel run is started from main and returns through arrays passed by reference;
+// arrays are never passed by value into this file's functions; guard rows compare the same quantity
+// computed two ways (run AUC against Dose/(CL/F); steady-state interval AUC against the single-dose
+// AUC; budget centre against the direct run).
+//
+// Marker CIRC28_DRUG_QUETIAPINE_PASS.
+
+use darwin_pbpk::circ28::*
+use darwin_pbpk::circ28_kp::*
+use darwin_pbpk::circ28_drug::*
+use darwin_pbpk::circ28_drug_midazolam::*
+use darwin_pbpk::circ28_drug_quetiapine::*
+use math::pure::{exp, ln}
+
+fn qt_abs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn qt_rel(tag: string, got: f64, want: f64, tol: f64) -> i32 with IO, Mut, Div, Panic {
+    let r = qt_abs(got - want) / qt_abs(want)
+    print("  "); print(tag); print(": got "); print(got); print(" want "); print(want)
+    print("  rel = "); println(r)
+    if !(r <= tol) {
+        println("  [FAIL]")
+        return 1
+    }
+    return 0
+}
+
+// One validation row. sd > 0: |z| <= 2; sd = 0: within `fold`. expect: 1 pass, 0 fail, 2 no assertion
+// of the verdict. [blo, bhi] bounds z (sd > 0) or the ratio pred/obs (sd = 0). Returns 1 if the test
+// must fail.
+fn qt_row(tag: string, pred: f64, obs: f64, sd: f64, fold: f64, expect: i32, blo: f64, bhi: f64) -> i32 with IO, Mut, Div, Panic {
+    var stat = pred / obs
+    var pass = false
+    if sd > 0.0 {
+        stat = (pred - obs) / sd
+        pass = qt_abs(stat) <= 2.0
+    } else {
+        pass = stat <= fold && stat >= 1.0 / fold
+    }
+    print("  "); print(tag); print(": predicted "); print(pred); print("  observed "); print(obs)
+    print("  ratio "); print(pred / obs)
+    if sd > 0.0 {
+        print("  z "); print(stat)
+    }
+    if pass { print("  PASS") } else { print("  FAIL") }
+    var bad = 0
+    if stat < blo || stat > bhi {
+        print("  [outside the asserted band]")
+        bad = 1
+    }
+    if expect == 1 && !pass {
+        print("  [expected pass]")
+        bad = 1
+    }
+    if expect == 0 && pass {
+        print("  [expected fail]")
+        bad = 1
+    }
+    println("")
+    return bad
+}
+
+fn qt_rname(i: i32) -> string {
+    if i == 0 { return "MW" }
+    if i == 1 { return "logP" }
+    if i == 2 { return "pKa1" }
+    if i == 3 { return "pKa2" }
+    if i == 4 { return "ion class" }
+    if i == 5 { return "fu" }
+    if i == 6 { return "B:P" }
+    if i == 7 { return "clint (hep)" }
+    if i == 8 { return "clform" }
+    if i == 9 { return "clint (gut)" }
+    if i == 10 { return "cl renal" }
+    if i == 11 { return "cl plasma" }
+    if i == 12 { return "Kp scalar" }
+    if i == 13 { return "ps scalar" }
+    if i == 14 { return "ka" }
+    if i == 15 { return "fa" }
+    if i == 16 { return "tlag" }
+    return "ps gut"
+}
+
+fn qt_bname(i: i32) -> string {
+    if i == 0 { return "logP          " }
+    if i == 1 { return "pKa1          " }
+    if i == 2 { return "fu            " }
+    if i == 3 { return "B:P           " }
+    if i == 4 { return "ps_gut        " }
+    if i == 5 { return "fa            " }
+    if i == 6 { return "CL/F obs      " }
+    if i == 7 { return "t1/2 obs      " }
+    if i == 8 { return "Tmax obs      " }
+    if i == 9 { return "keto Cmax obs " }
+    return "keto AUC obs  "
+}
+
+fn qt_prt(tag: string, which: i32) -> i32 with IO, Mut, Div, Panic {
+    var m: [f64; 8] = [0.0; 8]
+    var s: [f64; 8] = [0.0; 8]
+    var n: [f64; 8] = [0.0; 8]
+    var k: i32 = 0
+    if which == 0 { k = qtp_clf_studies(&!m, &!s, &!n) }
+    if which == 1 { k = qtp_thalf_studies(&!m, &!s, &!n) }
+    if which == 2 { k = qtp_tmax_studies(&!m, &!s, &!n) }
+    print("  "); println(tag)
+    var i: i32 = 0
+    while i < k {
+        print("      study "); print(i); print(": mean "); print(m[i]); print("  SD "); print(s[i]); print("  n "); println(n[i])
+        i = i + 1
+    }
+    let q = mdz_pool(&m, &s, &n, k)
+    print("      pooled mean "); print(q.mean); print("  N "); print(q.n_tot); print("  k "); print(q.k)
+    print("  SE_w "); print(q.se_w); print("  sb "); print(q.sb); print("  SE_b "); print(q.se_b); print("  u = max "); println(q.u)
+    return 0
+}
+
+fn qt_sec_pool() -> i32 with IO, Mut, Div, Panic {
+    var fails: i32 = 0
+    println("S0 pooled observables (u = max(pooled SE, between-study SD / sqrt k); SD -1 = not in the source)")
+    qt_prt("CL/F (L/h): Grimm 2006 healthy; Zubiaur 2021 25 mg, 50 mg; Mahatthanatrakul 2008 (Dose/AUC); Li 2004; Grimm 2006 patients; Zhou 2015", 0)
+    qt_prt("terminal t1/2 (h): Zubiaur 2021 25 mg, 50 mg; Li 2004; Gefvert 1998; Zhou 2015 (ln2/ke)", 1)
+    qt_prt("Tmax (h): Zubiaur 2021 25 mg, 50 mg; Mahatthanatrakul 2008; Li 2004 (median, SD = range/sqrt12); Nord 2011", 2)
+    fails = fails + qt_rel("pooled CL/F (pinned)", qtp_obs_clf(), 80.806156, 1.0e-6)
+    fails = fails + qt_rel("pooled CL/F u (pinned, = SE_b)", qtp_u_clf(), 13.328857, 1.0e-6)
+    fails = fails + qt_rel("pooled t1/2 (pinned)", qtp_obs_thalf(), 5.692735, 1.0e-6)
+    fails = fails + qt_rel("pooled Tmax (pinned)", qtp_obs_tmax(), 1.452788, 1.0e-6)
+    print("  ketoconazole (Grimm 2006, n 12): Cmax ratio "); print(qtp_keto_rcmax()); print(" u "); print(qtp_u_keto_rcmax())
+    print(";  AUC ratio "); print(qtp_keto_rauc()); print(" u "); println(qtp_u_keto_rauc())
+    println("  input consistency (lesson 2). Published V/F are Vz/F, so V ln2/CL = t1/2 is an identity on them:")
+    print("      Zubiaur 2021: 12.04 L/kg x ln2 / 1.78 L/h/kg = "); print(12.04 * 0.6931471805599453 / 1.78); println(" h against 4.98 h reported (means of ratios)")
+    print("      label: 10 L/kg and 6 h imply CL/F "); print(10.0 * 0.6931471805599453 / 6.0); println(" L/h/kg")
+    return fails
+}
+
+fn qt_sec_rec(d: &Circ28Drug, c: &[f64; 8], ck: &[f64; 8], hk: f64) -> i32 with IO, Mut, Div, Panic, Epistemic {
+    var fails: i32 = 0
+    println("S1 parameter record (value, standard uncertainty, status)")
+    var i: i32 = 0
+    while i < 18 {
+        print("  "); print(i); print(" "); print(qt_rname(i)); print("  value "); print(circ28_drug_value(d, i))
+        print("  u "); print(cd_sqrt(circ28_drug_variance(d, i))); print("  status "); println((*d).status[i])
+        i = i + 1
+    }
+    println("S1b closed forms at the fit")
+    print("  Fg "); print((*c)[0]); print("  Eh "); print((*c)[1]); print("  Eg (arterial) "); print((*c)[2]); print("  F "); print((*c)[3])
+    print("  systemic CL "); print((*c)[4]); print(" L/h  V_ss "); print((*c)[6]); println(" L")
+    print("  lesson 2 at the fit: V_ss ln2 / CL = "); print((*c)[6] * 0.6931471805599453 / (*c)[4]); print(" h against the pooled t1/2 "); print(qtp_obs_thalf()); println(" h (terminal clearly longer: room for a distribution phase)")
+    print("  ketoconazole state: hepatic clint x "); print(hk); print("  CYP3A activity left "); print((hk - (1.0 - qtp_fm3a())) / qtp_fm3a())
+    print("  Eh "); print((*ck)[1]); print("  F "); println((*ck)[3])
+    fails = fails + qt_rel("CL/F closed form = pooled", (*c)[5], qtp_obs_clf(), 1.0e-9)
+    fails = fails + qt_rel("CL/F under ketoconazole = pooled / 6.2", (*ck)[5], qtp_obs_clf() / qtp_keto_rauc(), 1.0e-9)
+    return fails
+}
+
+fn qt_sec_fit(o: &[f64; 16], md: &[f64; 8]) -> i32 with IO, Mut, Div, Panic {
+    var fails: i32 = 0
+    println("S2 the fits reproduce their observables (NOT validations) and guards")
+    fails = fails + qt_rel("terminal t1/2 (h) = pooled", (*o)[3], qtp_obs_thalf(), 2.0e-3)
+    fails = fails + qt_rel("Tmax (h) = pooled", (*o)[2], qtp_obs_tmax(), 2.0e-3)
+    fails = fails + qt_rel("ketoconazole Cmax ratio = 3.35", (*o)[7], qtp_keto_rcmax(), 2.0e-3)
+    fails = fails + qt_rel("guard: AUC_inf of the 25 mg run = Dose / pooled CL/F", (*o)[0], 25.0 / qtp_obs_clf(), 2.0e-3)
+    fails = fails + qt_rel("guard: AUC_inf under ketoconazole = 6.2 x baseline", (*o)[8] / (*o)[0], qtp_keto_rauc(), 2.0e-3)
+    fails = fails + qt_rel("guard: mass balance, single dose", (*o)[4] + 1.0, 1.0, 1.0e-9)
+    fails = fails + qt_rel("guard: 200 mg b.i.d. interval AUC at steady state = single-dose AUC_inf x 8", (*md)[3], 8.0 * (*o)[0], 2.0e-3)
+    fails = fails + qt_rel("guard: mass balance, multiple dose", (*md)[5] + 1.0, 1.0, 1.0e-9)
+    print("  ketoconazole: t1/2 "); print((*o)[3]); print(" -> "); print((*o)[11]); print(" h;  Tmax "); print((*o)[2]); print(" -> "); print((*o)[10]); println(" h (not in the abstract: no row)")
+    return fails
+}
+
+// Cmax/AUC of four studies against the prediction (distribution row)
+fn qt_shape(pred: f64) -> i32 with IO, Mut, Div, Panic {
+    var m: [f64; 8] = [0.0; 8]
+    var s: [f64; 8] = [0.0; 8]
+    var n: [f64; 8] = [0.0; 8]
+    m[0] = 203.71 / 699.87
+    n[0] = 19.0
+    m[1] = 200.28 / 776.13
+    n[1] = 30.0
+    m[2] = 811.34 / 3769.45
+    n[2] = 24.0
+    m[3] = 45.0 * 138.0 / 25000.0
+    n[3] = 12.0
+    let q = mdz_pool(&m, &s, &n, 4)
+    let z = (pred - q.mean) / q.sb
+    print("  A5 Cmax/AUC (1/h): Zubiaur 25 mg "); print(m[0]); print(", 50 mg "); print(m[1]); print(", Mahatthanatrakul "); print(m[2]); print(", Grimm "); println(m[3])
+    print("      predicted "); print(pred); print("  pooled mean "); print(q.mean); print("  sb "); print(q.sb); print("  ratio "); print(pred / q.mean); print("  z "); print(z)
+    if qt_abs(z) <= 2.0 {
+        println("  PASS  [expected fail]")
+        return 1
+    }
+    println("  FAIL (expected)")
+    if z < 0.0 - 4.0 || z > 0.0 - 2.5 {
+        println("      [outside the asserted band]")
+        return 1
+    }
+    return 0
+}
+
+fn qt_sec_single(o: &[f64; 16]) -> i32 with IO, Mut, Div, Panic {
+    var fails: i32 = 0
+    let w = qtp_zub_weight()
+    let cm = (*o)[1] * 1000.0 / 25.0
+    let au = (*o)[0] * 1000.0 / 25.0
+    println("V1 single dose (the model is linear: per-mg values scaled)")
+    print("  per mg: Cmax "); print(cm); print(" ng/mL, AUC_inf "); print(au); print(" ng h/mL, Cmax/AUC "); print(cm / au); println(" /h")
+    fails = fails + qt_row("A1 Cmax 25 mg (ng/mL) Grimm 2006          ", 25.0 * cm, 45.0, 0.0, 2.0, 1, 0.9, 1.2)
+    fails = fails + qt_row("A2 Cmax 25 mg Zubiaur 2021                ", 25.0 * cm, 203.71 * 25.0 / w, 92.80 * 25.0 / w, 0.0, 1, 0.0 - 1.0, 0.0 - 0.5)
+    fails = fails + qt_row("A3 Cmax 50 mg Zubiaur 2021                ", 50.0 * cm, 200.28 * 50.0 / w, 90.70 * 50.0 / w, 0.0, 1, 0.0 - 1.0, 0.0 - 0.5)
+    fails = fails + qt_row("A4 Cmax 200 mg Mahatthanatrakul 2008      ", 200.0 * cm, 811.34, 323.37, 0.0, 1, 0.0 - 1.6, 0.0 - 1.1)
+    fails = fails + qt_shape(cm / au)
+    println("  AUC rows: every study is a member of the CL/F pool (consistency, not validation)")
+    fails = fails + qt_row("A6 AUC 25 mg (ng h/mL) Zubiaur 2021 [pool]", 25.0 * au, 699.87 * 25.0 / w, 306.78 * 25.0 / w, 0.0, 1, 0.3, 0.7)
+    fails = fails + qt_row("A7 AUC 50 mg Zubiaur 2021 [pool]          ", 50.0 * au, 776.13 * 50.0 / w, 420.26 * 50.0 / w, 0.0, 1, 0.0, 0.4)
+    fails = fails + qt_row("A8 AUC 200 mg Mahatthanatrakul 2008 [pool]", 200.0 * au, 3769.45, 1296.69, 0.0, 1, 0.0 - 1.2, 0.0 - 0.8)
+    fails = fails + qt_row("A9 AUC 25 mg = Dose/(CL/F) Grimm 2006 [pool]", 25.0 * au, 25000.0 / 138.0, 0.0, 2.0, 1, 1.5, 1.9)
+    print("  dose linearity: the model is linear (identity). Observed dose-normalised AUC, 200 mg (Thai men) over 25-50 mg (Zubiaur, per kg x 69.2 kg): ")
+    println((3769.45 / 200.0) / (746.6 / w))
+    println("      other subjects and doses: between-study spread, carried by u(CL/F); the label states dose proportionality")
+    return fails
+}
+
+fn qt_sec_ss(m12: &[f64; 8], m24: &[f64; 8]) -> i32 with IO, Mut, Div, Panic {
+    var fails: i32 = 0
+    println("V2 steady state (kernel run of 6 doses every 12 h and 4 doses every 24 h; scaled by dose)")
+    let c12 = (*m12)[0] * 1000.0 / 200.0
+    let t12 = (*m12)[2] * 1000.0 / 200.0
+    let a12 = (*m12)[3] * 1000.0 / 200.0
+    print("  per mg, b.i.d.: Cmax,ss "); print(c12); print("  trough "); print(t12); print("  AUC0-12 "); print(a12); print("  Tmax,ss "); print((*m12)[1]); println(" h")
+    print("  steady state reached: trough before / after the last interval "); print((*m12)[4] * 1000.0 / 200.0); print(" / "); println(t12)
+    fails = fails + qt_row("B1 200 mg b.i.d. Cmax,ss (ng/mL) Li 2004   ", 200.0 * c12, 678.0, 325.0, 0.0, 1, 0.0 - 1.0, 0.0 - 0.5)
+    fails = fails + qt_row("B2 200 mg b.i.d. trough Li 2004            ", 200.0 * t12, 51.0, 68.0, 0.0, 1, 0.0 - 0.1, 0.3)
+    fails = fails + qt_row("B3 200 mg b.i.d. AUC0-12 Li 2004 [pool]    ", 200.0 * a12, 3538.0, 1728.0, 0.0, 1, 0.0 - 0.8, 0.0 - 0.4)
+    fails = fails + qt_row("B4 300 mg b.i.d. Cmax,ss Grimm 2006        ", 300.0 * c12, 1042.0, 0.0, 2.0, 1, 0.5, 0.75)
+    fails = fails + qt_row("B5 150 mg b.i.d. Cmax,ss Figueroa 2009     ", 150.0 * c12, 568.1, 0.0, 2.0, 1, 0.5, 0.7)
+    fails = fails + qt_row("B6 150 mg b.i.d. trough Figueroa 2009      ", 150.0 * t12, 96.5, 0.0, 2.0, 0, 0.35, 0.5)
+    let c24 = (*m24)[0] * 1000.0
+    let t24 = (*m24)[2] * 1000.0
+    fails = fails + qt_row("B7 300 mg once daily Cmax Nord 2011        ", c24, 1850.0 * 0.3835, 820.0 * 0.3835, 0.0, 1, 0.0 - 1.0, 0.0)
+    fails = fails + qt_row("B8 300 mg once daily 24 h trough Nord 2011 ", t24, 20.3 * 0.3835, 7.8 * 0.3835, 0.0, 0, 2.0, 3.5)
+    return fails
+}
+
+fn qt_sec_ddi(e: &[f64; 16]) -> i32 with IO, Mut, Div, Panic {
+    var fails: i32 = 0
+    println("V3 interactions NOT used in any fit")
+    println("  erythromycin 500 mg t.i.d.: CYP3A activity left in liver and gut derived from MIDAZOLAM (Olkkola 1993: IV CL x 0.46,")
+    println("  abstract; oral AUC x 4.07, dossier CSV, abstract says 'more than four times') through the fitted midazolam record")
+    print("      liver "); print((*e)[0]); print("  gut "); print((*e)[1]); print("  (midazolam ratios reproduced: "); print((*e)[2]); print(", "); print((*e)[3]); println(")")
+    fails = fails + qt_row("D1 erythromycin AUC ratio  Li 2005          ", (*e)[4], 2.29, 0.0, 2.0, 1, 1.4, 1.9)
+    fails = fails + qt_row("D2 erythromycin Cmax,ss ratio  Li 2005      ", (*e)[5], 1.68, 0.0, 2.0, 1, 1.5, 1.95)
+    fails = fails + qt_row("D3 erythromycin t1/2 ratio  Li 2005         ", (*e)[6], 1.92, 0.0, 2.0, 1, 0.65, 0.9)
+    println("  carbamazepine 600 mg/day: CYP3A fold = 1 + Emax I/(EC50 + I), Fuhr 2021 pair (EC50 20 uM, Emax 6), I from 9.5 ug/mL")
+    print("      fold with unbound I "); print((*e)[7]); print(", with total I "); println((*e)[8])
+    fails = fails + qt_row("D4 carbamazepine CL/F ratio, unbound  Grimm 2006", (*e)[9], 7.5, 0.0, 2.0, 1, 0.55, 0.75)
+    fails = fails + qt_row("D5 carbamazepine CL/F ratio, total    Grimm 2006", (*e)[10], 7.5, 0.0, 2.0, 1, 1.3, 1.7)
+    fails = fails + qt_row("D6 carbamazepine Cmax,ss ratio, unbound Grimm 2006", (*e)[11], 0.20, 0.0, 2.0, 1, 1.0, 1.4)
+    print("      90% CI of the observed ratios: CL/F 6.04-9.28, Cmax 0.14-0.28. Inside the CI? CL/F unbound: ")
+    if (*e)[9] >= 6.04 && (*e)[9] <= 9.28 { print("yes") } else { print("no") }
+    print(", total: ")
+    if (*e)[10] >= 6.04 && (*e)[10] <= 9.28 { print("yes") } else { print("no") }
+    print(", Cmax: ")
+    if (*e)[11] >= 0.14 && (*e)[11] <= 0.28 { println("yes") } else { println("no") }
+    print("      phenytoin (label, no constants here): oral CL x 5 observed; a CYP3A fold of "); print((*e)[12]); println(" would give exactly 5 in this model")
+    return fails
+}
+
+// CL/F ratio (induced or inhibited over base) of a set modulated by (a_h, a_g): closed forms
+fn qt_clf_ratio(th: &[f64; 18], a_h: f64, a_g: f64) -> f64 with Mut, Div, Panic {
+    var r: [f64; 4] = [0.0; 4]
+    qtp_ratios(th, qtp_fm3a(), a_h, a_g, &!r)
+    return 1.0 / r[1]
+}
+
+// the fold that gives a CL/F ratio of `target` (bisection on closed forms, 40 halvings of [1, 50])
+fn qt_fold_for(th: &[f64; 18], target: f64) -> f64 with Mut, Div, Panic {
+    var lo = 1.0
+    var hi = 50.0
+    var k: i32 = 0
+    while k < 40 {
+        let mid = 0.5 * (lo + hi)
+        if qt_clf_ratio(th, mid, mid) < target {
+            lo = mid
+        } else {
+            hi = mid
+        }
+        k = k + 1
+    }
+    return 0.5 * (lo + hi)
+}
+
+// Fitted Fg and F under a different assumption, closed forms only: the ratio F'/F is held at the value
+// of the fit (the kernel's Cmax shape factor is kept), the gut wall keeps a fraction `ag` of its activity
+// under ketoconazole and ps_gut is `psg`. Bisection on clint_gut. o[0] clint_gut, o[1] Fg, o[2] F.
+fn qt_alt(th: &[f64; 18], fratio: f64, ag: f64, psg: f64, o: &![f64; 4]) -> i32 with Mut, Div, Panic {
+    var t: [f64; 18] = [0.0; 18]
+    var tk: [f64; 18] = [0.0; 18]
+    var c: [f64; 8] = [0.0; 8]
+    var ck: [f64; 8] = [0.0; 8]
+    var i: i32 = 0
+    while i < 18 {
+        t[i] = (*th)[i]
+        i = i + 1
+    }
+    t[CD_PSGUT] = psg
+    var lo = 0.0
+    var hi = 2000.0
+    var k: i32 = 0
+    while k < 50 {
+        let mid = 0.5 * (lo + hi)
+        t[CD_CLGUT] = mid
+        t[CD_CLINT] = qtp_fit_clint(&t, qtp_obs_clf())
+        i = 0
+        while i < 18 {
+            tk[i] = t[i]
+            i = i + 1
+        }
+        tk[CD_CLGUT] = ag * mid
+        tk[CD_CLINT] = qtp_fit_clint(&tk, qtp_obs_clf() / qtp_keto_rauc())
+        qtp_closed(&t, &!c)
+        qtp_closed(&tk, &!ck)
+        if ck[3] / c[3] < fratio {
+            lo = mid
+        } else {
+            hi = mid
+        }
+        k = k + 1
+    }
+    (*o)[0] = t[CD_CLGUT]
+    (*o)[1] = c[0]
+    (*o)[2] = c[3]
+    return 0
+}
+
+fn qt_alt_prn(tag: string, th: &[f64; 18], fratio: f64, ag: f64, psg: f64) -> f64 with IO, Mut, Div, Panic {
+    var o: [f64; 4] = [0.0; 4]
+    qt_alt(th, fratio, ag, psg, &!o)
+    print("  "); print(tag); print(": clint_gut "); print(o[0]); print("  Fg "); print(o[1]); print("  F "); println(o[2])
+    return o[2]
+}
+
+fn qt_sec_split(th: &[f64; 18], c: &[f64; 8], ck: &[f64; 8], su2: f64) -> i32 with IO, Mut, Div, Panic {
+    var fails: i32 = 0
+    println("V4 the gut / liver split: what the data fix and what they do not")
+    var tm: [f64; 18] = [0.0; 18]
+    qtp_mdz_theta(&!tm)
+    let rr = tm[CD_CLGUT] / tm[CD_CLINT]
+    var p1: [f64; 4] = [0.0; 4]
+    var p2: [f64; 4] = [0.0; 4]
+    qtp_prior_fg(th, qtp_obs_clf(), rr, qtp_fm3a(), &!p1)
+    qtp_prior_fg(th, qtp_obs_clf(), rr * mdz_fu() / qtp_fu(), qtp_fm3a(), &!p2)
+    print("  midazolam record: clint_gut / clint = "); print(rr); println(" (kernel convention: both act on the unbound tissue concentration)")
+    print("  P1 derived prior, kernel convention: clint_gut "); print(p1[0]); print("  Fg "); print(p1[2]); print("  F "); println(p1[3])
+    print("     derived prior, fu,gut = 1 convention (ratio x fu_midazolam / fu_quetiapine): clint_gut "); print(p2[0]); print("  Fg "); print(p2[2]); print("  F "); println(p2[3])
+    print("     fitted: clint_gut "); print((*th)[CD_CLGUT]); print(" +/- "); print(su2); print("  Fg "); print((*c)[0]); print("  F "); println((*c)[3])
+    let zk = ((*th)[CD_CLGUT] - p1[0]) / su2
+    let zq = ((*th)[CD_CLGUT] - p2[0]) / su2
+    print("     (fitted - prior) / u(fitted): kernel convention "); print(zk); print(", fu,gut = 1 convention "); println(zq)
+    if !(qt_abs(zk) <= 2.0) {
+        println("  [FAIL] the fitted gut clint is not within 2 u of the kernel-convention prior")
+        fails = fails + 1
+    }
+    if !((*th)[CD_CLGUT] > p2[0] && (*th)[CD_CLGUT] < p1[0]) {
+        println("  [FAIL] expected the fitted value between the two priors")
+        fails = fails + 1
+    }
+    let fr = (*ck)[3] / (*c)[3]
+    print("  F'/F at the fit "); print(fr); print("; kernel shape factor (Cmax ratio / F ratio) "); println(qtp_keto_rcmax() / fr)
+    println("  sensitivity of the fitted split to the two assumptions (closed forms, F'/F held):")
+    let f0 = qt_alt_prn("gut fully inhibited under ketoconazole, ps_gut 10.45 (the fit)", th, fr, 0.0, qtp_psgut())
+    let f1 = qt_alt_prn("gut keeps 10% of its activity under ketoconazole            ", th, fr, 0.1, qtp_psgut())
+    let f2 = qt_alt_prn("gut keeps 30% of its activity under ketoconazole            ", th, fr, 0.3, qtp_psgut())
+    let f3 = qt_alt_prn("ps_gut 3.5 L/h (one third)                                  ", th, fr, 0.0, qtp_psgut() / 3.0)
+    let f4 = qt_alt_prn("ps_gut 31.4 L/h (three times)                               ", th, fr, 0.0, qtp_psgut() * 3.0)
+    fails = fails + qt_rel("guard: the closed-form refit at the fit's own assumptions returns the fitted F", f0, (*c)[3], 1.0e-6)
+    if !(f1 < f0 && f2 < f1) {
+        println("  [FAIL] incomplete gut inhibition must lower the fitted F")
+        fails = fails + 1
+    }
+    print("  F is "); print(f0); print(" at the fit; ps_gut x 1/3 .. x 3 moves it "); print(f3); print(" .. "); print(f4)
+    println(" (ps_gut and clint_gut are not separable in oral data)")
+    println("  P2 Rodgers-Rowland volume: Kp scalar fitted to the half-life against 1 (criterion: within fold 3)")
+    fails = fails + qt_row("P2 Kp scalar                               ", (*th)[CD_KPSC], 1.0, 0.0, 3.0, 0, 0.10, 0.13)
+    println("  P3 implied F against the tertiary 9% (Martindale 2007 as cited by Narala 2013; no study, n or method traced)")
+    fails = fails + qt_row("P3 F                                       ", (*c)[3], 0.09, 0.0, 2.0, 0, 3.5, 4.2)
+    // the smallest F the model can have at the pooled CL/F: clint_gut raised until the hepatic clint
+    // needed for CL/F reaches zero (beyond it the gut wall alone clears more than CL/F)
+    var t: [f64; 18] = [0.0; 18]
+    var cc: [f64; 8] = [0.0; 8]
+    var i: i32 = 0
+    while i < 18 {
+        t[i] = (*th)[i]
+        i = i + 1
+    }
+    var lo = 0.0
+    var hi = 5000.0
+    var k: i32 = 0
+    while k < 50 {
+        let mid = 0.5 * (lo + hi)
+        t[CD_CLGUT] = mid
+        if qtp_fit_clint(&t, qtp_obs_clf()) > 0.0 {
+            lo = mid
+        } else {
+            hi = mid
+        }
+        k = k + 1
+    }
+    t[CD_CLGUT] = lo
+    t[CD_CLINT] = qtp_fit_clint(&t, qtp_obs_clf())
+    qtp_closed(&t, &!cc)
+    print("      smallest F possible at the pooled CL/F: "); print(cc[3]); print(" (Fg "); print(cc[0]); print(", clint_gut "); print(lo); print(", hepatic clint "); print(t[CD_CLINT])
+    println("): F = 0.09 would need the WHOLE clearance in the gut wall and none in the liver")
+    if !(cc[3] > 0.07 && cc[3] < 0.11) {
+        println("  [FAIL] smallest F outside 0.07..0.11")
+        fails = fails + 1
+    }
+    return fails
+}
+
+fn qt_sec_bud(base: &[f64; 3], sens: &[f64; 33], vr: &[f64; 3], o: &[f64; 16], fcl: f64) -> i32 with IO, Mut, Div, Panic {
+    var fails: i32 = 0
+    var u: [f64; 11] = [0.0; 11]
+    qtp_budget_u(&!u)
+    println("S5 uncertainty budget, 25 mg oral, refit at every perturbation (one Newton step, fixed inverse Jacobian), 34 kernel runs")
+    print("  AUC_inf "); print((*base)[0] * 1000.0); print(" ng h/mL  u "); print(cd_sqrt((*vr)[0]) * 1000.0); print("  (rel "); print(cd_sqrt((*vr)[0]) / (*base)[0]); println(")")
+    print("  Cmax    "); print((*base)[1] * 1000.0); print(" ng/mL    u "); print(cd_sqrt((*vr)[1]) * 1000.0); print("  (rel "); print(cd_sqrt((*vr)[1]) / (*base)[1]); println(")")
+    print("  F       "); print((*base)[2]); print("          u "); print(cd_sqrt((*vr)[2])); print("  (rel "); print(cd_sqrt((*vr)[2]) / (*base)[2]); println(")")
+    println("  input           u(input)     share of var(AUC) %   var(Cmax) %   var(F) %")
+    var i: i32 = 0
+    while i < 11 {
+        let sa = (*sens)[3 * i] * u[i]
+        let sc = (*sens)[3 * i + 1] * u[i]
+        let sf = (*sens)[3 * i + 2] * u[i]
+        print("  "); print(qt_bname(i)); print("  "); print(u[i]); print("   "); print(100.0 * sa * sa / (*vr)[0])
+        print("   "); print(100.0 * sc * sc / (*vr)[1]); print("   "); println(100.0 * sf * sf / (*vr)[2])
+        i = i + 1
+    }
+    fails = fails + qt_rel("guard: budget AUC = direct run", (*base)[0], (*o)[0], 1.0e-9)
+    fails = fails + qt_rel("guard: budget Cmax = direct run", (*base)[1], (*o)[1], 1.0e-9)
+    fails = fails + qt_rel("guard: budget F = closed form", (*base)[2], fcl, 1.0e-9)
+    let sl = (*sens)[3 * 6] * qtp_obs_clf() / (*base)[0]
+    fails = fails + qt_rel("dlnAUC/dln(CL/F obs) = -1 (AUC = Dose/(CL/F) after the refit)", sl, 0.0 - 1.0, 5.0e-3)
+    let share = (*sens)[3 * 6] * u[6] * (*sens)[3 * 6] * u[6] / (*vr)[0]
+    if !(share > 0.99) {
+        println("  [FAIL] the pooled CL/F must carry the AUC variance")
+        fails = fails + 1
+    }
+    return fails
+}
+
+fn qt_tau(p: &Circ28Params, o: i32, nm: string) -> f64 with IO, Mut, Div, Panic {
+    let vt = (*p).v[o] * (1.0 - (*p).vf[o])
+    let tau = (*p).kp[o] * vt / ((*p).q[o] * (*p).bp)
+    print("      "); print(nm); print(" kp "); print((*p).kp[o]); print("  holds kp Vt "); print((*p).kp[o] * vt); print(" L-eq  tau_perfusion "); print(tau); println(" h")
+    return tau
+}
+
+fn qt_sec_tau(th: &[f64; 18]) -> i32 with IO, Mut, Div, Panic {
+    var t: [f64; 18] = [0.0; 18]
+    var i: i32 = 0
+    while i < 18 {
+        t[i] = (*th)[i]
+        i = i + 1
+    }
+    let p = circ28_drug_params_theta(t)
+    println("S6 which tissue is slow (lesson 4): perfusion time constants kp Vt / (Q bp) at the fit")
+    let ta = qt_tau(&p, 7, "adipose")
+    let tm = qt_tau(&p, 6, "muscle ")
+    let ts = qt_tau(&p, 9, "skin   ")
+    println("      ps/Q = 20 in every organ: exchange is not rate-limiting; the ps scalar is not fitted")
+    return 0
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic, Epistemic {
+    var fails: i32 = 0
+    // parameter set with the stored fits, hepatic clint in closed form
+    var th: [f64; 18] = [0.0; 18]
+    qtp_theta0(&!th)
+    var obs: [f64; 5] = [0.0; 5]
+    qtp_obs_into(&!obs)
+    // every kernel run is started here
+    var o: [f64; 16] = [0.0; 16]
+    qtp_pair(&!th, obs[0], obs[4], &!o)
+    var ji: [f64; 9] = [0.0; 9]
+    let jbad = qtp_jac_inv(&th, obs[0], obs[4], &!ji)
+    var su: [f64; 4] = [0.0; 4]
+    qtp_fit_u(&th, &ji, &!su)
+    var base: [f64; 3] = [0.0; 3]
+    var sens: [f64; 33] = [0.0; 33]
+    var vr: [f64; 3] = [0.0; 3]
+    qtp_budget(&th, &ji, &!base, &!sens, &!vr)
+    var m12: [f64; 8] = [0.0; 8]
+    var m24: [f64; 8] = [0.0; 8]
+    qtp_md(&th, 200.0, 12.0, 6, &!m12)
+    qtp_md(&th, 300.0, 24.0, 4, &!m24)
+    // closed forms
+    var c: [f64; 8] = [0.0; 8]
+    var ck: [f64; 8] = [0.0; 8]
+    var tk: [f64; 18] = [0.0; 18]
+    qtp_closed(&th, &!c)
+    qtp_keto_theta(&th, obs[0], obs[4], &!tk)
+    qtp_closed(&tk, &!ck)
+    // interactions: e[0..3] erythromycin factors and midazolam ratios; e[4] AUC ratio, e[5] Cmax,ss
+    // ratio, e[6] t1/2 ratio; e[7], e[8] carbamazepine folds; e[9], e[10] CL/F ratios; e[11] Cmax,ss
+    // ratio; e[12] fold for a CL/F ratio of 5
+    var e: [f64; 16] = [0.0; 16]
+    var tm: [f64; 18] = [0.0; 18]
+    var fac: [f64; 4] = [0.0; 4]
+    qtp_mdz_theta(&!tm)
+    qtp_factors_from_mdz(&tm, 0.46, 4.07, &!fac)
+    e[0] = fac[0]
+    e[1] = fac[1]
+    e[2] = fac[2]
+    e[3] = fac[3]
+    var te: [f64; 18] = [0.0; 18]
+    qtp_modulate(&th, qtp_fm3a(), fac[0], fac[1], &!te)
+    var oe: [f64; 8] = [0.0; 8]
+    var me: [f64; 8] = [0.0; 8]
+    qtp_run_into(&te, 25.0, &!oe)
+    qtp_md(&te, 200.0, 12.0, 6, &!me)
+    e[4] = oe[0] / o[0]
+    e[5] = me[0] / m12[0]
+    e[6] = oe[3] / o[3]
+    e[7] = qtp_cbz_fold(0)
+    e[8] = qtp_cbz_fold(1)
+    e[9] = qt_clf_ratio(&th, e[7], e[7])
+    e[10] = qt_clf_ratio(&th, e[8], e[8])
+    var tc: [f64; 18] = [0.0; 18]
+    var mc: [f64; 8] = [0.0; 8]
+    qtp_modulate(&th, qtp_fm3a(), e[7], e[7], &!tc)
+    qtp_md(&tc, 200.0, 12.0, 6, &!mc)
+    e[11] = mc[0] / m12[0]
+    e[12] = qt_fold_for(&th, 5.0)
+    // the record
+    var d = circ28_drug_new()
+    qtp_measured_record(&!d)
+    qtp_fit_record(&!d, &su)
+
+    fails = fails + qt_sec_pool()
+    fails = fails + qt_sec_rec(&d, &c, &ck, tk[CD_CLINT] / th[CD_CLINT])
+    if jbad != 0 {
+        println("  [FAIL] singular Jacobian")
+        fails = fails + 1
+    }
+    fails = fails + qt_rel("guard: record clint = clint of the run set", circ28_drug_value(&d, CD_CLINT), th[CD_CLINT], 1.0e-12)
+    var gi: i32 = 0
+    var gbad: i32 = 0
+    while gi < 18 {
+        if qt_abs(circ28_drug_value(&d, gi) - th[gi]) > 1.0e-12 * (1.0 + qt_abs(th[gi])) { gbad = gbad + 1 }
+        gi = gi + 1
+    }
+    if gbad != 0 {
+        println("  [FAIL] guard: the record and the run set differ in a slot")
+        fails = fails + 1
+    } else {
+        println("  guard: all 18 record values equal the value array the runs used")
+    }
+    fails = fails + qt_rel("guard: erythromycin AUC ratio, kernel runs = closed form", e[4], 1.0 / qt_clf_ratio(&th, fac[0], fac[1]), 3.0e-3)
+    fails = fails + qt_sec_fit(&o, &m12)
+    fails = fails + qt_sec_single(&o)
+    fails = fails + qt_sec_ss(&m12, &m24)
+    fails = fails + qt_sec_ddi(&e)
+    fails = fails + qt_sec_split(&th, &c, &ck, su[2])
+    fails = fails + qt_sec_bud(&base, &sens, &vr, &o, c[3])
+    fails = fails + qt_sec_tau(&th)
+    println("NOT MODELLED: norquetiapine (exposure ratio to parent about 0.5 at steady state, Li 2014 abstract; Cmax molar")
+    println("ratio 624/1850 = 0.34, Nord 2011); its formation share has no source. Elderly (oral CL -40%, label) and")
+    println("food (Cmax +25%, AUC +15%, label) are not predicted.")
+    if fails == 0 {
+        println("CIRC28_DRUG_QUETIAPINE_PASS")
+        return 0
+    }
+    println("CIRC28_DRUG_QUETIAPINE_FAIL")
+    return 1
+}
