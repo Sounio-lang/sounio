@@ -84,6 +84,16 @@
 //       S = 205 + 19 = 224.
 // Edge-level expectations (the lists above) were right and are checked cell
 // by cell below.
+// (g) legacy vs wide on one TBox with a role hierarchy and a role chain:
+//     atoms TOP 0, Peri 1, Endo 2, Pc 3, H 4; roles fs 0, po 1; existentials
+//     5 = ex fs.Pc, 6 = ex po.H, 7 = ex po.Pc; nc 8, nb 5; fs <= po,
+//     po o po <= po. Stated: Peri <= 5, Pc <= 6, Endo <= 6.
+//     Edges: stated (fs,Peri,Pc) (po,Pc,H) (po,Endo,H); self edges
+//     (fs,5,Pc) (po,6,H) (po,7,Pc); roleSub (po,Peri,Pc) (po,5,Pc); roleComp
+//     (po,7,H) (po,Peri,H) (po,5,H): 9 po + 2 fs = 11. S = 8 + 7 + 3 stated +
+//     5 derived (7<=6, Peri<=6, 5<=6, Peri<=7, 5<=7) = 23. Run through the
+//     14-parameter legacy elplus_fixpoint AND the wide API; all cells equal.
+//
 //
 // (f) timing: fixpoint wall time (CLOCK_MONOTONIC via syscall 228) of (a),
 //     (d) and (e) printed on a TIMING line; each must stay under 30000 ms.
@@ -92,19 +102,17 @@ use ontology::elplus::{
     elplus_wide_role_closure, elplus_wide_seed, elplus_wide_fixpoint_packed,
     elplus_wide_set_concept, elplus_wide_set_exid, elplus_wide_set_chain,
     elplus_wide_subsumes, elplus_wide_edge, elplus_wide_s_count, elplus_wide_r_count,
-    elplus_wide_derive_conflicts
+    elplus_wide_derive_conflicts,
+    elplus_role_closure, elplus_seed, elplus_fixpoint, elplus_s_count, elplus_r_count, elplus_edge_dense, elplus_subsumes_dense
 }
 
-var T_S: [bool; 65536] = [false; 65536]
-var T_R: [bool; 1048576] = [false; 1048576]
-var T_D: [bool; 65536] = [false; 65536]
-var T_CP: [bool; 65536] = [false; 65536]
-var T_PK: [i64; 4864] = [0; 4864]
-var T_CH: [i64; 96] = [0; 96]
-var T_RC: [bool; 256] = [false; 256]
-var T_DM: [i64; 4] = [0; 4]
-var T_ENT: [i64; 256] = [0; 256]
-var T_CLS: [i64; 256] = [0; 256]
+// Committed-compiler rule (see the 2026-11-15 section of
+// work/swarm/elplus_limits_report.md): a module-level array written by direct
+// statements is not seen by a callee that reads it through a `&` / `&!`
+// argument. All state therefore lives in LOCAL arrays of the scenario
+// functions (created once per scenario) and every helper takes its arrays as
+// parameters.
+
 var T_TS: [i64; 2] = [0; 2]
 
 fn now_ms() -> i64 with IO, Mut, Div, Panic {
@@ -132,94 +140,103 @@ fn chkb(label: string, got: bool, want: bool) -> i64 with IO {
     return 1
 }
 
-// Clear all module state: S, R, D, CP false; pack = 0 with exid = -1;
-// chains 0; role closure false.
-fn rst() with Mut, Div, Panic {
+// Clear S, R, D, CP false; pack = 0 with exid = -1; chains 0; rclos false.
+fn rst(s: &![bool; 65536], r: &![bool; 1048576], d: &![bool; 65536], cp: &![bool; 65536], pk: &![i64; 4864], ch: &![i64; 96], rc: &![bool; 256]) with Mut, Div, Panic {
     var i: i64 = 0
     while i < 1048576 {
-        T_R[i] = false
+        r[i] = false
         i = i + 1
     }
     i = 0
     while i < 65536 {
-        T_S[i] = false
-        T_D[i] = false
-        T_CP[i] = false
+        s[i] = false
+        d[i] = false
+        cp[i] = false
         i = i + 1
     }
     i = 0
     while i < 4864 {
-        if i < 768 { T_PK[i] = 0 } else { T_PK[i] = 0 - 1 }
+        if i < 768 { pk[i] = 0 } else { pk[i] = 0 - 1 }
         i = i + 1
     }
     i = 0
     while i < 96 {
-        T_CH[i] = 0
+        ch[i] = 0
         i = i + 1
     }
     i = 0
     while i < 256 {
-        T_RC[i] = false
+        rc[i] = false
         i = i + 1
     }
 }
 
-fn sub(a: i64, b: i64) with Mut, Div, Panic {
-    T_S[a * 256 + b] = true
+fn sub(s: &![bool; 65536], a: i64, b: i64) with Mut, Div, Panic {
+    s[a * 256 + b] = true
 }
 
 // Intern ex role.filler as concept id.
-fn ex(id: i64, role: i64, filler: i64) with Mut, Div, Panic {
-    let a = elplus_wide_set_concept(&! T_PK, id, 3, role, filler)
-    let b = elplus_wide_set_exid(&! T_PK, role, filler, id)
+fn ex(pk: &![i64; 4864], id: i64, role: i64, filler: i64) with Mut, Div, Panic {
+    let a = elplus_wide_set_concept(pk, id, 3, role, filler)
+    let b = elplus_wide_set_exid(pk, role, filler, id)
     if a != 0 || b != 0 { panic("ex: helper refused an in-range id") }
 }
 
-fn chain(k: i64, r1: i64, r2: i64, r3: i64) with Mut, Div, Panic {
-    let a = elplus_wide_set_chain(&! T_CH, k, r1, r2, r3)
+fn chain(ch: &![i64; 96], k: i64, r1: i64, r2: i64, r3: i64) with Mut, Div, Panic {
+    let a = elplus_wide_set_chain(ch, k, r1, r2, r3)
     if a != 0 { panic("chain: helper refused an in-range chain") }
 }
 
-fn seed(nc: i64, top: i64) with Mut, Div, Panic {
-    let a = elplus_wide_seed(&! T_S, nc, top)
+fn seed(s: &![bool; 65536], nc: i64, top: i64) with Mut, Div, Panic {
+    let a = elplus_wide_seed(s, nc, top)
     if a != 0 { panic("seed: refused an in-range seed") }
 }
 
-fn run(nchain: i64, nc: i64, nb: i64, nr: i64) -> i64 with Mut, Div, Panic {
-    T_DM[0] = nchain
-    T_DM[1] = nc
-    T_DM[2] = nb
-    T_DM[3] = nr
-    return elplus_wide_fixpoint_packed(&! T_S, &! T_R, &T_PK, &T_RC, &T_CH, &T_DM)
+fn run(s: &![bool; 65536], r: &![bool; 1048576], pk: &[i64; 4864], rc: &[bool; 256], ch: &[i64; 96], dm: &![i64; 4], nchain: i64, nc: i64, nb: i64, nr: i64) -> i64 with Mut, Div, Panic {
+    dm[0] = nchain
+    dm[1] = nc
+    dm[2] = nb
+    dm[3] = nr
+    return elplus_wide_fixpoint_packed(s, r, pk, rc, ch, dm)
 }
 
-fn sc(nc: i64) -> i64 with Div, Panic {
-    return elplus_wide_s_count(&T_S, nc)
+fn sc(s: &[bool; 65536], nc: i64) -> i64 with Div, Panic {
+    return elplus_wide_s_count(s, nc)
 }
 
-fn rcnt(nr: i64, nc: i64, nb: i64) -> i64 with Div, Panic {
-    return elplus_wide_r_count(&T_R, nr, nc, nb)
+fn rcnt(r: &[bool; 1048576], nr: i64, nc: i64, nb: i64) -> i64 with Div, Panic {
+    return elplus_wide_r_count(r, nr, nc, nb)
 }
 
-fn edge(role: i64, c: i64, f: i64) -> bool with Div, Panic {
-    return elplus_wide_edge(&T_R, role, c, f)
+fn edge(r: &[bool; 1048576], role: i64, c: i64, f: i64) -> bool with Div, Panic {
+    return elplus_wide_edge(r, role, c, f)
 }
 
-fn subs(a: i64, b: i64) -> bool with Div, Panic {
-    return elplus_wide_subsumes(&T_S, a, b)
+fn subs(s: &[bool; 65536], a: i64, b: i64) -> bool with Div, Panic {
+    return elplus_wide_subsumes(s, a, b)
 }
 
 fn scenario_a() -> i64 with IO, Mut, Div, Panic {
     var fails: i64 = 0
-    rst()
-    seed(201, 200)
+    var T_S: [bool; 65536] = [false; 65536]
+    var T_R: [bool; 1048576] = [false; 1048576]
+    var T_D: [bool; 65536] = [false; 65536]
+    var T_CP: [bool; 65536] = [false; 65536]
+    var T_PK: [i64; 4864] = [0; 4864]
+    var T_CH: [i64; 96] = [0; 96]
+    var T_RC: [bool; 256] = [false; 256]
+    var T_DM: [i64; 4] = [0; 4]
+    var T_ENT: [i64; 256] = [0; 256]
+    var T_CLS: [i64; 256] = [0; 256]
+    rst(&! T_S, &! T_R, &! T_D, &! T_CP, &! T_PK, &! T_CH, &! T_RC)
+    seed(&! T_S, 201, 200)
     var i: i64 = 0
     while i < 199 {
-        sub(i, i + 1)
+        sub(&! T_S, i, i + 1)
         i = i + 1
     }
     let t0 = now_ms()
-    let rounds = run(0, 201, 201, 0)
+    let rounds = run(&! T_S, &! T_R, &T_PK, &T_RC, &T_CH, &! T_DM, 0, 201, 201, 0)
     let t1 = now_ms()
     print("TIMING_A chain200 rounds ")
     print_int(rounds)
@@ -244,12 +261,12 @@ fn scenario_a() -> i64 with IO, Mut, Div, Panic {
     }
     fails = fails + chk("a.pairs_among_atoms", pairs, 20100)
     fails = fails + chk("a.cells_differing_from_a<=b", bad, 0)
-    fails = fails + chk("a.S_total", sc(201), 20301)
-    fails = fails + chk("a.R_total", rcnt(1, 201, 201), 0)
-    fails = fails + chkb("a.C0<=C199", subs(0, 199), true)
-    fails = fails + chkb("a.C199<=C0", subs(199, 0), false)
-    fails = fails + chkb("a.C150<=top", subs(150, 200), true)
-    fails = fails + chkb("a.top<=C0", subs(200, 0), false)
+    fails = fails + chk("a.S_total", sc(&T_S, 201), 20301)
+    fails = fails + chk("a.R_total", rcnt(&T_R, 1, 201, 201), 0)
+    fails = fails + chkb("a.C0<=C199", subs(&T_S, 0, 199), true)
+    fails = fails + chkb("a.C199<=C0", subs(&T_S, 199, 0), false)
+    fails = fails + chkb("a.C150<=top", subs(&T_S, 150, 200), true)
+    fails = fails + chkb("a.top<=C0", subs(&T_S, 200, 0), false)
     // conflict probe on the same closure
     T_D[150 * 256 + 160] = true
     T_D[160 * 256 + 150] = true
@@ -282,91 +299,111 @@ fn scenario_a() -> i64 with IO, Mut, Div, Panic {
 
 fn scenario_b() -> i64 with IO, Mut, Div, Panic {
     var fails: i64 = 0
-    rst()
-    seed(217, 209)
+    var T_S: [bool; 65536] = [false; 65536]
+    var T_R: [bool; 1048576] = [false; 1048576]
+    var T_D: [bool; 65536] = [false; 65536]
+    var T_CP: [bool; 65536] = [false; 65536]
+    var T_PK: [i64; 4864] = [0; 4864]
+    var T_CH: [i64; 96] = [0; 96]
+    var T_RC: [bool; 256] = [false; 256]
+    var T_DM: [i64; 4] = [0; 4]
+    var T_ENT: [i64; 256] = [0; 256]
+    var T_CLS: [i64; 256] = [0; 256]
+    rst(&! T_S, &! T_R, &! T_D, &! T_CP, &! T_PK, &! T_CH, &! T_RC)
+    seed(&! T_S, 217, 209)
     T_PK[209] = 1
-    ex(210, 0, 100)
-    ex(211, 1, 130)
-    ex(212, 1, 200)
-    ex(213, 2, 130)
-    ex(214, 3, 200)
-    ex(215, 4, 100)
-    ex(216, 0, 110)
-    sub(70, 210)
-    sub(100, 211)
-    sub(130, 212)
-    sub(100, 110)
+    ex(&! T_PK, 210, 0, 100)
+    ex(&! T_PK, 211, 1, 130)
+    ex(&! T_PK, 212, 1, 200)
+    ex(&! T_PK, 213, 2, 130)
+    ex(&! T_PK, 214, 3, 200)
+    ex(&! T_PK, 215, 4, 100)
+    ex(&! T_PK, 216, 0, 110)
+    sub(&! T_S, 70, 210)
+    sub(&! T_S, 100, 211)
+    sub(&! T_S, 130, 212)
+    sub(&! T_S, 100, 110)
     T_RC[0 * 16 + 4] = true
     let rcs = elplus_wide_role_closure(&! T_RC, 5)
     fails = fails + chk("b.role_closure_status", rcs, 0)
-    chain(0, 0, 1, 2)
-    chain(1, 1, 1, 3)
-    let rounds = run(2, 217, 210, 5)
+    chain(&! T_CH, 0, 0, 1, 2)
+    chain(&! T_CH, 1, 1, 1, 3)
+    let rounds = run(&! T_S, &! T_R, &T_PK, &T_RC, &T_CH, &! T_DM, 2, 217, 210, 5)
     print("b.rounds ")
     print_int(rounds)
     println("")
     if rounds < 1 { fails = fails + 1 }
-    fails = fails + chk("b.R_total", rcnt(5, 217, 210), 18)
-    fails = fails + chk("b.S_total", sc(217), 445)
-    fails = fails + chkb("b.edge r X Y", edge(0, 70, 100), true)
-    fails = fails + chkb("b.edge s Y Z", edge(1, 100, 130), true)
-    fails = fails + chkb("b.edge s Z W", edge(1, 130, 200), true)
-    fails = fails + chkb("b.edge r X Y2 (Rmono)", edge(0, 70, 110), true)
-    fails = fails + chkb("b.edge q X Y (roleSub)", edge(4, 70, 100), true)
-    fails = fails + chkb("b.edge t X Z (r o s)", edge(2, 70, 130), true)
-    fails = fails + chkb("b.edge u Y W (s o s)", edge(3, 100, 200), true)
-    fails = fails + chkb("b.edge q X Y2 (not interned)", edge(4, 70, 110), false)
-    fails = fails + chkb("b.edge t X W", edge(2, 70, 200), false)
-    fails = fails + chkb("b.edge t X Y", edge(2, 70, 100), false)
-    fails = fails + chkb("b.edge u X W", edge(3, 70, 200), false)
-    fails = fails + chkb("b.edge u Y Z", edge(3, 100, 130), false)
-    fails = fails + chkb("b.edge t Y Z", edge(2, 100, 130), false)
-    fails = fails + chkb("b.X<=ex t.Z", subs(70, 213), true)
-    fails = fails + chkb("b.Y<=ex u.W", subs(100, 214), true)
-    fails = fails + chkb("b.X<=ex q.Y", subs(70, 215), true)
-    fails = fails + chkb("b.X<=ex r.Y2", subs(70, 216), true)
-    fails = fails + chkb("b.Y<=ex t.Z", subs(100, 213), false)
-    fails = fails + chkb("b.Z<=ex u.W", subs(130, 214), false)
+    fails = fails + chk("b.R_total", rcnt(&T_R, 5, 217, 210), 18)
+    fails = fails + chk("b.S_total", sc(&T_S, 217), 445)
+    fails = fails + chkb("b.edge r X Y", edge(&T_R, 0, 70, 100), true)
+    fails = fails + chkb("b.edge s Y Z", edge(&T_R, 1, 100, 130), true)
+    fails = fails + chkb("b.edge s Z W", edge(&T_R, 1, 130, 200), true)
+    fails = fails + chkb("b.edge r X Y2 (Rmono)", edge(&T_R, 0, 70, 110), true)
+    fails = fails + chkb("b.edge q X Y (roleSub)", edge(&T_R, 4, 70, 100), true)
+    fails = fails + chkb("b.edge t X Z (r o s)", edge(&T_R, 2, 70, 130), true)
+    fails = fails + chkb("b.edge u Y W (s o s)", edge(&T_R, 3, 100, 200), true)
+    fails = fails + chkb("b.edge q X Y2 (not interned)", edge(&T_R, 4, 70, 110), false)
+    fails = fails + chkb("b.edge t X W", edge(&T_R, 2, 70, 200), false)
+    fails = fails + chkb("b.edge t X Y", edge(&T_R, 2, 70, 100), false)
+    fails = fails + chkb("b.edge u X W", edge(&T_R, 3, 70, 200), false)
+    fails = fails + chkb("b.edge u Y Z", edge(&T_R, 3, 100, 130), false)
+    fails = fails + chkb("b.edge t Y Z", edge(&T_R, 2, 100, 130), false)
+    fails = fails + chkb("b.X<=ex t.Z", subs(&T_S, 70, 213), true)
+    fails = fails + chkb("b.Y<=ex u.W", subs(&T_S, 100, 214), true)
+    fails = fails + chkb("b.X<=ex q.Y", subs(&T_S, 70, 215), true)
+    fails = fails + chkb("b.X<=ex r.Y2", subs(&T_S, 70, 216), true)
+    fails = fails + chkb("b.Y<=ex t.Z", subs(&T_S, 100, 213), false)
+    fails = fails + chkb("b.Z<=ex u.W", subs(&T_S, 130, 214), false)
     return fails
 }
 
 fn scenario_c() -> i64 with IO, Mut, Div, Panic {
     var fails: i64 = 0
-    rst()
-    seed(137, 113)
+    var T_S: [bool; 65536] = [false; 65536]
+    var T_R: [bool; 1048576] = [false; 1048576]
+    var T_D: [bool; 65536] = [false; 65536]
+    var T_CP: [bool; 65536] = [false; 65536]
+    var T_PK: [i64; 4864] = [0; 4864]
+    var T_CH: [i64; 96] = [0; 96]
+    var T_RC: [bool; 256] = [false; 256]
+    var T_DM: [i64; 4] = [0; 4]
+    var T_ENT: [i64; 256] = [0; 256]
+    var T_CLS: [i64; 256] = [0; 256]
+    rst(&! T_S, &! T_R, &! T_D, &! T_CP, &! T_PK, &! T_CH, &! T_RC)
+    seed(&! T_S, 137, 113)
     T_PK[113] = 1
     var i: i64 = 0
     while i < 12 {
-        ex(114 + i, i, 101 + i)
-        sub(100 + i, 114 + i)
+        ex(&! T_PK, 114 + i, i, 101 + i)
+        sub(&! T_S, 100 + i, 114 + i)
         i = i + 1
     }
     var k: i64 = 0
     while k < 10 {
-        ex(126 + k, 12 + k % 4, 102 + k)
-        chain(k, k, k + 1, 12 + k % 4)
+        ex(&! T_PK, 126 + k, 12 + k % 4, 102 + k)
+        chain(&! T_CH, k, k, k + 1, 12 + k % 4)
         k = k + 1
     }
-    ex(136, 14, 112)
-    let rounds = run(10, 137, 114, 16)
+    ex(&! T_PK, 136, 14, 112)
+    let rounds = run(&! T_S, &! T_R, &T_PK, &T_RC, &T_CH, &! T_DM, 10, 137, 114, 16)
     print("c.rounds ")
     print_int(rounds)
     println("")
     if rounds < 1 { fails = fails + 1 }
-    fails = fails + chk("c.R_total", rcnt(16, 137, 114), 55)
-    fails = fails + chk("c.S_total", sc(137), 305)
+    fails = fails + chk("c.R_total", rcnt(&T_R, 16, 137, 114), 55)
+    fails = fails + chk("c.S_total", sc(&T_S, 137), 305)
     var derived: i64 = 0
     k = 0
     while k < 10 {
-        if edge(12 + k % 4, 100 + k, 102 + k) { derived = derived + 1 }
+        if edge(&T_R, 12 + k % 4, 100 + k, 102 + k) { derived = derived + 1 }
         k = k + 1
     }
     fails = fails + chk("c.derived_sigma_edges", derived, 10)
-    fails = fails + chkb("c.edge sigma0 A0 A2", edge(12, 100, 102), true)
-    fails = fails + chkb("c.edge sigma1 A9 A11", edge(13, 109, 111), true)
-    fails = fails + chkb("c.edge sigma0 A0 A3", edge(12, 100, 103), false)
-    fails = fails + chkb("c.A10<=D10 (no chain 10)", subs(110, 136), false)
-    fails = fails + chkb("c.A9<=D9", subs(109, 135), true)
+    fails = fails + chkb("c.edge sigma0 A0 A2", edge(&T_R, 12, 100, 102), true)
+    fails = fails + chkb("c.edge sigma1 A9 A11", edge(&T_R, 13, 109, 111), true)
+    fails = fails + chkb("c.edge sigma0 A0 A3", edge(&T_R, 12, 100, 103), false)
+    fails = fails + chkb("c.A10<=D10 (no chain 10)", subs(&T_S, 110, 136), false)
+    fails = fails + chkb("c.A9<=D9", subs(&T_S, 109, 135), true)
     // 16-role path closure
     var j: i64 = 0
     while j < 15 {
@@ -392,18 +429,28 @@ fn scenario_c() -> i64 with IO, Mut, Div, Panic {
 
 fn scenario_d() -> i64 with IO, Mut, Div, Panic {
     var fails: i64 = 0
-    rst()
-    seed(256, 254)
+    var T_S: [bool; 65536] = [false; 65536]
+    var T_R: [bool; 1048576] = [false; 1048576]
+    var T_D: [bool; 65536] = [false; 65536]
+    var T_CP: [bool; 65536] = [false; 65536]
+    var T_PK: [i64; 4864] = [0; 4864]
+    var T_CH: [i64; 96] = [0; 96]
+    var T_RC: [bool; 256] = [false; 256]
+    var T_DM: [i64; 4] = [0; 4]
+    var T_ENT: [i64; 256] = [0; 256]
+    var T_CLS: [i64; 256] = [0; 256]
+    rst(&! T_S, &! T_R, &! T_D, &! T_CP, &! T_PK, &! T_CH, &! T_RC)
+    seed(&! T_S, 256, 254)
     T_PK[254] = 1
-    ex(255, 15, 253)
+    ex(&! T_PK, 255, 15, 253)
     var i: i64 = 0
     while i < 253 {
-        sub(i, i + 1)
+        sub(&! T_S, i, i + 1)
         i = i + 1
     }
-    sub(252, 255)
+    sub(&! T_S, 252, 255)
     let t0 = now_ms()
-    let rounds = run(0, 256, 255, 16)
+    let rounds = run(&! T_S, &! T_R, &T_PK, &T_RC, &T_CH, &! T_DM, 0, 256, 255, 16)
     let t1 = now_ms()
     print("TIMING_D boundary256 rounds ")
     print_int(rounds)
@@ -412,19 +459,19 @@ fn scenario_d() -> i64 with IO, Mut, Div, Panic {
     println("")
     if rounds < 1 { fails = fails + 1 }
     if t1 - t0 >= 30000 { fails = fails + 1 }
-    fails = fails + chk("d.S_total", sc(256), 32895)
-    fails = fails + chk("d.R_total", rcnt(16, 256, 255), 254)
-    fails = fails + chkb("d.edge 15 C252 C253", edge(15, 252, 253), true)
-    fails = fails + chkb("d.edge 15 C0 C253", edge(15, 0, 253), true)
-    fails = fails + chkb("d.edge 15 C253 C253", edge(15, 253, 253), false)
-    fails = fails + chkb("d.C0<=E255", subs(0, 255), true)
-    fails = fails + chkb("d.C253<=E255", subs(253, 255), false)
-    fails = fails + chkb("d.E255<=top254", subs(255, 254), true)
-    fails = fails + chkb("d.accessor beyond range", subs(256, 0), false)
-    fails = fails + chkb("d.edge beyond range", edge(16, 0, 0), false)
+    fails = fails + chk("d.S_total", sc(&T_S, 256), 32895)
+    fails = fails + chk("d.R_total", rcnt(&T_R, 16, 256, 255), 254)
+    fails = fails + chkb("d.edge 15 C252 C253", edge(&T_R, 15, 252, 253), true)
+    fails = fails + chkb("d.edge 15 C0 C253", edge(&T_R, 15, 0, 253), true)
+    fails = fails + chkb("d.edge 15 C253 C253", edge(&T_R, 15, 253, 253), false)
+    fails = fails + chkb("d.C0<=E255", subs(&T_S, 0, 255), true)
+    fails = fails + chkb("d.C253<=E255", subs(&T_S, 253, 255), false)
+    fails = fails + chkb("d.E255<=top254", subs(&T_S, 255, 254), true)
+    fails = fails + chkb("d.accessor beyond range", subs(&T_S, 256, 0), false)
+    fails = fails + chkb("d.edge beyond range", edge(&T_R, 16, 0, 0), false)
 
     // sentinels: a refusal must write nothing
-    rst()
+    rst(&! T_S, &! T_R, &! T_D, &! T_CP, &! T_PK, &! T_CH, &! T_RC)
     T_S[5 * 256 + 7] = true
     T_S[255 * 256 + 255] = true
     fails = fails + chk("d.seed nc=257", elplus_wide_seed(&! T_S, 257, 0), 1)
@@ -446,26 +493,26 @@ fn scenario_d() -> i64 with IO, Mut, Div, Panic {
 
     // fixpoint refusals leave S and R untouched
     T_R[12345] = false
-    fails = fails + chk("d.fixpoint nchain=33", run(33, 3, 3, 1), 0 - 1)
-    fails = fails + chk("d.fixpoint nc=257", run(0, 257, 3, 1), 0 - 2)
-    fails = fails + chk("d.fixpoint nb=257", run(0, 3, 257, 1), 0 - 3)
-    fails = fails + chk("d.fixpoint nr=17", run(0, 3, 3, 17), 0 - 4)
+    fails = fails + chk("d.fixpoint nchain=33", run(&! T_S, &! T_R, &T_PK, &T_RC, &T_CH, &! T_DM, 33, 3, 3, 1), 0 - 1)
+    fails = fails + chk("d.fixpoint nc=257", run(&! T_S, &! T_R, &T_PK, &T_RC, &T_CH, &! T_DM, 0, 257, 3, 1), 0 - 2)
+    fails = fails + chk("d.fixpoint nb=257", run(&! T_S, &! T_R, &T_PK, &T_RC, &T_CH, &! T_DM, 0, 3, 257, 1), 0 - 3)
+    fails = fails + chk("d.fixpoint nr=17", run(&! T_S, &! T_R, &T_PK, &T_RC, &T_CH, &! T_DM, 0, 3, 3, 17), 0 - 4)
     T_PK[0] = 2
     T_PK[256] = 256
     T_PK[512] = 0
-    fails = fails + chk("d.fixpoint conjunct=256", run(0, 1, 1, 0), 0 - 5)
+    fails = fails + chk("d.fixpoint conjunct=256", run(&! T_S, &! T_R, &T_PK, &T_RC, &T_CH, &! T_DM, 0, 1, 1, 0), 0 - 5)
     T_PK[0] = 3
     T_PK[256] = 16
     T_PK[512] = 0
-    fails = fails + chk("d.fixpoint ex role=16", run(0, 1, 1, 0), 0 - 6)
+    fails = fails + chk("d.fixpoint ex role=16", run(&! T_S, &! T_R, &T_PK, &T_RC, &T_CH, &! T_DM, 0, 1, 1, 0), 0 - 6)
     T_PK[0] = 0
     T_PK[768] = 256
-    fails = fails + chk("d.fixpoint exid=256", run(0, 1, 1, 1), 0 - 7)
+    fails = fails + chk("d.fixpoint exid=256", run(&! T_S, &! T_R, &T_PK, &T_RC, &T_CH, &! T_DM, 0, 1, 1, 1), 0 - 7)
     T_PK[768] = 0 - 1
     T_CH[0] = 16
     T_CH[32] = 0
     T_CH[64] = 0
-    fails = fails + chk("d.fixpoint chain role=16", run(1, 1, 1, 1), 0 - 8)
+    fails = fails + chk("d.fixpoint chain role=16", run(&! T_S, &! T_R, &T_PK, &T_RC, &T_CH, &! T_DM, 1, 1, 1, 1), 0 - 8)
     fails = fails + chkb("d.S untouched by refusals", T_S[255 * 256 + 255], true)
     fails = fails + chkb("d.R untouched by refusals", T_R[12345], false)
     fails = fails + chk("d.derive_conflicts m=257", elplus_wide_derive_conflicts(&! T_CP, 257, &T_ENT, &T_CLS, &T_S, &T_D, 3), 1)
@@ -475,50 +522,60 @@ fn scenario_d() -> i64 with IO, Mut, Div, Panic {
 // 23-drug shape. Concept layout and expectations: header (e).
 fn scenario_e() -> i64 with IO, Mut, Div, Panic {
     var fails: i64 = 0
-    rst()
-    seed(83, 31)
+    var T_S: [bool; 65536] = [false; 65536]
+    var T_R: [bool; 1048576] = [false; 1048576]
+    var T_D: [bool; 65536] = [false; 65536]
+    var T_CP: [bool; 65536] = [false; 65536]
+    var T_PK: [i64; 4864] = [0; 4864]
+    var T_CH: [i64; 96] = [0; 96]
+    var T_RC: [bool; 256] = [false; 256]
+    var T_DM: [i64; 4] = [0; 4]
+    var T_ENT: [i64; 256] = [0; 256]
+    var T_CLS: [i64; 256] = [0; 256]
+    rst(&! T_S, &! T_R, &! T_D, &! T_CP, &! T_PK, &! T_CH, &! T_RC)
+    seed(&! T_S, 83, 31)
     T_PK[31] = 1
     // clears.v for victims 0..10: id 32+v, role 0, filler v; route 23 + v mod 6
     var v: i64 = 0
     while v < 11 {
-        ex(32 + v, 0, v)
-        sub(23 + v % 6, 32 + v)
+        ex(&! T_PK, 32 + v, 0, v)
+        sub(&! T_S, 23 + v % 6, 32 + v)
         v = v + 1
     }
     // perpetrator existentials 43..52
-    ex(43, 1, 26)
-    sub(15, 43)
-    ex(44, 1, 27)
-    sub(16, 44)
-    ex(45, 1, 28)
-    sub(17, 45)
-    ex(46, 1, 23)
-    sub(18, 46)
-    ex(47, 1, 24)
-    sub(19, 47)
-    ex(48, 2, 23)
-    sub(20, 48)
-    ex(49, 3, 24)
-    sub(21, 49)
-    ex(50, 3, 25)
-    sub(22, 50)
-    ex(51, 4, 26)
-    sub(22, 51)
-    ex(52, 4, 27)
-    sub(20, 52)
+    ex(&! T_PK, 43, 1, 26)
+    sub(&! T_S, 15, 43)
+    ex(&! T_PK, 44, 1, 27)
+    sub(&! T_S, 16, 44)
+    ex(&! T_PK, 45, 1, 28)
+    sub(&! T_S, 17, 45)
+    ex(&! T_PK, 46, 1, 23)
+    sub(&! T_S, 18, 46)
+    ex(&! T_PK, 47, 1, 24)
+    sub(&! T_S, 19, 47)
+    ex(&! T_PK, 48, 2, 23)
+    sub(&! T_S, 20, 48)
+    ex(&! T_PK, 49, 3, 24)
+    sub(&! T_S, 21, 49)
+    ex(&! T_PK, 50, 3, 25)
+    sub(&! T_S, 22, 50)
+    ex(&! T_PK, 51, 4, 26)
+    sub(&! T_S, 22, 51)
+    ex(&! T_PK, 52, 4, 27)
+    sub(&! T_S, 20, 52)
     // raises.v 53..67, lowers.v 68..82 for all 15 victims
     v = 0
     while v < 15 {
-        ex(53 + v, 5, v)
-        ex(68 + v, 6, v)
+        ex(&! T_PK, 53 + v, 5, v)
+        ex(&! T_PK, 68 + v, 6, v)
         v = v + 1
     }
-    chain(0, 1, 0, 5)
-    chain(1, 2, 0, 5)
-    chain(2, 3, 0, 6)
-    chain(3, 4, 0, 6)
+    chain(&! T_CH, 0, 1, 0, 5)
+    chain(&! T_CH, 1, 2, 0, 5)
+    chain(&! T_CH, 2, 3, 0, 6)
+    chain(&! T_CH, 3, 4, 0, 6)
     let t0 = now_ms()
-    let rounds = run(4, 83, 32, 7)
+    let rounds = run(&! T_S, &! T_R, &T_PK, &T_RC, &T_CH, &! T_DM, 4, 83, 32, 7)
     let t1 = now_ms()
     print("TIMING_E drug23 nc 83 rounds ")
     print_int(rounds)
@@ -527,34 +584,134 @@ fn scenario_e() -> i64 with IO, Mut, Div, Panic {
     println("")
     if rounds < 1 { fails = fails + 1 }
     if t1 - t0 >= 30000 { fails = fails + 1 }
-    fails = fails + chk("e.R_total", rcnt(7, 83, 32), 110)
-    fails = fails + chk("e.S_total", sc(83), 224)
+    fails = fails + chk("e.R_total", rcnt(&T_R, 7, 83, 32), 110)
+    fails = fails + chk("e.S_total", sc(&T_S, 83), 224)
     var raises: i64 = 0
     var lowers: i64 = 0
     var p: i64 = 15
     while p < 23 {
         v = 0
         while v < 15 {
-            if edge(5, p, v) { raises = raises + 1 }
-            if edge(6, p, v) { lowers = lowers + 1 }
+            if edge(&T_R, 5, p, v) { raises = raises + 1 }
+            if edge(&T_R, 6, p, v) { lowers = lowers + 1 }
             v = v + 1
         }
         p = p + 1
     }
     fails = fails + chk("e.raises_edges", raises, 11)
     fails = fails + chk("e.lowers_edges", lowers, 8)
-    fails = fails + chkb("e.15 raises 3", edge(5, 15, 3), true)
-    fails = fails + chkb("e.15 raises 9", edge(5, 15, 9), true)
-    fails = fails + chkb("e.15 raises 4", edge(5, 15, 4), false)
-    fails = fails + chkb("e.20 raises 0", edge(5, 20, 0), true)
-    fails = fails + chkb("e.20 lowers 4", edge(6, 20, 4), true)
-    fails = fails + chkb("e.20 lowers 0", edge(6, 20, 0), false)
-    fails = fails + chkb("e.22 lowers 2", edge(6, 22, 2), true)
-    fails = fails + chkb("e.22 lowers 3", edge(6, 22, 3), true)
-    fails = fails + chkb("e.17 raises 5", edge(5, 17, 5), true)
-    fails = fails + chkb("e.perp 15<=ex raises.3", subs(15, 56), true)
-    fails = fails + chkb("e.perp 15<=ex raises.4", subs(15, 57), false)
-    fails = fails + chkb("e.victims 11..14 never reached", edge(5, 18, 11), false)
+    fails = fails + chkb("e.15 raises 3", edge(&T_R, 5, 15, 3), true)
+    fails = fails + chkb("e.15 raises 9", edge(&T_R, 5, 15, 9), true)
+    fails = fails + chkb("e.15 raises 4", edge(&T_R, 5, 15, 4), false)
+    fails = fails + chkb("e.20 raises 0", edge(&T_R, 5, 20, 0), true)
+    fails = fails + chkb("e.20 lowers 4", edge(&T_R, 6, 20, 4), true)
+    fails = fails + chkb("e.20 lowers 0", edge(&T_R, 6, 20, 0), false)
+    fails = fails + chkb("e.22 lowers 2", edge(&T_R, 6, 22, 2), true)
+    fails = fails + chkb("e.22 lowers 3", edge(&T_R, 6, 22, 3), true)
+    fails = fails + chkb("e.17 raises 5", edge(&T_R, 5, 17, 5), true)
+    fails = fails + chkb("e.perp 15<=ex raises.3", subs(&T_S, 15, 56), true)
+    fails = fails + chkb("e.perp 15<=ex raises.4", subs(&T_S, 15, 57), false)
+    fails = fails + chkb("e.victims 11..14 never reached", edge(&T_R, 5, 18, 11), false)
+    return fails
+}
+
+// (g) legacy API and wide API on the same role-hierarchy + role-chain TBox
+// (regression for the 2026-11-15 wrapper bug: S came out right and every
+// derived role edge was lost).
+fn scenario_g() -> i64 with IO, Mut, Div, Panic {
+    var fails: i64 = 0
+    // legacy layout
+    var ck: [i64; 64] = [0; 64]
+    var a1: [i64; 64] = [0; 64]
+    var a2: [i64; 64] = [0; 64]
+    var lx: [i64; 512] = [0; 512]
+    var lrc: [bool; 64] = [false; 64]
+    var ls: [bool; 4096] = [false; 4096]
+    var lr: [bool; 32768] = [false; 32768]
+    var c1: [i64; 8] = [0; 8]
+    var c2: [i64; 8] = [0; 8]
+    var c3: [i64; 8] = [0; 8]
+    // wide layout
+    var T_S: [bool; 65536] = [false; 65536]
+    var T_R: [bool; 1048576] = [false; 1048576]
+    var T_D: [bool; 65536] = [false; 65536]
+    var T_CP: [bool; 65536] = [false; 65536]
+    var T_PK: [i64; 4864] = [0; 4864]
+    var T_CH: [i64; 96] = [0; 96]
+    var T_RC: [bool; 256] = [false; 256]
+    var T_DM: [i64; 4] = [0; 4]
+    var i: i64 = 0
+    while i < 512 { lx[i] = 0 - 1  i = i + 1 }
+    rst(&! T_S, &! T_R, &! T_D, &! T_CP, &! T_PK, &! T_CH, &! T_RC)
+    ck[0] = 1
+    // 5 = ex fs.Pc, 6 = ex po.H, 7 = ex po.Pc ; fs = role 0, po = role 1
+    ck[5] = 3; a1[5] = 0; a2[5] = 3; lx[0 * 64 + 3] = 5
+    ck[6] = 3; a1[6] = 1; a2[6] = 4; lx[1 * 64 + 4] = 6
+    ck[7] = 3; a1[7] = 1; a2[7] = 3; lx[1 * 64 + 3] = 7
+    lrc[0 * 8 + 1] = true
+    elplus_role_closure(&! lrc, 2)
+    c1[0] = 1
+    c2[0] = 1
+    c3[0] = 1
+    elplus_seed(&! ls, 8, 0)
+    ls[1 * 64 + 5] = true
+    ls[3 * 64 + 6] = true
+    ls[2 * 64 + 6] = true
+    let lrounds = elplus_fixpoint(&! ls, &! lr, &ck, &a1, &a2, &lx, &lrc, &c1, &c2, &c3, 1, 8, 5, 2)
+    // wide, same TBox
+    seed(&! T_S, 8, 0)
+    ex(&! T_PK, 5, 0, 3)
+    ex(&! T_PK, 6, 1, 4)
+    ex(&! T_PK, 7, 1, 3)
+    T_PK[0] = 1
+    sub(&! T_S, 1, 5)
+    sub(&! T_S, 3, 6)
+    sub(&! T_S, 2, 6)
+    T_RC[0 * 16 + 1] = true
+    let wrc = elplus_wide_role_closure(&! T_RC, 2)
+    chain(&! T_CH, 0, 1, 1, 1)
+    let wrounds = run(&! T_S, &! T_R, &T_PK, &T_RC, &T_CH, &! T_DM, 1, 8, 5, 2)
+    fails = fails + chk("g.legacy rounds>=2", if lrounds >= 2 { 1 } else { 0 }, 1)
+    fails = fails + chk("g.wide rounds>=2", if wrounds >= 2 { 1 } else { 0 }, 1)
+    fails = fails + chk("g.wide role_closure", wrc, 0)
+    // hand-enumerated: po edges (Pc,H) (Endo,H) (6,H) (7,Pc) (Peri,Pc) (5,Pc) (7,H) (Peri,H) (5,H);
+    // fs edges (Peri,Pc) (5,Pc)  => 11
+    fails = fails + chk("g.legacy R_total", elplus_r_count(&lr, 2, 8, 5), 11)
+    fails = fails + chk("g.wide R_total", rcnt(&T_R, 2, 8, 5), 11)
+    // S: 8 reflexive + 7 top + 3 stated + 5 derived (7<=6, Peri<=6, 5<=6, Peri<=7, 5<=7) = 23
+    fails = fails + chk("g.legacy S_total", elplus_s_count(&ls, 8), 23)
+    fails = fails + chk("g.wide S_total", sc(&T_S, 8), 23)
+    // derived edges that need the role hierarchy (fs <= po) and the chain (po o po <= po)
+    fails = fails + chkb("g.legacy po Peri Pc (roleSub)", elplus_edge_dense(&lr, 1, 1, 3), true)
+    fails = fails + chkb("g.wide   po Peri Pc (roleSub)", edge(&T_R, 1, 1, 3), true)
+    fails = fails + chkb("g.legacy po Peri H (chain)", elplus_edge_dense(&lr, 1, 1, 4), true)
+    fails = fails + chkb("g.wide   po Peri H (chain)", edge(&T_R, 1, 1, 4), true)
+    fails = fails + chkb("g.legacy po 7 H (chain)", elplus_edge_dense(&lr, 1, 7, 4), true)
+    fails = fails + chkb("g.wide   po 7 H (chain)", edge(&T_R, 1, 7, 4), true)
+    fails = fails + chkb("g.legacy po Endo H (stated)", elplus_edge_dense(&lr, 1, 2, 4), true)
+    fails = fails + chkb("g.legacy po Endo Pc", elplus_edge_dense(&lr, 1, 2, 3), false)
+    fails = fails + chkb("g.wide   po Endo Pc", edge(&T_R, 1, 2, 3), false)
+    fails = fails + chkb("g.legacy fs Pc H", elplus_edge_dense(&lr, 0, 3, 4), false)
+    fails = fails + chkb("g.legacy Peri<=ex po.H", elplus_subsumes_dense(&ls, 1, 6), true)
+    fails = fails + chkb("g.wide   Peri<=ex po.H", subs(&T_S, 1, 6), true)
+    fails = fails + chkb("g.legacy Endo<=ex po.Pc", elplus_subsumes_dense(&ls, 2, 7), false)
+    // legacy and wide agree cell by cell
+    var diff: i64 = 0
+    var x: i64 = 0
+    while x < 8 {
+        var y: i64 = 0
+        while y < 8 {
+            if elplus_subsumes_dense(&ls, x, y) != subs(&T_S, x, y) { diff = diff + 1 }
+            var q: i64 = 0
+            while q < 2 {
+                if elplus_edge_dense(&lr, q, x, y) != edge(&T_R, q, x, y) { diff = diff + 1 }
+                q = q + 1
+            }
+            y = y + 1
+        }
+        x = x + 1
+    }
+    fails = fails + chk("g.legacy vs wide differing cells", diff, 0)
     return fails
 }
 
@@ -565,6 +722,7 @@ fn main() -> i32 with IO, Mut, Div, Panic {
     fails = fails + scenario_c()
     fails = fails + scenario_d()
     fails = fails + scenario_e()
+    fails = fails + scenario_g()
     if fails == 0 {
         println("ELPLUS_LIMITS_256_PASS")
         return 0
