@@ -168,7 +168,7 @@ struct LowerLocalStack {
 // budget. Measured before choosing, because the obvious target was the wrong one.
 struct LowerFoBindTable {
     names: [Name; 128],
-    sens: [i64; 4096],
+    sens: [i64; 8192],
     // #2827: per-row residual-variance slot of a loop-carried (`var`) local, or
     // -1. A mutable local's sens rows exist only for the channels that existed
     // when it was declared; the residual holds the part of its variance carried
@@ -183,7 +183,7 @@ struct LowerFoBindTable {
 fn empty_lower_fo_bind_table() -> LowerFoBindTable {
     LowerFoBindTable {
         names: [ir_empty_name(); 128],
-        sens: [-1; 4096],
+        sens: [-1; 8192],
         resid: [-1; 128],
         depth: [0; 128],
     }
@@ -208,7 +208,7 @@ fn lower_fo_bind_table_clone(src: &LowerFoBindTable) -> Box<LowerFoBindTable> wi
         i = i + 1
     }
     var k: i64 = 0
-    while k < 4096 {
+    while k < 8192 {
         t.sens[k as usize] = (*src).sens[k as usize]
         k = k + 1
     }
@@ -340,11 +340,11 @@ var FO_STEP_NNAME: Name = ir_empty_name()
 var FO_STEP_FN: Name = ir_empty_name()
 var FO_STEP_ZERO: i64 = 0
 var FO_STEP_ZVAL: i64 = 0
-var FO_STEP_ZS: [i64; 32] = [-1; 32]
+var FO_STEP_ZS: [i64; 64] = [-1; 64]
 var FO_STEP_VALS: [i64; 16] = [-1; 16]
-var FO_STEP_SENS: [i64; 512] = [-1; 512]
+var FO_STEP_SENS: [i64; 1024] = [-1; 1024]
 var FO_STEP_OUT_VAL: i64 = 0
-var FO_STEP_OUT_S: [i64; 32] = [-1; 32]
+var FO_STEP_OUT_S: [i64; 64] = [-1; 64]
 var FO_STEP_CARRY: i64 = 0
 var FO_STEP_H: [i64; 36] = [-1; 36]
 var FO_STEP_OUT_H: [i64; 36] = [-1; 36]
@@ -764,6 +764,16 @@ var IR_LOWER_ERROR_TOTAL: i64 = 0
 // Lowerer resets and is cleared only at top-level compile entry.
 var IR_LOWER_COMPILE_ERROR_LATCH: bool = false
 var IR_LOWER_COMPILE_ERROR_SCOPE_ACTIVE: bool = false
+// First-order GUM channel capacity per function (#3545, raised from 32).
+// This constant bounds every channel loop and is the row stride of the
+// sensitivity tables. Array LENGTHS cannot name it (literal-only in the
+// bootstrap grammar): they are written as the literal 64 -- the Lowerer's
+// fo_sigma2/fo_expr_sens/fo_pending_sens, FO_SIGMA_REG, FO_CH_DEPTH,
+// FO_STEP_ZS/OUT_S, every [i64; 64] snapshot -- and as multiples of it for the
+// row tables (128 x 64 bind rows, 16 x 64 step rows, 64 x 64 field/array rows).
+// Raise all of them together; tests/run-pass/gum_channel_capacity_64_3545.sio
+// and tests/compile-fail/gum_channel_capacity_65_3545.sio witness the pair.
+let FO_MAX_CH: i64 = 64
 // Numeric lowering also creates zero-variance bookkeeping channels. Overflow
 // matters only when this compilation actually constructs/observes uncertainty.
 // Keep both facts across module resets so either discovery order fails closed.
@@ -1143,7 +1153,7 @@ fn fo_refuse_capacity(correlation: bool) with Mut, IO {
     if correlation {
         print("error[E304]: GUM correlation channel capacity exceeded: correlate() supports only channels 0 through 7; refusing to drop covariance (#3545)\n")
     } else {
-        print("error[E303]: GUM channel capacity exceeded: first-order lowering supports at most 32 channels per function; refusing to drop uncertainty sources (#3545)\n")
+        print("error[E303]: GUM channel capacity exceeded: first-order lowering supports at most 64 channels per function; refusing to drop uncertainty sources (#3545)\n")
     }
     IR_LOWER_HARD_ERROR = 1
     if IR_LOWER_COMPILE_ERROR_SCOPE_ACTIVE {
@@ -1192,7 +1202,7 @@ var FO_CTOR_FIELD0: [i64; 256] = [0; 256]
 //
 // 8x8 to match so_hess_idx's domain: the off-diagonal Hessian is the second
 // consumer of this, and a covariance the Hessian cannot index is a covariance
-// nothing can use. Variance walks 32 channels, so a pair above 7 must refuse
+// nothing can use. Variance walks FO_MAX_CH (64) channels, so a pair above 7 must refuse
 // compilation rather than silently becoming uncorrelated or wrapping into
 // another pair's slot (#3545).
 // sigma per channel, as a register index -- not sigma squared, and not a
@@ -1203,13 +1213,13 @@ var FO_CTOR_FIELD0: [i64; 256] = [0; 256]
 // vanished. FO_COV_RHO beside it is a module global and reads correctly, so
 // this follows it -- consistent with this compiler's known limits on large
 // aggregates.
-var FO_SIGMA_REG: [i64; 32] = [-1; 32]
+var FO_SIGMA_REG: [i64; 64] = [-1; 64]
 // #2827: the loop depth at which each first-order channel was created. A
 // channel created inside a loop that a local was declared outside of is a new
 // quantity on every iteration (a measure() in the body), so that local never
 // carries a sensitivity row for it; one created at or above the local's depth
 // is the same quantity on every iteration and gets a row.
-var FO_CH_DEPTH: [i64; 32] = [0; 32]
+var FO_CH_DEPTH: [i64; 64] = [0; 64]
 
 var FO_COV_RHO: [f64; 64] = [0.0; 64]
 // Runtime rho, as a register. -1 means the pair uses the f64 table above.
@@ -1302,7 +1312,7 @@ fn fo_cov_rho_live(i: i64, j: i64) -> bool with Mut, Panic, Div {
 // call is the last place those vectors exist together.
 var FO_FIELD_SENS_COUNT: i64 = 0
 var FO_FIELD_SENS_KEY: [i64; 64] = [0; 64]
-var FO_FIELD_SENS: [i64; 2048] = [-1; 2048]
+var FO_FIELD_SENS: [i64; 4096] = [-1; 4096]
 
 // #3546: straight-line f64 array element sensitivities, keyed by the actual
 // local array register and literal index. Snapshot registers at stores: a
@@ -1310,7 +1320,7 @@ var FO_FIELD_SENS: [i64; 2048] = [-1; 2048]
 var FO_ARRAY_COUNT: i64 = 0
 var FO_ARRAY_BASE: [i64; 64] = [-1; 64]
 var FO_ARRAY_INDEX: [i64; 64] = [-1; 64]
-var FO_ARRAY_SENS: [i64; 2048] = [-1; 2048]
+var FO_ARRAY_SENS: [i64; 4096] = [-1; 4096]
 var FO_CONTAINER_KNOWLEDGE_SEEN: bool = false
 
 fn fo_array_base_tracked(base: i64) -> bool with Mut, Panic, Div {
@@ -3194,13 +3204,13 @@ struct Lowerer {
     allow_direct_capturing_closure_literal: bool,
     pending_variance_reg: i64,
     // β-Madaros multi-channel FO GUM (lean_single β¹⁰/β¹¹ parity target).
-    // Var(y) = Σ_k (∂y/∂x_k)² · σ²_k with up to 32 channels per function.
+    // Var(y) = Σ_k (∂y/∂x_k)² · σ²_k with up to FO_MAX_CH (64) channels per function.
     // Enables partial-correlation products ((a*b)*a) and p1−p2 cancel.
-    // 32 channels: headroom for multi-seed polys after other live seeds in main.
+    // 64 channels (was 32; #3545): headroom for multi-seed polys after other live seeds in main.
     fo_nchan: i64,
-    fo_sigma2: [i64; 32],
-    fo_expr_sens: [i64; 32],
-    fo_pending_sens: [i64; 32],
+    fo_sigma2: [i64; 64],
+    fo_expr_sens: [i64; 64],
+    fo_pending_sens: [i64; 64],
     fo_bind_count: i64,
     fo_bind: Box<LowerFoBindTable>,
     // Second order. H_jk = d2y/dx_j dx_k over the same 8 seed channels, stored
@@ -3756,9 +3766,9 @@ fn lowerer_new() -> Lowerer with Alloc, Mut, Panic, Div {
         allow_direct_capturing_closure_literal: false,
         pending_variance_reg: -1,
         fo_nchan: 0,
-        fo_sigma2: [-1; 32],
-        fo_expr_sens: [-1; 32],
-        fo_pending_sens: [-1; 32],
+        fo_sigma2: [-1; 64],
+        fo_expr_sens: [-1; 64],
+        fo_pending_sens: [-1; 64],
         fo_bind_count: 0,
         fo_bind: Box::new(empty_lower_fo_bind_table()),
         so_enabled: false,
@@ -4388,9 +4398,9 @@ fn lowerer_new_from_program_summary(summary: &IrProgramSummary, epistemic: &IrEp
         allow_direct_capturing_closure_literal: false,
         pending_variance_reg: -1,
         fo_nchan: 0,
-        fo_sigma2: [-1; 32],
-        fo_expr_sens: [-1; 32],
-        fo_pending_sens: [-1; 32],
+        fo_sigma2: [-1; 64],
+        fo_expr_sens: [-1; 64],
+        fo_pending_sens: [-1; 64],
         fo_bind_count: 0,
         fo_bind: Box::new(empty_lower_fo_bind_table()),
         so_enabled: false,
@@ -4451,9 +4461,9 @@ fn lowerer_new_from_program_summary_owned(summary: IrProgramSummary, epistemic: 
         allow_direct_capturing_closure_literal: false,
         pending_variance_reg: -1,
         fo_nchan: 0,
-        fo_sigma2: [-1; 32],
-        fo_expr_sens: [-1; 32],
-        fo_pending_sens: [-1; 32],
+        fo_sigma2: [-1; 64],
+        fo_expr_sens: [-1; 64],
+        fo_pending_sens: [-1; 64],
         fo_bind_count: 0,
         fo_bind: Box::new(empty_lower_fo_bind_table()),
         so_enabled: false,
@@ -4518,9 +4528,9 @@ fn lowerer_from_acc_module(module: Box<IrModule>) -> Lowerer with Alloc, Mut, Pa
         allow_direct_capturing_closure_literal: false,
         pending_variance_reg: -1,
         fo_nchan: 0,
-        fo_sigma2: [-1; 32],
-        fo_expr_sens: [-1; 32],
-        fo_pending_sens: [-1; 32],
+        fo_sigma2: [-1; 64],
+        fo_expr_sens: [-1; 64],
+        fo_pending_sens: [-1; 64],
         fo_bind_count: 0,
         fo_bind: Box::new(empty_lower_fo_bind_table()),
         so_enabled: false,
@@ -9165,7 +9175,7 @@ fn lowerer_lower_fn_item_mut(
     // reg_count=18 (run_tests' vreg 122) and native emit refused
     // malformed_ir_registers.
     var fo_sri: i64 = 0
-    while fo_sri < 32 {
+    while fo_sri < FO_MAX_CH {
         (*lo).fo_sigma2[fo_sri as usize] = -1
         FO_SIGMA_REG[fo_sri as usize] = -1
         (*lo).fo_expr_sens[fo_sri as usize] = -1
@@ -15727,7 +15737,7 @@ impl Lowerer {
         lo.fo_bind_count = 0
         fo_field_sens_reset()
         var fci: i64 = 0
-        while fci < 32 {
+        while fci < FO_MAX_CH {
             lo.fo_sigma2[fci as usize] = -1
             lo.fo_expr_sens[fci as usize] = -1
             lo.fo_pending_sens[fci as usize] = -1
@@ -18845,8 +18855,8 @@ impl Lowerer {
         (*fb0).resid[idx as usize] = 0 - 1
         (*fb0).depth[idx as usize] = lo.loop_depth
         var c: i64 = 0
-        while c < 32 {
-            (*fb0).sens[(idx * 32 + c) as usize] = 0 - 1
+        while c < FO_MAX_CH {
+            (*fb0).sens[(idx * FO_MAX_CH + c) as usize] = 0 - 1
             c = c + 1
         }
         lo.fo_bind = fb0
@@ -18855,9 +18865,9 @@ impl Lowerer {
     }
 
     // Zero-initialised sens slots for the channels that exist at this point.
-    // Bounded by fo_nchan rather than 32: channels are seeded by measure(), which
+    // Bounded by fo_nchan rather than FO_MAX_CH: channels are seeded by measure(), which
     // in practice precedes the locals that accumulate through them, and allocating
-    // all 32 would cost register pressure in every program that touches f64.
+    // all FO_MAX_CH would cost register pressure in every program that touches f64.
     fn fo_alloc_sens_slots_for_local(self, name: Name) -> Lowerer with Mut, Panic, Div, IO, Alloc {
         var lo = self
         if lo.fo_nchan <= 0 {
@@ -18870,18 +18880,18 @@ impl Lowerer {
             return lo
         }
         var k: i64 = 0
-        while k < lo.fo_nchan && k < 32 {
+        while k < lo.fo_nchan && k < FO_MAX_CH {
             // Same aliasing rule as alloc_variance_slot_for_local: a channel already
             // bound points at the RHS's vreg, so copy its value into a private reg
             // rather than reusing it as this local's slot.
-            let existing = (*lo.fo_bind).sens[(row * 32 + k) as usize]
+            let existing = (*lo.fo_bind).sens[(row * FO_MAX_CH + k) as usize]
             let z = lo.emit_f64_const(0.0)
             lo = z.0
             if existing >= 0 {
                 lo = lo.emit(ir_copy(z.1, existing))
             }
             var fb1 = lo.fo_bind
-            (*fb1).sens[(row * 32 + k) as usize] = z.1
+            (*fb1).sens[(row * FO_MAX_CH + k) as usize] = z.1
             lo.fo_bind = fb1
             k = k + 1
         }
@@ -18892,7 +18902,7 @@ impl Lowerer {
         // read of the local drop it.
         var had_sens = false
         var hk: i64 = 0
-        while hk < 32 {
+        while hk < FO_MAX_CH {
             if lo.fo_expr_sens[hk as usize] >= 0 { had_sens = true }
             hk = hk + 1
         }
@@ -18938,12 +18948,12 @@ impl Lowerer {
             let rd = (*lo.fo_bind).depth[r as usize]
             if rs >= 0 && rd <= lo.loop_depth {
                 var k: i64 = 0
-                while k < lo.fo_nchan && k < 32 {
-                    if (*lo.fo_bind).sens[(r * 32 + k) as usize] < 0 && lo.fo_sigma2[k as usize] >= 0 && FO_CH_DEPTH[k as usize] <= rd {
+                while k < lo.fo_nchan && k < FO_MAX_CH {
+                    if (*lo.fo_bind).sens[(r * FO_MAX_CH + k) as usize] < 0 && lo.fo_sigma2[k as usize] >= 0 && FO_CH_DEPTH[k as usize] <= rd {
                         let z = lo.emit_f64_const(0.0)
                         lo = z.0
                         var fbe = lo.fo_bind
-                        (*fbe).sens[(r * 32 + k) as usize] = z.1
+                        (*fbe).sens[(r * FO_MAX_CH + k) as usize] = z.1
                         lo.fo_bind = fbe
                     }
                     k = k + 1
@@ -18973,7 +18983,7 @@ impl Lowerer {
             }
         }
         if ch < 0 {
-            if lo.fo_nchan >= 32 {
+            if lo.fo_nchan >= FO_MAX_CH {
                 fo_refuse_capacity(false)
                 return lo
             }
@@ -19034,8 +19044,8 @@ impl Lowerer {
         var dropped: i64 = 0 - 1
         if resid >= 0 {
             var dk: i64 = 0
-            while dk < 32 {
-                let dslot = (*lo.fo_bind).sens[(row * 32 + dk) as usize]
+            while dk < FO_MAX_CH {
+                let dslot = (*lo.fo_bind).sens[(row * FO_MAX_CH + dk) as usize]
                 let dsrc = lo.fo_expr_sens[dk as usize]
                 let dsig = lo.fo_sigma2[dk as usize]
                 if dslot < 0 && dsrc >= 0 && dsig >= 0 && lo.loop_depth == rdepth && FO_CH_DEPTH[dk as usize] <= rdepth {
@@ -19045,7 +19055,7 @@ impl Lowerer {
                     let z = lo.emit_f64_const(0.0)
                     lo = z.0
                     var fbx = lo.fo_bind
-                    (*fbx).sens[(row * 32 + dk) as usize] = z.1
+                    (*fbx).sens[(row * FO_MAX_CH + dk) as usize] = z.1
                     lo.fo_bind = fbx
                 } else if dslot < 0 && dsrc >= 0 && dsig >= 0 {
                     let q_p = lo.fresh_reg()
@@ -19071,8 +19081,8 @@ impl Lowerer {
         }
         var any: bool = false
         var k: i64 = 0
-        while k < 32 {
-            let slot = (*lo.fo_bind).sens[(row * 32 + k) as usize]
+        while k < FO_MAX_CH {
+            let slot = (*lo.fo_bind).sens[(row * FO_MAX_CH + k) as usize]
             if slot >= 0 {
                 any = true
                 let src = lo.fo_expr_sens[k as usize]
@@ -19277,7 +19287,7 @@ impl Lowerer {
         var k: i64 = 0
         // Inspect every FO channel so the correlation setters can diagnose a
         // channel outside their smaller covariance table instead of seeing -1.
-        while k < 32 {
+        while k < FO_MAX_CH {
             if self.fo_expr_sens[k as usize] >= 0 {
                 if found >= 0 {
                     return 0 - 1
@@ -19500,7 +19510,7 @@ impl Lowerer {
     // except the channels that made the denominator uncertain to begin with.
     // hessian_of(a/b, kb, kb) is therefore the pin for this rule, not the
     // mixed partial: the mixed one survives a two-term approximation.
-    fn so_combine_hess_div(self, hL: [i64; 36], hR: [i64; 36], sL: [i64; 32], sR: [i64; 32], lhs_v: i64, rhs_v: i64) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+    fn so_combine_hess_div(self, hL: [i64; 36], hR: [i64; 36], sL: [i64; 64], sR: [i64; 64], lhs_v: i64, rhs_v: i64) -> Lowerer with Mut, Panic, Div, Alloc, IO {
         var lo = self.so_clear_expr_hess()
         // Declared sabotage: revert to the pre-#2144 clear.
         if sab_quotient_hessian() {
@@ -19589,7 +19599,7 @@ impl Lowerer {
     // alone: for r = c*c*k they are what makes the mixed partial H_ck = 2c
     // non-zero. A diagonal-only check passes with Sx_j*Sy_k by itself, so
     // hessian_of(r, 0, 1) is the pin that actually tests this rule.
-    fn so_combine_hess_mul(self, hL: [i64; 36], hR: [i64; 36], sL: [i64; 32], sR: [i64; 32], lhs_v: i64, rhs_v: i64) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+    fn so_combine_hess_mul(self, hL: [i64; 36], hR: [i64; 36], sL: [i64; 64], sR: [i64; 64], lhs_v: i64, rhs_v: i64) -> Lowerer with Mut, Panic, Div, Alloc, IO {
         var lo = self.so_clear_expr_hess()
         var nch = lo.fo_nchan
         if nch > 8 { nch = 8 }
@@ -19635,7 +19645,7 @@ impl Lowerer {
     fn fo_clear_expr_sens(self) -> Lowerer with Mut {
         var lo = self
         var k: i64 = 0
-        while k < 32 {
+        while k < FO_MAX_CH {
             lo.fo_expr_sens[k as usize] = -1
             k = k + 1
         }
@@ -19645,7 +19655,7 @@ impl Lowerer {
     fn fo_clear_pending_sens(self) -> Lowerer with Mut {
         var lo = self
         var k: i64 = 0
-        while k < 32 {
+        while k < FO_MAX_CH {
             lo.fo_pending_sens[k as usize] = -1
             k = k + 1
         }
@@ -19654,7 +19664,7 @@ impl Lowerer {
 
     fn fo_expr_has_sens(self) -> bool with Mut {
         var k: i64 = 0
-        while k < 32 {
+        while k < FO_MAX_CH {
             if self.fo_expr_sens[k as usize] >= 0 {
                 return true
             }
@@ -19681,7 +19691,7 @@ impl Lowerer {
             }
             k = k + 1
         }
-        if lo.fo_nchan >= 32 {
+        if lo.fo_nchan >= FO_MAX_CH {
             // Clear temporary state only after latching a compile-time refusal.
             fo_refuse_capacity(false)
             return lo.fo_clear_expr_sens()
@@ -19710,10 +19720,10 @@ impl Lowerer {
         var lo = self
         if slot < 0 { return lo }
         var k: i64 = 0
-        while k < lo.fo_nchan && k < 32 {
+        while k < lo.fo_nchan && k < FO_MAX_CH {
             if lo.fo_sigma2[k as usize] == slot && lo.fo_expr_sens[k as usize] >= 0 {
-                if lo.fo_nchan >= 32 { fo_refuse_capacity(false) }
-                if lo.so_enabled || lo.fo_nchan >= 32 {
+                if lo.fo_nchan >= FO_MAX_CH { fo_refuse_capacity(false) }
+                if lo.so_enabled || lo.fo_nchan >= FO_MAX_CH {
                     return lo.fo_clear_expr_sens().so_clear_expr_hess()
                 }
                 let snap_pair = lo.fresh_reg()
@@ -19734,20 +19744,20 @@ impl Lowerer {
         lo
     }
 
-    fn fo_snapshot_expr_sens(self) -> [i64; 32] with Mut {
-        var snap: [i64; 32] = [-1; 32]
+    fn fo_snapshot_expr_sens(self) -> [i64; 64] with Mut {
+        var snap: [i64; 64] = [-1; 64]
         var k: i64 = 0
-        while k < 32 {
+        while k < FO_MAX_CH {
             snap[k as usize] = self.fo_expr_sens[k as usize]
             k = k + 1
         }
         snap
     }
 
-    fn fo_restore_expr_sens(self, snap: [i64; 32]) -> Lowerer with Mut {
+    fn fo_restore_expr_sens(self, snap: [i64; 64]) -> Lowerer with Mut {
         var lo = self
         var k: i64 = 0
-        while k < 32 {
+        while k < FO_MAX_CH {
             lo.fo_expr_sens[k as usize] = snap[k as usize]
             k = k + 1
         }
@@ -19861,9 +19871,9 @@ impl Lowerer {
         while i < lo.fo_bind_count {
             if ir_name_eq((*lo.fo_bind).names[i as usize], name) {
                 var k: i64 = 0
-                while k < 32 {
+                while k < FO_MAX_CH {
                     var fb2 = lo.fo_bind
-                    (*fb2).sens[(i * 32 + k) as usize] = lo.fo_expr_sens[k as usize]
+                    (*fb2).sens[(i * FO_MAX_CH + k) as usize] = lo.fo_expr_sens[k as usize]
                     lo.fo_bind = fb2
                     k = k + 1
                 }
@@ -19881,9 +19891,9 @@ impl Lowerer {
         (*fb3).depth[idx as usize] = lo.loop_depth
         lo.fo_bind = fb3
         var k2: i64 = 0
-        while k2 < 32 {
+        while k2 < FO_MAX_CH {
             var fb4 = lo.fo_bind
-            (*fb4).sens[(idx * 32 + k2) as usize] = lo.fo_expr_sens[k2 as usize]
+            (*fb4).sens[(idx * FO_MAX_CH + k2) as usize] = lo.fo_expr_sens[k2 as usize]
             lo.fo_bind = fb4
             k2 = k2 + 1
         }
@@ -19896,7 +19906,7 @@ impl Lowerer {
         // Move pending_sens into expr_sens then bind.
         var k: i64 = 0
         var any = false
-        while k < 32 {
+        while k < FO_MAX_CH {
             lo.fo_expr_sens[k as usize] = lo.fo_pending_sens[k as usize]
             if lo.fo_pending_sens[k as usize] >= 0 {
                 any = true
@@ -19916,8 +19926,8 @@ impl Lowerer {
         while i < lo.fo_bind_count {
             if ir_name_eq((*lo.fo_bind).names[i as usize], name) {
                 var k: i64 = 0
-                while k < 32 {
-                    lo.fo_expr_sens[k as usize] = (*lo.fo_bind).sens[(i * 32 + k) as usize]
+                while k < FO_MAX_CH {
+                    lo.fo_expr_sens[k as usize] = (*lo.fo_bind).sens[(i * FO_MAX_CH + k) as usize]
                     k = k + 1
                 }
                 return lo
@@ -19941,7 +19951,7 @@ impl Lowerer {
         var lo = z.0
         var acc = z.1
         var k: i64 = 0
-        while k < 32 {
+        while k < FO_MAX_CH {
             let sreg = lo.fo_expr_sens[k as usize]
             let sig = lo.fo_sigma2[k as usize]
             if sreg >= 0 && sig >= 0 {
@@ -20156,7 +20166,7 @@ impl Lowerer {
             FO_ARRAY_COUNT = slot + 1
         }
         var k: i64 = 0
-        while k < 32 {
+        while k < FO_MAX_CH {
             var snap: i64 = -1
             let sens = lo.fo_expr_sens[k as usize]
             if sens >= 0 {
@@ -20164,7 +20174,7 @@ impl Lowerer {
                 lo = cp.0.emit(ir_copy(cp.1, sens)).emit(ir_mark_float_reg(cp.1))
                 snap = cp.1
             }
-            FO_ARRAY_SENS[(slot * 32 + k) as usize] = snap
+            FO_ARRAY_SENS[(slot * FO_MAX_CH + k) as usize] = snap
             k = k + 1
         }
         lo
@@ -20188,8 +20198,8 @@ impl Lowerer {
         while i < FO_ARRAY_COUNT {
             if FO_ARRAY_BASE[i as usize] == base && FO_ARRAY_INDEX[i as usize] == idx {
                 var k: i64 = 0
-                while k < 32 {
-                    lo.fo_expr_sens[k as usize] = FO_ARRAY_SENS[(i * 32 + k) as usize]
+                while k < FO_MAX_CH {
+                    lo.fo_expr_sens[k as usize] = FO_ARRAY_SENS[(i * FO_MAX_CH + k) as usize]
                     k = k + 1
                 }
                 return lo.fo_emit_var_from_sens()
@@ -20245,8 +20255,8 @@ impl Lowerer {
             FO_FIELD_SENS_COUNT = slot + 1
         }
         var k: i64 = 0
-        while k < 32 {
-            FO_FIELD_SENS[(slot * 32 + k) as usize] = lo.fo_expr_sens[k as usize]
+        while k < FO_MAX_CH {
+            FO_FIELD_SENS[(slot * FO_MAX_CH + k) as usize] = lo.fo_expr_sens[k as usize]
             k = k + 1
         }
         lo
@@ -20270,12 +20280,12 @@ impl Lowerer {
     //   + sum_{i<j} (sF_i sG_j + sF_j sG_i) rho_ij sigma_i sigma_j.
     // When f and g are the same expression this is Var. The cross term is
     // not folded into either variance.
-    fn fo_emit_cov_from_sens(self, sA: [i64; 32], sB: [i64; 32]) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+    fn fo_emit_cov_from_sens(self, sA: [i64; 64], sB: [i64; 64]) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         let z = self.emit_f64_const(0.0)
         var lo = z.0
         var acc = z.1
         var k: i64 = 0
-        while k < 32 {
+        while k < FO_MAX_CH {
             let sa = sA[k as usize]
             let sb = sB[k as usize]
             let sig = lo.fo_sigma2[k as usize]
@@ -20390,14 +20400,14 @@ impl Lowerer {
         lo.fo_emit_var_from_sens()
     }
 
-    fn fo_copy_field_sens(self, slot: i64) -> (Lowerer, [i64; 32]) with Mut, Panic, Div {
-        var snap: [i64; 32] = [-1; 32]
+    fn fo_copy_field_sens(self, slot: i64) -> (Lowerer, [i64; 64]) with Mut, Panic, Div {
+        var snap: [i64; 64] = [-1; 64]
         if slot < 0 {
             return (self, snap)
         }
         var k: i64 = 0
-        while k < 32 {
-            snap[k as usize] = FO_FIELD_SENS[(slot * 32 + k) as usize]
+        while k < FO_MAX_CH {
+            snap[k as usize] = FO_FIELD_SENS[(slot * FO_MAX_CH + k) as usize]
             k = k + 1
         }
         (self, snap)
@@ -20405,10 +20415,10 @@ impl Lowerer {
 
 
     // s_out[k] = sL[k] + sR[k]  (add) or sL[k] - sR[k] (sub)
-    fn fo_combine_sens_addsub(self, sL: [i64; 32], sR: [i64; 32], is_sub: bool) -> Lowerer with Mut, Panic, Div, IO {
+    fn fo_combine_sens_addsub(self, sL: [i64; 64], sR: [i64; 64], is_sub: bool) -> Lowerer with Mut, Panic, Div, IO {
         var lo = self
         var k: i64 = 0
-        while k < 32 {
+        while k < FO_MAX_CH {
             let l = sL[k as usize]
             let r = sR[k as usize]
             if l < 0 && r < 0 {
@@ -20446,14 +20456,14 @@ impl Lowerer {
     // Product rule: s_out[k] = rhs_val · sL[k] + lhs_val · sR[k]
     fn fo_combine_sens_mul(
         self,
-        sL: [i64; 32],
-        sR: [i64; 32],
+        sL: [i64; 64],
+        sR: [i64; 64],
         lhs_val: i64,
         rhs_val: i64
     ) -> Lowerer with Mut, Panic, Div, IO {
         var lo = self
         var k: i64 = 0
-        while k < 32 {
+        while k < FO_MAX_CH {
             let l = sL[k as usize]
             let r = sR[k as usize]
             var term_l: i64 = -1
@@ -20494,8 +20504,8 @@ impl Lowerer {
     // Quotient rule: s_out[k] = sL[k]/b − a·sR[k]/b²  (f = a/b).
     fn fo_combine_sens_div(
         self,
-        sL: [i64; 32],
-        sR: [i64; 32],
+        sL: [i64; 64],
+        sR: [i64; 64],
         lhs_val: i64,
         rhs_val: i64
     ) -> Lowerer with Mut, Panic, Div, IO {
@@ -20507,7 +20517,7 @@ impl Lowerer {
         lo = lo.emit(ir_binop_typed(bb, rhs_val, BinaryOp::OpMul, rhs_val, true, true))
         lo = lo.emit(ir_mark_float_reg(bb))
         var k: i64 = 0
-        while k < 32 {
+        while k < FO_MAX_CH {
             let l = sL[k as usize]
             let r = sR[k as usize]
             var term_l: i64 = -1
@@ -20599,9 +20609,9 @@ impl Lowerer {
         lo.emit_variance_add(term_l, tr_p.1)
     }
 
-    fn fo_expr_or_snap_has_sens(self, snap: [i64; 32]) -> bool with Mut {
+    fn fo_expr_or_snap_has_sens(self, snap: [i64; 64]) -> bool with Mut {
         var k: i64 = 0
-        while k < 32 {
+        while k < FO_MAX_CH {
             if snap[k as usize] >= 0 || self.fo_expr_sens[k as usize] >= 0 {
                 return true
             }
@@ -21666,7 +21676,7 @@ impl Lowerer {
         print(" nchan=")
         print_int(self.fo_nchan)
         var k: i64 = 0
-        while k < 32 {
+        while k < FO_MAX_CH {
             if self.fo_expr_sens[k as usize] >= 0 {
                 print(" s[")
                 print_int(k)
@@ -22088,7 +22098,7 @@ impl Lowerer {
             let lit = kind_lit
             let c_pair = lo.emit_f64_const(lit)
             lo = c_pair.0
-            var sL: [i64; 32] = [-1; 32]
+            var sL: [i64; 64] = [-1; 64]
             var argi: i64 = 0
             if kind == 11 { argi = 1 }
             // SIO-146: fo_lower_nth_arg_value below RE-LOWERS the argument
@@ -22144,7 +22154,7 @@ impl Lowerer {
                 print_int(argv8)
                 var q: i64 = 0
                 var n0: i64 = 0
-                while q < 32 {
+                while q < FO_MAX_CH {
                     if s0[q as usize] >= 0 { n0 = n0 + 1 }
                     q = q + 1
                 }
@@ -22235,7 +22245,7 @@ impl Lowerer {
                 // H(g). Clear rather than let the inner's Hessian wear f's name.
                 lo = lo.so_clear_expr_hess()
             }
-            var sL8: [i64; 32] = [-1; 32]
+            var sL8: [i64; 64] = [-1; 64]
             lo = lo.fo_combine_sens_mul(sL8, s0, d1r, argv8)
             lo.fo_trace_sens(make_name("k8_after_combine"))
             return lo.fo_emit_var_from_sens()
@@ -22392,7 +22402,7 @@ impl Lowerer {
             } else if lo.so_enabled {
                 lo = lo.so_clear_expr_hess()
             }
-            var sZ: [i64; 32] = [-1; 32]
+            var sZ: [i64; 64] = [-1; 64]
             lo = lo.fo_combine_sens_mul(sZ, s0, factor, factor)
             if exp_affine && v0 >= 0 && argv >= 0 {
                 FO_LOGN_ACTIVE = 1
@@ -22441,7 +22451,7 @@ impl Lowerer {
             let snap12 = lo.fo_snapshot_expr_sens()
             let c12 = lo.emit_f64_const(kind_lit)
             lo = c12.0
-            var sL12: [i64; 32] = [-1; 32]
+            var sL12: [i64; 64] = [-1; 64]
             lo = lo.fo_combine_sens_mul(sL12, snap12, c12.1, c12.1)
             return lo.fo_emit_var_from_sens()
         }
@@ -22689,11 +22699,11 @@ impl Lowerer {
             } else if lo.so_enabled {
                 lo = lo.so_clear_expr_hess()
             }
-            var sLx: [i64; 32] = [-1; 32]
+            var sLx: [i64; 64] = [-1; 64]
             lo = lo.fo_combine_sens_mul(sLx, s0, d1x, xv)
             var s1_live: i64 = 0
             var qi: i64 = 0
-            while qi < 32 {
+            while qi < FO_MAX_CH {
                 if s1[qi as usize] >= 0 { s1_live = 1 }
                 qi = qi + 1
             }
@@ -22705,7 +22715,7 @@ impl Lowerer {
                 let d1yp = lo.fo_emit_f64_binop(fv, BinaryOp::OpMul, lv)
                 lo = d1yp.0
                 let d1y = d1yp.1
-                var sLy: [i64; 32] = [-1; 32]
+                var sLy: [i64; 64] = [-1; 64]
                 lo = lo.fo_combine_sens_mul(sLy, s1, d1y, yv)
                 let s_exp = lo.fo_snapshot_expr_sens()
                 lo = lo.fo_combine_sens_addsub(s_base, s_exp, false)
@@ -23417,7 +23427,7 @@ impl Lowerer {
         let fo_err_snap = fo_inline_error_snap(lo.error_count, lo.had_error, (*lo.current_func).instr_count, (*lo.current_func).reg_count)
         var vals: [i64; 8] = [0 - 1; 8]
         var vars: [i64; 8] = [0 - 1; 8]
-        var sens: [i64; 256] = [0 - 1; 256]
+        var sens: [i64; 512] = [0 - 1; 512]
         var hess: [i64; 288] = [0 - 1; 288]
         ac = args
         var i: i64 = 0
@@ -23444,8 +23454,8 @@ impl Lowerer {
                         }
                         vars[i as usize] = v
                         var k: i64 = 0
-                        while k < 32 {
-                            sens[(i * 32 + k) as usize] = lo.fo_expr_sens[k as usize]
+                        while k < FO_MAX_CH {
+                            sens[(i * FO_MAX_CH + k) as usize] = lo.fo_expr_sens[k as usize]
                             k = k + 1
                         }
                         if lo.so_enabled && i < 8 {
@@ -23489,8 +23499,8 @@ impl Lowerer {
                 lo = lo.bind_local_scalar_kind(pname, 2)
                 lo = lo.bind_local_variance_reg(pname, vars[i as usize])
                 var k2: i64 = 0
-                while k2 < 32 {
-                    lo.fo_expr_sens[k2 as usize] = sens[(i * 32 + k2) as usize]
+                while k2 < FO_MAX_CH {
+                    lo.fo_expr_sens[k2 as usize] = sens[(i * FO_MAX_CH + k2) as usize]
                     k2 = k2 + 1
                 }
             } else {
@@ -23519,9 +23529,9 @@ impl Lowerer {
             lo = ep2.0
             result = ep2.1
         }
-        var out_sens: [i64; 32] = [0 - 1; 32]
+        var out_sens: [i64; 64] = [0 - 1; 64]
         var k3: i64 = 0
-        while k3 < 32 {
+        while k3 < FO_MAX_CH {
             out_sens[k3 as usize] = lo.fo_expr_sens[k3 as usize]
             k3 = k3 + 1
         }
@@ -23557,7 +23567,7 @@ impl Lowerer {
 
     // nest(x, n) = x when n < 1, else nest(x, n - 1) + x. The multiplier is
     // a runtime value, so the depth cap never has to unroll it.
-    fn fo_emit_recur_count_scale(self, n_reg: i64, xs: [i64; 32]) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+    fn fo_emit_recur_count_scale(self, n_reg: i64, xs: [i64; 64]) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         var lo = self
         let one_i = lo.emit_i64_const(1)
         lo = one_i.0
@@ -23594,7 +23604,7 @@ impl Lowerer {
         lo = lo.emit(ir_mark_float_reg(mreg))
         lo = lo.fo_clear_expr_sens().so_clear_expr_hess()
         var k: i64 = 0
-        while k < 32 {
+        while k < FO_MAX_CH {
             let s = xs[k as usize]
             if s >= 0 {
                 let pr = lo.fresh_reg()
@@ -23611,7 +23621,7 @@ impl Lowerer {
     // scale(x, n) = x when n < 1, else 2 * scale(x, n - 1). The factor is 2^n
     // for n >= 0 and 1 otherwise, computed by a runtime loop so n = 12 does
     // not depend on the unroll cap.
-    fn fo_emit_recur_pow2_scale(self, n_reg: i64, xs: [i64; 32]) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+    fn fo_emit_recur_pow2_scale(self, n_reg: i64, xs: [i64; 64]) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         var lo = self
         let mp = lo.fresh_reg()
         lo = mp.0
@@ -23652,7 +23662,7 @@ impl Lowerer {
         lo = lo.emit(ir_label(l_end))
         lo = lo.fo_clear_expr_sens().so_clear_expr_hess()
         var k: i64 = 0
-        while k < 32 {
+        while k < FO_MAX_CH {
             let s = xs[k as usize]
             if s >= 0 {
                 let pr = lo.fresh_reg()
@@ -23668,7 +23678,7 @@ impl Lowerer {
 
     // mix(x, y, n) = x when n < 1, else mix(...) + y. The coefficient of y
     // is n, a runtime value. x keeps its own channels.
-    fn fo_emit_recur_mix_scale(self, n_reg: i64, xs: [i64; 32], ys: [i64; 32]) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+    fn fo_emit_recur_mix_scale(self, n_reg: i64, xs: [i64; 64], ys: [i64; 64]) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         var lo = self
         let one_i = lo.emit_i64_const(1)
         lo = one_i.0
@@ -23699,7 +23709,7 @@ impl Lowerer {
         lo = lo.emit(ir_mark_float_reg(mreg))
         lo = lo.fo_clear_expr_sens().so_clear_expr_hess()
         var k: i64 = 0
-        while k < 32 {
+        while k < FO_MAX_CH {
             let sx = xs[k as usize]
             let sy = ys[k as usize]
             if sx >= 0 && sy >= 0 {
@@ -23729,7 +23739,7 @@ impl Lowerer {
     // byy(x, y, n) = x when n < 1, else y * byy(...). After n steps the
     // value is x*y^n, the x-coefficient is y^n and the y-coefficient is
     // n*x*y^(n-1). Both are tracked in the loop, so y = 0 does not divide.
-    fn fo_emit_recur_ymul_scale(self, n_reg: i64, x_val: i64, y_val: i64, xs: [i64; 32], ys: [i64; 32]) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+    fn fo_emit_recur_ymul_scale(self, n_reg: i64, x_val: i64, y_val: i64, xs: [i64; 64], ys: [i64; 64]) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         var lo = self
         lo = lo.emit(ir_mark_float_reg(x_val))
         lo = lo.emit(ir_mark_float_reg(y_val))
@@ -23796,7 +23806,7 @@ impl Lowerer {
         lo = lo.emit(ir_label(l_end))
         lo = lo.fo_clear_expr_sens().so_clear_expr_hess()
         var k: i64 = 0
-        while k < 32 {
+        while k < FO_MAX_CH {
             let sx = xs[k as usize]
             let sy = ys[k as usize]
             if sx >= 0 && sy >= 0 {
@@ -23834,14 +23844,14 @@ impl Lowerer {
     // powx(x, n) = x when n < 1, else x * powx(x, n - 1). After n steps the
     // value is x^(n+1) and the sensitivity is (n+1) x^n times the sensitivity
     // of x. The running value is what multiplies the original sensitivity.
-    fn fo_emit_recur_xmul_scale(self, n_reg: i64, x_val: i64, xs: [i64; 32]) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+    fn fo_emit_recur_xmul_scale(self, n_reg: i64, x_val: i64, xs: [i64; 64]) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         var lo = self
         lo = lo.emit(ir_mark_float_reg(x_val))
-        var sk: [i64; 32] = [0 - 1; 32]
+        var sk: [i64; 64] = [0 - 1; 64]
         let zf = lo.emit_f64_const(0.0)
         lo = zf.0
         var k0: i64 = 0
-        while k0 < 32 {
+        while k0 < FO_MAX_CH {
             let sp = lo.fresh_reg()
             lo = sp.0
             sk[k0 as usize] = sp.1
@@ -23874,7 +23884,7 @@ impl Lowerer {
         lo = lo.emit(ir_binop(cmp_p.1, ireg, BinaryOp::OpLt, n_reg))
         lo = lo.emit(ir_branch_false(cmp_p.1, l_end))
         var k: i64 = 0
-        while k < 32 {
+        while k < FO_MAX_CH {
             if xs[k as usize] >= 0 {
                 let t1 = lo.fresh_reg()
                 lo = t1.0
@@ -23907,7 +23917,7 @@ impl Lowerer {
         lo = lo.emit(ir_label(l_end))
         lo = lo.fo_clear_expr_sens().so_clear_expr_hess()
         k = 0
-        while k < 32 {
+        while k < FO_MAX_CH {
             if xs[k as usize] >= 0 {
                 lo.fo_expr_sens[k as usize] = sk[k as usize]
             }
@@ -23919,7 +23929,7 @@ impl Lowerer {
     // aff(x, n) = x when n < 1, else c * aff(x, n - 1) + x.
     // m starts at 1 and each step is m = c*m + 1, so m = (c^(n+1)-1)/(c-1)
     // when c != 1, and m = n+1 when c = 1. n < 1 leaves m = 1.
-    fn fo_emit_recur_affine_scale(self, n_reg: i64, xs: [i64; 32]) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+    fn fo_emit_recur_affine_scale(self, n_reg: i64, xs: [i64; 64]) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         var lo = self
         let mp = lo.fresh_reg()
         lo = mp.0
@@ -23966,7 +23976,7 @@ impl Lowerer {
         lo = lo.emit(ir_label(l_end))
         lo = lo.fo_clear_expr_sens().so_clear_expr_hess()
         var k: i64 = 0
-        while k < 32 {
+        while k < FO_MAX_CH {
             let s = xs[k as usize]
             if s >= 0 {
                 let pr = lo.fresh_reg()
@@ -23983,14 +23993,14 @@ impl Lowerer {
     // powbase(x, n) = b when n < 1, else x * powbase(x, n - 1), b a numeric
     // literal. After n steps the value is b*x^n and the sensitivity is
     // b*n*x^(n-1) times the sensitivity of x. n < 1 leaves sensitivity 0.
-    fn fo_emit_recur_powbase_scale(self, n_reg: i64, x_val: i64, xs: [i64; 32]) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+    fn fo_emit_recur_powbase_scale(self, n_reg: i64, x_val: i64, xs: [i64; 64]) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         var lo = self
         lo = lo.emit(ir_mark_float_reg(x_val))
-        var sk: [i64; 32] = [0 - 1; 32]
+        var sk: [i64; 64] = [0 - 1; 64]
         let zf = lo.emit_f64_const(0.0)
         lo = zf.0
         var k0: i64 = 0
-        while k0 < 32 {
+        while k0 < FO_MAX_CH {
             let sp = lo.fresh_reg()
             lo = sp.0
             sk[k0 as usize] = sp.1
@@ -24021,7 +24031,7 @@ impl Lowerer {
         lo = lo.emit(ir_binop(cmp_p.1, ireg, BinaryOp::OpLt, n_reg))
         lo = lo.emit(ir_branch_false(cmp_p.1, l_end))
         var k: i64 = 0
-        while k < 32 {
+        while k < FO_MAX_CH {
             if xs[k as usize] >= 0 {
                 let t1 = lo.fresh_reg()
                 lo = t1.0
@@ -24054,7 +24064,7 @@ impl Lowerer {
         lo = lo.emit(ir_label(l_end))
         lo = lo.fo_clear_expr_sens().so_clear_expr_hess()
         k = 0
-        while k < 32 {
+        while k < FO_MAX_CH {
             if xs[k as usize] >= 0 {
                 lo.fo_expr_sens[k as usize] = sk[k as usize]
             }
@@ -24066,7 +24076,7 @@ impl Lowerer {
     // affy(x, y, n) = x when n < 1, else c * affy(x, y, n - 1) + y.
     // sx starts at 1 and sy at 0. Each step is sy = c*sy + 1, sx = c*sx.
     // After n steps sx = c^n and sy = (c^n - 1)/(c - 1) when c != 1, else n.
-    fn fo_emit_recur_affy_scale(self, n_reg: i64, xs: [i64; 32], ys: [i64; 32]) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+    fn fo_emit_recur_affy_scale(self, n_reg: i64, xs: [i64; 64], ys: [i64; 64]) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         var lo = self
         let sxp = lo.fresh_reg()
         lo = sxp.0
@@ -24125,7 +24135,7 @@ impl Lowerer {
         lo = lo.emit(ir_label(l_end))
         lo = lo.fo_clear_expr_sens().so_clear_expr_hess()
         var k: i64 = 0
-        while k < 32 {
+        while k < FO_MAX_CH {
             let sxs = xs[k as usize]
             let sys = ys[k as usize]
             if sxs >= 0 && sys >= 0 {
@@ -24163,15 +24173,15 @@ impl Lowerer {
     // ch(x, y, n) = x when n < 1, else y * ch(x, y, n - 1) + x.
     // Sensitivity update uses the running value: s = val*sy + y*s + sx,
     // then val = y*val + x.
-    fn fo_emit_recur_chcoef_scale(self, n_reg: i64, x_val: i64, y_val: i64, xs: [i64; 32], ys: [i64; 32]) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+    fn fo_emit_recur_chcoef_scale(self, n_reg: i64, x_val: i64, y_val: i64, xs: [i64; 64], ys: [i64; 64]) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         var lo = self
         lo = lo.emit(ir_mark_float_reg(x_val))
         lo = lo.emit(ir_mark_float_reg(y_val))
-        var sk: [i64; 32] = [0 - 1; 32]
+        var sk: [i64; 64] = [0 - 1; 64]
         let zf = lo.emit_f64_const(0.0)
         lo = zf.0
         var k0: i64 = 0
-        while k0 < 32 {
+        while k0 < FO_MAX_CH {
             let sp = lo.fresh_reg()
             lo = sp.0
             sk[k0 as usize] = sp.1
@@ -24204,7 +24214,7 @@ impl Lowerer {
         lo = lo.emit(ir_binop(cmp_p.1, ireg, BinaryOp::OpLt, n_reg))
         lo = lo.emit(ir_branch_false(cmp_p.1, l_end))
         var k: i64 = 0
-        while k < 32 {
+        while k < FO_MAX_CH {
             if xs[k as usize] >= 0 || ys[k as usize] >= 0 {
                 let accp = lo.fresh_reg()
                 lo = accp.0
@@ -24256,7 +24266,7 @@ impl Lowerer {
         lo = lo.emit(ir_label(l_end))
         lo = lo.fo_clear_expr_sens().so_clear_expr_hess()
         k = 0
-        while k < 32 {
+        while k < FO_MAX_CH {
             if xs[k as usize] >= 0 || ys[k as usize] >= 0 {
                 lo.fo_expr_sens[k as usize] = sk[k as usize]
             }
@@ -24282,7 +24292,7 @@ impl Lowerer {
 
     fn fo_step_fill_zero(self) -> Lowerer with Mut, Panic, Div, Alloc, IO {
         var k: i64 = 0
-        while k < 32 {
+        while k < FO_MAX_CH {
             FO_STEP_OUT_S[k as usize] = FO_STEP_ZERO
             k = k + 1
         }
@@ -24309,7 +24319,7 @@ impl Lowerer {
         lo
     }
 
-    fn fo_step_combine(self, op: BinaryOp, lv: i64, rv: i64, ls: [i64; 32], rs: [i64; 32]) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+    fn fo_step_combine(self, op: BinaryOp, lv: i64, rv: i64, ls: [i64; 64], rs: [i64; 64]) -> Lowerer with Mut, Panic, Div, Alloc, IO {
         var lo = self
         let vp = lo.fresh_reg()
         lo = vp.0
@@ -24325,7 +24335,7 @@ impl Lowerer {
             den = d.1
         }
         var k: i64 = 0
-        while k < 32 {
+        while k < FO_MAX_CH {
             let a = ls[k as usize]
             let b = rs[k as usize]
             if a == FO_STEP_ZERO && b == FO_STEP_ZERO {
@@ -24464,7 +24474,7 @@ impl Lowerer {
         if (*e).kind == ExprKind::ExprCall {
             FO_STEP_OUT_VAL = FO_STEP_ZVAL
             var k: i64 = 0
-            while k < 32 {
+            while k < FO_MAX_CH {
                 FO_STEP_OUT_S[k as usize] = FO_STEP_ZS[k as usize]
                 k = k + 1
             }
@@ -24490,8 +24500,8 @@ impl Lowerer {
             FO_STEP_OUT_VAL = FO_STEP_VALS[pi as usize]
             lo = lo.emit(ir_mark_float_reg(FO_STEP_OUT_VAL))
             var k2: i64 = 0
-            while k2 < 32 {
-                let sk = FO_STEP_SENS[(pi * 32 + k2) as usize]
+            while k2 < FO_MAX_CH {
+                let sk = FO_STEP_SENS[(pi * FO_MAX_CH + k2) as usize]
                 if sk >= 0 {
                     FO_STEP_OUT_S[k2 as usize] = sk
                 } else {
@@ -24517,9 +24527,9 @@ impl Lowerer {
                 None => { return lo.fo_step_fill_zero() }
             }
             let v = FO_STEP_OUT_VAL
-            var ss: [i64; 32] = [-1; 32]
+            var ss: [i64; 64] = [-1; 64]
             var ku: i64 = 0
-            while ku < 32 {
+            while ku < FO_MAX_CH {
                 ss[ku as usize] = FO_STEP_OUT_S[ku as usize]
                 ku = ku + 1
             }
@@ -24531,7 +24541,7 @@ impl Lowerer {
             lo = lo.emit(ir_mark_float_reg(np.1))
             FO_STEP_OUT_VAL = np.1
             ku = 0
-            while ku < 32 {
+            while ku < FO_MAX_CH {
                 if ss[ku as usize] == FO_STEP_ZERO {
                     FO_STEP_OUT_S[ku as usize] = FO_STEP_ZERO
                 } else {
@@ -24571,10 +24581,10 @@ impl Lowerer {
                         Some(r) => {
                             lo = lo.fo_emit_step_node(&(*l))
                             let lv = FO_STEP_OUT_VAL
-                            var ls: [i64; 32] = [-1; 32]
+                            var ls: [i64; 64] = [-1; 64]
                             var lh: [i64; 36] = [-1; 36]
                             var kb: i64 = 0
-                            while kb < 32 {
+                            while kb < FO_MAX_CH {
                                 ls[kb as usize] = FO_STEP_OUT_S[kb as usize]
                                 kb = kb + 1
                             }
@@ -24585,10 +24595,10 @@ impl Lowerer {
                             }
                             lo = lo.fo_emit_step_node(&(*r))
                             let rv = FO_STEP_OUT_VAL
-                            var rs: [i64; 32] = [-1; 32]
+                            var rs: [i64; 64] = [-1; 64]
                             var rh: [i64; 36] = [-1; 36]
                             kb = 0
-                            while kb < 32 {
+                            while kb < FO_MAX_CH {
                                 rs[kb as usize] = FO_STEP_OUT_S[kb as usize]
                                 kb = kb + 1
                             }
@@ -24620,7 +24630,7 @@ impl Lowerer {
     // The else-expression is differentiated in forward mode and the step is
     // repeated n times. A recursive call reads the loop-carried value and
     // sensitivity. A literal contributes 0. A parameter contributes its channel.
-    fn fo_emit_recur_expr_body(self, step: &Expr, n_reg: i64, vals: [i64; 16], sens: [i64; 512], hess: [i64; 576]) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+    fn fo_emit_recur_expr_body(self, step: &Expr, n_reg: i64, vals: [i64; 16], sens: [i64; 1024], hess: [i64; 576]) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         var lo = self
         var i: i64 = 0
         while i < 16 {
@@ -24628,7 +24638,7 @@ impl Lowerer {
             i = i + 1
         }
         i = 0
-        while i < 512 {
+        while i < 1024 {
             FO_STEP_SENS[i as usize] = sens[i as usize]
             i = i + 1
         }
@@ -24655,14 +24665,14 @@ impl Lowerer {
         }
         lo = lo.emit(ir_mark_float_reg(FO_STEP_ZVAL))
         var k0: i64 = 0
-        while k0 < 32 {
+        while k0 < FO_MAX_CH {
             let sp = lo.fresh_reg()
             lo = sp.0
             FO_STEP_ZS[k0 as usize] = sp.1
             var src: i64 = FO_STEP_ZERO
             if FO_STEP_BASE_LIT == 0 {
                 let bpi2 = FO_STEP_FIDX[FO_STEP_BASE_SLOT as usize]
-                let sk0 = FO_STEP_SENS[(bpi2 * 32 + k0) as usize]
+                let sk0 = FO_STEP_SENS[(bpi2 * FO_MAX_CH + k0) as usize]
                 if sk0 >= 0 { src = sk0 }
             }
             lo = lo.emit(ir_copy(sp.1, src))
@@ -24688,7 +24698,7 @@ impl Lowerer {
         lo = lo.emit(ir_copy(FO_STEP_ZVAL, FO_STEP_OUT_VAL))
         lo = lo.emit(ir_mark_float_reg(FO_STEP_ZVAL))
         var kc: i64 = 0
-        while kc < 32 {
+        while kc < FO_MAX_CH {
             lo = lo.emit(ir_copy(FO_STEP_ZS[kc as usize], FO_STEP_OUT_S[kc as usize]))
             lo = lo.emit(ir_mark_float_reg(FO_STEP_ZS[kc as usize]))
             kc = kc + 1
@@ -24709,12 +24719,12 @@ impl Lowerer {
         lo = lo.emit(ir_label(l_end))
         lo = lo.fo_clear_expr_sens().so_clear_expr_hess()
         var k: i64 = 0
-        while k < 32 {
+        while k < FO_MAX_CH {
             var live = false
             var p: i64 = 0
             while p < FO_STEP_NF {
                 let pi = FO_STEP_FIDX[p as usize]
-                if FO_STEP_SENS[(pi * 32 + k) as usize] >= 0 { live = true }
+                if FO_STEP_SENS[(pi * FO_MAX_CH + k) as usize] >= 0 { live = true }
                 p = p + 1
             }
             if live {
@@ -24730,7 +24740,7 @@ impl Lowerer {
         lo.fo_emit_var_from_sens()
     }
 
-    fn fo_emit_recur_expr_scale(self, fd: &FnDef, n_reg: i64, vals: [i64; 16], sens: [i64; 512], hess: [i64; 576]) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+    fn fo_emit_recur_expr_scale(self, fd: &FnDef, n_reg: i64, vals: [i64; 16], sens: [i64; 1024], hess: [i64; 576]) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         match (*fd).body.stmts {
             Some(only) => {
                 match (*only).head.expr {
@@ -24747,7 +24757,7 @@ impl Lowerer {
         }
     }
 
-    fn fo_emit_recur_block_scale(self, fd: &FnDef, n_reg: i64, vals: [i64; 16], sens: [i64; 512], vars: [i64; 16], isf: [i64; 16], hess: [i64; 576]) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+    fn fo_emit_recur_block_scale(self, fd: &FnDef, n_reg: i64, vals: [i64; 16], sens: [i64; 1024], vars: [i64; 16], isf: [i64; 16], hess: [i64; 576]) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         var lo = self
         match (*fd).body.stmts {
             Some(only) => {
@@ -24773,7 +24783,7 @@ impl Lowerer {
     // The else block is lowered by the ordinary let/expression lowerer. The
     // recursive call reads the loop-carried value and sensitivity instead of
     // inlining another copy of the function.
-    fn fo_emit_recur_block_body(self, stmts: &Option<Box<StmtList>>, fd: &FnDef, n_reg: i64, vals: [i64; 16], sens: [i64; 512], vars: [i64; 16], isf: [i64; 16], hess: [i64; 576]) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+    fn fo_emit_recur_block_body(self, stmts: &Option<Box<StmtList>>, fd: &FnDef, n_reg: i64, vals: [i64; 16], sens: [i64; 1024], vars: [i64; 16], isf: [i64; 16], hess: [i64; 576]) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         var lo = self
         var i: i64 = 0
         while i < 16 {
@@ -24781,7 +24791,7 @@ impl Lowerer {
             i = i + 1
         }
         i = 0
-        while i < 512 {
+        while i < 1024 {
             FO_STEP_SENS[i as usize] = sens[i as usize]
             i = i + 1
         }
@@ -24804,8 +24814,8 @@ impl Lowerer {
                             lo = lo.bind_local_scalar_kind(pname, 2)
                             lo = lo.bind_local_variance_reg(pname, vars[i as usize])
                             var k2: i64 = 0
-                            while k2 < 32 {
-                                lo.fo_expr_sens[k2 as usize] = sens[(i * 32 + k2) as usize]
+                            while k2 < FO_MAX_CH {
+                                lo.fo_expr_sens[k2 as usize] = sens[(i * FO_MAX_CH + k2) as usize]
                                 k2 = k2 + 1
                             }
                         } else {
@@ -24847,14 +24857,14 @@ impl Lowerer {
         }
         lo = lo.emit(ir_mark_float_reg(FO_STEP_ZVAL))
         var k0: i64 = 0
-        while k0 < 32 {
+        while k0 < FO_MAX_CH {
             let sp = lo.fresh_reg()
             lo = sp.0
             FO_STEP_ZS[k0 as usize] = sp.1
             var src: i64 = FO_STEP_ZERO
             if FO_STEP_BASE_LIT == 0 {
                 let bpi2 = FO_STEP_FIDX[FO_STEP_BASE_SLOT as usize]
-                let sk0 = FO_STEP_SENS[(bpi2 * 32 + k0) as usize]
+                let sk0 = FO_STEP_SENS[(bpi2 * FO_MAX_CH + k0) as usize]
                 if sk0 >= 0 { src = sk0 }
             }
             lo = lo.emit(ir_copy(sp.1, src))
@@ -24924,7 +24934,7 @@ impl Lowerer {
             lo = lo.emit(ir_mark_float_reg(FO_STEP_ZVAL))
         }
         var kc: i64 = 0
-        while kc < 32 {
+        while kc < FO_MAX_CH {
             let sk = lo.fo_expr_sens[kc as usize]
             if sk >= 0 {
                 lo = lo.emit(ir_copy(FO_STEP_ZS[kc as usize], sk))
@@ -24962,12 +24972,12 @@ impl Lowerer {
         lo.big = bigr
         lo = lo.fo_clear_expr_sens().so_clear_expr_hess()
         var k: i64 = 0
-        while k < 32 {
+        while k < FO_MAX_CH {
             var live = false
             var p: i64 = 0
             while p < FO_STEP_NF {
                 let pi = FO_STEP_FIDX[p as usize]
-                if FO_STEP_SENS[(pi * 32 + k) as usize] >= 0 { live = true }
+                if FO_STEP_SENS[(pi * FO_MAX_CH + k) as usize] >= 0 { live = true }
                 p = p + 1
             }
             if live {
@@ -25169,7 +25179,7 @@ impl Lowerer {
         var vals: [i64; 16] = [0 - 1; 16]
         var vars: [i64; 16] = [0 - 1; 16]
         var isf: [i64; 16] = [0; 16]
-        var sens: [i64; 512] = [0 - 1; 512]
+        var sens: [i64; 1024] = [0 - 1; 1024]
         // Second-order rows of each f64 argument (hessian_of / sensitivity_of
         // in a function with second order on), 36 per argument.
         var hess: [i64; 576] = [0 - 1; 576]
@@ -25228,8 +25238,8 @@ impl Lowerer {
                         }
                         vars[i as usize] = v
                         var k: i64 = 0
-                        while k < 32 {
-                            sens[(i * 32 + k) as usize] = lo.fo_expr_sens[k as usize]
+                        while k < FO_MAX_CH {
+                            sens[(i * FO_MAX_CH + k) as usize] = lo.fo_expr_sens[k as usize]
                             k = k + 1
                         }
                         if lo.so_enabled && i < 16 {
@@ -25248,20 +25258,20 @@ impl Lowerer {
         }
         let rec_idx = fo_recur_linear_indexes(&fd)
         if rec_idx.0 >= 0 && isf[rec_idx.0 as usize] == 1 {
-            var xs: [i64; 32] = [0 - 1; 32]
+            var xs: [i64; 64] = [0 - 1; 64]
             var rk: i64 = 0
-            while rk < 32 {
-                xs[rk as usize] = sens[(rec_idx.0 * 32 + rk) as usize]
+            while rk < FO_MAX_CH {
+                xs[rk as usize] = sens[(rec_idx.0 * FO_MAX_CH + rk) as usize]
                 rk = rk + 1
             }
             return lo.fo_emit_recur_count_scale(vals[rec_idx.1 as usize], xs)
         }
         let scale_idx = fo_recur_scale_indexes(&fd)
         if scale_idx.0 >= 0 && isf[scale_idx.0 as usize] == 1 {
-            var xs2: [i64; 32] = [0 - 1; 32]
+            var xs2: [i64; 64] = [0 - 1; 64]
             var sk: i64 = 0
-            while sk < 32 {
-                xs2[sk as usize] = sens[(scale_idx.0 * 32 + sk) as usize]
+            while sk < FO_MAX_CH {
+                xs2[sk as usize] = sens[(scale_idx.0 * FO_MAX_CH + sk) as usize]
                 sk = sk + 1
             }
             return lo.fo_emit_recur_pow2_scale(vals[scale_idx.1 as usize], xs2)
@@ -25269,12 +25279,12 @@ impl Lowerer {
         let mix_idx = fo_recur_mix_indexes(&fd, false)
         if mix_idx.0 >= 0 && mix_idx.1 >= 0 && isf[mix_idx.0 as usize] == 1 && isf[mix_idx.1 as usize] == 1 {
             let mix_n = 3 - mix_idx.0 - mix_idx.1
-            var mxs: [i64; 32] = [0 - 1; 32]
-            var mys: [i64; 32] = [0 - 1; 32]
+            var mxs: [i64; 64] = [0 - 1; 64]
+            var mys: [i64; 64] = [0 - 1; 64]
             var mk: i64 = 0
-            while mk < 32 {
-                mxs[mk as usize] = sens[(mix_idx.0 * 32 + mk) as usize]
-                mys[mk as usize] = sens[(mix_idx.1 * 32 + mk) as usize]
+            while mk < FO_MAX_CH {
+                mxs[mk as usize] = sens[(mix_idx.0 * FO_MAX_CH + mk) as usize]
+                mys[mk as usize] = sens[(mix_idx.1 * FO_MAX_CH + mk) as usize]
                 mk = mk + 1
             }
             return lo.fo_emit_recur_mix_scale(vals[mix_n as usize], mxs, mys)
@@ -25282,32 +25292,32 @@ impl Lowerer {
         let ymul_idx = fo_recur_mix_indexes(&fd, true)
         if ymul_idx.0 >= 0 && ymul_idx.1 >= 0 && isf[ymul_idx.0 as usize] == 1 && isf[ymul_idx.1 as usize] == 1 {
             let ymul_n = 3 - ymul_idx.0 - ymul_idx.1
-            var yxs: [i64; 32] = [0 - 1; 32]
-            var yys: [i64; 32] = [0 - 1; 32]
+            var yxs: [i64; 64] = [0 - 1; 64]
+            var yys: [i64; 64] = [0 - 1; 64]
             var yk: i64 = 0
-            while yk < 32 {
-                yxs[yk as usize] = sens[(ymul_idx.0 * 32 + yk) as usize]
-                yys[yk as usize] = sens[(ymul_idx.1 * 32 + yk) as usize]
+            while yk < FO_MAX_CH {
+                yxs[yk as usize] = sens[(ymul_idx.0 * FO_MAX_CH + yk) as usize]
+                yys[yk as usize] = sens[(ymul_idx.1 * FO_MAX_CH + yk) as usize]
                 yk = yk + 1
             }
             return lo.fo_emit_recur_ymul_scale(vals[ymul_n as usize], vals[ymul_idx.0 as usize], vals[ymul_idx.1 as usize], yxs, yys)
         }
         let xmul_idx = fo_recur_xmul_indexes(&fd)
         if xmul_idx.0 >= 0 && isf[xmul_idx.0 as usize] == 1 {
-            var xxs: [i64; 32] = [0 - 1; 32]
+            var xxs: [i64; 64] = [0 - 1; 64]
             var xk: i64 = 0
-            while xk < 32 {
-                xxs[xk as usize] = sens[(xmul_idx.0 * 32 + xk) as usize]
+            while xk < FO_MAX_CH {
+                xxs[xk as usize] = sens[(xmul_idx.0 * FO_MAX_CH + xk) as usize]
                 xk = xk + 1
             }
             return lo.fo_emit_recur_xmul_scale(vals[xmul_idx.1 as usize], vals[xmul_idx.0 as usize], xxs)
         }
         let aff_idx = fo_recur_affine_indexes(&fd)
         if aff_idx.0 >= 0 && isf[aff_idx.0 as usize] == 1 {
-            var axs: [i64; 32] = [0 - 1; 32]
+            var axs: [i64; 64] = [0 - 1; 64]
             var ak: i64 = 0
-            while ak < 32 {
-                axs[ak as usize] = sens[(aff_idx.0 * 32 + ak) as usize]
+            while ak < FO_MAX_CH {
+                axs[ak as usize] = sens[(aff_idx.0 * FO_MAX_CH + ak) as usize]
                 ak = ak + 1
             }
             return lo.fo_emit_recur_affine_scale(vals[aff_idx.1 as usize], axs)
@@ -25315,12 +25325,12 @@ impl Lowerer {
         let affy_idx = fo_recur_step2_indexes(&fd, 0)
         if affy_idx.0 >= 0 && affy_idx.1 >= 0 && isf[affy_idx.0 as usize] == 1 && isf[affy_idx.1 as usize] == 1 {
             let affy_n = 3 - affy_idx.0 - affy_idx.1
-            var ayxs: [i64; 32] = [0 - 1; 32]
-            var ayys: [i64; 32] = [0 - 1; 32]
+            var ayxs: [i64; 64] = [0 - 1; 64]
+            var ayys: [i64; 64] = [0 - 1; 64]
             var ayk: i64 = 0
-            while ayk < 32 {
-                ayxs[ayk as usize] = sens[(affy_idx.0 * 32 + ayk) as usize]
-                ayys[ayk as usize] = sens[(affy_idx.1 * 32 + ayk) as usize]
+            while ayk < FO_MAX_CH {
+                ayxs[ayk as usize] = sens[(affy_idx.0 * FO_MAX_CH + ayk) as usize]
+                ayys[ayk as usize] = sens[(affy_idx.1 * FO_MAX_CH + ayk) as usize]
                 ayk = ayk + 1
             }
             return lo.fo_emit_recur_affy_scale(vals[affy_n as usize], ayxs, ayys)
@@ -25328,12 +25338,12 @@ impl Lowerer {
         let ch_idx = fo_recur_step2_indexes(&fd, 1)
         if ch_idx.0 >= 0 && ch_idx.1 >= 0 && isf[ch_idx.0 as usize] == 1 && isf[ch_idx.1 as usize] == 1 {
             let ch_n = 3 - ch_idx.0 - ch_idx.1
-            var cxs: [i64; 32] = [0 - 1; 32]
-            var cys: [i64; 32] = [0 - 1; 32]
+            var cxs: [i64; 64] = [0 - 1; 64]
+            var cys: [i64; 64] = [0 - 1; 64]
             var ck: i64 = 0
-            while ck < 32 {
-                cxs[ck as usize] = sens[(ch_idx.0 * 32 + ck) as usize]
-                cys[ck as usize] = sens[(ch_idx.1 * 32 + ck) as usize]
+            while ck < FO_MAX_CH {
+                cxs[ck as usize] = sens[(ch_idx.0 * FO_MAX_CH + ck) as usize]
+                cys[ck as usize] = sens[(ch_idx.1 * FO_MAX_CH + ck) as usize]
                 ck = ck + 1
             }
             return lo.fo_emit_recur_chcoef_scale(vals[ch_n as usize], vals[ch_idx.0 as usize], vals[ch_idx.1 as usize], cxs, cys)
@@ -25394,8 +25404,8 @@ impl Lowerer {
                             }
                             lo = lo.bind_local_variance_reg(pname, vars[i as usize])
                             var k2: i64 = 0
-                            while k2 < 32 {
-                                lo.fo_expr_sens[k2 as usize] = sens[(i * 32 + k2) as usize]
+                            while k2 < FO_MAX_CH {
+                                lo.fo_expr_sens[k2 as usize] = sens[(i * FO_MAX_CH + k2) as usize]
                                 k2 = k2 + 1
                             }
                         } else {
@@ -25569,9 +25579,9 @@ impl Lowerer {
             lo = ep2.0
             result = ep2.1
         }
-        var out_sens: [i64; 32] = [0 - 1; 32]
+        var out_sens: [i64; 64] = [0 - 1; 64]
         var k3: i64 = 0
-        while k3 < 32 {
+        while k3 < FO_MAX_CH {
             out_sens[k3 as usize] = lo.fo_expr_sens[k3 as usize]
             k3 = k3 + 1
         }
@@ -25729,9 +25739,9 @@ impl Lowerer {
         let mvp = lo.fresh_reg()
         lo = mvp.0
         let mv = mvp.1
-        var msens: [i64; 32] = [0 - 1; 32]
+        var msens: [i64; 64] = [0 - 1; 64]
         var k: i64 = 0
-        while k < 32 {
+        while k < FO_MAX_CH {
             if t_sens[k as usize] >= 0 || e_sens[k as usize] >= 0 {
                 let rp = lo.fresh_reg()
                 lo = rp.0
@@ -25749,9 +25759,9 @@ impl Lowerer {
             }
             h = h + 1
         }
-        var msig: [i64; 32] = [0 - 1; 32]
+        var msig: [i64; 64] = [0 - 1; 64]
         k = nch0
-        while k < nch_e && k < 32 {
+        while k < nch_e && k < FO_MAX_CH {
             if lo.fo_sigma2[k as usize] >= reg0 {
                 let rp = lo.fresh_reg()
                 lo = rp.0
@@ -25759,8 +25769,8 @@ impl Lowerer {
             }
             k = k + 1
         }
-        if (t_trunc != 0 || e_trunc != 0) && nch_e >= 32 { fo_refuse_capacity(false) }
-        let poison = (t_trunc != 0 || e_trunc != 0) && nch_e < 32
+        if (t_trunc != 0 || e_trunc != 0) && nch_e >= FO_MAX_CH { fo_refuse_capacity(false) }
+        let poison = (t_trunc != 0 || e_trunc != 0) && nch_e < FO_MAX_CH
         var mpsig: i64 = 0 - 1
         var mpsens: i64 = 0 - 1
         if poison {
@@ -25780,7 +25790,7 @@ impl Lowerer {
         lo = lo.emit(ir_label(l_end))
         lo = lo.emit(ir_mark_float_reg(mv))
         k = 0
-        while k < 32 {
+        while k < FO_MAX_CH {
             if msens[k as usize] >= 0 { lo = lo.emit(ir_mark_float_reg(msens[k as usize])) }
             if msig[k as usize] >= 0 {
                 lo = lo.emit(ir_mark_float_reg(msig[k as usize]))
@@ -25811,7 +25821,7 @@ impl Lowerer {
     // One path's copies into the if-merge registers (see lower_if_variance_runtime_ref).
     // `then_side`: channels [nch0, nch_t) were seeded by the then-arm, [nch_t, nch_e)
     // by the else-arm; a channel seeded on the other path reads a zero sigma^2 here.
-    fn fo_if_merge_side(self, mv: i64, var_r: i64, trunc: bool, msens: [i64; 32], sens: [i64; 32], mhess: [i64; 36], hess: [i64; 36], msig: [i64; 32], nch_t: i64, nch_e: i64, then_side: bool, mpsig: i64, mpsens: i64) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+    fn fo_if_merge_side(self, mv: i64, var_r: i64, trunc: bool, msens: [i64; 64], sens: [i64; 64], mhess: [i64; 36], hess: [i64; 36], msig: [i64; 64], nch_t: i64, nch_e: i64, then_side: bool, mpsig: i64, mpsens: i64) -> Lowerer with Mut, Panic, Div, Alloc, IO {
         let zp = self.emit_f64_const(0.0)
         var lo = zp.0
         let zero = zp.1
@@ -25832,7 +25842,7 @@ impl Lowerer {
             lo = lo.emit(ir_copy(mv, zero))
         }
         var k: i64 = 0
-        while k < 32 {
+        while k < FO_MAX_CH {
             let m = msens[k as usize]
             if m >= 0 {
                 let src = sens[k as usize]
@@ -25941,9 +25951,9 @@ impl Lowerer {
                 let mvp = lo.fresh_reg()
                 lo = mvp.0
                 let mv = mvp.1
-                var msens: [i64; 32] = [0 - 1; 32]
+                var msens: [i64; 64] = [0 - 1; 64]
                 var k: i64 = 0
-                while k < 32 {
+                while k < FO_MAX_CH {
                     if t_sens[k as usize] >= 0 || e_sens[k as usize] >= 0 {
                         let rp = lo.fresh_reg()
                         lo = rp.0
@@ -25961,9 +25971,9 @@ impl Lowerer {
                     }
                     h = h + 1
                 }
-                var msig: [i64; 32] = [0 - 1; 32]
+                var msig: [i64; 64] = [0 - 1; 64]
                 k = nch0
-                while k < nch_e && k < 32 {
+                while k < nch_e && k < FO_MAX_CH {
                     if lo.fo_sigma2[k as usize] >= reg0 {
                         let rp = lo.fresh_reg()
                         lo = rp.0
@@ -25971,8 +25981,8 @@ impl Lowerer {
                     }
                     k = k + 1
                 }
-                if (t_trunc != 0 || e_trunc != 0) && nch_e >= 32 { fo_refuse_capacity(false) }
-                let poison = (t_trunc != 0 || e_trunc != 0) && nch_e < 32
+                if (t_trunc != 0 || e_trunc != 0) && nch_e >= FO_MAX_CH { fo_refuse_capacity(false) }
+                let poison = (t_trunc != 0 || e_trunc != 0) && nch_e < FO_MAX_CH
                 var mpsig: i64 = 0 - 1
                 var mpsens: i64 = 0 - 1
                 if poison {
@@ -25990,7 +26000,7 @@ impl Lowerer {
                 lo = lo.emit(ir_label(l_end))
                 lo = lo.emit(ir_mark_float_reg(mv))
                 k = 0
-                while k < 32 {
+                while k < FO_MAX_CH {
                     if msens[k as usize] >= 0 { lo = lo.emit(ir_mark_float_reg(msens[k as usize])) }
                     if msig[k as usize] >= 0 {
                         lo = lo.emit(ir_mark_float_reg(msig[k as usize]))
@@ -26024,7 +26034,7 @@ impl Lowerer {
         if FO_STEP_CARRY == 1 && fo_recur_call_is_this(e) {
             var lo = self.fo_clear_expr_sens().so_clear_expr_hess()
             var k: i64 = 0
-            while k < 32 {
+            while k < FO_MAX_CH {
                 let src = FO_STEP_ZS[k as usize]
                 if src >= 0 {
                     let sp = lo.fresh_reg()
@@ -26307,7 +26317,7 @@ impl Lowerer {
                 hi = hi + 1
             }
             var k: i64 = 0
-            while k < 32 {
+            while k < FO_MAX_CH {
                 let sk = lo.fo_expr_sens[k as usize]
                 if sk >= 0 {
                     let zp = lo.emit_f64_const(0.0)
@@ -37422,7 +37432,7 @@ impl Lowerer {
                         lo.pending_variance_reg = var_r.1
                         lo = lo.fo_seed_from_variance(var_r.1, 0 - 1)
                         var mk: i64 = 0
-                        while mk < 32 {
+                        while mk < FO_MAX_CH {
                             lo.fo_pending_sens[mk as usize] = lo.fo_expr_sens[mk as usize]
                             mk = mk + 1
                         }
@@ -37478,7 +37488,7 @@ impl Lowerer {
         // Seed FO channel so `let k = measure(...)` then k.value shares the same σ² channel.
         lo11 = lo11.fo_seed_from_variance(variance_reg, 0 - 1)
         var mk: i64 = 0
-        while mk < 32 {
+        while mk < FO_MAX_CH {
             lo11.fo_pending_sens[mk as usize] = lo11.fo_expr_sens[mk as usize]
             mk = mk + 1
         }
@@ -37528,7 +37538,7 @@ impl Lowerer {
         lo9.pending_variance_reg = variance_reg
         lo9 = lo9.fo_seed_from_variance(variance_reg, 0 - 1)
         var mk: i64 = 0
-        while mk < 32 {
+        while mk < FO_MAX_CH {
             lo9.fo_pending_sens[mk as usize] = lo9.fo_expr_sens[mk as usize]
             mk = mk + 1
         }
@@ -37568,7 +37578,7 @@ impl Lowerer {
         (lo, vr.1)
     }
 
-    fn fo_sens_of_cov_arg(self, e: &Expr) -> (Lowerer, [i64; 32]) with Mut, Panic, Div, Alloc, IO {
+    fn fo_sens_of_cov_arg(self, e: &Expr) -> (Lowerer, [i64; 64]) with Mut, Panic, Div, Alloc, IO {
         if (*e).kind == ExprKind::ExprFieldAccess {
             let inl = self.fo_inline_field_chain(e)
             if inl.1 >= 0 {
@@ -37675,7 +37685,7 @@ impl Lowerer {
                     }
                     _ => {}
                 }
-                if chan >= 0 && chan < 32 {
+                if chan >= 0 && chan < FO_MAX_CH {
                     let sens = lo.fo_expr_sens[chan as usize]
                     if sens >= 0 {
                         let cp = lo.fresh_reg()
@@ -40204,7 +40214,7 @@ impl Lowerer {
                 lo_d8.pending_variance_reg = result_variance_reg
                 lo_d8 = lo_d8.fo_seed_from_variance(result_variance_reg, 0 - 1)
                 var dk: i64 = 0
-                while dk < 32 {
+                while dk < FO_MAX_CH {
                     lo_d8.fo_pending_sens[dk as usize] = lo_d8.fo_expr_sens[dk as usize]
                     dk = dk + 1
                 }
@@ -40254,7 +40264,7 @@ impl Lowerer {
                 lo_k7.pending_variance_reg = result_variance_reg
                 lo_k7 = lo_k7.fo_seed_from_variance(result_variance_reg, 0 - 1)
                 var mk: i64 = 0
-                while mk < 32 {
+                while mk < FO_MAX_CH {
                     lo_k7.fo_pending_sens[mk as usize] = lo_k7.fo_expr_sens[mk as usize]
                     mk = mk + 1
                 }
@@ -41386,7 +41396,7 @@ impl Lowerer {
                             lo3.pending_variance_reg = vpair.1
                             lo3 = lo3.fo_seed_from_variance(vpair.1, 0 - 1)
                             var pk: i64 = 0
-                            while pk < 32 {
+                            while pk < FO_MAX_CH {
                                 lo3.fo_pending_sens[pk as usize] = lo3.fo_expr_sens[pk as usize]
                                 pk = pk + 1
                             }
@@ -44140,7 +44150,7 @@ impl Lowerer {
                             lo.pending_variance_reg = fv.1
                             lo = lo.fo_seed_from_variance(fv.1, 0 - 1)
                             var mk: i64 = 0
-                            while mk < 32 {
+                            while mk < FO_MAX_CH {
                                 lo.fo_pending_sens[mk as usize] = lo.fo_expr_sens[mk as usize]
                                 mk = mk + 1
                             }
