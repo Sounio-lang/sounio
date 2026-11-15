@@ -84,6 +84,15 @@
 //                                         2005, n = 12): 1.225 h, u 0.225 h
 //  clform, clren, clpla  0        0       2.2 % of radioactivity in urine (label)
 //
+// ROUND (TRANSIT), 2026-11-15: the oral input of the adopted record is an Erlang chain of sir_ntr() = 4 stages (n = 3 transit
+// compartments DECLARED + 1, Savic 2007 convention with Ka = Ktr; no sirolimus n is sourced). CD_KA is then the rate k of EACH
+// stage, refitted to the same pooled Tmax 1.225 h: k = 6.35 /h (u 1.83), MTT = 4/k = 0.63 h; tlag 0 (no sourced lag). Djebli 2006
+// Ktr 5.25 /h (PMID 17048977, abstract; n not given) is a VALIDATION of k, not a fit target. The ps scalar is refitted to R24
+// at that input: 0.256 (first order 0.138). Gut-wall Kp: sir_gut() = 0 (all-organ Kp scalar) is ADOPTED; the gut-unscaled
+// variant (mtor_params(th, 1)) was run refitted and rejected by the rule in the test header (4 PASS -> FAIL rows, Cmax 1.3 %
+// higher). The legacy entry points (sir_drug_into, sir_cfg, ...) keep the first-order record; sir_drug_into_adopted(d, sysn) is
+// the adopted one. Uncertainty: u(k) = u(Tmax)/|dTmax/dk| = 1.83 /h enters the budget as the "ka" input.
+//
 // EVIDENCE THAT THE FIRST PASS IS MAINLY INTESTINAL: Emoto 2013 (FT): Fh 0.96 +/- 0.03 and Fg 0.16 +/- 0.10 from
 // recombinant CYP clearances scaled with the hepatic and intestinal CYP3A contents of 15 donors (well-stirred
 // liver, Qgut model), F predicted 15 +/- 9 %; label: "extensively metabolized in the intestinal wall and liver
@@ -202,21 +211,33 @@ fn mtor_fg_of(p: Circ28Params, bp: f64, cg: f64) -> f64 with Div {
 }
 
 // Returns th with CD_BP (bp at cref), CD_KPSC, CD_CLGUT and CD_CLINT fitted. CD_CLINT = -1 when impossible.
+// gut = 1: the gut wall keeps its Rodgers-Rowland Kp (circ28_drug_params_theta_gutrr) and the Kp scalar of the
+// other organs is fitted to V_ss with circ28_kp_scale_for_vss_gutrr. gut = 0: the all-organ scalar (the original fit).
+pub fn mtor_params(th: [f64; 18], gut: i32) -> Circ28Params with Mut, Div, Panic {
+    if gut == 1 { return circ28_drug_params_theta_gutrr(th) }
+    return circ28_drug_params_theta(th)
+}
+
 pub fn mtor_fit(th: [f64; 18], o: MtorObs) -> [f64; 18] with Mut, Div, Panic {
+    return mtor_fit_g(th, o, 0)
+}
+
+pub fn mtor_fit_g(th: [f64; 18], o: MtorObs, gut: i32) -> [f64; 18] with Mut, Div, Panic {
     var t = th
     let bp = nl28_bp_local(o.hct, o.bmax, o.kd, o.cref)
     t[CD_BP] = bp
     t[CD_KPSC] = 1.0
     t[CD_CLGUT] = 0.0
     t[CD_CLINT] = 0.0
-    let p0 = circ28_drug_params_theta(t)
-    let sc = circ28_kp_scale_for_vss(p0, p0.kp, o.vss * bp)
+    let p0 = mtor_params(t, gut)
+    var sc = circ28_kp_scale_for_vss(p0, p0.kp, o.vss * bp)
+    if gut == 1 { sc = circ28_kp_scale_for_vss_gutrr(p0, p0.kp, o.vss * bp) }
     if !(sc > 0.0) {
         t[CD_CLINT] = 0.0 - 1.0
         return t
     }
     t[CD_KPSC] = sc
-    let p = circ28_drug_params_theta(t)
+    let p = mtor_params(t, gut)
     let fa = t[CD_FA]
     var lo = ln(1.0e-6)
     var hi = ln(1.0e7)
@@ -326,6 +347,7 @@ pub struct MtorDose {
     pub dose: f64,
     pub t_inf: f64,
     pub ka: f64,
+    pub ntr: i32,
     pub fa: f64,
     pub tlag: f64,
     pub ndose: i32,
@@ -342,7 +364,7 @@ pub struct MtorDose {
 
 // Single oral dose: 0.1 h to 3 h, 0.5 h to 12 h, 4 h to t_end (the callers of long runs set dt3 = 8 h).
 pub fn mtor_cfg_oral(dose_mg: f64, t_end: f64, fit_lo: f64, fit_hi: f64) -> MtorDose {
-    return MtorDose { route: 1, dose: dose_mg, t_inf: 0.0, ka: 1.0, fa: 1.0, tlag: 0.0, ndose: 1, tau: 24.0, dt1: 0.1, t1: 3.0, dt2: 0.5, t2: 12.0, dt3: 4.0, t_end: t_end, fit_lo: fit_lo, fit_hi: fit_hi }
+    return MtorDose { route: 1, dose: dose_mg, t_inf: 0.0, ka: 1.0, ntr: 1, fa: 1.0, tlag: 0.0, ndose: 1, tau: 24.0, dt1: 0.1, t1: 3.0, dt2: 0.5, t2: 12.0, dt3: 4.0, t_end: t_end, fit_lo: fit_lo, fit_hi: fit_hi }
 }
 
 // Results (venous WHOLE BLOOD, mg/L; AUC mg h/L; times from the last dose)
@@ -431,7 +453,7 @@ pub fn mtor_run(p: Circ28Params, hct: f64, bmax: f64, kd: f64, dc: MtorDose, sys
                         var j: i32 = 0
                         while j <= kd_i {
                             let sh = ((kd_i - j) as f64) * dc.tau
-                            mass = mass + circ28_oral_mass(dc.ka, dc.fa, dc.dose, dc.tlag, t + sh, t + sh + dt)
+                            mass = mass + circ28_oral_mass_n(dc.ka, dc.ntr, dc.fa, dc.dose, dc.tlag, t + sh, t + sh + dt)
                             j = j + 1
                         }
                         oral = mass / dt
@@ -592,7 +614,7 @@ pub fn mtor_run_single(p: Circ28Params, hct: f64, bmax: f64, kd: f64, dc: MtorDo
     var cm = 0.0
     var tm = 0.0
     while t + 0.5 * dc.dt1 < dc.t1 {
-        let mass = circ28_oral_mass(dc.ka, dc.fa, dc.dose, dc.tlag, t, t + dc.dt1)
+        let mass = circ28_oral_mass_n(dc.ka, dc.ntr, dc.fa, dc.dose, dc.tlag, t, t + dc.dt1)
         blood28_step(&!b, sysc, 0.0, mass / dc.dt1)
         t = t + dc.dt1
         let c = blood28_get_x(&b, 0)
@@ -610,7 +632,7 @@ pub fn mtor_run_single(p: Circ28Params, hct: f64, bmax: f64, kd: f64, dc: MtorDo
     }
     b2.el.auc_ven = a1
     while t + 0.5 * dc.dt2 < dc.t_end {
-        let mass2 = circ28_oral_mass(dc.ka, dc.fa, dc.dose, dc.tlag, t, t + dc.dt2)
+        let mass2 = circ28_oral_mass_n(dc.ka, dc.ntr, dc.fa, dc.dose, dc.tlag, t, t + dc.dt2)
         blood28_step(&!b2, sysc, 0.0, mass2 / dc.dt2)
         t = t + dc.dt2
         let c = blood28_get_x(&b2, 0)
@@ -624,7 +646,13 @@ pub fn mtor_run_single(p: Circ28Params, hct: f64, bmax: f64, kd: f64, dc: MtorDo
 
 // Tmax (h) of a single oral dose at absorption rate ka, run to 3 h on the 0.1 h grid (a later peak returns 3 h).
 pub fn mtor_tmax_at(p: Circ28Params, hct: f64, bmax: f64, kd: f64, dose: f64, fa: f64, ka: f64, sysn: &!Nl28Sys) -> f64 with Mut, Div, Panic {
+    return mtor_tmax_at_n(p, hct, bmax, kd, dose, fa, ka, 1, sysn)
+}
+
+// Same with a chain of ntr transit stages of rate ka each (ntr = 1: first order).
+pub fn mtor_tmax_at_n(p: Circ28Params, hct: f64, bmax: f64, kd: f64, dose: f64, fa: f64, ka: f64, ntr: i32, sysn: &!Nl28Sys) -> f64 with Mut, Div, Panic {
     var dc = mtor_cfg_oral(dose, 3.0, 100.0, 200.0)
+    dc.ntr = ntr
     dc.ka = ka
     dc.fa = fa
     let r = mtor_run(p, hct, bmax, kd, dc, sysn)
@@ -638,20 +666,24 @@ pub fn mtor_tmax_at(p: Circ28Params, hct: f64, bmax: f64, kd: f64, dose: f64, fa
 // unconverged, ka 0.9334 instead of 0.9572; the second and later solves were right; Madaros is right at the first).
 // Each solver below therefore makes its first evaluation twice and discards the first (a workaround, not a fix).
 pub fn mtor_ka_solve(p: Circ28Params, hct: f64, bmax: f64, kd: f64, dose: f64, fa: f64, tobs: f64, klo: f64, khi: f64, sysn: &!Nl28Sys) -> f64 with Mut, Div, Panic {
-    let warm = mtor_tmax_at(p, hct, bmax, kd, dose, fa, khi, sysn)
-    let tb = mtor_tmax_at(p, hct, bmax, kd, dose, fa, khi, sysn)
+    return mtor_ka_solve_n(p, hct, bmax, kd, dose, fa, tobs, klo, khi, 1, sysn)
+}
+
+pub fn mtor_ka_solve_n(p: Circ28Params, hct: f64, bmax: f64, kd: f64, dose: f64, fa: f64, tobs: f64, klo: f64, khi: f64, ntr: i32, sysn: &!Nl28Sys) -> f64 with Mut, Div, Panic {
+    let warm = mtor_tmax_at_n(p, hct, bmax, kd, dose, fa, khi, ntr, sysn)
+    let tb = mtor_tmax_at_n(p, hct, bmax, kd, dose, fa, khi, ntr, sysn)
     if tb > tobs { return khi }
     var xa = ln(klo)
     var xb = ln(khi)
     var gb = tb - tobs
-    var ga = mtor_tmax_at(p, hct, bmax, kd, dose, fa, klo, sysn) - tobs
+    var ga = mtor_tmax_at_n(p, hct, bmax, kd, dose, fa, klo, ntr, sysn) - tobs
     if !(ga > 0.0) { return klo }
     var side: i32 = 0
     var x = xb
     var k: i32 = 0
     while k < 20 && mtor_abs(xb - xa) > 1.0e-9 {
         x = (xa * gb - xb * ga) / (gb - ga)
-        let fx = mtor_tmax_at(p, hct, bmax, kd, dose, fa, exp(x), sysn) - tobs
+        let fx = mtor_tmax_at_n(p, hct, bmax, kd, dose, fa, exp(x), ntr, sysn) - tobs
         if mtor_abs(fx) < 1.0e-4 { return exp(x) }
         if fx > 0.0 {
             xa = x
@@ -679,6 +711,10 @@ pub struct MtorOut {
 }
 
 pub fn mtor_eval(z: [f64; 12], thb: [f64; 18], cref: f64, dc0: MtorDose, sysn: &!Nl28Sys) -> MtorOut with Mut, Div, Panic {
+    return mtor_eval_g(z, thb, cref, dc0, 0, sysn)
+}
+
+pub fn mtor_eval_g(z: [f64; 12], thb: [f64; 18], cref: f64, dc0: MtorDose, gut: i32, sysn: &!Nl28Sys) -> MtorOut with Mut, Div, Panic {
     var t = thb
     t[CD_LOGP] = z[0]
     t[CD_FU] = z[1]
@@ -687,8 +723,8 @@ pub fn mtor_eval(z: [f64; 12], thb: [f64; 18], cref: f64, dc0: MtorDose, sysn: &
     t[CD_KA] = z[10]
     t[CD_PSSC] = z[11]
     let o = MtorObs { hct: z[2], bmax: z[3], kd: z[4], vss: z[9] * z[7], cl: z[9] * z[8], f: z[9], cref: cref }
-    t = mtor_fit(t, o)
-    let p = circ28_drug_params_theta(t)
+    t = mtor_fit_g(t, o, gut)
+    let p = mtor_params(t, gut)
     var dc = dc0
     dc.ka = z[10]
     dc.fa = z[6]
@@ -712,8 +748,12 @@ pub struct MtorBudget {
 
 // Forward differences, h_i = min(1e-4 |z_i|, 0.1 u_i).
 pub fn mtor_budget(z0: [f64; 12], u: [f64; 12], thb: [f64; 18], cref: f64, dc0: MtorDose, sysn: &!Nl28Sys) -> MtorBudget with Mut, Div, Panic {
-    let warm = mtor_eval(z0, thb, cref, dc0, sysn)
-    let o0 = mtor_eval(z0, thb, cref, dc0, sysn)
+    return mtor_budget_g(z0, u, thb, cref, dc0, 0, sysn)
+}
+
+pub fn mtor_budget_g(z0: [f64; 12], u: [f64; 12], thb: [f64; 18], cref: f64, dc0: MtorDose, gut: i32, sysn: &!Nl28Sys) -> MtorBudget with Mut, Div, Panic {
+    let warm = mtor_eval_g(z0, thb, cref, dc0, gut, sysn)
+    let o0 = mtor_eval_g(z0, thb, cref, dc0, gut, sysn)
     var sa: [f64; 12] = [0.0; 12]
     var sc: [f64; 12] = [0.0; 12]
     var ca: [f64; 12] = [0.0; 12]
@@ -728,7 +768,7 @@ pub fn mtor_budget(z0: [f64; 12], u: [f64; 12], thb: [f64; 18], cref: f64, dc0: 
         if hs > 0.0 {
             var zp = z0
             zp[i] = z0[i] + hs
-            let op = mtor_eval(zp, thb, cref, dc0, sysn)
+            let op = mtor_eval_g(zp, thb, cref, dc0, gut, sysn)
             nrun = nrun + 1
             let da = (op.auc - o0.auc) / hs
             let dcm = (op.cmax - o0.cmax) / hs
@@ -767,7 +807,16 @@ pub fn sir_kd() -> f64 { return mtor_hct() * sir_bmax() / (sir_bp0() - (1.0 - mt
 pub fn sir_u_kd() -> f64 { return sir_kd() * sir_u_bp0() / (sir_bp0() - (1.0 - mtor_hct())) }
 pub fn sir_fa() -> f64 { return 1.0 }
 pub fn sir_u_fa() -> f64 { return 0.115 }
+// Erlang stages of the oral input: a published "3 transit compartments with Ka = Ktr" (Savic 2007 convention, rule 11)
+// is n + 1 = 4 stages here. n = 3 is DECLARED (no sirolimus n is sourced; Djebli 2006 gives Ktr 5.25 /h without n in the abstract).
+pub fn sir_ntr() -> i32 { return 4 }
 pub fn sir_f() -> f64 { return 0.14 }
+// Gut-wall Kp variant adopted by the transit round: 0 = all-organ scalar, 1 = gut wall at its Rodgers-Rowland Kp (decision in the test).
+pub fn sir_gut() -> i32 { return 0 }
+// The record of the module as adopted: transit input (sir_ntr stages) and the adopted gut variant.
+pub fn sir_drug_into_adopted(d: &!Circ28Drug, sysn: &!Nl28Sys) with Mut, Div, Panic, Epistemic {
+    sir_drug_into_g(d, sir_ntr(), sir_gut(), sysn)
+}
 pub fn sir_u_f() -> f64 { return 0.04 }
 
 // pooled apparent clearance (L/h), k = 3 without ciclosporin
@@ -842,6 +891,13 @@ pub fn sir_obs_base() -> MtorObs with Mut, Div {
 }
 
 // Single-dose grid of the sirolimus runs: 0.1 h to 3 h, 1 h to 24 h, 8 h to 488 h; terminal slope over 96-336 h.
+// Same grid with the Erlang stage count of the oral input.
+pub fn sir_cfg_n(dose_mg: f64, ntr: i32) -> MtorDose {
+    var dc = sir_cfg(dose_mg)
+    dc.ntr = ntr
+    return dc
+}
+
 pub fn sir_cfg(dose_mg: f64) -> MtorDose {
     var dc = mtor_cfg_oral(dose_mg, 488.0, 96.0, 336.0)
     dc.dt2 = 1.0
@@ -862,6 +918,10 @@ pub fn sir_measured_record(d: &!Circ28Drug) with Mut, Div, Panic, Epistemic {
 // d(fitted component)/d(observable) by central differences through the closed-form fit.
 // which: 0 V_ss(blood), 1 CL(blood), 2 F (V and CL held).
 pub fn mtor_fit_d(th: [f64; 18], o: MtorObs, which: i32, comp: i32) -> f64 with Mut, Div, Panic {
+    return mtor_fit_d_g(th, o, which, comp, 0)
+}
+
+pub fn mtor_fit_d_g(th: [f64; 18], o: MtorObs, which: i32, comp: i32, gut: i32) -> f64 with Mut, Div, Panic {
     var op = o
     var om = o
     var h = 1.0e-4
@@ -880,20 +940,24 @@ pub fn mtor_fit_d(th: [f64; 18], o: MtorObs, which: i32, comp: i32) -> f64 with 
         op.f = o.f + h
         om.f = o.f - h
     }
-    let tp = mtor_fit(th, op)
-    let tm = mtor_fit(th, om)
+    let tp = mtor_fit_g(th, op, gut)
+    let tm = mtor_fit_g(th, om, gut)
     return (tp[comp] - tm[comp]) / (2.0 * h)
 }
 
 // Writes CD_BP, CD_KPSC, CD_CLGUT, CD_CLINT. u_vss, u_cl: standard uncertainties of the WHOLE-BLOOD
 // volume and clearance handed in by the drug module (they include u(F)).
 pub fn mtor_fit_record(d: &!Circ28Drug, o: MtorObs, u_vss: f64, u_cl: f64, u_f: f64) with Mut, Div, Panic, Epistemic {
+    mtor_fit_record_g(d, o, u_vss, u_cl, u_f, 0)
+}
+
+pub fn mtor_fit_record_g(d: &!Circ28Drug, o: MtorObs, u_vss: f64, u_cl: f64, u_f: f64, gut: i32) with Mut, Div, Panic, Epistemic {
     let th0 = circ28_drug_theta(d)
-    let th = mtor_fit(th0, o)
-    let dk_dv = mtor_fit_d(th0, o, 0, CD_KPSC)
-    let dg_df = mtor_fit_d(th0, o, 2, CD_CLGUT)
-    let dc_dcl = mtor_fit_d(th0, o, 1, CD_CLINT)
-    let dc_df = mtor_fit_d(th0, o, 2, CD_CLINT)
+    let th = mtor_fit_g(th0, o, gut)
+    let dk_dv = mtor_fit_d_g(th0, o, 0, CD_KPSC, gut)
+    let dg_df = mtor_fit_d_g(th0, o, 2, CD_CLGUT, gut)
+    let dc_dcl = mtor_fit_d_g(th0, o, 1, CD_CLINT, gut)
+    let dc_df = mtor_fit_d_g(th0, o, 2, CD_CLINT, gut)
     let ua = dc_dcl * u_cl
     let ub = dc_df * u_f
     circ28_drug_set(d, CD_BP, th[CD_BP], 0.0, CD_STATUS_DERIVED, "bp at C_ref from the binding relation; the nl stepper replaces it by the local relation")
@@ -916,12 +980,17 @@ pub fn sir_u_cl_blood() -> f64 with Mut, Div {
 // R24 = C(24 h)/Cmax of a single 6 mg oral dose at ps scalar s and absorption rate ka, the closed-form
 // fits redone at s (grid 0.1 h to 3 h, 1 h to 12 h, 6 h to 24 h). -1 when the hepatic fit does not exist at s.
 pub fn sir_r24_at(th0: [f64; 18], o: MtorObs, s: f64, ka: f64, sysn: &!Nl28Sys) -> f64 with Mut, Div, Panic {
+    return sir_r24_at_g(th0, o, s, ka, 1, 0, sysn)
+}
+
+pub fn sir_r24_at_g(th0: [f64; 18], o: MtorObs, s: f64, ka: f64, ntr: i32, gut: i32, sysn: &!Nl28Sys) -> f64 with Mut, Div, Panic {
     var t = th0
     t[CD_PSSC] = s
-    t = mtor_fit(t, o)
+    t = mtor_fit_g(t, o, gut)
     if !(t[CD_CLINT] > 0.0) { return 0.0 - 1.0 }
-    let p = circ28_drug_params_theta(t)
+    let p = mtor_params(t, gut)
     var dc = mtor_cfg_oral(6.0, 24.0, 100.0, 200.0)
+    dc.ntr = ntr
     dc.dt2 = 1.0
     dc.dt3 = 6.0
     dc.ka = ka
@@ -932,21 +1001,29 @@ pub fn sir_r24_at(th0: [f64; 18], o: MtorObs, s: f64, ka: f64, sysn: &!Nl28Sys) 
 }
 
 pub fn mtor_fit_exists(th0: [f64; 18], o: MtorObs, s: f64) -> bool with Mut, Div, Panic {
+    return mtor_fit_exists_g(th0, o, s, 0)
+}
+
+pub fn mtor_fit_exists_g(th0: [f64; 18], o: MtorObs, s: f64, gut: i32) -> bool with Mut, Div, Panic {
     var t = th0
     t[CD_PSSC] = s
-    t = mtor_fit(t, o)
+    t = mtor_fit_g(t, o, gut)
     return t[CD_CLINT] > 0.0
 }
 
 // Smallest s in [1e-3, 1] for which the closed-form fit exists (bisection on ln s, 14 halvings).
 pub fn mtor_ps_min(th0: [f64; 18], o: MtorObs) -> f64 with Mut, Div, Panic {
+    return mtor_ps_min_g(th0, o, 0)
+}
+
+pub fn mtor_ps_min_g(th0: [f64; 18], o: MtorObs, gut: i32) -> f64 with Mut, Div, Panic {
     var lo = ln(1.0e-3)
     var hi = 0.0
-    if mtor_fit_exists(th0, o, exp(lo)) { return exp(lo) }
+    if mtor_fit_exists_g(th0, o, exp(lo), gut) { return exp(lo) }
     var k: i32 = 0
     while k < 14 {
         let mid = 0.5 * (lo + hi)
-        if mtor_fit_exists(th0, o, exp(mid)) {
+        if mtor_fit_exists_g(th0, o, exp(mid), gut) {
             hi = mid
         } else {
             lo = mid
@@ -959,11 +1036,15 @@ pub fn mtor_ps_min(th0: [f64; 18], o: MtorObs) -> f64 with Mut, Div, Panic {
 // ps scalar with R24(s) = target on [slo, shi]. R24 rises with s (a slower tissue uptake gives a higher
 // peak and a deeper fall). R24(shi) <= target: shi (1 = flow-limited); R24(slo) >= target: slo.
 pub fn sir_fit_ps(th0: [f64; 18], o: MtorObs, target: f64, ka: f64, slo: f64, shi: f64, sysn: &!Nl28Sys) -> f64 with Mut, Div, Panic {
-    let warm = sir_r24_at(th0, o, shi, ka, sysn)
-    let r1 = sir_r24_at(th0, o, shi, ka, sysn)
+    return sir_fit_ps_g(th0, o, target, ka, slo, shi, 1, 0, sysn)
+}
+
+pub fn sir_fit_ps_g(th0: [f64; 18], o: MtorObs, target: f64, ka: f64, slo: f64, shi: f64, ntr: i32, gut: i32, sysn: &!Nl28Sys) -> f64 with Mut, Div, Panic {
+    let warm = sir_r24_at_g(th0, o, shi, ka, ntr, gut, sysn)
+    let r1 = sir_r24_at_g(th0, o, shi, ka, ntr, gut, sysn)
     if r1 <= target { return shi }
     let smin = slo
-    let rmin = sir_r24_at(th0, o, smin, ka, sysn)
+    let rmin = sir_r24_at_g(th0, o, smin, ka, ntr, gut, sysn)
     if rmin >= target { return smin }
     var xa = ln(smin)
     var xb = ln(shi)
@@ -974,8 +1055,8 @@ pub fn sir_fit_ps(th0: [f64; 18], o: MtorObs, target: f64, ka: f64, slo: f64, sh
     var k: i32 = 0
     while k < 30 {
         x = (xa * fb - xb * fa) / (fb - fa)
-        let fx = sir_r24_at(th0, o, exp(x), ka, sysn) - target
-        if mtor_abs(fx) < 2.0e-5 { return exp(x) }
+        let fx = sir_r24_at_g(th0, o, exp(x), ka, ntr, gut, sysn) - target
+        if mtor_abs(fx) < 1.0e-4 { return exp(x) }
         if fx < 0.0 {
             xa = x
             fa = fx
@@ -997,24 +1078,36 @@ pub fn sir_fit_ps(th0: [f64; 18], o: MtorObs, target: f64, ka: f64, slo: f64, sh
 // form fits. THREE rounds: after two the record gave R24 0.1819 against 0.1767 (3 %), measured 2026-11-15.
 // The test asserts that both observables are reproduced by the final record.
 pub fn sir_drug_into(d: &!Circ28Drug, sysn: &!Nl28Sys) with Mut, Div, Panic, Epistemic {
+    sir_drug_into_g(d, 1, 0, sysn)
+}
+
+// ntr: Erlang stages of the oral input (1 = first order; CD_KA is then ka, else the rate k of each stage);
+// gut = 1: gut wall at its Rodgers-Rowland Kp (see mtor_params).
+pub fn sir_drug_into_g(d: &!Circ28Drug, ntr: i32, gut: i32, sysn: &!Nl28Sys) with Mut, Div, Panic, Epistemic {
     sir_measured_record(d)
     let o = sir_obs_base()
     let th0 = circ28_drug_theta(d)
     var ka = 2.77
+    // starting k of the alternation (numerical start only, not an input; the converged values of an earlier run of this module):
+    // with the stages the converged k is 6.3 /h (all-organ Kp scalar) or 9.7 /h (gut wall at its Kp), from a start of 4 /h the alternation needed a third round; first-order input (ntr = 1) keeps three
+    if ntr > 1 { ka = 6.3 }
+    if ntr > 1 && gut == 1 { ka = 9.7 }
     var s = 1.0
     var round: i32 = 0
-    let smin = 1.0001 * mtor_ps_min(th0, o)
+    let smin = 1.0001 * mtor_ps_min_g(th0, o, gut)
     var slo = smin
     var shi = 1.0
     var klo = 0.05
     var khi = 10.0
-    while round < 3 {
-        s = sir_fit_ps(th0, o, sir_obs_r24(), ka, slo, shi, sysn)
+    var nrounds: i32 = 3
+    if ntr > 1 { nrounds = 2 }
+    while round < nrounds {
+        s = sir_fit_ps_g(th0, o, sir_obs_r24(), ka, slo, shi, ntr, gut, sysn)
         var t = th0
         t[CD_PSSC] = s
-        t = mtor_fit(t, o)
-        let p = circ28_drug_params_theta(t)
-        ka = mtor_ka_solve(p, o.hct, o.bmax, o.kd, 6.0, t[CD_FA], sir_obs_tmax(), klo, khi, sysn)
+        t = mtor_fit_g(t, o, gut)
+        let p = mtor_params(t, gut)
+        ka = mtor_ka_solve_n(p, o.hct, o.bmax, o.kd, 6.0, t[CD_FA], sir_obs_tmax(), klo, khi, ntr, sysn)
         // second round: brackets a factor 2 around the first-round values (inside the bounds)
         slo = 0.5 * s
         if slo < smin { slo = smin }
@@ -1026,19 +1119,19 @@ pub fn sir_drug_into(d: &!Circ28Drug, sysn: &!Nl28Sys) with Mut, Div, Panic, Epi
         round = round + 1
     }
     // u(s) = u(R24)/|dR24/ds|, u(ka) = u(Tmax)/|dTmax/dka| (forward differences, 1 % steps)
-    let r0 = sir_r24_at(th0, o, s, ka, sysn)
-    let r1 = sir_r24_at(th0, o, 1.01 * s, ka, sysn)
+    let r0 = sir_r24_at_g(th0, o, s, ka, ntr, gut, sysn)
+    let r1 = sir_r24_at_g(th0, o, 1.01 * s, ka, ntr, gut, sysn)
     var us = 0.0
     if mtor_abs(r1 - r0) > 0.0 { us = sir_u_r24() / (mtor_abs(r1 - r0) / (0.01 * s)) }
     circ28_drug_set(d, CD_PSSC, s, us, CD_STATUS_FITTED, "fitted to R24 = C(24 h)/Cmax = 0.177 after 6 mg (Leelahavanichkul2005, n=12, abstract); bound s <= 1; u = u(R24)/|dR24/ds|")
-    mtor_fit_record(d, o, sir_u_vss_blood(), sir_u_cl_blood(), sir_u_f())
+    mtor_fit_record_g(d, o, sir_u_vss_blood(), sir_u_cl_blood(), sir_u_f(), gut)
     let th = circ28_drug_theta(d)
-    let p = circ28_drug_params_theta(th)
-    let t0 = mtor_tmax_at(p, o.hct, o.bmax, o.kd, 6.0, th[CD_FA], ka, sysn)
-    let t1 = mtor_tmax_at(p, o.hct, o.bmax, o.kd, 6.0, th[CD_FA], 1.01 * ka, sysn)
+    let p = mtor_params(th, gut)
+    let t0 = mtor_tmax_at_n(p, o.hct, o.bmax, o.kd, 6.0, th[CD_FA], ka, ntr, sysn)
+    let t1 = mtor_tmax_at_n(p, o.hct, o.bmax, o.kd, 6.0, th[CD_FA], 1.01 * ka, ntr, sysn)
     var uk = 0.0
     if mtor_abs(t1 - t0) > 0.0 { uk = sir_u_tmax() / (mtor_abs(t1 - t0) / (0.01 * ka)) }
-    circ28_drug_set(d, CD_KA, ka, uk, CD_STATUS_FITTED, "fitted to the pooled Tmax 1.225 h (label 1 h healthy; Leelahavanichkul2005 1.45 h); u = u(Tmax)/|dTmax/dka|")
+    circ28_drug_set(d, CD_KA, ka, uk, CD_STATUS_FITTED, "fitted to the pooled Tmax 1.225 h (label 1 h healthy; Leelahavanichkul2005 1.45 h); per-stage rate when ntr > 1; u = u(Tmax)/|dTmax/dka|")
 }
 
 // Budget inputs and their standard uncertainties.

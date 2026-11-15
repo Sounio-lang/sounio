@@ -67,6 +67,14 @@
 //  ka       fitted       propag.  3       to Tmax 1.5 h: label "peak everolimus concentrations occur 1 to 2 hours
 //                                         post dose" (LBL); u = 1 h/sqrt12
 //
+// ROUND (TRANSIT), 2026-11-15: the oral input of the adopted record is an Erlang chain of evr_ntr() = 4 stages (n = 3 transit
+// compartments DECLARED + 1; no sourced n: the Djebli 2006 value is a sirolimus k). CD_KA is then the rate k of EACH stage,
+// refitted to the same Tmax 1.5 h: k = 3.96 /h (u 0.79), MTT = 4/k = 1.01 h; tlag 0. The ps scalar stays 1 (no sourced rate
+// observable; the what-if scan D-E1 of the test is a diagnostic: Dose/Cmax is a volume-type observable). Gut variant:
+// evr_gut() = 0 (all-organ Kp scalar); the gut-unscaled variant cannot reproduce the Tmax (k at its bound, Tmax 4.0 h, gut-wall
+// Kp 173) and is rejected. The legacy entry points (evr_drug_into, evr_cfg, ...) keep the first-order record.
+// evr_drug_into_gf / _gfu take the declared F (0.16 UNSOURCED, sensitivity only); a record refitted at s = 1 resets the ps scalar.
+//
 // FIRST PASS MAINLY INTESTINAL: label: substrate of CYP3A and P-gp; in this record Eh = CL(blood)/Q_h is about
 // 2 %, so F = 0.16 comes from the gut wall. Evidence from interactions (label; Kovarik 2006 Biopharm Drug Dispos
 // 27:421, PMID 16955532, AB): ketoconazole raises AUC 15-fold with Cmax 3.9-fold and the half-life only 1.9-fold.
@@ -165,10 +173,21 @@ pub fn evr_cref() -> f64 with Mut, Div { return 2.0 / evr_vzf() }
 
 // vssf: the apparent steady-state volume (L) handed in by the half-life fit.
 pub fn evr_obs_at(vssf: f64) -> MtorObs with Mut, Div {
-    return MtorObs { hct: mtor_hct(), bmax: evr_bmax(), kd: evr_kd(), vss: evr_f() * vssf, cl: evr_f() * evr_obs_clf(), f: evr_f(), cref: evr_cref() }
+    return evr_obs_at_f(vssf, evr_f())
+}
+
+// the same with another declared F (the F sensitivity of the test)
+pub fn evr_obs_at_f(vssf: f64, f: f64) -> MtorObs with Mut, Div {
+    return MtorObs { hct: mtor_hct(), bmax: evr_bmax(), kd: evr_kd(), vss: f * vssf, cl: f * evr_obs_clf(), f: f, cref: evr_cref() }
 }
 
 // Single-dose grid: 0.1 h to 3 h, 1 h to 24 h, 8 h to t_end; terminal slope over 48-168 h.
+pub fn evr_cfg_n(dose_mg: f64, t_end: f64, ntr: i32) -> MtorDose {
+    var dc = evr_cfg(dose_mg, t_end)
+    dc.ntr = ntr
+    return dc
+}
+
 pub fn evr_cfg(dose_mg: f64, t_end: f64) -> MtorDose {
     var dc = mtor_cfg_oral(dose_mg, t_end, 48.0, 168.0)
     dc.dt2 = 1.0
@@ -189,13 +208,21 @@ pub fn evr_measured_record(d: &!Circ28Drug) with Mut, Div, Panic, Epistemic {
 // Terminal half-life (h) of a single 2 mg dose (slope over 48-168 h) when the apparent steady-state volume is
 // vssf (L), ps scalar s, absorption rate ka; the closed-form fits are redone. -1 when the fit does not exist.
 pub fn evr_thalf_at(th0: [f64; 18], vssf: f64, s: f64, ka: f64, sysn: &!Nl28Sys) -> f64 with Mut, Div, Panic {
+    return evr_thalf_at_g(th0, vssf, s, ka, 1, 0, sysn)
+}
+
+pub fn evr_thalf_at_g(th0: [f64; 18], vssf: f64, s: f64, ka: f64, ntr: i32, gut: i32, sysn: &!Nl28Sys) -> f64 with Mut, Div, Panic {
+    return evr_thalf_at_gf(th0, vssf, s, ka, ntr, gut, evr_f(), sysn)
+}
+
+pub fn evr_thalf_at_gf(th0: [f64; 18], vssf: f64, s: f64, ka: f64, ntr: i32, gut: i32, f: f64, sysn: &!Nl28Sys) -> f64 with Mut, Div, Panic {
     var t = th0
     t[CD_PSSC] = s
-    let o = evr_obs_at(vssf)
-    t = mtor_fit(t, o)
+    let o = evr_obs_at_f(vssf, f)
+    t = mtor_fit_g(t, o, gut)
     if !(t[CD_CLINT] > 0.0) { return 0.0 - 1.0 }
-    let p = circ28_drug_params_theta(t)
-    var dc = evr_cfg(2.0, 168.0)
+    let p = mtor_params(t, gut)
+    var dc = evr_cfg_n(2.0, 168.0, ntr)
     dc.ka = ka
     dc.fa = t[CD_FA]
     let r = mtor_run(p, o.hct, o.bmax, o.kd, dc, sysn)
@@ -206,11 +233,19 @@ pub fn evr_thalf_at(th0: [f64; 18], vssf: f64, s: f64, ka: f64, sysn: &!Nl28Sys)
 // V_ss/F (L) with simulated half-life = target; Illinois on [0.2, 1.3] x Vz/F (the half-life rises with the
 // volume). Returns the bound when the target is outside.
 pub fn evr_fit_vssf(th0: [f64; 18], target: f64, s: f64, ka: f64, sysn: &!Nl28Sys) -> f64 with Mut, Div, Panic {
-    let warm = evr_thalf_at(th0, 0.2 * evr_vzf(), s, ka, sysn)
+    return evr_fit_vssf_g(th0, target, s, ka, 1, 0, sysn)
+}
+
+pub fn evr_fit_vssf_g(th0: [f64; 18], target: f64, s: f64, ka: f64, ntr: i32, gut: i32, sysn: &!Nl28Sys) -> f64 with Mut, Div, Panic {
+    return evr_fit_vssf_gf(th0, target, s, ka, ntr, gut, evr_f(), sysn)
+}
+
+pub fn evr_fit_vssf_gf(th0: [f64; 18], target: f64, s: f64, ka: f64, ntr: i32, gut: i32, f: f64, sysn: &!Nl28Sys) -> f64 with Mut, Div, Panic {
+    let warm = evr_thalf_at_gf(th0, 0.2 * evr_vzf(), s, ka, ntr, gut, f, sysn)
     var xa = 0.2 * evr_vzf()
     var xb = 1.3 * evr_vzf()
-    var fa = evr_thalf_at(th0, xa, s, ka, sysn) - target
-    var fb = evr_thalf_at(th0, xb, s, ka, sysn) - target
+    var fa = evr_thalf_at_gf(th0, xa, s, ka, ntr, gut, f, sysn) - target
+    var fb = evr_thalf_at_gf(th0, xb, s, ka, ntr, gut, f, sysn) - target
     if fa > 0.0 { return xa }
     if fb < 0.0 { return xb }
     var side: i32 = 0
@@ -218,7 +253,7 @@ pub fn evr_fit_vssf(th0: [f64; 18], target: f64, s: f64, ka: f64, sysn: &!Nl28Sy
     var k: i32 = 0
     while k < 30 {
         x = (xa * fb - xb * fa) / (fb - fa)
-        let fx = evr_thalf_at(th0, x, s, ka, sysn) - target
+        let fx = evr_thalf_at_gf(th0, x, s, ka, ntr, gut, f, sysn) - target
         if mtor_abs(fx) < 1.0e-3 { return x }
         if fx < 0.0 {
             xa = x
@@ -238,9 +273,17 @@ pub fn evr_fit_vssf(th0: [f64; 18], target: f64, s: f64, ka: f64, sysn: &!Nl28Sy
 
 // u of the fitted V_ss/F from u(t1/2): u(t1/2)/|dt1/2/dV| (forward difference, 1 % step).
 pub fn evr_u_vssf_at(th0: [f64; 18], vssf: f64, s: f64, ka: f64, sysn: &!Nl28Sys) -> f64 with Mut, Div, Panic {
-    let warm = evr_thalf_at(th0, vssf, s, ka, sysn)
-    let t0 = evr_thalf_at(th0, vssf, s, ka, sysn)
-    let t1 = evr_thalf_at(th0, 1.01 * vssf, s, ka, sysn)
+    return evr_u_vssf_at_g(th0, vssf, s, ka, 1, 0, sysn)
+}
+
+pub fn evr_u_vssf_at_g(th0: [f64; 18], vssf: f64, s: f64, ka: f64, ntr: i32, gut: i32, sysn: &!Nl28Sys) -> f64 with Mut, Div, Panic {
+    return evr_u_vssf_at_gf(th0, vssf, s, ka, ntr, gut, evr_f(), sysn)
+}
+
+pub fn evr_u_vssf_at_gf(th0: [f64; 18], vssf: f64, s: f64, ka: f64, ntr: i32, gut: i32, f: f64, sysn: &!Nl28Sys) -> f64 with Mut, Div, Panic {
+    let warm = evr_thalf_at_gf(th0, vssf, s, ka, ntr, gut, f, sysn)
+    let t0 = evr_thalf_at_gf(th0, vssf, s, ka, ntr, gut, f, sysn)
+    let t1 = evr_thalf_at_gf(th0, 1.01 * vssf, s, ka, ntr, gut, f, sysn)
     let d = mtor_abs(t1 - t0) / (0.01 * vssf)
     if !(d > 0.0) { return 0.0 }
     return evr_u_thalf() / d
@@ -256,20 +299,41 @@ pub struct EvrFit {
 }
 
 pub fn evr_drug_into(d: &!Circ28Drug, s: f64, sysn: &!Nl28Sys) -> EvrFit with Mut, Div, Panic, Epistemic {
+    return evr_drug_into_g(d, s, 1, 0, sysn)
+}
+
+pub fn evr_drug_into_g(d: &!Circ28Drug, s: f64, ntr: i32, gut: i32, sysn: &!Nl28Sys) -> EvrFit with Mut, Div, Panic, Epistemic {
+    return evr_drug_into_gf(d, s, ntr, gut, evr_f(), sysn)
+}
+
+// f: the declared oral bioavailability (evr_f() = 0.16, UNSOURCED; another value only for the sensitivity of the test)
+pub fn evr_drug_into_gf(d: &!Circ28Drug, s: f64, ntr: i32, gut: i32, f: f64, sysn: &!Nl28Sys) -> EvrFit with Mut, Div, Panic, Epistemic {
+    return evr_drug_into_gfu(d, s, ntr, gut, f, 1, sysn)
+}
+
+// withu = 0: the u of the fitted V_ss/F is not computed (three runs saved; the what-if records of the test do not use it)
+pub fn evr_drug_into_gfu(d: &!Circ28Drug, s: f64, ntr: i32, gut: i32, f: f64, withu: i32, sysn: &!Nl28Sys) -> EvrFit with Mut, Div, Panic, Epistemic {
     evr_measured_record(d)
+    var ka_fit = 2.0
+    if ntr > 1 { ka_fit = 4.0 }
     let th0 = circ28_drug_theta(d)
     // the half-life does not depend on ka to the tolerance of the fit (asserted by the test): ka 2 /h here
-    let x = evr_fit_vssf(th0, evr_obs_thalf(), s, 2.0, sysn)
-    let ux = evr_u_vssf_at(th0, x, s, 2.0, sysn)
-    let o = evr_obs_at(x)
-    let a = evr_f() * ux
+    let x = evr_fit_vssf_gf(th0, evr_obs_thalf(), s, ka_fit, ntr, gut, f, sysn)
+    var ux = 0.0
+    if withu == 1 { ux = evr_u_vssf_at_gf(th0, x, s, ka_fit, ntr, gut, f, sysn) }
+    let o = evr_obs_at_f(x, f)
+    let a = f * ux
     let b = evr_u_f() * x
-    let c = evr_f() * evr_u_clf()
+    let c = f * evr_u_clf()
     let e = evr_u_f() * evr_obs_clf()
     if s < 1.0 {
         circ28_drug_set(d, CD_PSSC, s, evr_u_ps(), CD_STATUS_DERIVED, "WHAT-IF: the ps scalar fitted for sirolimus, transferred")
+    } else {
+        // a record refitted at s = 1 after a what-if must not keep the earlier scalar (found in the round "transit": the F sensitivity ran on a
+        // record that still carried ps scalar 0.001)
+        circ28_drug_set(d, CD_PSSC, 1.0, 0.0, CD_STATUS_UNUSED, "default")
     }
-    mtor_fit_record(d, o, cd_sqrt(a * a + b * b), cd_sqrt(c * c + e * e), evr_u_f())
+    mtor_fit_record_g(d, o, cd_sqrt(a * a + b * b), cd_sqrt(c * c + e * e), evr_u_f(), gut)
     return EvrFit { vssf: x, u_vssf: ux }
 }
 
@@ -280,14 +344,23 @@ pub fn evr_drug_into(d: &!Circ28Drug, s: f64, sysn: &!Nl28Sys) -> EvrFit with Mu
 // run, both; none cured it; the same solve written in main is right on the three engines). Cause not found:
 // reported as an engine observation, worked around, not fixed.
 pub fn evr_ka_set(d: &!Circ28Drug, ka: f64, sysn: &!Nl28Sys) with Mut, Div, Panic, Epistemic {
+    evr_ka_set_g(d, ka, 1, 0, sysn)
+}
+
+pub fn evr_ka_set_g(d: &!Circ28Drug, ka: f64, ntr: i32, gut: i32, sysn: &!Nl28Sys) with Mut, Div, Panic, Epistemic {
     let th = circ28_drug_theta(d)
-    let p = circ28_drug_params_theta(th)
-    let t0 = mtor_tmax_at(p, mtor_hct(), evr_bmax(), evr_kd(), 2.0, th[CD_FA], ka, sysn)
-    let t1 = mtor_tmax_at(p, mtor_hct(), evr_bmax(), evr_kd(), 2.0, th[CD_FA], 1.01 * ka, sysn)
+    let p = mtor_params(th, gut)
+    let t0 = mtor_tmax_at_n(p, mtor_hct(), evr_bmax(), evr_kd(), 2.0, th[CD_FA], ka, ntr, sysn)
+    let t1 = mtor_tmax_at_n(p, mtor_hct(), evr_bmax(), evr_kd(), 2.0, th[CD_FA], 1.01 * ka, ntr, sysn)
     var uk = 0.0
     if mtor_abs(t1 - t0) > 0.0 { uk = evr_u_tmax() / (mtor_abs(t1 - t0) / (0.01 * ka)) }
     circ28_drug_set(d, CD_KA, ka, uk, CD_STATUS_FITTED, "fitted to Tmax 1.5 h (label: 1 to 2 hours); u = u(Tmax)/|dTmax/dka|")
 }
+
+// ADOPTED configuration of the module (round "transit"): Erlang stages of the oral input (n = 3 transit compartments declared +
+// 1 = 4 stages; no sourced n for everolimus either) and the gut variant decided by the test (0: all-organ Kp scalar).
+pub fn evr_ntr() -> i32 { return 4 }
+pub fn evr_gut() -> i32 { return 0 }
 
 // Budget inputs (index 7 is the V_ss/F fitted to the half-life) and their standard uncertainties.
 pub fn evr_z0(thb: [f64; 18], vssf: f64) -> [f64; 12] with Mut, Div {
