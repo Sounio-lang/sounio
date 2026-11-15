@@ -172,21 +172,19 @@ pub fn unit_registry_find_dim(reg: UnitRegistry, d: UnitDim) -> i64 with Mut, Pa
 // mass^2 rather than silently collapsing to "no unit", which in this
 // representation is indistinguishable from dimensionless.
 //
-// The registry is fixed at 32 entries. When it is full the result is
-// returned unbranded, which is a REPRESENTATIONAL limit and is not a claim
-// that the quantity is dimensionless -- the honest fix is a TypeEntry that
-// carries a UnitDim rather than an index into a bounded table.
+// Failure returns -1 and leaves a sticky overflow flag in the registry.
+// The checker must reject that program, never interpret failure as dimensionless.
 pub fn unit_registry_intern_dim(reg: UnitRegistry, d: UnitDim) -> (UnitRegistry, i64) with Mut, Panic, Div {
     let existing = unit_registry_find_dim(reg, d)
     if existing >= 0 {
         return (reg, existing)
     }
-    if reg.count >= 32 {
-        return (reg, 0 - 1)
-    }
     var r = reg
     let idx = r.count
     r = r.register(Name { buf: [0; 384], len: 0 }, d)
+    if r.count == idx {
+        return (r, 0 - 1)
+    }
     (r, idx)
 }
 
@@ -218,24 +216,33 @@ fn empty_unit_entry() -> UnitEntry {
     }
 }
 
+// Keep the array lengths below in sync with this capacity.
+pub let UNIT_REGISTRY_CAPACITY: i64 = 128
+
 pub struct UnitRegistry {
-    pub entries: [UnitEntry; 32],
+    pub entries: [UnitEntry; 128],
     pub count: i64,
+    pub overflowed: bool,
+    pub overflow_reported: bool,
 }
 
 pub fn unit_registry_new() -> UnitRegistry {
     UnitRegistry {
-        entries: [empty_unit_entry(); 32],
+        entries: [empty_unit_entry(); 128],
         count: 0,
+        overflowed: false,
+        overflow_reported: false,
     }
 }
 
 impl UnitRegistry {
     fn register(self, name: Name, dim: UnitDim) -> UnitRegistry with Mut, Panic, Div {
         var reg = self
-        if reg.count < 32 {
+        if reg.count < UNIT_REGISTRY_CAPACITY {
             reg.entries[reg.count] = UnitEntry { name: name, dim: dim }
             reg.count = reg.count + 1
+        } else {
+            reg.overflowed = true
         }
         reg
     }

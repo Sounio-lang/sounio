@@ -264,6 +264,16 @@ pub enum BinaryOp {
     OpUDiv,
     OpURem,
     OpUShr,
+    // Unsigned add/sub/mul variants: chosen by the lowerer for u8/u16/u32/u64
+    // operands (SIO-588). On x86_64 add/sub/imul set OF on the SIGNED
+    // overflow bit pattern, and SIO-207 arms a `jo` trap after every signed
+    // +,-,*. The unsigned variants emit the same bit-producing instruction
+    // with no trap: unsigned arithmetic wraps by definition. x86 add/sub/imul
+    // bit patterns are signedness-agnostic, so unlike UDiv/URem/UShr these
+    // need no distinct encoding -- only the missing guard.
+    OpUAdd,
+    OpUSub,
+    OpUMul,
 }
 
 // One `on op(params) -> body` clause of a handle with-block (SIO-417).
@@ -1969,6 +1979,64 @@ pub fn ast_record_global_deferred_init(name: Name, init: Box<Expr>) with Mut, Di
     GLOBAL_DEFERRED_INIT_MODS[GLOBAL_DEFERRED_INIT_COUNT as usize] = GLOBAL_VAR_INIT_CUR_MOD
     GLOBAL_DEFERRED_INIT_COUNT = GLOBAL_DEFERRED_INIT_COUNT + 1
 }
+
+// ADR-031 R1: a module-level `let`/`var` whose i64 initializer is a constant
+// expression that does not fit i64 is refused at compile time with E300, as a
+// local `let` already is. Globals are not type-checked expressions (the checker
+// sees only the declaration item), so the parser finds the first overflowing
+// `+ - *` while it still holds the initializer and records it here, keyed by
+// the declaration's name hash and item span; the checker reports it when it
+// reaches that item (check/check.sio checker_check_items_inplace). The table is
+// not cleared by ast_reset_global_var_inits: a module parsed twice replaces its
+// own entry. A full table drops the entry, and the run-time R1 guard still
+// stops the program at the same operation.
+pub var GLOBAL_INIT_OVF_HASH: [i64; 4096] = [0; 4096]
+pub var GLOBAL_INIT_OVF_FILE: [i64; 4096] = [0; 4096]
+pub var GLOBAL_INIT_OVF_ISTART: [i64; 4096] = [0; 4096]
+pub var GLOBAL_INIT_OVF_IEND: [i64; 4096] = [0; 4096]
+pub var GLOBAL_INIT_OVF_SSTART: [i64; 4096] = [0; 4096]
+pub var GLOBAL_INIT_OVF_SEND: [i64; 4096] = [0; 4096]
+pub var GLOBAL_INIT_OVF_COUNT: i64 = 0
+
+pub fn ast_record_global_init_overflow(name: Name, item_span: Span, site_start: i64, site_end: i64) with Mut, Div {
+    let h = ast_name_hash(name)
+    var k: i64 = 0
+    while k < GLOBAL_INIT_OVF_COUNT {
+        if GLOBAL_INIT_OVF_HASH[k as usize] == h && GLOBAL_INIT_OVF_FILE[k as usize] == item_span.file_id as i64
+            && GLOBAL_INIT_OVF_ISTART[k as usize] == item_span.start && GLOBAL_INIT_OVF_IEND[k as usize] == item_span.end {
+            GLOBAL_INIT_OVF_SSTART[k as usize] = site_start
+            GLOBAL_INIT_OVF_SEND[k as usize] = site_end
+            return
+        }
+        k = k + 1
+    }
+    if GLOBAL_INIT_OVF_COUNT >= 4096 { return }
+    let n = GLOBAL_INIT_OVF_COUNT as usize
+    GLOBAL_INIT_OVF_HASH[n] = h
+    GLOBAL_INIT_OVF_FILE[n] = item_span.file_id as i64
+    GLOBAL_INIT_OVF_ISTART[n] = item_span.start
+    GLOBAL_INIT_OVF_IEND[n] = item_span.end
+    GLOBAL_INIT_OVF_SSTART[n] = site_start
+    GLOBAL_INIT_OVF_SEND[n] = site_end
+    GLOBAL_INIT_OVF_COUNT = GLOBAL_INIT_OVF_COUNT + 1
+}
+
+// Index of the recorded overflow for this declaration, or -1.
+pub fn ast_global_init_overflow_index(name: Name, item_span: Span) -> i64 with Div {
+    if GLOBAL_INIT_OVF_COUNT == 0 { return 0 - 1 }
+    let h = ast_name_hash(name)
+    var k: i64 = 0
+    while k < GLOBAL_INIT_OVF_COUNT {
+        if GLOBAL_INIT_OVF_HASH[k as usize] == h && GLOBAL_INIT_OVF_FILE[k as usize] == item_span.file_id as i64
+            && GLOBAL_INIT_OVF_ISTART[k as usize] == item_span.start && GLOBAL_INIT_OVF_IEND[k as usize] == item_span.end {
+            return k
+        }
+        k = k + 1
+    }
+    0 - 1
+}
+pub fn ast_global_init_overflow_site_start(k: i64) -> i64 with Panic { GLOBAL_INIT_OVF_SSTART[k as usize] }
+pub fn ast_global_init_overflow_site_end(k: i64) -> i64 with Panic { GLOBAL_INIT_OVF_SEND[k as usize] }
 
 pub fn ast_global_deferred_init_count() -> i64 { GLOBAL_DEFERRED_INIT_COUNT }
 pub fn ast_global_deferred_init_overflowed() -> bool { GLOBAL_DEFERRED_INIT_OVERFLOW != 0 }

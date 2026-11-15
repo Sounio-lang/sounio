@@ -12121,6 +12121,34 @@ fn fsh_emit_fresh_channel_x86(k_vi: i64, ch: i64) with Mut, Panic {
     }
 }
 
+// a64 twin of fsh_emit_fresh_channel_x86 (#2827). The a64 pass has no extra
+// channels, so only 0..7. Without it acc = Σ w·k over a loop read 619.444
+// for the 169.444 case above, as the #2917 seed did on x86.
+fn fsh_emit_fresh_channel_a64(k_vi: i64, ch: i64) with Mut, Panic {
+    if k_vi < 0 || ch < 0 || ch > 7 { return }
+    let kd = VAR_DECL_LOOP[k_vi as usize]
+    if kd <= 0 { return }
+    var vi: i64 = 0
+    while vi < VAR_COUNT {
+        if VAR_MUT[vi as usize] == 1 && VAR_DECL_LOOP[vi as usize] < kd {
+            var sl: i64 = -1
+            if ch == 0 { sl = VAR_SSHADOW[vi as usize] }
+            if ch == 1 { sl = VAR_SSHADOW_1[vi as usize] }
+            if ch == 2 { sl = VAR_SSHADOW_2[vi as usize] }
+            if ch == 3 { sl = VAR_SSHADOW_3[vi as usize] }
+            if ch == 4 { sl = VAR_SSHADOW_4[vi as usize] }
+            if ch == 5 { sl = VAR_SSHADOW_5[vi as usize] }
+            if ch == 6 { sl = VAR_SSHADOW_6[vi as usize] }
+            if ch == 7 { sl = VAR_SSHADOW_7[vi as usize] }
+            if sl >= 0 {
+                emit_imm64_a64(0)
+                emit_store_var_a64(sl)
+            }
+        }
+        vi = vi + 1
+    }
+}
+
 fn fsh_ret_tag_off() -> i64 with Mut { FSH_RET_BSS_OFF + fsh_nch() * FSH_RET_WORDS * 8 }
 fn fsh_arg_tag_off() -> i64 with Mut { FSH_ARG_BSS_OFF + fsh_nch() * FSH_ARG_WORDS * 8 }
 
@@ -17872,6 +17900,21 @@ fn primary_fallback_report(tok: i64) with IO, Mut, Panic {
     tc_mark_failed()
 }
 
+// #3551: use the same derivative as the sensitivity chain rule for GUM variance.
+// The caller saves/restores the primal result around shadow emission.
+fn emit_math_variance_x86(input: i64, derivative: i64) with Mut {
+    EXPR_VSHADOW = -1
+    if input < 0 { return }
+    let out = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+    emit_load_var(derivative); em(0x50)
+    emit_load_var(derivative)
+    em(0x59); emit_f64_mul_from_rcx_rax_x86()
+    em(0x50); emit_load_var(input)
+    em(0x59); emit_f64_mul_from_rcx_rax_x86()
+    emit_store_var(out)
+    EXPR_VSHADOW = out
+}
+
 fn compile_primary() with IO, Mut, Panic, Div {
     if tc_reject_rust_macro_at(EP) { }
     LAST_EXPR_IS_CLOSURE = 0
@@ -22014,6 +22057,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                         while TK[EP as usize] != 7 && TK[EP as usize] != 0 { EP = EP + 1 }
                     }
                     // β⁶/β⁷: chain rule AD for transcendentals — capture arg shadows before call
+                    let math_v = EXPR_VSHADOW
                     let math_s0 = EXPR_SSHADOW
                     let math_s1 = EXPR_SSHADOW_1
                     let math_s2 = EXPR_SSHADOW_2
@@ -22036,7 +22080,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                     let math_h55 = EXPR_HSHADOW_55; let math_h56 = EXPR_HSHADOW_56; let math_h57 = EXPR_HSHADOW_57
                     let math_h66 = EXPR_HSHADOW_66; let math_h67 = EXPR_HSHADOW_67; let math_h77 = EXPR_HSHADOW_77
                     var math_arg_slot: i64 = -1
-                    if sx_any_at(math_sx) || math_s0 >= 0 || math_s1 >= 0 || math_s2 >= 0 || math_s3 >= 0 || math_s4 >= 0 || math_s5 >= 0 || math_s6 >= 0 || math_s7 >= 0 || math_h00 >= 0 || math_h01 >= 0 || math_h11 >= 0 || math_h22 >= 0 || math_h33 >= 0 || math_h44 >= 0 || math_h55 >= 0 || math_h66 >= 0 || math_h77 >= 0 {
+                    if math_v >= 0 || sx_any_at(math_sx) || math_s0 >= 0 || math_s1 >= 0 || math_s2 >= 0 || math_s3 >= 0 || math_s4 >= 0 || math_s5 >= 0 || math_s6 >= 0 || math_s7 >= 0 || math_h00 >= 0 || math_h01 >= 0 || math_h11 >= 0 || math_h22 >= 0 || math_h33 >= 0 || math_h44 >= 0 || math_h55 >= 0 || math_h66 >= 0 || math_h77 >= 0 {
                         math_arg_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
                         emit_store_var(math_arg_slot)
                     }
@@ -22070,7 +22114,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
     EXPR_HSHADOW_55 = -1; EXPR_HSHADOW_56 = -1; EXPR_HSHADOW_57 = -1
     EXPR_HSHADOW_66 = -1; EXPR_HSHADOW_67 = -1
     EXPR_HSHADOW_77 = -1
-                    if sx_any_at(math_sx) || math_s0 >= 0 || math_s1 >= 0 || math_s2 >= 0 || math_s3 >= 0 || math_s4 >= 0 || math_s5 >= 0 || math_s6 >= 0 || math_s7 >= 0 || math_h00 >= 0 || math_h01 >= 0 || math_h11 >= 0 || math_h22 >= 0 || math_h33 >= 0 || math_h44 >= 0 || math_h55 >= 0 || math_h66 >= 0 || math_h77 >= 0 {
+                    if math_v >= 0 || sx_any_at(math_sx) || math_s0 >= 0 || math_s1 >= 0 || math_s2 >= 0 || math_s3 >= 0 || math_s4 >= 0 || math_s5 >= 0 || math_s6 >= 0 || math_s7 >= 0 || math_h00 >= 0 || math_h01 >= 0 || math_h11 >= 0 || math_h22 >= 0 || math_h33 >= 0 || math_h44 >= 0 || math_h55 >= 0 || math_h66 >= 0 || math_h77 >= 0 {
                         var math_res_slot: i64 = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
                         emit_store_var(math_res_slot)
                         // Compute f'(arg) into math_deriv_slot
@@ -22160,6 +22204,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                             emit_imm64(0)  // unknown: zero derivative
                         }
                         emit_store_var(math_deriv_slot)
+                        emit_math_variance_x86(math_v, math_deriv_slot)
                         // Propagate: sens_k(f(x)) = f'(arg) · sens_k(x)
                         if math_s0 >= 0 {
                             let msr0 = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
@@ -24692,6 +24737,7 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                     EP = EP + 1  // skip (
                     EP = EP + 1  // skip )
                     // β⁶/β⁷: capture receiver's shadow state before call
+                    let mm_v = EXPR_VSHADOW
                     let mm_s0 = EXPR_SSHADOW; let mm_s1 = EXPR_SSHADOW_1
                     let mm_s2 = EXPR_SSHADOW_2; let mm_s3 = EXPR_SSHADOW_3
                     let mm_h00 = EXPR_HSHADOW_00; let mm_h01 = EXPR_HSHADOW_01
@@ -24701,7 +24747,7 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                     let mm_h23 = EXPR_HSHADOW_23; let mm_h33 = EXPR_HSHADOW_33
                     var mm_arg_slot: i64 = -1
                     var mm_any_shadow: i64 = 0
-                    if mm_s0 >= 0 || mm_s1 >= 0 || mm_s2 >= 0 || mm_s3 >= 0 || mm_h00 >= 0 || mm_h01 >= 0 || mm_h11 >= 0 || mm_h22 >= 0 || mm_h33 >= 0 {
+                    if mm_v >= 0 || mm_s0 >= 0 || mm_s1 >= 0 || mm_s2 >= 0 || mm_s3 >= 0 || mm_h00 >= 0 || mm_h01 >= 0 || mm_h11 >= 0 || mm_h22 >= 0 || mm_h33 >= 0 {
                         mm_any_shadow = 1
                         mm_arg_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
                         emit_store_var(mm_arg_slot)
@@ -24805,6 +24851,9 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                             emit_imm64(0)
                         }
                         emit_store_var(mm_deriv_slot)
+                        if !src_match(fns, fne - fns, "abs") && !src_match(fns, fne - fns, "floor") {
+                            emit_math_variance_x86(mm_v, mm_deriv_slot)
+                        }
                         if mm_s0 >= 0 {
                             let mmr0 = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
                             emit_load_var(mm_deriv_slot); em(0x50); emit_load_var(mm_s0)
@@ -45035,6 +45084,9 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                     let m_arg_a = NEXT_SLOT
                     NEXT_SLOT = NEXT_SLOT + 1
                     emit_store_var_a64(m_arg_a)
+                    // The argument's own variance: scaled by f'(u)² below (#3551
+                    // on x86). The a64 pass left it untouched, i.e. f' == 1.
+                    let m_v_a = EXPR_VSHADOW
                     let m_prev_a = B7_TOP
                     var m_u_a = B7_TOP
                     if B7_TOP + B7_FRAME * 2 > 8192 {
@@ -45085,11 +45137,21 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                         if B7F[(m_u_a + m_q_a) as usize] >= 0 { m_any_a = 1 }
                         m_q_a = m_q_a + 1
                     }
+                    EXPR_VSHADOW = -1
+                    if m_any_a == 0 && m_v_a >= 0 {
+                        let m_dv_a = NEXT_SLOT
+                        NEXT_SLOT = NEXT_SLOT + 1
+                        emit_math_deriv_a64(m_kind_a, 0, m_arg_a, m_res_a, 0 - 1)
+                        emit_store_var_a64(m_dv_a)
+                        EXPR_VSHADOW = emit_math_variance_a64(m_v_a, m_dv_a)
+                        emit_load_var_a64(m_res_a)
+                    }
                     if m_any_a == 1 {
                         let m_d1_a = NEXT_SLOT
                         NEXT_SLOT = NEXT_SLOT + 1
                         emit_math_deriv_a64(m_kind_a, 0, m_arg_a, m_res_a, 0 - 1)
                         emit_store_var_a64(m_d1_a)
+                        EXPR_VSHADOW = emit_math_variance_a64(m_v_a, m_d1_a)
                         let m_d2_a = NEXT_SLOT
                         NEXT_SLOT = NEXT_SLOT + 1
                         emit_math_deriv_a64(m_kind_a, 1, m_arg_a, m_res_a, m_d1_a)
@@ -46718,6 +46780,7 @@ fn compile_postfix_tail_a64() with IO, Mut, Panic, Div {
                         if MEAS_KNOW_IDX >= 0 && MEAS_KNOW_IDX < 8 {
                             CHANNEL_INPUT_VAR_SLOT[MEAS_KNOW_IDX as usize] = b4a_vseed
                         }
+                        fsh_emit_fresh_channel_a64(LAST_EXPR_VAR_IDX, MEAS_KNOW_IDX)
                         emit_load_var_a64(b4a_ptr_slot)       // restore ptr
                         em32(0xF9400000)                      // ldr x0, [x0] (.value)
                         // Save .value before the sensitivity seeds (emit_imm64_a64 overwrites x0)
@@ -47139,7 +47202,7 @@ fn compile_multiplicative_a64() with IO, Mut, Panic, Div {
             if B7F[(b7_r_m + b7q_m) as usize] >= 0 { b7_any_m = 1 }
             b7q_m = b7q_m + 1
         }
-        if left_f64 == 1 && op == 19 && ((b4am_left_vshadow >= 0 || b4am_right_vshadow >= 0) || b7_any_m == 1) {
+        if left_f64 == 1 && (op == 19 || op == 20) && ((b4am_left_vshadow >= 0 || b4am_right_vshadow >= 0) || b7_any_m == 1) {
             b4am_result_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
             emit_store_var_a64(b4am_result_slot)
         }
@@ -47168,6 +47231,15 @@ fn compile_multiplicative_a64() with IO, Mut, Panic, Div {
             let b4am_vres = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
             emit_store_var_a64(b4am_vres)
             EXPR_VSHADOW = b4am_vres
+            // Correlation term, as in compile_multiplicative: h·h is 4h²σ², not 2h²σ².
+            if b4am_left_vshadow >= 0 && b4am_right_vshadow >= 0 {
+                EXPR_VSHADOW = emit_var_mul_cov_term_a64(b4am_vres, b4am_lval_slot, b4am_rval_slot, b4am_left_vshadow, b4am_right_vshadow, b7_l_m, b7_r_m)
+            }
+        }
+        // Quotient rule for the variance (twin of emit_var_div_x86): `/` kept no
+        // variance at all on a64, so variance_of(e / 100.0) read 0.
+        if left_f64 == 1 && op == 20 && (b4am_left_vshadow >= 0 || b4am_right_vshadow >= 0) && b4am_lval_slot >= 0 && b4am_rval_slot >= 0 {
+            EXPR_VSHADOW = emit_var_div_a64(b4am_left_vshadow, b4am_right_vshadow, b4am_lval_slot, b4am_rval_slot, b7_l_m, b7_r_m)
         }
         // β⁵/β⁷ through · , as loops over the frames. The product's own
         // second-order state starts empty -- without the clear, the RHS's
@@ -47190,6 +47262,37 @@ fn compile_multiplicative_a64() with IO, Mut, Panic, Div {
                     b7k_m = b7k_m + 1
                 }
                 b7j_m = b7j_m + 1
+            }
+            // β¹¹ (twin of compile_multiplicative): with no variance shadow on
+            // either side but live channels, the product's variance is Σ s_k² σ²_k.
+            if b4am_left_vshadow < 0 && b4am_right_vshadow < 0 {
+                var b4am_live: i64 = 0
+                var b4am_q: i64 = 0
+                while b4am_q < 8 {
+                    if B7F[(b7_o_m + 36 + b4am_q) as usize] >= 0 { b4am_live = 1 }
+                    b4am_q = b4am_q + 1
+                }
+                if b4am_live == 1 {
+                    EXPR_VSHADOW = emit_fo_var_from_sens_a64(B7F[(b7_o_m + 36) as usize], B7F[(b7_o_m + 37) as usize], B7F[(b7_o_m + 38) as usize], B7F[(b7_o_m + 39) as usize], B7F[(b7_o_m + 40) as usize], B7F[(b7_o_m + 41) as usize], B7F[(b7_o_m + 42) as usize], B7F[(b7_o_m + 43) as usize])
+                }
+            }
+        }
+        if left_f64 == 1 && op == 20 && b4am_result_slot >= 0 && b4am_rval_slot >= 0 {
+            var b7c_d: i64 = 0
+            while b7c_d < 8 {
+                B7F[(b7_o_m + 36 + b7c_d) as usize] = emit_s_div_a64(b4am_lval_slot, b4am_rval_slot, B7F[(b7_l_m + 36 + b7c_d) as usize], B7F[(b7_r_m + 36 + b7c_d) as usize])
+                b7c_d = b7c_d + 1
+            }
+            var b7j_d: i64 = 0
+            var b7i_d: i64 = 0
+            while b7j_d < 8 {
+                var b7k_d: i64 = b7j_d
+                while b7k_d < 8 {
+                    B7F[(b7_o_m + b7i_d) as usize] = emit_h_div_a64(B7F[(b7_l_m + b7i_d) as usize], B7F[(b7_r_m + b7i_d) as usize], b4am_result_slot, b4am_rval_slot, B7F[(b7_o_m + 36 + b7j_d) as usize], B7F[(b7_r_m + 36 + b7k_d) as usize], B7F[(b7_o_m + 36 + b7k_d) as usize], B7F[(b7_r_m + 36 + b7j_d) as usize])
+                    b7i_d = b7i_d + 1
+                    b7k_d = b7k_d + 1
+                }
+                b7j_d = b7j_d + 1
             }
         }
         b7_restore_a64(b7_o_m)
@@ -47357,6 +47460,237 @@ fn emit_s_mul_a64(lval: i64, rval: i64, ls: i64, rs: i64) -> i64 with IO, Mut, P
     if ls >= 0 { emit_load_var_a64(ls) } else { emit_imm64_a64(0) }
     emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
     emit_pop_x1_a64(); emit_f64_binop_a64(0x1E612800)
+    emit_store_var_a64(res)
+    return res
+}
+
+// s(a/b) = (s(a)·b − a·s(b)) / b². The a64 pass had no division rule: every
+// channel of a quotient was dropped, so variance_of(e / 100.0) read 0 on
+// aarch64 while x86 (compile_multiplicative) read the exact 1e-4.
+fn emit_s_div_a64(lval: i64, rval: i64, ls: i64, rs: i64) -> i64 with IO, Mut, Panic, Div {
+    if ls < 0 && rs < 0 { return -1 }
+    let res = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    if ls >= 0 { emit_load_var_a64(ls) } else { emit_imm64_a64(0) }
+    emit_push_a64()
+    emit_load_var_a64(rval)
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)  // s(a)·b
+    emit_push_a64()
+    if lval >= 0 { emit_load_var_a64(lval) } else { emit_imm64_a64(0) }
+    emit_push_a64()
+    if rs >= 0 { emit_load_var_a64(rs) } else { emit_imm64_a64(0) }
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)  // a·s(b)
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E613800)  // s(a)·b − a·s(b)
+    emit_push_a64()
+    emit_load_var_a64(rval)
+    emit_push_a64()
+    emit_load_var_a64(rval)
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)  // b²
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E611800)  // / b²
+    emit_store_var_a64(res)
+    return res
+}
+
+// Var(y) = Σ_k s_k(y)² u_k² over the 8 first-order channels (the a64 twin of
+// emit_fo_var_from_sens_x86; the a64 pass has no extra channels).
+fn emit_fo_var_from_sens_a64(s0: i64, s1: i64, s2: i64, s3: i64, s4: i64, s5: i64, s6: i64, s7: i64) -> i64 with IO, Mut, Panic, Div {
+    let out = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    emit_imm64_a64(0)
+    emit_store_var_a64(out)
+    var ch: i64 = 0
+    while ch < 8 {
+        var s: i64 = s0
+        if ch == 1 { s = s1 }
+        if ch == 2 { s = s2 }
+        if ch == 3 { s = s3 }
+        if ch == 4 { s = s4 }
+        if ch == 5 { s = s5 }
+        if ch == 6 { s = s6 }
+        if ch == 7 { s = s7 }
+        let iv = CHANNEL_INPUT_VAR_SLOT[ch as usize]
+        if s >= 0 && iv >= 0 {
+            emit_load_var_a64(s); emit_push_a64()
+            emit_load_var_a64(s)
+            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)  // s²
+            emit_push_a64()
+            emit_load_var_a64(iv)
+            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)  // s² u²
+            emit_push_a64()
+            emit_load_var_a64(out)
+            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E612800)
+            emit_store_var_a64(out)
+        }
+        ch = ch + 1
+    }
+    return out
+}
+
+// x0 = A op B for two slots (a missing slot reads 0.0).
+fn emit_bin_slots_a64(a: i64, b: i64, opc: i64) with IO, Mut, Panic, Div {
+    if a >= 0 { emit_load_var_a64(a) } else { emit_imm64_a64(0) }
+    emit_push_a64()
+    if b >= 0 { emit_load_var_a64(b) } else { emit_imm64_a64(0) }
+    emit_pop_x1_a64(); emit_f64_binop_a64(opc)
+}
+
+// x0 = x0 op B.
+fn emit_bin_x0_slot_a64(b: i64, opc: i64) with IO, Mut, Panic, Div {
+    emit_push_a64()
+    if b >= 0 { emit_load_var_a64(b) } else { emit_imm64_a64(0) }
+    emit_pop_x1_a64(); emit_f64_binop_a64(opc)
+}
+
+// a64 twin of emit_fo_cov_slot_x86: cov(L,R) = Σ_k s_k(L)·s_k(R)·σ²_k over the
+// channels of the two operand frames, or var(L) exactly when both operands
+// carry the same variance-shadow slot (the same quantity, e.g. x*x in a callee
+// where no input channel is in scope).
+fn emit_fo_cov_slot_a64(lv: i64, rv: i64, fl: i64, fr: i64) -> i64 with IO, Mut, Panic, Div {
+    let cov = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    if lv >= 0 && lv == rv {
+        emit_load_var_a64(lv)
+        emit_store_var_a64(cov)
+        return cov
+    }
+    emit_imm64_a64(0)
+    emit_store_var_a64(cov)
+    var c: i64 = 0
+    while c < 8 {
+        let ls = B7F[(fl + 36 + c) as usize]
+        let rs = B7F[(fr + 36 + c) as usize]
+        let iv = CHANNEL_INPUT_VAR_SLOT[c as usize]
+        if ls >= 0 && rs >= 0 && iv >= 0 {
+            emit_bin_slots_a64(ls, rs, 0x1E610800)
+            emit_bin_x0_slot_a64(iv, 0x1E610800)
+            emit_bin_x0_slot_a64(cov, 0x1E612800)
+            emit_store_var_a64(cov)
+        }
+        c = c + 1
+    }
+    return cov
+}
+
+// var(L+R) = var(L) + var(R) + 2·cov(L,R) (a64 twin of emit_var_add_correlated_x86).
+fn emit_var_add_correlated_a64(lv: i64, rv: i64, fl: i64, fr: i64) -> i64 with IO, Mut, Panic, Div {
+    let cov = emit_fo_cov_slot_a64(lv, rv, fl, fr)
+    let out = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    emit_bin_slots_a64(cov, cov, 0x1E612800)
+    emit_bin_x0_slot_a64(lv, 0x1E612800)
+    emit_bin_x0_slot_a64(rv, 0x1E612800)
+    emit_store_var_a64(out)
+    return out
+}
+
+// var(L−R) = var(L) + var(R) − 2·cov(L,R). Where every input has a channel this
+// equals x86's Σ_k (s_k(L) − s_k(R))²·σ²_k; the a64 pass has 8 channels and
+// no extras, so the channel-only form would DROP the variance of every input
+// past the eighth (the octonion scalar part read half its GUM value). This
+// form keeps it, counting a channel-less input as independent -- the same
+// treatment x86 gives inputs past its 32.
+fn emit_var_sub_correlated_a64(lv: i64, rv: i64, fl: i64, fr: i64) -> i64 with IO, Mut, Panic, Div {
+    let cov = emit_fo_cov_slot_a64(lv, rv, fl, fr)
+    let out = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    emit_bin_slots_a64(lv, rv, 0x1E612800)
+    emit_push_a64()
+    emit_bin_slots_a64(cov, cov, 0x1E612800)
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E613800)
+    emit_store_var_a64(out)
+    return out
+}
+
+// var(L·R) += 2·L·R·cov(L,R) (a64 twin of emit_var_mul_cov_term_x86).
+fn emit_var_mul_cov_term_a64(var_slot: i64, lval: i64, rval: i64, lv: i64, rv: i64, fl: i64, fr: i64) -> i64 with IO, Mut, Panic, Div {
+    let cov = emit_fo_cov_slot_a64(lv, rv, fl, fr)
+    let out = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    emit_bin_slots_a64(lval, rval, 0x1E610800)
+    emit_bin_x0_slot_a64(cov, 0x1E610800)
+    emit_push_a64(); emit_pop_x1_a64(); emit_f64_binop_a64(0x1E612800)  // ×2
+    emit_bin_x0_slot_a64(var_slot, 0x1E612800)
+    emit_store_var_a64(out)
+    return out
+}
+
+// q = L/R; var(q) = (var(L) + q²·var(R) − 2·q·cov(L,R)) / R²
+// (a64 twin of emit_var_div_x86). a/a gives 0 through the same-slot identity.
+fn emit_var_div_a64(lv: i64, rv: i64, lval: i64, rval: i64, fl: i64, fr: i64) -> i64 with IO, Mut, Panic, Div {
+    let cov = emit_fo_cov_slot_a64(lv, rv, fl, fr)
+    let q = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    emit_bin_slots_a64(lval, rval, 0x1E611800)
+    emit_store_var_a64(q)
+    let acc = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    if lv >= 0 { emit_load_var_a64(lv) } else { emit_imm64_a64(0) }
+    emit_store_var_a64(acc)
+    if rv >= 0 {
+        emit_bin_slots_a64(q, q, 0x1E610800)
+        emit_bin_x0_slot_a64(rv, 0x1E610800)
+        emit_bin_x0_slot_a64(acc, 0x1E612800)
+        emit_store_var_a64(acc)
+    }
+    let t = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    emit_bin_slots_a64(q, cov, 0x1E610800)
+    emit_push_a64(); emit_pop_x1_a64(); emit_f64_binop_a64(0x1E612800)  // 2·q·cov
+    emit_store_var_a64(t)
+    emit_bin_slots_a64(acc, t, 0x1E613800)
+    emit_store_var_a64(acc)
+    let r2 = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    emit_bin_slots_a64(rval, rval, 0x1E610800)
+    emit_store_var_a64(r2)
+    let out = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    emit_bin_slots_a64(acc, r2, 0x1E611800)
+    emit_store_var_a64(out)
+    return out
+}
+
+// Var(f(u)) = f'(u)²·Var(u), with the same f' the sensitivity chain uses
+// (a64 twin of emit_math_variance_x86, #3551). -1 when u carries no variance.
+fn emit_math_variance_a64(input: i64, d1: i64) -> i64 with IO, Mut, Panic, Div {
+    if input < 0 { return -1 }
+    let out = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    emit_bin_slots_a64(d1, d1, 0x1E610800)
+    emit_bin_x0_slot_a64(input, 0x1E610800)
+    emit_store_var_a64(out)
+    return out
+}
+
+// H_jk(a/b) from a = q·b: H(a) = H(q)·b + s(q)⊗s(b) + s(b)⊗s(q) + q·H(b), so
+// H_jk(q) = (H_jk(a) − s_j(q)·s_k(b) − s_k(q)·s_j(b) − q·H_jk(b)) / b.
+// sqj / sqk are the QUOTIENT's channels (emit_s_div_a64 output).
+fn emit_h_div_a64(lh: i64, rh: i64, qval: i64, rval: i64, sqj: i64, sbk: i64, sqk: i64, sbj: i64) -> i64 with IO, Mut, Panic, Div {
+    if lh < 0 && rh < 0 && (sqj < 0 || sbk < 0) && (sqk < 0 || sbj < 0) { return -1 }
+    let res = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    if lh >= 0 { emit_load_var_a64(lh) } else { emit_imm64_a64(0) }
+    emit_push_a64()
+    if sqj >= 0 { emit_load_var_a64(sqj) } else { emit_imm64_a64(0) }
+    emit_push_a64()
+    if sbk >= 0 { emit_load_var_a64(sbk) } else { emit_imm64_a64(0) }
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E613800)
+    emit_push_a64()
+    if sqk >= 0 { emit_load_var_a64(sqk) } else { emit_imm64_a64(0) }
+    emit_push_a64()
+    if sbj >= 0 { emit_load_var_a64(sbj) } else { emit_imm64_a64(0) }
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E613800)
+    emit_push_a64()
+    emit_load_var_a64(qval)
+    emit_push_a64()
+    if rh >= 0 { emit_load_var_a64(rh) } else { emit_imm64_a64(0) }
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E613800)
+    emit_push_a64()
+    emit_load_var_a64(rval)
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E611800)
     emit_store_var_a64(res)
     return res
 }
@@ -47700,13 +48034,35 @@ fn compile_additive_a64() with IO, Mut, Panic, Div {
                 emit_store_var_a64(b4aa_result_slot)
             }
             if b4aa_left_vshadow >= 0 || b4aa_right_vshadow >= 0 {
-                if b4aa_left_vshadow >= 0 { emit_load_var_a64(b4aa_left_vshadow) } else { emit_imm64_a64(0) }
-                emit_push_a64()
-                if b4aa_right_vshadow >= 0 { emit_load_var_a64(b4aa_right_vshadow) } else { emit_imm64_a64(0) }
-                emit_pop_x1_a64(); emit_f64_binop_a64(0x1E612800)  // fadd
-                let b4aa_vres = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
-                emit_store_var_a64(b4aa_vres)
-                EXPR_VSHADOW = b4aa_vres
+                // Same rules as compile_additive (x86): the variance shadow is the
+                // total variance and the channels supply the covariance. The a64
+                // pass used the blind var(a)+var(b) for both + and −, so e+e read
+                // 2·var(e) and x−x read 2·var(x).
+                var b4aa_ch_live: i64 = 0
+                var b4aa_q: i64 = 0
+                while b4aa_q < 8 {
+                    if B7F[(b7_l_a + 36 + b4aa_q) as usize] >= 0 || B7F[(b7_r_a + 36 + b4aa_q) as usize] >= 0 { b4aa_ch_live = 1 }
+                    b4aa_q = b4aa_q + 1
+                }
+                if op == 18 && b4aa_left_vshadow >= 0 && b4aa_left_vshadow == b4aa_right_vshadow {
+                    let b4aa_z = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                    emit_imm64_a64(0)
+                    emit_store_var_a64(b4aa_z)
+                    EXPR_VSHADOW = b4aa_z
+                } else if b4aa_right_vshadow < 0 {
+                    EXPR_VSHADOW = b4aa_left_vshadow
+                } else if b4aa_left_vshadow < 0 {
+                    EXPR_VSHADOW = b4aa_right_vshadow
+                } else if op == 17 {
+                    EXPR_VSHADOW = emit_var_add_correlated_a64(b4aa_left_vshadow, b4aa_right_vshadow, b7_l_a, b7_r_a)
+                } else if b4aa_ch_live == 1 {
+                    EXPR_VSHADOW = emit_var_sub_correlated_a64(b4aa_left_vshadow, b4aa_right_vshadow, b7_l_a, b7_r_a)
+                } else {
+                    emit_bin_slots_a64(b4aa_left_vshadow, b4aa_right_vshadow, 0x1E612800)
+                    let b4aa_vres = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                    emit_store_var_a64(b4aa_vres)
+                    EXPR_VSHADOW = b4aa_vres
+                }
             }
             // β⁵/β⁷ through ± , as loops over the frames rather than 4 + 36
             // inline copies. Channels 4-7 had no a64 site at all before this:

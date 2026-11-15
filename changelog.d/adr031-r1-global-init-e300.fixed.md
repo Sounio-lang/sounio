@@ -1,0 +1,1 @@
+ADR-031 R1: a module-level `let` or `var` whose i64 constant initializer does not fit i64 (`let K: i64 = 9223372036854775807 + 1`, `var G = 3037000500 * 3037000500`) is now refused at compile time with `error[E300]`, as the local form already was. Before, it checked clean and the program stopped only at run time.

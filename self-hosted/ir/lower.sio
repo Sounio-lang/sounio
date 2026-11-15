@@ -60,6 +60,12 @@ struct LowerLocalStack {
     // wide_signed only fires for bits>64, so this field is the separate
     // per-slot tracker for the standard 8/16/32/64-bit unsigned widths.
     is_unsigned_int: Box<LowerLocalI64Slots>,
+    // SIO-588: 32 when the local/param was bound with an i32/u32 annotation
+    // (else 0). Signedness still comes from is_unsigned_int (u32 sets both).
+    // Drives 32-bit result narrowing in lower_binary_expr_ref: a 64-bit word
+    // slot otherwise keeps the full 64-bit result of `a + 1` on i32/u32
+    // operands. 8/16-bit widths are not stamped narrow here (residual gap).
+    narrow32: Box<LowerLocalI64Slots>,
     global_bss_offsets: Box<LowerLocalI64Slots>,
     global_bss_sizes: Box<LowerLocalI64Slots>,
     is_global: Box<LowerLocalI64Slots>,
@@ -339,6 +345,8 @@ fn empty_lower_local_stack() -> LowerLocalStack with Alloc, Mut {
         wide_signed: lowerer_box_local_i64_slots(0),
         // Findings 11 (#2084): see the is_unsigned_int field comment above.
         is_unsigned_int: lowerer_box_local_i64_slots(0),
+        // SIO-588: see the narrow32 field comment above.
+        narrow32: lowerer_box_local_i64_slots(0),
         global_bss_offsets: lowerer_box_local_i64_slots(0),
         global_bss_sizes: lowerer_box_local_i64_slots(0),
         is_global: lowerer_box_local_i64_slots(0),
@@ -831,7 +839,7 @@ pub fn lower_note_error(site: i64, n: Name) with Mut {
 }
 var IR_LOWER_HARD_ERROR_LIMIT: i64 = 0
 
-pub fn lower_hard_error_pending() -> bool { (IR_LOWER_COMPILE_ERROR_SCOPE_ACTIVE && IR_LOWER_COMPILE_ERROR_LATCH) || IR_LOWER_HARD_ERROR != 0 || LOWER_USE_MODULE_OVERFLOWED || LOWER_IMPL_METHOD_OVERFLOWED || LOWER_UNIT_FLOAT_OVERFLOWED || ast_named_item_terminal_overflowed() || spec_item_module_overflowed() || ast_path_range_name_overflowed() }
+pub fn lower_hard_error_pending() -> bool { (IR_LOWER_COMPILE_ERROR_SCOPE_ACTIVE && IR_LOWER_COMPILE_ERROR_LATCH) || IR_LOWER_HARD_ERROR != 0 || LOWER_USE_MODULE_OVERFLOWED || LOWER_MERGE_FN_OVERFLOWED || LOWER_IMPL_METHOD_OVERFLOWED || LOWER_UNIT_FLOAT_OVERFLOWED || ast_named_item_terminal_overflowed() || spec_item_module_overflowed() || ast_path_range_name_overflowed() }
 
 // Print what the flag knows, or say plainly that it knows nothing — never
 // silence. Called by the consumers that used to print a bare "ir_summary_failed".
@@ -899,6 +907,13 @@ pub fn lower_hard_error_report() with IO, Mut, Panic, Div {
         print("\n")
     }
     if IR_LOWER_COMPILE_ERROR_SCOPE_ACTIVE && IR_LOWER_COMPILE_ERROR_LATCH { print("  cause: lowering reported an error in this compilation; refusing binary publication ") }
+    if LOWER_MERGE_FN_OVERFLOWED {
+        print("  cause: merging the separately lowered modules needs ")
+        print_int(LOWER_MERGE_FN_NEEDED)
+        print(" function-table slots but IR_MAX_FUNCS is ")
+        print_int(LOWER_MERGE_FN_LIMIT)
+        print(";\n         the merge would have dropped the rest of the program, so it is refused.\n")
+    }
     if LOWER_USE_MODULE_OVERFLOWED {
         print("  cause: more than 4096 module-scoped lowercase `use` path suffixes in this\n")
         print("         compilation; the module-qualified-call registry (LOWER_USE_MODULE_HASH)\n")
@@ -1002,6 +1017,56 @@ pub fn lower_compile_error_scope_begin() with Mut {
 pub fn lower_compile_error_scope_end() with Mut {
     IR_LOWER_COMPILE_ERROR_SCOPE_ACTIVE = false
 }
+var LOWER_MERGE_FN_OVERFLOWED: bool = false
+var LOWER_MERGE_FN_NEEDED: i64 = 0
+var LOWER_MERGE_FN_LIMIT: i64 = 0
+// A merge of separately lowered modules (compiler/module_frontend.sio:
+// ir_merge_modules_into, the place+remap dependency lane, and the legacy
+// copies in module_loader.sio) whose function tables do not fit in one:
+// refuse the program. The merges used to stop at IR_MAX_FUNCS and drop the
+// rest silently. Durable per compile, like the registry overflows, because
+// lowerer_new() clears IR_LOWER_HARD_ERROR for each module lowered after the
+// merge that overflowed.
+pub fn lower_note_merge_fn_overflow(needed: i64, limit: i64) with Mut {
+    if !LOWER_MERGE_FN_OVERFLOWED {
+        LOWER_MERGE_FN_NEEDED = needed
+        LOWER_MERGE_FN_LIMIT = limit
+    }
+    LOWER_MERGE_FN_OVERFLOWED = true
+}
+
+pub fn lower_merge_fn_overflowed() -> bool with Mut { LOWER_MERGE_FN_OVERFLOWED }
+
+// Once per compile (module_frontend_global_init_compile_begin), never per
+// module: lowerer_new() resets the transient hard-error state for every
+// module, and the merges run between those lowerings.
+pub fn lower_merge_state_reset() with Mut {
+    LOWER_MERGE_FN_OVERFLOWED = false
+    LOWER_MERGE_FN_NEEDED = 0
+    LOWER_MERGE_FN_LIMIT = 0
+    LOWER_RGN_MERGE_VETO = false
+}
+
+// Region reclamation across a multi-module merge. Within one function table
+// the cast hook is complete (rgn_copy_cost, numeric provenance). Modules are
+// lowered with separate tables and then merged, and a module whose table had
+// no room for __rgn_barrier lowered its casts without the hook; once merged,
+// its functions can run inside another module's region and publish a young
+// reference as a plain number. Such a module is recognisable exactly: it
+// has no __rgn_barrier slot AND more than IR_MAX_FUNCS -
+// lower_rgn_fn_headroom() functions. (A module without the slot at or below
+// that bound never skipped a hook: its first unproven cast would have added
+// the slot.) When one takes part in a merge, every region of the merged
+// program is vetoed: each __rgn_enter call becomes the token 0, which every
+// region path treats as "no region" (function exits jump to the plain return,
+// loop resets and settles do nothing). Reclamation is lost for that program;
+// nothing it holds can be reclaimed while still reachable.
+var LOWER_RGN_MERGE_VETO: bool = false
+// SOUNIO_RGN_FORCE_MERGE_VETO=1 (gate only): veto at every merge, so the
+// gate can show that a vetoed program really runs without regions.
+var LOWER_RGN_FORCE_MERGE_VETO: bool = false
+
+
 pub fn lower_hard_error_reset() with Mut {
     IR_LOWER_HARD_ERROR = 0
     IR_LOWER_HARD_ERROR_NEEDED = 0
@@ -1029,7 +1094,7 @@ pub fn lower_hard_error_reset() with Mut {
 // successful IR by any of the many IrLowerResult/IrLowerBoxResult
 // construction sites that gate on THIS helper rather than polling the
 // separate pending flag directly.
-pub fn lower_had_error_with_hard(v: bool) -> bool { v || (IR_LOWER_COMPILE_ERROR_SCOPE_ACTIVE && IR_LOWER_COMPILE_ERROR_LATCH) || IR_LOWER_HARD_ERROR != 0 || LOWER_USE_MODULE_OVERFLOWED || LOWER_IMPL_METHOD_OVERFLOWED || LOWER_UNIT_FLOAT_OVERFLOWED || ast_named_item_terminal_overflowed() || spec_item_module_overflowed() || ast_path_range_name_overflowed() }
+pub fn lower_had_error_with_hard(v: bool) -> bool { v || (IR_LOWER_COMPILE_ERROR_SCOPE_ACTIVE && IR_LOWER_COMPILE_ERROR_LATCH) || IR_LOWER_HARD_ERROR != 0 || LOWER_USE_MODULE_OVERFLOWED || LOWER_MERGE_FN_OVERFLOWED || LOWER_IMPL_METHOD_OVERFLOWED || LOWER_UNIT_FLOAT_OVERFLOWED || ast_named_item_terminal_overflowed() || spec_item_module_overflowed() || ast_path_range_name_overflowed() }
 fn lower_ok_without_hard(v: bool) -> bool { !lower_had_error_with_hard(v) }
 var FO_XFER_COUNT: i64 = 0
 var FO_XFER_KIND: [i64; 64] = [0; 64]
@@ -3152,6 +3217,24 @@ var LOWER_MONOLITHIC_PUBLIC_PROBE_TRACE: bool = false
 // this instead of a call to a name that binds to nothing (which left its dst vreg
 // unwritten, i.e. reading 0). See lowerer_lower_fn_mut and the ExprCall lowering.
 var LOWER_KERNEL_TID_REG: i64 = 0 - 1
+// Wide-integer call ABI: the callee's packed wide_param_limbs for the argument
+// list about to be lowered (args shifted past a method receiver). Armed by the
+// direct and method call sites, consumed and cleared on entry by
+// lower_expr_args_masked_borrow_ref so nested argument lists never inherit it.
+var LOWER_WIDE_ARG_LIMBS: i64 = 0
+// Wide-integer return ABI for the function being lowered (IrFunction
+// wide_return_bits): its fn id, the hidden out-array param register, and the
+// return width/signedness. LOWER_WIDE_RET_FN is -1 outside such a function.
+var LOWER_WIDE_RET_FN: i64 = 0 - 1
+var LOWER_WIDE_RET_OUT: i64 = 0 - 1
+var LOWER_WIDE_RET_BITS: i64 = 0
+var LOWER_WIDE_RET_SIGNED: i64 = 0
+// Width facts of the tail expression of the block most recently lowered,
+// read while its locals are still in scope (the fn-body tail is the last one
+// written before the implicit return).
+var LOWER_BLOCK_TAIL_WIDE_BITS: i64 = 0
+var LOWER_BLOCK_TAIL_WIDE_SIGNED: i64 = 0
+var LOWER_BLOCK_TAIL_NARROW: bool = false
 // #2766: the scrutinee of the match being lowered is a reference local, so a
 // struct-pattern arm reads its fields through the reference (field_get label 1).
 var LOWER_MATCH_SCRUT_IS_REF: bool = false
@@ -3178,6 +3261,80 @@ var LOWER_RGN_TOK_REG: i64 = 0 - 1
 var LOWER_RGN_RET_REG: i64 = 0 - 1
 var LOWER_RGN_EXIT_LABEL: i64 = 0 - 1
 var LOWER_RGN_FN_ID: i64 = 0 - 1
+
+// Loop-iteration regions. A function region hands its garbage back only when
+// the function returns, so a loop that runs N iterations inside ONE call kept
+// every >16 B aggregate it made -- a tuple result, an Epistemic -- for the
+// whole loop, and a long Monte Carlo loop in `main` (which never had a region)
+// died with `madaros: handles full` after 2^22 of them. Each iteration of an
+// eligible while / loop / for now opens its own region and resets it at the
+// back edge, with the same runtime (__rgn_enter / __rgn_exit_scalar /
+// __rgn_leave) and the same escape protocol as a function region: heap stores
+// run the store barrier, casts run the cast hook, extern calls mark all.
+//
+// What a function region gets for free and an iteration region must check is
+// the one root the barrier does not see: a plain write of a young value into a
+// register that outlives the iteration. lowerer_loop_rgn_check_body_mut
+// collects every register the body writes (W) and refuses the region when one
+// of them is an outer local that is not proven numeric, or was written before
+// the loop; lowerer_loop_rgn_finalize_mut refuses it, once the whole function
+// is lowered, when a W register is read anywhere outside the loop. Float
+// registers and proven-numeric locals never hold a reference (a reference only
+// becomes a number through a cast, which already ran the hook). A refused
+// region is patched back to nothing: enter -> `tok = 0`, exit and leave ->
+// nop.
+var LOWER_LOOP_RGN_FN_OK: i64 = 0
+var LOWER_LOOP_RGN_FN_ID: i64 = 0 - 1
+var LOWER_LOOP_RGN_DEPTH: i64 = 0
+var LOWER_LOOP_RGN_TOKS: [i64; 256] = [0; 256]
+var LOWER_LOOP_REC_COUNT: i64 = 0
+var LOWER_LOOP_REC_BASE: i64 = 0
+var LOWER_LOOP_REC_TOK: [i64; 4096] = [0; 4096]
+var LOWER_LOOP_REC_ENTER: [i64; 4096] = [0; 4096]
+var LOWER_LOOP_REC_EXIT: [i64; 4096] = [0; 4096]
+var LOWER_LOOP_REC_LEAVE: [i64; 4096] = [0; 4096]
+var LOWER_LOOP_REC_START: [i64; 4096] = [0; 4096]
+var LOWER_LOOP_REC_BODY: [i64; 4096] = [0; 4096]
+var LOWER_LOOP_REC_END: [i64; 4096] = [0; 4096]
+var LOWER_LOOP_REC_OK: [i64; 4096] = [0; 4096]
+var LOWER_LOOP_REC_ITER: [i64; 4096] = [0; 4096]
+var LOWER_LOOP_REC_BRK: [i64; 4096] = [0; 4096]
+var LOWER_LOOP_REC_WBASE: [i64; 4096] = [0; 4096]
+var LOWER_LOOP_REC_WLEN: [i64; 4096] = [0; 4096]
+var LOWER_LOOP_W_LEN: i64 = 0
+var LOWER_LOOP_W: [i64; 262144] = [0; 262144]
+var LOWER_LOOP_EPOCH: i64 = 0
+var LOWER_LOOP_W_STAMP: [i64; 262144] = [0; 262144]
+var LOWER_LOOP_F_STAMP: [i64; 262144] = [0; 262144]
+// Why a region was refused (SOUNIO_LOOP_RGN_DIAG=1 prints each loop's verdict,
+// =2 also dumps its IR; diagnostics only, never read by lowering): 1 not worth it,
+// 2 non-numeric outer local written, 3 W register written before the loop,
+// 4 W register read outside the loop, 5 capacity, 6 never closed.
+var LOWER_LOOP_REC_WHY: [i64; 4096] = [0; 4096]
+// Loop-carried aggregates: outer struct / word-scalar-array locals the body
+// writes. Instead of refusing the region, the iteration end lifts their young
+// parts out of it exactly as a function exit lifts its result
+// (loop_rgn_emit_carried_exit). Per record: first entry and count in
+// LOWER_LOOP_CARRY_SLOT (locals-stack slot of each carried local).
+var LOWER_LOOP_REC_CBASE: [i64; 4096] = [0; 4096]
+var LOWER_LOOP_REC_CLEN: [i64; 4096] = [0; 4096]
+var LOWER_LOOP_CARRY_LEN: i64 = 0
+// 1 when the record's iteration end was emitted as a carried exit; its
+// region calls then all take `tok`, so a refusal only has to zero `tok`.
+var LOWER_LOOP_REC_CARRIED: [i64; 4096] = [0; 4096]
+// A register the analysis ignores: the element variable of `for v in arr`.
+var LOWER_LOOP_REC_SKIPREG: [i64; 4096] = [0; 4096]
+var LOWER_LOOP_CARRY_SLOT: [i64; 16384] = [0; 16384]
+fn lower_loop_carry_max_per_loop() -> i64 { 16 }
+var LOWER_LOOP_REC_WHAT: [i64; 4096] = [0; 4096]
+var LOWER_LOOP_DIAG: i64 = 0 - 1
+// SOUNIO_LOOP_RGN_SABOTAGE (gate only). 1 keeps every region the escape
+// analysis refuses (why 2, 3, 4); 2 makes `break` and `return` reset the
+// iteration region instead of popping it unreset; 3 does both; 4 resets a
+// loop that carries aggregates as if it carried none. scripts/ci/
+// madaros_loop_region_gate.sh shows each witness fails without its rule.
+var LOWER_LOOP_SABOTAGE: i64 = 0
+fn lower_loop_reg_cap() -> i64 { 262144 }
 
 // Region reclamation's cast escape hook. A cast from a non-numeric value (a
 // struct handle, a reference, a Seq, a string, ...) to a numeric type turns a
@@ -3235,6 +3392,62 @@ var LOWER_RAW_ARR_PACKED_BYTE: [i64; 4096] = [0; 4096]
 // native/codegen.sio used by module_loader's thin linker and the standalone
 // render/wide drivers) never opts in, so its IR carries no region calls and no
 // __rgn_* stubs. compiler/main.sio (Madaros) opts in at startup.
+// Function-table slots the region runtime reserves (__rgn_enter .. the last
+// name in the summary-lane reservation lists below). Every region opening, the
+// cast hook and both reservation lists test fn_count against
+// IR_MAX_FUNCS - lower_rgn_fn_headroom(): keeping that one bound shared is what
+// lets numeric provenance (rgn_copy_cost) argue that no region opens after an
+// unhooked cast. Add a runtime entry point -> add it to both lists and bump this.
+fn lower_rgn_fn_headroom() -> i64 { 13 }
+
+pub fn lower_rgn_module_may_skip_hooks(m: &IrModule) -> bool with Mut, Panic, Div {
+    if (*m).fn_count <= IR_MAX_FUNCS - lower_rgn_fn_headroom() { return false }
+    var fi: i64 = 0
+    while fi < (*m).fn_count {
+        if ir_name_eq_lit(ir_fn_get(m, fi as usize).name, "__rgn_barrier") { return false }
+        fi = fi + 1
+    }
+    true
+}
+
+// Record whether either side of a merge may hold unhooked casts; true when
+// this compile's merged program must have its regions vetoed.
+pub fn lower_rgn_merge_check(dst: &IrModule, src: &IrModule) -> bool with Mut, Panic, Div {
+    if lower_rgn_module_may_skip_hooks(dst) || lower_rgn_module_may_skip_hooks(src) || LOWER_RGN_FORCE_MERGE_VETO {
+        LOWER_RGN_MERGE_VETO = true
+    }
+    LOWER_RGN_MERGE_VETO
+}
+
+pub fn lower_rgn_merge_vetoed() -> bool with Mut { LOWER_RGN_MERGE_VETO }
+
+// Turn every call to a function named __rgn_enter into `dst = 0`; returns
+// how many it rewrote.
+pub fn lower_rgn_veto_regions(m: &IrModule) -> i64 with Mut, Panic, Div {
+    var rewritten: i64 = 0
+    let call_op = IrOpcode::IrCall as i64
+    var fi: i64 = 0
+    while fi < (*m).fn_count {
+        let func = ir_fn_get(m, fi as usize)
+        var ii: i64 = 0
+        while ii < func.instr_count {
+            let s = ir_region_slot_r(func.region, ii) as usize
+            if IR_A_OP[s] == call_op {
+                let target = IR_A_FN_ID[s]
+                let by_target = target >= 0 && target < (*m).fn_count
+                    && ir_name_eq_lit(ir_fn_get(m, target as usize).name, "__rgn_enter")
+                if by_target || ir_name_eq_lit(ir_name_at(IR_A_NAME_ID[s]), "__rgn_enter") {
+                    ir_arena_store(ir_region_slot_w(func.region, ii), ir_load_imm(IR_A_DST[s], 0))
+                    rewritten = rewritten + 1
+                }
+            }
+            ii = ii + 1
+        }
+        fi = fi + 1
+    }
+    rewritten
+}
+
 pub fn lower_rgn_backend_opt_in() with Mut {
     LOWER_RGN_BACKEND_OK = 1
 }
@@ -3918,9 +4131,9 @@ fn ir_program_summary_from_lowerer(lo: Lowerer) -> IrProgramSummary with Alloc, 
     // consumers freeze this summary's function-id table before then. Reserve
     // every runtime entry point now so body lowering and codegen agree on ids.
     // At the imported-function ceiling the language promises the full table to
-    // user code. Do not consume ten hidden slots there: body lowering applies
+    // user code. Do not consume the hidden slots (lower_rgn_fn_headroom) there: body lowering applies
     // the matching headroom guard and simply leaves reclamation disabled.
-    if lower_rgn_enabled() && (*module_box).fn_count <= IR_MAX_FUNCS - 10 {
+    if lower_rgn_enabled() && (*module_box).fn_count <= IR_MAX_FUNCS - lower_rgn_fn_headroom() {
         let _r0 = ir_fast_summary_find_or_add_fn_id(&! (*module_box), make_name("__rgn_enter"))
         let _r1 = ir_fast_summary_find_or_add_fn_id(&! (*module_box), make_name("__rgn_leave"))
         let _r2 = ir_fast_summary_find_or_add_fn_id(&! (*module_box), make_name("__rgn_escaped"))
@@ -3931,6 +4144,9 @@ fn ir_program_summary_from_lowerer(lo: Lowerer) -> IrProgramSummary with Alloc, 
         let _r7 = ir_fast_summary_find_or_add_fn_id(&! (*module_box), make_name("__rgn_exit_scalar"))
         let _r8 = ir_fast_summary_find_or_add_fn_id(&! (*module_box), make_name("__rgn_barrier"))
         let _r9 = ir_fast_summary_find_or_add_fn_id(&! (*module_box), make_name("__rgn_mark_all"))
+        let _r10 = ir_fast_summary_find_or_add_fn_id(&! (*module_box), make_name("__rgn_reset"))
+        let _r11 = ir_fast_summary_find_or_add_fn_id(&! (*module_box), make_name("__rgn_settle"))
+        let _r12 = ir_fast_summary_find_or_add_fn_id(&! (*module_box), make_name("__rgn_copy_payload"))
     }
     IrProgramSummary {
         module: module_box,
@@ -3969,6 +4185,9 @@ fn lowerer_seed_module_from_summary(lo_in: Lowerer, summary: &IrProgramSummary) 
         func.returns_float = ir_fn_get(&(*summary.module), i as usize).returns_float
         func.return_kn_value_float = ir_fn_get(&(*summary.module), i as usize).return_kn_value_float
         func.return_fixed_array_len = ir_fn_get(&(*summary.module), i as usize).return_fixed_array_len
+        func.wide_param_limbs = ir_fn_get(&(*summary.module), i as usize).wide_param_limbs
+        func.wide_return_bits = ir_fn_get(&(*summary.module), i as usize).wide_return_bits
+        func.wide_return_signed = ir_fn_get(&(*summary.module), i as usize).wide_return_signed
         func.return_struct_name = ir_fn_get(&(*summary.module), i as usize).return_struct_name
         func.prof_counter_id = ir_fn_get(&(*summary.module), i as usize).prof_counter_id
         func.hyper_algebra_kind = ir_fn_get(&(*summary.module), i as usize).hyper_algebra_kind
@@ -4357,9 +4576,13 @@ fn lowerer_preseed_dep_items_into_acc_mut(
                                         fn_slot_sig.return_kn_value_float = lower_opt_type_knowledge_value_float(&(*fd).return_type)
                                         fn_slot_sig.return_fixed_array_len = lower_opt_type_return_fixed_array_code(&(*fd).return_type)
                                         fn_slot_sig.return_struct_name = lower_opt_type_return_layout_name(&(*fd).return_type)
+                                        fn_slot_sig.wide_return_bits = lower_opt_type_wide_bits(&(*fd).return_type)
+                                        fn_slot_sig.wide_return_signed = lower_opt_type_wide_signed(&(*fd).return_type)
                                         lower_record_option_box_return(fn_slot_sig.name, &(*fd).return_type)
                                         fn_slot_sig.param_count = ir_param_list_count_ref(&(*fd).params)
                                         fn_slot_sig.f128_param_mask = lower_f128_param_mask_of(&(*fd).params)
+                                        fn_slot_sig.wide_param_limbs = lower_wide_param_limbs_of(&(*fd).params)
+                                        if fn_slot_sig.wide_return_bits > 64 { fn_slot_sig.param_count = fn_slot_sig.param_count + 1 }
                                         fn_slot_sig.ref_struct_param_mask = lower_ref_struct_param_mask_of(&(*fd).params)
                                         fn_slot_sig.first_param_is_ref = lower_fn_first_param_is_ref(&(*fd).params)
                                         if strategy_sig == IR_STRATEGY_INSTRUMENTED {
@@ -4767,6 +4990,9 @@ fn lowerer_new_from_program_summary_flat(summary: &IrProgramSummaryFlat, epistem
         func.returns_float = ir_fn_get(&summary.module, i as usize).returns_float
         func.return_kn_value_float = ir_fn_get(&summary.module, i as usize).return_kn_value_float
         func.return_fixed_array_len = ir_fn_get(&summary.module, i as usize).return_fixed_array_len
+        func.wide_param_limbs = ir_fn_get(&summary.module, i as usize).wide_param_limbs
+        func.wide_return_bits = ir_fn_get(&summary.module, i as usize).wide_return_bits
+        func.wide_return_signed = ir_fn_get(&summary.module, i as usize).wide_return_signed
         func.return_struct_name = ir_fn_get(&summary.module, i as usize).return_struct_name
         func.prof_counter_id = ir_fn_get(&summary.module, i as usize).prof_counter_id
         func.hyper_algebra_kind = ir_fn_get(&summary.module, i as usize).hyper_algebra_kind
@@ -5060,9 +5286,13 @@ fn lowerer_preseed_fn_signature_mut(
     fn_slot.return_kn_value_float = lower_opt_type_knowledge_value_float(return_type)
     fn_slot.return_fixed_array_len = lower_opt_type_return_fixed_array_code(return_type)
     fn_slot.return_struct_name = lower_opt_type_return_layout_name(return_type)
+    fn_slot.wide_return_bits = lower_opt_type_wide_bits(return_type)
+    fn_slot.wide_return_signed = lower_opt_type_wide_signed(return_type)
     lower_record_option_box_return(fn_slot.name, return_type)
     fn_slot.param_count = ir_param_list_count_ref(params)
     fn_slot.f128_param_mask = lower_f128_param_mask_of(params)
+    fn_slot.wide_param_limbs = lower_wide_param_limbs_of(params)
+    if fn_slot.wide_return_bits > 64 { fn_slot.param_count = fn_slot.param_count + 1 }
     fn_slot.ref_struct_param_mask = lower_ref_struct_param_mask_of(params)
     fn_slot.first_param_is_ref = lower_fn_first_param_is_ref(params)
     if strategy == IR_STRATEGY_INSTRUMENTED {
@@ -6396,9 +6626,13 @@ fn lowerer_preseed_fn_item_signature_mut(
         fn_slot_sig.return_kn_value_float = lower_opt_type_knowledge_value_float(&(*fd).return_type)
         fn_slot_sig.return_fixed_array_len = lower_opt_type_return_fixed_array_code(&(*fd).return_type)
         fn_slot_sig.return_struct_name = lower_opt_type_return_layout_name(&(*fd).return_type)
+        fn_slot_sig.wide_return_bits = lower_opt_type_wide_bits(&(*fd).return_type)
+        fn_slot_sig.wide_return_signed = lower_opt_type_wide_signed(&(*fd).return_type)
         lower_record_option_box_return(fn_slot_sig.name, &(*fd).return_type)
         fn_slot_sig.param_count = ir_param_list_count_ref(&(*fd).params)
         fn_slot_sig.f128_param_mask = lower_f128_param_mask_of(&(*fd).params)
+        fn_slot_sig.wide_param_limbs = lower_wide_param_limbs_of(&(*fd).params)
+        if fn_slot_sig.wide_return_bits > 64 { fn_slot_sig.param_count = fn_slot_sig.param_count + 1 }
         fn_slot_sig.ref_struct_param_mask = lower_ref_struct_param_mask_of(&(*fd).params)
         fn_slot_sig.first_param_is_ref = lower_fn_first_param_is_ref(&(*fd).params)
         if strategy_sig == IR_STRATEGY_INSTRUMENTED {
@@ -6620,9 +6854,13 @@ fn ir_fast_summary_preseed_fn_signature(
     fn_slot.return_kn_value_float = lower_opt_type_knowledge_value_float(return_type)
     fn_slot.return_fixed_array_len = lower_opt_type_return_fixed_array_code(return_type)
     fn_slot.return_struct_name = lower_opt_type_return_layout_name(return_type)
+    fn_slot.wide_return_bits = lower_opt_type_wide_bits(return_type)
+    fn_slot.wide_return_signed = lower_opt_type_wide_signed(return_type)
     lower_record_option_box_return(fn_slot.name, return_type)
     fn_slot.param_count = ir_param_list_count_ref(params)
     fn_slot.f128_param_mask = lower_f128_param_mask_of(params)
+    fn_slot.wide_param_limbs = lower_wide_param_limbs_of(params)
+    if fn_slot.wide_return_bits > 64 { fn_slot.param_count = fn_slot.param_count + 1 }
     fn_slot.ref_struct_param_mask = lower_ref_struct_param_mask_of(params)
     fn_slot.first_param_is_ref = lower_fn_first_param_is_ref(params)
     if strategy == IR_STRATEGY_INSTRUMENTED {
@@ -6758,9 +6996,13 @@ fn ir_fast_summary_preseed_fn_signature_owned(
     fn_slot.return_kn_value_float = lower_opt_type_knowledge_value_float(return_type)
     fn_slot.return_fixed_array_len = lower_opt_type_return_fixed_array_code(return_type)
     fn_slot.return_struct_name = lower_opt_type_return_layout_name(return_type)
+    fn_slot.wide_return_bits = lower_opt_type_wide_bits(return_type)
+    fn_slot.wide_return_signed = lower_opt_type_wide_signed(return_type)
     lower_record_option_box_return(fn_slot.name, return_type)
     fn_slot.param_count = ir_param_list_count_ref(params)
     fn_slot.f128_param_mask = lower_f128_param_mask_of(params)
+    fn_slot.wide_param_limbs = lower_wide_param_limbs_of(params)
+    if fn_slot.wide_return_bits > 64 { fn_slot.param_count = fn_slot.param_count + 1 }
     fn_slot.ref_struct_param_mask = lower_ref_struct_param_mask_of(params)
     fn_slot.first_param_is_ref = lower_fn_first_param_is_ref(params)
     if strategy == IR_STRATEGY_INSTRUMENTED {
@@ -7089,9 +7331,13 @@ pub fn lower_program_to_ir_summary_flat_owned_with_epistemic_ref(
                                 fn_slot.return_kn_value_float = lower_opt_type_knowledge_value_float(&(*fd).return_type)
                                 fn_slot.return_fixed_array_len = lower_opt_type_return_fixed_array_code(&(*fd).return_type)
                                 fn_slot.return_struct_name = lower_opt_type_return_layout_name(&(*fd).return_type)
+                                fn_slot.wide_return_bits = lower_opt_type_wide_bits(&(*fd).return_type)
+                                fn_slot.wide_return_signed = lower_opt_type_wide_signed(&(*fd).return_type)
                                 lower_record_option_box_return(fn_slot.name, &(*fd).return_type)
                                 fn_slot.param_count = ir_param_list_count_ref(&(*fd).params)
                                 fn_slot.f128_param_mask = lower_f128_param_mask_of(&(*fd).params)
+                                fn_slot.wide_param_limbs = lower_wide_param_limbs_of(&(*fd).params)
+                                if fn_slot.wide_return_bits > 64 { fn_slot.param_count = fn_slot.param_count + 1 }
                                 fn_slot.ref_struct_param_mask = lower_ref_struct_param_mask_of(&(*fd).params)
                                 fn_slot.first_param_is_ref = lower_fn_first_param_is_ref(&(*fd).params)
                                 if strategy == IR_STRATEGY_INSTRUMENTED {
@@ -7191,9 +7437,13 @@ pub fn lower_program_to_ir_summary_flat_owned_with_epistemic_ref(
                                                         fn_slot.return_kn_value_float = lower_opt_type_knowledge_value_float(&(*fd).return_type)
                                                         fn_slot.return_fixed_array_len = lower_opt_type_return_fixed_array_code(&(*fd).return_type)
                                                         fn_slot.return_struct_name = lower_opt_type_return_layout_name(&(*fd).return_type)
+                                                        fn_slot.wide_return_bits = lower_opt_type_wide_bits(&(*fd).return_type)
+                                                        fn_slot.wide_return_signed = lower_opt_type_wide_signed(&(*fd).return_type)
                                                         lower_record_option_box_return(fn_slot.name, &(*fd).return_type)
                                                         fn_slot.param_count = ir_param_list_count_ref(&(*fd).params)
                                                         fn_slot.f128_param_mask = lower_f128_param_mask_of(&(*fd).params)
+                                                        fn_slot.wide_param_limbs = lower_wide_param_limbs_of(&(*fd).params)
+                                                        if fn_slot.wide_return_bits > 64 { fn_slot.param_count = fn_slot.param_count + 1 }
                                                         fn_slot.ref_struct_param_mask = lower_ref_struct_param_mask_of(&(*fd).params)
                                                         fn_slot.first_param_is_ref = lower_fn_first_param_is_ref(&(*fd).params)
                                                         if strategy == IR_STRATEGY_INSTRUMENTED {
@@ -7231,7 +7481,7 @@ pub fn lower_program_to_ir_summary_flat_owned_with_epistemic_ref(
     }
     // Keep the owned flat-summary lane id-compatible with the boxed summary
     // lane above. These stubs are bodyless here and emitted by native codegen.
-    if lower_rgn_enabled() && module.fn_count <= IR_MAX_FUNCS - 10 {
+    if lower_rgn_enabled() && module.fn_count <= IR_MAX_FUNCS - lower_rgn_fn_headroom() {
         let _r0 = ir_fast_summary_find_or_add_fn_id(&! module, make_name("__rgn_enter"))
         let _r1 = ir_fast_summary_find_or_add_fn_id(&! module, make_name("__rgn_leave"))
         let _r2 = ir_fast_summary_find_or_add_fn_id(&! module, make_name("__rgn_escaped"))
@@ -7242,6 +7492,9 @@ pub fn lower_program_to_ir_summary_flat_owned_with_epistemic_ref(
         let _r7 = ir_fast_summary_find_or_add_fn_id(&! module, make_name("__rgn_exit_scalar"))
         let _r8 = ir_fast_summary_find_or_add_fn_id(&! module, make_name("__rgn_barrier"))
         let _r9 = ir_fast_summary_find_or_add_fn_id(&! module, make_name("__rgn_mark_all"))
+        let _r10 = ir_fast_summary_find_or_add_fn_id(&! module, make_name("__rgn_reset"))
+        let _r11 = ir_fast_summary_find_or_add_fn_id(&! module, make_name("__rgn_settle"))
+        let _r12 = ir_fast_summary_find_or_add_fn_id(&! module, make_name("__rgn_copy_payload"))
     }
     IrProgramSummaryFlatResult {
         summary: IrProgramSummaryFlat {
@@ -7279,6 +7532,8 @@ fn lowerer_bind_local_mut(
         (*(*locals_box).wide_signed).values[idx as usize] = 0
         // Findings 11 (#2084): zero-init the per-slot unsigned-int flag.
         (*(*locals_box).is_unsigned_int).values[idx as usize] = 0
+        // SIO-588: zero-init the per-slot 32-bit-narrow flag.
+        (*(*locals_box).narrow32).values[idx as usize] = 0
         (*(*locals_box).global_bss_offsets).values[idx as usize] = 0
         (*(*locals_box).global_bss_sizes).values[idx as usize] = 0
         (*(*locals_box).is_global).values[idx as usize] = 0
@@ -7499,6 +7754,22 @@ fn lowerer_mark_local_unsigned_int_mut(lo: &! Lowerer, name: Name) with Mut, All
     }
 }
 
+// SIO-588: *mut analogue of bind_local_narrow32 for the
+// lowerer_bind_local_mut parameter path (which zeroes the slot). Called
+// next to lowerer_mark_local_unsigned_int_mut with the param's own type.
+fn lowerer_mark_local_narrow32_mut(lo: &! Lowerer, name: Name) with Mut, Alloc, Panic, Div {
+    var locals_box = (*lo).locals
+    var i = (*locals_box).count - 1
+    while i >= 0 {
+        if (*(*locals_box).depths).values[i as usize] <= (*lo).scope_depth && ir_name_eq((*(*locals_box).names).values[i as usize], name) {
+            (*(*locals_box).narrow32).values[i as usize] = 1
+            (*lo).locals = locals_box
+            return
+        }
+        i = i - 1
+    }
+}
+
 fn lowerer_mark_local_wide_bits_mut(
     lo: &! Lowerer,
     name: Name,
@@ -7510,6 +7781,22 @@ fn lowerer_mark_local_wide_bits_mut(
         if (*(*locals_box).depths).values[i as usize] <= (*lo).scope_depth && ir_name_eq((*(*locals_box).names).values[i as usize], name) {
             (*(*locals_box).wide_bits).values[i as usize] = bits
             (*(*locals_box).wide_signed).values[i as usize] = 0
+            (*lo).locals = locals_box
+            return
+        }
+        i = i - 1
+    }
+}
+
+// Wide-integer param (iN/uN, N > 64): record width AND signedness, so the
+// param is a wide operand exactly like an annotated wide `let`.
+fn lowerer_mark_local_wide_int_mut(lo: &! Lowerer, name: Name, bits: i64, signed: i64) with Mut, Alloc, Panic, Div {
+    var locals_box = (*lo).locals
+    var i = (*locals_box).count - 1
+    while i >= 0 {
+        if (*(*locals_box).depths).values[i as usize] <= (*lo).scope_depth && ir_name_eq((*(*locals_box).names).values[i as usize], name) {
+            (*(*locals_box).wide_bits).values[i as usize] = bits
+            (*(*locals_box).wide_signed).values[i as usize] = signed
             (*lo).locals = locals_box
             return
         }
@@ -7930,10 +8217,36 @@ fn lowerer_lower_fn_params_mut(
                     (*lo) = copy_pair.0
                     param_value_reg = copy_pair.1
                 }
+                // Wide-integer param: preg is the address of the caller's limb
+                // array (IrFunction.wide_param_limbs); unpack it.
+                let param_wide_bits = lower_type_expr_wide_bits(&(*list).head.ty)
+                if param_wide_bits > 64 && !param_is_ref {
+                    let wp = (*lo).emit_wide_param_unpack(preg, lower_wide_limb_count(param_wide_bits))
+                    (*lo) = wp.0
+                    param_value_reg = wp.1
+                }
 
                 lowerer_bind_local_mut(lo, (*list).head.name, param_value_reg, (*list).head.is_self_mut)
+                if param_wide_bits > 64 && !param_is_ref {
+                    var param_wide_signed: i64 = 0
+                    if ir_path_first_name((*list).head.ty.path).buf[0] as i64 == 105 { param_wide_signed = 1 }
+                    lowerer_mark_local_wide_int_mut(lo, (*list).head.name, param_wide_bits, param_wide_signed)
+                }
                 if lower_type_expr_is_unsigned_int(&(*list).head.ty) {
                     lowerer_mark_local_unsigned_int_mut(lo, (*list).head.name)
+                }
+                // SIO-588: stamp narrow32 on i32/u32 params on this binder path.
+                if lower_type_expr_is_narrow32(&(*list).head.ty) {
+                    lowerer_mark_local_narrow32_mut(lo, (*list).head.name)
+                    // ADR-031 R1: the checker lets a non-literal i64 argument reach
+                    // an i32/u32 param; a value outside 32 bits panics here, at the
+                    // boundary, instead of living on in a 32-bit-typed local
+                    // (`fn id(x: i32) -> i32 { x }` returned 9999999999).
+                    if !param_is_ref {
+                        let nk = lower_name_narrow32_kind(ir_path_first_name((*list).head.ty.path))
+                        let ncheck = lower_narrow32_check_reg((*lo), param_value_reg, nk)
+                        (*lo) = ncheck.0
+                    }
                 }
                 // An array-of-tuples param (`&[(f64, f64)]`) carries its ELEMENT
                 // tuple's float mask: see lower_type_array_elem_tuple_float_mask.
@@ -8153,9 +8466,8 @@ fn lowerer_rgn_return_kind_mut(lo: &! Lowerer, rt: &Option<Box<TypeExpr>>) -> i6
 //
 //   exit:  if tok == 0 goto plain            // no region was opened
 //   scalar kinds:
-//          __rgn_exit_scalar(tok, v)         // reset unless escaped, then pop
+//          __rgn_exit_scalar(tok, ret)       // reset unless escaped (ret not classified), pop
 //   struct kind:
-//          scan_scalar_words(v)             // encoded references escape too
 //          if __rgn_escaped(tok) goto leave_v
 //          sc, sh = __rgn_count(), __rgn_cursor()
 //          t  = young_copy(v)                // above the dead region
@@ -8172,7 +8484,8 @@ fn lowerer_rgn_emit_exit_mut(lo: &! Lowerer, kind: i64, type_name: Name) with Mu
     let plain_label = lowerer_fresh_label_mut(lo)
     lowerer_emit_mut(lo, ir_branch_false(tok, plain_label))
     if kind == 3 {
-        (*lo) = (*lo).rgn_emit_result_escape_scan(ret, type_name, 0)
+        // No word scan of the result: every slot rgn_copy_cost accepts has a
+        // declared numeric type (numeric provenance, see rgn_copy_cost).
         let esc_pair = (*lo).rgn_call("__rgn_escaped", tok, 0, 0, 1)
         (*lo) = esc_pair.0
         let zero_reg = lowerer_emit_i64_const_mut(lo, 0)
@@ -8203,8 +8516,14 @@ fn lowerer_rgn_emit_exit_mut(lo: &! Lowerer, kind: i64, type_name: Name) with Mu
         let leave3 = (*lo).rgn_call("__rgn_leave", tok, 0, 0, 1)
         (*lo) = leave3.0
     } else {
-        // Internal calls pass f64 as raw words too; bits_to_f64 can encode a
-        // handle or arena address, so classify the actual return value.
+        // Scalar kinds (lowerer_rgn_return_kind_mut) are unit, a declared
+        // integer / bool / f64, or a payload-free enum tag: none can carry a
+        // young reference that its region does not already know about
+        // (numeric provenance, see rgn_copy_cost; bits_to_f64 takes an integer,
+        // which carries an address only through a hooked conversion). The
+        // result is still passed, because this exact epilogue is read by
+        // opt_cleanup ocp_center_frame and the HOF-transparency probe, but the
+        // runtime no longer classifies it (codegen emit_builtin_rgn_exit_scalar_into).
         let exit_pair = (*lo).rgn_call("__rgn_exit_scalar", tok, ret, 0, 2)
         (*lo) = exit_pair.0
     }
@@ -8231,6 +8550,403 @@ fn lowerer_rgn_body_worth_region(lo: &! Lowerer, first: i64, end: i64) -> bool w
         i = i + 1
     }
     allocs >= 2 || (allocs >= 1 && jumps >= 1)
+}
+
+// Loop-iteration regions (LOWER_LOOP_RGN_*): is register `r` a local on the
+// locals stack? 1 = yes and proven numeric, 2 = yes and not proven, 0 = no.
+fn lowerer_loop_rgn_local_kind(lo: &! Lowerer, r: i64) -> i64 with Mut, Panic, Div {
+    let locals_box = (*lo).locals
+    var i = (*locals_box).count - 1
+    while i >= 0 {
+        if (*(*locals_box).regs).values[i as usize] == r {
+            if i < 4096 && LOWER_RGN_NUM_SLOT_EPOCH[i as usize] == LOWER_RGN_NUM_EPOCH
+                && LOWER_RGN_NUM_SLOT_REG[i as usize] == r {
+                return 1
+            }
+            return 2
+        }
+        i = i - 1
+    }
+    0
+}
+
+// Locals-stack slot holding register `r`, or -1.
+fn lowerer_loop_rgn_local_slot(lo: &! Lowerer, r: i64) -> i64 with Mut, Panic, Div {
+    let locals_box = (*lo).locals
+    var i = (*locals_box).count - 1
+    while i >= 0 {
+        if (*(*locals_box).regs).values[i as usize] == r { return i }
+        i = i - 1
+    }
+    0 - 1
+}
+
+
+// Register `r` is known not to hold an f64 array. The per-function table
+// (bind_reg_array_elem_float) stops recording at 512 entries; past that
+// nothing is known and the answer is false.
+fn lowerer_loop_rgn_reg_not_float_array(lo: &! Lowerer, r: i64) -> bool with Mut, Panic, Div {
+    if (*lo).array_elem_float_reg_count >= 512 { return false }
+    !(*lo).lookup_reg_array_elem_float(r)
+}
+
+// Whether the local held in register `r` is a plain one-word scalar: no
+// array, struct, array-element record or reference, and `r` is not bound as
+// an f64-array register. Only such a local may skip the loop carry decision
+// on the strength of a float marker.
+fn lowerer_loop_rgn_local_is_plain_scalar(lo: &! Lowerer, r: i64) -> bool with Mut, Panic, Div {
+    let slot = lowerer_loop_rgn_local_slot(lo, r)
+    if slot < 0 { return false }
+    let locals_box = (*lo).locals
+    let si = slot as usize
+    if (*(*locals_box).array_lens).values[si] != 0 { return false }
+    if (*(*locals_box).struct_types).values[si].len > 0 { return false }
+    if (*(*locals_box).struct_type_is_array_elem).values[si] != 0 { return false }
+    if (*(*locals_box).is_ref).values[si] != 0 { return false }
+    lowerer_loop_rgn_reg_not_float_array(lo, r)
+}
+
+// Copy-out cost of carrying the local in `slot` across an iteration reset,
+// or -1 when it cannot be carried: a struct rgn_copy_cost accepts, or a fixed
+// array of one-word scalars. References, globals and array-element type
+// records are never carried.
+fn lowerer_loop_rgn_carry_cost(lo: &! Lowerer, slot: i64) -> i64 with Mut, Panic, Div, Alloc {
+    if slot < 0 { return 0 - 1 }
+    let locals_box = (*lo).locals
+    let si = slot as usize
+    if (*(*locals_box).is_ref).values[si] != 0 { return 0 - 1 }
+    if (*(*locals_box).is_global).values[si] != 0 { return 0 - 1 }
+    let alen = (*(*locals_box).array_lens).values[si]
+    if alen > 0 {
+        if (*(*locals_box).array_copy_word_scalar).values[si] != 1 { return 0 - 1 }
+        return 26
+    }
+    if (*(*locals_box).struct_type_is_array_elem).values[si] != 0 { return 0 - 1 }
+    let tname = (*(*locals_box).struct_types).values[si]
+    if tname.len <= 0 { return 0 - 1 }
+    let cost = (*lo).rgn_copy_cost(tname, 0)
+    if cost < 0 || cost > lower_rgn_max_copy_cost() { return 0 - 1 }
+    cost
+}
+
+fn lowerer_loop_rgn_slot(lo: &! Lowerer, i: i64) -> usize with Mut, Panic, Div {
+    ir_region_slot_r((*(*lo).current_func).region, i) as usize
+}
+
+// At the end of a loop body, collect W -- the registers the body writes that
+// are not float, not a proven-numeric local and not the function-region return
+// register -- and refuse the region when one of them is a non-numeric outer
+// local or was already written before the loop.
+fn lowerer_loop_rgn_check_body_mut(lo: &! Lowerer, rec: i64, body_end: i64) with Mut, Panic, Div, Alloc {
+    let regcap = lower_loop_reg_cap()
+    if (*(*lo).current_func).reg_count >= regcap {
+        LOWER_LOOP_REC_OK[rec as usize] = 0
+        LOWER_LOOP_REC_WHY[rec as usize] = 5
+        return
+    }
+    LOWER_LOOP_EPOCH = LOWER_LOOP_EPOCH + 1
+    let ep = LOWER_LOOP_EPOCH
+    let nop_op = IrOpcode::IrNop as i64
+    let label_op = IrOpcode::IrLabel as i64
+    let sret_op = IrOpcode::IrCallSret as i64
+    var i: i64 = 0
+    while i < body_end {
+        let s = lowerer_loop_rgn_slot(lo, i)
+        if IR_A_OP[s] == nop_op && IR_A_IMM_FLAGS[s] == IR_FLOAT_REG_MARKER_FLAG {
+            let d = IR_A_DST[s]
+            if d >= 0 && d < regcap { LOWER_LOOP_F_STAMP[d as usize] = ep }
+        }
+        i = i + 1
+    }
+    let skip_ret = LOWER_RGN_TOK_REG >= 0 && (*lo).current_fn == LOWER_RGN_FN_ID
+    let wbase = LOWER_LOOP_W_LEN
+    var wlen: i64 = 0
+    LOWER_LOOP_REC_CBASE[rec as usize] = LOWER_LOOP_CARRY_LEN
+    LOWER_LOOP_REC_CLEN[rec as usize] = 0
+    var carry_cost: i64 = 0
+    i = LOWER_LOOP_REC_BODY[rec as usize]
+    while i < body_end {
+        let s = lowerer_loop_rgn_slot(lo, i)
+        let op = IR_A_OP[s]
+        if op != nop_op && op != label_op {
+            var k: i64 = 0
+            while k < 2 {
+                var d = IR_A_DST[s]
+                if k == 1 {
+                    if op == sret_op { d = IR_A_SRC1[s] } else { d = 0 - 1 }
+                }
+                var lk: i64 = 0 - 1
+                if d >= 0 && d < regcap && LOWER_LOOP_W_STAMP[d as usize] != ep {
+                    lk = lowerer_loop_rgn_local_kind(lo, d)
+                    // The float marker (IR_FLOAT_REG_MARKER_FLAG) is also put on
+                    // the handle register of an f64 ARRAY (emit_array_alloc_like_source,
+                    // so every `var w = a` of an f64 array). Read as "float scalar" it
+                    // let such a local skip the carry decision: the iteration reset
+                    // then reclaimed the array (linalg_factorize: L and U came back
+                    // zero). A marked register is skipped only when it is provably a
+                    // float scalar: a plain scalar local, or a temporary that is not
+                    // bound as an f64-array register. Temporaries keep the exemption
+                    // because a float constant materialised in the body is reused
+                    // after the loop (one register for one constant per function).
+                    if LOWER_LOOP_F_STAMP[d as usize] == ep {
+                        if lk == 2 && lowerer_loop_rgn_local_is_plain_scalar(lo, d) {
+                            lk = 0 - 1
+                        } else if lk == 0 && lowerer_loop_rgn_reg_not_float_array(lo, d) {
+                            lk = 0 - 1
+                        }
+                    }
+                }
+                if lk >= 0 && !(skip_ret && d == LOWER_RGN_RET_REG)
+                    && d != LOWER_LOOP_REC_SKIPREG[rec as usize] {
+                    LOWER_LOOP_W_STAMP[d as usize] = ep
+                    if lk == 2 {
+                        let cslot = lowerer_loop_rgn_local_slot(lo, d)
+                        let cc = lowerer_loop_rgn_carry_cost(lo, cslot)
+                        if cc < 0 || LOWER_LOOP_REC_CLEN[rec as usize] >= lower_loop_carry_max_per_loop()
+                            || LOWER_LOOP_CARRY_LEN >= 16384 {
+                            LOWER_LOOP_REC_OK[rec as usize] = 0
+                            LOWER_LOOP_REC_WHY[rec as usize] = 2
+                            LOWER_LOOP_REC_WHAT[rec as usize] = d
+                            return
+                        }
+                        carry_cost = carry_cost + cc
+                        LOWER_LOOP_CARRY_SLOT[LOWER_LOOP_CARRY_LEN as usize] = cslot
+                        LOWER_LOOP_CARRY_LEN = LOWER_LOOP_CARRY_LEN + 1
+                        LOWER_LOOP_REC_CLEN[rec as usize] = LOWER_LOOP_REC_CLEN[rec as usize] + 1
+                    }
+                    if lk == 0 {
+                        if LOWER_LOOP_W_LEN >= regcap {
+                            LOWER_LOOP_REC_OK[rec as usize] = 0
+                            LOWER_LOOP_REC_WHY[rec as usize] = 5
+                            return
+                        }
+                        LOWER_LOOP_W[LOWER_LOOP_W_LEN as usize] = d
+                        LOWER_LOOP_W_LEN = LOWER_LOOP_W_LEN + 1
+                        wlen = wlen + 1
+                    }
+                }
+                k = k + 1
+            }
+        }
+        i = i + 1
+    }
+    LOWER_LOOP_REC_WBASE[rec as usize] = wbase
+    LOWER_LOOP_REC_WLEN[rec as usize] = wlen
+    // Two copies of every carried value must fit.
+    if body_end + 64 + 3 * carry_cost > IR_MAX_INSTRS - 256 {
+        LOWER_LOOP_REC_OK[rec as usize] = 0
+        LOWER_LOOP_REC_WHY[rec as usize] = 5
+        return
+    }
+    // A W register already written before the loop carries a value from one
+    // iteration into the next (or from before the loop into it).
+    i = 0
+    while i < LOWER_LOOP_REC_START[rec as usize] {
+        let s = lowerer_loop_rgn_slot(lo, i)
+        let op = IR_A_OP[s]
+        if op != nop_op && op != label_op {
+            let d = IR_A_DST[s]
+            // Locals are settled above: numeric ones need nothing, the rest
+            // are carried. Only a non-local W register may not be pre-written.
+            if d >= 0 && d < regcap && LOWER_LOOP_W_STAMP[d as usize] == ep
+                && LOWER_LOOP_F_STAMP[d as usize] != ep && lowerer_loop_rgn_local_kind(lo, d) == 0 {
+                LOWER_LOOP_REC_OK[rec as usize] = 0
+                LOWER_LOOP_REC_WHY[rec as usize] = 3
+                LOWER_LOOP_REC_WHAT[rec as usize] = d
+                return
+            }
+        }
+        i = i + 1
+    }
+}
+
+// Whether instruction slot `s` reads a register stamped `ep` in
+// LOWER_LOOP_W_STAMP: src1, src2, the stored value of an index store (kept in
+// imm_i64 -- the only opcode whose imm_i64 is a register, per the core
+// emitter and dce_extract_uses), call arguments, and explicit sret arguments.
+fn lowerer_loop_rgn_reads_stamped(s: usize, ep: i64) -> bool with Mut, Panic, Div {
+    let regcap = lower_loop_reg_cap()
+    let op = IR_A_OP[s]
+    if op == IrOpcode::IrNop as i64 || op == IrOpcode::IrLabel as i64 { return false }
+    let a = IR_A_SRC1[s]
+    if a >= 0 && a < regcap && LOWER_LOOP_W_STAMP[a as usize] == ep { return true }
+    let b = IR_A_SRC2[s]
+    if b >= 0 && b < regcap && LOWER_LOOP_W_STAMP[b as usize] == ep { return true }
+    if op == IrOpcode::IrIndexSet as i64 {
+        let c = IR_A_IMM_I64[s]
+        if c >= 0 && c < regcap && LOWER_LOOP_W_STAMP[c as usize] == ep { return true }
+    }
+    let n = IR_A_ARG_COUNT[s]
+    if op == IrOpcode::IrCallSret as i64 {
+        // Explicit sret arguments are the contiguous vregs first_arg .. +n.
+        let first = IR_A_FIELD_IDX[s]
+        var q: i64 = 0
+        while q < n {
+            let r = first + q
+            if r >= 0 && r < regcap && LOWER_LOOP_W_STAMP[r as usize] == ep { return true }
+            q = q + 1
+        }
+        return false
+    }
+    let base = IR_A_ARG_BASE[s]
+    if n > 0 && base >= 0 && base + n <= IR_ARG_POOL_LEN {
+        var k: i64 = 0
+        while k < n {
+            let r = IR_ARG_POOL[(base + k) as usize]
+            if r >= 0 && r < regcap && LOWER_LOOP_W_STAMP[r as usize] == ep { return true }
+            k = k + 1
+        }
+    }
+    false
+}
+
+// Index of the region call `name` whose destination (enter) or first source
+// (exit, leave) is `tok`, starting the search at `hint`; -1 when absent.
+fn lowerer_loop_rgn_find_call(lo: &! Lowerer, hint: i64, tok: i64, want_dst: bool) -> i64 with Mut, Panic, Div {
+    let count = (*(*lo).current_func).instr_count
+    let call_op = IrOpcode::IrCall as i64
+    if hint >= 0 && hint < count {
+        let s = lowerer_loop_rgn_slot(lo, hint)
+        if IR_A_OP[s] == call_op && ((want_dst && IR_A_DST[s] == tok) || (!want_dst && IR_A_SRC1[s] == tok)) {
+            return hint
+        }
+    }
+    var i: i64 = 0
+    while i < count {
+        let s = lowerer_loop_rgn_slot(lo, i)
+        if IR_A_OP[s] == call_op && ((want_dst && IR_A_DST[s] == tok) || (!want_dst && IR_A_SRC1[s] == tok)) {
+            return i
+        }
+        i = i + 1
+    }
+    0 - 1
+}
+
+// After the whole function is lowered: refuse every loop region whose W is
+// read outside the loop, then patch the refused ones back to nothing.
+fn lower_loop_rgn_env_init() with Mut, Panic, Div, IO {
+    if LOWER_LOOP_DIAG < 0 {
+        LOWER_LOOP_DIAG = 0
+        if str_eq(read_env("SOUNIO_LOOP_RGN_DIAG"), "1") { LOWER_LOOP_DIAG = 1 }
+        if str_eq(read_env("SOUNIO_LOOP_RGN_DIAG"), "2") { LOWER_LOOP_DIAG = 2 }
+        if str_eq(read_env("SOUNIO_LOOP_RGN_SABOTAGE"), "1") { LOWER_LOOP_SABOTAGE = 1 }
+        if str_eq(read_env("SOUNIO_LOOP_RGN_SABOTAGE"), "2") { LOWER_LOOP_SABOTAGE = 2 }
+        if str_eq(read_env("SOUNIO_LOOP_RGN_SABOTAGE"), "3") { LOWER_LOOP_SABOTAGE = 3 }
+        if str_eq(read_env("SOUNIO_LOOP_RGN_SABOTAGE"), "4") { LOWER_LOOP_SABOTAGE = 4 }
+        if str_eq(read_env("SOUNIO_RGN_FORCE_MERGE_VETO"), "1") { LOWER_RGN_FORCE_MERGE_VETO = true }
+    }
+}
+
+fn lowerer_loop_rgn_finalize_mut(lo: &! Lowerer) with Mut, Panic, Div, IO {
+    var rec = LOWER_LOOP_REC_BASE
+    while rec < LOWER_LOOP_REC_COUNT {
+        let ri = rec as usize
+        let count = (*(*lo).current_func).instr_count
+        if LOWER_LOOP_REC_OK[ri] == 1 && LOWER_LOOP_REC_EXIT[ri] >= 0 && LOWER_LOOP_REC_LEAVE[ri] >= 0 {
+            LOWER_LOOP_EPOCH = LOWER_LOOP_EPOCH + 1
+            let ep = LOWER_LOOP_EPOCH
+            var k: i64 = 0
+            while k < LOWER_LOOP_REC_WLEN[ri] {
+                let r = LOWER_LOOP_W[(LOWER_LOOP_REC_WBASE[ri] + k) as usize]
+                LOWER_LOOP_W_STAMP[r as usize] = ep
+                k = k + 1
+            }
+            var i: i64 = 0
+            while i < count && LOWER_LOOP_REC_OK[ri] == 1 {
+                if i == LOWER_LOOP_REC_START[ri] { i = LOWER_LOOP_REC_END[ri] }
+                if i < count && lowerer_loop_rgn_reads_stamped(lowerer_loop_rgn_slot(lo, i), ep) {
+                    LOWER_LOOP_REC_OK[ri] = 0
+                    LOWER_LOOP_REC_WHY[ri] = 4
+                    LOWER_LOOP_REC_WHAT[ri] = i
+                }
+                i = i + 1
+            }
+        } else {
+            if LOWER_LOOP_REC_OK[ri] == 1 { LOWER_LOOP_REC_WHY[ri] = 6 }
+            LOWER_LOOP_REC_OK[ri] = 0
+        }
+        if LOWER_LOOP_DIAG == 2 {
+            var di = LOWER_LOOP_REC_START[ri]
+            var dend = LOWER_LOOP_REC_END[ri]
+            if dend < 0 { dend = count }
+            while di < dend {
+                let ds = lowerer_loop_rgn_slot(lo, di)
+                print("  ir ")
+                print_int(di)
+                print(" op=")
+                print_int(IR_A_OP[ds])
+                print(" d=")
+                print_int(IR_A_DST[ds])
+                print(" s1=")
+                print_int(IR_A_SRC1[ds])
+                print(" s2=")
+                print_int(IR_A_SRC2[ds])
+                print(" imm=")
+                print_int(IR_A_IMM_I64[ds])
+                print(" fi=")
+                print_int(IR_A_FIELD_IDX[ds])
+                print(" lab=")
+                print_int(IR_A_LABEL_ID[ds])
+                print(" fn=")
+                print_int(IR_A_FN_ID[ds])
+                print("\n")
+                di = di + 1
+            }
+        }
+        if LOWER_LOOP_DIAG >= 1 {
+            print("loop_rgn: fn=")
+            print_int((*lo).current_fn)
+            print(" rec=")
+            print_int(rec - LOWER_LOOP_REC_BASE)
+            if LOWER_LOOP_REC_OK[ri] == 1 { print(" OPEN\n") } else {
+                print(" refused why=")
+                print_int(LOWER_LOOP_REC_WHY[ri])
+                print(" what=")
+                print_int(LOWER_LOOP_REC_WHAT[ri])
+                if LOWER_LOOP_REC_WHY[ri] == 4 {
+                    let ds = lowerer_loop_rgn_slot(lo, LOWER_LOOP_REC_WHAT[ri])
+                    print(" op=")
+                    print_int(IR_A_OP[ds])
+                    print(" dst=")
+                    print_int(IR_A_DST[ds])
+                    print(" s1=")
+                    print_int(IR_A_SRC1[ds])
+                    print(" s2=")
+                    print_int(IR_A_SRC2[ds])
+                    print(" imm=")
+                    print_int(IR_A_IMM_I64[ds])
+                    print(" argc=")
+                    print_int(IR_A_ARG_COUNT[ds])
+                    print(" start=")
+                    print_int(LOWER_LOOP_REC_START[ri])
+                    print(" end=")
+                    print_int(LOWER_LOOP_REC_END[ri])
+                }
+                print("\n")
+            }
+        }
+        if (LOWER_LOOP_SABOTAGE == 1 || LOWER_LOOP_SABOTAGE == 3) && LOWER_LOOP_REC_OK[ri] != 1
+            && (LOWER_LOOP_REC_WHY[ri] == 2 || LOWER_LOOP_REC_WHY[ri] == 3 || LOWER_LOOP_REC_WHY[ri] == 4) {
+            LOWER_LOOP_REC_OK[ri] = 1
+        }
+        if LOWER_LOOP_REC_OK[ri] != 1 {
+            let tok = LOWER_LOOP_REC_TOK[ri]
+            let e = lowerer_loop_rgn_find_call(lo, LOWER_LOOP_REC_ENTER[ri], tok, true)
+            if e >= 0 { let _a = ir_region_set(&(*(*lo).current_func).region, e, ir_load_imm(tok, 0)) }
+            if LOWER_LOOP_REC_CARRIED[ri] != 1 {
+                // The in-place reset of a refused region answers "reset" (1) without
+                // a call, so the restart path is never taken.
+                let x = lowerer_loop_rgn_find_call(lo, LOWER_LOOP_REC_EXIT[ri], tok, false)
+                if x >= 0 {
+                    let xd = IR_A_DST[lowerer_loop_rgn_slot(lo, x)]
+                    let _b = ir_region_set(&(*(*lo).current_func).region, x, ir_load_imm(xd, 1))
+                }
+            }
+            let l = lowerer_loop_rgn_find_call(lo, LOWER_LOOP_REC_LEAVE[ri], tok, false)
+            if l >= 0 { let _c = ir_region_set(&(*(*lo).current_func).region, l, ir_nop()) }
+        }
+        rec = rec + 1
+    }
 }
 
 // #2355: evaluate, at `main`'s entry, every closed module-level initializer
@@ -8418,6 +9134,9 @@ fn lowerer_lower_fn_item_mut(
         (*reused).returns_float = preserved.returns_float
         (*reused).return_kn_value_float = preserved.return_kn_value_float
         (*reused).return_fixed_array_len = preserved.return_fixed_array_len
+        (*reused).wide_param_limbs = preserved.wide_param_limbs
+        (*reused).wide_return_bits = preserved.wide_return_bits
+        (*reused).wide_return_signed = preserved.wide_return_signed
         (*reused).return_struct_name = preserved.return_struct_name
         (*reused).first_param_is_ref = preserved.first_param_is_ref
         (*reused).prof_counter_id = preserved.prof_counter_id
@@ -8485,9 +9204,12 @@ fn lowerer_lower_fn_item_mut(
     (*strategy_func_box).return_kn_value_float = lower_opt_type_knowledge_value_float(&fd.return_type)
     (*strategy_func_box).return_fixed_array_len = lower_opt_type_return_fixed_array_code(&fd.return_type)
     (*strategy_func_box).return_struct_name = lower_opt_type_return_layout_name(&fd.return_type)
+    (*strategy_func_box).wide_return_bits = lower_opt_type_wide_bits(&fd.return_type)
+    (*strategy_func_box).wide_return_signed = lower_opt_type_wide_signed(&fd.return_type)
     lower_record_option_box_return((*strategy_func_box).name, &fd.return_type)
     (*strategy_func_box).first_param_is_ref = lower_fn_first_param_is_ref(&fd.params)
     (*strategy_func_box).f128_param_mask = lower_f128_param_mask_of(&fd.params)
+    (*strategy_func_box).wide_param_limbs = lower_wide_param_limbs_of(&fd.params)
     (*strategy_func_box).ref_struct_param_mask = lower_ref_struct_param_mask_of(&fd.params)
     lowerer_sco_strategy_trace(name, (*strategy_func_box).compile_strategy)
     (*lo).current_func = strategy_func_box
@@ -8596,7 +9318,24 @@ lower_rss_mark("before_block")
     let saved_rgn_ret = LOWER_RGN_RET_REG
     let saved_rgn_exit = LOWER_RGN_EXIT_LABEL
     let saved_rgn_fn = LOWER_RGN_FN_ID
+    let saved_loop_ok = LOWER_LOOP_RGN_FN_OK
+    let saved_loop_fn = LOWER_LOOP_RGN_FN_ID
+    let saved_loop_depth = LOWER_LOOP_RGN_DEPTH
+    let saved_loop_base = LOWER_LOOP_REC_BASE
+    let saved_loop_wlen = LOWER_LOOP_W_LEN
+    let saved_loop_clen = LOWER_LOOP_CARRY_LEN
     LOWER_RGN_TOK_REG = 0 - 1
+    LOWER_LOOP_RGN_FN_OK = 0
+    if lower_rgn_enabled() && (*(*lo).module).fn_count <= IR_MAX_FUNCS - lower_rgn_fn_headroom()
+        && !fd.is_kernel && !fd.is_extern && !(*lo).probe_mode
+        && !(*lo).ir_effect_list_has_name_ref(&fd.effects, "GPU")
+        && !(*lo).ir_effect_list_has_name_ref(&fd.effects, "Async") {
+        LOWER_LOOP_RGN_FN_OK = 1
+    }
+    LOWER_LOOP_RGN_FN_ID = (*lo).current_fn
+    LOWER_LOOP_RGN_DEPTH = 0
+    lower_loop_rgn_env_init()
+    LOWER_LOOP_REC_BASE = LOWER_LOOP_REC_COUNT
     var rgn_kind: i64 = 0
     var rgn_type = ir_empty_name()
     var rgn_enter_idx: i64 = 0 - 1
@@ -8604,9 +9343,12 @@ lower_rss_mark("before_block")
     if lowerer_name_is_main(name) && !fd.is_kernel && !fd.is_extern {
         lowerer_emit_deferred_global_inits_mut(lo)
     }
+    // `-> iN/uN` (N > 64): hidden out-array param, bound last (after the
+    // validated-param injection and every declared param).
+    (*lo) = (*lo).lower_wide_ret_bind_hidden()
     var result_reg = lowerer_try_canonical_hello_block_mut(lo, &fd.body)
     if result_reg == IR_INVALID_REG {
-        if lower_rgn_enabled() && (*(*lo).module).fn_count <= IR_MAX_FUNCS - 10
+        if lower_rgn_enabled() && (*(*lo).module).fn_count <= IR_MAX_FUNCS - lower_rgn_fn_headroom()
             && !fd.is_kernel && !fd.is_extern && !(*lo).probe_mode
             && !ir_name_eq_lit(name, "main")
             && !(*lo).ir_effect_list_has_name_ref(&fd.effects, "GPU")
@@ -8668,6 +9410,9 @@ lower_rss_mark("before_block")
         print("\n")
     }
 
+    if LOWER_WIDE_RET_FN >= 0 && LOWER_WIDE_RET_FN == (*lo).current_fn && !(*lo).fn_ends_with_return() {
+        (*lo) = (*lo).emit_wide_ret_store(result_reg, LOWER_BLOCK_TAIL_WIDE_BITS, LOWER_BLOCK_TAIL_WIDE_SIGNED, LOWER_BLOCK_TAIL_NARROW)
+    }
     if rgn_kind > 0 {
         // The tail value falls through into the exit block; explicit returns
         // jump there (lower_return_expr_ref).
@@ -8701,6 +9446,14 @@ lower_rss_mark("before_block")
             lowerer_emit_mut(lo, ir_return(result_reg))
         }
     }
+    lowerer_loop_rgn_finalize_mut(lo)
+    LOWER_LOOP_REC_COUNT = LOWER_LOOP_REC_BASE
+    LOWER_LOOP_W_LEN = saved_loop_wlen
+    LOWER_LOOP_CARRY_LEN = saved_loop_clen
+    LOWER_LOOP_RGN_FN_OK = saved_loop_ok
+    LOWER_LOOP_RGN_FN_ID = saved_loop_fn
+    LOWER_LOOP_RGN_DEPTH = saved_loop_depth
+    LOWER_LOOP_REC_BASE = saved_loop_base
     LOWER_RGN_TOK_REG = saved_rgn_tok
     LOWER_RGN_RET_REG = saved_rgn_ret
     LOWER_RGN_EXIT_LABEL = saved_rgn_exit
@@ -9754,6 +10507,104 @@ fn lower_cast_narrow_unsigned_mask(ct: &Option<Box<TypeExpr>>) -> i64 with Mut, 
                 if n.buf[1] == 51 as i8 && n.buf[2] == 50 as i8 { return 4294967295 }
             }
             0
+        },
+        None => 0,
+    }
+}
+
+// SIO-588: 32-bit narrow integer annotation test. Selects i32/u32 only;
+// u8/u16/i8/i16 dynamic narrowing is a residual gap (their casts already
+// mask on the unsigned side via lower_cast_narrow_unsigned_mask).
+fn lower_name_is_narrow32_type(n: Name) -> bool with Div {
+    if n.len == 3 && n.buf[1] == 51 as i8 && n.buf[2] == 50 as i8 {
+        return n.buf[0] == 105 as i8 || n.buf[0] == 117 as i8
+    }
+    false
+}
+
+fn lower_type_expr_is_narrow32(te: &TypeExpr) -> bool with Mut, Panic, Div {
+    if (*te).kind != TypeExprKind::TypeNamed { return false }
+    lower_name_is_narrow32_type(ir_path_first_name((*te).path))
+}
+
+fn lower_opt_type_is_narrow32(opt: &Option<Box<TypeExpr>>) -> bool with Mut, Panic, Div {
+    match *opt {
+        Some(te) => lower_type_expr_is_narrow32(&(*te)),
+        None => false,
+    }
+}
+
+// SIO-588: narrow-32 kind of a type name: 0 = not i32/u32, 1 = i32
+// (sign-extend the low 32 bits), 2 = u32 (mask the low 32 bits).
+fn lower_name_narrow32_kind(n: Name) -> i64 with Div {
+    if n.len == 3 && n.buf[1] == 51 as i8 && n.buf[2] == 50 as i8 {
+        if n.buf[0] == 105 as i8 { return 1 }
+        if n.buf[0] == 117 as i8 { return 2 }
+    }
+    0
+}
+
+// SIO-588: wrap a 64-bit integer result back to 32 bits after an i32/u32
+// binop (or unary negation). kind 1 (i32) sign-extends the low 32 bits via
+// (x << 32) >> 32 with the arithmetic shr; kind 2 (u32) masks with
+// 0xFFFFFFFF. kind 0 returns the register unchanged. Pure IR built from the
+// existing OpShl/OpShr/OpBitAnd, so every backend lowers it with no new
+// opcodes and no overflow guard (wrapping is the defined narrow result);
+// const-prop only folds all-constant inputs, never runtime registers.
+fn lower_narrow32_wrap_reg(lo: Lowerer, reg: i64, kind: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+    if kind == 2 {
+        let mp = lo.emit_i64_const(4294967295)
+        var lo2 = mp.0
+        let np = lo2.fresh_reg()
+        lo2 = np.0
+        return (lo2.emit(ir_binop(np.1, reg, BinaryOp::OpBitAnd, mp.1)), np.1)
+    }
+    if kind == 1 {
+        let cp = lo.emit_i64_const(32)
+        var lo2 = cp.0
+        let tp = lo2.fresh_reg()
+        lo2 = tp.0
+        lo2 = lo2.emit(ir_binop(tp.1, reg, BinaryOp::OpShl, cp.1))
+        let np = lo2.fresh_reg()
+        lo2 = np.0
+        return (lo2.emit(ir_binop(np.1, tp.1, BinaryOp::OpShr, cp.1)), np.1)
+    }
+    (lo, reg)
+}
+
+// ADR-031 R1: an i32/u32 arithmetic result that does not fit 32 bits fails;
+// it is not sign-extended or masked. The 64-bit result is compared with its
+// 32-bit narrowing (lower_narrow32_wrap_reg); if they differ the program
+// panics through the `panic` builtin (exit 1, the shape of the SIO-207
+// overflow trap). The value is returned unchanged when it fits, so no
+// 64-bit value leaks through a 32-bit-typed operation either way. Used only
+// at arithmetic sites (Add/Sub/Mul, unary negation); `as i32`/`as u32` casts
+// are explicit conversions and are not routed here.
+fn lower_narrow32_check_reg(lo: Lowerer, reg: i64, kind: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+    if kind == 0 { return (lo, reg) }
+    let wp = lower_narrow32_wrap_reg(lo, reg, kind)
+    var lo2 = wp.0
+    let narrowed = wp.1
+    let eqp = lo2.fresh_reg()
+    lo2 = eqp.0
+    lo2 = lo2.emit(ir_binop(eqp.1, narrowed, BinaryOp::OpEq, reg))
+    let okp = lo2.fresh_label()
+    lo2 = okp.0
+    lo2 = lo2.emit(ir_branch_true(eqp.1, okp.1))
+    let panic_fn = lowerer_find_or_add_fn_id_mut(&! lo2, make_name("panic"))
+    let pdst = lo2.fresh_reg()
+    lo2 = pdst.0
+    lo2 = lo2.emit(ir_call(pdst.1, panic_fn, make_name("panic"), None, 0))
+    lo2 = lo2.emit(ir_label(okp.1))
+    (lo2, reg)
+}
+
+// SIO-588: narrow-32 kind of a cast target (see lower_name_narrow32_kind).
+fn lower_cast_narrow32_kind(ct: &Option<Box<TypeExpr>>) -> i64 with Mut, Panic, Div {
+    match *ct {
+        Some(te) => {
+            if (*te).kind != TypeExprKind::TypeNamed { return 0 }
+            lower_name_narrow32_kind(ir_path_first_name((*te).path))
         },
         None => 0,
     }
@@ -11352,6 +12203,52 @@ fn lower_opt_type_wide_signed(opt: &Option<Box<TypeExpr>>) -> i64 with Mut, Pani
 fn lower_wide_limb_count(bits: i64) -> i64 {
     if bits <= 0 { return 0 }
     (bits + 63) / 64
+}
+
+// IrFunction.wide_param_limbs: 4 bits per declared param i < 15, the limb count
+// of an iN/uN param wider than 64 bits (0 for a word param). -1 when a wide
+// param falls outside the encoding (index >= 15 or more than 15 limbs): the
+// binder refuses that function instead of narrowing it.
+fn lower_wide_param_limbs_of(params: &Option<Box<ParamList>>) -> i64 with Mut, Panic, Div {
+    var packed: i64 = 0
+    var shift: i64 = 1
+    var idx: i64 = 0
+    var cur = params
+    var going = true
+    while going {
+        match *cur {
+            Some(list) => {
+                let limbs = lower_wide_limb_count(lower_type_expr_wide_bits(&(*list).head.ty))
+                if limbs > 1 {
+                    if idx >= 15 || limbs > 15 { return 0 - 1 }
+                    packed = packed + limbs * shift
+                }
+                if idx < 15 { shift = shift * 16 }
+                idx = idx + 1
+                cur = &(*list).tail
+            }
+            None => { going = false }
+        }
+    }
+    packed
+}
+
+// `args` with `reg` appended as the LAST argument (the hidden out-array of a
+// wide-returning call), through the recursive ir_reg_list_append.
+fn lower_reg_list_append(args: Option<Box<IrRegList>>, reg: i64) -> Option<Box<IrRegList>> with Mut, Panic, Div, Alloc {
+    match args {
+        Some(node) => Some(Box::new(ir_reg_list_append(*node, reg))),
+        None => Some(Box::new(IrRegList { head: reg, tail: None })),
+    }
+}
+
+// Limb count of declared param `idx` from a packed wide_param_limbs word.
+fn lower_wide_param_limbs_at(packed: i64, idx: i64) -> i64 {
+    if packed <= 0 || idx < 0 || idx >= 15 { return 0 }
+    var p = packed
+    var i: i64 = 0
+    while i < idx { p = p / 16; i = i + 1 }
+    p % 16
 }
 
 // `t op= e` lowers as `t = t op e` (lower_assign_stmt_ref). Same table as
@@ -14620,6 +15517,23 @@ fn fx_op_key(eff: Name, op: Name) -> i64 with Mut, Panic, Div {
     fx_hash_name(eff) * 1000003 + fx_hash_name(op)
 }
 
+// #3547: a literal initializer's zero variance is not an independent source.
+// Keep loop-carried slots dynamic: their next iteration may see an assignment
+// that has not been lowered yet. Outside loops, inspect the latest definition
+// and accept only an actual zero constant, never a copy or computed variance.
+fn fo_variance_is_static_zero(lo: &Lowerer, reg: i64) -> bool with Mut, Panic, Div {
+    if reg < 0 || lo.loop_depth > 0 { return false }
+    var i = (*lo.current_func).instr_count - 1
+    while i >= 0 {
+        let instr = ir_arena_load(ir_region_slot_r((*lo.current_func).region, i))
+        if instr.dst == reg && instr.op != IrOpcode::IrNop {
+            return instr.op == IrOpcode::IrLoadImm && instr.imm_i64 == 0
+        }
+        i = i - 1
+    }
+    false
+}
+
 impl Lowerer {
     fn current_fn_compile_strategy(self) -> i64 with Mut, Panic, Div {
         if self.current_fn < 0 || self.current_fn >= self.module.fn_count {
@@ -14669,6 +15583,9 @@ impl Lowerer {
             (*reused).returns_float = ir_fn_get(&(*lo.module), fn_id as usize).returns_float
             (*reused).return_kn_value_float = ir_fn_get(&(*lo.module), fn_id as usize).return_kn_value_float
             (*reused).return_fixed_array_len = ir_fn_get(&(*lo.module), fn_id as usize).return_fixed_array_len
+            (*reused).wide_param_limbs = ir_fn_get(&(*lo.module), fn_id as usize).wide_param_limbs
+            (*reused).wide_return_bits = ir_fn_get(&(*lo.module), fn_id as usize).wide_return_bits
+            (*reused).wide_return_signed = ir_fn_get(&(*lo.module), fn_id as usize).wide_return_signed
             (*reused).return_struct_name = ir_fn_get(&(*lo.module), fn_id as usize).return_struct_name
             (*reused).first_param_is_ref = ir_fn_get(&(*lo.module), fn_id as usize).first_param_is_ref
             (*reused).prof_counter_id = ir_fn_get(&(*lo.module), fn_id as usize).prof_counter_id
@@ -15032,11 +15949,12 @@ impl Lowerer {
         if elem_count <= 0 { 8 } else { elem_count * 8 }
     }
 
-    fn emit_fixed_array_value_copy(self, src_reg: i64, elem_count: i64, elem_is_float: bool) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+    // A fresh array with the layout of the one in `src_reg` (a packed byte
+    // array gets a packed one), its elements still zero.
+    fn emit_array_alloc_like_source(self, src_reg: i64, elem_count: i64, elem_is_float: bool) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         let pair_dst = self.fresh_reg()
         var lo = pair_dst.0
         let dst_reg = pair_dst.1
-        // Same layout as the source: a packed byte array copies to a packed one.
         var copy_alloc = ir_alloc_array(dst_reg, lo.aggregate_storage_bytes(elem_count), elem_count)
         copy_alloc.label_id = IR_ALLOC_LIKE_SOURCE
         copy_alloc.src1 = src_reg
@@ -15045,6 +15963,168 @@ impl Lowerer {
             lo = lo.emit(ir_mark_float_reg(dst_reg))
             lo = lo.bind_reg_array_elem_float(dst_reg)
         }
+        (lo, dst_reg)
+    }
+
+    // Wide-integer call ABI, caller side (see IrFunction.wide_param_limbs). Builds
+    // the [i64; param_limbs] array the callee reads: the argument's own limbs
+    // first, then the sign word (sar 63 of its top limb for a signed argument,
+    // 0 for an unsigned one) for every limb the argument is narrower than the
+    // param, the same extension `let x: i256 = <i64 expr>` performs (KL-7).
+    // An argument wider than the param keeps its low param_limbs limbs: the
+    // checker only lets a wide argument reach a param of the same width.
+    fn emit_wide_arg_pack(self, arg_reg: i64, arg_limbs: i64, arg_signed: bool, param_limbs: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        let pair_dst = self.fresh_reg()
+        var lo = pair_dst.0
+        let arr = pair_dst.1
+        lo = lo.emit(ir_alloc_array(arr, lo.aggregate_storage_bytes(param_limbs), param_limbs))
+        lo = lo.emit_wide_store_limbs(arr, arg_reg, arg_limbs, arg_signed, param_limbs)
+        (lo, arr)
+    }
+
+    // Store `src_limbs` limbs of `src` into arr[0..dst_limbs), extending a
+    // narrower value with its sign word (signed) or 0 (unsigned).
+    fn emit_wide_store_limbs(self, arr: i64, src: i64, src_limbs: i64, src_signed: bool, dst_limbs: i64) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        var have = src_limbs
+        if have < 1 { have = 1 }
+        if have > dst_limbs { have = dst_limbs }
+        let pair_sign = lo.fresh_reg()
+        lo = pair_sign.0
+        let sign_reg = pair_sign.1
+        if src_signed {
+            let shift_pair = lo.emit_i64_const(63)
+            lo = shift_pair.0
+            lo = lo.emit(ir_binop(sign_reg, src + have - 1, BinaryOp::OpShr, shift_pair.1))
+        } else {
+            lo = lo.emit(ir_load_imm(sign_reg, 0))
+        }
+        var i: i64 = 0
+        while i < dst_limbs {
+            let idx_pair = lo.emit_i64_const(i)
+            lo = idx_pair.0
+            if i < have {
+                lo = lo.emit(ir_index_set(arr, idx_pair.1, src + i))
+            } else {
+                lo = lo.emit(ir_index_set(arr, idx_pair.1, sign_reg))
+            }
+            i = i + 1
+        }
+        lo
+    }
+
+    // An expression whose value is one machine word for certain: an integer
+    // literal (or its negation), a cast to a word type, a word-typed local, a
+    // call to a word-returning function, or arithmetic over those. Anything
+    // else whose width expr_wide_bits_ref cannot see (an `if` or `match`
+    // whose arms are wide, a block) is NOT assumed narrow.
+    fn expr_known_word_ref(self, e: &Expr) -> bool with Mut, Panic, Div, Alloc {
+        if (*e).kind == ExprKind::ExprIntLit { return true }
+        if (*e).kind == ExprKind::ExprBoolTrue || (*e).kind == ExprKind::ExprBoolFalse { return true }
+        if (*e).kind == ExprKind::ExprUnary {
+            match (*e).left {
+                Some(inner) => { return self.expr_known_word_ref(&(*inner)) }
+                None => { return false }
+            }
+        }
+        if (*e).kind == ExprKind::ExprCast {
+            return lower_opt_type_wide_bits(&(*e).cast_type) == 0 && !lower_opt_type_is_wide_float(&(*e).cast_type)
+        }
+        if (*e).kind == ExprKind::ExprIdent {
+            return self.lookup_local((*e).name) >= 0 && self.lookup_local_wide_bits((*e).name) == 0
+        }
+        if (*e).kind == ExprKind::ExprCall || (*e).kind == ExprKind::ExprMethodCall {
+            return self.expr_wide_bits_ref(e) == 0
+        }
+        if (*e).kind == ExprKind::ExprBinary {
+            var l_ok = false
+            var r_ok = false
+            match (*e).left {
+                Some(le) => { l_ok = self.expr_known_word_ref(&(*le)) }
+                None => {}
+            }
+            match (*e).right {
+                Some(re) => { r_ok = self.expr_known_word_ref(&(*re)) }
+                None => {}
+            }
+            return l_ok && r_ok
+        }
+        false
+    }
+
+    // `return v` in a function declared `-> iN/uN` (N > 64): write v's limbs to
+    // the hidden out-array. `src_bits` / `src_signed` describe v; a word value
+    // is extended by its own signedness, as a `let x: i256 = <word>` binding
+    // is. A value whose width cannot be established is refused (10835), never
+    // truncated.
+    fn emit_wide_ret_store(self, reg: i64, src_bits: i64, src_signed: i64, src_is_word: bool) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        let limbs = lower_wide_limb_count(LOWER_WIDE_RET_BITS)
+        if src_bits > 64 {
+            return lo.emit_wide_store_limbs(LOWER_WIDE_RET_OUT, reg, lower_wide_limb_count(src_bits), src_signed == 1, limbs)
+        }
+        if !src_is_word {
+            return lo.report_error_at(10835)
+        }
+        lo.emit_wide_store_limbs(LOWER_WIDE_RET_OUT, reg, 1, src_signed == 1, limbs)
+    }
+
+    // Wide-integer return ABI, callee side: a function declared `-> iN/uN`
+    // (N > 64) takes one hidden LAST parameter, the address of the caller's
+    // [i64; limbs] out-array (IrFunction.wide_return_bits). Called right before
+    // the body is lowered, after every other param_regs change, so it stays
+    // last. Clears the state for any other function.
+    fn lower_wide_ret_bind_hidden(self) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        LOWER_WIDE_RET_FN = 0 - 1
+        LOWER_WIDE_RET_OUT = 0 - 1
+        LOWER_WIDE_RET_BITS = 0
+        LOWER_WIDE_RET_SIGNED = 0
+        if (*lo.current_func).wide_return_bits <= 64 { return lo }
+        if (*lo.current_func).compile_strategy == IR_STRATEGY_INSTRUMENTED {
+            // The instrumented counter is a hidden param too; their order is
+            // not defined, so refuse instead of guessing.
+            return lo.report_error_at(10836)
+        }
+        let preg_pair = lo.fresh_reg()
+        lo = preg_pair.0
+        let preg = preg_pair.1
+        var current_func_box = lo.current_func
+        if (*current_func_box).param_count >= IR_MAX_PARAMS {
+            return lo.report_error_at(10837)
+        }
+        let pc = (*current_func_box).param_count
+        (*current_func_box).param_regs[pc as usize] = preg
+        (*current_func_box).param_count = pc + 1
+        lo.current_func = current_func_box
+        LOWER_WIDE_RET_FN = lo.current_fn
+        LOWER_WIDE_RET_OUT = preg
+        LOWER_WIDE_RET_BITS = (*current_func_box).wide_return_bits
+        LOWER_WIDE_RET_SIGNED = (*current_func_box).wide_return_signed
+        lo
+    }
+
+    // Wide-integer call ABI, callee side: the param register holds the address
+    // of the caller's [i64; limbs] array; load the limbs into a fresh wide
+    // register, which becomes the param's value.
+    fn emit_wide_param_unpack(self, preg: i64, limbs: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        let wide_pair = self.fresh_wide_reg(limbs)
+        var lo = wide_pair.0
+        let wide_reg = wide_pair.1
+        var i: i64 = 0
+        while i < limbs {
+            let idx_pair = lo.emit_i64_const(i)
+            lo = idx_pair.0
+            lo = lo.emit(ir_index_get(wide_reg + i, preg, idx_pair.1))
+            i = i + 1
+        }
+        (lo, wide_reg)
+    }
+
+    fn emit_fixed_array_value_copy(self, src_reg: i64, elem_count: i64, elem_is_float: bool) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        let alloc_pair = self.emit_array_alloc_like_source(src_reg, elem_count, elem_is_float)
+        var lo = alloc_pair.0
+        let dst_reg = alloc_pair.1
         if elem_count <= 0 {
             return (lo, dst_reg)
         }
@@ -16672,6 +17752,8 @@ impl Lowerer {
                 (*(*stk).wide_signed).values[idx as usize] = 0
                 // Findings 11 (#2084): zero-init the per-slot unsigned-int flag.
                 (*(*stk).is_unsigned_int).values[idx as usize] = 0
+                // SIO-588: zero-init the per-slot 32-bit-narrow flag.
+                (*(*stk).narrow32).values[idx as usize] = 0
                 (*(*stk).is_ref).values[idx as usize] = 0
                 (*(*stk).is_borrow_handle).values[idx as usize] = 0
                 // Explicit 0: slot may be reused after scope-pop restores count.
@@ -17360,6 +18442,38 @@ impl Lowerer {
         lo
     }
 
+    // SIO-588: look up the per-slot 32-bit-narrow flag set when the
+    // local/param was bound with an i32/u32 annotation. 1 means narrow;
+    // signedness still comes from lookup_local_is_unsigned_int. Default 0
+    // (word-width or unknown), so i64-style locals keep today's 64-bit path.
+    fn lookup_local_narrow32(self, name: Name) -> i64 with Mut, Panic, Div, Alloc {
+        var i = (*self.locals).count - 1
+        while i >= 0 {
+            if (*(*self.locals).depths).values[i as usize] <= self.scope_depth && ir_name_eq((*(*self.locals).names).values[i as usize], name) {
+                return (*(*self.locals).narrow32).values[i as usize]
+            }
+            i = i - 1
+        }
+        0
+    }
+
+    // SIO-588: stamp narrow32=1 on the local whose type annotation is
+    // i32/u32. Same top-down shadowing walk as bind_local_is_unsigned_int.
+    fn bind_local_narrow32(self, name: Name) -> Lowerer with Mut, Alloc, Panic, Div {
+        var lo = self
+        var stk = lo.locals
+        var i = (*stk).count - 1
+        while i >= 0 {
+            if (*(*stk).depths).values[i as usize] <= lo.scope_depth && ir_name_eq((*(*stk).names).values[i as usize], name) {
+                (*(*stk).narrow32).values[i as usize] = 1
+                lo.locals = stk
+                return lo
+            }
+            i = i - 1
+        }
+        lo
+    }
+
     // Mark a local as holding a reference (&T / &!T / &[T;N]). IndexGet/Set then
     // use label_id=1 (ref_array: load handle from the pointed-to slot). Required for
     // `var p = &!arr; p[i] = v` — without this the local takes the GC-handle array
@@ -17779,7 +18893,10 @@ impl Lowerer {
                 i = i + 1
             }
         }
-        if row < 0 {
+        // #3547: a row bound after a var declared before the first measure()
+        // aliases expression registers; it has no private slots. Rebind the
+        // whole gradient, including channels introduced since the last update.
+        if row < 0 || (*lo.fo_bind).resid[row as usize] < 0 {
             return (lo, false)
         }
         // #2827: a channel the expression carries but this row has no slot for
@@ -24726,7 +25843,10 @@ impl Lowerer {
                 // Prefer bound multi-channel sens; else seed a channel from σ².
                 var lo = self.fo_load_local_sens((*e).name).so_load_local_hess((*e).name)
                 if !lo.fo_expr_has_sens() {
-                    lo = lo.so_clear_expr_hess().fo_seed_from_variance(local_v, 0 - 1)
+                    lo = lo.so_clear_expr_hess()
+                    if !fo_variance_is_static_zero(&lo, local_v) {
+                        lo = lo.fo_seed_from_variance(local_v, 0 - 1)
+                    }
                 } else {
                     // #2827: rows cover only the channels that existed at the
                     // declaration; the rest of the variance is the residual.
@@ -25579,9 +26699,27 @@ impl Lowerer {
     }
 
     fn expr_wide_bits_ref(self, expr: &Expr) -> i64 with Mut, Panic, Div, Alloc {
+        // A call to a function declared `-> iN/uN` (N > 64) yields a wide value
+        // (IrFunction.wide_return_bits, read back from the hidden out-array).
+        if (*expr).kind == ExprKind::ExprCall {
+            let cfid = self.lower_callee_fn_id_ref(&(*expr).left)
+            if cfid >= 0 { return ir_fn_get(&(*self.module), cfid as usize).wide_return_bits }
+            return 0
+        }
+        if (*expr).kind == ExprKind::ExprMethodCall {
+            let mfid = self.lower_method_call_fn_id_ref(expr)
+            if mfid >= 0 { return ir_fn_get(&(*self.module), mfid as usize).wide_return_bits }
+            return 0
+        }
         if (*expr).kind == ExprKind::ExprCast {
             let bits = lower_opt_type_wide_bits(&(*expr).cast_type)
             if bits > 64 { return bits }
+            // A cast to a word integer type (`(x >> 64) as i64`) is one word,
+            // whatever the operand: it keeps limb 0.
+            match (*expr).cast_type {
+                Some(ct) => { if lower_type_expr_is_integer(&(*ct)) { return 0 } }
+                None => {}
+            }
             return self.expr_wide_bits_opt_ref(&(*expr).left)
         }
         if (*expr).kind == ExprKind::ExprUnary {
@@ -25608,6 +26746,16 @@ impl Lowerer {
     }
 
     fn expr_wide_signed_ref(self, expr: &Expr) -> i64 with Mut, Panic, Div, Alloc {
+        if (*expr).kind == ExprKind::ExprCall {
+            let cfid = self.lower_callee_fn_id_ref(&(*expr).left)
+            if cfid >= 0 { return ir_fn_get(&(*self.module), cfid as usize).wide_return_signed }
+            return 0
+        }
+        if (*expr).kind == ExprKind::ExprMethodCall {
+            let mfid = self.lower_method_call_fn_id_ref(expr)
+            if mfid >= 0 { return ir_fn_get(&(*self.module), mfid as usize).wide_return_signed }
+            return 0
+        }
         if (*expr).kind == ExprKind::ExprCast {
             let signed = lower_opt_type_wide_signed(&(*expr).cast_type)
             if lower_opt_type_wide_bits(&(*expr).cast_type) > 64 { return signed }
@@ -27323,6 +28471,10 @@ impl Lowerer {
     //   - ExprCast with cast_type = u8/u16/u32/u64/usize → true
     //   - ExprIdent whose local was bound with such a type        → true
     //   - ExprBinary                                            → propagate from left
+    //   - ExprCall whose callee returns u8/u16/u32/u64/usize     → true
+    //     (SIO-588: without this, a direct call result such as
+    //     `id(0) - 1` misses the unsigned flip and silently stays
+    //     signed — same shape as the narrow-32 call arm below)
     //   - everything else (IntLit, FloatLit, BoolLit, StringLit) → false
     //
     // A boolean-literal, integer-literal, or float-literal CANNOT carry
@@ -27364,6 +28516,122 @@ impl Lowerer {
             // the literal binding via let-typed locals; a nested let n: u64 =
             // foo() + bar() will be re-tagged when the inner if-let lands).
             return self.opt_expr_is_unsigned_int_ref(&(*e).left)
+        }
+        if (*e).kind == ExprKind::ExprCall {
+            // SIO-588: a direct call result carries its callee's return
+            // type — resolve it the same way the narrow-32/int-compatible
+            // arms below do, so `id(0) - 1` flips to OpUSub instead of
+            // silently staying signed.
+            match (*e).left {
+                Some(callee_expr) => {
+                    let callee_name = self.expr_to_callee_name_ref(&(*callee_expr))
+                    let fn_id = lowerer_lookup_fn_id_by_name_ref(&self, callee_name)
+                    if fn_id >= 0 && fn_id < self.module.fn_count {
+                        let callee_fn = ir_fn_get(&(*self.module), fn_id)
+                        return lower_name_is_unsigned_int_type(callee_fn.return_struct_name)
+                    }
+                    return false
+                },
+                None => return false,
+            }
+        }
+        false
+    }
+
+    // SIO-588: `opt_expr_narrow32_kind_ref` walks an expression to determine
+    // whether it is an i32-typed (returns 1) or u32-typed (returns 2) result,
+    // 0 otherwise. Coverage mirrors opt_expr_is_unsigned_int_ref:
+    //   - ExprCast with cast_type = i32 → 1, u32 → 2
+    //   - ExprIdent whose local was bound with such a type (narrow32 slot
+    //     set; signedness from the is_unsigned_int slot) → 1 or 2
+    //   - ExprBinary → propagate from left (the checker types arithmetic
+    //     results as the LEFT operand: check/compat.sio binary_result_type)
+    //   - ExprCall whose callee returns i32/u32 → 1 or 2
+    //   - everything else (literals, other types) → 0. A bare integer
+    //     literal is untyped at this level; the binary-op call site pairs it
+    //     contextually with a typed sibling, as with unsigned.
+    fn opt_expr_narrow32_kind_ref(self, opt: &Option<Box<Expr>>) -> i64 with Mut, Panic, Div, Alloc {
+        match *opt {
+            Some(expr) => self.expr_narrow32_kind_ref(&(*expr)),
+            None => 0,
+        }
+    }
+
+    fn expr_narrow32_kind_ref(self, e: &Expr) -> i64 with Mut, Panic, Div, Alloc {
+        if (*e).kind == ExprKind::ExprCast {
+            return lower_cast_narrow32_kind(&(*e).cast_type)
+        }
+        if (*e).kind == ExprKind::ExprIdent {
+            if self.lookup_local_narrow32((*e).name) == 1 {
+                if self.lookup_local_is_unsigned_int((*e).name) == 1 {
+                    return 2
+                }
+                return 1
+            }
+            return 0
+        }
+        if (*e).kind == ExprKind::ExprBinary {
+            return self.opt_expr_narrow32_kind_ref(&(*e).left)
+        }
+        if (*e).kind == ExprKind::ExprCall {
+            match (*e).left {
+                Some(callee_expr) => {
+                    let callee_name = self.expr_to_callee_name_ref(&(*callee_expr))
+                    let fn_id = lowerer_lookup_fn_id_by_name_ref(&self, callee_name)
+                    if fn_id >= 0 && fn_id < self.module.fn_count {
+                        let callee_fn = ir_fn_get(&(*self.module), fn_id)
+                        return lower_name_narrow32_kind(callee_fn.return_struct_name)
+                    }
+                    return 0
+                },
+                None => return 0,
+            }
+        }
+        0
+    }
+
+    // SIO-588: is this expression a plausible integer operand for a
+    // narrow-32 binary (anything whose 64-bit word value the checker would
+    // accept next to an i32/u32)? Int literals, integer casts, scalar-kind-1
+    // idents (int/bool words), integer binaries (from the left), integer
+    // calls and `.len()`/`.count()` (i64). Floats, strings and unknowns
+    // return false so narrowing never touches a float or string `+`.
+    fn opt_expr_is_int_compatible_ref(self, opt: &Option<Box<Expr>>) -> bool with Mut, Panic, Div, Alloc {
+        match *opt {
+            Some(expr) => self.expr_is_int_compatible_ref(&(*expr)),
+            None => false,
+        }
+    }
+
+    fn expr_is_int_compatible_ref(self, e: &Expr) -> bool with Mut, Panic, Div, Alloc {
+        if (*e).kind == ExprKind::ExprIntLit {
+            return true
+        }
+        if (*e).kind == ExprKind::ExprCast {
+            return lower_cast_type_is_integer(&(*e).cast_type)
+        }
+        if (*e).kind == ExprKind::ExprIdent {
+            return self.lookup_local_scalar_kind((*e).name) == 1
+        }
+        if (*e).kind == ExprKind::ExprBinary {
+            return self.opt_expr_is_int_compatible_ref(&(*e).left)
+        }
+        if (*e).kind == ExprKind::ExprCall {
+            match (*e).left {
+                Some(callee_expr) => {
+                    let callee_name = self.expr_to_callee_name_ref(&(*callee_expr))
+                    let fn_id = lowerer_lookup_fn_id_by_name_ref(&self, callee_name)
+                    if fn_id >= 0 && fn_id < self.module.fn_count {
+                        let callee_fn = ir_fn_get(&(*self.module), fn_id)
+                        return lower_name_is_integer_type(callee_fn.return_struct_name)
+                    }
+                    return false
+                },
+                None => false,
+            }
+        }
+        if (*e).kind == ExprKind::ExprMethodCall {
+            return ir_name_eq((*e).name, make_name("len")) || ir_name_eq((*e).name, make_name("count"))
         }
         false
     }
@@ -29049,9 +30317,13 @@ impl Lowerer {
         func.return_kn_value_float = lower_opt_type_knowledge_value_float(return_type)
         func.return_fixed_array_len = lower_opt_type_return_fixed_array_code(return_type)
         func.return_struct_name = lower_opt_type_return_layout_name(return_type)
+        func.wide_return_bits = lower_opt_type_wide_bits(return_type)
+        func.wide_return_signed = lower_opt_type_wide_signed(return_type)
         lower_record_option_box_return(func.name, return_type)
         func.param_count = ir_param_list_count_ref(params)
         func.f128_param_mask = lower_f128_param_mask_of(params)
+        func.wide_param_limbs = lower_wide_param_limbs_of(params)
+        if func.wide_return_bits > 64 { func.param_count = func.param_count + 1 }
         func.ref_struct_param_mask = lower_ref_struct_param_mask_of(params)
         func.first_param_is_ref = lower_fn_first_param_is_ref(params)
         func.param_regs = [IR_INVALID_REG; 64]
@@ -29491,6 +30763,23 @@ impl Lowerer {
                         param_value_reg = copy_pair.1
                         current_func = lo.current_func
                     }
+                    // Wide-integer param: see path A.
+                    let ref_param_wide_bits = lower_type_expr_wide_bits(&(*list).head.ty)
+                    if ref_param_wide_bits > 64 && !ref_param_is_ref {
+                        lo.current_func = current_func
+                        let wp = lo.emit_wide_param_unpack(preg, lower_wide_limb_count(ref_param_wide_bits))
+                        lo = wp.0
+                        param_value_reg = wp.1
+                        current_func = lo.current_func
+                    }
+                    // ADR-031 R1 boundary range check for i32/u32 params: see path A.
+                    if !ref_param_is_ref && lower_type_expr_is_narrow32(&(*list).head.ty) {
+                        lo.current_func = current_func
+                        let nk_b = lower_name_narrow32_kind(ir_path_first_name((*list).head.ty.path))
+                        let ncheck_b = lower_narrow32_check_reg(lo, param_value_reg, nk_b)
+                        lo = ncheck_b.0
+                        current_func = lo.current_func
+                    }
 
                     let _is_mut = (*list).head.is_self_mut
                     if (*locals).count < 4096 {
@@ -29524,10 +30813,12 @@ impl Lowerer {
                         }
                         // V0-E.5.4: f128 params are F128Bits handles (wide_bits=128, kind 5
                         // below) so they are ready softfloat operands; f256 stays kind 5 only.
-                        (*(*locals).wide_bits).values[idx as usize] = if lower_type_expr_is_f128(&(*list).head.ty) { 128 } else { 0 }
-                        (*(*locals).wide_signed).values[idx as usize] = 0
+                        (*(*locals).wide_bits).values[idx as usize] = if lower_type_expr_is_f128(&(*list).head.ty) { 128 } else if ref_param_wide_bits > 64 && !ref_param_is_ref { ref_param_wide_bits } else { 0 }
+                        (*(*locals).wide_signed).values[idx as usize] = if ref_param_wide_bits > 64 && !ref_param_is_ref && ir_path_first_name((*list).head.ty.path).buf[0] as i64 == 105 { 1 } else { 0 }
                         // Findings 11 (#2084): stamp is_unsigned_int=1 when the param is u8/u16/u32/u64/usize.
                         (*(*locals).is_unsigned_int).values[idx as usize] = if lower_type_expr_is_unsigned_int(&(*list).head.ty) { 1 } else { 0 }
+                        // SIO-588: stamp narrow32=1 when the param is i32/u32.
+                        (*(*locals).narrow32).values[idx as usize] = if lower_type_expr_is_narrow32(&(*list).head.ty) { 1 } else { 0 }
                         (*(*locals).is_ref).values[idx as usize] = if lower_type_expr_is_ref_like(&(*list).head.ty) { 1 } else if (*list).head.ty.kind == TypeExprKind::TypeRawPtr { 2 } else { 0 }
                         // Copilot review (PR #2516): a tuple-typed PARAMETER (e.g.
                         // fn f(t: (f64, [f64; 8]))) needs the same per-slot masks a
@@ -29742,6 +31033,9 @@ impl Lowerer {
             (*reused).returns_float = ir_fn_get(&(*lo.module), fn_id as usize).returns_float
             (*reused).return_kn_value_float = ir_fn_get(&(*lo.module), fn_id as usize).return_kn_value_float
             (*reused).return_fixed_array_len = ir_fn_get(&(*lo.module), fn_id as usize).return_fixed_array_len
+            (*reused).wide_param_limbs = ir_fn_get(&(*lo.module), fn_id as usize).wide_param_limbs
+            (*reused).wide_return_bits = ir_fn_get(&(*lo.module), fn_id as usize).wide_return_bits
+            (*reused).wide_return_signed = ir_fn_get(&(*lo.module), fn_id as usize).wide_return_signed
             (*reused).return_struct_name = ir_fn_get(&(*lo.module), fn_id as usize).return_struct_name
             (*reused).first_param_is_ref = ir_fn_get(&(*lo.module), fn_id as usize).first_param_is_ref
             (*reused).prof_counter_id = ir_fn_get(&(*lo.module), fn_id as usize).prof_counter_id
@@ -29795,6 +31089,8 @@ impl Lowerer {
         (*lo.current_func).return_kn_value_float = lower_opt_type_knowledge_value_float(&fd.return_type)
         (*lo.current_func).return_fixed_array_len = lower_opt_type_return_fixed_array_code(&fd.return_type)
         (*lo.current_func).return_struct_name = lower_opt_type_return_layout_name(&fd.return_type)
+        (*lo.current_func).wide_return_bits = lower_opt_type_wide_bits(&fd.return_type)
+        (*lo.current_func).wide_return_signed = lower_opt_type_wide_signed(&fd.return_type)
         lower_record_option_box_return((*lo.current_func).name, &fd.return_type)
         (*lo.current_func).first_param_is_ref = lower_fn_first_param_is_ref(&fd.params)
 
@@ -29861,7 +31157,10 @@ impl Lowerer {
             print(str_from_bytes(name.buf, name.len))
             print("\n")
         }
-        let bpair = lo.lower_block(fd.body)
+        lo = lo.lower_wide_ret_bind_hidden()
+        // A wide-returning fn needs the tail's width facts, which only the _ref
+        // block lowering records (LOWER_BLOCK_TAIL_*).
+        let bpair = if LOWER_WIDE_RET_FN == lo.current_fn { lo.lower_block_ref(&fd.body) } else { lo.lower_block(fd.body) }
         lo = bpair.0
         let result_reg = bpair.1
         if lower_live_diag_enabled() {
@@ -29886,6 +31185,9 @@ impl Lowerer {
             print("\n")
         }
 
+        if LOWER_WIDE_RET_FN == lo.current_fn && !lo.fn_ends_with_return() {
+            lo = lo.emit_wide_ret_store(result_reg, LOWER_BLOCK_TAIL_WIDE_BITS, LOWER_BLOCK_TAIL_WIDE_SIGNED, LOWER_BLOCK_TAIL_NARROW)
+        }
         if !lo.fn_ends_with_return() {
             lo = lo.emit(ir_return(result_reg))
         }
@@ -29946,6 +31248,9 @@ impl Lowerer {
             (*reused).returns_float = ir_fn_get(&(*lo.module), fn_id as usize).returns_float
             (*reused).return_kn_value_float = ir_fn_get(&(*lo.module), fn_id as usize).return_kn_value_float
             (*reused).return_fixed_array_len = ir_fn_get(&(*lo.module), fn_id as usize).return_fixed_array_len
+            (*reused).wide_param_limbs = ir_fn_get(&(*lo.module), fn_id as usize).wide_param_limbs
+            (*reused).wide_return_bits = ir_fn_get(&(*lo.module), fn_id as usize).wide_return_bits
+            (*reused).wide_return_signed = ir_fn_get(&(*lo.module), fn_id as usize).wide_return_signed
             (*reused).return_struct_name = ir_fn_get(&(*lo.module), fn_id as usize).return_struct_name
             (*reused).first_param_is_ref = ir_fn_get(&(*lo.module), fn_id as usize).first_param_is_ref
             (*reused).prof_counter_id = ir_fn_get(&(*lo.module), fn_id as usize).prof_counter_id
@@ -29986,6 +31291,8 @@ impl Lowerer {
         (*lo.current_func).return_kn_value_float = lower_opt_type_knowledge_value_float(&fd.return_type)
         (*lo.current_func).return_fixed_array_len = lower_opt_type_return_fixed_array_code(&fd.return_type)
         (*lo.current_func).return_struct_name = lower_opt_type_return_layout_name(&fd.return_type)
+        (*lo.current_func).wide_return_bits = lower_opt_type_wide_bits(&fd.return_type)
+        (*lo.current_func).wide_return_signed = lower_opt_type_wide_signed(&fd.return_type)
         lower_record_option_box_return((*lo.current_func).name, &fd.return_type)
         (*lo.current_func).first_param_is_ref = lower_fn_first_param_is_ref(&fd.params)
 
@@ -30043,6 +31350,7 @@ impl Lowerer {
             print(str_from_bytes(name.buf, name.len))
             print("\n")
         }
+        lo = lo.lower_wide_ret_bind_hidden()
         let bpair = lo.lower_block_ref(&fd.body)
         lo = bpair.0
         let result_reg = bpair.1
@@ -30057,6 +31365,9 @@ impl Lowerer {
             print("\n")
         }
 
+        if LOWER_WIDE_RET_FN == lo.current_fn && !lo.fn_ends_with_return() {
+            lo = lo.emit_wide_ret_store(result_reg, LOWER_BLOCK_TAIL_WIDE_BITS, LOWER_BLOCK_TAIL_WIDE_SIGNED, LOWER_BLOCK_TAIL_NARROW)
+        }
         if !lo.fn_ends_with_return() {
             lo = lo.emit(ir_return(result_reg))
         }
@@ -30138,6 +31449,14 @@ impl Lowerer {
                                 if f128_body_tail && is_tail_stmt {
                                     LOWER_F128_TAIL_EXPR = false
                                 }
+                                if is_tail_stmt {
+                                    // Read now: this block's locals leave scope below.
+                                    LOWER_BLOCK_TAIL_WIDE_BITS = pair_tail.0.expr_wide_bits_ref(&(*expr_box))
+                                    LOWER_BLOCK_TAIL_WIDE_SIGNED = if LOWER_BLOCK_TAIL_WIDE_BITS > 64 {
+                                        pair_tail.0.expr_wide_signed_ref(&(*expr_box))
+                                    } else if pair_tail.0.expr_is_unsigned_int_ref(&(*expr_box)) { 0 } else { 1 }
+                                    LOWER_BLOCK_TAIL_NARROW = pair_tail.0.expr_known_word_ref(&(*expr_box))
+                                }
                                 pair_tail
                             }
                             _ => {
@@ -30146,6 +31465,11 @@ impl Lowerer {
                         }
                     } else {
                         lo.lower_assign_stmt_ref(stmt_ref)
+                    }
+                    if is_tail_stmt && stmt_ref.kind != StmtKind::StmtExpr {
+                        LOWER_BLOCK_TAIL_WIDE_BITS = 0
+                        LOWER_BLOCK_TAIL_WIDE_SIGNED = 1
+                        LOWER_BLOCK_TAIL_NARROW = false
                     }
                     LOWER_PLACE_MOVE_OK = 0
                     stmt_idx = stmt_idx + 1
@@ -31246,11 +32570,27 @@ impl Lowerer {
                         // and an alias would observe that mutation. `is_mut` alone was
                         // insufficient — the binding's own mutability says nothing about
                         // the source's.
-                        let copy_pair = lo.fresh_reg()
-                        lo = copy_pair.0
-                        let copy_reg = copy_pair.1
-                        lo = lo.emit(ir_copy(copy_reg, reg))
-                        bind_reg = copy_reg
+                        // A wide-integer source (iN/uN, N > 64) is `limbs` consecutive
+                        // vregs: snapshot every one. A one-register copy kept limb 0
+                        // only, so `let c: i256 = big; c == big` was false.
+                        let src_wide_limbs = lower_wide_limb_count(lo.lookup_local_wide_bits((*rhs_ident).name))
+                        if src_wide_limbs > 1 && lo.lookup_local_scalar_kind((*rhs_ident).name) != 5 {
+                            let wcopy_pair = lo.fresh_wide_reg(src_wide_limbs)
+                            lo = wcopy_pair.0
+                            let wcopy_reg = wcopy_pair.1
+                            var wl: i64 = 0
+                            while wl < src_wide_limbs {
+                                lo = lo.emit(ir_copy(wcopy_reg + wl, reg + wl))
+                                wl = wl + 1
+                            }
+                            bind_reg = wcopy_reg
+                        } else {
+                            let copy_pair = lo.fresh_reg()
+                            lo = copy_pair.0
+                            let copy_reg = copy_pair.1
+                            lo = lo.emit(ir_copy(copy_reg, reg))
+                            bind_reg = copy_reg
+                        }
                     }
                 } else if (*rhs_ident).kind == ExprKind::ExprUnary || (*rhs_ident).kind == ExprKind::ExprFieldAccess {
                     // SIO-278: `let saved = *b` / `let s = o.f` bound the
@@ -32348,6 +33688,17 @@ impl Lowerer {
                 }
             }
         }
+        // SIO-588: if the let type annotation is i32/u32, stamp narrow32 so
+        // lower_binary_expr_ref can wrap the 64-bit binop result back to 32
+        // bits. Signedness still comes from the is_unsigned_int stamp above.
+        match s.ty {
+            Some(ann_ty_narrow) => {
+                if lower_type_expr_is_narrow32(&(*ann_ty_narrow)) {
+                    lo = lo.bind_local_narrow32(s.name)
+                }
+            }
+            _ => {}
+        }
         // V0-E.4.1: annotated f128/f256 locals are scalar_kind=5 (not f64=2).
         // V0-E.5.1: f128 locals additionally occupy two i64 limbs (wide_bits=128).
         match s.ty {
@@ -33125,6 +34476,53 @@ impl Lowerer {
                                 lo = lo.emit(ir_store_global(rhs, bss_off_local, (*target_expr).name))
                             }
                             lo = lo.emit(ir_copy(dst, rhs))
+                            // A wide-integer local is `limbs` consecutive vregs: the
+                            // copy above moved limb 0 only, so `x = x * 2` in a loop
+                            // lost every high limb. Copy the rest; a word RHS (a
+                            // literal: the checker admits nothing else narrower)
+                            // supplies its sign word. A compound assignment's value
+                            // is `x op y`, as wide as x.
+                            let dst_limbs = lower_wide_limb_count(lo.lookup_local_wide_bits((*target_expr).name))
+                            if dst_limbs > 1 && lo.lookup_local_scalar_kind((*target_expr).name) != 5 {
+                                var rhs_limbs: i64 = dst_limbs
+                                var rhs_signed = true
+                                if s.assign_op == AssignOp::AssignEq {
+                                    match s.expr {
+                                        Some(rhs_e) => {
+                                            let rb = lo.expr_wide_bits_ref(&(*rhs_e))
+                                            if rb > 64 {
+                                                rhs_limbs = lower_wide_limb_count(rb)
+                                            } else {
+                                                rhs_limbs = 1
+                                                rhs_signed = !lo.expr_is_unsigned_int_ref(&(*rhs_e))
+                                            }
+                                        }
+                                        None => {}
+                                    }
+                                }
+                                var sign_w = rhs
+                                if rhs_limbs < dst_limbs {
+                                    let sw_pair = lo.fresh_reg()
+                                    lo = sw_pair.0
+                                    sign_w = sw_pair.1
+                                    if rhs_signed {
+                                        let sh_pair = lo.emit_i64_const(63)
+                                        lo = sh_pair.0
+                                        lo = lo.emit(ir_binop(sign_w, rhs + rhs_limbs - 1, BinaryOp::OpShr, sh_pair.1))
+                                    } else {
+                                        lo = lo.emit(ir_load_imm(sign_w, 0))
+                                    }
+                                }
+                                var li: i64 = 1
+                                while li < dst_limbs {
+                                    if li < rhs_limbs {
+                                        lo = lo.emit(ir_copy(dst + li, rhs + li))
+                                    } else {
+                                        lo = lo.emit(ir_copy(dst + li, sign_w))
+                                    }
+                                    li = li + 1
+                                }
+                            }
                             if rhs_variance >= 0 {
                                 // Copy into the local's fixed uncertainty slots, the
                                 // same discipline the value uses one line above. A
@@ -33425,6 +34823,9 @@ impl Lowerer {
         var regs: [i64; 64] = [0; 64]
         var reg_count: i64 = 0
         var f128_bit: i64 = 1
+        let wide_limbs = LOWER_WIDE_ARG_LIMBS
+        LOWER_WIDE_ARG_LIMBS = 0
+        var arg_idx: i64 = 0
         while true {
             match *current {
                 Some(list) => {
@@ -33438,6 +34839,21 @@ impl Lowerer {
                     f128_bit = f128_bit * 2
                     lo = pair_head.0
                     var arg_reg = pair_head.1
+                    // Wide-integer param: pass the address of a limb array.
+                    let param_limbs = lower_wide_param_limbs_at(wide_limbs, arg_idx)
+                    if param_limbs > 1 {
+                        let arg_bits = lo.expr_wide_bits_ref(&(*list).head)
+                        var arg_limbs: i64 = 1
+                        var arg_signed = !lo.expr_is_unsigned_int_ref(&(*list).head)
+                        if arg_bits > 64 {
+                            arg_limbs = lower_wide_limb_count(arg_bits)
+                            arg_signed = lo.expr_wide_signed_ref(&(*list).head) == 1
+                        }
+                        let pk = lo.emit_wide_arg_pack(arg_reg, arg_limbs, arg_signed, param_limbs)
+                        lo = pk.0
+                        arg_reg = pk.1
+                    }
+                    arg_idx = arg_idx + 1
                     if borrow {
                         // The same OpRef an explicit `&value` argument lowers to.
                         let pair_bref = lo.fresh_reg()
@@ -37548,11 +38964,36 @@ impl Lowerer {
             } else {
                 0
             }
+            if fn_id >= 0 && fn_id < lo1.module.fn_count {
+                let wide_packed = ir_fn_get(&(*lo1.module), fn_id as usize).wide_param_limbs
+                if wide_packed < 0 {
+                    // A wide param past the 15-param / 15-limb encoding: refuse
+                    // rather than pass it as one word.
+                    lo1 = lo1.report_error_at(10831)
+                } else {
+                    LOWER_WIDE_ARG_LIMBS = wide_packed
+                }
+            }
             lo1.lower_expr_args_masked_borrow_ref(&e.args, f128_arg_mask, ref_arg_mask)
         }
-        let lo2 = pair_args.lowerer
-        let args: Option<Box<IrRegList>> = if pair_args.count <= 0 { None } else { Some(Box::new(pair_args.regs)) }
-        let argc = pair_args.count
+        var lo2 = pair_args.lowerer
+        var args: Option<Box<IrRegList>> = if pair_args.count <= 0 { None } else { Some(Box::new(pair_args.regs)) }
+        var argc = pair_args.count
+        // `-> iN/uN` (N > 64): pass a fresh out-array as the hidden last arg.
+        var wide_ret_limbs: i64 = 0
+        var wide_ret_arr: i64 = 0 - 1
+        if fn_id >= 0 && fn_id < (*lo2.module).fn_count {
+            let wrb = ir_fn_get(&(*lo2.module), fn_id as usize).wide_return_bits
+            if wrb > 64 {
+                wide_ret_limbs = lower_wide_limb_count(wrb)
+                let arr_pair = lo2.fresh_reg()
+                lo2 = arr_pair.0
+                wide_ret_arr = arr_pair.1
+                lo2 = lo2.emit(ir_alloc_array(wide_ret_arr, lo2.aggregate_storage_bytes(wide_ret_limbs), wide_ret_limbs))
+                args = lower_reg_list_append(args, wide_ret_arr)
+                argc = argc + 1
+            }
+        }
         let pair_d = lo2.fresh_reg()
         let lo3 = pair_d.0
         let dst = pair_d.1
@@ -37574,6 +39015,10 @@ impl Lowerer {
         var lo5 = lo4.emit(call_instr)
         if call_instr.imm_flags == IR_FLOAT_REG_MARKER_FLAG {
             lo5 = lo5.emit(ir_mark_float_reg(dst))
+        }
+        if wide_ret_limbs > 1 {
+            // The value is the out-array's limbs, not rax.
+            return lo5.emit_wide_param_unpack(wide_ret_arr, wide_ret_limbs)
         }
         (lo5, dst)
     }
@@ -38612,6 +40057,18 @@ impl Lowerer {
                 final_op = BinaryOp::OpURem
             } else if e.bin_op == BinaryOp::OpShr {
                 final_op = BinaryOp::OpUShr
+            } else if e.bin_op == BinaryOp::OpAdd {
+                // SIO-588 + ADR-031 R1: unsigned +,-,* take the unsigned
+                // variant, whose overflow guard tests the unsigned condition
+                // (CF via `jc`, with `mul` for the product) instead of the
+                // signed one (OF via `jo`). Same guard shape as Div/Rem/Shr
+                // above: mixed signedness stays signed (trapping on OF), per
+                // the #2286 review.
+                final_op = BinaryOp::OpUAdd
+            } else if e.bin_op == BinaryOp::OpSub {
+                final_op = BinaryOp::OpUSub
+            } else if e.bin_op == BinaryOp::OpMul {
+                final_op = BinaryOp::OpUMul
             }
             // #2830: unsigned < <= > >=. BinaryOp has no unsigned compares and every
             // backend emits setl/setg (signed), so `a > 1` was false for a u64 with
@@ -38639,6 +40096,32 @@ impl Lowerer {
             }
         }
         let lo4 = lo3.emit(ir_binop_typed(dst, lhs, final_op, rhs, lhs_expr_is_float, rhs_expr_is_float))
+        // SIO-588 + ADR-031 R1: dynamic narrow-32 enforcement. The checker
+        // types an arithmetic result as the LEFT operand (binary_result_type),
+        // so a 64-bit word slot holding an i32/u32 result must be range-checked
+        // against 32 bits (lower_narrow32_check_reg): out of range panics. Gate: left is i32/u32-typed,
+        // both sides non-float, right is integer-compatible (literal,
+        // integer cast/ident/call, .len()/.count()) — the same contextual
+        // literal pairing as the unsigned flip, extended to any integer
+        // right side, since a checker-accepted program only pairs numerics
+        // here. `1 + a32` keeps the 64-bit result (its type IS i64: left
+        // rules), as does any op the gate cannot positively type.
+        // ADR-031 R2: OpDiv joins the check because i32::MIN / -1 = 2^31 does
+        // not fit i32 (the 64-bit idiv cannot fault on it).
+        if e.bin_op == BinaryOp::OpAdd || e.bin_op == BinaryOp::OpSub || e.bin_op == BinaryOp::OpMul || e.bin_op == BinaryOp::OpDiv {
+            if !lhs_expr_is_float && !rhs_expr_is_float {
+                let narrow_kind = lo4.opt_expr_narrow32_kind_ref(&e.left)
+                if narrow_kind != 0 {
+                    let rhs_int_p = match e.right {
+                        Some(nrbox) => rhs_is_intlit_p || lo4.expr_is_int_compatible_ref(&(*nrbox)),
+                        None => false,
+                    }
+                    if rhs_int_p {
+                        return lower_narrow32_check_reg(lo4, dst, narrow_kind)
+                    }
+                }
+            }
+        }
         (lo4, dst)
     }
 
@@ -40232,6 +41715,18 @@ impl Lowerer {
         if src_is_float || deref_yields_float {
             lo3 = lo3.emit(ir_mark_float_reg(dst))
         }
+        // SIO-588 + ADR-031 R1: dynamic narrow-32 enforcement for unary
+        // negation. `-a` on an i32/u32 operand negates in 64 bits (the
+        // SIO-207 `jo` guard cannot fire on a 32-bit-range value) and the
+        // result is range-checked against 32 bits, exactly as the binary
+        // Add/Sub/Mul check above: `-i32::MIN` panics. Float negation is
+        // untouched.
+        if e.un_op == UnaryOp::OpNeg && !src_is_float {
+            let neg_narrow_kind = lo3.opt_expr_narrow32_kind_ref(&e.left)
+            if neg_narrow_kind != 0 {
+                return lower_narrow32_check_reg(lo3, dst, neg_narrow_kind)
+            }
+        }
         (lo3, dst)
     }
 
@@ -41105,10 +42600,35 @@ impl Lowerer {
         } else {
             0
         }
+        // Wide-integer params: same receiver shift, one 4-bit field.
+        if fn_id0 >= 0 && fn_id0 < (*lo1.module).fn_count {
+            let wide_packed_m = ir_fn_get(&(*lo1.module), fn_id0 as usize).wide_param_limbs
+            if wide_packed_m < 0 {
+                lo1 = lo1.report_error_at(10832)
+            } else {
+                LOWER_WIDE_ARG_LIMBS = wide_packed_m / 16
+            }
+        }
         let pair_args: LowerExprArgsResult = lo1.lower_expr_args_masked_borrow_ref(&e.args, f128_arg_mask_m, ref_arg_mask_m)
-        let lo2 = pair_args.lowerer
-        let arg_list: Option<Box<IrRegList>> = if pair_args.count <= 0 { None } else { Some(Box::new(pair_args.regs)) }
-        let arg_count = pair_args.count
+        var lo2 = pair_args.lowerer
+        var arg_list: Option<Box<IrRegList>> = if pair_args.count <= 0 { None } else { Some(Box::new(pair_args.regs)) }
+        var arg_count = pair_args.count
+        // `-> iN/uN` (N > 64): hidden out-array as the last arg (see the
+        // named-call site).
+        var wide_ret_limbs_m: i64 = 0
+        var wide_ret_arr_m: i64 = 0 - 1
+        if fn_id0 >= 0 && fn_id0 < (*lo2.module).fn_count {
+            let wrb_m = ir_fn_get(&(*lo2.module), fn_id0 as usize).wide_return_bits
+            if wrb_m > 64 {
+                wide_ret_limbs_m = lower_wide_limb_count(wrb_m)
+                let arr_pair_m = lo2.fresh_reg()
+                lo2 = arr_pair_m.0
+                wide_ret_arr_m = arr_pair_m.1
+                lo2 = lo2.emit(ir_alloc_array(wide_ret_arr_m, lo2.aggregate_storage_bytes(wide_ret_limbs_m), wide_ret_limbs_m))
+                arg_list = lower_reg_list_append(arg_list, wide_ret_arr_m)
+                arg_count = arg_count + 1
+            }
+        }
         let args2 = lo2.prepend_arg(base_reg, arg_list)
         let pair_fn = lo2.find_or_add_fn_id(call_name)
         let lo3 = pair_fn.0
@@ -41132,6 +42652,9 @@ impl Lowerer {
         var lo6 = lo5.emit(call_instr_m)
         if call_instr_m.imm_flags == IR_FLOAT_REG_MARKER_FLAG {
             lo6 = lo6.emit(ir_mark_float_reg(dst))
+        }
+        if wide_ret_limbs_m > 1 {
+            return lo6.emit_wide_param_unpack(wide_ret_arr_m, wide_ret_limbs_m)
         }
         (lo6, dst)
     }
@@ -41270,6 +42793,238 @@ impl Lowerer {
         (lo, res)
     }
 
+    // Open a loop region (LOWER_LOOP_RGN_*). Called right before the loop's
+    // top label: the region spans the whole loop and is reset in place at
+    // every iteration end (loop_rgn_end_iter), so values carried from one
+    // iteration to the next live INSIDE it and are relocated to its start
+    // instead of piling up below it. Returns the record, or -1 when this
+    // function or this loop cannot have one.
+    fn loop_rgn_begin(self) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        if LOWER_LOOP_RGN_FN_OK != 1 || lo.current_fn != LOWER_LOOP_RGN_FN_ID { return (lo, 0 - 1) }
+        if LOWER_LOOP_REC_COUNT >= 4096 || LOWER_LOOP_RGN_DEPTH >= 256 { return (lo, 0 - 1) }
+        if (*lo.current_func).instr_count > IR_MAX_INSTRS - 1024 { return (lo, 0 - 1) }
+        let _barrier_id = lowerer_find_or_add_fn_id_mut(&! lo, make_name("__rgn_barrier"))
+        let _mark_id = lowerer_find_or_add_fn_id_mut(&! lo, make_name("__rgn_mark_all"))
+        let rec = LOWER_LOOP_REC_COUNT
+        let ri = rec as usize
+        LOWER_LOOP_REC_COUNT = rec + 1
+        LOWER_LOOP_REC_START[ri] = (*lo.current_func).instr_count
+        LOWER_LOOP_REC_ENTER[ri] = (*lo.current_func).instr_count
+        let enter_pair = lo.rgn_call("__rgn_enter", 0, 0, 0, 0)
+        lo = enter_pair.0
+        LOWER_LOOP_REC_TOK[ri] = enter_pair.1
+        LOWER_LOOP_REC_BODY[ri] = (*lo.current_func).instr_count
+        let pi = lo.fresh_label()
+        lo = pi.0
+        LOWER_LOOP_REC_ITER[ri] = pi.1
+        let pb = lo.fresh_label()
+        lo = pb.0
+        LOWER_LOOP_REC_BRK[ri] = pb.1
+        LOWER_LOOP_REC_OK[ri] = 1
+        LOWER_LOOP_REC_WHY[ri] = 0
+        LOWER_LOOP_REC_WHAT[ri] = 0
+        LOWER_LOOP_REC_EXIT[ri] = 0 - 1
+        LOWER_LOOP_REC_LEAVE[ri] = 0 - 1
+        LOWER_LOOP_REC_END[ri] = 0 - 1
+        LOWER_LOOP_REC_WLEN[ri] = 0
+        LOWER_LOOP_REC_CLEN[ri] = 0
+        LOWER_LOOP_REC_CARRIED[ri] = 0
+        LOWER_LOOP_REC_SKIPREG[ri] = 0 - 1
+        LOWER_LOOP_RGN_TOKS[LOWER_LOOP_RGN_DEPTH as usize] = enter_pair.1
+        LOWER_LOOP_RGN_DEPTH = LOWER_LOOP_RGN_DEPTH + 1
+        (lo, rec)
+    }
+
+    // Close the loop region at `tok` and open a fresh one in the same token
+    // register: what the closed region holds is kept (it merges into the
+    // enclosing region) and the following iterations start a new region at
+    // the cursor. Used when an iteration cannot reset because something
+    // escaped it. A tok of 0 (no region, or a refused one) stays 0.
+    fn loop_rgn_emit_restart(self, tok: i64) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        let zp = lo.emit_i64_const(0)
+        lo = zp.0
+        let is_none = lo.fresh_reg()
+        lo = is_none.0
+        lo = lo.emit(ir_binop(is_none.1, tok, BinaryOp::OpEq, zp.1))
+        let sk = lo.fresh_label()
+        lo = sk.0
+        lo = lo.emit(ir_branch_true(is_none.1, sk.1))
+        let leave_pair = lo.rgn_call("__rgn_leave", tok, 0, 0, 1)
+        lo = leave_pair.0
+        let enter_pair = lo.rgn_call("__rgn_enter", 0, 0, 0, 0)
+        lo = enter_pair.0
+        lo = lo.emit(ir_copy(tok, enter_pair.1))
+        lo.emit(ir_label(sk.1))
+    }
+
+    // End of an iteration (and the `continue` target). The caller emits the
+    // back edge right after. With no carried aggregate the region is reset in
+    // place; with carried ones their young parts are lifted out and laid back
+    // down at the region start (loop_rgn_emit_carried_exit). An escaped
+    // region restarts instead.
+    fn loop_rgn_end_iter(self, rec: i64) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        let ri = rec as usize
+        if LOWER_LOOP_RGN_DEPTH > 0 { LOWER_LOOP_RGN_DEPTH = LOWER_LOOP_RGN_DEPTH - 1 }
+        let body_end = (*lo.current_func).instr_count
+        lo = lo.emit(ir_label(LOWER_LOOP_REC_ITER[ri]))
+        LOWER_LOOP_REC_CARRIED[ri] = 0
+        LOWER_LOOP_REC_CLEN[ri] = 0
+        if !lowerer_rgn_body_worth_region(&! lo, LOWER_LOOP_REC_BODY[ri], body_end) {
+            LOWER_LOOP_REC_OK[ri] = 0
+            LOWER_LOOP_REC_WHY[ri] = 1
+        } else {
+            lowerer_loop_rgn_check_body_mut(&! lo, rec, body_end)
+        }
+        let tok = LOWER_LOOP_REC_TOK[ri]
+        if LOWER_LOOP_REC_OK[ri] == 1 && LOWER_LOOP_REC_CLEN[ri] > 0 && LOWER_LOOP_SABOTAGE != 4 {
+            lo = lo.loop_rgn_emit_carried_exit(rec)
+            LOWER_LOOP_REC_CARRIED[ri] = 1
+        } else {
+            LOWER_LOOP_REC_EXIT[ri] = (*lo.current_func).instr_count
+            let reset_pair = lo.rgn_call("__rgn_reset", tok, 0, 0, 1)
+            lo = reset_pair.0
+            let dn = lo.fresh_label()
+            lo = dn.0
+            lo = lo.emit(ir_branch_true(reset_pair.1, dn.1))
+            lo = lo.loop_rgn_emit_restart(tok)
+            lo = lo.emit(ir_label(dn.1))
+        }
+        lo
+    }
+
+    // Iteration end of a loop region whose body writes outer aggregate
+    // locals: the function-exit protocol (lowerer_rgn_emit_exit_mut, struct
+    // kind) applied to every carried local at once, except that the region
+    // stays open (__rgn_settle in place of __rgn_leave).
+    //
+    //   if __rgn_escaped(tok) goto restart
+    //   sc, sh = __rgn_count(), __rgn_cursor()
+    //   t_k = young_copy(v_k)                  // above the dead iteration
+    //   if !__rgn_reset_fits(tok, sh, sc) goto keep_t
+    //   v_k = young_copy(t_k)                  // back down at the region start
+    //   __rgn_settle(tok); goto done
+    //   keep_t:  v_k = t_k                     // nothing was reset
+    //   restart: close and reopen the region (loop_rgn_emit_restart)
+    //   done:
+    //
+    // With tok = 0 (a refused region) __rgn_escaped answers 1 and the restart
+    // is skipped.
+    fn loop_rgn_emit_carried_exit(self, rec: i64) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        let ri = rec as usize
+        let tok = LOWER_LOOP_REC_TOK[ri]
+        let base = LOWER_LOOP_REC_CBASE[ri]
+        let n = LOWER_LOOP_REC_CLEN[ri]
+        // Carried locals are declared word-scalar arrays or structs that
+        // rgn_copy_cost accepts (lowerer_loop_rgn_carry_cost): no word scan
+        // (numeric provenance, see rgn_copy_cost).
+        var k: i64 = 0
+        LOWER_LOOP_REC_EXIT[ri] = (*lo.current_func).instr_count
+        let esc_pair = lo.rgn_call("__rgn_escaped", tok, 0, 0, 1)
+        lo = esc_pair.0
+        let rs = lo.fresh_label()
+        lo = rs.0
+        let restart_label = rs.1
+        lo = lo.emit(ir_branch_true(esc_pair.1, restart_label))
+        let sc_pair = lo.rgn_call("__rgn_count", 0, 0, 0, 0)
+        lo = sc_pair.0
+        let sh_pair = lo.rgn_call("__rgn_cursor", 0, 0, 0, 0)
+        lo = sh_pair.0
+        // First copies, one register per carried local.
+        var firsts: [i64; 16] = [0; 16]
+        k = 0
+        while k < n {
+            let slot = LOWER_LOOP_CARRY_SLOT[(base + k) as usize] as usize
+            let v = (*(*lo.locals).regs).values[slot]
+            let alen = (*(*lo.locals).array_lens).values[slot]
+            if alen > 0 {
+                let fl = (*(*lo.locals).array_elem_float).values[slot] != 0
+                let cp = lo.rgn_emit_young_array_copy(tok, v, alen, fl)
+                lo = cp.0
+                firsts[k as usize] = cp.1
+            } else {
+                let cp = lo.rgn_emit_young_copy(tok, v, (*(*lo.locals).struct_types).values[slot], 0)
+                lo = cp.0
+                firsts[k as usize] = cp.1
+            }
+            k = k + 1
+        }
+        let ok_pair = lo.rgn_call("__rgn_reset_fits", tok, sh_pair.1, sc_pair.1, 3)
+        lo = ok_pair.0
+        let kt = lo.fresh_label()
+        lo = kt.0
+        let keep_t_label = kt.1
+        lo = lo.emit(ir_branch_false(ok_pair.1, keep_t_label))
+        // Second copies, laid down at the region start.
+        var seconds: [i64; 16] = [0; 16]
+        k = 0
+        while k < n {
+            let slot = LOWER_LOOP_CARRY_SLOT[(base + k) as usize] as usize
+            let alen = (*(*lo.locals).array_lens).values[slot]
+            if alen > 0 {
+                let fl = (*(*lo.locals).array_elem_float).values[slot] != 0
+                let cp = lo.rgn_emit_young_array_copy(tok, firsts[k as usize], alen, fl)
+                lo = cp.0
+                seconds[k as usize] = cp.1
+            } else {
+                let cp = lo.rgn_emit_young_copy(tok, firsts[k as usize], (*(*lo.locals).struct_types).values[slot], 0)
+                lo = cp.0
+                seconds[k as usize] = cp.1
+            }
+            k = k + 1
+        }
+        let settle = lo.rgn_call("__rgn_settle", tok, 0, 0, 1)
+        lo = settle.0
+        k = 0
+        while k < n {
+            let slot = LOWER_LOOP_CARRY_SLOT[(base + k) as usize] as usize
+            lo = lo.emit(ir_copy((*(*lo.locals).regs).values[slot], seconds[k as usize]))
+            k = k + 1
+        }
+        let dn = lo.fresh_label()
+        lo = dn.0
+        let done_label = dn.1
+        lo = lo.emit(ir_jump(done_label))
+        // The copies did not fit below the first ones: nothing was reset, the
+        // region keeps everything, and the carried values are the first
+        // copies. The region is restarted so the next iterations reclaim again.
+        lo = lo.emit(ir_label(keep_t_label))
+        k = 0
+        while k < n {
+            let slot = LOWER_LOOP_CARRY_SLOT[(base + k) as usize] as usize
+            lo = lo.emit(ir_copy((*(*lo.locals).regs).values[slot], firsts[k as usize]))
+            k = k + 1
+        }
+        lo = lo.emit(ir_label(restart_label))
+        lo = lo.loop_rgn_emit_restart(tok)
+        lo.emit(ir_label(done_label))
+    }
+
+    // Loop exit: the condition's false branch and every `break` land here.
+    // Close the loop region without resetting it (what it holds then belongs
+    // to the enclosing region), then fall into the loop's end label, which
+    // the caller emits next.
+    fn loop_rgn_end_break(self, rec: i64) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        let ri = rec as usize
+        lo = lo.emit(ir_label(LOWER_LOOP_REC_BRK[ri]))
+        if LOWER_LOOP_SABOTAGE == 2 || LOWER_LOOP_SABOTAGE == 3 {
+            let zs = lowerer_emit_i64_const_mut(&! lo, 0)
+            LOWER_LOOP_REC_LEAVE[ri] = (*lo.current_func).instr_count
+            let sab_pair = lo.rgn_call("__rgn_exit_scalar", LOWER_LOOP_REC_TOK[ri], zs, 0, 2)
+            lo = sab_pair.0
+        } else {
+            LOWER_LOOP_REC_LEAVE[ri] = (*lo.current_func).instr_count
+            let leave_pair = lo.rgn_call("__rgn_leave", LOWER_LOOP_REC_TOK[ri], 0, 0, 1)
+            lo = leave_pair.0
+        }
+        LOWER_LOOP_REC_END[ri] = (*lo.current_func).instr_count
+        lo
+    }
+
     fn lower_while_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         let pair_l_top = self.fresh_label()
         let lo1 = pair_l_top.0
@@ -41278,12 +43033,22 @@ impl Lowerer {
         let lo2 = pair_l_end.0
         let l_end = pair_l_end.1
 
-        var lo = lo2.fo_extend_rows_for_loop().emit(ir_label(l_top))
+        var lo = lo2.fo_extend_rows_for_loop()
+        let rgn_pair = lo.loop_rgn_begin()
+        lo = rgn_pair.0
+        let rec = rgn_pair.1
+        var exit_label = l_end
+        if rec >= 0 { exit_label = LOWER_LOOP_REC_BRK[rec as usize] }
+        lo = lo.emit(ir_label(l_top))
         let pair_cond = lo.lower_opt_expr_ref(&e.left)
         lo = pair_cond.0
         let cond = pair_cond.1
-        lo = lo.emit(ir_branch_false(cond, l_end))
-        lo = lo.push_loop_labels(l_top, l_end)
+        lo = lo.emit(ir_branch_false(cond, exit_label))
+        if rec >= 0 {
+            lo = lo.push_loop_labels(LOWER_LOOP_REC_ITER[rec as usize], exit_label)
+        } else {
+            lo = lo.push_loop_labels(l_top, l_end)
+        }
         let while_block_opt: Option<Box<Block>> = e.block
         match while_block_opt {
             Some(blk) => {
@@ -41293,7 +43058,9 @@ impl Lowerer {
             None => {}
         }
         lo = lo.pop_loop_labels()
+        if rec >= 0 { lo = lo.loop_rgn_end_iter(rec) }
         lo = lo.emit(ir_jump(l_top))
+        if rec >= 0 { lo = lo.loop_rgn_end_break(rec) }
         lo = lo.emit(ir_label(l_end))
         lo.emit_unit()
     }
@@ -41306,8 +43073,16 @@ impl Lowerer {
         let lo2 = pair_l_end.0
         let l_end = pair_l_end.1
 
-        var lo = lo2.fo_extend_rows_for_loop().emit(ir_label(l_top))
-        lo = lo.push_loop_labels(l_top, l_end)
+        var lo = lo2.fo_extend_rows_for_loop()
+        let rgn_pair = lo.loop_rgn_begin()
+        lo = rgn_pair.0
+        let rec = rgn_pair.1
+        lo = lo.emit(ir_label(l_top))
+        if rec >= 0 {
+            lo = lo.push_loop_labels(LOWER_LOOP_REC_ITER[rec as usize], LOWER_LOOP_REC_BRK[rec as usize])
+        } else {
+            lo = lo.push_loop_labels(l_top, l_end)
+        }
         let loop_block_opt: Option<Box<Block>> = e.block
         match loop_block_opt {
             Some(blk) => {
@@ -41317,7 +43092,9 @@ impl Lowerer {
             None => {}
         }
         lo = lo.pop_loop_labels()
+        if rec >= 0 { lo = lo.loop_rgn_end_iter(rec) }
         lo = lo.emit(ir_jump(l_top))
+        if rec >= 0 { lo = lo.loop_rgn_end_break(rec) }
         lo = lo.emit(ir_label(l_end))
         lo.emit_unit()
     }
@@ -41376,15 +43153,25 @@ impl Lowerer {
                 lo = pair_end_lbl.0
                 let l_end = pair_end_lbl.1
 
-                lo = lo.fo_extend_rows_for_loop().emit(ir_label(l_top))
+                lo = lo.fo_extend_rows_for_loop()
+                let rgn_pair = lo.loop_rgn_begin()
+                lo = rgn_pair.0
+                let rec = rgn_pair.1
+                var exit_label = l_end
+                if rec >= 0 { exit_label = LOWER_LOOP_REC_BRK[rec as usize] }
+                lo = lo.emit(ir_label(l_top))
                 let cmp_op = if (*iter_box).bin_op == BinaryOp::OpRangeInclusive { BinaryOp::OpLe } else { BinaryOp::OpLt }
                 let pair_cond = lo.fresh_reg()
                 lo = pair_cond.0
                 let cond = pair_cond.1
                 lo = lo.emit(ir_binop(cond, iv, cmp_op, end_reg))
-                lo = lo.emit(ir_branch_false(cond, l_end))
+                lo = lo.emit(ir_branch_false(cond, exit_label))
 
-                lo = lo.push_loop_labels(l_cont, l_end)
+                if rec >= 0 {
+                    lo = lo.push_loop_labels(LOWER_LOOP_REC_ITER[rec as usize], LOWER_LOOP_REC_BRK[rec as usize])
+                } else {
+                    lo = lo.push_loop_labels(l_cont, l_end)
+                }
                 let for_block_opt: Option<Box<Block>> = e.block
                 match for_block_opt {
                     Some(blk) => {
@@ -41394,6 +43181,7 @@ impl Lowerer {
                     None => {}
                 }
                 lo = lo.pop_loop_labels()
+                if rec >= 0 { lo = lo.loop_rgn_end_iter(rec) }
 
                 lo = lo.emit(ir_label(l_cont))
                 let pair_one = lo.fresh_reg()
@@ -41406,6 +43194,7 @@ impl Lowerer {
                 lo = lo.emit(ir_binop(next_reg, iv, BinaryOp::OpAdd, one_reg))
                 lo = lo.emit(ir_copy(iv, next_reg))
                 lo = lo.emit(ir_jump(l_top))
+                if rec >= 0 { lo = lo.loop_rgn_end_break(rec) }
                 lo = lo.emit(ir_label(l_end))
                 lo.emit_unit()
             }
@@ -41461,12 +43250,18 @@ impl Lowerer {
         lo = pair_end_lbl.0
         let l_end = pair_end_lbl.1
 
-        lo = lo.fo_extend_rows_for_loop().emit(ir_label(l_top))
+        lo = lo.fo_extend_rows_for_loop()
+        let rgn_pair = lo.loop_rgn_begin()
+        lo = rgn_pair.0
+        let rec = rgn_pair.1
+        var exit_label = l_end
+        if rec >= 0 { exit_label = LOWER_LOOP_REC_BRK[rec as usize] }
+        lo = lo.emit(ir_label(l_top))
         let pair_cond = lo.fresh_reg()
         lo = pair_cond.0
         let cond = pair_cond.1
         lo = lo.emit(ir_binop(cond, iv, BinaryOp::OpLt, len_reg))
-        lo = lo.emit(ir_branch_false(cond, l_end))
+        lo = lo.emit(ir_branch_false(cond, exit_label))
 
         // v = arr[iv]
         let pair_v = lo.fresh_reg()
@@ -41481,8 +43276,17 @@ impl Lowerer {
         } else {
             lo = lo.bind_local_scalar_kind(e.name, 1)
         }
+        // The element variable is rebound from `arr` at the top of every
+        // iteration, so it never carries a value from one iteration into the
+        // next; an element born in an earlier iteration can only be in `arr`
+        // through a barriered store (escaped) or a carried `arr`.
+        if rec >= 0 { LOWER_LOOP_REC_SKIPREG[rec as usize] = v_reg }
 
-        lo = lo.push_loop_labels(l_cont, l_end)
+        if rec >= 0 {
+            lo = lo.push_loop_labels(LOWER_LOOP_REC_ITER[rec as usize], LOWER_LOOP_REC_BRK[rec as usize])
+        } else {
+            lo = lo.push_loop_labels(l_cont, l_end)
+        }
         let for_block_opt: Option<Box<Block>> = e.block
         match for_block_opt {
             Some(blk) => {
@@ -41492,6 +43296,7 @@ impl Lowerer {
             None => {}
         }
         lo = lo.pop_loop_labels()
+        if rec >= 0 { lo = lo.loop_rgn_end_iter(rec) }
 
         // iv = iv + 1
         lo = lo.emit(ir_label(l_cont))
@@ -41505,6 +43310,7 @@ impl Lowerer {
         lo = lo.emit(ir_binop(next_reg, iv, BinaryOp::OpAdd, one_reg))
         lo = lo.emit(ir_copy(iv, next_reg))
         lo = lo.emit(ir_jump(l_top))
+        if rec >= 0 { lo = lo.loop_rgn_end_break(rec) }
         lo = lo.emit(ir_label(l_end))
         lo.emit_unit()
     }
@@ -41648,7 +43454,7 @@ impl Lowerer {
             return (lo, cached)
         }
         var found = lowerer_lookup_fn_id_by_name_ref(&lo, make_name("__rgn_barrier"))
-        if found < 0 && (*lo.module).fn_count <= IR_MAX_FUNCS - 10 {
+        if found < 0 && (*lo.module).fn_count <= IR_MAX_FUNCS - lower_rgn_fn_headroom() {
             found = lowerer_find_or_add_fn_id_mut(&! lo, make_name("__rgn_barrier"))
         }
         LOWER_RGN_CAST_BARRIER_ID = found
@@ -41667,16 +43473,34 @@ impl Lowerer {
         lo.emit(ir_call(dst_pair.1, barrier_id, make_name("__rgn_barrier"), args, 2))
     }
 
-    // Projected IR bound for one young-copy or escape scan of a `type_name`
-    // value, or -1 for an unsupported shape. Declarations classify storage;
-    // the exit scan still checks scalar bits for encoded references before
-    // resetting. Supported slots are non-integer word scalars, their arrays,
-    // or structs that are themselves copyable. A slot wrongly taken for a scalar would
-    // keep a reference into memory the reset hands back, so anything else --
-    // a string, Option, &T, an array of structs, an unregistered or
-    // literal-seeded layout -- makes the whole type ineligible. Box and
-    // Knowledge are excluded as in the value-copy paths (reference semantics;
-    // variance riding alongside the slots).
+    // Projected IR bound for one young copy of a `type_name` value, or -1 for
+    // an unsupported shape. Supported slots are DECLARED word scalars (f64,
+    // integers, bool), fixed arrays of them, and structs that are themselves
+    // copyable; anything else -- a string, Option, &T, an array of structs, an
+    // unregistered or literal-seeded layout -- makes the whole type
+    // ineligible. Box and Knowledge are excluded as in the value-copy paths
+    // (reference semantics; variance riding alongside the slots).
+    //
+    // Numeric provenance (why an accepted type needs no word scan). A word in
+    // a slot whose declared type is numeric can carry a reference's bits only
+    // through a conversion that keeps the word: a numeric-target `as`
+    // (lower_cast_type_is_rgn_numeric_target), `__ptr_of_ref`, or an
+    // extern/syscall argument. Every one of them passes the referent through
+    // __rgn_barrier(v, 0) (rgn_emit_cast_escape and the codegen store
+    // barriers), which marks the referent's region escaped, and that region
+    // then never resets. The hook is module-wide, not per function: it is
+    // installed whenever fn_count <= IR_MAX_FUNCS - lower_rgn_fn_headroom(),
+    // the same bound every region opening requires, and fn_count only grows,
+    // so no region can open after a conversion that went unhooked. The hook
+    // carries this alone: removing its calls (SOUNIO_RGN_BARRIER_SABOTAGE=call,
+    // scripts/ci/madaros_region_reclaim_gate.sh) breaks every encoded-reference
+    // witness. Scanning numeric words for "encoded references" adds no safety
+    // on top of it -- an exit classifier is beaten by any reversible
+    // arithmetic on the word (madaros_region_reclaim_cast_xor.sio) -- and it is
+    // wrong in the other direction: handle ids are the integers 1..handle_count, so any
+    // counter, index or tag that walks into that range reads as a live young
+    // reference and keeps the region forever (a 4M-iteration loop over
+    // `struct { a: f64, n: i64, c: f64 }` held 400 MB until this was fixed).
     fn rgn_copy_cost(self, type_name: Name, depth: i64) -> i64 with Mut, Panic, Div, Alloc {
         if depth > 4 { return 0 - 1 }
         if type_name.len <= 0 { return 0 - 1 }
@@ -41690,14 +43514,11 @@ impl Lowerer {
             let pos = self.struct_layout_field_pos(type_name, i)
             if pos < 0 { return 0 - 1 }
             if self.struct_layout_pos_array_len(pos) > 0 {
-                // Keep the existing conservative integer-array exclusion.
-                // Expanding eligibility needs its own result-relocation tests.
-                if lower_name_is_integer_type(self.rgn_pos_elem_type_name(pos)) { return 0 - 1 }
+                // Declared word-scalar array (word_scalar_array_len is set only
+                // from the field's declared type): numeric provenance above.
                 total = total + 26
             } else if self.rgn_pos_decl_word_scalar(pos) == 1 {
-                // Retain the existing integer-bearing aggregate exclusion;
-                // declaration types alone cannot exclude references.
-                if lower_name_is_integer_type(self.struct_layout_pos_named_type(pos)) { return 0 - 1 }
+                // Declared f64 / integer / bool: numeric provenance above.
                 total = total + 2
             } else {
                 let sub = self.rgn_copy_cost(self.struct_layout_pos_named_type(pos), depth + 1)
@@ -41737,84 +43558,16 @@ impl Lowerer {
         (lo, dst)
     }
 
-    // Returning scalar bits publishes them to the caller, an older target.
-    // Load raw words (no float conversion) and reuse the store classifier.
-    fn rgn_emit_result_array_escape_scan(self, src_reg: i64, elem_count: i64, target_reg: i64) -> Lowerer with Mut, Panic, Div, Alloc, IO {
-        var lo = self
-        let end_pair = lo.fresh_label()
-        lo = end_pair.0
-        let end_label = end_pair.1
-        lo = lo.emit(ir_branch_false(src_reg, end_label))
-        let idx_pair = lo.emit_i64_const(0)
-        lo = idx_pair.0
-        let idx_reg = idx_pair.1
-        let limit_pair = lo.emit_i64_const(elem_count)
-        lo = limit_pair.0
-        let limit_reg = limit_pair.1
-        let one_pair = lo.emit_i64_const(1)
-        lo = one_pair.0
-        let one_reg = one_pair.1
-        let top_pair = lo.fresh_label()
-        lo = top_pair.0
-        let top_label = top_pair.1
-        lo = lo.emit(ir_label(top_label))
-        let cond_pair = lo.fresh_reg()
-        lo = cond_pair.0
-        lo = lo.emit(ir_binop(cond_pair.1, idx_reg, BinaryOp::OpLt, limit_reg))
-        lo = lo.emit(ir_branch_false(cond_pair.1, end_label))
-        let elem_pair = lo.fresh_reg()
-        lo = elem_pair.0
-        lo = lo.emit(ir_index_get(elem_pair.1, src_reg, idx_reg))
-        let barrier_pair = lo.rgn_call("__rgn_barrier", elem_pair.1, target_reg, 0, 2)
-        lo = barrier_pair.0
-        let next_pair = lo.fresh_reg()
-        lo = next_pair.0
-        lo = lo.emit(ir_binop(next_pair.1, idx_reg, BinaryOp::OpAdd, one_reg))
-        lo = lo.emit(ir_copy(idx_reg, next_pair.1))
-        lo = lo.emit(ir_jump(top_label))
-        lo.emit(ir_label(end_label))
-    }
-
-    fn rgn_emit_result_escape_scan(self, src_reg: i64, type_name: Name, depth: i64) -> Lowerer with Mut, Panic, Div, Alloc, IO {
-        var lo = self
-        if depth > 4 {
-            let escaped = lo.rgn_call("__rgn_mark_all", 0, 0, 0, 0)
-            return escaped.0
-        }
-        let done_pair = lo.fresh_label()
-        lo = done_pair.0
-        let done_label = done_pair.1
-        lo = lo.emit(ir_branch_false(src_reg, done_label))
-        let target_pair = lo.emit_i64_const(0)
-        lo = target_pair.0
-        let target_reg = target_pair.1
-        let slots = lo.struct_layout_slot_count(type_name)
-        var i: i64 = 0
-        while i < slots {
-            let pos = lo.struct_layout_field_pos(type_name, i)
-            let fname = lo.struct_layout_pos_field_name(pos)
-            let arr_len = lo.struct_layout_pos_array_len(pos)
-            let is_scalar = lo.rgn_pos_decl_word_scalar(pos) == 1
-            let nested_name = lo.struct_layout_pos_named_type(pos)
-            let slot_pair = lo.fresh_reg()
-            lo = slot_pair.0
-            let slot_reg = slot_pair.1
-            lo = lo.emit(ir_field_get(slot_reg, src_reg, i, fname))
-            if arr_len > 0 {
-                lo = lo.rgn_emit_result_array_escape_scan(slot_reg, arr_len, target_reg)
-            } else if is_scalar {
-                let barrier_pair = lo.rgn_call("__rgn_barrier", slot_reg, target_reg, 0, 2)
-                lo = barrier_pair.0
-            } else {
-                lo = lo.rgn_emit_result_escape_scan(slot_reg, nested_name, depth + 1)
-            }
-            i = i + 1
-        }
-        lo.emit(ir_label(done_label))
-    }
-
     // Copy of a word-scalar array handle when it was born inside the region at
-    // `tok_reg`; the handle itself otherwise.
+    // `tok_reg`; the handle itself otherwise. The copy is one block move of
+    // the payload (__rgn_copy_payload), not an element loop: the region
+    // protocol copies every carried or returned array twice per exit, and per
+    // element each IrIndexGet/IrIndexSet pair pays two handle resolves, two
+    // bounds checks and a store barrier -- a 4096-element carried array made
+    // an iteration ~50x slower than the work inside it. The barrier is not
+    // needed: the destination is the youngest object in existence, so no store
+    // into it can make an older object point at a younger one. Reached only
+    // with tok != 0, i.e. on the x86-64 runtime; the arm64 stub is fail-closed.
     fn rgn_emit_young_array_copy(self, tok_reg: i64, src_reg: i64, elem_count: i64, elem_is_float: bool) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         let pair_dst = self.fresh_reg()
         var lo = pair_dst.0
@@ -41826,9 +43579,11 @@ impl Lowerer {
         lo = pair_done.0
         let done_label = pair_done.1
         lo = lo.emit(ir_branch_false(young_pair.1, done_label))
-        let copy_pair = lo.emit_fixed_array_value_copy(src_reg, elem_count, elem_is_float)
-        lo = copy_pair.0
-        lo = lo.emit(ir_copy(dst_reg, copy_pair.1))
+        let alloc_pair = lo.emit_array_alloc_like_source(src_reg, elem_count, elem_is_float)
+        lo = alloc_pair.0
+        let move_pair = lo.rgn_call("__rgn_copy_payload", alloc_pair.1, src_reg, 0, 2)
+        lo = move_pair.0
+        lo = lo.emit(ir_copy(dst_reg, alloc_pair.1))
         lo = lo.emit(ir_label(done_label))
         (lo, dst_reg)
     }
@@ -41904,8 +43659,37 @@ impl Lowerer {
         } else {
             self.lower_opt_expr_ref(&e.left)
         }
-        let lo = pair.0
+        var lo = pair.0
         let reg = pair.1
+        // `-> iN/uN` (N > 64): the value leaves through the hidden out-array.
+        if LOWER_WIDE_RET_FN >= 0 && LOWER_WIDE_RET_FN == lo.current_fn {
+            match e.left {
+                Some(rv) => {
+                    let rv_bits = lo.expr_wide_bits_ref(&(*rv))
+                    let rv_signed = if rv_bits > 64 { lo.expr_wide_signed_ref(&(*rv)) } else if lo.expr_is_unsigned_int_ref(&(*rv)) { 0 } else { 1 }
+                    let rv_word = lo.expr_known_word_ref(&(*rv))
+                    lo = lo.emit_wide_ret_store(reg, rv_bits, rv_signed, rv_word)
+                }
+                None => {}
+            }
+        }
+        // Leaving the function from inside loops: pop their iteration regions,
+        // innermost first, without resetting them -- what they made, the
+        // returned value included, then belongs to the enclosing region.
+        if LOWER_LOOP_RGN_DEPTH > 0 && lo.current_fn == LOWER_LOOP_RGN_FN_ID && LOWER_KERNEL_CONT_LABEL < 0 {
+            var d = LOWER_LOOP_RGN_DEPTH - 1
+            while d >= 0 {
+                if LOWER_LOOP_SABOTAGE == 2 || LOWER_LOOP_SABOTAGE == 3 {
+                    let zs = lowerer_emit_i64_const_mut(&! lo, 0)
+                    let sab_pair = lo.rgn_call("__rgn_exit_scalar", LOWER_LOOP_RGN_TOKS[d as usize], zs, 0, 2)
+                    lo = sab_pair.0
+                } else {
+                    let leave_pair = lo.rgn_call("__rgn_leave", LOWER_LOOP_RGN_TOKS[d as usize], 0, 0, 1)
+                    lo = leave_pair.0
+                }
+                d = d - 1
+            }
+        }
         // Inside a kernel lane loop, `return` ends the lane, not the launch.
         // Emitting IrReturn here would abandon every remaining lane — the shape
         // `if (early_out) return` is common enough in kernels that getting this
@@ -42391,8 +44175,13 @@ impl Lowerer {
                         (lo3, ref_reg)
                     } else {
                         let ref_pair = self.fresh_reg()
-                        let lo2 = ref_pair.0
+                        var lo2 = ref_pair.0
                         let ref_reg = ref_pair.1
+                        if ir_fn_get(&(*lo2.module), fn_id as usize).wide_param_limbs != 0 || ir_fn_get(&(*lo2.module), fn_id as usize).wide_return_bits > 64 {
+                            // Wide-integer params travel as limb-array addresses that only a
+                            // direct call builds; an indirect call would pass one word.
+                            lo2 = lo2.report_error_at(10833)
+                        }
                         let lo3 = lo2.emit(ir_load_fn_ref(ref_reg, fn_id))
                         (lo3, ref_reg)
                     }
@@ -42461,8 +44250,11 @@ impl Lowerer {
                 let fn_id = lowerer_lookup_fn_id_by_name_ref(&self, n)
                 if fn_id >= 0 {
                     let ref_pair = self.fresh_reg()
-                    let lo2 = ref_pair.0
+                    var lo2 = ref_pair.0
                     let ref_reg = ref_pair.1
+                    if ir_fn_get(&(*lo2.module), fn_id as usize).wide_param_limbs != 0 || ir_fn_get(&(*lo2.module), fn_id as usize).wide_return_bits > 64 {
+                        lo2 = lo2.report_error_at(10834)
+                    }
                     let lo3 = lo2.emit(ir_load_fn_ref(ref_reg, fn_id))
                     (lo3, ref_reg)
                 } else {
