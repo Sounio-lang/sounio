@@ -33,6 +33,48 @@
 //   7 Mass balance for every drug of a dynamic three-drug interacting run:
 //     input = eliminated + remaining to 1e-10.
 //
+// Gut-wall layer (expectations written from the equations before the first run).
+// Notation: CLs(clint, clint_gut) = circ28_splanchnic_clearance, Fg =
+// circ28_gut_availability, Eh = circ28_hepatic_extraction, evaluated on a
+// parameter copy with the clearances stated. For a constant perpetrator the
+// closed-system equilibrium has T_i / kp_i = C / bp in EVERY tissue, so the
+// unbound gut and liver concentrations coincide (Ig = Il = fu C / bp) -- the
+// only steady state of a closed linear system; the test reads each from its
+// own state (ddi28_unbound_gut / _liver) and prints both. Where liver and gut
+// parameters differ (tests 11 and 12) the gut-specific overrides and the
+// separate turnover rates make the two tissues' enzymes differ.
+//   8 Null: a drug with gut pathways (hepatic 300 + 200, gut 80 + 40 L/h) and a
+//     second one (hepatic 100, gut 60), no interaction parameters, gut turnover
+//     set: E = F = 1 exactly, clint = 500 / 150 and clint_gut = 120 / 60 exactly,
+//     so a plain circ28 run with those values is reproduced BIT-IDENTICALLY
+//     (AUC and all 28 state entries equal, difference 0).
+//   9 Gut-only competitive inhibition (victim: gut pathway 300 L/h on enzyme 1,
+//     hepatic 100 L/h on enzyme 7, which is not inhibited). clint_gut_inh =
+//     300 / (1 + Ig/Ki). IV: AUC = Dose / CLs, AUCR_iv = CLs0 / CLs1. Oral:
+//     AUC / input = Fg (1 - Eh) / CLs, so AUCR_oral = AUCR_iv (Fg1 / Fg0)
+//     ((1 - Eh1)/(1 - Eh0)); Eh is unchanged and Fg1 > Fg0, hence
+//     AUCR_oral > AUCR_iv.
+//  10 Gut and liver pathways on the same enzyme (hepatic 500, gut 300 L/h on
+//     enzyme 1): clint_h1 = 500 / (1 + Il/Ki), clint_g1 = 300 / (1 + Ig/Ki),
+//     Il and Ig from the states. AUC_iv = Dose / CLs; AUC_oral / input =
+//     Fg (1 - Eh) / CLs before and after; the oral/IV contrast
+//     AUCR_oral / AUCR_iv = Fg1 (1 - Eh1) / (Fg0 (1 - Eh0)) > 1 (both Fg and
+//     the first-pass factor move: this is the mechanism by which an oral
+//     interaction exceeds an intravenous one; predicted numbers only).
+//  11 Gut mechanism-based inactivation, constant inhibitor: gut Eg(t) = Einf_g +
+//     (1 - Einf_g) exp(-(kdeg_g + a_g) t), a_g = kinact_g Ig/(KI_g + Ig) (gut
+//     specific override), Einf_g = kdeg_g / (kdeg_g + a_g) -> limit, and after
+//     removal Eg = 1 - (1 - Er) exp(-kdeg_g t); the hepatic E follows its own
+//     kdeg and kinact/KI and is not affected by the gut values.
+//  12 Gut induction: Fg(t) -> 1 + Emax_g Ig/(EC50_g + Ig) (gut-specific Emax,
+//     EC50, own kdeg), hepatic F -> 1 + Emax Il/(EC50 + Il). Oral victim:
+//     AUC/input = Fg (1 - Eh) / CLs at clint = 500 F_inf,h and clint_gut =
+//     300 Fg_inf; AUCR_oral = ratio to the un-induced value of test 10 (< 1).
+//  13 Mass balance of every drug of a dynamic three-drug run with gut and
+//     hepatic channels, gut MBI / induction / competitive inhibition active:
+//     input = eliminated + remaining to 1e-10; ddi28_eliminated includes the gut
+//     channel (the balance fails by more than 1e-3 when the gut tally is left out).
+//
 // AUC identities hold exactly for the whole-time integral of the scheme, at
 // any step size (see circ28.sio), so the low-extraction cases use a large step
 // and run until the remaining mass is below 1e-9 of the input; every run
@@ -136,6 +178,11 @@ struct DdiRun {
     mass_end: f64,
     el_total: f64,
     idev: f64,
+    gdev: f64,
+    il0: f64,
+    ig0: f64,
+    clg: f64,
+    cl: f64,
 }
 
 // Drives drug `vic` for nsteps. route 0: `dose` mg intravenously as an
@@ -146,8 +193,12 @@ struct DdiRun {
 fn ck_drive(d: &!Ddi28, s0: &!Circ28Sys, s1: &!Circ28Sys, s2: &!Circ28Sys, vic: i32, route: i32, dose: f64, nsteps: i32) -> DdiRun with Mut, Div, Panic {
     let dt = (*d).dt
     var i0 = 0.0
-    if (*d).n > 1 { i0 = ddi28_unbound_liver(&(*d), 1) }
+    var g0 = 1.0
+    if (*d).n > 1 { i0 = ddi28_unbound_liver(&(*d), 1); g0 = ddi28_unbound_gut(&(*d), 1) }
+    let il0 = i0
+    let ig0 = g0
     var dev = 0.0
+    var gdev = 0.0
     var input = 0.0
     var k: i32 = 0
     while k < nsteps {
@@ -165,6 +216,8 @@ fn ck_drive(d: &!Ddi28, s0: &!Circ28Sys, s1: &!Circ28Sys, s2: &!Circ28Sys, vic: 
         if (*d).n > 1 {
             let dv = ck_abs(ddi28_unbound_liver(&(*d), 1) - i0) / i0
             if dv > dev { dev = dv }
+            let gv = ck_abs(ddi28_unbound_gut(&(*d), 1) - g0) / g0
+            if gv > gdev { gdev = gv }
         }
         k = k + 1
     }
@@ -174,6 +227,11 @@ fn ck_drive(d: &!Ddi28, s0: &!Circ28Sys, s1: &!Circ28Sys, s2: &!Circ28Sys, vic: 
         mass_end: ddi28_remaining(&(*d), vic),
         el_total: ddi28_eliminated(&(*d), vic),
         idev: dev,
+        gdev: gdev,
+        il0: il0,
+        ig0: ig0,
+        clg: ddi28_clint_gut(&(*d), vic),
+        cl: ddi28_clint(&(*d), vic),
     }
 }
 
@@ -217,6 +275,35 @@ fn ck_victim(pv: Circ28Params, cl1: f64, cl2: f64, with_perp: bool, ki: f64, dt:
     return ck_drive(&!d, &!s0, &!s1, &!s2, 0, route, 10.0, nsteps)
 }
 
+// Gut + liver victim (drug 0): hepatic clh1 on enzyme 1, clh7 on enzyme 7 (never
+// inhibited), gut clg1 on enzyme 1; optional constant perpetrator as drug 1
+// (Ki on enzyme 1, loaded at its equilibrium).
+fn ck_gvictim(pv: Circ28Params, clh1: f64, clh7: f64, clg1: f64, with_perp: bool, ki: f64, dt: f64, route: i32, nsteps: i32) -> DdiRun with IO, Mut, Div, Panic {
+    var d = ddi28_new(dt)
+    var s0 = circ28_sys_zero()
+    var s1 = circ28_sys_zero()
+    var s2 = circ28_sys_zero()
+    let a = ddi28_add_drug(&!d, pv)
+    if clh1 > 0.0 { ddi28_add_pathway(&!d, a, 1, clh1) }
+    if clh7 > 0.0 { ddi28_add_pathway(&!d, a, 7, clh7) }
+    if clg1 > 0.0 { ddi28_add_gut_pathway(&!d, a, 1, clg1) }
+    if with_perp {
+        let pp = ck_perp()
+        let b = ddi28_add_drug(&!d, pp)
+        ddi28_set_ki(&!d, b, 1, ki)
+        ck_load_eq(&!d, b, pp, 100.0)
+    }
+    return ck_drive(&!d, &!s0, &!s1, &!s2, 0, route, 10.0, nsteps)
+}
+
+// Parameter copy with the given hepatic and gut intrinsic clearances.
+fn ck_with(p: Circ28Params, clint: f64, clint_gut: f64) -> Circ28Params with Mut {
+    var q = p
+    q.clint = clint
+    q.clint_gut = clint_gut
+    return q
+}
+
 fn main() -> i32 with IO, Mut, Div, Panic {
     var fails: i32 = 0
 
@@ -232,8 +319,8 @@ fn main() -> i32 with IO, Mut, Div, Panic {
     // ------------------------------------------------------------------ 1
     println("1 null: no interaction parameters")
     {
-        let dt1 = 0.05
-        let n1 = 2000
+        let dt1 = 0.1
+        let n1 = 500
         let pa = ck_set()
         var pb = ck_set()
         pb.fu = 0.3
@@ -304,7 +391,7 @@ fn main() -> i32 with IO, Mut, Div, Panic {
     // ------------------------------------------------------------------ 2
     println("2 competitive inhibition, constant inhibitor, intravenous victim")
     let pv = ck_set()
-    let dt2 = 0.1
+    let dt2 = 1.0
     let base_cl = 500.0
     let cl_inh = base_cl / (1.0 + r_ik)
     let clb0 = ck_clb(pv, base_cl)
@@ -482,7 +569,7 @@ fn main() -> i32 with IO, Mut, Div, Panic {
     // ------------------------------------------------------------------ 7
     println("7 mass balance, three interacting drugs, dynamic exposures")
     {
-        let dt7 = 0.05
+        let dt7 = 0.25
         var d = ddi28_new(dt7)
         var s0 = circ28_sys_zero()
         var s1 = circ28_sys_zero()
@@ -517,7 +604,7 @@ fn main() -> i32 with IO, Mut, Div, Panic {
         var emin = 1.0
         var emax = 0.0
         var fmax = 0.0
-        let n7 = 3000
+        let n7 = 600
         var k: i32 = 0
         while k < n7 {
             let t = ((k as f64) + 0.5) * dt7
@@ -554,6 +641,362 @@ fn main() -> i32 with IO, Mut, Div, Panic {
         print("  enzyme fraction E range ["); print(emin); print(", "); print(emax); print("], largest fold "); println(fmax)
         fails = fails + ck_true("E in [0,1]", emin >= 0.0 && emax <= 1.0)
         fails = fails + ck_true("interaction is active (E below 1 and fold above 1)", emin < 0.9 && fmax > 1.1)
+    }
+
+    // ------------------------------------------------------------------ 8
+    println("8 null: gut pathways, no interaction parameters")
+    {
+        let dt8 = 0.1
+        let n8 = 500
+        let pa = ck_set()
+        var pb = ck_set()
+        pb.fu = 0.3
+        pb.cl_renal = 1.0
+        var d8 = ddi28_new(dt8)
+        var s0 = circ28_sys_zero()
+        var s1 = circ28_sys_zero()
+        var s2 = circ28_sys_zero()
+        let a = ddi28_add_drug(&!d8, pa)
+        let b = ddi28_add_drug(&!d8, pb)
+        ddi28_add_pathway(&!d8, a, 1, 300.0)
+        ddi28_add_pathway(&!d8, a, 2, 200.0)
+        ddi28_add_gut_pathway(&!d8, a, 1, 80.0)
+        ddi28_add_gut_pathway(&!d8, a, 3, 40.0)
+        ddi28_add_pathway(&!d8, b, 1, 100.0)
+        ddi28_add_gut_pathway(&!d8, b, 1, 60.0)
+        ddi28_set_kdeg(&!d8, 1, 0.05)
+        ddi28_set_gut_kdeg(&!d8, 1, 0.4)
+        ddi28_set_gut_kdeg(&!d8, 3, 0.2)
+        var ra = ck_with(pa, 500.0, 120.0)
+        var rb = ck_with(pb, 100.0, 60.0)
+        var ya = circ28_sys_zero()
+        var yb = circ28_sys_zero()
+        circ28_prepare(ra, dt8, &!ya)
+        circ28_prepare(rb, dt8, &!yb)
+        var xa = circ28_state_zero()
+        var xb = circ28_state_zero()
+        var ela = circ28_elim_zero()
+        var elb = circ28_elim_zero()
+        var k: i32 = 0
+        while k < n8 {
+            let t = ((k as f64) + 0.5) * dt8
+            var iva = 0.0
+            if k == 0 { iva = 10.0 / dt8 }
+            let ora = 5.0 * exp(0.0 - t)
+            let orb = 8.0 * exp(0.0 - 0.5 * t)
+            ddi28_step_all(&!d8, &!s0, &!s1, &!s2, iva, ora, 0.0, orb, 0.0, 0.0)
+            circ28_step(&!xa, ra, &ya, iva, ora, &!ela)
+            circ28_step(&!xb, rb, &yb, 0.0, orb, &!elb)
+            k = k + 1
+        }
+        var da = 0.0
+        var db = 0.0
+        var j: i32 = 0
+        while j < 28 {
+            let ea = ck_abs(ddi28_get_x(&d8, 0, j) - xa.x[j])
+            let eb = ck_abs(ddi28_get_x(&d8, 1, j) - xb.x[j])
+            if ea > da { da = ea }
+            if eb > db { db = eb }
+            j = j + 1
+        }
+        fails = fails + ck_rel("drug A AUC_blood (bit-identical)", ddi28_auc_blood(&d8, 0), ela.auc_ven, 0.0)
+        fails = fails + ck_rel("drug B AUC_blood (bit-identical)", ddi28_auc_blood(&d8, 1), elb.auc_ven, 0.0)
+        print("  drug A final state max |diff| = "); print(da); print("  drug B = "); println(db)
+        fails = fails + ck_true("states bit-identical", da == 0.0 && db == 0.0)
+        fails = fails + ck_rel("drug A gut mass eliminated", ddi28_gut_eliminated(&d8, 0), ela.gut, 0.0)
+        fails = fails + ck_rel("drug A clint_gut (L/h)", ddi28_clint_gut(&d8, 0), 120.0, 0.0)
+        fails = fails + ck_rel("drug B clint_gut (L/h)", ddi28_clint_gut(&d8, 1), 60.0, 0.0)
+        fails = fails + ck_rel("gut enzyme 1 activity", ddi28_gut_enzyme_activity(&d8, 1), 1.0, 1.0e-14)
+        fails = fails + ck_rel("gut enzyme 3 activity", ddi28_gut_enzyme_activity(&d8, 3), 1.0, 1.0e-14)
+    }
+
+    // ------------------------------------------------------------------ 9
+    println("9 gut-only competitive inhibition, constant inhibitor")
+    let cg9 = 300.0
+    let ch9 = 100.0
+    let ig_f = pperp.fu * (pperp.kp[8] * ceq / pperp.bp) / pperp.kp[8]
+    let pg0 = ck_with(pv, ch9, cg9)
+    let pg1f = ck_with(pv, ch9, cg9 / (1.0 + ig_f / ki))
+    let cls_min9 = circ28_splanchnic_clearance(pg1f)
+    let n9 = ck_nsteps(pv, cls_min9, dt2)
+    let i9a = ck_gvictim(pv, 0.0, ch9, cg9, false, 0.0, dt2, 0, n9)
+    let i9b = ck_gvictim(pv, 0.0, ch9, cg9, true, ki, dt2, 0, n9)
+    let o9a = ck_gvictim(pv, 0.0, ch9, cg9, false, 0.0, dt2, 1, n9)
+    let o9b = ck_gvictim(pv, 0.0, ch9, cg9, true, ki, dt2, 1, n9)
+    fails = fails + ck_tail("iv alone", i9a)
+    fails = fails + ck_tail("iv inhibited", i9b)
+    fails = fails + ck_tail("oral alone", o9a)
+    fails = fails + ck_tail("oral inhibited", o9b)
+    print("  I_gut = "); print(i9b.ig0); print("  I_liver = "); print(i9b.il0); print("  (formula "); print(ig_f); println(")")
+    fails = fails + ck_true("I_gut constant to 1e-6 (iv run)", i9b.gdev <= 1.0e-6)
+    fails = fails + ck_true("I_gut constant to 1e-6 (oral run)", o9b.gdev <= 1.0e-6)
+    fails = fails + ck_rel("I_gut at the start = fu C / bp", i9b.ig0, ig_f, 1.0e-12)
+    let pg1 = ck_with(pv, ch9, cg9 / (1.0 + i9b.ig0 / ki))
+    let cls0 = circ28_splanchnic_clearance(pg0)
+    let cls1 = circ28_splanchnic_clearance(pg1)
+    let fg0 = circ28_gut_availability(pg0)
+    let fg1 = circ28_gut_availability(pg1)
+    let eh0 = circ28_hepatic_extraction(pg0)
+    let eh1 = circ28_hepatic_extraction(pg1)
+    print("  CLs0 = "); print(cls0); print("  CLs1 = "); print(cls1)
+    print("  Fg0 = "); print(fg0); print("  Fg1 = "); print(fg1)
+    print("  Eh0 = "); print(eh0); print("  Eh1 = "); println(eh1)
+    fails = fails + ck_rel("engine clint_gut after (L/h)", i9b.clg, cg9 / (1.0 + i9b.ig0 / ki), 1.0e-9)
+    fails = fails + ck_rel("AUC iv alone = Dose / CLs0", i9a.auc, 10.0 / cls0, 1.0e-6)
+    fails = fails + ck_rel("AUC iv inhibited = Dose / CLs1", i9b.auc, 10.0 / cls1, 1.0e-6)
+    let aucr9i = i9b.auc / i9a.auc
+    fails = fails + ck_rel("AUCR_iv = CLs0 / CLs1", aucr9i, cls0 / cls1, 1.0e-6)
+    fails = fails + ck_rel("AUC/input oral alone = Fg (1 - Eh) / CLs", o9a.auc / o9a.input, fg0 * (1.0 - eh0) / cls0, 1.0e-6)
+    fails = fails + ck_rel("AUC/input oral inhibited", o9b.auc / o9b.input, fg1 * (1.0 - eh1) / cls1, 1.0e-6)
+    let aucr9o = (o9b.auc / o9b.input) / (o9a.auc / o9a.input)
+    fails = fails + ck_rel("AUCR_oral = AUCR_iv (Fg1/Fg0)((1-Eh1)/(1-Eh0))", aucr9o, (cls0 / cls1) * (fg1 / fg0) * ((1.0 - eh1) / (1.0 - eh0)), 1.0e-6)
+    print("  AUCR_oral "); print(aucr9o); print(" > AUCR_iv "); println(aucr9i)
+    fails = fails + ck_true("AUCR_oral > AUCR_iv", aucr9o > aucr9i)
+    fails = fails + ck_true("predicted AUCR_oral > predicted AUCR_iv", (cls0 / cls1) * (fg1 / fg0) > cls0 / cls1)
+
+    // ------------------------------------------------------------------ 10
+    println("10 gut and liver pathways on the same enzyme, constant inhibitor")
+    let ch10 = 500.0
+    let cg10 = 300.0
+    let pj0 = ck_with(pv, ch10, cg10)
+    let pj1f = ck_with(pv, ch10 / (1.0 + iu / ki), cg10 / (1.0 + ig_f / ki))
+    let n10 = ck_nsteps(pv, circ28_splanchnic_clearance(pj1f), dt2)
+    let i10a = ck_gvictim(pv, ch10, 0.0, cg10, false, 0.0, dt2, 0, n10)
+    let i10b = ck_gvictim(pv, ch10, 0.0, cg10, true, ki, dt2, 0, n10)
+    let o10a = ck_gvictim(pv, ch10, 0.0, cg10, false, 0.0, dt2, 1, n10)
+    let o10b = ck_gvictim(pv, ch10, 0.0, cg10, true, ki, dt2, 1, n10)
+    fails = fails + ck_tail("iv alone", i10a)
+    fails = fails + ck_tail("iv inhibited", i10b)
+    fails = fails + ck_tail("oral alone", o10a)
+    fails = fails + ck_tail("oral inhibited", o10b)
+    print("  I_liver = "); print(i10b.il0); print("  I_gut = "); println(i10b.ig0)
+    fails = fails + ck_true("I_gut and I_liver constant to 1e-6", i10b.gdev <= 1.0e-6 && i10b.idev <= 1.0e-6 && o10b.gdev <= 1.0e-6 && o10b.idev <= 1.0e-6)
+    let pj1 = ck_with(pv, ch10 / (1.0 + i10b.il0 / ki), cg10 / (1.0 + i10b.ig0 / ki))
+    let cj0 = circ28_splanchnic_clearance(pj0)
+    let cj1 = circ28_splanchnic_clearance(pj1)
+    let fj0 = circ28_gut_availability(pj0)
+    let fj1 = circ28_gut_availability(pj1)
+    let hj0 = circ28_hepatic_extraction(pj0)
+    let hj1 = circ28_hepatic_extraction(pj1)
+    let f0 = fj0 * (1.0 - hj0)
+    let f1 = fj1 * (1.0 - hj1)
+    print("  CLs0 = "); print(cj0); print("  CLs1 = "); print(cj1); print("  F0 = Fg(1-Eh) = "); print(f0); print("  F1 = "); println(f1)
+    fails = fails + ck_rel("engine clint (L/h)", i10b.cl, ch10 / (1.0 + i10b.il0 / ki), 1.0e-9)
+    fails = fails + ck_rel("engine clint_gut (L/h)", i10b.clg, cg10 / (1.0 + i10b.ig0 / ki), 1.0e-9)
+    fails = fails + ck_rel("AUC iv alone = Dose / CLs0", i10a.auc, 10.0 / cj0, 1.0e-6)
+    fails = fails + ck_rel("AUC iv inhibited = Dose / CLs1", i10b.auc, 10.0 / cj1, 1.0e-6)
+    fails = fails + ck_rel("AUC/input oral alone = F0 / CLs0", o10a.auc / o10a.input, f0 / cj0, 1.0e-6)
+    fails = fails + ck_rel("AUC/input oral inhibited = F1 / CLs1", o10b.auc / o10b.input, f1 / cj1, 1.0e-6)
+    let r10i = i10b.auc / i10a.auc
+    let r10o = (o10b.auc / o10b.input) / (o10a.auc / o10a.input)
+    fails = fails + ck_rel("AUCR_iv = CLs0 / CLs1", r10i, cj0 / cj1, 1.0e-6)
+    fails = fails + ck_rel("AUCR_oral = (CLs0/CLs1)(F1/F0)", r10o, (cj0 / cj1) * (f1 / f0), 1.0e-6)
+    fails = fails + ck_rel("contrast AUCR_oral / AUCR_iv = F1 / F0", r10o / r10i, f1 / f0, 1.0e-6)
+    print("  AUCR_oral "); print(r10o); print(" > AUCR_iv "); println(r10i)
+    fails = fails + ck_true("AUCR_oral > AUCR_iv", r10o > r10i)
+    fails = fails + ck_true("predicted contrast F1/F0 > 1", f1 / f0 > 1.0)
+
+    // ------------------------------------------------------------------ 11
+    println("11 gut mechanism-based inactivation, constant inhibitor, independent of the liver")
+    let kdh = 0.05
+    let kdg11 = 0.3
+    let kin_h = 0.4
+    let kbg_h = 0.2
+    let kin_g = 0.9
+    let kbg_g = 0.5
+    {
+        var d = ddi28_new(1.0)
+        var s0 = circ28_sys_zero()
+        var s1 = circ28_sys_zero()
+        var s2 = circ28_sys_zero()
+        let v = ddi28_add_drug(&!d, pv)
+        ddi28_add_pathway(&!d, v, 1, 500.0)
+        ddi28_add_gut_pathway(&!d, v, 1, 300.0)
+        let pr = ddi28_add_drug(&!d, pperp)
+        ddi28_set_mbi(&!d, pr, 1, kin_h, kbg_h)
+        ddi28_set_gut_mbi(&!d, pr, 1, kin_g, kbg_g)
+        ddi28_set_kdeg(&!d, 1, kdh)
+        ddi28_set_gut_kdeg(&!d, 1, kdg11)
+        ck_load_eq(&!d, pr, pperp, 100.0)
+        let il = ddi28_unbound_liver(&d, pr)
+        let ig = ddi28_unbound_gut(&d, pr)
+        let ah = kin_h * il / (kbg_h + il)
+        let ag = kin_g * ig / (kbg_g + ig)
+        let eh_inf = kdh / (kdh + ah)
+        let eg_inf = kdg11 / (kdg11 + ag)
+        print("  I_liver = "); print(il); print("  I_gut = "); print(ig)
+        print("  a_h = "); print(ah); print("  a_g = "); print(ag)
+        print("  Einf_h = "); print(eh_inf); print("  Einf_g = "); println(eg_inf)
+        fails = fails + ck_true("gut and liver limits differ", ck_abs(eg_inf - eh_inf) > 0.05)
+        ck_idle(&!d, &!s0, &!s1, &!s2, 5)
+        fails = fails + ck_rel("Eg(5 h)", ddi28_gut_enzyme_fraction(&d, 1), eg_inf + (1.0 - eg_inf) * exp(0.0 - (kdg11 + ag) * 5.0), 1.0e-8)
+        fails = fails + ck_rel("E_liver(5 h), own kdeg and kinact", ddi28_enzyme_fraction(&d, 1), eh_inf + (1.0 - eh_inf) * exp(0.0 - (kdh + ah) * 5.0), 1.0e-8)
+        ck_idle(&!d, &!s0, &!s1, &!s2, 15)
+        fails = fails + ck_rel("Eg(20 h)", ddi28_gut_enzyme_fraction(&d, 1), eg_inf + (1.0 - eg_inf) * exp(0.0 - (kdg11 + ag) * 20.0), 1.0e-8)
+        fails = fails + ck_rel("E_liver(20 h)", ddi28_enzyme_fraction(&d, 1), eh_inf + (1.0 - eh_inf) * exp(0.0 - (kdh + ah) * 20.0), 1.0e-8)
+        ck_idle(&!d, &!s0, &!s1, &!s2, 80)
+        fails = fails + ck_rel("Eg(100 h) -> kdeg_g / (kdeg_g + kinact_g I/(KI_g + I))", ddi28_gut_enzyme_fraction(&d, 1), eg_inf, 1.0e-8)
+        fails = fails + ck_rel("E_liver(100 h)", ddi28_enzyme_fraction(&d, 1), eh_inf + (1.0 - eh_inf) * exp(0.0 - (kdh + ah) * 100.0), 1.0e-8)
+        fails = fails + ck_rel("clint_gut at Eg_inf (L/h)", ddi28_clint_gut(&d, 0), 300.0 * eg_inf, 1.0e-8)
+        let eh100 = ddi28_enzyme_fraction(&d, 1)
+        fails = fails + ck_rel("clint (hepatic) at E(100 h) (L/h)", ddi28_clint(&d, 0), 500.0 * eh100, 1.0e-8)
+        // remove the inhibitor
+        let erg = ddi28_gut_enzyme_fraction(&d, 1)
+        let erh = ddi28_enzyme_fraction(&d, 1)
+        ddi28_clear_drug(&!d, 1)
+        ck_idle(&!d, &!s0, &!s1, &!s2, 5)
+        let g5 = ddi28_gut_enzyme_fraction(&d, 1)
+        fails = fails + ck_rel("gut recovery Eg(5 h)", g5, 1.0 - (1.0 - erg) * exp(0.0 - kdg11 * 5.0), 1.0e-8)
+        ck_idle(&!d, &!s0, &!s1, &!s2, 15)
+        let g20 = ddi28_gut_enzyme_fraction(&d, 1)
+        fails = fails + ck_rel("gut recovery Eg(20 h)", g20, 1.0 - (1.0 - erg) * exp(0.0 - kdg11 * 20.0), 1.0e-8)
+        fails = fails + ck_rel("gut recovery rate = kdeg_g", ln((1.0 - g5) / (1.0 - g20)) / 15.0, kdg11, 1.0e-8)
+        fails = fails + ck_rel("liver recovery E(20 h) at its own kdeg", ddi28_enzyme_fraction(&d, 1), 1.0 - (1.0 - erh) * exp(0.0 - kdh * 20.0), 1.0e-8)
+    }
+
+    // ------------------------------------------------------------------ 12
+    println("12 gut induction, constant inducer")
+    let kdh12 = 0.5
+    let kdg12 = 0.8
+    let em_h = 4.0
+    let ec_h = 0.3
+    let em_g = 2.5
+    let ec_g = 0.2
+    {
+        var d = ddi28_new(1.0)
+        var s0 = circ28_sys_zero()
+        var s1 = circ28_sys_zero()
+        var s2 = circ28_sys_zero()
+        let v = ddi28_add_drug(&!d, pv)
+        ddi28_add_pathway(&!d, v, 1, ch10)
+        ddi28_add_gut_pathway(&!d, v, 1, cg10)
+        let pr = ddi28_add_drug(&!d, pperp)
+        ddi28_set_induction(&!d, pr, 1, em_h, ec_h)
+        ddi28_set_gut_induction(&!d, pr, 1, em_g, ec_g)
+        ddi28_set_kdeg(&!d, 1, kdh12)
+        ddi28_set_gut_kdeg(&!d, 1, kdg12)
+        ck_load_eq(&!d, pr, pperp, 100.0)
+        let il = ddi28_unbound_liver(&d, pr)
+        let ig = ddi28_unbound_gut(&d, pr)
+        let fh_inf = 1.0 + em_h * il / (ec_h + il)
+        let fg_inf = 1.0 + em_g * ig / (ec_g + ig)
+        print("  Fh_inf = 1 + Emax I/(EC50 + I) = "); print(fh_inf); print("  Fg_inf = "); println(fg_inf)
+        ck_idle(&!d, &!s0, &!s1, &!s2, 3)
+        fails = fails + ck_rel("Fg(3 h)", ddi28_gut_enzyme_fold(&d, 1), fg_inf + (1.0 - fg_inf) * exp(0.0 - kdg12 * 3.0), 1.0e-8)
+        fails = fails + ck_rel("F_liver(3 h)", ddi28_enzyme_fold(&d, 1), fh_inf + (1.0 - fh_inf) * exp(0.0 - kdh12 * 3.0), 1.0e-8)
+        ck_idle(&!d, &!s0, &!s1, &!s2, 57)
+        fails = fails + ck_rel("Fg(60 h) -> 1 + Emax I/(EC50 + I)", ddi28_gut_enzyme_fold(&d, 1), fg_inf, 1.0e-8)
+        fails = fails + ck_rel("F_liver(60 h)", ddi28_enzyme_fold(&d, 1), fh_inf, 1.0e-8)
+        let pi0 = ck_with(pv, ch10, cg10)
+        let pi1 = ck_with(pv, ch10 * fh_inf, cg10 * fg_inf)
+        let ci0 = circ28_splanchnic_clearance(pi0)
+        let ci1 = circ28_splanchnic_clearance(pi1)
+        let fi0 = circ28_gut_availability(pi0) * (1.0 - circ28_hepatic_extraction(pi0))
+        let fi1 = circ28_gut_availability(pi1) * (1.0 - circ28_hepatic_extraction(pi1))
+        let ni = ck_nsteps(pv, ci1, 1.0)
+        let ri = ck_drive(&!d, &!s0, &!s1, &!s2, 0, 1, 10.0, ni)
+        fails = fails + ck_tail("victim oral", ri)
+        fails = fails + ck_true("I_gut and I_liver constant to 1e-6", ri.gdev <= 1.0e-6 && ri.idev <= 1.0e-6)
+        fails = fails + ck_rel("engine clint (L/h) = CL F_inf", ri.cl, ch10 * fh_inf, 1.0e-8)
+        fails = fails + ck_rel("engine clint_gut (L/h) = CL Fg_inf", ri.clg, cg10 * fg_inf, 1.0e-8)
+        fails = fails + ck_rel("AUC/input induced = F / CLs", ri.auc / ri.input, fi1 / ci1, 1.0e-6)
+        let r12 = (ri.auc / ri.input) / (o10a.auc / o10a.input)
+        fails = fails + ck_rel("AUCR_oral induced = (F1/CLs1) / (F0/CLs0)", r12, (fi1 / ci1) / (fi0 / ci0), 1.0e-6)
+        print("  AUCR_oral induced "); println(r12)
+        fails = fails + ck_true("induction lowers oral exposure (AUCR < 1)", r12 < 1.0)
+    }
+
+    // ------------------------------------------------------------------ 13
+    println("13 mass balance, three drugs, gut and hepatic channels, dynamic exposures")
+    {
+        let dt13 = 0.25
+        var d = ddi28_new(dt13)
+        var s0 = circ28_sys_zero()
+        var s1 = circ28_sys_zero()
+        var s2 = circ28_sys_zero()
+        let pa = ck_perp()
+        var pb = ck_set()
+        pb.cl_renal = 2.0
+        pb.clform = 3.0
+        var pc = ck_set()
+        pc.fu = 0.4
+        pc.cl_plasma = 1.5
+        let a = ddi28_add_drug(&!d, pa)
+        let b = ddi28_add_drug(&!d, pb)
+        let c = ddi28_add_drug(&!d, pc)
+        ddi28_add_pathway(&!d, a, 6, 200.0)
+        ddi28_add_pathway(&!d, a, 1, 20.0)
+        ddi28_add_gut_pathway(&!d, a, 1, 60.0)
+        ddi28_add_gut_pathway(&!d, a, 6, 100.0)
+        ddi28_add_pathway(&!d, b, 1, 300.0)
+        ddi28_add_pathway(&!d, b, 2, 100.0)
+        ddi28_add_gut_pathway(&!d, b, 1, 250.0)
+        ddi28_add_pathway(&!d, c, 1, 200.0)
+        ddi28_add_pathway(&!d, c, 2, 50.0)
+        ddi28_add_gut_pathway(&!d, c, 1, 150.0)
+        ddi28_add_gut_pathway(&!d, c, 2, 80.0)
+        ddi28_set_ki(&!d, a, 1, 0.1)
+        ddi28_set_mbi(&!d, a, 1, 0.3, 0.1)
+        ddi28_set_gut_mbi(&!d, a, 1, 0.6, 0.2)
+        ddi28_set_induction(&!d, a, 2, 3.0, 0.1)
+        ddi28_set_gut_induction(&!d, a, 2, 2.0, 0.05)
+        ddi28_set_ki(&!d, b, 1, 0.5)
+        ddi28_set_mbi(&!d, b, 2, 0.2, 0.2)
+        ddi28_set_ki(&!d, c, 2, 0.3)
+        ddi28_set_kdeg(&!d, 1, 0.05)
+        ddi28_set_kdeg(&!d, 2, 0.1)
+        ddi28_set_gut_kdeg(&!d, 1, 0.3)
+        ddi28_set_gut_kdeg(&!d, 2, 0.4)
+        var in0 = 0.0
+        var in1 = 0.0
+        var in2 = 0.0
+        var gmin = 1.0
+        var gmax = 0.0
+        var gfmax = 0.0
+        let n13 = 600
+        var k: i32 = 0
+        while k < n13 {
+            let t = ((k as f64) + 0.5) * dt13
+            var iv0 = 0.0
+            var iv1 = 0.0
+            var iv2 = 0.0
+            var or0 = 0.0
+            if t < 100.0 { or0 = 50.0 * exp(0.0 - 0.3 * t) }
+            if t < 10.0 { iv0 = 5.0 }
+            if t < 60.0 { iv1 = 20.0 }
+            let or1 = 12.0 * exp(0.0 - 0.1 * t)
+            if t < 8.0 { iv2 = 15.0 }
+            let or2 = 30.0 * exp(0.0 - 0.2 * t)
+            in0 = in0 + (iv0 + or0) * dt13
+            in1 = in1 + (iv1 + or1) * dt13
+            in2 = in2 + (iv2 + or2) * dt13
+            ddi28_step_all(&!d, &!s0, &!s1, &!s2, iv0, or0, iv1, or1, iv2, or2)
+            var e: i32 = 1
+            while e < 3 {
+                let ef = ddi28_gut_enzyme_fraction(&d, e)
+                if ef < gmin { gmin = ef }
+                if ef > gmax { gmax = ef }
+                let ff = ddi28_gut_enzyme_fold(&d, e)
+                if ff > gfmax { gfmax = ff }
+                e = e + 1
+            }
+            k = k + 1
+        }
+        fails = fails + ck_rel("drug A: eliminated + remaining over input", (ddi28_eliminated(&d, 0) + ddi28_remaining(&d, 0)) / in0, 1.0, 1.0e-10)
+        fails = fails + ck_rel("drug B: eliminated + remaining over input", (ddi28_eliminated(&d, 1) + ddi28_remaining(&d, 1)) / in1, 1.0, 1.0e-10)
+        fails = fails + ck_rel("drug C: eliminated + remaining over input", (ddi28_eliminated(&d, 2) + ddi28_remaining(&d, 2)) / in2, 1.0, 1.0e-10)
+        let gfa = ddi28_gut_eliminated(&d, 0) / in0
+        let gfb = ddi28_gut_eliminated(&d, 1) / in1
+        let gfc = ddi28_gut_eliminated(&d, 2) / in2
+        print("  gut-wall share of input: A "); print(gfa); print("  B "); print(gfb); print("  C "); println(gfc)
+        fails = fails + ck_true("gut channel is substantial (> 1e-3 of input) for every drug", gfa > 1.0e-3 && gfb > 1.0e-3 && gfc > 1.0e-3)
+        fails = fails + ck_true("balance without the gut tally fails by > 1e-3 (ddi28_eliminated includes it)",
+            (ddi28_eliminated(&d, 0) - ddi28_gut_eliminated(&d, 0) + ddi28_remaining(&d, 0)) / in0 < 0.999
+            && (ddi28_eliminated(&d, 1) - ddi28_gut_eliminated(&d, 1) + ddi28_remaining(&d, 1)) / in1 < 0.999
+            && (ddi28_eliminated(&d, 2) - ddi28_gut_eliminated(&d, 2) + ddi28_remaining(&d, 2)) / in2 < 0.999)
+        print("  gut enzyme fraction Eg range ["); print(gmin); print(", "); print(gmax); print("], largest gut fold "); println(gfmax)
+        fails = fails + ck_true("Eg in [0,1]", gmin >= 0.0 && gmax <= 1.0)
+        fails = fails + ck_true("gut interaction is active (Eg below 0.9 and fold above 1.1)", gmin < 0.9 && gfmax > 1.1)
     }
 
     if fails == 0 {

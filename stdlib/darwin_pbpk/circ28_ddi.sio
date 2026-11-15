@@ -48,6 +48,33 @@
 // Doses are rates (mg/h) held constant over the step; a jump in a state is not
 // a dose here (see circ28.sio).
 //
+// Gut-wall pathways. A drug may also get up to four GUT pathways (a baseline
+// gut-wall intrinsic clearance, L/h unbound, on an enzyme id 1..7; same ids as
+// the hepatic ones). The gut intrinsic clearance handed to circ28 as clint_gut is
+//
+//   clint_gut_v = sum over its gut pathways j  CL_j * Eg_e * Fg_e / (1 + sum_{p != v} Ig_p / Ki_{p,e})
+//
+// with Ig_p = fu_p * T_gut,p / kp_p[8] (state circ28_it(8)) the unbound
+// concentration in the kernel's single gut tissue compartment. Eg_e (active
+// fraction) and Fg_e (induced fold) are gut enzyme states SEPARATE from the
+// hepatic E_e, F_e: they have their own turnover kdeg_gut_e (default 0 = frozen;
+// gut CYP3A4 turns over faster than hepatic, so set it per enzyme) and are
+// driven by Ig_p with the perpetrator's kinact/KI and Emax/EC50 of the liver
+// unless a gut-specific value is set (ddi28_set_gut_mbi / _induction). The
+// competitive Ki is shared between liver and gut. The enzyme update is the same
+// exact exponential as the hepatic one and uses the same midpoint splitting
+// (the gut exposure is extrapolated to mid-step exactly like the hepatic one).
+// A drug with NO gut pathway keeps the clint_gut of the parameters it was added
+// with, unchanged and un-interacted, so callers that never add a gut pathway get
+// exactly the results of the hepatic-only engine.
+// NOT modelled: P-gp (or other) efflux and uptake in the enterocyte; luminal
+// concentration or solubility; gut tissue is the kernel's single gut compartment
+// (stomach, small and large intestine together), so a perpetrator's Ig is the
+// mean unbound concentration in that compartment, not that in the enterocyte
+// of the proximal small intestine; no gut-specific protein binding or Fu,gut.
+// The mass metabolised in the gut wall is booked by the kernel in its gut tally
+// and is part of ddi28_eliminated.
+//
 // Handle table (Madaros pitfall, docs/audit/MADAROS_HANDLE_TABLE_182_...):
 // a Circ28Sys holds two [f64; 784] arrays and must be created ONCE and never
 // inside the stepping loop. The caller therefore owns the three Circ28Sys:
@@ -106,6 +133,28 @@ pub struct Ddi28 {
     pub hist: [i32; 3],       // 1 once i_prev holds the previous step's exposure
     pub last_clint: [f64; 3],
     pub prepared: [i32; 3],
+    // gut-wall layer
+    pub kpg: [f64; 3],        // kp of the gut tissue, organ 8
+    pub ngut: [i32; 3],
+    pub gpath_enz: [i32; 12], // index drug * 4 + j
+    pub gpath_cl: [f64; 12],  // L/h
+    pub gkdeg: [f64; 8],      // 1/h, gut enzyme turnover, index enzyme
+    pub gkinact: [f64; 24],   // gut-specific overrides (used where gov_mbi == 1)
+    pub gkbig: [f64; 24],
+    pub gemax: [f64; 24],     // used where gov_ind == 1
+    pub gec50: [f64; 24],
+    pub gov_mbi: [i32; 24],
+    pub gov_ind: [i32; 24],
+    pub act_g: [f64; 8],      // Eg_e
+    pub fold_g: [f64; 8],     // Fg_e
+    pub eg_half: [f64; 8],
+    pub fg_half: [f64; 8],
+    pub eg_new: [f64; 8],
+    pub fg_new: [f64; 8],
+    pub ig: [f64; 3],         // unbound gut concentration at the start of the step
+    pub igmid: [f64; 3],
+    pub ig_prev: [f64; 3],
+    pub last_clint_gut: [f64; 3],
 }
 
 pub fn ddi28_new(dt: f64) -> Ddi28 {
@@ -146,6 +195,27 @@ pub fn ddi28_new(dt: f64) -> Ddi28 {
         hist: [0; 3],
         last_clint: [0.0; 3],
         prepared: [0; 3],
+        kpg: [1.0; 3],
+        ngut: [0; 3],
+        gpath_enz: [0; 12],
+        gpath_cl: [0.0; 12],
+        gkdeg: [0.0; 8],
+        gkinact: [0.0; 24],
+        gkbig: [0.0; 24],
+        gemax: [0.0; 24],
+        gec50: [0.0; 24],
+        gov_mbi: [0; 24],
+        gov_ind: [0; 24],
+        act_g: [1.0; 8],
+        fold_g: [1.0; 8],
+        eg_half: [1.0; 8],
+        fg_half: [1.0; 8],
+        eg_new: [1.0; 8],
+        fg_new: [1.0; 8],
+        ig: [0.0; 3],
+        igmid: [0.0; 3],
+        ig_prev: [0.0; 3],
+        last_clint_gut: [0.0; 3],
     }
 }
 
@@ -164,6 +234,7 @@ pub fn ddi28_add_drug(d: &!Ddi28, p: Circ28Params) -> i32 with Mut {
     if i == 2 { (*d).p2 = p; (*d).p2.clint = 0.0 }
     (*d).fu[i] = p.fu
     (*d).kpl[i] = p.kp[1]
+    (*d).kpg[i] = p.kp[8]
     (*d).n = i + 1
     return i
 }
@@ -221,6 +292,60 @@ pub fn ddi28_set_kdeg(d: &!Ddi28, enz: i32, kdeg: f64) -> i32 with Mut {
     (*d).kdeg[enz] = kdeg
     return 0
 }
+
+// Adds a GUT pathway (clint_j in L/h, unbound, gut wall) of `drug` on enzyme
+// 1..7. Returns 0, or -1 when the drug does not exist, has four gut pathways or
+// the id is invalid. Once a drug has a gut pathway its clint_gut is the sum
+// defined in the header, replacing the clint_gut of its parameters.
+pub fn ddi28_add_gut_pathway(d: &!Ddi28, drug: i32, enz: i32, clint_j: f64) -> i32 with Mut {
+    if drug < 0 { return 0 - 1 }
+    if drug >= (*d).n { return 0 - 1 }
+    if enz < 1 { return 0 - 1 }
+    if enz > 7 { return 0 - 1 }
+    let k = (*d).ngut[drug]
+    if k >= 4 { return 0 - 1 }
+    (*d).gpath_enz[drug * 4 + k] = enz
+    (*d).gpath_cl[drug * 4 + k] = clint_j
+    (*d).ngut[drug] = k + 1
+    return 0
+}
+
+// Gut enzyme turnover kdeg_gut (1/h) for enzyme 1..7 (0 freezes it).
+pub fn ddi28_set_gut_kdeg(d: &!Ddi28, enz: i32, kdeg: f64) -> i32 with Mut {
+    if enz < 1 { return 0 - 1 }
+    if enz > 7 { return 0 - 1 }
+    (*d).gkdeg[enz] = kdeg
+    return 0
+}
+
+// Gut-specific mechanism-based inactivation of `perp` on enzyme `enz`
+// (kinact 1/h, KI mg/L unbound); overrides the hepatic values for the gut only.
+pub fn ddi28_set_gut_mbi(d: &!Ddi28, perp: i32, enz: i32, kinact: f64, ki_big: f64) -> i32 with Mut {
+    if !ddi28_slot_ok(d, perp, enz) { return 0 - 1 }
+    (*d).gkinact[perp * 8 + enz] = kinact
+    (*d).gkbig[perp * 8 + enz] = ki_big
+    (*d).gov_mbi[perp * 8 + enz] = 1
+    return 0
+}
+
+// Gut-specific induction (Emax, EC50 mg/L unbound); overrides the hepatic values
+// for the gut only.
+pub fn ddi28_set_gut_induction(d: &!Ddi28, perp: i32, enz: i32, emax: f64, ec50: f64) -> i32 with Mut {
+    if !ddi28_slot_ok(d, perp, enz) { return 0 - 1 }
+    (*d).gemax[perp * 8 + enz] = emax
+    (*d).gec50[perp * 8 + enz] = ec50
+    (*d).gov_ind[perp * 8 + enz] = 1
+    return 0
+}
+
+pub fn ddi28_set_gut_enzyme_state(d: &!Ddi28, enz: i32, e_act: f64, fold: f64) -> i32 with Mut {
+    if enz < 1 { return 0 - 1 }
+    if enz > 7 { return 0 - 1 }
+    (*d).act_g[enz] = e_act
+    (*d).fold_g[enz] = fold
+    return 0
+}
+
 
 // Sets the enzyme states directly (E in [0,1], induced fold F).
 pub fn ddi28_set_enzyme_state(d: &!Ddi28, enz: i32, e_act: f64, fold: f64) -> i32 with Mut {
@@ -280,6 +405,18 @@ pub fn ddi28_auc_blood(d: &Ddi28, drug: i32) -> f64 {
     return (*d).e2.auc_ven
 }
 
+// Unbound gut-tissue concentration of `drug` (mg/L): fu T_gut / kp_gut.
+pub fn ddi28_unbound_gut(d: &Ddi28, drug: i32) -> f64 with Div {
+    return (*d).fu[drug] * ddi28_get_x(d, drug, circ28_it(8)) / (*d).kpg[drug]
+}
+
+// Mass metabolised in the gut wall so far (mg); part of ddi28_eliminated.
+pub fn ddi28_gut_eliminated(d: &Ddi28, drug: i32) -> f64 {
+    if drug == 0 { return (*d).e0.gut }
+    if drug == 1 { return (*d).e1.gut }
+    return (*d).e2.gut
+}
+
 // Mass eliminated by all channels (mg).
 pub fn ddi28_eliminated(d: &Ddi28, drug: i32) -> f64 {
     if drug == 0 { return (*d).e0.hepatic + (*d).e0.formed + (*d).e0.renal + (*d).e0.plasma + (*d).e0.gut }
@@ -305,6 +442,16 @@ pub fn ddi28_enzyme_fold(d: &Ddi28, enz: i32) -> f64 { return (*d).fold[enz] }
 // Net activity multiplier E_e * F_e.
 pub fn ddi28_enzyme_activity(d: &Ddi28, enz: i32) -> f64 { return (*d).act_e[enz] * (*d).fold[enz] }
 
+// Current gut-wall clint of the drug (L/h) as last set by a step.
+pub fn ddi28_clint_gut(d: &Ddi28, drug: i32) -> f64 {
+    return (*d).last_clint_gut[drug]
+}
+
+// Eg_e, Fg_e and Eg_e * Fg_e of the gut enzyme e.
+pub fn ddi28_gut_enzyme_fraction(d: &Ddi28, enz: i32) -> f64 { return (*d).act_g[enz] }
+pub fn ddi28_gut_enzyme_fold(d: &Ddi28, enz: i32) -> f64 { return (*d).fold_g[enz] }
+pub fn ddi28_gut_enzyme_activity(d: &Ddi28, enz: i32) -> f64 { return (*d).act_g[enz] * (*d).fold_g[enz] }
+
 pub fn ddi28_time(d: &Ddi28) -> f64 { return (*d).t }
 
 // x <- x_inf + (x - x_inf) exp(-rate dt); unchanged for rate <= 0.
@@ -315,15 +462,26 @@ fn ddi28_relax(x: f64, xinf: f64, rate: f64, dt: f64) -> f64 with Div {
     return x
 }
 
-// Sets clint of drug i and refactors its system in place when it changed.
-fn ddi28_prepare_drug(d: &!Ddi28, i: i32, cl: f64, sys: &!Circ28Sys) with Mut, Div {
+// clint_gut parameter of drug i as currently held.
+fn ddi28_pclg(d: &Ddi28, i: i32) -> f64 {
+    if i == 0 { return (*d).p0.clint_gut }
+    if i == 1 { return (*d).p1.clint_gut }
+    return (*d).p2.clint_gut
+}
+
+// Sets clint and clint_gut of drug i and refactors its system in place when
+// either changed.
+fn ddi28_prepare_drug(d: &!Ddi28, i: i32, cl: f64, clg: f64, sys: &!Circ28Sys) with Mut, Div {
     if (*d).prepared[i] == 1 {
-        if cl == (*d).last_clint[i] { return }
+        if cl == (*d).last_clint[i] {
+            if clg == (*d).last_clint_gut[i] { return }
+        }
     }
-    if i == 0 { (*d).p0.clint = cl; circ28_prepare((*d).p0, (*d).dt, sys) }
-    if i == 1 { (*d).p1.clint = cl; circ28_prepare((*d).p1, (*d).dt, sys) }
-    if i == 2 { (*d).p2.clint = cl; circ28_prepare((*d).p2, (*d).dt, sys) }
+    if i == 0 { (*d).p0.clint = cl; (*d).p0.clint_gut = clg; circ28_prepare((*d).p0, (*d).dt, sys) }
+    if i == 1 { (*d).p1.clint = cl; (*d).p1.clint_gut = clg; circ28_prepare((*d).p1, (*d).dt, sys) }
+    if i == 2 { (*d).p2.clint = cl; (*d).p2.clint_gut = clg; circ28_prepare((*d).p2, (*d).dt, sys) }
     (*d).last_clint[i] = cl
+    (*d).last_clint_gut[i] = clg
     (*d).prepared[i] = 1
 }
 
@@ -335,24 +493,34 @@ fn ddi28_enzymes(d: &!Ddi28) with Mut, Div {
     while j < 3 {
         var iu = 0.0
         var im = 0.0
+        var ig = 0.0
+        var gm = 0.0
         if j < n {
             iu = ddi28_unbound_liver(&(*d), j)
             im = iu
+            ig = ddi28_unbound_gut(&(*d), j)
+            gm = ig
             if (*d).mode == 0 {
                 if (*d).hist[j] == 1 {
                     im = iu + 0.5 * (iu - (*d).i_prev[j])
                     if im < 0.0 { im = 0.0 }
+                    gm = ig + 0.5 * (ig - (*d).ig_prev[j])
+                    if gm < 0.0 { gm = 0.0 }
                 }
             }
         }
         (*d).iu[j] = iu
         (*d).imid[j] = im
+        (*d).ig[j] = ig
+        (*d).igmid[j] = gm
         j = j + 1
     }
     var e: i32 = 1
     while e < 8 {
         var a = 0.0
         var g = 0.0
+        var ag = 0.0
+        var gg = 0.0
         var p: i32 = 0
         while p < n {
             let ix = p * 8 + e
@@ -366,6 +534,28 @@ fn ddi28_enzymes(d: &!Ddi28) with Mut, Div {
             if em != 0.0 {
                 let den2 = (*d).ec50[ix] + im
                 if den2 > 0.0 { g = g + em * im / den2 }
+            }
+            // gut: same parameters unless a gut-specific value is set
+            let gm = (*d).igmid[p]
+            var kin_g = kin
+            var kb_g = (*d).kbig[ix]
+            if (*d).gov_mbi[ix] == 1 {
+                kin_g = (*d).gkinact[ix]
+                kb_g = (*d).gkbig[ix]
+            }
+            if kin_g > 0.0 {
+                let dg = kb_g + gm
+                if dg > 0.0 { ag = ag + kin_g * gm / dg }
+            }
+            var em_g = em
+            var ec_g = (*d).ec50[ix]
+            if (*d).gov_ind[ix] == 1 {
+                em_g = (*d).gemax[ix]
+                ec_g = (*d).gec50[ix]
+            }
+            if em_g != 0.0 {
+                let dg2 = ec_g + gm
+                if dg2 > 0.0 { gg = gg + em_g * gm / dg2 }
             }
             p = p + 1
         }
@@ -385,6 +575,23 @@ fn ddi28_enzymes(d: &!Ddi28) with Mut, Div {
         }
         (*d).e_new[e] = ddi28_relax(ec, einf, rate_e, dt)
         (*d).f_new[e] = ddi28_relax(fc, finf, kd, dt)
+        // gut enzyme states
+        let kdg = (*d).gkdeg[e]
+        let ecg = (*d).act_g[e]
+        let fcg = (*d).fold_g[e]
+        let rate_g = kdg + ag
+        var einf_g = ecg
+        if rate_g > 0.0 { einf_g = kdg / rate_g }
+        let finf_g = 1.0 + gg
+        if (*d).mode == 0 {
+            (*d).eg_half[e] = ddi28_relax(ecg, einf_g, rate_g, 0.5 * dt)
+            (*d).fg_half[e] = ddi28_relax(fcg, finf_g, kdg, 0.5 * dt)
+        } else {
+            (*d).eg_half[e] = ecg
+            (*d).fg_half[e] = fcg
+        }
+        (*d).eg_new[e] = ddi28_relax(ecg, einf_g, rate_g, dt)
+        (*d).fg_new[e] = ddi28_relax(fcg, finf_g, kdg, dt)
         e = e + 1
     }
 }
@@ -412,6 +619,31 @@ fn ddi28_victim_clint(d: &!Ddi28, v: i32) -> f64 with Mut, Div {
     return cl
 }
 
+// Gut-wall clint of victim v from the in-step gut enzyme values and gut
+// exposures; the parameters' own clint_gut when v has no gut pathway.
+fn ddi28_victim_clint_gut(d: &!Ddi28, v: i32) -> f64 with Mut, Div {
+    if (*d).ngut[v] == 0 { return ddi28_pclg(&(*d), v) }
+    let n = (*d).n
+    var cl = 0.0
+    var k: i32 = 0
+    while k < (*d).ngut[v] {
+        let pi = v * 4 + k
+        let e = (*d).gpath_enz[pi]
+        var den = 1.0
+        var q: i32 = 0
+        while q < n {
+            if q != v {
+                let ki = (*d).ki[q * 8 + e]
+                if ki > 0.0 { den = den + (*d).igmid[q] / ki }
+            }
+            q = q + 1
+        }
+        cl = cl + (*d).gpath_cl[pi] * ((*d).eg_half[e] * (*d).fg_half[e]) / den
+        k = k + 1
+    }
+    return cl
+}
+
 // Advances all drugs by d.dt. iv_i (mg/h) enters the venous pool of drug i and
 // or_i (mg/h) its gut tissue, both constant over the step. Rates of drugs that
 // were not added are ignored.
@@ -432,9 +664,10 @@ pub fn ddi28_step_all(
     var v: i32 = 0
     while v < n {
         let cl = ddi28_victim_clint(d, v)
-        if v == 0 { ddi28_prepare_drug(d, 0, cl, sys0) }
-        if v == 1 { ddi28_prepare_drug(d, 1, cl, sys1) }
-        if v == 2 { ddi28_prepare_drug(d, 2, cl, sys2) }
+        let clg = ddi28_victim_clint_gut(d, v)
+        if v == 0 { ddi28_prepare_drug(d, 0, cl, clg, sys0) }
+        if v == 1 { ddi28_prepare_drug(d, 1, cl, clg, sys1) }
+        if v == 2 { ddi28_prepare_drug(d, 2, cl, clg, sys2) }
         v = v + 1
     }
     if n > 0 { circ28_step(&!(*d).s0, (*d).p0, sys0, iv0, or0, &!(*d).e0) }
@@ -444,11 +677,14 @@ pub fn ddi28_step_all(
     while e < 8 {
         (*d).act_e[e] = (*d).e_new[e]
         (*d).fold[e] = (*d).f_new[e]
+        (*d).act_g[e] = (*d).eg_new[e]
+        (*d).fold_g[e] = (*d).fg_new[e]
         e = e + 1
     }
     var j: i32 = 0
     while j < 3 {
         (*d).i_prev[j] = (*d).iu[j]
+        (*d).ig_prev[j] = (*d).ig[j]
         if j < n { (*d).hist[j] = 1 }
         j = j + 1
     }
