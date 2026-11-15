@@ -6,6 +6,7 @@
 |---|---|
 | `seed-a.hex` | The source of record: the annotated listing, in format A |
 | `seed-a` | The committed binary: exactly the bytes the listing describes |
+| `seed-a.oct` | The same bytes in format B, for the cross-check: root B's `seed-b` assembles it into `seed-a` |
 | `seed_a_ref.cpp` | A reference model of the decoder, used by the gate as a test oracle only; it is not on the bootstrap path |
 
 ## What it does
@@ -36,6 +37,6 @@
 
 The design is in the decision record of 2026-11-13/14 (project notes, "Bootstrap root"):
 
-- **Root B** has its own loader in octal, written separately. Each loader's listing will also be written in the other's format, so A assembles B and B assembles A (a cross-check at the base).
+- **Root B** has its own loader in octal, written separately (`../b`). Each loader's listing is also written in the other's format, and `scripts/ci/root_b_seed_gate.sh` checks that A assembles B and B assembles A (a cross-check at the base).
 - The plan is a Lean 4 theorem, over our own minimal x86-64 semantics tested against the CPU: this loader turns every valid format-A listing into exactly the bytes it describes and refuses every other.
 - The next stage of root A is a minimal Forth, written in format A and loaded by `seed-a`.
