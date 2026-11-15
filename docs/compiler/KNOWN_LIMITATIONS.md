@@ -90,8 +90,16 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
   `self: &T`) carry one tangent per scalar `f64` field. The argument has to
   name a local (`p`, `&p`); pin:
   `tests/run-pass/gum_fo_tangent_clone_structs.sio`.
-  What this leaves to the re-lowering below: struct returns, nested struct
-  fields, helpers whose body asks `variance_of` and friends,
+  Struct returns (`fn f(..) -> S`, scalar `f64` fields of `S` read after a
+  `let r = f(..)`: the clone writes one Jacobian row per field, the caller
+  chain-rules each) and nested struct fields (`p.pos.x`, `self.pos.x`, depth
+  up to 3, at most 24 tangents) are covered too; pin:
+  `tests/run-pass/gum_fo_tangent_clone_struct_returns.sio`. A struct return
+  needs every return to be a struct literal or a local and no field
+  assignment or `var` struct in the body; a struct holding a struct field,
+  a result not bound by a `let`, and second order stay on the path below.
+  What this leaves to the re-lowering below: those struct-return shapes,
+  helpers whose body asks `variance_of` and friends,
   and the Hessian of a call the re-lowering refuses (with second order on,
   such a call takes the clone's first-order row and its Hessian reads NaN;
   `hessian_of` of a call that was never lowered for its value still reads 0).
