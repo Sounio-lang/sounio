@@ -41,6 +41,9 @@
 //                                                          (Alasmari 2022 text, citing Kudo 1999: SEC)
 //  kpsc    fitted   propag.  3       from u(Vss)           FITTED to the pooled V_ss
 //  pssc    1        -        0       -                     PLACEHOLDER (ps = 20 Q), not fitted: see below
+//  (Transit round, 2026-11-15: an Erlang input of 4 stages (3 transit compartments, Ka = Ktr, rule 11, a declared
+//  assumption) with k fitted to the same Tmax was TESTED and REJECTED because it raises the oral peak, which is already too
+//  sharp; so is the gut-unscaled Kp variant. Values in hal_k_transit(gv); both columns in the test, section S8.)
 //  ka      1.873    0.322    1       SD/sqrt(n)            ln 2 / absorption half-life 0.37 +/- 0.18 h, n 8
 //                                                          healthy men, 0.5 mg/kg oral (Holley 1983, PMID
 //                                                          6831826, AB). Compartmental estimate of the source.
@@ -79,6 +82,24 @@ use darwin_pbpk::circ28::*
 use darwin_pbpk::circ28_kp::*
 use darwin_pbpk::circ28_drug::*
 use math::pure::{exp, ln}
+
+// Transit round (2026-11-15). Stage count of the Erlang input chain tested against first order: published "3 transit
+// compartments with Ka = Ktr" = 3 + 1 = 4 stages (rule 11); a DECLARED ASSUMPTION (no haloperidol transit model exists).
+pub fn hal_ntr_transit() -> i32 { return 4 }
+
+// Parameter set of a value array: gv 0 all-organ Kp scalar (the record), gv 1 gut wall at its Rodgers-Rowland Kp.
+pub fn hal_p(th: [f64; 18], gv: i32) -> Circ28Params with Mut, Div, Panic {
+    if gv == 1 { return circ28_drug_params_theta_gutrr(th) }
+    return circ28_drug_params_theta(th)
+}
+
+// Transit-chain k (per stage) fitted offline (secant on the refined Tmax of hal_profile_v, ntr = 4) to the Tmax that the
+// module first-order input gives (2.2802 h, Holley 1983 ka and lag): gv 0 all-organ scalar, gv 1 gut wall at its
+// Rodgers-Rowland Kp (scalar refitted). NOT in the record: the transit input was not adopted (see the test, S8).
+pub fn hal_k_transit(gv: i32) -> f64 {
+    if gv == 1 { return 4.182471 }
+    return 7.317724
+}
 
 // ---- measured / derived inputs -------------------------------------------------
 pub fn hal_mw() -> f64 { return 376.0 }
@@ -470,18 +491,23 @@ pub fn hal_u_vss() -> f64 with Mut, Div, Panic { return hal_pool_vss(0).u * hal_
 // Takes a value array with the measured parameters set and returns it with CD_KPSC, CD_CLREN and
 // CD_CLINT set from (vss, cl_plasma). CD_CLINT = -1 if a fit is impossible.
 pub fn hal_fit(th: [f64; 18], vss: f64, cl_plasma: f64) -> [f64; 18] with Mut, Div, Panic {
+    return hal_fit_v(th, vss, cl_plasma, 0)
+}
+
+pub fn hal_fit_v(th: [f64; 18], vss: f64, cl_plasma: f64, gv: i32) -> [f64; 18] with Mut, Div, Panic {
     var t = th
     t[CD_KPSC] = 1.0
     t[CD_CLINT] = 0.0
     t[CD_CLREN] = hal_fe_renal() * cl_plasma
-    let p0 = circ28_drug_params_theta(t)
-    let sc = circ28_kp_scale_for_vss(p0, p0.kp, vss)
+    let p0 = hal_p(t, gv)
+    var sc = circ28_kp_scale_for_vss(p0, p0.kp, vss)
+    if gv == 1 { sc = circ28_kp_scale_for_vss_gutrr(p0, p0.kp, vss) }
     if !(sc > 0.0) {
         t[CD_CLINT] = 0.0 - 1.0
         return t
     }
     t[CD_KPSC] = sc
-    let p = circ28_drug_params_theta(t)
+    let p = hal_p(t, gv)
     let clb = (cl_plasma - t[CD_CLREN]) / p.bp
     let qh = circ28_q_hepatic(p)
     let eh = clb / qh
@@ -555,6 +581,13 @@ pub fn hal_drug_into(d: &!Circ28Drug) with Mut, Div, Panic, Epistemic {
 //   (j = 0, 1, 2)
 // One run per call, everything local to this function (lean_single).
 pub fn hal_profile(th: &[f64; 18], route: i32, dose: f64, t_inf: f64, pssc: f64, f: &![f64; 80]) -> i32 with Mut, Div, Panic {
+    return hal_profile_v(th, route, dose, t_inf, pssc, f, 0, 1)
+}
+
+// gv: gut variant (see hal_p); ntr: stages of the oral input chain (1 = first order with lag; CD_KA is then the
+// rate per stage). f[28] refined Tmax and f[29] refined Cmax of the first interior maximum (parabola through three
+// equally spaced points, used for the Tmax fit of the transit input).
+pub fn hal_profile_v(th: &[f64; 18], route: i32, dose: f64, t_inf: f64, pssc: f64, f: &![f64; 80], gv: i32, ntr: i32) -> i32 with Mut, Div, Panic {
     var t2: [f64; 18] = [0.0; 18]
     var i: i32 = 0
     while i < 18 {
@@ -565,7 +598,7 @@ pub fn hal_profile(th: &[f64; 18], route: i32, dose: f64, t_inf: f64, pssc: f64,
     let ka = t2[CD_KA]
     let fa = t2[CD_FA]
     let tlag = t2[CD_TLAG]
-    let p = circ28_drug_params_theta(t2)
+    let p = hal_p(t2, gv)
     var sys = circ28_sys_zero()
     var s = circ28_state_zero()
     var el = circ28_elim_zero()
@@ -573,6 +606,10 @@ pub fn hal_profile(th: &[f64; 18], route: i32, dose: f64, t_inf: f64, pssc: f64,
     var input = 0.0
     var cmax = 0.0
     var tmax = 0.0
+    var c1 = 0.0
+    var c2 = 0.0
+    var c3 = 0.0
+    var refd: i32 = 0
     var ph: i32 = 0
     while ph < 5 {
         var dt = 0.01
@@ -602,13 +639,25 @@ pub fn hal_profile(th: &[f64; 18], route: i32, dose: f64, t_inf: f64, pssc: f64,
                 mass = circ28_iv_mass(dose, t_inf, t, t + dt)
                 iv = mass / dt
             } else {
-                mass = circ28_oral_mass(ka, fa, dose, tlag, t, t + dt)
+                mass = circ28_oral_mass_n(ka, ntr, fa, dose, tlag, t, t + dt)
                 oral = mass / dt
             }
             input = input + mass
             circ28_step(&!s, p, &sys, iv, oral, &!el)
             t = t + dt
             let c = s.x[0] / p.bp
+            c3 = c2
+            c2 = c1
+            c1 = c
+            if refd == 0 && c2 > c3 && c2 >= c1 && c3 > 0.0 && ph >= 1 && t > 0.6 {
+                let den = c3 - 2.0 * c2 + c1
+                if den < 0.0 {
+                    let off = 0.5 * (c3 - c1) / den
+                    (*f)[28] = (t - dt) + off * dt
+                    (*f)[29] = c2 - 0.25 * (c3 - c1) * off
+                    refd = 1
+                }
+            }
             if c > cmax {
                 cmax = c
                 tmax = t
