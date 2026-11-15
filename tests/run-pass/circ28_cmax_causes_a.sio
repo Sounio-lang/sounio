@@ -1,0 +1,780 @@
+//@ run-pass
+//@ timeout: 180
+//@ expect-stdout-contains: CIRC28_CMAX_CAUSES_A_PASS
+//
+// DIAGNOSTIC of the oral Cmax shortfall of the three immunophilins on the circ28 drug layer (tacrolimus,
+// sirolimus, everolimus; whole-blood observables). Nothing is fitted or adopted and no stdlib file is
+// changed: the three fitted records are built by their own modules and read; every diagnostic changes
+// ONE thing (labelled C1 .. C4) and re-derives only what that change forces (the closed-form fits of the
+// modules, redone at the changed input, and the transit rate refitted to the same Tmax). The sibling
+// circ28_cmax_causes_b.sio does C5 (venlafaxine). The question: why is the oral Cmax still low after a
+// transit input (tacrolimus 20.9 against 28.8 +/- 8.9 ng/mL, sirolimus 34 against 67, everolimus 4.5
+// against 17.8; peak_shape_report.md)? Coordinator's prediction: "C2 is the main cause for sirolimus and
+// everolimus, C1 or C4 for tacrolimus, C5 for venlafaxine."
+//
+// BASELINE B0 (the "current numbers"): the record's own disposition on the LOCAL saturable erythrocyte
+// binding stepper (circ28_nl: nl28), single oral dose, the first-order input replaced by a chain of 3
+// equal transit compartments (cc_in_mass; rate k_tr refitted to the module's Tmax target: tacrolimus 1.37
+// h, sirolimus 1.225 h, everolimus 1.5 h). The peak_shape_report numbers 20.9 / 34.3 / 4.47 were made with
+// the single-ratio kernel; this file uses the local one (module measurement: -0.3 % to -3 % in Cmax).
+// Concentrations are venous WHOLE BLOOD (state 0 of the nl stepper), mg/L; printed in ng/mL (x 1000).
+//
+// DIAGNOSTICS (one labelled run each; gap closure g = (Cmax_diag - Cmax_B0) / (Cmax_obs - Cmax_B0))
+//  C1  whole-blood versus plasma bookkeeping. No model change: an AUDIT of every row that compares model
+//      and observation (matrix, unit factor 1000 mg/L -> ng/mL, dose of the run against the dose of the
+//      observation, reference volume of V_ss: plasma-referred V_ss / bp(C_ref) = observed whole-blood V_ss,
+//      asserted), the model's own blood, plasma AUC and B:P at the peak, and the SHAPE measure Cmax/AUC of
+//      model and observation (level and shape separated: AUC bookkeeping right and Cmax/AUC low = shape).
+//  C2  erythrocyte binding capacity. A different (Bmax, Kd) pair; the closed-form fits of the module (Kp
+//      scalar to V_ss(blood), hepatic and gut-wall clint to CL(blood) and F, bp at C_ref) are REDONE for it
+//      (they are whole-blood observables) and k_tr refitted; the plasma permeability product ps (scalar
+//      CD_PSSC, fitted by the modules to a rate observable) and every other input are HELD. Tacrolimus:
+//      Cossart 2024 median (Bmax 90.4 ug/L, Kd 2.36 ug/L; abstract only, read as per litre of
+//      erythrocytes: an assumption, the abstract does not define it). Sirolimus: capacity DERIVED from the
+//      everolimus label (same molar capacity, Bmax = evr_bmax x 914.2/958.2), Kd such that the low-
+//      concentration B:P is 36 (label B:P 36 +/- 18; Ferron 1997 30.9 and Zimmerman 1997 38 in patients,
+//      concentration independent); C2b: same capacity with B:P 18.3 (Yatscoff 1993, plasma share 3.1 %,
+//      abstract). Everolimus: capacity x 3 at the label Kd (what-if, no source: the label capacity is
+//      already the label-implied one). NO sourced sirolimus or everolimus Bmax/Kd exists in the sources
+//      opened (below): these runs are DERIVED/what-if, diagnostic only.
+//  C3  bioavailability declared against fitted. F = 0.10, 0.16, 0.30 (sirolimus also its declared 0.14,
+//      everolimus its declared 0.16) with the apparent CL/F and V_ss/F HELD (V_ss(blood) = F V_ss/F,
+//      CL(blood) = F CL/F): F changes the split gut wall / liver (Fg, Eh printed), not the AUC to first
+//      order. Tacrolimus is not run: its CL and V_ss are IV observables and F is measured (0.14 +/- 0.02).
+//  C4  absorption site. Gut-tissue Kp printed: the single scalar multiplies the Rodgers-Rowland gut Kp,
+//      the depot time constant V_t Kp / ps_gut is printed. C4a: gut Kp reset to the UNSCALED R&R value
+//      (the round-1 tacrolimus diagnostic D1/D2, reused for all three; nothing else changed, k_tr as in B0);
+//      C4b: as C4a with k_tr refitted to the same Tmax (D3). The gut clint is NOT rescaled (the closed
+//      forms of Fg, Eh do not contain Kp); the simulated F = AUC_plasma CL_plasma / dose is printed to show
+//      what the unscaled Kp does to first pass.
+//
+// OBSERVED ROWS (matrix whole blood in all three; AB abstract, FT full text, L label)
+//  tacrolimus  5 mg capsule Cmax 28.8 +/- 8.9 ng/mL, AUC 266 +/- 95 ng h/mL (Prograf label, L; drug_tacrolimus_
+//              report.md); B:P 35 (range 12-67); F 0.14 +/- 0.02 (Floren 1997, n 6, AB); V_ss 139.4 L, CL 2.92 L/h
+//              whole blood (label, IV).
+//  sirolimus   10 mg solution Cmax 67 ng/mL, AUC 736 ng h/mL (Bottiger 2001, PMID 11180036, n 18, AB, geometric
+//              means); B:P 36 +/- 18 (label); 31-38 in vivo; Yatscoff 1993 (PMID 8249123, AB): in vitro, 5-100
+//              ug/L, no concentration dependence, plasma:whole blood 0.09, RBC 94.5 %, plasma 3.1 %.
+//  everolimus  2 mg Cmax 17.8 (SD 6.1) ng/mL, k 4, N 62 (Kovarik, AB); AUC pooled (90, 116, 115, 114 ng h/mL;
+//              n 12, 16, 16, 18; mean computed here); label: plasma share of blood 17 % to 73 % over 5-5000
+//              ng/mL (the module's reading; the label wording is "blood-to-plasma ratio ... 17% to 73%").
+//
+// LITERATURE SEARCH FOR C2/C3 (2026-11-15; PubMed MCP, Scite, openFDA label text; every item below was
+// opened or searched in this session): NO sirolimus or everolimus FKBP12 erythrocyte Bmax/Kd was found
+// (PubMed "rapamycin whole blood erythrocytes distribution concentration dependent" -> only Yatscoff 1993;
+// Scite and web searches return tacrolimus papers only). Tacrolimus Bmax/Kd found: Cossart 2024 (Ther Drug
+// Monit 47:161, doi 10.1097/FTD.0000000000001274, AB: median Bmax 90.4 ug/L (range 22.4-752.5), Kd 2.36
+// ug/L, median Cwb:Cp 9:1, 15 recipients); Sikma/Huitema 2020 (Clin Pharmacokinet 59:771, doi 10.1007/
+// s40262-019-00854-1, page text read: Bmax 2700 pg/mL, Kd 0.142 pg/mL, plasma < 1 % of blood; units not
+// comparable with the module). Everolimus F: the Zortress SPL (openFDA label.json) contains no
+// "bioavailab" string; Afinitor two mentions (not absolute F); Kirchner 2004 (PMID 14748618, AB) gives
+// Tmax 1.3-1.8 h and no F; NO SOURCE FOR 0.16 EXISTS in the sources opened: it came from the coordinator's
+// prompt. Sirolimus F 0.14: label ("about 14 %"), no n.
+//
+// PRE-REGISTRATION (written 2026-11-15 BEFORE any run of this file; only `souc check`). DISCLOSURE: I had
+// read the three drug reports and peak_shape_report.md (their numbers are the baseline), the module source
+// and the tacrolimus D1-D3 notes; I reasoned (not simulated) that holding the plasma permeability product ps
+// fixed while the blood:plasma ratio rises makes the organs permeability-limited in blood-referred terms
+// (ps/bp falls), so a larger capacity can raise a whole-blood Cmax; this changed my C2 predictions from
+// "no effect" to the ranges below before any run. Predictions are printed HIT / MISS and never asserted.
+//  PB  B0 Cmax (ng/mL): tacrolimus 19.0-21.5; sirolimus 32.5-35.5; everolimus 4.3-4.7.
+//  PC1 AUC_inf(blood) / (dose / (CL/F)): tacrolimus 0.95-1.10; sirolimus 0.93-1.05; everolimus 0.96-1.04.
+//      (Cmax/AUC model) / (Cmax/AUC observed): tacrolimus 0.65-0.85; sirolimus 0.50-0.72; everolimus
+//      0.18-0.30. AUC model / observed: tacrolimus 0.85-1.05; sirolimus 0.75-0.88; everolimus 0.94-1.02.
+//      Verdict: no unit or matrix mismatch is found (asserted rows pass); C1 closes none of the gap.
+//  PC2 tacrolimus (Cossart): Cmax 14-21 ng/mL, g < 0.15.
+//      sirolimus (B:P 36): Cmax 40-70, g 0.2-1.0, B:P at the peak 33-37.5, B:P(100)/B:P(5 ng/mL) 0.93-1.0.
+//      sirolimus (B:P 18.3): Cmax 34-52.  everolimus (x 3): Cmax 4.7-7.5, g < 0.25, B:P at the peak 7-9.
+//      baseline B:P at the peak: everolimus 3.1-3.4.
+//  PC3 sirolimus: Cmax(F 0.10)/Cmax(F 0.30) 1.05-1.6; AUC_inf within +/- 8 % across F; Cmax(F 0.16)/Cmax(0.14)
+//      0.92-1.08. everolimus: no closed-form fit at F = 0.10 (clint < 0, the report's F >= 0.148); Cmax(F 0.30) /
+//      Cmax(F 0.16) 0.6-1.0.
+//  PC4 Kp scalar = gut Kp scaled / unscaled (asserted equal). tacrolimus: C4a Cmax 24-45 ng/mL with Tmax < 1.0 h;
+//      C4b Cmax 15-24 (g < 0.3). sirolimus: C4a Cmax 36-60; C4b 29-40. everolimus: C4a 4.0-4.9; C4b 4.25-4.7.
+//      simulated F (C4a) / F closed form: tacrolimus 0.5-1.05.
+//  CAUSES (coordinator): C2 main for sirolimus: MY PREDICTION HIT if the largest g of C1-C4 is C2 with g >= 0.5;
+//      C2 main for everolimus: MY PREDICTION MISS (every g < 0.25: the shortfall there is structural, Vc/F 110
+//      L against V_ss/F 829 L); C1 or C4 for tacrolimus: MY PREDICTION MISS (every g < 0.35).
+//
+// RESULTS (added after the first run, 2026-11-15; the pre-registration above is unchanged). 27 of 40 evaluated
+// predictions HIT. Raw Madaros (the committed ELF), ./bin/souc and lean_single print identical numbers;
+// compiled run 4.1 s. Cmax in whole blood, ng/mL; g = gap closure.
+//  B0 (3 transit compartments, local binding): tacrolimus 20.24 HIT; sirolimus 31.09 MISS (predicted 32.5-35.5; the
+//      34.3 of peak_shape_report was made with the single-ratio kernel: the local binding costs 9 %, not 0.3-3 %);
+//      everolimus 4.47 HIT. Observed 28.8, 67, 17.8.
+//  C1 no unit, matrix or dose mismatch (AUC_inf / (dose/(CL/F)) 1.034, 0.985, 1.000: HIT). Level and shape split:
+//      model/observed AUC 0.93, 0.80, 0.98; model/observed Cmax/AUC 0.75, 0.58, 0.25 (all HIT). Everolimus: AUC right,
+//      Cmax/AUC four times low = shape, not bookkeeping. g(C1) = 0 by construction.
+//  C2 tacrolimus (Cossart 2024): 16.2, g -0.47 (B:P at the peak 10.7 against 43; AUC +21 %): opposite direction. sirolimus
+//      B:P 36: 37.9, g 0.19 (MISS of both bands: 40-70, g >= 0.2); B:P 18.3: 36.5, g 0.15; B:P at the peak 35.1 and
+//      B:P(100)/B:P(5) 0.934: HIT. everolimus x 3 capacity: 4.83, g 0.027, B:P at the peak 8.87 (HIT).
+//  C3 sirolimus F 0.10 / 0.14 / 0.16 / 0.30: 27.3 / 31.1 / 31.6 / 25.4 (not monotone: k_tr moves 3.8 -> 24.6), AUC within
+//      1.3 % (HIT, HIT, HIT). everolimus: no closed-form fit at F 0.10 (HIT); F 0.30 gives 5.50, g 0.078; Cmax(0.30)/
+//      Cmax(0.16) 1.23 MISS (predicted below 1).
+//  C4 gut Kp scaled / unscaled: tacrolimus 115.1 / 1.126 (the Kp scalar 102.2, depot time constant V_t Kp/ps_gut 11.8 h
+//      against 0.115 h; 52 % of the absorbed dose in gut tissue at Tmax). C4a 55.3 (Tmax 0.41 h) MISS; C4b with k_tr
+//      refitted 29.2, g 1.05 MISS (both beyond the predicted bands: the effect is larger than predicted); simulated F
+//      0.138 against 0.140 (HIT). sirolimus (scalar 0.468: unscaled Kp is LARGER) 24.4 / 25.5, g -0.19 / -0.16 MISS;
+//      everolimus (scalar 0.038, unscaled 26 times larger) 2.43 / 2.45 (C4b: k_tr hit its bound 60, Tmax 3.5 h
+//      unreachable) MISS.
+//  CAUSES: tacrolimus "every g below 0.35" MISS (C4b g 1.05: the gut Kp is the cause); sirolimus "C2 is the largest g and
+//      g >= 0.5" MISS (C2 is the largest, g 0.19); everolimus "every g below 0.25" HIT (largest 0.078, C3).
+// ASSERTED (guards only): runner against mtor_run at ka = 1 /h (1 %); plasma-referred V_ss / bp_ref equals the
+// observed whole-blood V_ss (1e-4); Kp scalar = gut Kp ratio; mass balance of the full runs (1e-6); the transit
+// Tmax equals its target (3e-3 h) when the target is reachable.
+//
+// COMPILER NOTES. Records are built first in main; the Nl28Sys is created once and passed down; results travel
+// in flat arrays with literal strides. The three records cost about 2.8 s; this file runs all three.
+
+use darwin_pbpk::circ28::*
+use darwin_pbpk::circ28_kp::*
+use darwin_pbpk::circ28_drug::*
+use darwin_pbpk::circ28_nl::*
+use darwin_pbpk::circ28_drug_tacrolimus::*
+use darwin_pbpk::circ28_drug_sirolimus::*
+use darwin_pbpk::circ28_drug_everolimus::*
+use math::pure::{exp, ln}
+
+fn cc_abs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn cc_name(k: i32) -> string {
+    if k == 0 { return "tacrolimus" }
+    if k == 1 { return "sirolimus" }
+    return "everolimus"
+}
+
+fn cc_pred(tag: string, v: f64, lo: f64, hi: f64, acc: &![i32; 2]) with IO, Mut, Div, Panic {
+    print("  P "); print(tag); print(": "); print(v); print("  predicted ["); print(lo); print(", "); print(hi); print("]  ")
+    (*acc)[1] = (*acc)[1] + 1
+    if v >= lo && v <= hi {
+        (*acc)[0] = (*acc)[0] + 1
+        println("HIT")
+    } else {
+        println("MISS")
+    }
+}
+
+fn cc_rel(tag: string, got: f64, want: f64, tol: f64) -> i32 with IO, Mut, Div, Panic {
+    let r = cc_abs(got - want) / cc_abs(want)
+    if !(r <= tol) {
+        print("  [FAIL] "); print(tag); print(": got "); print(got); print(" want "); print(want); print(" rel "); println(r)
+        return 1
+    }
+    return 0
+}
+
+// Mass (mg) entering the gut tissue in [t0, t1]. ntr = 0: the record's first-order input with lag
+// (circ28_oral_mass). ntr > 0: a chain of ntr equal transit compartments with rate ka, delivered after the lag:
+// cumulative fraction G(t) = 1 - exp(-ka s) sum_{j<ntr} (ka s)^j / j!, s = t - tlag.
+fn cc_in_mass(ntr: i32, ka: f64, fa: f64, dose: f64, tlag: f64, t0: f64, t1: f64) -> f64 with Mut, Div, Panic {
+    if ntr <= 0 { return circ28_oral_mass(ka, fa, dose, tlag, t0, t1) }
+    var g0 = 0.0
+    var g1 = 0.0
+    var s = t0 - tlag
+    if s > 0.0 {
+        var term = 1.0
+        var sum = 1.0
+        var j: i32 = 1
+        while j < ntr {
+            term = term * ka * s / (j as f64)
+            sum = sum + term
+            j = j + 1
+        }
+        g0 = 1.0 - exp(0.0 - ka * s) * sum
+    }
+    s = t1 - tlag
+    if s > 0.0 {
+        var term = 1.0
+        var sum = 1.0
+        var j: i32 = 1
+        while j < ntr {
+            term = term * ka * s / (j as f64)
+            sum = sum + term
+            j = j + 1
+        }
+        g1 = 1.0 - exp(0.0 - ka * s) * sum
+    }
+    return fa * dose * (g1 - g0)
+}
+
+// Single oral dose on the local-binding stepper. Grid: 0.1 h to 6 h, 1 h to 24 h, 8 h to t_end (full = 1);
+// full = 0 stops after the peak (only Cmax, Tmax, B:P at the peak, gut share).
+//  o[0] Cmax (blood, mg/L)  o[1] Tmax (h)  o[2] B:P at the grid peak  o[3] AUC_inf blood (mg h/L)
+//  o[4] AUC_inf plasma  o[5] share of the absorbed mass in the gut tissue at the grid peak  o[6] terminal rate
+//  o[7] mass-balance error  o[8] 1 = ok  o[9] plasma Cmax (mg/L)  o[10] stepper failures  o[19] t1/2 (h)
+fn cc_run(p: Circ28Params, hct: f64, bmax: f64, kd: f64, dose: f64, fa: f64, ntr: i32, ktr: f64, tlag: f64, t_end: f64, full: i32, sysn: &!Nl28Sys, o: &![f64; 20]) with Mut, Div, Panic {
+    var ts: [f64; 200] = [0.0; 200]
+    var cs: [f64; 200] = [0.0; 200]
+    var pl: [f64; 200] = [0.0; 200]
+    var s = circ28_state_zero()
+    var el = nl28_tally_zero()
+    nl28_stats_reset(sysn)
+    var n: i32 = 0
+    var t = 0.0
+    var input = 0.0
+    var ok = true
+    var cm = 0.0
+    var im: i32 = 0
+    var gut_pk = 0.0
+    var in_pk = 0.0
+    var stop = false
+    let vgt = p.v[8] * (1.0 - p.vf[8])
+    var ph: i32 = 0
+    while ph < 3 {
+        var dt = 0.1
+        var tstop = 6.0
+        if ph == 1 {
+            dt = 1.0
+            tstop = 24.0
+        }
+        if ph == 2 {
+            dt = 8.0
+            tstop = t_end
+        }
+        if full == 0 && ph > 0 { tstop = 0.0 }
+        if tstop > t_end { tstop = t_end }
+        if t + 0.5 * dt < tstop {
+            nl28_prepare(p, hct, bmax, kd, dt, sysn)
+        }
+        while ok && !stop && t + 0.5 * dt < tstop {
+            if n >= 199 {
+                ok = false
+            } else {
+                let mass = cc_in_mass(ntr, ktr, fa, dose, tlag, t, t + dt)
+                let st = nl28_step(&!s, sysn, 0.0, mass / dt, &!el)
+                if st != 0 {
+                    ok = false
+                } else {
+                    input = input + mass
+                    t = t + dt
+                    n = n + 1
+                    ts[n] = t
+                    cs[n] = s.x[0]
+                    pl[n] = nl28_plasma(hct, bmax, kd, s.x[0])
+                    if cs[n] > cm {
+                        cm = cs[n]
+                        im = n
+                        gut_pk = s.x[circ28_it(8)] * vgt
+                        in_pk = input
+                    }
+                    if full == 0 && n > 3 && cs[n] < 0.85 * cm { stop = true }
+                }
+            }
+        }
+        ph = ph + 1
+    }
+    var cmax = cm
+    var tmax = ts[im]
+    if im >= 1 && im < n {
+        let h1 = ts[im] - ts[im - 1]
+        let h2 = ts[im + 1] - ts[im]
+        if cc_abs(h1 - h2) < 1.0e-9 {
+            let den = cs[im - 1] - 2.0 * cs[im] + cs[im + 1]
+            if den < 0.0 {
+                let off = 0.5 * (cs[im - 1] - cs[im + 1]) / den
+                tmax = ts[im] + off * h1
+                cmax = cs[im] - 0.25 * (cs[im - 1] - cs[im + 1]) * off
+            }
+        }
+    }
+    var bpk = 0.0
+    if pl[im] > 0.0 { bpk = cs[im] / pl[im] }
+    (*o)[0] = cmax
+    (*o)[1] = tmax
+    (*o)[2] = bpk
+    (*o)[3] = 0.0
+    (*o)[4] = 0.0
+    (*o)[5] = gut_pk / in_pk
+    (*o)[6] = 0.0
+    (*o)[7] = 0.0
+    (*o)[8] = 0.0
+    if ok { (*o)[8] = 1.0 }
+    (*o)[9] = 0.0
+    if bpk > 0.0 { (*o)[9] = cmax / bpk }
+    (*o)[10] = (nl28_failures(sysn) as f64)
+    (*o)[19] = 0.0
+    if full == 1 && n >= 3 {
+        let lz = ln(cs[n - 1] / cs[n]) / (ts[n] - ts[n - 1])
+        let lzp = ln(pl[n - 1] / pl[n]) / (ts[n] - ts[n - 1])
+        (*o)[3] = el.auc_ven + cs[n] / lz
+        (*o)[4] = el.auc_pven + pl[n] / lzp
+        (*o)[6] = lz
+        (*o)[19] = 0.6931471805599453 / lz
+        let elim = nl28_eliminated(&el)
+        let rem = circ28_total_mass(&s, p)
+        (*o)[7] = cc_abs(input - elim - rem) / input
+    }
+}
+
+fn cc_tmax_at(p: Circ28Params, hct: f64, bmax: f64, kd: f64, dose: f64, fa: f64, ntr: i32, ktr: f64, tlag: f64, sysn: &!Nl28Sys, o: &![f64; 20]) -> f64 with Mut, Div, Panic {
+    cc_run(p, hct, bmax, kd, dose, fa, ntr, ktr, tlag, 24.0, 0, sysn, o)
+    return (*o)[1]
+}
+
+// k_tr with Tmax(k_tr) = tobs (Illinois on ln k over [0.2, 60] /h; Tmax falls with k). The bound is returned when
+// the target is not reachable (flag in fl[0]: 1 = floor above the target, 2 = ceiling below it).
+fn cc_fit_ktr(p: Circ28Params, hct: f64, bmax: f64, kd: f64, dose: f64, fa: f64, ntr: i32, tlag: f64, tobs: f64, sysn: &!Nl28Sys, o: &![f64; 20], fl: &![f64; 1]) -> f64 with Mut, Div, Panic {
+    (*fl)[0] = 0.0
+    var xa = ln(0.2)
+    var xb = ln(60.0)
+    var fb = cc_tmax_at(p, hct, bmax, kd, dose, fa, ntr, exp(xb), tlag, sysn, o) - tobs
+    if fb > 0.0 {
+        (*fl)[0] = 1.0
+        return exp(xb)
+    }
+    var fa_ = cc_tmax_at(p, hct, bmax, kd, dose, fa, ntr, exp(xa), tlag, sysn, o) - tobs
+    if fa_ < 0.0 {
+        (*fl)[0] = 2.0
+        return exp(xa)
+    }
+    var x = 0.5 * (xa + xb)
+    var side: i32 = 0
+    var it: i32 = 0
+    while it < 30 {
+        x = (xa * fb - xb * fa_) / (fb - fa_)
+        let fx = cc_tmax_at(p, hct, bmax, kd, dose, fa, ntr, exp(x), tlag, sysn, o) - tobs
+        if cc_abs(fx) < 2.0e-4 { return exp(x) }
+        if fx > 0.0 {
+            xa = x
+            fa_ = fx
+            if side == 1 { fb = 0.5 * fb }
+            side = 1
+        } else {
+            xb = x
+            fb = fx
+            if side == 2 { fa_ = 0.5 * fa_ }
+            side = 2
+        }
+        if xb - xa < 1.0e-9 { return exp(x) }
+        it = it + 1
+    }
+    return exp(x)
+}
+
+// Per-drug constants. b[0] V_ss(blood) L, b[1] CL(blood) L/h, b[2] F, b[3] C_ref (mg/L, mtor), b[4] V_ss/F, b[5] CL/F,
+// b[6] dose mg, b[7] t_end h, b[8] Tmax target h, b[9] observed Cmax (mg/L), b[10] observed AUC (mg h/L),
+// b[11] hct, b[12] Bmax (mg/L RBC), b[13] Kd (mg/L plasma), b[14] observed Cmax SD (mg/L)
+fn cc_base(k: i32, vssf_evr: f64, b: &![f64; 16]) with Mut, Div, Panic {
+    var i: i32 = 0
+    while i < 16 {
+        (*b)[i] = 0.0
+        i = i + 1
+    }
+    if k == 0 {
+        (*b)[0] = tac_obs_vss()
+        (*b)[1] = tac_obs_cl()
+        (*b)[2] = tac_obs_f()
+        (*b)[4] = tac_obs_vss() / tac_obs_f()
+        (*b)[5] = tac_obs_cl() / tac_obs_f()
+        (*b)[6] = 5.0
+        (*b)[7] = 240.0
+        (*b)[8] = tac_obs_tmax()
+        (*b)[9] = 0.0288
+        (*b)[10] = 0.266
+        (*b)[11] = tac_hct()
+        (*b)[12] = tac_bmax()
+        (*b)[13] = tac_kd()
+        (*b)[14] = 0.0089
+    }
+    if k == 1 {
+        (*b)[0] = sir_f() * sir_obs_vssf()
+        (*b)[1] = sir_f() * sir_obs_clf()
+        (*b)[2] = sir_f()
+        (*b)[3] = sir_cref()
+        (*b)[4] = sir_obs_vssf()
+        (*b)[5] = sir_obs_clf()
+        (*b)[6] = 10.0
+        (*b)[7] = 488.0
+        (*b)[8] = sir_obs_tmax()
+        (*b)[9] = 0.067
+        (*b)[10] = 0.736
+        (*b)[11] = mtor_hct()
+        (*b)[12] = sir_bmax()
+        (*b)[13] = sir_kd()
+        (*b)[14] = 0.0
+    }
+    if k == 2 {
+        (*b)[0] = evr_f() * vssf_evr
+        (*b)[1] = evr_f() * evr_obs_clf()
+        (*b)[2] = evr_f()
+        (*b)[3] = evr_cref()
+        (*b)[4] = vssf_evr
+        (*b)[5] = evr_obs_clf()
+        (*b)[6] = 2.0
+        (*b)[7] = 168.0
+        (*b)[8] = evr_obs_tmax()
+        (*b)[9] = 0.0178
+        // pooled AUC: 90, 116, 115, 114 ng h/mL, n 12, 16, 16, 18 (Kovarik, abstracts)
+        (*b)[10] = (90.0 * 12.0 + 116.0 * 16.0 + 115.0 * 16.0 + 114.0 * 18.0) / 62.0 / 1000.0
+        (*b)[11] = mtor_hct()
+        (*b)[12] = evr_bmax()
+        (*b)[13] = evr_kd()
+        (*b)[14] = 0.0061
+    }
+}
+
+fn cc_fit(k: i32, th: [f64; 18], hct: f64, bmax: f64, kd: f64, f: f64, vss: f64, cl: f64, cref: f64) -> [f64; 18] with Mut, Div, Panic {
+    if k == 0 {
+        let o = TacObs { hct: hct, bmax: bmax, kd: kd, vss: vss, cl: cl, f: f, d_iv: tac_d_iv(), psl: tac_psl() }
+        return tac_fit(th, o)
+    }
+    let om = MtorObs { hct: hct, bmax: bmax, kd: kd, vss: vss, cl: cl, f: f, cref: cref }
+    return mtor_fit(th, om)
+}
+
+fn cc_params(k: i32, t: [f64; 18]) -> Circ28Params with Mut, Div, Panic {
+    if k == 0 { return tac_params_theta(t, tac_psl()) }
+    return circ28_drug_params_theta(t)
+}
+
+fn cc_th(thall: &[f64; 54], k: i32) -> [f64; 18] with Mut, Div, Panic {
+    var th: [f64; 18] = [0.0; 18]
+    var i: i32 = 0
+    while i < 18 {
+        th[i] = (*thall)[18 * k + i]
+        i = i + 1
+    }
+    return th
+}
+
+// One diagnostic case. fnew: bioavailability; vss, cl: whole-blood observables to refit (callers scale them);
+// bm, kdv: binding; unscaled: 1 = gut Kp reset to the unscaled R&R value; refit: 1 = k_tr refitted to the
+// target, 0 = ktr_in. Returns k_tr. o: run outputs (index 8 = -1 when the closed-form fit does not exist);
+// o[11] Kp scalar, o[12] hepatic clint, o[13] gut clint, o[14] k_tr, o[15] closed-form F, o[16] Fg, o[17] Eh, o[18] Eg
+fn cc_case(k: i32, thall: &[f64; 54], bb: &[f64; 16], bm: f64, kdv: f64, fnew: f64, vss: f64, cl: f64, unscaled: i32, refit: i32, ktr_in: f64, sysn: &!Nl28Sys, o: &![f64; 20]) -> f64 with Mut, Div, Panic {
+    let th = cc_th(thall, k)
+    var t = cc_fit(k, th, (*bb)[11], bm, kdv, fnew, vss, cl, (*bb)[3])
+    var i: i32 = 0
+    while i < 20 {
+        (*o)[i] = 0.0
+        i = i + 1
+    }
+    if !(t[CD_CLINT] > 0.0) {
+        (*o)[8] = 0.0 - 1.0
+        return ktr_in
+    }
+    var p = cc_params(k, t)
+    if unscaled == 1 {
+        var tu = t
+        tu[CD_KPSC] = 1.0
+        let pu = cc_params(k, tu)
+        p.kp[8] = pu.kp[8]
+    }
+    let fa = t[CD_FA]
+    let tlag = t[CD_TLAG]
+    var ktr = ktr_in
+    var fl: [f64; 1] = [0.0; 1]
+    if refit == 1 {
+        ktr = cc_fit_ktr(p, (*bb)[11], bm, kdv, (*bb)[6], fa, 3, tlag, (*bb)[8], sysn, o, &!fl)
+    }
+    cc_run(p, (*bb)[11], bm, kdv, (*bb)[6], fa, 3, ktr, tlag, (*bb)[7], 1, sysn, o)
+    (*o)[11] = t[CD_KPSC]
+    (*o)[12] = t[CD_CLINT]
+    (*o)[13] = t[CD_CLGUT]
+    (*o)[14] = ktr
+    let fg = circ28_gut_availability(p)
+    let eh = circ28_hepatic_extraction(p)
+    (*o)[15] = fa * fg * (1.0 - eh)
+    (*o)[16] = fg
+    (*o)[17] = eh
+    (*o)[18] = circ28_gut_extraction(p)
+    return ktr
+}
+
+fn cc_show(tag: string, o: &[f64; 20], dose: f64) with IO, Mut, Div, Panic {
+    print("  "); print(tag)
+    if (*o)[8] < 0.0 {
+        println(": NO closed-form fit exists at these inputs (hepatic clint <= 0)")
+        return
+    }
+    print(": Cmax "); print(1000.0 * (*o)[0]); print(" ng/mL  Tmax "); print((*o)[1]); print(" h  B:P(peak) "); print((*o)[2])
+    print("  AUC_inf blood "); print(1000.0 * (*o)[3]); print(" plasma "); print(1000.0 * (*o)[4]); print(" ng h/mL  Cmax/AUC "); print((*o)[0] / (*o)[3])
+    print(" /h  gut share@Tmax "); print((*o)[5]); print("  k_tr "); print((*o)[14]); print("  Kp "); print((*o)[11]); print("  F(cf) "); print((*o)[15])
+    print("  Fg "); print((*o)[16]); print(" Eh "); print((*o)[17]); print(" Eg "); println((*o)[18])
+}
+
+fn cc_cl(p: Circ28Params) -> f64 with Mut, Div {
+    return circ28_splanchnic_clearance(p) * p.bp + p.cl_renal + p.cl_plasma
+}
+
+fn cc_drug(k: i32, thall: &[f64; 54], vssf_evr: f64, sysn: &!Nl28Sys, acc: &![i32; 2]) -> i32 with IO, Mut, Div, Panic {
+    var fails: i32 = 0
+    var bb: [f64; 16] = [0.0; 16]
+    cc_base(k, vssf_evr, &!bb)
+    let th = cc_th(thall, k)
+    let p0 = cc_params(k, th)
+    var o: [f64; 20] = [0.0; 20]
+    var o0: [f64; 20] = [0.0; 20]
+    var fl: [f64; 1] = [0.0; 1]
+    print("== "); print(k); print(" "); println(cc_name(k))
+    print("  record: Kp scalar "); print(th[CD_KPSC]); print("  ps scalar "); print(th[CD_PSSC]); print("  bp(C_ref) "); print(p0.bp); print("  fu "); print(p0.fu)
+    print("  hepatic clint "); print(th[CD_CLINT]); print("  gut clint "); print(th[CD_CLGUT]); print("  ps_gut "); println(p0.ps[8])
+    // guard: plasma-referred V_ss / bp_ref = observed whole-blood V_ss
+    fails = fails + cc_rel("V_ss plasma-referred / bp_ref = observed V_ss(blood)", circ28_vss_plasma(p0) / p0.bp, bb[0], 1.0e-4)
+    let fa = th[CD_FA]
+    let tlag = th[CD_TLAG]
+    // runner guard against the module's own runner at ka = 1 /h, first-order input
+    cc_run(p0, bb[11], bb[12], bb[13], bb[6], fa, 0, 1.0, tlag, 24.0, 0, sysn, &!o)
+    var dcg = mtor_cfg_oral(bb[6], 24.0, 12.0, 24.0)
+    dcg.ka = 1.0
+    dcg.fa = fa
+    let rg = mtor_run(p0, bb[11], bb[12], bb[13], dcg, sysn)
+    fails = fails + cc_rel("runner Cmax against mtor_run at ka 1", o[0], rg.cmax, 1.0e-2)
+    print("  guard: runner first-order ka 1 Cmax "); print(1000.0 * o[0]); print(" ng/mL, mtor_run "); println(1000.0 * rg.cmax)
+    // B0
+    let ktr0 = cc_fit_ktr(p0, bb[11], bb[12], bb[13], bb[6], fa, 3, tlag, bb[8], sysn, &!o, &!fl)
+    cc_run(p0, bb[11], bb[12], bb[13], bb[6], fa, 3, ktr0, tlag, bb[7], 1, sysn, &!o0)
+    if fl[0] > 0.5 { println("  [B0 transit Tmax target not reachable: bound returned]") } else {
+        fails = fails + cc_rel("B0 transit Tmax = target", o0[1], bb[8], 3.0e-3 / bb[8])
+    }
+    fails = fails + cc_rel("B0 mass balance (error + 1e-6 against 1e-6, tol 1)", o0[7] + 1.0e-6, 1.0e-6, 1.0)
+    var cc0: [f64; 20] = [0.0; 20]
+    var ii: i32 = 0
+    while ii < 20 {
+        cc0[ii] = o0[ii]
+        ii = ii + 1
+    }
+    cc0[14] = ktr0
+    cc0[11] = th[CD_KPSC]
+    cc0[12] = th[CD_CLINT]
+    cc0[13] = th[CD_CLGUT]
+    cc0[15] = fa * circ28_gut_availability(p0) * (1.0 - circ28_hepatic_extraction(p0))
+    cc0[16] = circ28_gut_availability(p0)
+    cc0[17] = circ28_hepatic_extraction(p0)
+    cc0[18] = circ28_gut_extraction(p0)
+    cc_show("B0 (record, 3 transit compartments, k_tr to the Tmax target)", &cc0, bb[6])
+    let cmax0 = 1000.0 * o0[0]
+    let cobs = 1000.0 * bb[9]
+    let gap = cobs - cmax0
+    print("  observed Cmax "); print(cobs); print(" ng/mL (u/SD "); print(1000.0 * bb[14]); print(")  B0/observed "); println(cmax0 / cobs)
+    if k == 0 { cc_pred("B0 Cmax", cmax0, 19.0, 21.5, acc) }
+    if k == 1 { cc_pred("B0 Cmax", cmax0, 32.5, 35.5, acc) }
+    if k == 2 { cc_pred("B0 Cmax", cmax0, 4.3, 4.7, acc) }
+    // ---- C1
+    println("  C1 bookkeeping audit (no model change)")
+    print("   matrix: model = venous WHOLE BLOOD (nl28 state 0); observed = whole blood; unit factor mg/L -> ng/mL = 1000; run dose "); print(bb[6]); println(" mg = dose of the observation")
+    let clf = bb[5]
+    let auc_exp = bb[6] / clf
+    print("   AUC_inf blood "); print(1000.0 * o0[3]); print(" ng h/mL;  dose/(CL/F) "); print(1000.0 * auc_exp); print(";  ratio "); println(o0[3] / auc_exp)
+    print("   AUC_inf plasma "); print(1000.0 * o0[4]); print(";  AUC blood / AUC plasma (B:P by AUC) "); print(o0[3] / o0[4]); print(";  B:P at the peak "); print(o0[2]); print(";  plasma Cmax "); print(1000.0 * o0[9]); println(" ng/mL")
+    print("   observed AUC "); print(1000.0 * bb[10]); print(" ng h/mL;  model/observed AUC "); println(o0[3] / bb[10])
+    let shape_m = o0[0] / o0[3]
+    let shape_o = bb[9] / bb[10]
+    print("   Cmax/AUC model "); print(shape_m); print(" /h, observed "); print(shape_o); print(" /h;  ratio "); println(shape_m / shape_o)
+    print("   Cmax ratio model/observed "); print(cmax0 / cobs); print(";  AUC ratio "); print(o0[3] / bb[10]); println("  (level right and Cmax/AUC low = SHAPE, not bookkeeping)")
+    if k == 0 {
+        cc_pred("C1 AUC/(D/(CL/F))", o0[3] / auc_exp, 0.95, 1.10, acc)
+        cc_pred("C1 Cmax/AUC model/obs", shape_m / shape_o, 0.65, 0.85, acc)
+        cc_pred("C1 AUC model/obs", o0[3] / bb[10], 0.85, 1.05, acc)
+    }
+    if k == 1 {
+        cc_pred("C1 AUC/(D/(CL/F))", o0[3] / auc_exp, 0.93, 1.05, acc)
+        cc_pred("C1 Cmax/AUC model/obs", shape_m / shape_o, 0.50, 0.72, acc)
+        cc_pred("C1 AUC model/obs", o0[3] / bb[10], 0.75, 0.88, acc)
+    }
+    if k == 2 {
+        cc_pred("C1 AUC/(D/(CL/F))", o0[3] / auc_exp, 0.96, 1.04, acc)
+        cc_pred("C1 Cmax/AUC model/obs", shape_m / shape_o, 0.18, 0.30, acc)
+        cc_pred("C1 AUC model/obs", o0[3] / bb[10], 0.94, 1.02, acc)
+    }
+    var gbest = 0.0
+    var gname = 0
+    // ---- C2
+    println("  C2 erythrocyte binding capacity (closed-form fits redone at the new binding; ps and ka-structure held, k_tr refitted)")
+    print("   baseline binding: Bmax "); print(1000.0 * bb[12]); print(" ng/mL RBC, Kd "); print(1000.0 * bb[13]); print(" ng/mL plasma;  B:P at 5 / 100 ng/mL blood "); print(nl28_bp_local(bb[11], bb[12], bb[13], 0.005)); print(" / "); print(nl28_bp_local(bb[11], bb[12], bb[13], 0.1))
+    print("  ratio "); println(nl28_bp_local(bb[11], bb[12], bb[13], 0.1) / nl28_bp_local(bb[11], bb[12], bb[13], 0.005))
+    var c2n: i32 = 1
+    if k == 1 { c2n = 2 }
+    var j: i32 = 0
+    while j < c2n {
+        var bm = bb[12]
+        var kdv = bb[13]
+        var lab = "C2"
+        if k == 0 {
+            bm = 0.0904
+            kdv = 0.00236
+            lab = "C2 tacrolimus: Cossart 2024 median Bmax 90.4 ug/L, Kd 2.36 ug/L (abstract; per litre of erythrocytes assumed)"
+        }
+        if k == 1 {
+            bm = evr_bmax() * 914.2 / 958.2
+            var bplow = 36.0
+            lab = "C2a sirolimus: capacity DERIVED from the everolimus label (molar), B:P 36"
+            if j == 1 {
+                bplow = sir_bp0_b()
+                lab = "C2b sirolimus: same capacity, B:P 18.3 (Yatscoff 1993 plasma share 3.1 %)"
+            }
+            kdv = bb[11] * bm / (bplow - (1.0 - bb[11]))
+        }
+        if k == 2 {
+            bm = 3.0 * bb[12]
+            lab = "C2 everolimus: capacity x 3 at the label Kd (what-if, no source)"
+        }
+        let kt = cc_case(k, thall, &bb, bm, kdv, bb[2], bb[0], bb[1], 0, 1, ktr0, sysn, &!o)
+        print("   "); println(lab)
+        print("   Bmax "); print(1000.0 * bm); print(" ng/mL RBC, Kd "); print(1000.0 * kdv); print(" ng/mL;  B:P at 5 / 100 ng/mL blood "); print(nl28_bp_local(bb[11], bm, kdv, 0.005)); print(" / "); print(nl28_bp_local(bb[11], bm, kdv, 0.1))
+        print("  ratio "); println(nl28_bp_local(bb[11], bm, kdv, 0.1) / nl28_bp_local(bb[11], bm, kdv, 0.005))
+        cc_show("run", &o, bb[6])
+        let gcl = (1000.0 * o[0] - cmax0) / gap
+        print("   gap closure g "); print(gcl); print("   AUC_inf blood / B0 "); println(o[3] / o0[3])
+        if gcl > gbest {
+            gbest = gcl
+            gname = 2
+        }
+        if k == 0 {
+            cc_pred("C2 Cmax", 1000.0 * o[0], 14.0, 21.0, acc)
+            cc_pred("C2 g below 0.15", gcl, 0.0 - 5.0, 0.15, acc)
+        }
+        if k == 1 && j == 0 {
+            cc_pred("C2a Cmax", 1000.0 * o[0], 40.0, 70.0, acc)
+            cc_pred("C2a g", gcl, 0.2, 1.0, acc)
+            cc_pred("C2a B:P at the peak", o[2], 33.0, 37.5, acc)
+            cc_pred("C2a B:P(100)/B:P(5)", nl28_bp_local(bb[11], bm, kdv, 0.1) / nl28_bp_local(bb[11], bm, kdv, 0.005), 0.93, 1.0, acc)
+        }
+        if k == 1 && j == 1 { cc_pred("C2b Cmax", 1000.0 * o[0], 34.0, 52.0, acc) }
+        if k == 2 {
+            cc_pred("C2 Cmax", 1000.0 * o[0], 4.7, 7.5, acc)
+            cc_pred("C2 g below 0.25", gcl, 0.0 - 5.0, 0.25, acc)
+            cc_pred("C2 B:P at the peak", o[2], 7.0, 9.0, acc)
+            cc_pred("baseline B:P at the peak", o0[2], 3.1, 3.4, acc)
+        }
+        j = j + 1
+    }
+    // ---- C3
+    if k > 0 {
+        println("  C3 bioavailability declared against fitted (apparent CL/F and V_ss/F held; fits redone; k_tr refitted)")
+        var fv: [f64; 4] = [0.10, 0.16, 0.30, bb[2]]
+        var c10 = 0.0
+        var c30 = 0.0
+        var c16 = 0.0
+        var c14 = 0.0
+        var a10 = 0.0
+        var a30 = 0.0
+        var q: i32 = 0
+        while q < 4 {
+            let fq = fv[q]
+            let kt = cc_case(k, thall, &bb, bb[12], bb[13], fq, fq * bb[4], fq * bb[5], 0, 1, ktr0, sysn, &!o)
+            print("   F = "); print(fq); print(":")
+            cc_show("", &o, bb[6])
+            if o[8] > 0.0 {
+                if q == 0 {
+                    c10 = 1000.0 * o[0]
+                    a10 = o[3]
+                }
+                if q == 1 { c16 = 1000.0 * o[0] }
+                if q == 2 {
+                    c30 = 1000.0 * o[0]
+                    a30 = o[3]
+                }
+                if q == 3 { c14 = 1000.0 * o[0] }
+                let gq = (1000.0 * o[0] - cmax0) / gap
+                if gq > gbest && q != 3 {
+                    gbest = gq
+                    gname = 3
+                }
+            }
+            q = q + 1
+        }
+        if k == 1 {
+            cc_pred("C3 Cmax(F 0.10)/Cmax(F 0.30)", c10 / c30, 1.05, 1.6, acc)
+            cc_pred("C3 AUC(F 0.10)/AUC(F 0.30)", a10 / a30, 0.92, 1.08, acc)
+            cc_pred("C3 Cmax(F 0.16)/Cmax(F 0.14)", c16 / c14, 0.92, 1.08, acc)
+        }
+        if k == 2 {
+            var nofit = 0.0
+            if c10 == 0.0 { nofit = 1.0 }
+            cc_pred("C3 no closed-form fit at F 0.10 (1 = none)", nofit, 1.0, 1.0, acc)
+            cc_pred("C3 Cmax(F 0.30)/Cmax(F 0.16)", c30 / c16, 0.6, 1.0, acc)
+        }
+    }
+    // ---- C4
+    println("  C4 absorption site")
+    var tu = th
+    tu[CD_KPSC] = 1.0
+    let pu = cc_params(k, tu)
+    let vgt = p0.v[8] * (1.0 - p0.vf[8])
+    print("   gut Kp scaled "); print(p0.kp[8]); print(", unscaled R&R "); print(pu.kp[8]); print(", ratio = Kp scalar "); print(p0.kp[8] / pu.kp[8])
+    print(";  gut tissue "); print(vgt); print(" L, capacity V_t Kp "); print(vgt * p0.kp[8]); print(" L; depot time constant V_t Kp/ps_gut "); print(vgt * p0.kp[8] / p0.ps[8]); print(" h (unscaled "); print(vgt * pu.kp[8] / p0.ps[8]); println(" h)")
+    fails = fails + cc_rel("gut Kp ratio = Kp scalar", p0.kp[8] / pu.kp[8], th[CD_KPSC], 1.0e-9)
+    print("   B0 share of the absorbed dose in the gut tissue at Tmax "); println(o0[5])
+    let ktr_a = cc_case(k, thall, &bb, bb[12], bb[13], bb[2], bb[0], bb[1], 1, 0, ktr0, sysn, &!o)
+    cc_show("C4a unscaled gut Kp, k_tr as B0", &o, bb[6])
+    let ca = 1000.0 * o[0]
+    let ga = (ca - cmax0) / gap
+    let tma = o[1]
+    let fsa = o[4] * cc_cl(p0) / bb[6]
+    print("   simulated F (plasma AUC x CL_plasma / dose) "); print(fsa); print(" against closed form "); println(cc0[15])
+    var fsr = fsa / cc0[15]
+    var o4b: [f64; 20] = [0.0; 20]
+    let ktr_b = cc_case(k, thall, &bb, bb[12], bb[13], bb[2], bb[0], bb[1], 1, 1, ktr0, sysn, &!o4b)
+    cc_show("C4b unscaled gut Kp, k_tr refitted to the Tmax target", &o4b, bb[6])
+    let cb = 1000.0 * o4b[0]
+    let gb = (cb - cmax0) / gap
+    print("   g(C4a) "); print(ga); print("  g(C4b) "); print(gb); print("  AUC_inf blood C4b / B0 "); println(o4b[3] / o0[3])
+    if ga > gbest {
+        gbest = ga
+        gname = 4
+    }
+    if gb > gbest {
+        gbest = gb
+        gname = 4
+    }
+    if k == 0 {
+        cc_pred("C4a Cmax", ca, 24.0, 45.0, acc)
+        cc_pred("C4a Tmax", tma, 0.0, 1.0, acc)
+        cc_pred("C4b Cmax", cb, 15.0, 24.0, acc)
+        cc_pred("C4b g below 0.3", gb, 0.0 - 5.0, 0.3, acc)
+        cc_pred("C4a simulated F / closed form", fsr, 0.5, 1.05, acc)
+    }
+    if k == 1 {
+        cc_pred("C4a Cmax", ca, 36.0, 60.0, acc)
+        cc_pred("C4b Cmax", cb, 29.0, 40.0, acc)
+    }
+    if k == 2 {
+        cc_pred("C4a Cmax", ca, 4.0, 4.9, acc)
+        cc_pred("C4b Cmax", cb, 4.25, 4.7, acc)
+    }
+    print("  largest gap closure among C2/C3/C4: "); print(gbest); print(" by C"); println(gname)
+    if k == 0 { cc_pred("tacrolimus: every g below 0.35", gbest, 0.0 - 5.0, 0.35, acc) }
+    var c2flag = 0.0
+    if gname == 2 { c2flag = 1.0 }
+    if k == 1 { cc_pred("sirolimus: C2 is the largest g and g >= 0.5", gbest * c2flag, 0.5, 5.0, acc) }
+    if k == 2 { cc_pred("everolimus: every g below 0.25", gbest, 0.0 - 5.0, 0.25, acc) }
+    return fails
+}
+
+fn cc_copy(d: &Circ28Drug, k: i32, thall: &![f64; 54]) with Mut, Div, Panic, Epistemic {
+    var i: i32 = 0
+    while i < 18 {
+        (*thall)[18 * k + i] = circ28_drug_value(d, i)
+        i = i + 1
+    }
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic, Epistemic {
+    var d8 = circ28_drug_new()
+    var d9 = circ28_drug_new()
+    var d10 = circ28_drug_new()
+    var sysn = nl28_sys_zero()
+    var thall: [f64; 54] = [0.0; 54]
+    var acc: [i32; 2] = [0; 2]
+    var fails: i32 = 0
+    tac_drug_into(&!d8, &!sysn)
+    cc_copy(&d8, 0, &!thall)
+    sir_drug_into(&!d9, &!sysn)
+    cc_copy(&d9, 1, &!thall)
+    let fit = evr_drug_into(&!d10, 1.0, &!sysn)
+    cc_copy(&d10, 2, &!thall)
+    fails = fails + cc_drug(0, &thall, 0.0, &!sysn, &!acc)
+    fails = fails + cc_drug(1, &thall, 0.0, &!sysn, &!acc)
+    fails = fails + cc_drug(2, &thall, fit.vssf, &!sysn, &!acc)
+    print("P total: "); print(acc[0]); print(" HIT of "); print(acc[1]); println(" evaluated predictions in this file")
+    if fails == 0 {
+        println("CIRC28_CMAX_CAUSES_A_PASS")
+        return 0
+    }
+    print("CIRC28_CMAX_CAUSES_A_FAIL "); println(fails)
+    return 1
+}
