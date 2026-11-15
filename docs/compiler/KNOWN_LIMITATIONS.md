@@ -36,7 +36,7 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
 | Rung | Scope | Engine |
 |---|---|---|
 | KL-9 | seed: #1494 imported-module typecheck errors non-fatal | lean_single |
-| KL-11 | #1792 first-order / variance across user calls (pow FO closed; f64-returning helpers with any body closed by tangent clones, first and second order, 2026-11-15) | madaros |
+| KL-11 | #1792 first-order / variance across user calls (pow FO closed; f64-returning helpers with any body closed by tangent clones, first and second order, also through function-typed parameters, 2026-11-15) | madaros |
 | KL-14 | FFI: 14a–14d3 CLOSED | madaros |
 | KL-15 | `f256` surface (15a softfloat add/sub partial), `Knowledge<f128>`/GUM | madaros |
 | KL-16 | Hessian Tier-4 (16a–16f CLOSED; residual H-multi/non-H00 if/a64 atan2) | lean_single |
@@ -126,7 +126,25 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
   `m^2 ue^2 + (eps-1)^2 um^2`). A struct return with more than four such
   measurements is refused at compile time
   (`tests/compile-fail/gum_refuse_struct_return_internal_cap.sio`).
-  A query whose answer depends on a call the clones cannot differentiate is
+  Higher-order calls are closed the same way (2026-11-15). A function with
+  function-typed parameters (`fn apply1(f: fn(f64) -> f64 with Mut, Div, x:
+  f64) -> f64`) is cloned once per tuple of function arguments,
+  `apply1__fotan_dbl_s<n>` (and `__fotan2_..` with second order on): inside
+  the clone `f(x)` is a direct call to `dbl`, which goes through its own
+  clone, so the chain rule nests. The argument is resolved at compile time: a
+  named function, a `let` alias of one, or a function parameter of an
+  enclosing specialised clone (forwarding through any depth). Two function
+  parameters, a loop calling the parameter, one HOF at several call sites
+  with different functions, binary function arguments, the product and
+  quotient rules over such a call, `variance_of`, `covariance_of` and
+  `hessian_of` with the call written inside the query, and correlation with
+  the caller's other uses of the input are exact (pin:
+  `tests/run-pass/gum_fo_tangent_clone_hof.sio`, oracle
+  `tests/oracles/gum_fo_tangent_clone_hof.cpp`, 1e-12 first order, 1e-10
+  second order). A function argument that is only known at run time (chosen
+  by an `if`) cannot be specialised and the query is refused at compile time
+  (pin: `tests/compile-fail/gum_refuse_uncovered_call_zero.sio`).
+  A query whose answer depends on a call the compiler cannot differentiate is
   refused at compile time rather than answered 0 (see the refusal entry
   below).
 - **Narrowed (#1706, 2026-10-13).** A call to a *pure helper* (an `f64`
@@ -199,8 +217,7 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
   (`hessian_of(pow(x, 3.0), 0, 0)` at `x=0.5` → `3.0`) and
   `tests/run-pass/kl11_pow_mixed_hessian.sio` (at `x=2`, `y=3`:
   `Hxx=12`, `Hxy=x^(y-1)*(1+y*ln x)`, `Hyy=x^y*(ln x)^2`). Pin:
-  `scripts/ci/madaros_kl11_pow_fo_gate.sh`. FO across arbitrary user `fn`
-  bodies remains open.
+  `scripts/ci/madaros_kl11_pow_fo_gate.sh`. 
 
 
 ### KL-13 — derived units and unit loss (#2388) — CLOSED
