@@ -832,26 +832,29 @@ fn ep28_jacobian_fill_oral(
         let pk_i = priors.kn[i]
         let h = ep28_fdiff_h(pk_i.value, pk_i.variance)
         if h > 0.0 {
-            // idx 0 perturbs the CYP2D6 formation sink (OralInputs28).
-            // The θ-step takes a sink only for cl_sink > 0, so when
-            // cl_form − h <= 0 (midazolam, haloperidol: cl_form = 0) the
-            // "minus" run of a central difference is the unperturbed model
-            // and the column comes out halved (measured 2026-11-14 against
-            // the tangent of sens_pbpk28: midazolam −0.007708 vs −0.015557,
-            // haloperidol −0.013463 vs −0.028800). Use the second-order
-            // one-sided formula (−3·f(0) + 4·f(h) − f(2h)) / (2h) there.
-            if i == 0 && !(base_oi.cl_form - h > 0.0) {
-                let m_0 = ep28_simulate_oral(base_prm, dose_mg, t_end, base_oi, rel, gut0)
-                let m_1 = ep28_simulate_oral(base_prm, dose_mg, t_end, ep28_oral_clform(base_oi, h), rel, gut0)
-                let m_2 = ep28_simulate_oral(base_prm, dose_mg, t_end, ep28_oral_clform(base_oi, 2.0 * h), rel, gut0)
-                if !m_0.success || !m_1.success || !m_2.success { return EpJac28 { d_auc_b: [0.0; 8], d_cb24: [0.0; 8], d_auc_l: [0.0; 8], d_auc_k: [0.0; 8], ok: false } }
+            // idx 0 is the clearance the prior describes. With a formation
+            // sink configured (venlafaxine: cl_form > 0) that is the liver
+            // sink. Without one (midazolam, haloperidol: cl_form = 0, the
+            // hepatic clearance of the prior is cl_central) it is
+            // cl_central. Perturbing an absent sink around zero gave a
+            // column that was not the sensitivity to the prior's quantity
+            // (measured 2026-11-14: u(AUC_blood)/AUC_blood of 73% for
+            // midazolam and 443% for haloperidol from that column alone).
+            if i == 0 && !(base_oi.cl_form > 0.0) {
+                var pp = base_prm
+                var pn = base_prm
+                pp.cl_central = base_prm.cl_central + h
+                pn.cl_central = base_prm.cl_central - h
+                let m_p = ep28_simulate_oral(pp, dose_mg, t_end, base_oi, rel, gut0)
+                let m_n = ep28_simulate_oral(pn, dose_mg, t_end, base_oi, rel, gut0)
+                if !m_p.success || !m_n.success { return EpJac28 { d_auc_b: [0.0; 8], d_cb24: [0.0; 8], d_auc_l: [0.0; 8], d_auc_k: [0.0; 8], ok: false } }
                 let inv2h = 1.0 / (2.0 * h)
-                d_auc_b[i] = (4.0 * m_1.auc_blood   - 3.0 * m_0.auc_blood   - m_2.auc_blood)   * inv2h
-                d_cb24[i]  = (4.0 * m_1.c_brain_24h - 3.0 * m_0.c_brain_24h - m_2.c_brain_24h) * inv2h
-                d_auc_l[i] = (4.0 * m_1.auc_liver   - 3.0 * m_0.auc_liver   - m_2.auc_liver)   * inv2h
-                d_auc_k[i] = (4.0 * m_1.auc_kidney  - 3.0 * m_0.auc_kidney  - m_2.auc_kidney)  * inv2h
+                d_auc_b[i] = (m_p.auc_blood   - m_n.auc_blood)   * inv2h
+                d_cb24[i]  = (m_p.c_brain_24h - m_n.c_brain_24h) * inv2h
+                d_auc_l[i] = (m_p.auc_liver   - m_n.auc_liver)   * inv2h
+                d_auc_k[i] = (m_p.auc_kidney  - m_n.auc_kidney)  * inv2h
             }
-            if i == 0 && base_oi.cl_form - h > 0.0 {
+            if i == 0 && base_oi.cl_form > 0.0 {
                 let m_p = ep28_simulate_oral(base_prm, dose_mg, t_end, ep28_oral_clform(base_oi, h), rel, gut0)
                 let m_n = ep28_simulate_oral(base_prm, dose_mg, t_end, ep28_oral_clform(base_oi, 0.0 - h), rel, gut0)
                 if !m_p.success || !m_n.success { return EpJac28 { d_auc_b: [0.0; 8], d_cb24: [0.0; 8], d_auc_l: [0.0; 8], d_auc_k: [0.0; 8], ok: false } }
@@ -1094,7 +1097,8 @@ pub fn ep28_midazolam_params() -> PBPKParams28 {
 
 pub fn ep28_midazolam_priors() -> EpPrior28 with Mut {
     // 8-dim taxonomy, midazolam-mapped (same layout as venlafaxine):
-    // dim 0 = CYP3A hepatic CL (perturbs the liver sink, NOT cl_central).
+    // dim 0 = CYP3A hepatic CL. It lives in cl_central (no formation sink is
+    // configured for midazolam), so dim 0 perturbs cl_central.
     var m: [f64; 8] = [0.0; 8]
     var v: [f64; 8] = [0.0; 8]
     var c: [f64; 8] = [0.0; 8]
@@ -1150,7 +1154,8 @@ pub fn ep28_haloperidol_params() -> PBPKParams28 {
 
 pub fn ep28_haloperidol_priors() -> EpPrior28 with Mut {
     // 8-dim taxonomy, haloperidol-mapped (same layout as venlafaxine):
-    // dim 0 = CYP3A4/2D6 hepatic CL (perturbs the liver sink, NOT cl_central).
+    // dim 0 = CYP3A4/2D6 hepatic CL. It lives in cl_central (no formation sink
+    // is configured for haloperidol), so dim 0 perturbs cl_central.
     var m: [f64; 8] = [0.0; 8]
     var v: [f64; 8] = [0.0; 8]
     var c: [f64; 8] = [0.0; 8]
