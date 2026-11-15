@@ -46,13 +46,16 @@
 //  clpla    0         -        0      -                       unused
 //  kpsc     fitted    propagated 3    from u of Vss           FITTED to V_ss = 50.2 L (below)
 //  pssc     1         0        0      -                       placeholder, no source (see circ28_drug.sio)
-//  ka       fitted    propagated 3    from u of Tmax          FITTED to the oral Tmax (below)
+//  ka (k)   fitted    propagated 3    from u of Tmax          FITTED to the pooled oral Tmax of the dose form (below).
+//                                                              Round 5: k is the rate of ONE of ntr = 4 transit stages
+//                                                              (Brill 2014, PMID 25141974: three transit compartments with
+//                                                              Ka = Ktr, MTT = (n+1)/Ktr = ntr/k; full text read)
 //  fa       1.0       0        1      not quantified          complete absorption into the gut wall:
 //                                                              Thummel 1996 (PMID 8646820, "complete oral
 //                                                              absorption"), Gorski 1998 (PMID 9728893,
 //                                                              urinary 1'-OH-midazolam equal after IV and
 //                                                              oral dose)
-//  tlag     0         -        0      -                       unused
+//  tlag     0         -        0      -                       unused (Brill 2014: no lag, the chain replaces it)
 //
 // OBSERVABLES USED TO FIT (one per fitted parameter; these are NOT validations).
 // Each is a POOLED estimate computed in Sounio (mdz_pool; printed by the test, section S0):
@@ -66,8 +69,12 @@
 //   Tmax     two dose forms, each fitted to its own pooled Tmax:
 //            solution 0.4645 h, u 0.065 h (Hohmann 2015 0.50 h, SD = range/sqrt12; Smith 1981 0.37 h);
 //            tablet   0.9291 h, u 0.094 h (Smith 1981 0.74 h, Backman 1995 1.0 h, Greenblatt 1986 1.0 h).
-//            ka = 1.976828 /h (solution) and 0.827927 /h (tablet), by bisection on the kernel run
-//            (round 4 values; round 3 had 2.157170 and 0.852464 before Fg was pooled).
+//            ROUND 5, ntr = 4 stages: k = 12.238730 /h (solution, MTT 0.327 h) and 5.371780 /h (tablet, MTT 0.745 h)
+//            with the all-organ Kp scalar; 12.847642 and 5.509594 /h with the gut wall left at its Rodgers-Rowland
+//            Kp (mdz_ka_fit), by bisection on the kernel run. Round 4 (first-order input, ntr = 1) had 1.976828 and
+//            0.827927 /h (round 3: 2.157170 and 0.852464 before Fg was pooled); mdz_k_sweep keeps the k of ntr 1-5.
+//            MTT validation (not fitted): Brill 2014 tablet in 20 morbidly obese patients 1.17 h, oral solution in 12
+//            healthy volunteers 0.51 h (different populations).
 //   Fg       0.4886, u 0.0419 (k 4, N 57): POOLED, round 4 (before: 0.57 from Paine alone). Paine 1996
 //            0.57 (n 5, direct), Thummel 1996 0.57 (n 20), Gorski 1998 0.42 (n 16), Hohmann 2015 0.43
 //            (n 16); the last three derive Fg from F, CL_iv and an assumed hepatic flow. See mdz_fg_studies.
@@ -352,15 +359,63 @@ pub fn mdz_u_tmax(form: i32) -> f64 with Mut, Div, Panic { return mdz_pool_tmax(
 // re-checks the Tmax each gives.
 pub fn mdz_form_sol() -> i32 { return 0 }
 pub fn mdz_form_tab() -> i32 { return 1 }
-pub fn mdz_ka_fit(form: i32) -> f64 {
-    if form == 0 { return 1.976828 }   // solution: Tmax 0.4645 h (round 4: refit with the pooled Fg)
-    return 0.827927                    // tablet:   Tmax 0.9291 h
+
+// ---- transit input (round 5) ------------------------------------------------------------
+// Number of Erlang STAGES of the oral input: Brill 2014 (PMID 25141974, full text) found three transit
+// compartments with Ka = Ktr, i.e. four stages here (rule 11); both dose forms use it (the paper's
+// solution and tablet models share the structure and differ in Ktr).
+pub fn mdz_ntr() -> i32 { return 4 }
+
+// Gut-wall Kp variant: 0 = every organ scaled by the V_ss scalar (rounds 1-4), 1 = the gut wall left at
+// its Rodgers-Rowland Kp (circ28_kp_scale_for_vss_gutrr).
+pub fn mdz_gv_all() -> i32 { return 0 }
+pub fn mdz_gv_gut() -> i32 { return 1 }
+// The variant the record and the headline rows use (decision of round 5: see the test header and report).
+pub fn mdz_gv_adopted() -> i32 { return 0 }
+
+// Rate k (/h) of ONE stage, fitted to the pooled Tmax of the dose form by bisection on the kernel run
+// (round 5, ntr = 4; mdz_fit_ka; the test re-checks the Tmax each gives).
+pub fn mdz_ka_fit(form: i32, gv: i32) -> f64 {
+    if gv == 0 {
+        if form == 0 { return 12.238730 }   // solution: Tmax 0.4645 h
+        return 5.371780                     // tablet:   Tmax 0.9291 h
+    }
+    if form == 0 { return 12.847642 }
+    return 5.509594
 }
 
 // ---- run configuration ----------------------------------------------------
 // Grid 0.05 h to 3 h, 0.5 h to 24 h (102 steps); terminal fit on 8..24 h.
 pub fn mdz_cfg_oral(dose_mg: f64) -> Circ28Dose {
-    return circ28_dose_oral(dose_mg, 0.05, 3.0, 0.5, 24.0, 8.0, 24.0)
+    return circ28_dose_oral_transit(dose_mg, mdz_ntr(), 0.05, 3.0, 0.5, 24.0, 8.0, 24.0)
+}
+
+// the same with another stage count (ntr = 1 is the first-order input of rounds 1-4)
+pub fn mdz_cfg_oral_n(dose_mg: f64, ntr: i32) -> Circ28Dose {
+    return circ28_dose_oral_transit(dose_mg, ntr, 0.05, 3.0, 0.5, 24.0, 8.0, 24.0)
+}
+
+// Kernel parameters of a value array for the Kp variant gv.
+pub fn mdz_params_v(th: [f64; 18], gv: i32) -> Circ28Params with Mut, Div, Panic {
+    var t = th
+    if gv == 1 { return circ28_drug_params_theta_gutrr(t) }
+    return circ28_drug_params_theta(t)
+}
+
+// Rodgers-Rowland Kp (unscaled) of a value array
+pub fn mdz_kp_rr(th: [f64; 18]) -> [f64; 14] with Mut, Div, Panic {
+    let kd = circ28_kp_drug(th[CD_LOGP], th[CD_PKA1], th[CD_PKA2], (th[CD_ION] + 0.5) as i32, th[CD_FU], th[CD_BP])
+    return circ28_kp_rr(kd)
+}
+
+// circ28_run_theta for either Kp variant: ka (the stage rate), fa and tlag of the dose from the array.
+pub fn mdz_run_theta(th: [f64; 18], dc: Circ28Dose, gv: i32) -> Circ28Run with Mut, Div, Panic {
+    var d2 = dc
+    d2.ka = th[CD_KA]
+    d2.fa = th[CD_FA]
+    d2.tlag = th[CD_TLAG]
+    let p = mdz_params_v(th, gv)
+    return circ28_run(p, d2)
 }
 
 // Intravenous: a bolus is an infusion over one step (0.05 h).
@@ -373,19 +428,25 @@ pub fn mdz_cfg_iv(dose_mg: f64) -> Circ28Dose {
 // CD_KPSC, CD_CLGUT and CD_CLINT fitted to (vss, cl_plasma, fg). If a fit is
 // impossible (V_ss below the blood floor, ps not above the required value) the
 // returned CD_CLINT is -1.
-pub fn mdz_fit(th: [f64; 18], vss: f64, cl_plasma: f64, fg: f64) -> [f64; 18] with Mut, Div, Panic {
+pub fn mdz_fit(th: [f64; 18], vss: f64, cl_plasma: f64, fg: f64, gv: i32) -> [f64; 18] with Mut, Div, Panic {
     var t = th
     t[CD_KPSC] = 1.0
     t[CD_CLGUT] = 0.0
     t[CD_CLINT] = 0.0
-    let p0 = circ28_drug_params_theta(t)
-    let sc = circ28_kp_scale_for_vss(p0, p0.kp, vss)
+    let p0 = mdz_params_v(t, gv)
+    var sc = 0.0
+    if gv == 1 {
+        let kr = mdz_kp_rr(t)
+        sc = circ28_kp_scale_for_vss_gutrr(p0, kr, vss)
+    } else {
+        sc = circ28_kp_scale_for_vss(p0, p0.kp, vss)
+    }
     if !(sc > 0.0) {
         t[CD_CLINT] = 0.0 - 1.0
         return t
     }
     t[CD_KPSC] = sc
-    var p = circ28_drug_params_theta(t)
+    var p = mdz_params_v(t, gv)
     let qb = p.q[8] * p.bp
     let qg = qb * p.ps[8] / (p.ps[8] + qb)
     let cg = qg * (1.0 - fg) / fg
@@ -410,7 +471,7 @@ pub fn mdz_fit(th: [f64; 18], vss: f64, cl_plasma: f64, fg: f64) -> [f64; 18] wi
 }
 
 // Central difference of one fitted component with respect to one observable.
-pub fn mdz_fit_d(th: [f64; 18], vss: f64, cl: f64, fg: f64, which: i32, comp: i32) -> f64 with Mut, Div, Panic {
+pub fn mdz_fit_d(th: [f64; 18], vss: f64, cl: f64, fg: f64, which: i32, comp: i32, gv: i32) -> f64 with Mut, Div, Panic {
     var h = 1.0e-4
     var a = vss
     var b = vss
@@ -433,32 +494,36 @@ pub fn mdz_fit_d(th: [f64; 18], vss: f64, cl: f64, fg: f64, which: i32, comp: i3
         f = fg + h
         g = fg - h
     }
-    let tp = mdz_fit(th, a, c, f)
-    let tm = mdz_fit(th, b, e, g)
+    let tp = mdz_fit(th, a, c, f, gv)
+    let tm = mdz_fit(th, b, e, g, gv)
     return (tp[comp] - tm[comp]) / (2.0 * h)
 }
 
 // Oral run of 1 mg (the model is linear) with a given value array; used for the
 // ka slope and fit. Returns the run.
-pub fn mdz_oral_run(th: [f64; 18], dose_mg: f64) -> Circ28Run with Mut, Div, Panic {
-    return circ28_run_theta(th, mdz_cfg_oral(dose_mg))
+pub fn mdz_oral_run(th: [f64; 18], dose_mg: f64, gv: i32) -> Circ28Run with Mut, Div, Panic {
+    return mdz_run_theta(th, mdz_cfg_oral(dose_mg), gv)
 }
 
 // dTmax/dka at the values in th (central difference, relative step 1e-3).
-pub fn mdz_tmax_slope(th: [f64; 18]) -> f64 with Mut, Div, Panic {
+pub fn mdz_tmax_slope(th: [f64; 18], gv: i32) -> f64 with Mut, Div, Panic {
     var tp = th
     var tm = th
     let h = 1.0e-3 * th[CD_KA]
     tp[CD_KA] = th[CD_KA] + h
     tm[CD_KA] = th[CD_KA] - h
-    let rp = mdz_oral_run(tp, 1.0)
-    let rm = mdz_oral_run(tm, 1.0)
+    let rp = mdz_oral_run(tp, 1.0, gv)
+    let rm = mdz_oral_run(tm, 1.0, gv)
     return (rp.tmax - rm.tmax) / (2.0 * h)
 }
 
-// Bisection for the ka with Tmax(ka) = tobs, 30 halvings of [lo, hi]
-// (30 kernel runs: used offline; the stored value is mdz_ka_fit()).
-pub fn mdz_fit_ka(th: [f64; 18], tobs: f64, lo0: f64, hi0: f64) -> f64 with Mut, Div, Panic {
+// the same run with another stage count (round 5 sweep; ntr = 1 is the first-order input)
+pub fn mdz_oral_run_n(th: [f64; 18], dose_mg: f64, gv: i32, ntr: i32) -> Circ28Run with Mut, Div, Panic {
+    return mdz_run_theta(th, mdz_cfg_oral_n(dose_mg, ntr), gv)
+}
+
+// Bisection for the k of a chain of ntr stages (offline; the stored values are mdz_k_sweep)
+pub fn mdz_fit_ka_n(th: [f64; 18], tobs: f64, lo0: f64, hi0: f64, gv: i32, ntr: i32) -> f64 with Mut, Div, Panic {
     var t = th
     var lo = lo0
     var hi = hi0
@@ -466,7 +531,28 @@ pub fn mdz_fit_ka(th: [f64; 18], tobs: f64, lo0: f64, hi0: f64) -> f64 with Mut,
     while k < 30 {
         let mid = 0.5 * (lo + hi)
         t[CD_KA] = mid
-        let r = mdz_oral_run(t, 1.0)
+        let r = mdz_oral_run_n(t, 1.0, gv, ntr)
+        if r.tmax > tobs {
+            lo = mid
+        } else {
+            hi = mid
+        }
+        k = k + 1
+    }
+    return 0.5 * (lo + hi)
+}
+
+// Bisection for the ka with Tmax(ka) = tobs, 30 halvings of [lo, hi]
+// (30 kernel runs: used offline; the stored value is mdz_ka_fit()).
+pub fn mdz_fit_ka(th: [f64; 18], tobs: f64, lo0: f64, hi0: f64, gv: i32) -> f64 with Mut, Div, Panic {
+    var t = th
+    var lo = lo0
+    var hi = hi0
+    var k: i32 = 0
+    while k < 30 {
+        let mid = 0.5 * (lo + hi)
+        t[CD_KA] = mid
+        let r = mdz_oral_run(t, 1.0, gv)
         if r.tmax > tobs {
             lo = mid
         } else {
@@ -479,16 +565,16 @@ pub fn mdz_fit_ka(th: [f64; 18], tobs: f64, lo0: f64, hi0: f64) -> f64 with Mut,
 
 // The fitting steps are separate functions: Madaros segfaults on one frame that holds
 // the record plus several [f64; 18] arrays (measured 2026-11-15).
-pub fn mdz_fit_record(d: &!Circ28Drug) with Mut, Div, Panic, Epistemic {
+pub fn mdz_fit_record(d: &!Circ28Drug, gv: i32) with Mut, Div, Panic, Epistemic {
     let th0 = circ28_drug_theta(d)
     let vss = mdz_obs_vss()
     let cl = mdz_obs_cl()
     let fg = mdz_obs_fg()
-    let th = mdz_fit(th0, vss, cl, fg)
-    let dk_dv = mdz_fit_d(th0, vss, cl, fg, 0, CD_KPSC)
-    let dg_df = mdz_fit_d(th0, vss, cl, fg, 2, CD_CLGUT)
-    let dc_dcl = mdz_fit_d(th0, vss, cl, fg, 1, CD_CLINT)
-    let dc_df = mdz_fit_d(th0, vss, cl, fg, 2, CD_CLINT)
+    let th = mdz_fit(th0, vss, cl, fg, gv)
+    let dk_dv = mdz_fit_d(th0, vss, cl, fg, 0, CD_KPSC, gv)
+    let dg_df = mdz_fit_d(th0, vss, cl, fg, 2, CD_CLGUT, gv)
+    let dc_dcl = mdz_fit_d(th0, vss, cl, fg, 1, CD_CLINT, gv)
+    let dc_df = mdz_fit_d(th0, vss, cl, fg, 2, CD_CLINT, gv)
     let u_kpsc = cd_abs_m(dk_dv) * mdz_u_vss()
     let u_gut = cd_abs_m(dg_df) * mdz_u_fg()
     let ua = dc_dcl * mdz_u_cl()
@@ -502,7 +588,7 @@ pub fn mdz_fit_record(d: &!Circ28Drug) with Mut, Div, Panic, Epistemic {
 // Tmax of a 1 mg oral run with the record's parameters and the given ka. One run per
 // function, the value array filled in the function that runs the kernel (lean_single
 // returns wrong run results from frames that hold several arrays and structs).
-pub fn mdz_tmax_at(d: &Circ28Drug, ka: f64) -> f64 with Mut, Div, Panic, Epistemic {
+pub fn mdz_tmax_at(d: &Circ28Drug, ka: f64, gv: i32) -> f64 with Mut, Div, Panic, Epistemic {
     var th: [f64; 18] = [0.0; 18]
     var i: i32 = 0
     while i < 18 {
@@ -511,18 +597,18 @@ pub fn mdz_tmax_at(d: &Circ28Drug, ka: f64) -> f64 with Mut, Div, Panic, Epistem
     }
     th[CD_KA] = ka
     var dc = mdz_cfg_oral(1.0)
-    let r = circ28_run_theta(th, dc)
+    let r = mdz_run_theta(th, dc, gv)
     return r.tmax
 }
 
 // Sets CD_KA of the record to the ka of a dose form (0 solution, 1 tablet), with u from
 // u(Tmax of the form) / |dTmax/dka|; the record then describes that form. The slope is a
 // central difference, relative step 1e-3, made with one run per function.
-pub fn mdz_ka_record(d: &!Circ28Drug, form: i32) with Mut, Div, Panic, Epistemic {
-    let ka = mdz_ka_fit(form)
+pub fn mdz_ka_record(d: &!Circ28Drug, form: i32, gv: i32) with Mut, Div, Panic, Epistemic {
+    let ka = mdz_ka_fit(form, gv)
     let h = 1.0e-3 * ka
-    let tp = mdz_tmax_at(d, ka + h)
-    let tm = mdz_tmax_at(d, ka - h)
+    let tp = mdz_tmax_at(d, ka + h, gv)
+    let tm = mdz_tmax_at(d, ka - h, gv)
     let slope = (tp - tm) / (2.0 * h)
     var prov = "fitted to the SOLUTION Tmax (Hohmann2015, Smith1981 pooled); u from u(Tmax) / |dTmax/dka|"
     if form == 1 {
@@ -547,10 +633,10 @@ pub fn mdz_measured_record(d: &!Circ28Drug) with Mut, Div, Panic, Epistemic {
 // AND returns the record: on Madaros, `fn f() -> Circ28Drug { var d = ..; fit(&!d); return d }`
 // segfaults at run time once the fit runs inside it (measured 2026-11-15, 18-slot record),
 // while the same calls made from the caller's frame work.
-pub fn mdz_drug_into(d: &!Circ28Drug) with Mut, Div, Panic, Epistemic {
+pub fn mdz_drug_into(d: &!Circ28Drug, gv: i32) with Mut, Div, Panic, Epistemic {
     mdz_measured_record(d)
-    mdz_fit_record(d)
-    mdz_ka_record(d, 0)
+    mdz_fit_record(d, gv)
+    mdz_ka_record(d, 0, gv)
 }
 
 fn cd_abs_m(x: f64) -> f64 {
@@ -570,19 +656,19 @@ pub struct MdzOut {
     pub ka: f64,
 }
 
-pub fn mdz_eval(z: [f64; 9], thb: [f64; 18], ka0: f64, slope: f64, dose_mg: f64) -> MdzOut with Mut, Div, Panic {
+pub fn mdz_eval(z: [f64; 9], thb: [f64; 18], ka0: f64, slope: f64, dose_mg: f64, gv: i32) -> MdzOut with Mut, Div, Panic {
     var t = thb
     t[CD_LOGP] = z[0]
     t[CD_PKA1] = z[1]
     t[CD_FU] = z[2]
     t[CD_BP] = z[3]
     t[CD_PSGUT] = z[8]
-    t = mdz_fit(t, z[4], z[5], z[6])
+    t = mdz_fit(t, z[4], z[5], z[6], gv)
     t[CD_KA] = ka0
-    let r1 = mdz_oral_run(t, dose_mg)
+    let r1 = mdz_oral_run(t, dose_mg, gv)
     let ka2 = ka0 + (z[7] - r1.tmax) / slope
     t[CD_KA] = ka2
-    let r2 = mdz_oral_run(t, dose_mg)
+    let r2 = mdz_oral_run(t, dose_mg, gv)
     return MdzOut { auc: circ28_run_auc(r2), cmax: r2.cmax, tmax: r2.tmax, ka: ka2 }
 }
 
@@ -599,10 +685,10 @@ pub struct MdzBudget {
     pub runs: i32,
 }
 
-pub fn mdz_budget(d: &Circ28Drug, dose_mg: f64, form: i32) -> MdzBudget with Mut, Div, Panic, Epistemic {
+pub fn mdz_budget(d: &Circ28Drug, dose_mg: f64, form: i32, gv: i32) -> MdzBudget with Mut, Div, Panic, Epistemic {
     let thb = circ28_drug_theta(d)
     let ka0 = thb[CD_KA]
-    let slope = mdz_tmax_slope(thb)
+    let slope = mdz_tmax_slope(thb, gv)
     var z0: [f64; 9] = [0.0; 9]
     z0[0] = thb[CD_LOGP]
     z0[1] = thb[CD_PKA1]
@@ -623,7 +709,7 @@ pub fn mdz_budget(d: &Circ28Drug, dose_mg: f64, form: i32) -> MdzBudget with Mut
     u[6] = mdz_u_fg()
     u[7] = mdz_u_tmax(form)
     u[8] = mdz_u_psgut()
-    let o0 = mdz_eval(z0, thb, ka0, slope, dose_mg)
+    let o0 = mdz_eval(z0, thb, ka0, slope, dose_mg, gv)
     var sa: [f64; 9] = [0.0; 9]
     var sc: [f64; 9] = [0.0; 9]
     var ca: [f64; 9] = [0.0; 9]
@@ -639,8 +725,8 @@ pub fn mdz_budget(d: &Circ28Drug, dose_mg: f64, form: i32) -> MdzBudget with Mut
         var zm = z0
         zp[i] = z0[i] + hs
         zm[i] = z0[i] - hs
-        let op = mdz_eval(zp, thb, ka0, slope, dose_mg)
-        let om = mdz_eval(zm, thb, ka0, slope, dose_mg)
+        let op = mdz_eval(zp, thb, ka0, slope, dose_mg, gv)
+        let om = mdz_eval(zm, thb, ka0, slope, dose_mg, gv)
         nrun = nrun + 4
         let da = (op.auc - om.auc) / (2.0 * hs)
         let dcm = (op.cmax - om.cmax) / (2.0 * hs)
@@ -664,7 +750,7 @@ pub fn mdz_budget(d: &Circ28Drug, dose_mg: f64, form: i32) -> MdzBudget with Mut
 //   f[42..45]        venous plasma concentration (mg/L) at 0.1, 0.25, 0.5 and 2 h
 //   f[46]            total mass in the body (mg) at 12 h; f[47] unused
 // One run per call, the array filled in this function (lean_single).
-pub fn mdz_iv_dist(d: &Circ28Drug, pssc: f64, f: &![f64; 48]) -> i32 with Mut, Div, Panic, Epistemic {
+pub fn mdz_iv_dist(d: &Circ28Drug, pssc: f64, f: &![f64; 48], gv: i32) -> i32 with Mut, Div, Panic, Epistemic {
     var th: [f64; 18] = [0.0; 18]
     var i: i32 = 0
     while i < 18 {
@@ -672,8 +758,7 @@ pub fn mdz_iv_dist(d: &Circ28Drug, pssc: f64, f: &![f64; 48]) -> i32 with Mut, D
         i = i + 1
     }
     if pssc >= 0.0 { th[CD_PSSC] = pssc }
-    var t2 = th
-    let p = circ28_drug_params_theta(t2)
+    let p = mdz_params_v(th, gv)
     var sys = circ28_sys_zero()
     var s = circ28_state_zero()
     var el = circ28_elim_zero()
@@ -721,4 +806,76 @@ pub fn mdz_iv_dist(d: &Circ28Drug, pssc: f64, f: &![f64; 48]) -> i32 with Mut, D
         ph = ph + 1
     }
     return 0
+}
+
+// ---- record-level helpers for the two Kp variants (round 5) ----------------------------------
+// Kernel parameters of the record for the variant gv.
+pub fn mdz_params_rec(d: &Circ28Drug, gv: i32) -> Circ28Params with Mut, Div, Panic, Epistemic {
+    let th = circ28_drug_theta(d)
+    return mdz_params_v(th, gv)
+}
+
+// First-order propagation over the 18 record parameters, independent, no refit: the same algorithm
+// as circ28_drug_unc_theta (JCGM 100:2008 5.1.2, central differences, h = min(1e-4 |theta|, 0.1 u)),
+// with the run made for the Kp variant gv.
+pub fn mdz_drug_unc(d: &Circ28Drug, dc: Circ28Dose, gv: i32) -> Circ28Unc with Mut, Div, Panic, Epistemic {
+    let th = circ28_drug_theta(d)
+    let vr = circ28_drug_var(d)
+    let st = (*d).status
+    let r0 = mdz_run_theta(th, dc, gv)
+    var sa: [f64; 18] = [0.0; 18]
+    var sc: [f64; 18] = [0.0; 18]
+    var ca: [f64; 18] = [0.0; 18]
+    var cc: [f64; 18] = [0.0; 18]
+    var va = 0.0
+    var vc = 0.0
+    var nrun: i32 = 1
+    var i: i32 = 0
+    while i < 18 {
+        if st[i] != 0 && vr[i] > 0.0 {
+            let u = cd_sqrt(vr[i])
+            var hs = 1.0e-4 * cd_abs_m(th[i])
+            if hs > 0.1 * u || !(hs > 0.0) { hs = 0.1 * u }
+            var tp = th
+            var tm = th
+            tp[i] = th[i] + hs
+            tm[i] = th[i] - hs
+            let rp = mdz_run_theta(tp, dc, gv)
+            let rm = mdz_run_theta(tm, dc, gv)
+            nrun = nrun + 2
+            let da = (circ28_run_auc(rp) - circ28_run_auc(rm)) / (2.0 * hs)
+            let dcm = (rp.cmax - rm.cmax) / (2.0 * hs)
+            sa[i] = da
+            sc[i] = dcm
+            ca[i] = da * da * vr[i]
+            cc[i] = dcm * dcm * vr[i]
+            va = va + ca[i]
+            vc = vc + cc[i]
+        }
+        i = i + 1
+    }
+    return Circ28Unc {
+        auc: circ28_run_auc(r0), cmax: r0.cmax, var_auc: va, var_cmax: vc,
+        sens_auc: sa, sens_cmax: sc, contrib_auc: ca, contrib_cmax: cc, runs: nrun
+    }
+}
+
+// ---- stage-count sweep (round 5; gv 0, the all-organ record) --------------------------------------
+// k (/h) of one stage that reproduces the pooled Tmax of the dose form for a chain of ntr stages,
+// found by bisection on the kernel run (mdz_fit_ka_n, 30 halvings); ntr = 1 is the first-order ka of
+// rounds 1-4, ntr = 4 the sourced stage count (Brill 2014). Used to show what the stage count does to
+// the peak shape, not to choose it.
+pub fn mdz_k_sweep(form: i32, ntr: i32) -> f64 {
+    if form == 1 {
+        if ntr == 1 { return 0.827927 }
+        if ntr == 2 { return 2.455544 }
+        if ntr == 3 { return 3.943083 }
+        if ntr == 4 { return 5.371780 }
+        return 6.766470
+    }
+    if ntr == 1 { return 1.976828 }
+    if ntr == 2 { return 5.659914 }
+    if ntr == 3 { return 9.019972 }
+    if ntr == 4 { return 12.238730 }
+    return 15.372520
 }
