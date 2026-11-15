@@ -280,7 +280,7 @@ export const elimZero = () => ({ hepatic: 0, formed: 0, renal: 0, plasma: 0, gut
 // One step. ivRate (mg/h) goes into the venous pool, oralRate (mg/h) into gut
 // tissue; both constant over the step. x is updated in place.
 export function step(x, sys, ivRate, oralRate, el) {
-  const { F, K, V, dt, p } = sys;
+  const { F, K, V, dt } = sys;
   const g = GAMMA, h = g * dt;
   const u = new Float64Array(NS);               // mass input rate, mg/h
   u[0] = ivRate;
