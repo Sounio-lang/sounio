@@ -43,7 +43,7 @@
 //                                   read, so it is not invented. The consequence is tested (V1, S3 of the test).
 //  clren   fitted  3                fe_R x CL (fe_R below)
 //  kpsc    fitted  3                to V_ss
-//  ka      fitted  3                to Tmax
+//  ka      fitted  3                k per stage of the oral chain (CD_KA), to the oral Tmax 1.0 h (see ROUND TRANSIT below)
 //  fa      1.0     0        1       "rapidly and completely absorbed; < 1 % unchanged in the faeces",
 //                                   Heykants 1994 J Clin Psychiatry 55 Suppl:13, PMID 7520903 (A)
 //  pssc    1       0        0       placeholder with no source (flow-limited default, circ28_drug.sio)
@@ -118,6 +118,14 @@
 // which forms 9-OH entirely) is fitted to the PM/NM oral clearance ratio 6.20 (u 0.65), Zhang 2020 Pharmacotherapy 40:632, PMID
 // 32519344 (abstract, A); q = share of the non-2D6 clearance that forms 9-OH is 0 (no source). The IV ratio 3 is then a validation row.
 //
+// ROUND TRANSIT (2026-11-15). The oral input is an Erlang chain of rsp_ntr() = 4 stages (n = 3 transit compartments, a DECLARED
+// ASSUMPTION: no risperidone-specific number was read, plus 1 by the n+1 rule); CD_KA is k per stage, MTT = ntr/k, mode (ntr-1)/k;
+// tlag 0 (none sourced). k is refitted to the SAME observable as before (oral Tmax 1.0 h): rsp_ka_fit 5.133473 /h (round 2 first-order ka
+// 0.8120). The coupled run uses circ28_oral_mass_n; the R-only Tmax run uses circ28_dose_oral_transit. The _g variants (rsp_params,
+// rsp_fit_m_g, rsp_fit_r_g, rsp_run_th_g, rsp_ka_fit_g) carry a gut-wall variant gv (0: V_ss scalar on every organ; 1: gut wall at its
+// Rodgers-Rowland Kp, circ28_kp_scale_for_vss_gutrr); gv 0 is the module's variant (test S6: gv 1 does not improve the failing peak row).
+// The budget now also carries the R Cmax and the 9-OH Tmax (rsp_eval out[4], out[5]).
+//
 // POOR METABOLISER. The CYP2D6 pathway only is scaled: clform x PM_SCALE with PM_SCALE = 0 (a PM has no
 // functional CYP2D6, which defines the phenotype in Huang 1993, "dextromethorphan-phenotyped"). The
 // residual formation of 9-OH in PMs (CYP3A4, Mahatthanatrakul 2011, A, and Kneller 2020, PMID 31359271, A)
@@ -168,13 +176,22 @@ pub fn rsp_u_m_cl() -> f64 { return 0.42 }
 pub fn rsp_obs_m_fe() -> f64 { return 0.59 }
 pub fn rsp_u_m_fe() -> f64 { return 0.031 }
 
-// ka (1/h) with Tmax(ka) = rsp_obs_r_tmax() on the grid of rsp_cfg_r_oral (offline bisection, 30
-// halvings of [0.3, 8]; the test re-checks the Tmax it gives).
-pub fn rsp_ka_fit() -> f64 { return 0.8120 }
+// Number of stages of the oral Erlang chain: n = 3 transit compartments (a DECLARED ASSUMPTION, no risperidone value read) + 1.
+pub fn rsp_ntr() -> i32 { return 4 }
+
+// k (1/h per stage of the ntr = 4 chain; CD_KA) with Tmax(k) = rsp_obs_r_tmax() on the grid of rsp_cfg_r_oral (offline bisection, 30
+// halvings of [0.5, 30], rsp_fit_ka; the test re-checks the Tmax it gives). Round 2 (first-order input) was ka 0.8120 /h.
+pub fn rsp_ka_fit() -> f64 { return 5.133473 }
+
+// k per stage of the variant gv (offline fit, see rsp_ka_fit).
+pub fn rsp_ka_fit_g(gv: i32) -> f64 {
+    if gv == 1 { return 4.893535 }
+    return 5.133473
+}
 
 // R-only oral run configuration (for the ka fit): 0.05 h to 3 h, 0.5 h to 24 h, terminal fit 8-24 h.
 pub fn rsp_cfg_r_oral(dose_mg: f64) -> Circ28Dose {
-    return circ28_dose_oral(dose_mg, 0.05, 3.0, 0.5, 24.0, 8.0, 24.0)
+    return circ28_dose_oral_transit(dose_mg, rsp_ntr(), 0.05, 3.0, 0.5, 24.0, 8.0, 24.0)
 }
 
 fn rsp_abs(x: f64) -> f64 {
@@ -182,23 +199,40 @@ fn rsp_abs(x: f64) -> f64 {
     return x
 }
 
+// Parameters of the variant gv: 0 = V_ss scalar on every organ, gut wall included; 1 = gut wall at its Rodgers-Rowland Kp.
+pub fn rsp_params(th: [f64; 18], gv: i32) -> Circ28Params with Mut, Div, Panic {
+    var t = th
+    if gv == 1 { return circ28_drug_params_theta_gutrr(t) }
+    return circ28_drug_params_theta(t)
+}
+
+// V_ss scalar of the variant gv from the parameters p0 built with CD_KPSC = 1.
+pub fn rsp_kp_scale(p0: Circ28Params, vss: f64, gv: i32) -> f64 with Mut, Div {
+    if gv == 1 { return circ28_kp_scale_for_vss_gutrr(p0, p0.kp, vss) }
+    return circ28_kp_scale_for_vss(p0, p0.kp, vss)
+}
+
 // ---- the fits ----------------------------------------------------------------------------------
 // 9-OH: Kp scalar to V_ss, renal part fe x CL, hepatic intrinsic clearance to the rest. Returns the
 // array with CD_KPSC, CD_CLREN and CD_CLINT set; CD_CLINT = -1 if a fit is impossible.
 pub fn rsp_fit_m(th: [f64; 18], vss: f64, cl: f64, fe: f64) -> [f64; 18] with Mut, Div, Panic {
+    return rsp_fit_m_g(th, vss, cl, fe, 0)
+}
+
+pub fn rsp_fit_m_g(th: [f64; 18], vss: f64, cl: f64, fe: f64, gv: i32) -> [f64; 18] with Mut, Div, Panic {
     var t = th
     t[CD_KPSC] = 1.0
     t[CD_CLINT] = 0.0
     t[CD_CLFORM] = 0.0
     t[CD_CLREN] = 0.0
-    let p0 = circ28_drug_params_theta(t)
-    let sc = circ28_kp_scale_for_vss(p0, p0.kp, vss)
+    let p0 = rsp_params(t, gv)
+    let sc = rsp_kp_scale(p0, vss, gv)
     if !(sc > 0.0) {
         t[CD_CLINT] = 0.0 - 1.0
         return t
     }
     t[CD_KPSC] = sc
-    let p = circ28_drug_params_theta(t)
+    let p = rsp_params(t, gv)
     let qh = circ28_q_hepatic(p)
     let clren = fe * cl
     let clh = cl - clren
@@ -267,19 +301,23 @@ pub fn rsp_solve_ypm(target: f64, bb: f64, clren: f64) -> f64 with Mut, Div {
 // Risperidone: Kp scalar to V_ss, cl_renal = fe CL, total hepatic intrinsic clearance to CL, f2D6 to the EM/PM
 // oral clearance ratio. clform = f2D6 tot + q (1 - f2D6) tot ; clint = (1 - q)(1 - f2D6) tot.
 pub fn rsp_fit_r(th: [f64; 18], vss: f64, cl: f64, fe: f64, pmratio: f64, q: f64) -> [f64; 18] with Mut, Div, Panic {
+    return rsp_fit_r_g(th, vss, cl, fe, pmratio, q, 0)
+}
+
+pub fn rsp_fit_r_g(th: [f64; 18], vss: f64, cl: f64, fe: f64, pmratio: f64, q: f64, gv: i32) -> [f64; 18] with Mut, Div, Panic {
     var t = th
     t[CD_KPSC] = 1.0
     t[CD_CLINT] = 0.0
     t[CD_CLFORM] = 0.0
     t[CD_CLREN] = 0.0
-    let p0 = circ28_drug_params_theta(t)
-    let sc = circ28_kp_scale_for_vss(p0, p0.kp, vss)
+    let p0 = rsp_params(t, gv)
+    let sc = rsp_kp_scale(p0, vss, gv)
     if !(sc > 0.0) {
         t[CD_CLINT] = 0.0 - 1.0
         return t
     }
     t[CD_KPSC] = sc
-    let p = circ28_drug_params_theta(t)
+    let p = rsp_params(t, gv)
     let qh = circ28_q_hepatic(p)
     let bb = p.bp * qh
     let clren = fe * cl
@@ -373,16 +411,24 @@ pub fn rsp_measured_m(d: &!Circ28Drug) with Mut, Div, Panic, Epistemic {
 // The fitting steps are separate functions (Madaros segfaults on one frame holding records plus
 // several [f64; 18] arrays, measured in the midazolam module).
 pub fn rsp_fit_record_m(d: &!Circ28Drug) with Mut, Div, Panic, Epistemic {
+    rsp_fit_record_m_g(d, 0)
+}
+
+pub fn rsp_fit_record_m_g(d: &!Circ28Drug, gv: i32) with Mut, Div, Panic, Epistemic {
     let th0 = circ28_drug_theta(d)
-    let th = rsp_fit_m(th0, rsp_obs_m_vss(), rsp_obs_m_cl(), rsp_obs_m_fe())
+    let th = rsp_fit_m_g(th0, rsp_obs_m_vss(), rsp_obs_m_cl(), rsp_obs_m_fe(), gv)
     circ28_drug_set(d, CD_KPSC, th[CD_KPSC], 0.0, CD_STATUS_FITTED, "fitted to Vss 136.4 L = 487 L x 0.28 (Invega label)")
     circ28_drug_set(d, CD_CLREN, th[CD_CLREN], 0.0, CD_STATUS_FITTED, "fe 0.59 x CL 3.81 L/h (Vermeir2008; Invega F 0.28 x CL/F)")
     circ28_drug_set(d, CD_CLINT, th[CD_CLINT], 0.0, CD_STATUS_FITTED, "fitted to the non-renal part of CL 3.81 L/h")
 }
 
 pub fn rsp_fit_record_r(d: &!Circ28Drug) with Mut, Div, Panic, Epistemic {
+    rsp_fit_record_r_g(d, 0)
+}
+
+pub fn rsp_fit_record_r_g(d: &!Circ28Drug, gv: i32) with Mut, Div, Panic, Epistemic {
     let th0 = circ28_drug_theta(d)
-    let th = rsp_fit_r(th0, rsp_obs_r_vss(), rsp_obs_r_cl(), rsp_obs_r_fe(), rsp_obs_pmratio(), rsp_q_other())
+    let th = rsp_fit_r_g(th0, rsp_obs_r_vss(), rsp_obs_r_cl(), rsp_obs_r_fe(), rsp_obs_pmratio(), rsp_q_other(), gv)
     circ28_drug_set(d, CD_KPSC, th[CD_KPSC], 0.0, CD_STATUS_FITTED, "fitted to Vss 109.5 L = 1.5 L/kg x 73 kg (Risperdal label)")
     circ28_drug_set(d, CD_CLREN, th[CD_CLREN], 0.0, CD_STATUS_FITTED, "fe 0.02 x CL 23.6 L/h (Wong2019 <4 %; Mahdy2023 citing Huang1993)")
     circ28_drug_set(d, CD_CLINT, th[CD_CLINT], 0.0, CD_STATUS_FITTED, "non-2D6 pathways (1 - f2D6) x total hepatic, total to CL 23.6 L/h; f2D6 to EM/PM CL/F 6.2 (Zhang2020)")
@@ -390,7 +436,11 @@ pub fn rsp_fit_record_r(d: &!Circ28Drug) with Mut, Div, Panic, Epistemic {
 }
 
 pub fn rsp_ka_record(d: &!Circ28Drug) with Mut, Div, Panic, Epistemic {
-    circ28_drug_set(d, CD_KA, rsp_ka_fit(), 0.0, CD_STATUS_FITTED, "fitted to oral Tmax 1.0 h (Risperdal label)")
+    circ28_drug_set(d, CD_KA, rsp_ka_fit(), 0.0, CD_STATUS_FITTED, "k per stage of the 4-stage chain (3 transit compartments, assumed), fitted to oral Tmax 1.0 h (Risperdal label)")
+}
+
+pub fn rsp_ka_record_g(d: &!Circ28Drug, gv: i32) with Mut, Div, Panic, Epistemic {
+    circ28_drug_set(d, CD_KA, rsp_ka_fit_g(gv), 0.0, CD_STATUS_FITTED, "k per stage of the 4-stage chain (3 transit compartments, assumed), fitted to oral Tmax 1.0 h (Risperdal label); gv 1: gut wall at Rodgers-Rowland Kp")
 }
 
 pub fn rsp_drug_into(dr: &!Circ28Drug, dm: &!Circ28Drug) with Mut, Div, Panic, Epistemic {
@@ -467,14 +517,14 @@ pub fn rsp_peak(ts: &[f64; 800], cs: &[f64; 800], n: i32, out: &![f64; 2]) with 
     }
 }
 
-pub fn rsp_run_th(
+pub fn rsp_run_th_g(
     thr_in: [f64; 18], thm_in: [f64; 18], route: i32, dose: f64, t_inf: f64,
-    wr_lo: f64, wr_hi: f64, wm_lo: f64, wm_hi: f64, res: &![f64; 24]
+    wr_lo: f64, wr_hi: f64, wm_lo: f64, wm_hi: f64, gv: i32, res: &![f64; 24]
 ) with Mut, Div, Panic {
     var thr = thr_in
     var thm = thm_in
-    let pr = circ28_drug_params_theta(thr)
-    let pm = circ28_drug_params_theta(thm)
+    let pr = rsp_params(thr, gv)
+    let pm = rsp_params(thm, gv)
     let cp = circ28_coupling(thm[CD_MW] / thr[CD_MW], 0.0)
     var ts: [f64; 800] = [0.0; 800]
     var cr: [f64; 800] = [0.0; 800]
@@ -512,7 +562,7 @@ pub fn rsp_run_th(
                     mass = circ28_iv_mass(dose, t_inf, t, t + dt)
                     iv = mass / dt
                 } else {
-                    mass = circ28_oral_mass(thr[CD_KA], thr[CD_FA], dose, thr[CD_TLAG], t, t + dt)
+                    mass = circ28_oral_mass_n(thr[CD_KA], rsp_ntr(), thr[CD_FA], dose, thr[CD_TLAG], t, t + dt)
                     oral = mass / dt
                 }
                 input = input + mass
@@ -570,12 +620,19 @@ pub fn rsp_run_th(
     (*res)[18] = cm[n]
 }
 
+pub fn rsp_run_th(
+    thr_in: [f64; 18], thm_in: [f64; 18], route: i32, dose: f64, t_inf: f64,
+    wr_lo: f64, wr_hi: f64, wm_lo: f64, wm_hi: f64, res: &![f64; 24]
+) with Mut, Div, Panic {
+    rsp_run_th_g(thr_in, thm_in, route, dose, t_inf, wr_lo, wr_hi, wm_lo, wm_hi, 0, res)
+}
+
 // ---- budget with refit -------------------------------------------------------------------------
 // Sixteen inputs: 0 logP_R, 1 pKa_R, 2 fu_R, 3 bp_R, 4 logP_M, 5 pKa_M, 6 fu_M, 7 bp_M (measured),
 // 8 CL_R, 9 Vss_R, 10 fe_R, 11 IV ratio, 12 Tmax_R, 13 CL_M, 14 Vss_M, 15 fe_M (observables).
 // Each evaluation refits M, then R, then ka by one chord correction, then runs the coupled oral dose.
 
-pub fn rsp_eval(z: [f64; 16], dr: &Circ28Drug, dm: &Circ28Drug, ka0: f64, slope: f64, dose_mg: f64, out: &![f64; 4]) with Mut, Div, Panic, Epistemic {
+pub fn rsp_eval(z: [f64; 16], dr: &Circ28Drug, dm: &Circ28Drug, ka0: f64, slope: f64, dose_mg: f64, out: &![f64; 6]) with Mut, Div, Panic, Epistemic {
     var tm0 = circ28_drug_theta(dm)
     tm0[CD_LOGP] = z[4]
     tm0[CD_PKA1] = z[5]
@@ -597,6 +654,8 @@ pub fn rsp_eval(z: [f64; 16], dr: &Circ28Drug, dm: &Circ28Drug, ka0: f64, slope:
     (*out)[1] = res[2]
     (*out)[2] = res[7]
     (*out)[3] = res[7] / res[2]
+    (*out)[4] = res[0]
+    (*out)[5] = res[6]
 }
 
 fn rsp_abs_m(x: f64) -> f64 {
@@ -621,6 +680,12 @@ pub struct RspBudget {
     pub var_r: f64,
     pub var_m: f64,
     pub var_ratio: f64,
+    pub var_rcmax: f64,
+    pub var_mtmax: f64,
+    pub rcmax: f64,
+    pub mtmax: f64,
+    pub contrib_rcmax: [f64; 16],
+    pub contrib_mtmax: [f64; 16],
     pub contrib_am: [f64; 16],
     pub sens_am: [f64; 16],
     pub u: [f64; 16],
@@ -693,7 +758,7 @@ pub fn rsp_budget(dr: &Circ28Drug, dm: &Circ28Drug, dose_mg: f64) -> RspBudget w
         u[i] = rsp_input_u(i)
         i = i + 1
     }
-    var o0: [f64; 4] = [0.0; 4]
+    var o0: [f64; 6] = [0.0; 6]
     rsp_eval(z0, dr, dm, ka0, slope, dose_mg, &!o0)
     var sa: [f64; 16] = [0.0; 16]
     var ca: [f64; 16] = [0.0; 16]
@@ -701,6 +766,10 @@ pub fn rsp_budget(dr: &Circ28Drug, dm: &Circ28Drug, dose_mg: f64) -> RspBudget w
     var vr = 0.0
     var vm = 0.0
     var vq = 0.0
+    var vc = 0.0
+    var vt = 0.0
+    var cc: [f64; 16] = [0.0; 16]
+    var ct: [f64; 16] = [0.0; 16]
     var nrun: i32 = 1
     i = 0
     while i < 16 {
@@ -710,8 +779,8 @@ pub fn rsp_budget(dr: &Circ28Drug, dm: &Circ28Drug, dose_mg: f64) -> RspBudget w
         var zm = z0
         zp[i] = z0[i] + hs
         zm[i] = z0[i] - hs
-        var op: [f64; 4] = [0.0; 4]
-        var om: [f64; 4] = [0.0; 4]
+        var op: [f64; 6] = [0.0; 6]
+        var om: [f64; 6] = [0.0; 6]
         rsp_eval(zp, dr, dm, ka0, slope, dose_mg, &!op)
         rsp_eval(zm, dr, dm, ka0, slope, dose_mg, &!om)
         nrun = nrun + 2
@@ -719,13 +788,19 @@ pub fn rsp_budget(dr: &Circ28Drug, dm: &Circ28Drug, dose_mg: f64) -> RspBudget w
         let dr = (op[1] - om[1]) / (2.0 * hs)
         let dm = (op[2] - om[2]) / (2.0 * hs)
         let dq = (op[3] - om[3]) / (2.0 * hs)
+        let dc = (op[4] - om[4]) / (2.0 * hs)
+        let dt = (op[5] - om[5]) / (2.0 * hs)
         sa[i] = da
         ca[i] = da * da * u[i] * u[i]
         va = va + ca[i]
         vr = vr + dr * dr * u[i] * u[i]
         vm = vm + dm * dm * u[i] * u[i]
         vq = vq + dq * dq * u[i] * u[i]
+        cc[i] = dc * dc * u[i] * u[i]
+        ct[i] = dt * dt * u[i] * u[i]
+        vc = vc + cc[i]
+        vt = vt + ct[i]
         i = i + 1
     }
-    return RspBudget { am_auc: o0[0], r_auc: o0[1], m_auc: o0[2], ratio: o0[3], var_am: va, var_r: vr, var_m: vm, var_ratio: vq, contrib_am: ca, sens_am: sa, u: u, runs: nrun }
+    return RspBudget { am_auc: o0[0], r_auc: o0[1], m_auc: o0[2], ratio: o0[3], var_am: va, var_r: vr, var_m: vm, var_ratio: vq, var_rcmax: vc, var_mtmax: vt, rcmax: o0[4], mtmax: o0[5], contrib_rcmax: cc, contrib_mtmax: ct, contrib_am: ca, sens_am: sa, u: u, runs: nrun }
 }
