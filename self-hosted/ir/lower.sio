@@ -1008,6 +1008,106 @@ fn tg_corr_class(idx: i64, depth: i64) -> i64 with Mut, Panic, Div {
     cls
 }
 
+// Every function the module declares, with whether its body measures directly
+// and which names it calls (recorded at the registry's preregistration pass).
+// A call to a function with no tangent clone whose body can draw a measurement
+// (directly or through what it calls) loses that measurement's uncertainty when
+// the arguments are certain, because nothing then asks the call-site analysis
+// for it: such a call reached by a query is refused (tg_unreg_draws_call).
+var TG_FN_N: i64 = 0
+var TG_FN_ID: [i64; 4096] = [0; 4096]
+var TG_FN_DRAW: [i64; 4096] = [0; 4096]
+var TG_FN_NC: [i64; 4096] = [0; 4096]
+var TG_FN_CAL: [i64; 131072] = [0; 131072]
+var TG_FN_M1: [i64; 4096] = [-1; 4096]
+var TG_FN_M2: [i64; 4096] = [-1; 4096]
+
+fn tg_fn_note(name: Name, fd: &FnDef) with Mut, Panic, Div {
+    if TG_FN_N >= 4096 { return }
+    let k = TG_FN_N
+    TG_FN_ID[k as usize] = ir_intern_name(name)
+    TG_FN_M1[k as usize] = 0 - 1
+    TG_FN_M2[k as usize] = 0 - 1
+    TG_FN_DRAW[k as usize] = if tg_stmts_call(&(*fd).body.stmts, 1, 0) { 1 } else { 0 }
+    TG_NCALLEES = 0
+    tg_stmts_callees(&(*fd).body.stmts, 0)
+    var n = TG_NCALLEES
+    if n > 32 {
+        TG_FN_DRAW[k as usize] = 1
+        n = 0
+    }
+    TG_FN_NC[k as usize] = n
+    var i: i64 = 0
+    while i < n {
+        TG_FN_CAL[(k * 32 + i) as usize] = ir_intern_name(TG_CALLEES[i as usize])
+        i = i + 1
+    }
+    TG_FN_N = k + 1
+}
+
+fn tg_fn_slot(id: i64) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < TG_FN_N {
+        if TG_FN_ID[i as usize] == id { return i }
+        i = i + 1
+    }
+    0 - 1
+}
+
+// Can a call to function `id` make a measurement, directly or transitively?
+fn tg_fn_draws(id: i64, depth: i64) -> bool with Mut, Panic, Div {
+    let k = tg_fn_slot(id)
+    if k < 0 { return false }
+    if TG_FN_M1[k as usize] >= 0 { return TG_FN_M1[k as usize] == 1 }
+    if TG_FN_DRAW[k as usize] == 1 {
+        TG_FN_M1[k as usize] = 1
+        return true
+    }
+    if depth > 16 { return true }
+    TG_FN_M1[k as usize] = 0
+    var i: i64 = 0
+    while i < TG_FN_NC[k as usize] {
+        if tg_fn_draws(TG_FN_CAL[(k * 32 + i) as usize], depth + 1) {
+            TG_FN_M1[k as usize] = 1
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+// A call to `name` that has no tangent clone and can draw a measurement.
+fn tg_unreg_draws_call(name: Name) -> bool with Mut, Panic, Div {
+    let id = ir_intern_name(name)
+    tg_find(id) < 0 && tg_fn_draws(id, 0)
+}
+
+// Does function `id` (a cloned one) call, transitively, a function with no
+// clone that can draw?
+fn tg_unreg_reach(id: i64, depth: i64) -> bool with Mut, Panic, Div {
+    let k = tg_fn_slot(id)
+    if k < 0 { return false }
+    if TG_FN_M2[k as usize] >= 0 { return TG_FN_M2[k as usize] == 1 }
+    if depth > 16 { return true }
+    TG_FN_M2[k as usize] = 0
+    var i: i64 = 0
+    while i < TG_FN_NC[k as usize] {
+        let c = TG_FN_CAL[(k * 32 + i) as usize]
+        var hit = false
+        if tg_find(c) < 0 {
+            hit = tg_fn_draws(c, 0)
+        } else {
+            hit = tg_unreg_reach(c, depth + 1)
+        }
+        if hit {
+            TG_FN_M2[k as usize] = 1
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
 // The last statement of a struct-returning body: a struct literal, a local, or a
 // `return` (whose operand tg_stmts_call pred 3 has checked).
 fn tg_body_tail_is_struct_shape(opt: &Option<Box<StmtList>>) -> bool with Mut, Panic, Div {
@@ -11554,6 +11654,7 @@ fn lower_type_expr_is_integer(te: &TypeExpr) -> bool with Mut, Panic, Div {
 // Parameter kinds (TG_PKIND): 0 integer/bool, 1 f64, 2 Knowledge, 3 struct.
 fn tg_note(name: Name, fd: &FnDef, self_type: Name) with Mut, Panic, Div, Alloc {
     if (*fd).is_extern || (*fd).is_kernel { return }
+    tg_fn_note(name, fd)
     if TG_COUNT >= TG_MAX { return }
     var ret_kind: i64 = 0
     var ret_type: i64 = 0
@@ -18131,6 +18232,7 @@ impl Lowerer {
         // A `correlate` on a parameter-derived value inside the callee cannot be
         // read through its clone: refused, never answered.
         if tg_corr_class(tgi, 0) == 2 { tg_mark_drop(TG_NAME[tgi as usize]) }
+        if tg_unreg_reach(ir_intern_name(TG_NAME[tgi as usize]), 0) { tg_mark_drop(TG_NAME[tgi as usize]) }
         let ord2 = base.so_enabled && TG_SITE_ORD[si as usize] == 2
         var lo = base
         let has_self = TG_HASSELF[tgi as usize] == 1
@@ -28439,10 +28541,10 @@ impl Lowerer {
                     if cv.1 >= 0 {
                         return cv
                     }
-                    if FO_INLINE_TRUNCATED == 0 && cv.0.expr_result_is_float_ref(e) && cv.0.tg_call_args_uncertain(e) { tg_mark_drop(callee_name) }
+                    if FO_INLINE_TRUNCATED == 0 && cv.0.expr_result_is_float_ref(e) && (cv.0.tg_call_args_uncertain(e) || tg_unreg_draws_call(callee_name)) { tg_mark_drop(callee_name) }
                     return (cv.0.fo_clear_expr_sens().so_clear_expr_hess(), -1)
                 }
-                if FO_INLINE_TRUNCATED == 0 && inl.0.expr_result_is_float_ref(e) && inl.0.tg_call_args_uncertain(e) { tg_mark_drop(callee_name) }
+                if FO_INLINE_TRUNCATED == 0 && inl.0.expr_result_is_float_ref(e) && (inl.0.tg_call_args_uncertain(e) || tg_unreg_draws_call(callee_name)) { tg_mark_drop(callee_name) }
                 return (inl.0.fo_clear_expr_sens().so_clear_expr_hess(), -1)
             }
             _ => {}
@@ -28541,10 +28643,10 @@ impl Lowerer {
                         if cv.1 >= 0 {
                             return cv
                         }
-                        if FO_INLINE_TRUNCATED == 0 && cv.0.expr_result_is_float_ref(e) && cv.0.tg_call_args_uncertain(e) { tg_mark_drop(callee_name) }
+                        if FO_INLINE_TRUNCATED == 0 && cv.0.expr_result_is_float_ref(e) && (cv.0.tg_call_args_uncertain(e) || tg_unreg_draws_call(callee_name)) { tg_mark_drop(callee_name) }
                         return (cv.0.fo_clear_expr_sens().so_clear_expr_hess(), -1)
                     }
-                    if FO_INLINE_TRUNCATED == 0 && inl.0.expr_result_is_float_ref(e) && inl.0.tg_call_args_uncertain(e) { tg_mark_drop(callee_name) }
+                    if FO_INLINE_TRUNCATED == 0 && inl.0.expr_result_is_float_ref(e) && (inl.0.tg_call_args_uncertain(e) || tg_unreg_draws_call(callee_name)) { tg_mark_drop(callee_name) }
                     return (inl.0.fo_clear_expr_sens().so_clear_expr_hess(), -1)
                 }
                 _ => {}

@@ -158,6 +158,13 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
   with the same diagnostic (pin
   `tests/compile-fail/gum_refuse_correlate_param_in_callee.sio`); before it was
   dropped without a diagnostic.
+  A call with no tangent clone to a function that can draw a measurement,
+  directly or through what it calls, is refused when its result reaches a
+  query, whatever its arguments (`tg_unreg_draws_call`, and `tg_unreg_reach`
+  for a cloned callee that calls such a function; pin
+  `tests/compile-fail/gum_refuse_unregistered_drawing_callee.sio`). Before,
+  a callee that asks for an uncertainty and measures inside itself, called with
+  certain arguments, read variance 0.
   A query is refused at compile time, never answered 0 or short, when it reads
   a measured quantity beyond the 32-slot channel table (pin
   `tests/compile-fail/gum_refuse_uncovered_hessian.sio`; before, the 33rd
