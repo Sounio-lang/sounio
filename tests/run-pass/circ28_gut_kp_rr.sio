@@ -1,0 +1,102 @@
+//@ run-pass
+//@ timeout: 120
+//@ expect-stdout-contains: CIRC28_GUT_KP_RR_PASS
+// tests/run-pass/circ28_gut_kp_rr.sio — the gut-unscaled parameter variant of the
+// drug record (circ28_drug_params_theta_gutrr, circ28_kp_scale_for_vss_gutrr).
+//
+// Expectations, written before the first run:
+//   G1  kp[8] of the variant equals the Rodgers-Rowland gut Kp exactly.
+//   G2  every other organ equals s * kp_rr[i] exactly (same s as the record).
+//   G3  with s from circ28_kp_scale_for_vss_gutrr, circ28_vss_plasma equals the
+//       target V_ss to 1e-12 relative (closed form).
+//   G4  midazolam: the gut wall carries a small share of V_ss, so the refitted
+//       scalar differs from the all-organ scalar by under 5 %.
+//   G5  everything except kp[8] (flows, ps, clearances, bp, fu) is identical to
+//       circ28_drug_params_theta.
+// Records are built and read before any f64 is printed (committed Madaros
+// variance-paste shadowing defect, fixed in source by #3592).
+
+use darwin_pbpk::circ28::*
+use darwin_pbpk::circ28_kp::*
+use darwin_pbpk::circ28_drug::*
+use darwin_pbpk::circ28_drug_midazolam::*
+use math::pure::{abs}
+
+fn g_rel(a: f64, b: f64) -> f64 {
+    let den = abs(b)
+    if den > 0.0 { return abs(a - b) / den }
+    return abs(a - b)
+}
+
+fn g_row(name: string, ok: bool) -> i32 with IO {
+    print(name)
+    if ok {
+        println("  PASS")
+        return 0
+    }
+    println("  FAIL")
+    return 1
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic, Epistemic {
+    var rec = circ28_drug_new()
+    mdz_drug_into(&!rec)
+    let th = circ28_drug_theta(&rec)
+    var t1 = th
+    var t2 = th
+    let pa = circ28_drug_params_theta(t1)
+    let pg = circ28_drug_params_theta_gutrr(t2)
+    let kd = circ28_kp_drug(th[CD_LOGP], th[CD_PKA1], th[CD_PKA2], (th[CD_ION] + 0.5) as i32, th[CD_FU], th[CD_BP])
+    let kp_rr = circ28_kp_rr(kd)
+    let s = th[CD_KPSC]
+
+    var fails: i32 = 0
+    fails = fails + g_row("G1 gut Kp left at Rodgers-Rowland", pg.kp[8] == kp_rr[8])
+
+    var g2 = true
+    var i: i32 = 1
+    while i < 14 {
+        if i != 8 {
+            if !(pg.kp[i] == s * kp_rr[i]) { g2 = false }
+        }
+        i = i + 1
+    }
+    fails = fails + g_row("G2 other organs scaled by the record scalar", g2)
+
+    let vss_target = circ28_vss_plasma(pa)
+    let s2 = circ28_kp_scale_for_vss_gutrr(pg, kp_rr, vss_target)
+    var p3 = pg
+    var j: i32 = 1
+    while j < 14 {
+        if j != 8 { p3.kp[j] = s2 * kp_rr[j] }
+        j = j + 1
+    }
+    let vss3 = circ28_vss_plasma(p3)
+    let r3 = g_rel(vss3, vss_target)
+    print("   V_ss target "); print(vss_target); print("  variant "); print(vss3); print("  rel "); println(r3)
+    fails = fails + g_row("G3 refitted scalar reproduces V_ss to 1e-12", r3 < 1.0e-12)
+
+    let r4 = g_rel(s2, s)
+    print("   scalar all organs "); print(s); print("  gut unscaled "); print(s2); print("  rel "); println(r4)
+    print("   gut Kp scaled "); print(s * kp_rr[8]); print("  unscaled "); println(kp_rr[8])
+    fails = fails + g_row("G4 refitted scalar within 5 % of the all-organ scalar", r4 < 0.05)
+
+    var g5 = pa.bp == pg.bp && pa.fu == pg.fu && pa.clint == pg.clint && pa.clint_gut == pg.clint_gut
+    g5 = g5 && pa.cl_renal == pg.cl_renal && pa.cl_plasma == pg.cl_plasma && pa.clform == pg.clform
+    var k: i32 = 1
+    while k < 14 {
+        if !(pa.q[k] == pg.q[k] && pa.ps[k] == pg.ps[k] && pa.v[k] == pg.v[k] && pa.vf[k] == pg.vf[k]) { g5 = false }
+        if k != 8 {
+            if !(pa.kp[k] == pg.kp[k]) { g5 = false }
+        }
+        k = k + 1
+    }
+    fails = fails + g_row("G5 nothing but the gut Kp changes", g5)
+
+    if fails == 0 {
+        println("CIRC28_GUT_KP_RR_PASS")
+        return 0
+    }
+    println("CIRC28_GUT_KP_RR_FAIL")
+    return 1
+}
