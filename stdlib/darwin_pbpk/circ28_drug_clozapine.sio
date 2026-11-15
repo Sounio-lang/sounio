@@ -56,7 +56,10 @@
 //                             of the radioactivity in urine and 30 % in faeces, parent a MINOR component of the
 //                             excreta: absorption taken as complete; u = (1 - 0.8)/sqrt12. UK SmPC: "90-95 %" [L],
 //                             inside 1.3 u. The oral AUC does not depend on fa (clint is fitted to CL/F); F does
-//  ka     fitted          3   to the steady-state Tmax
+//  k (CD_KA) fitted       3   ROUND 3: per-stage rate of an Erlang transit input, ntr = 4 stages (n = 3 transit compartments
+//                             DECLARED, an assumption: no n is published for clozapine; Ka = Ktr, rule 11; mean transit time
+//                             4/k = 1.61 h), tlag 0 (no sourced lag); fitted to the pooled steady-state Tmax (pool 4).
+//                             k 2.4898 /h (all-organ scalar) or 2.3066 /h (gut wall at Rodgers-Rowland Kp). Round 2: first-order ka 0.295 /h
 //  pssc   1       -       0   placeholder (flow-limited default 20 x Q). NOT fitted (lesson 3; x0.3 moves the terminal
 //                             half-life by 1.7 %, x0.1 by 6.7 %, test D2)
 //
@@ -621,18 +624,42 @@ pub fn clz_u_t12_ns(bb: f64, y: f64) -> f64 with Mut, Div {
 // Measured offline in this order (secant, 7 steps each; each depends only on the ones before it):
 // kpsc 1.726813, ka 0.295110, CL_M 10.680236, phi 0.289512, s_M 0.450279 (round 2, 2026-11-15).
 // kpsc: terminal half-life (48-120 h) of clozapine after an oral dose = clz_obs_t12_ns(bb, CL/F).
-pub fn clz_kpsc_fit() -> f64 { return 1.726813 }
-// ka (1/h): steady-state Tmax of 100 mg b.i.d. on the grid of clz_run_th = clz_obs_tmax_ss().
-pub fn clz_ka_fit() -> f64 { return 0.295110 }
+// ROUND 3 (transit input): every constant below exists for BOTH gut variants, gv 0 = all-organ scalar (gut wall
+// scaled too, the round-2 record), gv 1 = gut wall left at its Rodgers-Rowland Kp (circ28_drug_params_theta_gutrr);
+// clz_ntr() = 4 Erlang stages (n = 3 transit compartments declared, Ka = Ktr, rule 11) and the record slot CD_KA is
+// the per-stage rate k. Values: offline secant fits of round 3 (kernel runs; the test re-checks every one).
+// DECISION (test header): the module default is gv 0; gv 1 is not adopted (it changes no row beyond 1 %).
+pub fn clz_ntr() -> i32 { return 4 }
+pub fn clz_kpsc_fit(gv: i32) -> f64 {
+    if gv == 1 { return 1.738335 }
+    return 1.726771
+}
+// k (1/h per stage): steady-state Tmax of 100 mg b.i.d. on the grid of clz_run_th = clz_obs_tmax_ss().
+pub fn clz_ka_fit(gv: i32) -> f64 {
+    if gv == 1 { return 2.306606 }
+    return 2.489831
+}
 // CL_M (L/h, plasma, total): terminal half-life of norclozapine GIVEN ALONE = clz_obs_m_t12().
 pub fn clz_m_cl_fit() -> f64 { return 10.680236 }
 // phi = clform/(clint + clform): steady-state trough ratio norclozapine/clozapine = clz_obs_ncratio().
-pub fn clz_phi_fit() -> f64 { return 0.289512 }
+pub fn clz_phi_fit(gv: i32) -> f64 {
+    if gv == 1 { return 0.271267 }
+    return 0.271543
+}
 // s_M: multiplier of the hepatic intrinsic clearance of norclozapine under fluvoxamine, such that the
 // steady-state norclozapine trough ratio (with/without fluvoxamine, clozapine scaled by its own factor)
 // = clz_obs_m_fvx(). fM = (1 - s_M)/(1 - r) is the fluvoxamine-sensitive share of norclozapine's clint.
-pub fn clz_m_sfvx_fit() -> f64 { return 0.450279 }
-pub fn clz_fm() -> f64 { return (1.0 - clz_m_sfvx_fit()) / (1.0 - clz_fvx_r()) }
+pub fn clz_m_sfvx_fit(gv: i32) -> f64 {
+    if gv == 1 { return 0.465248 }
+    return 0.465000
+}
+pub fn clz_fm(gv: i32) -> f64 { return (1.0 - clz_m_sfvx_fit(gv)) / (1.0 - clz_fvx_r()) }
+
+// Parameters of a record array under the gut variant gv (0 all-organ scalar, 1 gut wall at Rodgers-Rowland).
+pub fn clz_params(th: [f64; 18], gv: i32) -> Circ28Params with Mut, Div, Panic {
+    if gv == 1 { return circ28_drug_params_theta_gutrr(th) }
+    return circ28_drug_params_theta(th)
+}
 
 fn clz_abs(x: f64) -> f64 {
     if x < 0.0 { return 0.0 - x }
@@ -792,15 +819,16 @@ pub fn clz_fit_record_m(d: &!Circ28Drug) with Mut, Div, Panic, Epistemic {
     circ28_drug_set(d, CD_CLINT, th[CD_CLINT], 0.0, CD_STATUS_FITTED, "CL_M fitted to the pooled model-based norclozapine elimination half-life (Li2012, Guitton1998), minus renal")
 }
 
-pub fn clz_fit_record_p(d: &!Circ28Drug) with Mut, Div, Panic, Epistemic {
+pub fn clz_fit_record_p(d: &!Circ28Drug, gv: i32) with Mut, Div, Panic, Epistemic {
     let th0 = circ28_drug_theta(d)
     let clren = clz_p_ren_mult() * clz_clcr() * clz_p_fu()
-    let th = clz_fit_p(th0, clz_obs_clf(), clren, clz_phi_fit(), clz_kpsc_fit())
+    let th = clz_fit_p(th0, clz_obs_clf(), clren, clz_phi_fit(gv), clz_kpsc_fit(gv))
     circ28_drug_set(d, CD_KPSC, th[CD_KPSC], 0.0, CD_STATUS_FITTED, "fitted to the pooled terminal half-life (k 6, N 79), corrected to the non-smoker")
     circ28_drug_set(d, CD_CLREN, th[CD_CLREN], 0.0, CD_STATUS_DERIVED, "0.11 x CLcr x fu (Schaber1998: unbound renal clearance 11 % of CLcr)")
     circ28_drug_set(d, CD_CLINT, th[CD_CLINT], 0.0, CD_STATUS_FITTED, "(1 - phi) x total hepatic; total to the pooled CL/F of the non-smoking man (k 5, N 720)")
     circ28_drug_set(d, CD_CLFORM, th[CD_CLFORM], 0.0, CD_STATUS_FITTED, "phi x total hepatic; phi to the pooled steady-state norclozapine:clozapine trough ratio")
-    circ28_drug_set(d, CD_KA, clz_ka_fit(), 0.0, CD_STATUS_FITTED, "fitted to the pooled steady-state Tmax (100 mg b.i.d.)")
+    circ28_drug_set(d, CD_TLAG, 0.0, 0.0, CD_STATUS_UNUSED, "no sourced lag for clozapine: tlag 0 (the transit chain carries the delay)")
+    circ28_drug_set(d, CD_KA, clz_ka_fit(gv), 0.0, CD_STATUS_FITTED, "per-stage transit rate k (4 stages, n = 3 declared) fitted to the pooled steady-state Tmax (100 mg b.i.d.)")
 }
 
 // ---- coupled run with steady-state superposition -------------------------------------------------------------
@@ -952,11 +980,11 @@ pub fn clz_peak(ts: &[f64; 400], cs: &[f64; 400], n: i32, out: &![f64; 3]) with 
 
 pub fn clz_run_th(
     thp_in: [f64; 18], thm_in: [f64; 18], route: i32, dose: f64, t_inf: f64, tau: f64,
-    wp_lo: f64, wp_hi: f64, wm_lo: f64, wm_hi: f64, res: &![f64; 32]
+    wp_lo: f64, wp_hi: f64, wm_lo: f64, wm_hi: f64, gv: i32, res: &![f64; 32]
 ) with Mut, Div, Panic {
     var thp = thp_in
     var thm = thm_in
-    let pp = circ28_drug_params_theta(thp)
+    let pp = clz_params(thp, gv)
     let pm = circ28_drug_params_theta(thm)
     let cp = circ28_coupling(thm[CD_MW] / thp[CD_MW], 0.0)
     var ts: [f64; 400] = [0.0; 400]
@@ -995,7 +1023,7 @@ pub fn clz_run_th(
                     mass = circ28_iv_mass(dose, t_inf, t, t + dt)
                     iv = mass / dt
                 } else {
-                    mass = circ28_oral_mass(thp[CD_KA], thp[CD_FA], dose, thp[CD_TLAG], t, t + dt)
+                    mass = circ28_oral_mass_n(thp[CD_KA], clz_ntr(), thp[CD_FA], dose, thp[CD_TLAG], t, t + dt)
                     oral = mass / dt
                 }
                 input = input + mass
@@ -1082,7 +1110,7 @@ pub fn clz_m_t12(thm: [f64; 18]) -> f64 with Mut, Div, Panic {
 // so the norclozapine trough is T x (clozapine trough) whatever the metabolite parameters are; the sum is
 // (1 + T) x (clozapine trough) and T adds its own term. A guard row of the test checks this with a perturbed
 // metabolite.
-pub fn clz_eval(z: [f64; 9], dp: &Circ28Drug, dm: &Circ28Drug, ka0: f64, slope_ka: f64, slope_kp: f64, out: &![f64; 2]) with Mut, Div, Panic, Epistemic {
+pub fn clz_eval(z: [f64; 9], dp: &Circ28Drug, dm: &Circ28Drug, ka0: f64, slope_ka: f64, slope_kp: f64, gv: i32, out: &![f64; 2]) with Mut, Div, Panic, Epistemic {
     var tp0 = circ28_drug_theta(dp)
     let kp0 = tp0[CD_KPSC]
     tp0[CD_LOGP] = z[0]
@@ -1091,16 +1119,16 @@ pub fn clz_eval(z: [f64; 9], dp: &Circ28Drug, dm: &Circ28Drug, ka0: f64, slope_k
     tp0[CD_BP] = z[3]
     tp0[CD_FA] = z[8]
     let clren = clz_p_ren_mult() * z[7] * z[2]
-    var tp = clz_fit_p(tp0, z[4], clren, clz_phi_fit(), kp0)
+    var tp = clz_fit_p(tp0, z[4], clren, clz_phi_fit(gv), kp0)
     let tm = circ28_drug_theta(dm)
     tp[CD_KA] = ka0
     var r1: [f64; 32] = [0.0; 32]
-    clz_run_th(tp, tm, 1, 100.0, 0.0, 12.0, 48.0, 120.0, 96.0, 168.0, &!r1)
+    clz_run_th(tp, tm, 1, 100.0, 0.0, 12.0, 48.0, 120.0, 96.0, 168.0, gv, &!r1)
     let kp1 = kp0 + (z[5] - r1[3]) / slope_kp
-    var tq = clz_fit_p(tp0, z[4], clren, clz_phi_fit(), kp1)
+    var tq = clz_fit_p(tp0, z[4], clren, clz_phi_fit(gv), kp1)
     tq[CD_KA] = ka0 + (z[6] - r1[16]) / slope_ka
     var r2: [f64; 32] = [0.0; 32]
-    clz_run_th(tq, tm, 1, 100.0, 0.0, 12.0, 48.0, 120.0, 96.0, 168.0, &!r2)
+    clz_run_th(tq, tm, 1, 100.0, 0.0, 12.0, 48.0, 120.0, 96.0, 168.0, gv, &!r2)
     (*out)[0] = r2[17]
     (*out)[1] = r2[3]
 }
@@ -1126,7 +1154,7 @@ pub struct ClzBudget {
 }
 
 // t12: the half-life target of the non-smoker (h) and its u (clz_obs_t12_ns, clz_u_t12_ns).
-pub fn clz_budget(dp: &Circ28Drug, dm: &Circ28Drug, slope_ka: f64, slope_kp: f64, t12: f64, u_t12: f64) -> ClzBudget with Mut, Div, Panic, Epistemic {
+pub fn clz_budget(dp: &Circ28Drug, dm: &Circ28Drug, slope_ka: f64, slope_kp: f64, t12: f64, u_t12: f64, gv: i32) -> ClzBudget with Mut, Div, Panic, Epistemic {
     let thp = circ28_drug_theta(dp)
     let ka0 = thp[CD_KA]
     var z0: [f64; 9] = [0.0; 9]
@@ -1150,7 +1178,7 @@ pub fn clz_budget(dp: &Circ28Drug, dm: &Circ28Drug, slope_ka: f64, slope_kp: f64
     u[7] = clz_u_clcr()
     u[8] = clz_p_u_fa()
     var o0: [f64; 2] = [0.0; 2]
-    clz_eval(z0, dp, dm, ka0, slope_ka, slope_kp, &!o0)
+    clz_eval(z0, dp, dm, ka0, slope_ka, slope_kp, gv, &!o0)
     var ca: [f64; 9] = [0.0; 9]
     var va = 0.0
     var nrun: i32 = 2
@@ -1161,7 +1189,7 @@ pub fn clz_budget(dp: &Circ28Drug, dm: &Circ28Drug, slope_ka: f64, slope_kp: f64
         var zp = z0
         zp[i] = z0[i] + hs
         var op: [f64; 2] = [0.0; 2]
-        clz_eval(zp, dp, dm, ka0, slope_ka, slope_kp, &!op)
+        clz_eval(zp, dp, dm, ka0, slope_ka, slope_kp, gv, &!op)
         nrun = nrun + 2
         let da = (op[0] - o0[0]) / hs
         ca[i] = da * da * u[i] * u[i]

@@ -33,7 +33,11 @@
 //  clren   0.00292  0.0015   1       0.04 mL/h/kg in controls x 73 kg (Mallikaarjun 2008, PMID 18611062, A);
 //                                    u = 50 % ASSUMED (no spread in the abstract); < 1 % unchanged in urine (L)
 //  kpsc    fitted   3                to V_ss
-//  ka      0.2848   0.0282   3       ROUND 2: FITTED to the pooled Tmax of the single-dose TABLET studies, 4.267 h (k = 3:
+//  k (CD_KA) 1.2648  0.1241    3       ROUND 3: per-stage rate of an Erlang transit input, ntr = 4 stages (n = 3 transit compartments DECLARED, no
+//                                    published n; Ka = Ktr, rule 11; MTT 4/k = 3.16 h), tlag 0 (Koue 2007, PMID 17978491: first-order
+//                                    input with ALAG 0.805 h and KA 2.65 /h, abstract only, full text not retrievable: NOT adopted); k
+//                                    refitted to the same pooled Tmax 4.267 h; u = u(Tmax)/|dTmax/dk| = 0.481/3.873. With the gut wall at
+//                                    Rodgers-Rowland Kp (gv 1, not adopted): k 1.6098, u 0.2117. ROUND 2 (history): ka 0.2848 FITTED to the pooled Tmax of the single-dose TABLET studies, 4.267 h (k = 3:
 //                                    label 4.0, Kubo 2007 3.6, Koller 2020 day 1 5.2; u 0.481 h), offline secant on the kernel;
 //                                    u = u(Tmax)/|dTmax/dka| = 0.481/17.07. Round 1 used the popPK value 1.67 /h (FDA review), kept as a diagnostic.
 //  fa      fitted   3                to the absolute oral bioavailability
@@ -113,9 +117,18 @@ pub fn ari_p_bp() -> f64 { return 0.61 }
 pub fn ari_p_u_bp() -> f64 { return 0.0144 }
 pub fn ari_p_clren() -> f64 { return 0.00292 }
 pub fn ari_p_u_clren() -> f64 { return 0.0015 }
-pub fn ari_p_ka() -> f64 { return 0.284844 }
+pub fn ari_ntr() -> i32 { return 4 }
+// Per-stage transit rate k (1/h) of the oral input for the gut variant gv (0 all-organ scalar, 1 gut wall at its
+// Rodgers-Rowland Kp); offline secant on the kernel (round 3); u(k) = u(Tmax)/|dTmax/dk|, slope -3.873 (gv 0) and -2.271 (gv 1) h per (1/h).
+pub fn ari_p_ka(gv: i32) -> f64 {
+    if gv == 1 { return 1.609815 }
+    return 1.264831
+}
 pub fn ari_p_ka_poppk() -> f64 { return 1.67 }
-pub fn ari_p_u_ka() -> f64 { return 0.02817 }
+pub fn ari_p_u_ka(gv: i32) -> f64 {
+    if gv == 1 { return 0.211702 }
+    return 0.124132
+}
 pub fn ari_m_mw() -> f64 { return 446.38 }
 pub fn ari_m_logp() -> f64 { return 5.13 }
 pub fn ari_m_u_logp() -> f64 { return 0.52 }
@@ -134,7 +147,16 @@ pub fn ari_r_base() -> f64 { return 1.0 }
 // kappa = CL_M t_half,M / V_ss,M on the kernel (offline secant on the terminal slope of M after an oral
 // dose of the parent, window 1200-1680 h, six iterations to 100.650 h; ln 2 = 0.6931 would be the
 // one-compartment value). With it CL_M = 3.437 L/h, V_ss,M = 414.9 L and fm = 0.4196.
-pub fn ari_m_kappa() -> f64 { return 0.833746 }
+pub fn ari_m_kappa(gv: i32) -> f64 {
+    if gv == 1 { return 0.812203 }
+    return 0.833889
+}
+
+// Parameters of a record array under the gut variant gv.
+pub fn ari_params(th: [f64; 18], gv: i32) -> Circ28Params with Mut, Div, Panic {
+    if gv == 1 { return circ28_drug_params_theta_gutrr(th) }
+    return circ28_drug_params_theta(th)
+}
 
 fn ari_abs(x: f64) -> f64 {
     if x < 0.0 { return 0.0 - x }
@@ -296,9 +318,9 @@ pub fn ari_eh(th: [f64; 18]) -> f64 with Mut, Div, Panic {
     return circ28_hepatic_extraction(p)
 }
 
-pub fn ari_vss(th: [f64; 18]) -> f64 with Mut, Div, Panic {
+pub fn ari_vss(th: [f64; 18], gv: i32) -> f64 with Mut, Div, Panic {
     var tl = th
-    let p = circ28_drug_params_theta(tl)
+    let p = ari_params(tl, gv)
     return circ28_vss_plasma(p)
 }
 
@@ -337,13 +359,14 @@ pub fn ari_tot_for_clf(th: [f64; 18], clf: f64, clren: f64) -> f64 with Mut, Div
 // ---- the fits ------------------------------------------------------------------------------------
 // Parent, step 1: Kp scalar to V_ss, total hepatic intrinsic clearance to CL (all of it booked in clint for
 // now), fa to F. Sets CD_KPSC, CD_CLINT, CD_CLFORM = 0, CD_FA; CD_CLINT = -1 if impossible.
-pub fn ari_fit_p1(th: [f64; 18], vss: f64, cl: f64, f_obs: f64) -> [f64; 18] with Mut, Div, Panic {
+pub fn ari_fit_p1(th: [f64; 18], vss: f64, cl: f64, f_obs: f64, gv: i32) -> [f64; 18] with Mut, Div, Panic {
     var t = th
     t[CD_KPSC] = 1.0
     t[CD_CLINT] = 0.0
     t[CD_CLFORM] = 0.0
     let p0 = circ28_drug_params_theta(t)
-    let sc = circ28_kp_scale_for_vss(p0, p0.kp, vss)
+    var sc = circ28_kp_scale_for_vss(p0, p0.kp, vss)
+    if gv == 1 { sc = circ28_kp_scale_for_vss_gutrr(p0, p0.kp, vss) }
     if !(sc > 0.0) {
         t[CD_CLINT] = 0.0 - 1.0
         return t
@@ -369,13 +392,13 @@ pub fn ari_f2d6(th: [f64; 18], pmratio: f64) -> f64 with Mut, Div, Panic {
 
 // Metabolite: Kp scalar given (the parent's, see the header), hepatic intrinsic clearance to the half-life
 // through CL_M = kappa V_ss,M / t_half. CD_CLINT = -1 if impossible.
-pub fn ari_fit_m(th: [f64; 18], kpsc: f64, thalf: f64, kappa: f64) -> [f64; 18] with Mut, Div, Panic {
+pub fn ari_fit_m(th: [f64; 18], kpsc: f64, thalf: f64, kappa: f64, gv: i32) -> [f64; 18] with Mut, Div, Panic {
     var t = th
     t[CD_KPSC] = kpsc
     t[CD_CLINT] = 0.0
     t[CD_CLFORM] = 0.0
     t[CD_CLREN] = 0.0
-    let vss = ari_vss(t)
+    let vss = ari_vss(t, gv)
     let cl = kappa * vss / thalf
     t[CD_CLINT] = ari_tot_for_cl(t, cl, 0.0)
     return t
@@ -441,7 +464,7 @@ pub fn ari_ratio_cf(thp: [f64; 18], thm: [f64; 18]) -> f64 with Mut, Div, Panic 
 }
 
 // ---- records -------------------------------------------------------------------------------------
-pub fn ari_measured_p(d: &!Circ28Drug) with Mut, Div, Panic, Epistemic {
+pub fn ari_measured_p(d: &!Circ28Drug, gv: i32) with Mut, Div, Panic, Epistemic {
     circ28_drug_set(d, CD_MW, ari_p_mw(), 0.0, CD_STATUS_MEASURED, "Abilify label")
     circ28_drug_set(d, CD_LOGP, ari_p_logp(), ari_p_u_logp(), CD_STATUS_DERIVED, "mean of predicted 4.9, 5.21, 5.11 (Kneller2021); u to Mou2024 3.60; no experimental value")
     circ28_drug_set(d, CD_PKA1, ari_p_pka1(), ari_p_u_pka1(), CD_STATUS_DERIVED, "DrugBank predicted 7.46 (Kneller2021, Mou2024); 7.6 PubChem; u = range/sqrt12")
@@ -449,7 +472,7 @@ pub fn ari_measured_p(d: &!Circ28Drug) with Mut, Div, Panic, Epistemic {
     circ28_drug_set(d, CD_FU, ari_p_fu(), ari_p_u_fu(), CD_STATUS_DERIVED, "label > 99 % bound (inequality); 0.01 = PBPK model input; u = [0, 0.01]/sqrt12")
     circ28_drug_set(d, CD_BP, ari_p_bp(), ari_p_u_bp(), CD_STATUS_DERIVED, "0.61 Zheng2021 via PMC12081286 supp (model input); 0.56 from Fisher2013 1/1.8")
     circ28_drug_set(d, CD_CLREN, ari_p_clren(), ari_p_u_clren(), CD_STATUS_MEASURED, "0.04 mL/h/kg x 73 kg, Mallikaarjun2008 PMID 18611062 (abstract); u 50 % assumed")
-    circ28_drug_set(d, CD_KA, ari_p_ka(), ari_p_u_ka(), CD_STATUS_FITTED, "fitted to the pooled Tmax 4.267 h of the single-dose tablet studies (k = 3); offline secant")
+    circ28_drug_set(d, CD_KA, ari_p_ka(gv), ari_p_u_ka(gv), CD_STATUS_FITTED, "per-stage transit rate k (4 stages, n = 3 declared) fitted to the pooled single-dose tablet Tmax 4.267 h (k = 3); offline secant")
 }
 
 pub fn ari_measured_m(d: &!Circ28Drug) with Mut, Div, Panic, Epistemic {
@@ -463,17 +486,18 @@ pub fn ari_measured_m(d: &!Circ28Drug) with Mut, Div, Panic, Epistemic {
 
 // Each fitting step is its own function and is called from main in the test (lean_single mis-forwards
 // chained references; Madaros dislikes frames holding records plus several [f64; 18] arrays).
-pub fn ari_fit_record_p1(d: &!Circ28Drug) with Mut, Div, Panic, Epistemic {
+pub fn ari_fit_record_p1(d: &!Circ28Drug, gv: i32) with Mut, Div, Panic, Epistemic {
     let th0 = circ28_drug_theta(d)
-    let th = ari_fit_p1(th0, ari_obs(2, 0), ari_obs(1, 0), ari_obs(0, 0))
+    let th = ari_fit_p1(th0, ari_obs(2, 0), ari_obs(1, 0), ari_obs(0, 0), gv)
+    circ28_drug_set(d, CD_TLAG, 0.0, 0.0, CD_STATUS_UNUSED, "no sourced lag (Koue2007 ALAG 0.805 h is abstract only and belongs to a first-order model): tlag 0")
     circ28_drug_set(d, CD_KPSC, th[CD_KPSC], 0.0, CD_STATUS_FITTED, "fitted to Vss 4.9 L/kg x 73 kg (label, IV; one study)")
     circ28_drug_set(d, CD_CLINT, th[CD_CLINT], 0.0, CD_STATUS_FITTED, "total hepatic intrinsic clearance fitted to the pooled CL (k = 4); split in step 2")
     circ28_drug_set(d, CD_FA, th[CD_FA], 0.0, CD_STATUS_FITTED, "fa = F/(1 - Eh), pooled F 0.86 (label 0.87, Boulton2008 0.85); Fg = 1 assumed")
 }
 
-pub fn ari_fit_record_m(dm: &!Circ28Drug, kpsc_parent: f64) with Mut, Div, Panic, Epistemic {
+pub fn ari_fit_record_m(dm: &!Circ28Drug, kpsc_parent: f64, gv: i32) with Mut, Div, Panic, Epistemic {
     let th0 = circ28_drug_theta(dm)
-    let th = ari_fit_m(th0, kpsc_parent, ari_obs(5, 0), ari_m_kappa())
+    let th = ari_fit_m(th0, kpsc_parent, ari_obs(5, 0), ari_m_kappa(gv), gv)
     circ28_drug_set(dm, CD_KPSC, th[CD_KPSC], 0.0, CD_STATUS_DERIVED, "ASSUMED equal to the parent's fitted Kp scalar (no direct dosing of the metabolite)")
     circ28_drug_set(dm, CD_CLINT, th[CD_CLINT], 0.0, CD_STATUS_FITTED, "fitted to the pooled terminal half-life of the metabolite (label 94 h, Koller2020 107.3 h)")
 }
@@ -647,12 +671,12 @@ pub fn ari_interval(ca: &[f64; 1100], cb: &[f64; 1100], mode: i32, nd: i32, tail
 // tail: 8.0 (default grid) or 2.0 (convergence check); 24/tail must be an integer.
 pub fn ari_run_th(
     thp_in: [f64; 18], thm_in: [f64; 18], route: i32, dose: f64, t_inf: f64, tail: f64,
-    wp_lo: f64, wp_hi: f64, wm_lo: f64, wm_hi: f64, res: &![f64; 40]
+    wp_lo: f64, wp_hi: f64, wm_lo: f64, wm_hi: f64, gv: i32, res: &![f64; 40]
 ) with Mut, Div, Panic {
     var thp = thp_in
     var thm = thm_in
-    let pp = circ28_drug_params_theta(thp)
-    let pm = circ28_drug_params_theta(thm)
+    let pp = ari_params(thp, gv)
+    let pm = ari_params(thm, gv)
     let cp = circ28_coupling(thm[CD_MW] / thp[CD_MW], 0.0)
     var ts: [f64; 1100] = [0.0; 1100]
     var cpar: [f64; 1100] = [0.0; 1100]
@@ -701,7 +725,7 @@ pub fn ari_run_th(
                     mass = circ28_iv_mass(dose, t_inf, t, t + dt)
                     iv = mass / dt
                 } else {
-                    mass = circ28_oral_mass(thp[CD_KA], thp[CD_FA], dose, thp[CD_TLAG], t, t + dt)
+                    mass = circ28_oral_mass_n(thp[CD_KA], ari_ntr(), thp[CD_FA], dose, thp[CD_TLAG], t, t + dt)
                     oral = mass / dt
                 }
                 input = input + mass
@@ -797,14 +821,14 @@ pub fn ari_run_th(
 // metabolite and the split in closed form and runs one coupled oral dose with superposition.
 // out: 0 active-moiety trough at steady state, 1 parent trough, 2 metabolite trough, 3 parent AUCinf
 // (all per `dose` mg once daily, mg/L and mg h/L).
-pub fn ari_input_value(i: i32) -> f64 with Mut, Div, Panic {
+pub fn ari_input_value(i: i32, gv: i32) -> f64 with Mut, Div, Panic {
     if i == 0 { return ari_obs(1, 0) }
     if i == 1 { return ari_obs(2, 0) }
     if i == 2 { return ari_obs(0, 0) }
     if i == 3 { return ari_obs(3, 0) }
     if i == 4 { return ari_obs(4, 0) }
     if i == 5 { return ari_obs(5, 0) }
-    if i == 6 { return ari_p_ka() }
+    if i == 6 { return ari_p_ka(gv) }
     if i == 7 { return ari_p_logp() }
     if i == 8 { return ari_p_fu() }
     if i == 9 { return ari_p_bp() }
@@ -813,14 +837,14 @@ pub fn ari_input_value(i: i32) -> f64 with Mut, Div, Panic {
     return ari_p_pka1()
 }
 
-pub fn ari_input_u(i: i32) -> f64 with Mut, Div, Panic {
+pub fn ari_input_u(i: i32, gv: i32) -> f64 with Mut, Div, Panic {
     if i == 0 { return ari_obs(1, 2) }
     if i == 1 { return ari_obs(2, 2) }
     if i == 2 { return ari_obs(0, 2) }
     if i == 3 { return ari_obs(3, 2) }
     if i == 4 { return ari_obs(4, 2) }
     if i == 5 { return ari_obs(5, 2) }
-    if i == 6 { return ari_p_u_ka() }
+    if i == 6 { return ari_p_u_ka(gv) }
     if i == 7 { return ari_p_u_logp() }
     if i == 8 { return ari_p_u_fu() }
     if i == 9 { return ari_p_u_bp() }
@@ -845,22 +869,22 @@ pub fn ari_input_name(i: i32) -> string {
     return "pKa parent        "
 }
 
-pub fn ari_eval(z: [f64; 13], dp: &Circ28Drug, dm: &Circ28Drug, dose_mg: f64, out: &![f64; 4]) with Mut, Div, Panic, Epistemic {
+pub fn ari_eval(z: [f64; 13], dp: &Circ28Drug, dm: &Circ28Drug, dose_mg: f64, gv: i32, out: &![f64; 4]) with Mut, Div, Panic, Epistemic {
     var tp0 = circ28_drug_theta(dp)
     tp0[CD_KA] = z[6]
     tp0[CD_LOGP] = z[7]
     tp0[CD_FU] = z[8]
     tp0[CD_BP] = z[9]
     tp0[CD_PKA1] = z[12]
-    let tp1 = ari_fit_p1(tp0, z[1], z[0], z[2])
+    let tp1 = ari_fit_p1(tp0, z[1], z[0], z[2], gv)
     var tm0 = circ28_drug_theta(dm)
     tm0[CD_LOGP] = z[10]
     tm0[CD_BP] = z[11]
-    let tm = ari_fit_m(tm0, tp1[CD_KPSC], z[5], ari_m_kappa())
+    let tm = ari_fit_m(tm0, tp1[CD_KPSC], z[5], ari_m_kappa(gv), gv)
     let fm = ari_fm(tp1, tm, z[4])
     let tp = ari_split(tp1, fm)
     var res: [f64; 40] = [0.0; 40]
-    ari_run_th(tp, tm, 1, dose_mg, 0.0, 8.0, 300.0, 600.0, 1200.0, 1680.0, &!res)
+    ari_run_th(tp, tm, 1, dose_mg, 0.0, 8.0, 300.0, 600.0, 1200.0, 1680.0, gv, &!res)
     (*out)[0] = res[22]
     (*out)[1] = res[18]
     (*out)[2] = res[20]
@@ -879,17 +903,17 @@ pub struct AriBudget {
 }
 
 // Forward differences (one run per input plus one), step h_i = min(1e-3 |z_i|, 0.1 u_i).
-pub fn ari_budget(dp: &Circ28Drug, dm: &Circ28Drug, dose_mg: f64) -> AriBudget with Mut, Div, Panic, Epistemic {
+pub fn ari_budget(dp: &Circ28Drug, dm: &Circ28Drug, dose_mg: f64, gv: i32) -> AriBudget with Mut, Div, Panic, Epistemic {
     var z0: [f64; 13] = [0.0; 13]
     var u: [f64; 13] = [0.0; 13]
     var i: i32 = 0
     while i < 13 {
-        z0[i] = ari_input_value(i)
-        u[i] = ari_input_u(i)
+        z0[i] = ari_input_value(i, gv)
+        u[i] = ari_input_u(i, gv)
         i = i + 1
     }
     var o0: [f64; 4] = [0.0; 4]
-    ari_eval(z0, dp, dm, dose_mg, &!o0)
+    ari_eval(z0, dp, dm, dose_mg, gv, &!o0)
     var ca: [f64; 13] = [0.0; 13]
     var va = 0.0
     var vp = 0.0
@@ -911,7 +935,7 @@ pub fn ari_budget(dp: &Circ28Drug, dm: &Circ28Drug, dose_mg: f64) -> AriBudget w
             op[2] = o0[2]
             op[3] = o0[3]
         } else {
-            ari_eval(zp, dp, dm, dose_mg, &!op)
+            ari_eval(zp, dp, dm, dose_mg, gv, &!op)
             nrun = nrun + 1
         }
         let da = (op[0] - o0[0]) / hs
