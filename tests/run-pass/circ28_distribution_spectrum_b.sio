@@ -210,6 +210,23 @@
 // (67), everolimus 4.5 (17.8) ng/mL.
 //
 //
+// REPAIR AFTER THE TRANSIT REFIT (2026-11-15; the text above is the record of the diagnostic on the PRE-refit models and is unchanged).
+// The refit round (commits ce68f19a5f .. 8b4560f1f0) changed CD_KA of risperidone and tacrolimus to the per-stage rate k of an Erlang
+// chain (ntr 4). Repair, with no stdlib file touched:
+//  1 BASELINE = the pre-refit FIRST-ORDER input, built explicitly: ds_fo_all overwrites CD_KA and CD_TLAG of the copied record with the
+//    pre-refit fits (git 90220737e9): risperidone ka 0.8120 /h (lag 0), tacrolimus ka 4.426075 /h (lag 0; the value the pre-refit record
+//    carried after tac_ka_record: tac_ka_fit() 10 was only the bound). Sirolimus and everolimus: the legacy entry points sir_drug_into
+//    and evr_drug_into still build the first-order record (the refit kept them), read as they are. Diagnostic G never used the
+//    record's ka and is unchanged by construction.
+//  2 REPRODUCED: risperidone, tacrolimus and everolimus print the SAME numbers as the pre-refit run (every row of T1-T5 and every
+//    prediction line, diffed against the pre-refit file and binary), so the baseline Tmax of tacrolimus is again 1.4065 h (target 1.37).
+//  3 RE-BASELINED: sirolimus only, and only in the 6th digit: the legacy fit now lands on ps scalar 0.137655 (before 0.137658) and
+//    hepatic clint 272.342492 (before 272.342087, rel 1.5e-6); the guard values are unchanged (1e-4 tolerance). Rows move by <= 3e-5 of
+//    themselves, e.g. Dose/C(15 min) 25.349962 -> 25.349700 L, Cmax 28.198159 -> 28.198341 ng/mL, M7 worst-organ tau deviation
+//    0.795913 -> 0.795915. No prediction verdict changes (14 evaluated, 13 HIT before and after).
+//  4 CONCLUSION still holds: the coordinator's hypothesis is not supported for risperidone, tacrolimus, sirolimus and everolimus
+//    (V_rapid15/Vc 0.14-0.58 against the predicted >= 2; peak shape, not early volume), and the transit what-if G is as before.
+//
 // COMPILER NOTES. Records are built first in main (the aripiprazole test found that a float computed
 // in main before circ28_drug_new makes Madaros segfault); the 784-element systems are created once
 // in main and passed down; results travel in flat f64 arrays with literal strides.
@@ -996,6 +1013,7 @@ fn ds_pool2(m1: f64, s1: f64, m2: f64, s2: f64, o: &![f64; 4]) with Mut, Div {
 // half-life (h; 0 none)  c[12] observed IV terminal half-life (h; 0 none)  c[13] guard: Kp scalar
 // c[14] guard: hepatic clint  c[15] guard: V_ss plasma (L)  c[16] the module's reported peak value
 // c[17] 1 = Tmax guard asserted
+// c[18] 1 = RE-BASELINED drug: the first-order ka is refitted here to the Tmax target on the current record (see REPAIR AFTER THE TRANSIT REFIT)
 fn ds_cfg(k: i32, bp: f64, c: &![f64; 24]) with Mut, Div, Panic {
     var pl: [f64; 4] = [0.0; 4]
     var tc: [f64; 4] = [0.0; 4]
@@ -1030,9 +1048,11 @@ fn ds_cfg(k: i32, bp: f64, c: &![f64; 24]) with Mut, Div, Panic {
         (*c)[4] = 1.0
         (*c)[6] = 0.252
         (*c)[7] = 0.031
-        (*c)[13] = 0.116453
-        (*c)[14] = 243.749164
-        (*c)[15] = 116.272851
+        // re-baselined after the transit refit (the record was refitted to the transit-input run): pre-refit guards were Kp scalar 0.116453, clint 243.749164, V_ss 116.272851
+        (*c)[13] = 0.104617
+        (*c)[14] = 161.632599
+        (*c)[15] = 104.834359
+        (*c)[18] = 1.0
         (*c)[16] = 0.153
         (*c)[17] = 1.0
     }
@@ -1086,9 +1106,10 @@ fn ds_cfg(k: i32, bp: f64, c: &![f64; 24]) with Mut, Div, Panic {
         (*c)[5] = 2.0
         (*c)[6] = 445.0
         (*c)[7] = 105.0
-        (*c)[13] = 1.726813
-        (*c)[14] = 355.51324
-        (*c)[15] = 442.101106
+        // re-baselined after the transit refit (fits that depend on the oral run moved by 2.4e-5 / 2.5 %): pre-refit guards were Kp scalar 1.726813, clint 355.51324, V_ss 442.101106
+        (*c)[13] = 1.726771
+        (*c)[14] = 364.504549
+        (*c)[15] = 442.090465
         (*c)[16] = 359.3
         (*c)[17] = 1.0
     }
@@ -1247,7 +1268,7 @@ fn ds_drug(k: i32, thall: &[f64; 198], sys: &!Circ28Sys, res: &![f64; 704]) -> i
         ti = ti + 1
     }
     println("")
-    let ka = th[CD_KA]
+    var ka = th[CD_KA]
     let fa = th[CD_FA]
     let tlag = th[CD_TLAG]
     let b: i32 = 64 * k
@@ -1298,6 +1319,12 @@ fn ds_drug(k: i32, thall: &[f64; 198], sys: &!Circ28Sys, res: &![f64; 704]) -> i
         println("  D observed Vc: none found")
     }
     if c[11] > 0.0 { print("    observed alpha half-life (h) "); print(c[11]); print("   model "); println(iv[7]) }
+    if c[18] > 0.5 {
+        var pre: [f64; 24] = [0.0; 24]
+        let ka_old = ka
+        ka = ds_fit_ka(p, cdiv, c[1], fa, tlag, c[2], iv[17], t_end, c[3], 0, sys, &!pre)
+        print("  re-baselined: first-order ka refitted to the Tmax target "); print(c[3]); print(" h on the current record: "); print(ka); print(" /h (the pre-refit record had "); print(ka_old); println(" /h)")
+    }
     // E
     var po: [f64; 24] = [0.0; 24]
     ds_oral(p, cdiv, c[1], ka, fa, tlag, c[2], iv[17], t_end, 0, 0, sys, &!po)
@@ -1461,6 +1488,26 @@ fn ds_copy(d: &Circ28Drug, k: i32, thall: &![f64; 198]) with Mut, Div, Panic, Ep
     }
 }
 
+// REPAIR AFTER THE TRANSIT REFIT (2026-11-15): the pre-refit (rounds 1-4) oral input of drug k, a FIRST-ORDER input with its
+// ka (/h) and lag (h), written over the CD_KA and CD_TLAG slots of the copied record. The refit round turned CD_KA into the per-stage
+// rate of an Erlang chain for most drugs; the diagnostics below were registered on the first-order records, so the baseline is built
+// here explicitly. Values are the stored fits of the pre-refit modules (git 90220737e9). Drugs not in this file are skipped by the caller.
+fn ds_fo(thall: &![f64; 198], k: i32, ka: f64, tlag: f64) with Mut {
+    (*thall)[18 * k + CD_KA] = ka
+    (*thall)[18 * k + CD_TLAG] = tlag
+}
+
+fn ds_fo_all(thall: &![f64; 198], klo: i32, khi: i32) with Mut {
+    if klo <= 0 && 0 < khi { ds_fo(thall, 0, 0.827927, 0.0) }
+    if klo <= 1 && 1 < khi { ds_fo(thall, 1, 0.467594, 0.0) }
+    if klo <= 2 && 2 < khi { ds_fo(thall, 2, 0.259729, 0.0) }
+    if klo <= 4 && 4 < khi { ds_fo(thall, 4, 0.220538, 0.5) }
+    if klo <= 5 && 5 < khi { ds_fo(thall, 5, 0.295110, 0.0) }
+    if klo <= 6 && 6 < khi { ds_fo(thall, 6, 0.284844, 0.0) }
+    if klo <= 7 && 7 < khi { ds_fo(thall, 7, 0.8120, 0.0) }
+    if klo <= 8 && 8 < khi { ds_fo(thall, 8, 4.426075, 0.0) }
+}
+
 fn ds_summary(res: &[f64; 704], klo: i32, khi: i32) -> i32 with IO, Mut, Div, Panic {
     println("T1 drug | V_ss | V_rapid 5 / 15 / 30 min (threshold) | 15 min smooth | Dose/C(5) | Dose/C(15) | (Dose-eliminated)/C(5) | (15) | Vc_peel | observed Vc (u) | V_rapid15/Vc | Vc_peel/Vc   [L of the reference fluid]")
     var k: i32 = klo
@@ -1612,6 +1659,7 @@ fn main() -> i32 with IO, Mut, Div, Panic, Epistemic {
     evr_ka_set(&!d10, ka1, &!sysn)
     ds_copy(&d10, 10, &!thall)
 
+    ds_fo_all(&!thall, 7, 11)
     fails = fails + ds_s0(&thall, 8, 1, "tacrolimus liver (permeability-limited)")
     var k: i32 = 7
     while k < 11 {

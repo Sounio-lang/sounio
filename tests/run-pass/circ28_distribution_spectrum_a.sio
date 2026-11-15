@@ -210,6 +210,40 @@
 // (67), everolimus 4.5 (17.8) ng/mL.
 //
 //
+// REPAIR AFTER THE TRANSIT REFIT (2026-11-15; the text above is the record of the diagnostic on the PRE-refit models and is unchanged).
+// The refit round (commits ce68f19a5f .. 8b4560f1f0) turned CD_KA of most drug modules into the per-stage rate k of an Erlang chain and
+// changed signatures (mdz_drug_into / mdz_ka_record / qtp_fit_record / ari_measured_p / ari_fit_record_p1 / ari_fit_record_m take a gut
+// variant argument gv; this file passes gv = 0, the all-organ scalar of the pre-refit records). Repair, with no stdlib file touched:
+//  1 every call is made with the current signature (gv = 0);
+//  2 the BASELINE of each section is the pre-refit FIRST-ORDER input, built explicitly: ds_fo_all overwrites CD_KA and CD_TLAG of the
+//    copied record with the stored pre-refit fits (git 90220737e9): midazolam tablet ka 0.827927, quetiapine 0.467594, venlafaxine IR
+//    0.259729, olanzapine 0.220538 with lag 0.5 h (Sun 2018), clozapine 0.295110, aripiprazole 0.284844 (lag 0). Haloperidol stayed first
+//    order and is read as it is (ka 1.873371, lag 0.82 h). Diagnostic G (3 equal transit compartments, rate refitted to the Tmax target)
+//    is unchanged by construction: it never used the record's ka;
+//  3 REPRODUCED: midazolam, venlafaxine, haloperidol, olanzapine, aripiprazole print the SAME numbers as the pre-refit run (every row of
+//    the tables T1-T5 and every prediction line, diffed against the pre-refit file and binary); clozapine to 6 digits except the rows
+//    listed below;
+//  4 RE-BASELINED (a fitted parameter of the record itself moved in the refit, so the pre-refit numbers cannot be reproduced):
+//    quetiapine: the module refits Kp scalar, hepatic clint and gut clint jointly with the oral run (ntr 5 transit input): Kp scalar
+//    0.116453 -> 0.104617, clint 243.749164 -> 161.632599, clgut 40.309786 -> 74.317865, hence V_ss 116.272851 -> 104.834359 L, F 0.347 ->
+//    0.287, CL 28.07 -> 23.16 L/h. The first-order ka is refitted HERE to the same Tmax target 1.452788 h on the current record
+//    (ds_fit_ka, c[18]): 0.467594 -> 0.485024 /h. The guard rows (Kp scalar, clint, V_ss) carry the new values. Clozapine: the fits
+//    that use the oral run moved: Kp scalar 1.726813 -> 1.726771, clint 355.51324 -> 364.504549, V_ss 442.101106 -> 442.090465 (guards
+//    updated; the table rows move in the 5th digit or later, e.g. Tmax 2.219616 -> 2.219606 h).
+//    Quetiapine rows, pre-refit -> re-baselined: V_rapid15 11.94 -> 13.14 L; V_rapid15/V_ss 0.103 -> 0.125; Dose/C(15 min) 74.9 -> 64.8 L;
+//    Vc_peel 64.7 -> 55.1 L; IV t1/2 5.81 -> 5.70 h; baseline Cmax/AUC 0.1528 -> 0.1465 /h (module report 0.153, pre-refit); share of
+//    the absorbed dose in rapid organs other than blood at Tmax 0.113 -> 0.077; eliminated 0.712 -> 0.767; family limit Cmax/AUC 0.1316 ->
+//    0.1313; diagnostic G Cmax/AUC 0.2577 -> 0.2387 (observed 0.252, pre-refit it was inside the 0.252 +/- 0.031 band as it still is).
+//  5 VERDICT LINES: no HIT / MISS of a pre-registered prediction changes (32 evaluated, 19 HIT before and after); the pre-registered
+//    ranges and the RESULT paragraph above are kept as printed then. Where a value moved (quetiapine C2, C3, M2, M3, M4) the line is
+//    re-baselined: its value is the one printed now and its verdict is the same as the original.
+//  6 CONCLUSION still holds on the re-baselined records: the coordinator's hypothesis (a too large early volume dilutes the dose) is not
+//    supported: V_rapid(15 min) is 0.02-0.19 of V_ss (quetiapine 0.125) and, where an observed Vc exists, 0.09-0.80 of it; at Tmax at
+//    most 0.13 of the absorbed dose sits in rapid organs other than blood (quetiapine 0.077); the Vc-matched split could not reach the
+//    observed Vc for midazolam and the quetiapine family limit stays below 0.21 (0.131); the SHAPE of the input is what moves the peak:
+//    G for quetiapine 0.239 against observed 0.252 (baseline 0.146). The refit itself (transit input in the record) adopted what G
+//    diagnosed; this file still measures the first-order baseline that motivated it.
+//
 // COMPILER NOTES. Records are built first in main (the aripiprazole test found that a float computed
 // in main before circ28_drug_new makes Madaros segfault); the 784-element systems are created once
 // in main and passed down; results travel in flat f64 arrays with literal strides.
@@ -996,6 +1030,7 @@ fn ds_pool2(m1: f64, s1: f64, m2: f64, s2: f64, o: &![f64; 4]) with Mut, Div {
 // half-life (h; 0 none)  c[12] observed IV terminal half-life (h; 0 none)  c[13] guard: Kp scalar
 // c[14] guard: hepatic clint  c[15] guard: V_ss plasma (L)  c[16] the module's reported peak value
 // c[17] 1 = Tmax guard asserted
+// c[18] 1 = RE-BASELINED drug: the first-order ka is refitted here to the Tmax target on the current record (see REPAIR AFTER THE TRANSIT REFIT)
 fn ds_cfg(k: i32, bp: f64, c: &![f64; 24]) with Mut, Div, Panic {
     var pl: [f64; 4] = [0.0; 4]
     var tc: [f64; 4] = [0.0; 4]
@@ -1030,9 +1065,11 @@ fn ds_cfg(k: i32, bp: f64, c: &![f64; 24]) with Mut, Div, Panic {
         (*c)[4] = 1.0
         (*c)[6] = 0.252
         (*c)[7] = 0.031
-        (*c)[13] = 0.116453
-        (*c)[14] = 243.749164
-        (*c)[15] = 116.272851
+        // re-baselined after the transit refit (the record was refitted to the transit-input run): pre-refit guards were Kp scalar 0.116453, clint 243.749164, V_ss 116.272851
+        (*c)[13] = 0.104617
+        (*c)[14] = 161.632599
+        (*c)[15] = 104.834359
+        (*c)[18] = 1.0
         (*c)[16] = 0.153
         (*c)[17] = 1.0
     }
@@ -1086,9 +1123,10 @@ fn ds_cfg(k: i32, bp: f64, c: &![f64; 24]) with Mut, Div, Panic {
         (*c)[5] = 2.0
         (*c)[6] = 445.0
         (*c)[7] = 105.0
-        (*c)[13] = 1.726813
-        (*c)[14] = 355.51324
-        (*c)[15] = 442.101106
+        // re-baselined after the transit refit (fits that depend on the oral run moved by 2.4e-5 / 2.5 %): pre-refit guards were Kp scalar 1.726813, clint 355.51324, V_ss 442.101106
+        (*c)[13] = 1.726771
+        (*c)[14] = 364.504549
+        (*c)[15] = 442.090465
         (*c)[16] = 359.3
         (*c)[17] = 1.0
     }
@@ -1247,7 +1285,7 @@ fn ds_drug(k: i32, thall: &[f64; 198], sys: &!Circ28Sys, res: &![f64; 704]) -> i
         ti = ti + 1
     }
     println("")
-    let ka = th[CD_KA]
+    var ka = th[CD_KA]
     let fa = th[CD_FA]
     let tlag = th[CD_TLAG]
     let b: i32 = 64 * k
@@ -1298,6 +1336,12 @@ fn ds_drug(k: i32, thall: &[f64; 198], sys: &!Circ28Sys, res: &![f64; 704]) -> i
         println("  D observed Vc: none found")
     }
     if c[11] > 0.0 { print("    observed alpha half-life (h) "); print(c[11]); print("   model "); println(iv[7]) }
+    if c[18] > 0.5 {
+        var pre: [f64; 24] = [0.0; 24]
+        let ka_old = ka
+        ka = ds_fit_ka(p, cdiv, c[1], fa, tlag, c[2], iv[17], t_end, c[3], 0, sys, &!pre)
+        print("  re-baselined: first-order ka refitted to the Tmax target "); print(c[3]); print(" h on the current record: "); print(ka); print(" /h (the pre-refit record had "); print(ka_old); println(" /h)")
+    }
     // E
     var po: [f64; 24] = [0.0; 24]
     ds_oral(p, cdiv, c[1], ka, fa, tlag, c[2], iv[17], t_end, 0, 0, sys, &!po)
@@ -1461,6 +1505,26 @@ fn ds_copy(d: &Circ28Drug, k: i32, thall: &![f64; 198]) with Mut, Div, Panic, Ep
     }
 }
 
+// REPAIR AFTER THE TRANSIT REFIT (2026-11-15): the pre-refit (rounds 1-4) oral input of drug k, a FIRST-ORDER input with its
+// ka (/h) and lag (h), written over the CD_KA and CD_TLAG slots of the copied record. The refit round turned CD_KA into the per-stage
+// rate of an Erlang chain for most drugs; the diagnostics below were registered on the first-order records, so the baseline is built
+// here explicitly. Values are the stored fits of the pre-refit modules (git 90220737e9). Drugs not in this file are skipped by the caller.
+fn ds_fo(thall: &![f64; 198], k: i32, ka: f64, tlag: f64) with Mut {
+    (*thall)[18 * k + CD_KA] = ka
+    (*thall)[18 * k + CD_TLAG] = tlag
+}
+
+fn ds_fo_all(thall: &![f64; 198], klo: i32, khi: i32) with Mut {
+    if klo <= 0 && 0 < khi { ds_fo(thall, 0, 0.827927, 0.0) }
+    if klo <= 1 && 1 < khi { ds_fo(thall, 1, 0.467594, 0.0) }
+    if klo <= 2 && 2 < khi { ds_fo(thall, 2, 0.259729, 0.0) }
+    if klo <= 4 && 4 < khi { ds_fo(thall, 4, 0.220538, 0.5) }
+    if klo <= 5 && 5 < khi { ds_fo(thall, 5, 0.295110, 0.0) }
+    if klo <= 6 && 6 < khi { ds_fo(thall, 6, 0.284844, 0.0) }
+    if klo <= 7 && 7 < khi { ds_fo(thall, 7, 0.8120, 0.0) }
+    if klo <= 8 && 8 < khi { ds_fo(thall, 8, 4.426075, 0.0) }
+}
+
 fn ds_summary(res: &[f64; 704], klo: i32, khi: i32) -> i32 with IO, Mut, Div, Panic {
     println("T1 drug | V_ss | V_rapid 5 / 15 / 30 min (threshold) | 15 min smooth | Dose/C(5) | Dose/C(15) | (Dose-eliminated)/C(5) | (15) | Vc_peel | observed Vc (u) | V_rapid15/Vc | Vc_peel/Vc   [L of the reference fluid]")
     var k: i32 = klo
@@ -1600,11 +1664,11 @@ fn main() -> i32 with IO, Mut, Div, Panic, Epistemic {
     var su: [f64; 4] = [0.0; 4]
     var fails: i32 = 0
 
-    mdz_drug_into(&!d0)
-    mdz_ka_record(&!d0, 1)
+    mdz_drug_into(&!d0, 0)
+    mdz_ka_record(&!d0, 1, 0)
     ds_copy(&d0, 0, &!thall)
     qtp_measured_record(&!d1)
-    qtp_fit_record(&!d1, &su)
+    qtp_fit_record(&!d1, &su, 0)
     ds_copy(&d1, 1, &!thall)
     ven_measured_m(&!d2m)
     ven_fit_record_m(&!d2m)
@@ -1619,16 +1683,17 @@ fn main() -> i32 with IO, Mut, Div, Panic, Epistemic {
     clz_measured_m(&!d5m)
     clz_fit_record_m(&!d5m)
     clz_measured_p(&!d5)
-    clz_fit_record_p(&!d5)
+    clz_fit_record_p(&!d5, 0)
     ds_copy(&d5, 5, &!thall)
-    ari_measured_p(&!d6)
-    ari_fit_record_p1(&!d6)
+    ari_measured_p(&!d6, 0)
+    ari_fit_record_p1(&!d6, 0)
     ari_measured_m(&!d6m)
-    ari_fit_record_m(&!d6m, circ28_drug_value(&d6, CD_KPSC))
+    ari_fit_record_m(&!d6m, circ28_drug_value(&d6, CD_KPSC), 0)
     let fm = ari_fm(circ28_drug_theta(&d6), circ28_drug_theta(&d6m), ari_obs(4, 0))
     ari_fit_record_p2(&!d6, fm)
     ds_copy(&d6, 6, &!thall)
 
+    ds_fo_all(&!thall, 0, 7)
     fails = fails + ds_s0(&thall, 0, 6, "midazolam muscle (flow-limited)")
     var k: i32 = 0
     while k < 7 {

@@ -87,6 +87,20 @@
 // report's 0.511 within 1 %; PM/EM AUC of the single-dose parent equals the pooled ratio within 3e-2 (module
 // fit, steady state not used); the secant for 225 converged (|Cmax - 225| < 0.5 ng/mL).
 //
+// REPAIR AFTER THE TRANSIT REFIT (2026-11-15; the text above is the record of the diagnostic on the PRE-refit models and is unchanged).
+// The refit round (commits ce68f19a5f .. 8b4560f1f0) made the venlafaxine record's CD_KA the per-stage rate of a 4-stage chain (2.375 /h;
+// the XR Weibull t50 refitted to 2.404 h; ven_run_th now feeds the chain for the IR and XR routes). Two sections of this file used the
+// OLD first-order model through the record and broke silently (the file still printed its marker): V0 (first-order input: 201.9 ng/mL
+// MISS with the chain's k read as a first-order ka) and V5 (XR rows 114.0 and 209.9 ng/mL with the chain). Repair, no stdlib change:
+//  V0 runs the pre-refit first-order ka 0.259729 /h (git 90220737e9 ven_ka_fit) through the unchanged cv_par;
+//  V5 runs cv_xr_fo, a local copy of the pre-refit route 2 of ven_run_th (Weibull release into ONE lumen pool, first-order ka 0.259729
+//    /h) with the pre-refit t50 0.689116 h;
+//  every other section (B0, V1-V4, V6) never used the record's ka or t50 (transit input with k_tr refitted here, closed-form fits redone
+//    here) and needed nothing.
+// REPRODUCED: all printed numbers identical to the pre-refit run (diff empty): V0 76.845839 HIT, V5 XR 108.283643 and 203.588898, 13
+// of 18 predictions HIT, verdict C5 MISS. RE-BASELINED: nothing. CONCLUSION still holds (the label Cmax is not explained by the
+// transit input; no single CL/F fits IR 225 and XR 150).
+//
 // COMPILER NOTES. Records and every closed form are evaluated in main before the first kernel run (lean_single
 // returns stack-dependent closed forms after a kernel run, module note); one big Circ28Sys is created in main;
 // results travel in flat arrays with literal strides.
@@ -230,6 +244,63 @@ fn cv_cpl(thr_in: [f64; 18], thm_in: [f64; 18], dose: f64, ntr: i32, ktr: f64, t
                 (*cm)[n] = sm.x[0] / pm.bp
             } else {
                 t = tstop
+            }
+        }
+        ph = ph + 1
+    }
+}
+
+// REPAIR AFTER THE TRANSIT REFIT (2026-11-15): the XR run of V5 as it was before the module turned its oral input into an Erlang chain
+// (git 90220737e9, route 2 of ven_run_th): Weibull release (lag and shape of the module, t50 given) into ONE lumen pool with first-order
+// absorption ka (/h), exact for a release rate constant over the step; same grid, same coupled parent + ODV kernel. The module's own
+// ven_run_th now feeds the 4-stage chain with the refitted k and t50, which is a different model (the refit shifts V5: see the header).
+fn cv_xr_fo(thr_in: [f64; 18], thm_in: [f64; 18], dose: f64, t50: f64, ka: f64, ts: &![f64; 400], cr: &![f64; 400], cm: &![f64; 400]) with Mut, Div, Panic {
+    var thr = thr_in
+    var thm = thm_in
+    let pr = circ28_drug_params_theta(thr)
+    let pm = circ28_drug_params_theta(thm)
+    let cp = circ28_coupling(thm[CD_MW] / thr[CD_MW], 0.0)
+    let fa = thr[CD_FA]
+    let lag = ven_xr_lag()
+    let shape = ven_xr_shape()
+    var sysr = circ28_sys_zero()
+    var sysm = circ28_sys_zero()
+    var sr = circ28_state_zero()
+    var sm = circ28_state_zero()
+    var elr = circ28_elim_zero()
+    var elm = circ28_elim_zero()
+    var n: i32 = 0
+    var t = 0.0
+    var pool = 0.0
+    (*ts)[0] = 0.0
+    (*cr)[0] = 0.0
+    (*cm)[0] = 0.0
+    var ph: i32 = 0
+    while ph < 2 {
+        var dt = 0.1
+        var tstop = 12.0
+        if ph == 1 {
+            dt = 0.5
+            tstop = 132.0
+        }
+        circ28_prepare(pr, dt, &!sysr)
+        circ28_prepare(pm, dt, &!sysm)
+        let ek = exp(0.0 - ka * dt)
+        while t + 0.5 * dt < tstop {
+            if n >= 399 {
+                t = tstop
+            } else {
+                let rel = dose * (ven_weibull(t + dt, lag, t50, shape) - ven_weibull(t, lag, t50, shape))
+                let p1 = pool * ek + (rel / dt) * (1.0 - ek) / ka
+                let absorbed = pool + rel - p1
+                pool = p1
+                let mass = fa * absorbed
+                let g = circ28_metab_step(&!sr, pr, &sysr, &!elr, &!sm, pm, &sysm, &!elm, cp, 0.0, mass / dt)
+                t = t + dt
+                n = n + 1
+                (*ts)[n] = t
+                (*cr)[n] = sr.x[0] / pr.bp
+                (*cm)[n] = sm.x[0] / pm.bp
             }
         }
         ph = ph + 1
@@ -436,9 +507,11 @@ fn main() -> i32 with IO, Mut, Div, Panic, Epistemic {
     let th_em = cv_th(&thall, 0)
     let pem = circ28_drug_params_theta(th_em)
     // V0 module first-order input
-    cv_par(pem, 75.0, th_em[CD_FA], 0, th_em[CD_KA], th_em[CD_TLAG], &!sys, &!ts, &!cr)
+    // pre-refit first-order ka of the IR tablet (git 90220737e9 ven_ka_fit): the refitted record's CD_KA is now the per-stage rate of a 4-stage chain
+    let ka_fo = 0.259729
+    cv_par(pem, 75.0, th_em[CD_FA], 0, ka_fo, th_em[CD_TLAG], &!sys, &!ts, &!cr)
     ven_ss(&cr, &cr, 12.0, &!ss)
-    print("V0 first-order input (ka "); print(th_em[CD_KA]); print("): Cmax_ss "); print(1000.0 * ss[0]); print(" ng/mL, Tmax_ss "); print(ss[1]); println(" h")
+    print("V0 first-order input (ka "); print(ka_fo); print("): Cmax_ss "); print(1000.0 * ss[0]); print(" ng/mL, Tmax_ss "); print(ss[1]); println(" h")
     cv_pred("V0 first-order Cmax_ss", 1000.0 * ss[0], 74.0, 79.0, &!acc)
     // B0
     cv_case(th_em, 2.0, &!sys, &!oe)
@@ -527,12 +600,13 @@ fn main() -> i32 with IO, Mut, Div, Panic, Epistemic {
     print("  implied by the nearest fit (48 L/h): F "); print(cf[32]); print(", Eh "); print(cf[33]); print(", IV CL "); print(cf[34]); println(" L/h")
     cv_pred("PV4 CL/F returning 225", clf_for, 50.0, 64.0, &!acc)
     // V5 XR 150 mg once daily at steady state
-    var res: [f64; 24] = [0.0; 24]
-    ven_run_th(th_em, cv_th(&thall, 7), 2, 150.0, 0.0, ven_t50_fit(), 24.0, 60.0, 60.0, 120.0, &!ts, &!cr, &!cmm, &!res)
+    // pre-refit first-order XR (ka 0.259729 /h, Weibull t50 0.689116 h, both git 90220737e9): see cv_xr_fo
+    let t50_fo = 0.689116
+    cv_xr_fo(th_em, cv_th(&thall, 7), 150.0, t50_fo, ka_fo, &!ts, &!cr, &!cmm)
     ven_ss(&cr, &cmm, 24.0, &!ss)
     print("V5 XR 150 mg qd, pooled CL/F: parent Cmax_ss "); print(1000.0 * ss[0]); print(" ng/mL (label 150) at "); print(ss[1]); print(" h (label 5.5);  ODV Cmax_ss "); print(1000.0 * ss[4]); print(" (label 260) at "); println(ss[5])
     cv_pred("PV5 XR 150 pooled CL/F", 1000.0 * ss[0], 95.0, 120.0, &!acc)
-    ven_run_th(cv_th(&thall, 8), cv_th(&thall, 7), 2, 150.0, 0.0, ven_t50_fit(), 24.0, 60.0, 60.0, 120.0, &!ts, &!cr, &!cmm, &!res)
+    cv_xr_fo(cv_th(&thall, 8), cv_th(&thall, 7), 150.0, t50_fo, ka_fo, &!ts, &!cr, &!cmm)
     ven_ss(&cr, &cmm, 24.0, &!ss)
     print("V5 XR 150 mg qd, CL/F 48 (nearest fit to the 225 row; Cmax_ss 225 at "); print(clf_for); print("): parent Cmax_ss "); print(1000.0 * ss[0]); print(" ng/mL (label 150) at "); print(ss[1]); print(" h;  AUC24 "); print(1000.0 * ss[3]); print(";  ODV Cmax_ss "); println(1000.0 * ss[4])
     cv_pred("PV5 XR 150 at the V4 CL/F", 1000.0 * ss[0], 150.0, 230.0, &!acc)
