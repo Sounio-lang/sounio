@@ -94,9 +94,7 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
   `let r = f(..)`: the clone writes one Jacobian row per field, the caller
   chain-rules each) and nested struct fields (`p.pos.x`, `self.pos.x`, depth
   up to 3, at most 24 tangents) are covered too; pin:
-  `tests/run-pass/gum_fo_tangent_clone_struct_returns.sio`. A struct return
-  needs every return to be a struct literal or a local and no field
-  assignment or `var` struct in the body.
+  `tests/run-pass/gum_fo_tangent_clone_struct_returns.sio`.
   Second order is closed the same way (2026-11-15, hyper-dual clones). A
   function that calls `hessian_of` or `second_order_mean` calls such a helper
   through `<name>__fotan2`: the helper lowered with second order on, writing
@@ -110,16 +108,27 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
   `tests/oracles/gum_so_hyperdual_clones.cpp`, 1e-10 relative). A
   `hessian_of(f(x), j, k)` whose call occurs only inside the query emits the
   clone call inside the query lowering (callee without an IO effect only).
-  Still open: a struct return holding a struct field, a struct result not
-  bound by a `let`, struct returns with second order on, a second-order
-  callee with more than 8 tangents or a measurement inside it (its Hessian
-  reads NaN, never 0), `hessian_of` of an IO callee whose value is not used
-  elsewhere, a `var` declared before the first `measure` (no private Hessian
-  slots, like its gradient rows, #3547), Hessian rows beyond the first 8
-  channels and 16 bound locals, and helpers whose body asks `variance_of`
-  and friends. A query whose answer depends on such a call is refused at
-  compile time rather than answered 0 where the walk can tell (see the
-  refusal entry below).
+  Struct returns that hold a struct field (`Site { pos: Vec3, e: f64 }`, read
+  as `r.pos.x`), and struct results used without a `let` (`f(x).energy`,
+  `f(x).pos.x`, `g(f(x))` with `g` taking the struct by value), are exact too:
+  the call is recorded in the value path and each field row is chain-ruled
+  where the field-access walk reads it. With second order on, a struct return
+  goes through a hyper-dual clone with one Hessian block per output field, so
+  `hessian_of(r.energy, j, k)` is exact (callees with at most 8 tangents and
+  no measurement inside). Pin:
+  `tests/run-pass/gum_fo_tangent_clone_struct_returns2.sio`, oracle
+  `tests/oracles/gum_fo_tangent_clone_struct_returns2.cpp` (1e-12 first order,
+  1e-10 second order).
+  A measurement made inside a struct-returning call that feeds two output
+  fields keeps their covariance: the clone exports each internal measurement
+  once (its sigma^2 and one sensitivity per field) and the caller makes one
+  shared channel for it (`Var(p.u - p.w)` for `u = eps*m`, `w = m` reads
+  `m^2 ue^2 + (eps-1)^2 um^2`). A struct return with more than four such
+  measurements is refused at compile time
+  (`tests/compile-fail/gum_refuse_struct_return_internal_cap.sio`).
+  A query whose answer depends on a call the clones cannot differentiate is
+  refused at compile time rather than answered 0 (see the refusal entry
+  below).
 - **Narrowed (#1706, 2026-10-13).** A call to a *pure helper* (an `f64`
   return, or a struct return when a field of the call is read; `f64`, integer
   or bool parameters, struct parameters by value or by reference whose

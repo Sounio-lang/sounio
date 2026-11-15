@@ -392,6 +392,9 @@ var TG_RTYPE: [i64; 512] = [0; 512]
 let TG_OMAX: i64 = 8
 var TG_O_N: i64 = 0
 var TG_O_FNAME: [i64; 8] = [0; 8]
+// Depth (1..3) and field path (3 name ids) of each output leaf, and the path key.
+var TG_O_DEPTH: [i64; 8] = [0; 8]
+var TG_O_PATH: [i64; 24] = [0; 24]
 var TG_NPARAM: [i64; 512] = [0; 512]
 var TG_STATE: [i64; 512] = [0; 512]
 // -1 unknown, 0 no measurement can happen inside, 1 one can.
@@ -426,6 +429,20 @@ var TG_SITE_D: [i64; 8192] = [-1; 8192]
 // Struct-return sites: entry (site * 8 + row) * 25 + k, k < nf a partial, k == nf
 // the row's internal variance.
 var TG_SITE_DM: [i64; 51200] = [-1; 51200]
+// Hessian block of each output row of a second-order struct site: entry
+// (site * 8 + row) * 36 + so_hess_idx.
+var TG_SITE_HM: [i64; 73728] = [-1; 73728]
+// Scratch of tg_rows_compute / tg_row_install: per row the sensitivities on the
+// caller's channels (32 per row) and, at second order, the Hessian (36 per row).
+var TG_ROW_ACC: [i64; 256] = [-1; 256]
+var TG_ROW_HESS: [i64; 288] = [-1; 288]
+// Internal measurements of a struct-returning clone, exported once each so the
+// caller can share one channel across the output rows: per site and slot
+// (site * 4 + c) the sigma^2 register, and per row (that * 8 + row) the row's
+// sensitivity to it.
+let TG_NI: i64 = 4
+var TG_SITE_ISIG: [i64; 1024] = [-1; 1024]
+var TG_SITE_IS: [i64; 8192] = [-1; 8192]
 
 // Key of a field path (up to 3 name ids): the clone matches a field read to a
 // tangent by it, the caller builds the same key from the layout.
@@ -855,13 +872,18 @@ fn tg_body_tail_is_struct_shape(opt: &Option<Box<StmtList>>) -> bool with Mut, P
 
 // `<base>.<id0>.<id1>.<id2>` (depth names) as a field-access expression.
 fn tg_chain_expr(base: Name, sp: Span, depth: i64, id0: i64, id1: i64, id2: i64) -> Expr with Mut, Panic, Div, Alloc {
-    var cur = lower_ident_expr_for_name(base, sp)
+    tg_chain_expr_e(lower_ident_expr_for_name(base, sp), sp, depth, id0, id1, id2)
+}
+
+// The same over an arbitrary base expression (a local, or a call returning a struct).
+fn tg_chain_expr_e(base: Expr, sp: Span, depth: i64, id0: i64, id1: i64, id2: i64) -> Expr with Mut, Panic, Div, Alloc {
+    var cur = base
     var l: i64 = 0
     while l < depth {
         var nid = id0
         if l == 1 { nid = id1 }
         if l == 2 { nid = id2 }
-        var fa = lower_ident_expr_for_name(base, sp)
+        var fa = lower_ident_expr_for_name(ir_name_at(nid), sp)
         fa.kind = ExprKind::ExprFieldAccess
         fa.name = ir_name_at(nid)
         fa.left = Some(Box::new(cur))
@@ -1846,6 +1868,10 @@ fn fo_cov_rho_live(i: i64, j: i64) -> bool with Mut, Panic, Div {
 var FO_FIELD_SENS_COUNT: i64 = 0
 var FO_FIELD_SENS_KEY: [i64; 64] = [0; 64]
 var FO_FIELD_SENS: [i64; 2048] = [-1; 2048]
+// Hessian row of a field whose tangent clone carried one (struct returns at
+// second order): 36 per slot of FO_FIELD_SENS, valid where the flag is 1.
+var FO_FIELD_HESS: [i64; 2304] = [-1; 2304]
+var FO_FIELD_HESS_SET: [i64; 64] = [0; 64]
 
 // A `let r = &p` (or `let s = r`) names the same struct local for field
 // variance. Without this, variance_of(r.cl0) keys the reference's own
@@ -16974,8 +17000,9 @@ impl Lowerer {
 
     // The output layout of entry `tgi` into TG_O_*: one row for an f64 return,
     // else one per scalar f64 field of the returned struct, in declaration
-    // order. False when the struct is unknown, holds a struct-typed field (its
-    // fields would be outputs nobody reads) or has no f64 field.
+    // order (nested struct fields are walked depth first, at most 3 deep). False
+    // when the struct is unknown, holds a Knowledge-typed field, nests too deep
+    // or has no f64 field.
     fn tg_out_layout(self, tgi: i64) -> bool with Mut, Panic, Div, Alloc {
         TG_O_N = 0
         if tgi < 0 || tgi >= TG_COUNT { return false }
@@ -16983,34 +17010,68 @@ impl Lowerer {
             TG_O_N = 1
             return true
         }
-        let tn = ir_name_at(TG_RTYPE[tgi as usize])
-        let ns = self.struct_layout_slot_count(tn)
-        if ns <= 0 { return false }
-        var sidx: i64 = 0
-        while sidx < ns {
-            let pos = self.struct_layout_field_pos(tn, sidx)
-            if pos >= 0 {
-                if self.struct_layout_pos_is_float(pos) == 1 && self.struct_layout_pos_array_len(pos) == 0 {
-                    if TG_O_N >= TG_OMAX { return false }
-                    TG_O_FNAME[TG_O_N as usize] = ir_intern_name(self.struct_layout_pos_field_name(pos))
-                    TG_O_N = TG_O_N + 1
-                } else if self.struct_layout_pos_is_float(pos) != 1 && self.struct_layout_pos_array_len(pos) == 0 {
-                    let nt = self.struct_layout_pos_named_type(pos)
-                    if nt.len > 0 && self.struct_layout_slot_count(nt) > 0 { return false }
+        let tn0 = ir_name_at(TG_RTYPE[tgi as usize])
+        let ns0 = self.struct_layout_slot_count(tn0)
+        if ns0 <= 0 { return false }
+        // Depth-first over the returned struct's scalar f64 fields, descending
+        // into struct-typed fields up to depth 3.
+        var ltype: [i64; 3] = [0; 3]
+        var lslot: [i64; 3] = [0; 3]
+        var lcount: [i64; 3] = [0; 3]
+        var lname: [i64; 3] = [0; 3]
+        ltype[0] = TG_RTYPE[tgi as usize]
+        lcount[0] = ns0
+        var d: i64 = 0
+        while d >= 0 {
+            if lslot[d as usize] >= lcount[d as usize] {
+                d = d - 1
+            } else {
+                let sidx = lslot[d as usize]
+                lslot[d as usize] = sidx + 1
+                let tn = ir_name_at(ltype[d as usize])
+                let pos = self.struct_layout_field_pos(tn, sidx)
+                if pos >= 0 {
+                    let fnm = self.struct_layout_pos_field_name(pos)
+                    let alen = self.struct_layout_pos_array_len(pos)
+                    let isf = self.struct_layout_pos_is_float(pos)
+                    if isf == 1 && alen == 0 {
+                        if TG_O_N >= TG_OMAX { return false }
+                        let oi = TG_O_N
+                        var l: i64 = 1
+                        while l <= d {
+                            TG_O_PATH[(oi * 3 + l - 1) as usize] = lname[l as usize]
+                            l = l + 1
+                        }
+                        TG_O_PATH[(oi * 3 + d) as usize] = ir_intern_name(fnm)
+                        TG_O_DEPTH[oi as usize] = d + 1
+                        TG_O_FNAME[oi as usize] = ir_intern_name(fnm)
+                        TG_O_N = oi + 1
+                    } else if isf != 1 && alen == 0 {
+                        let nt = self.struct_layout_pos_named_type(pos)
+                        if nt.len > 0 && self.struct_layout_slot_count(nt) > 0 {
+                            if ir_name_eq_lit(nt, "Knowledge") || d >= 2 { return false }
+                            d = d + 1
+                            ltype[d as usize] = ir_intern_name(nt)
+                            lslot[d as usize] = 0
+                            lcount[d as usize] = self.struct_layout_slot_count(nt)
+                            lname[d as usize] = ir_intern_name(fnm)
+                        }
+                    }
                 }
             }
-            sidx = sidx + 1
         }
         TG_O_N > 0
     }
 
     // Whether the clone of `tgi` can serve a call here: an f64 return always
-    // can; a struct return needs a usable output layout and first order only
-    // (a clone carries no Hessian, and the re-lowering path owns second order).
+    // can; a struct return needs a usable output layout and, with second order
+    // on, the hyper-dual clone (it carries one Hessian block per output field;
+    // a first-order clone would leave the fields' Hessian unknown). Call it
+    // after tg_layout: it reads TG_L_N.
     fn tg_ret_ok(self, tgi: i64) -> bool with Mut, Panic, Div, Alloc {
         if tgi < 0 || tgi >= TG_COUNT { return false }
         if TG_RET[tgi as usize] == 0 { return true }
-        if self.so_enabled { return false }
+        if self.so_enabled && self.tg_pick_ord(tgi, TG_L_N) != 2 { return false }
         self.tg_out_layout(tgi)
     }
 
@@ -17159,7 +17220,7 @@ impl Lowerer {
         var lo = self
         // The body's own Hessian row, for the hyper-dual clone below.
         let hess = lo.so_expr_hess
-        let base = row * (TG_NPCH + 1)
+        let base = row * (TG_NPCH + 1 + (if TG_ACTIVE_ORD == 2 { TG_HESS_SLOTS } else { 0 }))
         let z = lo.emit_f64_const(0.0)
         lo = z.0
         var k: i64 = 0
@@ -17179,7 +17240,7 @@ impl Lowerer {
                 var hb: i64 = ha
                 while hb < TG_NPCH {
                     let hr = hess[lo.so_hess_idx(TG_PARAM_CH[ha as usize], TG_PARAM_CH[hb as usize]) as usize]
-                    let hslot = TG_NPCH + 1 + lo.so_hess_idx(ha, hb)
+                    let hslot = base + TG_NPCH + 1 + lo.so_hess_idx(ha, hb)
                     let hip = lo.emit_i64_const(hslot)
                     lo = hip.0
                     lo = lo.emit(ir_index_set(TG_OUT_REG, hip.1, if hr >= 0 { hr } else { z.1 }))
@@ -17230,48 +17291,125 @@ impl Lowerer {
         var lo = self
         if !lo.tg_out_layout(TG_ACTIVE) { return lo }
         let nout = TG_O_N
-        var ofn: [i64; 8] = [0; 8]
+        var rs: [i64; 256] = [-1; 256]
+        var odepth: [i64; 8] = [0; 8]
+        var opath: [i64; 24] = [0; 24]
         var oi: i64 = 0
         while oi < nout {
-            ofn[oi as usize] = TG_O_FNAME[oi as usize]
+            odepth[oi as usize] = TG_O_DEPTH[oi as usize]
+            opath[(oi * 3) as usize] = TG_O_PATH[(oi * 3) as usize]
+            opath[(oi * 3 + 1) as usize] = TG_O_PATH[(oi * 3 + 1) as usize]
+            opath[(oi * 3 + 2) as usize] = TG_O_PATH[(oi * 3 + 2) as usize]
             oi = oi + 1
         }
         var j: i64 = 0
         while j < nout {
-            let fname = ir_name_at(ofn[j as usize])
-            var vp = (lo, 0 - 1)
-            var have = false
-            if (*e).kind == ExprKind::ExprStructLit {
-                var fl = &(*e).fields
-                while !have {
-                    match *fl {
-                        Some(node) => {
-                            if ir_name_eq((*node).head.name, fname) {
-                                vp = lo.lower_expr_variance_ref(&(*node).head.value)
-                                have = true
-                            } else {
-                                fl = &(*node).tail
+            // The expression of leaf j: the path through the returned value,
+            // taking a struct literal's initialiser at each step and a field
+            // access on anything else.
+            var cur: Expr = *e
+            var have = true
+            var l: i64 = 0
+            while l < odepth[j as usize] && have {
+                let fname = ir_name_at(opath[(j * 3 + l) as usize])
+                if cur.kind == ExprKind::ExprStructLit {
+                    var found = false
+                    var fl = &cur.fields
+                    while !found {
+                        match *fl {
+                            Some(node) => {
+                                if ir_name_eq((*node).head.name, fname) {
+                                    cur = (*node).head.value
+                                    found = true
+                                } else {
+                                    fl = &(*node).tail
+                                }
                             }
+                            None => break
                         }
-                        None => break
                     }
+                    if !found { have = false }
+                } else {
+                    var fa = lower_ident_expr_for_name(fname, (*e).span)
+                    fa.kind = ExprKind::ExprFieldAccess
+                    fa.name = fname
+                    fa.left = Some(Box::new(cur))
+                    cur = fa
                 }
-            } else {
-                var fa = lower_ident_expr_for_name(fname, (*e).span)
-                fa.kind = ExprKind::ExprFieldAccess
-                fa.name = fname
-                fa.left = Some(Box::new(*e))
-                vp = lo.lower_expr_variance_ref(&fa)
-                have = true
+                l = l + 1
             }
+            var vp = (lo, 0 - 1)
+            if have { vp = lo.lower_expr_variance_ref(&cur) }
             lo = vp.0
             if have && vp.1 >= 0 && !lo.fo_expr_has_sens() && !fo_variance_is_static_zero(&lo, vp.1) {
                 lo = lo.fo_seed_from_variance(vp.1, 0 - 1)
             }
-            if !have { lo = lo.fo_clear_expr_sens() }
+            if !have { lo = lo.fo_clear_expr_sens().so_clear_expr_hess() }
             let sens = lo.fo_snapshot_expr_sens()
+            var cc: i64 = 0
+            while cc < 32 {
+                rs[(j * 32 + cc) as usize] = sens[cc as usize]
+                cc = cc + 1
+            }
             lo = lo.tg_store_row(sens, j)
             j = j + 1
+        }
+        // Internal measurements: one export per measurement, shared by the
+        // rows (sigma^2, then each row's sensitivity to it), so the caller can
+        // keep their covariance. At most TG_NI per return.
+        if tg_may_draw(TG_ACTIVE, 0) {
+            let stride = TG_NPCH + 1 + (if TG_ACTIVE_ORD == 2 { TG_HESS_SLOTS } else { 0 })
+            let zc = lo.emit_f64_const(0.0)
+            lo = zc.0
+            var c: i64 = 0
+            var ch: i64 = 0
+            while ch < lo.fo_nchan && ch < 32 {
+                var is_param = false
+                var q: i64 = 0
+                while q < TG_NPCH {
+                    if TG_PARAM_CH[q as usize] == ch { is_param = true }
+                    q = q + 1
+                }
+                var used = false
+                var r: i64 = 0
+                while r < nout {
+                    if rs[(r * 32 + ch) as usize] >= 0 { used = true }
+                    r = r + 1
+                }
+                if !is_param && used && lo.fo_sigma2[ch as usize] >= 0 {
+                    if c >= TG_NI {
+                        print("error: the struct return of `")
+                        print(str_from_bytes((*lo.current_func).name.buf, (*lo.current_func).name.len))
+                        print("` has more than 4 internal measurements feeding its fields; refused instead of returning a wrong covariance (KL-11)\n")
+                        return lo.report_error_at(10841)
+                    }
+                    let cb = nout * stride + c * (1 + nout)
+                    let sp0 = lo.emit_i64_const(cb)
+                    lo = sp0.0
+                    lo = lo.emit(ir_index_set(TG_OUT_REG, sp0.1, lo.fo_sigma2[ch as usize]))
+                    var r2: i64 = 0
+                    while r2 < nout {
+                        let sv = rs[(r2 * 32 + ch) as usize]
+                        let sp1 = lo.emit_i64_const(cb + 1 + r2)
+                        lo = sp1.0
+                        lo = lo.emit(ir_index_set(TG_OUT_REG, sp1.1, if sv >= 0 { sv } else { zc.1 }))
+                        r2 = r2 + 1
+                    }
+                    c = c + 1
+                }
+                ch = ch + 1
+            }
+            while c < TG_NI {
+                let cb = nout * stride + c * (1 + nout)
+                var r3: i64 = 0
+                while r3 <= nout {
+                    let sp2 = lo.emit_i64_const(cb + r3)
+                    lo = sp2.0
+                    lo = lo.emit(ir_index_set(TG_OUT_REG, sp2.1, zc.1))
+                    r3 = r3 + 1
+                }
+                c = c + 1
+            }
         }
         lo
     }
@@ -17475,6 +17613,28 @@ impl Lowerer {
         false
     }
 
+    // `<arg>.<id0>.<id1>.<id2>` for a struct argument that names a local or is a
+    // call to a struct-returning helper.
+    fn tg_walk_chain(self, arg_e: &Expr, sp: Span, depth: i64, id0: i64, id1: i64, id2: i64) -> Expr with Mut, Panic, Div, Alloc {
+        let nm = self.tg_struct_arg_name(arg_e)
+        if nm.len > 0 { return tg_chain_expr(nm, sp, depth, id0, id1, id2) }
+        tg_chain_expr_e(*arg_e, sp, depth, id0, id1, id2)
+    }
+
+    // A call to a registered struct-returning helper used as a struct argument.
+    fn tg_struct_arg_is_sret_call(self, a: &Expr) -> bool with Mut, Panic, Div, Alloc {
+        if (*a).kind != ExprKind::ExprCall { return false }
+        match (*a).left {
+            Some(c) => {
+                if (*c).kind != ExprKind::ExprIdent { return false }
+                let t = tg_find(ir_intern_name((*c).name))
+                if t < 0 { return false }
+                return TG_RET[t as usize] == 1 && TG_HASSELF[t as usize] == 0
+            }
+            None => { return false }
+        }
+    }
+
     // A struct argument must name a local (`p`, `&p`, `&!p`): the caller
     // reads its fields' sensitivities through that name. Empty otherwise.
     fn tg_struct_arg_name(self, a: &Expr) -> Name with Mut, Panic, Div, Alloc {
@@ -17509,7 +17669,7 @@ impl Lowerer {
             match *ac {
                 Some(al) => {
                     if p >= 16 { return false }
-                    if TG_PKIND[(tgi * 16 + p) as usize] == 3 && self.tg_struct_arg_name(&(*al).head).len <= 0 { return false }
+                    if TG_PKIND[(tgi * 16 + p) as usize] == 3 && self.tg_struct_arg_name(&(*al).head).len <= 0 && !self.tg_struct_arg_is_sret_call(&(*al).head) { return false }
                     p = p + 1
                     ac = &(*al).tail
                 }
@@ -17559,7 +17719,9 @@ impl Lowerer {
             if !lo.tg_out_layout(tgi) { return (lo, 0 - 1) }
             nout = TG_O_N
         }
-        let arrlen = if is_sret { nout * (nf + 1) } else if ord == 2 { nf + 1 + TG_HESS_SLOTS } else { nf + 1 }
+        let stride = nf + 1 + (if ord == 2 { TG_HESS_SLOTS } else { 0 })
+        let shared_int = is_sret && tg_may_draw(tgi, 0)
+        let arrlen = if is_sret { nout * stride + (if shared_int { TG_NI * (1 + nout) } else { 0 }) } else if ord == 2 { nf + 1 + TG_HESS_SLOTS } else { nf + 1 }
         lo = lo.emit(ir_alloc_array(arr, lo.aggregate_storage_bytes(arrlen), arrlen))
         lo = lo.bind_reg_array_elem_float(arr)
         args = lower_reg_list_append(args, arr)
@@ -17595,7 +17757,7 @@ impl Lowerer {
             while row < nout {
                 var kk: i64 = 0
                 while kk <= nf {
-                    let ip = lo.emit_i64_const(row * (nf + 1) + kk)
+                    let ip = lo.emit_i64_const(row * stride + kk)
                     lo = ip.0
                     let dr = lo.fresh_reg()
                     lo = dr.0
@@ -17606,7 +17768,57 @@ impl Lowerer {
                     if slot_i >= 0 { TG_SITE_DM[((slot_i * 8 + row) * 25 + kk) as usize] = dr.1 }
                     kk = kk + 1
                 }
+                if ord == 2 && slot_i >= 0 {
+                    var ha: i64 = 0
+                    while ha < nf {
+                        var hb: i64 = ha
+                        while hb < nf {
+                            let hidx = lo.so_hess_idx(ha, hb)
+                            let ip2 = lo.emit_i64_const(row * stride + nf + 1 + hidx)
+                            lo = ip2.0
+                            let hr = lo.fresh_reg()
+                            lo = hr.0
+                            var ldh = ir_index_get(hr.1, arr, ip2.1)
+                            ldh.imm_flags = IR_FLOAT_REG_MARKER_FLAG
+                            lo = lo.emit(ldh)
+                            lo = lo.emit(ir_mark_float_reg(hr.1))
+                            TG_SITE_HM[((slot_i * 8 + row) * 36 + hidx) as usize] = hr.1
+                            hb = hb + 1
+                        }
+                        ha = ha + 1
+                    }
+                }
                 row = row + 1
+            }
+            if shared_int && slot_i >= 0 {
+                // The internal measurements: sigma^2 and one sensitivity per row.
+                var c: i64 = 0
+                while c < TG_NI {
+                    let cb = nout * stride + c * (1 + nout)
+                    let sp0 = lo.emit_i64_const(cb)
+                    lo = sp0.0
+                    let sg = lo.fresh_reg()
+                    lo = sg.0
+                    var lsg = ir_index_get(sg.1, arr, sp0.1)
+                    lsg.imm_flags = IR_FLOAT_REG_MARKER_FLAG
+                    lo = lo.emit(lsg)
+                    lo = lo.emit(ir_mark_float_reg(sg.1))
+                    TG_SITE_ISIG[(slot_i * 4 + c) as usize] = sg.1
+                    var r2: i64 = 0
+                    while r2 < nout {
+                        let sp1 = lo.emit_i64_const(cb + 1 + r2)
+                        lo = sp1.0
+                        let sr = lo.fresh_reg()
+                        lo = sr.0
+                        var lsr = ir_index_get(sr.1, arr, sp1.1)
+                        lsr.imm_flags = IR_FLOAT_REG_MARKER_FLAG
+                        lo = lo.emit(lsr)
+                        lo = lo.emit(ir_mark_float_reg(sr.1))
+                        TG_SITE_IS[((slot_i * 4 + c) * 8 + r2) as usize] = sr.1
+                        r2 = r2 + 1
+                    }
+                    c = c + 1
+                }
             }
             return (lo, dst)
         }
@@ -17710,7 +17922,7 @@ impl Lowerer {
                 let fd = tg_def_at(tgi)
                 if self.ir_effect_list_has_name_ref(&fd.effects, "IO") { return self }
                 if !self.tg_layout(tgi) { return self }
-                if self.tg_pick_ord(tgi, TG_L_N) != 2 { return self }
+                if self.so_enabled && self.tg_pick_ord(tgi, TG_L_N) != 2 { return self }
                 let tr = self.tg_lower_call(e, callee_name, tgi)
                 tr.0
             }
@@ -17727,7 +17939,7 @@ impl Lowerer {
         var base = self
         var si: i64 = 0 - 1
         if TG_SITE_N > 0 { si = tg_site_find((*e).span) }
-        if si < 0 && base.so_enabled && TG_QUERY_DEPTH > 0 && (*e).kind == ExprKind::ExprCall {
+        if si < 0 && ((base.so_enabled && TG_QUERY_DEPTH > 0) || after_paste) && (*e).kind == ExprKind::ExprCall {
             // The call appears only inside the Hessian query: its value was
             // never lowered, so there is no site. Evaluate it here, through its
             // hyper-dual clone, which is then its only evaluation.
@@ -17806,9 +18018,9 @@ impl Lowerer {
             if found {
                 var walk_e = arg_e
                 if lfield[li as usize] >= 0 {
-                    // `<local>.<field>[.<field>...]` of the struct argument.
-                    let base_nm = lo.tg_struct_arg_name(&arg_e)
-                    walk_e = tg_chain_expr(base_nm, (*e).span, ldepth[li as usize], lpath[(li * 3) as usize], lpath[(li * 3 + 1) as usize], lpath[(li * 3 + 2) as usize])
+                    // `<local>.<field>[.<field>...]` of the struct argument (or of a
+                    // struct-returning call used as the argument).
+                    walk_e = lo.tg_walk_chain(&arg_e, (*e).span, ldepth[li as usize], lpath[(li * 3) as usize], lpath[(li * 3 + 1) as usize], lpath[(li * 3 + 2) as usize])
                 }
                 let wp = lo.lower_expr_variance_ref(&walk_e)
                 lo = wp.0
@@ -17949,17 +18161,14 @@ impl Lowerer {
         lo.fo_emit_var_from_sens()
     }
 
-    // `let r = f(args)` where the call went through a struct-returning tangent
-    // clone: each scalar f64 field of `r` gets its sensitivity on the caller's
-    // channels by the chain rule over the clone's Jacobian row for that field,
-    // plus the row's internal variance as one new independent channel. Stored
-    // where `variance_of(r.x)`, `r.x - r.y` and `r.x - g(..)` read it.
-    fn tg_bind_struct_result(self, nm: Name, e: &Expr) -> Lowerer with Mut, Panic, Div, Alloc, IO {
-        if TG_SITE_N <= 0 { return self }
-        let si = tg_site_find((*e).span)
-        if si < 0 { return self }
+    // The sensitivities of every output row of the struct-returning call `e`
+    // (recorded site `si`) on the caller's channels, by the chain rule over the
+    // clone's Jacobian rows: acc_j[c] = sum_k J_jk s_c(a_k). With the site at
+    // second order also the Hessian rows, H_j = sum_k J_jk H(a_k) +
+    // sum_kl Hf_j,kl g_k g_l^T. Left in TG_ROW_ACC (32 per row) and
+    // TG_ROW_HESS (36 per row); tg_row_install reads them.
+    fn tg_rows_compute(self, e: &Expr, si: i64) -> Lowerer with Mut, Panic, Div, Alloc, IO {
         let tgi = TG_SITE_TG[si as usize]
-        if TG_RET[tgi as usize] != 1 { return self }
         if !self.tg_layout(tgi) { return self }
         var lo = self
         let has_self = TG_HASSELF[tgi as usize] == 1
@@ -17980,15 +18189,10 @@ impl Lowerer {
         }
         if !lo.tg_out_layout(tgi) { return lo }
         let nout = TG_O_N
-        var ofn: [i64; 8] = [0; 8]
-        var oi: i64 = 0
-        while oi < nout {
-            ofn[oi as usize] = TG_O_FNAME[oi as usize]
-            oi = oi + 1
-        }
-        let dst_reg = lo.lookup_local(nm)
-        if dst_reg < 0 { return lo }
+        let ord2 = lo.so_enabled && TG_SITE_ORD[si as usize] == 2
         var acc: [i64; 256] = [-1; 256]
+        var sensA: [i64; 256] = [-1; 256]
+        var hessA: [i64; 288] = [-1; 288]
         var li: i64 = 0
         while li < ln {
             let p = lparam[li as usize]
@@ -18020,13 +18224,24 @@ impl Lowerer {
             if found {
                 var walk_e = arg_e
                 if lfield[li as usize] >= 0 {
-                    let base_nm = lo.tg_struct_arg_name(&arg_e)
-                    walk_e = tg_chain_expr(base_nm, (*e).span, ldepth[li as usize], lpath[(li * 3) as usize], lpath[(li * 3 + 1) as usize], lpath[(li * 3 + 2) as usize])
+                    walk_e = lo.tg_walk_chain(&arg_e, (*e).span, ldepth[li as usize], lpath[(li * 3) as usize], lpath[(li * 3 + 1) as usize], lpath[(li * 3 + 2) as usize])
                 }
                 let wp = lo.lower_expr_variance_ref(&walk_e)
                 lo = wp.0
                 if wp.1 >= 0 && !lo.fo_expr_has_sens() && !fo_variance_is_static_zero(&lo, wp.1) {
                     lo = lo.fo_seed_from_variance(wp.1, 0 - 1)
+                }
+                if ord2 && li < 8 {
+                    var sc: i64 = 0
+                    while sc < 32 {
+                        sensA[(li * 32 + sc) as usize] = lo.fo_expr_sens[sc as usize]
+                        sc = sc + 1
+                    }
+                    var sh: i64 = 0
+                    while sh < 36 {
+                        hessA[(li * 36 + sh) as usize] = lo.so_expr_hess[sh as usize]
+                        sh = sh + 1
+                    }
                 }
                 var j: i64 = 0
                 while j < nout {
@@ -18057,34 +18272,236 @@ impl Lowerer {
             }
             li = li + 1
         }
+        var hres: [i64; 288] = [-1; 288]
+        if ord2 {
+            var row: i64 = 0
+            while row < nout {
+                var c1: i64 = 0
+                while c1 < 8 {
+                    var c2h: i64 = c1
+                    while c2h < 8 {
+                        let hix = lo.so_hess_idx(c1, c2h)
+                        var hacc: i64 = 0 - 1
+                        var k1: i64 = 0
+                        while k1 < ln && k1 < 8 {
+                            let jk = TG_SITE_DM[((si * 8 + row) * 25 + k1) as usize]
+                            let ha = hessA[(k1 * 36 + hix) as usize]
+                            if jk >= 0 && ha >= 0 {
+                                let tm = lo.so_mul_or_none(jk, ha)
+                                lo = tm.0
+                                let ad = lo.so_add_or_take(hacc, tm.1)
+                                lo = ad.0
+                                hacc = ad.1
+                            }
+                            k1 = k1 + 1
+                        }
+                        var k2: i64 = 0
+                        while k2 < ln && k2 < 8 {
+                            let g1 = sensA[(k2 * 32 + c1) as usize]
+                            if g1 >= 0 {
+                                var l2: i64 = 0
+                                while l2 < ln && l2 < 8 {
+                                    let g2 = sensA[(l2 * 32 + c2h) as usize]
+                                    let hf = TG_SITE_HM[((si * 8 + row) * 36 + lo.so_hess_idx(k2, l2)) as usize]
+                                    if g2 >= 0 && hf >= 0 {
+                                        let t1 = lo.so_mul_or_none(hf, g1)
+                                        lo = t1.0
+                                        let t2 = lo.so_mul_or_none(t1.1, g2)
+                                        lo = t2.0
+                                        let ad2 = lo.so_add_or_take(hacc, t2.1)
+                                        lo = ad2.0
+                                        hacc = ad2.1
+                                    }
+                                    l2 = l2 + 1
+                                }
+                            }
+                            k2 = k2 + 1
+                        }
+                        hres[(row * 36 + hix) as usize] = hacc
+                        c2h = c2h + 1
+                    }
+                    c1 = c1 + 1
+                }
+                row = row + 1
+            }
+        }
+        var z: i64 = 0
+        while z < 256 {
+            TG_ROW_ACC[z as usize] = acc[z as usize]
+            z = z + 1
+        }
+        var zh: i64 = 0
+        while zh < 288 {
+            TG_ROW_HESS[zh as usize] = hres[zh as usize]
+            zh = zh + 1
+        }
+        lo
+    }
+
+    // Put row `row` of tg_rows_compute into the expression state (sensitivities,
+    // Hessian, and the row's internal variance as one new channel) and return
+    // its variance register.
+    fn tg_row_install(self, si: i64, row: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        let tgi = TG_SITE_TG[si as usize]
+        if !self.tg_layout(tgi) { return (self, 0 - 1) }
+        let nf = TG_L_N
+        var lo = self.fo_clear_expr_sens().so_clear_expr_hess()
+        var c2: i64 = 0
+        while c2 < 32 {
+            lo.fo_expr_sens[c2 as usize] = TG_ROW_ACC[(row * 32 + c2) as usize]
+            c2 = c2 + 1
+        }
+        if lo.so_enabled && TG_SITE_ORD[si as usize] == 2 {
+            var hw: i64 = 0
+            while hw < 36 {
+                lo.so_expr_hess[hw as usize] = TG_ROW_HESS[(row * 36 + hw) as usize]
+                hw = hw + 1
+            }
+        }
+        if tg_may_draw(tgi, 0) {
+            // The call's internal measurements: one channel per measurement,
+            // shared by every row, so two fields that depend on the same
+            // measurement stay correlated.
+            var c: i64 = 0
+            while c < TG_NI {
+                let sg = TG_SITE_ISIG[(si * 4 + c) as usize]
+                let sv = TG_SITE_IS[((si * 4 + c) * 8 + row) as usize]
+                if sg >= 0 && sv >= 0 {
+                    let ar = lo.fo_add_channel_with_sens(sg, sv)
+                    lo = ar.0
+                    if !ar.1 {
+                        print("error: a struct-returning call has no room for its internal measurement channels; refused instead of returning a wrong covariance (KL-11)\n")
+                        return (lo.report_error_at(10842), 0 - 1)
+                    }
+                }
+                c = c + 1
+            }
+        }
+        if !lo.fo_expr_has_sens() { return lo.emit_zero_variance() }
+        lo.fo_emit_var_from_sens()
+    }
+
+    // `let r = f(args)` where the call went through a struct-returning tangent
+    // clone: each scalar f64 leaf of `r` (nested struct fields included) gets
+    // its sensitivity on the caller's channels, and at second order its
+    // Hessian, stored where `variance_of(r.x)`, `hessian_of(r.pos.x, j, k)`,
+    // `r.x - r.y` and `r.x - g(..)` read them.
+    fn tg_bind_struct_result(self, nm: Name, e: &Expr) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        if TG_SITE_N <= 0 { return self }
+        let si = tg_site_find((*e).span)
+        if si < 0 { return self }
+        let tgi = TG_SITE_TG[si as usize]
+        if TG_RET[tgi as usize] != 1 { return self }
+        var lo = self.tg_rows_compute(e, si)
+        if !lo.tg_out_layout(tgi) { return lo }
+        let nout = TG_O_N
+        var odepth: [i64; 8] = [0; 8]
+        var opath: [i64; 24] = [0; 24]
+        var oi: i64 = 0
+        while oi < nout {
+            odepth[oi as usize] = TG_O_DEPTH[oi as usize]
+            opath[(oi * 3) as usize] = TG_O_PATH[(oi * 3) as usize]
+            opath[(oi * 3 + 1) as usize] = TG_O_PATH[(oi * 3 + 1) as usize]
+            opath[(oi * 3 + 2) as usize] = TG_O_PATH[(oi * 3 + 2) as usize]
+            oi = oi + 1
+        }
+        let dst_reg = lo.lookup_local(nm)
+        if dst_reg < 0 { return lo }
+        let ord2 = lo.so_enabled && TG_SITE_ORD[si as usize] == 2
         var row: i64 = 0
         while row < nout {
-            lo = lo.fo_clear_expr_sens().so_clear_expr_hess()
-            var c2: i64 = 0
-            while c2 < 32 {
-                lo.fo_expr_sens[c2 as usize] = acc[(row * 32 + c2) as usize]
-                c2 = c2 + 1
+            let iv = lo.tg_row_install(si, row)
+            lo = iv.0
+            // Hop through the struct-valued fields on the way to the leaf.
+            var cur = dst_reg
+            var l: i64 = 0
+            while l + 1 < odepth[row as usize] {
+                let hidx = lo.field_idx_from_name_simple(ir_name_at(opath[(row * 3 + l) as usize]))
+                var nxt = lo.lookup_variance_for_field_base(cur, hidx)
+                if nxt < 0 {
+                    let fr = lo.fresh_reg()
+                    lo = fr.0
+                    nxt = fr.1
+                    lo = lo.bind_variance_for_field_base(cur, hidx, nxt)
+                }
+                cur = nxt
+                l = l + 1
             }
-            let vint = TG_SITE_DM[((si * 8 + row) * 25 + ln) as usize]
-            if tg_may_draw(tgi, 0) && vint >= 0 {
-                lo = lo.fo_add_channel_for_variance(vint)
-            }
-            var vr: i64 = 0 - 1
-            if !lo.fo_expr_has_sens() {
-                let zv = lo.emit_zero_variance()
-                lo = zv.0
-                vr = zv.1
-            } else {
-                let fv = lo.fo_emit_var_from_sens()
-                lo = fv.0
-                vr = fv.1
-            }
-            let fidx = lo.field_idx_from_name_simple(ir_name_at(ofn[row as usize]))
-            lo = lo.bind_variance_for_field(dst_reg, fidx, vr)
-            lo = lo.fo_field_sens_store(lo.variance_field_key(dst_reg, fidx))
+            let fidx = lo.field_idx_from_name_simple(ir_name_at(opath[(row * 3 + odepth[row as usize] - 1) as usize]))
+            lo = lo.bind_variance_for_field(cur, fidx, iv.1)
+            lo = lo.fo_field_sens_store(lo.variance_field_key(cur, fidx))
+            if ord2 { lo = lo.fo_field_hess_store(lo.variance_field_key(cur, fidx)) }
             row = row + 1
         }
         lo.fo_clear_expr_sens().so_clear_expr_hess()
+    }
+
+    // `f(args).pos.x`, a field path rooted at a call that returns a struct,
+    // read without a `let`. The call's recorded site (made when its value was
+    // lowered) gives the leaf's row; a call whose value is never lowered, such
+    // as the argument of variance_of, is emitted here through its clone (the
+    // callee must have no IO effect). (self, -1) when it does not apply.
+    fn tg_field_chain_variance(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        var ids: [i64; 3] = [0; 3]
+        var n: i64 = 0
+        var cur: &Expr = e
+        while (*cur).kind == ExprKind::ExprFieldAccess {
+            if n >= 3 { return (self, 0 - 1) }
+            ids[n as usize] = ir_intern_name((*cur).name)
+            n = n + 1
+            match (*cur).left {
+                Some(b) => { cur = &(*b) }
+                None => { return (self, 0 - 1) }
+            }
+        }
+        if n <= 0 { return (self, 0 - 1) }
+        if (*cur).kind != ExprKind::ExprCall { return (self, 0 - 1) }
+        var cname = ir_empty_name()
+        match (*cur).left {
+            Some(ce) => {
+                if (*ce).kind != ExprKind::ExprIdent { return (self, 0 - 1) }
+                cname = self.tg_resolve_callee(&(*ce))
+            }
+            None => { return (self, 0 - 1) }
+        }
+        let tgi = tg_find(ir_intern_name(cname))
+        if tgi < 0 || TG_RET[tgi as usize] != 1 || TG_HASSELF[tgi as usize] == 1 { return (self, 0 - 1) }
+        var lo = self
+        var si: i64 = 0 - 1
+        if TG_SITE_N > 0 { si = tg_site_find((*cur).span) }
+        if si < 0 {
+            // Never lowered for its value: emit it through its clone here.
+            if TG_ITEM_FN < 0 || lo.current_fn != TG_ITEM_FN || lo.probe_mode { return (self, 0 - 1) }
+            if !(TG_ITEM_EPI || TG_CLONE_FN == lo.current_fn) { return (self, 0 - 1) }
+            if lo.expr_list_len_ref(&(*cur).args) != TG_NPARAM[tgi as usize] { return (self, 0 - 1) }
+            let fd = tg_def_at(tgi)
+            if lo.ir_effect_list_has_name_ref(&fd.effects, "IO") { return (self, 0 - 1) }
+            let tr = lo.tg_lower_call(&(*cur), cname, tgi)
+            if tr.1 < 0 { return (self, 0 - 1) }
+            lo = tr.0
+            if TG_SITE_N > 0 { si = tg_site_find((*cur).span) }
+        }
+        if si < 0 { return (self, 0 - 1) }
+        if TG_SITE_TG[si as usize] != tgi { return (self, 0 - 1) }
+        if !lo.tg_out_layout(tgi) { return (self, 0 - 1) }
+        // The leaf: path names root-first are ids[n-1] .. ids[0].
+        var row: i64 = 0 - 1
+        var r: i64 = 0
+        while r < TG_O_N {
+            if TG_O_DEPTH[r as usize] == n {
+                var same = true
+                var l: i64 = 0
+                while l < n {
+                    if TG_O_PATH[(r * 3 + l) as usize] != ids[(n - 1 - l) as usize] { same = false }
+                    l = l + 1
+                }
+                if same { row = r }
+            }
+            r = r + 1
+        }
+        if row < 0 { return (self, 0 - 1) }
+        lo = lo.tg_rows_compute(&(*cur), si)
+        lo.tg_row_install(si, row)
     }
 
     fn emit_wide_param_unpack(self, preg: i64, limbs: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
@@ -20933,6 +21350,43 @@ impl Lowerer {
         lo
     }
 
+    // Like fo_add_channel_for_variance, but the sensitivity on the channel
+    // (found or created by its sigma^2 register) is the register `sens_reg`,
+    // added to what the expression already has there. False when the channel
+    // table is full.
+    fn fo_add_channel_with_sens(self, variance_reg: i64, sens_reg: i64) -> (Lowerer, bool) with Mut, Panic, Div, IO {
+        var lo = self
+        var ch: i64 = 0 - 1
+        var k: i64 = 0
+        while k < lo.fo_nchan {
+            if lo.fo_sigma2[k as usize] == variance_reg {
+                ch = k
+                k = lo.fo_nchan
+            } else {
+                k = k + 1
+            }
+        }
+        if ch < 0 {
+            if lo.fo_nchan >= 32 { return (lo, false) }
+            ch = lo.fo_nchan
+            lo.fo_sigma2[ch as usize] = variance_reg
+            FO_SIGMA_REG[ch as usize] = 0 - 1
+            FO_CH_DEPTH[ch as usize] = lo.loop_depth
+            lo.fo_nchan = ch + 1
+        }
+        let prev = lo.fo_expr_sens[ch as usize]
+        if prev >= 0 {
+            let sp = lo.fresh_reg()
+            lo = sp.0
+            lo = lo.emit(ir_binop_typed(sp.1, prev, BinaryOp::OpAdd, sens_reg, true, true))
+            lo = lo.emit(ir_mark_float_reg(sp.1))
+            lo.fo_expr_sens[ch as usize] = sp.1
+        } else {
+            lo.fo_expr_sens[ch as usize] = sens_reg
+        }
+        (lo, true)
+    }
+
     // #2827: add sensitivity 1.0 on the channel whose sigma^2 register is
     // `variance_reg`, KEEPING the expression's other channels (fo_seed_from_variance
     // replaces them). Used to put a local's residual variance next to its rows.
@@ -22037,12 +22491,27 @@ impl Lowerer {
             FO_FIELD_SENS_KEY[slot as usize] = key
             FO_FIELD_SENS_COUNT = slot + 1
         }
+        FO_FIELD_HESS_SET[slot as usize] = 0
         var k: i64 = 0
         while k < 32 {
             FO_FIELD_SENS[(slot * 32 + k) as usize] = lo.fo_expr_sens[k as usize]
             k = k + 1
         }
         lo
+    }
+
+    // The expression's Hessian row, kept with the field sensitivities just stored
+    // under `key` (call right after fo_field_sens_store).
+    fn fo_field_hess_store(self, key: i64) -> Lowerer with Mut, Panic, Div {
+        let slot = self.fo_field_sens_slot(key)
+        if slot < 0 { return self }
+        var k: i64 = 0
+        while k < 36 {
+            FO_FIELD_HESS[(slot * 36 + k) as usize] = self.so_expr_hess[k as usize]
+            k = k + 1
+        }
+        FO_FIELD_HESS_SET[slot as usize] = 1
+        self
     }
 
     fn fo_field_sens_slot(self, key: i64) -> i64 with Mut, Panic, Div {
@@ -22180,6 +22649,14 @@ impl Lowerer {
         let copied = self.fo_copy_field_sens(slot)
         var lo = copied.0
         lo = lo.fo_restore_expr_sens(copied.1)
+        if FO_FIELD_HESS_SET[slot as usize] == 1 {
+            lo = lo.so_clear_expr_hess()
+            var hk: i64 = 0
+            while hk < 36 {
+                lo.so_expr_hess[hk as usize] = FO_FIELD_HESS[(slot * 36 + hk) as usize]
+                hk = hk + 1
+            }
+        }
         lo.fo_emit_var_from_sens()
     }
 
@@ -28082,6 +28559,9 @@ impl Lowerer {
             return z
         }
         if (*e).kind == ExprKind::ExprFieldAccess {
+            // A struct-returning call read through a field path without a let.
+            let tgf = self.tg_field_chain_variance(e)
+            if tgf.1 >= 0 { return tgf }
             // Speculative re-lowering: marks raised in a refused paste do not count.
             let fdrop_inl_let = TG_DROP
             TG_DROP = 0
@@ -38168,6 +38648,9 @@ impl Lowerer {
                             // Inside a tangent clone the field keeps its tangent
                             // row, so a returned local reads it back exactly.
                             lo = lo.fo_field_sens_store(lo.variance_field_key(base_reg, named_field_idx))
+                            if TG_ACTIVE_ORD == 2 {
+                                lo = lo.fo_field_hess_store(lo.variance_field_key(base_reg, named_field_idx))
+                            }
                         }
                     }
                     // A struct-valued field carries its own field slots; remember the
