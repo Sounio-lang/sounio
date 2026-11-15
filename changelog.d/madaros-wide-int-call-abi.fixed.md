@@ -30,3 +30,12 @@ silently.
 Pinned by `tests/run-pass/wide_int_fn_abi_high_limbs.sio`, whose values are
 the inline computation plus `tests/oracles/wide_int_fn_abi_high_limbs.cpp`.
 Main's compiler fails it.
+
+SOIR v6 does not carry the three new IrFunction fields. `--ir-roundtrip` and
+`--ir-dump` now refuse a function that uses the wide ABI and name the field
+(`wide_param_limbs` or `wide_return_bits`), so a round trip can never decode
+it silently as one-word. Before this, such a function was refused only
+incidentally (by a named return type, or by the writer's size limits), and
+a unit-returning wide-param function had nothing else to stop it. Pinned in
+`scripts/ci/madaros_ir_roundtrip_gate.sh` with three fixtures. The gate fails
+on the compiler without the named preflight check.
