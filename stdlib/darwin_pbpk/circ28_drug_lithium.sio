@@ -68,7 +68,7 @@
 //                                    crosses cell membranes slowly (Na/H exchange, Na-Li
 //                                    countertransport), so distribution is permeability-limited; the
 //                                    one scalar multiplies every organ's ps (default 20 Q_i)
-//  ka      fitted   propagated 3     FITTED to the oral Tmax 1.44 h (below)
+//  ka      fitted   propagated 3     first-order ka (ADOPTED, ntr = 1) FITTED to the oral Tmax 1.44 h; a 7-stage transit chain is recorded as a comparison (not adopted)
 //  fa      0.945    0.0159   1       urinary recovery after the immediate-release tablet 94.5 %
 //                                    (Arancibia 1986; lithium is not metabolised, so urinary recovery
 //                                    is F). u = range/sqrt12 of [0.945, 1.0], judgment (no SD in abstract)
@@ -98,7 +98,7 @@
 //   kpsc = (V_ss - bp V_blood) / sum_i V_i (1 - vf_i) w_i,  w_i = fEW_i + fIW_i
 //          (circ28_kp_scale_for_vss on the water pattern)
 //   pssc, ka: roots of V1(pssc) = V1_obs and Tmax(ka) = Tmax_obs by bisection on kernel runs
-//          (offline; the stored values are LI_PSSC and LI_KA, re-checked by the test)
+//          (offline; the stored values are li_pssc_fit_g(g) and li_k_fit_g(g); g = gut variant, re-checked by the test)
 //
 // WHAT IS VALIDATION: terminal t1/2; alpha; V_ss from a second study; the total
 // clearance from the same study as alpha (Arancibia 1986 values that no fit used); Cmax and
@@ -150,9 +150,32 @@ pub fn li_val_alpha_sd() -> f64 { return 0.27 }
 pub fn li_obs_tmax() -> f64 { return 1.44 }
 pub fn li_u_tmax() -> f64 { return 0.5 / 3.4641016151377544 }
 
-// Stored results of the offline bisections (re-checked by the test)
-pub fn li_pssc_fit() -> f64 { return 0.002840382 }
-pub fn li_ka_fit() -> f64 { return 0.8754726387 }
+// Stored results of the offline root searches (re-checked by the test). g = the gut variant (0 all-organ Kp scalar, 1 gut wall
+// at its unscaled water-pattern Kp). ADOPTED input: first-order (li_ntr() = 1, ka 0.8755 /h fitted to Tmax 1.44 h). RECORDED COMPARISON
+// (round 3): a chain of li_ntr_tr() = 7 STAGES of rate k (IR tablet "6 transit compartments", Ka = Ktr, Yuan 2021: 6 + 1, rule 11;
+// PAEDIATRIC, 52 children, n fixed, weak), mean transit time 7/k. It is NOT adopted: it raises Cmax from 1.35 to 2.07 mmol/L (z +3.0 -> +10.2)
+// and fails two round-2 passes (see the test header).
+pub fn li_ntr() -> i32 { return 1 }
+pub fn li_ntr_tr() -> i32 { return 7 }
+pub fn li_gut() -> i32 { return 0 }
+pub fn li_ka_fo_fit() -> f64 { return 0.8754726387 }
+pub fn li_pssc_fit_g(g: i32) -> f64 {
+    if g == 1 { return 0.002880983057 }
+    return 0.002840382018
+}
+// k of the adopted input (ntr = li_ntr() = 1, first-order ka; g = 1 with ntr = 1 was not fitted and is not used) and of the recorded
+// 7-stage comparison input (li_k_tr_g)
+pub fn li_k_fit_g(g: i32) -> f64 { return 0.8754726387 }
+pub fn li_k_tr_g(g: i32) -> f64 {
+    if g == 1 { return 7.69427498 }
+    return 7.90855876
+}
+pub fn li_k_n(g: i32, ntr: i32) -> f64 {
+    if ntr == 1 { return li_k_fit_g(g) }
+    return li_k_tr_g(g)
+}
+pub fn li_pssc_fit() -> f64 { return li_pssc_fit_g(li_gut()) }
+pub fn li_k_fit() -> f64 { return li_k_fit_g(li_gut()) }
 
 // ---- molar arithmetic --------------------------------------------------------
 // mmol of lithium in `mg` of lithium carbonate (Li2CO3, two Li per formula unit)
@@ -174,7 +197,7 @@ pub fn li_pattern(out: &![f64; 14]) with Mut {
 // ---- record --------------------------------------------------------------------
 // Value array of the record with the kernel's Kp slots: the water pattern is not an entry
 // of the 18-slot record, so the parameters of a run are built by li_params below.
-pub fn li_params(th: &[f64; 18]) -> Circ28Params with Mut, Div, Panic {
+pub fn li_params(th: &[f64; 18], g: i32) -> Circ28Params with Mut, Div, Panic {
     var t2: [f64; 18] = [0.0; 18]
     var k: i32 = 0
     while k < 18 {
@@ -189,15 +212,21 @@ pub fn li_params(th: &[f64; 18]) -> Circ28Params with Mut, Div, Panic {
         p.kp[i] = (*th)[CD_KPSC] * pat[i]
         i = i + 1
     }
+    if g == 1 {
+        p.kp[8] = pat[8]
+    }
     return p
 }
 
 // kpsc for a given bp and V_ss (closed form on the water pattern)
-pub fn li_kpsc_for(bp: f64, vss: f64) -> f64 with Mut, Div, Panic {
+pub fn li_kpsc_for(bp: f64, vss: f64, g: i32) -> f64 with Mut, Div, Panic {
     var p = circ28_physiology()
     p.bp = bp
     var pat: [f64; 14] = [0.0; 14]
     li_pattern(&!pat)
+    if g == 1 {
+        return circ28_kp_scale_for_vss_gutrr(p, pat, vss)
+    }
     return circ28_kp_scale_for_vss(p, pat, vss)
 }
 
@@ -218,7 +247,7 @@ pub fn li_idx(t: f64) -> i32 {
 // One dose of `dose` (mmol) into a fresh body. route 0: IV over 0.05 h; route 1: oral first-order
 // (ka, fa, tlag = 0). cs[k] = venous plasma concentration (mmol/L) at li_tgrid(k); cs[0] = 0.
 // Returns the plasma AUC 0..312 h (kernel weights); *tail receives c(312 h).
-pub fn li_profile(p: Circ28Params, dose: f64, route: i32, ka: f64, fa: f64, cs: &![f64; 1300], tail: &![f64; 2]) -> f64 with Mut, Div, Panic {
+pub fn li_profile_n(p: Circ28Params, dose: f64, route: i32, ka: f64, ntr: i32, fa: f64, nstep: i32, cs: &![f64; 1300], tail: &![f64; 2]) -> f64 with Mut, Div, Panic {
     var sys = circ28_sys_zero()
     var s = circ28_state_zero()
     var el = circ28_elim_zero()
@@ -229,9 +258,10 @@ pub fn li_profile(p: Circ28Params, dose: f64, route: i32, ka: f64, fa: f64, cs: 
     while ph < 2 {
         var dt = 0.05
         var n: i32 = 60
+        if nstep < 60 { n = nstep }
         if ph == 1 {
             dt = 0.25
-            n = 1236
+            n = nstep - 60
         }
         circ28_prepare(p, dt, &!sys)
         var j: i32 = 0
@@ -241,7 +271,7 @@ pub fn li_profile(p: Circ28Params, dose: f64, route: i32, ka: f64, fa: f64, cs: 
             if route == 0 {
                 iv = circ28_iv_mass(dose, 0.05, t, t + dt) / dt
             } else {
-                oral = circ28_oral_mass(ka, fa, dose, 0.0, t, t + dt) / dt
+                oral = circ28_oral_mass_n(ka, ntr, fa, dose, 0.0, t, t + dt) / dt
             }
             circ28_step(&!s, p, &sys, iv, oral, &!el)
             t = t + dt
@@ -251,9 +281,14 @@ pub fn li_profile(p: Circ28Params, dose: f64, route: i32, ka: f64, fa: f64, cs: 
         }
         ph = ph + 1
     }
-    (*tail)[0] = (*cs)[1296]
+    (*tail)[0] = (*cs)[nstep]
     (*tail)[1] = s.x[3]
     return el.auc_ven / p.bp
+}
+
+// Full 312 h profile with the module's transit chain (ntr = li_ntr(); k is the per-stage rate).
+pub fn li_profile(p: Circ28Params, dose: f64, route: i32, ka: f64, fa: f64, cs: &![f64; 1300], tail: &![f64; 2]) -> f64 with Mut, Div, Panic {
+    return li_profile_n(p, dose, route, ka, li_ntr(), fa, 1296, cs, tail)
 }
 
 // Curve peeling. out[0] terminal rate lambda_z (1/h), out[1] terminal intercept B,
@@ -323,11 +358,11 @@ pub fn li_w_alo() -> f64 { return 0.5 }
 pub fn li_w_ahi() -> f64 { return 5.0 }
 
 // alpha half-life (h) of the model for the value array th (IV 1 mmol bolus). One run per call.
-pub fn li_alpha_half(th: &[f64; 18]) -> f64 with Mut, Div, Panic {
-    let p = li_params(th)
+pub fn li_alpha_half(th: &[f64; 18], g: i32) -> f64 with Mut, Div, Panic {
+    let p = li_params(th, g)
     var cs: [f64; 1300] = [0.0; 1300]
     var tail: [f64; 2] = [0.0; 2]
-    let a = li_profile(p, 1.0, 0, 1.0, 1.0, &!cs, &!tail)
+    let a = li_profile_n(p, 1.0, 0, 1.0, 1, 1.0, 432, &!cs, &!tail)
     var pe: [f64; 4] = [0.0; 4]
     li_peel(&cs, li_w_tlo(), li_w_thi(), li_w_alo(), li_w_ahi(), &!pe)
     return 0.6931471805599453 / pe[2]
@@ -336,11 +371,11 @@ pub fn li_alpha_half(th: &[f64; 18]) -> f64 with Mut, Div, Panic {
 // Peeled parameters of the model for th (IV 1 mmol bolus): out[0] alpha half-life (h),
 // out[1] central volume V1 = dose / (A + B) (L), out[2] terminal half-life (h),
 // out[3] V_area = dose / (B/lambda_z) (L).
-pub fn li_peeled(th: &[f64; 18], out: &![f64; 4]) with Mut, Div, Panic {
-    let p = li_params(th)
+pub fn li_peeled(th: &[f64; 18], g: i32, out: &![f64; 4]) with Mut, Div, Panic {
+    let p = li_params(th, g)
     var cs: [f64; 1300] = [0.0; 1300]
     var tail: [f64; 2] = [0.0; 2]
-    let a = li_profile(p, 1.0, 0, 1.0, 1.0, &!cs, &!tail)
+    let a = li_profile_n(p, 1.0, 0, 1.0, 1, 1.0, 432, &!cs, &!tail)
     var pe: [f64; 4] = [0.0; 4]
     li_peel(&cs, li_w_tlo(), li_w_thi(), li_w_alo(), li_w_ahi(), &!pe)
     (*out)[0] = 0.6931471805599453 / pe[2]
@@ -350,11 +385,11 @@ pub fn li_peeled(th: &[f64; 18], out: &![f64; 4]) with Mut, Div, Panic {
 }
 
 // Tmax (h) of the model for th: 1 mmol oral, ka = th[CD_KA]; parabolic vertex on the grid
-pub fn li_tmax(th: &[f64; 18]) -> f64 with Mut, Div, Panic {
-    let p = li_params(th)
+pub fn li_tmax(th: &[f64; 18], g: i32, ntr: i32) -> f64 with Mut, Div, Panic {
+    let p = li_params(th, g)
     var cs: [f64; 1300] = [0.0; 1300]
     var tail: [f64; 2] = [0.0; 2]
-    let a = li_profile(p, 1.0, 1, (*th)[CD_KA], (*th)[CD_FA], &!cs, &!tail)
+    let a = li_profile_n(p, 1.0, 1, (*th)[CD_KA], ntr, (*th)[CD_FA], 120, &!cs, &!tail)
     var im: i32 = 1
     var cm = 0.0
     var k: i32 = 1
@@ -429,20 +464,20 @@ pub fn li_measured_record(d: &!Circ28Drug) with Mut, Div, Panic, Epistemic {
 }
 
 // Fits (each in its own function; the closed-form kpsc first, then pssc and ka).
-pub fn li_fit_kpsc_record(d: &!Circ28Drug) with Mut, Div, Panic, Epistemic {
+pub fn li_fit_kpsc_record(d: &!Circ28Drug, g: i32) with Mut, Div, Panic, Epistemic {
     let bp = circ28_drug_value(d, CD_BP)
     let u_bp = cd_sqrt(circ28_drug_variance(d, CD_BP))
     let vss = li_obs_vss()
-    let k0 = li_kpsc_for(bp, vss)
+    let k0 = li_kpsc_for(bp, vss, g)
     let hb = 1.0e-3 * bp
     let hv = 1.0e-4 * vss
-    let dk_dbp = (li_kpsc_for(bp + hb, vss) - li_kpsc_for(bp - hb, vss)) / (2.0 * hb)
-    let dk_dv = (li_kpsc_for(bp, vss + hv) - li_kpsc_for(bp, vss - hv)) / (2.0 * hv)
+    let dk_dbp = (li_kpsc_for(bp + hb, vss, g) - li_kpsc_for(bp - hb, vss, g)) / (2.0 * hb)
+    let dk_dv = (li_kpsc_for(bp, vss + hv, g) - li_kpsc_for(bp, vss - hv, g)) / (2.0 * hv)
     let u = cd_sqrt(dk_dbp * dk_dbp * u_bp * u_bp + dk_dv * dk_dv * li_u_vss() * li_u_vss())
     circ28_drug_set(d, CD_KPSC, k0, u, CD_STATUS_FITTED, "fitted to Vss 41.6 L (Reiss1994) on the tissue-water pattern; u from u(Vss), u(bp)")
 }
 
-pub fn li_v1_at(d: &Circ28Drug, pssc: f64) -> f64 with Mut, Div, Panic, Epistemic {
+pub fn li_v1_at(d: &Circ28Drug, pssc: f64, g: i32) -> f64 with Mut, Div, Panic, Epistemic {
     var th: [f64; 18] = [0.0; 18]
     var i: i32 = 0
     while i < 18 {
@@ -451,20 +486,20 @@ pub fn li_v1_at(d: &Circ28Drug, pssc: f64) -> f64 with Mut, Div, Panic, Epistemi
     }
     th[CD_PSSC] = pssc
     var o: [f64; 4] = [0.0; 4]
-    li_peeled(&th, &!o)
+    li_peeled(&th, g, &!o)
     return o[1]
 }
 
-pub fn li_pssc_record(d: &!Circ28Drug) with Mut, Div, Panic, Epistemic {
-    let x = li_pssc_fit()
+pub fn li_pssc_record(d: &!Circ28Drug, g: i32) with Mut, Div, Panic, Epistemic {
+    let x = li_pssc_fit_g(g)
     let h = 1.0e-2 * x
-    let slope = (li_v1_at(d, x + h) - li_v1_at(d, x - h)) / (2.0 * h)
+    let slope = (li_v1_at(d, x + h, g) - li_v1_at(d, x - h, g)) / (2.0 * h)
     var sa = slope
     if sa < 0.0 { sa = 0.0 - sa }
     circ28_drug_set(d, CD_PSSC, x, li_u_v1() / sa, CD_STATUS_FITTED, "fitted to the central volume V1 0.224 L/kg x 73 kg (Arancibia1986); u from u(V1)/|dV1/dpssc|")
 }
 
-pub fn li_tmax_at(d: &Circ28Drug, ka: f64) -> f64 with Mut, Div, Panic, Epistemic {
+pub fn li_tmax_at(d: &Circ28Drug, ka: f64, g: i32, ntr: i32) -> f64 with Mut, Div, Panic, Epistemic {
     var th: [f64; 18] = [0.0; 18]
     var i: i32 = 0
     while i < 18 {
@@ -472,23 +507,27 @@ pub fn li_tmax_at(d: &Circ28Drug, ka: f64) -> f64 with Mut, Div, Panic, Epistemi
         i = i + 1
     }
     th[CD_KA] = ka
-    return li_tmax(&th)
+    return li_tmax(&th, g, ntr)
 }
 
-pub fn li_ka_record(d: &!Circ28Drug) with Mut, Div, Panic, Epistemic {
-    let x = li_ka_fit()
+pub fn li_ka_record(d: &!Circ28Drug, g: i32, ntr: i32) with Mut, Div, Panic, Epistemic {
+    let x = li_k_n(g, ntr)
     let h = 1.0e-3 * x
-    let slope = (li_tmax_at(d, x + h) - li_tmax_at(d, x - h)) / (2.0 * h)
+    let slope = (li_tmax_at(d, x + h, g, ntr) - li_tmax_at(d, x - h, g, ntr)) / (2.0 * h)
     var sa = slope
     if sa < 0.0 { sa = 0.0 - sa }
-    circ28_drug_set(d, CD_KA, x, li_u_tmax() / sa, CD_STATUS_FITTED, "fitted to the oral Tmax 1.44 h (Arancibia1986 IR tablet); u from u(Tmax)/|dTmax/dka|")
+    circ28_drug_set(d, CD_KA, x, li_u_tmax() / sa, CD_STATUS_FITTED, "per-stage rate of the transit chain (ntr stages; adopted ntr = 1, first-order), fitted to the oral Tmax 1.44 h (Arancibia1986 IR tablet); u from u(Tmax)/|dTmax/dk|")
+}
+
+pub fn li_drug_into_g(d: &!Circ28Drug, g: i32, ntr: i32) with Mut, Div, Panic, Epistemic {
+    li_measured_record(d)
+    li_fit_kpsc_record(d, g)
+    li_pssc_record(d, g)
+    li_ka_record(d, g, ntr)
 }
 
 pub fn li_drug_into(d: &!Circ28Drug) with Mut, Div, Panic, Epistemic {
-    li_measured_record(d)
-    li_fit_kpsc_record(d)
-    li_pssc_record(d)
-    li_ka_record(d)
+    li_drug_into_g(d, li_gut(), li_ntr())
 }
 
 // ---- uncertainty budget with refit ------------------------------------------------------
@@ -516,7 +555,7 @@ pub fn li_z_nominal(z: &![f64; 7]) with Mut {
     (*z)[6] = li_fa()
 }
 
-pub fn li_eval(z: &[f64; 7], th0: &[f64; 18], slope_v1: f64, slope_t: f64, out: &![f64; 2]) with Mut, Div, Panic {
+pub fn li_eval(g: i32, z: &[f64; 7], th0: &[f64; 18], slope_v1: f64, slope_t: f64, out: &![f64; 2]) with Mut, Div, Panic {
     var t: [f64; 18] = [0.0; 18]
     var k: i32 = 0
     while k < 18 {
@@ -526,16 +565,16 @@ pub fn li_eval(z: &[f64; 7], th0: &[f64; 18], slope_v1: f64, slope_t: f64, out: 
     t[CD_BP] = li_bp_of((*z)[0], (*z)[1])
     t[CD_CLREN] = (*z)[2] * 0.06
     t[CD_FA] = (*z)[6]
-    t[CD_KPSC] = li_kpsc_for(t[CD_BP], (*z)[3])
+    t[CD_KPSC] = li_kpsc_for(t[CD_BP], (*z)[3], g)
     var o: [f64; 4] = [0.0; 4]
-    li_peeled(&t, &!o)
+    li_peeled(&t, g, &!o)
     t[CD_PSSC] = t[CD_PSSC] + ((*z)[4] - o[1]) / slope_v1
-    let tm = li_tmax(&t)
+    let tm = li_tmax(&t, g, li_ntr())
     t[CD_KA] = t[CD_KA] + ((*z)[5] - tm) / slope_t
-    let p = li_params(&t)
+    let p = li_params(&t, g)
     var cs: [f64; 1300] = [0.0; 1300]
     var tail: [f64; 2] = [0.0; 2]
-    let a = li_profile(p, 1.0, 1, t[CD_KA], t[CD_FA], &!cs, &!tail)
+    let a = li_profile_n(p, 1.0, 1, t[CD_KA], li_ntr(), t[CD_FA], 1296, &!cs, &!tail)
     var pe: [f64; 4] = [0.0; 4]
     li_peel(&cs, li_w_tlo(), li_w_thi(), li_w_alo(), li_w_ahi(), &!pe)
     (*out)[0] = (a + cs[1296] / pe[0]) * li_mmol_of_carbonate_mg(300.0)
@@ -544,37 +583,33 @@ pub fn li_eval(z: &[f64; 7], th0: &[f64; 18], slope_v1: f64, slope_t: f64, out: 
     (*out)[1] = ss[0]
 }
 
-pub fn li_budget(th0: &[f64; 18], slope_v1: f64, slope_t: f64, b: &![f64; 40]) with Mut, Div, Panic {
+// Forward differences from the nominal evaluation, step min(1e-4 z, 0.1 u) (round 3; was central, 1e-3 z): 8 evaluations instead of 15.
+pub fn li_budget(g: i32, th0: &[f64; 18], slope_v1: f64, slope_t: f64, b: &![f64; 40]) with Mut, Div, Panic {
     var z0: [f64; 7] = [0.0; 7]
     li_z_nominal(&!z0)
     var u: [f64; 7] = [0.0; 7]
     li_u_inputs(&!u)
     var o0: [f64; 2] = [0.0; 2]
-    li_eval(&z0, th0, slope_v1, slope_t, &!o0)
+    li_eval(g, &z0, th0, slope_v1, slope_t, &!o0)
     (*b)[0] = o0[0]
     (*b)[1] = o0[1]
     var va = 0.0
     var vt = 0.0
     var i: i32 = 0
     while i < 7 {
-        var hs = 1.0e-3 * z0[i]
+        var hs = 1.0e-4 * z0[i]
         if hs > 0.1 * u[i] { hs = 0.1 * u[i] }
         var zp: [f64; 7] = [0.0; 7]
-        var zm: [f64; 7] = [0.0; 7]
         var j: i32 = 0
         while j < 7 {
             zp[j] = z0[j]
-            zm[j] = z0[j]
             j = j + 1
         }
         zp[i] = z0[i] + hs
-        zm[i] = z0[i] - hs
         var op: [f64; 2] = [0.0; 2]
-        var om: [f64; 2] = [0.0; 2]
-        li_eval(&zp, th0, slope_v1, slope_t, &!op)
-        li_eval(&zm, th0, slope_v1, slope_t, &!om)
-        let da = (op[0] - om[0]) / (2.0 * hs)
-        let dt = (op[1] - om[1]) / (2.0 * hs)
+        li_eval(g, &zp, th0, slope_v1, slope_t, &!op)
+        let da = (op[0] - o0[0]) / hs
+        let dt = (op[1] - o0[1]) / hs
         (*b)[16 + i] = da
         (*b)[23 + i] = dt
         (*b)[30 + i] = u[i]
