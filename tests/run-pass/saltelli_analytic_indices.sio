@@ -1,0 +1,102 @@
+//@ run-pass
+//@ timeout: 120
+//@ expect-stdout-contains: SALTELLI_ANALYTIC_INDICES_PASS
+//
+// epistemic::sobol::saltelli_run against models whose Sobol' indices are known
+// in closed form, with every input uniform on [0, 1] and seven inputs (the
+// dimension the PBPK28 analyses use).
+//
+//   additive   Y = x0 + 2·x1          S_0 = 1/5, S_1 = 4/5, S_Ti = S_i,
+//                                      every other index 0
+//   product7   Y = Π (0.5 + x_i)       S_i = 0.110917, S_Ti = 0.179307 (all seven)
+//   product    Y = x0·x2              S_0 = S_2 = 3/7, S_T0 = S_T2 = 4/7,
+//                                      every other index 0
+//
+// The sample matrices A and B must be uniform in every column and
+// independent of each other. With the earlier generator, column 0 of A lay in
+// [0, 0.5) and column 0 of B in [0.5, 1) (the base-2 radical inverse of even
+// and of odd indices), so the estimators returned S_0 = 0 for the additive
+// model and first-order values above the total-order ones. Tolerance 0.05 at
+// N = 500.
+
+use epistemic::sobol::{SaltelliResult, saltelli_run}
+
+fn sa_abs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn sa_additive(x: [f64; 10]) -> f64 {
+    return x[0] + 2.0 * x[1]
+}
+
+fn sa_product(x: [f64; 10]) -> f64 {
+    return x[0] * x[2]
+}
+
+// Y = prod_{i<7} (0.5 + x_i): every input has mean 1 and variance 1/12, so
+// with r = 1/12 and P = (1 + r)^7, S_i = r / (P - 1) = 0.110917 and
+// S_Ti = r (1 + r)^6 / (P - 1) = 0.179307 for each of the seven inputs.
+fn sa_product7(x: [f64; 10]) -> f64 {
+    return (0.5 + x[0]) * (0.5 + x[1]) * (0.5 + x[2]) * (0.5 + x[3]) * (0.5 + x[4]) * (0.5 + x[5]) * (0.5 + x[6])
+}
+
+fn sa_check(tag: string, got: f64, want: f64, tol: f64) -> i32 with IO, Mut, Div, Panic {
+    print("  "); print(tag); print(" got "); print(got); print(" want "); println(want)
+    if sa_abs(got - want) > tol {
+        println("  [FAIL] outside tolerance")
+        return 1
+    }
+    return 0
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var fails: i32 = 0
+    let tol = 0.05
+
+    println("additive Y = x0 + 2 x1")
+    let a = saltelli_run(500, 7, 42, sa_additive)
+    fails = fails + sa_check("S_0 ", a.first_order[0], 0.2, tol)
+    fails = fails + sa_check("S_1 ", a.first_order[1], 0.8, tol)
+    fails = fails + sa_check("S_T0", a.total_order[0], 0.2, tol)
+    fails = fails + sa_check("S_T1", a.total_order[1], 0.8, tol)
+    fails = fails + sa_check("S_2 ", a.first_order[2], 0.0, tol)
+    fails = fails + sa_check("S_T6", a.total_order[6], 0.0, tol)
+
+    println("product Y = x0 x2")
+    let p = saltelli_run(500, 7, 42, sa_product)
+    fails = fails + sa_check("S_0 ", p.first_order[0], 0.428571, tol)
+    fails = fails + sa_check("S_2 ", p.first_order[2], 0.428571, tol)
+    fails = fails + sa_check("S_T0", p.total_order[0], 0.571429, tol)
+    fails = fails + sa_check("S_T2", p.total_order[2], 0.571429, tol)
+    fails = fails + sa_check("S_1 ", p.first_order[1], 0.0, tol)
+    fails = fails + sa_check("S_T1", p.total_order[1], 0.0, tol)
+
+    println("product of seven Y = prod (0.5 + x_i)")
+    let q = saltelli_run(500, 7, 42, sa_product7)
+    var sum_first = 0.0
+    var j: i32 = 0
+    while j < 7 {
+        fails = fails + sa_check("S_i ", q.first_order[j], 0.110917, tol)
+        fails = fails + sa_check("S_Ti", q.total_order[j], 0.179307, tol)
+        sum_first = sum_first + q.first_order[j]
+        j = j + 1
+    }
+    fails = fails + sa_check("sum S_i", sum_first, 0.776419, 0.10)
+
+    var i: i32 = 0
+    var order: i32 = 0
+    while i < 7 {
+        if a.first_order[i] > a.total_order[i] + tol { order = order + 1 }
+        if p.first_order[i] > p.total_order[i] + tol { order = order + 1 }
+        i = i + 1
+    }
+    if order != 0 { println("  [FAIL] a first-order index exceeds its total-order index"); fails = fails + 1 }
+
+    if fails == 0 {
+        println("SALTELLI_ANALYTIC_INDICES_PASS")
+        return 0
+    }
+    println("SALTELLI_ANALYTIC_INDICES_FAIL")
+    return 1
+}

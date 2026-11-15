@@ -1019,25 +1019,61 @@ struct SaltelliSamples {
     n_dims: i32,
 }
 
-// Return a prime multiplier for dimension d (up to 10 dims).
-// Used to decorrelate quasi-random streams across dimensions.
-fn saltelli_dim_prime(d: i32) -> i64 {
-    if d == 0 { return 2 }
-    if d == 1 { return 3 }
-    if d == 2 { return 5 }
-    if d == 3 { return 7 }
-    if d == 4 { return 11 }
-    if d == 5 { return 13 }
-    if d == 6 { return 17 }
-    if d == 7 { return 19 }
-    if d == 8 { return 23 }
-    return 29
+// Fractional part of the square root of the d-th prime (2, 3, 5, ... 71),
+// d in 0..19: the irrational generators of the Richtmyer lattice below.
+// Matrix A uses d in 0..n_dims-1 and matrix B uses n_dims..2*n_dims-1, so
+// ten inputs need twenty generators.
+fn saltelli_dim_alpha(d: i32) -> f64 {
+    if d == 0 { return 0.414213562373095 }
+    if d == 1 { return 0.732050807568877 }
+    if d == 2 { return 0.236067977499790 }
+    if d == 3 { return 0.645751311064591 }
+    if d == 4 { return 0.316624790355400 }
+    if d == 5 { return 0.605551275463989 }
+    if d == 6 { return 0.123105625617661 }
+    if d == 7 { return 0.358898943540674 }
+    if d == 8 { return 0.795831523312719 }
+    if d == 9 { return 0.385164807134504 }
+    if d == 10 { return 0.567764362830022 }
+    if d == 11 { return 0.082762530298219 }
+    if d == 12 { return 0.403124237432849 }
+    if d == 13 { return 0.557438524302000 }
+    if d == 14 { return 0.855654600401044 }
+    if d == 15 { return 0.280109889280518 }
+    if d == 16 { return 0.681145747868608 }
+    if d == 17 { return 0.810249675906654 }
+    if d == 18 { return 0.185352771872450 }
+    return 0.426149773176359
 }
 
-// Generate Saltelli base sample matrices A and B using quasi-random sequences.
-// Each matrix has n_samples rows and n_dims columns, filled with values in [0,1].
-// Uses the van der Corput / reverse_bits low-discrepancy generator already in
-// this file, with different multiplier offsets per dimension to decorrelate.
+// Fractional part of a non-negative x.
+fn saltelli_frac(x: f64) -> f64 {
+    let whole = (x as i64) as f64
+    return x - whole
+}
+
+// Generate the Saltelli base sample matrices A and B. Each has n_samples rows
+// and n_dims columns of values in [0, 1).
+//
+// Row i of the pair (A, B) is point k = i + 1 + seed of a Richtmyer
+// (Kronecker) lattice in 2 * n_dims dimensions, x_d = frac(k * alpha_d) with
+// alpha_d = frac(sqrt(p_d)): the first n_dims coordinates form the row of A,
+// the last n_dims the row of B. Every column is equidistributed on [0, 1)
+// and, the alpha_d together with 1 being linearly independent over the
+// rationals, so is every set of columns jointly. That is what the
+// estimators below assume of A and B.
+//
+// Two earlier generators did not satisfy it:
+//  - the base-2 radical inverse of (i + 1 + seed) * p_d + d for every
+//    column: in column 0 the index was always even for A and always odd for
+//    B, so A's column lay in [0, 0.5) and B's in [0.5, 1), and the other
+//    columns were strided subsequences of one base-2 sequence. The
+//    estimators returned S_i = 1 where 0.2 is exact, and S_i > S_Ti.
+//  - a Halton sequence in 2 * n_dims dimensions: at N = 500 its columns
+//    with bases 31..43 are too coarse and too correlated; for the
+//    seven-input product model the seventh first-order index came out at
+//    0.051 where 0.111 is exact.
+// tests/run-pass/saltelli_analytic_indices.sio holds the closed-form cases.
 fn saltelli_generate(n_samples: i32, n_dims: i32, seed: i64) -> SaltelliSamples {
     var result = SaltelliSamples {
         matrix_a: [0.0; 5000],
@@ -1056,23 +1092,14 @@ fn saltelli_generate(n_samples: i32, n_dims: i32, seed: i64) -> SaltelliSamples 
     }
     result.n_samples = actual_samples
 
-    // Fill matrix A: use base indices [1 .. actual_samples] with dimension
-    // multipliers chosen to be coprime (primes) for decorrelation.
-    // Primes for up to 10 dimensions: 2, 3, 5, 7, 11, 13, 17, 19, 23, 29
     var i: i32 = 0
     while i < actual_samples {
-        let base_idx: i64 = (i as i64) + 1 + seed
+        let k: f64 = ((i as i64) + 1 + seed) as f64
         var d: i32 = 0
         while d < n_dims {
-            // Dimension-dependent multiplier to decorrelate quasi-random streams
-            let dim_mult = saltelli_dim_prime(d)
-            let idx_a: i64 = base_idx * dim_mult + (d as i64)
-            let idx_b: i64 = base_idx * dim_mult + (d as i64) + (actual_samples as i64) * 7 + 131
-
             let flat = i * n_dims + d
-            result.matrix_a[flat] = reverse_bits(idx_a)
-            result.matrix_b[flat] = reverse_bits(idx_b)
-
+            result.matrix_a[flat] = saltelli_frac(k * saltelli_dim_alpha(d))
+            result.matrix_b[flat] = saltelli_frac(k * saltelli_dim_alpha(n_dims + d))
             d = d + 1
         }
         i = i + 1
