@@ -169,6 +169,12 @@ expect_trap i32_mul "1000000i32 * 3000"
 probe i32_neg_min i32 'let n: i32 = id(-2147483647) - 1
   println(-n)'
 expect_trap i32_neg_min "-i32::MIN"
+# The call boundary: a non-literal i64 outside 32 bits reaching an i32 param
+# panics there (it used to be masked, or kept whole in an i32 local).
+probe i32_arg_narrow i32 'let big: i64 = 9999999999
+  let r: i32 = id(big)
+  println(r as i64)'
+expect_trap i32_arg_narrow "i64 9999999999 passed to an i32 param"
 probe u32_add_max u32 'let w: u32 = id(4294967295)
   println(w + 1)'
 expect_trap u32_add_max "u32::MAX + 1"
