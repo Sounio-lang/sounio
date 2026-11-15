@@ -191,7 +191,7 @@ expect_trap i32_neg_min "-i32::MIN" "i32 unary -"
 probe i32_arg_narrow i32 'let big: i64 = 9999999999
   let r: i32 = id(big)
   println(r as i64)'
-expect_trap i32_arg_narrow "i64 9999999999 passed to an i32 param"
+expect_trap i32_arg_narrow "i64 9999999999 passed to an i32 param" "i32 argument"
 probe u32_add_max u32 'let w: u32 = id(4294967295)
   println(w + 1)'
 expect_trap u32_add_max "u32::MAX + 1" "u32 +"
