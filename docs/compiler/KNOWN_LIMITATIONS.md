@@ -86,8 +86,12 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
   and correlation with the caller's other uses of the same input is kept.
   Pin: `tests/run-pass/gum_fo_tangent_clone_calls.sio`, which checks nine
   values against `tests/oracles/gum_fo_tangent_clone_calls.cpp` at 1e-12.
-  What this leaves to the re-lowering below: struct parameters and struct
-  returns, methods, helpers whose body asks `variance_of` and friends,
+  Struct parameters (by value or by reference) and methods (`self`,
+  `self: &T`) carry one tangent per scalar `f64` field. The argument has to
+  name a local (`p`, `&p`); pin:
+  `tests/run-pass/gum_fo_tangent_clone_structs.sio`.
+  What this leaves to the re-lowering below: struct returns, nested struct
+  fields, helpers whose body asks `variance_of` and friends,
   and the Hessian of a call the re-lowering refuses (with second order on,
   such a call takes the clone's first-order row and its Hessian reads NaN;
   `hessian_of` of a call that was never lowered for its value still reads 0).

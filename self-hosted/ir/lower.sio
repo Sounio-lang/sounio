@@ -366,6 +366,20 @@ var TG_NF: [i64; 512] = [0; 512]
 // Knowledge). Bit p of TG_KMASK: that parameter is a Knowledge.
 var TG_FMASK: [i64; 512] = [0; 512]
 var TG_KMASK: [i64; 512] = [0; 512]
+// Per-parameter kind and struct type id (16 slots per entry), and whether
+// parameter 0 is the receiver.
+var TG_PKIND: [i64; 8192] = [0; 8192]
+var TG_PTYPE: [i64; 8192] = [0; 8192]
+var TG_HASSELF: [i64; 512] = [0; 512]
+// Tangent layout of one entry (tg_layout): parameter index, field slot (-1:
+// the parameter itself) and field name id, in a fixed order both the clone
+// and its callers enumerate.
+let TG_LMAX: i64 = 24
+var TG_L_N: i64 = 0
+var TG_L_PARAM: [i64; 24] = [0; 24]
+var TG_L_FIELD: [i64; 24] = [-1; 24]
+var TG_L_FNAME: [i64; 24] = [0; 24]
+var TG_L_ISK: [i64; 24] = [0; 24]
 var TG_NPARAM: [i64; 512] = [0; 512]
 var TG_STATE: [i64; 512] = [0; 512]
 // -1 unknown, 0 no measurement can happen inside, 1 one can.
@@ -377,9 +391,10 @@ var TG_CLONE_FN: i64 = 0 - 1
 var TG_OUT_REG: i64 = 0 - 1
 var TG_BODY_PENDING: bool = false
 var TG_NPCH: i64 = 0
-var TG_PARAM_REG: [i64; 16] = [-1; 16]
-var TG_PARAM_CH: [i64; 16] = [-1; 16]
-var TG_PARAM_ISK: [i64; 16] = [0; 16]
+var TG_PARAM_REG: [i64; 24] = [-1; 24]
+var TG_PARAM_CH: [i64; 24] = [-1; 24]
+var TG_PARAM_ISK: [i64; 24] = [0; 24]
+var TG_PARAM_FIELD: [i64; 24] = [-1; 24]
 var TG_ONE_REG: i64 = 0 - 1
 // The function lowered by lowerer_lower_fn_item_mut, the only path that
 // drains the clone queue. A call lowered anywhere else keeps the original.
@@ -395,7 +410,7 @@ var TG_SITE_START: [i64; 256] = [0; 256]
 var TG_SITE_END: [i64; 256] = [0; 256]
 var TG_SITE_TG: [i64; 256] = [0; 256]
 var TG_SITE_VINT: [i64; 256] = [-1; 256]
-var TG_SITE_D: [i64; 4096] = [-1; 4096]
+var TG_SITE_D: [i64; 8192] = [-1; 8192]
 
 fn tg_find(id: i64) -> i64 with Mut, Panic, Div {
     var i: i64 = 0
@@ -10078,7 +10093,7 @@ fn lowerer_fo_preregister_pure_fns_mut(
                             // Tangent-clone registry: here, before any module's
                             // body lowering opens its Box-arena window, so the
                             // TgNode outlives every module that calls it.
-                            if TG_ACTIVE < 0 { tg_note(head.name, &(*fd)) }
+                            if TG_ACTIVE < 0 { tg_note(head.name, &(*fd), ir_empty_name()) }
                             let lo_x = (*lo).fo_register_pure_fn_transfer(head.name, &(*fd))
                             (*lo) = lo_x
                         }
@@ -10098,6 +10113,7 @@ fn lowerer_fo_preregister_pure_fns_mut(
                                             match *mfd_opt {
                                                 Some(fd) => {
                                                     let mangled = ir_mangle_method_name(head.name, mhead.name)
+                                                    if TG_ACTIVE < 0 { tg_note(mangled, &(*fd), head.name) }
                                                     let lo_x = (*lo).fo_register_pure_fn_transfer(mangled, &(*fd))
                                                     (*lo) = lo_x
                                                 }
@@ -11045,10 +11061,12 @@ fn lower_type_expr_is_integer(te: &TypeExpr) -> bool with Mut, Panic, Div {
     lower_name_is_integer_type(ir_path_first_name((*te).path))
 }
 // Register `name` when a clone can carry its Jacobian row: an f64 return, at
-// most 15 declared parameters each f64, Knowledge, integer or bool, at least
-// one of them carrying a tangent, no receiver, and no epistemic query in the
-// body. Everything else keeps the existing call-site analysis.
-fn tg_note(name: Name, fd: &FnDef) with Mut, Panic, Div, Alloc {
+// most 15 declared parameters, each f64, Knowledge, integer, bool, or a
+// struct (by value or by reference) whose scalar f64 fields carry the
+// tangents, a leading `self` for a method of `self_type`, and no epistemic
+// query in the body. Everything else keeps the existing call-site analysis.
+// Parameter kinds (TG_PKIND): 0 integer/bool, 1 f64, 2 Knowledge, 3 struct.
+fn tg_note(name: Name, fd: &FnDef, self_type: Name) with Mut, Panic, Div, Alloc {
     if (*fd).is_extern || (*fd).is_kernel { return }
     if TG_COUNT >= TG_MAX { return }
     match (*fd).return_type {
@@ -11057,24 +11075,42 @@ fn tg_note(name: Name, fd: &FnDef) with Mut, Panic, Div, Alloc {
     }
     let id = ir_intern_name(name)
     if tg_find(id) >= 0 { return }
+    let idx = TG_COUNT
     var fmask: i64 = 0
     var kmask: i64 = 0
     var np: i64 = 0
     var nf: i64 = 0
+    var nstruct: i64 = 0
+    var has_self = false
     var pc = &(*fd).params
     while true {
         match *pc {
             Some(pl) => {
-                if (*pl).head.is_self { return }
                 if np >= 15 { return }
-                if (*pl).head.ty.kind == TypeExprKind::TypeKnowledge {
+                let slot = (idx * 16 + np) as usize
+                TG_PTYPE[slot] = 0
+                if (*pl).head.is_self {
+                    if np != 0 || self_type.len <= 0 { return }
+                    has_self = true
+                    TG_PKIND[slot] = 3
+                    TG_PTYPE[slot] = ir_intern_name(self_type)
+                    nstruct = nstruct + 1
+                } else if (*pl).head.ty.kind == TypeExprKind::TypeKnowledge {
                     fmask = fmask + (1 << np)
                     kmask = kmask + (1 << np)
                     nf = nf + 1
+                    TG_PKIND[slot] = 2
                 } else if lower_type_expr_is_f64(&(*pl).head.ty) {
                     fmask = fmask + (1 << np)
                     nf = nf + 1
-                } else if !(lower_type_expr_is_integer(&(*pl).head.ty) || lower_type_expr_is_bool(&(*pl).head.ty)) {
+                    TG_PKIND[slot] = 1
+                } else if lower_type_expr_is_integer(&(*pl).head.ty) || lower_type_expr_is_bool(&(*pl).head.ty) {
+                    TG_PKIND[slot] = 0
+                } else if (*pl).head.ty.kind != TypeExprKind::TypeRawPtr && lower_param_struct_type_name(&(*pl).head.ty).len > 0 {
+                    TG_PKIND[slot] = 3
+                    TG_PTYPE[slot] = ir_intern_name(lower_param_struct_type_name(&(*pl).head.ty))
+                    nstruct = nstruct + 1
+                } else {
                     return
                 }
                 np = np + 1
@@ -11083,15 +11119,15 @@ fn tg_note(name: Name, fd: &FnDef) with Mut, Panic, Div, Alloc {
             None => break
         }
     }
-    if nf <= 0 { return }
+    if nf <= 0 && nstruct <= 0 { return }
     if tg_stmts_call(&(*fd).body.stmts, 0, 0) { return }
-    let idx = TG_COUNT
     TG_ID[idx as usize] = id
     TG_NAME[idx as usize] = name
     TG_NF[idx as usize] = nf
     TG_FMASK[idx as usize] = fmask
     TG_KMASK[idx as usize] = kmask
     TG_NPARAM[idx as usize] = np
+    TG_HASSELF[idx as usize] = if has_self { 1 } else { 0 }
     TG_STATE[idx as usize] = 0
     TG_DRAW[idx as usize] = 0 - 1
     TG_HEAD = Some(Box::new(TgNode { idx: idx, def: *fd, next: TG_HEAD }))
@@ -16573,23 +16609,82 @@ impl Lowerer {
     // register, which becomes the param's value.
     // ---- tangent clones (see TgNode) ----
 
-    // The clone parameter `e` names: a bare parameter local, or `.value` of a
-    // Knowledge parameter. -1 when it is neither, or when the name has been
-    // rebound since entry (the local register no longer matches).
+    // The tangent layout of entry `tgi` into TG_L_*: every f64 / Knowledge
+    // parameter, then, in declaration order, every scalar f64 field of each
+    // struct parameter (the receiver included). The clone and every caller
+    // call this, so both sides index the Jacobian row the same way. False
+    // when a struct type is unknown or the row would exceed TG_LMAX.
+    fn tg_layout(self, tgi: i64) -> bool with Mut, Panic, Div, Alloc {
+        TG_L_N = 0
+        if tgi < 0 || tgi >= TG_COUNT { return false }
+        let np = TG_NPARAM[tgi as usize]
+        var p: i64 = 0
+        while p < np {
+            let slot = (tgi * 16 + p) as usize
+            let kind = TG_PKIND[slot]
+            if kind == 1 || kind == 2 {
+                if TG_L_N >= TG_LMAX { return false }
+                TG_L_PARAM[TG_L_N as usize] = p
+                TG_L_FIELD[TG_L_N as usize] = 0 - 1
+                TG_L_FNAME[TG_L_N as usize] = 0
+                TG_L_ISK[TG_L_N as usize] = if kind == 2 { 1 } else { 0 }
+                TG_L_N = TG_L_N + 1
+            } else if kind == 3 {
+                let tn = ir_name_at(TG_PTYPE[slot])
+                let nslots = self.struct_layout_slot_count(tn)
+                if nslots <= 0 { return false }
+                var sidx: i64 = 0
+                while sidx < nslots {
+                    let pos = self.struct_layout_field_pos(tn, sidx)
+                    if pos >= 0 && self.struct_layout_pos_is_float(pos) == 1
+                        && self.struct_layout_pos_array_len(pos) == 0 {
+                        if TG_L_N >= TG_LMAX { return false }
+                        TG_L_PARAM[TG_L_N as usize] = p
+                        TG_L_FIELD[TG_L_N as usize] = sidx
+                        TG_L_FNAME[TG_L_N as usize] = ir_intern_name(self.struct_layout_pos_field_name(pos))
+                        TG_L_ISK[TG_L_N as usize] = 0
+                        TG_L_N = TG_L_N + 1
+                    }
+                    sidx = sidx + 1
+                }
+            }
+            p = p + 1
+        }
+        TG_L_N > 0
+    }
+
+    // The clone parameter `e` names: a bare parameter local, `.value` of a
+    // Knowledge parameter, or a scalar field of a struct parameter
+    // (`p.f`, `(*p).f`, `self.f`). -1 when it is none of these, or when the
+    // name has been rebound since entry (the local register no longer
+    // matches).
     fn tg_param_slot(self, e: &Expr) -> i64 with Mut, Panic, Div, Alloc {
         var nm = ir_empty_name()
         var via_value = false
+        var field_id: i64 = 0 - 1
         if (*e).kind == ExprKind::ExprIdent {
             nm = (*e).name
-        } else if (*e).kind == ExprKind::ExprFieldAccess && ir_name_eq_lit((*e).name, "value") {
+        } else if (*e).kind == ExprKind::ExprFieldAccess {
             match (*e).left {
                 Some(b) => {
-                    if (*b).kind != ExprKind::ExprIdent { return 0 - 1 }
-                    nm = (*b).name
-                    via_value = true
+                    if (*b).kind == ExprKind::ExprIdent {
+                        nm = (*b).name
+                    } else if (*b).kind == ExprKind::ExprUnary && (*b).un_op == UnaryOp::OpDeref {
+                        match (*b).left {
+                            Some(bi) => {
+                                if (*bi).kind != ExprKind::ExprIdent { return 0 - 1 }
+                                nm = (*bi).name
+                            }
+                            None => { return 0 - 1 }
+                        }
+                    } else {
+                        return 0 - 1
+                    }
                 }
                 None => { return 0 - 1 }
             }
+            if ir_name_eq_lit((*e).name, "value") { via_value = true }
+            field_id = ir_intern_name((*e).name)
         } else {
             return 0 - 1
         }
@@ -16598,8 +16693,10 @@ impl Lowerer {
         var k: i64 = 0
         while k < TG_NPCH {
             if TG_PARAM_REG[k as usize] == r {
-                if via_value && TG_PARAM_ISK[k as usize] == 0 { return 0 - 1 }
-                return k
+                let pf = TG_PARAM_FIELD[k as usize]
+                if field_id < 0 && pf < 0 { return k }
+                if field_id >= 0 && pf >= 0 && pf == field_id { return k }
+                if via_value && pf < 0 && TG_PARAM_ISK[k as usize] == 1 { return k }
             }
             k = k + 1
         }
@@ -16607,12 +16704,13 @@ impl Lowerer {
     }
 
     // Clone entry: bind the hidden out-array parameter (last, after every
-    // declared one) and give each f64 / Knowledge parameter its own channel.
+    // declared one) and give each tangent of the layout its own channel.
     fn tg_bind_out_and_seed(self, params: &Option<Box<ParamList>>) -> Lowerer with Mut, Panic, Div, Alloc, IO {
         var lo = self
         TG_NPCH = 0
         TG_OUT_REG = 0 - 1
         if TG_ACTIVE < 0 { return lo }
+        if !lo.tg_layout(TG_ACTIVE) { return lo.report_error_at(10839) }
         let preg_pair = lo.fresh_reg()
         lo = preg_pair.0
         let preg = preg_pair.1
@@ -16629,37 +16727,37 @@ impl Lowerer {
         let one = lo.emit_f64_const(1.0)
         lo = one.0
         TG_ONE_REG = one.1
-        let fmask = TG_FMASK[TG_ACTIVE as usize]
-        let kmask = TG_KMASK[TG_ACTIVE as usize]
-        var p: i64 = 0
-        var cur = params
-        while true {
-            match *cur {
-                Some(pl) => {
-                    if ((fmask >> p) & 1) == 1 && TG_NPCH < 16 && lo.fo_nchan < 32 {
-                        let sig = lo.emit_f64_const(1.0)
-                        lo = sig.0
-                        let ch = lo.fo_nchan
-                        lo.fo_sigma2[ch as usize] = sig.1
-                        FO_SIGMA_REG[ch as usize] = 0 - 1
-                        FO_CH_DEPTH[ch as usize] = lo.loop_depth
-                        lo.fo_nchan = ch + 1
-                        TG_PARAM_REG[TG_NPCH as usize] = lo.lookup_local((*pl).head.name)
-                        TG_PARAM_CH[TG_NPCH as usize] = ch
-                        TG_PARAM_ISK[TG_NPCH as usize] = (kmask >> p) & 1
-                        TG_NPCH = TG_NPCH + 1
+        var li: i64 = 0
+        while li < TG_L_N {
+            if lo.fo_nchan >= 32 { return lo.report_error_at(10839) }
+            // The name of parameter TG_L_PARAM[li].
+            var pname = ir_empty_name()
+            var p: i64 = 0
+            var cur = params
+            while true {
+                match *cur {
+                    Some(pl) => {
+                        if p == TG_L_PARAM[li as usize] { pname = (*pl).head.name }
+                        p = p + 1
+                        cur = &(*pl).tail
                     }
-                    p = p + 1
-                    cur = &(*pl).tail
+                    None => break
                 }
-                None => break
             }
+            let sig = lo.emit_f64_const(1.0)
+            lo = sig.0
+            let ch = lo.fo_nchan
+            lo.fo_sigma2[ch as usize] = sig.1
+            FO_SIGMA_REG[ch as usize] = 0 - 1
+            FO_CH_DEPTH[ch as usize] = lo.loop_depth
+            lo.fo_nchan = ch + 1
+            TG_PARAM_REG[li as usize] = lo.lookup_local(pname)
+            TG_PARAM_CH[li as usize] = ch
+            TG_PARAM_ISK[li as usize] = TG_L_ISK[li as usize]
+            TG_PARAM_FIELD[li as usize] = if TG_L_FIELD[li as usize] >= 0 { TG_L_FNAME[li as usize] } else { 0 - 1 }
+            li = li + 1
         }
-        if TG_NPCH != TG_NF[TG_ACTIVE as usize] {
-            // A parameter the registry counted did not get a channel (table
-            // full): the row would be wrong, so the clone cannot be built.
-            return lo.report_error_at(10839)
-        }
+        TG_NPCH = TG_L_N
         lo
     }
 
@@ -16718,19 +16816,59 @@ impl Lowerer {
         lo
     }
 
-    // Value path of `callee(args)` through its clone. Returns -1 (emitting
-    // nothing) when the clone's slot cannot be had; the caller then lowers
-    // the ordinary call.
-    fn tg_lower_call(self, e: &Expr, callee_name: Name, tgi: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+    // A struct argument must name a local (`p`, `&p`, `&!p`): the caller
+    // reads its fields' sensitivities through that name. Empty otherwise.
+    fn tg_struct_arg_name(self, a: &Expr) -> Name with Mut, Panic, Div, Alloc {
+        if (*a).kind == ExprKind::ExprIdent {
+            if self.lookup_local((*a).name) >= 0 { return (*a).name }
+            return ir_empty_name()
+        }
+        if (*a).kind == ExprKind::ExprUnary && ((*a).un_op == UnaryOp::OpRef || (*a).un_op == UnaryOp::OpRefMut) {
+            match (*a).left {
+                Some(inner) => {
+                    if (*inner).kind == ExprKind::ExprIdent && self.lookup_local((*inner).name) >= 0 { return (*inner).name }
+                }
+                None => {}
+            }
+        }
+        ir_empty_name()
+    }
+
+    // Whether every struct parameter of entry `tgi` gets a local-naming
+    // argument. `recv` is the receiver of a method call (or None).
+    fn tg_args_ok(self, tgi: i64, recv: &Option<Box<Expr> >, args: &Option<Box<ExprList>>) -> bool with Mut, Panic, Div, Alloc {
+        var p: i64 = 0
+        if TG_HASSELF[tgi as usize] == 1 {
+            match *recv {
+                Some(r) => { if self.tg_struct_arg_name(&(*r)).len <= 0 { return false } }
+                None => { return false }
+            }
+            p = 1
+        }
+        var ac = args
+        while true {
+            match *ac {
+                Some(al) => {
+                    if p >= 16 { return false }
+                    if TG_PKIND[(tgi * 16 + p) as usize] == 3 && self.tg_struct_arg_name(&(*al).head).len <= 0 { return false }
+                    p = p + 1
+                    ac = &(*al).tail
+                }
+                None => break
+            }
+        }
+        p == TG_NPARAM[tgi as usize]
+    }
+
+    // The clone's fn id, with its signature preseeded (declared params plus
+    // the out-array) and the clone queued for lowering. -1 when no slot.
+    fn tg_clone_id(self, callee_name: Name, tgi: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         var lo = self
-        if tgi < 0 || tgi >= TG_COUNT { return (lo, 0 - 1) }
         let fd = tg_def_at(tgi)
         let cname = tg_clone_name(callee_name)
-        let orig_id = lowerer_find_or_add_fn_id_mut(&! lo, callee_name)
         let cid = lowerer_find_or_add_fn_id_mut(&! lo, cname)
-        if cid < 0 || orig_id < 0 { return (lo, 0 - 1) }
+        if cid < 0 { return (lo, 0 - 1) }
         let np = TG_NPARAM[tgi as usize]
-        let nf = TG_NF[tgi as usize]
         if ir_fn_get(&(*lo.module), cid as usize).param_count != np + 1 && TG_CLONE_FN != cid {
             lowerer_preseed_fn_signature_mut(&! lo, cname, &fd.params, &fd.return_type, &fd.effects)
             var mb = lo.module
@@ -16740,12 +16878,15 @@ impl Lowerer {
             lo.module = mb
         }
         if TG_STATE[tgi as usize] == 0 { TG_STATE[tgi as usize] = 1 }
-        let f128_mask = ir_fn_get(&(*lo.module), orig_id as usize).f128_param_mask
-        let ref_mask = ir_fn_get(&(*lo.module), orig_id as usize).ref_struct_param_mask
-        let pa = lo.lower_expr_args_masked_borrow_ref(&e.args, f128_mask, ref_mask)
-        lo = pa.lowerer
-        var args: Option<Box<IrRegList>> = if pa.count <= 0 { None } else { Some(Box::new(pa.regs)) }
-        var argc = pa.count
+        (lo, cid)
+    }
+
+    // Append the out-array to `args`, call clone `cid`, and load the
+    // Jacobian row and the internal variance into the call site's record.
+    fn tg_emit_clone_call(self, e: &Expr, tgi: i64, cid: i64, cname: Name, args0: Option<Box<IrRegList>>, argc0: i64, nf: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        var args = args0
+        var argc = argc0
         let arr_pair = lo.fresh_reg()
         lo = arr_pair.0
         let arr = arr_pair.1
@@ -16784,7 +16925,7 @@ impl Lowerer {
             lo = lo.emit(ir_mark_float_reg(dr.1))
             if slot_i >= 0 {
                 if k < nf {
-                    TG_SITE_D[(slot_i * 16 + k) as usize] = dr.1
+                    TG_SITE_D[(slot_i * 32 + k) as usize] = dr.1
                 } else {
                     TG_SITE_VINT[slot_i as usize] = dr.1
                 }
@@ -16794,8 +16935,33 @@ impl Lowerer {
         (lo, dst)
     }
 
+    // Value path of `callee(args)` through its clone. Returns -1 (emitting
+    // nothing) when the clone cannot be used; the caller then lowers the
+    // ordinary call.
+    fn tg_lower_call(self, e: &Expr, callee_name: Name, tgi: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        if tgi < 0 || tgi >= TG_COUNT || TG_HASSELF[tgi as usize] == 1 { return (lo, 0 - 1) }
+        let no_recv: Option<Box<Expr> > = None
+        if !lo.tg_args_ok(tgi, &no_recv, &e.args) { return (lo, 0 - 1) }
+        if !lo.tg_layout(tgi) { return (lo, 0 - 1) }
+        let nf = TG_L_N
+        let orig_id = lowerer_find_or_add_fn_id_mut(&! lo, callee_name)
+        if orig_id < 0 { return (lo, 0 - 1) }
+        let cp = lo.tg_clone_id(callee_name, tgi)
+        lo = cp.0
+        let cid = cp.1
+        if cid < 0 { return (lo, 0 - 1) }
+        let f128_mask = ir_fn_get(&(*lo.module), orig_id as usize).f128_param_mask
+        let ref_mask = ir_fn_get(&(*lo.module), orig_id as usize).ref_struct_param_mask
+        let pa = lo.lower_expr_args_masked_borrow_ref(&e.args, f128_mask, ref_mask)
+        lo = pa.lowerer
+        let args: Option<Box<IrRegList>> = if pa.count <= 0 { None } else { Some(Box::new(pa.regs)) }
+        lo.tg_emit_clone_call(e, tgi, cid, tg_clone_name(callee_name), args, pa.count, nf)
+    }
+
     // Variance of a call that went through a clone: s_c = sum_k d_k s_c(a_k)
-    // over the caller's channels, plus the call's internal variance as one
+    // over the caller's channels, where a_k is the argument, the receiver, or
+    // a field of a struct argument, plus the call's internal variance as one
     // new independent channel. (self, -1) unchanged when the call has no
     // recorded site.
     fn tg_call_variance(self, e: &Expr, after_paste: bool) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
@@ -16805,50 +16971,92 @@ impl Lowerer {
         if self.so_enabled && !after_paste { return (self, 0 - 1) }
         let si = tg_site_find((*e).span)
         if si < 0 { return (self, 0 - 1) }
-        var lo = self
         let tgi = TG_SITE_TG[si as usize]
-        let fmask = TG_FMASK[tgi as usize]
+        if !self.tg_layout(tgi) { return (self, 0 - 1) }
+        var lo = self
+        let has_self = TG_HASSELF[tgi as usize] == 1
+        // Snapshot the layout: walking an argument may lower a nested call,
+        // which lays out its own callee into the same globals.
+        let ln = TG_L_N
+        var lparam: [i64; 24] = [0; 24]
+        var lfield: [i64; 24] = [-1; 24]
+        var lfname: [i64; 24] = [0; 24]
+        var q: i64 = 0
+        while q < ln {
+            lparam[q as usize] = TG_L_PARAM[q as usize]
+            lfield[q as usize] = TG_L_FIELD[q as usize]
+            lfname[q as usize] = TG_L_FNAME[q as usize]
+            q = q + 1
+        }
         var acc: [i64; 32] = [-1; 32]
-        var p: i64 = 0
-        var fk: i64 = 0
-        var ac = &(*e).args
-        while true {
-            match *ac {
-                Some(al) => {
-                    if ((fmask >> p) & 1) == 1 {
-                        let wp = lo.lower_expr_variance_ref(&(*al).head)
-                        lo = wp.0
-                        if wp.1 >= 0 && !lo.fo_expr_has_sens() && !fo_variance_is_static_zero(&lo, wp.1) {
-                            lo = lo.fo_seed_from_variance(wp.1, 0 - 1)
-                        }
-                        let d = TG_SITE_D[(si * 16 + fk) as usize]
-                        var c: i64 = 0
-                        while c < 32 {
-                            let s = lo.fo_expr_sens[c as usize]
-                            if s >= 0 && d >= 0 {
-                                let t = lo.fresh_reg()
-                                lo = t.0
-                                lo = lo.emit(ir_binop_typed(t.1, d, BinaryOp::OpMul, s, true, true))
-                                lo = lo.emit(ir_mark_float_reg(t.1))
-                                if acc[c as usize] < 0 {
-                                    acc[c as usize] = t.1
-                                } else {
-                                    let a = lo.fresh_reg()
-                                    lo = a.0
-                                    lo = lo.emit(ir_binop_typed(a.1, acc[c as usize], BinaryOp::OpAdd, t.1, true, true))
-                                    lo = lo.emit(ir_mark_float_reg(a.1))
-                                    acc[c as usize] = a.1
-                                }
-                            }
-                            c = c + 1
-                        }
-                        fk = fk + 1
-                    }
-                    p = p + 1
-                    ac = &(*al).tail
+        var li: i64 = 0
+        while li < ln {
+            let p = lparam[li as usize]
+            // The argument expression of parameter p.
+            var found = false
+            var arg_e = lower_ident_expr_for_name(ir_empty_name(), (*e).span)
+            if has_self && p == 0 {
+                match (*e).left {
+                    Some(r) => { arg_e = *r; found = true }
+                    None => {}
                 }
-                None => break
+            } else {
+                var ap: i64 = if has_self { 1 } else { 0 }
+                var ac = &(*e).args
+                while !found {
+                    match *ac {
+                        Some(al) => {
+                            if ap == p {
+                                arg_e = (*al).head
+                                found = true
+                            } else {
+                                ap = ap + 1
+                                ac = &(*al).tail
+                            }
+                        }
+                        None => break
+                    }
+                }
             }
+            if found {
+                var walk_e = arg_e
+                if lfield[li as usize] >= 0 {
+                    // `<local>.<field>` of the struct argument.
+                    let base_nm = lo.tg_struct_arg_name(&arg_e)
+                    var fa = lower_ident_expr_for_name(base_nm, (*e).span)
+                    fa.kind = ExprKind::ExprFieldAccess
+                    fa.name = ir_name_at(lfname[li as usize])
+                    fa.left = Some(Box::new(lower_ident_expr_for_name(base_nm, (*e).span)))
+                    walk_e = fa
+                }
+                let wp = lo.lower_expr_variance_ref(&walk_e)
+                lo = wp.0
+                if wp.1 >= 0 && !lo.fo_expr_has_sens() && !fo_variance_is_static_zero(&lo, wp.1) {
+                    lo = lo.fo_seed_from_variance(wp.1, 0 - 1)
+                }
+                let d = TG_SITE_D[(si * 32 + li) as usize]
+                var c: i64 = 0
+                while c < 32 {
+                    let s = lo.fo_expr_sens[c as usize]
+                    if s >= 0 && d >= 0 {
+                        let t = lo.fresh_reg()
+                        lo = t.0
+                        lo = lo.emit(ir_binop_typed(t.1, d, BinaryOp::OpMul, s, true, true))
+                        lo = lo.emit(ir_mark_float_reg(t.1))
+                        if acc[c as usize] < 0 {
+                            acc[c as usize] = t.1
+                        } else {
+                            let a = lo.fresh_reg()
+                            lo = a.0
+                            lo = lo.emit(ir_binop_typed(a.1, acc[c as usize], BinaryOp::OpAdd, t.1, true, true))
+                            lo = lo.emit(ir_mark_float_reg(a.1))
+                            acc[c as usize] = a.1
+                        }
+                    }
+                    c = c + 1
+                }
+            }
+            li = li + 1
         }
         lo = lo.fo_clear_expr_sens().so_clear_expr_hess()
         var c2: i64 = 0
@@ -26620,6 +26828,14 @@ impl Lowerer {
         if (*e).kind == ExprKind::ExprCall {
             return self.lower_call_expr_variance_ref(e)
         }
+        if (*e).kind == ExprKind::ExprMethodCall && TG_SITE_N > 0 {
+            // A method call that went through its tangent clone.
+            let tgm = self.tg_call_variance(e, false)
+            if tgm.1 >= 0 {
+                return tgm
+            }
+            return tgm.0.lower_expr_variance_non_call_ref(e)
+        }
         if TG_NPCH > 0 && self.current_fn == TG_CLONE_FN {
             let tk = self.tg_param_slot(e)
             if tk >= 0 {
@@ -26807,7 +27023,12 @@ impl Lowerer {
                             if minl.1 >= 0 {
                                 return minl
                             }
-                            return (minl.0.fo_clear_expr_sens().so_clear_expr_hess(), -1)
+                            // Second order on and the body refused: the clone's first-order row.
+                            let mtg = minl.0.tg_call_variance(e, true)
+                            if mtg.1 >= 0 {
+                                return mtg
+                            }
+                            return (mtg.0.fo_clear_expr_sens().so_clear_expr_hess(), -1)
                         }
                     }
                 }
@@ -43518,6 +43739,21 @@ impl Lowerer {
                 lo2 = lo2.emit(ir_alloc_array(wide_ret_arr_m, lo2.aggregate_storage_bytes(wide_ret_limbs_m), wide_ret_limbs_m))
                 arg_list = lower_reg_list_append(arg_list, wide_ret_arr_m)
                 arg_count = arg_count + 1
+            }
+        }
+        // First-order GUM through a method: the same tangent clone as a named
+        // call, with the receiver's scalar f64 fields in the Jacobian row.
+        if TG_ITEM_FN >= 0 && lo2.current_fn == TG_ITEM_FN && !lo2.probe_mode
+            && (TG_ITEM_EPI || TG_CLONE_FN == lo2.current_fn) && wide_ret_limbs_m == 0 {
+            let tgi_m = tg_find(ir_intern_name(call_name))
+            if tgi_m >= 0 && TG_HASSELF[tgi_m as usize] == 1 && lo2.tg_args_ok(tgi_m, &e.left, &e.args) && lo2.tg_layout(tgi_m) {
+                let nf_m = TG_L_N
+                let cpm = lo2.tg_clone_id(call_name, tgi_m)
+                lo2 = cpm.0
+                if cpm.1 >= 0 {
+                    let args_m = lo2.prepend_arg(base_reg, arg_list)
+                    return lo2.tg_emit_clone_call(e, tgi_m, cpm.1, tg_clone_name(call_name), args_m, arg_count + 1, nf_m)
+                }
             }
         }
         let args2 = lo2.prepend_arg(base_reg, arg_list)
