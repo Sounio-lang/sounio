@@ -16,7 +16,8 @@ theorem α_pc (t : DSt) : (α t).pc = leaves t.ar t.pc := rfl
 
 theorem sim_prim (ph : Phys) (p : Prim) (args : List DVal) (t : DSt) (o : Origin) (qn : Nat)
     (hl : args.length = p.eff.1)
-    (hp : p ≠ .copy ∧ p ≠ .tput ∧ p ≠ .tnew ∧ p ≠ .tget ∧ p ≠ .putb ∧ p ≠ .putn ∧ p ≠ .mcmp)
+    (hp : p ≠ .copy ∧ p ≠ .tput ∧ p ≠ .tnew ∧ p ≠ .tget ∧ p ≠ .putb ∧ p ≠ .putn ∧ p ≠ .mcmp ∧
+      p ≠ .streq ∧ p ≠ .strhash)
     (hqd : leaves t.ar qn = (qPlan args t.pc o).den (leaves t.ar)) :
     execPrim ph p (args.map (αv t.ar)) (α t) o = (execPrimD ph p args t o qn).abs := by
   have hq := hqd.trans (qPlan_den t.ar args t.pc o)
@@ -95,6 +96,38 @@ theorem sim_mcmp (ph : Phys) (n y x : DVal) (t : DSt) (o : Origin) (qn : Nat) :
     simp only [DPR.abs, List.map, PE.den, qPlan_den, foldPlan2_den]
     rfl
   · have h' : ¬ ((αv t.ar x).w + (αv t.ar n).w ≤ (α t).msize ∧ (αv t.ar y).w + (αv t.ar n).w ≤ (α t).msize) := h
+    rw [if_neg h', if_neg h]; rfl
+
+theorem sim_strhash (ph : Phys) (l a : DVal) (t : DSt) (o : Origin) (qn : Nat) :
+    execPrim ph .strhash ([l, a].map (αv t.ar)) (α t) o = (execPrimD ph .strhash [l, a] t o qn).abs := by
+  simp only [execPrim, execPrimD, List.map]
+  by_cases h : a.w + l.w ≤ t.msize
+  · have h' : (αv t.ar a).w + (αv t.ar l).w ≤ (α t).msize := h
+    rw [if_pos h', if_pos h]
+    simp only [DPR.abs, List.map, PE.den, qPlan_den, foldPlan_den]
+    rfl
+  · have h' : ¬ (αv t.ar a).w + (αv t.ar l).w ≤ (α t).msize := h
+    rw [if_neg h', if_neg h]; rfl
+
+theorem sim_streq (ph : Phys) (l2 a2 l1 a1 : DVal) (t : DSt) (o : Origin) (qn : Nat) :
+    execPrim ph .streq ([l2, a2, l1, a1].map (αv t.ar)) (α t) o =
+      (execPrimD ph .streq [l2, a2, l1, a1] t o qn).abs := by
+  simp only [execPrim, execPrimD, List.map]
+  by_cases h : a1.w + l1.w ≤ t.msize ∧ a2.w + l2.w ≤ t.msize
+  · have h' : (αv t.ar a1).w + (αv t.ar l1).w ≤ (α t).msize ∧
+        (αv t.ar a2).w + (αv t.ar l2).w ≤ (α t).msize := h
+    rw [if_pos h', if_pos h]
+    by_cases hl : l1.w = l2.w
+    · have hl' : (αv t.ar l1).w = (αv t.ar l2).w := hl
+      rw [if_pos hl', if_pos hl]
+      simp only [DPR.abs, List.map, PE.den, qPlan_den, foldPlan2_den]
+      rfl
+    · have hl' : ¬ (αv t.ar l1).w = (αv t.ar l2).w := hl
+      rw [if_neg hl', if_neg hl]
+      simp only [DPR.abs, List.map, PE.den, qPlan_den]
+      rfl
+  · have h' : ¬ ((αv t.ar a1).w + (αv t.ar l1).w ≤ (α t).msize ∧
+        (αv t.ar a2).w + (αv t.ar l2).w ≤ (α t).msize) := h
     rw [if_neg h', if_neg h]; rfl
 
 end Sporos

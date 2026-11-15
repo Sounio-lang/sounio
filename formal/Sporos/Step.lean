@@ -69,7 +69,8 @@ def execPrim (ph : Phys) (p : Prim) (args : List Val) (s : St) (o : Origin) : PR
   | .st32, [a, v] => match s.st a.w 4 v.w q with | some s' => .ok [] s' | none => .fail .bounds
   | .st64, [a, v] => match s.st a.w 8 v.w q with | some s' => .ok [] s' | none => .fail .bounds
   | .copy, [n, dst, src] =>
-    -- ( src dst n -- ): byte by byte, ascending
+    -- ( src dst n -- ): every destination byte is read from the memory before the copy,
+    -- so overlapping blocks behave as memmove (`copy_overlap`)
     if src.w + n.w ≤ s.msize ∧ dst.w + n.w ≤ s.msize then
       .ok [] { s with mem := (fun x =>
         if dst.w ≤ x ∧ x < dst.w + n.w then ⟨(s.mem (src.w + (x - dst.w))).w, (s.mem (src.w + (x - dst.w))).p ++ q⟩
@@ -95,11 +96,15 @@ def execPrim (ph : Phys) (p : Prim) (args : List Val) (s : St) (o : Origin) : PR
     if a1.w + l1.w ≤ s.msize ∧ a2.w + l2.w ≤ s.msize then
       let eqb := l1.w == l2.w && (List.range l1.w).all fun i =>
         (s.mem (a1.w + i)).w % 256 == (s.mem (a2.w + i)).w % 256
-      .ok [mk (bool eqb)] s
+      -- the bytes compared determine the result: when the lengths differ none is read
+      let pm := if l1.w = l2.w then
+        (List.range l1.w).foldr (fun i acc => (s.mem (a1.w + i)).p ++ (s.mem (a2.w + i)).p ++ acc) [] else []
+      .ok [⟨bool eqb, q ++ pm⟩] s
     else .fail .bounds
   | .strhash, [l, a] =>
     if a.w + l.w ≤ s.msize then
-      .ok [mk (fnv ((List.range l.w).map fun i => (s.mem (a.w + i)).w % 256))] s
+      let pm := (List.range l.w).foldr (fun i acc => (s.mem (a.w + i)).p ++ acc) []
+      .ok [⟨wrap (fnv ((List.range l.w).map fun i => (s.mem (a.w + i)).w % 256)), q ++ pm⟩] s
     else .fail .bounds
   | .tnew, [] => .ok [mk s.tabs.length] { s with tabs := s.tabs ++ [[]] }
   | .tput, [v, k, tb] =>

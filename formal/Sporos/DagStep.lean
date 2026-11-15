@@ -170,11 +170,15 @@ def execPrimD (ph : Phys) (p : Prim) (args : List DVal) (s : DSt) (o : Origin) (
     if a1.w + l1.w ≤ s.msize ∧ a2.w + l2.w ≤ s.msize then
       let eqb := l1.w == l2.w && (List.range l1.w).all fun i =>
         (s.mem (a1.w + i)).w % 256 == (s.mem (a2.w + i)).w % 256
-      .ok [mk (bool eqb)] s
+      let pm : PE := if l1.w = l2.w then
+        (List.range l1.w).foldr (fun i acc => .app (.app (.node (s.mem (a1.w + i)).n) (.node (s.mem (a2.w + i)).n)) acc) .nil
+        else .nil
+      .ok [(bool eqb, .app q pm)] s
     else .fail .bounds
   | .strhash, [l, a] =>
     if a.w + l.w ≤ s.msize then
-      .ok [mk (fnv ((List.range l.w).map fun i => (s.mem (a.w + i)).w % 256))] s
+      let pm : PE := (List.range l.w).foldr (fun i acc => .app (.node (s.mem (a.w + i)).n) acc) .nil
+      .ok [(wrap (fnv ((List.range l.w).map fun i => (s.mem (a.w + i)).w % 256)), .app q pm)] s
     else .fail .bounds
   | .tnew, [] => .ok [mk s.tabs.length] { s with tabs := s.tabs ++ [[]] }
   | .tput, [v, k, tb] =>
