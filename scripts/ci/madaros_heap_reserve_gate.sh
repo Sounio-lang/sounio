@@ -13,9 +13,12 @@
 #      its address space covers the reservation (lazy commit);
 #   2. under `ulimit -v 3 GiB` it still prints 42 (halving fallback);
 #   3. under `ulimit -v 200 MiB` it exits 184 (below the floor), not SIGSEGV;
-#   4. a by-value loop needing ~9.8 GB of arena, under `ulimit -v 4 GiB`,
-#      exits 181 with the arena-full diagnostic — the wall is the mapping,
-#      checked, not a crash.
+#   4. a linked chain of 400k live 32 KiB nodes (~13 GB, all reachable at
+#      once), under `ulimit -v 4 GiB`, exits 181 with the arena-full
+#      diagnostic — the wall is the mapping, checked, not a crash;
+#   5. the by-value loop that churns ~9.8 GB of garbage completes under the
+#      same limit. Until loop regions (ADR-010 section 5) that loop was case
+#      4: it reached the wall with garbage, so it pinned the leak as well.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
@@ -41,6 +44,22 @@ fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
     var i: i64 = 0
     while i < 400000000 { s = s + i  i = i + 1 }
     if s < 0 { println(s) }
+    0
+}
+SIO
+
+cat >"$WORK/chain.sio" <<'SIO'
+struct Big { data: [f64; 4096], n: i64 }
+struct Node { b: Big, next: Option<Box<Node>> }
+
+fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
+    var head: Option<Box<Node>> = None
+    var i: i64 = 0
+    while i < 400000 {
+        head = Some(Box::new(Node { b: Big { data: [0.0; 4096], n: i }, next: head }))
+        i = i + 1
+    }
+    println("done")
     0
 }
 SIO
@@ -73,6 +92,7 @@ build() {
   chmod +x "$WORK/$1.elf"
 }
 build small
+build chain
 build big
 
 # 1. normal run; sample address space and RSS while it loops.
@@ -107,15 +127,24 @@ set -e
 [[ "$rc" -eq 184 ]] || gate_fail "under ulimit -v 200 MiB: rc=$rc, want 184"
 echo "ulimit -v 200 MiB: exit 184"
 
-# 4. The wall is checked: a 4 GiB mapping fills and reports arena full.
+# 4. The wall is checked: live data fills the 4 GiB mapping and reports arena full.
+set +e
+( ulimit -v 4194304; timeout 600 "$WORK/chain.elf" ) >"$WORK/chain.out" 2>"$WORK/chain.err"
+rc=$?
+set -e
+[[ "$rc" -eq 181 ]] || { sed -n '1,10p' "$WORK/chain.err" >&2; gate_fail "live chain under ulimit -v 4 GiB: rc=$rc, want 181"; }
+grep -q "madaros: arena full" "$WORK/chain.err" || gate_fail "arena-full diagnostic missing"
+echo "ulimit -v 4 GiB, ~13 GB live chain: exit 181 with the arena-full diagnostic"
+
+# 5. Garbage is not a wall: loop regions reclaim each iteration.
 set +e
 ( ulimit -v 4194304; timeout 600 "$WORK/big.elf" ) >"$WORK/big.out" 2>"$WORK/big.err"
 rc=$?
 set -e
-[[ "$rc" -eq 181 ]] || { sed -n '1,10p' "$WORK/big.err" >&2; gate_fail "by-value loop under ulimit -v 4 GiB: rc=$rc, want 181"; }
-grep -q "madaros: arena full" "$WORK/big.err" || gate_fail "arena-full diagnostic missing"
-echo "ulimit -v 4 GiB, ~9.8 GB by-value loop: exit 181 with the arena-full diagnostic"
+[[ "$rc" -eq 0 ]] && grep -qx '299999.000000' "$WORK/big.out" \
+  || { sed -n '1,10p' "$WORK/big.err" >&2; gate_fail "by-value loop under ulimit -v 4 GiB: rc=$rc, want rc 0 and 299999.000000"; }
+echo "ulimit -v 4 GiB, ~9.8 GB of by-value garbage: completes, prints 299999.000000"
 
-gate_pass "heap reserved lazily (RSS ${rss_kb} KiB of ${vm_kb} KiB mapped), rlimit fallback, floor exit 184, checked wall 181"
+gate_pass "heap reserved lazily (RSS ${rss_kb} KiB of ${vm_kb} KiB mapped), rlimit fallback, floor exit 184, checked wall 181 on live data, garbage reclaimed"
 echo "measured=yes"
 exit 0

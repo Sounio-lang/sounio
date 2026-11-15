@@ -186,6 +186,12 @@ expect_trap i32_mul "1000000i32 * 3000" "i32 *"
 probe i32_neg_min i32 'let n: i32 = id(-2147483647) - 1
   println(-n)'
 expect_trap i32_neg_min "-i32::MIN" "i32 unary -"
+# The call boundary: a non-literal i64 outside 32 bits reaching an i32 param
+# panics there (it used to be masked, or kept whole in an i32 local).
+probe i32_arg_narrow i32 'let big: i64 = 9999999999
+  let r: i32 = id(big)
+  println(r as i64)'
+expect_trap i32_arg_narrow "i64 9999999999 passed to an i32 param"
 probe u32_add_max u32 'let w: u32 = id(4294967295)
   println(w + 1)'
 expect_trap u32_add_max "u32::MAX + 1" "u32 +"
@@ -201,5 +207,54 @@ expect_trap i64_mul "2^62 * 2" "i64 *"
 probe i64_neg_min i64 'let n: i64 = id(-9223372036854775808)
   println(-n)'
 expect_trap i64_neg_min "-i64::MIN" "i64 unary -"
+
+# 5) ADR-031 R2: integer / and % fail on a zero divisor and on MIN / -1,
+# through the same trap as overflow (exit 1), not the CPU's SIGFPE. The
+# divisors come through id() so neither the checker's constant-zero refusal
+# (E056/E057) nor constant propagation sees them.
+probe div_zero_i64 i64 'let z: i64 = id(0)
+  println(id(7) / z)'
+expect_trap div_zero_i64 "7 / 0 (i64)"
+probe rem_zero_i64 i64 'let z: i64 = id(0)
+  println(id(7) % z)'
+expect_trap rem_zero_i64 "7 % 0 (i64)"
+probe div_min_i64 i64 'let m: i64 = id(-9223372036854775807) - 1
+  println(m / id(-1))'
+expect_trap div_min_i64 "i64::MIN / -1"
+probe rem_min_i64 i64 'let m: i64 = id(-9223372036854775807) - 1
+  println(m % id(-1))'
+expect_trap rem_min_i64 "i64::MIN % -1"
+probe div_zero_u64 u64 'let z: u64 = id(0)
+  println(id(7) / z)'
+expect_trap div_zero_u64 "7 / 0 (u64)"
+probe div_min_i32 i32 'let m: i32 = id(-2147483647) - 1
+  println(m / id(-1))'
+expect_trap div_min_i32 "i32::MIN / -1"
+
+cat > "$OUT/div_ok.sio" <<'EOF'
+fn id(x: i64) -> i64 { x }
+fn idu(x: u64) -> u64 { x }
+fn main() with IO {
+  let m: i64 = id(-9223372036854775807) - 1
+  println(id(-7) / id(2))
+  println(id(-7) % id(2))
+  println(m / id(1))
+  println(m / id(2))
+  println(idu(18446744073709551615) / idu(2))
+  println(idu(18446744073709551615) % idu(10))
+}
+EOF
+if ! "$SOUC" run "$OUT/div_ok.sio" >"$OUT/div_ok.log" 2>&1; then
+  echo "FAIL: in-range division probe did not run clean"
+  tail -10 "$OUT/div_ok.log" || true
+  exit 1
+fi
+for want in "-3" "-1" "-9223372036854775808" "-4611686018427387904" "9223372036854775807" "5"; do
+  grep -qxF -- "$want" "$OUT/div_ok.log" || {
+    echo "FAIL: expected line '$want' missing from the division probe"
+    cat "$OUT/div_ok.log" || true
+    exit 1
+  }
+done
 
 echo "MADAROS_INT_OVERFLOW_GATE_OK"

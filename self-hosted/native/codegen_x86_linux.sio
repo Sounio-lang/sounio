@@ -1573,6 +1573,16 @@ fn native_v2_region_builtin_id(n: Name) -> i64 with Mut, Panic, Div {
     if name_eq_lit(n, "__rgn_exit_scalar") { return 67 }
     if name_eq_lit(n, "__rgn_barrier") { return 68 }
     if name_eq_lit(n, "__rgn_mark_all") { return 69 }
+    // 74 and 75: loop-iteration regions (ir/lower.sio LOWER_LOOP_RGN_*).
+    if name_eq_lit(n, "__rgn_reset") { return 74 }
+    if name_eq_lit(n, "__rgn_settle") { return 75 }
+    // 84: 76..80 belong to the effect and print builtins (fx_install is 76),
+    // 80..82 to wrapping_add/sub/mul (SIO-207) and 83 to print_u64; this id
+    // was 81 until SIO-207 took it;
+    // the dispatch is a flat `builtin_id == N` chain, so a shared id runs the
+    // first emitter that matches. scripts/ci/madaros_loop_region_gate.sh
+    // checks every id in that chain is distinct.
+    if name_eq_lit(n, "__rgn_copy_payload") { return 84 }
     // 73, not 72: main took 72 for array_concat (SIO-389); sharing it sent
     // `v as *mut T` to the array_concat emitter (SIGILL, #2966 merge).
     if name_eq_lit(n, "__ptr_of_ref") { return 73 }
@@ -3087,6 +3097,45 @@ fn nc_emit_carry_guard(nc: &! NativeCompiler, kind: i64) with Mut, Panic, Div {
     let jc_pos = (*nc).code.len
     nc_emit_jc_rel32(nc)
     nc_record_overflow_site(nc, jc_pos + 2, kind)
+}
+
+// ADR-031 R2: integer division and remainder fail on a zero divisor and,
+// for signed operands, on the one quotient that does not fit (MIN / -1).
+// Emit with the divisor in rcx and the dividend in rax, before cqo or
+// `xor rdx, rdx` (the MIN check uses rdx as scratch). Both failures jump to
+// the same per-function trap stub as the SIO-207 overflow guard, so they
+// exit through the panic shape instead of the CPU's #DE (SIGFPE).
+//   test rcx, rcx        48 85 C9
+//   jz   trap            0F 84 rel32
+// signed only:
+//   cmp  rcx, -1         48 83 F9 FF
+//   jne  +12             75 0C          (skips the next 12 bytes)
+//   mov  rdx, rax        48 89 C2
+//   neg  rdx             48 F7 DA       (OF set iff rax == i64::MIN)
+//   jo   trap            0F 80 rel32
+fn nc_emit_div_guard(nc: &! NativeCompiler, is_signed: bool) with Mut, Panic, Div {
+    NC_V2_OVERFLOW_GUARD_USED = 1
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x85)
+    nc_emit_byte(nc, 0xc9)
+    let jz_pos = (*nc).code.len
+    nc_emit_jz_rel32(nc)
+    nc_add_label_patch(nc, jz_pos + 2, nc_v2_overflow_trap_label())
+    if is_signed {
+        nc_emit_byte(nc, 0x48)
+        nc_emit_byte(nc, 0x83)
+        nc_emit_byte(nc, 0xf9)
+        nc_emit_byte(nc, 0xff)
+        nc_emit_byte(nc, 0x75)
+        nc_emit_byte(nc, 0x0c)
+        nc_emit_byte(nc, 0x48)
+        nc_emit_byte(nc, 0x89)
+        nc_emit_byte(nc, 0xc2)
+        nc_emit_byte(nc, 0x48)
+        nc_emit_byte(nc, 0xf7)
+        nc_emit_byte(nc, 0xda)
+        nc_emit_overflow_guard(nc)
+    }
 }
 
 // CMP RAX, RBX  (sets flags for lhs=rax, rhs=rbx)
@@ -5569,13 +5618,11 @@ fn nc_core_intern_alloc_fail_explain_into(nc: &! NativeCompiler, fail_code: i64)
         }
         let off = native_v2_rodata_len_into(nc)
         nc_alloc_diag_append_ascii_into(nc, "  the generated program's runtime heap is one bump arena, reserved at start up\n")
-        nc_alloc_diag_append_ascii_into(nc, "  to this machine's RAM + swap (never below 2 GiB), whose space is\n")
-        nc_alloc_diag_append_ascii_into(nc, "  never reclaimed: every aggregate value created or copied by value (struct\n")
-        nc_alloc_diag_append_ascii_into(nc, "  literal, by-value array/struct argument or return, x = matnm_set(x, ...))\n")
-        nc_alloc_diag_append_ascii_into(nc, "  takes fresh arena space for the life of the process. A loop that does so\n")
-        nc_alloc_diag_append_ascii_into(nc, "  per iteration exhausts it. Fix: hoist buffers out of the loop and write\n")
-        nc_alloc_diag_append_ascii_into(nc, "  through &! references (see stdlib/chemistry/catalysis.sio and\n")
-        nc_alloc_diag_append_ascii_into(nc, "  simulate_general_epistemic in stdlib/chemistry/kinetics.sio).\n")
+        nc_alloc_diag_append_ascii_into(nc, "  to this machine's RAM + swap (never below 2 GiB), and it is full. Region\n")
+        nc_alloc_diag_append_ascii_into(nc, "  reclamation hands back what a function or a loop iteration made once it\n")
+        nc_alloc_diag_append_ascii_into(nc, "  returns or ends, so this much is either reachable at once or was kept by\n")
+        nc_alloc_diag_append_ascii_into(nc, "  a region that could not reset because a value made in it escaped (a store\n")
+        nc_alloc_diag_append_ascii_into(nc, "  into older memory, an extern call, a reference cast to a number).\n")
         (*nc).alloc_fail_arena_explain_off = off
         (*nc).alloc_fail_arena_explain_len = native_v2_rodata_len_into(nc) - off
         return
@@ -5589,10 +5636,11 @@ fn nc_core_intern_alloc_fail_explain_into(nc: &! NativeCompiler, fail_code: i64)
     // ELF load address 0x400000 and requires exactly seven argument-form hits.
     nc_alloc_diag_append_ascii_into(nc, "  the generated program's handle table (")
     nc_alloc_diag_append_decimal_into(nc, nc_handle_capacity())
-    nc_alloc_diag_append_ascii_into(nc, " managed objects, never\n")
-    nc_alloc_diag_append_ascii_into(nc, "  reclaimed) is exhausted: every aggregate over 16 bytes created or copied\n")
-    nc_alloc_diag_append_ascii_into(nc, "  by value takes a handle for the life of the process. Fix: hoist buffers\n")
-    nc_alloc_diag_append_ascii_into(nc, "  out of the loop and write through &! references.\n")
+    nc_alloc_diag_append_ascii_into(nc, " managed objects) is full: that many\n")
+    nc_alloc_diag_append_ascii_into(nc, "  objects over 16 bytes are reachable at once, or were kept by a region that\n")
+    nc_alloc_diag_append_ascii_into(nc, "  could not reset because a value made in it escaped. What a function or a\n")
+    nc_alloc_diag_append_ascii_into(nc, "  loop iteration makes and drops is reclaimed when it returns or ends.\n")
+    nc_alloc_diag_append_ascii_into(nc, "  Compile with SOUNIO_NV2_HANDLE_LOG2=23..28 for a table of 2^23..2^28.\n")
     (*nc).alloc_fail_handles_explain_off = off
     (*nc).alloc_fail_handles_explain_len = native_v2_rodata_len_into(nc) - off
 }
@@ -6633,8 +6681,13 @@ fn emit_builtin_rgn_reset_fits_into(nc: &! NativeCompiler) with Mut, Panic, Div 
 }
 
 // __rgn_exit_scalar(tok, v): close a region whose function returns a scalar,
-// resetting it unless it escaped or v itself refers to a young heap object
-// (an integer carrying a reference is not something lowering can rule out).
+// resetting it unless it escaped. v (the result, kept in the IR shape that
+// opt_cleanup's ocp_center_frame and lower.sio's HOF-transparency probe
+// read) is not classified: a scalar result carries a young reference only
+// through a word-keeping conversion, and every such conversion has already
+// marked the region escaped (numeric provenance, ADR-010 section 5). Classifying
+// it read counters, indices and enum tags in the handle-id range
+// 1..handle_count as young references and kept the region forever.
 fn emit_builtin_rgn_exit_scalar_into(nc: &! NativeCompiler) with Mut, Panic, Div {
     rgn_emit_alu(nc, 0x85, 7, 7)
     let none = rgn_emit_jcc(nc, 0x84)
@@ -6643,19 +6696,106 @@ fn emit_builtin_rgn_exit_scalar_into(nc: &! NativeCompiler) with Mut, Panic, Div
     rgn_emit_load(nc, 0, 11, native_v2_region_record_field_escaped())
     rgn_emit_alu(nc, 0x85, 0, 0)
     let escaped = rgn_emit_jcc(nc, 0x85)
-    rgn_emit_classify(nc, 6, 8, 9, 10, 0 - 1, 0 - 1)
-    rgn_emit_load(nc, 10, 11, native_v2_region_record_field_heap_start())
-    rgn_emit_alu(nc, 0x39, 9, 10)
-    let young = rgn_emit_jcc(nc, 0x83)
-    rgn_patch_not_ref_exits(nc)
     rgn_emit_load(nc, 9, 11, native_v2_region_record_field_heap_start())
     rgn_emit_load(nc, 10, 8, runtime_context_field_heap_cursor())
     rgn_emit_zero_range(nc, 9, 10, 8, true)
     rgn_emit_reset_bumps(nc, 11, 8)
     rgn_patch(nc, escaped)
-    rgn_patch(nc, young)
     rgn_emit_pop_to(nc, 11, 8)
     rgn_patch(nc, none)
+    nc_emit_ret(nc)
+}
+
+// __rgn_reset(tok) -> 1 after resetting the region at tok IN PLACE (it stays
+// open, its start unchanged), 0 when it escaped and must not reset. Loop
+// regions (ir/lower.sio LOWER_LOOP_RGN_*) span the whole loop and call this at
+// every iteration end that carries no aggregate. tok 0 (no region) answers 1:
+// there is nothing to keep and nothing to restart.
+fn emit_builtin_rgn_reset_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    rgn_emit_mov_imm(nc, 0, 1)
+    rgn_emit_alu(nc, 0x85, 7, 7)
+    let none = rgn_emit_jcc(nc, 0x84)
+    rgn_emit_load_ctx(nc, 8)
+    rgn_emit_mov(nc, 11, 7)
+    rgn_emit_load(nc, 0, 11, native_v2_region_record_field_escaped())
+    rgn_emit_alu(nc, 0x85, 0, 0)
+    let escaped = rgn_emit_jcc(nc, 0x85)
+    rgn_emit_load(nc, 9, 11, native_v2_region_record_field_heap_start())
+    rgn_emit_load(nc, 10, 8, runtime_context_field_heap_cursor())
+    rgn_emit_zero_range(nc, 9, 10, 8, true)
+    rgn_emit_reset_bumps(nc, 11, 8)
+    rgn_emit_mov_imm(nc, 2, 0)
+    rgn_emit_store(nc, 11, native_v2_region_record_field_zero_to(), 2)
+    rgn_emit_store(nc, 11, native_v2_region_record_field_handles_to(), 2)
+    rgn_emit_mov_imm(nc, 0, 1)
+    nc_emit_ret(nc)
+    rgn_patch(nc, escaped)
+    rgn_emit_alu(nc, 0x31, 0, 0)
+    rgn_patch(nc, none)
+    nc_emit_ret(nc)
+}
+
+// __rgn_settle(tok): after __rgn_reset_fits and the second copies, keep the
+// region at tok open and finish what __rgn_leave would: zero the first copies
+// (between the cursor and zero_to) and clear the widened live bounds, so the
+// next iteration starts from fresh zero bytes and exact bounds.
+fn emit_builtin_rgn_settle_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    rgn_emit_alu(nc, 0x85, 7, 7)
+    let none = rgn_emit_jcc(nc, 0x84)
+    rgn_emit_load_ctx(nc, 8)
+    rgn_emit_mov(nc, 11, 7)
+    rgn_emit_load(nc, 10, 11, native_v2_region_record_field_zero_to())
+    rgn_emit_load(nc, 9, 8, runtime_context_field_heap_cursor())
+    rgn_emit_alu(nc, 0x39, 9, 10)
+    let nothing_above = rgn_emit_jcc(nc, 0x83)
+    rgn_emit_zero_range(nc, 9, 10, 8, true)
+    rgn_patch(nc, nothing_above)
+    rgn_emit_mov_imm(nc, 2, 0)
+    rgn_emit_store(nc, 11, native_v2_region_record_field_zero_to(), 2)
+    rgn_emit_store(nc, 11, native_v2_region_record_field_handles_to(), 2)
+    rgn_patch(nc, none)
+    nc_emit_ret(nc)
+}
+
+// w := object base of the array word in w, resolved as an element access
+// resolves it (native_v2_resolve_handle_to_object_base_rax_into): below the
+// handle capacity a handle id, otherwise a raw base. `c` holds the context,
+// `t` is scratch.
+fn rgn_emit_resolve_base(nc: &! NativeCompiler, w: i64, c: i64, t: i64) with Mut, Panic, Div {
+    rgn_emit_mov_imm(nc, t, nc_handle_capacity())
+    rgn_emit_alu(nc, 0x39, w, t)
+    let raw = rgn_emit_jcc(nc, 0x83)
+    rgn_emit_imul_imm(nc, w, w, native_v2_handle_entry_size())
+    rgn_emit_load(nc, t, c, runtime_context_field_handle_table_base())
+    rgn_emit_alu(nc, 0x01, w, t)
+    rgn_emit_load(nc, w, w, native_v2_handle_entry_field_object_base())
+    rgn_patch(nc, raw)
+}
+
+// __rgn_copy_payload(dst, src): the young-array copy of the region protocol
+// (ir/lower.sio rgn_emit_young_array_copy). dst was just allocated like src
+// (IR_ALLOC_LIKE_SOURCE: same descriptor, same element count, so the same
+// payload size); copy min(dst, src) payload bytes, rounded up to whole words,
+// with one rep movsq. Taking the minimum means the copy can never run past
+// dst whatever the two headers say. No barrier: dst is the youngest object.
+fn emit_builtin_rgn_copy_payload_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    rgn_emit_load_ctx(nc, 8)
+    rgn_emit_resolve_base(nc, 7, 8, 9)
+    rgn_emit_resolve_base(nc, 6, 8, 9)
+    rgn_emit_load(nc, 1, 7, native_v2_object_header_field_payload_size())
+    rgn_emit_load(nc, 2, 6, native_v2_object_header_field_payload_size())
+    rgn_emit_alu(nc, 0x39, 1, 2)
+    let fits = rgn_emit_jcc(nc, 0x86)
+    rgn_emit_mov(nc, 1, 2)
+    rgn_patch(nc, fits)
+    rgn_emit_alu_imm(nc, 0, 1, 7)
+    rgn_emit_shr_imm(nc, 1, 3)
+    rgn_emit_alu_imm(nc, 0, 7, native_v2_object_header_size())
+    rgn_emit_alu_imm(nc, 0, 6, native_v2_object_header_size())
+    nc_emit_byte(nc, 0xf3)  // rep movsq
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0xa5)
+    rgn_emit_alu(nc, 0x31, 0, 0)
     nc_emit_ret(nc)
 }
 
@@ -11029,6 +11169,9 @@ fn native_v2_emit_builtin_by_id_into(nc: &! NativeCompiler, builtin_id: i64) wit
     if builtin_id == 67 { emit_builtin_rgn_exit_scalar_into(nc); return }
     if builtin_id == 68 { emit_builtin_rgn_barrier_into(nc); return }
     if builtin_id == 69 { emit_builtin_rgn_mark_all_into(nc); return }
+    if builtin_id == 74 { emit_builtin_rgn_reset_into(nc); return }
+    if builtin_id == 75 { emit_builtin_rgn_settle_into(nc); return }
+    if builtin_id == 84 { emit_builtin_rgn_copy_payload_into(nc); return }
     if builtin_id == 73 { emit_builtin_ptr_of_ref_into(nc); return }
     if builtin_id == 57 { emit_builtin_arena_reset_into(nc); return }
     if builtin_id == 58 { emit_builtin_panic_into(nc); return }
@@ -12033,6 +12176,7 @@ fn nc_emit_core_binop(nc: &! NativeCompiler, func: &IrFunction, instr_index: i64
         nc_core_load_temp_to_rax(nc, rhs)
         nc_emit_mov_reg_reg(nc, 1, 0)
         nc_core_load_temp_to_rax(nc, lhs)
+        nc_emit_div_guard(nc, true)
         nc_emit_cqo(nc)
         nc_emit_idiv_rcx(nc)
         nc_core_store_rax_to_temp(nc, dst)
@@ -12046,6 +12190,7 @@ fn nc_emit_core_binop(nc: &! NativeCompiler, func: &IrFunction, instr_index: i64
         nc_core_load_temp_to_rax(nc, rhs)
         nc_emit_mov_reg_reg(nc, 1, 0)
         nc_core_load_temp_to_rax(nc, lhs)
+        nc_emit_div_guard(nc, false)
         nc_emit_xor_rdx_rdx(nc)   // rdx = 0
         nc_emit_div_rcx(nc)                 // div rcx: rax = quotient, rdx = remainder
         nc_core_store_rax_to_temp(nc, dst)
@@ -12056,6 +12201,7 @@ fn nc_emit_core_binop(nc: &! NativeCompiler, func: &IrFunction, instr_index: i64
         nc_core_load_temp_to_rax(nc, rhs)
         nc_emit_mov_reg_reg(nc, 1, 0)
         nc_core_load_temp_to_rax(nc, lhs)
+        nc_emit_div_guard(nc, true)
         nc_emit_cqo(nc)
         nc_emit_idiv_rcx(nc)
         nc_emit_mov_rax_rdx(nc)
@@ -12071,6 +12217,7 @@ fn nc_emit_core_binop(nc: &! NativeCompiler, func: &IrFunction, instr_index: i64
         nc_core_load_temp_to_rax(nc, rhs)
         nc_emit_mov_reg_reg(nc, 1, 0)
         nc_core_load_temp_to_rax(nc, lhs)
+        nc_emit_div_guard(nc, false)
         nc_emit_xor_rdx_rdx(nc)   // rdx = 0
         nc_emit_div_rcx(nc)                 // rdx = lhs % rhs (unsigned)
         nc_emit_mov_rax_rdx(nc)
@@ -13788,6 +13935,7 @@ pub fn native_v2_core_emit_binop_code_into(nc: &! NativeCompiler, dst: i64, lhs:
         nc_core_load_temp_to_rax(nc, rhs)
         nc_emit_mov_reg_reg(nc, 1, 0)
         nc_core_load_temp_to_rax(nc, lhs)
+        nc_emit_div_guard(nc, true)
         nc_emit_cqo(nc)
         nc_emit_idiv_rcx(nc)
         nc_core_store_rax_to_temp(nc, dst)
@@ -14721,6 +14869,7 @@ pub fn native_v2_core_emit_any_binop_into(nc: &! NativeCompiler, dst: i64, lhs: 
         nc_core_load_temp_to_rax(nc, rhs)
         nc_emit_mov_reg_reg(nc, 1, 0)
         nc_core_load_temp_to_rax(nc, lhs)
+        nc_emit_div_guard(nc, true)
         nc_emit_cqo(nc)
         nc_emit_idiv_rcx(nc)
         nc_core_store_rax_to_temp(nc, dst)

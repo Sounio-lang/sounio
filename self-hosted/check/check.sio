@@ -3228,11 +3228,8 @@ fn checker_ty_from_unit_dim(c: *mut Checker, dim: UnitDim) -> TypeEntry with Mut
     if pair.1 >= 0 {
         return ty_with_unit(ty_f64(), pair.1)
     }
-    let found = (*c).units.find_by_dim(dim)
-    if found >= 0 {
-        return ty_with_unit(ty_f64(), found)
-    }
-    ty_f64()
+    // The sticky registry overflow is diagnosed by the item capacity guard.
+    ty_error()
 }
 
 fn checker_lower_unit_or_ref_type_mut(c: *mut Checker, te: TypeExpr, is_mut_ref: bool) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
@@ -3253,7 +3250,17 @@ fn checker_lower_unit_or_ref_type_mut(c: *mut Checker, te: TypeExpr, is_mut_ref:
     }
 }
 
-fn checker_type_env_capacity_ok_inplace(c: *mut Checker) -> bool with Mut, Panic, Div, IO {
+fn checker_type_env_capacity_ok_inplace(c: *mut Checker) -> bool with Mut, Panic, Div, Alloc, IO {
+    // Both registries must retain every brand/binding, including those created
+    // while collecting signatures or checking a function body (#3548).
+    if (*c).units.overflowed {
+        (*c).had_error = true
+        if !(*c).units.overflow_reported {
+            (*c).units.overflow_reported = true
+            checker_report_error_at_inplace(c, Span { file_id: 0, start: 0, end: 0 }, 301, 0, 0, 0)
+        }
+        return false
+    }
     if !(*c).env.overflowed { return true }
     (*c).had_error = true
     if !(*c).env.overflow_reported {
@@ -6977,7 +6984,7 @@ fn checker_check_items_inplace(c: *mut Checker, items: Option<Box<ItemList> >) w
 // checker_report_error_at_inplace:
 //   E156 role domain class not found, E157 role range class not found,
 //   E158 inverse_of target role not found, E159 duplicate role declaration,
-//   E041 ontology subsumption could not be verified (child property weakens parent).
+//   E286 ontology subsumption could not be verified (child property weakens parent).
 // ============================================================================
 
 fn onto_class_list_has(classes: Option<Box<OntologyClassDeclList> >, target: Name) -> bool with Mut, Panic, Div {
@@ -7130,7 +7137,7 @@ fn checker_onto_check_weakening_inplace(c: *mut Checker, classes: Option<Box<Ont
                                                         (*plist).head.properties[b as usize].pred_rhs_float,
                                                         (*plist).head.properties[b as usize].is_float)
                                                     if !pred_implies(child_pred, parent_pred) {
-                                                        checker_report_error_at_inplace(c, (*clist).head.properties[a as usize].span, 41, 0, 0, 0)
+                                                        checker_report_error_at_inplace(c, (*clist).head.properties[a as usize].span, 286, 0, 0, 0)
                                                     }
                                                 }
                                                 b = b + 1
@@ -7419,6 +7426,23 @@ fn checker_collect_impl_item_bridge(c: *mut Checker, opt: Option<Box<ImplDef> >)
 
 fn checker_check_item_inplace(c: *mut Checker, item: Item) with Mut, Panic, Div, Alloc, IO {
     if item.kind == ItemKind::ItemFn {
+        // ADR-031 R1: a module-level `let`/`var` is an ItemFn without a body.
+        // The parser recorded an i64 constant initializer that does not fit
+        // i64 (parser/ast.sio GLOBAL_INIT_OVF_*); refuse it like a local let.
+        match item.fn_def {
+            None => {
+                let ovf = ast_global_init_overflow_index(item.name, item.span)
+                if ovf >= 0 {
+                    let site = Span {
+                        file_id: item.span.file_id,
+                        start: ast_global_init_overflow_site_start(ovf),
+                        end: ast_global_init_overflow_site_end(ovf),
+                    }
+                    checker_report_error_at_inplace(c, site, 300, 0, 0, 0)
+                }
+            }
+            _ => {}
+        }
         checker_check_fn_item_inplace(c, item.fn_def)
     } else if item.kind == ItemKind::ItemImpl {
         checker_check_impl_item_bridge(c, item.impl_def)
@@ -9296,6 +9320,7 @@ fn checker_brand_with_dim(c: *mut Checker, result: TypeEntry, d: UnitDim) -> Typ
     }
     let pair = unit_registry_intern_dim((*c).units, d)
     (*c).units = pair.0
+    if pair.1 < 0 { return ty_error() }
     ty_with_unit(result, pair.1)
 }
 
@@ -12446,6 +12471,49 @@ fn checker_check_expr_list_no_type_no_linear_consume_inplace(c: *mut Checker, op
     }
 }
 
+// #3549: implicit math builtins have no FnSig, so their argument walk must
+// enforce dimensions itself. Keep this in leaf helpers on the in-place spine:
+// growing the by-value Checker call checker breaks the gen2 lowering budget.
+fn checker_name_requires_dimensionless_arg(n: Name) -> bool with Mut, Panic, Div {
+    name_eq_lit(n, "exp") || name_eq_lit(n, "log")
+        || name_eq_lit(n, "sin") || name_eq_lit(n, "cos")
+        || name_eq_lit(n, "tan") || name_eq_lit(n, "atan")
+        || name_eq_lit(n, "tanh") || name_eq_lit(n, "asin")
+        || name_eq_lit(n, "acos")
+}
+
+fn checker_check_transcendental_arg_unit_inplace(c: *mut Checker, span: Span, arg_ty: TypeEntry) with Mut, Panic, Div, Alloc, IO {
+    let scalar_ty = if arg_ty.kind == TypeKind::TyKnowledge { knowledge_inner(arg_ty) } else { arg_ty }
+    if scalar_ty.unit_id >= 0 {
+        // Inspect the seven exponents, not the brand or rational scale:
+        // a dimensionless brand and m/km are legitimate scalar arguments.
+        if !unit_dim_is_dimensionless(checker_unit_dim_at(c, scalar_ty.unit_id)) {
+            checker_report_error_at_inplace(c, span, 285, 0, 0, 0)
+        }
+    }
+}
+
+fn checker_check_implicit_call_args_inplace(c: *mut Checker, e: Expr) with Mut, Panic, Div, Alloc, IO {
+    let needs_scalar = match e.left {
+        Some(callee) => (*callee).kind == ExprKind::ExprIdent && checker_name_requires_dimensionless_arg((*callee).name),
+        None => false
+    }
+    if !needs_scalar {
+        checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
+        return
+    }
+    (*c).suppress_linear_consume_depth = (*c).suppress_linear_consume_depth + 1
+    var args = expr_list_handle(e.args)
+    while args.ptr != 0 as *mut ExprList {
+        let arg_ty = checker_check_expr_inplace(c, (*args.ptr).head)
+        checker_check_transcendental_arg_unit_inplace(c, (*args.ptr).head.span, arg_ty)
+        args = expr_list_handle_next(args)
+    }
+    if (*c).suppress_linear_consume_depth > 0 {
+        (*c).suppress_linear_consume_depth = (*c).suppress_linear_consume_depth - 1
+    }
+}
+
 fn checker_check_one_call_arg_inplace(c: *mut Checker, arg_expr: Expr, param_info: FnParamInfo, call_span: Span) with Mut, Panic, Div, Alloc, IO {
     let implicit_borrow =
         arg_expr.kind == ExprKind::ExprIdent &&
@@ -13534,7 +13602,7 @@ fn checker_check_call_shadow_forms_inplace(c: *mut Checker, e: Expr, direct_sig_
     match e.left {
         Some(shadow_callee) => {
             if (*shadow_callee).kind == ExprKind::ExprIdent && checker_invisible_native_builtin_sig(c, (*shadow_callee).name) {
-                checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
+                checker_check_implicit_call_args_inplace(c, e)
                 return (true, checker_shadowed_builtin_result((*shadow_callee).name))
             }
         }
@@ -13739,7 +13807,7 @@ fn checker_check_call_indirect_inplace(c: *mut Checker, e: Expr, callee_is_local
             ns_result
         }
     } else if is_error_or_unknown(callee_ty) {
-        checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
+        checker_check_implicit_call_args_inplace(c, e)
         checker_release_call_arg_borrows_inplace(c, e.args, None)
         // The runtime `read_file` is bound import-unknown, so its result reached
         // method calls with an unknown type (`read_file(p).as_bytes()`, `.len()`
@@ -16005,9 +16073,12 @@ fn checker_const_int_op_fits(op: BinaryOp, lv: i64, rv: i64) -> bool with Div {
     }
     if op == BinaryOp::OpMul {
         if lv == 0 || rv == 0 { return true }
-        if lv == imin || rv == imin { return false }
+        // MIN * 1 and the products that land exactly on MIN (-2^62 * 2) fit.
+        if lv == imin { return rv == 1 }
+        if rv == imin { return lv == 1 }
         let alv = if lv < 0 { 0 - lv } else { lv }
         let arv = if rv < 0 { 0 - rv } else { rv }
+        if (lv < 0) != (rv < 0) { return 0 - alv >= imin / arv }
         return alv <= imax / arv
     }
     if op == BinaryOp::OpDiv || op == BinaryOp::OpRem {
@@ -21143,12 +21214,13 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 38 { print("cannot borrow exclusively while other borrows are active") }
     else if code == 39 { print("linear value has already been used") }
     else if code == 40 { print("linear value must be used") }
-    // Ontology property weakening (41); refinement (42-43)
-    // E041 is ontology subsumption (child property weakens parent) — the only
-    // reporter of error code 41. (No reporter uses 41 for unit incompatibility.)
-    else if code == 41 { print("ontology subsumption could not be verified") }
+    // E041 is unit mismatch; ontology property weakening uses E286 (#3552).
+    else if code == 41 { print("unit mismatch") }
+    else if code == 286 { print("ontology subsumption could not be verified") }
     else if code == 42 { print("value does not satisfy the refinement predicate") }
     else if code == 43 { print("incompatible unit dimensions in conversion") }
+    // Units: transcendental builtin arguments (#3549).
+    else if code == 285 { print("transcendental function argument must be dimensionless") }
     // Phase A additions (44-51)
     else if code == 44 { print("`break` can only be used inside a loop") }
     else if code == 45 { print("`continue` can only be used inside a loop") }
@@ -21325,6 +21397,7 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 298 { print("perform with live linear bindings (a non-resuming handler would drop them)") }
     else if code == 299 { print("handler backend v1 limit exceeded (results and operation values are i64 words; handler nesting depth at most 8)") }
     else if code == 300 { print("integer constant is out of range for the annotated type") }
+    else if code == 301 { print("unit registry capacity exceeded; refusing to discard a unit dimension") }
     else if code == 269 { print("a `where` refinement on Knowledge<T> is not enforced by this compiler yet: the predicate would be silently ignored, so it is refused") }
     else if code == 270 { print("`as string` does not convert a number, bool or char to text: no engine formats the value, so the cast is refused") }
     else if code == 263 { print("qualified call is ambiguous: this qualifier names a module you `use`d, but also collides with an unrelated struct/enum method of the same name, and the compiler cannot yet guarantee which one runs") }
@@ -21439,6 +21512,9 @@ fn print_error_help(code: i64) with IO, Mut, Panic, Div {
     }
     else if code == 40 {
         print("   |\n   = help: consume the linear value by using it in a function call or assignment\n")
+    }
+    else if code == 286 {
+        print("   |\n   = help: strengthen the child property so it implies the parent constraint\n")
     }
     // Units/refinement (41-43)
     else if code == 41 {
@@ -21826,6 +21902,9 @@ fn print_error_note(code: i64) with IO, Mut, Panic, Div {
     }
     else if code == 40 {
         print("   = note: linear types must be consumed exactly once\n")
+    }
+    else if code == 286 {
+        print("   = note: a subclass property must imply the corresponding parent property\n")
     }
     // Units/refinement (41-43)
     else if code == 41 {
@@ -29014,8 +29093,16 @@ impl Checker {
     // By-value twin of checker_type_env_capacity_ok_inplace. `(&!c) as *mut
     // Checker` handed that function the object, and its error_count/had_error
     // writes landed at raw-layout offsets past Checker's first array (#2966).
-    fn type_env_capacity_ok(self) -> (Checker, bool) with Mut, Panic, Div, IO {
+    fn type_env_capacity_ok(self) -> (Checker, bool) with Mut, Panic, Div, Alloc, IO {
         var c = self
+        if c.units.overflowed {
+            c.had_error = true
+            if !c.units.overflow_reported {
+                c.units.overflow_reported = true
+                c = c.report_error_at(Span { file_id: 0, start: 0, end: 0 }, 301, 0, 0, 0)
+            }
+            return (c, false)
+        }
         if !c.env.overflowed { return (c, true) }
         c.had_error = true
         if !c.env.overflow_reported {
