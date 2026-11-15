@@ -305,40 +305,41 @@ export const DEFAULT_PARAMS_SEMAGLUTIDE = Object.freeze({
 
 // Urva 2022 (Clin Pharmacokinet) — tirzepatide popPK, T2D patients:
 //   MW = 4813 Da               (dual GIP/GLP-1 peptide)
-//   CL = 0.061 L/h             (proteolytic; no intact parent in excreta,
+//   CL = 0.0488 L/h            (label CL/F 0.061 x F 0.80; no intact parent in excreta,
 //                               Martin 2024 — no renal clearance modeled)
 //   t1/2 ~= 120 h              (FDA 2022 label, 5 mg weekly maintenance)
-//   ka = 0.0164 /h, F = 0.80   (SC absorption, Urva 2022)
+//   ka = 0.0373 /h, F = 0.80   (Schneck & Urva 2024; label)
 // Kp/PS mirror the semaglutide peptide vector (vascular-confined, Kp < 1):
 // the 1/sqrt(MW) PS shift vs semaglutide is under 8%, inside estimation
 // noise. Tirzepatide-specific Kp refinement is SIO-550 follow-up.
 export const MW_TIRZEPATIDE = 4813.0;
 
-// Peptide pattern x 0.128280: kinetic V_ss = 10.26 L (population model Vc + Vp).
+// Peptide pattern x 0.008041: kinetic V_ss = 8.70 L, 0.10 L above the
+// structural floor of 8.60 L (label V/F 10.3 L x F 0.80 = 8.24 L is below it).
 export const KP_TIRZEPATIDE = Object.freeze([
   1.00,  // 0 blood (definition)
-  0.06414,  // 1 liver
-  0.07697,  // 2 kidney
-  0.00641,  // 3 brain
-  0.05131,  // 4 heart
-  0.03848,  // 5 lung
-  0.02566,  // 6 muscle
-  0.01283,  // 7 adipose
-  0.10262,  // 8 gut
-  0.03848,  // 9 skin
-  0.02566,  // 10 bone
-  0.05131,  // 11 spleen
-  0.08980,  // 12 pancreas
-  0.03848,  // 13 other
+  0.004021,  // 1 liver
+  0.004825,  // 2 kidney
+  0.000402,  // 3 brain
+  0.003217,  // 4 heart
+  0.002412,  // 5 lung
+  0.001608,  // 6 muscle
+  0.000804,  // 7 adipose
+  0.006433,  // 8 gut
+  0.002412,  // 9 skin
+  0.001608,  // 10 bone
+  0.003217,  // 11 spleen
+  0.005629,  // 12 pancreas
+  0.002412,  // 13 other
 ]);
 
 export const PS_TIRZEPATIDE = PS_SEMAGLUTIDE;
 
-export const TIRZ_KA_DEFAULT = 0.0164;
+export const TIRZ_KA_DEFAULT = 0.0373;
 export const TIRZ_F_DEFAULT  = 0.80;
 
 export const DEFAULT_PARAMS_TIRZEPATIDE = Object.freeze({
-  clHep: 0.061,
+  clHep: 0.0488,
   higuchiScale: 1.0,
   vdScale: 1.0,
   bolusMg: 0.0,
@@ -357,7 +358,7 @@ export const DEFAULT_PARAMS_TIRZEPATIDE = Object.freeze({
   pdParams: {},
   cVisualMax: 3.0e-5,
   drugLabel: 'Tirzepatide (SC depot)',
-  releaseSourceLabel: 'Subcutaneous depot (k_a = 0.0164 /h, F = 0.80)',
+  releaseSourceLabel: 'Subcutaneous depot (k_a = 0.0373 /h, F = 0.80)',
 });
 
 // Xience V everolimus-eluting stent (SIO-524): CoCr platform, durable

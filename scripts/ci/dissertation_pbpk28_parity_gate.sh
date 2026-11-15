@@ -1127,7 +1127,7 @@ echo "[pbpk28-parity] midazolam CYP3A DDI canonical: solo PK + ketoconazole-inhi
 
 # ════════════════════════════════════════════════════════════════════════════
 # Case 20: Tirzepatide — sixth canonical drug, second incretin peptide.
-# SC depot (5 mg weekly, ka=0.0164/h, F=0.80, Urva 2022) + proteolytic CL
+# SC depot (5 mg weekly, ka=0.0373/h, F=0.80) + proteolytic CL
 # 0.061 L/h (no renal clearance of parent per Martin 2024). PK only:
 # no TMDD/PD layer (SIO-517 follow-up). Sounio ref drives the stdlib
 # scenario itself; Node side is DEFAULT_PARAMS_TIRZEPATIDE.
