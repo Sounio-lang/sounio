@@ -70,7 +70,7 @@ says, having written the byte it says, or exits 1 where the decoder refuses.
 `step_mono` carries each iteration from the abstract state to every concrete
 state above it: the model is stuck on any read of an undefined value, so a run
 that is not stuck read only what the abstract state defines. Measured
-2026-11-15: about 10 minutes of kernel time for seed-a, 20 for seed-b.
+2026-11-15 (job 22889): 749 s of kernel time for seed-a, 1139 s for seed-b.
 
 ## Why the model can be trusted
 

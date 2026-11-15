@@ -42,7 +42,7 @@ lean_lib Bootstrap where
   roots := #[`Bootstrap.X86Min, `Bootstrap.SeedData, `Bootstrap.Seeds, `Bootstrap.Formats, `Bootstrap.Refine,
              `Bootstrap.Loop]
 
--- The two seeds on every listing (about half an hour of kernel time); built by
+-- The two seeds on every listing (about 20 minutes of kernel time, the two in parallel); built by
 -- bootstrap/model/seed_proofs.sh and the nightly job, not on every pull request.
 lean_lib BootstrapSeeds where
   roots := #[`Bootstrap.SeedA, `Bootstrap.SeedB]

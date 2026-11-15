@@ -19,7 +19,7 @@ it, with the rest of the input and the output so far, and `decB_cons` says that
 `stepB` is one step of the reference decoder `decB`, which `decB_iff` proves
 equal to the grammar.
 
-Kernel time: about 20 minutes for the enumeration.
+Kernel time, measured 2026-11-15 (Slurm job 22889): 1139 s.
 -/
 import Bootstrap.Loop
 import Bootstrap.Formats

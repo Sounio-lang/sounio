@@ -19,7 +19,7 @@ it, with the rest of the input and the output so far, and `decA_cons` says that
 `stepA` is one step of the reference decoder `decA`, which `decA_iff` proves
 equal to the grammar.
 
-Kernel time: about 10 minutes for the enumeration.
+Kernel time, measured 2026-11-15 (Slurm job 22889): 749 s.
 -/
 import Bootstrap.Loop
 import Bootstrap.Formats
