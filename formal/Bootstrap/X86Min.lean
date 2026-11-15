@@ -345,7 +345,9 @@ def step (im : Img) (s : St) : Sum St Outcome :=
     | .shlI w d c => ok (do
         let a ← s.rd w d
         let c := c % w
-        if c == 0 then pure s1 else
+        -- a count of 0 leaves the flags alone, but a 32-bit destination is still
+        -- written, so bits 32..63 are cleared (found by the CPU differential)
+        if c == 0 then s1.wr w d a else
         let res := a * pow2 c % pow2 w
         let cf := a / pow2 (w - c) % 2 == 1
         let ofl := if c == 1 then some (msb w res != cf) else none

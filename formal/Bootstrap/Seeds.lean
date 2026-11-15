@@ -48,4 +48,21 @@ theorem b_refuses_short : exec 1000 seedB [48, 48, 49, 48, 48] = .exit 1 [1] := 
 /-- seed-b: empty input is a valid listing of no bytes. -/
 theorem b_empty : exec 1000 seedB [] = .exit 0 [] := by decide +kernel
 
+/-! Model regressions found by the CPU differential (bootstrap/model/x86diff_gate.sh). -/
+
+/-- One step of `bytes` at 0x400000 from registers `regs`, all flags defined. -/
+def step1 (bytes : List Nat) (regs : List Nat) : Sum St Outcome :=
+  step (Img.mk' bytes 0x400000 bytes.length)
+    { regs := regs.map some, rip := 0x400000, fl := ⟨some true, some false, some true, some false⟩,
+      mem := List.replicate winSize (some 0), lo := 0x10800 - winSize / 2, inp := [], out := [] }
+
+/-- `shl r10d, 0xc0`: the count masks to 0, so the flags stay, but the 32-bit
+destination is still written and bits 32..63 are cleared. Measured on a Xeon 6730P,
+2026-11-15 (case `41c1e2c0`); the first version of the model left r10 unchanged. -/
+theorem shl32_count0_zero_extends :
+    (match step1 [0x41, 0xc1, 0xe2, 0xc0]
+        ((List.replicate 16 0).set 4 0x10800 |>.set 10 0x75e0dd3226a6fe92) with
+      | .inl t => t.reg 10 == some 0x26a6fe92 && t.fl == ⟨some true, some false, some true, some false⟩
+      | .inr _ => false) = true := by decide +kernel
+
 end X86Min.Seeds
