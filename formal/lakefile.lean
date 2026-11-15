@@ -41,7 +41,8 @@ lean_lib Sounio where
 lean_lib Bootstrap where
   roots := #[`Bootstrap.X86Min, `Bootstrap.SeedData, `Bootstrap.Seeds, `Bootstrap.Formats, `Bootstrap.Refine,
              `Bootstrap.Loop,
-             `Sporos.Core, `Sporos.Step, `Sporos.Check, `Sporos.Safe, `Sporos.SafeStep, `Sporos.Run]
+             `Sporos.Core, `Sporos.Step, `Sporos.Check, `Sporos.Safe, `Sporos.SafeStep, `Sporos.Run,
+             `Sporos.Dag]
 
 -- The two seeds on every listing (about 20 minutes of kernel time, the two in parallel); built by
 -- bootstrap/model/seed_proofs.sh and the nightly job, not on every pull request.
