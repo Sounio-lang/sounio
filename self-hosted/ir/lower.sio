@@ -380,6 +380,18 @@ var TG_L_PARAM: [i64; 24] = [0; 24]
 var TG_L_FIELD: [i64; 24] = [-1; 24]
 var TG_L_FNAME: [i64; 24] = [0; 24]
 var TG_L_ISK: [i64; 24] = [0; 24]
+// Field path of a layout entry (up to 3 names, depth 0 for a plain parameter)
+// and its matching key (TG_L_FNAME holds the key of the path).
+var TG_L_DEPTH: [i64; 24] = [0; 24]
+var TG_L_PATH: [i64; 72] = [0; 72]
+// Return kind per entry: 0 f64, 1 struct (TG_RTYPE: its type name id). A struct
+// return is a matrix: one row per scalar f64 field of the type, in declaration
+// order, each row nf Jacobian entries then the internal variance.
+var TG_RET: [i64; 512] = [0; 512]
+var TG_RTYPE: [i64; 512] = [0; 512]
+let TG_OMAX: i64 = 8
+var TG_O_N: i64 = 0
+var TG_O_FNAME: [i64; 8] = [0; 8]
 var TG_NPARAM: [i64; 512] = [0; 512]
 var TG_STATE: [i64; 512] = [0; 512]
 // -1 unknown, 0 no measurement can happen inside, 1 one can.
@@ -411,6 +423,19 @@ var TG_SITE_END: [i64; 256] = [0; 256]
 var TG_SITE_TG: [i64; 256] = [0; 256]
 var TG_SITE_VINT: [i64; 256] = [-1; 256]
 var TG_SITE_D: [i64; 8192] = [-1; 8192]
+// Struct-return sites: entry (site * 8 + row) * 25 + k, k < nf a partial, k == nf
+// the row's internal variance.
+var TG_SITE_DM: [i64; 51200] = [-1; 51200]
+
+// Key of a field path (up to 3 name ids): the clone matches a field read to a
+// tangent by it, the caller builds the same key from the layout.
+fn tg_path_key(id0: i64, id1: i64, id2: i64, depth: i64) -> i64 with Mut, Panic, Div {
+    var k: i64 = 1
+    if depth >= 1 { k = k * 1000003 + id0 + 1 }
+    if depth >= 2 { k = k * 1000003 + id1 + 1 }
+    if depth >= 3 { k = k * 1000003 + id2 + 1 }
+    k
+}
 
 fn tg_find(id: i64) -> i64 with Mut, Panic, Div {
     var i: i64 = 0
@@ -474,6 +499,16 @@ fn tg_expr_calls(e: &Expr, pred: i64, depth: i64) -> bool with Mut, Panic, Div {
     if depth > 96 { return true }
     // pred 2: the expression contains a `return` anywhere.
     if pred == 2 && (*e).kind == ExprKind::ExprReturn { return true }
+    // pred 3: a `return` whose operand is not a struct literal or a local, which
+    // the struct-return clone cannot read the per-field sensitivities of.
+    if pred == 3 && (*e).kind == ExprKind::ExprReturn {
+        match (*e).left {
+            Some(rx) => {
+                if (*rx).kind != ExprKind::ExprStructLit && (*rx).kind != ExprKind::ExprIdent { return true }
+            }
+            None => { return true }
+        }
+    }
     if (*e).kind == ExprKind::ExprCall {
         match (*e).left {
             Some(c) => {
@@ -552,6 +587,22 @@ fn tg_stmts_call(opt: &Option<Box<StmtList>>, pred: i64, depth: i64) -> bool wit
     while true {
         match *cur {
             Some(sl) => {
+                if pred == 3 {
+                    // A field assignment or a mutable struct local leaves the
+                    // per-field sensitivities stale at the return.
+                    if (*sl).head.kind == StmtKind::StmtAssign {
+                        match (*sl).head.target {
+                            Some(tx) => { if (*tx).kind == ExprKind::ExprFieldAccess { return true } }
+                            None => {}
+                        }
+                    }
+                    if (*sl).head.kind == StmtKind::StmtVar {
+                        match (*sl).head.expr {
+                            Some(vx) => { if (*vx).kind == ExprKind::ExprStructLit { return true } }
+                            None => {}
+                        }
+                    }
+                }
                 match (*sl).head.expr {
                     Some(x) => { if tg_expr_calls(&(*x), pred, depth + 1) { return true } }
                     None => {}
@@ -679,6 +730,50 @@ fn tg_may_draw(idx: i64, depth: i64) -> bool with Mut, Panic, Div {
         j = j + 1
     }
     false
+}
+
+// The last statement of a struct-returning body: a struct literal, a local, or a
+// `return` (whose operand tg_stmts_call pred 3 has checked).
+fn tg_body_tail_is_struct_shape(opt: &Option<Box<StmtList>>) -> bool with Mut, Panic, Div {
+    var cur = opt
+    var last_kind = ExprKind::ExprIntLit
+    var have = false
+    while true {
+        match *cur {
+            Some(sl) => {
+                if (*sl).head.kind == StmtKind::StmtExpr {
+                    match (*sl).head.expr {
+                        Some(x) => { last_kind = (*x).kind; have = true }
+                        None => { have = false }
+                    }
+                } else {
+                    have = false
+                }
+                cur = &(*sl).tail
+            }
+            None => break
+        }
+    }
+    if !have { return false }
+    last_kind == ExprKind::ExprStructLit || last_kind == ExprKind::ExprIdent || last_kind == ExprKind::ExprReturn
+}
+
+// `<base>.<id0>.<id1>.<id2>` (depth names) as a field-access expression.
+fn tg_chain_expr(base: Name, sp: Span, depth: i64, id0: i64, id1: i64, id2: i64) -> Expr with Mut, Panic, Div, Alloc {
+    var cur = lower_ident_expr_for_name(base, sp)
+    var l: i64 = 0
+    while l < depth {
+        var nid = id0
+        if l == 1 { nid = id1 }
+        if l == 2 { nid = id2 }
+        var fa = lower_ident_expr_for_name(base, sp)
+        fa.kind = ExprKind::ExprFieldAccess
+        fa.name = ir_name_at(nid)
+        fa.left = Some(Box::new(cur))
+        cur = fa
+        l = l + 1
+    }
+    cur
 }
 
 fn tg_site_find(sp: Span) -> i64 with Mut, Panic, Div {
@@ -11069,8 +11164,22 @@ fn lower_type_expr_is_integer(te: &TypeExpr) -> bool with Mut, Panic, Div {
 fn tg_note(name: Name, fd: &FnDef, self_type: Name) with Mut, Panic, Div, Alloc {
     if (*fd).is_extern || (*fd).is_kernel { return }
     if TG_COUNT >= TG_MAX { return }
+    var ret_kind: i64 = 0
+    var ret_type: i64 = 0
     match (*fd).return_type {
-        Some(rt) => { if !lower_type_expr_is_f64(&(*rt)) { return } }
+        Some(rt) => {
+            if !lower_type_expr_is_f64(&(*rt)) {
+                // A struct by value: its scalar f64 fields are the outputs. The
+                // type is validated at the first call (tg_out_layout), where the
+                // layout registry is available.
+                if (*rt).kind != TypeExprKind::TypeNamed { return }
+                let rn = lower_param_struct_type_name(&(*rt))
+                if rn.len <= 0 { return }
+                if ir_name_eq_lit(rn, "f128") || ir_name_eq_lit(rn, "f256") || ir_name_eq_lit(rn, "Knowledge") { return }
+                ret_kind = 1
+                ret_type = ir_intern_name(rn)
+            }
+        }
         None => { return }
     }
     let id = ir_intern_name(name)
@@ -11121,7 +11230,14 @@ fn tg_note(name: Name, fd: &FnDef, self_type: Name) with Mut, Panic, Div, Alloc 
     }
     if nf <= 0 && nstruct <= 0 { return }
     if tg_stmts_call(&(*fd).body.stmts, 0, 0) { return }
+    if ret_kind == 1 {
+        // Every return must be a struct literal or a local, and the tail too.
+        if tg_stmts_call(&(*fd).body.stmts, 3, 0) { return }
+        if !tg_body_tail_is_struct_shape(&(*fd).body.stmts) { return }
+    }
     TG_ID[idx as usize] = id
+    TG_RET[idx as usize] = ret_kind
+    TG_RTYPE[idx as usize] = ret_type
     TG_NAME[idx as usize] = name
     TG_NF[idx as usize] = nf
     TG_FMASK[idx as usize] = fmask
@@ -16626,31 +16742,112 @@ impl Lowerer {
                 if TG_L_N >= TG_LMAX { return false }
                 TG_L_PARAM[TG_L_N as usize] = p
                 TG_L_FIELD[TG_L_N as usize] = 0 - 1
+                TG_L_DEPTH[TG_L_N as usize] = 0
                 TG_L_FNAME[TG_L_N as usize] = 0
                 TG_L_ISK[TG_L_N as usize] = if kind == 2 { 1 } else { 0 }
                 TG_L_N = TG_L_N + 1
             } else if kind == 3 {
-                let tn = ir_name_at(TG_PTYPE[slot])
-                let nslots = self.struct_layout_slot_count(tn)
-                if nslots <= 0 { return false }
-                var sidx: i64 = 0
-                while sidx < nslots {
-                    let pos = self.struct_layout_field_pos(tn, sidx)
-                    if pos >= 0 && self.struct_layout_pos_is_float(pos) == 1
-                        && self.struct_layout_pos_array_len(pos) == 0 {
-                        if TG_L_N >= TG_LMAX { return false }
-                        TG_L_PARAM[TG_L_N as usize] = p
-                        TG_L_FIELD[TG_L_N as usize] = sidx
-                        TG_L_FNAME[TG_L_N as usize] = ir_intern_name(self.struct_layout_pos_field_name(pos))
-                        TG_L_ISK[TG_L_N as usize] = 0
-                        TG_L_N = TG_L_N + 1
+                // Depth-first over the struct's scalar f64 fields, descending
+                // into struct-typed fields up to depth 3 (a path of at most 3
+                // names), in declaration order.
+                let tn0 = ir_name_at(TG_PTYPE[slot])
+                let ns0 = self.struct_layout_slot_count(tn0)
+                if ns0 <= 0 { return false }
+                var ltype: [i64; 3] = [0; 3]
+                var lslot: [i64; 3] = [0; 3]
+                var lcount: [i64; 3] = [0; 3]
+                var lname: [i64; 3] = [0; 3]
+                ltype[0] = TG_PTYPE[slot]
+                lcount[0] = ns0
+                var d: i64 = 0
+                while d >= 0 {
+                    if lslot[d as usize] >= lcount[d as usize] {
+                        d = d - 1
+                    } else {
+                        let sidx = lslot[d as usize]
+                        lslot[d as usize] = sidx + 1
+                        let tn = ir_name_at(ltype[d as usize])
+                        let pos = self.struct_layout_field_pos(tn, sidx)
+                        if pos >= 0 {
+                            let fnm = self.struct_layout_pos_field_name(pos)
+                            let alen = self.struct_layout_pos_array_len(pos)
+                            if self.struct_layout_pos_is_float(pos) == 1 && alen == 0 {
+                                if TG_L_N >= TG_LMAX { return false }
+                                let li = TG_L_N
+                                TG_L_PARAM[li as usize] = p
+                                TG_L_FIELD[li as usize] = lslot[0] - 1
+                                TG_L_ISK[li as usize] = 0
+                                var l: i64 = 1
+                                while l <= d {
+                                    TG_L_PATH[(li * 3 + l - 1) as usize] = lname[l as usize]
+                                    l = l + 1
+                                }
+                                TG_L_PATH[(li * 3 + d) as usize] = ir_intern_name(fnm)
+                                TG_L_DEPTH[li as usize] = d + 1
+                                TG_L_FNAME[li as usize] = tg_path_key(TG_L_PATH[(li * 3) as usize], TG_L_PATH[(li * 3 + 1) as usize], TG_L_PATH[(li * 3 + 2) as usize], d + 1)
+                                TG_L_N = li + 1
+                            } else if d < 2 && alen == 0 && self.struct_layout_pos_is_float(pos) != 1 {
+                                let nt = self.struct_layout_pos_named_type(pos)
+                                if nt.len > 0 && !ir_name_eq_lit(nt, "Knowledge") {
+                                    let nns = self.struct_layout_slot_count(nt)
+                                    if nns > 0 {
+                                        d = d + 1
+                                        ltype[d as usize] = ir_intern_name(nt)
+                                        lslot[d as usize] = 0
+                                        lcount[d as usize] = nns
+                                        lname[d as usize] = ir_intern_name(fnm)
+                                    }
+                                }
+                            }
+                        }
                     }
-                    sidx = sidx + 1
                 }
             }
             p = p + 1
         }
         TG_L_N > 0
+    }
+
+    // The output layout of entry `tgi` into TG_O_*: one row for an f64 return,
+    // else one per scalar f64 field of the returned struct, in declaration
+    // order. False when the struct is unknown, holds a struct-typed field (its
+    // fields would be outputs nobody reads) or has no f64 field.
+    fn tg_out_layout(self, tgi: i64) -> bool with Mut, Panic, Div, Alloc {
+        TG_O_N = 0
+        if tgi < 0 || tgi >= TG_COUNT { return false }
+        if TG_RET[tgi as usize] == 0 {
+            TG_O_N = 1
+            return true
+        }
+        let tn = ir_name_at(TG_RTYPE[tgi as usize])
+        let ns = self.struct_layout_slot_count(tn)
+        if ns <= 0 { return false }
+        var sidx: i64 = 0
+        while sidx < ns {
+            let pos = self.struct_layout_field_pos(tn, sidx)
+            if pos >= 0 {
+                if self.struct_layout_pos_is_float(pos) == 1 && self.struct_layout_pos_array_len(pos) == 0 {
+                    if TG_O_N >= TG_OMAX { return false }
+                    TG_O_FNAME[TG_O_N as usize] = ir_intern_name(self.struct_layout_pos_field_name(pos))
+                    TG_O_N = TG_O_N + 1
+                } else if self.struct_layout_pos_is_float(pos) != 1 && self.struct_layout_pos_array_len(pos) == 0 {
+                    let nt = self.struct_layout_pos_named_type(pos)
+                    if nt.len > 0 && self.struct_layout_slot_count(nt) > 0 { return false }
+                }
+            }
+            sidx = sidx + 1
+        }
+        TG_O_N > 0
+    }
+
+    // Whether the clone of `tgi` can serve a call here: an f64 return always
+    // can; a struct return needs a usable output layout and first order only
+    // (a clone carries no Hessian, and the re-lowering path owns second order).
+    fn tg_ret_ok(self, tgi: i64) -> bool with Mut, Panic, Div, Alloc {
+        if tgi < 0 || tgi >= TG_COUNT { return false }
+        if TG_RET[tgi as usize] == 0 { return true }
+        if self.so_enabled { return false }
+        self.tg_out_layout(tgi)
     }
 
     // The clone parameter `e` names: a bare parameter local, `.value` of a
@@ -16661,32 +16858,44 @@ impl Lowerer {
     fn tg_param_slot(self, e: &Expr) -> i64 with Mut, Panic, Div, Alloc {
         var nm = ir_empty_name()
         var via_value = false
-        var field_id: i64 = 0 - 1
-        if (*e).kind == ExprKind::ExprIdent {
-            nm = (*e).name
-        } else if (*e).kind == ExprKind::ExprFieldAccess {
-            match (*e).left {
-                Some(b) => {
-                    if (*b).kind == ExprKind::ExprIdent {
-                        nm = (*b).name
-                    } else if (*b).kind == ExprKind::ExprUnary && (*b).un_op == UnaryOp::OpDeref {
-                        match (*b).left {
-                            Some(bi) => {
-                                if (*bi).kind != ExprKind::ExprIdent { return 0 - 1 }
-                                nm = (*bi).name
-                            }
-                            None => { return 0 - 1 }
-                        }
-                    } else {
-                        return 0 - 1
-                    }
+        // The field path of `e`, outermost field first while walking, then
+        // reversed into declaration order.
+        var rev: [i64; 3] = [0; 3]
+        var depth: i64 = 0
+        var cur: &Expr = e
+        while (*cur).kind == ExprKind::ExprFieldAccess {
+            if depth >= 3 { return 0 - 1 }
+            rev[depth as usize] = ir_intern_name((*cur).name)
+            if depth == 0 && ir_name_eq_lit((*cur).name, "value") { via_value = true }
+            depth = depth + 1
+            match (*cur).left {
+                Some(b) => { cur = &(*b) }
+                None => { return 0 - 1 }
+            }
+        }
+        if depth != 1 { via_value = false }
+        if (*cur).kind == ExprKind::ExprIdent {
+            nm = (*cur).name
+        } else if depth > 0 && (*cur).kind == ExprKind::ExprUnary && (*cur).un_op == UnaryOp::OpDeref {
+            match (*cur).left {
+                Some(bi) => {
+                    if (*bi).kind != ExprKind::ExprIdent { return 0 - 1 }
+                    nm = (*bi).name
                 }
                 None => { return 0 - 1 }
             }
-            if ir_name_eq_lit((*e).name, "value") { via_value = true }
-            field_id = ir_intern_name((*e).name)
         } else {
             return 0 - 1
+        }
+        var field_key: i64 = 0 - 1
+        if depth > 0 {
+            var p0: i64 = 0
+            var p1: i64 = 0
+            var p2: i64 = 0
+            if depth == 1 { p0 = rev[0] }
+            if depth == 2 { p0 = rev[1]; p1 = rev[0] }
+            if depth == 3 { p0 = rev[2]; p1 = rev[1]; p2 = rev[0] }
+            field_key = tg_path_key(p0, p1, p2, depth)
         }
         let r = self.lookup_local(nm)
         if r < 0 { return 0 - 1 }
@@ -16694,8 +16903,8 @@ impl Lowerer {
         while k < TG_NPCH {
             if TG_PARAM_REG[k as usize] == r {
                 let pf = TG_PARAM_FIELD[k as usize]
-                if field_id < 0 && pf < 0 { return k }
-                if field_id >= 0 && pf >= 0 && pf == field_id { return k }
+                if field_key < 0 && pf < 0 { return k }
+                if field_key >= 0 && pf >= 0 && pf == field_key { return k }
                 if via_value && pf < 0 && TG_PARAM_ISK[k as usize] == 1 { return k }
             }
             k = k + 1
@@ -16762,22 +16971,33 @@ impl Lowerer {
     }
 
     // `return e` / the body tail of a clone: write d e / d p_k to out[k] and
-    // the variance from measurements made inside the call to out[nf].
+    // the variance from measurements made inside the call to out[nf]. A struct
+    // return writes one such row per output field (tg_emit_ret_store_struct).
     fn tg_emit_ret_store(self, e: &Expr) -> Lowerer with Mut, Panic, Div, Alloc, IO {
         var lo = self
         if TG_OUT_REG < 0 || lo.current_fn != TG_CLONE_FN { return lo }
+        if TG_ACTIVE >= 0 && TG_RET[TG_ACTIVE as usize] == 1 { return lo.tg_emit_ret_store_struct(e) }
         let vp = lo.lower_expr_variance_ref(e)
         lo = vp.0
         if vp.1 >= 0 && !lo.fo_expr_has_sens() && !fo_variance_is_static_zero(&lo, vp.1) {
             lo = lo.fo_seed_from_variance(vp.1, 0 - 1)
         }
         let sens = lo.fo_snapshot_expr_sens()
+        lo.tg_store_row(sens, 0)
+    }
+
+    // Row `row` of the out-array: out[row*(nf+1) + k] = d/d tangent_k for each
+    // parameter tangent k (sens[channel of k]), and out[row*(nf+1) + nf] = the
+    // variance that comes from channels that are not parameter channels.
+    fn tg_store_row(self, sens: [i64; 32], row: i64) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        let base = row * (TG_NPCH + 1)
         let z = lo.emit_f64_const(0.0)
         lo = z.0
         var k: i64 = 0
         while k < TG_NPCH {
             let s = sens[TG_PARAM_CH[k as usize] as usize]
-            let ip = lo.emit_i64_const(k)
+            let ip = lo.emit_i64_const(base + k)
             lo = ip.0
             lo = lo.emit(ir_index_set(TG_OUT_REG, ip.1, if s >= 0 { s } else { z.1 }))
             k = k + 1
@@ -16810,9 +17030,63 @@ impl Lowerer {
             }
             ch = ch + 1
         }
-        let ipn = lo.emit_i64_const(TG_NPCH)
+        let ipn = lo.emit_i64_const(base + TG_NPCH)
         lo = ipn.0
         lo = lo.emit(ir_index_set(TG_OUT_REG, ipn.1, acc))
+        lo
+    }
+
+    // Struct return: for each scalar f64 output field, the sensitivities of the
+    // field's value. A struct literal gives them through each field's
+    // initialiser; a local through the per-field sensitivities stored where it
+    // was built (the struct-literal lowering keeps them inside a clone).
+    fn tg_emit_ret_store_struct(self, e: &Expr) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        if !lo.tg_out_layout(TG_ACTIVE) { return lo }
+        let nout = TG_O_N
+        var ofn: [i64; 8] = [0; 8]
+        var oi: i64 = 0
+        while oi < nout {
+            ofn[oi as usize] = TG_O_FNAME[oi as usize]
+            oi = oi + 1
+        }
+        var j: i64 = 0
+        while j < nout {
+            let fname = ir_name_at(ofn[j as usize])
+            var vp = (lo, 0 - 1)
+            var have = false
+            if (*e).kind == ExprKind::ExprStructLit {
+                var fl = &(*e).fields
+                while !have {
+                    match *fl {
+                        Some(node) => {
+                            if ir_name_eq((*node).head.name, fname) {
+                                vp = lo.lower_expr_variance_ref(&(*node).head.value)
+                                have = true
+                            } else {
+                                fl = &(*node).tail
+                            }
+                        }
+                        None => break
+                    }
+                }
+            } else {
+                var fa = lower_ident_expr_for_name(fname, (*e).span)
+                fa.kind = ExprKind::ExprFieldAccess
+                fa.name = fname
+                fa.left = Some(Box::new(*e))
+                vp = lo.lower_expr_variance_ref(&fa)
+                have = true
+            }
+            lo = vp.0
+            if have && vp.1 >= 0 && !lo.fo_expr_has_sens() && !fo_variance_is_static_zero(&lo, vp.1) {
+                lo = lo.fo_seed_from_variance(vp.1, 0 - 1)
+            }
+            if !have { lo = lo.fo_clear_expr_sens() }
+            let sens = lo.fo_snapshot_expr_sens()
+            lo = lo.tg_store_row(sens, j)
+            j = j + 1
+        }
         lo
     }
 
@@ -16890,7 +17164,13 @@ impl Lowerer {
         let arr_pair = lo.fresh_reg()
         lo = arr_pair.0
         let arr = arr_pair.1
-        lo = lo.emit(ir_alloc_array(arr, lo.aggregate_storage_bytes(nf + 1), nf + 1))
+        let is_sret = TG_RET[tgi as usize] == 1
+        var nout: i64 = 1
+        if is_sret {
+            if !lo.tg_out_layout(tgi) { return (lo, 0 - 1) }
+            nout = TG_O_N
+        }
+        lo = lo.emit(ir_alloc_array(arr, lo.aggregate_storage_bytes(nout * (nf + 1)), nout * (nf + 1)))
         lo = lo.bind_reg_array_elem_float(arr)
         args = lower_reg_list_append(args, arr)
         argc = argc + 1
@@ -16901,9 +17181,9 @@ impl Lowerer {
         lo = pc.lo
         lo.pending_variance_reg = -1
         var ci = ir_call(dst, cid, cname, pc.args, pc.argc)
-        ci.imm_flags = IR_FLOAT_REG_MARKER_FLAG
+        if !is_sret { ci.imm_flags = IR_FLOAT_REG_MARKER_FLAG }
         lo = lo.emit(ci)
-        lo = lo.emit(ir_mark_float_reg(dst))
+        if !is_sret { lo = lo.emit(ir_mark_float_reg(dst)) }
         var slot_i: i64 = 0 - 1
         if TG_SITE_N < TG_SITE_MAX {
             slot_i = TG_SITE_N
@@ -16912,6 +17192,27 @@ impl Lowerer {
             TG_SITE_START[slot_i as usize] = e.span.start
             TG_SITE_END[slot_i as usize] = e.span.end
             TG_SITE_TG[slot_i as usize] = tgi
+        }
+        if is_sret {
+            // One row of nf partials and the internal variance per output.
+            var row: i64 = 0
+            while row < nout {
+                var kk: i64 = 0
+                while kk <= nf {
+                    let ip = lo.emit_i64_const(row * (nf + 1) + kk)
+                    lo = ip.0
+                    let dr = lo.fresh_reg()
+                    lo = dr.0
+                    var ld = ir_index_get(dr.1, arr, ip.1)
+                    ld.imm_flags = IR_FLOAT_REG_MARKER_FLAG
+                    lo = lo.emit(ld)
+                    lo = lo.emit(ir_mark_float_reg(dr.1))
+                    if slot_i >= 0 { TG_SITE_DM[((slot_i * 8 + row) * 25 + kk) as usize] = dr.1 }
+                    kk = kk + 1
+                }
+                row = row + 1
+            }
+            return (lo, dst)
         }
         var k: i64 = 0
         while k <= nf {
@@ -16944,6 +17245,7 @@ impl Lowerer {
         let no_recv: Option<Box<Expr> > = None
         if !lo.tg_args_ok(tgi, &no_recv, &e.args) { return (lo, 0 - 1) }
         if !lo.tg_layout(tgi) { return (lo, 0 - 1) }
+        if !lo.tg_ret_ok(tgi) { return (lo, 0 - 1) }
         let nf = TG_L_N
         let orig_id = lowerer_find_or_add_fn_id_mut(&! lo, callee_name)
         if orig_id < 0 { return (lo, 0 - 1) }
@@ -16972,6 +17274,8 @@ impl Lowerer {
         let si = tg_site_find((*e).span)
         if si < 0 { return (self, 0 - 1) }
         let tgi = TG_SITE_TG[si as usize]
+        // A struct return is bound field by field at its let (tg_bind_struct_result).
+        if TG_RET[tgi as usize] == 1 { return (self, 0 - 1) }
         if !self.tg_layout(tgi) { return (self, 0 - 1) }
         var lo = self
         let has_self = TG_HASSELF[tgi as usize] == 1
@@ -16981,11 +17285,17 @@ impl Lowerer {
         var lparam: [i64; 24] = [0; 24]
         var lfield: [i64; 24] = [-1; 24]
         var lfname: [i64; 24] = [0; 24]
+        var ldepth: [i64; 24] = [0; 24]
+        var lpath: [i64; 72] = [0; 72]
         var q: i64 = 0
         while q < ln {
             lparam[q as usize] = TG_L_PARAM[q as usize]
             lfield[q as usize] = TG_L_FIELD[q as usize]
             lfname[q as usize] = TG_L_FNAME[q as usize]
+            ldepth[q as usize] = TG_L_DEPTH[q as usize]
+            lpath[(q * 3) as usize] = TG_L_PATH[(q * 3) as usize]
+            lpath[(q * 3 + 1) as usize] = TG_L_PATH[(q * 3 + 1) as usize]
+            lpath[(q * 3 + 2) as usize] = TG_L_PATH[(q * 3 + 2) as usize]
             q = q + 1
         }
         var acc: [i64; 32] = [-1; 32]
@@ -17021,13 +17331,9 @@ impl Lowerer {
             if found {
                 var walk_e = arg_e
                 if lfield[li as usize] >= 0 {
-                    // `<local>.<field>` of the struct argument.
+                    // `<local>.<field>[.<field>...]` of the struct argument.
                     let base_nm = lo.tg_struct_arg_name(&arg_e)
-                    var fa = lower_ident_expr_for_name(base_nm, (*e).span)
-                    fa.kind = ExprKind::ExprFieldAccess
-                    fa.name = ir_name_at(lfname[li as usize])
-                    fa.left = Some(Box::new(lower_ident_expr_for_name(base_nm, (*e).span)))
-                    walk_e = fa
+                    walk_e = tg_chain_expr(base_nm, (*e).span, ldepth[li as usize], lpath[(li * 3) as usize], lpath[(li * 3 + 1) as usize], lpath[(li * 3 + 2) as usize])
                 }
                 let wp = lo.lower_expr_variance_ref(&walk_e)
                 lo = wp.0
@@ -17095,6 +17401,144 @@ impl Lowerer {
             return lo.emit_zero_variance()
         }
         lo.fo_emit_var_from_sens()
+    }
+
+    // `let r = f(args)` where the call went through a struct-returning tangent
+    // clone: each scalar f64 field of `r` gets its sensitivity on the caller's
+    // channels by the chain rule over the clone's Jacobian row for that field,
+    // plus the row's internal variance as one new independent channel. Stored
+    // where `variance_of(r.x)`, `r.x - r.y` and `r.x - g(..)` read it.
+    fn tg_bind_struct_result(self, nm: Name, e: &Expr) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        if TG_SITE_N <= 0 { return self }
+        let si = tg_site_find((*e).span)
+        if si < 0 { return self }
+        let tgi = TG_SITE_TG[si as usize]
+        if TG_RET[tgi as usize] != 1 { return self }
+        if !self.tg_layout(tgi) { return self }
+        var lo = self
+        let has_self = TG_HASSELF[tgi as usize] == 1
+        let ln = TG_L_N
+        var lparam: [i64; 24] = [0; 24]
+        var lfield: [i64; 24] = [-1; 24]
+        var ldepth: [i64; 24] = [0; 24]
+        var lpath: [i64; 72] = [0; 72]
+        var q: i64 = 0
+        while q < ln {
+            lparam[q as usize] = TG_L_PARAM[q as usize]
+            lfield[q as usize] = TG_L_FIELD[q as usize]
+            ldepth[q as usize] = TG_L_DEPTH[q as usize]
+            lpath[(q * 3) as usize] = TG_L_PATH[(q * 3) as usize]
+            lpath[(q * 3 + 1) as usize] = TG_L_PATH[(q * 3 + 1) as usize]
+            lpath[(q * 3 + 2) as usize] = TG_L_PATH[(q * 3 + 2) as usize]
+            q = q + 1
+        }
+        if !lo.tg_out_layout(tgi) { return lo }
+        let nout = TG_O_N
+        var ofn: [i64; 8] = [0; 8]
+        var oi: i64 = 0
+        while oi < nout {
+            ofn[oi as usize] = TG_O_FNAME[oi as usize]
+            oi = oi + 1
+        }
+        let dst_reg = lo.lookup_local(nm)
+        if dst_reg < 0 { return lo }
+        var acc: [i64; 256] = [-1; 256]
+        var li: i64 = 0
+        while li < ln {
+            let p = lparam[li as usize]
+            var found = false
+            var arg_e = lower_ident_expr_for_name(ir_empty_name(), (*e).span)
+            if has_self && p == 0 {
+                match (*e).left {
+                    Some(r) => { arg_e = *r; found = true }
+                    None => {}
+                }
+            } else {
+                var ap: i64 = if has_self { 1 } else { 0 }
+                var ac = &(*e).args
+                while !found {
+                    match *ac {
+                        Some(al) => {
+                            if ap == p {
+                                arg_e = (*al).head
+                                found = true
+                            } else {
+                                ap = ap + 1
+                                ac = &(*al).tail
+                            }
+                        }
+                        None => break
+                    }
+                }
+            }
+            if found {
+                var walk_e = arg_e
+                if lfield[li as usize] >= 0 {
+                    let base_nm = lo.tg_struct_arg_name(&arg_e)
+                    walk_e = tg_chain_expr(base_nm, (*e).span, ldepth[li as usize], lpath[(li * 3) as usize], lpath[(li * 3 + 1) as usize], lpath[(li * 3 + 2) as usize])
+                }
+                let wp = lo.lower_expr_variance_ref(&walk_e)
+                lo = wp.0
+                if wp.1 >= 0 && !lo.fo_expr_has_sens() && !fo_variance_is_static_zero(&lo, wp.1) {
+                    lo = lo.fo_seed_from_variance(wp.1, 0 - 1)
+                }
+                var j: i64 = 0
+                while j < nout {
+                    let d = TG_SITE_DM[((si * 8 + j) * 25 + li) as usize]
+                    var c: i64 = 0
+                    while c < 32 {
+                        let s = lo.fo_expr_sens[c as usize]
+                        if s >= 0 && d >= 0 {
+                            let t = lo.fresh_reg()
+                            lo = t.0
+                            lo = lo.emit(ir_binop_typed(t.1, d, BinaryOp::OpMul, s, true, true))
+                            lo = lo.emit(ir_mark_float_reg(t.1))
+                            let ai = (j * 32 + c) as usize
+                            if acc[ai] < 0 {
+                                acc[ai] = t.1
+                            } else {
+                                let a = lo.fresh_reg()
+                                lo = a.0
+                                lo = lo.emit(ir_binop_typed(a.1, acc[ai], BinaryOp::OpAdd, t.1, true, true))
+                                lo = lo.emit(ir_mark_float_reg(a.1))
+                                acc[ai] = a.1
+                            }
+                        }
+                        c = c + 1
+                    }
+                    j = j + 1
+                }
+            }
+            li = li + 1
+        }
+        var row: i64 = 0
+        while row < nout {
+            lo = lo.fo_clear_expr_sens().so_clear_expr_hess()
+            var c2: i64 = 0
+            while c2 < 32 {
+                lo.fo_expr_sens[c2 as usize] = acc[(row * 32 + c2) as usize]
+                c2 = c2 + 1
+            }
+            let vint = TG_SITE_DM[((si * 8 + row) * 25 + ln) as usize]
+            if tg_may_draw(tgi, 0) && vint >= 0 {
+                lo = lo.fo_add_channel_for_variance(vint)
+            }
+            var vr: i64 = 0 - 1
+            if !lo.fo_expr_has_sens() {
+                let zv = lo.emit_zero_variance()
+                lo = zv.0
+                vr = zv.1
+            } else {
+                let fv = lo.fo_emit_var_from_sens()
+                lo = fv.0
+                vr = fv.1
+            }
+            let fidx = lo.field_idx_from_name_simple(ir_name_at(ofn[row as usize]))
+            lo = lo.bind_variance_for_field(dst_reg, fidx, vr)
+            lo = lo.fo_field_sens_store(lo.variance_field_key(dst_reg, fidx))
+            row = row + 1
+        }
+        lo.fo_clear_expr_sens().so_clear_expr_hess()
     }
 
     fn emit_wide_param_unpack(self, preg: i64, limbs: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
@@ -34285,6 +34729,15 @@ impl Lowerer {
             }
             _ => {}
         }
+        // Struct-returning tangent clone: bind each field's sensitivities.
+        match s.expr {
+            Some(rhs_tgs) => {
+                if (*rhs_tgs).kind == ExprKind::ExprCall || (*rhs_tgs).kind == ExprKind::ExprMethodCall {
+                    lo = lo.tg_bind_struct_result(s.name, &(*rhs_tgs))
+                }
+            }
+            _ => {}
+        }
         match s.expr {
             Some(rhs_alias) => {
                 if (*rhs_alias).kind == ExprKind::ExprIdent {
@@ -36958,6 +37411,11 @@ impl Lowerer {
                     lo = fv.0
                     if fv.1 >= 0 {
                         lo = lo.bind_variance_for_field(base_reg, named_field_idx, fv.1)
+                        if TG_NPCH > 0 && lo.current_fn == TG_CLONE_FN {
+                            // Inside a tangent clone the field keeps its tangent
+                            // row, so a returned local reads it back exactly.
+                            lo = lo.fo_field_sens_store(lo.variance_field_key(base_reg, named_field_idx))
+                        }
                     }
                     // A struct-valued field carries its own field slots; remember the
                     // inner base so a chain (`c.a.x`) can hop through it.
@@ -43746,7 +44204,7 @@ impl Lowerer {
         if TG_ITEM_FN >= 0 && lo2.current_fn == TG_ITEM_FN && !lo2.probe_mode
             && (TG_ITEM_EPI || TG_CLONE_FN == lo2.current_fn) && wide_ret_limbs_m == 0 {
             let tgi_m = tg_find(ir_intern_name(call_name))
-            if tgi_m >= 0 && TG_HASSELF[tgi_m as usize] == 1 && lo2.tg_args_ok(tgi_m, &e.left, &e.args) && lo2.tg_layout(tgi_m) {
+            if tgi_m >= 0 && TG_HASSELF[tgi_m as usize] == 1 && lo2.tg_args_ok(tgi_m, &e.left, &e.args) && lo2.tg_layout(tgi_m) && lo2.tg_ret_ok(tgi_m) {
                 let nf_m = TG_L_N
                 let cpm = lo2.tg_clone_id(call_name, tgi_m)
                 lo2 = cpm.0
