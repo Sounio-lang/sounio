@@ -1,0 +1,347 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// tests/stdlib/ontology/test_snomed_elplus_failclosed.sio
+//
+// Regression test for the EL+ fail-closed overflow work.
+//
+// Before this change every fixed capacity in the SNOMED EL+ adapter
+// (stdlib/ontology/biomedical/snomed.sio) dropped the caller's axiom
+// SILENTLY, and `snomed_elplus_add_role_chain` wrote an unresolved role id
+// of 0 - 1 straight into ch1/ch2/ch3 with no guard — unlike its sibling
+// `snomed_elplus_add_role_sub`, which has always guarded r >= 0.  The (RC)
+// rule of the inlined fixpoint then evaluated
+//     CLOSE_R[(r1 * 64 + c) * 64 + f]   with r1 = 0 - 1   (index -4096)
+// and wrote
+//     CLOSE_R[(r3 * 64 + c) * 64 + f2] = true   with r3 = 0 - 1
+// out of bounds.  `CLOSE_S: [bool; 4096]` is declared immediately before
+// `CLOSE_R: [bool; 32768]` in that module, so the stray write landed inside
+// the subsumption matrix and corrupted the closure.
+//
+// The dropped-axiom case is the soundness-critical one: a closure computed
+// over a TBox weaker than the caller declared makes `elplus_conflict` miss
+// conflicts, which makes `ontology::evolve::guarded_add` accept
+// inconsistent additions.
+//
+// This test asserts the fail-closed contract, NOT a raised capacity: every
+// capacity is unchanged, and every overflow is now loud.
+//
+// Named imports only — the qualified form miscompiles (see
+// stdlib/ontology/elplus.sio).
+
+use ontology::biomedical::snomed::{
+    SNOMEDElplus,
+    snomed_elplus_new,
+    snomed_relationship_new,
+    CONCEPT_ROOT,
+    CONCEPT_CLINICAL_FINDING,
+    REL_FINDING_SITE,
+    REL_PART_OF,
+    SNOMED_ELPLUS_OVF_ATOM,
+    SNOMED_ELPLUS_OVF_ROLE,
+    SNOMED_ELPLUS_OVF_STATED,
+    SNOMED_ELPLUS_OVF_DROPPED_AXIOM,
+    SNOMED_ELPLUS_OVF_CHAIN_CAP,
+    SNOMED_ELPLUS_OVF_CHAIN_ROLE
+}
+
+use ontology::elplus::{
+    elplus_caps_ok,
+    elplus_fault,
+    elplus_clear_fault,
+    elplus_seed,
+    elplus_s_count,
+    elplus_fixpoint,
+    elplus_conflict
+}
+
+// Illustrative module-local concept keys (not real SCTIDs).
+let DISEASE_A: i64 = 900201
+let DISEASE_B: i64 = 900202
+let PART_A: i64 = 900301
+let PART_B: i64 = 900302
+let PART_C: i64 = 900303
+
+// ELPLUS_FAULT_SEED / ELPLUS_FAULT_FIXPOINT, spelled out: the module-level
+// fault register is a bit set.
+let FAULT_SEED: i64 = 1
+let FAULT_FIXPOINT: i64 = 2
+
+// Is `bit` (a power of two) set in `bits`?  Written with / and % because
+// `&` is also the reference sigil.
+fn has_bit(bits: i64, bit: i64) -> bool with Div, Panic {
+    (bits / bit) % 2 == 1
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var n_fail = 0
+
+    // ── 0. Positive control: a TBox inside every capacity still closes ──
+    var ok = snomed_elplus_new(CONCEPT_ROOT)
+    ok.snomed_elplus_add_isa(DISEASE_A, CONCEPT_CLINICAL_FINDING)
+    ok.snomed_elplus_add_isa(DISEASE_B, DISEASE_A)
+    let rounds_ok = ok.snomed_elplus_close()
+    if rounds_ok < 1 {
+        println("FAIL 0a: a within-capacity TBox must still close")
+        n_fail = n_fail + 1
+    }
+    if ok.snomed_elplus_overflowed() {
+        println("FAIL 0b: a within-capacity TBox must not report overflow")
+        n_fail = n_fail + 1
+    }
+    if ok.snomed_elplus_overflow_bits() != 0 {
+        println("FAIL 0c: overflow_bits must be 0 on a clean build")
+        n_fail = n_fail + 1
+    }
+    if !ok.snomed_subsumes_elplus(DISEASE_B, CONCEPT_CLINICAL_FINDING) {
+        println("FAIL 0d: transitivity must still be derived")
+        n_fail = n_fail + 1
+    }
+    if ok.snomed_subsumes_elplus(CONCEPT_CLINICAL_FINDING, DISEASE_B) {
+        println("FAIL 0e: subsumption must not be symmetric")
+        n_fail = n_fail + 1
+    }
+
+    // ── 1. The 9th role chain is NOT silently swallowed ──
+    // The chain buffer holds 8.  The 9th add must be recorded, and close()
+    // must refuse rather than report a closure over 8 of the 9 chains the
+    // caller declared.
+    var ch = snomed_elplus_new(CONCEPT_ROOT)
+    ch.snomed_elplus_add_isa(DISEASE_A, CONCEPT_CLINICAL_FINDING)
+    var i: i64 = 0
+    while i < 9 {
+        ch.snomed_elplus_add_role_chain(REL_FINDING_SITE, REL_FINDING_SITE, REL_FINDING_SITE)
+        i = i + 1
+    }
+    if !has_bit(ch.snomed_elplus_overflow_bits(), SNOMED_ELPLUS_OVF_CHAIN_CAP) {
+        println("FAIL 1a: the 9th role chain was swallowed silently")
+        n_fail = n_fail + 1
+    }
+    if ch.snomed_elplus_close() != 0 - 1 {
+        println("FAIL 1b: close() must return the sentinel after a dropped chain")
+        n_fail = n_fail + 1
+    }
+    if ch.snomed_elplus_rounds() != 0 - 1 {
+        println("FAIL 1c: rounds must record the refusal")
+        n_fail = n_fail + 1
+    }
+
+    // ── 2. The negative-role-index path no longer reaches the (RC) loop ──
+    // Fill the 8-role table, then declare a chain over three role types
+    // that cannot intern.  intern_role returns 0 - 1 for each; the old code
+    // stored those directly in ch1/ch2/ch3 and the (RC) rule then wrote
+    // CLOSE_R at a negative index, i.e. into CLOSE_S.
+    var bad = snomed_elplus_new(CONCEPT_ROOT)
+    bad.snomed_elplus_add_isa(DISEASE_A, CONCEPT_CLINICAL_FINDING)
+    var j: i64 = 0
+    while j < 8 {
+        bad.snomed_elplus_add_role_sub(700000 + j, 700000 + j)
+        j = j + 1
+    }
+    if bad.snomed_elplus_overflowed() {
+        println("FAIL 2a: exactly 8 roles must fit without overflow")
+        n_fail = n_fail + 1
+    }
+    bad.snomed_elplus_add_role_chain(999001, 999002, 999003)
+    if !has_bit(bad.snomed_elplus_overflow_bits(), SNOMED_ELPLUS_OVF_ROLE) {
+        println("FAIL 2b: the 9th role must be recorded as an overflow")
+        n_fail = n_fail + 1
+    }
+    if !has_bit(bad.snomed_elplus_overflow_bits(), SNOMED_ELPLUS_OVF_CHAIN_ROLE) {
+        println("FAIL 2c: a chain over unresolved roles must be recorded")
+        n_fail = n_fail + 1
+    }
+    if bad.snomed_elplus_close() != 0 - 1 {
+        println("FAIL 2d: close() must refuse a chain over unresolved roles")
+        n_fail = n_fail + 1
+    }
+
+    // The stray write used to corrupt CLOSE_S / CLOSE_R, which are MODULE
+    // globals shared by every adapter.  A fresh, entirely valid adapter
+    // built after the bad one must still close to exactly the right answer.
+    var after = snomed_elplus_new(CONCEPT_ROOT)
+    after.snomed_elplus_add_isa(DISEASE_A, CONCEPT_CLINICAL_FINDING)
+    after.snomed_elplus_add_isa(DISEASE_B, DISEASE_A)
+    if after.snomed_elplus_close() < 1 {
+        println("FAIL 2e: a clean adapter after a refused one must still close")
+        n_fail = n_fail + 1
+    }
+    if !after.snomed_subsumes_elplus(DISEASE_B, CONCEPT_CLINICAL_FINDING) {
+        println("FAIL 2f: the closure after a refused run must still be exact")
+        n_fail = n_fail + 1
+    }
+    if after.snomed_subsumes_elplus(CONCEPT_CLINICAL_FINDING, DISEASE_B) {
+        println("FAIL 2g: the closure after a refused run must not gain cells")
+        n_fail = n_fail + 1
+    }
+
+    // ── 2b. The exact corruption the out-of-bounds write produced ──
+    // Here only r3 fails to intern, so the (RC) rule kept a VALID r1/r2
+    // guard and wrote its conclusion at
+    // CLOSE_R[((0 - 1) * 64 + c) * 64 + f2] = CLOSE_S[c * 64 + f2].  With
+    // edges (part_of, A, B) and (part_of, B, C) that asserted the PLAIN
+    // subsumption A <= C, which EL+ never entails — only A <= ex part_of.C
+    // is.  (The guard read exid[0 - 64 + f2] lands in carg2, whose cells
+    // are >= 0, so the bad write fired deterministically.)  Measured on
+    // origin/main @ 57f87da54f: rounds = 2 and A <= C reported true.
+    var oob = snomed_elplus_new(CONCEPT_ROOT)
+    let e1 = snomed_relationship_new(PART_A, REL_PART_OF, PART_B)
+    oob.snomed_elplus_add_rel(&e1)
+    let e2 = snomed_relationship_new(PART_B, REL_PART_OF, PART_C)
+    oob.snomed_elplus_add_rel(&e2)
+    var p: i64 = 0
+    while p < 7 {
+        oob.snomed_elplus_add_role_sub(710000 + p, 710000 + p)
+        p = p + 1
+    }
+    oob.snomed_elplus_add_role_chain(REL_PART_OF, REL_PART_OF, 999999)
+    if oob.snomed_elplus_close() != 0 - 1 {
+        println("FAIL 2h: close() must refuse a chain whose target role is unresolved")
+        n_fail = n_fail + 1
+    }
+    if oob.snomed_subsumes_elplus(PART_A, PART_C) {
+        println("FAIL 2i: A <= C must never be asserted (out-of-bounds write into CLOSE_S)")
+        n_fail = n_fail + 1
+    }
+
+    // ── 3. A stated axiom past the cap sets the flag and close() refuses ──
+    // The stated buffer holds 64; stage() does not deduplicate, so 65 adds
+    // overflow it.  This is the soundness-critical drop.
+    var st = snomed_elplus_new(CONCEPT_ROOT)
+    var m: i64 = 0
+    while m < 65 {
+        st.snomed_elplus_add_isa(DISEASE_A, CONCEPT_CLINICAL_FINDING)
+        m = m + 1
+    }
+    if !has_bit(st.snomed_elplus_overflow_bits(), SNOMED_ELPLUS_OVF_STATED) {
+        println("FAIL 3a: a stated axiom past the cap was dropped silently")
+        n_fail = n_fail + 1
+    }
+    if st.snomed_elplus_close() != 0 - 1 {
+        println("FAIL 3b: close() must return the sentinel after a dropped axiom")
+        n_fail = n_fail + 1
+    }
+
+    // ── 4. Atom-table overflow propagates to the staged axiom ──
+    var at = snomed_elplus_new(CONCEPT_ROOT)
+    var q: i64 = 0
+    while q < 40 {
+        at.snomed_elplus_add_isa(800000 + q, CONCEPT_CLINICAL_FINDING)
+        q = q + 1
+    }
+    if !has_bit(at.snomed_elplus_overflow_bits(), SNOMED_ELPLUS_OVF_ATOM) {
+        println("FAIL 4a: an atom past the 32-atom cap was dropped silently")
+        n_fail = n_fail + 1
+    }
+    if !has_bit(at.snomed_elplus_overflow_bits(), SNOMED_ELPLUS_OVF_DROPPED_AXIOM) {
+        println("FAIL 4b: the axiom whose operand failed to intern must be recorded")
+        n_fail = n_fail + 1
+    }
+    if at.snomed_elplus_close() != 0 - 1 {
+        println("FAIL 4c: close() must refuse after an atom overflow")
+        n_fail = n_fail + 1
+    }
+
+    // ── 5. elplus_caps_ok is the capacity predicate ──
+    if !elplus_caps_ok(64, 64, 8, 8) {
+        println("FAIL 5a: the exact capacities must be accepted")
+        n_fail = n_fail + 1
+    }
+    if elplus_caps_ok(65, 64, 8, 8) {
+        println("FAIL 5b: nc past ELPLUS_MAXC must be rejected")
+        n_fail = n_fail + 1
+    }
+    if elplus_caps_ok(64, 65, 8, 8) {
+        println("FAIL 5c: nb past ELPLUS_MAXC must be rejected")
+        n_fail = n_fail + 1
+    }
+    if elplus_caps_ok(64, 64, 9, 8) {
+        println("FAIL 5d: nr past ELPLUS_MAXR must be rejected")
+        n_fail = n_fail + 1
+    }
+    if elplus_caps_ok(64, 64, 8, 9) {
+        println("FAIL 5e: nchain past ELPLUS_MAXCH must be rejected")
+        n_fail = n_fail + 1
+    }
+    if elplus_caps_ok(0 - 1, 64, 8, 8) {
+        println("FAIL 5f: a negative nc must be rejected")
+        n_fail = n_fail + 1
+    }
+
+    // ── 6. The library entry points fail closed ──
+    elplus_clear_fault()
+    var s: [bool; 4096] = [false; 4096]
+
+    // 6a. elplus_seed with an out-of-range nc leaves S empty and faults.
+    elplus_seed(&!s, 65, 0)
+    if elplus_s_count(&s, 64) != 0 {
+        println("FAIL 6a: a refused seed must leave S empty")
+        n_fail = n_fail + 1
+    }
+    if !has_bit(elplus_fault(), FAULT_SEED) {
+        println("FAIL 6b: a refused seed must record ELPLUS_FAULT_SEED")
+        n_fail = n_fail + 1
+    }
+
+    // 6c. elplus_seed with an out-of-range top also refuses.
+    elplus_clear_fault()
+    elplus_seed(&!s, 4, 64)
+    if elplus_s_count(&s, 64) != 0 {
+        println("FAIL 6c: a seed with an out-of-range top must leave S empty")
+        n_fail = n_fail + 1
+    }
+
+    // 6d. elplus_fixpoint returns 0 - 1 rather than running off the arrays.
+    elplus_clear_fault()
+    var redges: [bool; 32768] = [false; 32768]
+    var ckind: [i64; 64] = [0; 64]
+    var carg1: [i64; 64] = [0; 64]
+    var carg2: [i64; 64] = [0; 64]
+    var exid: [i64; 512] = [0; 512]
+    var rclos: [bool; 64] = [false; 64]
+    var c1: [i64; 8] = [0; 8]
+    var c2: [i64; 8] = [0; 8]
+    var c3: [i64; 8] = [0; 8]
+    let rounds_bad = elplus_fixpoint(&!s, &!redges, &ckind, &carg1, &carg2, &exid, &rclos, &c1, &c2, &c3, 0, 65, 65, 1)
+    if rounds_bad != 0 - 1 {
+        println("FAIL 6d: elplus_fixpoint must return the sentinel out of capacity")
+        n_fail = n_fail + 1
+    }
+    if !has_bit(elplus_fault(), FAULT_FIXPOINT) {
+        println("FAIL 6e: a refused fixpoint must record ELPLUS_FAULT_FIXPOINT")
+        n_fail = n_fail + 1
+    }
+
+    // 6f. elplus_fixpoint over 9 chains is refused too.
+    elplus_clear_fault()
+    let rounds_bad2 = elplus_fixpoint(&!s, &!redges, &ckind, &carg1, &carg2, &exid, &rclos, &c1, &c2, &c3, 9, 4, 4, 1)
+    if rounds_bad2 != 0 - 1 {
+        println("FAIL 6f: elplus_fixpoint must reject nchain past ELPLUS_MAXCH")
+        n_fail = n_fail + 1
+    }
+
+    // 6g. elplus_conflict reports a CONFLICT (the conservative answer) for
+    //     a concept id that never interned, instead of reading OOB.
+    var disj: [bool; 4096] = [false; 4096]
+    elplus_seed(&!s, 4, 0)
+    if !elplus_conflict(&s, &disj, 4, 0 - 1, 2) {
+        println("FAIL 6g: elplus_conflict must fail closed on an uninterned id")
+        n_fail = n_fail + 1
+    }
+    if !elplus_conflict(&s, &disj, 65, 1, 2) {
+        println("FAIL 6h: elplus_conflict must fail closed on an out-of-range nc")
+        n_fail = n_fail + 1
+    }
+    if elplus_conflict(&s, &disj, 4, 1, 2) {
+        println("FAIL 6i: elplus_conflict must still answer false in range")
+        n_fail = n_fail + 1
+    }
+
+    if n_fail == 0 {
+        println("ALL PASS")
+        return 0
+    }
+    println("FAILURES:")
+    println(n_fail)
+    return 1
+}
