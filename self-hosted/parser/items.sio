@@ -169,25 +169,47 @@ fn pure_fn_local_lookup(name: Name) -> (bool, i64) with Div {
     (false, 0)
 }
 
-// Fold a binary op over two already-bound pure-call arg words.
+// ADR-031 R1: folding a global initialiser must not overflow inside the
+// compiler. A fold whose result does not fit i64 is left unfolded (false),
+// so the expression is evaluated at run time, where it fails closed; before,
+// the compiler wrapped it into the BSS image (and, built by the guarded
+// lean_single seed, trapped here). The probes wrap on purpose.
+fn items_fold_add(a: i64, b: i64) -> (bool, i64) {
+    let r = wrapping_add(a, b)
+    ((a ^ r) & (b ^ r) >= 0, r)
+}
+fn items_fold_sub(a: i64, b: i64) -> (bool, i64) {
+    let r = wrapping_sub(a, b)
+    ((a ^ b) & (a ^ r) >= 0, r)
+}
+fn items_fold_mul(a: i64, b: i64) -> (bool, i64) with Div {
+    let min = 0 - 9223372036854775807 - 1
+    if a == 0 || b == 0 { return (true, 0) }
+    if (a == 0 - 1 && b == min) || (b == 0 - 1 && a == min) { return (false, 0) }
+    let r = wrapping_mul(a, b)
+    (r / b == a, r)
+}
+
+// Fold a binary op over two already-bound pure-call arg words. Same
+// overflow rule as items_eval_global_init_word (ADR-031 R1).
 fn pure_fn_fold_binop(op: BinaryOp, a: i64, b: i64) -> (bool, i64) with Div {
     if op == BinaryOp::OpAdd {
-        return (true, a + b)
+        return items_fold_add(a, b)
     }
     if op == BinaryOp::OpSub {
-        return (true, a - b)
+        return items_fold_sub(a, b)
     }
     if op == BinaryOp::OpMul {
-        return (true, a * b)
+        return items_fold_mul(a, b)
     }
     if op == BinaryOp::OpDiv {
-        if b == 0 {
+        if b == 0 || (b == 0 - 1 && a == 0 - 9223372036854775807 - 1) {
             return (false, 0)
         }
         return (true, a / b)
     }
     if op == BinaryOp::OpRem {
-        if b == 0 {
+        if b == 0 || (b == 0 - 1 && a == 0 - 9223372036854775807 - 1) {
             return (false, 0)
         }
         return (true, a % b)
@@ -751,6 +773,14 @@ fn items_eval_global_init_word(e: &Expr) -> (bool, i64) with Mut, Div {
                     if (*operand).kind == ExprKind::ExprFloatLit {
                         return (true, f64_to_bits(0.0 - (*operand).float_val))
                     }
+                    // -MIN does not fit (ADR-031 R1). The one exception is the
+                    // MIN spelling itself, -9223372036854775808, whose 2^63
+                    // token already folds to MIN; any other MIN operand is
+                    // left unfolded and fails at run time.
+                    if pair.1 == 0 - 9223372036854775807 - 1 {
+                        if (*operand).kind == ExprKind::ExprIntLit { return (true, pair.1) }
+                        return (false, 0)
+                    }
                     return (true, 0 - pair.1)
                 }
             }
@@ -790,22 +820,22 @@ fn items_eval_global_init_word(e: &Expr) -> (bool, i64) with Mut, Div {
                         let a = lp.1
                         let b = rp.1
                         if (*e).bin_op == BinaryOp::OpAdd {
-                            return (true, a + b)
+                            return items_fold_add(a, b)
                         }
                         if (*e).bin_op == BinaryOp::OpSub {
-                            return (true, a - b)
+                            return items_fold_sub(a, b)
                         }
                         if (*e).bin_op == BinaryOp::OpMul {
-                            return (true, a * b)
+                            return items_fold_mul(a, b)
                         }
                         if (*e).bin_op == BinaryOp::OpDiv {
-                            if b == 0 {
+                            if b == 0 || (b == 0 - 1 && a == 0 - 9223372036854775807 - 1) {
                                 return (false, 0)
                             }
                             return (true, a / b)
                         }
                         if (*e).bin_op == BinaryOp::OpRem {
-                            if b == 0 {
+                            if b == 0 || (b == 0 - 1 && a == 0 - 9223372036854775807 - 1) {
                                 return (false, 0)
                             }
                             return (true, a % b)
