@@ -1,0 +1,362 @@
+//@ run-pass
+//@ timeout: 120
+//@ expect-stdout-contains: CIRC28_ONTOLOGY_DDI_PASS
+//
+// stdlib/darwin_pbpk/circ28_ontology.sio: interaction pairs DERIVED by the EL+
+// reasoner from sourced drug - enzyme - transporter axioms.
+//
+// Expected set, worked out by hand from the stated axioms BEFORE the first run
+// (axiom numbers: docs/evidence/CIRC28_ONTOLOGY_AXIOM_SOURCES.md). A perpetrator
+// raises (R) or lowers (L) a victim when it inhibits / induces a route that
+// "clears" the victim; the enzyme column is the route of the chain, strongest
+// perpetrator edge first, then lowest id (1 CYP3A4, 2 CYP2D6, 3 CYP1A2,
+// 4 CYP2C19, 6 UGT, 7 other = P-gp).
+//
+//   victim routes (A1..A21): sirolimus 3A4 + P-gp; everolimus 3A4 + P-gp;
+//   tacrolimus 3A4; semaglutide, tirzepatide proteolysis; venlafaxine 2D6;
+//   haloperidol 3A4; midazolam 3A4; olanzapine 1A2 + UGT1A4; clozapine 1A2 +
+//   3A4 + 2D6; quetiapine 3A4; risperidone 2D6; aripiprazole 3A4 + 2D6;
+//   lithium, vancomycin renal.
+//
+//   perpetrator (id)      acts on                            derived pairs (victim: enzyme)
+//   ketoconazole 16       strong 3A4, P-gp                   R 1:1 2:1 3:1 7:1 8:1 10:1 11:1 13:1
+//   itraconazole 17       strong 3A4                         R 1:1 2:1 3:1 7:1 8:1 10:1 11:1 13:1
+//   clarithromycin 23     strong 3A4                         R 1:1 2:1 3:1 7:1 8:1 10:1 11:1 13:1
+//   fluvoxamine 19        strong 1A2, 2C19; moderate 3A4     R 1:1 2:1 3:1 7:1 8:1 9:3 10:3 11:1 13:1
+//   paroxetine 20         strong 2D6                         R 6:2 10:2 12:2 13:2
+//   fluoxetine 21         strong 2D6, 2C19                   R 6:2 10:2 12:2 13:2
+//   rifampicin 18         strong 3A4, 2C19, P-gp; mod. 1A2   L 1:1 2:1 3:1 7:1 8:1 9:3 10:1 11:1 13:1
+//   carbamazepine 22      strong 3A4; moderate 1A2           L 1:1 2:1 3:1 7:1 8:1 9:3 10:1 11:1 13:1
+//
+//   Counts: 41 raises (8 + 8 + 8 + 9 + 4 + 4) and 18 lowers (9 + 9) = 59 pairs.
+//   Nothing is derived for semaglutide (4), tirzepatide (5), lithium (14) or
+//   vancomycin (15): none of their routes is a CYP or P-gp that a perpetrator
+//   acts on. Fluvoxamine does not raise venlafaxine or risperidone (its CYP2D6
+//   inhibition is weak and weak inhibition is not encoded), and carbamazepine
+//   does not lower risperidone (the label documents it, no sourced route).
+//
+// Removal predictions (made with the table above, checked by rebuilding):
+//   E1 drop A10 (CYP3A4 clears midazolam): all six pairs on victim 8 go.
+//   E2 drop A1 (CYP3A4 clears sirolimus): itraconazole, clarithromycin,
+//      fluvoxamine, carbamazepine lose victim 1; ketoconazole and rifampicin keep
+//      it through P-gp, enzyme 7.
+//   E3 drop P5 (fluvoxamine strong CYP1A2): (19, olanzapine) goes; (19, clozapine)
+//      stays through the moderate CYP3A4 edge, enzyme 3 -> 1.
+//   E4 drop P15 (carbamazepine strong CYP3A): only the CYP1A2 pairs (olanzapine,
+//      clozapine, enzyme 3) remain for carbamazepine.
+
+use darwin_pbpk::circ28_ontology::*
+
+fn pname(id: i32) with IO {
+    if id == 1 { print("sirolimus") }
+    if id == 2 { print("everolimus") }
+    if id == 3 { print("tacrolimus") }
+    if id == 4 { print("semaglutide") }
+    if id == 5 { print("tirzepatide") }
+    if id == 6 { print("venlafaxine") }
+    if id == 7 { print("haloperidol") }
+    if id == 8 { print("midazolam") }
+    if id == 9 { print("olanzapine") }
+    if id == 10 { print("clozapine") }
+    if id == 11 { print("quetiapine") }
+    if id == 12 { print("risperidone") }
+    if id == 13 { print("aripiprazole") }
+    if id == 14 { print("lithium") }
+    if id == 15 { print("vancomycin") }
+    if id == 16 { print("ketoconazole") }
+    if id == 17 { print("itraconazole") }
+    if id == 18 { print("rifampicin") }
+    if id == 19 { print("fluvoxamine") }
+    if id == 20 { print("paroxetine") }
+    if id == 21 { print("fluoxetine") }
+    if id == 22 { print("carbamazepine") }
+    if id == 23 { print("clarithromycin") }
+}
+
+fn ename(e: i32) with IO {
+    if e == 0 { print("-") }
+    if e == 1 { print("CYP3A4") }
+    if e == 2 { print("CYP2D6") }
+    if e == 3 { print("CYP1A2") }
+    if e == 4 { print("CYP2C19") }
+    if e == 6 { print("UGT") }
+    if e == 7 { print("other(P-gp)") }
+}
+
+fn put(d: &![i32; 512], e: &![i32; 512], perp: i32, v: i32, dir: i32, enz: i32) with Mut, Div, Panic {
+    let k = (perp * 16 + v) as i64
+    d[k] = dir
+    e[k] = enz
+}
+
+// victims 1 2 3 7 8 10 11 13 (every CYP3A4 route plus clozapine), enzyme 1
+fn put_cyp3a4_set(d: &![i32; 512], e: &![i32; 512], perp: i32, dir: i32) with Mut, Div, Panic {
+    put(d, e, perp, 1, dir, 1)
+    put(d, e, perp, 2, dir, 1)
+    put(d, e, perp, 3, dir, 1)
+    put(d, e, perp, 7, dir, 1)
+    put(d, e, perp, 8, dir, 1)
+    put(d, e, perp, 10, dir, 1)
+    put(d, e, perp, 11, dir, 1)
+    put(d, e, perp, 13, dir, 1)
+}
+
+// The expected set, as in the header table.
+fn expected(d: &![i32; 512], e: &![i32; 512]) with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < 512 { d[i] = 0  e[i] = 0  i = i + 1 }
+    put_cyp3a4_set(d, e, 16, 1)
+    put_cyp3a4_set(d, e, 17, 1)
+    put_cyp3a4_set(d, e, 23, 1)
+    put_cyp3a4_set(d, e, 19, 1)
+    put(d, e, 19, 9, 1, 3)
+    put(d, e, 19, 10, 1, 3)
+    put_cyp3a4_set(d, e, 18, 2)
+    put(d, e, 18, 9, 2, 3)
+    put_cyp3a4_set(d, e, 22, 2)
+    put(d, e, 22, 9, 2, 3)
+    put(d, e, 20, 6, 1, 2)
+    put(d, e, 20, 10, 1, 2)
+    put(d, e, 20, 12, 1, 2)
+    put(d, e, 20, 13, 1, 2)
+    put(d, e, 21, 6, 1, 2)
+    put(d, e, 21, 10, 1, 2)
+    put(d, e, 21, 12, 1, 2)
+    put(d, e, 21, 13, 1, 2)
+}
+
+// Compare the reasoner with an expected set over all 8 x 15 pairs.
+// res[0] expected but not derived, res[1] derived but not expected,
+// res[2] wrong enzyme, res[3] pairs derived.
+fn compare(d: &[i32; 512], e: &[i32; 512], res: &![i32; 4]) with Mut, Div, Panic {
+    res[0] = 0
+    res[1] = 0
+    res[2] = 0
+    res[3] = 0
+    var p: i32 = 16
+    while p <= 23 {
+        var v: i32 = 1
+        while v <= 15 {
+            let k = (p * 16 + v) as i64
+            let up = circ28_onto_raises(p, v)
+            let down = circ28_onto_lowers(p, v)
+            var got: i32 = 0
+            if up { got = 1 }
+            if down { got = 2 }
+            if up && down { got = 3 }
+            if got != 0 { res[3] = res[3] + 1 }
+            if d[k] != 0 && got != d[k] { res[0] = res[0] + 1 }
+            if d[k] == 0 && got != 0 { res[1] = res[1] + 1 }
+            if got == d[k] && got != 0 {
+                if circ28_onto_shared_enzyme(p, v) != e[k] { res[2] = res[2] + 1 }
+            }
+            if got == 0 {
+                if circ28_onto_shared_enzyme(p, v) != 0 { res[2] = res[2] + 1 }
+            }
+            v = v + 1
+        }
+        p = p + 1
+    }
+}
+
+fn check(label: i64, ok: bool) -> i64 with IO {
+    if ok { return 0 }
+    print("FAIL check ")
+    print_int(label)
+    println("")
+    1
+}
+
+fn check_set(name: i64, d: &[i32; 512], e: &[i32; 512], want_total: i32) -> i64 with IO, Mut, Div, Panic {
+    var res: [i32; 4] = [0; 4]
+    compare(d, e, &!res)
+    print("  set ")
+    print_int(name)
+    print(": missing ")
+    print_int(res[0] as i64)
+    print(" extra ")
+    print_int(res[1] as i64)
+    print(" wrong-enzyme ")
+    print_int(res[2] as i64)
+    print(" derived ")
+    print_int(res[3] as i64)
+    print(" (want ")
+    print_int(want_total as i64)
+    println(")")
+    var bad: i64 = 0
+    bad = bad + check(name * 10 + 1, res[0] == 0)
+    bad = bad + check(name * 10 + 2, res[1] == 0)
+    bad = bad + check(name * 10 + 3, res[2] == 0)
+    bad = bad + check(name * 10 + 4, res[3] == want_total)
+    bad
+}
+
+fn run() -> i32 with IO, Mut, Div, Panic {
+    var bad: i64 = 0
+
+    // budget of the dense engine
+    let stated = circ28_onto_init()
+    print("stated axioms ")
+    print_int(stated as i64)
+    print(", fixpoint rounds ")
+    print_int(circ28_onto_rounds_inhibition() as i64)
+    print(" / ")
+    print_int(circ28_onto_rounds_induction() as i64)
+    print(", concepts ")
+    print_int(CIRC28_ONTO_NC_INHIBITION)
+    print(" / ")
+    print_int(CIRC28_ONTO_NC_INDUCTION)
+    println(" of 64")
+    bad = bad + check(1, stated == 37)
+    bad = bad + check(2, CIRC28_ONTO_NC_INHIBITION <= 64 && CIRC28_ONTO_NC_INDUCTION <= 64)
+    bad = bad + check(3, CIRC28_ONTO_NR <= 8 && CIRC28_ONTO_NCHAIN <= 8)
+    bad = bad + check(4, circ28_onto_rounds_inhibition() > 0 && circ28_onto_rounds_induction() > 0)
+    bad = bad + check(5, CIRC28_DRUG_MIDAZOLAM == 8 && CIRC28_DRUG_RIFAMPICIN == 18 && CIRC28_ENZ_CYP3A4 == 1 && CIRC28_ENZ_UGT == 6 && CIRC28_ENZ_OTHER == 7)
+
+    // (a) every expected pair is derived and (b) nothing else is
+    var d: [i32; 512] = [0; 512]
+    var e: [i32; 512] = [0; 512]
+    expected(&!d, &!e)
+    println("full set")
+    bad = bad + check_set(1, &d, &e, 59)
+
+    // (c) clinically documented positives, each with the source in the evidence file
+    bad = bad + check(110, circ28_onto_raises(16, 8))                        // C1 ketoconazole -> midazolam
+    bad = bad + check(111, circ28_onto_shared_enzyme(16, 8) == 1)
+    bad = bad + check(112, circ28_onto_lowers(18, 8))                        // C2 rifampicin -> midazolam
+    bad = bad + check(113, circ28_onto_shared_enzyme(18, 8) == 1)
+    bad = bad + check(114, circ28_onto_raises(19, 10))                       // C3 fluvoxamine -> clozapine
+    bad = bad + check(115, circ28_onto_shared_enzyme(19, 10) == 3)           //    through CYP1A2
+    bad = bad + check(116, circ28_onto_raises(20, 12))                       // C4 paroxetine -> risperidone
+    bad = bad + check(117, circ28_onto_raises(21, 12))                       //    fluoxetine -> risperidone
+    bad = bad + check(118, circ28_onto_shared_enzyme(20, 12) == 2)
+    bad = bad + check(119, circ28_onto_raises(16, 11))                       // C5 ketoconazole -> quetiapine
+    bad = bad + check(120, circ28_onto_lowers(22, 11))                       // C6 carbamazepine -> quetiapine
+    bad = bad + check(121, circ28_onto_lowers(22, 13))                       // C7 carbamazepine -> aripiprazole
+    bad = bad + check(122, circ28_onto_lowers(18, 7))                        // C8 rifampicin -> haloperidol
+    bad = bad + check(123, circ28_onto_lowers(22, 9) && circ28_onto_raises(19, 9))   // C9 olanzapine, CYP1A2
+    bad = bad + check(124, circ28_onto_raises(16, 2))                        // C10 ketoconazole -> everolimus
+    bad = bad + check(125, circ28_onto_raises(20, 6) && circ28_onto_raises(21, 6))   // C11 venlafaxine, CYP2D6
+
+    // (d) negatives: nothing acts on lithium, vancomycin, semaglutide, tirzepatide
+    var neg: i32 = 0
+    var p: i32 = 16
+    while p <= 23 {
+        var v: i32 = 4
+        while v <= 15 {
+            if v == 4 || v == 5 || v == 14 || v == 15 {
+                if circ28_onto_raises(p, v) || circ28_onto_lowers(p, v) { neg = neg + 1 }
+                if circ28_onto_shared_enzyme(p, v) != 0 { neg = neg + 1 }
+            }
+            v = v + 1
+        }
+        p = p + 1
+    }
+    print("derived pairs on lithium / vancomycin / semaglutide / tirzepatide: ")
+    print_int(neg as i64)
+    println("")
+    bad = bad + check(130, neg == 0)
+    // other absences that the table predicts
+    bad = bad + check(131, !circ28_onto_raises(20, 8))                       // paroxetine does not touch CYP3A4
+    bad = bad + check(132, !circ28_onto_lowers(22, 12))                      // carbamazepine -> risperidone: no sourced route
+    bad = bad + check(133, !circ28_onto_raises(19, 6) && !circ28_onto_raises(19, 12))   // fluvoxamine: weak 2D6 not encoded
+    bad = bad + check(134, !circ28_onto_raises(16, 9))                       // ketoconazole -> olanzapine (1A2, UGT)
+    bad = bad + check(135, !circ28_onto_lowers(18, 6))                       // rifampicin -> venlafaxine (2D6)
+    bad = bad + check(136, !circ28_onto_raises(8, 16) && !circ28_onto_raises(16, 99) && circ28_onto_shared_enzyme(1, 1) == 0)  // ids out of range
+
+    // the derived table
+    var out: [i32; 1024] = [0; 1024]
+    let n = circ28_onto_fill_pairs(&!out)
+    print("derived pairs: ")
+    print_int(n as i64)
+    println("")
+    println("  perpetrator      direction  victim        enzyme")
+    var i: i32 = 0
+    var nr: i32 = 0
+    var nl: i32 = 0
+    var tuple_bad: i32 = 0
+    while i < n {
+        let b = (i * 4) as i64
+        print("  ")
+        pname(out[b])
+        print(" -> ")
+        if out[b + 3] == 1 { print("raises  ") }
+        if out[b + 3] == 2 { print("lowers  ") }
+        pname(out[b + 1])
+        print("  via ")
+        ename(out[b + 2])
+        println("")
+        if out[b + 3] == 1 { nr = nr + 1 }
+        if out[b + 3] == 2 { nl = nl + 1 }
+        let k = (out[b] * 16 + out[b + 1]) as i64
+        if d[k] != out[b + 3] || e[k] != out[b + 2] { tuple_bad = tuple_bad + 1 }
+        i = i + 1
+    }
+    bad = bad + check(140, n == 59 && nr == 41 && nl == 18)
+    bad = bad + check(141, tuple_bad == 0)
+
+    // (e) removing one axiom removes exactly the pairs that depended on it
+    println("removal tests")
+    var d1: [i32; 512] = [0; 512]
+    var e1: [i32; 512] = [0; 512]
+
+    // E1 drop A10: CYP3A4 clears midazolam
+    let s1 = circ28_onto_init_without(0, 0, 8)
+    bad = bad + check(150, s1 == 36 && circ28_onto_omitted() == 1)
+    expected(&!d1, &!e1)
+    var q: i32 = 16
+    while q <= 23 { put(&!d1, &!e1, q, 8, 0, 0)  q = q + 1 }
+    bad = bad + check_set(2, &d1, &e1, 53)
+    bad = bad + check(151, !circ28_onto_raises(16, 8) && !circ28_onto_lowers(18, 8) && circ28_onto_raises(16, 11))
+
+    // E2 drop A1: CYP3A4 clears sirolimus; ketoconazole and rifampicin keep it through P-gp
+    let s2 = circ28_onto_init_without(0, 0, 1)
+    bad = bad + check(152, s2 == 36)
+    expected(&!d1, &!e1)
+    put(&!d1, &!e1, 17, 1, 0, 0)
+    put(&!d1, &!e1, 23, 1, 0, 0)
+    put(&!d1, &!e1, 19, 1, 0, 0)
+    put(&!d1, &!e1, 22, 1, 0, 0)
+    put(&!d1, &!e1, 16, 1, 1, 7)
+    put(&!d1, &!e1, 18, 1, 2, 7)
+    bad = bad + check_set(3, &d1, &e1, 55)
+    bad = bad + check(153, circ28_onto_via_route(16, 1, 5, true) && !circ28_onto_via_route(16, 1, 0, true))
+
+    // E3 drop P5: fluvoxamine strong CYP1A2
+    let s3 = circ28_onto_init_without(1, 2, 19)
+    bad = bad + check(154, s3 == 36)
+    expected(&!d1, &!e1)
+    put(&!d1, &!e1, 19, 9, 0, 0)
+    put(&!d1, &!e1, 19, 10, 1, 1)
+    bad = bad + check_set(4, &d1, &e1, 58)
+
+    // E4 drop P15: carbamazepine strong CYP3A
+    let s4 = circ28_onto_init_without(3, 0, 22)
+    bad = bad + check(155, s4 == 36)
+    expected(&!d1, &!e1)
+    put(&!d1, &!e1, 22, 1, 0, 0)
+    put(&!d1, &!e1, 22, 2, 0, 0)
+    put(&!d1, &!e1, 22, 3, 0, 0)
+    put(&!d1, &!e1, 22, 7, 0, 0)
+    put(&!d1, &!e1, 22, 8, 0, 0)
+    put(&!d1, &!e1, 22, 11, 0, 0)
+    put(&!d1, &!e1, 22, 13, 0, 0)
+    put(&!d1, &!e1, 22, 10, 2, 3)
+    bad = bad + check_set(5, &d1, &e1, 52)
+
+    // restore: the full set returns
+    let s5 = circ28_onto_init()
+    bad = bad + check(156, s5 == 37 && circ28_onto_omitted() == 0)
+    bad = bad + check_set(6, &d, &e, 59)
+
+    if bad == 0 {
+        println("CIRC28_ONTOLOGY_DDI_PASS")
+        return 0
+    }
+    print("CIRC28_ONTOLOGY_DDI_FAIL ")
+    print_int(bad)
+    println("")
+    1
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic { run() }
