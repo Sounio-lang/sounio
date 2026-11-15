@@ -2563,6 +2563,9 @@ var FO_ARRAY_BASE: [i64; 64] = [-1; 64]
 var FO_ARRAY_INDEX: [i64; 64] = [-1; 64]
 var FO_ARRAY_SENS: [i64; 2048] = [-1; 2048]
 var FO_CONTAINER_KNOWLEDGE_SEEN: bool = false
+// Does the function being lowered ask an uncertainty query (or is it a tangent
+// clone)? Set at function entry.
+var FO_FN_OBSERVES: bool = true
 
 fn fo_array_base_tracked(base: i64) -> bool with Mut, Panic, Div {
     var i: i64 = 0
@@ -10553,6 +10556,12 @@ fn lowerer_lower_fn_item_mut(
         // The hyper-dual clone carries the Hessian rows of its body.
         if TG_ACTIVE_ORD == 2 { (*lo).so_enabled = true }
     }
+    // #3546 tracks measured values stored in arrays and refuses the first lossy
+    // container operation. That protects an answer someone can ask for, so it
+    // runs only in a body that asks an uncertainty query or is a tangent clone.
+    // Elsewhere no query can read the sensitivity; the results reach a caller
+    // through a clone (which tracks) or a call the caller's query refuses.
+    FO_FN_OBSERVES = TG_CLONE_FN == fn_id || tg_stmts_call(&(*fd).body.stmts, 0, 0)
     // Inter-procedural FO: register pure-fn transfer before body lower so later
     // callers (e.g. main) see helpers defined earlier in the module.
     // Note: fo_xfer_* is NOT cleared per-function — it accumulates across the module.
@@ -23839,7 +23848,7 @@ impl Lowerer {
     // receiver is evidence for enabling the measured-container refusal.
     fn fo_container_note_projection(self, name: Name) with Mut, Panic, Div, Alloc {
         if ir_name_eq_lit(self.lookup_local_struct_type(name), "Knowledge") {
-            FO_CONTAINER_KNOWLEDGE_SEEN = true
+            if FO_FN_OBSERVES { FO_CONTAINER_KNOWLEDGE_SEEN = true }
         }
     }
 
@@ -41447,7 +41456,7 @@ impl Lowerer {
     }
 
     fn lower_measure_call_ref(self, _span: Span, args: &Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
-        FO_CONTAINER_KNOWLEDGE_SEEN = true
+        if FO_FN_OBSERVES { FO_CONTAINER_KNOWLEDGE_SEEN = true }
         // Extract first argument: value
         let value_pair = self.lower_measure_value_arg_ref(args)
         let lo1 = value_pair.0
@@ -41503,7 +41512,7 @@ impl Lowerer {
     // separate pre-existing lowering gap, unchanged here.) Named call arguments lower to
     // their value expression, so arg0 is the value and arg1 is the epsilon expression.
     fn lower_knowledge_ctor_call_ref(self, _span: Span, args: &Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
-        FO_CONTAINER_KNOWLEDGE_SEEN = true
+        if FO_FN_OBSERVES { FO_CONTAINER_KNOWLEDGE_SEEN = true }
         let value_pair = self.lower_measure_value_arg_ref(args)
         let lo1 = value_pair.0
         let value_reg = value_pair.1
