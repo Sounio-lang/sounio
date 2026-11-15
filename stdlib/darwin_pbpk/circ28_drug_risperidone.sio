@@ -114,6 +114,10 @@
 // the renal clearance of paliperidone, and the PM case. The criteria and expectations are written in
 // tests/run-pass/circ28_drug_risperidone.sio BEFORE the runs.
 //
+// ROUND 2: the split clform/clint is no longer fitted to the IV AUC ratio. f2D6 (share of the hepatic clearance carried by CYP2D6,
+// which forms 9-OH entirely) is fitted to the PM/NM oral clearance ratio 6.20 (u 0.65), Zhang 2020 Pharmacotherapy 40:632, PMID
+// 32519344 (abstract, A); q = share of the non-2D6 clearance that forms 9-OH is 0 (no source). The IV ratio 3 is then a validation row.
+//
 // POOR METABOLISER. The CYP2D6 pathway only is scaled: clform x PM_SCALE with PM_SCALE = 0 (a PM has no
 // functional CYP2D6, which defines the phenotype in Huang 1993, "dextromethorphan-phenotyped"). The
 // residual formation of 9-OH in PMs (CYP3A4, Mahatthanatrakul 2011, A, and Kneller 2020, PMID 31359271, A)
@@ -228,9 +232,41 @@ pub fn rsp_hep_cl(th: [f64; 18]) -> f64 with Mut, Div, Panic {
     return circ28_hepatic_extraction(p) * circ28_q_hepatic(p) * p.bp
 }
 
-// Risperidone: Kp scalar to V_ss, cl_renal = fe CL, total hepatic intrinsic clearance to the rest,
-// and the split phi = clform/(clint + clform) to the IV plasma AUC ratio of the (already fitted) 9-OH.
-pub fn rsp_fit_r(th: [f64; 18], thm: [f64; 18], vss: f64, cl: f64, fe: f64, ratio: f64) -> [f64; 18] with Mut, Div, Panic {
+// ROUND 2 split. CYP2D6 share f2D6 of the parent hepatic clearance is fitted to the EM/PM ratio of oral
+// clearance (CL/F)_EM/(CL/F)_PM = 6.20 (Zhang 2020 meta-analysis, PMID 32519344, abstract); the CYP2D6 pathway
+// forms 9-OH entirely. q = fraction of the NON-2D6 hepatic clearance that forms 9-OH (no independent observable
+// read; base case q = 0, derived-with-no-source, i.e. an assumption kept visible and scanned in the test).
+pub fn rsp_q_other() -> f64 { return 0.0 }
+pub fn rsp_obs_pmratio() -> f64 { return 6.20 }
+pub fn rsp_u_pmratio() -> f64 { return 0.65 }
+
+// CL/F of risperidone for a given hepatic CL/F (y), B = bp Qh and renal clearance: well-stirred closed form.
+pub fn rsp_cl_over_f(y: f64, bb: f64, clren: f64) -> f64 with Div {
+    let clh = y / (1.0 + y / bb)
+    let f = 1.0 - clh / bb
+    return (clh + clren) / f
+}
+
+// y_PM such that (CL/F)(y_PM) = target; monotone increasing, bisection (closed-form model, no kernel run).
+pub fn rsp_solve_ypm(target: f64, bb: f64, clren: f64) -> f64 with Mut, Div {
+    var lo = 0.0
+    var hi = 1000.0 * bb
+    var k: i32 = 0
+    while k < 200 {
+        let mid = 0.5 * (lo + hi)
+        if rsp_cl_over_f(mid, bb, clren) > target {
+            hi = mid
+        } else {
+            lo = mid
+        }
+        k = k + 1
+    }
+    return 0.5 * (lo + hi)
+}
+
+// Risperidone: Kp scalar to V_ss, cl_renal = fe CL, total hepatic intrinsic clearance to CL, f2D6 to the EM/PM
+// oral clearance ratio. clform = f2D6 tot + q (1 - f2D6) tot ; clint = (1 - q)(1 - f2D6) tot.
+pub fn rsp_fit_r(th: [f64; 18], vss: f64, cl: f64, fe: f64, pmratio: f64, q: f64) -> [f64; 18] with Mut, Div, Panic {
     var t = th
     t[CD_KPSC] = 1.0
     t[CD_CLINT] = 0.0
@@ -245,9 +281,10 @@ pub fn rsp_fit_r(th: [f64; 18], thm: [f64; 18], vss: f64, cl: f64, fe: f64, rati
     t[CD_KPSC] = sc
     let p = circ28_drug_params_theta(t)
     let qh = circ28_q_hepatic(p)
+    let bb = p.bp * qh
     let clren = fe * cl
     let clh = cl - clren
-    let eh = clh / (p.bp * qh)
+    let eh = clh / bb
     if !(eh > 0.0) || !(eh < 1.0) {
         t[CD_CLINT] = 0.0 - 1.0
         return t
@@ -258,17 +295,28 @@ pub fn rsp_fit_r(th: [f64; 18], thm: [f64; 18], vss: f64, cl: f64, fe: f64, rati
         return t
     }
     let tot = (y * p.ps[1] / (p.ps[1] - y)) / p.fu
-    let mwr = thm[CD_MW] / th[CD_MW]
-    let clm = thm[CD_CLREN] + rsp_hep_cl(thm)
-    let phi2 = ratio * clm / (mwr * (1.0 - fe) * rsp_fsrc(thm) * cl)
-    if !(phi2 > 0.0) || !(phi2 < 1.0) {
+    let clf_em = cl / (1.0 - eh)
+    let ypm = rsp_solve_ypm(clf_em / pmratio, bb, clren)
+    if !(p.ps[1] > ypm) {
+        t[CD_CLINT] = 0.0 - 1.0
+        return t
+    }
+    let totpm = (ypm * p.ps[1] / (p.ps[1] - ypm)) / p.fu
+    let f2d6 = 1.0 - totpm / tot
+    if !(f2d6 > 0.0) || !(f2d6 < 1.0) {
         t[CD_CLINT] = 0.0 - 1.0
         return t
     }
     t[CD_CLREN] = clren
-    t[CD_CLFORM] = phi2 * tot
-    t[CD_CLINT] = (1.0 - phi2) * tot
+    t[CD_CLFORM] = f2d6 * tot + q * (1.0 - f2d6) * tot
+    t[CD_CLINT] = (1.0 - q) * (1.0 - f2d6) * tot
     return t
+}
+
+// PM: CYP2D6 formation removed, the non-2D6 formation q (1 - f) tot kept. With clint = (1 - q)(1 - f) tot
+// that is clform_PM = clint q/(1 - q).
+pub fn rsp_pm_clform(th: [f64; 18], q: f64) -> f64 {
+    return th[CD_CLINT] * q / (1.0 - q)
 }
 
 // Tmax (h) of a 1 mg oral run of risperidone ALONE at the given ka (record array in the caller).
@@ -332,14 +380,13 @@ pub fn rsp_fit_record_m(d: &!Circ28Drug) with Mut, Div, Panic, Epistemic {
     circ28_drug_set(d, CD_CLINT, th[CD_CLINT], 0.0, CD_STATUS_FITTED, "fitted to the non-renal part of CL 3.81 L/h")
 }
 
-pub fn rsp_fit_record_r(d: &!Circ28Drug, dm: &Circ28Drug) with Mut, Div, Panic, Epistemic {
+pub fn rsp_fit_record_r(d: &!Circ28Drug) with Mut, Div, Panic, Epistemic {
     let th0 = circ28_drug_theta(d)
-    let thm = circ28_drug_theta(dm)
-    let th = rsp_fit_r(th0, thm, rsp_obs_r_vss(), rsp_obs_r_cl(), rsp_obs_r_fe(), rsp_obs_ratio())
+    let th = rsp_fit_r(th0, rsp_obs_r_vss(), rsp_obs_r_cl(), rsp_obs_r_fe(), rsp_obs_pmratio(), rsp_q_other())
     circ28_drug_set(d, CD_KPSC, th[CD_KPSC], 0.0, CD_STATUS_FITTED, "fitted to Vss 109.5 L = 1.5 L/kg x 73 kg (Risperdal label)")
     circ28_drug_set(d, CD_CLREN, th[CD_CLREN], 0.0, CD_STATUS_FITTED, "fe 0.02 x CL 23.6 L/h (Wong2019 <4 %; Mahdy2023 citing Huang1993)")
-    circ28_drug_set(d, CD_CLINT, th[CD_CLINT], 0.0, CD_STATUS_FITTED, "other pathways: (1 - phi) x total hepatic, total to CL 23.6 L/h")
-    circ28_drug_set(d, CD_CLFORM, th[CD_CLFORM], 0.0, CD_STATUS_FITTED, "9-hydroxylation: phi x total hepatic, phi to the IV AUC ratio 3 (Huang1993)")
+    circ28_drug_set(d, CD_CLINT, th[CD_CLINT], 0.0, CD_STATUS_FITTED, "non-2D6 pathways (1 - f2D6) x total hepatic, total to CL 23.6 L/h; f2D6 to EM/PM CL/F 6.2 (Zhang2020)")
+    circ28_drug_set(d, CD_CLFORM, th[CD_CLFORM], 0.0, CD_STATUS_FITTED, "9-hydroxylation: f2D6 x total hepatic + q(1-f2D6) (q = 0); f2D6 to EM/PM CL/F 6.2 (Zhang2020 PMID 32519344)")
 }
 
 pub fn rsp_ka_record(d: &!Circ28Drug) with Mut, Div, Panic, Epistemic {
@@ -350,7 +397,7 @@ pub fn rsp_drug_into(dr: &!Circ28Drug, dm: &!Circ28Drug) with Mut, Div, Panic, E
     rsp_measured_m(dm)
     rsp_fit_record_m(dm)
     rsp_measured_r(dr)
-    rsp_fit_record_r(dr, dm)
+    rsp_fit_record_r(dr)
     rsp_ka_record(dr)
 }
 
@@ -540,7 +587,7 @@ pub fn rsp_eval(z: [f64; 16], dr: &Circ28Drug, dm: &Circ28Drug, ka0: f64, slope:
     tr0[CD_PKA1] = z[1]
     tr0[CD_FU] = z[2]
     tr0[CD_BP] = z[3]
-    var tr = rsp_fit_r(tr0, tm, z[9], z[8], z[10], z[11])
+    var tr = rsp_fit_r(tr0, z[9], z[8], z[10], z[11], rsp_q_other())
     tr[CD_KA] = ka0
     let t1 = rsp_tmax_th(tr, ka0)
     tr[CD_KA] = ka0 + (z[12] - t1) / slope
@@ -592,7 +639,7 @@ pub fn rsp_input_u(i: i32) -> f64 {
     if i == 8 { return rsp_u_r_cl() }
     if i == 9 { return rsp_u_r_vss() }
     if i == 10 { return rsp_u_r_fe() }
-    if i == 11 { return rsp_u_ratio() }
+    if i == 11 { return rsp_u_pmratio() }
     if i == 12 { return rsp_u_r_tmax() }
     if i == 13 { return rsp_u_m_cl() }
     if i == 14 { return rsp_u_m_vss() }
@@ -611,7 +658,7 @@ pub fn rsp_input_name(i: i32) -> string {
     if i == 8 { return "CL_R obs " }
     if i == 9 { return "Vss_R obs" }
     if i == 10 { return "fe_R obs " }
-    if i == 11 { return "IV ratio " }
+    if i == 11 { return "PM/EM CLF" }
     if i == 12 { return "Tmax_R   " }
     if i == 13 { return "CL_M obs " }
     if i == 14 { return "Vss_M obs" }
@@ -635,7 +682,7 @@ pub fn rsp_budget(dr: &Circ28Drug, dm: &Circ28Drug, dose_mg: f64) -> RspBudget w
     z0[8] = rsp_obs_r_cl()
     z0[9] = rsp_obs_r_vss()
     z0[10] = rsp_obs_r_fe()
-    z0[11] = rsp_obs_ratio()
+    z0[11] = rsp_obs_pmratio()
     z0[12] = rsp_obs_r_tmax()
     z0[13] = rsp_obs_m_cl()
     z0[14] = rsp_obs_m_vss()

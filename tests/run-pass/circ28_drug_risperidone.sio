@@ -6,6 +6,9 @@
 // circ28_metab.sio (stdlib/darwin_pbpk/circ28_drug_risperidone.sio; parameter table and sources
 // in its header). CYP2D6 extensive metaboliser (EM) unless stated.
 //
+// ROUND 1 TEXT BELOW IS HISTORY: in round 2 the split is fitted to the EM/PM clearance ratio and the IV ratio 3 is a validation
+// row (see the ROUND 2 block further down for the current fits, predictions and results).
+//
 // FITTED, hence NOT validations (one observable per fitted parameter):
 //   R Kp scalar -> Vss 109.5 L; R total hepatic clint -> IV CL 23.6 L/h (fe_R 0.02 sets the renal part);
 //   R split clform/other -> IV AUC ratio 9-OH/risperidone = 3 (Huang 1993); R ka -> Tmax 1.0 h;
@@ -51,11 +54,44 @@
 //   V8 PM ratio 0 vs 0.2 FAIL (by construction); V9 PM R t1/2 5.6 h vs 22 h FAIL (fold 0.26), z -1.8 vs the label's
 //   wide CV 40 % (pass only because of that CV). The assertions below are bands around these measured numbers.
 
+// =====================================================================================================
+// ROUND 2 (restructured split). The round-1 split phi was fitted to the IV AUC ratio 3 (abstract level,
+// from two clearances I could not open). Round 2 fits instead the CYP2D6 share f2D6 of the parent hepatic
+// clearance to ONE EM/PM observable: the PM/NM ratio of dose-adjusted steady-state risperidone concentration,
+// 6.20 (95 % CI 5.05-7.62), pooled over oral studies, Zhang 2020 Pharmacotherapy 40:632 (PMID 32519344, abstract
+// read) -> (CL/F)_EM / (CL/F)_PM = 6.2, u 0.65 (from the log CI). The CYP2D6 pathway forms 9-OH entirely; the
+// rest of the hepatic clearance (1 - f2D6) is split by q = fraction that forms 9-OH (CYP3A4 etc.).
+// q has NO independent observable in the sources I could read ("lesser extent CYP3A4", no number), so the base
+// case sets q = 0 (PM forms no 9-OH: the PM-ratio failure is kept, not fitted away) and S4b scans q as a
+// DIAGNOSIS. The IV ratio 3, the oral ratio 6, PM ratio 0.2, PM half-life 22 h, the PM/NM active-moiety
+// ratio 1.44 (Zhang 2020, 95 % CI 1.23-1.69) and the 9-OH Tmax are VALIDATION rows in round 2.
+// Fitted in round 2 (so NOT validations): Vss_R, CL_R, fe_R, f2D6 (to the 6.2), Tmax_R (ka), Vss_M, CL_M, fe_M.
+//
+// ROUND 2 PREDICTIONS, written before any round-2 run. Hand arithmetic from the round-1 closed forms
+// (CL/F_EM = 23.6/0.653 = 36.1 L/h; PM target 36.1/6.2 = 5.83 L/h; Eh_PM ~0.075; tot_PM ~53 against tot_EM 360.7):
+//   f2D6 ~0.85 (0.84-0.86)         coordinator expected ~0.86
+//   R1  IV ratio 9-OH/R  = MWr f (1-fe) F_src CL_R/CL_M = 1.039 x 0.853 x 0.98 x 0.9777 x 6.194 = 5.26  vs 3: fold 1.75 FAIL
+//                          (coordinator: ~5.3, FAIL: agree)
+//   R2  oral ratio = IV ratio / F = 5.26/0.653 = 8.06   vs 6: fold 1.34 PASS, now OVER-predicted (coordinator ~8: agree)
+//   R3  F 0.653 PASS (unchanged); active-moiety F (F+5.26)/(1+5.26) = 0.945 PASS
+//   R4  PM R t1/2 (kernel) ~14-16 h (ln2 Vss/CL_PM,total 0.693 x 109.5/5.4 = 14.1 h + tail)   vs 22 h (Huang): fold ~0.68 PASS;
+//       vs label 20 h CV 40 %: z ~ -0.6 PASS   (coordinator: passes: agree)
+//   R5  PM oral ratio 0 (q = 0)  vs 0.2: FAIL (kept on purpose)
+//   R6  PM/NM active-moiety AUC: AUC_R,PM = F_PM/CL_PM = 0.925/5.4 = 0.171, M_PM = 0 -> AM_PM/AM_EM = 0.171/0.251 = 0.68  vs 1.44: FAIL
+//   R7  9-OH Tmax (oral) = 9.0 h, UNCHANGED from round 1. Reason (my prediction against the coordinator's 5-7 h): total parent clearance,
+//       Vss, ka and the 9-OH disposition are all unchanged, so the SHAPE of the 9-OH curve is unchanged and only its height
+//       scales with f2D6; the first-pass share of 9-OH formation is Eh/(1-0) ~ 0.35 whatever f2D6 is. FAIL vs 3 h (fold 3).
+//       A one-compartment bound: Tmax = ln(kf/ke)/(kf-ke) with kf = ln2/3.8 h, ke = ln2/25.4 h gives 12.4 h; the multi-compartment
+//       kernel gives less (9 h) but the formation limit is what sets the scale.
+//   R8  active-moiety t1/2 25.4 h unchanged: FAIL (z 2.16), as in round 1.
+// =====================================================================================================
+
 use darwin_pbpk::circ28::*
 use darwin_pbpk::circ28_kp::*
 use darwin_pbpk::circ28_drug::*
 use darwin_pbpk::circ28_metab::*
 use darwin_pbpk::circ28_drug_risperidone::*
+use math::pure::{ln}
 
 fn rt_fold(tag: string, pred: f64, obs: f64, fold: f64, expect_pass: i32) -> i32 with IO, Mut, Div, Panic {
     let r = pred / obs
@@ -101,12 +137,33 @@ fn rt_rel(tag: string, got: f64, want: f64, tol: f64) -> i32 with IO, Mut, Div, 
     return 0
 }
 
-// One coupled run; clform of R scaled by pm (1 = EM, 0 = PM).
-fn rt_run(dr: &Circ28Drug, dm: &Circ28Drug, route: i32, dose: f64, pm: f64, res: &![f64; 24]) with Mut, Div, Panic, Epistemic {
+// One coupled run. mode 0 = EM; mode 1 = PM: the CYP2D6 formation is removed and the non-2D6 hepatic clearance
+// (the record's clint, valid because the base q is 0) is re-split with q forming 9-OH; mode 2 = DIAGNOSTIC only,
+// parent hepatic clearance x3 (clint and clform).
+fn rt_run(dr: &Circ28Drug, dm: &Circ28Drug, route: i32, dose: f64, mode: i32, q: f64, res: &![f64; 24]) with Mut, Div, Panic, Epistemic {
     var thr = circ28_drug_theta(dr)
-    thr[CD_CLFORM] = thr[CD_CLFORM] * pm
+    if mode == 1 {
+        let rest = thr[CD_CLINT]
+        thr[CD_CLFORM] = q * rest
+        thr[CD_CLINT] = (1.0 - q) * rest
+    }
+    if mode == 2 {
+        thr[CD_CLFORM] = 3.0 * thr[CD_CLFORM]
+        thr[CD_CLINT] = 3.0 * thr[CD_CLINT]
+    }
     let thm = circ28_drug_theta(dm)
     rsp_run_th(thr, thm, route, dose, 0.1, 12.0, 36.0, 120.0, 240.0, res)
+}
+
+// CL/F of risperidone from the record (mode 0) or its PM version with q = 0 (mode 1), closed form.
+fn rt_clf(dr: &Circ28Drug, mode: i32) -> f64 with Mut, Div, Panic, Epistemic {
+    var th = circ28_drug_theta(dr)
+    if mode == 1 {
+        th[CD_CLFORM] = 0.0
+    }
+    let p = circ28_drug_params_theta(th)
+    let eh = circ28_hepatic_extraction(p)
+    return (eh * circ28_q_hepatic(p) * p.bp + th[CD_CLREN]) / (1.0 - eh)
 }
 
 fn rt_show(tag: string, r: &[f64; 24]) with IO, Mut, Div, Panic {
@@ -123,8 +180,8 @@ fn rt_budget(dr: &Circ28Drug, dm: &Circ28Drug) -> i32 with IO, Mut, Div, Panic, 
     var fails: i32 = 0
     let b = rsp_budget(dr, dm, 1.0)
     print("S5 uncertainty budget with refit, 1 mg oral: "); print(b.runs); println(" coupled runs")
-    fails = fails + rt_band("AM AUC (ng h/mL per mg)", b.am_auc * 1000.0, 145.0, 166.0)
-    fails = fails + rt_band("AM AUC relative u", sqrt_f(b.var_am) / b.am_auc, 0.30, 0.42)
+    fails = fails + rt_band("AM AUC (ng h/mL per mg)", b.am_auc * 1000.0, 240.0, 265.0)
+    fails = fails + rt_band("AM AUC relative u", sqrt_f(b.var_am) / b.am_auc, 0.09, 0.14)
     print("  active-moiety AUC "); print(b.am_auc * 1000.0); print(" ng h/mL per mg  u "); print(1000.0 * sqrt_f(b.var_am)); print("  rel "); println(sqrt_f(b.var_am) / b.am_auc)
     print("  risperidone AUC "); print(b.r_auc * 1000.0); print("  u "); println(1000.0 * sqrt_f(b.var_r))
     print("  9-OH AUC "); print(b.m_auc * 1000.0); print("  u "); println(1000.0 * sqrt_f(b.var_m))
@@ -150,6 +207,13 @@ fn sqrt_f(x: f64) -> f64 with Mut, Div, Panic {
     return g
 }
 
+// 9-OH alone, IV 1 mg over 0.1 h: does the metabolite's own distribution delay a peak? (diagnostic)
+fn rt_malone(dm: &Circ28Drug) with IO, Mut, Div, Panic, Epistemic {
+    let th = circ28_drug_theta(dm)
+    let r = circ28_run_theta(th, circ28_dose_iv(1.0, 0.1, 0.05, 3.0, 0.5, 240.0, 120.0, 240.0))
+    print("  9-OH given alone IV 1 mg over 0.1 h: Tmax "); print(r.tmax); print(" h, t1/2 "); print(r.thalf); print(" h, AUCinf "); println(r.auc_inf)
+}
+
 fn main() with IO, Mut, Div, Panic, Epistemic {
     var fails: i32 = 0
     var dm = circ28_drug_new()
@@ -159,7 +223,7 @@ fn main() with IO, Mut, Div, Panic, Epistemic {
     rsp_measured_m(&!dm)
     rsp_fit_record_m(&!dm)
     rsp_measured_r(&!dr)
-    rsp_fit_record_r(&!dr, &dm)
+    rsp_fit_record_r(&!dr)
     rsp_ka_record(&!dr)
     println("S0 record: R then 9-OH (value, status)")
     var i: i32 = 0
@@ -176,52 +240,71 @@ fn main() with IO, Mut, Div, Panic, Epistemic {
     fails = fails + rt_rel("V_ss M (L)", circ28_vss_plasma(pm), rsp_obs_m_vss(), 1.0e-9)
     fails = fails + rt_rel("CL R total (L/h)", circ28_splanchnic_clearance(pr) * pr.bp + circ28_drug_value(&dr, CD_CLREN), rsp_obs_r_cl(), 1.0e-9)
     fails = fails + rt_rel("CL M total (L/h)", circ28_splanchnic_clearance(pm) * pm.bp + circ28_drug_value(&dm, CD_CLREN), rsp_obs_m_cl(), 1.0e-9)
-    // ---- S2: IV run, kernel ratio against the fitted 3
+    fails = fails + rt_rel("(CL/F)_EM/(CL/F)_PM (closed form) = 6.20 [fitted]", rt_clf(&dr, 0) / rt_clf(&dr, 1), rsp_obs_pmratio(), 1.0e-6)
+    print("  f2D6 = clform/(clform+clint) = "); println(circ28_drug_value(&dr, CD_CLFORM) / (circ28_drug_value(&dr, CD_CLFORM) + circ28_drug_value(&dr, CD_CLINT)))
+    // ---- S2: IV run (the IV ratio 3 is now a VALIDATION row)
     var iv: [f64; 24] = [0.0; 24]
-    rt_run(&dr, &dm, 0, 1.0, 1.0, &!iv)
+    rt_run(&dr, &dm, 0, 1.0, 0, 0.0, &!iv)
     rt_show("S2 IV 1 mg over 0.1 h", &iv)
-    fails = fails + rt_rel("IV AUC ratio 9-OH/R (kernel, plasma)", iv[7] / iv[2], rsp_obs_ratio(), 0.02)
     fails = fails + rt_band("IV balance R", iv[10], 0.0, 1.0e-9)
     fails = fails + rt_band("IV balance M", iv[11], 0.0, 1.0e-9)
     // ---- S3: oral EM
     var po: [f64; 24] = [0.0; 24]
-    rt_run(&dr, &dm, 1, 1.0, 1.0, &!po)
+    rt_run(&dr, &dm, 1, 1.0, 0, 0.0, &!po)
     rt_show("S3 oral 1 mg EM", &po)
-    println("V validation, predicted vs observed (criteria fixed before the runs)")
+    println("V validation, predicted vs observed (criteria fixed before the runs; round-2 predictions in the header)")
     let f_cf = rt_pk(&dr)
+    fails = fails + rt_fold("VI  IV AUC ratio 9-OH/R, Huang 3         ", iv[7] / iv[2], 3.0, 1.5, 0)
     fails = fails + rt_fold("V1  F risperidone (closed form)         ", f_cf, 0.66, 1.5, 1)
     fails = fails + rt_z("V1b F risperidone vs label 0.70 CV 25 % ", f_cf, 0.70, 0.175, 1)
-    fails = fails + rt_fold("V2  oral AUC ratio 9-OH/R               ", po[7] / po[2], 6.0, 1.5, 1)
-    fails = fails + rt_fold("V2b oral ratio / IV ratio = 1/F         ", (po[7] / po[2]) / (iv[7] / iv[2]), 1.0 / 0.66, 1.1, 1)
+    fails = fails + rt_fold("V2  oral AUC ratio 9-OH/R, Huang 6       ", po[7] / po[2], 6.0, 1.5, 1)
+    fails = fails + rt_fold("V2b oral ratio / IV ratio = 1/F         ", (po[7] / po[2]) / (iv[7] / iv[2]), 1.0 / f_cf, 1.1, 1)
     fails = fails + rt_fold("V3  active-moiety F (oral/IV AUC)       ", (po[2] + po[7]) / (iv[2] + iv[7]), 1.0, 1.5, 1)
     fails = fails + rt_z("V4  R t1/2 (h), label 3 h CV 30 %       ", po[3], 3.0, 0.9, 1)
     fails = fails + rt_z("V5  9-OH t1/2 (h), label 21 h CV 20 %   ", po[8], 21.0, 4.2, 1)
-    // V6 had no pre-commitment (borderline); measured outcome asserted.
     fails = fails + rt_z("V6  active-moiety t1/2 (h), Huang 20 +/- 2.5", po[8], 20.0, 2.5, 0)
-    // V7 was pre-registered PASS (estimate 3-5 h) and FAILED: the prediction was wrong, see RESULTS.
-    fails = fails + rt_fold("V7  9-OH Tmax (h), label 3 h (pre-registered PASS, measured FAIL)", po[6], 3.0, 1.5, 0)
-    fails = fails + rt_band("V7 9-OH Tmax band", po[6], 8.0, 10.0)
-    fails = fails + rt_band("V2 oral ratio band", po[7] / po[2], 4.4, 4.85)
-    fails = fails + rt_band("oral R Cmax per mg (mg/L)", po[0], 0.0039, 0.0044)
-    // ---- S4: poor metaboliser
+    fails = fails + rt_fold("V7  9-OH Tmax (h), label 3 h             ", po[6], 3.0, 1.5, 0)
+    // round-2 bands around the measured outcomes
+    fails = fails + rt_band("IV ratio band (hand prediction 5.26)", iv[7] / iv[2], 5.0, 5.5)
+    fails = fails + rt_band("oral ratio band (hand prediction 8.06)", po[7] / po[2], 7.8, 8.4)
+    fails = fails + rt_band("9-OH Tmax band (hand prediction 9.0; coordinator 5-7)", po[6], 8.5, 9.6)
+    fails = fails + rt_band("f2D6 band (hand 0.85)", circ28_drug_value(&dr, CD_CLFORM) / (circ28_drug_value(&dr, CD_CLFORM) + circ28_drug_value(&dr, CD_CLINT)), 0.84, 0.86)
+    // ---- S4: poor metaboliser (CYP2D6 formation removed; q = 0)
     var pmr: [f64; 24] = [0.0; 24]
-    rt_run(&dr, &dm, 1, 1.0, 0.0, &!pmr)
-    rt_show("S4 oral 1 mg PM (clform x 0)", &pmr)
+    rt_run(&dr, &dm, 1, 1.0, 1, 0.0, &!pmr)
+    rt_show("S4 oral 1 mg PM (clform_2D6 removed, q = 0)", &pmr)
     fails = fails + rt_fold("V8  PM oral ratio 9-OH/R, Huang 0.2     ", pmr[7] / pmr[2] + 1.0e-12, 0.2, 1.5, 0)
     fails = fails + rt_fold("V9  PM R t1/2 (h), Huang 22 h            ", pmr[3], 22.0, 1.5, 0)
+    // round-2 prediction R4 said 14-16 h, fold ~0.68, PASS: measured 14.55 h, fold 0.661 < 1/1.5: FAIL by 1 %. My miss.
     fails = fails + rt_z("V9b PM R t1/2 vs label 20 h CV 40 %     ", pmr[3], 20.0, 8.0, 1)
-    fails = fails + rt_band("V9 PM R t1/2 band", pmr[3], 5.0, 6.3)
-    // DIAGNOSIS (not validation): residual CYP2D6-independent formation s x clform in PMs.
-    println("S4b diagnosis: PM with residual formation s x clform (what would 0.2 need?)")
-    var sc: f64 = 0.02
-    var js: i32 = 0
-    while js < 4 {
+    fails = fails + rt_fold("V10 PM/NM active-moiety AUC, Zhang 1.44  ", (pmr[2] + pmr[7]) / (po[2] + po[7]), 1.44, 1.5, 0)
+    fails = fails + rt_band("PM R t1/2 band (hand 14-16)", pmr[3], 14.0, 15.2)
+    fails = fails + rt_band("PM/NM AM band (hand 0.68)", (pmr[2] + pmr[7]) / (po[2] + po[7]), 0.65, 0.71)
+    // S4b DIAGNOSIS (not validation): fraction q of the non-2D6 hepatic clearance that forms 9-OH in PMs.
+    println("S4b diagnosis: PM with q = fraction of the non-2D6 hepatic clearance forming 9-OH (what do 0.2 and 1.44 need?)")
+    var jq: i32 = 0
+    while jq < 5 {
+        var qv: f64 = 0.0
+        if jq == 1 { qv = 0.1 }
+        if jq == 2 { qv = 0.25 }
+        if jq == 3 { qv = 0.5 }
+        if jq == 4 { qv = 1.0 }
         var rr: [f64; 24] = [0.0; 24]
-        rt_run(&dr, &dm, 1, 1.0, sc, &!rr)
-        print("  s "); print(sc); print("  ratio "); print(rr[7] / rr[2]); print("  R t1/2 "); print(rr[3]); print("  M Tmax "); println(rr[6])
-        sc = sc * 2.5
-        js = js + 1
+        rt_run(&dr, &dm, 1, 1.0, 1, qv, &!rr)
+        print("  q "); print(qv); print("  ratio "); print(rr[7] / rr[2]); print("  AM PM/NM "); print((rr[2] + rr[7]) / (po[2] + po[7]))
+        print("  R t1/2 "); print(rr[3]); print("  M Tmax "); print(rr[6]); print("  M t1/2 "); println(rr[8])
+        jq = jq + 1
     }
+    // S4c DIAGNOSIS of the 9-OH Tmax (formation-rate limited or distribution of the metabolite?)
+    println("S4c diagnosis of the 9-OH Tmax (not a fit)")
+    print("  M Tmax: IV R "); print(iv[6]); print(" h, oral R "); print(po[6]); println(" h")
+    var fast: [f64; 24] = [0.0; 24]
+    rt_run(&dr, &dm, 1, 1.0, 2, 0.0, &!fast)
+    print("  parent hepatic clearance x3 (diagnostic): R t1/2 "); print(fast[3]); print("  M Tmax "); println(fast[6])
+    let kf = 0.6931471805599453 / po[3]
+    let ke = 0.6931471805599453 / po[8]
+    print("  one-compartment M fed at the parent rate: Tmax = ln(kf/ke)/(kf-ke) = "); println(ln(kf / ke) / (kf - ke))
+    rt_malone(&dm)
     // ---- S5: budget
     fails = fails + rt_budget(&dr, &dm)
     if fails == 0 { println("CIRC28_DRUG_RISPERIDONE_PASS") } else { print("FAILS "); println(fails) }
