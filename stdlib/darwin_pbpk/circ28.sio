@@ -462,6 +462,103 @@ pub fn circ28_step(
     (*el).gut = (*el).gut + (*sys).k_gut * q_tg
 }
 
+// k <- (I - gamma dt A)^-1 (A y + u) for a source in every state. u is in
+// concentration per hour (mass rate over the state's volume).
+fn circ28_stage_src(sys: &Circ28Sys, y: &[f64; 28], u: &[f64; 28], k: &![f64; 28]) with Mut, Div {
+    var r: i32 = 0
+    while r < 28 {
+        var acc = (*u)[r]
+        var c: i32 = 0
+        while c < 28 {
+            let e = (*sys).a[r * 28 + c]
+            if e != 0.0 { acc = acc + e * (*y)[c] }
+            c = c + 1
+        }
+        (*k)[r] = acc
+        r = r + 1
+    }
+    r = 1
+    while r < 28 {
+        var acc = (*k)[r]
+        var c: i32 = 0
+        while c < r {
+            let l = (*sys).lu[r * 28 + c]
+            if l != 0.0 { acc = acc - l * (*k)[c] }
+            c = c + 1
+        }
+        (*k)[r] = acc
+        r = r + 1
+    }
+    r = 27
+    while r >= 0 {
+        var acc = (*k)[r]
+        var c: i32 = r + 1
+        while c < 28 {
+            let uu = (*sys).lu[r * 28 + c]
+            if uu != 0.0 { acc = acc - uu * (*k)[c] }
+            c = c + 1
+        }
+        (*k)[r] = acc / (*sys).lu[r * 28 + r]
+        r = r - 1
+    }
+}
+
+// One step with a source in any state: src[k] is the mass rate (mg/h)
+// entering state k, held constant over the step, so the mass entered is
+// dt * sum src. Used for inputs that are neither intravenous nor oral, e.g.
+// a metabolite formed in liver tissue (state circ28_it(1)) or a drug absorbed
+// from a subcutaneous depot. Tallies as in circ28_step.
+pub fn circ28_step_src(
+    s: &!Circ28State,
+    p: Circ28Params,
+    sys: &Circ28Sys,
+    src: &[f64; 28],
+    el: &!Circ28Elim
+) with Mut, Div {
+    let dt = (*sys).dt
+    let g = circ28_gamma()
+    var u: [f64; 28] = [0.0; 28]
+    var y: [f64; 28] = [0.0; 28]
+    var k1: [f64; 28] = [0.0; 28]
+    var k2: [f64; 28] = [0.0; 28]
+    var r: i32 = 0
+    while r < 28 {
+        u[r] = (*src)[r] / circ28_state_volume(p, r)
+        y[r] = (*s).x[r]
+        r = r + 1
+    }
+    circ28_stage_src(sys, &y, &u, &!k1)
+    r = 0
+    while r < 28 {
+        y[r] = (*s).x[r] + (1.0 - g) * dt * k1[r]
+        r = r + 1
+    }
+    circ28_stage_src(sys, &y, &u, &!k2)
+
+    let w1 = (1.0 - g) * dt
+    let w2 = g * dt
+    let x1_ven = (*s).x[0] + g * dt * k1[0]
+    let x1_art = (*s).x[1] + g * dt * k1[1]
+    let x1_tl = (*s).x[3] + g * dt * k1[3]
+    let x1_tg = (*s).x[17] + g * dt * k1[17]
+    r = 0
+    while r < 28 {
+        (*s).x[r] = (*s).x[r] + w1 * k1[r] + w2 * k2[r]
+        r = r + 1
+    }
+    let q_ven = w1 * x1_ven + w2 * (*s).x[0]
+    let q_art = w1 * x1_art + w2 * (*s).x[1]
+    let q_tl = w1 * x1_tl + w2 * (*s).x[3]
+    let q_tg = w1 * x1_tg + w2 * (*s).x[17]
+    (*el).auc_ven = (*el).auc_ven + q_ven
+    (*el).auc_art = (*el).auc_art + q_art
+    (*el).hepatic = (*el).hepatic + (*sys).k_hep * q_tl
+    (*el).formed = (*el).formed + (*sys).k_form * q_tl
+    (*el).renal = (*el).renal + (*sys).k_ren * q_art
+    (*el).plasma = (*el).plasma + (*sys).k_pla * q_ven
+    (*el).gut = (*el).gut + (*sys).k_gut * q_tg
+}
+
 // Reference adult male (ICRP Publication 89, 2002: 73 kg, cardiac output
 // 6.5 L/min = 390 L/h, blood volume 5.3 L).
 //   v    organ volume including its own blood: ICRP 89 Table 2.8 masses over
