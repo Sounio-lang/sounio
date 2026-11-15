@@ -36,7 +36,7 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
 | Rung | Scope | Engine |
 |---|---|---|
 | KL-9 | seed: #1494 imported-module typecheck errors non-fatal | lean_single |
-| KL-11 | #1792 first-order / variance across user calls (pow FO closed; f64-returning helpers with any body closed by tangent clones, 2026-11-15) | madaros |
+| KL-11 | #1792 first-order / variance across user calls (pow FO closed; f64-returning helpers with any body closed by tangent clones, first and second order, 2026-11-15) | madaros |
 | KL-14 | FFI: 14a–14d3 CLOSED | madaros |
 | KL-15 | `f256` surface (15a softfloat add/sub partial), `Knowledge<f128>`/GUM | madaros |
 | KL-16 | Hessian Tier-4 (16a–16f CLOSED; residual H-multi/non-H00 if/a64 atan2) | lean_single |
@@ -90,11 +90,27 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
   `self: &T`) carry one tangent per scalar `f64` field. The argument has to
   name a local (`p`, `&p`); pin:
   `tests/run-pass/gum_fo_tangent_clone_structs.sio`.
-  What this leaves to the re-lowering below: struct returns, nested struct
-  fields, helpers whose body asks `variance_of` and friends,
-  and the Hessian of a call the re-lowering refuses (with second order on,
-  such a call takes the clone's first-order row and its Hessian reads NaN;
-  `hessian_of` of a call that was never lowered for its value still reads 0).
+  Second order is closed the same way (2026-11-15, hyper-dual clones). A
+  function that calls `hessian_of` or `second_order_mean` calls such a helper
+  through `<name>__fotan2`: the helper lowered with second order on, writing
+  the Hessian of its result over its tangents after the gradient row. The
+  caller applies `H = sum_k J_k H(a_k) + sum_kl Hf_kl g_k g_l^T`. Loops,
+  reassigned `var`s, early returns, recursion, mixed partials between two
+  measured inputs, composed arguments, struct and `self` tangents and
+  correlation with the caller's other uses of the input are exact (pins:
+  `tests/run-pass/gum_fo_tangent_clone_second_order_on.sio`,
+  `tests/run-pass/gum_so_hyperdual_clones.sio`, oracle
+  `tests/oracles/gum_so_hyperdual_clones.cpp`, 1e-10 relative). A
+  `hessian_of(f(x), j, k)` whose call occurs only inside the query emits the
+  clone call inside the query lowering (callee without an IO effect only).
+  Still open for second order: a callee with more than 8 tangents or a
+  measurement inside it (the first-order clone is used and the Hessian
+  between its channels reads NaN, never 0); `hessian_of` of an IO callee
+  whose value is not used elsewhere (reads 0.0); a `var` declared before the
+  first `measure` (no private Hessian slots, like its gradient rows, #3547);
+  Hessian rows cover the first 8 channels and the first 16 bound locals.
+  What the re-lowering below still owns: struct returns, nested struct
+  fields and helpers whose body asks `variance_of` and friends.
 - **Narrowed (#1706, 2026-10-13).** A call to a *pure helper* (an `f64`
   return, or a struct return when a field of the call is read; `f64`, integer
   or bool parameters, struct parameters by value or by reference whose
