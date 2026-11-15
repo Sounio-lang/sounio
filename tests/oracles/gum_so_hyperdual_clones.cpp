@@ -288,5 +288,57 @@ int main() {
         std::printf("late_branch_h01 %.17g\n", s3.h[0][1]);
         std::printf("late_branch_mean %.17g\n", mean2(s3));
     }
+    // correlate inside the callee: channels (a, m1, m2); a measured by the caller
+    // (u_a = 0.1), m1 = 2 (u 0.3) and m2 = 3 (u 0.2) measured inside it, correlated
+    // with rho = 0.6. Var = sum_ij J_i J_j Cov_ij; E2 = f + 1/2 sum_ij H_ij Cov_ij.
+    {
+        using J3 = Jet<3>;
+        const double u[3] = {0.1, 0.3, 0.2};
+        double cov[3][3] = {};
+        for (int i = 0; i < 3; ++i) cov[i][i] = u[i] * u[i];
+        cov[1][2] = cov[2][1] = 0.6 * u[1] * u[2];
+        auto var_of = [&](const J3& r) { double v = 0; for (int i = 0; i < 3; ++i) for (int j = 0; j < 3; ++j) v += r.g[i] * r.g[j] * cov[i][j]; return v; };
+        auto mean2 = [&](const J3& r) { double v = r.v; for (int i = 0; i < 3; ++i) for (int j = 0; j < 3; ++j) v += 0.5 * r.h[i][j] * cov[i][j]; return v; };
+        const J3 a = J3::var(0, 1.5), m1 = J3::var(1, 2.0), m2 = J3::var(2, 3.0);
+        // corr1(a) = exp(0.2 a) m1 m2 + m1 m1
+        const J3 r = jexp(J3::cst(0.2) * a) * m1 * m2 + m1 * m1;
+        std::printf("corr_var %.17g\n", var_of(r));
+        std::printf("corr_hess_aa %.17g\n", r.h[0][0]);
+        std::printf("corr_mean %.17g\n", mean2(r));
+        const J3 rr = r * r;
+        std::printf("corr_sq_mean %.17g\n", mean2(rr));
+        // a callee that calls the correlating callee: q = corr1(a) * a
+        const J3 q = r * a;
+        std::printf("corr_outer_var %.17g\n", var_of(q));
+        std::printf("corr_outer_mean %.17g\n", mean2(q));
+        // first order only (no second-order query in the function)
+        std::printf("corr_var_sq %.17g\n", var_of(rr));
+        // uncorrelated reference (what the callee read before the fix)
+        double v0 = 0; for (int i = 0; i < 3; ++i) v0 += r.g[i] * r.g[i] * cov[i][i];
+        std::printf("corr_var_ignoring_rho %.17g\n", v0);
+    }
+    // The same callee with a caller argument that carries no uncertainty (u_a = 0,
+    // so only the callee's own correlated pair contributes), and with a negative
+    // correlation (rho = -0.5, written 0.0 - 0.5 in the program) beside an
+    // uncertain argument.
+    for (int variant = 0; variant < 2; ++variant) {
+        using J3 = Jet<3>;
+        const double rho = variant == 0 ? 0.6 : -0.5;
+        const double u[3] = {variant == 0 ? 0.0 : 0.1, 0.3, 0.2};
+        double cov[3][3] = {};
+        for (int i = 0; i < 3; ++i) cov[i][i] = u[i] * u[i];
+        cov[1][2] = cov[2][1] = rho * u[1] * u[2];
+        auto var_of = [&](const J3& r) { double v = 0; for (int i = 0; i < 3; ++i) for (int j = 0; j < 3; ++j) v += r.g[i] * r.g[j] * cov[i][j]; return v; };
+        auto mean2 = [&](const J3& r) { double v = r.v; for (int i = 0; i < 3; ++i) for (int j = 0; j < 3; ++j) v += 0.5 * r.h[i][j] * cov[i][j]; return v; };
+        const J3 a = J3::var(0, 1.5), m1 = J3::var(1, 2.0), m2 = J3::var(2, 3.0);
+        const J3 r = jexp(J3::cst(0.2) * a) * m1 * m2 + m1 * m1;
+        const char* tag = variant == 0 ? "corr_certain" : "corr_neg";
+        std::printf("%s_var %.17g\n", tag, var_of(r));
+        std::printf("%s_hess_aa %.17g\n", tag, r.h[0][0]);
+        std::printf("%s_mean %.17g\n", tag, mean2(r));
+        const J3 rr = r * r;
+        std::printf("%s_sq_mean %.17g\n", tag, mean2(rr));
+        std::printf("%s_var_sq %.17g\n", tag, var_of(rr));
+    }
     return 0;
 }

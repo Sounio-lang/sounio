@@ -141,6 +141,23 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
   branch through it are exact (pins `late_loop_*`, `late_nested_*`,
   `late_branch_*` in `gum_so_hyperdual_clones.sio`). Before, variance_of read
   19.71 where the value is 59.13 and the Hessian read 0.
+  A `correlate` between two quantities measured inside a callee is carried
+  exactly, at first and second order (2026-11-15). A callee containing
+  `correlate` is no longer kept out of the clone registry; `tg_store_row`
+  adds the cross terms `2 J_i J_j rho_ij sigma_i sigma_j` to the internal
+  variance and `2 H_ij rho_ij sigma_i sigma_j` to the curvature term (whose
+  half is the mean term), for each internal pair with a declared correlation,
+  so the clone is no longer skipped and the callee's own uncertainty no longer
+  reads 0 or short when the argument is certain. Pins `corr_*` in
+  `tests/run-pass/gum_so_hyperdual_clones.sio` (oracle
+  `tests/oracles/gum_so_hyperdual_clones.cpp`, 1e-10 relative): uncertain and
+  certain argument, first-order-only and second-order queries, positive and
+  negative rho, and a callee that calls the correlating callee. A
+  `correlate` with an operand that is not `<measure local>.value` (a
+  parameter, a value derived from one), here or in a cloned callee, is refused
+  with the same diagnostic (pin
+  `tests/compile-fail/gum_refuse_correlate_param_in_callee.sio`); before it was
+  dropped without a diagnostic.
   A query is refused at compile time, never answered 0 or short, when it reads
   a measured quantity beyond the 32-slot channel table (pin
   `tests/compile-fail/gum_refuse_uncovered_hessian.sio`; before, the 33rd

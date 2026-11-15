@@ -1,7 +1,7 @@
 //@ run-pass
 //@ requires: madaros
 //@ expect-stdout: GUM_SO_HYPERDUAL_OK
-//@ description: Second-order GUM through user calls, beyond the Newton / Boltzmann / mixed-partial witnesses of gum_fo_tangent_clone_second_order_on.sio: struct parameters and methods (one tangent per scalar f64 field), a `var` reassigned under a branch, a loop with an early return, a helper that loops over a helper that loops, a Knowledge parameter, the same call read twice, and a call whose value is also used. The hyper-dual clone writes the Hessian of the result over its tangents; the caller forms H = sum_k J_k H(a_k) + sum_kl Hf_kl g_k g_l^T. Also: an IO callee whose call appears only inside hessian_of / second_order_mean runs exactly once and the value is exact; a measurement made inside the callee (its curvature term 1/2 H_mm u_m^2 reaches second_order_mean, also stationary in the measurement and through a callee of a drawing callee); nine and twelve tangents (the old 8-channel limit read NaN); and a `var` declared before the first measure() carried through a loop, nested loops and a branch (#3547). Expected values: tests/oracles/gum_so_hyperdual_clones.cpp (second-order jets through the same algorithm; 1e-10 relative).
+//@ description: Second-order GUM through user calls, beyond the Newton / Boltzmann / mixed-partial witnesses of gum_fo_tangent_clone_second_order_on.sio: struct parameters and methods (one tangent per scalar f64 field), a `var` reassigned under a branch, a loop with an early return, a helper that loops over a helper that loops, a Knowledge parameter, the same call read twice, and a call whose value is also used. The hyper-dual clone writes the Hessian of the result over its tangents; the caller forms H = sum_k J_k H(a_k) + sum_kl Hf_kl g_k g_l^T. Also: an IO callee whose call appears only inside hessian_of / second_order_mean runs exactly once and the value is exact; a measurement made inside the callee (its curvature term 1/2 H_mm u_m^2 reaches second_order_mean, also stationary in the measurement and through a callee of a drawing callee); nine and twelve tangents (the old 8-channel limit read NaN); a `correlate` between two quantities measured inside a callee (the cross terms of the internal variance and of the curvature term, first and second order, an uncertain and a certain argument, positive and negative rho), and a `var` declared before the first measure() carried through a loop, nested loops and a branch (#3547). Expected values: tests/oracles/gum_so_hyperdual_clones.cpp (second-order jets through the same algorithm; 1e-10 relative).
 
 ontology HyProbe {
     class Parameter { property amount: f64 where amount >= 0.0 }
@@ -143,6 +143,39 @@ fn outer_draw(a: f64) -> f64 with Epistemic, Mut, Div {
     y
 }
 
+// a correlate between two quantities measured inside the callee: the internal
+// variance carries the cross term 2 J1 J2 rho u1 u2 and the curvature term the
+// cross term 2 H12 rho u1 u2
+fn corr1(a: f64) -> f64 with Epistemic, Mut, Div {
+    let k1 = measure(2.0, uncertainty: 0.3)
+    let k2 = measure(3.0, uncertainty: 0.2)
+    let m1: f64 = k1.value
+    let m2: f64 = k2.value
+    let _c = correlate(m1, m2, 0.6)
+    var y = a
+    y = exp(0.2 * y)
+    y * m1 * m2 + m1 * m1
+}
+
+// the same with an anticorrelation, written as the dialect writes a negative literal
+fn corr1n(a: f64) -> f64 with Epistemic, Mut, Div {
+    let k1 = measure(2.0, uncertainty: 0.3)
+    let k2 = measure(3.0, uncertainty: 0.2)
+    let m1: f64 = k1.value
+    let m2: f64 = k2.value
+    let _c = correlate(m1, m2, 0.0 - 0.5)
+    var y = a
+    y = exp(0.2 * y)
+    y * m1 * m2 + m1 * m1
+}
+
+// a callee that calls the correlating callee
+fn corr_outer(a: f64) -> f64 with Epistemic, Mut, Div {
+    var y = corr1(a)
+    y = y * a
+    y
+}
+
 fn close_rel(got: f64, want: f64) -> bool with Mut, Div {
     var d = got - want
     if d < 0.0 { d = 0.0 - d }
@@ -254,6 +287,58 @@ fn check_draw() -> i64 with IO, Mut, Div, Epistemic {
     let r3 = outer_draw(a)
     bad = bad + report_rel("draw3_hess_aa", hessian_of(r3, 0, 0), 2.4837402059398457)
     bad = bad + report_rel("draw3_mean", second_order_mean(r3), 8.2938024855084773)
+    bad
+}
+
+// correlate inside a callee (first and second order)
+fn check_corr() -> i64 with IO, Mut, Div, Epistemic {
+    let ka = measure(1.5, uncertainty: 0.1)
+    let a: f64 = ka.value
+    var bad: i64 = 0
+    let r = corr1(a)
+    bad = bad + report_rel("corr_var", variance_of(r), 7.714062766401061)
+    bad = bad + report_rel("corr_hess_aa", hessian_of(r, 0, 0), 0.32396611381824081)
+    bad = bad + report_rel("corr_mean", second_order_mean(r), 12.239367593097846)
+    bad = bad + report_rel("corr_sq_mean", second_order_mean(r * r), 157.49652166991851)
+    bad = bad + report_rel("corr_var_sq", variance_of(r * r), 4517.0311523378768)
+    let q = corr_outer(a)
+    bad = bad + report_rel("corr_outer_var", variance_of(q), 19.408493549354748)
+    bad = bad + report_rel("corr_outer_mean", second_order_mean(q), 18.375249695337679)
+    bad
+}
+
+// the same callee, first-order queries only
+fn check_corr_fo() -> i64 with IO, Mut, Div, Epistemic {
+    let ka = measure(1.5, uncertainty: 0.1)
+    let a: f64 = ka.value
+    var bad: i64 = 0
+    let r = corr1(a)
+    bad = bad + report_rel("corr_fo_var", variance_of(r), 7.714062766401061)
+    bad = bad + report_rel("corr_fo_var_sq", variance_of(r * r), 4517.0311523378768)
+    bad
+}
+
+// the caller's argument carries no uncertainty: only the callee's pair counts
+fn check_corr_certain() -> i64 with IO, Mut, Div, Epistemic {
+    let a0: f64 = 1.5
+    var bad: i64 = 0
+    let r = corr1(a0)
+    bad = bad + report_rel("corr_certain_var", variance_of(r), 7.6878242556754381)
+    bad = bad + report_rel("corr_certain_mean", second_order_mean(r), 12.237747762528755)
+    bad = bad + report_rel("corr_certain_sq_mean", second_order_mean(r * r), 157.43108600391454)
+    bad = bad + report_rel("corr_certain_var_sq", variance_of(r * r), 4501.6669825187237)
+    bad
+}
+
+fn check_corr_neg() -> i64 with IO, Mut, Div, Epistemic {
+    let ka = measure(1.5, uncertainty: 0.1)
+    let a: f64 = ka.value
+    var bad: i64 = 0
+    let r = corr1n(a)
+    bad = bad + report_rel("corr_neg_var", variance_of(r), 4.8454937756915202)
+    bad = bad + report_rel("corr_neg_mean", second_order_mean(r), 12.150276911797828)
+    bad = bad + report_rel("corr_neg_sq_mean", second_order_mean(r * r), 152.47210913889958)
+    bad = bad + report_rel("corr_neg_var_sq", variance_of(r * r), 2837.3176361214914)
     bad
 }
 
@@ -387,6 +472,10 @@ fn main() -> i32 with IO, Mut, Div, Epistemic {
     bad = bad + check_io_once()
     bad = bad + check_draw()
     bad = bad + check_late_var()
+    bad = bad + check_corr()
+    bad = bad + check_corr_fo()
+    bad = bad + check_corr_certain()
+    bad = bad + check_corr_neg()
     bad = bad + check_nine()
     bad = bad + check_twelve()
     if bad == 0 {

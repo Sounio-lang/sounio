@@ -523,6 +523,99 @@ fn tg_clone_name_ord(n: Name, ord: i64) -> Name with Mut, Panic, Div {
     tg_clone_name(n)
 }
 
+// A `correlate` inside a tangent-clone callee is carried exactly only between
+// two quantities the callee itself measures: tg_store_row adds the cross terms
+// of the internal variance and of the curvature term. An operand that is not
+// `<measure local>.value` (a parameter, a value derived from one) would need
+// the caller's channels, so a call to such a callee is refused (tg_mark_drop).
+var TG_CR_M: [i64; 64] = [0; 64]
+var TG_CR_NM: i64 = 0
+var TG_CR_V: [i64; 64] = [0; 64]
+var TG_CR_NV: i64 = 0
+var TG_CR_P: [i64; 16] = [0; 16]
+var TG_CR_NP: i64 = 0
+var TG_CORRP: [i64; 512] = [-1; 512]
+
+fn tg_corr_in(arr: [i64; 64], n: i64, id: i64) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < n && i < 64 {
+        if arr[i as usize] == id { return true }
+        i = i + 1
+    }
+    false
+}
+
+fn tg_corr_is_param(id: i64) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < TG_CR_NP && i < 16 {
+        if TG_CR_P[i as usize] == id { return true }
+        i = i + 1
+    }
+    false
+}
+
+fn tg_corr_note_binding(n: Name, rhs: &Expr) with Mut, Panic, Div {
+    let id = ir_intern_name(n)
+    if (*rhs).kind == ExprKind::ExprCall {
+        match (*rhs).left {
+            Some(c) => {
+                if (*c).kind == ExprKind::ExprIdent && (ir_name_is_measure((*c).name) || ir_name_is_knowledge_ctor((*c).name)) {
+                    if TG_CR_NM < 64 && !tg_corr_is_param(id) {
+                        TG_CR_M[TG_CR_NM as usize] = id
+                        TG_CR_NM = TG_CR_NM + 1
+                    }
+                }
+            }
+            None => {}
+        }
+    }
+    if (*rhs).kind == ExprKind::ExprFieldAccess && ir_name_eq_lit((*rhs).name, "value") {
+        match (*rhs).left {
+            Some(o) => {
+                if (*o).kind == ExprKind::ExprIdent && tg_corr_in(TG_CR_M, TG_CR_NM, ir_intern_name((*o).name)) {
+                    if TG_CR_NV < 64 && !tg_corr_is_param(id) {
+                        TG_CR_V[TG_CR_NV as usize] = id
+                        TG_CR_NV = TG_CR_NV + 1
+                    }
+                }
+            }
+            None => {}
+        }
+    }
+}
+
+fn tg_corr_operand_internal(x: &Expr) -> bool with Mut, Panic, Div {
+    if (*x).kind == ExprKind::ExprIdent {
+        let id = ir_intern_name((*x).name)
+        return tg_corr_in(TG_CR_V, TG_CR_NV, id) && !tg_corr_is_param(id)
+    }
+    if (*x).kind == ExprKind::ExprFieldAccess && ir_name_eq_lit((*x).name, "value") {
+        match (*x).left {
+            Some(o) => {
+                if (*o).kind == ExprKind::ExprIdent {
+                    let id = ir_intern_name((*o).name)
+                    return tg_corr_in(TG_CR_M, TG_CR_NM, id) && !tg_corr_is_param(id)
+                }
+            }
+            None => {}
+        }
+    }
+    false
+}
+
+fn tg_corr_args_internal(e: &Expr) -> bool with Mut, Panic, Div {
+    match (*e).args {
+        Some(l0) => {
+            if !tg_corr_operand_internal(&(*l0).head) { return false }
+            match (*l0).tail {
+                Some(l1) => { return tg_corr_operand_internal(&(*l1).head) }
+                None => { return false }
+            }
+        }
+        None => { return false }
+    }
+}
+
 // Epistemic queries read the uncertainty of a value. Inside a clone the
 // parameters are unit channels, so a body that asks would compute a
 // different VALUE than the original; such a function keeps the original.
@@ -555,6 +648,13 @@ fn tg_expr_calls(e: &Expr, pred: i64, depth: i64) -> bool with Mut, Panic, Div {
             Some(c) => {
                 if (*c).kind == ExprKind::ExprIdent {
                     if pred == 0 && tg_name_is_query((*c).name) { return true }
+                    // pred 7: a query other than `correlate`, which the clone
+                    // carries itself (tg_store_row's cross terms).
+                    if pred == 7 && tg_name_is_query((*c).name) && !ir_name_eq_lit((*c).name, "correlate") { return true }
+                    if pred == 5 && ir_name_eq_lit((*c).name, "correlate") { return true }
+                    // pred 4: a `correlate` whose operands are not both
+                    // `<measure local>.value` (or a local bound to it).
+                    if pred == 4 && ir_name_eq_lit((*c).name, "correlate") && !tg_corr_args_internal(&(*e)) { return true }
                     if pred == 1 && (ir_name_is_measure((*c).name) || ir_name_is_knowledge_ctor((*c).name)) { return true }
                 }
             }
@@ -642,6 +742,12 @@ fn tg_stmts_call(opt: &Option<Box<StmtList>>, pred: i64, depth: i64) -> bool wit
                             Some(vx) => { if (*vx).kind == ExprKind::ExprStructLit { return true } }
                             None => {}
                         }
+                    }
+                }
+                if pred == 6 && ((*sl).head.kind == StmtKind::StmtLet || (*sl).head.kind == StmtKind::StmtVar) {
+                    match (*sl).head.expr {
+                        Some(rx) => { tg_corr_note_binding((*sl).head.name, &(*rx)) }
+                        None => {}
                     }
                 }
                 match (*sl).head.expr {
@@ -840,6 +946,66 @@ fn tg_may_draw(idx: i64, depth: i64) -> bool with Mut, Panic, Div {
         j = j + 1
     }
     false
+}
+
+// 0: neither the callee nor anything it calls correlates; 1: every `correlate`
+// is between quantities measured inside the call (carried exactly); 2: some
+// `correlate` involves a parameter-derived value, here or in a cloned callee.
+fn tg_corr_class(idx: i64, depth: i64) -> i64 with Mut, Panic, Div {
+    if idx < 0 || idx >= TG_COUNT { return 0 }
+    if TG_CORRP[idx as usize] >= 0 { return TG_CORRP[idx as usize] }
+    if depth > 16 { return 2 }
+    let fd = tg_def_at(idx)
+    TG_CORRP[idx as usize] = 0
+    var cls: i64 = 0
+    if tg_stmts_call(&fd.body.stmts, 5, 0) {
+        cls = 1
+        TG_CR_NM = 0
+        TG_CR_NV = 0
+        TG_CR_NP = 0
+        var pc = &fd.params
+        while true {
+            match *pc {
+                Some(pl) => {
+                    if TG_CR_NP < 16 {
+                        TG_CR_P[TG_CR_NP as usize] = ir_intern_name((*pl).head.name)
+                        TG_CR_NP = TG_CR_NP + 1
+                    }
+                    pc = &(*pl).tail
+                }
+                None => break
+            }
+        }
+        tg_stmts_call(&fd.body.stmts, 6, 0)
+        if tg_stmts_call(&fd.body.stmts, 4, 0) { cls = 2 }
+    }
+    if cls < 2 {
+        TG_NCALLEES = 0
+        tg_stmts_callees(&fd.body.stmts, 0)
+        let nn = TG_NCALLEES
+        if nn > 32 {
+            TG_CORRP[idx as usize] = 2
+            return 2
+        }
+        var ids: [i64; 32] = [0; 32]
+        var j0: i64 = 0
+        while j0 < nn {
+            ids[j0 as usize] = ir_intern_name(TG_CALLEES[j0 as usize])
+            j0 = j0 + 1
+        }
+        var j: i64 = 0
+        while j < nn {
+            let sub = tg_find(ids[j as usize])
+            if sub >= 0 && sub != idx {
+                let sc = tg_corr_class(sub, depth + 1)
+                if sc == 2 { cls = 2 }
+                if sc == 1 && cls == 0 { cls = 1 }
+            }
+            j = j + 1
+        }
+    }
+    TG_CORRP[idx as usize] = cls
+    cls
 }
 
 // The last statement of a struct-returning body: a struct literal, a local, or a
@@ -11454,7 +11620,7 @@ fn tg_note(name: Name, fd: &FnDef, self_type: Name) with Mut, Panic, Div, Alloc 
         }
     }
     if nf <= 0 && nstruct <= 0 { return }
-    if tg_stmts_call(&(*fd).body.stmts, 0, 0) { return }
+    if tg_stmts_call(&(*fd).body.stmts, 7, 0) { return }
     if ret_kind == 1 {
         // Every return must be a struct literal or a local, and the tail too.
         if tg_stmts_call(&(*fd).body.stmts, 3, 0) { return }
@@ -11473,6 +11639,7 @@ fn tg_note(name: Name, fd: &FnDef, self_type: Name) with Mut, Panic, Div, Alloc 
     TG_STATE2[idx as usize] = 0
     TG_PREFER[idx as usize] = if tg_stmts_nonstraight(&(*fd).body.stmts, 0) { 1 } else { 0 }
     TG_DRAW[idx as usize] = 0 - 1
+    TG_CORRP[idx as usize] = 0 - 1
     TG_HEAD = Some(Box::new(TgNode { idx: idx, def: *fd, next: TG_HEAD }))
     TG_COUNT = idx + 1
 }
@@ -17218,6 +17385,33 @@ impl Lowerer {
     // Row `row` of the out-array: out[row*(nf+1) + k] = d/d tangent_k for each
     // parameter tangent k (sens[channel of k]), and out[row*(nf+1) + nf] = the
     // variance that comes from channels that are not parameter channels.
+    // rho_ij * sigma_i * sigma_j for two channels with variance registers
+    // `vi`, `vj` (sigma = sqrt of the product of the two variances, as the
+    // second_order_mean walk forms it). Takes the registers, not the channel
+    // indices, so each call reads its own pair.
+    fn tg_cov_reg(self, ci: i64, cj: i64, vi: i64, vj: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        let epp = lo.fresh_reg()
+        lo = epp.0
+        lo = lo.emit(ir_binop_typed(epp.1, vi, BinaryOp::OpMul, vj, true, true))
+        lo = lo.emit(ir_mark_float_reg(epp.1))
+        let esq = lowerer_find_or_add_fn_id_mut(&! lo, make_name("sqrt"))
+        let eargs: Option<Box<IrRegList>> = Some(Box::new(ir_reg_list_single(epp.1)))
+        let edp = lo.fresh_reg()
+        lo = edp.0
+        var eci = ir_call(edp.1, esq, make_name("sqrt"), eargs, 1)
+        eci.imm_flags = IR_FLOAT_REG_MARKER_FLAG
+        lo = lo.emit(eci)
+        lo = lo.emit(ir_mark_float_reg(edp.1))
+        let rp = lo.fo_emit_rho_reg(ci, cj)
+        lo = rp.0
+        let u = lo.fresh_reg()
+        lo = u.0
+        lo = lo.emit(ir_binop_typed(u.1, edp.1, BinaryOp::OpMul, rp.1, true, true))
+        lo = lo.emit(ir_mark_float_reg(u.1))
+        (lo, u.1)
+    }
+
     fn tg_store_row(self, sens: [i64; 32], row: i64) -> Lowerer with Mut, Panic, Div, Alloc, IO {
         var lo = self
         // The body's own Hessian row, for the hyper-dual clone below.
@@ -17278,6 +17472,42 @@ impl Lowerer {
                 }
                 mc = mc + 1
             }
+            // Correlated internal pairs: 2 * H_ij * rho_ij * sigma_i * sigma_j
+            // (the mean term is half of this sum, with the diagonal's).
+            var mi: i64 = 0
+            while mi < lo.fo_nchan && mi < 32 {
+                var mj: i64 = mi + 1
+                while mj < lo.fo_nchan && mj < 32 {
+                    var pi_ = false
+                    var q3: i64 = 0
+                    while q3 < TG_NPCH {
+                        if TG_PARAM_CH[q3 as usize] == mi || TG_PARAM_CH[q3 as usize] == mj { pi_ = true }
+                        q3 = q3 + 1
+                    }
+                    let hij = hess[lo.so_hess_idx(mi, mj) as usize]
+                    let vi = lo.fo_sigma2[mi as usize]
+                    let vj = lo.fo_sigma2[mj as usize]
+                    if !pi_ && hij >= 0 && vi >= 0 && vj >= 0 && fo_cov_rho_live(mi, mj) {
+                        let cv = lo.tg_cov_reg(mi, mj, vi, vj)
+                        lo = cv.0
+                        let t1 = lo.fresh_reg()
+                        lo = t1.0
+                        lo = lo.emit(ir_binop_typed(t1.1, hij, BinaryOp::OpMul, cv.1, true, true))
+                        lo = lo.emit(ir_mark_float_reg(t1.1))
+                        let t2 = lo.fresh_reg()
+                        lo = t2.0
+                        lo = lo.emit(ir_binop_typed(t2.1, t1.1, BinaryOp::OpAdd, t1.1, true, true))
+                        lo = lo.emit(ir_mark_float_reg(t2.1))
+                        let t3 = lo.fresh_reg()
+                        lo = t3.0
+                        lo = lo.emit(ir_binop_typed(t3.1, macc, BinaryOp::OpAdd, t2.1, true, true))
+                        lo = lo.emit(ir_mark_float_reg(t3.1))
+                        macc = t3.1
+                    }
+                    mj = mj + 1
+                }
+                mi = mi + 1
+            }
             let mslot = lo.emit_i64_const(base + TG_NPCH + 1 + (TG_NPCH * (TG_NPCH + 1)) / 2)
             lo = mslot.0
             lo = lo.emit(ir_index_set(TG_OUT_REG, mslot.1, macc))
@@ -17309,6 +17539,46 @@ impl Lowerer {
                 acc = a.1
             }
             ch = ch + 1
+        }
+        // Correlated internal pairs: 2 * s_i * s_j * rho_ij * sigma_i * sigma_j.
+        var ci2: i64 = 0
+        while ci2 < lo.fo_nchan && ci2 < 32 {
+            var cj2: i64 = ci2 + 1
+            while cj2 < lo.fo_nchan && cj2 < 32 {
+                var pp = false
+                var q4: i64 = 0
+                while q4 < TG_NPCH {
+                    if TG_PARAM_CH[q4 as usize] == ci2 || TG_PARAM_CH[q4 as usize] == cj2 { pp = true }
+                    q4 = q4 + 1
+                }
+                let si = sens[ci2 as usize]
+                let sj = sens[cj2 as usize]
+                let vi2 = lo.fo_sigma2[ci2 as usize]
+                let vj2 = lo.fo_sigma2[cj2 as usize]
+                if !pp && si >= 0 && sj >= 0 && vi2 >= 0 && vj2 >= 0 && fo_cov_rho_live(ci2, cj2) {
+                    let cv2 = lo.tg_cov_reg(ci2, cj2, vi2, vj2)
+                    lo = cv2.0
+                    let w1 = lo.fresh_reg()
+                    lo = w1.0
+                    lo = lo.emit(ir_binop_typed(w1.1, si, BinaryOp::OpMul, sj, true, true))
+                    lo = lo.emit(ir_mark_float_reg(w1.1))
+                    let w2 = lo.fresh_reg()
+                    lo = w2.0
+                    lo = lo.emit(ir_binop_typed(w2.1, w1.1, BinaryOp::OpMul, cv2.1, true, true))
+                    lo = lo.emit(ir_mark_float_reg(w2.1))
+                    let w3 = lo.fresh_reg()
+                    lo = w3.0
+                    lo = lo.emit(ir_binop_typed(w3.1, w2.1, BinaryOp::OpAdd, w2.1, true, true))
+                    lo = lo.emit(ir_mark_float_reg(w3.1))
+                    let w4 = lo.fresh_reg()
+                    lo = w4.0
+                    lo = lo.emit(ir_binop_typed(w4.1, acc, BinaryOp::OpAdd, w3.1, true, true))
+                    lo = lo.emit(ir_mark_float_reg(w4.1))
+                    acc = w4.1
+                }
+                cj2 = cj2 + 1
+            }
+            ci2 = ci2 + 1
         }
         let ipn = lo.emit_i64_const(base + TG_NPCH)
         lo = ipn.0
@@ -17858,6 +18128,9 @@ impl Lowerer {
         // A struct return is bound field by field at its let (tg_bind_struct_result).
         if TG_RET[tgi as usize] == 1 { return (base, 0 - 1) }
         if !base.tg_layout(tgi) { return (base, 0 - 1) }
+        // A `correlate` on a parameter-derived value inside the callee cannot be
+        // read through its clone: refused, never answered.
+        if tg_corr_class(tgi, 0) == 2 { tg_mark_drop(TG_NAME[tgi as usize]) }
         let ord2 = base.so_enabled && TG_SITE_ORD[si as usize] == 2
         var lo = base
         let has_self = TG_HASSELF[tgi as usize] == 1
