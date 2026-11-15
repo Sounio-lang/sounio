@@ -25068,6 +25068,12 @@ impl Lowerer {
         // Every argument must be safe to evaluate again here; a struct
         // parameter's argument must name a struct local (`p`, `&p`, `&!p`).
         var sargs: [Name; 16] = [ir_empty_name(); 16]
+        // The caller local's struct type and ref-ness, read BEFORE any callee
+        // parameter is bound: a callee parameter that shares the caller argument's
+        // name (`f(d)` into `fn g(d: &S)`) would otherwise shadow it, and the
+        // late lookups below would read the fresh, untyped, non-ref binding.
+        var sarg_types: [Name; 16] = [ir_empty_name(); 16]
+        var sarg_refs: [bool; 16] = [false; 16]
         var sk = args
         var spa = &fd.params
         var si: i64 = 0
@@ -25093,6 +25099,8 @@ impl Lowerer {
                         if an.len <= 0 { return (lo, 0 - 1) }
                         if lo.lookup_local(an) < 0 || lo.lookup_local_struct_type(an).len <= 0 { return (lo, 0 - 1) }
                         sargs[si as usize] = an
+                        sarg_types[si as usize] = lo.lookup_local_struct_type(an)
+                        sarg_refs[si as usize] = lo.lookup_local_is_ref(an)
                     } else if !lower_expr_relower_safe_ref(&(*al).head) {
                         return (lo, 0 - 1)
                     }
@@ -25330,10 +25338,11 @@ impl Lowerer {
                         // Bound to the caller's struct local, like `self`: field
                         // variance is keyed by that local's register.
                         let sname = (*pl).head.name
-                        let an2 = sargs[i as usize]
+                        let an2_type = sarg_types[i as usize]
+                        let an2_ref = sarg_refs[i as usize]
                         lo = lo.bind_local(sname, vals[i as usize], false)
-                        lo = lo.bind_local_struct_type(sname, lo.lookup_local_struct_type(an2), false)
-                        if lo.lookup_local_is_ref(an2) {
+                        lo = lo.bind_local_struct_type(sname, an2_type, false)
+                        if an2_ref {
                             lo = lo.bind_local_ref(sname)
                         }
                         lo = lo.fo_clear_expr_sens().fo_bind_local_sens(sname)
