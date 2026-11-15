@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.evidence.circ28-ontology-axiom-sources
+authority: repo_only
+audience: users
+last_validated: unvalidated
+validated_by: none
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.evidence.circ28-ontology-axiom-sources
+-->
+
 # Evidence for stdlib/darwin_pbpk/circ28_ontology.sio
 
 Every axiom below was read from a source opened on 2026-11-15 (DailyMed label XML through the DailyMed services API, the FDA table page, PubMed abstracts through NCBI E-utilities). Each quoted phrase (under 15 words) was checked by program to occur verbatim, after whitespace normalisation, in the saved source text. Axiom numbers A* (route clears victim) and P* (perpetrator acts on route) are the ones in the comments of `circ28_ax_table`.
