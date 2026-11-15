@@ -28,10 +28,14 @@
 //!   the S / R / rclos / pack arrays and the 64-stride indexing documented
 //!   above, unchanged, `elplus_*`) and the WIDE layout (256 concepts, 16
 //!   roles, 32 chains, 256-stride, `elplus_wide_*`; see the section
-//!   "Wide dense variant" below).  The wide core is the single home of the
-//!   rule loop; the legacy `elplus_fixpoint_packed` embeds its 64/8/8 arrays
-//!   into a wide workspace, calls the core and copies the result back, so
-//!   both layouts compute the same closure.  Inputs beyond a layout's
+//!   "Wide dense variant" below).  The legacy `elplus_fixpoint_packed` keeps
+//!   its own copy of the 8-rule loop (the original, unchanged except for
+//!   capacity guards) and the wide core carries a second copy with 256-stride
+//!   indexing: an embedding of the legacy arrays into a shared wide workspace
+//!   was tried and dropped because the committed Madaros prebuilt does not see
+//!   direct writes to module-level arrays from a callee (see the 2026-11-15
+//!   report), so both layouts are kept in step by the legacy-vs-wide cell
+//!   comparison in tests/run-pass/elplus_limits_256.sio, section (g).  Inputs
 //!   capacity are refused (wide: status code, legacy: panic), never written
 //!   out of bounds.
 //!
@@ -105,8 +109,8 @@ const ELPLUS_SE: i64 = 4096
 // The legacy dense API above/below is bound to the 64 / 8 / 8 layout by the
 // array TYPES in its signatures (`[bool; 4096]`, `[bool; 32768]`,
 // `[i64; 704]`, ...) and by the callers' literal strides (`s[a*64+b]`); it is
-// kept byte-for-byte source compatible and is now a thin wrapper over the
-// wide core.  The wide API has the same rules, the same relations, and the
+// kept source compatible (its rule loop is the original; only capacity guards were added) next to the
+// wide core below.  The wide API has the same rules, the same relations, and the
 // layout below:
 //
 //   S[c*256+d]            [bool; 65536]    (256 x 256)
@@ -133,7 +137,10 @@ const ELPLUS_SE: i64 = 4096
 // the theorems.  The capacities here are only the bounds of the executable
 // mirror; a TBox that does not fit is REFUSED, never truncated.
 
-// Wide capacities.
+// Wide capacities (documentation and caller use; the wide code below uses the
+// literals 256 / 16 / 32 on purpose: with these named constants the committed
+// Madaros prebuilt computed wrong results, measured: elplus_wide_seed(s, 3, 2)
+// set 3 cells instead of 5).
 pub const ELPLUS_WIDE_MAXC: i64 = 256
 pub const ELPLUS_WIDE_MAXR: i64 = 16
 pub const ELPLUS_WIDE_MAXCH: i64 = 32
@@ -193,10 +200,10 @@ fn elplus_wide_check(pack: &[i64; 4864], chains: &[i64; 96], dims: &[i64; 4], cc
 /// # Complexity
 /// O(nr^3) per pass, at most nr passes.
 pub fn elplus_wide_role_closure(rclos: &![bool; 256], nr: i64) -> i64 with Mut, Div, Panic {
-    if nr < 0 || nr > ELPLUS_WIDE_MAXR { return 1 }
+    if nr < 0 || nr > 16 { return 1 }
     var r: i64 = 0
     while r < nr {
-        rclos[r * ELPLUS_WIDE_MAXR + r] = true
+        rclos[r * 16 + r] = true
         r = r + 1
     }
     var changed = true
@@ -209,12 +216,12 @@ pub fn elplus_wide_role_closure(rclos: &![bool; 256], nr: i64) -> i64 with Mut, 
         while a < nr {
             b = 0
             while b < nr {
-                if rclos[a * ELPLUS_WIDE_MAXR + b] {
+                if rclos[a * 16 + b] {
                     d = 0
                     while d < nr {
-                        if rclos[b * ELPLUS_WIDE_MAXR + d] {
-                            if !rclos[a * ELPLUS_WIDE_MAXR + d] {
-                                rclos[a * ELPLUS_WIDE_MAXR + d] = true
+                        if rclos[b * 16 + d] {
+                            if !rclos[a * 16 + d] {
+                                rclos[a * 16 + d] = true
                                 changed = true
                             }
                         }
@@ -237,23 +244,23 @@ pub fn elplus_wide_role_closure(rclos: &![bool; 256], nr: i64) -> i64 with Mut, 
 /// # Complexity
 /// O(256^2)
 pub fn elplus_wide_seed(s: &![bool; 65536], nc: i64, top: i64) -> i64 with Mut, Div, Panic {
-    if nc < 0 || nc > ELPLUS_WIDE_MAXC { return 1 }
+    if nc < 0 || nc > 256 { return 1 }
     if nc > 0 {
-        if top < 0 || top >= ELPLUS_WIDE_MAXC { return 2 }
+        if top < 0 || top >= 256 { return 2 }
     }
     var a: i64 = 0
-    while a < ELPLUS_WIDE_MAXC {
+    while a < 256 {
         var b: i64 = 0
-        while b < ELPLUS_WIDE_MAXC {
-            s[a * ELPLUS_WIDE_MAXC + b] = false
+        while b < 256 {
+            s[a * 256 + b] = false
             b = b + 1
         }
         a = a + 1
     }
     var c: i64 = 0
     while c < nc {
-        s[c * ELPLUS_WIDE_MAXC + c] = true
-        s[c * ELPLUS_WIDE_MAXC + top] = true
+        s[c * 256 + c] = true
+        s[c * 256 + top] = true
         c = c + 1
     }
     return 0
@@ -263,7 +270,7 @@ pub fn elplus_wide_seed(s: &![bool; 65536], nc: i64, top: i64) -> i64 with Mut, 
 /// 3 existential) with arguments `a1`, `a2` (see the module header).
 /// Returns 0, or 1 when c is outside 0..256 (nothing written).
 pub fn elplus_wide_set_concept(pack: &![i64; 4864], c: i64, kind: i64, a1: i64, a2: i64) -> i64 with Mut, Div, Panic {
-    if c < 0 || c >= ELPLUS_WIDE_MAXC { return 1 }
+    if c < 0 || c >= 256 { return 1 }
     pack[c] = kind
     pack[256 + c] = a1
     pack[512 + c] = a2
@@ -273,7 +280,7 @@ pub fn elplus_wide_set_concept(pack: &![i64; 4864], c: i64, kind: i64, a1: i64, 
 /// Pack helper: exid[r][f] = id of the interned `exists r.f` (or -1).
 /// Returns 0, or 1 when r or f is out of range (nothing written).
 pub fn elplus_wide_set_exid(pack: &![i64; 4864], r: i64, f: i64, id: i64) -> i64 with Mut, Div, Panic {
-    if r < 0 || r >= ELPLUS_WIDE_MAXR || f < 0 || f >= ELPLUS_WIDE_MAXC { return 1 }
+    if r < 0 || r >= 16 || f < 0 || f >= 256 { return 1 }
     pack[768 + r * 256 + f] = id
     return 0
 }
@@ -281,7 +288,7 @@ pub fn elplus_wide_set_exid(pack: &![i64; 4864], r: i64, f: i64, id: i64) -> i64
 /// Pack helper: chain k is r1 o r2 <= r3.  Returns 0, or 1 when k is out of
 /// range (nothing written).
 pub fn elplus_wide_set_chain(chains: &![i64; 96], k: i64, r1: i64, r2: i64, r3: i64) -> i64 with Mut, Div, Panic {
-    if k < 0 || k >= ELPLUS_WIDE_MAXCH { return 1 }
+    if k < 0 || k >= 32 { return 1 }
     chains[k] = r1
     chains[32 + k] = r2
     chains[64 + k] = r3
@@ -290,7 +297,7 @@ pub fn elplus_wide_set_chain(chains: &![i64; 96], k: i64, r1: i64, r2: i64, r3: 
 
 /// The 8-rule EL+ completion step iterated to a genuine fixpoint over the
 /// wide capacities (256 concepts, 16 roles, 32 chains): the PRIMARY home of
-/// the rule loop; the legacy 64 / 8 / 8 entry points delegate here.
+/// the rule loop at 256 stride (the legacy 64 / 8 / 8 entry points keep their own copy).
 /// Identical semantics to the legacy documentation of `elplus_fixpoint`
 /// (S seeded with `elplus_wide_seed` plus the stated inclusions; R passed
 /// splat-false and derived here; derived edges that would need a
@@ -315,34 +322,8 @@ pub fn elplus_wide_fixpoint_packed(
     chains: &[i64; 96],
     dims: &[i64; 4]
 ) -> i64 with Mut, Div, Panic {
-    let status = elplus_wide_check(pack, chains, dims, ELPLUS_WIDE_MAXC, ELPLUS_WIDE_MAXR, ELPLUS_WIDE_MAXCH)
+    let status = elplus_wide_check(pack, chains, dims, 256, 16, 32)
     if status != 0 { return 0 - status }
-    var ckind: [i64; 256] = [0; 256]
-    var carg1: [i64; 256] = [0; 256]
-    var carg2: [i64; 256] = [0; 256]
-    var exid: [i64; 4096] = [0; 4096]
-    var ch1: [i64; 32] = [0; 32]
-    var ch2: [i64; 32] = [0; 32]
-    var ch3: [i64; 32] = [0; 32]
-    var i: i64 = 0
-    while i < 256 {
-        ckind[i] = pack[i]
-        carg1[i] = pack[256 + i]
-        carg2[i] = pack[512 + i]
-        i = i + 1
-    }
-    i = 0
-    while i < 4096 {
-        exid[i] = pack[768 + i]
-        i = i + 1
-    }
-    i = 0
-    while i < 32 {
-        ch1[i] = chains[i]
-        ch2[i] = chains[32 + i]
-        ch3[i] = chains[64 + i]
-        i = i + 1
-    }
     var nchain: i64 = dims[0]
     var nc: i64 = dims[1]
     var nb: i64 = dims[2]
@@ -372,11 +353,11 @@ pub fn elplus_wide_fixpoint_packed(
         while a < nc {
             k = 0
             while k < nc {
-                if s[a * ELPLUS_WIDE_MAXC + k] {
+                if s[a * 256 + k] {
                     d = 0
                     while d < nc {
-                        if s[k * ELPLUS_WIDE_MAXC + d] && !s[a * ELPLUS_WIDE_MAXC + d] {
-                            s[a * ELPLUS_WIDE_MAXC + d] = true
+                        if s[k * 256 + d] && !s[a * 256 + d] {
+                            s[a * 256 + d] = true
                             changed = true
                         }
                         d = d + 1
@@ -392,20 +373,20 @@ pub fn elplus_wide_fixpoint_packed(
         while a < nc {
             d = 0
             while d < nc {
-                if ckind[d] == 2 {
-                    if s[a * ELPLUS_WIDE_MAXC + d] {
-                        if !s[a * ELPLUS_WIDE_MAXC + carg1[d]] {
-                            s[a * ELPLUS_WIDE_MAXC + carg1[d]] = true
+                if pack[d] == 2 {
+                    if s[a * 256 + d] {
+                        if !s[a * 256 + pack[256 + d]] {
+                            s[a * 256 + pack[256 + d]] = true
                             changed = true
                         }
-                        if !s[a * ELPLUS_WIDE_MAXC + carg2[d]] {
-                            s[a * ELPLUS_WIDE_MAXC + carg2[d]] = true
+                        if !s[a * 256 + pack[512 + d]] {
+                            s[a * 256 + pack[512 + d]] = true
                             changed = true
                         }
                     }
-                    if s[a * ELPLUS_WIDE_MAXC + carg1[d]] && s[a * ELPLUS_WIDE_MAXC + carg2[d]] {
-                        if !s[a * ELPLUS_WIDE_MAXC + d] {
-                            s[a * ELPLUS_WIDE_MAXC + d] = true
+                    if s[a * 256 + pack[256 + d]] && s[a * 256 + pack[512 + d]] {
+                        if !s[a * 256 + d] {
+                            s[a * 256 + d] = true
                             changed = true
                         }
                     }
@@ -420,8 +401,8 @@ pub fn elplus_wide_fixpoint_packed(
         while a < nc {
             d = 0
             while d < nc {
-                if ckind[d] == 3 && s[a * ELPLUS_WIDE_MAXC + d] {
-                    idx = (carg1[d] * ELPLUS_WIDE_MAXC + a) * ELPLUS_WIDE_MAXC + carg2[d]
+                if pack[d] == 3 && s[a * 256 + d] {
+                    idx = (pack[256 + d] * 256 + a) * 256 + pack[512 + d]
                     if !r[idx] {
                         r[idx] = true
                         changed = true
@@ -439,11 +420,11 @@ pub fn elplus_wide_fixpoint_packed(
             while c < nc {
                 f = 0
                 while f < nb {
-                    if r[(rr * ELPLUS_WIDE_MAXC + c) * ELPLUS_WIDE_MAXC + f] {
+                    if r[(rr * 256 + c) * 256 + f] {
                         d2 = 0
                         while d2 < nb {
-                            if s[f * ELPLUS_WIDE_MAXC + d2] && exid[rr * ELPLUS_WIDE_MAXC + d2] >= 0 {
-                                idx = (rr * ELPLUS_WIDE_MAXC + c) * ELPLUS_WIDE_MAXC + d2
+                            if s[f * 256 + d2] && pack[768 + rr * 256 + d2] >= 0 {
+                                idx = (rr * 256 + c) * 256 + d2
                                 if !r[idx] {
                                     r[idx] = true
                                     changed = true
@@ -464,13 +445,13 @@ pub fn elplus_wide_fixpoint_packed(
         while rr < nr {
             ss = 0
             while ss < nr {
-                if rclos[rr * ELPLUS_WIDE_MAXR + ss] {
+                if rclos[rr * 16 + ss] {
                     c = 0
                     while c < nc {
                         f = 0
                         while f < nb {
-                            if r[(rr * ELPLUS_WIDE_MAXC + c) * ELPLUS_WIDE_MAXC + f] && exid[ss * ELPLUS_WIDE_MAXC + f] >= 0 {
-                                idx = (ss * ELPLUS_WIDE_MAXC + c) * ELPLUS_WIDE_MAXC + f
+                            if r[(rr * 256 + c) * 256 + f] && pack[768 + ss * 256 + f] >= 0 {
+                                idx = (ss * 256 + c) * 256 + f
                                 if !r[idx] {
                                     r[idx] = true
                                     changed = true
@@ -490,18 +471,18 @@ pub fn elplus_wide_fixpoint_packed(
         // r1 o r2 <= r3 give (r3,C,E)
         k = 0
         while k < nchain {
-            r1 = ch1[k]
-            r2 = ch2[k]
-            r3 = ch3[k]
+            r1 = chains[k]
+            r2 = chains[32 + k]
+            r3 = chains[64 + k]
             c = 0
             while c < nc {
                 f = 0
                 while f < nb {
-                    if r[(r1 * ELPLUS_WIDE_MAXC + c) * ELPLUS_WIDE_MAXC + f] {
+                    if r[(r1 * 256 + c) * 256 + f] {
                         f2 = 0
                         while f2 < nb {
-                            if r[(r2 * ELPLUS_WIDE_MAXC + f) * ELPLUS_WIDE_MAXC + f2] && exid[r3 * ELPLUS_WIDE_MAXC + f2] >= 0 {
-                                idx = (r3 * ELPLUS_WIDE_MAXC + c) * ELPLUS_WIDE_MAXC + f2
+                            if r[(r2 * 256 + f) * 256 + f2] && pack[768 + r3 * 256 + f2] >= 0 {
+                                idx = (r3 * 256 + c) * 256 + f2
                                 if !r[idx] {
                                     r[idx] = true
                                     changed = true
@@ -524,10 +505,10 @@ pub fn elplus_wide_fixpoint_packed(
             while c < nc {
                 f = 0
                 while f < nb {
-                    if r[(rr * ELPLUS_WIDE_MAXC + c) * ELPLUS_WIDE_MAXC + f] {
-                        x = exid[rr * ELPLUS_WIDE_MAXC + f]
-                        if x >= 0 && !s[c * ELPLUS_WIDE_MAXC + x] {
-                            s[c * ELPLUS_WIDE_MAXC + x] = true
+                    if r[(rr * 256 + c) * 256 + f] {
+                        x = pack[768 + rr * 256 + f]
+                        if x >= 0 && !s[c * 256 + x] {
+                            s[c * 256 + x] = true
                             changed = true
                         }
                     }
@@ -540,18 +521,6 @@ pub fn elplus_wide_fixpoint_packed(
     }
     return rounds
 }
-
-// Wide-layout workspace used by the legacy 64/8/8 entry points (module
-// level BSS: one allocation, no large locals; see the pitfalls recorded in
-// ontology::biomedical::snomed).  Every cell the rules read is overwritten
-// on entry, so the dirty-leading-cells pitfall of module-level splat arrays
-// does not matter here.
-var elplus_ws: [bool; 65536] = [false; 65536]
-var elplus_wr: [bool; 1048576] = [false; 1048576]
-var elplus_wpack: [i64; 4864] = [0; 4864]
-var elplus_wrclos: [bool; 256] = [false; 256]
-var elplus_wchains: [i64; 96] = [0; 96]
-var elplus_wdims: [i64; 4] = [0; 4]
 
 /// Role-hierarchy closure: seed reflexivity, then transitive saturation
 /// over the stated cells of rclos.  Existing stated cells are kept.
@@ -732,103 +701,230 @@ pub fn elplus_fixpoint_packed(
     chains: &[i64; 24],
     dims: &[i64; 4]
 ) -> i64 with Mut, Div, Panic {
-    let nchain: i64 = dims[0]
-    let nc: i64 = dims[1]
-    let nb: i64 = dims[2]
-    let nr: i64 = dims[3]
-    if nchain < 0 || nchain > ELPLUS_MAXCH { panic("elplus_fixpoint: nchain outside 0..8 (legacy capacity ELPLUS_MAXCH); use elplus_wide_fixpoint_packed") }
-    if nc < 0 || nc > ELPLUS_MAXC { panic("elplus_fixpoint: nc outside 0..64 (legacy capacity ELPLUS_MAXC); use elplus_wide_fixpoint_packed") }
-    if nb < 0 || nb > ELPLUS_MAXC { panic("elplus_fixpoint: nb outside 0..64 (legacy capacity ELPLUS_MAXC); use elplus_wide_fixpoint_packed") }
-    if nr < 0 || nr > ELPLUS_MAXR { panic("elplus_fixpoint: nr outside 0..8 (legacy capacity ELPLUS_MAXR); use elplus_wide_fixpoint_packed") }
-    // Embed the 64/8/8 layout into the wide scratch (row stride 64 -> 256,
-    // role stride 8 -> 16).  Every cell the rules can read is overwritten, so
-    // stale scratch content from an earlier call is never observed.
+    if dims[0] < 0 || dims[0] > ELPLUS_MAXCH { panic("elplus_fixpoint: nchain outside 0..8 (legacy capacity ELPLUS_MAXCH); use elplus_wide_fixpoint_packed") }
+    if dims[1] < 0 || dims[1] > ELPLUS_MAXC { panic("elplus_fixpoint: nc outside 0..64 (legacy capacity ELPLUS_MAXC); use elplus_wide_fixpoint_packed") }
+    if dims[2] < 0 || dims[2] > ELPLUS_MAXC { panic("elplus_fixpoint: nb outside 0..64 (legacy capacity ELPLUS_MAXC); use elplus_wide_fixpoint_packed") }
+    if dims[3] < 0 || dims[3] > ELPLUS_MAXR { panic("elplus_fixpoint: nr outside 0..8 (legacy capacity ELPLUS_MAXR); use elplus_wide_fixpoint_packed") }
+    var ckind: [i64; 64] = [0; 64]
+    var carg1: [i64; 64] = [0; 64]
+    var carg2: [i64; 64] = [0; 64]
+    var exid: [i64; 512] = [0; 512]
+    var ch1: [i64; 8] = [0; 8]
+    var ch2: [i64; 8] = [0; 8]
+    var ch3: [i64; 8] = [0; 8]
     var i: i64 = 0
     while i < 64 {
-        elplus_wpack[i] = pack[i]
-        elplus_wpack[256 + i] = pack[64 + i]
-        elplus_wpack[512 + i] = pack[128 + i]
+        ckind[i] = pack[i]
+        carg1[i] = pack[64 + i]
+        carg2[i] = pack[128 + i]
         i = i + 1
     }
-    var rr: i64 = 0
-    var c: i64 = 0
-    var f: i64 = 0
-    while rr < 8 {
-        f = 0
-        while f < 64 {
-            elplus_wpack[768 + rr * 256 + f] = pack[192 + rr * 64 + f]
-            f = f + 1
-        }
-        rr = rr + 1
+    i = 0
+    while i < 512 {
+        exid[i] = pack[192 + i]
+        i = i + 1
     }
     i = 0
     while i < 8 {
-        elplus_wchains[i] = chains[i]
-        elplus_wchains[32 + i] = chains[8 + i]
-        elplus_wchains[64 + i] = chains[16 + i]
+        ch1[i] = chains[i]
+        ch2[i] = chains[8 + i]
+        ch3[i] = chains[16 + i]
         i = i + 1
     }
+    var nchain: i64 = dims[0]
+    var nc: i64 = dims[1]
+    var nb: i64 = dims[2]
+    var nr: i64 = dims[3]
+    var changed = true
+    var rounds: i64 = 0
+    var a: i64 = 0
+    var k: i64 = 0
+    var d: i64 = 0
+    var c: i64 = 0
+    var rr: i64 = 0
     var ss: i64 = 0
-    rr = 0
-    while rr < 8 {
-        ss = 0
-        while ss < 8 {
-            elplus_wrclos[rr * 16 + ss] = rclos[rr * 8 + ss]
-            ss = ss + 1
-        }
-        rr = rr + 1
-    }
-    elplus_wdims[0] = nchain
-    elplus_wdims[1] = nc
-    elplus_wdims[2] = nb
-    elplus_wdims[3] = nr
-    let chk = elplus_wide_check(&elplus_wpack, &elplus_wchains, &elplus_wdims, ELPLUS_MAXC, ELPLUS_MAXR, ELPLUS_MAXCH)
-    if chk != 0 { panic("elplus_fixpoint: concept/existential/chain table entry outside the legacy 64/8/8 capacities") }
-    c = 0
-    while c < 64 {
-        var d: i64 = 0
-        while d < 64 {
-            elplus_ws[c * 256 + d] = s[c * 64 + d]
-            d = d + 1
-        }
-        c = c + 1
-    }
-    rr = 0
-    while rr < 8 {
-        c = 0
-        while c < 64 {
-            f = 0
-            while f < 64 {
-                elplus_wr[(rr * 256 + c) * 256 + f] = r[(rr * 64 + c) * 64 + f]
-                f = f + 1
+    var f: i64 = 0
+    var d2: i64 = 0
+    var f2: i64 = 0
+    var x: i64 = 0
+    var idx: i64 = 0
+    var r1: i64 = 0
+    var r2: i64 = 0
+    var r3: i64 = 0
+    while changed {
+        changed = false
+        rounds = rounds + 1
+
+        // (T) transitivity on S
+        a = 0
+        while a < nc {
+            k = 0
+            while k < nc {
+                if s[a * ELPLUS_MAXC + k] {
+                    d = 0
+                    while d < nc {
+                        if s[k * ELPLUS_MAXC + d] && !s[a * ELPLUS_MAXC + d] {
+                            s[a * ELPLUS_MAXC + d] = true
+                            changed = true
+                        }
+                        d = d + 1
+                    }
+                }
+                k = k + 1
             }
-            c = c + 1
+            a = a + 1
         }
-        rr = rr + 1
-    }
-    let rounds = elplus_wide_fixpoint_packed(&!elplus_ws, &!elplus_wr, &elplus_wpack, &elplus_wrclos, &elplus_wchains, &elplus_wdims)
-    if rounds < 0 { panic("elplus_fixpoint: wide core refused a validated TBox") }
-    c = 0
-    while c < 64 {
-        var d: i64 = 0
-        while d < 64 {
-            s[c * 64 + d] = elplus_ws[c * 256 + d]
-            d = d + 1
-        }
-        c = c + 1
-    }
-    rr = 0
-    while rr < 8 {
-        c = 0
-        while c < 64 {
-            f = 0
-            while f < 64 {
-                r[(rr * 64 + c) * 64 + f] = elplus_wr[(rr * 256 + c) * 256 + f]
-                f = f + 1
+
+        // (CE) conjunction elimination and (CI) introduction (kind 2)
+        a = 0
+        while a < nc {
+            d = 0
+            while d < nc {
+                if ckind[d] == 2 {
+                    if s[a * ELPLUS_MAXC + d] {
+                        if !s[a * ELPLUS_MAXC + carg1[d]] {
+                            s[a * ELPLUS_MAXC + carg1[d]] = true
+                            changed = true
+                        }
+                        if !s[a * ELPLUS_MAXC + carg2[d]] {
+                            s[a * ELPLUS_MAXC + carg2[d]] = true
+                            changed = true
+                        }
+                    }
+                    if s[a * ELPLUS_MAXC + carg1[d]] && s[a * ELPLUS_MAXC + carg2[d]] {
+                        if !s[a * ELPLUS_MAXC + d] {
+                            s[a * ELPLUS_MAXC + d] = true
+                            changed = true
+                        }
+                    }
+                }
+                d = d + 1
             }
-            c = c + 1
+            a = a + 1
         }
-        rr = rr + 1
+
+        // (S2R) stoR: C <= ex r.D becomes edge (r, C, D)
+        a = 0
+        while a < nc {
+            d = 0
+            while d < nc {
+                if ckind[d] == 3 && s[a * ELPLUS_MAXC + d] {
+                    idx = (carg1[d] * ELPLUS_MAXC + a) * ELPLUS_MAXC + carg2[d]
+                    if !r[idx] {
+                        r[idx] = true
+                        changed = true
+                    }
+                }
+                d = d + 1
+            }
+            a = a + 1
+        }
+
+        // (RM) Rmono: edge (r,C,D) and D <= D' give (r,C,D'), D' base
+        rr = 0
+        while rr < nr {
+            c = 0
+            while c < nc {
+                f = 0
+                while f < nb {
+                    if r[(rr * ELPLUS_MAXC + c) * ELPLUS_MAXC + f] {
+                        d2 = 0
+                        while d2 < nb {
+                            if s[f * ELPLUS_MAXC + d2] && exid[rr * ELPLUS_MAXC + d2] >= 0 {
+                                idx = (rr * ELPLUS_MAXC + c) * ELPLUS_MAXC + d2
+                                if !r[idx] {
+                                    r[idx] = true
+                                    changed = true
+                                }
+                            }
+                            d2 = d2 + 1
+                        }
+                    }
+                    f = f + 1
+                }
+                c = c + 1
+            }
+            rr = rr + 1
+        }
+
+        // (RS) roleSub: edge (r,C,D) and r <=* s (rclos) give (s,C,D)
+        rr = 0
+        while rr < nr {
+            ss = 0
+            while ss < nr {
+                if rclos[rr * ELPLUS_MAXR + ss] {
+                    c = 0
+                    while c < nc {
+                        f = 0
+                        while f < nb {
+                            if r[(rr * ELPLUS_MAXC + c) * ELPLUS_MAXC + f] && exid[ss * ELPLUS_MAXC + f] >= 0 {
+                                idx = (ss * ELPLUS_MAXC + c) * ELPLUS_MAXC + f
+                                if !r[idx] {
+                                    r[idx] = true
+                                    changed = true
+                                }
+                            }
+                            f = f + 1
+                        }
+                        c = c + 1
+                    }
+                }
+                ss = ss + 1
+            }
+            rr = rr + 1
+        }
+
+        // (RC) roleComp: edges (r1,C,D) and (r2,D,E) with chain
+        // r1 o r2 <= r3 give (r3,C,E)
+        k = 0
+        while k < nchain {
+            r1 = ch1[k]
+            r2 = ch2[k]
+            r3 = ch3[k]
+            c = 0
+            while c < nc {
+                f = 0
+                while f < nb {
+                    if r[(r1 * ELPLUS_MAXC + c) * ELPLUS_MAXC + f] {
+                        f2 = 0
+                        while f2 < nb {
+                            if r[(r2 * ELPLUS_MAXC + f) * ELPLUS_MAXC + f2] && exid[r3 * ELPLUS_MAXC + f2] >= 0 {
+                                idx = (r3 * ELPLUS_MAXC + c) * ELPLUS_MAXC + f2
+                                if !r[idx] {
+                                    r[idx] = true
+                                    changed = true
+                                }
+                            }
+                            f2 = f2 + 1
+                        }
+                    }
+                    f = f + 1
+                }
+                c = c + 1
+            }
+            k = k + 1
+        }
+
+        // (R2S) RtoS: edge (r,C,D) gives C <= ex r.D
+        rr = 0
+        while rr < nr {
+            c = 0
+            while c < nc {
+                f = 0
+                while f < nb {
+                    if r[(rr * ELPLUS_MAXC + c) * ELPLUS_MAXC + f] {
+                        x = exid[rr * ELPLUS_MAXC + f]
+                        if x >= 0 && !s[c * ELPLUS_MAXC + x] {
+                            s[c * ELPLUS_MAXC + x] = true
+                            changed = true
+                        }
+                    }
+                    f = f + 1
+                }
+                c = c + 1
+            }
+            rr = rr + 1
+        }
     }
     return rounds
 }
@@ -1005,8 +1101,8 @@ pub fn elplus_derive_conflicts(
 /// # Complexity
 /// O(1)
 pub fn elplus_wide_subsumes(s: &[bool; 65536], a: i64, b: i64) -> bool with Div, Panic {
-    if a < 0 || a >= ELPLUS_WIDE_MAXC || b < 0 || b >= ELPLUS_WIDE_MAXC { return false }
-    return s[a * ELPLUS_WIDE_MAXC + b]
+    if a < 0 || a >= 256 || b < 0 || b >= 256 { return false }
+    return s[a * 256 + b]
 }
 
 /// Wide role-edge query: derived edge (role, c, f) in a CLOSED wide
@@ -1015,8 +1111,8 @@ pub fn elplus_wide_subsumes(s: &[bool; 65536], a: i64, b: i64) -> bool with Div,
 /// # Complexity
 /// O(1)
 pub fn elplus_wide_edge(r: &[bool; 1048576], role: i64, c: i64, f: i64) -> bool with Div, Panic {
-    if role < 0 || role >= ELPLUS_WIDE_MAXR || c < 0 || c >= ELPLUS_WIDE_MAXC || f < 0 || f >= ELPLUS_WIDE_MAXC { return false }
-    return r[(role * ELPLUS_WIDE_MAXC + c) * ELPLUS_WIDE_MAXC + f]
+    if role < 0 || role >= 16 || c < 0 || c >= 256 || f < 0 || f >= 256 { return false }
+    return r[(role * 256 + c) * 256 + f]
 }
 
 /// Count the set cells of the used nc x nc region of a wide subsumption
@@ -1027,12 +1123,12 @@ pub fn elplus_wide_edge(r: &[bool; 1048576], role: i64, c: i64, f: i64) -> bool 
 pub fn elplus_wide_s_count(s: &[bool; 65536], nc: i64) -> i64 with Div, Panic {
     var n: i64 = 0
     var lim: i64 = nc
-    if lim > ELPLUS_WIDE_MAXC { lim = ELPLUS_WIDE_MAXC }
+    if lim > 256 { lim = 256 }
     var a: i64 = 0
     while a < lim {
         var b: i64 = 0
         while b < lim {
-            if s[a * ELPLUS_WIDE_MAXC + b] {
+            if s[a * 256 + b] {
                 n = n + 1
             }
             b = b + 1
@@ -1052,16 +1148,16 @@ pub fn elplus_wide_r_count(r: &[bool; 1048576], nr: i64, nc: i64, nb: i64) -> i6
     var lr: i64 = nr
     var lc: i64 = nc
     var lb: i64 = nb
-    if lr > ELPLUS_WIDE_MAXR { lr = ELPLUS_WIDE_MAXR }
-    if lc > ELPLUS_WIDE_MAXC { lc = ELPLUS_WIDE_MAXC }
-    if lb > ELPLUS_WIDE_MAXC { lb = ELPLUS_WIDE_MAXC }
+    if lr > 16 { lr = 16 }
+    if lc > 256 { lc = 256 }
+    if lb > 256 { lb = 256 }
     var rr: i64 = 0
     while rr < lr {
         var c: i64 = 0
         while c < lc {
             var f: i64 = 0
             while f < lb {
-                if r[(rr * ELPLUS_WIDE_MAXC + c) * ELPLUS_WIDE_MAXC + f] {
+                if r[(rr * 256 + c) * 256 + f] {
                     n = n + 1
                 }
                 f = f + 1
@@ -1080,15 +1176,15 @@ pub fn elplus_wide_r_count(r: &[bool; 1048576], nr: i64, nc: i64, nb: i64) -> i6
 /// # Complexity
 /// O(nc^2)
 pub fn elplus_wide_conflict(s: &[bool; 65536], disj: &[bool; 65536], nc: i64, a: i64, b: i64) -> bool with Div, Panic {
-    if nc < 0 || nc > ELPLUS_WIDE_MAXC { return false }
-    if a < 0 || a >= ELPLUS_WIDE_MAXC || b < 0 || b >= ELPLUS_WIDE_MAXC { return false }
+    if nc < 0 || nc > 256 { return false }
+    if a < 0 || a >= 256 || b < 0 || b >= 256 { return false }
     var hit = false
     var d1: i64 = 0
     while d1 < nc {
-        if s[a * ELPLUS_WIDE_MAXC + d1] {
+        if s[a * 256 + d1] {
             var d2: i64 = 0
             while d2 < nc {
-                if s[b * ELPLUS_WIDE_MAXC + d2] && disj[d1 * ELPLUS_WIDE_MAXC + d2] {
+                if s[b * 256 + d2] && disj[d1 * 256 + d2] {
                     hit = true
                 }
                 d2 = d2 + 1
@@ -1116,21 +1212,21 @@ pub fn elplus_wide_derive_conflicts(
     disj: &[bool; 65536],
     nc: i64
 ) -> i64 with Mut, Div, Panic {
-    if m < 0 || m > ELPLUS_MAXM || nc < 0 || nc > ELPLUS_WIDE_MAXC { return 1 }
+    if m < 0 || m > 256 || nc < 0 || nc > 256 { return 1 }
     var q: i64 = 0
     while q < m {
-        if cls[q] < 0 || cls[q] >= ELPLUS_WIDE_MAXC { return 1 }
+        if cls[q] < 0 || cls[q] >= 256 { return 1 }
         q = q + 1
     }
     var i: i64 = 0
     while i < m {
         var j: i64 = 0
         while j < m {
-            conf_pair[i * ELPLUS_MAXM + j] = false
+            conf_pair[i * 256 + j] = false
             if i != j {
                 if ent[i] == ent[j] {
                     if elplus_wide_conflict(s, disj, nc, cls[i], cls[j]) {
-                        conf_pair[i * ELPLUS_MAXM + j] = true
+                        conf_pair[i * 256 + j] = true
                     }
                 }
             }
