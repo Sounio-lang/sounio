@@ -119,6 +119,13 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
   `tests/run-pass/gum_fo_tangent_clone_struct_returns2.sio`, oracle
   `tests/oracles/gum_fo_tangent_clone_struct_returns2.cpp` (1e-12 first order,
   1e-10 second order).
+  A measurement made inside a struct-returning call that feeds two output
+  fields keeps their covariance: the clone exports each internal measurement
+  once (its sigma^2 and one sensitivity per field) and the caller makes one
+  shared channel for it (`Var(p.u - p.w)` for `u = eps*m`, `w = m` reads
+  `m^2 ue^2 + (eps-1)^2 um^2`). A struct return with more than four such
+  measurements is refused at compile time
+  (`tests/compile-fail/gum_refuse_struct_return_internal_cap.sio`).
   A query whose answer depends on a call the clones cannot differentiate is
   refused at compile time rather than answered 0 (see the refusal entry
   below).

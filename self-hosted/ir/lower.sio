@@ -436,6 +436,13 @@ var TG_SITE_HM: [i64; 73728] = [-1; 73728]
 // caller's channels (32 per row) and, at second order, the Hessian (36 per row).
 var TG_ROW_ACC: [i64; 256] = [-1; 256]
 var TG_ROW_HESS: [i64; 288] = [-1; 288]
+// Internal measurements of a struct-returning clone, exported once each so the
+// caller can share one channel across the output rows: per site and slot
+// (site * 4 + c) the sigma^2 register, and per row (that * 8 + row) the row's
+// sensitivity to it.
+let TG_NI: i64 = 4
+var TG_SITE_ISIG: [i64; 1024] = [-1; 1024]
+var TG_SITE_IS: [i64; 8192] = [-1; 8192]
 
 // Key of a field path (up to 3 name ids): the clone matches a field read to a
 // tangent by it, the caller builds the same key from the layout.
@@ -17284,6 +17291,7 @@ impl Lowerer {
         var lo = self
         if !lo.tg_out_layout(TG_ACTIVE) { return lo }
         let nout = TG_O_N
+        var rs: [i64; 256] = [-1; 256]
         var odepth: [i64; 8] = [0; 8]
         var opath: [i64; 24] = [0; 24]
         var oi: i64 = 0
@@ -17338,8 +17346,70 @@ impl Lowerer {
             }
             if !have { lo = lo.fo_clear_expr_sens().so_clear_expr_hess() }
             let sens = lo.fo_snapshot_expr_sens()
+            var cc: i64 = 0
+            while cc < 32 {
+                rs[(j * 32 + cc) as usize] = sens[cc as usize]
+                cc = cc + 1
+            }
             lo = lo.tg_store_row(sens, j)
             j = j + 1
+        }
+        // Internal measurements: one export per measurement, shared by the
+        // rows (sigma^2, then each row's sensitivity to it), so the caller can
+        // keep their covariance. At most TG_NI per return.
+        if tg_may_draw(TG_ACTIVE, 0) {
+            let stride = TG_NPCH + 1 + (if TG_ACTIVE_ORD == 2 { TG_HESS_SLOTS } else { 0 })
+            let zc = lo.emit_f64_const(0.0)
+            lo = zc.0
+            var c: i64 = 0
+            var ch: i64 = 0
+            while ch < lo.fo_nchan && ch < 32 {
+                var is_param = false
+                var q: i64 = 0
+                while q < TG_NPCH {
+                    if TG_PARAM_CH[q as usize] == ch { is_param = true }
+                    q = q + 1
+                }
+                var used = false
+                var r: i64 = 0
+                while r < nout {
+                    if rs[(r * 32 + ch) as usize] >= 0 { used = true }
+                    r = r + 1
+                }
+                if !is_param && used && lo.fo_sigma2[ch as usize] >= 0 {
+                    if c >= TG_NI {
+                        print("error: the struct return of `")
+                        print(str_from_bytes((*lo.current_func).name.buf, (*lo.current_func).name.len))
+                        print("` has more than 4 internal measurements feeding its fields; refused instead of returning a wrong covariance (KL-11)\n")
+                        return lo.report_error_at(10841)
+                    }
+                    let cb = nout * stride + c * (1 + nout)
+                    let sp0 = lo.emit_i64_const(cb)
+                    lo = sp0.0
+                    lo = lo.emit(ir_index_set(TG_OUT_REG, sp0.1, lo.fo_sigma2[ch as usize]))
+                    var r2: i64 = 0
+                    while r2 < nout {
+                        let sv = rs[(r2 * 32 + ch) as usize]
+                        let sp1 = lo.emit_i64_const(cb + 1 + r2)
+                        lo = sp1.0
+                        lo = lo.emit(ir_index_set(TG_OUT_REG, sp1.1, if sv >= 0 { sv } else { zc.1 }))
+                        r2 = r2 + 1
+                    }
+                    c = c + 1
+                }
+                ch = ch + 1
+            }
+            while c < TG_NI {
+                let cb = nout * stride + c * (1 + nout)
+                var r3: i64 = 0
+                while r3 <= nout {
+                    let sp2 = lo.emit_i64_const(cb + r3)
+                    lo = sp2.0
+                    lo = lo.emit(ir_index_set(TG_OUT_REG, sp2.1, zc.1))
+                    r3 = r3 + 1
+                }
+                c = c + 1
+            }
         }
         lo
     }
@@ -17650,7 +17720,8 @@ impl Lowerer {
             nout = TG_O_N
         }
         let stride = nf + 1 + (if ord == 2 { TG_HESS_SLOTS } else { 0 })
-        let arrlen = if is_sret { nout * stride } else if ord == 2 { nf + 1 + TG_HESS_SLOTS } else { nf + 1 }
+        let shared_int = is_sret && tg_may_draw(tgi, 0)
+        let arrlen = if is_sret { nout * stride + (if shared_int { TG_NI * (1 + nout) } else { 0 }) } else if ord == 2 { nf + 1 + TG_HESS_SLOTS } else { nf + 1 }
         lo = lo.emit(ir_alloc_array(arr, lo.aggregate_storage_bytes(arrlen), arrlen))
         lo = lo.bind_reg_array_elem_float(arr)
         args = lower_reg_list_append(args, arr)
@@ -17718,6 +17789,36 @@ impl Lowerer {
                     }
                 }
                 row = row + 1
+            }
+            if shared_int && slot_i >= 0 {
+                // The internal measurements: sigma^2 and one sensitivity per row.
+                var c: i64 = 0
+                while c < TG_NI {
+                    let cb = nout * stride + c * (1 + nout)
+                    let sp0 = lo.emit_i64_const(cb)
+                    lo = sp0.0
+                    let sg = lo.fresh_reg()
+                    lo = sg.0
+                    var lsg = ir_index_get(sg.1, arr, sp0.1)
+                    lsg.imm_flags = IR_FLOAT_REG_MARKER_FLAG
+                    lo = lo.emit(lsg)
+                    lo = lo.emit(ir_mark_float_reg(sg.1))
+                    TG_SITE_ISIG[(slot_i * 4 + c) as usize] = sg.1
+                    var r2: i64 = 0
+                    while r2 < nout {
+                        let sp1 = lo.emit_i64_const(cb + 1 + r2)
+                        lo = sp1.0
+                        let sr = lo.fresh_reg()
+                        lo = sr.0
+                        var lsr = ir_index_get(sr.1, arr, sp1.1)
+                        lsr.imm_flags = IR_FLOAT_REG_MARKER_FLAG
+                        lo = lo.emit(lsr)
+                        lo = lo.emit(ir_mark_float_reg(sr.1))
+                        TG_SITE_IS[((slot_i * 4 + c) * 8 + r2) as usize] = sr.1
+                        r2 = r2 + 1
+                    }
+                    c = c + 1
+                }
             }
             return (lo, dst)
         }
@@ -18257,9 +18358,24 @@ impl Lowerer {
                 hw = hw + 1
             }
         }
-        let vint = TG_SITE_DM[((si * 8 + row) * 25 + nf) as usize]
-        if tg_may_draw(tgi, 0) && vint >= 0 {
-            lo = lo.fo_add_channel_for_variance(vint)
+        if tg_may_draw(tgi, 0) {
+            // The call's internal measurements: one channel per measurement,
+            // shared by every row, so two fields that depend on the same
+            // measurement stay correlated.
+            var c: i64 = 0
+            while c < TG_NI {
+                let sg = TG_SITE_ISIG[(si * 4 + c) as usize]
+                let sv = TG_SITE_IS[((si * 4 + c) * 8 + row) as usize]
+                if sg >= 0 && sv >= 0 {
+                    let ar = lo.fo_add_channel_with_sens(sg, sv)
+                    lo = ar.0
+                    if !ar.1 {
+                        print("error: a struct-returning call has no room for its internal measurement channels; refused instead of returning a wrong covariance (KL-11)\n")
+                        return (lo.report_error_at(10842), 0 - 1)
+                    }
+                }
+                c = c + 1
+            }
         }
         if !lo.fo_expr_has_sens() { return lo.emit_zero_variance() }
         lo.fo_emit_var_from_sens()
@@ -21232,6 +21348,43 @@ impl Lowerer {
             r = r + 1
         }
         lo
+    }
+
+    // Like fo_add_channel_for_variance, but the sensitivity on the channel
+    // (found or created by its sigma^2 register) is the register `sens_reg`,
+    // added to what the expression already has there. False when the channel
+    // table is full.
+    fn fo_add_channel_with_sens(self, variance_reg: i64, sens_reg: i64) -> (Lowerer, bool) with Mut, Panic, Div, IO {
+        var lo = self
+        var ch: i64 = 0 - 1
+        var k: i64 = 0
+        while k < lo.fo_nchan {
+            if lo.fo_sigma2[k as usize] == variance_reg {
+                ch = k
+                k = lo.fo_nchan
+            } else {
+                k = k + 1
+            }
+        }
+        if ch < 0 {
+            if lo.fo_nchan >= 32 { return (lo, false) }
+            ch = lo.fo_nchan
+            lo.fo_sigma2[ch as usize] = variance_reg
+            FO_SIGMA_REG[ch as usize] = 0 - 1
+            FO_CH_DEPTH[ch as usize] = lo.loop_depth
+            lo.fo_nchan = ch + 1
+        }
+        let prev = lo.fo_expr_sens[ch as usize]
+        if prev >= 0 {
+            let sp = lo.fresh_reg()
+            lo = sp.0
+            lo = lo.emit(ir_binop_typed(sp.1, prev, BinaryOp::OpAdd, sens_reg, true, true))
+            lo = lo.emit(ir_mark_float_reg(sp.1))
+            lo.fo_expr_sens[ch as usize] = sp.1
+        } else {
+            lo.fo_expr_sens[ch as usize] = sens_reg
+        }
+        (lo, true)
     }
 
     // #2827: add sensitivity 1.0 on the channel whose sigma^2 register is

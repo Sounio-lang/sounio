@@ -160,5 +160,8 @@ int main() {
     const double m = 0.5, um = 0.05;
     std::printf("shared_u_var       %.17g\n", m * m * ue * ue + eps * eps * um * um);
     std::printf("shared_w_var       %.17g\n", um * um);
+    // u = eps m, w = m share m: Var(u - w) = m^2 ue^2 + (eps - 1)^2 um^2
+    std::printf("shared_u_minus_w_var %.17g\n", m * m * ue * ue + (eps - 1.0) * (eps - 1.0) * um * um);
+    std::printf("shared_u_plus_w_var %.17g\n", m * m * ue * ue + (eps + 1.0) * (eps + 1.0) * um * um);
     return 0;
 }
