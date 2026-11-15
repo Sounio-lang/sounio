@@ -38,7 +38,10 @@
 //    11    CD_CLPLA   plasma clearance (e.g. proteolysis)             L/h
 //    12    CD_KPSC    scalar multiplying every Rodgers-Rowland Kp     -
 //    13    CD_PSSC    scalar multiplying the default ps (below)       -
-//    14    CD_KA      first-order oral absorption rate constant       1/h
+//    14    CD_KA      oral absorption rate constant: ka (first order)  1/h
+//                     when the dose has ntr = 1, the rate k of ONE
+//                     transit compartment when ntr > 1 (Circ28Dose.ntr;
+//                     mean transit time ntr / k)
 //    15    CD_FA      fraction of the oral dose absorbed (enters the  -
 //                     gut tissue)
 //    16    CD_TLAG    absorption lag time                             h
@@ -146,6 +149,14 @@ pub fn circ28_drug_new() -> Circ28Drug with Mut, Panic {
         status: [0; 18],
         prov: ["", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""],
     }
+    // Every slot is written explicitly: lean_single does not always carry the
+    // array-literal initialiser into the record, and an unwritten slot then
+    // reads whatever the frame held (seen as CD_TLAG ~0.8 h on midazolam).
+    var i: i32 = 0
+    while i < 18 {
+        circ28_drug_set(&!d, i, 0.0, 0.0, CD_STATUS_UNUSED, "unused")
+        i = i + 1
+    }
     circ28_drug_set(&!d, CD_FU, 1.0, 0.0, CD_STATUS_UNUSED, "default")
     circ28_drug_set(&!d, CD_BP, 1.0, 0.0, CD_STATUS_UNUSED, "default")
     circ28_drug_set(&!d, CD_KPSC, 1.0, 0.0, CD_STATUS_UNUSED, "default")
@@ -241,20 +252,83 @@ pub fn circ28_drug_params(d: &Circ28Drug) -> Circ28Params with Mut, Div, Panic, 
 // Oral input
 // ---------------------------------------------------------------------------
 
-// Fraction of the first-order input still to come at time t:
-// exp(-ka (t - tlag)) for t > tlag, 1 before.
-fn circ28_oral_left(ka: f64, tlag: f64, t: f64) -> f64 with Mut, Div, Panic {
+// Fraction of the input still to come at time t for a chain of ntr (>= 1) equal
+// transit compartments of rate k (Erlang-ntr arrival time, mean transit time
+// ntr / k) started after the lag tlag:
+//   S_n(t) = exp(-k tau) sum_{j=0}^{n-1} (k tau)^j / j!,  tau = t - tlag,
+// S = 1 for t <= tlag. Evaluation: term_0 = exp(-x), term_j = term_{j-1} x / j with
+// x = k tau, S = sum of the terms. The exponential is applied FIRST, so every term
+// is exp(-x) x^j / j! (at most about 1) and x^j / j! is never formed alone (no
+// overflow). Where exp(-x) underflows (x beyond about 745) S is 0; the true value
+// there is below 1e-240 for n <= 50, an absolute error that is negligible for a
+// mass. Valid for n up to about 100. For n = 1 this is the same floating-point
+// expression as the first-order input of the layer (exp(0 - ka (t - tlag))), so
+// n = 1 reproduces it bit for bit. ntr < 1 is treated as 1.
+pub fn circ28_oral_left_n(k: f64, ntr: i32, tlag: f64, t: f64) -> f64 with Mut, Div, Panic {
     if t <= tlag { return 1.0 }
-    return exp(0.0 - ka * (t - tlag))
+    let x = k * (t - tlag)
+    var term = exp(0.0 - x)
+    var sum = term
+    var j: i32 = 1
+    while j < ntr {
+        term = term * x / (j as f64)
+        sum = sum + term
+        j = j + 1
+    }
+    return sum
 }
 
-// Mass (mg) entering the gut tissue between t0 and t1 (t1 >= t0):
+// First-order special case (ntr = 1): exp(-ka (t - tlag)) for t > tlag, 1 before.
+fn circ28_oral_left(ka: f64, tlag: f64, t: f64) -> f64 with Mut, Div, Panic {
+    return circ28_oral_left_n(ka, 1, tlag, t)
+}
+
+// Mass (mg) entering the gut tissue between t0 and t1 (t1 >= t0) through a chain
+// of ntr transit compartments of rate k:  fa Dose (S_n(t0) - S_n(t1)), the exact
+// integral of the Erlang input rate. Summed over a grid the masses telescope to
+// fa Dose (1 - S_n(T)): the total input is fa Dose to rounding once k (T - tlag)
+// is large. The rate to hand to circ28_step is this mass / dt.
+pub fn circ28_oral_mass_n(k: f64, ntr: i32, fa: f64, dose: f64, tlag: f64, t0: f64, t1: f64) -> f64 with Mut, Div, Panic {
+    return fa * dose * (circ28_oral_left_n(k, ntr, tlag, t0) - circ28_oral_left_n(k, ntr, tlag, t1))
+}
+
+// Mass (mg) entering the gut tissue between t0 and t1 (t1 >= t0) with first-order
+// absorption (ntr = 1):
 //   integral of ka fa Dose exp(-ka (t - tlag)) dt = fa Dose (L(t0) - L(t1)),
-// L(t) = exp(-ka (t - tlag)) after the lag, 1 before. Summed over a grid the
-// masses telescope to fa Dose (1 - L(T)): the total input is fa Dose to rounding
-// once ka (T - tlag) is large. The rate to hand to circ28_step is this mass / dt.
+// L(t) = exp(-ka (t - tlag)) after the lag, 1 before. Signature and behaviour are
+// those of the layer before the transit input existed; drug modules with their own
+// loops call it and are unaffected.
 pub fn circ28_oral_mass(ka: f64, fa: f64, dose: f64, tlag: f64, t0: f64, t1: f64) -> f64 with Mut, Div, Panic {
     return fa * dose * (circ28_oral_left(ka, tlag, t0) - circ28_oral_left(ka, tlag, t1))
+}
+
+// Mean transit time (h) of the chain, ntr / k, NOT counting the lag.
+pub fn circ28_transit_mtt(k: f64, ntr: i32) -> f64 with Div {
+    return (ntr as f64) / k
+}
+
+// Mode (h) of the input RATE: (ntr - 1) / k + tlag (the lag for ntr = 1, where the
+// rate is largest at tlag). This is the peak of the input, not the Tmax of the
+// plasma concentration, which also depends on the disposition.
+pub fn circ28_transit_mode(k: f64, ntr: i32, tlag: f64) -> f64 with Div {
+    var n = ntr
+    if n < 1 { n = 1 }
+    return ((n - 1) as f64) / k + tlag
+}
+
+// Input rate per unit of fa Dose (1/h) at t: the Erlang density
+// k (k tau)^{n-1} exp(-k tau) / (n-1)!, tau = t - tlag, 0 for t <= tlag; equal to
+// -dS_n/dt. Evaluated by the same term recursion as S_n (term_{n-1} k).
+pub fn circ28_transit_rate(k: f64, ntr: i32, tlag: f64, t: f64) -> f64 with Mut, Div, Panic {
+    if t <= tlag { return 0.0 }
+    let x = k * (t - tlag)
+    var term = exp(0.0 - x)
+    var j: i32 = 1
+    while j < ntr {
+        term = term * x / (j as f64)
+        j = j + 1
+    }
+    return k * term
 }
 
 // Mass (mg) of an intravenous infusion of `dose` over [0, t_inf] falling in
@@ -292,8 +366,20 @@ pub fn cd_clearance_from_extraction(q: L_per_h, e: f64) -> f64 { return (q * e) 
 pub const CD_MAXS: i32 = 2048
 
 // route 0: intravenous infusion of `dose` mg over t_inf h (a bolus is a short
-// infusion; doses enter as rates, see circ28.sio). route 1: first-order oral
-// absorption into the gut tissue with ka, fa, tlag.
+// infusion; doses enter as rates, see circ28.sio). route 1: oral absorption into
+// the gut tissue with ka, fa, tlag through a chain of ntr (>= 1) equal transit
+// compartments (see circ28_oral_left_n). ntr = 1 is first-order absorption with a
+// lag (the layer's original input); ntr = 2, 3, ... is an Erlang transit input.
+//
+// ntr is a property of the FORMULATION (like ka per formulation) and lives here,
+// not in the record. The record slot CD_KA is read as the rate constant of ONE
+// compartment: ka for ntr = 1, the per-compartment transit rate k for ntr > 1
+// (mean transit time ntr / k after the lag, mode of the input rate
+// (ntr - 1) / k + tlag). The record has no extra slot (CD_N = 18 is an array size
+// across the layer). The runner uses ntr as stored in the dose; the rate k is
+// fitted by the drug module to the pooled Tmax, n comes from a published model
+// of the formulation or is declared an assumption (3), Cmax/AUC stays a
+// validation row.
 // The grid is dt1 on [0, t1] then dt2 on [t1, t_end]. fit_lo..fit_hi is the
 // window (h) of the log-linear fit of the plasma concentration that gives the
 // terminal rate constant.
@@ -304,6 +390,7 @@ pub struct Circ28Dose {
     pub ka: f64,
     pub fa: f64,
     pub tlag: f64,
+    pub ntr: i32,
     pub dt1: f64,
     pub t1: f64,
     pub dt2: f64,
@@ -313,12 +400,19 @@ pub struct Circ28Dose {
 }
 
 pub fn circ28_dose_iv(dose: f64, t_inf: f64, dt1: f64, t1: f64, dt2: f64, t_end: f64, fit_lo: f64, fit_hi: f64) -> Circ28Dose {
-    return Circ28Dose { route: 0, dose: dose, t_inf: t_inf, ka: 1.0, fa: 1.0, tlag: 0.0, dt1: dt1, t1: t1, dt2: dt2, t_end: t_end, fit_lo: fit_lo, fit_hi: fit_hi }
+    return Circ28Dose { route: 0, dose: dose, t_inf: t_inf, ka: 1.0, fa: 1.0, tlag: 0.0, ntr: 1, dt1: dt1, t1: t1, dt2: dt2, t_end: t_end, fit_lo: fit_lo, fit_hi: fit_hi }
 }
 
-// ka, fa and tlag are taken from the parameters at run time (circ28_drug_run).
+// First-order oral dose (ntr = 1). ka, fa and tlag are taken from the parameters at
+// run time (circ28_drug_run).
 pub fn circ28_dose_oral(dose: f64, dt1: f64, t1: f64, dt2: f64, t_end: f64, fit_lo: f64, fit_hi: f64) -> Circ28Dose {
-    return Circ28Dose { route: 1, dose: dose, t_inf: 0.0, ka: 1.0, fa: 1.0, tlag: 0.0, dt1: dt1, t1: t1, dt2: dt2, t_end: t_end, fit_lo: fit_lo, fit_hi: fit_hi }
+    return Circ28Dose { route: 1, dose: dose, t_inf: 0.0, ka: 1.0, fa: 1.0, tlag: 0.0, ntr: 1, dt1: dt1, t1: t1, dt2: dt2, t_end: t_end, fit_lo: fit_lo, fit_hi: fit_hi }
+}
+
+// Oral dose through ntr equal transit compartments. k (per compartment), fa and
+// tlag are taken from the record's CD_KA, CD_FA, CD_TLAG at run time.
+pub fn circ28_dose_oral_transit(dose: f64, ntr: i32, dt1: f64, t1: f64, dt2: f64, t_end: f64, fit_lo: f64, fit_hi: f64) -> Circ28Dose {
+    return Circ28Dose { route: 1, dose: dose, t_inf: 0.0, ka: 1.0, fa: 1.0, tlag: 0.0, ntr: ntr, dt1: dt1, t1: t1, dt2: dt2, t_end: t_end, fit_lo: fit_lo, fit_hi: fit_hi }
 }
 
 // Results (plasma = venous blood / bp):
@@ -389,7 +483,7 @@ pub fn circ28_run(p: Circ28Params, dc: Circ28Dose) -> Circ28Run with Mut, Div, P
                     mass = circ28_iv_mass(dc.dose, dc.t_inf, t, t + dt)
                     iv = mass / dt
                 } else {
-                    mass = circ28_oral_mass(dc.ka, dc.fa, dc.dose, dc.tlag, t, t + dt)
+                    mass = circ28_oral_mass_n(dc.ka, dc.ntr, dc.fa, dc.dose, dc.tlag, t, t + dt)
                     oral = mass / dt
                 }
                 input = input + mass

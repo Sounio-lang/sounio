@@ -1,0 +1,646 @@
+//@ run-pass
+//@ timeout: 180
+//@ expect-stdout-contains: CIRC28_TRANSIT_INPUT_PASS
+//
+// Transit-chain (Erlang) oral input of the circ28 drug layer (stdlib/darwin_pbpk/circ28_drug.sio).
+//
+// THE MECHANISM. A dose of fa Dose reaches the gut tissue through ntr equal transit compartments of
+// rate k after a lag tlag. With tau = t - tlag the fraction NOT yet arrived is
+//     S_n(t) = exp(-k tau) sum_{j<n} (k tau)^j / j!      (S = 1 for tau <= 0)
+// and the mass entering in [t0, t1] is fa Dose (S_n(t0) - S_n(t1)). n is a property of the formulation
+// (Circ28Dose.ntr, default 1); the record slot CD_KA is the rate of ONE compartment. circ28_dose_oral
+// is unchanged (ntr = 1). No extra state variables.
+//
+// EXPECTED VALUES AND BANDS, WRITTEN BEFORE THE FIRST RUN (outcome recorded in the report afterwards)
+//  T1  n = 1 is the old input bit for bit.
+//      T1a masses per step: circ28_oral_mass_n(ka, 1, ...) == circ28_oral_mass(...) == an independent copy
+//          of the old formula in this file, exactly (==), over 4 ka x 3 tlag x 240 steps. Mismatches: 0.
+//      T1b a full kernel run of the midazolam tablet record (7.5 mg) and of the quetiapine record (25 mg):
+//          raw grid maximum, AUC_0-t and last concentration of circ28_run equal exactly (==) those of a
+//          loop in this file that uses the old formula; and Cmax, Tmax, AUC_inf equal the values printed by
+//          the UNCHANGED library before the edit (midazolam x1e6 mg/L: 24228.261168, 0.929091 h,
+//          103785.947605; quetiapine: 47269.723757, 1.452788 h, 309333.296465), to the printed digits.
+//      T1c ntr read back: circ28_dose_oral 1, circ28_dose_iv 1, circ28_dose_oral_transit(.., 3, ..) 3.
+//  T2  sum of the masses over 80 h (k 1.3, tlag 0.4, fa 0.7, Dose 12.5, step 0.05) = fa Dose within 1e-12
+//      relative for n = 1, 2, 3, 5, 8; predicted worst 1e-14. Nothing enters before the lag (exactly 0).
+//  T3  S_3 at the mean transit time (k tau = 3) = 8.5 exp(-3) within 1e-14; S_n from the term recursion
+//      against a direct sum with explicit powers and factorials (n 1..8, 5 values of k tau) within 1e-13;
+//      -dS/dt by a 5-point stencil (step 0.002/k) against the Erlang density written with explicit powers
+//      and factorials, relative 1e-8 (predicted worst 1e-9) at k tau = 0.6 n, n, 1.6 n for n in
+//      {1, 2, 3, 5, 8}; integral of S over [tlag, inf) by Simpson (step 0.01/k) = n/k + 0 within 1e-9
+//      relative (n = 1, 3, 8); mean transit time and mode helpers against hand values exactly.
+//  T4  midazolam tablet record, grid 0.05 h to 3 h then 0.5 h to 24 h, terminal fit 8..24 h. For n = 1, 2, 3,
+//      5 the rate k is fitted (Illinois on ln k, |dTmax| < 1e-6 h) to the Tmax of the n = 1 record
+//      (0.929091 h) and compared with the value fitted offline (1e-3 relative);
+//      predicted k: n = 2 in [1.6, 2.8], n = 3 in [3.6, 4.3], n = 5 in [7, 13]; predicted
+//      Cmax/AUC (1/h): n = 1 in [0.225, 0.240], n = 2 in [0.28, 0.345], n = 3 in [0.355, 0.38],
+//      n = 5 in [0.375, 0.46]; strictly increasing with n (n = 1 < 2 < 3 < 5), observed 0.359.
+//  T5  the diagnostic of circ28_distribution_spectrum_a (n = 3, the same k, its grid 0.05 h to 12 h then 60
+//      steps to T_end, AUC_inf = AUC_0-t + C_end / lambda_IV with the IV terminal rate of its printout)
+//      through the new public API: midazolam tablet 7.5 mg, k 3.943497: Tmax 0.928998 h, Cmax/AUC
+//      0.367073 /h; quetiapine 25 mg, k 2.465302: Tmax 1.452901 h, Cmax/AUC 0.257743 /h; each within 1e-6.
+//      (The printed numbers have six decimals; the k printed is rounded too: that is the 1e-6.)
+//  T6  mass balance of the kernel run with transit input (n = 3 midazolam, n = 3 quetiapine, n = 5
+//      midazolam): |input - eliminated - remaining| / input <= 1e-10 (predicted 1e-13); input equals the
+//      sum of the masses computed here and fa Dose within 1e-12.
+//  Compiled run time <= 5 s (predicted 0.5 s).
+//
+// COMPILER NOTES. The records are built first in main (a float computed before circ28_drug_new made Madaros
+// segfault in the aripiprazole test); the 784-element system is created once in main; every kernel run is
+// done in a small function that fills its own value array from the record (lean_single mishandles arrays
+// passed by value across deep frames); several rows compute one quantity two ways as guards.
+// lean_single reads record slots that were never written with whatever the frame held: the first version of
+// this test gave Tmax 1.73 h instead of 0.929 h in the T4 frames (CD_TLAG about 0.8 h), reproduced with the
+// unchanged library; tr_touch writes the unused slots (zero) explicitly and a guard row checks the lag.
+// Marker CIRC28_TRANSIT_INPUT_PASS.
+
+use darwin_pbpk::circ28::*
+use darwin_pbpk::circ28_kp::*
+use darwin_pbpk::circ28_drug::*
+use darwin_pbpk::circ28_drug_midazolam::*
+use darwin_pbpk::circ28_drug_quetiapine::*
+use math::pure::{exp, ln}
+
+fn tr_abs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn tr_rel(tag: string, got: f64, want: f64, tol: f64) -> i32 with IO, Mut, Div, Panic {
+    let r = tr_abs(got - want) / tr_abs(want)
+    print("  "); print(tag); print(": got "); print(got); print(" want "); print(want)
+    print("  rel x 1e12 = "); println(r * 1.0e12)
+    if !(r <= tol) {
+        println("  [FAIL]")
+        return 1
+    }
+    return 0
+}
+
+fn tr_abs_tol(tag: string, got: f64, want: f64, tol: f64) -> i32 with IO, Mut, Div, Panic {
+    let r = tr_abs(got - want)
+    print("  "); print(tag); print(": got "); print(got); print(" want "); print(want)
+    print("  abs x 1e9 = "); println(r * 1.0e9)
+    if !(r <= tol) {
+        println("  [FAIL]")
+        return 1
+    }
+    return 0
+}
+
+fn tr_band(tag: string, got: f64, lo: f64, hi: f64) -> i32 with IO, Mut, Div, Panic {
+    print("  "); print(tag); print(": "); print(got); print("  predicted ["); print(lo); print(", "); print(hi); print("]")
+    if got >= lo && got <= hi {
+        println("  HIT")
+        return 0
+    }
+    println("  MISS (recorded, not tuned)")
+    return 0
+}
+
+// ---------------------------------------------------------------------------
+// Independent references (explicit powers and factorials; the old first-order formula)
+// ---------------------------------------------------------------------------
+fn tr_pow(x: f64, n: i32) -> f64 with Mut {
+    var r = 1.0
+    var j: i32 = 0
+    while j < n {
+        r = r * x
+        j = j + 1
+    }
+    return r
+}
+
+fn tr_fact(n: i32) -> f64 with Mut {
+    var r = 1.0
+    var j: i32 = 2
+    while j <= n {
+        r = r * (j as f64)
+        j = j + 1
+    }
+    return r
+}
+
+// S_n by a direct sum with explicit powers and factorials.
+fn tr_s_direct(k: f64, n: i32, tlag: f64, t: f64) -> f64 with Mut, Div, Panic {
+    if t <= tlag { return 1.0 }
+    let x = k * (t - tlag)
+    var s = 0.0
+    var j: i32 = 0
+    while j < n {
+        s = s + tr_pow(x, j) / tr_fact(j)
+        j = j + 1
+    }
+    return exp(0.0 - x) * s
+}
+
+// Erlang density per unit dose with explicit powers and factorials.
+fn tr_pdf_direct(k: f64, n: i32, tlag: f64, t: f64) -> f64 with Mut, Div, Panic {
+    if t <= tlag { return 0.0 }
+    let x = k * (t - tlag)
+    return k * tr_pow(x, n - 1) * exp(0.0 - x) / tr_fact(n - 1)
+}
+
+// The old first-order input, copied from the layer as it was before the transit input.
+fn tr_old_left(ka: f64, tlag: f64, t: f64) -> f64 with Mut, Div, Panic {
+    if t <= tlag { return 1.0 }
+    return exp(0.0 - ka * (t - tlag))
+}
+
+fn tr_old_mass(ka: f64, fa: f64, dose: f64, tlag: f64, t0: f64, t1: f64) -> f64 with Mut, Div, Panic {
+    return fa * dose * (tr_old_left(ka, tlag, t0) - tr_old_left(ka, tlag, t1))
+}
+
+// ---------------------------------------------------------------------------
+// T1a
+// ---------------------------------------------------------------------------
+fn tr_t1a() -> i32 with IO, Mut, Div, Panic {
+    println("T1a n = 1 masses per step: new, public wrapper and the old formula agree exactly")
+    var bad: i32 = 0
+    var nchk: i32 = 0
+    var ia: i32 = 0
+    while ia < 4 {
+        var ka = 0.3
+        if ia == 1 { ka = 0.827927 }
+        if ia == 2 { ka = 3.9 }
+        if ia == 3 { ka = 12.0 }
+        var il: i32 = 0
+        while il < 3 {
+            var tlag = 0.0
+            if il == 1 { tlag = 0.25 }
+            if il == 2 { tlag = 1.0 }
+            var i: i32 = 0
+            while i < 240 {
+                let t0 = 0.05 * (i as f64)
+                let t1 = 0.05 * ((i + 1) as f64)
+                let a = circ28_oral_mass_n(ka, 1, 0.9, 25.0, tlag, t0, t1)
+                let b = circ28_oral_mass(ka, 0.9, 25.0, tlag, t0, t1)
+                let c = tr_old_mass(ka, 0.9, 25.0, tlag, t0, t1)
+                if !(a == c) || !(b == c) { bad = bad + 1 }
+                nchk = nchk + 1
+                i = i + 1
+            }
+            il = il + 1
+        }
+        ia = ia + 1
+    }
+    print("  steps compared "); print(nchk); print("  mismatches "); println(bad)
+    if bad != 0 {
+        println("  [FAIL]")
+        return 1
+    }
+    return 0
+}
+
+// ---------------------------------------------------------------------------
+// T1b: legacy loop (the old circ28_run for an oral dose, with the old input formula)
+//   o[0] raw grid maximum of C_plasma, o[1] AUC_0-t, o[2] last C_plasma, o[3] input
+// ---------------------------------------------------------------------------
+fn tr_legacy_run(p: Circ28Params, ka: f64, fa: f64, dose: f64, tlag: f64, dt1: f64, t1: f64, dt2: f64, t_end: f64, sys: &!Circ28Sys, o: &![f64; 4]) with Mut, Div, Panic {
+    var s = circ28_state_zero()
+    var el = circ28_elim_zero()
+    var t = 0.0
+    var input = 0.0
+    var cm = 0.0
+    var cl = 0.0
+    var ph: i32 = 0
+    while ph < 2 {
+        var dt = dt1
+        var tstop = t1
+        if ph == 1 {
+            dt = dt2
+            tstop = t_end
+        }
+        circ28_prepare(p, dt, sys)
+        while t + 0.5 * dt < tstop {
+            let mass = tr_old_mass(ka, fa, dose, tlag, t, t + dt)
+            input = input + mass
+            circ28_step(&!s, p, sys, 0.0, mass / dt, &!el)
+            t = t + dt
+            cl = s.x[0] / p.bp
+            if cl > cm { cm = cl }
+        }
+        ph = ph + 1
+    }
+    (*o)[0] = cm
+    (*o)[1] = el.auc_ven / p.bp
+    (*o)[2] = cl
+    (*o)[3] = input
+}
+
+fn tr_t1b_one(name: string, d: &Circ28Drug, dc: Circ28Dose, c0: f64, tmax0: f64, auc0: f64, sys: &!Circ28Sys) -> i32 with IO, Mut, Div, Panic, Epistemic {
+    var fails: i32 = 0
+    let p = circ28_drug_params(d)
+    var o: [f64; 4] = [0.0; 4]
+    tr_legacy_run(p, circ28_drug_value(d, CD_KA), circ28_drug_value(d, CD_FA), dc.dose, circ28_drug_value(d, CD_TLAG), dc.dt1, dc.t1, dc.dt2, dc.t_end, sys, &!o)
+    let r = circ28_drug_run(d, dc)
+    print("  "); println(name)
+    print("    raw grid max  new "); print(r.cmax_grid * 1.0e6); print("  legacy loop "); println(o[0] * 1.0e6)
+    print("    AUC 0-t       new "); print(r.auc_t * 1.0e6); print("  legacy loop "); println(o[1] * 1.0e6)
+    print("    C_end         new "); print(r.c_end * 1.0e6); print("  legacy loop "); println(o[2] * 1.0e6)
+    print("    input         new "); print(r.input); print("  legacy loop "); println(o[3])
+    if !(r.cmax_grid == o[0]) { println("  [FAIL] raw grid max not bit-identical"); fails = fails + 1 }
+    if !(r.auc_t == o[1]) { println("  [FAIL] AUC 0-t not bit-identical"); fails = fails + 1 }
+    if !(r.c_end == o[2]) { println("  [FAIL] C_end not bit-identical"); fails = fails + 1 }
+    if !(r.input == o[3]) { println("  [FAIL] input not bit-identical"); fails = fails + 1 }
+    // the values printed by the unchanged library before the edit (x 1e6 for the concentrations)
+    fails = fails + tr_abs_tol("Cmax x1e6 against the pre-change print", r.cmax * 1.0e6, c0, 1.0e-6)
+    fails = fails + tr_abs_tol("Tmax against the pre-change print", r.tmax, tmax0, 1.0e-6)
+    fails = fails + tr_abs_tol("AUC_inf x1e6 against the pre-change print", r.auc_inf * 1.0e6, auc0, 1.0e-6)
+    return fails
+}
+
+// ---------------------------------------------------------------------------
+// T2
+// ---------------------------------------------------------------------------
+fn tr_sum_masses(k: f64, n: i32, fa: f64, dose: f64, tlag: f64, horizon: f64, early: &![f64; 1]) -> f64 with Mut, Div, Panic {
+    var sum = 0.0
+    var t = 0.0
+    var e = 0.0
+    let nst = (horizon / 0.05 + 0.5) as i32
+    var i: i32 = 0
+    while i < nst {
+        let m = circ28_oral_mass_n(k, n, fa, dose, tlag, t, t + 0.05)
+        if t + 0.05 <= tlag + 1.0e-12 { e = e + tr_abs(m) }
+        sum = sum + m
+        t = 0.05 * ((i + 1) as f64)
+        i = i + 1
+    }
+    (*early)[0] = e
+    return sum
+}
+
+fn tr_t2() -> i32 with IO, Mut, Div, Panic {
+    println("T2 total input over 80 h = fa Dose (k 1.3, tlag 0.4, fa 0.7, Dose 12.5)")
+    var fails: i32 = 0
+    var ns: [i32; 5] = [1, 2, 3, 5, 8]
+    var worst = 0.0
+    var early: [f64; 1] = [0.0; 1]
+    var i: i32 = 0
+    while i < 5 {
+        let s = tr_sum_masses(1.3, ns[i], 0.7, 12.5, 0.4, 80.0, &!early)
+        let r = tr_abs(s / (0.7 * 12.5) - 1.0)
+        if r > worst { worst = r }
+        print("  n = "); print(ns[i]); print("  sum "); print(s); print("  |sum/(fa Dose) - 1| x 1e15 = "); print(r * 1.0e15)
+        print("  mass before the lag "); println(early[0])
+        if !(r <= 1.0e-12) { println("  [FAIL]"); fails = fails + 1 }
+        if !(early[0] == 0.0) { println("  [FAIL] mass before the lag"); fails = fails + 1 }
+        i = i + 1
+    }
+    print("  worst relative residual x 1e15 "); println(worst * 1.0e15)
+    return fails
+}
+
+// ---------------------------------------------------------------------------
+// T3
+// ---------------------------------------------------------------------------
+fn tr_t3() -> i32 with IO, Mut, Div, Panic {
+    println("T3 S_n closed forms, derivative against the Erlang density, mean transit time")
+    var fails: i32 = 0
+    // S_3 at the mean transit time (k tau = 3): 8.5 exp(-3)
+    let k0 = 2.0
+    let mtt = circ28_transit_mtt(k0, 3)
+    fails = fails + tr_rel("S_3 at the mean transit time (k 2, tlag 0.3)", circ28_oral_left_n(k0, 3, 0.3, 0.3 + mtt), 8.5 * exp(0.0 - 3.0), 1.0e-14)
+    // recursion against explicit sum
+    var worst_d = 0.0
+    var n: i32 = 1
+    while n <= 8 {
+        var c: i32 = 0
+        while c < 5 {
+            var x = 0.2
+            if c == 1 { x = 1.0 }
+            if c == 2 { x = 3.0 }
+            if c == 3 { x = 9.0 }
+            if c == 4 { x = 40.0 }
+            let k = 1.7
+            let t = 0.4 + x / k
+            let a = circ28_oral_left_n(k, n, 0.4, t)
+            let b = tr_s_direct(k, n, 0.4, t)
+            var r = tr_abs(a - b) / b
+            if b < 1.0e-250 { r = tr_abs(a - b) }
+            if r > worst_d { worst_d = r }
+            c = c + 1
+        }
+        n = n + 1
+    }
+    print("  recursion vs direct sum, worst relative x 1e15 = "); println(worst_d * 1.0e15)
+    if !(worst_d <= 1.0e-13) { println("  [FAIL]"); fails = fails + 1 }
+    // derivative against the density
+    var ns: [i32; 5] = [1, 2, 3, 5, 8]
+    var worst_p = 0.0
+    var i: i32 = 0
+    while i < 5 {
+        let nn = ns[i]
+        var cc: i32 = 0
+        while cc < 3 {
+            var f = 0.6
+            if cc == 1 { f = 1.0 }
+            if cc == 2 { f = 1.6 }
+            let k = 1.7
+            let tl = 0.4
+            let t = tl + f * (nn as f64) / k
+            let h = 0.002 / k
+            let sp2 = circ28_oral_left_n(k, nn, tl, t + 2.0 * h)
+            let sp1 = circ28_oral_left_n(k, nn, tl, t + h)
+            let sm1 = circ28_oral_left_n(k, nn, tl, t - h)
+            let sm2 = circ28_oral_left_n(k, nn, tl, t - 2.0 * h)
+            let dsdt = (0.0 - sp2 + 8.0 * sp1 - 8.0 * sm1 + sm2) / (12.0 * h)
+            let pdf = tr_pdf_direct(k, nn, tl, t)
+            let pdf2 = circ28_transit_rate(k, nn, tl, t)
+            let r = tr_abs(0.0 - dsdt - pdf) / pdf
+            let r2 = tr_abs(pdf2 - pdf) / pdf
+            if r > worst_p { worst_p = r }
+            if !(r2 <= 1.0e-13) { println("  [FAIL] circ28_transit_rate against the explicit density"); fails = fails + 1 }
+            cc = cc + 1
+        }
+        i = i + 1
+    }
+    print("  -dS/dt (5-point) vs Erlang density, worst relative x 1e12 = "); println(worst_p * 1.0e12)
+    if !(worst_p <= 1.0e-8) { println("  [FAIL]"); fails = fails + 1 }
+    // mean transit time by Simpson on S (tlag 0.7): integral of S over [tlag, inf) = n / k
+    var j: i32 = 0
+    while j < 3 {
+        var nm: i32 = 1
+        if j == 1 { nm = 3 }
+        if j == 2 { nm = 8 }
+        let k = 1.7
+        let tl = 0.7
+        let h = 0.01 / k
+        var ne = (((nm as f64) + 80.0) / 0.01 + 0.5) as i32
+        if ne % 2 == 1 { ne = ne + 1 }
+        var acc = circ28_oral_left_n(k, nm, tl, tl) + circ28_oral_left_n(k, nm, tl, tl + (ne as f64) * h)
+        var q: i32 = 1
+        while q < ne {
+            var w = 4.0
+            if q % 2 == 0 { w = 2.0 }
+            acc = acc + w * circ28_oral_left_n(k, nm, tl, tl + (q as f64) * h)
+            q = q + 1
+        }
+        let integral = acc * h / 3.0
+        fails = fails + tr_rel("Simpson integral of S_n = mean transit time", integral, (nm as f64) / k, 1.0e-9)
+        j = j + 1
+    }
+    // helpers against hand values
+    fails = fails + tr_rel("circ28_transit_mtt(2, 3)", circ28_transit_mtt(2.0, 3), 1.5, 1.0e-15)
+    fails = fails + tr_rel("circ28_transit_mode(2, 3, 0.5)", circ28_transit_mode(2.0, 3, 0.5), 1.5, 1.0e-15)
+    fails = fails + tr_rel("circ28_transit_mode(2, 1, 0.5) (the lag)", circ28_transit_mode(2.0, 1, 0.5), 0.5, 1.0e-15)
+    // the density is largest at the mode
+    let pm = circ28_transit_rate(2.0, 3, 0.5, 1.5)
+    let pl = circ28_transit_rate(2.0, 3, 0.5, 1.45)
+    let pr = circ28_transit_rate(2.0, 3, 0.5, 1.55)
+    print("  density at the mode "); print(pm); print("  at mode -+ 0.05: "); print(pl); print(" "); println(pr)
+    if !(pm > pl && pm > pr) { println("  [FAIL] mode"); fails = fails + 1 }
+    return fails
+}
+
+// ---------------------------------------------------------------------------
+// T4 / T5 / T6 helpers: one kernel run per function, value array filled here
+//   o[0] Tmax, o[1] Cmax, o[2] AUC_inf, o[3] AUC_0-t, o[4] C_end, o[5] input, o[6] balance_err,
+//   o[7] Cmax/AUC_inf, o[8] eliminated + remaining, o[9] fit_ok
+// ---------------------------------------------------------------------------
+fn tr_run_into(d: &Circ28Drug, dc: Circ28Dose, k: f64, o: &![f64; 10]) with Mut, Div, Panic, Epistemic {
+    var th: [f64; 18] = [0.0; 18]
+    var i: i32 = 0
+    while i < 18 {
+        th[i] = circ28_drug_value(d, i)
+        i = i + 1
+    }
+    th[CD_KA] = k
+    let r = circ28_run_theta(th, dc)
+    (*o)[0] = r.tmax
+    (*o)[1] = r.cmax
+    (*o)[2] = r.auc_inf
+    (*o)[3] = r.auc_t
+    (*o)[4] = r.c_end
+    (*o)[5] = r.input
+    (*o)[6] = r.balance_err
+    (*o)[7] = r.cmax / r.auc_inf
+    (*o)[8] = r.eliminated + r.remaining
+    (*o)[9] = 0.0
+    if r.fit_ok { (*o)[9] = 1.0 }
+}
+
+// k with Tmax(k) = target (Illinois on ln k over [0.05, 300] /h) for the midazolam grid and n transit
+// compartments; |dTmax| < 1e-6 h. The scratch array is local to this function.
+fn tr_fit_k(d: &Circ28Drug, ntr: i32, target: f64) -> f64 with Mut, Div, Panic, Epistemic {
+    var o: [f64; 10] = [0.0; 10]
+    var xa = ln(0.05)
+    var xb = ln(300.0)
+    var dc = circ28_dose_oral_transit(7.5, ntr, 0.05, 3.0, 0.5, 24.0, 8.0, 24.0)
+    tr_run_into(d, dc, exp(xa), &!o)
+    var fa_ = o[0] - target
+    tr_run_into(d, dc, exp(xb), &!o)
+    var fb = o[0] - target
+    var x = 0.5 * (xa + xb)
+    var side: i32 = 0
+    var it: i32 = 0
+    while it < 80 {
+        x = (xa * fb - xb * fa_) / (fb - fa_)
+        tr_run_into(d, dc, exp(x), &!o)
+        let fx = o[0] - target
+        if tr_abs(fx) < 1.0e-6 { return exp(x) }
+        if fx > 0.0 {
+            xa = x
+            fa_ = fx
+            if side == 1 { fb = 0.5 * fb }
+            side = 1
+        } else {
+            xb = x
+            fb = fx
+            if side == 2 { fa_ = 0.5 * fa_ }
+            side = 2
+        }
+        it = it + 1
+    }
+    return exp(x)
+}
+
+// T4. k_n is fitted here (tr_fit_k) to the Tmax of the n = 1 record and compared with the value fitted
+// offline and stored (2.455544, 3.943083, 6.766470 /h; the fit is flat in k to about 1e-4, so the
+// comparison is 1e-3 relative). One kernel run per n at the fitted k gives Cmax/AUC; a guard run in a
+// fresh frame must reproduce the n = 3 value.
+fn tr_t4(d: &Circ28Drug) -> i32 with IO, Mut, Div, Panic, Epistemic {
+    println("T4 midazolam tablet record: k_n fitted to the n = 1 Tmax; Cmax/AUC increases with n")
+    var fails: i32 = 0
+    var o: [f64; 10] = [0.0; 10]
+    var cm: [f64; 4] = [0.0; 4]
+    var kk: [f64; 4] = [0.0; 4]
+    var ks: [f64; 4] = [0.827927, 2.455544, 3.943083, 6.766470]
+    var ns: [i32; 4] = [1, 2, 3, 5]
+    // target: Tmax of the record's own first-order run
+    var dc1 = circ28_dose_oral(7.5, 0.05, 3.0, 0.5, 24.0, 8.0, 24.0)
+    tr_run_into(d, dc1, circ28_drug_value(d, CD_KA), &!o)
+    let target = o[0]
+    print("  target Tmax (record, n = 1) "); print(target); print(" h; record ka "); println(circ28_drug_value(d, CD_KA))
+    var i: i32 = 0
+    while i < 4 {
+        let k = tr_fit_k(d, ns[i], target)
+        var dcn = circ28_dose_oral_transit(7.5, ns[i], 0.05, 3.0, 0.5, 24.0, 8.0, 24.0)
+        tr_run_into(d, dcn, k, &!o)
+        kk[i] = k
+        cm[i] = o[7]
+        print("  n = "); print(ns[i]); print("  k "); print(k); print(" /h  MTT "); print(circ28_transit_mtt(k, ns[i]))
+        print(" h  input mode "); print(circ28_transit_mode(k, ns[i], 0.0)); print(" h  Tmax "); print(o[0])
+        print("  Cmax/AUC "); print(o[7]); print(" /h  fit_ok "); println(o[9])
+        if !(tr_abs(o[0] - target) < 2.0e-5) { println("  [FAIL] Tmax not matched"); fails = fails + 1 }
+        if !(o[9] > 0.5) { println("  [FAIL] terminal fit"); fails = fails + 1 }
+        fails = fails + tr_rel("fitted k against the stored offline fit", k, ks[i], 1.0e-3)
+        i = i + 1
+    }
+    // guard: the n = 3 point computed again in a fresh frame at the stored k
+    var og: [f64; 10] = [0.0; 10]
+    var dcg = circ28_dose_oral_transit(7.5, 3, 0.05, 3.0, 0.5, 24.0, 8.0, 24.0)
+    tr_run_into(d, dcg, 3.943083, &!og)
+    fails = fails + tr_abs_tol("guard: n = 3 Cmax/AUC, fitted k against the stored k in a fresh frame", cm[2], og[7], 1.0e-5)
+    fails = fails + tr_abs_tol("guard: n = 3 Tmax at the stored k against the n = 1 target", og[0], target, 2.0e-5)
+    // predictions (hit or miss recorded)
+    fails = fails + tr_band("k, n = 2", kk[1], 1.6, 2.8)
+    fails = fails + tr_band("k, n = 3", kk[2], 3.6, 4.3)
+    fails = fails + tr_band("k, n = 5", kk[3], 7.0, 13.0)
+    fails = fails + tr_band("Cmax/AUC, n = 1", cm[0], 0.225, 0.240)
+    fails = fails + tr_band("Cmax/AUC, n = 2", cm[1], 0.28, 0.345)
+    fails = fails + tr_band("Cmax/AUC, n = 3", cm[2], 0.355, 0.38)
+    fails = fails + tr_band("Cmax/AUC, n = 5", cm[3], 0.375, 0.46)
+    println("  observed Cmax/AUC (tablet) 0.359 /h (sd 0.049)")
+    if !(cm[0] < cm[1] && cm[1] < cm[2] && cm[2] < cm[3]) {
+        println("  [FAIL] Cmax/AUC not strictly increasing with n")
+        fails = fails + 1
+    }
+    if !(kk[0] < kk[1] && kk[1] < kk[2] && kk[2] < kk[3]) {
+        println("  [FAIL] k not increasing with n at fixed Tmax")
+        fails = fails + 1
+    }
+    return fails
+}
+
+// ---------------------------------------------------------------------------
+// T5: the diagnostic of circ28_distribution_spectrum_a through the public API
+// ---------------------------------------------------------------------------
+fn tr_t5_one(name: string, d: &Circ28Drug, dose: f64, k: f64, t_end: f64, thalf_iv: f64, tmax_want: f64, cauc_want: f64) -> i32 with IO, Mut, Div, Panic, Epistemic {
+    var fails: i32 = 0
+    var o: [f64; 10] = [0.0; 10]
+    let dt2 = (t_end - 12.0) / 60.0
+    var dc = circ28_dose_oral_transit(dose, 3, 0.05, 12.0, dt2, t_end, 0.5 * t_end, t_end)
+    tr_run_into(d, dc, k, &!o)
+    let lz = 0.6931471805599453 / thalf_iv
+    let auc_inf = o[3] + o[4] / lz
+    let cauc = o[1] / auc_inf
+    print("  "); print(name); print(": k "); print(k); print(" /h  Tmax "); print(o[0]); print(" h  Cmax/AUC_inf "); print(cauc)
+    print(" /h  (oral-fit AUC_inf gives "); print(o[7]); println(")")
+    fails = fails + tr_abs_tol("Tmax", o[0], tmax_want, 1.0e-6)
+    fails = fails + tr_abs_tol("Cmax/AUC", cauc, cauc_want, 1.0e-6)
+    return fails
+}
+
+// ---------------------------------------------------------------------------
+// T6
+// ---------------------------------------------------------------------------
+fn tr_t6_one(name: string, d: &Circ28Drug, dose: f64, ntr: i32, k: f64, t_end: f64) -> i32 with IO, Mut, Div, Panic, Epistemic {
+    var fails: i32 = 0
+    var o: [f64; 10] = [0.0; 10]
+    let dt2 = (t_end - 3.0) / 100.0
+    var dc = circ28_dose_oral_transit(dose, ntr, 0.05, 3.0, dt2, t_end, 0.5 * t_end, t_end)
+    tr_run_into(d, dc, k, &!o)
+    // the same input summed here on the same grid (second way)
+    var sum = 0.0
+    var t = 0.0
+    var i: i32 = 0
+    let fa = circ28_drug_value(d, CD_FA)
+    let tlag = circ28_drug_value(d, CD_TLAG)
+    while i < 60 {
+        sum = sum + circ28_oral_mass_n(k, ntr, fa, dose, tlag, t, t + 0.05)
+        t = 0.05 * ((i + 1) as f64)
+        i = i + 1
+    }
+    var j: i32 = 0
+    while j < 100 {
+        sum = sum + circ28_oral_mass_n(k, ntr, fa, dose, tlag, t, t + dt2)
+        t = 3.0 + dt2 * ((j + 1) as f64)
+        j = j + 1
+    }
+    print("  "); print(name); print(" n = "); print(ntr); print("  input "); print(o[5]); print(" mg  (state + tallies) "); print(o[8]); print("  balance error x 1e15 = "); print(o[6] * 1.0e15); print("  Tmax "); print(o[0]); print("  Cmax/AUC "); println(o[7])
+    if !(o[6] <= 1.0e-10) { println("  [FAIL] mass balance"); fails = fails + 1 }
+    fails = fails + tr_rel("input of the run against the sum computed here", o[5], sum, 1.0e-12)
+    fails = fails + tr_rel("input against fa Dose", o[5], fa * dose, 1.0e-12)
+    fails = fails + tr_rel("state + tallies against input", o[8], o[5], 1.0e-10)
+    return fails
+}
+
+fn tr_t1c() -> i32 with IO, Mut, Div, Panic {
+    println("T1c ntr read back from the constructors")
+    var fails: i32 = 0
+    let a = circ28_dose_oral(1.0, 0.05, 3.0, 0.5, 24.0, 8.0, 24.0)
+    let b = circ28_dose_iv(1.0, 0.05, 0.05, 3.0, 0.5, 24.0, 8.0, 24.0)
+    let c = circ28_dose_oral_transit(1.0, 3, 0.05, 3.0, 0.5, 24.0, 8.0, 24.0)
+    print("  oral "); print(a.ntr); print("  iv "); print(b.ntr); print("  transit "); println(c.ntr)
+    if !(a.ntr == 1) { println("  [FAIL] oral ntr"); fails = fails + 1 }
+    if !(b.ntr == 1) { println("  [FAIL] iv ntr"); fails = fails + 1 }
+    if !(c.ntr == 3) { println("  [FAIL] transit ntr"); fails = fails + 1 }
+    if !(c.route == 1 && a.route == 1 && b.route == 0) { println("  [FAIL] route"); fails = fails + 1 }
+    if !(c.dt2 == 0.5 && c.t_end == 24.0 && c.fit_lo == 8.0 && c.fit_hi == 24.0 && c.tlag == 0.0 && c.fa == 1.0) { println("  [FAIL] fields"); fails = fails + 1 }
+    return fails
+}
+
+// lean_single reads record slots that were never written with whatever the frame held (measured here:
+// CD_TLAG of the midazolam record read about 0.8 h in some frames, which moved Tmax from 0.929 to 1.73 h).
+// The slots these two records leave unused are zero by construction; write them explicitly.
+fn tr_touch(d: &!Circ28Drug) with Mut, Panic {
+    circ28_drug_set(d, CD_PKA2, 0.0, 0.0, CD_STATUS_UNUSED, "unused (explicit zero)")
+    circ28_drug_set(d, CD_CLFORM, 0.0, 0.0, CD_STATUS_UNUSED, "unused (explicit zero)")
+    circ28_drug_set(d, CD_CLREN, 0.0, 0.0, CD_STATUS_UNUSED, "unused (explicit zero)")
+    circ28_drug_set(d, CD_CLPLA, 0.0, 0.0, CD_STATUS_UNUSED, "unused (explicit zero)")
+    circ28_drug_set(d, CD_TLAG, 0.0, 0.0, CD_STATUS_UNUSED, "unused (explicit zero)")
+}
+
+fn tr_guard_slots(name: string, d: &Circ28Drug) -> i32 with IO, Mut, Div, Panic, Epistemic {
+    var bad: i32 = 0
+    if !(circ28_drug_value(d, CD_TLAG) == 0.0) { bad = bad + 1 }
+    if !(circ28_drug_value(d, CD_CLFORM) == 0.0) { bad = bad + 1 }
+    if !(circ28_drug_value(d, CD_CLREN) == 0.0) { bad = bad + 1 }
+    if !(circ28_drug_value(d, CD_CLPLA) == 0.0) { bad = bad + 1 }
+    if !(circ28_drug_value(d, CD_PKA2) == 0.0) { bad = bad + 1 }
+    print("  guard "); print(name); print(": tlag "); print(circ28_drug_value(d, CD_TLAG)); print(" fa "); print(circ28_drug_value(d, CD_FA)); print(" unused slots nonzero: "); println(bad)
+    if bad != 0 { println("  [FAIL] unused slot not zero"); return 1 }
+    return 0
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic, Epistemic {
+    // records first (see COMPILER NOTES), then every float
+    var d0 = circ28_drug_new()
+    var d1 = circ28_drug_new()
+    var sys = circ28_sys_zero()
+    var su: [f64; 4] = [0.0; 4]
+    var fails: i32 = 0
+
+    mdz_drug_into(&!d0)
+    mdz_ka_record(&!d0, 1)
+    qtp_measured_record(&!d1)
+    qtp_fit_record(&!d1, &su)
+    tr_touch(&!d0)
+    tr_touch(&!d1)
+    fails = fails + tr_guard_slots("midazolam", &d0)
+    fails = fails + tr_guard_slots("quetiapine", &d1)
+
+    fails = fails + tr_t1a()
+    println("T1b n = 1 full kernel runs against a loop with the old formula and against the pre-change print")
+    fails = fails + tr_t1b_one("midazolam tablet 7.5 mg", &d0, mdz_cfg_oral(7.5), 24228.261168, 0.929091, 103785.947605, &!sys)
+    fails = fails + tr_t1b_one("quetiapine 25 mg", &d1, qtp_cfg_oral(25.0), 47269.723757, 1.452788, 309333.296465, &!sys)
+    fails = fails + tr_t1c()
+    fails = fails + tr_t2()
+    fails = fails + tr_t3()
+    fails = fails + tr_t4(&d0)
+    println("T5 diagnostic G of circ28_distribution_spectrum_a through circ28_dose_oral_transit (n = 3)")
+    fails = fails + tr_t5_one("midazolam tablet 7.5 mg", &d0, 7.5, 3.943497, 24.0, 3.314587, 0.928998, 0.367073)
+    fails = fails + tr_t5_one("quetiapine 25 mg", &d1, 25.0, 2.465302, 28.707135, 5.810608, 1.452901, 0.257743)
+    println("T6 mass balance of the kernel run with transit input")
+    fails = fails + tr_t6_one("midazolam tablet", &d0, 7.5, 3, 3.943497, 24.0)
+    fails = fails + tr_t6_one("midazolam tablet", &d0, 7.5, 5, 9.0, 24.0)
+    fails = fails + tr_t6_one("quetiapine", &d1, 25.0, 3, 2.465302, 28.707135)
+
+    if fails == 0 {
+        println("CIRC28_TRANSIT_INPUT_PASS")
+        return 0
+    }
+    print("CIRC28_TRANSIT_INPUT_FAIL "); println(fails)
+    return 1
+}
