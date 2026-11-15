@@ -391,37 +391,40 @@ export const DEFAULT_PARAMS_EVEROLIMUS = Object.freeze({
 });
 
 // Prograf immediate-release tacrolimus (SIO-516): single 5 mg oral dose,
-// fasted. ka = 0.38/h (Bekersky 1999), F = 0.25 (Kershner 1996, first-pass
-// loss leaves the system). Whole-blood referenced (TDM matrix): CL_wb =
-// 28 L/h (Jusko 1995). Kp = tacrolimus tissue-to-blood values (Iwasaki 2007
-// liver, Saitoh 2006 brain, Staatz 2004 review; adipose capped per the
-// 24-48 h window note) -- NOT rapamycin's. PS mirrors the rapamycin
+// fasted. ka = 4.5/h after a 0.39 h lag (Jusko 1995), F = 0.18 (Prograf
+// label, healthy volunteers; first-pass loss leaves the system). Whole-blood
+// referenced (TDM matrix): CL_wb = 2.8 L/h and V_ss = 133.7 L (label, healthy
+// volunteers). Kp = tacrolimus tissue-to-blood pattern scaled to that volume
+// -- NOT rapamycin's. PS mirrors the rapamycin
 // flow-limited pattern, ASSUMED pending SIO-550. Single-dose PK only.
 export const MW_TACROLIMUS = 804.02;
 
-export const TAC_KA_DEFAULT = 0.38;    // h^-1, Bekersky 1999 fasted
-export const TAC_F_DEFAULT = 0.25;     // Kershner 1996
+export const TAC_KA_DEFAULT = 4.5;     // h^-1, Jusko 1995
+export const TAC_F_DEFAULT = 0.18;     // Prograf label, healthy volunteers
+export const TAC_TLAG_DEFAULT = 0.39;  // h, Jusko 1995
 export const TAC_DOSE_DEFAULT = 5.0;   // mg, single dose
 
+// Drug-file tissue-to-blood pattern scaled by 0.484518 so that
+// V_ss = 133.7 L (label, healthy volunteers, 1.91 L/kg at 70 kg).
 export const KP_TACROLIMUS = Object.freeze([
-  1.00,  // 0 blood (definition)
-  20.0,  // 1 liver (Iwasaki 2007, CYP3A4 site)
-  6.0,   // 2 kidney
-  0.10,  // 3 brain (Saitoh 2006, P-gp restrained)
-  4.0,   // 4 heart
-  8.0,   // 5 lung
-  3.0,   // 6 muscle
-  5.0,   // 7 adipose (capped; 24-48 h window)
-  6.0,   // 8 gut (enterocyte CYP3A4 + P-gp)
-  2.0,   // 9 skin
-  1.5,   // 10 bone
-  8.0,   // 11 spleen (lymphocyte FKBP12)
-  4.0,   // 12 pancreas
-  2.0,   // 13 other
+  1.00,    // 0 blood (definition)
+  9.6904,  // 1 liver
+  2.9071,  // 2 kidney
+  0.0485,  // 3 brain
+  1.9381,  // 4 heart
+  3.8761,  // 5 lung
+  1.4536,  // 6 muscle
+  2.4226,  // 7 adipose
+  2.9071,  // 8 gut
+  0.9690,  // 9 skin
+  0.7268,  // 10 bone
+  3.8761,  // 11 spleen
+  1.9381,  // 12 pancreas
+  0.9690,  // 13 other
 ]);
 
 export const DEFAULT_PARAMS_TACROLIMUS = Object.freeze({
-  clHep: 28.0,
+  clHep: 2.8,
   higuchiScale: 1.0,
   vdScale: 1.0,
   bolusMg: 0.0,
@@ -433,6 +436,7 @@ export const DEFAULT_PARAMS_TACROLIMUS = Object.freeze({
   releaseModel: 'oral_ir',
   releaseKa: TAC_KA_DEFAULT,
   releaseF: TAC_F_DEFAULT,
+  releaseTlag: TAC_TLAG_DEFAULT,
   releaseDoseMg: TAC_DOSE_DEFAULT,
   tmddOrgans: [],
   tmddParams: {},

@@ -1,0 +1,85 @@
+//@ run-pass
+//@ timeout: 300
+//@ expect-stdout-contains: PBPK28_TACROLIMUS_HEALTHY_LABEL_PASS
+//
+// Tacrolimus PBPK28 oral scenario against the healthy-volunteer row of the
+// Prograf prescribing information (5 mg oral, fasted, n = 16, whole blood):
+//
+//   C_max 29.7 ± 7.2 ng/mL, T_max 1.6 ± 0.7 h, AUC(0-72 h) 243 ± 73 ng.h/mL,
+//   t1/2 34.8 ± 11.4 h.
+//
+// The scenario's inputs are the label's IV disposition in healthy volunteers
+// (CL 0.040 L/h/kg, V 1.91 L/kg), the label's bioavailability (18%) and the
+// absorption constants of Jusko 1995; none is fitted to the oral row, so the
+// four numbers above are predictions.
+//
+// Asserted:
+//   AUC(0-72 h) within one SD of the label mean      [170, 316] ng.h/mL
+//   terminal half-life (72-144 h) within one SD      [23.4, 46.2] h
+//   V_ss of the parameter set                         133.7 ± 0.1 L
+// Recorded, not met: C_max. The model gives about half the observed peak
+// (distribution into tissue is faster than in vivo: PS values are assumed).
+// The ratio is pinned to [0.40, 0.70] so that a change is noticed.
+//
+// With the profile used until 2026-11-15 (cl_central 28 L/h, F 0.25,
+// ka 0.38 /h, unscaled Kp) AUC(0-72 h) is 44.6 ng.h/mL and the half-life
+// 12 h: both assertions fail.
+
+use darwin_pbpk::core::pbpk28_params::*
+use darwin_pbpk::tsit5_pbpk28::*
+use darwin_pbpk::scenarios::tacrolimus_oral::*
+use math::pure::ln
+
+fn tl_check(tag: string, x: f64, lo: f64, hi: f64) -> i32 with IO, Mut, Div, Panic {
+    print("  "); print(tag); print(" = "); print(x); print("  allowed ["); print(lo); print(", "); print(hi); println("]")
+    if x < lo || x > hi {
+        println("  [FAIL]")
+        return 1
+    }
+    return 0
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    let p = tac_pbpk28_params()
+    var vss = p.v_ref[0]
+    var i = 1
+    while i < 14 {
+        vss = vss + p.v_ref[i] * p.kp[i]
+        i = i + 1
+    }
+
+    var scen = tac_scenario_init()
+    let dt = 0.01
+    var t = 0.0
+    var cmax = 0.0
+    var tmax = 0.0
+    var auc72 = 0.0
+    var prev = 0.0
+    var c72 = 0.0
+    while t + dt * 0.5 < 144.0 {
+        scen = tac_step(scen, p, t, dt)
+        t = t + dt
+        let c = scen.pbpk.cv[0]
+        if t < 72.005 {
+            auc72 = auc72 + 0.5 * (prev + c) * dt
+            c72 = c
+        }
+        prev = c
+        if c > cmax { cmax = c; tmax = t }
+    }
+    let thalf = ln(2.0) * 72.0 / ln(c72 / prev)
+
+    var fails: i32 = 0
+    fails = fails + tl_check("V_ss (L)", vss, 133.6, 133.8)
+    fails = fails + tl_check("AUC(0-72 h) (ng.h/mL)", auc72 * 1000.0, 170.0, 316.0)
+    fails = fails + tl_check("t1/2, 72-144 h (h)", thalf, 23.4, 46.2)
+    fails = fails + tl_check("C_max model / 29.7 ng/mL", cmax * 1000.0 / 29.7, 0.40, 0.70)
+    print("  C_max (ng/mL) = "); print(cmax * 1000.0); print("  T_max (h) = "); println(tmax)
+
+    if fails == 0 {
+        println("PBPK28_TACROLIMUS_HEALTHY_LABEL_PASS")
+        return 0
+    }
+    println("PBPK28_TACROLIMUS_HEALTHY_LABEL_FAIL")
+    return 1
+}

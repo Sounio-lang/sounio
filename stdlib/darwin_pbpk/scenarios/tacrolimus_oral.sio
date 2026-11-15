@@ -3,8 +3,8 @@
 // End-to-end dissertation scenario for tacrolimus (SIO-516):
 //
 //   - Prograf immediate-release capsule, single 5 mg oral dose (fasted)
-//     → first-order gut absorption (ka = 0.38/h, Bekersky 1999) with
-//       first-pass loss (F = 0.25, Kershner 1996)
+//     → absorption lag (0.39 h) + first-order gut absorption (ka = 4.5/h,
+//       Jusko 1995) with first-pass loss (F = 0.18, Prograf label)
 //       → blood input (closed-form rate, operator-split source term)
 //         → 14-compartment PBPK28 (tsit5_pbpk28, fully-coupled CN)
 //
@@ -20,8 +20,9 @@
 // Tacrolimus RBC sequestration (rb = 15, Beysens 1991) and plasma binding
 // (fu = 0.01, Staatz 2004) are folded into the blood-referenced convention:
 // Kp are tissue-to-blood partition coefficients (tacrolimus's OWN values
-// from drugs/tacrolimus.sio — NOT rapamycin's), and cl_central = CL_wb =
-// 28 L/h (Jusko 1995) acts on blood directly, as the PBPK28 kernel applies
+// from drugs/tacrolimus.sio — NOT rapamycin's — scaled to the label volume),
+// and cl_central = CL_wb = 2.8 L/h (label, healthy volunteers) acts on blood
+// directly, as the PBPK28 kernel applies
 // clearance on Cb. Distribution is flow-limited (small lipophilic molecule);
 // PS mirrors the rapamycin PBPK28 pattern — ASSUMED, pending SIO-550.
 // Adipose Kp stays capped (5.0) per the drug file's 24–48 h window note;
@@ -47,32 +48,51 @@ use math::pure::{exp}
 // website-pinned domain source. Standard 70 kg physiology. Kp = tacrolimus
 // tissue-to-blood values (Iwasaki 2007 liver, Saitoh 2006 brain, Staatz 2004
 // review for the rest) with adipose capped per the drug file; PS assumed
-// (rapamycin flow-limited pattern, SIO-550); CL_wb = 28 L/h (Jusko 1995).
+// (rapamycin flow-limited pattern, SIO-550).
+//
+// Healthy-volunteer whole-blood disposition (Prograf prescribing information,
+// pharmacokinetics table, healthy volunteers, IV 0.025 mg/kg/4 h, n = 8):
+// CL = 0.040 L/h/kg and V = 1.91 L/kg, i.e. 2.8 L/h and 133.7 L at 70 kg.
+// Hebert et al. 1999 (J Clin Pharmacol 39:91) measured 36.0 mL/h/kg in six
+// healthy men. The tissue Kp are the drug file's tissue-to-blood pattern
+// multiplied by one common factor, 0.484518, so that
+// V_ss = v_ref[0] + sum v_ref[i]*kp[i] = 133.70 L.
+//
+// Until 2026-11-15 this profile used cl_central = 28 L/h, attributed to
+// Jusko 1995. That paper (Clin Pharmacol Ther 57:281, liver-transplant
+// patients, n = 16) reports a whole-blood clearance of 54 mL/h/kg, 3.8 L/h
+// at 70 kg; 28 L/h is not in it. With 28 L/h and F = 0.25 the 5 mg dose gave
+// C_max 3.8 ng/mL, AUC 45 ng.h/mL and a 12 h half-life, against 29.7 ng/mL,
+// 243 ng.h/mL (0-72 h) and 34.8 h in the label's healthy-volunteer row
+// (tests/run-pass/pbpk28_tacrolimus_healthy_label.sio).
 pub fn tac_pbpk28_params() -> PBPKParams28 {
     PBPKParams28 {
         v_ref:     [5.0, 1.8, 0.31, 1.45, 0.33, 1.1, 28.0, 20.0, 1.2, 3.6, 6.6, 0.18, 0.09, 3.7],
         vasc_frac: [1.000, 0.210, 0.160, 0.037, 0.262, 0.262, 0.040, 0.050, 0.024, 0.019, 0.041, 0.282, 0.180, 0.050],
-        kp:        [1.00, 20.0, 6.0, 0.10, 4.0, 8.0, 3.0, 5.0, 6.0, 2.0, 1.5, 8.0, 4.0, 2.0],
+        kp:        [1.00, 9.6904, 2.9071, 0.0485, 1.9381, 3.8761, 1.4536, 2.4226, 2.9071, 0.9690, 0.7268, 3.8761, 1.9381, 0.9690],
         ps:        [0.0, 1800.0, 1110.0, 88.0, 160.0, 10500.0, 336.0, 40.0, 660.0, 126.0, 51.0, 150.0, 96.0, 78.0],
         q:         [350.0, 90.0, 74.0, 44.0, 16.0, 350.0, 42.0, 10.0, 55.0, 21.0, 17.0, 10.0, 8.0, 13.0],
-        cl_central: 28.0,
+        cl_central: 2.8,
     }
 }
 
 // ─── Oral IR input ──────────────────────────────────────────────────────────
-// rate(t) = F·D·ka·exp(−ka·t), mg/h (gut pool dosed at t = 0, first-pass loss
-// leaves the system). D = 5 mg single dose (Prograf label 0.1–0.2 mg/kg/day
-// in two divided doses → 3.5–7 mg per dose at 70 kg; 5 mg fasted is the
-// Bekersky 1999 design). ka = 0.38/h (Bekersky 1999, fasted), F = 0.25
-// (Kershner 1996, CV ~50%).
+// rate(t) = F·D·ka·exp(−ka·(t − tlag)) for t >= tlag, 0 before, mg/h (gut pool
+// dosed at t = 0, first-pass loss leaves the system). D = 5 mg single dose,
+// fasted. F = 0.18 (Prograf prescribing information: absolute bioavailability
+// 18 ± 5% in healthy volunteers, n = 16). ka = 4.5 /h and tlag = 0.39 h
+// (Jusko 1995: ka 4.5 ± 3.0 /h, tlag 0.39 h, oral capsules). These three are
+// scenario-owned: drugs/tacrolimus.sio keeps its own oral parameters for the
+// PBPK14 transplant model.
 pub fn tac_dose_mg() -> f64 { return tacrolimus_single_dose_mg() }
-pub fn tac_ka() -> f64       { return tacrolimus_ka_per_h() }
-pub fn tac_f() -> f64        { return tacrolimus_f_oral_val() }
+pub fn tac_ka() -> f64       { return 4.5 }
+pub fn tac_f() -> f64        { return 0.18 }
+pub fn tac_tlag() -> f64     { return 0.39 }
 
 pub fn tac_release_rate_at(t: f64) -> f64 with Mut, Div {
-    var tc = t
-    if tc < 0.0 { tc = 0.0 }
-    return tac_f() * tac_dose_mg() * tac_ka() * exp(0.0 - tac_ka() * tc)
+    let te = t - tac_tlag()
+    if te < 0.0 { return 0.0 }
+    return tac_f() * tac_dose_mg() * tac_ka() * exp(0.0 - tac_ka() * te)
 }
 
 // ─── Composite scenario state ───────────────────────────────────────────────
