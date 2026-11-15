@@ -1,0 +1,456 @@
+// stdlib/darwin_pbpk/circ28_ddi.sio — drug-drug interaction engine on the circ28 kernel
+//
+// Up to three drugs are simulated at once, each on its own circ28 system
+// (its own parameters, state, elimination tally and factored matrix). The
+// drugs meet only at hepatic enzymes. This file is an engine: it carries no
+// literature parameter values.
+//
+// Hepatic intrinsic clearance of drug v (L/h, unbound) is
+//
+//   clint_v = sum over its pathways j  CL_j * E_e * F_e / (1 + sum_{p != v} I_p / Ki_{p,e})
+//
+// where e = enzyme id of pathway j (1..7; the ids are labels chosen by the
+// caller, e.g. 1 CYP3A4, 2 CYP2D6, 3 CYP1A2, 4 CYP2C19, 5 CYP2C9, 6 UGT,
+// 7 other / not inhibitable) and I_p = fu_p * T_liver,p / kp_p[1] is the
+// unbound liver-tissue concentration of drug p (mg/L), the concentration
+// circ28 itself eliminates from. A drug can have up to four pathways.
+//
+//   reversible    competitive: divides the pathway by 1 + sum I_p / Ki_{p,e}
+//                 over the other drugs p (a drug does not inhibit itself).
+//                 Ki_{p,e} <= 0 means "no inhibition".
+//   inactivation  mechanism-based: one state E_e in [0,1] per enzyme,
+//                 dE/dt = kdeg_e (1 - E) - E * sum_p kinact_{p,e} I_p / (KI_{p,e} + I_p)
+//                 (a drug's own inactivation of its own enzyme is included).
+//   induction     one state F_e >= 0 per enzyme,
+//                 dF/dt = kdeg_e (1 + sum_p Emax_{p,e} I_p / (EC50_{p,e} + I_p) - F).
+//
+// Both enzyme states are advanced with the exact solution of their linear
+// ODE with the exposure frozen over the interval: x <- x_inf + (x - x_inf)
+// exp(-rate dt). That update is unconditionally stable, keeps E in [0,1] and
+// F >= 1 - ... >= 0, and is exact when the exposure is constant. kdeg_e = 0
+// freezes an enzyme's turnover (E then only decays under inactivation).
+// clform of each drug is not touched by interactions.
+//
+// Splitting. Per step of length dt, with I_n the exposures at the start:
+//   mode 0 (default, "midpoint"): the exposure is extrapolated to the middle
+//     of the step, I_mid = max(0, I_n + (I_n - I_{n-1})/2); E and F are
+//     advanced dt/2 with I_mid frozen to give the values used for clint during
+//     the step, and dt with I_mid frozen to give the values at the end. Second
+//     order in dt when the exposures are smooth (measured, see the test and
+//     docs): a coefficient evaluated at the middle of a step costs O(dt^2) per
+//     unit time.
+//   mode 1 ("lag"): I_mid = I_n and clint uses E, F at the start of the step:
+//     first-order lag, kept for order studies.
+// Then, per drug: clint is set, circ28_prepare refactors the system IN PLACE
+// (skipped when clint is bit-identical to the one already factored), and
+// circ28_step advances the drug. Mass balance of every drug holds to rounding
+// at any dt because circ28_step books each step with that step's own k_hep.
+// Doses are rates (mg/h) held constant over the step; a jump in a state is not
+// a dose here (see circ28.sio).
+//
+// Handle table (Madaros pitfall, docs/audit/MADAROS_HANDLE_TABLE_182_...):
+// a Circ28Sys holds two [f64; 784] arrays and must be created ONCE and never
+// inside the stepping loop. The caller therefore owns the three Circ28Sys:
+//
+//   var d = ddi28_new(0.05)               // once
+//   var s0 = circ28_sys_zero()            // once each; unused ones may stay unused
+//   var s1 = circ28_sys_zero()
+//   var s2 = circ28_sys_zero()
+//   let a = ddi28_add_drug(&!d, p_a)      // returns 0, 1, 2
+//   ddi28_add_pathway(&!d, a, 1, 300.0)
+//   ddi28_set_ki(&!d, perp, 1, 0.02)
+//   loop: ddi28_step_all(&!d, &!s0, &!s1, &!s2, iv0, or0, iv1, or1, iv2, or2)
+//
+// The engine itself builds no array-bearing struct inside the loop; its
+// per-step scratch is persistent fields of Ddi28 mutated through &!.
+// Sys i belongs to drug i and is bound to d.dt; do not share them with other
+// engines or change d.dt after the first step.
+
+use darwin_pbpk::circ28::*
+use math::pure::{exp}
+
+pub struct Ddi28 {
+    pub n: i32,
+    pub dt: f64,
+    pub mode: i32,            // 0 midpoint (default), 1 first-order lag
+    pub t: f64,
+    pub p0: Circ28Params,
+    pub p1: Circ28Params,
+    pub p2: Circ28Params,
+    pub s0: Circ28State,
+    pub s1: Circ28State,
+    pub s2: Circ28State,
+    pub e0: Circ28Elim,
+    pub e1: Circ28Elim,
+    pub e2: Circ28Elim,
+    pub fu: [f64; 3],
+    pub kpl: [f64; 3],        // kp of the liver, organ 1
+    pub npath: [i32; 3],
+    pub path_enz: [i32; 12],  // index drug * 4 + j
+    pub path_cl: [f64; 12],   // L/h
+    pub ki: [f64; 24],        // index perpetrator * 8 + enzyme; mg/L unbound
+    pub kinact: [f64; 24],    // 1/h
+    pub kbig: [f64; 24],      // KI, mg/L unbound
+    pub emax: [f64; 24],
+    pub ec50: [f64; 24],      // mg/L unbound
+    pub kdeg: [f64; 8],       // 1/h, index enzyme
+    pub act_e: [f64; 8],      // E_e / E_0
+    pub fold: [f64; 8],       // induced fold F_e
+    pub e_half: [f64; 8],     // scratch: E used during the step
+    pub f_half: [f64; 8],
+    pub e_new: [f64; 8],      // scratch: E at the end of the step
+    pub f_new: [f64; 8],
+    pub iu: [f64; 3],         // unbound liver concentration at the start of the step
+    pub imid: [f64; 3],       // exposure used in the step
+    pub i_prev: [f64; 3],
+    pub hist: [i32; 3],       // 1 once i_prev holds the previous step's exposure
+    pub last_clint: [f64; 3],
+    pub prepared: [i32; 3],
+}
+
+pub fn ddi28_new(dt: f64) -> Ddi28 {
+    return Ddi28 {
+        n: 0,
+        dt: dt,
+        mode: 0,
+        t: 0.0,
+        p0: circ28_physiology(),
+        p1: circ28_physiology(),
+        p2: circ28_physiology(),
+        s0: circ28_state_zero(),
+        s1: circ28_state_zero(),
+        s2: circ28_state_zero(),
+        e0: circ28_elim_zero(),
+        e1: circ28_elim_zero(),
+        e2: circ28_elim_zero(),
+        fu: [1.0; 3],
+        kpl: [1.0; 3],
+        npath: [0; 3],
+        path_enz: [0; 12],
+        path_cl: [0.0; 12],
+        ki: [0.0; 24],
+        kinact: [0.0; 24],
+        kbig: [0.0; 24],
+        emax: [0.0; 24],
+        ec50: [0.0; 24],
+        kdeg: [0.0; 8],
+        act_e: [1.0; 8],
+        fold: [1.0; 8],
+        e_half: [1.0; 8],
+        f_half: [1.0; 8],
+        e_new: [1.0; 8],
+        f_new: [1.0; 8],
+        iu: [0.0; 3],
+        imid: [0.0; 3],
+        i_prev: [0.0; 3],
+        hist: [0; 3],
+        last_clint: [0.0; 3],
+        prepared: [0; 3],
+    }
+}
+
+// 0 midpoint (default), 1 first-order lag.
+pub fn ddi28_set_mode(d: &!Ddi28, mode: i32) with Mut {
+    (*d).mode = mode
+}
+
+// Adds a drug (at most three); returns its index or -1. Its clint is set to 0:
+// hepatic clearance comes only from the pathways added afterwards.
+pub fn ddi28_add_drug(d: &!Ddi28, p: Circ28Params) -> i32 with Mut {
+    let i = (*d).n
+    if i >= 3 { return 0 - 1 }
+    if i == 0 { (*d).p0 = p; (*d).p0.clint = 0.0 }
+    if i == 1 { (*d).p1 = p; (*d).p1.clint = 0.0 }
+    if i == 2 { (*d).p2 = p; (*d).p2.clint = 0.0 }
+    (*d).fu[i] = p.fu
+    (*d).kpl[i] = p.kp[1]
+    (*d).n = i + 1
+    return i
+}
+
+// Adds a pathway (clint_j in L/h, unbound) of `drug` on enzyme 1..7. Returns 0,
+// or -1 when the drug does not exist, has four pathways or the id is invalid.
+pub fn ddi28_add_pathway(d: &!Ddi28, drug: i32, enz: i32, clint_j: f64) -> i32 with Mut {
+    if drug < 0 { return 0 - 1 }
+    if drug >= (*d).n { return 0 - 1 }
+    if enz < 1 { return 0 - 1 }
+    if enz > 7 { return 0 - 1 }
+    let k = (*d).npath[drug]
+    if k >= 4 { return 0 - 1 }
+    (*d).path_enz[drug * 4 + k] = enz
+    (*d).path_cl[drug * 4 + k] = clint_j
+    (*d).npath[drug] = k + 1
+    return 0
+}
+
+fn ddi28_slot_ok(d: &!Ddi28, perp: i32, enz: i32) -> bool {
+    if perp < 0 { return false }
+    if perp >= (*d).n { return false }
+    if enz < 1 { return false }
+    if enz > 7 { return false }
+    return true
+}
+
+// Competitive inhibition of enzyme `enz` by `perp`, Ki in mg/L unbound.
+pub fn ddi28_set_ki(d: &!Ddi28, perp: i32, enz: i32, ki_u: f64) -> i32 with Mut {
+    if !ddi28_slot_ok(d, perp, enz) { return 0 - 1 }
+    (*d).ki[perp * 8 + enz] = ki_u
+    return 0
+}
+
+// Mechanism-based inactivation: kinact (1/h), KI (mg/L unbound).
+pub fn ddi28_set_mbi(d: &!Ddi28, perp: i32, enz: i32, kinact: f64, ki_big: f64) -> i32 with Mut {
+    if !ddi28_slot_ok(d, perp, enz) { return 0 - 1 }
+    (*d).kinact[perp * 8 + enz] = kinact
+    (*d).kbig[perp * 8 + enz] = ki_big
+    return 0
+}
+
+// Induction: Emax (fold increase at saturation), EC50 (mg/L unbound).
+pub fn ddi28_set_induction(d: &!Ddi28, perp: i32, enz: i32, emax: f64, ec50: f64) -> i32 with Mut {
+    if !ddi28_slot_ok(d, perp, enz) { return 0 - 1 }
+    (*d).emax[perp * 8 + enz] = emax
+    (*d).ec50[perp * 8 + enz] = ec50
+    return 0
+}
+
+// Enzyme turnover rate kdeg (1/h) for enzyme 1..7.
+pub fn ddi28_set_kdeg(d: &!Ddi28, enz: i32, kdeg: f64) -> i32 with Mut {
+    if enz < 1 { return 0 - 1 }
+    if enz > 7 { return 0 - 1 }
+    (*d).kdeg[enz] = kdeg
+    return 0
+}
+
+// Sets the enzyme states directly (E in [0,1], induced fold F).
+pub fn ddi28_set_enzyme_state(d: &!Ddi28, enz: i32, e_act: f64, fold: f64) -> i32 with Mut {
+    if enz < 1 { return 0 - 1 }
+    if enz > 7 { return 0 - 1 }
+    (*d).act_e[enz] = e_act
+    (*d).fold[enz] = fold
+    return 0
+}
+
+// Writes state entry k (0..27) of `drug`; see circ28.sio for the layout.
+pub fn ddi28_set_x(d: &!Ddi28, drug: i32, k: i32, v: f64) with Mut {
+    if drug == 0 { (*d).s0.x[k] = v }
+    if drug == 1 { (*d).s1.x[k] = v }
+    if drug == 2 { (*d).s2.x[k] = v }
+    (*d).hist[drug] = 0
+}
+
+// Zeroes the state of `drug` in place (e.g. to remove a perpetrator).
+pub fn ddi28_clear_drug(d: &!Ddi28, drug: i32) with Mut {
+    var k: i32 = 0
+    while k < 28 {
+        ddi28_set_x(d, drug, k, 0.0)
+        k = k + 1
+    }
+}
+
+pub fn ddi28_get_x(d: &Ddi28, drug: i32, k: i32) -> f64 {
+    if drug == 0 { return (*d).s0.x[k] }
+    if drug == 1 { return (*d).s1.x[k] }
+    return (*d).s2.x[k]
+}
+
+// Unbound liver-tissue concentration of `drug` (mg/L).
+pub fn ddi28_unbound_liver(d: &Ddi28, drug: i32) -> f64 with Div {
+    return (*d).fu[drug] * ddi28_get_x(d, drug, circ28_it(1)) / (*d).kpl[drug]
+}
+
+// Venous plasma concentration (mg/L).
+pub fn ddi28_conc_plasma(d: &Ddi28, drug: i32) -> f64 with Div {
+    if drug == 0 { return (*d).s0.x[0] / (*d).p0.bp }
+    if drug == 1 { return (*d).s1.x[0] / (*d).p1.bp }
+    return (*d).s2.x[0] / (*d).p2.bp
+}
+
+// Area under the venous PLASMA curve (mg.h/L) accumulated since the start.
+pub fn ddi28_auc_plasma(d: &Ddi28, drug: i32) -> f64 with Div {
+    if drug == 0 { return (*d).e0.auc_ven / (*d).p0.bp }
+    if drug == 1 { return (*d).e1.auc_ven / (*d).p1.bp }
+    return (*d).e2.auc_ven / (*d).p2.bp
+}
+
+// Area under the venous BLOOD curve (mg.h/L).
+pub fn ddi28_auc_blood(d: &Ddi28, drug: i32) -> f64 {
+    if drug == 0 { return (*d).e0.auc_ven }
+    if drug == 1 { return (*d).e1.auc_ven }
+    return (*d).e2.auc_ven
+}
+
+// Mass eliminated by all channels (mg).
+pub fn ddi28_eliminated(d: &Ddi28, drug: i32) -> f64 {
+    if drug == 0 { return (*d).e0.hepatic + (*d).e0.formed + (*d).e0.renal + (*d).e0.plasma }
+    if drug == 1 { return (*d).e1.hepatic + (*d).e1.formed + (*d).e1.renal + (*d).e1.plasma }
+    return (*d).e2.hepatic + (*d).e2.formed + (*d).e2.renal + (*d).e2.plasma
+}
+
+// Mass still in the body (mg).
+pub fn ddi28_remaining(d: &Ddi28, drug: i32) -> f64 with Mut {
+    if drug == 0 { return circ28_total_mass(&(*d).s0, (*d).p0) }
+    if drug == 1 { return circ28_total_mass(&(*d).s1, (*d).p1) }
+    return circ28_total_mass(&(*d).s2, (*d).p2)
+}
+
+// Current hepatic clint of the drug (L/h) as last set by a step.
+pub fn ddi28_clint(d: &Ddi28, drug: i32) -> f64 {
+    return (*d).last_clint[drug]
+}
+
+// E_e (fraction of enzyme left after inactivation) and induced fold F_e.
+pub fn ddi28_enzyme_fraction(d: &Ddi28, enz: i32) -> f64 { return (*d).act_e[enz] }
+pub fn ddi28_enzyme_fold(d: &Ddi28, enz: i32) -> f64 { return (*d).fold[enz] }
+// Net activity multiplier E_e * F_e.
+pub fn ddi28_enzyme_activity(d: &Ddi28, enz: i32) -> f64 { return (*d).act_e[enz] * (*d).fold[enz] }
+
+pub fn ddi28_time(d: &Ddi28) -> f64 { return (*d).t }
+
+// x <- x_inf + (x - x_inf) exp(-rate dt); unchanged for rate <= 0.
+fn ddi28_relax(x: f64, xinf: f64, rate: f64, dt: f64) -> f64 with Div {
+    if rate > 0.0 {
+        return xinf + (x - xinf) * exp(0.0 - rate * dt)
+    }
+    return x
+}
+
+// Sets clint of drug i and refactors its system in place when it changed.
+fn ddi28_prepare_drug(d: &!Ddi28, i: i32, cl: f64, sys: &!Circ28Sys) with Mut, Div {
+    if (*d).prepared[i] == 1 {
+        if cl == (*d).last_clint[i] { return }
+    }
+    if i == 0 { (*d).p0.clint = cl; circ28_prepare((*d).p0, (*d).dt, sys) }
+    if i == 1 { (*d).p1.clint = cl; circ28_prepare((*d).p1, (*d).dt, sys) }
+    if i == 2 { (*d).p2.clint = cl; circ28_prepare((*d).p2, (*d).dt, sys) }
+    (*d).last_clint[i] = cl
+    (*d).prepared[i] = 1
+}
+
+// Exposures, then enzyme states (end-of-step and in-step values).
+fn ddi28_enzymes(d: &!Ddi28) with Mut, Div {
+    let n = (*d).n
+    let dt = (*d).dt
+    var j: i32 = 0
+    while j < 3 {
+        var iu = 0.0
+        var im = 0.0
+        if j < n {
+            iu = ddi28_unbound_liver(&(*d), j)
+            im = iu
+            if (*d).mode == 0 {
+                if (*d).hist[j] == 1 {
+                    im = iu + 0.5 * (iu - (*d).i_prev[j])
+                    if im < 0.0 { im = 0.0 }
+                }
+            }
+        }
+        (*d).iu[j] = iu
+        (*d).imid[j] = im
+        j = j + 1
+    }
+    var e: i32 = 1
+    while e < 8 {
+        var a = 0.0
+        var g = 0.0
+        var p: i32 = 0
+        while p < n {
+            let ix = p * 8 + e
+            let im = (*d).imid[p]
+            let kin = (*d).kinact[ix]
+            if kin > 0.0 {
+                let den = (*d).kbig[ix] + im
+                if den > 0.0 { a = a + kin * im / den }
+            }
+            let em = (*d).emax[ix]
+            if em != 0.0 {
+                let den2 = (*d).ec50[ix] + im
+                if den2 > 0.0 { g = g + em * im / den2 }
+            }
+            p = p + 1
+        }
+        let kd = (*d).kdeg[e]
+        let ec = (*d).act_e[e]
+        let fc = (*d).fold[e]
+        let rate_e = kd + a
+        var einf = ec
+        if rate_e > 0.0 { einf = kd / rate_e }
+        let finf = 1.0 + g
+        if (*d).mode == 0 {
+            (*d).e_half[e] = ddi28_relax(ec, einf, rate_e, 0.5 * dt)
+            (*d).f_half[e] = ddi28_relax(fc, finf, kd, 0.5 * dt)
+        } else {
+            (*d).e_half[e] = ec
+            (*d).f_half[e] = fc
+        }
+        (*d).e_new[e] = ddi28_relax(ec, einf, rate_e, dt)
+        (*d).f_new[e] = ddi28_relax(fc, finf, kd, dt)
+        e = e + 1
+    }
+}
+
+// Hepatic clint of victim v from the in-step enzyme values and exposures.
+fn ddi28_victim_clint(d: &!Ddi28, v: i32) -> f64 with Mut, Div {
+    let n = (*d).n
+    var cl = 0.0
+    var k: i32 = 0
+    while k < (*d).npath[v] {
+        let pi = v * 4 + k
+        let e = (*d).path_enz[pi]
+        var den = 1.0
+        var q: i32 = 0
+        while q < n {
+            if q != v {
+                let ki = (*d).ki[q * 8 + e]
+                if ki > 0.0 { den = den + (*d).imid[q] / ki }
+            }
+            q = q + 1
+        }
+        cl = cl + (*d).path_cl[pi] * ((*d).e_half[e] * (*d).f_half[e]) / den
+        k = k + 1
+    }
+    return cl
+}
+
+// Advances all drugs by d.dt. iv_i (mg/h) enters the venous pool of drug i and
+// or_i (mg/h) its gut tissue, both constant over the step. Rates of drugs that
+// were not added are ignored.
+pub fn ddi28_step_all(
+    d: &!Ddi28,
+    sys0: &!Circ28Sys,
+    sys1: &!Circ28Sys,
+    sys2: &!Circ28Sys,
+    iv0: f64,
+    or0: f64,
+    iv1: f64,
+    or1: f64,
+    iv2: f64,
+    or2: f64
+) with Mut, Div, Panic {
+    let n = (*d).n
+    ddi28_enzymes(d)
+    var v: i32 = 0
+    while v < n {
+        let cl = ddi28_victim_clint(d, v)
+        if v == 0 { ddi28_prepare_drug(d, 0, cl, sys0) }
+        if v == 1 { ddi28_prepare_drug(d, 1, cl, sys1) }
+        if v == 2 { ddi28_prepare_drug(d, 2, cl, sys2) }
+        v = v + 1
+    }
+    if n > 0 { circ28_step(&!(*d).s0, (*d).p0, sys0, iv0, or0, &!(*d).e0) }
+    if n > 1 { circ28_step(&!(*d).s1, (*d).p1, sys1, iv1, or1, &!(*d).e1) }
+    if n > 2 { circ28_step(&!(*d).s2, (*d).p2, sys2, iv2, or2, &!(*d).e2) }
+    var e: i32 = 1
+    while e < 8 {
+        (*d).act_e[e] = (*d).e_new[e]
+        (*d).fold[e] = (*d).f_new[e]
+        e = e + 1
+    }
+    var j: i32 = 0
+    while j < 3 {
+        (*d).i_prev[j] = (*d).iu[j]
+        if j < n { (*d).hist[j] = 1 }
+        j = j + 1
+    }
+    (*d).t = (*d).t + (*d).dt
+}
