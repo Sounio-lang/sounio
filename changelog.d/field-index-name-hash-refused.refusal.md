@@ -1,0 +1,1 @@
+Madaros lowering no longer invents a field index from the first byte of a field's name (`name[0] % 64`). A field access whose index is not in the layout table is now a compile error (hard-error reason 10) instead of silently reading or writing an unrelated slot, as `.epsilon` did in #1499 and `.span` in #2966. ADR-026 amendment, 2026-11-09.
