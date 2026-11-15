@@ -1,0 +1,592 @@
+// stdlib/darwin_pbpk/circ28_drug.sio — the drug record of the circ28 drug layer
+//
+// One small, stable record that every drug of the layer is written against,
+// the map from the record to the circ28 kernel parameters, an oral-input
+// helper, a generic single-dose runner and first-order uncertainty propagation.
+//
+// THE RECORD
+//   Circ28Drug { kn: [Knowledge<f64>; 18], status: [i32; 18], prov: [string; 18] }
+//   kn[i]     value and variance (variance = squared STANDARD uncertainty u^2 of
+//             the value, not an inter-individual variance; the writer of a drug
+//             module says which of the two a number is, in the provenance string)
+//   status[i] 0 unused, 1 measured, 2 derived (stated formula from cited
+//             measurements), 3 fitted (to a named clinical observable, which is
+//             then NOT a validation)
+//   prov[i]   provenance string. The compiler stores the provenance of a
+//             Knowledge literal but cannot read it back (`k.provenance` is
+//             error[E012], measured 2026-11-15), so the same text is also kept
+//             in this plain array.
+//
+//   index  constant   meaning                                          unit
+//     0    CD_MW      molecular weight                                 g/mol
+//     1    CD_LOGP    log10 octanol:water P of the neutral species     -
+//     2    CD_PKA1    pKa 1 (acid pKa for a zwitterion / acid; base    -
+//                     pKa for a base; lower base pKa for a dibase)
+//     3    CD_PKA2    pKa 2 (0 and status 0 when unused)               -
+//     4    CD_ION     ionisation class of circ28_kp: 0 neutral, 1 acid,
+//                     2 base, 3 dibase, 4 zwitterion                   -
+//     5    CD_FU      unbound fraction in plasma                       -
+//     6    CD_BP      blood:plasma concentration ratio                 -
+//     7    CD_CLINT   hepatic intrinsic clearance, unbound drug        L/h
+//     8    CD_CLFORM  hepatic intrinsic clearance forming a tracked    L/h
+//                     metabolite (0 when no metabolite is tracked)
+//     9    CD_CLGUT   gut-wall intrinsic clearance in the kernel       L/h
+//                     convention (acts on fu * T_gut / kp_gut; this is
+//                     NOT the fu_gut = 1 convention of the Qgut papers:
+//                     a value from such a paper must be divided by fu)
+//    10    CD_CLREN   renal clearance referred to plasma              L/h
+//    11    CD_CLPLA   plasma clearance (e.g. proteolysis)             L/h
+//    12    CD_KPSC    scalar multiplying every Rodgers-Rowland Kp     -
+//    13    CD_PSSC    scalar multiplying the default ps (below)       -
+//    14    CD_KA      first-order oral absorption rate constant       1/h
+//    15    CD_FA      fraction of the oral dose absorbed (enters the  -
+//                     gut tissue)
+//    16    CD_TLAG    absorption lag time                             h
+//    17    CD_PSGUT   gut-wall permeability clearance, PLASMA-referred  L/h
+//                     (the kernel's ps[8]). Value 0 with status 0 (unused):
+//                     the gut keeps the flow-limited default
+//                     20 * CD_PSSC * Q_gut. Value > 0: ps[8] = this value
+//                     and CD_PSSC no longer touches the gut (it still scales
+//                     every other organ). With ps_gut ~ Q_gut the gut wall is
+//                     permeability-limited, which changes how a fitted Fg
+//                     splits the first-pass clearance between gut and liver
+//                     (see the midazolam module).
+//
+// UNIT CHECKING THE COMPILER GIVES THIS MODULE (measured 2026-11-15, Madaros
+// 3.0.0-rc.1 local build and lean_single, scratch programs, nothing assumed):
+//   - Named units declared at module level (`unit L_per_h = L / h`,
+//     `unit per_h = 1 / h`) work as parameter and struct-field types without
+//     the miscompile of the bare `L/h` spelling.
+//   - A deliberate mismatch is a COMPILE error on both engines:
+//       `cl_Lh + v_L`                      error[E041] unit mismatch in arithmetic
+//                                          operation (Madaros); "unit mismatch"
+//                                          (lean_single)
+//       `rate(p.v, p.cl)` with
+//       `fn rate(cl: L_per_h, v: L)`       error[E041] unit mismatch in call
+//                                          argument (Madaros and lean_single)
+//   - A function declared `-> per_h` whose body is `cl / v` is REFUSED on Madaros
+//     (error[E001] "expected f64 found f64", a misleading message) and on
+//     lean_single ("unit mismatch in return value"): derived-unit return types
+//     are unusable, so unit-typed helpers return plain f64 through `as f64`.
+//   - A plain f64 variable can be branded (`let cl: L_per_h = x`): the brand is
+//     an assertion by the caller, not a check.
+//   What is NOT checked: the record is an array of Knowledge<f64> and the kernel
+//   works on f64 arrays, so unit checking stops at the boundary of the
+//   unit-typed helpers below (cd_auc_iv, cd_half_life, cd_ka_dt, cd_clearance_
+//   from_extraction). The unit of every index is documented in the table above,
+//   not enforced. Knowledge<unit> exists but cannot live in a heterogeneous
+//   array.
+//
+// Madaros pitfalls respected (docs: tests/run-pass/circ28_drug_record.sio):
+//   P1 value of a Knowledge is read through a typed local (`let k:
+//      Knowledge<f64> = (*d).kn[i]`), never `d.kn[i].value`;
+//   P3 a Knowledge literal keeps its declared variance only if `value:` is a
+//      numeric literal or an array element, so circ28_drug_set writes the value
+//      and the variance through one-element scratch arrays;
+//   P4 no compiler-level propagation through the kernel: variances are
+//      propagated by central finite differences (circ28_drug_unc).
+//
+// PS DEFAULT. The kernel needs a permeability-surface product per organ. The
+// default here is PLACEHOLDER with no source: ps_i = CD_PSSC * 20 * Q_i, with
+// Q_i the arterial flow of organ i (Q_h, the hepatic outflow, for the liver; the
+// cardiac output for the lung). That makes every organ flow-limited
+// (ps/Q = 20 for CD_PSSC = 1; the tissue extraction fraction 1 - exp(-ps/Q) is
+// 1 to 9 digits). It is not a measurement; a drug whose tissue exchange is
+// permeability-limited must set CD_PSSC. The multiplier 20 is
+// circ28_drug_ps_mult().
+
+use darwin_pbpk::circ28::*
+use darwin_pbpk::circ28_kp::*
+use math::pure::{exp, ln}
+
+unit L_per_h = L / h
+unit per_h = 1 / h
+
+pub const CD_N: i32 = 18
+
+pub const CD_MW: i32 = 0
+pub const CD_LOGP: i32 = 1
+pub const CD_PKA1: i32 = 2
+pub const CD_PKA2: i32 = 3
+pub const CD_ION: i32 = 4
+pub const CD_FU: i32 = 5
+pub const CD_BP: i32 = 6
+pub const CD_CLINT: i32 = 7
+pub const CD_CLFORM: i32 = 8
+pub const CD_CLGUT: i32 = 9
+pub const CD_CLREN: i32 = 10
+pub const CD_CLPLA: i32 = 11
+pub const CD_KPSC: i32 = 12
+pub const CD_PSSC: i32 = 13
+pub const CD_KA: i32 = 14
+pub const CD_FA: i32 = 15
+pub const CD_TLAG: i32 = 16
+pub const CD_PSGUT: i32 = 17
+
+pub const CD_STATUS_UNUSED: i32 = 0
+pub const CD_STATUS_MEASURED: i32 = 1
+pub const CD_STATUS_DERIVED: i32 = 2
+pub const CD_STATUS_FITTED: i32 = 3
+
+pub fn circ28_drug_ps_mult() -> f64 { return 20.0 }
+
+pub struct Circ28Drug {
+    pub kn: [Knowledge<f64>; 18],
+    pub status: [i32; 18],
+    pub prov: [string; 18],
+}
+
+// A record with every parameter unused and zero, except the neutral scalars
+// that make an empty record harmless: Kp scalar 1, ps scalar 1, fa 1, fu 1,
+// bp 1 (all status 0 until the drug module sets them).
+pub fn circ28_drug_new() -> Circ28Drug with Mut, Panic {
+    var kn: [Knowledge<f64>; 18] = [Knowledge(0.0, ε=1.0, prov="unused"); 18]
+    var d = Circ28Drug {
+        kn: kn,
+        status: [0; 18],
+        prov: ["", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""],
+    }
+    circ28_drug_set(&!d, CD_FU, 1.0, 0.0, CD_STATUS_UNUSED, "default")
+    circ28_drug_set(&!d, CD_BP, 1.0, 0.0, CD_STATUS_UNUSED, "default")
+    circ28_drug_set(&!d, CD_KPSC, 1.0, 0.0, CD_STATUS_UNUSED, "default")
+    circ28_drug_set(&!d, CD_PSSC, 1.0, 0.0, CD_STATUS_UNUSED, "default")
+    circ28_drug_set(&!d, CD_FA, 1.0, 0.0, CD_STATUS_UNUSED, "default")
+    return d
+}
+
+// Sets parameter i: value, STANDARD uncertainty u (variance = u^2), status and
+// provenance. The value and the variance go through one-element scratch arrays
+// (P3).
+pub fn circ28_drug_set(d: &!Circ28Drug, i: i32, value: f64, u: f64, status: i32, prov: string) with Mut, Panic {
+    var m: [f64; 1] = [0.0; 1]
+    var v: [f64; 1] = [0.0; 1]
+    m[0] = value
+    v[0] = u * u
+    (*d).kn[i] = Knowledge { value: m[0], variance: v[0], epsilon: 1.0, provenance: prov }
+    (*d).status[i] = status
+    (*d).prov[i] = prov
+}
+
+pub fn circ28_drug_value(d: &Circ28Drug, i: i32) -> f64 with Epistemic, Panic {
+    let k: Knowledge<f64> = (*d).kn[i]
+    return k.value
+}
+
+pub fn circ28_drug_variance(d: &Circ28Drug, i: i32) -> f64 with Epistemic, Panic {
+    let k: Knowledge<f64> = (*d).kn[i]
+    return k.variance
+}
+
+// All values / all variances as plain f64 arrays (the representation the
+// finite-difference propagation perturbs).
+pub fn circ28_drug_theta(d: &Circ28Drug) -> [f64; 18] with Mut, Epistemic, Panic {
+    var th: [f64; 18] = [0.0; 18]
+    var i: i32 = 0
+    while i < 18 {
+        th[i] = circ28_drug_value(d, i)
+        i = i + 1
+    }
+    return th
+}
+
+pub fn circ28_drug_var(d: &Circ28Drug) -> [f64; 18] with Mut, Epistemic, Panic {
+    var v: [f64; 18] = [0.0; 18]
+    var i: i32 = 0
+    while i < 18 {
+        v[i] = circ28_drug_variance(d, i)
+        i = i + 1
+    }
+    return v
+}
+
+// ---------------------------------------------------------------------------
+// Record -> kernel parameters
+// ---------------------------------------------------------------------------
+
+// Kernel parameters from a plain value array: ICRP physiology, Rodgers-Rowland
+// Kp times CD_KPSC, bp, fu, clearances, and the default ps (see the header).
+pub fn circ28_drug_params_theta(th: [f64; 18]) -> Circ28Params with Mut, Div, Panic {
+    var p = circ28_physiology()
+    let kd = circ28_kp_drug(th[CD_LOGP], th[CD_PKA1], th[CD_PKA2], (th[CD_ION] + 0.5) as i32, th[CD_FU], th[CD_BP])
+    let kp_rr = circ28_kp_rr(kd)
+    p.kp = circ28_kp_scaled(kp_rr, th[CD_KPSC])
+    p.bp = th[CD_BP]
+    p.fu = th[CD_FU]
+    p.clint = th[CD_CLINT]
+    p.clform = th[CD_CLFORM]
+    p.clint_gut = th[CD_CLGUT]
+    p.cl_renal = th[CD_CLREN]
+    p.cl_plasma = th[CD_CLPLA]
+    let m = circ28_drug_ps_mult() * th[CD_PSSC]
+    var i: i32 = 1
+    while i < 14 {
+        p.ps[i] = m * p.q[i]
+        i = i + 1
+    }
+    // gut: the record value when it is set (> 0), else the default just written
+    var psg = p.ps[8]
+    if th[CD_PSGUT] > 0.0 { psg = th[CD_PSGUT] }
+    p.ps[8] = psg
+    p.ps[1] = m * circ28_q_hepatic(p)
+    return p
+}
+
+pub fn circ28_drug_params(d: &Circ28Drug) -> Circ28Params with Mut, Div, Panic, Epistemic {
+    let th = circ28_drug_theta(d)
+    var t2 = th
+    return circ28_drug_params_theta(t2)
+}
+
+// ---------------------------------------------------------------------------
+// Oral input
+// ---------------------------------------------------------------------------
+
+// Fraction of the first-order input still to come at time t:
+// exp(-ka (t - tlag)) for t > tlag, 1 before.
+fn circ28_oral_left(ka: f64, tlag: f64, t: f64) -> f64 with Mut, Div, Panic {
+    if t <= tlag { return 1.0 }
+    return exp(0.0 - ka * (t - tlag))
+}
+
+// Mass (mg) entering the gut tissue between t0 and t1 (t1 >= t0):
+//   integral of ka fa Dose exp(-ka (t - tlag)) dt = fa Dose (L(t0) - L(t1)),
+// L(t) = exp(-ka (t - tlag)) after the lag, 1 before. Summed over a grid the
+// masses telescope to fa Dose (1 - L(T)): the total input is fa Dose to rounding
+// once ka (T - tlag) is large. The rate to hand to circ28_step is this mass / dt.
+pub fn circ28_oral_mass(ka: f64, fa: f64, dose: f64, tlag: f64, t0: f64, t1: f64) -> f64 with Mut, Div, Panic {
+    return fa * dose * (circ28_oral_left(ka, tlag, t0) - circ28_oral_left(ka, tlag, t1))
+}
+
+// Mass (mg) of an intravenous infusion of `dose` over [0, t_inf] falling in
+// [t0, t1].
+pub fn circ28_iv_mass(dose: f64, t_inf: f64, t0: f64, t1: f64) -> f64 with Div {
+    if t0 >= t_inf { return 0.0 }
+    var b = t1
+    if b > t_inf { b = t_inf }
+    return dose * (b - t0) / t_inf
+}
+
+// ---------------------------------------------------------------------------
+// Unit-typed closed forms (the part of the module the compiler unit-checks)
+// ---------------------------------------------------------------------------
+
+// AUC (mg h / L) of an intravenous dose: Dose / CL.
+pub fn cd_auc_iv(dose: mg, cl: L_per_h) -> f64 with Div { return (dose / cl) as f64 }
+
+// Terminal half-life (h) of a one-compartment disposition: ln 2 V / CL.
+pub fn cd_half_life(cl: L_per_h, v: L) -> f64 with Div {
+    let k = cl / v
+    return 0.6931471805599453 / (k as f64)
+}
+
+// ka * dt, dimensionless.
+pub fn cd_ka_dt(ka: per_h, dt: h) -> f64 { return (ka * dt) as f64 }
+
+// Clearance (L/h) from a flow (L/h) and an extraction ratio.
+pub fn cd_clearance_from_extraction(q: L_per_h, e: f64) -> f64 { return (q * e) as f64 }
+
+// ---------------------------------------------------------------------------
+// Generic single-dose runner
+// ---------------------------------------------------------------------------
+
+pub const CD_MAXS: i32 = 2048
+
+// route 0: intravenous infusion of `dose` mg over t_inf h (a bolus is a short
+// infusion; doses enter as rates, see circ28.sio). route 1: first-order oral
+// absorption into the gut tissue with ka, fa, tlag.
+// The grid is dt1 on [0, t1] then dt2 on [t1, t_end]. fit_lo..fit_hi is the
+// window (h) of the log-linear fit of the plasma concentration that gives the
+// terminal rate constant.
+pub struct Circ28Dose {
+    pub route: i32,
+    pub dose: f64,
+    pub t_inf: f64,
+    pub ka: f64,
+    pub fa: f64,
+    pub tlag: f64,
+    pub dt1: f64,
+    pub t1: f64,
+    pub dt2: f64,
+    pub t_end: f64,
+    pub fit_lo: f64,
+    pub fit_hi: f64,
+}
+
+pub fn circ28_dose_iv(dose: f64, t_inf: f64, dt1: f64, t1: f64, dt2: f64, t_end: f64, fit_lo: f64, fit_hi: f64) -> Circ28Dose {
+    return Circ28Dose { route: 0, dose: dose, t_inf: t_inf, ka: 1.0, fa: 1.0, tlag: 0.0, dt1: dt1, t1: t1, dt2: dt2, t_end: t_end, fit_lo: fit_lo, fit_hi: fit_hi }
+}
+
+// ka, fa and tlag are taken from the parameters at run time (circ28_drug_run).
+pub fn circ28_dose_oral(dose: f64, dt1: f64, t1: f64, dt2: f64, t_end: f64, fit_lo: f64, fit_hi: f64) -> Circ28Dose {
+    return Circ28Dose { route: 1, dose: dose, t_inf: 0.0, ka: 1.0, fa: 1.0, tlag: 0.0, dt1: dt1, t1: t1, dt2: dt2, t_end: t_end, fit_lo: fit_lo, fit_hi: fit_hi }
+}
+
+// Results (plasma = venous blood / bp):
+//   cmax, tmax   maximum of the venous plasma concentration on the grid, refined
+//                by the vertex of the parabola through the maximum and its two
+//                neighbours when the three grid points are equally spaced
+//                (cmax_grid is the raw grid maximum)
+//   auc_t        AUC 0..t_end of venous plasma (mg h / L), accumulated with the
+//                weights of the kernel scheme
+//   lambda_z     terminal rate constant (1/h): least-squares slope of ln C_plasma
+//                on t over the samples with fit_lo <= t <= fit_hi; 0 and
+//                `fit_ok` false if fewer than 3 samples or a non-positive C
+//   thalf        ln 2 / lambda_z (h)
+//   auc_inf      auc_t + C_plasma(t_end) / lambda_z
+//   input        mass delivered to the body over the grid (mg)
+//   balance_err  |input - eliminated - remaining| / input
+pub struct Circ28Run {
+    pub cmax: f64,
+    pub tmax: f64,
+    pub cmax_grid: f64,
+    pub auc_t: f64,
+    pub lambda_z: f64,
+    pub thalf: f64,
+    pub auc_inf: f64,
+    pub c_end: f64,
+    pub input: f64,
+    pub eliminated: f64,
+    pub remaining: f64,
+    pub balance_err: f64,
+    pub fit_ok: bool,
+    pub grid_ok: bool,
+}
+
+fn cd_abs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+// Runs one dose through the kernel. Plain f64 in, plain f64 out.
+pub fn circ28_run(p: Circ28Params, dc: Circ28Dose) -> Circ28Run with Mut, Div, Panic {
+    var ts: [f64; 2048] = [0.0; 2048]
+    var cs: [f64; 2048] = [0.0; 2048]
+    var sys = circ28_sys_zero()
+    var s = circ28_state_zero()
+    var el = circ28_elim_zero()
+    var n: i32 = 0
+    var t = 0.0
+    var input = 0.0
+    var ok = true
+    var ph: i32 = 0
+    while ph < 2 {
+        var dt = dc.dt1
+        var tstop = dc.t1
+        if ph == 1 {
+            dt = dc.dt2
+            tstop = dc.t_end
+        }
+        circ28_prepare(p, dt, &!sys)
+        while t + 0.5 * dt < tstop {
+            if n >= 2047 {
+                ok = false
+                t = tstop
+            } else {
+                var iv = 0.0
+                var oral = 0.0
+                var mass = 0.0
+                if dc.route == 0 {
+                    mass = circ28_iv_mass(dc.dose, dc.t_inf, t, t + dt)
+                    iv = mass / dt
+                } else {
+                    mass = circ28_oral_mass(dc.ka, dc.fa, dc.dose, dc.tlag, t, t + dt)
+                    oral = mass / dt
+                }
+                input = input + mass
+                circ28_step(&!s, p, &sys, iv, oral, &!el)
+                t = t + dt
+                n = n + 1
+                ts[n] = t
+                cs[n] = s.x[0] / p.bp
+            }
+        }
+        ph = ph + 1
+    }
+    // maximum
+    var im: i32 = 0
+    var cm = 0.0
+    var i: i32 = 1
+    while i <= n {
+        if cs[i] > cm {
+            cm = cs[i]
+            im = i
+        }
+        i = i + 1
+    }
+    var cmax = cm
+    var tmax = ts[im]
+    if im >= 1 && im < n {
+        let h1 = ts[im] - ts[im - 1]
+        let h2 = ts[im + 1] - ts[im]
+        if cd_abs(h1 - h2) < 1.0e-9 {
+            let den = cs[im - 1] - 2.0 * cs[im] + cs[im + 1]
+            if den < 0.0 {
+                let off = 0.5 * (cs[im - 1] - cs[im + 1]) / den
+                tmax = ts[im] + off * h1
+                cmax = cs[im] - 0.25 * (cs[im - 1] - cs[im + 1]) * off
+            }
+        }
+    }
+    // terminal slope
+    var sw = 0.0
+    var st = 0.0
+    var sy = 0.0
+    var stt = 0.0
+    var sty = 0.0
+    var nf: i32 = 0
+    var fit_ok = true
+    i = 1
+    while i <= n {
+        if ts[i] >= dc.fit_lo && ts[i] <= dc.fit_hi {
+            if cs[i] > 0.0 {
+                let y = ln(cs[i])
+                sw = sw + 1.0
+                st = st + ts[i]
+                sy = sy + y
+                stt = stt + ts[i] * ts[i]
+                sty = sty + ts[i] * y
+                nf = nf + 1
+            } else {
+                fit_ok = false
+            }
+        }
+        i = i + 1
+    }
+    var lz = 0.0
+    if nf >= 3 && fit_ok {
+        let den = sw * stt - st * st
+        lz = 0.0 - (sw * sty - st * sy) / den
+        if !(lz > 0.0) {
+            fit_ok = false
+            lz = 0.0
+        }
+    } else {
+        fit_ok = false
+    }
+    var thalf = 0.0
+    var auc_inf = 0.0
+    let auc_t = el.auc_ven / p.bp
+    if fit_ok {
+        thalf = 0.6931471805599453 / lz
+        auc_inf = auc_t + cs[n] / lz
+    }
+    let elim = el.hepatic + el.formed + el.renal + el.plasma + el.gut
+    let rem = circ28_total_mass(&s, p)
+    var be = 0.0
+    if input > 0.0 { be = cd_abs(input - elim - rem) / input }
+    return Circ28Run {
+        cmax: cmax, tmax: tmax, cmax_grid: cm, auc_t: auc_t, lambda_z: lz, thalf: thalf,
+        auc_inf: auc_inf, c_end: cs[n], input: input, eliminated: elim, remaining: rem,
+        balance_err: be, fit_ok: fit_ok, grid_ok: ok
+    }
+}
+
+// Run from a plain value array: parameters from the array, ka / fa / tlag of the
+// dose taken from the array too.
+pub fn circ28_run_theta(th: [f64; 18], dc: Circ28Dose) -> Circ28Run with Mut, Div, Panic {
+    var d2 = dc
+    d2.ka = th[CD_KA]
+    d2.fa = th[CD_FA]
+    d2.tlag = th[CD_TLAG]
+    let p = circ28_drug_params_theta(th)
+    return circ28_run(p, d2)
+}
+
+pub fn circ28_drug_run(d: &Circ28Drug, dc: Circ28Dose) -> Circ28Run with Mut, Div, Panic, Epistemic {
+    let th = circ28_drug_theta(d)
+    var d2 = dc
+    return circ28_run_theta(th, d2)
+}
+
+// The output used by the uncertainty propagation: AUC (0..infinity when the
+// terminal fit is valid, else 0..t_end) and Cmax.
+pub fn circ28_run_auc(r: Circ28Run) -> f64 {
+    if r.fit_ok { return r.auc_inf }
+    return r.auc_t
+}
+
+// ---------------------------------------------------------------------------
+// First-order uncertainty propagation (JCGM 100:2008 5.1.2)
+//   u^2(y) = sum_i (dy/dtheta_i)^2 u^2(theta_i),  parameters independent,
+// dy/dtheta_i by central differences around the values with
+//   h_i = min(1e-4 |theta_i|, 0.1 u_i)
+// (the 1e-4 relative cap keeps the O(h^2) error of a 1/CL-type response (relative h^2/x^2) below
+// 1e-8; the 0.1 u cap keeps the step inside the uncertainty). Parameters with
+// status 0 or zero variance are skipped. Two outputs per run: AUC (see
+// circ28_run_auc) and Cmax. Two kernel runs per active parameter plus one.
+// The propagation treats the 18 record parameters as independent. A fitted
+// parameter is not independent of the measured parameters it was fitted with
+// (and of its target); a drug module that needs that structure builds its
+// own budget over its inputs and observables (see circ28_drug_midazolam.sio).
+// ---------------------------------------------------------------------------
+pub struct Circ28Unc {
+    pub auc: f64,
+    pub cmax: f64,
+    pub var_auc: f64,
+    pub var_cmax: f64,
+    pub sens_auc: [f64; 18],     // dAUC/dtheta_i
+    pub sens_cmax: [f64; 18],
+    pub contrib_auc: [f64; 18],  // (dAUC/dtheta_i)^2 u_i^2  (the variance share)
+    pub contrib_cmax: [f64; 18],
+    pub runs: i32,
+}
+
+pub fn circ28_drug_unc_theta(th: [f64; 18], vr: [f64; 18], status: [i32; 18], dc: Circ28Dose) -> Circ28Unc with Mut, Div, Panic {
+    let r0 = circ28_run_theta(th, dc)
+    var sa: [f64; 18] = [0.0; 18]
+    var sc: [f64; 18] = [0.0; 18]
+    var ca: [f64; 18] = [0.0; 18]
+    var cc: [f64; 18] = [0.0; 18]
+    var va = 0.0
+    var vc = 0.0
+    var nrun: i32 = 1
+    var i: i32 = 0
+    while i < 18 {
+        if status[i] != 0 && vr[i] > 0.0 {
+            let u = cd_sqrt(vr[i])
+            var hs = 1.0e-4 * cd_abs(th[i])
+            if hs > 0.1 * u || !(hs > 0.0) { hs = 0.1 * u }
+            var tp = th
+            var tm = th
+            tp[i] = th[i] + hs
+            tm[i] = th[i] - hs
+            let rp = circ28_run_theta(tp, dc)
+            let rm = circ28_run_theta(tm, dc)
+            nrun = nrun + 2
+            let da = (circ28_run_auc(rp) - circ28_run_auc(rm)) / (2.0 * hs)
+            let dcm = (rp.cmax - rm.cmax) / (2.0 * hs)
+            sa[i] = da
+            sc[i] = dcm
+            ca[i] = da * da * vr[i]
+            cc[i] = dcm * dcm * vr[i]
+            va = va + ca[i]
+            vc = vc + cc[i]
+        }
+        i = i + 1
+    }
+    return Circ28Unc {
+        auc: circ28_run_auc(r0), cmax: r0.cmax, var_auc: va, var_cmax: vc,
+        sens_auc: sa, sens_cmax: sc, contrib_auc: ca, contrib_cmax: cc, runs: nrun
+    }
+}
+
+pub fn circ28_drug_unc(d: &Circ28Drug, dc: Circ28Dose) -> Circ28Unc with Mut, Div, Panic, Epistemic {
+    let th = circ28_drug_theta(d)
+    let vr = circ28_drug_var(d)
+    let st = (*d).status
+    var d2 = dc
+    return circ28_drug_unc_theta(th, vr, st, d2)
+}
+
+// Square root by Newton iteration (this module needs no other math import).
+pub fn cd_sqrt(x: f64) -> f64 with Mut, Div {
+    if !(x > 0.0) { return 0.0 }
+    var y = x
+    if y < 1.0 { y = 1.0 }
+    var k: i32 = 0
+    while k < 60 {
+        y = 0.5 * (y + x / y)
+        k = k + 1
+    }
+    return y
+}

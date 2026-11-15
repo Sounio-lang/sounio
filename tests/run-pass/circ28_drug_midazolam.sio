@@ -1,0 +1,423 @@
+//@ run-pass
+//@ timeout: 180
+//@ expect-stdout-contains: CIRC28_DRUG_MIDAZOLAM_PASS
+//
+// Midazolam on the circ28 drug record (stdlib/darwin_pbpk/circ28_drug_midazolam.sio).
+// The fits reproduce their own observables, and the model is then compared with
+// observations that were NOT used for any fit. Parameter table, sources and the
+// measured / derived / fitted status of every parameter: header of the module.
+//
+// FITTED (so NOT validations): V_ss 50.2 L (Heizmann 1983) -> Kp scalar;
+//   plasma CL 22.2 L/h (Thummel 1996) -> hepatic intrinsic clearance;
+//   Fg 0.57 = 1 - 0.43 intraduodenal extraction (Paine 1996) -> gut-wall clearance;
+//   oral Tmax 1.00 h (Greenblatt 1986, three trials pooled) -> ka.
+// DERIVED (not fitted, not measured): ps_gut = 4.4e-4 cm/s x 6600 cm2 x 3.6 = 10.45 L/h
+//   from Brussee 2018 (PMC6096899), u 4.53 L/h by judgment (factor-2 band).
+//
+// CRITERION. An observation with an inter-individual SD: the prediction lies within
+// mean +/- 2 SD (|z| <= 2, z = (pred - obs)/SD). The SD is that of the individuals, not
+// the uncertainty of the mean; a source's SEM is converted, SD = SEM sqrt(n) (Ahonen
+// 1995, n = 12). An observation with no spread: the prediction lies within a stated
+// fold. A row asserts a band on z (or on the ratio) around its measured outcome; a row
+// that fails its criterion is reported as a failure of the model and its discrepancy is
+// asserted inside a band, never tuned away.
+//
+// ROUND 1 (ps_gut = flow-limited default 20 Q_gut; the model of the first report):
+//   Eg after IV 0.416 (obs 0.08 +/- 0.11, z 3.05 FAIL); Eh 0.109 (0.44 +/- 0.14, z -2.36
+//   FAIL); F 0.508 (0.31 +/- 0.1 borderline; 0.262 Thummel FAIL; 0.385 Greenblatt pass);
+//   AUC(7.5 mg) 171.5 (102 +/- 34.6, z 2.01 FAIL); Cmax(7.5) 38.3 (pass); Cmax(15) 76.5.
+//   Diagnosis (coordinator, from the closed forms): with ps_gut = 20 Q_gut the effective
+//   gut entry flow Qg = Q_gut bp ps_gut/(ps_gut + Q_gut bp) is ~ 40 L/h, so Fg = 0.57
+//   forces clint_gut fu ~ 30 L/h and Eg ~ 0.42. A permeability-limited gut (ps_gut ~ 10
+//   L/h, Brussee 2018) needs a far smaller clint_gut for the same Fg and gives a small Eg.
+//
+// ROUND 2 PREDICTIONS (written before any kernel run of the new parameters).
+// From the closed forms, evaluated in Sounio (mdz_fit + circ28_gut/hepatic extraction,
+// no kernel run), refitting clint_gut to Fg and clint to the plasma CL each time:
+//   ps_gut   clint_gut  clint    Fg     Eg      Eh      F       AUC(7.5 mg) = F 7.5/22.2
+//    5.00    100.97     922.14  0.570  0.0479  0.3076  0.3947  133.3 ng h/mL
+//   10.454   188.26     846.00  0.570  0.0892  0.2898  0.4048  136.8
+//   20.00    302.78     746.40  0.570  0.1435  0.2650  0.4189  141.5
+// CORRECTION (made after the first kernel run of the test, which disagreed): the first
+// scratch evaluation of these rows ran on lean_single and passed the fitted array straight
+// into circ28_drug_params_theta, which that engine mis-forwards; it gave Eh 0.2944, F 0.4022
+// (AUC 135.9) at 10.454 and Eh 0.2700, F 0.4161 (AUC 140.6) at 20, and the rows at 5 and in Eg
+// were right. The rows above are the corrected ones; Madaros and lean_single now agree, and
+// the coordinator's independent hand prediction (Eg 0.0895, Eh 0.290, F 0.405 at 10.5)
+// matches them. No pass/fail expectation below changed; the z-scores moved by < 0.05.
+// (the coordinator's hand prediction at 10.5: Eg 0.0895, Eh 0.290, F 0.405; the closed
+// forms at the paper's 10.4544 give the middle row.) AUC_oral = F Dose / CL is exact in
+// the linear model, so the AUC row is also a closed-form prediction. NOT closed-form and
+// therefore only ESTIMATES written down here: the Cmax scales roughly with F and Tmax is
+// refitted: Cmax(7.5 mg) ~ 31 ng/mL (range 26-36), Cmax(15) = 2 x that ~ 62, IV t1/2 and
+// oral t1/2 ~ 2.5 h (2.3-2.8; V_ss and CL are unchanged, the gut/liver split moves little).
+//
+//  row                              predicted  observed (source)                 expected
+//  V1a IV t1/2 (h)                  ~2.5       2.3 (Heizmann 1983, n=6)          pass, fold 1.5
+//  V1b IV t1/2 (h)                  ~2.5       2.107 (Greenblatt 1986)           pass, fold 1.5
+//  V2  IV plasma CL (L/h)           22.2 (fit) 28 +/- 9 SD (Gorski 1998, n=16)   pass (fitted: two studies agree)
+//  V3  Fg                           0.57 (fit) 0.42 +/- 0.2 SD (Gorski 1998)     pass (fitted: same remark)
+//  V4a Fh = 1 - Eh                  0.710      0.74 +/- 0.1 SD (Gorski 1998)     pass (z -0.30)
+//  V4b Eh                           0.290      0.44 +/- 0.14 SD (Thummel 1996)   pass (z -1.07)
+//  V5  gut extraction, IV dose      0.0892     0.08 +/- 0.11 SD (Paine 1996)     pass (z 0.08)
+//  V6a oral F                       0.405      0.31 +/- 0.1 SD (Gorski 1998)     pass (z 0.95)
+//  V6b oral F                       0.405      0.262 = 370/1413 (Thummel 1996)   FAIL, fold 1.5 (ratio 1.55)
+//  V6c oral F                       0.405      0.385 (Greenblatt 1984)           pass, fold 1.5
+//  V7  AUC 7.5 mg (ng h/mL)         136.8      102 +/- 34.6 SD (Ahonen 1995)    pass (z 1.00)
+//  V8  Cmax 7.5 mg (ng/mL)          ~31        34 +/- 17.3 SD (Ahonen 1995)      pass (z ~ -0.2)
+//  V9  Tmax 7.5 mg (h)              1.00 (fit) 1.25 median (Ahonen 1995)         pass, fold 2 (fitted: no test)
+//  V10 oral t1/2 (h)                ~2.5       3.8 +/- 1.73 SD (Ahonen 1995)     pass (z ~ -0.75)
+//  V11 Cmax 15 mg (ng/mL)           ~62        100.7 (Greenblatt 1986)           FAIL, fold 1.5 (ratio ~0.62)
+//
+// Ahonen 1995 Br J Clin Pharmacol 40:270 (placebo phase, 7.5 mg, 12 volunteers; mean
+// +/- SEM; Cmax 34 +/- 5 ng/mL, tmax 1.25 h (median), AUC 102 +/- 10, t1/2 3.8 +/- 0.5;
+// the AUC unit as read from the garbled table is ng/mL h and is taken to be AUC(0-inf)).
+// Greenblatt 1986 Anesth Analg 65:176 (PMID 2935051): 15 mg oral, peak 90, 95, 117
+// ng/mL in three trials, mean 100.7; IV 5 mg t1/2 2.25, 2.02, 2.05 h (mean 2.107 h).
+//
+// Also printed: the ps_gut sensitivity (5, 10.5, 20 L/h; clint_gut and clint refitted each
+// time, ka not refitted) and the uncertainty budget including ps_gut as a ninth input.
+//
+// Marker CIRC28_DRUG_MIDAZOLAM_PASS.
+
+use darwin_pbpk::circ28::*
+use darwin_pbpk::circ28_kp::*
+use darwin_pbpk::circ28_drug::*
+use darwin_pbpk::circ28_drug_midazolam::*
+use math::pure::{exp, ln}
+
+fn mt_abs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn mt_rel(tag: string, got: f64, want: f64, tol: f64) -> i32 with IO, Mut, Div, Panic {
+    let r = mt_abs(got - want) / mt_abs(want)
+    print("  "); print(tag); print(": got "); print(got); print(" want "); print(want)
+    print("  rel = "); println(r)
+    if !(r <= tol) {
+        println("  [FAIL]")
+        return 1
+    }
+    return 0
+}
+
+// One validation row. sd > 0: criterion |z| <= 2; sd = 0: criterion within `fold`.
+// expect: 1 pass, 0 fail, 2 borderline. band_lo..band_hi bound z (sd > 0) or the
+// ratio pred/obs (sd = 0) of the measured discrepancy. Returns 1 if the test must fail.
+fn mt_row(tag: string, pred: f64, obs: f64, sd: f64, fold: f64, expect: i32, band_lo: f64, band_hi: f64) -> i32 with IO, Mut, Div, Panic {
+    var stat = pred / obs
+    var pass = false
+    if sd > 0.0 {
+        stat = (pred - obs) / sd
+        pass = mt_abs(stat) <= 2.0
+    } else {
+        pass = stat <= fold && stat >= 1.0 / fold
+    }
+    print("  "); print(tag); print(": predicted "); print(pred); print("  observed "); print(obs)
+    print("  ratio "); print(pred / obs)
+    if sd > 0.0 {
+        print("  z "); print(stat)
+    }
+    if pass { print("  PASS") } else { print("  FAIL") }
+    var bad = 0
+    if stat < band_lo || stat > band_hi {
+        print("  [outside the asserted band]")
+        bad = 1
+    }
+    if expect == 1 && !pass {
+        print("  [expected pass]")
+        bad = 1
+    }
+    if expect == 0 && pass {
+        print("  [expected fail]")
+        bad = 1
+    }
+    println("")
+    return bad
+}
+
+fn mt_name(i: i32) -> string {
+    if i == 0 { return "logP" }
+    if i == 1 { return "pKa1" }
+    if i == 2 { return "fu" }
+    if i == 3 { return "B:P" }
+    if i == 4 { return "V_ss obs" }
+    if i == 5 { return "CL_iv obs" }
+    if i == 6 { return "Fg obs" }
+    if i == 7 { return "Tmax obs" }
+    return "ps_gut"
+}
+
+fn mt_rname(i: i32) -> string {
+    if i == 0 { return "MW" }
+    if i == 1 { return "logP" }
+    if i == 2 { return "pKa1" }
+    if i == 3 { return "pKa2" }
+    if i == 4 { return "ion class" }
+    if i == 5 { return "fu" }
+    if i == 6 { return "B:P" }
+    if i == 7 { return "clint (hep)" }
+    if i == 8 { return "clform" }
+    if i == 9 { return "clint (gut)" }
+    if i == 10 { return "cl renal" }
+    if i == 11 { return "cl plasma" }
+    if i == 12 { return "Kp scalar" }
+    if i == 13 { return "ps scalar" }
+    if i == 14 { return "ka" }
+    if i == 15 { return "fa" }
+    if i == 16 { return "tlag" }
+    return "ps gut"
+}
+
+// One kernel run per call, one scalar back: lean_single corrupts a frame that holds several
+// large structs (Circ28Params, Circ28Dose, Circ28Run) at once, so each run lives in its own frame.
+// mode 0: IV 1 mg; 1: oral 7.5 mg; 2: oral 15 mg. k: 0 AUC_inf, 1 Cmax, 2 Tmax, 3 t1/2, 4 balance.
+// pssc < 0 keeps the record value.
+fn mt_pick(r: &Circ28Run, k: i32) -> f64 {
+    if k == 0 { return (*r).auc_inf }
+    if k == 1 { return (*r).cmax }
+    if k == 2 { return (*r).tmax }
+    if k == 3 { return (*r).thalf }
+    return (*r).balance_err
+}
+
+// Arrays are never passed by value and structs never reassigned (lean_single corrupts both):
+// the parameter array is filled in the function that runs the kernel, one function per mode.
+fn mt_fill(d: &Circ28Drug, pssc: f64, th: &![f64; 18]) -> i32 with Mut, Div, Panic, Epistemic {
+    var ti: i32 = 0
+    while ti < 18 {
+        (*th)[ti] = circ28_drug_value(d, ti)
+        ti = ti + 1
+    }
+    if pssc >= 0.0 { (*th)[CD_PSSC] = pssc }
+    return 0
+}
+fn mt_m0(d: &Circ28Drug, pssc: f64, k: i32) -> f64 with IO, Mut, Div, Panic, Epistemic {
+    var th: [f64; 18] = [0.0; 18]
+    mt_fill(d, pssc, &!th)
+    var d2 = mdz_cfg_iv(1.0)
+    let r = circ28_run_theta(th, d2)
+    return mt_pick(&r, k)
+}
+fn mt_m1(d: &Circ28Drug, pssc: f64, k: i32) -> f64 with IO, Mut, Div, Panic, Epistemic {
+    var th: [f64; 18] = [0.0; 18]
+    mt_fill(d, pssc, &!th)
+    var d2 = mdz_cfg_oral(7.5)
+    let r = circ28_run_theta(th, d2)
+    return mt_pick(&r, k)
+}
+fn mt_m2(d: &Circ28Drug, pssc: f64, k: i32) -> f64 with IO, Mut, Div, Panic, Epistemic {
+    var th: [f64; 18] = [0.0; 18]
+    mt_fill(d, pssc, &!th)
+    var d2 = mdz_cfg_oral(15.0)
+    let r = circ28_run_theta(th, d2)
+    return mt_pick(&r, k)
+}
+
+fn mt_eh(d: &Circ28Drug) -> f64 with Mut, Div, Panic, Epistemic {
+    let p = circ28_drug_params(d)
+    return circ28_hepatic_extraction(p)
+}
+fn mt_eg(d: &Circ28Drug) -> f64 with Mut, Div, Panic, Epistemic {
+    let p = circ28_drug_params(d)
+    return circ28_gut_extraction(p)
+}
+fn mt_fg(d: &Circ28Drug) -> f64 with Mut, Div, Panic, Epistemic {
+    let p = circ28_drug_params(d)
+    return circ28_gut_availability(p)
+}
+fn mt_clb(d: &Circ28Drug) -> f64 with Mut, Div, Panic, Epistemic {
+    let p = circ28_drug_params(d)
+    return circ28_splanchnic_clearance(p) * p.bp
+}
+fn mt_qgut(d: &Circ28Drug) -> f64 with Mut, Div, Panic, Epistemic {
+    let p = circ28_drug_params(d)
+    return p.q[8]
+}
+
+// S0: the table of the record and the fits against their own observables.
+fn mt_sec_fit(d: &Circ28Drug) -> i32 with IO, Mut, Div, Panic, Epistemic {
+    var fails: i32 = 0
+    println("S0 parameter record (value, standard uncertainty, status)")
+    var i: i32 = 0
+    while i < 18 {
+        print("  "); print(i); print(" "); print(mt_rname(i)); print("  value "); print(circ28_drug_value(d, i))
+        print("  u "); print(cd_sqrt(circ28_drug_variance(d, i))); print("  status "); println((*d).status[i])
+        i = i + 1
+    }
+    let p = circ28_drug_params(d)
+    println("S1 the fits reproduce their observables (these are NOT validations)")
+    print("  Kp scalar "); println(circ28_drug_value(d, CD_KPSC))
+    fails = fails + mt_rel("V_ss (L) = 50.2", circ28_vss_plasma(p), 50.2, 1.0e-9)
+    fails = fails + mt_rel("plasma CL (L/h) = 22.2", circ28_splanchnic_clearance(p) * p.bp, 22.2, 1.0e-9)
+    fails = fails + mt_rel("Fg = 0.57", circ28_gut_availability(p), 0.57, 1.0e-9)
+    return fails
+}
+
+// S2: intravenous and oral runs, validation rows.
+fn mt_sec_val(d: &Circ28Drug, m: &![f64; 10]) -> i32 with IO, Mut, Div, Panic, Epistemic {
+    var fails: i32 = 0
+    let iv_auc = (*m)[0]
+    let iv_cmax = (*m)[1]
+    let iv_half = (*m)[2]
+    let iv_bal = (*m)[3]
+    let o75_auc = (*m)[4]
+    let o75_cmax = (*m)[5]
+    let o75_tmax = (*m)[6]
+    let o75_half = (*m)[7]
+    let o75_bal = (*m)[8]
+    let o15_cmax = (*m)[9]
+    let fg = mt_fg(d)
+    let eh = mt_eh(d)
+    let eg = mt_eg(d)
+    let clb = mt_clb(d)
+    print("  IV 1 mg: AUC_inf "); print(iv_auc); print(" (Dose/CL = "); print(1.0 / 22.2); print(")  t1/2 "); print(iv_half)
+    print("  Cmax "); print(iv_cmax); print("  balance "); println(iv_bal)
+    fails = fails + mt_rel("IV AUC_inf = Dose / CL", iv_auc, 1.0 / 22.2, 1.0e-3)
+    fails = fails + mt_rel("stored ka reproduces the fitted Tmax (1.00 h; grid and vertex)", o75_tmax, 1.0, 2.0e-3)
+    fails = fails + mt_rel("oral mass balance", o75_bal + 1.0, 1.0, 1.0e-9)
+    let f_sim = (o75_auc / 7.5) / (iv_auc / 1.0)
+    fails = fails + mt_rel("F from the two runs = Fg (1 - Eh)", f_sim, fg * (1.0 - eh), 2.0e-3)
+    print("  Eg (IV) "); print(eg); print("  Q_gut Eg "); print(mt_qgut(d) * eg); print(" L/h of "); print(clb); println(" (blood CL L/h)")
+    let f_pred = fg * (1.0 - eh)
+    println("V validation, predicted vs observed")
+    fails = fails + mt_row("V1a IV t1/2 (h)  Heizmann 1983     ", iv_half, 2.3, 0.0, 1.5, 1, 0.66, 1.5)
+    fails = fails + mt_row("V1b IV t1/2 (h)  Greenblatt 1986   ", iv_half, 2.107, 0.0, 1.5, 1, 0.66, 1.5)
+    fails = fails + mt_row("V2  IV plasma CL (L/h) Gorski 1998 ", clb, 28.0, 9.0, 0.0, 1, -2.0, 0.0)
+    fails = fails + mt_row("V3  Fg  Gorski 1998                ", fg, 0.42, 0.2, 0.0, 1, 0.0, 2.0)
+    fails = fails + mt_row("V4a Fh = 1 - Eh  Gorski 1998       ", 1.0 - eh, 0.74, 0.1, 0.0, 1, -1.0, 0.5)
+    fails = fails + mt_row("V4b Eh  Thummel 1996               ", eh, 0.44, 0.14, 0.0, 1, -2.0, 0.0)
+    fails = fails + mt_row("V5  gut extraction after IV  Paine ", eg, 0.08, 0.11, 0.0, 1, -1.0, 1.0)
+    fails = fails + mt_row("V6a oral F  Gorski 1998            ", f_pred, 0.31, 0.1, 0.0, 1, 0.0, 2.0)
+    fails = fails + mt_row("V6b oral F  Thummel 1996 (CL/CLo)  ", f_pred, 370.0 / 1413.0, 0.0, 1.5, 0, 1.5, 2.0)
+    fails = fails + mt_row("V6c oral F  Greenblatt 1984        ", f_pred, 0.385, 0.0, 1.5, 1, 0.66, 1.5)
+    fails = fails + mt_row("V7  AUC 7.5 mg (ng h/mL)  Ahonen   ", o75_auc * 1000.0, 102.0, 34.64, 0.0, 1, 0.0, 2.0)
+    fails = fails + mt_row("V8  Cmax 7.5 mg (ng/mL)  Ahonen    ", o75_cmax * 1000.0, 34.0, 17.32, 0.0, 1, -1.5, 1.0)
+    fails = fails + mt_row("V9  Tmax 7.5 mg (h)  Ahonen median ", o75_tmax, 1.25, 0.0, 2.0, 1, 0.5, 2.0)
+    fails = fails + mt_row("V10 oral t1/2 (h)  Ahonen          ", o75_half, 3.8, 1.73, 0.0, 1, -2.0, 0.0)
+    fails = fails + mt_row("V11 Cmax 15 mg (ng/mL)  Greenblatt ", o15_cmax * 1000.0, 100.7, 0.0, 1.5, 0, 0.5, 0.6667)
+    print("  linearity: Cmax(15)/Cmax(7.5) = "); println(o15_cmax / o75_cmax)
+    fails = fails + mt_rel("dose proportionality", o15_cmax / o75_cmax, 2.0, 1.0e-9)
+    return fails
+}
+
+// S3: ps_gut sensitivity. clint_gut and clint are refitted (closed forms) to Fg 0.57 and the
+// plasma CL 22.2 L/h at each ps_gut; ka is not refitted. Printed lines, plus identities.
+fn mt_sens(d: &Circ28Drug, psg: f64) -> f64 with IO, Mut, Div, Panic, Epistemic {
+    var th: [f64; 18] = [0.0; 18]
+    mt_fill(d, 0.0 - 1.0, &!th)
+    th[CD_PSGUT] = psg
+    let t = mdz_fit(th, mdz_obs_vss(), mdz_obs_cl(), mdz_obs_fg())
+    var t2 = t
+    let p = circ28_drug_params_theta(t2)
+    let eg = circ28_gut_extraction(p)
+    let eh = circ28_hepatic_extraction(p)
+    let fg = circ28_gut_availability(p)
+    let f = fg * (1.0 - eh)
+    print("  ps_gut "); print(psg); print("  clint_gut "); print(t[CD_CLGUT]); print("  clint "); print(t[CD_CLINT])
+    print("  Fg "); print(fg); print("  Eg "); print(eg); print("  Eh "); print(eh); print("  F "); print(f)
+    print("  AUC(7.5 mg) = F 7.5/CL "); println(1000.0 * 7.5 * f / 22.2)
+    return eg
+}
+
+fn mt_sec_sens(d: &Circ28Drug) -> i32 with IO, Mut, Div, Panic, Epistemic {
+    var fails: i32 = 0
+    println("S3 ps_gut sensitivity (L/h, plasma-referred); the record value is the middle one")
+    let e5 = mt_sens(d, 5.0)
+    let e10 = mt_sens(d, 10.5)
+    let e20 = mt_sens(d, 20.0)
+    let e0 = mt_sens(d, circ28_drug_value(d, CD_PSGUT))
+    let e_flow = mt_sens(d, 1170.0)
+    if !(e5 < e10 && e10 < e20) {
+        println("  [FAIL] Eg must rise with ps_gut")
+        fails = fails + 1
+    }
+    // the record's own clint_gut / clint are those of this refit
+    var th: [f64; 18] = [0.0; 18]
+    mt_fill(d, 0.0 - 1.0, &!th)
+    let t = mdz_fit(th, mdz_obs_vss(), mdz_obs_cl(), mdz_obs_fg())
+    fails = fails + mt_rel("record clint_gut = refit at the record ps_gut", circ28_drug_value(d, CD_CLGUT), t[CD_CLGUT], 1.0e-9)
+    fails = fails + mt_rel("record clint = refit at the record ps_gut", circ28_drug_value(d, CD_CLINT), t[CD_CLINT], 1.0e-9)
+    fails = fails + mt_rel("ps_gut = 4.4e-4 cm/s x 6600 cm2 x 3.6 L/h per cm3/s", circ28_drug_value(d, CD_PSGUT), 10.4544, 1.0e-12)
+    // the flow-limited gut (ps_gut = 1170 = 20 Q_gut, no override) is round 1
+    println("  (ps_gut 1170 = the flow-limited default of round 1: Eg above)")
+    if !(e_flow > 0.4) {
+        println("  [FAIL] flow-limited Eg should be ~ 0.42")
+        fails = fails + 1
+    }
+    return fails
+}
+
+// S4: uncertainty budgets for the 7.5 mg oral dose.
+fn mt_sec_budget(d: &Circ28Drug, b: &MdzBudget, u: &Circ28Unc) -> i32 with IO, Mut, Div, Panic, Epistemic {
+    var fails: i32 = 0
+    print("S4a budget with refit, 7.5 mg oral: "); print((*b).runs); println(" kernel runs")
+    print("  AUC_oral "); print((*b).auc * 1000.0); print(" ng h/mL  u "); print(cd_sqrt((*b).var_auc) * 1000.0)
+    print("  (rel "); print(cd_sqrt((*b).var_auc) / (*b).auc); println(")")
+    print("  Cmax     "); print((*b).cmax * 1000.0); print(" ng/mL    u "); print(cd_sqrt((*b).var_cmax) * 1000.0)
+    print("  (rel "); print(cd_sqrt((*b).var_cmax) / (*b).cmax); println(")")
+    println("  input          u(input)      share of var(AUC) %   share of var(Cmax) %")
+    var i: i32 = 0
+    while i < 9 {
+        print("  "); print(mt_name(i)); print("   "); print((*b).u[i]); print("   "); print(100.0 * (*b).contrib_auc[i] / (*b).var_auc)
+        print("   "); println(100.0 * (*b).contrib_cmax[i] / (*b).var_cmax)
+        i = i + 1
+    }
+    // AUC_oral = Fg (1 - Eh) Dose / CL. A higher CL_obs raises the refitted hepatic clint, so Eh
+    // rises and F falls: both terms push the same way and dlnAUC/dlnCL_obs lies in (-2, -1).
+    // (An earlier draft of this assertion expected exactly -1, ignoring the refit; wrong.)
+    let sl = (*b).sens_auc[5] * mdz_obs_cl() / (*b).auc
+    print("  dlnAUC/dlnCL_obs (refit) = "); println(sl)
+    if !(sl < 0.0 - 1.0 && sl > 0.0 - 2.0) {
+        println("  [FAIL] sensitivity outside (-2,-1)")
+        fails = fails + 1
+    }
+    // the record-level propagation (18 parameters taken as independent)
+    print("S4b record-level propagation (parameters independent, no refit): "); print((*u).runs); println(" kernel runs")
+    print("  AUC_oral "); print((*u).auc * 1000.0); print("  u "); print(cd_sqrt((*u).var_auc) * 1000.0)
+    print("  Cmax "); print((*u).cmax * 1000.0); print("  u "); println(cd_sqrt((*u).var_cmax) * 1000.0)
+    println("  parameter      share of var(AUC) %   share of var(Cmax) %")
+    i = 0
+    while i < 18 {
+        if (*u).contrib_auc[i] > 0.0 || (*u).contrib_cmax[i] > 0.0 {
+            print("  "); print(mt_rname(i)); print("   "); print(100.0 * (*u).contrib_auc[i] / (*u).var_auc)
+            print("   "); println(100.0 * (*u).contrib_cmax[i] / (*u).var_cmax)
+        }
+        i = i + 1
+    }
+    return fails
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic, Epistemic {
+    var fails: i32 = 0
+    var d = circ28_drug_new()
+    mdz_drug_into(&!d)
+    // every kernel run is made here, at the shallowest call depth (lean_single returns wrong
+    // run results from deeper frames); the scalars go to the sections in one array.
+    var m: [f64; 10] = [0.0; 10]
+    let u = 0.0 - 1.0
+    m[0] = mt_m0(&d, u, 0)
+    m[1] = mt_m0(&d, u, 1)
+    m[2] = mt_m0(&d, u, 3)
+    m[3] = mt_m0(&d, u, 4)
+    m[4] = mt_m1(&d, u, 0)
+    m[5] = mt_m1(&d, u, 1)
+    m[6] = mt_m1(&d, u, 2)
+    m[7] = mt_m1(&d, u, 3)
+    m[8] = mt_m1(&d, u, 4)
+    m[9] = mt_m2(&d, u, 1)
+    let bud = mdz_budget(&d, 7.5)
+    let c75 = mdz_cfg_oral(7.5)
+    let unc = circ28_drug_unc(&d, c75)
+    fails = fails + mt_sec_fit(&d)
+    fails = fails + mt_sec_val(&d, &!m)
+    fails = fails + mt_sec_sens(&d)
+    fails = fails + mt_sec_budget(&d, &bud, &unc)
+    if fails == 0 {
+        println("CIRC28_DRUG_MIDAZOLAM_PASS")
+        return 0
+    }
+    println("CIRC28_DRUG_MIDAZOLAM_FAIL")
+    return 1
+}
