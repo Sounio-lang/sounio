@@ -53,3 +53,20 @@ two moved toward the right value:
   adaptive-step statistics exactly: 56 accepted steps, 39 active, 5 shrink
   and 1 grow signals, final dt 0.006739. Before, it took 45 steps with
   final dt 0.104106.
+
+Two related fixes:
+
+- **The pure-helper transfer table registers only straight-line bodies.**
+  It used to classify a body from its last `let` or `return`, ignoring
+  reassignment and early returns. Newton's `var y = x; y = 0.5 * (y + x / y)
+  ...; return y` read as the identity of `x` (variance 1.0 where the true
+  value is 0.0125), and `if a > b { return a }; return b` read as the
+  identity of `b` (0.0 where the true value is 1.0).
+- **With second order on, the clone is the fallback.** In a function that
+  calls `hessian_of`, the #1706 re-lowering still goes first, because it
+  carries the Hessian row exactly. A call whose body it refuses now falls
+  back to the clone's first-order row, and between the channels that call
+  touches, its Hessian reads NaN instead of a structural 0.
+
+Pinned by `tests/run-pass/gum_fo_tangent_clone_second_order_on.sio`, whose
+expected values come from the same oracle. Main fails 2 of its 3 checks.

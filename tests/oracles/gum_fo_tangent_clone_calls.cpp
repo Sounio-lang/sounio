@@ -42,5 +42,24 @@ int main() {
     double db = 0.0;
     for (int i = 1; i <= 4; ++i) db -= (i / 100.0) * std::exp(-34.2 * i / 100.0);
     std::printf("boltz %.17g\n", db * db);
+
+    // tests/run-pass/gum_fo_tangent_clone_second_order_on.sio
+    // nsqrt(x): six Newton steps from y = x, differentiated step by step
+    // (forward-mode duals), x = 20 +- 1.
+    {
+        const double x = 20.0;
+        double y = x, dy = 1.0;
+        for (int i = 0; i < 6; ++i) {
+            const double ny = 0.5 * (y + x / y);
+            const double dny = 0.5 * (dy + (y - x * dy) / (y * y));
+            y = ny;
+            dy = dny;
+        }
+        std::printf("newton_sqrt %.17g\n", dy * dy);
+    }
+    // mymax(x, 3) with x = 20: the first argument is returned, d/dx = 1.
+    std::printf("early_return_max %.17g\n", 1.0);
+    // hessian_of(sq(x), 0, 0) = d2(x^2)/dx2.
+    std::printf("hessian_sq %.17g\n", 2.0);
     return 0;
 }

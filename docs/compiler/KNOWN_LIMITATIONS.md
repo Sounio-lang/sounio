@@ -87,8 +87,10 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
   Pin: `tests/run-pass/gum_fo_tangent_clone_calls.sio`, which checks nine
   values against `tests/oracles/gum_fo_tangent_clone_calls.cpp` at 1e-12.
   What this leaves to the re-lowering below: struct parameters and struct
-  returns, methods, helpers whose body asks `variance_of` and friends, and
-  any function with second order on (a clone carries no Hessian row).
+  returns, methods, helpers whose body asks `variance_of` and friends,
+  and the Hessian of a call the re-lowering refuses (with second order on,
+  such a call takes the clone's first-order row and its Hessian reads NaN;
+  `hessian_of` of a call that was never lowered for its value still reads 0).
 - **Narrowed (#1706, 2026-10-13).** A call to a *pure helper* (an `f64`
   return, or a struct return when a field of the call is read; `f64`, integer
   or bool parameters, struct parameters by value or by reference whose

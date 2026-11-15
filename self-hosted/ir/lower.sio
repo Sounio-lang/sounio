@@ -457,6 +457,8 @@ fn tg_name_is_query(n: Name) -> bool with Mut, Panic, Div {
 // query, 1: a measurement constructor)?
 fn tg_expr_calls(e: &Expr, pred: i64, depth: i64) -> bool with Mut, Panic, Div {
     if depth > 96 { return true }
+    // pred 2: the expression contains a `return` anywhere.
+    if pred == 2 && (*e).kind == ExprKind::ExprReturn { return true }
     if (*e).kind == ExprKind::ExprCall {
         match (*e).left {
             Some(c) => {
@@ -16796,8 +16798,11 @@ impl Lowerer {
     // over the caller's channels, plus the call's internal variance as one
     // new independent channel. (self, -1) unchanged when the call has no
     // recorded site.
-    fn tg_call_variance(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
-        if TG_SITE_N <= 0 || self.so_enabled { return (self, 0 - 1) }
+    fn tg_call_variance(self, e: &Expr, after_paste: bool) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        if TG_SITE_N <= 0 { return (self, 0 - 1) }
+        // With second order on, the #1706 re-lowering carries the Hessian row
+        // exactly; the clone is the fallback for bodies it refuses.
+        if self.so_enabled && !after_paste { return (self, 0 - 1) }
         let si = tg_site_find((*e).span)
         if si < 0 { return (self, 0 - 1) }
         var lo = self
@@ -16850,6 +16855,30 @@ impl Lowerer {
         while c2 < 32 {
             lo.fo_expr_sens[c2 as usize] = acc[c2 as usize]
             c2 = c2 + 1
+        }
+        if lo.so_enabled {
+            // A clone carries no Hessian row. Between two channels the call
+            // depends on, the second derivative is unknown, not zero: NaN, so
+            // hessian_of and second_order_mean through this call fail loudly
+            // instead of reading a structural 0. Pairs the call does not touch
+            // stay structurally zero.
+            let zp = lo.emit_f64_const(0.0)
+            lo = zp.0
+            let np = lo.fresh_reg()
+            lo = np.0
+            lo = lo.emit(ir_binop_typed(np.1, zp.1, BinaryOp::OpDiv, zp.1, true, true))
+            lo = lo.emit(ir_mark_float_reg(np.1))
+            var hj: i64 = 0
+            while hj < 8 {
+                var hk: i64 = hj
+                while hk < 8 {
+                    if acc[hj as usize] >= 0 && acc[hk as usize] >= 0 {
+                        lo.so_expr_hess[lo.so_hess_idx(hj, hk) as usize] = np.1
+                    }
+                    hk = hk + 1
+                }
+                hj = hj + 1
+            }
         }
         if tg_may_draw(tgi, 0) && TG_SITE_VINT[si as usize] >= 0 {
             lo = lo.fo_add_channel_for_variance(TG_SITE_VINT[si as usize])
@@ -21814,6 +21843,37 @@ impl Lowerer {
         nparams: i64
     ) -> Lowerer with Mut, Panic, Div, Alloc, IO {
         var lo = self
+        // The transfer vocabulary describes a value, so only a straight-line
+        // body has one: `let`/`var` bindings with no `return` inside, then the
+        // tail. An assignment rebinds a name after its `let` (Newton's
+        // `var y = x; y = 0.5 * (y + x / y) ...; return y` read as identity
+        // of x), and an early return makes the tail one of several values
+        // (`if a > b { return a }; return b` read as identity of b). Such a
+        // body stays unregistered.
+        var scan = &(*blk).stmts
+        while true {
+            match *scan {
+                Some(sl) => {
+                    let st = &(*sl).head
+                    var is_tail = false
+                    match (*sl).tail {
+                        Some(_r) => { is_tail = false }
+                        _ => { is_tail = true }
+                    }
+                    if st.kind == StmtKind::StmtAssign { return lo }
+                    if !is_tail && st.kind == StmtKind::StmtExpr { return lo }
+                    match st.expr {
+                        Some(sx) => {
+                            if !is_tail && tg_expr_calls(&(*sx), 2, 0) { return lo }
+                            if is_tail && (*sx).kind != ExprKind::ExprReturn && tg_expr_calls(&(*sx), 2, 0) { return lo }
+                        }
+                        _ => {}
+                    }
+                    scan = &(*sl).tail
+                }
+                _ => break
+            }
+        }
         var current = &(*blk).stmts
         // Support `let r = x+y; return r` (gum_cross_function): remember last
         // pure let RHS; if the trailing return/expr is that local, classify RHS.
@@ -26519,7 +26579,7 @@ impl Lowerer {
                 }
                 // The call went through a tangent clone: chain rule on its
                 // run-time Jacobian row.
-                let tgv = self.tg_call_variance(e)
+                let tgv = self.tg_call_variance(e, false)
                 if tgv.1 >= 0 {
                     return tgv
                 }
@@ -26533,7 +26593,12 @@ impl Lowerer {
                     return lo_x.fo_emit_var_from_sens()
                 }
                 // #1706: not in the transfer table -- re-lower a pure helper inline.
-                let inl = lo_x.fo_inline_call_variance(callee_name, &(*e).args)
+                let inl0 = lo_x.fo_inline_call_variance(callee_name, &(*e).args)
+                if inl0.1 >= 0 {
+                    return inl0
+                }
+                // Second order on and the body refused: the clone's first-order row.
+                let inl = inl0.0.tg_call_variance(e, true)
                 if inl.1 >= 0 {
                     return inl
                 }
@@ -26588,7 +26653,7 @@ impl Lowerer {
                         lo = lo.so_clear_expr_hess().fo_seed_from_variance(variance_reg, unc_reg)
                         return (lo, variance_reg)
                     }
-                    let tgv = self.tg_call_variance(e)
+                    let tgv = self.tg_call_variance(e, false)
                     if tgv.1 >= 0 {
                         return tgv
                     }
@@ -26602,7 +26667,12 @@ impl Lowerer {
                     if lo_x.fo_expr_has_sens() {
                         return lo_x.fo_emit_var_from_sens()
                     }
-                    let inl = lo_x.fo_inline_call_variance(callee_name, &(*e).args)
+                    let inl0 = lo_x.fo_inline_call_variance(callee_name, &(*e).args)
+                    if inl0.1 >= 0 {
+                        return inl0
+                    }
+                    // Second order on and the body refused: the clone's first-order row.
+                    let inl = inl0.0.tg_call_variance(e, true)
                     if inl.1 >= 0 {
                         return inl
                     }
@@ -39730,7 +39800,7 @@ impl Lowerer {
         // First-order GUM through the call: an epistemic function (or a
         // clone, transitively) calls a registered helper through its tangent
         // clone, so the variance of the result can be taken by the chain rule.
-        if TG_ITEM_FN >= 0 && self.current_fn == TG_ITEM_FN && !self.so_enabled && !self.probe_mode
+        if TG_ITEM_FN >= 0 && self.current_fn == TG_ITEM_FN && !self.probe_mode
             && (TG_ITEM_EPI || TG_CLONE_FN == self.current_fn) {
             let tgi = tg_find(ir_intern_name(callee_name))
             if tgi >= 0 && self.expr_list_len_ref(&e.args) == TG_NPARAM[tgi as usize] {
