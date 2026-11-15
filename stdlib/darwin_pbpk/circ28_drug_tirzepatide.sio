@@ -1,0 +1,100 @@
+// stdlib/darwin_pbpk/circ28_drug_tirzepatide.sio — tirzepatide on the circ28 kernel.
+//
+// Same model as semaglutide (header of circ28_drug_semaglutide.sio: plasma-confined
+// albumin-bound peptide, Kp = interstitial share x (fu + (1 - fu) r_int), no
+// Rodgers-Rowland, exchange sum ps = Q, catabolism in venous plasma, no hepatic
+// clearance, SC depot with exact exp). The engine (pep_*) is imported from
+// that module; only the numbers differ.
+//
+// ABSOLUTE OR APPARENT (the defect class of this project: a label CL/F used as an
+// absolute clearance and F applied again).
+//   Mounjaro label (DailyMed, read in full): "apparent population mean clearance
+//     0.061 L/h", "apparent steady-state volume ~10.3 L", F (absolute) 80 %, t1/2 ~5 days,
+//     Tmax 8-72 h, 99 % bound. 0.061 and 10.3 are APPARENT (CL/F, V/F) in T2D patients
+//     of about 90 kg.
+//   Schneck & Urva 2024 (PMID 38356317, PMC10962491, full text): CL 0.0329 L/h/70 kg
+//     (CI 0.0313-0.0342), Q 0.126 (0.101-0.144), Vc 2.47, Vp 3.98 L/70 kg, ka 0.0373 /h
+//     (0.0289-0.0460), F FIXED at 0.8 (absolute, from the IV study) with a relative
+//     between-study effect -0.181 (F = 0.8 (1 - 0.181) = 0.655 in the studies other than
+//     the reference), weight exponent 0.8 on CL and Q, 1 (adjusted weight) on V. Their CL is
+//     ABSOLUTE conditional on F = 0.8. The label's apparent values follow from them:
+//     CL(90 kg) = 0.0329 (90/70)^0.8 = 0.0402 L/h; / 0.655 = 0.0614 L/h = the label's 0.061.
+//     (The test prints this reconstruction.) Using 0.061 as absolute and applying F = 0.8
+//     would give 0.0488 absolute: 43 % above the model's 0.0340 at 73 kg.
+//   Coskun 2018 (Mol Metab 18:3-14, PMC6308032, full text) Table 2: SAD, healthy, apparent
+//     CL/F and Vz/F; used as OBSERVATIONS, never as inputs.
+//
+// PARAMETERS (th[9]; value at the 73 kg reference man, u = standard uncertainty)
+//  param   value             u         status  basis and source (access)
+//  MW      4813.5            0         1       formula C225H348N48O68 (Coskun 2018 s.2.1): 225 x 12.011 +
+//                                              348 x 1.008 + 48 x 14.007 + 68 x 15.999 (arithmetic in the test)
+//  HCT     0.434             0.0104    2       as semaglutide (ICRP 89); NO tirzepatide blood:plasma value
+//                                              exists in the EPAR sections read (gaps_D3): ASSUMED 1 - Hct
+//  FU      0.0094            0.0030    1       EMA Mounjaro EPAR: 99.06 % bound in human plasma at 50 nM,
+//                                              albumin, no AGP (gaps_D3, EPAR read by WebFetch extraction);
+//                                              u JUDGMENT: ultrafiltration/dialysis are unreliable for
+//                                              strongly bound peptides (Nordell 2026); effect negligible
+//  RINT    0.37              0.0271    2       as semaglutide
+//  CL      0.0329 (73/70)^0.8 = 0.03403 L/h      1  Schneck 2024 Table 3, ABSOLUTE (F fixed 0.8); u from the
+//                                              CI (0.0342 - 0.0313)/3.92 = 0.00074 (weight exponent fixed,
+//                                              no uncertainty)
+//  CLREN   0                 0         1       label: "Intact tirzepatide is not observed in urine or
+//                                              feces"; EPAR: excretion of the intact molecule does not occur.
+//                                              (Free drug is filterable, fu x GFR is of the order of the total
+//                                              clearance, but the filtered peptide is catabolised.)
+//  F       0.80              0.040     1       label and EPAR: mean absolute bioavailability 80 % (IV study,
+//                                              healthy); u JUDGMENT (5 % relative; no CI in the sources read)
+//  KA      0.0373 /h         0.00436   1       Schneck 2024 Table 3 (CI 0.0289-0.0460); IIV 22.5 %, shrinkage 57 %
+//  Q       0.126 (73/70)^0.8 = 0.1303 L/h        3  Schneck 2024, ABSOLUTE; u from the CI (0.144 - 0.101)/3.92
+//                                              = 0.0110; FITTED OBSERVABLE of the exchange
+//
+// Population volume at 73 kg: (Vc + Vp) = 6.45 L/70 kg x 73/70 = 6.73 L (the fat-mass
+// fraction 0.482 of the adjusted weight is not applied: for the reference man it changes
+// the scaling by a few per cent; stated, not computed).
+
+use darwin_pbpk::circ28::*
+use darwin_pbpk::circ28_kp::*
+use darwin_pbpk::circ28_drug::*
+use darwin_pbpk::circ28_drug_semaglutide::*
+use math::pure::{exp, ln}
+
+pub fn tirz_wt_ratio() -> f64 { return 73.0 / 70.0 }
+pub fn tirz_wexp() -> f64 { return 0.8 }
+pub fn tirz_cl_ref() -> f64 { return 0.0329 }
+pub fn tirz_u_cl_ref() -> f64 { return 0.000740 }        // (0.0342 - 0.0313) / 3.92
+pub fn tirz_q_ref() -> f64 { return 0.126 }
+pub fn tirz_u_q_ref() -> f64 { return 0.01097 }          // (0.144 - 0.101) / 3.92
+pub fn tirz_f() -> f64 { return 0.80 }
+pub fn tirz_u_f() -> f64 { return 0.040 }
+pub fn tirz_f_rel() -> f64 { return 0.8 * (1.0 - 0.181) }
+pub fn tirz_ka() -> f64 { return 0.0373 }
+pub fn tirz_u_ka() -> f64 { return 0.004362 }            // (0.0460 - 0.0289) / 3.92
+pub fn tirz_vc_ref() -> f64 { return 2.47 }
+pub fn tirz_vp_ref() -> f64 { return 3.98 }
+pub fn tirz_fu() -> f64 { return 0.0094 }
+pub fn tirz_u_fu() -> f64 { return 0.0030 }
+pub fn tirz_mw() -> f64 {
+    return 225.0 * 12.011 + 348.0 * 1.008 + 48.0 * 14.007 + 68.0 * 15.999
+}
+
+pub fn tirz_theta_into(th: &![f64; 9], u: &![f64; 9]) with Mut, Div, Panic {
+    let sw = pep_pow(tirz_wt_ratio(), tirz_wexp())
+    (*th)[PT_MW] = tirz_mw()
+    (*th)[PT_HCT] = pep_hct()
+    (*th)[PT_FU] = tirz_fu()
+    (*th)[PT_RINT] = pep_rint()
+    (*th)[PT_CL] = tirz_cl_ref() * sw
+    (*th)[PT_CLREN] = 0.0
+    (*th)[PT_F] = tirz_f()
+    (*th)[PT_KA] = tirz_ka()
+    (*th)[PT_Q] = tirz_q_ref() * sw
+    (*u)[PT_MW] = 0.0
+    (*u)[PT_HCT] = pep_u_hct()
+    (*u)[PT_FU] = tirz_u_fu()
+    (*u)[PT_RINT] = pep_u_rint()
+    (*u)[PT_CL] = tirz_u_cl_ref() * sw
+    (*u)[PT_CLREN] = 0.0
+    (*u)[PT_F] = tirz_u_f()
+    (*u)[PT_KA] = tirz_u_ka()
+    (*u)[PT_Q] = tirz_u_q_ref() * sw
+}
