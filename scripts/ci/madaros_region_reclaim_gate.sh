@@ -166,6 +166,14 @@ MUTATIONS=(
   "seqpush madaros_region_reclaim_barrier_paths.sio 1"
   "rawwrite madaros_region_reclaim_barrier_paths.sio 6"
   "call madaros_region_reclaim_cast_xor.sio 1"
+  # Since region exits trust declared numeric types (numeric provenance,
+  # ir/lower.sio rgn_copy_cost) the explicit __rgn_barrier calls of the cast
+  # hook are the ONLY thing that keeps a reference encoded in an f64 / i64
+  # result or carried slot alive. 3: all three aggregate cases fail and the
+  # last one wins; 2: the Seq<i64> case stays protected by the seqpush
+  # barrier (codegen, not `call`), the f64 return does not.
+  "call madaros_region_reclaim_encoded_aggregate.sio 3"
+  "call madaros_region_reclaim_encoded_scalar.sio 2"
   "syscall madaros_region_reclaim_syscall_escape.sio 2"
 )
 for m in "${MUTATIONS[@]}"; do
