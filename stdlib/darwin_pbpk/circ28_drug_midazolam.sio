@@ -54,30 +54,23 @@
 //                                                              oral dose)
 //  tlag     0         -        0      -                       unused
 //
-// OBSERVABLES USED TO FIT (one per fitted parameter; these are NOT validations):
-//   V_ss     50.2 L, u 11.8 L.  Heizmann, Eckert, Ziegler 1983 Br J Clin Pharmacol 16
-//            Suppl 1:43S (PMC1428091), six volunteers, 0.15 mg/kg IV, two-compartment
-//            fit: "apparent volume of distribution at steady-state 50.2 l". The
-//            abstract has no SD. The uncertainty is range/sqrt(12) of [50.2 L, 91 L]:
-//            91 L = 1.3 L/kg x 70 kg, the Vd(area) of young men in Greenblatt 1984
-//            (PMID 6742481), an upper bound of V_ss because Vd(area) >= V_ss. The
-//            70 kg is an assumption. The two sources differ by a factor of 1.8.
-//            The unscaled Rodgers-Rowland Kp gives 78.9 L, inside that range.
-//   CL_iv    22.2 L/h (370 mL/min), u 1.53 L/h.  Thummel 1996 Clin Pharmacol Ther
-//            59:491 (PMID 8646820): 370 +/- 114 mL/min (mean +/- SD, n = 20 healthy
-//            adults, 1 mg IV). u = SD/sqrt(20). Taken as PLASMA clearance (the paper
-//            reports it for the drug measured in plasma; not checked against the
-//            full text).
-//   Fg       0.57, u 0.0805.  Paine 1996 Clin Pharmacol Ther 60:14 (PMID 8689807):
-//            fraction of an intraduodenal dose metabolised on passing the mucosa,
-//            0.43 +/- 0.18 (n = 5 liver-transplant recipients in the anhepatic
-//            phase); Fg = 1 - 0.43; u = 0.18/sqrt(5).
-//   Tmax     1.00 h, u 0.236 h.  Greenblatt 1986 Anesth Analg 65:176 (PMID 2935051):
-//            15 mg oral, six subjects, three trials that the paper reports as not
-//            different (control, cimetidine, ranitidine): time of peak 0.65, 1.45,
-//            0.90 h. Pooled mean 1.00 h; u = SD of the three trial means / sqrt(3).
-//            The spread of three trials stands in for an uncertainty that the
-//            abstract does not give (the individual SDs are not in the abstract).
+// OBSERVABLES USED TO FIT (one per fitted parameter; these are NOT validations).
+// Each is a POOLED estimate computed in Sounio (mdz_pool; printed by the test, section S0):
+//   mean = sum n_i m_i / sum n_i;  sw = sqrt(sum (n_i-1) s_i^2 / sum (n_i-1)) over studies with an SD;
+//   SE_w = sw/sqrt(N);  sb = SD of the k study means;  SE_b = sb/sqrt(k);  u = max(SE_w, SE_b).
+//   CL_iv    24.22 L/h, u 2.40 L/h (k = 4, N = 58): Thummel 1996 370 +/- 114 mL/min (n 20);
+//            Gorski 1998 28 +/- 9 L/h (n 16); Allonen 1981 283 +/- 43 mL/min (n 6, "+/-"
+//            assumed SD); Hohmann 2015 428 mL/min [396, 462] (n 16, SD from the CI).
+//   V_ss     67.1 L, u 11.65 L (k = 2, N = 22): Heizmann 1983 50.2 L (n 6, no SD in the
+//            abstract); Hohmann 2015 73.5 L [62.1, 87.1] (n 16). u = SE_b (two studies).
+//   Tmax     two dose forms, each fitted to its own pooled Tmax:
+//            solution 0.4645 h, u 0.065 h (Hohmann 2015 0.50 h, SD = range/sqrt12; Smith 1981 0.37 h);
+//            tablet   0.9291 h, u 0.094 h (Smith 1981 0.74 h, Backman 1995 1.0 h, Greenblatt 1986 1.0 h).
+//            ka = 2.157170 /h (solution) and 0.852464 /h (tablet), by bisection on the kernel run.
+//   Fg       0.57, u 0.0805. ONE study: Paine 1996 Clin Pharmacol Ther 60:14 (PMID 8689807),
+//            0.43 +/- 0.18 (n 5) fraction metabolised in the gut wall during the anhepatic phase of
+//            liver transplant; Fg = 1 - 0.43. Thummel 1996 (EG 0.43) and Gorski 1998 (Fg 0.42) are not
+//            pooled with it: |0.57 - 0.42| exceeds 2 SE of the difference (test, section S0).
 //
 // CLOSED FORMS USED BY THE FITS (kernel equations, tested in
 // tests/run-pass/circ28_kernel_identities.sio):
@@ -134,20 +127,194 @@ pub fn mdz_gut_area() -> f64 { return 6600.0 }        // cm2 (0.66 m2)
 pub fn mdz_psgut() -> f64 { return mdz_peff() * mdz_gut_area() * 3.6 }   // L/h = cm3/s * 3.6
 pub fn mdz_u_psgut() -> f64 { return 1.5 * mdz_psgut() / 3.4641016151377544 }
 
+// ---- pooling of study means (done in Sounio; the test prints every table) ----
+// A pooled observable is built from the healthy-adult studies that report a mean, an
+// SD (when the source gives one) and n:
+//   mean = sum n_i m_i / sum n_i                         (n-weighted mean of the study means)
+//   sw   = sqrt( sum (n_i - 1) s_i^2 / sum (n_i - 1) )   over the studies that give an SD
+//   se_w = sw / sqrt(sum n_i)                            (pooled standard error; all n_i)
+//   sb   = SD of the k study means (unweighted, k - 1)   (between-study SD)
+//   se_b = sb / sqrt(k)
+//   u    = max(se_w, se_b)                               (the standard uncertainty used)
+// A study without an SD (s_i <= 0) enters the mean and sb but not sw. sb is also the
+// "between-study SD" of the distribution rows of the test.
+pub struct MdzPool {
+    pub mean: f64,
+    pub n_tot: f64,
+    pub k: i32,
+    pub sw: f64,
+    pub se_w: f64,
+    pub sb: f64,
+    pub se_b: f64,
+    pub u: f64,
+}
+
+pub fn mdz_pool(m: &[f64; 8], s: &[f64; 8], n: &[f64; 8], k: i32) -> MdzPool with Mut, Div, Panic {
+    var sn = 0.0
+    var sm = 0.0
+    var mm = 0.0
+    var num = 0.0
+    var den = 0.0
+    var i: i32 = 0
+    while i < k {
+        sn = sn + (*n)[i]
+        sm = sm + (*n)[i] * (*m)[i]
+        mm = mm + (*m)[i]
+        if (*s)[i] > 0.0 && (*n)[i] > 1.0 {
+            num = num + ((*n)[i] - 1.0) * (*s)[i] * (*s)[i]
+            den = den + ((*n)[i] - 1.0)
+        }
+        i = i + 1
+    }
+    let kf = k as f64
+    let mbar = mm / kf
+    var ss = 0.0
+    i = 0
+    while i < k {
+        let dv = (*m)[i] - mbar
+        ss = ss + dv * dv
+        i = i + 1
+    }
+    var sb = 0.0
+    if k > 1 { sb = cd_sqrt(ss / (kf - 1.0)) }
+    var sw = 0.0
+    if den > 0.0 { sw = cd_sqrt(num / den) }
+    let se_w = sw / cd_sqrt(sn)
+    let se_b = sb / cd_sqrt(kf)
+    var u = se_w
+    if se_b > u { u = se_b }
+    return MdzPool { mean: sm / sn, n_tot: sn, k: k, sw: sw, se_w: se_w, sb: sb, se_b: se_b, u: u }
+}
+
+// SD of the individuals from a geometric mean and its 95% CI (n subjects):
+// SE of ln = (ln hi - ln lo) / (2 t), SD = gm sqrt(n) SE (small-CV approximation).
+// t = 2.1314 is the two-sided 5% point for 15 df (Hohmann 2015, n = 16).
+pub fn mdz_sd_ci(gm: f64, lo: f64, hi: f64, n: f64) -> f64 with Mut, Div, Panic {
+    return gm * cd_sqrt(n) * (ln(hi) - ln(lo)) / (2.0 * 2.1314)
+}
+
+// ---- IV plasma clearance, L/h: healthy-adult studies with mean, SD, n -------
+//   0 Thummel 1996 (PMID 8646820, abstract): 370 +/- 114 mL/min (mean +/- SD), n = 20
+//   1 Gorski 1998 (PMID 9728893, abstract): 28 +/- 9 L/h, n = 16 (8 M, 8 F)
+//   2 Allonen 1981 CPT 30:653 (abstract as quoted in midazolam_fulltext_check.md): plasma
+//     CL 283 +/- 43 mL/min, n = 6 (the "+/-" is taken to be an SD: the quoted text does not say)
+//   3 Hohmann 2015 BJCP 79:278 (PMC4309633 Table 1): 1 mg IV, CL 428 [396, 462] mL/min
+//     (geometric mean, 95% CI), n = 16; SD from the CI by mdz_sd_ci
+// NOT pooled (reason): Heizmann 1983 323 mL/min and Lappin 2006 20.4 L/h (no SD, n not in the
+// abstract), Smith 1981 0.383 +/- 0.094 L/kg/h and Greenblatt 1986 10.8-12.3 mL/min/kg (body
+// weight not in the abstract), Quinney 2008 (elderly). Thummel's CL is not stated to be plasma
+// or blood in the abstract; the four are treated as plasma clearances.
+pub fn mdz_cl_studies(m: &![f64; 8], s: &![f64; 8], n: &![f64; 8]) -> i32 with Mut, Div, Panic {
+    (*m)[0] = 370.0 * 0.06
+    (*s)[0] = 114.0 * 0.06
+    (*n)[0] = 20.0
+    (*m)[1] = 28.0
+    (*s)[1] = 9.0
+    (*n)[1] = 16.0
+    (*m)[2] = 283.0 * 0.06
+    (*s)[2] = 43.0 * 0.06
+    (*n)[2] = 6.0
+    (*m)[3] = 428.0 * 0.06
+    (*s)[3] = mdz_sd_ci(428.0 * 0.06, 396.0 * 0.06, 462.0 * 0.06, 16.0)
+    (*n)[3] = 16.0
+    return 4
+}
+
+// ---- V_ss, L ---------------------------------------------------------------
+//   0 Heizmann 1983 (PMID 6138080, abstract): 50.2 L, n = 6, no SD in the abstract
+//   1 Hohmann 2015 (PMC4309633 Table 1): 1 mg IV, Vss 73.5 [62.1, 87.1] L, n = 16
+// NOT pooled: Lappin 2006 (V 75 L at 7.5 mg, 145 L microdose; which volume is not stated),
+// Vd(area) values (Greenblatt, per kg), Quinney 2008 (elderly).
+pub fn mdz_vss_studies(m: &![f64; 8], s: &![f64; 8], n: &![f64; 8]) -> i32 with Mut, Div, Panic {
+    (*m)[0] = 50.2
+    (*s)[0] = 0.0 - 1.0
+    (*n)[0] = 6.0
+    (*m)[1] = 73.5
+    (*s)[1] = mdz_sd_ci(73.5, 62.1, 87.1, 16.0)
+    (*n)[1] = 16.0
+    return 2
+}
+
+// ---- Tmax by dose form, h: medians treated as means --------------------------------
+// SOLUTION (form 0): 0 Hohmann 2015 3 mg solution: median 0.50 h, range 0.25-0.75, n = 16 (SD
+// taken as range / sqrt(12)); 1 Smith 1981 (PMID 6116606): 10 mg solution 0.37 +/- 0.45 h, n = 6.
+// Qiu 2024 (median 0.51 h) is left out of the fit: it is a validation row.
+// TABLET (form 1): 0 Smith 1981 10 mg tablet 0.74 +/- 0.45 h, n = 6; 1 Backman 1995 (PMID
+// 7582388) 15 mg, placebo phase, median 1.0 h (range 0.5-2), n = 10 (SD range / sqrt(12));
+// 2 Greenblatt 1986 15 mg: 0.65, 1.45, 0.90 h on three occasions in 6 subjects, mean 1.0 h,
+// no SD. Ahonen 1995 (median 1.25 h) is left out of the fit: it is a validation row.
+// Formulation is stated for Smith, Hohmann and Qiu; for Backman 1995, Greenblatt 1986 and
+// Ahonen 1995 the abstracts do not name it and "tablet" is an assignment (dose strength).
+pub fn mdz_tmax_studies(form: i32, m: &![f64; 8], s: &![f64; 8], n: &![f64; 8]) -> i32 with Mut, Div, Panic {
+    if form == 0 {
+        (*m)[0] = 0.5
+        (*s)[0] = 0.5 / 3.4641016151377544
+        (*n)[0] = 16.0
+        (*m)[1] = 0.37
+        (*s)[1] = 0.45
+        (*n)[1] = 6.0
+        return 2
+    }
+    (*m)[0] = 0.74
+    (*s)[0] = 0.45
+    (*n)[0] = 6.0
+    (*m)[1] = 1.0
+    (*s)[1] = 1.5 / 3.4641016151377544
+    (*n)[1] = 10.0
+    (*m)[2] = 1.0
+    (*s)[2] = 0.0 - 1.0
+    (*n)[2] = 6.0
+    return 3
+}
+
+pub fn mdz_pool_cl() -> MdzPool with Mut, Div, Panic {
+    var m: [f64; 8] = [0.0; 8]
+    var s: [f64; 8] = [0.0; 8]
+    var n: [f64; 8] = [0.0; 8]
+    let k = mdz_cl_studies(&!m, &!s, &!n)
+    return mdz_pool(&m, &s, &n, k)
+}
+
+pub fn mdz_pool_vss() -> MdzPool with Mut, Div, Panic {
+    var m: [f64; 8] = [0.0; 8]
+    var s: [f64; 8] = [0.0; 8]
+    var n: [f64; 8] = [0.0; 8]
+    let k = mdz_vss_studies(&!m, &!s, &!n)
+    return mdz_pool(&m, &s, &n, k)
+}
+
+pub fn mdz_pool_tmax(form: i32) -> MdzPool with Mut, Div, Panic {
+    var m: [f64; 8] = [0.0; 8]
+    var s: [f64; 8] = [0.0; 8]
+    var n: [f64; 8] = [0.0; 8]
+    let k = mdz_tmax_studies(form, &!m, &!s, &!n)
+    return mdz_pool(&m, &s, &n, k)
+}
+
 // ---- observables the fits are tied to (value, standard uncertainty) -------
-pub fn mdz_obs_vss() -> f64 { return 50.2 }          // L
-pub fn mdz_u_vss() -> f64 { return 11.8 }
-pub fn mdz_obs_cl() -> f64 { return 22.2 }           // L/h, plasma, 370 mL/min
-pub fn mdz_u_cl() -> f64 { return 1.53 }
+pub fn mdz_obs_vss() -> f64 with Mut, Div, Panic { return mdz_pool_vss().mean }          // L
+pub fn mdz_u_vss() -> f64 with Mut, Div, Panic { return mdz_pool_vss().u }
+pub fn mdz_obs_cl() -> f64 with Mut, Div, Panic { return mdz_pool_cl().mean }            // L/h, plasma
+pub fn mdz_u_cl() -> f64 with Mut, Div, Panic { return mdz_pool_cl().u }
+// Fg stays ONE study: Paine 1996 (direct measurement of the gut-wall extraction in anhepatic
+// patients, not derived through a hepatic-extraction estimate). Thummel's EG 0.43 (0.57)
+// and Gorski's Fg 0.42 are mass-balance estimates; they differ by 0.15 with
+// 2 sqrt(se1^2 + se2^2) = 0.147, i.e. they do NOT quite agree within 2 SE (test prints it),
+// so they are not pooled; Gorski and Hohmann stay as validations of this fitted value.
 pub fn mdz_obs_fg() -> f64 { return 0.57 }
 pub fn mdz_u_fg() -> f64 { return 0.0805 }
-pub fn mdz_obs_tmax() -> f64 { return 1.00 }         // h, oral
-pub fn mdz_u_tmax() -> f64 { return 0.2363 }
+pub fn mdz_obs_tmax(form: i32) -> f64 with Mut, Div, Panic { return mdz_pool_tmax(form).mean }   // h
+pub fn mdz_u_tmax(form: i32) -> f64 with Mut, Div, Panic { return mdz_pool_tmax(form).u }
 
-// ka (1/h) solving Tmax(ka) = mdz_obs_tmax() on the grid of mdz_cfg_oral, found
-// by bisection (30 halvings of [0.3, 4]) on the kernel run with the fitted
-// parameters; see tests for the re-check.
-pub fn mdz_ka_fit() -> f64 { return 0.736164 }
+// Two named dose forms: 0 solution, 1 tablet. Each has its own ka, found by bisection
+// (30 halvings of [0.3, 40] /h) on the kernel run with the fitted parameters; the test
+// re-checks the Tmax each gives.
+pub fn mdz_form_sol() -> i32 { return 0 }
+pub fn mdz_form_tab() -> i32 { return 1 }
+pub fn mdz_ka_fit(form: i32) -> f64 {
+    if form == 0 { return 2.157170 }   // solution: Tmax 0.4645 h
+    return 0.852464                    // tablet:   Tmax 0.9291 h
+}
 
 // ---- run configuration ----------------------------------------------------
 // Grid 0.05 h to 3 h, 0.5 h to 24 h (102 steps); terminal fit on 8..24 h.
@@ -286,9 +453,9 @@ pub fn mdz_fit_record(d: &!Circ28Drug) with Mut, Div, Panic, Epistemic {
     let ua = dc_dcl * mdz_u_cl()
     let ub = dc_df * mdz_u_fg()
     let u_int = cd_sqrt(ua * ua + ub * ub)
-    circ28_drug_set(d, CD_KPSC, th[CD_KPSC], u_kpsc, CD_STATUS_FITTED, "fitted to Vss 50.2 L (Heizmann1983); u from u(Vss)")
+    circ28_drug_set(d, CD_KPSC, th[CD_KPSC], u_kpsc, CD_STATUS_FITTED, "fitted to pooled Vss (Heizmann1983, Hohmann2015); u from u(Vss)")
     circ28_drug_set(d, CD_CLGUT, th[CD_CLGUT], u_gut, CD_STATUS_FITTED, "fitted to Fg 0.57 = 1 - 0.43 intraduodenal extraction (Paine1996); u from u(Fg)")
-    circ28_drug_set(d, CD_CLINT, th[CD_CLINT], u_int, CD_STATUS_FITTED, "fitted to plasma CL 22.2 L/h (Thummel1996) given clgut; u from u(CL), u(Fg)")
+    circ28_drug_set(d, CD_CLINT, th[CD_CLINT], u_int, CD_STATUS_FITTED, "fitted to pooled plasma CL (Thummel1996, Gorski1998, Allonen1981, Hohmann2015) given clgut; u from u(CL), u(Fg)")
 }
 
 // Tmax of a 1 mg oral run with the record's parameters and the given ka. One run per
@@ -307,13 +474,20 @@ pub fn mdz_tmax_at(d: &Circ28Drug, ka: f64) -> f64 with Mut, Div, Panic, Epistem
     return r.tmax
 }
 
-pub fn mdz_ka_record(d: &!Circ28Drug) with Mut, Div, Panic, Epistemic {
-    // dTmax/dka by central difference, relative step 1e-3
-    let h = 1.0e-3 * mdz_ka_fit()
-    let tp = mdz_tmax_at(d, mdz_ka_fit() + h)
-    let tm = mdz_tmax_at(d, mdz_ka_fit() - h)
+// Sets CD_KA of the record to the ka of a dose form (0 solution, 1 tablet), with u from
+// u(Tmax of the form) / |dTmax/dka|; the record then describes that form. The slope is a
+// central difference, relative step 1e-3, made with one run per function.
+pub fn mdz_ka_record(d: &!Circ28Drug, form: i32) with Mut, Div, Panic, Epistemic {
+    let ka = mdz_ka_fit(form)
+    let h = 1.0e-3 * ka
+    let tp = mdz_tmax_at(d, ka + h)
+    let tm = mdz_tmax_at(d, ka - h)
     let slope = (tp - tm) / (2.0 * h)
-    circ28_drug_set(d, CD_KA, mdz_ka_fit(), mdz_u_tmax() / cd_abs_m(slope), CD_STATUS_FITTED, "fitted to oral Tmax 1.00 h (Greenblatt1986, 3 trials pooled); u from u(Tmax) / |dTmax/dka|")
+    var prov = "fitted to the SOLUTION Tmax (Hohmann2015, Smith1981 pooled); u from u(Tmax) / |dTmax/dka|"
+    if form == 1 {
+        prov = "fitted to the TABLET Tmax (Smith1981, Backman1995, Greenblatt1986 pooled); u from u(Tmax) / |dTmax/dka|"
+    }
+    circ28_drug_set(d, CD_KA, ka, mdz_u_tmax(form) / cd_abs_m(slope), CD_STATUS_FITTED, prov)
 }
 
 pub fn mdz_measured_record(d: &!Circ28Drug) with Mut, Div, Panic, Epistemic {
@@ -335,7 +509,7 @@ pub fn mdz_measured_record(d: &!Circ28Drug) with Mut, Div, Panic, Epistemic {
 pub fn mdz_drug_into(d: &!Circ28Drug) with Mut, Div, Panic, Epistemic {
     mdz_measured_record(d)
     mdz_fit_record(d)
-    mdz_ka_record(d)
+    mdz_ka_record(d, 0)
 }
 
 fn cd_abs_m(x: f64) -> f64 {
@@ -384,7 +558,7 @@ pub struct MdzBudget {
     pub runs: i32,
 }
 
-pub fn mdz_budget(d: &Circ28Drug, dose_mg: f64) -> MdzBudget with Mut, Div, Panic, Epistemic {
+pub fn mdz_budget(d: &Circ28Drug, dose_mg: f64, form: i32) -> MdzBudget with Mut, Div, Panic, Epistemic {
     let thb = circ28_drug_theta(d)
     let ka0 = thb[CD_KA]
     let slope = mdz_tmax_slope(thb)
@@ -396,7 +570,7 @@ pub fn mdz_budget(d: &Circ28Drug, dose_mg: f64) -> MdzBudget with Mut, Div, Pani
     z0[4] = mdz_obs_vss()
     z0[5] = mdz_obs_cl()
     z0[6] = mdz_obs_fg()
-    z0[7] = mdz_obs_tmax()
+    z0[7] = mdz_obs_tmax(form)
     z0[8] = thb[CD_PSGUT]
     var u: [f64; 9] = [0.0; 9]
     u[0] = mdz_u_logp()
@@ -406,7 +580,7 @@ pub fn mdz_budget(d: &Circ28Drug, dose_mg: f64) -> MdzBudget with Mut, Div, Pani
     u[4] = mdz_u_vss()
     u[5] = mdz_u_cl()
     u[6] = mdz_u_fg()
-    u[7] = mdz_u_tmax()
+    u[7] = mdz_u_tmax(form)
     u[8] = mdz_u_psgut()
     let o0 = mdz_eval(z0, thb, ka0, slope, dose_mg)
     var sa: [f64; 9] = [0.0; 9]
