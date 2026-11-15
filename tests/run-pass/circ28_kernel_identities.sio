@@ -20,6 +20,10 @@
 //   T6 a plasma-confined drug (bp 0.55, kp 0.05) has a plasma volume of
 //      distribution of 6.099 L, below the 8.60 L floor of the star kernel.
 //
+//   T8 gut wall. (a) gut-wall clearance only: AUC_iv = Dose / (Q_gut Eg) and
+//      AUC_oral / AUC_iv = Fg, with Fg and Eg from circ28_gut_availability
+//      and circ28_gut_extraction. (b) gut wall and liver: AUC_iv = Dose /
+//      [Q_gut Eg + Eh (Q_h - Q_gut Eg)] and AUC_oral / AUC_iv = Fg (1 - Eh).
 //   T7 10 mg given as an infusion over the first step of a coarse grid
 //      (0.25 h): no state goes below -1e-12 mg/L in 100 h and mass is
 //      conserved. Measured for the record: Crank-Nicolson reached -8.4 mg/L
@@ -86,7 +90,7 @@ fn ck_run(p: Circ28Params, route: i32, dt: f64, horizon: f64) -> CkRun with Mut,
         circ28_step(&!s, p, &sys, 0.0, oral, &!el)
         t = t + dt
     }
-    return CkRun { auc_ven: el.auc_ven, input: input, mass_end: circ28_total_mass(&s, p), el_total: el.hepatic + el.formed + el.renal + el.plasma }
+    return CkRun { auc_ven: el.auc_ven, input: input, mass_end: circ28_total_mass(&s, p), el_total: el.hepatic + el.formed + el.renal + el.plasma + el.gut }
 }
 
 fn main() -> i32 with IO, Mut, Div, Panic {
@@ -160,6 +164,27 @@ fn main() -> i32 with IO, Mut, Div, Panic {
         i = i + 1
     }
     fails = fails + ck_rel("V_ss plasma (L)", circ28_vss_plasma(p6), 0.55 * 5.3000119 + 0.05 * 63.687988, 1.0e-6)
+
+    println("T8 gut wall")
+    var p8 = ck_set()
+    p8.clint_gut = 300.0
+    let fg = circ28_gut_availability(p8)
+    let eg = circ28_gut_extraction(p8)
+    print("  Fg = "); print(fg); print("  Eg = "); println(eg)
+    let r8i = ck_run(p8, 0, 0.05, 600.0)
+    let r8o = ck_run(p8, 1, 0.05, 600.0)
+    fails = fails + ck_rel("gut only: eliminated + remaining (mg)", r8i.el_total + r8i.mass_end, 10.0, 1.0e-10)
+    fails = fails + ck_rel("gut only: AUC iv (mg.h/L)", r8i.auc_ven, 10.0 / (p8.q[8] * eg), 1.0e-6)
+    fails = fails + ck_rel("gut only: F = Fg", (r8o.auc_ven / r8o.input) / (r8i.auc_ven / 10.0), fg, 1.0e-6)
+    p8.clint = 500.0
+    let eh8 = circ28_hepatic_extraction(p8)
+    let cl8 = circ28_splanchnic_clearance(p8)
+    print("  Eh = "); print(eh8); print("  CL_blood (L/h) = "); println(cl8)
+    let r8bi = ck_run(p8, 0, 0.05, 400.0)
+    let r8bo = ck_run(p8, 1, 0.05, 400.0)
+    fails = fails + ck_rel("gut + liver: eliminated + remaining (mg)", r8bi.el_total + r8bi.mass_end, 10.0, 1.0e-10)
+    fails = fails + ck_rel("gut + liver: AUC iv (mg.h/L)", r8bi.auc_ven, 10.0 / cl8, 1.0e-6)
+    fails = fails + ck_rel("gut + liver: F = Fg (1 - Eh)", (r8bo.auc_ven / r8bo.input) / (r8bi.auc_ven / 10.0), fg * (1.0 - eh8), 1.0e-6)
 
     println("T7 dose as a one-step infusion, coarse step")
     var p7 = ck_set()
