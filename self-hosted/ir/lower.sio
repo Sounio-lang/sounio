@@ -3217,6 +3217,24 @@ var LOWER_MONOLITHIC_PUBLIC_PROBE_TRACE: bool = false
 // this instead of a call to a name that binds to nothing (which left its dst vreg
 // unwritten, i.e. reading 0). See lowerer_lower_fn_mut and the ExprCall lowering.
 var LOWER_KERNEL_TID_REG: i64 = 0 - 1
+// Wide-integer call ABI: the callee's packed wide_param_limbs for the argument
+// list about to be lowered (args shifted past a method receiver). Armed by the
+// direct and method call sites, consumed and cleared on entry by
+// lower_expr_args_masked_borrow_ref so nested argument lists never inherit it.
+var LOWER_WIDE_ARG_LIMBS: i64 = 0
+// Wide-integer return ABI for the function being lowered (IrFunction
+// wide_return_bits): its fn id, the hidden out-array param register, and the
+// return width/signedness. LOWER_WIDE_RET_FN is -1 outside such a function.
+var LOWER_WIDE_RET_FN: i64 = 0 - 1
+var LOWER_WIDE_RET_OUT: i64 = 0 - 1
+var LOWER_WIDE_RET_BITS: i64 = 0
+var LOWER_WIDE_RET_SIGNED: i64 = 0
+// Width facts of the tail expression of the block most recently lowered,
+// read while its locals are still in scope (the fn-body tail is the last one
+// written before the implicit return).
+var LOWER_BLOCK_TAIL_WIDE_BITS: i64 = 0
+var LOWER_BLOCK_TAIL_WIDE_SIGNED: i64 = 0
+var LOWER_BLOCK_TAIL_NARROW: bool = false
 // #2766: the scrutinee of the match being lowered is a reference local, so a
 // struct-pattern arm reads its fields through the reference (field_get label 1).
 var LOWER_MATCH_SCRUT_IS_REF: bool = false
@@ -4167,6 +4185,9 @@ fn lowerer_seed_module_from_summary(lo_in: Lowerer, summary: &IrProgramSummary) 
         func.returns_float = ir_fn_get(&(*summary.module), i as usize).returns_float
         func.return_kn_value_float = ir_fn_get(&(*summary.module), i as usize).return_kn_value_float
         func.return_fixed_array_len = ir_fn_get(&(*summary.module), i as usize).return_fixed_array_len
+        func.wide_param_limbs = ir_fn_get(&(*summary.module), i as usize).wide_param_limbs
+        func.wide_return_bits = ir_fn_get(&(*summary.module), i as usize).wide_return_bits
+        func.wide_return_signed = ir_fn_get(&(*summary.module), i as usize).wide_return_signed
         func.return_struct_name = ir_fn_get(&(*summary.module), i as usize).return_struct_name
         func.prof_counter_id = ir_fn_get(&(*summary.module), i as usize).prof_counter_id
         func.hyper_algebra_kind = ir_fn_get(&(*summary.module), i as usize).hyper_algebra_kind
@@ -4555,9 +4576,13 @@ fn lowerer_preseed_dep_items_into_acc_mut(
                                         fn_slot_sig.return_kn_value_float = lower_opt_type_knowledge_value_float(&(*fd).return_type)
                                         fn_slot_sig.return_fixed_array_len = lower_opt_type_return_fixed_array_code(&(*fd).return_type)
                                         fn_slot_sig.return_struct_name = lower_opt_type_return_layout_name(&(*fd).return_type)
+                                        fn_slot_sig.wide_return_bits = lower_opt_type_wide_bits(&(*fd).return_type)
+                                        fn_slot_sig.wide_return_signed = lower_opt_type_wide_signed(&(*fd).return_type)
                                         lower_record_option_box_return(fn_slot_sig.name, &(*fd).return_type)
                                         fn_slot_sig.param_count = ir_param_list_count_ref(&(*fd).params)
                                         fn_slot_sig.f128_param_mask = lower_f128_param_mask_of(&(*fd).params)
+                                        fn_slot_sig.wide_param_limbs = lower_wide_param_limbs_of(&(*fd).params)
+                                        if fn_slot_sig.wide_return_bits > 64 { fn_slot_sig.param_count = fn_slot_sig.param_count + 1 }
                                         fn_slot_sig.ref_struct_param_mask = lower_ref_struct_param_mask_of(&(*fd).params)
                                         fn_slot_sig.first_param_is_ref = lower_fn_first_param_is_ref(&(*fd).params)
                                         if strategy_sig == IR_STRATEGY_INSTRUMENTED {
@@ -4965,6 +4990,9 @@ fn lowerer_new_from_program_summary_flat(summary: &IrProgramSummaryFlat, epistem
         func.returns_float = ir_fn_get(&summary.module, i as usize).returns_float
         func.return_kn_value_float = ir_fn_get(&summary.module, i as usize).return_kn_value_float
         func.return_fixed_array_len = ir_fn_get(&summary.module, i as usize).return_fixed_array_len
+        func.wide_param_limbs = ir_fn_get(&summary.module, i as usize).wide_param_limbs
+        func.wide_return_bits = ir_fn_get(&summary.module, i as usize).wide_return_bits
+        func.wide_return_signed = ir_fn_get(&summary.module, i as usize).wide_return_signed
         func.return_struct_name = ir_fn_get(&summary.module, i as usize).return_struct_name
         func.prof_counter_id = ir_fn_get(&summary.module, i as usize).prof_counter_id
         func.hyper_algebra_kind = ir_fn_get(&summary.module, i as usize).hyper_algebra_kind
@@ -5258,9 +5286,13 @@ fn lowerer_preseed_fn_signature_mut(
     fn_slot.return_kn_value_float = lower_opt_type_knowledge_value_float(return_type)
     fn_slot.return_fixed_array_len = lower_opt_type_return_fixed_array_code(return_type)
     fn_slot.return_struct_name = lower_opt_type_return_layout_name(return_type)
+    fn_slot.wide_return_bits = lower_opt_type_wide_bits(return_type)
+    fn_slot.wide_return_signed = lower_opt_type_wide_signed(return_type)
     lower_record_option_box_return(fn_slot.name, return_type)
     fn_slot.param_count = ir_param_list_count_ref(params)
     fn_slot.f128_param_mask = lower_f128_param_mask_of(params)
+    fn_slot.wide_param_limbs = lower_wide_param_limbs_of(params)
+    if fn_slot.wide_return_bits > 64 { fn_slot.param_count = fn_slot.param_count + 1 }
     fn_slot.ref_struct_param_mask = lower_ref_struct_param_mask_of(params)
     fn_slot.first_param_is_ref = lower_fn_first_param_is_ref(params)
     if strategy == IR_STRATEGY_INSTRUMENTED {
@@ -6594,9 +6626,13 @@ fn lowerer_preseed_fn_item_signature_mut(
         fn_slot_sig.return_kn_value_float = lower_opt_type_knowledge_value_float(&(*fd).return_type)
         fn_slot_sig.return_fixed_array_len = lower_opt_type_return_fixed_array_code(&(*fd).return_type)
         fn_slot_sig.return_struct_name = lower_opt_type_return_layout_name(&(*fd).return_type)
+        fn_slot_sig.wide_return_bits = lower_opt_type_wide_bits(&(*fd).return_type)
+        fn_slot_sig.wide_return_signed = lower_opt_type_wide_signed(&(*fd).return_type)
         lower_record_option_box_return(fn_slot_sig.name, &(*fd).return_type)
         fn_slot_sig.param_count = ir_param_list_count_ref(&(*fd).params)
         fn_slot_sig.f128_param_mask = lower_f128_param_mask_of(&(*fd).params)
+        fn_slot_sig.wide_param_limbs = lower_wide_param_limbs_of(&(*fd).params)
+        if fn_slot_sig.wide_return_bits > 64 { fn_slot_sig.param_count = fn_slot_sig.param_count + 1 }
         fn_slot_sig.ref_struct_param_mask = lower_ref_struct_param_mask_of(&(*fd).params)
         fn_slot_sig.first_param_is_ref = lower_fn_first_param_is_ref(&(*fd).params)
         if strategy_sig == IR_STRATEGY_INSTRUMENTED {
@@ -6818,9 +6854,13 @@ fn ir_fast_summary_preseed_fn_signature(
     fn_slot.return_kn_value_float = lower_opt_type_knowledge_value_float(return_type)
     fn_slot.return_fixed_array_len = lower_opt_type_return_fixed_array_code(return_type)
     fn_slot.return_struct_name = lower_opt_type_return_layout_name(return_type)
+    fn_slot.wide_return_bits = lower_opt_type_wide_bits(return_type)
+    fn_slot.wide_return_signed = lower_opt_type_wide_signed(return_type)
     lower_record_option_box_return(fn_slot.name, return_type)
     fn_slot.param_count = ir_param_list_count_ref(params)
     fn_slot.f128_param_mask = lower_f128_param_mask_of(params)
+    fn_slot.wide_param_limbs = lower_wide_param_limbs_of(params)
+    if fn_slot.wide_return_bits > 64 { fn_slot.param_count = fn_slot.param_count + 1 }
     fn_slot.ref_struct_param_mask = lower_ref_struct_param_mask_of(params)
     fn_slot.first_param_is_ref = lower_fn_first_param_is_ref(params)
     if strategy == IR_STRATEGY_INSTRUMENTED {
@@ -6956,9 +6996,13 @@ fn ir_fast_summary_preseed_fn_signature_owned(
     fn_slot.return_kn_value_float = lower_opt_type_knowledge_value_float(return_type)
     fn_slot.return_fixed_array_len = lower_opt_type_return_fixed_array_code(return_type)
     fn_slot.return_struct_name = lower_opt_type_return_layout_name(return_type)
+    fn_slot.wide_return_bits = lower_opt_type_wide_bits(return_type)
+    fn_slot.wide_return_signed = lower_opt_type_wide_signed(return_type)
     lower_record_option_box_return(fn_slot.name, return_type)
     fn_slot.param_count = ir_param_list_count_ref(params)
     fn_slot.f128_param_mask = lower_f128_param_mask_of(params)
+    fn_slot.wide_param_limbs = lower_wide_param_limbs_of(params)
+    if fn_slot.wide_return_bits > 64 { fn_slot.param_count = fn_slot.param_count + 1 }
     fn_slot.ref_struct_param_mask = lower_ref_struct_param_mask_of(params)
     fn_slot.first_param_is_ref = lower_fn_first_param_is_ref(params)
     if strategy == IR_STRATEGY_INSTRUMENTED {
@@ -7287,9 +7331,13 @@ pub fn lower_program_to_ir_summary_flat_owned_with_epistemic_ref(
                                 fn_slot.return_kn_value_float = lower_opt_type_knowledge_value_float(&(*fd).return_type)
                                 fn_slot.return_fixed_array_len = lower_opt_type_return_fixed_array_code(&(*fd).return_type)
                                 fn_slot.return_struct_name = lower_opt_type_return_layout_name(&(*fd).return_type)
+                                fn_slot.wide_return_bits = lower_opt_type_wide_bits(&(*fd).return_type)
+                                fn_slot.wide_return_signed = lower_opt_type_wide_signed(&(*fd).return_type)
                                 lower_record_option_box_return(fn_slot.name, &(*fd).return_type)
                                 fn_slot.param_count = ir_param_list_count_ref(&(*fd).params)
                                 fn_slot.f128_param_mask = lower_f128_param_mask_of(&(*fd).params)
+                                fn_slot.wide_param_limbs = lower_wide_param_limbs_of(&(*fd).params)
+                                if fn_slot.wide_return_bits > 64 { fn_slot.param_count = fn_slot.param_count + 1 }
                                 fn_slot.ref_struct_param_mask = lower_ref_struct_param_mask_of(&(*fd).params)
                                 fn_slot.first_param_is_ref = lower_fn_first_param_is_ref(&(*fd).params)
                                 if strategy == IR_STRATEGY_INSTRUMENTED {
@@ -7389,9 +7437,13 @@ pub fn lower_program_to_ir_summary_flat_owned_with_epistemic_ref(
                                                         fn_slot.return_kn_value_float = lower_opt_type_knowledge_value_float(&(*fd).return_type)
                                                         fn_slot.return_fixed_array_len = lower_opt_type_return_fixed_array_code(&(*fd).return_type)
                                                         fn_slot.return_struct_name = lower_opt_type_return_layout_name(&(*fd).return_type)
+                                                        fn_slot.wide_return_bits = lower_opt_type_wide_bits(&(*fd).return_type)
+                                                        fn_slot.wide_return_signed = lower_opt_type_wide_signed(&(*fd).return_type)
                                                         lower_record_option_box_return(fn_slot.name, &(*fd).return_type)
                                                         fn_slot.param_count = ir_param_list_count_ref(&(*fd).params)
                                                         fn_slot.f128_param_mask = lower_f128_param_mask_of(&(*fd).params)
+                                                        fn_slot.wide_param_limbs = lower_wide_param_limbs_of(&(*fd).params)
+                                                        if fn_slot.wide_return_bits > 64 { fn_slot.param_count = fn_slot.param_count + 1 }
                                                         fn_slot.ref_struct_param_mask = lower_ref_struct_param_mask_of(&(*fd).params)
                                                         fn_slot.first_param_is_ref = lower_fn_first_param_is_ref(&(*fd).params)
                                                         if strategy == IR_STRATEGY_INSTRUMENTED {
@@ -7729,6 +7781,22 @@ fn lowerer_mark_local_wide_bits_mut(
         if (*(*locals_box).depths).values[i as usize] <= (*lo).scope_depth && ir_name_eq((*(*locals_box).names).values[i as usize], name) {
             (*(*locals_box).wide_bits).values[i as usize] = bits
             (*(*locals_box).wide_signed).values[i as usize] = 0
+            (*lo).locals = locals_box
+            return
+        }
+        i = i - 1
+    }
+}
+
+// Wide-integer param (iN/uN, N > 64): record width AND signedness, so the
+// param is a wide operand exactly like an annotated wide `let`.
+fn lowerer_mark_local_wide_int_mut(lo: &! Lowerer, name: Name, bits: i64, signed: i64) with Mut, Alloc, Panic, Div {
+    var locals_box = (*lo).locals
+    var i = (*locals_box).count - 1
+    while i >= 0 {
+        if (*(*locals_box).depths).values[i as usize] <= (*lo).scope_depth && ir_name_eq((*(*locals_box).names).values[i as usize], name) {
+            (*(*locals_box).wide_bits).values[i as usize] = bits
+            (*(*locals_box).wide_signed).values[i as usize] = signed
             (*lo).locals = locals_box
             return
         }
@@ -8149,14 +8217,36 @@ fn lowerer_lower_fn_params_mut(
                     (*lo) = copy_pair.0
                     param_value_reg = copy_pair.1
                 }
+                // Wide-integer param: preg is the address of the caller's limb
+                // array (IrFunction.wide_param_limbs); unpack it.
+                let param_wide_bits = lower_type_expr_wide_bits(&(*list).head.ty)
+                if param_wide_bits > 64 && !param_is_ref {
+                    let wp = (*lo).emit_wide_param_unpack(preg, lower_wide_limb_count(param_wide_bits))
+                    (*lo) = wp.0
+                    param_value_reg = wp.1
+                }
 
                 lowerer_bind_local_mut(lo, (*list).head.name, param_value_reg, (*list).head.is_self_mut)
+                if param_wide_bits > 64 && !param_is_ref {
+                    var param_wide_signed: i64 = 0
+                    if ir_path_first_name((*list).head.ty.path).buf[0] as i64 == 105 { param_wide_signed = 1 }
+                    lowerer_mark_local_wide_int_mut(lo, (*list).head.name, param_wide_bits, param_wide_signed)
+                }
                 if lower_type_expr_is_unsigned_int(&(*list).head.ty) {
                     lowerer_mark_local_unsigned_int_mut(lo, (*list).head.name)
                 }
                 // SIO-588: stamp narrow32 on i32/u32 params on this binder path.
                 if lower_type_expr_is_narrow32(&(*list).head.ty) {
                     lowerer_mark_local_narrow32_mut(lo, (*list).head.name)
+                    // ADR-031 R1: the checker lets a non-literal i64 argument reach
+                    // an i32/u32 param; a value outside 32 bits panics here, at the
+                    // boundary, instead of living on in a 32-bit-typed local
+                    // (`fn id(x: i32) -> i32 { x }` returned 9999999999).
+                    if !param_is_ref {
+                        let nk = lower_name_narrow32_kind(ir_path_first_name((*list).head.ty.path))
+                        let ncheck = lower_narrow32_check_reg((*lo), param_value_reg, nk)
+                        (*lo) = ncheck.0
+                    }
                 }
                 // An array-of-tuples param (`&[(f64, f64)]`) carries its ELEMENT
                 // tuple's float mask: see lower_type_array_elem_tuple_float_mask.
@@ -9044,6 +9134,9 @@ fn lowerer_lower_fn_item_mut(
         (*reused).returns_float = preserved.returns_float
         (*reused).return_kn_value_float = preserved.return_kn_value_float
         (*reused).return_fixed_array_len = preserved.return_fixed_array_len
+        (*reused).wide_param_limbs = preserved.wide_param_limbs
+        (*reused).wide_return_bits = preserved.wide_return_bits
+        (*reused).wide_return_signed = preserved.wide_return_signed
         (*reused).return_struct_name = preserved.return_struct_name
         (*reused).first_param_is_ref = preserved.first_param_is_ref
         (*reused).prof_counter_id = preserved.prof_counter_id
@@ -9111,9 +9204,12 @@ fn lowerer_lower_fn_item_mut(
     (*strategy_func_box).return_kn_value_float = lower_opt_type_knowledge_value_float(&fd.return_type)
     (*strategy_func_box).return_fixed_array_len = lower_opt_type_return_fixed_array_code(&fd.return_type)
     (*strategy_func_box).return_struct_name = lower_opt_type_return_layout_name(&fd.return_type)
+    (*strategy_func_box).wide_return_bits = lower_opt_type_wide_bits(&fd.return_type)
+    (*strategy_func_box).wide_return_signed = lower_opt_type_wide_signed(&fd.return_type)
     lower_record_option_box_return((*strategy_func_box).name, &fd.return_type)
     (*strategy_func_box).first_param_is_ref = lower_fn_first_param_is_ref(&fd.params)
     (*strategy_func_box).f128_param_mask = lower_f128_param_mask_of(&fd.params)
+    (*strategy_func_box).wide_param_limbs = lower_wide_param_limbs_of(&fd.params)
     (*strategy_func_box).ref_struct_param_mask = lower_ref_struct_param_mask_of(&fd.params)
     lowerer_sco_strategy_trace(name, (*strategy_func_box).compile_strategy)
     (*lo).current_func = strategy_func_box
@@ -9247,6 +9343,9 @@ lower_rss_mark("before_block")
     if lowerer_name_is_main(name) && !fd.is_kernel && !fd.is_extern {
         lowerer_emit_deferred_global_inits_mut(lo)
     }
+    // `-> iN/uN` (N > 64): hidden out-array param, bound last (after the
+    // validated-param injection and every declared param).
+    (*lo) = (*lo).lower_wide_ret_bind_hidden()
     var result_reg = lowerer_try_canonical_hello_block_mut(lo, &fd.body)
     if result_reg == IR_INVALID_REG {
         if lower_rgn_enabled() && (*(*lo).module).fn_count <= IR_MAX_FUNCS - lower_rgn_fn_headroom()
@@ -9311,6 +9410,9 @@ lower_rss_mark("before_block")
         print("\n")
     }
 
+    if LOWER_WIDE_RET_FN >= 0 && LOWER_WIDE_RET_FN == (*lo).current_fn && !(*lo).fn_ends_with_return() {
+        (*lo) = (*lo).emit_wide_ret_store(result_reg, LOWER_BLOCK_TAIL_WIDE_BITS, LOWER_BLOCK_TAIL_WIDE_SIGNED, LOWER_BLOCK_TAIL_NARROW)
+    }
     if rgn_kind > 0 {
         // The tail value falls through into the exit block; explicit returns
         // jump there (lower_return_expr_ref).
@@ -12101,6 +12203,52 @@ fn lower_opt_type_wide_signed(opt: &Option<Box<TypeExpr>>) -> i64 with Mut, Pani
 fn lower_wide_limb_count(bits: i64) -> i64 {
     if bits <= 0 { return 0 }
     (bits + 63) / 64
+}
+
+// IrFunction.wide_param_limbs: 4 bits per declared param i < 15, the limb count
+// of an iN/uN param wider than 64 bits (0 for a word param). -1 when a wide
+// param falls outside the encoding (index >= 15 or more than 15 limbs): the
+// binder refuses that function instead of narrowing it.
+fn lower_wide_param_limbs_of(params: &Option<Box<ParamList>>) -> i64 with Mut, Panic, Div {
+    var packed: i64 = 0
+    var shift: i64 = 1
+    var idx: i64 = 0
+    var cur = params
+    var going = true
+    while going {
+        match *cur {
+            Some(list) => {
+                let limbs = lower_wide_limb_count(lower_type_expr_wide_bits(&(*list).head.ty))
+                if limbs > 1 {
+                    if idx >= 15 || limbs > 15 { return 0 - 1 }
+                    packed = packed + limbs * shift
+                }
+                if idx < 15 { shift = shift * 16 }
+                idx = idx + 1
+                cur = &(*list).tail
+            }
+            None => { going = false }
+        }
+    }
+    packed
+}
+
+// `args` with `reg` appended as the LAST argument (the hidden out-array of a
+// wide-returning call), through the recursive ir_reg_list_append.
+fn lower_reg_list_append(args: Option<Box<IrRegList>>, reg: i64) -> Option<Box<IrRegList>> with Mut, Panic, Div, Alloc {
+    match args {
+        Some(node) => Some(Box::new(ir_reg_list_append(*node, reg))),
+        None => Some(Box::new(IrRegList { head: reg, tail: None })),
+    }
+}
+
+// Limb count of declared param `idx` from a packed wide_param_limbs word.
+fn lower_wide_param_limbs_at(packed: i64, idx: i64) -> i64 {
+    if packed <= 0 || idx < 0 || idx >= 15 { return 0 }
+    var p = packed
+    var i: i64 = 0
+    while i < idx { p = p / 16; i = i + 1 }
+    p % 16
 }
 
 // `t op= e` lowers as `t = t op e` (lower_assign_stmt_ref). Same table as
@@ -15435,6 +15583,9 @@ impl Lowerer {
             (*reused).returns_float = ir_fn_get(&(*lo.module), fn_id as usize).returns_float
             (*reused).return_kn_value_float = ir_fn_get(&(*lo.module), fn_id as usize).return_kn_value_float
             (*reused).return_fixed_array_len = ir_fn_get(&(*lo.module), fn_id as usize).return_fixed_array_len
+            (*reused).wide_param_limbs = ir_fn_get(&(*lo.module), fn_id as usize).wide_param_limbs
+            (*reused).wide_return_bits = ir_fn_get(&(*lo.module), fn_id as usize).wide_return_bits
+            (*reused).wide_return_signed = ir_fn_get(&(*lo.module), fn_id as usize).wide_return_signed
             (*reused).return_struct_name = ir_fn_get(&(*lo.module), fn_id as usize).return_struct_name
             (*reused).first_param_is_ref = ir_fn_get(&(*lo.module), fn_id as usize).first_param_is_ref
             (*reused).prof_counter_id = ir_fn_get(&(*lo.module), fn_id as usize).prof_counter_id
@@ -15813,6 +15964,161 @@ impl Lowerer {
             lo = lo.bind_reg_array_elem_float(dst_reg)
         }
         (lo, dst_reg)
+    }
+
+    // Wide-integer call ABI, caller side (see IrFunction.wide_param_limbs). Builds
+    // the [i64; param_limbs] array the callee reads: the argument's own limbs
+    // first, then the sign word (sar 63 of its top limb for a signed argument,
+    // 0 for an unsigned one) for every limb the argument is narrower than the
+    // param, the same extension `let x: i256 = <i64 expr>` performs (KL-7).
+    // An argument wider than the param keeps its low param_limbs limbs: the
+    // checker only lets a wide argument reach a param of the same width.
+    fn emit_wide_arg_pack(self, arg_reg: i64, arg_limbs: i64, arg_signed: bool, param_limbs: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        let pair_dst = self.fresh_reg()
+        var lo = pair_dst.0
+        let arr = pair_dst.1
+        lo = lo.emit(ir_alloc_array(arr, lo.aggregate_storage_bytes(param_limbs), param_limbs))
+        lo = lo.emit_wide_store_limbs(arr, arg_reg, arg_limbs, arg_signed, param_limbs)
+        (lo, arr)
+    }
+
+    // Store `src_limbs` limbs of `src` into arr[0..dst_limbs), extending a
+    // narrower value with its sign word (signed) or 0 (unsigned).
+    fn emit_wide_store_limbs(self, arr: i64, src: i64, src_limbs: i64, src_signed: bool, dst_limbs: i64) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        var have = src_limbs
+        if have < 1 { have = 1 }
+        if have > dst_limbs { have = dst_limbs }
+        let pair_sign = lo.fresh_reg()
+        lo = pair_sign.0
+        let sign_reg = pair_sign.1
+        if src_signed {
+            let shift_pair = lo.emit_i64_const(63)
+            lo = shift_pair.0
+            lo = lo.emit(ir_binop(sign_reg, src + have - 1, BinaryOp::OpShr, shift_pair.1))
+        } else {
+            lo = lo.emit(ir_load_imm(sign_reg, 0))
+        }
+        var i: i64 = 0
+        while i < dst_limbs {
+            let idx_pair = lo.emit_i64_const(i)
+            lo = idx_pair.0
+            if i < have {
+                lo = lo.emit(ir_index_set(arr, idx_pair.1, src + i))
+            } else {
+                lo = lo.emit(ir_index_set(arr, idx_pair.1, sign_reg))
+            }
+            i = i + 1
+        }
+        lo
+    }
+
+    // An expression whose value is one machine word for certain: an integer
+    // literal (or its negation), a cast to a word type, a word-typed local, a
+    // call to a word-returning function, or arithmetic over those. Anything
+    // else whose width expr_wide_bits_ref cannot see (an `if` or `match`
+    // whose arms are wide, a block) is NOT assumed narrow.
+    fn expr_known_word_ref(self, e: &Expr) -> bool with Mut, Panic, Div, Alloc {
+        if (*e).kind == ExprKind::ExprIntLit { return true }
+        if (*e).kind == ExprKind::ExprBoolTrue || (*e).kind == ExprKind::ExprBoolFalse { return true }
+        if (*e).kind == ExprKind::ExprUnary {
+            match (*e).left {
+                Some(inner) => { return self.expr_known_word_ref(&(*inner)) }
+                None => { return false }
+            }
+        }
+        if (*e).kind == ExprKind::ExprCast {
+            return lower_opt_type_wide_bits(&(*e).cast_type) == 0 && !lower_opt_type_is_wide_float(&(*e).cast_type)
+        }
+        if (*e).kind == ExprKind::ExprIdent {
+            return self.lookup_local((*e).name) >= 0 && self.lookup_local_wide_bits((*e).name) == 0
+        }
+        if (*e).kind == ExprKind::ExprCall || (*e).kind == ExprKind::ExprMethodCall {
+            return self.expr_wide_bits_ref(e) == 0
+        }
+        if (*e).kind == ExprKind::ExprBinary {
+            var l_ok = false
+            var r_ok = false
+            match (*e).left {
+                Some(le) => { l_ok = self.expr_known_word_ref(&(*le)) }
+                None => {}
+            }
+            match (*e).right {
+                Some(re) => { r_ok = self.expr_known_word_ref(&(*re)) }
+                None => {}
+            }
+            return l_ok && r_ok
+        }
+        false
+    }
+
+    // `return v` in a function declared `-> iN/uN` (N > 64): write v's limbs to
+    // the hidden out-array. `src_bits` / `src_signed` describe v; a word value
+    // is extended by its own signedness, as a `let x: i256 = <word>` binding
+    // is. A value whose width cannot be established is refused (10835), never
+    // truncated.
+    fn emit_wide_ret_store(self, reg: i64, src_bits: i64, src_signed: i64, src_is_word: bool) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        let limbs = lower_wide_limb_count(LOWER_WIDE_RET_BITS)
+        if src_bits > 64 {
+            return lo.emit_wide_store_limbs(LOWER_WIDE_RET_OUT, reg, lower_wide_limb_count(src_bits), src_signed == 1, limbs)
+        }
+        if !src_is_word {
+            return lo.report_error_at(10835)
+        }
+        lo.emit_wide_store_limbs(LOWER_WIDE_RET_OUT, reg, 1, src_signed == 1, limbs)
+    }
+
+    // Wide-integer return ABI, callee side: a function declared `-> iN/uN`
+    // (N > 64) takes one hidden LAST parameter, the address of the caller's
+    // [i64; limbs] out-array (IrFunction.wide_return_bits). Called right before
+    // the body is lowered, after every other param_regs change, so it stays
+    // last. Clears the state for any other function.
+    fn lower_wide_ret_bind_hidden(self) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        LOWER_WIDE_RET_FN = 0 - 1
+        LOWER_WIDE_RET_OUT = 0 - 1
+        LOWER_WIDE_RET_BITS = 0
+        LOWER_WIDE_RET_SIGNED = 0
+        if (*lo.current_func).wide_return_bits <= 64 { return lo }
+        if (*lo.current_func).compile_strategy == IR_STRATEGY_INSTRUMENTED {
+            // The instrumented counter is a hidden param too; their order is
+            // not defined, so refuse instead of guessing.
+            return lo.report_error_at(10836)
+        }
+        let preg_pair = lo.fresh_reg()
+        lo = preg_pair.0
+        let preg = preg_pair.1
+        var current_func_box = lo.current_func
+        if (*current_func_box).param_count >= IR_MAX_PARAMS {
+            return lo.report_error_at(10837)
+        }
+        let pc = (*current_func_box).param_count
+        (*current_func_box).param_regs[pc as usize] = preg
+        (*current_func_box).param_count = pc + 1
+        lo.current_func = current_func_box
+        LOWER_WIDE_RET_FN = lo.current_fn
+        LOWER_WIDE_RET_OUT = preg
+        LOWER_WIDE_RET_BITS = (*current_func_box).wide_return_bits
+        LOWER_WIDE_RET_SIGNED = (*current_func_box).wide_return_signed
+        lo
+    }
+
+    // Wide-integer call ABI, callee side: the param register holds the address
+    // of the caller's [i64; limbs] array; load the limbs into a fresh wide
+    // register, which becomes the param's value.
+    fn emit_wide_param_unpack(self, preg: i64, limbs: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        let wide_pair = self.fresh_wide_reg(limbs)
+        var lo = wide_pair.0
+        let wide_reg = wide_pair.1
+        var i: i64 = 0
+        while i < limbs {
+            let idx_pair = lo.emit_i64_const(i)
+            lo = idx_pair.0
+            lo = lo.emit(ir_index_get(wide_reg + i, preg, idx_pair.1))
+            i = i + 1
+        }
+        (lo, wide_reg)
     }
 
     fn emit_fixed_array_value_copy(self, src_reg: i64, elem_count: i64, elem_is_float: bool) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
@@ -26393,9 +26699,27 @@ impl Lowerer {
     }
 
     fn expr_wide_bits_ref(self, expr: &Expr) -> i64 with Mut, Panic, Div, Alloc {
+        // A call to a function declared `-> iN/uN` (N > 64) yields a wide value
+        // (IrFunction.wide_return_bits, read back from the hidden out-array).
+        if (*expr).kind == ExprKind::ExprCall {
+            let cfid = self.lower_callee_fn_id_ref(&(*expr).left)
+            if cfid >= 0 { return ir_fn_get(&(*self.module), cfid as usize).wide_return_bits }
+            return 0
+        }
+        if (*expr).kind == ExprKind::ExprMethodCall {
+            let mfid = self.lower_method_call_fn_id_ref(expr)
+            if mfid >= 0 { return ir_fn_get(&(*self.module), mfid as usize).wide_return_bits }
+            return 0
+        }
         if (*expr).kind == ExprKind::ExprCast {
             let bits = lower_opt_type_wide_bits(&(*expr).cast_type)
             if bits > 64 { return bits }
+            // A cast to a word integer type (`(x >> 64) as i64`) is one word,
+            // whatever the operand: it keeps limb 0.
+            match (*expr).cast_type {
+                Some(ct) => { if lower_type_expr_is_integer(&(*ct)) { return 0 } }
+                None => {}
+            }
             return self.expr_wide_bits_opt_ref(&(*expr).left)
         }
         if (*expr).kind == ExprKind::ExprUnary {
@@ -26422,6 +26746,16 @@ impl Lowerer {
     }
 
     fn expr_wide_signed_ref(self, expr: &Expr) -> i64 with Mut, Panic, Div, Alloc {
+        if (*expr).kind == ExprKind::ExprCall {
+            let cfid = self.lower_callee_fn_id_ref(&(*expr).left)
+            if cfid >= 0 { return ir_fn_get(&(*self.module), cfid as usize).wide_return_signed }
+            return 0
+        }
+        if (*expr).kind == ExprKind::ExprMethodCall {
+            let mfid = self.lower_method_call_fn_id_ref(expr)
+            if mfid >= 0 { return ir_fn_get(&(*self.module), mfid as usize).wide_return_signed }
+            return 0
+        }
         if (*expr).kind == ExprKind::ExprCast {
             let signed = lower_opt_type_wide_signed(&(*expr).cast_type)
             if lower_opt_type_wide_bits(&(*expr).cast_type) > 64 { return signed }
@@ -29983,9 +30317,13 @@ impl Lowerer {
         func.return_kn_value_float = lower_opt_type_knowledge_value_float(return_type)
         func.return_fixed_array_len = lower_opt_type_return_fixed_array_code(return_type)
         func.return_struct_name = lower_opt_type_return_layout_name(return_type)
+        func.wide_return_bits = lower_opt_type_wide_bits(return_type)
+        func.wide_return_signed = lower_opt_type_wide_signed(return_type)
         lower_record_option_box_return(func.name, return_type)
         func.param_count = ir_param_list_count_ref(params)
         func.f128_param_mask = lower_f128_param_mask_of(params)
+        func.wide_param_limbs = lower_wide_param_limbs_of(params)
+        if func.wide_return_bits > 64 { func.param_count = func.param_count + 1 }
         func.ref_struct_param_mask = lower_ref_struct_param_mask_of(params)
         func.first_param_is_ref = lower_fn_first_param_is_ref(params)
         func.param_regs = [IR_INVALID_REG; 64]
@@ -30425,6 +30763,23 @@ impl Lowerer {
                         param_value_reg = copy_pair.1
                         current_func = lo.current_func
                     }
+                    // Wide-integer param: see path A.
+                    let ref_param_wide_bits = lower_type_expr_wide_bits(&(*list).head.ty)
+                    if ref_param_wide_bits > 64 && !ref_param_is_ref {
+                        lo.current_func = current_func
+                        let wp = lo.emit_wide_param_unpack(preg, lower_wide_limb_count(ref_param_wide_bits))
+                        lo = wp.0
+                        param_value_reg = wp.1
+                        current_func = lo.current_func
+                    }
+                    // ADR-031 R1 boundary range check for i32/u32 params: see path A.
+                    if !ref_param_is_ref && lower_type_expr_is_narrow32(&(*list).head.ty) {
+                        lo.current_func = current_func
+                        let nk_b = lower_name_narrow32_kind(ir_path_first_name((*list).head.ty.path))
+                        let ncheck_b = lower_narrow32_check_reg(lo, param_value_reg, nk_b)
+                        lo = ncheck_b.0
+                        current_func = lo.current_func
+                    }
 
                     let _is_mut = (*list).head.is_self_mut
                     if (*locals).count < 4096 {
@@ -30458,8 +30813,8 @@ impl Lowerer {
                         }
                         // V0-E.5.4: f128 params are F128Bits handles (wide_bits=128, kind 5
                         // below) so they are ready softfloat operands; f256 stays kind 5 only.
-                        (*(*locals).wide_bits).values[idx as usize] = if lower_type_expr_is_f128(&(*list).head.ty) { 128 } else { 0 }
-                        (*(*locals).wide_signed).values[idx as usize] = 0
+                        (*(*locals).wide_bits).values[idx as usize] = if lower_type_expr_is_f128(&(*list).head.ty) { 128 } else if ref_param_wide_bits > 64 && !ref_param_is_ref { ref_param_wide_bits } else { 0 }
+                        (*(*locals).wide_signed).values[idx as usize] = if ref_param_wide_bits > 64 && !ref_param_is_ref && ir_path_first_name((*list).head.ty.path).buf[0] as i64 == 105 { 1 } else { 0 }
                         // Findings 11 (#2084): stamp is_unsigned_int=1 when the param is u8/u16/u32/u64/usize.
                         (*(*locals).is_unsigned_int).values[idx as usize] = if lower_type_expr_is_unsigned_int(&(*list).head.ty) { 1 } else { 0 }
                         // SIO-588: stamp narrow32=1 when the param is i32/u32.
@@ -30678,6 +31033,9 @@ impl Lowerer {
             (*reused).returns_float = ir_fn_get(&(*lo.module), fn_id as usize).returns_float
             (*reused).return_kn_value_float = ir_fn_get(&(*lo.module), fn_id as usize).return_kn_value_float
             (*reused).return_fixed_array_len = ir_fn_get(&(*lo.module), fn_id as usize).return_fixed_array_len
+            (*reused).wide_param_limbs = ir_fn_get(&(*lo.module), fn_id as usize).wide_param_limbs
+            (*reused).wide_return_bits = ir_fn_get(&(*lo.module), fn_id as usize).wide_return_bits
+            (*reused).wide_return_signed = ir_fn_get(&(*lo.module), fn_id as usize).wide_return_signed
             (*reused).return_struct_name = ir_fn_get(&(*lo.module), fn_id as usize).return_struct_name
             (*reused).first_param_is_ref = ir_fn_get(&(*lo.module), fn_id as usize).first_param_is_ref
             (*reused).prof_counter_id = ir_fn_get(&(*lo.module), fn_id as usize).prof_counter_id
@@ -30731,6 +31089,8 @@ impl Lowerer {
         (*lo.current_func).return_kn_value_float = lower_opt_type_knowledge_value_float(&fd.return_type)
         (*lo.current_func).return_fixed_array_len = lower_opt_type_return_fixed_array_code(&fd.return_type)
         (*lo.current_func).return_struct_name = lower_opt_type_return_layout_name(&fd.return_type)
+        (*lo.current_func).wide_return_bits = lower_opt_type_wide_bits(&fd.return_type)
+        (*lo.current_func).wide_return_signed = lower_opt_type_wide_signed(&fd.return_type)
         lower_record_option_box_return((*lo.current_func).name, &fd.return_type)
         (*lo.current_func).first_param_is_ref = lower_fn_first_param_is_ref(&fd.params)
 
@@ -30797,7 +31157,10 @@ impl Lowerer {
             print(str_from_bytes(name.buf, name.len))
             print("\n")
         }
-        let bpair = lo.lower_block(fd.body)
+        lo = lo.lower_wide_ret_bind_hidden()
+        // A wide-returning fn needs the tail's width facts, which only the _ref
+        // block lowering records (LOWER_BLOCK_TAIL_*).
+        let bpair = if LOWER_WIDE_RET_FN == lo.current_fn { lo.lower_block_ref(&fd.body) } else { lo.lower_block(fd.body) }
         lo = bpair.0
         let result_reg = bpair.1
         if lower_live_diag_enabled() {
@@ -30822,6 +31185,9 @@ impl Lowerer {
             print("\n")
         }
 
+        if LOWER_WIDE_RET_FN == lo.current_fn && !lo.fn_ends_with_return() {
+            lo = lo.emit_wide_ret_store(result_reg, LOWER_BLOCK_TAIL_WIDE_BITS, LOWER_BLOCK_TAIL_WIDE_SIGNED, LOWER_BLOCK_TAIL_NARROW)
+        }
         if !lo.fn_ends_with_return() {
             lo = lo.emit(ir_return(result_reg))
         }
@@ -30882,6 +31248,9 @@ impl Lowerer {
             (*reused).returns_float = ir_fn_get(&(*lo.module), fn_id as usize).returns_float
             (*reused).return_kn_value_float = ir_fn_get(&(*lo.module), fn_id as usize).return_kn_value_float
             (*reused).return_fixed_array_len = ir_fn_get(&(*lo.module), fn_id as usize).return_fixed_array_len
+            (*reused).wide_param_limbs = ir_fn_get(&(*lo.module), fn_id as usize).wide_param_limbs
+            (*reused).wide_return_bits = ir_fn_get(&(*lo.module), fn_id as usize).wide_return_bits
+            (*reused).wide_return_signed = ir_fn_get(&(*lo.module), fn_id as usize).wide_return_signed
             (*reused).return_struct_name = ir_fn_get(&(*lo.module), fn_id as usize).return_struct_name
             (*reused).first_param_is_ref = ir_fn_get(&(*lo.module), fn_id as usize).first_param_is_ref
             (*reused).prof_counter_id = ir_fn_get(&(*lo.module), fn_id as usize).prof_counter_id
@@ -30922,6 +31291,8 @@ impl Lowerer {
         (*lo.current_func).return_kn_value_float = lower_opt_type_knowledge_value_float(&fd.return_type)
         (*lo.current_func).return_fixed_array_len = lower_opt_type_return_fixed_array_code(&fd.return_type)
         (*lo.current_func).return_struct_name = lower_opt_type_return_layout_name(&fd.return_type)
+        (*lo.current_func).wide_return_bits = lower_opt_type_wide_bits(&fd.return_type)
+        (*lo.current_func).wide_return_signed = lower_opt_type_wide_signed(&fd.return_type)
         lower_record_option_box_return((*lo.current_func).name, &fd.return_type)
         (*lo.current_func).first_param_is_ref = lower_fn_first_param_is_ref(&fd.params)
 
@@ -30979,6 +31350,7 @@ impl Lowerer {
             print(str_from_bytes(name.buf, name.len))
             print("\n")
         }
+        lo = lo.lower_wide_ret_bind_hidden()
         let bpair = lo.lower_block_ref(&fd.body)
         lo = bpair.0
         let result_reg = bpair.1
@@ -30993,6 +31365,9 @@ impl Lowerer {
             print("\n")
         }
 
+        if LOWER_WIDE_RET_FN == lo.current_fn && !lo.fn_ends_with_return() {
+            lo = lo.emit_wide_ret_store(result_reg, LOWER_BLOCK_TAIL_WIDE_BITS, LOWER_BLOCK_TAIL_WIDE_SIGNED, LOWER_BLOCK_TAIL_NARROW)
+        }
         if !lo.fn_ends_with_return() {
             lo = lo.emit(ir_return(result_reg))
         }
@@ -31074,6 +31449,14 @@ impl Lowerer {
                                 if f128_body_tail && is_tail_stmt {
                                     LOWER_F128_TAIL_EXPR = false
                                 }
+                                if is_tail_stmt {
+                                    // Read now: this block's locals leave scope below.
+                                    LOWER_BLOCK_TAIL_WIDE_BITS = pair_tail.0.expr_wide_bits_ref(&(*expr_box))
+                                    LOWER_BLOCK_TAIL_WIDE_SIGNED = if LOWER_BLOCK_TAIL_WIDE_BITS > 64 {
+                                        pair_tail.0.expr_wide_signed_ref(&(*expr_box))
+                                    } else if pair_tail.0.expr_is_unsigned_int_ref(&(*expr_box)) { 0 } else { 1 }
+                                    LOWER_BLOCK_TAIL_NARROW = pair_tail.0.expr_known_word_ref(&(*expr_box))
+                                }
                                 pair_tail
                             }
                             _ => {
@@ -31082,6 +31465,11 @@ impl Lowerer {
                         }
                     } else {
                         lo.lower_assign_stmt_ref(stmt_ref)
+                    }
+                    if is_tail_stmt && stmt_ref.kind != StmtKind::StmtExpr {
+                        LOWER_BLOCK_TAIL_WIDE_BITS = 0
+                        LOWER_BLOCK_TAIL_WIDE_SIGNED = 1
+                        LOWER_BLOCK_TAIL_NARROW = false
                     }
                     LOWER_PLACE_MOVE_OK = 0
                     stmt_idx = stmt_idx + 1
@@ -32182,11 +32570,27 @@ impl Lowerer {
                         // and an alias would observe that mutation. `is_mut` alone was
                         // insufficient — the binding's own mutability says nothing about
                         // the source's.
-                        let copy_pair = lo.fresh_reg()
-                        lo = copy_pair.0
-                        let copy_reg = copy_pair.1
-                        lo = lo.emit(ir_copy(copy_reg, reg))
-                        bind_reg = copy_reg
+                        // A wide-integer source (iN/uN, N > 64) is `limbs` consecutive
+                        // vregs: snapshot every one. A one-register copy kept limb 0
+                        // only, so `let c: i256 = big; c == big` was false.
+                        let src_wide_limbs = lower_wide_limb_count(lo.lookup_local_wide_bits((*rhs_ident).name))
+                        if src_wide_limbs > 1 && lo.lookup_local_scalar_kind((*rhs_ident).name) != 5 {
+                            let wcopy_pair = lo.fresh_wide_reg(src_wide_limbs)
+                            lo = wcopy_pair.0
+                            let wcopy_reg = wcopy_pair.1
+                            var wl: i64 = 0
+                            while wl < src_wide_limbs {
+                                lo = lo.emit(ir_copy(wcopy_reg + wl, reg + wl))
+                                wl = wl + 1
+                            }
+                            bind_reg = wcopy_reg
+                        } else {
+                            let copy_pair = lo.fresh_reg()
+                            lo = copy_pair.0
+                            let copy_reg = copy_pair.1
+                            lo = lo.emit(ir_copy(copy_reg, reg))
+                            bind_reg = copy_reg
+                        }
                     }
                 } else if (*rhs_ident).kind == ExprKind::ExprUnary || (*rhs_ident).kind == ExprKind::ExprFieldAccess {
                     // SIO-278: `let saved = *b` / `let s = o.f` bound the
@@ -34072,6 +34476,53 @@ impl Lowerer {
                                 lo = lo.emit(ir_store_global(rhs, bss_off_local, (*target_expr).name))
                             }
                             lo = lo.emit(ir_copy(dst, rhs))
+                            // A wide-integer local is `limbs` consecutive vregs: the
+                            // copy above moved limb 0 only, so `x = x * 2` in a loop
+                            // lost every high limb. Copy the rest; a word RHS (a
+                            // literal: the checker admits nothing else narrower)
+                            // supplies its sign word. A compound assignment's value
+                            // is `x op y`, as wide as x.
+                            let dst_limbs = lower_wide_limb_count(lo.lookup_local_wide_bits((*target_expr).name))
+                            if dst_limbs > 1 && lo.lookup_local_scalar_kind((*target_expr).name) != 5 {
+                                var rhs_limbs: i64 = dst_limbs
+                                var rhs_signed = true
+                                if s.assign_op == AssignOp::AssignEq {
+                                    match s.expr {
+                                        Some(rhs_e) => {
+                                            let rb = lo.expr_wide_bits_ref(&(*rhs_e))
+                                            if rb > 64 {
+                                                rhs_limbs = lower_wide_limb_count(rb)
+                                            } else {
+                                                rhs_limbs = 1
+                                                rhs_signed = !lo.expr_is_unsigned_int_ref(&(*rhs_e))
+                                            }
+                                        }
+                                        None => {}
+                                    }
+                                }
+                                var sign_w = rhs
+                                if rhs_limbs < dst_limbs {
+                                    let sw_pair = lo.fresh_reg()
+                                    lo = sw_pair.0
+                                    sign_w = sw_pair.1
+                                    if rhs_signed {
+                                        let sh_pair = lo.emit_i64_const(63)
+                                        lo = sh_pair.0
+                                        lo = lo.emit(ir_binop(sign_w, rhs + rhs_limbs - 1, BinaryOp::OpShr, sh_pair.1))
+                                    } else {
+                                        lo = lo.emit(ir_load_imm(sign_w, 0))
+                                    }
+                                }
+                                var li: i64 = 1
+                                while li < dst_limbs {
+                                    if li < rhs_limbs {
+                                        lo = lo.emit(ir_copy(dst + li, rhs + li))
+                                    } else {
+                                        lo = lo.emit(ir_copy(dst + li, sign_w))
+                                    }
+                                    li = li + 1
+                                }
+                            }
                             if rhs_variance >= 0 {
                                 // Copy into the local's fixed uncertainty slots, the
                                 // same discipline the value uses one line above. A
@@ -34372,6 +34823,9 @@ impl Lowerer {
         var regs: [i64; 64] = [0; 64]
         var reg_count: i64 = 0
         var f128_bit: i64 = 1
+        let wide_limbs = LOWER_WIDE_ARG_LIMBS
+        LOWER_WIDE_ARG_LIMBS = 0
+        var arg_idx: i64 = 0
         while true {
             match *current {
                 Some(list) => {
@@ -34385,6 +34839,21 @@ impl Lowerer {
                     f128_bit = f128_bit * 2
                     lo = pair_head.0
                     var arg_reg = pair_head.1
+                    // Wide-integer param: pass the address of a limb array.
+                    let param_limbs = lower_wide_param_limbs_at(wide_limbs, arg_idx)
+                    if param_limbs > 1 {
+                        let arg_bits = lo.expr_wide_bits_ref(&(*list).head)
+                        var arg_limbs: i64 = 1
+                        var arg_signed = !lo.expr_is_unsigned_int_ref(&(*list).head)
+                        if arg_bits > 64 {
+                            arg_limbs = lower_wide_limb_count(arg_bits)
+                            arg_signed = lo.expr_wide_signed_ref(&(*list).head) == 1
+                        }
+                        let pk = lo.emit_wide_arg_pack(arg_reg, arg_limbs, arg_signed, param_limbs)
+                        lo = pk.0
+                        arg_reg = pk.1
+                    }
+                    arg_idx = arg_idx + 1
                     if borrow {
                         // The same OpRef an explicit `&value` argument lowers to.
                         let pair_bref = lo.fresh_reg()
@@ -38495,11 +38964,36 @@ impl Lowerer {
             } else {
                 0
             }
+            if fn_id >= 0 && fn_id < lo1.module.fn_count {
+                let wide_packed = ir_fn_get(&(*lo1.module), fn_id as usize).wide_param_limbs
+                if wide_packed < 0 {
+                    // A wide param past the 15-param / 15-limb encoding: refuse
+                    // rather than pass it as one word.
+                    lo1 = lo1.report_error_at(10831)
+                } else {
+                    LOWER_WIDE_ARG_LIMBS = wide_packed
+                }
+            }
             lo1.lower_expr_args_masked_borrow_ref(&e.args, f128_arg_mask, ref_arg_mask)
         }
-        let lo2 = pair_args.lowerer
-        let args: Option<Box<IrRegList>> = if pair_args.count <= 0 { None } else { Some(Box::new(pair_args.regs)) }
-        let argc = pair_args.count
+        var lo2 = pair_args.lowerer
+        var args: Option<Box<IrRegList>> = if pair_args.count <= 0 { None } else { Some(Box::new(pair_args.regs)) }
+        var argc = pair_args.count
+        // `-> iN/uN` (N > 64): pass a fresh out-array as the hidden last arg.
+        var wide_ret_limbs: i64 = 0
+        var wide_ret_arr: i64 = 0 - 1
+        if fn_id >= 0 && fn_id < (*lo2.module).fn_count {
+            let wrb = ir_fn_get(&(*lo2.module), fn_id as usize).wide_return_bits
+            if wrb > 64 {
+                wide_ret_limbs = lower_wide_limb_count(wrb)
+                let arr_pair = lo2.fresh_reg()
+                lo2 = arr_pair.0
+                wide_ret_arr = arr_pair.1
+                lo2 = lo2.emit(ir_alloc_array(wide_ret_arr, lo2.aggregate_storage_bytes(wide_ret_limbs), wide_ret_limbs))
+                args = lower_reg_list_append(args, wide_ret_arr)
+                argc = argc + 1
+            }
+        }
         let pair_d = lo2.fresh_reg()
         let lo3 = pair_d.0
         let dst = pair_d.1
@@ -38521,6 +39015,10 @@ impl Lowerer {
         var lo5 = lo4.emit(call_instr)
         if call_instr.imm_flags == IR_FLOAT_REG_MARKER_FLAG {
             lo5 = lo5.emit(ir_mark_float_reg(dst))
+        }
+        if wide_ret_limbs > 1 {
+            // The value is the out-array's limbs, not rax.
+            return lo5.emit_wide_param_unpack(wide_ret_arr, wide_ret_limbs)
         }
         (lo5, dst)
     }
@@ -42102,10 +42600,35 @@ impl Lowerer {
         } else {
             0
         }
+        // Wide-integer params: same receiver shift, one 4-bit field.
+        if fn_id0 >= 0 && fn_id0 < (*lo1.module).fn_count {
+            let wide_packed_m = ir_fn_get(&(*lo1.module), fn_id0 as usize).wide_param_limbs
+            if wide_packed_m < 0 {
+                lo1 = lo1.report_error_at(10832)
+            } else {
+                LOWER_WIDE_ARG_LIMBS = wide_packed_m / 16
+            }
+        }
         let pair_args: LowerExprArgsResult = lo1.lower_expr_args_masked_borrow_ref(&e.args, f128_arg_mask_m, ref_arg_mask_m)
-        let lo2 = pair_args.lowerer
-        let arg_list: Option<Box<IrRegList>> = if pair_args.count <= 0 { None } else { Some(Box::new(pair_args.regs)) }
-        let arg_count = pair_args.count
+        var lo2 = pair_args.lowerer
+        var arg_list: Option<Box<IrRegList>> = if pair_args.count <= 0 { None } else { Some(Box::new(pair_args.regs)) }
+        var arg_count = pair_args.count
+        // `-> iN/uN` (N > 64): hidden out-array as the last arg (see the
+        // named-call site).
+        var wide_ret_limbs_m: i64 = 0
+        var wide_ret_arr_m: i64 = 0 - 1
+        if fn_id0 >= 0 && fn_id0 < (*lo2.module).fn_count {
+            let wrb_m = ir_fn_get(&(*lo2.module), fn_id0 as usize).wide_return_bits
+            if wrb_m > 64 {
+                wide_ret_limbs_m = lower_wide_limb_count(wrb_m)
+                let arr_pair_m = lo2.fresh_reg()
+                lo2 = arr_pair_m.0
+                wide_ret_arr_m = arr_pair_m.1
+                lo2 = lo2.emit(ir_alloc_array(wide_ret_arr_m, lo2.aggregate_storage_bytes(wide_ret_limbs_m), wide_ret_limbs_m))
+                arg_list = lower_reg_list_append(arg_list, wide_ret_arr_m)
+                arg_count = arg_count + 1
+            }
+        }
         let args2 = lo2.prepend_arg(base_reg, arg_list)
         let pair_fn = lo2.find_or_add_fn_id(call_name)
         let lo3 = pair_fn.0
@@ -42129,6 +42652,9 @@ impl Lowerer {
         var lo6 = lo5.emit(call_instr_m)
         if call_instr_m.imm_flags == IR_FLOAT_REG_MARKER_FLAG {
             lo6 = lo6.emit(ir_mark_float_reg(dst))
+        }
+        if wide_ret_limbs_m > 1 {
+            return lo6.emit_wide_param_unpack(wide_ret_arr_m, wide_ret_limbs_m)
         }
         (lo6, dst)
     }
@@ -43135,6 +43661,18 @@ impl Lowerer {
         }
         var lo = pair.0
         let reg = pair.1
+        // `-> iN/uN` (N > 64): the value leaves through the hidden out-array.
+        if LOWER_WIDE_RET_FN >= 0 && LOWER_WIDE_RET_FN == lo.current_fn {
+            match e.left {
+                Some(rv) => {
+                    let rv_bits = lo.expr_wide_bits_ref(&(*rv))
+                    let rv_signed = if rv_bits > 64 { lo.expr_wide_signed_ref(&(*rv)) } else if lo.expr_is_unsigned_int_ref(&(*rv)) { 0 } else { 1 }
+                    let rv_word = lo.expr_known_word_ref(&(*rv))
+                    lo = lo.emit_wide_ret_store(reg, rv_bits, rv_signed, rv_word)
+                }
+                None => {}
+            }
+        }
         // Leaving the function from inside loops: pop their iteration regions,
         // innermost first, without resetting them -- what they made, the
         // returned value included, then belongs to the enclosing region.
@@ -43637,8 +44175,13 @@ impl Lowerer {
                         (lo3, ref_reg)
                     } else {
                         let ref_pair = self.fresh_reg()
-                        let lo2 = ref_pair.0
+                        var lo2 = ref_pair.0
                         let ref_reg = ref_pair.1
+                        if ir_fn_get(&(*lo2.module), fn_id as usize).wide_param_limbs != 0 || ir_fn_get(&(*lo2.module), fn_id as usize).wide_return_bits > 64 {
+                            // Wide-integer params travel as limb-array addresses that only a
+                            // direct call builds; an indirect call would pass one word.
+                            lo2 = lo2.report_error_at(10833)
+                        }
                         let lo3 = lo2.emit(ir_load_fn_ref(ref_reg, fn_id))
                         (lo3, ref_reg)
                     }
@@ -43707,8 +44250,11 @@ impl Lowerer {
                 let fn_id = lowerer_lookup_fn_id_by_name_ref(&self, n)
                 if fn_id >= 0 {
                     let ref_pair = self.fresh_reg()
-                    let lo2 = ref_pair.0
+                    var lo2 = ref_pair.0
                     let ref_reg = ref_pair.1
+                    if ir_fn_get(&(*lo2.module), fn_id as usize).wide_param_limbs != 0 || ir_fn_get(&(*lo2.module), fn_id as usize).wide_return_bits > 64 {
+                        lo2 = lo2.report_error_at(10834)
+                    }
                     let lo3 = lo2.emit(ir_load_fn_ref(ref_reg, fn_id))
                     (lo3, ref_reg)
                 } else {
