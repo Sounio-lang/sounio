@@ -61,4 +61,23 @@ if [[ $rc -ne 0 ]] || ! echo "$got" | grep -q 'kl14d_multi_needed: PASS'; then
   exit 1
 fi
 
+# D-05 (#2536): verify symbol interposition resolves to first DT_NEEDED library
+D05_SRC=tests/run-pass/d05_dynlink_symbol_interposition.sio
+D05_OUT="$WORKDIR/d05_dynlink_symbol_interposition.elf"
+if ! MADAROS_RAW_BIN="$RAW" "$SOUC" build "$D05_SRC" -o "$D05_OUT" >"$WORKDIR/compile_d05.out" 2>"$WORKDIR/compile_d05.err"; then
+  echo "madaros_kl14d_multi_needed_gate: FAIL compile D-05 interposition" >&2
+  cat "$WORKDIR/compile_d05.out" "$WORKDIR/compile_d05.err" >&2
+  exit 1
+fi
+chmod +x "$D05_OUT"
+set +e
+got_d05="$("$D05_OUT" 2>"$WORKDIR/run_d05.err")"
+rc_d05=$?
+set -e
+if [[ $rc_d05 -ne 0 ]] || ! echo "$got_d05" | grep -q 'd05_dynlink_symbol_interposition: PASS'; then
+  echo "madaros_kl14d_multi_needed_gate: FAIL run D-05 rc=$rc_d05 stdout=[$got_d05]" >&2
+  cat "$WORKDIR/run_d05.err" >&2 || true
+  exit 1
+fi
+
 echo "MADAROS_KL14D_MULTI_NEEDED_GATE_OK"
