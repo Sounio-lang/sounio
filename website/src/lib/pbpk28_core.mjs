@@ -449,37 +449,37 @@ export const DEFAULT_PARAMS_TACROLIMUS = Object.freeze({
 
 // Zyprexa immediate-release olanzapine (SIO-518): single 10 mg oral dose.
 // ka = 0.6/h, F = 0.60, tlag = 0.25 h tablet dissolution (Bergstrom 2006).
-// Plasma referenced (rb ~= 1, Callaghan 1999): CL = 25 L/h (CYP1A2 primary).
-// Kp = olanzapine tissue values (Rodgers-Rowland, Vd ~700 L) -- NOT
+// Plasma referenced: CL = 9.3 L/h (CL/F 15.5 L/h, Sun 2021, x F 0.60).
+// Kp = olanzapine tissue pattern scaled to V_ss = 528.6 L -- NOT
 // haloperidol's, despite the shared class. PS assumed flow-limited pattern,
 // SIO-550. Dual UGT1A4/CYP1A2 pathway recorded in the drug file, not equated
 // with clozapine. Single-dose PK only.
 export const MW_OLANZAPINE = 312.43;
 
-export const OLZ_KA_DEFAULT = 0.6;     // h^-1, Bergstrom 2006
-export const OLZ_F_DEFAULT = 0.60;     // Bergstrom 2006
-export const OLZ_TLAG_DEFAULT = 0.25;  // h, tablet dissolution
+export const OLZ_KA_DEFAULT = 0.861;   // h^-1, Sun 2021
+export const OLZ_F_DEFAULT = 0.60;     // Zyprexa label (40% first pass)
+export const OLZ_TLAG_DEFAULT = 0.782; // h, Sun 2021
 export const OLZ_DOSE_DEFAULT = 10.0;  // mg, single dose
 
 export const KP_OLANZAPINE = Object.freeze([
   1.00,  // 0 blood (definition)
-  12.0,  // 1 liver
-  5.0,   // 2 kidney
-  10.0,  // 3 brain
-  4.0,   // 4 heart
-  8.0,   // 5 lung
-  15.0,  // 6 muscle (Vd driver)
-  8.0,   // 7 adipose (Vd driver)
-  5.0,   // 8 gut
-  5.0,   // 9 skin
-  4.0,   // 10 bone
-  5.0,   // 11 spleen
-  3.5,   // 12 pancreas
-  3.5,   // 13 other
+  9.4973,  // 1 liver
+  3.9572,   // 2 kidney
+  7.9144,  // 3 brain
+  3.1658,   // 4 heart
+  6.3315,   // 5 lung
+  11.8716,  // 6 muscle (Vd driver)
+  6.3315,   // 7 adipose (Vd driver)
+  3.9572,   // 8 gut
+  3.9572,   // 9 skin
+  3.1658,   // 10 bone
+  3.9572,   // 11 spleen
+  2.7700,   // 12 pancreas
+  2.7700,   // 13 other
 ]);
 
 export const DEFAULT_PARAMS_OLANZAPINE = Object.freeze({
-  clHep: 25.0,
+  clHep: 9.3,
   higuchiScale: 1.0,
   vdScale: 1.0,
   bolusMg: 0.0,
@@ -499,7 +499,7 @@ export const DEFAULT_PARAMS_OLANZAPINE = Object.freeze({
   pdParams: {},
   cVisualMax: 3.0e-5,
   drugLabel: 'Olanzapine (oral IR)',
-  releaseSourceLabel: 'Oral IR (k_a = 0.6 /h, F = 0.60, lag 0.25 h)',
+  releaseSourceLabel: 'Oral IR (k_a = 0.861 /h, F = 0.60, lag 0.782 h)',
 });
 
 // Clozapine single 100 mg oral tablet (SIO-521): ka = 1.0/h (Tmax ~2 h),
