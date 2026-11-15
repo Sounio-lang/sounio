@@ -1,0 +1,67 @@
+//@ run-pass
+//@ expect-stdout-contains: KNOWLEDGE_FIELD_ARRAY_VALUE_NAMED_TWIN_PASS
+
+// `s.kn[i].value` on a `[Knowledge[f64]; N]` struct field reads Knowledge's
+// own slot 0 even when another struct in the program has a field called
+// `value` at a different index.
+//
+// The array element type of such a field was not named in the struct layout,
+// so the access had no receiver type and the slot was chosen by field name
+// across every registered struct, where a non-Knowledge struct outranks
+// Knowledge. With `Twin { status, value }` (the shape of math::pure's
+// CheckedLog) in the program, `.value` read slot 1 as an integer: 0.0 printed
+// for every prior of darwin_pbpk::epistemic_pbpk28, while `.variance` and
+// `.confidence` were correct.
+
+struct Twin { status: i64, value: f64 }
+
+struct KBox { kn: [Knowledge[f64]; 3], n: i32 }
+
+fn mk_box() -> KBox with Mut {
+    var m: [f64; 3] = [0.0; 3]
+    var v: [f64; 3] = [0.0; 3]
+    m[0] = 0.077; v[0] = 0.5
+    m[2] = 0.33;  v[2] = 0.25
+    var kn: [Knowledge[f64]; 3] = [Knowledge(0.0, ε=1.0, prov="e"); 3]
+    kn[0] = Knowledge { value: m[0], variance: v[0], epsilon: 0.9, provenance: "x" }
+    kn[2] = Knowledge { value: m[2], variance: v[2], epsilon: 0.8, provenance: "y" }
+    KBox { kn: kn, n: 3 }
+}
+
+fn near(a: f64, b: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d < 1.0e-12
+}
+
+fn check(tag: string, got: f64, want: f64) -> i32 with IO {
+    if near(got, want) { return 0 }
+    print("FAIL "); print(tag); print(" got="); print_f64(got); print(" want="); print_f64(want); println("")
+    return 1
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic, Epistemic {
+    let t = Twin { status: 7, value: 1.5 }
+    var fails: i32 = 0
+    fails = fails + check("twin.value", t.value, 1.5)
+    let b = mk_box()
+    fails = fails + check("kn[0].value", b.kn[0].value, 0.077)
+    fails = fails + check("kn[0].variance", b.kn[0].variance, 0.5)
+    fails = fails + check("kn[0].confidence", b.kn[0].confidence, 0.9)
+    fails = fails + check("kn[2].value", b.kn[2].value, 0.33)
+    fails = fails + check("kn[2].variance", b.kn[2].variance, 0.25)
+    let k = b.kn[2]
+    fails = fails + check("let k = kn[2]; k.value", k.value, 0.33)
+    var i: i32 = 0
+    var sum = 0.0
+    while i < b.n {
+        sum = sum + b.kn[i].value
+        i = i + 1
+    }
+    fails = fails + check("sum of values in a loop", sum, 0.407)
+    if fails == 0 {
+        println("KNOWLEDGE_FIELD_ARRAY_VALUE_NAMED_TWIN_PASS")
+        return 0
+    }
+    println("KNOWLEDGE_FIELD_ARRAY_VALUE_NAMED_TWIN_FAIL")
+    return 1
+}
