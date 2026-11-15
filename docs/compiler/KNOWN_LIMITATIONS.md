@@ -93,7 +93,7 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
   Struct returns (`fn f(..) -> S`, scalar `f64` fields of `S` read after a
   `let r = f(..)`: the clone writes one Jacobian row per field, the caller
   chain-rules each) and nested struct fields (`p.pos.x`, `self.pos.x`, depth
-  up to 3, at most 24 tangents) are covered too; pin:
+  up to 3, at most 32 tangents) are covered too; pin:
   `tests/run-pass/gum_fo_tangent_clone_struct_returns.sio`. A struct return
   needs every return to be a struct literal or a local and no field
   assignment or `var` struct in the body.
@@ -107,19 +107,49 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
   correlation with the caller's other uses of the input are exact (pins:
   `tests/run-pass/gum_fo_tangent_clone_second_order_on.sio`,
   `tests/run-pass/gum_so_hyperdual_clones.sio`, oracle
-  `tests/oracles/gum_so_hyperdual_clones.cpp`, 1e-10 relative). A
-  `hessian_of(f(x), j, k)` whose call occurs only inside the query emits the
-  clone call inside the query lowering (callee without an IO effect only).
-  Still open: a struct return holding a struct field, a struct result not
-  bound by a `let`, struct returns with second order on, a second-order
-  callee with more than 8 tangents or a measurement inside it (its Hessian
-  reads NaN, never 0), `hessian_of` of an IO callee whose value is not used
-  elsewhere, a `var` declared before the first `measure` (no private Hessian
-  slots, like its gradient rows, #3547), Hessian rows beyond the first 8
-  channels and 16 bound locals, and helpers whose body asks `variance_of`
-  and friends. A query whose answer depends on such a call is refused at
-  compile time rather than answered 0 where the walk can tell (see the
-  refusal entry below).
+  `tests/oracles/gum_so_hyperdual_clones.cpp`, 1e-10 relative).
+  Wide second order (2026-11-15). The second-order tables cover all 32
+  channels (528 Hessian slots, column-major upper triangle, so a row of
+  `n` channels is the prefix of a wider one), 128 bound locals carry Hessian
+  rows, and the declared correlation matrix is 32 x 32 (it was 8 x 8, so a
+  `correlate` between channels above 7 was dropped). `hessian_of(r, j, k)`
+  accepts `j`, `k` below 32. A call with nine and with twelve tangents
+  returns its exact Hessian (`nine_h*`, `twelve_h*` in
+  `tests/run-pass/gum_so_hyperdual_clones.sio`, replacing the NaN that
+  `nine_tangents_nan` pinned), and 32 measured quantities in one expression
+  carry exactly (`tests/run-pass/gum_so_32_channels.sio`, oracle
+  `tests/oracles/gum_so_32_channels.cpp`). A callee takes up to 32 tangents
+  (it was 24).
+  A measurement made inside a second-order callee is exact. Its channels sit
+  above the tangents, so the Hessian over the tangents is unchanged; the clone
+  also writes the internal curvature term `sum_m H_mm sigma_m^2` in one extra
+  out slot, and the caller adds it as a curvature-only channel (no
+  sensitivity, sigma^2 = 1, `H_dd` = the term). `second_order_mean` reads
+  `1/2 H_dd`, and a later call's chain rule carries it on, including where the
+  callee is stationary in its measurement (internal variance 0, all of the
+  contribution curvature) and where the callee calls a drawing callee (pins
+  `draw1_*`, `draw2_*`, `draw3_*` in `gum_so_hyperdual_clones.sio`).
+  `hessian_of(f(x), j, k)` and `second_order_mean(f(x))` whose call occurs
+  only inside the query emit the clone call inside the query lowering, for an
+  IO callee as well: a query argument is evaluated once, like any call
+  argument, and `second_order_mean` now lowers its value before the walk so
+  the walk reuses that call (the side effect happens exactly once and the
+  value is exact; pin `io_query_only_*`).
+  A `var` declared before the first `measure` (#3547) gets its private
+  sensitivity, Hessian and variance slots as soon as a channel exists in the
+  block it was declared in, so a loop-carried update, a nested loop and a
+  branch through it are exact (pins `late_loop_*`, `late_nested_*`,
+  `late_branch_*` in `gum_so_hyperdual_clones.sio`). Before, variance_of read
+  19.71 where the value is 59.13 and the Hessian read 0.
+  A query is refused at compile time, never answered 0 or short, when it reads
+  a measured quantity beyond the 32-slot channel table (pin
+  `tests/compile-fail/gum_refuse_uncovered_hessian.sio`; before, the 33rd
+  quantity's variance and curvature were silently left out), when it reads a
+  `var` declared before the first `measure` whose loop-carried update could
+  not be given slots because the first `measure` sat in a nested block (pin
+  `tests/compile-fail/gum_refuse_late_var_nested_measure.sio`), and, as
+  before, when it reaches a call the compiler cannot differentiate (pin
+  `tests/compile-fail/gum_refuse_uncovered_call_zero.sio`).
 - **Narrowed (#1706, 2026-10-13).** A call to a *pure helper* (an `f64`
   return, or a struct return when a field of the call is read; `f64`, integer
   or bool parameters, struct parameters by value or by reference whose
@@ -164,8 +194,7 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
   `ir_register_knowledge_layout` now tags it `1`. The two call-boundary pins pass on Madaros (measured 2026-10-15):
   `tests/run-pass/gum_fo_across_call.sio` prints `CALL_var 0.002117` against
   its oracle, and `tests/run-pass/fo_call_boundary_arity3.sio` prints
-  `id3_var 1.000000`. Neither file carries `//@ known-failure`. What stays
-  open is the list above. Re-measured 2026-09-22: the specific
+  `id3_var 1.000000`. Neither file carries `//@ known-failure`. Re-measured 2026-09-22: the specific
   `rapamycin_epistemic_adaptive` witness (F1) now reports non-zero variance
   too, and the accompanying test change is `b2df0727` (2026-09-18) — but that
   commit touches only the test fixture and its recorded gate/dataset
