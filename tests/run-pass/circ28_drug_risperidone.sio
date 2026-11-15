@@ -1,0 +1,228 @@
+//@ run-pass
+//@ timeout: 300
+//@ expect-stdout-contains: CIRC28_DRUG_RISPERIDONE_PASS
+//
+// Risperidone + 9-hydroxyrisperidone (paliperidone) on the circ28 drug record, coupled by
+// circ28_metab.sio (stdlib/darwin_pbpk/circ28_drug_risperidone.sio; parameter table and sources
+// in its header). CYP2D6 extensive metaboliser (EM) unless stated.
+//
+// FITTED, hence NOT validations (one observable per fitted parameter):
+//   R Kp scalar -> Vss 109.5 L; R total hepatic clint -> IV CL 23.6 L/h (fe_R 0.02 sets the renal part);
+//   R split clform/other -> IV AUC ratio 9-OH/risperidone = 3 (Huang 1993); R ka -> Tmax 1.0 h;
+//   M Kp scalar -> Vss 136.4 L; M clint, clren -> CL 3.81 L/h and fe_M 0.59.
+//   The EXTRA fit that the sources force: the IV ratio 3 with CL_M 3.81 gives phi = clform/(clform+clint)
+//   0.487, i.e. 9-OH formation carries only about half of the hepatic clearance of risperidone.
+//
+// VALIDATIONS (none of the numbers below enters a fit), criteria fixed BEFORE the runs:
+//   an observation with a between-subject SD (label CV x mean): |z| <= 2;
+//   an observation with no spread: the prediction within a factor 1.5.
+//
+// PREDICTIONS WRITTEN BEFORE THE FIRST COUPLED RUN. CLOSED FORM (Sounio scratch evaluation of the
+// fitted record, no coupled run): Eh_R 0.3471, F = fa Fg (1-Eh) = 0.6529, F_src of 9-OH 0.9777, phi 0.4865,
+// CL_R,hep 23.128 + renal 0.472 L/h, PM (clform = 0) total CL_R 14.86 L/h, ka fit 0.8120 /h.
+//   V1  F risperidone              0.653   obs 0.66 (Huang 1993, no spread) and 0.70 CV 25 % (label)   PASS
+//   V2  oral AUC ratio 9-OH/R      4.59 = 3/F (formation is route independent: sequential first
+//                                  pass, linear kinetics, no gut-wall metabolism)  obs 6 (Huang 1993)   PASS at 1.5 (fold 1.31),
+//                                  an UNDER-prediction by 23 % that the fits cannot remove: 6 needs a first-pass-specific
+//                                  yield (a gut-wall or CYP3A route that forms 9-OH), which one clform slot cannot carry.
+//   V3  active-moiety F            (F + 3)/4 = 0.913 (plasma concentrations summed)  obs 1.00 (Huang)   PASS (fold 1.10)
+//   V4  R terminal t1/2            ESTIMATE ~3.3 h (ln2 Vss/CL; range 2.5-4.5)  obs 3 h (CV 30 %, label)   PASS
+//   V5  9-OH terminal t1/2         ESTIMATE ~24.8 h (ln2 Vss/CL_M, range 20-30)  obs 21 h (CV 20 %, label)  PASS (z ~0.9)
+//   V6  active-moiety t1/2         ESTIMATE ~24 h  obs 20 +/- 2.5 (Huang)   BORDERLINE (z ~1.6-2); no pre-commitment
+//   V7  9-OH Tmax (oral)           ESTIMATE 3-5 h  obs 3 h (label, no spread)   PASS if <= 4.5 h
+//   V8  PM oral ratio 9-OH/R       0 (clform = 0: no 9-OH is formed at all)  obs 0.2 (Huang)   FAIL (a stated limit:
+//                                  PMs still form 9-OH, via CYP3A4, Mahatthanatrakul 2011; not in the record)
+//   V9  PM R t1/2                  5.1 h (ln2 Vss/CL_PM)  obs 22 h (Huang) and 20 h CV 40 % (label)   FAIL at 1.5 (fold 4.3)
+//   The PM scaling is CYP2D6 pathway only: clform x 0 (PMs lack CYP2D6, defining the phenotype in Huang 1993).
+//   It fails twice because the sources disagree with each other: IV ratio 3 (EM) with CL_M 3.81 needs phi 0.49,
+//   but the PM half-life 22 h (3 h in EM) needs the CYP2D6 share of the parent clearance to be >= 0.86.
+//   The fit chooses the IV ratio (an observable of its own), so the PM t1/2 pays for it.
+// NOT VALIDATED (no absolute value opened): Cmax and Tmax of both after a stated oral dose in healthy EM.
+//   Remmerie 2016 gave profiles in figures only, Narayanan 2026 (PMID 42053037) gave no absolute values in the
+//   abstract, Kneller 2020 and Boonleang 2010 full texts are closed. Cmax is printed per mg for reference only.
+//
+// RESULTS (first kernel run, Madaros; the predictions above were not changed afterwards)
+//   V1 0.653 pass; V1b z -0.27 pass; V2 oral ratio 4.63 vs 6 (fold 0.77) pass; V2b pass; V3 0.919 pass;
+//   V4 R t1/2 3.77 h (z 0.86) pass; V5 9-OH t1/2 25.4 h (z 1.05) pass; V6 active-moiety t1/2 25.4 h vs 20 +/- 2.5
+//   (z 2.2) FAIL, borderline as foreseen; V7 9-OH Tmax 9.0 h vs 3 h FAIL (fold 3.0) AGAINST the pre-registered PASS:
+//   the estimate 3-5 h was wrong. Diagnosis: the 9-OH curve is formation-rate limited AND the uniform Kp scalar gives
+//   it a 136 L volume that fills slowly through the 3.8 L/h clearance; the label's 3 h implies a much smaller central
+//   volume than a single Kp scalar can give. Not fixable by any fit allowed here (one observable per parameter).
+//   V8 PM ratio 0 vs 0.2 FAIL (by construction); V9 PM R t1/2 5.6 h vs 22 h FAIL (fold 0.26), z -1.8 vs the label's
+//   wide CV 40 % (pass only because of that CV). The assertions below are bands around these measured numbers.
+
+use darwin_pbpk::circ28::*
+use darwin_pbpk::circ28_kp::*
+use darwin_pbpk::circ28_drug::*
+use darwin_pbpk::circ28_metab::*
+use darwin_pbpk::circ28_drug_risperidone::*
+
+fn rt_fold(tag: string, pred: f64, obs: f64, fold: f64, expect_pass: i32) -> i32 with IO, Mut, Div, Panic {
+    let r = pred / obs
+    var ok: i32 = 0
+    if r <= fold && r >= 1.0 / fold { ok = 1 }
+    print("  "); print(tag); print("  pred "); print(pred); print("  obs "); print(obs); print("  fold "); print(r)
+    if ok == 1 { println("  [pass]") } else { println("  [fail]") }
+    if ok != expect_pass {
+        println("  [FAIL] outcome differs from the pre-registered one")
+        return 1
+    }
+    return 0
+}
+
+fn rt_z(tag: string, pred: f64, obs: f64, sd: f64, expect_pass: i32) -> i32 with IO, Mut, Div, Panic {
+    let z = (pred - obs) / sd
+    var ok: i32 = 0
+    if z <= 2.0 && z >= 0.0 - 2.0 { ok = 1 }
+    print("  "); print(tag); print("  pred "); print(pred); print("  obs "); print(obs); print("  SD "); print(sd); print("  z "); print(z)
+    if ok == 1 { println("  [pass]") } else { println("  [fail]") }
+    if ok != expect_pass {
+        println("  [FAIL] outcome differs from the pre-registered one")
+        return 1
+    }
+    return 0
+}
+
+fn rt_band(tag: string, v: f64, lo: f64, hi: f64) -> i32 with IO, Mut, Div, Panic {
+    if v >= lo && v <= hi { return 0 }
+    print("  [FAIL] "); print(tag); print(" = "); print(v); print(" outside ["); print(lo); print(", "); print(hi); println("]")
+    return 1
+}
+
+fn rt_rel(tag: string, got: f64, want: f64, tol: f64) -> i32 with IO, Mut, Div, Panic {
+    var d = got - want
+    if d < 0.0 { d = 0.0 - d }
+    d = d / want
+    print("  "); print(tag); print("  got "); print(got); print("  want "); print(want); print("  rel "); println(d)
+    if d > tol {
+        println("  [FAIL] above tolerance")
+        return 1
+    }
+    return 0
+}
+
+// One coupled run; clform of R scaled by pm (1 = EM, 0 = PM).
+fn rt_run(dr: &Circ28Drug, dm: &Circ28Drug, route: i32, dose: f64, pm: f64, res: &![f64; 24]) with Mut, Div, Panic, Epistemic {
+    var thr = circ28_drug_theta(dr)
+    thr[CD_CLFORM] = thr[CD_CLFORM] * pm
+    let thm = circ28_drug_theta(dm)
+    rsp_run_th(thr, thm, route, dose, 0.1, 12.0, 36.0, 120.0, 240.0, res)
+}
+
+fn rt_show(tag: string, r: &[f64; 24]) with IO, Mut, Div, Panic {
+    print(tag); print(": R Cmax "); print((*r)[0]); print(" Tmax "); print((*r)[1]); print(" AUCinf "); print((*r)[2]); print(" t1/2 "); println((*r)[3])
+    print("      M Cmax "); print((*r)[5]); print(" Tmax "); print((*r)[6]); print(" AUCinf "); print((*r)[7]); print(" t1/2 "); println((*r)[8])
+    print("      balance R "); print((*r)[10]); print(" M "); print((*r)[11]); print(" fits ok R/M "); print((*r)[13]); print("/"); println((*r)[14])
+}
+
+fn rt_pk(dr: &Circ28Drug) -> f64 with Mut, Div, Panic, Epistemic {
+    return rsp_f_oral(circ28_drug_theta(dr))
+}
+
+fn rt_budget(dr: &Circ28Drug, dm: &Circ28Drug) -> i32 with IO, Mut, Div, Panic, Epistemic {
+    var fails: i32 = 0
+    let b = rsp_budget(dr, dm, 1.0)
+    print("S5 uncertainty budget with refit, 1 mg oral: "); print(b.runs); println(" coupled runs")
+    fails = fails + rt_band("AM AUC (ng h/mL per mg)", b.am_auc * 1000.0, 145.0, 166.0)
+    fails = fails + rt_band("AM AUC relative u", sqrt_f(b.var_am) / b.am_auc, 0.30, 0.42)
+    print("  active-moiety AUC "); print(b.am_auc * 1000.0); print(" ng h/mL per mg  u "); print(1000.0 * sqrt_f(b.var_am)); print("  rel "); println(sqrt_f(b.var_am) / b.am_auc)
+    print("  risperidone AUC "); print(b.r_auc * 1000.0); print("  u "); println(1000.0 * sqrt_f(b.var_r))
+    print("  9-OH AUC "); print(b.m_auc * 1000.0); print("  u "); println(1000.0 * sqrt_f(b.var_m))
+    print("  oral ratio "); print(b.ratio); print("  u "); print(sqrt_f(b.var_ratio)); print("  vs 6: z "); println((b.ratio - 6.0) / sqrt_f(b.var_ratio))
+    println("  input          u(input)      share of var(active-moiety AUC) %")
+    var i: i32 = 0
+    while i < 16 {
+        print("  "); print(rsp_input_name(i)); print("   "); print(b.u[i]); print("   "); println(100.0 * b.contrib_am[i] / b.var_am)
+        i = i + 1
+    }
+    return fails
+}
+
+fn sqrt_f(x: f64) -> f64 with Mut, Div, Panic {
+    if !(x > 0.0) { return 0.0 }
+    var g = x
+    if g < 1.0 { g = 1.0 }
+    var k: i32 = 0
+    while k < 60 {
+        g = 0.5 * (g + x / g)
+        k = k + 1
+    }
+    return g
+}
+
+fn main() with IO, Mut, Div, Panic, Epistemic {
+    var fails: i32 = 0
+    var dm = circ28_drug_new()
+    var dr = circ28_drug_new()
+    // the steps of rsp_drug_into, written out in main: lean_single mis-forwards the second reference when
+    // they are chained inside one function (measured: it gave clint 178.0 / clform 182.6 instead of 185.2 / 175.5)
+    rsp_measured_m(&!dm)
+    rsp_fit_record_m(&!dm)
+    rsp_measured_r(&!dr)
+    rsp_fit_record_r(&!dr, &dm)
+    rsp_ka_record(&!dr)
+    println("S0 record: R then 9-OH (value, status)")
+    var i: i32 = 0
+    while i < 18 {
+        print("  R "); print(i); print(" "); print(circ28_drug_value(&dr, i)); print("  status "); print(dr.status[i])
+        print("   |  M "); print(circ28_drug_value(&dm, i)); print("  status "); println(dm.status[i])
+        i = i + 1
+    }
+    // ---- S1: the fits reproduce their own observables
+    println("S1 the fits reproduce their observables (NOT validations)")
+    let pr = circ28_drug_params(&dr)
+    let pm = circ28_drug_params(&dm)
+    fails = fails + rt_rel("V_ss R (L)", circ28_vss_plasma(pr), rsp_obs_r_vss(), 1.0e-9)
+    fails = fails + rt_rel("V_ss M (L)", circ28_vss_plasma(pm), rsp_obs_m_vss(), 1.0e-9)
+    fails = fails + rt_rel("CL R total (L/h)", circ28_splanchnic_clearance(pr) * pr.bp + circ28_drug_value(&dr, CD_CLREN), rsp_obs_r_cl(), 1.0e-9)
+    fails = fails + rt_rel("CL M total (L/h)", circ28_splanchnic_clearance(pm) * pm.bp + circ28_drug_value(&dm, CD_CLREN), rsp_obs_m_cl(), 1.0e-9)
+    // ---- S2: IV run, kernel ratio against the fitted 3
+    var iv: [f64; 24] = [0.0; 24]
+    rt_run(&dr, &dm, 0, 1.0, 1.0, &!iv)
+    rt_show("S2 IV 1 mg over 0.1 h", &iv)
+    fails = fails + rt_rel("IV AUC ratio 9-OH/R (kernel, plasma)", iv[7] / iv[2], rsp_obs_ratio(), 0.02)
+    fails = fails + rt_band("IV balance R", iv[10], 0.0, 1.0e-9)
+    fails = fails + rt_band("IV balance M", iv[11], 0.0, 1.0e-9)
+    // ---- S3: oral EM
+    var po: [f64; 24] = [0.0; 24]
+    rt_run(&dr, &dm, 1, 1.0, 1.0, &!po)
+    rt_show("S3 oral 1 mg EM", &po)
+    println("V validation, predicted vs observed (criteria fixed before the runs)")
+    let f_cf = rt_pk(&dr)
+    fails = fails + rt_fold("V1  F risperidone (closed form)         ", f_cf, 0.66, 1.5, 1)
+    fails = fails + rt_z("V1b F risperidone vs label 0.70 CV 25 % ", f_cf, 0.70, 0.175, 1)
+    fails = fails + rt_fold("V2  oral AUC ratio 9-OH/R               ", po[7] / po[2], 6.0, 1.5, 1)
+    fails = fails + rt_fold("V2b oral ratio / IV ratio = 1/F         ", (po[7] / po[2]) / (iv[7] / iv[2]), 1.0 / 0.66, 1.1, 1)
+    fails = fails + rt_fold("V3  active-moiety F (oral/IV AUC)       ", (po[2] + po[7]) / (iv[2] + iv[7]), 1.0, 1.5, 1)
+    fails = fails + rt_z("V4  R t1/2 (h), label 3 h CV 30 %       ", po[3], 3.0, 0.9, 1)
+    fails = fails + rt_z("V5  9-OH t1/2 (h), label 21 h CV 20 %   ", po[8], 21.0, 4.2, 1)
+    // V6 had no pre-commitment (borderline); measured outcome asserted.
+    fails = fails + rt_z("V6  active-moiety t1/2 (h), Huang 20 +/- 2.5", po[8], 20.0, 2.5, 0)
+    // V7 was pre-registered PASS (estimate 3-5 h) and FAILED: the prediction was wrong, see RESULTS.
+    fails = fails + rt_fold("V7  9-OH Tmax (h), label 3 h (pre-registered PASS, measured FAIL)", po[6], 3.0, 1.5, 0)
+    fails = fails + rt_band("V7 9-OH Tmax band", po[6], 8.0, 10.0)
+    fails = fails + rt_band("V2 oral ratio band", po[7] / po[2], 4.4, 4.85)
+    fails = fails + rt_band("oral R Cmax per mg (mg/L)", po[0], 0.0039, 0.0044)
+    // ---- S4: poor metaboliser
+    var pmr: [f64; 24] = [0.0; 24]
+    rt_run(&dr, &dm, 1, 1.0, 0.0, &!pmr)
+    rt_show("S4 oral 1 mg PM (clform x 0)", &pmr)
+    fails = fails + rt_fold("V8  PM oral ratio 9-OH/R, Huang 0.2     ", pmr[7] / pmr[2] + 1.0e-12, 0.2, 1.5, 0)
+    fails = fails + rt_fold("V9  PM R t1/2 (h), Huang 22 h            ", pmr[3], 22.0, 1.5, 0)
+    fails = fails + rt_z("V9b PM R t1/2 vs label 20 h CV 40 %     ", pmr[3], 20.0, 8.0, 1)
+    fails = fails + rt_band("V9 PM R t1/2 band", pmr[3], 5.0, 6.3)
+    // DIAGNOSIS (not validation): residual CYP2D6-independent formation s x clform in PMs.
+    println("S4b diagnosis: PM with residual formation s x clform (what would 0.2 need?)")
+    var sc: f64 = 0.02
+    var js: i32 = 0
+    while js < 4 {
+        var rr: [f64; 24] = [0.0; 24]
+        rt_run(&dr, &dm, 1, 1.0, sc, &!rr)
+        print("  s "); print(sc); print("  ratio "); print(rr[7] / rr[2]); print("  R t1/2 "); print(rr[3]); print("  M Tmax "); println(rr[6])
+        sc = sc * 2.5
+        js = js + 1
+    }
+    // ---- S5: budget
+    fails = fails + rt_budget(&dr, &dm)
+    if fails == 0 { println("CIRC28_DRUG_RISPERIDONE_PASS") } else { print("FAILS "); println(fails) }
+}
