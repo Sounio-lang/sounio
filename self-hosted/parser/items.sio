@@ -1199,17 +1199,19 @@ fn items_global_ty_is_i64(ty: &Option<Box<TypeExpr>>) -> bool with Mut, Panic, D
     }
 }
 
-// Scans the initializer; on overflow returns (true, site_start, site_end).
-fn items_global_init_overflow_site(init: &Expr, ty: &Option<Box<TypeExpr>>) -> (bool, i64, i64) with Mut, Panic, Div {
-    if !items_global_ty_is_i64(ty) { return (false, 0, 0) }
+// Scans the initializer. On overflow returns true and leaves the site in
+// ITEMS_GINIT_OVF_START / ITEMS_GINIT_OVF_END, which the caller reads at once.
+// A scalar result on purpose: the macOS arm64 Madaros is compiled by the
+// lean_single seed, which read a `(bool, i64, i64)` result of this function as
+// (true, garbage, garbage) and so refused every `var X: i64 = 0` with E300
+// (Native Self-Host macOS arm64, module registry gate, 2026-11-15).
+fn items_global_init_overflows(init: &Expr, ty: &Option<Box<TypeExpr>>) -> bool with Mut, Panic, Div {
     ITEMS_GINIT_OVF_FOUND = 0
     ITEMS_GINIT_OVF_START = 0
     ITEMS_GINIT_OVF_END = 0
+    if !items_global_ty_is_i64(ty) { return false }
     let ignored = items_ginit_i64_eval(init)
-    if ITEMS_GINIT_OVF_FOUND != 0 {
-        return (true, ITEMS_GINIT_OVF_START, ITEMS_GINIT_OVF_END)
-    }
-    (false, 0, 0)
+    ITEMS_GINIT_OVF_FOUND != 0
 }
 
 fn items_record_global_init_or_defer(name: Name, init: Box<Expr>, deferrable: bool) with Mut, Panic, Div {
@@ -1773,7 +1775,9 @@ impl Parser {
         p = p.expect(TokenKind::Eq)
         p = p.parse_expr()
         let init_let_box = parser_take_expr_box()
-        let let_ovf = items_global_init_overflow_site(&(*init_let_box), &global_ty)
+        let let_ovf = items_global_init_overflows(&(*init_let_box), &global_ty)
+        let let_ovf_start = ITEMS_GINIT_OVF_START
+        let let_ovf_end = ITEMS_GINIT_OVF_END
         items_record_global_init_or_defer(name, init_let_box, items_global_init_deferrable(&global_ty))
         ast_record_global_const_name(name)
         if parser_peek(p) == TokenKind::Semi {
@@ -1781,8 +1785,8 @@ impl Parser {
         }
 
         let span = p.span_from(start)
-        if let_ovf.0 {
-            ast_record_global_init_overflow(name, span, let_ovf.1, let_ovf.2)
+        if let_ovf {
+            ast_record_global_init_overflow(name, span, let_ovf_start, let_ovf_end)
         }
         (p, Item {
             kind: ItemKind::ItemFn,
@@ -1832,12 +1836,16 @@ impl Parser {
         let global_ty: Option<Box<TypeExpr>> = ty_pair.1
         ast_record_global_decl_type(name, &global_ty)
 
-        var var_ovf: (bool, i64, i64) = (false, 0, 0)
+        var var_ovf = false
+        var var_ovf_start: i64 = 0
+        var var_ovf_end: i64 = 0
         if parser_peek(p) == TokenKind::Eq {
             p = p.advance()
             p = p.parse_expr()
             let init_var_box = parser_take_expr_box()
-            var_ovf = items_global_init_overflow_site(&(*init_var_box), &global_ty)
+            var_ovf = items_global_init_overflows(&(*init_var_box), &global_ty)
+            var_ovf_start = ITEMS_GINIT_OVF_START
+            var_ovf_end = ITEMS_GINIT_OVF_END
             items_record_global_init_or_defer(name, init_var_box, items_global_init_deferrable(&global_ty))
         }
         if parser_peek(p) == TokenKind::Semi {
@@ -1845,8 +1853,8 @@ impl Parser {
         }
 
         let span = p.span_from(start)
-        if var_ovf.0 {
-            ast_record_global_init_overflow(name, span, var_ovf.1, var_ovf.2)
+        if var_ovf {
+            ast_record_global_init_overflow(name, span, var_ovf_start, var_ovf_end)
         }
         (p, Item {
             kind: ItemKind::ItemFn,
