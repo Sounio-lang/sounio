@@ -1,0 +1,403 @@
+// stdlib/darwin_pbpk/circ28.sio — whole-body PBPK kernel with a closed circulation
+//
+// Twenty-eight states, the same count as tsit5_pbpk28.sio, laid out as a
+// circulation instead of a star around one blood pool:
+//
+//   venous pool -> lung -> arterial pool -> organs -> venous pool
+//   gut, spleen and pancreas drain into the liver (portal vein); the liver
+//   also receives the hepatic artery and drains into the venous pool.
+//
+//   x[0]            venous blood                       (mg per L of blood)
+//   x[1]            arterial blood                     (mg per L of blood)
+//   x[2 + 2(i-1)]   vascular space of organ i, i=1..13 (mg per L of blood)
+//   x[3 + 2(i-1)]   tissue space of organ i            (mg per L of tissue)
+//
+// Organ order (i): 1 liver, 2 kidney, 3 brain, 4 heart, 5 lung, 6 muscle,
+// 7 adipose, 8 gut, 9 skin, 10 bone, 11 spleen, 12 pancreas, 13 rest.
+//
+// Why a new kernel. In tsit5_pbpk28.sio every organ, the lung included, hangs
+// in parallel from one 5 L blood pool, clearance acts on that pool, and
+// concentrations are whole-blood with no plasma partition. Three consequences
+// were measured on its drug sets (2026-11-15):
+//   - the organ vascular spaces (3.60 L) add to the 5 L pool, so no parameter
+//     set can have a volume below 8.60 L, above the published volumes of
+//     semaglutide and tirzepatide;
+//   - oral first pass is a bioavailability constant applied to the input,
+//     which invited combining an apparent clearance with F a second time;
+//   - the lung does not see the whole cardiac output and the splanchnic bed
+//     does not feed the liver, so the early distribution and the first pass
+//     are not those of the circulation.
+// Here blood volumes add up to the blood volume, plasma concentration is
+// blood concentration divided by the blood-to-plasma ratio, hepatic clearance
+// is an intrinsic clearance acting in liver tissue, renal clearance acts on
+// the arterial plasma reaching the kidney, and oral drug enters gut tissue so
+// that first-pass extraction is produced by the portal route.
+//
+// Equations (C blood concentrations, T tissue concentrations, bp blood to
+// plasma ratio, kp tissue to plasma partition, ps permeability-surface
+// product referred to plasma, CO cardiac output):
+//
+//   exchange_i  = ps_i (C_i / bp - T_i / kp_i)
+//   venous      V_ven dC_ven/dt = sum_out Q_out C_out - CO C_ven
+//                                 - (cl_plasma / bp) C_ven + iv(t)
+//   lung        V_v dC/dt = CO (C_ven - C) - exchange
+//   arterial    V_art dC_art/dt = CO (C_lung - C_art)
+//   organ i     V_v dC/dt = Q_i (C_art - C) - exchange
+//               kidney: the inflow term loses (cl_renal / bp) C_art
+//   liver       V_v dC/dt = Q_ha C_art + sum_portal Q_j C_j - Q_h C - exchange
+//   tissue i    V_t dT/dt = exchange
+//               liver: - (clint + clform) fu T / kp
+//               gut:   + oral(t)
+//
+// with Q_h = Q_ha + Q_gut + Q_spleen + Q_pancreas and CO the sum of the
+// arterial flows (q[1] is the hepatic artery; q[5] is not read).
+//
+// Integration: Crank-Nicolson on dx/dt = A x + u. (I - h A) is factored once
+// per parameter set and step (LU without pivoting; the matrix is strictly
+// diagonally dominant by columns in mass form for any h), and each step is
+// one multiplication by (I + h A) and one pair of triangular solves. The
+// eliminated masses are the trapezoid of the same rates, so the mass
+// identity holds to rounding. No state is clamped.
+
+pub struct Circ28Params {
+    pub v_ven: f64,          // L, venous blood pool
+    pub v_art: f64,          // L, arterial blood pool
+    pub v: [f64; 14],        // L, organ volume (index 0 unused)
+    pub vf: [f64; 14],       // vascular fraction of the organ volume
+    pub q: [f64; 14],        // L/h, arterial flow to the organ; q[1] hepatic artery
+    pub kp: [f64; 14],       // tissue to plasma partition coefficient
+    pub ps: [f64; 14],       // L/h, permeability-surface product (plasma)
+    pub bp: f64,             // blood to plasma concentration ratio
+    pub fu: f64,             // unbound fraction in plasma
+    pub clint: f64,          // L/h, hepatic intrinsic clearance of unbound drug
+    pub clform: f64,         // L/h, hepatic intrinsic clearance forming a tracked metabolite
+    pub cl_renal: f64,       // L/h, renal clearance referred to plasma
+    pub cl_plasma: f64,      // L/h, clearance from venous plasma (e.g. proteolysis)
+}
+
+pub struct Circ28State {
+    pub x: [f64; 28],
+}
+
+// Masses (mg) removed over one step or accumulated over a run.
+pub struct Circ28Elim {
+    pub hepatic: f64,
+    pub formed: f64,
+    pub renal: f64,
+    pub plasma: f64,
+}
+
+// Factored system for one parameter set and one step size.
+pub struct Circ28Sys {
+    pub lu: [f64; 784],      // LU of (I - h A), row-major, unit lower triangle
+    pub ex: [f64; 784],      // (I + h A), row-major
+    pub dt: f64,
+    pub k_hep: f64,          // L/h: mass rate = k_hep * T_liver
+    pub k_form: f64,
+    pub k_ren: f64,          // mass rate = k_ren * C_art
+    pub k_pla: f64,          // mass rate = k_pla * C_ven
+}
+
+pub fn circ28_state_zero() -> Circ28State {
+    Circ28State { x: [0.0; 28] }
+}
+
+pub fn circ28_elim_zero() -> Circ28Elim {
+    Circ28Elim { hepatic: 0.0, formed: 0.0, renal: 0.0, plasma: 0.0 }
+}
+
+pub fn circ28_iv(i: i32) -> i32 { return 2 + 2 * (i - 1) }
+pub fn circ28_it(i: i32) -> i32 { return 3 + 2 * (i - 1) }
+
+fn circ28_is_portal(i: i32) -> bool {
+    return i == 8 || i == 11 || i == 12
+}
+
+// Liver outflow: hepatic artery plus the portal organs.
+pub fn circ28_q_hepatic(p: Circ28Params) -> f64 {
+    return p.q[1] + p.q[8] + p.q[11] + p.q[12]
+}
+
+// Cardiac output: the sum of the arterial flows (lung excluded).
+pub fn circ28_cardiac_output(p: Circ28Params) -> f64 with Mut {
+    var co = 0.0
+    var i: i32 = 1
+    while i < 14 {
+        if i != 5 { co = co + p.q[i] }
+        i = i + 1
+    }
+    return co
+}
+
+// Volume of each state (L): blood volumes for vascular states, tissue volumes
+// for tissue states.
+pub fn circ28_state_volume(p: Circ28Params, k: i32) -> f64 {
+    if k == 0 { return p.v_ven }
+    if k == 1 { return p.v_art }
+    let i = (k - 2) / 2 + 1
+    if (k - 2) % 2 == 0 { return p.v[i] * p.vf[i] }
+    return p.v[i] * (1.0 - p.vf[i])
+}
+
+// Total blood volume (L).
+pub fn circ28_blood_volume(p: Circ28Params) -> f64 with Mut {
+    var vb = p.v_ven + p.v_art
+    var i: i32 = 1
+    while i < 14 {
+        vb = vb + p.v[i] * p.vf[i]
+        i = i + 1
+    }
+    return vb
+}
+
+// Steady-state volume of distribution referred to plasma (L):
+// bp * blood volume + sum of tissue volume * kp.
+pub fn circ28_vss_plasma(p: Circ28Params) -> f64 with Mut {
+    var vss = p.bp * circ28_blood_volume(p)
+    var i: i32 = 1
+    while i < 14 {
+        vss = vss + p.v[i] * (1.0 - p.vf[i]) * p.kp[i]
+        i = i + 1
+    }
+    return vss
+}
+
+// Total drug mass in the body (mg).
+pub fn circ28_total_mass(s: &Circ28State, p: Circ28Params) -> f64 with Mut {
+    var m = 0.0
+    var k: i32 = 0
+    while k < 28 {
+        m = m + circ28_state_volume(p, k) * (*s).x[k]
+        k = k + 1
+    }
+    return m
+}
+
+// Plasma concentration in the venous pool (mg/L).
+pub fn circ28_plasma_venous(s: &Circ28State, p: Circ28Params) -> f64 with Div {
+    return (*s).x[0] / p.bp
+}
+
+// Hepatic extraction ratio at steady state, from the same equations:
+// tissue balance ps (C/bp - T/kp) = (clint + clform) fu T/kp gives an
+// effective blood clearance cl_eff = (ps * ci / (ps + ci)) / bp with
+// ci = (clint + clform) * fu, and E = cl_eff / (Q_h + cl_eff).
+pub fn circ28_hepatic_extraction(p: Circ28Params) -> f64 with Div {
+    let ci = (p.clint + p.clform) * p.fu
+    if !(ci > 0.0) { return 0.0 }
+    let cl_eff = (p.ps[1] * ci / (p.ps[1] + ci)) / p.bp
+    let qh = circ28_q_hepatic(p)
+    return cl_eff / (qh + cl_eff)
+}
+
+// Adds a to entry (r, c) of a 28 x 28 row-major matrix.
+fn circ28_add(m: &![f64; 784], r: i32, c: i32, a: f64) with Mut {
+    (*m)[r * 28 + c] = (*m)[r * 28 + c] + a
+}
+
+// Fills `a` with the rate matrix A of dx/dt = A x (1/h).
+fn circ28_fill_rate_matrix(p: Circ28Params, a: &![f64; 784]) with Mut, Div {
+    var k: i32 = 0
+    while k < 784 {
+        (*a)[k] = 0.0
+        k = k + 1
+    }
+    let co = circ28_cardiac_output(p)
+    let qh = circ28_q_hepatic(p)
+    let ven = 0
+    let art = 1
+
+    // venous pool: loses CO and plasma clearance
+    circ28_add(a, ven, ven, 0.0 - (co + p.cl_plasma / p.bp) / p.v_ven)
+    // arterial pool: fed by lung vascular, loses CO
+    circ28_add(a, art, circ28_iv(5), co / p.v_art)
+    circ28_add(a, art, art, 0.0 - co / p.v_art)
+
+    var i: i32 = 1
+    while i < 14 {
+        let iv = circ28_iv(i)
+        let it = circ28_it(i)
+        let vv = p.v[i] * p.vf[i]
+        let vt = p.v[i] * (1.0 - p.vf[i])
+        let ps = p.ps[i]
+        let kp = p.kp[i]
+
+        // exchange between vascular and tissue space
+        circ28_add(a, iv, iv, 0.0 - ps / (p.bp * vv))
+        circ28_add(a, iv, it, ps / (kp * vv))
+        circ28_add(a, it, iv, ps / (p.bp * vt))
+        circ28_add(a, it, it, 0.0 - ps / (kp * vt))
+
+        if i == 5 {
+            // lung: whole cardiac output from the venous pool
+            circ28_add(a, iv, ven, co / vv)
+            circ28_add(a, iv, iv, 0.0 - co / vv)
+        } else if i == 1 {
+            // liver: hepatic artery in, hepatic flow out to the venous pool
+            circ28_add(a, iv, art, p.q[1] / vv)
+            circ28_add(a, iv, iv, 0.0 - qh / vv)
+            circ28_add(a, ven, iv, qh / p.v_ven)
+            // intrinsic clearance on unbound tissue concentration
+            circ28_add(a, it, it, 0.0 - (p.clint + p.clform) * p.fu / (kp * vt))
+        } else {
+            let qi = p.q[i]
+            circ28_add(a, iv, art, qi / vv)
+            circ28_add(a, iv, iv, 0.0 - qi / vv)
+            if circ28_is_portal(i) {
+                // outflow to the liver vascular space
+                circ28_add(a, circ28_iv(1), iv, qi / (p.v[1] * p.vf[1]))
+            } else {
+                circ28_add(a, ven, iv, qi / p.v_ven)
+            }
+            if i == 2 {
+                // renal clearance removes drug from the arterial plasma inflow
+                circ28_add(a, iv, art, 0.0 - (p.cl_renal / p.bp) / vv)
+            }
+        }
+        i = i + 1
+    }
+}
+
+// Builds and factors the Crank-Nicolson system for step dt (h).
+pub fn circ28_prepare(p: Circ28Params, dt: f64, sys: &!Circ28Sys) with Mut, Div {
+    var a: [f64; 784] = [0.0; 784]
+    circ28_fill_rate_matrix(p, &!a)
+    let h = 0.5 * dt
+    var r: i32 = 0
+    while r < 28 {
+        var c: i32 = 0
+        while c < 28 {
+            let id = if r == c { 1.0 } else { 0.0 }
+            (*sys).lu[r * 28 + c] = id - h * a[r * 28 + c]
+            (*sys).ex[r * 28 + c] = id + h * a[r * 28 + c]
+            c = c + 1
+        }
+        r = r + 1
+    }
+    // Doolittle LU in place, no pivoting.
+    var j: i32 = 0
+    while j < 28 {
+        let piv = (*sys).lu[j * 28 + j]
+        var rr: i32 = j + 1
+        while rr < 28 {
+            let f = (*sys).lu[rr * 28 + j] / piv
+            (*sys).lu[rr * 28 + j] = f
+            if f != 0.0 {
+                var cc: i32 = j + 1
+                while cc < 28 {
+                    (*sys).lu[rr * 28 + cc] = (*sys).lu[rr * 28 + cc] - f * (*sys).lu[j * 28 + cc]
+                    cc = cc + 1
+                }
+            }
+            rr = rr + 1
+        }
+        j = j + 1
+    }
+    (*sys).dt = dt
+    (*sys).k_hep = p.clint * p.fu / p.kp[1]
+    (*sys).k_form = p.clform * p.fu / p.kp[1]
+    (*sys).k_ren = p.cl_renal / p.bp
+    (*sys).k_pla = p.cl_plasma / p.bp
+}
+
+pub fn circ28_sys_zero() -> Circ28Sys {
+    Circ28Sys { lu: [0.0; 784], ex: [0.0; 784], dt: 0.0, k_hep: 0.0, k_form: 0.0, k_ren: 0.0, k_pla: 0.0 }
+}
+
+// One Crank-Nicolson step. iv_rate (mg/h) enters the venous pool and
+// oral_rate (mg/h) enters gut tissue, both taken at the step midpoint.
+// Adds the masses eliminated over the step to `el`.
+pub fn circ28_step(
+    s: &!Circ28State,
+    p: Circ28Params,
+    sys: &Circ28Sys,
+    iv_rate: f64,
+    oral_rate: f64,
+    el: &!Circ28Elim
+) with Mut, Div {
+    let dt = (*sys).dt
+    let h = 0.5 * dt
+    let it_liver = circ28_it(1)
+    let old_ven = (*s).x[0]
+    let old_art = (*s).x[1]
+    let old_tl = (*s).x[it_liver]
+
+    var b: [f64; 28] = [0.0; 28]
+    var r: i32 = 0
+    while r < 28 {
+        var acc = 0.0
+        var c: i32 = 0
+        while c < 28 {
+            let e = (*sys).ex[r * 28 + c]
+            if e != 0.0 { acc = acc + e * (*s).x[c] }
+            c = c + 1
+        }
+        b[r] = acc
+        r = r + 1
+    }
+    b[0] = b[0] + dt * iv_rate / p.v_ven
+    let it_gut = circ28_it(8)
+    b[it_gut] = b[it_gut] + dt * oral_rate / (p.v[8] * (1.0 - p.vf[8]))
+
+    // forward substitution (unit lower triangle)
+    r = 1
+    while r < 28 {
+        var acc = b[r]
+        var c: i32 = 0
+        while c < r {
+            let l = (*sys).lu[r * 28 + c]
+            if l != 0.0 { acc = acc - l * b[c] }
+            c = c + 1
+        }
+        b[r] = acc
+        r = r + 1
+    }
+    // back substitution
+    r = 27
+    while r >= 0 {
+        var acc = b[r]
+        var c: i32 = r + 1
+        while c < 28 {
+            let u = (*sys).lu[r * 28 + c]
+            if u != 0.0 { acc = acc - u * b[c] }
+            c = c + 1
+        }
+        b[r] = acc / (*sys).lu[r * 28 + r]
+        r = r - 1
+    }
+    r = 0
+    while r < 28 {
+        (*s).x[r] = b[r]
+        r = r + 1
+    }
+
+    (*el).hepatic = (*el).hepatic + h * (*sys).k_hep * (old_tl + (*s).x[it_liver])
+    (*el).formed = (*el).formed + h * (*sys).k_form * (old_tl + (*s).x[it_liver])
+    (*el).renal = (*el).renal + h * (*sys).k_ren * (old_art + (*s).x[1])
+    (*el).plasma = (*el).plasma + h * (*sys).k_pla * (old_ven + (*s).x[0])
+}
+
+// Standard 70 kg physiology with a closed blood balance. Organ volumes,
+// vascular fractions and flows are those of pbpk28_params_*; the hepatic
+// artery flow is the liver flow of that set (90 L/h) minus its portal organs
+// (55 + 10 + 8), the "rest" flow is raised from 13 to 36 L/h so that the
+// arterial flows add up to the 350 L/h the lung carries, and the venous and
+// arterial pools hold what remains of a 5.2 L blood volume after the organ
+// vascular spaces (3.596 L), split two to one.
+pub fn circ28_physiology() -> Circ28Params {
+    Circ28Params {
+        v_ven: 1.06955,
+        v_art: 0.53478,
+        v:  [0.0, 1.8, 0.31, 1.45, 0.33, 1.1, 28.0, 20.0, 1.2, 3.6, 6.6, 0.18, 0.09, 3.7],
+        vf: [0.0, 0.210, 0.160, 0.037, 0.262, 0.262, 0.040, 0.050, 0.024, 0.019, 0.041, 0.282, 0.180, 0.050],
+        q:  [0.0, 17.0, 74.0, 44.0, 16.0, 350.0, 42.0, 10.0, 55.0, 21.0, 17.0, 10.0, 8.0, 36.0],
+        kp: [0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+        ps: [0.0, 1800.0, 1110.0, 88.0, 160.0, 10500.0, 336.0, 40.0, 660.0, 126.0, 51.0, 150.0, 96.0, 78.0],
+        bp: 1.0,
+        fu: 1.0,
+        clint: 0.0,
+        clform: 0.0,
+        cl_renal: 0.0,
+        cl_plasma: 0.0,
+    }
+}

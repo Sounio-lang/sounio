@@ -1,0 +1,165 @@
+//@ run-pass
+//@ timeout: 300
+//@ expect-stdout-contains: CIRC28_KERNEL_IDENTITIES_PASS
+//
+// Closed-circulation PBPK kernel (stdlib/darwin_pbpk/circ28.sio) against
+// identities that follow from its equations and are fixed before the run.
+//
+//   P  physiology: arterial flows add up to 350 L/h; blood volume 5.2 L.
+//   T1 closed system (no clearance), 10 mg into the venous pool: mass is
+//      conserved to 1e-10 over 12000 steps and the state reaches the equilibrium
+//      C_blood = Dose / (V_blood + sum V_t kp / bp), T_i = kp_i C_blood / bp.
+//   T2 plasma clearance only: eliminated mass = Dose and
+//      AUC_venous(blood) = Dose * bp / cl_plasma.
+//   T3 hepatic intrinsic clearance only, intravenous:
+//      AUC_venous(blood) = Dose / (Q_h E), E from circ28_hepatic_extraction.
+//   T4 same set, oral (drug enters gut tissue, reaches the liver through the
+//      portal vein): AUC_oral / input = (1 - E) / (Q_h E), i.e. F = 1 - E.
+//   T5 renal clearance only: AUC_venous(blood) = Dose * bp / cl_renal.
+//   T6 a plasma-confined drug (bp 0.55, kp 0.05) has a plasma volume of
+//      distribution of 6.098 L, below the 8.60 L floor of the star kernel.
+//
+// Tolerance 1e-6 relative on the AUC identities (the Crank-Nicolson
+// trapezoid sums satisfy them exactly; the residual is the truncated tail).
+
+use darwin_pbpk::circ28::*
+use math::pure::{exp}
+
+fn ck_abs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn ck_rel(tag: string, got: f64, want: f64, tol: f64) -> i32 with IO, Mut, Div, Panic {
+    let r = ck_abs(got - want) / ck_abs(want)
+    print("  "); print(tag); print(": got "); print(got); print(" want "); print(want)
+    print("  rel x 1e9 = "); println(r * 1.0e9)
+    if !(r <= tol) {
+        println("  [FAIL]")
+        return 1
+    }
+    return 0
+}
+
+fn ck_set() -> Circ28Params with Mut {
+    var p = circ28_physiology()
+    p.kp = [0.0, 4.0, 3.0, 0.5, 2.0, 5.0, 1.5, 3.0, 2.5, 1.0, 0.8, 2.0, 1.8, 1.2]
+    p.bp = 0.8
+    p.fu = 0.1
+    return p
+}
+
+struct CkRun {
+    auc_ven: f64,
+    input: f64,
+    mass_end: f64,
+    el_total: f64,
+}
+
+// route 0: 10 mg bolus in the venous pool; route 1: 10 mg oral, ka 1 /h.
+fn ck_run(p: Circ28Params, route: i32, dt: f64, horizon: f64) -> CkRun with Mut, Div, Panic {
+    var sys = circ28_sys_zero()
+    circ28_prepare(p, dt, &!sys)
+    var s = circ28_state_zero()
+    var el = circ28_elim_zero()
+    var input = 0.0
+    if route == 0 {
+        s.x[0] = 10.0 / p.v_ven
+        input = 10.0
+    }
+    var t = 0.0
+    var auc = 0.0
+    var prev = s.x[0]
+    while t + dt * 0.5 < horizon {
+        var oral = 0.0
+        if route == 1 {
+            oral = 10.0 * exp(0.0 - (t + 0.5 * dt))
+            input = input + oral * dt
+        }
+        circ28_step(&!s, p, &sys, 0.0, oral, &!el)
+        t = t + dt
+        auc = auc + 0.5 * (prev + s.x[0]) * dt
+        prev = s.x[0]
+    }
+    return CkRun { auc_ven: auc, input: input, mass_end: circ28_total_mass(&s, p), el_total: el.hepatic + el.formed + el.renal + el.plasma }
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var fails: i32 = 0
+
+    println("P physiology")
+    let base = circ28_physiology()
+    fails = fails + ck_rel("cardiac output (L/h)", circ28_cardiac_output(base), 350.0, 1.0e-12)
+    fails = fails + ck_rel("blood volume (L)", circ28_blood_volume(base), 5.2, 1.0e-9)
+
+    println("T1 closed system")
+    let p1 = ck_set()
+    var sys = circ28_sys_zero()
+    circ28_prepare(p1, 0.05, &!sys)
+    var s = circ28_state_zero()
+    var el = circ28_elim_zero()
+    s.x[0] = 10.0 / p1.v_ven
+    var t = 0.0
+    while t + 0.025 < 600.0 {
+        circ28_step(&!s, p1, &sys, 0.0, 0.0, &!el)
+        t = t + 0.05
+    }
+    fails = fails + ck_rel("mass (mg)", circ28_total_mass(&s, p1), 10.0, 1.0e-10)
+    var veq = circ28_blood_volume(p1)
+    var i: i32 = 1
+    while i < 14 {
+        veq = veq + p1.v[i] * (1.0 - p1.vf[i]) * p1.kp[i] / p1.bp
+        i = i + 1
+    }
+    let ceq = 10.0 / veq
+    fails = fails + ck_rel("venous at equilibrium", s.x[0], ceq, 1.0e-6)
+    fails = fails + ck_rel("arterial at equilibrium", s.x[1], ceq, 1.0e-6)
+    fails = fails + ck_rel("adipose tissue at equilibrium", s.x[circ28_it(7)], p1.kp[7] * ceq / p1.bp, 1.0e-6)
+    fails = fails + ck_rel("brain tissue at equilibrium", s.x[circ28_it(3)], p1.kp[3] * ceq / p1.bp, 1.0e-6)
+
+    println("T2 plasma clearance")
+    var p2 = ck_set()
+    p2.cl_plasma = 2.0
+    let r2 = ck_run(p2, 0, 0.02, 3000.0)
+    fails = fails + ck_rel("eliminated + remaining (mg)", r2.el_total + r2.mass_end, 10.0, 1.0e-10)
+    fails = fails + ck_rel("AUC venous (mg.h/L)", r2.auc_ven, 10.0 * p2.bp / 2.0, 1.0e-6)
+
+    println("T3 hepatic clearance, intravenous")
+    var p3 = ck_set()
+    p3.clint = 500.0
+    let e3 = circ28_hepatic_extraction(p3)
+    let clb = circ28_q_hepatic(p3) * e3
+    print("  E = "); print(e3); print("  CL_blood (L/h) = "); println(clb)
+    let r3 = ck_run(p3, 0, 0.01, 400.0)
+    fails = fails + ck_rel("eliminated + remaining (mg)", r3.el_total + r3.mass_end, 10.0, 1.0e-10)
+    fails = fails + ck_rel("AUC venous (mg.h/L)", r3.auc_ven, 10.0 / clb, 1.0e-6)
+
+    println("T4 hepatic clearance, oral")
+    let r4 = ck_run(p3, 1, 0.01, 400.0)
+    fails = fails + ck_rel("eliminated + remaining over input", (r4.el_total + r4.mass_end) / r4.input, 1.0, 1.0e-10)
+    fails = fails + ck_rel("AUC oral / input (h/L)", r4.auc_ven / r4.input, (1.0 - e3) / clb, 1.0e-6)
+    fails = fails + ck_rel("F = AUC_oral / AUC_iv per unit dose", (r4.auc_ven / r4.input) / (r3.auc_ven / 10.0), 1.0 - e3, 1.0e-6)
+
+    println("T5 renal clearance")
+    var p5 = ck_set()
+    p5.cl_renal = 5.0
+    let r5 = ck_run(p5, 0, 0.02, 1500.0)
+    fails = fails + ck_rel("AUC venous (mg.h/L)", r5.auc_ven, 10.0 * p5.bp / 5.0, 1.0e-6)
+
+    println("T6 plasma-confined drug")
+    var p6 = circ28_physiology()
+    p6.bp = 0.55
+    i = 1
+    while i < 14 {
+        p6.kp[i] = 0.05
+        i = i + 1
+    }
+    fails = fails + ck_rel("V_ss plasma (L)", circ28_vss_plasma(p6), 0.55 * 5.2 + 0.05 * 64.76433, 1.0e-6)
+
+    if fails == 0 {
+        println("CIRC28_KERNEL_IDENTITIES_PASS")
+        return 0
+    }
+    println("CIRC28_KERNEL_IDENTITIES_FAIL")
+    return 1
+}
