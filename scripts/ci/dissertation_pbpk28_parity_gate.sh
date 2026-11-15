@@ -42,7 +42,7 @@
 #                  Couples the PK chain end-to-end: PBPK28 → TMDD → PD readout.
 #   7. HARD GATE — Semaglutide PBPK28 parity (G-δ-1): Node ↔ Sounio on
 #                  semaglutide trajectory (SC depot release k_a=0.01155 /h,
-#                  cl_proteolytic=0.077 L/h, peptide Kp/PS). RMSE < 1.0% per
+#                  cl_proteolytic=0.0445 L/h, peptide Kp/PS). RMSE < 1.0% per
 #                  organ on cavg. Demonstrates the DrugProfile abstraction —
 #                  same PBPK28 integrator, different drug.
 #   8. HARD GATE — Semaglutide TMDD parity (G-δ-2): Node ↔ Sounio on GLP-1R
