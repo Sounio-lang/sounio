@@ -19,8 +19,16 @@
 //   T6 a plasma-confined drug (bp 0.55, kp 0.05) has a plasma volume of
 //      distribution of 6.098 L, below the 8.60 L floor of the star kernel.
 //
-// Tolerance 1e-6 relative on the AUC identities (the Crank-Nicolson
-// trapezoid sums satisfy them exactly; the residual is the truncated tail).
+//   T7 10 mg given as an infusion over the first step of a coarse grid
+//      (0.25 h): no state goes below -1e-12 mg/L in 100 h and mass is
+//      conserved. Measured for the record: Crank-Nicolson reached -8.4 mg/L
+//      when the same dose was set as a jump in the venous state; the scheme
+//      used here reaches -0.28 mg/L on a jump and 0 on an infusion, which is
+//      why doses enter as rates.
+//
+// Tolerance 1e-6 relative on the AUC identities (the areas accumulated with
+// the weights of the scheme satisfy them exactly; the residual is the
+// truncated tail).
 
 use darwin_pbpk::circ28::*
 use math::pure::{exp}
@@ -68,8 +76,6 @@ fn ck_run(p: Circ28Params, route: i32, dt: f64, horizon: f64) -> CkRun with Mut,
         input = 10.0
     }
     var t = 0.0
-    var auc = 0.0
-    var prev = s.x[0]
     while t + dt * 0.5 < horizon {
         var oral = 0.0
         if route == 1 {
@@ -78,10 +84,8 @@ fn ck_run(p: Circ28Params, route: i32, dt: f64, horizon: f64) -> CkRun with Mut,
         }
         circ28_step(&!s, p, &sys, 0.0, oral, &!el)
         t = t + dt
-        auc = auc + 0.5 * (prev + s.x[0]) * dt
-        prev = s.x[0]
     }
-    return CkRun { auc_ven: auc, input: input, mass_end: circ28_total_mass(&s, p), el_total: el.hepatic + el.formed + el.renal + el.plasma }
+    return CkRun { auc_ven: el.auc_ven, input: input, mass_end: circ28_total_mass(&s, p), el_total: el.hepatic + el.formed + el.renal + el.plasma }
 }
 
 fn main() -> i32 with IO, Mut, Div, Panic {
@@ -155,6 +159,33 @@ fn main() -> i32 with IO, Mut, Div, Panic {
         i = i + 1
     }
     fails = fails + ck_rel("V_ss plasma (L)", circ28_vss_plasma(p6), 0.55 * 5.2 + 0.05 * 64.76433, 1.0e-6)
+
+    println("T7 dose as a one-step infusion, coarse step")
+    var p7 = ck_set()
+    p7.cl_plasma = 2.0
+    var sys7 = circ28_sys_zero()
+    circ28_prepare(p7, 0.25, &!sys7)
+    var s7 = circ28_state_zero()
+    var el7 = circ28_elim_zero()
+    var mn = 0.0
+    var n7: i32 = 0
+    while n7 < 400 {
+        var rate7 = 0.0
+        if n7 == 0 { rate7 = 10.0 / 0.25 }
+        circ28_step(&!s7, p7, &sys7, rate7, 0.0, &!el7)
+        var j: i32 = 0
+        while j < 28 {
+            if s7.x[j] < mn { mn = s7.x[j] }
+            j = j + 1
+        }
+        n7 = n7 + 1
+    }
+    print("  most negative state (mg/L): "); println(mn)
+    if mn < -1.0e-12 {
+        println("  [FAIL]")
+        fails = fails + 1
+    }
+    fails = fails + ck_rel("eliminated + remaining (mg)", el7.plasma + circ28_total_mass(&s7, p7), 10.0, 1.0e-10)
 
     if fails == 0 {
         println("CIRC28_KERNEL_IDENTITIES_PASS")

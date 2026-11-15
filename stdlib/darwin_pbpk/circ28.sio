@@ -52,12 +52,22 @@
 // with Q_h = Q_ha + Q_gut + Q_spleen + Q_pancreas and CO the sum of the
 // arterial flows (q[1] is the hepatic artery; q[5] is not read).
 //
-// Integration: Crank-Nicolson on dx/dt = A x + u. (I - h A) is factored once
-// per parameter set and step (LU without pivoting; the matrix is strictly
-// diagonally dominant by columns in mass form for any h), and each step is
-// one multiplication by (I + h A) and one pair of triangular solves. The
-// eliminated masses are the trapezoid of the same rates, so the mass
-// identity holds to rounding. No state is clamped.
+// Integration: the two-stage, second-order, L-stable SDIRK scheme of
+// Alexander (1977), gamma = 1 - 1/sqrt(2), on dx/dt = A x + u. Both stages
+// solve with the same matrix (I - gamma dt A), factored once per parameter
+// set and step (LU without pivoting; the matrix is strictly diagonally
+// dominant by columns in mass form for any dt). Crank-Nicolson was measured
+// first and rejected: after an intravenous bolus with dt = 0.01 h it rang to
+// -2.1 mg/L in the lung vascular space (lung turnover is 1200 /h), because
+// its amplification factor tends to -1 for stiff modes; an L-stable scheme
+// damps them. Eliminated masses and the areas under the venous and arterial
+// curves are accumulated with the weights of the scheme, so that
+// dose = eliminated + remaining and AUC = eliminated / clearance hold to
+// rounding at any step size. No state is clamped. Doses enter as rates: a
+// jump written into a state excites the stiff modes, for which the scheme's
+// amplification factor is small but negative (down to -0.2), and produced
+// a transient -0.28 mg/L in the test case; the same dose infused over one
+// step produced none. An intravenous bolus is an infusion of stated length.
 
 pub struct Circ28Params {
     pub v_ven: f64,          // L, venous blood pool
@@ -79,18 +89,21 @@ pub struct Circ28State {
     pub x: [f64; 28],
 }
 
-// Masses (mg) removed over one step or accumulated over a run.
+// Accumulated over a run: masses removed (mg) and areas under the blood
+// concentration curves (mg.h/L).
 pub struct Circ28Elim {
     pub hepatic: f64,
     pub formed: f64,
     pub renal: f64,
     pub plasma: f64,
+    pub auc_ven: f64,
+    pub auc_art: f64,
 }
 
 // Factored system for one parameter set and one step size.
 pub struct Circ28Sys {
-    pub lu: [f64; 784],      // LU of (I - h A), row-major, unit lower triangle
-    pub ex: [f64; 784],      // (I + h A), row-major
+    pub lu: [f64; 784],      // LU of (I - gamma dt A), row-major, unit lower triangle
+    pub a: [f64; 784],       // A, row-major
     pub dt: f64,
     pub k_hep: f64,          // L/h: mass rate = k_hep * T_liver
     pub k_form: f64,
@@ -103,7 +116,7 @@ pub fn circ28_state_zero() -> Circ28State {
 }
 
 pub fn circ28_elim_zero() -> Circ28Elim {
-    Circ28Elim { hepatic: 0.0, formed: 0.0, renal: 0.0, plasma: 0.0 }
+    Circ28Elim { hepatic: 0.0, formed: 0.0, renal: 0.0, plasma: 0.0, auc_ven: 0.0, auc_art: 0.0 }
 }
 
 pub fn circ28_iv(i: i32) -> i32 { return 2 + 2 * (i - 1) }
@@ -258,18 +271,20 @@ fn circ28_fill_rate_matrix(p: Circ28Params, a: &![f64; 784]) with Mut, Div {
     }
 }
 
-// Builds and factors the Crank-Nicolson system for step dt (h).
+pub fn circ28_gamma() -> f64 { return 0.29289321881345254 }
+
+// Builds A and factors (I - gamma dt A) for step dt (h).
 pub fn circ28_prepare(p: Circ28Params, dt: f64, sys: &!Circ28Sys) with Mut, Div {
     var a: [f64; 784] = [0.0; 784]
     circ28_fill_rate_matrix(p, &!a)
-    let h = 0.5 * dt
+    let h = circ28_gamma() * dt
     var r: i32 = 0
     while r < 28 {
         var c: i32 = 0
         while c < 28 {
             let id = if r == c { 1.0 } else { 0.0 }
             (*sys).lu[r * 28 + c] = id - h * a[r * 28 + c]
-            (*sys).ex[r * 28 + c] = id + h * a[r * 28 + c]
+            (*sys).a[r * 28 + c] = a[r * 28 + c]
             c = c + 1
         }
         r = r + 1
@@ -301,12 +316,55 @@ pub fn circ28_prepare(p: Circ28Params, dt: f64, sys: &!Circ28Sys) with Mut, Div 
 }
 
 pub fn circ28_sys_zero() -> Circ28Sys {
-    Circ28Sys { lu: [0.0; 784], ex: [0.0; 784], dt: 0.0, k_hep: 0.0, k_form: 0.0, k_ren: 0.0, k_pla: 0.0 }
+    Circ28Sys { lu: [0.0; 784], a: [0.0; 784], dt: 0.0, k_hep: 0.0, k_form: 0.0, k_ren: 0.0, k_pla: 0.0 }
 }
 
-// One Crank-Nicolson step. iv_rate (mg/h) enters the venous pool and
-// oral_rate (mg/h) enters gut tissue, both taken at the step midpoint.
-// Adds the masses eliminated over the step to `el`.
+// k <- (I - gamma dt A)^-1 (A y + u), in place in k; u has two entries.
+fn circ28_stage(sys: &Circ28Sys, y: &[f64; 28], u_ven: f64, u_gut: f64, k: &![f64; 28]) with Mut, Div {
+    var r: i32 = 0
+    while r < 28 {
+        var acc = 0.0
+        var c: i32 = 0
+        while c < 28 {
+            let e = (*sys).a[r * 28 + c]
+            if e != 0.0 { acc = acc + e * (*y)[c] }
+            c = c + 1
+        }
+        (*k)[r] = acc
+        r = r + 1
+    }
+    (*k)[0] = (*k)[0] + u_ven
+    (*k)[17] = (*k)[17] + u_gut
+    r = 1
+    while r < 28 {
+        var acc = (*k)[r]
+        var c: i32 = 0
+        while c < r {
+            let l = (*sys).lu[r * 28 + c]
+            if l != 0.0 { acc = acc - l * (*k)[c] }
+            c = c + 1
+        }
+        (*k)[r] = acc
+        r = r + 1
+    }
+    r = 27
+    while r >= 0 {
+        var acc = (*k)[r]
+        var c: i32 = r + 1
+        while c < 28 {
+            let u = (*sys).lu[r * 28 + c]
+            if u != 0.0 { acc = acc - u * (*k)[c] }
+            c = c + 1
+        }
+        (*k)[r] = acc / (*sys).lu[r * 28 + r]
+        r = r - 1
+    }
+}
+
+// One step. iv_rate (mg/h) enters the venous pool and oral_rate (mg/h)
+// enters gut tissue (state 17); both are held constant over the step, so
+// the mass entered is exactly dt times the rate. Adds the masses eliminated
+// and the areas under the venous and arterial curves to `el`.
 pub fn circ28_step(
     s: &!Circ28State,
     p: Circ28Params,
@@ -316,65 +374,46 @@ pub fn circ28_step(
     el: &!Circ28Elim
 ) with Mut, Div {
     let dt = (*sys).dt
-    let h = 0.5 * dt
-    let it_liver = circ28_it(1)
-    let old_ven = (*s).x[0]
-    let old_art = (*s).x[1]
-    let old_tl = (*s).x[it_liver]
+    let g = circ28_gamma()
+    let u_ven = iv_rate / p.v_ven
+    let u_gut = oral_rate / (p.v[8] * (1.0 - p.vf[8]))
 
-    var b: [f64; 28] = [0.0; 28]
+    var y: [f64; 28] = [0.0; 28]
+    var k1: [f64; 28] = [0.0; 28]
+    var k2: [f64; 28] = [0.0; 28]
     var r: i32 = 0
     while r < 28 {
-        var acc = 0.0
-        var c: i32 = 0
-        while c < 28 {
-            let e = (*sys).ex[r * 28 + c]
-            if e != 0.0 { acc = acc + e * (*s).x[c] }
-            c = c + 1
-        }
-        b[r] = acc
+        y[r] = (*s).x[r]
         r = r + 1
     }
-    b[0] = b[0] + dt * iv_rate / p.v_ven
-    let it_gut = circ28_it(8)
-    b[it_gut] = b[it_gut] + dt * oral_rate / (p.v[8] * (1.0 - p.vf[8]))
-
-    // forward substitution (unit lower triangle)
-    r = 1
-    while r < 28 {
-        var acc = b[r]
-        var c: i32 = 0
-        while c < r {
-            let l = (*sys).lu[r * 28 + c]
-            if l != 0.0 { acc = acc - l * b[c] }
-            c = c + 1
-        }
-        b[r] = acc
-        r = r + 1
-    }
-    // back substitution
-    r = 27
-    while r >= 0 {
-        var acc = b[r]
-        var c: i32 = r + 1
-        while c < 28 {
-            let u = (*sys).lu[r * 28 + c]
-            if u != 0.0 { acc = acc - u * b[c] }
-            c = c + 1
-        }
-        b[r] = acc / (*sys).lu[r * 28 + r]
-        r = r - 1
-    }
+    circ28_stage(sys, &y, u_ven, u_gut, &!k1)
     r = 0
     while r < 28 {
-        (*s).x[r] = b[r]
+        y[r] = (*s).x[r] + (1.0 - g) * dt * k1[r]
         r = r + 1
     }
+    circ28_stage(sys, &y, u_ven, u_gut, &!k2)
 
-    (*el).hepatic = (*el).hepatic + h * (*sys).k_hep * (old_tl + (*s).x[it_liver])
-    (*el).formed = (*el).formed + h * (*sys).k_form * (old_tl + (*s).x[it_liver])
-    (*el).renal = (*el).renal + h * (*sys).k_ren * (old_art + (*s).x[1])
-    (*el).plasma = (*el).plasma + h * (*sys).k_pla * (old_ven + (*s).x[0])
+    // stage values: X1 = x + g dt k1, X2 = x_new; weights (1 - g) and g
+    let w1 = (1.0 - g) * dt
+    let w2 = g * dt
+    let x1_ven = (*s).x[0] + g * dt * k1[0]
+    let x1_art = (*s).x[1] + g * dt * k1[1]
+    let x1_tl = (*s).x[3] + g * dt * k1[3]
+    r = 0
+    while r < 28 {
+        (*s).x[r] = (*s).x[r] + w1 * k1[r] + w2 * k2[r]
+        r = r + 1
+    }
+    let q_ven = w1 * x1_ven + w2 * (*s).x[0]
+    let q_art = w1 * x1_art + w2 * (*s).x[1]
+    let q_tl = w1 * x1_tl + w2 * (*s).x[3]
+    (*el).auc_ven = (*el).auc_ven + q_ven
+    (*el).auc_art = (*el).auc_art + q_art
+    (*el).hepatic = (*el).hepatic + (*sys).k_hep * q_tl
+    (*el).formed = (*el).formed + (*sys).k_form * q_tl
+    (*el).renal = (*el).renal + (*sys).k_ren * q_art
+    (*el).plasma = (*el).plasma + (*sys).k_pla * q_ven
 }
 
 // Standard 70 kg physiology with a closed blood balance. Organ volumes,
