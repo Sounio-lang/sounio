@@ -444,7 +444,7 @@ export const DEFAULT_PARAMS_TACROLIMUS = Object.freeze({
   pdParams: {},
   cVisualMax: 3.0e-5,
   drugLabel: 'Tacrolimus (oral IR)',
-  releaseSourceLabel: 'Oral IR (k_a = 0.38 /h, F = 0.25)',
+  releaseSourceLabel: 'Oral IR (k_a = 4.5 /h, F = 0.18, lag 0.39 h)',
 });
 
 // Zyprexa immediate-release olanzapine (SIO-518): single 10 mg oral dose.
