@@ -220,10 +220,10 @@ probe rem_zero_i64 i64 'let z: i64 = id(0)
 expect_trap rem_zero_i64 "7 % 0 (i64)"
 probe div_min_i64 i64 'let m: i64 = id(-9223372036854775807) - 1
   println(m / id(-1))'
-expect_trap div_min_i64 "i64::MIN / -1"
+expect_trap div_min_i64 "i64::MIN / -1" "i64 /"
 probe rem_min_i64 i64 'let m: i64 = id(-9223372036854775807) - 1
   println(m % id(-1))'
-expect_trap rem_min_i64 "i64::MIN % -1"
+expect_trap rem_min_i64 "i64::MIN % -1" "i64 %"
 probe div_zero_u64 u64 'let z: u64 = id(0)
   println(id(7) / z)'
 expect_trap div_zero_u64 "7 / 0 (u64)"

@@ -2967,7 +2967,9 @@ fn nc_overflow_kind_text(kind: i64) -> string {
     else if kind == 3 { "i64 unary -" }
     else if kind == 4 { "u64 +" }
     else if kind == 5 { "u64 -" }
-    else { "u64 *" }
+    else if kind == 6 { "u64 *" }
+    else if kind == 7 { "i64 /" }
+    else { "i64 %" }
 }
 
 // The message for one kind, interned once per compile in the flat rodata.
@@ -3041,7 +3043,7 @@ fn nc_emit_located_overflow_stub(nc: &! NativeCompiler, kind: i64, site: i64) ->
 
 fn nc_emit_overflow_stubs(nc: &! NativeCompiler) with Mut, Panic, Div {
     if NC_OVF_PATCH_N == 0 { return }
-    var stub_at: [i64; 8] = [-1; 8]
+    var stub_at: [i64; 16] = [-1; 16]
     var i: i64 = 0
     while i < NC_OVF_PATCH_N {
         let kind = NC_OVF_PATCH_KIND[i as usize]
@@ -3113,7 +3115,7 @@ fn nc_emit_carry_guard(nc: &! NativeCompiler, kind: i64) with Mut, Panic, Div {
 //   mov  rdx, rax        48 89 C2
 //   neg  rdx             48 F7 DA       (OF set iff rax == i64::MIN)
 //   jo   trap            0F 80 rel32
-fn nc_emit_div_guard(nc: &! NativeCompiler, is_signed: bool) with Mut, Panic, Div {
+fn nc_emit_div_guard(nc: &! NativeCompiler, is_signed: bool, kind: i64) with Mut, Panic, Div {
     NC_V2_OVERFLOW_GUARD_USED = 1
     nc_emit_byte(nc, 0x48)
     nc_emit_byte(nc, 0x85)
@@ -3134,7 +3136,9 @@ fn nc_emit_div_guard(nc: &! NativeCompiler, is_signed: bool) with Mut, Panic, Di
         nc_emit_byte(nc, 0x48)
         nc_emit_byte(nc, 0xf7)
         nc_emit_byte(nc, 0xda)
-        nc_emit_overflow_guard(nc)
+        // MIN / -1 and MIN % -1: the same located overflow stub as + - *,
+        // naming the operation (kind 7 = i64 /, 8 = i64 %).
+        nc_emit_overflow_guard(nc, kind)
     }
 }
 
@@ -12176,7 +12180,7 @@ fn nc_emit_core_binop(nc: &! NativeCompiler, func: &IrFunction, instr_index: i64
         nc_core_load_temp_to_rax(nc, rhs)
         nc_emit_mov_reg_reg(nc, 1, 0)
         nc_core_load_temp_to_rax(nc, lhs)
-        nc_emit_div_guard(nc, true)
+        nc_emit_div_guard(nc, true, 7)
         nc_emit_cqo(nc)
         nc_emit_idiv_rcx(nc)
         nc_core_store_rax_to_temp(nc, dst)
@@ -12190,7 +12194,7 @@ fn nc_emit_core_binop(nc: &! NativeCompiler, func: &IrFunction, instr_index: i64
         nc_core_load_temp_to_rax(nc, rhs)
         nc_emit_mov_reg_reg(nc, 1, 0)
         nc_core_load_temp_to_rax(nc, lhs)
-        nc_emit_div_guard(nc, false)
+        nc_emit_div_guard(nc, false, 0 - 1)
         nc_emit_xor_rdx_rdx(nc)   // rdx = 0
         nc_emit_div_rcx(nc)                 // div rcx: rax = quotient, rdx = remainder
         nc_core_store_rax_to_temp(nc, dst)
@@ -12201,7 +12205,7 @@ fn nc_emit_core_binop(nc: &! NativeCompiler, func: &IrFunction, instr_index: i64
         nc_core_load_temp_to_rax(nc, rhs)
         nc_emit_mov_reg_reg(nc, 1, 0)
         nc_core_load_temp_to_rax(nc, lhs)
-        nc_emit_div_guard(nc, true)
+        nc_emit_div_guard(nc, true, 8)
         nc_emit_cqo(nc)
         nc_emit_idiv_rcx(nc)
         nc_emit_mov_rax_rdx(nc)
@@ -12217,7 +12221,7 @@ fn nc_emit_core_binop(nc: &! NativeCompiler, func: &IrFunction, instr_index: i64
         nc_core_load_temp_to_rax(nc, rhs)
         nc_emit_mov_reg_reg(nc, 1, 0)
         nc_core_load_temp_to_rax(nc, lhs)
-        nc_emit_div_guard(nc, false)
+        nc_emit_div_guard(nc, false, 0 - 1)
         nc_emit_xor_rdx_rdx(nc)   // rdx = 0
         nc_emit_div_rcx(nc)                 // rdx = lhs % rhs (unsigned)
         nc_emit_mov_rax_rdx(nc)
@@ -13935,7 +13939,7 @@ pub fn native_v2_core_emit_binop_code_into(nc: &! NativeCompiler, dst: i64, lhs:
         nc_core_load_temp_to_rax(nc, rhs)
         nc_emit_mov_reg_reg(nc, 1, 0)
         nc_core_load_temp_to_rax(nc, lhs)
-        nc_emit_div_guard(nc, true)
+        nc_emit_div_guard(nc, true, 7)
         nc_emit_cqo(nc)
         nc_emit_idiv_rcx(nc)
         nc_core_store_rax_to_temp(nc, dst)
@@ -14869,7 +14873,7 @@ pub fn native_v2_core_emit_any_binop_into(nc: &! NativeCompiler, dst: i64, lhs: 
         nc_core_load_temp_to_rax(nc, rhs)
         nc_emit_mov_reg_reg(nc, 1, 0)
         nc_core_load_temp_to_rax(nc, lhs)
-        nc_emit_div_guard(nc, true)
+        nc_emit_div_guard(nc, true, 7)
         nc_emit_cqo(nc)
         nc_emit_idiv_rcx(nc)
         nc_core_store_rax_to_temp(nc, dst)
