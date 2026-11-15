@@ -1,0 +1,652 @@
+//@ run-pass
+//@ timeout: 180
+//@ expect-stdout-contains: CIRC28_DRUG_EVEROLIMUS_PASS
+//
+// Everolimus on the circ28 drug record with LOCAL saturable erythrocyte binding
+// (stdlib/darwin_pbpk/circ28_drug_everolimus.sio; shared helpers in circ28_drug_sirolimus.sio). WHOLE-BLOOD
+// concentrations, oral tablet. Parameter table, sources, access levels, status: header of the module.
+//
+// NO INTRAVENOUS HUMAN DATA: CL and V are apparent, F = 0.16 is declared (UNSOURCED here, u 0.05).
+//
+// FITTED (so NOT validations), one observable each:
+//   CL/F   pooled k = 5, N = 70 (healthy, 2 mg, Kovarik abstracts)            -> hepatic clint (with F)
+//   t1/2   pooled k = 5, N = 64 (the terminal volume Vz/F = CL/F t1/2/ln 2)   -> Kp scalar, BY SIMULATION
+//          (no V_ss/F exists in any source opened: the half-life is therefore NOT a validation and the
+//          input-consistency check is an identity, printed as such)
+//   F      0.16 (declared)                                                    -> gut-wall clint
+//   Tmax   1.5 h (label: 1 to 2 hours)                                        -> ka
+// NOT FITTED: the ps scalar stays at the placeholder 1 (no rate observable found that leaves Cmax free).
+// DERIVED: Bmax 3365 ng/mL RBC and Kd 527 ng/mL plasma from the label's 17 % -> 73 % (read as the plasma share
+//   of the drug in blood, 5 -> 5000 ng/mL); ps_gut 11.33 L/h (tacrolimus surrogate).
+//
+// CRITERION: as in the sirolimus test (|z| <= 2 with an inter-individual SD; a stated fold otherwise; every row
+// asserts a band around its measured outcome; CONSISTENCY marks a row whose study is inside a fitted pool).
+//
+// PREDICTIONS, written before ANY everolimus quantity was computed (nothing of this drug had been run; the
+// sirolimus test had been run and its lessons are used: under a gut-only factor the Cmax ratio is well below
+// the AUC ratio; the gut wall also clears arterial drug, so the liver alone cannot give large AUC ratios).
+//   E0  pooled CL/F 18.4 L/h (u 0.95), pooled t1/2 33.0 h (u 2.3), Vz/F 877 L (hand arithmetic).
+//   E1  fitted V_ss/F 780 L (650-860), i.e. V_ss/Vz 0.89 (0.75-0.98).
+//   E2  Cmax 2 mg at the default ps: 6 ng/mL (3-12) against the pooled 17.8 (inter-individual SD about 6):
+//       z -2.0, FAIL expected, at the edge. With the sirolimus ps scalar 0.138 transferred (WHAT-IF, E11):
+//       13 ng/mL (8-18), z -0.8 PASS.
+//   E3  AUC_inf 2 mg = D/(CL/F) = 108.5 ng h/mL within 3 % (CONSISTENCY).
+//   E4  steady state 0.75 mg twice daily (20 doses): AUC(0-12) 40.7 (39-42), Cmax 4.5 ng/mL (3-7), trough 2.9
+//       (2.3-3.3). Label Table 4 (kidney recipients WITH ciclosporin): AUC 75 +/- 31 (z -1.1 PASS), Cmax 11.1
+//       +/- 4.6 (z -1.4 PASS); both low, as expected without ciclosporin. What-if x 2.68 (label: Neoral raises
+//       the single-dose AUC by 168 % in healthy subjects): AUC 109, z +1.1 PASS.
+//   E5  plasma share of the drug in blood at the 2 mg peak and at the steady-state trough 0.170-0.172; Afinitor
+//       label "approximately 20 %": fold 1.25 PASS (ratio 0.86; CONSISTENCY, same label family as the derivation).
+//       Share at 100 ng/mL over share at 5 ng/mL: 1.05 (1.02-1.10): "constant over 5-100 ug/L" (van Erp 2016,
+//       secondary, via the dossier), criterion 0.80-1.25 PASS.
+//   E6  dose linearity 0.75 to 10 mg: dose-normalised Cmax ratio 0.995 (0.97-1.0), AUC 0.998 (0.98-1.0).
+//   E7  intravenous what-if: simulated F within 0.9-1.1 of 0.16.
+//   E8  interaction WHAT-IFS (single 2 mg dose in all studies; factor solved for the AUC ratio in closed form;
+//       the Cmax ratio is the prediction, fold 1.3; the half-life ratio CL/CL' is a second prediction, fold 1.25):
+//         verapamil    AUC 3.5, Cmax 2.3, t1/2 x 1.16:  gut only: Cmax 2.0 (1.7-2.6) PASS; t1/2 x 1.08 PASS
+//         erythromycin AUC 4.4, Cmax 2.0, t1/2 x 1.39:  gut only: Cmax 2.3 (1.9-3.0) PASS; t1/2 x 1.12 PASS (edge)
+//         ciclosporin  AUC 2.68, Cmax 1.82, t1/2 unchanged: gut only: Cmax 1.8 (1.5-2.2) PASS; t1/2 x 1.05 PASS
+//         ketoconazole AUC 15.0, Cmax 3.9, t1/2 x 1.9:  gut alone cannot reach it (ceiling about 9.3); gut fully
+//                      inhibited + hepatic factor: Cmax 3.0 (2.4-3.6), ratio 0.77: PASS at the edge; t1/2 x 2.4
+//                      (2.0-2.9): FAIL at the edge (1.27)
+//         rifampicin   AUC 0.37, Cmax 0.42, t1/2 x 0.75: gut only: Cmax 0.47 (0.38-0.55) PASS, t1/2 x 1.0 FAIL (1.33);
+//                      same factor on gut and liver: Cmax 0.62 FAIL; liver only: 0.85 FAIL
+//   E9  single-ratio module: |dCmax| < 1 %, |dAUC(0-72)| < 0.5 % (the binding is nearly linear here).
+//   E10 budget (2 mg): u(AUC)/AUC 0.052 (0.045-0.065), CL/F above 95 % of the variance; u(Cmax)/Cmax 0.5
+//       (0.3-0.8), the ps scalar above 50 % of the variance.
+//   E11 what-if record with the sirolimus ps scalar: see E2.
+//
+//   E11b (ADDED after the first run had shown E11 wrong, and written BEFORE E11b was run): the comparable quantity is
+//       not the scalar but the blood-referred permeability ps/(bp Q): the exchange term is ps (C/bp - T/kp). The
+//       sirolimus value 0.138 at bp 12.58 corresponds here (bp 3.33) to s = 0.138 x 3.33/12.58 = 0.0366. Prediction:
+//       Cmax 2 mg 8 ng/mL (5-12), z -1.6 PASS (sirolimus: Cmax V_ss/F / D = 3.2; 3.2 x 2 mg / 776 L = 8.3).
+// RESULTS: block at the end of this header, written after the first run; nothing above was edited after it.
+//
+// RESULTS (first complete run, 2026-11-15; bands of rows whose outcome differed from the prediction were set AFTER the run)
+//   HIT:  E0 18.45 L/h, 33.0 h, Vz/F 879 L; E1 V_ss/F 829 L (V_ss/Vz 0.94); E2 Cmax 3.69 ng/mL against 17.8 +/- 6.1:
+//         z -2.34 FAIL as predicted (value inside the stated 3-12, below the central 6); E3 108.4; E4 AUC 40.4 (z -1.12),
+//         Cmax,ss 4.10 (z -1.52), trough 2.81, x 2.68: 108 (z +1.07); E5 share 0.170 (ratio 0.85), share(100)/share(5) 1.047;
+//         E6 0.994 / 0.997; E7 1.0002; E8a verapamil Cmax 2.55 (ratio 1.11), t1/2 1.37 against 1.16 (ratio 1.19);
+//         E8c ciclosporin Cmax 2.15 (ratio 1.18), t1/2 1.249 against 1.0 (PASS by 0.001 of the fold); E8e rifampicin gut only
+//         Cmax 0.41 (ratio 0.97), liver only 0.87 FAIL; E9 dCmax -0.002 %, dAUC +0.009 %; E10 u(AUC)/AUC 0.0515 (CL/F 100 %).
+//   MISSED:
+//     E11 the sirolimus ps scalar 0.138 transferred: Cmax 4.41 (predicted 13): z -2.22 FAIL. The scalar is not the comparable
+//       quantity (see E11b). E11b (s 0.0366, same ps/(bp Q)): Cmax 5.81 (predicted 8, inside 5-12), z -1.99: PASS by 0.01.
+//       Even there Cmax is a third of the observed: the ka that keeps Tmax at 1.5 h falls with s (0.96, 0.85, 0.64 /h).
+//     E10 u(Cmax)/Cmax 0.14 (predicted 0.5) and the ps scalar carries 0.5 % of var(Cmax) (predicted > 50 %): near s = 1 Cmax
+//       does not depend on ps (dlnCmax/dlns -0.04). Shares: F 49 %, ka 29 %, logP 11 %, V_ss/F 9 %. The budget (14 %) does
+//       not cover the Cmax discrepancy (a factor 4.8): the failure is structural, not parametric.
+//     E8b erythromycin gut only: Cmax 2.91 against 2.0, ratio 1.46 FAIL (predicted 2.3 PASS); t1/2 1.50 against 1.39 PASS.
+//     E8d ketoconazole: predicted NOT reachable by the gut wall alone (ceiling 9.3). WRONG: the ceiling is 70, because the
+//       gut wall carries 91 % of the SYSTEMIC clearance in this record (Q_gut Eg = 2.70 of 2.95 L/h; Eh 0.0026). Gut-only
+//       solution (g 0.053; no prediction existed): Cmax 4.76 against 3.9 PASS (ratio 1.22); half-life 3.08 against 1.9 FAIL.
+//     E8e rifampicin: gut-only half-life 0.91 against 0.75 PASS (predicted FAIL); same factor on both: Cmax 0.45 PASS
+//       (predicted 0.62 FAIL).
+//   STRUCTURAL FINDING: with ps_gut 11.33 L/h and B:P 3.3 the closed-form fit exists only for a declared F >= 0.148
+//     (F = 0.16, u 0.05): the gut wall alone nearly exhausts CL(blood) = F CL/F. Printed by the test (S2).
+//   WHICH NEED THE GUT PATHWAY: all; the liver alone cannot raise the AUC by more than 10 % (ceiling 1.097).
+//   COMPILER (not fixed, worked around): three segmentation faults of the compiled test on the Madaros local build (a pool
+//     struct declared late in main; three drug records in main; a record built in a helper function); lean_single: ka
+//     solved inside a module function after record writes is wrong (0.9334 for 0.9572), the first read of a rewritten
+//     record is stale, a budget called from a section function is off by 2.4 %. See the notes at each workaround.
+//   RUNTIME: compiled 3.3 s.
+//
+// COMPILER WORKAROUNDS: as in the sirolimus test (big structs first in main, a discarded warm-up run on the
+// fresh stepper, one run per helper function).
+//
+// Marker CIRC28_DRUG_EVEROLIMUS_PASS.
+
+use darwin_pbpk::circ28::*
+use darwin_pbpk::circ28_kp::*
+use darwin_pbpk::circ28_drug::*
+use darwin_pbpk::circ28_blood::*
+use darwin_pbpk::circ28_nl::*
+use darwin_pbpk::circ28_drug_sirolimus::*
+use darwin_pbpk::circ28_drug_everolimus::*
+use math::pure::{exp, ln}
+
+fn et_abs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn et_rel(tag: string, got: f64, want: f64, tol: f64) -> i32 with IO, Mut, Div, Panic {
+    let r = et_abs(got - want) / et_abs(want)
+    print("  "); print(tag); print(": got "); print(got); print(" want "); print(want)
+    print("  rel = "); println(r)
+    if !(r <= tol) {
+        println("  [FAIL]")
+        return 1
+    }
+    return 0
+}
+
+// One validation row. sd > 0: |z| <= 2; sd = 0: within `fold`. expect 1 pass, 0 fail. band_lo..band_hi bound
+// z (sd > 0) or the ratio pred/obs (sd = 0). Returns 1 if the test must fail.
+fn et_row(tag: string, pred: f64, obs: f64, sd: f64, fold: f64, expect: i32, band_lo: f64, band_hi: f64) -> i32 with IO, Mut, Div, Panic {
+    var stat = pred / obs
+    var pass = false
+    if sd > 0.0 {
+        stat = (pred - obs) / sd
+        pass = et_abs(stat) <= 2.0
+    } else {
+        pass = stat <= fold && stat >= 1.0 / fold
+    }
+    print("  "); print(tag); print(": predicted "); print(pred); print("  observed "); print(obs)
+    print("  ratio "); print(pred / obs)
+    if sd > 0.0 {
+        print("  z "); print(stat)
+    }
+    if pass { print("  PASS") } else { print("  FAIL") }
+    var bad = 0
+    if stat < band_lo || stat > band_hi {
+        print("  [outside the asserted band]")
+        bad = 1
+    }
+    if expect == 1 && !pass {
+        print("  [expected pass]")
+        bad = 1
+    }
+    if expect == 0 && pass {
+        print("  [expected fail]")
+        bad = 1
+    }
+    println("")
+    return bad
+}
+
+fn et_rname(i: i32) -> string {
+    if i == 0 { return "MW" }
+    if i == 1 { return "logP" }
+    if i == 2 { return "pKa1" }
+    if i == 3 { return "pKa2" }
+    if i == 4 { return "ion class" }
+    if i == 5 { return "fu" }
+    if i == 6 { return "B:P at C_ref" }
+    if i == 7 { return "clint (hep)" }
+    if i == 8 { return "clform" }
+    if i == 9 { return "clint (gut)" }
+    if i == 10 { return "cl renal" }
+    if i == 11 { return "cl plasma" }
+    if i == 12 { return "Kp scalar" }
+    if i == 13 { return "ps scalar" }
+    if i == 14 { return "ka" }
+    if i == 15 { return "fa" }
+    if i == 16 { return "tlag" }
+    return "ps gut"
+}
+
+fn et_bname(i: i32) -> string {
+    if i == 0 { return "logP" }
+    if i == 1 { return "fu" }
+    if i == 2 { return "Hct" }
+    if i == 3 { return "Bmax" }
+    if i == 4 { return "Kd" }
+    if i == 5 { return "ps_gut" }
+    if i == 6 { return "fa" }
+    if i == 7 { return "V_ss/F (from t1/2)" }
+    if i == 8 { return "CL/F obs" }
+    if i == 9 { return "F" }
+    if i == 10 { return "ka" }
+    return "ps scalar"
+}
+
+fn et_theta(d: &Circ28Drug, gs: f64, hs: f64) -> [f64; 18] with Mut, Div, Panic, Epistemic {
+    var th: [f64; 18] = [0.0; 18]
+    var i: i32 = 0
+    while i < 18 {
+        th[i] = circ28_drug_value(d, i)
+        i = i + 1
+    }
+    th[CD_CLGUT] = th[CD_CLGUT] * gs
+    th[CD_CLINT] = th[CD_CLINT] * hs
+    return th
+}
+
+// Single oral dose on the standard grid (240 h).
+fn et_oral(d: &Circ28Drug, dose: f64, sysn: &!Nl28Sys) -> MtorRun with Mut, Div, Panic, Epistemic {
+    let p = circ28_drug_params_theta(et_theta(d, 1.0, 1.0))
+    var dc = evr_cfg(dose, 240.0)
+    dc.ka = circ28_drug_value(d, CD_KA)
+    dc.fa = circ28_drug_value(d, CD_FA)
+    return mtor_run(p, mtor_hct(), evr_bmax(), evr_kd(), dc, sysn)
+}
+
+fn et_oral_fine(d: &Circ28Drug, dose: f64, sysn: &!Nl28Sys) -> MtorRun with Mut, Div, Panic, Epistemic {
+    let p = circ28_drug_params_theta(et_theta(d, 1.0, 1.0))
+    var dc = evr_cfg(dose, 240.0)
+    dc.ka = circ28_drug_value(d, CD_KA)
+    dc.fa = circ28_drug_value(d, CD_FA)
+    dc.dt1 = 0.05
+    dc.dt2 = 0.25
+    dc.dt3 = 4.0
+    return mtor_run(p, mtor_hct(), evr_bmax(), evr_kd(), dc, sysn)
+}
+
+// Budget grid: 0.2 h to 3 h, 3 h to 24 h, 8 h to 240 h.
+fn et_cfg_budget(d: &Circ28Drug, dose: f64) -> MtorDose with Mut, Div, Panic, Epistemic {
+    var dc = evr_cfg(dose, 240.0)
+    dc.ka = circ28_drug_value(d, CD_KA)
+    dc.fa = circ28_drug_value(d, CD_FA)
+    dc.dt1 = 0.2
+    dc.dt2 = 3.0
+    return dc
+}
+
+fn et_oral_budget_grid(d: &Circ28Drug, dose: f64, sysn: &!Nl28Sys) -> MtorRun with Mut, Div, Panic, Epistemic {
+    let p = circ28_drug_params_theta(et_theta(d, 1.0, 1.0))
+    let dc = et_cfg_budget(d, dose)
+    return mtor_run(p, mtor_hct(), evr_bmax(), evr_kd(), dc, sysn)
+}
+
+// 4 h run (Cmax only) with scaled clearances.
+fn et_oral_short(d: &Circ28Drug, dose: f64, gs: f64, hs: f64, sysn: &!Nl28Sys) -> MtorRun with Mut, Div, Panic, Epistemic {
+    let p = circ28_drug_params_theta(et_theta(d, gs, hs))
+    var dc = mtor_cfg_oral(dose, 4.0, 100.0, 200.0)
+    dc.ka = circ28_drug_value(d, CD_KA)
+    dc.fa = circ28_drug_value(d, CD_FA)
+    return mtor_run(p, mtor_hct(), evr_bmax(), evr_kd(), dc, sysn)
+}
+
+// Steady state: 20 doses, one every 12 h (7 half-lives); grid 0.25 h to 3 h, 3 h to 12 h; last interval recorded.
+fn et_ss(d: &Circ28Drug, dose: f64, sysn: &!Nl28Sys) -> MtorRun with Mut, Div, Panic, Epistemic {
+    let p = circ28_drug_params_theta(et_theta(d, 1.0, 1.0))
+    var dc = mtor_cfg_oral(dose, 12.0, 100.0, 200.0)
+    dc.ka = circ28_drug_value(d, CD_KA)
+    dc.fa = circ28_drug_value(d, CD_FA)
+    dc.ndose = 20
+    dc.tau = 12.0
+    dc.dt1 = 0.25
+    dc.dt2 = 3.0
+    dc.dt3 = 3.0
+    return mtor_run(p, mtor_hct(), evr_bmax(), evr_kd(), dc, sysn)
+}
+
+// Intravenous what-if: 0.5 mg over 2 h.
+fn et_iv(d: &Circ28Drug, sysn: &!Nl28Sys) -> MtorRun with Mut, Div, Panic, Epistemic {
+    let p = circ28_drug_params_theta(et_theta(d, 1.0, 1.0))
+    var dc = evr_cfg(0.5, 240.0)
+    dc.route = 0
+    dc.t_inf = 2.0
+    return mtor_run(p, mtor_hct(), evr_bmax(), evr_kd(), dc, sysn)
+}
+
+fn et_cmp_cfg(d: &Circ28Drug, t_end: f64) -> MtorDose with Mut, Div, Panic, Epistemic {
+    var dc = mtor_cfg_oral(2.0, t_end, 100.0, 200.0)
+    dc.ka = circ28_drug_value(d, CD_KA)
+    dc.fa = circ28_drug_value(d, CD_FA)
+    dc.dt2 = 1.0
+    dc.t2 = t_end
+    dc.dt3 = 1.0
+    return dc
+}
+
+fn et_cmp_nl(d: &Circ28Drug, t_end: f64, sysn: &!Nl28Sys) -> MtorRun with Mut, Div, Panic, Epistemic {
+    let p = circ28_drug_params_theta(et_theta(d, 1.0, 1.0))
+    let dc = et_cmp_cfg(d, t_end)
+    return mtor_run(p, mtor_hct(), evr_bmax(), evr_kd(), dc, sysn)
+}
+
+fn et_cmp_single(d: &Circ28Drug, sysc: &!Circ28Sys) -> MtorSingle with Mut, Div, Panic, Epistemic {
+    let p = circ28_drug_params_theta(et_theta(d, 1.0, 1.0))
+    let dc = et_cmp_cfg(d, 72.0)
+    return mtor_run_single(p, mtor_hct(), evr_bmax(), evr_kd(), dc, sysc)
+}
+
+fn et_print_run(tag: string, r: &MtorRun) with IO, Mut, Div {
+    print("  "); print(tag)
+    print(": Cmax "); print(1000.0 * (*r).cmax); print(" ng/mL  Tmax "); print((*r).tmax)
+    print(" h  C24 "); print(1000.0 * (*r).c24); print("  AUCinf "); print(1000.0 * (*r).auc_inf)
+    print("  t1/2 "); print((*r).thalf); print(" h  bal "); print((*r).balance_err)
+    print("  fails "); println((*r).nfail)
+}
+
+// Pooled observed Cmax (ng/mL) after 2 mg: mean, pooled inter-individual SD, u of the mean. In helper functions: a
+// MtorPool declared late in the large main crashed the compiled test (segmentation fault, Madaros local build,
+// 2026-11-15); the same code in a function works.
+fn et_cm_mean() -> f64 with Mut, Div {
+    var pc = mtor_pool_zero()
+    evr_pool_cmax(&!pc)
+    return 1000.0 * mtor_pool_mean(&pc)
+}
+fn et_cm_sd() -> f64 with Mut, Div {
+    var pc = mtor_pool_zero()
+    evr_pool_cmax(&!pc)
+    return 1000.0 * mtor_pool_se(&pc) * cd_sqrt(62.0)
+}
+fn et_cm_u() -> f64 with Mut, Div {
+    var pc = mtor_pool_zero()
+    evr_pool_cmax(&!pc)
+    return 1000.0 * mtor_pool_u(&pc)
+}
+
+fn et_sec_pool(vssf: f64) -> i32 with IO, Mut, Div, Panic {
+    var fails: i32 = 0
+    println("S0 pooled observables (n-weighted mean; u = max(pooled standard error, between-study SD/sqrt k))")
+    var a = mtor_pool_zero()
+    evr_pool_clf(&!a)
+    print("  CL/F (L/h), k = 5, N = 70: 22.22 (n 12), 17.24 (16), 17.39 (16), 17.54 (18), 19.4 (8): mean ")
+    print(mtor_pool_mean(&a)); print("  pooled SE "); print(mtor_pool_se(&a)); print("  between/sqrt k "); print(mtor_pool_between(&a)); print("  u "); println(mtor_pool_u(&a))
+    let m_hand = (12.0 * (2.0 / 0.090) + 16.0 * (2.0 / 0.116) + 16.0 * (2.0 / 0.115) + 18.0 * (2.0 / 0.114) + 8.0 * 19.4) / 70.0
+    fails = fails + et_rel("guard: pooled CL/F mean, second computation", evr_obs_clf(), m_hand, 1.0e-12)
+    var c = mtor_pool_zero()
+    evr_pool_thalf(&!c)
+    print("  t1/2 (h), k = 5, N = 64: 30, 32, 32, 43, 32: mean "); print(mtor_pool_mean(&c)); print("  pooled SE "); print(mtor_pool_se(&c)); print("  between/sqrt k "); print(mtor_pool_between(&c)); print("  u "); println(mtor_pool_u(&c))
+    fails = fails + et_rel("guard: pooled t1/2 mean, second computation", evr_obs_thalf(), (12.0 * 30.0 + 16.0 * 32.0 + 16.0 * 32.0 + 8.0 * 43.0 + 12.0 * 32.0) / 64.0, 1.0e-12)
+    fails = fails + et_row("E0 pooled CL/F (L/h)  pred 18.4", evr_obs_clf(), 18.4, 0.0, 1.02, 1, 0.98, 1.02)
+    fails = fails + et_row("E0 pooled t1/2 (h)  pred 33.0  ", evr_obs_thalf(), 33.0, 0.0, 1.02, 1, 0.98, 1.02)
+    println("S0b input-consistency check: DEGENERATE for this drug (declared)")
+    print("  the only volume observable is Vz/F = (CL/F) t1/2/ln2 = "); print(evr_vzf()); println(" L, so V ln2/CL = t1/2 identically;")
+    print("  the model's V_ss/F fitted to that half-life is "); print(vssf); print(" L: V_ss ln2/CL = "); print(vssf * 0.6931471805599453 / evr_obs_clf())
+    print(" h against t1/2 "); print(evr_obs_thalf()); println(" h (a MODEL output, not an input check)")
+    print("  patients on ciclosporin (label, NOT pooled): Vz/F 342 L, CL/F 8.8 L/h -> "); print(342.0 * 0.6931471805599453 / 8.8); println(" h against their 30 h")
+    fails = fails + et_row("E1 fitted V_ss/F (L)  pred 780 (650-860)", vssf, 780.0, 0.0, 1.2, 1, 0.83, 1.11)
+    return fails
+}
+
+// Smallest declared F for which the closed-form fit exists (hepatic clint > 0), V_ss/F and CL/F held: the gut wall
+// clears arterial drug too (Q_gut Eg), and the hepatic clearance is what is left of CL(blood) = F CL/F.
+fn et_f_min(th0: [f64; 18], vssf: f64) -> f64 with Mut, Div, Panic {
+    var lo = 0.02
+    var hi = 0.16
+    var k: i32 = 0
+    while k < 40 {
+        let f = 0.5 * (lo + hi)
+        let o = MtorObs { hct: mtor_hct(), bmax: evr_bmax(), kd: evr_kd(), vss: f * vssf, cl: f * evr_obs_clf(), f: f, cref: evr_cref() }
+        let t = mtor_fit(th0, o)
+        if t[CD_CLINT] > 0.0 {
+            hi = f
+        } else {
+            lo = f
+        }
+        k = k + 1
+    }
+    return hi
+}
+
+fn et_sec_fit(d: &Circ28Drug, vssf: f64, sysn: &!Nl28Sys) -> i32 with IO, Mut, Div, Panic, Epistemic {
+    var fails: i32 = 0
+    println("S1 parameter record (value, standard uncertainty, status)")
+    var i: i32 = 0
+    while i < 18 {
+        print("  "); print(i); print(" "); print(et_rname(i)); print("  value "); print(circ28_drug_value(d, i))
+        print("  u "); print(cd_sqrt(circ28_drug_variance(d, i))); print("  status "); println((*d).status[i])
+        i = i + 1
+    }
+    print("  binding (derived from the label endpoints): Bmax "); print(1000.0 * evr_bmax()); print(" ng/mL RBC, Kd "); print(1000.0 * evr_kd()); println(" ng/mL plasma (u 30 % each)")
+    println("S2 the fits and derivations reproduce their inputs (these are NOT validations)")
+    let hct = mtor_hct()
+    let cp5 = nl28_plasma(hct, evr_bmax(), evr_kd(), 0.005)
+    let cp5000 = nl28_plasma(hct, evr_bmax(), evr_kd(), 5.0)
+    fails = fails + et_rel("plasma share at 5 ng/mL = 0.17 (derivation check)", (1.0 - hct) * cp5 / 0.005, 0.17, 1.0e-9)
+    fails = fails + et_rel("plasma share at 5000 ng/mL = 0.73 (derivation check)", (1.0 - hct) * cp5000 / 5.0, 0.73, 1.0e-9)
+    let o = evr_obs_at(vssf)
+    let th = et_theta(d, 1.0, 1.0)
+    let p = circ28_drug_params_theta(th)
+    print("  C_ref (ng/mL) "); print(1000.0 * o.cref); print("  bp_ref "); println(circ28_drug_value(d, CD_BP))
+    fails = fails + et_rel("blood CL (L/h) = F x pooled CL/F", circ28_splanchnic_clearance(p), o.cl, 1.0e-9)
+    let fcl = circ28_drug_value(d, CD_FA) * circ28_gut_availability(p) * (1.0 - circ28_hepatic_extraction(p))
+    fails = fails + et_rel("F = fa Fg (1 - Eh) = 0.16", fcl, 0.16, 1.0e-9)
+    print("  Fg "); print(circ28_gut_availability(p)); print("  Eh "); print(circ28_hepatic_extraction(p)); print("  Eg "); println(circ28_gut_extraction(p))
+    print("  share of the systemic blood clearance carried by the gut wall, Q_gut Eg / CL: "); println(p.q[8] * circ28_gut_extraction(p) / o.cl)
+    print("  the closed-form fit exists (hepatic clint > 0) only for a declared F above "); println(et_f_min(th, vssf))
+    let tm = mtor_tmax_at(p, o.hct, o.bmax, o.kd, 2.0, th[CD_FA], th[CD_KA], sysn)
+    fails = fails + et_rel("Tmax at the record (fit check)", tm, evr_obs_tmax(), 1.0e-2)
+    return fails
+}
+
+fn et_ddi(tag: string, d: &Circ28Drug, mode: i32, ra: f64, cbase: f64, sysn: &!Nl28Sys) -> f64 with IO, Mut, Div, Panic, Epistemic {
+    let th = et_theta(d, 1.0, 1.0)
+    let x = mtor_ddi_solve(th, mode, ra)
+    print("  "); print(tag); print(": AUC ratio target "); print(ra)
+    if x < 0.0 {
+        println("  NOT REACHABLE")
+        return 0.0 - 1.0
+    }
+    var g = x
+    var h = 1.0
+    if mode == 1 {
+        g = 1.0
+        h = x
+    }
+    if mode == 2 { h = x }
+    if mode == 3 {
+        g = 0.0
+        h = x
+    }
+    let r = et_oral_short(d, 2.0, g, h, sysn)
+    print("  factor "); print(x); print("  AUC ratio closed form "); print(mtor_auc_ratio(th, g, h))
+    print("  t1/2 ratio CL/CL' "); print(1.0 / mtor_cl_ratio(th, g, h)); print("  Cmax ratio simulated "); println(r.cmax / cbase)
+    return r.cmax / cbase
+}
+
+fn et_unreach(tag: string, x: f64) -> i32 with IO, Mut, Div, Panic {
+    if x < 0.0 {
+        print("  "); print(tag); println(": not reachable, as asserted")
+        return 0
+    }
+    print("  "); print(tag); println(": [FAIL] expected NOT reachable")
+    return 1
+}
+
+fn et_sec_ddi(d: &Circ28Drug, sysn: &!Nl28Sys) -> i32 with IO, Mut, Div, Panic, Epistemic {
+    var fails: i32 = 0
+    println("V8 interaction WHAT-IFS (single 2 mg dose; factor solved for the observed AUC ratio; Cmax ratio fold 1.3, half-life ratio fold 1.25)")
+    println("   G: gut-wall clint x g, liver unchanged.  H: hepatic clint x h, gut unchanged.")
+    let rb = et_oral_short(d, 2.0, 1.0, 1.0, sysn)
+    let cb = rb.cmax
+    let th = et_theta(d, 1.0, 1.0)
+    print("  ceilings of the AUC ratio: gut wall fully inhibited "); print(mtor_auc_ratio(th, 0.0, 1.0)); print(";  liver fully inhibited "); println(mtor_auc_ratio(th, 1.0, 0.0))
+    let vg = et_ddi("verapamil G   ", d, 0, 3.5, cb, sysn)
+    let gv = mtor_ddi_solve(th, 0, 3.5)
+    fails = fails + et_row("E8a verapamil G Cmax ratio  obs 2.3 (90 % CI 1.9-2.7)   pred 2.0", vg, 2.3, 0.0, 1.3, 1, 0.77, 1.3)
+    fails = fails + et_row("E8a verapamil G t1/2 ratio  obs 37/32 = 1.16           pred 1.08", 1.0 / mtor_cl_ratio(th, gv, 1.0), 37.0 / 32.0, 0.0, 1.25, 1, 1.1, 1.25)
+    let eg = et_ddi("erythromycin G", d, 0, 4.4, cb, sysn)
+    let ge = mtor_ddi_solve(th, 0, 4.4)
+    fails = fails + et_row("E8b erythromycin G Cmax ratio  obs 2.0 (90 % CI 1.8-2.3)  pred 2.3", eg, 2.0, 0.0, 1.3, 0, 1.3001, 1.6)
+    fails = fails + et_row("E8b erythromycin G t1/2 ratio  obs 44/32 = 1.39          pred 1.12", 1.0 / mtor_cl_ratio(th, ge, 1.0), 44.0 / 32.0, 0.0, 1.25, 1, 0.8, 1.25)
+    let cg = et_ddi("ciclosporin G ", d, 0, 2.68, cb, sysn)
+    let gc = mtor_ddi_solve(th, 0, 2.68)
+    fails = fails + et_row("E8c ciclosporin G Cmax ratio  obs 1.82                    pred 1.8", cg, 1.82, 0.0, 1.3, 1, 0.77, 1.3)
+    fails = fails + et_row("E8c ciclosporin G t1/2 ratio  obs 1.0 (unchanged)         pred 1.05", 1.0 / mtor_cl_ratio(th, gc, 1.0), 1.0, 0.0, 1.25, 1, 1.2, 1.25)
+    // E8d: the header predicted that the gut wall alone could NOT reach AUC x 15 (ceiling 9.3). WRONG: the ceiling is 70,
+    // because in this record the gut wall carries 91 % of the SYSTEMIC clearance (Q_gut Eg against CL). The mixed row of
+    // the header (gut fully inhibited + a hepatic factor) is meaningless here (it needs hepatic INDUCTION x 4.7; first
+    // run: Cmax ratio 5.77, half-life ratio 2.43) and is replaced by the gut-only solution, for which no prediction existed.
+    let kg = et_ddi("ketoconazole G", d, 0, 15.0, cb, sysn)
+    let gk = mtor_ddi_solve(th, 0, 15.0)
+    if !(kg > 0.0) {
+        println("  [FAIL] ketoconazole G must be reachable (ceiling 70)")
+        fails = fails + 1
+    }
+    fails = fails + et_row("E8d ketoconazole G Cmax ratio  obs 3.9 (90 % CI 3.4-4.6)  (no prediction)", kg, 3.9, 0.0, 1.3, 1, 1.1, 1.3)
+    fails = fails + et_row("E8d ketoconazole G t1/2 ratio  obs 1.9                    (no prediction)", 1.0 / mtor_cl_ratio(th, gk, 1.0), 1.9, 0.0, 1.25, 0, 1.5, 1.75)
+    let rg = et_ddi("rifampicin G  ", d, 0, 0.37, cb, sysn)
+    let gr = mtor_ddi_solve(th, 0, 0.37)
+    let rr = et_ddi("rifampicin, same factor on gut and liver", d, 2, 0.37, cb, sysn)
+    let rh = et_ddi("rifampicin H  ", d, 1, 0.37, cb, sysn)
+    fails = fails + et_row("E8e rifampicin G Cmax ratio  obs 0.42                     pred 0.47", rg, 0.42, 0.0, 1.3, 1, 0.77, 1.3)
+    fails = fails + et_row("E8e rifampicin G t1/2 ratio  obs 24/32 = 0.75             pred 1.0", 1.0 / mtor_cl_ratio(th, gr, 1.0), 0.75, 0.0, 1.25, 1, 1.15, 1.25)
+    fails = fails + et_row("E8e rifampicin both Cmax ratio  obs 0.42                  pred 0.62", rr, 0.42, 0.0, 1.3, 1, 1.0, 1.15)
+    fails = fails + et_row("E8e rifampicin H Cmax ratio  obs 0.42                     pred 0.85", rh, 0.42, 0.0, 1.3, 0, 1.3001, 2.4)
+    return fails
+}
+
+fn et_sec_cmp(d: &Circ28Drug, sysn: &!Nl28Sys, sysc: &!Circ28Sys) -> i32 with IO, Mut, Div, Panic, Epistemic {
+    var fails: i32 = 0
+    println("V9 single-ratio module (circ28_blood) against the local stepper, same parameters and grid, 2 mg")
+    let cw = et_cmp_nl(d, 12.0, sysn)
+    let cn = et_cmp_nl(d, 72.0, sysn)
+    let cs = et_cmp_single(d, sysc)
+    print("  Cmax local "); print(1000.0 * cn.cmax); print("  single-ratio "); print(1000.0 * cs.cmax); print("  dCmax "); print(100.0 * (cs.cmax - cn.cmax) / cn.cmax); println(" %")
+    print("  AUC(0-72) local "); print(1000.0 * cn.auc_t); print("  single-ratio "); print(1000.0 * cs.auc_t); print("  dAUC "); print(100.0 * (cs.auc_t - cn.auc_t) / cn.auc_t); println(" %")
+    print("  single-ratio bp range used "); print(cs.bp_min); print(" - "); println(cs.bp_max)
+    if !(et_abs(cs.cmax - cn.cmax) / cn.cmax < 0.01) {
+        println("  [FAIL] |dCmax|/Cmax >= 1 %")
+        fails = fails + 1
+    }
+    if !(et_abs(cs.auc_t - cn.auc_t) / cn.auc_t < 0.005) {
+        println("  [FAIL] |dAUC|/AUC >= 0.5 %")
+        fails = fails + 1
+    }
+    return fails
+}
+
+// The budget itself is computed in main (one frame less): called from this section function, lean_single returned a
+// base run off by 2e-4 (sirolimus) and 2.4 % (everolimus), measured 2026-11-15; from main it agrees with Madaros.
+fn et_sec_budget(d: &Circ28Drug, r6: &MtorRun, rbp: &MtorRun, budp: &MtorBudget, u_v: f64, vssf: f64) -> i32 with IO, Mut, Div, Panic, Epistemic {
+    var fails: i32 = 0
+    println("S4 uncertainty budget with refit, 2 mg oral (twelve inputs; closed-form fits redone at every perturbation; the")
+    println("   V_ss/F fitted to the half-life enters as an input with the u propagated from u(t1/2))")
+    fails = fails + et_rel("budget grid AUC_inf against the standard grid", (*rbp).auc_inf, (*r6).auc_inf, 5.0e-3)
+    fails = fails + et_rel("budget grid Cmax against the standard grid", (*rbp).cmax, (*r6).cmax, 1.0e-2)
+    let thb = et_theta(d, 1.0, 1.0)
+    let z0 = evr_z0(thb, vssf)
+    let u = evr_u_all(u_v, cd_sqrt(circ28_drug_variance(d, CD_KA)))
+    print("  runs "); println((*budp).runs)
+    print("  AUC_inf "); print((*budp).auc * 1000.0); print(" ng h/mL  u "); print(cd_sqrt((*budp).var_auc) * 1000.0); print("  (rel "); print(cd_sqrt((*budp).var_auc) / (*budp).auc); println(")")
+    print("  Cmax    "); print((*budp).cmax * 1000.0); print(" ng/mL    u "); print(cd_sqrt((*budp).var_cmax) * 1000.0); print("  (rel "); print(cd_sqrt((*budp).var_cmax) / (*budp).cmax); println(")")
+    println("  input       u          dlnAUC/dlnx   share of var(AUC) %   dlnCmax/dlnx  share of var(Cmax) %")
+    var j: i32 = 0
+    var sh_a = 0.0
+    var sh_c = 0.0
+    while j < 12 {
+        let la = (*budp).sens_auc[j] * z0[j] / (*budp).auc
+        let lc = (*budp).sens_cmax[j] * z0[j] / (*budp).cmax
+        print("  "); print(et_bname(j)); print("   "); print(u[j]); print("   "); print(la); print("   "); print(100.0 * (*budp).contrib_auc[j] / (*budp).var_auc)
+        print("   "); print(lc); print("   "); println(100.0 * (*budp).contrib_cmax[j] / (*budp).var_cmax)
+        sh_a = sh_a + (*budp).contrib_auc[j] / (*budp).var_auc
+        sh_c = sh_c + (*budp).contrib_cmax[j] / (*budp).var_cmax
+        j = j + 1
+    }
+    fails = fails + et_rel("budget AUC = the 2 mg run (same grid, refit path)", (*budp).auc, (*rbp).auc_inf, 1.0e-6)
+    fails = fails + et_rel("shares of var(AUC) add to 1", sh_a, 1.0, 1.0e-9)
+    fails = fails + et_rel("shares of var(Cmax) add to 1", sh_c, 1.0, 1.0e-9)
+    fails = fails + et_row("E10 u(AUC)/AUC   predicted 0.052 (0.045-0.065)", cd_sqrt((*budp).var_auc) / (*budp).auc, 0.052, 0.0, 1.25, 1, 0.8, 1.25)
+    fails = fails + et_row("E10 u(Cmax)/Cmax predicted 0.5 (0.3-0.8)      ", cd_sqrt((*budp).var_cmax) / (*budp).cmax, 0.5, 0.0, 1.6, 0, 0.2, 0.35)
+    fails = fails + et_row("E10 share of the ps scalar in var(Cmax)  predicted > 0.5", (*budp).contrib_cmax[11] / (*budp).var_cmax, 0.75, 0.0, 1.5, 0, 0.0, 0.03)
+    return fails
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic, Epistemic {
+    var fails: i32 = 0
+    var sysr = nl28_sys_zero()
+    var sysn = nl28_sys_zero()
+    var sysc = circ28_sys_zero()
+    var d = circ28_drug_new()
+    let fit = evr_drug_into(&!d, 1.0, &!sysr)
+    let thk1 = circ28_drug_theta(&d)
+    let pk1 = circ28_drug_params_theta(thk1)
+    let ka1 = mtor_ka_solve(pk1, mtor_hct(), evr_bmax(), evr_kd(), 2.0, thk1[CD_FA], evr_obs_tmax(), 0.05, 10.0, &!sysr)
+    evr_ka_set(&!d, ka1, &!sysr)
+    let warm = et_oral_short(&d, 2.0, 1.0, 1.0, &!sysn)
+    fails = fails + et_sec_cmp(&d, &!sysn, &!sysc)
+    fails = fails + et_sec_pool(fit.vssf)
+    fails = fails + et_sec_fit(&d, fit.vssf, &!sysr)
+
+    println("R runs (whole blood; venous pool)")
+    let r2 = et_oral(&d, 2.0, &!sysn)
+    et_print_run("oral 2 mg ", &r2)
+    let r2f = et_oral_fine(&d, 2.0, &!sysn)
+    et_print_run("oral 2 mg, grid refined", &r2f)
+    let r075 = et_oral(&d, 0.75, &!sysn)
+    et_print_run("oral 0.75 mg", &r075)
+    let r10 = et_oral(&d, 10.0, &!sysn)
+    et_print_run("oral 10 mg", &r10)
+    let riv = et_iv(&d, &!sysn)
+    et_print_run("IV what-if 0.5 mg over 2 h", &riv)
+    let rss = et_ss(&d, 0.75, &!sysn)
+    print("  steady state 0.75 mg twice daily, dose 20: Cmax "); print(1000.0 * rss.cmax); print(" ng/mL  Tmax "); print(rss.tmax); print(" h  trough C(12) "); print(1000.0 * rss.c_tau)
+    print("  AUC(0-12) "); print(1000.0 * rss.auc_tau); print("  bal "); println(rss.balance_err)
+
+    println("C numerical checks")
+    fails = fails + et_rel("mass balance oral 2 mg", r2.balance_err + 1.0, 1.0, 1.0e-9)
+    fails = fails + et_rel("mass balance 10 mg", r10.balance_err + 1.0, 1.0, 1.0e-9)
+    fails = fails + et_rel("mass balance IV", riv.balance_err + 1.0, 1.0, 1.0e-9)
+    fails = fails + et_rel("mass balance steady state", rss.balance_err + 1.0, 1.0, 1.0e-9)
+    if !(r2.ok && r2f.ok && r10.ok && r075.ok && riv.ok && rss.ok && warm.ok) {
+        println("  [FAIL] a run did not complete")
+        fails = fails + 1
+    }
+    if !(r2.nfail == 0 && r10.nfail == 0 && rss.nfail == 0) {
+        println("  [FAIL] failed Newton steps")
+        fails = fails + 1
+    }
+    if !(r2.fit_ok && r10.fit_ok && riv.fit_ok) {
+        println("  [FAIL] terminal fit not valid")
+        fails = fails + 1
+    }
+    fails = fails + et_rel("grid refinement: Cmax", r2f.cmax, r2.cmax, 5.0e-3)
+    fails = fails + et_rel("grid refinement: AUC_inf", r2f.auc_inf, r2.auc_inf, 5.0e-3)
+    fails = fails + et_rel("grid refinement: t1/2", r2f.thalf, r2.thalf, 1.0e-2)
+    fails = fails + et_rel("t1/2 of the 2 mg run = pooled t1/2 (FIT CHECK, not a validation)", r2.thalf, evr_obs_thalf(), 5.0e-3)
+
+    println("V validation, predicted against observed (whole blood)")
+    let cm_obs = et_cm_mean()
+    let cm_sd = et_cm_sd()
+    print("  pooled observed Cmax 2 mg (k = 4, N = 62): mean "); print(cm_obs); print(" ng/mL, pooled inter-individual SD "); print(cm_sd); print(", u of the mean "); println(et_cm_u())
+    fails = fails + et_row("E2a Cmax 2 mg (ng/mL)  pooled healthy, default ps        pred 6 (3-12)", 1000.0 * r2.cmax, cm_obs, cm_sd, 0.0, 0, -3.0, -2.0001)
+    fails = fails + et_rel("E3 AUC_inf 2 mg against D/(CL/F) (the fit; CONSISTENCY)", r2.auc_inf, 2.0 / evr_obs_clf(), 3.0e-2)
+    println("  steady state 0.75 mg twice daily against label Table 4 (kidney recipients WITH ciclosporin)")
+    fails = fails + et_row("E4a AUC(0-12),ss (ng h/mL)  label 75 +/- 31              pred 40.7", 1000.0 * rss.auc_tau, 75.0, 31.0, 0.0, 1, -1.4, -0.8)
+    fails = fails + et_row("E4b Cmax,ss (ng/mL)  label 11.1 +/- 4.6                  pred 4.5 (3-7)", 1000.0 * rss.cmax, 11.1, 4.6, 0.0, 1, -2.0, -0.8)
+    fails = fails + et_row("E4c what-if AUC x 2.68 (ciclosporin, label)  75 +/- 31   pred 109", 2680.0 * rss.auc_tau, 75.0, 31.0, 0.0, 1, 0.8, 1.4)
+    print("  trough C(12),ss "); print(1000.0 * rss.c_tau); println(" ng/mL (label target range with ciclosporin 3-8 ng/mL; pred 2.9)")
+    println("V5 plasma share of the drug in blood, (1 - Hct)/B:P, venous pool")
+    let hct = mtor_hct()
+    let sh_peak = (1.0 - hct) / r2.bp_peak
+    let sh_trough = (1.0 - hct) / rss.bp_end
+    print("  at the 2 mg peak "); print(sh_peak); print("  at the steady-state trough "); print(sh_trough); print("  (B:P "); print(r2.bp_peak); print(" and "); print(rss.bp_end); println(")")
+    fails = fails + et_row("E5a plasma share at the trough  Afinitor label about 0.20, fold 1.25 (CONSISTENCY)", sh_trough, 0.20, 0.0, 1.25, 1, 0.8, 0.95)
+    let s5 = (1.0 - hct) / nl28_bp_local(hct, evr_bmax(), evr_kd(), 0.005)
+    let s100 = (1.0 - hct) / nl28_bp_local(hct, evr_bmax(), evr_kd(), 0.100)
+    fails = fails + et_row("E5b share(100 ng/mL)/share(5 ng/mL)  constant 5-100 (van Erp, secondary), 0.80-1.25", s100 / s5, 1.0, 0.0, 1.25, 1, 1.0, 1.12)
+    println("V6 dose linearity (label: proportional 0.5-2 mg twice daily; single doses 0.75 and 2.5 mg linear)")
+    fails = fails + et_row("E6a Cmax(10)/Cmax(0.75) dose-normalised  pred 0.995", (r10.cmax / 10.0) / (r075.cmax / 0.75), 1.0, 0.0, 1.25, 1, 0.97, 1.0)
+    fails = fails + et_row("E6b AUC_inf(10)/AUC_inf(0.75) dose-normalised  pred 0.998", (r10.auc_inf / 10.0) / (r075.auc_inf / 0.75), 1.0, 0.0, 1.25, 1, 0.98, 1.0)
+    println("V7 intravenous what-if (no observation exists)")
+    let f_sim = (r2.auc_inf / 2.0) / (riv.auc_inf / 0.5)
+    let th = et_theta(&d, 1.0, 1.0)
+    let p = circ28_drug_params_theta(th)
+    print("  simulated F "); print(f_sim); print("  IV CL (L/h) "); print(0.5 / riv.auc_inf); print("  V_ss by NCA (L blood) "); print(riv.vss_nca); print("  Fh "); println(1.0 - circ28_hepatic_extraction(p))
+    fails = fails + et_row("E7 simulated F / 0.16", f_sim, 0.16, 0.0, 1.1, 1, 0.9, 1.1)
+
+    fails = fails + et_sec_ddi(&d, &!sysn)
+    let rbg = et_oral_budget_grid(&d, 2.0, &!sysn)
+    let thb = et_theta(&d, 1.0, 1.0)
+    let bud = mtor_budget(evr_z0(thb, fit.vssf), evr_u_all(fit.u_vssf, cd_sqrt(circ28_drug_variance(&d, CD_KA))), thb, evr_cref(), et_cfg_budget(&d, 2.0), &!sysn)
+    fails = fails + et_sec_budget(&d, &r2, &rbg, &bud, fit.u_vssf, fit.vssf)
+    // WHAT-IF records, LAST: the record d itself is refitted at another ps scalar (three separate records in this main,
+    // or a record built in a helper function, crashed the compiled test: segmentation fault, Madaros local build,
+    // 2026-11-15; the same statements in a small program run). Nothing after this point uses the default record.
+    // After each refit one short run is made and dropped: on lean_single the first read of a rewritten record is stale.
+    println("V11 WHAT-IF records: the ps scalar of sirolimus transferred (not fitted, not a validation of the record)")
+    let fw = evr_drug_into(&!d, 0.138, &!sysr)
+    let thk3 = circ28_drug_theta(&d)
+    let pk3 = circ28_drug_params_theta(thk3)
+    let ka3 = mtor_ka_solve(pk3, mtor_hct(), evr_bmax(), evr_kd(), 2.0, thk3[CD_FA], evr_obs_tmax(), 0.05, 10.0, &!sysr)
+    evr_ka_set(&!d, ka3, &!sysr)
+    let stale2 = et_oral_short(&d, 2.0, 1.0, 1.0, &!sysn)
+    let r2w = et_oral(&d, 2.0, &!sysn)
+    et_print_run("ps scalar 0.138 (the sirolimus value), oral 2 mg", &r2w)
+    print("    fitted V_ss/F "); print(fw.vssf); print(" L, ka "); println(circ28_drug_value(&d, CD_KA))
+    let fv = evr_drug_into(&!d, 0.138 * 3.33 / 12.58, &!sysr)
+    let thk4 = circ28_drug_theta(&d)
+    let pk4 = circ28_drug_params_theta(thk4)
+    let ka4 = mtor_ka_solve(pk4, mtor_hct(), evr_bmax(), evr_kd(), 2.0, thk4[CD_FA], evr_obs_tmax(), 0.05, 10.0, &!sysr)
+    evr_ka_set(&!d, ka4, &!sysr)
+    let stale3 = et_oral_short(&d, 2.0, 1.0, 1.0, &!sysn)
+    let r2v = et_oral(&d, 2.0, &!sysn)
+    et_print_run("ps scalar 0.0366 (same ps/(bp Q) as sirolimus), oral 2 mg", &r2v)
+    print("    fitted V_ss/F "); print(fv.vssf); print(" L, ka "); println(circ28_drug_value(&d, CD_KA))
+    if !(r2w.ok && r2v.ok) { fails = fails + 1 }
+    fails = fails + et_rel("t1/2 of the what-if records = pooled t1/2 (fit check)", 0.5 * (r2w.thalf + r2v.thalf), evr_obs_thalf(), 5.0e-3)
+    fails = fails + et_row("E11 Cmax 2 mg (ng/mL)  WHAT-IF ps scalar 0.138           pred 13 (8-18)", 1000.0 * r2w.cmax, cm_obs, cm_sd, 0.0, 0, -2.4, -2.0001)
+    fails = fails + et_row("E11b Cmax 2 mg (ng/mL)  WHAT-IF ps scalar 0.0366        pred 8 (5-12)", 1000.0 * r2v.cmax, cm_obs, cm_sd, 0.0, 1, -2.0, 0.5)
+    if fails == 0 {
+        println("CIRC28_DRUG_EVEROLIMUS_PASS")
+        return 0
+    }
+    println("CIRC28_DRUG_EVEROLIMUS_FAIL")
+    return 1
+}

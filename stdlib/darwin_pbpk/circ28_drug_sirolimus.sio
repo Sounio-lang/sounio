@@ -1,0 +1,1077 @@
+// stdlib/darwin_pbpk/circ28_drug_sirolimus.sio — sirolimus (rapamycin) on the circ28 drug record
+//
+// Sirolimus in a healthy adult (ICRP 89 reference male, 73 kg), WHOLE-BLOOD concentrations, oral solution,
+// with local saturable erythrocyte binding (circ28_nl.sio) and intestinal CYP3A first pass. The module also
+// holds the helpers shared with the everolimus module (prefix mtor_): pooling of study means, the closed-form
+// fit, the single / repeated dose runner on the local non-linear stepper, the single-ratio comparison run and
+// the budget with refit. Pattern: circ28_drug_tacrolimus.sio.
+//
+// NO INTRAVENOUS HUMAN PHARMACOKINETICS OF SIROLIMUS WAS FOUND (PubMed, two searches, 2026-11-15: the hits
+// are oral studies; Napoli 1994, PMID 8004232, mentions intravenous bolus infusions in renal recipients only
+// as assay test samples, no kinetic numbers). Volume and clearance are therefore APPARENT (V/F, CL/F) and
+// the bioavailability F is DECLARED with its uncertainty: V_ss(blood) = F (V_ss/F), CL(blood) = F (CL/F).
+// Consequence, by construction: the oral AUC is Dose/(CL/F) and the oral concentrations scale as
+// Dose/(V/F); F cancels in every oral whole-blood prediction to first order and matters only for the split
+// of the first pass, for intravenous what-ifs and for the ceiling of an interaction acting on F.
+//
+// STATUS: 1 measured, 2 derived by a stated formula from cited values, 3 fitted to ONE named observable
+// (then not a validation). u is the STANDARD UNCERTAINTY OF THE VALUE; SD/sqrt(n) for a mean, range/sqrt(12)
+// for a range, "judgment" where the width is a stated judgment. ACCESS: FT full text, AB abstract only,
+// LBL label text (DailyMed SPL, full text of the section), SEC secondary citation, PC PubChem.
+// Body weight 73 kg converts per-kg values: an ASSUMPTION (no study weight is in the abstracts).
+//
+//  param    value        u        status  source (access)
+//  MW       914.2        0        1       PubChem CID 5284616 (PC)
+//  logP     4.3          0.49     1       4.3 Emoto 2013 CPT:PSP 2:e59 (PMC3731827, FT; cites DrugBank: SEC);
+//                                         XLogP3 6.0 computed (PubChem, PC); u = (6.0 - 4.3)/sqrt12
+//  pKa      -            -        0       neutral macrolide: no ionisable pKa in the sources opened
+//  fu       0.08         0.0159   1       label "approximately 92 %" bound (LBL); Emoto 2013: 0.08 (SEC);
+//                                         Yatscoff 1993 Transplantation (PMID 8249123, AB): 2.5 +/- 0.2 % by
+//                                         ultracentrifugation; u = (0.08 - 0.025)/sqrt12
+//  Hct      0.434        0.0104   1       ICRP 89 body haematocrit (as in the tacrolimus module)
+//  Bmax     475 ng/mL    238      2       FKBP-12 capacity of erythrocytes taken EQUAL IN MOLES to the tacrolimus
+//           of RBC                        value: 418 ng/mL / 804.02 g/mol (Jusko 1995 as cited by Storset 2014,
+//                                         PMC4243902 FT; primary not opened) x 914.2 g/mol. No sirolimus Bmax
+//                                         exists in any source opened. u = 50 % (judgment: the equivalence is
+//                                         an assumption; see the test, rows V6b/V6c, which contradict it)
+//  bp0      12.9         2.6      2       low-concentration blood:plasma ratio IN VITRO, Yatscoff 1993 (AB,
+//                                         spiked blood 5-100 ug/L, n = 50): three readings of the abstract,
+//                                         plasma:whole blood 0.09 -> 11.1; plasma 3.1 % of the drug ->
+//                                         (1 - Hct)/0.031 = 18.3; plasma:formed elements 0.05 -> (1 - Hct) +
+//                                         Hct/0.05 = 9.2; mean 12.9, u = range/sqrt12. NOT the in-vivo ratio
+//                                         (label 36 +/- 18; that one is kept as a VALIDATION, row V6a)
+//  Kd       16.7 ng/mL   derived  2       Kd = Hct Bmax/(bp0 - (1 - Hct)); u from u(bp0) alone = 0.21 Kd in
+//           of plasma                     the budget (Bmax perturbed separately)
+//  fa       1.0          0.115    2       Emoto 2013: "Fa was assumed to be 1" (FT); band [0.6, 1]/sqrt12 as
+//                                         for tacrolimus (judgment)
+//  ps_gut   11.33 L/h    6.5      2       SURROGATE, UNSOURCED FOR THIS DRUG: the tacrolimus value (Peff 4.77e-4
+//                                         cm/s, Tamura 2002 via Van der Veken 2023, SEC, x 6600 cm2 x 3.6).
+//                                         Emoto 2013 gives Papp(Caco-2) 3.1e-6 cm/s (SEC) and a Papp -> Peff
+//                                         conversion that is an image in the text opened (not legible), so
+//                                         no sirolimus Peff could be computed from a readable source.
+//                                         u = factor-3 band/sqrt12 (judgment)
+//  F        0.14         0.04     2       label: "approximately 14 %" after the oral solution (LBL; no n, no SD,
+//                                         the underlying intravenous study not found). Emoto 2013 in-vitro
+//                                         scaled prediction 15 +/- 9 % (SD of 15 donors, FT). u = 0.04 is a
+//                                         JUDGMENT: it reaches at 1.2 u the bound F <= 1/10.9 = 0.092 implied
+//                                         by the label's own ketoconazole result (AUC x10.9, half-life unchanged)
+//  CL/F     pooled       pooled   -       k = 3, N = 70, WITHOUT ciclosporin: Brattstrom 2000 Ther Drug Monit
+//                                         22:537 (PMID 11034258, AB) healthy men, 0.3-8 mg/m2 solution, n = 30:
+//                                         278 +/- 117 mL/h/kg; Bottiger 2001 Clin Pharmacol Ther 69:32 (PMID
+//                                         11180036, AB) healthy, 10 mg solution, n = 18: AUC 736 ng h/mL
+//                                         (geometric mean) -> 10/0.736 = 13.59 L/h; Djebli 2006 Clin Pharmacokinet
+//                                         45:1135 (PMID 17048977, AB) renal recipients on mycophenolate, no
+//                                         calcineurin inhibitor, n = 22: 14.1 L/h (CYP3A5 non-expressers; the
+//                                         expressers' 28.3 L/h and the genotype mix are not used)
+//  Vss/F    pooled       pooled   -       k = 2, N = 52: Brattstrom 2000: 23 +/- 10 L/kg; Djebli 2006: V1/F 218 L
+//                                         + V2/F 292 L = 510 L. The two differ 3.3-fold: the between-study SD
+//                                         IS the uncertainty (49 %)
+//           NOT pooled: the ciclosporin-comedicated studies (label / Zimmerman & Kahan 1997, PMID 9156373, AB,
+//           n = 40: CL/F 208 +/- 95 mL/h/kg, Vss/F 12 +/- 5 L/kg; Ferron 1997, PMID 9129559, AB, n = 36:
+//           CL/F 8.9 L/h; label Table 4: 173 +/- 50 mL/h/kg). The same label measures the ciclosporin effect on
+//           sirolimus exposure (AUC +80 % to +230 %): a different, quantified condition, not a disagreement.
+//  clint    fitted       propag.  3       to CL(blood) = F x pooled CL/F
+//  clgut    fitted       propag.  3       to F (fa as given): F = fa Fg (1 - Eh)
+//  kpsc     fitted       propag.  3       to V_ss(blood) = F x pooled Vss/F
+//  ps scalar fitted      propag.  3       to the RATE observable R24 = C(24 h)/Cmax = 4.47/25.3 = 0.177 after a
+//                                         single 6 mg dose, 12 healthy Thai volunteers (Leelahavanichkul 2005
+//                                         J Med Assoc Thai 88 S4:S157, PMID 16623021, AB; HPLC-UV; "minimal
+//                                         concentration" read as the 24 h sample, the last one: an assumption).
+//                                         u(R24) = R24 sqrt((6.1/25.3)^2 + (0.57/4.47)^2)/sqrt12 = 0.0139
+//                                         (peak and trough treated as independent). Bound: s <= 1 (flow-limited)
+//  ka       fitted       propag.  3       to Tmax, pooled k = 2, equal weights (one n unknown): label "approximately
+//                                         1 hour" in healthy subjects (LBL) and 1.45 +/- 0.5 h (Leelahavanichkul
+//                                         2005, n = 12): 1.225 h, u 0.225 h
+//  clform, clren, clpla  0        0       2.2 % of radioactivity in urine (label)
+//
+// EVIDENCE THAT THE FIRST PASS IS MAINLY INTESTINAL: Emoto 2013 (FT): Fh 0.96 +/- 0.03 and Fg 0.16 +/- 0.10 from
+// recombinant CYP clearances scaled with the hepatic and intestinal CYP3A contents of 15 donors (well-stirred
+// liver, Qgut model), F predicted 15 +/- 9 %; label: "extensively metabolized in the intestinal wall and liver
+// and undergoes counter-transport from enterocytes"; Ladumor 2023 (PMC9931433, FT Table 1, column parsing by
+// the dossier): FaFG 0.37, FH 0.92. Here Eh = CL(blood)/Q_h is 2 to 3 % whatever F is, so F = 0.14 can only
+// come from the gut wall: Fa Fg = 0.144.
+//
+// CLOSED FORMS OF THE FIT (kernel equations; bp = the local ratio at C_ref)
+//   C_ref  = F x 6 mg / V_ss(blood): the blood concentration scale of the fitted single dose (declared)
+//   V_ss(plasma-referred) = V_ss(blood) x bp_ref -> kpsc;  Q'g = Q_gut bp ps_gut/(ps_gut + Q_gut bp);
+//   Fg = Q'g/(Q'g + cg), cg = clint_gut fu;  Eg = cl_g/(Q_gut + cl_g), cl_g = (ps_gut cg/(ps_gut + cg))/bp;
+//   Eh = (CL - Q_gut Eg)/(Q_h - Q_gut Eg);  F = fa Fg (1 - Eh) solved for cg by bisection;
+//   clint fu = y ps_liver/(ps_liver - y), y = bp Q_h Eh/(1 - Eh).
+
+use darwin_pbpk::circ28::*
+use darwin_pbpk::circ28_kp::*
+use darwin_pbpk::circ28_drug::*
+use darwin_pbpk::circ28_blood::*
+use darwin_pbpk::circ28_nl::*
+use math::pure::{exp, ln}
+
+// =====================================================================================================
+// Shared helpers (sirolimus and everolimus)
+// =====================================================================================================
+
+pub fn mtor_abs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+pub fn mtor_bw() -> f64 { return 73.0 }
+pub fn mtor_hct() -> f64 { return 0.434 }
+pub fn mtor_u_hct() -> f64 { return 0.0104 }
+// surrogate gut permeability clearance (L/h): tacrolimus Peff 4.77e-4 cm/s x 6600 cm2 x 3.6
+pub fn mtor_psgut() -> f64 { return 4.77e-4 * 6600.0 * 3.6 }
+// factor-3 band [x/3, 3x] / sqrt(12)
+pub fn mtor_u_psgut() -> f64 { return (3.0 - 1.0 / 3.0) * mtor_psgut() / 3.4641016151377544 }
+
+// ---- pooling of study means -------------------------------------------------------------------------
+// mean: n-weighted mean of the study means; se_within: sqrt(sum (n_i - 1) sd_i^2 / sum (n_i - 1)) / sqrt(N)
+// over the studies that report an SD; u_between: sample SD of the study means / sqrt(k);
+// u = max(se_within, u_between).
+pub struct MtorPool {
+    pub sn: f64,
+    pub sx: f64,
+    pub k: f64,
+    pub sm: f64,
+    pub smm: f64,
+    pub ssw: f64,
+    pub dfw: f64,
+}
+
+pub fn mtor_pool_zero() -> MtorPool {
+    return MtorPool { sn: 0.0, sx: 0.0, k: 0.0, sm: 0.0, smm: 0.0, ssw: 0.0, dfw: 0.0 }
+}
+
+pub fn mtor_pool_add(a: &!MtorPool, mean: f64, sd: f64, n: f64) with Mut {
+    (*a).sn = (*a).sn + n
+    (*a).sx = (*a).sx + n * mean
+    (*a).k = (*a).k + 1.0
+    (*a).sm = (*a).sm + mean
+    (*a).smm = (*a).smm + mean * mean
+    if sd > 0.0 {
+        (*a).ssw = (*a).ssw + (n - 1.0) * sd * sd
+        (*a).dfw = (*a).dfw + (n - 1.0)
+    }
+}
+
+pub fn mtor_pool_mean(a: &MtorPool) -> f64 with Div {
+    return (*a).sx / (*a).sn
+}
+
+pub fn mtor_pool_se(a: &MtorPool) -> f64 with Mut, Div {
+    if !((*a).dfw > 0.0) { return 0.0 }
+    return cd_sqrt((*a).ssw / (*a).dfw) / cd_sqrt((*a).sn)
+}
+
+pub fn mtor_pool_between(a: &MtorPool) -> f64 with Mut, Div {
+    if (*a).k < 1.5 { return 0.0 }
+    let v = ((*a).smm - (*a).sm * (*a).sm / (*a).k) / ((*a).k - 1.0)
+    if !(v > 0.0) { return 0.0 }
+    return cd_sqrt(v) / cd_sqrt((*a).k)
+}
+
+pub fn mtor_pool_u(a: &MtorPool) -> f64 with Mut, Div {
+    let s = mtor_pool_se(a)
+    let b = mtor_pool_between(a)
+    if b > s { return b }
+    return s
+}
+
+// ---- closed-form fit --------------------------------------------------------------------------------
+// vss, cl: WHOLE BLOOD (F x the apparent values); f: bioavailability; cref: blood concentration (mg/L) at
+// which the reference blood:plasma ratio is taken.
+pub struct MtorObs {
+    pub hct: f64,
+    pub bmax: f64,
+    pub kd: f64,
+    pub vss: f64,
+    pub cl: f64,
+    pub f: f64,
+    pub cref: f64,
+}
+
+fn mtor_eh_of(p: Circ28Params, bp: f64, cg: f64, cl: f64) -> f64 with Div {
+    let clg = (p.ps[8] * cg / (p.ps[8] + cg)) / bp
+    let eg = clg / (p.q[8] + clg)
+    let x = p.q[8] * eg
+    return (cl - x) / (circ28_q_hepatic(p) - x)
+}
+
+fn mtor_fg_of(p: Circ28Params, bp: f64, cg: f64) -> f64 with Div {
+    let qb = p.q[8] * bp
+    let qg = qb * p.ps[8] / (p.ps[8] + qb)
+    return qg / (qg + cg)
+}
+
+// Returns th with CD_BP (bp at cref), CD_KPSC, CD_CLGUT and CD_CLINT fitted. CD_CLINT = -1 when impossible.
+pub fn mtor_fit(th: [f64; 18], o: MtorObs) -> [f64; 18] with Mut, Div, Panic {
+    var t = th
+    let bp = nl28_bp_local(o.hct, o.bmax, o.kd, o.cref)
+    t[CD_BP] = bp
+    t[CD_KPSC] = 1.0
+    t[CD_CLGUT] = 0.0
+    t[CD_CLINT] = 0.0
+    let p0 = circ28_drug_params_theta(t)
+    let sc = circ28_kp_scale_for_vss(p0, p0.kp, o.vss * bp)
+    if !(sc > 0.0) {
+        t[CD_CLINT] = 0.0 - 1.0
+        return t
+    }
+    t[CD_KPSC] = sc
+    let p = circ28_drug_params_theta(t)
+    let fa = t[CD_FA]
+    var lo = ln(1.0e-6)
+    var hi = ln(1.0e7)
+    var k: i32 = 0
+    while k < 64 {
+        let mid = 0.5 * (lo + hi)
+        let cg = exp(mid)
+        let eh = mtor_eh_of(p, bp, cg, o.cl)
+        let f = fa * mtor_fg_of(p, bp, cg) * (1.0 - eh)
+        if f > o.f {
+            lo = mid
+        } else {
+            hi = mid
+        }
+        k = k + 1
+    }
+    let cgs = exp(0.5 * (lo + hi))
+    t[CD_CLGUT] = cgs / p.fu
+    let eh = mtor_eh_of(p, bp, cgs, o.cl)
+    if !(eh > 0.0) || !(eh < 1.0) {
+        t[CD_CLINT] = 0.0 - 1.0
+        return t
+    }
+    let qh = circ28_q_hepatic(p)
+    let y = bp * qh * eh / (1.0 - eh)
+    if !(p.ps[1] > y) {
+        t[CD_CLINT] = 0.0 - 1.0
+        return t
+    }
+    t[CD_CLINT] = (y * p.ps[1] / (p.ps[1] - y)) / p.fu
+    return t
+}
+
+// Closed-form oral exposure ratio AUC'/AUC when the gut-wall and the hepatic intrinsic clearances are
+// multiplied by g and h: (F'/F)(CL/CL'), with F = fa Fg (1 - Eh) and CL the splanchnic blood clearance.
+pub fn mtor_auc_ratio(th: [f64; 18], g: f64, h: f64) -> f64 with Mut, Div, Panic {
+    let p = circ28_drug_params_theta(th)
+    var t2 = th
+    t2[CD_CLGUT] = th[CD_CLGUT] * g
+    t2[CD_CLINT] = th[CD_CLINT] * h
+    let q = circ28_drug_params_theta(t2)
+    let f0 = circ28_gut_availability(p) * (1.0 - circ28_hepatic_extraction(p))
+    let f1 = circ28_gut_availability(q) * (1.0 - circ28_hepatic_extraction(q))
+    return (f1 / f0) * (circ28_splanchnic_clearance(p) / circ28_splanchnic_clearance(q))
+}
+
+// Blood clearance ratio CL'/CL for the same factors.
+pub fn mtor_cl_ratio(th: [f64; 18], g: f64, h: f64) -> f64 with Mut, Div, Panic {
+    let p = circ28_drug_params_theta(th)
+    var t2 = th
+    t2[CD_CLGUT] = th[CD_CLGUT] * g
+    t2[CD_CLINT] = th[CD_CLINT] * h
+    let q = circ28_drug_params_theta(t2)
+    return circ28_splanchnic_clearance(q) / circ28_splanchnic_clearance(p)
+}
+
+// Factor x with AUC ratio = target. mode 0: gut only (g = x, h = 1); 1: liver only (g = 1, h = x);
+// 2: both (g = h = x); 3: gut fully inhibited (g = 0), h = x. The ratio falls as x grows: bisection on
+// ln x over [1e-6, 1e3]. Returns -1 when the target is above the ratio at x -> 0 (not reachable).
+pub fn mtor_ddi_solve(th: [f64; 18], mode: i32, target: f64) -> f64 with Mut, Div, Panic {
+    var lo = ln(1.0e-6)
+    var hi = ln(1.0e3)
+    var k: i32 = 0
+    var g0 = exp(lo)
+    var h0 = 1.0
+    if mode == 1 {
+        g0 = 1.0
+        h0 = exp(lo)
+    }
+    if mode == 2 { h0 = exp(lo) }
+    if mode == 3 {
+        g0 = 0.0
+        h0 = exp(lo)
+    }
+    if mtor_auc_ratio(th, g0, h0) < target { return 0.0 - 1.0 }
+    while k < 60 {
+        let mid = 0.5 * (lo + hi)
+        let x = exp(mid)
+        var g = x
+        var h = 1.0
+        if mode == 1 {
+            g = 1.0
+            h = x
+        }
+        if mode == 2 { h = x }
+        if mode == 3 {
+            g = 0.0
+            h = x
+        }
+        if mtor_auc_ratio(th, g, h) > target {
+            lo = mid
+        } else {
+            hi = mid
+        }
+        k = k + 1
+    }
+    return exp(0.5 * (lo + hi))
+}
+
+// ---- runner on the local non-linear stepper -----------------------------------------------------------
+// route 0: one intravenous infusion of `dose` mg over t_inf h. route 1: `ndose` oral doses, one every `tau`
+// h, first-order input (ka, fa, tlag) into the gut tissue. Each dosing interval runs on a three-phase grid
+// (dt1 to t1, dt2 to t2, dt3 to tau); the LAST interval runs to t_end and is the one recorded. Times of the
+// results are counted from the last dose.
+pub struct MtorDose {
+    pub route: i32,
+    pub dose: f64,
+    pub t_inf: f64,
+    pub ka: f64,
+    pub fa: f64,
+    pub tlag: f64,
+    pub ndose: i32,
+    pub tau: f64,
+    pub dt1: f64,
+    pub t1: f64,
+    pub dt2: f64,
+    pub t2: f64,
+    pub dt3: f64,
+    pub t_end: f64,
+    pub fit_lo: f64,
+    pub fit_hi: f64,
+}
+
+// Single oral dose: 0.1 h to 3 h, 0.5 h to 12 h, 4 h to t_end (the callers of long runs set dt3 = 8 h).
+pub fn mtor_cfg_oral(dose_mg: f64, t_end: f64, fit_lo: f64, fit_hi: f64) -> MtorDose {
+    return MtorDose { route: 1, dose: dose_mg, t_inf: 0.0, ka: 1.0, fa: 1.0, tlag: 0.0, ndose: 1, tau: 24.0, dt1: 0.1, t1: 3.0, dt2: 0.5, t2: 12.0, dt3: 4.0, t_end: t_end, fit_lo: fit_lo, fit_hi: fit_hi }
+}
+
+// Results (venous WHOLE BLOOD, mg/L; AUC mg h/L; times from the last dose)
+//   cmax, tmax   grid maximum refined by the parabola vertex;  bp_peak the local blood:plasma ratio there
+//   c12, c24, bp24;  c_tau, auc_tau: concentration and AUC at t = tau (the dosing interval; 0 if not on the grid)
+//   auc_t  AUC from the last dose to t_end;  auc_inf = auc_t + c_end/lambda_z (single dose)
+//   aucp_t venous PLASMA AUC over the whole run
+pub struct MtorRun {
+    pub cmax: f64,
+    pub tmax: f64,
+    pub bp_peak: f64,
+    pub c12: f64,
+    pub c24: f64,
+    pub bp24: f64,
+    pub c_tau: f64,
+    pub auc_tau: f64,
+    pub auc_t: f64,
+    pub auc_inf: f64,
+    pub aucp_t: f64,
+    pub lambda_z: f64,
+    pub thalf: f64,
+    pub c_end: f64,
+    pub bp_end: f64,
+    pub c_inf: f64,
+    pub input: f64,
+    pub balance_err: f64,
+    pub fit_ok: bool,
+    pub ok: bool,
+    pub nfail: i32,
+    pub vss_nca: f64,
+}
+
+pub fn mtor_run(p: Circ28Params, hct: f64, bmax: f64, kd: f64, dc: MtorDose, sysn: &!Nl28Sys) -> MtorRun with Mut, Div, Panic {
+    var ts: [f64; 400] = [0.0; 400]
+    var cs: [f64; 400] = [0.0; 400]
+    var ps: [f64; 400] = [0.0; 400]
+    var au: [f64; 400] = [0.0; 400]
+    var s = circ28_state_zero()
+    var kz: i32 = 0
+    while kz < 28 {
+        s.x[kz] = 0.0
+        kz = kz + 1
+    }
+    var el = nl28_tally_zero()
+    nl28_stats_reset(sysn)
+    var n: i32 = 0
+    var input = 0.0
+    var ok = true
+    var auc0 = 0.0
+    var nd = dc.ndose
+    if dc.route == 0 { nd = 1 }
+    var kd_i: i32 = 0
+    while kd_i < nd {
+        let last = kd_i == nd - 1
+        var tstop_all = dc.tau
+        if last { tstop_all = dc.t_end }
+        if last { auc0 = el.auc_ven }
+        var t = 0.0
+        var ph: i32 = 0
+        while ph < 3 {
+            var dt = dc.dt1
+            var tstop = dc.t1
+            if ph == 1 {
+                dt = dc.dt2
+                tstop = dc.t2
+            }
+            if ph == 2 {
+                dt = dc.dt3
+                tstop = tstop_all
+            }
+            if tstop > tstop_all { tstop = tstop_all }
+            if t + 0.5 * dt < tstop {
+                nl28_prepare(p, hct, bmax, kd, dt, sysn)
+            }
+            while ok && t + 0.5 * dt < tstop {
+                if n >= 399 {
+                    ok = false
+                } else {
+                    var iv = 0.0
+                    var oral = 0.0
+                    var mass = 0.0
+                    if dc.route == 0 {
+                        mass = circ28_iv_mass(dc.dose, dc.t_inf, t, t + dt)
+                        iv = mass / dt
+                    } else {
+                        var j: i32 = 0
+                        while j <= kd_i {
+                            let sh = ((kd_i - j) as f64) * dc.tau
+                            mass = mass + circ28_oral_mass(dc.ka, dc.fa, dc.dose, dc.tlag, t + sh, t + sh + dt)
+                            j = j + 1
+                        }
+                        oral = mass / dt
+                    }
+                    let st = nl28_step(&!s, sysn, iv, oral, &!el)
+                    if st != 0 {
+                        ok = false
+                    } else {
+                        input = input + mass
+                        t = t + dt
+                        if last {
+                            n = n + 1
+                            ts[n] = t
+                            cs[n] = s.x[0]
+                            ps[n] = nl28_plasma(hct, bmax, kd, s.x[0])
+                            au[n] = el.auc_ven - auc0
+                        }
+                    }
+                }
+            }
+            ph = ph + 1
+        }
+        kd_i = kd_i + 1
+    }
+    var im: i32 = 0
+    var cm = 0.0
+    var i: i32 = 1
+    while i <= n {
+        if cs[i] > cm {
+            cm = cs[i]
+            im = i
+        }
+        i = i + 1
+    }
+    var cmax = cm
+    var tmax = ts[im]
+    if im >= 1 && im < n {
+        let h1 = ts[im] - ts[im - 1]
+        let h2 = ts[im + 1] - ts[im]
+        if mtor_abs(h1 - h2) < 1.0e-9 {
+            let den = cs[im - 1] - 2.0 * cs[im] + cs[im + 1]
+            if den < 0.0 {
+                let off = 0.5 * (cs[im - 1] - cs[im + 1]) / den
+                tmax = ts[im] + off * h1
+                cmax = cs[im] - 0.25 * (cs[im - 1] - cs[im + 1]) * off
+            }
+        }
+    }
+    var bp_peak = 0.0
+    if ps[im] > 0.0 { bp_peak = cs[im] / ps[im] }
+    var c12 = 0.0
+    var c24 = 0.0
+    var bp24 = 0.0
+    var c_tau = 0.0
+    var a_tau = 0.0
+    var c_inf = 0.0
+    i = 1
+    while i <= n {
+        if mtor_abs(ts[i] - 12.0) < 1.0e-6 { c12 = cs[i] }
+        if mtor_abs(ts[i] - 24.0) < 1.0e-6 {
+            c24 = cs[i]
+            if ps[i] > 0.0 { bp24 = cs[i] / ps[i] }
+        }
+        if mtor_abs(ts[i] - dc.tau) < 1.0e-6 {
+            c_tau = cs[i]
+            a_tau = au[i]
+        }
+        if mtor_abs(ts[i] - dc.t_inf) < 1.0e-6 { c_inf = cs[i] }
+        i = i + 1
+    }
+    var sw = 0.0
+    var st = 0.0
+    var sy = 0.0
+    var stt = 0.0
+    var sty = 0.0
+    var nf: i32 = 0
+    var fit_ok = true
+    i = 1
+    while i <= n {
+        if ts[i] >= dc.fit_lo && ts[i] <= dc.fit_hi {
+            if cs[i] > 0.0 {
+                let y = ln(cs[i])
+                sw = sw + 1.0
+                st = st + ts[i]
+                sy = sy + y
+                stt = stt + ts[i] * ts[i]
+                sty = sty + ts[i] * y
+                nf = nf + 1
+            } else {
+                fit_ok = false
+            }
+        }
+        i = i + 1
+    }
+    var lz = 0.0
+    if nf >= 3 && fit_ok {
+        let den = sw * stt - st * st
+        lz = 0.0 - (sw * sty - st * sy) / den
+        if !(lz > 0.0) {
+            fit_ok = false
+            lz = 0.0
+        }
+    } else {
+        fit_ok = false
+    }
+    var thalf = 0.0
+    var auc_inf = 0.0
+    if fit_ok {
+        thalf = 0.6931471805599453 / lz
+        auc_inf = au[n] + cs[n] / lz
+    }
+    var vss_nca = 0.0
+    if dc.route == 0 && fit_ok {
+        var a = 0.0
+        var am = 0.0
+        i = 1
+        while i <= n {
+            a = a + 0.5 * (cs[i] + cs[i - 1]) * (ts[i] - ts[i - 1])
+            am = am + 0.5 * (ts[i] * cs[i] + ts[i - 1] * cs[i - 1]) * (ts[i] - ts[i - 1])
+            i = i + 1
+        }
+        let tl = ts[n]
+        let a_tot = a + cs[n] / lz
+        let am_tot = am + cs[n] * (tl / lz + 1.0 / (lz * lz))
+        vss_nca = dc.dose / a_tot * (am_tot / a_tot - 0.5 * dc.t_inf)
+    }
+    let elim = nl28_eliminated(&el)
+    let rem = circ28_total_mass(&s, p)
+    var be = 0.0
+    if input > 0.0 { be = mtor_abs(input - elim - rem) / input }
+    var bp_end = 0.0
+    if ps[n] > 0.0 { bp_end = cs[n] / ps[n] }
+    return MtorRun {
+        cmax: cmax, tmax: tmax, bp_peak: bp_peak, c12: c12, c24: c24, bp24: bp24, c_tau: c_tau, auc_tau: a_tau,
+        auc_t: au[n], auc_inf: auc_inf, aucp_t: el.auc_pven, lambda_z: lz, thalf: thalf, c_end: cs[n], bp_end: bp_end,
+        c_inf: c_inf, input: input, balance_err: be, fit_ok: fit_ok, ok: ok, nfail: nl28_failures(sysn), vss_nca: vss_nca
+    }
+}
+
+// Same parameters through the single-ratio module (circ28_blood): single oral dose, dt1 to t1 then dt2 to
+// t_end. `sysc` is created once by the caller.
+pub struct MtorSingle {
+    pub cmax: f64,
+    pub tmax: f64,
+    pub auc_t: f64,
+    pub bp_min: f64,
+    pub bp_max: f64,
+}
+
+pub fn mtor_run_single(p: Circ28Params, hct: f64, bmax: f64, kd: f64, dc: MtorDose, sysc: &!Circ28Sys) -> MtorSingle with Mut, Div, Panic {
+    var b = blood28_new(p, hct, bmax, kd, dc.dt1)
+    var kz: i32 = 0
+    while kz < 28 {
+        blood28_set_x(&!b, kz, 0.0)
+        kz = kz + 1
+    }
+    var t = 0.0
+    var cm = 0.0
+    var tm = 0.0
+    while t + 0.5 * dc.dt1 < dc.t1 {
+        let mass = circ28_oral_mass(dc.ka, dc.fa, dc.dose, dc.tlag, t, t + dc.dt1)
+        blood28_step(&!b, sysc, 0.0, mass / dc.dt1)
+        t = t + dc.dt1
+        let c = blood28_get_x(&b, 0)
+        if c > cm {
+            cm = c
+            tm = t
+        }
+    }
+    let a1 = blood28_auc_blood(&b)
+    var b2 = blood28_new(p, hct, bmax, kd, dc.dt2)
+    var k: i32 = 0
+    while k < 28 {
+        blood28_set_x(&!b2, k, blood28_get_x(&b, k))
+        k = k + 1
+    }
+    b2.el.auc_ven = a1
+    while t + 0.5 * dc.dt2 < dc.t_end {
+        let mass2 = circ28_oral_mass(dc.ka, dc.fa, dc.dose, dc.tlag, t, t + dc.dt2)
+        blood28_step(&!b2, sysc, 0.0, mass2 / dc.dt2)
+        t = t + dc.dt2
+        let c = blood28_get_x(&b2, 0)
+        if c > cm {
+            cm = c
+            tm = t
+        }
+    }
+    return MtorSingle { cmax: cm, tmax: tm, auc_t: blood28_auc_blood(&b2), bp_min: blood28_bp_min(&b2), bp_max: blood28_bp_max(&b2) }
+}
+
+// Tmax (h) of a single oral dose at absorption rate ka, run to 3 h on the 0.1 h grid (a later peak returns 3 h).
+pub fn mtor_tmax_at(p: Circ28Params, hct: f64, bmax: f64, kd: f64, dose: f64, fa: f64, ka: f64, sysn: &!Nl28Sys) -> f64 with Mut, Div, Panic {
+    var dc = mtor_cfg_oral(dose, 3.0, 100.0, 200.0)
+    dc.ka = ka
+    dc.fa = fa
+    let r = mtor_run(p, hct, bmax, kd, dc, sysn)
+    return r.tmax
+}
+
+// ka with Tmax(ka) = tobs on [klo, khi] /h (Tmax falls with ka; Illinois on ln ka). Returns the bound khi
+// when Tmax(khi) is above tobs, klo when Tmax(klo) is below it.
+// lean_single: the FIRST run of a grid on a stepper that last ran another grid can be wrong (measured 2026-11-15: the
+// first Tmax run after the half-life fit of everolimus gave a bracket value that left the Illinois iteration
+// unconverged, ka 0.9334 instead of 0.9572; the second and later solves were right; Madaros is right at the first).
+// Each solver below therefore makes its first evaluation twice and discards the first (a workaround, not a fix).
+pub fn mtor_ka_solve(p: Circ28Params, hct: f64, bmax: f64, kd: f64, dose: f64, fa: f64, tobs: f64, klo: f64, khi: f64, sysn: &!Nl28Sys) -> f64 with Mut, Div, Panic {
+    let warm = mtor_tmax_at(p, hct, bmax, kd, dose, fa, khi, sysn)
+    let tb = mtor_tmax_at(p, hct, bmax, kd, dose, fa, khi, sysn)
+    if tb > tobs { return khi }
+    var xa = ln(klo)
+    var xb = ln(khi)
+    var gb = tb - tobs
+    var ga = mtor_tmax_at(p, hct, bmax, kd, dose, fa, klo, sysn) - tobs
+    if !(ga > 0.0) { return klo }
+    var side: i32 = 0
+    var x = xb
+    var k: i32 = 0
+    while k < 20 && mtor_abs(xb - xa) > 1.0e-9 {
+        x = (xa * gb - xb * ga) / (gb - ga)
+        let fx = mtor_tmax_at(p, hct, bmax, kd, dose, fa, exp(x), sysn) - tobs
+        if mtor_abs(fx) < 1.0e-4 { return exp(x) }
+        if fx > 0.0 {
+            xa = x
+            ga = fx
+            if side == 1 { gb = 0.5 * gb }
+            side = 1
+        } else {
+            xb = x
+            gb = fx
+            if side == 0 - 1 { ga = 0.5 * ga }
+            side = 0 - 1
+        }
+        k = k + 1
+    }
+    return exp(x)
+}
+
+// ---- budget with refit --------------------------------------------------------------------------------
+// Twelve inputs: 0 logP, 1 fu, 2 Hct, 3 Bmax, 4 Kd, 5 ps_gut, 6 fa, 7 V_ss/F, 8 CL/F, 9 F, 10 ka,
+// 11 the ps scalar. Each evaluation redoes the closed-form fit (V_ss = F V_ss/F, CL = F CL/F) and runs one
+// single oral dose on the grid of `dc0`. cref is held (it only selects the reference ratio).
+pub struct MtorOut {
+    pub auc: f64,
+    pub cmax: f64,
+}
+
+pub fn mtor_eval(z: [f64; 12], thb: [f64; 18], cref: f64, dc0: MtorDose, sysn: &!Nl28Sys) -> MtorOut with Mut, Div, Panic {
+    var t = thb
+    t[CD_LOGP] = z[0]
+    t[CD_FU] = z[1]
+    t[CD_PSGUT] = z[5]
+    t[CD_FA] = z[6]
+    t[CD_KA] = z[10]
+    t[CD_PSSC] = z[11]
+    let o = MtorObs { hct: z[2], bmax: z[3], kd: z[4], vss: z[9] * z[7], cl: z[9] * z[8], f: z[9], cref: cref }
+    t = mtor_fit(t, o)
+    let p = circ28_drug_params_theta(t)
+    var dc = dc0
+    dc.ka = z[10]
+    dc.fa = z[6]
+    let r = mtor_run(p, z[2], z[3], z[4], dc, sysn)
+    var a = r.auc_t
+    if r.fit_ok { a = r.auc_inf }
+    return MtorOut { auc: a, cmax: r.cmax }
+}
+
+pub struct MtorBudget {
+    pub auc: f64,
+    pub cmax: f64,
+    pub var_auc: f64,
+    pub var_cmax: f64,
+    pub contrib_auc: [f64; 12],
+    pub contrib_cmax: [f64; 12],
+    pub sens_auc: [f64; 12],
+    pub sens_cmax: [f64; 12],
+    pub runs: i32,
+}
+
+// Forward differences, h_i = min(1e-4 |z_i|, 0.1 u_i).
+pub fn mtor_budget(z0: [f64; 12], u: [f64; 12], thb: [f64; 18], cref: f64, dc0: MtorDose, sysn: &!Nl28Sys) -> MtorBudget with Mut, Div, Panic {
+    let warm = mtor_eval(z0, thb, cref, dc0, sysn)
+    let o0 = mtor_eval(z0, thb, cref, dc0, sysn)
+    var sa: [f64; 12] = [0.0; 12]
+    var sc: [f64; 12] = [0.0; 12]
+    var ca: [f64; 12] = [0.0; 12]
+    var cc: [f64; 12] = [0.0; 12]
+    var va = 0.0
+    var vc = 0.0
+    var nrun: i32 = 1
+    var i: i32 = 0
+    while i < 12 {
+        var hs = 1.0e-4 * mtor_abs(z0[i])
+        if hs > 0.1 * u[i] { hs = 0.1 * u[i] }
+        if hs > 0.0 {
+            var zp = z0
+            zp[i] = z0[i] + hs
+            let op = mtor_eval(zp, thb, cref, dc0, sysn)
+            nrun = nrun + 1
+            let da = (op.auc - o0.auc) / hs
+            let dcm = (op.cmax - o0.cmax) / hs
+            sa[i] = da
+            sc[i] = dcm
+            ca[i] = da * da * u[i] * u[i]
+            cc[i] = dcm * dcm * u[i] * u[i]
+            va = va + ca[i]
+            vc = vc + cc[i]
+        }
+        i = i + 1
+    }
+    return MtorBudget { auc: o0.auc, cmax: o0.cmax, var_auc: va, var_cmax: vc, contrib_auc: ca, contrib_cmax: cc, sens_auc: sa, sens_cmax: sc, runs: nrun }
+}
+
+// =====================================================================================================
+// Sirolimus
+// =====================================================================================================
+
+pub fn sir_mw() -> f64 { return 914.2 }
+pub fn sir_logp() -> f64 { return 4.3 }
+pub fn sir_u_logp() -> f64 { return (6.0 - 4.3) / 3.4641016151377544 }
+pub fn sir_fu() -> f64 { return 0.08 }
+pub fn sir_u_fu() -> f64 { return (0.08 - 0.025) / 3.4641016151377544 }
+// mg/L of erythrocytes: tacrolimus 0.418 mg/L / 804.02 g/mol x 914.2 g/mol
+pub fn sir_bmax() -> f64 { return 0.418 / 804.02 * 914.2 }
+pub fn sir_u_bmax() -> f64 { return 0.5 * sir_bmax() }
+// in-vitro low-concentration blood:plasma ratio (Yatscoff 1993, three readings of the abstract)
+pub fn sir_bp0_a() -> f64 { return 1.0 / 0.09 }
+pub fn sir_bp0_b() -> f64 { return (1.0 - mtor_hct()) / 0.031 }
+pub fn sir_bp0_c() -> f64 { return (1.0 - mtor_hct()) + mtor_hct() / 0.05 }
+pub fn sir_bp0() -> f64 { return (sir_bp0_a() + sir_bp0_b() + sir_bp0_c()) / 3.0 }
+pub fn sir_u_bp0() -> f64 { return (sir_bp0_b() - sir_bp0_c()) / 3.4641016151377544 }
+// mg/L of plasma
+pub fn sir_kd() -> f64 { return mtor_hct() * sir_bmax() / (sir_bp0() - (1.0 - mtor_hct())) }
+pub fn sir_u_kd() -> f64 { return sir_kd() * sir_u_bp0() / (sir_bp0() - (1.0 - mtor_hct())) }
+pub fn sir_fa() -> f64 { return 1.0 }
+pub fn sir_u_fa() -> f64 { return 0.115 }
+pub fn sir_f() -> f64 { return 0.14 }
+pub fn sir_u_f() -> f64 { return 0.04 }
+
+// pooled apparent clearance (L/h), k = 3 without ciclosporin
+pub fn sir_pool_clf(a: &!MtorPool) with Mut {
+    mtor_pool_add(a, 0.278 * mtor_bw(), 0.117 * mtor_bw(), 30.0)
+    mtor_pool_add(a, 10.0 / 0.736, 0.0, 18.0)
+    mtor_pool_add(a, 14.1, 0.0, 22.0)
+}
+
+// pooled apparent steady-state volume (L), k = 2
+pub fn sir_pool_vssf(a: &!MtorPool) with Mut {
+    mtor_pool_add(a, 23.0 * mtor_bw(), 10.0 * mtor_bw(), 30.0)
+    mtor_pool_add(a, 218.0 + 292.0, 0.0, 22.0)
+}
+
+// pooled terminal half-life (h) of healthy volunteers, k = 3, EQUAL weights (Zimmerman 1999 gives no n in
+// the abstract): Brattstrom 82 +/- 12, Bottiger 79, Zimmerman 1999 (PMID 10579146, AB) 67-68.
+pub fn sir_pool_thalf(a: &!MtorPool) with Mut {
+    mtor_pool_add(a, 82.0, 0.0, 1.0)
+    mtor_pool_add(a, 79.0, 0.0, 1.0)
+    mtor_pool_add(a, 67.5, 0.0, 1.0)
+}
+
+// pooled Tmax (h), k = 2, equal weights
+pub fn sir_pool_tmax(a: &!MtorPool) with Mut {
+    mtor_pool_add(a, 1.0, 0.0, 1.0)
+    mtor_pool_add(a, 1.45, 0.0, 1.0)
+}
+
+pub fn sir_obs_clf() -> f64 with Mut, Div {
+    var a = mtor_pool_zero()
+    sir_pool_clf(&!a)
+    return mtor_pool_mean(&a)
+}
+pub fn sir_u_clf() -> f64 with Mut, Div {
+    var a = mtor_pool_zero()
+    sir_pool_clf(&!a)
+    return mtor_pool_u(&a)
+}
+pub fn sir_obs_vssf() -> f64 with Mut, Div {
+    var a = mtor_pool_zero()
+    sir_pool_vssf(&!a)
+    return mtor_pool_mean(&a)
+}
+pub fn sir_u_vssf() -> f64 with Mut, Div {
+    var a = mtor_pool_zero()
+    sir_pool_vssf(&!a)
+    return mtor_pool_u(&a)
+}
+pub fn sir_obs_tmax() -> f64 with Mut, Div {
+    var a = mtor_pool_zero()
+    sir_pool_tmax(&!a)
+    return mtor_pool_mean(&a)
+}
+pub fn sir_u_tmax() -> f64 with Mut, Div {
+    var a = mtor_pool_zero()
+    sir_pool_tmax(&!a)
+    return mtor_pool_u(&a)
+}
+pub fn sir_obs_r24() -> f64 { return 4.47 / 25.3 }
+pub fn sir_u_r24() -> f64 with Mut, Div {
+    let a = 6.1 / 25.3
+    let b = 0.57 / 4.47
+    return sir_obs_r24() * cd_sqrt(a * a + b * b) / 3.4641016151377544
+}
+
+// reference blood concentration (mg/L): F x 6 mg / V_ss(blood) = 6 mg / (V_ss/F)
+pub fn sir_cref() -> f64 with Mut, Div { return 6.0 / sir_obs_vssf() }
+
+pub fn sir_obs_base() -> MtorObs with Mut, Div {
+    return MtorObs { hct: mtor_hct(), bmax: sir_bmax(), kd: sir_kd(), vss: sir_f() * sir_obs_vssf(), cl: sir_f() * sir_obs_clf(), f: sir_f(), cref: sir_cref() }
+}
+
+// Single-dose grid of the sirolimus runs: 0.1 h to 3 h, 1 h to 24 h, 8 h to 488 h; terminal slope over 96-336 h.
+pub fn sir_cfg(dose_mg: f64) -> MtorDose {
+    var dc = mtor_cfg_oral(dose_mg, 488.0, 96.0, 336.0)
+    dc.dt2 = 1.0
+    dc.t2 = 24.0
+    dc.dt3 = 8.0
+    return dc
+}
+
+pub fn sir_measured_record(d: &!Circ28Drug) with Mut, Div, Panic, Epistemic {
+    circ28_drug_set(d, CD_MW, sir_mw(), 0.0, CD_STATUS_MEASURED, "PubChem CID 5284616 (914.2)")
+    circ28_drug_set(d, CD_LOGP, sir_logp(), sir_u_logp(), CD_STATUS_MEASURED, "4.3 Emoto2013 (DrugBank, secondary); XLogP3 6.0 PubChem computed; u = range/sqrt12")
+    circ28_drug_set(d, CD_ION, 0.0, 0.0, CD_STATUS_DERIVED, "neutral macrolide")
+    circ28_drug_set(d, CD_FU, sir_fu(), sir_u_fu(), CD_STATUS_MEASURED, "label 92 % bound; Emoto2013 0.08; Yatscoff1993 0.025 ultracentrifugation (abstract); u = range/sqrt12")
+    circ28_drug_set(d, CD_FA, sir_fa(), sir_u_fa(), CD_STATUS_DERIVED, "Emoto2013 Fa assumed 1; band [0.6, 1]/sqrt12 (judgment)")
+    circ28_drug_set(d, CD_PSGUT, mtor_psgut(), mtor_u_psgut(), CD_STATUS_DERIVED, "SURROGATE: tacrolimus Peff 4.77e-4 cm/s x 6600 cm2 x 3.6 = 11.33 L/h; no sirolimus Peff in a readable source; u = factor-3 band (judgment)")
+}
+
+// d(fitted component)/d(observable) by central differences through the closed-form fit.
+// which: 0 V_ss(blood), 1 CL(blood), 2 F (V and CL held).
+pub fn mtor_fit_d(th: [f64; 18], o: MtorObs, which: i32, comp: i32) -> f64 with Mut, Div, Panic {
+    var op = o
+    var om = o
+    var h = 1.0e-4
+    if which == 0 {
+        h = 1.0e-4 * o.vss
+        op.vss = o.vss + h
+        om.vss = o.vss - h
+    }
+    if which == 1 {
+        h = 1.0e-4 * o.cl
+        op.cl = o.cl + h
+        om.cl = o.cl - h
+    }
+    if which == 2 {
+        h = 1.0e-4 * o.f
+        op.f = o.f + h
+        om.f = o.f - h
+    }
+    let tp = mtor_fit(th, op)
+    let tm = mtor_fit(th, om)
+    return (tp[comp] - tm[comp]) / (2.0 * h)
+}
+
+// Writes CD_BP, CD_KPSC, CD_CLGUT, CD_CLINT. u_vss, u_cl: standard uncertainties of the WHOLE-BLOOD
+// volume and clearance handed in by the drug module (they include u(F)).
+pub fn mtor_fit_record(d: &!Circ28Drug, o: MtorObs, u_vss: f64, u_cl: f64, u_f: f64) with Mut, Div, Panic, Epistemic {
+    let th0 = circ28_drug_theta(d)
+    let th = mtor_fit(th0, o)
+    let dk_dv = mtor_fit_d(th0, o, 0, CD_KPSC)
+    let dg_df = mtor_fit_d(th0, o, 2, CD_CLGUT)
+    let dc_dcl = mtor_fit_d(th0, o, 1, CD_CLINT)
+    let dc_df = mtor_fit_d(th0, o, 2, CD_CLINT)
+    let ua = dc_dcl * u_cl
+    let ub = dc_df * u_f
+    circ28_drug_set(d, CD_BP, th[CD_BP], 0.0, CD_STATUS_DERIVED, "bp at C_ref from the binding relation; the nl stepper replaces it by the local relation")
+    circ28_drug_set(d, CD_KPSC, th[CD_KPSC], mtor_abs(dk_dv) * u_vss, CD_STATUS_FITTED, "fitted to V_ss(blood) = F x pooled V_ss/F; u from u(V_ss)")
+    circ28_drug_set(d, CD_CLGUT, th[CD_CLGUT], mtor_abs(dg_df) * u_f, CD_STATUS_FITTED, "fitted to F = fa Fg (1 - Eh) (declared F); u from u(F)")
+    circ28_drug_set(d, CD_CLINT, th[CD_CLINT], cd_sqrt(ua * ua + ub * ub), CD_STATUS_FITTED, "fitted to CL(blood) = F x pooled CL/F given clgut; u from u(CL), u(F)")
+}
+
+pub fn sir_u_vss_blood() -> f64 with Mut, Div {
+    let a = sir_f() * sir_u_vssf()
+    let b = sir_u_f() * sir_obs_vssf()
+    return cd_sqrt(a * a + b * b)
+}
+pub fn sir_u_cl_blood() -> f64 with Mut, Div {
+    let a = sir_f() * sir_u_clf()
+    let b = sir_u_f() * sir_obs_clf()
+    return cd_sqrt(a * a + b * b)
+}
+
+// R24 = C(24 h)/Cmax of a single 6 mg oral dose at ps scalar s and absorption rate ka, the closed-form
+// fits redone at s (grid 0.1 h to 3 h, 1 h to 12 h, 6 h to 24 h). -1 when the hepatic fit does not exist at s.
+pub fn sir_r24_at(th0: [f64; 18], o: MtorObs, s: f64, ka: f64, sysn: &!Nl28Sys) -> f64 with Mut, Div, Panic {
+    var t = th0
+    t[CD_PSSC] = s
+    t = mtor_fit(t, o)
+    if !(t[CD_CLINT] > 0.0) { return 0.0 - 1.0 }
+    let p = circ28_drug_params_theta(t)
+    var dc = mtor_cfg_oral(6.0, 24.0, 100.0, 200.0)
+    dc.dt2 = 1.0
+    dc.dt3 = 6.0
+    dc.ka = ka
+    dc.fa = t[CD_FA]
+    let r = mtor_run(p, o.hct, o.bmax, o.kd, dc, sysn)
+    if !r.ok { return 0.0 - 1.0 }
+    return r.c24 / r.cmax
+}
+
+pub fn mtor_fit_exists(th0: [f64; 18], o: MtorObs, s: f64) -> bool with Mut, Div, Panic {
+    var t = th0
+    t[CD_PSSC] = s
+    t = mtor_fit(t, o)
+    return t[CD_CLINT] > 0.0
+}
+
+// Smallest s in [1e-3, 1] for which the closed-form fit exists (bisection on ln s, 14 halvings).
+pub fn mtor_ps_min(th0: [f64; 18], o: MtorObs) -> f64 with Mut, Div, Panic {
+    var lo = ln(1.0e-3)
+    var hi = 0.0
+    if mtor_fit_exists(th0, o, exp(lo)) { return exp(lo) }
+    var k: i32 = 0
+    while k < 14 {
+        let mid = 0.5 * (lo + hi)
+        if mtor_fit_exists(th0, o, exp(mid)) {
+            hi = mid
+        } else {
+            lo = mid
+        }
+        k = k + 1
+    }
+    return exp(hi)
+}
+
+// ps scalar with R24(s) = target on [slo, shi]. R24 rises with s (a slower tissue uptake gives a higher
+// peak and a deeper fall). R24(shi) <= target: shi (1 = flow-limited); R24(slo) >= target: slo.
+pub fn sir_fit_ps(th0: [f64; 18], o: MtorObs, target: f64, ka: f64, slo: f64, shi: f64, sysn: &!Nl28Sys) -> f64 with Mut, Div, Panic {
+    let warm = sir_r24_at(th0, o, shi, ka, sysn)
+    let r1 = sir_r24_at(th0, o, shi, ka, sysn)
+    if r1 <= target { return shi }
+    let smin = slo
+    let rmin = sir_r24_at(th0, o, smin, ka, sysn)
+    if rmin >= target { return smin }
+    var xa = ln(smin)
+    var xb = ln(shi)
+    var fa = rmin - target
+    var fb = r1 - target
+    var side: i32 = 0
+    var x = xa
+    var k: i32 = 0
+    while k < 30 {
+        x = (xa * fb - xb * fa) / (fb - fa)
+        let fx = sir_r24_at(th0, o, exp(x), ka, sysn) - target
+        if mtor_abs(fx) < 2.0e-5 { return exp(x) }
+        if fx < 0.0 {
+            xa = x
+            fa = fx
+            if side == 1 { fb = 0.5 * fb }
+            side = 1
+        } else {
+            xb = x
+            fb = fx
+            if side == 0 - 1 { fa = 0.5 * fa }
+            side = 0 - 1
+        }
+        k = k + 1
+    }
+    return exp(x)
+}
+
+// The record: measured rows, then the ps scalar and ka fitted in alternation (ps at ka 2.77 /h,
+// the value of Ferron 1997 in patients, as the start; ka at that ps; ps again; ka again; ...), then the closed-
+// form fits. THREE rounds: after two the record gave R24 0.1819 against 0.1767 (3 %), measured 2026-11-15.
+// The test asserts that both observables are reproduced by the final record.
+pub fn sir_drug_into(d: &!Circ28Drug, sysn: &!Nl28Sys) with Mut, Div, Panic, Epistemic {
+    sir_measured_record(d)
+    let o = sir_obs_base()
+    let th0 = circ28_drug_theta(d)
+    var ka = 2.77
+    var s = 1.0
+    var round: i32 = 0
+    let smin = 1.0001 * mtor_ps_min(th0, o)
+    var slo = smin
+    var shi = 1.0
+    var klo = 0.05
+    var khi = 10.0
+    while round < 3 {
+        s = sir_fit_ps(th0, o, sir_obs_r24(), ka, slo, shi, sysn)
+        var t = th0
+        t[CD_PSSC] = s
+        t = mtor_fit(t, o)
+        let p = circ28_drug_params_theta(t)
+        ka = mtor_ka_solve(p, o.hct, o.bmax, o.kd, 6.0, t[CD_FA], sir_obs_tmax(), klo, khi, sysn)
+        // second round: brackets a factor 2 around the first-round values (inside the bounds)
+        slo = 0.5 * s
+        if slo < smin { slo = smin }
+        shi = 2.0 * s
+        if shi > 1.0 { shi = 1.0 }
+        klo = 0.5 * ka
+        khi = 2.0 * ka
+        if khi > 10.0 { khi = 10.0 }
+        round = round + 1
+    }
+    // u(s) = u(R24)/|dR24/ds|, u(ka) = u(Tmax)/|dTmax/dka| (forward differences, 1 % steps)
+    let r0 = sir_r24_at(th0, o, s, ka, sysn)
+    let r1 = sir_r24_at(th0, o, 1.01 * s, ka, sysn)
+    var us = 0.0
+    if mtor_abs(r1 - r0) > 0.0 { us = sir_u_r24() / (mtor_abs(r1 - r0) / (0.01 * s)) }
+    circ28_drug_set(d, CD_PSSC, s, us, CD_STATUS_FITTED, "fitted to R24 = C(24 h)/Cmax = 0.177 after 6 mg (Leelahavanichkul2005, n=12, abstract); bound s <= 1; u = u(R24)/|dR24/ds|")
+    mtor_fit_record(d, o, sir_u_vss_blood(), sir_u_cl_blood(), sir_u_f())
+    let th = circ28_drug_theta(d)
+    let p = circ28_drug_params_theta(th)
+    let t0 = mtor_tmax_at(p, o.hct, o.bmax, o.kd, 6.0, th[CD_FA], ka, sysn)
+    let t1 = mtor_tmax_at(p, o.hct, o.bmax, o.kd, 6.0, th[CD_FA], 1.01 * ka, sysn)
+    var uk = 0.0
+    if mtor_abs(t1 - t0) > 0.0 { uk = sir_u_tmax() / (mtor_abs(t1 - t0) / (0.01 * ka)) }
+    circ28_drug_set(d, CD_KA, ka, uk, CD_STATUS_FITTED, "fitted to the pooled Tmax 1.225 h (label 1 h healthy; Leelahavanichkul2005 1.45 h); u = u(Tmax)/|dTmax/dka|")
+}
+
+// Budget inputs and their standard uncertainties.
+pub fn sir_z0(thb: [f64; 18]) -> [f64; 12] with Mut, Div {
+    var z: [f64; 12] = [0.0; 12]
+    z[0] = thb[CD_LOGP]
+    z[1] = thb[CD_FU]
+    z[2] = mtor_hct()
+    z[3] = sir_bmax()
+    z[4] = sir_kd()
+    z[5] = thb[CD_PSGUT]
+    z[6] = thb[CD_FA]
+    z[7] = sir_obs_vssf()
+    z[8] = sir_obs_clf()
+    z[9] = sir_f()
+    z[10] = thb[CD_KA]
+    z[11] = thb[CD_PSSC]
+    return z
+}
+
+pub fn sir_u_all(u_ka: f64, u_ps: f64) -> [f64; 12] with Mut, Div {
+    var u: [f64; 12] = [0.0; 12]
+    u[0] = sir_u_logp()
+    u[1] = sir_u_fu()
+    u[2] = mtor_u_hct()
+    u[3] = sir_u_bmax()
+    u[4] = sir_u_kd()
+    u[5] = mtor_u_psgut()
+    u[6] = sir_u_fa()
+    u[7] = sir_u_vssf()
+    u[8] = sir_u_clf()
+    u[9] = sir_u_f()
+    u[10] = u_ka
+    u[11] = u_ps
+    return u
+}
