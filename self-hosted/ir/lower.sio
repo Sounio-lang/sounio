@@ -215,16 +215,28 @@ fn lower_fo_bind_table_clone(src: &LowerFoBindTable) -> Box<LowerFoBindTable> wi
     Box::new(t)
 }
 
-// `let s = (*lo.big).so_bind_hess` shares the array on Madaros for the same
-// reason; this is a copy in fresh storage.
-fn lower_hess_rows_copy(src: &[i64; 576]) -> [i64; 576] with Mut, Panic, Div {
-    var out: [i64; 576] = [-1; 576]
+// Hessian bind rows (528 slots per bound local, 128 locals) saved around a
+// speculative re-lowering. Only the rows that exist are saved, on a stack in
+// global storage: a fresh 67584-slot array per paste would cost more than the
+// paste. so_rows_save returns the stack base to hand back to so_rows_restore
+// (-1 when the stack is full, in which case nothing is restored).
+let SO_ROWS_STACK_MAX: i64 = 2097152
+var SO_ROWS_STACK: [i64; 2097152] = [0; 2097152]
+var SO_ROWS_SP: i64 = 0
+
+fn so_rows_save(src: &[i64; 67584], nrows: i64) -> i64 with Mut, Panic, Div {
+    var n = nrows
+    if n > 128 { n = 128 }
+    let cnt = n * 528
+    if SO_ROWS_SP + cnt > SO_ROWS_STACK_MAX { return 0 - 1 }
+    let base = SO_ROWS_SP
     var i: i64 = 0
-    while i < 576 {
-        out[i as usize] = (*src)[i as usize]
+    while i < cnt {
+        SO_ROWS_STACK[(base + i) as usize] = (*src)[i as usize]
         i = i + 1
     }
-    out
+    SO_ROWS_SP = base + cnt
+    base
 }
 
 // #1706 (KL-11): a pure f64 helper the variance lowering may re-lower inline at
@@ -324,9 +336,9 @@ var FO_STEP_SENS: [i64; 512] = [-1; 512]
 var FO_STEP_OUT_VAL: i64 = 0
 var FO_STEP_OUT_S: [i64; 32] = [-1; 32]
 var FO_STEP_CARRY: i64 = 0
-var FO_STEP_H: [i64; 36] = [-1; 36]
-var FO_STEP_OUT_H: [i64; 36] = [-1; 36]
-var FO_STEP_ARGH: [i64; 576] = [-1; 576]
+var FO_STEP_H: [i64; 528] = [-1; 528]
+var FO_STEP_OUT_H: [i64; 528] = [-1; 528]
+var FO_STEP_ARGH: [i64; 8448] = [-1; 8448]
 
 // ---- First-order GUM through calls: tangent clones (forward-mode AD) ----
 //
@@ -374,16 +386,16 @@ var TG_HASSELF: [i64; 768] = [0; 768]
 // Tangent layout of one entry (tg_layout): parameter index, field slot (-1:
 // the parameter itself) and field name id, in a fixed order both the clone
 // and its callers enumerate.
-let TG_LMAX: i64 = 24
+let TG_LMAX: i64 = 32
 var TG_L_N: i64 = 0
-var TG_L_PARAM: [i64; 24] = [0; 24]
-var TG_L_FIELD: [i64; 24] = [-1; 24]
-var TG_L_FNAME: [i64; 24] = [0; 24]
-var TG_L_ISK: [i64; 24] = [0; 24]
+var TG_L_PARAM: [i64; 32] = [0; 32]
+var TG_L_FIELD: [i64; 32] = [-1; 32]
+var TG_L_FNAME: [i64; 32] = [0; 32]
+var TG_L_ISK: [i64; 32] = [0; 32]
 // Field path of a layout entry (up to 3 names, depth 0 for a plain parameter)
 // and its matching key (TG_L_FNAME holds the key of the path).
-var TG_L_DEPTH: [i64; 24] = [0; 24]
-var TG_L_PATH: [i64; 72] = [0; 72]
+var TG_L_DEPTH: [i64; 32] = [0; 32]
+var TG_L_PATH: [i64; 96] = [0; 96]
 // Return kind per entry: 0 f64, 1 struct (TG_RTYPE: its type name id). A struct
 // return is a matrix: one row per scalar f64 field of the type, in declaration
 // order, each row nf Jacobian entries then the internal variance.
@@ -406,10 +418,10 @@ var TG_CLONE_FN: i64 = 0 - 1
 var TG_OUT_REG: i64 = 0 - 1
 var TG_BODY_PENDING: bool = false
 var TG_NPCH: i64 = 0
-var TG_PARAM_REG: [i64; 24] = [-1; 24]
-var TG_PARAM_CH: [i64; 24] = [-1; 24]
-var TG_PARAM_ISK: [i64; 24] = [0; 24]
-var TG_PARAM_FIELD: [i64; 24] = [-1; 24]
+var TG_PARAM_REG: [i64; 32] = [-1; 32]
+var TG_PARAM_CH: [i64; 32] = [-1; 32]
+var TG_PARAM_ISK: [i64; 32] = [0; 32]
+var TG_PARAM_FIELD: [i64; 32] = [-1; 32]
 var TG_ONE_REG: i64 = 0 - 1
 // The function lowered by lowerer_lower_fn_item_mut, the only path that
 // drains the clone queue. A call lowered anywhere else keeps the original.
@@ -425,24 +437,32 @@ var TG_SITE_START: [i64; 256] = [0; 256]
 var TG_SITE_END: [i64; 256] = [0; 256]
 var TG_SITE_TG: [i64; 256] = [0; 256]
 var TG_SITE_VINT: [i64; 256] = [-1; 256]
+// Hyper-dual sites: the callee's internal curvature term, sum over the
+// measurements made inside it of H_mm * sigma_m^2 (a float vreg, -1 when none).
+var TG_SITE_M: [i64; 256] = [-1; 256]
 var TG_SITE_D: [i64; 8192] = [-1; 8192]
-// Struct-return sites: entry (site * 8 + row) * 25 + k, k < nf a partial, k == nf
+// Struct-return sites: entry (site * 8 + row) * 33 + k, k < nf a partial, k == nf
 // the row's internal variance.
-var TG_SITE_DM: [i64; 51200] = [-1; 51200]
+var TG_SITE_DM: [i64; 67584] = [-1; 67584]
 // Hessian block of each output row of a second-order struct site: entry
-// (site * 8 + row) * 36 + so_hess_idx.
-var TG_SITE_HM: [i64; 73728] = [-1; 73728]
+// (site * 8 + row) * 528 + so_hess_idx (over the tangent indices, up to 32).
+var TG_SITE_HM: [i64; 1081344] = [-1; 1081344]
+// The row's internal curvature term sum H_mm sigma_m^2 (+ correlated cross
+// terms), a float vreg per (site * 8 + row), -1 when none.
+var TG_SITE_MR: [i64; 2048] = [-1; 2048]
 // Scratch of tg_rows_compute / tg_row_install: per row the sensitivities on the
-// caller's channels (32 per row) and, at second order, the Hessian (36 per row).
+// caller's channels (32 per row) and, at second order, the Hessian (528 per row).
 var TG_ROW_ACC: [i64; 256] = [-1; 256]
-var TG_ROW_HESS: [i64; 288] = [-1; 288]
+var TG_ROW_HESS: [i64; 4224] = [-1; 4224]
 // Internal measurements of a struct-returning clone, exported once each so the
 // caller can share one channel across the output rows: per site and slot
 // (site * 4 + c) the sigma^2 register, and per row (that * 8 + row) the row's
-// sensitivity to it.
+// sensitivity to it; per site and slot pair (site * 16 + c1 * 4 + c2) their
+// declared correlation.
 let TG_NI: i64 = 4
 var TG_SITE_ISIG: [i64; 1024] = [-1; 1024]
 var TG_SITE_IS: [i64; 8192] = [-1; 8192]
+var TG_SITE_IR: [i64; 4096] = [-1; 4096]
 
 // Key of a field path (up to 3 name ids): the clone matches a field read to a
 // tangent by it, the caller builds the same key from the layout.
@@ -457,7 +477,7 @@ fn tg_path_key(id0: i64, id1: i64, id2: i64, depth: i64) -> i64 with Mut, Panic,
 // lowers the same body with `so_enabled` and writes, after the nf + 1 slots of
 // the first-order layout, the Hessian of the result over its tangents (upper
 // triangle, so_hess_idx over tangent indices) into slots nf + 1 + idx.
-let TG_HESS_SLOTS: i64 = 36
+let TG_HESS_SLOTS: i64 = 528
 var TG_STATE2: [i64; 768] = [0; 768]
 // Order of the clone being lowered (1 or 2), meaningful while TG_ACTIVE >= 0.
 var TG_ACTIVE_ORD: i64 = 1
@@ -487,7 +507,7 @@ var TG_BOUND_FN: [i64; 16] = [0; 16]
 var TG_SITE_ORD: [i64; 256] = [1; 256]
 // Hessian entries of a site, 36 per site, indexed by so_hess_idx over its
 // tangents; -1 where the site has none.
-var TG_SITE_H: [i64; 9216] = [-1; 9216]
+var TG_SITE_H: [i64; 135168] = [-1; 135168]
 // > 0 while the argument of hessian_of / second_order_mean is being walked:
 // the call there may be its only evaluation (no recorded site).
 var TG_QUERY_DEPTH: i64 = 0
@@ -635,6 +655,13 @@ fn tg_clone_name(n: Name) -> Name with Mut, Panic, Div {
     ir_mangle_method_name(n, make_name("_fotan"))
 }
 
+// Slots of one output row of a clone's array: nf partials and the internal
+// variance, and at second order the Hessian over the tangents (upper triangle,
+// so_hess_idx) and the row's internal curvature term.
+fn tg_row_stride(nf: i64, ord: i64) -> i64 with Div {
+    nf + 1 + (if ord == 2 { (nf * (nf + 1)) / 2 + 1 } else { 0 })
+}
+
 // The clone of order `ord` (1: gradient row, 2: gradient row and Hessian).
 fn tg_clone_name_ord(n: Name, ord: i64) -> Name with Mut, Panic, Div {
     if ord == 2 { return ir_mangle_method_name(n, make_name("_fotan2")) }
@@ -694,6 +721,99 @@ fn tg_clone_name_idx(idx: i64, ord: i64) -> Name with Mut, Panic, Div {
     tg_name_push_int(n, idx)
 }
 
+// A `correlate` inside a tangent-clone callee is carried exactly only between
+// two quantities the callee itself measures: tg_store_row adds the cross terms
+// of the internal variance and of the curvature term. An operand that is not
+// `<measure local>.value` (a parameter, a value derived from one) would need
+// the caller's channels, so a call to such a callee is refused (tg_mark_drop).
+var TG_CR_M: [i64; 64] = [0; 64]
+var TG_CR_NM: i64 = 0
+var TG_CR_V: [i64; 64] = [0; 64]
+var TG_CR_NV: i64 = 0
+var TG_CR_P: [i64; 16] = [0; 16]
+var TG_CR_NP: i64 = 0
+var TG_CORRP: [i64; 768] = [-1; 768]
+
+fn tg_corr_in(arr: [i64; 64], n: i64, id: i64) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < n && i < 64 {
+        if arr[i as usize] == id { return true }
+        i = i + 1
+    }
+    false
+}
+
+fn tg_corr_is_param(id: i64) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < TG_CR_NP && i < 16 {
+        if TG_CR_P[i as usize] == id { return true }
+        i = i + 1
+    }
+    false
+}
+
+fn tg_corr_note_binding(n: Name, rhs: &Expr) with Mut, Panic, Div {
+    let id = ir_intern_name(n)
+    if (*rhs).kind == ExprKind::ExprCall {
+        match (*rhs).left {
+            Some(c) => {
+                if (*c).kind == ExprKind::ExprIdent && (ir_name_is_measure((*c).name) || ir_name_is_knowledge_ctor((*c).name)) {
+                    if TG_CR_NM < 64 && !tg_corr_is_param(id) {
+                        TG_CR_M[TG_CR_NM as usize] = id
+                        TG_CR_NM = TG_CR_NM + 1
+                    }
+                }
+            }
+            None => {}
+        }
+    }
+    if (*rhs).kind == ExprKind::ExprFieldAccess && ir_name_eq_lit((*rhs).name, "value") {
+        match (*rhs).left {
+            Some(o) => {
+                if (*o).kind == ExprKind::ExprIdent && tg_corr_in(TG_CR_M, TG_CR_NM, ir_intern_name((*o).name)) {
+                    if TG_CR_NV < 64 && !tg_corr_is_param(id) {
+                        TG_CR_V[TG_CR_NV as usize] = id
+                        TG_CR_NV = TG_CR_NV + 1
+                    }
+                }
+            }
+            None => {}
+        }
+    }
+}
+
+fn tg_corr_operand_internal(x: &Expr) -> bool with Mut, Panic, Div {
+    if (*x).kind == ExprKind::ExprIdent {
+        let id = ir_intern_name((*x).name)
+        return tg_corr_in(TG_CR_V, TG_CR_NV, id) && !tg_corr_is_param(id)
+    }
+    if (*x).kind == ExprKind::ExprFieldAccess && ir_name_eq_lit((*x).name, "value") {
+        match (*x).left {
+            Some(o) => {
+                if (*o).kind == ExprKind::ExprIdent {
+                    let id = ir_intern_name((*o).name)
+                    return tg_corr_in(TG_CR_M, TG_CR_NM, id) && !tg_corr_is_param(id)
+                }
+            }
+            None => {}
+        }
+    }
+    false
+}
+
+fn tg_corr_args_internal(e: &Expr) -> bool with Mut, Panic, Div {
+    match (*e).args {
+        Some(l0) => {
+            if !tg_corr_operand_internal(&(*l0).head) { return false }
+            match (*l0).tail {
+                Some(l1) => { return tg_corr_operand_internal(&(*l1).head) }
+                None => { return false }
+            }
+        }
+        None => { return false }
+    }
+}
+
 // Epistemic queries read the uncertainty of a value. Inside a clone the
 // parameters are unit channels, so a body that asks would compute a
 // different VALUE than the original; such a function keeps the original.
@@ -726,6 +846,19 @@ fn tg_expr_calls(e: &Expr, pred: i64, depth: i64) -> bool with Mut, Panic, Div {
             Some(c) => {
                 if (*c).kind == ExprKind::ExprIdent {
                     if pred == 0 && tg_name_is_query((*c).name) { return true }
+                    // pred 7: a query other than `correlate`, which the clone
+                    // carries itself (tg_store_row's cross terms).
+                    if pred == 7 && tg_name_is_query((*c).name) && !ir_name_eq_lit((*c).name, "correlate") { return true }
+                    if pred == 5 && ir_name_eq_lit((*c).name, "correlate") { return true }
+                    // pred 8: a call through a parameter, or through a local that
+                    // is not a closure literal (a function pointer, an alias).
+                    if pred == 8 {
+                        let cid = ir_intern_name((*c).name)
+                        if tg_corr_is_param(cid) || tg_corr_in(TG_CR_M, TG_CR_NM, cid) { return true }
+                    }
+                    // pred 4: a `correlate` whose operands are not both
+                    // `<measure local>.value` (or a local bound to it).
+                    if pred == 4 && ir_name_eq_lit((*c).name, "correlate") && !tg_corr_args_internal(&(*e)) { return true }
                     if pred == 1 && (ir_name_is_measure((*c).name) || ir_name_is_knowledge_ctor((*c).name)) { return true }
                 }
             }
@@ -813,6 +946,23 @@ fn tg_stmts_call(opt: &Option<Box<StmtList>>, pred: i64, depth: i64) -> bool wit
                             Some(vx) => { if (*vx).kind == ExprKind::ExprStructLit { return true } }
                             None => {}
                         }
+                    }
+                }
+                if pred == 9 && ((*sl).head.kind == StmtKind::StmtLet || (*sl).head.kind == StmtKind::StmtVar) {
+                    var is_clo = false
+                    match (*sl).head.expr {
+                        Some(rx) => { if (*rx).kind == ExprKind::ExprClosure { is_clo = true } }
+                        None => {}
+                    }
+                    if !is_clo && TG_CR_NM < 64 {
+                        TG_CR_M[TG_CR_NM as usize] = ir_intern_name((*sl).head.name)
+                        TG_CR_NM = TG_CR_NM + 1
+                    }
+                }
+                if pred == 6 && ((*sl).head.kind == StmtKind::StmtLet || (*sl).head.kind == StmtKind::StmtVar) {
+                    match (*sl).head.expr {
+                        Some(rx) => { tg_corr_note_binding((*sl).head.name, &(*rx)) }
+                        None => {}
                     }
                 }
                 match (*sl).head.expr {
@@ -904,6 +1054,11 @@ fn tg_stmts_nonstraight(opt: &Option<Box<StmtList>>, depth: i64) -> bool with Mu
 // transitive may-draw question.
 var TG_CALLEES: [Name; 33] = [ir_empty_name(); 33]
 var TG_NCALLEES: i64 = 0
+// Methods called (by short name, a method call or `Type::f`), and whether the
+// body calls something that is not a name (a field, a call result).
+var TG_MCALLEES: [Name; 33] = [ir_empty_name(); 33]
+var TG_NMCALLEES: i64 = 0
+var TG_OPAQUE_CALL: i64 = 0
 
 fn tg_expr_callees(e: &Expr, depth: i64) with Mut, Panic, Div {
     if depth > 96 { return }
@@ -914,9 +1069,19 @@ fn tg_expr_callees(e: &Expr, depth: i64) with Mut, Panic, Div {
                     TG_CALLEES[TG_NCALLEES as usize] = (*c).name
                     TG_NCALLEES = TG_NCALLEES + 1
                 }
+                // `Type::f(..)`: resolved by the short name of the method.
+                if (*c).kind == ExprKind::ExprPath && TG_NMCALLEES <= 32 {
+                    TG_MCALLEES[TG_NMCALLEES as usize] = ir_path_last_name((*c).path)
+                    TG_NMCALLEES = TG_NMCALLEES + 1
+                }
+                if (*c).kind != ExprKind::ExprIdent && (*c).kind != ExprKind::ExprPath { TG_OPAQUE_CALL = 1 }
             }
             None => {}
         }
+    }
+    if (*e).kind == ExprKind::ExprMethodCall && TG_NMCALLEES <= 32 {
+        TG_MCALLEES[TG_NMCALLEES as usize] = (*e).name
+        TG_NMCALLEES = TG_NMCALLEES + 1
     }
     match (*e).left {
         Some(x) => { tg_expr_callees(&(*x), depth + 1) }
@@ -1029,6 +1194,257 @@ fn tg_may_draw(idx: i64, depth: i64) -> bool with Mut, Panic, Div {
     false
 }
 
+// 0: neither the callee nor anything it calls correlates; 1: every `correlate`
+// is between quantities measured inside the call (carried exactly); 2: some
+// `correlate` involves a parameter-derived value, here or in a cloned callee.
+fn tg_corr_class(idx0: i64, depth: i64) -> i64 with Mut, Panic, Div {
+    let idx = tg_base_of(idx0)
+    if idx < 0 || idx >= TG_COUNT { return 0 }
+    if TG_CORRP[idx as usize] >= 0 { return TG_CORRP[idx as usize] }
+    if depth > 16 { return 2 }
+    let fd = tg_def_at(idx)
+    TG_CORRP[idx as usize] = 0
+    var cls: i64 = 0
+    if tg_stmts_call(&fd.body.stmts, 5, 0) {
+        cls = 1
+        TG_CR_NM = 0
+        TG_CR_NV = 0
+        TG_CR_NP = 0
+        var pc = &fd.params
+        while true {
+            match *pc {
+                Some(pl) => {
+                    if TG_CR_NP < 16 {
+                        TG_CR_P[TG_CR_NP as usize] = ir_intern_name((*pl).head.name)
+                        TG_CR_NP = TG_CR_NP + 1
+                    }
+                    pc = &(*pl).tail
+                }
+                None => break
+            }
+        }
+        tg_stmts_call(&fd.body.stmts, 6, 0)
+        if tg_stmts_call(&fd.body.stmts, 4, 0) { cls = 2 }
+    }
+    if cls < 2 {
+        TG_NCALLEES = 0
+        tg_stmts_callees(&fd.body.stmts, 0)
+        let nn = TG_NCALLEES
+        if nn > 32 {
+            TG_CORRP[idx as usize] = 2
+            return 2
+        }
+        var ids: [i64; 32] = [0; 32]
+        var j0: i64 = 0
+        while j0 < nn {
+            ids[j0 as usize] = ir_intern_name(TG_CALLEES[j0 as usize])
+            j0 = j0 + 1
+        }
+        var j: i64 = 0
+        while j < nn {
+            let sub = tg_find(ids[j as usize])
+            if sub >= 0 && sub != idx {
+                let sc = tg_corr_class(sub, depth + 1)
+                if sc == 2 { cls = 2 }
+                if sc == 1 && cls == 0 { cls = 1 }
+            }
+            j = j + 1
+        }
+    }
+    TG_CORRP[idx as usize] = cls
+    cls
+}
+
+// Every function the module declares, with whether its body measures directly
+// and which names it calls (recorded at the registry's preregistration pass).
+// A call to a function with no tangent clone whose body can draw a measurement
+// (directly or through what it calls) loses that measurement's uncertainty when
+// the arguments are certain, because nothing then asks the call-site analysis
+// for it: such a call reached by a query is refused (tg_unreg_draws_call).
+var TG_FN_N: i64 = 0
+var TG_FN_ID: [i64; 4096] = [0; 4096]
+var TG_FN_DRAW: [i64; 4096] = [0; 4096]
+var TG_FN_NC: [i64; 4096] = [0; 4096]
+var TG_FN_CAL: [i64; 131072] = [0; 131072]
+var TG_FN_M1: [i64; 4096] = [-1; 4096]
+var TG_FN_M2: [i64; 4096] = [-1; 4096]
+
+var TG_NOTE_SHORT: i64 = 0 - 1
+var TG_FN_SHORT: [i64; 4096] = [0 - 1; 4096]
+var TG_FN_NMC: [i64; 4096] = [0; 4096]
+var TG_FN_MCAL: [i64; 65536] = [0; 65536]
+
+fn tg_fn_note(name: Name, fd: &FnDef) with Mut, Panic, Div {
+    if TG_FN_N >= 4096 { return }
+    let k = TG_FN_N
+    TG_FN_ID[k as usize] = ir_intern_name(name)
+    TG_FN_SHORT[k as usize] = TG_NOTE_SHORT
+    TG_FN_M1[k as usize] = 0 - 1
+    TG_FN_M2[k as usize] = 0 - 1
+    TG_FN_DRAW[k as usize] = if tg_stmts_call(&(*fd).body.stmts, 1, 0) { 1 } else { 0 }
+    TG_NCALLEES = 0
+    TG_NMCALLEES = 0
+    TG_OPAQUE_CALL = 0
+    tg_stmts_callees(&(*fd).body.stmts, 0)
+    var n = TG_NCALLEES
+    var nm = TG_NMCALLEES
+    if n > 32 || nm > 16 {
+        TG_FN_DRAW[k as usize] = 1
+        n = 0
+        nm = 0
+    }
+    // A call through a callable the body did not build (a parameter, a local
+    // that is not a closure literal, a field or call result) can reach anything,
+    // unless the function is a HOF the specialisation resolves at its call sites.
+    if TG_OPAQUE_CALL == 1 && !lower_hof_transparent_known(name) { TG_FN_DRAW[k as usize] = 1 }
+    if TG_FN_DRAW[k as usize] == 0 {
+        TG_CR_NM = 0
+        TG_CR_NV = 0
+        TG_CR_NP = 0
+        var pc = &(*fd).params
+        while true {
+            match *pc {
+                Some(pl) => {
+                    if TG_CR_NP < 16 {
+                        TG_CR_P[TG_CR_NP as usize] = ir_intern_name((*pl).head.name)
+                        TG_CR_NP = TG_CR_NP + 1
+                    }
+                    pc = &(*pl).tail
+                }
+                None => break
+            }
+        }
+        tg_stmts_call(&(*fd).body.stmts, 9, 0)
+        if tg_stmts_call(&(*fd).body.stmts, 8, 0) && !lower_hof_transparent_known(name) { TG_FN_DRAW[k as usize] = 1 }
+    }
+    TG_FN_NC[k as usize] = n
+    TG_FN_NMC[k as usize] = nm
+    var i: i64 = 0
+    while i < n {
+        TG_FN_CAL[(k * 32 + i) as usize] = ir_intern_name(TG_CALLEES[i as usize])
+        i = i + 1
+    }
+    var im: i64 = 0
+    while im < nm {
+        TG_FN_MCAL[(k * 16 + im) as usize] = ir_intern_name(TG_MCALLEES[im as usize])
+        im = im + 1
+    }
+    TG_FN_N = k + 1
+}
+
+fn tg_fn_slot(id: i64) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < TG_FN_N {
+        if TG_FN_ID[i as usize] == id { return i }
+        i = i + 1
+    }
+    0 - 1
+}
+
+// Can a call to function `id` make a measurement, directly or transitively?
+fn tg_fn_draws(id: i64, depth: i64) -> bool with Mut, Panic, Div {
+    let k = tg_fn_slot(id)
+    if k < 0 { return false }
+    if TG_FN_M1[k as usize] >= 0 { return TG_FN_M1[k as usize] == 1 }
+    if TG_FN_DRAW[k as usize] == 1 {
+        TG_FN_M1[k as usize] = 1
+        return true
+    }
+    if depth > 16 { return true }
+    TG_FN_M1[k as usize] = 0
+    var i: i64 = 0
+    while i < TG_FN_NC[k as usize] {
+        if tg_fn_draws(TG_FN_CAL[(k * 32 + i) as usize], depth + 1) {
+            TG_FN_M1[k as usize] = 1
+            return true
+        }
+        i = i + 1
+    }
+    var im: i64 = 0
+    while im < TG_FN_NMC[k as usize] {
+        if tg_method_draws(TG_FN_MCAL[(k * 16 + im) as usize], depth + 1) {
+            TG_FN_M1[k as usize] = 1
+            return true
+        }
+        im = im + 1
+    }
+    false
+}
+
+// Can any method (or associated function) with this short name draw? The
+// receiver type is not known from a body alone, so every impl method with the
+// name counts.
+fn tg_method_draws(short: i64, depth: i64) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < TG_FN_N {
+        if TG_FN_SHORT[i as usize] == short && tg_fn_draws(TG_FN_ID[i as usize], depth) { return true }
+        i = i + 1
+    }
+    false
+}
+
+// A method call with no clone that can draw, by short name (receiver not a local).
+fn tg_unreg_method_short_draws(name: Name) -> bool with Mut, Panic, Div {
+    let short = ir_intern_name(name)
+    var i: i64 = 0
+    while i < TG_FN_N {
+        if TG_FN_SHORT[i as usize] == short && tg_fn_draws(TG_FN_ID[i as usize], 0) { return true }
+        i = i + 1
+    }
+    false
+}
+
+// A call to `name` that reached the end of the call-site analysis (no clone
+// served it: none exists, or it is a HOF whose function argument could not be
+// resolved) and can draw a measurement.
+fn tg_unreg_draws_call(name: Name) -> bool with Mut, Panic, Div {
+    tg_fn_draws(ir_intern_name(name), 0)
+}
+
+// Does function `id` (a cloned one) call, transitively, a function with no
+// clone that can draw?
+fn tg_unreg_reach(id: i64, depth: i64) -> bool with Mut, Panic, Div {
+    let k = tg_fn_slot(id)
+    if k < 0 { return false }
+    if TG_FN_M2[k as usize] >= 0 { return TG_FN_M2[k as usize] == 1 }
+    if depth > 16 { return true }
+    TG_FN_M2[k as usize] = 0
+    var i: i64 = 0
+    while i < TG_FN_NC[k as usize] {
+        let c = TG_FN_CAL[(k * 32 + i) as usize]
+        var hit = false
+        if tg_find(c) < 0 {
+            hit = tg_fn_draws(c, 0)
+        } else {
+            hit = tg_unreg_reach(c, depth + 1)
+        }
+        if hit {
+            TG_FN_M2[k as usize] = 1
+            return true
+        }
+        i = i + 1
+    }
+    var im: i64 = 0
+    while im < TG_FN_NMC[k as usize] {
+        let sh = TG_FN_MCAL[(k * 16 + im) as usize]
+        var j: i64 = 0
+        while j < TG_FN_N {
+            if TG_FN_SHORT[j as usize] == sh {
+                let cid = TG_FN_ID[j as usize]
+                var h2 = false
+                if tg_find(cid) < 0 { h2 = tg_fn_draws(cid, 0) } else { h2 = tg_unreg_reach(cid, depth + 1) }
+                if h2 {
+                    TG_FN_M2[k as usize] = 1
+                    return true
+                }
+            }
+            j = j + 1
+        }
+        im = im + 1
+    }
+    false
+}
+
 // The last statement of a struct-returning body: a struct literal, a local, or a
 // `return` (whose operand tg_stmts_call pred 3 has checked).
 fn tg_body_tail_is_struct_shape(opt: &Option<Box<StmtList>>) -> bool with Mut, Panic, Div {
@@ -1087,6 +1503,23 @@ fn tg_chain_expr_e(base: Expr, sp: Span, depth: i64, id0: i64, id1: i64, id2: i6
 // from such a walk is TG_TAINT, so the mark follows it into later queries.
 // An epistemic query that ends with TG_DROP set is refused at compile time.
 var TG_DROP: i64 = 0
+// #3547: mutable f64 locals declared while no channel existed yet (a `var`
+// before the first measure()). They have no private slots, so a loop-carried
+// update through them lost its sensitivity and Hessian. Each is recorded here
+// (name id, declaration loop depth) and given its slots at the first loop entry
+// after a channel exists (fo_extend_rows_for_loop).
+var FO_LATE_N: i64 = 0
+var FO_LATE_NAME: [i64; 64] = [0; 64]
+var FO_LATE_DEPTH: [i64; 64] = [0; 64]
+var FO_LATE_SCOPE: [i64; 64] = [0; 64]
+// The scope depth at which each loop depth was entered, so a local can be told
+// to be declared outside (depth <= entry) or inside (deeper) a given loop.
+var FO_LOOP_SCOPE: [i64; 64] = [0; 64]
+// Per bind row: 1 once anything non-zero may have been written to the row's
+// residual slot (compile-time, in lowering order). A straight-line read of a
+// local whose residual was never written adds no residual channel.
+var FO_RESID_NZ: [i64; 128] = [0; 128]
+var FO_LATE_DONE: [i64; 64] = [0; 64]
 var TG_DROP_NAME: Name = ir_empty_name()
 var TG_TAINT_N: i64 = 0
 var TG_TAINT: [i64; 128] = [0; 128]
@@ -1099,6 +1532,30 @@ var TG_FNALIAS_FN: [i64; 32] = [0; 32]
 fn tg_mark_drop(callee: Name) with Mut, Panic, Div {
     if TG_DROP == 0 { TG_DROP_NAME = callee }
     TG_DROP = 1
+}
+
+// A `var` declared before the first measure() that has not been given its
+// private slots (see fo_late_alloc) and is assigned inside a loop it was
+// declared outside of from a quantity measured outside that loop: the update is
+// loop-carried and correlated across iterations, which the rebind of a
+// slotless local cannot carry. (Straight-line and branch-merged updates are
+// carried by the rebind, as for any local.)
+fn fo_late_pending_in_loop(n: Name, rhs: &Expr, lo: &Lowerer) -> bool with Mut, Panic, Div, Alloc {
+    let id = ir_intern_name(n)
+    var i: i64 = 0
+    while i < FO_LATE_N {
+        if FO_LATE_NAME[i as usize] == id && FO_LATE_DONE[i as usize] == 0 && (*lo).loop_depth > FO_LATE_DEPTH[i as usize] {
+            // Only an update that reads a quantity measured outside the loop is
+            // wrong without slots (the same quantity every iteration, so the
+            // iterations are correlated). A measurement made inside the loop is
+            // a fresh independent quantity each iteration and the scalar
+            // variance adds them correctly.
+            let s_out = FO_LOOP_SCOPE[(FO_LATE_DEPTH[i as usize] + 1) as usize]
+            return (*lo).fo_reads_outer_uncertain(rhs, n, s_out, 0)
+        }
+        i = i + 1
+    }
+    false
 }
 
 fn tg_tainted(n: Name) -> bool with Mut, Panic, Div {
@@ -1963,13 +2420,13 @@ var FO_SIGMA_REG: [i64; 32] = [-1; 32]
 // is the same quantity on every iteration and gets a row.
 var FO_CH_DEPTH: [i64; 32] = [0; 32]
 
-var FO_COV_RHO: [f64; 64] = [0.0; 64]
+var FO_COV_RHO: [f64; 1024] = [0.0; 1024]
 // Runtime rho, as a register. -1 means the pair uses the f64 table above.
 // A fitted correlation is not a literal, and baking 0.0 there asserts independence.
-var FO_COV_RHO_REG: [i64; 64] = [-1; 64]
+var FO_COV_RHO_REG: [i64; 1024] = [-1; 1024]
 // 1 only after correlate stored a register. A zero register is a real reg,
 // so absence cannot be encoded as 0 or every variance emits the cross term.
-var FO_COV_RHO_HAS: [i64; 64] = [0; 64]
+var FO_COV_RHO_HAS: [i64; 1024] = [0; 1024]
 
 fn fo_cov_rho_idx(i: i64, j: i64) -> i64 with Div {
     var a = i
@@ -1978,11 +2435,11 @@ fn fo_cov_rho_idx(i: i64, j: i64) -> i64 with Div {
         a = j
         b = i
     }
-    a * 8 + b
+    a * 32 + b
 }
 
 fn fo_cov_rho_set(i: i64, j: i64, rho: f64) with Mut, Panic, Div, IO {
-    if i < 0 || j < 0 || i >= 8 || j >= 8 {
+    if i < 0 || j < 0 || i >= 32 || j >= 32 {
         return
     }
     if i == j {
@@ -1997,7 +2454,7 @@ fn fo_cov_rho_set(i: i64, j: i64, rho: f64) with Mut, Panic, Div, IO {
 }
 
 fn fo_cov_rho_get(i: i64, j: i64) -> f64 with Mut, Panic, Div {
-    if i < 0 || j < 0 || i >= 8 || j >= 8 {
+    if i < 0 || j < 0 || i >= 32 || j >= 32 {
         return 0.0
     }
     if i == j {
@@ -2007,7 +2464,7 @@ fn fo_cov_rho_get(i: i64, j: i64) -> f64 with Mut, Panic, Div {
 }
 
 fn fo_cov_rho_reg_set(i: i64, j: i64, reg: i64) with Mut, Panic, Div, IO {
-    if i < 0 || j < 0 || i >= 8 || j >= 8 {
+    if i < 0 || j < 0 || i >= 32 || j >= 32 {
         return
     }
     if i == j {
@@ -2027,7 +2484,7 @@ fn fo_cov_rho_reg_set(i: i64, j: i64, reg: i64) with Mut, Panic, Div, IO {
 }
 
 fn fo_cov_rho_reg_get(i: i64, j: i64) -> i64 with Mut, Panic, Div {
-    if i < 0 || j < 0 || i >= 8 || j >= 8 {
+    if i < 0 || j < 0 || i >= 32 || j >= 32 {
         return 0 - 1
     }
     if i == j {
@@ -2037,7 +2494,7 @@ fn fo_cov_rho_reg_get(i: i64, j: i64) -> i64 with Mut, Panic, Div {
 }
 
 fn fo_cov_rho_live(i: i64, j: i64) -> bool with Mut, Panic, Div {
-    if i < 0 || j < 0 || i >= 8 || j >= 8 || i == j {
+    if i < 0 || j < 0 || i >= 32 || j >= 32 || i == j {
         return false
     }
     if FO_COV_RHO_HAS[fo_cov_rho_idx(i, j) as usize] != 0 {
@@ -2055,7 +2512,7 @@ var FO_FIELD_SENS_KEY: [i64; 64] = [0; 64]
 var FO_FIELD_SENS: [i64; 2048] = [-1; 2048]
 // Hessian row of a field whose tangent clone carried one (struct returns at
 // second order): 36 per slot of FO_FIELD_SENS, valid where the flag is 1.
-var FO_FIELD_HESS: [i64; 2304] = [-1; 2304]
+var FO_FIELD_HESS: [i64; 33792] = [-1; 33792]
 var FO_FIELD_HESS_SET: [i64; 64] = [0; 64]
 
 // A `let r = &p` (or `let s = r`) names the same struct local for field
@@ -3873,7 +4330,7 @@ struct LowerBigArrays {
     array_elem_float_regs: [i64; 512],
     variance_base_regs: [i64; 1024],
     variance_value_regs: [i64; 1024],
-    so_bind_hess: [i64; 576],
+    so_bind_hess: [i64; 67584],
 }
 
 fn empty_lower_big_arrays() -> LowerBigArrays with Mut {
@@ -3881,7 +4338,7 @@ fn empty_lower_big_arrays() -> LowerBigArrays with Mut {
         array_elem_float_regs: [IR_INVALID_REG; 512],
         variance_base_regs: [IR_INVALID_REG; 1024],
         variance_value_regs: [IR_INVALID_REG; 1024],
-        so_bind_hess: [-1; 576],
+        so_bind_hess: [-1; 67584],
     }
 }
 
@@ -3943,7 +4400,7 @@ struct Lowerer {
     // H = 0, so the common case costs no registers at all. Reuses the FO bind
     // rows so a local carries its Hessian exactly as it carries its gradient.
     so_enabled: bool,
-    so_expr_hess: [i64; 36],
+    so_expr_hess: [i64; 528],
     // Inter-procedural FO: pure-fn transfer table (survives across function lowers).
     // kind: 0=none 1=id(p0) 2=scale(lit*p0) 3=add(p0+p1) 4=mul(p0*p1) 5=fwd(g)
     fo_xfer_count: i64,
@@ -4496,7 +4953,7 @@ fn lowerer_new() -> Lowerer with Alloc, Mut, Panic, Div {
         fo_bind_count: 0,
         fo_bind: Box::new(empty_lower_fo_bind_table()),
         so_enabled: false,
-        so_expr_hess: [-1; 36],
+        so_expr_hess: [-1; 528],
         fo_xfer_count: 0,
         fo_xfer_kind: [0; 64],
         fo_xfer_lit: [0.0; 64],
@@ -5128,7 +5585,7 @@ fn lowerer_new_from_program_summary(summary: &IrProgramSummary, epistemic: &IrEp
         fo_bind_count: 0,
         fo_bind: Box::new(empty_lower_fo_bind_table()),
         so_enabled: false,
-        so_expr_hess: [-1; 36],
+        so_expr_hess: [-1; 528],
         fo_xfer_count: 0,
         fo_xfer_kind: [0; 64],
         fo_xfer_lit: [0.0; 64],
@@ -5191,7 +5648,7 @@ fn lowerer_new_from_program_summary_owned(summary: IrProgramSummary, epistemic: 
         fo_bind_count: 0,
         fo_bind: Box::new(empty_lower_fo_bind_table()),
         so_enabled: false,
-        so_expr_hess: [-1; 36],
+        so_expr_hess: [-1; 528],
         fo_xfer_count: 0,
         fo_xfer_kind: [0; 64],
         fo_xfer_lit: [0.0; 64],
@@ -5258,7 +5715,7 @@ fn lowerer_from_acc_module(module: Box<IrModule>) -> Lowerer with Alloc, Mut, Pa
         fo_bind_count: 0,
         fo_bind: Box::new(empty_lower_fo_bind_table()),
         so_enabled: false,
-        so_expr_hess: [-1; 36],
+        so_expr_hess: [-1; 528],
         fo_xfer_count: 0,
         fo_xfer_kind: [0; 64],
         fo_xfer_lit: [0.0; 64],
@@ -9847,11 +10304,17 @@ fn lowerer_lower_fn_item_mut(
     // path (the miscompile it measured is above); #2143 moved the channel table
     // (fo_nchan / fo_sigma2 / fo_bind_count) here too and removed the dead function.
     var fo_cri: i64 = 0
-    while fo_cri < 64 {
+    while fo_cri < 1024 {
         FO_COV_RHO[fo_cri as usize] = 0.0
         FO_COV_RHO_REG[fo_cri as usize] = 0 - 1
         FO_COV_RHO_HAS[fo_cri as usize] = 0
         fo_cri = fo_cri + 1
+    }
+    FO_LATE_N = 0
+    var fo_rz: i64 = 0
+    while fo_rz < 128 {
+        FO_RESID_NZ[fo_rz as usize] = 0
+        fo_rz = fo_rz + 1
     }
     // #2143 (sibling of #2145): the FO channel table is keyed by vreg, which restarts
     // per function. The *mut port left its reset only in the (now-removed) dead
@@ -9865,6 +10328,7 @@ fn lowerer_lower_fn_item_mut(
     // for parity.)
     (*lo).fo_nchan = 0
     (*lo).fo_bind_count = 0
+    SO_ROWS_SP = 0
     // The live expression sensitivities (fo_expr_sens / fo_pending_sens) and
     // Hessian row (so_expr_hess) hold VREGS of the function that set them. Left
     // over, a variance path that returns -1 without clearing them hands the next
@@ -9881,7 +10345,7 @@ fn lowerer_lower_fn_item_mut(
         fo_sri = fo_sri + 1
     }
     var so_hri: i64 = 0
-    while so_hri < 36 {
+    while so_hri < 528 {
         (*lo).so_expr_hess[so_hri as usize] = -1
         so_hri = so_hri + 1
     }
@@ -10567,6 +11031,7 @@ fn lowerer_fo_preregister_pure_fns_mut(
                             // Tangent-clone registry: here, before any module's
                             // body lowering opens its Box-arena window, so the
                             // TgNode outlives every module that calls it.
+                            TG_NOTE_SHORT = 0 - 1
                             if TG_ACTIVE < 0 { tg_note(head.name, &(*fd), ir_empty_name()) }
                             let lo_x = (*lo).fo_register_pure_fn_transfer(head.name, &(*fd))
                             (*lo) = lo_x
@@ -10587,7 +11052,9 @@ fn lowerer_fo_preregister_pure_fns_mut(
                                             match *mfd_opt {
                                                 Some(fd) => {
                                                     let mangled = ir_mangle_method_name(head.name, mhead.name)
+                                                    TG_NOTE_SHORT = ir_intern_name(mhead.name)
                                                     if TG_ACTIVE < 0 { tg_note(mangled, &(*fd), head.name) }
+                                                    TG_NOTE_SHORT = 0 - 1
                                                     let lo_x = (*lo).fo_register_pure_fn_transfer(mangled, &(*fd))
                                                     (*lo) = lo_x
                                                 }
@@ -11543,6 +12010,7 @@ fn lower_type_expr_is_integer(te: &TypeExpr) -> bool with Mut, Panic, Div {
 // 4 function.
 fn tg_note(name: Name, fd: &FnDef, self_type: Name) with Mut, Panic, Div, Alloc {
     if (*fd).is_extern || (*fd).is_kernel { return }
+    tg_fn_note(name, fd)
     if TG_COUNT >= TG_MAX { return }
     var ret_kind: i64 = 0
     var ret_type: i64 = 0
@@ -11615,7 +12083,7 @@ fn tg_note(name: Name, fd: &FnDef, self_type: Name) with Mut, Panic, Div, Alloc 
         }
     }
     if nf <= 0 && nstruct <= 0 { return }
-    if tg_stmts_call(&(*fd).body.stmts, 0, 0) { return }
+    if tg_stmts_call(&(*fd).body.stmts, 7, 0) { return }
     if ret_kind == 1 {
         // Every return must be a struct literal or a local, and the tail too.
         if tg_stmts_call(&(*fd).body.stmts, 3, 0) { return }
@@ -11636,6 +12104,7 @@ fn tg_note(name: Name, fd: &FnDef, self_type: Name) with Mut, Panic, Div, Alloc 
     TG_STATE2[idx as usize] = 0
     TG_PREFER[idx as usize] = if tg_stmts_nonstraight(&(*fd).body.stmts, 0) { 1 } else { 0 }
     TG_DRAW[idx as usize] = 0 - 1
+    TG_CORRP[idx as usize] = 0 - 1
     TG_HEAD = Some(Box::new(TgNode { idx: idx, def: *fd, next: TG_HEAD }))
     TG_COUNT = idx + 1
 }
@@ -17489,11 +17958,38 @@ impl Lowerer {
     // Row `row` of the out-array: out[row*(nf+1) + k] = d/d tangent_k for each
     // parameter tangent k (sens[channel of k]), and out[row*(nf+1) + nf] = the
     // variance that comes from channels that are not parameter channels.
+    // rho_ij * sigma_i * sigma_j for two channels with variance registers
+    // `vi`, `vj` (sigma = sqrt of the product of the two variances, as the
+    // second_order_mean walk forms it). Takes the registers, not the channel
+    // indices, so each call reads its own pair.
+    fn tg_cov_reg(self, ci: i64, cj: i64, vi: i64, vj: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        let epp = lo.fresh_reg()
+        lo = epp.0
+        lo = lo.emit(ir_binop_typed(epp.1, vi, BinaryOp::OpMul, vj, true, true))
+        lo = lo.emit(ir_mark_float_reg(epp.1))
+        let esq = lowerer_find_or_add_fn_id_mut(&! lo, make_name("sqrt"))
+        let eargs: Option<Box<IrRegList>> = Some(Box::new(ir_reg_list_single(epp.1)))
+        let edp = lo.fresh_reg()
+        lo = edp.0
+        var eci = ir_call(edp.1, esq, make_name("sqrt"), eargs, 1)
+        eci.imm_flags = IR_FLOAT_REG_MARKER_FLAG
+        lo = lo.emit(eci)
+        lo = lo.emit(ir_mark_float_reg(edp.1))
+        let rp = lo.fo_emit_rho_reg(ci, cj)
+        lo = rp.0
+        let u = lo.fresh_reg()
+        lo = u.0
+        lo = lo.emit(ir_binop_typed(u.1, edp.1, BinaryOp::OpMul, rp.1, true, true))
+        lo = lo.emit(ir_mark_float_reg(u.1))
+        (lo, u.1)
+    }
+
     fn tg_store_row(self, sens: [i64; 32], row: i64) -> Lowerer with Mut, Panic, Div, Alloc, IO {
         var lo = self
         // The body's own Hessian row, for the hyper-dual clone below.
         let hess = lo.so_expr_hess
-        let base = row * (TG_NPCH + 1 + (if TG_ACTIVE_ORD == 2 { TG_HESS_SLOTS } else { 0 }))
+        let base = row * tg_row_stride(TG_NPCH, TG_ACTIVE_ORD)
         let z = lo.emit_f64_const(0.0)
         lo = z.0
         var k: i64 = 0
@@ -17504,7 +18000,7 @@ impl Lowerer {
             lo = lo.emit(ir_index_set(TG_OUT_REG, ip.1, if s >= 0 { s } else { z.1 }))
             k = k + 1
         }
-        if TG_ACTIVE_ORD == 2 && TG_NPCH <= 8 {
+        if TG_ACTIVE_ORD == 2 {
             // Hyper-dual clone: d2 e / d p_a d p_b, the entry of the body's own
             // Hessian row at the two parameter channels (a structural zero
             // stores 0.0).
@@ -17521,6 +18017,73 @@ impl Lowerer {
                 }
                 ha = ha + 1
             }
+            // The internal curvature term: sum over the channels that are not
+            // parameter channels (measurements made inside the call, or in a
+            // callee's own call) of H_mm * sigma_m^2. The caller adds it as a
+            // curvature-only channel, so second_order_mean reads it exactly.
+            var macc = z.1
+            var mc: i64 = 0
+            while mc < lo.fo_nchan && mc < 32 {
+                var is_p2 = false
+                var q2: i64 = 0
+                while q2 < TG_NPCH {
+                    if TG_PARAM_CH[q2 as usize] == mc { is_p2 = true }
+                    q2 = q2 + 1
+                }
+                let hm = hess[lo.so_hess_idx(mc, mc) as usize]
+                let sg = lo.fo_sigma2[mc as usize]
+                if !is_p2 && hm >= 0 && sg >= 0 {
+                    let mt = lo.fresh_reg()
+                    lo = mt.0
+                    lo = lo.emit(ir_binop_typed(mt.1, hm, BinaryOp::OpMul, sg, true, true))
+                    lo = lo.emit(ir_mark_float_reg(mt.1))
+                    let ma = lo.fresh_reg()
+                    lo = ma.0
+                    lo = lo.emit(ir_binop_typed(ma.1, macc, BinaryOp::OpAdd, mt.1, true, true))
+                    lo = lo.emit(ir_mark_float_reg(ma.1))
+                    macc = ma.1
+                }
+                mc = mc + 1
+            }
+            // Correlated internal pairs: 2 * H_ij * rho_ij * sigma_i * sigma_j
+            // (the mean term is half of this sum, with the diagonal's).
+            var mi: i64 = 0
+            while mi < lo.fo_nchan && mi < 32 {
+                var mj: i64 = mi + 1
+                while mj < lo.fo_nchan && mj < 32 {
+                    var pi_ = false
+                    var q3: i64 = 0
+                    while q3 < TG_NPCH {
+                        if TG_PARAM_CH[q3 as usize] == mi || TG_PARAM_CH[q3 as usize] == mj { pi_ = true }
+                        q3 = q3 + 1
+                    }
+                    let hij = hess[lo.so_hess_idx(mi, mj) as usize]
+                    let vi = lo.fo_sigma2[mi as usize]
+                    let vj = lo.fo_sigma2[mj as usize]
+                    if !pi_ && hij >= 0 && vi >= 0 && vj >= 0 && fo_cov_rho_live(mi, mj) {
+                        let cv = lo.tg_cov_reg(mi, mj, vi, vj)
+                        lo = cv.0
+                        let t1 = lo.fresh_reg()
+                        lo = t1.0
+                        lo = lo.emit(ir_binop_typed(t1.1, hij, BinaryOp::OpMul, cv.1, true, true))
+                        lo = lo.emit(ir_mark_float_reg(t1.1))
+                        let t2 = lo.fresh_reg()
+                        lo = t2.0
+                        lo = lo.emit(ir_binop_typed(t2.1, t1.1, BinaryOp::OpAdd, t1.1, true, true))
+                        lo = lo.emit(ir_mark_float_reg(t2.1))
+                        let t3 = lo.fresh_reg()
+                        lo = t3.0
+                        lo = lo.emit(ir_binop_typed(t3.1, macc, BinaryOp::OpAdd, t2.1, true, true))
+                        lo = lo.emit(ir_mark_float_reg(t3.1))
+                        macc = t3.1
+                    }
+                    mj = mj + 1
+                }
+                mi = mi + 1
+            }
+            let mslot = lo.emit_i64_const(base + TG_NPCH + 1 + (TG_NPCH * (TG_NPCH + 1)) / 2)
+            lo = mslot.0
+            lo = lo.emit(ir_index_set(TG_OUT_REG, mslot.1, macc))
         }
         var acc = z.1
         var ch: i64 = 0
@@ -17549,6 +18112,46 @@ impl Lowerer {
                 acc = a.1
             }
             ch = ch + 1
+        }
+        // Correlated internal pairs: 2 * s_i * s_j * rho_ij * sigma_i * sigma_j.
+        var ci2: i64 = 0
+        while ci2 < lo.fo_nchan && ci2 < 32 {
+            var cj2: i64 = ci2 + 1
+            while cj2 < lo.fo_nchan && cj2 < 32 {
+                var pp = false
+                var q4: i64 = 0
+                while q4 < TG_NPCH {
+                    if TG_PARAM_CH[q4 as usize] == ci2 || TG_PARAM_CH[q4 as usize] == cj2 { pp = true }
+                    q4 = q4 + 1
+                }
+                let si = sens[ci2 as usize]
+                let sj = sens[cj2 as usize]
+                let vi2 = lo.fo_sigma2[ci2 as usize]
+                let vj2 = lo.fo_sigma2[cj2 as usize]
+                if !pp && si >= 0 && sj >= 0 && vi2 >= 0 && vj2 >= 0 && fo_cov_rho_live(ci2, cj2) {
+                    let cv2 = lo.tg_cov_reg(ci2, cj2, vi2, vj2)
+                    lo = cv2.0
+                    let w1 = lo.fresh_reg()
+                    lo = w1.0
+                    lo = lo.emit(ir_binop_typed(w1.1, si, BinaryOp::OpMul, sj, true, true))
+                    lo = lo.emit(ir_mark_float_reg(w1.1))
+                    let w2 = lo.fresh_reg()
+                    lo = w2.0
+                    lo = lo.emit(ir_binop_typed(w2.1, w1.1, BinaryOp::OpMul, cv2.1, true, true))
+                    lo = lo.emit(ir_mark_float_reg(w2.1))
+                    let w3 = lo.fresh_reg()
+                    lo = w3.0
+                    lo = lo.emit(ir_binop_typed(w3.1, w2.1, BinaryOp::OpAdd, w2.1, true, true))
+                    lo = lo.emit(ir_mark_float_reg(w3.1))
+                    let w4 = lo.fresh_reg()
+                    lo = w4.0
+                    lo = lo.emit(ir_binop_typed(w4.1, acc, BinaryOp::OpAdd, w3.1, true, true))
+                    lo = lo.emit(ir_mark_float_reg(w4.1))
+                    acc = w4.1
+                }
+                cj2 = cj2 + 1
+            }
+            ci2 = ci2 + 1
         }
         let ipn = lo.emit_i64_const(base + TG_NPCH)
         lo = ipn.0
@@ -17631,11 +18234,12 @@ impl Lowerer {
         // rows (sigma^2, then each row's sensitivity to it), so the caller can
         // keep their covariance. At most TG_NI per return.
         if tg_may_draw(TG_ACTIVE, 0) {
-            let stride = TG_NPCH + 1 + (if TG_ACTIVE_ORD == 2 { TG_HESS_SLOTS } else { 0 })
+            let stride = tg_row_stride(TG_NPCH, TG_ACTIVE_ORD)
             let zc = lo.emit_f64_const(0.0)
             lo = zc.0
             var c: i64 = 0
             var ch: i64 = 0
+            var cha: [i64; 4] = [-1; 4]
             while ch < lo.fo_nchan && ch < 32 {
                 var is_param = false
                 var q: i64 = 0
@@ -17656,6 +18260,7 @@ impl Lowerer {
                         print("` has more than 4 internal measurements feeding its fields; refused instead of returning a wrong covariance (KL-11)\n")
                         return lo.report_error_at(10841)
                     }
+                    cha[c as usize] = ch
                     let cb = nout * stride + c * (1 + nout)
                     let sp0 = lo.emit_i64_const(cb)
                     lo = sp0.0
@@ -17682,6 +18287,26 @@ impl Lowerer {
                     r3 = r3 + 1
                 }
                 c = c + 1
+            }
+            // The declared correlation between two exported internal
+            // measurements (a `correlate` inside the callee), one slot per pair.
+            let rb = nout * stride + TG_NI * (1 + nout)
+            var c1: i64 = 0
+            while c1 < TG_NI {
+                var c2: i64 = 0
+                while c2 < TG_NI {
+                    var rr = zc.1
+                    if c1 < c2 && cha[c1 as usize] >= 0 && cha[c2 as usize] >= 0 && fo_cov_rho_live(cha[c1 as usize], cha[c2 as usize]) {
+                        let rp = lo.fo_emit_rho_reg(cha[c1 as usize], cha[c2 as usize])
+                        lo = rp.0
+                        rr = rp.1
+                    }
+                    let rsl = lo.emit_i64_const(rb + c1 * TG_NI + c2)
+                    lo = rsl.0
+                    lo = lo.emit(ir_index_set(TG_OUT_REG, rsl.1, rr))
+                    c2 = c2 + 1
+                }
+                c1 = c1 + 1
             }
         }
         lo
@@ -17829,9 +18454,15 @@ impl Lowerer {
             if kind == 5 { print("second_order_mean") }
             print(" in `")
             print(str_from_bytes((*lo.current_func).name.buf, (*lo.current_func).name.len))
-            print("` depends on the call to `")
-            print(str_from_bytes(TG_DROP_NAME.buf, TG_DROP_NAME.len))
-            print("`, whose uncertainty the compiler cannot propagate; refused instead of reading 0 (KL-11)\n")
+            if name_eq_lit(TG_DROP_NAME, "<channel table>") {
+                print("` reads a measured quantity beyond the 32-slot channel table, whose uncertainty the compiler cannot carry; refused instead of reading 0 (KL-11)\n")
+            } else if name_eq_lit(TG_DROP_NAME, "<var declared before the first measure>") {
+                print("` reads a `var` declared before the first measure() and updated where its slots could not be placed, whose uncertainty the compiler cannot carry; refused instead of reading 0 (KL-11)\n")
+            } else {
+                print("` depends on the call to `")
+                print(str_from_bytes(TG_DROP_NAME.buf, TG_DROP_NAME.len))
+                print("`, whose uncertainty the compiler cannot propagate; refused instead of reading 0 (KL-11)\n")
+            }
             lo = lo.report_error_at(10840)
         }
         TG_DROP = saved
@@ -18066,9 +18697,9 @@ impl Lowerer {
             if !lo.tg_out_layout(tgi) { return (lo, 0 - 1) }
             nout = TG_O_N
         }
-        let stride = nf + 1 + (if ord == 2 { TG_HESS_SLOTS } else { 0 })
+        let stride = tg_row_stride(nf, ord)
         let shared_int = is_sret && tg_may_draw(tgi, 0)
-        let arrlen = if is_sret { nout * stride + (if shared_int { TG_NI * (1 + nout) } else { 0 }) } else if ord == 2 { nf + 1 + TG_HESS_SLOTS } else { nf + 1 }
+        let arrlen = if is_sret { nout * stride + (if shared_int { TG_NI * (1 + nout) + TG_NI * TG_NI } else { 0 }) } else { stride }
         lo = lo.emit(ir_alloc_array(arr, lo.aggregate_storage_bytes(arrlen), arrlen))
         lo = lo.bind_reg_array_elem_float(arr)
         args = lower_reg_list_append(args, arr)
@@ -18092,6 +18723,18 @@ impl Lowerer {
             TG_SITE_END[slot_i as usize] = e.span.end
             TG_SITE_TG[slot_i as usize] = tgi
             TG_SITE_ORD[slot_i as usize] = ord
+            TG_SITE_M[slot_i as usize] = 0 - 1
+            TG_SITE_VINT[slot_i as usize] = 0 - 1
+            var mrz: i64 = 0
+            while mrz < 8 {
+                TG_SITE_MR[(slot_i * 8 + mrz) as usize] = 0 - 1
+                mrz = mrz + 1
+            }
+            var irz: i64 = 0
+            while irz < 16 {
+                TG_SITE_IR[(slot_i * 16 + irz) as usize] = 0 - 1
+                irz = irz + 1
+            }
             var hz: i64 = 0
             while hz < TG_HESS_SLOTS {
                 TG_SITE_H[(slot_i * TG_HESS_SLOTS + hz) as usize] = 0 - 1
@@ -18112,7 +18755,7 @@ impl Lowerer {
                     ld.imm_flags = IR_FLOAT_REG_MARKER_FLAG
                     lo = lo.emit(ld)
                     lo = lo.emit(ir_mark_float_reg(dr.1))
-                    if slot_i >= 0 { TG_SITE_DM[((slot_i * 8 + row) * 25 + kk) as usize] = dr.1 }
+                    if slot_i >= 0 { TG_SITE_DM[((slot_i * 8 + row) * 33 + kk) as usize] = dr.1 }
                     kk = kk + 1
                 }
                 if ord == 2 && slot_i >= 0 {
@@ -18129,11 +18772,21 @@ impl Lowerer {
                             ldh.imm_flags = IR_FLOAT_REG_MARKER_FLAG
                             lo = lo.emit(ldh)
                             lo = lo.emit(ir_mark_float_reg(hr.1))
-                            TG_SITE_HM[((slot_i * 8 + row) * 36 + hidx) as usize] = hr.1
+                            TG_SITE_HM[((slot_i * 8 + row) * 528 + hidx) as usize] = hr.1
                             hb = hb + 1
                         }
                         ha = ha + 1
                     }
+                    // The row's internal curvature term.
+                    let mip = lo.emit_i64_const(row * stride + nf + 1 + (nf * (nf + 1)) / 2)
+                    lo = mip.0
+                    let mrr = lo.fresh_reg()
+                    lo = mrr.0
+                    var ldmr = ir_index_get(mrr.1, arr, mip.1)
+                    ldmr.imm_flags = IR_FLOAT_REG_MARKER_FLAG
+                    lo = lo.emit(ldmr)
+                    lo = lo.emit(ir_mark_float_reg(mrr.1))
+                    TG_SITE_MR[(slot_i * 8 + row) as usize] = mrr.1
                 }
                 row = row + 1
             }
@@ -18165,6 +18818,24 @@ impl Lowerer {
                         r2 = r2 + 1
                     }
                     c = c + 1
+                }
+                let rb = nout * stride + TG_NI * (1 + nout)
+                var q1: i64 = 0
+                while q1 < TG_NI {
+                    var q2: i64 = q1 + 1
+                    while q2 < TG_NI {
+                        let rq = lo.emit_i64_const(rb + q1 * TG_NI + q2)
+                        lo = rq.0
+                        let rg = lo.fresh_reg()
+                        lo = rg.0
+                        var lrg = ir_index_get(rg.1, arr, rq.1)
+                        lrg.imm_flags = IR_FLOAT_REG_MARKER_FLAG
+                        lo = lo.emit(lrg)
+                        lo = lo.emit(ir_mark_float_reg(rg.1))
+                        TG_SITE_IR[(slot_i * 16 + q1 * TG_NI + q2) as usize] = rg.1
+                        q2 = q2 + 1
+                    }
+                    q1 = q1 + 1
                 }
             }
             return (lo, dst)
@@ -18207,17 +18878,28 @@ impl Lowerer {
                 }
                 ha = ha + 1
             }
+            let mi = lo.emit_i64_const(nf + 1 + (nf * (nf + 1)) / 2)
+            lo = mi.0
+            let mr = lo.fresh_reg()
+            lo = mr.0
+            var ldm = ir_index_get(mr.1, arr, mi.1)
+            ldm.imm_flags = IR_FLOAT_REG_MARKER_FLAG
+            lo = lo.emit(ldm)
+            lo = lo.emit(ir_mark_float_reg(mr.1))
+            TG_SITE_M[slot_i as usize] = mr.1
         }
         (lo, dst)
     }
 
     // Which clone a call from the function being lowered uses: the hyper-dual
     // one (2) when this function carries a Hessian (it calls hessian_of or
-    // second_order_mean, or is itself a hyper-dual clone), the callee has at
-    // most 8 tangents, and no measurement can be made inside it (an internal
-    // measurement is a channel the Hessian rows do not cover); else 1.
+    // second_order_mean, or is itself a hyper-dual clone); else 1. A struct
+    // return carries one Hessian block and one curvature term per output row. A measurement made inside the callee is
+    // covered: its channels sit above the tangents, the Hessian over the
+    // tangents is unaffected, and its curvature term is returned in one extra
+    // slot (see tg_store_row).
     fn tg_pick_ord(self, tgi: i64, nf: i64) -> i64 with Mut, Panic, Div {
-        if self.so_enabled && nf <= 8 && !tg_may_draw(tgi, 0) { return 2 }
+        if self.so_enabled { return 2 }
         1
     }
 
@@ -18251,10 +18933,10 @@ impl Lowerer {
 
     // A named call inside hessian_of / second_order_mean whose value was never
     // lowered (so it has no recorded site): emit it through its hyper-dual clone
-    // here. That makes this its only evaluation, so the callee must have no IO
-    // effect (it is also evaluated again when the query reads the value, as
-    // second_order_mean does). Returns self unchanged when the call does not
-    // qualify; the caller then keeps whatever the re-lowering gives.
+    // here. A query argument is evaluated exactly once like any call argument,
+    // so this is the call's only evaluation and an IO callee runs once too.
+    // Returns self unchanged when the call does not qualify; the caller then
+    // keeps whatever the re-lowering gives.
     fn tg_query_emit(self, e: &Expr, after_paste: bool) -> Lowerer with Mut, Panic, Div, Alloc, IO {
         if TG_ITEM_FN < 0 || self.current_fn != TG_ITEM_FN || self.probe_mode { return self }
         if !(TG_ITEM_EPI || TG_CLONE_FN == self.current_fn) { return self }
@@ -18270,8 +18952,6 @@ impl Lowerer {
                 // First order: only a call the re-lowering has refused (after_paste).
                 if !self.so_enabled && !after_paste { return self }
                 if self.so_enabled && !after_paste && TG_PREFER[tgi as usize] != 1 { return self }
-                let fd = tg_def_at(tgi)
-                if self.ir_effect_list_has_name_ref(&fd.effects, "IO") { return self }
                 let tgr = self.tg_hof_entry(e, tgi)
                 if tgr < 0 { return self }
                 if !self.tg_layout(tgr) { return self }
@@ -18312,17 +18992,21 @@ impl Lowerer {
         // A struct return is bound field by field at its let (tg_bind_struct_result).
         if TG_RET[tgi as usize] == 1 { return (base, 0 - 1) }
         if !base.tg_layout(tgi) { return (base, 0 - 1) }
+        // A `correlate` on a parameter-derived value inside the callee cannot be
+        // read through its clone: refused, never answered.
+        if tg_corr_class(tgi, 0) == 2 { tg_mark_drop(TG_NAME[tgi as usize]) }
+        if tg_unreg_reach(ir_intern_name(TG_NAME[tgi as usize]), 0) { tg_mark_drop(TG_NAME[tgi as usize]) }
         let ord2 = base.so_enabled && TG_SITE_ORD[si as usize] == 2
         var lo = base
         let has_self = TG_HASSELF[tgi as usize] == 1
         // Snapshot the layout: walking an argument may lower a nested call,
         // which lays out its own callee into the same globals.
         let ln = TG_L_N
-        var lparam: [i64; 24] = [0; 24]
-        var lfield: [i64; 24] = [-1; 24]
-        var lfname: [i64; 24] = [0; 24]
-        var ldepth: [i64; 24] = [0; 24]
-        var lpath: [i64; 72] = [0; 72]
+        var lparam: [i64; 32] = [0; 32]
+        var lfield: [i64; 32] = [-1; 32]
+        var lfname: [i64; 32] = [0; 32]
+        var ldepth: [i64; 32] = [0; 32]
+        var lpath: [i64; 96] = [0; 96]
         var q: i64 = 0
         while q < ln {
             lparam[q as usize] = TG_L_PARAM[q as usize]
@@ -18337,8 +19021,8 @@ impl Lowerer {
         var acc: [i64; 32] = [-1; 32]
         // Second order: each tangent's argument gradient and Hessian on the
         // caller's channels (the chain rule below needs them all at once).
-        var sensA: [i64; 256] = [-1; 256]
-        var hessA: [i64; 288] = [-1; 288]
+        var sensA: [i64; 1024] = [-1; 1024]
+        var hessA: [i64; 16896] = [-1; 16896]
         var li: i64 = 0
         while li < ln {
             let p = lparam[li as usize]
@@ -18381,15 +19065,15 @@ impl Lowerer {
                     lo = lo.fo_seed_from_variance(wp.1, 0 - 1)
                 }
                 let d = TG_SITE_D[(si * 32 + li) as usize]
-                if ord2 && li < 8 {
+                if ord2 {
                     var sc: i64 = 0
                     while sc < 32 {
                         sensA[(li * 32 + sc) as usize] = lo.fo_expr_sens[sc as usize]
                         sc = sc + 1
                     }
                     var sh: i64 = 0
-                    while sh < 36 {
-                        hessA[(li * 36 + sh) as usize] = lo.so_expr_hess[sh as usize]
+                    while sh < 528 {
+                        hessA[(li * 528 + sh) as usize] = lo.so_expr_hess[sh as usize]
                         sh = sh + 1
                     }
                 }
@@ -18420,18 +19104,19 @@ impl Lowerer {
         // with J the clone's gradient row, Hf its Hessian over the tangents,
         // g_k / H(a_k) the argument's gradient and Hessian on the caller's
         // channels. Formed before the expression state is cleared.
-        var hres: [i64; 36] = [-1; 36]
+        var hres: [i64; 528] = [-1; 528]
+        let nchx = if lo.fo_nchan > 32 { 32 } else { lo.fo_nchan }
         if ord2 {
             var c1: i64 = 0
-            while c1 < 8 {
+            while c1 < nchx {
                 var c2h: i64 = c1
-                while c2h < 8 {
+                while c2h < nchx {
                     let hix = lo.so_hess_idx(c1, c2h)
                     var hacc: i64 = 0 - 1
                     var k1: i64 = 0
-                    while k1 < ln && k1 < 8 {
+                    while k1 < ln {
                         let jk = TG_SITE_D[(si * 32 + k1) as usize]
-                        let ha = hessA[(k1 * 36 + hix) as usize]
+                        let ha = hessA[(k1 * 528 + hix) as usize]
                         if jk >= 0 && ha >= 0 {
                             let tm = lo.so_mul_or_none(jk, ha)
                             lo = tm.0
@@ -18442,11 +19127,11 @@ impl Lowerer {
                         k1 = k1 + 1
                     }
                     var k2: i64 = 0
-                    while k2 < ln && k2 < 8 {
+                    while k2 < ln {
                         let g1 = sensA[(k2 * 32 + c1) as usize]
                         if g1 >= 0 {
                             var l2: i64 = 0
-                            while l2 < ln && l2 < 8 {
+                            while l2 < ln {
                                 let g2 = sensA[(l2 * 32 + c2h) as usize]
                                 let hf = TG_SITE_H[(si * TG_HESS_SLOTS + lo.so_hess_idx(k2, l2)) as usize]
                                 if g2 >= 0 && hf >= 0 {
@@ -18477,36 +19162,44 @@ impl Lowerer {
         }
         if ord2 {
             var hw: i64 = 0
-            while hw < 36 {
+            while hw < 528 {
                 lo.so_expr_hess[hw as usize] = hres[hw as usize]
                 hw = hw + 1
             }
         } else if lo.so_enabled {
-            // A first-order clone carries no Hessian row. Between two channels the call
-            // depends on, the second derivative is unknown, not zero: NaN, so
-            // hessian_of and second_order_mean through this call fail loudly
-            // instead of reading a structural 0. Pairs the call does not touch
-            // stay structurally zero.
-            let zp = lo.emit_f64_const(0.0)
-            lo = zp.0
-            let np = lo.fresh_reg()
-            lo = np.0
-            lo = lo.emit(ir_binop_typed(np.1, zp.1, BinaryOp::OpDiv, zp.1, true, true))
-            lo = lo.emit(ir_mark_float_reg(np.1))
+            // A first-order clone carries no Hessian row. Between two channels the
+            // call depends on, the second derivative is unknown, not zero. Every
+            // site a Hessian-carrying function reaches is hyper-dual (tg_pick_ord),
+            // so this is not expected; if it is reached the query is refused at
+            // compile time (tg_checked_query) rather than left to read NaN.
             var hj: i64 = 0
-            while hj < 8 {
-                var hk: i64 = hj
-                while hk < 8 {
-                    if acc[hj as usize] >= 0 && acc[hk as usize] >= 0 {
-                        lo.so_expr_hess[lo.so_hess_idx(hj, hk) as usize] = np.1
-                    }
-                    hk = hk + 1
-                }
+            while hj < 32 {
+                if acc[hj as usize] >= 0 { tg_mark_drop(TG_NAME[tgi as usize]) }
                 hj = hj + 1
             }
         }
         if tg_may_draw(tgi, 0) && TG_SITE_VINT[si as usize] >= 0 {
             lo = lo.fo_add_channel_for_variance(TG_SITE_VINT[si as usize])
+            if ord2 && TG_SITE_M[si as usize] >= 0 {
+                // The callee's internal curvature term M = sum H_mm sigma_m^2 as a
+                // curvature-only channel: no sensitivity (it adds nothing to the
+                // variance), sigma^2 = 1 and H_dd = M, so second_order_mean reads
+                // 1/2 M and a later call's chain rule carries it on. Not a
+                // division of M by the internal variance, which is 0 where the
+                // callee is stationary in its measurement.
+                if lo.fo_nchan >= 32 {
+                    tg_mark_drop(TG_NAME[tgi as usize])
+                } else {
+                    let dch = lo.fo_nchan
+                    let onep = lo.emit_f64_const(1.0)
+                    lo = onep.0
+                    lo.fo_sigma2[dch as usize] = onep.1
+                    FO_SIGMA_REG[dch as usize] = 0 - 1
+                    FO_CH_DEPTH[dch as usize] = lo.loop_depth
+                    lo.fo_nchan = dch + 1
+                    lo.so_expr_hess[lo.so_hess_idx(dch, dch) as usize] = TG_SITE_M[si as usize]
+                }
+            }
         }
         if !lo.fo_expr_has_sens() {
             return lo.emit_zero_variance()
@@ -18526,10 +19219,10 @@ impl Lowerer {
         var lo = self
         let has_self = TG_HASSELF[tgi as usize] == 1
         let ln = TG_L_N
-        var lparam: [i64; 24] = [0; 24]
-        var lfield: [i64; 24] = [-1; 24]
-        var ldepth: [i64; 24] = [0; 24]
-        var lpath: [i64; 72] = [0; 72]
+        var lparam: [i64; 32] = [0; 32]
+        var lfield: [i64; 32] = [-1; 32]
+        var ldepth: [i64; 32] = [0; 32]
+        var lpath: [i64; 96] = [0; 96]
         var q: i64 = 0
         while q < ln {
             lparam[q as usize] = TG_L_PARAM[q as usize]
@@ -18544,8 +19237,8 @@ impl Lowerer {
         let nout = TG_O_N
         let ord2 = lo.so_enabled && TG_SITE_ORD[si as usize] == 2
         var acc: [i64; 256] = [-1; 256]
-        var sensA: [i64; 256] = [-1; 256]
-        var hessA: [i64; 288] = [-1; 288]
+        var sensA: [i64; 1024] = [-1; 1024]
+        var hessA: [i64; 16896] = [-1; 16896]
         var li: i64 = 0
         while li < ln {
             let p = lparam[li as usize]
@@ -18584,21 +19277,21 @@ impl Lowerer {
                 if wp.1 >= 0 && !lo.fo_expr_has_sens() && !fo_variance_is_static_zero(&lo, wp.1) {
                     lo = lo.fo_seed_from_variance(wp.1, 0 - 1)
                 }
-                if ord2 && li < 8 {
+                if ord2 && li < 32 {
                     var sc: i64 = 0
                     while sc < 32 {
                         sensA[(li * 32 + sc) as usize] = lo.fo_expr_sens[sc as usize]
                         sc = sc + 1
                     }
                     var sh: i64 = 0
-                    while sh < 36 {
-                        hessA[(li * 36 + sh) as usize] = lo.so_expr_hess[sh as usize]
+                    while sh < 528 {
+                        hessA[(li * 528 + sh) as usize] = lo.so_expr_hess[sh as usize]
                         sh = sh + 1
                     }
                 }
                 var j: i64 = 0
                 while j < nout {
-                    let d = TG_SITE_DM[((si * 8 + j) * 25 + li) as usize]
+                    let d = TG_SITE_DM[((si * 8 + j) * 33 + li) as usize]
                     var c: i64 = 0
                     while c < 32 {
                         let s = lo.fo_expr_sens[c as usize]
@@ -18625,20 +19318,21 @@ impl Lowerer {
             }
             li = li + 1
         }
-        var hres: [i64; 288] = [-1; 288]
+        var hres: [i64; 4224] = [-1; 4224]
+        let nch = lo.fo_nchan
         if ord2 {
             var row: i64 = 0
             while row < nout {
                 var c1: i64 = 0
-                while c1 < 8 {
+                while c1 < nch && c1 < 32 {
                     var c2h: i64 = c1
-                    while c2h < 8 {
+                    while c2h < nch && c2h < 32 {
                         let hix = lo.so_hess_idx(c1, c2h)
                         var hacc: i64 = 0 - 1
                         var k1: i64 = 0
-                        while k1 < ln && k1 < 8 {
-                            let jk = TG_SITE_DM[((si * 8 + row) * 25 + k1) as usize]
-                            let ha = hessA[(k1 * 36 + hix) as usize]
+                        while k1 < ln && k1 < 32 {
+                            let jk = TG_SITE_DM[((si * 8 + row) * 33 + k1) as usize]
+                            let ha = hessA[(k1 * 528 + hix) as usize]
                             if jk >= 0 && ha >= 0 {
                                 let tm = lo.so_mul_or_none(jk, ha)
                                 lo = tm.0
@@ -18649,13 +19343,13 @@ impl Lowerer {
                             k1 = k1 + 1
                         }
                         var k2: i64 = 0
-                        while k2 < ln && k2 < 8 {
+                        while k2 < ln && k2 < 32 {
                             let g1 = sensA[(k2 * 32 + c1) as usize]
                             if g1 >= 0 {
                                 var l2: i64 = 0
-                                while l2 < ln && l2 < 8 {
+                                while l2 < ln && l2 < 32 {
                                     let g2 = sensA[(l2 * 32 + c2h) as usize]
-                                    let hf = TG_SITE_HM[((si * 8 + row) * 36 + lo.so_hess_idx(k2, l2)) as usize]
+                                    let hf = TG_SITE_HM[((si * 8 + row) * 528 + lo.so_hess_idx(k2, l2)) as usize]
                                     if g2 >= 0 && hf >= 0 {
                                         let t1 = lo.so_mul_or_none(hf, g1)
                                         lo = t1.0
@@ -18670,7 +19364,7 @@ impl Lowerer {
                             }
                             k2 = k2 + 1
                         }
-                        hres[(row * 36 + hix) as usize] = hacc
+                        hres[(row * 528 + hix) as usize] = hacc
                         c2h = c2h + 1
                     }
                     c1 = c1 + 1
@@ -18684,7 +19378,7 @@ impl Lowerer {
             z = z + 1
         }
         var zh: i64 = 0
-        while zh < 288 {
+        while zh < 4224 {
             TG_ROW_HESS[zh as usize] = hres[zh as usize]
             zh = zh + 1
         }
@@ -18706,8 +19400,8 @@ impl Lowerer {
         }
         if lo.so_enabled && TG_SITE_ORD[si as usize] == 2 {
             var hw: i64 = 0
-            while hw < 36 {
-                lo.so_expr_hess[hw as usize] = TG_ROW_HESS[(row * 36 + hw) as usize]
+            while hw < 528 {
+                lo.so_expr_hess[hw as usize] = TG_ROW_HESS[(row * 528 + hw) as usize]
                 hw = hw + 1
             }
         }
@@ -18728,6 +19422,47 @@ impl Lowerer {
                     }
                 }
                 c = c + 1
+            }
+            // A `correlate` between two of the callee's internal measurements:
+            // the declared correlation sits between their shared channels.
+            var p1: i64 = 0
+            while p1 < TG_NI {
+                var p2: i64 = p1 + 1
+                while p2 < TG_NI {
+                    let rg = TG_SITE_IR[(si * 16 + p1 * TG_NI + p2) as usize]
+                    let s1 = TG_SITE_ISIG[(si * 4 + p1) as usize]
+                    let s2 = TG_SITE_ISIG[(si * 4 + p2) as usize]
+                    if rg >= 0 && s1 >= 0 && s2 >= 0 {
+                        var ch1: i64 = 0 - 1
+                        var ch2: i64 = 0 - 1
+                        var kc: i64 = 0
+                        while kc < lo.fo_nchan {
+                            if lo.fo_sigma2[kc as usize] == s1 { ch1 = kc }
+                            if lo.fo_sigma2[kc as usize] == s2 { ch2 = kc }
+                            kc = kc + 1
+                        }
+                        if ch1 >= 0 && ch2 >= 0 { fo_cov_rho_reg_set(ch1, ch2, rg) }
+                    }
+                    p2 = p2 + 1
+                }
+                p1 = p1 + 1
+            }
+            // At second order the row's internal curvature term, as a
+            // curvature-only channel (see tg_call_variance).
+            let mr = TG_SITE_MR[(si * 8 + row) as usize]
+            if lo.so_enabled && TG_SITE_ORD[si as usize] == 2 && mr >= 0 {
+                if lo.fo_nchan >= 32 {
+                    tg_mark_drop(TG_NAME[tgi as usize])
+                } else {
+                    let dch = lo.fo_nchan
+                    let onep = lo.emit_f64_const(1.0)
+                    lo = onep.0
+                    lo.fo_sigma2[dch as usize] = onep.1
+                    FO_SIGMA_REG[dch as usize] = 0 - 1
+                    FO_CH_DEPTH[dch as usize] = lo.loop_depth
+                    lo.fo_nchan = dch + 1
+                    lo.so_expr_hess[lo.so_hess_idx(dch, dch) as usize] = mr
+                }
             }
         }
         if !lo.fo_expr_has_sens() { return lo.emit_zero_variance() }
@@ -18827,8 +19562,6 @@ impl Lowerer {
             if TG_ITEM_FN < 0 || lo.current_fn != TG_ITEM_FN || lo.probe_mode { return (self, 0 - 1) }
             if !(TG_ITEM_EPI || TG_CLONE_FN == lo.current_fn) { return (self, 0 - 1) }
             if lo.expr_list_len_ref(&(*cur).args) != TG_NPARAM[tgi as usize] { return (self, 0 - 1) }
-            let fd = tg_def_at(tgi)
-            if lo.ir_effect_list_has_name_ref(&fd.effects, "IO") { return (self, 0 - 1) }
             let tr = lo.tg_lower_call(&(*cur), cname, tgi)
             if tr.1 < 0 { return (self, 0 - 1) }
             lo = tr.0
@@ -21486,13 +22219,30 @@ impl Lowerer {
         (lo, idx)
     }
 
+    fn so_rows_restore(self, base: i64, nrows: i64) -> Lowerer with Mut, Panic, Div {
+        var lo = self
+        if base < 0 { return lo }
+        var n = nrows
+        if n > 128 { n = 128 }
+        let cnt = n * 528
+        var bg = lo.big
+        var i: i64 = 0
+        while i < cnt {
+            (*bg).so_bind_hess[i as usize] = SO_ROWS_STACK[(base + i) as usize]
+            i = i + 1
+        }
+        lo.big = bg
+        SO_ROWS_SP = base
+        lo
+    }
+
     fn so_clear_hess_row(self, row: i64) -> Lowerer with Mut, Panic, Div {
         var lo = self
-        if row < 0 || row >= 16 { return lo }
+        if row < 0 || row >= 128 { return lo }
         var bg = lo.big
         var j: i64 = 0
-        while j < 36 {
-            (*bg).so_bind_hess[(row * 36 + j) as usize] = 0 - 1
+        while j < 528 {
+            (*bg).so_bind_hess[(row * 528 + j) as usize] = 0 - 1
             j = j + 1
         }
         lo.big = bg
@@ -21510,22 +22260,22 @@ impl Lowerer {
         let row_pair = lo.fo_bind_row_for(name)
         lo = row_pair.0
         let row = row_pair.1
-        if row < 0 || row >= 16 { return lo }
+        if row < 0 || row >= 128 { return lo }
         var nch = lo.fo_nchan
-        if nch > 8 { nch = 8 }
+        if nch > 32 { nch = 32 }
         var a: i64 = 0
         while a < nch {
             var b: i64 = a
             while b < nch {
                 let idx = lo.so_hess_idx(a, b)
-                let existing = (*lo.big).so_bind_hess[(row * 36 + idx) as usize]
+                let existing = (*lo.big).so_bind_hess[(row * 528 + idx) as usize]
                 let z = lo.emit_f64_const(0.0)
                 lo = z.0
                 if existing >= 0 {
                     lo = lo.emit(ir_copy(z.1, existing))
                 }
                 var bg = lo.big
-                (*bg).so_bind_hess[(row * 36 + idx) as usize] = z.1
+                (*bg).so_bind_hess[(row * 528 + idx) as usize] = z.1
                 lo.big = bg
                 b = b + 1
             }
@@ -21551,15 +22301,15 @@ impl Lowerer {
                 i = i + 1
             }
         }
-        if row < 0 || row >= 16 || (*lo.fo_bind).resid[row as usize] < 0 {
+        if row < 0 || row >= 128 || (*lo.fo_bind).resid[row as usize] < 0 {
             // No private slots: rebind (only when there is something to bind).
             if lo.so_expr_has_hess() { return lo.so_bind_local_hess(name) }
             return lo
         }
         var zero: i64 = 0 - 1
         var idx: i64 = 0
-        while idx < 36 {
-            let slot = (*lo.big).so_bind_hess[(row * 36 + idx) as usize]
+        while idx < 528 {
+            let slot = (*lo.big).so_bind_hess[(row * 528 + idx) as usize]
             let src = lo.so_expr_hess[idx as usize]
             if slot >= 0 {
                 if src >= 0 {
@@ -21574,7 +22324,7 @@ impl Lowerer {
                 }
             } else if src >= 0 {
                 var bg = lo.big
-                (*bg).so_bind_hess[(row * 36 + idx) as usize] = src
+                (*bg).so_bind_hess[(row * 528 + idx) as usize] = src
                 lo.big = bg
             }
             idx = idx + 1
@@ -21628,14 +22378,33 @@ impl Lowerer {
         lo = rz.0
         if !had_sens {
             let v_now = lo.lookup_local_variance_reg(name)
-            if v_now >= 0 {
+            // A variance that is a literal zero is not residual: the slot stays
+            // the literal zero, so a straight-line read of the local adds no
+            // channel to the 32-slot table (32 measured quantities accumulated
+            // into a `var` leave no room for it).
+            if v_now >= 0 && !fo_variance_is_static_zero(&lo, v_now) {
                 lo = lo.emit(ir_copy(rz.1, v_now))
+                FO_RESID_NZ[row as usize] = 1
             }
         }
         var fbr = lo.fo_bind
         (*fbr).resid[row as usize] = rz.1
         lo.fo_bind = fbr
         lo
+    }
+
+    // True when nothing non-zero was ever written to the residual slot of
+    // `name`'s bind row (valid for a read outside every loop: lowering order is
+    // execution order there).
+    fn fo_resid_never_written(self, name: Name) -> bool with Mut, Panic, Div {
+        var i: i64 = 0
+        while i < self.fo_bind_count {
+            if ir_name_eq((*self.fo_bind).names[i as usize], name) {
+                return i < 128 && FO_RESID_NZ[i as usize] == 0
+            }
+            i = i + 1
+        }
+        false
     }
 
     // #2827: the residual-variance slot of `name`'s bind row, or -1.
@@ -21658,8 +22427,85 @@ impl Lowerer {
     // every iteration: `var acc = 0.0; let m = k.value; while .. { acc = acc +
     // 0.5 * m }` gives var(acc) = (4 * 0.5)^2 var(m) = 0.04 (the same m every
     // time), where folding m into the residual counted it as independent (0.01).
-    fn fo_extend_rows_for_loop(self) -> Lowerer with Mut, Panic, Div, IO {
+    // Declaration scope depth of the innermost visible local `name`, or -1.
+    fn local_decl_scope(self, name: Name) -> i64 with Mut, Panic, Div {
+        var i = (*self.locals).count - 1
+        while i >= 0 {
+            if (*(*self.locals).depths).values[i as usize] <= self.scope_depth && ir_name_eq((*(*self.locals).names).values[i as usize], name) {
+                return (*(*self.locals).depths).values[i as usize]
+            }
+            i = i - 1
+        }
+        0 - 1
+    }
+
+    // Does `e` read an uncertain local, other than `skip`, that was declared
+    // outside the loop entered at scope depth `s_out` (so it is the same
+    // quantity on every iteration)?
+    fn fo_reads_outer_uncertain(self, e: &Expr, skip: Name, s_out: i64, depth: i64) -> bool with Mut, Panic, Div, Alloc {
+        if depth > 32 { return true }
+        if (*e).kind == ExprKind::ExprIdent {
+            if ir_name_eq((*e).name, skip) { return false }
+            let ds = self.local_decl_scope((*e).name)
+            if ds >= 0 && ds <= s_out && self.expr_result_is_float_ref(e) && self.tg_expr_maybe_uncertain(e, 0) { return true }
+            return false
+        }
+        match (*e).left {
+            Some(x) => { if self.fo_reads_outer_uncertain(&(*x), skip, s_out, depth + 1) { return true } }
+            None => {}
+        }
+        match (*e).right {
+            Some(x) => { if self.fo_reads_outer_uncertain(&(*x), skip, s_out, depth + 1) { return true } }
+            None => {}
+        }
+        match (*e).else_expr {
+            Some(x) => { if self.fo_reads_outer_uncertain(&(*x), skip, s_out, depth + 1) { return true } }
+            None => {}
+        }
+        var ac = &(*e).args
+        while true {
+            match *ac {
+                Some(al) => {
+                    if self.fo_reads_outer_uncertain(&(*al).head, skip, s_out, depth + 1) { return true }
+                    ac = &(*al).tail
+                }
+                None => break
+            }
+        }
+        false
+    }
+
+    // #3547: give every pending late `var` (declared before the first measure())
+    // its private sens, Hessian and variance slots, now that a channel exists.
+    // Only in the block it was declared in: the zero-initialising stores must
+    // dominate every later read, which a nested block does not guarantee.
+    fn fo_late_alloc(self) -> Lowerer with Mut, Panic, Div, IO, Alloc {
         var lo = self
+        if FO_LATE_N <= 0 || lo.fo_nchan <= 0 || lo.probe_mode { return lo }
+        var li: i64 = 0
+        while li < FO_LATE_N {
+            if FO_LATE_DONE[li as usize] == 0 && FO_LATE_SCOPE[li as usize] == lo.scope_depth && FO_LATE_DEPTH[li as usize] == lo.loop_depth {
+                let lname = ir_name_at(FO_LATE_NAME[li as usize])
+                if lo.lookup_local(lname) >= 0 {
+                    FO_LATE_DONE[li as usize] = 1
+                    // Sens slots first: the residual then reads the declaration's own
+                    // variance (a literal zero), not the private slot's copy of it.
+                    lo = lo.fo_alloc_sens_slots_for_local(lname)
+                    lo = lo.alloc_variance_slot_for_local(lname)
+                    lo = lo.so_alloc_hess_slots_for_local(lname)
+                }
+            }
+            li = li + 1
+        }
+        lo
+    }
+
+    fn fo_extend_rows_for_loop(self) -> Lowerer with Mut, Panic, Div, IO, Alloc {
+        var lo = self
+        // #3547: a `var` declared before the first measure() gets its private
+        // slots now, before the first iteration, copying whatever it is bound to.
+        if lo.loop_depth >= 0 && lo.loop_depth < 63 { FO_LOOP_SCOPE[(lo.loop_depth + 1) as usize] = lo.scope_depth }
+        lo = lo.fo_late_alloc()
         var r: i64 = 0
         while r < lo.fo_bind_count {
             let rs = (*lo.fo_bind).resid[r as usize]
@@ -21677,19 +22523,19 @@ impl Lowerer {
                     k = k + 1
                 }
                 // Second order: the same for the Hessian slots, pair by pair.
-                if lo.so_enabled && r < 16 {
+                if lo.so_enabled && r < 128 {
                     var ha: i64 = 0
-                    while ha < lo.fo_nchan && ha < 8 {
+                    while ha < lo.fo_nchan && ha < 32 {
                         var hb: i64 = ha
-                        while hb < lo.fo_nchan && hb < 8 {
+                        while hb < lo.fo_nchan && hb < 32 {
                             let hix = lo.so_hess_idx(ha, hb)
-                            if (*lo.big).so_bind_hess[(r * 36 + hix) as usize] < 0
+                            if (*lo.big).so_bind_hess[(r * 528 + hix) as usize] < 0
                                 && lo.fo_sigma2[ha as usize] >= 0 && lo.fo_sigma2[hb as usize] >= 0
                                 && FO_CH_DEPTH[ha as usize] <= rd && FO_CH_DEPTH[hb as usize] <= rd {
                                 let hz = lo.emit_f64_const(0.0)
                                 lo = hz.0
                                 var hbg = lo.big
-                                (*hbg).so_bind_hess[(r * 36 + hix) as usize] = hz.1
+                                (*hbg).so_bind_hess[(r * 528 + hix) as usize] = hz.1
                                 lo.big = hbg
                             }
                             hb = hb + 1
@@ -21760,6 +22606,7 @@ impl Lowerer {
         }
         if ch < 0 {
             if lo.fo_nchan >= 32 {
+                tg_mark_drop(make_name("<channel table>"))
                 return lo
             }
             ch = lo.fo_nchan
@@ -21876,6 +22723,7 @@ impl Lowerer {
         if resid >= 0 {
             if dropped >= 0 {
                 lo = lo.emit(ir_copy(resid, dropped))
+                if row < 128 { FO_RESID_NZ[row as usize] = 1 }
             } else {
                 let rz = lo.emit_f64_const(0.0)
                 lo = rz.0
@@ -22060,7 +22908,7 @@ impl Lowerer {
     fn fo_primary_channel(self) -> i64 with Div {
         var found: i64 = 0 - 1
         var k: i64 = 0
-        while k < 8 {
+        while k < 32 {
             if self.fo_expr_sens[k as usize] >= 0 {
                 if found >= 0 {
                     return 0 - 1
@@ -22128,30 +22976,31 @@ impl Lowerer {
 
     // ─── Multi-channel FO GUM helpers (β-Madaros) ───────────────────────────
 
-    // Upper-triangle index for an 8-channel Hessian, j <= k. Same formula the
-    // test corpus already uses as hess_tri_idx_8, so a slot here and an index
-    // there name the same entry.
+    // Upper-triangle index for a 32-channel Hessian, j <= k.
     fn so_hess_idx(self, j: i64, k: i64) -> i64 with Mut, Div {
         var r = j
         var c = k
         if r > c { r = k; c = j }
-        8 * r - (r * (r - 1)) / 2 + (c - r)
+        // Column-major upper triangle: every channel below n lives in the
+        // first n (n + 1) / 2 slots, so a function with few channels touches
+        // a short prefix of the 528 slots of 32 channels.
+        (c * (c + 1)) / 2 + r
     }
 
     fn so_clear_expr_hess(self) -> Lowerer with Mut {
         var lo = self
         var i: i64 = 0
-        while i < 36 {
+        while i < 528 {
             lo.so_expr_hess[i as usize] = 0 - 1
             i = i + 1
         }
         lo
     }
 
-    fn so_snapshot_expr_hess(self) -> [i64; 36] with Mut {
-        var snap: [i64; 36] = [-1; 36]
+    fn so_snapshot_expr_hess(self) -> [i64; 528] with Mut {
+        var snap: [i64; 528] = [-1; 528]
         var i: i64 = 0
-        while i < 36 {
+        while i < 528 {
             snap[i as usize] = self.so_expr_hess[i as usize]
             i = i + 1
         }
@@ -22160,10 +23009,10 @@ impl Lowerer {
 
     // H(x +- y)_jk = Hx_jk +- Hy_jk. A -1 operand is a structural zero, so the
     // other side passes through untouched and no register is spent.
-    fn so_combine_hess_addsub(self, hL: [i64; 36], hR: [i64; 36], is_sub: bool) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+    fn so_combine_hess_addsub(self, hL: [i64; 528], hR: [i64; 528], is_sub: bool) -> Lowerer with Mut, Panic, Div, Alloc, IO {
         var lo = self.so_clear_expr_hess()
         var i: i64 = 0
-        while i < 36 {
+        while i < 528 {
             let a = hL[i as usize]
             let b = hR[i as usize]
             if a >= 0 && b >= 0 {
@@ -22283,7 +23132,7 @@ impl Lowerer {
     // except the channels that made the denominator uncertain to begin with.
     // hessian_of(a/b, kb, kb) is therefore the pin for this rule, not the
     // mixed partial: the mixed one survives a two-term approximation.
-    fn so_combine_hess_div(self, hL: [i64; 36], hR: [i64; 36], sL: [i64; 32], sR: [i64; 32], lhs_v: i64, rhs_v: i64) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+    fn so_combine_hess_div(self, hL: [i64; 528], hR: [i64; 528], sL: [i64; 32], sR: [i64; 32], lhs_v: i64, rhs_v: i64) -> Lowerer with Mut, Panic, Div, Alloc, IO {
         var lo = self.so_clear_expr_hess()
         // Declared sabotage: revert to the pre-#2144 clear.
         if sab_quotient_hessian() {
@@ -22308,7 +23157,7 @@ impl Lowerer {
         let two = two_p.1
 
         var nch = lo.fo_nchan
-        if nch > 8 { nch = 8 }
+        if nch > 32 { nch = 32 }
         var j: i64 = 0
         while j < nch {
             var k: i64 = j
@@ -22372,10 +23221,10 @@ impl Lowerer {
     // alone: for r = c*c*k they are what makes the mixed partial H_ck = 2c
     // non-zero. A diagonal-only check passes with Sx_j*Sy_k by itself, so
     // hessian_of(r, 0, 1) is the pin that actually tests this rule.
-    fn so_combine_hess_mul(self, hL: [i64; 36], hR: [i64; 36], sL: [i64; 32], sR: [i64; 32], lhs_v: i64, rhs_v: i64) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+    fn so_combine_hess_mul(self, hL: [i64; 528], hR: [i64; 528], sL: [i64; 32], sR: [i64; 32], lhs_v: i64, rhs_v: i64) -> Lowerer with Mut, Panic, Div, Alloc, IO {
         var lo = self.so_clear_expr_hess()
         var nch = lo.fo_nchan
-        if nch > 8 { nch = 8 }
+        if nch > 32 { nch = 32 }
         var j: i64 = 0
         while j < nch {
             var k: i64 = j
@@ -22465,7 +23314,11 @@ impl Lowerer {
             k = k + 1
         }
         if lo.fo_nchan >= 32 {
-            // Channel table full — leave sens empty (caller falls back to scalar Var).
+            // Channel table full: this quantity has no sensitivity row. A query
+            // that reads it is refused (tg_mark_drop: the let taints the local
+            // and tg_checked_query refuses); a plain local use falls back to
+            // the scalar variance, which is right for an independent use.
+            tg_mark_drop(make_name("<channel table>"))
             return lo.fo_clear_expr_sens()
         }
         let ch = lo.fo_nchan
@@ -22541,7 +23394,7 @@ impl Lowerer {
     // costs no register and no copy.
     fn so_expr_has_hess(self) -> bool with Mut {
         var i: i64 = 0
-        while i < 36 {
+        while i < 528 {
             if self.so_expr_hess[i as usize] >= 0 {
                 return true
             }
@@ -22564,12 +23417,12 @@ impl Lowerer {
         let rp = lo.fo_bind_row_for(name)
         lo = rp.0
         let row = rp.1
-        if row < 0 || row >= 16 {
+        if row < 0 || row >= 128 {
             return lo
         }
         var i: i64 = 0
-        while i < 36 {
-            (*lo.big).so_bind_hess[(row * 36 + i) as usize] = lo.so_expr_hess[i as usize]
+        while i < 528 {
+            (*lo.big).so_bind_hess[(row * 528 + i) as usize] = lo.so_expr_hess[i as usize]
             i = i + 1
         }
         lo
@@ -22578,7 +23431,7 @@ impl Lowerer {
     // #1706: set `name`'s second-order row outright (an inlined parameter), even
     // to "none" -- so_bind_local_hess skips an empty Hessian and would leave a
     // caller local's row of the same name in place.
-    fn so_set_local_hess_row(self, name: Name, row_hess: [i64; 36]) -> Lowerer with Mut, Panic, Div {
+    fn so_set_local_hess_row(self, name: Name, row_hess: [i64; 528]) -> Lowerer with Mut, Panic, Div {
         var lo = self
         var row: i64 = 0 - 1
         var i: i64 = 0
@@ -22592,20 +23445,20 @@ impl Lowerer {
         }
         var any = false
         var j0: i64 = 0
-        while j0 < 36 { if row_hess[j0 as usize] >= 0 { any = true }; j0 = j0 + 1 }
+        while j0 < 528 { if row_hess[j0 as usize] >= 0 { any = true }; j0 = j0 + 1 }
         if row < 0 {
             if !any { return lo }
             let rp = lo.fo_bind_row_for(name)
             lo = rp.0
             row = rp.1
         }
-        if row < 0 || row >= 16 {
+        if row < 0 || row >= 128 {
             return lo
         }
         var bg = lo.big
         var j: i64 = 0
-        while j < 36 {
-            (*bg).so_bind_hess[(row * 36 + j) as usize] = row_hess[j as usize]
+        while j < 528 {
+            (*bg).so_bind_hess[(row * 528 + j) as usize] = row_hess[j as usize]
             j = j + 1
         }
         lo.big = bg
@@ -22624,12 +23477,12 @@ impl Lowerer {
                 i = i + 1
             }
         }
-        if row < 0 || row >= 16 {
+        if row < 0 || row >= 128 {
             return lo
         }
         var j: i64 = 0
-        while j < 36 {
-            lo.so_expr_hess[j as usize] = (*lo.big).so_bind_hess[(row * 36 + j) as usize]
+        while j < 528 {
+            lo.so_expr_hess[j as usize] = (*lo.big).so_bind_hess[(row * 528 + j) as usize]
             j = j + 1
         }
         lo
@@ -22765,9 +23618,9 @@ impl Lowerer {
         // because a seed register passed to a call reads back as 1.0 (#2129) and
         // arithmetic is the one boundary that preserves it.
         var ci: i64 = 0
-        while ci < 8 {
+        while ci < 32 {
             var cj: i64 = ci + 1
-            while cj < 8 {
+            while cj < 32 {
                 let si = lo.fo_expr_sens[ci as usize]
                 let sj = lo.fo_expr_sens[cj as usize]
                 let v_i = lo.fo_sigma2[ci as usize]
@@ -22859,8 +23712,8 @@ impl Lowerer {
         let slot = self.fo_field_sens_slot(key)
         if slot < 0 { return self }
         var k: i64 = 0
-        while k < 36 {
-            FO_FIELD_HESS[(slot * 36 + k) as usize] = self.so_expr_hess[k as usize]
+        while k < 528 {
+            FO_FIELD_HESS[(slot * 528 + k) as usize] = self.so_expr_hess[k as usize]
             k = k + 1
         }
         FO_FIELD_HESS_SET[slot as usize] = 1
@@ -22912,9 +23765,9 @@ impl Lowerer {
             k = k + 1
         }
         var ci: i64 = 0
-        while ci < 8 {
+        while ci < 32 {
             var cj: i64 = ci + 1
-            while cj < 8 {
+            while cj < 32 {
                 let sai = sA[ci as usize]
                 let saj = sA[cj as usize]
                 let sbi = sB[ci as usize]
@@ -23005,8 +23858,8 @@ impl Lowerer {
         if FO_FIELD_HESS_SET[slot as usize] == 1 {
             lo = lo.so_clear_expr_hess()
             var hk: i64 = 0
-            while hk < 36 {
-                lo.so_expr_hess[hk as usize] = FO_FIELD_HESS[(slot * 36 + hk) as usize]
+            while hk < 528 {
+                lo.so_expr_hess[hk as usize] = FO_FIELD_HESS[(slot * 528 + hk) as usize]
                 hk = hk + 1
             }
         }
@@ -24343,7 +25196,7 @@ impl Lowerer {
 
     fn fo_hess_is_clear(self) -> bool with Mut, Div {
         var i: i64 = 0
-        while i < 36 {
+        while i < 528 {
             if self.so_expr_hess[i as usize] >= 0 { return false }
             i = i + 1
         }
@@ -24850,9 +25703,9 @@ impl Lowerer {
             // stays -1 (structural zero).
             if lo.so_enabled && !sab_hessian_chain() && d2r >= 0 {
                 var hj8: i64 = 0
-                while hj8 < 8 {
+                while hj8 < 32 {
                     var hk8: i64 = hj8
-                    while hk8 < 8 {
+                    while hk8 < 32 {
                         let sj8 = s0[hj8 as usize]
                         let sk8 = s0[hk8 as usize]
                         let hid8 = lo.so_hess_idx(hj8, hk8)
@@ -24995,9 +25848,9 @@ impl Lowerer {
                     // snapshot. Tuple .1 is bound on the next line -- same
                     // discipline as fo_emit_analytic_deriv.
                     var hj: i64 = 0
-                    while hj < 8 {
+                    while hj < 32 {
                         var hk: i64 = hj
-                        while hk < 8 {
+                        while hk < 32 {
                             let sj = s0[hj as usize]
                             let sk = s0[hk as usize]
                             let hid = lo.so_hess_idx(hj, hk)
@@ -25187,11 +26040,11 @@ impl Lowerer {
             let d2x = d2xp.1
             if lo.so_enabled && !sab_hessian_chain() {
                 // so_expr_hess still holds H(y): arg1 was lowered after h0.
-                // Copy in place. so_snapshot_expr_hess returns [i64; 36] by
+                // Copy in place. so_snapshot_expr_hess returns [i64; 528] by
                 // value, and that shape is what this depth smashes.
-                var h1: [i64; 36] = [-1; 36]
+                var h1: [i64; 528] = [-1; 528]
                 var hi9: i64 = 0
-                while hi9 < 36 {
+                while hi9 < 528 {
                     h1[hi9 as usize] = lo.so_expr_hess[hi9 as usize]
                     hi9 = hi9 + 1
                 }
@@ -25220,9 +26073,9 @@ impl Lowerer {
                 lo = dxyp.0
                 let dxy = dxyp.1
                 var hj9: i64 = 0
-                while hj9 < 8 {
+                while hj9 < 32 {
                     var hk9: i64 = hj9
-                    while hk9 < 8 {
+                    while hk9 < 32 {
                         let sj9 = s0[hj9 as usize]
                         let sk9 = s0[hk9 as usize]
                         let syj9 = s1[hj9 as usize]
@@ -26081,7 +26934,7 @@ impl Lowerer {
         var vals: [i64; 8] = [0 - 1; 8]
         var vars: [i64; 8] = [0 - 1; 8]
         var sens: [i64; 256] = [0 - 1; 256]
-        var hess: [i64; 288] = [0 - 1; 288]
+        var hess: [i64; 4224] = [0 - 1; 4224]
         ac = args
         var i: i64 = 0
         while i < nargs {
@@ -26111,10 +26964,10 @@ impl Lowerer {
                             sens[(i * 32 + k) as usize] = lo.fo_expr_sens[k as usize]
                             k = k + 1
                         }
-                        if lo.so_enabled && i < 8 {
+                        if lo.so_enabled && i < 32 {
                             var hk: i64 = 0
-                            while hk < 36 {
-                                hess[(i * 36 + hk) as usize] = lo.so_expr_hess[hk as usize]
+                            while hk < 528 {
+                                hess[(i * 528 + hk) as usize] = lo.so_expr_hess[hk as usize]
                                 hk = hk + 1
                             }
                         }
@@ -26139,7 +26992,7 @@ impl Lowerer {
         let saved_bind_box = lo.fo_bind
         lo.fo_bind = lower_fo_bind_table_clone(&(*saved_bind_box))
         let saved_bind_count = lo.fo_bind_count
-        let saved_hess_rows = lower_hess_rows_copy(&(*lo.big).so_bind_hess)
+        let saved_hess_base = so_rows_save(&(*lo.big).so_bind_hess, saved_bind_count)
         let saved_locals = (*lo.locals).count
         lo.scope_depth = lo.scope_depth + 1
         FO_INLINE_DEPTH = FO_INLINE_DEPTH + 1
@@ -26162,11 +27015,11 @@ impl Lowerer {
             }
             lo = lo.fo_bind_local_sens(pname)
             if lo.so_enabled {
-                var hrow: [i64; 36] = [0 - 1; 36]
+                var hrow: [i64; 528] = [0 - 1; 528]
                 if isf[i as usize] == 1 {
                     var hk2: i64 = 0
-                    while hk2 < 36 {
-                        hrow[hk2 as usize] = hess[(i * 36 + hk2) as usize]
+                    while hk2 < 528 {
+                        hrow[hk2 as usize] = hess[(i * 528 + hk2) as usize]
                         hk2 = hk2 + 1
                     }
                 }
@@ -26194,9 +27047,7 @@ impl Lowerer {
         (*lo.locals).count = saved_locals
         lo.fo_bind = saved_bind_box
         lo.fo_bind_count = saved_bind_count
-        var bigr = lo.big
-        (*bigr).so_bind_hess = saved_hess_rows
-        lo.big = bigr
+        lo = lo.so_rows_restore(saved_hess_base, saved_bind_count)
         if fo_inline_error_grew(lo.error_count, lo.had_error, fo_err_snap) || result < 0 {
             lo.error_count = fo_err_snap.error_count
             lo.had_error = fo_err_snap.had_error
@@ -26211,7 +27062,7 @@ impl Lowerer {
         }
         lo = lo.fo_restore_expr_sens(out_sens)
         var hk3: i64 = 0
-        while hk3 < 36 {
+        while hk3 < 528 {
             lo.so_expr_hess[hk3 as usize] = out_hess[hk3 as usize]
             hk3 = hk3 + 1
         }
@@ -26931,7 +27782,7 @@ impl Lowerer {
     fn fo_step_init_h(self) -> Lowerer with Mut, Panic, Div, Alloc, IO {
         var lo = self
         var i: i64 = 0
-        while i < 36 {
+        while i < 528 {
             let sp = lo.fresh_reg()
             lo = sp.0
             FO_STEP_H[i as usize] = sp.1
@@ -26950,7 +27801,7 @@ impl Lowerer {
             k = k + 1
         }
         k = 0
-        while k < 36 {
+        while k < 528 {
             FO_STEP_OUT_H[k as usize] = FO_STEP_ZERO
             k = k + 1
         }
@@ -26960,7 +27811,7 @@ impl Lowerer {
     fn fo_step_store_hess(self) -> Lowerer with Mut, Panic, Div, Alloc, IO {
         var lo = self
         var i: i64 = 0
-        while i < 36 {
+        while i < 528 {
             let h = lo.so_expr_hess[i as usize]
             if h >= 0 {
                 FO_STEP_OUT_H[i as usize] = h
@@ -27132,7 +27983,7 @@ impl Lowerer {
                 k = k + 1
             }
             k = 0
-            while k < 36 {
+            while k < 528 {
                 FO_STEP_OUT_H[k as usize] = FO_STEP_H[k as usize]
                 k = k + 1
             }
@@ -27163,8 +28014,8 @@ impl Lowerer {
                 k2 = k2 + 1
             }
             k2 = 0
-            while k2 < 36 {
-                let hk = FO_STEP_ARGH[(pi * 36 + k2) as usize]
+            while k2 < 528 {
+                let hk = FO_STEP_ARGH[(pi * 528 + k2) as usize]
                 if hk >= 0 {
                     FO_STEP_OUT_H[k2 as usize] = hk
                 } else {
@@ -27206,14 +28057,14 @@ impl Lowerer {
                 }
                 ku = ku + 1
             }
-            var uh: [i64; 36] = [-1; 36]
+            var uh: [i64; 528] = [-1; 528]
             ku = 0
-            while ku < 36 {
+            while ku < 528 {
                 uh[ku as usize] = FO_STEP_OUT_H[ku as usize]
                 ku = ku + 1
             }
             ku = 0
-            while ku < 36 {
+            while ku < 528 {
                 if uh[ku as usize] == FO_STEP_ZERO {
                     FO_STEP_OUT_H[ku as usize] = FO_STEP_ZERO
                 } else {
@@ -27235,28 +28086,28 @@ impl Lowerer {
                             lo = lo.fo_emit_step_node(&(*l))
                             let lv = FO_STEP_OUT_VAL
                             var ls: [i64; 32] = [-1; 32]
-                            var lh: [i64; 36] = [-1; 36]
+                            var lh: [i64; 528] = [-1; 528]
                             var kb: i64 = 0
                             while kb < 32 {
                                 ls[kb as usize] = FO_STEP_OUT_S[kb as usize]
                                 kb = kb + 1
                             }
                             kb = 0
-                            while kb < 36 {
+                            while kb < 528 {
                                 lh[kb as usize] = FO_STEP_OUT_H[kb as usize]
                                 kb = kb + 1
                             }
                             lo = lo.fo_emit_step_node(&(*r))
                             let rv = FO_STEP_OUT_VAL
                             var rs: [i64; 32] = [-1; 32]
-                            var rh: [i64; 36] = [-1; 36]
+                            var rh: [i64; 528] = [-1; 528]
                             kb = 0
                             while kb < 32 {
                                 rs[kb as usize] = FO_STEP_OUT_S[kb as usize]
                                 kb = kb + 1
                             }
                             kb = 0
-                            while kb < 36 {
+                            while kb < 528 {
                                 rh[kb as usize] = FO_STEP_OUT_H[kb as usize]
                                 kb = kb + 1
                             }
@@ -27283,7 +28134,7 @@ impl Lowerer {
     // The else-expression is differentiated in forward mode and the step is
     // repeated n times. A recursive call reads the loop-carried value and
     // sensitivity. A literal contributes 0. A parameter contributes its channel.
-    fn fo_emit_recur_expr_body(self, step: &Expr, n_reg: i64, vals: [i64; 16], sens: [i64; 512], hess: [i64; 576]) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+    fn fo_emit_recur_expr_body(self, step: &Expr, n_reg: i64, vals: [i64; 16], sens: [i64; 512], hess: [i64; 8448]) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         var lo = self
         var i: i64 = 0
         while i < 16 {
@@ -27296,7 +28147,7 @@ impl Lowerer {
             i = i + 1
         }
         i = 0
-        while i < 576 {
+        while i < 8448 {
             FO_STEP_ARGH[i as usize] = hess[i as usize]
             i = i + 1
         }
@@ -27357,7 +28208,7 @@ impl Lowerer {
             kc = kc + 1
         }
         var hc: i64 = 0
-        while hc < 36 {
+        while hc < 528 {
             lo = lo.emit(ir_copy(FO_STEP_H[hc as usize], FO_STEP_OUT_H[hc as usize]))
             lo = lo.emit(ir_mark_float_reg(FO_STEP_H[hc as usize]))
             hc = hc + 1
@@ -27386,14 +28237,14 @@ impl Lowerer {
             k = k + 1
         }
         var hi: i64 = 0
-        while hi < 36 {
+        while hi < 528 {
             lo.so_expr_hess[hi as usize] = FO_STEP_H[hi as usize]
             hi = hi + 1
         }
         lo.fo_emit_var_from_sens()
     }
 
-    fn fo_emit_recur_expr_scale(self, fd: &FnDef, n_reg: i64, vals: [i64; 16], sens: [i64; 512], hess: [i64; 576]) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+    fn fo_emit_recur_expr_scale(self, fd: &FnDef, n_reg: i64, vals: [i64; 16], sens: [i64; 512], hess: [i64; 8448]) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         match (*fd).body.stmts {
             Some(only) => {
                 match (*only).head.expr {
@@ -27410,7 +28261,7 @@ impl Lowerer {
         }
     }
 
-    fn fo_emit_recur_block_scale(self, fd: &FnDef, n_reg: i64, vals: [i64; 16], sens: [i64; 512], vars: [i64; 16], isf: [i64; 16], hess: [i64; 576]) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+    fn fo_emit_recur_block_scale(self, fd: &FnDef, n_reg: i64, vals: [i64; 16], sens: [i64; 512], vars: [i64; 16], isf: [i64; 16], hess: [i64; 8448]) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         var lo = self
         match (*fd).body.stmts {
             Some(only) => {
@@ -27436,7 +28287,7 @@ impl Lowerer {
     // The else block is lowered by the ordinary let/expression lowerer. The
     // recursive call reads the loop-carried value and sensitivity instead of
     // inlining another copy of the function.
-    fn fo_emit_recur_block_body(self, stmts: &Option<Box<StmtList>>, fd: &FnDef, n_reg: i64, vals: [i64; 16], sens: [i64; 512], vars: [i64; 16], isf: [i64; 16], hess: [i64; 576]) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+    fn fo_emit_recur_block_body(self, stmts: &Option<Box<StmtList>>, fd: &FnDef, n_reg: i64, vals: [i64; 16], sens: [i64; 512], vars: [i64; 16], isf: [i64; 16], hess: [i64; 8448]) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         var lo = self
         var i: i64 = 0
         while i < 16 {
@@ -27451,7 +28302,7 @@ impl Lowerer {
         let saved_bind_box = lo.fo_bind
         lo.fo_bind = lower_fo_bind_table_clone(&(*saved_bind_box))
         let saved_bind_count = lo.fo_bind_count
-        let saved_hess_rows = lower_hess_rows_copy(&(*lo.big).so_bind_hess)
+        let saved_hess_base = so_rows_save(&(*lo.big).so_bind_hess, saved_bind_count)
         let saved_locals = (*lo.locals).count
         let saved_carry = FO_STEP_CARRY
         lo.scope_depth = lo.scope_depth + 1
@@ -27477,10 +28328,10 @@ impl Lowerer {
                         }
                         lo = lo.fo_bind_local_sens(pname)
                         if lo.so_enabled {
-                            var hrow: [i64; 36] = [0 - 1; 36]
+                            var hrow: [i64; 528] = [0 - 1; 528]
                             var hk: i64 = 0
-                            while hk < 36 {
-                                hrow[hk as usize] = hess[(i * 36 + hk) as usize]
+                            while hk < 528 {
+                                hrow[hk as usize] = hess[(i * 528 + hk) as usize]
                                 hk = hk + 1
                             }
                             lo = lo.so_set_local_hess_row(pname, hrow)
@@ -27598,7 +28449,7 @@ impl Lowerer {
             kc = kc + 1
         }
         var hc: i64 = 0
-        while hc < 36 {
+        while hc < 528 {
             let hk = lo.so_expr_hess[hc as usize]
             if hk >= 0 {
                 lo = lo.emit(ir_copy(FO_STEP_H[hc as usize], hk))
@@ -27620,9 +28471,7 @@ impl Lowerer {
         (*lo.locals).count = saved_locals
         lo.fo_bind = saved_bind_box
         lo.fo_bind_count = saved_bind_count
-        var bigr = lo.big
-        (*bigr).so_bind_hess = saved_hess_rows
-        lo.big = bigr
+        lo = lo.so_rows_restore(saved_hess_base, saved_bind_count)
         lo = lo.fo_clear_expr_sens().so_clear_expr_hess()
         var k: i64 = 0
         while k < 32 {
@@ -27639,7 +28488,7 @@ impl Lowerer {
             k = k + 1
         }
         var hi: i64 = 0
-        while hi < 36 {
+        while hi < 528 {
             lo.so_expr_hess[hi as usize] = FO_STEP_H[hi as usize]
             hi = hi + 1
         }
@@ -27835,7 +28684,7 @@ impl Lowerer {
         var sens: [i64; 512] = [0 - 1; 512]
         // Second-order rows of each f64 argument (hessian_of / sensitivity_of
         // in a function with second order on), 36 per argument.
-        var hess: [i64; 576] = [0 - 1; 576]
+        var hess: [i64; 8448] = [0 - 1; 8448]
         var i: i64 = 0
         ac = args
         var pa = &fd.params
@@ -27897,8 +28746,8 @@ impl Lowerer {
                         }
                         if lo.so_enabled && i < 16 {
                             var hk: i64 = 0
-                            while hk < 36 {
-                                hess[(i * 36 + hk) as usize] = lo.so_expr_hess[hk as usize]
+                            while hk < 528 {
+                                hess[(i * 528 + hk) as usize] = lo.so_expr_hess[hk as usize]
                                 hk = hk + 1
                             }
                         }
@@ -28012,7 +28861,7 @@ impl Lowerer {
         let saved_bind_box = lo.fo_bind
         lo.fo_bind = lower_fo_bind_table_clone(&(*saved_bind_box))
         let saved_bind_count = lo.fo_bind_count
-        let saved_hess_rows = lower_hess_rows_copy(&(*lo.big).so_bind_hess)
+        let saved_hess_base = so_rows_save(&(*lo.big).so_bind_hess, saved_bind_count)
         let saved_locals = (*lo.locals).count
         lo.scope_depth = lo.scope_depth + 1
         FO_INLINE_STACK[FO_INLINE_DEPTH as usize] = id
@@ -28025,7 +28874,7 @@ impl Lowerer {
                 lo = lo.bind_local_ref(self_name)
             }
             lo = lo.fo_clear_expr_sens().fo_bind_local_sens(self_name)
-            if lo.so_enabled { lo = lo.so_set_local_hess_row(self_name, [0 - 1; 36]) }
+            if lo.so_enabled { lo = lo.so_set_local_hess_row(self_name, [0 - 1; 528]) }
         }
         var pc = &fd.params
         i = 0
@@ -28043,7 +28892,7 @@ impl Lowerer {
                             lo = lo.bind_local_ref(sname)
                         }
                         lo = lo.fo_clear_expr_sens().fo_bind_local_sens(sname)
-                        if lo.so_enabled { lo = lo.so_set_local_hess_row(sname, [0 - 1; 36]) }
+                        if lo.so_enabled { lo = lo.so_set_local_hess_row(sname, [0 - 1; 528]) }
                         i = i + 1
                     } else if !(*pl).head.is_self {
                         let pname = (*pl).head.name
@@ -28072,10 +28921,10 @@ impl Lowerer {
                         if lo.so_enabled {
                             // The parameter's second-order row: the argument's,
                             // or none (never a caller local's of the same name).
-                            var hrow: [i64; 36] = [0 - 1; 36]
+                            var hrow: [i64; 528] = [0 - 1; 528]
                             if isf[i as usize] >= 1 && i < 16 {
                                 var hk2: i64 = 0
-                                while hk2 < 36 { hrow[hk2 as usize] = hess[(i * 36 + hk2) as usize]; hk2 = hk2 + 1 }
+                                while hk2 < 528 { hrow[hk2 as usize] = hess[(i * 528 + hk2) as usize]; hk2 = hk2 + 1 }
                             }
                             lo = lo.so_set_local_hess_row(pname, hrow)
                         }
@@ -28244,9 +29093,7 @@ impl Lowerer {
         (*lo.locals).count = saved_locals
         lo.fo_bind = saved_bind_box
         lo.fo_bind_count = saved_bind_count
-        var bigr = lo.big
-        (*bigr).so_bind_hess = saved_hess_rows
-        lo.big = bigr
+        lo = lo.so_rows_restore(saved_hess_base, saved_bind_count)
         if fo_inline_error_grew(lo.error_count, lo.had_error, fo_err_snap) || !ok || result < 0 {
             lo.error_count = fo_err_snap.error_count
             lo.had_error = fo_err_snap.had_error
@@ -28261,7 +29108,7 @@ impl Lowerer {
         }
         lo = lo.fo_restore_expr_sens(out_sens)
         var hk3: i64 = 0
-        while hk3 < 36 {
+        while hk3 < 528 {
             lo.so_expr_hess[hk3 as usize] = out_hess[hk3 as usize]
             hk3 = hk3 + 1
         }
@@ -28402,9 +29249,9 @@ impl Lowerer {
             }
             k = k + 1
         }
-        var mhess: [i64; 36] = [0 - 1; 36]
+        var mhess: [i64; 528] = [0 - 1; 528]
         var h: i64 = 0
-        while h < 36 {
+        while h < 528 {
             if t_hess[h as usize] >= 0 || e_hess[h as usize] >= 0 {
                 let rp = lo.fresh_reg()
                 lo = rp.0
@@ -28453,7 +29300,7 @@ impl Lowerer {
             k = k + 1
         }
         h = 0
-        while h < 36 {
+        while h < 528 {
             if mhess[h as usize] >= 0 { lo = lo.emit(ir_mark_float_reg(mhess[h as usize])) }
             lo.so_expr_hess[h as usize] = mhess[h as usize]
             h = h + 1
@@ -28473,7 +29320,7 @@ impl Lowerer {
     // One path's copies into the if-merge registers (see lower_if_variance_runtime_ref).
     // `then_side`: channels [nch0, nch_t) were seeded by the then-arm, [nch_t, nch_e)
     // by the else-arm; a channel seeded on the other path reads a zero sigma^2 here.
-    fn fo_if_merge_side(self, mv: i64, var_r: i64, trunc: bool, msens: [i64; 32], sens: [i64; 32], mhess: [i64; 36], hess: [i64; 36], msig: [i64; 32], nch_t: i64, nch_e: i64, then_side: bool, mpsig: i64, mpsens: i64) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+    fn fo_if_merge_side(self, mv: i64, var_r: i64, trunc: bool, msens: [i64; 32], sens: [i64; 32], mhess: [i64; 528], hess: [i64; 528], msig: [i64; 32], nch_t: i64, nch_e: i64, then_side: bool, mpsig: i64, mpsens: i64) -> Lowerer with Mut, Panic, Div, Alloc, IO {
         let zp = self.emit_f64_const(0.0)
         var lo = zp.0
         let zero = zp.1
@@ -28510,7 +29357,7 @@ impl Lowerer {
             k = k + 1
         }
         var h: i64 = 0
-        while h < 36 {
+        while h < 528 {
             let m = mhess[h as usize]
             if m >= 0 {
                 let src = hess[h as usize]
@@ -28613,9 +29460,9 @@ impl Lowerer {
                     }
                     k = k + 1
                 }
-                var mhess: [i64; 36] = [0 - 1; 36]
+                var mhess: [i64; 528] = [0 - 1; 528]
                 var h: i64 = 0
-                while h < 36 {
+                while h < 528 {
                     if t_hess[h as usize] >= 0 || e_hess[h as usize] >= 0 {
                         let rp = lo.fresh_reg()
                         lo = rp.0
@@ -28662,7 +29509,7 @@ impl Lowerer {
                     k = k + 1
                 }
                 h = 0
-                while h < 36 {
+                while h < 528 {
                     if mhess[h as usize] >= 0 { lo = lo.emit(ir_mark_float_reg(mhess[h as usize])) }
                     lo.so_expr_hess[h as usize] = mhess[h as usize]
                     h = h + 1
@@ -28697,7 +29544,7 @@ impl Lowerer {
                 k = k + 1
             }
             var hi: i64 = 0
-            while hi < 36 {
+            while hi < 528 {
                 let src_h = FO_STEP_H[hi as usize]
                 if src_h >= 0 {
                     let hp = lo.fresh_reg()
@@ -28746,7 +29593,12 @@ impl Lowerer {
                 // that is then refused belongs to code that never runs.
                 let drop_before = TG_DROP
                 TG_DROP = 0
+                let sites_before = TG_SITE_N
                 let inl0 = lo_x.fo_inline_call_variance(callee_name, &(*e).args)
+                // The paste's inner calls are keyed by the callee's own spans: a site left by
+                // it (used while it was pasted) would be found again by the next paste of the
+                // same body, with the registers of this one.
+                TG_SITE_N = sites_before
                 if inl0.1 >= 0 {
                     if drop_before == 1 { TG_DROP = 1 }
                     return inl0
@@ -28762,10 +29614,10 @@ impl Lowerer {
                     if cv.1 >= 0 {
                         return cv
                     }
-                    if FO_INLINE_TRUNCATED == 0 && cv.0.expr_result_is_float_ref(e) && cv.0.tg_call_args_uncertain(e) { tg_mark_drop(callee_name) }
+                    if FO_INLINE_TRUNCATED == 0 && cv.0.expr_result_is_float_ref(e) && (cv.0.tg_call_args_uncertain(e) || tg_unreg_draws_call(callee_name)) { tg_mark_drop(callee_name) }
                     return (cv.0.fo_clear_expr_sens().so_clear_expr_hess(), -1)
                 }
-                if FO_INLINE_TRUNCATED == 0 && inl.0.expr_result_is_float_ref(e) && inl.0.tg_call_args_uncertain(e) { tg_mark_drop(callee_name) }
+                if FO_INLINE_TRUNCATED == 0 && inl.0.expr_result_is_float_ref(e) && (inl.0.tg_call_args_uncertain(e) || tg_unreg_draws_call(callee_name)) { tg_mark_drop(callee_name) }
                 return (inl.0.fo_clear_expr_sens().so_clear_expr_hess(), -1)
             }
             _ => {}
@@ -28848,7 +29700,12 @@ impl Lowerer {
                     // Speculative re-lowering: see lower_call_expr_variance_ref.
                     let drop_before = TG_DROP
                     TG_DROP = 0
+                    let sites_before = TG_SITE_N
                     let inl0 = lo_x.fo_inline_call_variance(callee_name, &(*e).args)
+                    // The paste's inner calls are keyed by the callee's own spans: a site left by
+                    // it (used while it was pasted) would be found again by the next paste of the
+                    // same body, with the registers of this one.
+                    TG_SITE_N = sites_before
                     if inl0.1 >= 0 {
                         if drop_before == 1 { TG_DROP = 1 }
                         return inl0
@@ -28864,10 +29721,10 @@ impl Lowerer {
                         if cv.1 >= 0 {
                             return cv
                         }
-                        if FO_INLINE_TRUNCATED == 0 && cv.0.expr_result_is_float_ref(e) && cv.0.tg_call_args_uncertain(e) { tg_mark_drop(callee_name) }
+                        if FO_INLINE_TRUNCATED == 0 && cv.0.expr_result_is_float_ref(e) && (cv.0.tg_call_args_uncertain(e) || tg_unreg_draws_call(callee_name)) { tg_mark_drop(callee_name) }
                         return (cv.0.fo_clear_expr_sens().so_clear_expr_hess(), -1)
                     }
-                    if FO_INLINE_TRUNCATED == 0 && inl.0.expr_result_is_float_ref(e) && inl.0.tg_call_args_uncertain(e) { tg_mark_drop(callee_name) }
+                    if FO_INLINE_TRUNCATED == 0 && inl.0.expr_result_is_float_ref(e) && (inl.0.tg_call_args_uncertain(e) || tg_unreg_draws_call(callee_name)) { tg_mark_drop(callee_name) }
                     return (inl.0.fo_clear_expr_sens().so_clear_expr_hess(), -1)
                 }
                 _ => {}
@@ -28888,8 +29745,12 @@ impl Lowerer {
                 } else {
                     // #2827: rows cover only the channels that existed at the
                     // declaration; the rest of the variance is the residual.
+                    // A residual that is a literal zero here (straight-line code, no
+                    // assignment has written it) adds nothing, and must not take one
+                    // of the 32 channels: 32 measured quantities accumulated into a
+                    // `var` declared first leave no room for it.
                     let resid_v = lo.fo_local_resid_slot((*e).name)
-                    if resid_v >= 0 {
+                    if resid_v >= 0 && !(lo.loop_depth == 0 && lo.fo_resid_never_written((*e).name)) {
                         lo = lo.fo_add_channel_for_variance(resid_v)
                     }
                 }
@@ -29032,14 +29893,14 @@ impl Lowerer {
                             if mtg.1 >= 0 {
                                 return mtg
                             }
-                            if FO_INLINE_TRUNCATED == 0 && mtg.0.expr_result_is_float_ref(e) && mtg.0.tg_call_args_uncertain(e) { tg_mark_drop(mangled) }
+                            if FO_INLINE_TRUNCATED == 0 && mtg.0.expr_result_is_float_ref(e) && (mtg.0.tg_call_args_uncertain(e) || tg_unreg_draws_call(mangled)) { tg_mark_drop(mangled) }
                             return (mtg.0.fo_clear_expr_sens().so_clear_expr_hess(), -1)
                         }
                     }
                 }
                 _ => {}
             }
-            if self.expr_result_is_float_ref(e) && self.tg_call_args_uncertain(e) { tg_mark_drop((*e).name) }
+            if self.expr_result_is_float_ref(e) && (self.tg_call_args_uncertain(e) || tg_unreg_method_short_draws((*e).name)) { tg_mark_drop((*e).name) }
             return (self.fo_clear_expr_sens().so_clear_expr_hess(), -1)
         }
         if (*e).kind == ExprKind::ExprMatch {
@@ -29060,7 +29921,7 @@ impl Lowerer {
             let vin = pair_in.1
             FO_LOGN_ACTIVE = 0
             var hi: i64 = 0
-            while hi < 36 && lo.so_enabled {
+            while hi < 528 && lo.so_enabled {
                 let hk = lo.so_expr_hess[hi as usize]
                 if hk >= 0 {
                     let zp2 = lo.emit_f64_const(0.0)
@@ -34563,6 +35424,10 @@ impl Lowerer {
                     stmt_idx = stmt_idx + 1
                     lo = pair.0
                     reg = pair.1
+                    // #3547: the first channel may have just appeared in the block a
+                    // `var` was declared in; give that var its slots before anything
+                    // assigns it.
+                    if FO_LATE_N > 0 && lo.fo_nchan > 0 { lo = lo.fo_late_alloc() }
                     saw_stmt = true
                     current = &(*list).tail
                 }
@@ -34689,7 +35554,7 @@ impl Lowerer {
     }
 
     fn lower_stmt_ref(self, s: &Stmt) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
-        if s.kind == StmtKind::StmtLet {
+        var sr = if s.kind == StmtKind::StmtLet {
             self.lower_let_stmt_ref(s, false)
         } else if s.kind == StmtKind::StmtVar {
             self.lower_let_stmt_ref(s, true)
@@ -34698,6 +35563,10 @@ impl Lowerer {
         } else {
             self.lower_assign_stmt_ref(s)
         }
+        // #3547: the first channel just appeared in the block a `var` was
+        // declared in; give that var its slots here, before anything assigns it.
+        if FO_LATE_N > 0 && sr.0.fo_nchan > 0 { sr.0 = sr.0.fo_late_alloc() }
+        sr
     }
 
     fn lower_stmt(self, s: Stmt) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
@@ -36418,6 +37287,20 @@ impl Lowerer {
             lo = lo.alloc_variance_slot_for_local(s.name)
             lo = lo.fo_alloc_sens_slots_for_local(s.name)
             lo = lo.so_alloc_hess_slots_for_local(s.name)
+        } else if is_mut && lo.fo_nchan == 0 && !bind_as_ref && fixed_array_len < 0 && !rhs_is_int_or_bool_lit && FO_LATE_N < 64 && !lo.probe_mode {
+            // #3547: declared before the first measure(): remember it.
+            match s.expr {
+                Some(rhs_late) => {
+                    if lo.expr_result_is_float_ref(&(*rhs_late)) {
+                        FO_LATE_NAME[FO_LATE_N as usize] = ir_intern_name(s.name)
+                        FO_LATE_DEPTH[FO_LATE_N as usize] = lo.loop_depth
+                        FO_LATE_SCOPE[FO_LATE_N as usize] = lo.scope_depth
+                        FO_LATE_DONE[FO_LATE_N as usize] = 0
+                        FO_LATE_N = FO_LATE_N + 1
+                    }
+                }
+                None => {}
+            }
         }
         lo.lower_let_stmt_type_metadata_ref(s, reg, rhs_array_elem_is_float)
     }
@@ -37679,6 +38562,23 @@ impl Lowerer {
                                     }
                                 } else {
                                     lo = lo.bind_local_variance_reg((*target_expr).name, rhs_variance)
+                                }
+                                // #3547: a `var` declared before the first measure() that could
+                                // not be given its slots (the first measure() sat in a nested
+                                // block) cannot carry a loop-carried update of an uncertain
+                                // value: queries that read it are refused.
+                                if FO_LATE_N > 0 {
+                                    match s.expr {
+                                        Some(rhs_expr_late) => {
+                                            if fo_late_pending_in_loop((*target_expr).name, &(*rhs_expr_late), &lo) {
+                                                let late_sv = TG_DROP_NAME
+                                                TG_DROP_NAME = make_name("<var declared before the first measure>")
+                                                tg_taint((*target_expr).name)
+                                                TG_DROP_NAME = late_sv
+                                            }
+                                        }
+                                        None => {}
+                                    }
                                 }
                                 if lo.fo_expr_has_sens() {
                                     let sens_pair = lo.fo_copy_expr_sens_into_local((*target_expr).name)
@@ -40539,7 +41439,7 @@ impl Lowerer {
                     }
                     _ => {}
                 }
-                if j >= 0 && j < 8 && k >= 0 && k < 8 {
+                if j >= 0 && j < 32 && k >= 0 && k < 32 {
                     let idx = lo.so_hess_idx(j, k)
                     let slot = lo.so_expr_hess[idx as usize]
                     if slot >= 0 {
@@ -40568,8 +41468,7 @@ impl Lowerer {
     //
     // Built on this tree's own second-order machinery rather than imported: the
     // FO/SO walk in lower_expr_variance_ref populates so_expr_hess, so_hess_idx
-    // addresses it, and fo_sigma2 holds each channel's variance. Channels are
-    // capped at 8 here because so_hess_idx is defined over 8x8.
+    // addresses it, and fo_sigma2 holds each channel's variance (32 channels).
     // correlate(a, b, rho): record Cov between the channels a and b carry, and
     // evaluate to rho so the call is usable as an expression.
     //
@@ -40651,11 +41550,20 @@ impl Lowerer {
         FO_LOGN_ACTIVE = 0
         match *args {
             Some(list) => {
-                // Walk first, so the Hessian and the sigmas exist to read.
+                // First-order mean: the expression evaluated at the seed means.
+                // Lowered BEFORE the walk: a call in it goes through its clone
+                // and records a site, which the walk then reads, so the argument
+                // is evaluated exactly once (a callee with an IO effect runs
+                // once). Walking first emitted the clone and this lowering then
+                // emitted the call again.
+                let vp = self.lower_expr_ref(&(*list).head)
+                let vlo = vp.0
+                let mean1 = vp.1
+                // Walk next, so the Hessian and the sigmas exist to read.
                 let saved_loops = FO_INLINE_ALLOW_LOOPS
                 FO_INLINE_ALLOW_LOOPS = 1
                 TG_QUERY_DEPTH = TG_QUERY_DEPTH + 1
-                let pair_v = self.lower_expr_variance_ref(&(*list).head)
+                let pair_v = vlo.lower_expr_variance_ref(&(*list).head)
                 TG_QUERY_DEPTH = TG_QUERY_DEPTH - 1
                 FO_INLINE_ALLOW_LOOPS = saved_loops
                 var lo = pair_v.0
@@ -40666,7 +41574,7 @@ impl Lowerer {
                 lo = hp.0
                 let half = hp.1
                 var k: i64 = 0
-                while k < 8 {
+                while k < 32 {
                     let idx = lo.so_hess_idx(k, k)
                     let hreg = lo.so_expr_hess[idx as usize]
                     let sig = lo.fo_sigma2[k as usize]
@@ -40697,9 +41605,9 @@ impl Lowerer {
                 // the closed form for E2[(x+y)^2] with sigma_x = 0.1,
                 // sigma_y = 0.2: independent 9.05, rho = 1 gives 9.09.
                 var oi: i64 = 0
-                while oi < 8 {
+                while oi < 32 {
                     var oj: i64 = oi + 1
-                    while oj < 8 {
+                    while oj < 32 {
                         let hij = lo.so_expr_hess[lo.so_hess_idx(oi, oj) as usize]
                         if fo_cov_rho_live(oi, oj) && hij >= 0 {
                             // Inline, for the same reason as the variance cross term: a helper
@@ -40741,10 +41649,6 @@ impl Lowerer {
                     }
                     oi = oi + 1
                 }
-                // First-order mean: the expression evaluated at the seed means.
-                let vp = lo.lower_expr_ref(&(*list).head)
-                lo = vp.0
-                let mean1 = vp.1
                 if FO_LOGN_ACTIVE != 0 {
                     return lo.fo_emit_lognormal_mean(FO_LOGN_U, FO_LOGN_V)
                 }
