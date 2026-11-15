@@ -88,7 +88,7 @@ fn ep28_max(a: f64, b: f64) -> f64 {
 }
 
 // fu_plasma reference value for rapamycin (Schreiber 1991)
-fn ep28_fu_ref() -> f64 { return 0.08 }
+pub fn ep28_fu_ref() -> f64 { return 0.08 }
 
 // ============================================================================
 // SIMULATION METRICS
@@ -355,6 +355,33 @@ pub fn ep28_rapamycin_priors() -> EpPrior28 with Mut {
     kn[5] = Knowledge { value: m[5], variance: v[5], epsilon: c[5], provenance: "Valoteau1996_CV25|CHEBI:9168" }
     kn[6] = Knowledge { value: m[6], variance: v[6], epsilon: c[6], provenance: "capped_model_CV40|CHEBI:9168" }
 
+    EpPrior28 { kn: kn, n: 7 }
+}
+
+// Priors for pbpk28_params_rapamycin_fullvd(). The clearance, unbound-fraction
+// and brain entries are those of ep28_rapamycin_priors(). The liver, kidney
+// and adipose Kp means are the capped means times the full-volume factor
+// (20.815064), so each mean equals the nominal the Jacobian is taken at; the
+// coefficients of variation are unchanged (25%, 25%, 40%).
+pub fn ep28_rapamycin_fullvd_priors() -> EpPrior28 with Mut {
+    var m: [f64; 8] = [0.0; 8]
+    var v: [f64; 8] = [0.0; 8]
+    var c: [f64; 8] = [0.0; 8]
+    m[0] = 12.4;        v[0] = 22.202944;   c[0] = 0.65
+    m[1] = 0.3;         v[1] = 0.0144;      c[1] = 0.50
+    m[2] = 0.08;        v[2] = 0.0004;      c[2] = 0.72
+    m[3] = 0.10;        v[3] = 0.000625;    c[3] = 0.63
+    m[4] = 112.401346;  v[4] = 789.628910;  c[4] = 0.60
+    m[5] = 87.423269;   v[5] = 477.676748;  c[5] = 0.55
+    m[6] = 6.244519;    v[6] = 6.239043;    c[6] = 0.40
+    var kn: [Knowledge[f64]; 8] = [Knowledge(0.0, ε=1.0, prov="unused"); 8]
+    kn[0] = Knowledge { value: m[0], variance: v[0], epsilon: c[0], provenance: "Jiao2009_popPK_CV38|CHEBI:9168" }
+    kn[1] = Knowledge { value: m[1], variance: v[1], epsilon: c[1], provenance: "cl_renal_estimate_CV40|CHEBI:9168" }
+    kn[2] = Knowledge { value: m[2], variance: v[2], epsilon: c[2], provenance: "Schreiber1991_CV25|CHEBI:9168" }
+    kn[3] = Knowledge { value: m[3], variance: v[3], epsilon: c[3], provenance: "Lampen1998_Pgp_CV25|CHEBI:9168" }
+    kn[4] = Knowledge { value: m[4], variance: v[4], epsilon: c[4], provenance: "Valoteau1996_CV25_x_fullvd_factor|CHEBI:9168" }
+    kn[5] = Knowledge { value: m[5], variance: v[5], epsilon: c[5], provenance: "Valoteau1996_CV25_x_fullvd_factor|CHEBI:9168" }
+    kn[6] = Knowledge { value: m[6], variance: v[6], epsilon: c[6], provenance: "capped_model_CV40_x_fullvd_factor|CHEBI:9168" }
     EpPrior28 { kn: kn, n: 7 }
 }
 
@@ -826,8 +853,29 @@ fn ep28_jacobian_fill_oral(
         let pk_i = priors.kn[i]
         let h = ep28_fdiff_h(pk_i.value, pk_i.variance)
         if h > 0.0 {
-            // idx 0 perturbs the CYP2D6 formation sink (OralInputs28).
-            if i == 0 {
+            // idx 0 is the clearance the prior describes. With a formation
+            // sink configured (venlafaxine: cl_form > 0) that is the liver
+            // sink. Without one (midazolam, haloperidol: cl_form = 0, the
+            // hepatic clearance of the prior is cl_central) it is
+            // cl_central. Perturbing an absent sink around zero gave a
+            // column that was not the sensitivity to the prior's quantity
+            // (measured 2026-11-14: u(AUC_blood)/AUC_blood of 73% for
+            // midazolam and 443% for haloperidol from that column alone).
+            if i == 0 && !(base_oi.cl_form > 0.0) {
+                var pp = base_prm
+                var pn = base_prm
+                pp.cl_central = base_prm.cl_central + h
+                pn.cl_central = base_prm.cl_central - h
+                let m_p = ep28_simulate_oral(pp, dose_mg, t_end, base_oi, rel, gut0)
+                let m_n = ep28_simulate_oral(pn, dose_mg, t_end, base_oi, rel, gut0)
+                if !m_p.success || !m_n.success { return EpJac28 { d_auc_b: [0.0; 8], d_cb24: [0.0; 8], d_auc_l: [0.0; 8], d_auc_k: [0.0; 8], ok: false } }
+                let inv2h = 1.0 / (2.0 * h)
+                d_auc_b[i] = (m_p.auc_blood   - m_n.auc_blood)   * inv2h
+                d_cb24[i]  = (m_p.c_brain_24h - m_n.c_brain_24h) * inv2h
+                d_auc_l[i] = (m_p.auc_liver   - m_n.auc_liver)   * inv2h
+                d_auc_k[i] = (m_p.auc_kidney  - m_n.auc_kidney)  * inv2h
+            }
+            if i == 0 && base_oi.cl_form > 0.0 {
                 let m_p = ep28_simulate_oral(base_prm, dose_mg, t_end, ep28_oral_clform(base_oi, h), rel, gut0)
                 let m_n = ep28_simulate_oral(base_prm, dose_mg, t_end, ep28_oral_clform(base_oi, 0.0 - h), rel, gut0)
                 if !m_p.success || !m_n.success { return EpJac28 { d_auc_b: [0.0; 8], d_cb24: [0.0; 8], d_auc_l: [0.0; 8], d_auc_k: [0.0; 8], ok: false } }
@@ -1070,7 +1118,8 @@ pub fn ep28_midazolam_params() -> PBPKParams28 {
 
 pub fn ep28_midazolam_priors() -> EpPrior28 with Mut {
     // 8-dim taxonomy, midazolam-mapped (same layout as venlafaxine):
-    // dim 0 = CYP3A hepatic CL (perturbs the liver sink, NOT cl_central).
+    // dim 0 = CYP3A hepatic CL. It lives in cl_central (no formation sink is
+    // configured for midazolam), so dim 0 perturbs cl_central.
     var m: [f64; 8] = [0.0; 8]
     var v: [f64; 8] = [0.0; 8]
     var c: [f64; 8] = [0.0; 8]
@@ -1126,7 +1175,8 @@ pub fn ep28_haloperidol_params() -> PBPKParams28 {
 
 pub fn ep28_haloperidol_priors() -> EpPrior28 with Mut {
     // 8-dim taxonomy, haloperidol-mapped (same layout as venlafaxine):
-    // dim 0 = CYP3A4/2D6 hepatic CL (perturbs the liver sink, NOT cl_central).
+    // dim 0 = CYP3A4/2D6 hepatic CL. It lives in cl_central (no formation sink
+    // is configured for haloperidol), so dim 0 perturbs cl_central.
     var m: [f64; 8] = [0.0; 8]
     var v: [f64; 8] = [0.0; 8]
     var c: [f64; 8] = [0.0; 8]

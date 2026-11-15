@@ -259,6 +259,28 @@ var FO_INLINE_DEPTH: i64 = 0
 // with a diagnostic instead of crashing. Globals match the FO_INLINE_DEPTH
 // precedent: a Lowerer field would not survive the per-call rebuilds.
 var LOWER_EXPR_DEPTH: i64 = 0
+// ADR-031 R1: source site of the arithmetic expression being lowered,
+// (span.file_id << 32) | span.start, 0 = none. Lowerer.emit stamps it on the
+// checked arithmetic it emits (IrInstr.src_site), so the overflow panic can
+// name the source location. Set and restored around each binary/unary node.
+var LOWER_CUR_SITE: i64 = 0
+
+fn lower_site_of_span(sp: Span) -> i64 {
+    if sp.file_id <= 0 || sp.start < 0 || sp.start >= 4294967296 { return 0 }
+    ((sp.file_id as i64) << 32) | sp.start
+}
+
+// The arithmetic the native backends guard (ADR-031 R1/R2).
+fn lower_instr_is_checked_arith(i: &IrInstr) -> bool {
+    if (*i).op == IrOpcode::IrBinOp {
+        let b = (*i).bin_op
+        return b == BinaryOp::OpAdd || b == BinaryOp::OpSub || b == BinaryOp::OpMul
+            || b == BinaryOp::OpUAdd || b == BinaryOp::OpUSub || b == BinaryOp::OpUMul
+            || b == BinaryOp::OpDiv || b == BinaryOp::OpRem || b == BinaryOp::OpUDiv || b == BinaryOp::OpURem
+    }
+    if (*i).op == IrOpcode::IrUnaryOp { return (*i).un_op == UnaryOp::OpNeg }
+    false
+}
 var LOWER_EXPR_BUDGET: i64 = 0 - 1
 // Global, like the FO_XFER_* table: a Lowerer is rebuilt per function, so a
 // Lowerer field would not survive from the helper's lowering to its caller's.
@@ -6533,6 +6555,18 @@ fn lower_type_expr_array_elem_name(te: &TypeExpr) -> Name with Mut, Panic, Div {
             if (*elem).kind == TypeExprKind::TypeNamed {
                 return ir_path_first_name((*elem).path)
             }
+            // `[Knowledge[T]; N]`: the element is the builtin Knowledge layout
+            // (ir_register_knowledge_layout). Left unnamed, `s.kn[i].value`
+            // had no receiver type and resolved `.value` by field name across
+            // every registered struct (field_idx_from_name_simple), where any
+            // non-Knowledge struct with a field called `value` outranks
+            // Knowledge: with math::pure's CheckedLog { status, value } in the
+            // program, `.value` read slot 1 as an integer and printed 0.0
+            // while `.variance` and `.confidence` stayed correct (measured
+            // 2026-11-14 on darwin_pbpk::epistemic_pbpk28's EpPrior28.kn).
+            if (*elem).kind == TypeExprKind::TypeKnowledge {
+                return make_name("Knowledge")
+            }
             ir_empty_name()
         }
         _ => ir_empty_name()
@@ -8244,7 +8278,7 @@ fn lowerer_lower_fn_params_mut(
                     // (`fn id(x: i32) -> i32 { x }` returned 9999999999).
                     if !param_is_ref {
                         let nk = lower_name_narrow32_kind(ir_path_first_name((*list).head.ty.path))
-                        let ncheck = lower_narrow32_check_reg((*lo), param_value_reg, nk)
+                        let ncheck = lower_narrow32_check_reg((*lo), param_value_reg, nk, 4)
                         (*lo) = ncheck.0
                     }
                 }
@@ -10580,7 +10614,11 @@ fn lower_narrow32_wrap_reg(lo: Lowerer, reg: i64, kind: i64) -> (Lowerer, i64) w
 // 64-bit value leaks through a 32-bit-typed operation either way. Used only
 // at arithmetic sites (Add/Sub/Mul, unary negation); `as i32`/`as u32` casts
 // are explicit conversions and are not routed here.
-fn lower_narrow32_check_reg(lo: Lowerer, reg: i64, kind: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+// The failing branch calls the `__int_overflow` builtin with a code naming
+// the type and the operation (narrow kind * 8 + op: 0 +, 1 -, 2 *, 3 unary -,
+// 4 an i64 argument outside 32 bits reaching an i32/u32 param),
+// so the panic message says what overflowed; see emit_builtin_int_overflow_into.
+fn lower_narrow32_check_reg(lo: Lowerer, reg: i64, kind: i64, opk: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
     if kind == 0 { return (lo, reg) }
     let wp = lower_narrow32_wrap_reg(lo, reg, kind)
     var lo2 = wp.0
@@ -10591,10 +10629,14 @@ fn lower_narrow32_check_reg(lo: Lowerer, reg: i64, kind: i64) -> (Lowerer, i64) 
     let okp = lo2.fresh_label()
     lo2 = okp.0
     lo2 = lo2.emit(ir_branch_true(eqp.1, okp.1))
-    let panic_fn = lowerer_find_or_add_fn_id_mut(&! lo2, make_name("panic"))
+    let ovf_fn = lowerer_find_or_add_fn_id_mut(&! lo2, make_name("__int_overflow"))
+    let codep = lo2.fresh_reg()
+    lo2 = codep.0
+    lo2 = lo2.emit(ir_load_imm(codep.1, kind * 8 + opk))
+    let ovf_args: Option<Box<IrRegList>> = Some(Box::new(ir_reg_list_single(codep.1)))
     let pdst = lo2.fresh_reg()
     lo2 = pdst.0
-    lo2 = lo2.emit(ir_call(pdst.1, panic_fn, make_name("panic"), None, 0))
+    lo2 = lo2.emit(ir_call(pdst.1, ovf_fn, make_name("__int_overflow"), ovf_args, 1))
     lo2 = lo2.emit(ir_label(okp.1))
     (lo2, reg)
 }
@@ -26791,7 +26833,11 @@ impl Lowerer {
         (self, label)
     }
 
-    fn emit(self, instr: IrInstr) -> Lowerer with Mut, Panic, Div, IO {
+    fn emit(self, instr_in: IrInstr) -> Lowerer with Mut, Panic, Div, IO {
+        var instr = instr_in
+        if instr.src_site == 0 && LOWER_CUR_SITE != 0 && lower_instr_is_checked_arith(&instr) {
+            instr.src_site = LOWER_CUR_SITE
+        }
         if self.current_fn < 0 || self.current_fn >= self.module.fn_count {
             if self.probe_mode {
                 print("lower_probe: emit_invalid current_fn=")
@@ -30776,7 +30822,7 @@ impl Lowerer {
                     if !ref_param_is_ref && lower_type_expr_is_narrow32(&(*list).head.ty) {
                         lo.current_func = current_func
                         let nk_b = lower_name_narrow32_kind(ir_path_first_name((*list).head.ty.path))
-                        let ncheck_b = lower_narrow32_check_reg(lo, param_value_reg, nk_b)
+                        let ncheck_b = lower_narrow32_check_reg(lo, param_value_reg, nk_b, 4)
                         lo = ncheck_b.0
                         current_func = lo.current_func
                     }
@@ -39636,6 +39682,14 @@ impl Lowerer {
     }
 
     fn lower_binary_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        let saved_site = LOWER_CUR_SITE
+        LOWER_CUR_SITE = lower_site_of_span((*e).span)
+        let r = self.lower_binary_expr_ref_inner(e)
+        LOWER_CUR_SITE = saved_site
+        r
+    }
+
+    fn lower_binary_expr_ref_inner(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         if e.bin_op == BinaryOp::OpAnd || e.bin_op == BinaryOp::OpOr {
             return self.lower_short_circuit_ref(e)
         }
@@ -40117,7 +40171,8 @@ impl Lowerer {
                         None => false,
                     }
                     if rhs_int_p {
-                        return lower_narrow32_check_reg(lo4, dst, narrow_kind)
+                        let narrow_opk = if e.bin_op == BinaryOp::OpAdd { 0 } else if e.bin_op == BinaryOp::OpSub { 1 } else { 2 }
+                        return lower_narrow32_check_reg(lo4, dst, narrow_kind, narrow_opk)
                     }
                 }
             }
@@ -41412,6 +41467,14 @@ impl Lowerer {
     }
 
     fn lower_unary_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        let saved_site = LOWER_CUR_SITE
+        LOWER_CUR_SITE = lower_site_of_span((*e).span)
+        let r = self.lower_unary_expr_ref_inner(e)
+        LOWER_CUR_SITE = saved_site
+        r
+    }
+
+    fn lower_unary_expr_ref_inner(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         // SIO-207: `-9223372036854775808` is the spelling of i64 MIN. The
         // magnitude token carries the 2^63 bit pattern in int_val, so emitting
         // a runtime negation would negate MIN itself and trip the overflow
@@ -41724,7 +41787,7 @@ impl Lowerer {
         if e.un_op == UnaryOp::OpNeg && !src_is_float {
             let neg_narrow_kind = lo3.opt_expr_narrow32_kind_ref(&e.left)
             if neg_narrow_kind != 0 {
-                return lower_narrow32_check_reg(lo3, dst, neg_narrow_kind)
+                return lower_narrow32_check_reg(lo3, dst, neg_narrow_kind, 3)
             }
         }
         (lo3, dst)
@@ -43742,6 +43805,17 @@ impl Lowerer {
             match *current {
                 Some(list) => {
                     if ir_name_eq_lit((*list).head.name, "value") {
+                        // A constant `value:` has no epistemic inputs: its
+                        // derived variance is a literal 0.0, and writing that
+                        // into field 1 erased the literal's own `variance:`
+                        // field (`Knowledge { value: 0.077, variance: 0.5, .. }`
+                        // read back variance 0.0; lean_single reads 0.5).
+                        // lower_struct_fields_ref has already stored the
+                        // declared variance, so leave it.
+                        if lower_expr_is_float_literal_like_ref(&(*list).head.value)
+                            || (*list).head.value.kind == ExprKind::ExprIntLit {
+                            return self
+                        }
                         let fv = self.lower_expr_variance_ref(&(*list).head.value)
                         var lo = fv.0
                         if fv.1 >= 0 {
