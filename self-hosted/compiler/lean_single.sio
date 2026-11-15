@@ -572,6 +572,10 @@ var EPIST_KNOW_SUBTYPE_VIOLATIONS: i64 = 0  // where src conf < dst conf
 var EPIST_EFFECT_VIOLATIONS: i64 = 0
 // Gen 17 D2: Parameterized EpistemicComplete — per-function minimum confidence
 var FN_EPISTEMIC_MIN: [i64; 65536] = [0; 65536]  // 0 = unset (use GATE_THRESHOLD)
+var FN_WIDE_INT_REACH: [i64; 65536] = [0; 65536]
+var FN_WIDE_INT_Q: [i64; 65536] = [0; 65536]
+var TC_WIDE_INT_ACTIVE_FN: i64 = -1
+var TC_WIDE_INT_SIG_PASS: i64 = 0
 // Gen 15 (Option B): epistemic certificate (.econf) support
 // Gen 17 D6: --emit-proof-obligations — Lean 4 proof goals for PLATINUM bindings
 var CLI_EMIT_PROOFS: i64 = 0
@@ -4153,12 +4157,32 @@ fn name_is_wide_int_spelling(ns: i64, ne: i64) -> bool with Panic, Mut {
     return false
 }
 
+fn tok_is_in_main_file(tok: i64) -> bool with Panic, Mut {
+    if tok < 0 || tok >= TC { return false }
+    let pos = TS[tok as usize]
+    if pos < 0 || pos >= SRC_LEN { return false }
+    if LMR_PRELUDE_SRC_START >= 0 && pos >= LMR_PRELUDE_SRC_START { return false }
+    if SRC[0 as usize] as i64 == 1 { return false }
+    return src_file_marker_start(pos) == 0
+}
+
 fn tc_wide_int_refused(tok: i64) -> i64 with IO, Mut, Panic {
     // KL-9 wide-int counterpart: lean_single used to greenwash unknown
     // lowercase names (including `i128`/`u128`/`i256`/`u256`/`i512`/`u512`)
     // as unit-typed f64, silently rounding wide integer arithmetic through
-    // binary64 when paired with `as i256` casts. Refuse fail-closed.
+    // binary64 when paired with `as i256` casts. Refuse fail-closed for any
+    // spelling in <main> or in an imported function reachable from <main>,
+    // without poisoning unused stdlib sibling helpers (e.g. div_witness).
+    let in_main = tok_is_in_main_file(tok)
+    var active_reach: bool = false
+    if TC_WIDE_INT_SIG_PASS != 0 { active_reach = true }
+    if TC_WIDE_INT_ACTIVE_FN >= 0 && TC_WIDE_INT_ACTIVE_FN < FN_COUNT {
+        if FN_WIDE_INT_REACH[TC_WIDE_INT_ACTIVE_FN as usize] != 0 { active_reach = true }
+    }
+    if !in_main && !active_reach { return 0 }
     tc_error_hard(tok, "wide integer types (i128/u128/i256/u256/i512/u512) are not implemented on lean_single; refuse rather than lower as f64")
+    TYPECHECK_FAILED = 1
+    return 0
 }
 
 fn name_is_lower(ns: i64, ne: i64) -> bool with Panic, Mut {
@@ -8105,7 +8129,7 @@ fn scan_type(p0: i64) with IO, Mut, Panic, Div {
             SCAN_TY_NEXT = p + 1
             return
         }
-        if name_is_wide_int_spelling(ns, ne) {
+        if name_is_wide_int_spelling(ns, ne) && st_find(gl_name_hash(ns, ne)) < 0 && en_find(gl_name_hash(ns, ne)) < 0 {
             tc_wide_int_refused(p)
             SCAN_TY = 0
             SCAN_TY_HASH = 0
@@ -8943,7 +8967,7 @@ fn lex_all() with IO, Mut, Panic, Div {
                             continue
                         }
                     }
-                    if esc != 110 && esc != 116 && esc != 48 && esc != 92 && esc != 34 {
+                    if esc != 110 && esc != 114 && esc != 116 && esc != 48 && esc != 92 && esc != 34 && esc != 39 {
                         if LEX_ERROR_LINE == 0 {
                             LEX_ERROR_LINE = cur_line
                             LEX_ERROR_KIND = 2
@@ -13021,6 +13045,7 @@ fn emit_print_src(tok: i64, ss: i64, se: i64, braces: i64) with IO, Mut, Panic, 
                 }
             } else {
                 if c2 == 110 { byte = 10 }
+                else if c2 == 114 { byte = 13 }
                 else if c2 == 116 { byte = 9 }
                 else if c2 == 48 { byte = 0 }
                 else { byte = c2 }
@@ -18860,6 +18885,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                     }
                 } else {
                     if c2 == 110 { byte = 10 }
+                    else if c2 == 114 { byte = 13 }
                     else if c2 == 116 { byte = 9 }
                     else if c2 == 48 { byte = 0 }
                     else { byte = c2 }
@@ -37801,10 +37827,84 @@ fn call_sh_restore(b: i64, a: i64) with Mut {
     }
 }
 
+fn mark_wide_int_reachable_fns() with IO, Mut, Panic, Div {
+    fn_lookup_index_sync()
+    var i: i64 = 0
+    var qh: i64 = 0
+    var qt: i64 = 0
+    while i < FN_COUNT {
+        FN_WIDE_INT_REACH[i as usize] = 0
+        let ntk = FN_NAME_TOK[i as usize]
+        if tok_is_in_main_file(ntk) {
+            FN_WIDE_INT_REACH[i as usize] = 1
+            FN_WIDE_INT_Q[qt as usize] = i
+            qt = qt + 1
+        }
+        i = i + 1
+    }
+    while qh < qt {
+        let fi = FN_WIDE_INT_Q[qh as usize]
+        qh = qh + 1
+        let bo = FN_BODY_OPEN[fi as usize]
+        let bc = FN_BODY_CLOSE[fi as usize]
+        if bo > 0 && bc > bo && bc <= TC {
+            var t: i64 = bo
+            while t < bc {
+                if TK[t as usize] == 3 {
+                    let ns = TS[t as usize]
+                    let ne = TE[t as usize]
+                    let h = gl_name_hash(ns, ne)
+                    var entry = FN_LOOKUP_HEAD[(h & 65535) as usize]
+                    while entry != 0 {
+                        let ci = entry - 1
+                        if FN_LOOKUP_HASH[ci as usize] == h && name_eq(FN_NS[ci as usize], FN_NE[ci as usize], ns, ne) {
+                            if FN_WIDE_INT_REACH[ci as usize] == 0 {
+                                FN_WIDE_INT_REACH[ci as usize] = 1
+                                if qt < 65536 {
+                                    FN_WIDE_INT_Q[qt as usize] = ci
+                                    qt = qt + 1
+                                }
+                            }
+                        }
+                        entry = FN_LOOKUP_NEXT[ci as usize]
+                    }
+                }
+                t = t + 1
+            }
+        }
+    }
+    TC_WIDE_INT_SIG_PASS = 1
+    i = 0
+    while i < FN_COUNT {
+        let ntk = FN_NAME_TOK[i as usize]
+        if FN_WIDE_INT_REACH[i as usize] != 0 && !tok_is_in_main_file(ntk) && ntk > 0 && ntk < TC {
+            var q: i64 = ntk + 1
+            if TK[q as usize] == 6 { q = q + 1 }
+            while q < TC && TK[q as usize] != 7 && TK[q as usize] != 0 {
+                if TK[q as usize] == 43 {
+                    q = q + 1
+                    scan_type(q)
+                    q = SCAN_TY_NEXT
+                } else {
+                    q = q + 1
+                }
+            }
+            let rtk = FN_RET_TY_TOK[i as usize]
+            if rtk >= 0 && rtk < TC {
+                scan_type(rtk)
+            }
+        }
+        i = i + 1
+    }
+    TC_WIDE_INT_SIG_PASS = 0
+}
+
 fn compile_all() -> i64 with IO, Mut, Panic, Div {
     CL = 0
     POOL_ALLOC_ROUTINE_CL = 0 - 1
     FN_COUNT = 0
+    TC_WIDE_INT_ACTIVE_FN = 0 - 1
+    TC_WIDE_INT_SIG_PASS = 0
     fn_lookup_index_reset()
     PATCH_COUNT = 0
     FNSIG_COUNT = 1
@@ -39412,12 +39512,14 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
     epistemic_infer_pass()
     // Gen 16 Track B: abort if any EpistemicComplete violations detected
     if EPIST_EFFECT_VIOLATIONS > 0 { return 1 }
+    mark_wide_int_reachable_fns()
     if TARGET_ARCH == 1 { return 0 }
 
     // Pass 2: compile each function
     p = 0
     var fn_idx: i64 = 0
     while fn_idx < FN_COUNT {
+        TC_WIDE_INT_ACTIVE_FN = fn_idx
         p = FN_NAME_TOK[fn_idx as usize]
         let is_kernel_fn = FN_IS_KERNEL[fn_idx as usize]
         let body_open = FN_BODY_OPEN[fn_idx as usize]
@@ -39999,6 +40101,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
 
         fn_idx = fn_idx + 1
     }
+    TC_WIDE_INT_ACTIVE_FN = 0 - 1
 
     if fn_idx != FN_COUNT {
         print("error: function pass mismatch compiled=")
@@ -40857,6 +40960,7 @@ fn emit_print_a64_src(tok: i64, ss: i64, se: i64, braces: i64) with IO, Mut, Pan
                 }
             } else {
                 if c2 == 110 { byte = 10 }
+                else if c2 == 114 { byte = 13 }
                 else if c2 == 116 { byte = 9 }
                 else if c2 == 48 { byte = 0 }
                 else { byte = c2 }
@@ -43629,6 +43733,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                     }
                 } else {
                     if c2 == 110 { byte = 10 }
+                    else if c2 == 114 { byte = 13 }
                     else if c2 == 116 { byte = 9 }
                     else if c2 == 48 { byte = 0 }
                     else { byte = c2 }
@@ -50666,6 +50771,7 @@ fn compile_all_arm64() -> i64 with IO, Mut, Panic, Div {
     var p: i64 = 0
     var fn_idx: i64 = 0
     while fn_idx < FN_COUNT {
+        TC_WIDE_INT_ACTIVE_FN = fn_idx
         p = FN_NAME_TOK[fn_idx as usize]
         let body_open = FN_BODY_OPEN[fn_idx as usize]
         let body_close = FN_BODY_CLOSE[fn_idx as usize]
@@ -51054,6 +51160,7 @@ fn compile_all_arm64() -> i64 with IO, Mut, Panic, Div {
         }
         fn_idx = fn_idx + 1
     }
+    TC_WIDE_INT_ACTIVE_FN = 0 - 1
 
     // Every diagnostic the arm64 pass raised above set TYPECHECK_FAILED through
     // tc_mark_failed, and nothing read it: this function emitted the binary and
