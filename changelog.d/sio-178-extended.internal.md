@@ -1,0 +1,1 @@
+Add a Std-only exact rational interval-set proof model with infinite endpoints, explicit empty sets, addition/subtraction enclosure, decoration order constraints and conditional outward rounding, preserving the existing finite model and auditing every theorem. General unbounded multiplication/division and IEEE/backend certification remain unestablished.
