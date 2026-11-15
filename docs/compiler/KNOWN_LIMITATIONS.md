@@ -162,7 +162,15 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
   directly or through what it calls, is refused when its result reaches a
   query, whatever its arguments (`tg_unreg_draws_call`, and `tg_unreg_reach`
   for a cloned callee that calls such a function; pin
-  `tests/compile-fail/gum_refuse_unregistered_drawing_callee.sio`). Before,
+  `tests/compile-fail/gum_refuse_unregistered_drawing_callee.sio`). The scan
+  follows method calls (a call site resolves the impl method through the
+  receiver type; inside a body, by the method's short name, over every impl
+  method of that name) and `Type::f` paths, and treats a call through a
+  parameter, a non-closure local or a computed callee as able to draw unless
+  the function is a HOF the specialisation resolves (pins
+  `gum_refuse_unregistered_drawing_{method,fnptr,closure}.sio`;
+  `tests/run-pass/gum_method_no_measure_exact.sio` keeps a method without a
+  measure exact). Before,
   a callee that asks for an uncertainty and measures inside itself, called with
   certain arguments, read variance 0.
   A query is refused at compile time, never answered 0 or short, when it reads

@@ -652,6 +652,12 @@ fn tg_expr_calls(e: &Expr, pred: i64, depth: i64) -> bool with Mut, Panic, Div {
                     // carries itself (tg_store_row's cross terms).
                     if pred == 7 && tg_name_is_query((*c).name) && !ir_name_eq_lit((*c).name, "correlate") { return true }
                     if pred == 5 && ir_name_eq_lit((*c).name, "correlate") { return true }
+                    // pred 8: a call through a parameter, or through a local that
+                    // is not a closure literal (a function pointer, an alias).
+                    if pred == 8 {
+                        let cid = ir_intern_name((*c).name)
+                        if tg_corr_is_param(cid) || tg_corr_in(TG_CR_M, TG_CR_NM, cid) { return true }
+                    }
                     // pred 4: a `correlate` whose operands are not both
                     // `<measure local>.value` (or a local bound to it).
                     if pred == 4 && ir_name_eq_lit((*c).name, "correlate") && !tg_corr_args_internal(&(*e)) { return true }
@@ -742,6 +748,17 @@ fn tg_stmts_call(opt: &Option<Box<StmtList>>, pred: i64, depth: i64) -> bool wit
                             Some(vx) => { if (*vx).kind == ExprKind::ExprStructLit { return true } }
                             None => {}
                         }
+                    }
+                }
+                if pred == 9 && ((*sl).head.kind == StmtKind::StmtLet || (*sl).head.kind == StmtKind::StmtVar) {
+                    var is_clo = false
+                    match (*sl).head.expr {
+                        Some(rx) => { if (*rx).kind == ExprKind::ExprClosure { is_clo = true } }
+                        None => {}
+                    }
+                    if !is_clo && TG_CR_NM < 64 {
+                        TG_CR_M[TG_CR_NM as usize] = ir_intern_name((*sl).head.name)
+                        TG_CR_NM = TG_CR_NM + 1
                     }
                 }
                 if pred == 6 && ((*sl).head.kind == StmtKind::StmtLet || (*sl).head.kind == StmtKind::StmtVar) {
@@ -839,6 +856,11 @@ fn tg_stmts_nonstraight(opt: &Option<Box<StmtList>>, depth: i64) -> bool with Mu
 // transitive may-draw question.
 var TG_CALLEES: [Name; 33] = [ir_empty_name(); 33]
 var TG_NCALLEES: i64 = 0
+// Methods called (by short name, a method call or `Type::f`), and whether the
+// body calls something that is not a name (a field, a call result).
+var TG_MCALLEES: [Name; 33] = [ir_empty_name(); 33]
+var TG_NMCALLEES: i64 = 0
+var TG_OPAQUE_CALL: i64 = 0
 
 fn tg_expr_callees(e: &Expr, depth: i64) with Mut, Panic, Div {
     if depth > 96 { return }
@@ -849,9 +871,19 @@ fn tg_expr_callees(e: &Expr, depth: i64) with Mut, Panic, Div {
                     TG_CALLEES[TG_NCALLEES as usize] = (*c).name
                     TG_NCALLEES = TG_NCALLEES + 1
                 }
+                // `Type::f(..)`: resolved by the short name of the method.
+                if (*c).kind == ExprKind::ExprPath && TG_NMCALLEES <= 32 {
+                    TG_MCALLEES[TG_NMCALLEES as usize] = ir_path_last_name((*c).path)
+                    TG_NMCALLEES = TG_NMCALLEES + 1
+                }
+                if (*c).kind != ExprKind::ExprIdent && (*c).kind != ExprKind::ExprPath { TG_OPAQUE_CALL = 1 }
             }
             None => {}
         }
+    }
+    if (*e).kind == ExprKind::ExprMethodCall && TG_NMCALLEES <= 32 {
+        TG_MCALLEES[TG_NMCALLEES as usize] = (*e).name
+        TG_NMCALLEES = TG_NMCALLEES + 1
     }
     match (*e).left {
         Some(x) => { tg_expr_callees(&(*x), depth + 1) }
@@ -1022,25 +1054,65 @@ var TG_FN_CAL: [i64; 131072] = [0; 131072]
 var TG_FN_M1: [i64; 4096] = [-1; 4096]
 var TG_FN_M2: [i64; 4096] = [-1; 4096]
 
+var TG_NOTE_SHORT: i64 = 0 - 1
+var TG_FN_SHORT: [i64; 4096] = [0 - 1; 4096]
+var TG_FN_NMC: [i64; 4096] = [0; 4096]
+var TG_FN_MCAL: [i64; 65536] = [0; 65536]
+
 fn tg_fn_note(name: Name, fd: &FnDef) with Mut, Panic, Div {
     if TG_FN_N >= 4096 { return }
     let k = TG_FN_N
     TG_FN_ID[k as usize] = ir_intern_name(name)
+    TG_FN_SHORT[k as usize] = TG_NOTE_SHORT
     TG_FN_M1[k as usize] = 0 - 1
     TG_FN_M2[k as usize] = 0 - 1
     TG_FN_DRAW[k as usize] = if tg_stmts_call(&(*fd).body.stmts, 1, 0) { 1 } else { 0 }
     TG_NCALLEES = 0
+    TG_NMCALLEES = 0
+    TG_OPAQUE_CALL = 0
     tg_stmts_callees(&(*fd).body.stmts, 0)
     var n = TG_NCALLEES
-    if n > 32 {
+    var nm = TG_NMCALLEES
+    if n > 32 || nm > 16 {
         TG_FN_DRAW[k as usize] = 1
         n = 0
+        nm = 0
+    }
+    // A call through a callable the body did not build (a parameter, a local
+    // that is not a closure literal, a field or call result) can reach anything,
+    // unless the function is a HOF the specialisation resolves at its call sites.
+    if TG_OPAQUE_CALL == 1 && !lower_hof_transparent_known(name) { TG_FN_DRAW[k as usize] = 1 }
+    if TG_FN_DRAW[k as usize] == 0 {
+        TG_CR_NM = 0
+        TG_CR_NV = 0
+        TG_CR_NP = 0
+        var pc = &(*fd).params
+        while true {
+            match *pc {
+                Some(pl) => {
+                    if TG_CR_NP < 16 {
+                        TG_CR_P[TG_CR_NP as usize] = ir_intern_name((*pl).head.name)
+                        TG_CR_NP = TG_CR_NP + 1
+                    }
+                    pc = &(*pl).tail
+                }
+                None => break
+            }
+        }
+        tg_stmts_call(&(*fd).body.stmts, 9, 0)
+        if tg_stmts_call(&(*fd).body.stmts, 8, 0) && !lower_hof_transparent_known(name) { TG_FN_DRAW[k as usize] = 1 }
     }
     TG_FN_NC[k as usize] = n
+    TG_FN_NMC[k as usize] = nm
     var i: i64 = 0
     while i < n {
         TG_FN_CAL[(k * 32 + i) as usize] = ir_intern_name(TG_CALLEES[i as usize])
         i = i + 1
+    }
+    var im: i64 = 0
+    while im < nm {
+        TG_FN_MCAL[(k * 16 + im) as usize] = ir_intern_name(TG_MCALLEES[im as usize])
+        im = im + 1
     }
     TG_FN_N = k + 1
 }
@@ -1071,6 +1143,37 @@ fn tg_fn_draws(id: i64, depth: i64) -> bool with Mut, Panic, Div {
             TG_FN_M1[k as usize] = 1
             return true
         }
+        i = i + 1
+    }
+    var im: i64 = 0
+    while im < TG_FN_NMC[k as usize] {
+        if tg_method_draws(TG_FN_MCAL[(k * 16 + im) as usize], depth + 1) {
+            TG_FN_M1[k as usize] = 1
+            return true
+        }
+        im = im + 1
+    }
+    false
+}
+
+// Can any method (or associated function) with this short name draw? The
+// receiver type is not known from a body alone, so every impl method with the
+// name counts.
+fn tg_method_draws(short: i64, depth: i64) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < TG_FN_N {
+        if TG_FN_SHORT[i as usize] == short && tg_fn_draws(TG_FN_ID[i as usize], depth) { return true }
+        i = i + 1
+    }
+    false
+}
+
+// A method call with no clone that can draw, by short name (receiver not a local).
+fn tg_unreg_method_short_draws(name: Name) -> bool with Mut, Panic, Div {
+    let short = ir_intern_name(name)
+    var i: i64 = 0
+    while i < TG_FN_N {
+        if TG_FN_SHORT[i as usize] == short && tg_find(TG_FN_ID[i as usize]) < 0 && tg_fn_draws(TG_FN_ID[i as usize], 0) { return true }
         i = i + 1
     }
     false
@@ -1104,6 +1207,24 @@ fn tg_unreg_reach(id: i64, depth: i64) -> bool with Mut, Panic, Div {
             return true
         }
         i = i + 1
+    }
+    var im: i64 = 0
+    while im < TG_FN_NMC[k as usize] {
+        let sh = TG_FN_MCAL[(k * 16 + im) as usize]
+        var j: i64 = 0
+        while j < TG_FN_N {
+            if TG_FN_SHORT[j as usize] == sh {
+                let cid = TG_FN_ID[j as usize]
+                var h2 = false
+                if tg_find(cid) < 0 { h2 = tg_fn_draws(cid, 0) } else { h2 = tg_unreg_reach(cid, depth + 1) }
+                if h2 {
+                    TG_FN_M2[k as usize] = 1
+                    return true
+                }
+            }
+            j = j + 1
+        }
+        im = im + 1
     }
     false
 }
@@ -10679,6 +10800,7 @@ fn lowerer_fo_preregister_pure_fns_mut(
                             // Tangent-clone registry: here, before any module's
                             // body lowering opens its Box-arena window, so the
                             // TgNode outlives every module that calls it.
+                            TG_NOTE_SHORT = 0 - 1
                             if TG_ACTIVE < 0 { tg_note(head.name, &(*fd), ir_empty_name()) }
                             let lo_x = (*lo).fo_register_pure_fn_transfer(head.name, &(*fd))
                             (*lo) = lo_x
@@ -10699,7 +10821,9 @@ fn lowerer_fo_preregister_pure_fns_mut(
                                             match *mfd_opt {
                                                 Some(fd) => {
                                                     let mangled = ir_mangle_method_name(head.name, mhead.name)
+                                                    TG_NOTE_SHORT = ir_intern_name(mhead.name)
                                                     if TG_ACTIVE < 0 { tg_note(mangled, &(*fd), head.name) }
+                                                    TG_NOTE_SHORT = 0 - 1
                                                     let lo_x = (*lo).fo_register_pure_fn_transfer(mangled, &(*fd))
                                                     (*lo) = lo_x
                                                 }
@@ -28812,14 +28936,14 @@ impl Lowerer {
                             if mtg.1 >= 0 {
                                 return mtg
                             }
-                            if FO_INLINE_TRUNCATED == 0 && mtg.0.expr_result_is_float_ref(e) && mtg.0.tg_call_args_uncertain(e) { tg_mark_drop(mangled) }
+                            if FO_INLINE_TRUNCATED == 0 && mtg.0.expr_result_is_float_ref(e) && (mtg.0.tg_call_args_uncertain(e) || tg_unreg_draws_call(mangled)) { tg_mark_drop(mangled) }
                             return (mtg.0.fo_clear_expr_sens().so_clear_expr_hess(), -1)
                         }
                     }
                 }
                 _ => {}
             }
-            if self.expr_result_is_float_ref(e) && self.tg_call_args_uncertain(e) { tg_mark_drop((*e).name) }
+            if self.expr_result_is_float_ref(e) && (self.tg_call_args_uncertain(e) || tg_unreg_method_short_draws((*e).name)) { tg_mark_drop((*e).name) }
             return (self.fo_clear_expr_sens().so_clear_expr_hess(), -1)
         }
         if (*e).kind == ExprKind::ExprMatch {
