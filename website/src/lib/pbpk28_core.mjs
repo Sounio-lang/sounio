@@ -391,37 +391,40 @@ export const DEFAULT_PARAMS_EVEROLIMUS = Object.freeze({
 });
 
 // Prograf immediate-release tacrolimus (SIO-516): single 5 mg oral dose,
-// fasted. ka = 0.38/h (Bekersky 1999), F = 0.25 (Kershner 1996, first-pass
-// loss leaves the system). Whole-blood referenced (TDM matrix): CL_wb =
-// 28 L/h (Jusko 1995). Kp = tacrolimus tissue-to-blood values (Iwasaki 2007
-// liver, Saitoh 2006 brain, Staatz 2004 review; adipose capped per the
-// 24-48 h window note) -- NOT rapamycin's. PS mirrors the rapamycin
+// fasted. ka = 4.5/h after a 0.39 h lag (Jusko 1995), F = 0.18 (Prograf
+// label, healthy volunteers; first-pass loss leaves the system). Whole-blood
+// referenced (TDM matrix): CL_wb = 2.8 L/h and V_ss = 133.7 L (label, healthy
+// volunteers). Kp = tacrolimus tissue-to-blood pattern scaled to that volume
+// -- NOT rapamycin's. PS mirrors the rapamycin
 // flow-limited pattern, ASSUMED pending SIO-550. Single-dose PK only.
 export const MW_TACROLIMUS = 804.02;
 
-export const TAC_KA_DEFAULT = 0.38;    // h^-1, Bekersky 1999 fasted
-export const TAC_F_DEFAULT = 0.25;     // Kershner 1996
+export const TAC_KA_DEFAULT = 4.5;     // h^-1, Jusko 1995
+export const TAC_F_DEFAULT = 0.18;     // Prograf label, healthy volunteers
+export const TAC_TLAG_DEFAULT = 0.39;  // h, Jusko 1995
 export const TAC_DOSE_DEFAULT = 5.0;   // mg, single dose
 
+// Drug-file tissue-to-blood pattern scaled by 0.510225 so that the kinetic
+// V_ss = 133.7 L (label, healthy volunteers, 1.91 L/kg at 70 kg).
 export const KP_TACROLIMUS = Object.freeze([
-  1.00,  // 0 blood (definition)
-  20.0,  // 1 liver (Iwasaki 2007, CYP3A4 site)
-  6.0,   // 2 kidney
-  0.10,  // 3 brain (Saitoh 2006, P-gp restrained)
-  4.0,   // 4 heart
-  8.0,   // 5 lung
-  3.0,   // 6 muscle
-  5.0,   // 7 adipose (capped; 24-48 h window)
-  6.0,   // 8 gut (enterocyte CYP3A4 + P-gp)
-  2.0,   // 9 skin
-  1.5,   // 10 bone
-  8.0,   // 11 spleen (lymphocyte FKBP12)
-  4.0,   // 12 pancreas
-  2.0,   // 13 other
+  1.00,    // 0 blood (definition)
+  10.2045,  // 1 liver
+  3.0614,  // 2 kidney
+  0.0510,  // 3 brain
+  2.0409,  // 4 heart
+  4.0818,  // 5 lung
+  1.5307,  // 6 muscle
+  2.5511,  // 7 adipose
+  3.0614,  // 8 gut
+  1.0205,  // 9 skin
+  0.7653,  // 10 bone
+  4.0818,  // 11 spleen
+  2.0409,  // 12 pancreas
+  1.0205,  // 13 other
 ]);
 
 export const DEFAULT_PARAMS_TACROLIMUS = Object.freeze({
-  clHep: 28.0,
+  clHep: 2.8,
   higuchiScale: 1.0,
   vdScale: 1.0,
   bolusMg: 0.0,
@@ -433,6 +436,7 @@ export const DEFAULT_PARAMS_TACROLIMUS = Object.freeze({
   releaseModel: 'oral_ir',
   releaseKa: TAC_KA_DEFAULT,
   releaseF: TAC_F_DEFAULT,
+  releaseTlag: TAC_TLAG_DEFAULT,
   releaseDoseMg: TAC_DOSE_DEFAULT,
   tmddOrgans: [],
   tmddParams: {},
@@ -440,42 +444,42 @@ export const DEFAULT_PARAMS_TACROLIMUS = Object.freeze({
   pdParams: {},
   cVisualMax: 3.0e-5,
   drugLabel: 'Tacrolimus (oral IR)',
-  releaseSourceLabel: 'Oral IR (k_a = 0.38 /h, F = 0.25)',
+  releaseSourceLabel: 'Oral IR (k_a = 4.5 /h, F = 0.18, lag 0.39 h)',
 });
 
 // Zyprexa immediate-release olanzapine (SIO-518): single 10 mg oral dose.
 // ka = 0.6/h, F = 0.60, tlag = 0.25 h tablet dissolution (Bergstrom 2006).
-// Plasma referenced (rb ~= 1, Callaghan 1999): CL = 25 L/h (CYP1A2 primary).
-// Kp = olanzapine tissue values (Rodgers-Rowland, Vd ~700 L) -- NOT
+// Plasma referenced: CL = 9.3 L/h (CL/F 15.5 L/h, Sun 2021, x F 0.60).
+// Kp = olanzapine tissue pattern scaled to V_ss = 528.6 L -- NOT
 // haloperidol's, despite the shared class. PS assumed flow-limited pattern,
 // SIO-550. Dual UGT1A4/CYP1A2 pathway recorded in the drug file, not equated
 // with clozapine. Single-dose PK only.
 export const MW_OLANZAPINE = 312.43;
 
-export const OLZ_KA_DEFAULT = 0.6;     // h^-1, Bergstrom 2006
-export const OLZ_F_DEFAULT = 0.60;     // Bergstrom 2006
-export const OLZ_TLAG_DEFAULT = 0.25;  // h, tablet dissolution
+export const OLZ_KA_DEFAULT = 0.861;   // h^-1, Sun 2021
+export const OLZ_F_DEFAULT = 0.60;     // Zyprexa label (40% first pass)
+export const OLZ_TLAG_DEFAULT = 0.782; // h, Sun 2021
 export const OLZ_DOSE_DEFAULT = 10.0;  // mg, single dose
 
 export const KP_OLANZAPINE = Object.freeze([
   1.00,  // 0 blood (definition)
-  12.0,  // 1 liver
-  5.0,   // 2 kidney
-  10.0,  // 3 brain
-  4.0,   // 4 heart
-  8.0,   // 5 lung
-  15.0,  // 6 muscle (Vd driver)
-  8.0,   // 7 adipose (Vd driver)
-  5.0,   // 8 gut
-  5.0,   // 9 skin
-  4.0,   // 10 bone
-  5.0,   // 11 spleen
-  3.5,   // 12 pancreas
-  3.5,   // 13 other
+  9.4973,  // 1 liver
+  3.9572,   // 2 kidney
+  7.9144,  // 3 brain
+  3.1658,   // 4 heart
+  6.3315,   // 5 lung
+  11.8716,  // 6 muscle (Vd driver)
+  6.3315,   // 7 adipose (Vd driver)
+  3.9572,   // 8 gut
+  3.9572,   // 9 skin
+  3.1658,   // 10 bone
+  3.9572,   // 11 spleen
+  2.7700,   // 12 pancreas
+  2.7700,   // 13 other
 ]);
 
 export const DEFAULT_PARAMS_OLANZAPINE = Object.freeze({
-  clHep: 25.0,
+  clHep: 9.3,
   higuchiScale: 1.0,
   vdScale: 1.0,
   bolusMg: 0.0,
@@ -495,7 +499,7 @@ export const DEFAULT_PARAMS_OLANZAPINE = Object.freeze({
   pdParams: {},
   cVisualMax: 3.0e-5,
   drugLabel: 'Olanzapine (oral IR)',
-  releaseSourceLabel: 'Oral IR (k_a = 0.6 /h, F = 0.60, lag 0.25 h)',
+  releaseSourceLabel: 'Oral IR (k_a = 0.861 /h, F = 0.60, lag 0.782 h)',
 });
 
 // Clozapine single 100 mg oral tablet (SIO-521): ka = 1.0/h (Tmax ~2 h),

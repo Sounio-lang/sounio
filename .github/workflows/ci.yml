@@ -131,6 +131,8 @@ jobs:
         run: node scripts/ci/deep_science_partition_contract.mjs "$PWD" --selftest
       - name: Workflow gate reference ratchet before expensive jobs
         run: bash scripts/ci/gate_workflow_reference_ratchet.sh
+      - name: E041 meaning agrees across registry, diagnostics and docs
+        run: bash scripts/ci/diagnostic_e041_meaning_gate.sh
       - name: Materialize the committed Madaros prebuilt
         run: bash scripts/lib/materialize_madaros_prebuilt.sh
       # Orchestration self-test for the SCO artefact-reuse path (ADR-027 §3):
@@ -454,6 +456,18 @@ jobs:
       - name: stage0 fails closed
         if: matrix.shard == 'core-b'
         run: bash scripts/ci/stage0_fail_closed_gate.sh
+      # Root A seed loader (bootstrap/roots/a): the hand-written seed-a must
+      # reproduce itself from its annotated listing, refuse malformed input,
+      # and agree with its C++23 reference model on a differential fuzz.
+      - name: Root A seed loader
+        if: matrix.shard == 'core-b'
+        run: bash scripts/ci/root_a_seed_gate.sh
+      # Root B seed loader (bootstrap/roots/b), written separately in octal,
+      # and the cross-check: each root's loader assembles the other's listing
+      # into the other's committed bytes.
+      - name: Root B seed loader and cross-check
+        if: matrix.shard == 'core-b'
+        run: bash scripts/ci/root_b_seed_gate.sh
       # Generated snapshots (governance registry, authority matrix, HF dataset)
       # are refreshed in their own snapshot/refresh-* PR; any other PR that
       # rewrites them is refused, because two such PRs always conflict.
@@ -940,6 +954,16 @@ jobs:
           chmod +x /tmp/lean_b.elf
           SOUNIO_LEAN_SINGLE_BIN=/tmp/lean_b.elf JOBS=4 TIMEOUT_SECS=120 \
             bash scripts/ci/a64_compile_fail_parity_gate.sh
+      # The arm64 lane must propagate GUM variance as x86 does: runs each listed
+      # case under qemu-aarch64 and compares stdout and exit code with x86.
+      # Reuses /tmp/lean_b.elf from the step above.
+      - name: aarch64 propagates variance as x86 does
+        if: matrix.shard == 'core-c'
+        run: |
+          set -euo pipefail
+          command -v qemu-aarch64-static >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq qemu-user-static; }
+          SOUNIO_LEAN_SINGLE_BIN=/tmp/lean_b.elf TIMEOUT_SECS=180 \
+            bash scripts/ci/a64_epistemic_variance_parity_gate.sh
       - name: checker_init_in_place assigns every Checker field (#2966)
         if: matrix.shard == 'core-c'
         run: |
@@ -1712,6 +1736,13 @@ jobs:
         env:
           MADAROS_RAW_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
         run: bash scripts/ci/madaros_region_reclaim_gate.sh
+      # ADR-010 §5: loop regions reset per iteration (reclaim witness and its
+      # opt-out teeth), the escape analysis shown load-bearing by mutation
+      # masks, distinct builtin ids, and the merge-time region veto.
+      - name: Loop regions (reclaim, escape mutation masks, builtin ids, merge veto)
+        env:
+          MADAROS_RAW_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
+        run: bash scripts/ci/madaros_loop_region_gate.sh
       - name: KL-3 specializer caps and method turbofish fail closed
         env:
           SOUNIO_MADAROS_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
@@ -2100,6 +2131,22 @@ jobs:
         run: bash scripts/ci/madaros_macos_arm64_acceptance_gate.sh /tmp/madaros-current-macos
       - name: Native module registry capacity and scalar bool globals
         run: bash scripts/ci/module_registry_capacity_gate.sh /tmp/madaros-current-macos /tmp/madaros-module-registry
+      # ADR-031 R1 on the macOS compiler, which the lean_single seed compiles
+      # directly: module-level i64 initializers that overflow are refused with
+      # E300, and one in range is accepted. The compile-fail suite does not run
+      # on this job, and a seed miscompilation once let `var G = MAX + 1` through
+      # here while Linux refused it.
+      - name: Native global initializer overflow refusals (E300)
+        run: |
+          export SOUNIO_STDLIB_PATH="$PWD/stdlib"
+          for t in tests/compile-fail/i64_global_let_init_overflow.sio \
+                   tests/compile-fail/i64_global_var_init_overflow.sio \
+                   tests/compile-fail/i64_global_init_overflow_operand_order.sio; do
+            if /tmp/madaros-current-macos check "$t" > /tmp/e300.log 2>&1 || ! grep -q 'error\[E300\]' /tmp/e300.log; then
+              echo "not refused with E300: $t"; cat /tmp/e300.log; exit 1
+            fi
+          done
+          /tmp/madaros-current-macos check tests/run-pass/i64_global_init_in_range.sio
       - name: Native type environment capacity and binding refusal
         run: bash scripts/ci/type_env_capacity_gate.sh /tmp/madaros-current-macos /tmp/madaros-type-env
       - name: Native IR tail growth and ARM64 address-window contract
@@ -2311,8 +2358,10 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install independent C++23 reference dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends g++ libboost-dev libquadmath0 jq
+          printf '%s\n' 'https://archive.ubuntu.com/ubuntu/' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
+          apt_options=(-o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Acquire::Retries=3 -o APT::Update::Error-Mode=any)
+          timeout 300 sudo apt-get "${apt_options[@]}" update
+          timeout 300 sudo apt-get "${apt_options[@]}" install -y --no-install-recommends g++ libboost-dev libquadmath0 jq
       - name: Run independent reference and mutant controls
         env:
           STDLIB_DEEP_GROUP: reference-controls
@@ -2769,8 +2818,10 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install independent C++23 reference dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends g++ libboost-dev libquadmath0 jq
+          printf '%s\n' 'https://archive.ubuntu.com/ubuntu/' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
+          apt_options=(-o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Acquire::Retries=3 -o APT::Update::Error-Mode=any)
+          timeout 300 sudo apt-get "${apt_options[@]}" update
+          timeout 300 sudo apt-get "${apt_options[@]}" install -y --no-install-recommends g++ libboost-dev libquadmath0 jq
       - name: Receipt and required-job tamper controls
         run: |
           bash scripts/ci/stdlib_deep_compiler_receipt.sh selftest

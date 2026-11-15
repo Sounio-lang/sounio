@@ -77,4 +77,17 @@ echo "$TAG: PASS mutation: flipped name byte caught (rc=$rc): $(grep -m1 're-enc
 expect_refused --ir-roundtrip tests/fixtures/soir/globals_extern_call.sio
 expect_refused --ir-dump tests/fixtures/soir/globals_extern_call.sio
 expect_refused --ir-roundtrip tests/fixtures/soir/int_calls_roundtrip.sio
+# The wide-integer call ABI (IrFunction wide_param_limbs / wide_return_bits) is
+# not in SOIR v6. The refusal must NAME it: these functions also carry other
+# fields the preflight refuses (a named return type), or trip the writer's
+# limits, and a refusal for that incidental reason would not survive a fix to it.
+expect_refused_named() {  # <mode> <file> <needle>
+  expect_refused "$1" "$2"
+  grep -q "SOIR v6 cannot represent .*$3" "$WORK/out" || { tail -n 20 "$WORK/out" >&2; fail "$1 $2 refused, but not for $3"; }
+}
+expect_refused_named --ir-roundtrip tests/fixtures/soir/wide_param_word_return.sio wide_param_limbs
+expect_refused_named --ir-dump tests/fixtures/soir/wide_param_word_return.sio wide_param_limbs
+expect_refused_named --ir-roundtrip tests/fixtures/soir/wide_param_unit_return.sio wide_param_limbs
+expect_refused_named --ir-roundtrip tests/fixtures/soir/wide_return.sio wide_return_bits
+expect_refused_named --ir-dump tests/fixtures/soir/wide_return.sio wide_return_bits
 echo "MADAROS_IR_ROUNDTRIP_GATE_OK"
