@@ -256,21 +256,27 @@ def layStrings : Nat → List (List Nat) → List Nat × List Nat
 
 /-- The stack at entry, as the kernel builds it for a static executable: at
 `sp`, `argc`, then the `argv` pointers and a 0, an empty environment (0), an
-empty auxiliary vector (two 0 words), then the strings. The region is one page
-per 4096 bytes, writable, ending at `top`. -/
+empty auxiliary vector (two 0 words), then the strings. The region is writable,
+ends at `top`, and is whole pages: the frame, and `stackRoom` bytes below `sp`
+for the program's own pushes and calls. Linux gives the stack far more room
+(8 MiB by default); a program that needs more than `stackRoom` gets stuck in the
+model where it would run on the machine, never the reverse. -/
+def stackRoom : Nat := page
+
 def initStack (top : Nat) (argv : List (List Nat)) : Region × Nat :=
   let strLen := (argv.map (·.length + 1)).foldl (· + ·) 0
   let words := 1 + argv.length + 1 + 1 + 2
   let need := words * 8 + strLen
-  let size := pages (need + 1)
+  let size := stackRoom + pages (need + 1)
   let base := top - size
-  -- 16-byte aligned sp, at the bottom of the region
-  let sp := base
+  -- 16-byte aligned sp, `stackRoom` above the bottom of the region
+  let sp := base + stackRoom
   let strAt := sp + words * 8
   let (strs, ptrs) := layStrings strAt argv
   let head := le64 argv.length ++ (ptrs.map le64).flatten ++ le64 0 ++ le64 0 ++ le64 0 ++ le64 0
   let bytes := head ++ strs
-  (⟨base, bytes ++ List.replicate (size - bytes.length) 0, true⟩, sp)
+  (⟨base, List.replicate stackRoom 0 ++ bytes ++
+    List.replicate (size - stackRoom - bytes.length) 0, true⟩, sp)
 
 /-! ### Witnesses -/
 
@@ -312,9 +318,12 @@ theorem demo_open_read : chkOpenRead = true := by decide +kernel
 def chkStack : Bool :=
   let (r, sp) := initStack 0x7ffffffff000 [[115], [47, 112]]
   Mem.rdN [r] sp 8 == some (le64 2) && r.base % page == 0 && sp % 16 == 0 &&
-    Mem.rdN [r] (sp + 8) 8 == some (le64 (sp + 56))
+    Mem.rdN [r] (sp + 8) 8 == some (le64 (sp + 56)) &&
+    (Mem.wrN [r] (sp - 8) (le64 1)).isSome && (Mem.wrN [r] (sp - stackRoom) (le64 1)).isSome &&
+    (Mem.wrN [r] (sp - stackRoom - 8) (le64 1)).isNone
 
-/-- The initial stack holds `argc` and, after it, a pointer to the first string. -/
+/-- The initial stack holds `argc` and, after it, a pointer to the first string;
+there are `stackRoom` writable bytes below `sp`, and none beyond them. -/
 theorem demo_stack : chkStack = true := by decide +kernel
 
 /-! ### Memory stays well-formed -/
