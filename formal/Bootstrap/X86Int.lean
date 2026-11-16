@@ -691,4 +691,14 @@ theorem exec_jmpR {r len t : Nat} {s : St} (h : s.reg r = some t) :
     exec (.jmpR r) len s = .ok { s with rip := t } := by
   simp only [exec, h, lift, bind, Option.bind, pure]
 
+
+/-- The truncation in the semantics: a mapping at the first oracle address, a
+pointer to it in a register. `mov32` keeps the low 32 bits (`v % 2 ^ 32`), and a
+load through the result reads no mapping (`rd64` is `none`, so the `ld` step is
+stuck) where the load through the untruncated pointer reads the buffer. -/
+def truncMem : Mem := [⟨0x7f0000000000, List.replicate 16 0, true⟩]
+
+example : rd64 truncMem 0x7f0000000000 = some 0 := by decide
+example : rd64 truncMem (0x7f0000000000 % 2 ^ 32) = none := by decide
+
 end X86Int

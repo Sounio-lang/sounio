@@ -35,8 +35,7 @@ def parseNat (s : String) : Option Nat :=
 
 def pattern (n : Nat) : List Nat := (List.range n).map (· % 251)
 
-def oracle : List Choice :=
-  (List.range 8).map fun i => .at (0x7f0000000000 + 0x100000000 * i)
+def oracle : List Choice := highAddrs.map .at
 
 def startState (code file : List Nat) : St :=
   let (stk, sp) := initStack 0x7ffffffff000 [[115, 116, 97, 103, 101, 49], [47, 112]]

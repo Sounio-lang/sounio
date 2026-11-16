@@ -437,4 +437,21 @@ theorem syscall_wf {k : Kern} {m : Mem} {nr a1 a2 a3 a4 a5 a6 : Nat} {r : Nat} {
                  rw [show ∀ x y : Nat, ¬ y < x → x + (y - x) = y from fun x y h => by omega] <;>
                    first | exact hf | assumption)))
 
+
+/-- Mapping addresses as Linux hands them out on x86-64, for an oracle: from
+0x7f0000000000, 4 GiB apart. A fixture, not a claim about the kernel's
+exact choice; what matters is that every one is above 4 GiB, so a pointer cut
+to 32 bits is a different address. -/
+def highAddrs : List Nat := (List.range 8).map fun i => 0x7f0000000000 + 0x100000000 * i
+
+/-- Every address is above 4 GiB. -/
+example : highAddrs.all (2 ^ 32 ≤ ·) = true := by decide
+
+/-- A pointer into any mapping of up to 4 GiB placed at one of these addresses,
+cut to 32 bits, lands in none of them. With the earlier oracle,
+`0x40000000 * (i + 1)`, the cut is the identity on the first three addresses and
+this fails. -/
+example : highAddrs.all (fun a => highAddrs.all fun b =>
+    !(b ≤ a % 2 ^ 32 && a % 2 ^ 32 < b + 2 ^ 32)) = true := by decide
+
 end X86Env
