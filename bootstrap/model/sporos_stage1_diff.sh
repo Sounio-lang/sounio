@@ -8,8 +8,10 @@
 # comparison is by its refusal line, not its exit status: a file the
 # reference refuses ("not a Sporos bytecode file", "refused by the
 # checker") must make the hex exit 1; any other file must make it exit 0.
-# Vectors: the example programs, N sporos_gen programs, and two
-# corruptions of each generated program (truncated, one byte flipped).
+# Vectors: the committed hand-made vectors in
+# bootstrap/roots/sporos/vectors (each also truncated and byte-flipped
+# here), the example programs, N sporos_gen programs, and two
+# corruptions of each generated program.
 # The RunHex variant is generated from RunHex.lean in a scratch dir: the
 # committed x86run feeds only a patterned file of a given size.
 set -euo pipefail
@@ -39,7 +41,13 @@ check() {
     *) fail=$((fail+1)); echo "MISMATCH $f want=exit $want got=$got";;
   esac
 }
-for f in "$W"/ex/*.spb; do check "$f"; done
+for f in "$W"/ex/*.spb "$ROOT"/bootstrap/roots/sporos/vectors/*.spb; do
+  check "$f"
+  sz=$(wc -c < "$f"); [ "$sz" -gt 1 ] || continue
+  head -c $((sz-1)) "$f" > "$W/v.trunc.spb"; check "$W/v.trunc.spb"
+  cp "$f" "$W/v.flip.spb"
+  printf '\xff' | dd of="$W/v.flip.spb" bs=1 seek=20 conv=notrunc 2>/dev/null; check "$W/v.flip.spb"
+done
 for i in $(seq 1 "$N"); do
   "$W/gen" "$i" > "$W/g$i.spb"; check "$W/g$i.spb"
   sz=$(wc -c < "$W/g$i.spb")
@@ -66,7 +74,13 @@ if [ "$(uname -s)-$(uname -m)" = "Linux-x86_64" ]; then
     "$W/stage1" "$f" >/dev/null 2>&1; got=$?
     if [ "$got" = "$want" ]; then kpass=$((kpass+1)); else kfail=$((kfail+1)); echo "KERNEL MISMATCH $f want=$want got=$got"; fi
   }
-  for f in "$W"/ex/*.spb; do kcheck "$f"; done
+  for f in "$W"/ex/*.spb "$ROOT"/bootstrap/roots/sporos/vectors/*.spb; do
+    kcheck "$f"
+    sz=$(wc -c < "$f"); [ "$sz" -gt 1 ] || continue
+    head -c $((sz-1)) "$f" > "$W/v.trunc.spb"; kcheck "$W/v.trunc.spb"
+    cp "$f" "$W/v.flip.spb"
+    printf '\xff' | dd of="$W/v.flip.spb" bs=1 seek=20 conv=notrunc 2>/dev/null; kcheck "$W/v.flip.spb"
+  done
   for i in $(seq 1 "$N"); do kcheck "$W/g$i.spb"; kcheck "$W/g$i.trunc.spb"; kcheck "$W/g$i.flip.spb"; done
   echo "sporos_stage1_diff (kernel via seed-a): pass=$kpass fail=$kfail"
   fail=$((fail+kfail))
