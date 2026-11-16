@@ -315,6 +315,13 @@ inductive Outcome where
   | outOfFuel
 deriving DecidableEq, Repr
 
+/-- The result of an instruction whose effect may fail: the next state, or stuck
+at `rip` with reason 1 (an undefined read or an unmodelled access). -/
+def okOf (rip : Nat) (o : Option St) : Sum St Outcome :=
+  match o with
+  | some t => .inl t
+  | none => .inr (.stuck rip 1)
+
 /-- One step: either the next state or the end of the run. -/
 def step (im : Img) (s : St) : Sum St Outcome :=
   match im.decodeAt s.rip with
@@ -323,9 +330,7 @@ def step (im : Img) (s : St) : Sum St Outcome :=
     let nx := (s.rip + len) % pow2 64
     let s1 := { s with rip := nx }
     let stuck := Sum.inr (Outcome.stuck s.rip 1)
-    let ok (o : Option St) : Sum St Outcome := match o with
-      | some t => .inl t
-      | none => stuck
+    let ok := okOf s.rip
     match ins with
     | .movImm d i => ok (s1.wr 32 d i)
     | .rr .mov w d src => ok (do let v ← s.rd w src; s1.wr w d v)
