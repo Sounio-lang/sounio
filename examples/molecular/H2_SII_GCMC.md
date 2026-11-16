@@ -28,7 +28,7 @@ d<N>/dtheta = -beta (<N U_theta> - <N><U_theta>).
 | | dN_s/dσ_H | 0.84 ± 0.32 | 0.346 ± 0.005 | +1.5σ |
 | | dN_l/dσ_H | −20.8 ± 1.1 | −19.31 ± 0.51 | −1.2σ |
 
-All twelve pass (largest deviation 1.7σ). Wall time 14 min on one core.
+All twelve pass (largest deviation 1.7σ). Wall time 14 min on one core with the full site sum; 5 min with the cell lists of `hg_build_cells` (same trajectory, same output to the printed digits).
 
 ## Where the predictions come from
 

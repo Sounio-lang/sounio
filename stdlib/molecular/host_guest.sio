@@ -412,7 +412,7 @@ pub struct HgSys {
 // pos, cage and w (each guest's field energy) are updated in place.
 // Returns the new number of guests.
 pub fn hg_trial(s: &HgSys, host: &[f64; 12288], cen: &[f64; 192], pos: &![f64; 3072], cage: &![i64; 1024],
-                wf: &![f64; 1024], n: i64) -> i64 with Mut, Div {
+                wf: &![f64; 1024], n: i64) -> i64 with Mut, Div, Panic {
     let beta = 1.0 / (*s).t
     let r = mol_uniform()
     if r < 1.0 / 3.0 {
@@ -421,7 +421,7 @@ pub fn hg_trial(s: &HgSys, host: &[f64; 12288], cen: &[f64; 192], pos: &![f64; 3
         let y = mol_uniform() * (*s).l
         let z = mol_uniform() * (*s).l
         let c = hg_cage_of(cen, (*s).nc, (*s).l, x, y, z)
-        let (w, we, ws) = hg_field(host, (*s).nh, x, y, z, (*s).eps, (*s).sig, (*s).eps_h, (*s).lam, (*s).cut, (*s).rho)
+        let (w, we, ws) = hg_field_cells(host, (*s).l, x, y, z, (*s).eps, (*s).sig, (*s).eps_h, (*s).lam, (*s).cut, (*s).rho)
         let (u, ue, us) = hg_pairs_at(pos, cage, n, 0 - 1, x, y, z, c, (*s).mode, (*s).l, (*s).eps_h, (*s).sig_h, (*s).lam2, (*s).rc2)
         if mol_uniform() < (*s).bfv / ((n + 1) as f64) * exp(0.0 - beta * (w + u)) {
             pos[(3 * n) as usize] = x
@@ -457,7 +457,7 @@ pub fn hg_trial(s: &HgSys, host: &[f64; 12288], cen: &[f64; 192], pos: &![f64; 3
     let y = hg_wrap(pos[(3 * i + 1) as usize] + (*s).step * (mol_uniform() - 0.5), (*s).l)
     let z = hg_wrap(pos[(3 * i + 2) as usize] + (*s).step * (mol_uniform() - 0.5), (*s).l)
     let c = hg_cage_of(cen, (*s).nc, (*s).l, x, y, z)
-    let (w, we, ws) = hg_field(host, (*s).nh, x, y, z, (*s).eps, (*s).sig, (*s).eps_h, (*s).lam, (*s).cut, (*s).rho)
+    let (w, we, ws) = hg_field_cells(host, (*s).l, x, y, z, (*s).eps, (*s).sig, (*s).eps_h, (*s).lam, (*s).cut, (*s).rho)
     let (u1, ue1, us1) = hg_pairs_at(pos, cage, n, i, x, y, z, c, (*s).mode, (*s).l, (*s).eps_h, (*s).sig_h, (*s).lam2, (*s).rc2)
     let (u0, ue0, us0) = hg_pairs_at(pos, cage, n, i, pos[(3 * i) as usize], pos[(3 * i + 1) as usize], pos[(3 * i + 2) as usize],
                                      cage[i as usize], (*s).mode, (*s).l, (*s).eps_h, (*s).sig_h, (*s).lam2, (*s).rc2)
@@ -473,12 +473,12 @@ pub fn hg_trial(s: &HgSys, host: &[f64; 12288], cen: &[f64; 192], pos: &![f64; 3
 
 // Parameter gradients of the configuration energy, dU/d eps_H and dU/d sig_H,
 // for the fluctuation estimate d<N>/d theta = -beta (<N U_theta> - <N><U_theta>).
-pub fn hg_config_grad(s: &HgSys, host: &[f64; 12288], pos: &[f64; 3072], cage: &[i64; 1024], n: i64) -> (f64, f64) with Mut, Div {
+pub fn hg_config_grad(s: &HgSys, host: &[f64; 12288], pos: &[f64; 3072], cage: &[i64; 1024], n: i64) -> (f64, f64) with Mut, Div, Panic {
     var ge = 0.0
     var gs = 0.0
     var i: i64 = 0
     while i < n {
-        let (w, we, ws) = hg_field(host, (*s).nh, pos[(3 * i) as usize], pos[(3 * i + 1) as usize], pos[(3 * i + 2) as usize],
+        let (w, we, ws) = hg_field_cells(host, (*s).l, pos[(3 * i) as usize], pos[(3 * i + 1) as usize], pos[(3 * i + 2) as usize],
                                    (*s).eps, (*s).sig, (*s).eps_h, (*s).lam, (*s).cut, (*s).rho)
         ge = ge + we
         gs = gs + ws
@@ -499,4 +499,97 @@ pub fn hg_config_grad(s: &HgSys, host: &[f64; 12288], pos: &[f64; 3072], cage: &
         i = i + 1
     }
     (ge, gs)
+}
+
+// ============================================================================
+// 5. CELL LISTS FOR THE GUEST-HOST FIELD
+// ============================================================================
+//
+// hg_field sums over every replicated host site (3672 for sII with a 12 A
+// cutoff). The home cell is cut into m^3 cubes; each cube keeps the sites within
+// cut + (half diagonal of the cube) of its centre, which are all the sites any
+// point of the cube can see. The pair test r2 <= cut^2 is still made, so the
+// field is the same sum over the same pairs as hg_field, only in another order.
+// For sII with m = 8 a cube keeps about 300 sites.
+
+var HG_CELL_M: i64 = 0
+var HG_CELL_START: [i64; 4097] = [0; 4097]
+var HG_CELL_SITES: [i64; 1048576] = [0; 1048576]
+
+// Builds the cube lists for a home cell of side l. m <= 16. Returns the total
+// number of entries, or -1 if they do not fit.
+pub fn hg_build_cells(host: &[f64; 12288], nh: i64, l: f64, cut: f64, m: i64) -> i64 with Mut, Div, Panic {
+    let h = l / (m as f64)
+    let reach = cut + 0.5 * h * 1.7320508075688772 + 1.0e-9
+    let reach2 = reach * reach
+    var total: i64 = 0
+    var c: i64 = 0
+    while c < m * m * m {
+        HG_CELL_START[c as usize] = total
+        let cx = ((c % m) as f64 + 0.5) * h
+        let cy = (((c / m) % m) as f64 + 0.5) * h
+        let cz = ((c / (m * m)) as f64 + 0.5) * h
+        var k: i64 = 0
+        while k < nh {
+            let dx = cx - host[(3 * k) as usize]
+            let dy = cy - host[(3 * k + 1) as usize]
+            let dz = cz - host[(3 * k + 2) as usize]
+            if dx * dx + dy * dy + dz * dz <= reach2 {
+                if total >= 1048576 { return 0 - 1 }
+                HG_CELL_SITES[total as usize] = k
+                total = total + 1
+            }
+            k = k + 1
+        }
+        c = c + 1
+    }
+    HG_CELL_START[(m * m * m) as usize] = total
+    HG_CELL_M = m
+    total
+}
+
+// hg_field over the cube that contains (x, y, z); the point must lie in the
+// home cell [0, l)^3 and hg_build_cells must have run for the same host and l.
+pub fn hg_field_cells(host: &[f64; 12288], l: f64, x: f64, y: f64, z: f64,
+                      eps: f64, sig: f64, eps_h: f64, lam: f64, cut: f64, rho: f64) -> (f64, f64, f64) with Mut, Div, Panic {
+    let m = HG_CELL_M
+    var ix = (x * (m as f64) / l) as i64
+    var iy = (y * (m as f64) / l) as i64
+    var iz = (z * (m as f64) / l) as i64
+    if ix >= m { ix = m - 1 }
+    if iy >= m { iy = m - 1 }
+    if iz >= m { iz = m - 1 }
+    if ix < 0 { ix = 0 }
+    if iy < 0 { iy = 0 }
+    if iz < 0 { iz = 0 }
+    let c = ix + m * (iy + m * iz)
+    let s2 = sig * sig
+    let s6 = s2 * s2 * s2
+    let s12 = s6 * s6
+    let c2 = cut * cut
+    var u = 0.0
+    var lp = 0.0
+    var us = 0.0
+    var p = HG_CELL_START[c as usize]
+    let pe = HG_CELL_START[(c + 1) as usize]
+    while p < pe {
+        let k = HG_CELL_SITES[p as usize]
+        let dx = x - host[(3 * k) as usize]
+        let dy = y - host[(3 * k + 1) as usize]
+        let dz = z - host[(3 * k + 2) as usize]
+        let r2 = dx * dx + dy * dy + dz * dz
+        if r2 <= c2 {
+            let i2 = 1.0 / r2
+            let i6 = i2 * i2 * i2
+            let aa = s12 * i6 * i6
+            let bb = s6 * i6
+            u = u + 4.0 * eps * (aa - bb)
+            lp = lp + 4.0 * eps * (132.0 * aa - 30.0 * bb) * i2
+            us = us + 4.0 * eps * (12.0 * aa - 6.0 * bb) / sig + lam * 4.0 * eps * (1584.0 * aa - 180.0 * bb) * i2 / sig
+        }
+        p = p + 1
+    }
+    let (t, ts) = hg_tail(eps, sig, rho, cut)
+    let w = u + t + lam * lp
+    (w, w / (2.0 * eps_h), 0.5 * (us + ts))
 }
