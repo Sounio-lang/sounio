@@ -45,6 +45,13 @@ export const ENGLISH_SEARCH = {
     description:
       'Effect system in Sounio: side effects sit in the function signature. Built-in names form a closed checked list. A caller that omits one is rejected.',
   },
+  '/learn/compiler/effect-system/': {
+    title: 'Sounio effect system: how the effect checker works',
+    description:
+      'How the Sounio compiler checks the effect system: source map of self-hosted/check/effects.sio and the effects subsystem, and what handlers do today.',
+    // last_validated on en/compiler/effect-system.mdx. Not a release version.
+    dateModified: '2026-10-29',
+  },
   '/learn/epistemic/uncertainty/': {
     title: UNCERTAINTY_EN.documentTitle,
     description: UNCERTAINTY_EN.description,

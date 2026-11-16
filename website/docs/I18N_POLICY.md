@@ -47,7 +47,7 @@ Every locale URL canonicalizes to itself, with a trailing slash, on `https://www
 
 What counts as a translation:
 
-- **Content documents** (`/learn/<slug>/`, `/science/<slug>/`, `/insights/<slug>/`, `/tutorials/<series>/<lesson>/`): a locale file exists and its prose is not the English prose. A missing file is not a translation. Today that is `zh-hk` for `/learn/language/units-and-uncertainty/` (no `zh-hk` source). `/zh/learn/compiler/effect-system/` has different prose, but it is the previous short page, not a translation of "Effect checker internals", so it is not indexable.
+- **Content documents** (`/learn/<slug>/`, `/science/<slug>/`, `/insights/<slug>/`, `/tutorials/<series>/<lesson>/`): a locale file exists and its prose is not the English prose. A missing file is not a translation. Today that is `zh-hk` for `/learn/language/units-and-uncertainty/` (no `zh-hk` source). `/zh/learn/compiler/effect-system/` has different prose, but it is the previous short page, not a translation of the English checker page, so it is not indexable.
 - **Listing hubs** whose cards are those documents (`/science/`, `/tutorials/`, `/tutorials/<series>/`) follow the same locales. `/learn/` also follows [publicSurface.json](../src/data/publicSurface.json).
 - **Home** (`/`) follows `publicSurface.json` (every current locale differs from English).
 - **`/language/` and `/compiler/`** branch the article for Greek only.
