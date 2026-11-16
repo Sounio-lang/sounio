@@ -38,13 +38,25 @@ lean_lib Sounio where
 
 -- Minimal x86-64 model of the bootstrap seed loaders (bootstrap/roots).
 -- Not a default target: CI builds it by name.
+-- Every module under Sporos/ is built by the glob, so a new Sporos module needs
+-- no edit here at all. Bootstrap modules are listed one per line, in
+-- alphabetical order: two pull requests that add modules in different
+-- alphabetical gaps touch different lines and merge cleanly. Two that insert
+-- into the same gap (say X86Float and X86Int, both between X86Env and X86Min)
+-- can still conflict.
 lean_lib Bootstrap where
-  roots := #[`Bootstrap.X86Min, `Bootstrap.SeedData, `Bootstrap.Seeds, `Bootstrap.Formats, `Bootstrap.Refine,
-             `Bootstrap.Loop, `Bootstrap.X86Env, `Bootstrap.PDist, `Bootstrap.X86Int,
-             `Sporos.Core, `Sporos.Step, `Sporos.Check, `Sporos.Safe, `Sporos.SafeStep, `Sporos.Run,
-             `Sporos.Dag, `Sporos.DagStep, `Sporos.DagSim, `Sporos.DagPrim, `Sporos.DagAlloc, `Sporos.DagRun, `Sporos.DagHash,
-             `Sporos.DagGC,
-             `Sporos.Witness]
+  roots := #[`Bootstrap, `Sporos]
+  globs := #[
+    .one `Bootstrap.Formats,
+    .one `Bootstrap.Loop,
+    .one `Bootstrap.PDist,
+    .one `Bootstrap.Refine,
+    .one `Bootstrap.SeedData,
+    .one `Bootstrap.Seeds,
+    .one `Bootstrap.X86Env,
+    .one `Bootstrap.X86Int,
+    .one `Bootstrap.X86Min,
+    .submodules `Sporos]
 
 -- The two seeds on every listing (about 20 minutes of kernel time, the two in parallel); built by
 -- bootstrap/model/seed_proofs.sh and the nightly job, not on every pull request.
