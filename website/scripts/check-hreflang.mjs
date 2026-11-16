@@ -78,6 +78,60 @@ function assertExamples() {
   if (esLanguage !== '/es/language/' || isIndexableUrl('/es/language/')) {
     errors.push(`expected /es/language/ to self-canonicalize and stay out of the index, got ${esLanguage}`);
   }
+  errors.push(...assertNoindexSitemapFixture());
+  return errors;
+}
+
+/**
+ * A self-canonical noindex URL must not be accepted as a sitemap row, even
+ * when its xhtml:link set is the English cluster the old checker expected.
+ */
+export function sitemapListingErrors(loc, page) {
+  const errors = [];
+  let pathname = '';
+  try {
+    pathname = new URL(loc).pathname;
+  } catch {
+    return [`sitemap loc is not a URL: ${loc}`];
+  }
+  if (!isIndexableUrl(pathname)) {
+    errors.push(`sitemap lists ${loc} which is not an indexable translation`);
+  }
+  if (page?.head?.noindex) {
+    errors.push(`sitemap lists ${loc} whose HTML is noindex`);
+  }
+  return errors;
+}
+
+function assertNoindexSitemapFixture() {
+  const loc = absoluteUrl('/es/packages/');
+  const englishCluster = hreflangLinks('/es/packages/');
+  const accepted = sitemapListingErrors(loc, {
+    head: {
+      canonicals: [loc],
+      noindex: true,
+      alternates: englishCluster,
+    },
+  });
+  const errors = [];
+  if (accepted.length === 0) {
+    errors.push('negative fixture: noindex /es/packages/ sitemap row was accepted');
+  }
+  if (!accepted.some((error) => error.includes('noindex'))) {
+    errors.push('negative fixture: noindex /es/packages/ was not rejected for noindex');
+  }
+  if (!accepted.some((error) => error.includes('not an indexable translation'))) {
+    errors.push('negative fixture: noindex /es/packages/ was not rejected as non-indexable');
+  }
+  const unmarked = sitemapListingErrors(loc, { head: { canonicals: [loc], noindex: false, alternates: englishCluster } });
+  if (!unmarked.some((error) => error.includes('not an indexable translation'))) {
+    errors.push('negative fixture: non-indexable /es/packages/ sitemap row was accepted');
+  }
+  const home = absoluteUrl('/');
+  const homeErrors = sitemapListingErrors(home, { head: { canonicals: [home], noindex: false } });
+  if (homeErrors.length > 0) {
+    errors.push(`negative fixture: indexable home was rejected: ${homeErrors.join('; ')}`);
+  }
   return errors;
 }
 
@@ -242,6 +296,7 @@ async function run() {
     if (page.head.canonicals[0] !== entry.loc) {
       errors.push(`sitemap lists ${entry.loc} but its canonical is ${page.head.canonicals[0]}`);
     }
+    errors.push(...sitemapListingErrors(entry.loc, page));
     if (isRedirectPath(new URL(entry.loc).pathname)) errors.push(`sitemap lists redirect ${entry.loc}`);
     const expected = hreflangLinks(new URL(entry.loc).pathname).map((link) => `${link.hreflang} ${link.href}`);
     const actual = entry.alternates.map((link) => `${link.hreflang} ${link.href}`);
