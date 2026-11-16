@@ -49,6 +49,7 @@ lean_lib Bootstrap where
   globs := #[
     .one `Bootstrap.Formats,
     .one `Bootstrap.Loop,
+    .one `Bootstrap.PDist,
     .one `Bootstrap.Refine,
     .one `Bootstrap.SeedData,
     .one `Bootstrap.Seeds,
