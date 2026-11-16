@@ -55,7 +55,8 @@ async function sitemapLocs() {
 
 function jsonLdBlocks(html) {
   const blocks = [];
-  const re = /<script\b([^>]*)>([\s\S]*?)<\/script>/gi;
+  // End tags may carry whitespace or ignored attributes: </script >, </script foo="bar">.
+  const re = /<script\b([^>]*)>([\s\S]*?)<\/script\b[^>]*>/gi;
   let match;
   while ((match = re.exec(html)) !== null) {
     if (!/\btype=(["'])application\/ld\+json\1/i.test(match[1])) continue;
