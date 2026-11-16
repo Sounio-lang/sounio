@@ -49,6 +49,11 @@ export const ENGLISH_SEARCH = {
     title: UNCERTAINTY_EN.documentTitle,
     description: UNCERTAINTY_EN.description,
   },
+  '/learn/examples/': {
+    title: 'Sounio 3.0 (pre-release): uncertainty, Knowledge types',
+    description:
+      'Sounio 3.0 (pre-release) examples the compiler checks: a Knowledge COVID kernel, vancomycin uncertainty, and a compile-fail that rejects low confidence.',
+  },
 };
 
 /** Approved S1 copy for the English self-hosted compiler page. */
