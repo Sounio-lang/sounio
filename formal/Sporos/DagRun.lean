@@ -11,6 +11,9 @@ import Sporos.Run
 
 namespace Sporos
 
+section
+variable {A : Alloc}
+
 theorem Valid.ext {t : DSt} (hv : Valid t) {ar' : Arena} (hg : Good ar') (he : Ext t.ar ar') :
     Valid { t with ar := ar' } := by
   obtain ⟨_, hds, hax, hrs, hmem, htab, hout, hpc⟩ := hv
@@ -21,15 +24,15 @@ theorem Valid.ext {t : DSt} (hv : Valid t) {ar' : Arena} (hg : Good ar') (he : E
     Nat.lt_of_lt_of_le hpc hl⟩
 
 theorem buildAll_spec : ∀ (res : List (Nat × PE)) (ar : Arena), Good ar → (∀ r ∈ res, r.2.ok ar.length) →
-    Good (buildAll res ar).2 ∧ Ext ar (buildAll res ar).2 ∧
-      (∀ d ∈ (buildAll res ar).1, d.n < (buildAll res ar).2.length) ∧
-      (buildAll res ar).1.map (αv (buildAll res ar).2) = res.map (fun r => ⟨r.1, r.2.den (leaves ar)⟩)
+    Good (buildAll A res ar).2 ∧ Ext ar (buildAll A res ar).2 ∧
+      (∀ d ∈ (buildAll A res ar).1, d.n < (buildAll A res ar).2.length) ∧
+      (buildAll A res ar).1.map (αv (buildAll A res ar).2) = res.map (fun r => ⟨r.1, r.2.den (leaves ar)⟩)
   | [], ar, hg, _ => ⟨hg, Ext.refl _, by simp [buildAll], rfl⟩
   | (w, e) :: r, ar, hg, hok => by
     have he : e.ok ar.length := hok (w, e) (by simp)
-    obtain ⟨g1, e1, l1, d1⟩ := build_spec e ar hg he
-    have hr : ∀ x ∈ r, x.2.ok (build e ar).2.length := fun x hx => PE.ok_mono (hok x (by simp [hx])) e1.len
-    obtain ⟨g2, e2, l2, d2⟩ := buildAll_spec r (build e ar).2 g1 hr
+    obtain ⟨g1, e1, l1, d1⟩ := A.spec e ar hg he
+    have hr : ∀ x ∈ r, x.2.ok (A.build e ar).2.length := fun x hx => PE.ok_mono (hok x (by simp [hx])) e1.len
+    obtain ⟨g2, e2, l2, d2⟩ := buildAll_spec r (A.build e ar).2 g1 hr
     refine ⟨g2, Ext.trans e1 e2, ?_, ?_⟩
     · intro d hd
       simp only [buildAll, List.mem_cons] at hd
@@ -62,8 +65,8 @@ theorem Valid.setTop {t : DSt} (hv : Valid t) {f : DFrame} (hf : ∀ d ∈ f.loc
 
 /-- Pushing a value: the arena grows by the plan, the state it stands for gains the value. -/
 theorem push_spec {t : DSt} (hv : Valid t) (w : Nat) {e : PE} (he : e.ok t.ar.length) :
-    Valid (t.push w e) ∧ α (t.push w e) = { α t with ds := ⟨w, e.den (leaves t.ar)⟩ :: (α t).ds } := by
-  obtain ⟨g1, e1, l1, d1⟩ := build_spec e t.ar hv.1 he
+    Valid (t.push A w e) ∧ α (t.push A w e) = { α t with ds := ⟨w, e.den (leaves t.ar)⟩ :: (α t).ds } := by
+  obtain ⟨g1, e1, l1, d1⟩ := A.spec e t.ar hv.1 he
   have hv1 := hv.ext g1 e1
   refine ⟨?_, ?_⟩
   · obtain ⟨hg, hds, hax, hrs, hmem, htab, hout, hpc⟩ := hv1
@@ -74,7 +77,7 @@ theorem push_spec {t : DSt} (hv : Valid t) (w : Nat) {e : PE} (he : e.ok t.ar.le
     · exact l1
     · exact hds d hd
   · have hα := α_ext hv e1
-    have : t.push w e = { { t with ar := (build e t.ar).2 } with ds := ⟨w, (build e t.ar).1⟩ :: t.ds } := rfl
+    have : t.push A w e = { { t with ar := (A.build e t.ar).2 } with ds := ⟨w, (A.build e t.ar).1⟩ :: t.ds } := rfl
     rw [this, ← hα]
     simp only [α, List.map_cons, αv, d1]
 
@@ -262,19 +265,19 @@ theorem adv_next {X : DSt} (hX : Valid X) (g : DFrame) (hg : ∀ d ∈ g.locs, d
 
 theorem push_adv {X : DSt} (hX : Valid X) (w : Nat) {e : PE} (he : e.ok X.ar.length) (g : DFrame)
     (hg : ∀ d ∈ g.locs, d.n < X.ar.length) :
-    (DRes.next ((X.push w e).setTop g)).abs =
+    (DRes.next ((X.push A w e).setTop g)).abs =
         .next ({ α X with ds := ⟨w, e.den (leaves X.ar)⟩ :: (α X).ds }.setTop (αf X.ar g)) ∧
-      ∀ t', DRes.next ((X.push w e).setTop g) = .next t' → Valid t' := by
+      ∀ t', DRes.next ((X.push A w e).setTop g) = .next t' → Valid t' := by
   obtain ⟨hv2, hα2⟩ := push_spec hX w he
-  have hext := (build_spec e X.ar hX.1 he).2.1
+  have hext := (A.spec e X.ar hX.1 he).2.1
   obtain ⟨h1, h2⟩ := adv_next hv2 g (fun d hd => Nat.lt_of_lt_of_le (hg d hd) hext.len)
   refine ⟨?_, h2⟩
   rw [h1, hα2]
-  have : (X.push w e).ar = (build e X.ar).2 := rfl
+  have : (X.push A w e).ar = (A.build e X.ar).2 := rfl
   rw [this, αf_ext hX.1 hext hg]
 
 theorem dstep_sim (pr : Prog) (ph : Phys) (t : DSt) (hv : Valid t) :
-    (dstep pr ph t).abs = step pr ph (α t) ∧ ∀ t', dstep pr ph t = .next t' → Valid t' := by
+    (dstep A pr ph t).abs = step pr ph (α t) ∧ ∀ t', dstep A pr ph t = .next t' → Valid t' := by
   obtain ⟨ds, aux, rs, mem, msize, hp, tabs, inp, ipos, out, pc, stp, ar⟩ := t
   rcases rs with _ | ⟨f, rest⟩
   · exact ⟨rfl, fun _ h => by simp [dstep] at h⟩
@@ -334,15 +337,15 @@ theorem dstep_sim (pr : Prog) (ph : Phys) (t : DSt) (hv : Valid t) :
           have hP : ((PE.node pc).app (PE.leaf ⟨none, f.word, f.pc, ph.core stp⟩)).ok ar.length :=
             ⟨hv.2.2.2.2.2.2.2, trivial⟩
           obtain ⟨hv2, hα2⟩ := push_spec hv1 (((pr.data.take i).map List.length).foldl (· + ·) 0) hP
-          have hext := (build_spec _ ar hv.1 hP).2.1
+          have hext := (A.spec _ ar hv.1 hP).2.1
           obtain ⟨h1, h2⟩ := push_adv hv2 d.length (PE.ok_mono hP hext.len) { f with pc := f.pc + 1 }
             (fun d hd => Nat.lt_of_lt_of_le (hf d hd) hext.len)
           refine ⟨?_, h2⟩
           rw [h1, hα2]
-          have : (DSt.push ⟨ds, aux, f :: rest, mem, msize, hp, tabs, inp, ipos, out, pc, stp + 1, ar⟩
+          have : (DSt.push A ⟨ds, aux, f :: rest, mem, msize, hp, tabs, inp, ipos, out, pc, stp + 1, ar⟩
               (((pr.data.take i).map List.length).foldl (· + ·) 0)
               ((PE.node pc).app (PE.leaf ⟨none, f.word, f.pc, ph.core stp⟩))).ar =
-              (build ((PE.node pc).app (PE.leaf ⟨none, f.word, f.pc, ph.core stp⟩)) ar).2 := rfl
+              (A.build ((PE.node pc).app (PE.leaf ⟨none, f.word, f.pc, ph.core stp⟩)) ar).2 := rfl
           rw [this, PE.den_ext hv.1 hext hP, αf_ext hv.1 hext (g := { f with pc := f.pc + 1 }) hf]
           rfl
       case tor =>
@@ -350,14 +353,14 @@ theorem dstep_sim (pr : Prog) (ph : Phys) (t : DSt) (hv : Valid t) :
         · exact ⟨rfl, fun _ h => by simp at h⟩
         · have hvn : v.n < ar.length := hv.2.1 v (by simp)
           have hP := tagPlan_ok ⟨none, f.word, f.pc, ph.core stp⟩ hv.2.2.2.2.2.2.2 hvn
-          obtain ⟨g1, e1, l1, d1⟩ := build_spec _ ar hv.1 hP
+          obtain ⟨g1, e1, l1, d1⟩ := A.spec _ ar hv.1 hP
           have hY1 : Valid ⟨r, aux, f :: rest, mem, msize, hp, tabs, inp, ipos, out, pc, stp + 1, ar⟩ :=
             ⟨hv.1, fun d hd => hv.2.1 d (by simp [hd]), hv.2.2⟩
           have hα1 := α_ext hY1 e1
           have hY := hY1.ext g1 e1
-          have hY' : Valid ⟨r, ⟨v.w, (build (tagPlan pc ⟨none, f.word, f.pc, ph.core stp⟩ v) ar).1⟩ :: aux,
+          have hY' : Valid ⟨r, ⟨v.w, (A.build (tagPlan pc ⟨none, f.word, f.pc, ph.core stp⟩ v) ar).1⟩ :: aux,
               f :: rest, mem, msize, hp, tabs, inp, ipos, out, pc, stp + 1,
-              (build (tagPlan pc ⟨none, f.word, f.pc, ph.core stp⟩ v) ar).2⟩ := by
+              (A.build (tagPlan pc ⟨none, f.word, f.pc, ph.core stp⟩ v) ar).2⟩ := by
             obtain ⟨a1, a2, a3, a4⟩ := hY
             refine ⟨a1, a2, ?_, a4⟩
             intro d hd; simp only [List.mem_cons] at hd
@@ -367,13 +370,13 @@ theorem dstep_sim (pr : Prog) (ph : Phys) (t : DSt) (hv : Valid t) :
           obtain ⟨h1, h2⟩ := adv_next hY' { f with pc := f.pc + 1 } (fun d hd => Nat.lt_of_lt_of_le (hf d hd) e1.len)
           refine ⟨?_, h2⟩
           rw [h1]
-          have : α ⟨r, ⟨v.w, (build (tagPlan pc ⟨none, f.word, f.pc, ph.core stp⟩ v) ar).1⟩ :: aux,
+          have : α ⟨r, ⟨v.w, (A.build (tagPlan pc ⟨none, f.word, f.pc, ph.core stp⟩ v) ar).1⟩ :: aux,
               f :: rest, mem, msize, hp, tabs, inp, ipos, out, pc, stp + 1,
-              (build (tagPlan pc ⟨none, f.word, f.pc, ph.core stp⟩ v) ar).2⟩ =
-              { α ⟨r, aux, f :: rest, mem, msize, hp, tabs, inp, ipos, out, pc, stp + 1, (build (tagPlan pc ⟨none, f.word, f.pc, ph.core stp⟩ v) ar).2⟩ with
-                aux := ⟨v.w, leaves (build (tagPlan pc ⟨none, f.word, f.pc, ph.core stp⟩ v) ar).2
-                  (build (tagPlan pc ⟨none, f.word, f.pc, ph.core stp⟩ v) ar).1⟩ ::
-                  aux.map (αv (build (tagPlan pc ⟨none, f.word, f.pc, ph.core stp⟩ v) ar).2) } := rfl
+              (A.build (tagPlan pc ⟨none, f.word, f.pc, ph.core stp⟩ v) ar).2⟩ =
+              { α ⟨r, aux, f :: rest, mem, msize, hp, tabs, inp, ipos, out, pc, stp + 1, (A.build (tagPlan pc ⟨none, f.word, f.pc, ph.core stp⟩ v) ar).2⟩ with
+                aux := ⟨v.w, leaves (A.build (tagPlan pc ⟨none, f.word, f.pc, ph.core stp⟩ v) ar).2
+                  (A.build (tagPlan pc ⟨none, f.word, f.pc, ph.core stp⟩ v) ar).1⟩ ::
+                  aux.map (αv (A.build (tagPlan pc ⟨none, f.word, f.pc, ph.core stp⟩ v) ar).2) } := rfl
           rw [this, d1]
           have hax := map_αv_ext hv.1 e1 hv.2.2.1
           simp only at hα1
@@ -387,17 +390,17 @@ theorem dstep_sim (pr : Prog) (ph : Phys) (t : DSt) (hv : Valid t) :
           · simp only [hi, if_true]
             have hvn : v.n < ar.length := hv.2.1 v (by simp)
             have hP := tagPlan_ok ⟨none, f.word, f.pc, ph.core stp⟩ hv.2.2.2.2.2.2.2 hvn
-            obtain ⟨g1, e1, l1, d1⟩ := build_spec _ ar hv.1 hP
+            obtain ⟨g1, e1, l1, d1⟩ := A.spec _ ar hv.1 hP
             have hY1 : Valid ⟨r, aux, f :: rest, mem, msize, hp, tabs, inp, ipos, out, pc, stp + 1, ar⟩ :=
               ⟨hv.1, fun d hd => hv.2.1 d (by simp [hd]), hv.2.2⟩
             have hα1 := α_ext hY1 e1
             have hY := hY1.ext g1 e1
-            have hloc : ∀ d ∈ (f.locs.set i ⟨v.w, (build (tagPlan pc ⟨none, f.word, f.pc, ph.core stp⟩ v) ar).1⟩), d.n < (build (tagPlan pc ⟨none, f.word, f.pc, ph.core stp⟩ v) ar).2.length := by
+            have hloc : ∀ d ∈ (f.locs.set i ⟨v.w, (A.build (tagPlan pc ⟨none, f.word, f.pc, ph.core stp⟩ v) ar).1⟩), d.n < (A.build (tagPlan pc ⟨none, f.word, f.pc, ph.core stp⟩ v) ar).2.length := by
               intro d hd
               rcases List.mem_or_eq_of_mem_set hd with hd | rfl
               · exact Nat.lt_of_lt_of_le (hf d hd) e1.len
               · exact l1
-            obtain ⟨h1, h2⟩ := adv_next hY { f with pc := f.pc + 1, locs := f.locs.set i ⟨v.w, (build (tagPlan pc ⟨none, f.word, f.pc, ph.core stp⟩ v) ar).1⟩ } hloc
+            obtain ⟨h1, h2⟩ := adv_next hY { f with pc := f.pc + 1, locs := f.locs.set i ⟨v.w, (A.build (tagPlan pc ⟨none, f.word, f.pc, ph.core stp⟩ v) ar).1⟩ } hloc
             refine ⟨?_, h2⟩
             rw [h1]
             simp only at hα1
@@ -410,14 +413,14 @@ theorem dstep_sim (pr : Prog) (ph : Phys) (t : DSt) (hv : Valid t) :
         · exact ⟨rfl, fun _ h => by simp at h⟩
         · have hcn : c.n < ar.length := hv.2.1 c (by simp)
           have hP : ((PE.node pc).app (PE.node c.n)).app (PE.leaf ⟨none, f.word, f.pc, ph.core stp⟩) |>.ok ar.length := ⟨⟨hv.2.2.2.2.2.2.2, hcn⟩, trivial⟩
-          obtain ⟨g1, e1, l1, d1⟩ := build_spec _ ar hv.1 hP
+          obtain ⟨g1, e1, l1, d1⟩ := A.spec _ ar hv.1 hP
           have hY1 : Valid ⟨r, aux, f :: rest, mem, msize, hp, tabs, inp, ipos, out, pc, stp + 1, ar⟩ :=
             ⟨hv.1, fun d hd => hv.2.1 d (by simp [hd]), hv.2.2⟩
           have hα1 := α_ext hY1 e1
           have hY := hY1.ext g1 e1
           have hY' : Valid ⟨r, aux, f :: rest, mem, msize, hp, tabs, inp, ipos, out,
-              (build (((PE.node pc).app (PE.node c.n)).app (PE.leaf ⟨none, f.word, f.pc, ph.core stp⟩)) ar).1, stp + 1,
-              (build (((PE.node pc).app (PE.node c.n)).app (PE.leaf ⟨none, f.word, f.pc, ph.core stp⟩)) ar).2⟩ :=
+              (A.build (((PE.node pc).app (PE.node c.n)).app (PE.leaf ⟨none, f.word, f.pc, ph.core stp⟩)) ar).1, stp + 1,
+              (A.build (((PE.node pc).app (PE.node c.n)).app (PE.leaf ⟨none, f.word, f.pc, ph.core stp⟩)) ar).2⟩ :=
             ⟨hY.1, hY.2.1, hY.2.2.1, hY.2.2.2.1, hY.2.2.2.2.1, hY.2.2.2.2.2.1, hY.2.2.2.2.2.2.1, l1⟩
           obtain ⟨h1, h2⟩ := adv_next hY' { f with pc := if c.w % M = 0 then tg else f.pc + 1 }
             (fun d hd => Nat.lt_of_lt_of_le (hf d hd) e1.len)
@@ -433,14 +436,14 @@ theorem dstep_sim (pr : Prog) (ph : Phys) (t : DSt) (hv : Valid t) :
         · exact ⟨rfl, fun _ h => by simp at h⟩
         · have hcn : c.n < ar.length := hv.2.1 c (by simp)
           have hP : ((PE.node pc).app (PE.node c.n)).app (PE.leaf ⟨none, f.word, f.pc, ph.core stp⟩) |>.ok ar.length := ⟨⟨hv.2.2.2.2.2.2.2, hcn⟩, trivial⟩
-          obtain ⟨g1, e1, l1, d1⟩ := build_spec _ ar hv.1 hP
+          obtain ⟨g1, e1, l1, d1⟩ := A.spec _ ar hv.1 hP
           have hY1 : Valid ⟨r, aux, f :: rest, mem, msize, hp, tabs, inp, ipos, out, pc, stp + 1, ar⟩ :=
             ⟨hv.1, fun d hd => hv.2.1 d (by simp [hd]), hv.2.2⟩
           have hα1 := α_ext hY1 e1
           have hY := hY1.ext g1 e1
           have hY' : Valid ⟨r, aux, f :: rest, mem, msize, hp, tabs, inp, ipos, out,
-              (build (((PE.node pc).app (PE.node c.n)).app (PE.leaf ⟨none, f.word, f.pc, ph.core stp⟩)) ar).1, stp + 1,
-              (build (((PE.node pc).app (PE.node c.n)).app (PE.leaf ⟨none, f.word, f.pc, ph.core stp⟩)) ar).2⟩ :=
+              (A.build (((PE.node pc).app (PE.node c.n)).app (PE.leaf ⟨none, f.word, f.pc, ph.core stp⟩)) ar).1, stp + 1,
+              (A.build (((PE.node pc).app (PE.node c.n)).app (PE.leaf ⟨none, f.word, f.pc, ph.core stp⟩)) ar).2⟩ :=
             ⟨hY.1, hY.2.1, hY.2.2.1, hY.2.2.2.1, hY.2.2.2.2.1, hY.2.2.2.2.2.1, hY.2.2.2.2.2.2.1, l1⟩
           obtain ⟨h1, h2⟩ := adv_next hY' { f with pc := if c.w % M = 0 then f.pc + 1 else tg }
             (fun d hd => Nat.lt_of_lt_of_le (hf d hd) e1.len)
@@ -466,11 +469,11 @@ theorem dstep_sim (pr : Prog) (ph : Phys) (t : DSt) (hv : Valid t) :
           · simp only [hl, if_true]; exact ⟨rfl, fun _ h => by simp at h⟩
           · simp only [hl, if_false]
             have hP : ((PE.node pc).app (PE.leaf ⟨none, f.word, f.pc, ph.core stp⟩)).ok ar.length := ⟨hv.2.2.2.2.2.2.2, trivial⟩
-            obtain ⟨g1, e1, l1, d1⟩ := build_spec _ ar hv.1 hP
+            obtain ⟨g1, e1, l1, d1⟩ := A.spec _ ar hv.1 hP
             have hY1 : Valid ⟨ds, aux, f :: rest, mem, msize, hp, tabs, inp, ipos, out, pc, stp + 1, ar⟩ := hv
             have hα1 := α_ext hY1 e1
             have hY := hY1.ext g1 e1
-            have hrs : ∀ g ∈ rest, αf (build ((PE.node pc).app (PE.leaf ⟨none, f.word, f.pc, ph.core stp⟩)) ar).2 g = αf ar g :=
+            have hrs : ∀ g ∈ rest, αf (A.build ((PE.node pc).app (PE.leaf ⟨none, f.word, f.pc, ph.core stp⟩)) ar).2 g = αf ar g :=
               fun g hg => αf_ext hv.1 e1 (hv.2.2.2.1 g (by simp [hg]))
             refine ⟨?_, fun t' h => ?_⟩
             · simp only [DRes.abs]
@@ -478,7 +481,7 @@ theorem dstep_sim (pr : Prog) (ph : Phys) (t : DSt) (hv : Valid t) :
               have : ∀ X : DSt, ∀ rs', α { X with rs := rs' } = { α X with rs := rs'.map (αf X.ar) } :=
                 fun _ _ => rfl
               show Res.next (α { (⟨ds, aux, f :: rest, mem, msize, hp, tabs, inp, ipos, out, pc, stp + 1,
-                (build ((PE.node pc).app (PE.leaf ⟨none, f.word, f.pc, ph.core stp⟩)) ar).2⟩ : DSt) with rs := _ }) = _
+                (A.build ((PE.node pc).app (PE.leaf ⟨none, f.word, f.pc, ph.core stp⟩)) ar).2⟩ : DSt) with rs := _ }) = _
               rw [this, hα1]
               simp only [List.map, αf, αv, List.map_replicate, d1, PE.den, map_αv_ext hv.1 e1 hf,
                 List.map_congr_left hrs]
@@ -500,16 +503,16 @@ theorem dstep_sim (pr : Prog) (ph : Phys) (t : DSt) (hv : Valid t) :
           have hv1 : Valid ⟨ds, aux, f :: rest, mem, msize, hp, tabs, inp, ipos, out, pc, stp + 1, ar⟩ := hv
           have ha : ∀ d ∈ ds.take p.eff.1, d.n < ar.length := fun d hd => hv.2.1 d (List.mem_of_mem_take hd)
           have hP := qPlan_ok ha hv.2.2.2.2.2.2.2 ⟨none, f.word, f.pc, ph.core stp⟩
-          obtain ⟨g1, e1, l1, d1⟩ := build_spec _ ar hv.1 hP
-          have hT1 : Valid (⟨ds, aux, f :: rest, mem, msize, hp, tabs, inp, ipos, out, pc, stp + 1, (build (qPlan (ds.take p.eff.1) pc ⟨none, f.word, f.pc, ph.core stp⟩) ar).2⟩ : DSt) := hv1.ext g1 e1
-          have hαT : α (⟨ds, aux, f :: rest, mem, msize, hp, tabs, inp, ipos, out, pc, stp + 1, (build (qPlan (ds.take p.eff.1) pc ⟨none, f.word, f.pc, ph.core stp⟩) ar).2⟩ : DSt) = α ⟨ds, aux, f :: rest, mem, msize, hp, tabs, inp, ipos, out, pc, stp + 1, ar⟩ :=
+          obtain ⟨g1, e1, l1, d1⟩ := A.spec _ ar hv.1 hP
+          have hT1 : Valid (⟨ds, aux, f :: rest, mem, msize, hp, tabs, inp, ipos, out, pc, stp + 1, (A.build (qPlan (ds.take p.eff.1) pc ⟨none, f.word, f.pc, ph.core stp⟩) ar).2⟩ : DSt) := hv1.ext g1 e1
+          have hαT : α (⟨ds, aux, f :: rest, mem, msize, hp, tabs, inp, ipos, out, pc, stp + 1, (A.build (qPlan (ds.take p.eff.1) pc ⟨none, f.word, f.pc, ph.core stp⟩) ar).2⟩ : DSt) = α ⟨ds, aux, f :: rest, mem, msize, hp, tabs, inp, ipos, out, pc, stp + 1, ar⟩ :=
             α_ext hv1 e1
-          have hargs : (ds.map (αv ar)).take p.eff.1 = (ds.take p.eff.1).map (αv (build (qPlan (ds.take p.eff.1) pc ⟨none, f.word, f.pc, ph.core stp⟩) ar).2) := by
+          have hargs : (ds.map (αv ar)).take p.eff.1 = (ds.take p.eff.1).map (αv (A.build (qPlan (ds.take p.eff.1) pc ⟨none, f.word, f.pc, ph.core stp⟩) ar).2) := by
             rw [← List.map_take, map_αv_ext hv.1 e1 ha]
           have hl : (ds.take p.eff.1).length = p.eff.1 := List.length_take_of_le (by omega)
-          have hqd : leaves (build (qPlan (ds.take p.eff.1) pc ⟨none, f.word, f.pc, ph.core stp⟩) ar).2 (build (qPlan (ds.take p.eff.1) pc ⟨none, f.word, f.pc, ph.core stp⟩) ar).1 = (qPlan (ds.take p.eff.1) pc ⟨none, f.word, f.pc, ph.core stp⟩).den (leaves (build (qPlan (ds.take p.eff.1) pc ⟨none, f.word, f.pc, ph.core stp⟩) ar).2) := by
+          have hqd : leaves (A.build (qPlan (ds.take p.eff.1) pc ⟨none, f.word, f.pc, ph.core stp⟩) ar).2 (A.build (qPlan (ds.take p.eff.1) pc ⟨none, f.word, f.pc, ph.core stp⟩) ar).1 = (qPlan (ds.take p.eff.1) pc ⟨none, f.word, f.pc, ph.core stp⟩).den (leaves (A.build (qPlan (ds.take p.eff.1) pc ⟨none, f.word, f.pc, ph.core stp⟩) ar).2) := by
             rw [d1, PE.den_ext hv.1 e1 hP]
-          have hsim := sim_prim_all ph p (ds.take p.eff.1) (⟨ds, aux, f :: rest, mem, msize, hp, tabs, inp, ipos, out, pc, stp + 1, (build (qPlan (ds.take p.eff.1) pc ⟨none, f.word, f.pc, ph.core stp⟩) ar).2⟩ : DSt) ⟨none, f.word, f.pc, ph.core stp⟩ (build (qPlan (ds.take p.eff.1) pc ⟨none, f.word, f.pc, ph.core stp⟩) ar).1 hT1 l1
+          have hsim := sim_prim_all ph p (ds.take p.eff.1) (⟨ds, aux, f :: rest, mem, msize, hp, tabs, inp, ipos, out, pc, stp + 1, (A.build (qPlan (ds.take p.eff.1) pc ⟨none, f.word, f.pc, ph.core stp⟩) ar).2⟩ : DSt) ⟨none, f.word, f.pc, ph.core stp⟩ (A.build (qPlan (ds.take p.eff.1) pc ⟨none, f.word, f.pc, ph.core stp⟩) ar).1 hT1 l1
             (fun d hd => Nat.lt_of_lt_of_le (ha d hd) e1.len) hl hqd
           have hlit : α ⟨ds, aux, f :: rest, mem, msize, hp, tabs, inp, ipos, out, pc, stp + 1, ar⟩ =
             ⟨ds.map (αv ar), aux.map (αv ar), ⟨f.word, f.pc, f.locs.map (αv ar), f.base, f.abase⟩ :: rest.map (αf ar),
@@ -517,28 +520,28 @@ theorem dstep_sim (pr : Prog) (ph : Phys) (t : DSt) (hv : Valid t) :
               tabs.map (List.map fun kv => (kv.1, αv ar kv.2)), inp, ipos, out.map (fun bn => (bn.1, leaves ar bn.2)),
               leaves ar pc, stp + 1⟩ := rfl
           rw [hargs, ← hlit, ← hαT, hsim]
-          rcases hr : execPrimD ph p (ds.take p.eff.1) (⟨ds, aux, f :: rest, mem, msize, hp, tabs, inp, ipos, out, pc, stp + 1, (build (qPlan (ds.take p.eff.1) pc ⟨none, f.word, f.pc, ph.core stp⟩) ar).2⟩ : DSt) ⟨none, f.word, f.pc, ph.core stp⟩ (build (qPlan (ds.take p.eff.1) pc ⟨none, f.word, f.pc, ph.core stp⟩) ar).1 with ⟨res, s'⟩ | c | e
+          rcases hr : execPrimD ph p (ds.take p.eff.1) (⟨ds, aux, f :: rest, mem, msize, hp, tabs, inp, ipos, out, pc, stp + 1, (A.build (qPlan (ds.take p.eff.1) pc ⟨none, f.word, f.pc, ph.core stp⟩) ar).2⟩ : DSt) ⟨none, f.word, f.pc, ph.core stp⟩ (A.build (qPlan (ds.take p.eff.1) pc ⟨none, f.word, f.pc, ph.core stp⟩) ar).1 with ⟨res, s'⟩ | c | e
           · obtain ⟨hs'v, hext', hres, hds', haux', hrs', hpc', hstp'⟩ :=
               prim_valid ph p _ _ _ _ hT1 l1 (fun d hd => Nat.lt_of_lt_of_le (ha d hd) e1.len) hr
             obtain ⟨g2, e2, l2, d2⟩ := buildAll_spec res s'.ar hs'v.1 hres
-            have eA : Ext ar (buildAll res s'.ar).2 := Ext.trans (Ext.trans e1 hext') e2
+            have eA : Ext ar (buildAll A res s'.ar).2 := Ext.trans (Ext.trans e1 hext') e2
             have hD : ∀ d ∈ ds.drop p.eff.1, d.n < ar.length := fun d hd => hv.2.1 d (List.mem_of_mem_drop hd)
-            have hZ : Valid { s' with ar := (buildAll res s'.ar).2, ds := (buildAll res s'.ar).1 ++ ds.drop p.eff.1 } := by
+            have hZ : Valid { s' with ar := (buildAll A res s'.ar).2, ds := (buildAll A res s'.ar).1 ++ ds.drop p.eff.1 } := by
               obtain ⟨a1, a2, a3⟩ := hs'v.ext g2 e2
               refine ⟨a1, ?_, a3⟩
               intro d hd
               rcases List.mem_append.1 hd with hd | hd
               · exact l2 d hd
               · exact Nat.lt_of_lt_of_le (hD d hd) eA.len
-            have hfr : ∀ d ∈ ({ f with pc := f.pc + 1 } : DFrame).locs, d.n < (buildAll res s'.ar).2.length :=
+            have hfr : ∀ d ∈ ({ f with pc := f.pc + 1 } : DFrame).locs, d.n < (buildAll A res s'.ar).2.length :=
               fun d hd => Nat.lt_of_lt_of_le (hf d hd) eA.len
             obtain ⟨h1, h2⟩ := adv_next hZ { f with pc := f.pc + 1 } hfr
             refine ⟨?_, h2⟩
             rw [h1]
             simp only [DPR.abs]
-            have hαZ : α { s' with ar := (buildAll res s'.ar).2, ds := (buildAll res s'.ar).1 ++ ds.drop p.eff.1 } =
-                { α { s' with ar := (buildAll res s'.ar).2 } with
-                  ds := ((buildAll res s'.ar).1 ++ ds.drop p.eff.1).map (αv (buildAll res s'.ar).2) } := rfl
+            have hαZ : α { s' with ar := (buildAll A res s'.ar).2, ds := (buildAll A res s'.ar).1 ++ ds.drop p.eff.1 } =
+                { α { s' with ar := (buildAll A res s'.ar).2 } with
+                  ds := ((buildAll A res s'.ar).1 ++ ds.drop p.eff.1).map (αv (buildAll A res s'.ar).2) } := rfl
             rw [hαZ, α_ext hs'v e2, List.map_append, d2, map_αv_ext hv.1 eA hD, αf_ext hv.1 eA (g := { f with pc := f.pc + 1 }) hf, ← List.map_drop]
             rfl
           · exact ⟨rfl, fun _ h => by simp at h⟩
@@ -546,25 +549,27 @@ theorem dstep_sim (pr : Prog) (ph : Phys) (t : DSt) (hv : Valid t) :
 
 /-! ### Whole runs -/
 
+variable (A)
+
 /-- `n` DAG steps, or the end of the run. -/
 def drun (pr : Prog) (ph : Phys) : Nat → DSt → DRes
   | 0, s => .next s
   | n + 1, s =>
-    match dstep pr ph s with
+    match dstep A pr ph s with
     | .next t => drun pr ph n t
     | r => r
 
 theorem drun_sim (pr : Prog) (ph : Phys) :
-    ∀ (n : Nat) (t : DSt), Valid t → (drun pr ph n t).abs = run pr ph n (α t) := by
+    ∀ (n : Nat) (t : DSt), Valid t → (drun A pr ph n t).abs = run pr ph n (α t) := by
   intro n
   induction n with
   | zero => intro t _; rfl
   | succ n ih =>
     intro t hv
-    obtain ⟨hs, hn⟩ := dstep_sim pr ph t hv
+    obtain ⟨hs, hn⟩ := dstep_sim (A := A) pr ph t hv
     simp only [drun, run]
     rw [← hs]
-    rcases h : dstep pr ph t with t' | ⟨c, o, a⟩ | e
+    rcases h : dstep A pr ph t with t' | ⟨c, o, a⟩ | e
     · simp only [DRes.abs]; exact ih t' (hn t' h)
     · rfl
     · rfl
@@ -599,7 +604,9 @@ theorem α_dinit (pr : Prog) (msize : Nat) (inp : List Nat) : α (dinit pr msize
 program, input and number of steps: same words, same halting code, and each
 output byte's provenance, read back from the arena, is the list one. -/
 theorem drun_init (pr : Prog) (ph : Phys) (msize : Nat) (inp : List Nat) (n : Nat) :
-    (drun pr ph n (dinit pr msize inp)).abs = run pr ph n (init pr msize inp) := by
-  rw [drun_sim pr ph n _ (dinit_valid pr msize inp), α_dinit]
+    (drun A pr ph n (dinit pr msize inp)).abs = run pr ph n (init pr msize inp) := by
+  rw [drun_sim A pr ph n _ (dinit_valid pr msize inp), α_dinit]
+
+end
 
 end Sporos
