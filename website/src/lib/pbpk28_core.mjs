@@ -166,9 +166,9 @@ export const DEFAULT_PARAMS_RAPAMYCIN = Object.freeze({
 // ─── Semaglutide profile (G-δ): GLP-1 receptor agonist, peptide, SC depot ──
 // Overgaard 2019 (Clin Pharmacokinet) — semaglutide PK in T2D patients:
 //   MW = 4113.58 g/mol         (peptide, vs 914 for rapamycin)
-//   V_d ≈ 9 L (70 kg)          (vascular-confined; FcRn-mediated albumin
+//   V_d = 11.1 L               (label V/F 12.5 L x F 0.89; FcRn-mediated albumin
 //                              recycling extends half-life to ~165 h)
-//   CL_proteolytic ≈ 0.077 L/h  (very low; receptor-mediated + DPP-IV cleavage)
+//   CL = 0.0445 L/h            (label CL/F 0.05 L/h x F 0.89)
 //   t1/2_abs ≈ 60 h            (slow SC absorption from depot, k_a = ln2/t)
 //   F = 0.89                   (subcutaneous bioavailability)
 //
@@ -178,21 +178,22 @@ export const DEFAULT_PARAMS_RAPAMYCIN = Object.freeze({
 // especially across BBB).
 export const MW_SEMAGLUTIDE = 4113.58;
 
+// Peptide pattern x 0.194951: kinetic V_ss = 11.125 L (label V/F 12.5 L x F 0.89).
 export const KP_SEMAGLUTIDE = Object.freeze([
   1.00,  // 0 blood (definition)
-  0.50,  // 1 liver
-  0.60,  // 2 kidney
-  0.05,  // 3 brain  (BBB extremely restrictive)
-  0.40,  // 4 heart
-  0.30,  // 5 lung
-  0.20,  // 6 muscle
-  0.10,  // 7 adipose
-  0.80,  // 8 gut   (enteroendocrine GLP-1R distribution)
-  0.30,  // 9 skin
-  0.20,  // 10 bone
-  0.40,  // 11 spleen
-  0.70,  // 12 pancreas (β-cell GLP-1R target)
-  0.30,  // 13 other
+  0.09748,  // 1 liver
+  0.11697,  // 2 kidney
+  0.00975,  // 3 brain
+  0.07798,  // 4 heart
+  0.05849,  // 5 lung
+  0.03899,  // 6 muscle
+  0.01950,  // 7 adipose
+  0.15596,  // 8 gut
+  0.05849,  // 9 skin
+  0.03899,  // 10 bone
+  0.07798,  // 11 spleen
+  0.13647,  // 12 pancreas
+  0.05849,  // 13 other
 ]);
 
 // Peptide PS: literature scarce; estimate from MW-based scaling of Rodgers &
@@ -280,7 +281,7 @@ export const PD_PARAMS_SEMAGLUTIDE = Object.freeze({
 // is mTORC1+neointima; semaglutide explicitly tags itself.
 
 export const DEFAULT_PARAMS_SEMAGLUTIDE = Object.freeze({
-  clHep: 0.077,                             // L/h — proteolytic clearance (Overgaard 2019)
+  clHep: 0.0445,                            // L/h, label CL/F 0.05 x F 0.89
   higuchiScale: 1.0,                        // unused for SC depot release
   vdScale: 1.0,
   bolusMg: 0.0,
@@ -304,39 +305,41 @@ export const DEFAULT_PARAMS_SEMAGLUTIDE = Object.freeze({
 
 // Urva 2022 (Clin Pharmacokinet) — tirzepatide popPK, T2D patients:
 //   MW = 4813 Da               (dual GIP/GLP-1 peptide)
-//   CL = 0.061 L/h             (proteolytic; no intact parent in excreta,
+//   CL = 0.0488 L/h            (label CL/F 0.061 x F 0.80; no intact parent in excreta,
 //                               Martin 2024 — no renal clearance modeled)
 //   t1/2 ~= 120 h              (FDA 2022 label, 5 mg weekly maintenance)
-//   ka = 0.0164 /h, F = 0.80   (SC absorption, Urva 2022)
+//   ka = 0.0373 /h, F = 0.80   (Schneck & Urva 2024; label)
 // Kp/PS mirror the semaglutide peptide vector (vascular-confined, Kp < 1):
 // the 1/sqrt(MW) PS shift vs semaglutide is under 8%, inside estimation
 // noise. Tirzepatide-specific Kp refinement is SIO-550 follow-up.
 export const MW_TIRZEPATIDE = 4813.0;
 
+// Peptide pattern x 0.008041: kinetic V_ss = 8.70 L, 0.10 L above the
+// structural floor of 8.60 L (label V/F 10.3 L x F 0.80 = 8.24 L is below it).
 export const KP_TIRZEPATIDE = Object.freeze([
   1.00,  // 0 blood (definition)
-  0.50,  // 1 liver
-  0.60,  // 2 kidney
-  0.05,  // 3 brain
-  0.40,  // 4 heart
-  0.30,  // 5 lung
-  0.20,  // 6 muscle
-  0.10,  // 7 adipose
-  0.80,  // 8 gut
-  0.30,  // 9 skin
-  0.20,  // 10 bone
-  0.40,  // 11 spleen
-  0.70,  // 12 pancreas
-  0.30,  // 13 other
+  0.004021,  // 1 liver
+  0.004825,  // 2 kidney
+  0.000402,  // 3 brain
+  0.003217,  // 4 heart
+  0.002412,  // 5 lung
+  0.001608,  // 6 muscle
+  0.000804,  // 7 adipose
+  0.006433,  // 8 gut
+  0.002412,  // 9 skin
+  0.001608,  // 10 bone
+  0.003217,  // 11 spleen
+  0.005629,  // 12 pancreas
+  0.002412,  // 13 other
 ]);
 
 export const PS_TIRZEPATIDE = PS_SEMAGLUTIDE;
 
-export const TIRZ_KA_DEFAULT = 0.0164;
+export const TIRZ_KA_DEFAULT = 0.0373;
 export const TIRZ_F_DEFAULT  = 0.80;
 
 export const DEFAULT_PARAMS_TIRZEPATIDE = Object.freeze({
-  clHep: 0.061,
+  clHep: 0.0488,
   higuchiScale: 1.0,
   vdScale: 1.0,
   bolusMg: 0.0,
@@ -355,7 +358,7 @@ export const DEFAULT_PARAMS_TIRZEPATIDE = Object.freeze({
   pdParams: {},
   cVisualMax: 3.0e-5,
   drugLabel: 'Tirzepatide (SC depot)',
-  releaseSourceLabel: 'Subcutaneous depot (k_a = 0.0164 /h, F = 0.80)',
+  releaseSourceLabel: 'Subcutaneous depot (k_a = 0.0373 /h, F = 0.80)',
 });
 
 // Xience V everolimus-eluting stent (SIO-524): CoCr platform, durable
@@ -391,37 +394,40 @@ export const DEFAULT_PARAMS_EVEROLIMUS = Object.freeze({
 });
 
 // Prograf immediate-release tacrolimus (SIO-516): single 5 mg oral dose,
-// fasted. ka = 0.38/h (Bekersky 1999), F = 0.25 (Kershner 1996, first-pass
-// loss leaves the system). Whole-blood referenced (TDM matrix): CL_wb =
-// 28 L/h (Jusko 1995). Kp = tacrolimus tissue-to-blood values (Iwasaki 2007
-// liver, Saitoh 2006 brain, Staatz 2004 review; adipose capped per the
-// 24-48 h window note) -- NOT rapamycin's. PS mirrors the rapamycin
+// fasted. ka = 4.5/h after a 0.39 h lag (Jusko 1995), F = 0.18 (Prograf
+// label, healthy volunteers; first-pass loss leaves the system). Whole-blood
+// referenced (TDM matrix): CL_wb = 2.8 L/h and V_ss = 133.7 L (label, healthy
+// volunteers). Kp = tacrolimus tissue-to-blood pattern scaled to that volume
+// -- NOT rapamycin's. PS mirrors the rapamycin
 // flow-limited pattern, ASSUMED pending SIO-550. Single-dose PK only.
 export const MW_TACROLIMUS = 804.02;
 
-export const TAC_KA_DEFAULT = 0.38;    // h^-1, Bekersky 1999 fasted
-export const TAC_F_DEFAULT = 0.25;     // Kershner 1996
+export const TAC_KA_DEFAULT = 4.5;     // h^-1, Jusko 1995
+export const TAC_F_DEFAULT = 0.18;     // Prograf label, healthy volunteers
+export const TAC_TLAG_DEFAULT = 0.39;  // h, Jusko 1995
 export const TAC_DOSE_DEFAULT = 5.0;   // mg, single dose
 
+// Drug-file tissue-to-blood pattern scaled by 0.510225 so that the kinetic
+// V_ss = 133.7 L (label, healthy volunteers, 1.91 L/kg at 70 kg).
 export const KP_TACROLIMUS = Object.freeze([
-  1.00,  // 0 blood (definition)
-  20.0,  // 1 liver (Iwasaki 2007, CYP3A4 site)
-  6.0,   // 2 kidney
-  0.10,  // 3 brain (Saitoh 2006, P-gp restrained)
-  4.0,   // 4 heart
-  8.0,   // 5 lung
-  3.0,   // 6 muscle
-  5.0,   // 7 adipose (capped; 24-48 h window)
-  6.0,   // 8 gut (enterocyte CYP3A4 + P-gp)
-  2.0,   // 9 skin
-  1.5,   // 10 bone
-  8.0,   // 11 spleen (lymphocyte FKBP12)
-  4.0,   // 12 pancreas
-  2.0,   // 13 other
+  1.00,    // 0 blood (definition)
+  10.2045,  // 1 liver
+  3.0614,  // 2 kidney
+  0.0510,  // 3 brain
+  2.0409,  // 4 heart
+  4.0818,  // 5 lung
+  1.5307,  // 6 muscle
+  2.5511,  // 7 adipose
+  3.0614,  // 8 gut
+  1.0205,  // 9 skin
+  0.7653,  // 10 bone
+  4.0818,  // 11 spleen
+  2.0409,  // 12 pancreas
+  1.0205,  // 13 other
 ]);
 
 export const DEFAULT_PARAMS_TACROLIMUS = Object.freeze({
-  clHep: 28.0,
+  clHep: 2.8,
   higuchiScale: 1.0,
   vdScale: 1.0,
   bolusMg: 0.0,
@@ -433,6 +439,7 @@ export const DEFAULT_PARAMS_TACROLIMUS = Object.freeze({
   releaseModel: 'oral_ir',
   releaseKa: TAC_KA_DEFAULT,
   releaseF: TAC_F_DEFAULT,
+  releaseTlag: TAC_TLAG_DEFAULT,
   releaseDoseMg: TAC_DOSE_DEFAULT,
   tmddOrgans: [],
   tmddParams: {},
@@ -440,42 +447,42 @@ export const DEFAULT_PARAMS_TACROLIMUS = Object.freeze({
   pdParams: {},
   cVisualMax: 3.0e-5,
   drugLabel: 'Tacrolimus (oral IR)',
-  releaseSourceLabel: 'Oral IR (k_a = 0.38 /h, F = 0.25)',
+  releaseSourceLabel: 'Oral IR (k_a = 4.5 /h, F = 0.18, lag 0.39 h)',
 });
 
 // Zyprexa immediate-release olanzapine (SIO-518): single 10 mg oral dose.
 // ka = 0.6/h, F = 0.60, tlag = 0.25 h tablet dissolution (Bergstrom 2006).
-// Plasma referenced (rb ~= 1, Callaghan 1999): CL = 25 L/h (CYP1A2 primary).
-// Kp = olanzapine tissue values (Rodgers-Rowland, Vd ~700 L) -- NOT
+// Plasma referenced: CL = 9.3 L/h (CL/F 15.5 L/h, Sun 2021, x F 0.60).
+// Kp = olanzapine tissue pattern scaled to V_ss = 528.6 L -- NOT
 // haloperidol's, despite the shared class. PS assumed flow-limited pattern,
 // SIO-550. Dual UGT1A4/CYP1A2 pathway recorded in the drug file, not equated
 // with clozapine. Single-dose PK only.
 export const MW_OLANZAPINE = 312.43;
 
-export const OLZ_KA_DEFAULT = 0.6;     // h^-1, Bergstrom 2006
-export const OLZ_F_DEFAULT = 0.60;     // Bergstrom 2006
-export const OLZ_TLAG_DEFAULT = 0.25;  // h, tablet dissolution
+export const OLZ_KA_DEFAULT = 0.861;   // h^-1, Sun 2021
+export const OLZ_F_DEFAULT = 0.60;     // Zyprexa label (40% first pass)
+export const OLZ_TLAG_DEFAULT = 0.782; // h, Sun 2021
 export const OLZ_DOSE_DEFAULT = 10.0;  // mg, single dose
 
 export const KP_OLANZAPINE = Object.freeze([
   1.00,  // 0 blood (definition)
-  12.0,  // 1 liver
-  5.0,   // 2 kidney
-  10.0,  // 3 brain
-  4.0,   // 4 heart
-  8.0,   // 5 lung
-  15.0,  // 6 muscle (Vd driver)
-  8.0,   // 7 adipose (Vd driver)
-  5.0,   // 8 gut
-  5.0,   // 9 skin
-  4.0,   // 10 bone
-  5.0,   // 11 spleen
-  3.5,   // 12 pancreas
-  3.5,   // 13 other
+  9.4973,  // 1 liver
+  3.9572,   // 2 kidney
+  7.9144,  // 3 brain
+  3.1658,   // 4 heart
+  6.3315,   // 5 lung
+  11.8716,  // 6 muscle (Vd driver)
+  6.3315,   // 7 adipose (Vd driver)
+  3.9572,   // 8 gut
+  3.9572,   // 9 skin
+  3.1658,   // 10 bone
+  3.9572,   // 11 spleen
+  2.7700,   // 12 pancreas
+  2.7700,   // 13 other
 ]);
 
 export const DEFAULT_PARAMS_OLANZAPINE = Object.freeze({
-  clHep: 25.0,
+  clHep: 9.3,
   higuchiScale: 1.0,
   vdScale: 1.0,
   bolusMg: 0.0,
@@ -495,7 +502,7 @@ export const DEFAULT_PARAMS_OLANZAPINE = Object.freeze({
   pdParams: {},
   cVisualMax: 3.0e-5,
   drugLabel: 'Olanzapine (oral IR)',
-  releaseSourceLabel: 'Oral IR (k_a = 0.6 /h, F = 0.60, lag 0.25 h)',
+  releaseSourceLabel: 'Oral IR (k_a = 0.861 /h, F = 0.60, lag 0.782 h)',
 });
 
 // Clozapine single 100 mg oral tablet (SIO-521): ka = 1.0/h (Tmax ~2 h),

@@ -41,3 +41,106 @@ impl Span {
         Span { file_id: self.file_id, start: start, end: end }
     }
 }
+
+// ============================================================================
+// Source map: Span.file_id -> path and line starts (ADR-031 R1)
+// ============================================================================
+//
+// lex_file_to_globals registers each file it lexes; the parser stamps the
+// current file's id into every Span it makes. A runtime panic can then name
+// `path:line:col` for a span that reached the IR (IrInstr.src_site). Id 0 is
+// "unknown" (sources lexed from memory, synthesized spans), and a full table
+// also answers 0: the message drops the location, it never names a wrong one.
+
+pub let SRCMAP_MAX_FILES: i64 = 8192
+pub let SRCMAP_MAX_PATH_BYTES: i64 = 2097152
+pub let SRCMAP_MAX_LINES: i64 = 8388608
+pub var SRCMAP_N: i64 = 0
+pub var SRCMAP_CURRENT: i64 = 0   // file being registered
+pub var SRCMAP_PENDING: i64 = 0   // registered, waiting for its token stream
+pub var SRCMAP_LEXED: i64 = 0     // file of the token stream the parser reads
+pub var SRCMAP_PATH_OFF: [i64; 8192] = [0; 8192]
+pub var SRCMAP_PATH_LEN: [i64; 8192] = [0; 8192]
+pub var SRCMAP_PATH_BYTES: [i8; 2097152] = [0; 2097152]
+pub var SRCMAP_PATH_USED: i64 = 0
+pub var SRCMAP_LS_OFF: [i64; 8192] = [0; 8192]
+pub var SRCMAP_LS_CNT: [i64; 8192] = [0; 8192]
+pub var SRCMAP_LS: [i64; 8388608] = [0; 8388608]
+pub var SRCMAP_LS_USED: i64 = 0
+
+// Start a file. Returns its id (>= 1), or 0 when a table is full.
+pub fn srcmap_begin_file(path: string) -> i64 with Mut, Panic {
+    SRCMAP_CURRENT = 0
+    let n = str_len(path)
+    if SRCMAP_N + 1 >= SRCMAP_MAX_FILES || SRCMAP_PATH_USED + n > SRCMAP_MAX_PATH_BYTES || SRCMAP_LS_USED >= SRCMAP_MAX_LINES {
+        return 0
+    }
+    let id = SRCMAP_N + 1
+    SRCMAP_PATH_OFF[id as usize] = SRCMAP_PATH_USED
+    SRCMAP_PATH_LEN[id as usize] = n
+    var i: i64 = 0
+    while i < n {
+        SRCMAP_PATH_BYTES[(SRCMAP_PATH_USED + i) as usize] = str_char_at(path, i) as i8
+        i = i + 1
+    }
+    SRCMAP_PATH_USED = SRCMAP_PATH_USED + n
+    SRCMAP_LS_OFF[id as usize] = SRCMAP_LS_USED
+    SRCMAP_LS_CNT[id as usize] = 0
+    SRCMAP_N = id
+    SRCMAP_CURRENT = id
+    id
+}
+
+// Record the byte offset at which the current file's next line starts. A
+// full table drops the file's id, so its spans read as unknown.
+pub fn srcmap_add_line_start(off: i64) with Mut, Panic {
+    let id = SRCMAP_CURRENT
+    if id <= 0 { return }
+    if SRCMAP_LS_USED >= SRCMAP_MAX_LINES {
+        SRCMAP_CURRENT = 0
+        SRCMAP_LS_CNT[id as usize] = 0
+        return
+    }
+    SRCMAP_LS[SRCMAP_LS_USED as usize] = off
+    SRCMAP_LS_USED = SRCMAP_LS_USED + 1
+    SRCMAP_LS_CNT[id as usize] = SRCMAP_LS_CNT[id as usize] + 1
+}
+
+// The registered file is handed to the next token stream only: lexing from
+// memory (no path) leaves the parser with id 0, never a stale file's id.
+pub fn srcmap_mark_pending() with Mut { SRCMAP_PENDING = SRCMAP_CURRENT  SRCMAP_CURRENT = 0 }
+pub fn srcmap_take_pending() with Mut { SRCMAP_LEXED = SRCMAP_PENDING  SRCMAP_PENDING = 0 }
+pub fn srcmap_current() -> i64 { SRCMAP_LEXED }
+
+pub fn srcmap_path_len(id: i64) -> i64 {
+    if id <= 0 || id > SRCMAP_N { return 0 }
+    SRCMAP_PATH_LEN[id as usize]
+}
+
+pub fn srcmap_path_byte(id: i64, i: i64) -> i64 with Panic {
+    SRCMAP_PATH_BYTES[(SRCMAP_PATH_OFF[id as usize] + i) as usize] as i64
+}
+
+// 1-based line of byte offset `off` in file `id`, or 0 when unknown.
+pub fn srcmap_line(id: i64, off: i64) -> i64 with Mut, Panic, Div {
+    if id <= 0 || id > SRCMAP_N || off < 0 { return 0 }
+    let cnt = SRCMAP_LS_CNT[id as usize]
+    if cnt <= 0 { return 0 }
+    let base = SRCMAP_LS_OFF[id as usize]
+    // largest k with LS[base + k] <= off
+    var lo: i64 = 0
+    var hi: i64 = cnt - 1
+    if SRCMAP_LS[base as usize] > off { return 0 }
+    while lo < hi {
+        let mid = lo + (hi - lo + 1) / 2
+        if SRCMAP_LS[(base + mid) as usize] <= off { lo = mid } else { hi = mid - 1 }
+    }
+    lo + 1
+}
+
+// 1-based byte column of `off` on its line, or 0 when unknown.
+pub fn srcmap_col(id: i64, off: i64) -> i64 with Mut, Panic, Div {
+    let line = srcmap_line(id, off)
+    if line <= 0 { return 0 }
+    off - SRCMAP_LS[(SRCMAP_LS_OFF[id as usize] + line - 1) as usize] + 1
+}

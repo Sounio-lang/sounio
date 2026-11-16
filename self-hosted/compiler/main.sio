@@ -1703,6 +1703,13 @@ fn compiler_soir_unrepresentable(module: &IrModule) -> string with Mut, Panic, D
         if f.name.len < 0 || f.name.len > 128 { return "fn name longer than 128 bytes" }
         let nm = str_from_bytes(f.name.buf, f.name.len)
         if f.compile_strategy == 99 { return "BSS global `" + nm + "`" }
+        // The wide-integer call ABI (iN/uN, N > 64) lives in IrFunction fields the
+        // SOIR v6 writer does not carry: a round trip would drop them and decode a
+        // function whose wide params read one word and whose wide return lost its
+        // hidden out-array. Named here so the refusal says why, whatever else the
+        // function also carries.
+        if f.wide_param_limbs != 0 { return "fn `" + nm + "`: wide_param_limbs (iN/uN > 64-bit params, limb-array ABI)" }
+        if f.wide_return_bits != 0 { return "fn `" + nm + "`: wide_return_bits (iN/uN > 64-bit return, hidden out-array param)" }
         if f.returns_float != 0 { return "fn `" + nm + "`: returns_float (f64 return)" }
         if f.return_struct_name.len != 0 { return "fn `" + nm + "`: return_struct_name (named return type)" }
         if f.return_fixed_array_len != 0 - 1 { return "fn `" + nm + "`: return_fixed_array_len" }
@@ -2755,7 +2762,7 @@ fn ir_return_sret(src: i64) -> IrInstr {
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name_id: base.name_id,
+        name_id: base.name_id, src_site: base.src_site,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -2776,7 +2783,7 @@ fn ir_call_sret(dst: i64, dest_reg: i64, fn_name: Name, fn_id: i64, arg0: i64, e
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name_id: ir_intern_name(fn_name),
+        name_id: ir_intern_name(fn_name), src_site: 0,
         call_args: base.call_args,
         arg_count: explicit_arg_count,
     }
@@ -3177,12 +3184,6 @@ fn compiler_try_default_native_v2_single(opts: CompilerOptions) -> bool with IO,
         return false
     }
 
-    let early_frontend_preflight = preflight_multimodule_frontend(opts.input_file)
-    let early_preflight_parse_errors = parser_last_error_count()
-    if !early_frontend_preflight.ok || early_preflight_parse_errors > 0 {
-        return false
-    }
-
     let main_prog = load_module_file(opts.input_file)
     let main_imports = extract_imports_from_ast(main_prog)
     if main_imports.count > 0 {
@@ -3191,6 +3192,12 @@ fn compiler_try_default_native_v2_single(opts: CompilerOptions) -> bool with IO,
 
     let requested_target_spec = native_resolve_target(opts.target, "auto", false)
     if requested_target_spec.arch_id != ARCH_X86_64() || requested_target_spec.os_id != OS_LINUX() {
+        return false
+    }
+
+    let early_frontend_preflight = preflight_multimodule_frontend(opts.input_file)
+    let early_preflight_parse_errors = parser_last_error_count()
+    if !early_frontend_preflight.ok || early_preflight_parse_errors > 0 {
         return false
     }
 
@@ -5228,19 +5235,6 @@ fn compile(opts: CompilerOptions) -> CompileResult with IO, Mut, Panic, Div, All
         }
     }
 
-    let early_frontend_preflight = preflight_multimodule_frontend(opts.input_file)
-    let early_preflight_parse_errors = parser_last_error_count()
-    if !early_frontend_preflight.ok || early_preflight_parse_errors > 0 {
-        compiler_print_ir_preflight_failure(early_frontend_preflight.error_msg)
-        var early_type_errors = compile_errors_new()
-        early_type_errors = compile_errors_push(early_type_errors, "error: type checking preflight failed")
-        return CompileResult {
-            success: false,
-            errors: early_type_errors,
-            output: "",
-        }
-    }
-
     let main_prog = load_module_file(opts.input_file)
     let main_imports = extract_imports_from_ast(main_prog)
     let requested_target_spec = native_resolve_target(opts.target, "auto", false)
@@ -5277,6 +5271,28 @@ fn compile(opts: CompilerOptions) -> CompileResult with IO, Mut, Panic, Div, All
         return CompileResult {
             success: false,
             errors: thin_errors,
+            output: "",
+        }
+    }
+
+    compile_after_multimodule_dispatch(opts, main_prog, main_imports, requested_target_spec)
+}
+
+fn compile_after_multimodule_dispatch(
+    opts: CompilerOptions,
+    main_prog: Program,
+    main_imports: ImportList,
+    requested_target_spec: NativeTargetSpec
+) -> CompileResult with IO, Mut, Panic, Div, Alloc {
+    let early_frontend_preflight = preflight_multimodule_frontend(opts.input_file)
+    let early_preflight_parse_errors = parser_last_error_count()
+    if !early_frontend_preflight.ok || early_preflight_parse_errors > 0 {
+        compiler_print_ir_preflight_failure(early_frontend_preflight.error_msg)
+        var early_type_errors = compile_errors_new()
+        early_type_errors = compile_errors_push(early_type_errors, "error: type checking preflight failed")
+        return CompileResult {
+            success: false,
+            errors: early_type_errors,
             output: "",
         }
     }
