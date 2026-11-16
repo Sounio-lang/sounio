@@ -40,7 +40,9 @@ lean_lib Sounio where
 -- Not a default target: CI builds it by name.
 lean_lib Bootstrap where
   roots := #[`Bootstrap.X86Min, `Bootstrap.SeedData, `Bootstrap.Seeds, `Bootstrap.Formats, `Bootstrap.Refine,
-             `Bootstrap.Loop, `Bootstrap.X86Env]
+             `Bootstrap.Loop, `Bootstrap.X86Env,
+             `Sporos.Core, `Sporos.Step, `Sporos.Check, `Sporos.Safe, `Sporos.SafeStep, `Sporos.Run,
+             `Sporos.Dag, `Sporos.DagStep, `Sporos.DagSim, `Sporos.DagPrim, `Sporos.DagAlloc, `Sporos.Witness]
 
 -- The two seeds on every listing (about 20 minutes of kernel time, the two in parallel); built by
 -- bootstrap/model/seed_proofs.sh and the nightly job, not on every pull request.
