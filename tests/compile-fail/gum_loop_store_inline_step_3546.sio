@@ -1,10 +1,17 @@
 //@ compile-fail
 //@ requires: madaros
 //@ error-pattern: GUM_UNTRACKED_CONTAINER
-// The inline form: the step is computed from Knowledge fields in the same
-// Epistemic function that stores into a loop-indexed array. First-order GUM
-// tracks the step's dependence on `.value` through the call, so the store
-// carries a channel the array cannot keep.
+// A loop-indexed store of a value that depends on a measured mean, followed by
+// an uncertainty query on the stored element. The array cannot keep the
+// first-order channels a dynamic-index store would need, so the query would
+// read a variance of 0.0 for a value whose true variance is 1.5625e-4 (the
+// literal-index twin, gum_loop_store_inline_step_3546_oracle.sio, prints it).
+// Lowering refuses at the query instead (#3546).
+//
+// The step is chosen so its measured branch wins (1e-3*|mean| > variance/2):
+// with a step that depends only on the variance the stored value carries no
+// channel, and the store is legal. Without the query nothing reads a lost
+// channel and the program is accepted; that is the oracle file's first half.
 fn step_of(mean: f64, variance: f64) -> f64 with Mut, Div, Panic {
     let a = if mean < 0.0 { 0.0 - mean } else { mean }
     let r = 1.0e-3 * a
@@ -12,7 +19,7 @@ fn step_of(mean: f64, variance: f64) -> f64 with Mut, Div, Panic {
     if r > s { r } else { s }
 }
 
-fn fill(kn: [Knowledge[f64]; 4]) -> [f64; 4] with Mut, Div, Panic, Epistemic {
+fn fill(kn: [Knowledge[f64]; 4]) -> f64 with IO, Mut, Div, Panic, Epistemic {
     var out: [f64; 4] = [0.0; 4]
     var i: i32 = 0
     while i < 4 {
@@ -21,11 +28,13 @@ fn fill(kn: [Knowledge[f64]; 4]) -> [f64; 4] with Mut, Div, Panic, Epistemic {
         out[i] = 1.0 / (2.0 * h)
         i = i + 1
     }
-    return out
+    let y = out[0]
+    println(variance_of(y))
+    return y
 }
 
 fn main() -> i32 with IO, Mut, Panic, Div, Epistemic {
-    let k: Knowledge<f64> = measure(2.0, uncertainty: 0.1)
+    let k: Knowledge<f64> = measure(2.0, uncertainty: 0.0001)
     let kn: [Knowledge[f64]; 4] = [k; 4]
     let r = fill(kn)
     println("unreachable")
