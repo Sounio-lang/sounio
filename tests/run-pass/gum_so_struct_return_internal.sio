@@ -1,0 +1,63 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: GUM_SO_STRUCT_RETURN_INTERNAL_OK
+//@ description: Second order through a struct-returning call that measures inside itself: two measurements made in the callee, correlated (rho = 0.6) and feeding both output fields. The hyper-dual struct clone writes one Hessian block and one internal curvature term per field and exports each internal measurement once with its declared correlation; the caller shares one channel per measurement across the fields and adds the curvature as a curvature-only channel, so variance_of and covariance of the fields, hessian_of over the caller's channel and second_order_mean of a field and of a product of fields match the jets. Expected values: tests/oracles/gum_so_struct_return_internal.cpp (1e-10 relative).
+
+struct EW {
+    u: f64,
+    w: f64,
+}
+
+fn noisy_ew(eps: f64) -> EW with Mut, Div, Epistemic {
+    let k1 = measure(0.5, uncertainty: 0.05)
+    let k2 = measure(1.5, uncertainty: 0.1)
+    let m1: f64 = k1.value
+    let m2: f64 = k2.value
+    let _c = correlate(m1, m2, 0.6)
+    var p = eps
+    var i: i64 = 0
+    while i < 1 {
+        p = p * eps
+        i = i + 1
+    }
+    EW { u: p * m1 * m2, w: m1 * m1 + eps * m2 }
+}
+
+fn close_rel(got: f64, want: f64) -> bool with Mut, Div {
+    var d = got - want
+    if d < 0.0 { d = 0.0 - d }
+    var w = want
+    if w < 0.0 { w = 0.0 - w }
+    d <= 1.0e-14 + 1.0e-10 * w
+}
+
+fn report_rel(name: string, got: f64, want: f64) -> i64 with IO, Mut, Div {
+    print(name)
+    print(" ")
+    print_f64(got)
+    if close_rel(got, want) {
+        print(" ok\n")
+        return 0
+    }
+    print(" FAIL\n")
+    1
+}
+
+fn main() -> i32 with IO, Mut, Div, Epistemic {
+    let ka = measure(1.2, uncertainty: 0.02)
+    let a: f64 = ka.value
+    var bad: i64 = 0
+    let r = noisy_ew(a)
+    bad = bad + report_rel("var_u", variance_of(r.u), 0.027475200000000005)
+    bad = bad + report_rel("var_w", variance_of(r.w), 0.025000000000000005)
+    bad = bad + report_rel("var_diff", variance_of(r.u - r.w), 0.0023632000000000015)
+    bad = bad + report_rel("hess_u_00", hessian_of(r.u, 0, 0), 1.5)
+    bad = bad + report_rel("mean_u", second_order_mean(r.u), 1.0846199999999999)
+    bad = bad + report_rel("mean_w", second_order_mean(r.w), 2.0524999999999998)
+    bad = bad + report_rel("mean_uw", second_order_mean(r.u * r.w), 2.2512270000000005)
+    if bad == 0 {
+        print("GUM_SO_STRUCT_RETURN_INTERNAL_OK\n")
+        return 0
+    }
+    1
+}
