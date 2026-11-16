@@ -71,3 +71,26 @@ A first run with 10⁶ trials per model failed the pass rule: TIP5P − SPC/E wa
 the Monte Carlo error of the shorter runs was too large to resolve the smaller difference.
 The predictions came from 4·10⁶-trial runs, and the driver now uses the same length; the pass
 rule is unchanged.
+
+# Three water models as a contest: `examples/molecular/h2_sii_water_contest.sio`
+
+The same C++ GCMC values (200 K, 300 MPa), with the H2 parameters as two channels shared
+by all three water models and each run's Monte Carlo error as its own, go through the
+ADR-016 builtins (`meet`, `contest`, `retract`). The GUM covariance comes from the channels;
+the oracle is `tests/oracles/epistemic_meet/h2_water_models.cpp`.
+
+| | Correlated (shared H2 channels) | Treated as independent |
+|---|---|---|
+| E_n TIP4P/Ice − SPC/E (k = 2) | 9.02 | 0.64 |
+| E_n TIP5P − SPC/E | 3.61 | 0.26 |
+| E_n TIP4P/Ice − TIP5P | 4.36 | 0.37 |
+| GLS weights SPC/E / TIP4P/Ice / TIP5P | 2.57 / −0.52 / −1.05 | 0.34 / 0.33 / 0.33 |
+| Fusion | 30.6 (outside all three) | 32.41 ± 0.41 |
+| Birge ratio | 12.8 | 0.90 |
+
+The correlation between models is 0.993 to 0.995, so the three count as n_eff = 1.004
+independent sources. Treated as independent, they would look consistent and fuse to a
+value narrower than any one of them. With the covariance, `meet` refuses (negative weight,
+under every policy), and the models are carried as `contest(spce, tip4, tip5)`. Retracting
+TIP4P/Ice, the force field fitted to the ice phases, leaves SPC/E and TIP5P, which still
+disagree (E_n = 3.6) and still cannot be fused.
