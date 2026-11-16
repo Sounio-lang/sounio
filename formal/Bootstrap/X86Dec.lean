@@ -22,11 +22,8 @@ accepted form is deliberately the narrowest one that has the 64-bit semantics
 `altsAt` is the supplier of Hamming-distance-1 neighbours that decision 42 asks
 of the byte decoder: one entry per flipped bit of the instruction's bytes.
 
-What it does not cover, found while writing it: the stage-0 listing uses
-`push imm8` (6A) and an indirect `jmp r64` (FF /4), and `X86Int.Ins` has
-neither. And `Alts` as defined in `X86Int` takes only the instruction and its
-length, but a neighbour of an encoding is a function of the bytes and the
-address; `altsAt` has the type that is needed.
+`6A` is `push imm8`, `85` is `test r64, r64` and a 32-bit register move is
+`mov32`. An indirect `jmp r64` (FF /4) is not decoded yet.
 -/
 import Bootstrap.X86Int
 
@@ -107,9 +104,15 @@ def decode (b : Nat → Option Nat) (a : Nat) : Option (Ins × Nat) := do
     else if o == 0x31 && d == s then pure (.alu .xor d d, p + 2)
     else none
   else if o == 0x89 || o == 0x8b then
-    if !w || x then none else
+    if x then none else
     let m ← b (p + 1)
-    if m / 64 == 3 then
+    if !w then
+      -- only the 32-bit register move: the low half, zero-extended
+      if m / 64 != 3 then none else
+      let rm := m % 8 + bb
+      let rg := m / 8 % 8 + r
+      if o == 0x89 then pure (.mov32 rm rg, p + 2) else pure (.mov32 rg rm, p + 2)
+    else if m / 64 == 3 then
       let rm := m % 8 + bb
       let rg := m / 8 % 8 + r
       if o == 0x89 then pure (.mov rm rg, p + 2) else pure (.mov rg rm, p + 2)
@@ -117,6 +120,15 @@ def decode (b : Nat → Option Nat) (a : Nat) : Option (Ins × Nat) := do
       let (base, disp, off') ← memOp b (p + 2) m bb x
       let rg := m / 8 % 8 + r
       if o == 0x89 then pure (.st base disp rg, off') else pure (.ld rg base disp, off')
+  else if o == 0x85 then
+    if !w || x then none else
+    let m ← b (p + 1)
+    if m / 64 != 3 then none else
+    pure (.test (m % 8 + bb) (m / 8 % 8 + r), p + 2)
+  else if o == 0x6a then
+    if hasRex then none else
+    let i ← b 1
+    pure (.pushI (sx8 i), 2)
   else if o == 0x39 || o == 0x3b then
     if !w || x then none else
     let m ← b (p + 1)
@@ -281,6 +293,14 @@ example : at0 [0x48, 0xb8, 8, 7, 6, 5, 4, 3, 2, 1] = some (.movI 0 0x01020304050
   decide +kernel
 -- 48 8d 7c 24 08: lea rdi, [rsp + 8]
 example : at0 [0x48, 0x8d, 0x7c, 0x24, 0x08] = some (.lea 7 4 8, 5) := by decide +kernel
+-- 6a 3c: push 60;  6a ff: push -1;  48 85 c0: test rax, rax;  44 89 f7: mov edi, r14d
+example : at0 [0x6a, 0x3c] = some (.pushI 60, 2) := by decide +kernel
+example : at0 [0x6a, 0xff] = some (.pushI (W - 1), 2) := by decide +kernel
+example : at0 [0x48, 0x85, 0xc0] = some (.test 0 0, 3) := by decide +kernel
+example : at0 [0x44, 0x89, 0xf7] = some (.mov32 7 14, 3) := by decide +kernel
+-- 7c 49 at 0x7d: jl 0x7d + 2 + 0x49;  78 34: js
+example : at0 [0x7c, 0x49] 0x7d = some (.jcc 12 0xc8, 2) := by decide +kernel
+
 -- the image boundary: below the base is outside, the first byte is inside, and
 -- an instruction does not run past the end
 example : imageOf [0xc3] 0x400000 0x3fffff = none := by decide +kernel

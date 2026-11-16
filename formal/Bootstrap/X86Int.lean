@@ -52,6 +52,8 @@ inductive Ins where
   | movI (d imm : Nat)
   /-- `mov r64, r64` -/
   | mov (d s : Reg)
+  /-- `mov r32, r32`: the low 32 bits, zero-extended -/
+  | mov32 (d s : Reg)
   /-- `op r64, r64`: `d := d op s`, flags set -/
   | alu (op : Alu) (d s : Reg)
   /-- `op r64, imm` (imm already sign-extended to 64 bits) -/
@@ -60,6 +62,8 @@ inductive Ins where
   | cmp (a b : Reg)
   /-- `cmp r64, imm` -/
   | cmpI (a imm : Nat)
+  /-- `test r64, r64`: flags of `a and b`, nothing written -/
+  | test (a b : Reg)
   /-- `shl r64, imm8`, `shr r64, imm8`: flags left undefined -/
   | shlI (d c : Nat)
   | shrI (d c : Nat)
@@ -87,10 +91,16 @@ inductive Ins where
   | syscall
 deriving DecidableEq, Repr
 
+/-- The four flags the conditional jumps read. `none` is a flag the architecture
+leaves undefined (after a shift), and reading it sticks the machine. -/
 structure Flags where
   cf : Option Bool
   zf : Option Bool
+  sf : Option Bool
+  of : Option Bool
 deriving DecidableEq, Repr
+
+def Flags.undef : Flags := ⟨none, none, none, none⟩
 
 structure St where
   regs : List (Option Nat)
@@ -121,24 +131,44 @@ def bytes8 (v : Nat) : List Nat := (List.range 8).map fun i => v / 256 ^ i % 256
 def rd64 (m : Mem) (a : Nat) : Option Nat := (m.rdN a 8).map leVal
 def wr64 (m : Mem) (a v : Nat) : Option Mem := m.wrN a (bytes8 v)
 
-def aluF (op : Alu) (a b : Nat) : Nat × Flags :=
-  match op with
-  | .add => let r := (a + b) % W; (r, ⟨some (W ≤ a + b), some (r == 0)⟩)
-  | .sub => let r := (a + W - b) % W; (r, ⟨some (a < b), some (r == 0)⟩)
-  | .and => let r := Nat.land a b; (r, ⟨some false, some (r == 0)⟩)
-  | .or => let r := Nat.lor a b; (r, ⟨some false, some (r == 0)⟩)
-  | .xor => let r := Nat.xor a b; (r, ⟨some false, some (r == 0)⟩)
+/-- Most significant bit of a 64-bit word. -/
+def msb (v : Nat) : Bool := v / 2 ^ 63 % 2 == 1
 
-/-- Unsigned conditions: 2 b, 3 ae, 4 e, 5 ne, 6 be, 7 a. -/
+/-- Result and flags of a 64-bit arithmetic or logical operation. These are the
+formulas of `X86Min.alu` at width 64, the ones the differential harness checks
+against the CPU: CF is the carry or borrow, OF the signed overflow, and the
+logical operations clear both. -/
+def aluF (op : Alu) (a b : Nat) : Nat × Flags :=
+  let res := match op with
+    | .add => (a + b) % W
+    | .sub => (a + W - b) % W
+    | .and => Nat.land a b
+    | .or => Nat.lor a b
+    | .xor => Nat.xor a b
+  let cf := match op with
+    | .add => W ≤ a + b
+    | .sub => a < b
+    | _ => false
+  let ofl := match op with
+    | .add => msb a == msb b && msb res != msb a
+    | .sub => msb a != msb b && msb res != msb a
+    | _ => false
+  (res, ⟨some cf, some (res == 0), some (msb res), some ofl⟩)
+
+/-- Condition code `cc` of `jcc` from the flags, as in `X86Min.cond`: 0 o, 1 no,
+2 b, 3 ae, 4 e, 5 ne, 6 be, 7 a, 8 s, 9 ns, 12 l, 13 ge, 14 le, 15 g. `none`
+when a flag it reads is undefined, and for the parity codes 10 and 11. -/
 def cond (f : Flags) (cc : Nat) : Option Bool := do
-  match cc with
-  | 2 => f.cf
-  | 3 => (! ·) <$> f.cf
-  | 4 => f.zf
-  | 5 => (! ·) <$> f.zf
-  | 6 => do let c ← f.cf; let z ← f.zf; pure (c || z)
-  | 7 => do let c ← f.cf; let z ← f.zf; pure (!(c || z))
-  | _ => none
+  let base ← match cc / 2 with
+    | 0 => f.of
+    | 1 => f.cf
+    | 2 => f.zf
+    | 3 => do let c ← f.cf; let z ← f.zf; pure (c || z)
+    | 4 => f.sf
+    | 6 => do let s ← f.sf; let o ← f.of; pure (s != o)
+    | 7 => do let s ← f.sf; let o ← f.of; let z ← f.zf; pure (z || s != o)
+    | _ => none
+  pure (if cc % 2 == 0 then base else !base)
 
 def ea (b d : Nat) : Nat := (b + d) % W
 
@@ -154,6 +184,7 @@ def exec (ins : Ins) (len : Nat) (s : St) : Out :=
     match ins with
     | .movI d imm => .ok (go (s.set d (some (imm % W))))
     | .mov d r => lift do let v ← s.reg r; pure (go (s.set d (some v)))
+    | .mov32 d r => lift do let v ← s.reg r; pure (go (s.set d (some (v % 2 ^ 32))))
     | .alu op d r => lift do
         let a ← s.reg d; let b ← s.reg r
         let (v, f) := aluF op a b
@@ -168,12 +199,15 @@ def exec (ins : Ins) (len : Nat) (s : St) : Out :=
     | .cmpI a imm => lift do
         let x ← s.reg a
         pure (go { s with fl := (aluF .sub x (imm % W)).2 })
+    | .test a b => lift do
+        let x ← s.reg a; let y ← s.reg b
+        pure (go { s with fl := (aluF .and x y).2 })
     | .shlI d c => lift do
         let a ← s.reg d
-        pure (go { s.set d (some (a * 2 ^ (c % 64) % W)) with fl := ⟨none, none⟩ })
+        pure (go { s.set d (some (a * 2 ^ (c % 64) % W)) with fl := Flags.undef })
     | .shrI d c => lift do
         let a ← s.reg d
-        pure (go { s.set d (some (a / 2 ^ (c % 64))) with fl := ⟨none, none⟩ })
+        pure (go { s.set d (some (a / 2 ^ (c % 64))) with fl := Flags.undef })
     | .ld d b disp => lift do
         let a ← s.reg b; let v ← rd64 s.mem (ea a disp)
         pure (go (s.set d (some v)))
@@ -396,7 +430,9 @@ def memFlips (s : St) : List St :=
 /-- Every single-bit upset of the defined flags. -/
 def flagFlips (s : St) : List St :=
   (s.fl.cf.toList.map fun c => { s with fl := { s.fl with cf := some (!c) } }) ++
-  (s.fl.zf.toList.map fun z => { s with fl := { s.fl with zf := some (!z) } })
+  (s.fl.zf.toList.map fun z => { s with fl := { s.fl with zf := some (!z) } }) ++
+  (s.fl.sf.toList.map fun f => { s with fl := { s.fl with sf := some (!f) } }) ++
+  (s.fl.of.toList.map fun o => { s with fl := { s.fl with of := some (!o) } })
 
 /-- Upsets uniform over the alternatives `alt s`, at rate `p`. -/
 def Fault.uniform (alt : St → List St) (p : Rat) (hp : Rate p) : Fault where
@@ -601,7 +637,7 @@ def prog : Nat → Option (Ins × Nat)
 
 def k0 : Kern := ⟨[], [], [], [], []⟩
 
-def s0 : St := ⟨List.replicate 16 (some 0), 0, ⟨none, none⟩, [tbl], k0⟩
+def s0 : St := ⟨List.replicate 16 (some 0), 0, Flags.undef, [tbl], k0⟩
 
 def Out.code : Out → Option Nat
   | .exit c => some c
@@ -638,7 +674,7 @@ def prog2 : Nat → Option (Ins × Nat)
 /-- A 4 KiB writable stack ending at 0x9000, with rsp at its top. -/
 def stk : Region := ⟨0x8000, List.replicate 4096 0, true⟩
 
-def s1 : St := ⟨(List.replicate 16 (some 0)).set 4 (some 0x9000), 0, ⟨none, none⟩, [stk], k0⟩
+def s1 : St := ⟨(List.replicate 16 (some 0)).set 4 (some 0x9000), 0, Flags.undef, [stk], k0⟩
 
 theorem witness2 : (run prog2 6 (.ok s1)).code = some 0 := by
   decide +kernel

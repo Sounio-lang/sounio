@@ -73,3 +73,6 @@ lean_exe sporos where
 
 lean_exe «sporos-examples» where
   root := `Sporos.Examples
+
+lean_exe x86run where
+  root := `Bootstrap.RunHex
