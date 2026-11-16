@@ -80,11 +80,9 @@ function authorNameOf(author) {
 }
 
 function visibleByline(html) {
-  const strip = html.match(/<div class="meta-strip"[^>]*>([\s\S]*?)<\/div>/i);
-  if (!strip) return '';
-  const span = strip[1].match(/<span[^>]*>([\s\S]*?)<\/span>/i);
+  const span = html.match(/<div class="meta-strip"[^>]*>\s*<time\b[^>]*>[^<]*<\/time>\s*<span[^>]*>([^<]*)<\/span>/i);
   if (!span) return '';
-  return span[1].replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
+  return span[1].replace(/\s+/g, ' ').trim();
 }
 
 function checkStructuredAuthors(pathname, html, node, errors) {
