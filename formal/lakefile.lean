@@ -54,6 +54,7 @@ lean_lib Bootstrap where
     .one `Bootstrap.SeedData,
     .one `Bootstrap.Seeds,
     .one `Bootstrap.X86Env,
+    .one `Bootstrap.X86Int,
     .one `Bootstrap.X86Min,
     .submodules `Sporos]
 
