@@ -1,0 +1,258 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: STRUCT_ASSIGN_PLACE_SOURCE_NO_ALIAS_OK
+// Regression gate: assigning a whole aggregate FROM A PLACE (`(*w).ts = (*w).tsa`, `x = *p`, `x = o.f`) copies by value.
+//
+// The assignment lowering value-copied the source only when it was a bare identifier
+// (docs/audit/MADAROS_STRUCT_REASSIGN_ARRAY_ALIAS_DISPATCH_2026-09-26.md). A source written as a field or a dereference stored
+// the source HANDLE: after `(*w).ts = (*w).tsa` the two fields were one object, and a later in-place write through either was
+// visible through the other. No size threshold is involved: the defect is the same for a 1-element array and for the 14112
+// doubles of the circ28 tangent system, where a work struct kept a prepared system in `tsa`, copied it into `ts`, let the step
+// overwrite `ts`, and then read `tsa` as if it still held the prepared matrices (AUC 10 times too large, exit 0).
+//
+// Tags 1-4 are the reported shape at three sizes (1, 784 and 14112 doubles), 5 a pointer-to-pointer shape, 6 the `x = *p`
+// form, 7 `x = o.f`, 8 the save/restore loop of the tangent cache. In every tag the copy is taken while the source holds its
+// original values, then the DESTINATION is written in place and the SOURCE must not move, then the source is written and the
+// destination must not move.
+//
+// NOT ASSERTED (left aliased on Madaros, reported in the commit): `&!o.f` passed to a callee that does `*d = v` (the argument
+// is a reference to a temporary slot, so the store is lost), and aggregates held in `[Struct; N]` elements.
+
+struct S1 {
+    a: [f64; 1],
+    n: i64,
+}
+
+struct S784 {
+    a: [f64; 784],
+    n: i64,
+}
+
+struct S14k {
+    a: [f64; 14112],
+    n: i64,
+}
+
+struct W1 {
+    ts: S1,
+    keep: [f64; 3],
+    tsa: S1,
+    tsb: S1,
+    tail: i64,
+}
+
+struct W784 {
+    ts: S784,
+    keep: [f64; 3],
+    tsa: S784,
+    tsb: S784,
+    tail: i64,
+}
+
+struct W14k {
+    ts: S14k,
+    keep: [f64; 3],
+    tsa: S14k,
+    tsb: S14k,
+    tail: i64,
+}
+
+fn mk1(v: f64) -> S1 {
+    S1 { a: [v], n: 1 }
+}
+
+fn mk784(v: f64) -> S784 {
+    S784 { a: [v; 784], n: 1 }
+}
+
+fn mk14k(v: f64) -> S14k {
+    S14k { a: [v; 14112], n: 1 }
+}
+
+fn chk_f(tag: i64, got: f64, want: f64) -> i64 with IO {
+    if got != want {
+        print("BAD ")
+        print(tag)
+        print(" got ")
+        print(got)
+        print(" want ")
+        print(want)
+        print("\n")
+        return 1
+    }
+    0
+}
+
+fn chk_i(tag: i64, got: i64, want: i64) -> i64 with IO {
+    if got != want {
+        print("BAD ")
+        print(tag)
+        print("\n")
+        return 1
+    }
+    0
+}
+
+fn set784(w: &!W784) with Mut, Div, Panic {
+    (*w).ts = (*w).tsa
+}
+
+fn set1(w: &!W1) with Mut, Div, Panic {
+    (*w).ts = (*w).tsa
+}
+
+fn set14k(w: &!W14k) with Mut, Div, Panic {
+    (*w).ts = (*w).tsa
+}
+
+fn save14k(w: &!W14k) with Mut, Div, Panic {
+    (*w).tsa = (*w).ts
+}
+
+fn t1(tag: i64) -> i64 with IO, Mut, Div, Panic {
+    var w = W1 { ts: mk1(0.0), keep: [5.0, 6.0, 7.0], tsa: mk1(1.0), tsb: mk1(2.0), tail: 9 }
+    set1(&!w)
+    var bad: i64 = 0
+    bad = bad + chk_f(tag, w.ts.a[0], 1.0)
+    w.ts.a[0] = 100.0
+    w.ts.n = 100
+    bad = bad + chk_f(tag, w.tsa.a[0], 1.0)
+    bad = bad + chk_i(tag, w.tsa.n, 1)
+    w.tsa.a[0] = 200.0
+    bad = bad + chk_f(tag, w.ts.a[0], 100.0)
+    bad = bad + chk_f(tag, w.tsb.a[0], 2.0)
+    bad = bad + chk_f(tag, w.keep[1], 6.0)
+    bad = bad + chk_i(tag, w.tail, 9)
+    bad
+}
+
+fn t_ptr1(tag: i64) -> i64 with IO, Mut, Div, Panic {
+    var w = W1 { ts: mk1(0.0), keep: [5.0, 6.0, 7.0], tsa: mk1(1.0), tsb: mk1(2.0), tail: 9 }
+    set1(&!w)
+    var bad: i64 = 0
+    bad = bad + chk_f(tag, w.ts.a[0], 1.0)
+    w.ts.a[0] = 100.0
+    bad = bad + chk_f(tag, w.tsa.a[0], 1.0)
+    w.tsa.a[0] = 200.0
+    bad = bad + chk_f(tag, w.ts.a[0], 100.0)
+    bad = bad + chk_f(tag, w.keep[2], 7.0)
+    bad = bad + chk_i(tag, w.tail, 9)
+    bad
+}
+
+fn t_ptr784(tag: i64) -> i64 with IO, Mut, Div, Panic {
+    var w = W784 { ts: mk784(0.0), keep: [5.0, 6.0, 7.0], tsa: mk784(1.0), tsb: mk784(2.0), tail: 9 }
+    set784(&!w)
+    var bad: i64 = 0
+    bad = bad + chk_f(tag, w.ts.a[0], 1.0)
+    bad = bad + chk_f(tag, w.ts.a[783], 1.0)
+    w.ts.a[0] = 100.0
+    w.ts.a[783] = 101.0
+    bad = bad + chk_f(tag, w.tsa.a[0], 1.0)
+    bad = bad + chk_f(tag, w.tsa.a[783], 1.0)
+    w.tsa.a[400] = 200.0
+    bad = bad + chk_f(tag, w.ts.a[400], 1.0)
+    bad = bad + chk_f(tag, w.keep[2], 7.0)
+    bad = bad + chk_i(tag, w.tail, 9)
+    bad
+}
+
+fn t_ptr14k(tag: i64) -> i64 with IO, Mut, Div, Panic {
+    var w = W14k { ts: mk14k(0.0), keep: [5.0, 6.0, 7.0], tsa: mk14k(1.0), tsb: mk14k(2.0), tail: 9 }
+    set14k(&!w)
+    var bad: i64 = 0
+    bad = bad + chk_f(tag, w.ts.a[0], 1.0)
+    bad = bad + chk_f(tag, w.ts.a[14111], 1.0)
+    w.ts.a[0] = 100.0
+    w.ts.a[14111] = 101.0
+    bad = bad + chk_f(tag, w.tsa.a[0], 1.0)
+    bad = bad + chk_f(tag, w.tsa.a[14111], 1.0)
+    w.tsa.a[7000] = 200.0
+    bad = bad + chk_f(tag, w.ts.a[7000], 1.0)
+    bad = bad + chk_f(tag, w.keep[2], 7.0)
+    bad = bad + chk_i(tag, w.tail, 9)
+    bad
+}
+
+fn bump14k(s: &!S14k) with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < 14112 {
+        (*s).a[i] = (*s).a[i] + 1000.0
+        i = i + 1
+    }
+}
+
+// The tangent cache shape: prepare into ts, keep it in tsa, later restore it into ts and let the step overwrite ts.
+fn t_cache(tag: i64) -> i64 with IO, Mut, Div, Panic {
+    var w = W14k { ts: mk14k(3.0), keep: [5.0, 6.0, 7.0], tsa: mk14k(0.0), tsb: mk14k(0.0), tail: 9 }
+    var bad: i64 = 0
+    var round: i64 = 0
+    while round < 3 {
+        save14k(&!w)
+        bump14k(&!w.ts)
+        set14k(&!w)
+        bump14k(&!w.ts)
+        bad = bad + chk_f(tag, w.tsa.a[5], 3.0)
+        bad = bad + chk_f(tag, w.ts.a[5], 1003.0)
+        w.ts.a[5] = 3.0
+        round = round + 1
+    }
+    // Only a[5] is reset each round, so a[14111] carries 1000 per round: the saved copy of round 3 holds 2003.
+    bad = bad + chk_f(tag, w.tsa.a[14111], 2003.0)
+    bad
+}
+
+fn load(p: &S784) -> S784 with Mut {
+    var r = mk784(0.0)
+    r = *p
+    r
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var bad: i64 = 0
+
+    // 1: pointer-free reported shape, 1 double.
+    bad = bad + t1(1)
+
+    // 2-4: through `&!W`, as the tangent module held it, at 1, 784 and 14112 doubles.
+    bad = bad + t_ptr1(2)
+    bad = bad + t_ptr784(3)
+    bad = bad + t_ptr14k(4)
+
+    // 5: save and restore with in-place writes in between (the tangent cache).
+    bad = bad + t_cache(5)
+
+    // 6: `x = *p`
+    var src = mk784(4.0)
+    var l = mk784(0.0)
+    let p = &src
+    l = *p
+    l.a[10] = 50.0
+    bad = bad + chk_f(6, src.a[10], 4.0)
+    src.a[11] = 60.0
+    bad = bad + chk_f(6, l.a[11], 4.0)
+    bad = bad + chk_f(6, l.a[10], 50.0)
+
+    // 7: `x = o.f`
+    var w = W784 { ts: mk784(0.0), keep: [5.0, 6.0, 7.0], tsa: mk784(1.0), tsb: mk784(2.0), tail: 9 }
+    var x = mk784(9.0)
+    x = w.tsa
+    x.a[0] = 300.0
+    bad = bad + chk_f(7, w.tsa.a[0], 1.0)
+    w.tsa.a[1] = 301.0
+    bad = bad + chk_f(7, x.a[1], 1.0)
+    w.ts = x
+    x.a[2] = 302.0
+    bad = bad + chk_f(7, w.ts.a[2], 1.0)
+    bad = bad + chk_f(7, w.ts.a[0], 300.0)
+
+    // 8: the same through a returning callee.
+    let r = load(&src)
+    bad = bad + chk_f(8, r.a[0], 4.0)
+
+    if bad == 0 {
+        println("STRUCT_ASSIGN_PLACE_SOURCE_NO_ALIAS_OK")
+        return 0
+    }
+    1
+}
