@@ -3643,7 +3643,35 @@ fn bind_struct_local_zeroinit_a64(ns: i64, ne: i64, ty_hash: i64) with Mut, Pani
 
 fn copy_struct_into_local_slot_a64(slot: i64, ty_hash: i64) with Mut, Panic, Div {
     let si = st_find(ty_hash)
-    if si < 0 && knowledge_hash_is(ty_hash) == false { emit_store_var_a64(slot); return }
+    if si < 0 && knowledge_hash_is(ty_hash) == false {
+        // A synthetic tuple (no registered struct) arrives as a pointer to the
+        // ONE global return buffer (stabilize_return_agg_a64). Storing that
+        // pointer made the variable an alias of every later aggregate return:
+        // `lp = f(a); rp = f(b)` left lp reading rp's value. Copy the words into
+        // slots of this assignment instead, as materialize_aggregate_expr_a64
+        // does for a struct. (x86 returns into the caller's SRET slot, so its
+        // pointer is stable there.)
+        let tup_n = struct_like_nslots(ty_hash)
+        if tup_n > 0 && tup_cache_lookup(ty_hash) >= 0 {
+            em32(0xAA0003EA)  // mov x10, x0 (src ptr)
+            if tup_n * 8 >= local_bss_spill_bytes() {
+                let tup_tmp = GL_BSS_BASE + a64_stmt_temp_alloc(tup_n * 8)
+                emit_image_addr_a64(tup_tmp)
+                em32(0xAA0003EB)  // mov x11, x0 (dst ptr)
+                emit_copy_words_x10_x11_a64(tup_n)
+                emit_image_addr_a64(tup_tmp)
+            } else {
+                let tup_base = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + tup_n
+                emit_lea_var_a64(tup_base + tup_n - 1)
+                em32(0xAA0003EB)  // mov x11, x0 (dst ptr)
+                emit_copy_words_x10_x11_a64(tup_n)
+                emit_lea_var_a64(tup_base + tup_n - 1)
+            }
+        }
+        emit_store_var_a64(slot)
+        return
+    }
     let nslots = struct_like_nslots(ty_hash)
     em32(0xAA0003EA)  // mov x10, x0 (src ptr)
     emit_load_var_a64(slot)
