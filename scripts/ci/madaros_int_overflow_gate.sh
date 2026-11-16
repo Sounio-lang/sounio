@@ -124,7 +124,7 @@ fi
 # overflowing operation. A guard on the signed 64-bit condition alone would
 # let every one of these through (they fit i64).
 expect_trap() {
-  local name="$1" what="$2"
+  local name="$1" what="$2" msg="${3:-}"
   local rc=0
   sounio_capture_rc rc "$OUT/$name.log" -- "$SOUC" run "$OUT/$name.sio"
   if ! sounio_expect_failed_exit "$rc" "$OUT/$name.log" ""; then
@@ -136,6 +136,27 @@ expect_trap() {
     echo "FAIL: $what: execution continued past the overflowing operation"
     tail -10 "$OUT/$name.log" || true
     exit 1
+  fi
+  # ADR-031 R1: the panic names the type and the operation and, for the
+  # 64-bit guards, where it is: the overflowing operation is on the probe's
+  # last body line, two above the closing brace.
+  if [[ -n "$msg" ]]; then
+    local opline=$(( $(wc -l < "$OUT/$name.sio") - 2 ))
+    local esc; esc=$(printf '%s' "$msg" | sed 's/[][\\.*^$+?(){}|/]/\\&/g')
+    local prefix="integer overflow"
+    case "$msg" in
+      zero\ *) prefix="division by zero"; msg="${msg#zero }"; esc=$(printf '%s' "$msg" | sed 's/[][\\.*^$+?(){}|/]/\\&/g') ;;
+    esac
+    local want="^sounio: $prefix \\($esc\\)"
+    case "$msg" in
+      i64*|u64*) want="$want at .*$name\\.sio:$opline:[0-9]+\$" ;;
+      *) want="$want( at .*$name\\.sio:$opline:[0-9]+)?\$" ;;
+    esac
+    if ! grep -qE -- "$want" "$OUT/$name.log"; then
+      echo "FAIL: $what: panic line does not match /$want/"
+      tail -10 "$OUT/$name.log" || true
+      exit 1
+    fi
   fi
 }
 probe() {
@@ -150,28 +171,46 @@ EOF
 }
 probe u64_add_max u64 'let m: u64 = id(18446744073709551615)
   println(m + 1)'
-expect_trap u64_add_max "u64::MAX + 1"
+expect_trap u64_add_max "u64::MAX + 1" "u64 +"
 probe u64_sub_zero u64 'let z: u64 = id(0)
   println(z - 1)'
-expect_trap u64_sub_zero "0u64 - 1"
+expect_trap u64_sub_zero "0u64 - 1" "u64 -"
 probe u64_mul_two u64 'let m: u64 = id(18446744073709551615)
   println(m * 2)'
-expect_trap u64_mul_two "u64::MAX * 2"
+expect_trap u64_mul_two "u64::MAX * 2" "u64 *"
 probe i32_add_max i32 'let a: i32 = id(2147483647)
   println(a + 1)'
-expect_trap i32_add_max "i32::MAX + 1"
+expect_trap i32_add_max "i32::MAX + 1" "i32 +"
 probe i32_sub_min i32 'let n: i32 = id(-2147483647) - 1
   println(n - 1)'
-expect_trap i32_sub_min "i32::MIN - 1"
+expect_trap i32_sub_min "i32::MIN - 1" "i32 -"
 probe i32_mul i32 'let a: i32 = id(1000000)
   println(a * id(3000))'
-expect_trap i32_mul "1000000i32 * 3000"
+expect_trap i32_mul "1000000i32 * 3000" "i32 *"
 probe i32_neg_min i32 'let n: i32 = id(-2147483647) - 1
   println(-n)'
-expect_trap i32_neg_min "-i32::MIN"
+expect_trap i32_neg_min "-i32::MIN" "i32 unary -"
+# The call boundary: a non-literal i64 outside 32 bits reaching an i32 param
+# panics there (it used to be masked, or kept whole in an i32 local).
+probe i32_arg_narrow i32 'let big: i64 = 9999999999
+  let r: i32 = id(big)
+  println(r as i64)'
+expect_trap i32_arg_narrow "i64 9999999999 passed to an i32 param" "i32 argument"
 probe u32_add_max u32 'let w: u32 = id(4294967295)
   println(w + 1)'
-expect_trap u32_add_max "u32::MAX + 1"
+expect_trap u32_add_max "u32::MAX + 1" "u32 +"
+probe i64_add_max i64 'let m: i64 = id(9223372036854775807)
+  println(m + 1)'
+expect_trap i64_add_max "i64::MAX + 1" "i64 +"
+probe i64_sub_min i64 'let n: i64 = id(-9223372036854775808)
+  println(n - 1)'
+expect_trap i64_sub_min "i64::MIN - 1" "i64 -"
+probe i64_mul i64 'let q: i64 = id(4611686018427387904)
+  println(q * 2)'
+expect_trap i64_mul "2^62 * 2" "i64 *"
+probe i64_neg_min i64 'let n: i64 = id(-9223372036854775808)
+  println(-n)'
+expect_trap i64_neg_min "-i64::MIN" "i64 unary -"
 
 # 5) ADR-031 R2: integer / and % fail on a zero divisor and on MIN / -1,
 # through the same trap as overflow (exit 1), not the CPU's SIGFPE. The
@@ -179,19 +218,19 @@ expect_trap u32_add_max "u32::MAX + 1"
 # (E056/E057) nor constant propagation sees them.
 probe div_zero_i64 i64 'let z: i64 = id(0)
   println(id(7) / z)'
-expect_trap div_zero_i64 "7 / 0 (i64)"
+expect_trap div_zero_i64 "7 / 0 (i64)" "zero i64 /"
 probe rem_zero_i64 i64 'let z: i64 = id(0)
   println(id(7) % z)'
-expect_trap rem_zero_i64 "7 % 0 (i64)"
+expect_trap rem_zero_i64 "7 % 0 (i64)" "zero i64 %"
 probe div_min_i64 i64 'let m: i64 = id(-9223372036854775807) - 1
   println(m / id(-1))'
-expect_trap div_min_i64 "i64::MIN / -1"
+expect_trap div_min_i64 "i64::MIN / -1" "i64 /"
 probe rem_min_i64 i64 'let m: i64 = id(-9223372036854775807) - 1
   println(m % id(-1))'
-expect_trap rem_min_i64 "i64::MIN % -1"
+expect_trap rem_min_i64 "i64::MIN % -1" "i64 %"
 probe div_zero_u64 u64 'let z: u64 = id(0)
   println(id(7) / z)'
-expect_trap div_zero_u64 "7 / 0 (u64)"
+expect_trap div_zero_u64 "7 / 0 (u64)" "zero u64 /"
 probe div_min_i32 i32 'let m: i32 = id(-2147483647) - 1
   println(m / id(-1))'
 expect_trap div_min_i32 "i32::MIN / -1"
