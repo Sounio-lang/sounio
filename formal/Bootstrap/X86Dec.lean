@@ -220,9 +220,11 @@ length `len`: one entry per encoding at Hamming distance 1 (decision 42). -/
 def altsAt (b : Nat → Option Nat) (a len : Nat) : List (Option (Ins × Nat)) :=
   (List.range (8 * len)).map fun k => decode (flipBit b k) a
 
-/-- The image seen by `X86Int.step`: the code bytes `code` loaded at `base`. -/
+/-- The image seen by `X86Int.step`: the code bytes `code` loaded at `base`.
+An address below `base` is outside the image and decodes to nothing; `Nat`
+subtraction would otherwise saturate at 0 and read the first byte there. -/
 def imageOf (code : List Nat) (base : Nat) : Nat → Option (Ins × Nat) :=
-  fun a => decode (fun i => code[a + i - base]?) a
+  fun a => if a < base then none else decode (fun i => code[a - base + i]?) a
 
 /-! ### Encodings checked against the Intel manual
 
@@ -279,6 +281,12 @@ example : at0 [0x48, 0xb8, 8, 7, 6, 5, 4, 3, 2, 1] = some (.movI 0 0x01020304050
   decide +kernel
 -- 48 8d 7c 24 08: lea rdi, [rsp + 8]
 example : at0 [0x48, 0x8d, 0x7c, 0x24, 0x08] = some (.lea 7 4 8, 5) := by decide +kernel
+-- the image boundary: below the base is outside, the first byte is inside, and
+-- an instruction does not run past the end
+example : imageOf [0xc3] 0x400000 0x3fffff = none := by decide +kernel
+example : imageOf [0xc3] 0x400000 0x400000 = some (.ret, 1) := by decide +kernel
+example : imageOf [0xc3] 0x400000 0x400001 = none := by decide +kernel
+example : imageOf [0x48, 0x89] 0x400000 0x400000 = none := by decide +kernel
 -- refused: rip-relative, truncated input
 example : at0 [0x48, 0x8b, 0x05, 0, 0, 0, 0] = none := by decide +kernel
 example : at0 [0x48, 0x89] = none := by decide +kernel
