@@ -9,46 +9,6 @@ import Sporos.DagStep
 
 namespace Sporos
 
-/-- `ar'` extends `ar`. -/
-def Ext (ar ar' : Arena) : Prop := ∃ x, ar' = ar ++ x
-
-theorem Ext.refl (ar : Arena) : Ext ar ar := ⟨[], by simp⟩
-
-theorem Ext.trans {a b c : Arena} (h1 : Ext a b) (h2 : Ext b c) : Ext a c := by
-  obtain ⟨x, rfl⟩ := h1; obtain ⟨y, rfl⟩ := h2; exact ⟨x ++ y, by simp⟩
-
-theorem Ext.len {a b : Arena} (h : Ext a b) : a.length ≤ b.length := by
-  obtain ⟨x, rfl⟩ := h; simp
-
-/-- A good arena: joins point backwards, node 0 is `empty`. -/
-def Good (ar : Arena) : Prop := AWF ar ∧ ar[0]? = some .empty
-
-theorem Good.leaves_ext {a b : Arena} (ha : Good a) (h : Ext a b) {i : Nat} (hi : i < a.length) :
-    leaves b i = leaves a i := by
-  obtain ⟨x, rfl⟩ := h; exact leaves_append ha.1 x hi
-
-/-- Every node a plan names exists. -/
-def PE.ok (n : Nat) : PE → Prop
-  | .nil => True
-  | .node i => i < n
-  | .leaf _ => True
-  | .app a b => a.ok n ∧ b.ok n
-
-theorem PE.ok_mono {e : PE} {n m : Nat} (h : e.ok n) (hm : n ≤ m) : e.ok m := by
-  induction e with
-  | nil => trivial
-  | node i => exact Nat.lt_of_lt_of_le h hm
-  | leaf _ => trivial
-  | app a b iha ihb => exact ⟨iha h.1, ihb h.2⟩
-
-theorem PE.den_ext {e : PE} {a b : Arena} (ha : Good a) (h : Ext a b) (he : e.ok a.length) :
-    e.den (leaves b) = e.den (leaves a) := by
-  induction e with
-  | nil => rfl
-  | node i => exact ha.leaves_ext h he
-  | leaf _ => rfl
-  | app x y ihx ihy => simp only [PE.den]; rw [ihx he.1, ihy he.2]
-
 theorem build_spec : ∀ (e : PE) (ar : Arena), Good ar → e.ok ar.length →
     Good (build e ar).2 ∧ Ext ar (build e ar).2 ∧ (build e ar).1 < (build e ar).2.length ∧
       leaves (build e ar).2 (build e ar).1 = e.den (leaves ar)
@@ -75,6 +35,9 @@ theorem build_spec : ∀ (e : PE) (ar : Arena), Good ar → e.ok ar.length →
     · rw [leaves_join g2.1 hlt1 l2, d2, g1.leaves_ext e2 l1, d1]
       simp only [PE.den]
       rw [PE.den_ext hg e1 he.2]
+
+/-- The allocator that appends one node per union and per origin. -/
+def Alloc.plain : Alloc := ⟨Sporos.build, build_spec⟩
 
 end Sporos
 
