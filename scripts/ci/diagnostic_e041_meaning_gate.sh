@@ -43,7 +43,7 @@ require(len(re.findall(r'checker_report_error_at_inplace\([^\n]+, 286, 0, 0, 0\)
 require(not re.search(r'(?:report_error_at[^\n]*|report_error\([^\n]*), 41, 0, 0, 0\)', checker),
         'ontology error must not reuse E041')
 unit_prints = re.findall(r'print\("error\[E041\]: ([^"\n]+)', checker)
-require(len(unit_prints) == 4 and all(s.startswith('unit mismatch') for s in unit_prints),
+require(len(unit_prints) == 5 and all(s.startswith('unit mismatch') for s in unit_prints),
         'direct E041 checker messages must describe unit mismatch')
 require('error[E287]: Sounio uses `&!T` for exclusive references, not `&mut T`' in parser,
         'Madaros &mut parser refusal must use E287')

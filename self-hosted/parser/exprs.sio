@@ -10,7 +10,7 @@
 
 use parser::ast::*
 use lexer::token::*
-use parser::parser::{parser_report_expected_expression, parser_peek, parser_at_eof, pt_read_kind, pt_read_kind_code, parser_peek_ahead, parser_ahead_is_p_ident, parser_ahead_is_hex_frac_p_ident, parser_ahead_fused_exp_ident, parser_assign_op_code, parser_advance, parser_prev_token_end, mk_expr, error_expr, dummy_type_expr, parser_store_expr_box, parser_take_expr_box, f64_hex_literal_from_source, parse_suffix_name_from_source}
+use parser::parser::{parser_report_expected_expression, parser_peek, parser_at_eof, pt_read_kind, pt_read_kind_code, parser_peek_ahead, parser_ahead_is_p_ident, parser_ahead_is_hex_frac_p_ident, parser_ahead_fused_exp_ident, parser_assign_op_code, parser_advance, parser_prev_token_end, mk_expr, error_expr, dummy_type_expr, parser_store_expr_box, parser_take_expr_box, f64_hex_literal_from_source, parse_suffix_name_from_source, pt_read_start, pt_read_end}
 use parser::f128_literal::*
 use parser::types::*
 use parser::stmts::*
@@ -432,7 +432,7 @@ impl Parser {
     fn parse_float_literal(self) -> Parser with Mut, IO, Panic, Div, Alloc {
         let span = self.current_span()
         let tok = self.current()
-        let p = self.advance()
+        var p = self.advance()
         var e = mk_expr(ExprKind::ExprFloatLit, span)
         e.float_val = tok.float_value
         e.name = parse_suffix_name_from_source(span.start, span.end)
@@ -442,6 +442,25 @@ impl Parser {
         e.f128_lit_lo = lit.lo
         e.f128_lit_hi = lit.hi
         e.f128_lit_exact = lit.exact
+        // Unit suffix `10.0<m>` (spec UNIT-003). Recognised only when the four
+        // tokens touch, byte for byte: literal, `<`, one identifier, `>`.
+        // `x < 10.0 < y` style spellings with spaces keep meaning comparison.
+        // The unit name rides in `path` (one segment), which a float literal
+        // never otherwise uses; lowering ignores it, the checker brands the
+        // literal with it.
+        if p.pending_gt == 0 && parser_peek(p) == TokenKind::Lt
+            && parser_peek_ahead(p, 1) == TokenKind::Ident
+            && parser_peek_ahead(p, 2) == TokenKind::Gt
+            && pt_read_start(p.pos) == span.end
+            && pt_read_end(p.pos) == pt_read_start(p.pos + 1)
+            && pt_read_end(p.pos + 1) == pt_read_start(p.pos + 2) {
+            let uname = p.advance().current_name()
+            e.path = AstPath {
+                segments: StringList { head_buf: uname.buf, head_len: uname.len, tail: None },
+                seg_count: 1,
+            }
+            p = p.advance().advance().advance()
+        }
         parser_store_expr_box(Box::new(e))
         p
     }

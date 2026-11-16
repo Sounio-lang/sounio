@@ -2018,6 +2018,10 @@ fn checker_lower_named_type_with_args_mut(c: *mut Checker, path: AstPath, type_a
             Some(args) => {
                 match (*args).tail {
                     None => {
+                        if checker_unit_expr_has_unknown_name((*c).units, (*args).head) {
+                            checker_report_error_at_inplace(c, span, 302, 0, 0, 0)
+                            return ty_error()
+                        }
                         let dim = checker_unit_dim_from_type_expr((*c).units, (*args).head)
                         return checker_ty_from_unit_dim(c, dim)
                     }
@@ -3192,6 +3196,8 @@ fn checker_unit_dim_from_type_expr(reg: UnitRegistry, ty: TypeExpr) -> UnitDim w
     var base_dim = unit_dim_dimensionless()
     if base_idx >= 0 {
         base_dim = reg.get_dim(base_idx)
+    } else if unit_lazy_builtin_id(base_name) > 0 {
+        base_dim = unit_lazy_builtin_dim(unit_lazy_builtin_id(base_name))
     }
     match ty.type_args {
         Some(args) => {
@@ -3212,6 +3218,27 @@ fn checker_unit_dim_from_type_expr(reg: UnitRegistry, ty: TypeExpr) -> UnitDim w
     } else {
         base_dim
     }
+}
+
+// True when some leaf name of a f64<UnitExpr> annotation is neither registered nor a
+// lazily registered builtin. Mirrors the traversal of checker_unit_dim_from_type_expr.
+fn checker_unit_expr_has_unknown_name(reg: UnitRegistry, ty: TypeExpr) -> bool with Mut, Panic, Div, Alloc {
+    var unknown = false
+    match ty.type_args {
+        Some(args) => { unknown = checker_unit_expr_has_unknown_name(reg, (*args).head) }
+        None => {
+            let nm = checker_unit_path_first_name(ty.path)
+            if reg.find(nm) < 0 && unit_lazy_builtin_id(nm) == 0 { unknown = true }
+        }
+    }
+    if unknown { return true }
+    if ty.kind == TypeExprKind::TypeReference || ty.kind == TypeExprKind::TypeRefMut {
+        match ty.inner {
+            Some(inner) => { return checker_unit_expr_has_unknown_name(reg, *inner) }
+            None => {}
+        }
+    }
+    false
 }
 
 fn checker_ty_from_unit_dim(c: *mut Checker, dim: UnitDim) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
@@ -5963,7 +5990,15 @@ fn checker_name_is_type_param_in_scope(c: *mut Checker, name: Name) -> bool with
 }
 
 fn checker_unit_index_for(c: *mut Checker, name: Name) -> i64 with Mut, Panic, Div, Alloc {
-    (*c).units.find(name)
+    let found = (*c).units.find(name)
+    if found >= 0 { return found }
+    let lazy = unit_lazy_builtin_id(name)
+    if lazy > 0 {
+        let before = (*c).units.count
+        (*c).units = (*c).units.register(name, unit_lazy_builtin_dim(lazy))
+        if (*c).units.count > before { return before }
+    }
+    0 - 1
 }
 
 
@@ -5998,6 +6033,9 @@ fn unit_dim_from_type_expr(reg: UnitRegistry, te: TypeExpr, depth: i64) -> UnitD
         let idx = reg.find(nm)
         if idx >= 0 {
             return reg.get_dim(idx)
+        }
+        if unit_lazy_builtin_id(nm) > 0 {
+            return unit_lazy_builtin_dim(unit_lazy_builtin_id(nm))
         }
         return unit_dim_dimensionless()
     }
@@ -7267,7 +7305,10 @@ fn checker_check_impl_method_inplace(c: *mut Checker, item: Item) with Mut, Pani
             let body_ty = checker_check_block_inplace(c, (*fd).body)
             if sig_id >= 0 {
                 let sig2 = fn_sig_table_get((*c).fn_sigs, sig_id)
-                if !checker_fn_body_return_compatible_inplace(c, body_ty, sig2.return_type) {
+                let tail_unit_verdict = checker_return_unit_verdict(c, body_ty, sig2.return_type)
+                if tail_unit_verdict == 2 {
+                    checker_report_unit_return_mismatch_inplace(c, (*fd).span, body_ty.unit_id, sig2.return_type.unit_id)
+                } else if tail_unit_verdict != 1 && !checker_fn_body_return_compatible_inplace(c, body_ty, sig2.return_type) {
                     checker_report_mismatch_inplace(c, (*fd).span, 8, sig2.return_type, body_ty)
                 }
                 // The implicit tail return carries the same obligation as an
@@ -7659,7 +7700,10 @@ fn checker_check_fn_item_inplace(c: *mut Checker, opt: Option<Box<FnDef> >) with
             let body_ty = checker_check_block_inplace(c, (*fd).body)
             if sig_id >= 0 {
                 let sig2 = fn_sig_table_get((*c).fn_sigs, sig_id)
-                if !checker_fn_body_return_compatible_inplace(c, body_ty, sig2.return_type) {
+                let tail_unit_verdict = checker_return_unit_verdict(c, body_ty, sig2.return_type)
+                if tail_unit_verdict == 2 {
+                    checker_report_unit_return_mismatch_inplace(c, (*fd).span, body_ty.unit_id, sig2.return_type.unit_id)
+                } else if tail_unit_verdict != 1 && !checker_fn_body_return_compatible_inplace(c, body_ty, sig2.return_type) {
                     checker_report_mismatch_inplace(c, (*fd).span, 8, sig2.return_type, body_ty)
                 }
                 // Free-function implicit tail return. Same obligation and same
@@ -8309,6 +8353,43 @@ fn checker_check_opt_expr_inplace(c: *mut Checker, opt: Option<Box<Expr> >) -> T
     }
 }
 
+// Unit check at a return position (spec UNIT-006: declared returns).
+// 0 = not a unit question, defer to the ordinary type check.
+// 1 = units agree (dimension and scale), accept even if registry indexes differ.
+// 2 = mismatch: a bare number or another dimension/scale into a unit-typed
+//     return. A unit-typed value returned as bare f64 stays accepted
+//     (tests/run-pass/unit_energy_explicit_conversion.sio).
+fn checker_return_unit_verdict(c: *mut Checker, val_ty: TypeEntry, ret_ty: TypeEntry) -> i64 with Mut, Panic, Div, Alloc, IO {
+    if val_ty.kind != TypeKind::TyF64 || ret_ty.kind != TypeKind::TyF64 {
+        return 0
+    }
+    if ret_ty.unit_id < 0 {
+        return 0
+    }
+    if val_ty.unit_id < 0 {
+        return 2
+    }
+    if checker_units_addable(c, val_ty.unit_id, ret_ty.unit_id) {
+        return 1
+    }
+    2
+}
+
+fn checker_report_unit_return_mismatch_inplace(c: *mut Checker, span: Span, val_uid: i64, ret_uid: i64) with Mut, Panic, Div, Alloc, IO {
+    (*c).had_error = true
+    (*c).error_count = (*c).error_count + 1
+    print("error[E041]: unit mismatch in return value\n")
+    print("  returned unit: ")
+    if val_uid >= 0 {
+        print_unit_dim(checker_unit_dim_at(c, val_uid))
+    } else {
+        print("(dimensionless)")
+    }
+    print("\n  declared return unit: ")
+    print_unit_dim(checker_unit_dim_at(c, ret_uid))
+    print("\n")
+}
+
 fn checker_check_return_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     (*c).last_literal_kind = 0  // so the flag reflects ONLY this return value expr
     let val_ty = checker_check_opt_expr_inplace(c, e.left)
@@ -8326,7 +8407,10 @@ fn checker_check_return_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with
             if is_epistemic_type((*c).current_return_type) && is_epistemic_type(val_ty) {
                 ret_expr_ok = checker_knowledge_subsumes(c, val_ty, (*c).current_return_type)
             }
-            if !ret_expr_ok {
+            let ret_unit_verdict = checker_return_unit_verdict(c, val_ty, (*c).current_return_type)
+            if ret_unit_verdict == 2 {
+                checker_report_unit_return_mismatch_inplace(c, e.span, val_ty.unit_id, (*c).current_return_type.unit_id)
+            } else if !ret_expr_ok && ret_unit_verdict != 1 {
                 checker_report_mismatch_inplace(c, e.span, 8, (*c).current_return_type, val_ty)
             }
             // A refinement must hold at the RETURN too, not only at a binding.
@@ -8390,6 +8474,17 @@ fn checker_check_expr_group_a_inplace(c: *mut Checker, e: Expr) -> (bool, TypeEn
     } else if e.kind == ExprKind::ExprFloatLit {
         (*c).last_literal_float = e.float_val
         (*c).last_literal_kind = 2
+        if e.path.seg_count == 1 {
+            // `10.0<m>`: brand the literal with its unit (spec UNIT-003).
+            let lit_unit_name = checker_unit_path_first_name(e.path)
+            let lit_uid = checker_unit_index_for(c, lit_unit_name)
+            if lit_uid < 0 {
+                checker_report_error_at_inplace(c, e.span, 302, 0, 0, 0)
+                return (true, ty_error())
+            }
+            (*c).last_literal_kind = 0
+            return (true, ty_with_unit(ty_f64(), lit_uid))
+        }
         return (true, checker_float_literal_type(e))
     } else if e.kind == ExprKind::ExprBoolTrue {
         return (true, ty_bool())
@@ -9347,6 +9442,13 @@ fn checker_report_unit_mismatch_inplace(c: *mut Checker, span: Span, left_uid: i
         print("(dimensionless)")
     }
     print("\n")
+    if left_uid >= 0 && right_uid >= 0 {
+        if unit_dim_compatible(checker_unit_dim_at(c, left_uid), checker_unit_dim_at(c, right_uid)) {
+            print("  note: same dimension, different scale; convert explicitly with `as`\n")
+        } else {
+            print("  note: unit dimension mismatch\n")
+        }
+    }
 }
 
 // A REAL *mut transcription of check_binary_units, replacing a bridge that
@@ -21398,6 +21500,7 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 299 { print("handler backend v1 limit exceeded (results and operation values are i64 words; handler nesting depth at most 8)") }
     else if code == 300 { print("integer constant is out of range for the annotated type") }
     else if code == 301 { print("unit registry capacity exceeded; refusing to discard a unit dimension") }
+    else if code == 302 { print("unknown unit in f64<UnitExpr> annotation or numeric literal suffix: the name is not a builtin or declared unit") }
     else if code == 269 { print("a `where` refinement on Knowledge<T> is not enforced by this compiler yet: the predicate would be silently ignored, so it is refused") }
     else if code == 270 { print("`as string` does not convert a number, bool or char to text: no engine formats the value, so the cast is refused") }
     else if code == 263 { print("qualified call is ambiguous: this qualifier names a module you `use`d, but also collides with an unrelated struct/enum method of the same name, and the compiler cannot yet guarantee which one runs") }
