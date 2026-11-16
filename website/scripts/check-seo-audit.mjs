@@ -65,6 +65,59 @@ function jsonLdBlocks(html) {
   return blocks;
 }
 
+const CREDENTIAL = /\b(?:Dr\.|MD|PhD|physician|doctor)\b/i;
+const PERSON_NAME = 'Demetrios Chiuratto Agourakis';
+
+function authorEntities(author) {
+  if (author == null) return [];
+  return Array.isArray(author) ? author : [author];
+}
+
+function authorNameOf(author) {
+  if (typeof author === 'string') return author.replace(/\s+/g, ' ').trim();
+  if (author && typeof author.name === 'string') return author.name.replace(/\s+/g, ' ').trim();
+  return '';
+}
+
+function visibleByline(html) {
+  const strip = html.match(/<div class="meta-strip"[^>]*>([\s\S]*?)<\/div>/i);
+  if (!strip) return '';
+  const span = strip[1].match(/<span[^>]*>([\s\S]*?)<\/span>/i);
+  if (!span) return '';
+  return span[1].replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
+}
+
+function checkStructuredAuthors(pathname, html, node, errors) {
+  if (!node || typeof node !== 'object') return;
+  if (Array.isArray(node)) {
+    for (const item of node) checkStructuredAuthors(pathname, html, item, errors);
+    return;
+  }
+  const type = node['@type'];
+  if (type === 'TechArticle' && authorEntities(node.author).length === 0) {
+    errors.push(`${pathname}: TechArticle has no author`);
+  }
+  if (type === 'BlogPosting') {
+    const names = authorEntities(node.author).map(authorNameOf).filter((name) => name.length > 0);
+    const byline = visibleByline(html);
+    if (names.length !== 1 || names[0] !== byline) {
+      errors.push(`${pathname}: BlogPosting author ${JSON.stringify(names[0] ?? '')} does not match the visible byline ${JSON.stringify(byline)}`);
+    }
+  }
+  for (const author of authorEntities(node.author)) {
+    const name = authorNameOf(author);
+    if (name && CREDENTIAL.test(name)) {
+      errors.push(`${pathname}: author name contains a credential: ${JSON.stringify(name)}`);
+    }
+    if (author && typeof author === 'object' && author['@type'] === 'Person' && name !== PERSON_NAME) {
+      errors.push(`${pathname}: Person author is ${JSON.stringify(name)}, expected ${JSON.stringify(PERSON_NAME)}`);
+    }
+  }
+  for (const value of Object.values(node)) {
+    if (value && typeof value === 'object') checkStructuredAuthors(pathname, html, value, errors);
+  }
+}
+
 function titleOf(html) {
   return html.match(/<title>([\s\S]*?)<\/title>/i)?.[1]?.replace(/\s+/g, ' ').trim() ?? '';
 }
@@ -125,8 +178,9 @@ async function run() {
     let parsed = 0;
     for (const block of blocks) {
       try {
-        JSON.parse(block);
+        const data = JSON.parse(block);
         parsed += 1;
+        checkStructuredAuthors(pathname, html, data, errors);
       } catch (error) {
         errors.push(`${pathname}: JSON-LD did not parse (${error.message})`);
       }
