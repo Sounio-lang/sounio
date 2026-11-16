@@ -1,0 +1,1 @@
+Madaros: the first-order transfer table and the f64-global table held 64 entries and dropped the rest without a diagnostic. They now hold 512 each, and a program that needs more and propagates uncertainty is refused with `error[E303]` (transfer table capacity exceeded), as the channel and Hessian tables are.
