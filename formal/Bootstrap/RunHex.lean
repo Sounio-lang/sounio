@@ -37,6 +37,12 @@ def pattern (n : Nat) : List Nat := (List.range n).map (· % 251)
 
 def oracle : List Choice := highAddrs.map .at
 
+/-- Every mapping the oracle places is above 4 GiB. Checked here, on the oracle the
+runner uses, so that changing `oracle` alone back to low addresses fails the build;
+`X86Env.highAddrs` carries the truncation witnesses. -/
+example : oracle.all (fun c => match c with | .at a => decide (2 ^ 32 ≤ a) | _ => false) = true := by
+  decide
+
 def startState (code file : List Nat) : St :=
   let (stk, sp) := initStack 0x7ffffffff000 [[115, 116, 97, 103, 101, 49], [47, 112]]
   let regs := (List.replicate 16 (some 0)).set 4 (some sp)
