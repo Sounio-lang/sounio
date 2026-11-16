@@ -34,7 +34,7 @@ lean_lib Sounio where
              `TrustSemiring,
              `EpistemicSafety,
              `EpistemicStat,
-             `EpistemicJoint]
+             `EpistemicJoint, `EpistemicCorr]
 
 -- Minimal x86-64 model of the bootstrap seed loaders (bootstrap/roots).
 -- Not a default target: CI builds it by name.
