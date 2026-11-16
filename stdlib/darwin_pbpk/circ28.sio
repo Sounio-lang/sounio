@@ -507,3 +507,478 @@ pub fn circ28_physiology() -> Circ28Params {
         cl_plasma: 0.0,
     }
 }
+
+// ---------------------------------------------------------------------------
+// Exact propagator
+//
+// Why. The amplification factor of the SDIRK scheme above,
+// R(z) = (1 + (1 - 2 gamma) z) / (1 - gamma z)^2, is negative for
+// z < -1/(1 - 2 gamma) = -2.41. The venous and arterial pools turn over at
+// 327 /h and 701 /h and the vascular spaces at up to 16000 /h, so on a 0.05 h
+// grid every stiff component changes sign at every step. Measured
+// (tests/run-pass/circ28_exact_propagator.sio, row E1): 1 mg infused over one
+// 0.05 h step into a set with Kp 11-61 and ps = 20 Q leaves the venous plasma
+// at -8.59 ng/mL after the next step, with the mass balance closed.
+//
+// What. The system is linear and time-invariant, and inputs are constant
+// over a step, so the step has a closed form. In amounts m = V x,
+//   dm/dt = M m + u,   M = V A V^-1,
+//   m(t + dt) = E m(t) + P u,           E = exp(M dt), P = int_0^dt exp(M s) ds,
+//   int_t^t+dt m = P m(t) + Q u,        Q = int_0^dt P(s) ds.
+// M is a compartmental matrix: off-diagonal entries >= 0 (they are flows over
+// volumes) and column sums <= 0 (a column loses only what is eliminated).
+// Hence E, P and Q are entrywise non-negative for every dt > 0, and so are
+// the matrices of the concentration form, E_c = V^-1 E V, G = V^-1 P. A
+// non-negative state with non-negative inputs stays non-negative at any step
+// size; there is no truncation error in time; a step is one matrix-vector
+// product. The tallies are integrals of four concentrations (venous,
+// arterial, liver tissue, gut tissue), i.e. four rows of P and Q, so they
+// are exact as well: dose = eliminated + remaining at any dt.
+//
+// How (construction chosen, and what was rejected).
+//  1. Uniformisation for a short base step h = dt / 2^s: with q the largest
+//     turnover and Pi = I + M/q >= 0,
+//       E(h) = sum_k w_k Pi^k,  P(h) = (1/q) sum_k W_k Pi^k,
+//       Q(h) = (1/q^2) sum_k V_k Pi^k,
+//     w_k the Poisson weights of theta = q h, W_k = sum_{j>k} w_j,
+//     V_k = sum_{j>k} W_j. Every term is a product or sum of non-negative
+//     numbers: no subtraction. s is the smallest integer with theta <= 0.5,
+//     and 18 terms leave a remainder below 0.5^19/19! = 2e-23.
+//  2. Doubling, s times, again with non-negative operands only:
+//       Q(2h) = Q + h P + Q E,   P(2h) = P + E P,   E(2h) = E E.
+//     (Q and E commute, both being functions of M; written with Q on the
+//     left, a row of Q(2h) needs only the same row of Q, so only the four
+//     tally rows of Q are carried.)
+//     This is the block form of Van Loan's augmented exponential,
+//     exp([[M, I, 0], [0, 0, I], [0, 0, 0]] h) = [[E, P, Q], [0, I, hI],
+//     [0, 0, I]], squared block by block: two 28 x 28 products and one 4 x 28
+//     product per doubling instead of one 84 x 84 product (12 times the work), and no entry that
+//     is known to be 0, 1 or h is ever computed.
+//  3. The diagonal of E comes from the conservation law, not from the series:
+//       E_jj = 1 - sum_{i != j} E_ij - sum_i loss_i P_ij,
+//     loss_i the elimination rate constant of state i. This is what keeps the
+//     result accurate. A relative rounding error c in E(h) taken as it comes
+//     from the series becomes (1 + c)^(2^s) after s doublings (s = 20 for
+//     dt = 12 h): the same as a spurious gain or loss of about eps q = 4e-12
+//     per hour in every state. Recomputing the diagonal after each doubling
+//     makes every column of the closed system (states plus eliminated mass)
+//     add up to 1 at every level, so the one direction that does not decay,
+//     total mass, cannot drift; the off-diagonal entries are only ever formed
+//     from non-negative products and keep their relative accuracy. The single
+//     subtraction is 1 - (a number in [0, 1]); if rounding makes it negative
+//     (by a few 1e-16 for a state that empties completely) it is set to 0.
+//     That is the only place a value is clipped, and it is a matrix entry
+//     whose exact value is non-negative, not a state.
+//  Rejected: a diagonal Pade approximant of M dt (subtractions in numerator
+//  and denominator, a linear solve, and no sign guarantee on the result);
+//  the 84 x 84 augmented matrix (cost); integrating the tallies with a
+//  quadrature of the propagated state (not exact).
+//
+// Precondition: cl_renal / bp <= q[2], or the kidney inflow entry of M is
+// negative and M is not compartmental. `metzler` is then 0 and the result is
+// not to be used.
+//
+// Limits: the propagator belongs to one parameter set and one step size. A
+// model whose matrix changes in time (enzyme inhibition, saturable binding)
+// has no fixed propagator; see the report of this change for what it needs.
+
+pub struct Circ28Exact {
+    pub e: [f64; 784],       // E_c: x(t+dt) = E_c x(t) + ..., row-major
+    pub g: [f64; 784],       // G: change of state r per unit mass rate (mg/h) into state c
+    pub ip: [f64; 112],      // integral over the step of x[0], x[1], x[3], x[17] per unit x[c](t)
+    pub iq: [f64; 112],      // the same per unit mass rate into state c
+    pub g_iv: [f64; 28],     // column 0 of G: intravenous rate
+    pub g_oral: [f64; 28],   // column 17 of G: oral rate into gut tissue
+    pub dt: f64,
+    pub k_hep: f64,
+    pub k_form: f64,
+    pub k_ren: f64,
+    pub k_pla: f64,
+    pub k_gut: f64,
+    pub q_max: f64,          // 1/h, largest turnover
+    pub theta: f64,          // q_max * dt / 2^squarings
+    pub squarings: i32,
+    pub metzler: i32,        // 1 if M is compartmental, 0 otherwise
+    pub min_entry: f64,      // smallest entry of e, g, ip, iq (>= 0 when metzler = 1)
+}
+
+pub fn circ28_exact_zero() -> Circ28Exact {
+    Circ28Exact {
+        e: [0.0; 784], g: [0.0; 784], ip: [0.0; 112], iq: [0.0; 112],
+        g_iv: [0.0; 28], g_oral: [0.0; 28],
+        dt: 0.0, k_hep: 0.0, k_form: 0.0, k_ren: 0.0, k_pla: 0.0, k_gut: 0.0,
+        q_max: 0.0, theta: 0.0, squarings: 0, metzler: 0, min_entry: 0.0
+    }
+}
+
+// State whose integral is tally row k: venous, arterial, liver tissue, gut tissue.
+fn circ28_exact_row(k: i32) -> i32 {
+    if k == 0 { return 0 }
+    if k == 1 { return 1 }
+    if k == 2 { return 3 }
+    return 17
+}
+
+// c <- a b, 28 x 28 row-major. Zero entries of a are skipped.
+fn circ28_exact_mul(a: &[f64; 784], b: &[f64; 784], c: &![f64; 784]) with Mut {
+    var r: i32 = 0
+    while r < 28 {
+        let ro = r * 28
+        var j: i32 = 0
+        while j < 28 {
+            (*c)[ro + j] = 0.0
+            j = j + 1
+        }
+        var k: i32 = 0
+        while k < 28 {
+            let f = (*a)[ro + k]
+            if f != 0.0 {
+                let ko = k * 28
+                j = 0
+                while j < 28 {
+                    (*c)[ro + j] = (*c)[ro + j] + f * (*b)[ko + j]
+                    j = j + 1
+                }
+            }
+            k = k + 1
+        }
+        r = r + 1
+    }
+}
+
+// Doubling of the four tally rows of Q: Q <- Q + h P + Q E.
+fn circ28_exact_qrows(q4: &![f64; 112], pm: &[f64; 784], em: &[f64; 784], h: f64) with Mut {
+    var row: [f64; 28] = [0.0; 28]
+    var k: i32 = 0
+    while k < 4 {
+        let ko = k * 28
+        let po = circ28_exact_row(k) * 28
+        var c: i32 = 0
+        while c < 28 {
+            row[c] = (*q4)[ko + c] + h * (*pm)[po + c]
+            c = c + 1
+        }
+        var j: i32 = 0
+        while j < 28 {
+            let f = (*q4)[ko + j]
+            let jo = j * 28
+            c = 0
+            while c < 28 {
+                row[c] = row[c] + f * (*em)[jo + c]
+                c = c + 1
+            }
+            j = j + 1
+        }
+        c = 0
+        while c < 28 {
+            (*q4)[ko + c] = row[c]
+            c = c + 1
+        }
+        k = k + 1
+    }
+}
+
+// Sets the diagonal of em from the conservation law (item 3 above).
+fn circ28_exact_close(em: &![f64; 784], pm: &[f64; 784], loss: &[f64; 28]) with Mut {
+    var c: i32 = 0
+    while c < 28 {
+        var t = 0.0
+        var r: i32 = 0
+        while r < 28 {
+            if r != c { t = t + (*em)[r * 28 + c] }
+            t = t + (*loss)[r] * (*pm)[r * 28 + c]
+            r = r + 1
+        }
+        var d = 1.0 - t
+        if d < 0.0 { d = 0.0 }
+        (*em)[c * 28 + c] = d
+        c = c + 1
+    }
+}
+
+// Builds the propagator of parameter set p for step dt (h).
+pub fn circ28_exact_prepare(p: Circ28Params, dt: f64, ex: &!Circ28Exact) with Mut, Div {
+    var a: [f64; 784] = [0.0; 784]
+    circ28_fill_rate_matrix(p, &!a)
+    var vol: [f64; 28] = [0.0; 28]
+    var k: i32 = 0
+    var q = 0.0
+    while k < 28 {
+        vol[k] = circ28_state_volume(p, k)
+        let d = 0.0 - a[k * 28 + k]
+        if d > q { q = d }
+        k = k + 1
+    }
+    if !(q > 0.0) { q = 1.0 }
+
+    // elimination rate constants per unit amount (1/h)
+    var loss: [f64; 28] = [0.0; 28]
+    loss[0] = (p.cl_plasma / p.bp) / p.v_ven
+    loss[1] = (p.cl_renal / p.bp) / p.v_art
+    loss[3] = (p.clint + p.clform) * p.fu / (p.kp[1] * vol[3])
+    loss[17] = p.clint_gut * p.fu / (p.kp[8] * vol[17])
+
+    // Pi = I + M / q, M = V A V^-1
+    var pi: [f64; 784] = [0.0; 784]
+    var metz: i32 = 1
+    var r: i32 = 0
+    while r < 28 {
+        var c: i32 = 0
+        while c < 28 {
+            if r == c {
+                pi[r * 28 + c] = 1.0 + a[r * 28 + c] / q
+            } else {
+                let m = vol[r] * a[r * 28 + c] / vol[c]
+                if m < 0.0 { metz = 0 }
+                pi[r * 28 + c] = m / q
+            }
+            c = c + 1
+        }
+        r = r + 1
+    }
+
+    // base step
+    var theta = q * dt
+    var h = dt
+    var s: i32 = 0
+    while theta > 0.5 {
+        theta = theta * 0.5
+        h = h * 0.5
+        s = s + 1
+    }
+    // Poisson weights and their tail sums
+    var w: [f64; 41] = [0.0; 41]
+    var wt: [f64; 41] = [0.0; 41]
+    var vt: [f64; 41] = [0.0; 41]
+    w[0] = 1.0
+    var sum = 1.0
+    var j: i32 = 1
+    while j < 41 {
+        w[j] = w[j - 1] * theta / (j as f64)
+        sum = sum + w[j]
+        j = j + 1
+    }
+    j = 0
+    while j < 41 {
+        w[j] = w[j] / sum
+        j = j + 1
+    }
+    j = 39
+    while j >= 0 {
+        wt[j] = wt[j + 1] + w[j + 1]
+        j = j - 1
+    }
+    j = 39
+    while j >= 0 {
+        vt[j] = vt[j + 1] + wt[j + 1]
+        j = j - 1
+    }
+
+    var em: [f64; 784] = [0.0; 784]
+    var pm: [f64; 784] = [0.0; 784]
+    var q4: [f64; 112] = [0.0; 112]
+    var pw: [f64; 784] = [0.0; 784]
+    var tmp: [f64; 784] = [0.0; 784]
+    k = 0
+    while k < 28 {
+        pw[k * 28 + k] = 1.0
+        em[k * 28 + k] = w[0]
+        pm[k * 28 + k] = wt[0] / q
+        k = k + 1
+    }
+    k = 0
+    while k < 4 {
+        q4[k * 28 + circ28_exact_row(k)] = vt[0] / (q * q)
+        k = k + 1
+    }
+    var n: i32 = 1
+    while n < 19 {
+        circ28_exact_mul(&pi, &pw, &!tmp)
+        let c0 = w[n]
+        let c1 = wt[n] / q
+        let c2 = vt[n] / (q * q)
+        k = 0
+        while k < 784 {
+            let t = tmp[k]
+            pw[k] = t
+            em[k] = em[k] + c0 * t
+            pm[k] = pm[k] + c1 * t
+            k = k + 1
+        }
+        k = 0
+        while k < 4 {
+            let po = circ28_exact_row(k) * 28
+            var c: i32 = 0
+            while c < 28 {
+                q4[k * 28 + c] = q4[k * 28 + c] + c2 * tmp[po + c]
+                c = c + 1
+            }
+            k = k + 1
+        }
+        n = n + 1
+    }
+    circ28_exact_close(&!em, &pm, &loss)
+
+    // doubling
+    n = 0
+    while n < s {
+        circ28_exact_qrows(&!q4, &pm, &em, h)
+        circ28_exact_mul(&em, &pm, &!tmp)
+        k = 0
+        while k < 784 {
+            pm[k] = pm[k] + tmp[k]
+            k = k + 1
+        }
+        circ28_exact_mul(&em, &em, &!tmp)
+        k = 0
+        while k < 784 {
+            em[k] = tmp[k]
+            k = k + 1
+        }
+        circ28_exact_close(&!em, &pm, &loss)
+        h = h + h
+        n = n + 1
+    }
+
+    // concentration form
+    var mn = 1.0
+    r = 0
+    while r < 28 {
+        var c: i32 = 0
+        while c < 28 {
+            let ev = em[r * 28 + c] * vol[c] / vol[r]
+            let gv = pm[r * 28 + c] / vol[r]
+            (*ex).e[r * 28 + c] = ev
+            (*ex).g[r * 28 + c] = gv
+            if ev < mn { mn = ev }
+            if gv < mn { mn = gv }
+            c = c + 1
+        }
+        (*ex).g_iv[r] = (*ex).g[r * 28]
+        (*ex).g_oral[r] = (*ex).g[r * 28 + 17]
+        r = r + 1
+    }
+    k = 0
+    while k < 4 {
+        let row = circ28_exact_row(k)
+        var c: i32 = 0
+        while c < 28 {
+            let pv = pm[row * 28 + c] * vol[c] / vol[row]
+            let qv = q4[k * 28 + c] / vol[row]
+            (*ex).ip[k * 28 + c] = pv
+            (*ex).iq[k * 28 + c] = qv
+            if pv < mn { mn = pv }
+            if qv < mn { mn = qv }
+            c = c + 1
+        }
+        k = k + 1
+    }
+    (*ex).dt = dt
+    (*ex).k_hep = p.clint * p.fu / p.kp[1]
+    (*ex).k_form = p.clform * p.fu / p.kp[1]
+    (*ex).k_ren = p.cl_renal / p.bp
+    (*ex).k_pla = p.cl_plasma / p.bp
+    (*ex).k_gut = p.clint_gut * p.fu / p.kp[8]
+    (*ex).q_max = q
+    (*ex).theta = theta
+    (*ex).squarings = s
+    (*ex).metzler = metz
+    (*ex).min_entry = mn
+}
+
+// Adds the step integrals of the four tally concentrations to `el`.
+fn circ28_exact_tally(ex: &Circ28Exact, el: &!Circ28Elim, q_ven: f64, q_art: f64, q_tl: f64, q_tg: f64) with Mut {
+    (*el).auc_ven = (*el).auc_ven + q_ven
+    (*el).auc_art = (*el).auc_art + q_art
+    (*el).hepatic = (*el).hepatic + (*ex).k_hep * q_tl
+    (*el).formed = (*el).formed + (*ex).k_form * q_tl
+    (*el).renal = (*el).renal + (*ex).k_ren * q_art
+    (*el).plasma = (*el).plasma + (*ex).k_pla * q_ven
+    (*el).gut = (*el).gut + (*ex).k_gut * q_tg
+}
+
+// One exact step of length ex.dt. iv_rate (mg/h) enters the venous pool and
+// oral_rate (mg/h) enters gut tissue, both constant over the step. The
+// parameter set is the one given to circ28_exact_prepare. Tallies as in
+// circ28_step, but exact.
+pub fn circ28_exact_step(
+    s: &!Circ28State,
+    ex: &Circ28Exact,
+    iv_rate: f64,
+    oral_rate: f64,
+    el: &!Circ28Elim
+) with Mut, Div {
+    var xn: [f64; 28] = [0.0; 28]
+    var qi: [f64; 4] = [0.0; 4]
+    var k: i32 = 0
+    while k < 4 {
+        var acc = (*ex).iq[k * 28] * iv_rate + (*ex).iq[k * 28 + 17] * oral_rate
+        var c: i32 = 0
+        while c < 28 {
+            acc = acc + (*ex).ip[k * 28 + c] * (*s).x[c]
+            c = c + 1
+        }
+        qi[k] = acc
+        k = k + 1
+    }
+    var r: i32 = 0
+    while r < 28 {
+        var acc = (*ex).g_iv[r] * iv_rate + (*ex).g_oral[r] * oral_rate
+        var c: i32 = 0
+        while c < 28 {
+            acc = acc + (*ex).e[r * 28 + c] * (*s).x[c]
+            c = c + 1
+        }
+        xn[r] = acc
+        r = r + 1
+    }
+    r = 0
+    while r < 28 {
+        (*s).x[r] = xn[r]
+        r = r + 1
+    }
+    circ28_exact_tally(ex, el, qi[0], qi[1], qi[2], qi[3])
+}
+
+// One exact step with a source in any state: src[k] is the mass rate (mg/h)
+// entering state k, constant over the step. `p` is not read (the volumes are
+// already inside ex.g); it is in the signature so that a caller of the
+// SDIRK source step changes only the function name and the system argument.
+pub fn circ28_exact_step_src(
+    s: &!Circ28State,
+    p: Circ28Params,
+    ex: &Circ28Exact,
+    src: &[f64; 28],
+    el: &!Circ28Elim
+) with Mut, Div {
+    var xn: [f64; 28] = [0.0; 28]
+    var qi: [f64; 4] = [0.0; 4]
+    var k: i32 = 0
+    while k < 4 {
+        var acc = 0.0
+        var c: i32 = 0
+        while c < 28 {
+            acc = acc + (*ex).ip[k * 28 + c] * (*s).x[c] + (*ex).iq[k * 28 + c] * (*src)[c]
+            c = c + 1
+        }
+        qi[k] = acc
+        k = k + 1
+    }
+    var r: i32 = 0
+    while r < 28 {
+        var acc = 0.0
+        var c: i32 = 0
+        while c < 28 {
+            acc = acc + (*ex).e[r * 28 + c] * (*s).x[c] + (*ex).g[r * 28 + c] * (*src)[c]
+            c = c + 1
+        }
+        xn[r] = acc
+        r = r + 1
+    }
+    r = 0
+    while r < 28 {
+        (*s).x[r] = xn[r]
+        r = r + 1
+    }
+    circ28_exact_tally(ex, el, qi[0], qi[1], qi[2], qi[3])
+}
