@@ -111,6 +111,81 @@ export function techArticle({
   return article;
 }
 
+/** Article author already used on learn pages. No honorific. */
+export const SITE_AUTHOR = {
+  '@type': 'Person',
+  name: 'Demetrios Chiuratto Agourakis',
+  url: 'https://www.souniolang.org/about/',
+  sameAs: ['https://orcid.org/0009-0001-8671-8878'],
+};
+
+/**
+ * Schema kind for pages that previously emitted no JSON-LD.
+ * `article` is TechArticle, `blog` is BlogPosting, `collection` is a hub,
+ * `crumbs` is BreadcrumbList only.
+ */
+export function pageSchemaKind(bare) {
+  if (
+    bare === '/science/'
+    || bare === '/tutorials/'
+    || bare === '/insights/'
+    || bare === '/releases/'
+    || bare === '/packages/'
+    || bare === '/showcases/'
+  ) {
+    return 'collection';
+  }
+  if (/^\/tutorials\/[^/]+\/$/.test(bare)) return 'collection';
+  if (/^\/science\/[^/]+\/$/.test(bare)) return 'article';
+  if (/^\/tutorials\/[^/]+\/[^/]+\/$/.test(bare)) return 'article';
+  if (/^\/insights\/[^/]+\/$/.test(bare)) return 'blog';
+  if (
+    bare === '/credits/'
+    || bare === '/dissertation/'
+    || bare === '/scientist/'
+    || /^\/packages\/[^/]+\/$/.test(bare)
+  ) {
+    return 'crumbs';
+  }
+  return null;
+}
+
+export function collectionPage({ name, description, url, inLanguage }) {
+  return {
+    '@context': 'https://schema.org',
+    '@type': 'CollectionPage',
+    name,
+    description,
+    url,
+    inLanguage,
+  };
+}
+
+export function blogPosting({
+  headline,
+  description,
+  url,
+  inLanguage,
+  datePublished,
+  dateModified,
+  author,
+}) {
+  const post = {
+    '@context': 'https://schema.org',
+    '@type': 'BlogPosting',
+    headline,
+    description,
+    inLanguage,
+    url,
+    author: author ?? SITE_AUTHOR,
+  };
+  const published = isoDateOrNothing(datePublished);
+  if (published) post.datePublished = published;
+  const modified = isoDateOrNothing(dateModified);
+  if (modified) post.dateModified = modified;
+  return post;
+}
+
 export function breadcrumbList(crumbs, absolutize) {
   return {
     '@context': 'https://schema.org',
@@ -143,6 +218,8 @@ export function buildPageSchemas({
   dependencies,
   citation,
   omitSoftwareApplication,
+  datePublished,
+  pageTitle,
 }) {
   const schemas = [];
   if (bare === '/' && !omitSoftwareApplication) schemas.push(softwareApplication({ description, siteOrigin }));
@@ -161,6 +238,33 @@ export function buildPageSchemas({
       dependencies,
       citation,
     }));
+  } else {
+    const kind = pageSchemaKind(bare);
+    const articleHeadline = headline || pageTitle || title;
+    if (kind === 'article') {
+      schemas.push(techArticle({
+        headline: articleHeadline,
+        description,
+        url: canonicalUrl,
+        inLanguage,
+      }));
+    } else if (kind === 'blog') {
+      schemas.push(blogPosting({
+        headline: articleHeadline,
+        description,
+        url: canonicalUrl,
+        inLanguage,
+        datePublished,
+        dateModified: dateModified || datePublished,
+      }));
+    } else if (kind === 'collection') {
+      schemas.push(collectionPage({
+        name: articleHeadline,
+        description,
+        url: canonicalUrl,
+        inLanguage,
+      }));
+    }
   }
   if (Array.isArray(breadcrumbs) && breadcrumbs.length > 0) {
     schemas.push(breadcrumbList(breadcrumbs, absolutize));
