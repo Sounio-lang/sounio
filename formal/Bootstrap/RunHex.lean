@@ -8,9 +8,12 @@ checked with, before any theorem is stated about it.
 `IMAGE.hex` is in format A (`Bootstrap.X86Min.Formats.decA`), loaded at 0x400000 and
 entered at the address in its ELF header. The process gets `argv = [stage, /p]`
 and a file `/p` of `FILESIZE` bytes (a repeating pattern), and a kernel oracle
-that places each new mapping at its own gigabyte. The run ends at an exit, at a
-step outside the model, or at the address `STOP` if one is given; the last
-instructions executed are printed. `FROM TO` is a what-if: when the run reaches
+that places each new mapping 4 GiB past the previous one, starting at
+0x7f0000000000. Linux returns mmap addresses above 4 GiB, so a pointer kept or
+advanced in a 32-bit register loses its upper half here as it does on the
+machine; an oracle with addresses below 4 GiB would hide that. The run ends at
+an exit, at a step outside the model, or at the address `STOP` if one is given;
+the last instructions executed are printed. `FROM TO` is a what-if: when the run reaches
 `FROM` it continues at `TO`, which stands in for a jump the image does not have
 yet, so what lies beyond can be checked before the fix is written.
 -/
@@ -32,7 +35,8 @@ def parseNat (s : String) : Option Nat :=
 
 def pattern (n : Nat) : List Nat := (List.range n).map (· % 251)
 
-def oracle : List Choice := (List.range 8).map fun i => .at (0x40000000 * (i + 1))
+def oracle : List Choice :=
+  (List.range 8).map fun i => .at (0x7f0000000000 + 0x100000000 * i)
 
 def startState (code file : List Nat) : St :=
   let (stk, sp) := initStack 0x7ffffffff000 [[115, 116, 97, 103, 101, 49], [47, 112]]
