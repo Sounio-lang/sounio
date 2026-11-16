@@ -4838,6 +4838,7 @@ fn checker_collect_global_item_inplace(
         None => {}
     }
     let benv_idx = (*c).env.count
+    type_env_reset_conf_at(benv_idx)
     if benv_idx < TYPE_ENV_CAPACITY {
         type_env_set_binding_mut(&!(*c).env, benv_idx, TypeBinding {
             name: name,
@@ -4881,6 +4882,7 @@ fn checker_bind_import_unknown_with_mutability_inplace(c: *mut Checker, name: Na
         i = i - 1
     }
     let benv_idx = (*c).env.count
+    type_env_reset_conf_at(benv_idx)
     if benv_idx < TYPE_ENV_CAPACITY {
         type_env_set_binding_mut(&!(*c).env, benv_idx, TypeBinding {
             name: name,
@@ -13642,6 +13644,175 @@ fn checker_check_call_direct_sig_generics_inplace(c: *mut Checker, e: Expr, dire
     (effective_params, effective_return_type)
 }
 
+// ============================================================
+// E214 call-site confidence gate (parity with lean_single's Gen 16/17 gate)
+// ============================================================
+//
+// Confidence is an integer on the 1..1000 scale; 0 means UNKNOWN. The rule,
+// as lean_single specifies it (self-hosted/compiler/lean_single.sio, the
+// `args confidence` block around the E214 print):
+//   - a literal is 1000;
+//   - measure(v, uncertainty: u) with literal v, u and u/v <= 1 is
+//     1000 - floor(1000 * u / v); any other measure() is 990;
+//     measured() is 990, asserted() is 970, constant() is 1000;
+//   - Knowledge(v, e=<literal>) is round(1000 * e); a non-literal e is 1
+//     (below every real floor, so it can never launder as certain);
+//   - a name has the confidence recorded when it was bound (ENV_BINDING_CONF);
+//     a bound name with nothing recorded is 1000, except Knowledge-typed
+//     parameters, which are unknown;
+//   - `x.field` (including `.value`) has the confidence of `x`;
+//   - arithmetic multiplies the operand confidences (GUM product rule,
+//     (a * b) / 1000, floored);
+//   - any other call is 1000 (the callee's effect confidence);
+//   - everything else, and anything that touches an unknown, is unknown.
+// A call into a function declared `Epistemic(N)` / `Confidence(N)` is refused
+// with E214 when the product of its argument confidences is known (> 0) and
+// below N. UNKNOWN IS NOT REFUSED: that is what lean_single does, and the
+// gate only claims what it can prove.
+
+fn conf_literal_scaled_million(opt: Option<Box<Expr> >) -> i64 with Mut, Panic, Div, Alloc {
+    match opt {
+        Some(x) => {
+            var ex = *x
+            if ex.kind == ExprKind::ExprUnary && ex.un_op == UnaryOp::OpNeg {
+                match ex.left {
+                    Some(inner) => { ex = *inner }
+                    None => { return 0 - 1 }
+                }
+            }
+            if ex.kind == ExprKind::ExprFloatLit {
+                var v = ex.float_val
+                if v < 0.0 { v = 0.0 - v }
+                if v > 9000000000.0 { return 0 - 1 }
+                return (v * 1000000.0 + 0.5) as i64
+            }
+            if ex.kind == ExprKind::ExprIntLit {
+                var iv = ex.int_val
+                if iv < 0 { iv = 0 - iv }
+                if iv > 9000000000 { return 0 - 1 }
+                return iv * 1000000
+            }
+            0 - 1
+        }
+        None => 0 - 1
+    }
+}
+
+fn conf_measure_milli(args: Option<Box<ExprList> >) -> i64 with Mut, Panic, Div, Alloc {
+    var conf: i64 = 990
+    let vs = conf_literal_scaled_million(expr_list_head(args))
+    let us = conf_literal_scaled_million(expr_list_second(args))
+    if vs > 0 && us >= 0 && us <= vs {
+        let ratio = (us as f64) / (vs as f64)
+        let eps_milli = (ratio * 1000.0 + 0.000001) as i64
+        conf = 1000 - eps_milli
+        // 0 is the "unknown" sentinel of the gate. A KNOWN confidence is
+        // floored at 1 so that a provably worthless measurement (u = v) is
+        // refused by E214 instead of being read as unknown and accepted.
+        if conf < 1 { conf = 1 }
+    }
+    conf
+}
+
+fn conf_product(a: i64, b: i64) -> i64 with Panic, Div {
+    if a <= 0 || b <= 0 { return 0 }
+    var p = (a * b) / 1000
+    // Two known confidences give a known product: never round it down to the
+    // "unknown" sentinel 0 (e.g. 1 * 1 / 1000).
+    if p < 1 { p = 1 }
+    if p > 1000 { p = 1000 }
+    p
+}
+
+fn checker_expr_conf_inplace(c: *mut Checker, e: Expr) -> i64 with Mut, Panic, Div, Alloc, IO {
+    if e.kind == ExprKind::ExprIntLit || e.kind == ExprKind::ExprFloatLit
+        || e.kind == ExprKind::ExprBoolTrue || e.kind == ExprKind::ExprBoolFalse
+        || e.kind == ExprKind::ExprStringLit || e.kind == ExprKind::ExprCharLit {
+        return 1000
+    }
+    if e.kind == ExprKind::ExprIdent {
+        let cf = type_env_lookup_conf(&(*c).env, e.name)
+        if cf == 0 - 2 { return 0 }
+        if cf > 0 { return cf }
+        if cf == 0 - 1 { return 0 }
+        let bty = type_env_lookup(&(*c).env, e.name)
+        if bty.kind == TypeKind::TyKnowledge { return 0 }
+        return 1000
+    }
+    if e.kind == ExprKind::ExprFieldAccess || e.kind == ExprKind::ExprUnary || e.kind == ExprKind::ExprCast {
+        match e.left {
+            Some(inner) => return checker_expr_conf_inplace(c, *inner)
+            None => return 0
+        }
+    }
+    if e.kind == ExprKind::ExprBinary {
+        var lc: i64 = 0
+        var rc: i64 = 0
+        match e.left {
+            Some(l) => { lc = checker_expr_conf_inplace(c, *l) }
+            None => {}
+        }
+        match e.right {
+            Some(r) => { rc = checker_expr_conf_inplace(c, *r) }
+            None => {}
+        }
+        return conf_product(lc, rc)
+    }
+    if e.kind == ExprKind::ExprStructLit {
+        return 1000
+    }
+    if e.kind == ExprKind::ExprCall {
+        if call_expr_is_builtin_measure(e.left) {
+            return conf_measure_milli(e.args)
+        }
+        if call_expr_is_builtin_knowledge_ctor(e.left) {
+            let kc = knowledge_ctor_confidence(e.args)
+            if kc < 0.0 { return 1 }
+            var km = (kc * 1000.0 + 0.5) as i64
+            if km < 1 { km = 1 }
+            if km > 1000 { km = 1000 }
+            return km
+        }
+        match e.left {
+            Some(callee) => {
+                if (*callee).kind == ExprKind::ExprIdent {
+                    if name_matches_str8((*callee).name, 109, 101, 97, 115, 117, 114, 101, 100) { return 990 }
+                    if name_matches_str8((*callee).name, 97, 115, 115, 101, 114, 116, 101, 100) { return 970 }
+                    return 1000
+                }
+                return 0
+            }
+            None => return 0
+        }
+    }
+    0
+}
+
+// Product of the argument confidences of call `e`; 0 when any is unknown.
+fn checker_call_args_conf_inplace(c: *mut Checker, e: Expr) -> i64 with Mut, Panic, Div, Alloc, IO {
+    var conf: i64 = 1000
+    var cursor = e.args
+    while true {
+        match cursor {
+            Some(list) => {
+                let ac = checker_expr_conf_inplace(c, (*list).head)
+                conf = conf_product(conf, ac)
+                cursor = (*list).tail
+            }
+            None => return conf
+        }
+    }
+    conf
+}
+
+fn checker_check_confidence_gate_inplace(c: *mut Checker, e: Expr, minimum: i64) with Mut, Panic, Div, Alloc, IO {
+    if minimum <= 0 { return }
+    let conf = checker_call_args_conf_inplace(c, e)
+    if conf > 0 && conf < minimum {
+        checker_report_error_at_inplace(c, e.span, 214, conf, minimum, 0)
+    }
+}
+
 fn checker_check_call_direct_sig_inplace(c: *mut Checker, e: Expr, direct_sig_id: i64) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     if (*c).enforce_visibility && !checker_fn_sig_visible_inplace(c, direct_sig_id) {
         checker_report_private_fn_inplace(c, e.span, direct_sig_id)
@@ -13677,6 +13848,7 @@ fn checker_check_call_direct_sig_inplace(c: *mut Checker, e: Expr, direct_sig_id
         ns_watch_d,
     )
     checker_check_callee_effects_named_inplace(c, e.span, direct_sig.effects, direct_sig.effect_count, direct_sig.name)
+    checker_check_confidence_gate_inplace(c, e, direct_sig.epistemic_min_confidence)
     checker_release_call_arg_borrows_inplace(c, e.args, effective_params)
     if refused_unimplemented {
         (*c).last_call_arg_ns = outer_arg_ns_d
@@ -16396,7 +16568,23 @@ fn checker_check_let_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with Mu
     if const_pair.0 != 0 {
         checker_check_const_int_range_inplace(c, s.span, const_pair.1, bind_ty)
     }
+    // E214 confidence channel: record what this initialiser's confidence is,
+    // and refuse (E215) an initialiser provably below the enclosing function's
+    // own Epistemic(N) floor -- lean_single flags the same tokens.
+    var let_conf: i64 = 0 - 1
+    match s.expr {
+        Some(conf_init) => {
+            let ic = checker_expr_conf_inplace(c, *conf_init)
+            if ic > 0 { let_conf = ic }
+            let fn_floor = checker_current_epistemic_min_inplace(c)
+            if fn_floor > 0 && ic > 0 && ic < fn_floor {
+                checker_report_error_at_inplace(c, s.span, 215, ic, fn_floor, 0)
+            }
+        }
+        None => {}
+    }
     type_env_bind_mut(&!(*c).env, s.name, bind_ty, false)
+    type_env_set_last_conf(&(*c).env, let_conf)
     if const_pair.0 != 0 {
         checker_const_int_bind_value_inplace(c, s.name, const_pair.1)
     } else {
@@ -19070,6 +19258,14 @@ fn e035_print_depth_suffix(code: i64, depth: i64, limit: i64) with IO, Mut, Pani
         print_int(limit)
         print(")")
     }
+    // E214: same figures lean_single prints ("args confidence C < minconf M").
+    if 214 == code {
+        print(" (args confidence ")
+        print_int(depth)
+        print(" < minconf ")
+        print_int(limit)
+        print(")")
+    }
 }
 
 fn e035_print_ident(n: Name) with IO, Mut, Panic, Div {
@@ -21346,6 +21542,7 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 236 { print("binary operation on Knowledge values reuses a correlated binding; independence is not assumed. Add `with Correlated` to the function signature.") }
     else if code == 247 { print("ZD locus is not a well-formed sedenion pair eIeJ with 1 <= I < J <= 15") }
     else if code == 213 { print("tuple destructure arity mismatch") }
+    else if code == 214 { print("confidence gate violation") }
     else if code == 215 { print("EpistemicComplete violation") }
     else if code == 216 { print("infinite recursive type") }
     else if code == 248 { print("f128/f256 value conversion is not implemented; wide-float casts fail closed") }
