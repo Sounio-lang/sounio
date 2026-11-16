@@ -10505,12 +10505,49 @@ fn lowerer_emit_deferred_global_inits_mut(lo: &! Lowerer) with Mut, Panic, Div, 
     }
 }
 
+// Condition registers of the if-expressions lowered on the VALUE path of the
+// function being lowered, keyed by the address of the ExprIf node. The
+// variance walk (lower_if_variance_runtime_ref_rows) re-lowers an if-expression
+// to follow the arm taken at run time; it used to lower the condition a second
+// time, so `let p = if tick() == 0 { 10 } else { 20 }` called tick() twice
+// (measured: calls=2, and the value came from the SECOND call) in every program,
+// uncertainty or not -- a minstd generator drawn inside an if-condition skipped
+// every other number. The value path's register dominates the variance code
+// (it is emitted right after it, on the same path), so the walk branches on it.
+// The epoch is bumped per function: a stale entry from an earlier lowering of
+// the same AST never matches. A miss (inline re-lowering of a callee body,
+// whose value path is a call) falls back to lowering the condition.
+var IFC_KEY: [i64; 4096] = [0; 4096]
+var IFC_REG: [i64; 4096] = [0; 4096]
+var IFC_EPOCH_OF: [i64; 4096] = [0; 4096]
+var IFC_N: i64 = 0
+var IFC_EPOCH: i64 = 0
+
+fn ifc_note(key: i64, reg: i64) with Mut {
+    if IFC_N >= 4096 { return }
+    IFC_KEY[IFC_N as usize] = key
+    IFC_REG[IFC_N as usize] = reg
+    IFC_EPOCH_OF[IFC_N as usize] = IFC_EPOCH
+    IFC_N = IFC_N + 1
+}
+
+fn ifc_find(key: i64) -> i64 with Mut {
+    var i = IFC_N - 1
+    while i >= 0 {
+        if IFC_KEY[i as usize] == key && IFC_EPOCH_OF[i as usize] == IFC_EPOCH { return IFC_REG[i as usize] }
+        i = i - 1
+    }
+    0 - 1
+}
+
 fn lowerer_lower_fn_item_mut(
     lo: &! Lowerer,
     name: Name,
     fd: &FnDef
 ) with Mut, Panic, Div, Alloc, IO {
     ir_instr_overflow_begin_fn()
+    IFC_N = 0
+    IFC_EPOCH = IFC_EPOCH + 1
     // Correlations are per-function. FO_COV_RHO is a module global while the
     // channel ids that index it are Lowerer fields reset per function, so a
     // `correlate(a, b, 1.0)` in one function silently supplied rho to the next
@@ -29706,9 +29743,16 @@ impl Lowerer {
     }
 
     fn lower_if_variance_runtime_ref_rows(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
-        let pc = self.lower_opt_expr_ref(&(*e).left)
-        var lo = pc.0
-        let cond = pc.1
+        // The value path already evaluated this condition (see IFC_KEY): branch
+        // on that register instead of evaluating it, and its calls, again.
+        let seen_cond = ifc_find((e as *mut Expr) as i64)
+        var lo = self
+        var cond = seen_cond
+        if seen_cond < 0 {
+            let pc = lo.lower_opt_expr_ref(&(*e).left)
+            lo = pc.0
+            cond = pc.1
+        }
         let pl1 = lo.fresh_label()
         lo = pl1.0
         let l_else = pl1.1
@@ -30735,9 +30779,9 @@ impl Lowerer {
                 }
             }
             // Non-const cond (#1706): the variance follows the arm taken at RUN
-            // time. The condition is lowered once (lower_opt_expr_ref) and the
-            // branch uses that register. A call in the condition is not a reason
-            // to drop the variance: it is not evaluated again to guess an arm.
+            // time. The walk branches on the register the value path computed
+            // for this condition (IFC_KEY); it lowers the condition itself only
+            // when there is no value path in this function (inline re-lowering).
             var has_else = false
             match (*e).else_expr {
                 Some(_) => { has_else = true }
@@ -48384,6 +48428,7 @@ impl Lowerer {
             let pair_cond = lo.lower_opt_expr_ref(&(*cur_if).left)
             lo = pair_cond.0
             let cond = pair_cond.1
+            ifc_note((cur_if as *mut Expr) as i64, cond)
 
             let pair_l_else = lo.fresh_label()
             lo = pair_l_else.0

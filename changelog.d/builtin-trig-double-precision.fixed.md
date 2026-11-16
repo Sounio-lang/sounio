@@ -1,0 +1,1 @@
+Native backend: the `sin` and `cos` builtins are accurate to about 6e-16 on |x| <= 200 (Cody–Waite reduction against a split 2π, Taylor series through r^27 / r^28). They were Taylor series through r^13 / r^12 with a single-double 2π, wrong by up to 1e-4 near |r| = π: `cos(3.0)` returned -0.98993963 against -0.98999250 (`tests/run-pass/builtin_trig_double_precision.sio`).
