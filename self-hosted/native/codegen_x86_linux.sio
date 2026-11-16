@@ -31,6 +31,7 @@ use native::codegen_plan::*
 // and wraps them in the scalar-builtin calling shape. Regenerate with
 // scripts/dev/gen_math_ffi_emitters.py -- do not hand-edit the constants.
 use native::math_ffi_emitters::{emit_builtin_ffi_pow, emit_builtin_ffi_tgamma}
+use native::math_trans::{name_is_ln, name_is_tan, name_is_atan, name_is_tanh, name_is_asin, name_is_acos, name_is_atan2, emit_builtin_mt_tan, emit_builtin_mt_atan, emit_builtin_mt_tanh, emit_builtin_mt_asin, emit_builtin_mt_acos, emit_builtin_mt_atan2}
 // Sprint 40: IR-level dual-path transformation for Instrumented strategy
 use ir::opt_strategy::{ir_opt_apply_strategy}
 // io::trace is a lightweight extraction of io::file_write's trace helpers.
@@ -1779,6 +1780,13 @@ fn native_v2_builtin_id_for_func_ref(func: &IrFunction) -> i64 with Mut, Panic, 
         if name_is_ffi_pow((*func).name) { return 49 }
         if name_is_pow((*func).name) { return 49 }
         if name_is_ffi_tgamma((*func).name) { return 50 }
+        if name_is_ln((*func).name) { return 17 }      // alias of log
+        if name_is_tan((*func).name) { return 86 }
+        if name_is_atan((*func).name) { return 87 }
+        if name_is_tanh((*func).name) { return 88 }
+        if name_is_asin((*func).name) { return 89 }
+        if name_is_acos((*func).name) { return 90 }
+        if name_is_atan2((*func).name) { return 91 }
     0
 }
 
@@ -8839,6 +8847,8 @@ pub(crate) fn emit_builtin_log(nc: NativeCompiler) -> NativeCompiler with Mut, P
     let one_off = c.rodata.last_offset
     c.rodata = data_section_add_f64(c.rodata, 0x4000000000000000)   // 2.0
     let two_off = c.rodata.last_offset
+    c.rodata = data_section_add_f64(c.rodata, 0x4350000000000000)   // 2^54, subnormal pre-scale
+    let p54_off = c.rodata.last_offset
 
     // 1/(2k+1) for k = 0..12, indexed by k.
     var dc: [i64; 13] = [0; 13]
@@ -8876,6 +8886,80 @@ pub(crate) fn emit_builtin_log(nc: NativeCompiler) -> NativeCompiler with Mut, P
     c.code = emit_mov_reg_reg(c.code, 0, 7)
     c.code = emit_store_rax_rbp_disp32(c.code, 0 - 8)     // input bits
 
+    // ---- edge cases (previously silent wrong values) ------------------
+    // NaN -> x + x; +-0 -> -inf; x < 0 -> NaN; +inf -> +inf;
+    // subnormal -> scale by 2^54 (exact) and subtract 54 from the exponent.
+    // The polynomial below is only valid for a normal, positive, finite input:
+    // fed 0 it returned log(2^-1023) = -709.09, fed -1 it returned 0.
+    c.code = emit_mov_reg_imm(c.code, 3, 0x7FFFFFFFFFFFFFFF)
+    c.code = emit_and_rax_rbx(c.code)
+    c.code = emit_mov_rbx_rax(c.code)                     // rbx = |bits|
+    c.code = emit_mov_reg_imm(c.code, 0, 0x7FF0000000000000)
+    c.code = emit_cmp_rbx_rax(c.code)
+    c.code = emit_setg_al(c.code)
+    c.code = emit_test_al_al(c.code)
+    c.code = emit_jz_rel32(c.code)
+    let lg_nan_skip = c.code.len - 6
+    c.code = emit_movsd_xmm0_rbp_disp8(c.code, 0 - 8)
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, 0 - 8)
+    c.code = emit_addsd_xmm0_xmm1(c.code)
+    c.code = emit_movq_rax_xmm0(c.code)
+    c.code = emit_jmp_rel32(c.code)
+    let lg_end1 = c.code.len - 5
+    c.code = patch_u32_le(c.code, lg_nan_skip + 2, c.code.len - (lg_nan_skip + 6))
+
+    c.code = emit_mov_rax_rbx(c.code)
+    c.code = emit_test_rax_rax(c.code)
+    c.code = emit_jnz_rel32(c.code)
+    let lg_zero_skip = c.code.len - 6
+    c.code = emit_mov_reg_imm(c.code, 0, 0xFFF0000000000000)  // -inf
+    c.code = emit_jmp_rel32(c.code)
+    let lg_end2 = c.code.len - 5
+    c.code = patch_u32_le(c.code, lg_zero_skip + 2, c.code.len - (lg_zero_skip + 6))
+
+    c.code = emit_load_rbp_disp32_rax(c.code, 0 - 8)
+    c.code = emit_mov_reg_imm(c.code, 1, 63)
+    c.code = emit_shr_rax_cl(c.code)
+    c.code = emit_test_rax_rax(c.code)
+    c.code = emit_jz_rel32(c.code)
+    let lg_neg_skip = c.code.len - 6
+    c.code = emit_mov_reg_imm(c.code, 0, 0xFFF8000000000000)  // NaN
+    c.code = emit_jmp_rel32(c.code)
+    let lg_end3 = c.code.len - 5
+    c.code = patch_u32_le(c.code, lg_neg_skip + 2, c.code.len - (lg_neg_skip + 6))
+
+    c.code = emit_mov_reg_imm(c.code, 0, 0x7FF0000000000000)
+    c.code = emit_cmp_rbx_rax(c.code)
+    c.code = emit_sete_al(c.code)
+    c.code = emit_test_al_al(c.code)
+    c.code = emit_jz_rel32(c.code)
+    let lg_inf_skip = c.code.len - 6
+    c.code = emit_mov_reg_imm(c.code, 0, 0x7FF0000000000000)   // sete clobbered al
+    c.code = emit_jmp_rel32(c.code)
+    let lg_end4 = c.code.len - 5
+    c.code = patch_u32_le(c.code, lg_inf_skip + 2, c.code.len - (lg_inf_skip + 6))
+
+    // subnormal flag at [rbp-120]
+    c.code = emit_mov_reg_imm(c.code, 0, 0)
+    c.code = emit_store_rax_rbp_disp32(c.code, 0 - 120)
+    c.code = emit_mov_reg_imm(c.code, 0, 0x0010000000000000)
+    c.code = emit_cmp_rbx_rax(c.code)
+    c.code = emit_setl_al(c.code)
+    c.code = emit_test_al_al(c.code)
+    c.code = emit_jz_rel32(c.code)
+    let lg_sub_skip = c.code.len - 6
+    c.code = emit_movsd_xmm0_rbp_disp8(c.code, 0 - 8)
+    let p_p54 = c.code.len
+    c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, p_p54 + 4, p54_off)
+    c.code = emit_mulsd_xmm0_xmm1(c.code)
+    c.code = emit_movq_rax_xmm0(c.code)
+    c.code = emit_store_rax_rbp_disp32(c.code, 0 - 8)
+    c.code = emit_mov_reg_imm(c.code, 0, 54)
+    c.code = emit_store_rax_rbp_disp32(c.code, 0 - 120)
+    c.code = patch_u32_le(c.code, lg_sub_skip + 2, c.code.len - (lg_sub_skip + 6))
+    c.code = emit_load_rbp_disp32_rax(c.code, 0 - 8)
+
     // e = ((bits >> 52) & 0x7FF) - 1023
     c.code = emit_mov_reg_imm(c.code, 1, 52)
     var sh1 = c.code
@@ -8888,6 +8972,11 @@ pub(crate) fn emit_builtin_log(nc: NativeCompiler) -> NativeCompiler with Mut, P
     c.code = emit_mov_reg_imm(c.code, 3, 1023)
     c.code = emit_sub_rax_rbx(c.code)
     c.code = emit_store_rax_rbp_disp32(c.code, 0 - 64)    // e
+    c.code = emit_load_rbp_disp32_rax(c.code, 0 - 120)
+    c.code = emit_mov_rbx_rax(c.code)
+    c.code = emit_load_rbp_disp32_rax(c.code, 0 - 64)
+    c.code = emit_sub_rax_rbx(c.code)
+    c.code = emit_store_rax_rbp_disp32(c.code, 0 - 64)    // e -= 54 for a scaled subnormal
 
     // m_bits = (bits & mantissa_mask) | 0x3FF0000000000000  ->  m in [1, 2)
     c.code = emit_load_rbp_disp32_rax(c.code, 0 - 8)
@@ -8983,6 +9072,10 @@ pub(crate) fn emit_builtin_log(nc: NativeCompiler) -> NativeCompiler with Mut, P
     c.code = emit_addsd_xmm0_xmm1(c.code)
 
     c.code = emit_movq_rax_xmm0(c.code)
+    c.code = patch_u32_le(c.code, lg_end1 + 1, c.code.len - (lg_end1 + 5))
+    c.code = patch_u32_le(c.code, lg_end2 + 1, c.code.len - (lg_end2 + 5))
+    c.code = patch_u32_le(c.code, lg_end3 + 1, c.code.len - (lg_end3 + 5))
+    c.code = patch_u32_le(c.code, lg_end4 + 1, c.code.len - (lg_end4 + 5))
     c.code = emit_add_rsp_imm32(c.code, 128)
     c.code = emit_pop_rbp(c.code)
     c.code = emit_ret(c.code)
@@ -11084,6 +11177,13 @@ pub fn native_v2_builtin_id_for_name(name: Name) -> i64 with Mut, Panic, Div {
         if name_is_ffi_pow(name) { return 49 }
         if name_is_pow(name) { return 49 }
         if name_is_ffi_tgamma(name) { return 50 }
+        if name_is_ln(name) { return 17 }      // alias of log
+        if name_is_tan(name) { return 86 }
+        if name_is_atan(name) { return 87 }
+        if name_is_tanh(name) { return 88 }
+        if name_is_asin(name) { return 89 }
+        if name_is_acos(name) { return 90 }
+        if name_is_atan2(name) { return 91 }
     0
 }
 
@@ -11108,6 +11208,7 @@ pub fn native_v2_builtin_returns_float(builtin_id: i64) -> bool {
     if builtin_id == 48 { return true }  // ffi_ceil
     if builtin_id == 49 { return true }  // ffi_pow
     if builtin_id == 50 { return true }  // ffi_tgamma
+    if builtin_id >= 86 && builtin_id <= 91 { return true }  // tan atan tanh asin acos atan2
     false
 }
 
@@ -11131,6 +11232,12 @@ fn native_v2_emit_builtin_by_id_into(nc: &! NativeCompiler, builtin_id: i64) wit
     if builtin_id == 48 { native_v2_persist_builtin_emit_into(nc, emit_builtin_ffi_ceil((*nc))); return }
     if builtin_id == 49 { native_v2_persist_builtin_emit_into(nc, emit_builtin_ffi_pow((*nc))); return }
     if builtin_id == 50 { native_v2_persist_builtin_emit_into(nc, emit_builtin_ffi_tgamma((*nc))); return }
+    if builtin_id == 86 { native_v2_persist_builtin_emit_into(nc, emit_builtin_mt_tan((*nc))); return }
+    if builtin_id == 87 { native_v2_persist_builtin_emit_into(nc, emit_builtin_mt_atan((*nc))); return }
+    if builtin_id == 88 { native_v2_persist_builtin_emit_into(nc, emit_builtin_mt_tanh((*nc))); return }
+    if builtin_id == 89 { native_v2_persist_builtin_emit_into(nc, emit_builtin_mt_asin((*nc))); return }
+    if builtin_id == 90 { native_v2_persist_builtin_emit_into(nc, emit_builtin_mt_acos((*nc))); return }
+    if builtin_id == 91 { native_v2_persist_builtin_emit_into(nc, emit_builtin_mt_atan2((*nc))); return }
     if builtin_id == 51 { emit_builtin_native_seq_push_into(nc); return }
     if builtin_id == 70 { emit_builtin_native_seq_push_scalar_into(nc); return }
     if builtin_id == 52 { emit_builtin_native_seq_get_into(nc); return }

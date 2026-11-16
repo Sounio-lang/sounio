@@ -5607,6 +5607,8 @@ fn checker_collect_runtime_builtins_inplace(c: *mut Checker) with Mut, Panic, Di
     checker_bind_import_unknown_inplace(c, make_name("tanh"))
     checker_bind_import_unknown_inplace(c, make_name("asin"))
     checker_bind_import_unknown_inplace(c, make_name("acos"))
+    checker_bind_import_unknown_inplace(c, make_name("ln"))
+    checker_bind_import_unknown_inplace(c, make_name("atan2"))
     checker_bind_import_unknown_inplace(c, make_name("pow"))
     // Track A extern "C" wrapper intrinsics (docs/audit/MADAROS_EXTERN_C_
     // BUILTIN_PORT_DISPATCH_2026-08-16): the parser rewrites an extern
@@ -12475,7 +12477,7 @@ fn checker_check_expr_list_no_type_no_linear_consume_inplace(c: *mut Checker, op
 // enforce dimensions itself. Keep this in leaf helpers on the in-place spine:
 // growing the by-value Checker call checker breaks the gen2 lowering budget.
 fn checker_name_requires_dimensionless_arg(n: Name) -> bool with Mut, Panic, Div {
-    name_eq_lit(n, "exp") || name_eq_lit(n, "log")
+    name_eq_lit(n, "exp") || name_eq_lit(n, "log") || name_eq_lit(n, "ln")
         || name_eq_lit(n, "sin") || name_eq_lit(n, "cos")
         || name_eq_lit(n, "tan") || name_eq_lit(n, "atan")
         || name_eq_lit(n, "tanh") || name_eq_lit(n, "asin")
@@ -13607,21 +13609,6 @@ fn checker_check_call_shadow_forms_inplace(c: *mut Checker, e: Expr, direct_sig_
             }
         }
         None => {}
-    }
-    // #2164: a bare call to a math name the native backend cannot emit. Guarded
-    // on direct_sig_id < 0 so it fires only where the name resolves to nothing
-    // real -- the phantom-builtin case that produces a runtime SIGILL.
-    if direct_sig_id < 0 && !callee_is_local_fn {
-        match e.left {
-            Some(callee_expr) => {
-                if (*callee_expr).kind == ExprKind::ExprIdent {
-                    if name_is_unimplemented_native_math((*callee_expr).name) {
-                        checker_report_error_at_inplace(c, e.span, 221, 0, 0, 0)
-                    }
-                }
-            }
-            None => {}
-        }
     }
     (false, ty_error())
 }
@@ -22691,16 +22678,6 @@ pub fn checker_swap_darwin_math(enabled: bool) -> bool with Mut {
     previous
 }
 
-fn name_is_unimplemented_native_math(n: Name) -> bool with Mut, Panic, Div, Alloc, IO {
-    if CHECKER_DARWIN_MATH { return false }
-    if name_eq_lit(n, "tan") { return true }
-    if name_eq_lit(n, "atan") { return true }
-    if name_eq_lit(n, "tanh") { return true }
-    if name_eq_lit(n, "asin") { return true }
-    if name_eq_lit(n, "acos") { return true }
-    false
-}
-
 // KL-14b/c/d: externs resolved via DT_NEEDED + GOT (not ffi_* / native builtins).
 // Kept out of name_is_native_backend_builtin so extern_builtin_mirror_gate
 // stays a two-list truth; E250 sites consult this separately.
@@ -22741,6 +22718,13 @@ fn name_is_native_backend_builtin(n: Name) -> bool with Mut, Panic, Div, Alloc, 
     if name_eq_lit(n, "print_f64") { return true }        // id 15
     if name_eq_lit(n, "exp") { return true }              // id 16
     if name_eq_lit(n, "log") { return true }              // id 17
+    if name_eq_lit(n, "ln") { return true }               // id 17 (alias of log)
+    if name_eq_lit(n, "tan") { return true }              // id 86 (native::math_trans)
+    if name_eq_lit(n, "atan") { return true }             // id 87
+    if name_eq_lit(n, "tanh") { return true }             // id 88
+    if name_eq_lit(n, "asin") { return true }             // id 89
+    if name_eq_lit(n, "acos") { return true }             // id 90
+    if name_eq_lit(n, "atan2") { return true }            // id 91
     if name_eq_lit(n, "sin") { return true }              // id 18
     if name_eq_lit(n, "cos") { return true }              // id 19
     if name_eq_lit(n, "str_char_at") { return true }      // id 20
@@ -22841,6 +22825,12 @@ fn native_backend_builtin_arity_is_valid(n: Name, argc: i64) -> bool with Mut, P
             || name_eq_lit(n, "print_f64")
             || name_eq_lit(n, "exp")
             || name_eq_lit(n, "log")
+            || name_eq_lit(n, "ln")
+            || name_eq_lit(n, "tan")
+            || name_eq_lit(n, "atan")
+            || name_eq_lit(n, "tanh")
+            || name_eq_lit(n, "asin")
+            || name_eq_lit(n, "acos")
             || name_eq_lit(n, "sin")
             || name_eq_lit(n, "cos")
             || name_eq_lit(n, "assert")
@@ -22867,6 +22857,7 @@ fn native_backend_builtin_arity_is_valid(n: Name, argc: i64) -> bool with Mut, P
             || name_eq_lit(n, "acknowledge")
             || name_eq_lit(n, "require_confidence")
             || name_eq_lit(n, "pow")
+            || name_eq_lit(n, "atan2")
             || name_eq_lit(n, "heap_realloc")
             || name_eq_lit(n, "__sounio_seq_push")
             || name_eq_lit(n, "__sounio_seq_push_scalar")

@@ -1,0 +1,1 @@
+A function that needs a Hessian for more than 128 locals now fails to compile with `error[E303]` (GUM channel capacity exceeded: second-order lowering keeps a Hessian for at most 128 locals per function) instead of dropping curvature and printing 0.0 from `hessian_of`. Pinned by `tests/compile-fail/epistemic_hessian_rows_overflow.sio`.
