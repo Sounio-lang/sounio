@@ -43,6 +43,11 @@ expect "$lean" lean true
 expect "$lean" math true
 expect "$lean" compiler false
 
+# The Sporos C++ interpreter and its differential belong to the Lean job.
+sporos="$(classify_pr bootstrap/model/sporos_fast.cpp)"
+expect "$sporos" lean true
+expect "$sporos" full false
+
 compiler="$(classify_pr self-hosted/compiler/main.sio)"
 expect "$compiler" compiler true
 expect "$compiler" sio true
