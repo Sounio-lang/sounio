@@ -61,10 +61,9 @@ var CHECK_MOD_ONTOCACHE_SIDECAR_SUBCLASS: [bool; 36] = [false; 36]
 var CHECK_MOD_ONTOCACHE_SIDECAR_DISJOINT: [bool; 36] = [false; 36]
 
 fn check_mod_alloc_checker() -> *mut Checker with Alloc {
-    // The checker grew with the wider FnSigTable and TypeEnv capacities.
-    // Keep boot4/probe heap allocations ahead of the struct size so in-place
-    // checker paths cannot scribble past a stale literal allocation.
-    heap_alloc(134217728) as *mut Checker
+    // TypeEnv is chunked on demand (~3.6 MiB Checker); 32 MiB keeps generous
+    // headroom while staying well inside 8 GiB virtual-memory gates.
+    heap_alloc(33554432) as *mut Checker
 }
 
 pub fn check_policy_requirements_to_ir(
@@ -727,7 +726,26 @@ pub fn check_items_verdict_boot4_with_module_map(items: Option<Box<ItemList>>, m
 // Instead validate axioms in place over the parsed AST via
 // checker_validate_ontology_items_inplace (no large copies). Returns 1 on any
 // ontology axiom error, 0 when clean.
+fn check_mod_items_has_ontology(items: Option<Box<ItemList>>) -> bool with Mut, Panic, Div {
+    var cur = items
+    while true {
+        match cur {
+            Some(list) => {
+                if (*list).head.kind == ItemKind::ItemOntology {
+                    return true
+                }
+                cur = (*list).tail
+            }
+            None => { return false }
+        }
+    }
+    false
+}
+
 pub fn check_items_ontology_verdict(items: Option<Box<ItemList>>) -> i64 with Mut, Panic, Div, Alloc, IO {
+    if !check_mod_items_has_ontology(items) {
+        return 0
+    }
     let checker_ptr = check_mod_alloc_checker()
     checker_init_in_place(checker_ptr)
     checker_validate_ontology_items_inplace(checker_ptr, items)

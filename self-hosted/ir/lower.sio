@@ -1824,6 +1824,7 @@ let LOWER_GLOBAL_SCALAR_I64: i64 = 1
 // stored element value. Without this, `[T; 1]` (bss_size <= 8) took the scalar
 // load path and IndexGet treated the init word as a pointer → SEGV.
 let LOWER_GLOBAL_ARRAY: i64 = 4
+let LOWER_GLOBAL_SCALAR_STRING: i64 = 5
 
 // Inter-procedural FO transfer table (module-global so it survives Lowerer
 // by-value churn). Reset at each program-items lower start.
@@ -12402,6 +12403,7 @@ fn lower_global_elem_kind(ty_opt: &Option<Box<TypeExpr>>) -> i64 with Mut, Panic
             // Scalar integers: needed so print/println of `var G: i64` routes to
             // print_int (same SEGV class as untyped f64 → char*).
             if lower_type_expr_is_integer(&(*ty)) { return LOWER_GLOBAL_SCALAR_I64 }
+            if lower_type_expr_is_string(&(*ty)) { return LOWER_GLOBAL_SCALAR_STRING }
             0
         }
         _ => 0,
@@ -14480,7 +14482,7 @@ fn fo_nested_stmt_count(opt: &Option<Box<StmtList>>, depth: i64, expand_calls: b
                     None => {}
                 }
                 cur = &(*sl).tail
-                if n > 24 { return n }
+                if n > 64 { return n }
             }
             None => break
         }
@@ -14516,7 +14518,7 @@ fn fo_nested_expr_stmts(e: &Expr, depth: i64, expand_calls: bool) -> i64 with Mu
                 Some(al) => {
                     n = n + 1
                     n = n + fo_nested_expr_stmts(&(*al).head.body, depth + 1, expand_calls)
-                    if n > 24 { return n }
+                    if n > 64 { return n }
                     ac = &(*al).tail
                 }
                 None => break
@@ -14534,7 +14536,7 @@ fn fo_nested_expr_stmts(e: &Expr, depth: i64, expand_calls: bool) -> i64 with Mu
     // paste thousands of instructions at every field read. Saturate at the
     // existing statement budget; no IR capacity or refusal rule is relaxed.
     if expand_calls {
-        if n > 24 { return n }
+        if n > 64 { return n }
         if k == ExprKind::ExprCall {
             match (*e).left {
                 Some(ce) => {
@@ -17282,6 +17284,16 @@ fn fo_variance_is_static_zero(lo: &Lowerer, reg: i64) -> bool with Mut, Panic, D
         i = i - 1
     }
     false
+}
+
+struct VarBinSnaps {
+    lv: i64,
+    rv: i64,
+    same_ident: bool,
+    sL: [i64; 64],
+    hL: i64,
+    sR: [i64; 64],
+    hR: i64,
 }
 
 impl Lowerer {
@@ -29038,7 +29050,8 @@ impl Lowerer {
         FO_COUNT_DEPTH = 1
         let nstmt = fo_nested_stmt_count(&fd.body.stmts, 0, true)
         FO_COUNT_DEPTH = 0
-        if nstmt > 24 { return (lo, 0 - 1) }
+        let max_nstmt: i64 = if npath == 0 { 64 } else { 24 }
+        if nstmt > max_nstmt { return (lo, 0 - 1) }
         // An f64 return answers a plain call; a struct return answers a field path.
         match fd.return_type {
             Some(rt) => {
@@ -30147,16 +30160,211 @@ impl Lowerer {
         self.lower_expr_variance_non_call_ref(e)
     }
 
-    // SO_HS rows taken below are given back when this returns, whichever
-    // return it takes (see SO_HS).
     fn lower_expr_variance_non_call_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        if (*e).kind == ExprKind::ExprBinary {
+            return self.lower_expr_variance_binary_ref(e)
+        }
+        self.lower_expr_variance_other_ref(e)
+    }
+
+    // The operand rows taken below (SO_HS) are given back when this returns,
+    // whichever return it takes.
+    fn lower_expr_variance_binary_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         let mark = SO_HS_TOP
-        let r = self.lower_expr_variance_non_call_ref_rows(e)
+        let r = self.lower_expr_variance_binary_rows(e)
         so_hs_pop(mark)
         r
     }
 
-    fn lower_expr_variance_non_call_ref_rows(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+    fn lower_expr_variance_binary_rows(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        let same_ident = self.expr_is_same_ident_ref(&(*e).left, &(*e).right)
+        if same_ident && (*e).bin_op == BinaryOp::OpSub {
+            let z = self.fo_clear_expr_sens().so_clear_expr_hess().emit_zero_variance()
+            return z
+        }
+        let pair_lv = match (*e).left {
+            Some(l_expr) => self.lower_expr_variance_ref(&(*l_expr)),
+            _ => (self.fo_clear_expr_sens().so_clear_expr_hess(), -1),
+        }
+        var lo = pair_lv.0
+        let lv0 = pair_lv.1
+        let lv_pair = if lv0 >= 0 { (lo, lv0) } else { lo.emit_zero_variance() }
+        lo = lv_pair.0
+        let lv = lv_pair.1
+        let sL = lo.fo_snapshot_expr_sens()
+        let hL = lo.so_snapshot_expr_hess()
+
+        let pair_rv = match (*e).right {
+            Some(r_expr) => lo.lower_expr_variance_ref(&(*r_expr)),
+            _ => {
+                let lo2 = lo.fo_clear_expr_sens().so_clear_expr_hess()
+                (lo2, -1)
+            },
+        }
+        lo = pair_rv.0
+        let rv0 = pair_rv.1
+        let rv_pair = if rv0 >= 0 { (lo, rv0) } else { lo.emit_zero_variance() }
+        lo = rv_pair.0
+        let rv = rv_pair.1
+        let snaps = VarBinSnaps {
+            lv: lv,
+            rv: rv,
+            same_ident: same_ident,
+            sL: sL,
+            hL: hL,
+            sR: lo.fo_snapshot_expr_sens(),
+            hR: lo.so_snapshot_expr_hess(),
+        }
+        FO_LOGN_ACTIVE = 0
+        lo.lower_expr_variance_binary_combine_ref(e, &snaps)
+    }
+
+    fn lower_expr_variance_binary_combine_ref(self, e: &Expr, snaps: &VarBinSnaps) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        let lv = (*snaps).lv
+        let rv = (*snaps).rv
+        let same_ident = (*snaps).same_ident
+        let sL = (*snaps).sL
+        let hL = (*snaps).hL
+        let sR = (*snaps).sR
+        let hR = (*snaps).hR
+        if lo.fo_expr_or_snap_has_sens(sL) || lo.fo_expr_or_snap_has_sens(sR) {
+            if (*e).bin_op == BinaryOp::OpAdd || (*e).bin_op == BinaryOp::OpSub {
+                let is_sub = (*e).bin_op == BinaryOp::OpSub
+                if lo.so_enabled {
+                    lo = lo.so_combine_hess_addsub(hL, hR, is_sub)
+                }
+                lo = lo.fo_combine_sens_addsub(sL, sR, is_sub)
+                return lo.fo_emit_var_from_sens()
+            }
+            if ((*e).bin_op == BinaryOp::OpMul || (*e).bin_op == BinaryOp::OpDiv)
+                && (!lower_opt_expr_relower_safe(&(*e).left) || !lower_opt_expr_relower_safe(&(*e).right)) {
+                return (lo.fo_clear_expr_sens().so_clear_expr_hess(), -1)
+            }
+            if (*e).bin_op == BinaryOp::OpMul {
+                let lhs_val_pair = lo.lower_opt_expr_ref(&(*e).left)
+                lo = lhs_val_pair.0
+                let lhs_fp = lo.so_value_as_f64(lhs_val_pair.1, lo.opt_expr_result_is_float_ref(&(*e).left))
+                lo = lhs_fp.0
+                let lhs_v = lhs_fp.1
+                let rhs_val_pair = lo.lower_opt_expr_ref(&(*e).right)
+                lo = rhs_val_pair.0
+                let rhs_fp = lo.so_value_as_f64(rhs_val_pair.1, lo.opt_expr_result_is_float_ref(&(*e).right))
+                lo = rhs_fp.0
+                let rhs_v = rhs_fp.1
+                if lo.so_enabled {
+                    lo = lo.so_combine_hess_mul(hL, hR, sL, sR, lhs_v, rhs_v)
+                }
+                lo = lo.fo_combine_sens_mul(sL, sR, lhs_v, rhs_v)
+                return lo.fo_emit_var_from_sens()
+            }
+            if (*e).bin_op == BinaryOp::OpDiv {
+                let lhs_val_pair = lo.lower_opt_expr_ref(&(*e).left)
+                lo = lhs_val_pair.0
+                let lhs_fp = lo.so_value_as_f64(lhs_val_pair.1, lo.opt_expr_result_is_float_ref(&(*e).left))
+                lo = lhs_fp.0
+                let lhs_v = lhs_fp.1
+                let rhs_val_pair = lo.lower_opt_expr_ref(&(*e).right)
+                lo = rhs_val_pair.0
+                let rhs_fp = lo.so_value_as_f64(rhs_val_pair.1, lo.opt_expr_result_is_float_ref(&(*e).right))
+                lo = rhs_fp.0
+                let rhs_v = rhs_fp.1
+                if lo.so_enabled {
+                    lo = lo.so_combine_hess_div(hL, hR, sL, sR, lhs_v, rhs_v)
+                } else {
+                    lo = lo.so_clear_expr_hess()
+                }
+                lo = lo.fo_combine_sens_div(sL, sR, lhs_v, rhs_v)
+                return lo.fo_emit_var_from_sens()
+            }
+        }
+
+        lo = lo.fo_clear_expr_sens().so_clear_expr_hess()
+        if (*e).bin_op == BinaryOp::OpAdd || (*e).bin_op == BinaryOp::OpSub {
+            if same_ident && (*e).bin_op == BinaryOp::OpAdd {
+                let two_pair = lo.emit_f64_const(2.0)
+                lo = two_pair.0
+                return lo.emit_variance_scale(lv, two_pair.1)
+            }
+            if (*e).bin_op == BinaryOp::OpSub && lv >= 0 && lv == rv {
+                return lo.emit_zero_variance()
+            }
+            return lo.emit_variance_add(lv, rv)
+        }
+        if (*e).bin_op == BinaryOp::OpMul {
+            if same_ident {
+                let two_pair = lo.emit_f64_const(2.0)
+                lo = two_pair.0
+                let four_v_pair = lo.emit_variance_scale(lv, two_pair.1)
+                lo = four_v_pair.0
+                let x_pair = lo.lower_opt_expr_ref(&(*e).left)
+                lo = x_pair.0
+                let x_fp = lo.so_value_as_f64(x_pair.1, lo.opt_expr_result_is_float_ref(&(*e).left))
+                lo = x_fp.0
+                return lo.emit_variance_scale(four_v_pair.1, x_fp.1)
+            }
+            match (*e).left {
+                Some(le) => {
+                    if (*le).kind == ExprKind::ExprFloatLit {
+                        return lo.emit_variance_scale_const(rv, (*le).float_val)
+                    }
+                    if (*le).kind == ExprKind::ExprIntLit {
+                        return lo.emit_variance_scale_const(rv, (*le).int_val as f64)
+                    }
+                }
+                _ => {}
+            }
+            match (*e).right {
+                Some(re) => {
+                    if (*re).kind == ExprKind::ExprFloatLit {
+                        return lo.emit_variance_scale_const(lv, (*re).float_val)
+                    }
+                    if (*re).kind == ExprKind::ExprIntLit {
+                        return lo.emit_variance_scale_const(lv, (*re).int_val as f64)
+                    }
+                }
+                _ => {}
+            }
+            let corr_pair = lo.try_variance_const_square_chain(e)
+            if corr_pair.1 >= 0 {
+                return corr_pair
+            }
+            lo = corr_pair.0
+            if lower_opt_expr_contains_call(&(*e).left) || lower_opt_expr_contains_call(&(*e).right) {
+                return (lo, -1)
+            }
+            let lhs_val_pair = lo.lower_opt_expr_ref(&(*e).left)
+            lo = lhs_val_pair.0
+            let lhs_fp = lo.so_value_as_f64(lhs_val_pair.1, lo.opt_expr_result_is_float_ref(&(*e).left))
+            lo = lhs_fp.0
+            let lhs_v = lhs_fp.1
+            let rhs_val_pair = lo.lower_opt_expr_ref(&(*e).right)
+            lo = rhs_val_pair.0
+            let rhs_fp = lo.so_value_as_f64(rhs_val_pair.1, lo.opt_expr_result_is_float_ref(&(*e).right))
+            lo = rhs_fp.0
+            let rhs_v = rhs_fp.1
+            return lo.emit_variance_independent_product(lhs_v, rhs_v, lv, rv)
+        }
+        if (*e).bin_op == BinaryOp::OpDiv {
+            if lower_opt_expr_contains_call(&(*e).left) || lower_opt_expr_contains_call(&(*e).right) {
+                return (lo, -1)
+            }
+            let lhs_val_pair = lo.lower_opt_expr_ref(&(*e).left)
+            lo = lhs_val_pair.0
+            let lhs_fp = lo.so_value_as_f64(lhs_val_pair.1, lo.opt_expr_result_is_float_ref(&(*e).left))
+            lo = lhs_fp.0
+            let lhs_v = lhs_fp.1
+            let rhs_val_pair = lo.lower_opt_expr_ref(&(*e).right)
+            lo = rhs_val_pair.0
+            let rhs_fp = lo.so_value_as_f64(rhs_val_pair.1, lo.opt_expr_result_is_float_ref(&(*e).right))
+            lo = rhs_fp.0
+            let rhs_v = rhs_fp.1
+            return lo.emit_variance_independent_div(lhs_v, rhs_v, lv, rv)
+        }
+        (lo, -1)
+    }
+
+    fn lower_expr_variance_other_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         if (*e).kind == ExprKind::ExprCall {
             match (*e).left {
                 Some(callee_expr) => {
@@ -30449,206 +30657,6 @@ impl Lowerer {
             }
             return (lo, vin)
         }
-        if (*e).kind == ExprKind::ExprBinary {
-            let same_ident = self.expr_is_same_ident_ref(&(*e).left, &(*e).right)
-            if same_ident && (*e).bin_op == BinaryOp::OpSub {
-                let z = self.fo_clear_expr_sens().so_clear_expr_hess().emit_zero_variance()
-                return z
-            }
-            // Lower left FO (variance + sens), snapshot sens before right overwrites.
-            let pair_lv = match (*e).left {
-                Some(l_expr) => self.lower_expr_variance_ref(&(*l_expr)),
-                _ => (self.fo_clear_expr_sens().so_clear_expr_hess(), -1),
-            }
-            var lo = pair_lv.0
-            let lv0 = pair_lv.1
-            let lv_pair = if lv0 >= 0 { (lo, lv0) } else { lo.emit_zero_variance() }
-            lo = lv_pair.0
-            let lv = lv_pair.1
-            let sL = lo.fo_snapshot_expr_sens()
-            let hL = lo.so_snapshot_expr_hess()
-
-            let pair_rv = match (*e).right {
-                Some(r_expr) => lo.lower_expr_variance_ref(&(*r_expr)),
-                _ => {
-                    let lo2 = lo.fo_clear_expr_sens().so_clear_expr_hess()
-                    (lo2, -1)
-                },
-            }
-            lo = pair_rv.0
-            let rv0 = pair_rv.1
-            let rv_pair = if rv0 >= 0 { (lo, rv0) } else { lo.emit_zero_variance() }
-            lo = rv_pair.0
-            let rv = rv_pair.1
-            let sR = lo.fo_snapshot_expr_sens()
-            let hR = lo.so_snapshot_expr_hess()
-            // A product or sum is not exp of an affine. The inner exp may have
-            // raised FO_LOGN_ACTIVE; leaving it set makes second_order_mean
-            // return that inner mean and ignore the Hessian just computed.
-            FO_LOGN_ACTIVE = 0
-
-            // Multi-channel FO path when either side carries seed sensitivities.
-            // Both snapshots are named (KL-6): the live fo_expr_sens is sR at
-            // this point, so the old single-snapshot call already covered the
-            // right operand, but `1.0 / b` -- sensitivity and Hessian on the
-            // right only -- must visibly take this path, not the legacy one.
-            if lo.fo_expr_or_snap_has_sens(sL) || lo.fo_expr_or_snap_has_sens(sR) {
-                if (*e).bin_op == BinaryOp::OpAdd || (*e).bin_op == BinaryOp::OpSub {
-                    let is_sub = (*e).bin_op == BinaryOp::OpSub
-                    if lo.so_enabled {
-                        lo = lo.so_combine_hess_addsub(hL, hR, is_sub)
-                    }
-                    lo = lo.fo_combine_sens_addsub(sL, sR, is_sub)
-                    return lo.fo_emit_var_from_sens()
-                }
-                // Both rules below re-lower the operand values; never re-execute
-                // an effectful call to get them (same hazard as #1569).
-                if ((*e).bin_op == BinaryOp::OpMul || (*e).bin_op == BinaryOp::OpDiv)
-                    && (!lower_opt_expr_relower_safe(&(*e).left) || !lower_opt_expr_relower_safe(&(*e).right)) {
-                    return (lo.fo_clear_expr_sens().so_clear_expr_hess(), -1)
-                }
-                if (*e).bin_op == BinaryOp::OpMul {
-                    // Need operand values for the product rule.
-                    let lhs_val_pair = lo.lower_opt_expr_ref(&(*e).left)
-                    lo = lhs_val_pair.0
-                    let lhs_fp = lo.so_value_as_f64(lhs_val_pair.1, lo.opt_expr_result_is_float_ref(&(*e).left))
-                    lo = lhs_fp.0
-                    let lhs_v = lhs_fp.1
-                    let rhs_val_pair = lo.lower_opt_expr_ref(&(*e).right)
-                    lo = rhs_val_pair.0
-                    let rhs_fp = lo.so_value_as_f64(rhs_val_pair.1, lo.opt_expr_result_is_float_ref(&(*e).right))
-                    lo = rhs_fp.0
-                    let rhs_v = rhs_fp.1
-                    if lo.so_enabled {
-                        lo = lo.so_combine_hess_mul(hL, hR, sL, sR, lhs_v, rhs_v)
-                    }
-                    lo = lo.fo_combine_sens_mul(sL, sR, lhs_v, rhs_v)
-                    return lo.fo_emit_var_from_sens()
-                }
-                if (*e).bin_op == BinaryOp::OpDiv {
-                    let lhs_val_pair = lo.lower_opt_expr_ref(&(*e).left)
-                    lo = lhs_val_pair.0
-                    let lhs_fp = lo.so_value_as_f64(lhs_val_pair.1, lo.opt_expr_result_is_float_ref(&(*e).left))
-                    lo = lhs_fp.0
-                    let lhs_v = lhs_fp.1
-                    let rhs_val_pair = lo.lower_opt_expr_ref(&(*e).right)
-                    lo = rhs_val_pair.0
-                    let rhs_fp = lo.so_value_as_f64(rhs_val_pair.1, lo.opt_expr_result_is_float_ref(&(*e).right))
-                    lo = rhs_fp.0
-                    let rhs_v = rhs_fp.1
-                    if lo.so_enabled {
-                        lo = lo.so_combine_hess_div(hL, hR, sL, sR, lhs_v, rhs_v)
-                    } else {
-                        lo = lo.so_clear_expr_hess()
-                    }
-                    lo = lo.fo_combine_sens_div(sL, sR, lhs_v, rhs_v)
-                    return lo.fo_emit_var_from_sens()
-                }
-            }
-
-            // ── Legacy scalar-variance algebra (no FO seeds) ──
-            lo = lo.fo_clear_expr_sens().so_clear_expr_hess()
-            if (*e).bin_op == BinaryOp::OpAdd || (*e).bin_op == BinaryOp::OpSub {
-                if same_ident && (*e).bin_op == BinaryOp::OpAdd {
-                    let two_pair = lo.emit_f64_const(2.0)
-                    lo = two_pair.0
-                    return lo.emit_variance_scale(lv, two_pair.1)
-                }
-                if (*e).bin_op == BinaryOp::OpSub && lv >= 0 && lv == rv {
-                    return lo.emit_zero_variance()
-                }
-                return lo.emit_variance_add(lv, rv)
-            }
-            if (*e).bin_op == BinaryOp::OpMul {
-                if same_ident {
-                    let two_pair = lo.emit_f64_const(2.0)
-                    lo = two_pair.0
-                    let four_v_pair = lo.emit_variance_scale(lv, two_pair.1)
-                    lo = four_v_pair.0
-                    let x_pair = lo.lower_opt_expr_ref(&(*e).left)
-                    lo = x_pair.0
-                    let x_fp = lo.so_value_as_f64(x_pair.1, lo.opt_expr_result_is_float_ref(&(*e).left))
-                    lo = x_fp.0
-                    return lo.emit_variance_scale(four_v_pair.1, x_fp.1)
-                }
-                match (*e).left {
-                    Some(le) => {
-                        if (*le).kind == ExprKind::ExprFloatLit {
-                            return lo.emit_variance_scale_const(rv, (*le).float_val)
-                        }
-                        if (*le).kind == ExprKind::ExprIntLit {
-                            return lo.emit_variance_scale_const(rv, (*le).int_val as f64)
-                        }
-                    }
-                    _ => {}
-                }
-                match (*e).right {
-                    Some(re) => {
-                        if (*re).kind == ExprKind::ExprFloatLit {
-                            return lo.emit_variance_scale_const(lv, (*re).float_val)
-                        }
-                        if (*re).kind == ExprKind::ExprIntLit {
-                            return lo.emit_variance_scale_const(lv, (*re).int_val as f64)
-                        }
-                    }
-                    _ => {}
-                }
-                let corr_pair = lo.try_variance_const_square_chain(e)
-                if corr_pair.1 >= 0 {
-                    return corr_pair
-                }
-                lo = corr_pair.0
-                // #1569: the value re-lowering below would execute any
-                // effectful call in the operands a SECOND time (the first
-                // evaluation already happened in lower_let_stmt_ref).
-                // Variance of a call result is untracked anyway, so bail
-                // instead of re-emitting.
-                if lower_opt_expr_contains_call(&(*e).left) || lower_opt_expr_contains_call(&(*e).right) {
-                    return (lo, -1)
-                }
-                let lhs_val_pair = lo.lower_opt_expr_ref(&(*e).left)
-                lo = lhs_val_pair.0
-                let lhs_fp = lo.so_value_as_f64(lhs_val_pair.1, lo.opt_expr_result_is_float_ref(&(*e).left))
-                lo = lhs_fp.0
-                let lhs_v = lhs_fp.1
-                let rhs_val_pair = lo.lower_opt_expr_ref(&(*e).right)
-                lo = rhs_val_pair.0
-                let rhs_fp = lo.so_value_as_f64(rhs_val_pair.1, lo.opt_expr_result_is_float_ref(&(*e).right))
-                lo = rhs_fp.0
-                let rhs_v = rhs_fp.1
-                let lv_cap = lv
-                let rv_cap = rv
-                return lo.emit_variance_independent_product(lhs_v, rhs_v, lv_cap, rv_cap)
-            }
-            if (*e).bin_op == BinaryOp::OpDiv {
-                // Constant / x or x / constant via scale.
-                match (*e).left {
-                    Some(le) => {
-                        if (*le).kind == ExprKind::ExprFloatLit || (*le).kind == ExprKind::ExprIntLit {
-                            // c/x: need values for (c/x²) scale on rv only — use full formula.
-                        }
-                    }
-                    _ => {}
-                }
-                // #1569: same double-evaluation hazard as OpMul above —
-                // never re-lower an operand that may contain a call.
-                if lower_opt_expr_contains_call(&(*e).left) || lower_opt_expr_contains_call(&(*e).right) {
-                    return (lo, -1)
-                }
-                let lhs_val_pair = lo.lower_opt_expr_ref(&(*e).left)
-                lo = lhs_val_pair.0
-                let lhs_fp = lo.so_value_as_f64(lhs_val_pair.1, lo.opt_expr_result_is_float_ref(&(*e).left))
-                lo = lhs_fp.0
-                let lhs_v = lhs_fp.1
-                let rhs_val_pair = lo.lower_opt_expr_ref(&(*e).right)
-                lo = rhs_val_pair.0
-                let rhs_fp = lo.so_value_as_f64(rhs_val_pair.1, lo.opt_expr_result_is_float_ref(&(*e).right))
-                lo = rhs_fp.0
-                let rhs_v = rhs_fp.1
-                return lo.emit_variance_independent_div(lhs_v, rhs_v, lv, rv)
-            }
-            return (lo, -1)
-        }
         // if-expression: FO through the taken arm when cond is a bool literal;
         // otherwise try then-arm, then else-arm (first arm with live variance wins).
         if (*e).kind == ExprKind::ExprIf {
@@ -30823,7 +30831,7 @@ impl Lowerer {
                     make_name("print_f64")
                 } else if sk == 5 {
                     make_name("println_f128")
-                } else if self.expr_result_is_string_ref(&(*list).head) {
+                } else if sk == 3 || self.expr_result_is_string_ref(&(*list).head) {
                     make_name("print")
                 } else {
                     // The name is deliberately numeric as a poison-safe fallback:
@@ -31166,11 +31174,20 @@ impl Lowerer {
             return self.lookup_local_wide_bits((*expr).name)
         }
         if (*expr).kind == ExprKind::ExprBinary {
-            let lb = self.expr_wide_bits_opt_ref(&(*expr).left)
-            let rb = self.expr_wide_bits_opt_ref(&(*expr).right)
-            if lb > 64 && lb == rb { return lb }
-            if lb > 64 { return lb }
-            if rb > 64 { return rb }
+            var cur_wb = expr
+            while (*cur_wb).kind == ExprKind::ExprBinary {
+                let rb = self.expr_wide_bits_opt_ref(&(*cur_wb).right)
+                if rb > 64 { return rb }
+                var next_wb = cur_wb
+                var has_next_wb = false
+                match (*cur_wb).left {
+                    Some(lb) => { next_wb = &(*lb); has_next_wb = true }
+                    None => {}
+                }
+                if !has_next_wb { return 0 }
+                cur_wb = next_wb
+            }
+            return self.expr_wide_bits_ref(cur_wb)
         }
         0
     }
@@ -31201,11 +31218,19 @@ impl Lowerer {
         if (*expr).kind == ExprKind::ExprIdent {
             return self.lookup_local_wide_signed((*expr).name)
         }
-        if (*expr).kind == ExprKind::ExprUnary {
-            return self.expr_wide_signed_opt_ref(&(*expr).left)
-        }
-        if (*expr).kind == ExprKind::ExprBinary {
-            return self.expr_wide_signed_opt_ref(&(*expr).left)
+        if (*expr).kind == ExprKind::ExprUnary || (*expr).kind == ExprKind::ExprBinary {
+            var cur_ws = expr
+            while (*cur_ws).kind == ExprKind::ExprUnary || (*cur_ws).kind == ExprKind::ExprBinary {
+                var next_ws = cur_ws
+                var has_next_ws = false
+                match (*cur_ws).left {
+                    Some(lb) => { next_ws = &(*lb); has_next_ws = true }
+                    None => {}
+                }
+                if !has_next_ws { return 0 }
+                cur_ws = next_ws
+            }
+            return self.expr_wide_signed_ref(cur_ws)
         }
         0
     }
@@ -32063,6 +32088,10 @@ impl Lowerer {
         if gkind == LOWER_GLOBAL_SCALAR_I64 {
             return 1
         }
+        if gkind == LOWER_GLOBAL_SCALAR_STRING
+            || ir_fn_get(&(*self.module), fn_id as usize).prof_counter_id == BSS_INIT_STRING_MAGIC {
+            return 3
+        }
         0
     }
 
@@ -32241,16 +32270,24 @@ impl Lowerer {
             return self.opt_block_tail_struct_type_ref(&(*expr).block)
         }
         if (*expr).kind == ExprKind::ExprIf {
-            let then_ty = self.opt_block_tail_struct_type_ref(&(*expr).block)
-            if then_ty.len > 0 {
-                return then_ty
-            }
-            match (*expr).else_expr {
-                Some(else_e) => {
-                    return self.expr_receiver_struct_type_ref(&(*else_e))
+            var cur_if = expr
+            while (*cur_if).kind == ExprKind::ExprIf {
+                let then_ty = self.opt_block_tail_struct_type_ref(&(*cur_if).block)
+                if then_ty.len > 0 {
+                    return then_ty
                 }
-                _ => {}
+                var next_if = cur_if
+                var has_next_if = false
+                match (*cur_if).else_expr {
+                    Some(else_e) => { next_if = &(*else_e); has_next_if = true }
+                    _ => {}
+                }
+                if !has_next_if {
+                    return ir_empty_name()
+                }
+                cur_if = next_if
             }
+            return self.expr_receiver_struct_type_ref(cur_if)
         }
         if (*expr).kind == ExprKind::ExprMatch {
             var arm_cursor = &(*expr).arms
@@ -32643,9 +32680,20 @@ impl Lowerer {
         }
         if (*e).kind == ExprKind::ExprBinary {
             // V0-E.5.2: `a < b` on f128 operands is a bool, not a wide float.
-            if lower_binary_op_is_compare((*e).bin_op) { return false }
-            return self.opt_expr_result_is_wide_float_ref(&(*e).left)
-                || self.opt_expr_result_is_wide_float_ref(&(*e).right)
+            var cur_bin = e
+            while (*cur_bin).kind == ExprKind::ExprBinary {
+                if lower_binary_op_is_compare((*cur_bin).bin_op) { return false }
+                if self.opt_expr_result_is_wide_float_ref(&(*cur_bin).right) { return true }
+                var next_bin = cur_bin
+                var has_next_bin = false
+                match (*cur_bin).left {
+                    Some(lb) => { next_bin = &(*lb); has_next_bin = true }
+                    None => {}
+                }
+                if !has_next_bin { return false }
+                cur_bin = next_bin
+            }
+            return self.expr_result_is_wide_float_ref(cur_bin)
         }
         if (*e).kind == ExprKind::ExprUnary {
             // `*p` with p: &f128 / &f256 reads a wide value. Recursing into the
@@ -32659,31 +32707,51 @@ impl Lowerer {
             return self.opt_expr_result_is_wide_float_ref(&(*e).left)
         }
         if (*e).kind == ExprKind::ExprIf {
-            return self.block_tail_is_wide_float_ref(&(*e).block)
-                || self.opt_expr_result_is_wide_float_ref(&(*e).else_expr)
+            var cur_if = e
+            while (*cur_if).kind == ExprKind::ExprIf {
+                if self.block_tail_is_wide_float_ref(&(*cur_if).block) {
+                    return true
+                }
+                var next_if = cur_if
+                var has_next_if = false
+                match (*cur_if).else_expr {
+                    Some(ee) => { next_if = &(*ee); has_next_if = true }
+                    None => {}
+                }
+                if !has_next_if { return false }
+                cur_if = next_if
+            }
+            return self.expr_result_is_wide_float_ref(cur_if)
         }
         false
     }
 
     fn stmt_list_tail_is_wide_float_ref(self, opt: &Option<Box<StmtList>>) -> bool with Mut, Panic, Div, Alloc {
-        match *opt {
-            Some(list) => {
-                match (*list).tail {
-                    Some(rest) => self.stmt_list_tail_is_wide_float_ref(&Some(rest)),
-                    _ => {
+        var current = opt
+        while true {
+            match *current {
+                Some(list) => {
+                    var has_tail = false
+                    match (*list).tail {
+                        Some(_) => { has_tail = true }
+                        None => {}
+                    }
+                    if has_tail {
+                        current = &(*list).tail
+                    } else {
                         if (*list).head.kind == StmtKind::StmtExpr {
                             match (*list).head.expr {
-                                Some(expr_box) => self.expr_result_is_wide_float_ref(&(*expr_box)),
-                                None => false,
+                                Some(expr_box) => { return self.expr_result_is_wide_float_ref(&(*expr_box)) }
+                                None => { return false }
                             }
-                        } else {
-                            false
                         }
+                        return false
                     }
                 }
+                None => { return false }
             }
-            None => false,
         }
+        false
     }
 
     fn block_tail_is_wide_float_ref(self, opt: &Option<Box<Block>>) -> bool with Mut, Panic, Div, Alloc {
@@ -32751,7 +32819,11 @@ impl Lowerer {
             // Parameter binding records its declared named type even on paths
             // where scalar_kind is reserved for numeric dispatch. `string` and
             // `&string` therefore remain positive evidence, not kind-0 guesses.
-            return lower_name_is_string_type(self.lookup_local_struct_type((*e).name))
+            if lower_name_is_string_type(self.lookup_local_struct_type((*e).name)) {
+                return true
+            }
+            return (self.lookup_local((*e).name) < 0 || self.lookup_local_is_global((*e).name))
+                && self.bss_global_scalar_kind((*e).name) == 3
         }
         // `base.field` where the field is declared `string`. Ten of the fifteen
         // println-poison refusals in a self-compile are this shape --
@@ -32799,7 +32871,21 @@ impl Lowerer {
             }
         }
         if (*e).kind == ExprKind::ExprIf {
-            return self.opt_block_tail_is_string_ref(&(*e).block) || self.opt_expr_result_is_string_ref(&(*e).else_expr)
+            var cur_if = e
+            while (*cur_if).kind == ExprKind::ExprIf {
+                if self.opt_block_tail_is_string_ref(&(*cur_if).block) {
+                    return true
+                }
+                var next_if = cur_if
+                var has_next_if = false
+                match (*cur_if).else_expr {
+                    Some(ee) => { next_if = &(*ee); has_next_if = true }
+                    None => {}
+                }
+                if !has_next_if { return false }
+                cur_if = next_if
+            }
+            return self.expr_result_is_string_ref(cur_if)
         }
         // `base.field[i]` where the field is declared `[string; N]`. The last
         // println-poison refusal in a gen2 self-compile is this shape:
@@ -32831,7 +32917,22 @@ impl Lowerer {
         }
         if (*e).kind == ExprKind::ExprBinary {
             if (*e).bin_op == BinaryOp::OpAdd || (*e).bin_op == BinaryOp::OpConcat {
-                return self.opt_expr_result_is_string_ref(&(*e).left) || self.opt_expr_result_is_string_ref(&(*e).right)
+                var cur_bin = e
+                while (*cur_bin).kind == ExprKind::ExprBinary
+                    && ((*cur_bin).bin_op == BinaryOp::OpAdd || (*cur_bin).bin_op == BinaryOp::OpConcat) {
+                    if self.opt_expr_result_is_string_ref(&(*cur_bin).right) {
+                        return true
+                    }
+                    var next_bin = cur_bin
+                    var has_next_bin = false
+                    match (*cur_bin).left {
+                        Some(lb) => { next_bin = &(*lb); has_next_bin = true }
+                        None => {}
+                    }
+                    if !has_next_bin { return false }
+                    cur_bin = next_bin
+                }
+                return self.expr_result_is_string_ref(cur_bin)
             }
         }
         // Packed-string producers: read_file / str_from_bytes / str_concat /
@@ -32959,7 +33060,18 @@ impl Lowerer {
             // scope for now since the unsigned flag we track propagates from
             // the literal binding via let-typed locals; a nested let n: u64 =
             // foo() + bar() will be re-tagged when the inner if-let lands).
-            return self.opt_expr_is_unsigned_int_ref(&(*e).left)
+            var cur_u = e
+            while (*cur_u).kind == ExprKind::ExprBinary {
+                var next_u = cur_u
+                var has_next_u = false
+                match (*cur_u).left {
+                    Some(lb) => { next_u = &(*lb); has_next_u = true }
+                    None => {}
+                }
+                if !has_next_u { return false }
+                cur_u = next_u
+            }
+            return self.expr_is_unsigned_int_ref(cur_u)
         }
         if (*e).kind == ExprKind::ExprCall {
             // SIO-588: a direct call result carries its callee's return
@@ -33015,7 +33127,18 @@ impl Lowerer {
             return 0
         }
         if (*e).kind == ExprKind::ExprBinary {
-            return self.opt_expr_narrow32_kind_ref(&(*e).left)
+            var cur_n32 = e
+            while (*cur_n32).kind == ExprKind::ExprBinary {
+                var next_n32 = cur_n32
+                var has_next_n32 = false
+                match (*cur_n32).left {
+                    Some(lb) => { next_n32 = &(*lb); has_next_n32 = true }
+                    None => {}
+                }
+                if !has_next_n32 { return 0 }
+                cur_n32 = next_n32
+            }
+            return self.expr_narrow32_kind_ref(cur_n32)
         }
         if (*e).kind == ExprKind::ExprCall {
             match (*e).left {
@@ -33058,7 +33181,18 @@ impl Lowerer {
             return self.lookup_local_scalar_kind((*e).name) == 1
         }
         if (*e).kind == ExprKind::ExprBinary {
-            return self.opt_expr_is_int_compatible_ref(&(*e).left)
+            var cur_ic = e
+            while (*cur_ic).kind == ExprKind::ExprBinary {
+                var next_ic = cur_ic
+                var has_next_ic = false
+                match (*cur_ic).left {
+                    Some(lb) => { next_ic = &(*lb); has_next_ic = true }
+                    None => {}
+                }
+                if !has_next_ic { return false }
+                cur_ic = next_ic
+            }
+            return self.expr_is_int_compatible_ref(cur_ic)
         }
         if (*e).kind == ExprKind::ExprCall {
             match (*e).left {
@@ -33380,10 +33514,26 @@ impl Lowerer {
             return self.index_base_elem_is_float_ref(&(*e).left)
         }
         if (*e).kind == ExprKind::ExprBinary {
-            if lower_binary_op_is_compare((*e).bin_op) {
-                return false
+            var cur_bin = e
+            while (*cur_bin).kind == ExprKind::ExprBinary {
+                if lower_binary_op_is_compare((*cur_bin).bin_op) {
+                    return false
+                }
+                if self.opt_expr_result_is_float_ref(&(*cur_bin).right) {
+                    return true
+                }
+                var next_bin = cur_bin
+                var has_next_bin = false
+                match (*cur_bin).left {
+                    Some(lb) => { next_bin = &(*lb); has_next_bin = true }
+                    None => {}
+                }
+                if !has_next_bin {
+                    return false
+                }
+                cur_bin = next_bin
             }
-            return self.opt_expr_result_is_float_ref(&(*e).left) || self.opt_expr_result_is_float_ref(&(*e).right)
+            return self.expr_result_is_float_ref(cur_bin)
         }
         if (*e).kind == ExprKind::ExprUnary {
             if (*e).un_op == UnaryOp::OpNeg {
@@ -33408,7 +33558,23 @@ impl Lowerer {
         // (int-flagged), so without this case `let k = if c { a/b } else { 0.0 }`
         // leaves `k` untyped and a downstream `acc + k` cvtsi2sd-corrupts the bits.
         if (*e).kind == ExprKind::ExprIf {
-            return self.opt_block_tail_is_float_ref(&(*e).block) || self.opt_expr_result_is_float_ref(&(*e).else_expr)
+            var cur_if = e
+            while (*cur_if).kind == ExprKind::ExprIf {
+                if self.opt_block_tail_is_float_ref(&(*cur_if).block) {
+                    return true
+                }
+                var next_if = cur_if
+                var has_next_if = false
+                match (*cur_if).else_expr {
+                    Some(ee) => { next_if = &(*ee); has_next_if = true }
+                    None => {}
+                }
+                if !has_next_if {
+                    return false
+                }
+                cur_if = next_if
+            }
+            return self.expr_result_is_float_ref(cur_if)
         }
         if (*e).kind == ExprKind::ExprMatch {
             var current = &(*e).arms
@@ -33451,7 +33617,16 @@ impl Lowerer {
                 Some(list) => {
                     let stmt_ref = &(*list).head
                     if stmt_ref.kind == StmtKind::StmtExpr {
-                        result = lo.opt_expr_result_is_float_ref(&stmt_ref.expr)
+                        var is_last = true
+                        match (*list).tail {
+                            Some(_) => { is_last = false }
+                            None => {}
+                        }
+                        if is_last {
+                            result = lo.opt_expr_result_is_float_ref(&stmt_ref.expr)
+                        } else {
+                            result = false
+                        }
                     } else {
                         result = false
                         if stmt_ref.kind == StmtKind::StmtLet || stmt_ref.kind == StmtKind::StmtVar {
@@ -33531,7 +33706,12 @@ impl Lowerer {
             match *current {
                 Some(list) => {
                     let stmt_ref = &(*list).head
-                    if stmt_ref.kind == StmtKind::StmtExpr {
+                    var is_last = true
+                    match (*list).tail {
+                        Some(_) => { is_last = false }
+                        None => {}
+                    }
+                    if is_last && stmt_ref.kind == StmtKind::StmtExpr {
                         result = self.opt_expr_result_is_string_ref(&stmt_ref.expr)
                     } else {
                         result = false
@@ -33560,7 +33740,12 @@ impl Lowerer {
             match *current {
                 Some(list) => {
                     let stmt_ref = &(*list).head
-                    if stmt_ref.kind == StmtKind::StmtExpr {
+                    var is_last = true
+                    match (*list).tail {
+                        Some(_) => { is_last = false }
+                        None => {}
+                    }
+                    if is_last && stmt_ref.kind == StmtKind::StmtExpr {
                         result = self.opt_expr_method_fn_id(&stmt_ref.expr)
                     } else {
                         result = 0 - 1
@@ -33597,35 +33782,68 @@ impl Lowerer {
         // known record return, or the same named record in the same tuple slot.
         if (*e).kind == ExprKind::ExprIf {
             let then_fn = self.opt_block_tail_method_fn_id(&(*e).block)
-            let else_fn = self.opt_expr_method_fn_id(&(*e).else_expr)
-            if then_fn < 0 || else_fn < 0 { return 0 - 1 }
+            if then_fn < 0 { return 0 - 1 }
             let then_return = self.return_struct_name_for_fn_id(then_fn)
-            let else_return = self.return_struct_name_for_fn_id(else_fn)
             let then_slot = self.return_tuple_struct_slot_for_fn_id(then_fn)
+            var then_tuple_name = ir_empty_name()
+            if then_slot >= 0 {
+                then_tuple_name = self.return_tuple_struct_name_for_fn_id(then_fn)
+                if then_tuple_name.len <= 0 { return 0 - 1 }
+                if lower_struct_layout_index_of(&(*self.struct_layouts), then_tuple_name) < 0 {
+                    return 0 - 1
+                }
+            } else {
+                if ir_fn_get(&(*self.module), then_fn as usize).return_fixed_array_len >= 0 {
+                    return 0 - 1
+                }
+                if then_return.len <= 0 { return 0 - 1 }
+                if lower_struct_layout_index_of(&(*self.struct_layouts), then_return) < 0 {
+                    return 0 - 1
+                }
+            }
+            var cur_if = e
+            var first_arm = true
+            while (*cur_if).kind == ExprKind::ExprIf {
+                if !first_arm {
+                    let arm_fn = self.opt_block_tail_method_fn_id(&(*cur_if).block)
+                    if arm_fn < 0 { return 0 - 1 }
+                    if self.return_tuple_struct_slot_for_fn_id(arm_fn) != then_slot
+                        || !ir_name_eq(self.return_struct_name_for_fn_id(arm_fn), then_return) {
+                        return 0 - 1
+                    }
+                    if then_slot >= 0 {
+                        if !ir_name_eq(self.return_tuple_struct_name_for_fn_id(arm_fn), then_tuple_name) {
+                            return 0 - 1
+                        }
+                    } else if ir_fn_get(&(*self.module), arm_fn as usize).return_fixed_array_len >= 0 {
+                        return 0 - 1
+                    }
+                }
+                first_arm = false
+                var next_if = cur_if
+                var has_next_if = false
+                match (*cur_if).else_expr {
+                    Some(ee) => { next_if = &(*ee); has_next_if = true }
+                    None => {}
+                }
+                if !has_next_if { return 0 - 1 }
+                cur_if = next_if
+            }
+            let else_fn = self.expr_method_fn_id(cur_if)
+            if else_fn < 0 { return 0 - 1 }
+            let else_return = self.return_struct_name_for_fn_id(else_fn)
             let else_slot = self.return_tuple_struct_slot_for_fn_id(else_fn)
             if then_slot != else_slot || !ir_name_eq(then_return, else_return) {
                 return 0 - 1
             }
             if then_slot >= 0 {
-                let then_name = self.return_tuple_struct_name_for_fn_id(then_fn)
                 let else_name = self.return_tuple_struct_name_for_fn_id(else_fn)
-                if then_name.len <= 0 || !ir_name_eq(then_name, else_name) {
-                    return 0 - 1
-                }
-                if lower_struct_layout_index_of(&(*self.struct_layouts), then_name) < 0 {
+                if !ir_name_eq(then_tuple_name, else_name) {
                     return 0 - 1
                 }
                 return then_fn
             }
-            // A fixed-array element name does not describe a record return.
-            if ir_fn_get(&(*self.module), then_fn as usize).return_fixed_array_len >= 0 {
-                return 0 - 1
-            }
             if ir_fn_get(&(*self.module), else_fn as usize).return_fixed_array_len >= 0 {
-                return 0 - 1
-            }
-            if then_return.len <= 0 { return 0 - 1 }
-            if lower_struct_layout_index_of(&(*self.struct_layouts), then_return) < 0 {
                 return 0 - 1
             }
             return then_fn
@@ -33694,8 +33912,32 @@ impl Lowerer {
         }
         if (*e).kind == ExprKind::ExprIf {
             let t = self.opt_block_tail_tuple0_struct_name(&(*e).block)
-            let f = self.opt_expr_tuple0_struct_name(&(*e).else_expr)
-            if t.len > 0 && ir_name_eq(t, f) {
+            if t.len <= 0 {
+                return ir_empty_name()
+            }
+            var cur_if = e
+            var first_if = true
+            while (*cur_if).kind == ExprKind::ExprIf {
+                if !first_if {
+                    let arm_t = self.opt_block_tail_tuple0_struct_name(&(*cur_if).block)
+                    if !ir_name_eq(t, arm_t) {
+                        return ir_empty_name()
+                    }
+                }
+                first_if = false
+                var next_if = cur_if
+                var has_next_if = false
+                match (*cur_if).else_expr {
+                    Some(ee) => { next_if = &(*ee); has_next_if = true }
+                    None => {}
+                }
+                if !has_next_if {
+                    return ir_empty_name()
+                }
+                cur_if = next_if
+            }
+            let f = self.expr_tuple0_struct_name(cur_if)
+            if ir_name_eq(t, f) {
                 return t
             }
             return ir_empty_name()
@@ -33905,8 +34147,32 @@ impl Lowerer {
         }
         if (*e).kind == ExprKind::ExprIf {
             let t = self.opt_block_tail_via_block(&(*e).block, blk)
-            let f = self.opt_expr_tuple0_struct_name_via_block(&(*e).else_expr, blk)
-            if t.len > 0 && ir_name_eq(t, f) {
+            if t.len <= 0 {
+                return ir_empty_name()
+            }
+            var cur_if = e
+            var first_if = true
+            while (*cur_if).kind == ExprKind::ExprIf {
+                if !first_if {
+                    let arm_t = self.opt_block_tail_via_block(&(*cur_if).block, blk)
+                    if !ir_name_eq(t, arm_t) {
+                        return ir_empty_name()
+                    }
+                }
+                first_if = false
+                var next_if = cur_if
+                var has_next_if = false
+                match (*cur_if).else_expr {
+                    Some(ee) => { next_if = &(*ee); has_next_if = true }
+                    None => {}
+                }
+                if !has_next_if {
+                    return ir_empty_name()
+                }
+                cur_if = next_if
+            }
+            let f = self.expr_tuple0_struct_name_via_block(cur_if, blk)
+            if ir_name_eq(t, f) {
                 return t
             }
             return ir_empty_name()
@@ -36173,7 +36439,23 @@ impl Lowerer {
         // type, so ORing only ever adds `true` from an arm this classifier
         // recognises -- it cannot introduce a wrong `true`.
         if (*e).kind == ExprKind::ExprIf {
-            return self.opt_block_tail_is_f64_array_ref(&(*e).block) || self.opt_expr_result_is_f64_array_ref(&(*e).else_expr)
+            var cur_if = e
+            while (*cur_if).kind == ExprKind::ExprIf {
+                if self.opt_block_tail_is_f64_array_ref(&(*cur_if).block) {
+                    return true
+                }
+                var next_if = cur_if
+                var has_next_if = false
+                match (*cur_if).else_expr {
+                    Some(ee) => { next_if = &(*ee); has_next_if = true }
+                    None => {}
+                }
+                if !has_next_if {
+                    return false
+                }
+                cur_if = next_if
+            }
+            return self.expr_result_is_f64_array_ref(cur_if)
         }
         if (*e).kind == ExprKind::ExprMatch {
             return self.match_arms_is_f64_array_ref(&(*e).arms)
@@ -36220,7 +36502,12 @@ impl Lowerer {
             match *current {
                 Some(list) => {
                     let stmt_ref = &(*list).head
-                    if stmt_ref.kind == StmtKind::StmtExpr {
+                    var is_last = true
+                    match (*list).tail {
+                        Some(_) => { is_last = false }
+                        None => {}
+                    }
+                    if is_last && stmt_ref.kind == StmtKind::StmtExpr {
                         result = self.opt_expr_result_is_f64_array_ref(&stmt_ref.expr)
                     } else {
                         result = false
@@ -36456,7 +36743,22 @@ impl Lowerer {
         // which uses the same "either arm is enough" OR philosophy for the
         // scalar case.
         if (*e).kind == ExprKind::ExprIf {
-            return self.opt_block_tail_tuple_arr_mask_ref(&(*e).block) | self.opt_expr_result_tuple_arr_mask_ref(&(*e).else_expr)
+            var acc_mask: i64 = 0
+            var cur_if = e
+            while (*cur_if).kind == ExprKind::ExprIf {
+                acc_mask = acc_mask | self.opt_block_tail_tuple_arr_mask_ref(&(*cur_if).block)
+                var next_if = cur_if
+                var has_next_if = false
+                match (*cur_if).else_expr {
+                    Some(ee) => { next_if = &(*ee); has_next_if = true }
+                    None => {}
+                }
+                if !has_next_if {
+                    return acc_mask
+                }
+                cur_if = next_if
+            }
+            return acc_mask | self.expr_result_tuple_arr_mask_ref(cur_if)
         }
         if (*e).kind == ExprKind::ExprMatch {
             return self.match_arms_tuple_arr_mask_ref(&(*e).arms)
@@ -36514,7 +36816,12 @@ impl Lowerer {
             match *current {
                 Some(list) => {
                     let stmt_ref = &(*list).head
-                    if stmt_ref.kind == StmtKind::StmtExpr {
+                    var is_last = true
+                    match (*list).tail {
+                        Some(_) => { is_last = false }
+                        None => {}
+                    }
+                    if is_last && stmt_ref.kind == StmtKind::StmtExpr {
                         result = self.opt_expr_result_tuple_arr_mask_ref(&stmt_ref.expr)
                     } else {
                         result = 0
@@ -44239,13 +44546,26 @@ impl Lowerer {
         r
     }
 
-    fn lower_binary_expr_ref_inner(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
-        if e.bin_op == BinaryOp::OpAnd || e.bin_op == BinaryOp::OpOr {
-            return self.lower_short_circuit_ref(e)
+    fn lower_binary_expr_needs_special_ref(self, e: &Expr) -> bool with Mut, Panic, Div, Alloc {
+        if self.opt_expr_result_is_wide_float_ref(&e.left) || self.opt_expr_result_is_wide_float_ref(&e.right) {
+            return true
         }
-        // V0-E.4.1 fail-closed: never lower f128/f256 ops as f64 (lean_single greenwash).
-        // V0-E.5.1: same-format f128 + / - on 2-limb locals desugars to stdlib softfloat.
-        // V0-E.5.2: * and the six comparisons (bool result). V0-E.5.3: `/`. KL-8: `%`.
+        let lhs_untyped_deref = self.opt_expr_is_deref_ref(&e.left) && self.opt_deref_expr_pointee_kind_ref(&e.left) == 0
+        let rhs_untyped_deref = self.opt_expr_is_deref_ref(&e.right) && self.opt_deref_expr_pointee_kind_ref(&e.right) == 0
+        if (lhs_untyped_deref && self.opt_expr_result_is_float_ref(&e.right))
+            || (rhs_untyped_deref && self.opt_expr_result_is_float_ref(&e.left)) {
+            return true
+        }
+        let lhs_untyped_payload = self.opt_expr_is_untyped_option_payload_ref(&e.left)
+        let rhs_untyped_payload = self.opt_expr_is_untyped_option_payload_ref(&e.right)
+        if (lhs_untyped_payload && self.opt_expr_result_is_float_ref(&e.right))
+            || (rhs_untyped_payload && self.opt_expr_result_is_float_ref(&e.left)) {
+            return true
+        }
+        false
+    }
+
+    fn lower_binary_expr_special_or_refuse_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         if self.opt_expr_result_is_wide_float_ref(&e.left) || self.opt_expr_result_is_wide_float_ref(&e.right) {
             if self.lower_f128_binary_op_supported(e.bin_op)
                 && self.lower_f128_expr_ready_ref(&e.left)
@@ -44257,12 +44577,6 @@ impl Lowerer {
             lowerer_mark_hard_error(&! lo_refuse)
             return (lo_refuse, 0)
         }
-        // Fail-closed: a dereference whose pointee cannot be typed here, as an
-        // operand next to an f64. The checker only admits `*x <op> f64` when *x
-        // is itself an f64, but this lowering would classify the dereference as
-        // an integer and convert its IEEE-754 bit pattern (cvtsi2sd) -- the
-        // silent miscompile deref_operand_pointee_kind_ref exists to prevent.
-        // Refuse instead of guessing; binding the value first is always typed.
         let lhs_untyped_deref = self.opt_expr_is_deref_ref(&e.left) && self.opt_deref_expr_pointee_kind_ref(&e.left) == 0
         let rhs_untyped_deref = self.opt_expr_is_deref_ref(&e.right) && self.opt_deref_expr_pointee_kind_ref(&e.right) == 0
         if (lhs_untyped_deref && self.opt_expr_result_is_float_ref(&e.right))
@@ -44278,52 +44592,57 @@ impl Lowerer {
             lowerer_mark_hard_error(&! lo_deref_refuse)
             return (lo_deref_refuse, 0)
         }
-        // #2787: same refusal for a `Some(x)` payload binding whose type the lowerer
-        // could not name (scrutinee not a local/param declared `Option<T>`): its
-        // register holds the payload's bits as an integer word.
-        let lhs_untyped_payload = self.opt_expr_is_untyped_option_payload_ref(&e.left)
-        let rhs_untyped_payload = self.opt_expr_is_untyped_option_payload_ref(&e.right)
-        if (lhs_untyped_payload && self.opt_expr_result_is_float_ref(&e.right))
-            || (rhs_untyped_payload && self.opt_expr_result_is_float_ref(&e.left)) {
-            print("error: Madaros cannot type a `Some(x)` payload used as an f64 operand: the matched value is not a local or parameter declared `Option<f64>`; bind it first, e.g. `let o: Option<f64> = expr` and match on `o` (fail-closed; no integer arithmetic on IEEE-754 bits)\n")
-            var lo_payload_refuse = self
-            if IR_LOWER_HARD_ERROR_REASON == 0 {
-                IR_LOWER_HARD_ERROR_REASON = 8
-                IR_LOWER_HARD_ERROR_NEEDED = 0
-                IR_LOWER_HARD_ERROR_LIMIT = 0
-                ir_copy_name_to_flat(&(*self.current_func).name, &! IR_LOWER_HARD_ERROR_FN_BUF, &! IR_LOWER_HARD_ERROR_FN_LEN)
-            }
-            lowerer_mark_hard_error(&! lo_payload_refuse)
-            return (lo_payload_refuse, 0)
+        print("error: Madaros cannot type a `Some(x)` payload used as an f64 operand: the matched value is not a local or parameter declared `Option<f64>`; bind it first, e.g. `let o: Option<f64> = expr` and match on `o` (fail-closed; no integer arithmetic on IEEE-754 bits)\n")
+        var lo_payload_refuse = self
+        if IR_LOWER_HARD_ERROR_REASON == 0 {
+            IR_LOWER_HARD_ERROR_REASON = 8
+            IR_LOWER_HARD_ERROR_NEEDED = 0
+            IR_LOWER_HARD_ERROR_LIMIT = 0
+            ir_copy_name_to_flat(&(*self.current_func).name, &! IR_LOWER_HARD_ERROR_FN_BUF, &! IR_LOWER_HARD_ERROR_FN_LEN)
         }
-        let wide_bits = self.expr_wide_bits_ref(e)
-        let lhs_expr_is_float = self.opt_expr_result_is_float_ref(&e.left)
+        lowerer_mark_hard_error(&! lo_payload_refuse)
+        (lo_payload_refuse, 0)
+    }
+
+    fn lower_binary_expr_ref_inner(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        if e.bin_op == BinaryOp::OpAnd || e.bin_op == BinaryOp::OpOr {
+            return self.lower_short_circuit_ref(e)
+        }
+        if self.lower_binary_expr_needs_special_ref(e) {
+            return self.lower_binary_expr_special_or_refuse_ref(e)
+        }
+        let lhs_f = if self.opt_expr_result_is_float_ref(&e.left) { 1 } else { 0 }
+        let ws = if self.expr_wide_signed_ref(e) == 1 { 4 } else { 0 }
         let pair_l = self.lower_opt_expr_ref(&e.left)
         let lo1 = pair_l.0
         let lhs = pair_l.1
-        let rhs_expr_is_float = lo1.opt_expr_result_is_float_ref(&e.right)
+        let rhs_f = if lo1.opt_expr_result_is_float_ref(&e.right) { 2 } else { 0 }
         let pair_r = lo1.lower_opt_expr_ref(&e.right)
-        var lo2 = pair_r.0
+        let lo_r = pair_r.0
         let rhs = pair_r.1
+        lo_r.lower_binary_expr_after_operands_ref(e, lhs, rhs, lhs_f + rhs_f + ws)
+    }
+
+    fn lower_binary_expr_after_operands_ref(
+        self,
+        e: &Expr,
+        lhs: i64,
+        rhs: i64,
+        flags: i64
+    ) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        var lo2 = self
+        let wide_bits = lo2.expr_wide_bits_ref(e)
+        let lhs_expr_is_float = (flags & 1) != 0
+        let rhs_expr_is_float = (flags & 2) != 0
+        let wide_signed = if (flags & 4) != 0 { 1 } else { 0 }
         // A binary expression CONSUMES its operands' pending variance, exactly as a
-        // call consumes its arguments'. Lowering `k.value` sets pending_variance_reg
-        // to that Knowledge's raw channel so `let x = k.value` inherits it; leaving
-        // it set here lets the LAST operand's channel escape into an enclosing let.
-        //
-        // For `let y = k0.value * k1.value + k2.value * k3.value` the binding then
-        // took the pending-reg branch, which never calls lower_expr_variance_ref and
-        // so never runs the product/sum sensitivity rules: sensitivity_of(y, k) read
-        // 0, 0, 0, 1 against truths 3, 2, 7, 5 — the unit seed of whichever channel
-        // happened to be lowered last (#1549).
-        //
-        // The result's variance must be DERIVED from both operands, never inherited
-        // from one of them.
+        // call consumes its arguments'.
         lo2.pending_variance_reg = -1
         var cmp_op = lower_binary_op_to_wide_cmp(e.bin_op)
         // Ordered wide comparisons need signed treatment at the most-significant
         // limb. Encode signed Lt/Le/Gt/Ge as 8/9/10/11; Eq/Ne are bitwise and
         // retain 0/1. The native emitter compares lower limbs as unsigned.
-        if cmp_op >= 2 && self.expr_wide_signed_ref(e) == 1 {
+        if cmp_op >= 2 && wide_signed == 1 {
             cmp_op = cmp_op + 6
         }
         let limbs = lower_wide_limb_count(wide_bits)
@@ -47313,47 +47632,69 @@ impl Lowerer {
         // int-flagged value (e.g. an f64 literal via IrLoadImm) would otherwise
         // leave res untyped and a downstream float consumer cvtsi2sd-corrupts it.
         let res_is_float = self.expr_result_is_float_ref(e)
-        let pair_cond = self.lower_opt_expr_ref(&e.left)
-        let lo1 = pair_cond.0
-        let cond = pair_cond.1
-
-        let pair_l_else = lo1.fresh_label()
-        let lo2 = pair_l_else.0
-        let l_else = pair_l_else.1
-        let pair_l_end = lo2.fresh_label()
-        let lo3 = pair_l_end.0
+        let pair_l_end = self.fresh_label()
+        let lo_end = pair_l_end.0
         let l_end = pair_l_end.1
-        let pair_res = lo3.fresh_reg()
-        let lo4 = pair_res.0
+        let pair_res = lo_end.fresh_reg()
+        var lo = pair_res.0
         let res = pair_res.1
 
-        var lo = lo4.emit(ir_branch_false(cond, l_else))
+        var cur_if = e
+        while true {
+            let pair_cond = lo.lower_opt_expr_ref(&(*cur_if).left)
+            lo = pair_cond.0
+            let cond = pair_cond.1
 
-        let then_block_opt: Option<Box<Block>> = e.block
-        let pair_then = match then_block_opt {
-            Some(blk) => lo.lower_block_ref(&(*blk)),
-            None => lo.emit_unit(),
-        }
-        lo = pair_then.0
-        let then_reg = pair_then.1
-        lo = lo.emit(ir_copy(res, then_reg))
-        lo = lo.emit(ir_jump(l_end))
-        lo = lo.emit(ir_label(l_else))
+            let pair_l_else = lo.fresh_label()
+            lo = pair_l_else.0
+            let l_else = pair_l_else.1
 
-        let else_expr_opt: Option<Box<Expr>> = e.else_expr
-        let pair_else = match else_expr_opt {
-            Some(ee) => {
-                if LOWER_F128_TAIL_EXPR && lower_expr_is_float_literal_like_ref(&(*ee)) {
-                    lo.lower_f128_value_ref(&(*ee))
-                } else {
-                    lo.lower_expr_ref(&(*ee))
-                }
+            lo = lo.emit(ir_branch_false(cond, l_else))
+
+            let pair_then = match (*cur_if).block {
+                Some(blk) => lo.lower_block_ref(&(*blk)),
+                None => lo.emit_unit(),
             }
-            None => lo.emit_unit(),
+            lo = pair_then.0
+            let then_reg = pair_then.1
+            lo = lo.emit(ir_copy(res, then_reg))
+            lo = lo.emit(ir_jump(l_end))
+            lo = lo.emit(ir_label(l_else))
+
+            var next_if = cur_if
+            var step_else_if = false
+            var has_else = false
+            match (*cur_if).else_expr {
+                Some(ee) => {
+                    next_if = &(*ee)
+                    has_else = true
+                    if (*ee).kind == ExprKind::ExprIf
+                        && !(LOWER_F128_TAIL_EXPR && lower_expr_is_float_literal_like_ref(&(*ee))) {
+                        step_else_if = true
+                    }
+                }
+                None => {}
+            }
+            if step_else_if {
+                cur_if = next_if
+            } else if has_else {
+                let pair_else = if LOWER_F128_TAIL_EXPR && lower_expr_is_float_literal_like_ref(next_if) {
+                    lo.lower_f128_value_ref(next_if)
+                } else {
+                    lo.lower_expr_ref(next_if)
+                }
+                lo = pair_else.0
+                let else_reg = pair_else.1
+                lo = lo.emit(ir_copy(res, else_reg))
+                break
+            } else {
+                let pair_none = lo.emit_unit()
+                lo = pair_none.0
+                let else_reg = pair_none.1
+                lo = lo.emit(ir_copy(res, else_reg))
+                break
+            }
         }
-        lo = pair_else.0
-        let else_reg = pair_else.1
-        lo = lo.emit(ir_copy(res, else_reg))
         lo = lo.emit(ir_label(l_end))
         if res_is_float {
             lo = lo.emit(ir_mark_float_reg(res))
@@ -48695,35 +49036,36 @@ impl Lowerer {
         self.lower_expr_non_binary_ref(e)
     }
 
-    fn lower_expr_non_binary_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
-        if self.probe_mode && lower_body_diag_enabled() {
-            print("lower_probe: expr_kind=")
-            if e.kind == ExprKind::ExprIntLit { print("int") }
-            else if e.kind == ExprKind::ExprFloatLit { print("float") }
-            else if e.kind == ExprKind::ExprBoolTrue { print("bool_true") }
-            else if e.kind == ExprKind::ExprBoolFalse { print("bool_false") }
-            else if e.kind == ExprKind::ExprStringLit { print("string") }
-            else if e.kind == ExprKind::ExprCharLit { print("char") }
-            else if e.kind == ExprKind::ExprIdent { print("ident") }
-            else if e.kind == ExprKind::ExprCall { print("call") }
-            else if e.kind == ExprKind::ExprBinary { print("binary") }
-            else if e.kind == ExprKind::ExprUnary { print("unary") }
-            else if e.kind == ExprKind::ExprFieldAccess { print("field") }
-            else if e.kind == ExprKind::ExprIndex { print("index") }
-            else if e.kind == ExprKind::ExprIf { print("if") }
-            else if e.kind == ExprKind::ExprWhile { print("while") }
-            else if e.kind == ExprKind::ExprReturn { print("return") }
-            else if e.kind == ExprKind::ExprBreak { print("break") }
-            else if e.kind == ExprKind::ExprContinue { print("continue") }
-            else if e.kind == ExprKind::ExprStructLit { print("struct_lit") }
-            else if e.kind == ExprKind::ExprArrayLit { print("array_lit") }
-            else if e.kind == ExprKind::ExprTupleLit { print("tuple_lit") }
-            else if e.kind == ExprKind::ExprBlock { print("block") }
-            else if e.kind == ExprKind::ExprLoop { print("loop") }
-            else if e.kind == ExprKind::ExprForIn { print("for_in") }
-            else { print("other") }
-            print("\n")
-        }
+    fn lower_expr_probe_print(self, e: &Expr) with IO {
+        print("lower_probe: expr_kind=")
+        if e.kind == ExprKind::ExprIntLit { print("int") }
+        else if e.kind == ExprKind::ExprFloatLit { print("float") }
+        else if e.kind == ExprKind::ExprBoolTrue { print("bool_true") }
+        else if e.kind == ExprKind::ExprBoolFalse { print("bool_false") }
+        else if e.kind == ExprKind::ExprStringLit { print("string") }
+        else if e.kind == ExprKind::ExprCharLit { print("char") }
+        else if e.kind == ExprKind::ExprIdent { print("ident") }
+        else if e.kind == ExprKind::ExprCall { print("call") }
+        else if e.kind == ExprKind::ExprBinary { print("binary") }
+        else if e.kind == ExprKind::ExprUnary { print("unary") }
+        else if e.kind == ExprKind::ExprFieldAccess { print("field") }
+        else if e.kind == ExprKind::ExprIndex { print("index") }
+        else if e.kind == ExprKind::ExprIf { print("if") }
+        else if e.kind == ExprKind::ExprWhile { print("while") }
+        else if e.kind == ExprKind::ExprReturn { print("return") }
+        else if e.kind == ExprKind::ExprBreak { print("break") }
+        else if e.kind == ExprKind::ExprContinue { print("continue") }
+        else if e.kind == ExprKind::ExprStructLit { print("struct_lit") }
+        else if e.kind == ExprKind::ExprArrayLit { print("array_lit") }
+        else if e.kind == ExprKind::ExprTupleLit { print("tuple_lit") }
+        else if e.kind == ExprKind::ExprBlock { print("block") }
+        else if e.kind == ExprKind::ExprLoop { print("loop") }
+        else if e.kind == ExprKind::ExprForIn { print("for_in") }
+        else { print("other") }
+        print("\n")
+    }
+
+    fn lower_expr_leaf_or_path_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         if e.kind == ExprKind::ExprIntLit {
             let pair = self.fresh_reg()
             let lo = pair.0
@@ -48940,6 +49282,25 @@ impl Lowerer {
                     loe.emit_unit()
                 }
             }
+        } else {
+            let loe = self.report_error_at(15454)
+            loe.emit_unit()
+        }
+    }
+
+    fn lower_expr_non_binary_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        if self.probe_mode && lower_body_diag_enabled() {
+            self.lower_expr_probe_print(e)
+        }
+        if e.kind == ExprKind::ExprIntLit
+            || e.kind == ExprKind::ExprFloatLit
+            || e.kind == ExprKind::ExprBoolTrue
+            || e.kind == ExprKind::ExprBoolFalse
+            || e.kind == ExprKind::ExprStringLit
+            || e.kind == ExprKind::ExprCharLit
+            || e.kind == ExprKind::ExprIdent
+            || e.kind == ExprKind::ExprPath {
+            self.lower_expr_leaf_or_path_ref(e)
         } else if e.kind == ExprKind::ExprCall {
             self.lower_call_expr_ref(e)
         } else if e.kind == ExprKind::ExprBinary {
