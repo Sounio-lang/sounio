@@ -54,6 +54,28 @@ function assertExamples() {
   if (aboutCodes.length !== aboutExpected.length || aboutExpected.some((code) => !aboutCodes.includes(code))) {
     errors.push(`about hreflang codes drifted: ${aboutCodes.join(',')}`);
   }
+  const expandedCodes = hreflangLinks('/learn/epistemic/expanded-uncertainty/').map((link) => link.hreflang);
+  const expandedExpected = ['en', 'ja', 'x-default'];
+  if (
+    expandedCodes.length !== expandedExpected.length
+    || expandedExpected.some((code) => !expandedCodes.includes(code))
+    || expandedCodes.includes('pt-BR')
+    || expandedCodes.includes('zh-CN')
+  ) {
+    errors.push(`expanded-uncertainty hreflang drifted: ${expandedCodes.join(',')}`);
+  }
+  const expandedJa = canonicalPathname('/ja/learn/epistemic/expanded-uncertainty/');
+  if (expandedJa !== '/ja/learn/epistemic/expanded-uncertainty/') {
+    errors.push(`expected ja expanded-uncertainty to self-canonicalize, got ${expandedJa}`);
+  }
+  const expandedPt = canonicalPathname('/pt/learn/epistemic/expanded-uncertainty/');
+  if (expandedPt !== '/learn/epistemic/expanded-uncertainty/') {
+    errors.push(`expected pt expanded-uncertainty to canonicalize to English, got ${expandedPt}`);
+  }
+  const expandedDefault = hreflangLinks('/ja/learn/epistemic/expanded-uncertainty/').find((link) => link.hreflang === 'x-default');
+  if (expandedDefault?.href !== absoluteUrl('/learn/epistemic/expanded-uncertainty/')) {
+    errors.push(`expanded-uncertainty x-default is ${expandedDefault?.href ?? '(missing)'}`);
+  }
   return errors;
 }
 

@@ -176,6 +176,9 @@ const tutorialHubLocales = localesWithAny(tutorials);
  *   English article. `/about/vision/` and `/about/roadmap/` stay English.
  * - `/releases/` carries a distinct notes array for every locale, including
  *   `zh-hk`, in src/pages/releases/index.astro.
+ * - `/learn/epistemic/expanded-uncertainty/` has an English page and a
+ *   Japanese article. No other locale is generated, so hreflang is only
+ *   en, ja, and x-default (English).
  */
 const EXPLICIT_SHELLS = {
   '/': homeLocales,
@@ -188,6 +191,7 @@ const EXPLICIT_SHELLS = {
   '/scientist/': scientistLocales,
   '/honesty/': ['en', 'pt'],
   '/about/': ['en', 'pt'],
+  '/learn/epistemic/expanded-uncertainty/': ['en', 'ja'],
 };
 
 const REDIRECT_EXACT = new Set([
