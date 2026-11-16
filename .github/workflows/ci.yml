@@ -131,6 +131,8 @@ jobs:
         run: node scripts/ci/deep_science_partition_contract.mjs "$PWD" --selftest
       - name: Workflow gate reference ratchet before expensive jobs
         run: bash scripts/ci/gate_workflow_reference_ratchet.sh
+      - name: E041 meaning agrees across registry, diagnostics and docs
+        run: bash scripts/ci/diagnostic_e041_meaning_gate.sh
       - name: Materialize the committed Madaros prebuilt
         run: bash scripts/lib/materialize_madaros_prebuilt.sh
       # Orchestration self-test for the SCO artefact-reuse path (ADR-027 §3):
@@ -952,6 +954,16 @@ jobs:
           chmod +x /tmp/lean_b.elf
           SOUNIO_LEAN_SINGLE_BIN=/tmp/lean_b.elf JOBS=4 TIMEOUT_SECS=120 \
             bash scripts/ci/a64_compile_fail_parity_gate.sh
+      # The arm64 lane must propagate GUM variance as x86 does: runs each listed
+      # case under qemu-aarch64 and compares stdout and exit code with x86.
+      # Reuses /tmp/lean_b.elf from the step above.
+      - name: aarch64 propagates variance as x86 does
+        if: matrix.shard == 'core-c'
+        run: |
+          set -euo pipefail
+          command -v qemu-aarch64-static >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq qemu-user-static; }
+          SOUNIO_LEAN_SINGLE_BIN=/tmp/lean_b.elf TIMEOUT_SECS=180 \
+            bash scripts/ci/a64_epistemic_variance_parity_gate.sh
       - name: checker_init_in_place assigns every Checker field (#2966)
         if: matrix.shard == 'core-c'
         run: |
@@ -2094,6 +2106,20 @@ jobs:
           done
           codesign -s - -f artifacts/self-hosted/souc-self-hosted-arm64-macos
           codesign --verify artifacts/self-hosted/souc-self-hosted-arm64-macos
+      # lean_single on arm64 (the compiler that builds the macOS Madaros): a
+      # tuple var assigned from a call must keep its value when a later call
+      # returns another tuple. It stored a pointer to the single return buffer,
+      # and that let `var G = MAX + 1` through on macOS (2026-11-15).
+      - name: lean_single arm64 keeps reassigned tuples apart
+        run: |
+          export SOUNIO_STDLIB_PATH="$PWD/stdlib"
+          t=tests/run-pass/tuple_var_reassign_keeps_values.sio
+          artifacts/self-hosted/souc-self-hosted-arm64-macos "$t" /tmp/tuple-reassign --target aarch64-macos
+          chmod +x /tmp/tuple-reassign
+          codesign -s - -f /tmp/tuple-reassign
+          /tmp/tuple-reassign > /tmp/tuple-reassign.out
+          sed -n 's#^//@ expect-stdout: ##p' "$t" > /tmp/tuple-reassign.want
+          diff /tmp/tuple-reassign.want /tmp/tuple-reassign.out
       - name: Native AST expression-kind surface preflight
         run: |
           /usr/bin/clang++ -std=c++23 -O2 -Wall -Wextra -Werror scripts/ci/ast_expr_kind_surface.cpp -o /tmp/madaros-ast-expr-surface
@@ -2119,6 +2145,22 @@ jobs:
         run: bash scripts/ci/madaros_macos_arm64_acceptance_gate.sh /tmp/madaros-current-macos
       - name: Native module registry capacity and scalar bool globals
         run: bash scripts/ci/module_registry_capacity_gate.sh /tmp/madaros-current-macos /tmp/madaros-module-registry
+      # ADR-031 R1 on the macOS compiler, which the lean_single seed compiles
+      # directly: module-level i64 initializers that overflow are refused with
+      # E300, and one in range is accepted. The compile-fail suite does not run
+      # on this job, and a seed miscompilation once let `var G = MAX + 1` through
+      # here while Linux refused it.
+      - name: Native global initializer overflow refusals (E300)
+        run: |
+          export SOUNIO_STDLIB_PATH="$PWD/stdlib"
+          for t in tests/compile-fail/i64_global_let_init_overflow.sio \
+                   tests/compile-fail/i64_global_var_init_overflow.sio \
+                   tests/compile-fail/i64_global_init_overflow_operand_order.sio; do
+            if /tmp/madaros-current-macos check "$t" > /tmp/e300.log 2>&1 || ! grep -q 'error\[E300\]' /tmp/e300.log; then
+              echo "not refused with E300: $t"; cat /tmp/e300.log; exit 1
+            fi
+          done
+          /tmp/madaros-current-macos check tests/run-pass/i64_global_init_in_range.sio
       - name: Native type environment capacity and binding refusal
         run: bash scripts/ci/type_env_capacity_gate.sh /tmp/madaros-current-macos /tmp/madaros-type-env
       - name: Native IR tail growth and ARM64 address-window contract

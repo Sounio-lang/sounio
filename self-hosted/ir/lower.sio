@@ -259,6 +259,28 @@ var FO_INLINE_DEPTH: i64 = 0
 // with a diagnostic instead of crashing. Globals match the FO_INLINE_DEPTH
 // precedent: a Lowerer field would not survive the per-call rebuilds.
 var LOWER_EXPR_DEPTH: i64 = 0
+// ADR-031 R1: source site of the arithmetic expression being lowered,
+// (span.file_id << 32) | span.start, 0 = none. Lowerer.emit stamps it on the
+// checked arithmetic it emits (IrInstr.src_site), so the overflow panic can
+// name the source location. Set and restored around each binary/unary node.
+var LOWER_CUR_SITE: i64 = 0
+
+fn lower_site_of_span(sp: Span) -> i64 {
+    if sp.file_id <= 0 || sp.start < 0 || sp.start >= 4294967296 { return 0 }
+    ((sp.file_id as i64) << 32) | sp.start
+}
+
+// The arithmetic the native backends guard (ADR-031 R1/R2).
+fn lower_instr_is_checked_arith(i: &IrInstr) -> bool {
+    if (*i).op == IrOpcode::IrBinOp {
+        let b = (*i).bin_op
+        return b == BinaryOp::OpAdd || b == BinaryOp::OpSub || b == BinaryOp::OpMul
+            || b == BinaryOp::OpUAdd || b == BinaryOp::OpUSub || b == BinaryOp::OpUMul
+            || b == BinaryOp::OpDiv || b == BinaryOp::OpRem || b == BinaryOp::OpUDiv || b == BinaryOp::OpURem
+    }
+    if (*i).op == IrOpcode::IrUnaryOp { return (*i).un_op == UnaryOp::OpNeg }
+    false
+}
 var LOWER_EXPR_BUDGET: i64 = 0 - 1
 // Global, like the FO_XFER_* table: a Lowerer is rebuilt per function, so a
 // Lowerer field would not survive from the helper's lowering to its caller's.
@@ -742,6 +764,11 @@ var IR_LOWER_ERROR_TOTAL: i64 = 0
 // Lowerer resets and is cleared only at top-level compile entry.
 var IR_LOWER_COMPILE_ERROR_LATCH: bool = false
 var IR_LOWER_COMPILE_ERROR_SCOPE_ACTIVE: bool = false
+// Numeric lowering also creates zero-variance bookkeeping channels. Overflow
+// matters only when this compilation actually constructs/observes uncertainty.
+// Keep both facts across module resets so either discovery order fails closed.
+var FO_CAPACITY_OVERFLOWED: bool = false
+var FO_UNCERTAINTY_USED: bool = false
 // WHICH PRESEED STAGE first turned had_error true, and for the two that loop,
 // on which module index. The counters above proved the flag goes true without
 // any `had_error = true` in this file firing, so the write happens inside one
@@ -989,12 +1016,18 @@ pub fn lower_hard_error_report() with IO, Mut, Panic, Div {
         ir_print_flat_name(&IR_LOWER_HARD_ERROR_FN_BUF, IR_LOWER_HARD_ERROR_FN_LEN)
         print("` passes a capturing closure where its captured values cannot be\n")
         print("         supplied; the capture would read as 0, so it is refused (#1542).\n")
+    } else if IR_LOWER_HARD_ERROR_REASON == 10 {
+        print("  cause: GUM_UNTRACKED_CONTAINER in function `")
+        ir_print_flat_name(&IR_LOWER_HARD_ERROR_FN_BUF, IR_LOWER_HARD_ERROR_FN_LEN)
+        print("`: container operation cannot preserve Knowledge uncertainty (#3546)\n")
     } else if IR_LOWER_HARD_ERROR_REASON == 6 {
         print("  cause: function `")
         ir_print_flat_name(&IR_LOWER_HARD_ERROR_FN_BUF, IR_LOWER_HARD_ERROR_FN_LEN)
         print("` uses a dereference whose pointee type Madaros cannot determine as an\n")
         print("         operand next to an f64; lowering it would compute on the IEEE-754 bit\n")
         print("         pattern as an integer, so it is refused (bind `let v: f64 = *expr` first).\n")
+    } else if IR_LOWER_HARD_ERROR_REASON == 10 {
+        print("  cause: GUM channel capacity exceeded; see E303/E304 above (#3545).\n")
     } else if IR_LOWER_HARD_ERROR_NEEDED > 0 {
         print("  cause: function `")
         ir_print_flat_name(&IR_LOWER_HARD_ERROR_FN_BUF, IR_LOWER_HARD_ERROR_FN_LEN)
@@ -1012,6 +1045,8 @@ pub fn lower_hard_error_report() with IO, Mut, Panic, Div {
 pub fn lower_compile_error_scope_begin() with Mut {
     IR_LOWER_COMPILE_ERROR_LATCH = false
     IR_LOWER_COMPILE_ERROR_SCOPE_ACTIVE = true
+    FO_CAPACITY_OVERFLOWED = false
+    FO_UNCERTAINTY_USED = false
 }
 
 pub fn lower_compile_error_scope_end() with Mut {
@@ -1096,6 +1131,33 @@ pub fn lower_hard_error_reset() with Mut {
 // separate pending flag directly.
 pub fn lower_had_error_with_hard(v: bool) -> bool { v || (IR_LOWER_COMPILE_ERROR_SCOPE_ACTIVE && IR_LOWER_COMPILE_ERROR_LATCH) || IR_LOWER_HARD_ERROR != 0 || LOWER_USE_MODULE_OVERFLOWED || LOWER_MERGE_FN_OVERFLOWED || LOWER_IMPL_METHOD_OVERFLOWED || LOWER_UNIT_FLOAT_OVERFLOWED || ast_named_item_terminal_overflowed() || spec_item_module_overflowed() || ast_path_range_name_overflowed() }
 fn lower_ok_without_hard(v: bool) -> bool { !lower_had_error_with_hard(v) }
+
+// #3545: fail at the actual allocation, including synthetic residual channels
+// that the checker's measure() source counter cannot count. The compile-scope
+// latch survives discarded Lowerer values and per-module hard-error resets.
+fn fo_refuse_capacity(correlation: bool) with Mut, IO {
+    if !correlation {
+        FO_CAPACITY_OVERFLOWED = true
+        if !FO_UNCERTAINTY_USED { return }
+    }
+    if correlation {
+        print("error[E304]: GUM correlation channel capacity exceeded: correlate() supports only channels 0 through 7; refusing to drop covariance (#3545)\n")
+    } else {
+        print("error[E303]: GUM channel capacity exceeded: first-order lowering supports at most 32 channels per function; refusing to drop uncertainty sources (#3545)\n")
+    }
+    IR_LOWER_HARD_ERROR = 1
+    if IR_LOWER_COMPILE_ERROR_SCOPE_ACTIVE {
+        IR_LOWER_COMPILE_ERROR_LATCH = true
+    }
+    if IR_LOWER_HARD_ERROR_REASON == 0 {
+        IR_LOWER_HARD_ERROR_REASON = 10
+    }
+}
+
+fn fo_require_uncertainty_tracking() with Mut, IO {
+    FO_UNCERTAINTY_USED = true
+    if FO_CAPACITY_OVERFLOWED { fo_refuse_capacity(false) }
+}
 var FO_XFER_COUNT: i64 = 0
 var FO_XFER_KIND: [i64; 64] = [0; 64]
 // f64 globals whose initializer is a float word. A scale transfer folds them.
@@ -1130,9 +1192,9 @@ var FO_CTOR_FIELD0: [i64; 256] = [0; 256]
 //
 // 8x8 to match so_hess_idx's domain: the off-diagonal Hessian is the second
 // consumer of this, and a covariance the Hessian cannot index is a covariance
-// nothing can use. Variance walks 32 channels, so a pair above 7 is silently
-// uncorrelated -- fo_cov_rho_set refuses it rather than wrapping into another
-// pair's slot.
+// nothing can use. Variance walks 32 channels, so a pair above 7 must refuse
+// compilation rather than silently becoming uncorrelated or wrapping into
+// another pair's slot (#3545).
 // sigma per channel, as a register index -- not sigma squared, and not a
 // struct field.
 //
@@ -1169,6 +1231,7 @@ fn fo_cov_rho_idx(i: i64, j: i64) -> i64 with Div {
 
 fn fo_cov_rho_set(i: i64, j: i64, rho: f64) with Mut, Panic, Div, IO {
     if i < 0 || j < 0 || i >= 8 || j >= 8 {
+        if i >= 8 || j >= 8 { fo_refuse_capacity(true) }
         return
     }
     if i == j {
@@ -1194,6 +1257,7 @@ fn fo_cov_rho_get(i: i64, j: i64) -> f64 with Mut, Panic, Div {
 
 fn fo_cov_rho_reg_set(i: i64, j: i64, reg: i64) with Mut, Panic, Div, IO {
     if i < 0 || j < 0 || i >= 8 || j >= 8 {
+        if i >= 8 || j >= 8 { fo_refuse_capacity(true) }
         return
     }
     if i == j {
@@ -1240,6 +1304,24 @@ var FO_FIELD_SENS_COUNT: i64 = 0
 var FO_FIELD_SENS_KEY: [i64; 64] = [0; 64]
 var FO_FIELD_SENS: [i64; 2048] = [-1; 2048]
 
+// #3546: straight-line f64 array element sensitivities, keyed by the actual
+// local array register and literal index. Snapshot registers at stores: a
+// mutable scalar's sensitivity slots must not alias an earlier array value.
+var FO_ARRAY_COUNT: i64 = 0
+var FO_ARRAY_BASE: [i64; 64] = [-1; 64]
+var FO_ARRAY_INDEX: [i64; 64] = [-1; 64]
+var FO_ARRAY_SENS: [i64; 2048] = [-1; 2048]
+var FO_CONTAINER_KNOWLEDGE_SEEN: bool = false
+
+fn fo_array_base_tracked(base: i64) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < FO_ARRAY_COUNT {
+        if FO_ARRAY_BASE[i as usize] == base { return true }
+        i = i + 1
+    }
+    false
+}
+
 // A `let r = &p` (or `let s = r`) names the same struct local for field
 // variance. Without this, variance_of(r.cl0) keys the reference's own
 // register and reads 0 while variance_of(p.cl0) is live.
@@ -1280,6 +1362,8 @@ fn fo_ref_alias_base(name: Name) -> i64 with Mut, Panic, Div {
 
 fn fo_field_sens_reset() with Mut {
     FO_FIELD_SENS_COUNT = 0
+    FO_ARRAY_COUNT = 0
+    FO_CONTAINER_KNOWLEDGE_SEEN = false
     fo_ref_alias_reset()
     FO_CL_HEAD = None
     FO_LETCALL_HEAD = None
@@ -3110,7 +3194,7 @@ struct Lowerer {
     allow_direct_capturing_closure_literal: bool,
     pending_variance_reg: i64,
     // β-Madaros multi-channel FO GUM (lean_single β¹⁰/β¹¹ parity target).
-    // Var(y) = Σ_k (∂y/∂x_k)² · σ²_k with up to 8 Knowledge seeds per function.
+    // Var(y) = Σ_k (∂y/∂x_k)² · σ²_k with up to 32 channels per function.
     // Enables partial-correlation products ((a*b)*a) and p1−p2 cancel.
     // 32 channels: headroom for multi-seed polys after other live seeds in main.
     fo_nchan: i64,
@@ -3217,6 +3301,24 @@ var LOWER_MONOLITHIC_PUBLIC_PROBE_TRACE: bool = false
 // this instead of a call to a name that binds to nothing (which left its dst vreg
 // unwritten, i.e. reading 0). See lowerer_lower_fn_mut and the ExprCall lowering.
 var LOWER_KERNEL_TID_REG: i64 = 0 - 1
+// Wide-integer call ABI: the callee's packed wide_param_limbs for the argument
+// list about to be lowered (args shifted past a method receiver). Armed by the
+// direct and method call sites, consumed and cleared on entry by
+// lower_expr_args_masked_borrow_ref so nested argument lists never inherit it.
+var LOWER_WIDE_ARG_LIMBS: i64 = 0
+// Wide-integer return ABI for the function being lowered (IrFunction
+// wide_return_bits): its fn id, the hidden out-array param register, and the
+// return width/signedness. LOWER_WIDE_RET_FN is -1 outside such a function.
+var LOWER_WIDE_RET_FN: i64 = 0 - 1
+var LOWER_WIDE_RET_OUT: i64 = 0 - 1
+var LOWER_WIDE_RET_BITS: i64 = 0
+var LOWER_WIDE_RET_SIGNED: i64 = 0
+// Width facts of the tail expression of the block most recently lowered,
+// read while its locals are still in scope (the fn-body tail is the last one
+// written before the implicit return).
+var LOWER_BLOCK_TAIL_WIDE_BITS: i64 = 0
+var LOWER_BLOCK_TAIL_WIDE_SIGNED: i64 = 0
+var LOWER_BLOCK_TAIL_NARROW: bool = false
 // #2766: the scrutinee of the match being lowered is a reference local, so a
 // struct-pattern arm reads its fields through the reference (field_get label 1).
 var LOWER_MATCH_SCRUT_IS_REF: bool = false
@@ -4167,6 +4269,9 @@ fn lowerer_seed_module_from_summary(lo_in: Lowerer, summary: &IrProgramSummary) 
         func.returns_float = ir_fn_get(&(*summary.module), i as usize).returns_float
         func.return_kn_value_float = ir_fn_get(&(*summary.module), i as usize).return_kn_value_float
         func.return_fixed_array_len = ir_fn_get(&(*summary.module), i as usize).return_fixed_array_len
+        func.wide_param_limbs = ir_fn_get(&(*summary.module), i as usize).wide_param_limbs
+        func.wide_return_bits = ir_fn_get(&(*summary.module), i as usize).wide_return_bits
+        func.wide_return_signed = ir_fn_get(&(*summary.module), i as usize).wide_return_signed
         func.return_struct_name = ir_fn_get(&(*summary.module), i as usize).return_struct_name
         func.prof_counter_id = ir_fn_get(&(*summary.module), i as usize).prof_counter_id
         func.hyper_algebra_kind = ir_fn_get(&(*summary.module), i as usize).hyper_algebra_kind
@@ -4555,9 +4660,13 @@ fn lowerer_preseed_dep_items_into_acc_mut(
                                         fn_slot_sig.return_kn_value_float = lower_opt_type_knowledge_value_float(&(*fd).return_type)
                                         fn_slot_sig.return_fixed_array_len = lower_opt_type_return_fixed_array_code(&(*fd).return_type)
                                         fn_slot_sig.return_struct_name = lower_opt_type_return_layout_name(&(*fd).return_type)
+                                        fn_slot_sig.wide_return_bits = lower_opt_type_wide_bits(&(*fd).return_type)
+                                        fn_slot_sig.wide_return_signed = lower_opt_type_wide_signed(&(*fd).return_type)
                                         lower_record_option_box_return(fn_slot_sig.name, &(*fd).return_type)
                                         fn_slot_sig.param_count = ir_param_list_count_ref(&(*fd).params)
                                         fn_slot_sig.f128_param_mask = lower_f128_param_mask_of(&(*fd).params)
+                                        fn_slot_sig.wide_param_limbs = lower_wide_param_limbs_of(&(*fd).params)
+                                        if fn_slot_sig.wide_return_bits > 64 { fn_slot_sig.param_count = fn_slot_sig.param_count + 1 }
                                         fn_slot_sig.ref_struct_param_mask = lower_ref_struct_param_mask_of(&(*fd).params)
                                         fn_slot_sig.first_param_is_ref = lower_fn_first_param_is_ref(&(*fd).params)
                                         if strategy_sig == IR_STRATEGY_INSTRUMENTED {
@@ -4965,6 +5074,9 @@ fn lowerer_new_from_program_summary_flat(summary: &IrProgramSummaryFlat, epistem
         func.returns_float = ir_fn_get(&summary.module, i as usize).returns_float
         func.return_kn_value_float = ir_fn_get(&summary.module, i as usize).return_kn_value_float
         func.return_fixed_array_len = ir_fn_get(&summary.module, i as usize).return_fixed_array_len
+        func.wide_param_limbs = ir_fn_get(&summary.module, i as usize).wide_param_limbs
+        func.wide_return_bits = ir_fn_get(&summary.module, i as usize).wide_return_bits
+        func.wide_return_signed = ir_fn_get(&summary.module, i as usize).wide_return_signed
         func.return_struct_name = ir_fn_get(&summary.module, i as usize).return_struct_name
         func.prof_counter_id = ir_fn_get(&summary.module, i as usize).prof_counter_id
         func.hyper_algebra_kind = ir_fn_get(&summary.module, i as usize).hyper_algebra_kind
@@ -5026,6 +5138,16 @@ fn lowerer_mark_hard_error(lo: &! Lowerer) with Mut {
         IR_LOWER_HARD_ERROR_NEEDED = 0
         ir_copy_name_to_flat(&(*lo.current_func).name, &! IR_LOWER_HARD_ERROR_FN_BUF, &! IR_LOWER_HARD_ERROR_FN_LEN)
     }
+}
+
+fn lowerer_fo_container_error_mut(lo: &! Lowerer) with Mut, Panic, Div, IO {
+    print("error[GUM_UNTRACKED_CONTAINER]: cannot preserve Knowledge uncertainty through this container operation\n")
+    print("  help: use a straight-line local f64 array with literal indices, or keep the measured scalar outside the container\n")
+    if IR_LOWER_HARD_ERROR_REASON == 0 {
+        IR_LOWER_HARD_ERROR_REASON = 10
+        ir_copy_name_to_flat(&(*(*lo).current_func).name, &! IR_LOWER_HARD_ERROR_FN_BUF, &! IR_LOWER_HARD_ERROR_FN_LEN)
+    }
+    lowerer_mark_hard_error(lo)
 }
 
 fn lowerer_effect_list_has_name_ref(effects: &Option<Box<EffectList>>, target: string) -> bool with Mut, Panic, Div {
@@ -5258,9 +5380,13 @@ fn lowerer_preseed_fn_signature_mut(
     fn_slot.return_kn_value_float = lower_opt_type_knowledge_value_float(return_type)
     fn_slot.return_fixed_array_len = lower_opt_type_return_fixed_array_code(return_type)
     fn_slot.return_struct_name = lower_opt_type_return_layout_name(return_type)
+    fn_slot.wide_return_bits = lower_opt_type_wide_bits(return_type)
+    fn_slot.wide_return_signed = lower_opt_type_wide_signed(return_type)
     lower_record_option_box_return(fn_slot.name, return_type)
     fn_slot.param_count = ir_param_list_count_ref(params)
     fn_slot.f128_param_mask = lower_f128_param_mask_of(params)
+    fn_slot.wide_param_limbs = lower_wide_param_limbs_of(params)
+    if fn_slot.wide_return_bits > 64 { fn_slot.param_count = fn_slot.param_count + 1 }
     fn_slot.ref_struct_param_mask = lower_ref_struct_param_mask_of(params)
     fn_slot.first_param_is_ref = lower_fn_first_param_is_ref(params)
     if strategy == IR_STRATEGY_INSTRUMENTED {
@@ -6501,6 +6627,18 @@ fn lower_type_expr_array_elem_name(te: &TypeExpr) -> Name with Mut, Panic, Div {
             if (*elem).kind == TypeExprKind::TypeNamed {
                 return ir_path_first_name((*elem).path)
             }
+            // `[Knowledge[T]; N]`: the element is the builtin Knowledge layout
+            // (ir_register_knowledge_layout). Left unnamed, `s.kn[i].value`
+            // had no receiver type and resolved `.value` by field name across
+            // every registered struct (field_idx_from_name_simple), where any
+            // non-Knowledge struct with a field called `value` outranks
+            // Knowledge: with math::pure's CheckedLog { status, value } in the
+            // program, `.value` read slot 1 as an integer and printed 0.0
+            // while `.variance` and `.confidence` stayed correct (measured
+            // 2026-11-14 on darwin_pbpk::epistemic_pbpk28's EpPrior28.kn).
+            if (*elem).kind == TypeExprKind::TypeKnowledge {
+                return make_name("Knowledge")
+            }
             ir_empty_name()
         }
         _ => ir_empty_name()
@@ -6594,9 +6732,13 @@ fn lowerer_preseed_fn_item_signature_mut(
         fn_slot_sig.return_kn_value_float = lower_opt_type_knowledge_value_float(&(*fd).return_type)
         fn_slot_sig.return_fixed_array_len = lower_opt_type_return_fixed_array_code(&(*fd).return_type)
         fn_slot_sig.return_struct_name = lower_opt_type_return_layout_name(&(*fd).return_type)
+        fn_slot_sig.wide_return_bits = lower_opt_type_wide_bits(&(*fd).return_type)
+        fn_slot_sig.wide_return_signed = lower_opt_type_wide_signed(&(*fd).return_type)
         lower_record_option_box_return(fn_slot_sig.name, &(*fd).return_type)
         fn_slot_sig.param_count = ir_param_list_count_ref(&(*fd).params)
         fn_slot_sig.f128_param_mask = lower_f128_param_mask_of(&(*fd).params)
+        fn_slot_sig.wide_param_limbs = lower_wide_param_limbs_of(&(*fd).params)
+        if fn_slot_sig.wide_return_bits > 64 { fn_slot_sig.param_count = fn_slot_sig.param_count + 1 }
         fn_slot_sig.ref_struct_param_mask = lower_ref_struct_param_mask_of(&(*fd).params)
         fn_slot_sig.first_param_is_ref = lower_fn_first_param_is_ref(&(*fd).params)
         if strategy_sig == IR_STRATEGY_INSTRUMENTED {
@@ -6818,9 +6960,13 @@ fn ir_fast_summary_preseed_fn_signature(
     fn_slot.return_kn_value_float = lower_opt_type_knowledge_value_float(return_type)
     fn_slot.return_fixed_array_len = lower_opt_type_return_fixed_array_code(return_type)
     fn_slot.return_struct_name = lower_opt_type_return_layout_name(return_type)
+    fn_slot.wide_return_bits = lower_opt_type_wide_bits(return_type)
+    fn_slot.wide_return_signed = lower_opt_type_wide_signed(return_type)
     lower_record_option_box_return(fn_slot.name, return_type)
     fn_slot.param_count = ir_param_list_count_ref(params)
     fn_slot.f128_param_mask = lower_f128_param_mask_of(params)
+    fn_slot.wide_param_limbs = lower_wide_param_limbs_of(params)
+    if fn_slot.wide_return_bits > 64 { fn_slot.param_count = fn_slot.param_count + 1 }
     fn_slot.ref_struct_param_mask = lower_ref_struct_param_mask_of(params)
     fn_slot.first_param_is_ref = lower_fn_first_param_is_ref(params)
     if strategy == IR_STRATEGY_INSTRUMENTED {
@@ -6956,9 +7102,13 @@ fn ir_fast_summary_preseed_fn_signature_owned(
     fn_slot.return_kn_value_float = lower_opt_type_knowledge_value_float(return_type)
     fn_slot.return_fixed_array_len = lower_opt_type_return_fixed_array_code(return_type)
     fn_slot.return_struct_name = lower_opt_type_return_layout_name(return_type)
+    fn_slot.wide_return_bits = lower_opt_type_wide_bits(return_type)
+    fn_slot.wide_return_signed = lower_opt_type_wide_signed(return_type)
     lower_record_option_box_return(fn_slot.name, return_type)
     fn_slot.param_count = ir_param_list_count_ref(params)
     fn_slot.f128_param_mask = lower_f128_param_mask_of(params)
+    fn_slot.wide_param_limbs = lower_wide_param_limbs_of(params)
+    if fn_slot.wide_return_bits > 64 { fn_slot.param_count = fn_slot.param_count + 1 }
     fn_slot.ref_struct_param_mask = lower_ref_struct_param_mask_of(params)
     fn_slot.first_param_is_ref = lower_fn_first_param_is_ref(params)
     if strategy == IR_STRATEGY_INSTRUMENTED {
@@ -7287,9 +7437,13 @@ pub fn lower_program_to_ir_summary_flat_owned_with_epistemic_ref(
                                 fn_slot.return_kn_value_float = lower_opt_type_knowledge_value_float(&(*fd).return_type)
                                 fn_slot.return_fixed_array_len = lower_opt_type_return_fixed_array_code(&(*fd).return_type)
                                 fn_slot.return_struct_name = lower_opt_type_return_layout_name(&(*fd).return_type)
+                                fn_slot.wide_return_bits = lower_opt_type_wide_bits(&(*fd).return_type)
+                                fn_slot.wide_return_signed = lower_opt_type_wide_signed(&(*fd).return_type)
                                 lower_record_option_box_return(fn_slot.name, &(*fd).return_type)
                                 fn_slot.param_count = ir_param_list_count_ref(&(*fd).params)
                                 fn_slot.f128_param_mask = lower_f128_param_mask_of(&(*fd).params)
+                                fn_slot.wide_param_limbs = lower_wide_param_limbs_of(&(*fd).params)
+                                if fn_slot.wide_return_bits > 64 { fn_slot.param_count = fn_slot.param_count + 1 }
                                 fn_slot.ref_struct_param_mask = lower_ref_struct_param_mask_of(&(*fd).params)
                                 fn_slot.first_param_is_ref = lower_fn_first_param_is_ref(&(*fd).params)
                                 if strategy == IR_STRATEGY_INSTRUMENTED {
@@ -7389,9 +7543,13 @@ pub fn lower_program_to_ir_summary_flat_owned_with_epistemic_ref(
                                                         fn_slot.return_kn_value_float = lower_opt_type_knowledge_value_float(&(*fd).return_type)
                                                         fn_slot.return_fixed_array_len = lower_opt_type_return_fixed_array_code(&(*fd).return_type)
                                                         fn_slot.return_struct_name = lower_opt_type_return_layout_name(&(*fd).return_type)
+                                                        fn_slot.wide_return_bits = lower_opt_type_wide_bits(&(*fd).return_type)
+                                                        fn_slot.wide_return_signed = lower_opt_type_wide_signed(&(*fd).return_type)
                                                         lower_record_option_box_return(fn_slot.name, &(*fd).return_type)
                                                         fn_slot.param_count = ir_param_list_count_ref(&(*fd).params)
                                                         fn_slot.f128_param_mask = lower_f128_param_mask_of(&(*fd).params)
+                                                        fn_slot.wide_param_limbs = lower_wide_param_limbs_of(&(*fd).params)
+                                                        if fn_slot.wide_return_bits > 64 { fn_slot.param_count = fn_slot.param_count + 1 }
                                                         fn_slot.ref_struct_param_mask = lower_ref_struct_param_mask_of(&(*fd).params)
                                                         fn_slot.first_param_is_ref = lower_fn_first_param_is_ref(&(*fd).params)
                                                         if strategy == IR_STRATEGY_INSTRUMENTED {
@@ -7736,6 +7894,22 @@ fn lowerer_mark_local_wide_bits_mut(
     }
 }
 
+// Wide-integer param (iN/uN, N > 64): record width AND signedness, so the
+// param is a wide operand exactly like an annotated wide `let`.
+fn lowerer_mark_local_wide_int_mut(lo: &! Lowerer, name: Name, bits: i64, signed: i64) with Mut, Alloc, Panic, Div {
+    var locals_box = (*lo).locals
+    var i = (*locals_box).count - 1
+    while i >= 0 {
+        if (*(*locals_box).depths).values[i as usize] <= (*lo).scope_depth && ir_name_eq((*(*locals_box).names).values[i as usize], name) {
+            (*(*locals_box).wide_bits).values[i as usize] = bits
+            (*(*locals_box).wide_signed).values[i as usize] = signed
+            (*lo).locals = locals_box
+            return
+        }
+        i = i - 1
+    }
+}
+
 fn lowerer_mark_local_fn_ptr_ret_layout_mut(lo: &! Lowerer, name: Name, layout: i64) with Mut, Alloc, Panic, Div {
     var locals_box = (*lo).locals
     var i = (*locals_box).count - 1
@@ -7932,6 +8106,10 @@ fn lowerer_fresh_label_mut(lo: &! Lowerer) -> i64 with Mut, Panic, Div {
 }
 
 fn lowerer_emit_mut(lo: &! Lowerer, instr: IrInstr) with Mut, Panic, Div, IO {
+    if (instr.op == IrOpcode::IrReturn || instr.op == IrOpcode::IrCopy) && fo_array_base_tracked(instr.src1) {
+        lowerer_fo_container_error_mut(lo)
+        return
+    }
     if (*lo).current_fn < 0 || (*lo).current_fn >= (*(*lo).module).fn_count {
         if (*lo).probe_mode {
             print("lower_probe: emit_invalid current_fn=")
@@ -8149,14 +8327,36 @@ fn lowerer_lower_fn_params_mut(
                     (*lo) = copy_pair.0
                     param_value_reg = copy_pair.1
                 }
+                // Wide-integer param: preg is the address of the caller's limb
+                // array (IrFunction.wide_param_limbs); unpack it.
+                let param_wide_bits = lower_type_expr_wide_bits(&(*list).head.ty)
+                if param_wide_bits > 64 && !param_is_ref {
+                    let wp = (*lo).emit_wide_param_unpack(preg, lower_wide_limb_count(param_wide_bits))
+                    (*lo) = wp.0
+                    param_value_reg = wp.1
+                }
 
                 lowerer_bind_local_mut(lo, (*list).head.name, param_value_reg, (*list).head.is_self_mut)
+                if param_wide_bits > 64 && !param_is_ref {
+                    var param_wide_signed: i64 = 0
+                    if ir_path_first_name((*list).head.ty.path).buf[0] as i64 == 105 { param_wide_signed = 1 }
+                    lowerer_mark_local_wide_int_mut(lo, (*list).head.name, param_wide_bits, param_wide_signed)
+                }
                 if lower_type_expr_is_unsigned_int(&(*list).head.ty) {
                     lowerer_mark_local_unsigned_int_mut(lo, (*list).head.name)
                 }
                 // SIO-588: stamp narrow32 on i32/u32 params on this binder path.
                 if lower_type_expr_is_narrow32(&(*list).head.ty) {
                     lowerer_mark_local_narrow32_mut(lo, (*list).head.name)
+                    // ADR-031 R1: the checker lets a non-literal i64 argument reach
+                    // an i32/u32 param; a value outside 32 bits panics here, at the
+                    // boundary, instead of living on in a 32-bit-typed local
+                    // (`fn id(x: i32) -> i32 { x }` returned 9999999999).
+                    if !param_is_ref {
+                        let nk = lower_name_narrow32_kind(ir_path_first_name((*list).head.ty.path))
+                        let ncheck = lower_narrow32_check_reg((*lo), param_value_reg, nk, 4)
+                        (*lo) = ncheck.0
+                    }
                 }
                 // An array-of-tuples param (`&[(f64, f64)]`) carries its ELEMENT
                 // tuple's float mask: see lower_type_array_elem_tuple_float_mask.
@@ -9044,6 +9244,9 @@ fn lowerer_lower_fn_item_mut(
         (*reused).returns_float = preserved.returns_float
         (*reused).return_kn_value_float = preserved.return_kn_value_float
         (*reused).return_fixed_array_len = preserved.return_fixed_array_len
+        (*reused).wide_param_limbs = preserved.wide_param_limbs
+        (*reused).wide_return_bits = preserved.wide_return_bits
+        (*reused).wide_return_signed = preserved.wide_return_signed
         (*reused).return_struct_name = preserved.return_struct_name
         (*reused).first_param_is_ref = preserved.first_param_is_ref
         (*reused).prof_counter_id = preserved.prof_counter_id
@@ -9111,9 +9314,12 @@ fn lowerer_lower_fn_item_mut(
     (*strategy_func_box).return_kn_value_float = lower_opt_type_knowledge_value_float(&fd.return_type)
     (*strategy_func_box).return_fixed_array_len = lower_opt_type_return_fixed_array_code(&fd.return_type)
     (*strategy_func_box).return_struct_name = lower_opt_type_return_layout_name(&fd.return_type)
+    (*strategy_func_box).wide_return_bits = lower_opt_type_wide_bits(&fd.return_type)
+    (*strategy_func_box).wide_return_signed = lower_opt_type_wide_signed(&fd.return_type)
     lower_record_option_box_return((*strategy_func_box).name, &fd.return_type)
     (*strategy_func_box).first_param_is_ref = lower_fn_first_param_is_ref(&fd.params)
     (*strategy_func_box).f128_param_mask = lower_f128_param_mask_of(&fd.params)
+    (*strategy_func_box).wide_param_limbs = lower_wide_param_limbs_of(&fd.params)
     (*strategy_func_box).ref_struct_param_mask = lower_ref_struct_param_mask_of(&fd.params)
     lowerer_sco_strategy_trace(name, (*strategy_func_box).compile_strategy)
     (*lo).current_func = strategy_func_box
@@ -9247,6 +9453,9 @@ lower_rss_mark("before_block")
     if lowerer_name_is_main(name) && !fd.is_kernel && !fd.is_extern {
         lowerer_emit_deferred_global_inits_mut(lo)
     }
+    // `-> iN/uN` (N > 64): hidden out-array param, bound last (after the
+    // validated-param injection and every declared param).
+    (*lo) = (*lo).lower_wide_ret_bind_hidden()
     var result_reg = lowerer_try_canonical_hello_block_mut(lo, &fd.body)
     if result_reg == IR_INVALID_REG {
         if lower_rgn_enabled() && (*(*lo).module).fn_count <= IR_MAX_FUNCS - lower_rgn_fn_headroom()
@@ -9311,6 +9520,9 @@ lower_rss_mark("before_block")
         print("\n")
     }
 
+    if LOWER_WIDE_RET_FN >= 0 && LOWER_WIDE_RET_FN == (*lo).current_fn && !(*lo).fn_ends_with_return() {
+        (*lo) = (*lo).emit_wide_ret_store(result_reg, LOWER_BLOCK_TAIL_WIDE_BITS, LOWER_BLOCK_TAIL_WIDE_SIGNED, LOWER_BLOCK_TAIL_NARROW)
+    }
     if rgn_kind > 0 {
         // The tail value falls through into the exit block; explicit returns
         // jump there (lower_return_expr_ref).
@@ -10478,7 +10690,11 @@ fn lower_narrow32_wrap_reg(lo: Lowerer, reg: i64, kind: i64) -> (Lowerer, i64) w
 // 64-bit value leaks through a 32-bit-typed operation either way. Used only
 // at arithmetic sites (Add/Sub/Mul, unary negation); `as i32`/`as u32` casts
 // are explicit conversions and are not routed here.
-fn lower_narrow32_check_reg(lo: Lowerer, reg: i64, kind: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+// The failing branch calls the `__int_overflow` builtin with a code naming
+// the type and the operation (narrow kind * 8 + op: 0 +, 1 -, 2 *, 3 unary -,
+// 4 an i64 argument outside 32 bits reaching an i32/u32 param),
+// so the panic message says what overflowed; see emit_builtin_int_overflow_into.
+fn lower_narrow32_check_reg(lo: Lowerer, reg: i64, kind: i64, opk: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
     if kind == 0 { return (lo, reg) }
     let wp = lower_narrow32_wrap_reg(lo, reg, kind)
     var lo2 = wp.0
@@ -10489,10 +10705,14 @@ fn lower_narrow32_check_reg(lo: Lowerer, reg: i64, kind: i64) -> (Lowerer, i64) 
     let okp = lo2.fresh_label()
     lo2 = okp.0
     lo2 = lo2.emit(ir_branch_true(eqp.1, okp.1))
-    let panic_fn = lowerer_find_or_add_fn_id_mut(&! lo2, make_name("panic"))
+    let ovf_fn = lowerer_find_or_add_fn_id_mut(&! lo2, make_name("__int_overflow"))
+    let codep = lo2.fresh_reg()
+    lo2 = codep.0
+    lo2 = lo2.emit(ir_load_imm(codep.1, kind * 8 + opk))
+    let ovf_args: Option<Box<IrRegList>> = Some(Box::new(ir_reg_list_single(codep.1)))
     let pdst = lo2.fresh_reg()
     lo2 = pdst.0
-    lo2 = lo2.emit(ir_call(pdst.1, panic_fn, make_name("panic"), None, 0))
+    lo2 = lo2.emit(ir_call(pdst.1, ovf_fn, make_name("__int_overflow"), ovf_args, 1))
     lo2 = lo2.emit(ir_label(okp.1))
     (lo2, reg)
 }
@@ -12101,6 +12321,52 @@ fn lower_opt_type_wide_signed(opt: &Option<Box<TypeExpr>>) -> i64 with Mut, Pani
 fn lower_wide_limb_count(bits: i64) -> i64 {
     if bits <= 0 { return 0 }
     (bits + 63) / 64
+}
+
+// IrFunction.wide_param_limbs: 4 bits per declared param i < 15, the limb count
+// of an iN/uN param wider than 64 bits (0 for a word param). -1 when a wide
+// param falls outside the encoding (index >= 15 or more than 15 limbs): the
+// binder refuses that function instead of narrowing it.
+fn lower_wide_param_limbs_of(params: &Option<Box<ParamList>>) -> i64 with Mut, Panic, Div {
+    var packed: i64 = 0
+    var shift: i64 = 1
+    var idx: i64 = 0
+    var cur = params
+    var going = true
+    while going {
+        match *cur {
+            Some(list) => {
+                let limbs = lower_wide_limb_count(lower_type_expr_wide_bits(&(*list).head.ty))
+                if limbs > 1 {
+                    if idx >= 15 || limbs > 15 { return 0 - 1 }
+                    packed = packed + limbs * shift
+                }
+                if idx < 15 { shift = shift * 16 }
+                idx = idx + 1
+                cur = &(*list).tail
+            }
+            None => { going = false }
+        }
+    }
+    packed
+}
+
+// `args` with `reg` appended as the LAST argument (the hidden out-array of a
+// wide-returning call), through the recursive ir_reg_list_append.
+fn lower_reg_list_append(args: Option<Box<IrRegList>>, reg: i64) -> Option<Box<IrRegList>> with Mut, Panic, Div, Alloc {
+    match args {
+        Some(node) => Some(Box::new(ir_reg_list_append(*node, reg))),
+        None => Some(Box::new(IrRegList { head: reg, tail: None })),
+    }
+}
+
+// Limb count of declared param `idx` from a packed wide_param_limbs word.
+fn lower_wide_param_limbs_at(packed: i64, idx: i64) -> i64 {
+    if packed <= 0 || idx < 0 || idx >= 15 { return 0 }
+    var p = packed
+    var i: i64 = 0
+    while i < idx { p = p / 16; i = i + 1 }
+    p % 16
 }
 
 // `t op= e` lowers as `t = t op e` (lower_assign_stmt_ref). Same table as
@@ -15369,6 +15635,23 @@ fn fx_op_key(eff: Name, op: Name) -> i64 with Mut, Panic, Div {
     fx_hash_name(eff) * 1000003 + fx_hash_name(op)
 }
 
+// #3547: a literal initializer's zero variance is not an independent source.
+// Keep loop-carried slots dynamic: their next iteration may see an assignment
+// that has not been lowered yet. Outside loops, inspect the latest definition
+// and accept only an actual zero constant, never a copy or computed variance.
+fn fo_variance_is_static_zero(lo: &Lowerer, reg: i64) -> bool with Mut, Panic, Div {
+    if reg < 0 || lo.loop_depth > 0 { return false }
+    var i = (*lo.current_func).instr_count - 1
+    while i >= 0 {
+        let instr = ir_arena_load(ir_region_slot_r((*lo.current_func).region, i))
+        if instr.dst == reg && instr.op != IrOpcode::IrNop {
+            return instr.op == IrOpcode::IrLoadImm && instr.imm_i64 == 0
+        }
+        i = i - 1
+    }
+    false
+}
+
 impl Lowerer {
     fn current_fn_compile_strategy(self) -> i64 with Mut, Panic, Div {
         if self.current_fn < 0 || self.current_fn >= self.module.fn_count {
@@ -15418,6 +15701,9 @@ impl Lowerer {
             (*reused).returns_float = ir_fn_get(&(*lo.module), fn_id as usize).returns_float
             (*reused).return_kn_value_float = ir_fn_get(&(*lo.module), fn_id as usize).return_kn_value_float
             (*reused).return_fixed_array_len = ir_fn_get(&(*lo.module), fn_id as usize).return_fixed_array_len
+            (*reused).wide_param_limbs = ir_fn_get(&(*lo.module), fn_id as usize).wide_param_limbs
+            (*reused).wide_return_bits = ir_fn_get(&(*lo.module), fn_id as usize).wide_return_bits
+            (*reused).wide_return_signed = ir_fn_get(&(*lo.module), fn_id as usize).wide_return_signed
             (*reused).return_struct_name = ir_fn_get(&(*lo.module), fn_id as usize).return_struct_name
             (*reused).first_param_is_ref = ir_fn_get(&(*lo.module), fn_id as usize).first_param_is_ref
             (*reused).prof_counter_id = ir_fn_get(&(*lo.module), fn_id as usize).prof_counter_id
@@ -15798,7 +16084,165 @@ impl Lowerer {
         (lo, dst_reg)
     }
 
+    // Wide-integer call ABI, caller side (see IrFunction.wide_param_limbs). Builds
+    // the [i64; param_limbs] array the callee reads: the argument's own limbs
+    // first, then the sign word (sar 63 of its top limb for a signed argument,
+    // 0 for an unsigned one) for every limb the argument is narrower than the
+    // param, the same extension `let x: i256 = <i64 expr>` performs (KL-7).
+    // An argument wider than the param keeps its low param_limbs limbs: the
+    // checker only lets a wide argument reach a param of the same width.
+    fn emit_wide_arg_pack(self, arg_reg: i64, arg_limbs: i64, arg_signed: bool, param_limbs: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        let pair_dst = self.fresh_reg()
+        var lo = pair_dst.0
+        let arr = pair_dst.1
+        lo = lo.emit(ir_alloc_array(arr, lo.aggregate_storage_bytes(param_limbs), param_limbs))
+        lo = lo.emit_wide_store_limbs(arr, arg_reg, arg_limbs, arg_signed, param_limbs)
+        (lo, arr)
+    }
+
+    // Store `src_limbs` limbs of `src` into arr[0..dst_limbs), extending a
+    // narrower value with its sign word (signed) or 0 (unsigned).
+    fn emit_wide_store_limbs(self, arr: i64, src: i64, src_limbs: i64, src_signed: bool, dst_limbs: i64) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        var have = src_limbs
+        if have < 1 { have = 1 }
+        if have > dst_limbs { have = dst_limbs }
+        let pair_sign = lo.fresh_reg()
+        lo = pair_sign.0
+        let sign_reg = pair_sign.1
+        if src_signed {
+            let shift_pair = lo.emit_i64_const(63)
+            lo = shift_pair.0
+            lo = lo.emit(ir_binop(sign_reg, src + have - 1, BinaryOp::OpShr, shift_pair.1))
+        } else {
+            lo = lo.emit(ir_load_imm(sign_reg, 0))
+        }
+        var i: i64 = 0
+        while i < dst_limbs {
+            let idx_pair = lo.emit_i64_const(i)
+            lo = idx_pair.0
+            if i < have {
+                lo = lo.emit(ir_index_set(arr, idx_pair.1, src + i))
+            } else {
+                lo = lo.emit(ir_index_set(arr, idx_pair.1, sign_reg))
+            }
+            i = i + 1
+        }
+        lo
+    }
+
+    // An expression whose value is one machine word for certain: an integer
+    // literal (or its negation), a cast to a word type, a word-typed local, a
+    // call to a word-returning function, or arithmetic over those. Anything
+    // else whose width expr_wide_bits_ref cannot see (an `if` or `match`
+    // whose arms are wide, a block) is NOT assumed narrow.
+    fn expr_known_word_ref(self, e: &Expr) -> bool with Mut, Panic, Div, Alloc {
+        if (*e).kind == ExprKind::ExprIntLit { return true }
+        if (*e).kind == ExprKind::ExprBoolTrue || (*e).kind == ExprKind::ExprBoolFalse { return true }
+        if (*e).kind == ExprKind::ExprUnary {
+            match (*e).left {
+                Some(inner) => { return self.expr_known_word_ref(&(*inner)) }
+                None => { return false }
+            }
+        }
+        if (*e).kind == ExprKind::ExprCast {
+            return lower_opt_type_wide_bits(&(*e).cast_type) == 0 && !lower_opt_type_is_wide_float(&(*e).cast_type)
+        }
+        if (*e).kind == ExprKind::ExprIdent {
+            return self.lookup_local((*e).name) >= 0 && self.lookup_local_wide_bits((*e).name) == 0
+        }
+        if (*e).kind == ExprKind::ExprCall || (*e).kind == ExprKind::ExprMethodCall {
+            return self.expr_wide_bits_ref(e) == 0
+        }
+        if (*e).kind == ExprKind::ExprBinary {
+            var l_ok = false
+            var r_ok = false
+            match (*e).left {
+                Some(le) => { l_ok = self.expr_known_word_ref(&(*le)) }
+                None => {}
+            }
+            match (*e).right {
+                Some(re) => { r_ok = self.expr_known_word_ref(&(*re)) }
+                None => {}
+            }
+            return l_ok && r_ok
+        }
+        false
+    }
+
+    // `return v` in a function declared `-> iN/uN` (N > 64): write v's limbs to
+    // the hidden out-array. `src_bits` / `src_signed` describe v; a word value
+    // is extended by its own signedness, as a `let x: i256 = <word>` binding
+    // is. A value whose width cannot be established is refused (10835), never
+    // truncated.
+    fn emit_wide_ret_store(self, reg: i64, src_bits: i64, src_signed: i64, src_is_word: bool) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        let limbs = lower_wide_limb_count(LOWER_WIDE_RET_BITS)
+        if src_bits > 64 {
+            return lo.emit_wide_store_limbs(LOWER_WIDE_RET_OUT, reg, lower_wide_limb_count(src_bits), src_signed == 1, limbs)
+        }
+        if !src_is_word {
+            return lo.report_error_at(10835)
+        }
+        lo.emit_wide_store_limbs(LOWER_WIDE_RET_OUT, reg, 1, src_signed == 1, limbs)
+    }
+
+    // Wide-integer return ABI, callee side: a function declared `-> iN/uN`
+    // (N > 64) takes one hidden LAST parameter, the address of the caller's
+    // [i64; limbs] out-array (IrFunction.wide_return_bits). Called right before
+    // the body is lowered, after every other param_regs change, so it stays
+    // last. Clears the state for any other function.
+    fn lower_wide_ret_bind_hidden(self) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        LOWER_WIDE_RET_FN = 0 - 1
+        LOWER_WIDE_RET_OUT = 0 - 1
+        LOWER_WIDE_RET_BITS = 0
+        LOWER_WIDE_RET_SIGNED = 0
+        if (*lo.current_func).wide_return_bits <= 64 { return lo }
+        if (*lo.current_func).compile_strategy == IR_STRATEGY_INSTRUMENTED {
+            // The instrumented counter is a hidden param too; their order is
+            // not defined, so refuse instead of guessing.
+            return lo.report_error_at(10836)
+        }
+        let preg_pair = lo.fresh_reg()
+        lo = preg_pair.0
+        let preg = preg_pair.1
+        var current_func_box = lo.current_func
+        if (*current_func_box).param_count >= IR_MAX_PARAMS {
+            return lo.report_error_at(10837)
+        }
+        let pc = (*current_func_box).param_count
+        (*current_func_box).param_regs[pc as usize] = preg
+        (*current_func_box).param_count = pc + 1
+        lo.current_func = current_func_box
+        LOWER_WIDE_RET_FN = lo.current_fn
+        LOWER_WIDE_RET_OUT = preg
+        LOWER_WIDE_RET_BITS = (*current_func_box).wide_return_bits
+        LOWER_WIDE_RET_SIGNED = (*current_func_box).wide_return_signed
+        lo
+    }
+
+    // Wide-integer call ABI, callee side: the param register holds the address
+    // of the caller's [i64; limbs] array; load the limbs into a fresh wide
+    // register, which becomes the param's value.
+    fn emit_wide_param_unpack(self, preg: i64, limbs: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        let wide_pair = self.fresh_wide_reg(limbs)
+        var lo = wide_pair.0
+        let wide_reg = wide_pair.1
+        var i: i64 = 0
+        while i < limbs {
+            let idx_pair = lo.emit_i64_const(i)
+            lo = idx_pair.0
+            lo = lo.emit(ir_index_get(wide_reg + i, preg, idx_pair.1))
+            i = i + 1
+        }
+        (lo, wide_reg)
+    }
+
     fn emit_fixed_array_value_copy(self, src_reg: i64, elem_count: i64, elem_is_float: bool) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        if self.fo_array_has_base(src_reg) {
+            return (self.fo_container_refuse(), src_reg)
+        }
         let alloc_pair = self.emit_array_alloc_like_source(src_reg, elem_count, elem_is_float)
         var lo = alloc_pair.0
         let dst_reg = alloc_pair.1
@@ -16942,7 +17386,7 @@ impl Lowerer {
                 } else {
                     let zero_fill = lo.expr_is_zero_fill_value(*value_expr)
                     let pair_value = lo.lower_expr_ref(&(*value_expr))
-                    lo = pair_value.0
+                    lo = pair_value.0.fo_refuse_measured_initializer(&(*value_expr))
                     let value_reg = pair_value.1
                     if !zero_fill {
                         lo = lo.lower_array_repeat_fill(dst, value_reg, repeat_count)
@@ -18530,6 +18974,7 @@ impl Lowerer {
         }
         if ch < 0 {
             if lo.fo_nchan >= 32 {
+                fo_refuse_capacity(false)
                 return lo
             }
             ch = lo.fo_nchan
@@ -18570,7 +19015,10 @@ impl Lowerer {
                 i = i + 1
             }
         }
-        if row < 0 {
+        // #3547: a row bound after a var declared before the first measure()
+        // aliases expression registers; it has no private slots. Rebind the
+        // whole gradient, including channels introduced since the last update.
+        if row < 0 || (*lo.fo_bind).resid[row as usize] < 0 {
             return (lo, false)
         }
         // #2827: a channel the expression carries but this row has no slot for
@@ -18827,7 +19275,9 @@ impl Lowerer {
     fn fo_primary_channel(self) -> i64 with Div {
         var found: i64 = 0 - 1
         var k: i64 = 0
-        while k < 8 {
+        // Inspect every FO channel so the correlation setters can diagnose a
+        // channel outside their smaller covariance table instead of seeing -1.
+        while k < 32 {
             if self.fo_expr_sens[k as usize] >= 0 {
                 if found >= 0 {
                     return 0 - 1
@@ -19232,7 +19682,8 @@ impl Lowerer {
             k = k + 1
         }
         if lo.fo_nchan >= 32 {
-            // Channel table full — leave sens empty (caller falls back to scalar Var).
+            // Clear temporary state only after latching a compile-time refusal.
+            fo_refuse_capacity(false)
             return lo.fo_clear_expr_sens()
         }
         let ch = lo.fo_nchan
@@ -19261,6 +19712,7 @@ impl Lowerer {
         var k: i64 = 0
         while k < lo.fo_nchan && k < 32 {
             if lo.fo_sigma2[k as usize] == slot && lo.fo_expr_sens[k as usize] >= 0 {
+                if lo.fo_nchan >= 32 { fo_refuse_capacity(false) }
                 if lo.so_enabled || lo.fo_nchan >= 32 {
                     return lo.fo_clear_expr_sens().so_clear_expr_hess()
                 }
@@ -19583,6 +20035,188 @@ impl Lowerer {
             ci = ci + 1
         }
         (lo, acc)
+    }
+
+    // No new checker state or by-value Lowerer fields. Unsupported provenance
+    // is refused at its first lossy operation, including before a later query.
+    fn fo_container_refuse(self) -> Lowerer with Mut, Panic, Div, IO {
+        var lo = self
+        lowerer_fo_container_error_mut(&! lo)
+        lo
+    }
+
+    fn fo_array_has_base(self, base: i64) -> bool with Mut, Panic, Div {
+        fo_array_base_tracked(base)
+    }
+
+    fn fo_array_literal_index(self, e: &Expr) -> i64 with Mut, Panic, Div {
+        match (*e).right {
+            Some(idx) => {
+                if (*idx).kind == ExprKind::ExprIntLit { return (*idx).int_val }
+            }
+            None => {}
+        }
+        -1
+    }
+
+    fn fo_array_local_base(self, e: &Expr) -> i64 with Mut, Panic, Div, Alloc {
+        match (*e).left {
+            Some(base) => {
+                if (*base).kind == ExprKind::ExprIdent
+                    && self.lookup_local_fixed_array_len((*base).name) >= 0
+                    && !self.lookup_local_is_ref((*base).name)
+                    && self.lookup_local_array_elem_float((*base).name) {
+                    return self.lookup_local((*base).name)
+                }
+            }
+            None => {}
+        }
+        -1
+    }
+
+    // Pure scalar locals can have synthetic FO channels with literal-zero
+    // variance. They must not make a deterministic array look measured.
+    fn fo_container_zero_reg(self, reg: i64) -> bool with Mut, Panic, Div {
+        var defs: i64 = 0
+        var zero = false
+        var i: i64 = 0
+        while i < (*self.current_func).instr_count {
+            let at = ir_region_slot_r((*self.current_func).region, i) as usize
+            let op = IR_A_OP[at] as IrOpcode
+            if IR_A_DST[at] == reg && op != IrOpcode::IrNop {
+                defs = defs + 1
+                zero = op == IrOpcode::IrLoadImm && IR_A_IMM_I64[at] == 0
+            }
+            i = i + 1
+        }
+        defs == 1 && zero
+    }
+
+    fn fo_container_has_sens(self) -> bool with Mut, Panic, Div {
+        var k: i64 = 0
+        while k < self.fo_nchan {
+            if self.fo_expr_sens[k as usize] >= 0
+                && !self.fo_container_zero_reg(self.fo_sigma2[k as usize]) { return true }
+            k = k + 1
+        }
+        false
+    }
+
+    // A .value field and a variance shadow also occur on deterministic status
+    // structs (NumericValue, SVD/GLM work records). Only the actual Knowledge
+    // receiver is evidence for enabling the measured-container refusal.
+    fn fo_container_note_projection(self, name: Name) with Mut, Panic, Div, Alloc {
+        if ir_name_eq_lit(self.lookup_local_struct_type(name), "Knowledge") {
+            FO_CONTAINER_KNOWLEDGE_SEEN = true
+        }
+    }
+
+    fn fo_container_store(self, target: &Expr) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        if !FO_CONTAINER_KNOWLEDGE_SEEN { return self }
+        let measured = self.fo_container_has_sens()
+        if (*target).kind != ExprKind::ExprIndex {
+            if (*target).kind == ExprKind::ExprIdent
+                && self.fo_array_has_base(self.lookup_local((*target).name)) {
+                return self.fo_container_refuse()
+            }
+            if measured && (*target).kind != ExprKind::ExprIdent {
+                return self.fo_container_refuse()
+            }
+            return self
+        }
+        let base = self.fo_array_local_base(target)
+        let tracked = self.fo_array_has_base(base)
+        if base < 0 && FO_ARRAY_COUNT > 0 { return self.fo_container_refuse() }
+        if !measured && !tracked { return self }
+        var alias: i64 = 0
+        while alias < FO_REF_ALIAS_COUNT {
+            if FO_REF_ALIAS_BASE[alias as usize] == base { return self.fo_container_refuse() }
+            alias = alias + 1
+        }
+        let idx = self.fo_array_literal_index(target)
+        // No merge or back-edge representation is claimed here. Even an exact
+        // overwrite of a measured slot in a branch must refuse, not erase it.
+        if base < 0 || idx < 0 || self.scope_depth > 2 || self.loop_depth > 0
+            || FO_INLINE_DEPTH > 0 || self.so_enabled {
+            return self.fo_container_refuse()
+        }
+        var slot: i64 = -1
+        var i: i64 = 0
+        while i < FO_ARRAY_COUNT {
+            if FO_ARRAY_BASE[i as usize] == base && FO_ARRAY_INDEX[i as usize] == idx { slot = i }
+            i = i + 1
+        }
+        var lo = self
+        if slot < 0 {
+            if !measured { return lo }
+            if FO_ARRAY_COUNT >= 64 { return lo.fo_container_refuse() }
+            slot = FO_ARRAY_COUNT
+            FO_ARRAY_BASE[slot as usize] = base
+            FO_ARRAY_INDEX[slot as usize] = idx
+            FO_ARRAY_COUNT = slot + 1
+        }
+        var k: i64 = 0
+        while k < 32 {
+            var snap: i64 = -1
+            let sens = lo.fo_expr_sens[k as usize]
+            if sens >= 0 {
+                let cp = lo.fresh_reg()
+                lo = cp.0.emit(ir_copy(cp.1, sens)).emit(ir_mark_float_reg(cp.1))
+                snap = cp.1
+            }
+            FO_ARRAY_SENS[(slot * 32 + k) as usize] = snap
+            k = k + 1
+        }
+        lo
+    }
+
+    fn fo_array_variance(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        let base = self.fo_array_local_base(e)
+        if !self.fo_array_has_base(base) {
+            // A nonlocal/aliased array cannot be matched to a tracked register.
+            if base < 0 && FO_ARRAY_COUNT > 0 {
+                return (self.fo_container_refuse().fo_clear_expr_sens().so_clear_expr_hess(), -1)
+            }
+            return (self.fo_clear_expr_sens().so_clear_expr_hess(), -1)
+        }
+        let idx = self.fo_array_literal_index(e)
+        if idx < 0 || self.so_enabled {
+            return (self.fo_container_refuse().fo_clear_expr_sens().so_clear_expr_hess(), -1)
+        }
+        var lo = self.fo_clear_expr_sens().so_clear_expr_hess()
+        var i: i64 = 0
+        while i < FO_ARRAY_COUNT {
+            if FO_ARRAY_BASE[i as usize] == base && FO_ARRAY_INDEX[i as usize] == idx {
+                var k: i64 = 0
+                while k < 32 {
+                    lo.fo_expr_sens[k as usize] = FO_ARRAY_SENS[(i * 32 + k) as usize]
+                    k = k + 1
+                }
+                return lo.fo_emit_var_from_sens()
+            }
+            i = i + 1
+        }
+        lo.emit_zero_variance()
+    }
+
+    fn fo_array_escapes(self, e: &Expr) -> bool with Mut, Panic, Div, Alloc {
+        if FO_ARRAY_COUNT == 0 || (*e).kind == ExprKind::ExprIndex { return false }
+        if (*e).kind == ExprKind::ExprIdent {
+            return self.fo_array_has_base(self.lookup_local((*e).name))
+        }
+        match (*e).left {
+            Some(inner) => { if self.fo_array_escapes(&(*inner)) { return true } }
+            None => {}
+        }
+        false
+    }
+
+    fn fo_refuse_measured_initializer(self, e: &Expr) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        if !FO_CONTAINER_KNOWLEDGE_SEEN { return self }
+        if self.fo_array_escapes(e) { return self.fo_container_refuse() }
+        let vp = self.lower_expr_variance_ref(e)
+        if vp.0.fo_container_has_sens() { return vp.0.fo_container_refuse() }
+        vp.0
     }
 
     // Remember the channel vector just applied to a field. Overwrites a
@@ -24477,6 +25111,12 @@ impl Lowerer {
         // Every argument must be safe to evaluate again here; a struct
         // parameter's argument must name a struct local (`p`, `&p`, `&!p`).
         var sargs: [Name; 16] = [ir_empty_name(); 16]
+        // The caller local's struct type and ref-ness, read BEFORE any callee
+        // parameter is bound: a callee parameter that shares the caller argument's
+        // name (`f(d)` into `fn g(d: &S)`) would otherwise shadow it, and the
+        // late lookups below would read the fresh, untyped, non-ref binding.
+        var sarg_types: [Name; 16] = [ir_empty_name(); 16]
+        var sarg_refs: [bool; 16] = [false; 16]
         var sk = args
         var spa = &fd.params
         var si: i64 = 0
@@ -24502,6 +25142,8 @@ impl Lowerer {
                         if an.len <= 0 { return (lo, 0 - 1) }
                         if lo.lookup_local(an) < 0 || lo.lookup_local_struct_type(an).len <= 0 { return (lo, 0 - 1) }
                         sargs[si as usize] = an
+                        sarg_types[si as usize] = lo.lookup_local_struct_type(an)
+                        sarg_refs[si as usize] = lo.lookup_local_is_ref(an)
                     } else if !lower_expr_relower_safe_ref(&(*al).head) {
                         return (lo, 0 - 1)
                     }
@@ -24739,10 +25381,11 @@ impl Lowerer {
                         // Bound to the caller's struct local, like `self`: field
                         // variance is keyed by that local's register.
                         let sname = (*pl).head.name
-                        let an2 = sargs[i as usize]
+                        let an2_type = sarg_types[i as usize]
+                        let an2_ref = sarg_refs[i as usize]
                         lo = lo.bind_local(sname, vals[i as usize], false)
-                        lo = lo.bind_local_struct_type(sname, lo.lookup_local_struct_type(an2), false)
-                        if lo.lookup_local_is_ref(an2) {
+                        lo = lo.bind_local_struct_type(sname, an2_type, false)
+                        if an2_ref {
                             lo = lo.bind_local_ref(sname)
                         }
                         lo = lo.fo_clear_expr_sens().fo_bind_local_sens(sname)
@@ -25125,6 +25768,7 @@ impl Lowerer {
             }
             k = k + 1
         }
+        if (t_trunc != 0 || e_trunc != 0) && nch_e >= 32 { fo_refuse_capacity(false) }
         let poison = (t_trunc != 0 || e_trunc != 0) && nch_e < 32
         var mpsig: i64 = 0 - 1
         var mpsens: i64 = 0 - 1
@@ -25336,6 +25980,7 @@ impl Lowerer {
                     }
                     k = k + 1
                 }
+                if (t_trunc != 0 || e_trunc != 0) && nch_e >= 32 { fo_refuse_capacity(false) }
                 let poison = (t_trunc != 0 || e_trunc != 0) && nch_e < 32
                 var mpsig: i64 = 0 - 1
                 var mpsens: i64 = 0 - 1
@@ -25517,7 +26162,10 @@ impl Lowerer {
                 // Prefer bound multi-channel sens; else seed a channel from σ².
                 var lo = self.fo_load_local_sens((*e).name).so_load_local_hess((*e).name)
                 if !lo.fo_expr_has_sens() {
-                    lo = lo.so_clear_expr_hess().fo_seed_from_variance(local_v, 0 - 1)
+                    lo = lo.so_clear_expr_hess()
+                    if !fo_variance_is_static_zero(&lo, local_v) {
+                        lo = lo.fo_seed_from_variance(local_v, 0 - 1)
+                    }
                 } else {
                     // #2827: rows cover only the channels that existed at the
                     // declaration; the rest of the variance is the residual.
@@ -25539,6 +26187,9 @@ impl Lowerer {
                 return (lo2, kn_pair.1)
             }
             return (self.fo_clear_expr_sens().so_clear_expr_hess(), -1)
+        }
+        if (*e).kind == ExprKind::ExprIndex {
+            return self.fo_array_variance(e)
         }
         if (*e).kind == ExprKind::ExprFloatLit || (*e).kind == ExprKind::ExprIntLit {
             let z = self.fo_clear_expr_sens().so_clear_expr_hess().emit_zero_variance()
@@ -26370,9 +27021,27 @@ impl Lowerer {
     }
 
     fn expr_wide_bits_ref(self, expr: &Expr) -> i64 with Mut, Panic, Div, Alloc {
+        // A call to a function declared `-> iN/uN` (N > 64) yields a wide value
+        // (IrFunction.wide_return_bits, read back from the hidden out-array).
+        if (*expr).kind == ExprKind::ExprCall {
+            let cfid = self.lower_callee_fn_id_ref(&(*expr).left)
+            if cfid >= 0 { return ir_fn_get(&(*self.module), cfid as usize).wide_return_bits }
+            return 0
+        }
+        if (*expr).kind == ExprKind::ExprMethodCall {
+            let mfid = self.lower_method_call_fn_id_ref(expr)
+            if mfid >= 0 { return ir_fn_get(&(*self.module), mfid as usize).wide_return_bits }
+            return 0
+        }
         if (*expr).kind == ExprKind::ExprCast {
             let bits = lower_opt_type_wide_bits(&(*expr).cast_type)
             if bits > 64 { return bits }
+            // A cast to a word integer type (`(x >> 64) as i64`) is one word,
+            // whatever the operand: it keeps limb 0.
+            match (*expr).cast_type {
+                Some(ct) => { if lower_type_expr_is_integer(&(*ct)) { return 0 } }
+                None => {}
+            }
             return self.expr_wide_bits_opt_ref(&(*expr).left)
         }
         if (*expr).kind == ExprKind::ExprUnary {
@@ -26399,6 +27068,16 @@ impl Lowerer {
     }
 
     fn expr_wide_signed_ref(self, expr: &Expr) -> i64 with Mut, Panic, Div, Alloc {
+        if (*expr).kind == ExprKind::ExprCall {
+            let cfid = self.lower_callee_fn_id_ref(&(*expr).left)
+            if cfid >= 0 { return ir_fn_get(&(*self.module), cfid as usize).wide_return_signed }
+            return 0
+        }
+        if (*expr).kind == ExprKind::ExprMethodCall {
+            let mfid = self.lower_method_call_fn_id_ref(expr)
+            if mfid >= 0 { return ir_fn_get(&(*self.module), mfid as usize).wide_return_signed }
+            return 0
+        }
         if (*expr).kind == ExprKind::ExprCast {
             let signed = lower_opt_type_wide_signed(&(*expr).cast_type)
             if lower_opt_type_wide_bits(&(*expr).cast_type) > 64 { return signed }
@@ -26434,7 +27113,14 @@ impl Lowerer {
         (self, label)
     }
 
-    fn emit(self, instr: IrInstr) -> Lowerer with Mut, Panic, Div, IO {
+    fn emit(self, instr_in: IrInstr) -> Lowerer with Mut, Panic, Div, IO {
+        if (instr_in.op == IrOpcode::IrReturn || instr_in.op == IrOpcode::IrCopy) && fo_array_base_tracked(instr_in.src1) {
+            return self.fo_container_refuse()
+        }
+        var instr = instr_in
+        if instr.src_site == 0 && LOWER_CUR_SITE != 0 && lower_instr_is_checked_arith(&instr) {
+            instr.src_site = LOWER_CUR_SITE
+        }
         if self.current_fn < 0 || self.current_fn >= self.module.fn_count {
             if self.probe_mode {
                 print("lower_probe: emit_invalid current_fn=")
@@ -29960,9 +30646,13 @@ impl Lowerer {
         func.return_kn_value_float = lower_opt_type_knowledge_value_float(return_type)
         func.return_fixed_array_len = lower_opt_type_return_fixed_array_code(return_type)
         func.return_struct_name = lower_opt_type_return_layout_name(return_type)
+        func.wide_return_bits = lower_opt_type_wide_bits(return_type)
+        func.wide_return_signed = lower_opt_type_wide_signed(return_type)
         lower_record_option_box_return(func.name, return_type)
         func.param_count = ir_param_list_count_ref(params)
         func.f128_param_mask = lower_f128_param_mask_of(params)
+        func.wide_param_limbs = lower_wide_param_limbs_of(params)
+        if func.wide_return_bits > 64 { func.param_count = func.param_count + 1 }
         func.ref_struct_param_mask = lower_ref_struct_param_mask_of(params)
         func.first_param_is_ref = lower_fn_first_param_is_ref(params)
         func.param_regs = [IR_INVALID_REG; 64]
@@ -30402,6 +31092,23 @@ impl Lowerer {
                         param_value_reg = copy_pair.1
                         current_func = lo.current_func
                     }
+                    // Wide-integer param: see path A.
+                    let ref_param_wide_bits = lower_type_expr_wide_bits(&(*list).head.ty)
+                    if ref_param_wide_bits > 64 && !ref_param_is_ref {
+                        lo.current_func = current_func
+                        let wp = lo.emit_wide_param_unpack(preg, lower_wide_limb_count(ref_param_wide_bits))
+                        lo = wp.0
+                        param_value_reg = wp.1
+                        current_func = lo.current_func
+                    }
+                    // ADR-031 R1 boundary range check for i32/u32 params: see path A.
+                    if !ref_param_is_ref && lower_type_expr_is_narrow32(&(*list).head.ty) {
+                        lo.current_func = current_func
+                        let nk_b = lower_name_narrow32_kind(ir_path_first_name((*list).head.ty.path))
+                        let ncheck_b = lower_narrow32_check_reg(lo, param_value_reg, nk_b, 4)
+                        lo = ncheck_b.0
+                        current_func = lo.current_func
+                    }
 
                     let _is_mut = (*list).head.is_self_mut
                     if (*locals).count < 4096 {
@@ -30435,8 +31142,8 @@ impl Lowerer {
                         }
                         // V0-E.5.4: f128 params are F128Bits handles (wide_bits=128, kind 5
                         // below) so they are ready softfloat operands; f256 stays kind 5 only.
-                        (*(*locals).wide_bits).values[idx as usize] = if lower_type_expr_is_f128(&(*list).head.ty) { 128 } else { 0 }
-                        (*(*locals).wide_signed).values[idx as usize] = 0
+                        (*(*locals).wide_bits).values[idx as usize] = if lower_type_expr_is_f128(&(*list).head.ty) { 128 } else if ref_param_wide_bits > 64 && !ref_param_is_ref { ref_param_wide_bits } else { 0 }
+                        (*(*locals).wide_signed).values[idx as usize] = if ref_param_wide_bits > 64 && !ref_param_is_ref && ir_path_first_name((*list).head.ty.path).buf[0] as i64 == 105 { 1 } else { 0 }
                         // Findings 11 (#2084): stamp is_unsigned_int=1 when the param is u8/u16/u32/u64/usize.
                         (*(*locals).is_unsigned_int).values[idx as usize] = if lower_type_expr_is_unsigned_int(&(*list).head.ty) { 1 } else { 0 }
                         // SIO-588: stamp narrow32=1 when the param is i32/u32.
@@ -30655,6 +31362,9 @@ impl Lowerer {
             (*reused).returns_float = ir_fn_get(&(*lo.module), fn_id as usize).returns_float
             (*reused).return_kn_value_float = ir_fn_get(&(*lo.module), fn_id as usize).return_kn_value_float
             (*reused).return_fixed_array_len = ir_fn_get(&(*lo.module), fn_id as usize).return_fixed_array_len
+            (*reused).wide_param_limbs = ir_fn_get(&(*lo.module), fn_id as usize).wide_param_limbs
+            (*reused).wide_return_bits = ir_fn_get(&(*lo.module), fn_id as usize).wide_return_bits
+            (*reused).wide_return_signed = ir_fn_get(&(*lo.module), fn_id as usize).wide_return_signed
             (*reused).return_struct_name = ir_fn_get(&(*lo.module), fn_id as usize).return_struct_name
             (*reused).first_param_is_ref = ir_fn_get(&(*lo.module), fn_id as usize).first_param_is_ref
             (*reused).prof_counter_id = ir_fn_get(&(*lo.module), fn_id as usize).prof_counter_id
@@ -30708,6 +31418,8 @@ impl Lowerer {
         (*lo.current_func).return_kn_value_float = lower_opt_type_knowledge_value_float(&fd.return_type)
         (*lo.current_func).return_fixed_array_len = lower_opt_type_return_fixed_array_code(&fd.return_type)
         (*lo.current_func).return_struct_name = lower_opt_type_return_layout_name(&fd.return_type)
+        (*lo.current_func).wide_return_bits = lower_opt_type_wide_bits(&fd.return_type)
+        (*lo.current_func).wide_return_signed = lower_opt_type_wide_signed(&fd.return_type)
         lower_record_option_box_return((*lo.current_func).name, &fd.return_type)
         (*lo.current_func).first_param_is_ref = lower_fn_first_param_is_ref(&fd.params)
 
@@ -30774,7 +31486,10 @@ impl Lowerer {
             print(str_from_bytes(name.buf, name.len))
             print("\n")
         }
-        let bpair = lo.lower_block(fd.body)
+        lo = lo.lower_wide_ret_bind_hidden()
+        // A wide-returning fn needs the tail's width facts, which only the _ref
+        // block lowering records (LOWER_BLOCK_TAIL_*).
+        let bpair = if LOWER_WIDE_RET_FN == lo.current_fn { lo.lower_block_ref(&fd.body) } else { lo.lower_block(fd.body) }
         lo = bpair.0
         let result_reg = bpair.1
         if lower_live_diag_enabled() {
@@ -30799,6 +31514,9 @@ impl Lowerer {
             print("\n")
         }
 
+        if LOWER_WIDE_RET_FN == lo.current_fn && !lo.fn_ends_with_return() {
+            lo = lo.emit_wide_ret_store(result_reg, LOWER_BLOCK_TAIL_WIDE_BITS, LOWER_BLOCK_TAIL_WIDE_SIGNED, LOWER_BLOCK_TAIL_NARROW)
+        }
         if !lo.fn_ends_with_return() {
             lo = lo.emit(ir_return(result_reg))
         }
@@ -30859,6 +31577,9 @@ impl Lowerer {
             (*reused).returns_float = ir_fn_get(&(*lo.module), fn_id as usize).returns_float
             (*reused).return_kn_value_float = ir_fn_get(&(*lo.module), fn_id as usize).return_kn_value_float
             (*reused).return_fixed_array_len = ir_fn_get(&(*lo.module), fn_id as usize).return_fixed_array_len
+            (*reused).wide_param_limbs = ir_fn_get(&(*lo.module), fn_id as usize).wide_param_limbs
+            (*reused).wide_return_bits = ir_fn_get(&(*lo.module), fn_id as usize).wide_return_bits
+            (*reused).wide_return_signed = ir_fn_get(&(*lo.module), fn_id as usize).wide_return_signed
             (*reused).return_struct_name = ir_fn_get(&(*lo.module), fn_id as usize).return_struct_name
             (*reused).first_param_is_ref = ir_fn_get(&(*lo.module), fn_id as usize).first_param_is_ref
             (*reused).prof_counter_id = ir_fn_get(&(*lo.module), fn_id as usize).prof_counter_id
@@ -30899,6 +31620,8 @@ impl Lowerer {
         (*lo.current_func).return_kn_value_float = lower_opt_type_knowledge_value_float(&fd.return_type)
         (*lo.current_func).return_fixed_array_len = lower_opt_type_return_fixed_array_code(&fd.return_type)
         (*lo.current_func).return_struct_name = lower_opt_type_return_layout_name(&fd.return_type)
+        (*lo.current_func).wide_return_bits = lower_opt_type_wide_bits(&fd.return_type)
+        (*lo.current_func).wide_return_signed = lower_opt_type_wide_signed(&fd.return_type)
         lower_record_option_box_return((*lo.current_func).name, &fd.return_type)
         (*lo.current_func).first_param_is_ref = lower_fn_first_param_is_ref(&fd.params)
 
@@ -30956,6 +31679,7 @@ impl Lowerer {
             print(str_from_bytes(name.buf, name.len))
             print("\n")
         }
+        lo = lo.lower_wide_ret_bind_hidden()
         let bpair = lo.lower_block_ref(&fd.body)
         lo = bpair.0
         let result_reg = bpair.1
@@ -30970,6 +31694,9 @@ impl Lowerer {
             print("\n")
         }
 
+        if LOWER_WIDE_RET_FN == lo.current_fn && !lo.fn_ends_with_return() {
+            lo = lo.emit_wide_ret_store(result_reg, LOWER_BLOCK_TAIL_WIDE_BITS, LOWER_BLOCK_TAIL_WIDE_SIGNED, LOWER_BLOCK_TAIL_NARROW)
+        }
         if !lo.fn_ends_with_return() {
             lo = lo.emit(ir_return(result_reg))
         }
@@ -31051,6 +31778,14 @@ impl Lowerer {
                                 if f128_body_tail && is_tail_stmt {
                                     LOWER_F128_TAIL_EXPR = false
                                 }
+                                if is_tail_stmt {
+                                    // Read now: this block's locals leave scope below.
+                                    LOWER_BLOCK_TAIL_WIDE_BITS = pair_tail.0.expr_wide_bits_ref(&(*expr_box))
+                                    LOWER_BLOCK_TAIL_WIDE_SIGNED = if LOWER_BLOCK_TAIL_WIDE_BITS > 64 {
+                                        pair_tail.0.expr_wide_signed_ref(&(*expr_box))
+                                    } else if pair_tail.0.expr_is_unsigned_int_ref(&(*expr_box)) { 0 } else { 1 }
+                                    LOWER_BLOCK_TAIL_NARROW = pair_tail.0.expr_known_word_ref(&(*expr_box))
+                                }
                                 pair_tail
                             }
                             _ => {
@@ -31059,6 +31794,11 @@ impl Lowerer {
                         }
                     } else {
                         lo.lower_assign_stmt_ref(stmt_ref)
+                    }
+                    if is_tail_stmt && stmt_ref.kind != StmtKind::StmtExpr {
+                        LOWER_BLOCK_TAIL_WIDE_BITS = 0
+                        LOWER_BLOCK_TAIL_WIDE_SIGNED = 1
+                        LOWER_BLOCK_TAIL_NARROW = false
                     }
                     LOWER_PLACE_MOVE_OK = 0
                     stmt_idx = stmt_idx + 1
@@ -32159,11 +32899,27 @@ impl Lowerer {
                         // and an alias would observe that mutation. `is_mut` alone was
                         // insufficient — the binding's own mutability says nothing about
                         // the source's.
-                        let copy_pair = lo.fresh_reg()
-                        lo = copy_pair.0
-                        let copy_reg = copy_pair.1
-                        lo = lo.emit(ir_copy(copy_reg, reg))
-                        bind_reg = copy_reg
+                        // A wide-integer source (iN/uN, N > 64) is `limbs` consecutive
+                        // vregs: snapshot every one. A one-register copy kept limb 0
+                        // only, so `let c: i256 = big; c == big` was false.
+                        let src_wide_limbs = lower_wide_limb_count(lo.lookup_local_wide_bits((*rhs_ident).name))
+                        if src_wide_limbs > 1 && lo.lookup_local_scalar_kind((*rhs_ident).name) != 5 {
+                            let wcopy_pair = lo.fresh_wide_reg(src_wide_limbs)
+                            lo = wcopy_pair.0
+                            let wcopy_reg = wcopy_pair.1
+                            var wl: i64 = 0
+                            while wl < src_wide_limbs {
+                                lo = lo.emit(ir_copy(wcopy_reg + wl, reg + wl))
+                                wl = wl + 1
+                            }
+                            bind_reg = wcopy_reg
+                        } else {
+                            let copy_pair = lo.fresh_reg()
+                            lo = copy_pair.0
+                            let copy_reg = copy_pair.1
+                            lo = lo.emit(ir_copy(copy_reg, reg))
+                            bind_reg = copy_reg
+                        }
                     }
                 } else if (*rhs_ident).kind == ExprKind::ExprUnary || (*rhs_ident).kind == ExprKind::ExprFieldAccess {
                     // SIO-278: `let saved = *b` / `let s = o.f` bound the
@@ -32368,8 +33124,8 @@ impl Lowerer {
                                     && !lo.lookup_local_is_ref((*alias_tgt).name) {
                                     let tgt_base = lo.lookup_local((*alias_tgt).name)
                                     let tgt_ty = lo.lookup_local_struct_type((*alias_tgt).name)
-                                    if tgt_base >= 0 && tgt_ty.len > 0
-                                        && lower_struct_layout_index_of(&(*lo.struct_layouts), tgt_ty) >= 0 {
+                                    if tgt_base >= 0 && (lo.lookup_local_fixed_array_len((*alias_tgt).name) >= 0
+                                        || (tgt_ty.len > 0 && lower_struct_layout_index_of(&(*lo.struct_layouts), tgt_ty) >= 0)) {
                                         fo_ref_alias_note(s.name, tgt_base)
                                     }
                                 }
@@ -34027,6 +34783,13 @@ impl Lowerer {
             }
             _ => {}
         }
+        match s.target {
+            Some(gum_target) => { lo = lo.fo_container_store(&(*gum_target)) }
+            None => {}
+        }
+        // RHS projection metadata belongs to this assignment, never the next let.
+        lo.pending_variance_reg = -1
+        lo = lo.fo_clear_pending_sens()
         let target_opt: Option<Box<Expr>> = s.target
 
         match target_opt {
@@ -34049,6 +34812,53 @@ impl Lowerer {
                                 lo = lo.emit(ir_store_global(rhs, bss_off_local, (*target_expr).name))
                             }
                             lo = lo.emit(ir_copy(dst, rhs))
+                            // A wide-integer local is `limbs` consecutive vregs: the
+                            // copy above moved limb 0 only, so `x = x * 2` in a loop
+                            // lost every high limb. Copy the rest; a word RHS (a
+                            // literal: the checker admits nothing else narrower)
+                            // supplies its sign word. A compound assignment's value
+                            // is `x op y`, as wide as x.
+                            let dst_limbs = lower_wide_limb_count(lo.lookup_local_wide_bits((*target_expr).name))
+                            if dst_limbs > 1 && lo.lookup_local_scalar_kind((*target_expr).name) != 5 {
+                                var rhs_limbs: i64 = dst_limbs
+                                var rhs_signed = true
+                                if s.assign_op == AssignOp::AssignEq {
+                                    match s.expr {
+                                        Some(rhs_e) => {
+                                            let rb = lo.expr_wide_bits_ref(&(*rhs_e))
+                                            if rb > 64 {
+                                                rhs_limbs = lower_wide_limb_count(rb)
+                                            } else {
+                                                rhs_limbs = 1
+                                                rhs_signed = !lo.expr_is_unsigned_int_ref(&(*rhs_e))
+                                            }
+                                        }
+                                        None => {}
+                                    }
+                                }
+                                var sign_w = rhs
+                                if rhs_limbs < dst_limbs {
+                                    let sw_pair = lo.fresh_reg()
+                                    lo = sw_pair.0
+                                    sign_w = sw_pair.1
+                                    if rhs_signed {
+                                        let sh_pair = lo.emit_i64_const(63)
+                                        lo = sh_pair.0
+                                        lo = lo.emit(ir_binop(sign_w, rhs + rhs_limbs - 1, BinaryOp::OpShr, sh_pair.1))
+                                    } else {
+                                        lo = lo.emit(ir_load_imm(sign_w, 0))
+                                    }
+                                }
+                                var li: i64 = 1
+                                while li < dst_limbs {
+                                    if li < rhs_limbs {
+                                        lo = lo.emit(ir_copy(dst + li, rhs + li))
+                                    } else {
+                                        lo = lo.emit(ir_copy(dst + li, sign_w))
+                                    }
+                                    li = li + 1
+                                }
+                            }
                             if rhs_variance >= 0 {
                                 // Copy into the local's fixed uncertainty slots, the
                                 // same discipline the value uses one line above. A
@@ -34349,6 +35159,9 @@ impl Lowerer {
         var regs: [i64; 64] = [0; 64]
         var reg_count: i64 = 0
         var f128_bit: i64 = 1
+        let wide_limbs = LOWER_WIDE_ARG_LIMBS
+        LOWER_WIDE_ARG_LIMBS = 0
+        var arg_idx: i64 = 0
         while true {
             match *current {
                 Some(list) => {
@@ -34362,6 +35175,21 @@ impl Lowerer {
                     f128_bit = f128_bit * 2
                     lo = pair_head.0
                     var arg_reg = pair_head.1
+                    // Wide-integer param: pass the address of a limb array.
+                    let param_limbs = lower_wide_param_limbs_at(wide_limbs, arg_idx)
+                    if param_limbs > 1 {
+                        let arg_bits = lo.expr_wide_bits_ref(&(*list).head)
+                        var arg_limbs: i64 = 1
+                        var arg_signed = !lo.expr_is_unsigned_int_ref(&(*list).head)
+                        if arg_bits > 64 {
+                            arg_limbs = lower_wide_limb_count(arg_bits)
+                            arg_signed = lo.expr_wide_signed_ref(&(*list).head) == 1
+                        }
+                        let pk = lo.emit_wide_arg_pack(arg_reg, arg_limbs, arg_signed, param_limbs)
+                        lo = pk.0
+                        arg_reg = pk.1
+                    }
+                    arg_idx = arg_idx + 1
                     if borrow {
                         // The same OpRef an explicit `&value` argument lowers to.
                         let pair_bref = lo.fresh_reg()
@@ -35361,6 +36189,7 @@ impl Lowerer {
                     }
                     lo = pair.0
                     let vreg = pair.1
+                    if lo.fo_array_escapes(&(*list).head.value) { lo = lo.fo_container_refuse() }
                     lo = lo.emit(ir_field_set(base_reg, named_field_idx, vreg, (*list).head.name))
                     // #1706: record this field's uncertainty so `variance_of(a.x)` can
                     // find it later. The initialiser expression is the only place the
@@ -35399,6 +36228,7 @@ impl Lowerer {
                     let pair_v = lo.lower_expr_ref(&(*list).head)
                     lo = pair_v.0
                     let vreg = pair_v.1
+                    lo = lo.fo_refuse_measured_initializer(&(*list).head)
                     let pair_i = lo.fresh_reg()
                     lo = pair_i.0
                     let ireg = pair_i.1
@@ -36616,6 +37446,8 @@ impl Lowerer {
     }
 
     fn lower_measure_call_ref(self, _span: Span, args: &Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        FO_CONTAINER_KNOWLEDGE_SEEN = true
+        fo_require_uncertainty_tracking()
         // Extract first argument: value
         let value_pair = self.lower_measure_value_arg_ref(args)
         let lo1 = value_pair.0
@@ -36671,6 +37503,8 @@ impl Lowerer {
     // separate pre-existing lowering gap, unchanged here.) Named call arguments lower to
     // their value expression, so arg0 is the value and arg1 is the epsilon expression.
     fn lower_knowledge_ctor_call_ref(self, _span: Span, args: &Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        FO_CONTAINER_KNOWLEDGE_SEEN = true
+        fo_require_uncertainty_tracking()
         let value_pair = self.lower_measure_value_arg_ref(args)
         let lo1 = value_pair.0
         let value_reg = value_pair.1
@@ -36770,6 +37604,7 @@ impl Lowerer {
     }
 
     fn lower_covariance_of_call_ref(self, args: &Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        fo_require_uncertainty_tracking()
         match *args {
             Some(list) => {
                 match (*list).tail {
@@ -36798,6 +37633,7 @@ impl Lowerer {
     }
 
     fn lower_variance_of_call_ref(self, args: &Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        fo_require_uncertainty_tracking()
         match *args {
             Some(list) => {
                 let saved_loops = FO_INLINE_ALLOW_LOOPS
@@ -36831,6 +37667,7 @@ impl Lowerer {
     // are compile-time slots assigned by measure(). A channel with no recorded
     // partial is a genuine zero: x does not depend on input k.
     fn lower_sensitivity_of_call_ref(self, args: &Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        fo_require_uncertainty_tracking()
         match *args {
             Some(list) => {
                 let saved_loops = FO_INLINE_ALLOW_LOOPS
@@ -36879,6 +37716,7 @@ impl Lowerer {
     // register's runtime contents, which would be a wrong number dressed as a
     // right one. An empty slot is a genuine zero: x is linear in that pair.
     fn lower_hessian_of_call_ref(self, args: &Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        fo_require_uncertainty_tracking()
         match *args {
             Some(list) => {
                 let saved_loops = FO_INLINE_ALLOW_LOOPS
@@ -36942,6 +37780,7 @@ impl Lowerer {
     // register and read by the variance, covariance and second-order consumers.
     // A missing rho is 0, which is independence, and the checker already rejects it.
     fn lower_correlate_call_ref(self, args: &Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        fo_require_uncertainty_tracking()
         match *args {
             Some(l0) => {
                 let saved_loops = FO_INLINE_ALLOW_LOOPS
@@ -37013,6 +37852,7 @@ impl Lowerer {
     }
 
     fn lower_second_order_mean_call_ref(self, args: &Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        fo_require_uncertainty_tracking()
         FO_LOGN_ACTIVE = 0
         match *args {
             Some(list) => {
@@ -37145,6 +37985,7 @@ impl Lowerer {
 
     // lift_knowledge(k: Knowledge<T>) → IrLiftKnowledge (zero-cost copy; epistemic bridge H5.4)
     fn lower_lift_knowledge_call(self, span: Span, args: Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        fo_require_uncertainty_tracking()
         let knowledge_expr = match args {
             Some(list) => Some(Box::new((*list).head))
             None => None
@@ -38472,11 +39313,36 @@ impl Lowerer {
             } else {
                 0
             }
+            if fn_id >= 0 && fn_id < lo1.module.fn_count {
+                let wide_packed = ir_fn_get(&(*lo1.module), fn_id as usize).wide_param_limbs
+                if wide_packed < 0 {
+                    // A wide param past the 15-param / 15-limb encoding: refuse
+                    // rather than pass it as one word.
+                    lo1 = lo1.report_error_at(10831)
+                } else {
+                    LOWER_WIDE_ARG_LIMBS = wide_packed
+                }
+            }
             lo1.lower_expr_args_masked_borrow_ref(&e.args, f128_arg_mask, ref_arg_mask)
         }
-        let lo2 = pair_args.lowerer
-        let args: Option<Box<IrRegList>> = if pair_args.count <= 0 { None } else { Some(Box::new(pair_args.regs)) }
-        let argc = pair_args.count
+        var lo2 = pair_args.lowerer
+        var args: Option<Box<IrRegList>> = if pair_args.count <= 0 { None } else { Some(Box::new(pair_args.regs)) }
+        var argc = pair_args.count
+        // `-> iN/uN` (N > 64): pass a fresh out-array as the hidden last arg.
+        var wide_ret_limbs: i64 = 0
+        var wide_ret_arr: i64 = 0 - 1
+        if fn_id >= 0 && fn_id < (*lo2.module).fn_count {
+            let wrb = ir_fn_get(&(*lo2.module), fn_id as usize).wide_return_bits
+            if wrb > 64 {
+                wide_ret_limbs = lower_wide_limb_count(wrb)
+                let arr_pair = lo2.fresh_reg()
+                lo2 = arr_pair.0
+                wide_ret_arr = arr_pair.1
+                lo2 = lo2.emit(ir_alloc_array(wide_ret_arr, lo2.aggregate_storage_bytes(wide_ret_limbs), wide_ret_limbs))
+                args = lower_reg_list_append(args, wide_ret_arr)
+                argc = argc + 1
+            }
+        }
         let pair_d = lo2.fresh_reg()
         let lo3 = pair_d.0
         let dst = pair_d.1
@@ -38498,6 +39364,10 @@ impl Lowerer {
         var lo5 = lo4.emit(call_instr)
         if call_instr.imm_flags == IR_FLOAT_REG_MARKER_FLAG {
             lo5 = lo5.emit(ir_mark_float_reg(dst))
+        }
+        if wide_ret_limbs > 1 {
+            // The value is the out-array's limbs, not rax.
+            return lo5.emit_wide_param_unpack(wide_ret_arr, wide_ret_limbs)
         }
         (lo5, dst)
     }
@@ -39115,6 +39985,14 @@ impl Lowerer {
     }
 
     fn lower_binary_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        let saved_site = LOWER_CUR_SITE
+        LOWER_CUR_SITE = lower_site_of_span((*e).span)
+        let r = self.lower_binary_expr_ref_inner(e)
+        LOWER_CUR_SITE = saved_site
+        r
+    }
+
+    fn lower_binary_expr_ref_inner(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         if e.bin_op == BinaryOp::OpAnd || e.bin_op == BinaryOp::OpOr {
             return self.lower_short_circuit_ref(e)
         }
@@ -39596,7 +40474,8 @@ impl Lowerer {
                         None => false,
                     }
                     if rhs_int_p {
-                        return lower_narrow32_check_reg(lo4, dst, narrow_kind)
+                        let narrow_opk = if e.bin_op == BinaryOp::OpAdd { 0 } else if e.bin_op == BinaryOp::OpSub { 1 } else { 2 }
+                        return lower_narrow32_check_reg(lo4, dst, narrow_kind, narrow_opk)
                     }
                 }
             }
@@ -39606,6 +40485,16 @@ impl Lowerer {
 
     fn lower_call_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         var lo = self
+        var gum_args = &e.args
+        while true {
+            match *gum_args {
+                Some(arg) => {
+                    if lo.fo_array_escapes(&(*arg).head) { lo = lo.fo_container_refuse() }
+                    gum_args = &(*arg).tail
+                }
+                None => break,
+            }
+        }
         if FO_STEP_CARRY == 1 && fo_recur_call_is_this(e) {
             let c = lo.fresh_reg()
             lo = c.0
@@ -40502,6 +41391,7 @@ impl Lowerer {
                         let vpair = lo3.lower_knowledge_variance_for_ident((*base_expr).name)
                         lo3 = vpair.0
                         if vpair.1 >= 0 {
+                            lo3.fo_container_note_projection((*base_expr).name)
                             lo3.pending_variance_reg = vpair.1
                             lo3 = lo3.fo_seed_from_variance(vpair.1, 0 - 1)
                             var pk: i64 = 0
@@ -40891,6 +41781,17 @@ impl Lowerer {
     }
 
     fn lower_unary_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        let saved_site = LOWER_CUR_SITE
+        LOWER_CUR_SITE = lower_site_of_span((*e).span)
+        let r = self.lower_unary_expr_ref_inner(e)
+        LOWER_CUR_SITE = saved_site
+        r
+    }
+
+    fn lower_unary_expr_ref_inner(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        if (e.un_op == UnaryOp::OpRef || e.un_op == UnaryOp::OpRefMut) && self.fo_array_escapes(e) {
+            return (self.fo_container_refuse(), 0)
+        }
         // SIO-207: `-9223372036854775808` is the spelling of i64 MIN. The
         // magnitude token carries the 2^63 bit pattern in int_val, so emitting
         // a runtime negation would negate MIN itself and trip the overflow
@@ -41203,7 +42104,7 @@ impl Lowerer {
         if e.un_op == UnaryOp::OpNeg && !src_is_float {
             let neg_narrow_kind = lo3.opt_expr_narrow32_kind_ref(&e.left)
             if neg_narrow_kind != 0 {
-                return lower_narrow32_check_reg(lo3, dst, neg_narrow_kind)
+                return lower_narrow32_check_reg(lo3, dst, neg_narrow_kind, 3)
             }
         }
         (lo3, dst)
@@ -41651,6 +42552,10 @@ impl Lowerer {
     }
 
     fn lower_method_call_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        // Array methods and argument passing do not carry this local table.
+        if self.fo_array_escapes(e) && !ir_name_eq_lit(e.name, "len") {
+            return (self.fo_container_refuse(), 0)
+        }
         if self.expr_is_gpu_sync_call_ref(e) {
             // Unit. A plain integer zero -- emit_f64_const would mark the
             // register as float for a value that is never read.
@@ -42079,10 +42984,35 @@ impl Lowerer {
         } else {
             0
         }
+        // Wide-integer params: same receiver shift, one 4-bit field.
+        if fn_id0 >= 0 && fn_id0 < (*lo1.module).fn_count {
+            let wide_packed_m = ir_fn_get(&(*lo1.module), fn_id0 as usize).wide_param_limbs
+            if wide_packed_m < 0 {
+                lo1 = lo1.report_error_at(10832)
+            } else {
+                LOWER_WIDE_ARG_LIMBS = wide_packed_m / 16
+            }
+        }
         let pair_args: LowerExprArgsResult = lo1.lower_expr_args_masked_borrow_ref(&e.args, f128_arg_mask_m, ref_arg_mask_m)
-        let lo2 = pair_args.lowerer
-        let arg_list: Option<Box<IrRegList>> = if pair_args.count <= 0 { None } else { Some(Box::new(pair_args.regs)) }
-        let arg_count = pair_args.count
+        var lo2 = pair_args.lowerer
+        var arg_list: Option<Box<IrRegList>> = if pair_args.count <= 0 { None } else { Some(Box::new(pair_args.regs)) }
+        var arg_count = pair_args.count
+        // `-> iN/uN` (N > 64): hidden out-array as the last arg (see the
+        // named-call site).
+        var wide_ret_limbs_m: i64 = 0
+        var wide_ret_arr_m: i64 = 0 - 1
+        if fn_id0 >= 0 && fn_id0 < (*lo2.module).fn_count {
+            let wrb_m = ir_fn_get(&(*lo2.module), fn_id0 as usize).wide_return_bits
+            if wrb_m > 64 {
+                wide_ret_limbs_m = lower_wide_limb_count(wrb_m)
+                let arr_pair_m = lo2.fresh_reg()
+                lo2 = arr_pair_m.0
+                wide_ret_arr_m = arr_pair_m.1
+                lo2 = lo2.emit(ir_alloc_array(wide_ret_arr_m, lo2.aggregate_storage_bytes(wide_ret_limbs_m), wide_ret_limbs_m))
+                arg_list = lower_reg_list_append(arg_list, wide_ret_arr_m)
+                arg_count = arg_count + 1
+            }
+        }
         let args2 = lo2.prepend_arg(base_reg, arg_list)
         let pair_fn = lo2.find_or_add_fn_id(call_name)
         let lo3 = pair_fn.0
@@ -42106,6 +43036,9 @@ impl Lowerer {
         var lo6 = lo5.emit(call_instr_m)
         if call_instr_m.imm_flags == IR_FLOAT_REG_MARKER_FLAG {
             lo6 = lo6.emit(ir_mark_float_reg(dst))
+        }
+        if wide_ret_limbs_m > 1 {
+            return lo6.emit_wide_param_unpack(wide_ret_arr_m, wide_ret_limbs_m)
         }
         (lo6, dst)
     }
@@ -42654,6 +43587,7 @@ impl Lowerer {
     }
 
     fn lower_for_in_array_ref(self, e: &Expr, iter: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        if self.fo_array_escapes(iter) { return (self.fo_container_refuse(), 0) }
         // Desugar `for v in arr { body }` over a bare LOCAL array into the working
         // while-loop IR, using a runtime element count read from the object header
         // (IrArrayLen) — NO LowerLocalStack growth, NO per-local length column:
@@ -43092,6 +44026,7 @@ impl Lowerer {
     }
 
     fn lower_return_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        if self.fo_array_escapes(e) { return (self.fo_container_refuse(), 0) }
         // V0-E.5.10: `return 1.5` in an `-> f128` fn is a literal in f128
         // position — exact limbs or fail-closed, never binary64 bits in an
         // F128Bits slot (check accepted this spelling since V0-B).
@@ -43112,6 +44047,18 @@ impl Lowerer {
         }
         var lo = pair.0
         let reg = pair.1
+        // `-> iN/uN` (N > 64): the value leaves through the hidden out-array.
+        if LOWER_WIDE_RET_FN >= 0 && LOWER_WIDE_RET_FN == lo.current_fn {
+            match e.left {
+                Some(rv) => {
+                    let rv_bits = lo.expr_wide_bits_ref(&(*rv))
+                    let rv_signed = if rv_bits > 64 { lo.expr_wide_signed_ref(&(*rv)) } else if lo.expr_is_unsigned_int_ref(&(*rv)) { 0 } else { 1 }
+                    let rv_word = lo.expr_known_word_ref(&(*rv))
+                    lo = lo.emit_wide_ret_store(reg, rv_bits, rv_signed, rv_word)
+                }
+                None => {}
+            }
+        }
         // Leaving the function from inside loops: pop their iteration regions,
         // innermost first, without resetting them -- what they made, the
         // returned value included, then belongs to the enclosing region.
@@ -43176,11 +44123,23 @@ impl Lowerer {
 
 
     fn lower_knowledge_literal_variance(self, dst: i64, fields: &Option<Box<StructFieldList>>) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        fo_require_uncertainty_tracking()
         var current = fields
         while true {
             match *current {
                 Some(list) => {
                     if ir_name_eq_lit((*list).head.name, "value") {
+                        // A constant `value:` has no epistemic inputs: its
+                        // derived variance is a literal 0.0, and writing that
+                        // into field 1 erased the literal's own `variance:`
+                        // field (`Knowledge { value: 0.077, variance: 0.5, .. }`
+                        // read back variance 0.0; lean_single reads 0.5).
+                        // lower_struct_fields_ref has already stored the
+                        // declared variance, so leave it.
+                        if lower_expr_is_float_literal_like_ref(&(*list).head.value)
+                            || (*list).head.value.kind == ExprKind::ExprIntLit {
+                            return self
+                        }
                         let fv = self.lower_expr_variance_ref(&(*list).head.value)
                         var lo = fv.0
                         if fv.1 >= 0 {
@@ -43614,8 +44573,13 @@ impl Lowerer {
                         (lo3, ref_reg)
                     } else {
                         let ref_pair = self.fresh_reg()
-                        let lo2 = ref_pair.0
+                        var lo2 = ref_pair.0
                         let ref_reg = ref_pair.1
+                        if ir_fn_get(&(*lo2.module), fn_id as usize).wide_param_limbs != 0 || ir_fn_get(&(*lo2.module), fn_id as usize).wide_return_bits > 64 {
+                            // Wide-integer params travel as limb-array addresses that only a
+                            // direct call builds; an indirect call would pass one word.
+                            lo2 = lo2.report_error_at(10833)
+                        }
                         let lo3 = lo2.emit(ir_load_fn_ref(ref_reg, fn_id))
                         (lo3, ref_reg)
                     }
@@ -43684,8 +44648,11 @@ impl Lowerer {
                 let fn_id = lowerer_lookup_fn_id_by_name_ref(&self, n)
                 if fn_id >= 0 {
                     let ref_pair = self.fresh_reg()
-                    let lo2 = ref_pair.0
+                    var lo2 = ref_pair.0
                     let ref_reg = ref_pair.1
+                    if ir_fn_get(&(*lo2.module), fn_id as usize).wide_param_limbs != 0 || ir_fn_get(&(*lo2.module), fn_id as usize).wide_return_bits > 64 {
+                        lo2 = lo2.report_error_at(10834)
+                    }
                     let lo3 = lo2.emit(ir_load_fn_ref(ref_reg, fn_id))
                     (lo3, ref_reg)
                 } else {
