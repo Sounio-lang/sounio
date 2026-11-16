@@ -76,7 +76,7 @@ run_witness of \
 
 run_witness transcendentals \
   tests/run-pass/epistemic_hessian_transcendentals.sio \
-  $'-0.500000\n0.000000\n0.500000\n0.000000\n1.000000\n0.000000'
+  $'-0.500000\n0.000000\n0.500000\n0.000000\n1.000000\n0.000000\nEPISTEMIC_HESSIAN_TRANSCENDENTALS_PASS'
 
 run_witness eight_inputs \
   tests/run-pass/epistemic_hessian_8inputs.sio \
