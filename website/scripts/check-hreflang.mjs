@@ -13,6 +13,8 @@ import {
   canonicalPathname,
   hreflangLinks,
   htmlLang,
+  indexableLocales,
+  isIndexableUrl,
   isRedirectPath,
   localeFromPath,
 } from '../src/lib/seo-locales.mjs';
@@ -24,35 +26,57 @@ const ALLOWED_CODES = new Set([...Object.values(HREFLANG), 'x-default']);
 function assertExamples() {
   const errors = [];
   const packages = canonicalPathname('/es/packages/');
-  if (packages !== '/packages/') errors.push(`expected /es/packages/ to canonicalize to /packages/, got ${packages}`);
+  if (packages !== '/es/packages/') errors.push(`expected /es/packages/ to self-canonicalize, got ${packages}`);
+  if (isIndexableUrl('/es/packages/')) errors.push('/es/packages/ is not a Spanish translation and must be noindex');
   const effect = canonicalPathname('/zh/learn/compiler/effect-system/');
   if (effect !== '/zh/learn/compiler/effect-system/') {
     errors.push(`expected zh effect-system to self-canonicalize, got ${effect}`);
   }
-  const units = canonicalPathname('/zh-hk/learn/language/units-and-uncertainty/');
-  if (units !== '/learn/language/units-and-uncertainty/') {
-    errors.push(`expected zh-hk units page to canonicalize to English, got ${units}`);
+  if (isIndexableUrl('/zh/learn/compiler/effect-system/')) {
+    errors.push('zh effect-system stub is not a translation of the checker page');
   }
-  const effectCodes = hreflangLinks('/zh/learn/compiler/effect-system/').map((link) => link.hreflang);
-  if (!effectCodes.includes('zh-CN') || !effectCodes.includes('x-default') || effectCodes.includes('zh')) {
+  const units = canonicalPathname('/zh-hk/learn/language/units-and-uncertainty/');
+  if (units !== '/zh-hk/learn/language/units-and-uncertainty/') {
+    errors.push(`expected zh-hk units page to self-canonicalize, got ${units}`);
+  }
+  if (isIndexableUrl('/zh-hk/learn/language/units-and-uncertainty/')) {
+    errors.push('zh-hk units page is not a translation');
+  }
+  const effectCodes = hreflangLinks('/learn/compiler/effect-system/').map((link) => link.hreflang);
+  const effectDefault = hreflangLinks('/learn/compiler/effect-system/').find((link) => link.hreflang === 'x-default');
+  if (effectCodes.includes('zh-CN') || effectCodes.includes('zh') || !effectCodes.includes('en') || effectDefault?.href !== absoluteUrl('/learn/compiler/effect-system/')) {
     errors.push(`effect-system hreflang codes drifted: ${effectCodes.join(',')}`);
   }
-  const packageCodes = hreflangLinks('/es/packages/').map((link) => link.hreflang);
+  const effectsDefault = hreflangLinks('/learn/effects/').find((link) => link.hreflang === 'x-default');
+  if (indexableLocales('/learn/effects/').some((locale) => locale !== 'en') || effectsDefault?.href !== absoluteUrl('/learn/effects/')) {
+    errors.push(`effects hreflang still lists stale locales: ${indexableLocales('/learn/effects/').join(',')}`);
+  }
+  const packageCodes = hreflangLinks('/packages/').map((link) => link.hreflang);
   if (packageCodes.includes('es') || packageCodes.includes('pt-BR')) {
     errors.push(`packages hreflang still lists untranslated locales: ${packageCodes.join(',')}`);
   }
   const aboutPt = canonicalPathname('/pt/about/');
-  if (aboutPt !== '/pt/about/') errors.push(`expected /pt/about/ to self-canonicalize, got ${aboutPt}`);
+  if (aboutPt !== '/pt/about/' || !isIndexableUrl('/pt/about/')) errors.push(`expected /pt/about/ to stay indexable, got ${aboutPt}`);
   const aboutEl = canonicalPathname('/el/about/');
-  if (aboutEl !== '/about/') errors.push(`expected /el/about/ to canonicalize to English, got ${aboutEl}`);
+  if (aboutEl !== '/el/about/' || isIndexableUrl('/el/about/')) {
+    errors.push(`expected /el/about/ to self-canonicalize and stay out of the index, got ${aboutEl}`);
+  }
   const roadmapPt = canonicalPathname('/pt/about/roadmap/');
-  if (roadmapPt !== '/about/roadmap/') {
-    errors.push(`expected /pt/about/roadmap/ to canonicalize to English, got ${roadmapPt}`);
+  if (roadmapPt !== '/pt/about/roadmap/' || isIndexableUrl('/pt/about/roadmap/')) {
+    errors.push(`expected /pt/about/roadmap/ to self-canonicalize and stay out of the index, got ${roadmapPt}`);
   }
   const aboutCodes = hreflangLinks('/about/').map((link) => link.hreflang);
   const aboutExpected = ['en', 'pt-BR', 'x-default'];
   if (aboutCodes.length !== aboutExpected.length || aboutExpected.some((code) => !aboutCodes.includes(code))) {
     errors.push(`about hreflang codes drifted: ${aboutCodes.join(',')}`);
+  }
+  const homeDefault = hreflangLinks('/').find((link) => link.hreflang === 'x-default');
+  if (homeDefault?.href !== `${SITE}/`) errors.push(`home x-default is ${homeDefault?.href}`);
+  const esHome = canonicalPathname('/es/');
+  if (esHome !== '/es/' || !isIndexableUrl('/es/')) errors.push(`expected /es/ to stay an indexable self-canonical home, got ${esHome}`);
+  const esLanguage = canonicalPathname('/es/language/');
+  if (esLanguage !== '/es/language/' || isIndexableUrl('/es/language/')) {
+    errors.push(`expected /es/language/ to self-canonicalize and stay out of the index, got ${esLanguage}`);
   }
   return errors;
 }
@@ -165,7 +189,13 @@ async function run() {
       errors.push(`${page.rel}: canonical is missing a trailing slash`);
     }
 
+    if (!isIndexableUrl(page.pathname)) {
+      if (!page.head.noindex) errors.push(`${page.rel}: untranslated page is missing noindex`);
+      if (page.head.alternates.length > 0) errors.push(`${page.rel}: untranslated page emits hreflang`);
+      continue;
+    }
     if (page.head.noindex) {
+      errors.push(`${page.rel}: indexable page is noindex`);
       if (page.head.alternates.length > 0) errors.push(`${page.rel}: noindex page emits hreflang`);
       continue;
     }
@@ -218,6 +248,11 @@ async function run() {
     if (!sameSet(actual, expected)) {
       errors.push(`sitemap alternates for ${entry.loc} mismatch\n  actual: ${actual.join(' | ')}\n  expected: ${expected.join(' | ')}`);
     }
+  }
+
+  const effectsLoc = absoluteUrl('/learn/effects/');
+  if (!sitemapLocs.some((entry) => entry.loc === effectsLoc)) {
+    errors.push(`sitemap missing ${effectsLoc}`);
   }
 
   if (errors.length > 0) {

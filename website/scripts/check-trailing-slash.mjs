@@ -45,6 +45,8 @@ const ACCEPTANCE = [
   ['/zh-hk/docs/', 308, '/zh-hk/learn/'],
   ['/ja/docs/', 308, '/ja/learn/'],
   ['/es/docs/', 308, '/es/learn/'],
+  ['/es/docs/effects', 308, '/learn/effects/'],
+  ['/es/docs/effects/', 308, '/learn/effects/'],
   ['/docs/compiler/effect-system', 308, '/learn/compiler/effect-system/'],
   ['/docs/compiler/effect-system/', 308, '/learn/compiler/effect-system/'],
   ['/about/', null, null],

@@ -96,14 +96,38 @@ export const EFFECTS_PAGE = {
   dateModified: '2026-11-06',
 };
 
+/**
+ * Spanish learn hub. The nav label "Aprender — Sounio" was a second result
+ * for the query "sounio", next to the homepage. The visible H1 stays the
+ * journey line; only the document title and meta description change.
+ */
+export const SPANISH_SEARCH = {
+  '/learn/': {
+    title: 'Guías de Sounio: efectos, unidades e incertidumbre',
+    description:
+      'Guías del lenguaje Sounio: unidades de medida, el sistema de efectos, tipos de refinamiento, propagación de incertidumbre y el compilador autoalojado.',
+  },
+};
+
 export function englishSearchFor(barePath, locale) {
   if (locale !== 'en') return undefined;
   return ENGLISH_SEARCH[barePath];
 }
 
+export function searchCopyFor(barePath, locale) {
+  if (locale === 'en') return ENGLISH_SEARCH[barePath];
+  if (locale === 'es') return SPANISH_SEARCH[barePath];
+  return undefined;
+}
+
 const COMPILER_VERSION = /v0\.80|v0\.99|v0\.100|v1\.0/;
 
-for (const [page, copy] of Object.entries(ENGLISH_SEARCH)) {
+const SEARCH_COPY = [
+  ...Object.entries(ENGLISH_SEARCH),
+  ...Object.entries(SPANISH_SEARCH).map(([pathName, copy]) => [`es:${pathName}`, copy]),
+];
+
+for (const [page, copy] of SEARCH_COPY) {
   if (copy.title.length < 50 || copy.title.length > 60) {
     throw new Error(`${page} title length ${copy.title.length} is outside 50–60`);
   }
