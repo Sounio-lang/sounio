@@ -1,34 +1,41 @@
 //@ run-pass
+//@ requires: madaros
+//@ expect-stdout-contains: 7.397198
+//@ expect-stdout-contains: 10.798599
 // Full vancomycin uncertainty propagation (canonical syntax).
 //
 // Clinical intent:
 // - propagate confidence through weight, renal, assay, and nephrotoxic adjustments
 // - require confidence gates before final prescribing decisions
+//
+// Independence is declared by construction: every input is built as a fresh
+// Knowledge inside the function that combines it (the functions take the
+// measured numbers, not Knowledge parameters or call results), so each operand
+// starts from an empty noise-source set. A parameter or a call result has an
+// unknown set, and E230 (ADR-016 5.5) refuses to treat that as independent.
 
-type PatientWeight = Knowledge[f64];
-type CrCl = Knowledge[f64];
-type TroughLevel = Knowledge[f64];
-type AssayBias = Knowledge[f64];
 type DailyDose = Knowledge[f64];
 
-let base_dose_per_kg: Knowledge[f64] =
-    Knowledge(15.0, ε=0.92, prov="ASHP_2020_Level1A_RCT");
-
-fn adjust_for_crcl(crcl: CrCl) -> Knowledge[f64] with Panic {
+fn adjust_for_crcl(crcl_value: f64, crcl_eps: f64) -> Knowledge[f64] with Panic {
+    let crcl: Knowledge[f64] = Knowledge(crcl_value, ε=crcl_eps, prov="Cockcroft_Gault_2025");
     let crcl_ref: Knowledge[f64] = Knowledge(120.0, ε=1.0, prov="crcl_reference");
     crcl / crcl_ref
 }
 
 fn initial_patient_dose(
-    w: PatientWeight,
-    crcl: CrCl,
-    bias: AssayBias,
+    weight: f64,
+    crcl_value: f64,
+    bias_value: f64,
     has_nephrotoxics: bool
 ) -> DailyDose with Panic {
+    let base_dose_per_kg: Knowledge[f64] = Knowledge(15.0, ε=0.92, prov="ASHP_2020_Level1A_RCT");
+    let w: Knowledge[f64] = Knowledge(weight, ε=0.98, prov="hospital_scale_0.5kg");
+    let bias: Knowledge[f64] = Knowledge(bias_value, ε=0.88, prov="Labquality_Equalis_2026");
     let weight_factor = w / Knowledge(70.0, ε=1.0, prov="weight_reference");
     let dose1 = base_dose_per_kg * weight_factor;
 
-    let renal_factor = adjust_for_crcl(crcl);
+    let crcl: Knowledge[f64] = Knowledge(crcl_value, ε=0.72, prov="Cockcroft_Gault_2025");
+    let renal_factor = crcl / Knowledge(120.0, ε=1.0, prov="crcl_reference");
     let dose2 = dose1 * renal_factor;
 
     let dose3 = dose2 / bias;
@@ -40,7 +47,9 @@ fn initial_patient_dose(
     }
 }
 
-fn bayesian_trough_update(dose: DailyDose, trough: TroughLevel) -> Knowledge[f64] with Panic, Epistemic {
+fn bayesian_trough_update(dose_value: f64, trough_value: f64) -> Knowledge[f64] with Panic, Epistemic {
+    let dose: Knowledge[f64] = Knowledge(dose_value, ε=0.72, prov="initial_dose");
+    let trough: Knowledge[f64] = Knowledge(trough_value, ε=0.94, prov="lab_trough_8h_cv_6pct");
     let fused = (dose + trough) / Knowledge(2.0, ε=1.0, prov="bayesian_weighted_mean");
     Knowledge {
         value: fused.value,
@@ -56,19 +65,10 @@ fn prescribe_vancomycin(
 }
 
 fn main() with IO, Panic, Epistemic {
-    let measured_weight: PatientWeight =
-        Knowledge(78.5, ε=0.98, prov="hospital_scale_0.5kg");
-    let estimated_crcl: CrCl =
-        Knowledge(65.0, ε=0.72, prov="Cockcroft_Gault_2025");
-    let assay_bias: AssayBias =
-        Knowledge(1.047, ε=0.88, prov="Labquality_Equalis_2026");
-
-    let initial = initial_patient_dose(measured_weight, estimated_crcl, assay_bias, true);
+    let initial = initial_patient_dose(78.5, 65.0, 1.047, true);
     println(initial);
 
-    let measured_trough: TroughLevel =
-        Knowledge(14.2, ε=0.94, prov="lab_trough_8h_cv_6pct");
-    let adjusted = bayesian_trough_update(initial, measured_trough);
+    let adjusted = bayesian_trough_update(initial.value, 14.2);
     println(adjusted);
 
     let safe_order = prescribe_vancomycin(adjusted);
