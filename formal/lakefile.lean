@@ -54,6 +54,8 @@ lean_lib Bootstrap where
     .one `Bootstrap.SeedData,
     .one `Bootstrap.Seeds,
     .one `Bootstrap.TMR,
+    .one `Bootstrap.X86Dec,
+    .one `Bootstrap.TMRExposure,
     .one `Bootstrap.X86Env,
     .one `Bootstrap.X86Int,
     .one `Bootstrap.X86Min,
@@ -71,3 +73,6 @@ lean_exe sporos where
 
 lean_exe «sporos-examples» where
   root := `Sporos.Examples
+
+lean_exe x86run where
+  root := `Bootstrap.RunHex
