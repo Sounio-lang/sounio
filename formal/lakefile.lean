@@ -63,3 +63,11 @@ lean_lib Bootstrap where
 -- bootstrap/model/seed_proofs.sh and the nightly job, not on every pull request.
 lean_lib BootstrapSeeds where
   roots := #[`Bootstrap.SeedA, `Bootstrap.SeedB]
+
+-- The Sporos reference interpreter as a program (`sporos PROGRAM.spb < in > out`)
+-- and the writer of the example programs (`sporos-examples DIR`).
+lean_exe sporos where
+  root := `Sporos.Main
+
+lean_exe «sporos-examples» where
+  root := `Sporos.Examples
