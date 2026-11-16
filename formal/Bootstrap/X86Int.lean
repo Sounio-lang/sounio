@@ -78,6 +78,10 @@ inductive Ins where
   | jtab (b i disp : Nat)
   | call (t : Nat)
   | ret
+  /-- `jmp r64` -/
+  | jmpR (r : Reg)
+  /-- `push imm` (imm already sign-extended to 64 bits) -/
+  | pushI (imm : Nat)
   | push (s : Reg)
   | pop (d : Reg)
   | syscall
@@ -193,6 +197,14 @@ def exec (ins : Ins) (len : Nat) (s : St) : Out :=
         let x ← s.reg b; let y ← s.reg i
         let t ← rd64 s.mem ((x + 8 * y + disp) % W)
         pure { s with rip := t }
+    | .jmpR r => lift do
+        let t ← s.reg r
+        pure { s with rip := t }
+    | .pushI imm => lift do
+        let sp ← s.reg 4
+        let sp' := (sp + W - 8) % W
+        let m ← wr64 s.mem sp' (imm % W)
+        pure (go { s.set 4 (some sp') with mem := m })
     | .call t => lift do
         let sp ← s.reg 4
         let sp' := (sp + W - 8) % W
@@ -397,10 +409,11 @@ def Fault.uniform (alt : St → List St) (p : Rat) (hp : Rate p) : Fault where
 
 /-! ### The physical step -/
 
-/-- What a corrupted fetch may decode to, for the instruction `ins` of length
-`len`: one entry per encoding at Hamming distance 1, `none` when the corrupted
-bytes do not decode. Supplied by the byte decoder. -/
-abbrev Alts := Ins → Nat → List (Option (Ins × Nat))
+/-- What a corrupted fetch may decode to at address `a`: one entry per encoding
+at Hamming distance 1 of the instruction there, `none` when the corrupted bytes
+do not decode. Supplied by the byte decoder, which has the bytes and the
+address; the instruction and its length alone do not determine a neighbour. -/
+abbrev Alts := Nat → List (Option (Ins × Nat))
 
 def execO (s : St) : Option (Ins × Nat) → Out
   | some (j, l) => exec j l s
@@ -428,7 +441,7 @@ that halts or sticks has no state to corrupt. -/
 def pstep (alts : Alts) (F : Fault) (pf : Rat) (im : Nat → Option (Ins × Nat)) (s : St) : PDF Out :=
   let fetched : PDF Out := match im s.rip with
     | none => pureF .stuck
-    | some (ins, len) => unif pf (exec ins len s) ((alts ins len).map (execO s))
+    | some (ins, len) => unif pf (exec ins len s) ((alts s.rip).map (execO s))
   bindF fetched fun o => match o with
     | .ok s' => relabel Out.ok (F.hit s')
     | o => pureF o
@@ -467,7 +480,7 @@ theorem faultFree_pstep (alts : Alts) (F : Fault) (pf : Rat) (im : Nat → Optio
 theorem fetched_ok {pf : Rat} (hpf : Rate pf) (alts : Alts) (im : Nat → Option (Ins × Nat)) (s : St) :
     (match im s.rip with
       | none => pureF Out.stuck
-      | some (ins, len) => unif pf (exec ins len s) ((alts ins len).map (execO s))).ok := by
+      | some (ins, len) => unif pf (exec ins len s) ((alts s.rip).map (execO s))).ok := by
   cases im s.rip with
   | none => exact pureF_ok _
   | some p => obtain ⟨ins, len⟩ := p; exact unif_ok hpf _ _
@@ -475,7 +488,7 @@ theorem fetched_ok {pf : Rat} (hpf : Rate pf) (alts : Alts) (im : Nat → Option
 theorem fetched_le {pf : Rat} (hpf : Rate pf) (alts : Alts) (im : Nat → Option (Ins × Nat)) (s : St) :
     fm (match im s.rip with
       | none => pureF Out.stuck
-      | some (ins, len) => unif pf (exec ins len s) ((alts ins len).map (execO s))) ≤ pf := by
+      | some (ins, len) => unif pf (exec ins len s) ((alts s.rip).map (execO s))) ≤ pf := by
   cases im s.rip with
   | none => rw [fm_pureF]; exact hpf.1
   | some p => obtain ⟨ins, len⟩ := p; exact fm_unif_le hpf _ _
@@ -609,5 +622,37 @@ theorem witness_phys (alts : Alts) (r : Rates) (hr : r.ok) (hf : p7.mem r.fetch)
   have := baseline alts prog p7 p7 p7 p7 r hr hf hg hm hl 6 (.ok s0)
   refine Rat.le_trans this ?_
   decide +kernel
+
+/-- The two forms the stage-0 listing uses and the first witness does not:
+`push imm` and `jmp r64`. `push 60; pop rax; xor rdi, rdi; mov rcx, 0x20;
+jmp rcx` lands on `syscall` at 0x20, which is `exit(0)` since rax is 60. -/
+def prog2 : Nat → Option (Ins × Nat)
+  | 0x00 => some (.pushI 60, 2)
+  | 0x02 => some (.pop 0, 1)
+  | 0x03 => some (.alu .xor 7 7, 3)
+  | 0x06 => some (.movI 1 0x20, 10)
+  | 0x10 => some (.jmpR 1, 2)
+  | 0x20 => some (.syscall, 2)
+  | _ => none
+
+/-- A 4 KiB writable stack ending at 0x9000, with rsp at its top. -/
+def stk : Region := ⟨0x8000, List.replicate 4096 0, true⟩
+
+def s1 : St := ⟨(List.replicate 16 (some 0)).set 4 (some 0x9000), 0, ⟨none, none⟩, [stk], k0⟩
+
+theorem witness2 : (run prog2 6 (.ok s1)).code = some 0 := by
+  decide +kernel
+
+/-- `pushI` pushes the sign-extended immediate and moves rsp down by 8. -/
+theorem exec_pushI {imm len sp : Nat} {s : St} {m : Mem} (hsp : s.reg 4 = some sp)
+    (hm : wr64 s.mem ((sp + W - 8) % W) (imm % W) = some m) :
+    exec (.pushI imm) len s =
+      .ok { (s.set 4 (some ((sp + W - 8) % W))) with mem := m, rip := s.rip + len } := by
+  simp only [exec, hsp, hm, lift, bind, Option.bind, pure]
+
+/-- `jmpR` goes where the register says. -/
+theorem exec_jmpR {r len t : Nat} {s : St} (h : s.reg r = some t) :
+    exec (.jmpR r) len s = .ok { s with rip := t } := by
+  simp only [exec, h, lift, bind, Option.bind, pure]
 
 end X86Int
