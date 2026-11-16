@@ -55,6 +55,7 @@ lean_lib Bootstrap where
     .one `Bootstrap.Seeds,
     .one `Bootstrap.TMR,
     .one `Bootstrap.X86Dec,
+    .one `Bootstrap.TMRExposure,
     .one `Bootstrap.X86Env,
     .one `Bootstrap.X86Int,
     .one `Bootstrap.X86Min,
