@@ -1,0 +1,502 @@
+// stdlib/molecular/host_guest.sio -- one-site guests in a rigid host framework:
+// the structure II clathrate lattice, guest-host and guest-guest Lennard-Jones
+// with the quadratic Feynman-Hibbs correction, grand-canonical insertion,
+// deletion and displacement at a given fugacity, cage assignment, and the
+// parameter gradients that turn the grand-canonical fluctuations into
+// sensitivities of the occupancy to the guest's Lennard-Jones parameters.
+//
+// WHY THIS EXISTS. molecular::lj simulates a fluid of identical particles in an
+// empty box. Hydrogen in a gas hydrate is a different problem: the guests move
+// in a fixed field set by 136 water oxygens per cell, and what is measured is
+// how many guests each cage holds. Everything a hydrate needs beyond molecular::lj
+// is here: the framework, the guest-host field, the cage partition, and the
+// quantum correction a light guest cannot do without.
+//
+// WHAT IS CHECKED, AND AGAINST WHAT.
+//   - The lattice: 192 symmetry operations, orbits of 8 + 32 + 96 oxygens,
+//     every oxygen four-coordinated at 2.78-2.80 A, 16 + 8 cage centres with
+//     20 / 28 oxygens around them (tests/stdlib/molecular/test_host_guest_oracle.sio).
+//   - The guest-host field and its parameter gradients at fixed points, against
+//     stdlib/molecular/oracles/host_guest_oracle.cpp (long double, 1e-10).
+//   - The grand-canonical occupancy, against predictions written before the run
+//     from the cage partition functions (examples/molecular/h2_sii_gcmc.sio).
+//
+// UNITS. Angstrom, kelvin (energies as E / k_B), MPa for the fugacity.
+//
+// MODEL. One-site guest; host sites are oxygens only (the guest carries no
+// charge, so the water charges do not act on it). Lorentz-Berthelot combining
+// eps = sqrt(eps_O eps_H), sig = (sig_O + sig_H) / 2. Quadratic Feynman-Hibbs:
+// w = u + lam * lap(u), lam = hbar^2 / (24 m k_B T) for guest-host (the host is
+// infinitely heavy) and twice that for guest-guest (reduced mass m / 2).
+// Guest-host: point-centred cutoff, plus the tail of a uniform oxygen density
+// beyond it. Guest-guest: minimum image, truncated at min(cutoff, L / 2), no tail.
+//
+// LANGUAGE CONSTRAINTS as in molecular::lj: helpers precede callers, buffers are
+// caller-owned and written through `&!`, functions return scalars or tuples.
+
+module molecular::host_guest
+
+use math::pure::{exp, sqrt}
+use molecular::lj::{mol_uniform}
+
+// ============================================================================
+// 0. CAPACITIES
+// ============================================================================
+
+// Host sites: up to 4096, stored x0 y0 z0 x1 ... in a caller-owned [f64; 12288].
+pub fn hg_host_max() -> i64 { 4096 }
+// Guests: up to 1024 in a [f64; 3072], the molecular::lj layout.
+pub fn hg_guest_max() -> i64 { 1024 }
+// Cage centres: up to 64 in a [f64; 192].
+pub fn hg_cage_max() -> i64 { 64 }
+
+// ============================================================================
+// 1. THE SPACE GROUP Fd-3m (origin choice 2) AND THE sII LATTICE
+// ============================================================================
+
+// An operation is a 3x3 integer rotation and a translation in eighths of the
+// cell, stored as 12 integers. 192 operations close the group.
+var HG_OPS: [i64; 2304] = [0; 2304]
+var HG_NOPS: i64 = 0
+
+fn hg_mod8(v: i64) -> i64 {
+    var r = v % 8
+    if r < 0 { r = r + 8 }
+    r
+}
+
+// Index of the operation equal to (rot, trans) in HG_OPS, or -1.
+fn hg_find_op(c: &[i64; 12]) -> i64 with Mut {
+    var k: i64 = 0
+    while k < HG_NOPS {
+        var same = true
+        var m: i64 = 0
+        while m < 12 {
+            if HG_OPS[(12 * k + m) as usize] != c[m as usize] { same = false }
+            m = m + 1
+        }
+        if same { return k }
+        k = k + 1
+    }
+    0 - 1
+}
+
+fn hg_push_op(c: &[i64; 12]) with Mut {
+    var m: i64 = 0
+    while m < 12 {
+        HG_OPS[(12 * HG_NOPS + m) as usize] = c[m as usize]
+        m = m + 1
+    }
+    HG_NOPS = HG_NOPS + 1
+}
+
+// Closes the group from eight generators of Fd-3m, origin choice 2: four
+// symmetry operations, the inversion at the origin and the three F-centring
+// translations. Returns the group order (192).
+pub fn hg_build_fd3m() -> i64 with Mut, Div {
+    // rotation (row-major, 9) + translation in eighths (3)
+    let gens = [
+        0 - 1, 0, 0, 0, 0 - 1, 0, 0, 0, 1, 6, 2, 4,
+        0 - 1, 0, 0, 0, 1, 0, 0, 0, 0 - 1, 2, 4, 6,
+        0, 0, 1, 1, 0, 0, 0, 1, 0, 0, 0, 0,
+        0, 1, 0, 1, 0, 0, 0, 0, 0 - 1, 6, 2, 4,
+        0 - 1, 0, 0, 0, 0 - 1, 0, 0, 0, 0 - 1, 0, 0, 0,
+        1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 4, 4,
+        1, 0, 0, 0, 1, 0, 0, 0, 1, 4, 0, 4,
+        1, 0, 0, 0, 1, 0, 0, 0, 1, 4, 4, 0]
+    HG_NOPS = 0
+    var e: [i64; 12] = [1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0]
+    hg_push_op(&e)
+    var grew = true
+    while grew {
+        grew = false
+        let n0 = HG_NOPS
+        var i: i64 = 0
+        while i < n0 {
+            var g: i64 = 0
+            while g < 8 {
+                // c = gen_g o op_i
+                var c: [i64; 12] = [0; 12]
+                var r: i64 = 0
+                while r < 3 {
+                    var col: i64 = 0
+                    while col < 3 {
+                        var s: i64 = 0
+                        var k: i64 = 0
+                        while k < 3 {
+                            s = s + gens[(12 * g + 3 * r + k) as usize] * HG_OPS[(12 * i + 3 * k + col) as usize]
+                            k = k + 1
+                        }
+                        c[(3 * r + col) as usize] = s
+                        col = col + 1
+                    }
+                    var t = gens[(12 * g + 9 + r) as usize]
+                    var k2: i64 = 0
+                    while k2 < 3 {
+                        t = t + gens[(12 * g + 3 * r + k2) as usize] * HG_OPS[(12 * i + 9 + k2) as usize]
+                        k2 = k2 + 1
+                    }
+                    c[(9 + r) as usize] = hg_mod8(t)
+                    r = r + 1
+                }
+                if hg_find_op(&c) < 0 && HG_NOPS < 192 {
+                    hg_push_op(&c)
+                    grew = true
+                }
+                g = g + 1
+            }
+            i = i + 1
+        }
+    }
+    HG_NOPS
+}
+
+fn hg_frac(v: f64) -> f64 {
+    var x = v - ((v as i64) as f64)
+    if x < 0.0 { x = x + 1.0 }
+    if x >= 1.0 - 1.0e-12 { x = 0.0 }
+    x
+}
+
+fn hg_cyc(d: f64) -> f64 {
+    var x = d
+    if x < 0.0 { x = 0.0 - x }
+    if x > 0.5 { x = 1.0 - x }
+    x
+}
+
+// Appends the orbit of the fractional point (px, py, pz) under the group to
+// out (fractional, 3 per point) starting at index n. Returns the new count.
+pub fn hg_orbit(out: &![f64; 12288], n: i64, px: f64, py: f64, pz: f64) -> i64 with Mut, Div {
+    var cnt = n
+    var k: i64 = 0
+    while k < HG_NOPS {
+        var q: [f64; 3] = [0.0; 3]
+        var r: i64 = 0
+        while r < 3 {
+            let b = 12 * k + 3 * r
+            q[r as usize] = hg_frac((HG_OPS[b as usize] as f64) * px + (HG_OPS[(b + 1) as usize] as f64) * py
+                + (HG_OPS[(b + 2) as usize] as f64) * pz + (HG_OPS[(12 * k + 9 + r) as usize] as f64) / 8.0)
+            r = r + 1
+        }
+        var dup = false
+        var j = n
+        while j < cnt {
+            let d0 = hg_cyc(out[(3 * j) as usize] - q[0])
+            let d1 = hg_cyc(out[(3 * j + 1) as usize] - q[1])
+            let d2 = hg_cyc(out[(3 * j + 2) as usize] - q[2])
+            if d0 * d0 + d1 * d1 + d2 * d2 < 1.0e-12 { dup = true }
+            j = j + 1
+        }
+        if !dup {
+            out[(3 * cnt) as usize] = q[0]
+            out[(3 * cnt + 1) as usize] = q[1]
+            out[(3 * cnt + 2) as usize] = q[2]
+            cnt = cnt + 1
+        }
+        k = k + 1
+    }
+    cnt
+}
+
+// The 136 water oxygens of one sII cell (fractional), from the 8a, 32e and 96g
+// orbits. Coordinates of empty sII (ice XVI, Falenty et al. 2014):
+// x(32e) = 0.21796, (x, z)(96g) = (0.18198, 0.37081). Returns 136.
+pub fn hg_sii_oxygens(frac: &![f64; 12288], x32: f64, x96: f64, z96: f64) -> i64 with Mut, Div {
+    if HG_NOPS != 192 { hg_build_fd3m() }
+    var n = hg_orbit(frac, 0, 0.125, 0.125, 0.125)
+    n = hg_orbit(frac, n, x32, x32, x32)
+    n = hg_orbit(frac, n, x96, x96, z96)
+    n
+}
+
+// Cage centres of one sII cell in Cartesian coordinates: the 16 small (5^12)
+// cages at 16c first, then the 8 large (5^12 6^4) at 8b. Returns 24.
+pub fn hg_sii_cages(cen: &![f64; 192], a: f64) -> i64 with Mut, Div {
+    if HG_NOPS != 192 { hg_build_fd3m() }
+    var tmp: [f64; 12288] = [0.0; 12288]
+    var n = hg_orbit(&!tmp, 0, 0.0, 0.0, 0.0)
+    n = hg_orbit(&!tmp, n, 0.375, 0.375, 0.375)
+    var i: i64 = 0
+    while i < 3 * n {
+        cen[i as usize] = a * tmp[i as usize]
+        i = i + 1
+    }
+    n
+}
+
+// Cartesian host sites: the oxygens of the home cell and of every image cell
+// within the cutoff, so that a point anywhere in the home cell sees every
+// oxygen within the cutoff directly. Returns the number of sites.
+pub fn hg_replicate(host: &![f64; 12288], frac: &[f64; 12288], nfrac: i64, a: f64, cut: f64) -> i64 with Mut, Div {
+    var m: i64 = 1
+    while (m as f64) * a < cut { m = m + 1 }
+    var n: i64 = 0
+    var ix = 0 - m
+    while ix <= m {
+        var iy = 0 - m
+        while iy <= m {
+            var iz = 0 - m
+            while iz <= m {
+                var s: i64 = 0
+                while s < nfrac && n < hg_host_max() {
+                    host[(3 * n) as usize] = a * (frac[(3 * s) as usize] + (ix as f64))
+                    host[(3 * n + 1) as usize] = a * (frac[(3 * s + 1) as usize] + (iy as f64))
+                    host[(3 * n + 2) as usize] = a * (frac[(3 * s + 2) as usize] + (iz as f64))
+                    n = n + 1
+                    s = s + 1
+                }
+                iz = iz + 1
+            }
+            iy = iy + 1
+        }
+        ix = ix + 1
+    }
+    n
+}
+
+// ============================================================================
+// 2. THE GUEST-HOST FIELD AND ITS PARAMETER GRADIENTS
+// ============================================================================
+
+// Constant tail of a uniform host density rho beyond the cutoff, and its
+// derivative in the combined sigma:
+//   t = 16 pi rho eps (sig^12 / (9 c^9) - sig^6 / (3 c^3)).
+pub fn hg_tail(eps: f64, sig: f64, rho: f64, cut: f64) -> (f64, f64) with Div {
+    let s3 = sig * sig * sig
+    let s6 = s3 * s3
+    let s12 = s6 * s6
+    let c3 = cut * cut * cut
+    let c9 = c3 * c3 * c3
+    let k = 16.0 * 3.14159265358979323846 * rho * eps
+    (k * (s12 / (9.0 * c9) - s6 / (3.0 * c3)), k * (12.0 * s12 / (9.0 * c9) - 6.0 * s6 / (3.0 * c3)) / sig)
+}
+
+// Effective field w at a point (K), with dw/d eps_H and dw/d sig_H.
+// eps, sig are the combined (guest-oxygen) parameters; eps_h is the guest's own
+// well depth, needed because eps = sqrt(eps_O eps_H) makes w proportional to
+// sqrt(eps_H); sig = (sig_O + sig_H) / 2 gives the factor 1/2 on d/d sig_H.
+pub fn hg_field(host: &[f64; 12288], nh: i64, x: f64, y: f64, z: f64,
+                eps: f64, sig: f64, eps_h: f64, lam: f64, cut: f64, rho: f64) -> (f64, f64, f64) with Mut, Div {
+    let s2 = sig * sig
+    let s6 = s2 * s2 * s2
+    let s12 = s6 * s6
+    let c2 = cut * cut
+    var u = 0.0
+    var l = 0.0
+    var us = 0.0
+    var k: i64 = 0
+    while k < nh {
+        let dx = x - host[(3 * k) as usize]
+        let dy = y - host[(3 * k + 1) as usize]
+        let dz = z - host[(3 * k + 2) as usize]
+        let r2 = dx * dx + dy * dy + dz * dz
+        if r2 <= c2 {
+            let i2 = 1.0 / r2
+            let i6 = i2 * i2 * i2
+            let aa = s12 * i6 * i6
+            let bb = s6 * i6
+            u = u + 4.0 * eps * (aa - bb)
+            l = l + 4.0 * eps * (132.0 * aa - 30.0 * bb) * i2
+            us = us + 4.0 * eps * (12.0 * aa - 6.0 * bb) / sig + lam * 4.0 * eps * (1584.0 * aa - 180.0 * bb) * i2 / sig
+        }
+        k = k + 1
+    }
+    let (t, ts) = hg_tail(eps, sig, rho, cut)
+    let w = u + t + lam * l
+    (w, w / (2.0 * eps_h), 0.5 * (us + ts))
+}
+
+// ============================================================================
+// 3. GUEST-GUEST PAIRS AND CAGES
+// ============================================================================
+
+fn hg_min_image(d: f64, l: f64) -> f64 {
+    let h = 0.5 * l
+    if d > h { return d - l }
+    if d < 0.0 - h { return d + l }
+    d
+}
+
+fn hg_wrap(x: f64, l: f64) -> f64 {
+    if x >= l { return x - l }
+    if x < 0.0 { return x + l }
+    x
+}
+
+// Guest-guest FH pair (K) from the squared minimum-image distance, with
+// du/d eps_H and du/d sig_H; zero beyond rc2.
+pub fn hg_pair_r2(r2: f64, eps_h: f64, sig_h: f64, lam2: f64, rc2: f64) -> (f64, f64, f64) with Div {
+    if r2 > rc2 { return (0.0, 0.0, 0.0) }
+    let s2 = sig_h * sig_h
+    let s6 = s2 * s2 * s2
+    let s12 = s6 * s6
+    let i2 = 1.0 / r2
+    let i6 = i2 * i2 * i2
+    let aa = s12 * i6 * i6
+    let bb = s6 * i6
+    let u = 4.0 * eps_h * (aa - bb) + lam2 * 4.0 * eps_h * (132.0 * aa - 30.0 * bb) * i2
+    (u, u / eps_h, (4.0 * eps_h * (12.0 * aa - 6.0 * bb) + lam2 * 4.0 * eps_h * (1584.0 * aa - 180.0 * bb) * i2) / sig_h)
+}
+
+// Index of the cage whose centre is nearest (periodic, cubic cell l).
+pub fn hg_cage_of(cen: &[f64; 192], nc: i64, l: f64, x: f64, y: f64, z: f64) -> i64 with Mut, Div {
+    var best = 1.0e300
+    var bi: i64 = 0
+    var c: i64 = 0
+    while c < nc {
+        let dx = hg_min_image(x - cen[(3 * c) as usize], l)
+        let dy = hg_min_image(y - cen[(3 * c + 1) as usize], l)
+        let dz = hg_min_image(z - cen[(3 * c + 2) as usize], l)
+        let r2 = dx * dx + dy * dy + dz * dz
+        if r2 < best {
+            best = r2
+            bi = c
+        }
+        c = c + 1
+    }
+    bi
+}
+
+// Pair energy (with gradients) of a point with every guest but `skip`.
+// mode 0: guests do not interact (ideal); 1: all pairs; 2: only guests in the
+// same cage as the point (the cage-factorised model). cage_x is the point's cage.
+pub fn hg_pairs_at(pos: &[f64; 3072], cage: &[i64; 1024], n: i64, skip: i64, x: f64, y: f64, z: f64,
+                   cage_x: i64, mode: i64, l: f64, eps_h: f64, sig_h: f64, lam2: f64, rc2: f64) -> (f64, f64, f64) with Mut, Div {
+    if mode == 0 { return (0.0, 0.0, 0.0) }
+    var u = 0.0
+    var ue = 0.0
+    var us = 0.0
+    var j: i64 = 0
+    while j < n {
+        if j != skip && (mode == 1 || cage[j as usize] == cage_x) {
+            let dx = hg_min_image(x - pos[(3 * j) as usize], l)
+            let dy = hg_min_image(y - pos[(3 * j + 1) as usize], l)
+            let dz = hg_min_image(z - pos[(3 * j + 2) as usize], l)
+            let (a, b, c) = hg_pair_r2(dx * dx + dy * dy + dz * dz, eps_h, sig_h, lam2, rc2)
+            u = u + a
+            ue = ue + b
+            us = us + c
+        }
+        j = j + 1
+    }
+    (u, ue, us)
+}
+
+// ============================================================================
+// 4. THE SYSTEM AND ONE GRAND-CANONICAL TRIAL
+// ============================================================================
+
+// Everything a trial needs besides the buffers. bfv is beta f V, dimensionless
+// (f in MPa: bfv = f * 1e-24 * V[A^3] / (k_B T)).
+pub struct HgSys {
+    pub l: f64,
+    pub t: f64,
+    pub eps: f64,
+    pub sig: f64,
+    pub eps_h: f64,
+    pub sig_h: f64,
+    pub lam: f64,
+    pub lam2: f64,
+    pub cut: f64,
+    pub rho: f64,
+    pub rc2: f64,
+    pub bfv: f64,
+    pub mode: i64,
+    pub nh: i64,
+    pub nc: i64,
+    pub step: f64,
+}
+
+// One trial: insertion, deletion or displacement with probability 1/3 each.
+// pos, cage and w (each guest's field energy) are updated in place.
+// Returns the new number of guests.
+pub fn hg_trial(s: &HgSys, host: &[f64; 12288], cen: &[f64; 192], pos: &![f64; 3072], cage: &![i64; 1024],
+                wf: &![f64; 1024], n: i64) -> i64 with Mut, Div {
+    let beta = 1.0 / (*s).t
+    let r = mol_uniform()
+    if r < 1.0 / 3.0 {
+        if n >= hg_guest_max() { return n }
+        let x = mol_uniform() * (*s).l
+        let y = mol_uniform() * (*s).l
+        let z = mol_uniform() * (*s).l
+        let c = hg_cage_of(cen, (*s).nc, (*s).l, x, y, z)
+        let (w, we, ws) = hg_field(host, (*s).nh, x, y, z, (*s).eps, (*s).sig, (*s).eps_h, (*s).lam, (*s).cut, (*s).rho)
+        let (u, ue, us) = hg_pairs_at(pos, cage, n, 0 - 1, x, y, z, c, (*s).mode, (*s).l, (*s).eps_h, (*s).sig_h, (*s).lam2, (*s).rc2)
+        if mol_uniform() < (*s).bfv / ((n + 1) as f64) * exp(0.0 - beta * (w + u)) {
+            pos[(3 * n) as usize] = x
+            pos[(3 * n + 1) as usize] = y
+            pos[(3 * n + 2) as usize] = z
+            cage[n as usize] = c
+            wf[n as usize] = w
+            return n + 1
+        }
+        return n
+    }
+    if r < 2.0 / 3.0 {
+        if n <= 0 { return n }
+        var i = (mol_uniform() * (n as f64)) as i64
+        if i >= n { i = n - 1 }
+        let (u, ue, us) = hg_pairs_at(pos, cage, n, i, pos[(3 * i) as usize], pos[(3 * i + 1) as usize], pos[(3 * i + 2) as usize],
+                                      cage[i as usize], (*s).mode, (*s).l, (*s).eps_h, (*s).sig_h, (*s).lam2, (*s).rc2)
+        if mol_uniform() < (n as f64) / (*s).bfv * exp(beta * (wf[i as usize] + u)) {
+            let last = n - 1
+            pos[(3 * i) as usize] = pos[(3 * last) as usize]
+            pos[(3 * i + 1) as usize] = pos[(3 * last + 1) as usize]
+            pos[(3 * i + 2) as usize] = pos[(3 * last + 2) as usize]
+            cage[i as usize] = cage[last as usize]
+            wf[i as usize] = wf[last as usize]
+            return n - 1
+        }
+        return n
+    }
+    if n <= 0 { return n }
+    var i = (mol_uniform() * (n as f64)) as i64
+    if i >= n { i = n - 1 }
+    let x = hg_wrap(pos[(3 * i) as usize] + (*s).step * (mol_uniform() - 0.5), (*s).l)
+    let y = hg_wrap(pos[(3 * i + 1) as usize] + (*s).step * (mol_uniform() - 0.5), (*s).l)
+    let z = hg_wrap(pos[(3 * i + 2) as usize] + (*s).step * (mol_uniform() - 0.5), (*s).l)
+    let c = hg_cage_of(cen, (*s).nc, (*s).l, x, y, z)
+    let (w, we, ws) = hg_field(host, (*s).nh, x, y, z, (*s).eps, (*s).sig, (*s).eps_h, (*s).lam, (*s).cut, (*s).rho)
+    let (u1, ue1, us1) = hg_pairs_at(pos, cage, n, i, x, y, z, c, (*s).mode, (*s).l, (*s).eps_h, (*s).sig_h, (*s).lam2, (*s).rc2)
+    let (u0, ue0, us0) = hg_pairs_at(pos, cage, n, i, pos[(3 * i) as usize], pos[(3 * i + 1) as usize], pos[(3 * i + 2) as usize],
+                                     cage[i as usize], (*s).mode, (*s).l, (*s).eps_h, (*s).sig_h, (*s).lam2, (*s).rc2)
+    if mol_uniform() < exp(0.0 - beta * (w + u1 - wf[i as usize] - u0)) {
+        pos[(3 * i) as usize] = x
+        pos[(3 * i + 1) as usize] = y
+        pos[(3 * i + 2) as usize] = z
+        cage[i as usize] = c
+        wf[i as usize] = w
+    }
+    n
+}
+
+// Parameter gradients of the configuration energy, dU/d eps_H and dU/d sig_H,
+// for the fluctuation estimate d<N>/d theta = -beta (<N U_theta> - <N><U_theta>).
+pub fn hg_config_grad(s: &HgSys, host: &[f64; 12288], pos: &[f64; 3072], cage: &[i64; 1024], n: i64) -> (f64, f64) with Mut, Div {
+    var ge = 0.0
+    var gs = 0.0
+    var i: i64 = 0
+    while i < n {
+        let (w, we, ws) = hg_field(host, (*s).nh, pos[(3 * i) as usize], pos[(3 * i + 1) as usize], pos[(3 * i + 2) as usize],
+                                   (*s).eps, (*s).sig, (*s).eps_h, (*s).lam, (*s).cut, (*s).rho)
+        ge = ge + we
+        gs = gs + ws
+        if (*s).mode != 0 {
+            var j = i + 1
+            while j < n {
+                if (*s).mode == 1 || cage[j as usize] == cage[i as usize] {
+                    let dx = hg_min_image(pos[(3 * i) as usize] - pos[(3 * j) as usize], (*s).l)
+                    let dy = hg_min_image(pos[(3 * i + 1) as usize] - pos[(3 * j + 1) as usize], (*s).l)
+                    let dz = hg_min_image(pos[(3 * i + 2) as usize] - pos[(3 * j + 2) as usize], (*s).l)
+                    let (u, ue, us) = hg_pair_r2(dx * dx + dy * dy + dz * dz, (*s).eps_h, (*s).sig_h, (*s).lam2, (*s).rc2)
+                    ge = ge + ue
+                    gs = gs + us
+                }
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+    (ge, gs)
+}
