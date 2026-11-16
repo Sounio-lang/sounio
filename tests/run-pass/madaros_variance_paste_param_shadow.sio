@@ -1,0 +1,47 @@
+//@ run-pass
+//@ timeout: 60
+//@ expect-stdout-contains: PASTE_SHADOW_SUM 16.000000
+//@ expect-stdout-contains: PASTE_SHADOW_PASS
+//@ description: variance inline re-lowering must not let a callee parameter that shares the caller argument's name shadow the caller local (SIGSEGV when an f64 printed before the record left a value above 0x400000 in the frame)
+//
+// `r_sum(d: &R)` calls `r_val(d, i)`, and `r_val` names its own parameter `d`
+// too. The variance paste bound the callee's `d` first and only then looked up
+// the caller's `d` for its struct type and ref-ness, found the fresh untyped
+// binding, and lowered `(*d).kn[i]` as a raw inline-array read of the caller's
+// spill slot. That read is dead (it only feeds a variance), but it
+// dereferenced whatever sat in the frame slot at index i: the bits of the f64
+// printed first in main. Rename `d` in `r_val` and the crash goes away.
+// Found with the circ28 drug records (stdlib/darwin_pbpk/circ28_drug.sio).
+
+pub struct R {
+    pub kn: [Knowledge<f64>; 8],
+}
+
+pub fn r_val(d: &R, i: i32) -> f64 with Epistemic, Panic {
+    let k: Knowledge<f64> = (*d).kn[i]
+    return k.value
+}
+
+pub fn r_sum(d: &R) -> f64 with Mut, Epistemic, Panic {
+    var s: f64 = 0.0
+    var i: i32 = 0
+    while i < 8 {
+        s = s + r_val(d, i)
+        i = i + 1
+    }
+    return s
+}
+
+fn main() with IO, Mut, Div, Panic, Epistemic {
+    // An f64 computed and printed BEFORE the record exists: its bits (above
+    // 0x400000 as an integer) stay in main's frame, where the stale read lands.
+    println(1.5)
+    var kn: [Knowledge<f64>; 8] = [Knowledge(2.0, ε=1.0, prov="unused"); 8]
+    var d = R { kn: kn }
+    let s = r_sum(&d)
+    print("PASTE_SHADOW_SUM ")
+    println(s)
+    if s > 15.999999 && s < 16.000001 {
+        println("PASTE_SHADOW_PASS")
+    }
+}
