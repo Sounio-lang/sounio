@@ -15,6 +15,8 @@ Classical particle simulation in a periodic box.
 
 ## What it is checked against
 
+Also: `host_guest.sio` — module `molecular::host_guest`: the sII clathrate lattice (Fd-3m closed from generators, Falenty 2014 coordinates), one-site guest with Lorentz–Berthelot and quadratic Feynman–Hibbs, grand-canonical trials at a given fugacity, cage assignment, and the parameter gradients behind fluctuation sensitivities. Checked by `tests/stdlib/molecular/test_host_guest_oracle.sio` (lattice, field and gradients against `oracles/host_guest_oracle.cpp`, 1e-10) and by `examples/molecular/h2_sii_gcmc.sio` (occupancies and sensitivities against predictions written before the run; results in `examples/molecular/H2_SII_GCMC.md`).
+
 | Check | File | Reference |
 |---|---|---|
 | Analytic values, energy bookkeeping, near-ideal limit of the exchange move | `tests/stdlib/molecular/test_lj_core.sio` | closed forms; second virial coefficient |

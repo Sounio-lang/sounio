@@ -1,0 +1,185 @@
+// examples/molecular/h2_sii_gcmc.sio -- grand-canonical Monte Carlo of H2 in the
+// rigid sII hydrate lattice with molecular::host_guest, and the sensitivities of
+// the cage occupancy to the H2 Lennard-Jones parameters from the fluctuations.
+//
+// PREDICTIONS, WRITTEN BEFORE THE RUN (cutoff 12 A, Buch H2, SPC/E oxygen, a = 17.31 A).
+//
+// Case A, guests do not interact (mode 0), 250 K, f = 5 MPa. Each cage is an
+// independent Henry adsorber, so exactly
+//   <N_s> = 16 C_s f = 2.24957,  <N_l> = 8 C_l f = 3.11810   (per cell),
+//   d<N_s>/d eps_H = 0.08849, d<N_l>/d eps_H = 0.09304 (1/K),
+//   d<N_s>/d sig_H = 0.2218,  d<N_l>/d sig_H = 1.6234  (1/A),
+// with C_s = 0.02811959588, C_l = 0.07795238154 1/MPa and d ln C from the quadrature
+// oracle (gcmc oracle.cpp, finite differences of the long-double integral).
+//
+// Case B, guests interact only within the same cage (mode 2), 200 K, f = 300 MPa.
+// Cage-factorised grand partition function with R_n = Z_n / Z_1^n sampled exactly
+// (zn_d.cpp; the prediction file was hashed before any GCMC run):
+//   <N_s> = 15.25805 +- 0.0005,  <N_l> = 16.13373 +- 0.036,
+//   d<N_s>/d eps_H = 0.03614,  d<N_l>/d eps_H = 0.04621 +- 0.00278,
+//   d<N_s>/d sig_H = 0.3460 +- 0.0051, d<N_l>/d sig_H = -19.31 +- 0.51.
+//
+// PASS RULE: every quantity within 3 combined standard errors of its prediction
+// (run error from 20 block means, plus the prediction's own sampling error).
+
+use molecular::lj::{mol_seed}
+use molecular::host_guest::*
+
+fn ae(a: f64, b: f64) -> f64 { if a > b { a - b } else { b - a } }
+
+fn verdict(name: string, got: f64, err: f64, want: f64, werr: f64) -> i64 with IO, Mut, Div, Panic {
+    let tol = 3.0 * sqrt(err * err + werr * werr)
+    print(name)
+    print(" ")
+    print_f64(got)
+    print(" +- ")
+    print_f64(err)
+    print("  predicted ")
+    print_f64(want)
+    if ae(got, want) <= tol {
+        print("  ok\n")
+        return 0
+    }
+    print("  FAIL\n")
+    1
+}
+
+fn block_stats(v: &[f64; 64], nb: i64) -> (f64, f64) with Mut, Div, Panic {
+    var m = 0.0
+    var i: i64 = 0
+    while i < nb {
+        m = m + v[i as usize]
+        i = i + 1
+    }
+    m = m / (nb as f64)
+    var s = 0.0
+    i = 0
+    while i < nb {
+        s = s + (v[i as usize] - m) * (v[i as usize] - m)
+        i = i + 1
+    }
+    (m, sqrt(s / ((nb as f64) * ((nb - 1) as f64))))
+}
+
+// Runs one case; returns the number of failed checks.
+fn run_case(tk: f64, f_mpa: f64, mode: i64, steps: i64, gstride: i64, seed: i64,
+            want: &[f64; 12]) -> i64 with IO, Mut, Div, Panic {
+    let a = 17.31
+    var frac: [f64; 12288] = [0.0; 12288]
+    let no = hg_sii_oxygens(&!frac, 0.21796, 0.18198, 0.37081)
+    var host: [f64; 12288] = [0.0; 12288]
+    let nh = hg_replicate(&!host, &frac, no, a, 12.0)
+    var cen: [f64; 192] = [0.0; 192]
+    let nc = hg_sii_cages(&!cen, a)
+    let ncell = hg_build_cells(&host, nh, a, 12.0, 8)
+    if ncell <= 0 { print("cell lists do not fit\n"); return 99 }
+    // hbar^2 / (24 m_H2 k_B) * 1e20 = 1.00263768431755956 K A^2
+    let lam = 1.00263768431755956 / tk
+    let v = a * a * a
+    let sys = HgSys {
+        l: a, t: tk, eps: sqrt(78.20 * 34.2), sig: 0.5 * (3.166 + 2.96), eps_h: 34.2, sig_h: 2.96,
+        lam: lam, lam2: 2.0 * lam, cut: 12.0, rho: 136.0 / v, rc2: 8.655 * 8.655,
+        bfv: f_mpa * 1.0e-24 * v / (1.380649e-23 * tk), mode: mode, nh: nh, nc: nc, step: 0.6,
+    }
+    mol_seed(seed)
+    var pos: [f64; 3072] = [0.0; 3072]
+    var cage: [i64; 1024] = [0; 1024]
+    var wf: [f64; 1024] = [0.0; 1024]
+    var n: i64 = 0
+    var s: i64 = 0
+    while s < steps / 10 {
+        n = hg_trial(&sys, &host, &cen, &!pos, &!cage, &!wf, n)
+        s = s + 1
+    }
+    let nb: i64 = 20
+    let per = steps / nb
+    var bs: [f64; 64] = [0.0; 64]
+    var bl: [f64; 64] = [0.0; 64]
+    var gse: [f64; 64] = [0.0; 64]
+    var gle: [f64; 64] = [0.0; 64]
+    var gss: [f64; 64] = [0.0; 64]
+    var gls: [f64; 64] = [0.0; 64]
+    let beta = 1.0 / tk
+    var b: i64 = 0
+    while b < nb {
+        var cn = 0.0
+        var sn = 0.0
+        var ln = 0.0
+        var cg = 0.0
+        var ue = 0.0
+        var us = 0.0
+        var sue = 0.0
+        var sus = 0.0
+        var lue = 0.0
+        var lus = 0.0
+        var gn_s = 0.0
+        var gn_l = 0.0
+        var k: i64 = 0
+        while k < per {
+            n = hg_trial(&sys, &host, &cen, &!pos, &!cage, &!wf, n)
+            if k % 10 == 0 {
+                var ns: i64 = 0
+                var j: i64 = 0
+                while j < n {
+                    if cage[j as usize] < 16 { ns = ns + 1 }
+                    j = j + 1
+                }
+                sn = sn + (ns as f64)
+                ln = ln + ((n - ns) as f64)
+                cn = cn + 1.0
+                if k % gstride == 0 {
+                    let (ge, gs) = hg_config_grad(&sys, &host, &pos, &cage, n)
+                    cg = cg + 1.0
+                    ue = ue + ge
+                    us = us + gs
+                    sue = sue + (ns as f64) * ge
+                    sus = sus + (ns as f64) * gs
+                    lue = lue + ((n - ns) as f64) * ge
+                    lus = lus + ((n - ns) as f64) * gs
+                    gn_s = gn_s + (ns as f64)
+                    gn_l = gn_l + ((n - ns) as f64)
+                }
+            }
+            k = k + 1
+        }
+        bs[b as usize] = sn / cn
+        bl[b as usize] = ln / cn
+        let ms = gn_s / cg
+        let ml = gn_l / cg
+        gse[b as usize] = 0.0 - beta * (sue / cg - ms * ue / cg)
+        gss[b as usize] = 0.0 - beta * (sus / cg - ms * us / cg)
+        gle[b as usize] = 0.0 - beta * (lue / cg - ml * ue / cg)
+        gls[b as usize] = 0.0 - beta * (lus / cg - ml * us / cg)
+        b = b + 1
+    }
+    var bad: i64 = 0
+    let (m1, e1) = block_stats(&bs, nb)
+    bad = bad + verdict("N_s", m1, e1, want[0], want[1])
+    let (m2, e2) = block_stats(&bl, nb)
+    bad = bad + verdict("N_l", m2, e2, want[2], want[3])
+    let (m3, e3) = block_stats(&gse, nb)
+    bad = bad + verdict("dN_s/deH", m3, e3, want[4], want[5])
+    let (m4, e4) = block_stats(&gle, nb)
+    bad = bad + verdict("dN_l/deH", m4, e4, want[6], want[7])
+    let (m5, e5) = block_stats(&gss, nb)
+    bad = bad + verdict("dN_s/dsH", m5, e5, want[8], want[9])
+    let (m6, e6) = block_stats(&gls, nb)
+    bad = bad + verdict("dN_l/dsH", m6, e6, want[10], want[11])
+    bad
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var bad: i64 = 0
+    print("case A: ideal guests, 250 K, 5 MPa\n")
+    let wa: [f64; 12] = [2.24957, 0.0, 3.11810, 0.0, 0.08849, 0.0, 0.09304, 0.0, 0.2218, 0.0, 1.6234, 0.0]
+    bad = bad + run_case(250.0, 5.0, 0, 2000000, 50, 51, &wa)
+    print("case B: guests interact within a cage, 200 K, 300 MPa\n")
+    let wb: [f64; 12] = [15.25805, 0.0005, 16.13373, 0.036, 0.03614, 0.00001, 0.04621, 0.00278, 0.3460, 0.0051, 0.0 - 19.31, 0.51]
+    bad = bad + run_case(200.0, 300.0, 2, 1000000, 100, 52, &wb)
+    if bad != 0 {
+        print("H2_SII_GCMC_FAIL\n")
+        return 1
+    }
+    print("H2_SII_GCMC_OK\n")
+    0
+}
