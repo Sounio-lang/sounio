@@ -219,6 +219,13 @@ pub var NC_V2_LABEL_PATCH_OFFSETS: [i64; 65536] = [0; 65536]
 pub var NC_V2_LABEL_PATCH_IDS: [i64; 65536] = [0; 65536]
 pub var NC_V2_LABEL_PATCH_COUNT: i64 = 0
 pub var NC_V2_NEXT_CMP_LABEL: i64 = 210
+// SIO-207: per-function signed-overflow trap. Set by nc_emit_overflow_guard
+// on first use in a function; the fn-end stub (exit 1) is emitted only when
+// set. Reset per function in nc_v2_reset_label_state. The label id is the
+// last slot of the capacity: per-function IR labels are bounded by
+// IR_MAX_INSTRS (see nc_v2_label_capacity), far below it.
+pub var NC_V2_OVERFLOW_GUARD_USED: i64 = 0
+pub fn nc_v2_overflow_trap_label() -> i64 { 65535 }
 // Which function tripped the capacity FIRST, so the rc=22 message can name it.
 // NativeCompiler.label_overflow is only checked after the whole per-function loop
 // has run, by which point the identity is gone, and nc_define_label /
@@ -616,6 +623,21 @@ pub var NC_ALLOC_FAIL_DEC_N: i64 = 0
 pub var NC_ALLOC_FAIL_DEC_LAST_OFF: i64 = 0
 pub var NC_ALLOC_FAIL_DEC_LAST_LEN: i64 = 0
 pub var NC_ALLOC_FAIL_ARENA_PREFIX_OFF: i64 = -1
+// ADR-031 R1 overflow messages: one rodata string per kind (i64 + - * neg,
+// u64 + - *), interned on first use; reset in compiler_new(). The patch table
+// holds the current function's guards until its stubs are emitted.
+pub let NC_OVF_KIND_COUNT: i64 = 13
+pub var NC_OVF_MSG_OFF: [i64; 16] = [-1; 16]
+pub var NC_OVF_MSG_LEN: [i64; 16] = [0; 16]
+pub let NC_OVF_PATCH_CAP: i64 = 262144
+pub var NC_OVF_PATCH_POS: [i64; 262144] = [0; 262144]
+pub var NC_OVF_PATCH_KIND: [i64; 262144] = [0; 262144]
+pub var NC_OVF_PATCH_SITE: [i64; 262144] = [0; 262144]
+pub var NC_OVF_STUB_OFF: [i64; 262144] = [0; 262144]
+// Source site (IrInstr.src_site) of the instruction whose guard is emitted
+// next; consumed (and cleared) by nc_record_overflow_site.
+pub var NC_CUR_SRC_SITE: i64 = 0
+pub var NC_OVF_PATCH_N: i64 = 0
 pub var NC_ALLOC_FAIL_ARENA_PREFIX_LEN: i64 = 0
 pub var NC_ALLOC_FAIL_HANDLES_PREFIX_OFF: i64 = -1
 pub var NC_ALLOC_FAIL_HANDLES_PREFIX_LEN: i64 = 0
@@ -800,6 +822,9 @@ pub fn compiler_new() -> NativeCompiler with Mut {
     NC_ALLOC_FAIL_DEC_LAST_OFF = 0
     NC_ALLOC_FAIL_DEC_LAST_LEN = 0
     NC_ALLOC_FAIL_ARENA_PREFIX_OFF = -1
+    var ovk: i64 = 0
+    while ovk < 16 { NC_OVF_MSG_OFF[ovk as usize] = -1; NC_OVF_MSG_LEN[ovk as usize] = 0; ovk = ovk + 1 }
+    NC_OVF_PATCH_N = 0
     NC_ALLOC_FAIL_ARENA_PREFIX_LEN = 0
     NC_ALLOC_FAIL_HANDLES_PREFIX_OFF = -1
     NC_ALLOC_FAIL_HANDLES_PREFIX_LEN = 0
@@ -993,7 +1018,11 @@ fn label_patch_is_rel32_branch(nc: &NativeCompiler, patch_off: i64) -> bool with
     if patch_off >= 2 && patch_off + 4 <= (*nc).code.len
         && NC_BIG_CODE[(patch_off - 2) as usize] == (0x0f as i8) {
         let op = NC_BIG_CODE[(patch_off - 1) as usize]
-        return op == (0x84 as i8) || op == (0x85 as i8)
+        // 0x80 = jo (SIO-207 signed overflow guard); 0x82 = jc (ADR-031 R1
+        // unsigned overflow guard); 0x84 jz, 0x85 jnz. A rel32 branch whose
+        // opcode is missing here keeps displacement 0, i.e. falls through:
+        // the guard would silently never fire.
+        return op == (0x80 as i8) || op == (0x82 as i8) || op == (0x84 as i8) || op == (0x85 as i8)
     }
     false
 }

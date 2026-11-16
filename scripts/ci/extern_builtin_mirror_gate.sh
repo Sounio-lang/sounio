@@ -102,7 +102,10 @@ awk '
 # this. So: name, not structure. None of the five is source-spellable via
 # `extern "C"` in the first place (they are compiler-internal), so excluding
 # them from the extern mirror costs nothing real.
-_INTERNAL_ONLY_NOT_MIRRORED="arena_mark arena_reset panic read_byte untracked_counter"
+# int_overflow is the predicate suffix of `__int_overflow` (ADR-031 R1): the
+# i32/u32 range-check panic that ir/lower.sio emits itself. No source spells
+# it, so the checker has nothing to admit.
+_INTERNAL_ONLY_NOT_MIRRORED="arena_mark arena_reset panic read_byte untracked_counter int_overflow"
 : > "$WORK/backend_all.txt"
 while read -r _n; do
   _pred=""

@@ -1,0 +1,1 @@
+Scientific CI dependency setup (Stdlib Deep Science reference jobs) now uses the official HTTPS Ubuntu archive, bounds apt with 30 s network timeouts, 3 retries and a 300 s wall clock per call, and fails on incomplete index updates instead of stalling the job. Workflow fixtures cover success and failure propagation; no required job changes (split from #3557, see #3547).

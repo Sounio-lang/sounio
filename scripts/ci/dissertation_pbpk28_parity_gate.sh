@@ -42,7 +42,7 @@
 #                  Couples the PK chain end-to-end: PBPK28 → TMDD → PD readout.
 #   7. HARD GATE — Semaglutide PBPK28 parity (G-δ-1): Node ↔ Sounio on
 #                  semaglutide trajectory (SC depot release k_a=0.01155 /h,
-#                  cl_proteolytic=0.077 L/h, peptide Kp/PS). RMSE < 1.0% per
+#                  cl_proteolytic=0.0445 L/h, peptide Kp/PS). RMSE < 1.0% per
 #                  organ on cavg. Demonstrates the DrugProfile abstraction —
 #                  same PBPK28 integrator, different drug.
 #   8. HARD GATE — Semaglutide TMDD parity (G-δ-2): Node ↔ Sounio on GLP-1R
@@ -1127,7 +1127,7 @@ echo "[pbpk28-parity] midazolam CYP3A DDI canonical: solo PK + ketoconazole-inhi
 
 # ════════════════════════════════════════════════════════════════════════════
 # Case 20: Tirzepatide — sixth canonical drug, second incretin peptide.
-# SC depot (5 mg weekly, ka=0.0164/h, F=0.80, Urva 2022) + proteolytic CL
+# SC depot (5 mg weekly, ka=0.0373/h, F=0.80) + proteolytic CL
 # 0.061 L/h (no renal clearance of parent per Martin 2024). PK only:
 # no TMDD/PD layer (SIO-517 follow-up). Sounio ref drives the stdlib
 # scenario itself; Node side is DEFAULT_PARAMS_TIRZEPATIDE.
@@ -1291,8 +1291,8 @@ echo "[pbpk28-parity] everolimus DES canonical: stent release + systemic PK + ma
 
 # ════════════════════════════════════════════════════════════════════════════
 # Case 22: Tacrolimus — eighth canonical drug, first oral-IR case in PBPK-28.
-# Prograf 5 mg single dose (fasted) → 1st-order gut absorption (ka = 0.38/h)
-# with first-pass loss (F = 0.25) → blood → PBPK28 CN, dt = 0.001.
+# Prograf 5 mg single dose (fasted) → 1st-order gut absorption (ka = 4.5/h after
+# a 0.39 h lag) with first-pass loss (F = 0.18) → blood → PBPK28 CN, dt = 0.001.
 # Whole-blood referenced (TDM matrix); Kp are tacrolimus tissue-to-blood
 # values, NOT rapamycin's; PS assumed (SIO-550). Sounio ref drives the
 # stdlib scenario itself; Node side is DEFAULT_PARAMS_TACROLIMUS.
