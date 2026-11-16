@@ -22,6 +22,8 @@ unset SOUNIO_SOUC_ENGINE || true
 SOUC="${SOUNIO_MADAROS_BIN:-$ROOT/bin/souc}"
 DIR="$ROOT/tests/epistemic-meet"
 OUT="$(mktemp -d)"; trap 'rm -rf "$OUT"' EXIT
+# shellcheck source=../lib/classify_compile.sh
+. "$ROOT/scripts/lib/classify_compile.sh"
 fail() { echo "[epistemic-meet-refusal] FAIL: $*" >&2; exit 1; }
 
 build() { # build <name>
@@ -37,7 +39,10 @@ run() { # run <name> -> RC, LOG
 expect_refusal() { # expect_refusal <name> <reason substring> <statistic substring>
   build "$1"
   run "$1"
-  [[ "$RC" -ne 0 ]] || { cat "$LOG" >&2; fail "$1 exited 0"; }
+  # An ordinary non-zero exit that printed the refusal: a crash, timeout or OOM
+  # kill that left the text behind does not count.
+  sounio_expect_failed_exit "$RC" "$LOG" "error: meet refused: $2" \
+    || { cat "$LOG" >&2; fail "$1: not a run-time refusal, $(sounio_refusal_reason)"; }
   grep -q NOT_REACHED "$LOG" && { cat "$LOG" >&2; fail "$1 used the fused value"; }
   grep -qF "error: meet refused: $2" "$LOG" || { cat "$LOG" >&2; fail "$1: missing reason '$2'"; }
   grep -qF "$3" "$LOG" || { cat "$LOG" >&2; fail "$1: missing statistic '$3'"; }
