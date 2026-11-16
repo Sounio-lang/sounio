@@ -6,6 +6,21 @@ const distDir = path.join(root, 'dist');
 
 const localeSet = new Set(['pt', 'el', 'zh', 'ja', 'es', 'zh-hk']);
 
+// Vercel serves vercel.json routes before the filesystem, so a legacy path
+// whose route answers 308 never reaches its meta-refresh stub in dist/.
+const vercelRoutes = JSON.parse(await readFile(path.join(root, 'vercel.json'), 'utf8')).routes ?? [];
+
+function vercelLocationFor(webPath) {
+  for (const route of vercelRoutes) {
+    const match = webPath.match(new RegExp(route.src));
+    if (!match) continue;
+    const location = route.headers?.Location;
+    if (!location) return null;
+    return { status: route.status, location: location.replace(/\$(\d)/g, (_, n) => match[Number(n)] ?? '') };
+  }
+  return null;
+}
+
 function normalizeWebPathFromFile(relFile) {
   const clean = relFile.split(path.sep).join('/');
   if (clean.endsWith('/index.html')) {
@@ -53,6 +68,10 @@ function mapLegacyPathToTarget(webPath) {
     {
       test: /^\/roadmap$/,
       map: () => '/about/roadmap',
+    },
+    {
+      test: /^\/platform$/,
+      map: () => '/language',
     },
     {
       test: /^\/changelog$/,
@@ -108,6 +127,17 @@ async function run() {
 
     if (html.includes(`url=${webPath}`)) {
       errors.push(`Redirect loop detected at ${webPath}`);
+    }
+
+    // The legacy path, with and without its trailing slash, must get one
+    // 308 hop from vercel.json to the same target as the stub.
+    for (const requestPath of [`${webPath}/`, webPath]) {
+      const route = vercelLocationFor(requestPath);
+      if (!route || route.status !== 308 || route.location !== expected) {
+        errors.push(
+          `vercel.json does not 308 ${requestPath} to ${expected} (got ${route ? `${route.status} ${route.location}` : 'no redirect'})`,
+        );
+      }
     }
   }
 
