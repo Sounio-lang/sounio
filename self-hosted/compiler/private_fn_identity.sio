@@ -578,6 +578,45 @@ fn pfi_bsh_imports_from(items: Option<Box<ItemList> >, x: i64, n: Name, d: i64) 
     false
 }
 
+// Lowest module index among the builtin-shadow definers of `n`.
+fn bsh_first_definer(n: Name) -> i64 with Mut, Panic, Div {
+    var best: i64 = 0 - 1
+    var k: i64 = 0
+    while k < PFI_BSH_COUNT {
+        if pfi_bsh_name_eq(k, n) {
+            let d = PFI_BSH_DEF[k as usize]
+            if best < 0 || d < best { best = d }
+        }
+        k = k + 1
+    }
+    best
+}
+
+// How module x imports `n` from module d: 2 by name, 1 through a glob, 0 not.
+fn bsh_import_kind(items: Option<Box<ItemList> >, x: i64, n: Name, d: i64) -> i64 with Mut, Panic, Div, Alloc {
+    var best: i64 = 0
+    var ord: i64 = 0
+    var cur = items
+    var going = true
+    while going {
+        match cur {
+            None => { going = false }
+            Some(list) => {
+                if (*list).head.kind == ItemKind::ItemUse {
+                    if pfi_use_target(x, ord) == d {
+                        if pfi_import_list_has((*list).head.use_items, n) { return 2 }
+                        if pfi_use_named(x, ord) && name_eq(ir_path_last_name((*list).head.use_path), n) { return 2 }
+                        if (*list).head.use_glob { best = 1 }
+                    }
+                    ord = ord + 1
+                }
+                cur = (*list).tail
+            }
+        }
+    }
+    best
+}
+
 // Note every symbol module `mod_idx` puts into the IR function table: every
 // top-level fn item (real, extern, kernel, BSS global) and every impl method
 // under its mangled `Type_method` name. `main` is skipped: it is never renamed and
@@ -721,9 +760,14 @@ fn pfi_mangle(n: Name, mod_idx: i64) -> Name with Mut, Panic, Div, Alloc {
 // `__m<target module>` via pfi_mangle.
 fn pfi_mangle_entry(idx: i64) -> Name with Mut, Panic, Div, Alloc {
     let saved = PFI_MANGLE_USER
-    if PFI_T_USER[idx as usize] == 1 { PFI_MANGLE_USER = 1 }
-    let m = pfi_mangle(pfi_table_name(idx), PFI_T_TGT[idx as usize])
+    if PFI_T_USER[idx as usize] == 1 || PFI_T_USER[idx as usize] == 2 { PFI_MANGLE_USER = 1 }
+    var m = pfi_mangle(pfi_table_name(idx), PFI_T_TGT[idx as usize])
     PFI_MANGLE_USER = saved
+    // 2: a builtin-shadow definer that the same-name pub phase renamed apart,
+    // `<base>__user__m<idx>`.
+    if PFI_T_USER[idx as usize] == 2 && m.len > 0 {
+        m = pfi_mangle(m, PFI_T_TGT[idx as usize])
+    }
     m
 }
 
@@ -892,6 +936,18 @@ fn pfi_table_add_pub(n: Name, tgt: i64, is_def: i64, user: i64) with Mut, Panic,
 // ---------------------------------------------------------------------------
 
 fn pfi_scope_bind(n: Name) with Mut, Panic, Div {
+    if PFI_PHASE == 2 {
+        // Import-hygiene phase: every binder is scoped, by name hash.
+        if PFI_SC_DEPTH >= PFI_SC_MAX {
+            PFI_SC_OVERFLOW = 1
+            return
+        }
+        PFI_SC_IDX[PFI_SC_DEPTH as usize] = 0 - 1
+        HY_SC_HASH[PFI_SC_DEPTH as usize] = ast_name_hash(n)
+        HY_SC_LEN[PFI_SC_DEPTH as usize] = n.len
+        PFI_SC_DEPTH = PFI_SC_DEPTH + 1
+        return
+    }
     if PFI_PHASE != 1 { return }
     let idx = pfi_table_find_name(n)
     if idx < 0 { return }
@@ -901,6 +957,109 @@ fn pfi_scope_bind(n: Name) with Mut, Panic, Div {
     }
     PFI_SC_IDX[PFI_SC_DEPTH as usize] = idx
     PFI_SC_DEPTH = PFI_SC_DEPTH + 1
+}
+
+// ---------------------------------------------------------------------------
+// Import hygiene (phase 2)
+// ---------------------------------------------------------------------------
+// THE DEFECT. Calls were resolved against one flat table of every function in
+// the module closure, so a module could call a pub fn of a module it never
+// imported -- `use math::pure::{exp}` and then `log_sum_exp(0.0, 0.0)` compiled
+// and ran -- and which body a bare name meant depended on what OTHER modules
+// had loaded. A program's meaning must follow from its own `use` items.
+//
+// THE RULE. A bare call `n(..)` in module X is in scope when n is a local
+// binder at that point, when X defines n, when X imports n from a module that
+// defines it as a plain `pub` fn (`use p::{n}`, `use p::n`, `use p::*`), or
+// when no loaded module defines a plain `pub` fn named n (a builtin, a
+// restricted-visibility fn, or an undefined name -- the checker reports the
+// last). Otherwise the compile stops with error[E-NOT-IMPORTED], naming the
+// module that defines n. Runs after the rename phases, so `n__m<k>` and
+// `n__user` spellings and the rewritten `use` items are what it sees.
+//
+// OFF SWITCH: SOUNIO_IMPORT_HYGIENE=off. SOUNIO_IMPORT_HYGIENE=report prints
+// the violations without refusing (used to measure the tree).
+var HY_SC_HASH: [i64; 4096] = [0; 4096]
+var HY_SC_LEN: [i64; 4096] = [0; 4096]
+let HY_C_MAX: i64 = 1024
+var HY_C_BUF: [i8; 393216] = [0; 393216]
+var HY_C_LEN: [i64; 1024] = [0; 1024]
+var HY_C_SPAN: [i64; 1024] = [0; 1024]
+var HY_C_COUNT: i64 = 0
+var HY_C_OVERFLOW: i64 = 0
+var HY_MODE_CHECKED: i64 = 0
+var HY_MODE: i64 = 0   // 0 enforce, 1 report, 2 off
+
+fn hy_mode() -> i64 with IO, Mut, Panic, Div {
+    if HY_MODE_CHECKED == 0 {
+        HY_MODE_CHECKED = 1
+        let v = read_env("SOUNIO_IMPORT_HYGIENE")
+        if str_eq(v, "off") { HY_MODE = 2 } else if str_eq(v, "report") { HY_MODE = 1 } else { HY_MODE = 0 }
+    }
+    HY_MODE
+}
+
+fn hy_scoped(n: Name) -> bool with Mut, Panic, Div {
+    let h = ast_name_hash(n)
+    var i = PFI_SC_DEPTH - 1
+    while i >= 0 {
+        if PFI_SC_IDX[i as usize] == 0 - 1 && HY_SC_HASH[i as usize] == h && HY_SC_LEN[i as usize] == n.len { return true }
+        i = i - 1
+    }
+    false
+}
+
+fn hy_cand_eq(k: i64, n: Name) -> bool with Mut, Panic, Div {
+    if HY_C_LEN[k as usize] != n.len { return false }
+    var j: i64 = 0
+    while j < n.len {
+        if HY_C_BUF[(k * 384 + j) as usize] != n.buf[j as usize] { return false }
+        j = j + 1
+    }
+    true
+}
+
+fn hy_cand_name(k: i64) -> Name with Mut, Panic, Div {
+    var n = empty_name()
+    var j: i64 = 0
+    while j < HY_C_LEN[k as usize] && j < 384 {
+        n.buf[j as usize] = HY_C_BUF[(k * 384 + j) as usize]
+        j = j + 1
+    }
+    n.len = HY_C_LEN[k as usize]
+    n
+}
+
+fn hy_note_name(n: Name, span_start: i64) with Mut, Panic, Div {
+    if n.len <= 0 || n.len > 384 { return }
+    if hy_scoped(n) { return }
+    var k: i64 = 0
+    while k < HY_C_COUNT {
+        if hy_cand_eq(k, n) { return }
+        k = k + 1
+    }
+    if HY_C_COUNT >= HY_C_MAX {
+        HY_C_OVERFLOW = 1
+        return
+    }
+    var j: i64 = 0
+    while j < n.len {
+        HY_C_BUF[(HY_C_COUNT * 384 + j) as usize] = n.buf[j as usize]
+        j = j + 1
+    }
+    HY_C_LEN[HY_C_COUNT as usize] = n.len
+    HY_C_SPAN[HY_C_COUNT as usize] = span_start
+    HY_C_COUNT = HY_C_COUNT + 1
+}
+
+fn hy_note_callee(opt: Option<Box<Expr> >) with Mut, Panic, Div, Alloc {
+    let p = pfi_expr_ptr(opt)
+    if p == 0 as *mut Expr { return }
+    if (*p).kind == ExprKind::ExprIdent {
+        hy_note_name((*p).name, (*p).span.start)
+    } else if (*p).kind == ExprKind::ExprPath && (*p).path.seg_count == 1 {
+        hy_note_name(Name { buf: (*p).path.segments.head_buf, len: (*p).path.segments.head_len }, (*p).span.start)
+    }
 }
 
 fn pfi_scope_shadowed(idx: i64) -> bool with Mut, Panic, Div {
@@ -914,7 +1073,7 @@ fn pfi_scope_shadowed(idx: i64) -> bool with Mut, Panic, Div {
 }
 
 fn pfi_pattern_bind(p: Pattern) with Mut, Panic, Div, Alloc {
-    if PFI_PHASE != 1 { return }
+    if PFI_PHASE != 1 && PFI_PHASE != 2 { return }
     if p.kind == PatternKind::PatBinding {
         pfi_scope_bind(p.name)
     }
@@ -1637,6 +1796,9 @@ fn pfi_block(b: Block) with IO, Mut, Panic, Div, Alloc {
 }
 
 fn pfi_expr(e: Expr) with IO, Mut, Panic, Div, Alloc {
+    if PFI_PHASE == 2 && e.kind == ExprKind::ExprCall {
+        hy_note_callee(e.left)
+    }
     if PFI_MODE == 0 {
         if e.kind == ExprKind::ExprForIn {
             pfi_note_binder(e.name)
@@ -2020,21 +2182,47 @@ fn pfi_pub_module(programs: &! [Program; 256], count: i64, x: i64) -> bool with 
             if pfi_bsh_imports_from(prog.items, x, bsh_base, bsh_d) { print("1") } else { print("0") }
             print("\n")
         }
-        // Two loaded modules exporting the same intercepted name: the renames
-        // cannot be told apart at a bare call site, and the builtin is
-        // intercepted before any user signature, so fail closed with the real
-        // cause instead of letting the call type as Knowledge. Only when this
-        // module actually imports the name: merely loading both modules is fine
-        // (the pub phase renames the second `X__user` apart).
-        if pfi_bsh_def_count(bsh_base) > 1 && pfi_bsh_imports_from(prog.items, x, bsh_base, bsh_d) {
-            print("error[builtin_shadow]: `")
-            pfi_print_name(bsh_base)
-            print("` is exported by more than one loaded module and\n")
-            print("  ")
-            pfi_print_module(programs, x)
-            print(" imports it, but a bare call can only bind to one of them -- the\n")
-            print("  compiler's builtin is intercepted first. Rename one of the functions.\n")
-            return false
+        // Two loaded modules exporting the same intercepted name (math::pure
+        // and epistemic::propagate both define `pub fn exp`). Each definition is
+        // `<base>__user` after the shadow pass, and the same-name pub phase has
+        // renamed every definer but the lowest-index one to
+        // `<base>__user__m<idx>`. Resolve which definer THIS module means
+        // through its own use items -- an explicit import beats a glob -- and
+        // rebind to that definer's spelling. Refused only when that is
+        // ambiguous (two explicit imports, or two globs and no explicit one).
+        if pfi_bsh_def_count(bsh_base) > 1 && bsh_d == bsh_first_definer(bsh_base) {
+            var pick_explicit: i64 = 0 - 1
+            var pick_glob: i64 = 0 - 1
+            var n_explicit: i64 = 0
+            var n_glob: i64 = 0
+            var bj: i64 = 0
+            while bj < PFI_BSH_COUNT {
+                if pfi_bsh_name_eq(bj, bsh_base) {
+                    let dj = PFI_BSH_DEF[bj as usize]
+                    if dj != x {
+                        let how = bsh_import_kind(prog.items, x, bsh_base, dj)
+                        if how == 2 { pick_explicit = dj; n_explicit = n_explicit + 1 }
+                        if how == 1 { pick_glob = dj; n_glob = n_glob + 1 }
+                    }
+                }
+                bj = bj + 1
+            }
+            var chosen: i64 = 0 - 1
+            if n_explicit == 1 { chosen = pick_explicit } else if n_explicit == 0 && n_glob == 1 { chosen = pick_glob }
+            if n_explicit > 1 || (n_explicit == 0 && n_glob > 1) {
+                print("error[builtin_shadow]: `")
+                pfi_print_name(bsh_base)
+                print("` is exported by more than one loaded module and\n")
+                print("  ")
+                pfi_print_module(programs, x)
+                print(" imports it from more than one of them; a bare call can only bind to one.\n")
+                print("  Import it from one module only, or by name from the one you mean.\n")
+                return false
+            }
+            if chosen >= 0 && !pfi_items_define_name(prog.items, bsh_base) {
+                let spelled = if chosen == bsh_d { 1 } else { 2 }
+                pfi_table_add_pub(bsh_base, chosen, 0, spelled)
+            }
         }
         if x != bsh_d && pfi_bsh_def_count(bsh_base) == 1 {
             if pfi_bsh_imports_from(prog.items, x, bsh_base, bsh_d) {
@@ -2156,6 +2344,121 @@ fn pfi_pub_phase(programs: &! [Program; 256], count: i64) -> bool with IO, Mut, 
 //                    exhausted. A diagnostic has been printed and the caller MUST
 //                    stop compiling -- continuing would emit an executable in which
 //                    two functions share one body.
+// Does module x see `n` through its use items? A use of module t brings n
+// when it names n (or is a glob) and t defines n as a plain pub fn, or t
+// re-exports n with a `pub use` (followed up to four levels).
+fn hy_visible_via_uses(programs: &! [Program; 256], count: i64, x: i64, n: Name, depth: i64, pub_only: bool) -> bool with Mut, Panic, Div, Alloc {
+    if depth > 4 || x < 0 || x >= count || x >= 256 { return false }
+    var prog = (*programs)[x as usize]
+    var ord: i64 = 0
+    var cur = prog.items
+    var going = true
+    while going {
+        match cur {
+            None => { going = false }
+            Some(list) => {
+                if (*list).head.kind == ItemKind::ItemUse {
+                    let is_pub = (*list).head.visibility.kind != 0
+                    if is_pub || !pub_only {
+                        let t = pfi_use_target(x, ord)
+                        var names_n = (*list).head.use_glob || pfi_import_list_has((*list).head.use_items, n)
+                        if !names_n && pfi_use_named(x, ord) && name_eq(ir_path_last_name((*list).head.use_path), n) { names_n = true }
+                        if names_n && t >= 0 && t < count && t != x {
+                            var pt = (*programs)[t as usize]
+                            if pfi_items_define_pub_real(pt.items, n) { return true }
+                            if hy_visible_via_uses(programs, count, t, n, depth + 1, true) { return true }
+                        }
+                    }
+                    ord = ord + 1
+                }
+                cur = (*list).tail
+            }
+        }
+    }
+    false
+}
+
+// Phase 2 over every loaded module. Returns false when a violation was
+// reported in enforce mode.
+fn hy_check_all(programs: &! [Program; 256], count: i64) -> bool with IO, Mut, Panic, Div, Alloc {
+    var ok = true
+    var violations: i64 = 0
+    var x: i64 = 0
+    while x < count && x < 256 {
+        var prog = (*programs)[x as usize]
+        HY_C_COUNT = 0
+        HY_C_OVERFLOW = 0
+        PFI_SC_DEPTH = 0
+        PFI_SC_OVERFLOW = 0
+        PFI_PHASE = 2
+        PFI_MODE = 2
+        PFI_CUR_MOD = x
+        pfi_items(prog.items)
+        PFI_MODE = 0
+        PFI_PHASE = 0
+        if bsh_trace() {
+            print("[hygiene] module ")
+            print_int(x)
+            print(" bare calls ")
+            print_int(HY_C_COUNT)
+            print("\n")
+        }
+        if HY_C_OVERFLOW != 0 || PFI_SC_OVERFLOW != 0 {
+            print("warning[E-NOT-IMPORTED]: import-hygiene capacity exhausted in module ")
+            pfi_print_module(programs, x)
+            print("; the rest of that module was not checked\n")
+        }
+        var k: i64 = 0
+        while k < HY_C_COUNT {
+            let n = hy_cand_name(k)
+            if !pfi_items_define_name(prog.items, n) {
+                var first_def: i64 = 0 - 1
+                var d: i64 = 0
+                while d < count && d < 256 && first_def < 0 {
+                    if d != x {
+                        var pd = (*programs)[d as usize]
+                        if pfi_items_define_pub_real(pd.items, n) { first_def = d }
+                    }
+                    d = d + 1
+                }
+                var imported = false
+                if first_def >= 0 {
+                    imported = hy_visible_via_uses(programs, count, x, n, 0, false)
+                }
+                if first_def >= 0 && !imported {
+                    violations = violations + 1
+                    if hy_mode() == 0 {
+                        print("error[E-NOT-IMPORTED]: ")
+                        ok = false
+                    } else {
+                        print("warning[E-NOT-IMPORTED]: ")
+                    }
+                    print("`")
+                    pfi_print_name(n)
+                    print("` is called in module ")
+                    pfi_print_module(programs, x)
+                    print(" at ")
+                    print_int(HY_C_SPAN[k as usize])
+                    print(" but not imported there; it is a pub fn of module ")
+                    pfi_print_module(programs, first_def)
+                    print("\n  = help: import it in the calling module with a `use` item that names `")
+                    pfi_print_name(n)
+                    print("` (or a glob of a module that defines or `pub use`s it)\n")
+                }
+            }
+            k = k + 1
+        }
+        x = x + 1
+    }
+    PFI_SC_DEPTH = 0
+    if violations > 0 && hy_mode() == 1 {
+        print("import_hygiene: ")
+        print_int(violations)
+        print(" call(s) to unimported functions (report mode)\n")
+    }
+    ok
+}
+
 pub fn private_fn_identity_apply(programs: &! [Program; 256], count: i64) -> i64 with IO, Mut, Panic, Div, Alloc {
     if count < 2 {
         PFI_UM_VALID = 0
@@ -2207,6 +2510,13 @@ pub fn private_fn_identity_apply(programs: &! [Program; 256], count: i64) -> i64
         print("\n")
     }
     if PFI_DUP_ANY == 0 && PFI_BSH_ANY == 0 {
+        // Nothing to rename; the import-hygiene phase still runs.
+        if PFI_UM_VALID == 1 && PFI_UM_OVERFLOW == 0 && hy_mode() != 2 {
+            if !hy_check_all(programs, count) {
+                PFI_UM_VALID = 0
+                return 0 - 2
+            }
+        }
         PFI_UM_VALID = 0
         return 0
     }
@@ -2216,6 +2526,9 @@ pub fn private_fn_identity_apply(programs: &! [Program; 256], count: i64) -> i64
     // Without a `use` map (no multi-module entry point noted one for this
     // compile) the pub phase cannot resolve importers and is skipped.
     var pub_total: i64 = 0
+    // The pub phase consumes the map's validity flag; the hygiene phase at the
+    // end reads the same map.
+    let hy_map_ok = PFI_UM_VALID == 1 && PFI_UM_OVERFLOW == 0
     if PFI_UM_VALID == 1 {
         PFI_UM_VALID = 0
         if !pfi_pub_phase(programs, count) {
@@ -2271,6 +2584,10 @@ pub fn private_fn_identity_apply(programs: &! [Program; 256], count: i64) -> i64
         k = k + 1
     }
     if refused { return 0 - 2 }
+
+    if hy_map_ok && hy_mode() != 2 {
+        if !hy_check_all(programs, count) { return 0 - 2 }
+    }
 
     if PFI_RENAMED_TOTAL > 0 {
         print("private_fn_identity: renamed ")
