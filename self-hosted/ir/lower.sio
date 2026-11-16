@@ -183,6 +183,25 @@ struct LowerLocalStack {
 // so_hs_pop(mark) puts the top back where a frame found it, which also gives
 // back rows an inner early return left taken. A nesting deeper than SO_HS_ROWS
 // refuses the compilation instead of overwriting a row still in use.
+// Scratch of lower_merge_call_ref (ADR-016 meet): source values, their
+// covariance registers (8 x 8) and the right-hand side of the unrolled solve.
+var MERGE_X: [i64; 8] = [-1; 8]
+var MERGE_V: [i64; 64] = [-1; 64]
+var MERGE_RHS: [i64; 8] = [-1; 8]
+var MERGE_NAME: [Name; 8] = [ir_empty_name(); 8]
+
+// ADR-016 contests of measured values (lower_contest_let_ref): a `let` bound to
+// contest(x1, ..., xn) or to retract(c, x, because: "...") records the sources,
+// as a pointer to the call's argument list and a mask of the positions still in
+// the contest; queries (meet, meet_birge, en_of, birge_of, neff_of) that take the
+// contest read those sources. Keyed by function, so a name in another function
+// never matches.
+var CONTEST_N: i64 = 0
+var CONTEST_NAME: [Name; 64] = [ir_empty_name(); 64]
+var CONTEST_FN: [i64; 64] = [-1; 64]
+var CONTEST_LIST: [i64; 64] = [0; 64]
+var CONTEST_MASK: [i64; 64] = [0; 64]
+
 var SO_HS_ROWS: i64 = 256
 var SO_HS: [i64; 532480] = [-1; 532480]
 var SO_HS_TOP: i64 = 0
@@ -887,11 +906,23 @@ fn tg_corr_args_internal(e: &Expr) -> bool with Mut, Panic, Div {
     }
 }
 
+// ADR-016 fusion builtins (lower_merge_call_ref): 0 meet, 1 meet_birge, 2 en_of,
+// 3 birge_of, 4 neff_of; -1 otherwise.
+fn fo_merge_kind(n: Name) -> i64 with Mut, Panic, Div {
+    if ir_name_eq_lit(n, "meet") { return 0 }
+    if ir_name_eq_lit(n, "meet_birge") { return 1 }
+    if ir_name_eq_lit(n, "en_of") { return 2 }
+    if ir_name_eq_lit(n, "birge_of") { return 3 }
+    if ir_name_eq_lit(n, "neff_of") { return 4 }
+    0 - 1
+}
+
 // Epistemic queries read the uncertainty of a value. Inside a clone the
 // parameters are unit channels, so a body that asks would compute a
 // different VALUE than the original; such a function keeps the original.
 fn tg_name_is_query(n: Name) -> bool with Mut, Panic, Div {
     ir_name_eq_lit(n, "variance_of") || ir_name_eq_lit(n, "covariance_of")
+        || fo_merge_kind(n) >= 0
         || ir_name_eq_lit(n, "uncertainty_of") || ir_name_eq_lit(n, "sensitivity_of")
         || ir_name_eq_lit(n, "hessian_of") || ir_name_eq_lit(n, "second_order_mean")
         || ir_name_eq_lit(n, "correlate") || ir_name_eq_lit(n, "std_of")
@@ -30069,6 +30100,19 @@ impl Lowerer {
                     lo = lo.so_clear_expr_hess().fo_seed_from_variance(variance_reg, unc_reg)
                     return (lo, variance_reg)
                 }
+                // An epistemic query returns a number computed from the uncertainty
+                // budget (a variance, a covariance, a sensitivity, a curvature, a
+                // second-order mean). GUM treats that number as known: it has no
+                // uncertainty of its own, so a weight built from variance_of carries
+                // no channel. Before, the walk took the query for an unknown call
+                // with uncertain arguments and refused every value that used it.
+                let mkind = fo_merge_kind(callee_name)
+                if mkind == 0 || mkind == 1 {
+                    return self.lower_merge_call_ref(mkind, e, true)
+                }
+                if tg_name_is_query(callee_name) && !ir_name_eq_lit(callee_name, "correlate") {
+                    return self.fo_clear_expr_sens().so_clear_expr_hess().emit_zero_variance()
+                }
                 // The call went through a tangent clone: chain rule on its
                 // run-time Jacobian row.
                 let tgv = self.tg_call_variance(e, false)
@@ -33406,6 +33450,7 @@ impl Lowerer {
                     }
                     if self.name_is_variance_of(callee_name)
                         || self.name_is_covariance_of(callee_name)
+                        || fo_merge_kind(callee_name) >= 0
                         || self.name_is_uncertainty_of(callee_name)
                         || self.name_is_sensitivity_of(callee_name)
                         || self.name_is_second_order_mean(callee_name)
@@ -36943,6 +36988,8 @@ impl Lowerer {
     }
 
     fn lower_let_stmt_ref(self, s: &Stmt, is_mut: bool) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        let cl = self.lower_contest_let_ref(s)
+        if cl.1 >= 0 { return cl }
         // Variance inline re-lowers this let into the function that is already
         // live. A borrow, or a call that passes a struct/ref local
         // (`amp_real(qs, idx)`), stores through that frame's spill slot: the
@@ -42153,6 +42200,694 @@ impl Lowerer {
         }
     }
 
+    // ─── ADR-016 meet over correlated sources (decisions 2, 3, 5, 7) ─────────
+    //
+    // meet(x1, ..., xn) fuses n <= 8 measured values by generalised least
+    // squares over their GUM covariance: V_ij is covariance_of(x_i, x_j), read
+    // from the same channels every other query reads, so sources that share a
+    // component (the same calibrant, the same force-field parameters) are
+    // weighed as correlated. The weights 1^T V^-1 / (1^T V^-1 1) are known
+    // numbers; the result is sum_i w_i x_i, so it carries the sources' channels
+    // exactly and its variance is 1 / (1^T V^-1 1).
+    //
+    // Refusals, at run time because they depend on measured values:
+    //   - consistency (meet, policy E_n <= lim, default 1, coverage k = 2):
+    //     every pair must satisfy (x_i - x_j)^2 <= lim^2 * 4 * u^2(x_i - x_j),
+    //     with u^2(x_i - x_j) = V_ii + V_jj - 2 V_ij; ignoring a positive V_ij
+    //     can only accept more (formal/EpistemicCorr.lean, ignore_pos_corr);
+    //   - a negative GLS weight (Peelle), for every policy: the fused value
+    //     would lie outside the sources (EpistemicCorr.fused_between).
+    // meet_birge(...) has no consistency refusal: it expands the result by
+    // max(1, R_B), R_B = sqrt(chi^2 / (n - 1)), as an explicit policy.
+    // en_of(a, b), birge_of(...), neff_of(...) return the statistics as known
+    // numbers; neff_of is 1^T R^-1 1 with R the correlation matrix.
+    //
+    // kind: 0 meet, 1 meet_birge, 2 en_of, 3 birge_of, 4 neff_of.
+
+    // The contest bound to `n` in the function being lowered, or -1.
+    fn fo_contest_find(self, n: Name) -> i64 with Mut, Panic, Div {
+        var i: i64 = CONTEST_N - 1
+        while i >= 0 {
+            if CONTEST_FN[i as usize] == self.current_fn && ir_name_eq(CONTEST_NAME[i as usize], n) { return i }
+            i = i - 1
+        }
+        0 - 1
+    }
+
+    // If the only positional argument is a contest, its index; else -1.
+    fn fo_contest_of_args(self, args: &Option<Box<ExprList>>) -> i64 with Mut, Panic, Div {
+        var found: i64 = 0 - 1
+        var npos: i64 = 0
+        var cur = args
+        var go = true
+        while go {
+            match *cur {
+                Some(node) => {
+                    if !ir_name_eq_lit((*node).label, "consistency") {
+                        npos = npos + 1
+                        if (*node).head.kind == ExprKind::ExprIdent {
+                            found = self.fo_contest_find((*node).head.name)
+                        }
+                    }
+                    cur = &(*node).tail
+                }
+                None => { go = false }
+            }
+        }
+        if npos == 1 { return found }
+        0 - 1
+    }
+
+    fn fo_contest_error(self, msg: Name) -> Lowerer with Mut, Panic, Div, IO {
+        print("error[E307]: malformed ADR-016 contest or meet: ")
+        print(str_from_bytes(msg.buf, msg.len))
+        print(" (in `")
+        print(str_from_bytes((*self.current_func).name.buf, (*self.current_func).name.len))
+        print("`)\n")
+        IR_LOWER_HARD_ERROR = 1
+        if IR_LOWER_COMPILE_ERROR_SCOPE_ACTIVE { IR_LOWER_COMPILE_ERROR_LATCH = true }
+        if IR_LOWER_HARD_ERROR_REASON == 0 { IR_LOWER_HARD_ERROR_REASON = 10 }
+        self
+    }
+
+    // `let name = contest(...)` / `let name = retract(c, x, because: "...")`:
+    // records the contest and emits nothing. (Lowerer, -1) when `s` is not one.
+    fn lower_contest_let_ref(self, s: &Stmt) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        match s.expr {
+            Some(rhs) => {
+                if (*rhs).kind != ExprKind::ExprCall { return (lo, 0 - 1) }
+                var is_contest = false
+                var is_retract = false
+                match (*rhs).left {
+                    Some(callee) => {
+                        if (*callee).kind == ExprKind::ExprIdent {
+                            is_contest = ir_name_eq_lit((*callee).name, "contest")
+                            is_retract = ir_name_eq_lit((*callee).name, "retract")
+                        }
+                    }
+                    None => {}
+                }
+                if !is_contest && !is_retract { return (lo, 0 - 1) }
+                if CONTEST_N >= 64 {
+                    lo = lo.fo_contest_error(make_name("more than 64 contests in one compilation"))
+                    return lo.emit_zero_variance()
+                }
+                if is_contest {
+                    var mask: i64 = 0
+                    var pos: i64 = 0
+                    var lp: i64 = 0
+                    match (*rhs).args {
+                        Some(list) => {
+                            let p = list as *mut ExprList
+                            lp = p as i64
+                            var q = p
+                            var go = true
+                            while go {
+                                if !ir_name_eq_lit((*q).label, "because") {
+                                    if pos < 8 { mask = mask + (1 << pos) }
+                                }
+                                pos = pos + 1
+                                match (*q).tail {
+                                    Some(nx) => { q = nx as *mut ExprList }
+                                    None => { go = false }
+                                }
+                            }
+                        }
+                        None => {}
+                    }
+                    if pos > 8 {
+                        lo = lo.fo_contest_error(make_name("a contest holds at most 8 sources"))
+                    }
+                    CONTEST_NAME[CONTEST_N as usize] = s.name
+                    CONTEST_FN[CONTEST_N as usize] = lo.current_fn
+                    CONTEST_LIST[CONTEST_N as usize] = lp
+                    CONTEST_MASK[CONTEST_N as usize] = mask
+                    CONTEST_N = CONTEST_N + 1
+                    return lo.emit_zero_variance()
+                }
+                // retract(c, x, because: "...")
+                var ci: i64 = 0 - 1
+                var xname = ir_empty_name()
+                var k: i64 = 0
+                var cur = &(*rhs).args
+                var go = true
+                while go {
+                    match *cur {
+                        Some(node) => {
+                            if !ir_name_eq_lit((*node).label, "because") {
+                                if (*node).head.kind == ExprKind::ExprIdent {
+                                    if k == 0 { ci = lo.fo_contest_find((*node).head.name) }
+                                    if k == 1 { xname = (*node).head.name }
+                                }
+                                k = k + 1
+                            }
+                            cur = &(*node).tail
+                        }
+                        None => { go = false }
+                    }
+                }
+                if ci < 0 {
+                    lo = lo.fo_contest_error(make_name("retract needs a contest bound by `let` as its first argument"))
+                    return lo.emit_zero_variance()
+                }
+                var bit: i64 = 0 - 1
+                var q = CONTEST_LIST[ci as usize] as *mut ExprList
+                var pos2: i64 = 0
+                var go2 = CONTEST_LIST[ci as usize] != 0
+                while go2 {
+                    let m = CONTEST_MASK[ci as usize]
+                    if pos2 < 8 && ((m >> pos2) & 1) == 1 && (*q).head.kind == ExprKind::ExprIdent && ir_name_eq((*q).head.name, xname) {
+                        bit = pos2
+                    }
+                    pos2 = pos2 + 1
+                    match (*q).tail {
+                        Some(nx) => { q = nx as *mut ExprList }
+                        None => { go2 = false }
+                    }
+                }
+                if bit < 0 {
+                    lo = lo.fo_contest_error(make_name("retract names a value that is not a source of the contest"))
+                    return lo.emit_zero_variance()
+                }
+                CONTEST_NAME[CONTEST_N as usize] = s.name
+                CONTEST_FN[CONTEST_N as usize] = lo.current_fn
+                CONTEST_LIST[CONTEST_N as usize] = CONTEST_LIST[ci as usize]
+                CONTEST_MASK[CONTEST_N as usize] = CONTEST_MASK[ci as usize] - (1 << bit)
+                CONTEST_N = CONTEST_N + 1
+                lo.emit_zero_variance()
+            }
+            None => (lo, 0 - 1),
+        }
+    }
+
+    fn fo_merge_print_f64(self, reg: i64) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        let fid = lowerer_find_or_add_fn_id_mut(&! lo, make_name("print_f64"))
+        let dp = lo.fresh_reg()
+        lo = dp.0
+        let cargs: Option<Box<IrRegList>> = Some(Box::new(ir_reg_list_single(reg)))
+        lo.emit(ir_call(dp.1, fid, make_name("print_f64"), cargs, 1))
+    }
+
+    fn fo_merge_print_name(self, n: Name) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        let p = self.lower_print_string_literal_ref(n)
+        p.0
+    }
+
+    fn fo_merge_panic(self, msg: Name) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        let sp = lo.emit_name_string(msg)
+        lo = sp.0
+        let fid = lowerer_find_or_add_fn_id_mut(&! lo, make_name("panic"))
+        let dp = lo.fresh_reg()
+        lo = dp.0
+        let cargs: Option<Box<IrRegList>> = Some(Box::new(ir_reg_list_single(sp.1)))
+        lo.emit(ir_call(dp.1, fid, make_name("panic"), cargs, 1))
+    }
+
+    // Solves V y = b for the symmetric positive definite n x n matrix held in
+    // regs vr[i * 8 + j] (Gaussian elimination, no pivoting, unrolled at compile
+    // time). b and the answer are in MERGE_RHS[0..n).
+    fn fo_merge_solve(self, vr: [i64; 64], n: i64) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        var a: [i64; 64] = vr
+        var k: i64 = 0
+        while k < n {
+            var i: i64 = k + 1
+            while i < n {
+                let fp = lo.fo_emit_f64_binop(a[(i * 8 + k) as usize], BinaryOp::OpDiv, a[(k * 8 + k) as usize])
+                lo = fp.0
+                var j: i64 = k + 1
+                while j < n {
+                    let tp = lo.fo_emit_f64_binop(fp.1, BinaryOp::OpMul, a[(k * 8 + j) as usize])
+                    lo = tp.0
+                    let up = lo.fo_emit_f64_binop(a[(i * 8 + j) as usize], BinaryOp::OpSub, tp.1)
+                    lo = up.0
+                    a[(i * 8 + j) as usize] = up.1
+                    j = j + 1
+                }
+                let tb = lo.fo_emit_f64_binop(fp.1, BinaryOp::OpMul, MERGE_RHS[k as usize])
+                lo = tb.0
+                let ub = lo.fo_emit_f64_binop(MERGE_RHS[i as usize], BinaryOp::OpSub, tb.1)
+                lo = ub.0
+                MERGE_RHS[i as usize] = ub.1
+                i = i + 1
+            }
+            k = k + 1
+        }
+        var r: i64 = n - 1
+        while r >= 0 {
+            var acc = MERGE_RHS[r as usize]
+            var j2: i64 = r + 1
+            while j2 < n {
+                let tp = lo.fo_emit_f64_binop(a[(r * 8 + j2) as usize], BinaryOp::OpMul, MERGE_RHS[j2 as usize])
+                lo = tp.0
+                let up = lo.fo_emit_f64_binop(acc, BinaryOp::OpSub, tp.1)
+                lo = up.0
+                acc = up.1
+                j2 = j2 + 1
+            }
+            let dp = lo.fo_emit_f64_binop(acc, BinaryOp::OpDiv, a[(r * 8 + r) as usize])
+            lo = dp.0
+            MERGE_RHS[r as usize] = dp.1
+            r = r - 1
+        }
+        lo
+    }
+
+    // Branches to a refusal when `cond` (an integer 0/1 register) is set: prints
+    // the header, the sources with their uncertainties and the statistic, then
+    // panics. Falls through otherwise.
+    fn fo_merge_refuse_if(self, cond: i64, why: Name, stat_name: Name, si: i64, sj: i64, stat: i64, n: i64) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        let lok = lo.fresh_label()
+        lo = lok.0
+        lo = lo.emit(ir_branch_false(cond, lok.1))
+        lo = lo.fo_merge_print_name(make_name("error: meet refused: "))
+        lo = lo.fo_merge_print_name(why)
+        lo = lo.fo_merge_print_name(make_name("\n"))
+        var i: i64 = 0
+        while i < n {
+            lo = lo.fo_merge_print_name(make_name("  source "))
+            lo = lo.fo_merge_print_name(MERGE_NAME[i as usize])
+            lo = lo.fo_merge_print_name(make_name(" = "))
+            lo = lo.fo_merge_print_f64(MERGE_X[i as usize])
+            lo = lo.fo_merge_print_name(make_name(" +- "))
+            let su = lo.fo_emit_math_call(make_name("sqrt"), MERGE_V[(i * 8 + i) as usize])
+            lo = su.0
+            lo = lo.fo_merge_print_f64(su.1)
+            lo = lo.fo_merge_print_name(make_name("\n"))
+            i = i + 1
+        }
+        lo = lo.fo_merge_print_name(stat_name)
+        if si >= 0 { lo = lo.fo_merge_print_name(MERGE_NAME[si as usize]) }
+        if sj >= 0 {
+            lo = lo.fo_merge_print_name(make_name(", "))
+            lo = lo.fo_merge_print_name(MERGE_NAME[sj as usize])
+        }
+        lo = lo.fo_merge_print_name(make_name(") = "))
+        lo = lo.fo_merge_print_f64(stat)
+        lo = lo.fo_merge_print_name(make_name("\n"))
+        lo = lo.fo_merge_panic(make_name("meet refused (ADR-016): the sources are not combined; carry them as a contest or declare a policy"))
+        lo.emit(ir_label(lok.1))
+    }
+
+    fn lower_merge_call_ref(self, kind: i64, e: &Expr, want_var: bool) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        fo_require_uncertainty_tracking()
+        var lo = self
+        let mark = SO_HS_TOP
+        // E_n limit: `consistency: <literal>` (default 1).
+        var lim: f64 = 1.0
+        var n: i64 = 0
+        var sens: [i64; 512] = [-1; 512]
+        var hrow: [i64; 8] = [-1; 8]
+        let saved_loops = FO_INLINE_ALLOW_LOOPS
+        FO_INLINE_ALLOW_LOOPS = 1
+        // The sources: the positional arguments, or the sources still in the
+        // contest when that is the only positional argument.
+        let cidx = lo.fo_contest_of_args(&e.args)
+        var cmask: i64 = 0 - 1
+        var p0: i64 = 0
+        match e.args {
+            Some(list) => {
+                let pl = list as *mut ExprList
+                p0 = pl as i64
+            }
+            None => {}
+        }
+        // `consistency:` is read from the call, whatever the source list.
+        var pc = p0 as *mut ExprList
+        var goc = p0 != 0
+        while goc {
+            if ir_name_eq_lit((*pc).label, "consistency") {
+                if (*pc).head.kind == ExprKind::ExprFloatLit { lim = (*pc).head.float_val }
+                if (*pc).head.kind == ExprKind::ExprIntLit { lim = (*pc).head.int_val as f64 }
+            }
+            match (*pc).tail {
+                Some(nx) => { pc = nx as *mut ExprList }
+                None => { goc = false }
+            }
+        }
+        if cidx >= 0 {
+            p0 = CONTEST_LIST[cidx as usize]
+            cmask = CONTEST_MASK[cidx as usize]
+        }
+        var node = p0 as *mut ExprList
+        var pos: i64 = 0
+        var go = p0 != 0
+        while go {
+            var take = !ir_name_eq_lit((*node).label, "consistency") && !ir_name_eq_lit((*node).label, "because")
+            if cmask >= 0 && (pos >= 8 || ((cmask >> pos) & 1) == 0) { take = false }
+            if take {
+                    if n < 8 {
+                        let arg = &(*node).head
+                        let sp = lo.fo_sens_of_cov_arg(arg)
+                        lo = sp.0
+                        var k: i64 = 0
+                        while k < FO_MAX_CH {
+                            sens[(n * 64 + k) as usize] = sp.1[k as usize]
+                            k = k + 1
+                        }
+                        if lo.so_enabled { hrow[n as usize] = lo.so_snapshot_expr_hess() }
+                        let vp = lo.lower_expr_ref(arg)
+                        lo = vp.0
+                        let fp = lo.so_value_as_f64(vp.1, lo.expr_result_is_float_ref(arg))
+                        lo = fp.0
+                        MERGE_X[n as usize] = fp.1
+                        if (*arg).kind == ExprKind::ExprIdent {
+                            MERGE_NAME[n as usize] = (*arg).name
+                        } else {
+                            MERGE_NAME[n as usize] = make_name("<expression>")
+                        }
+                        n = n + 1
+                    }
+            }
+            pos = pos + 1
+            match (*node).tail {
+                Some(nx) => { node = nx as *mut ExprList }
+                None => { go = false }
+            }
+        }
+        FO_INLINE_ALLOW_LOOPS = saved_loops
+        if n < 2 && (kind >= 2) {
+            lo = lo.fo_contest_error(make_name("en_of, birge_of and neff_of need at least two sources"))
+            so_hs_pop(mark)
+            return lo.emit_zero_variance()
+        }
+        if n < 2 && cidx < 0 {
+            lo = lo.fo_contest_error(make_name("meet needs two or more sources, or a contest"))
+            so_hs_pop(mark)
+            return lo.emit_zero_variance()
+        }
+        if kind == 2 && n != 2 {
+            lo = lo.fo_contest_error(make_name("en_of compares exactly two sources"))
+            so_hs_pop(mark)
+            return lo.emit_zero_variance()
+        }
+        if n == 1 {
+            // A contest reduced to one source by retract: meet returns it.
+            if !want_var {
+                so_hs_pop(mark)
+                return (lo, MERGE_X[0])
+            }
+            lo = lo.fo_clear_expr_sens().so_clear_expr_hess()
+            var k1: i64 = 0
+            while k1 < FO_MAX_CH {
+                lo.fo_expr_sens[k1 as usize] = sens[k1 as usize]
+                k1 = k1 + 1
+            }
+            if lo.so_enabled && hrow[0] >= 0 {
+                var h1: i64 = 0
+                while h1 < 2080 {
+                    (*lo.so_hess).h[h1 as usize] = SO_HS[(hrow[0] * 2080 + h1) as usize]
+                    h1 = h1 + 1
+                }
+            }
+            so_hs_pop(mark)
+            return lo.fo_emit_var_from_sens()
+        }
+        // Covariance from the channels.
+        var i: i64 = 0
+        while i < n {
+            var j: i64 = i
+            while j < n {
+                var sa: [i64; 64] = [-1; 64]
+                var sb: [i64; 64] = [-1; 64]
+                var k: i64 = 0
+                while k < FO_MAX_CH {
+                    sa[k as usize] = sens[(i * 64 + k) as usize]
+                    sb[k as usize] = sens[(j * 64 + k) as usize]
+                    k = k + 1
+                }
+                let cp = lo.fo_emit_cov_from_sens(sa, sb)
+                lo = cp.0
+                MERGE_V[(i * 8 + j) as usize] = cp.1
+                MERGE_V[(j * 8 + i) as usize] = cp.1
+                j = j + 1
+            }
+            i = i + 1
+        }
+        var vr: [i64; 64] = [-1; 64]
+        i = 0
+        while i < 64 {
+            vr[i as usize] = MERGE_V[i as usize]
+            i = i + 1
+        }
+        let zero = lo.emit_f64_const(0.0)
+        lo = zero.0
+        let one = lo.emit_f64_const(1.0)
+        lo = one.0
+        // en_of(a, b): |a - b| / (2 u(a - b)).
+        if kind == 2 {
+            let dx = lo.fo_emit_f64_binop(MERGE_X[0], BinaryOp::OpSub, MERGE_X[1])
+            lo = dx.0
+            let d1 = lo.fo_emit_f64_binop(MERGE_V[0], BinaryOp::OpAdd, MERGE_V[9])
+            lo = d1.0
+            let two = lo.emit_f64_const(2.0)
+            lo = two.0
+            let c2 = lo.fo_emit_f64_binop(two.1, BinaryOp::OpMul, MERGE_V[1])
+            lo = c2.0
+            let dd = lo.fo_emit_f64_binop(d1.1, BinaryOp::OpSub, c2.1)
+            lo = dd.0
+            let su = lo.fo_emit_math_call(make_name("sqrt"), dd.1)
+            lo = su.0
+            let den = lo.fo_emit_f64_binop(two.1, BinaryOp::OpMul, su.1)
+            lo = den.0
+            let q = lo.fo_emit_f64_binop(dx.1, BinaryOp::OpDiv, den.1)
+            lo = q.0
+            let qq = lo.fo_emit_f64_binop(q.1, BinaryOp::OpMul, q.1)
+            lo = qq.0
+            let ab = lo.fo_emit_math_call(make_name("sqrt"), qq.1)
+            lo = ab.0
+            so_hs_pop(mark)
+            return (lo.fo_clear_expr_sens().so_clear_expr_hess(), ab.1)
+        }
+        // neff_of: 1^T R^-1 1 = sigma^T V^-1 sigma.
+        if kind == 4 {
+            var sig: [i64; 8] = [-1; 8]
+            i = 0
+            while i < n {
+                let su = lo.fo_emit_math_call(make_name("sqrt"), MERGE_V[(i * 8 + i) as usize])
+                lo = su.0
+                sig[i as usize] = su.1
+                MERGE_RHS[i as usize] = su.1
+                i = i + 1
+            }
+            lo = lo.fo_merge_solve(vr, n)
+            var acc = zero.1
+            i = 0
+            while i < n {
+                let tp = lo.fo_emit_f64_binop(sig[i as usize], BinaryOp::OpMul, MERGE_RHS[i as usize])
+                lo = tp.0
+                let ap = lo.fo_emit_f64_binop(acc, BinaryOp::OpAdd, tp.1)
+                lo = ap.0
+                acc = ap.1
+                i = i + 1
+            }
+            so_hs_pop(mark)
+            return (lo.fo_clear_expr_sens().so_clear_expr_hess(), acc)
+        }
+        // GLS weights: y = V^-1 1, s = 1^T y, w = y / s.
+        i = 0
+        while i < n {
+            MERGE_RHS[i as usize] = one.1
+            i = i + 1
+        }
+        lo = lo.fo_merge_solve(vr, n)
+        var y: [i64; 8] = [-1; 8]
+        var s = zero.1
+        i = 0
+        while i < n {
+            y[i as usize] = MERGE_RHS[i as usize]
+            let ap = lo.fo_emit_f64_binop(s, BinaryOp::OpAdd, y[i as usize])
+            lo = ap.0
+            s = ap.1
+            i = i + 1
+        }
+        var w: [i64; 8] = [-1; 8]
+        var xh = zero.1
+        i = 0
+        while i < n {
+            let wp = lo.fo_emit_f64_binop(y[i as usize], BinaryOp::OpDiv, s)
+            lo = wp.0
+            w[i as usize] = wp.1
+            let tp = lo.fo_emit_f64_binop(wp.1, BinaryOp::OpMul, MERGE_X[i as usize])
+            lo = tp.0
+            let ap = lo.fo_emit_f64_binop(xh, BinaryOp::OpAdd, tp.1)
+            lo = ap.0
+            xh = ap.1
+            i = i + 1
+        }
+        // chi^2 = r^T V^-1 r, r = x - xh; R_B = sqrt(chi^2 / (n - 1)).
+        var rr: [i64; 8] = [-1; 8]
+        i = 0
+        while i < n {
+            let rp = lo.fo_emit_f64_binop(MERGE_X[i as usize], BinaryOp::OpSub, xh)
+            lo = rp.0
+            rr[i as usize] = rp.1
+            MERGE_RHS[i as usize] = rp.1
+            i = i + 1
+        }
+        lo = lo.fo_merge_solve(vr, n)
+        var chi = zero.1
+        i = 0
+        while i < n {
+            let tp = lo.fo_emit_f64_binop(rr[i as usize], BinaryOp::OpMul, MERGE_RHS[i as usize])
+            lo = tp.0
+            let ap = lo.fo_emit_f64_binop(chi, BinaryOp::OpAdd, tp.1)
+            lo = ap.0
+            chi = ap.1
+            i = i + 1
+        }
+        let nm1 = lo.emit_f64_const((n - 1) as f64)
+        lo = nm1.0
+        let rb2 = lo.fo_emit_f64_binop(chi, BinaryOp::OpDiv, nm1.1)
+        lo = rb2.0
+        let rbp = lo.fo_emit_math_call(make_name("sqrt"), rb2.1)
+        lo = rbp.0
+        let rb = rbp.1
+        if kind == 3 {
+            so_hs_pop(mark)
+            return (lo.fo_clear_expr_sens().so_clear_expr_hess(), rb)
+        }
+        // Consistency (meet only): every pair within E_n <= lim at k = 2.
+        if kind == 0 {
+            let l4 = lo.emit_f64_const(4.0 * lim * lim)
+            lo = l4.0
+            i = 0
+            while i < n {
+                var j: i64 = i + 1
+                while j < n {
+                    let dx = lo.fo_emit_f64_binop(MERGE_X[i as usize], BinaryOp::OpSub, MERGE_X[j as usize])
+                    lo = dx.0
+                    let d2 = lo.fo_emit_f64_binop(dx.1, BinaryOp::OpMul, dx.1)
+                    lo = d2.0
+                    let a1 = lo.fo_emit_f64_binop(MERGE_V[(i * 8 + i) as usize], BinaryOp::OpAdd, MERGE_V[(j * 8 + j) as usize])
+                    lo = a1.0
+                    let a2 = lo.fo_emit_f64_binop(MERGE_V[(i * 8 + j) as usize], BinaryOp::OpAdd, MERGE_V[(i * 8 + j) as usize])
+                    lo = a2.0
+                    let dd = lo.fo_emit_f64_binop(a1.1, BinaryOp::OpSub, a2.1)
+                    lo = dd.0
+                    let rhs = lo.fo_emit_f64_binop(l4.1, BinaryOp::OpMul, dd.1)
+                    lo = rhs.0
+                    let cp = lo.fresh_reg()
+                    lo = cp.0
+                    lo = lo.emit(ir_binop_typed(cp.1, d2.1, BinaryOp::OpGt, rhs.1, true, true))
+                    let su = lo.fo_emit_math_call(make_name("sqrt"), dd.1)
+                    lo = su.0
+                    let two = lo.emit_f64_const(2.0)
+                    lo = two.0
+                    let den = lo.fo_emit_f64_binop(two.1, BinaryOp::OpMul, su.1)
+                    lo = den.0
+                    let q = lo.fo_emit_f64_binop(dx.1, BinaryOp::OpDiv, den.1)
+                    lo = q.0
+                    let qq = lo.fo_emit_f64_binop(q.1, BinaryOp::OpMul, q.1)
+                    lo = qq.0
+                    let en = lo.fo_emit_math_call(make_name("sqrt"), qq.1)
+                    lo = en.0
+                    lo = lo.fo_merge_refuse_if(cp.1, make_name("two sources are inconsistent above the E_n policy (u of their difference from the shared channels, k = 2)"), make_name("  E_n("), i, j, en.1, n)
+                    j = j + 1
+                }
+                i = i + 1
+            }
+        }
+        // Peelle: a negative weight puts the fusion outside the sources.
+        i = 0
+        while i < n {
+            let cp = lo.fresh_reg()
+            lo = cp.0
+            lo = lo.emit(ir_binop_typed(cp.1, w[i as usize], BinaryOp::OpLt, zero.1, true, true))
+            lo = lo.fo_merge_refuse_if(cp.1, make_name("a generalised-least-squares weight is negative (Peelle): the correlated fusion would lie outside the sources"), make_name("  GLS weight("), i, 0 - 1, w[i as usize], n)
+            i = i + 1
+        }
+        // Birge: expand by max(1, R_B).
+        var f = one.1
+        if kind == 1 {
+            let fr = lo.fresh_reg()
+            lo = fr.0
+            f = fr.1
+            lo = lo.emit(ir_copy(f, rb))
+            lo = lo.emit(ir_mark_float_reg(f))
+            let cp = lo.fresh_reg()
+            lo = cp.0
+            lo = lo.emit(ir_binop_typed(cp.1, rb, BinaryOp::OpLt, one.1, true, true))
+            let lk = lo.fresh_label()
+            lo = lk.0
+            lo = lo.emit(ir_branch_false(cp.1, lk.1))
+            lo = lo.emit(ir_copy(f, one.1))
+            lo = lo.emit(ir_label(lk.1))
+        }
+        if !want_var {
+            so_hs_pop(mark)
+            return (lo, xh)
+        }
+        // Sensitivities and Hessian of the fusion: f * sum_i w_i (.)_i.
+        lo = lo.fo_clear_expr_sens().so_clear_expr_hess()
+        var fw: [i64; 8] = [-1; 8]
+        i = 0
+        while i < n {
+            let p = lo.fo_emit_f64_binop(f, BinaryOp::OpMul, w[i as usize])
+            lo = p.0
+            fw[i as usize] = p.1
+            i = i + 1
+        }
+        var k: i64 = 0
+        while k < FO_MAX_CH {
+            var acc: i64 = 0 - 1
+            i = 0
+            while i < n {
+                let sk = sens[(i * 64 + k) as usize]
+                if sk >= 0 {
+                    let tp = lo.fo_emit_f64_binop(fw[i as usize], BinaryOp::OpMul, sk)
+                    lo = tp.0
+                    if acc < 0 {
+                        acc = tp.1
+                    } else {
+                        let ap = lo.fo_emit_f64_binop(acc, BinaryOp::OpAdd, tp.1)
+                        lo = ap.0
+                        acc = ap.1
+                    }
+                }
+                i = i + 1
+            }
+            lo.fo_expr_sens[k as usize] = acc
+            k = k + 1
+        }
+        if lo.so_enabled {
+            var nch = lo.fo_nchan
+            if nch > FO_MAX_CH { nch = FO_MAX_CH }
+            let nh = (nch * (nch + 1)) / 2
+            var h: i64 = 0
+            while h < nh {
+                var acc: i64 = 0 - 1
+                i = 0
+                while i < n {
+                    let row = hrow[i as usize]
+                    if row >= 0 {
+                        let hv = SO_HS[(row * 2080 + h) as usize]
+                        if hv >= 0 {
+                            let tp = lo.fo_emit_f64_binop(fw[i as usize], BinaryOp::OpMul, hv)
+                            lo = tp.0
+                            if acc < 0 {
+                                acc = tp.1
+                            } else {
+                                let ap = lo.fo_emit_f64_binop(acc, BinaryOp::OpAdd, tp.1)
+                                lo = ap.0
+                                acc = ap.1
+                            }
+                        }
+                    }
+                    i = i + 1
+                }
+                (*lo.so_hess).h[h as usize] = acc
+                h = h + 1
+            }
+        }
+        so_hs_pop(mark)
+        lo.fo_emit_var_from_sens()
+    }
+
     fn lower_variance_of_call_ref(self, args: &Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         fo_require_uncertainty_tracking()
         match *args {
@@ -43550,6 +44285,7 @@ impl Lowerer {
             || self.name_is_sensitivity_of(callee_name)
             || self.name_is_hessian_of(callee_name)
             || self.name_is_correlate(callee_name)
+            || fo_merge_kind(callee_name) >= 0
             || self.name_is_second_order_mean(callee_name)
             || self.contest_witness_kind_from_callee(callee_name) >= 0
     }
@@ -43659,6 +44395,10 @@ impl Lowerer {
         }
         if ir_name_is_knowledge_ctor(callee_name) {
             return self.lower_knowledge_ctor_call_ref(e.span, &e.args)
+        }
+        let merge_kind = fo_merge_kind(callee_name)
+        if merge_kind >= 0 {
+            return self.lower_merge_call_ref(merge_kind, e, false)
         }
         if self.name_is_variance_of(callee_name) {
             return self.tg_checked_query(0, e)
