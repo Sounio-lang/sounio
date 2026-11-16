@@ -39,3 +39,35 @@ All twelve pass (largest deviation 1.7σ). Wall time 14 min on one core with the
   sampled exactly from the one-guest Boltzmann density in each cage. The interaction between
   neighbouring cages is not in this model; that is why case B switches it off. With it on
   (mode 1), the occupancy rises by about 2.4% in the large cage, a measured, unpredicted term.
+
+# H2 content as Knowledge: `examples/molecular/h2_sii_epistemic.sio`
+
+Full guest-guest interaction, 200 K, 300 MPa, three water models. Each occupancy is a
+Knowledge value with two kinds of GUM channel: the H2 Lennard-Jones parameters (two latent
+channels shared by all three models, covariance of four published one-site sets) entering
+through the fluctuation sensitivities, and the Monte Carlo error of each run. The predictions
+in the header come from the C++ GCMC of the same model.
+
+## Measured, 4·10⁶ trials per model (2026-11-16)
+
+| | N per cell | u(N), H2 and MC |
+|---|---|---|
+| SPC/E | 31.919 ± 0.065 (predicted 31.82 ± 0.04) | 0.703 |
+| TIP4P/Ice | 33.016 ± 0.052 (33.08 ± 0.06) | 0.725 |
+| TIP5P | 32.387 ± 0.050 (32.35 ± 0.06) | 0.739 |
+
+| Difference | Value ± u | H2 part, shared channels | H2 part if independent |
+|---|---|---|---|
+| TIP4P/Ice − SPC/E | 1.096 ± 0.087 | 0.023 | 1.006 |
+| TIP5P − SPC/E | 0.468 ± 0.090 | 0.038 | 1.017 |
+
+Each water model alone carries about 2.2% uncertainty from the H2 parameters, the size of
+the differences between models. Taken as independent, the models would look alike; with the
+H2 channels shared, the H2 part of a difference falls about thirtyfold, and both differences
+are resolved (12.7 and 5.2 standard uncertainties).
+
+A first run with 10⁶ trials per model failed the pass rule: TIP5P − SPC/E was 0.50 ± 0.20,
+2.5 standard uncertainties, below the threshold of 3. The H2 part had cancelled as predicted;
+the Monte Carlo error of the shorter runs was too large to resolve the smaller difference.
+The predictions came from 4·10⁶-trial runs, and the driver now uses the same length; the pass
+rule is unchanged.
