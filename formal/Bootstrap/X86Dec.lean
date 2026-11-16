@@ -22,8 +22,10 @@ accepted form is deliberately the narrowest one that has the 64-bit semantics
 `altsAt` is the supplier of Hamming-distance-1 neighbours that decision 42 asks
 of the byte decoder: one entry per flipped bit of the instruction's bytes.
 
-`6A` is `push imm8`, `85` is `test r64, r64` and a 32-bit register move is
-`mov32`. An indirect `jmp r64` (FF /4) is not decoded yet.
+`6A` is `push imm8`, `85` is `test r64, r64`, a 32-bit register move is
+`mov32` and a 32-bit load from memory (`8B` without REX.W) is `ld32`, zero-extended;
+the 32-bit store (`89` without REX.W, memory operand) is refused. An indirect
+`jmp r64` (FF /4) is not decoded yet.
 -/
 import Bootstrap.X86Int
 
@@ -107,11 +109,16 @@ def decode (b : Nat → Option Nat) (a : Nat) : Option (Ins × Nat) := do
     if x then none else
     let m ← b (p + 1)
     if !w then
-      -- only the 32-bit register move: the low half, zero-extended
-      if m / 64 != 3 then none else
+      -- 32-bit forms: the register move, and the load from memory, both
+      -- zero-extended. The 32-bit store is not decoded.
       let rm := m % 8 + bb
       let rg := m / 8 % 8 + r
-      if o == 0x89 then pure (.mov32 rm rg, p + 2) else pure (.mov32 rg rm, p + 2)
+      if m / 64 == 3 then
+        if o == 0x89 then pure (.mov32 rm rg, p + 2) else pure (.mov32 rg rm, p + 2)
+      else if o == 0x89 then none
+      else
+        let (base, disp, off') ← memOp b (p + 2) m bb x
+        pure (.ld32 rg base disp, off')
     else if m / 64 == 3 then
       let rm := m % 8 + bb
       let rg := m / 8 % 8 + r
@@ -253,8 +260,8 @@ example : at0 [0x48, 0x89, 0xe5] = some (.mov 5 4, 3) := by decide +kernel
 example : at0 [0x48, 0x8b, 0x45, 0xf8] = some (.ld 0 5 (W - 8), 4) := by decide +kernel
 -- 48 89 44 24 10: mov [rsp + 16], rax (SIB 0x24 = no index, base rsp)
 example : at0 [0x48, 0x89, 0x44, 0x24, 0x10] = some (.st 4 16 0, 5) := by decide +kernel
--- 41 8b 04 24: mov eax,[r12] is 32-bit and refused; 49 8b 04 24: mov rax, [r12]
-example : at0 [0x41, 0x8b, 0x04, 0x24] = none := by decide +kernel
+-- 41 8b 04 24: mov eax, [r12] (32-bit, zero-extended); 49 8b 04 24: mov rax, [r12]
+example : at0 [0x41, 0x8b, 0x04, 0x24] = some (.ld32 0 12 0, 4) := by decide +kernel
 example : at0 [0x49, 0x8b, 0x04, 0x24] = some (.ld 0 12 0, 4) := by decide +kernel
 -- 48 83 f8 40: cmp rax, 0x40
 example : at0 [0x48, 0x83, 0xf8, 0x40] = some (.cmpI 0 0x40, 4) := by decide +kernel
@@ -300,6 +307,14 @@ example : at0 [0x48, 0x85, 0xc0] = some (.test 0 0, 3) := by decide +kernel
 example : at0 [0x44, 0x89, 0xf7] = some (.mov32 7 14, 3) := by decide +kernel
 -- 7c 49 at 0x7d: jl 0x7d + 2 + 0x49;  78 34: js
 example : at0 [0x7c, 0x49] 0x7d = some (.jcc 12 0xc8, 2) := by decide +kernel
+
+-- 8b 06: mov eax, [rsi];  44 8b 2a: mov r13d, [rdx];  8b 42 08: mov eax, [rdx + 8]
+example : at0 [0x8b, 0x06] = some (.ld32 0 6 0, 2) := by decide +kernel
+example : at0 [0x44, 0x8b, 0x2a] = some (.ld32 13 2 0, 3) := by decide +kernel
+example : at0 [0x8b, 0x42, 0x08] = some (.ld32 0 2 8, 3) := by decide +kernel
+-- refused: the 32-bit store, and a rip-relative 32-bit load
+example : at0 [0x89, 0x06] = none := by decide +kernel
+example : at0 [0x8b, 0x05, 0, 0, 0, 0] = none := by decide +kernel
 
 -- the image boundary: below the base is outside, the first byte is inside, and
 -- an instruction does not run past the end
