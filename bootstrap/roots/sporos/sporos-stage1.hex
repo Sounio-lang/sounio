@@ -1,0 +1,233 @@
+# sporos-stage1: loader + decode SPR1 + stack-effect checker (decision 31).
+# Written by hand, byte by byte, in format A. A complete program: opens the
+# file in argv[1], reads it whole (mremap growth, no ceiling), checks it is a
+# well-formed, well-typed Sporos bytecode file, and exits 0. Exit 1: refused
+# input, failed open/read, malformed or ill-typed file. Exit 2: kernel refused
+# memory. Silent on all paths: the exit status is the verdict.
+#
+# Mirrors formal/Sporos/Bytecode.lean (decode) and formal/Sporos/Check.lean
+# (infer/checkWord/checkProg) exactly; the stage-1 differential gate checks
+# exit-status agreement with sporos_fast on vectors and fuzz.
+#
+# New instruction forms beyond X86Min (model extension queued with the
+# Env x instruction integration): mov r,[r] / mov [r],r (8B/89 mod 00, 32 and
+# 64 bit), movzx r32, byte [r] (0F B6 mod 00). All displacements are built
+# with add, never encoded, so no disp forms are used. No call/ret: shared
+# scans are straight-line code ending in local jumps; the one indirect jump
+# (FF E0, decision 38) arrives with the stage-2 dispatch table.
+#
+# Registers, checker phase: rbx file base; r15 file end; rsi cursor/file
+# pointer; r14 words-table base (stride 64); r13d nwords; r12d main;
+# r11 lengths-scratch base; rdi current word entry; r8 d, r9 a (current
+# height); rcx instruction index i; r10d scan counter; rax rdx rsi?/rdi?
+# scratch (never live across a scan except as noted). No value lives in
+# rcx/r11 across a syscall; the only syscalls after entry are the two mmaps.
+#
+# Words-table entry (64 bytes): +0 ins, +8 outs, +16 locals, +24 ncode,
+# +32 nann, +40 code pointer, +48 ann pointer. All fields u64 (u32 values
+# zero-extended).
+#
+# Layout: ELF64 header (0x00-0x3f), program header (0x40-0x77), code.
+# Loaded at 0x400000; file offset X is address 0x400000+X.
+
+# ------------------------------ ELF header
+7f 45 4c 46 02 01 01 00 00 00 00 00 00 00 00 00   # 0   e_ident: ELF64 LE v1 SysV
+02 00 3e 00 01 00 00 00                            # 10   e_type EXEC, e_machine X86-64, e_version
+78 00 40 00 00 00 00 00                            # 18   e_entry = 0x400078 (start of code)
+40 00 00 00 00 00 00 00                            # 20   e_phoff = 0x40
+00 00 00 00 00 00 00 00                            # 28   e_shoff
+00 00 00 00                                        # 30   e_flags
+40 00                                              # 34   e_ehsize = 64
+38 00                                              # 36   e_phentsize = 56
+01 00                                              # 38   e_phnum = 1
+00 00                                              # 3a   e_shentsize
+00 00                                              # 3c   e_shnum
+00 00                                              # 3e   e_shstrndx
+
+# --------------------------- program header
+01 00 00 00                                        # 40   p_type = PT_LOAD
+05 00 00 00                                        # 44   p_flags = R+X
+00 00 00 00 00 00 00 00                            # 48   p_offset = 0
+00 00 40 00 00 00 00 00                            # 50   p_vaddr = 0x400000
+00 00 40 00 00 00 00 00                            # 58   p_paddr
+99 02 00 00 00 00 00 00                            # 60   p_filesz = 665
+99 02 00 00 00 00 00 00                            # 68   p_memsz = 665
+00 10 00 00 00 00 00 00                            # 70   p_align = 0x1000
+
+# ----------------------------------- code
+# start: argc in rax
+58                                                 # 78   pop rax: argc
+48 83 f8 02                                        # 79   cmp rax, 2
+7d 05                                              # 7d   jge over E9: argc >= 2, keep going
+e9 a0 00 00 00                                     # 7f   jmp fail1 (0x124): no program, refuse
+5e                                                 # 84   pop rsi: argv[0], discard
+5e                                                 # 85   pop rsi: argv[1], the path
+b8 02 00 00 00                                     # 86   mov eax, 2: open
+48 89 f7                                           # 8b   mov rdi, rsi: path
+31 f6                                              # 8e   xor esi, esi: O_RDONLY
+31 d2                                              # 90   xor edx, edx: mode unused, must be 0
+0f 05                                              # 92   syscall
+48 85 c0                                           # 94   test rax, rax
+79 05                                              # 97   jns over E9: fd ok, keep going
+e9 86 00 00 00                                     # 99   jmp fail1 (0x124): -errno
+49 89 c6                                           # 9e   mov r14, rax: fd
+b8 09 00 00 00                                     # a1   mov eax, 9: mmap
+31 ff                                              # a6   xor edi, edi: addr 0
+be 00 00 01 00                                     # a8   mov esi, 0x10000: 64 KiB first region
+ba 03 00 00 00                                     # ad   mov edx, 3: PROT_READ|PROT_WRITE
+41 ba 22 00 00 00                                  # b2   mov r10d, 0x22: MAP_PRIVATE|MAP_ANONYMOUS
+6a ff                                              # b8   push -1
+41 58                                              # ba   pop r8: fd -1
+4d 31 c9                                           # bc   xor r9d, r9d: offset 0
+0f 05                                              # bf   syscall
+48 85 c0                                           # c1   test rax, rax
+79 05                                              # c4   jns over E9: mapping ok, keep going
+e9 61 00 00 00                                     # c6   jmp fail2 (0x12c): -ENOMEM, exit 2
+48 89 c3                                           # cb   mov rbx, rax: base
+41 bc 00 00 01 00                                  # ce   mov r12d, 0x10000: capacity
+4d 31 ed                                           # d4   xor r13d, r13d: held 0
+
+# readloop: read(fd, base+held, cap-held). Entered by fall-through from init.
+48 89 de                                           # d7   mov rsi, rbx
+4c 01 ee                                           # da   add rsi, r13
+4c 89 e2                                           # dd   mov rdx, r12
+4c 29 ea                                           # e0   sub rdx, r13: remaining
+31 c0                                              # e3   xor eax, eax: read
+44 89 f7                                           # e5   mov edi, r14d: fd
+0f 05                                              # e8   syscall
+48 85 c0                                           # ea   test rax, rax
+78 35                                              # ed   js fail1 (0x124): failed read
+74 31                                              # ef   jz loaded (0x122): EOF
+49 01 c5                                           # f1   add r13, rax: held += n
+4c 89 e2                                           # f4   mov rdx, r12
+4c 29 ea                                           # f7   sub rdx, r13: remaining
+75 db                                              # fa   jnz readloop (0xd7): room left
+# grow: mremap(base, cap, 2*cap, MREMAP_MAYMOVE)
+b8 19 00 00 00                                     # fc   mov eax, 25: mremap
+48 89 df                                           # 101  mov rdi, rbx: old base
+4c 89 e6                                           # 104  mov rsi, r12: old len
+4c 89 e2                                           # 107  mov rdx, r12
+48 01 d2                                           # 10a  add rdx, rdx: new len = 2*cap
+41 ba 01 00 00 00                                  # 10d   mov r10d, 1: MREMAP_MAYMOVE
+0f 05                                              # 113  syscall
+48 85 c0                                           # 115  test rax, rax
+78 12                                              # 118   js fail2 (0x12c): -ENOMEM
+48 89 c3                                           # 11a  mov rbx, rax: new base
+49 89 d4                                           # 11d  mov r12, rdx: new capacity
+eb b5                                              # 120   jmp readloop (0xd7)
+
+# loaded: rbx = base, r13 = held length. Checker starts here.
+eb 10                                              # 122   jmp checker (0x134): over the fail blocks
+# fail1: refuse or malformed file, exit 1. Reached only by forward jumps.
+6a 3c                                              # 124   push 60
+58                                                 # 126   pop rax: exit
+6a 01                                              # 127   push 1
+5f                                                 # 129   pop rdi: status 1
+0f 05                                              # 12a   syscall
+
+# fail2: kernel refused memory, exit 2. Reached only by forward jumps.
+6a 3c                                              # 12c   push 60
+58                                                 # 12e   pop rax: exit
+6a 02                                              # 12f   push 2
+5f                                                 # 131   pop rdi: status 2
+0f 05                                              # 132   syscall
+
+# checker:
+49 89 df                                           # 134  mov r15, rbx: end = base, then += held
+4d 01 ef                                           # 137  add r15, r13
+48 89 de                                           # 13a  mov rsi, rbx: cursor = base
+8b 06                                              # 13d  mov eax, [rsi]: magic
+81 f8 53 50 52 31                                  # 13f  cmp eax, 0x31525053: "SPR1"
+75 05                                              # 145  jnz refuse-far
+e9 d8 ff ff ff                                     # 147   jmp fail1 (0x124)
+48 89 f2                                           # 14c  mov rdx, rsi
+83 c2 04                                           # 14f  add rdx, 4
+8b 02                                              # 152  mov eax, [rdx]: main
+41 89 c4                                           # 154  mov r12d, eax
+48 89 f2                                           # 157  mov rdx, rsi
+83 c2 08                                           # 15a  add rdx, 8
+8b 02                                              # 15d  mov eax, [rdx]: nwords
+41 89 c2                                           # 15f  mov r10d, eax
+48 89 f2                                           # 162  mov rdx, rsi
+83 c2 0c                                           # 165  add rdx, 12
+8b 02                                              # 168  mov eax, [rdx]: ndata
+89 c1                                              # 16a  mov ecx, eax
+48 83 c6 10                                        # 16c  add rsi, 16: cursor past header
+45 85 d2                                           # 170  test r10d, r10d: nwords == 0 refuses
+75 05                                              # 173  jnz +5
+e9 aa ff ff ff                                     # 175   jmp fail1 (0x124)
+# data_loop: skip the data segments
+85 c9                                              # 17a  test ecx, ecx
+74 2f                                              # 17c  jz data_done (0x1ad): was 0x25, wrong target
+4c 89 fa                                           # 17e  mov rdx, r15
+48 29 f2                                           # 181  sub rdx, rsi: remaining
+48 83 fa 04                                        # 184  cmp rdx, 4
+73 05                                              # 188  jb +5
+e9 95 ff ff ff                                     # 18a   jmp fail1 (0x124)
+8b 06                                              # 18f  mov eax, [rsi]: len
+48 83 c6 04                                        # 191  add rsi, 4
+4c 89 fa                                           # 195  mov rdx, r15
+48 29 f2                                           # 198  sub rdx, rsi: remaining
+48 29 c2                                           # 19b  sub rdx, rax: remaining - len
+73 05                                              # 19e  jb +5
+e9 7f ff ff ff                                     # 1a0   jmp fail1 (0x124)
+48 01 c6                                           # 1a5  add rsi, rax: skip len bytes
+83 e9 01                                           # 1a8  sub ecx, 1
+eb cd                                              # 1ab  jmp data_loop (0x17a)
+# data_done: mmap the words table (nwords * 64, stride 64)
+44 89 d2                                           # 1ad  mov edx, r10d
+48 01 d2                                           # 1b0  add rdx, rdx: *2
+48 01 d2                                           # 1b3  *4
+48 01 d2                                           # 1b6  *8
+48 01 d2                                           # 1b9  *16
+48 01 d2                                           # 1bc  *32
+48 01 d2                                           # 1bf  *64
+b8 09 00 00 00                                     # 1c2  mov eax, 9: mmap
+31 ff                                              # 1c7  xor edi, edi
+48 89 d6                                           # 1c9  mov rsi, rdx: length
+ba 03 00 00 00                                     # 1cc  mov edx, 3
+41 ba 22 00 00 00                                  # 1d1  mov r10d, 0x22
+6a ff                                              # 1d7  push -1
+41 58                                              # 1d9  pop r8
+4d 31 c9                                           # 1db  xor r9d, r9d
+0f 05                                              # 1de  syscall
+48 85 c0                                           # 1e0  test rax, rax
+79 05                                              # 1e3  js +5
+e9 42 ff ff ff                                     # 1e5   jmp fail2 (0x12c)
+49 89 c6                                           # 1ea  mov r14, rax: words table
+# scratch mmap(flen) for instruction lengths, indexed by file offset
+56                                                 # 1ed  push rsi: save words-start cursor
+b8 09 00 00 00                                     # 1ee  mov eax, 9
+31 ff                                              # 1f3  xor edi, edi
+48 89 ee                                           # 1f5  mov rsi, r13: flen
+ba 03 00 00 00                                     # 1f8  mov edx, 3
+41 ba 22 00 00 00                                  # 1fd  mov r10d, 0x22
+6a ff                                              # 203  push -1
+41 58                                              # 205  pop r8
+4d 31 c9                                           # 207  xor r9d, r9d
+0f 05                                              # 20a  syscall
+48 85 c0                                           # 20c  test rax, rax
+79 05                                              # 20f  js +5
+e9 16 ff ff ff                                     # 211   jmp fail2 (0x12c)
+49 89 c3                                           # 216  mov r11, rax: lengths scratch
+5e                                                 # 219  pop rsi: restore cursor
+48 89 f7                                           # 21a  mov rdi, r14: entry pointer
+# r10d held nwords, but both mmap sequences reused it for 0x22 (1d1, 1fd).
+# Reload nwords from the header into r13d (register map at the top); r13
+# held the file length, which r15 now carries as the end pointer.
+48 89 da                                           # 21d  mov rdx, rbx
+48 83 c2 08                                        # 220  add rdx, 8: header nwords field
+44 8b 2a                                           # 224  mov r13d, [rdx]: nwords
+
+# Eff table: prim index -> (in, out), 57 entries. Addressed absolutely by
+# the checker once hstep is written; kept at the end so the fail blocks
+# could sit right after loaded (0x122) within rel8 reach.
+01 02 01 00 02 02 02 03 03 03 02 01 02 03 02 01   # 227   entries 0-7: dup..add
+02 01 02 01 02 01 02 01 02 01 02 01 01 01 02 01   # 237   entries 8-15: sub..band
+02 01 02 01 01 01 02 01 02 01 02 01 02 01 02 01   # 247   entries 16-23: bor..ne
+02 01 02 01 02 01 02 01 01 01 02 00 01 01 02 00   # 257   entries 24-31: ltu..st16
+01 01 02 00 01 01 02 00 03 00 03 00 03 01 01 01   # 267   entries 32-39: ld32..alloc
+00 01 01 00 04 01 02 01 00 01 03 00 02 02 00 01   # 277   entries 40-47: mark..getb
+01 00 01 00 01 00 00 01 00 01 01 01 01 02 01 02   # 287   entries 48-55: putb..confget
+02 01                                              # 297   entry 56: demand
+
