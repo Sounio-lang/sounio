@@ -8,25 +8,32 @@ import socket
 from pathlib import Path
 import numpy as np
 import torch
-from gpu_device_key import identity_record, marker_name, observation_dir
+from gpu_device_key import device_identity, marker_name, observation_dir
 from gpu_probe import Driver, hex_frame
 from paired_timing import BLOCKS, GRAPH_WARMUP, REPLAYS, VECTORS, row
 from run_inputs import data_root, require_probe_inputs, require_timing_inputs
+
+
+def version_text(value):
+    if value is None or isinstance(value, (str, int)):
+        return value
+    if isinstance(value, (bytes, bytearray)):
+        return bytes(value).split(b"\0", 1)[0].decode("utf-8", "replace")
+    return str(value)
 
 
 def visible_identity(expect_sm):
     if torch.cuda.device_count() != 1:
         raise RuntimeError("this step must see exactly one GPU")
     props = torch.cuda.get_device_properties(0)
-    uuid = getattr(props, "uuid", None)
-    if isinstance(uuid, bytes):
-        uuid = uuid.hex()
-    if not isinstance(uuid, str) or not uuid:
-        raise RuntimeError("GPU UUID is missing")
-    identity = identity_record(str(uuid), int(props.major), int(props.minor), torch.cuda.get_device_name(0))
-    if identity["sm"] != expect_sm:
-        raise RuntimeError("visible GPU SM does not match the gres this step requested")
-    return identity
+    try:
+        name = torch.cuda.get_device_name(0)
+    except Exception:
+        name = getattr(props, "name", None)
+    try:
+        return device_identity(props, name, expect_sm)
+    except ValueError as exc:
+        raise RuntimeError(str(exc)) from exc
 
 
 def write_marker(root, phase, identity, job):
@@ -73,7 +80,7 @@ def probe(root, identity, job):
             key_scope="per-gpu", job=job)), flush=True)
         driver.check(driver.lib.cuModuleUnload(module))
     (output / "inventory.json").write_text(json.dumps(dict(
-        job=job, node=socket.gethostname(), cuda=torch.version.cuda,
+        job=job, node=socket.gethostname(), cuda=version_text(torch.version.cuda),
         observation_only=True, key_scope="per-gpu", **identity), indent=2) + "\n")
 
 
@@ -140,7 +147,7 @@ def timing(root, identity, job):
                 sm=identity["sm"], key_scope="per-gpu", job=job,
                 sha256=hashlib.sha256(target.read_bytes()).hexdigest(), blocks=BLOCKS)), flush=True)
     (output / "inventory.json").write_text(json.dumps(dict(
-        job=job, node=socket.gethostname(), cuda=torch.version.cuda, torch=str(torch.__version__),
+        job=job, node=socket.gethostname(), cuda=version_text(torch.version.cuda), torch=str(torch.__version__),
         timing="CUDA events around 32 captured kernel launches", vectors=VECTORS,
         layout_conversion_included=False, observation_only=True, key_scope="per-gpu",
         **identity), indent=2) + "\n")

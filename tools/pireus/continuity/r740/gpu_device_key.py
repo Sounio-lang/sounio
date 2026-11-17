@@ -1,19 +1,112 @@
 """Observation keys for one GPU. A hostname is not an identity when a node has two."""
 
 ADMITTED_SM = (75, 86, 121)
+# cudaDeviceProp.uuid is a 16-byte CUuuid. PyTorch 2.15 binds it as _CUuuid:
+# `.bytes` is those raw bytes (a bytes-like or a list of ints) and `__str__`
+# is uuid_to_string from torch/csrc/utils.cpp, the dashed hex in print order
+# with no GPU- prefix. nvidia-smi -L is that same hex with the prefix.
+
+
+def _grouped(hexchars):
+    return "GPU-" + "-".join((
+        hexchars[0:8], hexchars[8:12], hexchars[12:16], hexchars[16:20], hexchars[20:32],
+    ))
+
+
+def _canonical_text(value):
+    text = value.strip()
+    if not text:
+        raise ValueError("GPU UUID is missing")
+    body = text.lower()[4:] if text.lower().startswith("gpu-") else text.lower()
+    if any(ch not in "0123456789abcdef-" for ch in body):
+        raise ValueError("GPU UUID is malformed")
+    hexchars = "".join(ch for ch in body if ch in "0123456789abcdef")
+    if len(hexchars) != 32:
+        raise ValueError("GPU UUID is malformed")
+    if "-" in body and [len(group) for group in body.split("-")] != [8, 4, 4, 4, 12]:
+        raise ValueError("GPU UUID is malformed")
+    return _grouped(hexchars)
+
+
+def _raw_uuid(value):
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        raw = bytes(value)
+    else:
+        blob = getattr(value, "bytes", None)
+        if blob is None:
+            return None
+        if isinstance(blob, (bytes, bytearray, memoryview)):
+            raw = bytes(blob)
+        elif isinstance(blob, (list, tuple)):
+            if any(isinstance(item, bool) or not isinstance(item, int) or item < 0 or item > 255 for item in blob):
+                raise ValueError("GPU UUID is malformed")
+            raw = bytes(blob)
+        else:
+            raise ValueError("GPU UUID is malformed")
+    if len(raw) != 16:
+        raise ValueError("GPU UUID is malformed")
+    return raw
+
+
+def canonical_gpu_uuid(value):
+    """nvidia-smi -L form. str, 16 raw bytes, and a torch _CUuuid are accepted."""
+    if value is None or value == "" or value == b"":
+        raise ValueError("GPU UUID is missing")
+    if isinstance(value, str):
+        return _canonical_text(value)
+    rendered = ""
+    try:
+        rendered = str(value).strip()
+    except Exception:
+        rendered = ""
+    if rendered and not rendered.startswith("<"):
+        try:
+            text = rendered if rendered.lower().startswith("gpu-") else "GPU-" + rendered
+            return _canonical_text(text)
+        except ValueError:
+            pass
+    raw = _raw_uuid(value)
+    if raw is None:
+        raise ValueError("GPU UUID is malformed")
+    return _grouped(raw.hex())
 
 
 def normalize_uuid(uuid):
-    if not isinstance(uuid, str) or not uuid:
-        raise ValueError("gpu uuid required")
-    hexchars = "".join(ch for ch in uuid.lower() if ch in "0123456789abcdef")
-    if len(hexchars) != 32:
-        raise ValueError("gpu uuid must contain 32 hex digits")
-    return hexchars
+    return "".join(ch for ch in canonical_gpu_uuid(uuid) if ch in "0123456789abcdef")
+
+
+def cuda_int(value, label):
+    """A CUDA int, including a numpy integer. bool is not a capability or a size."""
+    if isinstance(value, bool) or value is None:
+        raise ValueError(label + " is missing")
+    if isinstance(value, int):
+        return value
+    item = getattr(value, "item", None)
+    if callable(item):
+        try:
+            value = item()
+        except Exception as exc:
+            raise ValueError(label + " is malformed") from exc
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError(label + " is malformed")
+        return value
+    raise ValueError(label + " is malformed")
+
+
+def cuda_text(value, label):
+    """A CUDA char buffer: str, or bytes with a trailing NUL."""
+    if isinstance(value, (bytes, bytearray)):
+        value = bytes(value).split(b"\0", 1)[0].decode("utf-8", "replace")
+    if not isinstance(value, str):
+        raise ValueError(label + " is missing")
+    value = value.split("\0", 1)[0].strip()
+    if not value:
+        raise ValueError(label + " is missing")
+    return value
 
 
 def device_key(uuid, major, minor):
-    if not isinstance(major, int) or not isinstance(minor, int):
+    if isinstance(major, bool) or isinstance(minor, bool) or not isinstance(major, int) or not isinstance(minor, int):
         raise ValueError("compute capability required")
     if major < 0 or minor < 0 or minor > 9 or major > 99:
         raise ValueError("compute capability required")
@@ -40,6 +133,7 @@ def marker_name(phase, sm):
 
 
 def identity_record(uuid, major, minor, name):
+    uuid = canonical_gpu_uuid(uuid)
     sm = major * 10 + minor
     if sm not in ADMITTED_SM:
         raise ValueError("compute capability is outside the admitted pilot")
@@ -52,3 +146,22 @@ def identity_record(uuid, major, minor, name):
         "key": device_key(uuid, major, minor),
         "key_scope": "per-gpu",
     }
+
+
+def device_identity(props, name, expect_sm):
+    """Identity from a torch device-properties object. Fails closed on a bad field."""
+    uuid = canonical_gpu_uuid(getattr(props, "uuid", None))
+    major = cuda_int(getattr(props, "major", None), "compute capability major")
+    minor = cuda_int(getattr(props, "minor", None), "compute capability minor")
+    if name is None:
+        name = getattr(props, "name", None)
+    identity = identity_record(uuid, major, minor, cuda_text(name, "GPU name"))
+    if identity["sm"] != expect_sm:
+        raise RuntimeError("visible GPU SM does not match the gres this step requested")
+    memory = getattr(props, "total_memory", None)
+    if memory is not None:
+        memory = cuda_int(memory, "GPU total memory")
+        if memory < 0:
+            raise ValueError("GPU total memory is malformed")
+        identity["total_memory_bytes"] = memory
+    return identity

@@ -147,6 +147,55 @@ class Keys(unittest.TestCase):
         with self.assertRaises(ValueError):
             keys.device_key("not-a-uuid", 8, 6)
 
+    def test_cuuuid_object_becomes_the_nvidia_smi_form(self):
+        raw = bytes.fromhex("00112233445566778899aabbccddeeff")
+
+        class CUuuid:
+            def __init__(self, blob, text):
+                self.bytes = blob
+                self.text = text
+
+            def __str__(self):
+                return self.text
+
+        # PyTorch's __str__ is the dashed hex and is not a str uuid until we prefix it.
+        printed = CUuuid(list(raw), "00112233-4455-6677-8899-aabbccddeeff")
+        # A binding that only exposes .bytes, with an unusable __str__, still converts.
+        opaque = CUuuid(raw, "<_CUuuid object>")
+        expected = "GPU-00112233-4455-6677-8899-aabbccddeeff"
+        self.assertEqual(keys.canonical_gpu_uuid(printed), expected)
+        self.assertEqual(keys.canonical_gpu_uuid(opaque), expected)
+        self.assertEqual(keys.canonical_gpu_uuid(raw), expected)
+        self.assertEqual(keys.canonical_gpu_uuid(expected.upper()), expected)
+
+        class Integral:
+            def __init__(self, value):
+                self.value = value
+
+            def item(self):
+                return self.value
+
+        class Props:
+            uuid = opaque
+            major = Integral(8)
+            minor = Integral(6)
+            name = b"RTX A5000\x00junk"
+            total_memory = Integral(256 * 1024 * 1024)
+
+        record = keys.device_identity(Props(), None, 86)
+        self.assertEqual(record["gpu_uuid"], expected)
+        self.assertEqual(record["gpu"], "RTX A5000")
+        self.assertEqual(record["sm"], 86)
+        self.assertEqual(record["total_memory_bytes"], 256 * 1024 * 1024)
+        self.assertEqual(record["key"], keys.device_key(expected, 8, 6))
+        with self.assertRaises(RuntimeError):
+            keys.device_identity(Props(), None, 75)
+        for bad in (None, "", b"", raw[:15], "GPU-zz", "not-a-uuid", object()):
+            with self.assertRaises(ValueError):
+                keys.canonical_gpu_uuid(bad)
+        with self.assertRaises(ValueError):
+            keys.device_identity(Props(), True, 86)
+
     def test_timing_row_matches_the_spark_grammar(self):
         self.assertEqual(paired_timing.row(1, 940000, 1000000), "1 1 940000 1000000\n")
         spark = (CONTINUITY / "gpu_benchmark.py").read_text()
