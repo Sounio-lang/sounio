@@ -218,7 +218,7 @@ class Launcher(unittest.TestCase):
             self.assertEqual(calls[0][calls[0].index("--gres=gpu:a5000:1")], "--gres=gpu:a5000:1")
             self.assertIn("--gres=gpu:quadro_rtx_8000:1", calls[1])
             self.assertIn("ab" * 32, calls[0][-1])
-            self.assertTrue((root / "bin" / "gpu_probe.py").read_bytes() == (CONTINUITY / "gpu_probe.py").read_bytes())
+            self.assertEqual((root / "bin" / "gpu_probe.py").read_bytes(), (CONTINUITY / "gpu_probe.py").read_bytes())
             with self.assertRaises(FileExistsError):
                 launch.execute(directory, REVIEW_NAME, ok, image_lock=image)
 
