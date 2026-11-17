@@ -108,6 +108,19 @@ def write_inputs(directory):
     return root
 
 
+def declared_image(path, payload=b"declared-sif"):
+    path = Path(path)
+    path.write_bytes(payload)
+    return {
+        "status": "DECLARED",
+        "derived_sif_sha256": hashlib.sha256(payload).hexdigest(),
+        "sif_bytes": len(payload),
+        "sif_path": str(path),
+        "definition_sha256": hashlib.sha256((HERE / "pireus-r740-amd64.def").read_bytes()).hexdigest(),
+        "independently_verified": False,
+    }
+
+
 class Keys(unittest.TestCase):
     def test_two_gpus_on_one_host_do_not_share_a_directory(self):
         a = keys.observation_dir("timing", "GPU-" + "ab" * 16, 8, 6)
@@ -182,6 +195,12 @@ class Launcher(unittest.TestCase):
             "gpu:a5000:1", "gpu:quadro_rtx_8000:1", "gpu:a5000:1", "gpu:quadro_rtx_8000:1"])
         self.assertEqual([step["phase"] for step in plan["steps"]], ["probe", "probe", "timing", "timing"])
         doc = (HERE / "R740_PILOT.md").read_text()
+        locked = json.loads((HERE / "r740-runtime-lock.json").read_text())
+        emitted = launch.build_plan(launch.DEFAULT_SCRATCH, REVIEW_NAME, image_token_value=launch.image_token(locked))
+        for step in emitted["steps"]:
+            self.assertIn(locked["derived_sif_sha256"], step["script"])
+            self.assertNotIn("UNPINNED", step["script"])
+            self.assertIn(locked["derived_sif_sha256"], doc)
         for step in plan["steps"]:
             argv = step["argv"]
             self.assertEqual(argv[0], "srun")
@@ -220,11 +239,21 @@ class Launcher(unittest.TestCase):
                 launch.allocate_run(directory, name)
             self.assertTrue(str(first).startswith(directory))
 
-    def test_unpinned_image_does_not_submit_or_create_a_run(self):
+    def test_declared_sif_is_hashed_before_srun(self):
         lock = json.loads((HERE / "r740-runtime-lock.json").read_text())
-        self.assertEqual(lock["status"], "UNBUILT")
-        self.assertIsNone(lock["derived_sif_sha256"])
-        self.assertTrue(lock["gap"])
+        self.assertEqual(lock["status"], "DECLARED")
+        self.assertFalse(lock["independently_verified"])
+        self.assertEqual(lock["derived_sif_sha256"], "e68b2794b7718bd0f8943ffbe48c06ca5dcccebebf19e751dbf4186c6ddbbf25")
+        self.assertEqual(lock["sif_bytes"], 3270336512)
+        self.assertEqual(lock["definition_sha256"], "b8c273f00197c0046e802b86ef17ea016e0216c2f214c00e8c043a9f25f06f9a")
+        self.assertEqual(hashlib.sha256((HERE / "pireus-r740-amd64.def").read_bytes()).hexdigest(), lock["definition_sha256"])
+        self.assertNotIn(b"\r", (HERE / "pireus-r740-amd64.def").read_bytes())
+        self.assertEqual(lock["apptainer"]["rpm"]["sha256"], "db786cb78a8bba81347e46ca676b1ad7409e4cd7225f2ee48e2915bdfedd535c")
+        self.assertEqual(lock["apptainer"]["rpm"]["bytes"], 50171128)
+        self.assertEqual(lock["apptainer"]["install_script"]["sha256"], "a097956eafa6ab3dd843ee429d0b774ed029753bfadf013b8046556228fac6f2")
+        self.assertEqual(lock["apptainer"]["prefix"], "/scratch/pireus/r740/apptainer-1.5.3")
+        self.assertEqual(lock["apptainer"]["reported_version"], "apptainer version 1.5.3-3.el8")
+        self.assertNotIn("c85138e9", json.dumps(lock))
         calls = []
 
         def boom(argv):
@@ -234,13 +263,25 @@ class Launcher(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaises(RuntimeError) as caught:
                 launch.execute(directory, REVIEW_NAME, boom, image_lock=lock)
-            self.assertIn("not pinned", str(caught.exception))
+            self.assertIn("SIF is missing", str(caught.exception))
             self.assertEqual(calls, [])
             self.assertFalse((Path(directory) / "runs").exists())
+            image = declared_image(Path(directory) / "image.sif")
+            image["derived_sif_sha256"] = "ab" * 32
+            with self.assertRaises(RuntimeError) as caught:
+                launch.execute(directory, REVIEW_NAME, boom, image_lock=image)
+            self.assertIn("sha256 does not match", str(caught.exception))
+            self.assertEqual(calls, [])
+            image = declared_image(Path(directory) / "image.sif")
+            image["sif_bytes"] = 1
+            with self.assertRaises(RuntimeError) as caught:
+                launch.execute(directory, REVIEW_NAME, boom, image_lock=image)
+            self.assertIn("size does not match", str(caught.exception))
+            self.assertEqual(calls, [])
 
     def test_pinned_run_uses_one_directory_and_does_not_resubmit(self):
-        image = {"status": "PINNED", "derived_sif_sha256": "ab" * 32}
         with tempfile.TemporaryDirectory() as directory:
+            image = declared_image(Path(directory) / "image.sif")
             bundle = write_inputs(Path(directory) / "bundle")
             calls = []
 
@@ -256,7 +297,7 @@ class Launcher(unittest.TestCase):
             self.assertEqual(len(calls), 4)
             self.assertEqual(calls[0][calls[0].index("--gres=gpu:a5000:1")], "--gres=gpu:a5000:1")
             self.assertIn("--gres=gpu:quadro_rtx_8000:1", calls[1])
-            self.assertIn("ab" * 32, calls[0][-1])
+            self.assertIn(image["derived_sif_sha256"], calls[0][-1])
             self.assertEqual((root / "bin" / "gpu_probe.py").read_bytes(), (CONTINUITY / "gpu_probe.py").read_bytes())
             with self.assertRaises(FileExistsError):
                 launch.execute(directory, REVIEW_NAME, ok, image_lock=image, inputs=bundle)
@@ -279,8 +320,8 @@ class Launcher(unittest.TestCase):
             self.assertEqual(again, [])
 
     def test_staged_inputs_are_readable_before_srun_and_a_mismatch_refuses(self):
-        image = {"status": "PINNED", "derived_sif_sha256": "cd" * 32}
         with tempfile.TemporaryDirectory() as directory:
+            image = declared_image(Path(directory) / "image.sif", b"staged-sif")
             bundle = write_inputs(Path(directory) / "bundle")
             seen = {}
 
@@ -353,14 +394,14 @@ class Launcher(unittest.TestCase):
         with self.assertRaises(ValueError):
             launch.descriptive_report([{"sm": 86, "gain_gate": "PASS"}, {"sm": 86, "gain_gate": "PASS"}])
 
-    def test_cli_run_refuses_while_the_image_is_unpinned(self):
+    def test_cli_run_refuses_before_srun_when_the_sif_is_absent(self):
         with tempfile.TemporaryDirectory() as directory:
             result = subprocess.run(
                 [sys.executable, str(HERE / "r740_launch.py"), "run",
                  "--name", REVIEW_NAME, "--scratch", directory],
                 capture_output=True, text=True, timeout=30)
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("not pinned", result.stderr)
+        self.assertIn("refusing to submit", result.stderr)
         self.assertNotIn("srun:", result.stderr)
 
     def test_materialize_modes_leave_sm121_on_the_historical_spelling(self):

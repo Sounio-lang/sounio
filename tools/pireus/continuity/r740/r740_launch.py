@@ -13,7 +13,7 @@ from pathlib import Path
 
 from gpu_device_key import marker_name
 from proposals import phase_a, phase_b
-from run_inputs import require_run_inputs, stage_verified_inputs
+from run_inputs import require_run_inputs, sha256_file, stage_verified_inputs
 
 HERE = Path(__file__).resolve().parent
 PARTITION = "gpu-orangefs"
@@ -78,10 +78,29 @@ def load_json(path):
 
 def image_token(lock):
     digest = lock.get("derived_sif_sha256")
-    if (lock.get("status") == "PINNED" and isinstance(digest, str) and len(digest) == 64
+    if (lock.get("status") in ("PINNED", "DECLARED") and isinstance(digest, str) and len(digest) == 64
             and all(c in "0123456789abcdef" for c in digest)):
         return digest
     return "UNPINNED"
+
+
+def verify_sif_before_submit(lock):
+    """Hash the SIF on this host before any srun. A declared digest is not a measurement."""
+    token = image_token(lock)
+    if token == "UNPINNED":
+        raise RuntimeError("r740 amd64 image is not pinned; refusing to submit")
+    definition = HERE / "pireus-r740-amd64.def"
+    if sha256_file(definition) != lock.get("definition_sha256"):
+        raise RuntimeError("r740 image definition does not match the lock; refusing to submit")
+    path = Path(lock.get("sif_path") or SIF)
+    if path.is_symlink() or not path.is_file():
+        raise RuntimeError("r740 SIF is missing; refusing to submit")
+    expected_bytes = lock.get("sif_bytes")
+    if isinstance(expected_bytes, int) and path.stat().st_size != expected_bytes:
+        raise RuntimeError("r740 SIF size does not match the lock; refusing to submit")
+    if sha256_file(path) != token:
+        raise RuntimeError("r740 SIF sha256 does not match the lock; refusing to submit")
+    return token
 
 
 def rule_sha256(source=None):
@@ -249,9 +268,7 @@ def execute(scratch, name, runner, mem=DEFAULT_MEM, minutes=DEFAULT_MINUTES,
     image_lock = image_lock if image_lock is not None else load_json(HERE / "r740-runtime-lock.json")
     rule_lock = rule_lock if rule_lock is not None else load_json(HERE / "arch_gain_rule.lock.json")
     assert_rule_frozen(rule_lock)
-    token = image_token(image_lock)
-    if token == "UNPINNED":
-        raise RuntimeError("r740 amd64 image is not pinned; refusing to submit")
+    token = verify_sif_before_submit(image_lock)
     if inputs is None:
         raise RuntimeError("r740 run inputs are missing; refusing to submit")
     require_run_inputs(inputs)

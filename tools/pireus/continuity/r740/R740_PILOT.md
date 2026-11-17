@@ -1,6 +1,6 @@
 # R740 admitted-lowering pilot
 
-The Spark pair stays on its own launcher (`benchmark_pair.py`): host fence, `pireus-spark-pair` lease, `check_pair`, and `gpu:gb10:1`. This directory is the other machine. It does not import those controls and it does not submit a job while `r740-runtime-lock.json` says the amd64 image is `UNBUILT`.
+The Spark pair stays on its own launcher (`benchmark_pair.py`): host fence, `pireus-spark-pair` lease, `check_pair`, and `gpu:gb10:1`. This directory is the other machine. It does not import those controls. On r740-proxmox, `/scratch` is `/mnt/hpc-local-nvme/slurm-scratch`. The job lines keep `/scratch` because that is the path inside the allocation.
 
 Node: `gpuorangefs-multi-r740-proxmox` (x86_64). Partition: `gpu-orangefs`. GPUs, one per step:
 
@@ -19,40 +19,40 @@ Observation directories are `observed-gpu-<uuid>-sm<N>` and `timings-gpu-<uuid>-
 
 `r740_launch.py run` calls `srun`. It does not call `sbatch`. The sbatch text below is the same allocation with `--no-requeue`, rendered for review and marked `submitted: false`. There is no retry loop. A failed stage is recorded and a second call refuses it. A second execution does not reuse the run directory.
 
-`run --inputs BUNDLE` copies `gpu-manifest.json`, `benchmark-manifest.json`, `numeric-fixtures.jsonl` and every PTX those manifests name into the fresh run directory, after the SHA-256 of each file matches the manifest. A missing file, a mismatched digest, a path that leaves the bundle, or a missing `--inputs` refuses before `srun`. The observer reads those same paths and repeats the same checks before it touches CUDA. The amd64 image and its Apptainer prefix are still an external gap.
+`run --inputs BUNDLE` copies `gpu-manifest.json`, `benchmark-manifest.json`, `numeric-fixtures.jsonl` and every PTX those manifests name into the fresh run directory, after the SHA-256 of each file matches the manifest. A missing file, a mismatched digest, a path that leaves the bundle, or a missing `--inputs` refuses before `srun`. The observer reads those same paths and repeats the same checks before it touches CUDA. The SIF digest below is declared, and `run` re-hashes the file before it submits.
 
-Today `run` raises `r740 amd64 image is not pinned; refusing to submit` before `srun`, because `derived_sif_sha256` is null. The lines below are the argv it builds for review name `20261117T120000Z-1-0123456789abcdef`, scratch `/scratch/pireus/r740`, `--mem=16G` (the default; 64G is the ceiling), `--time=30`. `UNPINNED` is replaced by the 64-hex digest only after the lock is pinned. Memory is always passed. The step is not `--exclusive`.
+`run` hashes `/scratch/pireus/images/pireus-r740-amd64.sif` before `srun` and refuses if the size or sha256 differs from the lock. The lines below are the argv for review name `20261117T120000Z-1-0123456789abcdef`, scratch `/scratch/pireus/r740`, `--mem=16G` (the default; 64G is the ceiling), `--time=30`. The digest is the one Infra Sounio declared. Memory is always passed. The step is not `--exclusive`.
 
 Probe A5000, then probe Quadro, then timing A5000, then timing Quadro:
 
 ```
 srun -p gpu-orangefs -w gpuorangefs-multi-r740-proxmox --nodes=1 --ntasks=1 --ntasks-per-node=1 -c8 --gres=gpu:a5000:1 --mem=16G --propagate=NONE --kill-on-bad-exit=1 --time=30 --job-name=pireus-r740-probe-sm86 bash -c 'set -euo pipefail
-export PIREUS_R740_SIF_SHA256=UNPINNED
-echo "UNPINNED  /scratch/pireus/images/pireus-r740-amd64.sif" | sha256sum -c -
+export PIREUS_R740_SIF_SHA256=e68b2794b7718bd0f8943ffbe48c06ca5dcccebebf19e751dbf4186c6ddbbf25
+echo "e68b2794b7718bd0f8943ffbe48c06ca5dcccebebf19e751dbf4186c6ddbbf25  /scratch/pireus/images/pireus-r740-amd64.sif" | sha256sum -c -
 exec /scratch/pireus/r740/runs/20261117T120000Z-1-0123456789abcdef/bin/run_in_container_r740.sh python3 /scratch/pireus/r740/runs/20261117T120000Z-1-0123456789abcdef/bin/r740_observe.py --phase probe --run /scratch/pireus/r740/runs/20261117T120000Z-1-0123456789abcdef --expect-sm 86
 '
 ```
 
 ```
 srun -p gpu-orangefs -w gpuorangefs-multi-r740-proxmox --nodes=1 --ntasks=1 --ntasks-per-node=1 -c8 --gres=gpu:quadro_rtx_8000:1 --mem=16G --propagate=NONE --kill-on-bad-exit=1 --time=30 --job-name=pireus-r740-probe-sm75 bash -c 'set -euo pipefail
-export PIREUS_R740_SIF_SHA256=UNPINNED
-echo "UNPINNED  /scratch/pireus/images/pireus-r740-amd64.sif" | sha256sum -c -
+export PIREUS_R740_SIF_SHA256=e68b2794b7718bd0f8943ffbe48c06ca5dcccebebf19e751dbf4186c6ddbbf25
+echo "e68b2794b7718bd0f8943ffbe48c06ca5dcccebebf19e751dbf4186c6ddbbf25  /scratch/pireus/images/pireus-r740-amd64.sif" | sha256sum -c -
 exec /scratch/pireus/r740/runs/20261117T120000Z-1-0123456789abcdef/bin/run_in_container_r740.sh python3 /scratch/pireus/r740/runs/20261117T120000Z-1-0123456789abcdef/bin/r740_observe.py --phase probe --run /scratch/pireus/r740/runs/20261117T120000Z-1-0123456789abcdef --expect-sm 75
 '
 ```
 
 ```
 srun -p gpu-orangefs -w gpuorangefs-multi-r740-proxmox --nodes=1 --ntasks=1 --ntasks-per-node=1 -c8 --gres=gpu:a5000:1 --mem=16G --propagate=NONE --kill-on-bad-exit=1 --time=30 --job-name=pireus-r740-timing-sm86 bash -c 'set -euo pipefail
-export PIREUS_R740_SIF_SHA256=UNPINNED
-echo "UNPINNED  /scratch/pireus/images/pireus-r740-amd64.sif" | sha256sum -c -
+export PIREUS_R740_SIF_SHA256=e68b2794b7718bd0f8943ffbe48c06ca5dcccebebf19e751dbf4186c6ddbbf25
+echo "e68b2794b7718bd0f8943ffbe48c06ca5dcccebebf19e751dbf4186c6ddbbf25  /scratch/pireus/images/pireus-r740-amd64.sif" | sha256sum -c -
 exec /scratch/pireus/r740/runs/20261117T120000Z-1-0123456789abcdef/bin/run_in_container_r740.sh python3 /scratch/pireus/r740/runs/20261117T120000Z-1-0123456789abcdef/bin/r740_observe.py --phase timing --run /scratch/pireus/r740/runs/20261117T120000Z-1-0123456789abcdef --expect-sm 86
 '
 ```
 
 ```
 srun -p gpu-orangefs -w gpuorangefs-multi-r740-proxmox --nodes=1 --ntasks=1 --ntasks-per-node=1 -c8 --gres=gpu:quadro_rtx_8000:1 --mem=16G --propagate=NONE --kill-on-bad-exit=1 --time=30 --job-name=pireus-r740-timing-sm75 bash -c 'set -euo pipefail
-export PIREUS_R740_SIF_SHA256=UNPINNED
-echo "UNPINNED  /scratch/pireus/images/pireus-r740-amd64.sif" | sha256sum -c -
+export PIREUS_R740_SIF_SHA256=e68b2794b7718bd0f8943ffbe48c06ca5dcccebebf19e751dbf4186c6ddbbf25
+echo "e68b2794b7718bd0f8943ffbe48c06ca5dcccebebf19e751dbf4186c6ddbbf25  /scratch/pireus/images/pireus-r740-amd64.sif" | sha256sum -c -
 exec /scratch/pireus/r740/runs/20261117T120000Z-1-0123456789abcdef/bin/run_in_container_r740.sh python3 /scratch/pireus/r740/runs/20261117T120000Z-1-0123456789abcdef/bin/r740_observe.py --phase timing --run /scratch/pireus/r740/runs/20261117T120000Z-1-0123456789abcdef --expect-sm 75
 '
 ```
@@ -76,16 +76,18 @@ Reviewed sbatch for the first step, not executed:
 #SBATCH --no-requeue
 # submitted: false. The launcher executes srun, not sbatch.
 set -euo pipefail
-export PIREUS_R740_SIF_SHA256=UNPINNED
-echo "UNPINNED  /scratch/pireus/images/pireus-r740-amd64.sif" | sha256sum -c -
+export PIREUS_R740_SIF_SHA256=e68b2794b7718bd0f8943ffbe48c06ca5dcccebebf19e751dbf4186c6ddbbf25
+echo "e68b2794b7718bd0f8943ffbe48c06ca5dcccebebf19e751dbf4186c6ddbbf25  /scratch/pireus/images/pireus-r740-amd64.sif" | sha256sum -c -
 exec /scratch/pireus/r740/runs/20261117T120000Z-1-0123456789abcdef/bin/run_in_container_r740.sh python3 /scratch/pireus/r740/runs/20261117T120000Z-1-0123456789abcdef/bin/r740_observe.py --phase probe --run /scratch/pireus/r740/runs/20261117T120000Z-1-0123456789abcdef --expect-sm 86
 ```
 
 The other three steps use the same header with their own `--gres` and `--job-name`.
 
-## Image gap
+## Image
 
-`runtime/runtime-lock.json` pins an arm64 SIF. This pilot needs `linux/amd64`. CI did not build one, so no digest is invented here. `run_in_container_r740.sh` checks a 64-hex `PIREUS_R740_SIF_SHA256` and then execs `/scratch/pireus/r740/apptainer-1.5.3/usr/bin/apptainer`. That prefix is not installed by this change. The Ubuntu amd64 package hash `c85138e99d2a3d7fabfb2b93e415f326bdc6e4ded357f74c147069b4865b2ccf` is the hash already recorded for Apptainer 1.5.3; it is not a hash of an image or of an installed prefix.
+`pireus-r740-amd64.def` is the definition Infra built. Its sha256 is `b8c273f00197c0046e802b86ef17ea016e0216c2f214c00e8c043a9f25f06f9a`. The base is `pytorch/pytorch:2.15.0-cuda13.2-cudnn9-runtime` at `sha256:924707fa828f821c9a82d987b405675df6369eee5ce368aece6757b025ffcde5`. The SIF at `/scratch/pireus/images/pireus-r740-amd64.sif` is 3270336512 bytes, sha256 `e68b2794b7718bd0f8943ffbe48c06ca5dcccebebf19e751dbf4186c6ddbbf25`, declared by Infra Sounio on 2026-11-17 11:28 BRT. The host mtime is 2026-11-17 11:24:55 -0300 on r740-proxmox. This tree has not re-hashed that file.
+
+The Apptainer prefix `/scratch/pireus/r740/apptainer-1.5.3` reports `apptainer version 1.5.3-3.el8`. It came from `install-unprivileged.sh` for tag v1.5.3 (sha256 `a097956eafa6ab3dd843ee429d0b774ed029753bfadf013b8046556228fac6f2`), which fetches `apptainer-1.5.3-3.el8.x86_64.rpm` (sha256 `db786cb78a8bba81347e46ca676b1ad7409e4cd7225f2ee48e2915bdfedd535c`, 50171128 bytes). The old noble PPA package is not this install. `run_in_container_r740.sh` still checks the SIF digest inside the job.
 
 ## Phases
 
