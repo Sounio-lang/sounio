@@ -71,7 +71,7 @@ if [ "$(uname -s)-$(uname -m)" = "Linux-x86_64" ]; then
     local f="$1" err want got
     err=$("$W/fast" "$f" </dev/null 2>&1 >/dev/null || true)
     case "$err" in *refused*|*"not a Sporos"*) want=1;; *) want=0;; esac
-    "$W/stage1" "$f" >/dev/null 2>&1; got=$?
+    got=0; "$W/stage1" "$f" >/dev/null 2>&1 || got=$?
     if [ "$got" = "$want" ]; then kpass=$((kpass+1)); else kfail=$((kfail+1)); echo "KERNEL MISMATCH $f want=$want got=$got"; fi
   }
   for f in "$W"/ex/*.spb "$ROOT"/bootstrap/roots/sporos/vectors/*.spb; do
