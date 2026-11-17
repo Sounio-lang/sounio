@@ -11505,12 +11505,26 @@ fn nc_promo_reg_of(temp: i64) -> i64 {
     -1
 }
 
+// movaps xmm_dst, xmm_src with both in 0..15
+fn nc_emit_movaps_xmm(nc: &! NativeCompiler, dst: i64, src: i64) with Mut, Panic, Div {
+    let rex = 0x40 | (if dst >= 8 { 4 } else { 0 }) | (if src >= 8 { 1 } else { 0 })
+    if rex != 0x40 { nc_emit_byte(nc, rex) }
+    nc_emit_byte(nc, 0x0f); nc_emit_byte(nc, 0x28)
+    nc_emit_byte(nc, 0xc0 | ((dst % 8) * 8) | (src % 8))
+}
+
 fn nc_core_load_temp_to_rax(nc: &! NativeCompiler, temp: i64) with Mut, Panic, Div {
     if temp < 0 {
         nc_emit_xor_rax_rax(nc)
         return
     }
     let pr = nc_promo_reg_of(temp)
+    if pr >= 16 {
+        // movq rax, xmm8..xmm15
+        nc_emit_byte(nc, 0x66); nc_emit_byte(nc, 0x4c); nc_emit_byte(nc, 0x0f); nc_emit_byte(nc, 0x7e)
+        nc_emit_byte(nc, 0xc0 + (pr - 16) * 8)
+        return
+    }
     if pr >= 8 {
         // mov rax, r8..r11
         nc_emit_byte(nc, 0x4c)
@@ -11524,6 +11538,12 @@ fn nc_core_load_temp_to_rax(nc: &! NativeCompiler, temp: i64) with Mut, Panic, D
 fn nc_core_store_rax_to_temp(nc: &! NativeCompiler, temp: i64) with Mut, Panic, Div {
     if temp >= 0 {
         let pr = nc_promo_reg_of(temp)
+        if pr >= 16 {
+            // movq xmm8..xmm15, rax
+            nc_emit_byte(nc, 0x66); nc_emit_byte(nc, 0x4c); nc_emit_byte(nc, 0x0f); nc_emit_byte(nc, 0x6e)
+            nc_emit_byte(nc, 0xc0 + (pr - 16) * 8)
+            return
+        }
         if pr >= 8 {
             // mov r8..r11, rax
             nc_emit_byte(nc, 0x49)
@@ -12107,6 +12127,21 @@ fn nc_emit_core_binop(nc: &! NativeCompiler, func: &IrFunction, instr_index: i64
     let rhs_typed_float = if op_wants_float_typing == 1 && rhs >= 0 && rhs < NC_MAX_VREGS && NC_REG_TYPE[rhs as usize] == 1 { 1 } else { 0 }
     let lhs_is_float = if (lhs_float_marked == 1 || lhs_typed_float == 1) && lhs_known_int == 0 { 1 } else { 0 }
     let rhs_is_float = if (rhs_float_marked == 1 || rhs_typed_float == 1) && rhs_known_int == 0 { 1 } else { 0 }
+    // Both operands f64 and promoted to xmm8..15: operate on the registers directly
+    // (no xmm<->gpr transfers on the dependency chain).
+    if lhs_is_float == 1 && rhs_is_float == 1 && op_is_arith == 1 {
+        let lpr = nc_promo_reg_of(lhs)
+        let rpr = nc_promo_reg_of(rhs)
+        let dpr = nc_promo_reg_of(dst)
+        if lpr >= 16 || rpr >= 16 || dpr >= 16 {
+            if lpr >= 16 { nc_emit_movaps_xmm(nc, 0, lpr - 8) } else { nc_core_load_temp_to_rax(nc, lhs); nc_emit_movq_xmm0_rax(nc) }
+            if rpr >= 16 { nc_emit_movaps_xmm(nc, 1, rpr - 8) } else { nc_core_load_temp_to_rax(nc, rhs); nc_emit_movq_xmm1_rax(nc) }
+            if !nc_emit_core_float_binop_into(nc, op) { return false }
+            if dpr >= 16 { nc_emit_movaps_xmm(nc, dpr - 8, 0) } else { nc_core_store_rax_to_temp(nc, dst) }
+            nc_core_mark_float_reg(nc, dst)
+            return true
+        }
+    }
     if lhs_is_float == 1 || rhs_is_float == 1 {
         nc_core_load_temp_to_rax(nc, lhs)
         if lhs_is_float == 1 {
@@ -12383,7 +12418,13 @@ fn nc_core_load_call_arg_into(nc: &! NativeCompiler, func: &IrFunction, instr_in
         return false
     }
     let apr = nc_promo_reg_of(arg)
-    if apr >= 8 && preg < 8 {
+    if apr >= 16 && preg < 8 {
+        // movq preg, xmm8..xmm15
+        nc_emit_byte(nc, 0x66); nc_emit_byte(nc, 0x4c); nc_emit_byte(nc, 0x0f); nc_emit_byte(nc, 0x7e)
+        nc_emit_byte(nc, 0xc0 | ((apr - 16) * 8) | preg)
+        return true
+    }
+    if apr >= 8 && apr < 16 && preg < 8 {
         // mov preg, r8..r11 (promotion only admits call args when argc <= 4, so
         // preg is rdi/rsi/rdx/rcx and never overwrites a promoted register)
         nc_emit_byte(nc, 0x49)
@@ -13324,9 +13365,11 @@ fn nc_promo_analyze(func: &IrFunction) with Mut, Panic, Div {
         }
         if best < 0 { round = 4 } else {
             // find a register whose assigned spans do not overlap this one
-            var r: i64 = 8
+            let is_f = if best < 2048 && NC_REG_TYPE[best as usize] == 1 { 1 } else { 0 }
+            var r: i64 = if is_f == 1 { 16 } else { 8 }
+            let r_end = if is_f == 1 { 24 } else { 12 }
             var assigned: i64 = -1
-            while r < 12 && assigned < 0 {
+            while r < r_end && assigned < 0 {
                 var clash = false
                 var u: i64 = 0
                 while u < 256 {
@@ -13343,10 +13386,24 @@ fn nc_promo_analyze(func: &IrFunction) with Mut, Panic, Div {
     }
     if used > 0 { NC_PRO_ON = 1 }
     NC_PRO_STATS = NC_PRO_STATS + used
+    if str_eq(read_env("SOUNIO_PROMO_DEBUG"), "1") {
+        var dv: i64 = 0
+        while dv < 256 {
+            if NC_PRO_CNT[dv as usize] > 0 {
+                print("[promo] v="); print_int(dv)
+                print(" span="); print_int(NC_PRO_FIRST[dv as usize]); print(".."); print_int(NC_PRO_LAST[dv as usize])
+                print(" cnt="); print_int(NC_PRO_CNT[dv as usize])
+                print(" w="); print_int(NC_PRO_W[dv as usize])
+                print(" bad="); print_int(NC_PRO_BAD[dv as usize])
+                print(" reg="); print_int(NC_PRO_REG[dv as usize])
+                print("\n")
+            }
+            dv = dv + 1
+        }
+    }
 }
 
 pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunction, fn_index: i64) -> bool with IO, Mut, Panic, Div, Alloc {
-    nc_promo_analyze(func)
     let ok = compile_ir_function_v2_core_ir_inner(nc, func, fn_index)
     nc_promo_reset()
     ok
@@ -13374,6 +13431,7 @@ fn compile_ir_function_v2_core_ir_inner(nc: &! NativeCompiler, func: &IrFunction
     reset_function_state_mut(nc)
     nc_compute_float_types(nc, func)
     nc_collect_high_float_markers(func)
+    nc_promo_analyze(func)
     let function_offset = (*nc).code.len
     native_compiler_set_fn_offset(nc, fn_index, function_offset)
     native_compiler_add_symbol_func_ref(nc, fn_index, func)
@@ -13730,8 +13788,12 @@ fn compile_ir_function_v2_core_ir_inner(nc: &! NativeCompiler, func: &IrFunction
         } else if instr_op == IrOpcode::IrCopy {
             let copy_src = IR_A_SRC1[(ir_region_slot_r((*func).region, (i))) as usize]
             let copy_dst = IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize]
-            nc_core_load_temp_to_rax(nc, copy_src)
-            nc_core_store_rax_to_temp(nc, copy_dst)
+            if nc_promo_reg_of(copy_src) >= 16 && nc_promo_reg_of(copy_dst) >= 16 {
+                nc_emit_movaps_xmm(nc, nc_promo_reg_of(copy_dst) - 8, nc_promo_reg_of(copy_src) - 8)
+            } else {
+                nc_core_load_temp_to_rax(nc, copy_src)
+                nc_core_store_rax_to_temp(nc, copy_dst)
+            }
             if nc_raw_tag_get(copy_src) {
                 nc_raw_tag_set(copy_dst)
             }
