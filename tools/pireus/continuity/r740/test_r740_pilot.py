@@ -459,7 +459,6 @@ class PhaseABundle(unittest.TestCase):
                          "c55daadb94b2050ca88047316f5f0317ccbe3fe48744b26dae13ad7afed659b3")
 
     def test_bundle_is_deterministic_and_one_step_respects_probe_failure(self):
-        image_dir = None
         with tempfile.TemporaryDirectory() as directory:
             first = Path(directory) / "bundle-a"
             second = Path(directory) / "bundle-b"
