@@ -11496,6 +11496,7 @@ pub var NC_PRO_OFIRST: [i64; 256] = [0; 256]
 pub var NC_PRO_OLAST: [i64; 256] = [0; 256]
 pub var NC_PRO_FDEF: [i64; 256] = [0; 256]
 pub var NC_PRO_W: [i64; 256] = [0; 256]
+pub var NC_PRO_ISF: [i64; 256] = [0; 256]
 pub var NC_PRO_JT: [i64; 4096] = [-1; 4096]
 pub var NC_PRO_LW: [i64; 4096] = [0; 4096]
 pub var NC_PRO_BARRIER: [i64; 4096] = [0; 4096]
@@ -13155,6 +13156,7 @@ fn nc_promo_reset() with Mut, Panic, Div {
         NC_PRO_OLAST[k as usize] = 0
         NC_PRO_FDEF[k as usize] = 0
         NC_PRO_W[k as usize] = 0
+        NC_PRO_ISF[k as usize] = 0
         k = k + 1
     }
     var bk: i64 = 0
@@ -13234,6 +13236,43 @@ fn nc_promo_analyze(func: &IrFunction) with Mut, Panic, Div {
     while pv < 256 {
         if NC_PRO_CNT[pv as usize] > 0 && nc_core_func_param_index(func, pv) >= 0 { NC_PRO_BAD[pv as usize] = 1 }
         pv = pv + 1
+    }
+    // f64 inference (register-class choice only; never affects correctness, since
+    // both classes carry the raw 64 bits): float literals, int->float, f64
+    // arithmetic, and copies of any of those, to a fixpoint.
+    var fr: i64 = 0
+    var fchanged = true
+    while fchanged && fr < 8 {
+        fchanged = false
+        fr = fr + 1
+        var fi: i64 = 0
+        while fi < n {
+            let fat = ir_region_slot_r((*func).region, fi)
+            let fop = (IR_A_OP[fat as usize] as IrOpcode)
+            let fd = IR_A_DST[fat as usize]
+            let f1 = IR_A_SRC1[fat as usize]
+            let f2 = IR_A_SRC2[fat as usize]
+            if fd >= 0 && fd < 256 && NC_PRO_ISF[fd as usize] == 0 {
+                var mark = false
+                if fop == IrOpcode::IrLoadFloat || fop == IrOpcode::IrIntToFloat { mark = true }
+                if fop == IrOpcode::IrBinOp {
+                    let bop = (IR_A_BIN_OP[fat as usize] as BinaryOp)
+                    if bop == BinaryOp::OpAdd || bop == BinaryOp::OpSub || bop == BinaryOp::OpMul || bop == BinaryOp::OpDiv {
+                        let fl = IR_A_IMM_FLAGS[fat as usize]
+                        let l_f = ((fl / 2) & 1) == 1 || (f1 >= 0 && f1 < 256 && NC_PRO_ISF[f1 as usize] == 1)
+                        let r_f = ((fl / 4) & 1) == 1 || (f2 >= 0 && f2 < 256 && NC_PRO_ISF[f2 as usize] == 1)
+                        if l_f || r_f { mark = true }
+                    }
+                }
+                if fop == IrOpcode::IrCopy && f1 >= 0 && f1 < 256 && NC_PRO_ISF[f1 as usize] == 1 { mark = true }
+                if mark { NC_PRO_ISF[fd as usize] = 1; fchanged = true }
+            }
+            if fop == IrOpcode::IrCopy && fd >= 0 && fd < 256 && NC_PRO_ISF[fd as usize] == 1 && f1 >= 0 && f1 < 256 && NC_PRO_ISF[f1 as usize] == 0 {
+                NC_PRO_ISF[f1 as usize] = 1
+                fchanged = true
+            }
+            fi = fi + 1
+        }
     }
     // Jump targets, and per-instruction loop weight.
     var t: i64 = 0
@@ -13365,7 +13404,7 @@ fn nc_promo_analyze(func: &IrFunction) with Mut, Panic, Div {
         }
         if best < 0 { round = 4 } else {
             // find a register whose assigned spans do not overlap this one
-            let is_f = if best < 2048 && NC_REG_TYPE[best as usize] == 1 { 1 } else { 0 }
+            let is_f = if NC_PRO_ISF[best as usize] == 1 || (best < 2048 && NC_REG_TYPE[best as usize] == 1) { 1 } else { 0 }
             var r: i64 = if is_f == 1 { 16 } else { 8 }
             let r_end = if is_f == 1 { 24 } else { 12 }
             var assigned: i64 = -1
