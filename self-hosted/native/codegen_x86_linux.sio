@@ -11514,6 +11514,28 @@ fn nc_emit_movaps_xmm(nc: &! NativeCompiler, dst: i64, src: i64) with Mut, Panic
     nc_emit_byte(nc, 0xc0 | ((dst % 8) * 8) | (src % 8))
 }
 
+// rbx <- vreg (rax untouched). Replaces the push rax / pop rbx pair, which put a
+// stack store->load forward on every integer operation's dependency chain.
+fn nc_core_load_temp_to_rbx(nc: &! NativeCompiler, temp: i64) with Mut, Panic, Div {
+    if temp < 0 {
+        nc_emit_mov_reg_imm(nc, 3, 0)
+        return
+    }
+    let pr = nc_promo_reg_of(temp)
+    if pr >= 16 {
+        // movq rbx, xmm8..xmm15
+        nc_emit_byte(nc, 0x66); nc_emit_byte(nc, 0x4c); nc_emit_byte(nc, 0x0f); nc_emit_byte(nc, 0x7e)
+        nc_emit_byte(nc, 0xc3 + (pr - 16) * 8)
+        return
+    }
+    if pr >= 8 {
+        // mov rbx, r8..r11
+        nc_emit_byte(nc, 0x4c); nc_emit_byte(nc, 0x89); nc_emit_byte(nc, 0xc3 + (pr - 8) * 8)
+        return
+    }
+    nc_emit_load_rbp_disp32_reg(nc, 3, ir_slot_offset(temp))
+}
+
 fn nc_core_load_temp_to_rax(nc: &! NativeCompiler, temp: i64) with Mut, Panic, Div {
     if temp < 0 {
         nc_emit_xor_rax_rax(nc)
@@ -12179,10 +12201,8 @@ fn nc_emit_core_binop(nc: &! NativeCompiler, func: &IrFunction, instr_index: i64
     }
 
     if op == BinaryOp::OpAdd {
-        nc_core_load_temp_to_rax(nc, lhs)
-        nc_emit_push_rax(nc)
         nc_core_load_temp_to_rax(nc, rhs)
-        nc_emit_pop_rbx(nc)
+        nc_core_load_temp_to_rbx(nc, lhs)
         nc_emit_add_rax_rbx(nc)
         nc_emit_overflow_guard(nc, 0)
         nc_core_store_rax_to_temp(nc, dst)
@@ -12190,10 +12210,8 @@ fn nc_emit_core_binop(nc: &! NativeCompiler, func: &IrFunction, instr_index: i64
         return true
     }
     if op == BinaryOp::OpSub {
-        nc_core_load_temp_to_rax(nc, rhs)
-        nc_emit_push_rax(nc)
         nc_core_load_temp_to_rax(nc, lhs)
-        nc_emit_pop_rbx(nc)
+        nc_core_load_temp_to_rbx(nc, rhs)
         nc_emit_sub_rax_rbx(nc)
         nc_emit_overflow_guard(nc, 1)
         nc_core_store_rax_to_temp(nc, dst)
@@ -12201,10 +12219,8 @@ fn nc_emit_core_binop(nc: &! NativeCompiler, func: &IrFunction, instr_index: i64
         return true
     }
     if op == BinaryOp::OpMul {
-        nc_core_load_temp_to_rax(nc, lhs)
-        nc_emit_push_rax(nc)
         nc_core_load_temp_to_rax(nc, rhs)
-        nc_emit_pop_rbx(nc)
+        nc_core_load_temp_to_rbx(nc, lhs)
         nc_emit_imul_rax_rbx(nc)
         nc_emit_overflow_guard(nc, 2)
         nc_core_store_rax_to_temp(nc, dst)
@@ -12222,10 +12238,8 @@ fn nc_emit_core_binop(nc: &! NativeCompiler, func: &IrFunction, instr_index: i64
     // for u8/u16/u32/u64/usize-typed operands (or literals paired with one);
     // a narrower result is range-checked by the lowerer, not masked.
     if op == BinaryOp::OpUAdd {
-        nc_core_load_temp_to_rax(nc, lhs)
-        nc_emit_push_rax(nc)
         nc_core_load_temp_to_rax(nc, rhs)
-        nc_emit_pop_rbx(nc)
+        nc_core_load_temp_to_rbx(nc, lhs)
         nc_emit_add_rax_rbx(nc)
         nc_emit_carry_guard(nc, 4)
         nc_core_store_rax_to_temp(nc, dst)
@@ -12233,10 +12247,8 @@ fn nc_emit_core_binop(nc: &! NativeCompiler, func: &IrFunction, instr_index: i64
         return true
     }
     if op == BinaryOp::OpUSub {
-        nc_core_load_temp_to_rax(nc, rhs)
-        nc_emit_push_rax(nc)
         nc_core_load_temp_to_rax(nc, lhs)
-        nc_emit_pop_rbx(nc)
+        nc_core_load_temp_to_rbx(nc, rhs)
         nc_emit_sub_rax_rbx(nc)
         nc_emit_carry_guard(nc, 5)
         nc_core_store_rax_to_temp(nc, dst)
@@ -12244,10 +12256,8 @@ fn nc_emit_core_binop(nc: &! NativeCompiler, func: &IrFunction, instr_index: i64
         return true
     }
     if op == BinaryOp::OpUMul {
-        nc_core_load_temp_to_rax(nc, lhs)
-        nc_emit_push_rax(nc)
         nc_core_load_temp_to_rax(nc, rhs)
-        nc_emit_pop_rbx(nc)
+        nc_core_load_temp_to_rbx(nc, lhs)
         nc_emit_mul_rbx(nc)
         nc_emit_carry_guard(nc, 6)
         nc_core_store_rax_to_temp(nc, dst)
@@ -12308,10 +12318,8 @@ fn nc_emit_core_binop(nc: &! NativeCompiler, func: &IrFunction, instr_index: i64
         return true
     }
     if op == BinaryOp::OpAnd || op == BinaryOp::OpOr || op == BinaryOp::OpBitAnd || op == BinaryOp::OpBitOr || op == BinaryOp::OpBitXor {
-        nc_core_load_temp_to_rax(nc, lhs)
-        nc_emit_push_rax(nc)
         nc_core_load_temp_to_rax(nc, rhs)
-        nc_emit_pop_rbx(nc)
+        nc_core_load_temp_to_rbx(nc, lhs)
         if op == BinaryOp::OpAnd {
             nc_emit_and_bool_rax_rbx(nc)
         } else if op == BinaryOp::OpOr {
@@ -12328,10 +12336,8 @@ fn nc_emit_core_binop(nc: &! NativeCompiler, func: &IrFunction, instr_index: i64
         return true
     }
     if op == BinaryOp::OpShl || op == BinaryOp::OpShr || op == BinaryOp::OpUShr {
-        nc_core_load_temp_to_rax(nc, lhs)
-        nc_emit_push_rax(nc)
         nc_core_load_temp_to_rax(nc, rhs)
-        nc_emit_pop_rbx(nc)
+        nc_core_load_temp_to_rbx(nc, lhs)
         nc_emit_mov_rcx_rax(nc)
         nc_emit_mov_rax_rbx(nc)
         if op == BinaryOp::OpShl {
@@ -12351,10 +12357,8 @@ fn nc_emit_core_binop(nc: &! NativeCompiler, func: &IrFunction, instr_index: i64
     // Comparison ops: push lhs, load rhs into rax, pop lhs into rbx
     // CMP RAX, RBX = rhs - lhs; setXX conditions are flipped vs intuition
     if op == BinaryOp::OpLt || op == BinaryOp::OpLe || op == BinaryOp::OpGt || op == BinaryOp::OpGe || op == BinaryOp::OpEq || op == BinaryOp::OpNe {
-        nc_core_load_temp_to_rax(nc, lhs)
-        nc_emit_push_rax(nc)
         nc_core_load_temp_to_rax(nc, rhs)
-        nc_emit_pop_rbx(nc)
+        nc_core_load_temp_to_rbx(nc, lhs)
         // rax=rhs, rbx=lhs; CMP RAX,RBX = rhs-lhs
         nc_emit_cmp_rax_rbx(nc)
         // setg: rhs>lhs, i.e. lhs<rhs; setle: rhs<=lhs, i.e. lhs>=rhs; etc.
