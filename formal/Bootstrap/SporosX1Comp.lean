@@ -2156,6 +2156,7 @@ theorem walk_loop {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
 
 /-! ### Around the walk: `check_word`, `annval`, `codewalk`, `word_done` -/
 
+def aCheckStart : Nat := base + 0x42d
 def aCheckWord : Nat := base + 0x433
 def aAnnval : Nat := base + 0x453
 def aCodewalk : Nat := base + 0x4d5
@@ -2178,6 +2179,8 @@ structure OuterCode (im : Nat → Option (Ins × Nat)) : Prop where
   cw5 : im (aCheckWord + 17) = some (.jcc 5 (aCheckWord + 24), 2)
   cw6 : im (aCheckWord + 24) = some (.ld 6 7 48, 4)
   cw7 : im (aCheckWord + 28) = some (.ld 1 7 32, 4)
+  cs0 : im aCheckStart = some (.mov 7 14, 3)
+  cs1 : im (aCheckStart + 3) = some (.mov 5 13, 3)
   av0 : im aAnnval = some (.test 1 1, 3)
   av1 : im (aAnnval + 3) = some (.jcc 5 (aAnnval + 10), 2)
   av2 : im (aAnnval + 5) = some (.jmp aCodewalk, 5)
@@ -5404,5 +5407,424 @@ theorem run_regs_ok {im : Nat → Option (Ins × Nat)} {k : Nat}
     {s s' : X86Int.St} (hr : run im k (Out.ok s) = Out.ok s')
     (h : RegsOk s) : RegsOk s' :=
   fun i hi16 hi11 => run_reg_ne11_some k hi11 hr (h i hi16 hi11)
+
+/-- `check_start`: cursor to the first entry, count to `rbp`. -/
+theorem CheckStart_triple {im : Nat → Option (Ins × Nat)}
+    (oc : OuterCode im) {nw tbl : Nat} :
+    ∀ s, s.rip = aCheckStart → s.reg 14 = some tbl → s.reg 13 = some nw →
+      ∃ k s', run im k (Out.ok s) = Out.ok s' ∧ s'.rip = aCheckWord ∧
+        s'.reg 7 = some tbl ∧ s'.reg 5 = some nw ∧
+        (∀ q, q ≠ 5 → q ≠ 7 → s'.reg q = s.reg q) ∧ s'.mem = s.mem ∧
+        s'.regs.length = s.regs.length := by
+  intro s hrip hr14 hr13
+  have e1 : X86Int.step im s = .ok { s.set 7 (some tbl) with
+      rip := s.rip + 3 } :=
+    step_mov (by rw [hrip]; exact oc.cs0) hr14
+  obtain ⟨a1, ha1⟩ : ∃ u : X86Int.St, u = { s.set 7 (some tbl) with
+    rip := s.rip + 3 } := ⟨_, rfl⟩
+  have ha1rip : a1.rip = aCheckStart + 3 := by
+    rw [ha1]; show s.rip + 3 = aCheckStart + 3; rw [hrip]
+  have ga1 : ∀ q, q ≠ 7 → a1.reg q = s.reg q := by
+    intro q hq
+    rw [ha1]
+    show (s.set 7 (some tbl)).reg q = s.reg q
+    rw [reg_set_other hq]
+  have ha1r7 : a1.reg 7 = some tbl := by
+    rw [ha1]
+    show (s.set 7 (some tbl)).reg 7 = some tbl
+    rw [reg_set_self (by
+      have : 13 < s.regs.length := reg_some_len hr13
+      omega)]
+  have e2 : X86Int.step im a1 = .ok { a1.set 5 (some nw) with
+      rip := a1.rip + 3 } :=
+    step_mov (by rw [ha1rip]; exact oc.cs1)
+      (by rw [ga1 13 (by decide)]; exact hr13)
+  obtain ⟨a2, ha2⟩ : ∃ u : X86Int.St, u = { a1.set 5 (some nw) with
+    rip := a1.rip + 3 } := ⟨_, rfl⟩
+  have rr1 : run im 1 (Out.ok s) = Out.ok a1 := by
+    rw [run_succ_ok im 0 s, e1, ← ha1, run_zero]
+  have rr2 : run im 1 (Out.ok a1) = Out.ok a2 := by
+    rw [run_succ_ok im 0 a1, e2, ← ha2, run_zero]
+  refine ⟨1 + 1, a2, by rw [run_add im 1 1, rr1, rr2], ?_, ?_, ?_, ?_, ?_, ?_⟩
+  · rw [ha2]; show a1.rip + 3 = aCheckWord; rw [ha1rip]; rfl
+  · rw [ha2]
+    show (a1.set 5 (some nw)).reg 7 = some tbl
+    rw [reg_set_other (by decide)]; exact ha1r7
+  · rw [ha2]
+    show (a1.set 5 (some nw)).reg 5 = some nw
+    rw [reg_set_self (by
+      have e : a1.regs.length = s.regs.length := by
+        rw [ha1]
+        show (s.set 7 (some tbl)).regs.length = s.regs.length
+        exact List.length_set
+      have : 13 < s.regs.length := reg_some_len hr13
+      omega)]
+  · intro q h5 h7
+    rw [ha2]
+    show (a1.set 5 (some nw)).reg q = s.reg q
+    rw [reg_set_other h5]; exact ga1 q h7
+  · rw [ha2, ha1]; exact rfl
+  · rw [ha2, ha1]
+    exact List.length_set.trans List.length_set
+
+/-- Everything the checker needs about one table entry besides its
+bytes: statics for the walk and the ann validation. -/
+def WordOk (pr : Prog) (wd : Sporos.Word) (w p cp sp tbl : Nat) : Prop :=
+  WalkStatic pr wd w p sp tbl ∧ wd.ins < W ∧
+  (∀ x ∈ wd.ann, x.2.d < W ∧ x.2.a < W) ∧
+  (∀ x ∈ wd.code, ImmOk x) ∧ hBnd pr wd wd.code 0 ⟨wd.ins, 0⟩ ∧
+  (cp + codeBytes wd.code ≤ sp - 48 ∨ sp ≤ cp) ∧
+  cp + codeBytes wd.code < W ∧
+  (sp ≤ w ∨ w + 56 ≤ sp - 48) ∧ (sp ≤ p ∨ p + 12 * wd.ann.length ≤ sp - 48)
+
+/-- The decoded words table: fields, code and ann arrays per entry. -/
+def WordTab (pr : Prog) (tbl sp : Nat) (s : X86Int.St) : Prop :=
+  ∀ j (hj : j < pr.words.length), ∃ cp p,
+    rd64 s.mem (tbl + 64 * j) = some (pr.words[j]).ins ∧
+    rd64 s.mem (tbl + 64 * j + 8) = some (pr.words[j]).outs ∧
+    rd64 s.mem (tbl + 64 * j + 16) = some (pr.words[j]).locals ∧
+    rd64 s.mem (tbl + 64 * j + 24) = some (pr.words[j]).code.length ∧
+    rd64 s.mem (tbl + 64 * j + 32) = some (pr.words[j]).ann.length ∧
+    rd64 s.mem (tbl + 64 * j + 40) = some cp ∧
+    rd64 s.mem (tbl + 64 * j + 48) = some p ∧
+    CodeSeq s.mem cp (pr.words[j]).code ∧ AnnLayout s (pr.words[j]).ann p ∧
+    WordOk pr (pr.words[j]) (tbl + 64 * j) p cp sp tbl
+
+theorem WordTab_of_frame {pr : Prog} {tbl sp : Nat} {s s' : X86Int.St}
+    (ht : WordTab pr tbl sp s)
+    (htab : ∀ j, j < pr.words.length →
+      sp ≤ tbl + 64 * j ∨ tbl + 64 * j + 64 ≤ sp - 48)
+    (hfr : ∀ x n, x + n ≤ sp - 48 ∨ sp ≤ x → s'.mem.rdN x n = s.mem.rdN x n) :
+    WordTab pr tbl sp s' := by
+  intro j hj
+  obtain ⟨cp, p, hf0, hf8, hf16, hf24, hf32, hf40, hf48, hcsq, hlay,
+    hok⟩ := ht j hj
+  have hd := htab j hj
+  have fld : ∀ (off v : Nat), off + 8 ≤ 64 →
+      rd64 s.mem (tbl + 64 * j + off) = some v →
+      rd64 s'.mem (tbl + 64 * j + off) = some v := by
+    intro off v hoff hv
+    unfold rd64
+    rw [hfr (tbl + 64 * j + off) 8 (by omega)]
+    exact hv
+  refine ⟨cp, p, fld 0 _ (by omega) (by simpa using hf0),
+    fld 8 _ (by omega) hf8, fld 16 _ (by omega) hf16,
+    fld 24 _ (by omega) hf24, fld 32 _ (by omega) hf32,
+    fld 40 _ (by omega) hf40, fld 48 _ (by omega) hf48, ?_, ?_, hok⟩
+  · exact CodeSeq_of_frame hcsq (fun x k _ _ => hfr x k (by
+      have hdc := hok.2.2.2.2.2.1
+      omega))
+  · exact AnnLayout_of_frame hlay (fun x k _ _ => hfr x k (by
+      have hdp := hok.2.2.2.2.2.2.2.2
+      omega))
+
+/-- The outer `check_word` loop state: `rest` words remain. -/
+def OuterSt (pr : Prog) (tbl sp : Nat) (rest : List Sporos.Word)
+    (s : X86Int.St) : Prop :=
+  s.rip = aCheckWord ∧ s.reg 5 = some rest.length ∧
+  s.reg 7 = some (tbl + 64 * (pr.words.length - rest.length)) ∧
+  s.reg 13 = some pr.words.length ∧ s.reg 14 = some tbl ∧
+  s.reg 4 = some sp ∧ 16 ≤ s.regs.length ∧ RegsOk s ∧
+  StackRoom s 6 ∧ EffTable s ∧ WordTab pr tbl sp s
+
+/-- One word of the outer loop: from `check_word` on `wd :: rest`
+back to `check_word` on `rest`, when `checkWord1` accepts `wd`. -/
+theorem word_step {im : Nat → Option (Ins × Nat)}
+    (ac : AllCode im) (oc : OuterCode im)
+    {pr : Prog} {tbl sp : Nat} (hsp48 : 48 ≤ sp) (hspW : sp < W)
+    (htblW : tbl + 64 * pr.words.length < W)
+    (htab : ∀ j, j < pr.words.length →
+      sp ≤ tbl + 64 * j ∨ tbl + 64 * j + 64 ≤ sp - 48)
+    (hdisjEff48 : aEff + 114 ≤ sp - 48 ∨ sp ≤ aEff)
+    (hchk : ∀ wd ∈ pr.words, Sporos.checkWord1 pr wd = true) :
+    ∀ (wd : Sporos.Word) (rest : List Sporos.Word)
+      (pre : List Sporos.Word), pr.words = pre ++ (wd :: rest) →
+      ∀ s, OuterSt pr tbl sp (wd :: rest) s →
+      ∃ k s', run im k (Out.ok s) = Out.ok s' ∧ OuterSt pr tbl sp rest s' := by
+  intro wd rest pre happ s hs
+  obtain ⟨hrip, hr5, hr7, hr13, hr14, hr4, h16, hregs, hroom, heff,
+    htabS⟩ := hs
+  have hlenann : pr.words.length = pre.length + (rest.length + 1) := by
+    rw [happ, List.length_append, List.length_cons]
+  have hj0 : pre.length < pr.words.length := by omega
+  have hget? : pr.words[pre.length]? = some wd := by
+    rw [happ, List.getElem?_append_right (by simp)]
+    simp
+  have hget : pr.words[pre.length]'hj0 = wd :=
+    Option.some.inj ((List.getElem?_eq_getElem hj0).symm.trans hget?)
+  obtain ⟨cp, p, hf0, hf8, hf16, hf24, hf32, hf40, hf48, hcsq, hlay,
+    hok⟩ := htabS pre.length hj0
+  rw [hget] at hf0 hf8 hf16 hf24 hf32 hcsq hlay hok
+  obtain ⟨st, hinsW, hhW, himm, hhb, hdisjC48, hcbound, hdisjw48,
+    hdisjp48⟩ := hok
+  have hr7w : s.reg 7 = some (tbl + 64 * pre.length) := by
+    have hw : tbl + 64 * (pr.words.length - (wd :: rest).length) =
+        tbl + 64 * pre.length := by
+      rw [List.length_cons]
+      congr 1
+      congr 1
+      omega
+    rw [hw] at hr7
+    exact hr7
+  have hmem : wd ∈ pr.words := by
+    rw [happ]
+    exact List.mem_append_right _ List.mem_cons_self
+  have hwd := hchk wd hmem
+  have hwd2 := hwd
+  simp only [Sporos.checkWord1, Bool.and_eq_true] at hwd2
+  have hne := hwd2.1.1.1
+  have h0clause := hwd2.1.1.2
+  have hann := hwd2.1.2
+  have hwalk := hwd2.2
+  have hnc : wd.code.length ≠ 0 := by
+    intro hz
+    have hc : wd.code = [] := List.eq_nil_of_length_eq_zero hz
+    rw [hc] at hne
+    simp at hne
+  have hlenW : pr.words.length < W := by
+    have h1 : pr.words.length ≤ 64 * pr.words.length :=
+      Nat.le_mul_of_pos_left _ (by decide)
+    omega
+  -- check_word head: to annval
+  obtain ⟨k1, s1, hrun1, hs1rip, hs1r6, hs1r1, -, hs1r5, hs1r7, gb1, hs1mem,
+    hlen1⟩ :=
+    CheckWord_head oc (tbl + 64 * pre.length) (rest.length + 1)
+      wd.code.length wd.ann.length p st.w56 (by omega) hnc s hrip hr5 hr7w
+      hf24 hf48 hf32
+  have hs1r4 : s1.reg 4 = some sp := by
+    rw [gb1 4 (by decide) (by decide) (by decide)]; exact hr4
+  have hregs1 : RegsOk s1 := run_regs_ok hrun1 hregs
+  have hs1r13 : s1.reg 13 = some pr.words.length := by
+    rw [gb1 13 (by decide) (by decide) (by decide)]; exact hr13
+  have hs1r14 : s1.reg 14 = some tbl := by
+    rw [gb1 14 (by decide) (by decide) (by decide)]; exact hr14
+  have hannst : AnnSt wd (tbl + 64 * pre.length) p sp wd.ann s1 := by
+    refine ⟨hs1rip, hs1r7, ?_, hs1r1, hs1r4,
+      by rw [hs1mem]; exact hf24, by rw [hs1mem]; exact hf32,
+      by rw [hs1mem]; exact hf48, AnnLayout_of_mem hs1mem hlay, by omega,
+      StackRoom_of_mem hs1mem (by rw [hs1r4, hr4]) hroom⟩
+    simpa using hs1r6
+  have hannstatic : AnnStatic wd (tbl + 64 * pre.length) p sp :=
+    ⟨st.w56, st.p0, st.pann, hsp48, hspW, st.clenW, hhW, hdisjw48, hdisjp48⟩
+  -- annval loop: to codewalk
+  obtain ⟨k2, s2, hrun2, hs2rip, hs2r7, hs2r4, hs2r6, hs2r1, hf24_2, hf32_2,
+    hf48_2, hlay2, hroom2, h12len2, gb2, hfr2, hw2, hlen2⟩ :=
+    annval_loop ac oc hannstatic hann wd.ann [] (by simp) s1 hannst
+  have hrun12 : run im (k1 + k2) (Out.ok s) = Out.ok s2 := by
+    rw [run_add im k1 k2, hrun1, hrun2]
+  have hregs2 : RegsOk s2 := run_regs_ok hrun12 hregs
+  have hs2r13 : s2.reg 13 = some pr.words.length := by
+    rw [gb2 13 (by decide) (by decide) (by decide) (by decide) (by decide)
+      (by decide) (by decide) (by decide)]; exact hs1r13
+  have hs2r14 : s2.reg 14 = some tbl := by
+    rw [gb2 14 (by decide) (by decide) (by decide) (by decide) (by decide)
+      (by decide) (by decide) (by decide)]; exact hs1r14
+  have hs2r5 : s2.reg 5 = some (rest.length + 1) := by
+    rw [gb2 5 (by decide) (by decide) (by decide) (by decide) (by decide)
+      (by decide) (by decide) (by decide)]; exact hs1r5
+  have hfr02 : ∀ x n, x + n ≤ sp - 48 ∨ sp ≤ x →
+      s2.mem.rdN x n = s.mem.rdN x n := by
+    intro x n hx
+    rw [hfr2 x n hx, hs1mem]
+  have hfld2 : ∀ (off v : Nat), off + 8 ≤ 64 →
+      rd64 s.mem (tbl + 64 * pre.length + off) = some v →
+      rd64 s2.mem (tbl + 64 * pre.length + off) = some v := by
+    intro off v hoff hv
+    unfold rd64
+    rw [hfr02 (tbl + 64 * pre.length + off) 8 (by
+      have hd := htab pre.length hj0
+      omega)]
+    exact hv
+  have heff2 : EffTable s2 := by
+    intro q
+    rw [hfr02 (aEff + 2 * q.code) 2 (by
+      have hc := Prim_code_lt q
+      cases hdisjEff48 with
+      | inl hh => exact Or.inl (by omega)
+      | inr hh => exact Or.inr (by omega))]
+    exact heff q
+  have hcsq2 : CodeSeq s2.mem cp wd.code :=
+    CodeSeq_of_frame hcsq (fun x k _ _ => hfr02 x k (by omega))
+  have hwords2 : ∀ n (hn : n < pr.words.length),
+      rd64 s2.mem (tbl + n * 64) = some (pr.words[n]).ins ∧
+      rd64 s2.mem (tbl + n * 64 + 8) = some (pr.words[n]).outs := by
+    intro n hn
+    obtain ⟨cpn, pn, g0, g8, -, -, -, -, -, -, -, -⟩ := htabS n hn
+    have hd := htab n hn
+    refine ⟨?_, ?_⟩
+    · have e : tbl + n * 64 = tbl + 64 * n := by rw [Nat.mul_comm]
+      rw [e]
+      unfold rd64
+      rw [hfr02 (tbl + 64 * n) 8 (by omega)]
+      exact g0
+    · have e : tbl + n * 64 + 8 = tbl + 64 * n + 8 := by rw [Nat.mul_comm]
+      rw [e]
+      unfold rd64
+      rw [hfr02 (tbl + 64 * n + 8) 8 (by omega)]
+      exact g8
+  have hdisjC32 : cp + codeBytes wd.code ≤ sp - 32 ∨ sp ≤ cp := by
+    cases hdisjC48 with
+    | inl hh => exact Or.inl (by omega)
+    | inr hh => exact Or.inr hh
+  -- codewalk: to walk_top in WalkInv
+  obtain ⟨k3, s3, hrun3, hinv3, gb3, hfr3, hw3, hlen3⟩ :=
+    codewalk_entry ac oc st hsp48 h0clause hinsW s2 hs2rip hs2r7 hs2r4
+      hs2r1 (hregs2 9 (by decide) (by decide))
+      (hregs2 12 (by decide) (by decide)) hs2r13 hs2r14 (by omega)
+      (hfld2 0 _ (by omega) (by simpa using hf0))
+      (hfld2 8 _ (by omega) hf8) (hfld2 16 _ (by omega) hf16) hf24_2 hf32_2
+      (hfld2 40 _ (by omega) hf40) hf48_2 hlay2 hroom2 heff2 hcsq2 hwords2
+      hdisjC32 hcbound himm hhb
+  have hs3r5 : s3.reg 5 = some (rest.length + 1) := by
+    rw [gb3 5 (by decide) (by decide) (by decide) (by decide) (by decide)
+      (by decide) (by decide) (by decide)]; exact hs2r5
+  have hfr03 : ∀ x n, x + n ≤ sp - 48 ∨ sp ≤ x →
+      s3.mem.rdN x n = s.mem.rdN x n := by
+    intro x n hx
+    exact (hfr3 x n (by omega)).trans (hfr02 x n hx)
+  have hw02 : wshape s2.mem = wshape s.mem := by rw [hw2, hs1mem]
+  have hlen02 : s2.regs.length = s.regs.length := hlen2.trans hlen1
+  have hw03 : wshape s3.mem = wshape s.mem := hw3.trans hw02
+  have hlen03 : s3.regs.length = s.regs.length := hlen3.trans hlen02
+  -- the walk itself
+  obtain ⟨k4, s4, hrun4, hs4rip, hs4r1, hs4r6, hs4r7, hs4r4, hfr4, hw4,
+    hs4r5, hs4r13, hs4r14⟩ :=
+    walk_loop ac st wd.code 0 cp ⟨wd.ins, 0⟩ ⟨wd.ins, 0⟩ s3 hinv3 hwalk
+  have hlen4 : s4.regs.length = s.regs.length :=
+    (run_regs_length k4 hrun4).trans hlen03
+  have hfr04 : ∀ x n, x + n ≤ sp - 48 ∨ sp ≤ x →
+      s4.mem.rdN x n = s.mem.rdN x n := by
+    intro x n hx
+    exact (hfr4 x n (by omega)).trans (hfr03 x n hx)
+  have hw04 : wshape s4.mem = wshape s.mem := hw4.trans hw03
+  have hs4r5' : s4.reg 5 = some (rest.length + 1) := by
+    rw [hs4r5]; exact hs3r5
+  have hs4r13' : s4.reg 13 = some pr.words.length := by
+    rw [hs4r13]; exact hinv3.r13
+  have hs4r14' : s4.reg 14 = some tbl := by
+    rw [hs4r14]; exact hinv3.r14
+  -- word_done: advance and count down
+  obtain ⟨k5, s5, hrun5, hs5rip, hs5r7, hs5r5, gb5, hs5mem, hlen5⟩ :=
+    WordDone_triple oc (tbl + 64 * pre.length) (rest.length + 1) (by omega)
+      (by omega)
+      (show tbl + 64 * pre.length + 64 < W by
+        have : 64 * pre.length + 64 = 64 * (pre.length + 1) := by
+          rw [Nat.mul_add, Nat.mul_one]
+        omega)
+      s4 hs4rip hs4r7 hs4r5'
+  have hrunT : run im (k1 + k2 + k3 + k4 + k5) (Out.ok s) = Out.ok s5 := by
+    rw [run_add im (k1 + k2 + k3 + k4) k5,
+      run_add im (k1 + k2 + k3) k4, run_add im (k1 + k2) k3,
+      run_add im k1 k2, hrun1, hrun2, hrun3, hrun4, hrun5]
+  have hfrT : ∀ x n, x + n ≤ sp - 48 ∨ sp ≤ x →
+      s5.mem.rdN x n = s.mem.rdN x n := by
+    intro x n hx
+    rw [hs5mem]; exact hfr04 x n hx
+  have hwT : wshape s5.mem = wshape s.mem := by rw [hs5mem]; exact hw04
+  have hlenT : s5.regs.length = s.regs.length := hlen5.trans hlen4
+  have hs5r4 : s5.reg 4 = some sp := by
+    rw [gb5 4 (by decide) (by decide)]; exact hs4r4
+  have hs5r13 : s5.reg 13 = some pr.words.length := by
+    rw [gb5 13 (by decide) (by decide)]; exact hs4r13'
+  have hs5r14 : s5.reg 14 = some tbl := by
+    rw [gb5 14 (by decide) (by decide)]; exact hs4r14'
+  have hs5r5' : s5.reg 5 = some rest.length := by
+    rw [hs5r5]
+    congr 1
+  have hs5r7' : s5.reg 7 =
+      some (tbl + 64 * (pr.words.length - rest.length)) := by
+    rw [hs5r7]
+    congr 1
+    have e : pr.words.length - rest.length = pre.length + 1 := by omega
+    rw [e, Nat.mul_add, Nat.mul_one, Nat.add_assoc]
+  have heff5 : EffTable s5 := by
+    intro q
+    rw [hfrT (aEff + 2 * q.code) 2 (by
+      have hc := Prim_code_lt q
+      cases hdisjEff48 with
+      | inl hh => exact Or.inl (by omega)
+      | inr hh => exact Or.inr (by omega))]
+    exact heff q
+  refine ⟨k1 + k2 + k3 + k4 + k5, s5, hrunT, hs5rip, hs5r5', hs5r7', hs5r13,
+    hs5r14, hs5r4, by omega, run_regs_ok hrunT hregs,
+    StackRoom_of_wshape hwT (by rw [hs5r4, hr4]) hroom, heff5,
+    WordTab_of_frame htabS htab hfrT⟩
+
+/-- The whole outer loop plus `accept`: from `check_word` with
+`rest` words left, the run exits 0. Induction on the remaining
+words. -/
+theorem words_loop {im : Nat → Option (Ins × Nat)}
+    (ac : AllCode im) (oc : OuterCode im)
+    {pr : Prog} {tbl sp : Nat} (hsp48 : 48 ≤ sp) (hspW : sp < W)
+    (htblW : tbl + 64 * pr.words.length < W)
+    (htab : ∀ j, j < pr.words.length →
+      sp ≤ tbl + 64 * j ∨ tbl + 64 * j + 64 ≤ sp - 48)
+    (hdisjEff48 : aEff + 114 ≤ sp - 48 ∨ sp ≤ aEff)
+    (hchk : ∀ wd ∈ pr.words, Sporos.checkWord1 pr wd = true) :
+    ∀ (rest : List Sporos.Word) (pre : List Sporos.Word),
+      pr.words = pre ++ rest → ∀ s, OuterSt pr tbl sp rest s →
+      ∃ k, run im k (Out.ok s) = Out.exit 0 := by
+  intro rest
+  induction rest with
+  | nil =>
+    intro pre _ s hs
+    obtain ⟨hrip, hr5, -, -, -, hr4, -, hregs, hroom, -, -⟩ := hs
+    have hr5' : s.reg 5 = some 0 := hr5
+    obtain ⟨k1, s1, hrun1, hs1rip, gs1, hs1mem, hlen1⟩ :=
+      CheckWord_done oc s hrip hr5'
+    have hs1r4 : s1.reg 4 = some sp := by
+      rw [gs1 4]; exact hr4
+    have hregs1 : RegsOk s1 := run_regs_ok hrun1 hregs
+    have hroom1 : StackRoom s1 6 :=
+      StackRoom_of_mem hs1mem (by rw [hs1r4, hr4]) hroom
+    obtain ⟨v6, hv6⟩ := hregs1 6 (by decide) (by decide)
+    obtain ⟨v2, hv2⟩ := hregs1 2 (by decide) (by decide)
+    obtain ⟨v10, hv10⟩ := hregs1 10 (by decide) (by decide)
+    obtain ⟨v8, hv8⟩ := hregs1 8 (by decide) (by decide)
+    obtain ⟨v9, hv9⟩ := hregs1 9 (by decide) (by decide)
+    obtain ⟨m1, hm1s⟩ := Option.isSome_iff_exists.mp
+      (hroom1 sp hs1r4 0 (by decide) 60)
+    obtain ⟨m2, hm2s⟩ := Option.isSome_iff_exists.mp
+      (wr64_some_of_wr64 hm1s (hroom1 sp hs1r4 0 (by decide) 0))
+    obtain ⟨k2, hrun2⟩ := Accept_exit oc sp v6 v2 v10 v8 v9 m1 m2 (by omega)
+      hspW s1 hs1rip hs1r4 hv6 hv2 hv10 hv8 hv9 hm1s hm2s
+    exact ⟨k1 + k2, by
+      rw [run_add im k1 k2, hrun1]
+      exact hrun2⟩
+  | cons wd rest' ih =>
+    intro pre happ s hs
+    obtain ⟨k1, s1, hrun1, hs1⟩ :=
+      word_step ac oc hsp48 hspW htblW htab hdisjEff48 hchk wd rest' pre
+        happ s hs
+    have happ' : pr.words = (pre ++ [wd]) ++ rest' := by
+      rw [happ, List.append_assoc, List.singleton_append]
+    obtain ⟨k2, hrun2⟩ := ih (pre ++ [wd]) happ' s1 hs1
+    exact ⟨k1 + k2, by
+      rw [run_add im k1 k2, hrun1]
+      exact hrun2⟩
+
+/-- Accept direction of the stage-1 checker at `check_word`: a
+program with `checkProg1 pr = true`, in the table/memory layout the
+outer invariant describes, exits 0. -/
+theorem checker_accepts {im : Nat → Option (Ins × Nat)}
+    (ac : AllCode im) (oc : OuterCode im)
+    {pr : Prog} {tbl sp : Nat} (hsp48 : 48 ≤ sp) (hspW : sp < W)
+    (htblW : tbl + 64 * pr.words.length < W)
+    (htab : ∀ j, j < pr.words.length →
+      sp ≤ tbl + 64 * j ∨ tbl + 64 * j + 64 ≤ sp - 48)
+    (hdisjEff48 : aEff + 114 ≤ sp - 48 ∨ sp ≤ aEff)
+    (hchk : Sporos.checkProg1 pr = true) :
+    ∀ s, OuterSt pr tbl sp pr.words s →
+      ∃ k, run im k (Out.ok s) = Out.exit 0 := by
+  have hall : ∀ wd ∈ pr.words, Sporos.checkWord1 pr wd = true := by
+    have h2 : (pr.words.all fun wd => Sporos.checkWord1 pr wd) = true := by
+      have hh := hchk
+      simp only [Sporos.checkProg1, Bool.and_eq_true] at hh
+      exact hh.1
+    exact fun wd hmem => List.all_eq_true.mp h2 wd hmem
+  exact fun s hs =>
+    words_loop ac oc hsp48 hspW htblW htab hdisjEff48 hall pr.words []
+      (by simp) s hs
+
 
 end SporosX1
