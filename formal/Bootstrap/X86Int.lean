@@ -70,6 +70,8 @@ inductive Ins where
   /-- `mov r64, [b + disp]` and `mov [b + disp], r64` -/
   | ld (d b disp : Nat)
   | st (b disp s : Nat)
+  /-- `mov r32, dword [b + disp]`: four bytes, zero-extended -/
+  | ld32 (d b disp : Nat)
   /-- `movzx r64, byte [b + disp]` and `mov byte [b + disp], r8` -/
   | ld8 (d b disp : Nat)
   | st8 (b disp s : Nat)
@@ -130,6 +132,7 @@ def bytes8 (v : Nat) : List Nat := (List.range 8).map fun i => v / 256 ^ i % 256
 
 def rd64 (m : Mem) (a : Nat) : Option Nat := (m.rdN a 8).map leVal
 def wr64 (m : Mem) (a v : Nat) : Option Mem := m.wrN a (bytes8 v)
+def rd32 (m : Mem) (a : Nat) : Option Nat := (m.rdN a 4).map leVal
 
 /-- Most significant bit of a 64-bit word. -/
 def msb (v : Nat) : Bool := v / 2 ^ 63 % 2 == 1
@@ -214,6 +217,9 @@ def exec (ins : Ins) (len : Nat) (s : St) : Out :=
     | .st b disp r => lift do
         let a ← s.reg b; let v ← s.reg r; let m ← wr64 s.mem (ea a disp) v
         pure (go { s with mem := m })
+    | .ld32 d b disp => lift do
+        let a ← s.reg b; let v ← rd32 s.mem (ea a disp)
+        pure (go (s.set d (some v)))
     | .ld8 d b disp => lift do
         let a ← s.reg b; let v ← s.mem.rd (ea a disp)
         pure (go (s.set d (some v)))
@@ -690,5 +696,15 @@ theorem exec_pushI {imm len sp : Nat} {s : St} {m : Mem} (hsp : s.reg 4 = some s
 theorem exec_jmpR {r len t : Nat} {s : St} (h : s.reg r = some t) :
     exec (.jmpR r) len s = .ok { s with rip := t } := by
   simp only [exec, h, lift, bind, Option.bind, pure]
+
+
+/-- The truncation in the semantics: a mapping at the first oracle address, a
+pointer to it in a register. `mov32` keeps the low 32 bits (`v % 2 ^ 32`), and a
+load through the result reads no mapping (`rd64` is `none`, so the `ld` step is
+stuck) where the load through the untruncated pointer reads the buffer. -/
+def truncMem : Mem := [⟨0x7f0000000000, List.replicate 16 0, true⟩]
+
+example : rd64 truncMem 0x7f0000000000 = some 0 := by decide
+example : rd64 truncMem (0x7f0000000000 % 2 ^ 32) = none := by decide
 
 end X86Int
