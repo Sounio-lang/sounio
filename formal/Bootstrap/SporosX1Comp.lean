@@ -137,7 +137,8 @@ def HPost (s s2 : X86Int.St) (h' : Height) (c' sp : Nat) : Prop :=
   s2.reg 4 = some sp ∧ s2.reg 1 = s.reg 1 ∧ s2.reg 7 = s.reg 7 ∧
   s2.reg 13 = s.reg 13 ∧ s2.reg 14 = s.reg 14 ∧
   (∀ x m, x + m ≤ sp - 32 ∨ sp ≤ x → s2.mem.rdN x m = s.mem.rdN x m) ∧
-  wshape s2.mem = wshape s.mem ∧ s2.regs.length = s.regs.length
+  wshape s2.mem = wshape s.mem ∧ s2.regs.length = s.regs.length ∧
+  s2.reg 5 = s.reg 5
 
 theorem rd64_of_frame_of_disjw {m m' : Mem} {w sp off v : Nat}
     (hdisj : sp ≤ w ∨ w + 56 ≤ sp - 32)
@@ -167,9 +168,9 @@ theorem fall_finish {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
     ∃ k s3, run im k (Out.ok s) = Out.ok s3 ∧
       WalkInv pr wd w p sp tbl s3 rest (i + 1) (c + len) h' h' ∧
       (∀ x m, x + m ≤ sp - 32 ∨ sp ≤ x → s3.mem.rdN x m = s.mem.rdN x m) ∧
-      wshape s3.mem = wshape s.mem := by
+      wshape s3.mem = wshape s.mem ∧ s3.reg 5 = s.reg 5 := by
   obtain ⟨hs2r8, hs2r9, hs2r6, hs2r4, hs2r1, hs2r7, hs2r13, hs2r14, hfr2, hsh2,
-    hlen2⟩ := hpost
+    hlen2, hs2r5⟩ := hpost
   have hs0 : hstep pr wd ((wd.ann.lookup i).getD cur) ins = some (some h') := by
     rw [← inv.hlink]; exact hs
   obtain ⟨hb'd, hb'a, hbrest⟩ := hBnd_some_some inv.hb hs0
@@ -221,7 +222,7 @@ theorem fall_finish {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
     rd64_of_frame_of_disjw st.disjw frS (by decide) inv.fouts,
     ?_, ?_, ?_, ?_, ?_, ?_,
     fun x hx => inv.imm x (List.mem_cons_of_mem ins hx), hbrest⟩, frS,
-    hsh3.trans hsh2⟩
+    hsh3.trans hsh2, by rw [hgen3 5 (by decide) (by decide) (by decide) (by decide) (by decide) (by decide) (by decide) (by decide)]; exact hs2r5⟩
   · rw [hgen3 7 (by decide) (by decide) (by decide) (by decide) (by decide)
       (by decide) (by decide) (by decide), hs2r7]; exact inv.r7
   · rw [hgen3 13 (by decide) (by decide) (by decide) (by decide) (by decide)
@@ -293,9 +294,9 @@ theorem none_finish_cons {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
         ((wd.ann.lookup (i + 1)).getD ⟨0, 0⟩)
         ((wd.ann.lookup (i + 1)).getD ⟨0, 0⟩) ∧
       (∀ x m, x + m ≤ sp - 32 ∨ sp ≤ x → s3.mem.rdN x m = s.mem.rdN x m) ∧
-      wshape s3.mem = wshape s.mem := by
+      wshape s3.mem = wshape s.mem ∧ s3.reg 5 = s.reg 5 := by
   obtain ⟨hs2r8, hs2r9, hs2r6, hs2r4, hs2r1, hs2r7, hs2r13, hs2r14, hfr2, hsh2,
-    hlen2⟩ := hpost
+    hlen2, hs2r5⟩ := hpost
   have hs0 : hstep pr wd ((wd.ann.lookup i).getD cur) ins = some none := by
     rw [← inv.hlink]; exact hs
   have hbrest := hBnd_some_none inv.hb hs0
@@ -351,7 +352,7 @@ theorem none_finish_cons {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
     rd64_of_frame_of_disjw st.disjw frS (by decide) inv.fouts,
     ?_, ?_, ?_, ?_, ?_, ?_,
     fun x hx => inv.imm x (List.mem_cons_of_mem ins hx), hbrest⟩, frS,
-    hsh3.trans hsh2⟩
+    hsh3.trans hsh2, by rw [hgen3 5 (by decide) (by decide) (by decide) (by decide) (by decide) (by decide) (by decide) (by decide)]; exact hs2r5⟩
   · rw [hgen3 7 (by decide) (by decide) (by decide) (by decide) (by decide)
       (by decide) (by decide) (by decide), hs2r7]; exact inv.r7
   · rw [hgen3 13 (by decide) (by decide) (by decide) (by decide) (by decide)
@@ -419,9 +420,10 @@ theorem none_finish_nil {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
       s4.reg 1 = some (i + 1) ∧ s4.reg 6 = some (c + len) ∧
       s4.reg 7 = some w ∧ s4.reg 4 = some sp ∧
       (∀ x m, x + m ≤ sp - 32 ∨ sp ≤ x → s4.mem.rdN x m = s.mem.rdN x m) ∧
-      wshape s4.mem = wshape s.mem := by
+      wshape s4.mem = wshape s.mem ∧ s4.reg 5 = s.reg 5 ∧ s4.reg 13 = s.reg 13 ∧
+      s4.reg 14 = s.reg 14 := by
   obtain ⟨hs2r8, hs2r9, hs2r6, hs2r4, hs2r1, hs2r7, hs2r13, hs2r14, hfr2, hsh2,
-    hlen2⟩ := hpost
+    hlen2, hs2r5⟩ := hpost
   have hs0 : hstep pr wd ((wd.ann.lookup i).getD cur) ins = some none := by
     rw [← inv.hlink]; exact hs
   have hhead := hBnd_head inv.hb
@@ -473,10 +475,14 @@ theorem none_finish_nil {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
       (rd64_of_frame_of_disjw st.disjw frS (by decide) inv.fnc)
   refine ⟨k1 + (k2 + (kt + k4)), s4, by
     rw [run_add im k1 (k2 + (kt + k4)), hr1, run_add im k2 (kt + k4), hr2,
-      run_add im kt k4, hrt, hr4], hrip4, hr14, hr64, hr74, hr44, ?_, ?_⟩
+      run_add im kt k4, hrt, hr4], hrip4, hr14, hr64, hr74, hr44, ?_, ?_, ?_,
+    ?_, ?_⟩
   · intro x m hx
     rw [hm4]; exact frS x m hx
   · rw [hm4]; exact hsh3.trans hsh2
+  · rw [hg4 5 (by decide), hgen3 5 (by decide) (by decide) (by decide) (by decide) (by decide) (by decide) (by decide) (by decide)]; exact hs2r5
+  · rw [hg4 13 (by decide), hgen3 13 (by decide) (by decide) (by decide) (by decide) (by decide) (by decide) (by decide) (by decide), hs2r13]
+  · rw [hg4 14 (by decide), hgen3 14 (by decide) (by decide) (by decide) (by decide) (by decide) (by decide) (by decide) (by decide), hs2r14]
 
 theorem hand_lit {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
     {pr : Prog} {wd : Word} {w p sp tbl : Nat} (st : WalkStatic pr wd w p sp tbl)
@@ -528,7 +534,8 @@ theorem hand_lit {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
     by rw [hg2 14 (by decide) (by decide) (by decide), hg1 14 (by decide)],
     by intro x m _; rw [hm2, hm1],
     by rw [hm2, hm1],
-    (run_regs_length k2 hr2).trans (run_regs_length k1 hr1)⟩
+    (run_regs_length k2 hr2).trans (run_regs_length k1 hr1),
+    by rw [hg2 5 (by decide) (by decide) (by decide), hg1 5 (by decide)]⟩
 
 theorem hand_tor {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
     {pr : Prog} {wd : Word} {w p sp tbl : Nat} (st : WalkStatic pr wd w p sp tbl)
@@ -580,7 +587,8 @@ theorem hand_tor {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
     by rw [hg2 14 (by decide) (by decide) (by decide), hg1 14 (by decide)],
     by intro x m _; rw [hm2, hm1],
     by rw [hm2, hm1],
-    (run_regs_length k2 hr2).trans (run_regs_length k1 hr1)⟩
+    (run_regs_length k2 hr2).trans (run_regs_length k1 hr1),
+    by rw [hg2 5 (by decide) (by decide) (by decide), hg1 5 (by decide)]⟩
 
 theorem c_lt_of_inv {pr : Prog} {wd : Word} {w p sp tbl : Nat} {s : X86Int.St}
     {ins : Instr} {rest : List Instr} {i c : Nat} {cur hm : Height}
@@ -651,7 +659,8 @@ theorem hand_str {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
     by rw [hg2 14 (by decide) (by decide) (by decide), hg1 14 (by decide)],
     by intro x m _; rw [hm2, hm1],
     by rw [hm2, hm1],
-    (run_regs_length k2 hr2).trans (run_regs_length k1 hr1)⟩
+    (run_regs_length k2 hr2).trans (run_regs_length k1 hr1),
+    by rw [hg2 5 (by decide) (by decide) (by decide), hg1 5 (by decide)]⟩
 
 theorem hand_fromr {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
     {pr : Prog} {wd : Word} {w p sp tbl : Nat} (st : WalkStatic pr wd w p sp tbl)
@@ -685,7 +694,8 @@ theorem hand_fromr {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
     by rw [hg2 14 (by decide) (by decide) (by decide), hg1 14 (by decide)],
     by intro x m _; rw [hm2, hm1],
     by rw [hm2, hm1],
-    (run_regs_length k2 hr2).trans (run_regs_length k1 hr1)⟩
+    (run_regs_length k2 hr2).trans (run_regs_length k1 hr1),
+    by rw [hg2 5 (by decide) (by decide) (by decide), hg1 5 (by decide)]⟩
 
 theorem hand_rfetch {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
     {pr : Prog} {wd : Word} {w p sp tbl : Nat} (st : WalkStatic pr wd w p sp tbl)
@@ -719,7 +729,8 @@ theorem hand_rfetch {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
     by rw [hg2 14 (by decide) (by decide) (by decide), hg1 14 (by decide)],
     by intro x m _; rw [hm2, hm1],
     by rw [hm2, hm1],
-    (run_regs_length k2 hr2).trans (run_regs_length k1 hr1)⟩
+    (run_regs_length k2 hr2).trans (run_regs_length k1 hr1),
+    by rw [hg2 5 (by decide) (by decide) (by decide), hg1 5 (by decide)]⟩
 
 theorem hand_pick {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
     {pr : Prog} {wd : Word} {w p sp tbl : Nat} (st : WalkStatic pr wd w p sp tbl)
@@ -777,7 +788,8 @@ theorem hand_pick {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
         | inr h => exact Or.inr h
       rw [hfr2 x m hx8, hm1],
     hsh2.trans (congrArg wshape hm1),
-    (run_regs_length k2 hr2).trans (run_regs_length k1 hr1)⟩
+    (run_regs_length k2 hr2).trans (run_regs_length k1 hr1),
+    by rw [hg2 5 (by decide) (by decide) (by decide) (by decide) (by decide), hg1 5 (by decide)]⟩
 
 theorem hand_locget {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
     {pr : Prog} {wd : Word} {w p sp tbl : Nat} (st : WalkStatic pr wd w p sp tbl)
@@ -836,7 +848,8 @@ theorem hand_locget {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
         | inr h => exact Or.inr h
       rw [hfr2 x m hx8, hm1],
     hsh2.trans (congrArg wshape hm1),
-    (run_regs_length k2 hr2).trans (run_regs_length k1 hr1)⟩
+    (run_regs_length k2 hr2).trans (run_regs_length k1 hr1),
+    by rw [hg2 5 (by decide) (by decide) (by decide) (by decide) (by decide) (by decide), hg1 5 (by decide)]⟩
 
 theorem hand_locset {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
     {pr : Prog} {wd : Word} {w p sp tbl : Nat} (st : WalkStatic pr wd w p sp tbl)
@@ -895,7 +908,8 @@ theorem hand_locset {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
         | inr h => exact Or.inr h
       rw [hfr2 x m hx8, hm1],
     hsh2.trans (congrArg wshape hm1),
-    (run_regs_length k2 hr2).trans (run_regs_length k1 hr1)⟩
+    (run_regs_length k2 hr2).trans (run_regs_length k1 hr1),
+    by rw [hg2 5 (by decide) (by decide) (by decide) (by decide) (by decide) (by decide), hg1 5 (by decide)]⟩
 
 theorem hand_jz {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
     {pr : Prog} {wd : Word} {w p sp tbl : Nat} (st : WalkStatic pr wd w p sp tbl)
@@ -945,7 +959,8 @@ theorem hand_jz {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
     by rw [hg2 14 (by decide) (by decide) (by decide) (by decide) (by decide) (by decide) (by decide) (by decide) (by decide), hg1 14 (by decide)],
     by intro x m hx; rw [hfr2 x m hx, hm1],
     hsh2.trans (congrArg wshape hm1),
-    (run_regs_length k2 hr2).trans (run_regs_length k1 hr1)⟩
+    (run_regs_length k2 hr2).trans (run_regs_length k1 hr1),
+    by rw [hg2 5 (by decide) (by decide) (by decide) (by decide) (by decide) (by decide) (by decide) (by decide) (by decide), hg1 5 (by decide)]⟩
 
 theorem hand_jnz {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
     {pr : Prog} {wd : Word} {w p sp tbl : Nat} (st : WalkStatic pr wd w p sp tbl)
@@ -995,7 +1010,8 @@ theorem hand_jnz {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
     by rw [hg2 14 (by decide) (by decide) (by decide) (by decide) (by decide) (by decide) (by decide) (by decide) (by decide), hg1 14 (by decide)],
     by intro x m hx; rw [hfr2 x m hx, hm1],
     hsh2.trans (congrArg wshape hm1),
-    (run_regs_length k2 hr2).trans (run_regs_length k1 hr1)⟩
+    (run_regs_length k2 hr2).trans (run_regs_length k1 hr1),
+    by rw [hg2 5 (by decide) (by decide) (by decide) (by decide) (by decide) (by decide) (by decide) (by decide) (by decide), hg1 5 (by decide)]⟩
 
 theorem hand_jmp {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
     {pr : Prog} {wd : Word} {w p sp tbl : Nat} (st : WalkStatic pr wd w p sp tbl)
@@ -1045,7 +1061,8 @@ theorem hand_jmp {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
     by rw [hg2 14 (by decide) (by decide) (by decide) (by decide) (by decide) (by decide) (by decide) (by decide), hg1 14 (by decide)],
     by intro x m hx; rw [hfr2 x m hx, hm1],
     hsh2.trans (congrArg wshape hm1),
-    (run_regs_length k2 hr2).trans (run_regs_length k1 hr1)⟩
+    (run_regs_length k2 hr2).trans (run_regs_length k1 hr1),
+    by rw [hg2 5 (by decide) (by decide) (by decide) (by decide) (by decide) (by decide) (by decide) (by decide), hg1 5 (by decide)]⟩
 
 theorem hand_call {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
     {pr : Prog} {wd : Word} {w p sp tbl : Nat} (st : WalkStatic pr wd w p sp tbl)
@@ -1122,7 +1139,8 @@ theorem hand_call {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
         | inr h => exact Or.inr h
       rw [hfr2 x m hx8, hm1],
     hsh2.trans (congrArg wshape hm1),
-    (run_regs_length k2 hr2).trans (run_regs_length k1 hr1)⟩
+    (run_regs_length k2 hr2).trans (run_regs_length k1 hr1),
+    by rw [hg2 5 (by decide) (by decide) (by decide) (by decide) (by decide) (by decide) (by decide), hg1 5 (by decide)]⟩
 
 theorem hand_prim_fall {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
     {pr : Prog} {wd : Word} {w p sp tbl : Nat} (st : WalkStatic pr wd w p sp tbl)
@@ -1172,7 +1190,8 @@ theorem hand_prim_fall {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
     by rw [hg2 14 (by decide) (by decide) (by decide) (by decide) (by decide), hg1 14 (by decide)],
     by intro x m _; rw [hm2, hm1],
     by rw [hm2, hm1],
-    (run_regs_length k2 hr2).trans (run_regs_length k1 hr1)⟩
+    (run_regs_length k2 hr2).trans (run_regs_length k1 hr1),
+    by rw [hg2 5 (by decide) (by decide) (by decide) (by decide) (by decide), hg1 5 (by decide)]⟩
 
 theorem hand_prim_exit {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
     {pr : Prog} {wd : Word} {w p sp tbl : Nat} (st : WalkStatic pr wd w p sp tbl)
@@ -1214,7 +1233,8 @@ theorem hand_prim_exit {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
     by rw [hg2 14 (by decide) (by decide) (by decide) (by decide) (by decide), hg1 14 (by decide)],
     by intro x m _; rw [hm2, hm1],
     by rw [hm2, hm1],
-    (run_regs_length k2 hr2).trans (run_regs_length k1 hr1)⟩
+    (run_regs_length k2 hr2).trans (run_regs_length k1 hr1),
+    by rw [hg2 5 (by decide) (by decide) (by decide) (by decide) (by decide), hg1 5 (by decide)]⟩
 
 theorem hand_ret {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
     {pr : Prog} {wd : Word} {w p sp tbl : Nat} (st : WalkStatic pr wd w p sp tbl)
@@ -1262,7 +1282,8 @@ theorem hand_ret {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
     by rw [hg2 14 (by decide) (by decide), hg1 14 (by decide)],
     by intro x m _; rw [hm2, hm1],
     by rw [hm2, hm1],
-    (run_regs_length k2 hr2).trans (run_regs_length k1 hr1)⟩
+    (run_regs_length k2 hr2).trans (run_regs_length k1 hr1),
+    by rw [hg2 5 (by decide) (by decide), hg1 5 (by decide)]⟩
 
 
 
@@ -1282,7 +1303,7 @@ theorem fall_finish1 {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
     ∃ k s3, run im k (Out.ok s) = Out.ok s3 ∧
       WalkInv pr wd w p sp tbl s3 rest (i + 1) (c + len) h' h' ∧
       (∀ x m, x + m ≤ sp - 32 ∨ sp ≤ x → s3.mem.rdN x m = s.mem.rdN x m) ∧
-      wshape s3.mem = wshape s.mem :=
+      wshape s3.mem = wshape s.mem ∧ s3.reg 5 = s.reg 5 :=
   fall_finish cfg st inv hs hann hi1 hlen hr (k2 := 0) (s1 := s2) (run_zero im (Out.ok s2))
     hrip2 hpost
 
@@ -1302,7 +1323,7 @@ theorem none_finish_cons1 {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
         ((wd.ann.lookup (i + 1)).getD ⟨0, 0⟩)
         ((wd.ann.lookup (i + 1)).getD ⟨0, 0⟩) ∧
       (∀ x m, x + m ≤ sp - 32 ∨ sp ≤ x → s3.mem.rdN x m = s.mem.rdN x m) ∧
-      wshape s3.mem = wshape s.mem :=
+      wshape s3.mem = wshape s.mem ∧ s3.reg 5 = s.reg 5 :=
   none_finish_cons cfg st inv hs hi1 hlen hr (k2 := 0) (s1 := s2) (run_zero im (Out.ok s2))
     hrip2 hpost
 
@@ -1320,7 +1341,8 @@ theorem none_finish_nil1 {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
       s4.reg 1 = some (i + 1) ∧ s4.reg 6 = some (c + len) ∧
       s4.reg 7 = some w ∧ s4.reg 4 = some sp ∧
       (∀ x m, x + m ≤ sp - 32 ∨ sp ≤ x → s4.mem.rdN x m = s.mem.rdN x m) ∧
-      wshape s4.mem = wshape s.mem :=
+      wshape s4.mem = wshape s.mem ∧ s4.reg 5 = s.reg 5 ∧ s4.reg 13 = s.reg 13 ∧
+      s4.reg 14 = s.reg 14 :=
   none_finish_nil cfg st inv hs hlen hr (k2 := 0) (s1 := s2) (run_zero im (Out.ok s2)) hrip2
     hpost
 
@@ -1340,16 +1362,17 @@ theorem walk_loop {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
         s'.reg 6 = some (c + codeBytes code) ∧
         s'.reg 7 = some w ∧ s'.reg 4 = some sp ∧
         (∀ x m, x + m ≤ sp - 32 ∨ sp ≤ x → s'.mem.rdN x m = s.mem.rdN x m) ∧
-        wshape s'.mem = wshape s.mem := by
+        wshape s'.mem = wshape s.mem ∧ s'.reg 5 = s.reg 5 ∧
+        s'.reg 13 = s.reg 13 ∧ s'.reg 14 = s.reg 14 := by
   intro code
   induction code with
   | nil =>
     intro i c cur hm s inv hw
-    obtain ⟨k, s', hr, hrip, -, hr1, hr6, hr7, -, -, hr4, -, hmD⟩ :=
+    obtain ⟨k, s', hr, hrip, -, hr1, hr6, hr7, -, -, hr4, hgD, hmD⟩ :=
       WalkDone_triple cfg.walk (by decide) hm c i w sp wd.code.length st.w56
         (by have h := inv.isum; simp at h; omega) s inv.rip inv.r8 inv.r9
         inv.r6 inv.r4 inv.r7 inv.r1 inv.len16 inv.fnc
-    refine ⟨k, s', hr, hrip, ?_, ?_, hr7, hr4, ?_, ?_⟩
+    refine ⟨k, s', hr, hrip, ?_, ?_, hr7, hr4, ?_, ?_, hgD 5 (by decide), hgD 13 (by decide), hgD 14 (by decide)⟩
     · simpa using hr1
     · have e : c + codeBytes ([] : List Instr) = c := rfl
       rw [e]; exact hr6
@@ -1394,13 +1417,13 @@ theorem walk_loop {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
               have h := inv.isum
               simp only [List.length_cons] at h
               omega
-            obtain ⟨k3, s3, hr3, inv3, hfr3i, hsh3i⟩ :=
+            obtain ⟨k3, s3, hr3, inv3, hfr3i, hsh3i, hr53⟩ :=
               fall_finish1 cfg st inv hs hw2.1 hi1 rfl hrh hrip2 hpost
-            obtain ⟨k4, s4, hr4, hrip4, hr14, hr64, hr74, hr44, hfr4, hsh4⟩ :=
+            obtain ⟨k4, s4, hr4, hrip4, hr14, hr64, hr74, hr44, hfr4, hsh4, hr54, hr134, hr144⟩ :=
               ih (i + 1) (c + 1) h' h' s3 inv3 hw2.2
             refine ⟨k3 + k4, s4, by rw [run_add im k3 k4, hr3, hr4], hrip4, ?_, ?_,
               hr74, hr44,
-              fun x m hx => (hfr4 x m hx).trans (hfr3i x m hx), hsh4.trans hsh3i⟩
+              fun x m hx => (hfr4 x m hx).trans (hfr3i x m hx), hsh4.trans hsh3i, hr54.trans hr53, by rw [hr134, inv3.r13, inv.r13], by rw [hr144, inv3.r14, inv.r14]⟩
             · have e : (i + 1) + (y :: ys).length =
                   i + (Instr.prim pq :: y :: ys).length := by
                 simp only [List.length_cons]; omega
@@ -1418,9 +1441,9 @@ theorem walk_loop {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
             rw [hge]; exact hs
           cases rest with
           | nil =>
-            obtain ⟨k3, s4, hr3, hrip4, hr14, hr64, hr74, hr44, hfr4, hsh4⟩ :=
+            obtain ⟨k3, s4, hr3, hrip4, hr14, hr64, hr74, hr44, hfr4, hsh4, hr54, hr134, hr144⟩ :=
               none_finish_nil1 cfg st inv hs rfl hrh hrip2 hpost
-            refine ⟨k3, s4, hr3, hrip4, ?_, ?_, hr74, hr44, hfr4, hsh4⟩
+            refine ⟨k3, s4, hr3, hrip4, ?_, ?_, hr74, hr44, hfr4, hsh4, hr54, hr134, hr144⟩
             · simpa using hr14
             · have e : c + codeBytes [Instr.prim pq] = c + 1 := rfl
               rw [e]; exact hr64
@@ -1433,13 +1456,13 @@ theorem walk_loop {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
                 ((wd.ann.lookup (i + 1)).getD ⟨0, 0⟩) = true := by
               simp only [Sporos.walk, hs0] at hw
               exact hw
-            obtain ⟨k3, s3, hr3, inv3, hfr3i, hsh3i⟩ :=
+            obtain ⟨k3, s3, hr3, inv3, hfr3i, hsh3i, hr53⟩ :=
               none_finish_cons1 cfg st inv hs hi1 rfl hrh hrip2 hpost
-            obtain ⟨k4, s4, hr4, hrip4, hr14, hr64, hr74, hr44, hfr4, hsh4⟩ :=
+            obtain ⟨k4, s4, hr4, hrip4, hr14, hr64, hr74, hr44, hfr4, hsh4, hr54, hr134, hr144⟩ :=
               ih (i + 1) (c + 1) _ _ s3 inv3 hwrest
             refine ⟨k3 + k4, s4, by rw [run_add im k3 k4, hr3, hr4], hrip4, ?_, ?_,
               hr74, hr44,
-              fun x m hx => (hfr4 x m hx).trans (hfr3i x m hx), hsh4.trans hsh3i⟩
+              fun x m hx => (hfr4 x m hx).trans (hfr3i x m hx), hsh4.trans hsh3i, hr54.trans hr53, by rw [hr134, inv3.r13, inv.r13], by rw [hr144, inv3.r14, inv.r14]⟩
             · have e : (i + 1) + (y :: ys).length =
                   i + (Instr.prim pq :: y :: ys).length := by
                 simp only [List.length_cons]; omega
@@ -1477,13 +1500,13 @@ theorem walk_loop {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
           have h := inv.isum
           simp only [List.length_cons] at h
           omega
-        obtain ⟨k3, s3, hr3, inv3, hfr3i, hsh3i⟩ :=
+        obtain ⟨k3, s3, hr3, inv3, hfr3i, hsh3i, hr53⟩ :=
           fall_finish1 cfg st inv hs hw2.1 hi1 rfl hrh hrip2 hpost
-        obtain ⟨k4, s4, hr4, hrip4, hr14, hr64, hr74, hr44, hfr4, hsh4⟩ :=
+        obtain ⟨k4, s4, hr4, hrip4, hr14, hr64, hr74, hr44, hfr4, hsh4, hr54, hr134, hr144⟩ :=
           ih (i + 1) (c + 9) ⟨hm.d + 1, hm.a⟩ ⟨hm.d + 1, hm.a⟩ s3 inv3 hw2.2
         refine ⟨k3 + k4, s4, by rw [run_add im k3 k4, hr3, hr4], hrip4, ?_, ?_,
           hr74, hr44,
-          fun x m hx => (hfr4 x m hx).trans (hfr3i x m hx), hsh4.trans hsh3i⟩
+          fun x m hx => (hfr4 x m hx).trans (hfr3i x m hx), hsh4.trans hsh3i, hr54.trans hr53, by rw [hr134, inv3.r13, inv.r13], by rw [hr144, inv3.r14, inv.r14]⟩
         · have e : (i + 1) + (y :: ys).length =
               i + (Instr.lit lv :: y :: ys).length := by
             simp only [List.length_cons]; omega
@@ -1521,13 +1544,13 @@ theorem walk_loop {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
           have h := inv.isum
           simp only [List.length_cons] at h
           omega
-        obtain ⟨k3, s3, hr3, inv3, hfr3i, hsh3i⟩ :=
+        obtain ⟨k3, s3, hr3, inv3, hfr3i, hsh3i, hr53⟩ :=
           fall_finish1 cfg st inv hs hw2.1 hi1 rfl hrh hrip2 hpost
-        obtain ⟨k4, s4, hr4, hrip4, hr14, hr64, hr74, hr44, hfr4, hsh4⟩ :=
+        obtain ⟨k4, s4, hr4, hrip4, hr14, hr64, hr74, hr44, hfr4, hsh4, hr54, hr134, hr144⟩ :=
           ih (i + 1) (c + 5) ⟨hm.d + 2, hm.a⟩ ⟨hm.d + 2, hm.a⟩ s3 inv3 hw2.2
         refine ⟨k3 + k4, s4, by rw [run_add im k3 k4, hr3, hr4], hrip4, ?_, ?_,
           hr74, hr44,
-          fun x m hx => (hfr4 x m hx).trans (hfr3i x m hx), hsh4.trans hsh3i⟩
+          fun x m hx => (hfr4 x m hx).trans (hfr3i x m hx), hsh4.trans hsh3i, hr54.trans hr53, by rw [hr134, inv3.r13, inv.r13], by rw [hr144, inv3.r14, inv.r14]⟩
         · have e : (i + 1) + (y :: ys).length =
               i + (Instr.str si :: y :: ys).length := by
             simp only [List.length_cons]; omega
@@ -1575,13 +1598,13 @@ theorem walk_loop {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
               have h := inv.isum
               simp only [List.length_cons] at h
               omega
-            obtain ⟨k3, s3, hr3, inv3, hfr3i, hsh3i⟩ :=
+            obtain ⟨k3, s3, hr3, inv3, hfr3i, hsh3i, hr53⟩ :=
               fall_finish1 cfg st inv hs hw2.1 hi1 rfl hrh hrip2 hpost
-            obtain ⟨k4, s4, hr4, hrip4, hr14, hr64, hr74, hr44, hfr4, hsh4⟩ :=
+            obtain ⟨k4, s4, hr4, hrip4, hr14, hr64, hr74, hr44, hfr4, hsh4, hr54, hr134, hr144⟩ :=
               ih (i + 1) (c + 5) ⟨hm.d + 1, hm.a⟩ ⟨hm.d + 1, hm.a⟩ s3 inv3 hw2.2
             refine ⟨k3 + k4, s4, by rw [run_add im k3 k4, hr3, hr4], hrip4, ?_, ?_,
               hr74, hr44,
-              fun x m hx => (hfr4 x m hx).trans (hfr3i x m hx), hsh4.trans hsh3i⟩
+              fun x m hx => (hfr4 x m hx).trans (hfr3i x m hx), hsh4.trans hsh3i, hr54.trans hr53, by rw [hr134, inv3.r13, inv.r13], by rw [hr144, inv3.r14, inv.r14]⟩
             · have e : (i + 1) + (y :: ys).length =
                   i + (Instr.pick pk :: y :: ys).length := by
                 simp only [List.length_cons]; omega
@@ -1629,13 +1652,13 @@ theorem walk_loop {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
               have h := inv.isum
               simp only [List.length_cons] at h
               omega
-            obtain ⟨k3, s3, hr3, inv3, hfr3i, hsh3i⟩ :=
+            obtain ⟨k3, s3, hr3, inv3, hfr3i, hsh3i, hr53⟩ :=
               fall_finish1 cfg st inv hs hw2.1 hi1 rfl hrh hrip2 hpost
-            obtain ⟨k4, s4, hr4, hrip4, hr14, hr64, hr74, hr44, hfr4, hsh4⟩ :=
+            obtain ⟨k4, s4, hr4, hrip4, hr14, hr64, hr74, hr44, hfr4, hsh4, hr54, hr134, hr144⟩ :=
               ih (i + 1) (c + 1) ⟨hm.d - 1, hm.a + 1⟩ ⟨hm.d - 1, hm.a + 1⟩ s3 inv3 hw2.2
             refine ⟨k3 + k4, s4, by rw [run_add im k3 k4, hr3, hr4], hrip4, ?_, ?_,
               hr74, hr44,
-              fun x m hx => (hfr4 x m hx).trans (hfr3i x m hx), hsh4.trans hsh3i⟩
+              fun x m hx => (hfr4 x m hx).trans (hfr3i x m hx), hsh4.trans hsh3i, hr54.trans hr53, by rw [hr134, inv3.r13, inv.r13], by rw [hr144, inv3.r14, inv.r14]⟩
             · have e : (i + 1) + (y :: ys).length =
                   i + (Instr.tor :: y :: ys).length := by
                 simp only [List.length_cons]; omega
@@ -1683,13 +1706,13 @@ theorem walk_loop {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
               have h := inv.isum
               simp only [List.length_cons] at h
               omega
-            obtain ⟨k3, s3, hr3, inv3, hfr3i, hsh3i⟩ :=
+            obtain ⟨k3, s3, hr3, inv3, hfr3i, hsh3i, hr53⟩ :=
               fall_finish1 cfg st inv hs hw2.1 hi1 rfl hrh hrip2 hpost
-            obtain ⟨k4, s4, hr4, hrip4, hr14, hr64, hr74, hr44, hfr4, hsh4⟩ :=
+            obtain ⟨k4, s4, hr4, hrip4, hr14, hr64, hr74, hr44, hfr4, hsh4, hr54, hr134, hr144⟩ :=
               ih (i + 1) (c + 1) ⟨hm.d + 1, hm.a - 1⟩ ⟨hm.d + 1, hm.a - 1⟩ s3 inv3 hw2.2
             refine ⟨k3 + k4, s4, by rw [run_add im k3 k4, hr3, hr4], hrip4, ?_, ?_,
               hr74, hr44,
-              fun x m hx => (hfr4 x m hx).trans (hfr3i x m hx), hsh4.trans hsh3i⟩
+              fun x m hx => (hfr4 x m hx).trans (hfr3i x m hx), hsh4.trans hsh3i, hr54.trans hr53, by rw [hr134, inv3.r13, inv.r13], by rw [hr144, inv3.r14, inv.r14]⟩
             · have e : (i + 1) + (y :: ys).length =
                   i + (Instr.fromr :: y :: ys).length := by
                 simp only [List.length_cons]; omega
@@ -1737,13 +1760,13 @@ theorem walk_loop {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
               have h := inv.isum
               simp only [List.length_cons] at h
               omega
-            obtain ⟨k3, s3, hr3, inv3, hfr3i, hsh3i⟩ :=
+            obtain ⟨k3, s3, hr3, inv3, hfr3i, hsh3i, hr53⟩ :=
               fall_finish1 cfg st inv hs hw2.1 hi1 rfl hrh hrip2 hpost
-            obtain ⟨k4, s4, hr4, hrip4, hr14, hr64, hr74, hr44, hfr4, hsh4⟩ :=
+            obtain ⟨k4, s4, hr4, hrip4, hr14, hr64, hr74, hr44, hfr4, hsh4, hr54, hr134, hr144⟩ :=
               ih (i + 1) (c + 1) ⟨hm.d + 1, hm.a⟩ ⟨hm.d + 1, hm.a⟩ s3 inv3 hw2.2
             refine ⟨k3 + k4, s4, by rw [run_add im k3 k4, hr3, hr4], hrip4, ?_, ?_,
               hr74, hr44,
-              fun x m hx => (hfr4 x m hx).trans (hfr3i x m hx), hsh4.trans hsh3i⟩
+              fun x m hx => (hfr4 x m hx).trans (hfr3i x m hx), hsh4.trans hsh3i, hr54.trans hr53, by rw [hr134, inv3.r13, inv.r13], by rw [hr144, inv3.r14, inv.r14]⟩
             · have e : (i + 1) + (y :: ys).length =
                   i + (Instr.rfetch :: y :: ys).length := by
                 simp only [List.length_cons]; omega
@@ -1791,13 +1814,13 @@ theorem walk_loop {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
               have h := inv.isum
               simp only [List.length_cons] at h
               omega
-            obtain ⟨k3, s3, hr3, inv3, hfr3i, hsh3i⟩ :=
+            obtain ⟨k3, s3, hr3, inv3, hfr3i, hsh3i, hr53⟩ :=
               fall_finish1 cfg st inv hs hw2.1 hi1 rfl hrh hrip2 hpost
-            obtain ⟨k4, s4, hr4, hrip4, hr14, hr64, hr74, hr44, hfr4, hsh4⟩ :=
+            obtain ⟨k4, s4, hr4, hrip4, hr14, hr64, hr74, hr44, hfr4, hsh4, hr54, hr134, hr144⟩ :=
               ih (i + 1) (c + 5) ⟨hm.d + 1, hm.a⟩ ⟨hm.d + 1, hm.a⟩ s3 inv3 hw2.2
             refine ⟨k3 + k4, s4, by rw [run_add im k3 k4, hr3, hr4], hrip4, ?_, ?_,
               hr74, hr44,
-              fun x m hx => (hfr4 x m hx).trans (hfr3i x m hx), hsh4.trans hsh3i⟩
+              fun x m hx => (hfr4 x m hx).trans (hfr3i x m hx), hsh4.trans hsh3i, hr54.trans hr53, by rw [hr134, inv3.r13, inv.r13], by rw [hr144, inv3.r14, inv.r14]⟩
             · have e : (i + 1) + (y :: ys).length =
                   i + (Instr.locget li :: y :: ys).length := by
                 simp only [List.length_cons]; omega
@@ -1845,13 +1868,13 @@ theorem walk_loop {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
               have h := inv.isum
               simp only [List.length_cons] at h
               omega
-            obtain ⟨k3, s3, hr3, inv3, hfr3i, hsh3i⟩ :=
+            obtain ⟨k3, s3, hr3, inv3, hfr3i, hsh3i, hr53⟩ :=
               fall_finish1 cfg st inv hs hw2.1 hi1 rfl hrh hrip2 hpost
-            obtain ⟨k4, s4, hr4, hrip4, hr14, hr64, hr74, hr44, hfr4, hsh4⟩ :=
+            obtain ⟨k4, s4, hr4, hrip4, hr14, hr64, hr74, hr44, hfr4, hsh4, hr54, hr134, hr144⟩ :=
               ih (i + 1) (c + 5) ⟨hm.d - 1, hm.a⟩ ⟨hm.d - 1, hm.a⟩ s3 inv3 hw2.2
             refine ⟨k3 + k4, s4, by rw [run_add im k3 k4, hr3, hr4], hrip4, ?_, ?_,
               hr74, hr44,
-              fun x m hx => (hfr4 x m hx).trans (hfr3i x m hx), hsh4.trans hsh3i⟩
+              fun x m hx => (hfr4 x m hx).trans (hfr3i x m hx), hsh4.trans hsh3i, hr54.trans hr53, by rw [hr134, inv3.r13, inv.r13], by rw [hr144, inv3.r14, inv.r14]⟩
             · have e : (i + 1) + (y :: ys).length =
                   i + (Instr.locset ls :: y :: ys).length := by
                 simp only [List.length_cons]; omega
@@ -1880,9 +1903,9 @@ theorem walk_loop {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
             rw [hge]; exact hs
           cases rest with
           | nil =>
-            obtain ⟨k3, s4, hr3, hrip4, hr14, hr64, hr74, hr44, hfr4, hsh4⟩ :=
+            obtain ⟨k3, s4, hr3, hrip4, hr14, hr64, hr74, hr44, hfr4, hsh4, hr54, hr134, hr144⟩ :=
               none_finish_nil1 cfg st inv hs rfl hrh hrip2 hpost
-            refine ⟨k3, s4, hr3, hrip4, ?_, ?_, hr74, hr44, hfr4, hsh4⟩
+            refine ⟨k3, s4, hr3, hrip4, ?_, ?_, hr74, hr44, hfr4, hsh4, hr54, hr134, hr144⟩
             · simpa using hr14
             · have e : c + codeBytes [Instr.jmp jt] = c + 5 := rfl
               rw [e]; exact hr64
@@ -1895,13 +1918,13 @@ theorem walk_loop {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
                 ((wd.ann.lookup (i + 1)).getD ⟨0, 0⟩) = true := by
               simp only [Sporos.walk, hs0] at hw
               exact hw
-            obtain ⟨k3, s3, hr3, inv3, hfr3i, hsh3i⟩ :=
+            obtain ⟨k3, s3, hr3, inv3, hfr3i, hsh3i, hr53⟩ :=
               none_finish_cons1 cfg st inv hs hi1 rfl hrh hrip2 hpost
-            obtain ⟨k4, s4, hr4, hrip4, hr14, hr64, hr74, hr44, hfr4, hsh4⟩ :=
+            obtain ⟨k4, s4, hr4, hrip4, hr14, hr64, hr74, hr44, hfr4, hsh4, hr54, hr134, hr144⟩ :=
               ih (i + 1) (c + 5) _ _ s3 inv3 hwrest
             refine ⟨k3 + k4, s4, by rw [run_add im k3 k4, hr3, hr4], hrip4, ?_, ?_,
               hr74, hr44,
-              fun x m hx => (hfr4 x m hx).trans (hfr3i x m hx), hsh4.trans hsh3i⟩
+              fun x m hx => (hfr4 x m hx).trans (hfr3i x m hx), hsh4.trans hsh3i, hr54.trans hr53, by rw [hr134, inv3.r13, inv.r13], by rw [hr144, inv3.r14, inv.r14]⟩
             · have e : (i + 1) + (y :: ys).length =
                   i + (Instr.jmp jt :: y :: ys).length := by
                 simp only [List.length_cons]; omega
@@ -1949,13 +1972,13 @@ theorem walk_loop {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
               have h := inv.isum
               simp only [List.length_cons] at h
               omega
-            obtain ⟨k3, s3, hr3, inv3, hfr3i, hsh3i⟩ :=
+            obtain ⟨k3, s3, hr3, inv3, hfr3i, hsh3i, hr53⟩ :=
               fall_finish1 cfg st inv hs hw2.1 hi1 rfl hrh hrip2 hpost
-            obtain ⟨k4, s4, hr4, hrip4, hr14, hr64, hr74, hr44, hfr4, hsh4⟩ :=
+            obtain ⟨k4, s4, hr4, hrip4, hr14, hr64, hr74, hr44, hfr4, hsh4, hr54, hr134, hr144⟩ :=
               ih (i + 1) (c + 5) ⟨hm.d - 1, hm.a⟩ ⟨hm.d - 1, hm.a⟩ s3 inv3 hw2.2
             refine ⟨k3 + k4, s4, by rw [run_add im k3 k4, hr3, hr4], hrip4, ?_, ?_,
               hr74, hr44,
-              fun x m hx => (hfr4 x m hx).trans (hfr3i x m hx), hsh4.trans hsh3i⟩
+              fun x m hx => (hfr4 x m hx).trans (hfr3i x m hx), hsh4.trans hsh3i, hr54.trans hr53, by rw [hr134, inv3.r13, inv.r13], by rw [hr144, inv3.r14, inv.r14]⟩
             · have e : (i + 1) + (y :: ys).length =
                   i + (Instr.jz zt :: y :: ys).length := by
                 simp only [List.length_cons]; omega
@@ -2003,13 +2026,13 @@ theorem walk_loop {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
               have h := inv.isum
               simp only [List.length_cons] at h
               omega
-            obtain ⟨k3, s3, hr3, inv3, hfr3i, hsh3i⟩ :=
+            obtain ⟨k3, s3, hr3, inv3, hfr3i, hsh3i, hr53⟩ :=
               fall_finish1 cfg st inv hs hw2.1 hi1 rfl hrh hrip2 hpost
-            obtain ⟨k4, s4, hr4, hrip4, hr14, hr64, hr74, hr44, hfr4, hsh4⟩ :=
+            obtain ⟨k4, s4, hr4, hrip4, hr14, hr64, hr74, hr44, hfr4, hsh4, hr54, hr134, hr144⟩ :=
               ih (i + 1) (c + 5) ⟨hm.d - 1, hm.a⟩ ⟨hm.d - 1, hm.a⟩ s3 inv3 hw2.2
             refine ⟨k3 + k4, s4, by rw [run_add im k3 k4, hr3, hr4], hrip4, ?_, ?_,
               hr74, hr44,
-              fun x m hx => (hfr4 x m hx).trans (hfr3i x m hx), hsh4.trans hsh3i⟩
+              fun x m hx => (hfr4 x m hx).trans (hfr3i x m hx), hsh4.trans hsh3i, hr54.trans hr53, by rw [hr134, inv3.r13, inv.r13], by rw [hr144, inv3.r14, inv.r14]⟩
             · have e : (i + 1) + (y :: ys).length =
                   i + (Instr.jnz nt :: y :: ys).length := by
                 simp only [List.length_cons]; omega
@@ -2061,13 +2084,13 @@ theorem walk_loop {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
               have h := inv.isum
               simp only [List.length_cons] at h
               omega
-            obtain ⟨k3, s3, hr3, inv3, hfr3i, hsh3i⟩ :=
+            obtain ⟨k3, s3, hr3, inv3, hfr3i, hsh3i, hr53⟩ :=
               fall_finish1 cfg st inv hs hw2.1 hi1 rfl hrh hrip2 hpost
-            obtain ⟨k4, s4, hr4, hrip4, hr14, hr64, hr74, hr44, hfr4, hsh4⟩ :=
+            obtain ⟨k4, s4, hr4, hrip4, hr14, hr64, hr74, hr44, hfr4, hsh4, hr54, hr134, hr144⟩ :=
               ih (i + 1) (c + 5) h' h' s3 inv3 hw2.2
             refine ⟨k3 + k4, s4, by rw [run_add im k3 k4, hr3, hr4], hrip4, ?_, ?_,
               hr74, hr44,
-              fun x m hx => (hfr4 x m hx).trans (hfr3i x m hx), hsh4.trans hsh3i⟩
+              fun x m hx => (hfr4 x m hx).trans (hfr3i x m hx), hsh4.trans hsh3i, hr54.trans hr53, by rw [hr134, inv3.r13, inv.r13], by rw [hr144, inv3.r14, inv.r14]⟩
             · have e : (i + 1) + (y :: ys).length =
                   i + (Instr.call cwidx :: y :: ys).length := by
                 simp only [List.length_cons]; omega
@@ -2096,9 +2119,9 @@ theorem walk_loop {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
             rw [hge]; exact hs
           cases rest with
           | nil =>
-            obtain ⟨k3, s4, hr3, hrip4, hr14, hr64, hr74, hr44, hfr4, hsh4⟩ :=
+            obtain ⟨k3, s4, hr3, hrip4, hr14, hr64, hr74, hr44, hfr4, hsh4, hr54, hr134, hr144⟩ :=
               none_finish_nil1 cfg st inv hs rfl hrh hrip2 hpost
-            refine ⟨k3, s4, hr3, hrip4, ?_, ?_, hr74, hr44, hfr4, hsh4⟩
+            refine ⟨k3, s4, hr3, hrip4, ?_, ?_, hr74, hr44, hfr4, hsh4, hr54, hr134, hr144⟩
             · simpa using hr14
             · have e : c + codeBytes [Instr.ret] = c + 1 := rfl
               rw [e]; exact hr64
@@ -2111,13 +2134,13 @@ theorem walk_loop {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
                 ((wd.ann.lookup (i + 1)).getD ⟨0, 0⟩) = true := by
               simp only [Sporos.walk, hs0] at hw
               exact hw
-            obtain ⟨k3, s3, hr3, inv3, hfr3i, hsh3i⟩ :=
+            obtain ⟨k3, s3, hr3, inv3, hfr3i, hsh3i, hr53⟩ :=
               none_finish_cons1 cfg st inv hs hi1 rfl hrh hrip2 hpost
-            obtain ⟨k4, s4, hr4, hrip4, hr14, hr64, hr74, hr44, hfr4, hsh4⟩ :=
+            obtain ⟨k4, s4, hr4, hrip4, hr14, hr64, hr74, hr44, hfr4, hsh4, hr54, hr134, hr144⟩ :=
               ih (i + 1) (c + 1) _ _ s3 inv3 hwrest
             refine ⟨k3 + k4, s4, by rw [run_add im k3 k4, hr3, hr4], hrip4, ?_, ?_,
               hr74, hr44,
-              fun x m hx => (hfr4 x m hx).trans (hfr3i x m hx), hsh4.trans hsh3i⟩
+              fun x m hx => (hfr4 x m hx).trans (hfr3i x m hx), hsh4.trans hsh3i, hr54.trans hr53, by rw [hr134, inv3.r13, inv.r13], by rw [hr144, inv3.r14, inv.r14]⟩
             · have e : (i + 1) + (y :: ys).length =
                   i + (Instr.ret :: y :: ys).length := by
                 simp only [List.length_cons]; omega
