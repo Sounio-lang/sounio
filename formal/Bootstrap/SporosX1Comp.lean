@@ -6761,4 +6761,102 @@ theorem annval_range_loop_exit1 {im : Nat → Option (Ins × Nat)}
     hs1c hcur htW' (run_regs_ok hrun1 hregs)
   exact ⟨k1 + k2, by rw [run_add im k1 k2, hrun1]; exact hk2⟩
 
+/-- At `check_word`, a current word with no instructions is refused. -/
+theorem checker_refuses_empty {im : Nat → Option (Ins × Nat)}
+    (oc : OuterCode im) (rc : RefuseCode im)
+    {pr : Prog} {tbl sp : Nat} (hsp48 : 48 ≤ sp) (hspW : sp < W) :
+    ∀ (wd : Sporos.Word) (rest pre : List Sporos.Word),
+      pr.words = pre ++ (wd :: rest) → wd.code = [] →
+      ∀ s, OuterSt pr tbl sp (wd :: rest) s →
+      ∃ k, run im k (Out.ok s) = Out.exit 1 := by
+  intro wd rest pre happ hcode s hs
+  obtain ⟨hrip, hr5, hr7, hr13, hr14, hr4, h16, hregs, hroom, heff,
+    htabS⟩ := hs
+  have hlenann : pr.words.length = pre.length + (rest.length + 1) := by
+    rw [happ, List.length_append, List.length_cons]
+  have hj0 : pre.length < pr.words.length := by omega
+  have hget? : pr.words[pre.length]? = some wd := by
+    rw [happ, List.getElem?_append_right (by simp)]
+    simp
+  have hget : pr.words[pre.length]'hj0 = wd :=
+    Option.some.inj ((List.getElem?_eq_getElem hj0).symm.trans hget?)
+  obtain ⟨cp, p, hf0, hf8, hf16, hf24, hf32, hf40, hf48, hcsq, hlay,
+    hok⟩ := htabS pre.length hj0
+  rw [hget] at hf24 hok
+  have hr7w : s.reg 7 = some (tbl + 64 * pre.length) := by
+    have hw : tbl + 64 * (pr.words.length - (wd :: rest).length) =
+        tbl + 64 * pre.length := by
+      rw [List.length_cons]
+      congr 1
+      congr 1
+      omega
+    rw [hw] at hr7
+    exact hr7
+  have hr5' : s.reg 5 = some (rest.length + 1) := hr5
+  have hf24' : rd64 s.mem (tbl + 64 * pre.length + 24) = some 0 := by
+    rw [hf24, hcode]
+    rfl
+  exact CheckWord_empty_exit1 oc rc (tbl + 64 * pre.length)
+    (rest.length + 1) sp hok.1.w56 (by omega) hsp48 hspW s hrip hr5'
+    hr7w hr4 hf24' hregs hroom
+
+/-- At `check_word`, a current word whose first bad annotation entry
+is out of range is refused. -/
+theorem checker_refuses_ann_range {im : Nat → Option (Ins × Nat)}
+    (ac : AllCode im) (oc : OuterCode im) (rc : RefuseCode im)
+    {pr : Prog} {tbl sp : Nat} (hsp48 : 48 ≤ sp) (hspW : sp < W)
+    {good tail : List (Nat × Height)} {t : Nat} {h : Height} :
+    ∀ (wd : Sporos.Word) (rest pre : List Sporos.Word),
+      pr.words = pre ++ (wd :: rest) →
+      wd.ann = good ++ (t, h) :: tail →
+      (∀ x ∈ good, x.1 < wd.code.length ∧
+        wd.ann.lookup x.1 = some x.2) →
+      wd.code.length ≤ t → wd.code.length ≠ 0 →
+      ∀ s, OuterSt pr tbl sp (wd :: rest) s →
+      ∃ k, run im k (Out.ok s) = Out.exit 1 := by
+  intro wd rest pre happ hann hgood hge hnc s hs
+  obtain ⟨hrip, hr5, hr7, hr13, hr14, hr4, h16, hregs, hroom, heff,
+    htabS⟩ := hs
+  have hlenann : pr.words.length = pre.length + (rest.length + 1) := by
+    rw [happ, List.length_append, List.length_cons]
+  have hj0 : pre.length < pr.words.length := by omega
+  have hget? : pr.words[pre.length]? = some wd := by
+    rw [happ, List.getElem?_append_right (by simp)]
+    simp
+  have hget : pr.words[pre.length]'hj0 = wd :=
+    Option.some.inj ((List.getElem?_eq_getElem hj0).symm.trans hget?)
+  obtain ⟨cp, p, hf0, hf8, hf16, hf24, hf32, hf40, hf48, hcsq, hlay,
+    hok⟩ := htabS pre.length hj0
+  rw [hget] at hf24 hf32 hlay hok
+  obtain ⟨st, hinsW, hhW, himm, hhb, hdisjC48, hcbound, hdisjw48,
+    hdisjp48⟩ := hok
+  have hr7w : s.reg 7 = some (tbl + 64 * pre.length) := by
+    have hw : tbl + 64 * (pr.words.length - (wd :: rest).length) =
+        tbl + 64 * pre.length := by
+      rw [List.length_cons]
+      congr 1
+      congr 1
+      omega
+    rw [hw] at hr7
+    exact hr7
+  obtain ⟨k1, s1, hrun1, hs1rip, hs1r6, hs1r1, -, hs1r5, hs1r7, gb1,
+    hs1mem, hlen1⟩ :=
+    CheckWord_head oc (tbl + 64 * pre.length) (rest.length + 1)
+      wd.code.length wd.ann.length p st.w56 (by omega) hnc s hrip hr5
+      hr7w hf24 hf48 hf32
+  have hs1r4 : s1.reg 4 = some sp := by
+    rw [gb1 4 (by decide) (by decide) (by decide)]; exact hr4
+  have hannst : AnnSt wd (tbl + 64 * pre.length) p sp wd.ann s1 := by
+    refine ⟨hs1rip, hs1r7, ?_, hs1r1, hs1r4,
+      by rw [hs1mem]; exact hf24, by rw [hs1mem]; exact hf32,
+      by rw [hs1mem]; exact hf48, AnnLayout_of_mem hs1mem hlay, by omega,
+      StackRoom_of_mem hs1mem (by rw [hs1r4, hr4]) hroom⟩
+    simpa using hs1r6
+  have hannstatic : AnnStatic wd (tbl + 64 * pre.length) p sp :=
+    ⟨st.w56, st.p0, st.pann, hsp48, hspW, st.clenW, hhW, hdisjw48,
+      hdisjp48⟩
+  obtain ⟨k2, hk2⟩ := annval_range_loop_exit1 ac oc rc hannstatic hann
+    hgood hge s1 hannst (run_regs_ok hrun1 hregs)
+  exact ⟨k1 + k2, by rw [run_add im k1 k2, hrun1]; exact hk2⟩
+
 end SporosX1
