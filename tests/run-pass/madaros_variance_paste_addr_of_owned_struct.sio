@@ -1,0 +1,89 @@
+//@ run-pass
+//@ timeout: 60
+//@ expect-stdout-contains: PASTE_ADDR_VAL 14.500000
+//@ expect-stdout-contains: PASTE_ADDR_SUM 162.000000
+//@ expect-stdout-contains: PASTE_ADDR_MUT 9.500000
+//@ expect-stdout-contains: PASTE_ADDR_VAR 0.360000
+//@ expect-stdout-contains: PASTE_ADDR_PASS
+//@ description: variance inline re-lowering of a call `f(&x)` / `f(&!x)` with x an owned struct local and f taking `&S` must bind the parameter to the address of x, not to x (SIGSEGV in main, nothing printed)
+//
+// `main` owns `rec` and calls `r_val(&rec, i)`. The variance paste of
+// `r_val` bound the reference parameter `d` straight to the register that
+// holds `rec`, unmarked as a reference, so `(*d).kn[i]` indexed the object
+// handle of `rec` as if it were a pointer to the array. That read is dead (it
+// only feeds the variance), but with a struct that the runtime keeps behind a
+// small handle number (here: string array field) it read address 3 + 8 i and
+// the program died with rc 139 before its first line of output. The same call
+// from a helper that receives `d: &R` worked, which is why the circ28 drug
+// records crashed only when `circ28_drug_value(&rec, i)` or
+// `circ28_drug_params(&rec)` ran directly in `main`.
+// Found with the circ28 drug records (stdlib/darwin_pbpk/circ28_drug.sio).
+
+pub struct R {
+    pub kn: [Knowledge<f64>; 18],
+    pub status: [i32; 18],
+    pub prov: [string; 18],
+}
+
+pub struct Pk {
+    pub cl0: f64,
+    pub v0: f64,
+}
+
+pub fn r_new() -> R with Mut, Panic {
+    var kn: [Knowledge<f64>; 18] = [Knowledge(0.0, ε=1.0, prov="unused"); 18]
+    var r = R { kn: kn, status: [0; 18], prov: ["", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""] }
+    var i: i32 = 0
+    while i < 18 {
+        r.kn[i] = Knowledge { value: (i as f64) + 0.5, variance: 0.0, epsilon: 1.0, provenance: "set" }
+        i = i + 1
+    }
+    return r
+}
+
+pub fn r_val(d: &R, i: i32) -> f64 with Epistemic, Panic {
+    let k: Knowledge<f64> = (*d).kn[i]
+    return k.value
+}
+
+pub fn r_val_mut(d: &!R, i: i32) -> f64 with Epistemic, Panic {
+    let k: Knowledge<f64> = (*d).kn[i]
+    return k.value
+}
+
+pub fn twice_ref(p: &Pk) -> f64 {
+    2.0 * (*p).cl0
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic, Epistemic {
+    var rec = r_new()
+    let v = r_val(&rec, 14)
+    print("PASTE_ADDR_VAL ")
+    println(v)
+    var s: f64 = 0.0
+    var i: i32 = 0
+    while i < 18 {
+        s = s + r_val(&rec, i)
+        i = i + 1
+    }
+    print("PASTE_ADDR_SUM ")
+    println(s)
+    let w = r_val_mut(&!rec, 9)
+    print("PASTE_ADDR_MUT ")
+    println(w)
+    // The variance of a field read through `&p` still reaches the caller
+    // local (the paste aliases the reference to p, as `let r = &p` does).
+    let kx: Knowledge<f64> = measure(5.0, uncertainty: 0.3)
+    let p = Pk { cl0: kx.value, v0: 50.0 }
+    let vr = variance_of(twice_ref(&p))
+    print("PASTE_ADDR_VAR ")
+    println(vr)
+    var ok = v == 14.5 && s == 162.0 && w == 9.5
+    if vr < 0.359999999 || vr > 0.360000001 { ok = false }
+    if ok {
+        println("PASTE_ADDR_PASS")
+        return 0
+    }
+    println("PASTE_ADDR_FAIL")
+    return 1
+}
