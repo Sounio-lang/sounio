@@ -13,5 +13,8 @@ The composition now reaches the accept exit: `annval` (annOk), `codewalk`
 (initial walk invariant), the outer `check_word` loop and
 `SporosX1.checker_accepts_from_start` are proved in
 `formal/Bootstrap/SporosX1Comp.lean` and audited in `formal/AxiomReport.lean`
-(axioms: propext, Classical.choice, Quot.sound). Refusal direction and the
-parse/decode phase remain open.
+(axioms: propext, Classical.choice, Quot.sound). The refusal direction has
+begun in the same module: a generic status-exit block and `fail1` exit,
+refusal of a word with no instructions, and refusal at the first
+out-of-range annotation entry after a good prefix. The remaining refusal
+branches and the parse/decode phase remain open.
