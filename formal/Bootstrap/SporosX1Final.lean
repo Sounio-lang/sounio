@@ -2901,6 +2901,8 @@ theorem loader_read_once {f : List Nat} {A sp0 cap count : Nat}
       s'.reg 3 = some A ∧ s'.reg 12 = some cap ∧
       s'.reg 13 = some count ∧ s'.reg 14 = some 3 ∧
       s'.reg 4 = some (sp0 + 24) ∧
+      (∃ v, s'.reg 10 = some v) ∧ (∃ v, s'.reg 8 = some v) ∧
+      (∃ v, s'.reg 9 = some v) ∧
       s'.k.oracle = s.k.oracle ∧
       s'.k.fds =
         [some ⟨f, count + min (cap - count) (f.length - count)⟩] ∧
@@ -3379,6 +3381,30 @@ theorem loader_read_once {f : List Nat} {A sp0 cap count : Nat}
       reg_set_other (by decide : (4 : Nat) ≠ 1),
       reg_set_other (by decide : (4 : Nat) ≠ 0)]
     exact hd6r4
+  have hd7r10 : d7.reg 10 = some v10 := by
+    rw [hd7]
+    show (((d6.set 0 (some n)).set 1 (some (d6.rip + 2))).set 11
+      none).reg 10 = some v10
+    rw [reg_set_other (by decide : (10 : Nat) ≠ 11),
+      reg_set_other (by decide : (10 : Nat) ≠ 1),
+      reg_set_other (by decide : (10 : Nat) ≠ 0)]
+    exact hd6r10
+  have hd7r8 : d7.reg 8 = some v8 := by
+    rw [hd7]
+    show (((d6.set 0 (some n)).set 1 (some (d6.rip + 2))).set 11
+      none).reg 8 = some v8
+    rw [reg_set_other (by decide : (8 : Nat) ≠ 11),
+      reg_set_other (by decide : (8 : Nat) ≠ 1),
+      reg_set_other (by decide : (8 : Nat) ≠ 0)]
+    exact hd6r8
+  have hd7r9 : d7.reg 9 = some v9 := by
+    rw [hd7]
+    show (((d6.set 0 (some n)).set 1 (some (d6.rip + 2))).set 11
+      none).reg 9 = some v9
+    rw [reg_set_other (by decide : (9 : Nat) ≠ 11),
+      reg_set_other (by decide : (9 : Nat) ≠ 1),
+      reg_set_other (by decide : (9 : Nat) ≠ 0)]
+    exact hd6r9
   have hd7mem : d7.mem = [c1, c2, buf'] := by rw [hd7]
   have hd7k : d7.k = { s.k with fds := [some ⟨f, count + n⟩] } := by
     rw [hd7]
@@ -3413,6 +3439,9 @@ theorem loader_read_once {f : List Nat} {A sp0 cap count : Nat}
   have hd8r13 : d8.reg 13 = some count := by rw [hd8]; exact hd7r13
   have hd8r14 : d8.reg 14 = some 3 := by rw [hd8]; exact hd7r14
   have hd8r4 : d8.reg 4 = some (sp0 + 24) := by rw [hd8]; exact hd7r4
+  have hd8r10 : d8.reg 10 = some v10 := by rw [hd8]; exact hd7r10
+  have hd8r8 : d8.reg 8 = some v8 := by rw [hd8]; exact hd7r8
+  have hd8r9 : d8.reg 9 = some v9 := by rw [hd8]; exact hd7r9
   have hd8mem : d8.mem = [c1, c2, buf'] := by rw [hd8]; exact hd7mem
   have hd8k : d8.k = { s.k with fds := [some ⟨f, count + n⟩] } := by rw [hd8]; exact hd7k
   have hlen8 : d8.regs.length = 16 := by rw [hd8]; exact hlen7
@@ -3446,6 +3475,15 @@ theorem loader_read_once {f : List Nat} {A sp0 cap count : Nat}
   have hd9r4 : d9.reg 4 = some (sp0 + 24) := by
     rw [hd9]; show ({ d8 with rip := d8.rip + 2 }).reg 4 = some (sp0 + 24)
     rw [reg_with_rip]; exact hd8r4
+  have hd9r10 : d9.reg 10 = some v10 := by
+    rw [hd9]; show ({ d8 with rip := d8.rip + 2 }).reg 10 = some v10
+    rw [reg_with_rip]; exact hd8r10
+  have hd9r8 : d9.reg 8 = some v8 := by
+    rw [hd9]; show ({ d8 with rip := d8.rip + 2 }).reg 8 = some v8
+    rw [reg_with_rip]; exact hd8r8
+  have hd9r9 : d9.reg 9 = some v9 := by
+    rw [hd9]; show ({ d8 with rip := d8.rip + 2 }).reg 9 = some v9
+    rw [reg_with_rip]; exact hd8r9
   have hd9mem : d9.mem = [c1, c2, buf'] := by rw [hd9]; exact hd8mem
   have hd9k : d9.k = { s.k with fds := [some ⟨f, count + n⟩] } := by rw [hd9]; exact hd8k
   have hlen9 : d9.regs.length = 16 := by
@@ -3501,7 +3539,7 @@ theorem loader_read_once {f : List Nat} {A sp0 cap count : Nat}
       rw [hn] at hn0
       omega
     refine ⟨d10, hrun, Or.inl ⟨by rw [hd10], hfeq⟩, ?_, ?_, ?_, ?_, ?_,
-      ?_, ?_, ?_, ⟨buf', ?_, hbuf'b.trans hbufbase, hbuf'hi.trans hbufhi, hbuf'rw.trans hbufrw⟩, ?_, ?_⟩
+      ?_, ?_, ?_, ?_, ?_, ?_, ⟨buf', ?_, hbuf'b.trans hbufbase, hbuf'hi.trans hbufhi, hbuf'rw.trans hbufrw⟩, ?_, ?_⟩
     · rw [hd10]
       show ({ d9 with rip := base + 0x122 }).reg 0 = some n
       rw [reg_with_rip]; exact hd9r0
@@ -3520,6 +3558,18 @@ theorem loader_read_once {f : List Nat} {A sp0 cap count : Nat}
     · rw [hd10]
       show ({ d9 with rip := base + 0x122 }).reg 4 = some (sp0 + 24)
       rw [reg_with_rip]; exact hd9r4
+    · refine ⟨v10, ?_⟩
+      rw [hd10]
+      show ({ d9 with rip := base + 0x122 }).reg 10 = some v10
+      rw [reg_with_rip]; exact hd9r10
+    · refine ⟨v8, ?_⟩
+      rw [hd10]
+      show ({ d9 with rip := base + 0x122 }).reg 8 = some v8
+      rw [reg_with_rip]; exact hd9r8
+    · refine ⟨v9, ?_⟩
+      rw [hd10]
+      show ({ d9 with rip := base + 0x122 }).reg 9 = some v9
+      rw [reg_with_rip]; exact hd9r9
     · rw [hd10]
       show d9.k.oracle = s.k.oracle
       rw [hd9k]
@@ -3561,7 +3611,7 @@ theorem loader_read_once {f : List Nat} {A sp0 cap count : Nat}
       omega
     refine ⟨d10, hrun, Or.inr ⟨by
         rw [hd10]; show d9.rip + 2 = base + 0xf1; rw [hd9rip], hflt⟩, ?_,
-      ?_, ?_, ?_, ?_, ?_, ?_, ?_, ⟨buf', ?_, hbuf'b.trans hbufbase, hbuf'hi.trans hbufhi, hbuf'rw.trans hbufrw⟩,
+      ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ⟨buf', ?_, hbuf'b.trans hbufbase, hbuf'hi.trans hbufhi, hbuf'rw.trans hbufrw⟩,
       ?_, ?_⟩
     · rw [hd10]
       show ({ d9 with rip := d9.rip + 2 }).reg 0 = some n
@@ -3581,6 +3631,18 @@ theorem loader_read_once {f : List Nat} {A sp0 cap count : Nat}
     · rw [hd10]
       show ({ d9 with rip := d9.rip + 2 }).reg 4 = some (sp0 + 24)
       rw [reg_with_rip]; exact hd9r4
+    · refine ⟨v10, ?_⟩
+      rw [hd10]
+      show ({ d9 with rip := d9.rip + 2 }).reg 10 = some v10
+      rw [reg_with_rip]; exact hd9r10
+    · refine ⟨v8, ?_⟩
+      rw [hd10]
+      show ({ d9 with rip := d9.rip + 2 }).reg 8 = some v8
+      rw [reg_with_rip]; exact hd9r8
+    · refine ⟨v9, ?_⟩
+      rw [hd10]
+      show ({ d9 with rip := d9.rip + 2 }).reg 9 = some v9
+      rw [reg_with_rip]; exact hd9r9
     · rw [hd10]
       show d9.k.oracle = s.k.oracle
       rw [hd9k]
@@ -4832,6 +4894,255 @@ theorem loader_grow {f : List Nat} {A sp0 cap count : Nat}
   · rw [hg12]
     show ({ g11 with rip := base + 0xd7 }).regs.length = 16
     rw [len_with_rip]; exact hlen11
+
+/-- The whole read loop, by strong induction on the bytes
+remaining: every iteration moves at least one byte, growths
+consume one replicated placement each, and the capacity bound
+`f.length < cap * 2 ^ g` is preserved (with `A + cap * 2 ^ g`
+inside the address bound).  The tail after the replicated
+placements begins with a placement, which is all the reads need
+once the growth entries run out (reads do not consume it).  Ends
+just after the jump at `loaded`, at the parser entry
+`base + 0x134`, with the whole file in the buffer. -/
+theorem loader_read_loop : ∀ rem : Nat,
+    ∀ {f : List Nat} {A sp0 cap count g : Nat}
+      {c1 c2 buf : Region} {s : X86Int.St} {tail : List Choice},
+      f.length - count = rem →
+      s.rip = base + 0xd7 → s.regs.length = 16 →
+      s.reg 3 = some A → s.reg 12 = some cap →
+      s.reg 13 = some count → s.reg 14 = some 3 →
+      s.reg 4 = some (sp0 + 24) →
+      (∃ v, s.reg 0 = some v) → (∃ v, s.reg 10 = some v) →
+      (∃ v, s.reg 8 = some v) → (∃ v, s.reg 9 = some v) →
+      s.mem = [c1, c2, buf] → buf.base = A → buf.rw = true →
+      buf.hi = A + cap → c1.hi ≤ A → c2.hi ≤ A →
+      s.mem.rdN A count = some (f.take count) →
+      s.k.fds = [some ⟨f, count⟩] →
+      s.k.oracle = List.replicate g (.at A) ++ tail →
+      (∃ B, tail.head? = some (.at B)) →
+      (∀ b ∈ f, b < 256) →
+      count ≤ f.length → count < cap →
+      A % page = 0 → 0 < A → A < 2 ^ 63 →
+      cap % page = 0 → 0 < cap →
+      A + cap * 2 ^ g ≤ 2 ^ 47 → f.length < cap * 2 ^ g →
+      ∃ k s', run stage1Im k (Out.ok s) = Out.ok s' ∧
+        s'.rip = base + 0x134 ∧
+        s'.reg 3 = some A ∧ (∃ cap', s'.reg 12 = some cap') ∧
+        s'.reg 13 = some f.length ∧ s'.reg 14 = some 3 ∧
+        s'.reg 4 = some (sp0 + 24) ∧
+        (∃ v, s'.reg 0 = some v) ∧ (∃ v, s'.reg 10 = some v) ∧
+        (∃ v, s'.reg 8 = some v) ∧ (∃ v, s'.reg 9 = some v) ∧
+        (∃ g', s'.k.oracle = List.replicate g' (.at A) ++ tail) ∧
+        s'.k.fds = [some ⟨f, f.length⟩] ∧
+        (∃ buf', s'.mem = [c1, c2, buf'] ∧ buf'.base = A ∧
+          (∃ cap', buf'.hi = A + cap') ∧ buf'.rw = true) ∧
+        s'.mem.rdN A f.length = some f ∧
+        s'.regs.length = 16 := by
+  intro rem
+  induction rem using Nat.strongRecOn with
+  | _ rem ih =>
+  intro f A sp0 cap count g c1 c2 buf s tail hrem hrip hlen16 hr3 hr12
+    hr13 hr14 hr4 hr0 hr10 hr8 hr9 hmem hbufbase hbufrw hbufhi hdisj1
+    hdisj2 hcontent hfd horacle htail hfB hcount hcountcap hAmod hApos
+    hA63 hcapmod hcappos hbound hflen
+  have hc := stage1_loaderCode
+  have hcaple : cap ≤ cap * 2 ^ g := by
+    cases g with
+    | zero => simp
+    | succ g =>
+      have h1 : 1 ≤ 2 ^ (g + 1) := Nat.one_le_two_pow
+      calc cap = cap * 1 := by rw [Nat.mul_one]
+        _ ≤ cap * 2 ^ (g + 1) := Nat.mul_le_mul_left cap h1
+  have hW : W = 2 ^ 64 := rfl
+  have hAcap : A + cap < W := by omega
+  have hcap63 : cap < 2 ^ 63 := by omega
+  have hhead : ∃ B, s.k.oracle.head? = some (.at B) := by
+    cases g with
+    | zero =>
+      obtain ⟨B, hB⟩ := htail
+      refine ⟨B, ?_⟩
+      rw [horacle]
+      simpa using hB
+    | succ g' =>
+      refine ⟨A, ?_⟩
+      rw [horacle, List.replicate_succ]
+      simp
+  obtain ⟨s1, hrun1, hor1, hs1r0, hs1r3, hs1r12, hs1r13, hs1r14, hs1r4,
+    hs1r10, hs1r8, hs1r9, hs1oracle, hs1fds,
+    ⟨buf1, hs1mem, hbuf1base, hbuf1hi, hbuf1rw⟩, hs1content, hs1len⟩ :=
+    loader_read_once hrip hlen16 hr3 hr12 hr13 hr14 hr4 hr0 hr10 hr8 hr9
+      hmem hbufbase hbufrw hbufhi hdisj1 hdisj2 hcontent hfd hhead hfB
+      hcount hcountcap hAcap hcap63
+  obtain ⟨n, hn⟩ : ∃ m : Nat,
+      m = min (cap - count) (f.length - count) := ⟨_, rfl⟩
+  rw [← hn] at hs1r0 hs1fds hs1content
+  have hncap : count + n ≤ cap := by
+    have h1 : n ≤ cap - count := by
+      rw [hn]; exact Nat.min_le_left _ _
+    omega
+  have hnlen : count + n ≤ f.length := by
+    have h1 : n ≤ f.length - count := by
+      rw [hn]; exact Nat.min_le_right _ _
+    omega
+  rcases hor1 with ⟨hs1rip, hlen_eq⟩ | ⟨hs1rip, hlt⟩
+  · -- EOF: jump from loaded (0x122) to the parser entry (0x134)
+    have hn0 : n = 0 := by
+      rw [hn]
+      simp [show f.length - count = 0 by omega]
+    have e11 : X86Int.step stage1Im s1 =
+        .ok { s1 with rip := base + 0x134 } :=
+      step_jmp (by rw [hs1rip]; exact hc.d122)
+    obtain ⟨s2, hs2⟩ : ∃ t : X86Int.St, t =
+        { s1 with rip := base + 0x134 } := ⟨_, rfl⟩
+    have r11 : run stage1Im 1 (Out.ok s1) = Out.ok s2 := by
+      rw [run_succ_ok stage1Im 0 s1, e11, ← hs2, run_zero]
+    have hrun : run stage1Im 11 (Out.ok s) = Out.ok s2 := by
+      rw [show (11 : Nat) = 10 + 1 from rfl, run_add stage1Im 10 1,
+        hrun1, r11]
+    have hcontent2 : s2.mem.rdN A f.length = some f := by
+      rw [hn0, Nat.add_zero] at hs1content
+      rw [hs2]
+      show Mem.rdN ({ s1 with rip := base + 0x134 }).mem A f.length =
+        some f
+      have htf : f.take f.length = f := by simp
+      rw [← hlen_eq, htf] at hs1content
+      exact hs1content
+    refine ⟨11, s2, hrun, by rw [hs2], ?_, ⟨cap, ?_⟩, ?_, ?_, ?_,
+      ⟨n, ?_⟩, ?_, ?_, ?_, ⟨g, ?_⟩, ?_,
+      ⟨buf1, ?_, hbuf1base, ⟨cap, hbuf1hi⟩, hbuf1rw⟩, hcontent2, ?_⟩
+    · rw [hs2]
+      show ({ s1 with rip := base + 0x134 }).reg 3 = some A
+      rw [reg_with_rip]; exact hs1r3
+    · rw [hs2]
+      show ({ s1 with rip := base + 0x134 }).reg 12 = some cap
+      rw [reg_with_rip]; exact hs1r12
+    · rw [hs2]
+      show ({ s1 with rip := base + 0x134 }).reg 13 = some f.length
+      rw [reg_with_rip, hlen_eq]; exact hs1r13
+    · rw [hs2]
+      show ({ s1 with rip := base + 0x134 }).reg 14 = some 3
+      rw [reg_with_rip]; exact hs1r14
+    · rw [hs2]
+      show ({ s1 with rip := base + 0x134 }).reg 4 = some (sp0 + 24)
+      rw [reg_with_rip]; exact hs1r4
+    · rw [hs2]
+      show ({ s1 with rip := base + 0x134 }).reg 0 = some n
+      rw [reg_with_rip]; exact hs1r0
+    · obtain ⟨v, hv⟩ := hs1r10
+      refine ⟨v, ?_⟩
+      rw [hs2]
+      show ({ s1 with rip := base + 0x134 }).reg 10 = some v
+      rw [reg_with_rip]; exact hv
+    · obtain ⟨v, hv⟩ := hs1r8
+      refine ⟨v, ?_⟩
+      rw [hs2]
+      show ({ s1 with rip := base + 0x134 }).reg 8 = some v
+      rw [reg_with_rip]; exact hv
+    · obtain ⟨v, hv⟩ := hs1r9
+      refine ⟨v, ?_⟩
+      rw [hs2]
+      show ({ s1 with rip := base + 0x134 }).reg 9 = some v
+      rw [reg_with_rip]; exact hv
+    · rw [hs2]
+      show ({ s1 with rip := base + 0x134 }).k.oracle =
+        List.replicate g (.at A) ++ tail
+      rw [hs1oracle, horacle]
+    · rw [hs2]
+      show ({ s1 with rip := base + 0x134 }).k.fds = [some ⟨f, f.length⟩]
+      rw [hs1fds, hn0, Nat.add_zero, ← hlen_eq]
+    · rw [hs2]
+      show ({ s1 with rip := base + 0x134 }).mem = [c1, c2, buf1]
+      exact hs1mem
+    · rw [hs2]
+      show ({ s1 with rip := base + 0x134 }).regs.length = 16
+      rw [len_with_rip]; exact hs1len
+  · -- a positive read: update the count, then loop or grow
+    have hn1 : 0 < n := Nat.pos_of_ne_zero (by
+      intro hn0
+      rw [hn] at hn0
+      omega)
+    have hrem2 : f.length - (count + n) < rem := by omega
+    obtain ⟨s2, hrun2, hor2, hs2r13, hs2r3, hs2r12, hs2r14, hs2r4,
+      hs2r0, hs2r10, hs2r8, hs2r9, hs2mem, hs2k, hs2len⟩ :=
+      loader_count_update hs1rip hs1len hs1r0 hs1r3 hs1r12 hs1r13
+        hs1r14 hs1r4 hs1r10 hs1r8 hs1r9 hncap (by omega)
+    have hs2content : s2.mem.rdN A (count + n) =
+        some (f.take (count + n)) := by
+      rwa [hs2mem]
+    have hs2fds : s2.k.fds = [some ⟨f, count + n⟩] := by
+      rw [hs2k]; exact hs1fds
+    have hs2oracle : s2.k.oracle = List.replicate g (.at A) ++ tail := by
+      rw [hs2k, hs1oracle, horacle]
+    have hs2mem' : s2.mem = [c1, c2, buf1] := by
+      rw [hs2mem]; exact hs1mem
+    rcases hor2 with ⟨hs2rip, hltcap⟩ | ⟨hs2rip, hfull⟩
+    · obtain ⟨k, s3, hrun3, hrip3, hr33, hcap3, hr133, hr143, hr43,
+        hr03, hr103, hr83, hr93, hor3, hfd3, hmem3, hcontent3,
+        hlen3⟩ :=
+        ih (f.length - (count + n)) hrem2 rfl hs2rip hs2len hs2r3
+          hs2r12 hs2r13 hs2r14 hs2r4 hs2r0 hs2r10 hs2r8 hs2r9 hs2mem'
+          hbuf1base hbuf1rw hbuf1hi hdisj1 hdisj2 hs2content hs2fds
+          hs2oracle htail hfB hnlen hltcap hAmod hApos hA63 hcapmod
+          hcappos hbound hflen
+      have hrun : run stage1Im (14 + k) (Out.ok s) = Out.ok s3 := by
+        rw [show 14 + k = 10 + (4 + k) by omega, run_add stage1Im 10 _,
+          hrun1, show 4 + k = 4 + k from rfl, run_add stage1Im 4 k,
+          hrun2, hrun3]
+      exact ⟨14 + k, s3, hrun, hrip3, hr33, hcap3, hr133, hr143, hr43,
+        hr03, hr103, hr83, hr93, hor3, hfd3, hmem3, hcontent3, hlen3⟩
+    · -- the buffer is exactly full: grow, then loop
+      have hg1 : 1 ≤ g := by
+        by_cases hg0 : g = 0
+        · rw [hg0] at hflen
+          simp at hflen
+          omega
+        · omega
+      obtain ⟨g', hg'⟩ : ∃ g', g = g' + 1 := ⟨g - 1, by omega⟩
+      have hor2' : s2.k.oracle =
+          .at A :: (List.replicate g' (.at A) ++ tail) := by
+        rw [hs2oracle, hg', List.replicate_succ, List.cons_append]
+      have hbound2 : A + (cap + cap) ≤ 2 ^ 47 := by
+        have h1 : cap + cap ≤ cap * 2 ^ g := by
+          rw [hg']
+          have h2 : (2 : Nat) ≤ 2 ^ (g' + 1) := by
+            calc (2 : Nat) = 2 ^ 1 := by decide
+              _ ≤ 2 ^ (g' + 1) :=
+                Nat.pow_le_pow_right (by decide) (by omega)
+          calc cap + cap = cap * 2 := by omega
+            _ ≤ cap * 2 ^ (g' + 1) := Nat.mul_le_mul_left cap h2
+        omega
+      obtain ⟨s3, hrun3, hs3rip, hs3r3, hs3r12, hs3r13, hs3r14, hs3r4,
+        hs3r0, hs3r10, hs3r8, hs3r9, hs3oracle, hs3fds,
+        ⟨buf3, hs3mem, hbuf3base, hbuf3hi, hbuf3rw⟩, hs3content,
+        hs3len, -⟩ :=
+        loader_grow hs2rip hs2len hs2r3 hs2r12 hs2r13 hs2r14 hs2r4
+          hs2r8 hs2r9 hs2mem' hbuf1base hbuf1rw hbuf1hi hdisj1 hdisj2
+          hs2content hs2fds hor2' (by omega) hAmod hApos hbound2
+          hcapmod hcappos (by omega) hA63
+      have hcapmod2 : (cap + cap) % page = 0 := by
+        simp [Nat.add_mod, hcapmod]
+      have hpow : (2 : Nat) * 2 ^ g' = 2 ^ (g' + 1) := by
+        rw [Nat.pow_succ, Nat.mul_comm]
+      have hcapgrow : (cap + cap) * 2 ^ g' = cap * 2 ^ g := by
+        rw [hg', ← hpow, show cap + cap = cap * 2 by omega,
+          Nat.mul_assoc]
+      have hbound3 : A + (cap + cap) * 2 ^ g' ≤ 2 ^ 47 := by omega
+      have hflen3 : f.length < (cap + cap) * 2 ^ g' := by omega
+      obtain ⟨k, s4, hrun4, hrip4, hr34, hcap4, hr134, hr144, hr44,
+          hr04, hr104, hr84, hr94, hor4, hfd4, hmem4, hcontent4,
+          hlen4⟩ :=
+        ih (f.length - (count + n)) hrem2 rfl hs3rip hs3len hs3r3
+          hs3r12 hs3r13 hs3r14 hs3r4 hs3r0 hs3r10 hs3r8 hs3r9 hs3mem
+          hbuf3base hbuf3rw hbuf3hi hdisj1 hdisj2 hs3content hs3fds
+          hs3oracle htail hfB hnlen (by omega) hAmod hApos hA63
+          hcapmod2 (by omega) hbound3 hflen3
+      have hrun : run stage1Im (26 + k) (Out.ok s) = Out.ok s4 := by
+        rw [show 26 + k = 10 + (16 + k) by omega, run_add stage1Im 10 _,
+          hrun1, show 16 + k = 4 + (12 + k) by omega,
+          run_add stage1Im 4 _, hrun2, show 12 + k = 12 + k from rfl,
+          run_add stage1Im 12 k, hrun3, hrun4]
+      exact ⟨26 + k, s4, hrun, hrip4, hr34, hcap4, hr134, hr144, hr44,
+        hr04, hr104, hr84, hr94, hor4, hfd4, hmem4, hcontent4, hlen4⟩
 
 /-- EXISTENCE TARGET: with room, some oracle makes the final
 theorem non-vacuous.  The witness is `stage1Oracle f A` for the
