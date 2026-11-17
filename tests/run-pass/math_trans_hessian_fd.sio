@@ -1,0 +1,216 @@
+//@ run-pass
+//@ expect-stdout: MATH_TRANS_HESSIAN_FD_OK
+//@ requires: madaros
+//@ sabotage: hessian-chain
+// Second derivatives of tan, atan, tanh, asin, acos, ln and atan2 as the GUM
+// second-order lowering emits them (hessian_of), checked against central finite
+// differences of the same builtins on plain f64, at a generic point and next to
+// each singularity (tan near pi/2, asin/acos near +-1, ln near 0, atan2 near the
+// origin and next to its branch cut on the negative x axis).
+//
+// The difference quotient is Richardson-extrapolated, D = (4 D(h/2) - D(h)) / 3,
+// so its truncation error is O(h^4); the step is scaled to the distance from
+// the singularity. A wrong closed form is off by O(1) relative, far past the
+// tolerance: 1e-6 relative plus the rounding bound of the quotient (rnd below).
+//
+// atan2 is the one two-argument transfer here. Its Hessian lives in the 64-
+// channel SO_HS rows (2080 upper-triangle slots per row), so t_atan2_ch8_9
+// measures ten inputs and differentiates in channels 8 and 9: an 8-channel
+// (36-slot) Hessian table has no slot for them and reads back 0.0.
+
+fn absf(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    x
+}
+
+// slack: the rounding error of the difference quotient itself. With f good to
+// about one ulp, a second difference with step h carries ~4 eps |f| / h^2, and
+// the Richardson combination (4 D(h/2) - D(h)) / 3 about 6 eps |f| / (h/2)^2;
+// 64 eps |f| / (h/2)^2 bounds that with a tenfold margin. Next to the atan2
+// branch cut |f| ~ pi while H ~ 2e-3, so this term, not the 1e-6 relative one,
+// sets the tolerance there (about 4e-4 relative).
+fn rnd(f0: f64, h: f64) -> f64 {
+    64.0 * 2.220446049250313e-16 * absf(f0) / (h * h / 4.0)
+}
+
+fn close(name: i64, got: f64, want: f64, slack: f64) -> bool with IO {
+    let ok = absf(got - want) <= 1.0e-6 * absf(want) + 1.0e-9 + slack
+    if !ok {
+        print("FAIL case ")
+        println(name)
+        println(got)
+        println(want)
+    }
+    ok
+}
+
+fn rich(d_h: f64, d_h2: f64) -> f64 {
+    (4.0 * d_h2 - d_h) / 3.0
+}
+
+// ---- one-argument second differences ----
+fn dd_tan(x: f64, h: f64) -> f64 { (tan(x + h) - 2.0 * tan(x) + tan(x - h)) / (h * h) }
+fn dd_atan(x: f64, h: f64) -> f64 { (atan(x + h) - 2.0 * atan(x) + atan(x - h)) / (h * h) }
+fn dd_tanh(x: f64, h: f64) -> f64 { (tanh(x + h) - 2.0 * tanh(x) + tanh(x - h)) / (h * h) }
+fn dd_asin(x: f64, h: f64) -> f64 { (asin(x + h) - 2.0 * asin(x) + asin(x - h)) / (h * h) }
+fn dd_acos(x: f64, h: f64) -> f64 { (acos(x + h) - 2.0 * acos(x) + acos(x - h)) / (h * h) }
+fn dd_ln(x: f64, h: f64) -> f64 { (ln(x + h) - 2.0 * ln(x) + ln(x - h)) / (h * h) }
+
+fn fd_tan(x: f64, h: f64) -> f64 { rich(dd_tan(x, h), dd_tan(x, h / 2.0)) }
+fn fd_atan(x: f64, h: f64) -> f64 { rich(dd_atan(x, h), dd_atan(x, h / 2.0)) }
+fn fd_tanh(x: f64, h: f64) -> f64 { rich(dd_tanh(x, h), dd_tanh(x, h / 2.0)) }
+fn fd_asin(x: f64, h: f64) -> f64 { rich(dd_asin(x, h), dd_asin(x, h / 2.0)) }
+fn fd_acos(x: f64, h: f64) -> f64 { rich(dd_acos(x, h), dd_acos(x, h / 2.0)) }
+fn fd_ln(x: f64, h: f64) -> f64 { rich(dd_ln(x, h), dd_ln(x, h / 2.0)) }
+
+// ---- atan2(y, x): second differences in y, in x, and mixed ----
+fn dd_a2_yy(y: f64, x: f64, h: f64) -> f64 {
+    (atan2(y + h, x) - 2.0 * atan2(y, x) + atan2(y - h, x)) / (h * h)
+}
+fn dd_a2_xx(y: f64, x: f64, h: f64) -> f64 {
+    (atan2(y, x + h) - 2.0 * atan2(y, x) + atan2(y, x - h)) / (h * h)
+}
+fn dd_a2_yx(y: f64, x: f64, h: f64) -> f64 {
+    (atan2(y + h, x + h) - atan2(y + h, x - h) - atan2(y - h, x + h) + atan2(y - h, x - h)) / (4.0 * h * h)
+}
+fn fd_a2_yy(y: f64, x: f64, h: f64) -> f64 { rich(dd_a2_yy(y, x, h), dd_a2_yy(y, x, h / 2.0)) }
+fn fd_a2_xx(y: f64, x: f64, h: f64) -> f64 { rich(dd_a2_xx(y, x, h), dd_a2_xx(y, x, h / 2.0)) }
+fn fd_a2_yx(y: f64, x: f64, h: f64) -> f64 { rich(dd_a2_yx(y, x, h), dd_a2_yx(y, x, h / 2.0)) }
+
+// g(y, x) = atan2(y*y, x): the chain through a curved first argument.
+fn g_sq(y: f64, x: f64) -> f64 { atan2(y * y, x) }
+fn dd_g_yy(y: f64, x: f64, h: f64) -> f64 { (g_sq(y + h, x) - 2.0 * g_sq(y, x) + g_sq(y - h, x)) / (h * h) }
+fn dd_g_yx(y: f64, x: f64, h: f64) -> f64 {
+    (g_sq(y + h, x + h) - g_sq(y + h, x - h) - g_sq(y - h, x + h) + g_sq(y - h, x - h)) / (4.0 * h * h)
+}
+fn fd_g_yy(y: f64, x: f64, h: f64) -> f64 { rich(dd_g_yy(y, x, h), dd_g_yy(y, x, h / 2.0)) }
+fn fd_g_yx(y: f64, x: f64, h: f64) -> f64 { rich(dd_g_yx(y, x, h), dd_g_yx(y, x, h / 2.0)) }
+
+// q(t) = atan2(t, t*t): both arguments on one channel (cross terms on the diagonal).
+fn q_tt(t: f64) -> f64 { atan2(t, t * t) }
+fn dd_q(t: f64, h: f64) -> f64 { (q_tt(t + h) - 2.0 * q_tt(t) + q_tt(t - h)) / (h * h) }
+fn fd_q(t: f64, h: f64) -> f64 { rich(dd_q(t, h), dd_q(t, h / 2.0)) }
+
+// ---- the lowered Hessians ----
+fn h_tan(x0: f64) -> f64 with IO, Epistemic {
+    let k: Knowledge<f64> = measure(x0, uncertainty: 0.01)
+    let x = k.value
+    hessian_of(tan(x), 0, 0)
+}
+fn h_atan(x0: f64) -> f64 with IO, Epistemic {
+    let k: Knowledge<f64> = measure(x0, uncertainty: 0.01)
+    let x = k.value
+    hessian_of(atan(x), 0, 0)
+}
+fn h_tanh(x0: f64) -> f64 with IO, Epistemic {
+    let k: Knowledge<f64> = measure(x0, uncertainty: 0.01)
+    let x = k.value
+    hessian_of(tanh(x), 0, 0)
+}
+fn h_asin(x0: f64) -> f64 with IO, Epistemic {
+    let k: Knowledge<f64> = measure(x0, uncertainty: 0.001)
+    let x = k.value
+    hessian_of(asin(x), 0, 0)
+}
+fn h_acos(x0: f64) -> f64 with IO, Epistemic {
+    let k: Knowledge<f64> = measure(x0, uncertainty: 0.001)
+    let x = k.value
+    hessian_of(acos(x), 0, 0)
+}
+fn h_ln(x0: f64) -> f64 with IO, Epistemic {
+    let k: Knowledge<f64> = measure(x0, uncertainty: 0.0001)
+    let x = k.value
+    hessian_of(ln(x), 0, 0)
+}
+fn h_a2(y0: f64, x0: f64, j: i64, l: i64) -> f64 with IO, Epistemic {
+    let ky: Knowledge<f64> = measure(y0, uncertainty: 0.0001)
+    let kx: Knowledge<f64> = measure(x0, uncertainty: 0.0001)
+    let y = ky.value
+    let x = kx.value
+    if j == 0 && l == 0 { return hessian_of(atan2(y, x), 0, 0) }
+    if j == 0 && l == 1 { return hessian_of(atan2(y, x), 0, 1) }
+    if j == 1 && l == 0 { return hessian_of(atan2(y, x), 1, 0) }
+    hessian_of(atan2(y, x), 1, 1)
+}
+fn h_g(y0: f64, x0: f64, j: i64, l: i64) -> f64 with IO, Epistemic {
+    let ky: Knowledge<f64> = measure(y0, uncertainty: 0.01)
+    let kx: Knowledge<f64> = measure(x0, uncertainty: 0.01)
+    let y = ky.value
+    let x = kx.value
+    if j == 0 && l == 0 { return hessian_of(atan2(y * y, x), 0, 0) }
+    hessian_of(atan2(y * y, x), 0, 1)
+}
+fn h_q(t0: f64) -> f64 with IO, Epistemic {
+    let kt: Knowledge<f64> = measure(t0, uncertainty: 0.01)
+    let t = kt.value
+    hessian_of(atan2(t, t * t), 0, 0)
+}
+// Ten inputs; atan2 reads channels 8 (y) and 9 (x).
+fn h_a2_ch(y0: f64, x0: f64, j: i64, l: i64) -> f64 with IO, Epistemic {
+    let k0: Knowledge<f64> = measure(1.0, uncertainty: 0.01)
+    let k1: Knowledge<f64> = measure(1.1, uncertainty: 0.01)
+    let k2: Knowledge<f64> = measure(1.2, uncertainty: 0.01)
+    let k3: Knowledge<f64> = measure(1.3, uncertainty: 0.01)
+    let k4: Knowledge<f64> = measure(1.4, uncertainty: 0.01)
+    let k5: Knowledge<f64> = measure(1.5, uncertainty: 0.01)
+    let k6: Knowledge<f64> = measure(1.6, uncertainty: 0.01)
+    let k7: Knowledge<f64> = measure(1.7, uncertainty: 0.01)
+    let ky: Knowledge<f64> = measure(y0, uncertainty: 0.01)
+    let kx: Knowledge<f64> = measure(x0, uncertainty: 0.01)
+    let s = k0.value + k1.value + k2.value + k3.value + k4.value + k5.value + k6.value + k7.value
+    let y = ky.value
+    let x = kx.value
+    if j == 8 && l == 8 { return hessian_of(atan2(y, x) + 0.0 * s, 8, 8) }
+    if j == 8 && l == 9 { return hessian_of(atan2(y, x) + 0.0 * s, 8, 9) }
+    if j == 9 && l == 9 { return hessian_of(atan2(y, x) + 0.0 * s, 9, 9) }
+    hessian_of(atan2(y, x) + 0.0 * s, 0, 8)
+}
+
+fn main() -> i64 with IO, Mut, Div, Panic, Epistemic {
+    var fails: i64 = 0
+    // generic points
+    if !close(1, h_tan(0.7), fd_tan(0.7, 1.0e-3), rnd(tan(0.7), 1.0e-3)) { fails = fails + 1 }
+    if !close(2, h_atan(0.7), fd_atan(0.7, 1.0e-3), rnd(atan(0.7), 1.0e-3)) { fails = fails + 1 }
+    if !close(3, h_tanh(0.4), fd_tanh(0.4, 1.0e-3), rnd(tanh(0.4), 1.0e-3)) { fails = fails + 1 }
+    if !close(4, h_asin(0.6), fd_asin(0.6, 1.0e-3), rnd(asin(0.6), 1.0e-3)) { fails = fails + 1 }
+    if !close(5, h_acos(0.6), fd_acos(0.6, 1.0e-3), rnd(acos(0.6), 1.0e-3)) { fails = fails + 1 }
+    if !close(6, h_ln(2.5), fd_ln(2.5, 1.0e-3), rnd(ln(2.5), 1.0e-3)) { fails = fails + 1 }
+    // next to the singularities (step ~ 1e-3 of the distance to it)
+    if !close(11, h_tan(1.5), fd_tan(1.5, 7.0e-5), rnd(tan(1.5), 7.0e-5)) { fails = fails + 1 }
+    if !close(12, h_tan(0.0 - 1.5), fd_tan(0.0 - 1.5, 7.0e-5), rnd(tan(0.0 - 1.5), 7.0e-5)) { fails = fails + 1 }
+    if !close(13, h_atan(0.001), fd_atan(0.001, 1.0e-3), rnd(atan(0.001), 1.0e-3)) { fails = fails + 1 }
+    if !close(14, h_tanh(3.0), fd_tanh(3.0, 1.0e-3), rnd(tanh(3.0), 1.0e-3)) { fails = fails + 1 }
+    if !close(15, h_asin(0.99), fd_asin(0.99, 1.0e-5), rnd(asin(0.99), 1.0e-5)) { fails = fails + 1 }
+    if !close(16, h_asin(0.0 - 0.99), fd_asin(0.0 - 0.99, 1.0e-5), rnd(asin(0.0 - 0.99), 1.0e-5)) { fails = fails + 1 }
+    if !close(17, h_acos(0.99), fd_acos(0.99, 1.0e-5), rnd(acos(0.99), 1.0e-5)) { fails = fails + 1 }
+    if !close(18, h_ln(0.001), fd_ln(0.001, 1.0e-6), rnd(ln(0.001), 1.0e-6)) { fails = fails + 1 }
+    // atan2 at a generic point: every Hessian entry, both orders of the mixed one
+    if !close(21, h_a2(0.6, 0.8, 0, 0), fd_a2_yy(0.6, 0.8, 1.0e-3), rnd(atan2(0.6, 0.8), 1.0e-3)) { fails = fails + 1 }
+    if !close(22, h_a2(0.6, 0.8, 0, 1), fd_a2_yx(0.6, 0.8, 1.0e-3), rnd(atan2(0.6, 0.8), 1.0e-3)) { fails = fails + 1 }
+    if !close(23, h_a2(0.6, 0.8, 1, 0), fd_a2_yx(0.6, 0.8, 1.0e-3), rnd(atan2(0.6, 0.8), 1.0e-3)) { fails = fails + 1 }
+    if !close(24, h_a2(0.6, 0.8, 1, 1), fd_a2_xx(0.6, 0.8, 1.0e-3), rnd(atan2(0.6, 0.8), 1.0e-3)) { fails = fails + 1 }
+    // atan2 next to the origin (r ~ 2.2e-3)
+    if !close(31, h_a2(0.001, 0.002, 0, 0), fd_a2_yy(0.001, 0.002, 1.0e-6), rnd(atan2(0.001, 0.002), 1.0e-6)) { fails = fails + 1 }
+    if !close(32, h_a2(0.001, 0.002, 0, 1), fd_a2_yx(0.001, 0.002, 1.0e-6), rnd(atan2(0.001, 0.002), 1.0e-6)) { fails = fails + 1 }
+    if !close(33, h_a2(0.001, 0.002, 1, 1), fd_a2_xx(0.001, 0.002, 1.0e-6), rnd(atan2(0.001, 0.002), 1.0e-6)) { fails = fails + 1 }
+    // atan2 just above its branch cut (y = 1e-3 > 0, x = -1); the steps (<= 5e-4)
+    // stay above it, where atan2 is smooth (its only singularity is the origin)
+    if !close(41, h_a2(0.001, 0.0 - 1.0, 0, 0), fd_a2_yy(0.001, 0.0 - 1.0, 5.0e-4), rnd(atan2(0.001, 0.0 - 1.0), 5.0e-4)) { fails = fails + 1 }
+    if !close(42, h_a2(0.001, 0.0 - 1.0, 0, 1), fd_a2_yx(0.001, 0.0 - 1.0, 5.0e-4), rnd(atan2(0.001, 0.0 - 1.0), 5.0e-4)) { fails = fails + 1 }
+    if !close(43, h_a2(0.001, 0.0 - 1.0, 1, 1), fd_a2_xx(0.001, 0.0 - 1.0, 5.0e-4), rnd(atan2(0.001, 0.0 - 1.0), 5.0e-4)) { fails = fails + 1 }
+    // chains: a curved first argument, and both arguments on one channel
+    if !close(51, h_g(0.6, 0.8, 0, 0), fd_g_yy(0.6, 0.8, 1.0e-3), rnd(g_sq(0.6, 0.8), 1.0e-3)) { fails = fails + 1 }
+    if !close(52, h_g(0.6, 0.8, 0, 1), fd_g_yx(0.6, 0.8, 1.0e-3), rnd(g_sq(0.6, 0.8), 1.0e-3)) { fails = fails + 1 }
+    if !close(53, h_q(0.7), fd_q(0.7, 1.0e-3), rnd(q_tt(0.7), 1.0e-3)) { fails = fails + 1 }
+    // channels 8 and 9 of ten
+    if !close(61, h_a2_ch(0.6, 0.8, 8, 8), fd_a2_yy(0.6, 0.8, 1.0e-3), rnd(atan2(0.6, 0.8), 1.0e-3)) { fails = fails + 1 }
+    if !close(62, h_a2_ch(0.6, 0.8, 8, 9), fd_a2_yx(0.6, 0.8, 1.0e-3), rnd(atan2(0.6, 0.8), 1.0e-3)) { fails = fails + 1 }
+    if !close(63, h_a2_ch(0.6, 0.8, 9, 9), fd_a2_xx(0.6, 0.8, 1.0e-3), rnd(atan2(0.6, 0.8), 1.0e-3)) { fails = fails + 1 }
+    if !close(64, h_a2_ch(0.6, 0.8, 0, 8), 0.0, 0.0) { fails = fails + 1 }
+    if fails == 0 {
+        print("MATH_TRANS_HESSIAN_FD_OK\n")
+        return 0
+    }
+    print("MATH_TRANS_HESSIAN_FD_FAIL\n")
+    1
+}
