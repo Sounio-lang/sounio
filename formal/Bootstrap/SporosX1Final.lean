@@ -2780,16 +2780,20 @@ theorem pages_mono {a b : Nat} (h : a ≤ b) :
   exact Nat.mul_le_mul_right page hdiv
 
 theorem mem_wr_third {c1 c2 r : Region} {a v : Nat}
-    (hdisj1 : c1.hi ≤ r.base) (hdisj2 : c2.hi ≤ r.base)
+    (hdisj1 : c1.hi ≤ r.base ∨ r.hi ≤ c1.base)
+    (hdisj2 : c2.hi ≤ r.base ∨ r.hi ≤ c2.base)
     (hge : r.base ≤ a) (hlt : a < r.hi) (hrw : r.rw = true) :
     Mem.wr [c1, c2, r] a v =
       some [c1, c2, { r with data := r.data.set (a - r.base) (v % 256) }] := by
-  have hnot1 : ¬ (c1.base ≤ a ∧ a < c1.hi) := by omega
-  have hnot2 : ¬ (c2.base ≤ a ∧ a < c2.hi) := by omega
+  have hnot1 : ¬ (c1.base ≤ a ∧ a < c1.hi) := by
+    rcases hdisj1 with h | h <;> omega
+  have hnot2 : ¬ (c2.base ≤ a ∧ a < c2.hi) := by
+    rcases hdisj2 with h | h <;> omega
   simp [Mem.wr, Mem.find, hnot1, hnot2, hge, hlt, hrw]
 
 theorem wrN_third_some : ∀ (bs : List Nat) {c1 c2 r : Region} {a : Nat},
-    c1.hi ≤ r.base → c2.hi ≤ r.base → r.rw = true → r.base ≤ a →
+    (c1.hi ≤ r.base ∨ r.hi ≤ c1.base) →
+    (c2.hi ≤ r.base ∨ r.hi ≤ c2.base) → r.rw = true → r.base ≤ a →
     a + bs.length ≤ r.hi →
     ∃ r', Mem.wrN [c1, c2, r] a bs = some [c1, c2, r'] ∧
       r'.base = r.base ∧ r'.hi = r.hi ∧ r'.rw = r.rw
@@ -2803,10 +2807,22 @@ theorem wrN_third_some : ∀ (bs : List Nat) {c1 c2 r : Region} {a : Nat},
     have hlen : ({ r with data := r.data.set (a - r.base) (b % 256) } :
         Region).hi = r.hi := by
       simp [Region.hi, List.length_set]
+    have hd1 : c1.hi ≤ r.base ∨
+        ({ r with data := r.data.set (a - r.base) (b % 256) } :
+          Region).hi ≤ c1.base := by
+      rcases hdisj1 with h | h
+      · exact Or.inl h
+      · exact Or.inr (by rw [hlen]; exact h)
+    have hd2 : c2.hi ≤ r.base ∨
+        ({ r with data := r.data.set (a - r.base) (b % 256) } :
+          Region).hi ≤ c2.base := by
+      rcases hdisj2 with h | h
+      · exact Or.inl h
+      · exact Or.inr (by rw [hlen]; exact h)
     obtain ⟨r'', hr'', hb, hh, hrw'⟩ :=
       wrN_third_some (c1 := c1) (c2 := c2)
         (r := { r with data := r.data.set (a - r.base) (b % 256) })
-        (a := a + 1) t hdisj1 hdisj2 (by simpa using hrw)
+        (a := a + 1) t hd1 hd2 (by simpa using hrw)
         (by show r.base ≤ a + 1; omega) (by
         rw [hlen]
         simp at hhi
@@ -2877,7 +2893,7 @@ oracle is not consumed (its head is a placement, and `Kern.count`
 keeps the kernel), the buffer prefix now holds `f.take (count+n)`,
 and control is at `loaded`'s jump when `n = 0`, else at the
 count-update. -/
-theorem loader_read_once {f : List Nat} {A sp0 cap count : Nat}
+theorem loader_read_once {f : List Nat} {A sp0 cap count capB : Nat}
     {c1 c2 buf : Region} {s : X86Int.St}
     (hrip : s.rip = base + 0xd7) (hlen16 : s.regs.length = 16)
     (hr3 : s.reg 3 = some A) (hr12 : s.reg 12 = some cap)
@@ -2887,7 +2903,8 @@ theorem loader_read_once {f : List Nat} {A sp0 cap count : Nat}
     (hr8 : ∃ v, s.reg 8 = some v) (hr9 : ∃ v, s.reg 9 = some v)
     (hmem : s.mem = [c1, c2, buf]) (hbufbase : buf.base = A)
     (hbufrw : buf.rw = true) (hbufhi : buf.hi = A + cap)
-    (hdisj1 : c1.hi ≤ A) (hdisj2 : c2.hi ≤ A)
+    (hdisj1 : c1.hi ≤ A ∨ A + capB ≤ c1.base)
+    (hdisj2 : c2.hi ≤ A ∨ A + capB ≤ c2.base) (hcapB : cap ≤ capB)
     (hcontent : s.mem.rdN A count = some (f.take count))
     (hfd : s.k.fds = [some ⟨f, count⟩])
     (hhead : ∃ B, s.k.oracle.head? = some (.at B))
@@ -2928,9 +2945,17 @@ theorem loader_read_once {f : List Nat} {A sp0 cap count : Nat}
   have hbslen : ((f.drop count).take n).length = n := by
     rw [List.length_take, hn, hdrop]
     omega
+  have hdwr1 : c1.hi ≤ buf.base ∨ buf.hi ≤ c1.base := by
+    rcases hdisj1 with h | h
+    · exact Or.inl (by omega)
+    · exact Or.inr (by omega)
+  have hdwr2 : c2.hi ≤ buf.base ∨ buf.hi ≤ c2.base := by
+    rcases hdisj2 with h | h
+    · exact Or.inl (by omega)
+    · exact Or.inr (by omega)
   obtain ⟨buf', hwr, hbuf'b, hbuf'hi, hbuf'rw⟩ :=
     wrN_third_some (c1 := c1) (c2 := c2) (r := buf) (a := A + count)
-      ((f.drop count).take n) (by omega) (by omega) hbufrw (by omega) (by
+      ((f.drop count).take n) hdwr1 hdwr2 hbufrw (by omega) (by
       rw [hbslen, hbufhi]
       have hnn : n ≤ cap - count := by rw [hn]; exact Nat.min_le_left _ _
       omega)
@@ -3988,39 +4013,51 @@ theorem pages_eq_of_mod_zero {n : Nat} (h : n % page = 0) :
   omega
 
 theorem find_third {c1 c2 r : Region} {A : Nat}
-    (h1 : c1.hi ≤ A) (h2 : c2.hi ≤ A) (hge : r.base ≤ A)
+    (h1 : c1.hi ≤ A ∨ A < c1.base) (h2 : c2.hi ≤ A ∨ A < c2.base)
+    (hge : r.base ≤ A)
     (hlt : A < r.hi) :
     Mem.find [c1, c2, r] A 0 = some (2, r) := by
-  have hnot1 : ¬ (c1.base ≤ A ∧ A < c1.hi) := by omega
-  have hnot2 : ¬ (c2.base ≤ A ∧ A < c2.hi) := by omega
+  have hnot1 : ¬ (c1.base ≤ A ∧ A < c1.hi) := by
+    rcases h1 with h | h <;> omega
+  have hnot2 : ¬ (c2.base ≤ A ∧ A < c2.hi) := by
+    rcases h2 with h | h <;> omega
   simp [Mem.find, hnot1, hnot2, hge, hlt]
 
 theorem free_pair {c1 c2 : Region} {A n : Nat}
-    (h1 : c1.hi ≤ A) (h2 : c2.hi ≤ A) :
+    (h1 : c1.hi ≤ A ∨ A + n ≤ c1.base)
+    (h2 : c2.hi ≤ A ∨ A + n ≤ c2.base) :
     Mem.free [c1, c2] A n = true := by
   rw [Mem.free, List.all_eq_true]
   intro r hr
   simp at hr
   rcases hr with rfl | rfl <;>
     simp only [Bool.or_eq_true, decide_eq_true_eq]
-  · exact Or.inr h1
-  · exact Or.inr h2
+  · rcases h1 with h | h
+    · exact Or.inr h
+    · exact Or.inl h
+  · rcases h2 with h | h
+    · exact Or.inr h
+    · exact Or.inl h
 
 theorem mem_rd_third {c1 c2 r : Region} {a v : Nat}
-    (h1 : c1.hi ≤ a) (h2 : c2.hi ≤ a) (hge : r.base ≤ a)
+    (h1 : c1.hi ≤ a ∨ a < c1.base) (h2 : c2.hi ≤ a ∨ a < c2.base)
+    (hge : r.base ≤ a)
     (hbyte : r.data[a - r.base]? = some v) :
     Mem.rd [c1, c2, r] a = some v := by
   have hlt : a < r.hi := by
     have hh := (List.getElem?_eq_some_iff.1 hbyte).1
     unfold Region.hi
     omega
-  have hnot1 : ¬ (c1.base ≤ a ∧ a < c1.hi) := by omega
-  have hnot2 : ¬ (c2.base ≤ a ∧ a < c2.hi) := by omega
+  have hnot1 : ¬ (c1.base ≤ a ∧ a < c1.hi) := by
+    rcases h1 with h | h <;> omega
+  have hnot2 : ¬ (c2.base ≤ a ∧ a < c2.hi) := by
+    rcases h2 with h | h <;> omega
   simp [Mem.rd, Mem.find, hnot1, hnot2, hge, hlt, hbyte]
 
-theorem rdN_third_take {c1 c2 r : Region} {A k : Nat}
-    (h1 : c1.hi ≤ A) (h2 : c2.hi ≤ A) (hb : r.base = A)
-    (hk : k ≤ r.data.length) :
+theorem rdN_third_take {c1 c2 r : Region} {A k capB : Nat}
+    (h1 : c1.hi ≤ A ∨ A + capB ≤ c1.base)
+    (h2 : c2.hi ≤ A ∨ A + capB ≤ c2.base) (hb : r.base = A)
+    (hk : k ≤ r.data.length) (hkB : k ≤ capB) :
     Mem.rdN [c1, c2, r] A k = some (r.data.take k) := by
   apply rdN_of_rd (by rw [List.length_take, Nat.min_eq_left hk])
   intro i hi
@@ -4029,13 +4066,23 @@ theorem rdN_third_take {c1 c2 r : Region} {A k : Nat}
   refine ⟨r.data[i], ?_, ?_⟩
   · have hbyte : r.data[(A + i) - r.base]? = some r.data[i] := by
       rw [hb, show A + i - A = i by omega]; exact hgi
-    exact mem_rd_third (by omega) (by omega) (by omega) hbyte
+    have hd1 : c1.hi ≤ A + i ∨ A + i < c1.base := by
+      rcases h1 with h | h
+      · exact Or.inl (by omega)
+      · exact Or.inr (by omega)
+    have hd2 : c2.hi ≤ A + i ∨ A + i < c2.base := by
+      rcases h2 with h | h
+      · exact Or.inl (by omega)
+      · exact Or.inr (by omega)
+    exact mem_rd_third hd1 hd2 (by omega) hbyte
   · rw [List.getElem?_take]
     simp [hi, hgi]
 
-theorem rdN_grow_preserve {c1 c2 r : Region} {A k z : Nat} {L : List Nat}
-    (h1 : c1.hi ≤ A) (h2 : c2.hi ≤ A) (hb : r.base = A)
-    (hk : k ≤ r.data.length)
+theorem rdN_grow_preserve {c1 c2 r : Region} {A k z capB : Nat}
+    {L : List Nat}
+    (h1 : c1.hi ≤ A ∨ A + capB ≤ c1.base)
+    (h2 : c2.hi ≤ A ∨ A + capB ≤ c2.base) (hb : r.base = A)
+    (hk : k ≤ r.data.length) (hkB : k ≤ capB)
     (hold : Mem.rdN [c1, c2, r] A k = some L) :
     Mem.rdN [c1, c2, ⟨A, r.data ++ List.replicate z 0, true⟩] A k =
       some L := by
@@ -4045,12 +4092,12 @@ theorem rdN_grow_preserve {c1 c2 r : Region} {A k z : Nat} {L : List Nat}
   have hk' : k ≤ (r.data ++ List.replicate z 0).length := by
     rw [hlen]; omega
   have hnew := rdN_third_take (r := ⟨A, r.data ++ List.replicate z 0, true⟩)
-    h1 h2 rfl hk'
+    h1 h2 rfl hk' hkB
   have htake : (r.data ++ List.replicate z 0).take k = r.data.take k := by
     rw [List.take_append, show k - r.data.length = 0 by omega,
       List.take_zero, List.append_nil]
   rw [htake] at hnew
-  have hold' := rdN_third_take h1 h2 hb hk
+  have hold' := rdN_third_take h1 h2 hb hk hkB
   rw [hold'] at hold
   injection hold with hL
   rw [← hL]
@@ -4101,7 +4148,7 @@ theorem syscall_mremap_grow {k : Kern} {c1 c2 r : Region}
 doubles the file buffer in place at `A`, consuming one oracle
 placement; the state at the syscall (after 6 steps) is
 oracle-legal.  The count and the buffer prefix are preserved. -/
-theorem loader_grow {f : List Nat} {A sp0 cap count : Nat}
+theorem loader_grow {f : List Nat} {A sp0 cap count capB : Nat}
     {c1 c2 buf : Region} {s : X86Int.St} {rest : List Choice}
     (hrip : s.rip = base + 0xfc) (hlen16 : s.regs.length = 16)
     (hr3 : s.reg 3 = some A) (hr12 : s.reg 12 = some cap)
@@ -4110,7 +4157,9 @@ theorem loader_grow {f : List Nat} {A sp0 cap count : Nat}
     (hr8 : ∃ v, s.reg 8 = some v) (hr9 : ∃ v, s.reg 9 = some v)
     (hmem : s.mem = [c1, c2, buf]) (hbufbase : buf.base = A)
     (hbufrw : buf.rw = true) (hbufhi : buf.hi = A + cap)
-    (hdisj1 : c1.hi ≤ A) (hdisj2 : c2.hi ≤ A)
+    (hdisj1 : c1.hi ≤ A ∨ A + capB ≤ c1.base)
+    (hdisj2 : c2.hi ≤ A ∨ A + capB ≤ c2.base)
+    (hcapB : cap + cap ≤ capB)
     (hcontent : s.mem.rdN A count = some (f.take count))
     (hfd : s.k.fds = [some ⟨f, count⟩])
     (horacle : s.k.oracle = .at A :: rest)
@@ -4142,11 +4191,27 @@ theorem loader_grow {f : List Nat} {A sp0 cap count : Nat}
   have hpages : X86Env.pages cap = cap := pages_eq_of_mod_zero hcapmod
   have hpages2 : X86Env.pages (cap + cap) = cap + cap :=
     pages_eq_of_mod_zero (by simp [Nat.add_mod, hcapmod])
-  have hfind : Mem.find [c1, c2, buf] A 0 = some (2, buf) :=
-    find_third hdisj1 hdisj2 (by omega) (by rw [hbufhi]; omega)
+  have hfind : Mem.find [c1, c2, buf] A 0 = some (2, buf) := by
+    have hd1 : c1.hi ≤ A ∨ A < c1.base := by
+      rcases hdisj1 with h | h
+      · exact Or.inl h
+      · exact Or.inr (by omega)
+    have hd2 : c2.hi ≤ A ∨ A < c2.base := by
+      rcases hdisj2 with h | h
+      · exact Or.inl h
+      · exact Or.inr (by omega)
+    exact find_third hd1 hd2 (by omega) (by rw [hbufhi]; omega)
   have hplace : X86Env.place [c1, c2] (some (.at A)) (cap + cap) =
-      some (some A) :=
-    place_at hAmod hApos hbound (free_pair hdisj1 hdisj2)
+      some (some A) := by
+    have hd1 : c1.hi ≤ A ∨ A + (cap + cap) ≤ c1.base := by
+      rcases hdisj1 with h | h
+      · exact Or.inl h
+      · exact Or.inr (by omega)
+    have hd2 : c2.hi ≤ A ∨ A + (cap + cap) ≤ c2.base := by
+      rcases hdisj2 with h | h
+      · exact Or.inl h
+      · exact Or.inr (by omega)
+    exact place_at hAmod hApos hbound (free_pair hd1 hd2)
   have hsc : X86Env.syscall s.k s.mem 25 A cap (cap + cap)
         MREMAP_MAYMOVE v8 v9 =
       some (.ret A { s.k with oracle := rest }
@@ -4160,7 +4225,7 @@ theorem loader_grow {f : List Nat} {A sp0 cap count : Nat}
   have hrdN' : Mem.rdN [c1, c2,
         ⟨A, buf.data ++ List.replicate cap 0, true⟩] A count =
       some (f.take count) :=
-    rdN_grow_preserve hdisj1 hdisj2 hbufbase (by omega) hcontent'
+    rdN_grow_preserve hdisj1 hdisj2 hbufbase (by omega) (by omega) hcontent'
   -- step 1: mov eax, 25
   have e1 : X86Int.step stage1Im s =
       .ok { s.set 0 (some (25 % W)) with rip := s.rip + 5 } :=
@@ -4905,7 +4970,7 @@ once the growth entries run out (reads do not consume it).  Ends
 just after the jump at `loaded`, at the parser entry
 `base + 0x134`, with the whole file in the buffer. -/
 theorem loader_read_loop : ∀ rem : Nat,
-    ∀ {f : List Nat} {A sp0 cap count g : Nat}
+    ∀ {f : List Nat} {A sp0 cap count g capB : Nat}
       {c1 c2 buf : Region} {s : X86Int.St} {tail : List Choice},
       f.length - count = rem →
       s.rip = base + 0xd7 → s.regs.length = 16 →
@@ -4915,7 +4980,8 @@ theorem loader_read_loop : ∀ rem : Nat,
       (∃ v, s.reg 0 = some v) → (∃ v, s.reg 10 = some v) →
       (∃ v, s.reg 8 = some v) → (∃ v, s.reg 9 = some v) →
       s.mem = [c1, c2, buf] → buf.base = A → buf.rw = true →
-      buf.hi = A + cap → c1.hi ≤ A → c2.hi ≤ A →
+      buf.hi = A + cap → (c1.hi ≤ A ∨ A + capB ≤ c1.base) →
+      (c2.hi ≤ A ∨ A + capB ≤ c2.base) → cap * 2 ^ g ≤ capB →
       s.mem.rdN A count = some (f.take count) →
       s.k.fds = [some ⟨f, count⟩] →
       s.k.oracle = List.replicate g (.at A) ++ tail →
@@ -4941,10 +5007,10 @@ theorem loader_read_loop : ∀ rem : Nat,
   intro rem
   induction rem using Nat.strongRecOn with
   | _ rem ih =>
-  intro f A sp0 cap count g c1 c2 buf s tail hrem hrip hlen16 hr3 hr12
-    hr13 hr14 hr4 hr0 hr10 hr8 hr9 hmem hbufbase hbufrw hbufhi hdisj1
-    hdisj2 hcontent hfd horacle htail hfB hcount hcountcap hAmod hApos
-    hA63 hcapmod hcappos hbound hflen
+  intro f A sp0 cap count g capB c1 c2 buf s tail hrem hrip hlen16 hr3
+    hr12 hr13 hr14 hr4 hr0 hr10 hr8 hr9 hmem hbufbase hbufrw hbufhi
+    hdisj1 hdisj2 hcapB hcontent hfd horacle htail hfB hcount hcountcap
+    hAmod hApos hA63 hcapmod hcappos hbound hflen
   have hc := stage1_loaderCode
   have hcaple : cap ≤ cap * 2 ^ g := by
     cases g with
@@ -4971,8 +5037,8 @@ theorem loader_read_loop : ∀ rem : Nat,
     hs1r10, hs1r8, hs1r9, hs1oracle, hs1fds,
     ⟨buf1, hs1mem, hbuf1base, hbuf1hi, hbuf1rw⟩, hs1content, hs1len⟩ :=
     loader_read_once hrip hlen16 hr3 hr12 hr13 hr14 hr4 hr0 hr10 hr8 hr9
-      hmem hbufbase hbufrw hbufhi hdisj1 hdisj2 hcontent hfd hhead hfB
-      hcount hcountcap hAcap hcap63
+      hmem hbufbase hbufrw hbufhi hdisj1 hdisj2 (by omega) hcontent hfd
+      hhead hfB hcount hcountcap hAcap hcap63
   obtain ⟨n, hn⟩ : ∃ m : Nat,
       m = min (cap - count) (f.length - count) := ⟨_, rfl⟩
   rw [← hn] at hs1r0 hs1fds hs1content
@@ -5081,7 +5147,7 @@ theorem loader_read_loop : ∀ rem : Nat,
         hlen3⟩ :=
         ih (f.length - (count + n)) hrem2 rfl hs2rip hs2len hs2r3
           hs2r12 hs2r13 hs2r14 hs2r4 hs2r0 hs2r10 hs2r8 hs2r9 hs2mem'
-          hbuf1base hbuf1rw hbuf1hi hdisj1 hdisj2 hs2content hs2fds
+          hbuf1base hbuf1rw hbuf1hi hdisj1 hdisj2 hcapB hs2content hs2fds
           hs2oracle htail hfB hnlen hltcap hAmod hApos hA63 hcapmod
           hcappos hbound hflen
       have hrun : run stage1Im (14 + k) (Out.ok s) = Out.ok s3 := by
@@ -5117,6 +5183,16 @@ theorem loader_read_loop : ∀ rem : Nat,
         hs3len, -⟩ :=
         loader_grow hs2rip hs2len hs2r3 hs2r12 hs2r13 hs2r14 hs2r4
           hs2r8 hs2r9 hs2mem' hbuf1base hbuf1rw hbuf1hi hdisj1 hdisj2
+          (by
+            have hcc : cap + cap ≤ cap * 2 ^ g := by
+              rw [hg']
+              have h2 : (2 : Nat) ≤ 2 ^ (g' + 1) := by
+                calc (2 : Nat) = 2 ^ 1 := by decide
+                  _ ≤ 2 ^ (g' + 1) :=
+                    Nat.pow_le_pow_right (by decide) (by omega)
+              calc cap + cap = cap * 2 := by omega
+                _ ≤ cap * 2 ^ (g' + 1) := Nat.mul_le_mul_left cap h2
+            omega)
           hs2content hs2fds hor2' (by omega) hAmod hApos hbound2
           hcapmod hcappos (by omega) hA63
       have hcapmod2 : (cap + cap) % page = 0 := by
@@ -5133,7 +5209,8 @@ theorem loader_read_loop : ∀ rem : Nat,
           hlen4⟩ :=
         ih (f.length - (count + n)) hrem2 rfl hs3rip hs3len hs3r3
           hs3r12 hs3r13 hs3r14 hs3r4 hs3r0 hs3r10 hs3r8 hs3r9 hs3mem
-          hbuf3base hbuf3rw hbuf3hi hdisj1 hdisj2 hs3content hs3fds
+          hbuf3base hbuf3rw hbuf3hi hdisj1 hdisj2
+          (by rwa [hcapgrow]) hs3content hs3fds
           hs3oracle htail hfB hnlen (by omega) hAmod hApos hA63
           hcapmod2 (by omega) hbound3 hflen3
       have hrun : run stage1Im (26 + k) (Out.ok s) = Out.ok s4 := by
