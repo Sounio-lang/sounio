@@ -1,19 +1,20 @@
 // stdlib/special/erf.sio — Error function and related
 //
-// Pure Sounio implementations (no FFI, no external imports):
-//   erf(x)            — Error function via A&S 7.1.26 rational approximation
-//   erfc(x)           — Complementary error function (1 - erf for |x|<4,
-//                        continued fraction for |x|>=4)
+//   erf(x)            — Error function to double precision (fdlibm s_erf.c)
+//   erfc(x)           — Complementary error function to double precision, no
+//                        cancellation in the tail (fdlibm s_erf.c)
 //   erfinv(x)         — Inverse error function (minimax + Newton-Raphson)
 //   normal_cdf(x)     — Standard normal CDF: 0.5*(1 + erf(x/sqrt(2)))
 //   normal_quantile(p)— Standard normal quantile: sqrt(2)*erfinv(2p-1)
 //
 // References:
-//   Abramowitz & Stegun (1964) §7.1.26 — erf rational approx, max error < 1.5e-7
+//   Sun Microsystems fdlibm 5.3, s_erf.c (1993) — erf / erfc
 //   J.M. Blair et al. (1976) "Rational Chebyshev approximations for the
 //     inverse of the error function" — erfinv minimax coefficients
 //   Giles (2010) "Approximating the erfinv function" — GPU-oriented derivation
 //   Press et al. (2007) "Numerical Recipes" 3rd ed., §6.2
+
+use math::pure::{exp, floor}
 
 // ============================================================================
 // HELPERS (must precede callers — no forward references in Sounio)
@@ -89,103 +90,129 @@ fn erf_exp(x: f64) -> f64 with Mut, Div, Panic {
     return result
 }
 
-// A&S 7.1.26 rational approximation for x >= 0
-// Returns erf(x) for non-negative x.
-fn erf_as726(x: f64) -> f64 with Mut, Div, Panic {
-    // Coefficients from Abramowitz & Stegun §7.1.26
-    let p  = 0.3275911
-    let a1 = 0.254829592
-    let a2 = 0.0 - 0.284496736
-    let a3 = 1.421413741
-    let a4 = 0.0 - 1.453152027
-    let a5 = 1.061405429
+// ============================================================================
+// erf AND erfc TO DOUBLE PRECISION
+// ============================================================================
+// The algorithm and the coefficients are those of fdlibm s_erf.c:
+//
+//   Copyright (C) 1993 by Sun Microsystems, Inc. All rights reserved.
+//   Developed at SunSoft, a Sun Microsystems, Inc. business.
+//   Permission to use, copy, modify, and distribute this software is freely
+//   granted, provided that this notice is preserved.
+//
+// WHY. The previous body was Abramowitz-Stegun 7.1.26, absolute error 1.5e-7.
+// Every p-value, normal CDF and quantile in stdlib/stats inherited that floor,
+// and an Ewald real-space sum (molecular::ewald) needs erfc to the last digit:
+// sum_j q_j erfc(alpha r)/r over thousands of charges of both signs cancels to
+// a few parts in 1e4, so a 1e-7 erfc leaves the electrostatic energy with a
+// 1e-3 relative error that no convergence test can see.
+//
+// THE ONE CHANGE TO fdlibm. For |x| >= 1.25 fdlibm forms exp(-x^2) as
+// exp(-z^2 - 0.5625) * exp((z - x)(z + x) + R/S), with z = x whose low 32 bits
+// are cleared so z^2 is exact. Here z = floor(x * 2^20) / 2^20: for |x| < 28
+// z has at most 25 significant bits, z^2 is exact in a double, and
+// (z - x)(z + x) is formed from two exact factors. Same identity, no bit access.
+//
+// ACCURACY, checked against long-double glibc erf/erfc on 20001 points of
+// [-6, 28] plus the branch boundaries (stdlib/special/oracles/erf_oracle.cpp):
+// worst case 1 ulp (erf) and 2 ulp (erfc), tests/stdlib/special/erf_double_precision.sio.
 
-    let t  = 1.0 / (1.0 + p * x)
-    let t2 = t * t
-    let t3 = t2 * t
-    let t4 = t3 * t
-    let t5 = t4 * t
-
-    let poly = a1 * t + a2 * t2 + a3 * t3 + a4 * t4 + a5 * t5
-    return 1.0 - poly * erf_exp(0.0 - x * x)
+fn erf_pp(z: f64) -> f64 {
+    0.128379167095512558561 + z * ((0.0 - 0.325042107247001499370) + z * ((0.0 - 0.0284817495755985104766)
+        + z * ((0.0 - 0.00577027029648944159157) + z * (0.0 - 0.0000237630166566501626084))))
 }
 
-// Continued fraction for erfc(x) for large |x| (x > 0)
-// erfc(x) = exp(-x^2)/sqrt(pi) * CF, CF via Lentz method.
-// Numerically stable for x >= 4.
-fn erfc_cf(x: f64) -> f64 with Mut, Div, Panic {
-    let sqrt_pi = 1.7724538509055159   // sqrt(pi)
-    let tiny    = 1.0e-30
-    let x2      = x * x
+fn erf_qq(z: f64) -> f64 {
+    1.0 + z * (0.397917223959155352819 + z * (0.0650222499887672944485 + z * (0.00508130628187576562776
+        + z * (0.000132494738004321644526 + z * (0.0 - 0.00000396022827877536812320)))))
+}
 
-    // Continued fraction: erfc(x) = (exp(-x^2)/sqrt(pi)) / (x + 0.5/(x + 1/(x + 1.5/(x + ...))))
-    // Equivalently write it as: CF = x + a_1/(x + a_2/(x + ...)), a_n = n/2
-    // We use the modified Lentz method on the CF representation.
-    var b = x + 0.5 / x   // seed for initial estimate
-    var f = b
-    if erf_abs(f) < tiny { f = tiny }
-    var c = f
-    var d = 0.0
+fn erf_pa(s: f64) -> f64 {
+    (0.0 - 0.00236211856075265944077) + s * (0.414856118683748331666 + s * ((0.0 - 0.372207876035701323847)
+        + s * (0.318346619901161753674 + s * ((0.0 - 0.110894694282396677476)
+        + s * (0.0354783043256182359371 + s * (0.0 - 0.00216637559486879084300))))))
+}
 
-    var n = 1
-    while n < 60 {
-        let an = (n as f64) * 0.5   // a_n = n/2
-        let bn = x                   // all partial denominators are x
+fn erf_qa(s: f64) -> f64 {
+    1.0 + s * (0.106420880400844228286 + s * (0.540397917702171048937 + s * (0.0718286544141962662868
+        + s * (0.126171219808761642112 + s * (0.0136370839120290507362 + s * 0.0119844998467991074170)))))
+}
 
-        d = bn + an * d
-        if erf_abs(d) < tiny { d = tiny }
-        d = 1.0 / d
-
-        c = bn + an / c
-        if erf_abs(c) < tiny { c = tiny }
-
-        let delta = c * d
-        f = f * delta
-
-        if erf_abs(delta - 1.0) < 1.0e-14 { n = 60 }
-        else { n = n + 1 }
+// erfc(ax) * ax * exp(ax^2) for ax in [1.25, 28): the R/S tail of fdlibm.
+fn erf_tail_rs(ax: f64) -> f64 {
+    let s = 1.0 / (ax * ax)
+    if ax < 2.857142857142857 {
+        let r = (0.0 - 0.00986494403484714822705) + s * ((0.0 - 0.693858572707181764372) + s * ((0.0 - 10.5586262253232909814)
+            + s * ((0.0 - 62.3753324503260060396) + s * ((0.0 - 162.396669462573470355) + s * ((0.0 - 184.605092906711035994)
+            + s * ((0.0 - 81.2874355063065934246) + s * (0.0 - 9.81432934416914548592)))))))
+        let q = 1.0 + s * (19.6512716674392571292 + s * (137.657754143519042600 + s * (434.565877475229228821
+            + s * (645.387271733267880336 + s * (429.008140027567833386 + s * (108.635005541779435134
+            + s * (6.57024977031928170135 + s * (0.0 - 0.0604244152148580987438))))))))
+        return r / q
     }
-
-    return erf_exp(0.0 - x2) / (sqrt_pi * f)
+    let r = (0.0 - 0.00986494292470009928597) + s * ((0.0 - 0.799283237680523006574) + s * ((0.0 - 17.7579549177547519889)
+        + s * ((0.0 - 160.636384855821916062) + s * ((0.0 - 637.566443368389627722) + s * ((0.0 - 1025.09513161107724954)
+        + s * (0.0 - 483.519191608651397019))))))
+    let q = 1.0 + s * (30.3380607434824582924 + s * (325.792512996573918826 + s * (1536.72958608443695994
+        + s * (3199.85821950859553908 + s * (2553.05040643316442583 + s * (474.528541206955367215
+        + s * (0.0 - 22.4409524465858183362)))))))
+    r / q
 }
 
-// ============================================================================
-// pub fn erf(x: f64) -> f64
-// ============================================================================
-// Abramowitz & Stegun 7.1.26 rational approximation.
-// Maximum error < 1.5e-7 over the entire real line.
-// Uses odd symmetry for negative x: erf(-x) = -erf(x).
+// erfc(ax) for ax in [1.25, 28).
+fn erf_tail(ax: f64) -> f64 {
+    let z = floor(ax * 1048576.0) / 1048576.0
+    let r = exp(0.0 - z * z - 0.5625) * exp((z - ax) * (z + ax) + erf_tail_rs(ax))
+    r / ax
+}
 
 pub fn erf(x: f64) -> f64 with Mut, Div, Panic {
-    if x == 0.0 { return 0.0 }
-    if x > 6.0  { return 1.0 }
-    if x < 0.0 - 6.0 { return 0.0 - 1.0 }
-    if x < 0.0  { return 0.0 - erf_as726(0.0 - x) }
-    return erf_as726(x)
+    if x != x { return x }
+    let ax = erf_abs(x)
+    if ax < 0.84375 {
+        if ax < 3.725290298461914e-9 { return x + 0.128379167095512586316 * x }
+        let z = x * x
+        return x + x * (erf_pp(z) / erf_qq(z))
+    }
+    if ax < 1.25 {
+        let pq = erf_pa(ax - 1.0) / erf_qa(ax - 1.0)
+        if x >= 0.0 { return 0.845062911510467529297 + pq }
+        return (0.0 - 0.845062911510467529297) - pq
+    }
+    if ax >= 6.0 {
+        if x >= 0.0 { return 1.0 }
+        return 0.0 - 1.0
+    }
+    let t = erf_tail(ax)
+    if x >= 0.0 { return 1.0 - t }
+    t - 1.0
 }
-
-// ============================================================================
-// pub fn erfc(x: f64) -> f64
-// ============================================================================
-// Complementary error function: 1 - erf(x).
-// For |x| < 4: computed as 1 - erf(x) to avoid catastrophic cancellation.
-// For |x| >= 4: continued fraction expansion (numerically stable tail).
 
 pub fn erfc(x: f64) -> f64 with Mut, Div, Panic {
-    if x == 0.0  { return 1.0 }
-    if x > 26.0  { return 0.0 }
-    if x < 0.0 - 26.0 { return 2.0 }
-
-    if x < 0.0 {
-        return 2.0 - erfc(0.0 - x)
+    if x != x { return x }
+    let ax = erf_abs(x)
+    if ax < 0.84375 {
+        if ax < 1.3877787807814457e-17 { return 1.0 - x }
+        let z = x * x
+        let y = erf_pp(z) / erf_qq(z)
+        if x < 0.25 { return 1.0 - (x + x * y) }
+        return 0.5 - (x * y + (x - 0.5))
     }
-
-    if x < 4.0 {
-        return 1.0 - erf_as726(x)
+    if ax < 1.25 {
+        let pq = erf_pa(ax - 1.0) / erf_qa(ax - 1.0)
+        if x >= 0.0 { return (1.0 - 0.845062911510467529297) - pq }
+        return 1.0 + (0.845062911510467529297 + pq)
     }
-
-    return erfc_cf(x)
+    if ax < 28.0 {
+        if x < 0.0 - 6.0 { return 2.0 }
+        let t = erf_tail(ax)
+        if x > 0.0 { return t }
+        return 2.0 - t
+    }
+    if x > 0.0 { return 0.0 }
+    2.0
 }
+
 
 // ============================================================================
 // erfinv helpers — Acklam's rational approximation mapped from normal quantile

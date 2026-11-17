@@ -94,3 +94,60 @@ value narrower than any one of them. With the covariance, `meet` refuses (negati
 under every policy), and the models are carried as `contest(spce, tip4, tip5)`. Retracting
 TIP4P/Ice, the force field fitted to the ice phases, leaves SPC/E and TIP5P, which still
 disagree (E_n = 3.6) and still cannot be fused.
+
+# A charged H2 in a proton-disordered host: `tests/stdlib/molecular/test_sii_charges_ewald.sio`
+
+The runs above use a one-site H2, so the water hydrogens never enter. With the Alavi
+three-site H2 (+0.4932 e on the atoms, −0.9864 e at the centre: quadrupole
+2.17·10⁻⁴⁰ C m², the experimental value) they do, and their positions are not in
+the oxygen lattice. `molecular::ice_rules` builds them: an Euler circuit on the
+4-regular bond graph satisfies the ice rules, and loop moves disorder the protons and
+bring the bond-winding vector to (0, 0, 0) exactly. On one sII cell (seed 20261116):
+272 bonds, 0 ice-rule violations, residual SPC/E dipole 0.32 e Å per cell against
+66.5 e Å if every water were aligned. `molecular::ewald` gives the tinfoil Ewald
+potential of the 408 host charges. Everything below was predicted in
+`stdlib/molecular/oracles/sii_ewald_predictions.txt` before the oracle ran, and matches
+it in Sounio to 1e-9 or better:
+
+| Check | Result |
+|---|---|
+| H2 energy independent of the Ewald splitting (α = 0.35, 0.40, 0.45 Å⁻¹) | 4e-12 relative |
+| Ewald equals the cubic direct sum of host images (N = 24 shells) | 6e-5 (small cage) and 2e-4 (large) relative, falling as 1/N² |
+| Point-quadrupole limit ½ Q_ab ∂_a∂_b φ | within 3 % of the orientational spread |
+| Orientation average at a cage centre (Laplace: ∇²φ = 0) | below 5e-5 of the spread |
+| Orientational spread (max − min energy) | 0.42–1.33 kJ/mol in small cages, 0.14–0.43 in large ones |
+| Orientational Boltzmann factor at 250 K, cage centre | 1.0016–1.0141 (small), 1.0002–1.0015 (large) |
+
+Two consequences. Because the orientation average of the quadrupole energy at a
+charge-free point is zero (Laplace) and exp is convex (Jensen), classical charges on H2
+can only raise the Langmuir constant over the uncharged model with the same
+Lennard-Jones centre, and at the cage centres they raise it by at most 1.4 % — the
+electrostatics do not explain a difference between groups that use the one-site and the
+three-site H2. The second: the spread varies threefold or more from cage to cage of the same
+type, because each cage sees a different proton arrangement, so "the" small-cage
+orientational potential of a clathrate is a distribution over proton configurations, not
+a number.
+
+## Beyond the classical one-site Langmuir constant (molecular::langmuir)
+
+Three corrections to the one-site, Feynman–Hibbs constant above were measured with
+C++23 oracles whose predictions were written (and hashed) before they ran, then ported
+to `stdlib/molecular/langmuir.sio`. 250 K unless stated; ln quantities.
+
+| Correction | Small cage | Large cage | Feynman–Hibbs error |
+|---|---|---|---|
+| Quantised centre of mass, ln C_cl − ln C_q (200 / 250 / 280 K, three waters) | 0.105–0.112 / 0.079–0.084 / 0.069–0.072 | 0.061–0.064 / 0.045–0.049 / 0.041–0.043 | ≤ 0.0043 |
+| Quantised pair term, ln R₂^cl − ln R₂^q (200 / 250 / 280 K) | — | 0.204–0.225 / 0.147–0.162 / 0.120–0.133 | ≤ 0.008 (R₂), ≤ 0.029 (R₃) |
+| Charges on H2 (Alavi), ln R_c over 12 proton configurations | 0.0114 ± 0.0040 | 0.0072 ± 0.0014 | — |
+
+Quantisation lowers C by 4–11 % and the double occupancy by 13–25 %, the same order as
+the 8–9 % that the H2 Lennard-Jones parameters contribute, and Feynman–Hibbs captures
+both to within 0.4 % and 0.8 %: the occupancies above stand. The TIP5P − SPC/E separation
+in ln R₂ survives exact quantisation of both guests (0.081 ± 0.005 at 250 K, Feynman–Hibbs
+0.081). Proton disorder spreads the charge correction by 0.4 % per small cage and 0.05 %
+per cell average: it is not a relevant source of uncertainty for a quadrupolar guest.
+
+`tests/stdlib/molecular/test_langmuir_oracle.sio` checks the library against
+`stdlib/molecular/oracles/langmuir_oracle.cpp` on the same random stream (1e-9) and its
+small-sample estimates against the large runs above (within 4 standard errors);
+predictions in `stdlib/molecular/oracles/langmuir_predictions.txt`.

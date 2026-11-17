@@ -51,6 +51,12 @@ for path in "${paths[@]}"; do
     # (that is how the full suite's own compile-fail tests are checked), so
     # widening this case is the only change needed.
     tests/compile-fail/*.sio) ;;
+    # The same hole for library witnesses: tests/stdlib/<area>/test_*.sio is in
+    # the full suite's inventory, but the full suite runs lean_single, which
+    # skips `//@ requires: madaros`. A changed Madaros-only stdlib witness (for
+    # example tests/stdlib/molecular/test_sii_charges_ewald.sio, PR #3639) was
+    # therefore executed by no CI job at all.
+    tests/stdlib/*/test_*.sio) ;;
     *) continue ;;
   esac
   [[ -f "$ROOT_DIR/$path" ]] || continue
