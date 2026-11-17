@@ -1076,6 +1076,127 @@ theorem initStack_cstr_path {c : Region} {top : Nat} {x y : List Nat}
       rfl] at hb
     exact hb
 
+/-! ### Entry to the initial `mmap`: step infrastructure -/
+
+theorem step_syscall_ret {im : Nat → Option (Ins × Nat)} {s : X86Int.St}
+    {len nr a1 a2 a3 a4 a5 a6 rax : Nat} {k' : Kern} {m' : Mem}
+    (hi : im s.rip = some (.syscall, len)) (h0 : s.reg 0 = some nr)
+    (h7 : s.reg 7 = some a1) (h6 : s.reg 6 = some a2)
+    (h2 : s.reg 2 = some a3) (h10 : s.reg 10 = some a4)
+    (h8 : s.reg 8 = some a5) (h9 : s.reg 9 = some a6)
+    (hsc : X86Env.syscall s.k s.mem nr a1 a2 a3 a4 a5 a6 =
+      some (.ret rax k' m')) :
+    X86Int.step im s =
+      .ok { ((s.set 0 (some rax)).set 1 (some (s.rip + len))).set 11 none with
+        k := k', mem := m', rip := s.rip + len } := by
+  simp only [X86Int.step, exec, hi, h0, h7, h6, h2, h10, h8, h9, hsc]
+
+theorem free_of_wshape {m m' : Mem} (h : wshape m' = wshape m)
+    {a n : Nat} : m'.free a n = m.free a n := by
+  induction m generalizing m' with
+  | nil =>
+    cases m' with
+    | nil => rfl
+    | cons r t => simp [wshape] at h
+  | cons r t ih =>
+    cases m' with
+    | nil => simp [wshape] at h
+    | cons r' t' =>
+      have h1 : (r'.base, r'.hi, r'.rw) = (r.base, r.hi, r.rw) := by
+        have := List.cons.inj h
+        exact this.1
+      have h2 : wshape t' = wshape t := (List.cons.inj h).2
+      simp only [Mem.free, List.all_cons]
+      have ih' : t'.all (fun r => a + n ≤ r.base || r.hi ≤ a) =
+          t.all (fun r => a + n ≤ r.base || r.hi ≤ a) := ih h2
+      rw [ih']
+      have hb : r'.base = r.base := by
+        have := congrArg Prod.fst h1
+        simpa using this
+      have hh : r'.hi = r.hi := by
+        have := congrArg (fun p => p.2.1) h1
+        simpa using this
+      rw [hb, hh]
+
+theorem mem_wr_second {c r : Region} {a v : Nat}
+    (hdisj : c.hi ≤ r.base) (hge : r.base ≤ a) (hlt : a < r.hi)
+    (hrw : r.rw = true) :
+    Mem.wr [c, r] a v =
+      some [c, { r with data := r.data.set (a - r.base) (v % 256) }] := by
+  have hnot : ¬ (c.base ≤ a ∧ a < c.hi) := by omega
+  simp [Mem.wr, Mem.find, hnot, hge, hlt, hrw]
+
+theorem wrN_second_some : ∀ (bs : List Nat) {c r : Region} {a : Nat},
+    c.hi ≤ r.base → r.rw = true → r.base ≤ a → a + bs.length ≤ r.hi →
+    ∃ r', Mem.wrN [c, r] a bs = some [c, r'] ∧ r'.base = r.base ∧
+      r'.hi = r.hi ∧ r'.rw = r.rw
+  | [], c, r, a, _, _, _, _ => ⟨r, by simp [Mem.wrN], rfl, rfl, rfl⟩
+  | b :: t, c, r, a, hdisj, hrw, hge, hhi => by
+    have hlt : a < r.hi := by
+      simp at hhi
+      omega
+    rw [Mem.wrN, mem_wr_second hdisj hge hlt hrw]
+    have hlen : ({ r with data := r.data.set (a - r.base) (b % 256) } :
+        Region).hi = r.hi := by
+      simp [Region.hi, List.length_set]
+    obtain ⟨r'', hr'', hb, hh, hrw'⟩ :=
+      wrN_second_some (c := c)
+        (r := { r with data := r.data.set (a - r.base) (b % 256) })
+        (a := a + 1) t hdisj (by simpa using hrw) (by show r.base ≤ a + 1; omega) (by
+        rw [hlen]
+        simp at hhi
+        omega)
+    exact ⟨r'', by simpa using hr'', by simpa using hb,
+      by rw [hh, hlen], by simpa using hrw'⟩
+
+theorem stage1Init_rip (f path argv0 stdin : List Nat)
+    (oracle : List Choice) (top : Nat) :
+    (stage1Init f path argv0 stdin oracle top).rip = base + 0x78 := by
+  simp [stage1Init, elfEntry_eq]
+
+theorem stage1Init_mem (f path argv0 stdin : List Nat)
+    (oracle : List Choice) (top : Nat) :
+    (stage1Init f path argv0 stdin oracle top).mem =
+      [⟨base, stage1Code, false⟩,
+        (X86Env.initStack top [argv0, path]).1] := by
+  simp [stage1Init, phVaddr_eq, loadSegment_eq]
+
+theorem stage1Init_reg4 (f path argv0 stdin : List Nat)
+    (oracle : List Choice) (top : Nat) :
+    (stage1Init f path argv0 stdin oracle top).reg 4 =
+      some (X86Env.initStack top [argv0, path]).2 := by
+  simp [stage1Init, St.reg]
+
+theorem stage1Init_reg_ne4 (f path argv0 stdin : List Nat)
+    (oracle : List Choice) (top : Nat) {i : Nat} (hi : i < 16)
+    (h4 : i ≠ 4) :
+    (stage1Init f path argv0 stdin oracle top).reg i = some 0 := by
+  simp only [stage1Init, St.reg, List.getElem?_set]
+  rw [if_neg (by omega : ¬ (4 = i))]
+  have hrep : (List.replicate 16 (some 0))[i]? = some (some 0) := by
+    rw [List.getElem?_replicate]
+    simp [hi]
+  rw [hrep]
+  rfl
+
+theorem stage1Init_regs_length (f path argv0 stdin : List Nat)
+    (oracle : List Choice) (top : Nat) :
+    (stage1Init f path argv0 stdin oracle top).regs.length = 16 := by
+  simp [stage1Init]
+
+theorem cond_cc13_of_sf_eq_of {f : Flags} {b : Bool}
+    (hsf : f.sf = some b) (hof : f.of = some b) :
+    X86Int.cond f 13 = some true := by
+  simp [X86Int.cond, hsf, hof]
+
+theorem cond_cc9_of_sf_false {f : Flags} (hsf : f.sf = some false) :
+    X86Int.cond f 9 = some true := by
+  simp [X86Int.cond, hsf]
+
+theorem cond_cc8_of_sf_false {f : Flags} (hsf : f.sf = some false) :
+    X86Int.cond f 8 = some false := by
+  simp [X86Int.cond, hsf]
+
 /-- EXISTENCE TARGET: with room, some oracle makes the final
 theorem non-vacuous.  The witness is `stage1Oracle f A` for the
 `A` given by `Room`.  What remains is the loader-prefix invariant:
