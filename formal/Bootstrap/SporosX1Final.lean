@@ -3917,6 +3917,124 @@ theorem loader_count_update {A sp0 cap count n : Nat} {s : X86Int.St}
       show ({ u3 with rip := base + 0xd7 }).regs.length = 16
       rw [len_with_rip]; exact hlen3
 
+theorem pages_eq_of_mod_zero {n : Nat} (h : n % page = 0) :
+    X86Env.pages n = n := by
+  have hp : page = 4096 := rfl
+  obtain ⟨q, hq⟩ := Nat.dvd_of_mod_eq_zero h
+  unfold X86Env.pages
+  rw [hq, hp]
+  omega
+
+theorem find_third {c1 c2 r : Region} {A : Nat}
+    (h1 : c1.hi ≤ A) (h2 : c2.hi ≤ A) (hge : r.base ≤ A)
+    (hlt : A < r.hi) :
+    Mem.find [c1, c2, r] A 0 = some (2, r) := by
+  have hnot1 : ¬ (c1.base ≤ A ∧ A < c1.hi) := by omega
+  have hnot2 : ¬ (c2.base ≤ A ∧ A < c2.hi) := by omega
+  simp [Mem.find, hnot1, hnot2, hge, hlt]
+
+theorem free_pair {c1 c2 : Region} {A n : Nat}
+    (h1 : c1.hi ≤ A) (h2 : c2.hi ≤ A) :
+    Mem.free [c1, c2] A n = true := by
+  rw [Mem.free, List.all_eq_true]
+  intro r hr
+  simp at hr
+  rcases hr with rfl | rfl <;>
+    simp only [Bool.or_eq_true, decide_eq_true_eq]
+  · exact Or.inr h1
+  · exact Or.inr h2
+
+theorem mem_rd_third {c1 c2 r : Region} {a v : Nat}
+    (h1 : c1.hi ≤ a) (h2 : c2.hi ≤ a) (hge : r.base ≤ a)
+    (hbyte : r.data[a - r.base]? = some v) :
+    Mem.rd [c1, c2, r] a = some v := by
+  have hlt : a < r.hi := by
+    have hh := (List.getElem?_eq_some_iff.1 hbyte).1
+    unfold Region.hi
+    omega
+  have hnot1 : ¬ (c1.base ≤ a ∧ a < c1.hi) := by omega
+  have hnot2 : ¬ (c2.base ≤ a ∧ a < c2.hi) := by omega
+  simp [Mem.rd, Mem.find, hnot1, hnot2, hge, hlt, hbyte]
+
+theorem rdN_third_take {c1 c2 r : Region} {A k : Nat}
+    (h1 : c1.hi ≤ A) (h2 : c2.hi ≤ A) (hb : r.base = A)
+    (hk : k ≤ r.data.length) :
+    Mem.rdN [c1, c2, r] A k = some (r.data.take k) := by
+  apply rdN_of_rd (by rw [List.length_take, Nat.min_eq_left hk])
+  intro i hi
+  have hilen : i < r.data.length := by omega
+  have hgi : r.data[i]? = some r.data[i] := List.getElem?_eq_getElem hilen
+  refine ⟨r.data[i], ?_, ?_⟩
+  · have hbyte : r.data[(A + i) - r.base]? = some r.data[i] := by
+      rw [hb, show A + i - A = i by omega]; exact hgi
+    exact mem_rd_third (by omega) (by omega) (by omega) hbyte
+  · rw [List.getElem?_take]
+    simp [hi, hgi]
+
+theorem rdN_grow_preserve {c1 c2 r : Region} {A k z : Nat} {L : List Nat}
+    (h1 : c1.hi ≤ A) (h2 : c2.hi ≤ A) (hb : r.base = A)
+    (hk : k ≤ r.data.length)
+    (hold : Mem.rdN [c1, c2, r] A k = some L) :
+    Mem.rdN [c1, c2, ⟨A, r.data ++ List.replicate z 0, true⟩] A k =
+      some L := by
+  have hlen : (r.data ++ List.replicate z 0).length =
+      r.data.length + z := by
+    rw [List.length_append, List.length_replicate]
+  have hk' : k ≤ (r.data ++ List.replicate z 0).length := by
+    rw [hlen]; omega
+  have hnew := rdN_third_take (r := ⟨A, r.data ++ List.replicate z 0, true⟩)
+    h1 h2 rfl hk'
+  have htake : (r.data ++ List.replicate z 0).take k = r.data.take k := by
+    rw [List.take_append, show k - r.data.length = 0 by omega,
+      List.take_zero, List.append_nil]
+  rw [htake] at hnew
+  have hold' := rdN_third_take h1 h2 hb hk
+  rw [hold'] at hold
+  injection hold with hL
+  rw [← hL]
+  exact hnew
+
+theorem syscall_mremap_grow {k : Kern} {c1 c2 r : Region}
+    {A cap a5 a6 : Nat} {rest : List Choice}
+    (hfind : Mem.find [c1, c2, r] A 0 = some (2, r))
+    (hbase : r.base = A) (hlen : r.data.length = cap)
+    (hrw : r.rw = true)
+    (hpages : X86Env.pages cap = cap)
+    (hpages2 : X86Env.pages (cap + cap) = cap + cap)
+    (horacle : k.oracle = .at A :: rest)
+    (hplace : X86Env.place [c1, c2] (some (.at A)) (cap + cap) =
+      some (some A)) :
+    X86Env.syscall k [c1, c2, r] 25 A cap (cap + cap) MREMAP_MAYMOVE
+        a5 a6 =
+      some (.ret A { k with oracle := rest }
+        [c1, c2, ⟨A, r.data ++ List.replicate cap 0, true⟩]) := by
+  have hval : ¬ (r.base ≠ A ∨ r.data.length ≠ X86Env.pages cap ∨
+      ¬ r.rw) := by simp [hbase, hlen, hrw, hpages]
+  have hgrow : ¬ X86Env.pages (cap + cap) < r.data.length := by
+    rw [hpages2, hlen]; omega
+  have herase : List.eraseIdx [c1, c2, r] 2 = [c1, c2] := rfl
+  have hplace' : X86Env.place (List.eraseIdx [c1, c2, r] 2)
+      (some (.at A)) (X86Env.pages (cap + cap)) = some (some A) := by
+    rw [herase, hpages2]; exact hplace
+  have hnextv : Kern.next k = (some (.at A), { k with oracle := rest }) := by
+    simp [Kern.next, horacle]
+  have hnext1 : (Kern.next k).1 = some (.at A) := by
+    rw [hnextv]
+  have hk1 : (Kern.next k).2 = { k with oracle := rest } := by
+    rw [hnextv]
+  simp only [X86Env.syscall, hfind, hbase, hlen, hrw]
+  rw [if_neg (by simp), if_neg (by simp [hpages]),
+    if_neg (by rw [hpages2]; omega : ¬ X86Env.pages (cap + cap) < cap)]
+  cases hnext : Kern.next k with
+  | mk c k1 =>
+    rw [hnext] at hnext1 hk1
+    simp only [] at hnext1 hk1
+    subst hnext1
+    subst hk1
+    dsimp only []
+    rw [hplace', herase]
+    simp [hpages2, hlen]
+
 /-- EXISTENCE TARGET: with room, some oracle makes the final
 theorem non-vacuous.  The witness is `stage1Oracle f A` for the
 `A` given by `Room`.  What remains is the loader-prefix invariant:
