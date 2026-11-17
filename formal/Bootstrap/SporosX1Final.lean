@@ -974,6 +974,108 @@ theorem initStack_rd64_argv1 {c : Region} {top : Nat} {x y : List Nat}
       exact getElem?_append_of_lt (by rw [le64_length]; exact hi))
   rwa [leVal_le64] at key
 
+theorem cstr_of_bytes {m : Mem} {a n : Nat} {s : List Nat}
+    (hn : s.length < n)
+    (h : ∀ i (hi : i < s.length), ∃ v, m.rd (a + i) = some v ∧ s[i]? = some v)
+    (h0 : ∀ b ∈ s, b ≠ 0) (hend : m.rd (a + s.length) = some 0) :
+    m.cstr a n = some s := by
+  induction s generalizing a n with
+  | nil =>
+    cases n with
+    | zero => simp at hn
+    | succ k =>
+      simp only [List.length_nil, Nat.add_zero] at hend
+      simp [Mem.cstr, hend]
+  | cons b t ih =>
+    cases n with
+    | zero => simp at hn
+    | succ k =>
+      obtain ⟨v, hv, hb⟩ := h 0 (by simp)
+      simp at hb
+      subst hb
+      have hb0 : b ≠ 0 := h0 b (by simp)
+      have hrec : m.cstr (a + 1) k = some t := by
+        apply ih (by simpa using hn)
+        · intro i hi
+          obtain ⟨w, hw, htw⟩ := h (i + 1) (by simpa using hi)
+          refine ⟨w, ?_, ?_⟩
+          · rwa [show a + 1 + i = a + (i + 1) from by omega]
+          · simpa using htw
+        · exact fun z hz => h0 z (List.mem_cons_of_mem b hz)
+        · rwa [show a + 1 + t.length = a + (b :: t).length from by simp; omega]
+      simp only [Mem.cstr]
+      rw [show m.rd a = some b from by simpa using hv]
+      simp [hb0, hrec]
+
+theorem initStack_rd_path {c : Region} {top : Nat} {x y : List Nat}
+    (hdisj : c.hi ≤ (X86Env.initStack top [x, y]).1.base) {i : Nat}
+    (hi : i ≤ y.length) :
+    Mem.rd [c, (X86Env.initStack top [x, y]).1]
+        ((X86Env.initStack top [x, y]).2 + 56 + x.length + 1 + i) =
+      (y ++ [0])[i]? := by
+  have hsp := initStack_sp top x y
+  obtain ⟨v, hv⟩ : ∃ v, (y ++ [0])[i]? = some v := by
+    cases hLi : (y ++ [0])[i]? with
+    | some v => exact ⟨v, rfl⟩
+    | none =>
+      simp [List.getElem?_eq_none_iff] at hLi
+      omega
+  rw [hv]
+  apply mem_rd_second hdisj (by omega)
+  rw [show (X86Env.initStack top [x, y]).2 + 56 + x.length + 1 + i -
+        (X86Env.initStack top [x, y]).1.base =
+      X86Env.stackRoom + (56 + x.length + 1 + i) from by omega,
+    initStack_data_at top x y (by omega)]
+  rw [show 56 + x.length + 1 + i = (X86Env.le64 2).length + (48 + x.length + 1 + i)
+      from by have h8 := le64_length 2; omega, getElem?_append_skip,
+    show 48 + x.length + 1 + i =
+        (X86Env.le64 ((X86Env.initStack top [x, y]).2 + 56)).length +
+          (40 + x.length + 1 + i)
+      from by have h8 := le64_length ((X86Env.initStack top [x, y]).2 + 56); omega, getElem?_append_skip,
+    show 40 + x.length + 1 + i =
+        (X86Env.le64 ((X86Env.initStack top [x, y]).2 + 56 + x.length + 1)).length +
+          (32 + x.length + 1 + i)
+      from by have h8 := le64_length ((X86Env.initStack top [x, y]).2 + 56 + x.length + 1); omega, getElem?_append_skip,
+    show 32 + x.length + 1 + i = (X86Env.le64 0).length + (24 + x.length + 1 + i)
+      from by have h8 := le64_length 0; omega, getElem?_append_skip,
+    show 24 + x.length + 1 + i = (X86Env.le64 0).length + (16 + x.length + 1 + i)
+      from by have h8 := le64_length 0; omega, getElem?_append_skip,
+    show 16 + x.length + 1 + i = (X86Env.le64 0).length + (8 + x.length + 1 + i)
+      from by have h8 := le64_length 0; omega, getElem?_append_skip,
+    show 8 + x.length + 1 + i = (X86Env.le64 0).length + (x.length + 1 + i)
+      from by have h8 := le64_length 0; omega, getElem?_append_skip,
+    show x.length + 1 + i = x.length + (1 + i) from by omega,
+    getElem?_append_skip,
+    show 1 + i = [0].length + i from rfl, getElem?_append_skip]
+  exact hv
+
+theorem initStack_cstr_path {c : Region} {top : Nat} {x y : List Nat}
+    (hdisj : c.hi ≤ (X86Env.initStack top [x, y]).1.base)
+    (h0 : 0 ∉ y) (hlen : y.length < 4096) :
+    Mem.cstr [c, (X86Env.initStack top [x, y]).1]
+        ((X86Env.initStack top [x, y]).2 + 56 + x.length + 1) 4096 =
+      some y := by
+  apply cstr_of_bytes hlen
+  · intro i hi
+    have hb := initStack_rd_path hdisj (i := i) (by omega)
+    obtain ⟨v, hv⟩ : ∃ v, y[i]? = some v := by
+      cases hLi : y[i]? with
+      | some v => exact ⟨v, rfl⟩
+      | none =>
+        simp [List.getElem?_eq_none_iff] at hLi
+        omega
+    refine ⟨v, ?_, hv⟩
+    have hsplit : (y ++ [0])[i]? = y[i]? :=
+      getElem?_append_of_lt hi
+    rwa [hsplit, hv] at hb
+  · intro b hb hb0
+    exact h0 (hb0 ▸ hb)
+  · have hb := initStack_rd_path hdisj (i := y.length) (Nat.le_refl _)
+    rw [show (y ++ [0])[y.length]? = some 0 from by
+      rw [show y.length = y.length + 0 from by omega, getElem?_append_skip]
+      rfl] at hb
+    exact hb
+
 /-- EXISTENCE TARGET: with room, some oracle makes the final
 theorem non-vacuous.  The witness is `stage1Oracle f A` for the
 `A` given by `Room`.  What remains is the loader-prefix invariant:
