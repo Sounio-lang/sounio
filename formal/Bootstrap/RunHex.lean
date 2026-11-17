@@ -3,18 +3,18 @@ RunHex: run a hex image in the `X86Int` model, as the Linux kernel would start
 it, and report where it ends. The tool a stage of the root-A bootstrap is first
 checked with, before any theorem is stated about it.
 
-  lean --run Bootstrap/RunHex.lean IMAGE.hex FILESIZE [STOP [FROM TO]]
+  lean --run Bootstrap/RunHex.lean IMAGE.hex (FILESIZE | @FILE) [STOP [FROM TO]]
 
 `IMAGE.hex` is in format A (`Bootstrap.X86Min.Formats.decA`), loaded at 0x400000 and
 entered at the address in its ELF header. The process gets `argv = [stage, /p]`
-and a file `/p` of `FILESIZE` bytes (a repeating pattern), and a kernel oracle
-that places each new mapping 4 GiB past the previous one, starting at
-0x7f0000000000. Linux returns mmap addresses above 4 GiB, so a pointer kept or
-advanced in a 32-bit register loses its upper half here as it does on the
-machine; an oracle with addresses below 4 GiB would hide that. The run ends at
-an exit, at a step outside the model, or at the address `STOP` if one is given;
-the last instructions executed are printed. `FROM TO` is a what-if: when the run reaches
-`FROM` it continues at `TO`, which stands in for a jump the image does not have
+and a file `/p`: `FILESIZE` bytes of a repeating pattern, or, with `@FILE`, the
+bytes of `FILE`. The kernel oracle places each new mapping 4 GiB past the
+previous one, starting at 0x7f0000000000. Linux returns mmap addresses above
+4 GiB, so a pointer kept or advanced in a 32-bit register loses its upper half
+here as it does on the machine; an oracle with addresses below 4 GiB would hide
+that. The run ends at an exit, at a step outside the model, or at the address
+`STOP` if one is given; the last instructions executed are printed. `FROM TO` is
+a what-if: when the run reaches `FROM` it continues at `TO`, which stands in for a jump the image does not have
 yet, so what lies beyond can be checked before the fix is written.
 -/
 import Bootstrap.X86Dec
@@ -75,16 +75,19 @@ partial def loop (im : Nat → Option (Ins × Nat)) (stop : Option Nat) (hop : O
 
 def main (args : List String) : IO UInt32 := do
   match args with
-  | path :: size :: rest =>
+  | path :: input :: rest =>
     let txt ← IO.FS.readFile path
     match X86Min.Formats.decA (txt.toList.map Char.toNat) false none [] with
     | none => IO.println "not format A"; pure 2
     | some code =>
+      let file ← if input.startsWith "@" then
+          do let bs ← IO.FS.readBinFile (input.drop 1).toString; pure (bs.toList.map UInt8.toNat)
+        else pure (pattern input.toNat!)
       let stop := rest.head?.bind parseNat
       let hop := match rest with
         | _ :: a :: b :: _ => (parseNat a).bind fun x => (parseNat b).map fun y => (x, y)
         | _ => none
-      let s := startState code (pattern size.toNat!)
-      IO.println s!"{code.length} bytes, entry {hx s.rip}, file of {size} bytes"
+      let s := startState code file
+      IO.println s!"{code.length} bytes, entry {hx s.rip}, file of {file.length} bytes"
       loop (imageOf code 0x400000) stop hop 2000000 s []
-  | _ => IO.println "usage: RunHex IMAGE.hex FILESIZE [STOP [FROM TO]]"; pure 2
+  | _ => IO.println "usage: RunHex IMAGE.hex (FILESIZE | @FILE) [STOP [FROM TO]]"; pure 2
