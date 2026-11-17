@@ -110,7 +110,7 @@ structure St where
   fl : Flags
   mem : Mem
   k : Kern
-deriving Repr
+deriving DecidableEq, Repr
 
 inductive Out where
   | ok (s : St)
@@ -118,7 +118,7 @@ inductive Out where
   /-- outside the model: an undefined value read, an unmapped address, a call
   the environment does not cover, a missing instruction -/
   | stuck
-deriving Repr
+deriving DecidableEq, Repr
 
 def St.reg (s : St) (i : Reg) : Option Nat := (s.regs[i]?).getD none
 def St.set (s : St) (i : Reg) (v : Option Nat) : St := { s with regs := s.regs.set i v }
