@@ -1252,4 +1252,843 @@ theorem hand_ret {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
     by rw [hm2, hm1],
     (run_regs_length k2 hr2).trans (run_regs_length k1 hr1)⟩
 
+
+
+theorem fall_finish1 {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
+    {pr : Prog} {wd : Word} {w p sp tbl : Nat} (st : WalkStatic pr wd w p sp tbl)
+    {ins : Instr} {rest : List Instr} {i c len : Nat} {cur hm h' : Height}
+    {s s2 : X86Int.St} {kh : Nat}
+    (inv : WalkInv pr wd w p sp tbl s (ins :: rest) i c cur hm)
+    (hs : hstep pr wd hm ins = some (some h'))
+    (hann : wd.ann.lookup (i + 1) = none ∨ wd.ann.lookup (i + 1) = some h')
+    (hi1 : i + 1 < wd.code.length)
+    (hlen : ins.enc.length = len)
+    (hr : run im kh (Out.ok s) = Out.ok s2)
+    (hrip2 : s2.rip = aFallTail)
+    (hpost : HPost s s2 h' (c + len) sp) :
+    ∃ k s3, run im k (Out.ok s) = Out.ok s3 ∧
+      WalkInv pr wd w p sp tbl s3 rest (i + 1) (c + len) h' h' :=
+  fall_finish cfg st inv hs hann hi1 hlen hr (k2 := 0) (s1 := s2) (run_zero im (Out.ok s2))
+    hrip2 hpost
+
+theorem none_finish_cons1 {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
+    {pr : Prog} {wd : Word} {w p sp tbl : Nat} (st : WalkStatic pr wd w p sp tbl)
+    {ins : Instr} {rest : List Instr} {i c len : Nat} {cur hm : Height}
+    {s s2 : X86Int.St} {kh : Nat}
+    (inv : WalkInv pr wd w p sp tbl s (ins :: rest) i c cur hm)
+    (hs : hstep pr wd hm ins = some none)
+    (hi1 : i + 1 < wd.code.length)
+    (hlen : ins.enc.length = len)
+    (hr : run im kh (Out.ok s) = Out.ok s2)
+    (hrip2 : s2.rip = aNoneTail)
+    (hpost : HPost s s2 hm (c + len) sp) :
+    ∃ k s3, run im k (Out.ok s) = Out.ok s3 ∧
+      WalkInv pr wd w p sp tbl s3 rest (i + 1) (c + len)
+        ((wd.ann.lookup (i + 1)).getD ⟨0, 0⟩)
+        ((wd.ann.lookup (i + 1)).getD ⟨0, 0⟩) :=
+  none_finish_cons cfg st inv hs hi1 hlen hr (k2 := 0) (s1 := s2) (run_zero im (Out.ok s2))
+    hrip2 hpost
+
+theorem none_finish_nil1 {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
+    {pr : Prog} {wd : Word} {w p sp tbl : Nat} (st : WalkStatic pr wd w p sp tbl)
+    {ins : Instr} {i c len : Nat} {cur hm : Height}
+    {s s2 : X86Int.St} {kh : Nat}
+    (inv : WalkInv pr wd w p sp tbl s [ins] i c cur hm)
+    (hs : hstep pr wd hm ins = some none)
+    (hlen : ins.enc.length = len)
+    (hr : run im kh (Out.ok s) = Out.ok s2)
+    (hrip2 : s2.rip = aNoneTail)
+    (hpost : HPost s s2 hm (c + len) sp) :
+    ∃ k s4, run im k (Out.ok s) = Out.ok s4 ∧ s4.rip = aWordDone ∧
+      s4.reg 1 = some (i + 1) ∧ s4.reg 6 = some (c + len) ∧
+      s4.reg 7 = some w ∧ s4.reg 4 = some sp :=
+  none_finish_nil cfg st inv hs hlen hr (k2 := 0) (s1 := s2) (run_zero im (Out.ok s2)) hrip2
+    hpost
+
+/-- The whole walk over one word, in the success direction: whenever
+`Sporos.walk` accepts the remaining code, execution from `walk_top`
+reaches `word_done` with index and cursor advanced over it. The
+induction is on the remaining instruction list — the termination
+measure. -/
+theorem walk_loop {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
+    {pr : Prog} {wd : Word} {w p sp tbl : Nat}
+    (st : WalkStatic pr wd w p sp tbl) :
+    ∀ (code : List Instr) (i c : Nat) (cur hm : Height) (s : X86Int.St),
+      WalkInv pr wd w p sp tbl s code i c cur hm →
+      Sporos.walk pr wd code i cur = true →
+      ∃ k s', run im k (Out.ok s) = Out.ok s' ∧ s'.rip = aWordDone ∧
+        s'.reg 1 = some (i + code.length) ∧
+        s'.reg 6 = some (c + codeBytes code) ∧
+        s'.reg 7 = some w ∧ s'.reg 4 = some sp := by
+  intro code
+  induction code with
+  | nil =>
+    intro i c cur hm s inv hw
+    obtain ⟨k, s', hr, hrip, -, hr1, hr6, hr7, -, -, hr4, -, -⟩ :=
+      WalkDone_triple cfg.walk (by decide) hm c i w sp wd.code.length st.w56
+        (by have h := inv.isum; simp at h; omega) s inv.rip inv.r8 inv.r9
+        inv.r6 inv.r4 inv.r7 inv.r1 inv.len16 inv.fnc
+    refine ⟨k, s', hr, hrip, ?_, ?_, hr7, hr4⟩
+    · simpa using hr1
+    · have e : c + codeBytes ([] : List Instr) = c := rfl
+      rw [e]; exact hr6
+  | cons ins rest ih =>
+    intro i c cur hm s inv hw
+    have hge : ((wd.ann.lookup i).getD cur) = hm := inv.hlink.symm
+    cases ins with
+    | prim pq =>
+      cases hs : hstep pr wd hm (Instr.prim pq) with
+      | none =>
+        have hs0 : hstep pr wd ((wd.ann.lookup i).getD cur) (Instr.prim pq) =
+            none := by
+          rw [hge]; exact hs
+        simp [Sporos.walk, hs0] at hw
+      | some o =>
+        cases o with
+        | some h' =>
+          obtain ⟨kh, s2, hrh, hrip2, hpost⟩ := hand_prim_fall cfg st inv hs
+          have hs0 : hstep pr wd ((wd.ann.lookup i).getD cur) (Instr.prim pq) =
+              some (some h') := by
+            rw [hge]; exact hs
+          cases rest with
+          | nil => simp [Sporos.walk, hs0] at hw
+          | cons y ys =>
+            have hw2 : (wd.ann.lookup (i + 1) = none ∨
+                  wd.ann.lookup (i + 1) = some h') ∧
+                Sporos.walk pr wd (y :: ys) (i + 1) h' = true := by
+              simp only [Sporos.walk, hs0, Bool.and_eq_true] at hw
+              refine ⟨?_, hw.2⟩
+              cases hl : wd.ann.lookup (i + 1) with
+              | none => exact Or.inl rfl
+              | some a =>
+                have hbe : (a == h') = true := by
+                  have h1 := hw.1
+                  rw [hl] at h1
+                  exact h1
+                exact Or.inr (by rw [height_eq_of_beq hbe])
+            have hi1 : i + 1 < wd.code.length := by
+              have h := inv.isum
+              simp only [List.length_cons] at h
+              omega
+            obtain ⟨k3, s3, hr3, inv3⟩ :=
+              fall_finish1 cfg st inv hs hw2.1 hi1 rfl hrh hrip2 hpost
+            obtain ⟨k4, s4, hr4, hrip4, hr14, hr64, hr74, hr44⟩ :=
+              ih (i + 1) (c + 1) h' h' s3 inv3 hw2.2
+            refine ⟨k3 + k4, s4, by rw [run_add im k3 k4, hr3, hr4], hrip4, ?_, ?_,
+              hr74, hr44⟩
+            · have e : (i + 1) + (y :: ys).length =
+                  i + (Instr.prim pq :: y :: ys).length := by
+                simp only [List.length_cons]; omega
+              rw [← e]; exact hr14
+            · have e : (c + 1) + codeBytes (y :: ys) =
+                  c + codeBytes (Instr.prim pq :: y :: ys) := by
+                show (c + 1) + codeBytes (y :: ys) =
+                  c + (1 + codeBytes (y :: ys))
+                omega
+              rw [← e]; exact hr64
+        | none =>
+          obtain ⟨kh, s2, hrh, hrip2, hpost⟩ := hand_prim_exit cfg st inv hs
+          have hs0 : hstep pr wd ((wd.ann.lookup i).getD cur) (Instr.prim pq) =
+              some none := by
+            rw [hge]; exact hs
+          cases rest with
+          | nil =>
+            obtain ⟨k3, s4, hr3, hrip4, hr14, hr64, hr74, hr44⟩ :=
+              none_finish_nil1 cfg st inv hs rfl hrh hrip2 hpost
+            refine ⟨k3, s4, hr3, hrip4, ?_, ?_, hr74, hr44⟩
+            · simpa using hr14
+            · have e : c + codeBytes [Instr.prim pq] = c + 1 := rfl
+              rw [e]; exact hr64
+          | cons y ys =>
+            have hi1 : i + 1 < wd.code.length := by
+              have h := inv.isum
+              simp only [List.length_cons] at h
+              omega
+            have hwrest : Sporos.walk pr wd (y :: ys) (i + 1)
+                ((wd.ann.lookup (i + 1)).getD ⟨0, 0⟩) = true := by
+              simp only [Sporos.walk, hs0] at hw
+              exact hw
+            obtain ⟨k3, s3, hr3, inv3⟩ :=
+              none_finish_cons1 cfg st inv hs hi1 rfl hrh hrip2 hpost
+            obtain ⟨k4, s4, hr4, hrip4, hr14, hr64, hr74, hr44⟩ :=
+              ih (i + 1) (c + 1) _ _ s3 inv3 hwrest
+            refine ⟨k3 + k4, s4, by rw [run_add im k3 k4, hr3, hr4], hrip4, ?_, ?_,
+              hr74, hr44⟩
+            · have e : (i + 1) + (y :: ys).length =
+                  i + (Instr.prim pq :: y :: ys).length := by
+                simp only [List.length_cons]; omega
+              rw [← e]; exact hr14
+            · have e : (c + 1) + codeBytes (y :: ys) =
+                  c + codeBytes (Instr.prim pq :: y :: ys) := by
+                show (c + 1) + codeBytes (y :: ys) =
+                  c + (1 + codeBytes (y :: ys))
+                omega
+              rw [← e]; exact hr64
+    | lit lv =>
+      have hs : hstep pr wd hm (Instr.lit lv) =
+          some (some ⟨hm.d + 1, hm.a⟩) := rfl
+      obtain ⟨kh, s2, hrh, hrip2, hpost⟩ := hand_lit cfg st inv
+      have hs0 : hstep pr wd ((wd.ann.lookup i).getD cur) (Instr.lit lv) =
+          some (some ⟨hm.d + 1, hm.a⟩) := by
+        rw [hge]; exact hs
+      cases rest with
+      | nil => simp [Sporos.walk, hs0] at hw
+      | cons y ys =>
+        have hw2 : (wd.ann.lookup (i + 1) = none ∨
+              wd.ann.lookup (i + 1) = some ⟨hm.d + 1, hm.a⟩) ∧
+            Sporos.walk pr wd (y :: ys) (i + 1) ⟨hm.d + 1, hm.a⟩ = true := by
+          simp only [Sporos.walk, hs0, Bool.and_eq_true] at hw
+          refine ⟨?_, hw.2⟩
+          cases hl : wd.ann.lookup (i + 1) with
+          | none => exact Or.inl rfl
+          | some a =>
+            have hbe : (a == ⟨hm.d + 1, hm.a⟩) = true := by
+              have h1 := hw.1
+              rw [hl] at h1
+              exact h1
+            exact Or.inr (by rw [height_eq_of_beq hbe])
+        have hi1 : i + 1 < wd.code.length := by
+          have h := inv.isum
+          simp only [List.length_cons] at h
+          omega
+        obtain ⟨k3, s3, hr3, inv3⟩ :=
+          fall_finish1 cfg st inv hs hw2.1 hi1 rfl hrh hrip2 hpost
+        obtain ⟨k4, s4, hr4, hrip4, hr14, hr64, hr74, hr44⟩ :=
+          ih (i + 1) (c + 9) ⟨hm.d + 1, hm.a⟩ ⟨hm.d + 1, hm.a⟩ s3 inv3 hw2.2
+        refine ⟨k3 + k4, s4, by rw [run_add im k3 k4, hr3, hr4], hrip4, ?_, ?_,
+          hr74, hr44⟩
+        · have e : (i + 1) + (y :: ys).length =
+              i + (Instr.lit lv :: y :: ys).length := by
+            simp only [List.length_cons]; omega
+          rw [← e]; exact hr14
+        · have e : (c + 9) + codeBytes (y :: ys) =
+              c + codeBytes (Instr.lit lv :: y :: ys) := by
+            show (c + 9) + codeBytes (y :: ys) =
+              c + (9 + codeBytes (y :: ys))
+            omega
+          rw [← e]; exact hr64
+    | str si =>
+      have hs : hstep pr wd hm (Instr.str si) =
+          some (some ⟨hm.d + 2, hm.a⟩) := rfl
+      obtain ⟨kh, s2, hrh, hrip2, hpost⟩ := hand_str cfg st inv
+      have hs0 : hstep pr wd ((wd.ann.lookup i).getD cur) (Instr.str si) =
+          some (some ⟨hm.d + 2, hm.a⟩) := by
+        rw [hge]; exact hs
+      cases rest with
+      | nil => simp [Sporos.walk, hs0] at hw
+      | cons y ys =>
+        have hw2 : (wd.ann.lookup (i + 1) = none ∨
+              wd.ann.lookup (i + 1) = some ⟨hm.d + 2, hm.a⟩) ∧
+            Sporos.walk pr wd (y :: ys) (i + 1) ⟨hm.d + 2, hm.a⟩ = true := by
+          simp only [Sporos.walk, hs0, Bool.and_eq_true] at hw
+          refine ⟨?_, hw.2⟩
+          cases hl : wd.ann.lookup (i + 1) with
+          | none => exact Or.inl rfl
+          | some a =>
+            have hbe : (a == ⟨hm.d + 2, hm.a⟩) = true := by
+              have h1 := hw.1
+              rw [hl] at h1
+              exact h1
+            exact Or.inr (by rw [height_eq_of_beq hbe])
+        have hi1 : i + 1 < wd.code.length := by
+          have h := inv.isum
+          simp only [List.length_cons] at h
+          omega
+        obtain ⟨k3, s3, hr3, inv3⟩ :=
+          fall_finish1 cfg st inv hs hw2.1 hi1 rfl hrh hrip2 hpost
+        obtain ⟨k4, s4, hr4, hrip4, hr14, hr64, hr74, hr44⟩ :=
+          ih (i + 1) (c + 5) ⟨hm.d + 2, hm.a⟩ ⟨hm.d + 2, hm.a⟩ s3 inv3 hw2.2
+        refine ⟨k3 + k4, s4, by rw [run_add im k3 k4, hr3, hr4], hrip4, ?_, ?_,
+          hr74, hr44⟩
+        · have e : (i + 1) + (y :: ys).length =
+              i + (Instr.str si :: y :: ys).length := by
+            simp only [List.length_cons]; omega
+          rw [← e]; exact hr14
+        · have e : (c + 5) + codeBytes (y :: ys) =
+              c + codeBytes (Instr.str si :: y :: ys) := by
+            show (c + 5) + codeBytes (y :: ys) =
+              c + (5 + codeBytes (y :: ys))
+            omega
+          rw [← e]; exact hr64
+    | pick pk =>
+      cases hs : hstep pr wd hm (Instr.pick pk) with
+      | none =>
+        have hs0 : hstep pr wd ((wd.ann.lookup i).getD cur) (Instr.pick pk) =
+            none := by
+          rw [hge]; exact hs
+        simp [Sporos.walk, hs0] at hw
+      | some o =>
+        cases o with
+        | none => by_cases hcond : (pk < hm.d) <;> simp [hstep, hcond] at hs
+        | some h' =>
+          obtain ⟨-, hh'⟩ := hstep_pick hs
+          subst hh'
+          obtain ⟨kh, s2, hrh, hrip2, hpost⟩ := hand_pick cfg st inv hs
+          have hs0 : hstep pr wd ((wd.ann.lookup i).getD cur) (Instr.pick pk) =
+              some (some ⟨hm.d + 1, hm.a⟩) := by
+            rw [hge]; exact hs
+          cases rest with
+          | nil => simp [Sporos.walk, hs0] at hw
+          | cons y ys =>
+            have hw2 : (wd.ann.lookup (i + 1) = none ∨
+                  wd.ann.lookup (i + 1) = some ⟨hm.d + 1, hm.a⟩) ∧
+                Sporos.walk pr wd (y :: ys) (i + 1) ⟨hm.d + 1, hm.a⟩ = true := by
+              simp only [Sporos.walk, hs0, Bool.and_eq_true] at hw
+              refine ⟨?_, hw.2⟩
+              cases hl : wd.ann.lookup (i + 1) with
+              | none => exact Or.inl rfl
+              | some a =>
+                have hbe : (a == ⟨hm.d + 1, hm.a⟩) = true := by
+                  have h1 := hw.1
+                  rw [hl] at h1
+                  exact h1
+                exact Or.inr (by rw [height_eq_of_beq hbe])
+            have hi1 : i + 1 < wd.code.length := by
+              have h := inv.isum
+              simp only [List.length_cons] at h
+              omega
+            obtain ⟨k3, s3, hr3, inv3⟩ :=
+              fall_finish1 cfg st inv hs hw2.1 hi1 rfl hrh hrip2 hpost
+            obtain ⟨k4, s4, hr4, hrip4, hr14, hr64, hr74, hr44⟩ :=
+              ih (i + 1) (c + 5) ⟨hm.d + 1, hm.a⟩ ⟨hm.d + 1, hm.a⟩ s3 inv3 hw2.2
+            refine ⟨k3 + k4, s4, by rw [run_add im k3 k4, hr3, hr4], hrip4, ?_, ?_,
+              hr74, hr44⟩
+            · have e : (i + 1) + (y :: ys).length =
+                  i + (Instr.pick pk :: y :: ys).length := by
+                simp only [List.length_cons]; omega
+              rw [← e]; exact hr14
+            · have e : (c + 5) + codeBytes (y :: ys) =
+                  c + codeBytes (Instr.pick pk :: y :: ys) := by
+                show (c + 5) + codeBytes (y :: ys) =
+                  c + (5 + codeBytes (y :: ys))
+                omega
+              rw [← e]; exact hr64
+    | tor =>
+      cases hs : hstep pr wd hm (Instr.tor) with
+      | none =>
+        have hs0 : hstep pr wd ((wd.ann.lookup i).getD cur) (Instr.tor) =
+            none := by
+          rw [hge]; exact hs
+        simp [Sporos.walk, hs0] at hw
+      | some o =>
+        cases o with
+        | none => by_cases hcond : (1 ≤ hm.d) <;> simp [hstep, hcond] at hs
+        | some h' =>
+          obtain ⟨-, hh'⟩ := hstep_tor hs
+          subst hh'
+          obtain ⟨kh, s2, hrh, hrip2, hpost⟩ := hand_tor cfg st inv hs
+          have hs0 : hstep pr wd ((wd.ann.lookup i).getD cur) (Instr.tor) =
+              some (some ⟨hm.d - 1, hm.a + 1⟩) := by
+            rw [hge]; exact hs
+          cases rest with
+          | nil => simp [Sporos.walk, hs0] at hw
+          | cons y ys =>
+            have hw2 : (wd.ann.lookup (i + 1) = none ∨
+                  wd.ann.lookup (i + 1) = some ⟨hm.d - 1, hm.a + 1⟩) ∧
+                Sporos.walk pr wd (y :: ys) (i + 1) ⟨hm.d - 1, hm.a + 1⟩ = true := by
+              simp only [Sporos.walk, hs0, Bool.and_eq_true] at hw
+              refine ⟨?_, hw.2⟩
+              cases hl : wd.ann.lookup (i + 1) with
+              | none => exact Or.inl rfl
+              | some a =>
+                have hbe : (a == ⟨hm.d - 1, hm.a + 1⟩) = true := by
+                  have h1 := hw.1
+                  rw [hl] at h1
+                  exact h1
+                exact Or.inr (by rw [height_eq_of_beq hbe])
+            have hi1 : i + 1 < wd.code.length := by
+              have h := inv.isum
+              simp only [List.length_cons] at h
+              omega
+            obtain ⟨k3, s3, hr3, inv3⟩ :=
+              fall_finish1 cfg st inv hs hw2.1 hi1 rfl hrh hrip2 hpost
+            obtain ⟨k4, s4, hr4, hrip4, hr14, hr64, hr74, hr44⟩ :=
+              ih (i + 1) (c + 1) ⟨hm.d - 1, hm.a + 1⟩ ⟨hm.d - 1, hm.a + 1⟩ s3 inv3 hw2.2
+            refine ⟨k3 + k4, s4, by rw [run_add im k3 k4, hr3, hr4], hrip4, ?_, ?_,
+              hr74, hr44⟩
+            · have e : (i + 1) + (y :: ys).length =
+                  i + (Instr.tor :: y :: ys).length := by
+                simp only [List.length_cons]; omega
+              rw [← e]; exact hr14
+            · have e : (c + 1) + codeBytes (y :: ys) =
+                  c + codeBytes (Instr.tor :: y :: ys) := by
+                show (c + 1) + codeBytes (y :: ys) =
+                  c + (1 + codeBytes (y :: ys))
+                omega
+              rw [← e]; exact hr64
+    | fromr =>
+      cases hs : hstep pr wd hm (Instr.fromr) with
+      | none =>
+        have hs0 : hstep pr wd ((wd.ann.lookup i).getD cur) (Instr.fromr) =
+            none := by
+          rw [hge]; exact hs
+        simp [Sporos.walk, hs0] at hw
+      | some o =>
+        cases o with
+        | none => by_cases hcond : (1 ≤ hm.a) <;> simp [hstep, hcond] at hs
+        | some h' =>
+          obtain ⟨-, hh'⟩ := hstep_fromr hs
+          subst hh'
+          obtain ⟨kh, s2, hrh, hrip2, hpost⟩ := hand_fromr cfg st inv hs
+          have hs0 : hstep pr wd ((wd.ann.lookup i).getD cur) (Instr.fromr) =
+              some (some ⟨hm.d + 1, hm.a - 1⟩) := by
+            rw [hge]; exact hs
+          cases rest with
+          | nil => simp [Sporos.walk, hs0] at hw
+          | cons y ys =>
+            have hw2 : (wd.ann.lookup (i + 1) = none ∨
+                  wd.ann.lookup (i + 1) = some ⟨hm.d + 1, hm.a - 1⟩) ∧
+                Sporos.walk pr wd (y :: ys) (i + 1) ⟨hm.d + 1, hm.a - 1⟩ = true := by
+              simp only [Sporos.walk, hs0, Bool.and_eq_true] at hw
+              refine ⟨?_, hw.2⟩
+              cases hl : wd.ann.lookup (i + 1) with
+              | none => exact Or.inl rfl
+              | some a =>
+                have hbe : (a == ⟨hm.d + 1, hm.a - 1⟩) = true := by
+                  have h1 := hw.1
+                  rw [hl] at h1
+                  exact h1
+                exact Or.inr (by rw [height_eq_of_beq hbe])
+            have hi1 : i + 1 < wd.code.length := by
+              have h := inv.isum
+              simp only [List.length_cons] at h
+              omega
+            obtain ⟨k3, s3, hr3, inv3⟩ :=
+              fall_finish1 cfg st inv hs hw2.1 hi1 rfl hrh hrip2 hpost
+            obtain ⟨k4, s4, hr4, hrip4, hr14, hr64, hr74, hr44⟩ :=
+              ih (i + 1) (c + 1) ⟨hm.d + 1, hm.a - 1⟩ ⟨hm.d + 1, hm.a - 1⟩ s3 inv3 hw2.2
+            refine ⟨k3 + k4, s4, by rw [run_add im k3 k4, hr3, hr4], hrip4, ?_, ?_,
+              hr74, hr44⟩
+            · have e : (i + 1) + (y :: ys).length =
+                  i + (Instr.fromr :: y :: ys).length := by
+                simp only [List.length_cons]; omega
+              rw [← e]; exact hr14
+            · have e : (c + 1) + codeBytes (y :: ys) =
+                  c + codeBytes (Instr.fromr :: y :: ys) := by
+                show (c + 1) + codeBytes (y :: ys) =
+                  c + (1 + codeBytes (y :: ys))
+                omega
+              rw [← e]; exact hr64
+    | rfetch =>
+      cases hs : hstep pr wd hm (Instr.rfetch) with
+      | none =>
+        have hs0 : hstep pr wd ((wd.ann.lookup i).getD cur) (Instr.rfetch) =
+            none := by
+          rw [hge]; exact hs
+        simp [Sporos.walk, hs0] at hw
+      | some o =>
+        cases o with
+        | none => by_cases hcond : (1 ≤ hm.a) <;> simp [hstep, hcond] at hs
+        | some h' =>
+          obtain ⟨-, hh'⟩ := hstep_rfetch hs
+          subst hh'
+          obtain ⟨kh, s2, hrh, hrip2, hpost⟩ := hand_rfetch cfg st inv hs
+          have hs0 : hstep pr wd ((wd.ann.lookup i).getD cur) (Instr.rfetch) =
+              some (some ⟨hm.d + 1, hm.a⟩) := by
+            rw [hge]; exact hs
+          cases rest with
+          | nil => simp [Sporos.walk, hs0] at hw
+          | cons y ys =>
+            have hw2 : (wd.ann.lookup (i + 1) = none ∨
+                  wd.ann.lookup (i + 1) = some ⟨hm.d + 1, hm.a⟩) ∧
+                Sporos.walk pr wd (y :: ys) (i + 1) ⟨hm.d + 1, hm.a⟩ = true := by
+              simp only [Sporos.walk, hs0, Bool.and_eq_true] at hw
+              refine ⟨?_, hw.2⟩
+              cases hl : wd.ann.lookup (i + 1) with
+              | none => exact Or.inl rfl
+              | some a =>
+                have hbe : (a == ⟨hm.d + 1, hm.a⟩) = true := by
+                  have h1 := hw.1
+                  rw [hl] at h1
+                  exact h1
+                exact Or.inr (by rw [height_eq_of_beq hbe])
+            have hi1 : i + 1 < wd.code.length := by
+              have h := inv.isum
+              simp only [List.length_cons] at h
+              omega
+            obtain ⟨k3, s3, hr3, inv3⟩ :=
+              fall_finish1 cfg st inv hs hw2.1 hi1 rfl hrh hrip2 hpost
+            obtain ⟨k4, s4, hr4, hrip4, hr14, hr64, hr74, hr44⟩ :=
+              ih (i + 1) (c + 1) ⟨hm.d + 1, hm.a⟩ ⟨hm.d + 1, hm.a⟩ s3 inv3 hw2.2
+            refine ⟨k3 + k4, s4, by rw [run_add im k3 k4, hr3, hr4], hrip4, ?_, ?_,
+              hr74, hr44⟩
+            · have e : (i + 1) + (y :: ys).length =
+                  i + (Instr.rfetch :: y :: ys).length := by
+                simp only [List.length_cons]; omega
+              rw [← e]; exact hr14
+            · have e : (c + 1) + codeBytes (y :: ys) =
+                  c + codeBytes (Instr.rfetch :: y :: ys) := by
+                show (c + 1) + codeBytes (y :: ys) =
+                  c + (1 + codeBytes (y :: ys))
+                omega
+              rw [← e]; exact hr64
+    | locget li =>
+      cases hs : hstep pr wd hm (Instr.locget li) with
+      | none =>
+        have hs0 : hstep pr wd ((wd.ann.lookup i).getD cur) (Instr.locget li) =
+            none := by
+          rw [hge]; exact hs
+        simp [Sporos.walk, hs0] at hw
+      | some o =>
+        cases o with
+        | none => by_cases hcond : (li < wd.locals) <;> simp [hstep, hcond] at hs
+        | some h' =>
+          obtain ⟨-, hh'⟩ := hstep_locget hs
+          subst hh'
+          obtain ⟨kh, s2, hrh, hrip2, hpost⟩ := hand_locget cfg st inv hs
+          have hs0 : hstep pr wd ((wd.ann.lookup i).getD cur) (Instr.locget li) =
+              some (some ⟨hm.d + 1, hm.a⟩) := by
+            rw [hge]; exact hs
+          cases rest with
+          | nil => simp [Sporos.walk, hs0] at hw
+          | cons y ys =>
+            have hw2 : (wd.ann.lookup (i + 1) = none ∨
+                  wd.ann.lookup (i + 1) = some ⟨hm.d + 1, hm.a⟩) ∧
+                Sporos.walk pr wd (y :: ys) (i + 1) ⟨hm.d + 1, hm.a⟩ = true := by
+              simp only [Sporos.walk, hs0, Bool.and_eq_true] at hw
+              refine ⟨?_, hw.2⟩
+              cases hl : wd.ann.lookup (i + 1) with
+              | none => exact Or.inl rfl
+              | some a =>
+                have hbe : (a == ⟨hm.d + 1, hm.a⟩) = true := by
+                  have h1 := hw.1
+                  rw [hl] at h1
+                  exact h1
+                exact Or.inr (by rw [height_eq_of_beq hbe])
+            have hi1 : i + 1 < wd.code.length := by
+              have h := inv.isum
+              simp only [List.length_cons] at h
+              omega
+            obtain ⟨k3, s3, hr3, inv3⟩ :=
+              fall_finish1 cfg st inv hs hw2.1 hi1 rfl hrh hrip2 hpost
+            obtain ⟨k4, s4, hr4, hrip4, hr14, hr64, hr74, hr44⟩ :=
+              ih (i + 1) (c + 5) ⟨hm.d + 1, hm.a⟩ ⟨hm.d + 1, hm.a⟩ s3 inv3 hw2.2
+            refine ⟨k3 + k4, s4, by rw [run_add im k3 k4, hr3, hr4], hrip4, ?_, ?_,
+              hr74, hr44⟩
+            · have e : (i + 1) + (y :: ys).length =
+                  i + (Instr.locget li :: y :: ys).length := by
+                simp only [List.length_cons]; omega
+              rw [← e]; exact hr14
+            · have e : (c + 5) + codeBytes (y :: ys) =
+                  c + codeBytes (Instr.locget li :: y :: ys) := by
+                show (c + 5) + codeBytes (y :: ys) =
+                  c + (5 + codeBytes (y :: ys))
+                omega
+              rw [← e]; exact hr64
+    | locset ls =>
+      cases hs : hstep pr wd hm (Instr.locset ls) with
+      | none =>
+        have hs0 : hstep pr wd ((wd.ann.lookup i).getD cur) (Instr.locset ls) =
+            none := by
+          rw [hge]; exact hs
+        simp [Sporos.walk, hs0] at hw
+      | some o =>
+        cases o with
+        | none => by_cases hcond : (1 ≤ hm.d ∧ ls < wd.locals) <;> simp [hstep, hcond] at hs
+        | some h' =>
+          obtain ⟨-, -, hh'⟩ := hstep_locset hs
+          subst hh'
+          obtain ⟨kh, s2, hrh, hrip2, hpost⟩ := hand_locset cfg st inv hs
+          have hs0 : hstep pr wd ((wd.ann.lookup i).getD cur) (Instr.locset ls) =
+              some (some ⟨hm.d - 1, hm.a⟩) := by
+            rw [hge]; exact hs
+          cases rest with
+          | nil => simp [Sporos.walk, hs0] at hw
+          | cons y ys =>
+            have hw2 : (wd.ann.lookup (i + 1) = none ∨
+                  wd.ann.lookup (i + 1) = some ⟨hm.d - 1, hm.a⟩) ∧
+                Sporos.walk pr wd (y :: ys) (i + 1) ⟨hm.d - 1, hm.a⟩ = true := by
+              simp only [Sporos.walk, hs0, Bool.and_eq_true] at hw
+              refine ⟨?_, hw.2⟩
+              cases hl : wd.ann.lookup (i + 1) with
+              | none => exact Or.inl rfl
+              | some a =>
+                have hbe : (a == ⟨hm.d - 1, hm.a⟩) = true := by
+                  have h1 := hw.1
+                  rw [hl] at h1
+                  exact h1
+                exact Or.inr (by rw [height_eq_of_beq hbe])
+            have hi1 : i + 1 < wd.code.length := by
+              have h := inv.isum
+              simp only [List.length_cons] at h
+              omega
+            obtain ⟨k3, s3, hr3, inv3⟩ :=
+              fall_finish1 cfg st inv hs hw2.1 hi1 rfl hrh hrip2 hpost
+            obtain ⟨k4, s4, hr4, hrip4, hr14, hr64, hr74, hr44⟩ :=
+              ih (i + 1) (c + 5) ⟨hm.d - 1, hm.a⟩ ⟨hm.d - 1, hm.a⟩ s3 inv3 hw2.2
+            refine ⟨k3 + k4, s4, by rw [run_add im k3 k4, hr3, hr4], hrip4, ?_, ?_,
+              hr74, hr44⟩
+            · have e : (i + 1) + (y :: ys).length =
+                  i + (Instr.locset ls :: y :: ys).length := by
+                simp only [List.length_cons]; omega
+              rw [← e]; exact hr14
+            · have e : (c + 5) + codeBytes (y :: ys) =
+                  c + codeBytes (Instr.locset ls :: y :: ys) := by
+                show (c + 5) + codeBytes (y :: ys) =
+                  c + (5 + codeBytes (y :: ys))
+                omega
+              rw [← e]; exact hr64
+    | jmp jt =>
+      cases hs : hstep pr wd hm (Instr.jmp jt) with
+      | none =>
+        have hs0 : hstep pr wd ((wd.ann.lookup i).getD cur) (Instr.jmp jt) =
+            none := by
+          rw [hge]; exact hs
+        simp [Sporos.walk, hs0] at hw
+      | some o =>
+        cases o with
+        | some h' => by_cases hcond : (wd.ann.lookup jt = some hm) <;>
+            simp [hstep, hcond] at hs
+        | none =>
+          obtain ⟨kh, s2, hrh, hrip2, hpost⟩ := hand_jmp cfg st inv hs
+          have hs0 : hstep pr wd ((wd.ann.lookup i).getD cur) (Instr.jmp jt) =
+              some none := by
+            rw [hge]; exact hs
+          cases rest with
+          | nil =>
+            obtain ⟨k3, s4, hr3, hrip4, hr14, hr64, hr74, hr44⟩ :=
+              none_finish_nil1 cfg st inv hs rfl hrh hrip2 hpost
+            refine ⟨k3, s4, hr3, hrip4, ?_, ?_, hr74, hr44⟩
+            · simpa using hr14
+            · have e : c + codeBytes [Instr.jmp jt] = c + 5 := rfl
+              rw [e]; exact hr64
+          | cons y ys =>
+            have hi1 : i + 1 < wd.code.length := by
+              have h := inv.isum
+              simp only [List.length_cons] at h
+              omega
+            have hwrest : Sporos.walk pr wd (y :: ys) (i + 1)
+                ((wd.ann.lookup (i + 1)).getD ⟨0, 0⟩) = true := by
+              simp only [Sporos.walk, hs0] at hw
+              exact hw
+            obtain ⟨k3, s3, hr3, inv3⟩ :=
+              none_finish_cons1 cfg st inv hs hi1 rfl hrh hrip2 hpost
+            obtain ⟨k4, s4, hr4, hrip4, hr14, hr64, hr74, hr44⟩ :=
+              ih (i + 1) (c + 5) _ _ s3 inv3 hwrest
+            refine ⟨k3 + k4, s4, by rw [run_add im k3 k4, hr3, hr4], hrip4, ?_, ?_,
+              hr74, hr44⟩
+            · have e : (i + 1) + (y :: ys).length =
+                  i + (Instr.jmp jt :: y :: ys).length := by
+                simp only [List.length_cons]; omega
+              rw [← e]; exact hr14
+            · have e : (c + 5) + codeBytes (y :: ys) =
+                  c + codeBytes (Instr.jmp jt :: y :: ys) := by
+                show (c + 5) + codeBytes (y :: ys) =
+                  c + (5 + codeBytes (y :: ys))
+                omega
+              rw [← e]; exact hr64
+    | jz zt =>
+      cases hs : hstep pr wd hm (Instr.jz zt) with
+      | none =>
+        have hs0 : hstep pr wd ((wd.ann.lookup i).getD cur) (Instr.jz zt) =
+            none := by
+          rw [hge]; exact hs
+        simp [Sporos.walk, hs0] at hw
+      | some o =>
+        cases o with
+        | none => by_cases hcond : (1 ≤ hm.d ∧ wd.ann.lookup zt = some ⟨hm.d - 1, hm.a⟩) <;> simp [hstep, hcond] at hs
+        | some h' =>
+          obtain ⟨-, -, hh'⟩ := hstep_jz hs
+          subst hh'
+          obtain ⟨kh, s2, hrh, hrip2, hpost⟩ := hand_jz cfg st inv hs
+          have hs0 : hstep pr wd ((wd.ann.lookup i).getD cur) (Instr.jz zt) =
+              some (some ⟨hm.d - 1, hm.a⟩) := by
+            rw [hge]; exact hs
+          cases rest with
+          | nil => simp [Sporos.walk, hs0] at hw
+          | cons y ys =>
+            have hw2 : (wd.ann.lookup (i + 1) = none ∨
+                  wd.ann.lookup (i + 1) = some ⟨hm.d - 1, hm.a⟩) ∧
+                Sporos.walk pr wd (y :: ys) (i + 1) ⟨hm.d - 1, hm.a⟩ = true := by
+              simp only [Sporos.walk, hs0, Bool.and_eq_true] at hw
+              refine ⟨?_, hw.2⟩
+              cases hl : wd.ann.lookup (i + 1) with
+              | none => exact Or.inl rfl
+              | some a =>
+                have hbe : (a == ⟨hm.d - 1, hm.a⟩) = true := by
+                  have h1 := hw.1
+                  rw [hl] at h1
+                  exact h1
+                exact Or.inr (by rw [height_eq_of_beq hbe])
+            have hi1 : i + 1 < wd.code.length := by
+              have h := inv.isum
+              simp only [List.length_cons] at h
+              omega
+            obtain ⟨k3, s3, hr3, inv3⟩ :=
+              fall_finish1 cfg st inv hs hw2.1 hi1 rfl hrh hrip2 hpost
+            obtain ⟨k4, s4, hr4, hrip4, hr14, hr64, hr74, hr44⟩ :=
+              ih (i + 1) (c + 5) ⟨hm.d - 1, hm.a⟩ ⟨hm.d - 1, hm.a⟩ s3 inv3 hw2.2
+            refine ⟨k3 + k4, s4, by rw [run_add im k3 k4, hr3, hr4], hrip4, ?_, ?_,
+              hr74, hr44⟩
+            · have e : (i + 1) + (y :: ys).length =
+                  i + (Instr.jz zt :: y :: ys).length := by
+                simp only [List.length_cons]; omega
+              rw [← e]; exact hr14
+            · have e : (c + 5) + codeBytes (y :: ys) =
+                  c + codeBytes (Instr.jz zt :: y :: ys) := by
+                show (c + 5) + codeBytes (y :: ys) =
+                  c + (5 + codeBytes (y :: ys))
+                omega
+              rw [← e]; exact hr64
+    | jnz nt =>
+      cases hs : hstep pr wd hm (Instr.jnz nt) with
+      | none =>
+        have hs0 : hstep pr wd ((wd.ann.lookup i).getD cur) (Instr.jnz nt) =
+            none := by
+          rw [hge]; exact hs
+        simp [Sporos.walk, hs0] at hw
+      | some o =>
+        cases o with
+        | none => by_cases hcond : (1 ≤ hm.d ∧ wd.ann.lookup nt = some ⟨hm.d - 1, hm.a⟩) <;> simp [hstep, hcond] at hs
+        | some h' =>
+          obtain ⟨-, -, hh'⟩ := hstep_jnz hs
+          subst hh'
+          obtain ⟨kh, s2, hrh, hrip2, hpost⟩ := hand_jnz cfg st inv hs
+          have hs0 : hstep pr wd ((wd.ann.lookup i).getD cur) (Instr.jnz nt) =
+              some (some ⟨hm.d - 1, hm.a⟩) := by
+            rw [hge]; exact hs
+          cases rest with
+          | nil => simp [Sporos.walk, hs0] at hw
+          | cons y ys =>
+            have hw2 : (wd.ann.lookup (i + 1) = none ∨
+                  wd.ann.lookup (i + 1) = some ⟨hm.d - 1, hm.a⟩) ∧
+                Sporos.walk pr wd (y :: ys) (i + 1) ⟨hm.d - 1, hm.a⟩ = true := by
+              simp only [Sporos.walk, hs0, Bool.and_eq_true] at hw
+              refine ⟨?_, hw.2⟩
+              cases hl : wd.ann.lookup (i + 1) with
+              | none => exact Or.inl rfl
+              | some a =>
+                have hbe : (a == ⟨hm.d - 1, hm.a⟩) = true := by
+                  have h1 := hw.1
+                  rw [hl] at h1
+                  exact h1
+                exact Or.inr (by rw [height_eq_of_beq hbe])
+            have hi1 : i + 1 < wd.code.length := by
+              have h := inv.isum
+              simp only [List.length_cons] at h
+              omega
+            obtain ⟨k3, s3, hr3, inv3⟩ :=
+              fall_finish1 cfg st inv hs hw2.1 hi1 rfl hrh hrip2 hpost
+            obtain ⟨k4, s4, hr4, hrip4, hr14, hr64, hr74, hr44⟩ :=
+              ih (i + 1) (c + 5) ⟨hm.d - 1, hm.a⟩ ⟨hm.d - 1, hm.a⟩ s3 inv3 hw2.2
+            refine ⟨k3 + k4, s4, by rw [run_add im k3 k4, hr3, hr4], hrip4, ?_, ?_,
+              hr74, hr44⟩
+            · have e : (i + 1) + (y :: ys).length =
+                  i + (Instr.jnz nt :: y :: ys).length := by
+                simp only [List.length_cons]; omega
+              rw [← e]; exact hr14
+            · have e : (c + 5) + codeBytes (y :: ys) =
+                  c + codeBytes (Instr.jnz nt :: y :: ys) := by
+                show (c + 5) + codeBytes (y :: ys) =
+                  c + (5 + codeBytes (y :: ys))
+                omega
+              rw [← e]; exact hr64
+    | call cwidx =>
+      cases hs : hstep pr wd hm (Instr.call cwidx) with
+      | none =>
+        have hs0 : hstep pr wd ((wd.ann.lookup i).getD cur) (Instr.call cwidx) =
+            none := by
+          rw [hge]; exact hs
+        simp [Sporos.walk, hs0] at hw
+      | some o =>
+        cases o with
+        | none =>
+          simp only [hstep] at hs
+          cases hc : pr.words[cwidx]? with
+          | none => rw [hc] at hs; cases hs
+          | some cw =>
+            rw [hc] at hs
+            by_cases hg : cw.ins ≤ hm.d <;> simp [hg] at hs
+        | some h' =>
+          obtain ⟨kh, s2, hrh, hrip2, hpost⟩ := hand_call cfg st inv hs
+          have hs0 : hstep pr wd ((wd.ann.lookup i).getD cur) (Instr.call cwidx) =
+              some (some h') := by
+            rw [hge]; exact hs
+          cases rest with
+          | nil => simp [Sporos.walk, hs0] at hw
+          | cons y ys =>
+            have hw2 : (wd.ann.lookup (i + 1) = none ∨
+                  wd.ann.lookup (i + 1) = some h') ∧
+                Sporos.walk pr wd (y :: ys) (i + 1) h' = true := by
+              simp only [Sporos.walk, hs0, Bool.and_eq_true] at hw
+              refine ⟨?_, hw.2⟩
+              cases hl : wd.ann.lookup (i + 1) with
+              | none => exact Or.inl rfl
+              | some a =>
+                have hbe : (a == h') = true := by
+                  have h1 := hw.1
+                  rw [hl] at h1
+                  exact h1
+                exact Or.inr (by rw [height_eq_of_beq hbe])
+            have hi1 : i + 1 < wd.code.length := by
+              have h := inv.isum
+              simp only [List.length_cons] at h
+              omega
+            obtain ⟨k3, s3, hr3, inv3⟩ :=
+              fall_finish1 cfg st inv hs hw2.1 hi1 rfl hrh hrip2 hpost
+            obtain ⟨k4, s4, hr4, hrip4, hr14, hr64, hr74, hr44⟩ :=
+              ih (i + 1) (c + 5) h' h' s3 inv3 hw2.2
+            refine ⟨k3 + k4, s4, by rw [run_add im k3 k4, hr3, hr4], hrip4, ?_, ?_,
+              hr74, hr44⟩
+            · have e : (i + 1) + (y :: ys).length =
+                  i + (Instr.call cwidx :: y :: ys).length := by
+                simp only [List.length_cons]; omega
+              rw [← e]; exact hr14
+            · have e : (c + 5) + codeBytes (y :: ys) =
+                  c + codeBytes (Instr.call cwidx :: y :: ys) := by
+                show (c + 5) + codeBytes (y :: ys) =
+                  c + (5 + codeBytes (y :: ys))
+                omega
+              rw [← e]; exact hr64
+    | ret =>
+      cases hs : hstep pr wd hm Instr.ret with
+      | none =>
+        have hs0 : hstep pr wd ((wd.ann.lookup i).getD cur) (Instr.ret) =
+            none := by
+          rw [hge]; exact hs
+        simp [Sporos.walk, hs0] at hw
+      | some o =>
+        cases o with
+        | some h' => by_cases hcond : (hm = ⟨wd.outs, 0⟩) <;>
+            simp [hstep, hcond] at hs
+        | none =>
+          obtain ⟨kh, s2, hrh, hrip2, hpost⟩ := hand_ret cfg st inv hs
+          have hs0 : hstep pr wd ((wd.ann.lookup i).getD cur) (Instr.ret) =
+              some none := by
+            rw [hge]; exact hs
+          cases rest with
+          | nil =>
+            obtain ⟨k3, s4, hr3, hrip4, hr14, hr64, hr74, hr44⟩ :=
+              none_finish_nil1 cfg st inv hs rfl hrh hrip2 hpost
+            refine ⟨k3, s4, hr3, hrip4, ?_, ?_, hr74, hr44⟩
+            · simpa using hr14
+            · have e : c + codeBytes [Instr.ret] = c + 1 := rfl
+              rw [e]; exact hr64
+          | cons y ys =>
+            have hi1 : i + 1 < wd.code.length := by
+              have h := inv.isum
+              simp only [List.length_cons] at h
+              omega
+            have hwrest : Sporos.walk pr wd (y :: ys) (i + 1)
+                ((wd.ann.lookup (i + 1)).getD ⟨0, 0⟩) = true := by
+              simp only [Sporos.walk, hs0] at hw
+              exact hw
+            obtain ⟨k3, s3, hr3, inv3⟩ :=
+              none_finish_cons1 cfg st inv hs hi1 rfl hrh hrip2 hpost
+            obtain ⟨k4, s4, hr4, hrip4, hr14, hr64, hr74, hr44⟩ :=
+              ih (i + 1) (c + 1) _ _ s3 inv3 hwrest
+            refine ⟨k3 + k4, s4, by rw [run_add im k3 k4, hr3, hr4], hrip4, ?_, ?_,
+              hr74, hr44⟩
+            · have e : (i + 1) + (y :: ys).length =
+                  i + (Instr.ret :: y :: ys).length := by
+                simp only [List.length_cons]; omega
+              rw [← e]; exact hr14
+            · have e : (c + 1) + codeBytes (y :: ys) =
+                  c + codeBytes (Instr.ret :: y :: ys) := by
+                show (c + 1) + codeBytes (y :: ys) =
+                  c + (1 + codeBytes (y :: ys))
+                omega
+              rw [← e]; exact hr64
+
+
 end SporosX1
