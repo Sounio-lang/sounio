@@ -2447,6 +2447,321 @@ theorem loader_entry_to_mmap {f path argv0 : List Nat} {oracle : List Choice}
     ha21r8, ha21r9, ha21r14, ha21r4, ha21k, by
       rw [ha21mem, hwshape, ha18mem], hlen21⟩
 
+/-- The initial `mmap` is legal for a placement in the room
+interval, and six further steps reach the read loop head with the
+file buffer mapped at `A`, capacity 65536 in `r12`, count 0 in
+`r13`, one oracle entry consumed. -/
+theorem loader_mmap1_to_readloop {f : List Nat} {A sp0 : Nat}
+    {s s' : X86Int.St}
+    (hrip : s'.rip = base + 0xbf) (hlen16 : s'.regs.length = 16)
+    (hr0 : s'.reg 0 = some 9) (hr7 : s'.reg 7 = some 0)
+    (hr6 : s'.reg 6 = some 65536) (hr2 : s'.reg 2 = some 3)
+    (hr10 : s'.reg 10 = some 34) (hr8 : s'.reg 8 = some (W - 1))
+    (hr9 : s'.reg 9 = some 0) (hr14 : s'.reg 14 = some 3)
+    (hr4 : s'.reg 4 = some (sp0 + 24))
+    (hr13 : ∃ v, s'.reg 13 = some v)
+    (hshape : wshape s'.mem = wshape s.mem)
+    (hhead : s'.k.oracle.head? = some (.at A))
+    (hAal : A % page = 0) (hApos : 0 < A)
+    (hbound : A + stage1Mf f ≤ 2 ^ 47)
+    (hfree : s.mem.free A (stage1Mf f) = true) :
+    OracleLegalAt s' ∧
+    ∃ s'', run stage1Im 6 (Out.ok s') = Out.ok s'' ∧
+      s''.rip = base + 0xd7 ∧
+      s''.reg 3 = some A ∧ s''.reg 12 = some 65536 ∧
+      s''.reg 13 = some 0 ∧ s''.reg 14 = some 3 ∧
+      s''.reg 4 = some (sp0 + 24) ∧
+      s''.mem = s'.mem ++ [⟨A, List.replicate 65536 0, true⟩] ∧
+      s''.k = (Kern.next s'.k).2 ∧ s''.regs.length = 16 := by
+  have hc := stage1_loaderCode
+  have hpages : X86Env.pages 65536 = 65536 := by decide
+  have hMf : 65536 ≤ stage1Mf f := by
+    unfold stage1Mf arenaFileBytes
+    have h := pages_ge (65536 + 2 * f.length)
+    omega
+  have hfree' : s'.mem.free A 65536 = true := by
+    have h1 : s'.mem.free A (stage1Mf f) = true := by
+      rw [free_of_wshape hshape]
+      exact hfree
+    have h2 : s'.mem.free A (65536 + (stage1Mf f - 65536)) = true := by
+      rw [Nat.add_sub_cancel' hMf]
+      exact h1
+    exact free_prefix h2
+  have hplace : X86Env.place s'.mem (some (.at A)) (X86Env.pages 65536) =
+      some (some A) := by
+    rw [hpages]
+    exact place_at hAal hApos (by omega) hfree'
+  have hlegal : OracleLegalAt s' :=
+    oracleLegalAt_mmap (by rw [hrip]; exact hc.dbf) hr0 hr7 hr6 hr2 hr10
+      hr8 hr9 (by decide) hhead hplace
+  have hsc : X86Env.syscall s'.k s'.mem 9 0 65536 PROT_RW
+        MAP_PRIVATE_ANON (W - 1) 0 =
+      some (.ret A (Kern.next s'.k).2
+        (s'.mem ++ [⟨A, List.replicate 65536 0, true⟩])) := by
+    have hnext1 : (Kern.next s'.k).1 = some (.at A) :=
+      kern_next_of_head hhead
+    simp only [X86Env.syscall]
+    rw [if_neg (by simp [PROT_RW, MAP_PRIVATE_ANON]),
+      if_neg (by decide : ¬ ((65536 : Nat) = 0))]
+    cases hnext : Kern.next s'.k with
+    | mk c k1 =>
+      rw [hnext] at hnext1
+      simp only [] at hnext1
+      subst hnext1
+      simp only [hplace]
+      rw [hpages]
+      rfl
+  have e1 : X86Int.step stage1Im s' =
+      .ok { ((s'.set 0 (some A)).set 1 (some (s'.rip + 2))).set 11 none with
+        k := (Kern.next s'.k).2,
+        mem := s'.mem ++ [⟨A, List.replicate 65536 0, true⟩],
+        rip := s'.rip + 2 } :=
+    step_syscall_ret (by rw [hrip]; exact hc.dbf) hr0 hr7 hr6 hr2 hr10
+      hr8 hr9 hsc
+  obtain ⟨b1, hb1⟩ : ∃ t : X86Int.St, t =
+      { ((s'.set 0 (some A)).set 1 (some (s'.rip + 2))).set 11 none with
+        k := (Kern.next s'.k).2,
+        mem := s'.mem ++ [⟨A, List.replicate 65536 0, true⟩],
+        rip := s'.rip + 2 } := ⟨_, rfl⟩
+  have hb1rip : b1.rip = base + 0xc1 := by
+    rw [hb1]; show s'.rip + 2 = base + 0xc1; rw [hrip]
+  have hlenb1 : b1.regs.length = 16 := by
+    rw [hb1]
+    show (((s'.set 0 (some A)).set 1 (some (s'.rip + 2))).set 11
+      none).regs.length = 16
+    rw [len_set, len_set, len_set]
+    exact hlen16
+  have hb1r0 : b1.reg 0 = some A := by
+    rw [hb1]
+    show (((s'.set 0 (some A)).set 1 (some (s'.rip + 2))).set 11
+      none).reg 0 = some A
+    rw [reg_set_other (by decide : (0 : Nat) ≠ 11),
+      reg_set_other (by decide : (0 : Nat) ≠ 1),
+      reg_set_self (by omega)]
+  have hb1r4 : b1.reg 4 = some (sp0 + 24) := by
+    rw [hb1]
+    show (((s'.set 0 (some A)).set 1 (some (s'.rip + 2))).set 11
+      none).reg 4 = some (sp0 + 24)
+    rw [reg_set_other (by decide : (4 : Nat) ≠ 11),
+      reg_set_other (by decide : (4 : Nat) ≠ 1),
+      reg_set_other (by decide : (4 : Nat) ≠ 0)]
+    exact hr4
+  have hb1r14 : b1.reg 14 = some 3 := by
+    rw [hb1]
+    show (((s'.set 0 (some A)).set 1 (some (s'.rip + 2))).set 11
+      none).reg 14 = some 3
+    rw [reg_set_other (by decide : (14 : Nat) ≠ 11),
+      reg_set_other (by decide : (14 : Nat) ≠ 1),
+      reg_set_other (by decide : (14 : Nat) ≠ 0)]
+    exact hr14
+  obtain ⟨v13, hb1r13⟩ : ∃ v, b1.reg 13 = some v := by
+    obtain ⟨v, hv⟩ := hr13
+    exact ⟨v, by
+      rw [hb1]
+      show (((s'.set 0 (some A)).set 1 (some (s'.rip + 2))).set 11
+        none).reg 13 = some v
+      rw [reg_set_other (by decide : (13 : Nat) ≠ 11),
+        reg_set_other (by decide : (13 : Nat) ≠ 1),
+        reg_set_other (by decide : (13 : Nat) ≠ 0)]
+      exact hv⟩
+  have hb1mem : b1.mem = s'.mem ++ [⟨A, List.replicate 65536 0, true⟩] := by
+    rw [hb1]
+  have hb1k : b1.k = (Kern.next s'.k).2 := by rw [hb1]
+  -- test rax, rax: A < 2^63 so not negative
+  have e2 : X86Int.step stage1Im b1 =
+      .ok { b1 with fl := (aluF .and A A).2, rip := b1.rip + 3 } :=
+    step_test (by rw [hb1rip]; exact hc.dc1) hb1r0 hb1r0
+  obtain ⟨b2, hb2⟩ : ∃ t : X86Int.St, t =
+      { b1 with fl := (aluF .and A A).2, rip := b1.rip + 3 } := ⟨_, rfl⟩
+  have hb2rip : b2.rip = base + 0xc4 := by
+    rw [hb2]; show b1.rip + 3 = base + 0xc4; rw [hb1rip]
+  have hb2fl : X86Int.cond b2.fl 9 = some true := by
+    rw [hb2]
+    show X86Int.cond (aluF .and A A).2 9 = some true
+    apply cond_cc9_of_sf_false
+    have hland : Nat.land A A = A := by simp
+    have hmsb : X86Int.msb A = false := by
+      simp only [X86Int.msb]
+      rw [Nat.div_eq_of_lt (by omega : A < 2 ^ 63)]
+      decide
+    simp [aluF, hland, hmsb]
+  have hb2r0 : b2.reg 0 = some A := by rw [hb2]; exact hb1r0
+  have hb2r4 : b2.reg 4 = some (sp0 + 24) := by rw [hb2]; exact hb1r4
+  have hb2r14 : b2.reg 14 = some 3 := by rw [hb2]; exact hb1r14
+  have hb2r13 : b2.reg 13 = some v13 := by rw [hb2]; exact hb1r13
+  have hb2mem : b2.mem = s'.mem ++ [⟨A, List.replicate 65536 0, true⟩] := by rw [hb2]; exact hb1mem
+  have hb2k : b2.k = (Kern.next s'.k).2 := by rw [hb2]; exact hb1k
+  have hlenb2 : b2.regs.length = 16 := by
+    rw [hb2]; show b1.regs.length = 16
+    exact hlenb1
+  -- jns 0xcb (taken)
+  have e3 : X86Int.step stage1Im b2 = .ok { b2 with rip := base + 0xcb } := by
+    have h := step_jcc (im := stage1Im) (s := b2)
+      (by rw [hb2rip]; exact hc.dc4) hb2fl
+    simpa using h
+  obtain ⟨b3, hb3⟩ : ∃ t : X86Int.St, t =
+      { b2 with rip := base + 0xcb } := ⟨_, rfl⟩
+  have hb3rip : b3.rip = base + 0xcb := by rw [hb3]
+  have hb3r0 : b3.reg 0 = some A := by
+    rw [hb3]; show ({ b2 with rip := base + 0xcb }).reg 0 = some A
+    rw [reg_with_rip]; exact hb2r0
+  have hb3r4 : b3.reg 4 = some (sp0 + 24) := by
+    rw [hb3]; show ({ b2 with rip := base + 0xcb }).reg 4 = some (sp0 + 24)
+    rw [reg_with_rip]; exact hb2r4
+  have hb3r14 : b3.reg 14 = some 3 := by
+    rw [hb3]; show ({ b2 with rip := base + 0xcb }).reg 14 = some 3
+    rw [reg_with_rip]; exact hb2r14
+  have hb3r13 : b3.reg 13 = some v13 := by
+    rw [hb3]; show ({ b2 with rip := base + 0xcb }).reg 13 = some v13
+    rw [reg_with_rip]; exact hb2r13
+  have hb3mem : b3.mem = s'.mem ++ [⟨A, List.replicate 65536 0, true⟩] := by rw [hb3]; exact hb2mem
+  have hb3k : b3.k = (Kern.next s'.k).2 := by rw [hb3]; exact hb2k
+  have hlenb3 : b3.regs.length = 16 := by
+    rw [hb3]; show ({ b2 with rip := base + 0xcb }).regs.length = 16
+    rw [len_with_rip]; exact hlenb2
+  -- mov rbx, rax
+  have e4 : X86Int.step stage1Im b3 =
+      .ok { b3.set 3 (some A) with rip := b3.rip + 3 } :=
+    step_mov (by rw [hb3rip]; exact hc.dcb) hb3r0
+  obtain ⟨b4, hb4⟩ : ∃ t : X86Int.St, t =
+      { b3.set 3 (some A) with rip := b3.rip + 3 } := ⟨_, rfl⟩
+  have hb4rip : b4.rip = base + 0xce := by
+    rw [hb4]; show b3.rip + 3 = base + 0xce; rw [hb3rip]
+  have hlenb4 : b4.regs.length = 16 := by
+    rw [hb4]
+    show ({ b3.set 3 (some A) with rip := b3.rip + 3 }).regs.length = 16
+    rw [len_with_rip, len_set]
+    exact hlenb3
+  have hb4r3 : b4.reg 3 = some A := by
+    rw [hb4]
+    show ({ b3.set 3 (some A) with rip := b3.rip + 3 }).reg 3 = some A
+    rw [reg_with_rip, reg_set_self (by omega)]
+  have hb4r4 : b4.reg 4 = some (sp0 + 24) := by
+    rw [hb4]
+    show ({ b3.set 3 (some A) with rip := b3.rip + 3 }).reg 4 =
+      some (sp0 + 24)
+    rw [reg_with_rip, reg_set_other (by decide : (4 : Nat) ≠ 3)]
+    exact hb3r4
+  have hb4r14 : b4.reg 14 = some 3 := by
+    rw [hb4]
+    show ({ b3.set 3 (some A) with rip := b3.rip + 3 }).reg 14 = some 3
+    rw [reg_with_rip, reg_set_other (by decide : (14 : Nat) ≠ 3)]
+    exact hb3r14
+  have hb4r13 : b4.reg 13 = some v13 := by
+    rw [hb4]
+    show ({ b3.set 3 (some A) with rip := b3.rip + 3 }).reg 13 = some v13
+    rw [reg_with_rip, reg_set_other (by decide : (13 : Nat) ≠ 3)]
+    exact hb3r13
+  have hb4mem : b4.mem = s'.mem ++ [⟨A, List.replicate 65536 0, true⟩] := by rw [hb4]; exact hb3mem
+  have hb4k : b4.k = (Kern.next s'.k).2 := by rw [hb4]; exact hb3k
+  -- mov r12d, 65536
+  have e5 : X86Int.step stage1Im b4 =
+      .ok { b4.set 12 (some (65536 % W)) with rip := b4.rip + 6 } :=
+    step_movI (by rw [hb4rip]; exact hc.dce)
+  obtain ⟨b5, hb5⟩ : ∃ t : X86Int.St, t =
+      { b4.set 12 (some (65536 % W)) with rip := b4.rip + 6 } := ⟨_, rfl⟩
+  have hb5rip : b5.rip = base + 0xd4 := by
+    rw [hb5]; show b4.rip + 6 = base + 0xd4; rw [hb4rip]
+  have hlenb5 : b5.regs.length = 16 := by
+    rw [hb5]
+    show ({ b4.set 12 (some (65536 % W)) with
+      rip := b4.rip + 6 }).regs.length = 16
+    rw [len_with_rip, len_set]
+    exact hlenb4
+  have hb5r12 : b5.reg 12 = some 65536 := by
+    rw [hb5]
+    show ({ b4.set 12 (some (65536 % W)) with
+      rip := b4.rip + 6 }).reg 12 = some 65536
+    rw [reg_with_rip, reg_set_self (by omega)]
+    decide
+  have hb5r3 : b5.reg 3 = some A := by
+    rw [hb5]
+    show ({ b4.set 12 (some (65536 % W)) with rip := b4.rip + 6 }).reg 3 =
+      some A
+    rw [reg_with_rip, reg_set_other (by decide : (3 : Nat) ≠ 12)]
+    exact hb4r3
+  have hb5r4 : b5.reg 4 = some (sp0 + 24) := by
+    rw [hb5]
+    show ({ b4.set 12 (some (65536 % W)) with rip := b4.rip + 6 }).reg 4 =
+      some (sp0 + 24)
+    rw [reg_with_rip, reg_set_other (by decide : (4 : Nat) ≠ 12)]
+    exact hb4r4
+  have hb5r14 : b5.reg 14 = some 3 := by
+    rw [hb5]
+    show ({ b4.set 12 (some (65536 % W)) with rip := b4.rip + 6 }).reg 14 =
+      some 3
+    rw [reg_with_rip, reg_set_other (by decide : (14 : Nat) ≠ 12)]
+    exact hb4r14
+  have hb5r13 : b5.reg 13 = some v13 := by
+    rw [hb5]
+    show ({ b4.set 12 (some (65536 % W)) with rip := b4.rip + 6 }).reg 13 =
+      some v13
+    rw [reg_with_rip, reg_set_other (by decide : (13 : Nat) ≠ 12)]
+    exact hb4r13
+  have hb5mem : b5.mem = s'.mem ++ [⟨A, List.replicate 65536 0, true⟩] := by rw [hb5]; exact hb4mem
+  have hb5k : b5.k = (Kern.next s'.k).2 := by rw [hb5]; exact hb4k
+  -- xor r13, r13
+  have e6 : X86Int.step stage1Im b5 =
+      .ok { b5.set 13 (some (aluF .xor v13 v13).1) with
+        fl := (aluF .xor v13 v13).2, rip := b5.rip + 3 } :=
+    step_alu_xor (by rw [hb5rip]; exact hc.dd4) hb5r13 hb5r13
+  obtain ⟨b6, hb6⟩ : ∃ t : X86Int.St, t =
+      { b5.set 13 (some (aluF .xor v13 v13).1) with
+        fl := (aluF .xor v13 v13).2, rip := b5.rip + 3 } := ⟨_, rfl⟩
+  have hb6rip : b6.rip = base + 0xd7 := by
+    rw [hb6]; show b5.rip + 3 = base + 0xd7; rw [hb5rip]
+  have hlenb6 : b6.regs.length = 16 := by
+    rw [hb6]
+    show (b5.set 13 (some (aluF .xor v13 v13).1)).regs.length = 16
+    rw [len_set]
+    exact hlenb5
+  have hb6r13 : b6.reg 13 = some 0 := by
+    rw [hb6]
+    show (b5.set 13 (some (aluF .xor v13 v13).1)).reg 13 = some 0
+    rw [reg_set_self (by omega), aluF_xor_fst_self]
+  have hb6r3 : b6.reg 3 = some A := by
+    rw [hb6]
+    show (b5.set 13 (some (aluF .xor v13 v13).1)).reg 3 = some A
+    rw [reg_set_other (by decide : (3 : Nat) ≠ 13)]
+    exact hb5r3
+  have hb6r12 : b6.reg 12 = some 65536 := by
+    rw [hb6]
+    show (b5.set 13 (some (aluF .xor v13 v13).1)).reg 12 = some 65536
+    rw [reg_set_other (by decide : (12 : Nat) ≠ 13)]
+    exact hb5r12
+  have hb6r14 : b6.reg 14 = some 3 := by
+    rw [hb6]
+    show (b5.set 13 (some (aluF .xor v13 v13).1)).reg 14 = some 3
+    rw [reg_set_other (by decide : (14 : Nat) ≠ 13)]
+    exact hb5r14
+  have hb6r4 : b6.reg 4 = some (sp0 + 24) := by
+    rw [hb6]
+    show (b5.set 13 (some (aluF .xor v13 v13).1)).reg 4 = some (sp0 + 24)
+    rw [reg_set_other (by decide : (4 : Nat) ≠ 13)]
+    exact hb5r4
+  have hb6mem : b6.mem = s'.mem ++ [⟨A, List.replicate 65536 0, true⟩] := by rw [hb6]; exact hb5mem
+  have hb6k : b6.k = (Kern.next s'.k).2 := by rw [hb6]; exact hb5k
+  have r1 : run stage1Im 1 (Out.ok s') = Out.ok b1 := by
+    rw [run_succ_ok stage1Im 0 s', e1, ← hb1, run_zero]
+  have r2 : run stage1Im 1 (Out.ok b1) = Out.ok b2 := by
+    rw [run_succ_ok stage1Im 0 b1, e2, ← hb2, run_zero]
+  have r3 : run stage1Im 1 (Out.ok b2) = Out.ok b3 := by
+    rw [run_succ_ok stage1Im 0 b2, e3, ← hb3, run_zero]
+  have r4 : run stage1Im 1 (Out.ok b3) = Out.ok b4 := by
+    rw [run_succ_ok stage1Im 0 b3, e4, ← hb4, run_zero]
+  have r5 : run stage1Im 1 (Out.ok b4) = Out.ok b5 := by
+    rw [run_succ_ok stage1Im 0 b4, e5, ← hb5, run_zero]
+  have r6 : run stage1Im 1 (Out.ok b5) = Out.ok b6 := by
+    rw [run_succ_ok stage1Im 0 b5, e6, ← hb6, run_zero]
+  have hrun : run stage1Im 6 (Out.ok s') = Out.ok b6 := by
+    rw [show (6 : Nat) = 1 + 5 from rfl, run_add stage1Im 1 5, r1,
+      show (5 : Nat) = 1 + 4 from rfl, run_add stage1Im 1 4, r2,
+      show (4 : Nat) = 1 + 3 from rfl, run_add stage1Im 1 3, r3,
+      show (3 : Nat) = 1 + 2 from rfl, run_add stage1Im 1 2, r4,
+      show (2 : Nat) = 1 + 1 from rfl, run_add stage1Im 1 1, r5, r6]
+  exact ⟨hlegal, b6, hrun, hb6rip, hb6r3, hb6r12, hb6r13, hb6r14, hb6r4,
+    hb6mem, hb6k, hlenb6⟩
+
 /-- EXISTENCE TARGET: with room, some oracle makes the final
 theorem non-vacuous.  The witness is `stage1Oracle f A` for the
 `A` given by `Room`.  What remains is the loader-prefix invariant:
