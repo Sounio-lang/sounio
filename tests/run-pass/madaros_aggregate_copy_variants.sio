@@ -1,0 +1,281 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: AGGREGATE_COPY_VARIANTS_OK
+// Regression gate: a fixed array or a struct copied by value from a place is an independent object.
+//
+// Each tag takes the copy, writes the destination in place and checks that the source did not move (and, where the
+// source stays reachable, writes the source and checks the copy). Every tag has sources of its own, so an alias in one
+// tag cannot move the values another tag reads. Measured before the fix (Madaros of main, 2026-11-16): tags 1, 3, 4,
+// 7, 8 and 9 failed with exit 0 and a wrong value (the write through the copy showed through the source).
+//
+//   1  `var t = *p`, p: &[f64; 18]: a reference parameter to a word-scalar array was never marked as copyable
+//      (lower_type_expr_fixed_array_word_scalar_ref does not peel the `&`), so t was the caller's array
+//   2  `var t = *p`, p: &S with S holding an array (worked; kept as the control)
+//   3  `var t = *p` of a scalar-only struct: the let path copies only structs with an array field of their own
+//   4  `t = *p` into a declared var, for an array, a struct with an array and a scalar-only struct
+//   5  `a = b` between structs of 784 doubles plus a nested struct
+//   7  return by value read through a reference: `fn f(w: &W) -> S { (*w).ts }`, `{ *p }`, `return *p`, `return (*w).ts`
+//   8  struct field inside a struct, two levels: `var x = w.m`, `w.m = y`, `m2 = m1`, `var inner = w.m.s`, `w.ts = w.m.s`
+//   9  array of structs: `var e = arr[i]`, `arr[i] = f`, `arr[i] = arr[j]`, `[Mid; N]` element assignment
+
+struct P {
+    x: f64,
+    y: f64,
+}
+
+struct S {
+    a: [f64; 18],
+    n: i64,
+}
+
+struct Big {
+    a: [f64; 784],
+    p: P,
+    n: i64,
+}
+
+struct Mid {
+    s: S,
+    p: P,
+    k: i64,
+}
+
+struct W {
+    ts: S,
+    m: Mid,
+    tail: i64,
+}
+
+fn mk(v: f64) -> S {
+    S { a: [v; 18], n: 7 }
+}
+
+fn mkbig(v: f64) -> Big {
+    Big { a: [v; 784], p: P { x: v, y: v }, n: 1 }
+}
+
+fn mkmid(v: f64) -> Mid {
+    Mid { s: mk(v), p: P { x: v, y: v }, k: 3 }
+}
+
+fn mkw(v: f64) -> W {
+    W { ts: mk(v), m: mkmid(v), tail: 1 }
+}
+
+fn chk(tag: i64, got: f64, want: f64) -> i64 with IO {
+    if got != want {
+        print("BAD ")
+        print(tag)
+        print(" got ")
+        print(got)
+        print(" want ")
+        print(want)
+        print("\n")
+        return 1
+    }
+    0
+}
+
+fn t1_arr_let_deref(p: &[f64; 18]) -> i64 with IO, Mut, Div, Panic {
+    var t = *p
+    t[0] = 9.0
+    var bad = chk(101, (*p)[0], 1.0) + chk(102, t[0], 9.0) + chk(103, t[17], 1.0)
+    // t is a fixed array of its own: copying it again copies.
+    var u = t
+    u[1] = 8.0
+    bad = bad + chk(104, t[1], 1.0) + chk(105, (*p)[1], 1.0)
+    var t2: [f64; 18] = *p
+    t2[2] = 7.0
+    bad = bad + chk(106, (*p)[2], 1.0)
+    bad
+}
+
+fn t1_arr_let_deref_mut(p: &![f64; 18]) -> i64 with IO, Mut, Div, Panic {
+    var t = *p
+    t[3] = 9.0
+    (*p)[4] = 6.0
+    chk(107, (*p)[3], 1.0) + chk(108, t[4], 1.0)
+}
+
+fn t1_int_arr(p: &[i64; 4]) -> i64 with IO, Mut, Div, Panic {
+    var t = *p
+    t[2] = 9
+    if (*p)[2] != 1 { return chk(109, 0.0, 1.0) }
+    0
+}
+
+fn t2_struct_let_deref(p: &S) -> i64 with IO, Mut, Div, Panic {
+    var t = *p
+    t.a[0] = 9.0
+    t.n = 99
+    var bad = chk(201, (*p).a[0], 1.0)
+    if (*p).n != 7 { bad = bad + chk(202, 0.0, 1.0) }
+    bad
+}
+
+fn t3_scalar_let_deref(p: &P) -> i64 with IO, Mut, Div, Panic {
+    var t = *p
+    t.x = 9.0
+    chk(301, (*p).x, 1.0) + chk(302, t.y, 2.0)
+}
+
+fn t4_assign_deref(pa: &[f64; 18], ps: &S, pp: &P) -> i64 with IO, Mut, Div, Panic {
+    var ta: [f64; 18] = [0.0; 18]
+    ta = *pa
+    ta[0] = 9.0
+    var ts = mk(0.0)
+    ts = *ps
+    ts.a[0] = 9.0
+    var tp = P { x: 0.0, y: 0.0 }
+    tp = *pp
+    tp.x = 9.0
+    chk(401, (*pa)[0], 1.0) + chk(402, (*ps).a[0], 1.0) + chk(403, (*pp).x, 1.0) + chk(404, ta[1], 1.0) + chk(405, ts.a[1], 1.0)
+}
+
+fn t5_assign_ident_big() -> i64 with IO, Mut, Div, Panic {
+    var a = mkbig(0.0)
+    var b = mkbig(1.0)
+    a = b
+    a.a[783] = 9.0
+    a.p.x = 9.0
+    var bad = chk(501, b.a[783], 1.0) + chk(502, b.p.x, 1.0)
+    b.a[0] = 5.0
+    bad = bad + chk(503, a.a[0], 1.0)
+    bad
+}
+
+fn get_ts(w: &W) -> S {
+    (*w).ts
+}
+
+fn get_deref(p: &S) -> S {
+    *p
+}
+
+fn get_arr(p: &[f64; 18]) -> [f64; 18] {
+    *p
+}
+
+fn get_mid_ret(w: &W, early: bool) -> Mid {
+    if early {
+        return (*w).m
+    }
+    (*w).m
+}
+
+fn get_p_ret(p: &P) -> P with Mut, Div, Panic {
+    var k: i64 = 0
+    while k < 1 {
+        k = k + 1
+    }
+    return *p
+}
+
+fn t7_return_by_value() -> i64 with IO, Mut, Div, Panic {
+    var w = mkw(1.0)
+    var r = get_ts(&w)
+    r.a[0] = 9.0
+    var bad = chk(701, w.ts.a[0], 1.0)
+    var s = mk(1.0)
+    var r2 = get_deref(&s)
+    r2.a[0] = 9.0
+    bad = bad + chk(702, s.a[0], 1.0)
+    var arr: [f64; 18] = [1.0; 18]
+    var r3 = get_arr(&arr)
+    r3[0] = 9.0
+    bad = bad + chk(703, arr[0], 1.0)
+    var m1 = get_mid_ret(&w, true)
+    m1.s.a[0] = 9.0
+    m1.p.x = 9.0
+    var m2 = get_mid_ret(&w, false)
+    m2.s.a[1] = 9.0
+    bad = bad + chk(704, w.m.s.a[0], 1.0) + chk(705, w.m.p.x, 1.0) + chk(706, w.m.s.a[1], 1.0)
+    let p = P { x: 1.0, y: 2.0 }
+    var r4 = get_p_ret(&p)
+    r4.x = 9.0
+    bad = bad + chk(707, p.x, 1.0)
+    bad
+}
+
+fn t8_nested_field() -> i64 with IO, Mut, Div, Panic {
+    var w = mkw(0.0)
+    w.m = mkmid(1.0)
+    var x = w.m
+    x.s.a[0] = 9.0
+    x.p.x = 9.0
+    var bad = chk(801, w.m.s.a[0], 1.0) + chk(802, w.m.p.x, 1.0)
+    var y = mkmid(2.0)
+    w.m = y
+    y.s.a[0] = 9.0
+    bad = bad + chk(803, w.m.s.a[0], 2.0)
+    w.m.s.a[1] = 7.0
+    bad = bad + chk(804, y.s.a[1], 2.0)
+    var m1 = mkmid(3.0)
+    var m2 = mkmid(4.0)
+    m2 = m1
+    m2.s.a[0] = 9.0
+    bad = bad + chk(805, m1.s.a[0], 3.0)
+    var inner = w.m.s
+    inner.a[3] = 9.0
+    bad = bad + chk(806, w.m.s.a[3], 2.0)
+    w.ts = w.m.s
+    w.ts.a[4] = 9.0
+    bad = bad + chk(807, w.m.s.a[4], 2.0)
+    bad
+}
+
+fn t9_array_elements() -> i64 with IO, Mut, Div, Panic {
+    var arr: [S; 3] = [mk(0.0), mk(1.0), mk(2.0)]
+    var e = arr[1]
+    e.a[0] = 9.0
+    var bad = chk(901, arr[1].a[0], 1.0)
+    var f = mk(5.0)
+    arr[0] = f
+    f.a[0] = 9.0
+    bad = bad + chk(902, arr[0].a[0], 5.0)
+    arr[2] = arr[1]
+    arr[2].a[1] = 9.0
+    bad = bad + chk(903, arr[1].a[1], 1.0)
+    var ms: [Mid; 2] = [mkmid(1.0), mkmid(2.0)]
+    ms[0] = ms[1]
+    ms[0].s.a[0] = 9.0
+    bad = bad + chk(904, ms[1].s.a[0], 2.0)
+    var em = ms[1]
+    em.p.x = 9.0
+    bad = bad + chk(905, ms[1].p.x, 2.0)
+    var ps: [P; 2] = [P { x: 1.0, y: 1.0 }, P { x: 2.0, y: 2.0 }]
+    var ep = ps[1]
+    ep.x = 9.0
+    bad = bad + chk(906, ps[1].x, 2.0)
+    bad
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var bad: i64 = 0
+    var arr1: [f64; 18] = [1.0; 18]
+    bad = bad + t1_arr_let_deref(&arr1)
+    var arr1m: [f64; 18] = [1.0; 18]
+    bad = bad + t1_arr_let_deref_mut(&!arr1m)
+    var ia: [i64; 4] = [1, 1, 1, 1]
+    bad = bad + t1_int_arr(&ia)
+    let s2 = mk(1.0)
+    bad = bad + t2_struct_let_deref(&s2)
+    let p3 = P { x: 1.0, y: 2.0 }
+    bad = bad + t3_scalar_let_deref(&p3)
+    var arr4: [f64; 18] = [1.0; 18]
+    let s4 = mk(1.0)
+    let p4 = P { x: 1.0, y: 2.0 }
+    bad = bad + t4_assign_deref(&arr4, &s4, &p4)
+    bad = bad + t5_assign_ident_big()
+    bad = bad + t7_return_by_value()
+    bad = bad + t8_nested_field()
+    bad = bad + t9_array_elements()
+    if bad == 0 {
+        println("AGGREGATE_COPY_VARIANTS_OK")
+        return 0
+    }
+    print("FAILED ")
+    print(bad)
+    print("\n")
+    1
+}
