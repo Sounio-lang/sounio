@@ -9,3 +9,9 @@ needs, and five small handlers were proved again in the framed
 `HandlerSpecF` form. Built by `lake build Bootstrap`; no
 `ci.yml` change, so the lean cache contract hash is untouched
 (verified with `scripts/ci/lean_cache_contract.mjs --selftest`).
+The composition now reaches the accept exit: `annval` (annOk), `codewalk`
+(initial walk invariant), the outer `check_word` loop and
+`SporosX1.checker_accepts_from_start` are proved in
+`formal/Bootstrap/SporosX1Comp.lean` and audited in `formal/AxiomReport.lean`
+(axioms: propext, Classical.choice, Quot.sound). Refusal direction and the
+parse/decode phase remain open.

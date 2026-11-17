@@ -5827,4 +5827,59 @@ theorem checker_accepts {im : Nat → Option (Ins × Nat)}
       (by simp) s hs
 
 
+/-- Accept direction against `Sporos.checkProg`, via the single-pass
+equivalence `checkProg1_eq`. -/
+theorem checker_accepts_checkProg {im : Nat → Option (Ins × Nat)}
+    (ac : AllCode im) (oc : OuterCode im)
+    {pr : Prog} {tbl sp : Nat} (hsp48 : 48 ≤ sp) (hspW : sp < W)
+    (htblW : tbl + 64 * pr.words.length < W)
+    (htab : ∀ j, j < pr.words.length →
+      sp ≤ tbl + 64 * j ∨ tbl + 64 * j + 64 ≤ sp - 48)
+    (hdisjEff48 : aEff + 114 ≤ sp - 48 ∨ sp ≤ aEff)
+    (hchk : Sporos.checkProg pr = true) :
+    ∀ s, OuterSt pr tbl sp pr.words s →
+      ∃ k, run im k (Out.ok s) = Out.exit 0 :=
+  checker_accepts ac oc hsp48 hspW htblW htab hdisjEff48
+    (by rw [Sporos.checkProg1_eq]; exact hchk)
+
+/-- From `check_start`: cursor and count are set from the table
+registers, then the outer loop runs to the accept exit. -/
+theorem checker_accepts_from_start {im : Nat → Option (Ins × Nat)}
+    (ac : AllCode im) (oc : OuterCode im)
+    {pr : Prog} {tbl sp : Nat} (hsp48 : 48 ≤ sp) (hspW : sp < W)
+    (htblW : tbl + 64 * pr.words.length < W)
+    (htab : ∀ j, j < pr.words.length →
+      sp ≤ tbl + 64 * j ∨ tbl + 64 * j + 64 ≤ sp - 48)
+    (hdisjEff48 : aEff + 114 ≤ sp - 48 ∨ sp ≤ aEff)
+    (hchk : Sporos.checkProg pr = true) :
+    ∀ s, s.rip = aCheckStart → s.reg 14 = some tbl →
+      s.reg 13 = some pr.words.length → s.reg 4 = some sp →
+      16 ≤ s.regs.length → RegsOk s → StackRoom s 6 → EffTable s →
+      WordTab pr tbl sp s →
+      ∃ k, run im k (Out.ok s) = Out.exit 0 := by
+  intro s hrip hr14 hr13 hr4 h16 hregs hroom heff htabS
+  obtain ⟨k1, s1, hrun1, hs1rip, hs1r7, hs1r5, gb1, hs1mem, hlen1⟩ :=
+    CheckStart_triple oc s hrip hr14 hr13
+  have hs1 : OuterSt pr tbl sp pr.words s1 := by
+    refine ⟨hs1rip, hs1r5, by simpa using hs1r7,
+      by rw [gb1 13 (by decide) (by decide)]; exact hr13,
+      by rw [gb1 14 (by decide) (by decide)]; exact hr14,
+      by rw [gb1 4 (by decide) (by decide)]; exact hr4, by omega,
+      run_regs_ok hrun1 hregs,
+      StackRoom_of_mem hs1mem (by
+        rw [gb1 4 (by decide) (by decide)]) hroom,
+      by
+        intro q
+        rw [hs1mem]; exact heff q,
+      by
+        apply WordTab_of_frame htabS htab
+        intro x n _
+        rw [hs1mem]⟩
+  obtain ⟨k2, hrun2⟩ := checker_accepts_checkProg ac oc hsp48 hspW htblW htab
+    hdisjEff48 hchk s1 hs1
+  exact ⟨k1 + k2, by
+    rw [run_add im k1 k2, hrun1]
+    exact hrun2⟩
+
+
 end SporosX1
