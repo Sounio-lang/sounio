@@ -9,20 +9,15 @@ purpose: the point of the file is to make the remaining subgoals
 before more proof work is invested in them.  Do not import this file
 from a registered module until the sorries are gone.
 
-OPEN REVIEW POINT (oracle existence): `OracleAdmits` and
-`¬ HitsNomem` are whole-run hypotheses, so the target needs a
-witness lemma exhibiting an oracle that meets them.  As stated,
-`Stage1InitOk` does not bound `argv0.length`; a stack region can
-therefore fill essentially all of `[phVaddr + phMemsz, 2^47)`,
-leaving no legal placement for a file region that must grow to
-`f.length` (take `f.length = 2^40`).  For such an initial state no
-oracle can satisfy both hypotheses: every oracle either refuses a
-growth `mremap` (so `HitsNomem` holds) or makes `X86Env.place` fail
-(so `OracleLegalAt` fails).  The unconditional existence lemma
-therefore needs one of: a bounded-stack/free-arena clause in
-`Stage1InitOk`, or a loader-prefix reachability invariant strong
-enough to place each allocation.  This is flagged here for review
-rather than silently assumed.
+ORACLE EXISTENCE: `OracleAdmits` and `¬ HitsNomem` are whole-run
+hypotheses of the main targets, which are correct as they stand
+(without room, a legal oracle refuses memory and the exit-2 target
+applies).  The non-vacuity witness is therefore a separate lemma,
+`stage1_oracle_exists_target` below, under an explicit `Room`
+hypothesis: a free interval of `stage1Mf f` bytes.  `Stage1InitOk`
+and the main statements are unchanged.  What that lemma still
+needs is the loader-prefix invariant at the four `mmap`/`mremap`
+sites.
 -/
 import Bootstrap.SporosX1Image
 
@@ -133,6 +128,92 @@ theorem kern_count_oracle_drop (k : Kern) (want avail : Nat) :
              unfold Kern.count
              simp only [hnext]
              split <;> dsimp only [] <;> exact hd)
+
+/-! ### Room, `M f`, and the witness oracle
+
+With the `nwords * 20 ≤ remaining` refusal now in the hex, every
+allocation size is bounded by the file length: the file buffer's
+final capacity is at most `65536 + 2 * f.length`, the words table is
+`64 * nwords ≤ 4 * f.length`, and the lengths scratch is `f.length`.
+`stage1Mf` is the sum of those three page-rounded bounds.  `Room`
+asks for one free interval of that size; `stage1Oracle` places the
+file buffer (initial `mmap` and every growth `mremap`, reusing the
+same base after the model erases the old region), then the table,
+then the scratch, at successive sub-bases of that interval. -/
+
+/-- Page-rounded byte bound for the file buffer at final capacity. -/
+def arenaFileBytes (f : List Nat) : Nat :=
+  X86Env.pages (65536 + 2 * f.length)
+
+/-- Page-rounded byte bound for the words table. -/
+def arenaTableBytes (f : List Nat) : Nat :=
+  X86Env.pages (4 * f.length)
+
+/-- Page-rounded byte bound for the lengths scratch. -/
+def arenaScratchBytes (f : List Nat) : Nat :=
+  X86Env.pages f.length
+
+/-- `M f`: bytes of address space the witness oracle needs, as an
+explicit function of the file size. -/
+def stage1Mf (f : List Nat) : Nat :=
+  arenaFileBytes f + arenaTableBytes f + arenaScratchBytes f
+
+/-- There is a free, page-aligned interval of `stage1Mf f` bytes
+below `2^47`, disjoint from the initial code and stack regions. -/
+def Room (f path argv0 : List Nat) (top : Nat) : Prop :=
+  ∃ A, A % page = 0 ∧ 0 < A ∧ A + stage1Mf f ≤ 2 ^ 47 ∧
+    X86Env.Mem.free (stage1Init f path argv0 [] [] top).mem A
+      (stage1Mf f) = true
+
+/-- Number of loader growth `mremap`s for a file of length `L`:
+the capacity doubles from 64 KiB until it strictly exceeds `L`
+(the loader grows when a read exactly fills the region). -/
+def stage1Growths (L : Nat) : Nat :=
+  if L < 65536 then 0 else Nat.log2 (L / 65536) + 1
+
+/-- The witness oracle: the file base repeated for the initial
+`mmap` and each growth `mremap`, then the table and scratch bases.
+No `nomem`, and no counts (reads therefore always return in full
+and do not consume an entry). -/
+def stage1Oracle (f : List Nat) (A : Nat) : List Choice :=
+  List.replicate (stage1Growths f.length + 1) (.at A) ++
+    [.at (A + arenaFileBytes f),
+     .at (A + (arenaFileBytes f + arenaTableBytes f))]
+
+/-- `stage1Mf` is linear in the file length, with an explicit
+constant: at most `65536 + 8 * (f.length + 4096)` bytes. -/
+theorem stage1Mf_le (f : List Nat) :
+    stage1Mf f ≤ 65536 + 8 * (f.length + 4096) := by
+  have key : ∀ n : Nat, X86Env.pages n ≤ n + 4095 := by
+    intro n
+    unfold X86Env.pages
+    exact Nat.div_mul_le_self _ _
+  have h1 := key (65536 + 2 * f.length)
+  have h2 := key (4 * f.length)
+  have h3 := key f.length
+  unfold stage1Mf arenaFileBytes arenaTableBytes arenaScratchBytes
+  omega
+
+/-- The witness oracle never refuses memory: every entry is a
+placement. -/
+theorem stage1Oracle_no_nomem {f : List Nat} {A : Nat} {c : Choice}
+    (hc : c ∈ stage1Oracle f A) : c ≠ .nomem := by
+  simp [stage1Oracle] at hc
+  rcases hc with ⟨-, rfl⟩ | rfl | rfl <;> simp
+
+/-- EXISTENCE TARGET: with room, some oracle makes the final
+theorem non-vacuous.  The witness is `stage1Oracle f A` for the
+`A` given by `Room`.  What remains is the loader-prefix invariant:
+at each of the four `mmap`/`mremap` sites, the argument and region
+shapes that make that placement legal, and that no other memory
+syscall is reachable afterwards. -/
+theorem stage1_oracle_exists_target
+    (f path argv0 stdin : List Nat) (top : Nat)
+    (hinit : Stage1InitOk f path argv0 top)
+    (hsize : f.length ≤ 2 ^ 40) (hroom : Room f path argv0 top) :
+    ∃ oracle, OracleAdmits (stage1Init f path argv0 stdin oracle top) ∧
+      ¬ HitsNomem (stage1Init f path argv0 stdin oracle top) := by
+  sorry
 
 /-- A PROVISIONAL explicit step bound as a function of the file size.
 The cubic term is a placeholder shape (walk instructions times
