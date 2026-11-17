@@ -12376,6 +12376,15 @@ fn nc_core_load_call_arg_into(nc: &! NativeCompiler, func: &IrFunction, instr_in
         }
         return false
     }
+    let apr = nc_promo_reg_of(arg)
+    if apr >= 8 && preg < 8 {
+        // mov preg, r8..r11 (promotion only admits call args when argc <= 4, so
+        // preg is rdi/rsi/rdx/rcx and never overwrites a promoted register)
+        nc_emit_byte(nc, 0x49)
+        nc_emit_byte(nc, 0x8b)
+        nc_emit_byte(nc, 0xc0 | (preg * 8) | (apr - 8))
+        return true
+    }
     nc_emit_load_rbp_disp32_reg(nc, preg, ir_slot_offset(arg))
     true
 }
@@ -13116,12 +13125,16 @@ fn nc_promo_analyze(func: &IrFunction) with Mut, Panic, Div {
         if op == IrOpcode::IrCall {
             nc_promo_poison(IR_A_SRC1[at as usize])
             nc_promo_poison(IR_A_SRC2[at as usize])
-            nc_promo_poison(IR_A_DST[at as usize])
+            // With <= 4 register arguments (rdi, rsi, rdx, rcx) the arguments are
+            // read before the call and the result written after it, so a vreg may
+            // end its span at the call (argument) or start it there (result).
+            let ac = IR_A_ARG_COUNT[at as usize]
             var ak: i64 = 0
-            while ak < IR_A_ARG_COUNT[at as usize] {
-                nc_promo_poison(ir_arena_arg_at(at, ak))
+            while ak < ac {
+                if ac <= 4 && ir_arena_arg_at(at, ak) >= 0 { nc_promo_note(ir_arena_arg_at(at, ak), i) } else { nc_promo_poison(ir_arena_arg_at(at, ak)) }
                 ak = ak + 1
             }
+            if ac <= 4 && IR_A_DST[at as usize] >= 0 { nc_promo_note(IR_A_DST[at as usize], i) } else { nc_promo_poison(IR_A_DST[at as usize]) }
         } else if !nc_promo_op_is_plain(op) {
             if str_eq(read_env("SOUNIO_PROMO_DEBUG"), "1") {
                 print("[promo] reject fn: op=")
@@ -13207,7 +13220,7 @@ fn nc_promo_analyze(func: &IrFunction) with Mut, Panic, Div {
         if (IR_A_OP[cat as usize] as IrOpcode) == IrOpcode::IrCall || NC_PRO_BARRIER[c as usize] == 1 {
             var v2: i64 = 0
             while v2 < 256 {
-                if NC_PRO_CNT[v2 as usize] > 0 && NC_PRO_FIRST[v2 as usize] <= c && NC_PRO_LAST[v2 as usize] >= c { NC_PRO_BAD[v2 as usize] = 1 }
+                if NC_PRO_CNT[v2 as usize] > 0 && NC_PRO_FIRST[v2 as usize] < c && NC_PRO_LAST[v2 as usize] > c { NC_PRO_BAD[v2 as usize] = 1 }
                 v2 = v2 + 1
             }
         }
