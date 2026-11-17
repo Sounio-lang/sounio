@@ -13,6 +13,7 @@ from pathlib import Path
 
 from gpu_device_key import marker_name
 from proposals import phase_a, phase_b
+from run_inputs import require_run_inputs, stage_verified_inputs
 
 HERE = Path(__file__).resolve().parent
 PARTITION = "gpu-orangefs"
@@ -23,7 +24,8 @@ DEFAULT_MINUTES = 30
 MEM_MAX_GIB = 64
 SIF = "/scratch/pireus/images/pireus-r740-amd64.sif"
 STAGED = (
-    "r740_observe.py", "gpu_device_key.py", "paired_timing.py", "run_in_container_r740.sh",
+    "r740_observe.py", "gpu_device_key.py", "paired_timing.py", "run_inputs.py",
+    "run_in_container_r740.sh",
 )
 GPUS = (
     {"gres": "gpu:a5000:1", "sm": 86, "arch": "sm_86", "name": "rtx-a5000"},
@@ -243,16 +245,20 @@ def run_steps(root, steps, runner):
 
 
 def execute(scratch, name, runner, mem=DEFAULT_MEM, minutes=DEFAULT_MINUTES,
-            image_lock=None, rule_lock=None):
+            image_lock=None, rule_lock=None, inputs=None):
     image_lock = image_lock if image_lock is not None else load_json(HERE / "r740-runtime-lock.json")
     rule_lock = rule_lock if rule_lock is not None else load_json(HERE / "arch_gain_rule.lock.json")
     assert_rule_frozen(rule_lock)
     token = image_token(image_lock)
     if token == "UNPINNED":
         raise RuntimeError("r740 amd64 image is not pinned; refusing to submit")
+    if inputs is None:
+        raise RuntimeError("r740 run inputs are missing; refusing to submit")
+    require_run_inputs(inputs)
     plan = build_plan(scratch, name, mem, minutes, token)
     root = allocate_run(scratch, name)
     stage_into(root)
+    stage_verified_inputs(root, inputs)
     return run_steps(root, plan["steps"], runner)
 
 
@@ -288,12 +294,13 @@ def main():
     parser.add_argument("--minutes", type=int, default=DEFAULT_MINUTES)
     parser.add_argument("--scratch", default=DEFAULT_SCRATCH)
     parser.add_argument("--name", required=True)
+    parser.add_argument("--inputs", type=Path)
     args = parser.parse_args()
     lock = load_json(HERE / "r740-runtime-lock.json")
     rule = load_json(HERE / "arch_gain_rule.lock.json")
     assert_rule_frozen(rule)
     if args.command == "run":
-        execute(args.scratch, args.name, subprocess_runner, args.mem, args.minutes)
+        execute(args.scratch, args.name, subprocess_runner, args.mem, args.minutes, inputs=args.inputs)
         return
     plan = build_plan(args.scratch, args.name, args.mem, args.minutes, image_token(lock))
     plan["image_status"] = lock["status"]

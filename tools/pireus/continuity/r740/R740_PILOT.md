@@ -19,6 +19,8 @@ Observation directories are `observed-gpu-<uuid>-sm<N>` and `timings-gpu-<uuid>-
 
 `r740_launch.py run` calls `srun`. It does not call `sbatch`. The sbatch text below is the same allocation with `--no-requeue`, rendered for review and marked `submitted: false`. There is no retry loop. A failed stage is recorded and a second call refuses it. A second execution does not reuse the run directory.
 
+`run --inputs BUNDLE` copies `gpu-manifest.json`, `benchmark-manifest.json`, `numeric-fixtures.jsonl` and every PTX those manifests name into the fresh run directory, after the SHA-256 of each file matches the manifest. A missing file, a mismatched digest, a path that leaves the bundle, or a missing `--inputs` refuses before `srun`. The observer reads those same paths and repeats the same checks before it touches CUDA. The amd64 image and its Apptainer prefix are still an external gap.
+
 Today `run` raises `r740 amd64 image is not pinned; refusing to submit` before `srun`, because `derived_sif_sha256` is null. The lines below are the argv it builds for review name `20261117T120000Z-1-0123456789abcdef`, scratch `/scratch/pireus/r740`, `--mem=16G` (the default; 64G is the ceiling), `--time=30`. `UNPINNED` is replaced by the 64-hex digest only after the lock is pinned. Memory is always passed. The step is not `--exclusive`.
 
 Probe A5000, then probe Quadro, then timing A5000, then timing Quadro:

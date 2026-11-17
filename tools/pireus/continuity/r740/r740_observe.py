@@ -11,6 +11,7 @@ import torch
 from gpu_device_key import identity_record, marker_name, observation_dir
 from gpu_probe import Driver, hex_frame
 from paired_timing import BLOCKS, GRAPH_WARMUP, REPLAYS, VECTORS, row
+from run_inputs import require_probe_inputs, require_timing_inputs
 
 
 def visible_identity(expect_sm):
@@ -37,10 +38,7 @@ def write_marker(root, phase, identity, job):
 
 
 def probe(root, identity, job):
-    manifest = json.loads((root / "gpu-manifest.json").read_text())
-    fixtures = (root / "numeric-fixtures.jsonl").read_bytes()
-    if hashlib.sha256(fixtures).hexdigest() != manifest["fixtures_sha256"]:
-        raise ValueError("fixture digest")
+    manifest, fixtures, _digest, _ptx = require_probe_inputs(root)
     rows = [json.loads(line) for line in fixtures.splitlines()]
     arrays = {key: np.array([r[key] for r in rows], dtype=np.int64) for key in ("a_bits", "b_bits", "output_bits")}
     driver = Driver()
@@ -80,14 +78,9 @@ def probe(root, identity, job):
 
 
 def timing(root, identity, job):
-    manifest = json.loads((root / "benchmark-manifest.json").read_text())
-    if manifest["method"] != "paired-median-ppm-bootstrap4000-v1":
-        raise ValueError("method")
+    manifest, fixtures, _digest, _ptx = require_timing_inputs(root)
     if manifest["blocks"] != BLOCKS or manifest["vectors"] != VECTORS or manifest["replays"] != REPLAYS:
         raise ValueError("protocol")
-    fixtures = (root / "numeric-fixtures.jsonl").read_bytes()
-    if hashlib.sha256(fixtures).hexdigest() != manifest["fixtures_sha256"]:
-        raise ValueError("fixture digest")
     rows = [json.loads(line) for line in fixtures.splitlines()][256:288]
     inputs = {k: np.tile(np.array([r[k] for r in rows], dtype=np.int64), (512, 1)).view(np.float64)
               for k in ("a_bits", "b_bits")}

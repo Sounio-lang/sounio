@@ -17,6 +17,7 @@ import gpu_device_key as keys
 import paired_timing
 import proposals
 import r740_launch as launch
+import run_inputs
 
 REVIEW_NAME = "20261117T120000Z-1-0123456789abcdef"
 SM121_KIND1 = "c55daadb94b2050ca88047316f5f0317ccbe3fe48744b26dae13ad7afed659b3"
@@ -68,6 +69,43 @@ def raw(value):
 
 def series(candidate, control=1000000):
     return "".join(f"{i} {i % 2} {candidate} {control}\n" for i in range(30))
+
+
+def write_inputs(directory):
+    root = Path(directory)
+    root.mkdir(parents=True, exist_ok=True)
+    files = {
+        "controls/direct.ptx": b".version 9.0\n.target sm_86\n// direct\n",
+        "controls/shuffle.ptx": b".version 9.0\n.target sm_86\n// shuffle\n",
+        "000.ptx": b".version 9.0\n.target sm_75\n// candidate\n",
+    }
+    for name, payload in files.items():
+        path = root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(payload)
+    fixtures = b'{"a_bits":[0],"b_bits":[0],"output_bits":[0]}\n'
+    (root / "numeric-fixtures.jsonl").write_bytes(fixtures)
+    fixture_sha = hashlib.sha256(fixtures).hexdigest()
+
+    def entry(name, path):
+        return {"id": name, "layout": 0, "ptx": path, "ptx_sha256": hashlib.sha256(files[path]).hexdigest()}
+
+    candidates = [
+        entry("direct", "controls/direct.ptx"),
+        entry("shuffle", "controls/shuffle.ptx"),
+        entry("000", "000.ptx"),
+    ]
+    gpu = {"schema": 1, "fixtures_sha256": fixture_sha, "candidates": candidates}
+    bench = {
+        "method": "paired-median-ppm-bootstrap4000-v1",
+        "blocks": 30, "vectors": 16384, "replays": 32,
+        "fixtures_sha256": fixture_sha,
+        "controls": candidates[:2],
+        "candidates": candidates[2:],
+    }
+    (root / "gpu-manifest.json").write_text(json.dumps(gpu) + "\n")
+    (root / "benchmark-manifest.json").write_text(json.dumps(bench) + "\n")
+    return root
 
 
 class Keys(unittest.TestCase):
@@ -203,6 +241,7 @@ class Launcher(unittest.TestCase):
     def test_pinned_run_uses_one_directory_and_does_not_resubmit(self):
         image = {"status": "PINNED", "derived_sif_sha256": "ab" * 32}
         with tempfile.TemporaryDirectory() as directory:
+            bundle = write_inputs(Path(directory) / "bundle")
             calls = []
 
             def ok(argv):
@@ -213,14 +252,14 @@ class Launcher(unittest.TestCase):
                 marker.write_text("{}\n")
                 return 0
 
-            root = launch.execute(directory, REVIEW_NAME, ok, image_lock=image)
+            root = launch.execute(directory, REVIEW_NAME, ok, image_lock=image, inputs=bundle)
             self.assertEqual(len(calls), 4)
             self.assertEqual(calls[0][calls[0].index("--gres=gpu:a5000:1")], "--gres=gpu:a5000:1")
             self.assertIn("--gres=gpu:quadro_rtx_8000:1", calls[1])
             self.assertIn("ab" * 32, calls[0][-1])
             self.assertEqual((root / "bin" / "gpu_probe.py").read_bytes(), (CONTINUITY / "gpu_probe.py").read_bytes())
             with self.assertRaises(FileExistsError):
-                launch.execute(directory, REVIEW_NAME, ok, image_lock=image)
+                launch.execute(directory, REVIEW_NAME, ok, image_lock=image, inputs=bundle)
 
             failed = []
 
@@ -230,7 +269,7 @@ class Launcher(unittest.TestCase):
 
             name = "20261117T120001Z-2-fedcba9876543210"
             with self.assertRaises(RuntimeError):
-                launch.execute(directory, name, fail, image_lock=image)
+                launch.execute(directory, name, fail, image_lock=image, inputs=bundle)
             self.assertEqual(len(failed), 1)
             again = []
             plan = launch.build_plan(directory, name, image_token_value=image["derived_sif_sha256"])
@@ -238,6 +277,71 @@ class Launcher(unittest.TestCase):
                 launch.run_steps(Path(directory) / "runs" / name, plan["steps"], lambda argv: again.append(argv) or 0)
             self.assertIn("resubmit", str(caught.exception))
             self.assertEqual(again, [])
+
+    def test_staged_inputs_are_readable_before_srun_and_a_mismatch_refuses(self):
+        image = {"status": "PINNED", "derived_sif_sha256": "cd" * 32}
+        with tempfile.TemporaryDirectory() as directory:
+            bundle = write_inputs(Path(directory) / "bundle")
+            seen = {}
+
+            def inspect(argv):
+                root = Path(directory) / "runs" / REVIEW_NAME
+                probe_manifest, probe_fixtures, probe_digest, probe_ptx = run_inputs.require_probe_inputs(root)
+                timing_manifest, timing_fixtures, timing_digest, timing_ptx = run_inputs.require_timing_inputs(root)
+                self.assertEqual(probe_fixtures, (bundle / "numeric-fixtures.jsonl").read_bytes())
+                self.assertEqual(probe_fixtures, timing_fixtures)
+                self.assertEqual(probe_digest, timing_digest)
+                self.assertEqual(probe_digest, probe_manifest["fixtures_sha256"])
+                self.assertEqual(timing_digest, timing_manifest["fixtures_sha256"])
+                referenced = probe_ptx | timing_ptx
+                self.assertEqual(set(referenced), {
+                    "controls/direct.ptx", "controls/shuffle.ptx", "000.ptx"})
+                for name, digest in referenced.items():
+                    payload = (root / name).read_bytes()
+                    self.assertEqual(hashlib.sha256(payload).hexdigest(), digest)
+                    self.assertEqual(payload, (bundle / name).read_bytes())
+                seen["argv"] = argv
+                plan = launch.build_plan(directory, REVIEW_NAME, image_token_value=image["derived_sif_sha256"])
+                for step in plan["steps"]:
+                    marker = Path(step["marker"])
+                    marker.parent.mkdir(parents=True, exist_ok=True)
+                    marker.write_text("{}\n")
+                return 0
+
+            root = launch.execute(directory, REVIEW_NAME, inspect, image_lock=image, inputs=bundle)
+            self.assertIn("argv", seen)
+            self.assertTrue((root / "input-inventory.json").is_file())
+            observe = (HERE / "r740_observe.py").read_text()
+            probe_body = observe.split("def probe", 1)[1].split("def timing", 1)[0]
+            timing_body = observe.split("def timing", 1)[1].split("def main", 1)[0]
+            self.assertLess(probe_body.index("require_probe_inputs"), probe_body.index("Driver()"))
+            self.assertLess(timing_body.index("require_timing_inputs"), timing_body.index("Driver()"))
+
+            calls = []
+
+            def boom(argv):
+                calls.append(argv)
+                raise AssertionError("submitted")
+
+            missing = write_inputs(Path(directory) / "missing")
+            (missing / "000.ptx").unlink()
+            with self.assertRaises(ValueError):
+                launch.execute(directory, "20261117T120002Z-3-0011223344556677", boom,
+                               image_lock=image, inputs=missing)
+            self.assertEqual(calls, [])
+            self.assertFalse((Path(directory) / "runs" / "20261117T120002Z-3-0011223344556677").exists())
+
+            mismatched = write_inputs(Path(directory) / "mismatched")
+            (mismatched / "000.ptx").write_bytes(b"not the recorded ptx\n")
+            with self.assertRaises(ValueError):
+                launch.execute(directory, "20261117T120003Z-4-0011223344556677", boom,
+                               image_lock=image, inputs=mismatched)
+            self.assertEqual(calls, [])
+
+            with self.assertRaises(RuntimeError) as caught:
+                launch.execute(directory, "20261117T120004Z-5-0011223344556677", boom, image_lock=image)
+            self.assertIn("inputs are missing", str(caught.exception))
+            self.assertEqual(calls, [])
 
     def test_cross_architecture_report_does_not_grant_a_gain(self):
         report = launch.descriptive_report([
