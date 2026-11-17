@@ -602,6 +602,108 @@ theorem syscall_mremap_ret_of_place {k : Kern} {m : Mem}
     rw [hplace]
     simp [hgrow]
 
+/-! ### Placement infrastructure for the loader-prefix invariant
+
+The four allocation sites each need three facts: the placement the
+witness oracle offers is legal in the memory reached at that site
+(`place_at`, fed by `Mem.free` facts transported through appends,
+subintervals and erasure), the reads in between do not consume a
+witness entry (`kern_count_at_head`), and those two assemble into
+`OracleLegalAt` at an mmap/mremap-shaped state
+(`oracleLegalAt_mmap`, `oracleLegalAt_mremap`).  What then remains
+for `stage1_oracle_exists_target` is reachability: at each site,
+the register/region shapes below and the drop count of the witness. -/
+
+theorem place_at {m : Mem} {a n : Nat} (ha : a % page = 0)
+    (hpos : 0 < a) (hbound : a + n ≤ 2 ^ 47) (hfree : m.free a n = true) :
+    X86Env.place m (some (.at a)) n = some (some a) := by
+  simp [X86Env.place, ha, hpos, hbound, hfree]
+
+theorem free_sub {m : Mem} {A n1 n2 : Nat}
+    (h : m.free A (n1 + n2) = true) : m.free (A + n1) n2 = true := by
+  rw [Mem.free, List.all_eq_true]
+  intro r hr
+  rcases X86Env.free_spec h r hr with h1 | h1 <;>
+    simp only [Bool.or_eq_true, decide_eq_true_eq] <;> omega
+
+theorem free_prefix {m : Mem} {A n1 n2 : Nat}
+    (h : m.free A (n1 + n2) = true) : m.free A n1 = true := by
+  rw [Mem.free, List.all_eq_true]
+  intro r hr
+  rcases X86Env.free_spec h r hr with h1 | h1 <;>
+    simp only [Bool.or_eq_true, decide_eq_true_eq] <;> omega
+
+theorem free_append {m : Mem} {a n : Nat} {r : Region}
+    (h : m.free a n = true) (hdisj : a + n ≤ r.base ∨ r.hi ≤ a) :
+    Mem.free (m ++ [r]) a n = true := by
+  rw [Mem.free, List.all_eq_true] at h ⊢
+  intro s hs
+  rcases List.mem_append.1 hs with hs | hs
+  · exact h s hs
+  · simp at hs
+    subst hs
+    simp only [Bool.or_eq_true, decide_eq_true_eq]
+    exact hdisj
+
+theorem free_eraseIdx {m : Mem} {a n i : Nat}
+    (h : m.free a n = true) : Mem.free (m.eraseIdx i) a n = true := by
+  rw [Mem.free, List.all_eq_true] at h ⊢
+  exact fun s hs => h s (List.mem_of_mem_eraseIdx hs)
+
+/-- A read/write count never consumes a placement entry: with an
+`at` head, `Kern.count` moves the full amount and keeps the kernel. -/
+theorem kern_count_at_head {k : Kern} {A want avail : Nat}
+    (h : k.oracle.head? = some (.at A)) :
+    Kern.count k want avail = (min want avail, k) := by
+  cases ho : k.oracle with
+  | nil => simp [ho] at h
+  | cons c rest =>
+    simp [ho] at h
+    subst h
+    simp [Kern.count, Kern.next, ho]
+
+/-- Every entry of the witness oracle is a placement. -/
+theorem stage1Oracle_mem_at {f : List Nat} {A : Nat} {c : Choice}
+    (hc : c ∈ stage1Oracle f A) : ∃ x, c = .at x := by
+  simp [stage1Oracle] at hc
+  rcases hc with ⟨-, rfl⟩ | rfl | rfl <;> exact ⟨_, rfl⟩
+
+theorem oracleLegalAt_mmap {s : X86Int.St} {B : Nat}
+    (hrip : stage1Im s.rip = some (.syscall, 2))
+    (h0 : s.reg 0 = some 9) (h7 : s.reg 7 = some 0)
+    {a2 : Nat} (h6 : s.reg 6 = some a2) (h2 : s.reg 2 = some PROT_RW)
+    (h10 : s.reg 10 = some MAP_PRIVATE_ANON)
+    (h8 : s.reg 8 = some (W - 1)) (h9 : s.reg 9 = some 0)
+    (ha2 : a2 ≠ 0) (hhead : s.k.oracle.head? = some (.at B))
+    (hplace : X86Env.place s.mem (some (.at B)) (X86Env.pages a2) =
+      some (some B)) :
+    OracleLegalAt s := by
+  intro _hmem
+  obtain ⟨rax, k', m', hsc⟩ :=
+    syscall_mmap_ret_of_place ha2 hhead hplace
+  exact ⟨9, 0, a2, PROT_RW, MAP_PRIVATE_ANON, W - 1, 0, rax, k', m',
+    h0, h7, h6, h2, h10, h8, h9, hsc⟩
+
+theorem oracleLegalAt_mremap {s : X86Int.St} {B : Nat}
+    (hrip : stage1Im s.rip = some (.syscall, 2))
+    (h0 : s.reg 0 = some 25)
+    {a1 a2 a3 : Nat} (h7 : s.reg 7 = some a1) (h6 : s.reg 6 = some a2)
+    (h2 : s.reg 2 = some a3) (h10 : s.reg 10 = some MREMAP_MAYMOVE)
+    (h8 : s.reg 8 = some 0) (h9 : s.reg 9 = some 0)
+    {i : Nat} {r : Region}
+    (hfind : s.mem.find a1 0 = some (i, r))
+    (hbase : r.base = a1) (hlen : r.data.length = X86Env.pages a2)
+    (hrw : r.rw = true) (hgrow : ¬ X86Env.pages a3 < r.data.length)
+    (hhead : s.k.oracle.head? = some (.at B))
+    (hplace : X86Env.place (s.mem.eraseIdx i) (some (.at B))
+      (X86Env.pages a3) = some (some B)) :
+    OracleLegalAt s := by
+  intro _hmem
+  obtain ⟨rax, k', m', hsc⟩ :=
+    syscall_mremap_ret_of_place hfind hbase hlen hrw hgrow hhead hplace
+  exact ⟨25, a1, a2, a3, MREMAP_MAYMOVE, 0, 0, rax, k', m',
+    h0, h7, h6, h2, h10, h8, h9, hsc⟩
+
 /-- EXISTENCE TARGET: with room, some oracle makes the final
 theorem non-vacuous.  The witness is `stage1Oracle f A` for the
 `A` given by `Room`.  What remains is the loader-prefix invariant:
