@@ -11388,4 +11388,9994 @@ theorem None_triple {im : Nat → Option (Ins × Nat)} {entry walk l32 annl : Na
           hg1mem, ← hf9mem]
         exact hframe9 x m hx
 
+
+
+/-- Decode facts for `walk_top` and its dispatch chain. The 13
+special opcodes sit in 14-byte compare blocks from `entry + 28`. -/
+structure WalkCode (im : Nat → Option (Ins × Nat))
+    (entry done prim lit str pick tor fromr rfetch locget locset jmp jz call ret : Nat) : Prop where
+  d0 : im entry = some (.ld 0 7 24, 4)
+  d1 : im (entry + 4) = some (.cmp 1 0, 3)
+  d2 : im (entry + 7) = some (.jcc 2 (entry + 14), 2)
+  d3 : im (entry + 9) = some (.jmp done, 5)
+  d4 : im (entry + 14) = some (.ld8 0 6 0, 3)
+  d5 : im (entry + 17) = some (.cmpI 0 57, 4)
+  d6 : im (entry + 21) = some (.jcc 3 (entry + 28), 2)
+  d7 : im (entry + 23) = some (.jmp prim, 5)
+  clit : im (entry + 28) = some (.cmpI 0 128, 7)
+  clitj : im (entry + 35) = some (.jcc 5 (entry + 42), 2)
+  clitjmp : im (entry + 37) = some (.jmp lit, 5)
+  cstr : im (entry + 42) = some (.cmpI 0 129, 7)
+  cstrj : im (entry + 49) = some (.jcc 5 (entry + 56), 2)
+  cstrjmp : im (entry + 51) = some (.jmp str, 5)
+  cpick : im (entry + 56) = some (.cmpI 0 130, 7)
+  cpickj : im (entry + 63) = some (.jcc 5 (entry + 70), 2)
+  cpickjmp : im (entry + 65) = some (.jmp pick, 5)
+  ctor : im (entry + 70) = some (.cmpI 0 131, 7)
+  ctorj : im (entry + 77) = some (.jcc 5 (entry + 84), 2)
+  ctorjmp : im (entry + 79) = some (.jmp tor, 5)
+  cfromr : im (entry + 84) = some (.cmpI 0 132, 7)
+  cfromrj : im (entry + 91) = some (.jcc 5 (entry + 98), 2)
+  cfromrjmp : im (entry + 93) = some (.jmp fromr, 5)
+  crfetch : im (entry + 98) = some (.cmpI 0 133, 7)
+  crfetchj : im (entry + 105) = some (.jcc 5 (entry + 112), 2)
+  crfetchjmp : im (entry + 107) = some (.jmp rfetch, 5)
+  clocget : im (entry + 112) = some (.cmpI 0 134, 7)
+  clocgetj : im (entry + 119) = some (.jcc 5 (entry + 126), 2)
+  clocgetjmp : im (entry + 121) = some (.jmp locget, 5)
+  clocset : im (entry + 126) = some (.cmpI 0 135, 7)
+  clocsetj : im (entry + 133) = some (.jcc 5 (entry + 140), 2)
+  clocsetjmp : im (entry + 135) = some (.jmp locset, 5)
+  cjmp : im (entry + 140) = some (.cmpI 0 136, 7)
+  cjmpj : im (entry + 147) = some (.jcc 5 (entry + 154), 2)
+  cjmpjmp : im (entry + 149) = some (.jmp jmp, 5)
+  cjz : im (entry + 154) = some (.cmpI 0 137, 7)
+  cjzj : im (entry + 161) = some (.jcc 5 (entry + 168), 2)
+  cjzjmp : im (entry + 163) = some (.jmp jz, 5)
+  cjnz : im (entry + 168) = some (.cmpI 0 138, 7)
+  cjnzj : im (entry + 175) = some (.jcc 5 (entry + 182), 2)
+  cjnzjmp : im (entry + 177) = some (.jmp jz, 5)
+  ccall : im (entry + 182) = some (.cmpI 0 139, 7)
+  ccallj : im (entry + 189) = some (.jcc 5 (entry + 196), 2)
+  ccalljmp : im (entry + 191) = some (.jmp call, 5)
+  cret : im (entry + 196) = some (.cmpI 0 140, 7)
+  cretj : im (entry + 203) = some (.jcc 5 (entry + 210), 2)
+  cretjmp : im (entry + 205) = some (.jmp ret, 5)
+
+/-- `walk_top` with no instruction left reaches `word_done`. -/
+theorem WalkDone_triple {im : Nat → Option (Ins × Nat)} {entry done prim lit str pick tor fromr rfetch locget locset jmp
+    jz call ret : Nat}
+    (hc : WalkCode im entry done prim lit str pick tor fromr rfetch locget locset jmp jz call ret)
+    (hentry : entry + 215 < W) :
+    ∀ (h : Height) (c i w sp nc : Nat), w + 56 ≤ W → (hdone : ¬ i < nc) →
+    ∀ s, s.rip = entry → s.reg 8 = some h.d → s.reg 9 = some h.a → s.reg 6 = some c →
+      s.reg 4 = some sp → s.reg 7 = some w → s.reg 1 = some i → 16 ≤ s.regs.length →
+      rd64 s.mem (w + 24) = some nc → 
+      ∃ k s', run im k (Out.ok s) = Out.ok s' ∧ s'.rip = done ∧ s'.reg 0 = some nc ∧
+        s'.reg 1 = some i ∧ s'.reg 6 = some c ∧ s'.reg 7 = some w ∧
+        s'.reg 8 = some h.d ∧ s'.reg 9 = some h.a ∧ s'.reg 4 = some sp ∧
+        (∀ q, q ≠ 0 → s'.reg q = s.reg q) ∧ s'.mem = s.mem := by
+  intro h c i w sp nc hw56 hdone s hrip hr8 hr9 hr6 hr4 hr7 hr1 hlen hfc 
+
+  have hea24 : ea w 24 = w + 24 := Nat.mod_eq_of_lt (by omega)
+  have h57 : 57 % W = 57 := Nat.mod_eq_of_lt (by unfold W; decide)
+  have e1 : X86Int.step im s = .ok { s.set 0 (some nc) with rip := s.rip + 4 } :=
+    step_ld (by rw [hrip]; exact hc.d0) hr7 (by rw [hea24]; exact hfc)
+  obtain ⟨w1, hw1⟩ : ∃ u : X86Int.St, u = { s.set 0 (some nc) with rip := s.rip + 4 } := ⟨_, rfl⟩
+  have hw1rip : w1.rip = entry + 4 := by rw [hw1]; show s.rip + 4 = entry + 4; rw [hrip]
+  have hw1r0 : w1.reg 0 = some nc := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 0 = some nc
+    rw [reg_set_self (len_of_r9 hr9 (by decide))]
+  have hw1r1 : w1.reg 1 = some i := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 1 = some i
+    rw [reg_set_other (by decide)]; exact hr1
+  have hw1r6 : w1.reg 6 = some c := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 6 = some c
+    rw [reg_set_other (by decide)]; exact hr6
+  have hw1r7 : w1.reg 7 = some w := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 7 = some w
+    rw [reg_set_other (by decide)]; exact hr7
+  have hw1r8 : w1.reg 8 = some h.d := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 8 = some h.d
+    rw [reg_set_other (by decide)]; exact hr8
+  have hw1r9 : w1.reg 9 = some h.a := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 9 = some h.a
+    rw [reg_set_other (by decide)]; exact hr9
+  have hw1r4 : w1.reg 4 = some sp := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 4 = some sp
+    rw [reg_set_other (by decide)]; exact hr4
+  have hw1mem : w1.mem = s.mem := by
+    rw [hw1]
+    show (s.set 0 (some nc)).mem = s.mem
+    rw [mem_set]
+  have gw1 : ∀ q, q ≠ 0 → w1.reg q = s.reg q := by
+    intro q h0
+    rw [hw1]
+    show (s.set 0 (some nc)).reg q = s.reg q
+    rw [reg_set_other h0]
+  have e2 : X86Int.step im w1 = .ok { w1 with fl := (aluF .sub i nc).2, rip := w1.rip + 3 } :=
+    step_cmp (by rw [hw1rip]; exact hc.d1) hw1r1 hw1r0
+  obtain ⟨w2, hw2⟩ : ∃ u : X86Int.St, u = { w1 with fl := (aluF .sub i nc).2, rip := w1.rip + 3 } := ⟨_, rfl⟩
+  have hw2rip : w2.rip = entry + 7 := by rw [hw2]; show w1.rip + 3 = entry + 7; rw [hw1rip]
+
+  have hw2fl : X86Int.cond w2.fl 2 = some false := by
+    have hcf : w2.fl.cf = some false := by
+      rw [hw2]
+      show (aluF .sub i nc).2.cf = some false
+      exact aluF_sub_cf hdone
+    exact cond_cc2 hcf
+
+  have hw2r1 : w2.reg 1 = some i := by rw [hw2]; show w1.reg 1 = some i; exact hw1r1
+  have hw2r0 : w2.reg 0 = some nc := by rw [hw2]; show w1.reg 0 = some nc; exact hw1r0
+  have hw2r6 : w2.reg 6 = some c := by rw [hw2]; show w1.reg 6 = some c; exact hw1r6
+  have hw2r8 : w2.reg 8 = some h.d := by rw [hw2]; show w1.reg 8 = some h.d; exact hw1r8
+  have hw2r9 : w2.reg 9 = some h.a := by rw [hw2]; show w1.reg 9 = some h.a; exact hw1r9
+  have hw2r4 : w2.reg 4 = some sp := by rw [hw2]; show w1.reg 4 = some sp; exact hw1r4
+  have hw2mem : w2.mem = s.mem := by rw [hw2]; show w1.mem = s.mem; exact hw1mem
+  have gw2 : ∀ q, q ≠ 0 → w2.reg q = s.reg q := by
+    intro q h0
+    rw [hw2]; show w1.reg q = s.reg q; exact gw1 q h0
+
+  have e3 : X86Int.step im w2 = .ok { w2 with rip := entry + 9 } := by
+    have hh := step_jcc (im := im) (s := w2) (by rw [hw2rip]; exact hc.d2) hw2fl
+    simpa [hw2rip] using hh
+  obtain ⟨w3, hw3⟩ : ∃ u : X86Int.St, u = { w2 with rip := entry + 9 } := ⟨_, rfl⟩
+  have hw3rip : w3.rip = entry + 9 := by rw [hw3]
+  have e4 : X86Int.step im w3 = .ok { w3 with rip := done } :=
+    step_jmp (by rw [hw3rip]; exact hc.d3)
+  obtain ⟨w4, hw4⟩ : ∃ u : X86Int.St, u = { w3 with rip := done } := ⟨_, rfl⟩
+  have r1 : run im 1 (Out.ok s) = Out.ok w1 := by rw [run_succ_ok im 0 s, e1, ← hw1, run_zero]
+  have r2 : run im 1 (Out.ok w1) = Out.ok w2 := by rw [run_succ_ok im 0 w1, e2, ← hw2, run_zero]
+  have r3 : run im 1 (Out.ok w2) = Out.ok w3 := by rw [run_succ_ok im 0 w2, e3, ← hw3, run_zero]
+  have r4 : run im 1 (Out.ok w3) = Out.ok w4 := by rw [run_succ_ok im 0 w3, e4, ← hw4, run_zero]
+  refine ⟨4, w4, by rw [run_add im 1 3, r1, run_add im 1 2, r2, run_add im 1 1, r3, r4],
+    by rw [hw4], ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
+  · rw [hw4]; show ({ w3 with rip := done }).reg 0 = some nc
+    rw [reg_with_rip]; rw [hw3]; show ({ w2 with rip := entry + 9 }).reg 0 = some nc
+    rw [reg_with_rip]; exact hw2r0
+  · rw [hw4]; show ({ w3 with rip := done }).reg 1 = some i
+    rw [reg_with_rip]; rw [hw3]; show ({ w2 with rip := entry + 9 }).reg 1 = some i
+    rw [reg_with_rip]; exact hw2r1
+  · rw [hw4]; show ({ w3 with rip := done }).reg 6 = some c
+    rw [reg_with_rip]; rw [hw3]; show ({ w2 with rip := entry + 9 }).reg 6 = some c
+    rw [reg_with_rip]; exact hw2r6
+  · rw [hw4]; show ({ w3 with rip := done }).reg 7 = some w
+    rw [reg_with_rip]; rw [hw3]; show ({ w2 with rip := entry + 9 }).reg 7 = some w
+    rw [reg_with_rip, gw2 7 (by decide)]; exact hr7
+  · rw [hw4]; show ({ w3 with rip := done }).reg 8 = some h.d
+    rw [reg_with_rip]; rw [hw3]; show ({ w2 with rip := entry + 9 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hw2r8
+  · rw [hw4]; show ({ w3 with rip := done }).reg 9 = some h.a
+    rw [reg_with_rip]; rw [hw3]; show ({ w2 with rip := entry + 9 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hw2r9
+  · rw [hw4]; show ({ w3 with rip := done }).reg 4 = some sp
+    rw [reg_with_rip]; rw [hw3]; show ({ w2 with rip := entry + 9 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hw2r4
+  · intro q h0
+    rw [hw4]; show ({ w3 with rip := done }).reg q = s.reg q
+    rw [reg_with_rip]; rw [hw3]; show ({ w2 with rip := entry + 9 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gw2 q h0
+  · have h1 : w4.mem = w3.mem := by rw [hw4, mem_with_rip]
+    have h2 : w3.mem = w2.mem := by rw [hw3, mem_with_rip]
+    rw [h1, h2, hw2mem]
+
+/-- `walk_top` with a primitive opcode byte reaches `h_prim`. -/
+theorem WalkPrim_triple {im : Nat → Option (Ins × Nat)} {entry done prim lit str pick tor fromr rfetch locget locset jmp
+    jz call ret : Nat}
+    (hc : WalkCode im entry done prim lit str pick tor fromr rfetch locget locset jmp jz call ret)
+    (hentry : entry + 215 < W) :
+    ∀ (h : Height) (c i w sp nc : Nat), w + 56 ≤ W → (hlt : i < nc) → (hcW : c < W) → (op : Nat) → (hop : op < 57) →
+    ∀ s, s.rip = entry → s.reg 8 = some h.d → s.reg 9 = some h.a → s.reg 6 = some c →
+      s.reg 4 = some sp → s.reg 7 = some w → s.reg 1 = some i → 16 ≤ s.regs.length →
+      rd64 s.mem (w + 24) = some nc → s.mem.rd c = some op →
+      ∃ k s', run im k (Out.ok s) = Out.ok s' ∧ s'.rip = prim ∧ s'.reg 0 = some op ∧
+        s'.reg 1 = some i ∧ s'.reg 6 = some c ∧ s'.reg 7 = some w ∧
+        s'.reg 8 = some h.d ∧ s'.reg 9 = some h.a ∧ s'.reg 4 = some sp ∧
+        (∀ q, q ≠ 0 → s'.reg q = s.reg q) ∧ s'.mem = s.mem := by
+  intro h c i w sp nc hw56 hlt hcW op hop s hrip hr8 hr9 hr6 hr4 hr7 hr1 hlen hfc hbyte
+
+  have hea24 : ea w 24 = w + 24 := Nat.mod_eq_of_lt (by omega)
+  have h57 : 57 % W = 57 := Nat.mod_eq_of_lt (by unfold W; decide)
+  have e1 : X86Int.step im s = .ok { s.set 0 (some nc) with rip := s.rip + 4 } :=
+    step_ld (by rw [hrip]; exact hc.d0) hr7 (by rw [hea24]; exact hfc)
+  obtain ⟨w1, hw1⟩ : ∃ u : X86Int.St, u = { s.set 0 (some nc) with rip := s.rip + 4 } := ⟨_, rfl⟩
+  have hw1rip : w1.rip = entry + 4 := by rw [hw1]; show s.rip + 4 = entry + 4; rw [hrip]
+  have hw1r0 : w1.reg 0 = some nc := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 0 = some nc
+    rw [reg_set_self (len_of_r9 hr9 (by decide))]
+  have hw1r1 : w1.reg 1 = some i := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 1 = some i
+    rw [reg_set_other (by decide)]; exact hr1
+  have hw1r6 : w1.reg 6 = some c := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 6 = some c
+    rw [reg_set_other (by decide)]; exact hr6
+  have hw1r7 : w1.reg 7 = some w := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 7 = some w
+    rw [reg_set_other (by decide)]; exact hr7
+  have hw1r8 : w1.reg 8 = some h.d := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 8 = some h.d
+    rw [reg_set_other (by decide)]; exact hr8
+  have hw1r9 : w1.reg 9 = some h.a := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 9 = some h.a
+    rw [reg_set_other (by decide)]; exact hr9
+  have hw1r4 : w1.reg 4 = some sp := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 4 = some sp
+    rw [reg_set_other (by decide)]; exact hr4
+  have hw1mem : w1.mem = s.mem := by
+    rw [hw1]
+    show (s.set 0 (some nc)).mem = s.mem
+    rw [mem_set]
+  have gw1 : ∀ q, q ≠ 0 → w1.reg q = s.reg q := by
+    intro q h0
+    rw [hw1]
+    show (s.set 0 (some nc)).reg q = s.reg q
+    rw [reg_set_other h0]
+  have e2 : X86Int.step im w1 = .ok { w1 with fl := (aluF .sub i nc).2, rip := w1.rip + 3 } :=
+    step_cmp (by rw [hw1rip]; exact hc.d1) hw1r1 hw1r0
+  obtain ⟨w2, hw2⟩ : ∃ u : X86Int.St, u = { w1 with fl := (aluF .sub i nc).2, rip := w1.rip + 3 } := ⟨_, rfl⟩
+  have hw2rip : w2.rip = entry + 7 := by rw [hw2]; show w1.rip + 3 = entry + 7; rw [hw1rip]
+
+  have hw2fl : X86Int.cond w2.fl 2 = some true := by
+    have hcf : w2.fl.cf = some true := by
+      rw [hw2]
+      show (aluF .sub i nc).2.cf = some true
+      exact aluF_sub_cf_true hlt
+    exact cond_cc2 hcf
+
+  have hw2r1 : w2.reg 1 = some i := by rw [hw2]; show w1.reg 1 = some i; exact hw1r1
+  have hw2r0 : w2.reg 0 = some nc := by rw [hw2]; show w1.reg 0 = some nc; exact hw1r0
+  have hw2r6 : w2.reg 6 = some c := by rw [hw2]; show w1.reg 6 = some c; exact hw1r6
+  have hw2r8 : w2.reg 8 = some h.d := by rw [hw2]; show w1.reg 8 = some h.d; exact hw1r8
+  have hw2r9 : w2.reg 9 = some h.a := by rw [hw2]; show w1.reg 9 = some h.a; exact hw1r9
+  have hw2r4 : w2.reg 4 = some sp := by rw [hw2]; show w1.reg 4 = some sp; exact hw1r4
+  have hw2mem : w2.mem = s.mem := by rw [hw2]; show w1.mem = s.mem; exact hw1mem
+  have gw2 : ∀ q, q ≠ 0 → w2.reg q = s.reg q := by
+    intro q h0
+    rw [hw2]; show w1.reg q = s.reg q; exact gw1 q h0
+
+  have e3 : X86Int.step im w2 = .ok { w2 with rip := entry + 14 } := by
+    have hh := step_jcc (im := im) (s := w2) (by rw [hw2rip]; exact hc.d2) hw2fl
+    simpa using hh
+  obtain ⟨w3, hw3⟩ : ∃ u : X86Int.St, u = { w2 with rip := entry + 14 } := ⟨_, rfl⟩
+  have hw3rip : w3.rip = entry + 14 := by rw [hw3]
+  have hw3r6 : w3.reg 6 = some c := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg 6 = some c
+    rw [reg_with_rip]; exact hw2r6
+  have hw3r1 : w3.reg 1 = some i := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg 1 = some i
+    rw [reg_with_rip]; exact hw2r1
+  have hw3r8 : w3.reg 8 = some h.d := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hw2r8
+  have hw3r9 : w3.reg 9 = some h.a := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hw2r9
+  have hw3r4 : w3.reg 4 = some sp := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hw2r4
+  have hw3r7 : w3.reg 7 = some w := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg 7 = some w
+    rw [reg_with_rip, gw2 7 (by decide)]; exact hr7
+  have hw3mem : w3.mem = s.mem := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).mem = s.mem
+    rw [mem_with_rip]; exact hw2mem
+  have gw3 : ∀ q, q ≠ 0 → w3.reg q = s.reg q := by
+    intro q h0
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gw2 q h0
+  have hea0 : ea c 0 = c := Nat.mod_eq_of_lt hcW
+  have e4 : X86Int.step im w3 = .ok { w3.set 0 (some op) with rip := w3.rip + 3 } :=
+    step_ld8 (by rw [hw3rip]; exact hc.d4) hw3r6 (by rw [hw3mem, hea0]; exact hbyte)
+  obtain ⟨w4, hw4⟩ : ∃ u : X86Int.St, u = { w3.set 0 (some op) with rip := w3.rip + 3 } := ⟨_, rfl⟩
+  have hw4rip : w4.rip = entry + 17 := by rw [hw4]; show w3.rip + 3 = entry + 17; rw [hw3rip]
+  have hw4r0 : w4.reg 0 = some op := by
+    rw [hw4]
+    show (w3.set 0 (some op)).reg 0 = some op
+    rw [reg_set_self (len_of_r9 hw3r9 (by decide))]
+  have hw4r1 : w4.reg 1 = some i := by
+    rw [hw4]
+    show (w3.set 0 (some op)).reg 1 = some i
+    rw [reg_set_other (by decide)]; exact hw3r1
+  have hw4r6 : w4.reg 6 = some c := by
+    rw [hw4]
+    show (w3.set 0 (some op)).reg 6 = some c
+    rw [reg_set_other (by decide)]; exact hw3r6
+  have hw4r7 : w4.reg 7 = some w := by
+    rw [hw4]
+    show (w3.set 0 (some op)).reg 7 = some w
+    rw [reg_set_other (by decide)]; exact hw3r7
+  have hw4r8 : w4.reg 8 = some h.d := by
+    rw [hw4]
+    show (w3.set 0 (some op)).reg 8 = some h.d
+    rw [reg_set_other (by decide)]; exact hw3r8
+  have hw4r9 : w4.reg 9 = some h.a := by
+    rw [hw4]
+    show (w3.set 0 (some op)).reg 9 = some h.a
+    rw [reg_set_other (by decide)]; exact hw3r9
+  have hw4r4 : w4.reg 4 = some sp := by
+    rw [hw4]
+    show (w3.set 0 (some op)).reg 4 = some sp
+    rw [reg_set_other (by decide)]; exact hw3r4
+  have hw4mem : w4.mem = s.mem := by
+    rw [hw4]
+    show (w3.set 0 (some op)).mem = s.mem
+    rw [mem_set]; exact hw3mem
+  have gw4 : ∀ q, q ≠ 0 → w4.reg q = s.reg q := by
+    intro q h0
+    rw [hw4]
+    show (w3.set 0 (some op)).reg q = s.reg q
+    rw [reg_set_other h0]; exact gw3 q h0
+  have e5 : X86Int.step im w4 = .ok { w4 with fl := (aluF .sub op (57 % W)).2, rip := w4.rip + 4 } :=
+    step_cmpI (by rw [hw4rip]; exact hc.d5) hw4r0
+  obtain ⟨w5, hw5⟩ : ∃ u : X86Int.St, u = { w4 with fl := (aluF .sub op (57 % W)).2, rip := w4.rip + 4 } := ⟨_, rfl⟩
+  have hw5rip : w5.rip = entry + 21 := by rw [hw5]; show w4.rip + 4 = entry + 21; rw [hw4rip]
+
+  have hw5fl : X86Int.cond w5.fl 3 = some false := by
+    have hcf : w5.fl.cf = some true := by
+      rw [hw5]
+      show (aluF .sub op (57 % W)).2.cf = some true
+      rw [h57]
+      exact aluF_sub_cf_true hop
+    have hh := cond_cc3 hcf
+    simpa using hh
+  have hw5r0 : w5.reg 0 = some op := by rw [hw5]; show w4.reg 0 = some op; exact hw4r0
+  have hw5r1 : w5.reg 1 = some i := by rw [hw5]; show w4.reg 1 = some i; exact hw4r1
+  have hw5r6 : w5.reg 6 = some c := by rw [hw5]; show w4.reg 6 = some c; exact hw4r6
+  have hw5r7 : w5.reg 7 = some w := by rw [hw5]; show w4.reg 7 = some w; exact hw4r7
+  have hw5r8 : w5.reg 8 = some h.d := by rw [hw5]; show w4.reg 8 = some h.d; exact hw4r8
+  have hw5r9 : w5.reg 9 = some h.a := by rw [hw5]; show w4.reg 9 = some h.a; exact hw4r9
+  have hw5r4 : w5.reg 4 = some sp := by rw [hw5]; show w4.reg 4 = some sp; exact hw4r4
+  have hw5mem : w5.mem = s.mem := by rw [hw5]; show w4.mem = s.mem; exact hw4mem
+  have gw5 : ∀ q, q ≠ 0 → w5.reg q = s.reg q := by
+    intro q h0
+    rw [hw5]; show w4.reg q = s.reg q; exact gw4 q h0
+
+  have e6 : X86Int.step im w5 = .ok { w5 with rip := entry + 23 } := by
+    have hh := step_jcc (im := im) (s := w5) (by rw [hw5rip]; exact hc.d6) hw5fl
+    simpa [hw5rip] using hh
+  obtain ⟨w6, hw6⟩ : ∃ u : X86Int.St, u = { w5 with rip := entry + 23 } := ⟨_, rfl⟩
+  have hw6rip : w6.rip = entry + 23 := by rw [hw6]
+  have e7 : X86Int.step im w6 = .ok { w6 with rip := prim } :=
+    step_jmp (by rw [hw6rip]; exact hc.d7)
+  obtain ⟨w7, hw7⟩ : ∃ u : X86Int.St, u = { w6 with rip := prim } := ⟨_, rfl⟩
+
+  have r1 : run im 1 (Out.ok s) = Out.ok w1 := by rw [run_succ_ok im 0 s, e1, ← hw1, run_zero]
+  have r2 : run im 1 (Out.ok w1) = Out.ok w2 := by rw [run_succ_ok im 0 w1, e2, ← hw2, run_zero]
+  have r3 : run im 1 (Out.ok w2) = Out.ok w3 := by rw [run_succ_ok im 0 w2, e3, ← hw3, run_zero]
+  have r4 : run im 1 (Out.ok w3) = Out.ok w4 := by rw [run_succ_ok im 0 w3, e4, ← hw4, run_zero]
+  have r5 : run im 1 (Out.ok w4) = Out.ok w5 := by rw [run_succ_ok im 0 w4, e5, ← hw5, run_zero]
+  have r6 : run im 1 (Out.ok w5) = Out.ok w6 := by rw [run_succ_ok im 0 w5, e6, ← hw6, run_zero]
+  have r7 : run im 1 (Out.ok w6) = Out.ok w7 := by rw [run_succ_ok im 0 w6, e7, ← hw7, run_zero]
+  have hw6r0 : w6.reg 0 = some op := by
+    rw [hw6]; show ({ w5 with rip := entry + 23 }).reg 0 = some op
+    rw [reg_with_rip]; exact hw5r0
+  have hw6r1 : w6.reg 1 = some i := by
+    rw [hw6]; show ({ w5 with rip := entry + 23 }).reg 1 = some i
+    rw [reg_with_rip]; exact hw5r1
+  have hw6r6 : w6.reg 6 = some c := by
+    rw [hw6]; show ({ w5 with rip := entry + 23 }).reg 6 = some c
+    rw [reg_with_rip]; exact hw5r6
+  have hw6r7 : w6.reg 7 = some w := by
+    rw [hw6]; show ({ w5 with rip := entry + 23 }).reg 7 = some w
+    rw [reg_with_rip]; exact hw5r7
+  have hw6r8 : w6.reg 8 = some h.d := by
+    rw [hw6]; show ({ w5 with rip := entry + 23 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hw5r8
+  have hw6r9 : w6.reg 9 = some h.a := by
+    rw [hw6]; show ({ w5 with rip := entry + 23 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hw5r9
+  have hw6r4 : w6.reg 4 = some sp := by
+    rw [hw6]; show ({ w5 with rip := entry + 23 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hw5r4
+  have hw6mem : w6.mem = s.mem := by
+    rw [hw6]; show ({ w5 with rip := entry + 23 }).mem = s.mem
+    rw [mem_with_rip]; exact hw5mem
+  have gw6 : ∀ q, q ≠ 0 → w6.reg q = s.reg q := by
+    intro q h0
+    rw [hw6]; show ({ w5 with rip := entry + 23 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gw5 q h0
+  refine ⟨7, w7, by rw [run_add im 1 6, r1, run_add im 1 5, r2, run_add im 1 4, r3, run_add im 1 3, r4, run_add im 1 2, r5, run_add im 1 1, r6, r7],
+    by rw [hw7], ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
+  · rw [hw7]; show ({ w6 with rip := prim }).reg 0 = some op
+    rw [reg_with_rip]; exact hw6r0
+  · rw [hw7]; show ({ w6 with rip := prim }).reg 1 = some i
+    rw [reg_with_rip]; exact hw6r1
+  · rw [hw7]; show ({ w6 with rip := prim }).reg 6 = some c
+    rw [reg_with_rip]; exact hw6r6
+  · rw [hw7]; show ({ w6 with rip := prim }).reg 7 = some w
+    rw [reg_with_rip]; exact hw6r7
+  · rw [hw7]; show ({ w6 with rip := prim }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hw6r8
+  · rw [hw7]; show ({ w6 with rip := prim }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hw6r9
+  · rw [hw7]; show ({ w6 with rip := prim }).reg 4 = some sp
+    rw [reg_with_rip]; exact hw6r4
+  · intro q h0
+    rw [hw7]; show ({ w6 with rip := prim }).reg q = s.reg q
+    rw [reg_with_rip]; exact gw6 q h0
+  · have h1 : w7.mem = s.mem := by rw [hw7, mem_with_rip]; exact hw6mem
+    exact h1
+
+/-- `walk_top` with opcode 128 reaches its handler. -/
+theorem WalkLit_triple {im : Nat → Option (Ins × Nat)} {entry done prim lit str pick tor fromr rfetch locget locset jmp
+    jz call ret : Nat}
+    (hc : WalkCode im entry done prim lit str pick tor fromr rfetch locget locset jmp jz call ret)
+    (hentry : entry + 215 < W) :
+    ∀ (h : Height) (c i w sp nc : Nat), w + 56 ≤ W → (hlt : i < nc) → (hcW : c < W) →
+    ∀ s, s.rip = entry → s.reg 8 = some h.d → s.reg 9 = some h.a → s.reg 6 = some c →
+      s.reg 4 = some sp → s.reg 7 = some w → s.reg 1 = some i → 16 ≤ s.regs.length →
+      rd64 s.mem (w + 24) = some nc → s.mem.rd c = some 128 →
+      ∃ k s', run im k (Out.ok s) = Out.ok s' ∧ s'.rip = lit ∧ s'.reg 0 = some 128 ∧
+        s'.reg 1 = some i ∧ s'.reg 6 = some c ∧ s'.reg 7 = some w ∧
+        s'.reg 8 = some h.d ∧ s'.reg 9 = some h.a ∧ s'.reg 4 = some sp ∧
+        (∀ q, q ≠ 0 → s'.reg q = s.reg q) ∧ s'.mem = s.mem := by
+  intro h c i w sp nc hw56 hlt hcW s hrip hr8 hr9 hr6 hr4 hr7 hr1 hlen hfc hbyte
+
+  have hea24 : ea w 24 = w + 24 := Nat.mod_eq_of_lt (by omega)
+  have h57 : 57 % W = 57 := Nat.mod_eq_of_lt (by unfold W; decide)
+  have e1 : X86Int.step im s = .ok { s.set 0 (some nc) with rip := s.rip + 4 } :=
+    step_ld (by rw [hrip]; exact hc.d0) hr7 (by rw [hea24]; exact hfc)
+  obtain ⟨w1, hw1⟩ : ∃ u : X86Int.St, u = { s.set 0 (some nc) with rip := s.rip + 4 } := ⟨_, rfl⟩
+  have hw1rip : w1.rip = entry + 4 := by rw [hw1]; show s.rip + 4 = entry + 4; rw [hrip]
+  have hw1r0 : w1.reg 0 = some nc := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 0 = some nc
+    rw [reg_set_self (len_of_r9 hr9 (by decide))]
+  have hw1r1 : w1.reg 1 = some i := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 1 = some i
+    rw [reg_set_other (by decide)]; exact hr1
+  have hw1r6 : w1.reg 6 = some c := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 6 = some c
+    rw [reg_set_other (by decide)]; exact hr6
+  have hw1r7 : w1.reg 7 = some w := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 7 = some w
+    rw [reg_set_other (by decide)]; exact hr7
+  have hw1r8 : w1.reg 8 = some h.d := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 8 = some h.d
+    rw [reg_set_other (by decide)]; exact hr8
+  have hw1r9 : w1.reg 9 = some h.a := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 9 = some h.a
+    rw [reg_set_other (by decide)]; exact hr9
+  have hw1r4 : w1.reg 4 = some sp := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 4 = some sp
+    rw [reg_set_other (by decide)]; exact hr4
+  have hw1mem : w1.mem = s.mem := by
+    rw [hw1]
+    show (s.set 0 (some nc)).mem = s.mem
+    rw [mem_set]
+  have gw1 : ∀ q, q ≠ 0 → w1.reg q = s.reg q := by
+    intro q h0
+    rw [hw1]
+    show (s.set 0 (some nc)).reg q = s.reg q
+    rw [reg_set_other h0]
+  have e2 : X86Int.step im w1 = .ok { w1 with fl := (aluF .sub i nc).2, rip := w1.rip + 3 } :=
+    step_cmp (by rw [hw1rip]; exact hc.d1) hw1r1 hw1r0
+  obtain ⟨w2, hw2⟩ : ∃ u : X86Int.St, u = { w1 with fl := (aluF .sub i nc).2, rip := w1.rip + 3 } := ⟨_, rfl⟩
+  have hw2rip : w2.rip = entry + 7 := by rw [hw2]; show w1.rip + 3 = entry + 7; rw [hw1rip]
+
+  have hw2fl : X86Int.cond w2.fl 2 = some true := by
+    have hcf : w2.fl.cf = some true := by
+      rw [hw2]
+      show (aluF .sub i nc).2.cf = some true
+      exact aluF_sub_cf_true hlt
+    exact cond_cc2 hcf
+
+  have hw2r1 : w2.reg 1 = some i := by rw [hw2]; show w1.reg 1 = some i; exact hw1r1
+  have hw2r0 : w2.reg 0 = some nc := by rw [hw2]; show w1.reg 0 = some nc; exact hw1r0
+  have hw2r6 : w2.reg 6 = some c := by rw [hw2]; show w1.reg 6 = some c; exact hw1r6
+  have hw2r8 : w2.reg 8 = some h.d := by rw [hw2]; show w1.reg 8 = some h.d; exact hw1r8
+  have hw2r9 : w2.reg 9 = some h.a := by rw [hw2]; show w1.reg 9 = some h.a; exact hw1r9
+  have hw2r4 : w2.reg 4 = some sp := by rw [hw2]; show w1.reg 4 = some sp; exact hw1r4
+  have hw2mem : w2.mem = s.mem := by rw [hw2]; show w1.mem = s.mem; exact hw1mem
+  have gw2 : ∀ q, q ≠ 0 → w2.reg q = s.reg q := by
+    intro q h0
+    rw [hw2]; show w1.reg q = s.reg q; exact gw1 q h0
+
+  have e3 : X86Int.step im w2 = .ok { w2 with rip := entry + 14 } := by
+    have hh := step_jcc (im := im) (s := w2) (by rw [hw2rip]; exact hc.d2) hw2fl
+    simpa using hh
+  obtain ⟨w3, hw3⟩ : ∃ u : X86Int.St, u = { w2 with rip := entry + 14 } := ⟨_, rfl⟩
+  have hw3rip : w3.rip = entry + 14 := by rw [hw3]
+  have hw3r6 : w3.reg 6 = some c := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg 6 = some c
+    rw [reg_with_rip]; exact hw2r6
+  have hw3r1 : w3.reg 1 = some i := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg 1 = some i
+    rw [reg_with_rip]; exact hw2r1
+  have hw3r8 : w3.reg 8 = some h.d := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hw2r8
+  have hw3r9 : w3.reg 9 = some h.a := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hw2r9
+  have hw3r4 : w3.reg 4 = some sp := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hw2r4
+  have hw3r7 : w3.reg 7 = some w := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg 7 = some w
+    rw [reg_with_rip, gw2 7 (by decide)]; exact hr7
+  have hw3mem : w3.mem = s.mem := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).mem = s.mem
+    rw [mem_with_rip]; exact hw2mem
+  have gw3 : ∀ q, q ≠ 0 → w3.reg q = s.reg q := by
+    intro q h0
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gw2 q h0
+  have hea0 : ea c 0 = c := Nat.mod_eq_of_lt hcW
+  have e4 : X86Int.step im w3 = .ok { w3.set 0 (some 128) with rip := w3.rip + 3 } :=
+    step_ld8 (by rw [hw3rip]; exact hc.d4) hw3r6 (by rw [hw3mem, hea0]; exact hbyte)
+  obtain ⟨w4, hw4⟩ : ∃ u : X86Int.St, u = { w3.set 0 (some 128) with rip := w3.rip + 3 } := ⟨_, rfl⟩
+  have hw4rip : w4.rip = entry + 17 := by rw [hw4]; show w3.rip + 3 = entry + 17; rw [hw3rip]
+  have hw4r0 : w4.reg 0 = some 128 := by
+    rw [hw4]
+    show (w3.set 0 (some 128)).reg 0 = some 128
+    rw [reg_set_self (len_of_r9 hw3r9 (by decide))]
+  have hw4r1 : w4.reg 1 = some i := by
+    rw [hw4]
+    show (w3.set 0 (some 128)).reg 1 = some i
+    rw [reg_set_other (by decide)]; exact hw3r1
+  have hw4r6 : w4.reg 6 = some c := by
+    rw [hw4]
+    show (w3.set 0 (some 128)).reg 6 = some c
+    rw [reg_set_other (by decide)]; exact hw3r6
+  have hw4r7 : w4.reg 7 = some w := by
+    rw [hw4]
+    show (w3.set 0 (some 128)).reg 7 = some w
+    rw [reg_set_other (by decide)]; exact hw3r7
+  have hw4r8 : w4.reg 8 = some h.d := by
+    rw [hw4]
+    show (w3.set 0 (some 128)).reg 8 = some h.d
+    rw [reg_set_other (by decide)]; exact hw3r8
+  have hw4r9 : w4.reg 9 = some h.a := by
+    rw [hw4]
+    show (w3.set 0 (some 128)).reg 9 = some h.a
+    rw [reg_set_other (by decide)]; exact hw3r9
+  have hw4r4 : w4.reg 4 = some sp := by
+    rw [hw4]
+    show (w3.set 0 (some 128)).reg 4 = some sp
+    rw [reg_set_other (by decide)]; exact hw3r4
+  have hw4mem : w4.mem = s.mem := by
+    rw [hw4]
+    show (w3.set 0 (some 128)).mem = s.mem
+    rw [mem_set]; exact hw3mem
+  have gw4 : ∀ q, q ≠ 0 → w4.reg q = s.reg q := by
+    intro q h0
+    rw [hw4]
+    show (w3.set 0 (some 128)).reg q = s.reg q
+    rw [reg_set_other h0]; exact gw3 q h0
+  have e5 : X86Int.step im w4 = .ok { w4 with fl := (aluF .sub 128 (57 % W)).2, rip := w4.rip + 4 } :=
+    step_cmpI (by rw [hw4rip]; exact hc.d5) hw4r0
+  obtain ⟨w5, hw5⟩ : ∃ u : X86Int.St, u = { w4 with fl := (aluF .sub 128 (57 % W)).2, rip := w4.rip + 4 } := ⟨_, rfl⟩
+  have hw5rip : w5.rip = entry + 21 := by rw [hw5]; show w4.rip + 4 = entry + 21; rw [hw4rip]
+
+  have hw5fl : X86Int.cond w5.fl 3 = some true := by
+    have hcf : w5.fl.cf = some false := by
+      rw [hw5]
+      show (aluF .sub 128 (57 % W)).2.cf = some false
+      rw [h57]
+      exact aluF_sub_cf (by decide)
+    have hh := cond_cc3 hcf
+    simpa using hh
+  have hw5r0 : w5.reg 0 = some 128 := by rw [hw5]; show w4.reg 0 = some 128; exact hw4r0
+  have hw5r1 : w5.reg 1 = some i := by rw [hw5]; show w4.reg 1 = some i; exact hw4r1
+  have hw5r6 : w5.reg 6 = some c := by rw [hw5]; show w4.reg 6 = some c; exact hw4r6
+  have hw5r7 : w5.reg 7 = some w := by rw [hw5]; show w4.reg 7 = some w; exact hw4r7
+  have hw5r8 : w5.reg 8 = some h.d := by rw [hw5]; show w4.reg 8 = some h.d; exact hw4r8
+  have hw5r9 : w5.reg 9 = some h.a := by rw [hw5]; show w4.reg 9 = some h.a; exact hw4r9
+  have hw5r4 : w5.reg 4 = some sp := by rw [hw5]; show w4.reg 4 = some sp; exact hw4r4
+  have hw5mem : w5.mem = s.mem := by rw [hw5]; show w4.mem = s.mem; exact hw4mem
+  have gw5 : ∀ q, q ≠ 0 → w5.reg q = s.reg q := by
+    intro q h0
+    rw [hw5]; show w4.reg q = s.reg q; exact gw4 q h0
+
+  have e6 : X86Int.step im w5 = .ok { w5 with rip := entry + 28 } := by
+    have hh := step_jcc (im := im) (s := w5) (by rw [hw5rip]; exact hc.d6) hw5fl
+    simpa using hh
+  obtain ⟨x0, hx0⟩ : ∃ u : X86Int.St, u = { w5 with rip := entry + 28 } := ⟨_, rfl⟩
+  have hx0rip : x0.rip = entry + 28 := by rw [hx0]
+  have hx0r0 : x0.reg 0 = some 128 := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 0 = some 128
+    rw [reg_with_rip]; exact hw5r0
+  have hx0r1 : x0.reg 1 = some i := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 1 = some i
+    rw [reg_with_rip]; exact hw5r1
+  have hx0r6 : x0.reg 6 = some c := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 6 = some c
+    rw [reg_with_rip]; exact hw5r6
+  have hx0r7 : x0.reg 7 = some w := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 7 = some w
+    rw [reg_with_rip]; exact hw5r7
+  have hx0r8 : x0.reg 8 = some h.d := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hw5r8
+  have hx0r9 : x0.reg 9 = some h.a := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hw5r9
+  have hx0r4 : x0.reg 4 = some sp := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hw5r4
+  have hx0mem : x0.mem = s.mem := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).mem = s.mem
+    rw [mem_with_rip]; exact hw5mem
+  have gx0 : ∀ q, q ≠ 0 → x0.reg q = s.reg q := by
+    intro q h0
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gw5 q h0
+
+  have e7 : X86Int.step im x0 = .ok { x0 with fl := (aluF .sub 128 (128 % W)).2, rip := x0.rip + 7 } :=
+    step_cmpI (by rw [hx0rip]; exact hc.clit) hx0r0
+  obtain ⟨y0, hy0⟩ : ∃ u : X86Int.St, u = { x0 with fl := (aluF .sub 128 (128 % W)).2, rip := x0.rip + 7 } := ⟨_, rfl⟩
+  have hy0rip : y0.rip = entry + 35 := by rw [hy0]; show x0.rip + 7 = entry + 35; rw [hx0rip]
+
+  have hy0fl : X86Int.cond y0.fl 5 = some false := by
+    have hz : y0.fl.zf = some true := by
+      rw [hy0]
+      show (aluF .sub 128 (128 % W)).2.zf = some true
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy0r0 : y0.reg 0 = some 128 := by rw [hy0]; show x0.reg 0 = some 128; exact hx0r0
+  have hy0r1 : y0.reg 1 = some i := by rw [hy0]; show x0.reg 1 = some i; exact hx0r1
+  have hy0r6 : y0.reg 6 = some c := by rw [hy0]; show x0.reg 6 = some c; exact hx0r6
+  have hy0r7 : y0.reg 7 = some w := by rw [hy0]; show x0.reg 7 = some w; exact hx0r7
+  have hy0r8 : y0.reg 8 = some h.d := by rw [hy0]; show x0.reg 8 = some h.d; exact hx0r8
+  have hy0r9 : y0.reg 9 = some h.a := by rw [hy0]; show x0.reg 9 = some h.a; exact hx0r9
+  have hy0r4 : y0.reg 4 = some sp := by rw [hy0]; show x0.reg 4 = some sp; exact hx0r4
+  have hy0mem : y0.mem = s.mem := by rw [hy0]; show x0.mem = s.mem; exact hx0mem
+  have gy0 : ∀ q, q ≠ 0 → y0.reg q = s.reg q := by
+    intro q h0
+    rw [hy0]; show x0.reg q = s.reg q; exact gx0 q h0
+
+  have e8 : X86Int.step im y0 = .ok { y0 with rip := entry + 37 } := by
+    have hh := step_jcc (im := im) (s := y0) (by rw [hy0rip]; exact hc.clitj) hy0fl
+    simpa [hy0rip] using hh
+  obtain ⟨z9, hz9⟩ : ∃ u : X86Int.St, u = { y0 with rip := entry + 37 } := ⟨_, rfl⟩
+  have hz9rip : z9.rip = entry + 37 := by rw [hz9]
+  have hz9r0 : z9.reg 0 = some 128 := by
+    rw [hz9]
+    show ({ y0 with rip := entry + 37 }).reg 0 = some 128
+    rw [reg_with_rip]; exact hy0r0
+  have hz9r1 : z9.reg 1 = some i := by
+    rw [hz9]
+    show ({ y0 with rip := entry + 37 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy0r1
+  have hz9r6 : z9.reg 6 = some c := by
+    rw [hz9]
+    show ({ y0 with rip := entry + 37 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy0r6
+  have hz9r7 : z9.reg 7 = some w := by
+    rw [hz9]
+    show ({ y0 with rip := entry + 37 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy0r7
+  have hz9r8 : z9.reg 8 = some h.d := by
+    rw [hz9]
+    show ({ y0 with rip := entry + 37 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy0r8
+  have hz9r9 : z9.reg 9 = some h.a := by
+    rw [hz9]
+    show ({ y0 with rip := entry + 37 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy0r9
+  have hz9r4 : z9.reg 4 = some sp := by
+    rw [hz9]
+    show ({ y0 with rip := entry + 37 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy0r4
+  have hz9mem : z9.mem = s.mem := by
+    rw [hz9]
+    show ({ y0 with rip := entry + 37 }).mem = s.mem
+    rw [mem_with_rip]; exact hy0mem
+  have gz9 : ∀ q, q ≠ 0 → z9.reg q = s.reg q := by
+    intro q h0
+    rw [hz9]
+    show ({ y0 with rip := entry + 37 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy0 q h0
+
+  have e9 : X86Int.step im z9 = .ok { z9 with rip := lit } :=
+    step_jmp (by rw [hz9rip]; exact hc.clitjmp)
+  obtain ⟨fin, hfin⟩ : ∃ u : X86Int.St, u = { z9 with rip := lit } := ⟨_, rfl⟩
+  have rw1 : run im 1 (Out.ok s) = Out.ok w1 := by rw [run_succ_ok im 0 s, e1, ← hw1, run_zero]
+  have rw2 : run im 1 (Out.ok w1) = Out.ok w2 := by rw [run_succ_ok im 0 w1, e2, ← hw2, run_zero]
+  have rw3 : run im 1 (Out.ok w2) = Out.ok w3 := by rw [run_succ_ok im 0 w2, e3, ← hw3, run_zero]
+  have rw4 : run im 1 (Out.ok w3) = Out.ok w4 := by rw [run_succ_ok im 0 w3, e4, ← hw4, run_zero]
+  have rw5 : run im 1 (Out.ok w4) = Out.ok w5 := by rw [run_succ_ok im 0 w4, e5, ← hw5, run_zero]
+  have rx0 : run im 1 (Out.ok w5) = Out.ok x0 := by rw [run_succ_ok im 0 w5, e6, ← hx0, run_zero]
+  have ry0 : run im 1 (Out.ok x0) = Out.ok y0 := by rw [run_succ_ok im 0 x0, e7, ← hy0, run_zero]
+  have rz9 : run im 1 (Out.ok y0) = Out.ok z9 := by rw [run_succ_ok im 0 y0, e8, ← hz9, run_zero]
+  have rfin : run im 1 (Out.ok z9) = Out.ok fin := by rw [run_succ_ok im 0 z9, e9, ← hfin, run_zero]
+  refine ⟨9, fin, by rw [run_add im 1 8, rw1, run_add im 1 7, rw2, run_add im 1 6, rw3, run_add im 1 5, rw4, run_add im 1 4, rw5, run_add im 1 3, rx0, run_add im 1 2, ry0, run_add im 1 1, rz9, rfin],
+    by rw [hfin], ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
+  · rw [hfin]; show ({ z9 with rip := lit }).reg 0 = some 128
+    rw [reg_with_rip]; exact hz9r0
+  · rw [hfin]; show ({ z9 with rip := lit }).reg 1 = some i
+    rw [reg_with_rip]; exact hz9r1
+  · rw [hfin]; show ({ z9 with rip := lit }).reg 6 = some c
+    rw [reg_with_rip]; exact hz9r6
+  · rw [hfin]; show ({ z9 with rip := lit }).reg 7 = some w
+    rw [reg_with_rip]; exact hz9r7
+  · rw [hfin]; show ({ z9 with rip := lit }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hz9r8
+  · rw [hfin]; show ({ z9 with rip := lit }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hz9r9
+  · rw [hfin]; show ({ z9 with rip := lit }).reg 4 = some sp
+    rw [reg_with_rip]; exact hz9r4
+  · intro q h0
+    rw [hfin]; show ({ z9 with rip := lit }).reg q = s.reg q
+    rw [reg_with_rip]; exact gz9 q h0
+  · have h1 : fin.mem = s.mem := by rw [hfin, mem_with_rip]; exact hz9mem
+    exact h1
+
+/-- `walk_top` with opcode 129 reaches its handler. -/
+theorem WalkStr_triple {im : Nat → Option (Ins × Nat)} {entry done prim lit str pick tor fromr rfetch locget locset jmp
+    jz call ret : Nat}
+    (hc : WalkCode im entry done prim lit str pick tor fromr rfetch locget locset jmp jz call ret)
+    (hentry : entry + 215 < W) :
+    ∀ (h : Height) (c i w sp nc : Nat), w + 56 ≤ W → (hlt : i < nc) → (hcW : c < W) →
+    ∀ s, s.rip = entry → s.reg 8 = some h.d → s.reg 9 = some h.a → s.reg 6 = some c →
+      s.reg 4 = some sp → s.reg 7 = some w → s.reg 1 = some i → 16 ≤ s.regs.length →
+      rd64 s.mem (w + 24) = some nc → s.mem.rd c = some 129 →
+      ∃ k s', run im k (Out.ok s) = Out.ok s' ∧ s'.rip = str ∧ s'.reg 0 = some 129 ∧
+        s'.reg 1 = some i ∧ s'.reg 6 = some c ∧ s'.reg 7 = some w ∧
+        s'.reg 8 = some h.d ∧ s'.reg 9 = some h.a ∧ s'.reg 4 = some sp ∧
+        (∀ q, q ≠ 0 → s'.reg q = s.reg q) ∧ s'.mem = s.mem := by
+  intro h c i w sp nc hw56 hlt hcW s hrip hr8 hr9 hr6 hr4 hr7 hr1 hlen hfc hbyte
+
+  have hea24 : ea w 24 = w + 24 := Nat.mod_eq_of_lt (by omega)
+  have h57 : 57 % W = 57 := Nat.mod_eq_of_lt (by unfold W; decide)
+  have e1 : X86Int.step im s = .ok { s.set 0 (some nc) with rip := s.rip + 4 } :=
+    step_ld (by rw [hrip]; exact hc.d0) hr7 (by rw [hea24]; exact hfc)
+  obtain ⟨w1, hw1⟩ : ∃ u : X86Int.St, u = { s.set 0 (some nc) with rip := s.rip + 4 } := ⟨_, rfl⟩
+  have hw1rip : w1.rip = entry + 4 := by rw [hw1]; show s.rip + 4 = entry + 4; rw [hrip]
+  have hw1r0 : w1.reg 0 = some nc := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 0 = some nc
+    rw [reg_set_self (len_of_r9 hr9 (by decide))]
+  have hw1r1 : w1.reg 1 = some i := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 1 = some i
+    rw [reg_set_other (by decide)]; exact hr1
+  have hw1r6 : w1.reg 6 = some c := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 6 = some c
+    rw [reg_set_other (by decide)]; exact hr6
+  have hw1r7 : w1.reg 7 = some w := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 7 = some w
+    rw [reg_set_other (by decide)]; exact hr7
+  have hw1r8 : w1.reg 8 = some h.d := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 8 = some h.d
+    rw [reg_set_other (by decide)]; exact hr8
+  have hw1r9 : w1.reg 9 = some h.a := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 9 = some h.a
+    rw [reg_set_other (by decide)]; exact hr9
+  have hw1r4 : w1.reg 4 = some sp := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 4 = some sp
+    rw [reg_set_other (by decide)]; exact hr4
+  have hw1mem : w1.mem = s.mem := by
+    rw [hw1]
+    show (s.set 0 (some nc)).mem = s.mem
+    rw [mem_set]
+  have gw1 : ∀ q, q ≠ 0 → w1.reg q = s.reg q := by
+    intro q h0
+    rw [hw1]
+    show (s.set 0 (some nc)).reg q = s.reg q
+    rw [reg_set_other h0]
+  have e2 : X86Int.step im w1 = .ok { w1 with fl := (aluF .sub i nc).2, rip := w1.rip + 3 } :=
+    step_cmp (by rw [hw1rip]; exact hc.d1) hw1r1 hw1r0
+  obtain ⟨w2, hw2⟩ : ∃ u : X86Int.St, u = { w1 with fl := (aluF .sub i nc).2, rip := w1.rip + 3 } := ⟨_, rfl⟩
+  have hw2rip : w2.rip = entry + 7 := by rw [hw2]; show w1.rip + 3 = entry + 7; rw [hw1rip]
+
+  have hw2fl : X86Int.cond w2.fl 2 = some true := by
+    have hcf : w2.fl.cf = some true := by
+      rw [hw2]
+      show (aluF .sub i nc).2.cf = some true
+      exact aluF_sub_cf_true hlt
+    exact cond_cc2 hcf
+
+  have hw2r1 : w2.reg 1 = some i := by rw [hw2]; show w1.reg 1 = some i; exact hw1r1
+  have hw2r0 : w2.reg 0 = some nc := by rw [hw2]; show w1.reg 0 = some nc; exact hw1r0
+  have hw2r6 : w2.reg 6 = some c := by rw [hw2]; show w1.reg 6 = some c; exact hw1r6
+  have hw2r8 : w2.reg 8 = some h.d := by rw [hw2]; show w1.reg 8 = some h.d; exact hw1r8
+  have hw2r9 : w2.reg 9 = some h.a := by rw [hw2]; show w1.reg 9 = some h.a; exact hw1r9
+  have hw2r4 : w2.reg 4 = some sp := by rw [hw2]; show w1.reg 4 = some sp; exact hw1r4
+  have hw2mem : w2.mem = s.mem := by rw [hw2]; show w1.mem = s.mem; exact hw1mem
+  have gw2 : ∀ q, q ≠ 0 → w2.reg q = s.reg q := by
+    intro q h0
+    rw [hw2]; show w1.reg q = s.reg q; exact gw1 q h0
+
+  have e3 : X86Int.step im w2 = .ok { w2 with rip := entry + 14 } := by
+    have hh := step_jcc (im := im) (s := w2) (by rw [hw2rip]; exact hc.d2) hw2fl
+    simpa using hh
+  obtain ⟨w3, hw3⟩ : ∃ u : X86Int.St, u = { w2 with rip := entry + 14 } := ⟨_, rfl⟩
+  have hw3rip : w3.rip = entry + 14 := by rw [hw3]
+  have hw3r6 : w3.reg 6 = some c := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg 6 = some c
+    rw [reg_with_rip]; exact hw2r6
+  have hw3r1 : w3.reg 1 = some i := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg 1 = some i
+    rw [reg_with_rip]; exact hw2r1
+  have hw3r8 : w3.reg 8 = some h.d := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hw2r8
+  have hw3r9 : w3.reg 9 = some h.a := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hw2r9
+  have hw3r4 : w3.reg 4 = some sp := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hw2r4
+  have hw3r7 : w3.reg 7 = some w := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg 7 = some w
+    rw [reg_with_rip, gw2 7 (by decide)]; exact hr7
+  have hw3mem : w3.mem = s.mem := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).mem = s.mem
+    rw [mem_with_rip]; exact hw2mem
+  have gw3 : ∀ q, q ≠ 0 → w3.reg q = s.reg q := by
+    intro q h0
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gw2 q h0
+  have hea0 : ea c 0 = c := Nat.mod_eq_of_lt hcW
+  have e4 : X86Int.step im w3 = .ok { w3.set 0 (some 129) with rip := w3.rip + 3 } :=
+    step_ld8 (by rw [hw3rip]; exact hc.d4) hw3r6 (by rw [hw3mem, hea0]; exact hbyte)
+  obtain ⟨w4, hw4⟩ : ∃ u : X86Int.St, u = { w3.set 0 (some 129) with rip := w3.rip + 3 } := ⟨_, rfl⟩
+  have hw4rip : w4.rip = entry + 17 := by rw [hw4]; show w3.rip + 3 = entry + 17; rw [hw3rip]
+  have hw4r0 : w4.reg 0 = some 129 := by
+    rw [hw4]
+    show (w3.set 0 (some 129)).reg 0 = some 129
+    rw [reg_set_self (len_of_r9 hw3r9 (by decide))]
+  have hw4r1 : w4.reg 1 = some i := by
+    rw [hw4]
+    show (w3.set 0 (some 129)).reg 1 = some i
+    rw [reg_set_other (by decide)]; exact hw3r1
+  have hw4r6 : w4.reg 6 = some c := by
+    rw [hw4]
+    show (w3.set 0 (some 129)).reg 6 = some c
+    rw [reg_set_other (by decide)]; exact hw3r6
+  have hw4r7 : w4.reg 7 = some w := by
+    rw [hw4]
+    show (w3.set 0 (some 129)).reg 7 = some w
+    rw [reg_set_other (by decide)]; exact hw3r7
+  have hw4r8 : w4.reg 8 = some h.d := by
+    rw [hw4]
+    show (w3.set 0 (some 129)).reg 8 = some h.d
+    rw [reg_set_other (by decide)]; exact hw3r8
+  have hw4r9 : w4.reg 9 = some h.a := by
+    rw [hw4]
+    show (w3.set 0 (some 129)).reg 9 = some h.a
+    rw [reg_set_other (by decide)]; exact hw3r9
+  have hw4r4 : w4.reg 4 = some sp := by
+    rw [hw4]
+    show (w3.set 0 (some 129)).reg 4 = some sp
+    rw [reg_set_other (by decide)]; exact hw3r4
+  have hw4mem : w4.mem = s.mem := by
+    rw [hw4]
+    show (w3.set 0 (some 129)).mem = s.mem
+    rw [mem_set]; exact hw3mem
+  have gw4 : ∀ q, q ≠ 0 → w4.reg q = s.reg q := by
+    intro q h0
+    rw [hw4]
+    show (w3.set 0 (some 129)).reg q = s.reg q
+    rw [reg_set_other h0]; exact gw3 q h0
+  have e5 : X86Int.step im w4 = .ok { w4 with fl := (aluF .sub 129 (57 % W)).2, rip := w4.rip + 4 } :=
+    step_cmpI (by rw [hw4rip]; exact hc.d5) hw4r0
+  obtain ⟨w5, hw5⟩ : ∃ u : X86Int.St, u = { w4 with fl := (aluF .sub 129 (57 % W)).2, rip := w4.rip + 4 } := ⟨_, rfl⟩
+  have hw5rip : w5.rip = entry + 21 := by rw [hw5]; show w4.rip + 4 = entry + 21; rw [hw4rip]
+
+  have hw5fl : X86Int.cond w5.fl 3 = some true := by
+    have hcf : w5.fl.cf = some false := by
+      rw [hw5]
+      show (aluF .sub 129 (57 % W)).2.cf = some false
+      rw [h57]
+      exact aluF_sub_cf (by decide)
+    have hh := cond_cc3 hcf
+    simpa using hh
+  have hw5r0 : w5.reg 0 = some 129 := by rw [hw5]; show w4.reg 0 = some 129; exact hw4r0
+  have hw5r1 : w5.reg 1 = some i := by rw [hw5]; show w4.reg 1 = some i; exact hw4r1
+  have hw5r6 : w5.reg 6 = some c := by rw [hw5]; show w4.reg 6 = some c; exact hw4r6
+  have hw5r7 : w5.reg 7 = some w := by rw [hw5]; show w4.reg 7 = some w; exact hw4r7
+  have hw5r8 : w5.reg 8 = some h.d := by rw [hw5]; show w4.reg 8 = some h.d; exact hw4r8
+  have hw5r9 : w5.reg 9 = some h.a := by rw [hw5]; show w4.reg 9 = some h.a; exact hw4r9
+  have hw5r4 : w5.reg 4 = some sp := by rw [hw5]; show w4.reg 4 = some sp; exact hw4r4
+  have hw5mem : w5.mem = s.mem := by rw [hw5]; show w4.mem = s.mem; exact hw4mem
+  have gw5 : ∀ q, q ≠ 0 → w5.reg q = s.reg q := by
+    intro q h0
+    rw [hw5]; show w4.reg q = s.reg q; exact gw4 q h0
+
+  have e6 : X86Int.step im w5 = .ok { w5 with rip := entry + 28 } := by
+    have hh := step_jcc (im := im) (s := w5) (by rw [hw5rip]; exact hc.d6) hw5fl
+    simpa using hh
+  obtain ⟨x0, hx0⟩ : ∃ u : X86Int.St, u = { w5 with rip := entry + 28 } := ⟨_, rfl⟩
+  have hx0rip : x0.rip = entry + 28 := by rw [hx0]
+  have hx0r0 : x0.reg 0 = some 129 := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 0 = some 129
+    rw [reg_with_rip]; exact hw5r0
+  have hx0r1 : x0.reg 1 = some i := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 1 = some i
+    rw [reg_with_rip]; exact hw5r1
+  have hx0r6 : x0.reg 6 = some c := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 6 = some c
+    rw [reg_with_rip]; exact hw5r6
+  have hx0r7 : x0.reg 7 = some w := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 7 = some w
+    rw [reg_with_rip]; exact hw5r7
+  have hx0r8 : x0.reg 8 = some h.d := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hw5r8
+  have hx0r9 : x0.reg 9 = some h.a := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hw5r9
+  have hx0r4 : x0.reg 4 = some sp := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hw5r4
+  have hx0mem : x0.mem = s.mem := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).mem = s.mem
+    rw [mem_with_rip]; exact hw5mem
+  have gx0 : ∀ q, q ≠ 0 → x0.reg q = s.reg q := by
+    intro q h0
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gw5 q h0
+
+  have e7 : X86Int.step im x0 = .ok { x0 with fl := (aluF .sub 129 (128 % W)).2, rip := x0.rip + 7 } :=
+    step_cmpI (by rw [hx0rip]; exact hc.clit) hx0r0
+  obtain ⟨y0, hy0⟩ : ∃ u : X86Int.St, u = { x0 with fl := (aluF .sub 129 (128 % W)).2, rip := x0.rip + 7 } := ⟨_, rfl⟩
+  have hy0rip : y0.rip = entry + 35 := by rw [hy0]; show x0.rip + 7 = entry + 35; rw [hx0rip]
+
+  have hy0fl : X86Int.cond y0.fl 5 = some true := by
+    have hz : y0.fl.zf = some false := by
+      rw [hy0]
+      show (aluF .sub 129 (128 % W)).2.zf = some false
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy0r0 : y0.reg 0 = some 129 := by rw [hy0]; show x0.reg 0 = some 129; exact hx0r0
+  have hy0r1 : y0.reg 1 = some i := by rw [hy0]; show x0.reg 1 = some i; exact hx0r1
+  have hy0r6 : y0.reg 6 = some c := by rw [hy0]; show x0.reg 6 = some c; exact hx0r6
+  have hy0r7 : y0.reg 7 = some w := by rw [hy0]; show x0.reg 7 = some w; exact hx0r7
+  have hy0r8 : y0.reg 8 = some h.d := by rw [hy0]; show x0.reg 8 = some h.d; exact hx0r8
+  have hy0r9 : y0.reg 9 = some h.a := by rw [hy0]; show x0.reg 9 = some h.a; exact hx0r9
+  have hy0r4 : y0.reg 4 = some sp := by rw [hy0]; show x0.reg 4 = some sp; exact hx0r4
+  have hy0mem : y0.mem = s.mem := by rw [hy0]; show x0.mem = s.mem; exact hx0mem
+  have gy0 : ∀ q, q ≠ 0 → y0.reg q = s.reg q := by
+    intro q h0
+    rw [hy0]; show x0.reg q = s.reg q; exact gx0 q h0
+
+  have e8 : X86Int.step im y0 = .ok { y0 with rip := entry + 42 } := by
+    have hh := step_jcc (im := im) (s := y0) (by rw [hy0rip]; exact hc.clitj) hy0fl
+    simpa using hh
+  obtain ⟨x1, hx1⟩ : ∃ u : X86Int.St, u = { y0 with rip := entry + 42 } := ⟨_, rfl⟩
+  have hx1rip : x1.rip = entry + 42 := by rw [hx1]
+  have hx1r0 : x1.reg 0 = some 129 := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg 0 = some 129
+    rw [reg_with_rip]; exact hy0r0
+  have hx1r1 : x1.reg 1 = some i := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy0r1
+  have hx1r6 : x1.reg 6 = some c := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy0r6
+  have hx1r7 : x1.reg 7 = some w := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy0r7
+  have hx1r8 : x1.reg 8 = some h.d := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy0r8
+  have hx1r9 : x1.reg 9 = some h.a := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy0r9
+  have hx1r4 : x1.reg 4 = some sp := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy0r4
+  have hx1mem : x1.mem = s.mem := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).mem = s.mem
+    rw [mem_with_rip]; exact hy0mem
+  have gx1 : ∀ q, q ≠ 0 → x1.reg q = s.reg q := by
+    intro q h0
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy0 q h0
+
+  have e9 : X86Int.step im x1 = .ok { x1 with fl := (aluF .sub 129 (129 % W)).2, rip := x1.rip + 7 } :=
+    step_cmpI (by rw [hx1rip]; exact hc.cstr) hx1r0
+  obtain ⟨y1, hy1⟩ : ∃ u : X86Int.St, u = { x1 with fl := (aluF .sub 129 (129 % W)).2, rip := x1.rip + 7 } := ⟨_, rfl⟩
+  have hy1rip : y1.rip = entry + 49 := by rw [hy1]; show x1.rip + 7 = entry + 49; rw [hx1rip]
+
+  have hy1fl : X86Int.cond y1.fl 5 = some false := by
+    have hz : y1.fl.zf = some true := by
+      rw [hy1]
+      show (aluF .sub 129 (129 % W)).2.zf = some true
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy1r0 : y1.reg 0 = some 129 := by rw [hy1]; show x1.reg 0 = some 129; exact hx1r0
+  have hy1r1 : y1.reg 1 = some i := by rw [hy1]; show x1.reg 1 = some i; exact hx1r1
+  have hy1r6 : y1.reg 6 = some c := by rw [hy1]; show x1.reg 6 = some c; exact hx1r6
+  have hy1r7 : y1.reg 7 = some w := by rw [hy1]; show x1.reg 7 = some w; exact hx1r7
+  have hy1r8 : y1.reg 8 = some h.d := by rw [hy1]; show x1.reg 8 = some h.d; exact hx1r8
+  have hy1r9 : y1.reg 9 = some h.a := by rw [hy1]; show x1.reg 9 = some h.a; exact hx1r9
+  have hy1r4 : y1.reg 4 = some sp := by rw [hy1]; show x1.reg 4 = some sp; exact hx1r4
+  have hy1mem : y1.mem = s.mem := by rw [hy1]; show x1.mem = s.mem; exact hx1mem
+  have gy1 : ∀ q, q ≠ 0 → y1.reg q = s.reg q := by
+    intro q h0
+    rw [hy1]; show x1.reg q = s.reg q; exact gx1 q h0
+
+  have e10 : X86Int.step im y1 = .ok { y1 with rip := entry + 51 } := by
+    have hh := step_jcc (im := im) (s := y1) (by rw [hy1rip]; exact hc.cstrj) hy1fl
+    simpa [hy1rip] using hh
+  obtain ⟨z9, hz9⟩ : ∃ u : X86Int.St, u = { y1 with rip := entry + 51 } := ⟨_, rfl⟩
+  have hz9rip : z9.rip = entry + 51 := by rw [hz9]
+  have hz9r0 : z9.reg 0 = some 129 := by
+    rw [hz9]
+    show ({ y1 with rip := entry + 51 }).reg 0 = some 129
+    rw [reg_with_rip]; exact hy1r0
+  have hz9r1 : z9.reg 1 = some i := by
+    rw [hz9]
+    show ({ y1 with rip := entry + 51 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy1r1
+  have hz9r6 : z9.reg 6 = some c := by
+    rw [hz9]
+    show ({ y1 with rip := entry + 51 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy1r6
+  have hz9r7 : z9.reg 7 = some w := by
+    rw [hz9]
+    show ({ y1 with rip := entry + 51 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy1r7
+  have hz9r8 : z9.reg 8 = some h.d := by
+    rw [hz9]
+    show ({ y1 with rip := entry + 51 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy1r8
+  have hz9r9 : z9.reg 9 = some h.a := by
+    rw [hz9]
+    show ({ y1 with rip := entry + 51 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy1r9
+  have hz9r4 : z9.reg 4 = some sp := by
+    rw [hz9]
+    show ({ y1 with rip := entry + 51 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy1r4
+  have hz9mem : z9.mem = s.mem := by
+    rw [hz9]
+    show ({ y1 with rip := entry + 51 }).mem = s.mem
+    rw [mem_with_rip]; exact hy1mem
+  have gz9 : ∀ q, q ≠ 0 → z9.reg q = s.reg q := by
+    intro q h0
+    rw [hz9]
+    show ({ y1 with rip := entry + 51 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy1 q h0
+
+  have e11 : X86Int.step im z9 = .ok { z9 with rip := str } :=
+    step_jmp (by rw [hz9rip]; exact hc.cstrjmp)
+  obtain ⟨fin, hfin⟩ : ∃ u : X86Int.St, u = { z9 with rip := str } := ⟨_, rfl⟩
+  have rw1 : run im 1 (Out.ok s) = Out.ok w1 := by rw [run_succ_ok im 0 s, e1, ← hw1, run_zero]
+  have rw2 : run im 1 (Out.ok w1) = Out.ok w2 := by rw [run_succ_ok im 0 w1, e2, ← hw2, run_zero]
+  have rw3 : run im 1 (Out.ok w2) = Out.ok w3 := by rw [run_succ_ok im 0 w2, e3, ← hw3, run_zero]
+  have rw4 : run im 1 (Out.ok w3) = Out.ok w4 := by rw [run_succ_ok im 0 w3, e4, ← hw4, run_zero]
+  have rw5 : run im 1 (Out.ok w4) = Out.ok w5 := by rw [run_succ_ok im 0 w4, e5, ← hw5, run_zero]
+  have rx0 : run im 1 (Out.ok w5) = Out.ok x0 := by rw [run_succ_ok im 0 w5, e6, ← hx0, run_zero]
+  have ry0 : run im 1 (Out.ok x0) = Out.ok y0 := by rw [run_succ_ok im 0 x0, e7, ← hy0, run_zero]
+  have rx1 : run im 1 (Out.ok y0) = Out.ok x1 := by rw [run_succ_ok im 0 y0, e8, ← hx1, run_zero]
+  have ry1 : run im 1 (Out.ok x1) = Out.ok y1 := by rw [run_succ_ok im 0 x1, e9, ← hy1, run_zero]
+  have rz9 : run im 1 (Out.ok y1) = Out.ok z9 := by rw [run_succ_ok im 0 y1, e10, ← hz9, run_zero]
+  have rfin : run im 1 (Out.ok z9) = Out.ok fin := by rw [run_succ_ok im 0 z9, e11, ← hfin, run_zero]
+  refine ⟨11, fin, by rw [run_add im 1 10, rw1, run_add im 1 9, rw2, run_add im 1 8, rw3, run_add im 1 7, rw4, run_add im 1 6, rw5, run_add im 1 5, rx0, run_add im 1 4, ry0, run_add im 1 3, rx1, run_add im 1 2, ry1, run_add im 1 1, rz9, rfin],
+    by rw [hfin], ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
+  · rw [hfin]; show ({ z9 with rip := str }).reg 0 = some 129
+    rw [reg_with_rip]; exact hz9r0
+  · rw [hfin]; show ({ z9 with rip := str }).reg 1 = some i
+    rw [reg_with_rip]; exact hz9r1
+  · rw [hfin]; show ({ z9 with rip := str }).reg 6 = some c
+    rw [reg_with_rip]; exact hz9r6
+  · rw [hfin]; show ({ z9 with rip := str }).reg 7 = some w
+    rw [reg_with_rip]; exact hz9r7
+  · rw [hfin]; show ({ z9 with rip := str }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hz9r8
+  · rw [hfin]; show ({ z9 with rip := str }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hz9r9
+  · rw [hfin]; show ({ z9 with rip := str }).reg 4 = some sp
+    rw [reg_with_rip]; exact hz9r4
+  · intro q h0
+    rw [hfin]; show ({ z9 with rip := str }).reg q = s.reg q
+    rw [reg_with_rip]; exact gz9 q h0
+  · have h1 : fin.mem = s.mem := by rw [hfin, mem_with_rip]; exact hz9mem
+    exact h1
+
+/-- `walk_top` with opcode 130 reaches its handler. -/
+theorem WalkPick_triple {im : Nat → Option (Ins × Nat)} {entry done prim lit str pick tor fromr rfetch locget locset jmp
+    jz call ret : Nat}
+    (hc : WalkCode im entry done prim lit str pick tor fromr rfetch locget locset jmp jz call ret)
+    (hentry : entry + 215 < W) :
+    ∀ (h : Height) (c i w sp nc : Nat), w + 56 ≤ W → (hlt : i < nc) → (hcW : c < W) →
+    ∀ s, s.rip = entry → s.reg 8 = some h.d → s.reg 9 = some h.a → s.reg 6 = some c →
+      s.reg 4 = some sp → s.reg 7 = some w → s.reg 1 = some i → 16 ≤ s.regs.length →
+      rd64 s.mem (w + 24) = some nc → s.mem.rd c = some 130 →
+      ∃ k s', run im k (Out.ok s) = Out.ok s' ∧ s'.rip = pick ∧ s'.reg 0 = some 130 ∧
+        s'.reg 1 = some i ∧ s'.reg 6 = some c ∧ s'.reg 7 = some w ∧
+        s'.reg 8 = some h.d ∧ s'.reg 9 = some h.a ∧ s'.reg 4 = some sp ∧
+        (∀ q, q ≠ 0 → s'.reg q = s.reg q) ∧ s'.mem = s.mem := by
+  intro h c i w sp nc hw56 hlt hcW s hrip hr8 hr9 hr6 hr4 hr7 hr1 hlen hfc hbyte
+
+  have hea24 : ea w 24 = w + 24 := Nat.mod_eq_of_lt (by omega)
+  have h57 : 57 % W = 57 := Nat.mod_eq_of_lt (by unfold W; decide)
+  have e1 : X86Int.step im s = .ok { s.set 0 (some nc) with rip := s.rip + 4 } :=
+    step_ld (by rw [hrip]; exact hc.d0) hr7 (by rw [hea24]; exact hfc)
+  obtain ⟨w1, hw1⟩ : ∃ u : X86Int.St, u = { s.set 0 (some nc) with rip := s.rip + 4 } := ⟨_, rfl⟩
+  have hw1rip : w1.rip = entry + 4 := by rw [hw1]; show s.rip + 4 = entry + 4; rw [hrip]
+  have hw1r0 : w1.reg 0 = some nc := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 0 = some nc
+    rw [reg_set_self (len_of_r9 hr9 (by decide))]
+  have hw1r1 : w1.reg 1 = some i := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 1 = some i
+    rw [reg_set_other (by decide)]; exact hr1
+  have hw1r6 : w1.reg 6 = some c := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 6 = some c
+    rw [reg_set_other (by decide)]; exact hr6
+  have hw1r7 : w1.reg 7 = some w := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 7 = some w
+    rw [reg_set_other (by decide)]; exact hr7
+  have hw1r8 : w1.reg 8 = some h.d := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 8 = some h.d
+    rw [reg_set_other (by decide)]; exact hr8
+  have hw1r9 : w1.reg 9 = some h.a := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 9 = some h.a
+    rw [reg_set_other (by decide)]; exact hr9
+  have hw1r4 : w1.reg 4 = some sp := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 4 = some sp
+    rw [reg_set_other (by decide)]; exact hr4
+  have hw1mem : w1.mem = s.mem := by
+    rw [hw1]
+    show (s.set 0 (some nc)).mem = s.mem
+    rw [mem_set]
+  have gw1 : ∀ q, q ≠ 0 → w1.reg q = s.reg q := by
+    intro q h0
+    rw [hw1]
+    show (s.set 0 (some nc)).reg q = s.reg q
+    rw [reg_set_other h0]
+  have e2 : X86Int.step im w1 = .ok { w1 with fl := (aluF .sub i nc).2, rip := w1.rip + 3 } :=
+    step_cmp (by rw [hw1rip]; exact hc.d1) hw1r1 hw1r0
+  obtain ⟨w2, hw2⟩ : ∃ u : X86Int.St, u = { w1 with fl := (aluF .sub i nc).2, rip := w1.rip + 3 } := ⟨_, rfl⟩
+  have hw2rip : w2.rip = entry + 7 := by rw [hw2]; show w1.rip + 3 = entry + 7; rw [hw1rip]
+
+  have hw2fl : X86Int.cond w2.fl 2 = some true := by
+    have hcf : w2.fl.cf = some true := by
+      rw [hw2]
+      show (aluF .sub i nc).2.cf = some true
+      exact aluF_sub_cf_true hlt
+    exact cond_cc2 hcf
+
+  have hw2r1 : w2.reg 1 = some i := by rw [hw2]; show w1.reg 1 = some i; exact hw1r1
+  have hw2r0 : w2.reg 0 = some nc := by rw [hw2]; show w1.reg 0 = some nc; exact hw1r0
+  have hw2r6 : w2.reg 6 = some c := by rw [hw2]; show w1.reg 6 = some c; exact hw1r6
+  have hw2r8 : w2.reg 8 = some h.d := by rw [hw2]; show w1.reg 8 = some h.d; exact hw1r8
+  have hw2r9 : w2.reg 9 = some h.a := by rw [hw2]; show w1.reg 9 = some h.a; exact hw1r9
+  have hw2r4 : w2.reg 4 = some sp := by rw [hw2]; show w1.reg 4 = some sp; exact hw1r4
+  have hw2mem : w2.mem = s.mem := by rw [hw2]; show w1.mem = s.mem; exact hw1mem
+  have gw2 : ∀ q, q ≠ 0 → w2.reg q = s.reg q := by
+    intro q h0
+    rw [hw2]; show w1.reg q = s.reg q; exact gw1 q h0
+
+  have e3 : X86Int.step im w2 = .ok { w2 with rip := entry + 14 } := by
+    have hh := step_jcc (im := im) (s := w2) (by rw [hw2rip]; exact hc.d2) hw2fl
+    simpa using hh
+  obtain ⟨w3, hw3⟩ : ∃ u : X86Int.St, u = { w2 with rip := entry + 14 } := ⟨_, rfl⟩
+  have hw3rip : w3.rip = entry + 14 := by rw [hw3]
+  have hw3r6 : w3.reg 6 = some c := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg 6 = some c
+    rw [reg_with_rip]; exact hw2r6
+  have hw3r1 : w3.reg 1 = some i := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg 1 = some i
+    rw [reg_with_rip]; exact hw2r1
+  have hw3r8 : w3.reg 8 = some h.d := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hw2r8
+  have hw3r9 : w3.reg 9 = some h.a := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hw2r9
+  have hw3r4 : w3.reg 4 = some sp := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hw2r4
+  have hw3r7 : w3.reg 7 = some w := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg 7 = some w
+    rw [reg_with_rip, gw2 7 (by decide)]; exact hr7
+  have hw3mem : w3.mem = s.mem := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).mem = s.mem
+    rw [mem_with_rip]; exact hw2mem
+  have gw3 : ∀ q, q ≠ 0 → w3.reg q = s.reg q := by
+    intro q h0
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gw2 q h0
+  have hea0 : ea c 0 = c := Nat.mod_eq_of_lt hcW
+  have e4 : X86Int.step im w3 = .ok { w3.set 0 (some 130) with rip := w3.rip + 3 } :=
+    step_ld8 (by rw [hw3rip]; exact hc.d4) hw3r6 (by rw [hw3mem, hea0]; exact hbyte)
+  obtain ⟨w4, hw4⟩ : ∃ u : X86Int.St, u = { w3.set 0 (some 130) with rip := w3.rip + 3 } := ⟨_, rfl⟩
+  have hw4rip : w4.rip = entry + 17 := by rw [hw4]; show w3.rip + 3 = entry + 17; rw [hw3rip]
+  have hw4r0 : w4.reg 0 = some 130 := by
+    rw [hw4]
+    show (w3.set 0 (some 130)).reg 0 = some 130
+    rw [reg_set_self (len_of_r9 hw3r9 (by decide))]
+  have hw4r1 : w4.reg 1 = some i := by
+    rw [hw4]
+    show (w3.set 0 (some 130)).reg 1 = some i
+    rw [reg_set_other (by decide)]; exact hw3r1
+  have hw4r6 : w4.reg 6 = some c := by
+    rw [hw4]
+    show (w3.set 0 (some 130)).reg 6 = some c
+    rw [reg_set_other (by decide)]; exact hw3r6
+  have hw4r7 : w4.reg 7 = some w := by
+    rw [hw4]
+    show (w3.set 0 (some 130)).reg 7 = some w
+    rw [reg_set_other (by decide)]; exact hw3r7
+  have hw4r8 : w4.reg 8 = some h.d := by
+    rw [hw4]
+    show (w3.set 0 (some 130)).reg 8 = some h.d
+    rw [reg_set_other (by decide)]; exact hw3r8
+  have hw4r9 : w4.reg 9 = some h.a := by
+    rw [hw4]
+    show (w3.set 0 (some 130)).reg 9 = some h.a
+    rw [reg_set_other (by decide)]; exact hw3r9
+  have hw4r4 : w4.reg 4 = some sp := by
+    rw [hw4]
+    show (w3.set 0 (some 130)).reg 4 = some sp
+    rw [reg_set_other (by decide)]; exact hw3r4
+  have hw4mem : w4.mem = s.mem := by
+    rw [hw4]
+    show (w3.set 0 (some 130)).mem = s.mem
+    rw [mem_set]; exact hw3mem
+  have gw4 : ∀ q, q ≠ 0 → w4.reg q = s.reg q := by
+    intro q h0
+    rw [hw4]
+    show (w3.set 0 (some 130)).reg q = s.reg q
+    rw [reg_set_other h0]; exact gw3 q h0
+  have e5 : X86Int.step im w4 = .ok { w4 with fl := (aluF .sub 130 (57 % W)).2, rip := w4.rip + 4 } :=
+    step_cmpI (by rw [hw4rip]; exact hc.d5) hw4r0
+  obtain ⟨w5, hw5⟩ : ∃ u : X86Int.St, u = { w4 with fl := (aluF .sub 130 (57 % W)).2, rip := w4.rip + 4 } := ⟨_, rfl⟩
+  have hw5rip : w5.rip = entry + 21 := by rw [hw5]; show w4.rip + 4 = entry + 21; rw [hw4rip]
+
+  have hw5fl : X86Int.cond w5.fl 3 = some true := by
+    have hcf : w5.fl.cf = some false := by
+      rw [hw5]
+      show (aluF .sub 130 (57 % W)).2.cf = some false
+      rw [h57]
+      exact aluF_sub_cf (by decide)
+    have hh := cond_cc3 hcf
+    simpa using hh
+  have hw5r0 : w5.reg 0 = some 130 := by rw [hw5]; show w4.reg 0 = some 130; exact hw4r0
+  have hw5r1 : w5.reg 1 = some i := by rw [hw5]; show w4.reg 1 = some i; exact hw4r1
+  have hw5r6 : w5.reg 6 = some c := by rw [hw5]; show w4.reg 6 = some c; exact hw4r6
+  have hw5r7 : w5.reg 7 = some w := by rw [hw5]; show w4.reg 7 = some w; exact hw4r7
+  have hw5r8 : w5.reg 8 = some h.d := by rw [hw5]; show w4.reg 8 = some h.d; exact hw4r8
+  have hw5r9 : w5.reg 9 = some h.a := by rw [hw5]; show w4.reg 9 = some h.a; exact hw4r9
+  have hw5r4 : w5.reg 4 = some sp := by rw [hw5]; show w4.reg 4 = some sp; exact hw4r4
+  have hw5mem : w5.mem = s.mem := by rw [hw5]; show w4.mem = s.mem; exact hw4mem
+  have gw5 : ∀ q, q ≠ 0 → w5.reg q = s.reg q := by
+    intro q h0
+    rw [hw5]; show w4.reg q = s.reg q; exact gw4 q h0
+
+  have e6 : X86Int.step im w5 = .ok { w5 with rip := entry + 28 } := by
+    have hh := step_jcc (im := im) (s := w5) (by rw [hw5rip]; exact hc.d6) hw5fl
+    simpa using hh
+  obtain ⟨x0, hx0⟩ : ∃ u : X86Int.St, u = { w5 with rip := entry + 28 } := ⟨_, rfl⟩
+  have hx0rip : x0.rip = entry + 28 := by rw [hx0]
+  have hx0r0 : x0.reg 0 = some 130 := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 0 = some 130
+    rw [reg_with_rip]; exact hw5r0
+  have hx0r1 : x0.reg 1 = some i := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 1 = some i
+    rw [reg_with_rip]; exact hw5r1
+  have hx0r6 : x0.reg 6 = some c := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 6 = some c
+    rw [reg_with_rip]; exact hw5r6
+  have hx0r7 : x0.reg 7 = some w := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 7 = some w
+    rw [reg_with_rip]; exact hw5r7
+  have hx0r8 : x0.reg 8 = some h.d := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hw5r8
+  have hx0r9 : x0.reg 9 = some h.a := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hw5r9
+  have hx0r4 : x0.reg 4 = some sp := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hw5r4
+  have hx0mem : x0.mem = s.mem := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).mem = s.mem
+    rw [mem_with_rip]; exact hw5mem
+  have gx0 : ∀ q, q ≠ 0 → x0.reg q = s.reg q := by
+    intro q h0
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gw5 q h0
+
+  have e7 : X86Int.step im x0 = .ok { x0 with fl := (aluF .sub 130 (128 % W)).2, rip := x0.rip + 7 } :=
+    step_cmpI (by rw [hx0rip]; exact hc.clit) hx0r0
+  obtain ⟨y0, hy0⟩ : ∃ u : X86Int.St, u = { x0 with fl := (aluF .sub 130 (128 % W)).2, rip := x0.rip + 7 } := ⟨_, rfl⟩
+  have hy0rip : y0.rip = entry + 35 := by rw [hy0]; show x0.rip + 7 = entry + 35; rw [hx0rip]
+
+  have hy0fl : X86Int.cond y0.fl 5 = some true := by
+    have hz : y0.fl.zf = some false := by
+      rw [hy0]
+      show (aluF .sub 130 (128 % W)).2.zf = some false
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy0r0 : y0.reg 0 = some 130 := by rw [hy0]; show x0.reg 0 = some 130; exact hx0r0
+  have hy0r1 : y0.reg 1 = some i := by rw [hy0]; show x0.reg 1 = some i; exact hx0r1
+  have hy0r6 : y0.reg 6 = some c := by rw [hy0]; show x0.reg 6 = some c; exact hx0r6
+  have hy0r7 : y0.reg 7 = some w := by rw [hy0]; show x0.reg 7 = some w; exact hx0r7
+  have hy0r8 : y0.reg 8 = some h.d := by rw [hy0]; show x0.reg 8 = some h.d; exact hx0r8
+  have hy0r9 : y0.reg 9 = some h.a := by rw [hy0]; show x0.reg 9 = some h.a; exact hx0r9
+  have hy0r4 : y0.reg 4 = some sp := by rw [hy0]; show x0.reg 4 = some sp; exact hx0r4
+  have hy0mem : y0.mem = s.mem := by rw [hy0]; show x0.mem = s.mem; exact hx0mem
+  have gy0 : ∀ q, q ≠ 0 → y0.reg q = s.reg q := by
+    intro q h0
+    rw [hy0]; show x0.reg q = s.reg q; exact gx0 q h0
+
+  have e8 : X86Int.step im y0 = .ok { y0 with rip := entry + 42 } := by
+    have hh := step_jcc (im := im) (s := y0) (by rw [hy0rip]; exact hc.clitj) hy0fl
+    simpa using hh
+  obtain ⟨x1, hx1⟩ : ∃ u : X86Int.St, u = { y0 with rip := entry + 42 } := ⟨_, rfl⟩
+  have hx1rip : x1.rip = entry + 42 := by rw [hx1]
+  have hx1r0 : x1.reg 0 = some 130 := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg 0 = some 130
+    rw [reg_with_rip]; exact hy0r0
+  have hx1r1 : x1.reg 1 = some i := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy0r1
+  have hx1r6 : x1.reg 6 = some c := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy0r6
+  have hx1r7 : x1.reg 7 = some w := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy0r7
+  have hx1r8 : x1.reg 8 = some h.d := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy0r8
+  have hx1r9 : x1.reg 9 = some h.a := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy0r9
+  have hx1r4 : x1.reg 4 = some sp := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy0r4
+  have hx1mem : x1.mem = s.mem := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).mem = s.mem
+    rw [mem_with_rip]; exact hy0mem
+  have gx1 : ∀ q, q ≠ 0 → x1.reg q = s.reg q := by
+    intro q h0
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy0 q h0
+
+  have e9 : X86Int.step im x1 = .ok { x1 with fl := (aluF .sub 130 (129 % W)).2, rip := x1.rip + 7 } :=
+    step_cmpI (by rw [hx1rip]; exact hc.cstr) hx1r0
+  obtain ⟨y1, hy1⟩ : ∃ u : X86Int.St, u = { x1 with fl := (aluF .sub 130 (129 % W)).2, rip := x1.rip + 7 } := ⟨_, rfl⟩
+  have hy1rip : y1.rip = entry + 49 := by rw [hy1]; show x1.rip + 7 = entry + 49; rw [hx1rip]
+
+  have hy1fl : X86Int.cond y1.fl 5 = some true := by
+    have hz : y1.fl.zf = some false := by
+      rw [hy1]
+      show (aluF .sub 130 (129 % W)).2.zf = some false
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy1r0 : y1.reg 0 = some 130 := by rw [hy1]; show x1.reg 0 = some 130; exact hx1r0
+  have hy1r1 : y1.reg 1 = some i := by rw [hy1]; show x1.reg 1 = some i; exact hx1r1
+  have hy1r6 : y1.reg 6 = some c := by rw [hy1]; show x1.reg 6 = some c; exact hx1r6
+  have hy1r7 : y1.reg 7 = some w := by rw [hy1]; show x1.reg 7 = some w; exact hx1r7
+  have hy1r8 : y1.reg 8 = some h.d := by rw [hy1]; show x1.reg 8 = some h.d; exact hx1r8
+  have hy1r9 : y1.reg 9 = some h.a := by rw [hy1]; show x1.reg 9 = some h.a; exact hx1r9
+  have hy1r4 : y1.reg 4 = some sp := by rw [hy1]; show x1.reg 4 = some sp; exact hx1r4
+  have hy1mem : y1.mem = s.mem := by rw [hy1]; show x1.mem = s.mem; exact hx1mem
+  have gy1 : ∀ q, q ≠ 0 → y1.reg q = s.reg q := by
+    intro q h0
+    rw [hy1]; show x1.reg q = s.reg q; exact gx1 q h0
+
+  have e10 : X86Int.step im y1 = .ok { y1 with rip := entry + 56 } := by
+    have hh := step_jcc (im := im) (s := y1) (by rw [hy1rip]; exact hc.cstrj) hy1fl
+    simpa using hh
+  obtain ⟨x2, hx2⟩ : ∃ u : X86Int.St, u = { y1 with rip := entry + 56 } := ⟨_, rfl⟩
+  have hx2rip : x2.rip = entry + 56 := by rw [hx2]
+  have hx2r0 : x2.reg 0 = some 130 := by
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).reg 0 = some 130
+    rw [reg_with_rip]; exact hy1r0
+  have hx2r1 : x2.reg 1 = some i := by
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy1r1
+  have hx2r6 : x2.reg 6 = some c := by
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy1r6
+  have hx2r7 : x2.reg 7 = some w := by
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy1r7
+  have hx2r8 : x2.reg 8 = some h.d := by
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy1r8
+  have hx2r9 : x2.reg 9 = some h.a := by
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy1r9
+  have hx2r4 : x2.reg 4 = some sp := by
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy1r4
+  have hx2mem : x2.mem = s.mem := by
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).mem = s.mem
+    rw [mem_with_rip]; exact hy1mem
+  have gx2 : ∀ q, q ≠ 0 → x2.reg q = s.reg q := by
+    intro q h0
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy1 q h0
+
+  have e11 : X86Int.step im x2 = .ok { x2 with fl := (aluF .sub 130 (130 % W)).2, rip := x2.rip + 7 } :=
+    step_cmpI (by rw [hx2rip]; exact hc.cpick) hx2r0
+  obtain ⟨y2, hy2⟩ : ∃ u : X86Int.St, u = { x2 with fl := (aluF .sub 130 (130 % W)).2, rip := x2.rip + 7 } := ⟨_, rfl⟩
+  have hy2rip : y2.rip = entry + 63 := by rw [hy2]; show x2.rip + 7 = entry + 63; rw [hx2rip]
+
+  have hy2fl : X86Int.cond y2.fl 5 = some false := by
+    have hz : y2.fl.zf = some true := by
+      rw [hy2]
+      show (aluF .sub 130 (130 % W)).2.zf = some true
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy2r0 : y2.reg 0 = some 130 := by rw [hy2]; show x2.reg 0 = some 130; exact hx2r0
+  have hy2r1 : y2.reg 1 = some i := by rw [hy2]; show x2.reg 1 = some i; exact hx2r1
+  have hy2r6 : y2.reg 6 = some c := by rw [hy2]; show x2.reg 6 = some c; exact hx2r6
+  have hy2r7 : y2.reg 7 = some w := by rw [hy2]; show x2.reg 7 = some w; exact hx2r7
+  have hy2r8 : y2.reg 8 = some h.d := by rw [hy2]; show x2.reg 8 = some h.d; exact hx2r8
+  have hy2r9 : y2.reg 9 = some h.a := by rw [hy2]; show x2.reg 9 = some h.a; exact hx2r9
+  have hy2r4 : y2.reg 4 = some sp := by rw [hy2]; show x2.reg 4 = some sp; exact hx2r4
+  have hy2mem : y2.mem = s.mem := by rw [hy2]; show x2.mem = s.mem; exact hx2mem
+  have gy2 : ∀ q, q ≠ 0 → y2.reg q = s.reg q := by
+    intro q h0
+    rw [hy2]; show x2.reg q = s.reg q; exact gx2 q h0
+
+  have e12 : X86Int.step im y2 = .ok { y2 with rip := entry + 65 } := by
+    have hh := step_jcc (im := im) (s := y2) (by rw [hy2rip]; exact hc.cpickj) hy2fl
+    simpa [hy2rip] using hh
+  obtain ⟨z9, hz9⟩ : ∃ u : X86Int.St, u = { y2 with rip := entry + 65 } := ⟨_, rfl⟩
+  have hz9rip : z9.rip = entry + 65 := by rw [hz9]
+  have hz9r0 : z9.reg 0 = some 130 := by
+    rw [hz9]
+    show ({ y2 with rip := entry + 65 }).reg 0 = some 130
+    rw [reg_with_rip]; exact hy2r0
+  have hz9r1 : z9.reg 1 = some i := by
+    rw [hz9]
+    show ({ y2 with rip := entry + 65 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy2r1
+  have hz9r6 : z9.reg 6 = some c := by
+    rw [hz9]
+    show ({ y2 with rip := entry + 65 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy2r6
+  have hz9r7 : z9.reg 7 = some w := by
+    rw [hz9]
+    show ({ y2 with rip := entry + 65 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy2r7
+  have hz9r8 : z9.reg 8 = some h.d := by
+    rw [hz9]
+    show ({ y2 with rip := entry + 65 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy2r8
+  have hz9r9 : z9.reg 9 = some h.a := by
+    rw [hz9]
+    show ({ y2 with rip := entry + 65 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy2r9
+  have hz9r4 : z9.reg 4 = some sp := by
+    rw [hz9]
+    show ({ y2 with rip := entry + 65 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy2r4
+  have hz9mem : z9.mem = s.mem := by
+    rw [hz9]
+    show ({ y2 with rip := entry + 65 }).mem = s.mem
+    rw [mem_with_rip]; exact hy2mem
+  have gz9 : ∀ q, q ≠ 0 → z9.reg q = s.reg q := by
+    intro q h0
+    rw [hz9]
+    show ({ y2 with rip := entry + 65 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy2 q h0
+
+  have e13 : X86Int.step im z9 = .ok { z9 with rip := pick } :=
+    step_jmp (by rw [hz9rip]; exact hc.cpickjmp)
+  obtain ⟨fin, hfin⟩ : ∃ u : X86Int.St, u = { z9 with rip := pick } := ⟨_, rfl⟩
+  have rw1 : run im 1 (Out.ok s) = Out.ok w1 := by rw [run_succ_ok im 0 s, e1, ← hw1, run_zero]
+  have rw2 : run im 1 (Out.ok w1) = Out.ok w2 := by rw [run_succ_ok im 0 w1, e2, ← hw2, run_zero]
+  have rw3 : run im 1 (Out.ok w2) = Out.ok w3 := by rw [run_succ_ok im 0 w2, e3, ← hw3, run_zero]
+  have rw4 : run im 1 (Out.ok w3) = Out.ok w4 := by rw [run_succ_ok im 0 w3, e4, ← hw4, run_zero]
+  have rw5 : run im 1 (Out.ok w4) = Out.ok w5 := by rw [run_succ_ok im 0 w4, e5, ← hw5, run_zero]
+  have rx0 : run im 1 (Out.ok w5) = Out.ok x0 := by rw [run_succ_ok im 0 w5, e6, ← hx0, run_zero]
+  have ry0 : run im 1 (Out.ok x0) = Out.ok y0 := by rw [run_succ_ok im 0 x0, e7, ← hy0, run_zero]
+  have rx1 : run im 1 (Out.ok y0) = Out.ok x1 := by rw [run_succ_ok im 0 y0, e8, ← hx1, run_zero]
+  have ry1 : run im 1 (Out.ok x1) = Out.ok y1 := by rw [run_succ_ok im 0 x1, e9, ← hy1, run_zero]
+  have rx2 : run im 1 (Out.ok y1) = Out.ok x2 := by rw [run_succ_ok im 0 y1, e10, ← hx2, run_zero]
+  have ry2 : run im 1 (Out.ok x2) = Out.ok y2 := by rw [run_succ_ok im 0 x2, e11, ← hy2, run_zero]
+  have rz9 : run im 1 (Out.ok y2) = Out.ok z9 := by rw [run_succ_ok im 0 y2, e12, ← hz9, run_zero]
+  have rfin : run im 1 (Out.ok z9) = Out.ok fin := by rw [run_succ_ok im 0 z9, e13, ← hfin, run_zero]
+  refine ⟨13, fin, by rw [run_add im 1 12, rw1, run_add im 1 11, rw2, run_add im 1 10, rw3, run_add im 1 9, rw4, run_add im 1 8, rw5, run_add im 1 7, rx0, run_add im 1 6, ry0, run_add im 1 5, rx1, run_add im 1 4, ry1, run_add im 1 3, rx2, run_add im 1 2, ry2, run_add im 1 1, rz9, rfin],
+    by rw [hfin], ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
+  · rw [hfin]; show ({ z9 with rip := pick }).reg 0 = some 130
+    rw [reg_with_rip]; exact hz9r0
+  · rw [hfin]; show ({ z9 with rip := pick }).reg 1 = some i
+    rw [reg_with_rip]; exact hz9r1
+  · rw [hfin]; show ({ z9 with rip := pick }).reg 6 = some c
+    rw [reg_with_rip]; exact hz9r6
+  · rw [hfin]; show ({ z9 with rip := pick }).reg 7 = some w
+    rw [reg_with_rip]; exact hz9r7
+  · rw [hfin]; show ({ z9 with rip := pick }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hz9r8
+  · rw [hfin]; show ({ z9 with rip := pick }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hz9r9
+  · rw [hfin]; show ({ z9 with rip := pick }).reg 4 = some sp
+    rw [reg_with_rip]; exact hz9r4
+  · intro q h0
+    rw [hfin]; show ({ z9 with rip := pick }).reg q = s.reg q
+    rw [reg_with_rip]; exact gz9 q h0
+  · have h1 : fin.mem = s.mem := by rw [hfin, mem_with_rip]; exact hz9mem
+    exact h1
+
+/-- `walk_top` with opcode 131 reaches its handler. -/
+theorem WalkTor_triple {im : Nat → Option (Ins × Nat)} {entry done prim lit str pick tor fromr rfetch locget locset jmp
+    jz call ret : Nat}
+    (hc : WalkCode im entry done prim lit str pick tor fromr rfetch locget locset jmp jz call ret)
+    (hentry : entry + 215 < W) :
+    ∀ (h : Height) (c i w sp nc : Nat), w + 56 ≤ W → (hlt : i < nc) → (hcW : c < W) →
+    ∀ s, s.rip = entry → s.reg 8 = some h.d → s.reg 9 = some h.a → s.reg 6 = some c →
+      s.reg 4 = some sp → s.reg 7 = some w → s.reg 1 = some i → 16 ≤ s.regs.length →
+      rd64 s.mem (w + 24) = some nc → s.mem.rd c = some 131 →
+      ∃ k s', run im k (Out.ok s) = Out.ok s' ∧ s'.rip = tor ∧ s'.reg 0 = some 131 ∧
+        s'.reg 1 = some i ∧ s'.reg 6 = some c ∧ s'.reg 7 = some w ∧
+        s'.reg 8 = some h.d ∧ s'.reg 9 = some h.a ∧ s'.reg 4 = some sp ∧
+        (∀ q, q ≠ 0 → s'.reg q = s.reg q) ∧ s'.mem = s.mem := by
+  intro h c i w sp nc hw56 hlt hcW s hrip hr8 hr9 hr6 hr4 hr7 hr1 hlen hfc hbyte
+
+  have hea24 : ea w 24 = w + 24 := Nat.mod_eq_of_lt (by omega)
+  have h57 : 57 % W = 57 := Nat.mod_eq_of_lt (by unfold W; decide)
+  have e1 : X86Int.step im s = .ok { s.set 0 (some nc) with rip := s.rip + 4 } :=
+    step_ld (by rw [hrip]; exact hc.d0) hr7 (by rw [hea24]; exact hfc)
+  obtain ⟨w1, hw1⟩ : ∃ u : X86Int.St, u = { s.set 0 (some nc) with rip := s.rip + 4 } := ⟨_, rfl⟩
+  have hw1rip : w1.rip = entry + 4 := by rw [hw1]; show s.rip + 4 = entry + 4; rw [hrip]
+  have hw1r0 : w1.reg 0 = some nc := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 0 = some nc
+    rw [reg_set_self (len_of_r9 hr9 (by decide))]
+  have hw1r1 : w1.reg 1 = some i := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 1 = some i
+    rw [reg_set_other (by decide)]; exact hr1
+  have hw1r6 : w1.reg 6 = some c := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 6 = some c
+    rw [reg_set_other (by decide)]; exact hr6
+  have hw1r7 : w1.reg 7 = some w := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 7 = some w
+    rw [reg_set_other (by decide)]; exact hr7
+  have hw1r8 : w1.reg 8 = some h.d := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 8 = some h.d
+    rw [reg_set_other (by decide)]; exact hr8
+  have hw1r9 : w1.reg 9 = some h.a := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 9 = some h.a
+    rw [reg_set_other (by decide)]; exact hr9
+  have hw1r4 : w1.reg 4 = some sp := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 4 = some sp
+    rw [reg_set_other (by decide)]; exact hr4
+  have hw1mem : w1.mem = s.mem := by
+    rw [hw1]
+    show (s.set 0 (some nc)).mem = s.mem
+    rw [mem_set]
+  have gw1 : ∀ q, q ≠ 0 → w1.reg q = s.reg q := by
+    intro q h0
+    rw [hw1]
+    show (s.set 0 (some nc)).reg q = s.reg q
+    rw [reg_set_other h0]
+  have e2 : X86Int.step im w1 = .ok { w1 with fl := (aluF .sub i nc).2, rip := w1.rip + 3 } :=
+    step_cmp (by rw [hw1rip]; exact hc.d1) hw1r1 hw1r0
+  obtain ⟨w2, hw2⟩ : ∃ u : X86Int.St, u = { w1 with fl := (aluF .sub i nc).2, rip := w1.rip + 3 } := ⟨_, rfl⟩
+  have hw2rip : w2.rip = entry + 7 := by rw [hw2]; show w1.rip + 3 = entry + 7; rw [hw1rip]
+
+  have hw2fl : X86Int.cond w2.fl 2 = some true := by
+    have hcf : w2.fl.cf = some true := by
+      rw [hw2]
+      show (aluF .sub i nc).2.cf = some true
+      exact aluF_sub_cf_true hlt
+    exact cond_cc2 hcf
+
+  have hw2r1 : w2.reg 1 = some i := by rw [hw2]; show w1.reg 1 = some i; exact hw1r1
+  have hw2r0 : w2.reg 0 = some nc := by rw [hw2]; show w1.reg 0 = some nc; exact hw1r0
+  have hw2r6 : w2.reg 6 = some c := by rw [hw2]; show w1.reg 6 = some c; exact hw1r6
+  have hw2r8 : w2.reg 8 = some h.d := by rw [hw2]; show w1.reg 8 = some h.d; exact hw1r8
+  have hw2r9 : w2.reg 9 = some h.a := by rw [hw2]; show w1.reg 9 = some h.a; exact hw1r9
+  have hw2r4 : w2.reg 4 = some sp := by rw [hw2]; show w1.reg 4 = some sp; exact hw1r4
+  have hw2mem : w2.mem = s.mem := by rw [hw2]; show w1.mem = s.mem; exact hw1mem
+  have gw2 : ∀ q, q ≠ 0 → w2.reg q = s.reg q := by
+    intro q h0
+    rw [hw2]; show w1.reg q = s.reg q; exact gw1 q h0
+
+  have e3 : X86Int.step im w2 = .ok { w2 with rip := entry + 14 } := by
+    have hh := step_jcc (im := im) (s := w2) (by rw [hw2rip]; exact hc.d2) hw2fl
+    simpa using hh
+  obtain ⟨w3, hw3⟩ : ∃ u : X86Int.St, u = { w2 with rip := entry + 14 } := ⟨_, rfl⟩
+  have hw3rip : w3.rip = entry + 14 := by rw [hw3]
+  have hw3r6 : w3.reg 6 = some c := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg 6 = some c
+    rw [reg_with_rip]; exact hw2r6
+  have hw3r1 : w3.reg 1 = some i := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg 1 = some i
+    rw [reg_with_rip]; exact hw2r1
+  have hw3r8 : w3.reg 8 = some h.d := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hw2r8
+  have hw3r9 : w3.reg 9 = some h.a := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hw2r9
+  have hw3r4 : w3.reg 4 = some sp := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hw2r4
+  have hw3r7 : w3.reg 7 = some w := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg 7 = some w
+    rw [reg_with_rip, gw2 7 (by decide)]; exact hr7
+  have hw3mem : w3.mem = s.mem := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).mem = s.mem
+    rw [mem_with_rip]; exact hw2mem
+  have gw3 : ∀ q, q ≠ 0 → w3.reg q = s.reg q := by
+    intro q h0
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gw2 q h0
+  have hea0 : ea c 0 = c := Nat.mod_eq_of_lt hcW
+  have e4 : X86Int.step im w3 = .ok { w3.set 0 (some 131) with rip := w3.rip + 3 } :=
+    step_ld8 (by rw [hw3rip]; exact hc.d4) hw3r6 (by rw [hw3mem, hea0]; exact hbyte)
+  obtain ⟨w4, hw4⟩ : ∃ u : X86Int.St, u = { w3.set 0 (some 131) with rip := w3.rip + 3 } := ⟨_, rfl⟩
+  have hw4rip : w4.rip = entry + 17 := by rw [hw4]; show w3.rip + 3 = entry + 17; rw [hw3rip]
+  have hw4r0 : w4.reg 0 = some 131 := by
+    rw [hw4]
+    show (w3.set 0 (some 131)).reg 0 = some 131
+    rw [reg_set_self (len_of_r9 hw3r9 (by decide))]
+  have hw4r1 : w4.reg 1 = some i := by
+    rw [hw4]
+    show (w3.set 0 (some 131)).reg 1 = some i
+    rw [reg_set_other (by decide)]; exact hw3r1
+  have hw4r6 : w4.reg 6 = some c := by
+    rw [hw4]
+    show (w3.set 0 (some 131)).reg 6 = some c
+    rw [reg_set_other (by decide)]; exact hw3r6
+  have hw4r7 : w4.reg 7 = some w := by
+    rw [hw4]
+    show (w3.set 0 (some 131)).reg 7 = some w
+    rw [reg_set_other (by decide)]; exact hw3r7
+  have hw4r8 : w4.reg 8 = some h.d := by
+    rw [hw4]
+    show (w3.set 0 (some 131)).reg 8 = some h.d
+    rw [reg_set_other (by decide)]; exact hw3r8
+  have hw4r9 : w4.reg 9 = some h.a := by
+    rw [hw4]
+    show (w3.set 0 (some 131)).reg 9 = some h.a
+    rw [reg_set_other (by decide)]; exact hw3r9
+  have hw4r4 : w4.reg 4 = some sp := by
+    rw [hw4]
+    show (w3.set 0 (some 131)).reg 4 = some sp
+    rw [reg_set_other (by decide)]; exact hw3r4
+  have hw4mem : w4.mem = s.mem := by
+    rw [hw4]
+    show (w3.set 0 (some 131)).mem = s.mem
+    rw [mem_set]; exact hw3mem
+  have gw4 : ∀ q, q ≠ 0 → w4.reg q = s.reg q := by
+    intro q h0
+    rw [hw4]
+    show (w3.set 0 (some 131)).reg q = s.reg q
+    rw [reg_set_other h0]; exact gw3 q h0
+  have e5 : X86Int.step im w4 = .ok { w4 with fl := (aluF .sub 131 (57 % W)).2, rip := w4.rip + 4 } :=
+    step_cmpI (by rw [hw4rip]; exact hc.d5) hw4r0
+  obtain ⟨w5, hw5⟩ : ∃ u : X86Int.St, u = { w4 with fl := (aluF .sub 131 (57 % W)).2, rip := w4.rip + 4 } := ⟨_, rfl⟩
+  have hw5rip : w5.rip = entry + 21 := by rw [hw5]; show w4.rip + 4 = entry + 21; rw [hw4rip]
+
+  have hw5fl : X86Int.cond w5.fl 3 = some true := by
+    have hcf : w5.fl.cf = some false := by
+      rw [hw5]
+      show (aluF .sub 131 (57 % W)).2.cf = some false
+      rw [h57]
+      exact aluF_sub_cf (by decide)
+    have hh := cond_cc3 hcf
+    simpa using hh
+  have hw5r0 : w5.reg 0 = some 131 := by rw [hw5]; show w4.reg 0 = some 131; exact hw4r0
+  have hw5r1 : w5.reg 1 = some i := by rw [hw5]; show w4.reg 1 = some i; exact hw4r1
+  have hw5r6 : w5.reg 6 = some c := by rw [hw5]; show w4.reg 6 = some c; exact hw4r6
+  have hw5r7 : w5.reg 7 = some w := by rw [hw5]; show w4.reg 7 = some w; exact hw4r7
+  have hw5r8 : w5.reg 8 = some h.d := by rw [hw5]; show w4.reg 8 = some h.d; exact hw4r8
+  have hw5r9 : w5.reg 9 = some h.a := by rw [hw5]; show w4.reg 9 = some h.a; exact hw4r9
+  have hw5r4 : w5.reg 4 = some sp := by rw [hw5]; show w4.reg 4 = some sp; exact hw4r4
+  have hw5mem : w5.mem = s.mem := by rw [hw5]; show w4.mem = s.mem; exact hw4mem
+  have gw5 : ∀ q, q ≠ 0 → w5.reg q = s.reg q := by
+    intro q h0
+    rw [hw5]; show w4.reg q = s.reg q; exact gw4 q h0
+
+  have e6 : X86Int.step im w5 = .ok { w5 with rip := entry + 28 } := by
+    have hh := step_jcc (im := im) (s := w5) (by rw [hw5rip]; exact hc.d6) hw5fl
+    simpa using hh
+  obtain ⟨x0, hx0⟩ : ∃ u : X86Int.St, u = { w5 with rip := entry + 28 } := ⟨_, rfl⟩
+  have hx0rip : x0.rip = entry + 28 := by rw [hx0]
+  have hx0r0 : x0.reg 0 = some 131 := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 0 = some 131
+    rw [reg_with_rip]; exact hw5r0
+  have hx0r1 : x0.reg 1 = some i := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 1 = some i
+    rw [reg_with_rip]; exact hw5r1
+  have hx0r6 : x0.reg 6 = some c := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 6 = some c
+    rw [reg_with_rip]; exact hw5r6
+  have hx0r7 : x0.reg 7 = some w := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 7 = some w
+    rw [reg_with_rip]; exact hw5r7
+  have hx0r8 : x0.reg 8 = some h.d := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hw5r8
+  have hx0r9 : x0.reg 9 = some h.a := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hw5r9
+  have hx0r4 : x0.reg 4 = some sp := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hw5r4
+  have hx0mem : x0.mem = s.mem := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).mem = s.mem
+    rw [mem_with_rip]; exact hw5mem
+  have gx0 : ∀ q, q ≠ 0 → x0.reg q = s.reg q := by
+    intro q h0
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gw5 q h0
+
+  have e7 : X86Int.step im x0 = .ok { x0 with fl := (aluF .sub 131 (128 % W)).2, rip := x0.rip + 7 } :=
+    step_cmpI (by rw [hx0rip]; exact hc.clit) hx0r0
+  obtain ⟨y0, hy0⟩ : ∃ u : X86Int.St, u = { x0 with fl := (aluF .sub 131 (128 % W)).2, rip := x0.rip + 7 } := ⟨_, rfl⟩
+  have hy0rip : y0.rip = entry + 35 := by rw [hy0]; show x0.rip + 7 = entry + 35; rw [hx0rip]
+
+  have hy0fl : X86Int.cond y0.fl 5 = some true := by
+    have hz : y0.fl.zf = some false := by
+      rw [hy0]
+      show (aluF .sub 131 (128 % W)).2.zf = some false
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy0r0 : y0.reg 0 = some 131 := by rw [hy0]; show x0.reg 0 = some 131; exact hx0r0
+  have hy0r1 : y0.reg 1 = some i := by rw [hy0]; show x0.reg 1 = some i; exact hx0r1
+  have hy0r6 : y0.reg 6 = some c := by rw [hy0]; show x0.reg 6 = some c; exact hx0r6
+  have hy0r7 : y0.reg 7 = some w := by rw [hy0]; show x0.reg 7 = some w; exact hx0r7
+  have hy0r8 : y0.reg 8 = some h.d := by rw [hy0]; show x0.reg 8 = some h.d; exact hx0r8
+  have hy0r9 : y0.reg 9 = some h.a := by rw [hy0]; show x0.reg 9 = some h.a; exact hx0r9
+  have hy0r4 : y0.reg 4 = some sp := by rw [hy0]; show x0.reg 4 = some sp; exact hx0r4
+  have hy0mem : y0.mem = s.mem := by rw [hy0]; show x0.mem = s.mem; exact hx0mem
+  have gy0 : ∀ q, q ≠ 0 → y0.reg q = s.reg q := by
+    intro q h0
+    rw [hy0]; show x0.reg q = s.reg q; exact gx0 q h0
+
+  have e8 : X86Int.step im y0 = .ok { y0 with rip := entry + 42 } := by
+    have hh := step_jcc (im := im) (s := y0) (by rw [hy0rip]; exact hc.clitj) hy0fl
+    simpa using hh
+  obtain ⟨x1, hx1⟩ : ∃ u : X86Int.St, u = { y0 with rip := entry + 42 } := ⟨_, rfl⟩
+  have hx1rip : x1.rip = entry + 42 := by rw [hx1]
+  have hx1r0 : x1.reg 0 = some 131 := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg 0 = some 131
+    rw [reg_with_rip]; exact hy0r0
+  have hx1r1 : x1.reg 1 = some i := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy0r1
+  have hx1r6 : x1.reg 6 = some c := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy0r6
+  have hx1r7 : x1.reg 7 = some w := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy0r7
+  have hx1r8 : x1.reg 8 = some h.d := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy0r8
+  have hx1r9 : x1.reg 9 = some h.a := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy0r9
+  have hx1r4 : x1.reg 4 = some sp := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy0r4
+  have hx1mem : x1.mem = s.mem := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).mem = s.mem
+    rw [mem_with_rip]; exact hy0mem
+  have gx1 : ∀ q, q ≠ 0 → x1.reg q = s.reg q := by
+    intro q h0
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy0 q h0
+
+  have e9 : X86Int.step im x1 = .ok { x1 with fl := (aluF .sub 131 (129 % W)).2, rip := x1.rip + 7 } :=
+    step_cmpI (by rw [hx1rip]; exact hc.cstr) hx1r0
+  obtain ⟨y1, hy1⟩ : ∃ u : X86Int.St, u = { x1 with fl := (aluF .sub 131 (129 % W)).2, rip := x1.rip + 7 } := ⟨_, rfl⟩
+  have hy1rip : y1.rip = entry + 49 := by rw [hy1]; show x1.rip + 7 = entry + 49; rw [hx1rip]
+
+  have hy1fl : X86Int.cond y1.fl 5 = some true := by
+    have hz : y1.fl.zf = some false := by
+      rw [hy1]
+      show (aluF .sub 131 (129 % W)).2.zf = some false
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy1r0 : y1.reg 0 = some 131 := by rw [hy1]; show x1.reg 0 = some 131; exact hx1r0
+  have hy1r1 : y1.reg 1 = some i := by rw [hy1]; show x1.reg 1 = some i; exact hx1r1
+  have hy1r6 : y1.reg 6 = some c := by rw [hy1]; show x1.reg 6 = some c; exact hx1r6
+  have hy1r7 : y1.reg 7 = some w := by rw [hy1]; show x1.reg 7 = some w; exact hx1r7
+  have hy1r8 : y1.reg 8 = some h.d := by rw [hy1]; show x1.reg 8 = some h.d; exact hx1r8
+  have hy1r9 : y1.reg 9 = some h.a := by rw [hy1]; show x1.reg 9 = some h.a; exact hx1r9
+  have hy1r4 : y1.reg 4 = some sp := by rw [hy1]; show x1.reg 4 = some sp; exact hx1r4
+  have hy1mem : y1.mem = s.mem := by rw [hy1]; show x1.mem = s.mem; exact hx1mem
+  have gy1 : ∀ q, q ≠ 0 → y1.reg q = s.reg q := by
+    intro q h0
+    rw [hy1]; show x1.reg q = s.reg q; exact gx1 q h0
+
+  have e10 : X86Int.step im y1 = .ok { y1 with rip := entry + 56 } := by
+    have hh := step_jcc (im := im) (s := y1) (by rw [hy1rip]; exact hc.cstrj) hy1fl
+    simpa using hh
+  obtain ⟨x2, hx2⟩ : ∃ u : X86Int.St, u = { y1 with rip := entry + 56 } := ⟨_, rfl⟩
+  have hx2rip : x2.rip = entry + 56 := by rw [hx2]
+  have hx2r0 : x2.reg 0 = some 131 := by
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).reg 0 = some 131
+    rw [reg_with_rip]; exact hy1r0
+  have hx2r1 : x2.reg 1 = some i := by
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy1r1
+  have hx2r6 : x2.reg 6 = some c := by
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy1r6
+  have hx2r7 : x2.reg 7 = some w := by
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy1r7
+  have hx2r8 : x2.reg 8 = some h.d := by
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy1r8
+  have hx2r9 : x2.reg 9 = some h.a := by
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy1r9
+  have hx2r4 : x2.reg 4 = some sp := by
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy1r4
+  have hx2mem : x2.mem = s.mem := by
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).mem = s.mem
+    rw [mem_with_rip]; exact hy1mem
+  have gx2 : ∀ q, q ≠ 0 → x2.reg q = s.reg q := by
+    intro q h0
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy1 q h0
+
+  have e11 : X86Int.step im x2 = .ok { x2 with fl := (aluF .sub 131 (130 % W)).2, rip := x2.rip + 7 } :=
+    step_cmpI (by rw [hx2rip]; exact hc.cpick) hx2r0
+  obtain ⟨y2, hy2⟩ : ∃ u : X86Int.St, u = { x2 with fl := (aluF .sub 131 (130 % W)).2, rip := x2.rip + 7 } := ⟨_, rfl⟩
+  have hy2rip : y2.rip = entry + 63 := by rw [hy2]; show x2.rip + 7 = entry + 63; rw [hx2rip]
+
+  have hy2fl : X86Int.cond y2.fl 5 = some true := by
+    have hz : y2.fl.zf = some false := by
+      rw [hy2]
+      show (aluF .sub 131 (130 % W)).2.zf = some false
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy2r0 : y2.reg 0 = some 131 := by rw [hy2]; show x2.reg 0 = some 131; exact hx2r0
+  have hy2r1 : y2.reg 1 = some i := by rw [hy2]; show x2.reg 1 = some i; exact hx2r1
+  have hy2r6 : y2.reg 6 = some c := by rw [hy2]; show x2.reg 6 = some c; exact hx2r6
+  have hy2r7 : y2.reg 7 = some w := by rw [hy2]; show x2.reg 7 = some w; exact hx2r7
+  have hy2r8 : y2.reg 8 = some h.d := by rw [hy2]; show x2.reg 8 = some h.d; exact hx2r8
+  have hy2r9 : y2.reg 9 = some h.a := by rw [hy2]; show x2.reg 9 = some h.a; exact hx2r9
+  have hy2r4 : y2.reg 4 = some sp := by rw [hy2]; show x2.reg 4 = some sp; exact hx2r4
+  have hy2mem : y2.mem = s.mem := by rw [hy2]; show x2.mem = s.mem; exact hx2mem
+  have gy2 : ∀ q, q ≠ 0 → y2.reg q = s.reg q := by
+    intro q h0
+    rw [hy2]; show x2.reg q = s.reg q; exact gx2 q h0
+
+  have e12 : X86Int.step im y2 = .ok { y2 with rip := entry + 70 } := by
+    have hh := step_jcc (im := im) (s := y2) (by rw [hy2rip]; exact hc.cpickj) hy2fl
+    simpa using hh
+  obtain ⟨x3, hx3⟩ : ∃ u : X86Int.St, u = { y2 with rip := entry + 70 } := ⟨_, rfl⟩
+  have hx3rip : x3.rip = entry + 70 := by rw [hx3]
+  have hx3r0 : x3.reg 0 = some 131 := by
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).reg 0 = some 131
+    rw [reg_with_rip]; exact hy2r0
+  have hx3r1 : x3.reg 1 = some i := by
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy2r1
+  have hx3r6 : x3.reg 6 = some c := by
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy2r6
+  have hx3r7 : x3.reg 7 = some w := by
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy2r7
+  have hx3r8 : x3.reg 8 = some h.d := by
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy2r8
+  have hx3r9 : x3.reg 9 = some h.a := by
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy2r9
+  have hx3r4 : x3.reg 4 = some sp := by
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy2r4
+  have hx3mem : x3.mem = s.mem := by
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).mem = s.mem
+    rw [mem_with_rip]; exact hy2mem
+  have gx3 : ∀ q, q ≠ 0 → x3.reg q = s.reg q := by
+    intro q h0
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy2 q h0
+
+  have e13 : X86Int.step im x3 = .ok { x3 with fl := (aluF .sub 131 (131 % W)).2, rip := x3.rip + 7 } :=
+    step_cmpI (by rw [hx3rip]; exact hc.ctor) hx3r0
+  obtain ⟨y3, hy3⟩ : ∃ u : X86Int.St, u = { x3 with fl := (aluF .sub 131 (131 % W)).2, rip := x3.rip + 7 } := ⟨_, rfl⟩
+  have hy3rip : y3.rip = entry + 77 := by rw [hy3]; show x3.rip + 7 = entry + 77; rw [hx3rip]
+
+  have hy3fl : X86Int.cond y3.fl 5 = some false := by
+    have hz : y3.fl.zf = some true := by
+      rw [hy3]
+      show (aluF .sub 131 (131 % W)).2.zf = some true
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy3r0 : y3.reg 0 = some 131 := by rw [hy3]; show x3.reg 0 = some 131; exact hx3r0
+  have hy3r1 : y3.reg 1 = some i := by rw [hy3]; show x3.reg 1 = some i; exact hx3r1
+  have hy3r6 : y3.reg 6 = some c := by rw [hy3]; show x3.reg 6 = some c; exact hx3r6
+  have hy3r7 : y3.reg 7 = some w := by rw [hy3]; show x3.reg 7 = some w; exact hx3r7
+  have hy3r8 : y3.reg 8 = some h.d := by rw [hy3]; show x3.reg 8 = some h.d; exact hx3r8
+  have hy3r9 : y3.reg 9 = some h.a := by rw [hy3]; show x3.reg 9 = some h.a; exact hx3r9
+  have hy3r4 : y3.reg 4 = some sp := by rw [hy3]; show x3.reg 4 = some sp; exact hx3r4
+  have hy3mem : y3.mem = s.mem := by rw [hy3]; show x3.mem = s.mem; exact hx3mem
+  have gy3 : ∀ q, q ≠ 0 → y3.reg q = s.reg q := by
+    intro q h0
+    rw [hy3]; show x3.reg q = s.reg q; exact gx3 q h0
+
+  have e14 : X86Int.step im y3 = .ok { y3 with rip := entry + 79 } := by
+    have hh := step_jcc (im := im) (s := y3) (by rw [hy3rip]; exact hc.ctorj) hy3fl
+    simpa [hy3rip] using hh
+  obtain ⟨z9, hz9⟩ : ∃ u : X86Int.St, u = { y3 with rip := entry + 79 } := ⟨_, rfl⟩
+  have hz9rip : z9.rip = entry + 79 := by rw [hz9]
+  have hz9r0 : z9.reg 0 = some 131 := by
+    rw [hz9]
+    show ({ y3 with rip := entry + 79 }).reg 0 = some 131
+    rw [reg_with_rip]; exact hy3r0
+  have hz9r1 : z9.reg 1 = some i := by
+    rw [hz9]
+    show ({ y3 with rip := entry + 79 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy3r1
+  have hz9r6 : z9.reg 6 = some c := by
+    rw [hz9]
+    show ({ y3 with rip := entry + 79 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy3r6
+  have hz9r7 : z9.reg 7 = some w := by
+    rw [hz9]
+    show ({ y3 with rip := entry + 79 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy3r7
+  have hz9r8 : z9.reg 8 = some h.d := by
+    rw [hz9]
+    show ({ y3 with rip := entry + 79 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy3r8
+  have hz9r9 : z9.reg 9 = some h.a := by
+    rw [hz9]
+    show ({ y3 with rip := entry + 79 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy3r9
+  have hz9r4 : z9.reg 4 = some sp := by
+    rw [hz9]
+    show ({ y3 with rip := entry + 79 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy3r4
+  have hz9mem : z9.mem = s.mem := by
+    rw [hz9]
+    show ({ y3 with rip := entry + 79 }).mem = s.mem
+    rw [mem_with_rip]; exact hy3mem
+  have gz9 : ∀ q, q ≠ 0 → z9.reg q = s.reg q := by
+    intro q h0
+    rw [hz9]
+    show ({ y3 with rip := entry + 79 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy3 q h0
+
+  have e15 : X86Int.step im z9 = .ok { z9 with rip := tor } :=
+    step_jmp (by rw [hz9rip]; exact hc.ctorjmp)
+  obtain ⟨fin, hfin⟩ : ∃ u : X86Int.St, u = { z9 with rip := tor } := ⟨_, rfl⟩
+  have rw1 : run im 1 (Out.ok s) = Out.ok w1 := by rw [run_succ_ok im 0 s, e1, ← hw1, run_zero]
+  have rw2 : run im 1 (Out.ok w1) = Out.ok w2 := by rw [run_succ_ok im 0 w1, e2, ← hw2, run_zero]
+  have rw3 : run im 1 (Out.ok w2) = Out.ok w3 := by rw [run_succ_ok im 0 w2, e3, ← hw3, run_zero]
+  have rw4 : run im 1 (Out.ok w3) = Out.ok w4 := by rw [run_succ_ok im 0 w3, e4, ← hw4, run_zero]
+  have rw5 : run im 1 (Out.ok w4) = Out.ok w5 := by rw [run_succ_ok im 0 w4, e5, ← hw5, run_zero]
+  have rx0 : run im 1 (Out.ok w5) = Out.ok x0 := by rw [run_succ_ok im 0 w5, e6, ← hx0, run_zero]
+  have ry0 : run im 1 (Out.ok x0) = Out.ok y0 := by rw [run_succ_ok im 0 x0, e7, ← hy0, run_zero]
+  have rx1 : run im 1 (Out.ok y0) = Out.ok x1 := by rw [run_succ_ok im 0 y0, e8, ← hx1, run_zero]
+  have ry1 : run im 1 (Out.ok x1) = Out.ok y1 := by rw [run_succ_ok im 0 x1, e9, ← hy1, run_zero]
+  have rx2 : run im 1 (Out.ok y1) = Out.ok x2 := by rw [run_succ_ok im 0 y1, e10, ← hx2, run_zero]
+  have ry2 : run im 1 (Out.ok x2) = Out.ok y2 := by rw [run_succ_ok im 0 x2, e11, ← hy2, run_zero]
+  have rx3 : run im 1 (Out.ok y2) = Out.ok x3 := by rw [run_succ_ok im 0 y2, e12, ← hx3, run_zero]
+  have ry3 : run im 1 (Out.ok x3) = Out.ok y3 := by rw [run_succ_ok im 0 x3, e13, ← hy3, run_zero]
+  have rz9 : run im 1 (Out.ok y3) = Out.ok z9 := by rw [run_succ_ok im 0 y3, e14, ← hz9, run_zero]
+  have rfin : run im 1 (Out.ok z9) = Out.ok fin := by rw [run_succ_ok im 0 z9, e15, ← hfin, run_zero]
+  refine ⟨15, fin, by rw [run_add im 1 14, rw1, run_add im 1 13, rw2, run_add im 1 12, rw3, run_add im 1 11, rw4, run_add im 1 10, rw5, run_add im 1 9, rx0, run_add im 1 8, ry0, run_add im 1 7, rx1, run_add im 1 6, ry1, run_add im 1 5, rx2, run_add im 1 4, ry2, run_add im 1 3, rx3, run_add im 1 2, ry3, run_add im 1 1, rz9, rfin],
+    by rw [hfin], ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
+  · rw [hfin]; show ({ z9 with rip := tor }).reg 0 = some 131
+    rw [reg_with_rip]; exact hz9r0
+  · rw [hfin]; show ({ z9 with rip := tor }).reg 1 = some i
+    rw [reg_with_rip]; exact hz9r1
+  · rw [hfin]; show ({ z9 with rip := tor }).reg 6 = some c
+    rw [reg_with_rip]; exact hz9r6
+  · rw [hfin]; show ({ z9 with rip := tor }).reg 7 = some w
+    rw [reg_with_rip]; exact hz9r7
+  · rw [hfin]; show ({ z9 with rip := tor }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hz9r8
+  · rw [hfin]; show ({ z9 with rip := tor }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hz9r9
+  · rw [hfin]; show ({ z9 with rip := tor }).reg 4 = some sp
+    rw [reg_with_rip]; exact hz9r4
+  · intro q h0
+    rw [hfin]; show ({ z9 with rip := tor }).reg q = s.reg q
+    rw [reg_with_rip]; exact gz9 q h0
+  · have h1 : fin.mem = s.mem := by rw [hfin, mem_with_rip]; exact hz9mem
+    exact h1
+
+/-- `walk_top` with opcode 132 reaches its handler. -/
+theorem WalkFromr_triple {im : Nat → Option (Ins × Nat)} {entry done prim lit str pick tor fromr rfetch locget locset jmp
+    jz call ret : Nat}
+    (hc : WalkCode im entry done prim lit str pick tor fromr rfetch locget locset jmp jz call ret)
+    (hentry : entry + 215 < W) :
+    ∀ (h : Height) (c i w sp nc : Nat), w + 56 ≤ W → (hlt : i < nc) → (hcW : c < W) →
+    ∀ s, s.rip = entry → s.reg 8 = some h.d → s.reg 9 = some h.a → s.reg 6 = some c →
+      s.reg 4 = some sp → s.reg 7 = some w → s.reg 1 = some i → 16 ≤ s.regs.length →
+      rd64 s.mem (w + 24) = some nc → s.mem.rd c = some 132 →
+      ∃ k s', run im k (Out.ok s) = Out.ok s' ∧ s'.rip = fromr ∧ s'.reg 0 = some 132 ∧
+        s'.reg 1 = some i ∧ s'.reg 6 = some c ∧ s'.reg 7 = some w ∧
+        s'.reg 8 = some h.d ∧ s'.reg 9 = some h.a ∧ s'.reg 4 = some sp ∧
+        (∀ q, q ≠ 0 → s'.reg q = s.reg q) ∧ s'.mem = s.mem := by
+  intro h c i w sp nc hw56 hlt hcW s hrip hr8 hr9 hr6 hr4 hr7 hr1 hlen hfc hbyte
+
+  have hea24 : ea w 24 = w + 24 := Nat.mod_eq_of_lt (by omega)
+  have h57 : 57 % W = 57 := Nat.mod_eq_of_lt (by unfold W; decide)
+  have e1 : X86Int.step im s = .ok { s.set 0 (some nc) with rip := s.rip + 4 } :=
+    step_ld (by rw [hrip]; exact hc.d0) hr7 (by rw [hea24]; exact hfc)
+  obtain ⟨w1, hw1⟩ : ∃ u : X86Int.St, u = { s.set 0 (some nc) with rip := s.rip + 4 } := ⟨_, rfl⟩
+  have hw1rip : w1.rip = entry + 4 := by rw [hw1]; show s.rip + 4 = entry + 4; rw [hrip]
+  have hw1r0 : w1.reg 0 = some nc := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 0 = some nc
+    rw [reg_set_self (len_of_r9 hr9 (by decide))]
+  have hw1r1 : w1.reg 1 = some i := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 1 = some i
+    rw [reg_set_other (by decide)]; exact hr1
+  have hw1r6 : w1.reg 6 = some c := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 6 = some c
+    rw [reg_set_other (by decide)]; exact hr6
+  have hw1r7 : w1.reg 7 = some w := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 7 = some w
+    rw [reg_set_other (by decide)]; exact hr7
+  have hw1r8 : w1.reg 8 = some h.d := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 8 = some h.d
+    rw [reg_set_other (by decide)]; exact hr8
+  have hw1r9 : w1.reg 9 = some h.a := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 9 = some h.a
+    rw [reg_set_other (by decide)]; exact hr9
+  have hw1r4 : w1.reg 4 = some sp := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 4 = some sp
+    rw [reg_set_other (by decide)]; exact hr4
+  have hw1mem : w1.mem = s.mem := by
+    rw [hw1]
+    show (s.set 0 (some nc)).mem = s.mem
+    rw [mem_set]
+  have gw1 : ∀ q, q ≠ 0 → w1.reg q = s.reg q := by
+    intro q h0
+    rw [hw1]
+    show (s.set 0 (some nc)).reg q = s.reg q
+    rw [reg_set_other h0]
+  have e2 : X86Int.step im w1 = .ok { w1 with fl := (aluF .sub i nc).2, rip := w1.rip + 3 } :=
+    step_cmp (by rw [hw1rip]; exact hc.d1) hw1r1 hw1r0
+  obtain ⟨w2, hw2⟩ : ∃ u : X86Int.St, u = { w1 with fl := (aluF .sub i nc).2, rip := w1.rip + 3 } := ⟨_, rfl⟩
+  have hw2rip : w2.rip = entry + 7 := by rw [hw2]; show w1.rip + 3 = entry + 7; rw [hw1rip]
+
+  have hw2fl : X86Int.cond w2.fl 2 = some true := by
+    have hcf : w2.fl.cf = some true := by
+      rw [hw2]
+      show (aluF .sub i nc).2.cf = some true
+      exact aluF_sub_cf_true hlt
+    exact cond_cc2 hcf
+
+  have hw2r1 : w2.reg 1 = some i := by rw [hw2]; show w1.reg 1 = some i; exact hw1r1
+  have hw2r0 : w2.reg 0 = some nc := by rw [hw2]; show w1.reg 0 = some nc; exact hw1r0
+  have hw2r6 : w2.reg 6 = some c := by rw [hw2]; show w1.reg 6 = some c; exact hw1r6
+  have hw2r8 : w2.reg 8 = some h.d := by rw [hw2]; show w1.reg 8 = some h.d; exact hw1r8
+  have hw2r9 : w2.reg 9 = some h.a := by rw [hw2]; show w1.reg 9 = some h.a; exact hw1r9
+  have hw2r4 : w2.reg 4 = some sp := by rw [hw2]; show w1.reg 4 = some sp; exact hw1r4
+  have hw2mem : w2.mem = s.mem := by rw [hw2]; show w1.mem = s.mem; exact hw1mem
+  have gw2 : ∀ q, q ≠ 0 → w2.reg q = s.reg q := by
+    intro q h0
+    rw [hw2]; show w1.reg q = s.reg q; exact gw1 q h0
+
+  have e3 : X86Int.step im w2 = .ok { w2 with rip := entry + 14 } := by
+    have hh := step_jcc (im := im) (s := w2) (by rw [hw2rip]; exact hc.d2) hw2fl
+    simpa using hh
+  obtain ⟨w3, hw3⟩ : ∃ u : X86Int.St, u = { w2 with rip := entry + 14 } := ⟨_, rfl⟩
+  have hw3rip : w3.rip = entry + 14 := by rw [hw3]
+  have hw3r6 : w3.reg 6 = some c := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg 6 = some c
+    rw [reg_with_rip]; exact hw2r6
+  have hw3r1 : w3.reg 1 = some i := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg 1 = some i
+    rw [reg_with_rip]; exact hw2r1
+  have hw3r8 : w3.reg 8 = some h.d := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hw2r8
+  have hw3r9 : w3.reg 9 = some h.a := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hw2r9
+  have hw3r4 : w3.reg 4 = some sp := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hw2r4
+  have hw3r7 : w3.reg 7 = some w := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg 7 = some w
+    rw [reg_with_rip, gw2 7 (by decide)]; exact hr7
+  have hw3mem : w3.mem = s.mem := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).mem = s.mem
+    rw [mem_with_rip]; exact hw2mem
+  have gw3 : ∀ q, q ≠ 0 → w3.reg q = s.reg q := by
+    intro q h0
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gw2 q h0
+  have hea0 : ea c 0 = c := Nat.mod_eq_of_lt hcW
+  have e4 : X86Int.step im w3 = .ok { w3.set 0 (some 132) with rip := w3.rip + 3 } :=
+    step_ld8 (by rw [hw3rip]; exact hc.d4) hw3r6 (by rw [hw3mem, hea0]; exact hbyte)
+  obtain ⟨w4, hw4⟩ : ∃ u : X86Int.St, u = { w3.set 0 (some 132) with rip := w3.rip + 3 } := ⟨_, rfl⟩
+  have hw4rip : w4.rip = entry + 17 := by rw [hw4]; show w3.rip + 3 = entry + 17; rw [hw3rip]
+  have hw4r0 : w4.reg 0 = some 132 := by
+    rw [hw4]
+    show (w3.set 0 (some 132)).reg 0 = some 132
+    rw [reg_set_self (len_of_r9 hw3r9 (by decide))]
+  have hw4r1 : w4.reg 1 = some i := by
+    rw [hw4]
+    show (w3.set 0 (some 132)).reg 1 = some i
+    rw [reg_set_other (by decide)]; exact hw3r1
+  have hw4r6 : w4.reg 6 = some c := by
+    rw [hw4]
+    show (w3.set 0 (some 132)).reg 6 = some c
+    rw [reg_set_other (by decide)]; exact hw3r6
+  have hw4r7 : w4.reg 7 = some w := by
+    rw [hw4]
+    show (w3.set 0 (some 132)).reg 7 = some w
+    rw [reg_set_other (by decide)]; exact hw3r7
+  have hw4r8 : w4.reg 8 = some h.d := by
+    rw [hw4]
+    show (w3.set 0 (some 132)).reg 8 = some h.d
+    rw [reg_set_other (by decide)]; exact hw3r8
+  have hw4r9 : w4.reg 9 = some h.a := by
+    rw [hw4]
+    show (w3.set 0 (some 132)).reg 9 = some h.a
+    rw [reg_set_other (by decide)]; exact hw3r9
+  have hw4r4 : w4.reg 4 = some sp := by
+    rw [hw4]
+    show (w3.set 0 (some 132)).reg 4 = some sp
+    rw [reg_set_other (by decide)]; exact hw3r4
+  have hw4mem : w4.mem = s.mem := by
+    rw [hw4]
+    show (w3.set 0 (some 132)).mem = s.mem
+    rw [mem_set]; exact hw3mem
+  have gw4 : ∀ q, q ≠ 0 → w4.reg q = s.reg q := by
+    intro q h0
+    rw [hw4]
+    show (w3.set 0 (some 132)).reg q = s.reg q
+    rw [reg_set_other h0]; exact gw3 q h0
+  have e5 : X86Int.step im w4 = .ok { w4 with fl := (aluF .sub 132 (57 % W)).2, rip := w4.rip + 4 } :=
+    step_cmpI (by rw [hw4rip]; exact hc.d5) hw4r0
+  obtain ⟨w5, hw5⟩ : ∃ u : X86Int.St, u = { w4 with fl := (aluF .sub 132 (57 % W)).2, rip := w4.rip + 4 } := ⟨_, rfl⟩
+  have hw5rip : w5.rip = entry + 21 := by rw [hw5]; show w4.rip + 4 = entry + 21; rw [hw4rip]
+
+  have hw5fl : X86Int.cond w5.fl 3 = some true := by
+    have hcf : w5.fl.cf = some false := by
+      rw [hw5]
+      show (aluF .sub 132 (57 % W)).2.cf = some false
+      rw [h57]
+      exact aluF_sub_cf (by decide)
+    have hh := cond_cc3 hcf
+    simpa using hh
+  have hw5r0 : w5.reg 0 = some 132 := by rw [hw5]; show w4.reg 0 = some 132; exact hw4r0
+  have hw5r1 : w5.reg 1 = some i := by rw [hw5]; show w4.reg 1 = some i; exact hw4r1
+  have hw5r6 : w5.reg 6 = some c := by rw [hw5]; show w4.reg 6 = some c; exact hw4r6
+  have hw5r7 : w5.reg 7 = some w := by rw [hw5]; show w4.reg 7 = some w; exact hw4r7
+  have hw5r8 : w5.reg 8 = some h.d := by rw [hw5]; show w4.reg 8 = some h.d; exact hw4r8
+  have hw5r9 : w5.reg 9 = some h.a := by rw [hw5]; show w4.reg 9 = some h.a; exact hw4r9
+  have hw5r4 : w5.reg 4 = some sp := by rw [hw5]; show w4.reg 4 = some sp; exact hw4r4
+  have hw5mem : w5.mem = s.mem := by rw [hw5]; show w4.mem = s.mem; exact hw4mem
+  have gw5 : ∀ q, q ≠ 0 → w5.reg q = s.reg q := by
+    intro q h0
+    rw [hw5]; show w4.reg q = s.reg q; exact gw4 q h0
+
+  have e6 : X86Int.step im w5 = .ok { w5 with rip := entry + 28 } := by
+    have hh := step_jcc (im := im) (s := w5) (by rw [hw5rip]; exact hc.d6) hw5fl
+    simpa using hh
+  obtain ⟨x0, hx0⟩ : ∃ u : X86Int.St, u = { w5 with rip := entry + 28 } := ⟨_, rfl⟩
+  have hx0rip : x0.rip = entry + 28 := by rw [hx0]
+  have hx0r0 : x0.reg 0 = some 132 := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 0 = some 132
+    rw [reg_with_rip]; exact hw5r0
+  have hx0r1 : x0.reg 1 = some i := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 1 = some i
+    rw [reg_with_rip]; exact hw5r1
+  have hx0r6 : x0.reg 6 = some c := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 6 = some c
+    rw [reg_with_rip]; exact hw5r6
+  have hx0r7 : x0.reg 7 = some w := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 7 = some w
+    rw [reg_with_rip]; exact hw5r7
+  have hx0r8 : x0.reg 8 = some h.d := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hw5r8
+  have hx0r9 : x0.reg 9 = some h.a := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hw5r9
+  have hx0r4 : x0.reg 4 = some sp := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hw5r4
+  have hx0mem : x0.mem = s.mem := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).mem = s.mem
+    rw [mem_with_rip]; exact hw5mem
+  have gx0 : ∀ q, q ≠ 0 → x0.reg q = s.reg q := by
+    intro q h0
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gw5 q h0
+
+  have e7 : X86Int.step im x0 = .ok { x0 with fl := (aluF .sub 132 (128 % W)).2, rip := x0.rip + 7 } :=
+    step_cmpI (by rw [hx0rip]; exact hc.clit) hx0r0
+  obtain ⟨y0, hy0⟩ : ∃ u : X86Int.St, u = { x0 with fl := (aluF .sub 132 (128 % W)).2, rip := x0.rip + 7 } := ⟨_, rfl⟩
+  have hy0rip : y0.rip = entry + 35 := by rw [hy0]; show x0.rip + 7 = entry + 35; rw [hx0rip]
+
+  have hy0fl : X86Int.cond y0.fl 5 = some true := by
+    have hz : y0.fl.zf = some false := by
+      rw [hy0]
+      show (aluF .sub 132 (128 % W)).2.zf = some false
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy0r0 : y0.reg 0 = some 132 := by rw [hy0]; show x0.reg 0 = some 132; exact hx0r0
+  have hy0r1 : y0.reg 1 = some i := by rw [hy0]; show x0.reg 1 = some i; exact hx0r1
+  have hy0r6 : y0.reg 6 = some c := by rw [hy0]; show x0.reg 6 = some c; exact hx0r6
+  have hy0r7 : y0.reg 7 = some w := by rw [hy0]; show x0.reg 7 = some w; exact hx0r7
+  have hy0r8 : y0.reg 8 = some h.d := by rw [hy0]; show x0.reg 8 = some h.d; exact hx0r8
+  have hy0r9 : y0.reg 9 = some h.a := by rw [hy0]; show x0.reg 9 = some h.a; exact hx0r9
+  have hy0r4 : y0.reg 4 = some sp := by rw [hy0]; show x0.reg 4 = some sp; exact hx0r4
+  have hy0mem : y0.mem = s.mem := by rw [hy0]; show x0.mem = s.mem; exact hx0mem
+  have gy0 : ∀ q, q ≠ 0 → y0.reg q = s.reg q := by
+    intro q h0
+    rw [hy0]; show x0.reg q = s.reg q; exact gx0 q h0
+
+  have e8 : X86Int.step im y0 = .ok { y0 with rip := entry + 42 } := by
+    have hh := step_jcc (im := im) (s := y0) (by rw [hy0rip]; exact hc.clitj) hy0fl
+    simpa using hh
+  obtain ⟨x1, hx1⟩ : ∃ u : X86Int.St, u = { y0 with rip := entry + 42 } := ⟨_, rfl⟩
+  have hx1rip : x1.rip = entry + 42 := by rw [hx1]
+  have hx1r0 : x1.reg 0 = some 132 := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg 0 = some 132
+    rw [reg_with_rip]; exact hy0r0
+  have hx1r1 : x1.reg 1 = some i := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy0r1
+  have hx1r6 : x1.reg 6 = some c := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy0r6
+  have hx1r7 : x1.reg 7 = some w := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy0r7
+  have hx1r8 : x1.reg 8 = some h.d := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy0r8
+  have hx1r9 : x1.reg 9 = some h.a := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy0r9
+  have hx1r4 : x1.reg 4 = some sp := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy0r4
+  have hx1mem : x1.mem = s.mem := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).mem = s.mem
+    rw [mem_with_rip]; exact hy0mem
+  have gx1 : ∀ q, q ≠ 0 → x1.reg q = s.reg q := by
+    intro q h0
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy0 q h0
+
+  have e9 : X86Int.step im x1 = .ok { x1 with fl := (aluF .sub 132 (129 % W)).2, rip := x1.rip + 7 } :=
+    step_cmpI (by rw [hx1rip]; exact hc.cstr) hx1r0
+  obtain ⟨y1, hy1⟩ : ∃ u : X86Int.St, u = { x1 with fl := (aluF .sub 132 (129 % W)).2, rip := x1.rip + 7 } := ⟨_, rfl⟩
+  have hy1rip : y1.rip = entry + 49 := by rw [hy1]; show x1.rip + 7 = entry + 49; rw [hx1rip]
+
+  have hy1fl : X86Int.cond y1.fl 5 = some true := by
+    have hz : y1.fl.zf = some false := by
+      rw [hy1]
+      show (aluF .sub 132 (129 % W)).2.zf = some false
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy1r0 : y1.reg 0 = some 132 := by rw [hy1]; show x1.reg 0 = some 132; exact hx1r0
+  have hy1r1 : y1.reg 1 = some i := by rw [hy1]; show x1.reg 1 = some i; exact hx1r1
+  have hy1r6 : y1.reg 6 = some c := by rw [hy1]; show x1.reg 6 = some c; exact hx1r6
+  have hy1r7 : y1.reg 7 = some w := by rw [hy1]; show x1.reg 7 = some w; exact hx1r7
+  have hy1r8 : y1.reg 8 = some h.d := by rw [hy1]; show x1.reg 8 = some h.d; exact hx1r8
+  have hy1r9 : y1.reg 9 = some h.a := by rw [hy1]; show x1.reg 9 = some h.a; exact hx1r9
+  have hy1r4 : y1.reg 4 = some sp := by rw [hy1]; show x1.reg 4 = some sp; exact hx1r4
+  have hy1mem : y1.mem = s.mem := by rw [hy1]; show x1.mem = s.mem; exact hx1mem
+  have gy1 : ∀ q, q ≠ 0 → y1.reg q = s.reg q := by
+    intro q h0
+    rw [hy1]; show x1.reg q = s.reg q; exact gx1 q h0
+
+  have e10 : X86Int.step im y1 = .ok { y1 with rip := entry + 56 } := by
+    have hh := step_jcc (im := im) (s := y1) (by rw [hy1rip]; exact hc.cstrj) hy1fl
+    simpa using hh
+  obtain ⟨x2, hx2⟩ : ∃ u : X86Int.St, u = { y1 with rip := entry + 56 } := ⟨_, rfl⟩
+  have hx2rip : x2.rip = entry + 56 := by rw [hx2]
+  have hx2r0 : x2.reg 0 = some 132 := by
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).reg 0 = some 132
+    rw [reg_with_rip]; exact hy1r0
+  have hx2r1 : x2.reg 1 = some i := by
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy1r1
+  have hx2r6 : x2.reg 6 = some c := by
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy1r6
+  have hx2r7 : x2.reg 7 = some w := by
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy1r7
+  have hx2r8 : x2.reg 8 = some h.d := by
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy1r8
+  have hx2r9 : x2.reg 9 = some h.a := by
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy1r9
+  have hx2r4 : x2.reg 4 = some sp := by
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy1r4
+  have hx2mem : x2.mem = s.mem := by
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).mem = s.mem
+    rw [mem_with_rip]; exact hy1mem
+  have gx2 : ∀ q, q ≠ 0 → x2.reg q = s.reg q := by
+    intro q h0
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy1 q h0
+
+  have e11 : X86Int.step im x2 = .ok { x2 with fl := (aluF .sub 132 (130 % W)).2, rip := x2.rip + 7 } :=
+    step_cmpI (by rw [hx2rip]; exact hc.cpick) hx2r0
+  obtain ⟨y2, hy2⟩ : ∃ u : X86Int.St, u = { x2 with fl := (aluF .sub 132 (130 % W)).2, rip := x2.rip + 7 } := ⟨_, rfl⟩
+  have hy2rip : y2.rip = entry + 63 := by rw [hy2]; show x2.rip + 7 = entry + 63; rw [hx2rip]
+
+  have hy2fl : X86Int.cond y2.fl 5 = some true := by
+    have hz : y2.fl.zf = some false := by
+      rw [hy2]
+      show (aluF .sub 132 (130 % W)).2.zf = some false
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy2r0 : y2.reg 0 = some 132 := by rw [hy2]; show x2.reg 0 = some 132; exact hx2r0
+  have hy2r1 : y2.reg 1 = some i := by rw [hy2]; show x2.reg 1 = some i; exact hx2r1
+  have hy2r6 : y2.reg 6 = some c := by rw [hy2]; show x2.reg 6 = some c; exact hx2r6
+  have hy2r7 : y2.reg 7 = some w := by rw [hy2]; show x2.reg 7 = some w; exact hx2r7
+  have hy2r8 : y2.reg 8 = some h.d := by rw [hy2]; show x2.reg 8 = some h.d; exact hx2r8
+  have hy2r9 : y2.reg 9 = some h.a := by rw [hy2]; show x2.reg 9 = some h.a; exact hx2r9
+  have hy2r4 : y2.reg 4 = some sp := by rw [hy2]; show x2.reg 4 = some sp; exact hx2r4
+  have hy2mem : y2.mem = s.mem := by rw [hy2]; show x2.mem = s.mem; exact hx2mem
+  have gy2 : ∀ q, q ≠ 0 → y2.reg q = s.reg q := by
+    intro q h0
+    rw [hy2]; show x2.reg q = s.reg q; exact gx2 q h0
+
+  have e12 : X86Int.step im y2 = .ok { y2 with rip := entry + 70 } := by
+    have hh := step_jcc (im := im) (s := y2) (by rw [hy2rip]; exact hc.cpickj) hy2fl
+    simpa using hh
+  obtain ⟨x3, hx3⟩ : ∃ u : X86Int.St, u = { y2 with rip := entry + 70 } := ⟨_, rfl⟩
+  have hx3rip : x3.rip = entry + 70 := by rw [hx3]
+  have hx3r0 : x3.reg 0 = some 132 := by
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).reg 0 = some 132
+    rw [reg_with_rip]; exact hy2r0
+  have hx3r1 : x3.reg 1 = some i := by
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy2r1
+  have hx3r6 : x3.reg 6 = some c := by
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy2r6
+  have hx3r7 : x3.reg 7 = some w := by
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy2r7
+  have hx3r8 : x3.reg 8 = some h.d := by
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy2r8
+  have hx3r9 : x3.reg 9 = some h.a := by
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy2r9
+  have hx3r4 : x3.reg 4 = some sp := by
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy2r4
+  have hx3mem : x3.mem = s.mem := by
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).mem = s.mem
+    rw [mem_with_rip]; exact hy2mem
+  have gx3 : ∀ q, q ≠ 0 → x3.reg q = s.reg q := by
+    intro q h0
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy2 q h0
+
+  have e13 : X86Int.step im x3 = .ok { x3 with fl := (aluF .sub 132 (131 % W)).2, rip := x3.rip + 7 } :=
+    step_cmpI (by rw [hx3rip]; exact hc.ctor) hx3r0
+  obtain ⟨y3, hy3⟩ : ∃ u : X86Int.St, u = { x3 with fl := (aluF .sub 132 (131 % W)).2, rip := x3.rip + 7 } := ⟨_, rfl⟩
+  have hy3rip : y3.rip = entry + 77 := by rw [hy3]; show x3.rip + 7 = entry + 77; rw [hx3rip]
+
+  have hy3fl : X86Int.cond y3.fl 5 = some true := by
+    have hz : y3.fl.zf = some false := by
+      rw [hy3]
+      show (aluF .sub 132 (131 % W)).2.zf = some false
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy3r0 : y3.reg 0 = some 132 := by rw [hy3]; show x3.reg 0 = some 132; exact hx3r0
+  have hy3r1 : y3.reg 1 = some i := by rw [hy3]; show x3.reg 1 = some i; exact hx3r1
+  have hy3r6 : y3.reg 6 = some c := by rw [hy3]; show x3.reg 6 = some c; exact hx3r6
+  have hy3r7 : y3.reg 7 = some w := by rw [hy3]; show x3.reg 7 = some w; exact hx3r7
+  have hy3r8 : y3.reg 8 = some h.d := by rw [hy3]; show x3.reg 8 = some h.d; exact hx3r8
+  have hy3r9 : y3.reg 9 = some h.a := by rw [hy3]; show x3.reg 9 = some h.a; exact hx3r9
+  have hy3r4 : y3.reg 4 = some sp := by rw [hy3]; show x3.reg 4 = some sp; exact hx3r4
+  have hy3mem : y3.mem = s.mem := by rw [hy3]; show x3.mem = s.mem; exact hx3mem
+  have gy3 : ∀ q, q ≠ 0 → y3.reg q = s.reg q := by
+    intro q h0
+    rw [hy3]; show x3.reg q = s.reg q; exact gx3 q h0
+
+  have e14 : X86Int.step im y3 = .ok { y3 with rip := entry + 84 } := by
+    have hh := step_jcc (im := im) (s := y3) (by rw [hy3rip]; exact hc.ctorj) hy3fl
+    simpa using hh
+  obtain ⟨x4, hx4⟩ : ∃ u : X86Int.St, u = { y3 with rip := entry + 84 } := ⟨_, rfl⟩
+  have hx4rip : x4.rip = entry + 84 := by rw [hx4]
+  have hx4r0 : x4.reg 0 = some 132 := by
+    rw [hx4]
+    show ({ y3 with rip := entry + 84 }).reg 0 = some 132
+    rw [reg_with_rip]; exact hy3r0
+  have hx4r1 : x4.reg 1 = some i := by
+    rw [hx4]
+    show ({ y3 with rip := entry + 84 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy3r1
+  have hx4r6 : x4.reg 6 = some c := by
+    rw [hx4]
+    show ({ y3 with rip := entry + 84 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy3r6
+  have hx4r7 : x4.reg 7 = some w := by
+    rw [hx4]
+    show ({ y3 with rip := entry + 84 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy3r7
+  have hx4r8 : x4.reg 8 = some h.d := by
+    rw [hx4]
+    show ({ y3 with rip := entry + 84 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy3r8
+  have hx4r9 : x4.reg 9 = some h.a := by
+    rw [hx4]
+    show ({ y3 with rip := entry + 84 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy3r9
+  have hx4r4 : x4.reg 4 = some sp := by
+    rw [hx4]
+    show ({ y3 with rip := entry + 84 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy3r4
+  have hx4mem : x4.mem = s.mem := by
+    rw [hx4]
+    show ({ y3 with rip := entry + 84 }).mem = s.mem
+    rw [mem_with_rip]; exact hy3mem
+  have gx4 : ∀ q, q ≠ 0 → x4.reg q = s.reg q := by
+    intro q h0
+    rw [hx4]
+    show ({ y3 with rip := entry + 84 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy3 q h0
+
+  have e15 : X86Int.step im x4 = .ok { x4 with fl := (aluF .sub 132 (132 % W)).2, rip := x4.rip + 7 } :=
+    step_cmpI (by rw [hx4rip]; exact hc.cfromr) hx4r0
+  obtain ⟨y4, hy4⟩ : ∃ u : X86Int.St, u = { x4 with fl := (aluF .sub 132 (132 % W)).2, rip := x4.rip + 7 } := ⟨_, rfl⟩
+  have hy4rip : y4.rip = entry + 91 := by rw [hy4]; show x4.rip + 7 = entry + 91; rw [hx4rip]
+
+  have hy4fl : X86Int.cond y4.fl 5 = some false := by
+    have hz : y4.fl.zf = some true := by
+      rw [hy4]
+      show (aluF .sub 132 (132 % W)).2.zf = some true
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy4r0 : y4.reg 0 = some 132 := by rw [hy4]; show x4.reg 0 = some 132; exact hx4r0
+  have hy4r1 : y4.reg 1 = some i := by rw [hy4]; show x4.reg 1 = some i; exact hx4r1
+  have hy4r6 : y4.reg 6 = some c := by rw [hy4]; show x4.reg 6 = some c; exact hx4r6
+  have hy4r7 : y4.reg 7 = some w := by rw [hy4]; show x4.reg 7 = some w; exact hx4r7
+  have hy4r8 : y4.reg 8 = some h.d := by rw [hy4]; show x4.reg 8 = some h.d; exact hx4r8
+  have hy4r9 : y4.reg 9 = some h.a := by rw [hy4]; show x4.reg 9 = some h.a; exact hx4r9
+  have hy4r4 : y4.reg 4 = some sp := by rw [hy4]; show x4.reg 4 = some sp; exact hx4r4
+  have hy4mem : y4.mem = s.mem := by rw [hy4]; show x4.mem = s.mem; exact hx4mem
+  have gy4 : ∀ q, q ≠ 0 → y4.reg q = s.reg q := by
+    intro q h0
+    rw [hy4]; show x4.reg q = s.reg q; exact gx4 q h0
+
+  have e16 : X86Int.step im y4 = .ok { y4 with rip := entry + 93 } := by
+    have hh := step_jcc (im := im) (s := y4) (by rw [hy4rip]; exact hc.cfromrj) hy4fl
+    simpa [hy4rip] using hh
+  obtain ⟨z9, hz9⟩ : ∃ u : X86Int.St, u = { y4 with rip := entry + 93 } := ⟨_, rfl⟩
+  have hz9rip : z9.rip = entry + 93 := by rw [hz9]
+  have hz9r0 : z9.reg 0 = some 132 := by
+    rw [hz9]
+    show ({ y4 with rip := entry + 93 }).reg 0 = some 132
+    rw [reg_with_rip]; exact hy4r0
+  have hz9r1 : z9.reg 1 = some i := by
+    rw [hz9]
+    show ({ y4 with rip := entry + 93 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy4r1
+  have hz9r6 : z9.reg 6 = some c := by
+    rw [hz9]
+    show ({ y4 with rip := entry + 93 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy4r6
+  have hz9r7 : z9.reg 7 = some w := by
+    rw [hz9]
+    show ({ y4 with rip := entry + 93 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy4r7
+  have hz9r8 : z9.reg 8 = some h.d := by
+    rw [hz9]
+    show ({ y4 with rip := entry + 93 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy4r8
+  have hz9r9 : z9.reg 9 = some h.a := by
+    rw [hz9]
+    show ({ y4 with rip := entry + 93 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy4r9
+  have hz9r4 : z9.reg 4 = some sp := by
+    rw [hz9]
+    show ({ y4 with rip := entry + 93 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy4r4
+  have hz9mem : z9.mem = s.mem := by
+    rw [hz9]
+    show ({ y4 with rip := entry + 93 }).mem = s.mem
+    rw [mem_with_rip]; exact hy4mem
+  have gz9 : ∀ q, q ≠ 0 → z9.reg q = s.reg q := by
+    intro q h0
+    rw [hz9]
+    show ({ y4 with rip := entry + 93 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy4 q h0
+
+  have e17 : X86Int.step im z9 = .ok { z9 with rip := fromr } :=
+    step_jmp (by rw [hz9rip]; exact hc.cfromrjmp)
+  obtain ⟨fin, hfin⟩ : ∃ u : X86Int.St, u = { z9 with rip := fromr } := ⟨_, rfl⟩
+  have rw1 : run im 1 (Out.ok s) = Out.ok w1 := by rw [run_succ_ok im 0 s, e1, ← hw1, run_zero]
+  have rw2 : run im 1 (Out.ok w1) = Out.ok w2 := by rw [run_succ_ok im 0 w1, e2, ← hw2, run_zero]
+  have rw3 : run im 1 (Out.ok w2) = Out.ok w3 := by rw [run_succ_ok im 0 w2, e3, ← hw3, run_zero]
+  have rw4 : run im 1 (Out.ok w3) = Out.ok w4 := by rw [run_succ_ok im 0 w3, e4, ← hw4, run_zero]
+  have rw5 : run im 1 (Out.ok w4) = Out.ok w5 := by rw [run_succ_ok im 0 w4, e5, ← hw5, run_zero]
+  have rx0 : run im 1 (Out.ok w5) = Out.ok x0 := by rw [run_succ_ok im 0 w5, e6, ← hx0, run_zero]
+  have ry0 : run im 1 (Out.ok x0) = Out.ok y0 := by rw [run_succ_ok im 0 x0, e7, ← hy0, run_zero]
+  have rx1 : run im 1 (Out.ok y0) = Out.ok x1 := by rw [run_succ_ok im 0 y0, e8, ← hx1, run_zero]
+  have ry1 : run im 1 (Out.ok x1) = Out.ok y1 := by rw [run_succ_ok im 0 x1, e9, ← hy1, run_zero]
+  have rx2 : run im 1 (Out.ok y1) = Out.ok x2 := by rw [run_succ_ok im 0 y1, e10, ← hx2, run_zero]
+  have ry2 : run im 1 (Out.ok x2) = Out.ok y2 := by rw [run_succ_ok im 0 x2, e11, ← hy2, run_zero]
+  have rx3 : run im 1 (Out.ok y2) = Out.ok x3 := by rw [run_succ_ok im 0 y2, e12, ← hx3, run_zero]
+  have ry3 : run im 1 (Out.ok x3) = Out.ok y3 := by rw [run_succ_ok im 0 x3, e13, ← hy3, run_zero]
+  have rx4 : run im 1 (Out.ok y3) = Out.ok x4 := by rw [run_succ_ok im 0 y3, e14, ← hx4, run_zero]
+  have ry4 : run im 1 (Out.ok x4) = Out.ok y4 := by rw [run_succ_ok im 0 x4, e15, ← hy4, run_zero]
+  have rz9 : run im 1 (Out.ok y4) = Out.ok z9 := by rw [run_succ_ok im 0 y4, e16, ← hz9, run_zero]
+  have rfin : run im 1 (Out.ok z9) = Out.ok fin := by rw [run_succ_ok im 0 z9, e17, ← hfin, run_zero]
+  refine ⟨17, fin, by rw [run_add im 1 16, rw1, run_add im 1 15, rw2, run_add im 1 14, rw3, run_add im 1 13, rw4, run_add im 1 12, rw5, run_add im 1 11, rx0, run_add im 1 10, ry0, run_add im 1 9, rx1, run_add im 1 8, ry1, run_add im 1 7, rx2, run_add im 1 6, ry2, run_add im 1 5, rx3, run_add im 1 4, ry3, run_add im 1 3, rx4, run_add im 1 2, ry4, run_add im 1 1, rz9, rfin],
+    by rw [hfin], ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
+  · rw [hfin]; show ({ z9 with rip := fromr }).reg 0 = some 132
+    rw [reg_with_rip]; exact hz9r0
+  · rw [hfin]; show ({ z9 with rip := fromr }).reg 1 = some i
+    rw [reg_with_rip]; exact hz9r1
+  · rw [hfin]; show ({ z9 with rip := fromr }).reg 6 = some c
+    rw [reg_with_rip]; exact hz9r6
+  · rw [hfin]; show ({ z9 with rip := fromr }).reg 7 = some w
+    rw [reg_with_rip]; exact hz9r7
+  · rw [hfin]; show ({ z9 with rip := fromr }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hz9r8
+  · rw [hfin]; show ({ z9 with rip := fromr }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hz9r9
+  · rw [hfin]; show ({ z9 with rip := fromr }).reg 4 = some sp
+    rw [reg_with_rip]; exact hz9r4
+  · intro q h0
+    rw [hfin]; show ({ z9 with rip := fromr }).reg q = s.reg q
+    rw [reg_with_rip]; exact gz9 q h0
+  · have h1 : fin.mem = s.mem := by rw [hfin, mem_with_rip]; exact hz9mem
+    exact h1
+
+/-- `walk_top` with opcode 133 reaches its handler. -/
+theorem WalkRfetch_triple {im : Nat → Option (Ins × Nat)} {entry done prim lit str pick tor fromr rfetch locget locset jmp
+    jz call ret : Nat}
+    (hc : WalkCode im entry done prim lit str pick tor fromr rfetch locget locset jmp jz call ret)
+    (hentry : entry + 215 < W) :
+    ∀ (h : Height) (c i w sp nc : Nat), w + 56 ≤ W → (hlt : i < nc) → (hcW : c < W) →
+    ∀ s, s.rip = entry → s.reg 8 = some h.d → s.reg 9 = some h.a → s.reg 6 = some c →
+      s.reg 4 = some sp → s.reg 7 = some w → s.reg 1 = some i → 16 ≤ s.regs.length →
+      rd64 s.mem (w + 24) = some nc → s.mem.rd c = some 133 →
+      ∃ k s', run im k (Out.ok s) = Out.ok s' ∧ s'.rip = rfetch ∧ s'.reg 0 = some 133 ∧
+        s'.reg 1 = some i ∧ s'.reg 6 = some c ∧ s'.reg 7 = some w ∧
+        s'.reg 8 = some h.d ∧ s'.reg 9 = some h.a ∧ s'.reg 4 = some sp ∧
+        (∀ q, q ≠ 0 → s'.reg q = s.reg q) ∧ s'.mem = s.mem := by
+  intro h c i w sp nc hw56 hlt hcW s hrip hr8 hr9 hr6 hr4 hr7 hr1 hlen hfc hbyte
+
+  have hea24 : ea w 24 = w + 24 := Nat.mod_eq_of_lt (by omega)
+  have h57 : 57 % W = 57 := Nat.mod_eq_of_lt (by unfold W; decide)
+  have e1 : X86Int.step im s = .ok { s.set 0 (some nc) with rip := s.rip + 4 } :=
+    step_ld (by rw [hrip]; exact hc.d0) hr7 (by rw [hea24]; exact hfc)
+  obtain ⟨w1, hw1⟩ : ∃ u : X86Int.St, u = { s.set 0 (some nc) with rip := s.rip + 4 } := ⟨_, rfl⟩
+  have hw1rip : w1.rip = entry + 4 := by rw [hw1]; show s.rip + 4 = entry + 4; rw [hrip]
+  have hw1r0 : w1.reg 0 = some nc := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 0 = some nc
+    rw [reg_set_self (len_of_r9 hr9 (by decide))]
+  have hw1r1 : w1.reg 1 = some i := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 1 = some i
+    rw [reg_set_other (by decide)]; exact hr1
+  have hw1r6 : w1.reg 6 = some c := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 6 = some c
+    rw [reg_set_other (by decide)]; exact hr6
+  have hw1r7 : w1.reg 7 = some w := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 7 = some w
+    rw [reg_set_other (by decide)]; exact hr7
+  have hw1r8 : w1.reg 8 = some h.d := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 8 = some h.d
+    rw [reg_set_other (by decide)]; exact hr8
+  have hw1r9 : w1.reg 9 = some h.a := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 9 = some h.a
+    rw [reg_set_other (by decide)]; exact hr9
+  have hw1r4 : w1.reg 4 = some sp := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 4 = some sp
+    rw [reg_set_other (by decide)]; exact hr4
+  have hw1mem : w1.mem = s.mem := by
+    rw [hw1]
+    show (s.set 0 (some nc)).mem = s.mem
+    rw [mem_set]
+  have gw1 : ∀ q, q ≠ 0 → w1.reg q = s.reg q := by
+    intro q h0
+    rw [hw1]
+    show (s.set 0 (some nc)).reg q = s.reg q
+    rw [reg_set_other h0]
+  have e2 : X86Int.step im w1 = .ok { w1 with fl := (aluF .sub i nc).2, rip := w1.rip + 3 } :=
+    step_cmp (by rw [hw1rip]; exact hc.d1) hw1r1 hw1r0
+  obtain ⟨w2, hw2⟩ : ∃ u : X86Int.St, u = { w1 with fl := (aluF .sub i nc).2, rip := w1.rip + 3 } := ⟨_, rfl⟩
+  have hw2rip : w2.rip = entry + 7 := by rw [hw2]; show w1.rip + 3 = entry + 7; rw [hw1rip]
+
+  have hw2fl : X86Int.cond w2.fl 2 = some true := by
+    have hcf : w2.fl.cf = some true := by
+      rw [hw2]
+      show (aluF .sub i nc).2.cf = some true
+      exact aluF_sub_cf_true hlt
+    exact cond_cc2 hcf
+
+  have hw2r1 : w2.reg 1 = some i := by rw [hw2]; show w1.reg 1 = some i; exact hw1r1
+  have hw2r0 : w2.reg 0 = some nc := by rw [hw2]; show w1.reg 0 = some nc; exact hw1r0
+  have hw2r6 : w2.reg 6 = some c := by rw [hw2]; show w1.reg 6 = some c; exact hw1r6
+  have hw2r8 : w2.reg 8 = some h.d := by rw [hw2]; show w1.reg 8 = some h.d; exact hw1r8
+  have hw2r9 : w2.reg 9 = some h.a := by rw [hw2]; show w1.reg 9 = some h.a; exact hw1r9
+  have hw2r4 : w2.reg 4 = some sp := by rw [hw2]; show w1.reg 4 = some sp; exact hw1r4
+  have hw2mem : w2.mem = s.mem := by rw [hw2]; show w1.mem = s.mem; exact hw1mem
+  have gw2 : ∀ q, q ≠ 0 → w2.reg q = s.reg q := by
+    intro q h0
+    rw [hw2]; show w1.reg q = s.reg q; exact gw1 q h0
+
+  have e3 : X86Int.step im w2 = .ok { w2 with rip := entry + 14 } := by
+    have hh := step_jcc (im := im) (s := w2) (by rw [hw2rip]; exact hc.d2) hw2fl
+    simpa using hh
+  obtain ⟨w3, hw3⟩ : ∃ u : X86Int.St, u = { w2 with rip := entry + 14 } := ⟨_, rfl⟩
+  have hw3rip : w3.rip = entry + 14 := by rw [hw3]
+  have hw3r6 : w3.reg 6 = some c := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg 6 = some c
+    rw [reg_with_rip]; exact hw2r6
+  have hw3r1 : w3.reg 1 = some i := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg 1 = some i
+    rw [reg_with_rip]; exact hw2r1
+  have hw3r8 : w3.reg 8 = some h.d := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hw2r8
+  have hw3r9 : w3.reg 9 = some h.a := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hw2r9
+  have hw3r4 : w3.reg 4 = some sp := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hw2r4
+  have hw3r7 : w3.reg 7 = some w := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg 7 = some w
+    rw [reg_with_rip, gw2 7 (by decide)]; exact hr7
+  have hw3mem : w3.mem = s.mem := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).mem = s.mem
+    rw [mem_with_rip]; exact hw2mem
+  have gw3 : ∀ q, q ≠ 0 → w3.reg q = s.reg q := by
+    intro q h0
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gw2 q h0
+  have hea0 : ea c 0 = c := Nat.mod_eq_of_lt hcW
+  have e4 : X86Int.step im w3 = .ok { w3.set 0 (some 133) with rip := w3.rip + 3 } :=
+    step_ld8 (by rw [hw3rip]; exact hc.d4) hw3r6 (by rw [hw3mem, hea0]; exact hbyte)
+  obtain ⟨w4, hw4⟩ : ∃ u : X86Int.St, u = { w3.set 0 (some 133) with rip := w3.rip + 3 } := ⟨_, rfl⟩
+  have hw4rip : w4.rip = entry + 17 := by rw [hw4]; show w3.rip + 3 = entry + 17; rw [hw3rip]
+  have hw4r0 : w4.reg 0 = some 133 := by
+    rw [hw4]
+    show (w3.set 0 (some 133)).reg 0 = some 133
+    rw [reg_set_self (len_of_r9 hw3r9 (by decide))]
+  have hw4r1 : w4.reg 1 = some i := by
+    rw [hw4]
+    show (w3.set 0 (some 133)).reg 1 = some i
+    rw [reg_set_other (by decide)]; exact hw3r1
+  have hw4r6 : w4.reg 6 = some c := by
+    rw [hw4]
+    show (w3.set 0 (some 133)).reg 6 = some c
+    rw [reg_set_other (by decide)]; exact hw3r6
+  have hw4r7 : w4.reg 7 = some w := by
+    rw [hw4]
+    show (w3.set 0 (some 133)).reg 7 = some w
+    rw [reg_set_other (by decide)]; exact hw3r7
+  have hw4r8 : w4.reg 8 = some h.d := by
+    rw [hw4]
+    show (w3.set 0 (some 133)).reg 8 = some h.d
+    rw [reg_set_other (by decide)]; exact hw3r8
+  have hw4r9 : w4.reg 9 = some h.a := by
+    rw [hw4]
+    show (w3.set 0 (some 133)).reg 9 = some h.a
+    rw [reg_set_other (by decide)]; exact hw3r9
+  have hw4r4 : w4.reg 4 = some sp := by
+    rw [hw4]
+    show (w3.set 0 (some 133)).reg 4 = some sp
+    rw [reg_set_other (by decide)]; exact hw3r4
+  have hw4mem : w4.mem = s.mem := by
+    rw [hw4]
+    show (w3.set 0 (some 133)).mem = s.mem
+    rw [mem_set]; exact hw3mem
+  have gw4 : ∀ q, q ≠ 0 → w4.reg q = s.reg q := by
+    intro q h0
+    rw [hw4]
+    show (w3.set 0 (some 133)).reg q = s.reg q
+    rw [reg_set_other h0]; exact gw3 q h0
+  have e5 : X86Int.step im w4 = .ok { w4 with fl := (aluF .sub 133 (57 % W)).2, rip := w4.rip + 4 } :=
+    step_cmpI (by rw [hw4rip]; exact hc.d5) hw4r0
+  obtain ⟨w5, hw5⟩ : ∃ u : X86Int.St, u = { w4 with fl := (aluF .sub 133 (57 % W)).2, rip := w4.rip + 4 } := ⟨_, rfl⟩
+  have hw5rip : w5.rip = entry + 21 := by rw [hw5]; show w4.rip + 4 = entry + 21; rw [hw4rip]
+
+  have hw5fl : X86Int.cond w5.fl 3 = some true := by
+    have hcf : w5.fl.cf = some false := by
+      rw [hw5]
+      show (aluF .sub 133 (57 % W)).2.cf = some false
+      rw [h57]
+      exact aluF_sub_cf (by decide)
+    have hh := cond_cc3 hcf
+    simpa using hh
+  have hw5r0 : w5.reg 0 = some 133 := by rw [hw5]; show w4.reg 0 = some 133; exact hw4r0
+  have hw5r1 : w5.reg 1 = some i := by rw [hw5]; show w4.reg 1 = some i; exact hw4r1
+  have hw5r6 : w5.reg 6 = some c := by rw [hw5]; show w4.reg 6 = some c; exact hw4r6
+  have hw5r7 : w5.reg 7 = some w := by rw [hw5]; show w4.reg 7 = some w; exact hw4r7
+  have hw5r8 : w5.reg 8 = some h.d := by rw [hw5]; show w4.reg 8 = some h.d; exact hw4r8
+  have hw5r9 : w5.reg 9 = some h.a := by rw [hw5]; show w4.reg 9 = some h.a; exact hw4r9
+  have hw5r4 : w5.reg 4 = some sp := by rw [hw5]; show w4.reg 4 = some sp; exact hw4r4
+  have hw5mem : w5.mem = s.mem := by rw [hw5]; show w4.mem = s.mem; exact hw4mem
+  have gw5 : ∀ q, q ≠ 0 → w5.reg q = s.reg q := by
+    intro q h0
+    rw [hw5]; show w4.reg q = s.reg q; exact gw4 q h0
+
+  have e6 : X86Int.step im w5 = .ok { w5 with rip := entry + 28 } := by
+    have hh := step_jcc (im := im) (s := w5) (by rw [hw5rip]; exact hc.d6) hw5fl
+    simpa using hh
+  obtain ⟨x0, hx0⟩ : ∃ u : X86Int.St, u = { w5 with rip := entry + 28 } := ⟨_, rfl⟩
+  have hx0rip : x0.rip = entry + 28 := by rw [hx0]
+  have hx0r0 : x0.reg 0 = some 133 := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 0 = some 133
+    rw [reg_with_rip]; exact hw5r0
+  have hx0r1 : x0.reg 1 = some i := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 1 = some i
+    rw [reg_with_rip]; exact hw5r1
+  have hx0r6 : x0.reg 6 = some c := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 6 = some c
+    rw [reg_with_rip]; exact hw5r6
+  have hx0r7 : x0.reg 7 = some w := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 7 = some w
+    rw [reg_with_rip]; exact hw5r7
+  have hx0r8 : x0.reg 8 = some h.d := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hw5r8
+  have hx0r9 : x0.reg 9 = some h.a := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hw5r9
+  have hx0r4 : x0.reg 4 = some sp := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hw5r4
+  have hx0mem : x0.mem = s.mem := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).mem = s.mem
+    rw [mem_with_rip]; exact hw5mem
+  have gx0 : ∀ q, q ≠ 0 → x0.reg q = s.reg q := by
+    intro q h0
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gw5 q h0
+
+  have e7 : X86Int.step im x0 = .ok { x0 with fl := (aluF .sub 133 (128 % W)).2, rip := x0.rip + 7 } :=
+    step_cmpI (by rw [hx0rip]; exact hc.clit) hx0r0
+  obtain ⟨y0, hy0⟩ : ∃ u : X86Int.St, u = { x0 with fl := (aluF .sub 133 (128 % W)).2, rip := x0.rip + 7 } := ⟨_, rfl⟩
+  have hy0rip : y0.rip = entry + 35 := by rw [hy0]; show x0.rip + 7 = entry + 35; rw [hx0rip]
+
+  have hy0fl : X86Int.cond y0.fl 5 = some true := by
+    have hz : y0.fl.zf = some false := by
+      rw [hy0]
+      show (aluF .sub 133 (128 % W)).2.zf = some false
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy0r0 : y0.reg 0 = some 133 := by rw [hy0]; show x0.reg 0 = some 133; exact hx0r0
+  have hy0r1 : y0.reg 1 = some i := by rw [hy0]; show x0.reg 1 = some i; exact hx0r1
+  have hy0r6 : y0.reg 6 = some c := by rw [hy0]; show x0.reg 6 = some c; exact hx0r6
+  have hy0r7 : y0.reg 7 = some w := by rw [hy0]; show x0.reg 7 = some w; exact hx0r7
+  have hy0r8 : y0.reg 8 = some h.d := by rw [hy0]; show x0.reg 8 = some h.d; exact hx0r8
+  have hy0r9 : y0.reg 9 = some h.a := by rw [hy0]; show x0.reg 9 = some h.a; exact hx0r9
+  have hy0r4 : y0.reg 4 = some sp := by rw [hy0]; show x0.reg 4 = some sp; exact hx0r4
+  have hy0mem : y0.mem = s.mem := by rw [hy0]; show x0.mem = s.mem; exact hx0mem
+  have gy0 : ∀ q, q ≠ 0 → y0.reg q = s.reg q := by
+    intro q h0
+    rw [hy0]; show x0.reg q = s.reg q; exact gx0 q h0
+
+  have e8 : X86Int.step im y0 = .ok { y0 with rip := entry + 42 } := by
+    have hh := step_jcc (im := im) (s := y0) (by rw [hy0rip]; exact hc.clitj) hy0fl
+    simpa using hh
+  obtain ⟨x1, hx1⟩ : ∃ u : X86Int.St, u = { y0 with rip := entry + 42 } := ⟨_, rfl⟩
+  have hx1rip : x1.rip = entry + 42 := by rw [hx1]
+  have hx1r0 : x1.reg 0 = some 133 := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg 0 = some 133
+    rw [reg_with_rip]; exact hy0r0
+  have hx1r1 : x1.reg 1 = some i := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy0r1
+  have hx1r6 : x1.reg 6 = some c := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy0r6
+  have hx1r7 : x1.reg 7 = some w := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy0r7
+  have hx1r8 : x1.reg 8 = some h.d := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy0r8
+  have hx1r9 : x1.reg 9 = some h.a := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy0r9
+  have hx1r4 : x1.reg 4 = some sp := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy0r4
+  have hx1mem : x1.mem = s.mem := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).mem = s.mem
+    rw [mem_with_rip]; exact hy0mem
+  have gx1 : ∀ q, q ≠ 0 → x1.reg q = s.reg q := by
+    intro q h0
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy0 q h0
+
+  have e9 : X86Int.step im x1 = .ok { x1 with fl := (aluF .sub 133 (129 % W)).2, rip := x1.rip + 7 } :=
+    step_cmpI (by rw [hx1rip]; exact hc.cstr) hx1r0
+  obtain ⟨y1, hy1⟩ : ∃ u : X86Int.St, u = { x1 with fl := (aluF .sub 133 (129 % W)).2, rip := x1.rip + 7 } := ⟨_, rfl⟩
+  have hy1rip : y1.rip = entry + 49 := by rw [hy1]; show x1.rip + 7 = entry + 49; rw [hx1rip]
+
+  have hy1fl : X86Int.cond y1.fl 5 = some true := by
+    have hz : y1.fl.zf = some false := by
+      rw [hy1]
+      show (aluF .sub 133 (129 % W)).2.zf = some false
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy1r0 : y1.reg 0 = some 133 := by rw [hy1]; show x1.reg 0 = some 133; exact hx1r0
+  have hy1r1 : y1.reg 1 = some i := by rw [hy1]; show x1.reg 1 = some i; exact hx1r1
+  have hy1r6 : y1.reg 6 = some c := by rw [hy1]; show x1.reg 6 = some c; exact hx1r6
+  have hy1r7 : y1.reg 7 = some w := by rw [hy1]; show x1.reg 7 = some w; exact hx1r7
+  have hy1r8 : y1.reg 8 = some h.d := by rw [hy1]; show x1.reg 8 = some h.d; exact hx1r8
+  have hy1r9 : y1.reg 9 = some h.a := by rw [hy1]; show x1.reg 9 = some h.a; exact hx1r9
+  have hy1r4 : y1.reg 4 = some sp := by rw [hy1]; show x1.reg 4 = some sp; exact hx1r4
+  have hy1mem : y1.mem = s.mem := by rw [hy1]; show x1.mem = s.mem; exact hx1mem
+  have gy1 : ∀ q, q ≠ 0 → y1.reg q = s.reg q := by
+    intro q h0
+    rw [hy1]; show x1.reg q = s.reg q; exact gx1 q h0
+
+  have e10 : X86Int.step im y1 = .ok { y1 with rip := entry + 56 } := by
+    have hh := step_jcc (im := im) (s := y1) (by rw [hy1rip]; exact hc.cstrj) hy1fl
+    simpa using hh
+  obtain ⟨x2, hx2⟩ : ∃ u : X86Int.St, u = { y1 with rip := entry + 56 } := ⟨_, rfl⟩
+  have hx2rip : x2.rip = entry + 56 := by rw [hx2]
+  have hx2r0 : x2.reg 0 = some 133 := by
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).reg 0 = some 133
+    rw [reg_with_rip]; exact hy1r0
+  have hx2r1 : x2.reg 1 = some i := by
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy1r1
+  have hx2r6 : x2.reg 6 = some c := by
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy1r6
+  have hx2r7 : x2.reg 7 = some w := by
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy1r7
+  have hx2r8 : x2.reg 8 = some h.d := by
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy1r8
+  have hx2r9 : x2.reg 9 = some h.a := by
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy1r9
+  have hx2r4 : x2.reg 4 = some sp := by
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy1r4
+  have hx2mem : x2.mem = s.mem := by
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).mem = s.mem
+    rw [mem_with_rip]; exact hy1mem
+  have gx2 : ∀ q, q ≠ 0 → x2.reg q = s.reg q := by
+    intro q h0
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy1 q h0
+
+  have e11 : X86Int.step im x2 = .ok { x2 with fl := (aluF .sub 133 (130 % W)).2, rip := x2.rip + 7 } :=
+    step_cmpI (by rw [hx2rip]; exact hc.cpick) hx2r0
+  obtain ⟨y2, hy2⟩ : ∃ u : X86Int.St, u = { x2 with fl := (aluF .sub 133 (130 % W)).2, rip := x2.rip + 7 } := ⟨_, rfl⟩
+  have hy2rip : y2.rip = entry + 63 := by rw [hy2]; show x2.rip + 7 = entry + 63; rw [hx2rip]
+
+  have hy2fl : X86Int.cond y2.fl 5 = some true := by
+    have hz : y2.fl.zf = some false := by
+      rw [hy2]
+      show (aluF .sub 133 (130 % W)).2.zf = some false
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy2r0 : y2.reg 0 = some 133 := by rw [hy2]; show x2.reg 0 = some 133; exact hx2r0
+  have hy2r1 : y2.reg 1 = some i := by rw [hy2]; show x2.reg 1 = some i; exact hx2r1
+  have hy2r6 : y2.reg 6 = some c := by rw [hy2]; show x2.reg 6 = some c; exact hx2r6
+  have hy2r7 : y2.reg 7 = some w := by rw [hy2]; show x2.reg 7 = some w; exact hx2r7
+  have hy2r8 : y2.reg 8 = some h.d := by rw [hy2]; show x2.reg 8 = some h.d; exact hx2r8
+  have hy2r9 : y2.reg 9 = some h.a := by rw [hy2]; show x2.reg 9 = some h.a; exact hx2r9
+  have hy2r4 : y2.reg 4 = some sp := by rw [hy2]; show x2.reg 4 = some sp; exact hx2r4
+  have hy2mem : y2.mem = s.mem := by rw [hy2]; show x2.mem = s.mem; exact hx2mem
+  have gy2 : ∀ q, q ≠ 0 → y2.reg q = s.reg q := by
+    intro q h0
+    rw [hy2]; show x2.reg q = s.reg q; exact gx2 q h0
+
+  have e12 : X86Int.step im y2 = .ok { y2 with rip := entry + 70 } := by
+    have hh := step_jcc (im := im) (s := y2) (by rw [hy2rip]; exact hc.cpickj) hy2fl
+    simpa using hh
+  obtain ⟨x3, hx3⟩ : ∃ u : X86Int.St, u = { y2 with rip := entry + 70 } := ⟨_, rfl⟩
+  have hx3rip : x3.rip = entry + 70 := by rw [hx3]
+  have hx3r0 : x3.reg 0 = some 133 := by
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).reg 0 = some 133
+    rw [reg_with_rip]; exact hy2r0
+  have hx3r1 : x3.reg 1 = some i := by
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy2r1
+  have hx3r6 : x3.reg 6 = some c := by
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy2r6
+  have hx3r7 : x3.reg 7 = some w := by
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy2r7
+  have hx3r8 : x3.reg 8 = some h.d := by
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy2r8
+  have hx3r9 : x3.reg 9 = some h.a := by
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy2r9
+  have hx3r4 : x3.reg 4 = some sp := by
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy2r4
+  have hx3mem : x3.mem = s.mem := by
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).mem = s.mem
+    rw [mem_with_rip]; exact hy2mem
+  have gx3 : ∀ q, q ≠ 0 → x3.reg q = s.reg q := by
+    intro q h0
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy2 q h0
+
+  have e13 : X86Int.step im x3 = .ok { x3 with fl := (aluF .sub 133 (131 % W)).2, rip := x3.rip + 7 } :=
+    step_cmpI (by rw [hx3rip]; exact hc.ctor) hx3r0
+  obtain ⟨y3, hy3⟩ : ∃ u : X86Int.St, u = { x3 with fl := (aluF .sub 133 (131 % W)).2, rip := x3.rip + 7 } := ⟨_, rfl⟩
+  have hy3rip : y3.rip = entry + 77 := by rw [hy3]; show x3.rip + 7 = entry + 77; rw [hx3rip]
+
+  have hy3fl : X86Int.cond y3.fl 5 = some true := by
+    have hz : y3.fl.zf = some false := by
+      rw [hy3]
+      show (aluF .sub 133 (131 % W)).2.zf = some false
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy3r0 : y3.reg 0 = some 133 := by rw [hy3]; show x3.reg 0 = some 133; exact hx3r0
+  have hy3r1 : y3.reg 1 = some i := by rw [hy3]; show x3.reg 1 = some i; exact hx3r1
+  have hy3r6 : y3.reg 6 = some c := by rw [hy3]; show x3.reg 6 = some c; exact hx3r6
+  have hy3r7 : y3.reg 7 = some w := by rw [hy3]; show x3.reg 7 = some w; exact hx3r7
+  have hy3r8 : y3.reg 8 = some h.d := by rw [hy3]; show x3.reg 8 = some h.d; exact hx3r8
+  have hy3r9 : y3.reg 9 = some h.a := by rw [hy3]; show x3.reg 9 = some h.a; exact hx3r9
+  have hy3r4 : y3.reg 4 = some sp := by rw [hy3]; show x3.reg 4 = some sp; exact hx3r4
+  have hy3mem : y3.mem = s.mem := by rw [hy3]; show x3.mem = s.mem; exact hx3mem
+  have gy3 : ∀ q, q ≠ 0 → y3.reg q = s.reg q := by
+    intro q h0
+    rw [hy3]; show x3.reg q = s.reg q; exact gx3 q h0
+
+  have e14 : X86Int.step im y3 = .ok { y3 with rip := entry + 84 } := by
+    have hh := step_jcc (im := im) (s := y3) (by rw [hy3rip]; exact hc.ctorj) hy3fl
+    simpa using hh
+  obtain ⟨x4, hx4⟩ : ∃ u : X86Int.St, u = { y3 with rip := entry + 84 } := ⟨_, rfl⟩
+  have hx4rip : x4.rip = entry + 84 := by rw [hx4]
+  have hx4r0 : x4.reg 0 = some 133 := by
+    rw [hx4]
+    show ({ y3 with rip := entry + 84 }).reg 0 = some 133
+    rw [reg_with_rip]; exact hy3r0
+  have hx4r1 : x4.reg 1 = some i := by
+    rw [hx4]
+    show ({ y3 with rip := entry + 84 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy3r1
+  have hx4r6 : x4.reg 6 = some c := by
+    rw [hx4]
+    show ({ y3 with rip := entry + 84 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy3r6
+  have hx4r7 : x4.reg 7 = some w := by
+    rw [hx4]
+    show ({ y3 with rip := entry + 84 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy3r7
+  have hx4r8 : x4.reg 8 = some h.d := by
+    rw [hx4]
+    show ({ y3 with rip := entry + 84 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy3r8
+  have hx4r9 : x4.reg 9 = some h.a := by
+    rw [hx4]
+    show ({ y3 with rip := entry + 84 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy3r9
+  have hx4r4 : x4.reg 4 = some sp := by
+    rw [hx4]
+    show ({ y3 with rip := entry + 84 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy3r4
+  have hx4mem : x4.mem = s.mem := by
+    rw [hx4]
+    show ({ y3 with rip := entry + 84 }).mem = s.mem
+    rw [mem_with_rip]; exact hy3mem
+  have gx4 : ∀ q, q ≠ 0 → x4.reg q = s.reg q := by
+    intro q h0
+    rw [hx4]
+    show ({ y3 with rip := entry + 84 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy3 q h0
+
+  have e15 : X86Int.step im x4 = .ok { x4 with fl := (aluF .sub 133 (132 % W)).2, rip := x4.rip + 7 } :=
+    step_cmpI (by rw [hx4rip]; exact hc.cfromr) hx4r0
+  obtain ⟨y4, hy4⟩ : ∃ u : X86Int.St, u = { x4 with fl := (aluF .sub 133 (132 % W)).2, rip := x4.rip + 7 } := ⟨_, rfl⟩
+  have hy4rip : y4.rip = entry + 91 := by rw [hy4]; show x4.rip + 7 = entry + 91; rw [hx4rip]
+
+  have hy4fl : X86Int.cond y4.fl 5 = some true := by
+    have hz : y4.fl.zf = some false := by
+      rw [hy4]
+      show (aluF .sub 133 (132 % W)).2.zf = some false
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy4r0 : y4.reg 0 = some 133 := by rw [hy4]; show x4.reg 0 = some 133; exact hx4r0
+  have hy4r1 : y4.reg 1 = some i := by rw [hy4]; show x4.reg 1 = some i; exact hx4r1
+  have hy4r6 : y4.reg 6 = some c := by rw [hy4]; show x4.reg 6 = some c; exact hx4r6
+  have hy4r7 : y4.reg 7 = some w := by rw [hy4]; show x4.reg 7 = some w; exact hx4r7
+  have hy4r8 : y4.reg 8 = some h.d := by rw [hy4]; show x4.reg 8 = some h.d; exact hx4r8
+  have hy4r9 : y4.reg 9 = some h.a := by rw [hy4]; show x4.reg 9 = some h.a; exact hx4r9
+  have hy4r4 : y4.reg 4 = some sp := by rw [hy4]; show x4.reg 4 = some sp; exact hx4r4
+  have hy4mem : y4.mem = s.mem := by rw [hy4]; show x4.mem = s.mem; exact hx4mem
+  have gy4 : ∀ q, q ≠ 0 → y4.reg q = s.reg q := by
+    intro q h0
+    rw [hy4]; show x4.reg q = s.reg q; exact gx4 q h0
+
+  have e16 : X86Int.step im y4 = .ok { y4 with rip := entry + 98 } := by
+    have hh := step_jcc (im := im) (s := y4) (by rw [hy4rip]; exact hc.cfromrj) hy4fl
+    simpa using hh
+  obtain ⟨x5, hx5⟩ : ∃ u : X86Int.St, u = { y4 with rip := entry + 98 } := ⟨_, rfl⟩
+  have hx5rip : x5.rip = entry + 98 := by rw [hx5]
+  have hx5r0 : x5.reg 0 = some 133 := by
+    rw [hx5]
+    show ({ y4 with rip := entry + 98 }).reg 0 = some 133
+    rw [reg_with_rip]; exact hy4r0
+  have hx5r1 : x5.reg 1 = some i := by
+    rw [hx5]
+    show ({ y4 with rip := entry + 98 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy4r1
+  have hx5r6 : x5.reg 6 = some c := by
+    rw [hx5]
+    show ({ y4 with rip := entry + 98 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy4r6
+  have hx5r7 : x5.reg 7 = some w := by
+    rw [hx5]
+    show ({ y4 with rip := entry + 98 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy4r7
+  have hx5r8 : x5.reg 8 = some h.d := by
+    rw [hx5]
+    show ({ y4 with rip := entry + 98 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy4r8
+  have hx5r9 : x5.reg 9 = some h.a := by
+    rw [hx5]
+    show ({ y4 with rip := entry + 98 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy4r9
+  have hx5r4 : x5.reg 4 = some sp := by
+    rw [hx5]
+    show ({ y4 with rip := entry + 98 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy4r4
+  have hx5mem : x5.mem = s.mem := by
+    rw [hx5]
+    show ({ y4 with rip := entry + 98 }).mem = s.mem
+    rw [mem_with_rip]; exact hy4mem
+  have gx5 : ∀ q, q ≠ 0 → x5.reg q = s.reg q := by
+    intro q h0
+    rw [hx5]
+    show ({ y4 with rip := entry + 98 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy4 q h0
+
+  have e17 : X86Int.step im x5 = .ok { x5 with fl := (aluF .sub 133 (133 % W)).2, rip := x5.rip + 7 } :=
+    step_cmpI (by rw [hx5rip]; exact hc.crfetch) hx5r0
+  obtain ⟨y5, hy5⟩ : ∃ u : X86Int.St, u = { x5 with fl := (aluF .sub 133 (133 % W)).2, rip := x5.rip + 7 } := ⟨_, rfl⟩
+  have hy5rip : y5.rip = entry + 105 := by rw [hy5]; show x5.rip + 7 = entry + 105; rw [hx5rip]
+
+  have hy5fl : X86Int.cond y5.fl 5 = some false := by
+    have hz : y5.fl.zf = some true := by
+      rw [hy5]
+      show (aluF .sub 133 (133 % W)).2.zf = some true
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy5r0 : y5.reg 0 = some 133 := by rw [hy5]; show x5.reg 0 = some 133; exact hx5r0
+  have hy5r1 : y5.reg 1 = some i := by rw [hy5]; show x5.reg 1 = some i; exact hx5r1
+  have hy5r6 : y5.reg 6 = some c := by rw [hy5]; show x5.reg 6 = some c; exact hx5r6
+  have hy5r7 : y5.reg 7 = some w := by rw [hy5]; show x5.reg 7 = some w; exact hx5r7
+  have hy5r8 : y5.reg 8 = some h.d := by rw [hy5]; show x5.reg 8 = some h.d; exact hx5r8
+  have hy5r9 : y5.reg 9 = some h.a := by rw [hy5]; show x5.reg 9 = some h.a; exact hx5r9
+  have hy5r4 : y5.reg 4 = some sp := by rw [hy5]; show x5.reg 4 = some sp; exact hx5r4
+  have hy5mem : y5.mem = s.mem := by rw [hy5]; show x5.mem = s.mem; exact hx5mem
+  have gy5 : ∀ q, q ≠ 0 → y5.reg q = s.reg q := by
+    intro q h0
+    rw [hy5]; show x5.reg q = s.reg q; exact gx5 q h0
+
+  have e18 : X86Int.step im y5 = .ok { y5 with rip := entry + 107 } := by
+    have hh := step_jcc (im := im) (s := y5) (by rw [hy5rip]; exact hc.crfetchj) hy5fl
+    simpa [hy5rip] using hh
+  obtain ⟨z9, hz9⟩ : ∃ u : X86Int.St, u = { y5 with rip := entry + 107 } := ⟨_, rfl⟩
+  have hz9rip : z9.rip = entry + 107 := by rw [hz9]
+  have hz9r0 : z9.reg 0 = some 133 := by
+    rw [hz9]
+    show ({ y5 with rip := entry + 107 }).reg 0 = some 133
+    rw [reg_with_rip]; exact hy5r0
+  have hz9r1 : z9.reg 1 = some i := by
+    rw [hz9]
+    show ({ y5 with rip := entry + 107 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy5r1
+  have hz9r6 : z9.reg 6 = some c := by
+    rw [hz9]
+    show ({ y5 with rip := entry + 107 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy5r6
+  have hz9r7 : z9.reg 7 = some w := by
+    rw [hz9]
+    show ({ y5 with rip := entry + 107 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy5r7
+  have hz9r8 : z9.reg 8 = some h.d := by
+    rw [hz9]
+    show ({ y5 with rip := entry + 107 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy5r8
+  have hz9r9 : z9.reg 9 = some h.a := by
+    rw [hz9]
+    show ({ y5 with rip := entry + 107 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy5r9
+  have hz9r4 : z9.reg 4 = some sp := by
+    rw [hz9]
+    show ({ y5 with rip := entry + 107 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy5r4
+  have hz9mem : z9.mem = s.mem := by
+    rw [hz9]
+    show ({ y5 with rip := entry + 107 }).mem = s.mem
+    rw [mem_with_rip]; exact hy5mem
+  have gz9 : ∀ q, q ≠ 0 → z9.reg q = s.reg q := by
+    intro q h0
+    rw [hz9]
+    show ({ y5 with rip := entry + 107 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy5 q h0
+
+  have e19 : X86Int.step im z9 = .ok { z9 with rip := rfetch } :=
+    step_jmp (by rw [hz9rip]; exact hc.crfetchjmp)
+  obtain ⟨fin, hfin⟩ : ∃ u : X86Int.St, u = { z9 with rip := rfetch } := ⟨_, rfl⟩
+  have rw1 : run im 1 (Out.ok s) = Out.ok w1 := by rw [run_succ_ok im 0 s, e1, ← hw1, run_zero]
+  have rw2 : run im 1 (Out.ok w1) = Out.ok w2 := by rw [run_succ_ok im 0 w1, e2, ← hw2, run_zero]
+  have rw3 : run im 1 (Out.ok w2) = Out.ok w3 := by rw [run_succ_ok im 0 w2, e3, ← hw3, run_zero]
+  have rw4 : run im 1 (Out.ok w3) = Out.ok w4 := by rw [run_succ_ok im 0 w3, e4, ← hw4, run_zero]
+  have rw5 : run im 1 (Out.ok w4) = Out.ok w5 := by rw [run_succ_ok im 0 w4, e5, ← hw5, run_zero]
+  have rx0 : run im 1 (Out.ok w5) = Out.ok x0 := by rw [run_succ_ok im 0 w5, e6, ← hx0, run_zero]
+  have ry0 : run im 1 (Out.ok x0) = Out.ok y0 := by rw [run_succ_ok im 0 x0, e7, ← hy0, run_zero]
+  have rx1 : run im 1 (Out.ok y0) = Out.ok x1 := by rw [run_succ_ok im 0 y0, e8, ← hx1, run_zero]
+  have ry1 : run im 1 (Out.ok x1) = Out.ok y1 := by rw [run_succ_ok im 0 x1, e9, ← hy1, run_zero]
+  have rx2 : run im 1 (Out.ok y1) = Out.ok x2 := by rw [run_succ_ok im 0 y1, e10, ← hx2, run_zero]
+  have ry2 : run im 1 (Out.ok x2) = Out.ok y2 := by rw [run_succ_ok im 0 x2, e11, ← hy2, run_zero]
+  have rx3 : run im 1 (Out.ok y2) = Out.ok x3 := by rw [run_succ_ok im 0 y2, e12, ← hx3, run_zero]
+  have ry3 : run im 1 (Out.ok x3) = Out.ok y3 := by rw [run_succ_ok im 0 x3, e13, ← hy3, run_zero]
+  have rx4 : run im 1 (Out.ok y3) = Out.ok x4 := by rw [run_succ_ok im 0 y3, e14, ← hx4, run_zero]
+  have ry4 : run im 1 (Out.ok x4) = Out.ok y4 := by rw [run_succ_ok im 0 x4, e15, ← hy4, run_zero]
+  have rx5 : run im 1 (Out.ok y4) = Out.ok x5 := by rw [run_succ_ok im 0 y4, e16, ← hx5, run_zero]
+  have ry5 : run im 1 (Out.ok x5) = Out.ok y5 := by rw [run_succ_ok im 0 x5, e17, ← hy5, run_zero]
+  have rz9 : run im 1 (Out.ok y5) = Out.ok z9 := by rw [run_succ_ok im 0 y5, e18, ← hz9, run_zero]
+  have rfin : run im 1 (Out.ok z9) = Out.ok fin := by rw [run_succ_ok im 0 z9, e19, ← hfin, run_zero]
+  refine ⟨19, fin, by rw [run_add im 1 18, rw1, run_add im 1 17, rw2, run_add im 1 16, rw3, run_add im 1 15, rw4, run_add im 1 14, rw5, run_add im 1 13, rx0, run_add im 1 12, ry0, run_add im 1 11, rx1, run_add im 1 10, ry1, run_add im 1 9, rx2, run_add im 1 8, ry2, run_add im 1 7, rx3, run_add im 1 6, ry3, run_add im 1 5, rx4, run_add im 1 4, ry4, run_add im 1 3, rx5, run_add im 1 2, ry5, run_add im 1 1, rz9, rfin],
+    by rw [hfin], ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
+  · rw [hfin]; show ({ z9 with rip := rfetch }).reg 0 = some 133
+    rw [reg_with_rip]; exact hz9r0
+  · rw [hfin]; show ({ z9 with rip := rfetch }).reg 1 = some i
+    rw [reg_with_rip]; exact hz9r1
+  · rw [hfin]; show ({ z9 with rip := rfetch }).reg 6 = some c
+    rw [reg_with_rip]; exact hz9r6
+  · rw [hfin]; show ({ z9 with rip := rfetch }).reg 7 = some w
+    rw [reg_with_rip]; exact hz9r7
+  · rw [hfin]; show ({ z9 with rip := rfetch }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hz9r8
+  · rw [hfin]; show ({ z9 with rip := rfetch }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hz9r9
+  · rw [hfin]; show ({ z9 with rip := rfetch }).reg 4 = some sp
+    rw [reg_with_rip]; exact hz9r4
+  · intro q h0
+    rw [hfin]; show ({ z9 with rip := rfetch }).reg q = s.reg q
+    rw [reg_with_rip]; exact gz9 q h0
+  · have h1 : fin.mem = s.mem := by rw [hfin, mem_with_rip]; exact hz9mem
+    exact h1
+
+/-- `walk_top` with opcode 134 reaches its handler. -/
+theorem WalkLocget_triple {im : Nat → Option (Ins × Nat)} {entry done prim lit str pick tor fromr rfetch locget locset jmp
+    jz call ret : Nat}
+    (hc : WalkCode im entry done prim lit str pick tor fromr rfetch locget locset jmp jz call ret)
+    (hentry : entry + 215 < W) :
+    ∀ (h : Height) (c i w sp nc : Nat), w + 56 ≤ W → (hlt : i < nc) → (hcW : c < W) →
+    ∀ s, s.rip = entry → s.reg 8 = some h.d → s.reg 9 = some h.a → s.reg 6 = some c →
+      s.reg 4 = some sp → s.reg 7 = some w → s.reg 1 = some i → 16 ≤ s.regs.length →
+      rd64 s.mem (w + 24) = some nc → s.mem.rd c = some 134 →
+      ∃ k s', run im k (Out.ok s) = Out.ok s' ∧ s'.rip = locget ∧ s'.reg 0 = some 134 ∧
+        s'.reg 1 = some i ∧ s'.reg 6 = some c ∧ s'.reg 7 = some w ∧
+        s'.reg 8 = some h.d ∧ s'.reg 9 = some h.a ∧ s'.reg 4 = some sp ∧
+        (∀ q, q ≠ 0 → s'.reg q = s.reg q) ∧ s'.mem = s.mem := by
+  intro h c i w sp nc hw56 hlt hcW s hrip hr8 hr9 hr6 hr4 hr7 hr1 hlen hfc hbyte
+
+  have hea24 : ea w 24 = w + 24 := Nat.mod_eq_of_lt (by omega)
+  have h57 : 57 % W = 57 := Nat.mod_eq_of_lt (by unfold W; decide)
+  have e1 : X86Int.step im s = .ok { s.set 0 (some nc) with rip := s.rip + 4 } :=
+    step_ld (by rw [hrip]; exact hc.d0) hr7 (by rw [hea24]; exact hfc)
+  obtain ⟨w1, hw1⟩ : ∃ u : X86Int.St, u = { s.set 0 (some nc) with rip := s.rip + 4 } := ⟨_, rfl⟩
+  have hw1rip : w1.rip = entry + 4 := by rw [hw1]; show s.rip + 4 = entry + 4; rw [hrip]
+  have hw1r0 : w1.reg 0 = some nc := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 0 = some nc
+    rw [reg_set_self (len_of_r9 hr9 (by decide))]
+  have hw1r1 : w1.reg 1 = some i := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 1 = some i
+    rw [reg_set_other (by decide)]; exact hr1
+  have hw1r6 : w1.reg 6 = some c := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 6 = some c
+    rw [reg_set_other (by decide)]; exact hr6
+  have hw1r7 : w1.reg 7 = some w := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 7 = some w
+    rw [reg_set_other (by decide)]; exact hr7
+  have hw1r8 : w1.reg 8 = some h.d := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 8 = some h.d
+    rw [reg_set_other (by decide)]; exact hr8
+  have hw1r9 : w1.reg 9 = some h.a := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 9 = some h.a
+    rw [reg_set_other (by decide)]; exact hr9
+  have hw1r4 : w1.reg 4 = some sp := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 4 = some sp
+    rw [reg_set_other (by decide)]; exact hr4
+  have hw1mem : w1.mem = s.mem := by
+    rw [hw1]
+    show (s.set 0 (some nc)).mem = s.mem
+    rw [mem_set]
+  have gw1 : ∀ q, q ≠ 0 → w1.reg q = s.reg q := by
+    intro q h0
+    rw [hw1]
+    show (s.set 0 (some nc)).reg q = s.reg q
+    rw [reg_set_other h0]
+  have e2 : X86Int.step im w1 = .ok { w1 with fl := (aluF .sub i nc).2, rip := w1.rip + 3 } :=
+    step_cmp (by rw [hw1rip]; exact hc.d1) hw1r1 hw1r0
+  obtain ⟨w2, hw2⟩ : ∃ u : X86Int.St, u = { w1 with fl := (aluF .sub i nc).2, rip := w1.rip + 3 } := ⟨_, rfl⟩
+  have hw2rip : w2.rip = entry + 7 := by rw [hw2]; show w1.rip + 3 = entry + 7; rw [hw1rip]
+
+  have hw2fl : X86Int.cond w2.fl 2 = some true := by
+    have hcf : w2.fl.cf = some true := by
+      rw [hw2]
+      show (aluF .sub i nc).2.cf = some true
+      exact aluF_sub_cf_true hlt
+    exact cond_cc2 hcf
+
+  have hw2r1 : w2.reg 1 = some i := by rw [hw2]; show w1.reg 1 = some i; exact hw1r1
+  have hw2r0 : w2.reg 0 = some nc := by rw [hw2]; show w1.reg 0 = some nc; exact hw1r0
+  have hw2r6 : w2.reg 6 = some c := by rw [hw2]; show w1.reg 6 = some c; exact hw1r6
+  have hw2r8 : w2.reg 8 = some h.d := by rw [hw2]; show w1.reg 8 = some h.d; exact hw1r8
+  have hw2r9 : w2.reg 9 = some h.a := by rw [hw2]; show w1.reg 9 = some h.a; exact hw1r9
+  have hw2r4 : w2.reg 4 = some sp := by rw [hw2]; show w1.reg 4 = some sp; exact hw1r4
+  have hw2mem : w2.mem = s.mem := by rw [hw2]; show w1.mem = s.mem; exact hw1mem
+  have gw2 : ∀ q, q ≠ 0 → w2.reg q = s.reg q := by
+    intro q h0
+    rw [hw2]; show w1.reg q = s.reg q; exact gw1 q h0
+
+  have e3 : X86Int.step im w2 = .ok { w2 with rip := entry + 14 } := by
+    have hh := step_jcc (im := im) (s := w2) (by rw [hw2rip]; exact hc.d2) hw2fl
+    simpa using hh
+  obtain ⟨w3, hw3⟩ : ∃ u : X86Int.St, u = { w2 with rip := entry + 14 } := ⟨_, rfl⟩
+  have hw3rip : w3.rip = entry + 14 := by rw [hw3]
+  have hw3r6 : w3.reg 6 = some c := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg 6 = some c
+    rw [reg_with_rip]; exact hw2r6
+  have hw3r1 : w3.reg 1 = some i := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg 1 = some i
+    rw [reg_with_rip]; exact hw2r1
+  have hw3r8 : w3.reg 8 = some h.d := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hw2r8
+  have hw3r9 : w3.reg 9 = some h.a := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hw2r9
+  have hw3r4 : w3.reg 4 = some sp := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hw2r4
+  have hw3r7 : w3.reg 7 = some w := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg 7 = some w
+    rw [reg_with_rip, gw2 7 (by decide)]; exact hr7
+  have hw3mem : w3.mem = s.mem := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).mem = s.mem
+    rw [mem_with_rip]; exact hw2mem
+  have gw3 : ∀ q, q ≠ 0 → w3.reg q = s.reg q := by
+    intro q h0
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gw2 q h0
+  have hea0 : ea c 0 = c := Nat.mod_eq_of_lt hcW
+  have e4 : X86Int.step im w3 = .ok { w3.set 0 (some 134) with rip := w3.rip + 3 } :=
+    step_ld8 (by rw [hw3rip]; exact hc.d4) hw3r6 (by rw [hw3mem, hea0]; exact hbyte)
+  obtain ⟨w4, hw4⟩ : ∃ u : X86Int.St, u = { w3.set 0 (some 134) with rip := w3.rip + 3 } := ⟨_, rfl⟩
+  have hw4rip : w4.rip = entry + 17 := by rw [hw4]; show w3.rip + 3 = entry + 17; rw [hw3rip]
+  have hw4r0 : w4.reg 0 = some 134 := by
+    rw [hw4]
+    show (w3.set 0 (some 134)).reg 0 = some 134
+    rw [reg_set_self (len_of_r9 hw3r9 (by decide))]
+  have hw4r1 : w4.reg 1 = some i := by
+    rw [hw4]
+    show (w3.set 0 (some 134)).reg 1 = some i
+    rw [reg_set_other (by decide)]; exact hw3r1
+  have hw4r6 : w4.reg 6 = some c := by
+    rw [hw4]
+    show (w3.set 0 (some 134)).reg 6 = some c
+    rw [reg_set_other (by decide)]; exact hw3r6
+  have hw4r7 : w4.reg 7 = some w := by
+    rw [hw4]
+    show (w3.set 0 (some 134)).reg 7 = some w
+    rw [reg_set_other (by decide)]; exact hw3r7
+  have hw4r8 : w4.reg 8 = some h.d := by
+    rw [hw4]
+    show (w3.set 0 (some 134)).reg 8 = some h.d
+    rw [reg_set_other (by decide)]; exact hw3r8
+  have hw4r9 : w4.reg 9 = some h.a := by
+    rw [hw4]
+    show (w3.set 0 (some 134)).reg 9 = some h.a
+    rw [reg_set_other (by decide)]; exact hw3r9
+  have hw4r4 : w4.reg 4 = some sp := by
+    rw [hw4]
+    show (w3.set 0 (some 134)).reg 4 = some sp
+    rw [reg_set_other (by decide)]; exact hw3r4
+  have hw4mem : w4.mem = s.mem := by
+    rw [hw4]
+    show (w3.set 0 (some 134)).mem = s.mem
+    rw [mem_set]; exact hw3mem
+  have gw4 : ∀ q, q ≠ 0 → w4.reg q = s.reg q := by
+    intro q h0
+    rw [hw4]
+    show (w3.set 0 (some 134)).reg q = s.reg q
+    rw [reg_set_other h0]; exact gw3 q h0
+  have e5 : X86Int.step im w4 = .ok { w4 with fl := (aluF .sub 134 (57 % W)).2, rip := w4.rip + 4 } :=
+    step_cmpI (by rw [hw4rip]; exact hc.d5) hw4r0
+  obtain ⟨w5, hw5⟩ : ∃ u : X86Int.St, u = { w4 with fl := (aluF .sub 134 (57 % W)).2, rip := w4.rip + 4 } := ⟨_, rfl⟩
+  have hw5rip : w5.rip = entry + 21 := by rw [hw5]; show w4.rip + 4 = entry + 21; rw [hw4rip]
+
+  have hw5fl : X86Int.cond w5.fl 3 = some true := by
+    have hcf : w5.fl.cf = some false := by
+      rw [hw5]
+      show (aluF .sub 134 (57 % W)).2.cf = some false
+      rw [h57]
+      exact aluF_sub_cf (by decide)
+    have hh := cond_cc3 hcf
+    simpa using hh
+  have hw5r0 : w5.reg 0 = some 134 := by rw [hw5]; show w4.reg 0 = some 134; exact hw4r0
+  have hw5r1 : w5.reg 1 = some i := by rw [hw5]; show w4.reg 1 = some i; exact hw4r1
+  have hw5r6 : w5.reg 6 = some c := by rw [hw5]; show w4.reg 6 = some c; exact hw4r6
+  have hw5r7 : w5.reg 7 = some w := by rw [hw5]; show w4.reg 7 = some w; exact hw4r7
+  have hw5r8 : w5.reg 8 = some h.d := by rw [hw5]; show w4.reg 8 = some h.d; exact hw4r8
+  have hw5r9 : w5.reg 9 = some h.a := by rw [hw5]; show w4.reg 9 = some h.a; exact hw4r9
+  have hw5r4 : w5.reg 4 = some sp := by rw [hw5]; show w4.reg 4 = some sp; exact hw4r4
+  have hw5mem : w5.mem = s.mem := by rw [hw5]; show w4.mem = s.mem; exact hw4mem
+  have gw5 : ∀ q, q ≠ 0 → w5.reg q = s.reg q := by
+    intro q h0
+    rw [hw5]; show w4.reg q = s.reg q; exact gw4 q h0
+
+  have e6 : X86Int.step im w5 = .ok { w5 with rip := entry + 28 } := by
+    have hh := step_jcc (im := im) (s := w5) (by rw [hw5rip]; exact hc.d6) hw5fl
+    simpa using hh
+  obtain ⟨x0, hx0⟩ : ∃ u : X86Int.St, u = { w5 with rip := entry + 28 } := ⟨_, rfl⟩
+  have hx0rip : x0.rip = entry + 28 := by rw [hx0]
+  have hx0r0 : x0.reg 0 = some 134 := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 0 = some 134
+    rw [reg_with_rip]; exact hw5r0
+  have hx0r1 : x0.reg 1 = some i := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 1 = some i
+    rw [reg_with_rip]; exact hw5r1
+  have hx0r6 : x0.reg 6 = some c := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 6 = some c
+    rw [reg_with_rip]; exact hw5r6
+  have hx0r7 : x0.reg 7 = some w := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 7 = some w
+    rw [reg_with_rip]; exact hw5r7
+  have hx0r8 : x0.reg 8 = some h.d := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hw5r8
+  have hx0r9 : x0.reg 9 = some h.a := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hw5r9
+  have hx0r4 : x0.reg 4 = some sp := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hw5r4
+  have hx0mem : x0.mem = s.mem := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).mem = s.mem
+    rw [mem_with_rip]; exact hw5mem
+  have gx0 : ∀ q, q ≠ 0 → x0.reg q = s.reg q := by
+    intro q h0
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gw5 q h0
+
+  have e7 : X86Int.step im x0 = .ok { x0 with fl := (aluF .sub 134 (128 % W)).2, rip := x0.rip + 7 } :=
+    step_cmpI (by rw [hx0rip]; exact hc.clit) hx0r0
+  obtain ⟨y0, hy0⟩ : ∃ u : X86Int.St, u = { x0 with fl := (aluF .sub 134 (128 % W)).2, rip := x0.rip + 7 } := ⟨_, rfl⟩
+  have hy0rip : y0.rip = entry + 35 := by rw [hy0]; show x0.rip + 7 = entry + 35; rw [hx0rip]
+
+  have hy0fl : X86Int.cond y0.fl 5 = some true := by
+    have hz : y0.fl.zf = some false := by
+      rw [hy0]
+      show (aluF .sub 134 (128 % W)).2.zf = some false
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy0r0 : y0.reg 0 = some 134 := by rw [hy0]; show x0.reg 0 = some 134; exact hx0r0
+  have hy0r1 : y0.reg 1 = some i := by rw [hy0]; show x0.reg 1 = some i; exact hx0r1
+  have hy0r6 : y0.reg 6 = some c := by rw [hy0]; show x0.reg 6 = some c; exact hx0r6
+  have hy0r7 : y0.reg 7 = some w := by rw [hy0]; show x0.reg 7 = some w; exact hx0r7
+  have hy0r8 : y0.reg 8 = some h.d := by rw [hy0]; show x0.reg 8 = some h.d; exact hx0r8
+  have hy0r9 : y0.reg 9 = some h.a := by rw [hy0]; show x0.reg 9 = some h.a; exact hx0r9
+  have hy0r4 : y0.reg 4 = some sp := by rw [hy0]; show x0.reg 4 = some sp; exact hx0r4
+  have hy0mem : y0.mem = s.mem := by rw [hy0]; show x0.mem = s.mem; exact hx0mem
+  have gy0 : ∀ q, q ≠ 0 → y0.reg q = s.reg q := by
+    intro q h0
+    rw [hy0]; show x0.reg q = s.reg q; exact gx0 q h0
+
+  have e8 : X86Int.step im y0 = .ok { y0 with rip := entry + 42 } := by
+    have hh := step_jcc (im := im) (s := y0) (by rw [hy0rip]; exact hc.clitj) hy0fl
+    simpa using hh
+  obtain ⟨x1, hx1⟩ : ∃ u : X86Int.St, u = { y0 with rip := entry + 42 } := ⟨_, rfl⟩
+  have hx1rip : x1.rip = entry + 42 := by rw [hx1]
+  have hx1r0 : x1.reg 0 = some 134 := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg 0 = some 134
+    rw [reg_with_rip]; exact hy0r0
+  have hx1r1 : x1.reg 1 = some i := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy0r1
+  have hx1r6 : x1.reg 6 = some c := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy0r6
+  have hx1r7 : x1.reg 7 = some w := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy0r7
+  have hx1r8 : x1.reg 8 = some h.d := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy0r8
+  have hx1r9 : x1.reg 9 = some h.a := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy0r9
+  have hx1r4 : x1.reg 4 = some sp := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy0r4
+  have hx1mem : x1.mem = s.mem := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).mem = s.mem
+    rw [mem_with_rip]; exact hy0mem
+  have gx1 : ∀ q, q ≠ 0 → x1.reg q = s.reg q := by
+    intro q h0
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy0 q h0
+
+  have e9 : X86Int.step im x1 = .ok { x1 with fl := (aluF .sub 134 (129 % W)).2, rip := x1.rip + 7 } :=
+    step_cmpI (by rw [hx1rip]; exact hc.cstr) hx1r0
+  obtain ⟨y1, hy1⟩ : ∃ u : X86Int.St, u = { x1 with fl := (aluF .sub 134 (129 % W)).2, rip := x1.rip + 7 } := ⟨_, rfl⟩
+  have hy1rip : y1.rip = entry + 49 := by rw [hy1]; show x1.rip + 7 = entry + 49; rw [hx1rip]
+
+  have hy1fl : X86Int.cond y1.fl 5 = some true := by
+    have hz : y1.fl.zf = some false := by
+      rw [hy1]
+      show (aluF .sub 134 (129 % W)).2.zf = some false
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy1r0 : y1.reg 0 = some 134 := by rw [hy1]; show x1.reg 0 = some 134; exact hx1r0
+  have hy1r1 : y1.reg 1 = some i := by rw [hy1]; show x1.reg 1 = some i; exact hx1r1
+  have hy1r6 : y1.reg 6 = some c := by rw [hy1]; show x1.reg 6 = some c; exact hx1r6
+  have hy1r7 : y1.reg 7 = some w := by rw [hy1]; show x1.reg 7 = some w; exact hx1r7
+  have hy1r8 : y1.reg 8 = some h.d := by rw [hy1]; show x1.reg 8 = some h.d; exact hx1r8
+  have hy1r9 : y1.reg 9 = some h.a := by rw [hy1]; show x1.reg 9 = some h.a; exact hx1r9
+  have hy1r4 : y1.reg 4 = some sp := by rw [hy1]; show x1.reg 4 = some sp; exact hx1r4
+  have hy1mem : y1.mem = s.mem := by rw [hy1]; show x1.mem = s.mem; exact hx1mem
+  have gy1 : ∀ q, q ≠ 0 → y1.reg q = s.reg q := by
+    intro q h0
+    rw [hy1]; show x1.reg q = s.reg q; exact gx1 q h0
+
+  have e10 : X86Int.step im y1 = .ok { y1 with rip := entry + 56 } := by
+    have hh := step_jcc (im := im) (s := y1) (by rw [hy1rip]; exact hc.cstrj) hy1fl
+    simpa using hh
+  obtain ⟨x2, hx2⟩ : ∃ u : X86Int.St, u = { y1 with rip := entry + 56 } := ⟨_, rfl⟩
+  have hx2rip : x2.rip = entry + 56 := by rw [hx2]
+  have hx2r0 : x2.reg 0 = some 134 := by
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).reg 0 = some 134
+    rw [reg_with_rip]; exact hy1r0
+  have hx2r1 : x2.reg 1 = some i := by
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy1r1
+  have hx2r6 : x2.reg 6 = some c := by
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy1r6
+  have hx2r7 : x2.reg 7 = some w := by
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy1r7
+  have hx2r8 : x2.reg 8 = some h.d := by
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy1r8
+  have hx2r9 : x2.reg 9 = some h.a := by
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy1r9
+  have hx2r4 : x2.reg 4 = some sp := by
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy1r4
+  have hx2mem : x2.mem = s.mem := by
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).mem = s.mem
+    rw [mem_with_rip]; exact hy1mem
+  have gx2 : ∀ q, q ≠ 0 → x2.reg q = s.reg q := by
+    intro q h0
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy1 q h0
+
+  have e11 : X86Int.step im x2 = .ok { x2 with fl := (aluF .sub 134 (130 % W)).2, rip := x2.rip + 7 } :=
+    step_cmpI (by rw [hx2rip]; exact hc.cpick) hx2r0
+  obtain ⟨y2, hy2⟩ : ∃ u : X86Int.St, u = { x2 with fl := (aluF .sub 134 (130 % W)).2, rip := x2.rip + 7 } := ⟨_, rfl⟩
+  have hy2rip : y2.rip = entry + 63 := by rw [hy2]; show x2.rip + 7 = entry + 63; rw [hx2rip]
+
+  have hy2fl : X86Int.cond y2.fl 5 = some true := by
+    have hz : y2.fl.zf = some false := by
+      rw [hy2]
+      show (aluF .sub 134 (130 % W)).2.zf = some false
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy2r0 : y2.reg 0 = some 134 := by rw [hy2]; show x2.reg 0 = some 134; exact hx2r0
+  have hy2r1 : y2.reg 1 = some i := by rw [hy2]; show x2.reg 1 = some i; exact hx2r1
+  have hy2r6 : y2.reg 6 = some c := by rw [hy2]; show x2.reg 6 = some c; exact hx2r6
+  have hy2r7 : y2.reg 7 = some w := by rw [hy2]; show x2.reg 7 = some w; exact hx2r7
+  have hy2r8 : y2.reg 8 = some h.d := by rw [hy2]; show x2.reg 8 = some h.d; exact hx2r8
+  have hy2r9 : y2.reg 9 = some h.a := by rw [hy2]; show x2.reg 9 = some h.a; exact hx2r9
+  have hy2r4 : y2.reg 4 = some sp := by rw [hy2]; show x2.reg 4 = some sp; exact hx2r4
+  have hy2mem : y2.mem = s.mem := by rw [hy2]; show x2.mem = s.mem; exact hx2mem
+  have gy2 : ∀ q, q ≠ 0 → y2.reg q = s.reg q := by
+    intro q h0
+    rw [hy2]; show x2.reg q = s.reg q; exact gx2 q h0
+
+  have e12 : X86Int.step im y2 = .ok { y2 with rip := entry + 70 } := by
+    have hh := step_jcc (im := im) (s := y2) (by rw [hy2rip]; exact hc.cpickj) hy2fl
+    simpa using hh
+  obtain ⟨x3, hx3⟩ : ∃ u : X86Int.St, u = { y2 with rip := entry + 70 } := ⟨_, rfl⟩
+  have hx3rip : x3.rip = entry + 70 := by rw [hx3]
+  have hx3r0 : x3.reg 0 = some 134 := by
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).reg 0 = some 134
+    rw [reg_with_rip]; exact hy2r0
+  have hx3r1 : x3.reg 1 = some i := by
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy2r1
+  have hx3r6 : x3.reg 6 = some c := by
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy2r6
+  have hx3r7 : x3.reg 7 = some w := by
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy2r7
+  have hx3r8 : x3.reg 8 = some h.d := by
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy2r8
+  have hx3r9 : x3.reg 9 = some h.a := by
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy2r9
+  have hx3r4 : x3.reg 4 = some sp := by
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy2r4
+  have hx3mem : x3.mem = s.mem := by
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).mem = s.mem
+    rw [mem_with_rip]; exact hy2mem
+  have gx3 : ∀ q, q ≠ 0 → x3.reg q = s.reg q := by
+    intro q h0
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy2 q h0
+
+  have e13 : X86Int.step im x3 = .ok { x3 with fl := (aluF .sub 134 (131 % W)).2, rip := x3.rip + 7 } :=
+    step_cmpI (by rw [hx3rip]; exact hc.ctor) hx3r0
+  obtain ⟨y3, hy3⟩ : ∃ u : X86Int.St, u = { x3 with fl := (aluF .sub 134 (131 % W)).2, rip := x3.rip + 7 } := ⟨_, rfl⟩
+  have hy3rip : y3.rip = entry + 77 := by rw [hy3]; show x3.rip + 7 = entry + 77; rw [hx3rip]
+
+  have hy3fl : X86Int.cond y3.fl 5 = some true := by
+    have hz : y3.fl.zf = some false := by
+      rw [hy3]
+      show (aluF .sub 134 (131 % W)).2.zf = some false
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy3r0 : y3.reg 0 = some 134 := by rw [hy3]; show x3.reg 0 = some 134; exact hx3r0
+  have hy3r1 : y3.reg 1 = some i := by rw [hy3]; show x3.reg 1 = some i; exact hx3r1
+  have hy3r6 : y3.reg 6 = some c := by rw [hy3]; show x3.reg 6 = some c; exact hx3r6
+  have hy3r7 : y3.reg 7 = some w := by rw [hy3]; show x3.reg 7 = some w; exact hx3r7
+  have hy3r8 : y3.reg 8 = some h.d := by rw [hy3]; show x3.reg 8 = some h.d; exact hx3r8
+  have hy3r9 : y3.reg 9 = some h.a := by rw [hy3]; show x3.reg 9 = some h.a; exact hx3r9
+  have hy3r4 : y3.reg 4 = some sp := by rw [hy3]; show x3.reg 4 = some sp; exact hx3r4
+  have hy3mem : y3.mem = s.mem := by rw [hy3]; show x3.mem = s.mem; exact hx3mem
+  have gy3 : ∀ q, q ≠ 0 → y3.reg q = s.reg q := by
+    intro q h0
+    rw [hy3]; show x3.reg q = s.reg q; exact gx3 q h0
+
+  have e14 : X86Int.step im y3 = .ok { y3 with rip := entry + 84 } := by
+    have hh := step_jcc (im := im) (s := y3) (by rw [hy3rip]; exact hc.ctorj) hy3fl
+    simpa using hh
+  obtain ⟨x4, hx4⟩ : ∃ u : X86Int.St, u = { y3 with rip := entry + 84 } := ⟨_, rfl⟩
+  have hx4rip : x4.rip = entry + 84 := by rw [hx4]
+  have hx4r0 : x4.reg 0 = some 134 := by
+    rw [hx4]
+    show ({ y3 with rip := entry + 84 }).reg 0 = some 134
+    rw [reg_with_rip]; exact hy3r0
+  have hx4r1 : x4.reg 1 = some i := by
+    rw [hx4]
+    show ({ y3 with rip := entry + 84 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy3r1
+  have hx4r6 : x4.reg 6 = some c := by
+    rw [hx4]
+    show ({ y3 with rip := entry + 84 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy3r6
+  have hx4r7 : x4.reg 7 = some w := by
+    rw [hx4]
+    show ({ y3 with rip := entry + 84 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy3r7
+  have hx4r8 : x4.reg 8 = some h.d := by
+    rw [hx4]
+    show ({ y3 with rip := entry + 84 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy3r8
+  have hx4r9 : x4.reg 9 = some h.a := by
+    rw [hx4]
+    show ({ y3 with rip := entry + 84 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy3r9
+  have hx4r4 : x4.reg 4 = some sp := by
+    rw [hx4]
+    show ({ y3 with rip := entry + 84 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy3r4
+  have hx4mem : x4.mem = s.mem := by
+    rw [hx4]
+    show ({ y3 with rip := entry + 84 }).mem = s.mem
+    rw [mem_with_rip]; exact hy3mem
+  have gx4 : ∀ q, q ≠ 0 → x4.reg q = s.reg q := by
+    intro q h0
+    rw [hx4]
+    show ({ y3 with rip := entry + 84 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy3 q h0
+
+  have e15 : X86Int.step im x4 = .ok { x4 with fl := (aluF .sub 134 (132 % W)).2, rip := x4.rip + 7 } :=
+    step_cmpI (by rw [hx4rip]; exact hc.cfromr) hx4r0
+  obtain ⟨y4, hy4⟩ : ∃ u : X86Int.St, u = { x4 with fl := (aluF .sub 134 (132 % W)).2, rip := x4.rip + 7 } := ⟨_, rfl⟩
+  have hy4rip : y4.rip = entry + 91 := by rw [hy4]; show x4.rip + 7 = entry + 91; rw [hx4rip]
+
+  have hy4fl : X86Int.cond y4.fl 5 = some true := by
+    have hz : y4.fl.zf = some false := by
+      rw [hy4]
+      show (aluF .sub 134 (132 % W)).2.zf = some false
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy4r0 : y4.reg 0 = some 134 := by rw [hy4]; show x4.reg 0 = some 134; exact hx4r0
+  have hy4r1 : y4.reg 1 = some i := by rw [hy4]; show x4.reg 1 = some i; exact hx4r1
+  have hy4r6 : y4.reg 6 = some c := by rw [hy4]; show x4.reg 6 = some c; exact hx4r6
+  have hy4r7 : y4.reg 7 = some w := by rw [hy4]; show x4.reg 7 = some w; exact hx4r7
+  have hy4r8 : y4.reg 8 = some h.d := by rw [hy4]; show x4.reg 8 = some h.d; exact hx4r8
+  have hy4r9 : y4.reg 9 = some h.a := by rw [hy4]; show x4.reg 9 = some h.a; exact hx4r9
+  have hy4r4 : y4.reg 4 = some sp := by rw [hy4]; show x4.reg 4 = some sp; exact hx4r4
+  have hy4mem : y4.mem = s.mem := by rw [hy4]; show x4.mem = s.mem; exact hx4mem
+  have gy4 : ∀ q, q ≠ 0 → y4.reg q = s.reg q := by
+    intro q h0
+    rw [hy4]; show x4.reg q = s.reg q; exact gx4 q h0
+
+  have e16 : X86Int.step im y4 = .ok { y4 with rip := entry + 98 } := by
+    have hh := step_jcc (im := im) (s := y4) (by rw [hy4rip]; exact hc.cfromrj) hy4fl
+    simpa using hh
+  obtain ⟨x5, hx5⟩ : ∃ u : X86Int.St, u = { y4 with rip := entry + 98 } := ⟨_, rfl⟩
+  have hx5rip : x5.rip = entry + 98 := by rw [hx5]
+  have hx5r0 : x5.reg 0 = some 134 := by
+    rw [hx5]
+    show ({ y4 with rip := entry + 98 }).reg 0 = some 134
+    rw [reg_with_rip]; exact hy4r0
+  have hx5r1 : x5.reg 1 = some i := by
+    rw [hx5]
+    show ({ y4 with rip := entry + 98 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy4r1
+  have hx5r6 : x5.reg 6 = some c := by
+    rw [hx5]
+    show ({ y4 with rip := entry + 98 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy4r6
+  have hx5r7 : x5.reg 7 = some w := by
+    rw [hx5]
+    show ({ y4 with rip := entry + 98 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy4r7
+  have hx5r8 : x5.reg 8 = some h.d := by
+    rw [hx5]
+    show ({ y4 with rip := entry + 98 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy4r8
+  have hx5r9 : x5.reg 9 = some h.a := by
+    rw [hx5]
+    show ({ y4 with rip := entry + 98 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy4r9
+  have hx5r4 : x5.reg 4 = some sp := by
+    rw [hx5]
+    show ({ y4 with rip := entry + 98 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy4r4
+  have hx5mem : x5.mem = s.mem := by
+    rw [hx5]
+    show ({ y4 with rip := entry + 98 }).mem = s.mem
+    rw [mem_with_rip]; exact hy4mem
+  have gx5 : ∀ q, q ≠ 0 → x5.reg q = s.reg q := by
+    intro q h0
+    rw [hx5]
+    show ({ y4 with rip := entry + 98 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy4 q h0
+
+  have e17 : X86Int.step im x5 = .ok { x5 with fl := (aluF .sub 134 (133 % W)).2, rip := x5.rip + 7 } :=
+    step_cmpI (by rw [hx5rip]; exact hc.crfetch) hx5r0
+  obtain ⟨y5, hy5⟩ : ∃ u : X86Int.St, u = { x5 with fl := (aluF .sub 134 (133 % W)).2, rip := x5.rip + 7 } := ⟨_, rfl⟩
+  have hy5rip : y5.rip = entry + 105 := by rw [hy5]; show x5.rip + 7 = entry + 105; rw [hx5rip]
+
+  have hy5fl : X86Int.cond y5.fl 5 = some true := by
+    have hz : y5.fl.zf = some false := by
+      rw [hy5]
+      show (aluF .sub 134 (133 % W)).2.zf = some false
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy5r0 : y5.reg 0 = some 134 := by rw [hy5]; show x5.reg 0 = some 134; exact hx5r0
+  have hy5r1 : y5.reg 1 = some i := by rw [hy5]; show x5.reg 1 = some i; exact hx5r1
+  have hy5r6 : y5.reg 6 = some c := by rw [hy5]; show x5.reg 6 = some c; exact hx5r6
+  have hy5r7 : y5.reg 7 = some w := by rw [hy5]; show x5.reg 7 = some w; exact hx5r7
+  have hy5r8 : y5.reg 8 = some h.d := by rw [hy5]; show x5.reg 8 = some h.d; exact hx5r8
+  have hy5r9 : y5.reg 9 = some h.a := by rw [hy5]; show x5.reg 9 = some h.a; exact hx5r9
+  have hy5r4 : y5.reg 4 = some sp := by rw [hy5]; show x5.reg 4 = some sp; exact hx5r4
+  have hy5mem : y5.mem = s.mem := by rw [hy5]; show x5.mem = s.mem; exact hx5mem
+  have gy5 : ∀ q, q ≠ 0 → y5.reg q = s.reg q := by
+    intro q h0
+    rw [hy5]; show x5.reg q = s.reg q; exact gx5 q h0
+
+  have e18 : X86Int.step im y5 = .ok { y5 with rip := entry + 112 } := by
+    have hh := step_jcc (im := im) (s := y5) (by rw [hy5rip]; exact hc.crfetchj) hy5fl
+    simpa using hh
+  obtain ⟨x6, hx6⟩ : ∃ u : X86Int.St, u = { y5 with rip := entry + 112 } := ⟨_, rfl⟩
+  have hx6rip : x6.rip = entry + 112 := by rw [hx6]
+  have hx6r0 : x6.reg 0 = some 134 := by
+    rw [hx6]
+    show ({ y5 with rip := entry + 112 }).reg 0 = some 134
+    rw [reg_with_rip]; exact hy5r0
+  have hx6r1 : x6.reg 1 = some i := by
+    rw [hx6]
+    show ({ y5 with rip := entry + 112 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy5r1
+  have hx6r6 : x6.reg 6 = some c := by
+    rw [hx6]
+    show ({ y5 with rip := entry + 112 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy5r6
+  have hx6r7 : x6.reg 7 = some w := by
+    rw [hx6]
+    show ({ y5 with rip := entry + 112 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy5r7
+  have hx6r8 : x6.reg 8 = some h.d := by
+    rw [hx6]
+    show ({ y5 with rip := entry + 112 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy5r8
+  have hx6r9 : x6.reg 9 = some h.a := by
+    rw [hx6]
+    show ({ y5 with rip := entry + 112 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy5r9
+  have hx6r4 : x6.reg 4 = some sp := by
+    rw [hx6]
+    show ({ y5 with rip := entry + 112 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy5r4
+  have hx6mem : x6.mem = s.mem := by
+    rw [hx6]
+    show ({ y5 with rip := entry + 112 }).mem = s.mem
+    rw [mem_with_rip]; exact hy5mem
+  have gx6 : ∀ q, q ≠ 0 → x6.reg q = s.reg q := by
+    intro q h0
+    rw [hx6]
+    show ({ y5 with rip := entry + 112 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy5 q h0
+
+  have e19 : X86Int.step im x6 = .ok { x6 with fl := (aluF .sub 134 (134 % W)).2, rip := x6.rip + 7 } :=
+    step_cmpI (by rw [hx6rip]; exact hc.clocget) hx6r0
+  obtain ⟨y6, hy6⟩ : ∃ u : X86Int.St, u = { x6 with fl := (aluF .sub 134 (134 % W)).2, rip := x6.rip + 7 } := ⟨_, rfl⟩
+  have hy6rip : y6.rip = entry + 119 := by rw [hy6]; show x6.rip + 7 = entry + 119; rw [hx6rip]
+
+  have hy6fl : X86Int.cond y6.fl 5 = some false := by
+    have hz : y6.fl.zf = some true := by
+      rw [hy6]
+      show (aluF .sub 134 (134 % W)).2.zf = some true
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy6r0 : y6.reg 0 = some 134 := by rw [hy6]; show x6.reg 0 = some 134; exact hx6r0
+  have hy6r1 : y6.reg 1 = some i := by rw [hy6]; show x6.reg 1 = some i; exact hx6r1
+  have hy6r6 : y6.reg 6 = some c := by rw [hy6]; show x6.reg 6 = some c; exact hx6r6
+  have hy6r7 : y6.reg 7 = some w := by rw [hy6]; show x6.reg 7 = some w; exact hx6r7
+  have hy6r8 : y6.reg 8 = some h.d := by rw [hy6]; show x6.reg 8 = some h.d; exact hx6r8
+  have hy6r9 : y6.reg 9 = some h.a := by rw [hy6]; show x6.reg 9 = some h.a; exact hx6r9
+  have hy6r4 : y6.reg 4 = some sp := by rw [hy6]; show x6.reg 4 = some sp; exact hx6r4
+  have hy6mem : y6.mem = s.mem := by rw [hy6]; show x6.mem = s.mem; exact hx6mem
+  have gy6 : ∀ q, q ≠ 0 → y6.reg q = s.reg q := by
+    intro q h0
+    rw [hy6]; show x6.reg q = s.reg q; exact gx6 q h0
+
+  have e20 : X86Int.step im y6 = .ok { y6 with rip := entry + 121 } := by
+    have hh := step_jcc (im := im) (s := y6) (by rw [hy6rip]; exact hc.clocgetj) hy6fl
+    simpa [hy6rip] using hh
+  obtain ⟨z9, hz9⟩ : ∃ u : X86Int.St, u = { y6 with rip := entry + 121 } := ⟨_, rfl⟩
+  have hz9rip : z9.rip = entry + 121 := by rw [hz9]
+  have hz9r0 : z9.reg 0 = some 134 := by
+    rw [hz9]
+    show ({ y6 with rip := entry + 121 }).reg 0 = some 134
+    rw [reg_with_rip]; exact hy6r0
+  have hz9r1 : z9.reg 1 = some i := by
+    rw [hz9]
+    show ({ y6 with rip := entry + 121 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy6r1
+  have hz9r6 : z9.reg 6 = some c := by
+    rw [hz9]
+    show ({ y6 with rip := entry + 121 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy6r6
+  have hz9r7 : z9.reg 7 = some w := by
+    rw [hz9]
+    show ({ y6 with rip := entry + 121 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy6r7
+  have hz9r8 : z9.reg 8 = some h.d := by
+    rw [hz9]
+    show ({ y6 with rip := entry + 121 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy6r8
+  have hz9r9 : z9.reg 9 = some h.a := by
+    rw [hz9]
+    show ({ y6 with rip := entry + 121 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy6r9
+  have hz9r4 : z9.reg 4 = some sp := by
+    rw [hz9]
+    show ({ y6 with rip := entry + 121 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy6r4
+  have hz9mem : z9.mem = s.mem := by
+    rw [hz9]
+    show ({ y6 with rip := entry + 121 }).mem = s.mem
+    rw [mem_with_rip]; exact hy6mem
+  have gz9 : ∀ q, q ≠ 0 → z9.reg q = s.reg q := by
+    intro q h0
+    rw [hz9]
+    show ({ y6 with rip := entry + 121 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy6 q h0
+
+  have e21 : X86Int.step im z9 = .ok { z9 with rip := locget } :=
+    step_jmp (by rw [hz9rip]; exact hc.clocgetjmp)
+  obtain ⟨fin, hfin⟩ : ∃ u : X86Int.St, u = { z9 with rip := locget } := ⟨_, rfl⟩
+  have rw1 : run im 1 (Out.ok s) = Out.ok w1 := by rw [run_succ_ok im 0 s, e1, ← hw1, run_zero]
+  have rw2 : run im 1 (Out.ok w1) = Out.ok w2 := by rw [run_succ_ok im 0 w1, e2, ← hw2, run_zero]
+  have rw3 : run im 1 (Out.ok w2) = Out.ok w3 := by rw [run_succ_ok im 0 w2, e3, ← hw3, run_zero]
+  have rw4 : run im 1 (Out.ok w3) = Out.ok w4 := by rw [run_succ_ok im 0 w3, e4, ← hw4, run_zero]
+  have rw5 : run im 1 (Out.ok w4) = Out.ok w5 := by rw [run_succ_ok im 0 w4, e5, ← hw5, run_zero]
+  have rx0 : run im 1 (Out.ok w5) = Out.ok x0 := by rw [run_succ_ok im 0 w5, e6, ← hx0, run_zero]
+  have ry0 : run im 1 (Out.ok x0) = Out.ok y0 := by rw [run_succ_ok im 0 x0, e7, ← hy0, run_zero]
+  have rx1 : run im 1 (Out.ok y0) = Out.ok x1 := by rw [run_succ_ok im 0 y0, e8, ← hx1, run_zero]
+  have ry1 : run im 1 (Out.ok x1) = Out.ok y1 := by rw [run_succ_ok im 0 x1, e9, ← hy1, run_zero]
+  have rx2 : run im 1 (Out.ok y1) = Out.ok x2 := by rw [run_succ_ok im 0 y1, e10, ← hx2, run_zero]
+  have ry2 : run im 1 (Out.ok x2) = Out.ok y2 := by rw [run_succ_ok im 0 x2, e11, ← hy2, run_zero]
+  have rx3 : run im 1 (Out.ok y2) = Out.ok x3 := by rw [run_succ_ok im 0 y2, e12, ← hx3, run_zero]
+  have ry3 : run im 1 (Out.ok x3) = Out.ok y3 := by rw [run_succ_ok im 0 x3, e13, ← hy3, run_zero]
+  have rx4 : run im 1 (Out.ok y3) = Out.ok x4 := by rw [run_succ_ok im 0 y3, e14, ← hx4, run_zero]
+  have ry4 : run im 1 (Out.ok x4) = Out.ok y4 := by rw [run_succ_ok im 0 x4, e15, ← hy4, run_zero]
+  have rx5 : run im 1 (Out.ok y4) = Out.ok x5 := by rw [run_succ_ok im 0 y4, e16, ← hx5, run_zero]
+  have ry5 : run im 1 (Out.ok x5) = Out.ok y5 := by rw [run_succ_ok im 0 x5, e17, ← hy5, run_zero]
+  have rx6 : run im 1 (Out.ok y5) = Out.ok x6 := by rw [run_succ_ok im 0 y5, e18, ← hx6, run_zero]
+  have ry6 : run im 1 (Out.ok x6) = Out.ok y6 := by rw [run_succ_ok im 0 x6, e19, ← hy6, run_zero]
+  have rz9 : run im 1 (Out.ok y6) = Out.ok z9 := by rw [run_succ_ok im 0 y6, e20, ← hz9, run_zero]
+  have rfin : run im 1 (Out.ok z9) = Out.ok fin := by rw [run_succ_ok im 0 z9, e21, ← hfin, run_zero]
+  refine ⟨21, fin, by rw [run_add im 1 20, rw1, run_add im 1 19, rw2, run_add im 1 18, rw3, run_add im 1 17, rw4, run_add im 1 16, rw5, run_add im 1 15, rx0, run_add im 1 14, ry0, run_add im 1 13, rx1, run_add im 1 12, ry1, run_add im 1 11, rx2, run_add im 1 10, ry2, run_add im 1 9, rx3, run_add im 1 8, ry3, run_add im 1 7, rx4, run_add im 1 6, ry4, run_add im 1 5, rx5, run_add im 1 4, ry5, run_add im 1 3, rx6, run_add im 1 2, ry6, run_add im 1 1, rz9, rfin],
+    by rw [hfin], ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
+  · rw [hfin]; show ({ z9 with rip := locget }).reg 0 = some 134
+    rw [reg_with_rip]; exact hz9r0
+  · rw [hfin]; show ({ z9 with rip := locget }).reg 1 = some i
+    rw [reg_with_rip]; exact hz9r1
+  · rw [hfin]; show ({ z9 with rip := locget }).reg 6 = some c
+    rw [reg_with_rip]; exact hz9r6
+  · rw [hfin]; show ({ z9 with rip := locget }).reg 7 = some w
+    rw [reg_with_rip]; exact hz9r7
+  · rw [hfin]; show ({ z9 with rip := locget }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hz9r8
+  · rw [hfin]; show ({ z9 with rip := locget }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hz9r9
+  · rw [hfin]; show ({ z9 with rip := locget }).reg 4 = some sp
+    rw [reg_with_rip]; exact hz9r4
+  · intro q h0
+    rw [hfin]; show ({ z9 with rip := locget }).reg q = s.reg q
+    rw [reg_with_rip]; exact gz9 q h0
+  · have h1 : fin.mem = s.mem := by rw [hfin, mem_with_rip]; exact hz9mem
+    exact h1
+
+/-- `walk_top` with opcode 135 reaches its handler. -/
+theorem WalkLocset_triple {im : Nat → Option (Ins × Nat)} {entry done prim lit str pick tor fromr rfetch locget locset jmp
+    jz call ret : Nat}
+    (hc : WalkCode im entry done prim lit str pick tor fromr rfetch locget locset jmp jz call ret)
+    (hentry : entry + 215 < W) :
+    ∀ (h : Height) (c i w sp nc : Nat), w + 56 ≤ W → (hlt : i < nc) → (hcW : c < W) →
+    ∀ s, s.rip = entry → s.reg 8 = some h.d → s.reg 9 = some h.a → s.reg 6 = some c →
+      s.reg 4 = some sp → s.reg 7 = some w → s.reg 1 = some i → 16 ≤ s.regs.length →
+      rd64 s.mem (w + 24) = some nc → s.mem.rd c = some 135 →
+      ∃ k s', run im k (Out.ok s) = Out.ok s' ∧ s'.rip = locset ∧ s'.reg 0 = some 135 ∧
+        s'.reg 1 = some i ∧ s'.reg 6 = some c ∧ s'.reg 7 = some w ∧
+        s'.reg 8 = some h.d ∧ s'.reg 9 = some h.a ∧ s'.reg 4 = some sp ∧
+        (∀ q, q ≠ 0 → s'.reg q = s.reg q) ∧ s'.mem = s.mem := by
+  intro h c i w sp nc hw56 hlt hcW s hrip hr8 hr9 hr6 hr4 hr7 hr1 hlen hfc hbyte
+
+  have hea24 : ea w 24 = w + 24 := Nat.mod_eq_of_lt (by omega)
+  have h57 : 57 % W = 57 := Nat.mod_eq_of_lt (by unfold W; decide)
+  have e1 : X86Int.step im s = .ok { s.set 0 (some nc) with rip := s.rip + 4 } :=
+    step_ld (by rw [hrip]; exact hc.d0) hr7 (by rw [hea24]; exact hfc)
+  obtain ⟨w1, hw1⟩ : ∃ u : X86Int.St, u = { s.set 0 (some nc) with rip := s.rip + 4 } := ⟨_, rfl⟩
+  have hw1rip : w1.rip = entry + 4 := by rw [hw1]; show s.rip + 4 = entry + 4; rw [hrip]
+  have hw1r0 : w1.reg 0 = some nc := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 0 = some nc
+    rw [reg_set_self (len_of_r9 hr9 (by decide))]
+  have hw1r1 : w1.reg 1 = some i := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 1 = some i
+    rw [reg_set_other (by decide)]; exact hr1
+  have hw1r6 : w1.reg 6 = some c := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 6 = some c
+    rw [reg_set_other (by decide)]; exact hr6
+  have hw1r7 : w1.reg 7 = some w := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 7 = some w
+    rw [reg_set_other (by decide)]; exact hr7
+  have hw1r8 : w1.reg 8 = some h.d := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 8 = some h.d
+    rw [reg_set_other (by decide)]; exact hr8
+  have hw1r9 : w1.reg 9 = some h.a := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 9 = some h.a
+    rw [reg_set_other (by decide)]; exact hr9
+  have hw1r4 : w1.reg 4 = some sp := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 4 = some sp
+    rw [reg_set_other (by decide)]; exact hr4
+  have hw1mem : w1.mem = s.mem := by
+    rw [hw1]
+    show (s.set 0 (some nc)).mem = s.mem
+    rw [mem_set]
+  have gw1 : ∀ q, q ≠ 0 → w1.reg q = s.reg q := by
+    intro q h0
+    rw [hw1]
+    show (s.set 0 (some nc)).reg q = s.reg q
+    rw [reg_set_other h0]
+  have e2 : X86Int.step im w1 = .ok { w1 with fl := (aluF .sub i nc).2, rip := w1.rip + 3 } :=
+    step_cmp (by rw [hw1rip]; exact hc.d1) hw1r1 hw1r0
+  obtain ⟨w2, hw2⟩ : ∃ u : X86Int.St, u = { w1 with fl := (aluF .sub i nc).2, rip := w1.rip + 3 } := ⟨_, rfl⟩
+  have hw2rip : w2.rip = entry + 7 := by rw [hw2]; show w1.rip + 3 = entry + 7; rw [hw1rip]
+
+  have hw2fl : X86Int.cond w2.fl 2 = some true := by
+    have hcf : w2.fl.cf = some true := by
+      rw [hw2]
+      show (aluF .sub i nc).2.cf = some true
+      exact aluF_sub_cf_true hlt
+    exact cond_cc2 hcf
+
+  have hw2r1 : w2.reg 1 = some i := by rw [hw2]; show w1.reg 1 = some i; exact hw1r1
+  have hw2r0 : w2.reg 0 = some nc := by rw [hw2]; show w1.reg 0 = some nc; exact hw1r0
+  have hw2r6 : w2.reg 6 = some c := by rw [hw2]; show w1.reg 6 = some c; exact hw1r6
+  have hw2r8 : w2.reg 8 = some h.d := by rw [hw2]; show w1.reg 8 = some h.d; exact hw1r8
+  have hw2r9 : w2.reg 9 = some h.a := by rw [hw2]; show w1.reg 9 = some h.a; exact hw1r9
+  have hw2r4 : w2.reg 4 = some sp := by rw [hw2]; show w1.reg 4 = some sp; exact hw1r4
+  have hw2mem : w2.mem = s.mem := by rw [hw2]; show w1.mem = s.mem; exact hw1mem
+  have gw2 : ∀ q, q ≠ 0 → w2.reg q = s.reg q := by
+    intro q h0
+    rw [hw2]; show w1.reg q = s.reg q; exact gw1 q h0
+
+  have e3 : X86Int.step im w2 = .ok { w2 with rip := entry + 14 } := by
+    have hh := step_jcc (im := im) (s := w2) (by rw [hw2rip]; exact hc.d2) hw2fl
+    simpa using hh
+  obtain ⟨w3, hw3⟩ : ∃ u : X86Int.St, u = { w2 with rip := entry + 14 } := ⟨_, rfl⟩
+  have hw3rip : w3.rip = entry + 14 := by rw [hw3]
+  have hw3r6 : w3.reg 6 = some c := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg 6 = some c
+    rw [reg_with_rip]; exact hw2r6
+  have hw3r1 : w3.reg 1 = some i := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg 1 = some i
+    rw [reg_with_rip]; exact hw2r1
+  have hw3r8 : w3.reg 8 = some h.d := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hw2r8
+  have hw3r9 : w3.reg 9 = some h.a := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hw2r9
+  have hw3r4 : w3.reg 4 = some sp := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hw2r4
+  have hw3r7 : w3.reg 7 = some w := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg 7 = some w
+    rw [reg_with_rip, gw2 7 (by decide)]; exact hr7
+  have hw3mem : w3.mem = s.mem := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).mem = s.mem
+    rw [mem_with_rip]; exact hw2mem
+  have gw3 : ∀ q, q ≠ 0 → w3.reg q = s.reg q := by
+    intro q h0
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gw2 q h0
+  have hea0 : ea c 0 = c := Nat.mod_eq_of_lt hcW
+  have e4 : X86Int.step im w3 = .ok { w3.set 0 (some 135) with rip := w3.rip + 3 } :=
+    step_ld8 (by rw [hw3rip]; exact hc.d4) hw3r6 (by rw [hw3mem, hea0]; exact hbyte)
+  obtain ⟨w4, hw4⟩ : ∃ u : X86Int.St, u = { w3.set 0 (some 135) with rip := w3.rip + 3 } := ⟨_, rfl⟩
+  have hw4rip : w4.rip = entry + 17 := by rw [hw4]; show w3.rip + 3 = entry + 17; rw [hw3rip]
+  have hw4r0 : w4.reg 0 = some 135 := by
+    rw [hw4]
+    show (w3.set 0 (some 135)).reg 0 = some 135
+    rw [reg_set_self (len_of_r9 hw3r9 (by decide))]
+  have hw4r1 : w4.reg 1 = some i := by
+    rw [hw4]
+    show (w3.set 0 (some 135)).reg 1 = some i
+    rw [reg_set_other (by decide)]; exact hw3r1
+  have hw4r6 : w4.reg 6 = some c := by
+    rw [hw4]
+    show (w3.set 0 (some 135)).reg 6 = some c
+    rw [reg_set_other (by decide)]; exact hw3r6
+  have hw4r7 : w4.reg 7 = some w := by
+    rw [hw4]
+    show (w3.set 0 (some 135)).reg 7 = some w
+    rw [reg_set_other (by decide)]; exact hw3r7
+  have hw4r8 : w4.reg 8 = some h.d := by
+    rw [hw4]
+    show (w3.set 0 (some 135)).reg 8 = some h.d
+    rw [reg_set_other (by decide)]; exact hw3r8
+  have hw4r9 : w4.reg 9 = some h.a := by
+    rw [hw4]
+    show (w3.set 0 (some 135)).reg 9 = some h.a
+    rw [reg_set_other (by decide)]; exact hw3r9
+  have hw4r4 : w4.reg 4 = some sp := by
+    rw [hw4]
+    show (w3.set 0 (some 135)).reg 4 = some sp
+    rw [reg_set_other (by decide)]; exact hw3r4
+  have hw4mem : w4.mem = s.mem := by
+    rw [hw4]
+    show (w3.set 0 (some 135)).mem = s.mem
+    rw [mem_set]; exact hw3mem
+  have gw4 : ∀ q, q ≠ 0 → w4.reg q = s.reg q := by
+    intro q h0
+    rw [hw4]
+    show (w3.set 0 (some 135)).reg q = s.reg q
+    rw [reg_set_other h0]; exact gw3 q h0
+  have e5 : X86Int.step im w4 = .ok { w4 with fl := (aluF .sub 135 (57 % W)).2, rip := w4.rip + 4 } :=
+    step_cmpI (by rw [hw4rip]; exact hc.d5) hw4r0
+  obtain ⟨w5, hw5⟩ : ∃ u : X86Int.St, u = { w4 with fl := (aluF .sub 135 (57 % W)).2, rip := w4.rip + 4 } := ⟨_, rfl⟩
+  have hw5rip : w5.rip = entry + 21 := by rw [hw5]; show w4.rip + 4 = entry + 21; rw [hw4rip]
+
+  have hw5fl : X86Int.cond w5.fl 3 = some true := by
+    have hcf : w5.fl.cf = some false := by
+      rw [hw5]
+      show (aluF .sub 135 (57 % W)).2.cf = some false
+      rw [h57]
+      exact aluF_sub_cf (by decide)
+    have hh := cond_cc3 hcf
+    simpa using hh
+  have hw5r0 : w5.reg 0 = some 135 := by rw [hw5]; show w4.reg 0 = some 135; exact hw4r0
+  have hw5r1 : w5.reg 1 = some i := by rw [hw5]; show w4.reg 1 = some i; exact hw4r1
+  have hw5r6 : w5.reg 6 = some c := by rw [hw5]; show w4.reg 6 = some c; exact hw4r6
+  have hw5r7 : w5.reg 7 = some w := by rw [hw5]; show w4.reg 7 = some w; exact hw4r7
+  have hw5r8 : w5.reg 8 = some h.d := by rw [hw5]; show w4.reg 8 = some h.d; exact hw4r8
+  have hw5r9 : w5.reg 9 = some h.a := by rw [hw5]; show w4.reg 9 = some h.a; exact hw4r9
+  have hw5r4 : w5.reg 4 = some sp := by rw [hw5]; show w4.reg 4 = some sp; exact hw4r4
+  have hw5mem : w5.mem = s.mem := by rw [hw5]; show w4.mem = s.mem; exact hw4mem
+  have gw5 : ∀ q, q ≠ 0 → w5.reg q = s.reg q := by
+    intro q h0
+    rw [hw5]; show w4.reg q = s.reg q; exact gw4 q h0
+
+  have e6 : X86Int.step im w5 = .ok { w5 with rip := entry + 28 } := by
+    have hh := step_jcc (im := im) (s := w5) (by rw [hw5rip]; exact hc.d6) hw5fl
+    simpa using hh
+  obtain ⟨x0, hx0⟩ : ∃ u : X86Int.St, u = { w5 with rip := entry + 28 } := ⟨_, rfl⟩
+  have hx0rip : x0.rip = entry + 28 := by rw [hx0]
+  have hx0r0 : x0.reg 0 = some 135 := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 0 = some 135
+    rw [reg_with_rip]; exact hw5r0
+  have hx0r1 : x0.reg 1 = some i := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 1 = some i
+    rw [reg_with_rip]; exact hw5r1
+  have hx0r6 : x0.reg 6 = some c := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 6 = some c
+    rw [reg_with_rip]; exact hw5r6
+  have hx0r7 : x0.reg 7 = some w := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 7 = some w
+    rw [reg_with_rip]; exact hw5r7
+  have hx0r8 : x0.reg 8 = some h.d := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hw5r8
+  have hx0r9 : x0.reg 9 = some h.a := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hw5r9
+  have hx0r4 : x0.reg 4 = some sp := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hw5r4
+  have hx0mem : x0.mem = s.mem := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).mem = s.mem
+    rw [mem_with_rip]; exact hw5mem
+  have gx0 : ∀ q, q ≠ 0 → x0.reg q = s.reg q := by
+    intro q h0
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gw5 q h0
+
+  have e7 : X86Int.step im x0 = .ok { x0 with fl := (aluF .sub 135 (128 % W)).2, rip := x0.rip + 7 } :=
+    step_cmpI (by rw [hx0rip]; exact hc.clit) hx0r0
+  obtain ⟨y0, hy0⟩ : ∃ u : X86Int.St, u = { x0 with fl := (aluF .sub 135 (128 % W)).2, rip := x0.rip + 7 } := ⟨_, rfl⟩
+  have hy0rip : y0.rip = entry + 35 := by rw [hy0]; show x0.rip + 7 = entry + 35; rw [hx0rip]
+
+  have hy0fl : X86Int.cond y0.fl 5 = some true := by
+    have hz : y0.fl.zf = some false := by
+      rw [hy0]
+      show (aluF .sub 135 (128 % W)).2.zf = some false
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy0r0 : y0.reg 0 = some 135 := by rw [hy0]; show x0.reg 0 = some 135; exact hx0r0
+  have hy0r1 : y0.reg 1 = some i := by rw [hy0]; show x0.reg 1 = some i; exact hx0r1
+  have hy0r6 : y0.reg 6 = some c := by rw [hy0]; show x0.reg 6 = some c; exact hx0r6
+  have hy0r7 : y0.reg 7 = some w := by rw [hy0]; show x0.reg 7 = some w; exact hx0r7
+  have hy0r8 : y0.reg 8 = some h.d := by rw [hy0]; show x0.reg 8 = some h.d; exact hx0r8
+  have hy0r9 : y0.reg 9 = some h.a := by rw [hy0]; show x0.reg 9 = some h.a; exact hx0r9
+  have hy0r4 : y0.reg 4 = some sp := by rw [hy0]; show x0.reg 4 = some sp; exact hx0r4
+  have hy0mem : y0.mem = s.mem := by rw [hy0]; show x0.mem = s.mem; exact hx0mem
+  have gy0 : ∀ q, q ≠ 0 → y0.reg q = s.reg q := by
+    intro q h0
+    rw [hy0]; show x0.reg q = s.reg q; exact gx0 q h0
+
+  have e8 : X86Int.step im y0 = .ok { y0 with rip := entry + 42 } := by
+    have hh := step_jcc (im := im) (s := y0) (by rw [hy0rip]; exact hc.clitj) hy0fl
+    simpa using hh
+  obtain ⟨x1, hx1⟩ : ∃ u : X86Int.St, u = { y0 with rip := entry + 42 } := ⟨_, rfl⟩
+  have hx1rip : x1.rip = entry + 42 := by rw [hx1]
+  have hx1r0 : x1.reg 0 = some 135 := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg 0 = some 135
+    rw [reg_with_rip]; exact hy0r0
+  have hx1r1 : x1.reg 1 = some i := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy0r1
+  have hx1r6 : x1.reg 6 = some c := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy0r6
+  have hx1r7 : x1.reg 7 = some w := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy0r7
+  have hx1r8 : x1.reg 8 = some h.d := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy0r8
+  have hx1r9 : x1.reg 9 = some h.a := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy0r9
+  have hx1r4 : x1.reg 4 = some sp := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy0r4
+  have hx1mem : x1.mem = s.mem := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).mem = s.mem
+    rw [mem_with_rip]; exact hy0mem
+  have gx1 : ∀ q, q ≠ 0 → x1.reg q = s.reg q := by
+    intro q h0
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy0 q h0
+
+  have e9 : X86Int.step im x1 = .ok { x1 with fl := (aluF .sub 135 (129 % W)).2, rip := x1.rip + 7 } :=
+    step_cmpI (by rw [hx1rip]; exact hc.cstr) hx1r0
+  obtain ⟨y1, hy1⟩ : ∃ u : X86Int.St, u = { x1 with fl := (aluF .sub 135 (129 % W)).2, rip := x1.rip + 7 } := ⟨_, rfl⟩
+  have hy1rip : y1.rip = entry + 49 := by rw [hy1]; show x1.rip + 7 = entry + 49; rw [hx1rip]
+
+  have hy1fl : X86Int.cond y1.fl 5 = some true := by
+    have hz : y1.fl.zf = some false := by
+      rw [hy1]
+      show (aluF .sub 135 (129 % W)).2.zf = some false
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy1r0 : y1.reg 0 = some 135 := by rw [hy1]; show x1.reg 0 = some 135; exact hx1r0
+  have hy1r1 : y1.reg 1 = some i := by rw [hy1]; show x1.reg 1 = some i; exact hx1r1
+  have hy1r6 : y1.reg 6 = some c := by rw [hy1]; show x1.reg 6 = some c; exact hx1r6
+  have hy1r7 : y1.reg 7 = some w := by rw [hy1]; show x1.reg 7 = some w; exact hx1r7
+  have hy1r8 : y1.reg 8 = some h.d := by rw [hy1]; show x1.reg 8 = some h.d; exact hx1r8
+  have hy1r9 : y1.reg 9 = some h.a := by rw [hy1]; show x1.reg 9 = some h.a; exact hx1r9
+  have hy1r4 : y1.reg 4 = some sp := by rw [hy1]; show x1.reg 4 = some sp; exact hx1r4
+  have hy1mem : y1.mem = s.mem := by rw [hy1]; show x1.mem = s.mem; exact hx1mem
+  have gy1 : ∀ q, q ≠ 0 → y1.reg q = s.reg q := by
+    intro q h0
+    rw [hy1]; show x1.reg q = s.reg q; exact gx1 q h0
+
+  have e10 : X86Int.step im y1 = .ok { y1 with rip := entry + 56 } := by
+    have hh := step_jcc (im := im) (s := y1) (by rw [hy1rip]; exact hc.cstrj) hy1fl
+    simpa using hh
+  obtain ⟨x2, hx2⟩ : ∃ u : X86Int.St, u = { y1 with rip := entry + 56 } := ⟨_, rfl⟩
+  have hx2rip : x2.rip = entry + 56 := by rw [hx2]
+  have hx2r0 : x2.reg 0 = some 135 := by
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).reg 0 = some 135
+    rw [reg_with_rip]; exact hy1r0
+  have hx2r1 : x2.reg 1 = some i := by
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy1r1
+  have hx2r6 : x2.reg 6 = some c := by
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy1r6
+  have hx2r7 : x2.reg 7 = some w := by
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy1r7
+  have hx2r8 : x2.reg 8 = some h.d := by
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy1r8
+  have hx2r9 : x2.reg 9 = some h.a := by
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy1r9
+  have hx2r4 : x2.reg 4 = some sp := by
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy1r4
+  have hx2mem : x2.mem = s.mem := by
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).mem = s.mem
+    rw [mem_with_rip]; exact hy1mem
+  have gx2 : ∀ q, q ≠ 0 → x2.reg q = s.reg q := by
+    intro q h0
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy1 q h0
+
+  have e11 : X86Int.step im x2 = .ok { x2 with fl := (aluF .sub 135 (130 % W)).2, rip := x2.rip + 7 } :=
+    step_cmpI (by rw [hx2rip]; exact hc.cpick) hx2r0
+  obtain ⟨y2, hy2⟩ : ∃ u : X86Int.St, u = { x2 with fl := (aluF .sub 135 (130 % W)).2, rip := x2.rip + 7 } := ⟨_, rfl⟩
+  have hy2rip : y2.rip = entry + 63 := by rw [hy2]; show x2.rip + 7 = entry + 63; rw [hx2rip]
+
+  have hy2fl : X86Int.cond y2.fl 5 = some true := by
+    have hz : y2.fl.zf = some false := by
+      rw [hy2]
+      show (aluF .sub 135 (130 % W)).2.zf = some false
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy2r0 : y2.reg 0 = some 135 := by rw [hy2]; show x2.reg 0 = some 135; exact hx2r0
+  have hy2r1 : y2.reg 1 = some i := by rw [hy2]; show x2.reg 1 = some i; exact hx2r1
+  have hy2r6 : y2.reg 6 = some c := by rw [hy2]; show x2.reg 6 = some c; exact hx2r6
+  have hy2r7 : y2.reg 7 = some w := by rw [hy2]; show x2.reg 7 = some w; exact hx2r7
+  have hy2r8 : y2.reg 8 = some h.d := by rw [hy2]; show x2.reg 8 = some h.d; exact hx2r8
+  have hy2r9 : y2.reg 9 = some h.a := by rw [hy2]; show x2.reg 9 = some h.a; exact hx2r9
+  have hy2r4 : y2.reg 4 = some sp := by rw [hy2]; show x2.reg 4 = some sp; exact hx2r4
+  have hy2mem : y2.mem = s.mem := by rw [hy2]; show x2.mem = s.mem; exact hx2mem
+  have gy2 : ∀ q, q ≠ 0 → y2.reg q = s.reg q := by
+    intro q h0
+    rw [hy2]; show x2.reg q = s.reg q; exact gx2 q h0
+
+  have e12 : X86Int.step im y2 = .ok { y2 with rip := entry + 70 } := by
+    have hh := step_jcc (im := im) (s := y2) (by rw [hy2rip]; exact hc.cpickj) hy2fl
+    simpa using hh
+  obtain ⟨x3, hx3⟩ : ∃ u : X86Int.St, u = { y2 with rip := entry + 70 } := ⟨_, rfl⟩
+  have hx3rip : x3.rip = entry + 70 := by rw [hx3]
+  have hx3r0 : x3.reg 0 = some 135 := by
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).reg 0 = some 135
+    rw [reg_with_rip]; exact hy2r0
+  have hx3r1 : x3.reg 1 = some i := by
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy2r1
+  have hx3r6 : x3.reg 6 = some c := by
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy2r6
+  have hx3r7 : x3.reg 7 = some w := by
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy2r7
+  have hx3r8 : x3.reg 8 = some h.d := by
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy2r8
+  have hx3r9 : x3.reg 9 = some h.a := by
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy2r9
+  have hx3r4 : x3.reg 4 = some sp := by
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy2r4
+  have hx3mem : x3.mem = s.mem := by
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).mem = s.mem
+    rw [mem_with_rip]; exact hy2mem
+  have gx3 : ∀ q, q ≠ 0 → x3.reg q = s.reg q := by
+    intro q h0
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy2 q h0
+
+  have e13 : X86Int.step im x3 = .ok { x3 with fl := (aluF .sub 135 (131 % W)).2, rip := x3.rip + 7 } :=
+    step_cmpI (by rw [hx3rip]; exact hc.ctor) hx3r0
+  obtain ⟨y3, hy3⟩ : ∃ u : X86Int.St, u = { x3 with fl := (aluF .sub 135 (131 % W)).2, rip := x3.rip + 7 } := ⟨_, rfl⟩
+  have hy3rip : y3.rip = entry + 77 := by rw [hy3]; show x3.rip + 7 = entry + 77; rw [hx3rip]
+
+  have hy3fl : X86Int.cond y3.fl 5 = some true := by
+    have hz : y3.fl.zf = some false := by
+      rw [hy3]
+      show (aluF .sub 135 (131 % W)).2.zf = some false
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy3r0 : y3.reg 0 = some 135 := by rw [hy3]; show x3.reg 0 = some 135; exact hx3r0
+  have hy3r1 : y3.reg 1 = some i := by rw [hy3]; show x3.reg 1 = some i; exact hx3r1
+  have hy3r6 : y3.reg 6 = some c := by rw [hy3]; show x3.reg 6 = some c; exact hx3r6
+  have hy3r7 : y3.reg 7 = some w := by rw [hy3]; show x3.reg 7 = some w; exact hx3r7
+  have hy3r8 : y3.reg 8 = some h.d := by rw [hy3]; show x3.reg 8 = some h.d; exact hx3r8
+  have hy3r9 : y3.reg 9 = some h.a := by rw [hy3]; show x3.reg 9 = some h.a; exact hx3r9
+  have hy3r4 : y3.reg 4 = some sp := by rw [hy3]; show x3.reg 4 = some sp; exact hx3r4
+  have hy3mem : y3.mem = s.mem := by rw [hy3]; show x3.mem = s.mem; exact hx3mem
+  have gy3 : ∀ q, q ≠ 0 → y3.reg q = s.reg q := by
+    intro q h0
+    rw [hy3]; show x3.reg q = s.reg q; exact gx3 q h0
+
+  have e14 : X86Int.step im y3 = .ok { y3 with rip := entry + 84 } := by
+    have hh := step_jcc (im := im) (s := y3) (by rw [hy3rip]; exact hc.ctorj) hy3fl
+    simpa using hh
+  obtain ⟨x4, hx4⟩ : ∃ u : X86Int.St, u = { y3 with rip := entry + 84 } := ⟨_, rfl⟩
+  have hx4rip : x4.rip = entry + 84 := by rw [hx4]
+  have hx4r0 : x4.reg 0 = some 135 := by
+    rw [hx4]
+    show ({ y3 with rip := entry + 84 }).reg 0 = some 135
+    rw [reg_with_rip]; exact hy3r0
+  have hx4r1 : x4.reg 1 = some i := by
+    rw [hx4]
+    show ({ y3 with rip := entry + 84 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy3r1
+  have hx4r6 : x4.reg 6 = some c := by
+    rw [hx4]
+    show ({ y3 with rip := entry + 84 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy3r6
+  have hx4r7 : x4.reg 7 = some w := by
+    rw [hx4]
+    show ({ y3 with rip := entry + 84 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy3r7
+  have hx4r8 : x4.reg 8 = some h.d := by
+    rw [hx4]
+    show ({ y3 with rip := entry + 84 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy3r8
+  have hx4r9 : x4.reg 9 = some h.a := by
+    rw [hx4]
+    show ({ y3 with rip := entry + 84 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy3r9
+  have hx4r4 : x4.reg 4 = some sp := by
+    rw [hx4]
+    show ({ y3 with rip := entry + 84 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy3r4
+  have hx4mem : x4.mem = s.mem := by
+    rw [hx4]
+    show ({ y3 with rip := entry + 84 }).mem = s.mem
+    rw [mem_with_rip]; exact hy3mem
+  have gx4 : ∀ q, q ≠ 0 → x4.reg q = s.reg q := by
+    intro q h0
+    rw [hx4]
+    show ({ y3 with rip := entry + 84 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy3 q h0
+
+  have e15 : X86Int.step im x4 = .ok { x4 with fl := (aluF .sub 135 (132 % W)).2, rip := x4.rip + 7 } :=
+    step_cmpI (by rw [hx4rip]; exact hc.cfromr) hx4r0
+  obtain ⟨y4, hy4⟩ : ∃ u : X86Int.St, u = { x4 with fl := (aluF .sub 135 (132 % W)).2, rip := x4.rip + 7 } := ⟨_, rfl⟩
+  have hy4rip : y4.rip = entry + 91 := by rw [hy4]; show x4.rip + 7 = entry + 91; rw [hx4rip]
+
+  have hy4fl : X86Int.cond y4.fl 5 = some true := by
+    have hz : y4.fl.zf = some false := by
+      rw [hy4]
+      show (aluF .sub 135 (132 % W)).2.zf = some false
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy4r0 : y4.reg 0 = some 135 := by rw [hy4]; show x4.reg 0 = some 135; exact hx4r0
+  have hy4r1 : y4.reg 1 = some i := by rw [hy4]; show x4.reg 1 = some i; exact hx4r1
+  have hy4r6 : y4.reg 6 = some c := by rw [hy4]; show x4.reg 6 = some c; exact hx4r6
+  have hy4r7 : y4.reg 7 = some w := by rw [hy4]; show x4.reg 7 = some w; exact hx4r7
+  have hy4r8 : y4.reg 8 = some h.d := by rw [hy4]; show x4.reg 8 = some h.d; exact hx4r8
+  have hy4r9 : y4.reg 9 = some h.a := by rw [hy4]; show x4.reg 9 = some h.a; exact hx4r9
+  have hy4r4 : y4.reg 4 = some sp := by rw [hy4]; show x4.reg 4 = some sp; exact hx4r4
+  have hy4mem : y4.mem = s.mem := by rw [hy4]; show x4.mem = s.mem; exact hx4mem
+  have gy4 : ∀ q, q ≠ 0 → y4.reg q = s.reg q := by
+    intro q h0
+    rw [hy4]; show x4.reg q = s.reg q; exact gx4 q h0
+
+  have e16 : X86Int.step im y4 = .ok { y4 with rip := entry + 98 } := by
+    have hh := step_jcc (im := im) (s := y4) (by rw [hy4rip]; exact hc.cfromrj) hy4fl
+    simpa using hh
+  obtain ⟨x5, hx5⟩ : ∃ u : X86Int.St, u = { y4 with rip := entry + 98 } := ⟨_, rfl⟩
+  have hx5rip : x5.rip = entry + 98 := by rw [hx5]
+  have hx5r0 : x5.reg 0 = some 135 := by
+    rw [hx5]
+    show ({ y4 with rip := entry + 98 }).reg 0 = some 135
+    rw [reg_with_rip]; exact hy4r0
+  have hx5r1 : x5.reg 1 = some i := by
+    rw [hx5]
+    show ({ y4 with rip := entry + 98 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy4r1
+  have hx5r6 : x5.reg 6 = some c := by
+    rw [hx5]
+    show ({ y4 with rip := entry + 98 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy4r6
+  have hx5r7 : x5.reg 7 = some w := by
+    rw [hx5]
+    show ({ y4 with rip := entry + 98 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy4r7
+  have hx5r8 : x5.reg 8 = some h.d := by
+    rw [hx5]
+    show ({ y4 with rip := entry + 98 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy4r8
+  have hx5r9 : x5.reg 9 = some h.a := by
+    rw [hx5]
+    show ({ y4 with rip := entry + 98 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy4r9
+  have hx5r4 : x5.reg 4 = some sp := by
+    rw [hx5]
+    show ({ y4 with rip := entry + 98 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy4r4
+  have hx5mem : x5.mem = s.mem := by
+    rw [hx5]
+    show ({ y4 with rip := entry + 98 }).mem = s.mem
+    rw [mem_with_rip]; exact hy4mem
+  have gx5 : ∀ q, q ≠ 0 → x5.reg q = s.reg q := by
+    intro q h0
+    rw [hx5]
+    show ({ y4 with rip := entry + 98 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy4 q h0
+
+  have e17 : X86Int.step im x5 = .ok { x5 with fl := (aluF .sub 135 (133 % W)).2, rip := x5.rip + 7 } :=
+    step_cmpI (by rw [hx5rip]; exact hc.crfetch) hx5r0
+  obtain ⟨y5, hy5⟩ : ∃ u : X86Int.St, u = { x5 with fl := (aluF .sub 135 (133 % W)).2, rip := x5.rip + 7 } := ⟨_, rfl⟩
+  have hy5rip : y5.rip = entry + 105 := by rw [hy5]; show x5.rip + 7 = entry + 105; rw [hx5rip]
+
+  have hy5fl : X86Int.cond y5.fl 5 = some true := by
+    have hz : y5.fl.zf = some false := by
+      rw [hy5]
+      show (aluF .sub 135 (133 % W)).2.zf = some false
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy5r0 : y5.reg 0 = some 135 := by rw [hy5]; show x5.reg 0 = some 135; exact hx5r0
+  have hy5r1 : y5.reg 1 = some i := by rw [hy5]; show x5.reg 1 = some i; exact hx5r1
+  have hy5r6 : y5.reg 6 = some c := by rw [hy5]; show x5.reg 6 = some c; exact hx5r6
+  have hy5r7 : y5.reg 7 = some w := by rw [hy5]; show x5.reg 7 = some w; exact hx5r7
+  have hy5r8 : y5.reg 8 = some h.d := by rw [hy5]; show x5.reg 8 = some h.d; exact hx5r8
+  have hy5r9 : y5.reg 9 = some h.a := by rw [hy5]; show x5.reg 9 = some h.a; exact hx5r9
+  have hy5r4 : y5.reg 4 = some sp := by rw [hy5]; show x5.reg 4 = some sp; exact hx5r4
+  have hy5mem : y5.mem = s.mem := by rw [hy5]; show x5.mem = s.mem; exact hx5mem
+  have gy5 : ∀ q, q ≠ 0 → y5.reg q = s.reg q := by
+    intro q h0
+    rw [hy5]; show x5.reg q = s.reg q; exact gx5 q h0
+
+  have e18 : X86Int.step im y5 = .ok { y5 with rip := entry + 112 } := by
+    have hh := step_jcc (im := im) (s := y5) (by rw [hy5rip]; exact hc.crfetchj) hy5fl
+    simpa using hh
+  obtain ⟨x6, hx6⟩ : ∃ u : X86Int.St, u = { y5 with rip := entry + 112 } := ⟨_, rfl⟩
+  have hx6rip : x6.rip = entry + 112 := by rw [hx6]
+  have hx6r0 : x6.reg 0 = some 135 := by
+    rw [hx6]
+    show ({ y5 with rip := entry + 112 }).reg 0 = some 135
+    rw [reg_with_rip]; exact hy5r0
+  have hx6r1 : x6.reg 1 = some i := by
+    rw [hx6]
+    show ({ y5 with rip := entry + 112 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy5r1
+  have hx6r6 : x6.reg 6 = some c := by
+    rw [hx6]
+    show ({ y5 with rip := entry + 112 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy5r6
+  have hx6r7 : x6.reg 7 = some w := by
+    rw [hx6]
+    show ({ y5 with rip := entry + 112 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy5r7
+  have hx6r8 : x6.reg 8 = some h.d := by
+    rw [hx6]
+    show ({ y5 with rip := entry + 112 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy5r8
+  have hx6r9 : x6.reg 9 = some h.a := by
+    rw [hx6]
+    show ({ y5 with rip := entry + 112 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy5r9
+  have hx6r4 : x6.reg 4 = some sp := by
+    rw [hx6]
+    show ({ y5 with rip := entry + 112 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy5r4
+  have hx6mem : x6.mem = s.mem := by
+    rw [hx6]
+    show ({ y5 with rip := entry + 112 }).mem = s.mem
+    rw [mem_with_rip]; exact hy5mem
+  have gx6 : ∀ q, q ≠ 0 → x6.reg q = s.reg q := by
+    intro q h0
+    rw [hx6]
+    show ({ y5 with rip := entry + 112 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy5 q h0
+
+  have e19 : X86Int.step im x6 = .ok { x6 with fl := (aluF .sub 135 (134 % W)).2, rip := x6.rip + 7 } :=
+    step_cmpI (by rw [hx6rip]; exact hc.clocget) hx6r0
+  obtain ⟨y6, hy6⟩ : ∃ u : X86Int.St, u = { x6 with fl := (aluF .sub 135 (134 % W)).2, rip := x6.rip + 7 } := ⟨_, rfl⟩
+  have hy6rip : y6.rip = entry + 119 := by rw [hy6]; show x6.rip + 7 = entry + 119; rw [hx6rip]
+
+  have hy6fl : X86Int.cond y6.fl 5 = some true := by
+    have hz : y6.fl.zf = some false := by
+      rw [hy6]
+      show (aluF .sub 135 (134 % W)).2.zf = some false
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy6r0 : y6.reg 0 = some 135 := by rw [hy6]; show x6.reg 0 = some 135; exact hx6r0
+  have hy6r1 : y6.reg 1 = some i := by rw [hy6]; show x6.reg 1 = some i; exact hx6r1
+  have hy6r6 : y6.reg 6 = some c := by rw [hy6]; show x6.reg 6 = some c; exact hx6r6
+  have hy6r7 : y6.reg 7 = some w := by rw [hy6]; show x6.reg 7 = some w; exact hx6r7
+  have hy6r8 : y6.reg 8 = some h.d := by rw [hy6]; show x6.reg 8 = some h.d; exact hx6r8
+  have hy6r9 : y6.reg 9 = some h.a := by rw [hy6]; show x6.reg 9 = some h.a; exact hx6r9
+  have hy6r4 : y6.reg 4 = some sp := by rw [hy6]; show x6.reg 4 = some sp; exact hx6r4
+  have hy6mem : y6.mem = s.mem := by rw [hy6]; show x6.mem = s.mem; exact hx6mem
+  have gy6 : ∀ q, q ≠ 0 → y6.reg q = s.reg q := by
+    intro q h0
+    rw [hy6]; show x6.reg q = s.reg q; exact gx6 q h0
+
+  have e20 : X86Int.step im y6 = .ok { y6 with rip := entry + 126 } := by
+    have hh := step_jcc (im := im) (s := y6) (by rw [hy6rip]; exact hc.clocgetj) hy6fl
+    simpa using hh
+  obtain ⟨x7, hx7⟩ : ∃ u : X86Int.St, u = { y6 with rip := entry + 126 } := ⟨_, rfl⟩
+  have hx7rip : x7.rip = entry + 126 := by rw [hx7]
+  have hx7r0 : x7.reg 0 = some 135 := by
+    rw [hx7]
+    show ({ y6 with rip := entry + 126 }).reg 0 = some 135
+    rw [reg_with_rip]; exact hy6r0
+  have hx7r1 : x7.reg 1 = some i := by
+    rw [hx7]
+    show ({ y6 with rip := entry + 126 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy6r1
+  have hx7r6 : x7.reg 6 = some c := by
+    rw [hx7]
+    show ({ y6 with rip := entry + 126 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy6r6
+  have hx7r7 : x7.reg 7 = some w := by
+    rw [hx7]
+    show ({ y6 with rip := entry + 126 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy6r7
+  have hx7r8 : x7.reg 8 = some h.d := by
+    rw [hx7]
+    show ({ y6 with rip := entry + 126 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy6r8
+  have hx7r9 : x7.reg 9 = some h.a := by
+    rw [hx7]
+    show ({ y6 with rip := entry + 126 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy6r9
+  have hx7r4 : x7.reg 4 = some sp := by
+    rw [hx7]
+    show ({ y6 with rip := entry + 126 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy6r4
+  have hx7mem : x7.mem = s.mem := by
+    rw [hx7]
+    show ({ y6 with rip := entry + 126 }).mem = s.mem
+    rw [mem_with_rip]; exact hy6mem
+  have gx7 : ∀ q, q ≠ 0 → x7.reg q = s.reg q := by
+    intro q h0
+    rw [hx7]
+    show ({ y6 with rip := entry + 126 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy6 q h0
+
+  have e21 : X86Int.step im x7 = .ok { x7 with fl := (aluF .sub 135 (135 % W)).2, rip := x7.rip + 7 } :=
+    step_cmpI (by rw [hx7rip]; exact hc.clocset) hx7r0
+  obtain ⟨y7, hy7⟩ : ∃ u : X86Int.St, u = { x7 with fl := (aluF .sub 135 (135 % W)).2, rip := x7.rip + 7 } := ⟨_, rfl⟩
+  have hy7rip : y7.rip = entry + 133 := by rw [hy7]; show x7.rip + 7 = entry + 133; rw [hx7rip]
+
+  have hy7fl : X86Int.cond y7.fl 5 = some false := by
+    have hz : y7.fl.zf = some true := by
+      rw [hy7]
+      show (aluF .sub 135 (135 % W)).2.zf = some true
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy7r0 : y7.reg 0 = some 135 := by rw [hy7]; show x7.reg 0 = some 135; exact hx7r0
+  have hy7r1 : y7.reg 1 = some i := by rw [hy7]; show x7.reg 1 = some i; exact hx7r1
+  have hy7r6 : y7.reg 6 = some c := by rw [hy7]; show x7.reg 6 = some c; exact hx7r6
+  have hy7r7 : y7.reg 7 = some w := by rw [hy7]; show x7.reg 7 = some w; exact hx7r7
+  have hy7r8 : y7.reg 8 = some h.d := by rw [hy7]; show x7.reg 8 = some h.d; exact hx7r8
+  have hy7r9 : y7.reg 9 = some h.a := by rw [hy7]; show x7.reg 9 = some h.a; exact hx7r9
+  have hy7r4 : y7.reg 4 = some sp := by rw [hy7]; show x7.reg 4 = some sp; exact hx7r4
+  have hy7mem : y7.mem = s.mem := by rw [hy7]; show x7.mem = s.mem; exact hx7mem
+  have gy7 : ∀ q, q ≠ 0 → y7.reg q = s.reg q := by
+    intro q h0
+    rw [hy7]; show x7.reg q = s.reg q; exact gx7 q h0
+
+  have e22 : X86Int.step im y7 = .ok { y7 with rip := entry + 135 } := by
+    have hh := step_jcc (im := im) (s := y7) (by rw [hy7rip]; exact hc.clocsetj) hy7fl
+    simpa [hy7rip] using hh
+  obtain ⟨z9, hz9⟩ : ∃ u : X86Int.St, u = { y7 with rip := entry + 135 } := ⟨_, rfl⟩
+  have hz9rip : z9.rip = entry + 135 := by rw [hz9]
+  have hz9r0 : z9.reg 0 = some 135 := by
+    rw [hz9]
+    show ({ y7 with rip := entry + 135 }).reg 0 = some 135
+    rw [reg_with_rip]; exact hy7r0
+  have hz9r1 : z9.reg 1 = some i := by
+    rw [hz9]
+    show ({ y7 with rip := entry + 135 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy7r1
+  have hz9r6 : z9.reg 6 = some c := by
+    rw [hz9]
+    show ({ y7 with rip := entry + 135 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy7r6
+  have hz9r7 : z9.reg 7 = some w := by
+    rw [hz9]
+    show ({ y7 with rip := entry + 135 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy7r7
+  have hz9r8 : z9.reg 8 = some h.d := by
+    rw [hz9]
+    show ({ y7 with rip := entry + 135 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy7r8
+  have hz9r9 : z9.reg 9 = some h.a := by
+    rw [hz9]
+    show ({ y7 with rip := entry + 135 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy7r9
+  have hz9r4 : z9.reg 4 = some sp := by
+    rw [hz9]
+    show ({ y7 with rip := entry + 135 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy7r4
+  have hz9mem : z9.mem = s.mem := by
+    rw [hz9]
+    show ({ y7 with rip := entry + 135 }).mem = s.mem
+    rw [mem_with_rip]; exact hy7mem
+  have gz9 : ∀ q, q ≠ 0 → z9.reg q = s.reg q := by
+    intro q h0
+    rw [hz9]
+    show ({ y7 with rip := entry + 135 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy7 q h0
+
+  have e23 : X86Int.step im z9 = .ok { z9 with rip := locset } :=
+    step_jmp (by rw [hz9rip]; exact hc.clocsetjmp)
+  obtain ⟨fin, hfin⟩ : ∃ u : X86Int.St, u = { z9 with rip := locset } := ⟨_, rfl⟩
+  have rw1 : run im 1 (Out.ok s) = Out.ok w1 := by rw [run_succ_ok im 0 s, e1, ← hw1, run_zero]
+  have rw2 : run im 1 (Out.ok w1) = Out.ok w2 := by rw [run_succ_ok im 0 w1, e2, ← hw2, run_zero]
+  have rw3 : run im 1 (Out.ok w2) = Out.ok w3 := by rw [run_succ_ok im 0 w2, e3, ← hw3, run_zero]
+  have rw4 : run im 1 (Out.ok w3) = Out.ok w4 := by rw [run_succ_ok im 0 w3, e4, ← hw4, run_zero]
+  have rw5 : run im 1 (Out.ok w4) = Out.ok w5 := by rw [run_succ_ok im 0 w4, e5, ← hw5, run_zero]
+  have rx0 : run im 1 (Out.ok w5) = Out.ok x0 := by rw [run_succ_ok im 0 w5, e6, ← hx0, run_zero]
+  have ry0 : run im 1 (Out.ok x0) = Out.ok y0 := by rw [run_succ_ok im 0 x0, e7, ← hy0, run_zero]
+  have rx1 : run im 1 (Out.ok y0) = Out.ok x1 := by rw [run_succ_ok im 0 y0, e8, ← hx1, run_zero]
+  have ry1 : run im 1 (Out.ok x1) = Out.ok y1 := by rw [run_succ_ok im 0 x1, e9, ← hy1, run_zero]
+  have rx2 : run im 1 (Out.ok y1) = Out.ok x2 := by rw [run_succ_ok im 0 y1, e10, ← hx2, run_zero]
+  have ry2 : run im 1 (Out.ok x2) = Out.ok y2 := by rw [run_succ_ok im 0 x2, e11, ← hy2, run_zero]
+  have rx3 : run im 1 (Out.ok y2) = Out.ok x3 := by rw [run_succ_ok im 0 y2, e12, ← hx3, run_zero]
+  have ry3 : run im 1 (Out.ok x3) = Out.ok y3 := by rw [run_succ_ok im 0 x3, e13, ← hy3, run_zero]
+  have rx4 : run im 1 (Out.ok y3) = Out.ok x4 := by rw [run_succ_ok im 0 y3, e14, ← hx4, run_zero]
+  have ry4 : run im 1 (Out.ok x4) = Out.ok y4 := by rw [run_succ_ok im 0 x4, e15, ← hy4, run_zero]
+  have rx5 : run im 1 (Out.ok y4) = Out.ok x5 := by rw [run_succ_ok im 0 y4, e16, ← hx5, run_zero]
+  have ry5 : run im 1 (Out.ok x5) = Out.ok y5 := by rw [run_succ_ok im 0 x5, e17, ← hy5, run_zero]
+  have rx6 : run im 1 (Out.ok y5) = Out.ok x6 := by rw [run_succ_ok im 0 y5, e18, ← hx6, run_zero]
+  have ry6 : run im 1 (Out.ok x6) = Out.ok y6 := by rw [run_succ_ok im 0 x6, e19, ← hy6, run_zero]
+  have rx7 : run im 1 (Out.ok y6) = Out.ok x7 := by rw [run_succ_ok im 0 y6, e20, ← hx7, run_zero]
+  have ry7 : run im 1 (Out.ok x7) = Out.ok y7 := by rw [run_succ_ok im 0 x7, e21, ← hy7, run_zero]
+  have rz9 : run im 1 (Out.ok y7) = Out.ok z9 := by rw [run_succ_ok im 0 y7, e22, ← hz9, run_zero]
+  have rfin : run im 1 (Out.ok z9) = Out.ok fin := by rw [run_succ_ok im 0 z9, e23, ← hfin, run_zero]
+  refine ⟨23, fin, by rw [run_add im 1 22, rw1, run_add im 1 21, rw2, run_add im 1 20, rw3, run_add im 1 19, rw4, run_add im 1 18, rw5, run_add im 1 17, rx0, run_add im 1 16, ry0, run_add im 1 15, rx1, run_add im 1 14, ry1, run_add im 1 13, rx2, run_add im 1 12, ry2, run_add im 1 11, rx3, run_add im 1 10, ry3, run_add im 1 9, rx4, run_add im 1 8, ry4, run_add im 1 7, rx5, run_add im 1 6, ry5, run_add im 1 5, rx6, run_add im 1 4, ry6, run_add im 1 3, rx7, run_add im 1 2, ry7, run_add im 1 1, rz9, rfin],
+    by rw [hfin], ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
+  · rw [hfin]; show ({ z9 with rip := locset }).reg 0 = some 135
+    rw [reg_with_rip]; exact hz9r0
+  · rw [hfin]; show ({ z9 with rip := locset }).reg 1 = some i
+    rw [reg_with_rip]; exact hz9r1
+  · rw [hfin]; show ({ z9 with rip := locset }).reg 6 = some c
+    rw [reg_with_rip]; exact hz9r6
+  · rw [hfin]; show ({ z9 with rip := locset }).reg 7 = some w
+    rw [reg_with_rip]; exact hz9r7
+  · rw [hfin]; show ({ z9 with rip := locset }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hz9r8
+  · rw [hfin]; show ({ z9 with rip := locset }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hz9r9
+  · rw [hfin]; show ({ z9 with rip := locset }).reg 4 = some sp
+    rw [reg_with_rip]; exact hz9r4
+  · intro q h0
+    rw [hfin]; show ({ z9 with rip := locset }).reg q = s.reg q
+    rw [reg_with_rip]; exact gz9 q h0
+  · have h1 : fin.mem = s.mem := by rw [hfin, mem_with_rip]; exact hz9mem
+    exact h1
+
+/-- `walk_top` with opcode 136 reaches its handler. -/
+theorem WalkJmp_triple {im : Nat → Option (Ins × Nat)} {entry done prim lit str pick tor fromr rfetch locget locset jmp
+    jz call ret : Nat}
+    (hc : WalkCode im entry done prim lit str pick tor fromr rfetch locget locset jmp jz call ret)
+    (hentry : entry + 215 < W) :
+    ∀ (h : Height) (c i w sp nc : Nat), w + 56 ≤ W → (hlt : i < nc) → (hcW : c < W) →
+    ∀ s, s.rip = entry → s.reg 8 = some h.d → s.reg 9 = some h.a → s.reg 6 = some c →
+      s.reg 4 = some sp → s.reg 7 = some w → s.reg 1 = some i → 16 ≤ s.regs.length →
+      rd64 s.mem (w + 24) = some nc → s.mem.rd c = some 136 →
+      ∃ k s', run im k (Out.ok s) = Out.ok s' ∧ s'.rip = jmp ∧ s'.reg 0 = some 136 ∧
+        s'.reg 1 = some i ∧ s'.reg 6 = some c ∧ s'.reg 7 = some w ∧
+        s'.reg 8 = some h.d ∧ s'.reg 9 = some h.a ∧ s'.reg 4 = some sp ∧
+        (∀ q, q ≠ 0 → s'.reg q = s.reg q) ∧ s'.mem = s.mem := by
+  intro h c i w sp nc hw56 hlt hcW s hrip hr8 hr9 hr6 hr4 hr7 hr1 hlen hfc hbyte
+
+  have hea24 : ea w 24 = w + 24 := Nat.mod_eq_of_lt (by omega)
+  have h57 : 57 % W = 57 := Nat.mod_eq_of_lt (by unfold W; decide)
+  have e1 : X86Int.step im s = .ok { s.set 0 (some nc) with rip := s.rip + 4 } :=
+    step_ld (by rw [hrip]; exact hc.d0) hr7 (by rw [hea24]; exact hfc)
+  obtain ⟨w1, hw1⟩ : ∃ u : X86Int.St, u = { s.set 0 (some nc) with rip := s.rip + 4 } := ⟨_, rfl⟩
+  have hw1rip : w1.rip = entry + 4 := by rw [hw1]; show s.rip + 4 = entry + 4; rw [hrip]
+  have hw1r0 : w1.reg 0 = some nc := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 0 = some nc
+    rw [reg_set_self (len_of_r9 hr9 (by decide))]
+  have hw1r1 : w1.reg 1 = some i := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 1 = some i
+    rw [reg_set_other (by decide)]; exact hr1
+  have hw1r6 : w1.reg 6 = some c := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 6 = some c
+    rw [reg_set_other (by decide)]; exact hr6
+  have hw1r7 : w1.reg 7 = some w := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 7 = some w
+    rw [reg_set_other (by decide)]; exact hr7
+  have hw1r8 : w1.reg 8 = some h.d := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 8 = some h.d
+    rw [reg_set_other (by decide)]; exact hr8
+  have hw1r9 : w1.reg 9 = some h.a := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 9 = some h.a
+    rw [reg_set_other (by decide)]; exact hr9
+  have hw1r4 : w1.reg 4 = some sp := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 4 = some sp
+    rw [reg_set_other (by decide)]; exact hr4
+  have hw1mem : w1.mem = s.mem := by
+    rw [hw1]
+    show (s.set 0 (some nc)).mem = s.mem
+    rw [mem_set]
+  have gw1 : ∀ q, q ≠ 0 → w1.reg q = s.reg q := by
+    intro q h0
+    rw [hw1]
+    show (s.set 0 (some nc)).reg q = s.reg q
+    rw [reg_set_other h0]
+  have e2 : X86Int.step im w1 = .ok { w1 with fl := (aluF .sub i nc).2, rip := w1.rip + 3 } :=
+    step_cmp (by rw [hw1rip]; exact hc.d1) hw1r1 hw1r0
+  obtain ⟨w2, hw2⟩ : ∃ u : X86Int.St, u = { w1 with fl := (aluF .sub i nc).2, rip := w1.rip + 3 } := ⟨_, rfl⟩
+  have hw2rip : w2.rip = entry + 7 := by rw [hw2]; show w1.rip + 3 = entry + 7; rw [hw1rip]
+
+  have hw2fl : X86Int.cond w2.fl 2 = some true := by
+    have hcf : w2.fl.cf = some true := by
+      rw [hw2]
+      show (aluF .sub i nc).2.cf = some true
+      exact aluF_sub_cf_true hlt
+    exact cond_cc2 hcf
+
+  have hw2r1 : w2.reg 1 = some i := by rw [hw2]; show w1.reg 1 = some i; exact hw1r1
+  have hw2r0 : w2.reg 0 = some nc := by rw [hw2]; show w1.reg 0 = some nc; exact hw1r0
+  have hw2r6 : w2.reg 6 = some c := by rw [hw2]; show w1.reg 6 = some c; exact hw1r6
+  have hw2r8 : w2.reg 8 = some h.d := by rw [hw2]; show w1.reg 8 = some h.d; exact hw1r8
+  have hw2r9 : w2.reg 9 = some h.a := by rw [hw2]; show w1.reg 9 = some h.a; exact hw1r9
+  have hw2r4 : w2.reg 4 = some sp := by rw [hw2]; show w1.reg 4 = some sp; exact hw1r4
+  have hw2mem : w2.mem = s.mem := by rw [hw2]; show w1.mem = s.mem; exact hw1mem
+  have gw2 : ∀ q, q ≠ 0 → w2.reg q = s.reg q := by
+    intro q h0
+    rw [hw2]; show w1.reg q = s.reg q; exact gw1 q h0
+
+  have e3 : X86Int.step im w2 = .ok { w2 with rip := entry + 14 } := by
+    have hh := step_jcc (im := im) (s := w2) (by rw [hw2rip]; exact hc.d2) hw2fl
+    simpa using hh
+  obtain ⟨w3, hw3⟩ : ∃ u : X86Int.St, u = { w2 with rip := entry + 14 } := ⟨_, rfl⟩
+  have hw3rip : w3.rip = entry + 14 := by rw [hw3]
+  have hw3r6 : w3.reg 6 = some c := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg 6 = some c
+    rw [reg_with_rip]; exact hw2r6
+  have hw3r1 : w3.reg 1 = some i := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg 1 = some i
+    rw [reg_with_rip]; exact hw2r1
+  have hw3r8 : w3.reg 8 = some h.d := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hw2r8
+  have hw3r9 : w3.reg 9 = some h.a := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hw2r9
+  have hw3r4 : w3.reg 4 = some sp := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hw2r4
+  have hw3r7 : w3.reg 7 = some w := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg 7 = some w
+    rw [reg_with_rip, gw2 7 (by decide)]; exact hr7
+  have hw3mem : w3.mem = s.mem := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).mem = s.mem
+    rw [mem_with_rip]; exact hw2mem
+  have gw3 : ∀ q, q ≠ 0 → w3.reg q = s.reg q := by
+    intro q h0
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gw2 q h0
+  have hea0 : ea c 0 = c := Nat.mod_eq_of_lt hcW
+  have e4 : X86Int.step im w3 = .ok { w3.set 0 (some 136) with rip := w3.rip + 3 } :=
+    step_ld8 (by rw [hw3rip]; exact hc.d4) hw3r6 (by rw [hw3mem, hea0]; exact hbyte)
+  obtain ⟨w4, hw4⟩ : ∃ u : X86Int.St, u = { w3.set 0 (some 136) with rip := w3.rip + 3 } := ⟨_, rfl⟩
+  have hw4rip : w4.rip = entry + 17 := by rw [hw4]; show w3.rip + 3 = entry + 17; rw [hw3rip]
+  have hw4r0 : w4.reg 0 = some 136 := by
+    rw [hw4]
+    show (w3.set 0 (some 136)).reg 0 = some 136
+    rw [reg_set_self (len_of_r9 hw3r9 (by decide))]
+  have hw4r1 : w4.reg 1 = some i := by
+    rw [hw4]
+    show (w3.set 0 (some 136)).reg 1 = some i
+    rw [reg_set_other (by decide)]; exact hw3r1
+  have hw4r6 : w4.reg 6 = some c := by
+    rw [hw4]
+    show (w3.set 0 (some 136)).reg 6 = some c
+    rw [reg_set_other (by decide)]; exact hw3r6
+  have hw4r7 : w4.reg 7 = some w := by
+    rw [hw4]
+    show (w3.set 0 (some 136)).reg 7 = some w
+    rw [reg_set_other (by decide)]; exact hw3r7
+  have hw4r8 : w4.reg 8 = some h.d := by
+    rw [hw4]
+    show (w3.set 0 (some 136)).reg 8 = some h.d
+    rw [reg_set_other (by decide)]; exact hw3r8
+  have hw4r9 : w4.reg 9 = some h.a := by
+    rw [hw4]
+    show (w3.set 0 (some 136)).reg 9 = some h.a
+    rw [reg_set_other (by decide)]; exact hw3r9
+  have hw4r4 : w4.reg 4 = some sp := by
+    rw [hw4]
+    show (w3.set 0 (some 136)).reg 4 = some sp
+    rw [reg_set_other (by decide)]; exact hw3r4
+  have hw4mem : w4.mem = s.mem := by
+    rw [hw4]
+    show (w3.set 0 (some 136)).mem = s.mem
+    rw [mem_set]; exact hw3mem
+  have gw4 : ∀ q, q ≠ 0 → w4.reg q = s.reg q := by
+    intro q h0
+    rw [hw4]
+    show (w3.set 0 (some 136)).reg q = s.reg q
+    rw [reg_set_other h0]; exact gw3 q h0
+  have e5 : X86Int.step im w4 = .ok { w4 with fl := (aluF .sub 136 (57 % W)).2, rip := w4.rip + 4 } :=
+    step_cmpI (by rw [hw4rip]; exact hc.d5) hw4r0
+  obtain ⟨w5, hw5⟩ : ∃ u : X86Int.St, u = { w4 with fl := (aluF .sub 136 (57 % W)).2, rip := w4.rip + 4 } := ⟨_, rfl⟩
+  have hw5rip : w5.rip = entry + 21 := by rw [hw5]; show w4.rip + 4 = entry + 21; rw [hw4rip]
+
+  have hw5fl : X86Int.cond w5.fl 3 = some true := by
+    have hcf : w5.fl.cf = some false := by
+      rw [hw5]
+      show (aluF .sub 136 (57 % W)).2.cf = some false
+      rw [h57]
+      exact aluF_sub_cf (by decide)
+    have hh := cond_cc3 hcf
+    simpa using hh
+  have hw5r0 : w5.reg 0 = some 136 := by rw [hw5]; show w4.reg 0 = some 136; exact hw4r0
+  have hw5r1 : w5.reg 1 = some i := by rw [hw5]; show w4.reg 1 = some i; exact hw4r1
+  have hw5r6 : w5.reg 6 = some c := by rw [hw5]; show w4.reg 6 = some c; exact hw4r6
+  have hw5r7 : w5.reg 7 = some w := by rw [hw5]; show w4.reg 7 = some w; exact hw4r7
+  have hw5r8 : w5.reg 8 = some h.d := by rw [hw5]; show w4.reg 8 = some h.d; exact hw4r8
+  have hw5r9 : w5.reg 9 = some h.a := by rw [hw5]; show w4.reg 9 = some h.a; exact hw4r9
+  have hw5r4 : w5.reg 4 = some sp := by rw [hw5]; show w4.reg 4 = some sp; exact hw4r4
+  have hw5mem : w5.mem = s.mem := by rw [hw5]; show w4.mem = s.mem; exact hw4mem
+  have gw5 : ∀ q, q ≠ 0 → w5.reg q = s.reg q := by
+    intro q h0
+    rw [hw5]; show w4.reg q = s.reg q; exact gw4 q h0
+
+  have e6 : X86Int.step im w5 = .ok { w5 with rip := entry + 28 } := by
+    have hh := step_jcc (im := im) (s := w5) (by rw [hw5rip]; exact hc.d6) hw5fl
+    simpa using hh
+  obtain ⟨x0, hx0⟩ : ∃ u : X86Int.St, u = { w5 with rip := entry + 28 } := ⟨_, rfl⟩
+  have hx0rip : x0.rip = entry + 28 := by rw [hx0]
+  have hx0r0 : x0.reg 0 = some 136 := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 0 = some 136
+    rw [reg_with_rip]; exact hw5r0
+  have hx0r1 : x0.reg 1 = some i := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 1 = some i
+    rw [reg_with_rip]; exact hw5r1
+  have hx0r6 : x0.reg 6 = some c := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 6 = some c
+    rw [reg_with_rip]; exact hw5r6
+  have hx0r7 : x0.reg 7 = some w := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 7 = some w
+    rw [reg_with_rip]; exact hw5r7
+  have hx0r8 : x0.reg 8 = some h.d := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hw5r8
+  have hx0r9 : x0.reg 9 = some h.a := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hw5r9
+  have hx0r4 : x0.reg 4 = some sp := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hw5r4
+  have hx0mem : x0.mem = s.mem := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).mem = s.mem
+    rw [mem_with_rip]; exact hw5mem
+  have gx0 : ∀ q, q ≠ 0 → x0.reg q = s.reg q := by
+    intro q h0
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gw5 q h0
+
+  have e7 : X86Int.step im x0 = .ok { x0 with fl := (aluF .sub 136 (128 % W)).2, rip := x0.rip + 7 } :=
+    step_cmpI (by rw [hx0rip]; exact hc.clit) hx0r0
+  obtain ⟨y0, hy0⟩ : ∃ u : X86Int.St, u = { x0 with fl := (aluF .sub 136 (128 % W)).2, rip := x0.rip + 7 } := ⟨_, rfl⟩
+  have hy0rip : y0.rip = entry + 35 := by rw [hy0]; show x0.rip + 7 = entry + 35; rw [hx0rip]
+
+  have hy0fl : X86Int.cond y0.fl 5 = some true := by
+    have hz : y0.fl.zf = some false := by
+      rw [hy0]
+      show (aluF .sub 136 (128 % W)).2.zf = some false
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy0r0 : y0.reg 0 = some 136 := by rw [hy0]; show x0.reg 0 = some 136; exact hx0r0
+  have hy0r1 : y0.reg 1 = some i := by rw [hy0]; show x0.reg 1 = some i; exact hx0r1
+  have hy0r6 : y0.reg 6 = some c := by rw [hy0]; show x0.reg 6 = some c; exact hx0r6
+  have hy0r7 : y0.reg 7 = some w := by rw [hy0]; show x0.reg 7 = some w; exact hx0r7
+  have hy0r8 : y0.reg 8 = some h.d := by rw [hy0]; show x0.reg 8 = some h.d; exact hx0r8
+  have hy0r9 : y0.reg 9 = some h.a := by rw [hy0]; show x0.reg 9 = some h.a; exact hx0r9
+  have hy0r4 : y0.reg 4 = some sp := by rw [hy0]; show x0.reg 4 = some sp; exact hx0r4
+  have hy0mem : y0.mem = s.mem := by rw [hy0]; show x0.mem = s.mem; exact hx0mem
+  have gy0 : ∀ q, q ≠ 0 → y0.reg q = s.reg q := by
+    intro q h0
+    rw [hy0]; show x0.reg q = s.reg q; exact gx0 q h0
+
+  have e8 : X86Int.step im y0 = .ok { y0 with rip := entry + 42 } := by
+    have hh := step_jcc (im := im) (s := y0) (by rw [hy0rip]; exact hc.clitj) hy0fl
+    simpa using hh
+  obtain ⟨x1, hx1⟩ : ∃ u : X86Int.St, u = { y0 with rip := entry + 42 } := ⟨_, rfl⟩
+  have hx1rip : x1.rip = entry + 42 := by rw [hx1]
+  have hx1r0 : x1.reg 0 = some 136 := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg 0 = some 136
+    rw [reg_with_rip]; exact hy0r0
+  have hx1r1 : x1.reg 1 = some i := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy0r1
+  have hx1r6 : x1.reg 6 = some c := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy0r6
+  have hx1r7 : x1.reg 7 = some w := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy0r7
+  have hx1r8 : x1.reg 8 = some h.d := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy0r8
+  have hx1r9 : x1.reg 9 = some h.a := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy0r9
+  have hx1r4 : x1.reg 4 = some sp := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy0r4
+  have hx1mem : x1.mem = s.mem := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).mem = s.mem
+    rw [mem_with_rip]; exact hy0mem
+  have gx1 : ∀ q, q ≠ 0 → x1.reg q = s.reg q := by
+    intro q h0
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy0 q h0
+
+  have e9 : X86Int.step im x1 = .ok { x1 with fl := (aluF .sub 136 (129 % W)).2, rip := x1.rip + 7 } :=
+    step_cmpI (by rw [hx1rip]; exact hc.cstr) hx1r0
+  obtain ⟨y1, hy1⟩ : ∃ u : X86Int.St, u = { x1 with fl := (aluF .sub 136 (129 % W)).2, rip := x1.rip + 7 } := ⟨_, rfl⟩
+  have hy1rip : y1.rip = entry + 49 := by rw [hy1]; show x1.rip + 7 = entry + 49; rw [hx1rip]
+
+  have hy1fl : X86Int.cond y1.fl 5 = some true := by
+    have hz : y1.fl.zf = some false := by
+      rw [hy1]
+      show (aluF .sub 136 (129 % W)).2.zf = some false
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy1r0 : y1.reg 0 = some 136 := by rw [hy1]; show x1.reg 0 = some 136; exact hx1r0
+  have hy1r1 : y1.reg 1 = some i := by rw [hy1]; show x1.reg 1 = some i; exact hx1r1
+  have hy1r6 : y1.reg 6 = some c := by rw [hy1]; show x1.reg 6 = some c; exact hx1r6
+  have hy1r7 : y1.reg 7 = some w := by rw [hy1]; show x1.reg 7 = some w; exact hx1r7
+  have hy1r8 : y1.reg 8 = some h.d := by rw [hy1]; show x1.reg 8 = some h.d; exact hx1r8
+  have hy1r9 : y1.reg 9 = some h.a := by rw [hy1]; show x1.reg 9 = some h.a; exact hx1r9
+  have hy1r4 : y1.reg 4 = some sp := by rw [hy1]; show x1.reg 4 = some sp; exact hx1r4
+  have hy1mem : y1.mem = s.mem := by rw [hy1]; show x1.mem = s.mem; exact hx1mem
+  have gy1 : ∀ q, q ≠ 0 → y1.reg q = s.reg q := by
+    intro q h0
+    rw [hy1]; show x1.reg q = s.reg q; exact gx1 q h0
+
+  have e10 : X86Int.step im y1 = .ok { y1 with rip := entry + 56 } := by
+    have hh := step_jcc (im := im) (s := y1) (by rw [hy1rip]; exact hc.cstrj) hy1fl
+    simpa using hh
+  obtain ⟨x2, hx2⟩ : ∃ u : X86Int.St, u = { y1 with rip := entry + 56 } := ⟨_, rfl⟩
+  have hx2rip : x2.rip = entry + 56 := by rw [hx2]
+  have hx2r0 : x2.reg 0 = some 136 := by
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).reg 0 = some 136
+    rw [reg_with_rip]; exact hy1r0
+  have hx2r1 : x2.reg 1 = some i := by
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy1r1
+  have hx2r6 : x2.reg 6 = some c := by
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy1r6
+  have hx2r7 : x2.reg 7 = some w := by
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy1r7
+  have hx2r8 : x2.reg 8 = some h.d := by
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy1r8
+  have hx2r9 : x2.reg 9 = some h.a := by
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy1r9
+  have hx2r4 : x2.reg 4 = some sp := by
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy1r4
+  have hx2mem : x2.mem = s.mem := by
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).mem = s.mem
+    rw [mem_with_rip]; exact hy1mem
+  have gx2 : ∀ q, q ≠ 0 → x2.reg q = s.reg q := by
+    intro q h0
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy1 q h0
+
+  have e11 : X86Int.step im x2 = .ok { x2 with fl := (aluF .sub 136 (130 % W)).2, rip := x2.rip + 7 } :=
+    step_cmpI (by rw [hx2rip]; exact hc.cpick) hx2r0
+  obtain ⟨y2, hy2⟩ : ∃ u : X86Int.St, u = { x2 with fl := (aluF .sub 136 (130 % W)).2, rip := x2.rip + 7 } := ⟨_, rfl⟩
+  have hy2rip : y2.rip = entry + 63 := by rw [hy2]; show x2.rip + 7 = entry + 63; rw [hx2rip]
+
+  have hy2fl : X86Int.cond y2.fl 5 = some true := by
+    have hz : y2.fl.zf = some false := by
+      rw [hy2]
+      show (aluF .sub 136 (130 % W)).2.zf = some false
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy2r0 : y2.reg 0 = some 136 := by rw [hy2]; show x2.reg 0 = some 136; exact hx2r0
+  have hy2r1 : y2.reg 1 = some i := by rw [hy2]; show x2.reg 1 = some i; exact hx2r1
+  have hy2r6 : y2.reg 6 = some c := by rw [hy2]; show x2.reg 6 = some c; exact hx2r6
+  have hy2r7 : y2.reg 7 = some w := by rw [hy2]; show x2.reg 7 = some w; exact hx2r7
+  have hy2r8 : y2.reg 8 = some h.d := by rw [hy2]; show x2.reg 8 = some h.d; exact hx2r8
+  have hy2r9 : y2.reg 9 = some h.a := by rw [hy2]; show x2.reg 9 = some h.a; exact hx2r9
+  have hy2r4 : y2.reg 4 = some sp := by rw [hy2]; show x2.reg 4 = some sp; exact hx2r4
+  have hy2mem : y2.mem = s.mem := by rw [hy2]; show x2.mem = s.mem; exact hx2mem
+  have gy2 : ∀ q, q ≠ 0 → y2.reg q = s.reg q := by
+    intro q h0
+    rw [hy2]; show x2.reg q = s.reg q; exact gx2 q h0
+
+  have e12 : X86Int.step im y2 = .ok { y2 with rip := entry + 70 } := by
+    have hh := step_jcc (im := im) (s := y2) (by rw [hy2rip]; exact hc.cpickj) hy2fl
+    simpa using hh
+  obtain ⟨x3, hx3⟩ : ∃ u : X86Int.St, u = { y2 with rip := entry + 70 } := ⟨_, rfl⟩
+  have hx3rip : x3.rip = entry + 70 := by rw [hx3]
+  have hx3r0 : x3.reg 0 = some 136 := by
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).reg 0 = some 136
+    rw [reg_with_rip]; exact hy2r0
+  have hx3r1 : x3.reg 1 = some i := by
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy2r1
+  have hx3r6 : x3.reg 6 = some c := by
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy2r6
+  have hx3r7 : x3.reg 7 = some w := by
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy2r7
+  have hx3r8 : x3.reg 8 = some h.d := by
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy2r8
+  have hx3r9 : x3.reg 9 = some h.a := by
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy2r9
+  have hx3r4 : x3.reg 4 = some sp := by
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy2r4
+  have hx3mem : x3.mem = s.mem := by
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).mem = s.mem
+    rw [mem_with_rip]; exact hy2mem
+  have gx3 : ∀ q, q ≠ 0 → x3.reg q = s.reg q := by
+    intro q h0
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy2 q h0
+
+  have e13 : X86Int.step im x3 = .ok { x3 with fl := (aluF .sub 136 (131 % W)).2, rip := x3.rip + 7 } :=
+    step_cmpI (by rw [hx3rip]; exact hc.ctor) hx3r0
+  obtain ⟨y3, hy3⟩ : ∃ u : X86Int.St, u = { x3 with fl := (aluF .sub 136 (131 % W)).2, rip := x3.rip + 7 } := ⟨_, rfl⟩
+  have hy3rip : y3.rip = entry + 77 := by rw [hy3]; show x3.rip + 7 = entry + 77; rw [hx3rip]
+
+  have hy3fl : X86Int.cond y3.fl 5 = some true := by
+    have hz : y3.fl.zf = some false := by
+      rw [hy3]
+      show (aluF .sub 136 (131 % W)).2.zf = some false
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy3r0 : y3.reg 0 = some 136 := by rw [hy3]; show x3.reg 0 = some 136; exact hx3r0
+  have hy3r1 : y3.reg 1 = some i := by rw [hy3]; show x3.reg 1 = some i; exact hx3r1
+  have hy3r6 : y3.reg 6 = some c := by rw [hy3]; show x3.reg 6 = some c; exact hx3r6
+  have hy3r7 : y3.reg 7 = some w := by rw [hy3]; show x3.reg 7 = some w; exact hx3r7
+  have hy3r8 : y3.reg 8 = some h.d := by rw [hy3]; show x3.reg 8 = some h.d; exact hx3r8
+  have hy3r9 : y3.reg 9 = some h.a := by rw [hy3]; show x3.reg 9 = some h.a; exact hx3r9
+  have hy3r4 : y3.reg 4 = some sp := by rw [hy3]; show x3.reg 4 = some sp; exact hx3r4
+  have hy3mem : y3.mem = s.mem := by rw [hy3]; show x3.mem = s.mem; exact hx3mem
+  have gy3 : ∀ q, q ≠ 0 → y3.reg q = s.reg q := by
+    intro q h0
+    rw [hy3]; show x3.reg q = s.reg q; exact gx3 q h0
+
+  have e14 : X86Int.step im y3 = .ok { y3 with rip := entry + 84 } := by
+    have hh := step_jcc (im := im) (s := y3) (by rw [hy3rip]; exact hc.ctorj) hy3fl
+    simpa using hh
+  obtain ⟨x4, hx4⟩ : ∃ u : X86Int.St, u = { y3 with rip := entry + 84 } := ⟨_, rfl⟩
+  have hx4rip : x4.rip = entry + 84 := by rw [hx4]
+  have hx4r0 : x4.reg 0 = some 136 := by
+    rw [hx4]
+    show ({ y3 with rip := entry + 84 }).reg 0 = some 136
+    rw [reg_with_rip]; exact hy3r0
+  have hx4r1 : x4.reg 1 = some i := by
+    rw [hx4]
+    show ({ y3 with rip := entry + 84 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy3r1
+  have hx4r6 : x4.reg 6 = some c := by
+    rw [hx4]
+    show ({ y3 with rip := entry + 84 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy3r6
+  have hx4r7 : x4.reg 7 = some w := by
+    rw [hx4]
+    show ({ y3 with rip := entry + 84 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy3r7
+  have hx4r8 : x4.reg 8 = some h.d := by
+    rw [hx4]
+    show ({ y3 with rip := entry + 84 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy3r8
+  have hx4r9 : x4.reg 9 = some h.a := by
+    rw [hx4]
+    show ({ y3 with rip := entry + 84 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy3r9
+  have hx4r4 : x4.reg 4 = some sp := by
+    rw [hx4]
+    show ({ y3 with rip := entry + 84 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy3r4
+  have hx4mem : x4.mem = s.mem := by
+    rw [hx4]
+    show ({ y3 with rip := entry + 84 }).mem = s.mem
+    rw [mem_with_rip]; exact hy3mem
+  have gx4 : ∀ q, q ≠ 0 → x4.reg q = s.reg q := by
+    intro q h0
+    rw [hx4]
+    show ({ y3 with rip := entry + 84 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy3 q h0
+
+  have e15 : X86Int.step im x4 = .ok { x4 with fl := (aluF .sub 136 (132 % W)).2, rip := x4.rip + 7 } :=
+    step_cmpI (by rw [hx4rip]; exact hc.cfromr) hx4r0
+  obtain ⟨y4, hy4⟩ : ∃ u : X86Int.St, u = { x4 with fl := (aluF .sub 136 (132 % W)).2, rip := x4.rip + 7 } := ⟨_, rfl⟩
+  have hy4rip : y4.rip = entry + 91 := by rw [hy4]; show x4.rip + 7 = entry + 91; rw [hx4rip]
+
+  have hy4fl : X86Int.cond y4.fl 5 = some true := by
+    have hz : y4.fl.zf = some false := by
+      rw [hy4]
+      show (aluF .sub 136 (132 % W)).2.zf = some false
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy4r0 : y4.reg 0 = some 136 := by rw [hy4]; show x4.reg 0 = some 136; exact hx4r0
+  have hy4r1 : y4.reg 1 = some i := by rw [hy4]; show x4.reg 1 = some i; exact hx4r1
+  have hy4r6 : y4.reg 6 = some c := by rw [hy4]; show x4.reg 6 = some c; exact hx4r6
+  have hy4r7 : y4.reg 7 = some w := by rw [hy4]; show x4.reg 7 = some w; exact hx4r7
+  have hy4r8 : y4.reg 8 = some h.d := by rw [hy4]; show x4.reg 8 = some h.d; exact hx4r8
+  have hy4r9 : y4.reg 9 = some h.a := by rw [hy4]; show x4.reg 9 = some h.a; exact hx4r9
+  have hy4r4 : y4.reg 4 = some sp := by rw [hy4]; show x4.reg 4 = some sp; exact hx4r4
+  have hy4mem : y4.mem = s.mem := by rw [hy4]; show x4.mem = s.mem; exact hx4mem
+  have gy4 : ∀ q, q ≠ 0 → y4.reg q = s.reg q := by
+    intro q h0
+    rw [hy4]; show x4.reg q = s.reg q; exact gx4 q h0
+
+  have e16 : X86Int.step im y4 = .ok { y4 with rip := entry + 98 } := by
+    have hh := step_jcc (im := im) (s := y4) (by rw [hy4rip]; exact hc.cfromrj) hy4fl
+    simpa using hh
+  obtain ⟨x5, hx5⟩ : ∃ u : X86Int.St, u = { y4 with rip := entry + 98 } := ⟨_, rfl⟩
+  have hx5rip : x5.rip = entry + 98 := by rw [hx5]
+  have hx5r0 : x5.reg 0 = some 136 := by
+    rw [hx5]
+    show ({ y4 with rip := entry + 98 }).reg 0 = some 136
+    rw [reg_with_rip]; exact hy4r0
+  have hx5r1 : x5.reg 1 = some i := by
+    rw [hx5]
+    show ({ y4 with rip := entry + 98 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy4r1
+  have hx5r6 : x5.reg 6 = some c := by
+    rw [hx5]
+    show ({ y4 with rip := entry + 98 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy4r6
+  have hx5r7 : x5.reg 7 = some w := by
+    rw [hx5]
+    show ({ y4 with rip := entry + 98 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy4r7
+  have hx5r8 : x5.reg 8 = some h.d := by
+    rw [hx5]
+    show ({ y4 with rip := entry + 98 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy4r8
+  have hx5r9 : x5.reg 9 = some h.a := by
+    rw [hx5]
+    show ({ y4 with rip := entry + 98 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy4r9
+  have hx5r4 : x5.reg 4 = some sp := by
+    rw [hx5]
+    show ({ y4 with rip := entry + 98 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy4r4
+  have hx5mem : x5.mem = s.mem := by
+    rw [hx5]
+    show ({ y4 with rip := entry + 98 }).mem = s.mem
+    rw [mem_with_rip]; exact hy4mem
+  have gx5 : ∀ q, q ≠ 0 → x5.reg q = s.reg q := by
+    intro q h0
+    rw [hx5]
+    show ({ y4 with rip := entry + 98 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy4 q h0
+
+  have e17 : X86Int.step im x5 = .ok { x5 with fl := (aluF .sub 136 (133 % W)).2, rip := x5.rip + 7 } :=
+    step_cmpI (by rw [hx5rip]; exact hc.crfetch) hx5r0
+  obtain ⟨y5, hy5⟩ : ∃ u : X86Int.St, u = { x5 with fl := (aluF .sub 136 (133 % W)).2, rip := x5.rip + 7 } := ⟨_, rfl⟩
+  have hy5rip : y5.rip = entry + 105 := by rw [hy5]; show x5.rip + 7 = entry + 105; rw [hx5rip]
+
+  have hy5fl : X86Int.cond y5.fl 5 = some true := by
+    have hz : y5.fl.zf = some false := by
+      rw [hy5]
+      show (aluF .sub 136 (133 % W)).2.zf = some false
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy5r0 : y5.reg 0 = some 136 := by rw [hy5]; show x5.reg 0 = some 136; exact hx5r0
+  have hy5r1 : y5.reg 1 = some i := by rw [hy5]; show x5.reg 1 = some i; exact hx5r1
+  have hy5r6 : y5.reg 6 = some c := by rw [hy5]; show x5.reg 6 = some c; exact hx5r6
+  have hy5r7 : y5.reg 7 = some w := by rw [hy5]; show x5.reg 7 = some w; exact hx5r7
+  have hy5r8 : y5.reg 8 = some h.d := by rw [hy5]; show x5.reg 8 = some h.d; exact hx5r8
+  have hy5r9 : y5.reg 9 = some h.a := by rw [hy5]; show x5.reg 9 = some h.a; exact hx5r9
+  have hy5r4 : y5.reg 4 = some sp := by rw [hy5]; show x5.reg 4 = some sp; exact hx5r4
+  have hy5mem : y5.mem = s.mem := by rw [hy5]; show x5.mem = s.mem; exact hx5mem
+  have gy5 : ∀ q, q ≠ 0 → y5.reg q = s.reg q := by
+    intro q h0
+    rw [hy5]; show x5.reg q = s.reg q; exact gx5 q h0
+
+  have e18 : X86Int.step im y5 = .ok { y5 with rip := entry + 112 } := by
+    have hh := step_jcc (im := im) (s := y5) (by rw [hy5rip]; exact hc.crfetchj) hy5fl
+    simpa using hh
+  obtain ⟨x6, hx6⟩ : ∃ u : X86Int.St, u = { y5 with rip := entry + 112 } := ⟨_, rfl⟩
+  have hx6rip : x6.rip = entry + 112 := by rw [hx6]
+  have hx6r0 : x6.reg 0 = some 136 := by
+    rw [hx6]
+    show ({ y5 with rip := entry + 112 }).reg 0 = some 136
+    rw [reg_with_rip]; exact hy5r0
+  have hx6r1 : x6.reg 1 = some i := by
+    rw [hx6]
+    show ({ y5 with rip := entry + 112 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy5r1
+  have hx6r6 : x6.reg 6 = some c := by
+    rw [hx6]
+    show ({ y5 with rip := entry + 112 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy5r6
+  have hx6r7 : x6.reg 7 = some w := by
+    rw [hx6]
+    show ({ y5 with rip := entry + 112 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy5r7
+  have hx6r8 : x6.reg 8 = some h.d := by
+    rw [hx6]
+    show ({ y5 with rip := entry + 112 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy5r8
+  have hx6r9 : x6.reg 9 = some h.a := by
+    rw [hx6]
+    show ({ y5 with rip := entry + 112 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy5r9
+  have hx6r4 : x6.reg 4 = some sp := by
+    rw [hx6]
+    show ({ y5 with rip := entry + 112 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy5r4
+  have hx6mem : x6.mem = s.mem := by
+    rw [hx6]
+    show ({ y5 with rip := entry + 112 }).mem = s.mem
+    rw [mem_with_rip]; exact hy5mem
+  have gx6 : ∀ q, q ≠ 0 → x6.reg q = s.reg q := by
+    intro q h0
+    rw [hx6]
+    show ({ y5 with rip := entry + 112 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy5 q h0
+
+  have e19 : X86Int.step im x6 = .ok { x6 with fl := (aluF .sub 136 (134 % W)).2, rip := x6.rip + 7 } :=
+    step_cmpI (by rw [hx6rip]; exact hc.clocget) hx6r0
+  obtain ⟨y6, hy6⟩ : ∃ u : X86Int.St, u = { x6 with fl := (aluF .sub 136 (134 % W)).2, rip := x6.rip + 7 } := ⟨_, rfl⟩
+  have hy6rip : y6.rip = entry + 119 := by rw [hy6]; show x6.rip + 7 = entry + 119; rw [hx6rip]
+
+  have hy6fl : X86Int.cond y6.fl 5 = some true := by
+    have hz : y6.fl.zf = some false := by
+      rw [hy6]
+      show (aluF .sub 136 (134 % W)).2.zf = some false
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy6r0 : y6.reg 0 = some 136 := by rw [hy6]; show x6.reg 0 = some 136; exact hx6r0
+  have hy6r1 : y6.reg 1 = some i := by rw [hy6]; show x6.reg 1 = some i; exact hx6r1
+  have hy6r6 : y6.reg 6 = some c := by rw [hy6]; show x6.reg 6 = some c; exact hx6r6
+  have hy6r7 : y6.reg 7 = some w := by rw [hy6]; show x6.reg 7 = some w; exact hx6r7
+  have hy6r8 : y6.reg 8 = some h.d := by rw [hy6]; show x6.reg 8 = some h.d; exact hx6r8
+  have hy6r9 : y6.reg 9 = some h.a := by rw [hy6]; show x6.reg 9 = some h.a; exact hx6r9
+  have hy6r4 : y6.reg 4 = some sp := by rw [hy6]; show x6.reg 4 = some sp; exact hx6r4
+  have hy6mem : y6.mem = s.mem := by rw [hy6]; show x6.mem = s.mem; exact hx6mem
+  have gy6 : ∀ q, q ≠ 0 → y6.reg q = s.reg q := by
+    intro q h0
+    rw [hy6]; show x6.reg q = s.reg q; exact gx6 q h0
+
+  have e20 : X86Int.step im y6 = .ok { y6 with rip := entry + 126 } := by
+    have hh := step_jcc (im := im) (s := y6) (by rw [hy6rip]; exact hc.clocgetj) hy6fl
+    simpa using hh
+  obtain ⟨x7, hx7⟩ : ∃ u : X86Int.St, u = { y6 with rip := entry + 126 } := ⟨_, rfl⟩
+  have hx7rip : x7.rip = entry + 126 := by rw [hx7]
+  have hx7r0 : x7.reg 0 = some 136 := by
+    rw [hx7]
+    show ({ y6 with rip := entry + 126 }).reg 0 = some 136
+    rw [reg_with_rip]; exact hy6r0
+  have hx7r1 : x7.reg 1 = some i := by
+    rw [hx7]
+    show ({ y6 with rip := entry + 126 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy6r1
+  have hx7r6 : x7.reg 6 = some c := by
+    rw [hx7]
+    show ({ y6 with rip := entry + 126 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy6r6
+  have hx7r7 : x7.reg 7 = some w := by
+    rw [hx7]
+    show ({ y6 with rip := entry + 126 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy6r7
+  have hx7r8 : x7.reg 8 = some h.d := by
+    rw [hx7]
+    show ({ y6 with rip := entry + 126 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy6r8
+  have hx7r9 : x7.reg 9 = some h.a := by
+    rw [hx7]
+    show ({ y6 with rip := entry + 126 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy6r9
+  have hx7r4 : x7.reg 4 = some sp := by
+    rw [hx7]
+    show ({ y6 with rip := entry + 126 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy6r4
+  have hx7mem : x7.mem = s.mem := by
+    rw [hx7]
+    show ({ y6 with rip := entry + 126 }).mem = s.mem
+    rw [mem_with_rip]; exact hy6mem
+  have gx7 : ∀ q, q ≠ 0 → x7.reg q = s.reg q := by
+    intro q h0
+    rw [hx7]
+    show ({ y6 with rip := entry + 126 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy6 q h0
+
+  have e21 : X86Int.step im x7 = .ok { x7 with fl := (aluF .sub 136 (135 % W)).2, rip := x7.rip + 7 } :=
+    step_cmpI (by rw [hx7rip]; exact hc.clocset) hx7r0
+  obtain ⟨y7, hy7⟩ : ∃ u : X86Int.St, u = { x7 with fl := (aluF .sub 136 (135 % W)).2, rip := x7.rip + 7 } := ⟨_, rfl⟩
+  have hy7rip : y7.rip = entry + 133 := by rw [hy7]; show x7.rip + 7 = entry + 133; rw [hx7rip]
+
+  have hy7fl : X86Int.cond y7.fl 5 = some true := by
+    have hz : y7.fl.zf = some false := by
+      rw [hy7]
+      show (aluF .sub 136 (135 % W)).2.zf = some false
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy7r0 : y7.reg 0 = some 136 := by rw [hy7]; show x7.reg 0 = some 136; exact hx7r0
+  have hy7r1 : y7.reg 1 = some i := by rw [hy7]; show x7.reg 1 = some i; exact hx7r1
+  have hy7r6 : y7.reg 6 = some c := by rw [hy7]; show x7.reg 6 = some c; exact hx7r6
+  have hy7r7 : y7.reg 7 = some w := by rw [hy7]; show x7.reg 7 = some w; exact hx7r7
+  have hy7r8 : y7.reg 8 = some h.d := by rw [hy7]; show x7.reg 8 = some h.d; exact hx7r8
+  have hy7r9 : y7.reg 9 = some h.a := by rw [hy7]; show x7.reg 9 = some h.a; exact hx7r9
+  have hy7r4 : y7.reg 4 = some sp := by rw [hy7]; show x7.reg 4 = some sp; exact hx7r4
+  have hy7mem : y7.mem = s.mem := by rw [hy7]; show x7.mem = s.mem; exact hx7mem
+  have gy7 : ∀ q, q ≠ 0 → y7.reg q = s.reg q := by
+    intro q h0
+    rw [hy7]; show x7.reg q = s.reg q; exact gx7 q h0
+
+  have e22 : X86Int.step im y7 = .ok { y7 with rip := entry + 140 } := by
+    have hh := step_jcc (im := im) (s := y7) (by rw [hy7rip]; exact hc.clocsetj) hy7fl
+    simpa using hh
+  obtain ⟨x8, hx8⟩ : ∃ u : X86Int.St, u = { y7 with rip := entry + 140 } := ⟨_, rfl⟩
+  have hx8rip : x8.rip = entry + 140 := by rw [hx8]
+  have hx8r0 : x8.reg 0 = some 136 := by
+    rw [hx8]
+    show ({ y7 with rip := entry + 140 }).reg 0 = some 136
+    rw [reg_with_rip]; exact hy7r0
+  have hx8r1 : x8.reg 1 = some i := by
+    rw [hx8]
+    show ({ y7 with rip := entry + 140 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy7r1
+  have hx8r6 : x8.reg 6 = some c := by
+    rw [hx8]
+    show ({ y7 with rip := entry + 140 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy7r6
+  have hx8r7 : x8.reg 7 = some w := by
+    rw [hx8]
+    show ({ y7 with rip := entry + 140 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy7r7
+  have hx8r8 : x8.reg 8 = some h.d := by
+    rw [hx8]
+    show ({ y7 with rip := entry + 140 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy7r8
+  have hx8r9 : x8.reg 9 = some h.a := by
+    rw [hx8]
+    show ({ y7 with rip := entry + 140 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy7r9
+  have hx8r4 : x8.reg 4 = some sp := by
+    rw [hx8]
+    show ({ y7 with rip := entry + 140 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy7r4
+  have hx8mem : x8.mem = s.mem := by
+    rw [hx8]
+    show ({ y7 with rip := entry + 140 }).mem = s.mem
+    rw [mem_with_rip]; exact hy7mem
+  have gx8 : ∀ q, q ≠ 0 → x8.reg q = s.reg q := by
+    intro q h0
+    rw [hx8]
+    show ({ y7 with rip := entry + 140 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy7 q h0
+
+  have e23 : X86Int.step im x8 = .ok { x8 with fl := (aluF .sub 136 (136 % W)).2, rip := x8.rip + 7 } :=
+    step_cmpI (by rw [hx8rip]; exact hc.cjmp) hx8r0
+  obtain ⟨y8, hy8⟩ : ∃ u : X86Int.St, u = { x8 with fl := (aluF .sub 136 (136 % W)).2, rip := x8.rip + 7 } := ⟨_, rfl⟩
+  have hy8rip : y8.rip = entry + 147 := by rw [hy8]; show x8.rip + 7 = entry + 147; rw [hx8rip]
+
+  have hy8fl : X86Int.cond y8.fl 5 = some false := by
+    have hz : y8.fl.zf = some true := by
+      rw [hy8]
+      show (aluF .sub 136 (136 % W)).2.zf = some true
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy8r0 : y8.reg 0 = some 136 := by rw [hy8]; show x8.reg 0 = some 136; exact hx8r0
+  have hy8r1 : y8.reg 1 = some i := by rw [hy8]; show x8.reg 1 = some i; exact hx8r1
+  have hy8r6 : y8.reg 6 = some c := by rw [hy8]; show x8.reg 6 = some c; exact hx8r6
+  have hy8r7 : y8.reg 7 = some w := by rw [hy8]; show x8.reg 7 = some w; exact hx8r7
+  have hy8r8 : y8.reg 8 = some h.d := by rw [hy8]; show x8.reg 8 = some h.d; exact hx8r8
+  have hy8r9 : y8.reg 9 = some h.a := by rw [hy8]; show x8.reg 9 = some h.a; exact hx8r9
+  have hy8r4 : y8.reg 4 = some sp := by rw [hy8]; show x8.reg 4 = some sp; exact hx8r4
+  have hy8mem : y8.mem = s.mem := by rw [hy8]; show x8.mem = s.mem; exact hx8mem
+  have gy8 : ∀ q, q ≠ 0 → y8.reg q = s.reg q := by
+    intro q h0
+    rw [hy8]; show x8.reg q = s.reg q; exact gx8 q h0
+
+  have e24 : X86Int.step im y8 = .ok { y8 with rip := entry + 149 } := by
+    have hh := step_jcc (im := im) (s := y8) (by rw [hy8rip]; exact hc.cjmpj) hy8fl
+    simpa [hy8rip] using hh
+  obtain ⟨z9, hz9⟩ : ∃ u : X86Int.St, u = { y8 with rip := entry + 149 } := ⟨_, rfl⟩
+  have hz9rip : z9.rip = entry + 149 := by rw [hz9]
+  have hz9r0 : z9.reg 0 = some 136 := by
+    rw [hz9]
+    show ({ y8 with rip := entry + 149 }).reg 0 = some 136
+    rw [reg_with_rip]; exact hy8r0
+  have hz9r1 : z9.reg 1 = some i := by
+    rw [hz9]
+    show ({ y8 with rip := entry + 149 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy8r1
+  have hz9r6 : z9.reg 6 = some c := by
+    rw [hz9]
+    show ({ y8 with rip := entry + 149 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy8r6
+  have hz9r7 : z9.reg 7 = some w := by
+    rw [hz9]
+    show ({ y8 with rip := entry + 149 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy8r7
+  have hz9r8 : z9.reg 8 = some h.d := by
+    rw [hz9]
+    show ({ y8 with rip := entry + 149 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy8r8
+  have hz9r9 : z9.reg 9 = some h.a := by
+    rw [hz9]
+    show ({ y8 with rip := entry + 149 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy8r9
+  have hz9r4 : z9.reg 4 = some sp := by
+    rw [hz9]
+    show ({ y8 with rip := entry + 149 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy8r4
+  have hz9mem : z9.mem = s.mem := by
+    rw [hz9]
+    show ({ y8 with rip := entry + 149 }).mem = s.mem
+    rw [mem_with_rip]; exact hy8mem
+  have gz9 : ∀ q, q ≠ 0 → z9.reg q = s.reg q := by
+    intro q h0
+    rw [hz9]
+    show ({ y8 with rip := entry + 149 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy8 q h0
+
+  have e25 : X86Int.step im z9 = .ok { z9 with rip := jmp } :=
+    step_jmp (by rw [hz9rip]; exact hc.cjmpjmp)
+  obtain ⟨fin, hfin⟩ : ∃ u : X86Int.St, u = { z9 with rip := jmp } := ⟨_, rfl⟩
+  have rw1 : run im 1 (Out.ok s) = Out.ok w1 := by rw [run_succ_ok im 0 s, e1, ← hw1, run_zero]
+  have rw2 : run im 1 (Out.ok w1) = Out.ok w2 := by rw [run_succ_ok im 0 w1, e2, ← hw2, run_zero]
+  have rw3 : run im 1 (Out.ok w2) = Out.ok w3 := by rw [run_succ_ok im 0 w2, e3, ← hw3, run_zero]
+  have rw4 : run im 1 (Out.ok w3) = Out.ok w4 := by rw [run_succ_ok im 0 w3, e4, ← hw4, run_zero]
+  have rw5 : run im 1 (Out.ok w4) = Out.ok w5 := by rw [run_succ_ok im 0 w4, e5, ← hw5, run_zero]
+  have rx0 : run im 1 (Out.ok w5) = Out.ok x0 := by rw [run_succ_ok im 0 w5, e6, ← hx0, run_zero]
+  have ry0 : run im 1 (Out.ok x0) = Out.ok y0 := by rw [run_succ_ok im 0 x0, e7, ← hy0, run_zero]
+  have rx1 : run im 1 (Out.ok y0) = Out.ok x1 := by rw [run_succ_ok im 0 y0, e8, ← hx1, run_zero]
+  have ry1 : run im 1 (Out.ok x1) = Out.ok y1 := by rw [run_succ_ok im 0 x1, e9, ← hy1, run_zero]
+  have rx2 : run im 1 (Out.ok y1) = Out.ok x2 := by rw [run_succ_ok im 0 y1, e10, ← hx2, run_zero]
+  have ry2 : run im 1 (Out.ok x2) = Out.ok y2 := by rw [run_succ_ok im 0 x2, e11, ← hy2, run_zero]
+  have rx3 : run im 1 (Out.ok y2) = Out.ok x3 := by rw [run_succ_ok im 0 y2, e12, ← hx3, run_zero]
+  have ry3 : run im 1 (Out.ok x3) = Out.ok y3 := by rw [run_succ_ok im 0 x3, e13, ← hy3, run_zero]
+  have rx4 : run im 1 (Out.ok y3) = Out.ok x4 := by rw [run_succ_ok im 0 y3, e14, ← hx4, run_zero]
+  have ry4 : run im 1 (Out.ok x4) = Out.ok y4 := by rw [run_succ_ok im 0 x4, e15, ← hy4, run_zero]
+  have rx5 : run im 1 (Out.ok y4) = Out.ok x5 := by rw [run_succ_ok im 0 y4, e16, ← hx5, run_zero]
+  have ry5 : run im 1 (Out.ok x5) = Out.ok y5 := by rw [run_succ_ok im 0 x5, e17, ← hy5, run_zero]
+  have rx6 : run im 1 (Out.ok y5) = Out.ok x6 := by rw [run_succ_ok im 0 y5, e18, ← hx6, run_zero]
+  have ry6 : run im 1 (Out.ok x6) = Out.ok y6 := by rw [run_succ_ok im 0 x6, e19, ← hy6, run_zero]
+  have rx7 : run im 1 (Out.ok y6) = Out.ok x7 := by rw [run_succ_ok im 0 y6, e20, ← hx7, run_zero]
+  have ry7 : run im 1 (Out.ok x7) = Out.ok y7 := by rw [run_succ_ok im 0 x7, e21, ← hy7, run_zero]
+  have rx8 : run im 1 (Out.ok y7) = Out.ok x8 := by rw [run_succ_ok im 0 y7, e22, ← hx8, run_zero]
+  have ry8 : run im 1 (Out.ok x8) = Out.ok y8 := by rw [run_succ_ok im 0 x8, e23, ← hy8, run_zero]
+  have rz9 : run im 1 (Out.ok y8) = Out.ok z9 := by rw [run_succ_ok im 0 y8, e24, ← hz9, run_zero]
+  have rfin : run im 1 (Out.ok z9) = Out.ok fin := by rw [run_succ_ok im 0 z9, e25, ← hfin, run_zero]
+  refine ⟨25, fin, by rw [run_add im 1 24, rw1, run_add im 1 23, rw2, run_add im 1 22, rw3, run_add im 1 21, rw4, run_add im 1 20, rw5, run_add im 1 19, rx0, run_add im 1 18, ry0, run_add im 1 17, rx1, run_add im 1 16, ry1, run_add im 1 15, rx2, run_add im 1 14, ry2, run_add im 1 13, rx3, run_add im 1 12, ry3, run_add im 1 11, rx4, run_add im 1 10, ry4, run_add im 1 9, rx5, run_add im 1 8, ry5, run_add im 1 7, rx6, run_add im 1 6, ry6, run_add im 1 5, rx7, run_add im 1 4, ry7, run_add im 1 3, rx8, run_add im 1 2, ry8, run_add im 1 1, rz9, rfin],
+    by rw [hfin], ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
+  · rw [hfin]; show ({ z9 with rip := jmp }).reg 0 = some 136
+    rw [reg_with_rip]; exact hz9r0
+  · rw [hfin]; show ({ z9 with rip := jmp }).reg 1 = some i
+    rw [reg_with_rip]; exact hz9r1
+  · rw [hfin]; show ({ z9 with rip := jmp }).reg 6 = some c
+    rw [reg_with_rip]; exact hz9r6
+  · rw [hfin]; show ({ z9 with rip := jmp }).reg 7 = some w
+    rw [reg_with_rip]; exact hz9r7
+  · rw [hfin]; show ({ z9 with rip := jmp }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hz9r8
+  · rw [hfin]; show ({ z9 with rip := jmp }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hz9r9
+  · rw [hfin]; show ({ z9 with rip := jmp }).reg 4 = some sp
+    rw [reg_with_rip]; exact hz9r4
+  · intro q h0
+    rw [hfin]; show ({ z9 with rip := jmp }).reg q = s.reg q
+    rw [reg_with_rip]; exact gz9 q h0
+  · have h1 : fin.mem = s.mem := by rw [hfin, mem_with_rip]; exact hz9mem
+    exact h1
+
+/-- `walk_top` with opcode 137 reaches its handler. -/
+theorem WalkJz_triple {im : Nat → Option (Ins × Nat)} {entry done prim lit str pick tor fromr rfetch locget locset jmp
+    jz call ret : Nat}
+    (hc : WalkCode im entry done prim lit str pick tor fromr rfetch locget locset jmp jz call ret)
+    (hentry : entry + 215 < W) :
+    ∀ (h : Height) (c i w sp nc : Nat), w + 56 ≤ W → (hlt : i < nc) → (hcW : c < W) →
+    ∀ s, s.rip = entry → s.reg 8 = some h.d → s.reg 9 = some h.a → s.reg 6 = some c →
+      s.reg 4 = some sp → s.reg 7 = some w → s.reg 1 = some i → 16 ≤ s.regs.length →
+      rd64 s.mem (w + 24) = some nc → s.mem.rd c = some 137 →
+      ∃ k s', run im k (Out.ok s) = Out.ok s' ∧ s'.rip = jz ∧ s'.reg 0 = some 137 ∧
+        s'.reg 1 = some i ∧ s'.reg 6 = some c ∧ s'.reg 7 = some w ∧
+        s'.reg 8 = some h.d ∧ s'.reg 9 = some h.a ∧ s'.reg 4 = some sp ∧
+        (∀ q, q ≠ 0 → s'.reg q = s.reg q) ∧ s'.mem = s.mem := by
+  intro h c i w sp nc hw56 hlt hcW s hrip hr8 hr9 hr6 hr4 hr7 hr1 hlen hfc hbyte
+
+  have hea24 : ea w 24 = w + 24 := Nat.mod_eq_of_lt (by omega)
+  have h57 : 57 % W = 57 := Nat.mod_eq_of_lt (by unfold W; decide)
+  have e1 : X86Int.step im s = .ok { s.set 0 (some nc) with rip := s.rip + 4 } :=
+    step_ld (by rw [hrip]; exact hc.d0) hr7 (by rw [hea24]; exact hfc)
+  obtain ⟨w1, hw1⟩ : ∃ u : X86Int.St, u = { s.set 0 (some nc) with rip := s.rip + 4 } := ⟨_, rfl⟩
+  have hw1rip : w1.rip = entry + 4 := by rw [hw1]; show s.rip + 4 = entry + 4; rw [hrip]
+  have hw1r0 : w1.reg 0 = some nc := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 0 = some nc
+    rw [reg_set_self (len_of_r9 hr9 (by decide))]
+  have hw1r1 : w1.reg 1 = some i := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 1 = some i
+    rw [reg_set_other (by decide)]; exact hr1
+  have hw1r6 : w1.reg 6 = some c := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 6 = some c
+    rw [reg_set_other (by decide)]; exact hr6
+  have hw1r7 : w1.reg 7 = some w := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 7 = some w
+    rw [reg_set_other (by decide)]; exact hr7
+  have hw1r8 : w1.reg 8 = some h.d := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 8 = some h.d
+    rw [reg_set_other (by decide)]; exact hr8
+  have hw1r9 : w1.reg 9 = some h.a := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 9 = some h.a
+    rw [reg_set_other (by decide)]; exact hr9
+  have hw1r4 : w1.reg 4 = some sp := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 4 = some sp
+    rw [reg_set_other (by decide)]; exact hr4
+  have hw1mem : w1.mem = s.mem := by
+    rw [hw1]
+    show (s.set 0 (some nc)).mem = s.mem
+    rw [mem_set]
+  have gw1 : ∀ q, q ≠ 0 → w1.reg q = s.reg q := by
+    intro q h0
+    rw [hw1]
+    show (s.set 0 (some nc)).reg q = s.reg q
+    rw [reg_set_other h0]
+  have e2 : X86Int.step im w1 = .ok { w1 with fl := (aluF .sub i nc).2, rip := w1.rip + 3 } :=
+    step_cmp (by rw [hw1rip]; exact hc.d1) hw1r1 hw1r0
+  obtain ⟨w2, hw2⟩ : ∃ u : X86Int.St, u = { w1 with fl := (aluF .sub i nc).2, rip := w1.rip + 3 } := ⟨_, rfl⟩
+  have hw2rip : w2.rip = entry + 7 := by rw [hw2]; show w1.rip + 3 = entry + 7; rw [hw1rip]
+
+  have hw2fl : X86Int.cond w2.fl 2 = some true := by
+    have hcf : w2.fl.cf = some true := by
+      rw [hw2]
+      show (aluF .sub i nc).2.cf = some true
+      exact aluF_sub_cf_true hlt
+    exact cond_cc2 hcf
+
+  have hw2r1 : w2.reg 1 = some i := by rw [hw2]; show w1.reg 1 = some i; exact hw1r1
+  have hw2r0 : w2.reg 0 = some nc := by rw [hw2]; show w1.reg 0 = some nc; exact hw1r0
+  have hw2r6 : w2.reg 6 = some c := by rw [hw2]; show w1.reg 6 = some c; exact hw1r6
+  have hw2r8 : w2.reg 8 = some h.d := by rw [hw2]; show w1.reg 8 = some h.d; exact hw1r8
+  have hw2r9 : w2.reg 9 = some h.a := by rw [hw2]; show w1.reg 9 = some h.a; exact hw1r9
+  have hw2r4 : w2.reg 4 = some sp := by rw [hw2]; show w1.reg 4 = some sp; exact hw1r4
+  have hw2mem : w2.mem = s.mem := by rw [hw2]; show w1.mem = s.mem; exact hw1mem
+  have gw2 : ∀ q, q ≠ 0 → w2.reg q = s.reg q := by
+    intro q h0
+    rw [hw2]; show w1.reg q = s.reg q; exact gw1 q h0
+
+  have e3 : X86Int.step im w2 = .ok { w2 with rip := entry + 14 } := by
+    have hh := step_jcc (im := im) (s := w2) (by rw [hw2rip]; exact hc.d2) hw2fl
+    simpa using hh
+  obtain ⟨w3, hw3⟩ : ∃ u : X86Int.St, u = { w2 with rip := entry + 14 } := ⟨_, rfl⟩
+  have hw3rip : w3.rip = entry + 14 := by rw [hw3]
+  have hw3r6 : w3.reg 6 = some c := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg 6 = some c
+    rw [reg_with_rip]; exact hw2r6
+  have hw3r1 : w3.reg 1 = some i := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg 1 = some i
+    rw [reg_with_rip]; exact hw2r1
+  have hw3r8 : w3.reg 8 = some h.d := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hw2r8
+  have hw3r9 : w3.reg 9 = some h.a := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hw2r9
+  have hw3r4 : w3.reg 4 = some sp := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hw2r4
+  have hw3r7 : w3.reg 7 = some w := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg 7 = some w
+    rw [reg_with_rip, gw2 7 (by decide)]; exact hr7
+  have hw3mem : w3.mem = s.mem := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).mem = s.mem
+    rw [mem_with_rip]; exact hw2mem
+  have gw3 : ∀ q, q ≠ 0 → w3.reg q = s.reg q := by
+    intro q h0
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gw2 q h0
+  have hea0 : ea c 0 = c := Nat.mod_eq_of_lt hcW
+  have e4 : X86Int.step im w3 = .ok { w3.set 0 (some 137) with rip := w3.rip + 3 } :=
+    step_ld8 (by rw [hw3rip]; exact hc.d4) hw3r6 (by rw [hw3mem, hea0]; exact hbyte)
+  obtain ⟨w4, hw4⟩ : ∃ u : X86Int.St, u = { w3.set 0 (some 137) with rip := w3.rip + 3 } := ⟨_, rfl⟩
+  have hw4rip : w4.rip = entry + 17 := by rw [hw4]; show w3.rip + 3 = entry + 17; rw [hw3rip]
+  have hw4r0 : w4.reg 0 = some 137 := by
+    rw [hw4]
+    show (w3.set 0 (some 137)).reg 0 = some 137
+    rw [reg_set_self (len_of_r9 hw3r9 (by decide))]
+  have hw4r1 : w4.reg 1 = some i := by
+    rw [hw4]
+    show (w3.set 0 (some 137)).reg 1 = some i
+    rw [reg_set_other (by decide)]; exact hw3r1
+  have hw4r6 : w4.reg 6 = some c := by
+    rw [hw4]
+    show (w3.set 0 (some 137)).reg 6 = some c
+    rw [reg_set_other (by decide)]; exact hw3r6
+  have hw4r7 : w4.reg 7 = some w := by
+    rw [hw4]
+    show (w3.set 0 (some 137)).reg 7 = some w
+    rw [reg_set_other (by decide)]; exact hw3r7
+  have hw4r8 : w4.reg 8 = some h.d := by
+    rw [hw4]
+    show (w3.set 0 (some 137)).reg 8 = some h.d
+    rw [reg_set_other (by decide)]; exact hw3r8
+  have hw4r9 : w4.reg 9 = some h.a := by
+    rw [hw4]
+    show (w3.set 0 (some 137)).reg 9 = some h.a
+    rw [reg_set_other (by decide)]; exact hw3r9
+  have hw4r4 : w4.reg 4 = some sp := by
+    rw [hw4]
+    show (w3.set 0 (some 137)).reg 4 = some sp
+    rw [reg_set_other (by decide)]; exact hw3r4
+  have hw4mem : w4.mem = s.mem := by
+    rw [hw4]
+    show (w3.set 0 (some 137)).mem = s.mem
+    rw [mem_set]; exact hw3mem
+  have gw4 : ∀ q, q ≠ 0 → w4.reg q = s.reg q := by
+    intro q h0
+    rw [hw4]
+    show (w3.set 0 (some 137)).reg q = s.reg q
+    rw [reg_set_other h0]; exact gw3 q h0
+  have e5 : X86Int.step im w4 = .ok { w4 with fl := (aluF .sub 137 (57 % W)).2, rip := w4.rip + 4 } :=
+    step_cmpI (by rw [hw4rip]; exact hc.d5) hw4r0
+  obtain ⟨w5, hw5⟩ : ∃ u : X86Int.St, u = { w4 with fl := (aluF .sub 137 (57 % W)).2, rip := w4.rip + 4 } := ⟨_, rfl⟩
+  have hw5rip : w5.rip = entry + 21 := by rw [hw5]; show w4.rip + 4 = entry + 21; rw [hw4rip]
+
+  have hw5fl : X86Int.cond w5.fl 3 = some true := by
+    have hcf : w5.fl.cf = some false := by
+      rw [hw5]
+      show (aluF .sub 137 (57 % W)).2.cf = some false
+      rw [h57]
+      exact aluF_sub_cf (by decide)
+    have hh := cond_cc3 hcf
+    simpa using hh
+  have hw5r0 : w5.reg 0 = some 137 := by rw [hw5]; show w4.reg 0 = some 137; exact hw4r0
+  have hw5r1 : w5.reg 1 = some i := by rw [hw5]; show w4.reg 1 = some i; exact hw4r1
+  have hw5r6 : w5.reg 6 = some c := by rw [hw5]; show w4.reg 6 = some c; exact hw4r6
+  have hw5r7 : w5.reg 7 = some w := by rw [hw5]; show w4.reg 7 = some w; exact hw4r7
+  have hw5r8 : w5.reg 8 = some h.d := by rw [hw5]; show w4.reg 8 = some h.d; exact hw4r8
+  have hw5r9 : w5.reg 9 = some h.a := by rw [hw5]; show w4.reg 9 = some h.a; exact hw4r9
+  have hw5r4 : w5.reg 4 = some sp := by rw [hw5]; show w4.reg 4 = some sp; exact hw4r4
+  have hw5mem : w5.mem = s.mem := by rw [hw5]; show w4.mem = s.mem; exact hw4mem
+  have gw5 : ∀ q, q ≠ 0 → w5.reg q = s.reg q := by
+    intro q h0
+    rw [hw5]; show w4.reg q = s.reg q; exact gw4 q h0
+
+  have e6 : X86Int.step im w5 = .ok { w5 with rip := entry + 28 } := by
+    have hh := step_jcc (im := im) (s := w5) (by rw [hw5rip]; exact hc.d6) hw5fl
+    simpa using hh
+  obtain ⟨x0, hx0⟩ : ∃ u : X86Int.St, u = { w5 with rip := entry + 28 } := ⟨_, rfl⟩
+  have hx0rip : x0.rip = entry + 28 := by rw [hx0]
+  have hx0r0 : x0.reg 0 = some 137 := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 0 = some 137
+    rw [reg_with_rip]; exact hw5r0
+  have hx0r1 : x0.reg 1 = some i := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 1 = some i
+    rw [reg_with_rip]; exact hw5r1
+  have hx0r6 : x0.reg 6 = some c := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 6 = some c
+    rw [reg_with_rip]; exact hw5r6
+  have hx0r7 : x0.reg 7 = some w := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 7 = some w
+    rw [reg_with_rip]; exact hw5r7
+  have hx0r8 : x0.reg 8 = some h.d := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hw5r8
+  have hx0r9 : x0.reg 9 = some h.a := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hw5r9
+  have hx0r4 : x0.reg 4 = some sp := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hw5r4
+  have hx0mem : x0.mem = s.mem := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).mem = s.mem
+    rw [mem_with_rip]; exact hw5mem
+  have gx0 : ∀ q, q ≠ 0 → x0.reg q = s.reg q := by
+    intro q h0
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gw5 q h0
+
+  have e7 : X86Int.step im x0 = .ok { x0 with fl := (aluF .sub 137 (128 % W)).2, rip := x0.rip + 7 } :=
+    step_cmpI (by rw [hx0rip]; exact hc.clit) hx0r0
+  obtain ⟨y0, hy0⟩ : ∃ u : X86Int.St, u = { x0 with fl := (aluF .sub 137 (128 % W)).2, rip := x0.rip + 7 } := ⟨_, rfl⟩
+  have hy0rip : y0.rip = entry + 35 := by rw [hy0]; show x0.rip + 7 = entry + 35; rw [hx0rip]
+
+  have hy0fl : X86Int.cond y0.fl 5 = some true := by
+    have hz : y0.fl.zf = some false := by
+      rw [hy0]
+      show (aluF .sub 137 (128 % W)).2.zf = some false
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy0r0 : y0.reg 0 = some 137 := by rw [hy0]; show x0.reg 0 = some 137; exact hx0r0
+  have hy0r1 : y0.reg 1 = some i := by rw [hy0]; show x0.reg 1 = some i; exact hx0r1
+  have hy0r6 : y0.reg 6 = some c := by rw [hy0]; show x0.reg 6 = some c; exact hx0r6
+  have hy0r7 : y0.reg 7 = some w := by rw [hy0]; show x0.reg 7 = some w; exact hx0r7
+  have hy0r8 : y0.reg 8 = some h.d := by rw [hy0]; show x0.reg 8 = some h.d; exact hx0r8
+  have hy0r9 : y0.reg 9 = some h.a := by rw [hy0]; show x0.reg 9 = some h.a; exact hx0r9
+  have hy0r4 : y0.reg 4 = some sp := by rw [hy0]; show x0.reg 4 = some sp; exact hx0r4
+  have hy0mem : y0.mem = s.mem := by rw [hy0]; show x0.mem = s.mem; exact hx0mem
+  have gy0 : ∀ q, q ≠ 0 → y0.reg q = s.reg q := by
+    intro q h0
+    rw [hy0]; show x0.reg q = s.reg q; exact gx0 q h0
+
+  have e8 : X86Int.step im y0 = .ok { y0 with rip := entry + 42 } := by
+    have hh := step_jcc (im := im) (s := y0) (by rw [hy0rip]; exact hc.clitj) hy0fl
+    simpa using hh
+  obtain ⟨x1, hx1⟩ : ∃ u : X86Int.St, u = { y0 with rip := entry + 42 } := ⟨_, rfl⟩
+  have hx1rip : x1.rip = entry + 42 := by rw [hx1]
+  have hx1r0 : x1.reg 0 = some 137 := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg 0 = some 137
+    rw [reg_with_rip]; exact hy0r0
+  have hx1r1 : x1.reg 1 = some i := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy0r1
+  have hx1r6 : x1.reg 6 = some c := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy0r6
+  have hx1r7 : x1.reg 7 = some w := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy0r7
+  have hx1r8 : x1.reg 8 = some h.d := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy0r8
+  have hx1r9 : x1.reg 9 = some h.a := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy0r9
+  have hx1r4 : x1.reg 4 = some sp := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy0r4
+  have hx1mem : x1.mem = s.mem := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).mem = s.mem
+    rw [mem_with_rip]; exact hy0mem
+  have gx1 : ∀ q, q ≠ 0 → x1.reg q = s.reg q := by
+    intro q h0
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy0 q h0
+
+  have e9 : X86Int.step im x1 = .ok { x1 with fl := (aluF .sub 137 (129 % W)).2, rip := x1.rip + 7 } :=
+    step_cmpI (by rw [hx1rip]; exact hc.cstr) hx1r0
+  obtain ⟨y1, hy1⟩ : ∃ u : X86Int.St, u = { x1 with fl := (aluF .sub 137 (129 % W)).2, rip := x1.rip + 7 } := ⟨_, rfl⟩
+  have hy1rip : y1.rip = entry + 49 := by rw [hy1]; show x1.rip + 7 = entry + 49; rw [hx1rip]
+
+  have hy1fl : X86Int.cond y1.fl 5 = some true := by
+    have hz : y1.fl.zf = some false := by
+      rw [hy1]
+      show (aluF .sub 137 (129 % W)).2.zf = some false
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy1r0 : y1.reg 0 = some 137 := by rw [hy1]; show x1.reg 0 = some 137; exact hx1r0
+  have hy1r1 : y1.reg 1 = some i := by rw [hy1]; show x1.reg 1 = some i; exact hx1r1
+  have hy1r6 : y1.reg 6 = some c := by rw [hy1]; show x1.reg 6 = some c; exact hx1r6
+  have hy1r7 : y1.reg 7 = some w := by rw [hy1]; show x1.reg 7 = some w; exact hx1r7
+  have hy1r8 : y1.reg 8 = some h.d := by rw [hy1]; show x1.reg 8 = some h.d; exact hx1r8
+  have hy1r9 : y1.reg 9 = some h.a := by rw [hy1]; show x1.reg 9 = some h.a; exact hx1r9
+  have hy1r4 : y1.reg 4 = some sp := by rw [hy1]; show x1.reg 4 = some sp; exact hx1r4
+  have hy1mem : y1.mem = s.mem := by rw [hy1]; show x1.mem = s.mem; exact hx1mem
+  have gy1 : ∀ q, q ≠ 0 → y1.reg q = s.reg q := by
+    intro q h0
+    rw [hy1]; show x1.reg q = s.reg q; exact gx1 q h0
+
+  have e10 : X86Int.step im y1 = .ok { y1 with rip := entry + 56 } := by
+    have hh := step_jcc (im := im) (s := y1) (by rw [hy1rip]; exact hc.cstrj) hy1fl
+    simpa using hh
+  obtain ⟨x2, hx2⟩ : ∃ u : X86Int.St, u = { y1 with rip := entry + 56 } := ⟨_, rfl⟩
+  have hx2rip : x2.rip = entry + 56 := by rw [hx2]
+  have hx2r0 : x2.reg 0 = some 137 := by
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).reg 0 = some 137
+    rw [reg_with_rip]; exact hy1r0
+  have hx2r1 : x2.reg 1 = some i := by
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy1r1
+  have hx2r6 : x2.reg 6 = some c := by
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy1r6
+  have hx2r7 : x2.reg 7 = some w := by
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy1r7
+  have hx2r8 : x2.reg 8 = some h.d := by
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy1r8
+  have hx2r9 : x2.reg 9 = some h.a := by
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy1r9
+  have hx2r4 : x2.reg 4 = some sp := by
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy1r4
+  have hx2mem : x2.mem = s.mem := by
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).mem = s.mem
+    rw [mem_with_rip]; exact hy1mem
+  have gx2 : ∀ q, q ≠ 0 → x2.reg q = s.reg q := by
+    intro q h0
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy1 q h0
+
+  have e11 : X86Int.step im x2 = .ok { x2 with fl := (aluF .sub 137 (130 % W)).2, rip := x2.rip + 7 } :=
+    step_cmpI (by rw [hx2rip]; exact hc.cpick) hx2r0
+  obtain ⟨y2, hy2⟩ : ∃ u : X86Int.St, u = { x2 with fl := (aluF .sub 137 (130 % W)).2, rip := x2.rip + 7 } := ⟨_, rfl⟩
+  have hy2rip : y2.rip = entry + 63 := by rw [hy2]; show x2.rip + 7 = entry + 63; rw [hx2rip]
+
+  have hy2fl : X86Int.cond y2.fl 5 = some true := by
+    have hz : y2.fl.zf = some false := by
+      rw [hy2]
+      show (aluF .sub 137 (130 % W)).2.zf = some false
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy2r0 : y2.reg 0 = some 137 := by rw [hy2]; show x2.reg 0 = some 137; exact hx2r0
+  have hy2r1 : y2.reg 1 = some i := by rw [hy2]; show x2.reg 1 = some i; exact hx2r1
+  have hy2r6 : y2.reg 6 = some c := by rw [hy2]; show x2.reg 6 = some c; exact hx2r6
+  have hy2r7 : y2.reg 7 = some w := by rw [hy2]; show x2.reg 7 = some w; exact hx2r7
+  have hy2r8 : y2.reg 8 = some h.d := by rw [hy2]; show x2.reg 8 = some h.d; exact hx2r8
+  have hy2r9 : y2.reg 9 = some h.a := by rw [hy2]; show x2.reg 9 = some h.a; exact hx2r9
+  have hy2r4 : y2.reg 4 = some sp := by rw [hy2]; show x2.reg 4 = some sp; exact hx2r4
+  have hy2mem : y2.mem = s.mem := by rw [hy2]; show x2.mem = s.mem; exact hx2mem
+  have gy2 : ∀ q, q ≠ 0 → y2.reg q = s.reg q := by
+    intro q h0
+    rw [hy2]; show x2.reg q = s.reg q; exact gx2 q h0
+
+  have e12 : X86Int.step im y2 = .ok { y2 with rip := entry + 70 } := by
+    have hh := step_jcc (im := im) (s := y2) (by rw [hy2rip]; exact hc.cpickj) hy2fl
+    simpa using hh
+  obtain ⟨x3, hx3⟩ : ∃ u : X86Int.St, u = { y2 with rip := entry + 70 } := ⟨_, rfl⟩
+  have hx3rip : x3.rip = entry + 70 := by rw [hx3]
+  have hx3r0 : x3.reg 0 = some 137 := by
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).reg 0 = some 137
+    rw [reg_with_rip]; exact hy2r0
+  have hx3r1 : x3.reg 1 = some i := by
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy2r1
+  have hx3r6 : x3.reg 6 = some c := by
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy2r6
+  have hx3r7 : x3.reg 7 = some w := by
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy2r7
+  have hx3r8 : x3.reg 8 = some h.d := by
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy2r8
+  have hx3r9 : x3.reg 9 = some h.a := by
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy2r9
+  have hx3r4 : x3.reg 4 = some sp := by
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy2r4
+  have hx3mem : x3.mem = s.mem := by
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).mem = s.mem
+    rw [mem_with_rip]; exact hy2mem
+  have gx3 : ∀ q, q ≠ 0 → x3.reg q = s.reg q := by
+    intro q h0
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy2 q h0
+
+  have e13 : X86Int.step im x3 = .ok { x3 with fl := (aluF .sub 137 (131 % W)).2, rip := x3.rip + 7 } :=
+    step_cmpI (by rw [hx3rip]; exact hc.ctor) hx3r0
+  obtain ⟨y3, hy3⟩ : ∃ u : X86Int.St, u = { x3 with fl := (aluF .sub 137 (131 % W)).2, rip := x3.rip + 7 } := ⟨_, rfl⟩
+  have hy3rip : y3.rip = entry + 77 := by rw [hy3]; show x3.rip + 7 = entry + 77; rw [hx3rip]
+
+  have hy3fl : X86Int.cond y3.fl 5 = some true := by
+    have hz : y3.fl.zf = some false := by
+      rw [hy3]
+      show (aluF .sub 137 (131 % W)).2.zf = some false
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy3r0 : y3.reg 0 = some 137 := by rw [hy3]; show x3.reg 0 = some 137; exact hx3r0
+  have hy3r1 : y3.reg 1 = some i := by rw [hy3]; show x3.reg 1 = some i; exact hx3r1
+  have hy3r6 : y3.reg 6 = some c := by rw [hy3]; show x3.reg 6 = some c; exact hx3r6
+  have hy3r7 : y3.reg 7 = some w := by rw [hy3]; show x3.reg 7 = some w; exact hx3r7
+  have hy3r8 : y3.reg 8 = some h.d := by rw [hy3]; show x3.reg 8 = some h.d; exact hx3r8
+  have hy3r9 : y3.reg 9 = some h.a := by rw [hy3]; show x3.reg 9 = some h.a; exact hx3r9
+  have hy3r4 : y3.reg 4 = some sp := by rw [hy3]; show x3.reg 4 = some sp; exact hx3r4
+  have hy3mem : y3.mem = s.mem := by rw [hy3]; show x3.mem = s.mem; exact hx3mem
+  have gy3 : ∀ q, q ≠ 0 → y3.reg q = s.reg q := by
+    intro q h0
+    rw [hy3]; show x3.reg q = s.reg q; exact gx3 q h0
+
+  have e14 : X86Int.step im y3 = .ok { y3 with rip := entry + 84 } := by
+    have hh := step_jcc (im := im) (s := y3) (by rw [hy3rip]; exact hc.ctorj) hy3fl
+    simpa using hh
+  obtain ⟨x4, hx4⟩ : ∃ u : X86Int.St, u = { y3 with rip := entry + 84 } := ⟨_, rfl⟩
+  have hx4rip : x4.rip = entry + 84 := by rw [hx4]
+  have hx4r0 : x4.reg 0 = some 137 := by
+    rw [hx4]
+    show ({ y3 with rip := entry + 84 }).reg 0 = some 137
+    rw [reg_with_rip]; exact hy3r0
+  have hx4r1 : x4.reg 1 = some i := by
+    rw [hx4]
+    show ({ y3 with rip := entry + 84 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy3r1
+  have hx4r6 : x4.reg 6 = some c := by
+    rw [hx4]
+    show ({ y3 with rip := entry + 84 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy3r6
+  have hx4r7 : x4.reg 7 = some w := by
+    rw [hx4]
+    show ({ y3 with rip := entry + 84 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy3r7
+  have hx4r8 : x4.reg 8 = some h.d := by
+    rw [hx4]
+    show ({ y3 with rip := entry + 84 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy3r8
+  have hx4r9 : x4.reg 9 = some h.a := by
+    rw [hx4]
+    show ({ y3 with rip := entry + 84 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy3r9
+  have hx4r4 : x4.reg 4 = some sp := by
+    rw [hx4]
+    show ({ y3 with rip := entry + 84 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy3r4
+  have hx4mem : x4.mem = s.mem := by
+    rw [hx4]
+    show ({ y3 with rip := entry + 84 }).mem = s.mem
+    rw [mem_with_rip]; exact hy3mem
+  have gx4 : ∀ q, q ≠ 0 → x4.reg q = s.reg q := by
+    intro q h0
+    rw [hx4]
+    show ({ y3 with rip := entry + 84 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy3 q h0
+
+  have e15 : X86Int.step im x4 = .ok { x4 with fl := (aluF .sub 137 (132 % W)).2, rip := x4.rip + 7 } :=
+    step_cmpI (by rw [hx4rip]; exact hc.cfromr) hx4r0
+  obtain ⟨y4, hy4⟩ : ∃ u : X86Int.St, u = { x4 with fl := (aluF .sub 137 (132 % W)).2, rip := x4.rip + 7 } := ⟨_, rfl⟩
+  have hy4rip : y4.rip = entry + 91 := by rw [hy4]; show x4.rip + 7 = entry + 91; rw [hx4rip]
+
+  have hy4fl : X86Int.cond y4.fl 5 = some true := by
+    have hz : y4.fl.zf = some false := by
+      rw [hy4]
+      show (aluF .sub 137 (132 % W)).2.zf = some false
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy4r0 : y4.reg 0 = some 137 := by rw [hy4]; show x4.reg 0 = some 137; exact hx4r0
+  have hy4r1 : y4.reg 1 = some i := by rw [hy4]; show x4.reg 1 = some i; exact hx4r1
+  have hy4r6 : y4.reg 6 = some c := by rw [hy4]; show x4.reg 6 = some c; exact hx4r6
+  have hy4r7 : y4.reg 7 = some w := by rw [hy4]; show x4.reg 7 = some w; exact hx4r7
+  have hy4r8 : y4.reg 8 = some h.d := by rw [hy4]; show x4.reg 8 = some h.d; exact hx4r8
+  have hy4r9 : y4.reg 9 = some h.a := by rw [hy4]; show x4.reg 9 = some h.a; exact hx4r9
+  have hy4r4 : y4.reg 4 = some sp := by rw [hy4]; show x4.reg 4 = some sp; exact hx4r4
+  have hy4mem : y4.mem = s.mem := by rw [hy4]; show x4.mem = s.mem; exact hx4mem
+  have gy4 : ∀ q, q ≠ 0 → y4.reg q = s.reg q := by
+    intro q h0
+    rw [hy4]; show x4.reg q = s.reg q; exact gx4 q h0
+
+  have e16 : X86Int.step im y4 = .ok { y4 with rip := entry + 98 } := by
+    have hh := step_jcc (im := im) (s := y4) (by rw [hy4rip]; exact hc.cfromrj) hy4fl
+    simpa using hh
+  obtain ⟨x5, hx5⟩ : ∃ u : X86Int.St, u = { y4 with rip := entry + 98 } := ⟨_, rfl⟩
+  have hx5rip : x5.rip = entry + 98 := by rw [hx5]
+  have hx5r0 : x5.reg 0 = some 137 := by
+    rw [hx5]
+    show ({ y4 with rip := entry + 98 }).reg 0 = some 137
+    rw [reg_with_rip]; exact hy4r0
+  have hx5r1 : x5.reg 1 = some i := by
+    rw [hx5]
+    show ({ y4 with rip := entry + 98 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy4r1
+  have hx5r6 : x5.reg 6 = some c := by
+    rw [hx5]
+    show ({ y4 with rip := entry + 98 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy4r6
+  have hx5r7 : x5.reg 7 = some w := by
+    rw [hx5]
+    show ({ y4 with rip := entry + 98 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy4r7
+  have hx5r8 : x5.reg 8 = some h.d := by
+    rw [hx5]
+    show ({ y4 with rip := entry + 98 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy4r8
+  have hx5r9 : x5.reg 9 = some h.a := by
+    rw [hx5]
+    show ({ y4 with rip := entry + 98 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy4r9
+  have hx5r4 : x5.reg 4 = some sp := by
+    rw [hx5]
+    show ({ y4 with rip := entry + 98 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy4r4
+  have hx5mem : x5.mem = s.mem := by
+    rw [hx5]
+    show ({ y4 with rip := entry + 98 }).mem = s.mem
+    rw [mem_with_rip]; exact hy4mem
+  have gx5 : ∀ q, q ≠ 0 → x5.reg q = s.reg q := by
+    intro q h0
+    rw [hx5]
+    show ({ y4 with rip := entry + 98 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy4 q h0
+
+  have e17 : X86Int.step im x5 = .ok { x5 with fl := (aluF .sub 137 (133 % W)).2, rip := x5.rip + 7 } :=
+    step_cmpI (by rw [hx5rip]; exact hc.crfetch) hx5r0
+  obtain ⟨y5, hy5⟩ : ∃ u : X86Int.St, u = { x5 with fl := (aluF .sub 137 (133 % W)).2, rip := x5.rip + 7 } := ⟨_, rfl⟩
+  have hy5rip : y5.rip = entry + 105 := by rw [hy5]; show x5.rip + 7 = entry + 105; rw [hx5rip]
+
+  have hy5fl : X86Int.cond y5.fl 5 = some true := by
+    have hz : y5.fl.zf = some false := by
+      rw [hy5]
+      show (aluF .sub 137 (133 % W)).2.zf = some false
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy5r0 : y5.reg 0 = some 137 := by rw [hy5]; show x5.reg 0 = some 137; exact hx5r0
+  have hy5r1 : y5.reg 1 = some i := by rw [hy5]; show x5.reg 1 = some i; exact hx5r1
+  have hy5r6 : y5.reg 6 = some c := by rw [hy5]; show x5.reg 6 = some c; exact hx5r6
+  have hy5r7 : y5.reg 7 = some w := by rw [hy5]; show x5.reg 7 = some w; exact hx5r7
+  have hy5r8 : y5.reg 8 = some h.d := by rw [hy5]; show x5.reg 8 = some h.d; exact hx5r8
+  have hy5r9 : y5.reg 9 = some h.a := by rw [hy5]; show x5.reg 9 = some h.a; exact hx5r9
+  have hy5r4 : y5.reg 4 = some sp := by rw [hy5]; show x5.reg 4 = some sp; exact hx5r4
+  have hy5mem : y5.mem = s.mem := by rw [hy5]; show x5.mem = s.mem; exact hx5mem
+  have gy5 : ∀ q, q ≠ 0 → y5.reg q = s.reg q := by
+    intro q h0
+    rw [hy5]; show x5.reg q = s.reg q; exact gx5 q h0
+
+  have e18 : X86Int.step im y5 = .ok { y5 with rip := entry + 112 } := by
+    have hh := step_jcc (im := im) (s := y5) (by rw [hy5rip]; exact hc.crfetchj) hy5fl
+    simpa using hh
+  obtain ⟨x6, hx6⟩ : ∃ u : X86Int.St, u = { y5 with rip := entry + 112 } := ⟨_, rfl⟩
+  have hx6rip : x6.rip = entry + 112 := by rw [hx6]
+  have hx6r0 : x6.reg 0 = some 137 := by
+    rw [hx6]
+    show ({ y5 with rip := entry + 112 }).reg 0 = some 137
+    rw [reg_with_rip]; exact hy5r0
+  have hx6r1 : x6.reg 1 = some i := by
+    rw [hx6]
+    show ({ y5 with rip := entry + 112 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy5r1
+  have hx6r6 : x6.reg 6 = some c := by
+    rw [hx6]
+    show ({ y5 with rip := entry + 112 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy5r6
+  have hx6r7 : x6.reg 7 = some w := by
+    rw [hx6]
+    show ({ y5 with rip := entry + 112 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy5r7
+  have hx6r8 : x6.reg 8 = some h.d := by
+    rw [hx6]
+    show ({ y5 with rip := entry + 112 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy5r8
+  have hx6r9 : x6.reg 9 = some h.a := by
+    rw [hx6]
+    show ({ y5 with rip := entry + 112 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy5r9
+  have hx6r4 : x6.reg 4 = some sp := by
+    rw [hx6]
+    show ({ y5 with rip := entry + 112 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy5r4
+  have hx6mem : x6.mem = s.mem := by
+    rw [hx6]
+    show ({ y5 with rip := entry + 112 }).mem = s.mem
+    rw [mem_with_rip]; exact hy5mem
+  have gx6 : ∀ q, q ≠ 0 → x6.reg q = s.reg q := by
+    intro q h0
+    rw [hx6]
+    show ({ y5 with rip := entry + 112 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy5 q h0
+
+  have e19 : X86Int.step im x6 = .ok { x6 with fl := (aluF .sub 137 (134 % W)).2, rip := x6.rip + 7 } :=
+    step_cmpI (by rw [hx6rip]; exact hc.clocget) hx6r0
+  obtain ⟨y6, hy6⟩ : ∃ u : X86Int.St, u = { x6 with fl := (aluF .sub 137 (134 % W)).2, rip := x6.rip + 7 } := ⟨_, rfl⟩
+  have hy6rip : y6.rip = entry + 119 := by rw [hy6]; show x6.rip + 7 = entry + 119; rw [hx6rip]
+
+  have hy6fl : X86Int.cond y6.fl 5 = some true := by
+    have hz : y6.fl.zf = some false := by
+      rw [hy6]
+      show (aluF .sub 137 (134 % W)).2.zf = some false
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy6r0 : y6.reg 0 = some 137 := by rw [hy6]; show x6.reg 0 = some 137; exact hx6r0
+  have hy6r1 : y6.reg 1 = some i := by rw [hy6]; show x6.reg 1 = some i; exact hx6r1
+  have hy6r6 : y6.reg 6 = some c := by rw [hy6]; show x6.reg 6 = some c; exact hx6r6
+  have hy6r7 : y6.reg 7 = some w := by rw [hy6]; show x6.reg 7 = some w; exact hx6r7
+  have hy6r8 : y6.reg 8 = some h.d := by rw [hy6]; show x6.reg 8 = some h.d; exact hx6r8
+  have hy6r9 : y6.reg 9 = some h.a := by rw [hy6]; show x6.reg 9 = some h.a; exact hx6r9
+  have hy6r4 : y6.reg 4 = some sp := by rw [hy6]; show x6.reg 4 = some sp; exact hx6r4
+  have hy6mem : y6.mem = s.mem := by rw [hy6]; show x6.mem = s.mem; exact hx6mem
+  have gy6 : ∀ q, q ≠ 0 → y6.reg q = s.reg q := by
+    intro q h0
+    rw [hy6]; show x6.reg q = s.reg q; exact gx6 q h0
+
+  have e20 : X86Int.step im y6 = .ok { y6 with rip := entry + 126 } := by
+    have hh := step_jcc (im := im) (s := y6) (by rw [hy6rip]; exact hc.clocgetj) hy6fl
+    simpa using hh
+  obtain ⟨x7, hx7⟩ : ∃ u : X86Int.St, u = { y6 with rip := entry + 126 } := ⟨_, rfl⟩
+  have hx7rip : x7.rip = entry + 126 := by rw [hx7]
+  have hx7r0 : x7.reg 0 = some 137 := by
+    rw [hx7]
+    show ({ y6 with rip := entry + 126 }).reg 0 = some 137
+    rw [reg_with_rip]; exact hy6r0
+  have hx7r1 : x7.reg 1 = some i := by
+    rw [hx7]
+    show ({ y6 with rip := entry + 126 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy6r1
+  have hx7r6 : x7.reg 6 = some c := by
+    rw [hx7]
+    show ({ y6 with rip := entry + 126 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy6r6
+  have hx7r7 : x7.reg 7 = some w := by
+    rw [hx7]
+    show ({ y6 with rip := entry + 126 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy6r7
+  have hx7r8 : x7.reg 8 = some h.d := by
+    rw [hx7]
+    show ({ y6 with rip := entry + 126 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy6r8
+  have hx7r9 : x7.reg 9 = some h.a := by
+    rw [hx7]
+    show ({ y6 with rip := entry + 126 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy6r9
+  have hx7r4 : x7.reg 4 = some sp := by
+    rw [hx7]
+    show ({ y6 with rip := entry + 126 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy6r4
+  have hx7mem : x7.mem = s.mem := by
+    rw [hx7]
+    show ({ y6 with rip := entry + 126 }).mem = s.mem
+    rw [mem_with_rip]; exact hy6mem
+  have gx7 : ∀ q, q ≠ 0 → x7.reg q = s.reg q := by
+    intro q h0
+    rw [hx7]
+    show ({ y6 with rip := entry + 126 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy6 q h0
+
+  have e21 : X86Int.step im x7 = .ok { x7 with fl := (aluF .sub 137 (135 % W)).2, rip := x7.rip + 7 } :=
+    step_cmpI (by rw [hx7rip]; exact hc.clocset) hx7r0
+  obtain ⟨y7, hy7⟩ : ∃ u : X86Int.St, u = { x7 with fl := (aluF .sub 137 (135 % W)).2, rip := x7.rip + 7 } := ⟨_, rfl⟩
+  have hy7rip : y7.rip = entry + 133 := by rw [hy7]; show x7.rip + 7 = entry + 133; rw [hx7rip]
+
+  have hy7fl : X86Int.cond y7.fl 5 = some true := by
+    have hz : y7.fl.zf = some false := by
+      rw [hy7]
+      show (aluF .sub 137 (135 % W)).2.zf = some false
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy7r0 : y7.reg 0 = some 137 := by rw [hy7]; show x7.reg 0 = some 137; exact hx7r0
+  have hy7r1 : y7.reg 1 = some i := by rw [hy7]; show x7.reg 1 = some i; exact hx7r1
+  have hy7r6 : y7.reg 6 = some c := by rw [hy7]; show x7.reg 6 = some c; exact hx7r6
+  have hy7r7 : y7.reg 7 = some w := by rw [hy7]; show x7.reg 7 = some w; exact hx7r7
+  have hy7r8 : y7.reg 8 = some h.d := by rw [hy7]; show x7.reg 8 = some h.d; exact hx7r8
+  have hy7r9 : y7.reg 9 = some h.a := by rw [hy7]; show x7.reg 9 = some h.a; exact hx7r9
+  have hy7r4 : y7.reg 4 = some sp := by rw [hy7]; show x7.reg 4 = some sp; exact hx7r4
+  have hy7mem : y7.mem = s.mem := by rw [hy7]; show x7.mem = s.mem; exact hx7mem
+  have gy7 : ∀ q, q ≠ 0 → y7.reg q = s.reg q := by
+    intro q h0
+    rw [hy7]; show x7.reg q = s.reg q; exact gx7 q h0
+
+  have e22 : X86Int.step im y7 = .ok { y7 with rip := entry + 140 } := by
+    have hh := step_jcc (im := im) (s := y7) (by rw [hy7rip]; exact hc.clocsetj) hy7fl
+    simpa using hh
+  obtain ⟨x8, hx8⟩ : ∃ u : X86Int.St, u = { y7 with rip := entry + 140 } := ⟨_, rfl⟩
+  have hx8rip : x8.rip = entry + 140 := by rw [hx8]
+  have hx8r0 : x8.reg 0 = some 137 := by
+    rw [hx8]
+    show ({ y7 with rip := entry + 140 }).reg 0 = some 137
+    rw [reg_with_rip]; exact hy7r0
+  have hx8r1 : x8.reg 1 = some i := by
+    rw [hx8]
+    show ({ y7 with rip := entry + 140 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy7r1
+  have hx8r6 : x8.reg 6 = some c := by
+    rw [hx8]
+    show ({ y7 with rip := entry + 140 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy7r6
+  have hx8r7 : x8.reg 7 = some w := by
+    rw [hx8]
+    show ({ y7 with rip := entry + 140 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy7r7
+  have hx8r8 : x8.reg 8 = some h.d := by
+    rw [hx8]
+    show ({ y7 with rip := entry + 140 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy7r8
+  have hx8r9 : x8.reg 9 = some h.a := by
+    rw [hx8]
+    show ({ y7 with rip := entry + 140 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy7r9
+  have hx8r4 : x8.reg 4 = some sp := by
+    rw [hx8]
+    show ({ y7 with rip := entry + 140 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy7r4
+  have hx8mem : x8.mem = s.mem := by
+    rw [hx8]
+    show ({ y7 with rip := entry + 140 }).mem = s.mem
+    rw [mem_with_rip]; exact hy7mem
+  have gx8 : ∀ q, q ≠ 0 → x8.reg q = s.reg q := by
+    intro q h0
+    rw [hx8]
+    show ({ y7 with rip := entry + 140 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy7 q h0
+
+  have e23 : X86Int.step im x8 = .ok { x8 with fl := (aluF .sub 137 (136 % W)).2, rip := x8.rip + 7 } :=
+    step_cmpI (by rw [hx8rip]; exact hc.cjmp) hx8r0
+  obtain ⟨y8, hy8⟩ : ∃ u : X86Int.St, u = { x8 with fl := (aluF .sub 137 (136 % W)).2, rip := x8.rip + 7 } := ⟨_, rfl⟩
+  have hy8rip : y8.rip = entry + 147 := by rw [hy8]; show x8.rip + 7 = entry + 147; rw [hx8rip]
+
+  have hy8fl : X86Int.cond y8.fl 5 = some true := by
+    have hz : y8.fl.zf = some false := by
+      rw [hy8]
+      show (aluF .sub 137 (136 % W)).2.zf = some false
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy8r0 : y8.reg 0 = some 137 := by rw [hy8]; show x8.reg 0 = some 137; exact hx8r0
+  have hy8r1 : y8.reg 1 = some i := by rw [hy8]; show x8.reg 1 = some i; exact hx8r1
+  have hy8r6 : y8.reg 6 = some c := by rw [hy8]; show x8.reg 6 = some c; exact hx8r6
+  have hy8r7 : y8.reg 7 = some w := by rw [hy8]; show x8.reg 7 = some w; exact hx8r7
+  have hy8r8 : y8.reg 8 = some h.d := by rw [hy8]; show x8.reg 8 = some h.d; exact hx8r8
+  have hy8r9 : y8.reg 9 = some h.a := by rw [hy8]; show x8.reg 9 = some h.a; exact hx8r9
+  have hy8r4 : y8.reg 4 = some sp := by rw [hy8]; show x8.reg 4 = some sp; exact hx8r4
+  have hy8mem : y8.mem = s.mem := by rw [hy8]; show x8.mem = s.mem; exact hx8mem
+  have gy8 : ∀ q, q ≠ 0 → y8.reg q = s.reg q := by
+    intro q h0
+    rw [hy8]; show x8.reg q = s.reg q; exact gx8 q h0
+
+  have e24 : X86Int.step im y8 = .ok { y8 with rip := entry + 154 } := by
+    have hh := step_jcc (im := im) (s := y8) (by rw [hy8rip]; exact hc.cjmpj) hy8fl
+    simpa using hh
+  obtain ⟨x9, hx9⟩ : ∃ u : X86Int.St, u = { y8 with rip := entry + 154 } := ⟨_, rfl⟩
+  have hx9rip : x9.rip = entry + 154 := by rw [hx9]
+  have hx9r0 : x9.reg 0 = some 137 := by
+    rw [hx9]
+    show ({ y8 with rip := entry + 154 }).reg 0 = some 137
+    rw [reg_with_rip]; exact hy8r0
+  have hx9r1 : x9.reg 1 = some i := by
+    rw [hx9]
+    show ({ y8 with rip := entry + 154 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy8r1
+  have hx9r6 : x9.reg 6 = some c := by
+    rw [hx9]
+    show ({ y8 with rip := entry + 154 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy8r6
+  have hx9r7 : x9.reg 7 = some w := by
+    rw [hx9]
+    show ({ y8 with rip := entry + 154 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy8r7
+  have hx9r8 : x9.reg 8 = some h.d := by
+    rw [hx9]
+    show ({ y8 with rip := entry + 154 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy8r8
+  have hx9r9 : x9.reg 9 = some h.a := by
+    rw [hx9]
+    show ({ y8 with rip := entry + 154 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy8r9
+  have hx9r4 : x9.reg 4 = some sp := by
+    rw [hx9]
+    show ({ y8 with rip := entry + 154 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy8r4
+  have hx9mem : x9.mem = s.mem := by
+    rw [hx9]
+    show ({ y8 with rip := entry + 154 }).mem = s.mem
+    rw [mem_with_rip]; exact hy8mem
+  have gx9 : ∀ q, q ≠ 0 → x9.reg q = s.reg q := by
+    intro q h0
+    rw [hx9]
+    show ({ y8 with rip := entry + 154 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy8 q h0
+
+  have e25 : X86Int.step im x9 = .ok { x9 with fl := (aluF .sub 137 (137 % W)).2, rip := x9.rip + 7 } :=
+    step_cmpI (by rw [hx9rip]; exact hc.cjz) hx9r0
+  obtain ⟨y9, hy9⟩ : ∃ u : X86Int.St, u = { x9 with fl := (aluF .sub 137 (137 % W)).2, rip := x9.rip + 7 } := ⟨_, rfl⟩
+  have hy9rip : y9.rip = entry + 161 := by rw [hy9]; show x9.rip + 7 = entry + 161; rw [hx9rip]
+
+  have hy9fl : X86Int.cond y9.fl 5 = some false := by
+    have hz : y9.fl.zf = some true := by
+      rw [hy9]
+      show (aluF .sub 137 (137 % W)).2.zf = some true
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy9r0 : y9.reg 0 = some 137 := by rw [hy9]; show x9.reg 0 = some 137; exact hx9r0
+  have hy9r1 : y9.reg 1 = some i := by rw [hy9]; show x9.reg 1 = some i; exact hx9r1
+  have hy9r6 : y9.reg 6 = some c := by rw [hy9]; show x9.reg 6 = some c; exact hx9r6
+  have hy9r7 : y9.reg 7 = some w := by rw [hy9]; show x9.reg 7 = some w; exact hx9r7
+  have hy9r8 : y9.reg 8 = some h.d := by rw [hy9]; show x9.reg 8 = some h.d; exact hx9r8
+  have hy9r9 : y9.reg 9 = some h.a := by rw [hy9]; show x9.reg 9 = some h.a; exact hx9r9
+  have hy9r4 : y9.reg 4 = some sp := by rw [hy9]; show x9.reg 4 = some sp; exact hx9r4
+  have hy9mem : y9.mem = s.mem := by rw [hy9]; show x9.mem = s.mem; exact hx9mem
+  have gy9 : ∀ q, q ≠ 0 → y9.reg q = s.reg q := by
+    intro q h0
+    rw [hy9]; show x9.reg q = s.reg q; exact gx9 q h0
+
+  have e26 : X86Int.step im y9 = .ok { y9 with rip := entry + 163 } := by
+    have hh := step_jcc (im := im) (s := y9) (by rw [hy9rip]; exact hc.cjzj) hy9fl
+    simpa [hy9rip] using hh
+  obtain ⟨z9, hz9⟩ : ∃ u : X86Int.St, u = { y9 with rip := entry + 163 } := ⟨_, rfl⟩
+  have hz9rip : z9.rip = entry + 163 := by rw [hz9]
+  have hz9r0 : z9.reg 0 = some 137 := by
+    rw [hz9]
+    show ({ y9 with rip := entry + 163 }).reg 0 = some 137
+    rw [reg_with_rip]; exact hy9r0
+  have hz9r1 : z9.reg 1 = some i := by
+    rw [hz9]
+    show ({ y9 with rip := entry + 163 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy9r1
+  have hz9r6 : z9.reg 6 = some c := by
+    rw [hz9]
+    show ({ y9 with rip := entry + 163 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy9r6
+  have hz9r7 : z9.reg 7 = some w := by
+    rw [hz9]
+    show ({ y9 with rip := entry + 163 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy9r7
+  have hz9r8 : z9.reg 8 = some h.d := by
+    rw [hz9]
+    show ({ y9 with rip := entry + 163 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy9r8
+  have hz9r9 : z9.reg 9 = some h.a := by
+    rw [hz9]
+    show ({ y9 with rip := entry + 163 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy9r9
+  have hz9r4 : z9.reg 4 = some sp := by
+    rw [hz9]
+    show ({ y9 with rip := entry + 163 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy9r4
+  have hz9mem : z9.mem = s.mem := by
+    rw [hz9]
+    show ({ y9 with rip := entry + 163 }).mem = s.mem
+    rw [mem_with_rip]; exact hy9mem
+  have gz9 : ∀ q, q ≠ 0 → z9.reg q = s.reg q := by
+    intro q h0
+    rw [hz9]
+    show ({ y9 with rip := entry + 163 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy9 q h0
+
+  have e27 : X86Int.step im z9 = .ok { z9 with rip := jz } :=
+    step_jmp (by rw [hz9rip]; exact hc.cjzjmp)
+  obtain ⟨fin, hfin⟩ : ∃ u : X86Int.St, u = { z9 with rip := jz } := ⟨_, rfl⟩
+  have rw1 : run im 1 (Out.ok s) = Out.ok w1 := by rw [run_succ_ok im 0 s, e1, ← hw1, run_zero]
+  have rw2 : run im 1 (Out.ok w1) = Out.ok w2 := by rw [run_succ_ok im 0 w1, e2, ← hw2, run_zero]
+  have rw3 : run im 1 (Out.ok w2) = Out.ok w3 := by rw [run_succ_ok im 0 w2, e3, ← hw3, run_zero]
+  have rw4 : run im 1 (Out.ok w3) = Out.ok w4 := by rw [run_succ_ok im 0 w3, e4, ← hw4, run_zero]
+  have rw5 : run im 1 (Out.ok w4) = Out.ok w5 := by rw [run_succ_ok im 0 w4, e5, ← hw5, run_zero]
+  have rx0 : run im 1 (Out.ok w5) = Out.ok x0 := by rw [run_succ_ok im 0 w5, e6, ← hx0, run_zero]
+  have ry0 : run im 1 (Out.ok x0) = Out.ok y0 := by rw [run_succ_ok im 0 x0, e7, ← hy0, run_zero]
+  have rx1 : run im 1 (Out.ok y0) = Out.ok x1 := by rw [run_succ_ok im 0 y0, e8, ← hx1, run_zero]
+  have ry1 : run im 1 (Out.ok x1) = Out.ok y1 := by rw [run_succ_ok im 0 x1, e9, ← hy1, run_zero]
+  have rx2 : run im 1 (Out.ok y1) = Out.ok x2 := by rw [run_succ_ok im 0 y1, e10, ← hx2, run_zero]
+  have ry2 : run im 1 (Out.ok x2) = Out.ok y2 := by rw [run_succ_ok im 0 x2, e11, ← hy2, run_zero]
+  have rx3 : run im 1 (Out.ok y2) = Out.ok x3 := by rw [run_succ_ok im 0 y2, e12, ← hx3, run_zero]
+  have ry3 : run im 1 (Out.ok x3) = Out.ok y3 := by rw [run_succ_ok im 0 x3, e13, ← hy3, run_zero]
+  have rx4 : run im 1 (Out.ok y3) = Out.ok x4 := by rw [run_succ_ok im 0 y3, e14, ← hx4, run_zero]
+  have ry4 : run im 1 (Out.ok x4) = Out.ok y4 := by rw [run_succ_ok im 0 x4, e15, ← hy4, run_zero]
+  have rx5 : run im 1 (Out.ok y4) = Out.ok x5 := by rw [run_succ_ok im 0 y4, e16, ← hx5, run_zero]
+  have ry5 : run im 1 (Out.ok x5) = Out.ok y5 := by rw [run_succ_ok im 0 x5, e17, ← hy5, run_zero]
+  have rx6 : run im 1 (Out.ok y5) = Out.ok x6 := by rw [run_succ_ok im 0 y5, e18, ← hx6, run_zero]
+  have ry6 : run im 1 (Out.ok x6) = Out.ok y6 := by rw [run_succ_ok im 0 x6, e19, ← hy6, run_zero]
+  have rx7 : run im 1 (Out.ok y6) = Out.ok x7 := by rw [run_succ_ok im 0 y6, e20, ← hx7, run_zero]
+  have ry7 : run im 1 (Out.ok x7) = Out.ok y7 := by rw [run_succ_ok im 0 x7, e21, ← hy7, run_zero]
+  have rx8 : run im 1 (Out.ok y7) = Out.ok x8 := by rw [run_succ_ok im 0 y7, e22, ← hx8, run_zero]
+  have ry8 : run im 1 (Out.ok x8) = Out.ok y8 := by rw [run_succ_ok im 0 x8, e23, ← hy8, run_zero]
+  have rx9 : run im 1 (Out.ok y8) = Out.ok x9 := by rw [run_succ_ok im 0 y8, e24, ← hx9, run_zero]
+  have ry9 : run im 1 (Out.ok x9) = Out.ok y9 := by rw [run_succ_ok im 0 x9, e25, ← hy9, run_zero]
+  have rz9 : run im 1 (Out.ok y9) = Out.ok z9 := by rw [run_succ_ok im 0 y9, e26, ← hz9, run_zero]
+  have rfin : run im 1 (Out.ok z9) = Out.ok fin := by rw [run_succ_ok im 0 z9, e27, ← hfin, run_zero]
+  refine ⟨27, fin, by rw [run_add im 1 26, rw1, run_add im 1 25, rw2, run_add im 1 24, rw3, run_add im 1 23, rw4, run_add im 1 22, rw5, run_add im 1 21, rx0, run_add im 1 20, ry0, run_add im 1 19, rx1, run_add im 1 18, ry1, run_add im 1 17, rx2, run_add im 1 16, ry2, run_add im 1 15, rx3, run_add im 1 14, ry3, run_add im 1 13, rx4, run_add im 1 12, ry4, run_add im 1 11, rx5, run_add im 1 10, ry5, run_add im 1 9, rx6, run_add im 1 8, ry6, run_add im 1 7, rx7, run_add im 1 6, ry7, run_add im 1 5, rx8, run_add im 1 4, ry8, run_add im 1 3, rx9, run_add im 1 2, ry9, run_add im 1 1, rz9, rfin],
+    by rw [hfin], ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
+  · rw [hfin]; show ({ z9 with rip := jz }).reg 0 = some 137
+    rw [reg_with_rip]; exact hz9r0
+  · rw [hfin]; show ({ z9 with rip := jz }).reg 1 = some i
+    rw [reg_with_rip]; exact hz9r1
+  · rw [hfin]; show ({ z9 with rip := jz }).reg 6 = some c
+    rw [reg_with_rip]; exact hz9r6
+  · rw [hfin]; show ({ z9 with rip := jz }).reg 7 = some w
+    rw [reg_with_rip]; exact hz9r7
+  · rw [hfin]; show ({ z9 with rip := jz }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hz9r8
+  · rw [hfin]; show ({ z9 with rip := jz }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hz9r9
+  · rw [hfin]; show ({ z9 with rip := jz }).reg 4 = some sp
+    rw [reg_with_rip]; exact hz9r4
+  · intro q h0
+    rw [hfin]; show ({ z9 with rip := jz }).reg q = s.reg q
+    rw [reg_with_rip]; exact gz9 q h0
+  · have h1 : fin.mem = s.mem := by rw [hfin, mem_with_rip]; exact hz9mem
+    exact h1
+
+/-- `walk_top` with opcode 138 reaches its handler. -/
+theorem WalkJnz_triple {im : Nat → Option (Ins × Nat)} {entry done prim lit str pick tor fromr rfetch locget locset jmp
+    jz call ret : Nat}
+    (hc : WalkCode im entry done prim lit str pick tor fromr rfetch locget locset jmp jz call ret)
+    (hentry : entry + 215 < W) :
+    ∀ (h : Height) (c i w sp nc : Nat), w + 56 ≤ W → (hlt : i < nc) → (hcW : c < W) →
+    ∀ s, s.rip = entry → s.reg 8 = some h.d → s.reg 9 = some h.a → s.reg 6 = some c →
+      s.reg 4 = some sp → s.reg 7 = some w → s.reg 1 = some i → 16 ≤ s.regs.length →
+      rd64 s.mem (w + 24) = some nc → s.mem.rd c = some 138 →
+      ∃ k s', run im k (Out.ok s) = Out.ok s' ∧ s'.rip = jz ∧ s'.reg 0 = some 138 ∧
+        s'.reg 1 = some i ∧ s'.reg 6 = some c ∧ s'.reg 7 = some w ∧
+        s'.reg 8 = some h.d ∧ s'.reg 9 = some h.a ∧ s'.reg 4 = some sp ∧
+        (∀ q, q ≠ 0 → s'.reg q = s.reg q) ∧ s'.mem = s.mem := by
+  intro h c i w sp nc hw56 hlt hcW s hrip hr8 hr9 hr6 hr4 hr7 hr1 hlen hfc hbyte
+
+  have hea24 : ea w 24 = w + 24 := Nat.mod_eq_of_lt (by omega)
+  have h57 : 57 % W = 57 := Nat.mod_eq_of_lt (by unfold W; decide)
+  have e1 : X86Int.step im s = .ok { s.set 0 (some nc) with rip := s.rip + 4 } :=
+    step_ld (by rw [hrip]; exact hc.d0) hr7 (by rw [hea24]; exact hfc)
+  obtain ⟨w1, hw1⟩ : ∃ u : X86Int.St, u = { s.set 0 (some nc) with rip := s.rip + 4 } := ⟨_, rfl⟩
+  have hw1rip : w1.rip = entry + 4 := by rw [hw1]; show s.rip + 4 = entry + 4; rw [hrip]
+  have hw1r0 : w1.reg 0 = some nc := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 0 = some nc
+    rw [reg_set_self (len_of_r9 hr9 (by decide))]
+  have hw1r1 : w1.reg 1 = some i := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 1 = some i
+    rw [reg_set_other (by decide)]; exact hr1
+  have hw1r6 : w1.reg 6 = some c := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 6 = some c
+    rw [reg_set_other (by decide)]; exact hr6
+  have hw1r7 : w1.reg 7 = some w := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 7 = some w
+    rw [reg_set_other (by decide)]; exact hr7
+  have hw1r8 : w1.reg 8 = some h.d := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 8 = some h.d
+    rw [reg_set_other (by decide)]; exact hr8
+  have hw1r9 : w1.reg 9 = some h.a := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 9 = some h.a
+    rw [reg_set_other (by decide)]; exact hr9
+  have hw1r4 : w1.reg 4 = some sp := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 4 = some sp
+    rw [reg_set_other (by decide)]; exact hr4
+  have hw1mem : w1.mem = s.mem := by
+    rw [hw1]
+    show (s.set 0 (some nc)).mem = s.mem
+    rw [mem_set]
+  have gw1 : ∀ q, q ≠ 0 → w1.reg q = s.reg q := by
+    intro q h0
+    rw [hw1]
+    show (s.set 0 (some nc)).reg q = s.reg q
+    rw [reg_set_other h0]
+  have e2 : X86Int.step im w1 = .ok { w1 with fl := (aluF .sub i nc).2, rip := w1.rip + 3 } :=
+    step_cmp (by rw [hw1rip]; exact hc.d1) hw1r1 hw1r0
+  obtain ⟨w2, hw2⟩ : ∃ u : X86Int.St, u = { w1 with fl := (aluF .sub i nc).2, rip := w1.rip + 3 } := ⟨_, rfl⟩
+  have hw2rip : w2.rip = entry + 7 := by rw [hw2]; show w1.rip + 3 = entry + 7; rw [hw1rip]
+
+  have hw2fl : X86Int.cond w2.fl 2 = some true := by
+    have hcf : w2.fl.cf = some true := by
+      rw [hw2]
+      show (aluF .sub i nc).2.cf = some true
+      exact aluF_sub_cf_true hlt
+    exact cond_cc2 hcf
+
+  have hw2r1 : w2.reg 1 = some i := by rw [hw2]; show w1.reg 1 = some i; exact hw1r1
+  have hw2r0 : w2.reg 0 = some nc := by rw [hw2]; show w1.reg 0 = some nc; exact hw1r0
+  have hw2r6 : w2.reg 6 = some c := by rw [hw2]; show w1.reg 6 = some c; exact hw1r6
+  have hw2r8 : w2.reg 8 = some h.d := by rw [hw2]; show w1.reg 8 = some h.d; exact hw1r8
+  have hw2r9 : w2.reg 9 = some h.a := by rw [hw2]; show w1.reg 9 = some h.a; exact hw1r9
+  have hw2r4 : w2.reg 4 = some sp := by rw [hw2]; show w1.reg 4 = some sp; exact hw1r4
+  have hw2mem : w2.mem = s.mem := by rw [hw2]; show w1.mem = s.mem; exact hw1mem
+  have gw2 : ∀ q, q ≠ 0 → w2.reg q = s.reg q := by
+    intro q h0
+    rw [hw2]; show w1.reg q = s.reg q; exact gw1 q h0
+
+  have e3 : X86Int.step im w2 = .ok { w2 with rip := entry + 14 } := by
+    have hh := step_jcc (im := im) (s := w2) (by rw [hw2rip]; exact hc.d2) hw2fl
+    simpa using hh
+  obtain ⟨w3, hw3⟩ : ∃ u : X86Int.St, u = { w2 with rip := entry + 14 } := ⟨_, rfl⟩
+  have hw3rip : w3.rip = entry + 14 := by rw [hw3]
+  have hw3r6 : w3.reg 6 = some c := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg 6 = some c
+    rw [reg_with_rip]; exact hw2r6
+  have hw3r1 : w3.reg 1 = some i := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg 1 = some i
+    rw [reg_with_rip]; exact hw2r1
+  have hw3r8 : w3.reg 8 = some h.d := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hw2r8
+  have hw3r9 : w3.reg 9 = some h.a := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hw2r9
+  have hw3r4 : w3.reg 4 = some sp := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hw2r4
+  have hw3r7 : w3.reg 7 = some w := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg 7 = some w
+    rw [reg_with_rip, gw2 7 (by decide)]; exact hr7
+  have hw3mem : w3.mem = s.mem := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).mem = s.mem
+    rw [mem_with_rip]; exact hw2mem
+  have gw3 : ∀ q, q ≠ 0 → w3.reg q = s.reg q := by
+    intro q h0
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gw2 q h0
+  have hea0 : ea c 0 = c := Nat.mod_eq_of_lt hcW
+  have e4 : X86Int.step im w3 = .ok { w3.set 0 (some 138) with rip := w3.rip + 3 } :=
+    step_ld8 (by rw [hw3rip]; exact hc.d4) hw3r6 (by rw [hw3mem, hea0]; exact hbyte)
+  obtain ⟨w4, hw4⟩ : ∃ u : X86Int.St, u = { w3.set 0 (some 138) with rip := w3.rip + 3 } := ⟨_, rfl⟩
+  have hw4rip : w4.rip = entry + 17 := by rw [hw4]; show w3.rip + 3 = entry + 17; rw [hw3rip]
+  have hw4r0 : w4.reg 0 = some 138 := by
+    rw [hw4]
+    show (w3.set 0 (some 138)).reg 0 = some 138
+    rw [reg_set_self (len_of_r9 hw3r9 (by decide))]
+  have hw4r1 : w4.reg 1 = some i := by
+    rw [hw4]
+    show (w3.set 0 (some 138)).reg 1 = some i
+    rw [reg_set_other (by decide)]; exact hw3r1
+  have hw4r6 : w4.reg 6 = some c := by
+    rw [hw4]
+    show (w3.set 0 (some 138)).reg 6 = some c
+    rw [reg_set_other (by decide)]; exact hw3r6
+  have hw4r7 : w4.reg 7 = some w := by
+    rw [hw4]
+    show (w3.set 0 (some 138)).reg 7 = some w
+    rw [reg_set_other (by decide)]; exact hw3r7
+  have hw4r8 : w4.reg 8 = some h.d := by
+    rw [hw4]
+    show (w3.set 0 (some 138)).reg 8 = some h.d
+    rw [reg_set_other (by decide)]; exact hw3r8
+  have hw4r9 : w4.reg 9 = some h.a := by
+    rw [hw4]
+    show (w3.set 0 (some 138)).reg 9 = some h.a
+    rw [reg_set_other (by decide)]; exact hw3r9
+  have hw4r4 : w4.reg 4 = some sp := by
+    rw [hw4]
+    show (w3.set 0 (some 138)).reg 4 = some sp
+    rw [reg_set_other (by decide)]; exact hw3r4
+  have hw4mem : w4.mem = s.mem := by
+    rw [hw4]
+    show (w3.set 0 (some 138)).mem = s.mem
+    rw [mem_set]; exact hw3mem
+  have gw4 : ∀ q, q ≠ 0 → w4.reg q = s.reg q := by
+    intro q h0
+    rw [hw4]
+    show (w3.set 0 (some 138)).reg q = s.reg q
+    rw [reg_set_other h0]; exact gw3 q h0
+  have e5 : X86Int.step im w4 = .ok { w4 with fl := (aluF .sub 138 (57 % W)).2, rip := w4.rip + 4 } :=
+    step_cmpI (by rw [hw4rip]; exact hc.d5) hw4r0
+  obtain ⟨w5, hw5⟩ : ∃ u : X86Int.St, u = { w4 with fl := (aluF .sub 138 (57 % W)).2, rip := w4.rip + 4 } := ⟨_, rfl⟩
+  have hw5rip : w5.rip = entry + 21 := by rw [hw5]; show w4.rip + 4 = entry + 21; rw [hw4rip]
+
+  have hw5fl : X86Int.cond w5.fl 3 = some true := by
+    have hcf : w5.fl.cf = some false := by
+      rw [hw5]
+      show (aluF .sub 138 (57 % W)).2.cf = some false
+      rw [h57]
+      exact aluF_sub_cf (by decide)
+    have hh := cond_cc3 hcf
+    simpa using hh
+  have hw5r0 : w5.reg 0 = some 138 := by rw [hw5]; show w4.reg 0 = some 138; exact hw4r0
+  have hw5r1 : w5.reg 1 = some i := by rw [hw5]; show w4.reg 1 = some i; exact hw4r1
+  have hw5r6 : w5.reg 6 = some c := by rw [hw5]; show w4.reg 6 = some c; exact hw4r6
+  have hw5r7 : w5.reg 7 = some w := by rw [hw5]; show w4.reg 7 = some w; exact hw4r7
+  have hw5r8 : w5.reg 8 = some h.d := by rw [hw5]; show w4.reg 8 = some h.d; exact hw4r8
+  have hw5r9 : w5.reg 9 = some h.a := by rw [hw5]; show w4.reg 9 = some h.a; exact hw4r9
+  have hw5r4 : w5.reg 4 = some sp := by rw [hw5]; show w4.reg 4 = some sp; exact hw4r4
+  have hw5mem : w5.mem = s.mem := by rw [hw5]; show w4.mem = s.mem; exact hw4mem
+  have gw5 : ∀ q, q ≠ 0 → w5.reg q = s.reg q := by
+    intro q h0
+    rw [hw5]; show w4.reg q = s.reg q; exact gw4 q h0
+
+  have e6 : X86Int.step im w5 = .ok { w5 with rip := entry + 28 } := by
+    have hh := step_jcc (im := im) (s := w5) (by rw [hw5rip]; exact hc.d6) hw5fl
+    simpa using hh
+  obtain ⟨x0, hx0⟩ : ∃ u : X86Int.St, u = { w5 with rip := entry + 28 } := ⟨_, rfl⟩
+  have hx0rip : x0.rip = entry + 28 := by rw [hx0]
+  have hx0r0 : x0.reg 0 = some 138 := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 0 = some 138
+    rw [reg_with_rip]; exact hw5r0
+  have hx0r1 : x0.reg 1 = some i := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 1 = some i
+    rw [reg_with_rip]; exact hw5r1
+  have hx0r6 : x0.reg 6 = some c := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 6 = some c
+    rw [reg_with_rip]; exact hw5r6
+  have hx0r7 : x0.reg 7 = some w := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 7 = some w
+    rw [reg_with_rip]; exact hw5r7
+  have hx0r8 : x0.reg 8 = some h.d := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hw5r8
+  have hx0r9 : x0.reg 9 = some h.a := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hw5r9
+  have hx0r4 : x0.reg 4 = some sp := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hw5r4
+  have hx0mem : x0.mem = s.mem := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).mem = s.mem
+    rw [mem_with_rip]; exact hw5mem
+  have gx0 : ∀ q, q ≠ 0 → x0.reg q = s.reg q := by
+    intro q h0
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gw5 q h0
+
+  have e7 : X86Int.step im x0 = .ok { x0 with fl := (aluF .sub 138 (128 % W)).2, rip := x0.rip + 7 } :=
+    step_cmpI (by rw [hx0rip]; exact hc.clit) hx0r0
+  obtain ⟨y0, hy0⟩ : ∃ u : X86Int.St, u = { x0 with fl := (aluF .sub 138 (128 % W)).2, rip := x0.rip + 7 } := ⟨_, rfl⟩
+  have hy0rip : y0.rip = entry + 35 := by rw [hy0]; show x0.rip + 7 = entry + 35; rw [hx0rip]
+
+  have hy0fl : X86Int.cond y0.fl 5 = some true := by
+    have hz : y0.fl.zf = some false := by
+      rw [hy0]
+      show (aluF .sub 138 (128 % W)).2.zf = some false
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy0r0 : y0.reg 0 = some 138 := by rw [hy0]; show x0.reg 0 = some 138; exact hx0r0
+  have hy0r1 : y0.reg 1 = some i := by rw [hy0]; show x0.reg 1 = some i; exact hx0r1
+  have hy0r6 : y0.reg 6 = some c := by rw [hy0]; show x0.reg 6 = some c; exact hx0r6
+  have hy0r7 : y0.reg 7 = some w := by rw [hy0]; show x0.reg 7 = some w; exact hx0r7
+  have hy0r8 : y0.reg 8 = some h.d := by rw [hy0]; show x0.reg 8 = some h.d; exact hx0r8
+  have hy0r9 : y0.reg 9 = some h.a := by rw [hy0]; show x0.reg 9 = some h.a; exact hx0r9
+  have hy0r4 : y0.reg 4 = some sp := by rw [hy0]; show x0.reg 4 = some sp; exact hx0r4
+  have hy0mem : y0.mem = s.mem := by rw [hy0]; show x0.mem = s.mem; exact hx0mem
+  have gy0 : ∀ q, q ≠ 0 → y0.reg q = s.reg q := by
+    intro q h0
+    rw [hy0]; show x0.reg q = s.reg q; exact gx0 q h0
+
+  have e8 : X86Int.step im y0 = .ok { y0 with rip := entry + 42 } := by
+    have hh := step_jcc (im := im) (s := y0) (by rw [hy0rip]; exact hc.clitj) hy0fl
+    simpa using hh
+  obtain ⟨x1, hx1⟩ : ∃ u : X86Int.St, u = { y0 with rip := entry + 42 } := ⟨_, rfl⟩
+  have hx1rip : x1.rip = entry + 42 := by rw [hx1]
+  have hx1r0 : x1.reg 0 = some 138 := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg 0 = some 138
+    rw [reg_with_rip]; exact hy0r0
+  have hx1r1 : x1.reg 1 = some i := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy0r1
+  have hx1r6 : x1.reg 6 = some c := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy0r6
+  have hx1r7 : x1.reg 7 = some w := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy0r7
+  have hx1r8 : x1.reg 8 = some h.d := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy0r8
+  have hx1r9 : x1.reg 9 = some h.a := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy0r9
+  have hx1r4 : x1.reg 4 = some sp := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy0r4
+  have hx1mem : x1.mem = s.mem := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).mem = s.mem
+    rw [mem_with_rip]; exact hy0mem
+  have gx1 : ∀ q, q ≠ 0 → x1.reg q = s.reg q := by
+    intro q h0
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy0 q h0
+
+  have e9 : X86Int.step im x1 = .ok { x1 with fl := (aluF .sub 138 (129 % W)).2, rip := x1.rip + 7 } :=
+    step_cmpI (by rw [hx1rip]; exact hc.cstr) hx1r0
+  obtain ⟨y1, hy1⟩ : ∃ u : X86Int.St, u = { x1 with fl := (aluF .sub 138 (129 % W)).2, rip := x1.rip + 7 } := ⟨_, rfl⟩
+  have hy1rip : y1.rip = entry + 49 := by rw [hy1]; show x1.rip + 7 = entry + 49; rw [hx1rip]
+
+  have hy1fl : X86Int.cond y1.fl 5 = some true := by
+    have hz : y1.fl.zf = some false := by
+      rw [hy1]
+      show (aluF .sub 138 (129 % W)).2.zf = some false
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy1r0 : y1.reg 0 = some 138 := by rw [hy1]; show x1.reg 0 = some 138; exact hx1r0
+  have hy1r1 : y1.reg 1 = some i := by rw [hy1]; show x1.reg 1 = some i; exact hx1r1
+  have hy1r6 : y1.reg 6 = some c := by rw [hy1]; show x1.reg 6 = some c; exact hx1r6
+  have hy1r7 : y1.reg 7 = some w := by rw [hy1]; show x1.reg 7 = some w; exact hx1r7
+  have hy1r8 : y1.reg 8 = some h.d := by rw [hy1]; show x1.reg 8 = some h.d; exact hx1r8
+  have hy1r9 : y1.reg 9 = some h.a := by rw [hy1]; show x1.reg 9 = some h.a; exact hx1r9
+  have hy1r4 : y1.reg 4 = some sp := by rw [hy1]; show x1.reg 4 = some sp; exact hx1r4
+  have hy1mem : y1.mem = s.mem := by rw [hy1]; show x1.mem = s.mem; exact hx1mem
+  have gy1 : ∀ q, q ≠ 0 → y1.reg q = s.reg q := by
+    intro q h0
+    rw [hy1]; show x1.reg q = s.reg q; exact gx1 q h0
+
+  have e10 : X86Int.step im y1 = .ok { y1 with rip := entry + 56 } := by
+    have hh := step_jcc (im := im) (s := y1) (by rw [hy1rip]; exact hc.cstrj) hy1fl
+    simpa using hh
+  obtain ⟨x2, hx2⟩ : ∃ u : X86Int.St, u = { y1 with rip := entry + 56 } := ⟨_, rfl⟩
+  have hx2rip : x2.rip = entry + 56 := by rw [hx2]
+  have hx2r0 : x2.reg 0 = some 138 := by
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).reg 0 = some 138
+    rw [reg_with_rip]; exact hy1r0
+  have hx2r1 : x2.reg 1 = some i := by
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy1r1
+  have hx2r6 : x2.reg 6 = some c := by
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy1r6
+  have hx2r7 : x2.reg 7 = some w := by
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy1r7
+  have hx2r8 : x2.reg 8 = some h.d := by
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy1r8
+  have hx2r9 : x2.reg 9 = some h.a := by
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy1r9
+  have hx2r4 : x2.reg 4 = some sp := by
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy1r4
+  have hx2mem : x2.mem = s.mem := by
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).mem = s.mem
+    rw [mem_with_rip]; exact hy1mem
+  have gx2 : ∀ q, q ≠ 0 → x2.reg q = s.reg q := by
+    intro q h0
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy1 q h0
+
+  have e11 : X86Int.step im x2 = .ok { x2 with fl := (aluF .sub 138 (130 % W)).2, rip := x2.rip + 7 } :=
+    step_cmpI (by rw [hx2rip]; exact hc.cpick) hx2r0
+  obtain ⟨y2, hy2⟩ : ∃ u : X86Int.St, u = { x2 with fl := (aluF .sub 138 (130 % W)).2, rip := x2.rip + 7 } := ⟨_, rfl⟩
+  have hy2rip : y2.rip = entry + 63 := by rw [hy2]; show x2.rip + 7 = entry + 63; rw [hx2rip]
+
+  have hy2fl : X86Int.cond y2.fl 5 = some true := by
+    have hz : y2.fl.zf = some false := by
+      rw [hy2]
+      show (aluF .sub 138 (130 % W)).2.zf = some false
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy2r0 : y2.reg 0 = some 138 := by rw [hy2]; show x2.reg 0 = some 138; exact hx2r0
+  have hy2r1 : y2.reg 1 = some i := by rw [hy2]; show x2.reg 1 = some i; exact hx2r1
+  have hy2r6 : y2.reg 6 = some c := by rw [hy2]; show x2.reg 6 = some c; exact hx2r6
+  have hy2r7 : y2.reg 7 = some w := by rw [hy2]; show x2.reg 7 = some w; exact hx2r7
+  have hy2r8 : y2.reg 8 = some h.d := by rw [hy2]; show x2.reg 8 = some h.d; exact hx2r8
+  have hy2r9 : y2.reg 9 = some h.a := by rw [hy2]; show x2.reg 9 = some h.a; exact hx2r9
+  have hy2r4 : y2.reg 4 = some sp := by rw [hy2]; show x2.reg 4 = some sp; exact hx2r4
+  have hy2mem : y2.mem = s.mem := by rw [hy2]; show x2.mem = s.mem; exact hx2mem
+  have gy2 : ∀ q, q ≠ 0 → y2.reg q = s.reg q := by
+    intro q h0
+    rw [hy2]; show x2.reg q = s.reg q; exact gx2 q h0
+
+  have e12 : X86Int.step im y2 = .ok { y2 with rip := entry + 70 } := by
+    have hh := step_jcc (im := im) (s := y2) (by rw [hy2rip]; exact hc.cpickj) hy2fl
+    simpa using hh
+  obtain ⟨x3, hx3⟩ : ∃ u : X86Int.St, u = { y2 with rip := entry + 70 } := ⟨_, rfl⟩
+  have hx3rip : x3.rip = entry + 70 := by rw [hx3]
+  have hx3r0 : x3.reg 0 = some 138 := by
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).reg 0 = some 138
+    rw [reg_with_rip]; exact hy2r0
+  have hx3r1 : x3.reg 1 = some i := by
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy2r1
+  have hx3r6 : x3.reg 6 = some c := by
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy2r6
+  have hx3r7 : x3.reg 7 = some w := by
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy2r7
+  have hx3r8 : x3.reg 8 = some h.d := by
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy2r8
+  have hx3r9 : x3.reg 9 = some h.a := by
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy2r9
+  have hx3r4 : x3.reg 4 = some sp := by
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy2r4
+  have hx3mem : x3.mem = s.mem := by
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).mem = s.mem
+    rw [mem_with_rip]; exact hy2mem
+  have gx3 : ∀ q, q ≠ 0 → x3.reg q = s.reg q := by
+    intro q h0
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy2 q h0
+
+  have e13 : X86Int.step im x3 = .ok { x3 with fl := (aluF .sub 138 (131 % W)).2, rip := x3.rip + 7 } :=
+    step_cmpI (by rw [hx3rip]; exact hc.ctor) hx3r0
+  obtain ⟨y3, hy3⟩ : ∃ u : X86Int.St, u = { x3 with fl := (aluF .sub 138 (131 % W)).2, rip := x3.rip + 7 } := ⟨_, rfl⟩
+  have hy3rip : y3.rip = entry + 77 := by rw [hy3]; show x3.rip + 7 = entry + 77; rw [hx3rip]
+
+  have hy3fl : X86Int.cond y3.fl 5 = some true := by
+    have hz : y3.fl.zf = some false := by
+      rw [hy3]
+      show (aluF .sub 138 (131 % W)).2.zf = some false
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy3r0 : y3.reg 0 = some 138 := by rw [hy3]; show x3.reg 0 = some 138; exact hx3r0
+  have hy3r1 : y3.reg 1 = some i := by rw [hy3]; show x3.reg 1 = some i; exact hx3r1
+  have hy3r6 : y3.reg 6 = some c := by rw [hy3]; show x3.reg 6 = some c; exact hx3r6
+  have hy3r7 : y3.reg 7 = some w := by rw [hy3]; show x3.reg 7 = some w; exact hx3r7
+  have hy3r8 : y3.reg 8 = some h.d := by rw [hy3]; show x3.reg 8 = some h.d; exact hx3r8
+  have hy3r9 : y3.reg 9 = some h.a := by rw [hy3]; show x3.reg 9 = some h.a; exact hx3r9
+  have hy3r4 : y3.reg 4 = some sp := by rw [hy3]; show x3.reg 4 = some sp; exact hx3r4
+  have hy3mem : y3.mem = s.mem := by rw [hy3]; show x3.mem = s.mem; exact hx3mem
+  have gy3 : ∀ q, q ≠ 0 → y3.reg q = s.reg q := by
+    intro q h0
+    rw [hy3]; show x3.reg q = s.reg q; exact gx3 q h0
+
+  have e14 : X86Int.step im y3 = .ok { y3 with rip := entry + 84 } := by
+    have hh := step_jcc (im := im) (s := y3) (by rw [hy3rip]; exact hc.ctorj) hy3fl
+    simpa using hh
+  obtain ⟨x4, hx4⟩ : ∃ u : X86Int.St, u = { y3 with rip := entry + 84 } := ⟨_, rfl⟩
+  have hx4rip : x4.rip = entry + 84 := by rw [hx4]
+  have hx4r0 : x4.reg 0 = some 138 := by
+    rw [hx4]
+    show ({ y3 with rip := entry + 84 }).reg 0 = some 138
+    rw [reg_with_rip]; exact hy3r0
+  have hx4r1 : x4.reg 1 = some i := by
+    rw [hx4]
+    show ({ y3 with rip := entry + 84 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy3r1
+  have hx4r6 : x4.reg 6 = some c := by
+    rw [hx4]
+    show ({ y3 with rip := entry + 84 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy3r6
+  have hx4r7 : x4.reg 7 = some w := by
+    rw [hx4]
+    show ({ y3 with rip := entry + 84 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy3r7
+  have hx4r8 : x4.reg 8 = some h.d := by
+    rw [hx4]
+    show ({ y3 with rip := entry + 84 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy3r8
+  have hx4r9 : x4.reg 9 = some h.a := by
+    rw [hx4]
+    show ({ y3 with rip := entry + 84 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy3r9
+  have hx4r4 : x4.reg 4 = some sp := by
+    rw [hx4]
+    show ({ y3 with rip := entry + 84 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy3r4
+  have hx4mem : x4.mem = s.mem := by
+    rw [hx4]
+    show ({ y3 with rip := entry + 84 }).mem = s.mem
+    rw [mem_with_rip]; exact hy3mem
+  have gx4 : ∀ q, q ≠ 0 → x4.reg q = s.reg q := by
+    intro q h0
+    rw [hx4]
+    show ({ y3 with rip := entry + 84 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy3 q h0
+
+  have e15 : X86Int.step im x4 = .ok { x4 with fl := (aluF .sub 138 (132 % W)).2, rip := x4.rip + 7 } :=
+    step_cmpI (by rw [hx4rip]; exact hc.cfromr) hx4r0
+  obtain ⟨y4, hy4⟩ : ∃ u : X86Int.St, u = { x4 with fl := (aluF .sub 138 (132 % W)).2, rip := x4.rip + 7 } := ⟨_, rfl⟩
+  have hy4rip : y4.rip = entry + 91 := by rw [hy4]; show x4.rip + 7 = entry + 91; rw [hx4rip]
+
+  have hy4fl : X86Int.cond y4.fl 5 = some true := by
+    have hz : y4.fl.zf = some false := by
+      rw [hy4]
+      show (aluF .sub 138 (132 % W)).2.zf = some false
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy4r0 : y4.reg 0 = some 138 := by rw [hy4]; show x4.reg 0 = some 138; exact hx4r0
+  have hy4r1 : y4.reg 1 = some i := by rw [hy4]; show x4.reg 1 = some i; exact hx4r1
+  have hy4r6 : y4.reg 6 = some c := by rw [hy4]; show x4.reg 6 = some c; exact hx4r6
+  have hy4r7 : y4.reg 7 = some w := by rw [hy4]; show x4.reg 7 = some w; exact hx4r7
+  have hy4r8 : y4.reg 8 = some h.d := by rw [hy4]; show x4.reg 8 = some h.d; exact hx4r8
+  have hy4r9 : y4.reg 9 = some h.a := by rw [hy4]; show x4.reg 9 = some h.a; exact hx4r9
+  have hy4r4 : y4.reg 4 = some sp := by rw [hy4]; show x4.reg 4 = some sp; exact hx4r4
+  have hy4mem : y4.mem = s.mem := by rw [hy4]; show x4.mem = s.mem; exact hx4mem
+  have gy4 : ∀ q, q ≠ 0 → y4.reg q = s.reg q := by
+    intro q h0
+    rw [hy4]; show x4.reg q = s.reg q; exact gx4 q h0
+
+  have e16 : X86Int.step im y4 = .ok { y4 with rip := entry + 98 } := by
+    have hh := step_jcc (im := im) (s := y4) (by rw [hy4rip]; exact hc.cfromrj) hy4fl
+    simpa using hh
+  obtain ⟨x5, hx5⟩ : ∃ u : X86Int.St, u = { y4 with rip := entry + 98 } := ⟨_, rfl⟩
+  have hx5rip : x5.rip = entry + 98 := by rw [hx5]
+  have hx5r0 : x5.reg 0 = some 138 := by
+    rw [hx5]
+    show ({ y4 with rip := entry + 98 }).reg 0 = some 138
+    rw [reg_with_rip]; exact hy4r0
+  have hx5r1 : x5.reg 1 = some i := by
+    rw [hx5]
+    show ({ y4 with rip := entry + 98 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy4r1
+  have hx5r6 : x5.reg 6 = some c := by
+    rw [hx5]
+    show ({ y4 with rip := entry + 98 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy4r6
+  have hx5r7 : x5.reg 7 = some w := by
+    rw [hx5]
+    show ({ y4 with rip := entry + 98 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy4r7
+  have hx5r8 : x5.reg 8 = some h.d := by
+    rw [hx5]
+    show ({ y4 with rip := entry + 98 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy4r8
+  have hx5r9 : x5.reg 9 = some h.a := by
+    rw [hx5]
+    show ({ y4 with rip := entry + 98 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy4r9
+  have hx5r4 : x5.reg 4 = some sp := by
+    rw [hx5]
+    show ({ y4 with rip := entry + 98 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy4r4
+  have hx5mem : x5.mem = s.mem := by
+    rw [hx5]
+    show ({ y4 with rip := entry + 98 }).mem = s.mem
+    rw [mem_with_rip]; exact hy4mem
+  have gx5 : ∀ q, q ≠ 0 → x5.reg q = s.reg q := by
+    intro q h0
+    rw [hx5]
+    show ({ y4 with rip := entry + 98 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy4 q h0
+
+  have e17 : X86Int.step im x5 = .ok { x5 with fl := (aluF .sub 138 (133 % W)).2, rip := x5.rip + 7 } :=
+    step_cmpI (by rw [hx5rip]; exact hc.crfetch) hx5r0
+  obtain ⟨y5, hy5⟩ : ∃ u : X86Int.St, u = { x5 with fl := (aluF .sub 138 (133 % W)).2, rip := x5.rip + 7 } := ⟨_, rfl⟩
+  have hy5rip : y5.rip = entry + 105 := by rw [hy5]; show x5.rip + 7 = entry + 105; rw [hx5rip]
+
+  have hy5fl : X86Int.cond y5.fl 5 = some true := by
+    have hz : y5.fl.zf = some false := by
+      rw [hy5]
+      show (aluF .sub 138 (133 % W)).2.zf = some false
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy5r0 : y5.reg 0 = some 138 := by rw [hy5]; show x5.reg 0 = some 138; exact hx5r0
+  have hy5r1 : y5.reg 1 = some i := by rw [hy5]; show x5.reg 1 = some i; exact hx5r1
+  have hy5r6 : y5.reg 6 = some c := by rw [hy5]; show x5.reg 6 = some c; exact hx5r6
+  have hy5r7 : y5.reg 7 = some w := by rw [hy5]; show x5.reg 7 = some w; exact hx5r7
+  have hy5r8 : y5.reg 8 = some h.d := by rw [hy5]; show x5.reg 8 = some h.d; exact hx5r8
+  have hy5r9 : y5.reg 9 = some h.a := by rw [hy5]; show x5.reg 9 = some h.a; exact hx5r9
+  have hy5r4 : y5.reg 4 = some sp := by rw [hy5]; show x5.reg 4 = some sp; exact hx5r4
+  have hy5mem : y5.mem = s.mem := by rw [hy5]; show x5.mem = s.mem; exact hx5mem
+  have gy5 : ∀ q, q ≠ 0 → y5.reg q = s.reg q := by
+    intro q h0
+    rw [hy5]; show x5.reg q = s.reg q; exact gx5 q h0
+
+  have e18 : X86Int.step im y5 = .ok { y5 with rip := entry + 112 } := by
+    have hh := step_jcc (im := im) (s := y5) (by rw [hy5rip]; exact hc.crfetchj) hy5fl
+    simpa using hh
+  obtain ⟨x6, hx6⟩ : ∃ u : X86Int.St, u = { y5 with rip := entry + 112 } := ⟨_, rfl⟩
+  have hx6rip : x6.rip = entry + 112 := by rw [hx6]
+  have hx6r0 : x6.reg 0 = some 138 := by
+    rw [hx6]
+    show ({ y5 with rip := entry + 112 }).reg 0 = some 138
+    rw [reg_with_rip]; exact hy5r0
+  have hx6r1 : x6.reg 1 = some i := by
+    rw [hx6]
+    show ({ y5 with rip := entry + 112 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy5r1
+  have hx6r6 : x6.reg 6 = some c := by
+    rw [hx6]
+    show ({ y5 with rip := entry + 112 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy5r6
+  have hx6r7 : x6.reg 7 = some w := by
+    rw [hx6]
+    show ({ y5 with rip := entry + 112 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy5r7
+  have hx6r8 : x6.reg 8 = some h.d := by
+    rw [hx6]
+    show ({ y5 with rip := entry + 112 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy5r8
+  have hx6r9 : x6.reg 9 = some h.a := by
+    rw [hx6]
+    show ({ y5 with rip := entry + 112 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy5r9
+  have hx6r4 : x6.reg 4 = some sp := by
+    rw [hx6]
+    show ({ y5 with rip := entry + 112 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy5r4
+  have hx6mem : x6.mem = s.mem := by
+    rw [hx6]
+    show ({ y5 with rip := entry + 112 }).mem = s.mem
+    rw [mem_with_rip]; exact hy5mem
+  have gx6 : ∀ q, q ≠ 0 → x6.reg q = s.reg q := by
+    intro q h0
+    rw [hx6]
+    show ({ y5 with rip := entry + 112 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy5 q h0
+
+  have e19 : X86Int.step im x6 = .ok { x6 with fl := (aluF .sub 138 (134 % W)).2, rip := x6.rip + 7 } :=
+    step_cmpI (by rw [hx6rip]; exact hc.clocget) hx6r0
+  obtain ⟨y6, hy6⟩ : ∃ u : X86Int.St, u = { x6 with fl := (aluF .sub 138 (134 % W)).2, rip := x6.rip + 7 } := ⟨_, rfl⟩
+  have hy6rip : y6.rip = entry + 119 := by rw [hy6]; show x6.rip + 7 = entry + 119; rw [hx6rip]
+
+  have hy6fl : X86Int.cond y6.fl 5 = some true := by
+    have hz : y6.fl.zf = some false := by
+      rw [hy6]
+      show (aluF .sub 138 (134 % W)).2.zf = some false
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy6r0 : y6.reg 0 = some 138 := by rw [hy6]; show x6.reg 0 = some 138; exact hx6r0
+  have hy6r1 : y6.reg 1 = some i := by rw [hy6]; show x6.reg 1 = some i; exact hx6r1
+  have hy6r6 : y6.reg 6 = some c := by rw [hy6]; show x6.reg 6 = some c; exact hx6r6
+  have hy6r7 : y6.reg 7 = some w := by rw [hy6]; show x6.reg 7 = some w; exact hx6r7
+  have hy6r8 : y6.reg 8 = some h.d := by rw [hy6]; show x6.reg 8 = some h.d; exact hx6r8
+  have hy6r9 : y6.reg 9 = some h.a := by rw [hy6]; show x6.reg 9 = some h.a; exact hx6r9
+  have hy6r4 : y6.reg 4 = some sp := by rw [hy6]; show x6.reg 4 = some sp; exact hx6r4
+  have hy6mem : y6.mem = s.mem := by rw [hy6]; show x6.mem = s.mem; exact hx6mem
+  have gy6 : ∀ q, q ≠ 0 → y6.reg q = s.reg q := by
+    intro q h0
+    rw [hy6]; show x6.reg q = s.reg q; exact gx6 q h0
+
+  have e20 : X86Int.step im y6 = .ok { y6 with rip := entry + 126 } := by
+    have hh := step_jcc (im := im) (s := y6) (by rw [hy6rip]; exact hc.clocgetj) hy6fl
+    simpa using hh
+  obtain ⟨x7, hx7⟩ : ∃ u : X86Int.St, u = { y6 with rip := entry + 126 } := ⟨_, rfl⟩
+  have hx7rip : x7.rip = entry + 126 := by rw [hx7]
+  have hx7r0 : x7.reg 0 = some 138 := by
+    rw [hx7]
+    show ({ y6 with rip := entry + 126 }).reg 0 = some 138
+    rw [reg_with_rip]; exact hy6r0
+  have hx7r1 : x7.reg 1 = some i := by
+    rw [hx7]
+    show ({ y6 with rip := entry + 126 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy6r1
+  have hx7r6 : x7.reg 6 = some c := by
+    rw [hx7]
+    show ({ y6 with rip := entry + 126 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy6r6
+  have hx7r7 : x7.reg 7 = some w := by
+    rw [hx7]
+    show ({ y6 with rip := entry + 126 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy6r7
+  have hx7r8 : x7.reg 8 = some h.d := by
+    rw [hx7]
+    show ({ y6 with rip := entry + 126 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy6r8
+  have hx7r9 : x7.reg 9 = some h.a := by
+    rw [hx7]
+    show ({ y6 with rip := entry + 126 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy6r9
+  have hx7r4 : x7.reg 4 = some sp := by
+    rw [hx7]
+    show ({ y6 with rip := entry + 126 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy6r4
+  have hx7mem : x7.mem = s.mem := by
+    rw [hx7]
+    show ({ y6 with rip := entry + 126 }).mem = s.mem
+    rw [mem_with_rip]; exact hy6mem
+  have gx7 : ∀ q, q ≠ 0 → x7.reg q = s.reg q := by
+    intro q h0
+    rw [hx7]
+    show ({ y6 with rip := entry + 126 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy6 q h0
+
+  have e21 : X86Int.step im x7 = .ok { x7 with fl := (aluF .sub 138 (135 % W)).2, rip := x7.rip + 7 } :=
+    step_cmpI (by rw [hx7rip]; exact hc.clocset) hx7r0
+  obtain ⟨y7, hy7⟩ : ∃ u : X86Int.St, u = { x7 with fl := (aluF .sub 138 (135 % W)).2, rip := x7.rip + 7 } := ⟨_, rfl⟩
+  have hy7rip : y7.rip = entry + 133 := by rw [hy7]; show x7.rip + 7 = entry + 133; rw [hx7rip]
+
+  have hy7fl : X86Int.cond y7.fl 5 = some true := by
+    have hz : y7.fl.zf = some false := by
+      rw [hy7]
+      show (aluF .sub 138 (135 % W)).2.zf = some false
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy7r0 : y7.reg 0 = some 138 := by rw [hy7]; show x7.reg 0 = some 138; exact hx7r0
+  have hy7r1 : y7.reg 1 = some i := by rw [hy7]; show x7.reg 1 = some i; exact hx7r1
+  have hy7r6 : y7.reg 6 = some c := by rw [hy7]; show x7.reg 6 = some c; exact hx7r6
+  have hy7r7 : y7.reg 7 = some w := by rw [hy7]; show x7.reg 7 = some w; exact hx7r7
+  have hy7r8 : y7.reg 8 = some h.d := by rw [hy7]; show x7.reg 8 = some h.d; exact hx7r8
+  have hy7r9 : y7.reg 9 = some h.a := by rw [hy7]; show x7.reg 9 = some h.a; exact hx7r9
+  have hy7r4 : y7.reg 4 = some sp := by rw [hy7]; show x7.reg 4 = some sp; exact hx7r4
+  have hy7mem : y7.mem = s.mem := by rw [hy7]; show x7.mem = s.mem; exact hx7mem
+  have gy7 : ∀ q, q ≠ 0 → y7.reg q = s.reg q := by
+    intro q h0
+    rw [hy7]; show x7.reg q = s.reg q; exact gx7 q h0
+
+  have e22 : X86Int.step im y7 = .ok { y7 with rip := entry + 140 } := by
+    have hh := step_jcc (im := im) (s := y7) (by rw [hy7rip]; exact hc.clocsetj) hy7fl
+    simpa using hh
+  obtain ⟨x8, hx8⟩ : ∃ u : X86Int.St, u = { y7 with rip := entry + 140 } := ⟨_, rfl⟩
+  have hx8rip : x8.rip = entry + 140 := by rw [hx8]
+  have hx8r0 : x8.reg 0 = some 138 := by
+    rw [hx8]
+    show ({ y7 with rip := entry + 140 }).reg 0 = some 138
+    rw [reg_with_rip]; exact hy7r0
+  have hx8r1 : x8.reg 1 = some i := by
+    rw [hx8]
+    show ({ y7 with rip := entry + 140 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy7r1
+  have hx8r6 : x8.reg 6 = some c := by
+    rw [hx8]
+    show ({ y7 with rip := entry + 140 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy7r6
+  have hx8r7 : x8.reg 7 = some w := by
+    rw [hx8]
+    show ({ y7 with rip := entry + 140 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy7r7
+  have hx8r8 : x8.reg 8 = some h.d := by
+    rw [hx8]
+    show ({ y7 with rip := entry + 140 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy7r8
+  have hx8r9 : x8.reg 9 = some h.a := by
+    rw [hx8]
+    show ({ y7 with rip := entry + 140 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy7r9
+  have hx8r4 : x8.reg 4 = some sp := by
+    rw [hx8]
+    show ({ y7 with rip := entry + 140 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy7r4
+  have hx8mem : x8.mem = s.mem := by
+    rw [hx8]
+    show ({ y7 with rip := entry + 140 }).mem = s.mem
+    rw [mem_with_rip]; exact hy7mem
+  have gx8 : ∀ q, q ≠ 0 → x8.reg q = s.reg q := by
+    intro q h0
+    rw [hx8]
+    show ({ y7 with rip := entry + 140 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy7 q h0
+
+  have e23 : X86Int.step im x8 = .ok { x8 with fl := (aluF .sub 138 (136 % W)).2, rip := x8.rip + 7 } :=
+    step_cmpI (by rw [hx8rip]; exact hc.cjmp) hx8r0
+  obtain ⟨y8, hy8⟩ : ∃ u : X86Int.St, u = { x8 with fl := (aluF .sub 138 (136 % W)).2, rip := x8.rip + 7 } := ⟨_, rfl⟩
+  have hy8rip : y8.rip = entry + 147 := by rw [hy8]; show x8.rip + 7 = entry + 147; rw [hx8rip]
+
+  have hy8fl : X86Int.cond y8.fl 5 = some true := by
+    have hz : y8.fl.zf = some false := by
+      rw [hy8]
+      show (aluF .sub 138 (136 % W)).2.zf = some false
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy8r0 : y8.reg 0 = some 138 := by rw [hy8]; show x8.reg 0 = some 138; exact hx8r0
+  have hy8r1 : y8.reg 1 = some i := by rw [hy8]; show x8.reg 1 = some i; exact hx8r1
+  have hy8r6 : y8.reg 6 = some c := by rw [hy8]; show x8.reg 6 = some c; exact hx8r6
+  have hy8r7 : y8.reg 7 = some w := by rw [hy8]; show x8.reg 7 = some w; exact hx8r7
+  have hy8r8 : y8.reg 8 = some h.d := by rw [hy8]; show x8.reg 8 = some h.d; exact hx8r8
+  have hy8r9 : y8.reg 9 = some h.a := by rw [hy8]; show x8.reg 9 = some h.a; exact hx8r9
+  have hy8r4 : y8.reg 4 = some sp := by rw [hy8]; show x8.reg 4 = some sp; exact hx8r4
+  have hy8mem : y8.mem = s.mem := by rw [hy8]; show x8.mem = s.mem; exact hx8mem
+  have gy8 : ∀ q, q ≠ 0 → y8.reg q = s.reg q := by
+    intro q h0
+    rw [hy8]; show x8.reg q = s.reg q; exact gx8 q h0
+
+  have e24 : X86Int.step im y8 = .ok { y8 with rip := entry + 154 } := by
+    have hh := step_jcc (im := im) (s := y8) (by rw [hy8rip]; exact hc.cjmpj) hy8fl
+    simpa using hh
+  obtain ⟨x9, hx9⟩ : ∃ u : X86Int.St, u = { y8 with rip := entry + 154 } := ⟨_, rfl⟩
+  have hx9rip : x9.rip = entry + 154 := by rw [hx9]
+  have hx9r0 : x9.reg 0 = some 138 := by
+    rw [hx9]
+    show ({ y8 with rip := entry + 154 }).reg 0 = some 138
+    rw [reg_with_rip]; exact hy8r0
+  have hx9r1 : x9.reg 1 = some i := by
+    rw [hx9]
+    show ({ y8 with rip := entry + 154 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy8r1
+  have hx9r6 : x9.reg 6 = some c := by
+    rw [hx9]
+    show ({ y8 with rip := entry + 154 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy8r6
+  have hx9r7 : x9.reg 7 = some w := by
+    rw [hx9]
+    show ({ y8 with rip := entry + 154 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy8r7
+  have hx9r8 : x9.reg 8 = some h.d := by
+    rw [hx9]
+    show ({ y8 with rip := entry + 154 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy8r8
+  have hx9r9 : x9.reg 9 = some h.a := by
+    rw [hx9]
+    show ({ y8 with rip := entry + 154 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy8r9
+  have hx9r4 : x9.reg 4 = some sp := by
+    rw [hx9]
+    show ({ y8 with rip := entry + 154 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy8r4
+  have hx9mem : x9.mem = s.mem := by
+    rw [hx9]
+    show ({ y8 with rip := entry + 154 }).mem = s.mem
+    rw [mem_with_rip]; exact hy8mem
+  have gx9 : ∀ q, q ≠ 0 → x9.reg q = s.reg q := by
+    intro q h0
+    rw [hx9]
+    show ({ y8 with rip := entry + 154 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy8 q h0
+
+  have e25 : X86Int.step im x9 = .ok { x9 with fl := (aluF .sub 138 (137 % W)).2, rip := x9.rip + 7 } :=
+    step_cmpI (by rw [hx9rip]; exact hc.cjz) hx9r0
+  obtain ⟨y9, hy9⟩ : ∃ u : X86Int.St, u = { x9 with fl := (aluF .sub 138 (137 % W)).2, rip := x9.rip + 7 } := ⟨_, rfl⟩
+  have hy9rip : y9.rip = entry + 161 := by rw [hy9]; show x9.rip + 7 = entry + 161; rw [hx9rip]
+
+  have hy9fl : X86Int.cond y9.fl 5 = some true := by
+    have hz : y9.fl.zf = some false := by
+      rw [hy9]
+      show (aluF .sub 138 (137 % W)).2.zf = some false
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy9r0 : y9.reg 0 = some 138 := by rw [hy9]; show x9.reg 0 = some 138; exact hx9r0
+  have hy9r1 : y9.reg 1 = some i := by rw [hy9]; show x9.reg 1 = some i; exact hx9r1
+  have hy9r6 : y9.reg 6 = some c := by rw [hy9]; show x9.reg 6 = some c; exact hx9r6
+  have hy9r7 : y9.reg 7 = some w := by rw [hy9]; show x9.reg 7 = some w; exact hx9r7
+  have hy9r8 : y9.reg 8 = some h.d := by rw [hy9]; show x9.reg 8 = some h.d; exact hx9r8
+  have hy9r9 : y9.reg 9 = some h.a := by rw [hy9]; show x9.reg 9 = some h.a; exact hx9r9
+  have hy9r4 : y9.reg 4 = some sp := by rw [hy9]; show x9.reg 4 = some sp; exact hx9r4
+  have hy9mem : y9.mem = s.mem := by rw [hy9]; show x9.mem = s.mem; exact hx9mem
+  have gy9 : ∀ q, q ≠ 0 → y9.reg q = s.reg q := by
+    intro q h0
+    rw [hy9]; show x9.reg q = s.reg q; exact gx9 q h0
+
+  have e26 : X86Int.step im y9 = .ok { y9 with rip := entry + 168 } := by
+    have hh := step_jcc (im := im) (s := y9) (by rw [hy9rip]; exact hc.cjzj) hy9fl
+    simpa using hh
+  obtain ⟨x10, hx10⟩ : ∃ u : X86Int.St, u = { y9 with rip := entry + 168 } := ⟨_, rfl⟩
+  have hx10rip : x10.rip = entry + 168 := by rw [hx10]
+  have hx10r0 : x10.reg 0 = some 138 := by
+    rw [hx10]
+    show ({ y9 with rip := entry + 168 }).reg 0 = some 138
+    rw [reg_with_rip]; exact hy9r0
+  have hx10r1 : x10.reg 1 = some i := by
+    rw [hx10]
+    show ({ y9 with rip := entry + 168 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy9r1
+  have hx10r6 : x10.reg 6 = some c := by
+    rw [hx10]
+    show ({ y9 with rip := entry + 168 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy9r6
+  have hx10r7 : x10.reg 7 = some w := by
+    rw [hx10]
+    show ({ y9 with rip := entry + 168 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy9r7
+  have hx10r8 : x10.reg 8 = some h.d := by
+    rw [hx10]
+    show ({ y9 with rip := entry + 168 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy9r8
+  have hx10r9 : x10.reg 9 = some h.a := by
+    rw [hx10]
+    show ({ y9 with rip := entry + 168 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy9r9
+  have hx10r4 : x10.reg 4 = some sp := by
+    rw [hx10]
+    show ({ y9 with rip := entry + 168 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy9r4
+  have hx10mem : x10.mem = s.mem := by
+    rw [hx10]
+    show ({ y9 with rip := entry + 168 }).mem = s.mem
+    rw [mem_with_rip]; exact hy9mem
+  have gx10 : ∀ q, q ≠ 0 → x10.reg q = s.reg q := by
+    intro q h0
+    rw [hx10]
+    show ({ y9 with rip := entry + 168 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy9 q h0
+
+  have e27 : X86Int.step im x10 = .ok { x10 with fl := (aluF .sub 138 (138 % W)).2, rip := x10.rip + 7 } :=
+    step_cmpI (by rw [hx10rip]; exact hc.cjnz) hx10r0
+  obtain ⟨y10, hy10⟩ : ∃ u : X86Int.St, u = { x10 with fl := (aluF .sub 138 (138 % W)).2, rip := x10.rip + 7 } := ⟨_, rfl⟩
+  have hy10rip : y10.rip = entry + 175 := by rw [hy10]; show x10.rip + 7 = entry + 175; rw [hx10rip]
+
+  have hy10fl : X86Int.cond y10.fl 5 = some false := by
+    have hz : y10.fl.zf = some true := by
+      rw [hy10]
+      show (aluF .sub 138 (138 % W)).2.zf = some true
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy10r0 : y10.reg 0 = some 138 := by rw [hy10]; show x10.reg 0 = some 138; exact hx10r0
+  have hy10r1 : y10.reg 1 = some i := by rw [hy10]; show x10.reg 1 = some i; exact hx10r1
+  have hy10r6 : y10.reg 6 = some c := by rw [hy10]; show x10.reg 6 = some c; exact hx10r6
+  have hy10r7 : y10.reg 7 = some w := by rw [hy10]; show x10.reg 7 = some w; exact hx10r7
+  have hy10r8 : y10.reg 8 = some h.d := by rw [hy10]; show x10.reg 8 = some h.d; exact hx10r8
+  have hy10r9 : y10.reg 9 = some h.a := by rw [hy10]; show x10.reg 9 = some h.a; exact hx10r9
+  have hy10r4 : y10.reg 4 = some sp := by rw [hy10]; show x10.reg 4 = some sp; exact hx10r4
+  have hy10mem : y10.mem = s.mem := by rw [hy10]; show x10.mem = s.mem; exact hx10mem
+  have gy10 : ∀ q, q ≠ 0 → y10.reg q = s.reg q := by
+    intro q h0
+    rw [hy10]; show x10.reg q = s.reg q; exact gx10 q h0
+
+  have e28 : X86Int.step im y10 = .ok { y10 with rip := entry + 177 } := by
+    have hh := step_jcc (im := im) (s := y10) (by rw [hy10rip]; exact hc.cjnzj) hy10fl
+    simpa [hy10rip] using hh
+  obtain ⟨z9, hz9⟩ : ∃ u : X86Int.St, u = { y10 with rip := entry + 177 } := ⟨_, rfl⟩
+  have hz9rip : z9.rip = entry + 177 := by rw [hz9]
+  have hz9r0 : z9.reg 0 = some 138 := by
+    rw [hz9]
+    show ({ y10 with rip := entry + 177 }).reg 0 = some 138
+    rw [reg_with_rip]; exact hy10r0
+  have hz9r1 : z9.reg 1 = some i := by
+    rw [hz9]
+    show ({ y10 with rip := entry + 177 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy10r1
+  have hz9r6 : z9.reg 6 = some c := by
+    rw [hz9]
+    show ({ y10 with rip := entry + 177 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy10r6
+  have hz9r7 : z9.reg 7 = some w := by
+    rw [hz9]
+    show ({ y10 with rip := entry + 177 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy10r7
+  have hz9r8 : z9.reg 8 = some h.d := by
+    rw [hz9]
+    show ({ y10 with rip := entry + 177 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy10r8
+  have hz9r9 : z9.reg 9 = some h.a := by
+    rw [hz9]
+    show ({ y10 with rip := entry + 177 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy10r9
+  have hz9r4 : z9.reg 4 = some sp := by
+    rw [hz9]
+    show ({ y10 with rip := entry + 177 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy10r4
+  have hz9mem : z9.mem = s.mem := by
+    rw [hz9]
+    show ({ y10 with rip := entry + 177 }).mem = s.mem
+    rw [mem_with_rip]; exact hy10mem
+  have gz9 : ∀ q, q ≠ 0 → z9.reg q = s.reg q := by
+    intro q h0
+    rw [hz9]
+    show ({ y10 with rip := entry + 177 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy10 q h0
+
+  have e29 : X86Int.step im z9 = .ok { z9 with rip := jz } :=
+    step_jmp (by rw [hz9rip]; exact hc.cjnzjmp)
+  obtain ⟨fin, hfin⟩ : ∃ u : X86Int.St, u = { z9 with rip := jz } := ⟨_, rfl⟩
+  have rw1 : run im 1 (Out.ok s) = Out.ok w1 := by rw [run_succ_ok im 0 s, e1, ← hw1, run_zero]
+  have rw2 : run im 1 (Out.ok w1) = Out.ok w2 := by rw [run_succ_ok im 0 w1, e2, ← hw2, run_zero]
+  have rw3 : run im 1 (Out.ok w2) = Out.ok w3 := by rw [run_succ_ok im 0 w2, e3, ← hw3, run_zero]
+  have rw4 : run im 1 (Out.ok w3) = Out.ok w4 := by rw [run_succ_ok im 0 w3, e4, ← hw4, run_zero]
+  have rw5 : run im 1 (Out.ok w4) = Out.ok w5 := by rw [run_succ_ok im 0 w4, e5, ← hw5, run_zero]
+  have rx0 : run im 1 (Out.ok w5) = Out.ok x0 := by rw [run_succ_ok im 0 w5, e6, ← hx0, run_zero]
+  have ry0 : run im 1 (Out.ok x0) = Out.ok y0 := by rw [run_succ_ok im 0 x0, e7, ← hy0, run_zero]
+  have rx1 : run im 1 (Out.ok y0) = Out.ok x1 := by rw [run_succ_ok im 0 y0, e8, ← hx1, run_zero]
+  have ry1 : run im 1 (Out.ok x1) = Out.ok y1 := by rw [run_succ_ok im 0 x1, e9, ← hy1, run_zero]
+  have rx2 : run im 1 (Out.ok y1) = Out.ok x2 := by rw [run_succ_ok im 0 y1, e10, ← hx2, run_zero]
+  have ry2 : run im 1 (Out.ok x2) = Out.ok y2 := by rw [run_succ_ok im 0 x2, e11, ← hy2, run_zero]
+  have rx3 : run im 1 (Out.ok y2) = Out.ok x3 := by rw [run_succ_ok im 0 y2, e12, ← hx3, run_zero]
+  have ry3 : run im 1 (Out.ok x3) = Out.ok y3 := by rw [run_succ_ok im 0 x3, e13, ← hy3, run_zero]
+  have rx4 : run im 1 (Out.ok y3) = Out.ok x4 := by rw [run_succ_ok im 0 y3, e14, ← hx4, run_zero]
+  have ry4 : run im 1 (Out.ok x4) = Out.ok y4 := by rw [run_succ_ok im 0 x4, e15, ← hy4, run_zero]
+  have rx5 : run im 1 (Out.ok y4) = Out.ok x5 := by rw [run_succ_ok im 0 y4, e16, ← hx5, run_zero]
+  have ry5 : run im 1 (Out.ok x5) = Out.ok y5 := by rw [run_succ_ok im 0 x5, e17, ← hy5, run_zero]
+  have rx6 : run im 1 (Out.ok y5) = Out.ok x6 := by rw [run_succ_ok im 0 y5, e18, ← hx6, run_zero]
+  have ry6 : run im 1 (Out.ok x6) = Out.ok y6 := by rw [run_succ_ok im 0 x6, e19, ← hy6, run_zero]
+  have rx7 : run im 1 (Out.ok y6) = Out.ok x7 := by rw [run_succ_ok im 0 y6, e20, ← hx7, run_zero]
+  have ry7 : run im 1 (Out.ok x7) = Out.ok y7 := by rw [run_succ_ok im 0 x7, e21, ← hy7, run_zero]
+  have rx8 : run im 1 (Out.ok y7) = Out.ok x8 := by rw [run_succ_ok im 0 y7, e22, ← hx8, run_zero]
+  have ry8 : run im 1 (Out.ok x8) = Out.ok y8 := by rw [run_succ_ok im 0 x8, e23, ← hy8, run_zero]
+  have rx9 : run im 1 (Out.ok y8) = Out.ok x9 := by rw [run_succ_ok im 0 y8, e24, ← hx9, run_zero]
+  have ry9 : run im 1 (Out.ok x9) = Out.ok y9 := by rw [run_succ_ok im 0 x9, e25, ← hy9, run_zero]
+  have rx10 : run im 1 (Out.ok y9) = Out.ok x10 := by rw [run_succ_ok im 0 y9, e26, ← hx10, run_zero]
+  have ry10 : run im 1 (Out.ok x10) = Out.ok y10 := by rw [run_succ_ok im 0 x10, e27, ← hy10, run_zero]
+  have rz9 : run im 1 (Out.ok y10) = Out.ok z9 := by rw [run_succ_ok im 0 y10, e28, ← hz9, run_zero]
+  have rfin : run im 1 (Out.ok z9) = Out.ok fin := by rw [run_succ_ok im 0 z9, e29, ← hfin, run_zero]
+  refine ⟨29, fin, by rw [run_add im 1 28, rw1, run_add im 1 27, rw2, run_add im 1 26, rw3, run_add im 1 25, rw4, run_add im 1 24, rw5, run_add im 1 23, rx0, run_add im 1 22, ry0, run_add im 1 21, rx1, run_add im 1 20, ry1, run_add im 1 19, rx2, run_add im 1 18, ry2, run_add im 1 17, rx3, run_add im 1 16, ry3, run_add im 1 15, rx4, run_add im 1 14, ry4, run_add im 1 13, rx5, run_add im 1 12, ry5, run_add im 1 11, rx6, run_add im 1 10, ry6, run_add im 1 9, rx7, run_add im 1 8, ry7, run_add im 1 7, rx8, run_add im 1 6, ry8, run_add im 1 5, rx9, run_add im 1 4, ry9, run_add im 1 3, rx10, run_add im 1 2, ry10, run_add im 1 1, rz9, rfin],
+    by rw [hfin], ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
+  · rw [hfin]; show ({ z9 with rip := jz }).reg 0 = some 138
+    rw [reg_with_rip]; exact hz9r0
+  · rw [hfin]; show ({ z9 with rip := jz }).reg 1 = some i
+    rw [reg_with_rip]; exact hz9r1
+  · rw [hfin]; show ({ z9 with rip := jz }).reg 6 = some c
+    rw [reg_with_rip]; exact hz9r6
+  · rw [hfin]; show ({ z9 with rip := jz }).reg 7 = some w
+    rw [reg_with_rip]; exact hz9r7
+  · rw [hfin]; show ({ z9 with rip := jz }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hz9r8
+  · rw [hfin]; show ({ z9 with rip := jz }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hz9r9
+  · rw [hfin]; show ({ z9 with rip := jz }).reg 4 = some sp
+    rw [reg_with_rip]; exact hz9r4
+  · intro q h0
+    rw [hfin]; show ({ z9 with rip := jz }).reg q = s.reg q
+    rw [reg_with_rip]; exact gz9 q h0
+  · have h1 : fin.mem = s.mem := by rw [hfin, mem_with_rip]; exact hz9mem
+    exact h1
+
+/-- `walk_top` with opcode 139 reaches its handler. -/
+theorem WalkCall_triple {im : Nat → Option (Ins × Nat)} {entry done prim lit str pick tor fromr rfetch locget locset jmp
+    jz call ret : Nat}
+    (hc : WalkCode im entry done prim lit str pick tor fromr rfetch locget locset jmp jz call ret)
+    (hentry : entry + 215 < W) :
+    ∀ (h : Height) (c i w sp nc : Nat), w + 56 ≤ W → (hlt : i < nc) → (hcW : c < W) →
+    ∀ s, s.rip = entry → s.reg 8 = some h.d → s.reg 9 = some h.a → s.reg 6 = some c →
+      s.reg 4 = some sp → s.reg 7 = some w → s.reg 1 = some i → 16 ≤ s.regs.length →
+      rd64 s.mem (w + 24) = some nc → s.mem.rd c = some 139 →
+      ∃ k s', run im k (Out.ok s) = Out.ok s' ∧ s'.rip = call ∧ s'.reg 0 = some 139 ∧
+        s'.reg 1 = some i ∧ s'.reg 6 = some c ∧ s'.reg 7 = some w ∧
+        s'.reg 8 = some h.d ∧ s'.reg 9 = some h.a ∧ s'.reg 4 = some sp ∧
+        (∀ q, q ≠ 0 → s'.reg q = s.reg q) ∧ s'.mem = s.mem := by
+  intro h c i w sp nc hw56 hlt hcW s hrip hr8 hr9 hr6 hr4 hr7 hr1 hlen hfc hbyte
+
+  have hea24 : ea w 24 = w + 24 := Nat.mod_eq_of_lt (by omega)
+  have h57 : 57 % W = 57 := Nat.mod_eq_of_lt (by unfold W; decide)
+  have e1 : X86Int.step im s = .ok { s.set 0 (some nc) with rip := s.rip + 4 } :=
+    step_ld (by rw [hrip]; exact hc.d0) hr7 (by rw [hea24]; exact hfc)
+  obtain ⟨w1, hw1⟩ : ∃ u : X86Int.St, u = { s.set 0 (some nc) with rip := s.rip + 4 } := ⟨_, rfl⟩
+  have hw1rip : w1.rip = entry + 4 := by rw [hw1]; show s.rip + 4 = entry + 4; rw [hrip]
+  have hw1r0 : w1.reg 0 = some nc := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 0 = some nc
+    rw [reg_set_self (len_of_r9 hr9 (by decide))]
+  have hw1r1 : w1.reg 1 = some i := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 1 = some i
+    rw [reg_set_other (by decide)]; exact hr1
+  have hw1r6 : w1.reg 6 = some c := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 6 = some c
+    rw [reg_set_other (by decide)]; exact hr6
+  have hw1r7 : w1.reg 7 = some w := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 7 = some w
+    rw [reg_set_other (by decide)]; exact hr7
+  have hw1r8 : w1.reg 8 = some h.d := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 8 = some h.d
+    rw [reg_set_other (by decide)]; exact hr8
+  have hw1r9 : w1.reg 9 = some h.a := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 9 = some h.a
+    rw [reg_set_other (by decide)]; exact hr9
+  have hw1r4 : w1.reg 4 = some sp := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 4 = some sp
+    rw [reg_set_other (by decide)]; exact hr4
+  have hw1mem : w1.mem = s.mem := by
+    rw [hw1]
+    show (s.set 0 (some nc)).mem = s.mem
+    rw [mem_set]
+  have gw1 : ∀ q, q ≠ 0 → w1.reg q = s.reg q := by
+    intro q h0
+    rw [hw1]
+    show (s.set 0 (some nc)).reg q = s.reg q
+    rw [reg_set_other h0]
+  have e2 : X86Int.step im w1 = .ok { w1 with fl := (aluF .sub i nc).2, rip := w1.rip + 3 } :=
+    step_cmp (by rw [hw1rip]; exact hc.d1) hw1r1 hw1r0
+  obtain ⟨w2, hw2⟩ : ∃ u : X86Int.St, u = { w1 with fl := (aluF .sub i nc).2, rip := w1.rip + 3 } := ⟨_, rfl⟩
+  have hw2rip : w2.rip = entry + 7 := by rw [hw2]; show w1.rip + 3 = entry + 7; rw [hw1rip]
+
+  have hw2fl : X86Int.cond w2.fl 2 = some true := by
+    have hcf : w2.fl.cf = some true := by
+      rw [hw2]
+      show (aluF .sub i nc).2.cf = some true
+      exact aluF_sub_cf_true hlt
+    exact cond_cc2 hcf
+
+  have hw2r1 : w2.reg 1 = some i := by rw [hw2]; show w1.reg 1 = some i; exact hw1r1
+  have hw2r0 : w2.reg 0 = some nc := by rw [hw2]; show w1.reg 0 = some nc; exact hw1r0
+  have hw2r6 : w2.reg 6 = some c := by rw [hw2]; show w1.reg 6 = some c; exact hw1r6
+  have hw2r8 : w2.reg 8 = some h.d := by rw [hw2]; show w1.reg 8 = some h.d; exact hw1r8
+  have hw2r9 : w2.reg 9 = some h.a := by rw [hw2]; show w1.reg 9 = some h.a; exact hw1r9
+  have hw2r4 : w2.reg 4 = some sp := by rw [hw2]; show w1.reg 4 = some sp; exact hw1r4
+  have hw2mem : w2.mem = s.mem := by rw [hw2]; show w1.mem = s.mem; exact hw1mem
+  have gw2 : ∀ q, q ≠ 0 → w2.reg q = s.reg q := by
+    intro q h0
+    rw [hw2]; show w1.reg q = s.reg q; exact gw1 q h0
+
+  have e3 : X86Int.step im w2 = .ok { w2 with rip := entry + 14 } := by
+    have hh := step_jcc (im := im) (s := w2) (by rw [hw2rip]; exact hc.d2) hw2fl
+    simpa using hh
+  obtain ⟨w3, hw3⟩ : ∃ u : X86Int.St, u = { w2 with rip := entry + 14 } := ⟨_, rfl⟩
+  have hw3rip : w3.rip = entry + 14 := by rw [hw3]
+  have hw3r6 : w3.reg 6 = some c := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg 6 = some c
+    rw [reg_with_rip]; exact hw2r6
+  have hw3r1 : w3.reg 1 = some i := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg 1 = some i
+    rw [reg_with_rip]; exact hw2r1
+  have hw3r8 : w3.reg 8 = some h.d := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hw2r8
+  have hw3r9 : w3.reg 9 = some h.a := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hw2r9
+  have hw3r4 : w3.reg 4 = some sp := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hw2r4
+  have hw3r7 : w3.reg 7 = some w := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg 7 = some w
+    rw [reg_with_rip, gw2 7 (by decide)]; exact hr7
+  have hw3mem : w3.mem = s.mem := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).mem = s.mem
+    rw [mem_with_rip]; exact hw2mem
+  have gw3 : ∀ q, q ≠ 0 → w3.reg q = s.reg q := by
+    intro q h0
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gw2 q h0
+  have hea0 : ea c 0 = c := Nat.mod_eq_of_lt hcW
+  have e4 : X86Int.step im w3 = .ok { w3.set 0 (some 139) with rip := w3.rip + 3 } :=
+    step_ld8 (by rw [hw3rip]; exact hc.d4) hw3r6 (by rw [hw3mem, hea0]; exact hbyte)
+  obtain ⟨w4, hw4⟩ : ∃ u : X86Int.St, u = { w3.set 0 (some 139) with rip := w3.rip + 3 } := ⟨_, rfl⟩
+  have hw4rip : w4.rip = entry + 17 := by rw [hw4]; show w3.rip + 3 = entry + 17; rw [hw3rip]
+  have hw4r0 : w4.reg 0 = some 139 := by
+    rw [hw4]
+    show (w3.set 0 (some 139)).reg 0 = some 139
+    rw [reg_set_self (len_of_r9 hw3r9 (by decide))]
+  have hw4r1 : w4.reg 1 = some i := by
+    rw [hw4]
+    show (w3.set 0 (some 139)).reg 1 = some i
+    rw [reg_set_other (by decide)]; exact hw3r1
+  have hw4r6 : w4.reg 6 = some c := by
+    rw [hw4]
+    show (w3.set 0 (some 139)).reg 6 = some c
+    rw [reg_set_other (by decide)]; exact hw3r6
+  have hw4r7 : w4.reg 7 = some w := by
+    rw [hw4]
+    show (w3.set 0 (some 139)).reg 7 = some w
+    rw [reg_set_other (by decide)]; exact hw3r7
+  have hw4r8 : w4.reg 8 = some h.d := by
+    rw [hw4]
+    show (w3.set 0 (some 139)).reg 8 = some h.d
+    rw [reg_set_other (by decide)]; exact hw3r8
+  have hw4r9 : w4.reg 9 = some h.a := by
+    rw [hw4]
+    show (w3.set 0 (some 139)).reg 9 = some h.a
+    rw [reg_set_other (by decide)]; exact hw3r9
+  have hw4r4 : w4.reg 4 = some sp := by
+    rw [hw4]
+    show (w3.set 0 (some 139)).reg 4 = some sp
+    rw [reg_set_other (by decide)]; exact hw3r4
+  have hw4mem : w4.mem = s.mem := by
+    rw [hw4]
+    show (w3.set 0 (some 139)).mem = s.mem
+    rw [mem_set]; exact hw3mem
+  have gw4 : ∀ q, q ≠ 0 → w4.reg q = s.reg q := by
+    intro q h0
+    rw [hw4]
+    show (w3.set 0 (some 139)).reg q = s.reg q
+    rw [reg_set_other h0]; exact gw3 q h0
+  have e5 : X86Int.step im w4 = .ok { w4 with fl := (aluF .sub 139 (57 % W)).2, rip := w4.rip + 4 } :=
+    step_cmpI (by rw [hw4rip]; exact hc.d5) hw4r0
+  obtain ⟨w5, hw5⟩ : ∃ u : X86Int.St, u = { w4 with fl := (aluF .sub 139 (57 % W)).2, rip := w4.rip + 4 } := ⟨_, rfl⟩
+  have hw5rip : w5.rip = entry + 21 := by rw [hw5]; show w4.rip + 4 = entry + 21; rw [hw4rip]
+
+  have hw5fl : X86Int.cond w5.fl 3 = some true := by
+    have hcf : w5.fl.cf = some false := by
+      rw [hw5]
+      show (aluF .sub 139 (57 % W)).2.cf = some false
+      rw [h57]
+      exact aluF_sub_cf (by decide)
+    have hh := cond_cc3 hcf
+    simpa using hh
+  have hw5r0 : w5.reg 0 = some 139 := by rw [hw5]; show w4.reg 0 = some 139; exact hw4r0
+  have hw5r1 : w5.reg 1 = some i := by rw [hw5]; show w4.reg 1 = some i; exact hw4r1
+  have hw5r6 : w5.reg 6 = some c := by rw [hw5]; show w4.reg 6 = some c; exact hw4r6
+  have hw5r7 : w5.reg 7 = some w := by rw [hw5]; show w4.reg 7 = some w; exact hw4r7
+  have hw5r8 : w5.reg 8 = some h.d := by rw [hw5]; show w4.reg 8 = some h.d; exact hw4r8
+  have hw5r9 : w5.reg 9 = some h.a := by rw [hw5]; show w4.reg 9 = some h.a; exact hw4r9
+  have hw5r4 : w5.reg 4 = some sp := by rw [hw5]; show w4.reg 4 = some sp; exact hw4r4
+  have hw5mem : w5.mem = s.mem := by rw [hw5]; show w4.mem = s.mem; exact hw4mem
+  have gw5 : ∀ q, q ≠ 0 → w5.reg q = s.reg q := by
+    intro q h0
+    rw [hw5]; show w4.reg q = s.reg q; exact gw4 q h0
+
+  have e6 : X86Int.step im w5 = .ok { w5 with rip := entry + 28 } := by
+    have hh := step_jcc (im := im) (s := w5) (by rw [hw5rip]; exact hc.d6) hw5fl
+    simpa using hh
+  obtain ⟨x0, hx0⟩ : ∃ u : X86Int.St, u = { w5 with rip := entry + 28 } := ⟨_, rfl⟩
+  have hx0rip : x0.rip = entry + 28 := by rw [hx0]
+  have hx0r0 : x0.reg 0 = some 139 := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 0 = some 139
+    rw [reg_with_rip]; exact hw5r0
+  have hx0r1 : x0.reg 1 = some i := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 1 = some i
+    rw [reg_with_rip]; exact hw5r1
+  have hx0r6 : x0.reg 6 = some c := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 6 = some c
+    rw [reg_with_rip]; exact hw5r6
+  have hx0r7 : x0.reg 7 = some w := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 7 = some w
+    rw [reg_with_rip]; exact hw5r7
+  have hx0r8 : x0.reg 8 = some h.d := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hw5r8
+  have hx0r9 : x0.reg 9 = some h.a := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hw5r9
+  have hx0r4 : x0.reg 4 = some sp := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hw5r4
+  have hx0mem : x0.mem = s.mem := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).mem = s.mem
+    rw [mem_with_rip]; exact hw5mem
+  have gx0 : ∀ q, q ≠ 0 → x0.reg q = s.reg q := by
+    intro q h0
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gw5 q h0
+
+  have e7 : X86Int.step im x0 = .ok { x0 with fl := (aluF .sub 139 (128 % W)).2, rip := x0.rip + 7 } :=
+    step_cmpI (by rw [hx0rip]; exact hc.clit) hx0r0
+  obtain ⟨y0, hy0⟩ : ∃ u : X86Int.St, u = { x0 with fl := (aluF .sub 139 (128 % W)).2, rip := x0.rip + 7 } := ⟨_, rfl⟩
+  have hy0rip : y0.rip = entry + 35 := by rw [hy0]; show x0.rip + 7 = entry + 35; rw [hx0rip]
+
+  have hy0fl : X86Int.cond y0.fl 5 = some true := by
+    have hz : y0.fl.zf = some false := by
+      rw [hy0]
+      show (aluF .sub 139 (128 % W)).2.zf = some false
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy0r0 : y0.reg 0 = some 139 := by rw [hy0]; show x0.reg 0 = some 139; exact hx0r0
+  have hy0r1 : y0.reg 1 = some i := by rw [hy0]; show x0.reg 1 = some i; exact hx0r1
+  have hy0r6 : y0.reg 6 = some c := by rw [hy0]; show x0.reg 6 = some c; exact hx0r6
+  have hy0r7 : y0.reg 7 = some w := by rw [hy0]; show x0.reg 7 = some w; exact hx0r7
+  have hy0r8 : y0.reg 8 = some h.d := by rw [hy0]; show x0.reg 8 = some h.d; exact hx0r8
+  have hy0r9 : y0.reg 9 = some h.a := by rw [hy0]; show x0.reg 9 = some h.a; exact hx0r9
+  have hy0r4 : y0.reg 4 = some sp := by rw [hy0]; show x0.reg 4 = some sp; exact hx0r4
+  have hy0mem : y0.mem = s.mem := by rw [hy0]; show x0.mem = s.mem; exact hx0mem
+  have gy0 : ∀ q, q ≠ 0 → y0.reg q = s.reg q := by
+    intro q h0
+    rw [hy0]; show x0.reg q = s.reg q; exact gx0 q h0
+
+  have e8 : X86Int.step im y0 = .ok { y0 with rip := entry + 42 } := by
+    have hh := step_jcc (im := im) (s := y0) (by rw [hy0rip]; exact hc.clitj) hy0fl
+    simpa using hh
+  obtain ⟨x1, hx1⟩ : ∃ u : X86Int.St, u = { y0 with rip := entry + 42 } := ⟨_, rfl⟩
+  have hx1rip : x1.rip = entry + 42 := by rw [hx1]
+  have hx1r0 : x1.reg 0 = some 139 := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg 0 = some 139
+    rw [reg_with_rip]; exact hy0r0
+  have hx1r1 : x1.reg 1 = some i := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy0r1
+  have hx1r6 : x1.reg 6 = some c := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy0r6
+  have hx1r7 : x1.reg 7 = some w := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy0r7
+  have hx1r8 : x1.reg 8 = some h.d := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy0r8
+  have hx1r9 : x1.reg 9 = some h.a := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy0r9
+  have hx1r4 : x1.reg 4 = some sp := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy0r4
+  have hx1mem : x1.mem = s.mem := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).mem = s.mem
+    rw [mem_with_rip]; exact hy0mem
+  have gx1 : ∀ q, q ≠ 0 → x1.reg q = s.reg q := by
+    intro q h0
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy0 q h0
+
+  have e9 : X86Int.step im x1 = .ok { x1 with fl := (aluF .sub 139 (129 % W)).2, rip := x1.rip + 7 } :=
+    step_cmpI (by rw [hx1rip]; exact hc.cstr) hx1r0
+  obtain ⟨y1, hy1⟩ : ∃ u : X86Int.St, u = { x1 with fl := (aluF .sub 139 (129 % W)).2, rip := x1.rip + 7 } := ⟨_, rfl⟩
+  have hy1rip : y1.rip = entry + 49 := by rw [hy1]; show x1.rip + 7 = entry + 49; rw [hx1rip]
+
+  have hy1fl : X86Int.cond y1.fl 5 = some true := by
+    have hz : y1.fl.zf = some false := by
+      rw [hy1]
+      show (aluF .sub 139 (129 % W)).2.zf = some false
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy1r0 : y1.reg 0 = some 139 := by rw [hy1]; show x1.reg 0 = some 139; exact hx1r0
+  have hy1r1 : y1.reg 1 = some i := by rw [hy1]; show x1.reg 1 = some i; exact hx1r1
+  have hy1r6 : y1.reg 6 = some c := by rw [hy1]; show x1.reg 6 = some c; exact hx1r6
+  have hy1r7 : y1.reg 7 = some w := by rw [hy1]; show x1.reg 7 = some w; exact hx1r7
+  have hy1r8 : y1.reg 8 = some h.d := by rw [hy1]; show x1.reg 8 = some h.d; exact hx1r8
+  have hy1r9 : y1.reg 9 = some h.a := by rw [hy1]; show x1.reg 9 = some h.a; exact hx1r9
+  have hy1r4 : y1.reg 4 = some sp := by rw [hy1]; show x1.reg 4 = some sp; exact hx1r4
+  have hy1mem : y1.mem = s.mem := by rw [hy1]; show x1.mem = s.mem; exact hx1mem
+  have gy1 : ∀ q, q ≠ 0 → y1.reg q = s.reg q := by
+    intro q h0
+    rw [hy1]; show x1.reg q = s.reg q; exact gx1 q h0
+
+  have e10 : X86Int.step im y1 = .ok { y1 with rip := entry + 56 } := by
+    have hh := step_jcc (im := im) (s := y1) (by rw [hy1rip]; exact hc.cstrj) hy1fl
+    simpa using hh
+  obtain ⟨x2, hx2⟩ : ∃ u : X86Int.St, u = { y1 with rip := entry + 56 } := ⟨_, rfl⟩
+  have hx2rip : x2.rip = entry + 56 := by rw [hx2]
+  have hx2r0 : x2.reg 0 = some 139 := by
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).reg 0 = some 139
+    rw [reg_with_rip]; exact hy1r0
+  have hx2r1 : x2.reg 1 = some i := by
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy1r1
+  have hx2r6 : x2.reg 6 = some c := by
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy1r6
+  have hx2r7 : x2.reg 7 = some w := by
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy1r7
+  have hx2r8 : x2.reg 8 = some h.d := by
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy1r8
+  have hx2r9 : x2.reg 9 = some h.a := by
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy1r9
+  have hx2r4 : x2.reg 4 = some sp := by
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy1r4
+  have hx2mem : x2.mem = s.mem := by
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).mem = s.mem
+    rw [mem_with_rip]; exact hy1mem
+  have gx2 : ∀ q, q ≠ 0 → x2.reg q = s.reg q := by
+    intro q h0
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy1 q h0
+
+  have e11 : X86Int.step im x2 = .ok { x2 with fl := (aluF .sub 139 (130 % W)).2, rip := x2.rip + 7 } :=
+    step_cmpI (by rw [hx2rip]; exact hc.cpick) hx2r0
+  obtain ⟨y2, hy2⟩ : ∃ u : X86Int.St, u = { x2 with fl := (aluF .sub 139 (130 % W)).2, rip := x2.rip + 7 } := ⟨_, rfl⟩
+  have hy2rip : y2.rip = entry + 63 := by rw [hy2]; show x2.rip + 7 = entry + 63; rw [hx2rip]
+
+  have hy2fl : X86Int.cond y2.fl 5 = some true := by
+    have hz : y2.fl.zf = some false := by
+      rw [hy2]
+      show (aluF .sub 139 (130 % W)).2.zf = some false
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy2r0 : y2.reg 0 = some 139 := by rw [hy2]; show x2.reg 0 = some 139; exact hx2r0
+  have hy2r1 : y2.reg 1 = some i := by rw [hy2]; show x2.reg 1 = some i; exact hx2r1
+  have hy2r6 : y2.reg 6 = some c := by rw [hy2]; show x2.reg 6 = some c; exact hx2r6
+  have hy2r7 : y2.reg 7 = some w := by rw [hy2]; show x2.reg 7 = some w; exact hx2r7
+  have hy2r8 : y2.reg 8 = some h.d := by rw [hy2]; show x2.reg 8 = some h.d; exact hx2r8
+  have hy2r9 : y2.reg 9 = some h.a := by rw [hy2]; show x2.reg 9 = some h.a; exact hx2r9
+  have hy2r4 : y2.reg 4 = some sp := by rw [hy2]; show x2.reg 4 = some sp; exact hx2r4
+  have hy2mem : y2.mem = s.mem := by rw [hy2]; show x2.mem = s.mem; exact hx2mem
+  have gy2 : ∀ q, q ≠ 0 → y2.reg q = s.reg q := by
+    intro q h0
+    rw [hy2]; show x2.reg q = s.reg q; exact gx2 q h0
+
+  have e12 : X86Int.step im y2 = .ok { y2 with rip := entry + 70 } := by
+    have hh := step_jcc (im := im) (s := y2) (by rw [hy2rip]; exact hc.cpickj) hy2fl
+    simpa using hh
+  obtain ⟨x3, hx3⟩ : ∃ u : X86Int.St, u = { y2 with rip := entry + 70 } := ⟨_, rfl⟩
+  have hx3rip : x3.rip = entry + 70 := by rw [hx3]
+  have hx3r0 : x3.reg 0 = some 139 := by
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).reg 0 = some 139
+    rw [reg_with_rip]; exact hy2r0
+  have hx3r1 : x3.reg 1 = some i := by
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy2r1
+  have hx3r6 : x3.reg 6 = some c := by
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy2r6
+  have hx3r7 : x3.reg 7 = some w := by
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy2r7
+  have hx3r8 : x3.reg 8 = some h.d := by
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy2r8
+  have hx3r9 : x3.reg 9 = some h.a := by
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy2r9
+  have hx3r4 : x3.reg 4 = some sp := by
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy2r4
+  have hx3mem : x3.mem = s.mem := by
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).mem = s.mem
+    rw [mem_with_rip]; exact hy2mem
+  have gx3 : ∀ q, q ≠ 0 → x3.reg q = s.reg q := by
+    intro q h0
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy2 q h0
+
+  have e13 : X86Int.step im x3 = .ok { x3 with fl := (aluF .sub 139 (131 % W)).2, rip := x3.rip + 7 } :=
+    step_cmpI (by rw [hx3rip]; exact hc.ctor) hx3r0
+  obtain ⟨y3, hy3⟩ : ∃ u : X86Int.St, u = { x3 with fl := (aluF .sub 139 (131 % W)).2, rip := x3.rip + 7 } := ⟨_, rfl⟩
+  have hy3rip : y3.rip = entry + 77 := by rw [hy3]; show x3.rip + 7 = entry + 77; rw [hx3rip]
+
+  have hy3fl : X86Int.cond y3.fl 5 = some true := by
+    have hz : y3.fl.zf = some false := by
+      rw [hy3]
+      show (aluF .sub 139 (131 % W)).2.zf = some false
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy3r0 : y3.reg 0 = some 139 := by rw [hy3]; show x3.reg 0 = some 139; exact hx3r0
+  have hy3r1 : y3.reg 1 = some i := by rw [hy3]; show x3.reg 1 = some i; exact hx3r1
+  have hy3r6 : y3.reg 6 = some c := by rw [hy3]; show x3.reg 6 = some c; exact hx3r6
+  have hy3r7 : y3.reg 7 = some w := by rw [hy3]; show x3.reg 7 = some w; exact hx3r7
+  have hy3r8 : y3.reg 8 = some h.d := by rw [hy3]; show x3.reg 8 = some h.d; exact hx3r8
+  have hy3r9 : y3.reg 9 = some h.a := by rw [hy3]; show x3.reg 9 = some h.a; exact hx3r9
+  have hy3r4 : y3.reg 4 = some sp := by rw [hy3]; show x3.reg 4 = some sp; exact hx3r4
+  have hy3mem : y3.mem = s.mem := by rw [hy3]; show x3.mem = s.mem; exact hx3mem
+  have gy3 : ∀ q, q ≠ 0 → y3.reg q = s.reg q := by
+    intro q h0
+    rw [hy3]; show x3.reg q = s.reg q; exact gx3 q h0
+
+  have e14 : X86Int.step im y3 = .ok { y3 with rip := entry + 84 } := by
+    have hh := step_jcc (im := im) (s := y3) (by rw [hy3rip]; exact hc.ctorj) hy3fl
+    simpa using hh
+  obtain ⟨x4, hx4⟩ : ∃ u : X86Int.St, u = { y3 with rip := entry + 84 } := ⟨_, rfl⟩
+  have hx4rip : x4.rip = entry + 84 := by rw [hx4]
+  have hx4r0 : x4.reg 0 = some 139 := by
+    rw [hx4]
+    show ({ y3 with rip := entry + 84 }).reg 0 = some 139
+    rw [reg_with_rip]; exact hy3r0
+  have hx4r1 : x4.reg 1 = some i := by
+    rw [hx4]
+    show ({ y3 with rip := entry + 84 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy3r1
+  have hx4r6 : x4.reg 6 = some c := by
+    rw [hx4]
+    show ({ y3 with rip := entry + 84 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy3r6
+  have hx4r7 : x4.reg 7 = some w := by
+    rw [hx4]
+    show ({ y3 with rip := entry + 84 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy3r7
+  have hx4r8 : x4.reg 8 = some h.d := by
+    rw [hx4]
+    show ({ y3 with rip := entry + 84 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy3r8
+  have hx4r9 : x4.reg 9 = some h.a := by
+    rw [hx4]
+    show ({ y3 with rip := entry + 84 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy3r9
+  have hx4r4 : x4.reg 4 = some sp := by
+    rw [hx4]
+    show ({ y3 with rip := entry + 84 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy3r4
+  have hx4mem : x4.mem = s.mem := by
+    rw [hx4]
+    show ({ y3 with rip := entry + 84 }).mem = s.mem
+    rw [mem_with_rip]; exact hy3mem
+  have gx4 : ∀ q, q ≠ 0 → x4.reg q = s.reg q := by
+    intro q h0
+    rw [hx4]
+    show ({ y3 with rip := entry + 84 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy3 q h0
+
+  have e15 : X86Int.step im x4 = .ok { x4 with fl := (aluF .sub 139 (132 % W)).2, rip := x4.rip + 7 } :=
+    step_cmpI (by rw [hx4rip]; exact hc.cfromr) hx4r0
+  obtain ⟨y4, hy4⟩ : ∃ u : X86Int.St, u = { x4 with fl := (aluF .sub 139 (132 % W)).2, rip := x4.rip + 7 } := ⟨_, rfl⟩
+  have hy4rip : y4.rip = entry + 91 := by rw [hy4]; show x4.rip + 7 = entry + 91; rw [hx4rip]
+
+  have hy4fl : X86Int.cond y4.fl 5 = some true := by
+    have hz : y4.fl.zf = some false := by
+      rw [hy4]
+      show (aluF .sub 139 (132 % W)).2.zf = some false
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy4r0 : y4.reg 0 = some 139 := by rw [hy4]; show x4.reg 0 = some 139; exact hx4r0
+  have hy4r1 : y4.reg 1 = some i := by rw [hy4]; show x4.reg 1 = some i; exact hx4r1
+  have hy4r6 : y4.reg 6 = some c := by rw [hy4]; show x4.reg 6 = some c; exact hx4r6
+  have hy4r7 : y4.reg 7 = some w := by rw [hy4]; show x4.reg 7 = some w; exact hx4r7
+  have hy4r8 : y4.reg 8 = some h.d := by rw [hy4]; show x4.reg 8 = some h.d; exact hx4r8
+  have hy4r9 : y4.reg 9 = some h.a := by rw [hy4]; show x4.reg 9 = some h.a; exact hx4r9
+  have hy4r4 : y4.reg 4 = some sp := by rw [hy4]; show x4.reg 4 = some sp; exact hx4r4
+  have hy4mem : y4.mem = s.mem := by rw [hy4]; show x4.mem = s.mem; exact hx4mem
+  have gy4 : ∀ q, q ≠ 0 → y4.reg q = s.reg q := by
+    intro q h0
+    rw [hy4]; show x4.reg q = s.reg q; exact gx4 q h0
+
+  have e16 : X86Int.step im y4 = .ok { y4 with rip := entry + 98 } := by
+    have hh := step_jcc (im := im) (s := y4) (by rw [hy4rip]; exact hc.cfromrj) hy4fl
+    simpa using hh
+  obtain ⟨x5, hx5⟩ : ∃ u : X86Int.St, u = { y4 with rip := entry + 98 } := ⟨_, rfl⟩
+  have hx5rip : x5.rip = entry + 98 := by rw [hx5]
+  have hx5r0 : x5.reg 0 = some 139 := by
+    rw [hx5]
+    show ({ y4 with rip := entry + 98 }).reg 0 = some 139
+    rw [reg_with_rip]; exact hy4r0
+  have hx5r1 : x5.reg 1 = some i := by
+    rw [hx5]
+    show ({ y4 with rip := entry + 98 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy4r1
+  have hx5r6 : x5.reg 6 = some c := by
+    rw [hx5]
+    show ({ y4 with rip := entry + 98 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy4r6
+  have hx5r7 : x5.reg 7 = some w := by
+    rw [hx5]
+    show ({ y4 with rip := entry + 98 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy4r7
+  have hx5r8 : x5.reg 8 = some h.d := by
+    rw [hx5]
+    show ({ y4 with rip := entry + 98 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy4r8
+  have hx5r9 : x5.reg 9 = some h.a := by
+    rw [hx5]
+    show ({ y4 with rip := entry + 98 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy4r9
+  have hx5r4 : x5.reg 4 = some sp := by
+    rw [hx5]
+    show ({ y4 with rip := entry + 98 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy4r4
+  have hx5mem : x5.mem = s.mem := by
+    rw [hx5]
+    show ({ y4 with rip := entry + 98 }).mem = s.mem
+    rw [mem_with_rip]; exact hy4mem
+  have gx5 : ∀ q, q ≠ 0 → x5.reg q = s.reg q := by
+    intro q h0
+    rw [hx5]
+    show ({ y4 with rip := entry + 98 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy4 q h0
+
+  have e17 : X86Int.step im x5 = .ok { x5 with fl := (aluF .sub 139 (133 % W)).2, rip := x5.rip + 7 } :=
+    step_cmpI (by rw [hx5rip]; exact hc.crfetch) hx5r0
+  obtain ⟨y5, hy5⟩ : ∃ u : X86Int.St, u = { x5 with fl := (aluF .sub 139 (133 % W)).2, rip := x5.rip + 7 } := ⟨_, rfl⟩
+  have hy5rip : y5.rip = entry + 105 := by rw [hy5]; show x5.rip + 7 = entry + 105; rw [hx5rip]
+
+  have hy5fl : X86Int.cond y5.fl 5 = some true := by
+    have hz : y5.fl.zf = some false := by
+      rw [hy5]
+      show (aluF .sub 139 (133 % W)).2.zf = some false
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy5r0 : y5.reg 0 = some 139 := by rw [hy5]; show x5.reg 0 = some 139; exact hx5r0
+  have hy5r1 : y5.reg 1 = some i := by rw [hy5]; show x5.reg 1 = some i; exact hx5r1
+  have hy5r6 : y5.reg 6 = some c := by rw [hy5]; show x5.reg 6 = some c; exact hx5r6
+  have hy5r7 : y5.reg 7 = some w := by rw [hy5]; show x5.reg 7 = some w; exact hx5r7
+  have hy5r8 : y5.reg 8 = some h.d := by rw [hy5]; show x5.reg 8 = some h.d; exact hx5r8
+  have hy5r9 : y5.reg 9 = some h.a := by rw [hy5]; show x5.reg 9 = some h.a; exact hx5r9
+  have hy5r4 : y5.reg 4 = some sp := by rw [hy5]; show x5.reg 4 = some sp; exact hx5r4
+  have hy5mem : y5.mem = s.mem := by rw [hy5]; show x5.mem = s.mem; exact hx5mem
+  have gy5 : ∀ q, q ≠ 0 → y5.reg q = s.reg q := by
+    intro q h0
+    rw [hy5]; show x5.reg q = s.reg q; exact gx5 q h0
+
+  have e18 : X86Int.step im y5 = .ok { y5 with rip := entry + 112 } := by
+    have hh := step_jcc (im := im) (s := y5) (by rw [hy5rip]; exact hc.crfetchj) hy5fl
+    simpa using hh
+  obtain ⟨x6, hx6⟩ : ∃ u : X86Int.St, u = { y5 with rip := entry + 112 } := ⟨_, rfl⟩
+  have hx6rip : x6.rip = entry + 112 := by rw [hx6]
+  have hx6r0 : x6.reg 0 = some 139 := by
+    rw [hx6]
+    show ({ y5 with rip := entry + 112 }).reg 0 = some 139
+    rw [reg_with_rip]; exact hy5r0
+  have hx6r1 : x6.reg 1 = some i := by
+    rw [hx6]
+    show ({ y5 with rip := entry + 112 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy5r1
+  have hx6r6 : x6.reg 6 = some c := by
+    rw [hx6]
+    show ({ y5 with rip := entry + 112 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy5r6
+  have hx6r7 : x6.reg 7 = some w := by
+    rw [hx6]
+    show ({ y5 with rip := entry + 112 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy5r7
+  have hx6r8 : x6.reg 8 = some h.d := by
+    rw [hx6]
+    show ({ y5 with rip := entry + 112 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy5r8
+  have hx6r9 : x6.reg 9 = some h.a := by
+    rw [hx6]
+    show ({ y5 with rip := entry + 112 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy5r9
+  have hx6r4 : x6.reg 4 = some sp := by
+    rw [hx6]
+    show ({ y5 with rip := entry + 112 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy5r4
+  have hx6mem : x6.mem = s.mem := by
+    rw [hx6]
+    show ({ y5 with rip := entry + 112 }).mem = s.mem
+    rw [mem_with_rip]; exact hy5mem
+  have gx6 : ∀ q, q ≠ 0 → x6.reg q = s.reg q := by
+    intro q h0
+    rw [hx6]
+    show ({ y5 with rip := entry + 112 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy5 q h0
+
+  have e19 : X86Int.step im x6 = .ok { x6 with fl := (aluF .sub 139 (134 % W)).2, rip := x6.rip + 7 } :=
+    step_cmpI (by rw [hx6rip]; exact hc.clocget) hx6r0
+  obtain ⟨y6, hy6⟩ : ∃ u : X86Int.St, u = { x6 with fl := (aluF .sub 139 (134 % W)).2, rip := x6.rip + 7 } := ⟨_, rfl⟩
+  have hy6rip : y6.rip = entry + 119 := by rw [hy6]; show x6.rip + 7 = entry + 119; rw [hx6rip]
+
+  have hy6fl : X86Int.cond y6.fl 5 = some true := by
+    have hz : y6.fl.zf = some false := by
+      rw [hy6]
+      show (aluF .sub 139 (134 % W)).2.zf = some false
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy6r0 : y6.reg 0 = some 139 := by rw [hy6]; show x6.reg 0 = some 139; exact hx6r0
+  have hy6r1 : y6.reg 1 = some i := by rw [hy6]; show x6.reg 1 = some i; exact hx6r1
+  have hy6r6 : y6.reg 6 = some c := by rw [hy6]; show x6.reg 6 = some c; exact hx6r6
+  have hy6r7 : y6.reg 7 = some w := by rw [hy6]; show x6.reg 7 = some w; exact hx6r7
+  have hy6r8 : y6.reg 8 = some h.d := by rw [hy6]; show x6.reg 8 = some h.d; exact hx6r8
+  have hy6r9 : y6.reg 9 = some h.a := by rw [hy6]; show x6.reg 9 = some h.a; exact hx6r9
+  have hy6r4 : y6.reg 4 = some sp := by rw [hy6]; show x6.reg 4 = some sp; exact hx6r4
+  have hy6mem : y6.mem = s.mem := by rw [hy6]; show x6.mem = s.mem; exact hx6mem
+  have gy6 : ∀ q, q ≠ 0 → y6.reg q = s.reg q := by
+    intro q h0
+    rw [hy6]; show x6.reg q = s.reg q; exact gx6 q h0
+
+  have e20 : X86Int.step im y6 = .ok { y6 with rip := entry + 126 } := by
+    have hh := step_jcc (im := im) (s := y6) (by rw [hy6rip]; exact hc.clocgetj) hy6fl
+    simpa using hh
+  obtain ⟨x7, hx7⟩ : ∃ u : X86Int.St, u = { y6 with rip := entry + 126 } := ⟨_, rfl⟩
+  have hx7rip : x7.rip = entry + 126 := by rw [hx7]
+  have hx7r0 : x7.reg 0 = some 139 := by
+    rw [hx7]
+    show ({ y6 with rip := entry + 126 }).reg 0 = some 139
+    rw [reg_with_rip]; exact hy6r0
+  have hx7r1 : x7.reg 1 = some i := by
+    rw [hx7]
+    show ({ y6 with rip := entry + 126 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy6r1
+  have hx7r6 : x7.reg 6 = some c := by
+    rw [hx7]
+    show ({ y6 with rip := entry + 126 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy6r6
+  have hx7r7 : x7.reg 7 = some w := by
+    rw [hx7]
+    show ({ y6 with rip := entry + 126 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy6r7
+  have hx7r8 : x7.reg 8 = some h.d := by
+    rw [hx7]
+    show ({ y6 with rip := entry + 126 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy6r8
+  have hx7r9 : x7.reg 9 = some h.a := by
+    rw [hx7]
+    show ({ y6 with rip := entry + 126 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy6r9
+  have hx7r4 : x7.reg 4 = some sp := by
+    rw [hx7]
+    show ({ y6 with rip := entry + 126 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy6r4
+  have hx7mem : x7.mem = s.mem := by
+    rw [hx7]
+    show ({ y6 with rip := entry + 126 }).mem = s.mem
+    rw [mem_with_rip]; exact hy6mem
+  have gx7 : ∀ q, q ≠ 0 → x7.reg q = s.reg q := by
+    intro q h0
+    rw [hx7]
+    show ({ y6 with rip := entry + 126 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy6 q h0
+
+  have e21 : X86Int.step im x7 = .ok { x7 with fl := (aluF .sub 139 (135 % W)).2, rip := x7.rip + 7 } :=
+    step_cmpI (by rw [hx7rip]; exact hc.clocset) hx7r0
+  obtain ⟨y7, hy7⟩ : ∃ u : X86Int.St, u = { x7 with fl := (aluF .sub 139 (135 % W)).2, rip := x7.rip + 7 } := ⟨_, rfl⟩
+  have hy7rip : y7.rip = entry + 133 := by rw [hy7]; show x7.rip + 7 = entry + 133; rw [hx7rip]
+
+  have hy7fl : X86Int.cond y7.fl 5 = some true := by
+    have hz : y7.fl.zf = some false := by
+      rw [hy7]
+      show (aluF .sub 139 (135 % W)).2.zf = some false
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy7r0 : y7.reg 0 = some 139 := by rw [hy7]; show x7.reg 0 = some 139; exact hx7r0
+  have hy7r1 : y7.reg 1 = some i := by rw [hy7]; show x7.reg 1 = some i; exact hx7r1
+  have hy7r6 : y7.reg 6 = some c := by rw [hy7]; show x7.reg 6 = some c; exact hx7r6
+  have hy7r7 : y7.reg 7 = some w := by rw [hy7]; show x7.reg 7 = some w; exact hx7r7
+  have hy7r8 : y7.reg 8 = some h.d := by rw [hy7]; show x7.reg 8 = some h.d; exact hx7r8
+  have hy7r9 : y7.reg 9 = some h.a := by rw [hy7]; show x7.reg 9 = some h.a; exact hx7r9
+  have hy7r4 : y7.reg 4 = some sp := by rw [hy7]; show x7.reg 4 = some sp; exact hx7r4
+  have hy7mem : y7.mem = s.mem := by rw [hy7]; show x7.mem = s.mem; exact hx7mem
+  have gy7 : ∀ q, q ≠ 0 → y7.reg q = s.reg q := by
+    intro q h0
+    rw [hy7]; show x7.reg q = s.reg q; exact gx7 q h0
+
+  have e22 : X86Int.step im y7 = .ok { y7 with rip := entry + 140 } := by
+    have hh := step_jcc (im := im) (s := y7) (by rw [hy7rip]; exact hc.clocsetj) hy7fl
+    simpa using hh
+  obtain ⟨x8, hx8⟩ : ∃ u : X86Int.St, u = { y7 with rip := entry + 140 } := ⟨_, rfl⟩
+  have hx8rip : x8.rip = entry + 140 := by rw [hx8]
+  have hx8r0 : x8.reg 0 = some 139 := by
+    rw [hx8]
+    show ({ y7 with rip := entry + 140 }).reg 0 = some 139
+    rw [reg_with_rip]; exact hy7r0
+  have hx8r1 : x8.reg 1 = some i := by
+    rw [hx8]
+    show ({ y7 with rip := entry + 140 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy7r1
+  have hx8r6 : x8.reg 6 = some c := by
+    rw [hx8]
+    show ({ y7 with rip := entry + 140 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy7r6
+  have hx8r7 : x8.reg 7 = some w := by
+    rw [hx8]
+    show ({ y7 with rip := entry + 140 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy7r7
+  have hx8r8 : x8.reg 8 = some h.d := by
+    rw [hx8]
+    show ({ y7 with rip := entry + 140 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy7r8
+  have hx8r9 : x8.reg 9 = some h.a := by
+    rw [hx8]
+    show ({ y7 with rip := entry + 140 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy7r9
+  have hx8r4 : x8.reg 4 = some sp := by
+    rw [hx8]
+    show ({ y7 with rip := entry + 140 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy7r4
+  have hx8mem : x8.mem = s.mem := by
+    rw [hx8]
+    show ({ y7 with rip := entry + 140 }).mem = s.mem
+    rw [mem_with_rip]; exact hy7mem
+  have gx8 : ∀ q, q ≠ 0 → x8.reg q = s.reg q := by
+    intro q h0
+    rw [hx8]
+    show ({ y7 with rip := entry + 140 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy7 q h0
+
+  have e23 : X86Int.step im x8 = .ok { x8 with fl := (aluF .sub 139 (136 % W)).2, rip := x8.rip + 7 } :=
+    step_cmpI (by rw [hx8rip]; exact hc.cjmp) hx8r0
+  obtain ⟨y8, hy8⟩ : ∃ u : X86Int.St, u = { x8 with fl := (aluF .sub 139 (136 % W)).2, rip := x8.rip + 7 } := ⟨_, rfl⟩
+  have hy8rip : y8.rip = entry + 147 := by rw [hy8]; show x8.rip + 7 = entry + 147; rw [hx8rip]
+
+  have hy8fl : X86Int.cond y8.fl 5 = some true := by
+    have hz : y8.fl.zf = some false := by
+      rw [hy8]
+      show (aluF .sub 139 (136 % W)).2.zf = some false
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy8r0 : y8.reg 0 = some 139 := by rw [hy8]; show x8.reg 0 = some 139; exact hx8r0
+  have hy8r1 : y8.reg 1 = some i := by rw [hy8]; show x8.reg 1 = some i; exact hx8r1
+  have hy8r6 : y8.reg 6 = some c := by rw [hy8]; show x8.reg 6 = some c; exact hx8r6
+  have hy8r7 : y8.reg 7 = some w := by rw [hy8]; show x8.reg 7 = some w; exact hx8r7
+  have hy8r8 : y8.reg 8 = some h.d := by rw [hy8]; show x8.reg 8 = some h.d; exact hx8r8
+  have hy8r9 : y8.reg 9 = some h.a := by rw [hy8]; show x8.reg 9 = some h.a; exact hx8r9
+  have hy8r4 : y8.reg 4 = some sp := by rw [hy8]; show x8.reg 4 = some sp; exact hx8r4
+  have hy8mem : y8.mem = s.mem := by rw [hy8]; show x8.mem = s.mem; exact hx8mem
+  have gy8 : ∀ q, q ≠ 0 → y8.reg q = s.reg q := by
+    intro q h0
+    rw [hy8]; show x8.reg q = s.reg q; exact gx8 q h0
+
+  have e24 : X86Int.step im y8 = .ok { y8 with rip := entry + 154 } := by
+    have hh := step_jcc (im := im) (s := y8) (by rw [hy8rip]; exact hc.cjmpj) hy8fl
+    simpa using hh
+  obtain ⟨x9, hx9⟩ : ∃ u : X86Int.St, u = { y8 with rip := entry + 154 } := ⟨_, rfl⟩
+  have hx9rip : x9.rip = entry + 154 := by rw [hx9]
+  have hx9r0 : x9.reg 0 = some 139 := by
+    rw [hx9]
+    show ({ y8 with rip := entry + 154 }).reg 0 = some 139
+    rw [reg_with_rip]; exact hy8r0
+  have hx9r1 : x9.reg 1 = some i := by
+    rw [hx9]
+    show ({ y8 with rip := entry + 154 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy8r1
+  have hx9r6 : x9.reg 6 = some c := by
+    rw [hx9]
+    show ({ y8 with rip := entry + 154 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy8r6
+  have hx9r7 : x9.reg 7 = some w := by
+    rw [hx9]
+    show ({ y8 with rip := entry + 154 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy8r7
+  have hx9r8 : x9.reg 8 = some h.d := by
+    rw [hx9]
+    show ({ y8 with rip := entry + 154 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy8r8
+  have hx9r9 : x9.reg 9 = some h.a := by
+    rw [hx9]
+    show ({ y8 with rip := entry + 154 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy8r9
+  have hx9r4 : x9.reg 4 = some sp := by
+    rw [hx9]
+    show ({ y8 with rip := entry + 154 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy8r4
+  have hx9mem : x9.mem = s.mem := by
+    rw [hx9]
+    show ({ y8 with rip := entry + 154 }).mem = s.mem
+    rw [mem_with_rip]; exact hy8mem
+  have gx9 : ∀ q, q ≠ 0 → x9.reg q = s.reg q := by
+    intro q h0
+    rw [hx9]
+    show ({ y8 with rip := entry + 154 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy8 q h0
+
+  have e25 : X86Int.step im x9 = .ok { x9 with fl := (aluF .sub 139 (137 % W)).2, rip := x9.rip + 7 } :=
+    step_cmpI (by rw [hx9rip]; exact hc.cjz) hx9r0
+  obtain ⟨y9, hy9⟩ : ∃ u : X86Int.St, u = { x9 with fl := (aluF .sub 139 (137 % W)).2, rip := x9.rip + 7 } := ⟨_, rfl⟩
+  have hy9rip : y9.rip = entry + 161 := by rw [hy9]; show x9.rip + 7 = entry + 161; rw [hx9rip]
+
+  have hy9fl : X86Int.cond y9.fl 5 = some true := by
+    have hz : y9.fl.zf = some false := by
+      rw [hy9]
+      show (aluF .sub 139 (137 % W)).2.zf = some false
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy9r0 : y9.reg 0 = some 139 := by rw [hy9]; show x9.reg 0 = some 139; exact hx9r0
+  have hy9r1 : y9.reg 1 = some i := by rw [hy9]; show x9.reg 1 = some i; exact hx9r1
+  have hy9r6 : y9.reg 6 = some c := by rw [hy9]; show x9.reg 6 = some c; exact hx9r6
+  have hy9r7 : y9.reg 7 = some w := by rw [hy9]; show x9.reg 7 = some w; exact hx9r7
+  have hy9r8 : y9.reg 8 = some h.d := by rw [hy9]; show x9.reg 8 = some h.d; exact hx9r8
+  have hy9r9 : y9.reg 9 = some h.a := by rw [hy9]; show x9.reg 9 = some h.a; exact hx9r9
+  have hy9r4 : y9.reg 4 = some sp := by rw [hy9]; show x9.reg 4 = some sp; exact hx9r4
+  have hy9mem : y9.mem = s.mem := by rw [hy9]; show x9.mem = s.mem; exact hx9mem
+  have gy9 : ∀ q, q ≠ 0 → y9.reg q = s.reg q := by
+    intro q h0
+    rw [hy9]; show x9.reg q = s.reg q; exact gx9 q h0
+
+  have e26 : X86Int.step im y9 = .ok { y9 with rip := entry + 168 } := by
+    have hh := step_jcc (im := im) (s := y9) (by rw [hy9rip]; exact hc.cjzj) hy9fl
+    simpa using hh
+  obtain ⟨x10, hx10⟩ : ∃ u : X86Int.St, u = { y9 with rip := entry + 168 } := ⟨_, rfl⟩
+  have hx10rip : x10.rip = entry + 168 := by rw [hx10]
+  have hx10r0 : x10.reg 0 = some 139 := by
+    rw [hx10]
+    show ({ y9 with rip := entry + 168 }).reg 0 = some 139
+    rw [reg_with_rip]; exact hy9r0
+  have hx10r1 : x10.reg 1 = some i := by
+    rw [hx10]
+    show ({ y9 with rip := entry + 168 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy9r1
+  have hx10r6 : x10.reg 6 = some c := by
+    rw [hx10]
+    show ({ y9 with rip := entry + 168 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy9r6
+  have hx10r7 : x10.reg 7 = some w := by
+    rw [hx10]
+    show ({ y9 with rip := entry + 168 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy9r7
+  have hx10r8 : x10.reg 8 = some h.d := by
+    rw [hx10]
+    show ({ y9 with rip := entry + 168 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy9r8
+  have hx10r9 : x10.reg 9 = some h.a := by
+    rw [hx10]
+    show ({ y9 with rip := entry + 168 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy9r9
+  have hx10r4 : x10.reg 4 = some sp := by
+    rw [hx10]
+    show ({ y9 with rip := entry + 168 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy9r4
+  have hx10mem : x10.mem = s.mem := by
+    rw [hx10]
+    show ({ y9 with rip := entry + 168 }).mem = s.mem
+    rw [mem_with_rip]; exact hy9mem
+  have gx10 : ∀ q, q ≠ 0 → x10.reg q = s.reg q := by
+    intro q h0
+    rw [hx10]
+    show ({ y9 with rip := entry + 168 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy9 q h0
+
+  have e27 : X86Int.step im x10 = .ok { x10 with fl := (aluF .sub 139 (138 % W)).2, rip := x10.rip + 7 } :=
+    step_cmpI (by rw [hx10rip]; exact hc.cjnz) hx10r0
+  obtain ⟨y10, hy10⟩ : ∃ u : X86Int.St, u = { x10 with fl := (aluF .sub 139 (138 % W)).2, rip := x10.rip + 7 } := ⟨_, rfl⟩
+  have hy10rip : y10.rip = entry + 175 := by rw [hy10]; show x10.rip + 7 = entry + 175; rw [hx10rip]
+
+  have hy10fl : X86Int.cond y10.fl 5 = some true := by
+    have hz : y10.fl.zf = some false := by
+      rw [hy10]
+      show (aluF .sub 139 (138 % W)).2.zf = some false
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy10r0 : y10.reg 0 = some 139 := by rw [hy10]; show x10.reg 0 = some 139; exact hx10r0
+  have hy10r1 : y10.reg 1 = some i := by rw [hy10]; show x10.reg 1 = some i; exact hx10r1
+  have hy10r6 : y10.reg 6 = some c := by rw [hy10]; show x10.reg 6 = some c; exact hx10r6
+  have hy10r7 : y10.reg 7 = some w := by rw [hy10]; show x10.reg 7 = some w; exact hx10r7
+  have hy10r8 : y10.reg 8 = some h.d := by rw [hy10]; show x10.reg 8 = some h.d; exact hx10r8
+  have hy10r9 : y10.reg 9 = some h.a := by rw [hy10]; show x10.reg 9 = some h.a; exact hx10r9
+  have hy10r4 : y10.reg 4 = some sp := by rw [hy10]; show x10.reg 4 = some sp; exact hx10r4
+  have hy10mem : y10.mem = s.mem := by rw [hy10]; show x10.mem = s.mem; exact hx10mem
+  have gy10 : ∀ q, q ≠ 0 → y10.reg q = s.reg q := by
+    intro q h0
+    rw [hy10]; show x10.reg q = s.reg q; exact gx10 q h0
+
+  have e28 : X86Int.step im y10 = .ok { y10 with rip := entry + 182 } := by
+    have hh := step_jcc (im := im) (s := y10) (by rw [hy10rip]; exact hc.cjnzj) hy10fl
+    simpa using hh
+  obtain ⟨x11, hx11⟩ : ∃ u : X86Int.St, u = { y10 with rip := entry + 182 } := ⟨_, rfl⟩
+  have hx11rip : x11.rip = entry + 182 := by rw [hx11]
+  have hx11r0 : x11.reg 0 = some 139 := by
+    rw [hx11]
+    show ({ y10 with rip := entry + 182 }).reg 0 = some 139
+    rw [reg_with_rip]; exact hy10r0
+  have hx11r1 : x11.reg 1 = some i := by
+    rw [hx11]
+    show ({ y10 with rip := entry + 182 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy10r1
+  have hx11r6 : x11.reg 6 = some c := by
+    rw [hx11]
+    show ({ y10 with rip := entry + 182 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy10r6
+  have hx11r7 : x11.reg 7 = some w := by
+    rw [hx11]
+    show ({ y10 with rip := entry + 182 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy10r7
+  have hx11r8 : x11.reg 8 = some h.d := by
+    rw [hx11]
+    show ({ y10 with rip := entry + 182 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy10r8
+  have hx11r9 : x11.reg 9 = some h.a := by
+    rw [hx11]
+    show ({ y10 with rip := entry + 182 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy10r9
+  have hx11r4 : x11.reg 4 = some sp := by
+    rw [hx11]
+    show ({ y10 with rip := entry + 182 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy10r4
+  have hx11mem : x11.mem = s.mem := by
+    rw [hx11]
+    show ({ y10 with rip := entry + 182 }).mem = s.mem
+    rw [mem_with_rip]; exact hy10mem
+  have gx11 : ∀ q, q ≠ 0 → x11.reg q = s.reg q := by
+    intro q h0
+    rw [hx11]
+    show ({ y10 with rip := entry + 182 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy10 q h0
+
+  have e29 : X86Int.step im x11 = .ok { x11 with fl := (aluF .sub 139 (139 % W)).2, rip := x11.rip + 7 } :=
+    step_cmpI (by rw [hx11rip]; exact hc.ccall) hx11r0
+  obtain ⟨y11, hy11⟩ : ∃ u : X86Int.St, u = { x11 with fl := (aluF .sub 139 (139 % W)).2, rip := x11.rip + 7 } := ⟨_, rfl⟩
+  have hy11rip : y11.rip = entry + 189 := by rw [hy11]; show x11.rip + 7 = entry + 189; rw [hx11rip]
+
+  have hy11fl : X86Int.cond y11.fl 5 = some false := by
+    have hz : y11.fl.zf = some true := by
+      rw [hy11]
+      show (aluF .sub 139 (139 % W)).2.zf = some true
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy11r0 : y11.reg 0 = some 139 := by rw [hy11]; show x11.reg 0 = some 139; exact hx11r0
+  have hy11r1 : y11.reg 1 = some i := by rw [hy11]; show x11.reg 1 = some i; exact hx11r1
+  have hy11r6 : y11.reg 6 = some c := by rw [hy11]; show x11.reg 6 = some c; exact hx11r6
+  have hy11r7 : y11.reg 7 = some w := by rw [hy11]; show x11.reg 7 = some w; exact hx11r7
+  have hy11r8 : y11.reg 8 = some h.d := by rw [hy11]; show x11.reg 8 = some h.d; exact hx11r8
+  have hy11r9 : y11.reg 9 = some h.a := by rw [hy11]; show x11.reg 9 = some h.a; exact hx11r9
+  have hy11r4 : y11.reg 4 = some sp := by rw [hy11]; show x11.reg 4 = some sp; exact hx11r4
+  have hy11mem : y11.mem = s.mem := by rw [hy11]; show x11.mem = s.mem; exact hx11mem
+  have gy11 : ∀ q, q ≠ 0 → y11.reg q = s.reg q := by
+    intro q h0
+    rw [hy11]; show x11.reg q = s.reg q; exact gx11 q h0
+
+  have e30 : X86Int.step im y11 = .ok { y11 with rip := entry + 191 } := by
+    have hh := step_jcc (im := im) (s := y11) (by rw [hy11rip]; exact hc.ccallj) hy11fl
+    simpa [hy11rip] using hh
+  obtain ⟨z9, hz9⟩ : ∃ u : X86Int.St, u = { y11 with rip := entry + 191 } := ⟨_, rfl⟩
+  have hz9rip : z9.rip = entry + 191 := by rw [hz9]
+  have hz9r0 : z9.reg 0 = some 139 := by
+    rw [hz9]
+    show ({ y11 with rip := entry + 191 }).reg 0 = some 139
+    rw [reg_with_rip]; exact hy11r0
+  have hz9r1 : z9.reg 1 = some i := by
+    rw [hz9]
+    show ({ y11 with rip := entry + 191 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy11r1
+  have hz9r6 : z9.reg 6 = some c := by
+    rw [hz9]
+    show ({ y11 with rip := entry + 191 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy11r6
+  have hz9r7 : z9.reg 7 = some w := by
+    rw [hz9]
+    show ({ y11 with rip := entry + 191 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy11r7
+  have hz9r8 : z9.reg 8 = some h.d := by
+    rw [hz9]
+    show ({ y11 with rip := entry + 191 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy11r8
+  have hz9r9 : z9.reg 9 = some h.a := by
+    rw [hz9]
+    show ({ y11 with rip := entry + 191 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy11r9
+  have hz9r4 : z9.reg 4 = some sp := by
+    rw [hz9]
+    show ({ y11 with rip := entry + 191 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy11r4
+  have hz9mem : z9.mem = s.mem := by
+    rw [hz9]
+    show ({ y11 with rip := entry + 191 }).mem = s.mem
+    rw [mem_with_rip]; exact hy11mem
+  have gz9 : ∀ q, q ≠ 0 → z9.reg q = s.reg q := by
+    intro q h0
+    rw [hz9]
+    show ({ y11 with rip := entry + 191 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy11 q h0
+
+  have e31 : X86Int.step im z9 = .ok { z9 with rip := call } :=
+    step_jmp (by rw [hz9rip]; exact hc.ccalljmp)
+  obtain ⟨fin, hfin⟩ : ∃ u : X86Int.St, u = { z9 with rip := call } := ⟨_, rfl⟩
+  have rw1 : run im 1 (Out.ok s) = Out.ok w1 := by rw [run_succ_ok im 0 s, e1, ← hw1, run_zero]
+  have rw2 : run im 1 (Out.ok w1) = Out.ok w2 := by rw [run_succ_ok im 0 w1, e2, ← hw2, run_zero]
+  have rw3 : run im 1 (Out.ok w2) = Out.ok w3 := by rw [run_succ_ok im 0 w2, e3, ← hw3, run_zero]
+  have rw4 : run im 1 (Out.ok w3) = Out.ok w4 := by rw [run_succ_ok im 0 w3, e4, ← hw4, run_zero]
+  have rw5 : run im 1 (Out.ok w4) = Out.ok w5 := by rw [run_succ_ok im 0 w4, e5, ← hw5, run_zero]
+  have rx0 : run im 1 (Out.ok w5) = Out.ok x0 := by rw [run_succ_ok im 0 w5, e6, ← hx0, run_zero]
+  have ry0 : run im 1 (Out.ok x0) = Out.ok y0 := by rw [run_succ_ok im 0 x0, e7, ← hy0, run_zero]
+  have rx1 : run im 1 (Out.ok y0) = Out.ok x1 := by rw [run_succ_ok im 0 y0, e8, ← hx1, run_zero]
+  have ry1 : run im 1 (Out.ok x1) = Out.ok y1 := by rw [run_succ_ok im 0 x1, e9, ← hy1, run_zero]
+  have rx2 : run im 1 (Out.ok y1) = Out.ok x2 := by rw [run_succ_ok im 0 y1, e10, ← hx2, run_zero]
+  have ry2 : run im 1 (Out.ok x2) = Out.ok y2 := by rw [run_succ_ok im 0 x2, e11, ← hy2, run_zero]
+  have rx3 : run im 1 (Out.ok y2) = Out.ok x3 := by rw [run_succ_ok im 0 y2, e12, ← hx3, run_zero]
+  have ry3 : run im 1 (Out.ok x3) = Out.ok y3 := by rw [run_succ_ok im 0 x3, e13, ← hy3, run_zero]
+  have rx4 : run im 1 (Out.ok y3) = Out.ok x4 := by rw [run_succ_ok im 0 y3, e14, ← hx4, run_zero]
+  have ry4 : run im 1 (Out.ok x4) = Out.ok y4 := by rw [run_succ_ok im 0 x4, e15, ← hy4, run_zero]
+  have rx5 : run im 1 (Out.ok y4) = Out.ok x5 := by rw [run_succ_ok im 0 y4, e16, ← hx5, run_zero]
+  have ry5 : run im 1 (Out.ok x5) = Out.ok y5 := by rw [run_succ_ok im 0 x5, e17, ← hy5, run_zero]
+  have rx6 : run im 1 (Out.ok y5) = Out.ok x6 := by rw [run_succ_ok im 0 y5, e18, ← hx6, run_zero]
+  have ry6 : run im 1 (Out.ok x6) = Out.ok y6 := by rw [run_succ_ok im 0 x6, e19, ← hy6, run_zero]
+  have rx7 : run im 1 (Out.ok y6) = Out.ok x7 := by rw [run_succ_ok im 0 y6, e20, ← hx7, run_zero]
+  have ry7 : run im 1 (Out.ok x7) = Out.ok y7 := by rw [run_succ_ok im 0 x7, e21, ← hy7, run_zero]
+  have rx8 : run im 1 (Out.ok y7) = Out.ok x8 := by rw [run_succ_ok im 0 y7, e22, ← hx8, run_zero]
+  have ry8 : run im 1 (Out.ok x8) = Out.ok y8 := by rw [run_succ_ok im 0 x8, e23, ← hy8, run_zero]
+  have rx9 : run im 1 (Out.ok y8) = Out.ok x9 := by rw [run_succ_ok im 0 y8, e24, ← hx9, run_zero]
+  have ry9 : run im 1 (Out.ok x9) = Out.ok y9 := by rw [run_succ_ok im 0 x9, e25, ← hy9, run_zero]
+  have rx10 : run im 1 (Out.ok y9) = Out.ok x10 := by rw [run_succ_ok im 0 y9, e26, ← hx10, run_zero]
+  have ry10 : run im 1 (Out.ok x10) = Out.ok y10 := by rw [run_succ_ok im 0 x10, e27, ← hy10, run_zero]
+  have rx11 : run im 1 (Out.ok y10) = Out.ok x11 := by rw [run_succ_ok im 0 y10, e28, ← hx11, run_zero]
+  have ry11 : run im 1 (Out.ok x11) = Out.ok y11 := by rw [run_succ_ok im 0 x11, e29, ← hy11, run_zero]
+  have rz9 : run im 1 (Out.ok y11) = Out.ok z9 := by rw [run_succ_ok im 0 y11, e30, ← hz9, run_zero]
+  have rfin : run im 1 (Out.ok z9) = Out.ok fin := by rw [run_succ_ok im 0 z9, e31, ← hfin, run_zero]
+  refine ⟨31, fin, by rw [run_add im 1 30, rw1, run_add im 1 29, rw2, run_add im 1 28, rw3, run_add im 1 27, rw4, run_add im 1 26, rw5, run_add im 1 25, rx0, run_add im 1 24, ry0, run_add im 1 23, rx1, run_add im 1 22, ry1, run_add im 1 21, rx2, run_add im 1 20, ry2, run_add im 1 19, rx3, run_add im 1 18, ry3, run_add im 1 17, rx4, run_add im 1 16, ry4, run_add im 1 15, rx5, run_add im 1 14, ry5, run_add im 1 13, rx6, run_add im 1 12, ry6, run_add im 1 11, rx7, run_add im 1 10, ry7, run_add im 1 9, rx8, run_add im 1 8, ry8, run_add im 1 7, rx9, run_add im 1 6, ry9, run_add im 1 5, rx10, run_add im 1 4, ry10, run_add im 1 3, rx11, run_add im 1 2, ry11, run_add im 1 1, rz9, rfin],
+    by rw [hfin], ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
+  · rw [hfin]; show ({ z9 with rip := call }).reg 0 = some 139
+    rw [reg_with_rip]; exact hz9r0
+  · rw [hfin]; show ({ z9 with rip := call }).reg 1 = some i
+    rw [reg_with_rip]; exact hz9r1
+  · rw [hfin]; show ({ z9 with rip := call }).reg 6 = some c
+    rw [reg_with_rip]; exact hz9r6
+  · rw [hfin]; show ({ z9 with rip := call }).reg 7 = some w
+    rw [reg_with_rip]; exact hz9r7
+  · rw [hfin]; show ({ z9 with rip := call }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hz9r8
+  · rw [hfin]; show ({ z9 with rip := call }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hz9r9
+  · rw [hfin]; show ({ z9 with rip := call }).reg 4 = some sp
+    rw [reg_with_rip]; exact hz9r4
+  · intro q h0
+    rw [hfin]; show ({ z9 with rip := call }).reg q = s.reg q
+    rw [reg_with_rip]; exact gz9 q h0
+  · have h1 : fin.mem = s.mem := by rw [hfin, mem_with_rip]; exact hz9mem
+    exact h1
+
+/-- `walk_top` with opcode 140 reaches its handler. -/
+theorem WalkRet_triple {im : Nat → Option (Ins × Nat)} {entry done prim lit str pick tor fromr rfetch locget locset jmp
+    jz call ret : Nat}
+    (hc : WalkCode im entry done prim lit str pick tor fromr rfetch locget locset jmp jz call ret)
+    (hentry : entry + 215 < W) :
+    ∀ (h : Height) (c i w sp nc : Nat), w + 56 ≤ W → (hlt : i < nc) → (hcW : c < W) →
+    ∀ s, s.rip = entry → s.reg 8 = some h.d → s.reg 9 = some h.a → s.reg 6 = some c →
+      s.reg 4 = some sp → s.reg 7 = some w → s.reg 1 = some i → 16 ≤ s.regs.length →
+      rd64 s.mem (w + 24) = some nc → s.mem.rd c = some 140 →
+      ∃ k s', run im k (Out.ok s) = Out.ok s' ∧ s'.rip = ret ∧ s'.reg 0 = some 140 ∧
+        s'.reg 1 = some i ∧ s'.reg 6 = some c ∧ s'.reg 7 = some w ∧
+        s'.reg 8 = some h.d ∧ s'.reg 9 = some h.a ∧ s'.reg 4 = some sp ∧
+        (∀ q, q ≠ 0 → s'.reg q = s.reg q) ∧ s'.mem = s.mem := by
+  intro h c i w sp nc hw56 hlt hcW s hrip hr8 hr9 hr6 hr4 hr7 hr1 hlen hfc hbyte
+
+  have hea24 : ea w 24 = w + 24 := Nat.mod_eq_of_lt (by omega)
+  have h57 : 57 % W = 57 := Nat.mod_eq_of_lt (by unfold W; decide)
+  have e1 : X86Int.step im s = .ok { s.set 0 (some nc) with rip := s.rip + 4 } :=
+    step_ld (by rw [hrip]; exact hc.d0) hr7 (by rw [hea24]; exact hfc)
+  obtain ⟨w1, hw1⟩ : ∃ u : X86Int.St, u = { s.set 0 (some nc) with rip := s.rip + 4 } := ⟨_, rfl⟩
+  have hw1rip : w1.rip = entry + 4 := by rw [hw1]; show s.rip + 4 = entry + 4; rw [hrip]
+  have hw1r0 : w1.reg 0 = some nc := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 0 = some nc
+    rw [reg_set_self (len_of_r9 hr9 (by decide))]
+  have hw1r1 : w1.reg 1 = some i := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 1 = some i
+    rw [reg_set_other (by decide)]; exact hr1
+  have hw1r6 : w1.reg 6 = some c := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 6 = some c
+    rw [reg_set_other (by decide)]; exact hr6
+  have hw1r7 : w1.reg 7 = some w := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 7 = some w
+    rw [reg_set_other (by decide)]; exact hr7
+  have hw1r8 : w1.reg 8 = some h.d := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 8 = some h.d
+    rw [reg_set_other (by decide)]; exact hr8
+  have hw1r9 : w1.reg 9 = some h.a := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 9 = some h.a
+    rw [reg_set_other (by decide)]; exact hr9
+  have hw1r4 : w1.reg 4 = some sp := by
+    rw [hw1]
+    show (s.set 0 (some nc)).reg 4 = some sp
+    rw [reg_set_other (by decide)]; exact hr4
+  have hw1mem : w1.mem = s.mem := by
+    rw [hw1]
+    show (s.set 0 (some nc)).mem = s.mem
+    rw [mem_set]
+  have gw1 : ∀ q, q ≠ 0 → w1.reg q = s.reg q := by
+    intro q h0
+    rw [hw1]
+    show (s.set 0 (some nc)).reg q = s.reg q
+    rw [reg_set_other h0]
+  have e2 : X86Int.step im w1 = .ok { w1 with fl := (aluF .sub i nc).2, rip := w1.rip + 3 } :=
+    step_cmp (by rw [hw1rip]; exact hc.d1) hw1r1 hw1r0
+  obtain ⟨w2, hw2⟩ : ∃ u : X86Int.St, u = { w1 with fl := (aluF .sub i nc).2, rip := w1.rip + 3 } := ⟨_, rfl⟩
+  have hw2rip : w2.rip = entry + 7 := by rw [hw2]; show w1.rip + 3 = entry + 7; rw [hw1rip]
+
+  have hw2fl : X86Int.cond w2.fl 2 = some true := by
+    have hcf : w2.fl.cf = some true := by
+      rw [hw2]
+      show (aluF .sub i nc).2.cf = some true
+      exact aluF_sub_cf_true hlt
+    exact cond_cc2 hcf
+
+  have hw2r1 : w2.reg 1 = some i := by rw [hw2]; show w1.reg 1 = some i; exact hw1r1
+  have hw2r0 : w2.reg 0 = some nc := by rw [hw2]; show w1.reg 0 = some nc; exact hw1r0
+  have hw2r6 : w2.reg 6 = some c := by rw [hw2]; show w1.reg 6 = some c; exact hw1r6
+  have hw2r8 : w2.reg 8 = some h.d := by rw [hw2]; show w1.reg 8 = some h.d; exact hw1r8
+  have hw2r9 : w2.reg 9 = some h.a := by rw [hw2]; show w1.reg 9 = some h.a; exact hw1r9
+  have hw2r4 : w2.reg 4 = some sp := by rw [hw2]; show w1.reg 4 = some sp; exact hw1r4
+  have hw2mem : w2.mem = s.mem := by rw [hw2]; show w1.mem = s.mem; exact hw1mem
+  have gw2 : ∀ q, q ≠ 0 → w2.reg q = s.reg q := by
+    intro q h0
+    rw [hw2]; show w1.reg q = s.reg q; exact gw1 q h0
+
+  have e3 : X86Int.step im w2 = .ok { w2 with rip := entry + 14 } := by
+    have hh := step_jcc (im := im) (s := w2) (by rw [hw2rip]; exact hc.d2) hw2fl
+    simpa using hh
+  obtain ⟨w3, hw3⟩ : ∃ u : X86Int.St, u = { w2 with rip := entry + 14 } := ⟨_, rfl⟩
+  have hw3rip : w3.rip = entry + 14 := by rw [hw3]
+  have hw3r6 : w3.reg 6 = some c := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg 6 = some c
+    rw [reg_with_rip]; exact hw2r6
+  have hw3r1 : w3.reg 1 = some i := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg 1 = some i
+    rw [reg_with_rip]; exact hw2r1
+  have hw3r8 : w3.reg 8 = some h.d := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hw2r8
+  have hw3r9 : w3.reg 9 = some h.a := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hw2r9
+  have hw3r4 : w3.reg 4 = some sp := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hw2r4
+  have hw3r7 : w3.reg 7 = some w := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg 7 = some w
+    rw [reg_with_rip, gw2 7 (by decide)]; exact hr7
+  have hw3mem : w3.mem = s.mem := by
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).mem = s.mem
+    rw [mem_with_rip]; exact hw2mem
+  have gw3 : ∀ q, q ≠ 0 → w3.reg q = s.reg q := by
+    intro q h0
+    rw [hw3]; show ({ w2 with rip := entry + 14 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gw2 q h0
+  have hea0 : ea c 0 = c := Nat.mod_eq_of_lt hcW
+  have e4 : X86Int.step im w3 = .ok { w3.set 0 (some 140) with rip := w3.rip + 3 } :=
+    step_ld8 (by rw [hw3rip]; exact hc.d4) hw3r6 (by rw [hw3mem, hea0]; exact hbyte)
+  obtain ⟨w4, hw4⟩ : ∃ u : X86Int.St, u = { w3.set 0 (some 140) with rip := w3.rip + 3 } := ⟨_, rfl⟩
+  have hw4rip : w4.rip = entry + 17 := by rw [hw4]; show w3.rip + 3 = entry + 17; rw [hw3rip]
+  have hw4r0 : w4.reg 0 = some 140 := by
+    rw [hw4]
+    show (w3.set 0 (some 140)).reg 0 = some 140
+    rw [reg_set_self (len_of_r9 hw3r9 (by decide))]
+  have hw4r1 : w4.reg 1 = some i := by
+    rw [hw4]
+    show (w3.set 0 (some 140)).reg 1 = some i
+    rw [reg_set_other (by decide)]; exact hw3r1
+  have hw4r6 : w4.reg 6 = some c := by
+    rw [hw4]
+    show (w3.set 0 (some 140)).reg 6 = some c
+    rw [reg_set_other (by decide)]; exact hw3r6
+  have hw4r7 : w4.reg 7 = some w := by
+    rw [hw4]
+    show (w3.set 0 (some 140)).reg 7 = some w
+    rw [reg_set_other (by decide)]; exact hw3r7
+  have hw4r8 : w4.reg 8 = some h.d := by
+    rw [hw4]
+    show (w3.set 0 (some 140)).reg 8 = some h.d
+    rw [reg_set_other (by decide)]; exact hw3r8
+  have hw4r9 : w4.reg 9 = some h.a := by
+    rw [hw4]
+    show (w3.set 0 (some 140)).reg 9 = some h.a
+    rw [reg_set_other (by decide)]; exact hw3r9
+  have hw4r4 : w4.reg 4 = some sp := by
+    rw [hw4]
+    show (w3.set 0 (some 140)).reg 4 = some sp
+    rw [reg_set_other (by decide)]; exact hw3r4
+  have hw4mem : w4.mem = s.mem := by
+    rw [hw4]
+    show (w3.set 0 (some 140)).mem = s.mem
+    rw [mem_set]; exact hw3mem
+  have gw4 : ∀ q, q ≠ 0 → w4.reg q = s.reg q := by
+    intro q h0
+    rw [hw4]
+    show (w3.set 0 (some 140)).reg q = s.reg q
+    rw [reg_set_other h0]; exact gw3 q h0
+  have e5 : X86Int.step im w4 = .ok { w4 with fl := (aluF .sub 140 (57 % W)).2, rip := w4.rip + 4 } :=
+    step_cmpI (by rw [hw4rip]; exact hc.d5) hw4r0
+  obtain ⟨w5, hw5⟩ : ∃ u : X86Int.St, u = { w4 with fl := (aluF .sub 140 (57 % W)).2, rip := w4.rip + 4 } := ⟨_, rfl⟩
+  have hw5rip : w5.rip = entry + 21 := by rw [hw5]; show w4.rip + 4 = entry + 21; rw [hw4rip]
+
+  have hw5fl : X86Int.cond w5.fl 3 = some true := by
+    have hcf : w5.fl.cf = some false := by
+      rw [hw5]
+      show (aluF .sub 140 (57 % W)).2.cf = some false
+      rw [h57]
+      exact aluF_sub_cf (by decide)
+    have hh := cond_cc3 hcf
+    simpa using hh
+  have hw5r0 : w5.reg 0 = some 140 := by rw [hw5]; show w4.reg 0 = some 140; exact hw4r0
+  have hw5r1 : w5.reg 1 = some i := by rw [hw5]; show w4.reg 1 = some i; exact hw4r1
+  have hw5r6 : w5.reg 6 = some c := by rw [hw5]; show w4.reg 6 = some c; exact hw4r6
+  have hw5r7 : w5.reg 7 = some w := by rw [hw5]; show w4.reg 7 = some w; exact hw4r7
+  have hw5r8 : w5.reg 8 = some h.d := by rw [hw5]; show w4.reg 8 = some h.d; exact hw4r8
+  have hw5r9 : w5.reg 9 = some h.a := by rw [hw5]; show w4.reg 9 = some h.a; exact hw4r9
+  have hw5r4 : w5.reg 4 = some sp := by rw [hw5]; show w4.reg 4 = some sp; exact hw4r4
+  have hw5mem : w5.mem = s.mem := by rw [hw5]; show w4.mem = s.mem; exact hw4mem
+  have gw5 : ∀ q, q ≠ 0 → w5.reg q = s.reg q := by
+    intro q h0
+    rw [hw5]; show w4.reg q = s.reg q; exact gw4 q h0
+
+  have e6 : X86Int.step im w5 = .ok { w5 with rip := entry + 28 } := by
+    have hh := step_jcc (im := im) (s := w5) (by rw [hw5rip]; exact hc.d6) hw5fl
+    simpa using hh
+  obtain ⟨x0, hx0⟩ : ∃ u : X86Int.St, u = { w5 with rip := entry + 28 } := ⟨_, rfl⟩
+  have hx0rip : x0.rip = entry + 28 := by rw [hx0]
+  have hx0r0 : x0.reg 0 = some 140 := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 0 = some 140
+    rw [reg_with_rip]; exact hw5r0
+  have hx0r1 : x0.reg 1 = some i := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 1 = some i
+    rw [reg_with_rip]; exact hw5r1
+  have hx0r6 : x0.reg 6 = some c := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 6 = some c
+    rw [reg_with_rip]; exact hw5r6
+  have hx0r7 : x0.reg 7 = some w := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 7 = some w
+    rw [reg_with_rip]; exact hw5r7
+  have hx0r8 : x0.reg 8 = some h.d := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hw5r8
+  have hx0r9 : x0.reg 9 = some h.a := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hw5r9
+  have hx0r4 : x0.reg 4 = some sp := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hw5r4
+  have hx0mem : x0.mem = s.mem := by
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).mem = s.mem
+    rw [mem_with_rip]; exact hw5mem
+  have gx0 : ∀ q, q ≠ 0 → x0.reg q = s.reg q := by
+    intro q h0
+    rw [hx0]
+    show ({ w5 with rip := entry + 28 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gw5 q h0
+
+  have e7 : X86Int.step im x0 = .ok { x0 with fl := (aluF .sub 140 (128 % W)).2, rip := x0.rip + 7 } :=
+    step_cmpI (by rw [hx0rip]; exact hc.clit) hx0r0
+  obtain ⟨y0, hy0⟩ : ∃ u : X86Int.St, u = { x0 with fl := (aluF .sub 140 (128 % W)).2, rip := x0.rip + 7 } := ⟨_, rfl⟩
+  have hy0rip : y0.rip = entry + 35 := by rw [hy0]; show x0.rip + 7 = entry + 35; rw [hx0rip]
+
+  have hy0fl : X86Int.cond y0.fl 5 = some true := by
+    have hz : y0.fl.zf = some false := by
+      rw [hy0]
+      show (aluF .sub 140 (128 % W)).2.zf = some false
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy0r0 : y0.reg 0 = some 140 := by rw [hy0]; show x0.reg 0 = some 140; exact hx0r0
+  have hy0r1 : y0.reg 1 = some i := by rw [hy0]; show x0.reg 1 = some i; exact hx0r1
+  have hy0r6 : y0.reg 6 = some c := by rw [hy0]; show x0.reg 6 = some c; exact hx0r6
+  have hy0r7 : y0.reg 7 = some w := by rw [hy0]; show x0.reg 7 = some w; exact hx0r7
+  have hy0r8 : y0.reg 8 = some h.d := by rw [hy0]; show x0.reg 8 = some h.d; exact hx0r8
+  have hy0r9 : y0.reg 9 = some h.a := by rw [hy0]; show x0.reg 9 = some h.a; exact hx0r9
+  have hy0r4 : y0.reg 4 = some sp := by rw [hy0]; show x0.reg 4 = some sp; exact hx0r4
+  have hy0mem : y0.mem = s.mem := by rw [hy0]; show x0.mem = s.mem; exact hx0mem
+  have gy0 : ∀ q, q ≠ 0 → y0.reg q = s.reg q := by
+    intro q h0
+    rw [hy0]; show x0.reg q = s.reg q; exact gx0 q h0
+
+  have e8 : X86Int.step im y0 = .ok { y0 with rip := entry + 42 } := by
+    have hh := step_jcc (im := im) (s := y0) (by rw [hy0rip]; exact hc.clitj) hy0fl
+    simpa using hh
+  obtain ⟨x1, hx1⟩ : ∃ u : X86Int.St, u = { y0 with rip := entry + 42 } := ⟨_, rfl⟩
+  have hx1rip : x1.rip = entry + 42 := by rw [hx1]
+  have hx1r0 : x1.reg 0 = some 140 := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg 0 = some 140
+    rw [reg_with_rip]; exact hy0r0
+  have hx1r1 : x1.reg 1 = some i := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy0r1
+  have hx1r6 : x1.reg 6 = some c := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy0r6
+  have hx1r7 : x1.reg 7 = some w := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy0r7
+  have hx1r8 : x1.reg 8 = some h.d := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy0r8
+  have hx1r9 : x1.reg 9 = some h.a := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy0r9
+  have hx1r4 : x1.reg 4 = some sp := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy0r4
+  have hx1mem : x1.mem = s.mem := by
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).mem = s.mem
+    rw [mem_with_rip]; exact hy0mem
+  have gx1 : ∀ q, q ≠ 0 → x1.reg q = s.reg q := by
+    intro q h0
+    rw [hx1]
+    show ({ y0 with rip := entry + 42 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy0 q h0
+
+  have e9 : X86Int.step im x1 = .ok { x1 with fl := (aluF .sub 140 (129 % W)).2, rip := x1.rip + 7 } :=
+    step_cmpI (by rw [hx1rip]; exact hc.cstr) hx1r0
+  obtain ⟨y1, hy1⟩ : ∃ u : X86Int.St, u = { x1 with fl := (aluF .sub 140 (129 % W)).2, rip := x1.rip + 7 } := ⟨_, rfl⟩
+  have hy1rip : y1.rip = entry + 49 := by rw [hy1]; show x1.rip + 7 = entry + 49; rw [hx1rip]
+
+  have hy1fl : X86Int.cond y1.fl 5 = some true := by
+    have hz : y1.fl.zf = some false := by
+      rw [hy1]
+      show (aluF .sub 140 (129 % W)).2.zf = some false
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy1r0 : y1.reg 0 = some 140 := by rw [hy1]; show x1.reg 0 = some 140; exact hx1r0
+  have hy1r1 : y1.reg 1 = some i := by rw [hy1]; show x1.reg 1 = some i; exact hx1r1
+  have hy1r6 : y1.reg 6 = some c := by rw [hy1]; show x1.reg 6 = some c; exact hx1r6
+  have hy1r7 : y1.reg 7 = some w := by rw [hy1]; show x1.reg 7 = some w; exact hx1r7
+  have hy1r8 : y1.reg 8 = some h.d := by rw [hy1]; show x1.reg 8 = some h.d; exact hx1r8
+  have hy1r9 : y1.reg 9 = some h.a := by rw [hy1]; show x1.reg 9 = some h.a; exact hx1r9
+  have hy1r4 : y1.reg 4 = some sp := by rw [hy1]; show x1.reg 4 = some sp; exact hx1r4
+  have hy1mem : y1.mem = s.mem := by rw [hy1]; show x1.mem = s.mem; exact hx1mem
+  have gy1 : ∀ q, q ≠ 0 → y1.reg q = s.reg q := by
+    intro q h0
+    rw [hy1]; show x1.reg q = s.reg q; exact gx1 q h0
+
+  have e10 : X86Int.step im y1 = .ok { y1 with rip := entry + 56 } := by
+    have hh := step_jcc (im := im) (s := y1) (by rw [hy1rip]; exact hc.cstrj) hy1fl
+    simpa using hh
+  obtain ⟨x2, hx2⟩ : ∃ u : X86Int.St, u = { y1 with rip := entry + 56 } := ⟨_, rfl⟩
+  have hx2rip : x2.rip = entry + 56 := by rw [hx2]
+  have hx2r0 : x2.reg 0 = some 140 := by
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).reg 0 = some 140
+    rw [reg_with_rip]; exact hy1r0
+  have hx2r1 : x2.reg 1 = some i := by
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy1r1
+  have hx2r6 : x2.reg 6 = some c := by
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy1r6
+  have hx2r7 : x2.reg 7 = some w := by
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy1r7
+  have hx2r8 : x2.reg 8 = some h.d := by
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy1r8
+  have hx2r9 : x2.reg 9 = some h.a := by
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy1r9
+  have hx2r4 : x2.reg 4 = some sp := by
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy1r4
+  have hx2mem : x2.mem = s.mem := by
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).mem = s.mem
+    rw [mem_with_rip]; exact hy1mem
+  have gx2 : ∀ q, q ≠ 0 → x2.reg q = s.reg q := by
+    intro q h0
+    rw [hx2]
+    show ({ y1 with rip := entry + 56 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy1 q h0
+
+  have e11 : X86Int.step im x2 = .ok { x2 with fl := (aluF .sub 140 (130 % W)).2, rip := x2.rip + 7 } :=
+    step_cmpI (by rw [hx2rip]; exact hc.cpick) hx2r0
+  obtain ⟨y2, hy2⟩ : ∃ u : X86Int.St, u = { x2 with fl := (aluF .sub 140 (130 % W)).2, rip := x2.rip + 7 } := ⟨_, rfl⟩
+  have hy2rip : y2.rip = entry + 63 := by rw [hy2]; show x2.rip + 7 = entry + 63; rw [hx2rip]
+
+  have hy2fl : X86Int.cond y2.fl 5 = some true := by
+    have hz : y2.fl.zf = some false := by
+      rw [hy2]
+      show (aluF .sub 140 (130 % W)).2.zf = some false
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy2r0 : y2.reg 0 = some 140 := by rw [hy2]; show x2.reg 0 = some 140; exact hx2r0
+  have hy2r1 : y2.reg 1 = some i := by rw [hy2]; show x2.reg 1 = some i; exact hx2r1
+  have hy2r6 : y2.reg 6 = some c := by rw [hy2]; show x2.reg 6 = some c; exact hx2r6
+  have hy2r7 : y2.reg 7 = some w := by rw [hy2]; show x2.reg 7 = some w; exact hx2r7
+  have hy2r8 : y2.reg 8 = some h.d := by rw [hy2]; show x2.reg 8 = some h.d; exact hx2r8
+  have hy2r9 : y2.reg 9 = some h.a := by rw [hy2]; show x2.reg 9 = some h.a; exact hx2r9
+  have hy2r4 : y2.reg 4 = some sp := by rw [hy2]; show x2.reg 4 = some sp; exact hx2r4
+  have hy2mem : y2.mem = s.mem := by rw [hy2]; show x2.mem = s.mem; exact hx2mem
+  have gy2 : ∀ q, q ≠ 0 → y2.reg q = s.reg q := by
+    intro q h0
+    rw [hy2]; show x2.reg q = s.reg q; exact gx2 q h0
+
+  have e12 : X86Int.step im y2 = .ok { y2 with rip := entry + 70 } := by
+    have hh := step_jcc (im := im) (s := y2) (by rw [hy2rip]; exact hc.cpickj) hy2fl
+    simpa using hh
+  obtain ⟨x3, hx3⟩ : ∃ u : X86Int.St, u = { y2 with rip := entry + 70 } := ⟨_, rfl⟩
+  have hx3rip : x3.rip = entry + 70 := by rw [hx3]
+  have hx3r0 : x3.reg 0 = some 140 := by
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).reg 0 = some 140
+    rw [reg_with_rip]; exact hy2r0
+  have hx3r1 : x3.reg 1 = some i := by
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy2r1
+  have hx3r6 : x3.reg 6 = some c := by
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy2r6
+  have hx3r7 : x3.reg 7 = some w := by
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy2r7
+  have hx3r8 : x3.reg 8 = some h.d := by
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy2r8
+  have hx3r9 : x3.reg 9 = some h.a := by
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy2r9
+  have hx3r4 : x3.reg 4 = some sp := by
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy2r4
+  have hx3mem : x3.mem = s.mem := by
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).mem = s.mem
+    rw [mem_with_rip]; exact hy2mem
+  have gx3 : ∀ q, q ≠ 0 → x3.reg q = s.reg q := by
+    intro q h0
+    rw [hx3]
+    show ({ y2 with rip := entry + 70 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy2 q h0
+
+  have e13 : X86Int.step im x3 = .ok { x3 with fl := (aluF .sub 140 (131 % W)).2, rip := x3.rip + 7 } :=
+    step_cmpI (by rw [hx3rip]; exact hc.ctor) hx3r0
+  obtain ⟨y3, hy3⟩ : ∃ u : X86Int.St, u = { x3 with fl := (aluF .sub 140 (131 % W)).2, rip := x3.rip + 7 } := ⟨_, rfl⟩
+  have hy3rip : y3.rip = entry + 77 := by rw [hy3]; show x3.rip + 7 = entry + 77; rw [hx3rip]
+
+  have hy3fl : X86Int.cond y3.fl 5 = some true := by
+    have hz : y3.fl.zf = some false := by
+      rw [hy3]
+      show (aluF .sub 140 (131 % W)).2.zf = some false
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy3r0 : y3.reg 0 = some 140 := by rw [hy3]; show x3.reg 0 = some 140; exact hx3r0
+  have hy3r1 : y3.reg 1 = some i := by rw [hy3]; show x3.reg 1 = some i; exact hx3r1
+  have hy3r6 : y3.reg 6 = some c := by rw [hy3]; show x3.reg 6 = some c; exact hx3r6
+  have hy3r7 : y3.reg 7 = some w := by rw [hy3]; show x3.reg 7 = some w; exact hx3r7
+  have hy3r8 : y3.reg 8 = some h.d := by rw [hy3]; show x3.reg 8 = some h.d; exact hx3r8
+  have hy3r9 : y3.reg 9 = some h.a := by rw [hy3]; show x3.reg 9 = some h.a; exact hx3r9
+  have hy3r4 : y3.reg 4 = some sp := by rw [hy3]; show x3.reg 4 = some sp; exact hx3r4
+  have hy3mem : y3.mem = s.mem := by rw [hy3]; show x3.mem = s.mem; exact hx3mem
+  have gy3 : ∀ q, q ≠ 0 → y3.reg q = s.reg q := by
+    intro q h0
+    rw [hy3]; show x3.reg q = s.reg q; exact gx3 q h0
+
+  have e14 : X86Int.step im y3 = .ok { y3 with rip := entry + 84 } := by
+    have hh := step_jcc (im := im) (s := y3) (by rw [hy3rip]; exact hc.ctorj) hy3fl
+    simpa using hh
+  obtain ⟨x4, hx4⟩ : ∃ u : X86Int.St, u = { y3 with rip := entry + 84 } := ⟨_, rfl⟩
+  have hx4rip : x4.rip = entry + 84 := by rw [hx4]
+  have hx4r0 : x4.reg 0 = some 140 := by
+    rw [hx4]
+    show ({ y3 with rip := entry + 84 }).reg 0 = some 140
+    rw [reg_with_rip]; exact hy3r0
+  have hx4r1 : x4.reg 1 = some i := by
+    rw [hx4]
+    show ({ y3 with rip := entry + 84 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy3r1
+  have hx4r6 : x4.reg 6 = some c := by
+    rw [hx4]
+    show ({ y3 with rip := entry + 84 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy3r6
+  have hx4r7 : x4.reg 7 = some w := by
+    rw [hx4]
+    show ({ y3 with rip := entry + 84 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy3r7
+  have hx4r8 : x4.reg 8 = some h.d := by
+    rw [hx4]
+    show ({ y3 with rip := entry + 84 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy3r8
+  have hx4r9 : x4.reg 9 = some h.a := by
+    rw [hx4]
+    show ({ y3 with rip := entry + 84 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy3r9
+  have hx4r4 : x4.reg 4 = some sp := by
+    rw [hx4]
+    show ({ y3 with rip := entry + 84 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy3r4
+  have hx4mem : x4.mem = s.mem := by
+    rw [hx4]
+    show ({ y3 with rip := entry + 84 }).mem = s.mem
+    rw [mem_with_rip]; exact hy3mem
+  have gx4 : ∀ q, q ≠ 0 → x4.reg q = s.reg q := by
+    intro q h0
+    rw [hx4]
+    show ({ y3 with rip := entry + 84 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy3 q h0
+
+  have e15 : X86Int.step im x4 = .ok { x4 with fl := (aluF .sub 140 (132 % W)).2, rip := x4.rip + 7 } :=
+    step_cmpI (by rw [hx4rip]; exact hc.cfromr) hx4r0
+  obtain ⟨y4, hy4⟩ : ∃ u : X86Int.St, u = { x4 with fl := (aluF .sub 140 (132 % W)).2, rip := x4.rip + 7 } := ⟨_, rfl⟩
+  have hy4rip : y4.rip = entry + 91 := by rw [hy4]; show x4.rip + 7 = entry + 91; rw [hx4rip]
+
+  have hy4fl : X86Int.cond y4.fl 5 = some true := by
+    have hz : y4.fl.zf = some false := by
+      rw [hy4]
+      show (aluF .sub 140 (132 % W)).2.zf = some false
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy4r0 : y4.reg 0 = some 140 := by rw [hy4]; show x4.reg 0 = some 140; exact hx4r0
+  have hy4r1 : y4.reg 1 = some i := by rw [hy4]; show x4.reg 1 = some i; exact hx4r1
+  have hy4r6 : y4.reg 6 = some c := by rw [hy4]; show x4.reg 6 = some c; exact hx4r6
+  have hy4r7 : y4.reg 7 = some w := by rw [hy4]; show x4.reg 7 = some w; exact hx4r7
+  have hy4r8 : y4.reg 8 = some h.d := by rw [hy4]; show x4.reg 8 = some h.d; exact hx4r8
+  have hy4r9 : y4.reg 9 = some h.a := by rw [hy4]; show x4.reg 9 = some h.a; exact hx4r9
+  have hy4r4 : y4.reg 4 = some sp := by rw [hy4]; show x4.reg 4 = some sp; exact hx4r4
+  have hy4mem : y4.mem = s.mem := by rw [hy4]; show x4.mem = s.mem; exact hx4mem
+  have gy4 : ∀ q, q ≠ 0 → y4.reg q = s.reg q := by
+    intro q h0
+    rw [hy4]; show x4.reg q = s.reg q; exact gx4 q h0
+
+  have e16 : X86Int.step im y4 = .ok { y4 with rip := entry + 98 } := by
+    have hh := step_jcc (im := im) (s := y4) (by rw [hy4rip]; exact hc.cfromrj) hy4fl
+    simpa using hh
+  obtain ⟨x5, hx5⟩ : ∃ u : X86Int.St, u = { y4 with rip := entry + 98 } := ⟨_, rfl⟩
+  have hx5rip : x5.rip = entry + 98 := by rw [hx5]
+  have hx5r0 : x5.reg 0 = some 140 := by
+    rw [hx5]
+    show ({ y4 with rip := entry + 98 }).reg 0 = some 140
+    rw [reg_with_rip]; exact hy4r0
+  have hx5r1 : x5.reg 1 = some i := by
+    rw [hx5]
+    show ({ y4 with rip := entry + 98 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy4r1
+  have hx5r6 : x5.reg 6 = some c := by
+    rw [hx5]
+    show ({ y4 with rip := entry + 98 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy4r6
+  have hx5r7 : x5.reg 7 = some w := by
+    rw [hx5]
+    show ({ y4 with rip := entry + 98 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy4r7
+  have hx5r8 : x5.reg 8 = some h.d := by
+    rw [hx5]
+    show ({ y4 with rip := entry + 98 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy4r8
+  have hx5r9 : x5.reg 9 = some h.a := by
+    rw [hx5]
+    show ({ y4 with rip := entry + 98 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy4r9
+  have hx5r4 : x5.reg 4 = some sp := by
+    rw [hx5]
+    show ({ y4 with rip := entry + 98 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy4r4
+  have hx5mem : x5.mem = s.mem := by
+    rw [hx5]
+    show ({ y4 with rip := entry + 98 }).mem = s.mem
+    rw [mem_with_rip]; exact hy4mem
+  have gx5 : ∀ q, q ≠ 0 → x5.reg q = s.reg q := by
+    intro q h0
+    rw [hx5]
+    show ({ y4 with rip := entry + 98 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy4 q h0
+
+  have e17 : X86Int.step im x5 = .ok { x5 with fl := (aluF .sub 140 (133 % W)).2, rip := x5.rip + 7 } :=
+    step_cmpI (by rw [hx5rip]; exact hc.crfetch) hx5r0
+  obtain ⟨y5, hy5⟩ : ∃ u : X86Int.St, u = { x5 with fl := (aluF .sub 140 (133 % W)).2, rip := x5.rip + 7 } := ⟨_, rfl⟩
+  have hy5rip : y5.rip = entry + 105 := by rw [hy5]; show x5.rip + 7 = entry + 105; rw [hx5rip]
+
+  have hy5fl : X86Int.cond y5.fl 5 = some true := by
+    have hz : y5.fl.zf = some false := by
+      rw [hy5]
+      show (aluF .sub 140 (133 % W)).2.zf = some false
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy5r0 : y5.reg 0 = some 140 := by rw [hy5]; show x5.reg 0 = some 140; exact hx5r0
+  have hy5r1 : y5.reg 1 = some i := by rw [hy5]; show x5.reg 1 = some i; exact hx5r1
+  have hy5r6 : y5.reg 6 = some c := by rw [hy5]; show x5.reg 6 = some c; exact hx5r6
+  have hy5r7 : y5.reg 7 = some w := by rw [hy5]; show x5.reg 7 = some w; exact hx5r7
+  have hy5r8 : y5.reg 8 = some h.d := by rw [hy5]; show x5.reg 8 = some h.d; exact hx5r8
+  have hy5r9 : y5.reg 9 = some h.a := by rw [hy5]; show x5.reg 9 = some h.a; exact hx5r9
+  have hy5r4 : y5.reg 4 = some sp := by rw [hy5]; show x5.reg 4 = some sp; exact hx5r4
+  have hy5mem : y5.mem = s.mem := by rw [hy5]; show x5.mem = s.mem; exact hx5mem
+  have gy5 : ∀ q, q ≠ 0 → y5.reg q = s.reg q := by
+    intro q h0
+    rw [hy5]; show x5.reg q = s.reg q; exact gx5 q h0
+
+  have e18 : X86Int.step im y5 = .ok { y5 with rip := entry + 112 } := by
+    have hh := step_jcc (im := im) (s := y5) (by rw [hy5rip]; exact hc.crfetchj) hy5fl
+    simpa using hh
+  obtain ⟨x6, hx6⟩ : ∃ u : X86Int.St, u = { y5 with rip := entry + 112 } := ⟨_, rfl⟩
+  have hx6rip : x6.rip = entry + 112 := by rw [hx6]
+  have hx6r0 : x6.reg 0 = some 140 := by
+    rw [hx6]
+    show ({ y5 with rip := entry + 112 }).reg 0 = some 140
+    rw [reg_with_rip]; exact hy5r0
+  have hx6r1 : x6.reg 1 = some i := by
+    rw [hx6]
+    show ({ y5 with rip := entry + 112 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy5r1
+  have hx6r6 : x6.reg 6 = some c := by
+    rw [hx6]
+    show ({ y5 with rip := entry + 112 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy5r6
+  have hx6r7 : x6.reg 7 = some w := by
+    rw [hx6]
+    show ({ y5 with rip := entry + 112 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy5r7
+  have hx6r8 : x6.reg 8 = some h.d := by
+    rw [hx6]
+    show ({ y5 with rip := entry + 112 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy5r8
+  have hx6r9 : x6.reg 9 = some h.a := by
+    rw [hx6]
+    show ({ y5 with rip := entry + 112 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy5r9
+  have hx6r4 : x6.reg 4 = some sp := by
+    rw [hx6]
+    show ({ y5 with rip := entry + 112 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy5r4
+  have hx6mem : x6.mem = s.mem := by
+    rw [hx6]
+    show ({ y5 with rip := entry + 112 }).mem = s.mem
+    rw [mem_with_rip]; exact hy5mem
+  have gx6 : ∀ q, q ≠ 0 → x6.reg q = s.reg q := by
+    intro q h0
+    rw [hx6]
+    show ({ y5 with rip := entry + 112 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy5 q h0
+
+  have e19 : X86Int.step im x6 = .ok { x6 with fl := (aluF .sub 140 (134 % W)).2, rip := x6.rip + 7 } :=
+    step_cmpI (by rw [hx6rip]; exact hc.clocget) hx6r0
+  obtain ⟨y6, hy6⟩ : ∃ u : X86Int.St, u = { x6 with fl := (aluF .sub 140 (134 % W)).2, rip := x6.rip + 7 } := ⟨_, rfl⟩
+  have hy6rip : y6.rip = entry + 119 := by rw [hy6]; show x6.rip + 7 = entry + 119; rw [hx6rip]
+
+  have hy6fl : X86Int.cond y6.fl 5 = some true := by
+    have hz : y6.fl.zf = some false := by
+      rw [hy6]
+      show (aluF .sub 140 (134 % W)).2.zf = some false
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy6r0 : y6.reg 0 = some 140 := by rw [hy6]; show x6.reg 0 = some 140; exact hx6r0
+  have hy6r1 : y6.reg 1 = some i := by rw [hy6]; show x6.reg 1 = some i; exact hx6r1
+  have hy6r6 : y6.reg 6 = some c := by rw [hy6]; show x6.reg 6 = some c; exact hx6r6
+  have hy6r7 : y6.reg 7 = some w := by rw [hy6]; show x6.reg 7 = some w; exact hx6r7
+  have hy6r8 : y6.reg 8 = some h.d := by rw [hy6]; show x6.reg 8 = some h.d; exact hx6r8
+  have hy6r9 : y6.reg 9 = some h.a := by rw [hy6]; show x6.reg 9 = some h.a; exact hx6r9
+  have hy6r4 : y6.reg 4 = some sp := by rw [hy6]; show x6.reg 4 = some sp; exact hx6r4
+  have hy6mem : y6.mem = s.mem := by rw [hy6]; show x6.mem = s.mem; exact hx6mem
+  have gy6 : ∀ q, q ≠ 0 → y6.reg q = s.reg q := by
+    intro q h0
+    rw [hy6]; show x6.reg q = s.reg q; exact gx6 q h0
+
+  have e20 : X86Int.step im y6 = .ok { y6 with rip := entry + 126 } := by
+    have hh := step_jcc (im := im) (s := y6) (by rw [hy6rip]; exact hc.clocgetj) hy6fl
+    simpa using hh
+  obtain ⟨x7, hx7⟩ : ∃ u : X86Int.St, u = { y6 with rip := entry + 126 } := ⟨_, rfl⟩
+  have hx7rip : x7.rip = entry + 126 := by rw [hx7]
+  have hx7r0 : x7.reg 0 = some 140 := by
+    rw [hx7]
+    show ({ y6 with rip := entry + 126 }).reg 0 = some 140
+    rw [reg_with_rip]; exact hy6r0
+  have hx7r1 : x7.reg 1 = some i := by
+    rw [hx7]
+    show ({ y6 with rip := entry + 126 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy6r1
+  have hx7r6 : x7.reg 6 = some c := by
+    rw [hx7]
+    show ({ y6 with rip := entry + 126 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy6r6
+  have hx7r7 : x7.reg 7 = some w := by
+    rw [hx7]
+    show ({ y6 with rip := entry + 126 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy6r7
+  have hx7r8 : x7.reg 8 = some h.d := by
+    rw [hx7]
+    show ({ y6 with rip := entry + 126 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy6r8
+  have hx7r9 : x7.reg 9 = some h.a := by
+    rw [hx7]
+    show ({ y6 with rip := entry + 126 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy6r9
+  have hx7r4 : x7.reg 4 = some sp := by
+    rw [hx7]
+    show ({ y6 with rip := entry + 126 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy6r4
+  have hx7mem : x7.mem = s.mem := by
+    rw [hx7]
+    show ({ y6 with rip := entry + 126 }).mem = s.mem
+    rw [mem_with_rip]; exact hy6mem
+  have gx7 : ∀ q, q ≠ 0 → x7.reg q = s.reg q := by
+    intro q h0
+    rw [hx7]
+    show ({ y6 with rip := entry + 126 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy6 q h0
+
+  have e21 : X86Int.step im x7 = .ok { x7 with fl := (aluF .sub 140 (135 % W)).2, rip := x7.rip + 7 } :=
+    step_cmpI (by rw [hx7rip]; exact hc.clocset) hx7r0
+  obtain ⟨y7, hy7⟩ : ∃ u : X86Int.St, u = { x7 with fl := (aluF .sub 140 (135 % W)).2, rip := x7.rip + 7 } := ⟨_, rfl⟩
+  have hy7rip : y7.rip = entry + 133 := by rw [hy7]; show x7.rip + 7 = entry + 133; rw [hx7rip]
+
+  have hy7fl : X86Int.cond y7.fl 5 = some true := by
+    have hz : y7.fl.zf = some false := by
+      rw [hy7]
+      show (aluF .sub 140 (135 % W)).2.zf = some false
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy7r0 : y7.reg 0 = some 140 := by rw [hy7]; show x7.reg 0 = some 140; exact hx7r0
+  have hy7r1 : y7.reg 1 = some i := by rw [hy7]; show x7.reg 1 = some i; exact hx7r1
+  have hy7r6 : y7.reg 6 = some c := by rw [hy7]; show x7.reg 6 = some c; exact hx7r6
+  have hy7r7 : y7.reg 7 = some w := by rw [hy7]; show x7.reg 7 = some w; exact hx7r7
+  have hy7r8 : y7.reg 8 = some h.d := by rw [hy7]; show x7.reg 8 = some h.d; exact hx7r8
+  have hy7r9 : y7.reg 9 = some h.a := by rw [hy7]; show x7.reg 9 = some h.a; exact hx7r9
+  have hy7r4 : y7.reg 4 = some sp := by rw [hy7]; show x7.reg 4 = some sp; exact hx7r4
+  have hy7mem : y7.mem = s.mem := by rw [hy7]; show x7.mem = s.mem; exact hx7mem
+  have gy7 : ∀ q, q ≠ 0 → y7.reg q = s.reg q := by
+    intro q h0
+    rw [hy7]; show x7.reg q = s.reg q; exact gx7 q h0
+
+  have e22 : X86Int.step im y7 = .ok { y7 with rip := entry + 140 } := by
+    have hh := step_jcc (im := im) (s := y7) (by rw [hy7rip]; exact hc.clocsetj) hy7fl
+    simpa using hh
+  obtain ⟨x8, hx8⟩ : ∃ u : X86Int.St, u = { y7 with rip := entry + 140 } := ⟨_, rfl⟩
+  have hx8rip : x8.rip = entry + 140 := by rw [hx8]
+  have hx8r0 : x8.reg 0 = some 140 := by
+    rw [hx8]
+    show ({ y7 with rip := entry + 140 }).reg 0 = some 140
+    rw [reg_with_rip]; exact hy7r0
+  have hx8r1 : x8.reg 1 = some i := by
+    rw [hx8]
+    show ({ y7 with rip := entry + 140 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy7r1
+  have hx8r6 : x8.reg 6 = some c := by
+    rw [hx8]
+    show ({ y7 with rip := entry + 140 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy7r6
+  have hx8r7 : x8.reg 7 = some w := by
+    rw [hx8]
+    show ({ y7 with rip := entry + 140 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy7r7
+  have hx8r8 : x8.reg 8 = some h.d := by
+    rw [hx8]
+    show ({ y7 with rip := entry + 140 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy7r8
+  have hx8r9 : x8.reg 9 = some h.a := by
+    rw [hx8]
+    show ({ y7 with rip := entry + 140 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy7r9
+  have hx8r4 : x8.reg 4 = some sp := by
+    rw [hx8]
+    show ({ y7 with rip := entry + 140 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy7r4
+  have hx8mem : x8.mem = s.mem := by
+    rw [hx8]
+    show ({ y7 with rip := entry + 140 }).mem = s.mem
+    rw [mem_with_rip]; exact hy7mem
+  have gx8 : ∀ q, q ≠ 0 → x8.reg q = s.reg q := by
+    intro q h0
+    rw [hx8]
+    show ({ y7 with rip := entry + 140 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy7 q h0
+
+  have e23 : X86Int.step im x8 = .ok { x8 with fl := (aluF .sub 140 (136 % W)).2, rip := x8.rip + 7 } :=
+    step_cmpI (by rw [hx8rip]; exact hc.cjmp) hx8r0
+  obtain ⟨y8, hy8⟩ : ∃ u : X86Int.St, u = { x8 with fl := (aluF .sub 140 (136 % W)).2, rip := x8.rip + 7 } := ⟨_, rfl⟩
+  have hy8rip : y8.rip = entry + 147 := by rw [hy8]; show x8.rip + 7 = entry + 147; rw [hx8rip]
+
+  have hy8fl : X86Int.cond y8.fl 5 = some true := by
+    have hz : y8.fl.zf = some false := by
+      rw [hy8]
+      show (aluF .sub 140 (136 % W)).2.zf = some false
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy8r0 : y8.reg 0 = some 140 := by rw [hy8]; show x8.reg 0 = some 140; exact hx8r0
+  have hy8r1 : y8.reg 1 = some i := by rw [hy8]; show x8.reg 1 = some i; exact hx8r1
+  have hy8r6 : y8.reg 6 = some c := by rw [hy8]; show x8.reg 6 = some c; exact hx8r6
+  have hy8r7 : y8.reg 7 = some w := by rw [hy8]; show x8.reg 7 = some w; exact hx8r7
+  have hy8r8 : y8.reg 8 = some h.d := by rw [hy8]; show x8.reg 8 = some h.d; exact hx8r8
+  have hy8r9 : y8.reg 9 = some h.a := by rw [hy8]; show x8.reg 9 = some h.a; exact hx8r9
+  have hy8r4 : y8.reg 4 = some sp := by rw [hy8]; show x8.reg 4 = some sp; exact hx8r4
+  have hy8mem : y8.mem = s.mem := by rw [hy8]; show x8.mem = s.mem; exact hx8mem
+  have gy8 : ∀ q, q ≠ 0 → y8.reg q = s.reg q := by
+    intro q h0
+    rw [hy8]; show x8.reg q = s.reg q; exact gx8 q h0
+
+  have e24 : X86Int.step im y8 = .ok { y8 with rip := entry + 154 } := by
+    have hh := step_jcc (im := im) (s := y8) (by rw [hy8rip]; exact hc.cjmpj) hy8fl
+    simpa using hh
+  obtain ⟨x9, hx9⟩ : ∃ u : X86Int.St, u = { y8 with rip := entry + 154 } := ⟨_, rfl⟩
+  have hx9rip : x9.rip = entry + 154 := by rw [hx9]
+  have hx9r0 : x9.reg 0 = some 140 := by
+    rw [hx9]
+    show ({ y8 with rip := entry + 154 }).reg 0 = some 140
+    rw [reg_with_rip]; exact hy8r0
+  have hx9r1 : x9.reg 1 = some i := by
+    rw [hx9]
+    show ({ y8 with rip := entry + 154 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy8r1
+  have hx9r6 : x9.reg 6 = some c := by
+    rw [hx9]
+    show ({ y8 with rip := entry + 154 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy8r6
+  have hx9r7 : x9.reg 7 = some w := by
+    rw [hx9]
+    show ({ y8 with rip := entry + 154 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy8r7
+  have hx9r8 : x9.reg 8 = some h.d := by
+    rw [hx9]
+    show ({ y8 with rip := entry + 154 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy8r8
+  have hx9r9 : x9.reg 9 = some h.a := by
+    rw [hx9]
+    show ({ y8 with rip := entry + 154 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy8r9
+  have hx9r4 : x9.reg 4 = some sp := by
+    rw [hx9]
+    show ({ y8 with rip := entry + 154 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy8r4
+  have hx9mem : x9.mem = s.mem := by
+    rw [hx9]
+    show ({ y8 with rip := entry + 154 }).mem = s.mem
+    rw [mem_with_rip]; exact hy8mem
+  have gx9 : ∀ q, q ≠ 0 → x9.reg q = s.reg q := by
+    intro q h0
+    rw [hx9]
+    show ({ y8 with rip := entry + 154 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy8 q h0
+
+  have e25 : X86Int.step im x9 = .ok { x9 with fl := (aluF .sub 140 (137 % W)).2, rip := x9.rip + 7 } :=
+    step_cmpI (by rw [hx9rip]; exact hc.cjz) hx9r0
+  obtain ⟨y9, hy9⟩ : ∃ u : X86Int.St, u = { x9 with fl := (aluF .sub 140 (137 % W)).2, rip := x9.rip + 7 } := ⟨_, rfl⟩
+  have hy9rip : y9.rip = entry + 161 := by rw [hy9]; show x9.rip + 7 = entry + 161; rw [hx9rip]
+
+  have hy9fl : X86Int.cond y9.fl 5 = some true := by
+    have hz : y9.fl.zf = some false := by
+      rw [hy9]
+      show (aluF .sub 140 (137 % W)).2.zf = some false
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy9r0 : y9.reg 0 = some 140 := by rw [hy9]; show x9.reg 0 = some 140; exact hx9r0
+  have hy9r1 : y9.reg 1 = some i := by rw [hy9]; show x9.reg 1 = some i; exact hx9r1
+  have hy9r6 : y9.reg 6 = some c := by rw [hy9]; show x9.reg 6 = some c; exact hx9r6
+  have hy9r7 : y9.reg 7 = some w := by rw [hy9]; show x9.reg 7 = some w; exact hx9r7
+  have hy9r8 : y9.reg 8 = some h.d := by rw [hy9]; show x9.reg 8 = some h.d; exact hx9r8
+  have hy9r9 : y9.reg 9 = some h.a := by rw [hy9]; show x9.reg 9 = some h.a; exact hx9r9
+  have hy9r4 : y9.reg 4 = some sp := by rw [hy9]; show x9.reg 4 = some sp; exact hx9r4
+  have hy9mem : y9.mem = s.mem := by rw [hy9]; show x9.mem = s.mem; exact hx9mem
+  have gy9 : ∀ q, q ≠ 0 → y9.reg q = s.reg q := by
+    intro q h0
+    rw [hy9]; show x9.reg q = s.reg q; exact gx9 q h0
+
+  have e26 : X86Int.step im y9 = .ok { y9 with rip := entry + 168 } := by
+    have hh := step_jcc (im := im) (s := y9) (by rw [hy9rip]; exact hc.cjzj) hy9fl
+    simpa using hh
+  obtain ⟨x10, hx10⟩ : ∃ u : X86Int.St, u = { y9 with rip := entry + 168 } := ⟨_, rfl⟩
+  have hx10rip : x10.rip = entry + 168 := by rw [hx10]
+  have hx10r0 : x10.reg 0 = some 140 := by
+    rw [hx10]
+    show ({ y9 with rip := entry + 168 }).reg 0 = some 140
+    rw [reg_with_rip]; exact hy9r0
+  have hx10r1 : x10.reg 1 = some i := by
+    rw [hx10]
+    show ({ y9 with rip := entry + 168 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy9r1
+  have hx10r6 : x10.reg 6 = some c := by
+    rw [hx10]
+    show ({ y9 with rip := entry + 168 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy9r6
+  have hx10r7 : x10.reg 7 = some w := by
+    rw [hx10]
+    show ({ y9 with rip := entry + 168 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy9r7
+  have hx10r8 : x10.reg 8 = some h.d := by
+    rw [hx10]
+    show ({ y9 with rip := entry + 168 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy9r8
+  have hx10r9 : x10.reg 9 = some h.a := by
+    rw [hx10]
+    show ({ y9 with rip := entry + 168 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy9r9
+  have hx10r4 : x10.reg 4 = some sp := by
+    rw [hx10]
+    show ({ y9 with rip := entry + 168 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy9r4
+  have hx10mem : x10.mem = s.mem := by
+    rw [hx10]
+    show ({ y9 with rip := entry + 168 }).mem = s.mem
+    rw [mem_with_rip]; exact hy9mem
+  have gx10 : ∀ q, q ≠ 0 → x10.reg q = s.reg q := by
+    intro q h0
+    rw [hx10]
+    show ({ y9 with rip := entry + 168 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy9 q h0
+
+  have e27 : X86Int.step im x10 = .ok { x10 with fl := (aluF .sub 140 (138 % W)).2, rip := x10.rip + 7 } :=
+    step_cmpI (by rw [hx10rip]; exact hc.cjnz) hx10r0
+  obtain ⟨y10, hy10⟩ : ∃ u : X86Int.St, u = { x10 with fl := (aluF .sub 140 (138 % W)).2, rip := x10.rip + 7 } := ⟨_, rfl⟩
+  have hy10rip : y10.rip = entry + 175 := by rw [hy10]; show x10.rip + 7 = entry + 175; rw [hx10rip]
+
+  have hy10fl : X86Int.cond y10.fl 5 = some true := by
+    have hz : y10.fl.zf = some false := by
+      rw [hy10]
+      show (aluF .sub 140 (138 % W)).2.zf = some false
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy10r0 : y10.reg 0 = some 140 := by rw [hy10]; show x10.reg 0 = some 140; exact hx10r0
+  have hy10r1 : y10.reg 1 = some i := by rw [hy10]; show x10.reg 1 = some i; exact hx10r1
+  have hy10r6 : y10.reg 6 = some c := by rw [hy10]; show x10.reg 6 = some c; exact hx10r6
+  have hy10r7 : y10.reg 7 = some w := by rw [hy10]; show x10.reg 7 = some w; exact hx10r7
+  have hy10r8 : y10.reg 8 = some h.d := by rw [hy10]; show x10.reg 8 = some h.d; exact hx10r8
+  have hy10r9 : y10.reg 9 = some h.a := by rw [hy10]; show x10.reg 9 = some h.a; exact hx10r9
+  have hy10r4 : y10.reg 4 = some sp := by rw [hy10]; show x10.reg 4 = some sp; exact hx10r4
+  have hy10mem : y10.mem = s.mem := by rw [hy10]; show x10.mem = s.mem; exact hx10mem
+  have gy10 : ∀ q, q ≠ 0 → y10.reg q = s.reg q := by
+    intro q h0
+    rw [hy10]; show x10.reg q = s.reg q; exact gx10 q h0
+
+  have e28 : X86Int.step im y10 = .ok { y10 with rip := entry + 182 } := by
+    have hh := step_jcc (im := im) (s := y10) (by rw [hy10rip]; exact hc.cjnzj) hy10fl
+    simpa using hh
+  obtain ⟨x11, hx11⟩ : ∃ u : X86Int.St, u = { y10 with rip := entry + 182 } := ⟨_, rfl⟩
+  have hx11rip : x11.rip = entry + 182 := by rw [hx11]
+  have hx11r0 : x11.reg 0 = some 140 := by
+    rw [hx11]
+    show ({ y10 with rip := entry + 182 }).reg 0 = some 140
+    rw [reg_with_rip]; exact hy10r0
+  have hx11r1 : x11.reg 1 = some i := by
+    rw [hx11]
+    show ({ y10 with rip := entry + 182 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy10r1
+  have hx11r6 : x11.reg 6 = some c := by
+    rw [hx11]
+    show ({ y10 with rip := entry + 182 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy10r6
+  have hx11r7 : x11.reg 7 = some w := by
+    rw [hx11]
+    show ({ y10 with rip := entry + 182 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy10r7
+  have hx11r8 : x11.reg 8 = some h.d := by
+    rw [hx11]
+    show ({ y10 with rip := entry + 182 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy10r8
+  have hx11r9 : x11.reg 9 = some h.a := by
+    rw [hx11]
+    show ({ y10 with rip := entry + 182 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy10r9
+  have hx11r4 : x11.reg 4 = some sp := by
+    rw [hx11]
+    show ({ y10 with rip := entry + 182 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy10r4
+  have hx11mem : x11.mem = s.mem := by
+    rw [hx11]
+    show ({ y10 with rip := entry + 182 }).mem = s.mem
+    rw [mem_with_rip]; exact hy10mem
+  have gx11 : ∀ q, q ≠ 0 → x11.reg q = s.reg q := by
+    intro q h0
+    rw [hx11]
+    show ({ y10 with rip := entry + 182 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy10 q h0
+
+  have e29 : X86Int.step im x11 = .ok { x11 with fl := (aluF .sub 140 (139 % W)).2, rip := x11.rip + 7 } :=
+    step_cmpI (by rw [hx11rip]; exact hc.ccall) hx11r0
+  obtain ⟨y11, hy11⟩ : ∃ u : X86Int.St, u = { x11 with fl := (aluF .sub 140 (139 % W)).2, rip := x11.rip + 7 } := ⟨_, rfl⟩
+  have hy11rip : y11.rip = entry + 189 := by rw [hy11]; show x11.rip + 7 = entry + 189; rw [hx11rip]
+
+  have hy11fl : X86Int.cond y11.fl 5 = some true := by
+    have hz : y11.fl.zf = some false := by
+      rw [hy11]
+      show (aluF .sub 140 (139 % W)).2.zf = some false
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy11r0 : y11.reg 0 = some 140 := by rw [hy11]; show x11.reg 0 = some 140; exact hx11r0
+  have hy11r1 : y11.reg 1 = some i := by rw [hy11]; show x11.reg 1 = some i; exact hx11r1
+  have hy11r6 : y11.reg 6 = some c := by rw [hy11]; show x11.reg 6 = some c; exact hx11r6
+  have hy11r7 : y11.reg 7 = some w := by rw [hy11]; show x11.reg 7 = some w; exact hx11r7
+  have hy11r8 : y11.reg 8 = some h.d := by rw [hy11]; show x11.reg 8 = some h.d; exact hx11r8
+  have hy11r9 : y11.reg 9 = some h.a := by rw [hy11]; show x11.reg 9 = some h.a; exact hx11r9
+  have hy11r4 : y11.reg 4 = some sp := by rw [hy11]; show x11.reg 4 = some sp; exact hx11r4
+  have hy11mem : y11.mem = s.mem := by rw [hy11]; show x11.mem = s.mem; exact hx11mem
+  have gy11 : ∀ q, q ≠ 0 → y11.reg q = s.reg q := by
+    intro q h0
+    rw [hy11]; show x11.reg q = s.reg q; exact gx11 q h0
+
+  have e30 : X86Int.step im y11 = .ok { y11 with rip := entry + 196 } := by
+    have hh := step_jcc (im := im) (s := y11) (by rw [hy11rip]; exact hc.ccallj) hy11fl
+    simpa using hh
+  obtain ⟨x12, hx12⟩ : ∃ u : X86Int.St, u = { y11 with rip := entry + 196 } := ⟨_, rfl⟩
+  have hx12rip : x12.rip = entry + 196 := by rw [hx12]
+  have hx12r0 : x12.reg 0 = some 140 := by
+    rw [hx12]
+    show ({ y11 with rip := entry + 196 }).reg 0 = some 140
+    rw [reg_with_rip]; exact hy11r0
+  have hx12r1 : x12.reg 1 = some i := by
+    rw [hx12]
+    show ({ y11 with rip := entry + 196 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy11r1
+  have hx12r6 : x12.reg 6 = some c := by
+    rw [hx12]
+    show ({ y11 with rip := entry + 196 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy11r6
+  have hx12r7 : x12.reg 7 = some w := by
+    rw [hx12]
+    show ({ y11 with rip := entry + 196 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy11r7
+  have hx12r8 : x12.reg 8 = some h.d := by
+    rw [hx12]
+    show ({ y11 with rip := entry + 196 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy11r8
+  have hx12r9 : x12.reg 9 = some h.a := by
+    rw [hx12]
+    show ({ y11 with rip := entry + 196 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy11r9
+  have hx12r4 : x12.reg 4 = some sp := by
+    rw [hx12]
+    show ({ y11 with rip := entry + 196 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy11r4
+  have hx12mem : x12.mem = s.mem := by
+    rw [hx12]
+    show ({ y11 with rip := entry + 196 }).mem = s.mem
+    rw [mem_with_rip]; exact hy11mem
+  have gx12 : ∀ q, q ≠ 0 → x12.reg q = s.reg q := by
+    intro q h0
+    rw [hx12]
+    show ({ y11 with rip := entry + 196 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy11 q h0
+
+  have e31 : X86Int.step im x12 = .ok { x12 with fl := (aluF .sub 140 (140 % W)).2, rip := x12.rip + 7 } :=
+    step_cmpI (by rw [hx12rip]; exact hc.cret) hx12r0
+  obtain ⟨y12, hy12⟩ : ∃ u : X86Int.St, u = { x12 with fl := (aluF .sub 140 (140 % W)).2, rip := x12.rip + 7 } := ⟨_, rfl⟩
+  have hy12rip : y12.rip = entry + 203 := by rw [hy12]; show x12.rip + 7 = entry + 203; rw [hx12rip]
+
+  have hy12fl : X86Int.cond y12.fl 5 = some false := by
+    have hz : y12.fl.zf = some true := by
+      rw [hy12]
+      show (aluF .sub 140 (140 % W)).2.zf = some true
+      rw [aluF_zf, aluF_sub_fst]; decide
+    have hh := cond_cc5 hz
+    simpa using hh
+  have hy12r0 : y12.reg 0 = some 140 := by rw [hy12]; show x12.reg 0 = some 140; exact hx12r0
+  have hy12r1 : y12.reg 1 = some i := by rw [hy12]; show x12.reg 1 = some i; exact hx12r1
+  have hy12r6 : y12.reg 6 = some c := by rw [hy12]; show x12.reg 6 = some c; exact hx12r6
+  have hy12r7 : y12.reg 7 = some w := by rw [hy12]; show x12.reg 7 = some w; exact hx12r7
+  have hy12r8 : y12.reg 8 = some h.d := by rw [hy12]; show x12.reg 8 = some h.d; exact hx12r8
+  have hy12r9 : y12.reg 9 = some h.a := by rw [hy12]; show x12.reg 9 = some h.a; exact hx12r9
+  have hy12r4 : y12.reg 4 = some sp := by rw [hy12]; show x12.reg 4 = some sp; exact hx12r4
+  have hy12mem : y12.mem = s.mem := by rw [hy12]; show x12.mem = s.mem; exact hx12mem
+  have gy12 : ∀ q, q ≠ 0 → y12.reg q = s.reg q := by
+    intro q h0
+    rw [hy12]; show x12.reg q = s.reg q; exact gx12 q h0
+
+  have e32 : X86Int.step im y12 = .ok { y12 with rip := entry + 205 } := by
+    have hh := step_jcc (im := im) (s := y12) (by rw [hy12rip]; exact hc.cretj) hy12fl
+    simpa [hy12rip] using hh
+  obtain ⟨z9, hz9⟩ : ∃ u : X86Int.St, u = { y12 with rip := entry + 205 } := ⟨_, rfl⟩
+  have hz9rip : z9.rip = entry + 205 := by rw [hz9]
+  have hz9r0 : z9.reg 0 = some 140 := by
+    rw [hz9]
+    show ({ y12 with rip := entry + 205 }).reg 0 = some 140
+    rw [reg_with_rip]; exact hy12r0
+  have hz9r1 : z9.reg 1 = some i := by
+    rw [hz9]
+    show ({ y12 with rip := entry + 205 }).reg 1 = some i
+    rw [reg_with_rip]; exact hy12r1
+  have hz9r6 : z9.reg 6 = some c := by
+    rw [hz9]
+    show ({ y12 with rip := entry + 205 }).reg 6 = some c
+    rw [reg_with_rip]; exact hy12r6
+  have hz9r7 : z9.reg 7 = some w := by
+    rw [hz9]
+    show ({ y12 with rip := entry + 205 }).reg 7 = some w
+    rw [reg_with_rip]; exact hy12r7
+  have hz9r8 : z9.reg 8 = some h.d := by
+    rw [hz9]
+    show ({ y12 with rip := entry + 205 }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hy12r8
+  have hz9r9 : z9.reg 9 = some h.a := by
+    rw [hz9]
+    show ({ y12 with rip := entry + 205 }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hy12r9
+  have hz9r4 : z9.reg 4 = some sp := by
+    rw [hz9]
+    show ({ y12 with rip := entry + 205 }).reg 4 = some sp
+    rw [reg_with_rip]; exact hy12r4
+  have hz9mem : z9.mem = s.mem := by
+    rw [hz9]
+    show ({ y12 with rip := entry + 205 }).mem = s.mem
+    rw [mem_with_rip]; exact hy12mem
+  have gz9 : ∀ q, q ≠ 0 → z9.reg q = s.reg q := by
+    intro q h0
+    rw [hz9]
+    show ({ y12 with rip := entry + 205 }).reg q = s.reg q
+    rw [reg_with_rip]; exact gy12 q h0
+
+  have e33 : X86Int.step im z9 = .ok { z9 with rip := ret } :=
+    step_jmp (by rw [hz9rip]; exact hc.cretjmp)
+  obtain ⟨fin, hfin⟩ : ∃ u : X86Int.St, u = { z9 with rip := ret } := ⟨_, rfl⟩
+  have rw1 : run im 1 (Out.ok s) = Out.ok w1 := by rw [run_succ_ok im 0 s, e1, ← hw1, run_zero]
+  have rw2 : run im 1 (Out.ok w1) = Out.ok w2 := by rw [run_succ_ok im 0 w1, e2, ← hw2, run_zero]
+  have rw3 : run im 1 (Out.ok w2) = Out.ok w3 := by rw [run_succ_ok im 0 w2, e3, ← hw3, run_zero]
+  have rw4 : run im 1 (Out.ok w3) = Out.ok w4 := by rw [run_succ_ok im 0 w3, e4, ← hw4, run_zero]
+  have rw5 : run im 1 (Out.ok w4) = Out.ok w5 := by rw [run_succ_ok im 0 w4, e5, ← hw5, run_zero]
+  have rx0 : run im 1 (Out.ok w5) = Out.ok x0 := by rw [run_succ_ok im 0 w5, e6, ← hx0, run_zero]
+  have ry0 : run im 1 (Out.ok x0) = Out.ok y0 := by rw [run_succ_ok im 0 x0, e7, ← hy0, run_zero]
+  have rx1 : run im 1 (Out.ok y0) = Out.ok x1 := by rw [run_succ_ok im 0 y0, e8, ← hx1, run_zero]
+  have ry1 : run im 1 (Out.ok x1) = Out.ok y1 := by rw [run_succ_ok im 0 x1, e9, ← hy1, run_zero]
+  have rx2 : run im 1 (Out.ok y1) = Out.ok x2 := by rw [run_succ_ok im 0 y1, e10, ← hx2, run_zero]
+  have ry2 : run im 1 (Out.ok x2) = Out.ok y2 := by rw [run_succ_ok im 0 x2, e11, ← hy2, run_zero]
+  have rx3 : run im 1 (Out.ok y2) = Out.ok x3 := by rw [run_succ_ok im 0 y2, e12, ← hx3, run_zero]
+  have ry3 : run im 1 (Out.ok x3) = Out.ok y3 := by rw [run_succ_ok im 0 x3, e13, ← hy3, run_zero]
+  have rx4 : run im 1 (Out.ok y3) = Out.ok x4 := by rw [run_succ_ok im 0 y3, e14, ← hx4, run_zero]
+  have ry4 : run im 1 (Out.ok x4) = Out.ok y4 := by rw [run_succ_ok im 0 x4, e15, ← hy4, run_zero]
+  have rx5 : run im 1 (Out.ok y4) = Out.ok x5 := by rw [run_succ_ok im 0 y4, e16, ← hx5, run_zero]
+  have ry5 : run im 1 (Out.ok x5) = Out.ok y5 := by rw [run_succ_ok im 0 x5, e17, ← hy5, run_zero]
+  have rx6 : run im 1 (Out.ok y5) = Out.ok x6 := by rw [run_succ_ok im 0 y5, e18, ← hx6, run_zero]
+  have ry6 : run im 1 (Out.ok x6) = Out.ok y6 := by rw [run_succ_ok im 0 x6, e19, ← hy6, run_zero]
+  have rx7 : run im 1 (Out.ok y6) = Out.ok x7 := by rw [run_succ_ok im 0 y6, e20, ← hx7, run_zero]
+  have ry7 : run im 1 (Out.ok x7) = Out.ok y7 := by rw [run_succ_ok im 0 x7, e21, ← hy7, run_zero]
+  have rx8 : run im 1 (Out.ok y7) = Out.ok x8 := by rw [run_succ_ok im 0 y7, e22, ← hx8, run_zero]
+  have ry8 : run im 1 (Out.ok x8) = Out.ok y8 := by rw [run_succ_ok im 0 x8, e23, ← hy8, run_zero]
+  have rx9 : run im 1 (Out.ok y8) = Out.ok x9 := by rw [run_succ_ok im 0 y8, e24, ← hx9, run_zero]
+  have ry9 : run im 1 (Out.ok x9) = Out.ok y9 := by rw [run_succ_ok im 0 x9, e25, ← hy9, run_zero]
+  have rx10 : run im 1 (Out.ok y9) = Out.ok x10 := by rw [run_succ_ok im 0 y9, e26, ← hx10, run_zero]
+  have ry10 : run im 1 (Out.ok x10) = Out.ok y10 := by rw [run_succ_ok im 0 x10, e27, ← hy10, run_zero]
+  have rx11 : run im 1 (Out.ok y10) = Out.ok x11 := by rw [run_succ_ok im 0 y10, e28, ← hx11, run_zero]
+  have ry11 : run im 1 (Out.ok x11) = Out.ok y11 := by rw [run_succ_ok im 0 x11, e29, ← hy11, run_zero]
+  have rx12 : run im 1 (Out.ok y11) = Out.ok x12 := by rw [run_succ_ok im 0 y11, e30, ← hx12, run_zero]
+  have ry12 : run im 1 (Out.ok x12) = Out.ok y12 := by rw [run_succ_ok im 0 x12, e31, ← hy12, run_zero]
+  have rz9 : run im 1 (Out.ok y12) = Out.ok z9 := by rw [run_succ_ok im 0 y12, e32, ← hz9, run_zero]
+  have rfin : run im 1 (Out.ok z9) = Out.ok fin := by rw [run_succ_ok im 0 z9, e33, ← hfin, run_zero]
+  refine ⟨33, fin, by rw [run_add im 1 32, rw1, run_add im 1 31, rw2, run_add im 1 30, rw3, run_add im 1 29, rw4, run_add im 1 28, rw5, run_add im 1 27, rx0, run_add im 1 26, ry0, run_add im 1 25, rx1, run_add im 1 24, ry1, run_add im 1 23, rx2, run_add im 1 22, ry2, run_add im 1 21, rx3, run_add im 1 20, ry3, run_add im 1 19, rx4, run_add im 1 18, ry4, run_add im 1 17, rx5, run_add im 1 16, ry5, run_add im 1 15, rx6, run_add im 1 14, ry6, run_add im 1 13, rx7, run_add im 1 12, ry7, run_add im 1 11, rx8, run_add im 1 10, ry8, run_add im 1 9, rx9, run_add im 1 8, ry9, run_add im 1 7, rx10, run_add im 1 6, ry10, run_add im 1 5, rx11, run_add im 1 4, ry11, run_add im 1 3, rx12, run_add im 1 2, ry12, run_add im 1 1, rz9, rfin],
+    by rw [hfin], ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
+  · rw [hfin]; show ({ z9 with rip := ret }).reg 0 = some 140
+    rw [reg_with_rip]; exact hz9r0
+  · rw [hfin]; show ({ z9 with rip := ret }).reg 1 = some i
+    rw [reg_with_rip]; exact hz9r1
+  · rw [hfin]; show ({ z9 with rip := ret }).reg 6 = some c
+    rw [reg_with_rip]; exact hz9r6
+  · rw [hfin]; show ({ z9 with rip := ret }).reg 7 = some w
+    rw [reg_with_rip]; exact hz9r7
+  · rw [hfin]; show ({ z9 with rip := ret }).reg 8 = some h.d
+    rw [reg_with_rip]; exact hz9r8
+  · rw [hfin]; show ({ z9 with rip := ret }).reg 9 = some h.a
+    rw [reg_with_rip]; exact hz9r9
+  · rw [hfin]; show ({ z9 with rip := ret }).reg 4 = some sp
+    rw [reg_with_rip]; exact hz9r4
+  · intro q h0
+    rw [hfin]; show ({ z9 with rip := ret }).reg q = s.reg q
+    rw [reg_with_rip]; exact gz9 q h0
+  · have h1 : fin.mem = s.mem := by rw [hfin, mem_with_rip]; exact hz9mem
+    exact h1
+
 end SporosX1
