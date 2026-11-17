@@ -202,6 +202,12 @@ class Launcher(unittest.TestCase):
             self.assertIn(locked["derived_sif_sha256"], step["script"])
             self.assertNotIn("UNPINNED", step["script"])
             self.assertIn(locked["derived_sif_sha256"], doc)
+        self.assertEqual(doc.count("# PAUSE LLM services"), 1)
+        self.assertIn("Probes above stay with the services up", doc)
+        self.assertIn("Do this even if either timing command failed", doc)
+        self.assertLess(doc.index("--step probe-sm75"), doc.index("# PAUSE LLM services"))
+        self.assertLess(doc.index("# PAUSE LLM services"), doc.index("--step timing-sm86"))
+        self.assertLess(doc.index("--step timing-sm75"), doc.index("# RESUME LLM services"))
         for step in plan["steps"]:
             argv = step["argv"]
             self.assertEqual(argv[0], "srun")

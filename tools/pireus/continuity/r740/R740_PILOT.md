@@ -25,24 +25,28 @@ Run this from inside the pod `slurm-pilot-worker-gpuorangefs-multi-*`, where `/s
 
 `run --name NAME --step STEP` is one `srun`, with the argv below, on that already prepared directory. It hashes the SIF first. `STEP` is `probe-sm86`, `probe-sm75`, `timing-sm86`, or `timing-sm75`. A failed probe blocks only that GPU's timing. Timing refuses unless the same GPU's probe succeeded in the same run directory.
 
-Pause the LLM services after `prepare` and before the two probes. Resume them after both probes. Pause them again before the two timings, and resume them after the timings. Parity between those windows is local and is not an `srun`.
+The probes run while the LLM services stay up. There is one pause, and it covers only the timing measurements: pause immediately before `timing-sm86`, and resume immediately after `timing-sm75`. Resume as well when `timing-sm86` or `timing-sm75` exits non-zero, before any retry or inspection. Do not leave the services paused. Parity stays local and is not an `srun`.
+
+`RUN_NAME_PLACEHOLDER` is not a directory. Replace it everywhere below with one fresh name. The launcher accepts `YYYYMMDDTHHMMSSZ-<pid>-<16 lowercase hex digits>`, the same shape as `new_run_name`. Generate it in the pod:
+
+```
+python3 -c 'import os,secrets; from datetime import datetime,timezone; print(datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")+"-"+str(os.getpid())+"-"+secrets.token_hex(8))'
+```
 
 ```
 python3 tools/pireus/continuity/r740/r740_launch.py bundle --out /scratch/pireus/r740/bundle-phase-a
-python3 tools/pireus/continuity/r740/r740_launch.py prepare --name 20261117T120000Z-1-0123456789abcdef --inputs /scratch/pireus/r740/bundle-phase-a
-# PAUSE LLM services
-python3 tools/pireus/continuity/r740/r740_launch.py run --name 20261117T120000Z-1-0123456789abcdef --step probe-sm86
-python3 tools/pireus/continuity/r740/r740_launch.py run --name 20261117T120000Z-1-0123456789abcdef --step probe-sm75
-# RESUME LLM services
-# PAUSE LLM services
-python3 tools/pireus/continuity/r740/r740_launch.py run --name 20261117T120000Z-1-0123456789abcdef --step timing-sm86
-python3 tools/pireus/continuity/r740/r740_launch.py run --name 20261117T120000Z-1-0123456789abcdef --step timing-sm75
-# RESUME LLM services
+python3 tools/pireus/continuity/r740/r740_launch.py prepare --name RUN_NAME_PLACEHOLDER --inputs /scratch/pireus/r740/bundle-phase-a
+python3 tools/pireus/continuity/r740/r740_launch.py run --name RUN_NAME_PLACEHOLDER --step probe-sm86
+python3 tools/pireus/continuity/r740/r740_launch.py run --name RUN_NAME_PLACEHOLDER --step probe-sm75
+# PAUSE LLM services. Probes above stay with the services up.
+python3 tools/pireus/continuity/r740/r740_launch.py run --name RUN_NAME_PLACEHOLDER --step timing-sm86
+python3 tools/pireus/continuity/r740/r740_launch.py run --name RUN_NAME_PLACEHOLDER --step timing-sm75
+# RESUME LLM services. Do this even if either timing command failed.
 ```
 
-The lines below are what each `--step` emits for review name `20261117T120000Z-1-0123456789abcdef`. A real name is a fresh directory under `/scratch/pireus/r740/runs/`.
+The lines below are what each `--step` emits when the name is the placeholder. A real invocation substitutes the generated name. The directory is `/scratch/pireus/r740/runs/<that name>`, created once by `prepare`.
 
-`run` hashes `/scratch/pireus/images/pireus-r740-amd64.sif` before `srun` and refuses if the size or sha256 differs from the lock. The lines below are the argv for review name `20261117T120000Z-1-0123456789abcdef`, scratch `/scratch/pireus/r740`, `--mem=16G` (the default; 64G is the ceiling), `--time=30`. The digest is the one Infra Sounio declared. Memory is always passed. The step is not `--exclusive`.
+`run` hashes `/scratch/pireus/images/pireus-r740-amd64.sif` before `srun` and refuses if the size or sha256 differs from the lock. The lines below are the argv for review name `RUN_NAME_PLACEHOLDER`, scratch `/scratch/pireus/r740`, `--mem=16G` (the default; 64G is the ceiling), `--time=30`. The digest is the one Infra Sounio declared. Memory is always passed. The step is not `--exclusive`.
 
 Probe A5000, then probe Quadro, then timing A5000, then timing Quadro:
 
@@ -50,7 +54,7 @@ Probe A5000, then probe Quadro, then timing A5000, then timing Quadro:
 srun -p gpu-orangefs -w gpuorangefs-multi-r740-proxmox --nodes=1 --ntasks=1 --ntasks-per-node=1 -c8 --gres=gpu:a5000:1 --mem=16G --propagate=NONE --kill-on-bad-exit=1 --time=30 --job-name=pireus-r740-probe-sm86 bash -c 'set -euo pipefail
 export PIREUS_R740_SIF_SHA256=e68b2794b7718bd0f8943ffbe48c06ca5dcccebebf19e751dbf4186c6ddbbf25
 echo "e68b2794b7718bd0f8943ffbe48c06ca5dcccebebf19e751dbf4186c6ddbbf25  /scratch/pireus/images/pireus-r740-amd64.sif" | sha256sum -c -
-exec /scratch/pireus/r740/runs/20261117T120000Z-1-0123456789abcdef/bin/run_in_container_r740.sh python3 /scratch/pireus/r740/runs/20261117T120000Z-1-0123456789abcdef/bin/r740_observe.py --phase probe --run /scratch/pireus/r740/runs/20261117T120000Z-1-0123456789abcdef --expect-sm 86
+exec /scratch/pireus/r740/runs/RUN_NAME_PLACEHOLDER/bin/run_in_container_r740.sh python3 /scratch/pireus/r740/runs/RUN_NAME_PLACEHOLDER/bin/r740_observe.py --phase probe --run /scratch/pireus/r740/runs/RUN_NAME_PLACEHOLDER --expect-sm 86
 '
 ```
 
@@ -58,7 +62,7 @@ exec /scratch/pireus/r740/runs/20261117T120000Z-1-0123456789abcdef/bin/run_in_co
 srun -p gpu-orangefs -w gpuorangefs-multi-r740-proxmox --nodes=1 --ntasks=1 --ntasks-per-node=1 -c8 --gres=gpu:quadro_rtx_8000:1 --mem=16G --propagate=NONE --kill-on-bad-exit=1 --time=30 --job-name=pireus-r740-probe-sm75 bash -c 'set -euo pipefail
 export PIREUS_R740_SIF_SHA256=e68b2794b7718bd0f8943ffbe48c06ca5dcccebebf19e751dbf4186c6ddbbf25
 echo "e68b2794b7718bd0f8943ffbe48c06ca5dcccebebf19e751dbf4186c6ddbbf25  /scratch/pireus/images/pireus-r740-amd64.sif" | sha256sum -c -
-exec /scratch/pireus/r740/runs/20261117T120000Z-1-0123456789abcdef/bin/run_in_container_r740.sh python3 /scratch/pireus/r740/runs/20261117T120000Z-1-0123456789abcdef/bin/r740_observe.py --phase probe --run /scratch/pireus/r740/runs/20261117T120000Z-1-0123456789abcdef --expect-sm 75
+exec /scratch/pireus/r740/runs/RUN_NAME_PLACEHOLDER/bin/run_in_container_r740.sh python3 /scratch/pireus/r740/runs/RUN_NAME_PLACEHOLDER/bin/r740_observe.py --phase probe --run /scratch/pireus/r740/runs/RUN_NAME_PLACEHOLDER --expect-sm 75
 '
 ```
 
@@ -66,7 +70,7 @@ exec /scratch/pireus/r740/runs/20261117T120000Z-1-0123456789abcdef/bin/run_in_co
 srun -p gpu-orangefs -w gpuorangefs-multi-r740-proxmox --nodes=1 --ntasks=1 --ntasks-per-node=1 -c8 --gres=gpu:a5000:1 --mem=16G --propagate=NONE --kill-on-bad-exit=1 --time=30 --job-name=pireus-r740-timing-sm86 bash -c 'set -euo pipefail
 export PIREUS_R740_SIF_SHA256=e68b2794b7718bd0f8943ffbe48c06ca5dcccebebf19e751dbf4186c6ddbbf25
 echo "e68b2794b7718bd0f8943ffbe48c06ca5dcccebebf19e751dbf4186c6ddbbf25  /scratch/pireus/images/pireus-r740-amd64.sif" | sha256sum -c -
-exec /scratch/pireus/r740/runs/20261117T120000Z-1-0123456789abcdef/bin/run_in_container_r740.sh python3 /scratch/pireus/r740/runs/20261117T120000Z-1-0123456789abcdef/bin/r740_observe.py --phase timing --run /scratch/pireus/r740/runs/20261117T120000Z-1-0123456789abcdef --expect-sm 86
+exec /scratch/pireus/r740/runs/RUN_NAME_PLACEHOLDER/bin/run_in_container_r740.sh python3 /scratch/pireus/r740/runs/RUN_NAME_PLACEHOLDER/bin/r740_observe.py --phase timing --run /scratch/pireus/r740/runs/RUN_NAME_PLACEHOLDER --expect-sm 86
 '
 ```
 
@@ -74,7 +78,7 @@ exec /scratch/pireus/r740/runs/20261117T120000Z-1-0123456789abcdef/bin/run_in_co
 srun -p gpu-orangefs -w gpuorangefs-multi-r740-proxmox --nodes=1 --ntasks=1 --ntasks-per-node=1 -c8 --gres=gpu:quadro_rtx_8000:1 --mem=16G --propagate=NONE --kill-on-bad-exit=1 --time=30 --job-name=pireus-r740-timing-sm75 bash -c 'set -euo pipefail
 export PIREUS_R740_SIF_SHA256=e68b2794b7718bd0f8943ffbe48c06ca5dcccebebf19e751dbf4186c6ddbbf25
 echo "e68b2794b7718bd0f8943ffbe48c06ca5dcccebebf19e751dbf4186c6ddbbf25  /scratch/pireus/images/pireus-r740-amd64.sif" | sha256sum -c -
-exec /scratch/pireus/r740/runs/20261117T120000Z-1-0123456789abcdef/bin/run_in_container_r740.sh python3 /scratch/pireus/r740/runs/20261117T120000Z-1-0123456789abcdef/bin/r740_observe.py --phase timing --run /scratch/pireus/r740/runs/20261117T120000Z-1-0123456789abcdef --expect-sm 75
+exec /scratch/pireus/r740/runs/RUN_NAME_PLACEHOLDER/bin/run_in_container_r740.sh python3 /scratch/pireus/r740/runs/RUN_NAME_PLACEHOLDER/bin/r740_observe.py --phase timing --run /scratch/pireus/r740/runs/RUN_NAME_PLACEHOLDER --expect-sm 75
 '
 ```
 
@@ -99,7 +103,7 @@ Reviewed sbatch for the first step, not executed:
 set -euo pipefail
 export PIREUS_R740_SIF_SHA256=e68b2794b7718bd0f8943ffbe48c06ca5dcccebebf19e751dbf4186c6ddbbf25
 echo "e68b2794b7718bd0f8943ffbe48c06ca5dcccebebf19e751dbf4186c6ddbbf25  /scratch/pireus/images/pireus-r740-amd64.sif" | sha256sum -c -
-exec /scratch/pireus/r740/runs/20261117T120000Z-1-0123456789abcdef/bin/run_in_container_r740.sh python3 /scratch/pireus/r740/runs/20261117T120000Z-1-0123456789abcdef/bin/r740_observe.py --phase probe --run /scratch/pireus/r740/runs/20261117T120000Z-1-0123456789abcdef --expect-sm 86
+exec /scratch/pireus/r740/runs/RUN_NAME_PLACEHOLDER/bin/run_in_container_r740.sh python3 /scratch/pireus/r740/runs/RUN_NAME_PLACEHOLDER/bin/r740_observe.py --phase probe --run /scratch/pireus/r740/runs/RUN_NAME_PLACEHOLDER --expect-sm 86
 ```
 
 The other three steps use the same header with their own `--gres` and `--job-name`.
