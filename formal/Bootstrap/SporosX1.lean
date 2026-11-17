@@ -21378,4 +21378,351 @@ theorem WalkRet_triple {im : Nat → Option (Ins × Nat)} {entry done prim lit s
   · have h1 : fin.mem = s.mem := by rw [hfin, mem_with_rip]; exact hz9mem
     exact h1
 
+
+/-! ### Composition infrastructure
+
+Register-file length is preserved by every run; encoded instructions
+laid out consecutively (`CodeSeq`) split into opcode and immediate
+reads; frames transport the layout, the ann layout and stack room;
+`hstep` unfolds per instruction. -/
+theorem lift_ok {o : Option X86Int.St} {s' : X86Int.St} (h : lift o = .ok s') :
+    o = some s' := by
+  cases o with
+  | none => cases h
+  | some t =>
+    have : t = s' := Out.ok.inj h
+    rw [this]
+
+theorem bind_some {α β : Type} {x : Option α} {f : α → Option β} {b : β}
+    (h : x.bind f = some b) : ∃ a, x = some a ∧ f a = some b := by
+  cases x with
+  | none => cases h
+  | some a => exact ⟨a, rfl, h⟩
+
+theorem exec_regs_length {ins : Ins} {len : Nat} {s s' : X86Int.St}
+    (h : exec ins len s = .ok s') : s'.regs.length = s.regs.length := by
+  cases ins <;> simp only [exec] at h
+  all_goals
+    first
+      | (injection h with h; cases h; simp [St.set])
+      | (have h1 := lift_ok h
+         obtain ⟨a, -, h1⟩ := bind_some h1
+         cases h1; simp [St.set])
+      | (have h1 := lift_ok h
+         obtain ⟨a, -, h1⟩ := bind_some h1
+         obtain ⟨b, -, h1⟩ := bind_some h1
+         cases h1; simp [St.set])
+      | (have h1 := lift_ok h
+         obtain ⟨a, -, h1⟩ := bind_some h1
+         obtain ⟨b, -, h1⟩ := bind_some h1
+         obtain ⟨c, -, h1⟩ := bind_some h1
+         cases h1; simp [St.set])
+      | (split at h <;> (try split at h) <;>
+          (first
+            | cases h
+            | simp [St.set]
+            | (injection h with hh; cases hh; simp [St.set])) <;>
+          simp [St.set])
+
+theorem step_regs_length {im : Nat → Option (Ins × Nat)} {s s' : X86Int.St}
+    (h : X86Int.step im s = .ok s') : s'.regs.length = s.regs.length := by
+  unfold X86Int.step at h
+  cases him : im s.rip with
+  | none => rw [him] at h; cases h
+  | some p =>
+    obtain ⟨ins, len⟩ := p
+    rw [him] at h
+    exact exec_regs_length h
+
+theorem run_regs_length {im : Nat → Option (Ins × Nat)} :
+    ∀ (n : Nat) {s s' : X86Int.St}, run im n (Out.ok s) = Out.ok s' →
+      s'.regs.length = s.regs.length := by
+  intro n
+  induction n with
+  | zero =>
+    intro s s' h
+    simp only [X86Int.run] at h
+    rw [← Out.ok.inj h]
+  | succ n ih =>
+    intro s s' h
+    have h1 : run im (n + 1) (Out.ok s) = run im n (X86Int.step im s) := rfl
+    rw [h1] at h
+    cases hs : X86Int.step im s with
+    | ok t =>
+      rw [hs] at h
+      rw [ih h, step_regs_length hs]
+    | exit c =>
+      rw [hs] at h
+      cases n <;> simp [X86Int.run] at h
+    | stuck =>
+      rw [hs] at h
+      cases n <;> simp [X86Int.run] at h
+
+
+theorem rdN_cons {m : Mem} {a k b : Nat} {bs : List Nat}
+    (h : m.rdN a (k + 1) = some (b :: bs)) :
+    m.rd a = some b ∧ m.rdN (a + 1) k = some bs := by
+  have h1 : (do let b ← m.rd a; let r ← Mem.rdN m (a + 1) k; pure (b :: r)) =
+      some (b :: bs) := h
+  obtain ⟨b', hb', h2⟩ := bind_some h1
+  obtain ⟨r, hr, h3⟩ := bind_some h2
+  have h4 : some (b' :: r) = some (b :: bs) := h3
+  injection h4 with h5
+  injection h5 with h6 h7
+  exact ⟨by rw [hb', h6], by rw [hr, h7]⟩
+
+theorem rdN_cons_some {m : Mem} {a k b : Nat} {bs : List Nat}
+    (h1 : m.rd a = some b) (h2 : m.rdN (a + 1) k = some bs) :
+    m.rdN a (k + 1) = some (b :: bs) := by
+  show (do let b ← m.rd a; let r ← Mem.rdN m (a + 1) k; pure (b :: r)) =
+    some (b :: bs)
+  simp [h1, h2]
+
+theorem rdN_append {m : Mem} :
+    ∀ {a : Nat} {xs ys : List Nat},
+      m.rdN a (xs.length + ys.length) = some (xs ++ ys) →
+      m.rdN a xs.length = some xs ∧ m.rdN (a + xs.length) ys.length = some ys := by
+  intro a xs
+  induction xs generalizing a with
+  | nil =>
+    intro ys h
+    simp only [List.length_nil, Nat.zero_add, List.nil_append, Nat.add_zero] at h ⊢
+    exact ⟨rfl, h⟩
+  | cons b xs ih =>
+    intro ys h
+    have hlen : (b :: xs).length + ys.length = (xs.length + ys.length) + 1 := by
+      simp; omega
+    rw [hlen, List.cons_append] at h
+    obtain ⟨hba, hrest⟩ := rdN_cons h
+    obtain ⟨hxs, hys⟩ := ih hrest
+    constructor
+    · have : (b :: xs).length = xs.length + 1 := by simp
+      rw [this]
+      exact rdN_cons_some hba hxs
+    · have : a + (b :: xs).length = (a + 1) + xs.length := by simp; omega
+      rw [this]; exact hys
+
+/-- Encoded instructions laid out consecutively at cursor `c`. -/
+def CodeSeq (m : Mem) (c : Nat) : List Instr → Prop
+  | [] => True
+  | x :: xs => m.rdN c x.enc.length = some x.enc ∧ CodeSeq m (c + x.enc.length) xs
+
+def codeBytes : List Instr → Nat
+  | [] => 0
+  | x :: xs => x.enc.length + codeBytes xs
+
+theorem CodeSeq_of_frame {m m' : Mem} :
+    ∀ {c : Nat} {code : List Instr}, CodeSeq m c code →
+      (∀ x k, c ≤ x → x + k ≤ c + codeBytes code → m'.rdN x k = m.rdN x k) →
+      CodeSeq m' c code := by
+  intro c code
+  induction code generalizing c with
+  | nil => intro _ _; trivial
+  | cons x xs ih =>
+    intro h hfr
+    obtain ⟨hx, hxs⟩ := h
+    constructor
+    · rw [hfr c x.enc.length (by omega) (by unfold codeBytes; omega)]; exact hx
+    · apply ih hxs
+      intro y k hy hk
+      apply hfr
+      · omega
+      · show y + k ≤ c + (x.enc.length + codeBytes xs); omega
+
+theorem leVal_leBytes (n k : Nat) : leVal (leBytes n k) = n % 256 ^ k :=
+  leVal_digits k n
+
+theorem imm32_of_enc {m : Mem} {c op n : Nat}
+    (h : m.rdN c 5 = some (op :: leBytes n 4)) :
+    m.rd c = some op ∧ (m.rdN (c + 1) 4).map leVal = some (n % 256 ^ 4) := by
+  have h5 : (5 : Nat) = 4 + 1 := rfl
+  rw [h5] at h
+  obtain ⟨h1, h2⟩ := rdN_cons h
+  exact ⟨h1, by rw [h2]; simp [leVal_leBytes]⟩
+
+theorem AnnLayout_of_frame {s s' : X86Int.St} {ann : List (Nat × Height)} {p : Nat}
+    (h : AnnLayout s ann p)
+    (hfr : ∀ x k, p ≤ x → x + k ≤ p + 12 * ann.length →
+      s'.mem.rdN x k = s.mem.rdN x k) :
+    AnnLayout s' ann p := by
+  intro i hi
+  obtain ⟨⟨h1, h2, h3⟩, hlt⟩ := h i hi
+  have hle : 12 * i + 12 ≤ 12 * ann.length := by omega
+  refine ⟨⟨?_, ?_, ?_⟩, hlt⟩
+  · rw [hfr (p + 12 * i) 4 (by omega) (by omega)]; exact h1
+  · have e : p + 12 * i + 4 = p + 12 * i + 4 := rfl
+    rw [hfr (p + 12 * i + 4) 4 (by omega) (by omega)]; exact h2
+  · rw [hfr (p + 12 * i + 8) 4 (by omega) (by omega)]; exact h3
+
+theorem StackRoom_of_wshape {s s' : X86Int.St} {k : Nat}
+    (hsh : wshape s'.mem = wshape s.mem) (h4 : s'.reg 4 = s.reg 4)
+    (h : StackRoom s k) : StackRoom s' k := by
+  intro sp hsp i hi v
+  have hh := h sp (by rw [← h4]; exact hsp) i hi v
+  exact wrN_some_of_wshape _ s.mem s'.mem hsh _ hh
+
+theorem StackRoom_of_mem {s s' : X86Int.St} {k : Nat}
+    (hm : s'.mem = s.mem) (h4 : s'.reg 4 = s.reg 4)
+    (h : StackRoom s k) : StackRoom s' k :=
+  StackRoom_of_wshape (by rw [hm]) h4 h
+
+
+theorem Prim_code_lt (p : Prim) : p.code < 57 := by
+  have h1 : p.code < Prim.all.length :=
+    List.idxOf_lt_length_of_mem (Prim.mem_all p)
+  have h2 : Prim.all.length = 57 := by decide
+  omega
+
+theorem Prim_exit_code : Prim.exit.code = 50 := by decide
+
+theorem height_eq_of_beq {a b : Height} (h : (a == b) = true) : a = b :=
+  eq_of_beq h
+
+theorem Prim_code_exit {p : Prim} (h : p.code = 50) : p = .exit := by
+  cases p <;> first | rfl | exact absurd h (by decide)
+
+theorem Prim_code_ne_50 {p : Prim} (h : p ≠ .exit) : p.code ≠ 50 :=
+  fun hc => h (Prim_code_exit hc)
+
+example (m : Mem) (c : Nat) (p : Prim)
+    (h : m.rdN c (Instr.prim p).enc.length = some (Instr.prim p).enc) :
+    m.rdN c 1 = some [p.code] := h
+
+/-! hstep extractions -/
+
+theorem hstep_prim_some {pr : Prog} {wd : Word} {h h' : Height} {p : Prim}
+    (hs : hstep pr wd h (.prim p) = some (some h')) :
+    p.eff.1 ≤ h.d ∧ p ≠ .exit ∧ h' = ⟨h.d - p.eff.1 + p.eff.2, h.a⟩ := by
+  by_cases hg : p.eff.1 ≤ h.d
+  · by_cases he : p = .exit
+    · simp [hstep, hg, he] at hs
+    · simp only [hstep, hg, he, ↓reduceIte, Option.some.injEq] at hs
+      exact ⟨hg, he, hs.symm⟩
+  · simp [hstep, hg] at hs
+
+theorem hstep_prim_none {pr : Prog} {wd : Word} {h : Height} {p : Prim}
+    (hs : hstep pr wd h (.prim p) = some none) :
+    p.eff.1 ≤ h.d ∧ p = .exit := by
+  by_cases hg : p.eff.1 ≤ h.d
+  · by_cases he : p = .exit
+    · exact ⟨hg, he⟩
+    · simp [hstep, hg, he] at hs
+  · simp [hstep, hg] at hs
+
+theorem hstep_pick {pr : Prog} {wd : Word} {h h' : Height} {n : Nat}
+    (hs : hstep pr wd h (.pick n) = some (some h')) :
+    n < h.d ∧ h' = ⟨h.d + 1, h.a⟩ := by
+  by_cases hn : n < h.d
+  · simp only [hstep, hn, ↓reduceIte, Option.some.injEq] at hs
+    exact ⟨hn, hs.symm⟩
+  · simp [hstep, hn] at hs
+
+theorem hstep_tor {pr : Prog} {wd : Word} {h h' : Height}
+    (hs : hstep pr wd h .tor = some (some h')) :
+    1 ≤ h.d ∧ h' = ⟨h.d - 1, h.a + 1⟩ := by
+  by_cases hn : 1 ≤ h.d
+  · simp only [hstep, hn, ↓reduceIte, Option.some.injEq] at hs
+    exact ⟨hn, hs.symm⟩
+  · simp [hstep, hn] at hs
+
+theorem hstep_fromr {pr : Prog} {wd : Word} {h h' : Height}
+    (hs : hstep pr wd h .fromr = some (some h')) :
+    1 ≤ h.a ∧ h' = ⟨h.d + 1, h.a - 1⟩ := by
+  by_cases hn : 1 ≤ h.a
+  · simp only [hstep, hn, ↓reduceIte, Option.some.injEq] at hs
+    exact ⟨hn, hs.symm⟩
+  · simp [hstep, hn] at hs
+
+theorem hstep_rfetch {pr : Prog} {wd : Word} {h h' : Height}
+    (hs : hstep pr wd h .rfetch = some (some h')) :
+    1 ≤ h.a ∧ h' = ⟨h.d + 1, h.a⟩ := by
+  by_cases hn : 1 ≤ h.a
+  · simp only [hstep, hn, ↓reduceIte, Option.some.injEq] at hs
+    exact ⟨hn, hs.symm⟩
+  · simp [hstep, hn] at hs
+
+theorem hstep_locget {pr : Prog} {wd : Word} {h h' : Height} {i : Nat}
+    (hs : hstep pr wd h (.locget i) = some (some h')) :
+    i < wd.locals ∧ h' = ⟨h.d + 1, h.a⟩ := by
+  by_cases hn : i < wd.locals
+  · simp only [hstep, hn, ↓reduceIte, Option.some.injEq] at hs
+    exact ⟨hn, hs.symm⟩
+  · simp [hstep, hn] at hs
+
+theorem hstep_locset {pr : Prog} {wd : Word} {h h' : Height} {i : Nat}
+    (hs : hstep pr wd h (.locset i) = some (some h')) :
+    1 ≤ h.d ∧ i < wd.locals ∧ h' = ⟨h.d - 1, h.a⟩ := by
+  by_cases hn : 1 ≤ h.d ∧ i < wd.locals
+  · simp only [hstep] at hs
+    rw [if_pos hn] at hs
+    exact ⟨hn.1, hn.2, (Option.some.inj (Option.some.inj hs)).symm⟩
+  · simp only [hstep] at hs
+    rw [if_neg hn] at hs
+    cases hs
+
+theorem hstep_jmp {pr : Prog} {wd : Word} {h : Height} {t : Nat}
+    (hs : hstep pr wd h (.jmp t) = some none) :
+    wd.ann.lookup t = some h := by
+  by_cases hn : wd.ann.lookup t = some h
+  · exact hn
+  · simp only [hstep] at hs
+    rw [if_neg hn] at hs
+    cases hs
+
+theorem hstep_jz {pr : Prog} {wd : Word} {h h' : Height} {t : Nat}
+    (hs : hstep pr wd h (.jz t) = some (some h')) :
+    1 ≤ h.d ∧ wd.ann.lookup t = some ⟨h.d - 1, h.a⟩ ∧ h' = ⟨h.d - 1, h.a⟩ := by
+  by_cases hn : 1 ≤ h.d ∧ wd.ann.lookup t = some ⟨h.d - 1, h.a⟩
+  · simp only [hstep] at hs
+    rw [if_pos hn] at hs
+    exact ⟨hn.1, hn.2, (Option.some.inj (Option.some.inj hs)).symm⟩
+  · simp only [hstep] at hs
+    rw [if_neg hn] at hs
+    cases hs
+
+theorem hstep_jnz {pr : Prog} {wd : Word} {h h' : Height} {t : Nat}
+    (hs : hstep pr wd h (.jnz t) = some (some h')) :
+    1 ≤ h.d ∧ wd.ann.lookup t = some ⟨h.d - 1, h.a⟩ ∧ h' = ⟨h.d - 1, h.a⟩ := by
+  by_cases hn : 1 ≤ h.d ∧ wd.ann.lookup t = some ⟨h.d - 1, h.a⟩
+  · simp only [hstep] at hs
+    rw [if_pos hn] at hs
+    exact ⟨hn.1, hn.2, (Option.some.inj (Option.some.inj hs)).symm⟩
+  · simp only [hstep] at hs
+    rw [if_neg hn] at hs
+    cases hs
+
+theorem hstep_call {pr : Prog} {wd : Word} {h h' : Height} {w : Nat}
+    (hs : hstep pr wd h (.call w) = some (some h')) :
+    ∃ cw, pr.words[w]? = some cw ∧ cw.ins ≤ h.d ∧
+      h' = ⟨h.d - cw.ins + cw.outs, h.a⟩ := by
+  simp only [hstep] at hs
+  cases hc : pr.words[w]? with
+  | none => rw [hc] at hs; cases hs
+  | some cw =>
+    rw [hc] at hs
+    by_cases hg : cw.ins ≤ h.d
+    · simp only [hg, ↓reduceIte, Option.some.injEq] at hs
+      exact ⟨cw, rfl, hg, hs.symm⟩
+    · simp [hg] at hs
+
+theorem hstep_ret {pr : Prog} {wd : Word} {h : Height}
+    (hs : hstep pr wd h .ret = some none) :
+    h = ⟨wd.outs, 0⟩ := by
+  by_cases hn : h = ⟨wd.outs, 0⟩
+  · exact hn
+  · simp [hstep, hn] at hs
+
+theorem hstep_lit {pr : Prog} {wd : Word} {h h' : Height} {n : Nat}
+    (hs : hstep pr wd h (.lit n) = some (some h')) :
+    h' = ⟨h.d + 1, h.a⟩ := by
+  simp only [hstep, Option.some.injEq] at hs
+  exact hs.symm
+
+theorem hstep_str {pr : Prog} {wd : Word} {h h' : Height} {i : Nat}
+    (hs : hstep pr wd h (.str i) = some (some h')) :
+    h' = ⟨h.d + 2, h.a⟩ := by
+  simp only [hstep, Option.some.injEq] at hs
+  exact hs.symm
+
+
 end SporosX1
