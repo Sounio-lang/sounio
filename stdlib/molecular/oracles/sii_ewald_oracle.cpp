@@ -64,7 +64,7 @@ static V bondvec(const Host& h, int e, int sign) {
 }
 static std::array<long, 3> winding(const Host& h) {
   std::array<long, 3> w{0, 0, 0};
-  for (size_t e = 0; e < h.E.size(); ++e) for (int i = 0; i < 3; ++i) w[i] += h.dir[e] * h.E[e].s[i];
+  for (size_t e = 0; e < h.E.size(); ++e) for (int i = 0; i < 3; ++i) w[i] += (long)h.dir[e] * h.E[e].s[i];
   return w;
 }
 
@@ -117,7 +117,7 @@ int main(int argc, char** argv) {
   }
   auto out_in_ok = [&]() { int bad = 0; for (int v = 0; v < NO; ++v) { int o = 0; for (int e : inc[v]) { bool tail = (h.E[e].u == v) == (h.dir[e] > 0); o += tail; } if (o != 2) ++bad; } return bad; };
   std::printf("ice-rule violations after euler: %d\n", out_in_ok());
-  { long fp = 0; for (int e = 0; e < NE; ++e) fp += h.dir[e] * (e + 1); long fo = 0; for (int v = 0; v < NO; ++v) fo += (long)std::llround(h.O[v][0] * 1000) * (v + 1); long fe = 0; for (int e = 0; e < NE; ++e) fe += (h.E[e].u * 7 + h.E[e].v * 3 + h.E[e].s[0] * 5) * (e + 1); std::printf("fingerprint euler %ld oxy %ld edges %ld\n", fp, fo, fe); }
+  { long fp = 0; for (int e = 0; e < NE; ++e) fp += (long)h.dir[e] * (e + 1); long fo = 0; for (int v = 0; v < NO; ++v) fo += (long)std::llround(h.O[v][0] * 1000) * (v + 1); long fe = 0; for (int e = 0; e < NE; ++e) fe += ((long)h.E[e].u * 7 + (long)h.E[e].v * 3 + (long)h.E[e].s[0] * 5) * (e + 1); std::printf("fingerprint euler %ld oxy %ld edges %ld\n", fp, fo, fe); }
 
   // loop moves: random directed walk until a vertex repeats, reverse the cycle.
   long long rs = (long long)(seed % 2147483646ULL) + 1;
@@ -140,7 +140,7 @@ int main(int argc, char** argv) {
       v = h.E[e].u == v ? h.E[e].v : h.E[e].u;
     }
     std::array<long, 3> dw{0, 0, 0};
-    for (size_t i = seen[v]; i < ev.size(); ++i) for (int c = 0; c < 3; ++c) dw[c] += h.dir[ev[i]] * h.E[ev[i]].s[c];
+    for (size_t i = seen[v]; i < ev.size(); ++i) for (int c = 0; c < 3; ++c) dw[c] += (long)h.dir[ev[i]] * h.E[ev[i]].s[c];
     std::array<long, 3> Wn{W[0] - 2 * dw[0], W[1] - 2 * dw[1], W[2] - 2 * dw[2]};
     bool wind = w2(dw) != 0;
     bool accept = !wind ? true : (w2(Wn) < w2(W) || (steps < NSTEP && w2(Wn) == w2(W)));
