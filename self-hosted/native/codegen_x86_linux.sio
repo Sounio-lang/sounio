@@ -11492,6 +11492,12 @@ pub var NC_PRO_BAD: [i64; 256] = [0; 256]
 pub var NC_PRO_CNT: [i64; 256] = [0; 256]
 pub var NC_PRO_STATS: i64 = 0
 pub var NC_PRO_N: i64 = 0
+pub var NC_PRO_OFIRST: [i64; 256] = [0; 256]
+pub var NC_PRO_OLAST: [i64; 256] = [0; 256]
+pub var NC_PRO_FDEF: [i64; 256] = [0; 256]
+pub var NC_PRO_W: [i64; 256] = [0; 256]
+pub var NC_PRO_JT: [i64; 4096] = [-1; 4096]
+pub var NC_PRO_LW: [i64; 4096] = [0; 4096]
 pub var NC_PRO_BARRIER: [i64; 4096] = [0; 4096]
 
 fn nc_promo_reg_of(temp: i64) -> i64 {
@@ -13079,10 +13085,15 @@ fn nc_promo_op_is_plain(op: IrOpcode) -> bool {
     }
 }
 
-fn nc_promo_note(v: i64, i: i64) with Mut, Panic, Div {
+fn nc_promo_note(v: i64, i: i64, is_def: i64) with Mut, Panic, Div {
     if v >= 0 && v < 256 {
-        if NC_PRO_CNT[v as usize] == 0 { NC_PRO_FIRST[v as usize] = i }
+        if NC_PRO_CNT[v as usize] == 0 {
+            NC_PRO_FIRST[v as usize] = i
+            NC_PRO_OFIRST[v as usize] = i
+            NC_PRO_FDEF[v as usize] = is_def
+        }
         NC_PRO_LAST[v as usize] = i
+        NC_PRO_OLAST[v as usize] = i
         NC_PRO_CNT[v as usize] = NC_PRO_CNT[v as usize] + 1
     }
 }
@@ -13099,10 +13110,14 @@ fn nc_promo_reset() with Mut, Panic, Div {
         NC_PRO_LAST[k as usize] = 0
         NC_PRO_BAD[k as usize] = 0
         NC_PRO_CNT[k as usize] = 0
+        NC_PRO_OFIRST[k as usize] = 0
+        NC_PRO_OLAST[k as usize] = 0
+        NC_PRO_FDEF[k as usize] = 0
+        NC_PRO_W[k as usize] = 0
         k = k + 1
     }
     var bk: i64 = 0
-    while bk < NC_PRO_N && bk < 4096 { NC_PRO_BARRIER[bk as usize] = 0; bk = bk + 1 }
+    while bk < NC_PRO_N && bk < 4096 { NC_PRO_BARRIER[bk as usize] = 0; NC_PRO_JT[bk as usize] = -1; NC_PRO_LW[bk as usize] = 0; bk = bk + 1 }
     NC_PRO_N = 0
     NC_PRO_ON = 0
 }
@@ -13131,10 +13146,10 @@ fn nc_promo_analyze(func: &IrFunction) with Mut, Panic, Div {
             let ac = IR_A_ARG_COUNT[at as usize]
             var ak: i64 = 0
             while ak < ac {
-                if ac <= 4 && ir_arena_arg_at(at, ak) >= 0 { nc_promo_note(ir_arena_arg_at(at, ak), i) } else { nc_promo_poison(ir_arena_arg_at(at, ak)) }
+                if ac <= 4 && ir_arena_arg_at(at, ak) >= 0 { nc_promo_note(ir_arena_arg_at(at, ak), i, 0) } else { nc_promo_poison(ir_arena_arg_at(at, ak)) }
                 ak = ak + 1
             }
-            if ac <= 4 && IR_A_DST[at as usize] >= 0 { nc_promo_note(IR_A_DST[at as usize], i) } else { nc_promo_poison(IR_A_DST[at as usize]) }
+            if ac <= 4 && IR_A_DST[at as usize] >= 0 { nc_promo_note(IR_A_DST[at as usize], i, 1) } else { nc_promo_poison(IR_A_DST[at as usize]) }
         } else if !nc_promo_op_is_plain(op) {
             if str_eq(read_env("SOUNIO_PROMO_DEBUG"), "1") {
                 print("[promo] reject fn: op=")
@@ -13159,17 +13174,17 @@ fn nc_promo_analyze(func: &IrFunction) with Mut, Panic, Div {
             // float-marker nops carry a vreg but emit no code
         } else if op == IrOpcode::IrLabel || op == IrOpcode::IrJump {
         } else if op == IrOpcode::IrLoadImm || op == IrOpcode::IrLoadBool || op == IrOpcode::IrLoadFloat {
-            nc_promo_note(IR_A_DST[at as usize], i)
+            nc_promo_note(IR_A_DST[at as usize], i, 1)
         } else if op == IrOpcode::IrBranchTrue || op == IrOpcode::IrBranchFalse || op == IrOpcode::IrReturn {
-            nc_promo_note(IR_A_SRC1[at as usize], i)
+            nc_promo_note(IR_A_SRC1[at as usize], i, 0)
         } else if op == IrOpcode::IrBinOp {
-            nc_promo_note(IR_A_SRC1[at as usize], i)
-            nc_promo_note(IR_A_SRC2[at as usize], i)
-            nc_promo_note(IR_A_DST[at as usize], i)
+            nc_promo_note(IR_A_SRC1[at as usize], i, 0)
+            nc_promo_note(IR_A_SRC2[at as usize], i, 0)
+            nc_promo_note(IR_A_DST[at as usize], i, 1)
         } else {
             // IrCopy, IrIntToFloat, IrFloatToInt
-            nc_promo_note(IR_A_SRC1[at as usize], i)
-            nc_promo_note(IR_A_DST[at as usize], i)
+            nc_promo_note(IR_A_SRC1[at as usize], i, 0)
+            nc_promo_note(IR_A_DST[at as usize], i, 1)
         }
         i = i + 1
     }
@@ -13179,40 +13194,106 @@ fn nc_promo_analyze(func: &IrFunction) with Mut, Panic, Div {
         if NC_PRO_CNT[pv as usize] > 0 && nc_core_func_param_index(func, pv) >= 0 { NC_PRO_BAD[pv as usize] = 1 }
         pv = pv + 1
     }
-    // widen spans over loops until stable
+    // Jump targets, and per-instruction loop weight.
+    var t: i64 = 0
+    while t < n {
+        let tat = ir_region_slot_r((*func).region, t)
+        let top = (IR_A_OP[tat as usize] as IrOpcode)
+        if top == IrOpcode::IrJump || top == IrOpcode::IrBranchTrue || top == IrOpcode::IrBranchFalse {
+            let lid = IR_A_LABEL_ID[tat as usize]
+            var l: i64 = 0
+            var found: i64 = -1
+            while l < n && found < 0 {
+                let lat = ir_region_slot_r((*func).region, l)
+                if (IR_A_OP[lat as usize] as IrOpcode) == IrOpcode::IrLabel && IR_A_LABEL_ID[lat as usize] == lid { found = l }
+                l = l + 1
+            }
+            NC_PRO_JT[t as usize] = found
+            if found >= 0 && found <= t {
+                var w: i64 = found
+                while w <= t { NC_PRO_LW[w as usize] = NC_PRO_LW[w as usize] + 1; w = w + 1 }
+            }
+        }
+        t = t + 1
+    }
+    // A vreg lives across a loop's back edge only if it can be read before it is
+    // written in an iteration. It is iteration-local (no widening) when every
+    // mention is inside the loop, the first one is a pure definition, and no jump
+    // from before that definition lands inside the span after it.
+    var j: i64 = 0
+    while j < n {
+        let lo = NC_PRO_JT[j as usize]
+        if lo >= 0 && lo <= j {
+            var v: i64 = 0
+            while v < 256 {
+                if NC_PRO_CNT[v as usize] > 0 && NC_PRO_OFIRST[v as usize] <= j && NC_PRO_OLAST[v as usize] >= lo {
+                    var local = false
+                    if NC_PRO_OFIRST[v as usize] >= lo && NC_PRO_OLAST[v as usize] <= j && NC_PRO_FDEF[v as usize] == 1 {
+                        local = true
+                        var e: i64 = 0
+                        while e < NC_PRO_OFIRST[v as usize] {
+                            let jt = NC_PRO_JT[e as usize]
+                            if jt > NC_PRO_OFIRST[v as usize] && jt <= NC_PRO_OLAST[v as usize] { local = false }
+                            e = e + 1
+                        }
+                    }
+                    if !local {
+                        if NC_PRO_FIRST[v as usize] > lo { NC_PRO_FIRST[v as usize] = lo }
+                        if NC_PRO_LAST[v as usize] < j { NC_PRO_LAST[v as usize] = j }
+                    }
+                }
+                v = v + 1
+            }
+        }
+        j = j + 1
+    }
+    // widening by one loop can pull a span into another loop: iterate to a fixpoint
+    // using the widened span for the intersection test but the ORIGINAL mentions
+    // for the locality test (a widened vreg is never local).
     var changed = true
     var rounds: i64 = 0
     while changed && rounds < 64 {
         changed = false
         rounds = rounds + 1
-        var j: i64 = 0
-        while j < n {
-            let jat = ir_region_slot_r((*func).region, j)
-            let jop = (IR_A_OP[jat as usize] as IrOpcode)
-            if jop == IrOpcode::IrJump || jop == IrOpcode::IrBranchTrue || jop == IrOpcode::IrBranchFalse {
-                let lid = IR_A_LABEL_ID[jat as usize]
-                var l: i64 = j
-                var found: i64 = -1
-                while l >= 0 && found < 0 {
-                    let lat = ir_region_slot_r((*func).region, l)
-                    if (IR_A_OP[lat as usize] as IrOpcode) == IrOpcode::IrLabel && IR_A_LABEL_ID[lat as usize] == lid { found = l }
-                    l = l - 1
-                }
-                if found >= 0 {
-                    var v: i64 = 0
-                    while v < 256 {
-                        if NC_PRO_CNT[v as usize] > 0 && NC_PRO_FIRST[v as usize] <= j && NC_PRO_LAST[v as usize] >= found {
-                            if NC_PRO_FIRST[v as usize] > found { NC_PRO_FIRST[v as usize] = found; changed = true }
-                            if NC_PRO_LAST[v as usize] < j { NC_PRO_LAST[v as usize] = j; changed = true }
-                        }
-                        v = v + 1
+        var j2: i64 = 0
+        while j2 < n {
+            let lo2 = NC_PRO_JT[j2 as usize]
+            if lo2 >= 0 && lo2 <= j2 {
+                var v4: i64 = 0
+                while v4 < 256 {
+                    if NC_PRO_CNT[v4 as usize] > 0 && NC_PRO_FIRST[v4 as usize] <= j2 && NC_PRO_LAST[v4 as usize] >= lo2
+                        && (NC_PRO_FIRST[v4 as usize] != NC_PRO_OFIRST[v4 as usize] || NC_PRO_LAST[v4 as usize] != NC_PRO_OLAST[v4 as usize]) {
+                        if NC_PRO_FIRST[v4 as usize] > lo2 { NC_PRO_FIRST[v4 as usize] = lo2; changed = true }
+                        if NC_PRO_LAST[v4 as usize] < j2 { NC_PRO_LAST[v4 as usize] = j2; changed = true }
                     }
+                    v4 = v4 + 1
                 }
             }
-            j = j + 1
+            j2 = j2 + 1
         }
     }
     if changed { nc_promo_reset(); return }
+    // weights: mentions inside loops count more
+    var wi: i64 = 0
+    while wi < 256 { NC_PRO_W[wi as usize] = 0; wi = wi + 1 }
+    var m: i64 = 0
+    while m < n {
+        let mat = ir_region_slot_r((*func).region, m)
+        let mop = (IR_A_OP[mat as usize] as IrOpcode)
+        if mop != IrOpcode::IrNop && mop != IrOpcode::IrLabel && mop != IrOpcode::IrJump {
+            var mw: i64 = 1
+            var d: i64 = 0
+            while d < NC_PRO_LW[m as usize] { mw = mw * 10; d = d + 1 }
+            if mw > 100000 { mw = 100000 }
+            let ms1 = IR_A_SRC1[mat as usize]
+            let ms2 = IR_A_SRC2[mat as usize]
+            let md = IR_A_DST[mat as usize]
+            if ms1 >= 0 && ms1 < 256 { NC_PRO_W[ms1 as usize] = NC_PRO_W[ms1 as usize] + mw }
+            if mop == IrOpcode::IrBinOp && ms2 >= 0 && ms2 < 256 { NC_PRO_W[ms2 as usize] = NC_PRO_W[ms2 as usize] + mw }
+            if mop != IrOpcode::IrBranchTrue && mop != IrOpcode::IrBranchFalse && mop != IrOpcode::IrReturn && md >= 0 && md < 256 { NC_PRO_W[md as usize] = NC_PRO_W[md as usize] + mw }
+        }
+        m = m + 1
+    }
     // calls inside a span disqualify it
     var c: i64 = 0
     while c < n {
@@ -13236,7 +13317,7 @@ fn nc_promo_analyze(func: &IrFunction) with Mut, Panic, Div {
         var v3: i64 = 0
         while v3 < 256 {
             if NC_PRO_CNT[v3 as usize] >= 2 && NC_PRO_BAD[v3 as usize] == 0 && NC_PRO_REG[v3 as usize] < 0 {
-                let w = NC_PRO_CNT[v3 as usize]
+                let w = NC_PRO_W[v3 as usize]
                 if w > best_w { best_w = w; best = v3 }
             }
             v3 = v3 + 1
