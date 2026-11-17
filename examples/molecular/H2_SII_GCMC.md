@@ -127,3 +127,27 @@ three-site H2. The second: the spread varies threefold or more from cage to cage
 type, because each cage sees a different proton arrangement, so "the" small-cage
 orientational potential of a clathrate is a distribution over proton configurations, not
 a number.
+
+## Beyond the classical one-site Langmuir constant (molecular::langmuir)
+
+Three corrections to the one-site, Feynman–Hibbs constant above were measured with
+C++23 oracles whose predictions were written (and hashed) before they ran, then ported
+to `stdlib/molecular/langmuir.sio`. 250 K unless stated; ln quantities.
+
+| Correction | Small cage | Large cage | Feynman–Hibbs error |
+|---|---|---|---|
+| Quantised centre of mass, ln C_cl − ln C_q (200 / 250 / 280 K, three waters) | 0.105–0.112 / 0.079–0.084 / 0.069–0.072 | 0.061–0.064 / 0.045–0.049 / 0.041–0.043 | ≤ 0.0043 |
+| Quantised pair term, ln R₂^cl − ln R₂^q (200 / 250 / 280 K) | — | 0.204–0.225 / 0.147–0.162 / 0.120–0.133 | ≤ 0.008 (R₂), ≤ 0.029 (R₃) |
+| Charges on H2 (Alavi), ln R_c over 12 proton configurations | 0.0114 ± 0.0040 | 0.0072 ± 0.0014 | — |
+
+Quantisation lowers C by 4–11 % and the double occupancy by 13–25 %, the same order as
+the 8–9 % that the H2 Lennard-Jones parameters contribute, and Feynman–Hibbs captures
+both to within 0.4 % and 0.8 %: the occupancies above stand. The TIP5P − SPC/E separation
+in ln R₂ survives exact quantisation of both guests (0.081 ± 0.005 at 250 K, Feynman–Hibbs
+0.081). Proton disorder spreads the charge correction by 0.4 % per small cage and 0.05 %
+per cell average: it is not a relevant source of uncertainty for a quadrupolar guest.
+
+`tests/stdlib/molecular/test_langmuir_oracle.sio` checks the library against
+`stdlib/molecular/oracles/langmuir_oracle.cpp` on the same random stream (1e-9) and its
+small-sample estimates against the large runs above (within 4 standard errors);
+predictions in `stdlib/molecular/oracles/langmuir_predictions.txt`.

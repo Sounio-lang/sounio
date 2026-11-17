@@ -1,0 +1,165 @@
+//@ run-pass
+//@ requires: madaros
+//@ timeout: 600
+//@ expect-stdout: MOLECULAR_LANGMUIR_ORACLE_OK
+// molecular::langmuir against stdlib/molecular/oracles/langmuir_oracle.cpp, which
+// runs the same algorithms on the same random stream (molecular::lj's
+// xorshift128+, Box-Muller) and the same quadratures. Every expected number below
+// is that program's output, pasted. The predictions it tests were written before
+// the library, the oracle and this test (stdlib/molecular/oracles/
+// langmuir_predictions.txt): the mirror to 1e-9, and agreement of the small-sample
+// estimates with large independent runs (another generator, another sampler)
+// within 4 of their standard errors.
+//
+// Model: sII a = 17.31 A, SPC/E oxygen (78.20 K, 3.166 A), 250 K, cutoff 12 A.
+// Path integral and pair terms: Buch H2 (34.2 K, 2.96 A, 2.01588 amu).
+// Charged guest: Alavi H2 (centre LJ 0.2852 kJ/mol, 3.038 A, +0.4932 e on the
+// atoms 0.7414 A apart) in the Ewald potential of the ice-rule SPC/E host of
+// test_sii_charges_ewald.sio (seed 20261116), FH on the LJ weight.
+//
+// Run time: the same computation takes 6 s in the C++ oracle and minutes here;
+// Madaros-compiled loops of this kind run 50-100x slower than optimised C++
+// (measured 2026-11-17: 3e7 iterations of a three-flop array loop in 1.6 s).
+// Hence the sample sizes and the timeout.
+
+use math::pure::{sqrt, ln}
+use molecular::lj::{mol_seed}
+use molecular::host_guest::{hg_build_fd3m, hg_sii_oxygens, hg_sii_cages, hg_replicate, hg_build_cells, hg_cage_of}
+use molecular::ice_rules::{ir_build_bonds, ir_euler_orient, ir_depolarize, ir_violations, ir_winding, ir_place_water}
+use molecular::ewald::{ew_setup, ew_fixed_charges}
+use molecular::langmuir::{lg_lambda2, lg_normal, lg_bridge, lg_envelope, lg_quantum_ratio, lg_pair_ratios, lg_charged_ln_ratio}
+
+fn absd(v: f64) -> f64 { if v < 0.0 { 0.0 - v } else { v } }
+
+// Fails closed: a NaN on either side is a mismatch.
+fn rel_bad(got: f64, want: f64, tol: f64) -> bool with Div {
+    var den = absd(want)
+    if den < 1.0e-300 { den = 1.0 }
+    if got != got || want != want { return true }
+    !(absd(got - want) / den <= tol)
+}
+
+fn rel_ok(tag: string, got: f64, want: f64, tol: f64) -> i64 with IO, Mut, Div {
+    if rel_bad(got, want, tol) {
+        print("MISMATCH "); print(tag); print(" got "); println(got); print("   want "); println(want)
+        return 1
+    }
+    0
+}
+
+// |est - ref| <= 4 se, failing closed on NaN.
+fn within(tag: string, est: f64, se: f64, rf: f64) -> i64 with IO, Mut, Div {
+    if est != est || se != se || !(absd(est - rf) <= 4.0 * se) {
+        print("INCONSISTENT "); print(tag); print(" est "); println(est); print("   se "); println(se); print("   ref "); println(rf)
+        return 1
+    }
+    0
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    let a = 17.31
+    let t = 250.0
+    var bad: i64 = 0
+    if hg_build_fd3m() != 192 { println("group order"); return 1 }
+    var frac: [f64; 12288] = [0.0; 12288]
+    let no = hg_sii_oxygens(&!frac, 0.21796, 0.18198, 0.37081)
+    var host: [f64; 12288] = [0.0; 12288]
+    let nh = hg_replicate(&!host, &frac, no, a, 12.0)
+    let _cells = hg_build_cells(&host, nh, a, 12.0, 8)
+    var cen: [f64; 192] = [0.0; 192]
+    let nc = hg_sii_cages(&!cen, a)
+    let small = hg_cage_of(&cen, nc, a, 0.0, 0.0, 0.0)
+    let large = hg_cage_of(&cen, nc, a, 0.375 * a, 0.375 * a, 0.375 * a)
+    if nc != 24 || small != 0 || large != 16 { println("cages differ from the oracle"); bad = bad + 1 }
+    let rho = 136.0 / (a * a * a)
+    let eps_b = sqrt(78.20 * 34.2)
+    let sig_b = 0.5 * (3.166 + 2.96)
+    let lam2 = lg_lambda2(t, 2.01588)
+    bad = bad + rel_ok("lambda2", lam2, 9.62532176944856932e-02, 1.0e-12)
+
+    // ---- the random stream ----
+    mol_seed(20261117)
+    bad = bad + rel_ok("normal 1", lg_normal(), 7.18410971599616421e-01, 1.0e-12)
+    bad = bad + rel_ok("normal 2", lg_normal(), 0.0 - 3.02328958150784415e-02, 1.0e-10)
+    bad = bad + rel_ok("normal 3", lg_normal(), 3.89779973535693658e-01, 1.0e-12)
+    var path: [f64; 768] = [0.0; 768]
+    lg_bridge(&!path, 8, 0.1, 0.2, 0.3, lam2)
+    var s = 0.0
+    var k: i64 = 0
+    while k < 24 {
+        s = s + path[k as usize] * ((k + 1) as f64)
+        k = k + 1
+    }
+    bad = bad + rel_ok("bridge x7", path[21], 0.0 - 3.73520282194749545e-02, 1.0e-10)
+    bad = bad + rel_ok("bridge y7", path[22], 4.04205310833429754e-01, 1.0e-10)
+    bad = bad + rel_ok("bridge z7", path[23], 3.42500475549391725e-01, 1.0e-10)
+    bad = bad + rel_ok("bridge sum", s, 5.61073042956926500e+01, 1.0e-12)
+
+    // ---- quantum centre of mass ----
+    let env_s = lg_envelope(&host, &cen, nc, small, a, 3.3, 20, eps_b, sig_b, 0.0, 12.0, rho)
+    let env_l = lg_envelope(&host, &cen, nc, large, a, 4.6, 20, eps_b, sig_b, 0.0, 12.0, rho)
+    bad = bad + rel_ok("envelope small", env_s, 0.0 - 8.74457245271606666e+02, 1.0e-10)
+    bad = bad + rel_ok("envelope large", env_l, 0.0 - 6.57939702245369290e+02, 1.0e-10)
+    let qs = lg_quantum_ratio(&host, &cen, nc, small, a, 3.3, env_s, eps_b, sig_b, 12.0, rho, t, lam2, 16, 400, 2, 10)
+    let ql = lg_quantum_ratio(&host, &cen, nc, large, a, 4.6, env_l, eps_b, sig_b, 12.0, rho, t, lam2, 16, 400, 2, 10)
+    bad = bad + rel_ok("C_q/C_cl small", qs.0, 9.24504768575607150e-01, 1.0e-9)
+    bad = bad + rel_ok("se small", qs.1, 1.13122292811041886e-02, 1.0e-7)
+    bad = bad + rel_ok("C_q/C_cl large", ql.0, 9.63260686249547526e-01, 1.0e-9)
+    bad = bad + rel_ok("se large", ql.1, 1.36609274810910574e-02, 1.0e-7)
+    // against the 4h runs (40 000 draws x 16 bridges x 64 beads, another generator)
+    bad = bad + within("ln(C_cl/C_q) small", 0.0 - ln(qs.0), qs.1 / qs.0, 0.0800)
+    bad = bad + within("ln(C_cl/C_q) large", 0.0 - ln(ql.0), ql.1 / ql.0, 0.0464)
+    if !(qs.0 < 1.0) || !(ql.0 < 1.0) { println("quantisation did not lower C"); bad = bad + 1 }
+
+    // ---- quantum pair and triple terms, large cage ----
+    let pr = lg_pair_ratios(&host, &cen, nc, large, a, 4.6, env_l, eps_b, sig_b, 12.0, rho, t, lam2, 16, 34.2, 2.96, 0.5 * a, 300, 10)
+    bad = bad + rel_ok("R2q", pr.0, 1.64994620713162815e-01, 1.0e-9)
+    bad = bad + rel_ok("R3q", pr.2, 3.35223179026143550e-03, 1.0e-9)
+    bad = bad + rel_ok("R2cl", pr.4, 2.04897902547772404e-01, 1.0e-9)
+    bad = bad + rel_ok("se R2q", pr.1, 1.07422871809790006e-02, 1.0e-7)
+    bad = bad + rel_ok("se R2cl", pr.5, 1.15806608124164219e-02, 1.0e-7)
+    // against the 4i runs: R2q 0.1813, R2cl 0.2116 (200 000 paths x 64 beads)
+    bad = bad + within("R2q", pr.0, pr.1, 0.1813)
+    bad = bad + within("R2cl", pr.4, pr.5, 0.2116)
+    if !(pr.0 < pr.4) { println("quantisation did not lower R2"); bad = bad + 1 }
+
+    // ---- charged H2 in the proton-disordered host ----
+    var pos: [f64; 12288] = [0.0; 12288]
+    var i: i64 = 0
+    while i < 3 * no {
+        pos[i as usize] = a * frac[i as usize]
+        i = i + 1
+    }
+    let _ne = ir_build_bonds(&pos, no, a, 3.2)
+    let _eu = ir_euler_orient()
+    let _mv = ir_depolarize(20261116, 200000)
+    let w = ir_winding()
+    if ir_violations() != 0 || w.0 != 0 || w.1 != 0 || w.2 != 0 { println("proton configuration"); bad = bad + 1 }
+    var sites: [f64; 12288] = [0.0; 12288]
+    var q: [f64; 4096] = [0.0; 4096]
+    let ns = ir_place_water(&!sites, &!q, 1.0, 109.47 * 3.14159265358979323846 / 180.0, 0.0 - 0.8476, 0.4238)
+    let _nk = ew_setup(a, 0.35, 16.0, 3.92)
+    ew_fixed_charges(&sites, &q, ns)
+    let eps_a = sqrt(78.20 * (0.2852 / 0.00831446261815324))
+    let sig_a = 0.5 * (3.166 + 3.038)
+    let rs = lg_charged_ln_ratio(&host, &cen, nc, small, a, 3.3, 6, 26, 14, eps_a, sig_a, lam2 / 24.0, 12.0, rho, t, &sites, &q, ns, 0.7414, 0.4932)
+    let rl = lg_charged_ln_ratio(&host, &cen, nc, large, a, 4.1, 6, 26, 14, eps_a, sig_a, lam2 / 24.0, 12.0, rho, t, &sites, &q, ns, 0.7414, 0.4932)
+    bad = bad + rel_ok("ln R_c small", rs, 1.82539598431534743e-02, 1.0e-9)
+    bad = bad + rel_ok("ln R_c large", rl, 9.00307775670390262e-03, 1.0e-9)
+    // against the 4g exact three-site values for this configuration, within the
+    // 10 % the coarser quadrature may move them. Quadrature sizes tried in the
+    // oracle before choosing the cheapest (relative deviation small / large cage):
+    // 10x50x26 +5.7 / +1.8 %, 8x26x14 -0.6 / +8.7 %, 6x26x14 +0.6 / -1.9 %,
+    // 6x26x26 +4.0 / -10.6 %, 8x26x26 +2.0 / +0.3 %. The spread is quadrature
+    // noise of about 10 %; 6x26x14 keeps the run time inside the CI budget.
+    if !(absd(rs - 0.01814) <= 0.1 * 0.01814) || !(absd(rl - 0.00918) <= 0.1 * 0.00918) { println("charged ratio off the 4g value"); bad = bad + 1 }
+    if !(rs > 0.0) || !(rl > 0.0) { println("R_c < 1"); bad = bad + 1 }
+
+    if bad != 0 {
+        print_int(bad)
+        println(" mismatches")
+        return 1
+    }
+    println("MOLECULAR_LANGMUIR_ORACLE_OK")
+    0
+}
