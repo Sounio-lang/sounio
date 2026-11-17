@@ -2757,7 +2757,9 @@ def PickSpec (im : Nat → Option (Ins × Nat)) (entry tail l32 : Nat) : Prop :=
       ∃ k s', run im k (Out.ok s) = Out.ok s' ∧ s'.rip = tail ∧
         s'.reg 8 = some (h.d + 1) ∧ s'.reg 9 = some h.a ∧ s'.reg 6 = some (c + 5) ∧
         s'.reg 4 = some sp ∧
-        (∀ x m, x + m ≤ sp - 8 ∨ sp ≤ x → s'.mem.rdN x m = s.mem.rdN x m)
+        (∀ x m, x + m ≤ sp - 8 ∨ sp ≤ x → s'.mem.rdN x m = s.mem.rdN x m) ∧
+        (∀ i, i ≠ 0 → i ≠ 2 → i ≠ 4 → i ≠ 6 → i ≠ 8 → s'.reg i = s.reg i) ∧
+        wshape s'.mem = wshape s.mem
 
 /-- Decode facts for `h_pick`: mov rdx,rsi; add rdx,1; call L32;
 cmp rax,r8; jb; add r8,1; add rsi,5; jmp tail. -/
@@ -3027,7 +3029,46 @@ theorem Pick_triple {im : Nat → Option (Ins × Nat)} {entry tail l32 : Nat}
   have r8 : run im 1 (Out.ok a7) = Out.ok a8 := by rw [run_succ_ok im 0 a7, e8, ← ha8, run_zero]
   have r9 : run im 1 (Out.ok a8) = Out.ok a9 := by rw [run_succ_ok im 0 a8, e9, ← ha9, run_zero]
   have r10 : run im 1 (Out.ok a9) = Out.ok a10 := by rw [run_succ_ok im 0 a9, e10, ← ha10, run_zero]
-  refine ⟨3 + n8 + 6, a10, ?_, by rw [ha10], ?_, ?_, ?_, ?_, ?_⟩
+  have ga1 : ∀ i, i ≠ 0 → i ≠ 2 → i ≠ 4 → i ≠ 6 → i ≠ 8 → a1.reg i = s.reg i := by
+    intro i h0 h2 h4 h6 h8
+    rw [ha1]; show ({ s.set 2 (some c) with rip := s.rip + 3 }).reg i = s.reg i
+    rw [reg_with_rip, reg_set_other h2]
+  have ga2 : ∀ i, i ≠ 0 → i ≠ 2 → i ≠ 4 → i ≠ 6 → i ≠ 8 → a2.reg i = s.reg i := by
+    intro i h0 h2 h4 h6 h8
+    rw [ha2]
+    show (a1.set 2 (some (aluF .add c (1 % W)).1)).reg i = s.reg i
+    rw [reg_set_other h2]; exact ga1 i h0 h2 h4 h6 h8
+  have ga3 : ∀ i, i ≠ 0 → i ≠ 2 → i ≠ 4 → i ≠ 6 → i ≠ 8 → a3.reg i = s.reg i := by
+    intro i h0 h2 h4 h6 h8
+    rw [ha3]
+    show (a2.set 4 (some ((sp + W - 8) % W))).reg i = s.reg i
+    rw [reg_set_other h4]; exact ga2 i h0 h2 h4 h6 h8
+  have ga4 : ∀ i, i ≠ 0 → i ≠ 2 → i ≠ 4 → i ≠ 6 → i ≠ 8 → a4.reg i = s.reg i := by
+    intro i h0 h2 h4 h6 h8
+    rw [ha4other i h0]; exact ga3 i h0 h2 h4 h6 h8
+  have ga5 : ∀ i, i ≠ 0 → i ≠ 2 → i ≠ 4 → i ≠ 6 → i ≠ 8 → a5.reg i = s.reg i := by
+    intro i h0 h2 h4 h6 h8
+    rw [ha5]
+    show ({ a4.set 4 (some ((sp - 8 + 8) % W)) with rip := entry + 12 }).reg i = s.reg i
+    rw [reg_with_rip, reg_set_other h4]; exact ga4 i h0 h2 h4 h6 h8
+  have ga6 : ∀ i, i ≠ 0 → i ≠ 2 → i ≠ 4 → i ≠ 6 → i ≠ 8 → a6.reg i = s.reg i := by
+    intro i h0 h2 h4 h6 h8
+    rw [ha6]; show a5.reg i = s.reg i; exact ga5 i h0 h2 h4 h6 h8
+  have ga7 : ∀ i, i ≠ 0 → i ≠ 2 → i ≠ 4 → i ≠ 6 → i ≠ 8 → a7.reg i = s.reg i := by
+    intro i h0 h2 h4 h6 h8
+    rw [ha7]; show ({ a6 with rip := entry + 22 }).reg i = s.reg i
+    rw [reg_with_rip]; exact ga6 i h0 h2 h4 h6 h8
+  have ga8 : ∀ i, i ≠ 0 → i ≠ 2 → i ≠ 4 → i ≠ 6 → i ≠ 8 → a8.reg i = s.reg i := by
+    intro i h0 h2 h4 h6 h8
+    rw [ha8]
+    show (a7.set 8 (some (aluF .add h.d (1 % W)).1)).reg i = s.reg i
+    rw [reg_set_other h8]; exact ga7 i h0 h2 h4 h6 h8
+  have ga9 : ∀ i, i ≠ 0 → i ≠ 2 → i ≠ 4 → i ≠ 6 → i ≠ 8 → a9.reg i = s.reg i := by
+    intro i h0 h2 h4 h6 h8
+    rw [ha9]
+    show (a8.set 6 (some (aluF .add c (5 % W)).1)).reg i = s.reg i
+    rw [reg_set_other h6]; exact ga8 i h0 h2 h4 h6 h8
+  refine ⟨3 + n8 + 6, a10, ?_, by rw [ha10], ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
   · rw [run_add im (3 + n8) 6,
       show run im (3 + n8) (Out.ok s) = Out.ok a4 from by
         rw [run_add im 3 n8,
@@ -3057,6 +3098,15 @@ theorem Pick_triple {im : Nat → Option (Ins × Nat)} {entry tail l32 : Nat}
     exact rdN_wr64_other hm1s (by cases hx with
       | inl h => exact Or.inr (by omega)
       | inr h => exact Or.inl (by omega))
+  · intro i h0 h2 h4 h6 h8
+    rw [ha10]
+    show ({ a9 with rip := tail }).reg i = s.reg i
+    rw [reg_with_rip]; exact ga9 i h0 h2 h4 h6 h8
+  · have hm10w : a10.mem = m1 := by
+      rw [ha10]
+      show ({ a9 with rip := tail }).mem = m1
+      rw [mem_with_rip]; exact ha9mem
+    rw [hm10w, wrN_wshape _ _ _ hm1s]
 
 
 /-- The `locget` handler's spec: the immediate at cursor+1 reads as
@@ -3076,7 +3126,8 @@ def LocgetSpec (im : Nat → Option (Ins × Nat)) (entry tail l32 : Nat) (wd : W
         s'.reg 8 = some (h.d + 1) ∧ s'.reg 9 = some h.a ∧ s'.reg 6 = some (c + 5) ∧
         s'.reg 4 = some sp ∧
         (∀ i, i ≠ 0 → i ≠ 2 → i ≠ 4 → i ≠ 6 → i ≠ 8 → i ≠ 10 → s'.reg i = s.reg i) ∧
-        (∀ x m, x + m ≤ sp - 8 ∨ sp ≤ x → s'.mem.rdN x m = s.mem.rdN x m)
+        (∀ x m, x + m ≤ sp - 8 ∨ sp ≤ x → s'.mem.rdN x m = s.mem.rdN x m) ∧
+        wshape s'.mem = wshape s.mem
 
 /-- Decode facts for `h_locget`. -/
 structure LocgetCode (im : Nat → Option (Ins × Nat)) (entry tail l32 : Nat) : Prop where
@@ -3459,7 +3510,7 @@ theorem Locget_triple {im : Nat → Option (Ins × Nat)} {entry tail l32 : Nat} 
   have r9 : run im 1 (Out.ok a8) = Out.ok a9 := by rw [run_succ_ok im 0 a8, e9, ← ha9, run_zero]
   have r10 : run im 1 (Out.ok a9) = Out.ok a10 := by rw [run_succ_ok im 0 a9, e10, ← ha10, run_zero]
   have r11 : run im 1 (Out.ok a10) = Out.ok a11 := by rw [run_succ_ok im 0 a10, e11, ← ha11, run_zero]
-  refine ⟨3 + n8 + 7, a11, ?_, by rw [ha11], ?_, ?_, ?_, ?_, ?_, ?_⟩
+  refine ⟨3 + n8 + 7, a11, ?_, by rw [ha11], ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
   · rw [run_add im (3 + n8) 7,
       show run im (3 + n8) (Out.ok s) = Out.ok a4 from by
         rw [run_add im 3 n8,
@@ -3493,6 +3544,11 @@ theorem Locget_triple {im : Nat → Option (Ins × Nat)} {entry tail l32 : Nat} 
     exact rdN_wr64_other hm1s (by cases hx with
       | inl h => exact Or.inr (by omega)
       | inr h => exact Or.inl (by omega))
+  · have hm11w : a11.mem = m1 := by
+      rw [ha11]
+      show ({ a10 with rip := tail }).mem = m1
+      rw [mem_with_rip]; exact ha10mem
+    rw [hm11w, wrN_wshape _ _ _ hm1s]
 
 
 /-- The `locset` handler's spec: like `locget`, with the additional
@@ -3510,7 +3566,8 @@ def LocsetSpec (im : Nat → Option (Ins × Nat)) (entry tail l32 : Nat) (wd : W
         s'.reg 8 = some (h.d - 1) ∧ s'.reg 9 = some h.a ∧ s'.reg 6 = some (c + 5) ∧
         s'.reg 4 = some sp ∧
         (∀ i, i ≠ 0 → i ≠ 2 → i ≠ 4 → i ≠ 6 → i ≠ 8 → i ≠ 10 → s'.reg i = s.reg i) ∧
-        (∀ x m, x + m ≤ sp - 8 ∨ sp ≤ x → s'.mem.rdN x m = s.mem.rdN x m)
+        (∀ x m, x + m ≤ sp - 8 ∨ sp ≤ x → s'.mem.rdN x m = s.mem.rdN x m) ∧
+        wshape s'.mem = wshape s.mem
 
 /-- Decode facts for `h_locset`. -/
 structure LocsetCode (im : Nat → Option (Ins × Nat)) (entry tail l32 : Nat) : Prop where
@@ -3957,7 +4014,7 @@ theorem Locset_triple {im : Nat → Option (Ins × Nat)} {entry tail l32 : Nat} 
   have r11 : run im 1 (Out.ok a10) = Out.ok a11 := by rw [run_succ_ok im 0 a10, e11, ← ha11, run_zero]
   have r12 : run im 1 (Out.ok a11) = Out.ok a12 := by rw [run_succ_ok im 0 a11, e12, ← ha12, run_zero]
   have r13 : run im 1 (Out.ok a12) = Out.ok a13 := by rw [run_succ_ok im 0 a12, e13, ← ha13, run_zero]
-  refine ⟨3 + n8 + 9, a13, ?_, by rw [ha13], ?_, ?_, ?_, ?_, ?_, ?_⟩
+  refine ⟨3 + n8 + 9, a13, ?_, by rw [ha13], ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
   · rw [run_add im (3 + n8) 9,
       show run im (3 + n8) (Out.ok s) = Out.ok a4 from by
         rw [run_add im 3 n8,
@@ -3991,6 +4048,11 @@ theorem Locset_triple {im : Nat → Option (Ins × Nat)} {entry tail l32 : Nat} 
     exact rdN_wr64_other hm1s (by cases hx with
       | inl h => exact Or.inr (by omega)
       | inr h => exact Or.inl (by omega))
+  · have hm13w : a13.mem = m1 := by
+      rw [ha13]
+      show ({ a12 with rip := tail }).mem = m1
+      rw [mem_with_rip]; exact ha12mem
+    rw [hm13w, wrN_wshape _ _ _ hm1s]
 
 
 theorem step_movI {im : Nat → Option (Ins × Nat)} {s : X86Int.St} {d imm len : Nat}
@@ -5171,7 +5233,8 @@ def CallSpec (im : Nat → Option (Ins × Nat)) (entry fall l32 : Nat) : Prop :=
         s'.reg 8 = some (h.d - cw.ins + cw.outs) ∧ s'.reg 9 = some h.a ∧
         s'.reg 6 = some (c + 5) ∧ s'.reg 4 = some sp ∧
         (∀ i, i ≠ 0 → i ≠ 2 → i ≠ 4 → i ≠ 6 → i ≠ 8 → i ≠ 10 → i ≠ 11 → s'.reg i = s.reg i) ∧
-        (∀ x m, x + m ≤ sp - 8 ∨ sp ≤ x → s'.mem.rdN x m = s.mem.rdN x m)
+        (∀ x m, x + m ≤ sp - 8 ∨ sp ≤ x → s'.mem.rdN x m = s.mem.rdN x m) ∧
+        wshape s'.mem = wshape s.mem
 
 /-- Decode facts for `h_call`. -/
 structure CallCode (im : Nat → Option (Ins × Nat)) (entry fall l32 : Nat) : Prop where
@@ -6064,7 +6127,7 @@ theorem Call_triple {im : Nat → Option (Ins × Nat)} {entry fall l32 : Nat}
   have rb13 : run im 1 (Out.ok b12) = Out.ok b13 := by rw [run_succ_ok im 0 b12, eb13, ← hb13, run_zero]
   have rb14 : run im 1 (Out.ok b13) = Out.ok b14 := by rw [run_succ_ok im 0 b13, eb14, ← hb14, run_zero]
   have rb15 : run im 1 (Out.ok b14) = Out.ok b15 := by rw [run_succ_ok im 0 b14, eb15, ← hb15, run_zero]
-  refine ⟨3 + n8 + 19, b15, ?_, by rw [hb15], ?_, ?_, ?_, ?_, ?_, ?_⟩
+  refine ⟨3 + n8 + 19, b15, ?_, by rw [hb15], ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
   · rw [run_add im (3 + n8) 19,
       show run im (3 + n8) (Out.ok s) = Out.ok a4 from by
         rw [run_add im 3 n8,
@@ -6101,6 +6164,11 @@ theorem Call_triple {im : Nat → Option (Ins × Nat)} {entry fall l32 : Nat}
     exact rdN_wr64_other hm1s (by cases hx with
       | inl hh => exact Or.inr (by omega)
       | inr hh => exact Or.inl (by omega))
+  · have hm15w : b15.mem = m1 := by
+      rw [hb15]
+      show ({ b14 with rip := fall }).mem = m1
+      rw [mem_with_rip]; exact hb14mem
+    rw [hm15w, wrN_wshape _ _ _ hm1s]
 
 
 /-- The `jmp` handler's spec: the immediate at cursor+1 is the
@@ -6111,7 +6179,7 @@ four stack words below `rsp` are writable and disjoint from the
 word entry, the ann array and the immediate bytes. -/
 def JmpSpec (im : Nat → Option (Ins × Nat)) (entry none l32 annl : Nat) : Prop :=
   ∀ (wd : Word) (h : Height) (c n w p sp cv : Nat),
-    wd.ann.lookup n = some h → n < W → 0 < p → w + 56 ≤ W →
+    wd.ann.lookup n = some h → n < W → cv < W → 0 < p → w + 56 ≤ W →
     p + 12 * wd.ann.length < W → h.d < W → h.a < W → c + 5 < W → 32 ≤ sp → sp < W →
     (sp ≤ w ∨ w + 56 ≤ sp - 32) → (sp ≤ p ∨ p + 12 * wd.ann.length ≤ sp - 32) →
     (sp ≤ c + 1 ∨ c + 5 ≤ sp - 32) →
@@ -6123,9 +6191,11 @@ def JmpSpec (im : Nat → Option (Ins × Nat)) (entry none l32 annl : Nat) : Pro
       ∃ k s', run im k (Out.ok s) = Out.ok s' ∧ s'.rip = none ∧
         s'.reg 8 = some h.d ∧ s'.reg 9 = some h.a ∧ s'.reg 6 = some (c + 5) ∧
         s'.reg 4 = some sp ∧
+        s'.reg 1 = some cv ∧
         (∀ i, i ≠ 0 → i ≠ 1 → i ≠ 2 → i ≠ 4 → i ≠ 6 → i ≠ 8 → i ≠ 9 → i ≠ 12 →
           s'.reg i = s.reg i) ∧
-        (∀ x m, x + m ≤ sp - 32 ∨ sp ≤ x → s'.mem.rdN x m = s.mem.rdN x m)
+        (∀ x m, x + m ≤ sp - 32 ∨ sp ≤ x → s'.mem.rdN x m = s.mem.rdN x m) ∧
+        wshape s'.mem = wshape s.mem
 
 /-- Decode facts for `h_jmp`, with the two `ret`s of `ANNL`. -/
 structure JmpCode (im : Nat → Option (Ins × Nat)) (entry none l32 annl : Nat) : Prop where
@@ -6158,7 +6228,7 @@ theorem Jmp_triple {im : Nat → Option (Ins × Nat)} {entry none l32 annl : Nat
     (hc : JmpCode im entry none l32 annl) (hl : L32Code im l32)
     (hannl : ANNLSpec im annl l32) (hentry : entry + 82 < W) :
     JmpSpec im entry none l32 annl := by
-  intro wd h c n w p sp cv hlk hnW hp0 hw56 hbound hdW haW hcW hsp32 hspW hdisjw hdisjp
+  intro wd h c n w p sp cv hlk hnW hcvW hp0 hw56 hbound hdW haW hcW hsp32 hspW hdisjw hdisjp
     hdisjc s hrip hr8 hr9 hr6 hr4 hr7 hr1 hlen hrd hfp hfn hlay hroom
   have hsp8 : 8 ≤ sp := by omega
   have hw8s : ∀ v, (wr64 s.mem (sp - 8) v).isSome := by
@@ -7260,8 +7330,70 @@ theorem Jmp_triple {im : Nat → Option (Ins × Nat)} {entry none l32 annl : Nat
   have segC : run im (1 + 4) (Out.ok a23) = Out.ok a28 := by
     rw [run_add im 1 4, ra24, run_add im 1 3, ra25, run_add im 1 2, ra26, run_add im 1 1, ra27,
       ra28]
+  have ha8r1c : a8.reg 1 = some (cv % W) := ha8r1
+  have ha9r1c : a9.reg 1 = some (cv % W) := by
+    rw [ha9]
+    show ({ a8.set 4 (some ((sp - 8 + 8) % W)) with rip := entry + 20 }).reg 1 = some (cv % W)
+    rw [reg_with_rip, reg_set_other (by decide)]; exact ha8r1c
+  have ha10r1c : a10.reg 1 = some (cv % W) := by rw [ha10]; show a9.reg 1 = some (cv % W); exact ha9r1c
+  have ha11r1c : a11.reg 1 = some (cv % W) := by
+    rw [ha11]
+    show ({ a10 with rip := entry + 30 }).reg 1 = some (cv % W)
+    rw [reg_with_rip]; exact ha10r1c
+  have ha12r1c : a12.reg 1 = some (cv % W) := by
+    rw [ha12]
+    show (a11.set 4 (some ((sp + W - 8) % W))).reg 1 = some (cv % W)
+    rw [reg_set_other (by decide)]; exact ha11r1c
+  have ha13r1c : a13.reg 1 = some (cv % W) := by
+    rw [ha13]
+    show (a12.set 2 (some e)).reg 1 = some (cv % W)
+    rw [reg_set_other (by decide)]; exact ha12r1c
+  have ha14r1c : a14.reg 1 = some (cv % W) := by
+    rw [ha14]
+    show (a13.set 2 (some (aluF .add e (4 % W)).1)).reg 1 = some (cv % W)
+    rw [reg_set_other (by decide)]; exact ha13r1c
+  have ha15r1c : a15.reg 1 = some (cv % W) := by
+    rw [ha15]
+    show (a14.set 4 (some ((sp - 8 + W - 8) % W))).reg 1 = some (cv % W)
+    rw [reg_set_other (by decide)]; exact ha14r1c
+  have ha16r1c : a16.reg 1 = some (cv % W) := by rw [ha16other 1 (by decide)]; exact ha15r1c
+  have ha17r1c : a17.reg 1 = some (cv % W) := by
+    rw [ha17]
+    show ({ a16.set 4 (some ((sp - 16 + 8) % W)) with rip := entry + 43 }).reg 1 = some (cv % W)
+    rw [reg_with_rip, reg_set_other (by decide)]; exact ha16r1c
+  have ha18r1c : a18.reg 1 = some (cv % W) := by rw [ha18]; show a17.reg 1 = some (cv % W); exact ha17r1c
+  have ha19r1c : a19.reg 1 = some (cv % W) := by
+    rw [ha19]
+    show ({ a18 with rip := entry + 53 }).reg 1 = some (cv % W)
+    rw [reg_with_rip]; exact ha18r1c
+  have ha20r1c : a20.reg 1 = some (cv % W) := by
+    rw [ha20]
+    show ((a19.set 4 (some ((sp - 8 + 8) % W))).set 2 (some e)).reg 1 = some (cv % W)
+    rw [reg_set_other (by decide), reg_set_other (by decide)]; exact ha19r1c
+  have ha21r1c : a21.reg 1 = some (cv % W) := by
+    rw [ha21]
+    show (a20.set 2 (some (aluF .add e (8 % W)).1)).reg 1 = some (cv % W)
+    rw [reg_set_other (by decide)]; exact ha20r1c
+  have ha22r1c : a22.reg 1 = some (cv % W) := by
+    rw [ha22]
+    show (a21.set 4 (some ((sp + W - 8) % W))).reg 1 = some (cv % W)
+    rw [reg_set_other (by decide)]; exact ha21r1c
+  have ha23r1c : a23.reg 1 = some (cv % W) := by rw [ha23other 1 (by decide)]; exact ha22r1c
+  have ha24r1c : a24.reg 1 = some (cv % W) := by
+    rw [ha24]
+    show ({ a23.set 4 (some ((sp - 8 + 8) % W)) with rip := entry + 63 }).reg 1 = some (cv % W)
+    rw [reg_with_rip, reg_set_other (by decide)]; exact ha23r1c
+  have ha25r1c : a25.reg 1 = some (cv % W) := by rw [ha25]; show a24.reg 1 = some (cv % W); exact ha24r1c
+  have ha26r1c : a26.reg 1 = some (cv % W) := by
+    rw [ha26]
+    show ({ a25 with rip := entry + 73 }).reg 1 = some (cv % W)
+    rw [reg_with_rip]; exact ha25r1c
+  have ha27r1c : a27.reg 1 = some (cv % W) := by
+    rw [ha27]
+    show (a26.set 6 (some (aluF .add c (5 % W)).1)).reg 1 = some (cv % W)
+    rw [reg_set_other (by decide)]; exact ha26r1c
   refine ⟨3 + n8 + 1 + 2 + nA + (7 + n2) + (5 + 1) + (n3 + 5), a28, ?_, by rw [ha28], ?_, ?_, ?_, ?_,
-    ?_, ?_⟩
+    ?_, ?_, ?_, ?_⟩
   · rw [run_add im (3 + n8 + 1 + 2 + nA + (7 + n2) + (5 + 1)) (n3 + 5),
       show run im (3 + n8 + 1 + 2 + nA + (7 + n2) + (5 + 1)) (Out.ok s) = Out.ok a22 from by
         rw [run_add im (3 + n8 + 1 + 2 + nA + (7 + n2)) (5 + 1),
@@ -7290,6 +7422,9 @@ theorem Jmp_triple {im : Nat → Option (Ins × Nat)} {entry none l32 annl : Nat
   · rw [ha28]
     show ({ a27 with rip := none }).reg 4 = some sp
     rw [reg_with_rip]; exact ha27r4
+  · rw [ha28]
+    show ({ a27 with rip := none }).reg 1 = some cv
+    rw [reg_with_rip, ha27r1c, Nat.mod_eq_of_lt hcvW]
   · intro i h0 h1 h2 h4 h6 h8 h9 h12
     rw [ha28]
     show ({ a27 with rip := none }).reg i = s.reg i
@@ -7321,13 +7456,20 @@ theorem Jmp_triple {im : Nat → Option (Ins × Nat)} {entry none l32 annl : Nat
       rdN_wr64_other hm1s (by cases hx with
         | inl hh => exact Or.inr (by omega)
         | inr hh => exact Or.inl (by omega))]
+  · have hm28w : a28.mem = m5 := by
+      rw [ha28]
+      show ({ a27 with rip := none }).mem = m5
+      rw [mem_with_rip]; exact ha27mem
+    rw [hm28w, wrN_wshape _ _ _ hm5s, ha21mem, wrN_wshape _ _ _ hm4s, ha14mem,
+      wrN_wshape _ _ _ hm3s]
+    exact hsh11
 
 /-- The `jz`/`jnz` handler's spec: like `jmp`, but the height must
 have a data value to pop, the target announces `(d-1, a)`, and the
 handler falls through with `d-1`. -/
 def JzSpec (im : Nat → Option (Ins × Nat)) (entry fall l32 annl : Nat) : Prop :=
   ∀ (wd : Word) (h : Height) (c n w p sp cv : Nat),
-    1 ≤ h.d → wd.ann.lookup n = some ⟨h.d - 1, h.a⟩ → n < W → 0 < p → w + 56 ≤ W →
+    1 ≤ h.d → wd.ann.lookup n = some ⟨h.d - 1, h.a⟩ → n < W → cv < W → 0 < p → w + 56 ≤ W →
     p + 12 * wd.ann.length < W → h.d < W → h.a < W → c + 5 < W → 32 ≤ sp → sp < W →
     (sp ≤ w ∨ w + 56 ≤ sp - 32) → (sp ≤ p ∨ p + 12 * wd.ann.length ≤ sp - 32) →
     (sp ≤ c + 1 ∨ c + 5 ≤ sp - 32) →
@@ -7339,9 +7481,11 @@ def JzSpec (im : Nat → Option (Ins × Nat)) (entry fall l32 annl : Nat) : Prop
       ∃ k s', run im k (Out.ok s) = Out.ok s' ∧ s'.rip = fall ∧
         s'.reg 8 = some (h.d - 1) ∧ s'.reg 9 = some h.a ∧ s'.reg 6 = some (c + 5) ∧
         s'.reg 4 = some sp ∧
+        s'.reg 1 = some cv ∧
         (∀ i, i ≠ 0 → i ≠ 1 → i ≠ 2 → i ≠ 4 → i ≠ 6 → i ≠ 8 → i ≠ 9 → i ≠ 10 → i ≠ 12 →
           s'.reg i = s.reg i) ∧
-        (∀ x m, x + m ≤ sp - 32 ∨ sp ≤ x → s'.mem.rdN x m = s.mem.rdN x m)
+        (∀ x m, x + m ≤ sp - 32 ∨ sp ≤ x → s'.mem.rdN x m = s.mem.rdN x m) ∧
+        wshape s'.mem = wshape s.mem
 
 /-- Decode facts for `h_jz`/`h_jnz`, with the two `ret`s of `ANNL`. -/
 structure JzCode (im : Nat → Option (Ins × Nat)) (entry fall l32 annl : Nat) : Prop where
@@ -7379,7 +7523,7 @@ theorem Jz_triple {im : Nat → Option (Ins × Nat)} {entry fall l32 annl : Nat}
     (hc : JzCode im entry fall l32 annl) (hl : L32Code im l32)
     (hannl : ANNLSpec im annl l32) (hentry : entry + 104 < W) :
     JzSpec im entry fall l32 annl := by
-  intro wd h c n w p sp cv h1d hlk hnW hp0 hw56 hbound hdW haW hcW hsp32 hspW hdisjw hdisjp
+  intro wd h c n w p sp cv h1d hlk hnW hcvW hp0 hw56 hbound hdW haW hcW hsp32 hspW hdisjw hdisjp
     hdisjc s hrip hr8 hr9 hr6 hr4 hr7 hr1 hlen hrd hfp hfn hlay hroom
   have hsp8 : 8 ≤ sp := by omega
   have h81 : entry + 81 < W := by omega
@@ -8655,8 +8799,80 @@ theorem Jz_triple {im : Nat → Option (Ins × Nat)} {entry fall l32 annl : Nat}
   have segC : run im (1 + 5) (Out.ok a23) = Out.ok a28 := by
     rw [run_add im 1 5, ra24, run_add im 1 4, ra25, run_add im 1 3, ra26, run_add im 1 2, rb5,
       run_add im 1 1, ra27, ra28]
+  have ha8r1c : a8.reg 1 = some (cv % W) := ha8r1
+  have ha9r1c : a9.reg 1 = some (cv % W) := by
+    rw [ha9]
+    show ({ a8.set 4 (some ((sp - 8 + 8) % W)) with rip := entry + 31 }).reg 1 = some (cv % W)
+    rw [reg_with_rip, reg_set_other (by decide)]; exact ha8r1c
+  have ha10r1c : a10.reg 1 = some (cv % W) := by rw [ha10]; show a9.reg 1 = some (cv % W); exact ha9r1c
+  have ha11r1c : a11.reg 1 = some (cv % W) := by
+    rw [ha11]
+    show ({ a10 with rip := entry + 41 }).reg 1 = some (cv % W)
+    rw [reg_with_rip]; exact ha10r1c
+  have ha12r1c : a12.reg 1 = some (cv % W) := by
+    rw [ha12]
+    show (a11.set 4 (some ((sp + W - 8) % W))).reg 1 = some (cv % W)
+    rw [reg_set_other (by decide)]; exact ha11r1c
+  have ha13r1c : a13.reg 1 = some (cv % W) := by
+    rw [ha13]
+    show (a12.set 2 (some e)).reg 1 = some (cv % W)
+    rw [reg_set_other (by decide)]; exact ha12r1c
+  have ha14r1c : a14.reg 1 = some (cv % W) := by
+    rw [ha14]
+    show (a13.set 2 (some (aluF .add e (4 % W)).1)).reg 1 = some (cv % W)
+    rw [reg_set_other (by decide)]; exact ha13r1c
+  have ha15r1c : a15.reg 1 = some (cv % W) := by
+    rw [ha15]
+    show (a14.set 4 (some ((sp - 8 + W - 8) % W))).reg 1 = some (cv % W)
+    rw [reg_set_other (by decide)]; exact ha14r1c
+  have ha16r1c : a16.reg 1 = some (cv % W) := by rw [ha16other 1 (by decide)]; exact ha15r1c
+  have ha17r1c : a17.reg 1 = some (cv % W) := by
+    rw [ha17]
+    show ({ a16.set 4 (some ((sp - 16 + 8) % W)) with rip := entry + 54 }).reg 1 = some (cv % W)
+    rw [reg_with_rip, reg_set_other (by decide)]; exact ha16r1c
+  have hb3r1c : b3.reg 1 = some (cv % W) := by
+    rw [hb3]; show (a17.set 10 (some h.d)).reg 1 = some (cv % W)
+    rw [reg_set_other (by decide)]; exact ha17r1c
+  have hb4r1c : b4.reg 1 = some (cv % W) := by
+    rw [hb4]; show (b3.set 10 (some (aluF .sub h.d (1 % W)).1)).reg 1 = some (cv % W)
+    rw [reg_set_other (by decide)]; exact hb3r1c
+  have ha18r1c : a18.reg 1 = some (cv % W) := by rw [ha18]; show b4.reg 1 = some (cv % W); exact hb4r1c
+  have ha19r1c : a19.reg 1 = some (cv % W) := by
+    rw [ha19]
+    show ({ a18 with rip := entry + 71 }).reg 1 = some (cv % W)
+    rw [reg_with_rip]; exact ha18r1c
+  have ha20r1c : a20.reg 1 = some (cv % W) := by
+    rw [ha20]
+    show ((a19.set 4 (some ((sp - 8 + 8) % W))).set 2 (some e)).reg 1 = some (cv % W)
+    rw [reg_set_other (by decide), reg_set_other (by decide)]; exact ha19r1c
+  have ha21r1c : a21.reg 1 = some (cv % W) := by
+    rw [ha21]
+    show (a20.set 2 (some (aluF .add e (8 % W)).1)).reg 1 = some (cv % W)
+    rw [reg_set_other (by decide)]; exact ha20r1c
+  have ha22r1c : a22.reg 1 = some (cv % W) := by
+    rw [ha22]
+    show (a21.set 4 (some ((sp + W - 8) % W))).reg 1 = some (cv % W)
+    rw [reg_set_other (by decide)]; exact ha21r1c
+  have ha23r1c : a23.reg 1 = some (cv % W) := by rw [ha23other 1 (by decide)]; exact ha22r1c
+  have ha24r1c : a24.reg 1 = some (cv % W) := by
+    rw [ha24]
+    show ({ a23.set 4 (some ((sp - 8 + 8) % W)) with rip := entry + 81 }).reg 1 = some (cv % W)
+    rw [reg_with_rip, reg_set_other (by decide)]; exact ha23r1c
+  have ha25r1c : a25.reg 1 = some (cv % W) := by rw [ha25]; show a24.reg 1 = some (cv % W); exact ha24r1c
+  have ha26r1c : a26.reg 1 = some (cv % W) := by
+    rw [ha26]
+    show ({ a25 with rip := entry + 91 }).reg 1 = some (cv % W)
+    rw [reg_with_rip]; exact ha25r1c
+  have hb5r1c : b5.reg 1 = some (cv % W) := by
+    rw [hb5]
+    show (a26.set 8 (some (aluF .sub h.d (1 % W)).1)).reg 1 = some (cv % W)
+    rw [reg_set_other (by decide)]; exact ha26r1c
+  have ha27r1c : a27.reg 1 = some (cv % W) := by
+    rw [ha27]
+    show (b5.set 6 (some (aluF .add c (5 % W)).1)).reg 1 = some (cv % W)
+    rw [reg_set_other (by decide)]; exact hb5r1c
   refine ⟨3 + n8 + 1 + 2 + 2 + nA + (7 + n2) + (7 + 1) + (n3 + 6), a28, ?_, by rw [ha28], ?_, ?_,
-    ?_, ?_, ?_, ?_⟩
+    ?_, ?_, ?_, ?_, ?_, ?_⟩
   · rw [run_add im (3 + n8 + 1 + 2 + 2 + nA + (7 + n2) + (7 + 1)) (n3 + 6),
       show run im (3 + n8 + 1 + 2 + 2 + nA + (7 + n2) + (7 + 1)) (Out.ok s) = Out.ok a22 from by
         rw [run_add im (3 + n8 + 1 + 2 + 2 + nA + (7 + n2)) (7 + 1),
@@ -8688,6 +8904,9 @@ theorem Jz_triple {im : Nat → Option (Ins × Nat)} {entry fall l32 annl : Nat}
   · rw [ha28]
     show ({ a27 with rip := fall }).reg 4 = some sp
     rw [reg_with_rip]; exact ha27r4
+  · rw [ha28]
+    show ({ a27 with rip := fall }).reg 1 = some cv
+    rw [reg_with_rip, ha27r1c, Nat.mod_eq_of_lt hcvW]
   · intro i h0 h1 h2 h4 h6 h8 h9 h10 h12
     rw [ha28]
     show ({ a27 with rip := fall }).reg i = s.reg i
@@ -8719,6 +8938,13 @@ theorem Jz_triple {im : Nat → Option (Ins × Nat)} {entry fall l32 annl : Nat}
       rdN_wr64_other hm1s (by cases hx with
         | inl hh => exact Or.inr (by omega)
         | inr hh => exact Or.inl (by omega))]
+  · have hm28w : a28.mem = m5 := by
+      rw [ha28]
+      show ({ a27 with rip := fall }).mem = m5
+      rw [mem_with_rip]; exact ha27mem
+    rw [hm28w, wrN_wshape _ _ _ hm5s, ha21mem, wrN_wshape _ _ _ hm4s, ha14mem,
+      wrN_wshape _ _ _ hm3s]
+    exact hsh11
 
 
 
@@ -8745,7 +8971,8 @@ def FallSpec (im : Nat → Option (Ins × Nat)) (entry walk l32 annl : Nat) : Pr
         s'.reg 6 = some c ∧ s'.reg 4 = some sp ∧
         (∀ q, q ≠ 0 → q ≠ 1 → q ≠ 2 → q ≠ 4 → q ≠ 6 → q ≠ 8 → q ≠ 9 → q ≠ 12 →
           s'.reg q = s.reg q) ∧
-        (∀ x m, x + m ≤ sp - 32 ∨ sp ≤ x → s'.mem.rdN x m = s.mem.rdN x m)
+        (∀ x m, x + m ≤ sp - 32 ∨ sp ≤ x → s'.mem.rdN x m = s.mem.rdN x m) ∧
+        wshape s'.mem = wshape s.mem
 
 /-- Decode facts for `fall_tail`, with the two `ret`s of `ANNL`. -/
 structure FallCode (im : Nat → Option (Ins × Nat)) (entry walk l32 annl : Nat) : Prop where
@@ -9219,7 +9446,7 @@ theorem Fall_triple {im : Nat → Option (Ins × Nat)} {entry walk l32 annl : Na
     have rf11 : run im 1 (Out.ok f10) = Out.ok f11 := by
       rw [run_succ_ok im 0 f10, e10, ← hf11, run_zero]
     refine ⟨6 + nA + 2 + 2, f11, by rw [run_add im (6 + nA + 2) 2, segpre, run_add im 1 1, rf10, rf11],
-      by rw [hf11], ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
+      by rw [hf11], ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
     · rw [hf11]; show ({ f10 with rip := walk }).reg 1 = some (i + 1)
       rw [reg_with_rip]; rw [hf10]; show ({ f9 with rip := entry + 31 }).reg 1 = some (i + 1)
       rw [reg_with_rip]; exact hf9r1
@@ -9245,6 +9472,12 @@ theorem Fall_triple {im : Nat → Option (Ins × Nat)} {entry walk l32 annl : Na
         have h2 : f10.mem = f9.mem := by rw [hf10, mem_with_rip]
         rw [h1, h2]
       rw [hm11]; exact hframe9 x m hx
+    · have hm11w : f11.mem = f9.mem := by
+        have h1 : f11.mem = f10.mem := by rw [hf11, mem_with_rip]
+        have h2 : f10.mem = f9.mem := by rw [hf10, mem_with_rip]
+        rw [h1, h2]
+      rw [hm11w, hf9mem, hshA, hf6mem]
+      exact wrN_wshape _ _ _ hm2s'
   | inr hb =>
     obtain ⟨d, a, hne, hatv, hlk2⟩ := hb
     obtain ⟨hdeq, haeq⟩ : d = h.d ∧ a = h.a := by
@@ -9960,7 +10193,7 @@ theorem Fall_triple {im : Nat → Option (Ins × Nat)} {entry walk l32 annl : Na
     have segC : run im (1 + 3) (Out.ok g13) = Out.ok g17 := by
       rw [run_add im 1 3, rg14, run_add im 1 2, rg15, run_add im 1 1, rg16, rg17]
     refine ⟨6 + nA + 2 + (5 + n2) + (6 + n3) + 4, g17, ?_, by rw [hg17], ?_, ?_, ?_, ?_, ?_, ?_,
-      ?_⟩
+      ?_, ?_⟩
     · rw [run_add im (6 + nA + 2 + (5 + n2) + (6 + n3)) 4,
         show run im (6 + nA + 2 + (5 + n2) + (6 + n3)) (Out.ok s) = Out.ok g13 from by
           rw [run_add im (6 + nA + 2 + (5 + n2)) (6 + n3),
@@ -9999,6 +10232,11 @@ theorem Fall_triple {im : Nat → Option (Ins × Nat)} {entry walk l32 annl : Na
           | inr hh => exact Or.inl (by omega)),
         hg1mem, ← hf9mem]
       exact hframe9 x m hx
+    · have hm17w : g17.mem = m5 := by
+        rw [hg17]; show ({ g16 with rip := walk }).mem = m5
+        rw [mem_with_rip]; exact hg16mem
+      rw [hm17w, wrN_wshape _ _ _ hm5s, hg11mem]
+      exact hshm4
 
 
 /-- The non-fallthrough tail's spec: after an instruction that
@@ -10023,7 +10261,8 @@ def NoneSpec (im : Nat → Option (Ins × Nat)) (entry walk l32 annl : Nat) : Pr
         s'.reg 6 = some c ∧ s'.reg 4 = some sp ∧
         (∀ q, q ≠ 0 → q ≠ 1 → q ≠ 2 → q ≠ 4 → q ≠ 6 → q ≠ 8 → q ≠ 9 → q ≠ 12 →
           s'.reg q = s.reg q) ∧
-        (∀ x m, x + m ≤ sp - 32 ∨ sp ≤ x → s'.mem.rdN x m = s.mem.rdN x m)
+        (∀ x m, x + m ≤ sp - 32 ∨ sp ≤ x → s'.mem.rdN x m = s.mem.rdN x m) ∧
+        wshape s'.mem = wshape s.mem
 
 /-- Decode facts for `none_tail`, with the two `ret`s of `ANNL`. -/
 structure NoneCode (im : Nat → Option (Ins × Nat)) (entry walk l32 annl : Nat) : Prop where
@@ -10203,7 +10442,7 @@ theorem None_triple {im : Nat → Option (Ins × Nat)} {entry walk l32 annl : Na
     have rx2 : run im 1 (Out.ok x1) = Out.ok x2 := by
       rw [run_succ_ok im 0 x1, eA2, ← hx2, run_zero]
     refine ⟨3 + 2, x2, by rw [run_add im 3 2, seg3, run_add im 1 1, rx1, rx2],
-      by rw [hx2], ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
+      by rw [hx2], ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
     · rw [hx2]; show ({ x1 with rip := walk }).reg 1 = some (i + 1)
       rw [reg_with_rip]; rw [hx1]; show ({ f3 with rip := entry + 13 }).reg 1 = some (i + 1)
       rw [reg_with_rip]; exact hf3r1
@@ -10229,6 +10468,11 @@ theorem None_triple {im : Nat → Option (Ins × Nat)} {entry walk l32 annl : Na
         have h2 : x1.mem = f3.mem := by rw [hx1, mem_with_rip]
         rw [h1, h2, hf3mem]
       rw [hm2]
+    · have hm2w : x2.mem = s.mem := by
+        have h1 : x2.mem = x1.mem := by rw [hx2, mem_with_rip]
+        have h2 : x1.mem = f3.mem := by rw [hx1, mem_with_rip]
+        rw [h1, h2, hf3mem]
+      rw [hm2w]
   | inr hB =>
     have hf3fl : X86Int.cond f3.fl 2 = some true := by
       have hcf : f3.fl.cf = some true := by
@@ -10663,7 +10907,7 @@ theorem None_triple {im : Nat → Option (Ins × Nat)} {entry walk l32 annl : Na
       refine ⟨6 + nA + 2 + 4, x4,
         by rw [run_add im (6 + nA + 2) 4, segpre, run_add im 1 3, rx1, run_add im 1 2, rx2,
           run_add im 1 1, rx3, rx4],
-        by rw [hx4], ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
+        by rw [hx4], ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
       · rw [hx4]; show ({ x3 with rip := walk }).reg 1 = some (i + 1)
         rw [reg_with_rip]; exact hx3r1
       · rw [hx4]; show ({ x3 with rip := walk }).reg 8 = some h'.d
@@ -10682,6 +10926,11 @@ theorem None_triple {im : Nat → Option (Ins × Nat)} {entry walk l32 annl : Na
           rw [hx4]; show ({ x3 with rip := walk }).mem = f9.mem
           rw [mem_with_rip, hx3mem]; exact hf9mem.symm
         rw [hm4x]; exact hframe9 x m hx
+      · have hm4xw : x4.mem = f9.mem := by
+          rw [hx4]; show ({ x3 with rip := walk }).mem = f9.mem
+          rw [mem_with_rip, hx3mem]; exact hf9mem.symm
+        rw [hm4xw, hf9mem, hshA, hf6mem]
+        exact wrN_wshape _ _ _ hm2s'
     | inr hb =>
       obtain ⟨d, a, hne, hatv, hlk2⟩ := hb
       obtain ⟨hdeq, haeq⟩ : d = h'.d ∧ a = h'.a := by
@@ -11348,7 +11597,7 @@ theorem None_triple {im : Nat → Option (Ins × Nat)} {entry walk l32 annl : Na
       have segC : run im (1 + 2) (Out.ok g12) = Out.ok g15 := by
         rw [run_add im 1 2, rg13, run_add im 1 1, rg14, rg15]
       refine ⟨6 + nA + 2 + (5 + n2) + (5 + n3) + 3, g15, ?_, by rw [hg15], ?_, ?_, ?_, ?_, ?_, ?_,
-        ?_⟩
+        ?_, ?_⟩
       · rw [run_add im (6 + nA + 2 + (5 + n2) + (5 + n3)) 3,
           show run im (6 + nA + 2 + (5 + n2) + (5 + n3)) (Out.ok s) = Out.ok g12 from by
             rw [run_add im (6 + nA + 2 + (5 + n2)) (5 + n3),
@@ -11387,6 +11636,11 @@ theorem None_triple {im : Nat → Option (Ins × Nat)} {entry walk l32 annl : Na
             | inr hh => exact Or.inl (by omega)),
           hg1mem, ← hf9mem]
         exact hframe9 x m hx
+      · have hm15w : g15.mem = m5 := by
+          rw [hg15]; show ({ g14 with rip := walk }).mem = m5
+          rw [mem_with_rip]; exact hg14mem
+        rw [hm15w, wrN_wshape _ _ _ hm5s, hg10mem]
+        exact hshm4
 
 
 
