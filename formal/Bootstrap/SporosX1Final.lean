@@ -5926,6 +5926,22 @@ structure ParserCode (im : Nat → Option (Ins × Nat)) : Prop where
 set_option maxHeartbeats 0 in
 theorem stage1_parserCode : ParserCode stage1Im := by
   apply ParserCode.mk <;> decide +kernel
+/-- The `fail2` block has the same status-exit shape as `fail1`,
+with status 2. -/
+theorem stage1_exitCode_fail2 : ExitCode stage1Im aFail2 2 := by
+  constructor <;> decide +kernel
+
+/-- Any state that reaches `fail2` with the registers defined and
+stack room exits 2. -/
+theorem exit2_of_fail2 {sp : Nat} (hsp32 : 32 ≤ sp) (hspW : sp < W) :
+    ∀ s, s.rip = aFail2 → s.reg 4 = some sp → RegsOk s →
+      StackRoom s 1 →
+      ∃ k, run stage1Im k (Out.ok s) = Out.exit 2 := by
+  intro s hrip hr4 hregs hroom
+  obtain ⟨k, hk⟩ := Status_exit_of_room stage1_exitCode_fail2
+    (by unfold W; decide) (by omega) hspW s hrip hr4 hregs hroom
+  exact ⟨k, by simpa using hk⟩
+
 /-- EXISTENCE TARGET: with room, some oracle makes the final
 theorem non-vacuous.  The witness is `stage1Oracle f A` for the
 `A` given by `Room`.  What remains is the loader-prefix invariant:
