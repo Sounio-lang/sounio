@@ -93,6 +93,13 @@ def _fixtures(root, expected):
     return raw, digest
 
 
+def data_root(run, expect_sm):
+    nested = Path(run) / ("sm%d" % expect_sm)
+    if (nested / GPU_MANIFEST).is_file():
+        return nested
+    return Path(run)
+
+
 def require_probe_inputs(root):
     root = Path(root)
     manifest = _load_json(root / GPU_MANIFEST)

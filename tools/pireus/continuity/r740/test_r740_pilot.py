@@ -15,6 +15,7 @@ ROOT = CONTINUITY.parents[2]
 sys.path.insert(0, str(HERE))
 import gpu_device_key as keys
 import paired_timing
+import phase_a
 import proposals
 import r740_launch as launch
 import run_inputs
@@ -440,6 +441,68 @@ class FrozenRule(unittest.TestCase):
         self.assertIn("arg_count() != 2", arch)
 
 
+class PhaseABundle(unittest.TestCase):
+    def test_imported_bytes_match_the_baseline_commit(self):
+        origin = phase_a.verify_imported_sources()
+        self.assertEqual(origin["origin_commit"], "1a82c417e55c687748ee396d91457ec4b3fe15b4")
+        self.assertEqual(origin["origin_branch"], "codex/pireus-inkling-cycle-20260906")
+        self.assertEqual(origin["sources"]["proposals/000.proposal.json"]["sha256"],
+                         origin["sources"]["controls/direct.proposal.json"]["sha256"])
+        self.assertEqual(len(origin["sources"]), 12)
+        self.assertEqual(origin["sm121_ptx_sha256"]["shuffle"],
+                         "c55daadb94b2050ca88047316f5f0317ccbe3fe48744b26dae13ad7afed659b3")
+
+    def test_bundle_is_deterministic_and_one_step_respects_probe_failure(self):
+        image_dir = None
+        with tempfile.TemporaryDirectory() as directory:
+            first = Path(directory) / "bundle-a"
+            second = Path(directory) / "bundle-b"
+            phase_a.bundle(first)
+            phase_a.bundle(second)
+            for arch in ("sm86", "sm75"):
+                run_inputs.require_run_inputs(first / arch)
+                for name in ("gpu-manifest.json", "benchmark-manifest.json", "numeric-fixtures.jsonl", "000.ptx"):
+                    self.assertEqual((first / arch / name).read_bytes(), (second / arch / name).read_bytes())
+            image = declared_image(Path(directory) / "image.sif")
+            scratch = Path(directory) / "scratch"
+            root = launch.prepare_run(scratch, REVIEW_NAME, first)
+            self.assertTrue((root / "sm86" / "gpu-manifest.json").is_file())
+            self.assertTrue((root / "sm75" / "000.ptx").is_file())
+            calls = []
+
+            def run(step, runner):
+                def wrapped(argv):
+                    calls.append(argv)
+                    self.assertEqual(argv[0], "srun")
+                    self.assertEqual([item for item in argv if item.startswith("--gres=")], [
+                        "--gres=" + ("gpu:a5000:1" if step.endswith("86") else "gpu:quadro_rtx_8000:1")])
+                    plan = launch.build_plan(scratch, REVIEW_NAME, image_token_value=image["derived_sif_sha256"])
+                    chosen = next(item for item in plan["steps"] if item["name"] == step)
+                    self.assertEqual(argv, chosen["argv"])
+                    Path(chosen["marker"]).parent.mkdir(parents=True, exist_ok=True)
+                    Path(chosen["marker"]).write_text("{}\n")
+                    return runner()
+                return wrapped
+
+            launch.run_step(scratch, REVIEW_NAME, "probe-sm86", run("probe-sm86", lambda: 0), image_lock=image)
+            self.assertEqual(len(calls), 1)
+            missed = []
+            with self.assertRaises(RuntimeError) as caught:
+                launch.run_step(scratch, REVIEW_NAME, "timing-sm75", lambda argv: missed.append(argv), image_lock=image)
+            self.assertIn("successful probe", str(caught.exception))
+            self.assertEqual(missed, [])
+            launch.run_step(scratch, REVIEW_NAME, "timing-sm86", run("timing-sm86", lambda: 0), image_lock=image)
+            self.assertEqual(len(calls), 2)
+            with self.assertRaises(RuntimeError):
+                launch.run_step(scratch, REVIEW_NAME, "probe-sm75", run("probe-sm75", lambda: 1), image_lock=image)
+            blocked = []
+            with self.assertRaises(RuntimeError) as caught:
+                launch.run_step(scratch, REVIEW_NAME, "timing-sm75", lambda argv: blocked.append(argv), image_lock=image)
+            self.assertIn("did not succeed", str(caught.exception))
+            self.assertEqual(blocked, [])
+            self.assertEqual(run_inputs.data_root(root, 86), root / "sm86")
+            self.assertEqual(run_inputs.data_root(root / "flat", 86).name, "flat")
+
 class Engines(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -512,6 +575,9 @@ class Engines(unittest.TestCase):
             receipt = subprocess.run([str(self.admission), str(cpath), str(ppath)], capture_output=True, timeout=30)
             self.assertEqual(hashlib.sha256(ptx.stdout).hexdigest(), digest, index)
             self.assertEqual(hashlib.sha256(receipt.stdout).hexdigest(), RECEIPT[index], index)
+
+    def test_phase_a_engine_matches_the_vendored_ptx_and_the_baseline_sm121(self):
+        phase_a.check_engine(self.admission)
 
     def test_new_targets_differ_only_in_the_target_line(self):
         base = self.emit("ptx").stdout

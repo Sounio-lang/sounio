@@ -12,6 +12,7 @@ import subprocess
 from pathlib import Path
 
 from gpu_device_key import marker_name
+from phase_a import bundle as build_phase_a_bundle
 from proposals import phase_a, phase_b
 from run_inputs import require_run_inputs, sha256_file, stage_verified_inputs
 
@@ -263,6 +264,59 @@ def run_steps(root, steps, runner):
     return root
 
 
+STEPS = ("probe-sm86", "probe-sm75", "timing-sm86", "timing-sm75")
+
+
+def prepare_run(scratch, name, inputs):
+    """Allocate a fresh run directory and stage both architectures. No srun."""
+    inputs = Path(inputs)
+    for arch in ("sm86", "sm75"):
+        require_run_inputs(inputs / arch)
+    root = allocate_run(scratch, name)
+    stage_into(root)
+    for arch in ("sm86", "sm75"):
+        (root / arch).mkdir()
+        stage_verified_inputs(root / arch, inputs / arch)
+    origin = HERE / "phase-a" / "ORIGIN.json"
+    if origin.is_file():
+        (root / "phase-a-origin.json").write_bytes(origin.read_bytes())
+    return root
+
+
+def assert_probe_succeeded(root, step_name):
+    if not step_name.startswith("timing-"):
+        return
+    probe = "probe-" + step_name.split("-", 1)[1]
+    state = Path(root) / "stages" / (probe + ".json")
+    if not state.is_file():
+        raise RuntimeError("timing requires a successful probe of the same GPU in this run directory")
+    prior = json.loads(state.read_text())
+    if prior.get("status") != "ok":
+        raise RuntimeError("timing refused because " + probe + " did not succeed")
+    sm = int(step_name.rsplit("sm", 1)[1])
+    marker = Path(root) / marker_name("probe", sm)
+    if not marker.is_file():
+        raise RuntimeError("timing requires the probe marker for the same GPU")
+
+
+def run_step(scratch, name, step_name, runner, mem=DEFAULT_MEM, minutes=DEFAULT_MINUTES,
+             image_lock=None, rule_lock=None):
+    """One srun against an already prepared run directory. The SIF is hashed first."""
+    if step_name not in STEPS:
+        raise ValueError("unknown step")
+    image_lock = image_lock if image_lock is not None else load_json(HERE / "r740-runtime-lock.json")
+    rule_lock = rule_lock if rule_lock is not None else load_json(HERE / "arch_gain_rule.lock.json")
+    assert_rule_frozen(rule_lock)
+    token = verify_sif_before_submit(image_lock)
+    root = Path(remote_run(scratch, name))
+    if not root.is_dir():
+        raise RuntimeError("run directory is not prepared")
+    assert_probe_succeeded(root, step_name)
+    plan = build_plan(scratch, name, mem, minutes, token)
+    step = next(item for item in plan["steps"] if item["name"] == step_name)
+    return run_steps(root, [step], runner)
+
+
 def execute(scratch, name, runner, mem=DEFAULT_MEM, minutes=DEFAULT_MINUTES,
             image_lock=None, rule_lock=None, inputs=None):
     image_lock = image_lock if image_lock is not None else load_json(HERE / "r740-runtime-lock.json")
@@ -306,16 +360,36 @@ def subprocess_runner(argv):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("plan", "run"))
+    parser.add_argument("command", choices=("plan", "bundle", "prepare", "run"))
     parser.add_argument("--mem", default=DEFAULT_MEM)
     parser.add_argument("--minutes", type=int, default=DEFAULT_MINUTES)
     parser.add_argument("--scratch", default=DEFAULT_SCRATCH)
-    parser.add_argument("--name", required=True)
+    parser.add_argument("--name")
     parser.add_argument("--inputs", type=Path)
+    parser.add_argument("--out", type=Path)
+    parser.add_argument("--engine", type=Path)
+    parser.add_argument("--step", choices=STEPS)
     args = parser.parse_args()
     lock = load_json(HERE / "r740-runtime-lock.json")
     rule = load_json(HERE / "arch_gain_rule.lock.json")
     assert_rule_frozen(rule)
+    if args.command == "bundle":
+        if args.out is None:
+            parser.error("bundle requires --out")
+        build_phase_a_bundle(args.out, args.engine)
+        print(json.dumps({"bundle": str(args.out), "engine": args.engine is not None}))
+        return
+    if args.name is None:
+        parser.error(args.command + " requires --name")
+    if args.command == "prepare":
+        if args.inputs is None:
+            parser.error("prepare requires --inputs")
+        root = prepare_run(args.scratch, args.name, args.inputs)
+        print(json.dumps({"prepared": str(root), "srun": False}))
+        return
+    if args.command == "run" and args.step:
+        run_step(args.scratch, args.name, args.step, subprocess_runner, args.mem, args.minutes)
+        return
     if args.command == "run":
         execute(args.scratch, args.name, subprocess_runner, args.mem, args.minutes, inputs=args.inputs)
         return

@@ -19,7 +19,28 @@ Observation directories are `observed-gpu-<uuid>-sm<N>` and `timings-gpu-<uuid>-
 
 `r740_launch.py run` calls `srun`. It does not call `sbatch`. The sbatch text below is the same allocation with `--no-requeue`, rendered for review and marked `submitted: false`. There is no retry loop. A failed stage is recorded and a second call refuses it. A second execution does not reuse the run directory.
 
-`run --inputs BUNDLE` copies `gpu-manifest.json`, `benchmark-manifest.json`, `numeric-fixtures.jsonl` and every PTX those manifests name into the fresh run directory, after the SHA-256 of each file matches the manifest. A missing file, a mismatched digest, a path that leaves the bundle, or a missing `--inputs` refuses before `srun`. The observer reads those same paths and repeats the same checks before it touches CUDA. The SIF digest below is declared, and `run` re-hashes the file before it submits.
+Run this from inside the pod `slurm-pilot-worker-gpuorangefs-multi-*`, where `/scratch` is the r740 NVMe. Do not run it from the r770 login.
+
+`bundle --out DIR` copies the imported Phase A proposals, the baseline fixtures, and the vendored sm_86/sm_75 PTX. It writes one manifest pair per architecture. It does not need `souc`. `bundle --engine admission.elf` regenerates those PTX files and refuses if they differ from the vendored bytes or from the sm_121 baseline hashes. `prepare --name NAME --inputs DIR` allocates the run directory and stages both architectures. It does not call `srun`.
+
+`run --name NAME --step STEP` is one `srun`, with the argv below, on that already prepared directory. It hashes the SIF first. `STEP` is `probe-sm86`, `probe-sm75`, `timing-sm86`, or `timing-sm75`. A failed probe blocks only that GPU's timing. Timing refuses unless the same GPU's probe succeeded in the same run directory.
+
+Pause the LLM services after `prepare` and before the two probes. Resume them after both probes. Pause them again before the two timings, and resume them after the timings. Parity between those windows is local and is not an `srun`.
+
+```
+python3 tools/pireus/continuity/r740/r740_launch.py bundle --out /scratch/pireus/r740/bundle-phase-a
+python3 tools/pireus/continuity/r740/r740_launch.py prepare --name 20261117T120000Z-1-0123456789abcdef --inputs /scratch/pireus/r740/bundle-phase-a
+# PAUSE LLM services
+python3 tools/pireus/continuity/r740/r740_launch.py run --name 20261117T120000Z-1-0123456789abcdef --step probe-sm86
+python3 tools/pireus/continuity/r740/r740_launch.py run --name 20261117T120000Z-1-0123456789abcdef --step probe-sm75
+# RESUME LLM services
+# PAUSE LLM services
+python3 tools/pireus/continuity/r740/r740_launch.py run --name 20261117T120000Z-1-0123456789abcdef --step timing-sm86
+python3 tools/pireus/continuity/r740/r740_launch.py run --name 20261117T120000Z-1-0123456789abcdef --step timing-sm75
+# RESUME LLM services
+```
+
+The lines below are what each `--step` emits for review name `20261117T120000Z-1-0123456789abcdef`. A real name is a fresh directory under `/scratch/pireus/r740/runs/`.
 
 `run` hashes `/scratch/pireus/images/pireus-r740-amd64.sif` before `srun` and refuses if the size or sha256 differs from the lock. The lines below are the argv for review name `20261117T120000Z-1-0123456789abcdef`, scratch `/scratch/pireus/r740`, `--mem=16G` (the default; 64G is the ceiling), `--time=30`. The digest is the one Infra Sounio declared. Memory is always passed. The step is not `--exclusive`.
 

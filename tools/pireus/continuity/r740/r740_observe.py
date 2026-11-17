@@ -11,7 +11,7 @@ import torch
 from gpu_device_key import identity_record, marker_name, observation_dir
 from gpu_probe import Driver, hex_frame
 from paired_timing import BLOCKS, GRAPH_WARMUP, REPLAYS, VECTORS, row
-from run_inputs import require_probe_inputs, require_timing_inputs
+from run_inputs import data_root, require_probe_inputs, require_timing_inputs
 
 
 def visible_identity(expect_sm):
@@ -156,10 +156,11 @@ def main():
         raise SystemExit("Slurm allocation required")
     identity = visible_identity(args.expect_sm)
     job = os.environ["SLURM_JOB_ID"]
+    data = data_root(args.run, args.expect_sm)
     if args.phase == "probe":
-        probe(args.run, identity, job)
+        probe(data, identity, job)
     else:
-        timing(args.run, identity, job)
+        timing(data, identity, job)
     write_marker(args.run, args.phase, identity, job)
 
 
