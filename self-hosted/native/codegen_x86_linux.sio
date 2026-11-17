@@ -11709,6 +11709,10 @@ fn nc_emit_movq_rax_xmm0(nc: &! NativeCompiler) with Mut, Panic, Div {
 }
 
 fn nc_emit_cvtsi2sd_xmm0_rax(nc: &! NativeCompiler) with Mut, Panic, Div {
+    // xorps xmm0, xmm0 first: cvtsi2sd merges into the destination's upper half, so
+    // without it every conversion depends on whatever last wrote xmm0 (on a loop,
+    // the previous iteration's arithmetic result).
+    nc_emit_byte(nc, 0x0F); nc_emit_byte(nc, 0x57); nc_emit_byte(nc, 0xC0)
     // F2 48 0F 2A C0  (cvtsi2sd xmm0, rax)
     nc_emit_byte(nc, 0xF2); nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x0F)
     nc_emit_byte(nc, 0x2A); nc_emit_byte(nc, 0xC0)
@@ -13648,9 +13652,17 @@ fn compile_ir_function_v2_core_ir_inner(nc: &! NativeCompiler, func: &IrFunction
             nc_core_mark_float_reg(nc, IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize])
         } else if instr_op == IrOpcode::IrIntToFloat {
             nc_core_load_temp_to_rax(nc, IR_A_SRC1[(ir_region_slot_r((*func).region, (i))) as usize])
-            nc_emit_cvtsi2sd_xmm0_rax(nc)
-            nc_emit_movq_rax_xmm0(nc)
-            nc_core_store_rax_to_temp(nc, IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize])
+            let i2f_dpr = nc_promo_reg_of(IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize])
+            if i2f_dpr >= 16 {
+                // xorps xmmK,xmmK ; cvtsi2sd xmmK, rax  (K = 8..15)
+                let kk = i2f_dpr - 16
+                nc_emit_byte(nc, 0x45); nc_emit_byte(nc, 0x0F); nc_emit_byte(nc, 0x57); nc_emit_byte(nc, 0xC0 | (kk * 8) | kk)
+                nc_emit_byte(nc, 0xF2); nc_emit_byte(nc, 0x4C); nc_emit_byte(nc, 0x0F); nc_emit_byte(nc, 0x2A); nc_emit_byte(nc, 0xC0 | (kk * 8))
+            } else {
+                nc_emit_cvtsi2sd_xmm0_rax(nc)
+                nc_emit_movq_rax_xmm0(nc)
+                nc_core_store_rax_to_temp(nc, IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize])
+            }
             nc_core_mark_float_reg(nc, IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize])
         } else if instr_op == IrOpcode::IrFloatToInt {
             nc_core_load_temp_to_rax(nc, IR_A_SRC1[(ir_region_slot_r((*func).region, (i))) as usize])
