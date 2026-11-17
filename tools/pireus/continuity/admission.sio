@@ -2,7 +2,7 @@
 // Protocol v1 is a bounded JSON object: ASCII keys, nonnegative integer values,
 // and one lowercase SHA256 context string. Unknown/duplicate keys are refused.
 use algebra::cayley_dickson::cd_sigma
-use materialize_ptx::emit_lowering_ptx
+use materialize_ptx::{emit_lowering_ptx, emit_lowering_ptx_sm}
 use crypto::sha256::{sha256_init, sha256_update, sha256_finalize, SHA256Digest}
 
 struct Document {
@@ -176,6 +176,15 @@ fn sigma_phase(code: i64, a: i64, b: i64) -> i64 with Mut, Panic, Div {
     if bilinear(code, a, b) == 1 { return 0 - base }
     base
 }
+// "ptx" is the historical sm_121 mode. ptx-sm86 and ptx-sm75 select a header
+// after the same admission checks. They do not admit a new target identity.
+fn mode_sm(mode: string) -> i64 with Mut, Panic {
+    let n = str_len(mode)
+    if n == 3 && str_char_at(mode, 0) == 112 && str_char_at(mode, 1) == 116 && str_char_at(mode, 2) == 120 { return 121 }
+    if n == 8 && str_char_at(mode, 0) == 112 && str_char_at(mode, 1) == 116 && str_char_at(mode, 2) == 120 && str_char_at(mode, 3) == 45 && str_char_at(mode, 4) == 115 && str_char_at(mode, 5) == 109 && str_char_at(mode, 6) == 56 && str_char_at(mode, 7) == 54 { return 86 }
+    if n == 8 && str_char_at(mode, 0) == 112 && str_char_at(mode, 1) == 116 && str_char_at(mode, 2) == 120 && str_char_at(mode, 3) == 45 && str_char_at(mode, 4) == 115 && str_char_at(mode, 5) == 109 && str_char_at(mode, 6) == 55 && str_char_at(mode, 7) == 53 { return 75 }
+    0
+}
 fn refuse(reason: string) -> i32 with IO {
     print("{\"schema\":1,\"authority\":\"Sounio\",\"decision\":\"REFUSE\",\"reason\":\"")
     print(reason); print("\"}\n")
@@ -184,9 +193,10 @@ fn refuse(reason: string) -> i32 with IO {
 fn main() -> i32 with IO, Mut, Panic, Div {
     if arg_count() != 2 && arg_count() != 3 { return refuse("ARGUMENTS") }
     var materialize = false
+    var sm: i64 = 121
     if arg_count() == 3 {
-        let mode = get_arg(2)
-        if str_len(mode) != 3 || str_char_at(mode, 0) != 112 || str_char_at(mode, 1) != 116 || str_char_at(mode, 2) != 120 { return refuse("MODE") }
+        sm = mode_sm(get_arg(2))
+        if sm == 0 { return refuse("MODE") }
         materialize = true
     }
     let cp = get_arg(0)
@@ -285,7 +295,8 @@ fn main() -> i32 with IO, Mut, Panic, Div {
     if materialize {
         // emit_lowering_ptx modulates the signs with the phase twist.
         // For kind=1 twist is 0 (pure Cayley-Dickson); for kind=2 twist is the operator phase.
-        emit_lowering_ptx(stride, offset, load, layout, unroll, twist)
+        if sm == 121 { emit_lowering_ptx(stride, offset, load, layout, unroll, twist) }
+        else { emit_lowering_ptx_sm(sm, stride, offset, load, layout, unroll, twist) }
         return 0
     }
     let plan_id = (((stride * 16 + offset) * 2 + load) * 2 + layout) * 32 + unroll

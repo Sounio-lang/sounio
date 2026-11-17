@@ -246,6 +246,10 @@ five native engine hashes and all cycle source dependencies. A stage records
 its launch intent before submission. Recovery may adopt an observed completed
 paired job, but never silently submits an interrupted request again.
 
+## R740 pilot
+
+`r740/R740_PILOT.md` is the plan for `gpuorangefs-multi-r740-proxmox` (RTX A5000, sm_86, and Quadro RTX 8000, sm_75). It is a separate launcher: no Spark host fence, no `pireus-spark-pair` lease, no `check_pair`. The Spark files named in that plan are unchanged. The gain rule is per architecture, with the same 50000 ppm median and positive bootstrap bound, and its hash was frozen before any r740 timing file existed. The amd64 image digest is not pinned, so the launcher refuses to submit.
+
 Use pilot.py prepare with --run, --engine, --context-engine, --fixture-engine,
 --parity-engine, --gain-engine and --evidence after committing the source. Run
 pilot.py run --run in remote tmux. pilot.py report --run reports partial state
