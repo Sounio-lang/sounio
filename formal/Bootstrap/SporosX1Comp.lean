@@ -5256,4 +5256,153 @@ theorem codewalk_entry {im : Nat → Option (Ins × Nat)}
     exact hb17r q h0 h1 h2 h4 h6 h8 h9 h12
 
 
+/-- One architectural step rewrites the register file by at most two
+`some`-valued sets, or is a syscall (two `some` sets and `r11`
+clobbered to `none`). -/
+theorem exec_regs_form {ins : Ins} {len : Nat} {s s' : X86Int.St}
+    (h : exec ins len s = .ok s') :
+    s'.regs = s.regs ∨ (∃ d v, s'.regs = s.regs.set d (some v)) ∨
+    (∃ d1 v1 d2 v2, s'.regs = (s.regs.set d1 (some v1)).set d2 (some v2)) ∨
+    ∃ d1 v1 d2 v2,
+      s'.regs = ((s.regs.set d1 (some v1)).set d2 (some v2)).set 11 none := by
+  cases ins <;> simp only [exec] at h
+  all_goals
+    first
+      | (injection h with h; cases h)
+      | (have h1 := lift_ok h
+         obtain ⟨a, -, h1⟩ := bind_some h1
+         cases h1)
+      | (have h1 := lift_ok h
+         obtain ⟨a, -, h1⟩ := bind_some h1
+         obtain ⟨b, -, h1⟩ := bind_some h1
+         cases h1)
+      | (have h1 := lift_ok h
+         obtain ⟨a, -, h1⟩ := bind_some h1
+         obtain ⟨b, -, h1⟩ := bind_some h1
+         obtain ⟨c, -, h1⟩ := bind_some h1
+         cases h1)
+      | (split at h <;> (try split at h) <;>
+          (first
+            | cases h
+            | (injection h with hh; cases hh)))
+  all_goals
+    first
+      | exact Or.inl rfl
+      | exact Or.inr (Or.inl ⟨_, _, rfl⟩)
+      | exact Or.inr (Or.inr (Or.inl ⟨_, _, _, _, rfl⟩))
+      | exact Or.inr (Or.inr (Or.inr ⟨_, _, _, _, rfl⟩))
+
+theorem reg_set_some_or {s : X86Int.St} {d v i : Nat} :
+    (s.set d (some v)).reg i = s.reg i ∨ (s.set d (some v)).reg i = some v := by
+  by_cases h1 : i = d
+  · subst h1
+    by_cases h2 : i < s.regs.length
+    · exact Or.inr (reg_set_self h2)
+    · left
+      have h3 : s.regs[i]? = none :=
+        List.getElem?_eq_none (by omega)
+      have h4 : (s.regs.set i (some v))[i]? = none :=
+        List.getElem?_eq_none (by rw [List.length_set]; omega)
+      show (s.set i (some v)).reg i = s.reg i
+      rw [St.reg, St.reg, St.set, h4, h3]
+  · exact Or.inl (reg_set_other h1)
+
+theorem reg_of_regs {s s' : X86Int.St} {i : Nat} (h : s'.regs = s.regs) :
+    s'.reg i = s.reg i := by
+  rw [St.reg, St.reg, h]
+
+theorem exec_reg_ne11 {ins : Ins} {len : Nat} {s s' : X86Int.St}
+    (h : exec ins len s = .ok s') {i : Nat} (hi : i ≠ 11) :
+    s'.reg i = s.reg i ∨ ∃ v, s'.reg i = some v := by
+  have key : ∀ (u : X86Int.St) (d v : Nat),
+      (u.set d (some v)).reg i = u.reg i ∨ ∃ x, (u.set d (some v)).reg i = some x := by
+    intro u d v
+    cases reg_set_some_or (s := u) (d := d) (v := v) (i := i) with
+    | inl hh => exact Or.inl hh
+    | inr hh => exact Or.inr ⟨v, hh⟩
+  have cvt : ∀ (u : X86Int.St), s'.regs = u.regs → s'.reg i = u.reg i :=
+    fun u hu => reg_of_regs hu
+  cases exec_regs_form h with
+  | inl hr => exact Or.inl (reg_of_regs hr)
+  | inr hr =>
+    cases hr with
+    | inl hr =>
+      obtain ⟨d, v, hv⟩ := hr
+      rw [cvt (s.set d (some v)) hv]
+      exact key s d v
+    | inr hr =>
+      cases hr with
+      | inl hr =>
+        obtain ⟨d1, v1, d2, v2, hv⟩ := hr
+        rw [cvt ((s.set d1 (some v1)).set d2 (some v2)) hv]
+        cases key (s.set d1 (some v1)) d2 v2 with
+        | inl hh =>
+          rw [hh]
+          exact key s d1 v1
+        | inr hh => exact Or.inr hh
+      | inr hr =>
+        obtain ⟨d1, v1, d2, v2, hv⟩ := hr
+        rw [cvt (((s.set d1 (some v1)).set d2 (some v2)).set 11 none) hv]
+        have hne : i ≠ 11 := hi
+        rw [reg_set_other hne]
+        cases key (s.set d1 (some v1)) d2 v2 with
+        | inl hh =>
+          rw [hh]
+          exact key s d1 v1
+        | inr hh => exact Or.inr hh
+
+theorem step_reg_ne11 {im : Nat → Option (Ins × Nat)} {s s' : X86Int.St}
+    (h : X86Int.step im s = .ok s') {i : Nat} (hi : i ≠ 11) :
+    s'.reg i = s.reg i ∨ ∃ v, s'.reg i = some v := by
+  unfold X86Int.step at h
+  cases him : im s.rip with
+  | none => rw [him] at h; cases h
+  | some p =>
+    obtain ⟨ins, len⟩ := p
+    rw [him] at h
+    exact exec_reg_ne11 h hi
+
+/-- Every register except `r11` (clobbered by `syscall`), once
+defined, stays defined under any run: every step either preserves it
+or writes a `some`. -/
+theorem run_reg_ne11_some {im : Nat → Option (Ins × Nat)} :
+    ∀ (k : Nat) {s s' : X86Int.St} {i : Nat}, i ≠ 11 →
+      run im k (Out.ok s) = Out.ok s' →
+      (∃ v, s.reg i = some v) → ∃ v, s'.reg i = some v := by
+  intro k
+  induction k with
+  | zero =>
+    intro s s' i _ hr hv
+    rw [run_zero] at hr
+    cases hr
+    exact hv
+  | succ k ih =>
+    intro s s' i hi hr hv
+    have h1 : run im (k + 1) (Out.ok s) = run im k (X86Int.step im s) := rfl
+    rw [h1] at hr
+    cases hst : X86Int.step im s with
+    | ok s1 =>
+      rw [hst] at hr
+      apply ih hi hr
+      cases step_reg_ne11 hst hi with
+      | inl hh =>
+        obtain ⟨v, hv'⟩ := hv
+        exact ⟨v, by rw [hh]; exact hv'⟩
+      | inr hh => exact hh
+    | exit n =>
+      rw [hst] at hr
+      cases k <;> simp [X86Int.run] at hr
+    | stuck =>
+      rw [hst] at hr
+      cases k <;> simp [X86Int.run] at hr
+
+/-- Registers `0..15` except `r11` are all defined. -/
+def RegsOk (s : X86Int.St) : Prop :=
+  ∀ i, i < 16 → i ≠ 11 → ∃ v, s.reg i = some v
+
+theorem run_regs_ok {im : Nat → Option (Ins × Nat)} {k : Nat}
+    {s s' : X86Int.St} (hr : run im k (Out.ok s) = Out.ok s')
+    (h : RegsOk s) : RegsOk s' :=
+  fun i hi16 hi11 => run_reg_ne11_some k hi11 hr (h i hi16 hi11)
+
 end SporosX1
