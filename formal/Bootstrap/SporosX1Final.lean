@@ -2762,6 +2762,115 @@ theorem loader_mmap1_to_readloop {f : List Nat} {A sp0 : Nat}
   exact ⟨hlegal, b6, hrun, hb6rip, hb6r3, hb6r12, hb6r13, hb6r14, hb6r4,
     hb6mem, hb6k, hlenb6⟩
 
+/-! ### Read-loop infrastructure -/
+
+theorem step_mov32 {im : Nat → Option (Ins × Nat)} {s : X86Int.St}
+    {d r len v : Nat} (hi : im s.rip = some (.mov32 d r, len))
+    (hr : s.reg r = some v) :
+    X86Int.step im s =
+      .ok { s.set d (some (v % 2 ^ 32)) with rip := s.rip + len } := by
+  simp only [X86Int.step, exec, hi, hr, lift, bind, Option.bind, pure]
+
+theorem pages_mono {a b : Nat} (h : a ≤ b) :
+    X86Env.pages a ≤ X86Env.pages b := by
+  unfold X86Env.pages
+  have hdiv : (a + page - 1) / page ≤ (b + page - 1) / page :=
+    Nat.div_le_div_right (by omega)
+  have hpage : 0 < page := by decide
+  exact Nat.mul_le_mul_right page hdiv
+
+theorem mem_wr_third {c1 c2 r : Region} {a v : Nat}
+    (hdisj1 : c1.hi ≤ r.base) (hdisj2 : c2.hi ≤ r.base)
+    (hge : r.base ≤ a) (hlt : a < r.hi) (hrw : r.rw = true) :
+    Mem.wr [c1, c2, r] a v =
+      some [c1, c2, { r with data := r.data.set (a - r.base) (v % 256) }] := by
+  have hnot1 : ¬ (c1.base ≤ a ∧ a < c1.hi) := by omega
+  have hnot2 : ¬ (c2.base ≤ a ∧ a < c2.hi) := by omega
+  simp [Mem.wr, Mem.find, hnot1, hnot2, hge, hlt, hrw]
+
+theorem wrN_third_some : ∀ (bs : List Nat) {c1 c2 r : Region} {a : Nat},
+    c1.hi ≤ r.base → c2.hi ≤ r.base → r.rw = true → r.base ≤ a →
+    a + bs.length ≤ r.hi →
+    ∃ r', Mem.wrN [c1, c2, r] a bs = some [c1, c2, r'] ∧
+      r'.base = r.base ∧ r'.hi = r.hi ∧ r'.rw = r.rw
+  | [], c1, c2, r, a, _, _, _, _, _ =>
+    ⟨r, by simp [Mem.wrN], rfl, rfl, rfl⟩
+  | b :: t, c1, c2, r, a, hdisj1, hdisj2, hrw, hge, hhi => by
+    have hlt : a < r.hi := by
+      simp at hhi
+      omega
+    rw [Mem.wrN, mem_wr_third hdisj1 hdisj2 hge hlt hrw]
+    have hlen : ({ r with data := r.data.set (a - r.base) (b % 256) } :
+        Region).hi = r.hi := by
+      simp [Region.hi, List.length_set]
+    obtain ⟨r'', hr'', hb, hh, hrw'⟩ :=
+      wrN_third_some (c1 := c1) (c2 := c2)
+        (r := { r with data := r.data.set (a - r.base) (b % 256) })
+        (a := a + 1) t hdisj1 hdisj2 (by simpa using hrw)
+        (by show r.base ≤ a + 1; omega) (by
+        rw [hlen]
+        simp at hhi
+        omega)
+    exact ⟨r'', by simpa using hr'', by simpa using hb,
+      by rw [hh, hlen], by simpa using hrw'⟩
+
+theorem rdN_combine {m : Mem} :
+    ∀ {a n : Nat} {xs : List Nat}, xs.length = n →
+      m.rdN a n = some xs →
+      ∀ {k : Nat} {ys : List Nat}, ys.length = k →
+        m.rdN (a + n) k = some ys →
+        m.rdN a (n + k) = some (xs ++ ys) := by
+  intro a n
+  induction n generalizing a with
+  | zero =>
+    intro xs hxs h k ys hys h2
+    have : xs = [] := by cases xs <;> simp_all
+    subst this
+    simpa using h2
+  | succ j ih =>
+    intro xs hxs h k ys hys h2
+    cases xs with
+    | nil => simp at hxs
+    | cons b t =>
+      have ht : t.length = j := by simpa using hxs
+      obtain ⟨hb, ht2⟩ := rdN_cons h
+      have hrec : m.rdN (a + 1) (j + k) = some (t ++ ys) := by
+        apply ih ht ht2 hys
+        rw [show a + 1 + j = a + (j + 1) from by omega]
+        exact h2
+      rw [show j + 1 + k = (j + k) + 1 from by omega]
+      simp only [Mem.rdN]
+      simp [hb, hrec]
+
+theorem rdN_wrN_prefix : ∀ (bs : List Nat) {m m' : Mem} {a k : Nat},
+    m.wrN (a + k) bs = some m' → m'.rdN a k = m.rdN a k
+  | bs, m, m', a, 0, _ => rfl
+  | bs, m, m', a, k + 1, h => by
+    have h1 : m'.rd a = m.rd a :=
+      rd_wrN_other bs m (a + (k + 1)) a h (fun i _ => by omega)
+    have h2 : m'.rdN (a + 1) k = m.rdN (a + 1) k := by
+      have h' : m.wrN (a + 1 + k) bs = some m' := by
+        rwa [show a + 1 + k = a + (k + 1) from by omega]
+      exact rdN_wrN_prefix bs h'
+    simp only [Mem.rdN, h1, h2]
+
+theorem syscall_read_file {k : Kern} {m m' : Mem} {f : List Nat}
+    {buf count want A : Nat} (hfd : k.fds = [some ⟨f, count⟩])
+    (hhead : k.oracle.head? = some (.at A))
+    (hwr : m.wrN buf
+      ((f.drop count).take (min want ((f.drop count).length))) = some m') :
+    X86Env.syscall k m 0 3 buf want 0 0 0 =
+      some (.ret (min want ((f.drop count).length))
+        { k with fds :=
+          [some ⟨f, count + min want ((f.drop count).length)⟩] } m') := by
+  simp only [X86Env.syscall]
+  rw [if_neg (by decide : ¬ ((3 : Nat) = 0)), if_pos (by decide : 3 ≤ 3)]
+  rw [hfd]
+  simp only [show (3 : Nat) - 3 = 0 from rfl, List.getElem?_cons_zero]
+  rw [kern_count_at_head hhead]
+  rw [hwr]
+  rfl
+
 /-- EXISTENCE TARGET: with room, some oracle makes the final
 theorem non-vacuous.  The witness is `stage1Oracle f A` for the
 `A` given by `Room`.  What remains is the loader-prefix invariant:
