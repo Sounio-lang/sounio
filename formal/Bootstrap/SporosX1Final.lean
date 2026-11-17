@@ -704,6 +704,86 @@ theorem oracleLegalAt_mremap {s : X86Int.St} {B : Nat}
   exact ⟨25, a1, a2, a3, MREMAP_MAYMOVE, 0, 0, rax, k', m',
     h0, h7, h6, h2, h10, h8, h9, hsc⟩
 
+/-! ### The loader prefix layout (entry to `loaded`, plus the fail blocks)
+
+Offsets are the listing's.  The two memory syscalls of this region
+are the initial file-buffer `mmap` at `base + 0xbf` and the growth
+`mremap` at `base + 0x113`; the syscalls at `0x92`, `0xe8`, `0x12a`
+and `0x132` are `open`, `read` and the two exits, none of which is a
+memory syscall. -/
+
+structure LoaderCode (im : Nat → Option (Ins × Nat)) : Prop where
+  d78 : im (base + 0x78) = some (.pop 0, 1)
+  d79 : im (base + 0x79) = some (.cmpI 0 2, 4)
+  d7d : im (base + 0x7d) = some (.jcc 13 (base + 0x84), 2)
+  d7f : im (base + 0x7f) = some (.jmp (base + 0x124), 5)
+  d84 : im (base + 0x84) = some (.pop 6, 1)
+  d85 : im (base + 0x85) = some (.pop 6, 1)
+  d86 : im (base + 0x86) = some (.movI 0 2, 5)
+  d8b : im (base + 0x8b) = some (.mov 7 6, 3)
+  d8e : im (base + 0x8e) = some (.alu .xor 6 6, 2)
+  d90 : im (base + 0x90) = some (.alu .xor 2 2, 2)
+  d92 : im (base + 0x92) = some (.syscall, 2)
+  d94 : im (base + 0x94) = some (.test 0 0, 3)
+  d97 : im (base + 0x97) = some (.jcc 9 (base + 0x9e), 2)
+  d99 : im (base + 0x99) = some (.jmp (base + 0x124), 5)
+  d9e : im (base + 0x9e) = some (.mov 14 0, 3)
+  da1 : im (base + 0xa1) = some (.movI 0 9, 5)
+  da6 : im (base + 0xa6) = some (.alu .xor 7 7, 2)
+  da8 : im (base + 0xa8) = some (.movI 6 65536, 5)
+  dad : im (base + 0xad) = some (.movI 2 3, 5)
+  db2 : im (base + 0xb2) = some (.movI 10 34, 6)
+  db8 : im (base + 0xb8) = some (.pushI (W - 1), 2)
+  dba : im (base + 0xba) = some (.pop 8, 2)
+  dbc : im (base + 0xbc) = some (.alu .xor 9 9, 3)
+  dbf : im (base + 0xbf) = some (.syscall, 2)
+  dc1 : im (base + 0xc1) = some (.test 0 0, 3)
+  dc4 : im (base + 0xc4) = some (.jcc 9 (base + 0xcb), 2)
+  dc6 : im (base + 0xc6) = some (.jmp (base + 0x12c), 5)
+  dcb : im (base + 0xcb) = some (.mov 3 0, 3)
+  dce : im (base + 0xce) = some (.movI 12 65536, 6)
+  dd4 : im (base + 0xd4) = some (.alu .xor 13 13, 3)
+  dd7 : im (base + 0xd7) = some (.mov 6 3, 3)
+  dda : im (base + 0xda) = some (.alu .add 6 13, 3)
+  ddd : im (base + 0xdd) = some (.mov 2 12, 3)
+  de0 : im (base + 0xe0) = some (.alu .sub 2 13, 3)
+  de3 : im (base + 0xe3) = some (.alu .xor 0 0, 2)
+  de5 : im (base + 0xe5) = some (.mov32 7 14, 3)
+  de8 : im (base + 0xe8) = some (.syscall, 2)
+  dea : im (base + 0xea) = some (.test 0 0, 3)
+  ded : im (base + 0xed) = some (.jcc 8 (base + 0x124), 2)
+  def_ : im (base + 0xef) = some (.jcc 4 (base + 0x122), 2)
+  df1 : im (base + 0xf1) = some (.alu .add 13 0, 3)
+  df4 : im (base + 0xf4) = some (.mov 2 12, 3)
+  df7 : im (base + 0xf7) = some (.alu .sub 2 13, 3)
+  dfa : im (base + 0xfa) = some (.jcc 5 (base + 0xd7), 2)
+  dfc : im (base + 0xfc) = some (.movI 0 25, 5)
+  d101 : im (base + 0x101) = some (.mov 7 3, 3)
+  d104 : im (base + 0x104) = some (.mov 6 12, 3)
+  d107 : im (base + 0x107) = some (.mov 2 12, 3)
+  d10a : im (base + 0x10a) = some (.alu .add 2 2, 3)
+  d10d : im (base + 0x10d) = some (.movI 10 1, 6)
+  d113 : im (base + 0x113) = some (.syscall, 2)
+  d115 : im (base + 0x115) = some (.test 0 0, 3)
+  d118 : im (base + 0x118) = some (.jcc 8 (base + 0x12c), 2)
+  d11a : im (base + 0x11a) = some (.mov 3 0, 3)
+  d11d : im (base + 0x11d) = some (.mov 12 2, 3)
+  d120 : im (base + 0x120) = some (.jmp (base + 0xd7), 2)
+  d122 : im (base + 0x122) = some (.jmp (base + 0x134), 2)
+  d124 : im (base + 0x124) = some (.pushI 60, 2)
+  d126 : im (base + 0x126) = some (.pop 0, 1)
+  d127 : im (base + 0x127) = some (.pushI 1, 2)
+  d129 : im (base + 0x129) = some (.pop 7, 1)
+  d12a : im (base + 0x12a) = some (.syscall, 2)
+  d12c : im (base + 0x12c) = some (.pushI 60, 2)
+  d12e : im (base + 0x12e) = some (.pop 0, 1)
+  d12f : im (base + 0x12f) = some (.pushI 2, 2)
+  d131 : im (base + 0x131) = some (.pop 7, 1)
+  d132 : im (base + 0x132) = some (.syscall, 2)
+
+theorem stage1_loaderCode : LoaderCode stage1Im := by
+  apply LoaderCode.mk <;> decide +kernel
+
 /-- EXISTENCE TARGET: with room, some oracle makes the final
 theorem non-vacuous.  The witness is `stage1Oracle f A` for the
 `A` given by `Room`.  What remains is the loader-prefix invariant:
