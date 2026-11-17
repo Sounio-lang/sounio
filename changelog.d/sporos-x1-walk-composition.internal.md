@@ -16,5 +16,9 @@ The composition now reaches the accept exit: `annval` (annOk), `codewalk`
 (axioms: propext, Classical.choice, Quot.sound). The refusal direction has
 begun in the same module: a generic status-exit block and `fail1` exit,
 refusal of a word with no instructions, and refusal at the first
-out-of-range annotation entry after a good prefix. The remaining refusal
-branches and the parse/decode phase remain open.
+out-of-range annotation entry after a good prefix. `gen_seed_data.sh`
+now also generates the stage-1 listing and its decoded bytes into
+`SeedData.lean`, and `formal/Bootstrap/SporosX1Image.lean` (registered
+in the lakefile) instantiates `AllCode`, `OuterCode` and `RefuseCode`
+at `imageOf` of those bytes. The remaining refusal branches and the
+parse/decode phase remain open.
