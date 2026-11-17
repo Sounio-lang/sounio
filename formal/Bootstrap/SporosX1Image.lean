@@ -26,6 +26,50 @@ def stage1Code : List Nat := X86Min.Data.sporosStage1
 at the ELF base. -/
 def stage1Im : Nat → Option (Ins × Nat) := X86Dec.imageOf stage1Code 0x400000
 
+/-! ### ELF header fields, read from the code itself
+
+The Linux loader does not know the constants `base` and `base + 0x78`;
+it reads them from the ELF and program headers.  These definitions do
+the same, and the theorems pin the values by `decide +kernel`, so the
+initial-state definition in the final-theorem file can be written in
+terms of the fields the kernel actually uses. -/
+
+/-- `e_entry` (ELF header, offset `0x18`, 8 bytes). -/
+def elfEntry : Nat := leVal ((stage1Code.drop 0x18).take 8)
+
+/-- `e_phnum` (ELF header, offset `0x38`, 2 bytes). -/
+def elfPhnum : Nat := leVal ((stage1Code.drop 0x38).take 2)
+
+/-- `p_flags` (program header at `0x40`, offset `0x44`, 4 bytes). -/
+def phFlags : Nat := leVal ((stage1Code.drop 0x44).take 4)
+
+/-- `p_offset` (program header, offset `0x48`, 8 bytes). -/
+def phOffset : Nat := leVal ((stage1Code.drop 0x48).take 8)
+
+/-- `p_vaddr` (program header, offset `0x50`, 8 bytes). -/
+def phVaddr : Nat := leVal ((stage1Code.drop 0x50).take 8)
+
+/-- `p_filesz` (program header, offset `0x60`, 8 bytes). -/
+def phFilesz : Nat := leVal ((stage1Code.drop 0x60).take 8)
+
+/-- `p_memsz` (program header, offset `0x68`, 8 bytes). -/
+def phMemsz : Nat := leVal ((stage1Code.drop 0x68).take 8)
+
+theorem elfEntry_eq : elfEntry = base + 0x78 := by decide +kernel
+
+theorem elfPhnum_eq : elfPhnum = 1 := by decide +kernel
+
+/-- `p_flags = 5` is R+X (`PF_R = 4`, `PF_X = 1`). -/
+theorem phFlags_eq : phFlags = 5 := by decide +kernel
+
+theorem phOffset_eq : phOffset = 0 := by decide +kernel
+
+theorem phVaddr_eq : phVaddr = base := by decide +kernel
+
+theorem phFilesz_eq : phFilesz = stage1Code.length := by decide +kernel
+
+theorem phMemsz_eq : phMemsz = stage1Code.length := by decide +kernel
+
 set_option maxHeartbeats 0 in
 /-- The decoded stage-1 image is 2410 bytes. -/
 theorem stage1Code_length : stage1Code.length = 2410 := by decide +kernel
