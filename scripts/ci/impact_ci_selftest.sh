@@ -48,6 +48,11 @@ sporos="$(classify_pr bootstrap/model/sporos_fast.cpp)"
 expect "$sporos" lean true
 expect "$sporos" full false
 
+# The x86 CPU differential harness belongs to the Lean job.
+x86diff="$(classify_pr bootstrap/model/x86diff_cpu.cpp bootstrap/model/x86int_diff_gate.sh)"
+expect "$x86diff" lean true
+expect "$x86diff" full false
+
 compiler="$(classify_pr self-hosted/compiler/main.sio)"
 expect "$compiler" compiler true
 expect "$compiler" sio true

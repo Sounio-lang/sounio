@@ -23,7 +23,7 @@ function check(w) {
  for(const input of ['formal/**','!formal/**/.lake/**','scripts/ci/*lean*.sh','scripts/ci/epistemic_measure_correspondence_gate.sh','.github/workflows/ci.yml']) assert(key?.includes("'"+input+"'"),'missing key input: '+input);
  assert(key.includes('runner.os')&&key.includes('runner.arch'),'platform identity required');
  const baseline=job.slice(0,a)+job.slice(b);
- assert.equal(crypto.createHash('sha256').update(baseline).digest('hex'),'096453f9dd602ba959d49c53cd5732bed965c53adf8c1799c13b67d290d451dc','mandatory proof gates, builds, conditions, or audit commands changed');
+ assert.equal(crypto.createHash('sha256').update(baseline).digest('hex'),'4eb59abf0d31d051f802b92aedb7e5b7ebe8c51cd436971775e8802072ab4f41','mandatory proof gates, builds, conditions, or audit commands changed');
  const fast=w.slice(w.indexOf('  fast-checks:\n'),w.indexOf('\n  contracts-core:'));
  assert(fast.includes('run: node scripts/ci/lean_cache_contract.mjs "$GITHUB_WORKSPACE" --selftest'),'contract must run in Fast Checks');
 }
@@ -40,6 +40,7 @@ if(process.argv.includes('--selftest')) {
   s=>s.replace('          lake build Bootstrap x86run\n','          true\n'),
   s=>s.replace('          lake build Bootstrap x86run\n','          lake build Bootstrap\n'),
   s=>s.replace('run: bash bootstrap/model/sporos_diff.sh 500','run: echo skipped'),
+  s=>s.replace('run: bash bootstrap/model/x86int_diff_gate.sh 200000 1','run: echo skipped'),
  ];
  for(const mutate of mutations) { const bad=mutate(w);assert.notEqual(bad,w,'mutation missed target');assert.throws(()=>check(bad),'unsafe mutation accepted'); }
  console.log('PASS: negative controls reject stale keys, omitted builds/audits and conditional proof skips');
