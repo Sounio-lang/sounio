@@ -165,7 +165,9 @@ theorem fall_finish {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
     (hrip2 : s2.rip = aFallTail)
     (hpost : HPost s s2 h' (c + len) sp) :
     ∃ k s3, run im k (Out.ok s) = Out.ok s3 ∧
-      WalkInv pr wd w p sp tbl s3 rest (i + 1) (c + len) h' h' := by
+      WalkInv pr wd w p sp tbl s3 rest (i + 1) (c + len) h' h' ∧
+      (∀ x m, x + m ≤ sp - 32 ∨ sp ≤ x → s3.mem.rdN x m = s.mem.rdN x m) ∧
+      wshape s3.mem = wshape s.mem := by
   obtain ⟨hs2r8, hs2r9, hs2r6, hs2r4, hs2r1, hs2r7, hs2r13, hs2r14, hfr2, hsh2,
     hlen2⟩ := hpost
   have hs0 : hstep pr wd ((wd.ann.lookup i).getD cur) ins = some (some h') := by
@@ -211,14 +213,15 @@ theorem fall_finish {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
     | inr h => exact Or.inr (by omega))
   refine ⟨k1 + (k2 + kt), s3, by
       rw [run_add im k1 (k2 + kt), hr1, run_add im k2 kt, hr2, hrt],
-    hrip3, hs3r8, hs3r9, hs3r6, hs3r4, ?_, hs3r1, ?_, ?_, ?_, ?_, csq3, ?_,
+    ⟨hrip3, hs3r8, hs3r9, hs3r6, hs3r4, ?_, hs3r1, ?_, ?_, ?_, ?_, csq3, ?_,
     rd64_of_frame_of_disjw st.disjw frS (by decide) inv.fnc,
     rd64_of_frame_of_disjw st.disjw frS (by decide) inv.fnann,
     rd64_of_frame_of_disjw st.disjw frS (by decide) inv.fannp,
     rd64_of_frame_of_disjw st.disjw frS (by decide) inv.floc,
     rd64_of_frame_of_disjw st.disjw frS (by decide) inv.fouts,
     ?_, ?_, ?_, ?_, ?_, ?_,
-    fun x hx => inv.imm x (List.mem_cons_of_mem ins hx), hbrest⟩
+    fun x hx => inv.imm x (List.mem_cons_of_mem ins hx), hbrest⟩, frS,
+    hsh3.trans hsh2⟩
   · rw [hgen3 7 (by decide) (by decide) (by decide) (by decide) (by decide)
       (by decide) (by decide) (by decide), hs2r7]; exact inv.r7
   · rw [hgen3 13 (by decide) (by decide) (by decide) (by decide) (by decide)
@@ -287,7 +290,10 @@ theorem none_finish_cons {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
     (hpost : HPost s s2 hm (c + len) sp) :
     ∃ k s3, run im k (Out.ok s) = Out.ok s3 ∧
       WalkInv pr wd w p sp tbl s3 rest (i + 1) (c + len)
-        ((wd.ann.lookup (i + 1)).getD ⟨0, 0⟩) ((wd.ann.lookup (i + 1)).getD ⟨0, 0⟩) := by
+        ((wd.ann.lookup (i + 1)).getD ⟨0, 0⟩)
+        ((wd.ann.lookup (i + 1)).getD ⟨0, 0⟩) ∧
+      (∀ x m, x + m ≤ sp - 32 ∨ sp ≤ x → s3.mem.rdN x m = s.mem.rdN x m) ∧
+      wshape s3.mem = wshape s.mem := by
   obtain ⟨hs2r8, hs2r9, hs2r6, hs2r4, hs2r1, hs2r7, hs2r13, hs2r14, hfr2, hsh2,
     hlen2⟩ := hpost
   have hs0 : hstep pr wd ((wd.ann.lookup i).getD cur) ins = some none := by
@@ -337,14 +343,15 @@ theorem none_finish_cons {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
     | inr h => exact Or.inr (by omega))
   refine ⟨k1 + (k2 + kt), s3, by
       rw [run_add im k1 (k2 + kt), hr1, run_add im k2 kt, hr2, hrt],
-    hrip3, hs3r8, hs3r9, hs3r6, hs3r4, ?_, hs3r1, ?_, ?_, ?_, ?_, csq3, ?_,
+    ⟨hrip3, hs3r8, hs3r9, hs3r6, hs3r4, ?_, hs3r1, ?_, ?_, ?_, ?_, csq3, ?_,
     rd64_of_frame_of_disjw st.disjw frS (by decide) inv.fnc,
     rd64_of_frame_of_disjw st.disjw frS (by decide) inv.fnann,
     rd64_of_frame_of_disjw st.disjw frS (by decide) inv.fannp,
     rd64_of_frame_of_disjw st.disjw frS (by decide) inv.floc,
     rd64_of_frame_of_disjw st.disjw frS (by decide) inv.fouts,
     ?_, ?_, ?_, ?_, ?_, ?_,
-    fun x hx => inv.imm x (List.mem_cons_of_mem ins hx), hbrest⟩
+    fun x hx => inv.imm x (List.mem_cons_of_mem ins hx), hbrest⟩, frS,
+    hsh3.trans hsh2⟩
   · rw [hgen3 7 (by decide) (by decide) (by decide) (by decide) (by decide)
       (by decide) (by decide) (by decide), hs2r7]; exact inv.r7
   · rw [hgen3 13 (by decide) (by decide) (by decide) (by decide) (by decide)
@@ -410,7 +417,9 @@ theorem none_finish_nil {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
     (hpost : HPost s s2 hm (c + len) sp) :
     ∃ k s4, run im k (Out.ok s) = Out.ok s4 ∧ s4.rip = aWordDone ∧
       s4.reg 1 = some (i + 1) ∧ s4.reg 6 = some (c + len) ∧
-      s4.reg 7 = some w ∧ s4.reg 4 = some sp := by
+      s4.reg 7 = some w ∧ s4.reg 4 = some sp ∧
+      (∀ x m, x + m ≤ sp - 32 ∨ sp ≤ x → s4.mem.rdN x m = s.mem.rdN x m) ∧
+      wshape s4.mem = wshape s.mem := by
   obtain ⟨hs2r8, hs2r9, hs2r6, hs2r4, hs2r1, hs2r7, hs2r13, hs2r14, hfr2, hsh2,
     hlen2⟩ := hpost
   have hs0 : hstep pr wd ((wd.ann.lookup i).getD cur) ins = some none := by
@@ -462,9 +471,12 @@ theorem none_finish_nil {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
     WalkDone_triple cfg.walk (by decide) hm (c + len) (i + 1) w sp wd.code.length
       st.w56 hnotlt s3 hrip3 hs3r8 hs3r9 hs3r6 hs3r4 hs3r7v hs3r1 hlen163
       (rd64_of_frame_of_disjw st.disjw frS (by decide) inv.fnc)
-  exact ⟨k1 + (k2 + (kt + k4)), s4, by
+  refine ⟨k1 + (k2 + (kt + k4)), s4, by
     rw [run_add im k1 (k2 + (kt + k4)), hr1, run_add im k2 (kt + k4), hr2,
-      run_add im kt k4, hrt, hr4], hrip4, hr14, hr64, hr74, hr44⟩
+      run_add im kt k4, hrt, hr4], hrip4, hr14, hr64, hr74, hr44, ?_, ?_⟩
+  · intro x m hx
+    rw [hm4]; exact frS x m hx
+  · rw [hm4]; exact hsh3.trans hsh2
 
 theorem hand_lit {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
     {pr : Prog} {wd : Word} {w p sp tbl : Nat} (st : WalkStatic pr wd w p sp tbl)
@@ -1254,6 +1266,7 @@ theorem hand_ret {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
 
 
 
+
 theorem fall_finish1 {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
     {pr : Prog} {wd : Word} {w p sp tbl : Nat} (st : WalkStatic pr wd w p sp tbl)
     {ins : Instr} {rest : List Instr} {i c len : Nat} {cur hm h' : Height}
@@ -1267,7 +1280,9 @@ theorem fall_finish1 {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
     (hrip2 : s2.rip = aFallTail)
     (hpost : HPost s s2 h' (c + len) sp) :
     ∃ k s3, run im k (Out.ok s) = Out.ok s3 ∧
-      WalkInv pr wd w p sp tbl s3 rest (i + 1) (c + len) h' h' :=
+      WalkInv pr wd w p sp tbl s3 rest (i + 1) (c + len) h' h' ∧
+      (∀ x m, x + m ≤ sp - 32 ∨ sp ≤ x → s3.mem.rdN x m = s.mem.rdN x m) ∧
+      wshape s3.mem = wshape s.mem :=
   fall_finish cfg st inv hs hann hi1 hlen hr (k2 := 0) (s1 := s2) (run_zero im (Out.ok s2))
     hrip2 hpost
 
@@ -1285,7 +1300,9 @@ theorem none_finish_cons1 {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
     ∃ k s3, run im k (Out.ok s) = Out.ok s3 ∧
       WalkInv pr wd w p sp tbl s3 rest (i + 1) (c + len)
         ((wd.ann.lookup (i + 1)).getD ⟨0, 0⟩)
-        ((wd.ann.lookup (i + 1)).getD ⟨0, 0⟩) :=
+        ((wd.ann.lookup (i + 1)).getD ⟨0, 0⟩) ∧
+      (∀ x m, x + m ≤ sp - 32 ∨ sp ≤ x → s3.mem.rdN x m = s.mem.rdN x m) ∧
+      wshape s3.mem = wshape s.mem :=
   none_finish_cons cfg st inv hs hi1 hlen hr (k2 := 0) (s1 := s2) (run_zero im (Out.ok s2))
     hrip2 hpost
 
@@ -1301,7 +1318,9 @@ theorem none_finish_nil1 {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
     (hpost : HPost s s2 hm (c + len) sp) :
     ∃ k s4, run im k (Out.ok s) = Out.ok s4 ∧ s4.rip = aWordDone ∧
       s4.reg 1 = some (i + 1) ∧ s4.reg 6 = some (c + len) ∧
-      s4.reg 7 = some w ∧ s4.reg 4 = some sp :=
+      s4.reg 7 = some w ∧ s4.reg 4 = some sp ∧
+      (∀ x m, x + m ≤ sp - 32 ∨ sp ≤ x → s4.mem.rdN x m = s.mem.rdN x m) ∧
+      wshape s4.mem = wshape s.mem :=
   none_finish_nil cfg st inv hs hlen hr (k2 := 0) (s1 := s2) (run_zero im (Out.ok s2)) hrip2
     hpost
 
@@ -1319,19 +1338,24 @@ theorem walk_loop {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
       ∃ k s', run im k (Out.ok s) = Out.ok s' ∧ s'.rip = aWordDone ∧
         s'.reg 1 = some (i + code.length) ∧
         s'.reg 6 = some (c + codeBytes code) ∧
-        s'.reg 7 = some w ∧ s'.reg 4 = some sp := by
+        s'.reg 7 = some w ∧ s'.reg 4 = some sp ∧
+        (∀ x m, x + m ≤ sp - 32 ∨ sp ≤ x → s'.mem.rdN x m = s.mem.rdN x m) ∧
+        wshape s'.mem = wshape s.mem := by
   intro code
   induction code with
   | nil =>
     intro i c cur hm s inv hw
-    obtain ⟨k, s', hr, hrip, -, hr1, hr6, hr7, -, -, hr4, -, -⟩ :=
+    obtain ⟨k, s', hr, hrip, -, hr1, hr6, hr7, -, -, hr4, -, hmD⟩ :=
       WalkDone_triple cfg.walk (by decide) hm c i w sp wd.code.length st.w56
         (by have h := inv.isum; simp at h; omega) s inv.rip inv.r8 inv.r9
         inv.r6 inv.r4 inv.r7 inv.r1 inv.len16 inv.fnc
-    refine ⟨k, s', hr, hrip, ?_, ?_, hr7, hr4⟩
+    refine ⟨k, s', hr, hrip, ?_, ?_, hr7, hr4, ?_, ?_⟩
     · simpa using hr1
     · have e : c + codeBytes ([] : List Instr) = c := rfl
       rw [e]; exact hr6
+    · intro x m _
+      rw [hmD]
+    · rw [hmD]
   | cons ins rest ih =>
     intro i c cur hm s inv hw
     have hge : ((wd.ann.lookup i).getD cur) = hm := inv.hlink.symm
@@ -1370,12 +1394,13 @@ theorem walk_loop {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
               have h := inv.isum
               simp only [List.length_cons] at h
               omega
-            obtain ⟨k3, s3, hr3, inv3⟩ :=
+            obtain ⟨k3, s3, hr3, inv3, hfr3i, hsh3i⟩ :=
               fall_finish1 cfg st inv hs hw2.1 hi1 rfl hrh hrip2 hpost
-            obtain ⟨k4, s4, hr4, hrip4, hr14, hr64, hr74, hr44⟩ :=
+            obtain ⟨k4, s4, hr4, hrip4, hr14, hr64, hr74, hr44, hfr4, hsh4⟩ :=
               ih (i + 1) (c + 1) h' h' s3 inv3 hw2.2
             refine ⟨k3 + k4, s4, by rw [run_add im k3 k4, hr3, hr4], hrip4, ?_, ?_,
-              hr74, hr44⟩
+              hr74, hr44,
+              fun x m hx => (hfr4 x m hx).trans (hfr3i x m hx), hsh4.trans hsh3i⟩
             · have e : (i + 1) + (y :: ys).length =
                   i + (Instr.prim pq :: y :: ys).length := by
                 simp only [List.length_cons]; omega
@@ -1393,9 +1418,9 @@ theorem walk_loop {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
             rw [hge]; exact hs
           cases rest with
           | nil =>
-            obtain ⟨k3, s4, hr3, hrip4, hr14, hr64, hr74, hr44⟩ :=
+            obtain ⟨k3, s4, hr3, hrip4, hr14, hr64, hr74, hr44, hfr4, hsh4⟩ :=
               none_finish_nil1 cfg st inv hs rfl hrh hrip2 hpost
-            refine ⟨k3, s4, hr3, hrip4, ?_, ?_, hr74, hr44⟩
+            refine ⟨k3, s4, hr3, hrip4, ?_, ?_, hr74, hr44, hfr4, hsh4⟩
             · simpa using hr14
             · have e : c + codeBytes [Instr.prim pq] = c + 1 := rfl
               rw [e]; exact hr64
@@ -1408,12 +1433,13 @@ theorem walk_loop {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
                 ((wd.ann.lookup (i + 1)).getD ⟨0, 0⟩) = true := by
               simp only [Sporos.walk, hs0] at hw
               exact hw
-            obtain ⟨k3, s3, hr3, inv3⟩ :=
+            obtain ⟨k3, s3, hr3, inv3, hfr3i, hsh3i⟩ :=
               none_finish_cons1 cfg st inv hs hi1 rfl hrh hrip2 hpost
-            obtain ⟨k4, s4, hr4, hrip4, hr14, hr64, hr74, hr44⟩ :=
+            obtain ⟨k4, s4, hr4, hrip4, hr14, hr64, hr74, hr44, hfr4, hsh4⟩ :=
               ih (i + 1) (c + 1) _ _ s3 inv3 hwrest
             refine ⟨k3 + k4, s4, by rw [run_add im k3 k4, hr3, hr4], hrip4, ?_, ?_,
-              hr74, hr44⟩
+              hr74, hr44,
+              fun x m hx => (hfr4 x m hx).trans (hfr3i x m hx), hsh4.trans hsh3i⟩
             · have e : (i + 1) + (y :: ys).length =
                   i + (Instr.prim pq :: y :: ys).length := by
                 simp only [List.length_cons]; omega
@@ -1451,12 +1477,13 @@ theorem walk_loop {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
           have h := inv.isum
           simp only [List.length_cons] at h
           omega
-        obtain ⟨k3, s3, hr3, inv3⟩ :=
+        obtain ⟨k3, s3, hr3, inv3, hfr3i, hsh3i⟩ :=
           fall_finish1 cfg st inv hs hw2.1 hi1 rfl hrh hrip2 hpost
-        obtain ⟨k4, s4, hr4, hrip4, hr14, hr64, hr74, hr44⟩ :=
+        obtain ⟨k4, s4, hr4, hrip4, hr14, hr64, hr74, hr44, hfr4, hsh4⟩ :=
           ih (i + 1) (c + 9) ⟨hm.d + 1, hm.a⟩ ⟨hm.d + 1, hm.a⟩ s3 inv3 hw2.2
         refine ⟨k3 + k4, s4, by rw [run_add im k3 k4, hr3, hr4], hrip4, ?_, ?_,
-          hr74, hr44⟩
+          hr74, hr44,
+          fun x m hx => (hfr4 x m hx).trans (hfr3i x m hx), hsh4.trans hsh3i⟩
         · have e : (i + 1) + (y :: ys).length =
               i + (Instr.lit lv :: y :: ys).length := by
             simp only [List.length_cons]; omega
@@ -1494,12 +1521,13 @@ theorem walk_loop {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
           have h := inv.isum
           simp only [List.length_cons] at h
           omega
-        obtain ⟨k3, s3, hr3, inv3⟩ :=
+        obtain ⟨k3, s3, hr3, inv3, hfr3i, hsh3i⟩ :=
           fall_finish1 cfg st inv hs hw2.1 hi1 rfl hrh hrip2 hpost
-        obtain ⟨k4, s4, hr4, hrip4, hr14, hr64, hr74, hr44⟩ :=
+        obtain ⟨k4, s4, hr4, hrip4, hr14, hr64, hr74, hr44, hfr4, hsh4⟩ :=
           ih (i + 1) (c + 5) ⟨hm.d + 2, hm.a⟩ ⟨hm.d + 2, hm.a⟩ s3 inv3 hw2.2
         refine ⟨k3 + k4, s4, by rw [run_add im k3 k4, hr3, hr4], hrip4, ?_, ?_,
-          hr74, hr44⟩
+          hr74, hr44,
+          fun x m hx => (hfr4 x m hx).trans (hfr3i x m hx), hsh4.trans hsh3i⟩
         · have e : (i + 1) + (y :: ys).length =
               i + (Instr.str si :: y :: ys).length := by
             simp only [List.length_cons]; omega
@@ -1547,12 +1575,13 @@ theorem walk_loop {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
               have h := inv.isum
               simp only [List.length_cons] at h
               omega
-            obtain ⟨k3, s3, hr3, inv3⟩ :=
+            obtain ⟨k3, s3, hr3, inv3, hfr3i, hsh3i⟩ :=
               fall_finish1 cfg st inv hs hw2.1 hi1 rfl hrh hrip2 hpost
-            obtain ⟨k4, s4, hr4, hrip4, hr14, hr64, hr74, hr44⟩ :=
+            obtain ⟨k4, s4, hr4, hrip4, hr14, hr64, hr74, hr44, hfr4, hsh4⟩ :=
               ih (i + 1) (c + 5) ⟨hm.d + 1, hm.a⟩ ⟨hm.d + 1, hm.a⟩ s3 inv3 hw2.2
             refine ⟨k3 + k4, s4, by rw [run_add im k3 k4, hr3, hr4], hrip4, ?_, ?_,
-              hr74, hr44⟩
+              hr74, hr44,
+              fun x m hx => (hfr4 x m hx).trans (hfr3i x m hx), hsh4.trans hsh3i⟩
             · have e : (i + 1) + (y :: ys).length =
                   i + (Instr.pick pk :: y :: ys).length := by
                 simp only [List.length_cons]; omega
@@ -1600,12 +1629,13 @@ theorem walk_loop {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
               have h := inv.isum
               simp only [List.length_cons] at h
               omega
-            obtain ⟨k3, s3, hr3, inv3⟩ :=
+            obtain ⟨k3, s3, hr3, inv3, hfr3i, hsh3i⟩ :=
               fall_finish1 cfg st inv hs hw2.1 hi1 rfl hrh hrip2 hpost
-            obtain ⟨k4, s4, hr4, hrip4, hr14, hr64, hr74, hr44⟩ :=
+            obtain ⟨k4, s4, hr4, hrip4, hr14, hr64, hr74, hr44, hfr4, hsh4⟩ :=
               ih (i + 1) (c + 1) ⟨hm.d - 1, hm.a + 1⟩ ⟨hm.d - 1, hm.a + 1⟩ s3 inv3 hw2.2
             refine ⟨k3 + k4, s4, by rw [run_add im k3 k4, hr3, hr4], hrip4, ?_, ?_,
-              hr74, hr44⟩
+              hr74, hr44,
+              fun x m hx => (hfr4 x m hx).trans (hfr3i x m hx), hsh4.trans hsh3i⟩
             · have e : (i + 1) + (y :: ys).length =
                   i + (Instr.tor :: y :: ys).length := by
                 simp only [List.length_cons]; omega
@@ -1653,12 +1683,13 @@ theorem walk_loop {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
               have h := inv.isum
               simp only [List.length_cons] at h
               omega
-            obtain ⟨k3, s3, hr3, inv3⟩ :=
+            obtain ⟨k3, s3, hr3, inv3, hfr3i, hsh3i⟩ :=
               fall_finish1 cfg st inv hs hw2.1 hi1 rfl hrh hrip2 hpost
-            obtain ⟨k4, s4, hr4, hrip4, hr14, hr64, hr74, hr44⟩ :=
+            obtain ⟨k4, s4, hr4, hrip4, hr14, hr64, hr74, hr44, hfr4, hsh4⟩ :=
               ih (i + 1) (c + 1) ⟨hm.d + 1, hm.a - 1⟩ ⟨hm.d + 1, hm.a - 1⟩ s3 inv3 hw2.2
             refine ⟨k3 + k4, s4, by rw [run_add im k3 k4, hr3, hr4], hrip4, ?_, ?_,
-              hr74, hr44⟩
+              hr74, hr44,
+              fun x m hx => (hfr4 x m hx).trans (hfr3i x m hx), hsh4.trans hsh3i⟩
             · have e : (i + 1) + (y :: ys).length =
                   i + (Instr.fromr :: y :: ys).length := by
                 simp only [List.length_cons]; omega
@@ -1706,12 +1737,13 @@ theorem walk_loop {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
               have h := inv.isum
               simp only [List.length_cons] at h
               omega
-            obtain ⟨k3, s3, hr3, inv3⟩ :=
+            obtain ⟨k3, s3, hr3, inv3, hfr3i, hsh3i⟩ :=
               fall_finish1 cfg st inv hs hw2.1 hi1 rfl hrh hrip2 hpost
-            obtain ⟨k4, s4, hr4, hrip4, hr14, hr64, hr74, hr44⟩ :=
+            obtain ⟨k4, s4, hr4, hrip4, hr14, hr64, hr74, hr44, hfr4, hsh4⟩ :=
               ih (i + 1) (c + 1) ⟨hm.d + 1, hm.a⟩ ⟨hm.d + 1, hm.a⟩ s3 inv3 hw2.2
             refine ⟨k3 + k4, s4, by rw [run_add im k3 k4, hr3, hr4], hrip4, ?_, ?_,
-              hr74, hr44⟩
+              hr74, hr44,
+              fun x m hx => (hfr4 x m hx).trans (hfr3i x m hx), hsh4.trans hsh3i⟩
             · have e : (i + 1) + (y :: ys).length =
                   i + (Instr.rfetch :: y :: ys).length := by
                 simp only [List.length_cons]; omega
@@ -1759,12 +1791,13 @@ theorem walk_loop {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
               have h := inv.isum
               simp only [List.length_cons] at h
               omega
-            obtain ⟨k3, s3, hr3, inv3⟩ :=
+            obtain ⟨k3, s3, hr3, inv3, hfr3i, hsh3i⟩ :=
               fall_finish1 cfg st inv hs hw2.1 hi1 rfl hrh hrip2 hpost
-            obtain ⟨k4, s4, hr4, hrip4, hr14, hr64, hr74, hr44⟩ :=
+            obtain ⟨k4, s4, hr4, hrip4, hr14, hr64, hr74, hr44, hfr4, hsh4⟩ :=
               ih (i + 1) (c + 5) ⟨hm.d + 1, hm.a⟩ ⟨hm.d + 1, hm.a⟩ s3 inv3 hw2.2
             refine ⟨k3 + k4, s4, by rw [run_add im k3 k4, hr3, hr4], hrip4, ?_, ?_,
-              hr74, hr44⟩
+              hr74, hr44,
+              fun x m hx => (hfr4 x m hx).trans (hfr3i x m hx), hsh4.trans hsh3i⟩
             · have e : (i + 1) + (y :: ys).length =
                   i + (Instr.locget li :: y :: ys).length := by
                 simp only [List.length_cons]; omega
@@ -1812,12 +1845,13 @@ theorem walk_loop {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
               have h := inv.isum
               simp only [List.length_cons] at h
               omega
-            obtain ⟨k3, s3, hr3, inv3⟩ :=
+            obtain ⟨k3, s3, hr3, inv3, hfr3i, hsh3i⟩ :=
               fall_finish1 cfg st inv hs hw2.1 hi1 rfl hrh hrip2 hpost
-            obtain ⟨k4, s4, hr4, hrip4, hr14, hr64, hr74, hr44⟩ :=
+            obtain ⟨k4, s4, hr4, hrip4, hr14, hr64, hr74, hr44, hfr4, hsh4⟩ :=
               ih (i + 1) (c + 5) ⟨hm.d - 1, hm.a⟩ ⟨hm.d - 1, hm.a⟩ s3 inv3 hw2.2
             refine ⟨k3 + k4, s4, by rw [run_add im k3 k4, hr3, hr4], hrip4, ?_, ?_,
-              hr74, hr44⟩
+              hr74, hr44,
+              fun x m hx => (hfr4 x m hx).trans (hfr3i x m hx), hsh4.trans hsh3i⟩
             · have e : (i + 1) + (y :: ys).length =
                   i + (Instr.locset ls :: y :: ys).length := by
                 simp only [List.length_cons]; omega
@@ -1846,9 +1880,9 @@ theorem walk_loop {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
             rw [hge]; exact hs
           cases rest with
           | nil =>
-            obtain ⟨k3, s4, hr3, hrip4, hr14, hr64, hr74, hr44⟩ :=
+            obtain ⟨k3, s4, hr3, hrip4, hr14, hr64, hr74, hr44, hfr4, hsh4⟩ :=
               none_finish_nil1 cfg st inv hs rfl hrh hrip2 hpost
-            refine ⟨k3, s4, hr3, hrip4, ?_, ?_, hr74, hr44⟩
+            refine ⟨k3, s4, hr3, hrip4, ?_, ?_, hr74, hr44, hfr4, hsh4⟩
             · simpa using hr14
             · have e : c + codeBytes [Instr.jmp jt] = c + 5 := rfl
               rw [e]; exact hr64
@@ -1861,12 +1895,13 @@ theorem walk_loop {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
                 ((wd.ann.lookup (i + 1)).getD ⟨0, 0⟩) = true := by
               simp only [Sporos.walk, hs0] at hw
               exact hw
-            obtain ⟨k3, s3, hr3, inv3⟩ :=
+            obtain ⟨k3, s3, hr3, inv3, hfr3i, hsh3i⟩ :=
               none_finish_cons1 cfg st inv hs hi1 rfl hrh hrip2 hpost
-            obtain ⟨k4, s4, hr4, hrip4, hr14, hr64, hr74, hr44⟩ :=
+            obtain ⟨k4, s4, hr4, hrip4, hr14, hr64, hr74, hr44, hfr4, hsh4⟩ :=
               ih (i + 1) (c + 5) _ _ s3 inv3 hwrest
             refine ⟨k3 + k4, s4, by rw [run_add im k3 k4, hr3, hr4], hrip4, ?_, ?_,
-              hr74, hr44⟩
+              hr74, hr44,
+              fun x m hx => (hfr4 x m hx).trans (hfr3i x m hx), hsh4.trans hsh3i⟩
             · have e : (i + 1) + (y :: ys).length =
                   i + (Instr.jmp jt :: y :: ys).length := by
                 simp only [List.length_cons]; omega
@@ -1914,12 +1949,13 @@ theorem walk_loop {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
               have h := inv.isum
               simp only [List.length_cons] at h
               omega
-            obtain ⟨k3, s3, hr3, inv3⟩ :=
+            obtain ⟨k3, s3, hr3, inv3, hfr3i, hsh3i⟩ :=
               fall_finish1 cfg st inv hs hw2.1 hi1 rfl hrh hrip2 hpost
-            obtain ⟨k4, s4, hr4, hrip4, hr14, hr64, hr74, hr44⟩ :=
+            obtain ⟨k4, s4, hr4, hrip4, hr14, hr64, hr74, hr44, hfr4, hsh4⟩ :=
               ih (i + 1) (c + 5) ⟨hm.d - 1, hm.a⟩ ⟨hm.d - 1, hm.a⟩ s3 inv3 hw2.2
             refine ⟨k3 + k4, s4, by rw [run_add im k3 k4, hr3, hr4], hrip4, ?_, ?_,
-              hr74, hr44⟩
+              hr74, hr44,
+              fun x m hx => (hfr4 x m hx).trans (hfr3i x m hx), hsh4.trans hsh3i⟩
             · have e : (i + 1) + (y :: ys).length =
                   i + (Instr.jz zt :: y :: ys).length := by
                 simp only [List.length_cons]; omega
@@ -1967,12 +2003,13 @@ theorem walk_loop {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
               have h := inv.isum
               simp only [List.length_cons] at h
               omega
-            obtain ⟨k3, s3, hr3, inv3⟩ :=
+            obtain ⟨k3, s3, hr3, inv3, hfr3i, hsh3i⟩ :=
               fall_finish1 cfg st inv hs hw2.1 hi1 rfl hrh hrip2 hpost
-            obtain ⟨k4, s4, hr4, hrip4, hr14, hr64, hr74, hr44⟩ :=
+            obtain ⟨k4, s4, hr4, hrip4, hr14, hr64, hr74, hr44, hfr4, hsh4⟩ :=
               ih (i + 1) (c + 5) ⟨hm.d - 1, hm.a⟩ ⟨hm.d - 1, hm.a⟩ s3 inv3 hw2.2
             refine ⟨k3 + k4, s4, by rw [run_add im k3 k4, hr3, hr4], hrip4, ?_, ?_,
-              hr74, hr44⟩
+              hr74, hr44,
+              fun x m hx => (hfr4 x m hx).trans (hfr3i x m hx), hsh4.trans hsh3i⟩
             · have e : (i + 1) + (y :: ys).length =
                   i + (Instr.jnz nt :: y :: ys).length := by
                 simp only [List.length_cons]; omega
@@ -2024,12 +2061,13 @@ theorem walk_loop {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
               have h := inv.isum
               simp only [List.length_cons] at h
               omega
-            obtain ⟨k3, s3, hr3, inv3⟩ :=
+            obtain ⟨k3, s3, hr3, inv3, hfr3i, hsh3i⟩ :=
               fall_finish1 cfg st inv hs hw2.1 hi1 rfl hrh hrip2 hpost
-            obtain ⟨k4, s4, hr4, hrip4, hr14, hr64, hr74, hr44⟩ :=
+            obtain ⟨k4, s4, hr4, hrip4, hr14, hr64, hr74, hr44, hfr4, hsh4⟩ :=
               ih (i + 1) (c + 5) h' h' s3 inv3 hw2.2
             refine ⟨k3 + k4, s4, by rw [run_add im k3 k4, hr3, hr4], hrip4, ?_, ?_,
-              hr74, hr44⟩
+              hr74, hr44,
+              fun x m hx => (hfr4 x m hx).trans (hfr3i x m hx), hsh4.trans hsh3i⟩
             · have e : (i + 1) + (y :: ys).length =
                   i + (Instr.call cwidx :: y :: ys).length := by
                 simp only [List.length_cons]; omega
@@ -2058,9 +2096,9 @@ theorem walk_loop {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
             rw [hge]; exact hs
           cases rest with
           | nil =>
-            obtain ⟨k3, s4, hr3, hrip4, hr14, hr64, hr74, hr44⟩ :=
+            obtain ⟨k3, s4, hr3, hrip4, hr14, hr64, hr74, hr44, hfr4, hsh4⟩ :=
               none_finish_nil1 cfg st inv hs rfl hrh hrip2 hpost
-            refine ⟨k3, s4, hr3, hrip4, ?_, ?_, hr74, hr44⟩
+            refine ⟨k3, s4, hr3, hrip4, ?_, ?_, hr74, hr44, hfr4, hsh4⟩
             · simpa using hr14
             · have e : c + codeBytes [Instr.ret] = c + 1 := rfl
               rw [e]; exact hr64
@@ -2073,12 +2111,13 @@ theorem walk_loop {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
                 ((wd.ann.lookup (i + 1)).getD ⟨0, 0⟩) = true := by
               simp only [Sporos.walk, hs0] at hw
               exact hw
-            obtain ⟨k3, s3, hr3, inv3⟩ :=
+            obtain ⟨k3, s3, hr3, inv3, hfr3i, hsh3i⟩ :=
               none_finish_cons1 cfg st inv hs hi1 rfl hrh hrip2 hpost
-            obtain ⟨k4, s4, hr4, hrip4, hr14, hr64, hr74, hr44⟩ :=
+            obtain ⟨k4, s4, hr4, hrip4, hr14, hr64, hr74, hr44, hfr4, hsh4⟩ :=
               ih (i + 1) (c + 1) _ _ s3 inv3 hwrest
             refine ⟨k3 + k4, s4, by rw [run_add im k3 k4, hr3, hr4], hrip4, ?_, ?_,
-              hr74, hr44⟩
+              hr74, hr44,
+              fun x m hx => (hfr4 x m hx).trans (hfr3i x m hx), hsh4.trans hsh3i⟩
             · have e : (i + 1) + (y :: ys).length =
                   i + (Instr.ret :: y :: ys).length := by
                 simp only [List.length_cons]; omega
