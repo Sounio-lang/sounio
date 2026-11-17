@@ -9604,6 +9604,141 @@ fn ocp_mfi_cse(module: &! IrModule, fi: i64) with Mut, Div, Panic {
     }
 }
 
+// Mark every register the instruction at arena slot `at` READS: src1/src2
+// (spanning wide operands), IrIndexSet's stored value parked in imm_i64, and the
+// call-argument pool. Shared by the read-by-anyone DCE sweep and the liveness
+// sweep below, so the two cannot disagree about what counts as a use.
+fn ocp_mfi_mark_uses_at(at: i64, used: &! [bool; 256]) with Mut, Div, Panic {
+    let s1 = IR_A_SRC1[at as usize]
+    let s2 = IR_A_SRC2[at as usize]
+    // A wide operand is a RANGE of consecutive registers, not one. Marking
+    // only the base left limbs 1..n-1 looking unused, and their defining
+    // instructions were NOPed -- the wrong answer under -O with no runtime
+    // signal. src2 is spanned only where it is a register: on the shift ops
+    // it is a shift amount, and marking a span there would be marking
+    // arithmetic on a number that is not a register at all.
+    let span = ocp_limb_count(at)
+    let s2_span = if ocp_src2_is_register((IR_A_OP[at as usize] as IrOpcode)) { span } else { 1 }
+    var lk: i64 = 0
+    while lk < span {
+        if s1 >= 0 && s1 + lk < 256 { used[(s1 + lk) as usize] = true }
+        lk = lk + 1
+    }
+    lk = 0
+    while lk < s2_span {
+        if s2 >= 0 && s2 + lk < 256 { used[(s2 + lk) as usize] = true }
+        lk = lk + 1
+    }
+    // #1682: NOT EVERY REGISTER USE LIVES IN src1/src2, and this scan used to
+    // assume it did. Two operand classes were invisible to it:
+    //
+    //   IrIndexSet's THIRD operand -- the value being stored -- is parked in
+    //   imm_i64 (see ir_index_set). An immediate slot holding a register is
+    //   exactly what a liveness scan will not look at. `var a: [i64; 4] = [7; 4]`
+    //   lowers to a fill loop whose only use of the 7 is that field, so the
+    //   `load_imm` defining it was removed as dead and the array was filled
+    //   with garbage -- ten lines, no loop in the source, wrong answer under -O.
+    //
+    //   Call arguments live in the flat IR_ARG_POOL, not in src1/src2 either.
+    //   No test caught that one; it is the same defect one operand class over,
+    //   and it is fixed here rather than waiting for it to be found the hard way.
+    //
+    // ocp_rebracket_source_use_count already counted the IrIndexSet operand.
+    // The two disagreed, and DCE is the one that deletes.
+    if (IR_A_OP[at as usize] as IrOpcode) == IrOpcode::IrIndexSet {
+        let v = IR_A_IMM_I64[at as usize]
+        if v >= 0 && v < 256 {
+            used[v as usize] = true
+        }
+    }
+    var ak: i64 = 0
+    while ak < IR_A_ARG_COUNT[at as usize] {
+        let a = ir_arena_arg_at(at, ak)
+        if a >= 0 && a < 256 {
+            used[a as usize] = true
+        }
+        ak = ak + 1
+    }
+}
+
+// Liveness DCE. ocp_mfi_dce_once keeps a register alive when ANY instruction
+// reads it, so a loop-carried chain that only feeds itself (v = f(v)) keeps
+// itself alive forever. This pass instead starts from the instructions that
+// cannot be removed -- everything that is not a pure definition: calls,
+// stores, branches, returns, labels -- and marks live only the registers those
+// roots read, then, to a fixed point, the registers read by the definitions of
+// live registers. A pure definition whose destination never becomes live is
+// NOPed. Registers are not SSA here, so liveness is flow-insensitive: a
+// register is live if any read of it can matter, which over-approximates and is
+// therefore sound for multiply-defined registers.
+//
+// A definition with dst outside [0,256) is a root, not a candidate: the table is
+// 256 wide and an untracked register is never assumed dead.
+fn ocp_mfi_adce_once(module: &! IrModule, fi: i64) -> i64 with Mut, Div, Panic {
+    var live: [bool; 256] = [false; 256]
+    let n = ir_fn_get(&(*module), fi as usize).instr_count
+    var i: i64 = 0
+    while i < n {
+        let at = ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (i))
+        let op = (IR_A_OP[at as usize] as IrOpcode)
+        let dst = IR_A_DST[at as usize]
+        let candidate = ocp_has_dst(op) && !ocp_has_side_effect(op) && dst >= 0 && dst < 256
+        if !candidate { ocp_mfi_mark_uses_at(at, &! live) }
+        i = i + 1
+    }
+    var changed: bool = true
+    while changed {
+        changed = false
+        i = 0
+        while i < n {
+            let at = ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (i))
+            let op = (IR_A_OP[at as usize] as IrOpcode)
+            let dst = IR_A_DST[at as usize]
+            if ocp_has_dst(op) && !ocp_has_side_effect(op) && dst >= 0 && dst < 256 {
+                let dspan = ocp_dst_limb_count(at)
+                var any_live: bool = false
+                var dk: i64 = 0
+                while dk < dspan {
+                    if dst + dk < 256 && live[(dst + dk) as usize] { any_live = true }
+                    dk = dk + 1
+                }
+                if any_live {
+                    var before: [bool; 256] = live
+                    ocp_mfi_mark_uses_at(at, &! live)
+                    var r: i64 = 0
+                    while r < 256 {
+                        if live[r as usize] && !before[r as usize] { changed = true }
+                        r = r + 1
+                    }
+                }
+            }
+            i = i + 1
+        }
+    }
+    var removed: i64 = 0
+    i = 0
+    while i < n {
+        let at = ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (i))
+        let op = (IR_A_OP[at as usize] as IrOpcode)
+        let dst = IR_A_DST[at as usize]
+        if ocp_has_dst(op) && !ocp_has_side_effect(op) && dst >= 0 && dst < 256 {
+            let dspan = ocp_dst_limb_count(at)
+            var any_live: bool = false
+            var dk: i64 = 0
+            while dk < dspan {
+                if dst + dk < 256 && live[(dst + dk) as usize] { any_live = true }
+                dk = dk + 1
+            }
+            if !any_live {
+                ir_arena_store(ir_region_slot_w(ir_fn_get(&(*module), fi as usize).region, (i)), ir_nop())
+                removed = removed + 1
+            }
+        }
+        i = i + 1
+    }
+    removed
+}
+
 // One DCE sweep: NOP pure defs whose dst is never used as src1/src2.
 // Note: does not walk call_args lists (would require Box walk). Side-effecting
 // ops (calls) are never removed — call_args Boxes stay in place.
@@ -9612,56 +9747,7 @@ fn ocp_mfi_dce_once(module: &! IrModule, fi: i64) -> i64 with Mut, Div, Panic {
     var i: i64 = 0
     while i < ir_fn_get(&(*module), fi as usize).instr_count {
         let at = ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (i))
-        let s1 = IR_A_SRC1[at as usize]
-        let s2 = IR_A_SRC2[at as usize]
-        // A wide operand is a RANGE of consecutive registers, not one. Marking
-        // only the base left limbs 1..n-1 looking unused, and their defining
-        // instructions were NOPed -- the wrong answer under -O with no runtime
-        // signal. src2 is spanned only where it is a register: on the shift ops
-        // it is a shift amount, and marking a span there would be marking
-        // arithmetic on a number that is not a register at all.
-        let span = ocp_limb_count(at)
-        let s2_span = if ocp_src2_is_register((IR_A_OP[at as usize] as IrOpcode)) { span } else { 1 }
-        var lk: i64 = 0
-        while lk < span {
-            if s1 >= 0 && s1 + lk < 256 { used[(s1 + lk) as usize] = true }
-            lk = lk + 1
-        }
-        lk = 0
-        while lk < s2_span {
-            if s2 >= 0 && s2 + lk < 256 { used[(s2 + lk) as usize] = true }
-            lk = lk + 1
-        }
-        // #1682: NOT EVERY REGISTER USE LIVES IN src1/src2, and this scan used to
-        // assume it did. Two operand classes were invisible to it:
-        //
-        //   IrIndexSet's THIRD operand -- the value being stored -- is parked in
-        //   imm_i64 (see ir_index_set). An immediate slot holding a register is
-        //   exactly what a liveness scan will not look at. `var a: [i64; 4] = [7; 4]`
-        //   lowers to a fill loop whose only use of the 7 is that field, so the
-        //   `load_imm` defining it was removed as dead and the array was filled
-        //   with garbage -- ten lines, no loop in the source, wrong answer under -O.
-        //
-        //   Call arguments live in the flat IR_ARG_POOL, not in src1/src2 either.
-        //   No test caught that one; it is the same defect one operand class over,
-        //   and it is fixed here rather than waiting for it to be found the hard way.
-        //
-        // ocp_rebracket_source_use_count already counted the IrIndexSet operand.
-        // The two disagreed, and DCE is the one that deletes.
-        if (IR_A_OP[at as usize] as IrOpcode) == IrOpcode::IrIndexSet {
-            let v = IR_A_IMM_I64[at as usize]
-            if v >= 0 && v < 256 {
-                used[v as usize] = true
-            }
-        }
-        var ak: i64 = 0
-        while ak < IR_A_ARG_COUNT[at as usize] {
-            let a = ir_arena_arg_at(at, ak)
-            if a >= 0 && a < 256 {
-                used[a as usize] = true
-            }
-            ak = ak + 1
-        }
+        ocp_mfi_mark_uses_at(at, &! used)
         i = i + 1
     }
     var removed: i64 = 0
@@ -10108,6 +10194,11 @@ fn ocp_mfi_compact_nops(module: &! IrModule, fi: i64) with Alloc, Mut, Div, Pani
 // A global rather than read_env at each site: the peels carry Mut/Div/Panic and
 // no IO, and widening them would cascade the effect to every caller. The value
 // is loaded once from the compile entry, which already has IO.
+//
+// Bits, in the order the peels run: 1 dedup_imm, 2 const_fold, 4 copy_prop, 8 dse,
+// 16 redundant_jump, 32 jump_to_return, 64 dead_after_jump, 128 dead_label, 256 cse,
+// 512 dce (read-by-anyone), 8192 liveness dce (ocp_mfi_adce_once), 1024 sccp,
+// 2048 dce again, 4096 compact_nops.
 pub var OCP_SKIP_MASK: i64 = 0
 
 fn ocp_skip(bit: i64) -> bool with Div {
@@ -10580,6 +10671,8 @@ fn opt_cleanup_function_mfi(module: &! IrModule, fi: i64) with Alloc, Mut, Div, 
             iter = iter + 1
         }
     }
+    // Liveness DCE (see ocp_mfi_adce_once): removes loop-carried chains the read-by-anyone sweep keeps.
+    if !ocp_skip(8192) { let _ = ocp_mfi_adce_once(module, fi) }
     // SCCP-lite + compact: previously deferred (by-value path only).
     if !ocp_skip(1024) { ocp_mfi_sccp(module, fi) }
     if !ocp_skip(2048) { let _ = ocp_mfi_dce_once(module, fi) }
