@@ -784,6 +784,196 @@ structure LoaderCode (im : Nat → Option (Ins × Nat)) : Prop where
 theorem stage1_loaderCode : LoaderCode stage1Im := by
   apply LoaderCode.mk <;> decide +kernel
 
+/-! ### Initial-stack facts for the loader prefix
+
+The three `pop`s at entry read `argc` and the two `argv` pointers
+from the stack the kernel built.  These lemmas discharge those
+reads against `X86Env.initStack` for a two-string `argv`, in the
+two-region initial memory: the bytes from `sp` are the seven head
+words followed by the two NUL-terminated strings. -/
+
+theorem pages_ge (n : Nat) : n ≤ X86Env.pages n := by
+  unfold X86Env.pages X86Env.page
+  have h := Nat.div_add_mod (n + 4096 - 1) 4096
+  have hlt := Nat.mod_lt (n + 4096 - 1) (by decide : 0 < 4096)
+  omega
+
+theorem le64_length (v : Nat) : (X86Env.le64 v).length = 8 := rfl
+
+theorem getElem?_append_of_lt {l1 l2 : List Nat} {n : Nat}
+    (h : n < l1.length) : (l1 ++ l2)[n]? = l1[n]? := by
+  induction l1 generalizing n with
+  | nil => simp at h
+  | cons a t ih =>
+    cases n with
+    | zero => rfl
+    | succ k => exact ih (by simpa using h)
+
+theorem getElem?_replicate_append (n j : Nat) {bs : List Nat} :
+    (List.replicate n 0 ++ bs)[n + j]? = bs[j]? := by
+  induction n with
+  | zero => simp
+  | succ k ih =>
+    rw [List.replicate_succ, List.cons_append,
+      show k + 1 + j = (k + j) + 1 from by omega]
+    exact ih
+
+set_option maxHeartbeats 400000 in
+/-- The bytes the initial stack holds from `sp`: argc, the two argv
+pointers, four zero words, then the two NUL-terminated strings. -/
+theorem initStack_data_at (top : Nat) (x y : List Nat) {j : Nat}
+    (hj : j < 56 + (x.length + 1) + (y.length + 1)) :
+    (X86Env.initStack top [x, y]).1.data[X86Env.stackRoom + j]? =
+      (X86Env.le64 2 ++ (X86Env.le64 ((X86Env.initStack top [x, y]).2 + 56) ++
+        (X86Env.le64 ((X86Env.initStack top [x, y]).2 + 56 + x.length + 1) ++
+        (X86Env.le64 0 ++ (X86Env.le64 0 ++ (X86Env.le64 0 ++ (X86Env.le64 0 ++
+        (x ++ ([0] ++ (y ++ [0]))))))))))[j]? := by
+  have hsp : (X86Env.initStack top [x, y]).2 =
+      (X86Env.initStack top [x, y]).1.base + X86Env.stackRoom := by
+    simp only [X86Env.initStack]
+  rw [hsp]
+  simp only [X86Env.initStack, X86Env.layStrings, List.flatten_cons,
+    List.map_cons, List.map_nil, List.flatten_nil, List.append_nil]
+  rw [getElem?_append_of_lt (by simp [le64_length]; omega)]
+  rw [getElem?_replicate_append]
+  simp only [List.append_assoc]
+  congr 2 <;> simp
+
+theorem getElem?_append_skip {l1 l2 : List Nat} {i : Nat} :
+    (l1 ++ l2)[l1.length + i]? = l2[i]? := by
+  induction l1 with
+  | nil => simp
+  | cons a t ih =>
+    simp only [List.length_cons, List.cons_append]
+    rw [show t.length + 1 + i = (t.length + i) + 1 from by omega]
+    exact ih
+
+theorem mem_rd_second {c r : Region} {a v : Nat}
+    (hdisj : c.hi ≤ r.base) (hge : r.base ≤ a)
+    (hbyte : r.data[a - r.base]? = some v) :
+    Mem.rd [c, r] a = some v := by
+  have hlt : a < r.hi := by
+    have h1 := (List.getElem?_eq_some_iff.1 hbyte).1
+    unfold Region.hi
+    omega
+  have hnot : ¬ (c.base ≤ a ∧ a < c.hi) := by omega
+  simp [Mem.rd, Mem.find, hnot, hge, hlt, hbyte]
+
+theorem rdN_of_rd {m : Mem} {a n : Nat} {L : List Nat} (hL : L.length = n)
+    (h : ∀ i (hi : i < n), ∃ v, m.rd (a + i) = some v ∧ L[i]? = some v) :
+    m.rdN a n = some L := by
+  induction n generalizing a L with
+  | zero =>
+    have : L = [] := by cases L <;> simp_all
+    simp [Mem.rdN, this]
+  | succ k ih =>
+    cases L with
+    | nil => simp at hL
+    | cons b t =>
+      have ht : t.length = k := by simpa using hL
+      obtain ⟨v, hv, hb⟩ := h 0 (by omega)
+      simp at hb
+      subst hb
+      have hrec : Mem.rdN m (a + 1) k = some t := by
+        apply ih ht
+        intro i hi
+        obtain ⟨w, hw, htw⟩ := h (i + 1) (by omega)
+        refine ⟨w, ?_, ?_⟩
+        · rwa [show a + 1 + i = a + (i + 1) from by omega]
+        · simpa using htw
+      simp only [Mem.rdN]
+      rw [show m.rd a = some b from by simpa using hv, hrec]
+      rfl
+
+set_option maxHeartbeats 800000 in
+theorem leVal_le64 (v : Nat) : leVal (X86Env.le64 v) = v % W := by
+  have h1 : X86Env.le64 v = bytes8 v := rfl
+  rw [h1]
+  have hd := leVal_digits 8 v
+  have hw : 256 ^ 8 = W := rfl
+  rwa [hw] at hd
+
+set_option maxHeartbeats 800000 in
+theorem rd64_second_of_bytes {c r : Region} {a : Nat} {L : List Nat}
+    (hdisj : c.hi ≤ r.base) (hge : r.base ≤ a) (hL : L.length = 8)
+    (h : ∀ i (hi : i < 8), r.data[a - r.base + i]? = L[i]?) :
+    rd64 [c, r] a = some (leVal L) := by
+  unfold rd64
+  rw [rdN_of_rd hL]
+  · simp
+  · intro i hi
+    have hb := h i hi
+    obtain ⟨v, hv⟩ : ∃ v, L[i]? = some v := by
+      cases hLi : L[i]? with
+      | some v => exact ⟨v, rfl⟩
+      | none =>
+        simp [hL] at hLi
+        omega
+    refine ⟨v, ?_, hv⟩
+    apply mem_rd_second hdisj (by omega)
+    rwa [show a + i - r.base = a - r.base + i from by omega, hb]
+
+theorem initStack_sp (top : Nat) (x y : List Nat) :
+    (X86Env.initStack top [x, y]).2 =
+      (X86Env.initStack top [x, y]).1.base + X86Env.stackRoom := by
+  simp only [X86Env.initStack]
+
+theorem initStack_rd64_argc {c : Region} {top : Nat} {x y : List Nat}
+    (hdisj : c.hi ≤ (X86Env.initStack top [x, y]).1.base) :
+    rd64 [c, (X86Env.initStack top [x, y]).1]
+      ((X86Env.initStack top [x, y]).2) = some 2 := by
+  have hsp := initStack_sp top x y
+  have key := rd64_second_of_bytes (L := X86Env.le64 2) hdisj (by omega)
+    (le64_length _) (a := (X86Env.initStack top [x, y]).2) (by
+      intro i hi
+      rw [hsp, Nat.add_sub_cancel_left, initStack_data_at top x y (by omega)]
+      exact getElem?_append_of_lt (by rw [le64_length]; exact hi))
+  rwa [leVal_le64] at key
+
+theorem initStack_rd64_argv0 {c : Region} {top : Nat} {x y : List Nat}
+    (hdisj : c.hi ≤ (X86Env.initStack top [x, y]).1.base) :
+    rd64 [c, (X86Env.initStack top [x, y]).1]
+        ((X86Env.initStack top [x, y]).2 + 8) =
+      some (((X86Env.initStack top [x, y]).2 + 56) % W) := by
+  have hsp := initStack_sp top x y
+  have key := rd64_second_of_bytes
+    (L := X86Env.le64 ((X86Env.initStack top [x, y]).2 + 56)) hdisj
+    (by omega) (le64_length _) (a := (X86Env.initStack top [x, y]).2 + 8) (by
+      intro i hi
+      rw [show (X86Env.initStack top [x, y]).2 + 8 -
+            (X86Env.initStack top [x, y]).1.base + i =
+          X86Env.stackRoom + (8 + i) from by omega,
+        initStack_data_at top x y (by omega),
+        show 8 + i = (X86Env.le64 2).length + i from by rw [le64_length],
+        getElem?_append_skip]
+      exact getElem?_append_of_lt (by rw [le64_length]; exact hi))
+  rwa [leVal_le64] at key
+
+theorem initStack_rd64_argv1 {c : Region} {top : Nat} {x y : List Nat}
+    (hdisj : c.hi ≤ (X86Env.initStack top [x, y]).1.base) :
+    rd64 [c, (X86Env.initStack top [x, y]).1]
+        ((X86Env.initStack top [x, y]).2 + 16) =
+      some (((X86Env.initStack top [x, y]).2 + 56 + x.length + 1) % W) := by
+  have hsp := initStack_sp top x y
+  have key := rd64_second_of_bytes
+    (L := X86Env.le64 ((X86Env.initStack top [x, y]).2 + 56 + x.length + 1))
+    hdisj (by omega) (le64_length _)
+    (a := (X86Env.initStack top [x, y]).2 + 16) (by
+      intro i hi
+      rw [show (X86Env.initStack top [x, y]).2 + 16 -
+            (X86Env.initStack top [x, y]).1.base + i =
+          X86Env.stackRoom + (16 + i) from by omega,
+        initStack_data_at top x y (by omega),
+        show 16 + i = (X86Env.le64 2).length + (8 + i) from by
+          have h8 := le64_length 2; omega,
+        getElem?_append_skip,
+        show 8 + i =
+          (X86Env.le64 ((X86Env.initStack top [x, y]).2 + 56)).length + i from by
+          rw [le64_length],
+        getElem?_append_skip]
+      exact getElem?_append_of_lt (by rw [le64_length]; exact hi))
+  rwa [leVal_le64] at key
+
 /-- EXISTENCE TARGET: with room, some oracle makes the final
 theorem non-vacuous.  The witness is `stage1Oracle f A` for the
 `A` given by `Room`.  What remains is the loader-prefix invariant:
