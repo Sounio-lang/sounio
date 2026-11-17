@@ -104,6 +104,11 @@ def RDCSpec (im : Nat → Option (Ins × Nat)) (entry : Nat) : Prop :=
     (fun s s' => s'.reg 0 = (s.mem.rdN c 4).map leVal ∧ s'.reg 6 = some (c + 4) ∧
       (s'.mem.rdN c 4 = s.mem.rdN c 4))
 
+/-- The write shape of a memory: base, end and writability of each
+region. `wr`/`wrN` keep it; writability of an address depends
+only on it. -/
+def wshape (m : Mem) : List (Nat × Nat × Bool) := m.map fun r => (r.base, r.hi, r.rw)
+
 /-- `ANNL`: first-match ann lookup for key `r12` in the word at
 `rdi`; `rax` is the entry address, or 0. The semantic content is that
 the entries at `rax` and at `rax + 4`, `rax + 8` are the `(t, d, a)` of
@@ -148,7 +153,9 @@ def ANNLSpec (im : Nat → Option (Ins × Nat)) (entry l32 : Nat) : Prop :=
         s'.reg 7 = some w ∧ AnnLayout s' wd.ann p ∧
         (∀ i, i ≠ 0 → i ≠ 1 → i ≠ 2 → i ≠ 4 → s'.reg i = s.reg i) ∧
         (∀ x n, x + n ≤ sp - 24 ∨ sp ≤ x → s'.mem.rdN x n = s.mem.rdN x n) ∧
-        (∃ e, s'.reg 0 = some e)
+        (∃ e, s'.reg 0 = some e) ∧
+        (∀ e, s'.reg 0 = some e → e ≠ 0 → p ≤ e ∧ e + 12 ≤ p + 12 * wd.ann.length) ∧
+        wshape s'.mem = wshape s.mem
 
 /-- The shape every fall-through handler's triple takes: `hstep` on the
 height in `r8`/`r9` gives `some (some h')`, and the handler leaves
@@ -846,7 +853,6 @@ theorem rdN_wrN_other : ∀ (n : Nat) (bs : List Nat) (m : Mem) (a x : Nat) {m' 
 
 /-- The write-relevant shape of a memory: base, extent and `rw` per
 region. Writability of any address depends only on it. -/
-def wshape (m : Mem) : List (Nat × Nat × Bool) := m.map fun r => (r.base, r.hi, r.rw)
 
 theorem wr_wshape {m m' : Mem} {a v : Nat} (h : m.wr a v = some m') :
     wshape m' = wshape m := by
@@ -1180,7 +1186,9 @@ theorem annl_loop {im : Nat → Option (Ins × Nat)} {entry l32 : Nat}
         s'.reg 1 = some sv ∧ s'.reg 4 = some sp ∧ s'.reg 12 = some t ∧
         (∀ i, i ≠ 0 → i ≠ 1 → i ≠ 2 → i ≠ 4 → s'.reg i = s.reg i) ∧
         (∀ x n, x + n ≤ sp - 24 ∨ sp ≤ x → s'.mem.rdN x n = s.mem.rdN x n) ∧
-        (∃ e, s'.reg 0 = some e) := by
+        (∃ e, s'.reg 0 = some e) ∧
+        (∀ e, s'.reg 0 = some e → e ≠ 0 → p ≤ e ∧ e + 12 ≤ p + 12 * ann.length) ∧
+        wshape s'.mem = wshape s.mem := by
   intro ann
   induction ann with
   | nil =>
@@ -1269,7 +1277,7 @@ theorem annl_loop {im : Nat → Option (Ins × Nat)} {entry l32 : Nat}
     have r2 : run im 1 (Out.ok a1) = Out.ok a2 := by rw [run_succ_ok im 0 a1, e2, ← ha2, run_zero]
     have r3 : run im 1 (Out.ok a2) = Out.ok a3 := by rw [run_succ_ok im 0 a2, e3, ← ha3, run_zero]
     have r4 : run im 1 (Out.ok a3) = Out.ok a4 := by rw [run_succ_ok im 0 a3, e4, ← ha4, run_zero]
-    refine ⟨1 + 1 + 1 + 1, a4, ?_, Or.inl ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
+    refine ⟨1 + 1 + 1 + 1, a4, ?_, Or.inl ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
     · rw [run_add im 1 3, r1, run_add im 1 2, r2, run_add im 1 1, r3, r4]
     · rw [ha4]; show a3.rip + 1 = entry + 45; rw [ha3rip]
     · intro e he
@@ -1307,6 +1315,18 @@ theorem annl_loop {im : Nat → Option (Ins × Nat)} {entry l32 : Nat}
       rw [ha4]
       show ((a3.set 4 (some ((sp - 8 + 8) % W))).set 1 (some sv)).reg 0 = some 0
       rw [reg_set_other (by decide), reg_set_other (by decide)]; exact ha3r0
+    · intro e he hne
+      have he0 : a4.reg 0 = some 0 := by
+        rw [ha4]
+        show ((a3.set 4 (some ((sp - 8 + 8) % W))).set 1 (some sv)).reg 0 = some 0
+        rw [reg_set_other (by decide), reg_set_other (by decide)]; exact ha3r0
+      have hz : e = 0 := Option.some.inj (he.symm.trans he0)
+      exact (hne hz).elim
+    · have hm4eq : a4.mem = s.mem := by
+        rw [ha4]
+        show ((a3.set 4 (some ((sp - 8 + 8) % W))).set 1 (some sv)).mem = s.mem
+        rw [mem_set, mem_set]; exact ha3mem
+      rw [hm4eq]
   | cons x xs ih =>
     intro t p sp sv s htW hp0 hbound hsp24 hspW hrip hr0 hr1 hr12 hr4 hsave hlay hw16 hw24 hdisj
     have hb : p + 12 * (xs.length + 1) < W := hbound
@@ -1720,7 +1740,7 @@ theorem annl_loop {im : Nat → Option (Ins × Nat)} {entry l32 : Nat}
         rw [ha12]
         show ((a11.set 4 (some ((sp - 8 + 8) % W))).set 1 (some sv)).mem = m4
         rw [mem_set, mem_set]; exact ha11mem
-      refine ⟨5 + n8 + 3 + 3, a12, ?_, Or.inr ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
+      refine ⟨5 + n8 + 3 + 3, a12, ?_, Or.inr ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
       · rw [run_add im (5 + n8 + 3) 3, hpre, run_add im 1 2, r10, run_add im 1 1, r11, r12]
       · rw [ha12]; show a11.rip + 1 = entry + 50; rw [ha11rip]
       · intro e he
@@ -1759,6 +1779,15 @@ theorem annl_loop {im : Nat → Option (Ins × Nat)} {entry l32 : Nat}
         rw [ha12]
         show ((a11.set 4 (some ((sp - 8 + 8) % W))).set 1 (some sv)).reg 0 = some p
         rw [reg_set_other (by decide), reg_set_other (by decide)]; exact ha11r0
+      · intro e he _
+        have he0 : a12.reg 0 = some p := by
+          rw [ha12]
+          show ((a11.set 4 (some ((sp - 8 + 8) % W))).set 1 (some sv)).reg 0 = some p
+          rw [reg_set_other (by decide), reg_set_other (by decide)]; exact ha11r0
+        have hep : e = p := Option.some.inj (he.symm.trans he0)
+        rw [hep]
+        exact ⟨Nat.le_refl p, by show p + 12 ≤ p + 12 * (xs.length + 1); omega⟩
+      · rw [ha12mem, wrN_wshape _ _ _ hm4, wrN_wshape _ _ _ hm3s]
     · -- not found: advance and recurse
       have hb2 : (x.1 == t) = false := by simp [hxt]
       have e10 : X86Int.step im a9 = .ok { a9 with rip := entry + 29 } := by
@@ -1915,7 +1944,8 @@ theorem annl_loop {im : Nat → Option (Ins × Nat)} {entry l32 : Nat}
         intro v; rw [ha14mem]; exact hw16'' v
       have hw24a : ∀ v, (wr64 a14.mem (sp - 24) v).isSome := by
         intro v; rw [ha14mem]; exact hw24'' v
-      obtain ⟨n', s', hrun', hrip', hpost', hr1', hr4', hr12', hgen', hframe', hr0e'⟩ :=
+      obtain ⟨n', s', hrun', hrip', hpost', hr1', hr4', hr12', hgen', hframe', hr0e', hloc',
+        hsh'⟩ :=
         ih t (p + 12) sp sv a14 htW (by omega) (by omega) hsp24 hspW ha14rip ha14r0 ha14r1
           ha14r12 ha14r4 hsv14 lay14 hw16a hw24a
           (by cases hdisj with
@@ -1928,7 +1958,7 @@ theorem annl_loop {im : Nat → Option (Ins × Nat)} {entry l32 : Nat}
       have r12 : run im 1 (Out.ok a11) = Out.ok a12 := by rw [run_succ_ok im 0 a11, e12, ← ha12, run_zero]
       have r13 : run im 1 (Out.ok a12) = Out.ok a13 := by rw [run_succ_ok im 0 a12, e13, ← ha13, run_zero]
       have r14 : run im 1 (Out.ok a13) = Out.ok a14 := by rw [run_succ_ok im 0 a13, e14, ← ha14, run_zero]
-      refine ⟨5 + n8 + 3 + 5 + n', s', ?_, hrip', ?_, hr1', hr4', hr12', ?_, ?_, hr0e'⟩
+      refine ⟨5 + n8 + 3 + 5 + n', s', ?_, hrip', ?_, hr1', hr4', hr12', ?_, ?_, hr0e', ?_, ?_⟩
       · rw [run_add im (5 + n8 + 3 + 5) n',
           show run im (5 + n8 + 3 + 5) (Out.ok s) = Out.ok a14 from by
             rw [run_add im (5 + n8 + 3) 5, hpre, run_add im 1 4, r10, run_add im 1 3, r11,
@@ -1946,6 +1976,10 @@ theorem annl_loop {im : Nat → Option (Ins × Nat)} {entry l32 : Nat}
       · intro y n hy
         rw [hframe' y n hy, ha14mem]
         exact hframe4 y n hy
+      · intro e he hne
+        obtain ⟨h1, h2⟩ := hloc' e he hne
+        refine ⟨by omega, by show e + 12 ≤ p + 12 * (xs.length + 1); omega⟩
+      · rw [hsh', ha14mem, wrN_wshape _ _ _ hm4, wrN_wshape _ _ _ hm3s]
 
 
 
@@ -2076,7 +2110,7 @@ theorem ANNL_triple {im : Nat → Option (Ins × Nat)} {entry l32 : Nat}
     rw [reg_with_rip, reg_set_other h1]; exact gb2 i h0 h1 h2 h4
   have lay3 : AnnLayout b3 wd.ann p := AnnLayout_of_mem (by rw [hb3mem, hb1mem]) lay1
   -- the loop
-  obtain ⟨n, s', hrun, hrip', hpost, hr1', hr4', hr12', hgen, hframe, hr0e⟩ :=
+  obtain ⟨n, s', hrun, hrip', hpost, hr1', hr4', hr12', hgen, hframe, hr0e, hloc, hsh⟩ :=
     annl_loop hc hl hentry wd.ann t p sp (cv % W) b3 htW hp0 hbound hsp24 hspW hb3rip hb3r0
       hb3r1 hb3r12 hb3r4 (by rw [hb3mem]; exact hsave1) lay3
       (by intro v; rw [hb3mem]; exact hw16' v) (by intro v; rw [hb3mem]; exact hw24' v) hdisjp
@@ -2102,7 +2136,7 @@ theorem ANNL_triple {im : Nat → Option (Ins × Nat)} {entry l32 : Nat}
   have r1 : run im 1 (Out.ok s) = Out.ok b1 := by rw [run_succ_ok im 0 s, e1, ← hb1, run_zero]
   have r2 : run im 1 (Out.ok b1) = Out.ok b2 := by rw [run_succ_ok im 0 b1, e2, ← hb2, run_zero]
   have r3 : run im 1 (Out.ok b2) = Out.ok b3 := by rw [run_succ_ok im 0 b2, e3, ← hb3, run_zero]
-  refine ⟨3 + n, s', ?_, hrip', hpost, hr1', hr4', hr12', ?_, lay', ?_, ?_, hr0e⟩
+  refine ⟨3 + n, s', ?_, hrip', hpost, hr1', hr4', hr12', ?_, lay', ?_, ?_, hr0e, hloc, ?_⟩
   · rw [run_add im 3 n,
       show run im 3 (Out.ok s) = Out.ok b3 from by
         rw [run_add im 1 2, r1, run_add im 1 1, r2, r3],
@@ -2117,6 +2151,7 @@ theorem ANNL_triple {im : Nat → Option (Ins × Nat)} {entry l32 : Nat}
     exact rdN_wr64_other hm1s (by cases hx with
       | inl h => exact Or.inr (by omega)
       | inr h => exact Or.inl (by omega))
+  · rw [hsh, hb3mem, wrN_wshape _ _ _ hm1s]
 
 
 /-! ### Handler proofs: the straight-line arithmetic handlers -/
