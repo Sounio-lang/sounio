@@ -11478,9 +11478,36 @@ pub fn compile_ir_function_v2_into(nc: &! NativeCompiler, func: &IrFunction, mac
     true
 }
 
+// Register promotion (core_ir path). A vreg promoted by nc_promo_analyze lives in
+// r8..r11 for its whole span instead of in its stack slot: the slot-per-vreg
+// scheme made every loop-carried scalar a store->load forward (latency-bound,
+// 50-100x slower than C++ on scalar loops). Only the helpers below ever touch a
+// promoted vreg; nc_promo_analyze admits a vreg only when every instruction that
+// names it goes through them.
+pub var NC_PRO_ON: i64 = 0
+pub var NC_PRO_REG: [i64; 256] = [-1; 256]
+pub var NC_PRO_FIRST: [i64; 256] = [0; 256]
+pub var NC_PRO_LAST: [i64; 256] = [0; 256]
+pub var NC_PRO_BAD: [i64; 256] = [0; 256]
+pub var NC_PRO_CNT: [i64; 256] = [0; 256]
+pub var NC_PRO_STATS: i64 = 0
+
+fn nc_promo_reg_of(temp: i64) -> i64 {
+    if NC_PRO_ON == 1 && temp >= 0 && temp < 256 { return NC_PRO_REG[temp as usize] }
+    -1
+}
+
 fn nc_core_load_temp_to_rax(nc: &! NativeCompiler, temp: i64) with Mut, Panic, Div {
     if temp < 0 {
         nc_emit_xor_rax_rax(nc)
+        return
+    }
+    let pr = nc_promo_reg_of(temp)
+    if pr >= 8 {
+        // mov rax, r8..r11
+        nc_emit_byte(nc, 0x4c)
+        nc_emit_byte(nc, 0x89)
+        nc_emit_byte(nc, 0xc0 + (pr - 8) * 8)
         return
     }
     nc_emit_load_rbp_disp32_rax(nc, ir_slot_offset(temp))
@@ -11488,6 +11515,14 @@ fn nc_core_load_temp_to_rax(nc: &! NativeCompiler, temp: i64) with Mut, Panic, D
 
 fn nc_core_store_rax_to_temp(nc: &! NativeCompiler, temp: i64) with Mut, Panic, Div {
     if temp >= 0 {
+        let pr = nc_promo_reg_of(temp)
+        if pr >= 8 {
+            // mov r8..r11, rax
+            nc_emit_byte(nc, 0x49)
+            nc_emit_byte(nc, 0x89)
+            nc_emit_byte(nc, 0xc0 + (pr - 8))
+            return
+        }
         nc_emit_store_rax_rbp_disp32(nc, ir_slot_offset(temp))
     }
 }
@@ -13011,7 +13046,200 @@ fn nc_collect_high_float_markers(func: &IrFunction) with Mut, Panic, Div {
     }
 }
 
+// Ops whose emitters read and write vregs ONLY through nc_core_load_temp_to_rax /
+// nc_core_store_rax_to_temp and clobber nothing in r8..r11 (audited: no direct
+// ir_slot_offset, no call, no r8..r11 encodings in nc_emit_core_binop).
+fn nc_promo_op_is_plain(op: IrOpcode) -> bool {
+    match op {
+        IrOpcode::IrLoadImm => true,
+        IrOpcode::IrLoadBool => true,
+        IrOpcode::IrLoadFloat => true,
+        IrOpcode::IrIntToFloat => true,
+        IrOpcode::IrFloatToInt => true,
+        IrOpcode::IrCopy => true,
+        IrOpcode::IrBinOp => true,
+        IrOpcode::IrBranchTrue => true,
+        IrOpcode::IrBranchFalse => true,
+        IrOpcode::IrReturn => true,
+        IrOpcode::IrJump => true,
+        IrOpcode::IrLabel => true,
+        IrOpcode::IrNop => true,
+        _ => false,
+    }
+}
+
+fn nc_promo_note(v: i64, i: i64) with Mut, Panic, Div {
+    if v >= 0 && v < 256 {
+        if NC_PRO_CNT[v as usize] == 0 { NC_PRO_FIRST[v as usize] = i }
+        NC_PRO_LAST[v as usize] = i
+        NC_PRO_CNT[v as usize] = NC_PRO_CNT[v as usize] + 1
+    }
+}
+
+fn nc_promo_poison(v: i64) with Mut, Panic, Div {
+    if v >= 0 && v < 256 { NC_PRO_BAD[v as usize] = 1 }
+}
+
+fn nc_promo_reset() with Mut, Panic, Div {
+    var k: i64 = 0
+    while k < 256 {
+        NC_PRO_REG[k as usize] = -1
+        NC_PRO_FIRST[k as usize] = 0
+        NC_PRO_LAST[k as usize] = 0
+        NC_PRO_BAD[k as usize] = 0
+        NC_PRO_CNT[k as usize] = 0
+        k = k + 1
+    }
+    NC_PRO_ON = 0
+}
+
+// Picks vregs to keep in r8..r11. Sound by construction:
+//  - a function with any op outside the plain set (plus IrCall) gets no promotion;
+//  - a vreg named by anything but a plain op (a call operand, a param) is excluded;
+//  - a vreg's span [first, last] is widened over every loop it touches (back edge),
+//    and must contain no IrCall -- calls clobber r8..r11.
+fn nc_promo_analyze(func: &IrFunction) with Mut, Panic, Div {
+    nc_promo_reset()
+    if str_eq(read_env("SOUNIO_NO_REGPROMO"), "1") { return }
+    let n = (*func).instr_count
+    if n <= 0 || n > IR_MAX_INSTRS { return }
+    var i: i64 = 0
+    while i < n {
+        let at = ir_region_slot_r((*func).region, i)
+        let op = (IR_A_OP[at as usize] as IrOpcode)
+        if op == IrOpcode::IrCall {
+            nc_promo_poison(IR_A_SRC1[at as usize])
+            nc_promo_poison(IR_A_SRC2[at as usize])
+            nc_promo_poison(IR_A_DST[at as usize])
+            var ak: i64 = 0
+            while ak < IR_A_ARG_COUNT[at as usize] {
+                nc_promo_poison(ir_arena_arg_at(at, ak))
+                ak = ak + 1
+            }
+        } else if !nc_promo_op_is_plain(op) {
+            nc_promo_reset()
+            return
+        } else if op == IrOpcode::IrLoadImm && IR_A_IMM_I64[at as usize] == (0 - 4242) {
+            // println sentinel: emits a call sequence.
+            nc_promo_reset()
+            return
+        } else if op == IrOpcode::IrNop {
+            // float-marker nops carry a vreg but emit no code
+        } else if op == IrOpcode::IrLabel || op == IrOpcode::IrJump {
+        } else if op == IrOpcode::IrLoadImm || op == IrOpcode::IrLoadBool || op == IrOpcode::IrLoadFloat {
+            nc_promo_note(IR_A_DST[at as usize], i)
+        } else if op == IrOpcode::IrBranchTrue || op == IrOpcode::IrBranchFalse || op == IrOpcode::IrReturn {
+            nc_promo_note(IR_A_SRC1[at as usize], i)
+        } else if op == IrOpcode::IrBinOp {
+            nc_promo_note(IR_A_SRC1[at as usize], i)
+            nc_promo_note(IR_A_SRC2[at as usize], i)
+            nc_promo_note(IR_A_DST[at as usize], i)
+        } else {
+            // IrCopy, IrIntToFloat, IrFloatToInt
+            nc_promo_note(IR_A_SRC1[at as usize], i)
+            nc_promo_note(IR_A_DST[at as usize], i)
+        }
+        i = i + 1
+    }
+    // params live in their slots (spilled in the prologue)
+    var pv: i64 = 0
+    while pv < 256 {
+        if NC_PRO_CNT[pv as usize] > 0 && nc_core_func_param_index(func, pv) >= 0 { NC_PRO_BAD[pv as usize] = 1 }
+        pv = pv + 1
+    }
+    // widen spans over loops until stable
+    var changed = true
+    var rounds: i64 = 0
+    while changed && rounds < 64 {
+        changed = false
+        rounds = rounds + 1
+        var j: i64 = 0
+        while j < n {
+            let jat = ir_region_slot_r((*func).region, j)
+            let jop = (IR_A_OP[jat as usize] as IrOpcode)
+            if jop == IrOpcode::IrJump || jop == IrOpcode::IrBranchTrue || jop == IrOpcode::IrBranchFalse {
+                let lid = IR_A_LABEL_ID[jat as usize]
+                var l: i64 = j
+                var found: i64 = -1
+                while l >= 0 && found < 0 {
+                    let lat = ir_region_slot_r((*func).region, l)
+                    if (IR_A_OP[lat as usize] as IrOpcode) == IrOpcode::IrLabel && IR_A_LABEL_ID[lat as usize] == lid { found = l }
+                    l = l - 1
+                }
+                if found >= 0 {
+                    var v: i64 = 0
+                    while v < 256 {
+                        if NC_PRO_CNT[v as usize] > 0 && NC_PRO_FIRST[v as usize] <= j && NC_PRO_LAST[v as usize] >= found {
+                            if NC_PRO_FIRST[v as usize] > found { NC_PRO_FIRST[v as usize] = found; changed = true }
+                            if NC_PRO_LAST[v as usize] < j { NC_PRO_LAST[v as usize] = j; changed = true }
+                        }
+                        v = v + 1
+                    }
+                }
+            }
+            j = j + 1
+        }
+    }
+    if changed { nc_promo_reset(); return }
+    // calls inside a span disqualify it
+    var c: i64 = 0
+    while c < n {
+        let cat = ir_region_slot_r((*func).region, c)
+        if (IR_A_OP[cat as usize] as IrOpcode) == IrOpcode::IrCall {
+            var v2: i64 = 0
+            while v2 < 256 {
+                if NC_PRO_CNT[v2 as usize] > 0 && NC_PRO_FIRST[v2 as usize] <= c && NC_PRO_LAST[v2 as usize] >= c { NC_PRO_BAD[v2 as usize] = 1 }
+                v2 = v2 + 1
+            }
+        }
+        c = c + 1
+    }
+    // greedy assignment by weight (mentions, x8 when the span is inside a loop is
+    // already reflected: spans widened over loops contain more mentions)
+    var used: i64 = 0
+    var round: i64 = 0
+    while round < 4 {
+        var best: i64 = -1
+        var best_w: i64 = 0
+        var v3: i64 = 0
+        while v3 < 256 {
+            if NC_PRO_CNT[v3 as usize] >= 2 && NC_PRO_BAD[v3 as usize] == 0 && NC_PRO_REG[v3 as usize] < 0 {
+                let w = NC_PRO_CNT[v3 as usize]
+                if w > best_w { best_w = w; best = v3 }
+            }
+            v3 = v3 + 1
+        }
+        if best < 0 { round = 4 } else {
+            // find a register whose assigned spans do not overlap this one
+            var r: i64 = 8
+            var assigned: i64 = -1
+            while r < 12 && assigned < 0 {
+                var clash = false
+                var u: i64 = 0
+                while u < 256 {
+                    if NC_PRO_REG[u as usize] == r
+                        && NC_PRO_FIRST[u as usize] <= NC_PRO_LAST[best as usize]
+                        && NC_PRO_LAST[u as usize] >= NC_PRO_FIRST[best as usize] { clash = true }
+                    u = u + 1
+                }
+                if !clash { assigned = r }
+                r = r + 1
+            }
+            if assigned >= 0 { NC_PRO_REG[best as usize] = assigned; used = used + 1 } else { NC_PRO_BAD[best as usize] = 1 }
+        }
+    }
+    if used > 0 { NC_PRO_ON = 1 }
+    NC_PRO_STATS = NC_PRO_STATS + used
+}
+
 pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunction, fn_index: i64) -> bool with IO, Mut, Panic, Div, Alloc {
+    nc_promo_analyze(func)
+    let ok = compile_ir_function_v2_core_ir_inner(nc, func, fn_index)
+    nc_promo_reset()
+    ok
+}
+
+fn compile_ir_function_v2_core_ir_inner(nc: &! NativeCompiler, func: &IrFunction, fn_index: i64) -> bool with IO, Mut, Panic, Div, Alloc {
     // Final fail-closed boundary: several optimization/legalization passes can
     // allocate registers after lowering. Never let oversized final IR reach
     // the fixed native register-class and allocation tables.
