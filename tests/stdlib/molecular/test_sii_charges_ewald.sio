@@ -19,10 +19,18 @@ use molecular::ewald::{ew_setup, ew_fixed_charges, ew_phi, ew_molecules_energy, 
 
 fn absd(v: f64) -> f64 { if v < 0.0 { 0.0 - v } else { v } }
 
-fn rel_ok(tag: string, got: f64, want: f64, tol: f64) -> i64 with IO, Mut, Div {
+// True when `got` is NOT within relative tolerance of `want`. Written as
+// "not (within)" so that it fails closed: every comparison with a NaN is false,
+// and the earlier `diff / den > tol` form let a NaN result count as a match.
+fn rel_bad(got: f64, want: f64, tol: f64) -> bool with Div {
     var den = absd(want)
     if den < 1.0e-300 { den = 1.0 }
-    if absd(got - want) / den > tol {
+    if got != got || want != want { return true }
+    !(absd(got - want) / den <= tol)
+}
+
+fn rel_ok(tag: string, got: f64, want: f64, tol: f64) -> i64 with IO, Mut, Div {
+    if rel_bad(got, want, tol) {
         print("MISMATCH "); print(tag); print(" got "); println(got * 1.0e6); print("   want "); println(want * 1.0e6)
         return 1
     }
@@ -42,6 +50,15 @@ fn h2_energy(sites: &[f64; 12288], q: &[f64; 4096], ns: i64, cx: f64, cy: f64, c
 fn main() -> i32 with IO, Mut, Div, Panic {
     let a = 17.31
     var bad: i64 = 0
+    // Canary: the comparison itself must reject a NaN on either side and an
+    // infinity, or a calculation that went non-finite would print OK.
+    let zero = absd(0.0)
+    let nan = zero / zero
+    let inf = 1.0 / zero
+    if !rel_bad(nan, 1.0, 1.0e-9) { println("CANARY nan got accepted"); bad = bad + 1 }
+    if !rel_bad(1.0, nan, 1.0e-9) { println("CANARY nan want accepted"); bad = bad + 1 }
+    if !rel_bad(inf, 1.0, 1.0e-9) { println("CANARY inf accepted"); bad = bad + 1 }
+    if rel_bad(1.0 + 1.0e-12, 1.0, 1.0e-9) { println("CANARY finite match refused"); bad = bad + 1 }
     var frac: [f64; 12288] = [0.0; 12288]
     let no = hg_sii_oxygens(&!frac, 0.21796, 0.18198, 0.37081)
     var pos: [f64; 12288] = [0.0; 12288]
@@ -138,7 +155,7 @@ fn main() -> i32 with IO, Mut, Div, Panic {
             d = d + 1
         }
         // the mean is ~1e-5 of the spread (Laplace): compare it on the spread's scale
-        if absd(sum / (nd as f64) - want_mean[c as usize]) > 1.0e-10 { println("orientation mean"); println(sum / (nd as f64) * 1.0e9); bad = bad + 1 }
+        if !(absd(sum / (nd as f64) - want_mean[c as usize]) <= 1.0e-10) { println("orientation mean"); println(sum / (nd as f64) * 1.0e9); bad = bad + 1 }
         bad = bad + rel_ok("min", mn, want_min[c as usize], 1.0e-9)
         bad = bad + rel_ok("max", mxe, want_max[c as usize], 1.0e-9)
         bad = bad + rel_ok("boltzmann", bz / (nd as f64), want_boltz[c as usize], 1.0e-11)
