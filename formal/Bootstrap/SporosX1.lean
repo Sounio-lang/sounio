@@ -36,28 +36,28 @@ open X86Env X86Int X86Dec Sporos
 def base : Nat := 0x400000
 
 /-- File offsets of the checker code in `sporos-stage1.hex`, as addresses. -/
-def aL32 : Nat := base + 0x249
-def aRDC : Nat := base + 0x24c
-def aANNL : Nat := base + 0x271
-def aWalk : Nat := base + 0x519
-def aFallTail : Nat := base + 0x5f0
-def aNoneTail : Nat := base + 0x644
-def aPrim : Nat := base + 0x690
-def aLit : Nat := base + 0x6d4
-def aStr : Nat := base + 0x6e1
-def aPick : Nat := base + 0x6ee
-def aTor : Nat := base + 0x711
-def aFromr : Nat := base + 0x72d
-def aRfetch : Nat := base + 0x749
-def aLocget : Nat := base + 0x761
-def aLocset : Nat := base + 0x788
-def aJmp : Nat := base + 0x7ba
-def aJz : Nat := base + 0x80c
-def aCall : Nat := base + 0x874
-def aRet : Nat := base + 0x8c2
-def aWordDone : Nat := base + 0x8e3
-def aAccept : Nat := base + 0x8f0
-def aEff : Nat := base + 0x8f8
+def aL32 : Nat := base + 0x26e
+def aRDC : Nat := base + 0x271
+def aANNL : Nat := base + 0x296
+def aWalk : Nat := base + 0x53e
+def aFallTail : Nat := base + 0x615
+def aNoneTail : Nat := base + 0x669
+def aPrim : Nat := base + 0x6b5
+def aLit : Nat := base + 0x6f9
+def aStr : Nat := base + 0x706
+def aPick : Nat := base + 0x713
+def aTor : Nat := base + 0x736
+def aFromr : Nat := base + 0x752
+def aRfetch : Nat := base + 0x76e
+def aLocget : Nat := base + 0x786
+def aLocset : Nat := base + 0x7ad
+def aJmp : Nat := base + 0x7df
+def aJz : Nat := base + 0x831
+def aCall : Nat := base + 0x899
+def aRet : Nat := base + 0x8e7
+def aWordDone : Nat := base + 0x908
+def aAccept : Nat := base + 0x915
+def aEff : Nat := base + 0x91d
 def aFail1 : Nat := base + 0x124
 def aFail2 : Nat := base + 0x12c
 
@@ -204,11 +204,11 @@ def EffTable (s : X86Int.St) : Prop :=
 
 /-! ### Decode witnesses: the first instruction at each handler address,
 as written in the listing, decodes as claimed. Kernel-checked; the
-`0x4008f8` immediate is the Eff table address `aEff`. -/
+`0x40091d` immediate is the Eff table address `aEff`. -/
 
 example : at0 [0x0f, 0xb6, 0x42, 0x03] = some (.ld8 0 2 3, 4) := by decide +kernel
-example : at0 [0x48, 0xba, 0xf8, 0x08, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00]
-    = some (.movI 2 0x4008f8, 10) := by decide +kernel
+example : at0 [0x48, 0xba, 0x1d, 0x09, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00]
+    = some (.movI 2 0x40091d, 10) := by decide +kernel
 example : at0 [0x48, 0x83, 0xc1, 0x01] = some (.aluI X86Int.Alu.add 1 1, 4) := by decide +kernel
 example : at0 [0x51] = some (.push 1, 1) := by decide +kernel
 example : at0 [0x6a, 0x00] = some (.pushI 0, 2) := by decide +kernel

@@ -2156,10 +2156,10 @@ theorem walk_loop {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
 
 /-! ### Around the walk: `check_word`, `annval`, `codewalk`, `word_done` -/
 
-def aCheckStart : Nat := base + 0x42d
-def aCheckWord : Nat := base + 0x433
-def aAnnval : Nat := base + 0x453
-def aCodewalk : Nat := base + 0x4d5
+def aCheckStart : Nat := base + 0x452
+def aCheckWord : Nat := base + 0x458
+def aAnnval : Nat := base + 0x478
+def aCodewalk : Nat := base + 0x4fa
 
 /-- Decode facts for the code around the walk. -/
 structure OuterCode (im : Nat → Option (Ins × Nat)) : Prop where
