@@ -1,0 +1,111 @@
+//@ run-pass
+//@ expect-stdout: UNIT_CAST_VARIANCE_PASS
+// variance_of through `as f64` and through unit types, under Epistemic.
+// Until the fix, ExprCast had no arm in lower_expr_variance_other_ref, so every
+// `x as f64` read variance 0 with no diagnostic. Leaving a unit type is done by
+// a cast (`(ka * dt) as f64`), so every unit-typed helper returned a value with
+// no uncertainty: 12 of the 16 checks below read 0 (the three without a cast
+// were already right; the half-life value also needs the cross-module clone
+// fix of unit_xmod_epistemic_clone.sio). Covered: built-in unit `h`, a unit
+// declared in this file, a unit declared in another module (testmod::unit_xmod_epi), each with and
+// without the cast, inline and through a helper (the helper goes through its
+// tangent clone).
+//
+// ka ~ 2.0 /h, u = 0.1, so var(ka) = 0.01 and var(ka * 0.25 h) = 0.000625.
+// cl ~ 6 L/h, u = 0.3, v = 42 L: t_half = 0.693 v / cl,
+// d t_half / d cl = -0.693 * 42 / 36 = -0.8085, var = 0.8085^2 * 0.09.
+use testmod::unit_xmod_epi::*
+
+unit per_hl = 1 / h
+
+fn rel_ok(got: f64, want: f64) -> bool {
+    var d = got - want
+    if d < 0.0 { d = 0.0 - d }
+    var w = want
+    if w < 0.0 { w = 0.0 - w }
+    d <= 0.000001 * w
+}
+
+fn check(label: string, got: f64, want: f64) -> i64 with IO {
+    print(label)
+    print(": got ")
+    print_f64(got)
+    print(" want ")
+    print_f64(want)
+    if rel_ok(got, want) {
+        print("\n")
+        return 0
+    }
+    print("  [FAIL]\n")
+    1
+}
+
+fn local_ka_dt(ka: per_hl, dt: h) -> f64 { return (ka * dt) as f64 }
+fn builtin_ka_dt(ka: f64, dt: h) -> f64 { return (ka * dt) as f64 }
+fn imported_ka_dt(ka: f64, dt: f64) -> f64 {
+    let kau: per_h = ka
+    let dtu: h = dt
+    return uxe_ka_dt(kau, dtu)
+}
+fn imported_half_life(cl: f64, v: f64) -> f64 {
+    let clu: L_per_h = cl
+    let vu: L = v
+    return uxe_half_life(clu, vu)
+}
+
+fn main() -> i64 with IO, Mut, Div, Epistemic {
+    let k: Knowledge<f64> = measure(2.0, uncertainty: 0.1)
+    let ka = k.value
+    let c: Knowledge<f64> = measure(6.0, uncertainty: 0.3)
+    let cl = c.value
+    let dtu: h = 0.25
+    let want = 0.000625
+    let want_t = 0.8085 * 0.8085 * 0.09
+    var bad: i64 = 0
+
+    let f0 = ka as f64
+    bad = bad + check("f64 as f64", variance_of(f0), 0.01)
+
+    let b0 = ka * dtu
+    bad = bad + check("builtin h, no cast", variance_of(b0), want)
+    let b1 = (ka * dtu) as f64
+    bad = bad + check("builtin h, as f64", variance_of(b1), want)
+    let b2 = builtin_ka_dt(ka, dtu)
+    bad = bad + check("builtin h, helper", variance_of(b2), want)
+    let b3 = b1 * 2.0
+    bad = bad + check("builtin h, cast then scaled", variance_of(b3), 4.0 * want)
+
+    let kl: per_hl = ka
+    let l0 = kl * dtu
+    bad = bad + check("local unit, no cast", variance_of(l0), want)
+    let l1 = (kl * dtu) as f64
+    bad = bad + check("local unit, as f64", variance_of(l1), want)
+    let l2 = kl as f64
+    bad = bad + check("local unit, bare as f64", variance_of(l2), 0.01)
+    let l3 = local_ka_dt(kl, dtu)
+    bad = bad + check("local unit, helper", variance_of(l3), want)
+
+    let ki: per_h = ka
+    let i0 = ki * dtu
+    bad = bad + check("imported unit, no cast", variance_of(i0), want)
+    let i1 = (ki * dtu) as f64
+    bad = bad + check("imported unit, as f64", variance_of(i1), want)
+    let i2 = uxe_ka_dt(ki, dtu)
+    bad = bad + check("imported unit, imported helper", variance_of(i2), want)
+    let i3 = imported_ka_dt(ka, 0.25)
+    bad = bad + check("imported unit, wrapped helper", variance_of(i3), want)
+    let i4 = uxe_cast(ki)
+    bad = bad + check("imported unit, imported bare cast", variance_of(i4), 0.01)
+    let t0 = imported_half_life(cl, 42.0)
+    bad = bad + check("imported unit, half-life value", t0, 4.851)
+    bad = bad + check("imported unit, half-life variance", variance_of(t0), want_t)
+
+    if bad == 0 {
+        println("UNIT_CAST_VARIANCE_PASS")
+        return 0
+    }
+    print("UNIT_CAST_VARIANCE_FAIL ")
+    print_int(bad)
+    print("\n")
+    return 1
+}
