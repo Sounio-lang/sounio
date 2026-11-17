@@ -13242,11 +13242,22 @@ fn nc_promo_analyze(func: &IrFunction) with Mut, Panic, Div {
         pv = pv + 1
     }
     // f64 inference (register-class choice only; never affects correctness, since
-    // both classes carry the raw 64 bits): float literals, int->float, f64
-    // arithmetic, and copies of any of those, to a fixpoint.
+    // both classes carry the raw 64 bits). The IR reuses one vreg for unrelated
+    // values, so a vreg is f64 only if EVERY definition of it produces an f64:
+    // a float literal, int->float, f64 arithmetic, or a copy of such a vreg.
+    // Greatest fixpoint: start optimistic for every defined vreg, demote until stable.
+    var ds: i64 = 0
+    while ds < n {
+        let dat = ir_region_slot_r((*func).region, ds)
+        let dop = (IR_A_OP[dat as usize] as IrOpcode)
+        let dd = IR_A_DST[dat as usize]
+        if dd >= 0 && dd < 256 && dop != IrOpcode::IrNop && dop != IrOpcode::IrLabel && dop != IrOpcode::IrJump
+            && dop != IrOpcode::IrBranchTrue && dop != IrOpcode::IrBranchFalse && dop != IrOpcode::IrReturn { NC_PRO_ISF[dd as usize] = 1 }
+        ds = ds + 1
+    }
     var fr: i64 = 0
     var fchanged = true
-    while fchanged && fr < 8 {
+    while fchanged && fr < 64 {
         fchanged = false
         fr = fr + 1
         var fi: i64 = 0
@@ -13256,24 +13267,22 @@ fn nc_promo_analyze(func: &IrFunction) with Mut, Panic, Div {
             let fd = IR_A_DST[fat as usize]
             let f1 = IR_A_SRC1[fat as usize]
             let f2 = IR_A_SRC2[fat as usize]
-            if fd >= 0 && fd < 256 && NC_PRO_ISF[fd as usize] == 0 {
-                var mark = false
-                if fop == IrOpcode::IrLoadFloat || fop == IrOpcode::IrIntToFloat { mark = true }
+            if fd >= 0 && fd < 256 && NC_PRO_ISF[fd as usize] == 1
+                && fop != IrOpcode::IrNop && fop != IrOpcode::IrLabel && fop != IrOpcode::IrJump
+                && fop != IrOpcode::IrBranchTrue && fop != IrOpcode::IrBranchFalse && fop != IrOpcode::IrReturn {
+                var ok = false
+                if fop == IrOpcode::IrLoadFloat || fop == IrOpcode::IrIntToFloat { ok = true }
                 if fop == IrOpcode::IrBinOp {
                     let bop = (IR_A_BIN_OP[fat as usize] as BinaryOp)
                     if bop == BinaryOp::OpAdd || bop == BinaryOp::OpSub || bop == BinaryOp::OpMul || bop == BinaryOp::OpDiv {
                         let fl = IR_A_IMM_FLAGS[fat as usize]
                         let l_f = ((fl / 2) & 1) == 1 || (f1 >= 0 && f1 < 256 && NC_PRO_ISF[f1 as usize] == 1)
                         let r_f = ((fl / 4) & 1) == 1 || (f2 >= 0 && f2 < 256 && NC_PRO_ISF[f2 as usize] == 1)
-                        if l_f || r_f { mark = true }
+                        if l_f && r_f { ok = true }
                     }
                 }
-                if fop == IrOpcode::IrCopy && f1 >= 0 && f1 < 256 && NC_PRO_ISF[f1 as usize] == 1 { mark = true }
-                if mark { NC_PRO_ISF[fd as usize] = 1; fchanged = true }
-            }
-            if fop == IrOpcode::IrCopy && fd >= 0 && fd < 256 && NC_PRO_ISF[fd as usize] == 1 && f1 >= 0 && f1 < 256 && NC_PRO_ISF[f1 as usize] == 0 {
-                NC_PRO_ISF[f1 as usize] = 1
-                fchanged = true
+                if fop == IrOpcode::IrCopy && f1 >= 0 && f1 < 256 && NC_PRO_ISF[f1 as usize] == 1 { ok = true }
+                if !ok { NC_PRO_ISF[fd as usize] = 0; fchanged = true }
             }
             fi = fi + 1
         }
