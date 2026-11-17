@@ -11491,6 +11491,8 @@ pub var NC_PRO_LAST: [i64; 256] = [0; 256]
 pub var NC_PRO_BAD: [i64; 256] = [0; 256]
 pub var NC_PRO_CNT: [i64; 256] = [0; 256]
 pub var NC_PRO_STATS: i64 = 0
+pub var NC_PRO_N: i64 = 0
+pub var NC_PRO_BARRIER: [i64; 4096] = [0; 4096]
 
 fn nc_promo_reg_of(temp: i64) -> i64 {
     if NC_PRO_ON == 1 && temp >= 0 && temp < 256 { return NC_PRO_REG[temp as usize] }
@@ -13090,6 +13092,9 @@ fn nc_promo_reset() with Mut, Panic, Div {
         NC_PRO_CNT[k as usize] = 0
         k = k + 1
     }
+    var bk: i64 = 0
+    while bk < NC_PRO_N && bk < 4096 { NC_PRO_BARRIER[bk as usize] = 0; bk = bk + 1 }
+    NC_PRO_N = 0
     NC_PRO_ON = 0
 }
 
@@ -13102,7 +13107,8 @@ fn nc_promo_analyze(func: &IrFunction) with Mut, Panic, Div {
     nc_promo_reset()
     if str_eq(read_env("SOUNIO_NO_REGPROMO"), "1") { return }
     let n = (*func).instr_count
-    if n <= 0 || n > IR_MAX_INSTRS { return }
+    if n <= 0 || n > 4096 { return }
+    NC_PRO_N = n
     var i: i64 = 0
     while i < n {
         let at = ir_region_slot_r((*func).region, i)
@@ -13117,12 +13123,25 @@ fn nc_promo_analyze(func: &IrFunction) with Mut, Panic, Div {
                 ak = ak + 1
             }
         } else if !nc_promo_op_is_plain(op) {
+            if str_eq(read_env("SOUNIO_PROMO_DEBUG"), "1") {
+                print("[promo] reject fn: op=")
+                print_int((op as i64))
+                print(" at=")
+                print_int(i)
+                print("\n")
+            }
             nc_promo_reset()
             return
         } else if op == IrOpcode::IrLoadImm && IR_A_IMM_I64[at as usize] == (0 - 4242) {
-            // println sentinel: emits a call sequence.
-            nc_promo_reset()
-            return
+            // println sentinel: expands to a call sequence (and consumes the
+            // preceding load_imm). A barrier like IrCall: its operands stay in
+            // slots, and no promoted span may contain it.
+            nc_promo_poison(IR_A_DST[at as usize])
+            if i > 0 {
+                let pat = ir_region_slot_r((*func).region, i - 1)
+                nc_promo_poison(IR_A_DST[pat as usize])
+            }
+            NC_PRO_BARRIER[i as usize] = 1
         } else if op == IrOpcode::IrNop {
             // float-marker nops carry a vreg but emit no code
         } else if op == IrOpcode::IrLabel || op == IrOpcode::IrJump {
@@ -13185,7 +13204,7 @@ fn nc_promo_analyze(func: &IrFunction) with Mut, Panic, Div {
     var c: i64 = 0
     while c < n {
         let cat = ir_region_slot_r((*func).region, c)
-        if (IR_A_OP[cat as usize] as IrOpcode) == IrOpcode::IrCall {
+        if (IR_A_OP[cat as usize] as IrOpcode) == IrOpcode::IrCall || NC_PRO_BARRIER[c as usize] == 1 {
             var v2: i64 = 0
             while v2 < 256 {
                 if NC_PRO_CNT[v2 as usize] > 0 && NC_PRO_FIRST[v2 as usize] <= c && NC_PRO_LAST[v2 as usize] >= c { NC_PRO_BAD[v2 as usize] = 1 }
