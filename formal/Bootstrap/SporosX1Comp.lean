@@ -2130,4 +2130,587 @@ theorem walk_loop {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
               rw [← e]; exact hr64
 
 
+
+/-! ### Around the walk: `check_word`, `annval`, `codewalk`, `word_done` -/
+
+def aCheckWord : Nat := base + 0x433
+def aAnnval : Nat := base + 0x453
+def aCodewalk : Nat := base + 0x4d5
+
+/-- Decode facts for the code around the walk. -/
+structure OuterCode (im : Nat → Option (Ins × Nat)) : Prop where
+  wd0 : im aWordDone = some (.aluI .add 7 64, 4)
+  wd1 : im (aWordDone + 4) = some (.aluI .sub 5 1, 4)
+  wd2 : im (aWordDone + 8) = some (.jmp aCheckWord, 5)
+  ac0 : im aAccept = some (.pushI 60, 2)
+  ac1 : im (aAccept + 2) = some (.pop 0, 1)
+  ac2 : im (aAccept + 3) = some (.pushI 0, 2)
+  ac3 : im (aAccept + 5) = some (.pop 7, 1)
+  ac4 : im (aAccept + 6) = some (.syscall, 2)
+  cw0 : im aCheckWord = some (.test 5 5, 3)
+  cw1 : im (aCheckWord + 3) = some (.jcc 5 (aCheckWord + 10), 2)
+  cw2 : im (aCheckWord + 5) = some (.jmp aAccept, 5)
+  cw3 : im (aCheckWord + 10) = some (.ld 0 7 24, 4)
+  cw4 : im (aCheckWord + 14) = some (.test 0 0, 3)
+  cw5 : im (aCheckWord + 17) = some (.jcc 5 (aCheckWord + 24), 2)
+  cw6 : im (aCheckWord + 24) = some (.ld 6 7 48, 4)
+  cw7 : im (aCheckWord + 28) = some (.ld 1 7 32, 4)
+
+theorem step_pushI {im : Nat → Option (Ins × Nat)} {s : X86Int.St}
+    {imm len sp : Nat} {m : Mem}
+    (hi : im s.rip = some (.pushI imm, len)) (hsp : s.reg 4 = some sp)
+    (hm : wr64 s.mem ((sp + W - 8) % W) (imm % W) = some m) :
+    X86Int.step im s =
+      .ok { s.set 4 (some ((sp + W - 8) % W)) with mem := m, rip := s.rip + len } := by
+  simp only [X86Int.step, hi]
+  exact exec_pushI hsp hm
+
+theorem step_syscall_exit {im : Nat → Option (Ins × Nat)} {s : X86Int.St}
+    {len code a2 a3 a4 a5 a6 : Nat}
+    (hi : im s.rip = some (.syscall, len)) (h0 : s.reg 0 = some 60)
+    (h7 : s.reg 7 = some code) (h6 : s.reg 6 = some a2)
+    (h2 : s.reg 2 = some a3) (h10 : s.reg 10 = some a4)
+    (h8 : s.reg 8 = some a5) (h9 : s.reg 9 = some a6) :
+    X86Int.step im s = .exit (code % 256) := by
+  have hsc : X86Env.syscall s.k s.mem 60 code a2 a3 a4 a5 a6 =
+      some (X86Env.SysRes.exit (code % 256)) := rfl
+  simp only [X86Int.step, exec, hi, h0, h7, h6, h2, h10, h8, h9, hsc]
+
+/-- `word_done`: advance the entry and decrement the word count. -/
+theorem WordDone_triple {im : Nat → Option (Ins × Nat)} (oc : OuterCode im) :
+    ∀ (w n : Nat), 1 ≤ n → n < W → w + 64 < W →
+    ∀ s, s.rip = aWordDone → s.reg 7 = some w → s.reg 5 = some n →
+      ∃ k s', run im k (Out.ok s) = Out.ok s' ∧ s'.rip = aCheckWord ∧
+        s'.reg 7 = some (w + 64) ∧ s'.reg 5 = some (n - 1) ∧
+        (∀ q, q ≠ 5 → q ≠ 7 → s'.reg q = s.reg q) ∧ s'.mem = s.mem ∧
+        s'.regs.length = s.regs.length := by
+  intro w n hn1 hnW hw64 s hrip hr7 hr5
+  have h64W : 64 < W := by unfold W; decide
+  have h1W : 1 < W := by unfold W; decide
+  have e1 : X86Int.step im s = .ok { s.set 7 (some (aluF .add w (64 % W)).1) with
+      fl := (aluF .add w (64 % W)).2, rip := s.rip + 4 } :=
+    step_aluI_add (by rw [hrip]; exact oc.wd0) hr7
+  obtain ⟨a1, ha1⟩ : ∃ u : X86Int.St, u = { s.set 7 (some (aluF .add w (64 % W)).1)
+    with fl := (aluF .add w (64 % W)).2, rip := s.rip + 4 } := ⟨_, rfl⟩
+  have ha1rip : a1.rip = aWordDone + 4 := by
+    rw [ha1]; show s.rip + 4 = aWordDone + 4; rw [hrip]
+  have hadd : (aluF .add w (64 % W)).1 = w + 64 := aluI_add_val h64W hw64
+  have ha1r7 : a1.reg 7 = some (w + 64) := by
+    rw [ha1]
+    show (s.set 7 (some (aluF .add w (64 % W)).1)).reg 7 = some (w + 64)
+    rw [reg_set_self (reg_some_len hr7), hadd]
+  have ha1r5 : a1.reg 5 = some n := by
+    rw [ha1]
+    show (s.set 7 (some (aluF .add w (64 % W)).1)).reg 5 = some n
+    rw [reg_set_other (by decide)]; exact hr5
+  have ha1mem : a1.mem = s.mem := by
+    rw [ha1]
+    show (s.set 7 (some (aluF .add w (64 % W)).1)).mem = s.mem
+    rw [mem_set]
+  have ga1 : ∀ q, q ≠ 7 → a1.reg q = s.reg q := by
+    intro q hq
+    rw [ha1]
+    show (s.set 7 (some (aluF .add w (64 % W)).1)).reg q = s.reg q
+    rw [reg_set_other hq]
+  have e2 : X86Int.step im a1 = .ok { a1.set 5 (some (aluF .sub n (1 % W)).1) with
+      fl := (aluF .sub n (1 % W)).2, rip := a1.rip + 4 } :=
+    step_aluI_sub (by rw [ha1rip]; exact oc.wd1) ha1r5
+  obtain ⟨a2, ha2⟩ : ∃ u : X86Int.St, u = { a1.set 5 (some (aluF .sub n (1 % W)).1)
+    with fl := (aluF .sub n (1 % W)).2, rip := a1.rip + 4 } := ⟨_, rfl⟩
+  have ha2rip : a2.rip = aWordDone + 8 := by
+    rw [ha2]; show a1.rip + 4 = aWordDone + 8; rw [ha1rip]
+  have hsub : (aluF .sub n (1 % W)).1 = n - 1 := aluI_sub_val h1W hn1 hnW
+  have ha2r5 : a2.reg 5 = some (n - 1) := by
+    rw [ha2]
+    show (a1.set 5 (some (aluF .sub n (1 % W)).1)).reg 5 = some (n - 1)
+    rw [reg_set_self (by
+      have h5len : 5 < s.regs.length := reg_some_len hr5
+      have e : a1.regs.length = s.regs.length := by
+        rw [ha1]; exact List.length_set
+      omega), hsub]
+  have ha2r7 : a2.reg 7 = some (w + 64) := by
+    rw [ha2]
+    show (a1.set 5 (some (aluF .sub n (1 % W)).1)).reg 7 = some (w + 64)
+    rw [reg_set_other (by decide)]; exact ha1r7
+  have ha2mem : a2.mem = s.mem := by
+    rw [ha2]
+    show (a1.set 5 (some (aluF .sub n (1 % W)).1)).mem = s.mem
+    rw [mem_set]; exact ha1mem
+  have ga2 : ∀ q, q ≠ 5 → q ≠ 7 → a2.reg q = s.reg q := by
+    intro q h5 h7
+    rw [ha2]
+    show (a1.set 5 (some (aluF .sub n (1 % W)).1)).reg q = s.reg q
+    rw [reg_set_other h5]; exact ga1 q h7
+  have e3 : X86Int.step im a2 = .ok { a2 with rip := aCheckWord } :=
+    step_jmp (by rw [ha2rip]; exact oc.wd2)
+  obtain ⟨a3, ha3⟩ : ∃ u : X86Int.St, u = { a2 with rip := aCheckWord } := ⟨_, rfl⟩
+  have r1 : run im 1 (Out.ok s) = Out.ok a1 := by
+    rw [run_succ_ok im 0 s, e1, ← ha1, run_zero]
+  have r2 : run im 1 (Out.ok a1) = Out.ok a2 := by
+    rw [run_succ_ok im 0 a1, e2, ← ha2, run_zero]
+  have r3 : run im 1 (Out.ok a2) = Out.ok a3 := by
+    rw [run_succ_ok im 0 a2, e3, ← ha3, run_zero]
+  refine ⟨1 + 1 + 1, a3, by
+      rw [run_add im 1 2, r1, run_add im 1 1, r2, r3], by rw [ha3], ?_, ?_, ?_, ?_,
+    ?_⟩
+  · rw [ha3]; show ({ a2 with rip := aCheckWord }).reg 7 = some (w + 64)
+    rw [reg_with_rip]; exact ha2r7
+  · rw [ha3]; show ({ a2 with rip := aCheckWord }).reg 5 = some (n - 1)
+    rw [reg_with_rip]; exact ha2r5
+  · intro q h5 h7
+    rw [ha3]; show ({ a2 with rip := aCheckWord }).reg q = s.reg q
+    rw [reg_with_rip]; exact ga2 q h5 h7
+  · rw [ha3]; show ({ a2 with rip := aCheckWord }).mem = s.mem
+    rw [mem_with_rip]; exact ha2mem
+  · have e1 : a3.regs.length = a2.regs.length := by rw [ha3]
+    have e2 : a2.regs.length = a1.regs.length := by
+      rw [ha2]; exact List.length_set
+    have e3 : a1.regs.length = s.regs.length := by
+      rw [ha1]; exact List.length_set
+    rw [e1, e2, e3]
+
+/-- `accept`: exit with status 0. -/
+theorem Accept_exit {im : Nat → Option (Ins × Nat)} (oc : OuterCode im) :
+    ∀ (sp a2 a3 a4 a5 a6 : Nat) (m1 m2 : Mem), 32 ≤ sp → sp < W →
+    ∀ s, s.rip = aAccept → s.reg 4 = some sp →
+      s.reg 6 = some a2 → s.reg 2 = some a3 → s.reg 10 = some a4 →
+      s.reg 8 = some a5 → s.reg 9 = some a6 →
+      wr64 s.mem ((sp + W - 8) % W) 60 = some m1 →
+      wr64 m1 ((sp + W - 8) % W) 0 = some m2 →
+      ∃ k, run im k (Out.ok s) = Out.exit 0 := by
+  intro sp a2 a3 a4 a5 a6 m1 m2 hsp32 hspW s hrip hr4 hr6 hr2 hr10 hr8 hr9 hm1 hm2
+  have hslot : (sp + W - 8) % W = sp - 8 := slot_sub (k := 1) (by omega) hspW
+  have hm1' : wr64 s.mem ((sp + W - 8) % W) (60 % W) = some m1 := hm1
+  have hr60 : rd64 m1 ((sp + W - 8) % W) = some 60 := rd64_wr64 hm1'
+  have hr0 : rd64 m2 ((sp + W - 8) % W) = some 0 := rd64_wr64 hm2
+  have e1 : X86Int.step im s =
+      .ok { s.set 4 (some ((sp + W - 8) % W)) with mem := m1, rip := s.rip + 2 } :=
+    step_pushI (by rw [hrip]; exact oc.ac0) hr4 hm1'
+  obtain ⟨a1, ha1⟩ : ∃ u : X86Int.St, u =
+    { s.set 4 (some ((sp + W - 8) % W)) with mem := m1, rip := s.rip + 2 } := ⟨_, rfl⟩
+  have ha1rip : a1.rip = aAccept + 2 := by
+    rw [ha1]; show s.rip + 2 = aAccept + 2; rw [hrip]
+  have ha1r4 : a1.reg 4 = some ((sp + W - 8) % W) := by
+    rw [ha1]
+    show (s.set 4 (some ((sp + W - 8) % W))).reg 4 = some ((sp + W - 8) % W)
+    rw [reg_set_self (reg_some_len hr4)]
+  have ha1mem : a1.mem = m1 := by rw [ha1]
+  have e2 : X86Int.step im a1 =
+      .ok { (a1.set 4 (some (((sp + W - 8) % W + 8) % W))).set 0 (some 60) with
+        rip := a1.rip + 1 } :=
+    step_pop (by rw [ha1rip]; exact oc.ac1) ha1r4 (by rw [ha1mem]; exact hr60)
+  obtain ⟨a2s, ha2⟩ : ∃ u : X86Int.St, u =
+    { (a1.set 4 (some (((sp + W - 8) % W + 8) % W))).set 0 (some 60) with
+      rip := a1.rip + 1 } := ⟨_, rfl⟩
+  have hsp8 : ((sp + W - 8) % W + 8) % W = sp := by
+    rw [hslot]
+    have h1 : sp - 8 + 8 = sp := by omega
+    rw [h1]; exact Nat.mod_eq_of_lt hspW
+  have ha2rip : a2s.rip = aAccept + 3 := by
+    rw [ha2]; show a1.rip + 1 = aAccept + 3; rw [ha1rip]
+  have ha2r4 : a2s.reg 4 = some sp := by
+    rw [ha2]
+    show ((a1.set 4 (some (((sp + W - 8) % W + 8) % W))).set 0 (some 60)).reg 4 =
+      some sp
+    rw [reg_set_other (by decide), reg_set_self (by
+      have e : a1.regs.length = s.regs.length := by
+        rw [ha1]; exact List.length_set
+      have h4len : 4 < s.regs.length := reg_some_len hr4
+      omega), hsp8]
+  have ha2r0 : a2s.reg 0 = some 60 := by
+    rw [ha2]
+    show ((a1.set 4 (some (((sp + W - 8) % W + 8) % W))).set 0 (some 60)).reg 0 =
+      some 60
+    rw [reg_set_self (by
+      have e1 : (a1.set 4 (some (((sp + W - 8) % W + 8) % W))).regs.length =
+          a1.regs.length := List.length_set
+      have e2 : a1.regs.length = s.regs.length := by
+        rw [ha1]; exact List.length_set
+      have h9len : 9 < s.regs.length := reg_some_len hr9
+      omega)]
+  have ha2mem : a2s.mem = m1 := by
+    rw [ha2]
+    show ((a1.set 4 (some (((sp + W - 8) % W + 8) % W))).set 0 (some 60)).mem = m1
+    rw [mem_set, mem_set]; exact ha1mem
+  have ga2 : ∀ q, q ≠ 0 → q ≠ 4 → a2s.reg q = s.reg q := by
+    intro q h0 h4
+    rw [ha2]
+    show ((a1.set 4 (some (((sp + W - 8) % W + 8) % W))).set 0 (some 60)).reg q =
+      s.reg q
+    rw [reg_set_other h0, reg_set_other h4]
+    rw [ha1]
+    show (s.set 4 (some ((sp + W - 8) % W))).reg q = s.reg q
+    rw [reg_set_other h4]
+  have hm2s : wr64 a2s.mem ((sp + W - 8) % W) (0 % W) = some m2 := by
+    rw [ha2mem]; exact hm2
+  have e3 : X86Int.step im a2s =
+      .ok { a2s.set 4 (some ((sp + W - 8) % W)) with mem := m2, rip := a2s.rip + 2 } :=
+    step_pushI (by rw [ha2rip]; exact oc.ac2) ha2r4 hm2s
+  obtain ⟨a3, ha3⟩ : ∃ u : X86Int.St, u =
+    { a2s.set 4 (some ((sp + W - 8) % W)) with mem := m2, rip := a2s.rip + 2 } :=
+    ⟨_, rfl⟩
+  have ha3rip : a3.rip = aAccept + 5 := by
+    rw [ha3]; show a2s.rip + 2 = aAccept + 5; rw [ha2rip]
+  have ha3r4 : a3.reg 4 = some ((sp + W - 8) % W) := by
+    rw [ha3]
+    show (a2s.set 4 (some ((sp + W - 8) % W))).reg 4 = some ((sp + W - 8) % W)
+    rw [reg_set_self (by
+      have e : a2s.regs.length = s.regs.length := by
+        have e1 : a2s.regs.length = a1.regs.length := by
+          rw [ha2]
+          exact (List.length_set).trans (List.length_set)
+        have e2 : a1.regs.length = s.regs.length := by
+          rw [ha1]; exact List.length_set
+        rw [e1, e2]
+      have h4len : 4 < s.regs.length := reg_some_len hr4
+      omega)]
+  have ha3mem : a3.mem = m2 := by rw [ha3]
+  have ga3 : ∀ q, q ≠ 4 → a3.reg q = a2s.reg q := by
+    intro q h4
+    rw [ha3]
+    show (a2s.set 4 (some ((sp + W - 8) % W))).reg q = a2s.reg q
+    rw [reg_set_other h4]
+  have e4 : X86Int.step im a3 =
+      .ok { (a3.set 4 (some (((sp + W - 8) % W + 8) % W))).set 7 (some 0) with
+        rip := a3.rip + 1 } :=
+    step_pop (by rw [ha3rip]; exact oc.ac3) ha3r4 (by rw [ha3mem]; exact hr0)
+  obtain ⟨a4, ha4⟩ : ∃ u : X86Int.St, u =
+    { (a3.set 4 (some (((sp + W - 8) % W + 8) % W))).set 7 (some 0) with
+      rip := a3.rip + 1 } := ⟨_, rfl⟩
+  have ha4rip : a4.rip = aAccept + 6 := by
+    rw [ha4]; show a3.rip + 1 = aAccept + 6; rw [ha3rip]
+  have ha4len : (a3.set 4 (some (((sp + W - 8) % W + 8) % W))).regs.length =
+      s.regs.length := by
+    have e0 : (a3.set 4 (some (((sp + W - 8) % W + 8) % W))).regs.length =
+        a3.regs.length := List.length_set
+    have e1 : a3.regs.length = a2s.regs.length := by
+      rw [ha3]; exact List.length_set
+    have e2 : a2s.regs.length = a1.regs.length := by
+      rw [ha2]; exact (List.length_set).trans (List.length_set)
+    have e3 : a1.regs.length = s.regs.length := by
+      rw [ha1]; exact List.length_set
+    rw [e0, e1, e2, e3]
+  have ha4r0 : a4.reg 0 = some 60 := by
+    rw [ha4]
+    show ((a3.set 4 (some (((sp + W - 8) % W + 8) % W))).set 7 (some 0)).reg 0 =
+      some 60
+    rw [reg_set_other (by decide), reg_set_other (by decide), ga3 0 (by decide)]
+    exact ha2r0
+  have ha4r7 : a4.reg 7 = some 0 := by
+    rw [ha4]
+    show ((a3.set 4 (some (((sp + W - 8) % W + 8) % W))).set 7 (some 0)).reg 7 =
+      some 0
+    rw [reg_set_self (by
+      have h9len : 9 < s.regs.length := reg_some_len hr9
+      omega)]
+  have ha4r : ∀ q, q ≠ 0 → q ≠ 4 → q ≠ 7 → a4.reg q = s.reg q := by
+    intro q h0 h4 h7
+    rw [ha4]
+    show ((a3.set 4 (some (((sp + W - 8) % W + 8) % W))).set 7 (some 0)).reg q =
+      s.reg q
+    rw [reg_set_other h7, reg_set_other h4, ga3 q h4]
+    exact ga2 q h0 h4
+  have e5 : X86Int.step im a4 = .exit (0 % 256) :=
+    step_syscall_exit (by rw [ha4rip]; exact oc.ac4) ha4r0 ha4r7
+      (by rw [ha4r 6 (by decide) (by decide) (by decide)]; exact hr6)
+      (by rw [ha4r 2 (by decide) (by decide) (by decide)]; exact hr2)
+      (by rw [ha4r 10 (by decide) (by decide) (by decide)]; exact hr10)
+      (by rw [ha4r 8 (by decide) (by decide) (by decide)]; exact hr8)
+      (by rw [ha4r 9 (by decide) (by decide) (by decide)]; exact hr9)
+  have r1 : run im 1 (Out.ok s) = Out.ok a1 := by
+    rw [run_succ_ok im 0 s, e1, ← ha1, run_zero]
+  have r2 : run im 1 (Out.ok a1) = Out.ok a2s := by
+    rw [run_succ_ok im 0 a1, e2, ← ha2, run_zero]
+  have r3 : run im 1 (Out.ok a2s) = Out.ok a3 := by
+    rw [run_succ_ok im 0 a2s, e3, ← ha3, run_zero]
+  have r4 : run im 1 (Out.ok a3) = Out.ok a4 := by
+    rw [run_succ_ok im 0 a3, e4, ← ha4, run_zero]
+  have r5 : run im 1 (Out.ok a4) = Out.exit 0 := by
+    rw [run_succ_ok im 0 a4, e5, run_zero]
+  exact ⟨1 + 1 + 1 + 1 + 1, by
+    rw [run_add im 1 4, r1, run_add im 1 3, r2, run_add im 1 2, r3, run_add im 1 1,
+      r4, r5]⟩
+
+/-- `check_word` with no words left reaches `accept`. -/
+theorem CheckWord_done {im : Nat → Option (Ins × Nat)} (oc : OuterCode im) :
+    ∀ s, s.rip = aCheckWord → s.reg 5 = some 0 →
+      ∃ k s', run im k (Out.ok s) = Out.ok s' ∧ s'.rip = aAccept ∧
+        (∀ q, s'.reg q = s.reg q) ∧ s'.mem = s.mem ∧
+        s'.regs.length = s.regs.length := by
+  intro s hrip hr5
+  have e1 : X86Int.step im s =
+      .ok { s with fl := (aluF .and 0 0).2, rip := s.rip + 3 } :=
+    step_test (by rw [hrip]; exact oc.cw0) hr5 hr5
+  obtain ⟨a1, ha1⟩ : ∃ u : X86Int.St, u =
+    { s with fl := (aluF .and 0 0).2, rip := s.rip + 3 } := ⟨_, rfl⟩
+  have ha1rip : a1.rip = aCheckWord + 3 := by
+    rw [ha1]; show s.rip + 3 = aCheckWord + 3; rw [hrip]
+  have ha1fl : X86Int.cond a1.fl 5 = some false := by
+    have hz : a1.fl.zf = some true := by
+      rw [ha1]
+      show (aluF .and 0 0).2.zf = some true
+      rw [aluF_zf, aluF_and_fst_self]
+      exact rfl
+    have := cond_cc5 hz
+    simpa using this
+  have e2 : X86Int.step im a1 = .ok { a1 with rip := aCheckWord + 5 } := by
+    have hh := step_jcc (im := im) (s := a1) (by rw [ha1rip]; exact oc.cw1) ha1fl
+    simpa [ha1rip] using hh
+  obtain ⟨a2, ha2⟩ : ∃ u : X86Int.St, u = { a1 with rip := aCheckWord + 5 } :=
+    ⟨_, rfl⟩
+  have ha2rip : a2.rip = aCheckWord + 5 := by rw [ha2]
+  have e3 : X86Int.step im a2 = .ok { a2 with rip := aAccept } :=
+    step_jmp (by rw [ha2rip]; exact oc.cw2)
+  obtain ⟨a3, ha3⟩ : ∃ u : X86Int.St, u = { a2 with rip := aAccept } := ⟨_, rfl⟩
+  have r1 : run im 1 (Out.ok s) = Out.ok a1 := by
+    rw [run_succ_ok im 0 s, e1, ← ha1, run_zero]
+  have r2 : run im 1 (Out.ok a1) = Out.ok a2 := by
+    rw [run_succ_ok im 0 a1, e2, ← ha2, run_zero]
+  have r3 : run im 1 (Out.ok a2) = Out.ok a3 := by
+    rw [run_succ_ok im 0 a2, e3, ← ha3, run_zero]
+  refine ⟨1 + 1 + 1, a3, by rw [run_add im 1 2, r1, run_add im 1 1, r2, r3],
+    by rw [ha3], ?_, ?_, ?_⟩
+  · intro q
+    rw [ha3]; show ({ a2 with rip := aAccept }).reg q = s.reg q
+    rw [reg_with_rip]
+    rw [ha2]; show ({ a1 with rip := aCheckWord + 5 }).reg q = s.reg q
+    rw [reg_with_rip]
+    rw [ha1]; exact rfl
+  · rw [ha3]; show ({ a2 with rip := aAccept }).mem = s.mem
+    rw [mem_with_rip]
+    rw [ha2]; show ({ a1 with rip := aCheckWord + 5 }).mem = s.mem
+    rw [mem_with_rip]
+    rw [ha1]
+  · rw [ha3, ha2, ha1]
+
+/-- `check_word` with a word left and nonempty code reaches `annval`,
+with the ann scan set up. -/
+theorem CheckWord_head {im : Nat → Option (Ins × Nat)} (oc : OuterCode im) :
+    ∀ (w n nc nann annp : Nat), w + 56 ≤ W → n ≠ 0 → nc ≠ 0 →
+    ∀ s, s.rip = aCheckWord → s.reg 5 = some n → s.reg 7 = some w →
+      rd64 s.mem (w + 24) = some nc → rd64 s.mem (w + 48) = some annp →
+      rd64 s.mem (w + 32) = some nann →
+      ∃ k s', run im k (Out.ok s) = Out.ok s' ∧ s'.rip = aAnnval ∧
+        s'.reg 6 = some annp ∧ s'.reg 1 = some nann ∧ s'.reg 0 = some nc ∧
+        s'.reg 5 = some n ∧ s'.reg 7 = some w ∧
+        (∀ q, q ≠ 0 → q ≠ 1 → q ≠ 6 → s'.reg q = s.reg q) ∧ s'.mem = s.mem ∧
+        s'.regs.length = s.regs.length := by
+  intro w n nc nann annp hw56 hn hnc s hrip hr5 hr7 hfnc hfannp hfnann
+  have e1 : X86Int.step im s =
+      .ok { s with fl := (aluF .and n n).2, rip := s.rip + 3 } :=
+    step_test (by rw [hrip]; exact oc.cw0) hr5 hr5
+  obtain ⟨a1, ha1⟩ : ∃ u : X86Int.St, u =
+    { s with fl := (aluF .and n n).2, rip := s.rip + 3 } := ⟨_, rfl⟩
+  have ha1rip : a1.rip = aCheckWord + 3 := by
+    rw [ha1]; show s.rip + 3 = aCheckWord + 3; rw [hrip]
+  have ha1fl : X86Int.cond a1.fl 5 = some true := by
+    have hz : a1.fl.zf = some false := by
+      rw [ha1]
+      show (aluF .and n n).2.zf = some false
+      rw [aluF_zf, aluF_and_fst_self]
+      simp [hn]
+    have := cond_cc5 hz
+    simpa using this
+  have e2 : X86Int.step im a1 = .ok { a1 with rip := aCheckWord + 10 } := by
+    have hh := step_jcc (im := im) (s := a1) (by rw [ha1rip]; exact oc.cw1) ha1fl
+    simpa [ha1rip] using hh
+  obtain ⟨a2, ha2⟩ : ∃ u : X86Int.St, u = { a1 with rip := aCheckWord + 10 } :=
+    ⟨_, rfl⟩
+  have ha2rip : a2.rip = aCheckWord + 10 := by rw [ha2]
+  have ha2r7 : a2.reg 7 = some w := by
+    rw [ha2]; show ({ a1 with rip := aCheckWord + 10 }).reg 7 = some w
+    rw [reg_with_rip]
+    rw [ha1]; show s.reg 7 = some w
+    exact hr7
+  have ha2r5 : a2.reg 5 = some n := by
+    rw [ha2]; show ({ a1 with rip := aCheckWord + 10 }).reg 5 = some n
+    rw [reg_with_rip]
+    rw [ha1]; show s.reg 5 = some n
+    exact hr5
+  have ha2mem : a2.mem = s.mem := by
+    rw [ha2]; show ({ a1 with rip := aCheckWord + 10 }).mem = s.mem
+    rw [mem_with_rip]
+    rw [ha1]
+  have ga2 : ∀ q, a2.reg q = s.reg q := by
+    intro q
+    rw [ha2]; show ({ a1 with rip := aCheckWord + 10 }).reg q = s.reg q
+    rw [reg_with_rip]
+    rw [ha1]; exact rfl
+  have hea24 : ea w 24 = w + 24 := Nat.mod_eq_of_lt (by omega)
+  have e3 : X86Int.step im a2 = .ok { a2.set 0 (some nc) with rip := a2.rip + 4 } :=
+    step_ld (by rw [ha2rip]; exact oc.cw3) ha2r7 (by rw [hea24, ha2mem]; exact hfnc)
+  obtain ⟨a3, ha3⟩ : ∃ u : X86Int.St, u =
+    { a2.set 0 (some nc) with rip := a2.rip + 4 } := ⟨_, rfl⟩
+  have ha3rip : a3.rip = aCheckWord + 14 := by
+    rw [ha3]; show a2.rip + 4 = aCheckWord + 14; rw [ha2rip]
+  have ha3r0 : a3.reg 0 = some nc := by
+    rw [ha3]
+    show (a2.set 0 (some nc)).reg 0 = some nc
+    rw [reg_set_self (by
+      have e : a2.regs.length = s.regs.length := by rw [ha2, ha1]
+      have h5len : 5 < s.regs.length := reg_some_len hr5
+      omega)]
+  have ha3r7 : a3.reg 7 = some w := by
+    rw [ha3]
+    show (a2.set 0 (some nc)).reg 7 = some w
+    rw [reg_set_other (by decide)]; exact ha2r7
+  have ha3r5 : a3.reg 5 = some n := by
+    rw [ha3]
+    show (a2.set 0 (some nc)).reg 5 = some n
+    rw [reg_set_other (by decide)]; exact ha2r5
+  have ha3mem : a3.mem = s.mem := by
+    rw [ha3]
+    show (a2.set 0 (some nc)).mem = s.mem
+    rw [mem_set]; exact ha2mem
+  have ga3 : ∀ q, q ≠ 0 → a3.reg q = s.reg q := by
+    intro q hq
+    rw [ha3]
+    show (a2.set 0 (some nc)).reg q = s.reg q
+    rw [reg_set_other hq]; exact ga2 q
+  have e4 : X86Int.step im a3 =
+      .ok { a3 with fl := (aluF .and nc nc).2, rip := a3.rip + 3 } :=
+    step_test (by rw [ha3rip]; exact oc.cw4) ha3r0 ha3r0
+  obtain ⟨a4, ha4⟩ : ∃ u : X86Int.St, u =
+    { a3 with fl := (aluF .and nc nc).2, rip := a3.rip + 3 } := ⟨_, rfl⟩
+  have ha4rip : a4.rip = aCheckWord + 17 := by
+    rw [ha4]; show a3.rip + 3 = aCheckWord + 17; rw [ha3rip]
+  have ha4fl : X86Int.cond a4.fl 5 = some true := by
+    have hz : a4.fl.zf = some false := by
+      rw [ha4]
+      show (aluF .and nc nc).2.zf = some false
+      rw [aluF_zf, aluF_and_fst_self]
+      simp [hnc]
+    have := cond_cc5 hz
+    simpa using this
+  have ha4r0 : a4.reg 0 = some nc := by
+    rw [ha4]; show a3.reg 0 = some nc; exact ha3r0
+  have ha4r7 : a4.reg 7 = some w := by
+    rw [ha4]; show a3.reg 7 = some w; exact ha3r7
+  have ha4r5 : a4.reg 5 = some n := by
+    rw [ha4]; show a3.reg 5 = some n; exact ha3r5
+  have ha4mem : a4.mem = s.mem := by
+    rw [ha4]; show a3.mem = s.mem; exact ha3mem
+  have ga4 : ∀ q, q ≠ 0 → a4.reg q = s.reg q := by
+    intro q hq
+    rw [ha4]; show a3.reg q = s.reg q; exact ga3 q hq
+  have e5 : X86Int.step im a4 = .ok { a4 with rip := aCheckWord + 24 } := by
+    have hh := step_jcc (im := im) (s := a4) (by rw [ha4rip]; exact oc.cw5) ha4fl
+    simpa [ha4rip] using hh
+  obtain ⟨a5, ha5⟩ : ∃ u : X86Int.St, u = { a4 with rip := aCheckWord + 24 } :=
+    ⟨_, rfl⟩
+  have ha5rip : a5.rip = aCheckWord + 24 := by rw [ha5]
+  have ha5r0 : a5.reg 0 = some nc := by
+    rw [ha5]; show ({ a4 with rip := aCheckWord + 24 }).reg 0 = some nc
+    rw [reg_with_rip]; exact ha4r0
+  have ha5r7 : a5.reg 7 = some w := by
+    rw [ha5]; show ({ a4 with rip := aCheckWord + 24 }).reg 7 = some w
+    rw [reg_with_rip]; exact ha4r7
+  have ha5r5 : a5.reg 5 = some n := by
+    rw [ha5]; show ({ a4 with rip := aCheckWord + 24 }).reg 5 = some n
+    rw [reg_with_rip]; exact ha4r5
+  have ha5mem : a5.mem = s.mem := by
+    rw [ha5]; show ({ a4 with rip := aCheckWord + 24 }).mem = s.mem
+    rw [mem_with_rip]; exact ha4mem
+  have ga5 : ∀ q, q ≠ 0 → a5.reg q = s.reg q := by
+    intro q hq
+    rw [ha5]; show ({ a4 with rip := aCheckWord + 24 }).reg q = s.reg q
+    rw [reg_with_rip]; exact ga4 q hq
+  have hea48 : ea w 48 = w + 48 := Nat.mod_eq_of_lt (by omega)
+  have e6 : X86Int.step im a5 =
+      .ok { a5.set 6 (some annp) with rip := a5.rip + 4 } :=
+    step_ld (by rw [ha5rip]; exact oc.cw6) ha5r7
+      (by rw [hea48, ha5mem]; exact hfannp)
+  obtain ⟨a6, ha6⟩ : ∃ u : X86Int.St, u =
+    { a5.set 6 (some annp) with rip := a5.rip + 4 } := ⟨_, rfl⟩
+  have ha6rip : a6.rip = aCheckWord + 28 := by
+    rw [ha6]; show a5.rip + 4 = aCheckWord + 28; rw [ha5rip]
+  have ha6r6 : a6.reg 6 = some annp := by
+    rw [ha6]
+    show (a5.set 6 (some annp)).reg 6 = some annp
+    rw [reg_set_self (by
+      have e : a5.regs.length = s.regs.length := by
+        rw [ha5, ha4, ha3, ha2, ha1]
+        exact List.length_set
+      have h7len : 7 < s.regs.length := reg_some_len hr7
+      omega)]
+  have ha6r0 : a6.reg 0 = some nc := by
+    rw [ha6]
+    show (a5.set 6 (some annp)).reg 0 = some nc
+    rw [reg_set_other (by decide)]; exact ha5r0
+  have ha6r7 : a6.reg 7 = some w := by
+    rw [ha6]
+    show (a5.set 6 (some annp)).reg 7 = some w
+    rw [reg_set_other (by decide)]; exact ha5r7
+  have ha6r5 : a6.reg 5 = some n := by
+    rw [ha6]
+    show (a5.set 6 (some annp)).reg 5 = some n
+    rw [reg_set_other (by decide)]; exact ha5r5
+  have ha6mem : a6.mem = s.mem := by
+    rw [ha6]
+    show (a5.set 6 (some annp)).mem = s.mem
+    rw [mem_set]; exact ha5mem
+  have ga6 : ∀ q, q ≠ 0 → q ≠ 6 → a6.reg q = s.reg q := by
+    intro q h0 h6
+    rw [ha6]
+    show (a5.set 6 (some annp)).reg q = s.reg q
+    rw [reg_set_other h6]; exact ga5 q h0
+  have hea32 : ea w 32 = w + 32 := Nat.mod_eq_of_lt (by omega)
+  have e7 : X86Int.step im a6 =
+      .ok { a6.set 1 (some nann) with rip := a6.rip + 4 } :=
+    step_ld (by rw [ha6rip]; exact oc.cw7) ha6r7
+      (by rw [hea32, ha6mem]; exact hfnann)
+  obtain ⟨a7, ha7⟩ : ∃ u : X86Int.St, u =
+    { a6.set 1 (some nann) with rip := a6.rip + 4 } := ⟨_, rfl⟩
+  have r1 : run im 1 (Out.ok s) = Out.ok a1 := by
+    rw [run_succ_ok im 0 s, e1, ← ha1, run_zero]
+  have r2 : run im 1 (Out.ok a1) = Out.ok a2 := by
+    rw [run_succ_ok im 0 a1, e2, ← ha2, run_zero]
+  have r3 : run im 1 (Out.ok a2) = Out.ok a3 := by
+    rw [run_succ_ok im 0 a2, e3, ← ha3, run_zero]
+  have r4 : run im 1 (Out.ok a3) = Out.ok a4 := by
+    rw [run_succ_ok im 0 a3, e4, ← ha4, run_zero]
+  have r5 : run im 1 (Out.ok a4) = Out.ok a5 := by
+    rw [run_succ_ok im 0 a4, e5, ← ha5, run_zero]
+  have r6 : run im 1 (Out.ok a5) = Out.ok a6 := by
+    rw [run_succ_ok im 0 a5, e6, ← ha6, run_zero]
+  have r7 : run im 1 (Out.ok a6) = Out.ok a7 := by
+    rw [run_succ_ok im 0 a6, e7, ← ha7, run_zero]
+  refine ⟨1 + 1 + 1 + 1 + 1 + 1 + 1, a7, by
+      rw [run_add im 1 6, r1, run_add im 1 5, r2, run_add im 1 4, r3,
+        run_add im 1 3, r4, run_add im 1 2, r5, run_add im 1 1, r6, r7],
+    by rw [ha7]; show a6.rip + 4 = aAnnval; rw [ha6rip]; rfl, ?_, ?_, ?_, ?_, ?_,
+    ?_, ?_, ?_⟩
+  · rw [ha7]; show (a6.set 1 (some nann)).reg 6 = some annp
+    rw [reg_set_other (by decide)]; exact ha6r6
+  · rw [ha7]; show (a6.set 1 (some nann)).reg 1 = some nann
+    rw [reg_set_self (by
+      have e : a6.regs.length = s.regs.length := by
+        have e1 : a6.regs.length = a5.regs.length := by
+          rw [ha6]; exact List.length_set
+        have e2 : a5.regs.length = s.regs.length := by
+          rw [ha5, ha4, ha3, ha2, ha1]
+          exact List.length_set
+        rw [e1, e2]
+      have h7len : 7 < s.regs.length := reg_some_len hr7
+      omega)]
+  · rw [ha7]; show (a6.set 1 (some nann)).reg 0 = some nc
+    rw [reg_set_other (by decide)]; exact ha6r0
+  · rw [ha7]; show (a6.set 1 (some nann)).reg 5 = some n
+    rw [reg_set_other (by decide)]; exact ha6r5
+  · rw [ha7]; show (a6.set 1 (some nann)).reg 7 = some w
+    rw [reg_set_other (by decide)]; exact ha6r7
+  · intro q h0 h1 h6
+    rw [ha7]; show (a6.set 1 (some nann)).reg q = s.reg q
+    rw [reg_set_other h1]; exact ga6 q h0 h6
+  · rw [ha7]; show (a6.set 1 (some nann)).mem = s.mem
+    rw [mem_set]; exact ha6mem
+  · have e1 : a7.regs.length = a6.regs.length := by
+      rw [ha7]; exact List.length_set
+    have e2 : a6.regs.length = a5.regs.length := by
+      rw [ha6]; exact List.length_set
+    have e3 : a5.regs.length = s.regs.length := by
+      rw [ha5, ha4, ha3, ha2, ha1]; exact List.length_set
+    rw [e1, e2, e3]
+
+
 end SporosX1
