@@ -99,6 +99,7 @@ def commonInsB : X86Min.Ins → Bool
   | .syscall => true
   | .shlI _ _ _ => false
   | .inc _ _ => false
+  | .jmpReg _ => false
 
 /-- Shared sub-ISA predicate on `X86Min.Ins`. -/
 def CommonIns (ins : X86Min.Ins) : Prop := commonInsB ins = true
@@ -126,6 +127,7 @@ def toIntIns (a len : Nat) : X86Min.Ins → X86Int.Ins
   | .syscall => .syscall
   | .shlI _ _ _ => .syscall
   | .inc _ _ => .syscall
+  | .jmpReg _ => .syscall
 
 /-- Helper checking that `n` bytes starting at `off` in byte source `b` are present and `< 256`. -/
 def leBytesLt256 (b : Nat → Option Nat) (off : Nat) : Nat → Bool
@@ -1195,7 +1197,7 @@ theorem imgCompat_of_check {addrs : List Nat} {imMin : X86Min.Img}
     | jcc cc rel =>
       simp only [Bool.and_eq_true, decide_eq_true_eq] at hcl
       exact ⟨hcl.1.1, hcl.1.2, hcl.2⟩
-    | movImm _ _ | rr _ _ _ _ | ri _ _ _ _ | shlI _ _ _ | inc _ _
+    | movImm _ _ | rr _ _ _ _ | ri _ _ _ _ | shlI _ _ _ | inc _ _ | jmpReg _
     | push _ | pop _ | syscall | ldRsp8 _ | stRsp8 _ =>
       simpa using hcl
 
@@ -1299,6 +1301,7 @@ theorem step_sim {P : Nat → Prop} {imMin : X86Min.Img}
     cases ins with
     | shlI _ _ _ => simp [CommonIns, commonInsB] at hci
     | inc _ _ => simp [CommonIns, commonInsB] at hci
+    | jmpReg _ => simp [CommonIns, commonInsB] at hci
     | movImm d imm =>
       simp only [CommonIns, commonInsB, Bool.and_eq_true, decide_eq_true_eq] at hci
       obtain ⟨hd16, himm32⟩ := hci
