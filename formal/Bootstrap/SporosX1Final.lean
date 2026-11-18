@@ -6009,6 +6009,81 @@ theorem leVal_take4_mod32 {xs : List Nat} (h8 : xs.length = 8) :
   rw [← hsplit, hlen4, h256] at hdecomp
   rw [hdecomp, Nat.add_mul_mod_self_left]
 
+theorem find_append_left : ∀ (m : Mem) (t : Mem) (a i : Nat)
+    {j : Nat} {r : Region},
+    Mem.find m a i = some (j, r) → Mem.find (m ++ t) a i = some (j, r) := by
+  intro m
+  induction m with
+  | nil =>
+    intro t a i j r h
+    simp [Mem.find] at h
+  | cons r0 rest ih =>
+    intro t a i j r h
+    have h1 : (if r0.base ≤ a ∧ a < r0.hi then some (i, r0)
+        else Mem.find rest a (i + 1)) = some (j, r) := h
+    by_cases hcond : r0.base ≤ a ∧ a < r0.hi
+    · rw [if_pos hcond] at h1
+      have hg : Mem.find ((r0 :: rest) ++ t) a i =
+          (if r0.base ≤ a ∧ a < r0.hi then some (i, r0)
+            else Mem.find (rest ++ t) a (i + 1)) := rfl
+      rw [hg, if_pos hcond]; exact h1
+    · rw [if_neg hcond] at h1
+      have hg : Mem.find ((r0 :: rest) ++ t) a i =
+          (if r0.base ≤ a ∧ a < r0.hi then some (i, r0)
+            else Mem.find (rest ++ t) a (i + 1)) := rfl
+      rw [hg, if_neg hcond]; exact ih t a (i + 1) h1
+
+theorem rd_append_left {m : Mem} {t : Mem} {a b : Nat}
+    (h : m.rd a = some b) : (m ++ t).rd a = some b := by
+  have h1 : (do let x ← Mem.find m a 0; x.2.data[a - x.2.base]?) =
+      some b := h
+  obtain ⟨⟨j, r⟩, hf, hb⟩ := bind_some h1
+  have hg : (m ++ t).rd a =
+      (do let x ← Mem.find (m ++ t) a 0; x.2.data[a - x.2.base]?) := rfl
+  rw [hg, find_append_left m t a 0 hf]
+  exact hb
+
+theorem rdN_append_left {m : Mem} {t : Mem} :
+    ∀ {a n : Nat} {bs : List Nat},
+    m.rdN a n = some bs → (m ++ t).rdN a n = some bs := by
+  intro a n
+  induction n generalizing a with
+  | zero =>
+    intro bs h
+    have h2 : m.rdN a 0 = some [] := rfl
+    rw [h2] at h
+    have hbs : bs = [] := (Option.some.inj h).symm
+    rw [hbs]; rfl
+  | succ n ih =>
+    intro bs h
+    cases bs with
+    | nil =>
+      exfalso
+      have h1 : (do let b ← m.rd a; let r ← Mem.rdN m (a + 1) n; pure (b :: r)) = some ([] : List Nat) := h
+      obtain ⟨b, hb, h2⟩ := bind_some h1
+      obtain ⟨r, hr, h3⟩ := bind_some h2
+      simp at h3
+    | cons b bs =>
+      obtain ⟨hb, hr⟩ := rdN_cons h
+      exact rdN_cons_some (rd_append_left hb) (ih hr)
+
+theorem syscall_mmap_exact {k : Kern} {m : Mem} {a2 A : Nat}
+    (ha2 : a2 ≠ 0) (hhead : k.oracle.head? = some (.at A))
+    (hplace : X86Env.place m (some (.at A)) (X86Env.pages a2) =
+      some (some A)) :
+    X86Env.syscall k m 9 0 a2 PROT_RW MAP_PRIVATE_ANON (W - 1) 0 =
+      some (.ret A (Kern.next k).2
+        (m ++ [⟨A, List.replicate (X86Env.pages a2) 0, true⟩])) := by
+  have hnext1 : (Kern.next k).1 = some (.at A) := kern_next_of_head hhead
+  simp only [X86Env.syscall]
+  rw [if_neg (by simp), if_neg ha2]
+  cases hnext : Kern.next k with
+  | mk c k1 =>
+    rw [hnext] at hnext1
+    simp only [] at hnext1
+    subst hnext1
+    simp [hplace]
+
 /-- The `RDC` body at `aRDC`, success case, with the frame the
 parser composition needs (the exported `RDCSpec` post is too weak
 on preserved registers): only `rax`, `rdx`, `rsp` and `rsi`
