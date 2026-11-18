@@ -15906,6 +15906,214 @@ theorem wordsBytes_flatMap : ∀ (wds : List Word),
     rw [List.flatMap_cons, List.length_append, wordEnc_length,
       wordsBytes_flatMap wds]
 
+/-- A word encoding, right-associated. -/
+theorem wordEnc_form (wd : Word) : wd.enc =
+    leBytes wd.ins 4 ++ (leBytes wd.outs 4 ++ (leBytes wd.locals 4 ++
+      (leBytes wd.code.length 4 ++ (leBytes wd.ann.length 4 ++
+        ((wd.code.flatMap Instr.enc) ++
+          (wd.ann.flatMap (fun x => leBytes x.1 4 ++
+            leBytes x.2.d 4 ++ leBytes x.2.a 4))))))) := by
+  unfold Word.enc
+  simp only [List.append_assoc]
+
+/-- The five header fields of a word encoding, as the parser
+reads them from its first 20 bytes. -/
+theorem word_fields (wd : Word) (hb : WordBound wd) :
+    leVal ((wd.enc.take 20).take 4) % W = wd.ins ∧
+    leVal (((wd.enc.take 20).drop 4).take 4) % W = wd.outs ∧
+    leVal (((wd.enc.take 20).drop 8).take 4) % W = wd.locals ∧
+    leVal (((wd.enc.take 20).drop 12).take 4) % W = wd.code.length ∧
+    leVal (((wd.enc.take 20).drop 16).take 4) % W = wd.ann.length := by
+  have hf := wordEnc_form wd
+  have d4 : wd.enc.drop 4 =
+      leBytes wd.outs 4 ++ (leBytes wd.locals 4 ++
+        (leBytes wd.code.length 4 ++ (leBytes wd.ann.length 4 ++
+          ((wd.code.flatMap Instr.enc) ++
+            (wd.ann.flatMap (fun x => leBytes x.1 4 ++
+              leBytes x.2.d 4 ++ leBytes x.2.a 4)))))) := by
+    rw [hf]; exact drop4_leBytes _ _
+  have d8 : wd.enc.drop 8 =
+      leBytes wd.locals 4 ++ (leBytes wd.code.length 4 ++
+        (leBytes wd.ann.length 4 ++ ((wd.code.flatMap Instr.enc) ++
+          (wd.ann.flatMap (fun x => leBytes x.1 4 ++
+            leBytes x.2.d 4 ++ leBytes x.2.a 4))))) := by
+    have e : wd.enc.drop 8 = (wd.enc.drop 4).drop 4 :=
+      (List.drop_drop (i := 4) (j := 4)).symm
+    rw [e, d4]; exact drop4_leBytes _ _
+  have d12 : wd.enc.drop 12 =
+      leBytes wd.code.length 4 ++ (leBytes wd.ann.length 4 ++
+        ((wd.code.flatMap Instr.enc) ++
+          (wd.ann.flatMap (fun x => leBytes x.1 4 ++
+            leBytes x.2.d 4 ++ leBytes x.2.a 4)))) := by
+    have e : wd.enc.drop 12 = (wd.enc.drop 8).drop 4 :=
+      (List.drop_drop (i := 4) (j := 8)).symm
+    rw [e, d8]; exact drop4_leBytes _ _
+  have d16 : wd.enc.drop 16 =
+      leBytes wd.ann.length 4 ++ ((wd.code.flatMap Instr.enc) ++
+        (wd.ann.flatMap (fun x => leBytes x.1 4 ++
+          leBytes x.2.d 4 ++ leBytes x.2.a 4))) := by
+    have e : wd.enc.drop 16 = (wd.enc.drop 12).drop 4 :=
+      (List.drop_drop (i := 4) (j := 12)).symm
+    rw [e, d12]; exact drop4_leBytes _ _
+  have tk : ∀ (o : Nat), o ≤ 16 →
+      ((wd.enc.take 20).drop o).take 4 = (wd.enc.drop o).take 4 := by
+    intro o ho
+    rw [List.drop_take, List.take_take, Nat.min_eq_left (by omega)]
+  obtain ⟨hb1, hb2, hb3, hb4, hb5, -, -⟩ := hb
+  refine ⟨?_, ?_, ?_, ?_, ?_⟩
+  · rw [List.take_take, Nat.min_eq_left (by decide : 4 ≤ 20), hf,
+      take4_leBytes]
+    exact leVal4_W hb1
+  · rw [tk 4 (by decide), d4, take4_leBytes]
+    exact leVal4_W hb2
+  · rw [tk 8 (by decide), d8, take4_leBytes]
+    exact leVal4_W hb3
+  · rw [tk 12 (by decide), d12, take4_leBytes]
+    exact leVal4_W hb4
+  · rw [tk 16 (by decide), d16, take4_leBytes]
+    exact leVal4_W hb5
+
+/-- Past the five header fields of a word encoding sit the code
+and annotation encodings. -/
+theorem wordEnc_drop20 (wd : Word) :
+    wd.enc.drop 20 = (wd.code.flatMap Instr.enc) ++
+      (wd.ann.flatMap (fun x => leBytes x.1 4 ++ leBytes x.2.d 4 ++
+        leBytes x.2.a 4)) := by
+  have hf := wordEnc_form wd
+  have e : wd.enc.drop 20 = (wd.enc.drop 16).drop 4 :=
+    (List.drop_drop (i := 4) (j := 16)).symm
+  have d16 : wd.enc.drop 16 =
+      leBytes wd.ann.length 4 ++ ((wd.code.flatMap Instr.enc) ++
+        (wd.ann.flatMap (fun x => leBytes x.1 4 ++
+          leBytes x.2.d 4 ++ leBytes x.2.a 4))) := by
+    have e4 : wd.enc.drop 16 = (wd.enc.drop 12).drop 4 :=
+      (List.drop_drop (i := 4) (j := 12)).symm
+    have d12 : wd.enc.drop 12 =
+        leBytes wd.code.length 4 ++ (leBytes wd.ann.length 4 ++
+          ((wd.code.flatMap Instr.enc) ++
+            (wd.ann.flatMap (fun x => leBytes x.1 4 ++
+              leBytes x.2.d 4 ++ leBytes x.2.a 4)))) := by
+      have e3 : wd.enc.drop 12 = (wd.enc.drop 8).drop 4 :=
+        (List.drop_drop (i := 4) (j := 8)).symm
+      have d8 : wd.enc.drop 8 =
+          leBytes wd.locals 4 ++ (leBytes wd.code.length 4 ++
+            (leBytes wd.ann.length 4 ++
+              ((wd.code.flatMap Instr.enc) ++
+                (wd.ann.flatMap (fun x => leBytes x.1 4 ++
+                  leBytes x.2.d 4 ++ leBytes x.2.a 4))))) := by
+        have e2 : wd.enc.drop 8 = (wd.enc.drop 4).drop 4 :=
+          (List.drop_drop (i := 4) (j := 4)).symm
+        have d4 : wd.enc.drop 4 =
+            leBytes wd.outs 4 ++ (leBytes wd.locals 4 ++
+              (leBytes wd.code.length 4 ++
+                (leBytes wd.ann.length 4 ++
+                  ((wd.code.flatMap Instr.enc) ++
+                    (wd.ann.flatMap (fun x => leBytes x.1 4 ++
+                      leBytes x.2.d 4 ++ leBytes x.2.a 4)))))) := by
+          rw [hf]; exact drop4_leBytes _ _
+        rw [e2, d4]; exact drop4_leBytes _ _
+      rw [e3, d8]; exact drop4_leBytes _ _
+    rw [e4, d12]; exact drop4_leBytes _ _
+  rw [e, d16]
+  exact drop4_leBytes _ _
+
+/-- `WordsLay` from one read of the whole words encoding. -/
+theorem WordsLay_of_rdN : ∀ (wds : List Word) {m : Mem} {c : Nat},
+    m.rdN c (wordsBytes wds) = some (wds.flatMap Word.enc) →
+    (∀ w ∈ wds, WordBound w) → WordsLay m c wds := by
+  intro wds
+  induction wds with
+  | nil => intro m c _ _; trivial
+  | cons wd wds ih =>
+    intro m c h hb
+    have hbwd := hb wd (.head _)
+    have hh : m.rdN c
+        ((20 + codeBytes wd.code + 12 * wd.ann.length) +
+          wordsBytes wds) =
+        some (wd.enc ++ wds.flatMap Word.enc) := by
+      rwa [List.flatMap_cons] at h
+    have h20 : m.rdN c 20 = some (wd.enc.take 20) := by
+      have hok : 0 + 20 ≤ (20 + codeBytes wd.code +
+          12 * wd.ann.length) + wordsBytes wds := by omega
+      have hs := rdN_slice hh hok
+      simp only [Nat.add_zero, List.drop_zero] at hs
+      rw [hs, List.take_append_of_le_length (by
+        rw [wordEnc_length]; omega)]
+    have hcode : m.rdN (c + 20) (codeBytes wd.code) =
+        some (wd.code.flatMap Instr.enc) := by
+      have hok : 20 + codeBytes wd.code ≤ (20 + codeBytes wd.code +
+          12 * wd.ann.length) + wordsBytes wds := by omega
+      have hs := rdN_slice hh hok
+      have e : (wd.code.flatMap Instr.enc).take (codeBytes wd.code) =
+          wd.code.flatMap Instr.enc := by
+        rw [← codeBytes_flatMap]
+        exact List.take_of_length_le (Nat.le_refl _)
+      rw [hs, seg_slice_append (l := wd.enc)
+        (r := wds.flatMap Word.enc) (o := 20) (k := codeBytes wd.code)
+        (by rw [wordEnc_length]; omega), wordEnc_drop20,
+        List.take_append_of_le_length
+          (by have hcc := codeBytes_flatMap wd.code; omega), e]
+    have hann : m.rdN (c + 20 + codeBytes wd.code)
+        (12 * wd.ann.length) =
+        some (wd.ann.flatMap (fun x => leBytes x.1 4 ++
+          leBytes x.2.d 4 ++ leBytes x.2.a 4)) := by
+      have hok : (20 + codeBytes wd.code) + 12 * wd.ann.length ≤
+          (20 + codeBytes wd.code + 12 * wd.ann.length) +
+            wordsBytes wds := by omega
+      have hs := rdN_slice hh hok
+      have ec : c + (20 + codeBytes wd.code) =
+          c + 20 + codeBytes wd.code := by omega
+      rw [ec] at hs
+      have edrop : (wd.enc ++ wds.flatMap Word.enc).drop
+            (20 + codeBytes wd.code) =
+          wd.ann.flatMap (fun x => leBytes x.1 4 ++
+            leBytes x.2.d 4 ++ leBytes x.2.a 4) ++
+            wds.flatMap Word.enc := by
+        have e1 : (wd.enc ++ wds.flatMap Word.enc).drop
+              (20 + codeBytes wd.code) =
+            ((wd.enc ++ wds.flatMap Word.enc).drop 20).drop
+              (codeBytes wd.code) := (List.drop_drop).symm
+        have e2 : (wd.enc ++ wds.flatMap Word.enc).drop 20 =
+            (wd.code.flatMap Instr.enc) ++
+              ((wd.ann.flatMap (fun x => leBytes x.1 4 ++
+                  leBytes x.2.d 4 ++ leBytes x.2.a 4)) ++
+                wds.flatMap Word.enc) := by
+          rw [List.drop_append_of_le_length (by
+            rw [wordEnc_length]; omega), wordEnc_drop20,
+            List.append_assoc]
+        rw [e1, e2, ← codeBytes_flatMap]
+        exact List.drop_left
+      have e : (wd.ann.flatMap (fun x => leBytes x.1 4 ++
+            leBytes x.2.d 4 ++ leBytes x.2.a 4)).take
+          (12 * wd.ann.length) =
+          wd.ann.flatMap (fun x => leBytes x.1 4 ++
+            leBytes x.2.d 4 ++ leBytes x.2.a 4) := by
+        rw [← annflat_length]
+        exact List.take_of_length_le (Nat.le_refl _)
+      rw [hs, edrop,
+        List.take_append_of_le_length
+          (by have haa := annflat_length wd.ann; omega), e]
+    have hrest : m.rdN
+        (c + 20 + codeBytes wd.code + 12 * wd.ann.length)
+        (wordsBytes wds) = some (wds.flatMap Word.enc) := by
+      have hok : (20 + codeBytes wd.code + 12 * wd.ann.length) +
+            wordsBytes wds ≤ (20 + codeBytes wd.code +
+              12 * wd.ann.length) + wordsBytes wds := Nat.le_refl _
+      have hs := rdN_slice hh hok
+      have ec : c + (20 + codeBytes wd.code + 12 * wd.ann.length) =
+          c + 20 + codeBytes wd.code + 12 * wd.ann.length := by omega
+      rw [ec] at hs
+      have e : (wds.flatMap Word.enc).take (wordsBytes wds) =
+          wds.flatMap Word.enc := by
+        rw [← wordsBytes_flatMap]
+        exact List.take_of_length_le (Nat.le_refl _)
+      rw [hs, ← wordEnc_length wd, List.drop_left, e]
+    obtain ⟨f1, f2, f3, f4, f5⟩ := word_fields wd hbwd
+    refine ⟨⟨wd.enc.take 20, h20, f1, f2, f3, f4, f5⟩,
+      CodeSeq_of_rdN _ hcode,
+      AnnLayB_of_rdN hann (fun x hx => hbwd.2.2.2.2.2.2 x hx),
+      ih hrest (fun w hw => hb w (.tail _ hw))⟩
+
 /-- EXISTENCE TARGET: with room, some oracle makes the final
 theorem non-vacuous.  The witness is `stage1Oracle f A` for the
 `A` given by `Room`.  What remains is the loader-prefix invariant:
