@@ -54,7 +54,7 @@ expect "$x86diff" lean true
 expect "$x86diff" full false
 
 # The X86Env syscall differential, X86Dec fuzzer, and TMR fault-injection gates belong to the Lean job.
-boot_gates="$(classify_pr bootstrap/model/tmr_fault_gate.sh bootstrap/model/x86env_diff_gate.sh bootstrap/model/x86dec_fuzz_gate.sh)"
+boot_gates="$(classify_pr bootstrap/model/tmr_fault_gate.sh bootstrap/model/x86env_diff_gate.sh bootstrap/model/x86dec_fuzz_gate.sh bootstrap/model/x86uni_diff_gate.sh)"
 expect "$boot_gates" lean true
 expect "$boot_gates" full false
 
